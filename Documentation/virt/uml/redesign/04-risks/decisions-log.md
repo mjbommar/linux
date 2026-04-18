@@ -182,7 +182,8 @@ from upstream; semantic drift is endless.
 ## D8: Backend ops table — 18 ops, 5 hot, sync, contract-versioned
 
 **Date:** 2026-04-17
-**Status:** Accepted (design draft; pending LKML review)
+**Status:** Accepted; contract landed and validated by A-02..A-07 in
+ptrace + seccomp (20 KUnit tests pass); still pending LKML review
 **Decided by:** claude-code session, working from project owner's
 brief, A-01.0 through A-01.7 analysis, and the gating rules in
 01-architecture/three-layers.md
@@ -514,6 +515,60 @@ users.
 `Documentation/virt/uml/backend-contract.rst` (selection mechanism
 section), `Documentation/virt/uml/redesign/scripts/uml-boot-matrix.sh`
 (updated DYNAMIC rows).
+
+---
+
+## D16: Reconciling review-01 recommendations vs mid-plan artifacts
+
+**Date:** 2026-04-18
+**Status:** Accepted
+
+**Decision:** The recommendations in
+`Documentation/virt/uml/review-01/README.md` are triaged into two
+buckets before any edits:
+
+1. **Real deviations from the plan** (must correct) — issues where the
+   implementation diverged from what the plan specified and the
+   deviation is still on the current head:
+   - stale op names / arg fields in `01-architecture/three-layers.md`
+     (the delivered contract is `run_userspace`/`mm_map`/`mm_unmap`
+     with `(requested, force, runtime_opts)`; the narrative still
+     showed `syscall_dispatch`/`map_user` with `want_*`);
+   - stale "A-04 will…" scaffolding comments in shipped code where
+     A-04 has already landed;
+   - stale "design draft" status on A-01 even though A-02..A-07
+     implemented and validated the design.
+
+2. **Mid-plan artifacts** (not deviations; do not edit) — items that
+   look unfinished but are exactly what the plan said should be
+   deferred to a later workstream:
+   - lifecycle ops stubbed (probe/init/shutdown return 0) — the
+     real probe lives in `os_early_checks()`; lifting it into the
+     ops table is future cleanup, not A-02 scope;
+   - `host_io_submit` reserved but unused — virtio-uml uses
+     `os_*` directly, and wiring the reserved op is a B/C workstream
+     concern;
+   - per-backend `_user.c` split enforced by Makefile.rules — this
+     is the USER/KERNEL TU discipline the plan mandates, not a bug;
+   - KVM backend absent — it's workstream D, deliberately deferred.
+
+**Reasoning:** Reviewing an in-flight project that conflates
+"unfinished per the plan" with "deviates from the plan" produces
+spurious cleanup pressure and scope drift. Making the distinction
+explicit in the decisions log lets future reviewers (and future-me)
+triage similar feedback consistently: "does this recommendation
+describe a delta from the design that should be corrected, or is
+it observing that a workstream we haven't started hasn't happened?"
+
+**Alternatives considered:** Accept all recommendations as equally
+weighted followups. Rejected because it conflates policy ("finish
+what you started") with scope drift ("do workstreams B/C/D in A's
+commit window").
+
+**Cross-reference:** `Documentation/virt/uml/review-01/README.md`
+(the review itself), `review-01/RESPONSE.md` (per-item response),
+`02-workstreams/A-backend-abstraction/notes/recon-audit.md`
+(file-by-file verdict for the RECON pass).
 
 ---
 

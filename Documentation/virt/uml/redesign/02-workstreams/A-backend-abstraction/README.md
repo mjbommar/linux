@@ -41,8 +41,8 @@ regressions.
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| 01 | [Design the ops table](01-ops-table.md) | 2 wk | **design draft complete (2026-04-17)** |
-| 02 | [Refactor existing skas mode into ptrace backend](02-ptrace-refactor.md) | 6 wk | **API wired (2026-04-17); 5 ops stubbed pending A-04/C-11** |
+| 01 | [Design the ops table](01-ops-table.md) | 2 wk | **landed and validated by A-02..A-07 (2026-04-17)** |
+| 02 | [Refactor existing skas mode into ptrace backend](02-ptrace-refactor.md) | 6 wk | **API wired (2026-04-17); lifecycle + guest-regs ops staged as placeholders, follow-up unscheduled** |
 | 03 | [Wrap merged 6.16 seccomp work as seccomp backend](03-seccomp-wrap.md) | 4 wk | **API wired across PTRACE_ONLY/SECCOMP_ONLY/DYNAMIC (2026-04-18); same caveats as A-02** |
 | 04 | [Kconfig: single vs multi-backend builds](04-kconfig.md) | 2 wk | **complete (2026-04-18); choice block + `backend=` param + matrix coverage** |
 | 05 | [Backend conformance test suite](05-contract.md) | 4 wk | **first pass complete (2026-04-18); 20 KUnit tests + 2 harness skeletons; LTP integration deferred** |

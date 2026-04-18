@@ -1,6 +1,6 @@
 # A-01: Design the ops table
 
-**Status:** design draft complete (2026-04-17)
+**Status:** landed and validated by A-02..A-07 (2026-04-17)
 **Owner:** claude-code session
 **Effort:** 2 weeks (design pass; LKML review cycle separate)
 **Dependencies:** none (foundation task)
@@ -10,7 +10,7 @@
 
 | Deliverable | Location | State |
 |---|---|---|
-| Backend ops header | `arch/um/include/asm/backend.h` | landed (compiles standalone; dispatch macro tested across all 4 build variants) |
+| Backend ops header | `arch/um/include/shared/backend.h` (+ `asm/backend.h` for kernel-only bits; D11) | landed (compiles standalone; dispatch macro tested across all 4 build variants) |
 | Contract spec | `Documentation/virt/uml/backend-contract.rst` | landed |
 | LKML design memo (draft) | `notes/10-lkml-memo.md` | drafted; pending project-owner review before sending |
 | Skas survey | `notes/00-skas-survey.md` | landed |
@@ -19,10 +19,17 @@
 | Per-backend sketches | `notes/04-ptrace-sketch.md`, `05-seccomp-sketch.md`, `06-kvm-sketch.md` | landed; all three fit the contract without per-backend extensions |
 | Inventory ↔ ops coverage | `notes/07-coverage.md` | landed; all sites accounted for |
 | Open-question resolutions | `notes/08-decisions.md` | landed; logged as D8 in `04-risks/decisions-log.md` |
+| Contract validated by impl | ptrace + seccomp (both landed in A-02/A-03) | landed; all 18 ops populated in both backends, 20 KUnit tests pass |
 
-Next steps: send LKML memo (after project-owner sign-off), then begin
-A-02 (ptrace refactor, 6 wk) targeting an interface freeze in month 2
-of the workstream calendar.
+The contract survived A-02 through A-07 intact — no ops added, renamed,
+or removed after the design pass. The three deviations captured during
+implementation (`requested`/`force` args shape, `mm_id` handle instead
+of raw `mm`, `run_userspace` absorbing the old `page_fault` op) are
+recorded in `notes/recon-audit.md` and propagated into three-layers.md.
+
+Next steps: send LKML memo (after project-owner sign-off). A-02 through
+A-07 are already complete; the remaining workstreams B/C/D do not block
+on any further A-01 design work.
 
 ## Goal
 

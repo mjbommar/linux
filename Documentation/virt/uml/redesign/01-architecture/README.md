@@ -31,11 +31,11 @@ higher layers.
 ┌──────────────────────────────────────────────────────────────┐
 │  Layer 1: Backend ops table                                  │
 │  ─────────────────────────────────────────────────────────── │
-│  struct um_backend_ops { syscall_dispatch, page_fault,       │
-│  context_switch, ipi_send, read_clock, ... }                 │
-│  Implementations: ptrace, seccomp, kvm.                      │
-│  Selected at compile time (single-backend, inlined) or       │
-│  runtime (multi-backend, indirect call).                     │
+│  struct um_backend_ops { run_userspace, mm_{map,unmap},      │
+│  context_switch, ipi_send, read_clock_ns, ... } — 18 ops    │
+│  Implementations: ptrace, seccomp (both in tree); kvm        │
+│  (workstream D). Selected at compile time (single-backend,   │
+│  inlined) or runtime (multi-backend, indirect call).         │
 └──────────────────────────────────────────────────────────────┘
                               ▲
                               │ traps to

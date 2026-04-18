@@ -351,9 +351,10 @@ int __init linux_main(int argc, char **argv, char **envp)
 	 * thread_start_idle() (which dispatches through um_backend) and
 	 * before timekeeping_init() calls read_persistent_clock64()
 	 * (likewise). os_early_checks() above set `using_seccomp` based
-	 * on the host probe; init_backend() consumes that. A-04 will
-	 * populate backend_args from the kernel command line; for now
-	 * the arbiter ignores them.
+	 * on the host probe; init_backend() consumes that together with
+	 * the `backend=` cmdline override already parsed by
+	 * uml_backend_config() into backend_arg_requested/backend_arg_force.
+	 * The backend_args arg is reserved for future per-backend knobs.
 	 */
 	{
 		struct um_backend_args backend_args = { 0 };

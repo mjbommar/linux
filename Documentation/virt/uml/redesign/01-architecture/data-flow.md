@@ -17,8 +17,8 @@ UML kernel ring-0 handler (still inside KVM guest)
         ├─ static_branch_unlikely(&um_record_replay)    → NOP
         ├─ static_branch_unlikely(&um_perf_dispatch)    → NOP
         └─ ~5 NOPs total                                ~1.5 ns
-    um_backend_dispatch(syscall_dispatch, regs)
-        → kvm_syscall_dispatch (inlined; single-backend build)
+    um_backend_dispatch(run_userspace, regs)
+        → kvm_run_userspace (inlined; single-backend build)
         → do_syscall_64(regs)
             → sys_getpid()
                 → return current->pid                    ~5 ns
@@ -55,8 +55,8 @@ UML kernel thread (separate host process)
         ├─ static_branch_unlikely(&um_kcov_enabled)     → NOP
         ├─ static_branch_unlikely(&um_record_replay)    → NOP
         └─ ~80 ns total
-    um_backend_dispatch(syscall_dispatch, regs)
-        → seccomp_syscall_dispatch (indirect call, multi-backend)
+    um_backend_dispatch(run_userspace, regs)
+        → seccomp_run_userspace (indirect call, multi-backend)
         ~10 ns
         → do_syscall_64(regs)
             → kprobe_pre_handler(syscall entry kprobe)   ~30 ns
@@ -99,7 +99,7 @@ UML kernel thread
         │   __um_kcov_record(regs->ip)                   ~10 ns
         ├─ record_replay           → NOP
         └─ ~10 ns total
-    seccomp_syscall_dispatch + do_syscall_64
+    seccomp_run_userspace + do_syscall_64
         kcov_remote_start (per-handler instrumentation)
         sys_getpid + KASAN wraps                         ~20 ns
         kcov_remote_stop
@@ -129,7 +129,7 @@ UML kernel thread
         (in this build, the gates are not even compiled in;
          the inline expands to nothing)
                                                          ~0 ns
-    seccomp_syscall_dispatch (single-backend, inlined)   ~0 ns
+    seccomp_run_userspace (single-backend, inlined)   ~0 ns
     do_syscall_64
         sys_getpid                                       ~5 ns
     um_on_syscall_exit                                   ~0 ns
@@ -175,7 +175,7 @@ Guest userspace process
 UML stub                                                 ~100 ns
 UML kernel thread
     um_on_syscall_entry                                  ~50 ns (trace on)
-    seccomp_syscall_dispatch
+    seccomp_run_userspace
         sys_clock_gettime
             ktime_get
                 um_backend->read_clock_ns()

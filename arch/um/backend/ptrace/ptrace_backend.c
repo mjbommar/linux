@@ -2,22 +2,11 @@
 /*
  * ptrace backend: struct um_backend_ops singleton.
  *
- * Workstream A-02 first slice. Op fields are NULL except for the ones
- * migrated so far; the boot arbiter (init_backend, A-02.5) refuses
- * the backend if a HOT op is NULL, so partial migrations can't ship
- * silently.
- *
- * Op fill-in plan (per Documentation/virt/uml/redesign/02-workstreams/
- * A-backend-abstraction/02-ptrace-refactor.md priority order):
- *
- *   A-02.6:        read_persistent_clock_ns  (cold proof-of-concept)
- *   A-02.HOT-1:    run_userspace
- *   A-02.HOT-2:    mm_map, mm_unmap
- *   A-02.HOT-3:    context_switch
- *   A-02.COLD-1:   read_clock_ns, set_timer
- *   A-02.COLD-2:   ipi_send, init_thread_regs, read/write_guest_regs
- *   A-02.COLD-3:   mm_attach, mm_detach, thread_create,
- *                  thread_start_idle, probe, init, shutdown
+ * All 18 ops are populated; the contract requires non-NULL for every
+ * field and the boot arbiter (init_backend) additionally refuses the
+ * backend if a HOT op is NULL. The per-slice annotations below record
+ * which A-02 slice migrated each op (archaeology, for reviewers
+ * tracing how the table was built up).
  */
 #include <linux/init.h>
 #include <linux/kernel.h>

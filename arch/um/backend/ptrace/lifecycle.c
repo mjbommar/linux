@@ -18,8 +18,9 @@
  *                pattern (see arch/um/kernel/reboot.c).
  *
  * Lifting the real probe and init logic into these ops is a future
- * refactor coordinating with A-03 + A-04 (Kconfig/dynamic-backend
- * selection), which is when the boot sequence needs unification.
+ * cleanup (no workstream currently owns it); the early-boot sequence
+ * in arch/um/os-Linux/ needs reorganization before the arbiter can
+ * safely drive probe() itself.
  */
 #include <linux/types.h>
 

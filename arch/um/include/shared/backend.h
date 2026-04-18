@@ -61,9 +61,9 @@ enum um_backend_kind {
 
 /*
  * Forwarded from kernel command line by init_backend(). All fields
- * have a "0 means 'no preference'" semantics. Today the args block
- * is unused (init_backend() defers to using_seccomp + Kconfig);
- * A-04 lands the boot-param parser that populates these.
+ * have a "0 means 'no preference'" semantics. Populated by
+ * uml_backend_config() in arch/um/os-Linux/start_up.c from the
+ * `backend=` / `backend_force=` boot params.
  */
 struct um_backend_args {
 	enum um_backend_kind requested;	/* boot-param override; 0 = auto */

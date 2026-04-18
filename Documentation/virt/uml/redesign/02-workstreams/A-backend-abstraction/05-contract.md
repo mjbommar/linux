@@ -41,9 +41,10 @@ The suite has three categories:
 
 For each op in `um_backend_ops`, test the op in isolation:
 
-- `syscall_dispatch`: known syscall arguments → known return value
-- `page_fault`: trigger a page fault at a known address → ops
-  receives the address with correct flags
+- `run_userspace`: known syscall arguments → known return value; a
+  triggered page fault surfaces in `regs->faultinfo` with the correct
+  address and write/exec flags (fault delivery is folded into
+  `run_userspace` rather than a separate `page_fault` op)
 - `context_switch`: switch between two known tasks → CPU state
   preserved
 - `read_clock_ns`: monotonic, reasonable values

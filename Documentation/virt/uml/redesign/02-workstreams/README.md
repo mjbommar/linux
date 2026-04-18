@@ -61,7 +61,7 @@ If you have a small team:
    exists. D can't implement a backend until the contract is
    defined.
 
-2. **B's first gate is on A's syscall_dispatch.** This validates
+2. **B's first gate is on A's `run_userspace`.** This validates
    that gates compose with backend ops. After this works once,
    the rest are mechanical.
 

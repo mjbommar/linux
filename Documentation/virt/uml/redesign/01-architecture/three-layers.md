@@ -3,52 +3,95 @@
 This is the architectural backbone. Every other document in
 this plan depends on these layers behaving as described.
 
+> **Current state (updated 2026-04-18):** Layer 1 is implemented
+> and shipping; see `arch/um/include/shared/backend.h` for the
+> authoritative struct definition and `Documentation/virt/uml/
+> backend-contract.rst` for the semantics spec. The Layer 1
+> section below retains the original design narrative. Where the
+> pre-implementation sketch and the delivered contract diverge
+> (some op renames, slightly different args block, no NULL/-ENOSYS
+> fallback), the delivered shape wins; see notes inline below.
+> Layers 2 and 3 are still design descriptions — workstreams B
+> and C will deliver them.
+
 ## Layer 1: Backend ops table
 
 ### The struct
 
+The delivered `struct um_backend_ops` lives in
+`arch/um/include/shared/backend.h` (shared rather than `asm/`
+because USER-side TUs in `arch/um/os-Linux/` need to deref it in
+DYNAMIC builds — see D11 in `04-risks/decisions-log.md`). It has
+18 ops in 5 categories; see `Documentation/virt/uml/backend-contract.rst`
+for per-op semantics. The summary:
+
 ```c
-/* arch/um/include/asm/backend.h */
+/* arch/um/include/shared/backend.h (excerpt; see file for full def) */
 
 struct um_backend_args {
-    bool   want_seccomp;   /* prefer seccomp over ptrace if available */
-    bool   want_kvm;       /* prefer KVM over seccomp if available */
-    bool   force_uniform;  /* abort if requested backend unavailable */
-    /* runtime knobs forwarded from boot params */
+    enum um_backend_kind requested;  /* 0 = auto */
+    bool                 force;      /* panic if requested unavailable */
+    const char          *runtime_opts;
 };
 
 struct um_backend_ops {
-    const char *name;
+    const char           *name;
+    enum um_backend_kind  kind;
+    u32                   contract_version;
 
-    /* lifecycle */
+    /* Lifecycle and trap (4) */
+    int  (*probe)(void);
     int  (*init)(const struct um_backend_args *args);
     void (*shutdown)(void);
+    void (*run_userspace)(struct uml_pt_regs *regs);       /* HOT */
 
-    /* syscall interception (the hot path) */
-    void (*syscall_dispatch)(struct pt_regs *regs);
+    /* Memory (4) */
+    int  (*mm_attach)(struct mm_id *id);
+    void (*mm_detach)(struct mm_id *id);
+    int  (*mm_map)(struct mm_id *id, unsigned long va,     /* HOT */
+                   unsigned long len, int prot,
+                   int phys_fd, u64 offset);
+    int  (*mm_unmap)(struct mm_id *id,                     /* HOT */
+                     unsigned long va, unsigned long len);
 
-    /* memory management */
-    void (*page_fault)(unsigned long addr, int write, int exec);
-    int  (*map_user)(struct mm_struct *mm, unsigned long va,
-                     unsigned long pa, size_t len, pgprot_t prot);
-    int  (*unmap_user)(struct mm_struct *mm, unsigned long va, size_t len);
+    /* Scheduling (4) */
+    int  (*thread_create)(struct task_struct *p,
+                          void *stack, void (*handler)(void));
+    int  (*thread_start_idle)(void *stack, struct thread_struct *t);
+    void (*context_switch)(struct task_struct *prev,       /* HOT */
+                           struct task_struct *next);
+    int  (*ipi_send)(int cpu, int vector);
 
-    /* scheduling */
-    int  (*context_switch)(struct task_struct *prev, struct task_struct *next);
-    void (*ipi_send)(int cpu, int vector);
+    /* Time (3) */
+    u64  (*read_clock_ns)(void);                           /* HOT */
+    int  (*set_timer)(int cpu, u64 deadline_ns,
+                      enum um_timer_mode mode);
+    u64  (*read_persistent_clock_ns)(void);
 
-    /* time */
-    u64  (*read_clock_ns)(void);
-    int  (*set_timer)(u64 deadline_ns);
-
-    /* I/O surfaces (called by virtio-uml etc.) */
-    int  (*host_io_submit)(struct um_io_request *req);
-
-    /* introspection (for KGDB, debugger ergonomics) */
-    int  (*read_guest_regs)(int cpu, struct pt_regs *regs);
-    int  (*write_guest_regs)(int cpu, const struct pt_regs *regs);
+    /* Debug / introspection (3) */
+    void (*init_thread_regs)(unsigned long *gp, unsigned long *fp);
+    int  (*read_guest_regs)(struct task_struct *t, struct pt_regs *regs);
+    int  (*write_guest_regs)(struct task_struct *t,
+                             const struct pt_regs *regs);
 };
 ```
+
+Notable deviations from the original sketch (all captured as
+D-entries in `04-risks/decisions-log.md`):
+
+- `syscall_dispatch` + `page_fault` folded into `run_userspace`
+  (one trap-loop iteration; faultinfo travels on regs).
+- `map_user`/`unmap_user` renamed `mm_map`/`mm_unmap` and take
+  `struct mm_id *` rather than `struct mm_struct *`.
+- `host_io_submit` dropped — virtio-uml uses shared host-service
+  APIs (`os_*_file`/epoll) directly; no backend abstraction needed.
+- `set_timer` takes a mode tag (`UM_TIMER_{DISABLE,ONE_SHOT,PERIODIC}`)
+  instead of being three separate ops.
+- Lifecycle ops added: `probe`, `init`, `shutdown` (lifecycle
+  unification into the ops table is in progress; boot probes
+  currently still live in `os_early_checks()`).
+- `read_guest_regs`/`write_guest_regs` take task pointers (not
+  cpu int) — better fit for KGDB's per-task semantics.
 
 ### The selection mechanism
 
@@ -78,9 +121,13 @@ Sandbox profile uses this — minimum TCB, no flexibility paid for.
 least two of the three backends compiled in. Then `um_backend` is
 selected at boot by `init_backend()` based on:
 
-1. Boot param `backend=ptrace|seccomp|kvm`.
-2. If `auto`, probe in order: KVM → seccomp → ptrace.
-3. If `force=` and unavailable, panic.
+1. Boot param `backend=ptrace|seccomp|force=<kind>`.
+2. `backend=auto` (default) defers to the `seccomp=` legacy alias
+   (preserves prior default: ptrace unless seccomp was requested).
+   A future release may flip this to "prefer seccomp if available"
+   (see D15; maintainer-visible behavior change, held for now).
+3. `force=` panics if the requested backend isn't compiled in or
+   its probe fails.
 
 Indirect calls cost ~5-10 cycles (modern CPUs predict them well
 when the target is stable, which ours is — `um_backend` doesn't
@@ -90,13 +137,16 @@ change after init).
 
 Every backend must:
 
-- Implement every op in `um_backend_ops`. Stub `-ENOSYS` where
-  not meaningful (e.g., `set_timer` for ptrace mode that uses
-  signals).
+- Populate every op in `um_backend_ops` — no NULL fields.
+  (Cold ops that aren't yet meaningful return `-EOPNOTSUPP` for
+  int-returning ops; see D14. The dispatch macro is a plain
+  function-pointer call and can't synthesize `-ENOSYS`.)
 - Be self-contained: `#include` no other backend's headers.
-- Document its cost model in `arch/um/<backend>/README.md`.
+- Document its cost model in `arch/um/backend/<kind>/README.md`
+  (or inline in the backend TU comments).
 - Pass the backend conformance test suite (see
-  `02-workstreams/A-backend-abstraction/05-contract.md`).
+  `02-workstreams/A-backend-abstraction/05-contract.md` and the
+  KUnit suite under `arch/um/backend/contract/`).
 
 ### What lives in Layer 1 vs above
 
@@ -175,10 +225,10 @@ is a runtime decision per-event.
 
 | Hook | Inserted at | Why |
 |---|---|---|
-| `um_on_syscall_entry` | Every backend's syscall_dispatch | Single point of all guest syscalls |
+| `um_on_syscall_entry` | Every backend's `run_userspace` | Single point of all guest syscalls |
 | `um_on_syscall_exit` | Same | Symmetric |
-| `um_on_page_fault` | Every backend's page_fault | Memory access trace |
-| `um_on_context_switch` | Every backend's context_switch | Schedule trace |
+| `um_on_page_fault` | Every backend's `run_userspace` (faultinfo path) | Memory access trace |
+| `um_on_context_switch` | Every backend's `context_switch` | Schedule trace |
 | `um_on_irq_entry` | Generic IRQ entry path | Interrupt trace |
 | `um_on_clock_read` | `read_clock_ns` | Time-travel hook |
 

@@ -3,15 +3,15 @@
  * seccomp backend: lifecycle ops (probe, init, shutdown).
  *
  * Workstream A-03.S1.4. Mirrors arch/um/backend/ptrace/lifecycle.c —
- * the real probe/init logic still lives in
+ * the real probe/init logic lives in
  * arch/um/os-Linux/start_up.c::os_early_checks() which runs
- * unconditionally at boot. The ops-table entries here are stubs
- * until the boot sequence is unified (deferred to A-04).
+ * unconditionally at boot (before init_backend()) and sets
+ * `using_seccomp`. The ops-table entries here are stubs.
  *
- * Once the arbiter takes over backend selection, seccomp_probe will
- * call init_seccomp() (currently scattered across os-Linux/start_up.c)
- * and return non-zero on failure so the arbiter can fall back to
- * ptrace.
+ * Lifting the probe/init logic into these ops is a future cleanup
+ * (no workstream currently owns it); it needs to land together with
+ * a reorganization of the os-Linux early-boot sequence so that the
+ * arbiter can run probe() itself and fall back on failure.
  */
 #include <linux/types.h>
 
