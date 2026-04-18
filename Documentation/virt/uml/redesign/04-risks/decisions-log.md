@@ -877,4 +877,49 @@ updated to name the specific repos once they exist).
 
 ---
 
+## D26: KASAN + KCSAN are mutually exclusive upstream — ship as separate profiles
+
+**Date:** 2026-04-18
+**Status:** Accepted
+
+**Decision:** The original plan matrix for `fuzz-deep` called for
+both `KASAN` and `KCSAN` in the same build. Upstream Linux's
+`lib/Kconfig.kcsan` declares `depends on DEBUG_KERNEL && !KASAN`,
+making the combination impossible on a stock kernel.
+
+Resolution: split into two profiles.
+
+- `fuzz-deep` stays KASAN-focused (heap corruption; its current
+  shape pre-C-03).
+- A new `race` profile is added (workstream C-03) with
+  `CONFIG_KCSAN=y`, no KASAN, plus lockdep and debugfs for the
+  `/sys/kernel/debug/kcsan` runtime control.
+
+Users pick the detector class matching the bug class they're
+hunting.
+
+**Reasoning:** Lifting the upstream exclusion would require a
+substantial patch series to both the KASAN and KCSAN runtimes to
+avoid instrumentation collisions. That is orthogonal to the UML
+port and shouldn't be done as part of it. Splitting profiles is
+cheap (one fragment + one doc + one selftest row) and gives the
+user the same menu of tools, just requiring a build-time choice.
+
+**Alternatives considered:**
+
+1. Fork fuzz-deep into fuzz-deep-kasan / fuzz-deep-kcsan — more
+   profile clutter, same outcome.
+2. Patch KASAN+KCSAN to be compatible — out of scope for a UML
+   port.
+3. Document fuzz-deep as "KASAN only; for KCSAN build a custom
+   config" — worse UX, no discoverable menu entry.
+
+**Cross-reference:** `arch/um/configs/profiles/race.config`,
+`Documentation/virt/uml/profiles/race.rst`,
+`Documentation/virt/uml/redesign/03-profiles/fuzz-deep.md`
+(reconciliation note at the top),
+`Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/03-port-kcsan.md`.
+
+---
+
 ## (Future entries here, as decisions are made)

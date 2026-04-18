@@ -7,6 +7,19 @@
 #include <signal.h>
 
 /*
+ * USER-TU-safe __READ_ONCE equivalent.
+ *
+ * <asm-generic/rwonce.h> pulls in <linux/kcsan-checks.h> when KCSAN
+ * is enabled, which in turn references `struct list_head` that USER
+ * TUs don't have forward-declared. Rather than pull kernel type
+ * plumbing into host-userspace compiles, use the compiler-barrier
+ * form directly. Semantically equivalent to __READ_ONCE for the
+ * uses in os-Linux/skas/process.c; no KCSAN instrumentation, which
+ * is correct for USER TUs (they aren't guest kernel code).
+ */
+#define UM_USER_READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
+
+/*
  * elf_aux.c
  */
 void scan_elf_aux(char **envp);

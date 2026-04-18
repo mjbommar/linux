@@ -20,6 +20,7 @@ built by the workstream A dev matrix enable
 | fuzz-deep       | 4s  | 298s | 160,647,400 | ok | PASS (4 features) |
 | sandbox         | 5s  | 133s | 7,326,496   | ok | PASS (5 features) |
 | embedded        | 5s  | 154s | 86,830,992  | ok | PASS (2 features) |
+| race            | 5s  | 246s | 138,787,680 | ok | PASS (5 features) |
 | time-travel     | 5s  | 236s | 141,361,104 | ok | PASS (3 features) |
 
 Build times were measured cold (empty `O=` tree, warm ccache disabled

@@ -3,8 +3,14 @@
 # Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
 #
 
-# Don't instrument UML-specific code
+# Don't instrument UML-specific code: this directory is USER-side
+# TUs that compile against host headers and don't participate in
+# the kernel sanitizer/coverage machinery. Disable every sanitizer
+# explicitly to keep the USER/KERNEL TU boundary clean.
 KCOV_INSTRUMENT                := n
+KASAN_SANITIZE                 := n
+KCSAN_SANITIZE                 := n
+UBSAN_SANITIZE                 := n
 
 obj-y = elf_aux.o execvp.o file.o helper.o irq.o main.o mem.o process.o \
 	registers.o sigio.o signal.o start_up.o time.o tty.o \

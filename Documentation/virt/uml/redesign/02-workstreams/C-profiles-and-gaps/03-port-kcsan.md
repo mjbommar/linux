@@ -1,9 +1,9 @@
 # C-03: Port KCSAN to UML
 
-**Status:** planned
+**Status:** landed (2026-04-18) — HAVE_ARCH_KCSAN selected on UML/x86_64; new `race` profile (`arch/um/configs/profiles/race.config`) + doc + selftest row. KCSAN selftest at boot: 3/3 PASS. KUnit suite runs with `ncpus>=2` and detects 20+ races. USER-TU sanitizer opt-outs added to `arch/um/os-Linux/{,skas/}Makefile`. KASAN/KCSAN mutual exclusion resolved per D26.
 **Effort:** 4 weeks
-**Dependencies:** SMP merged (currently Tiwei Bie v4 RFC)
-**Blocks:** fuzz-deep profile (needs KCSAN)
+**Dependencies:** SMP (already merged — UML has SMP via host threads)
+**Blocks:** race profile (landed); fuzz-deep stays KASAN-only per D26
 
 ## Goal
 

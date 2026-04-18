@@ -37,6 +37,7 @@ Profiles
    research
    fuzz
    fuzz-deep
+   race
    sandbox
    embedded
    time-travel
@@ -77,7 +78,12 @@ Summary matrix
      - SECCOMP_ONLY
      - yes
      - yes
-     - targeted fuzz session after a candidate bug
+     - targeted fuzz session after a candidate bug (KASAN-focused)
+   * - race
+     - SECCOMP_ONLY
+     - yes
+     - yes
+     - data-race detection (KCSAN; no KASAN — mutually exclusive)
    * - sandbox
      - SECCOMP_ONLY
      - no

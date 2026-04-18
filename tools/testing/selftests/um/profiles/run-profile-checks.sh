@@ -36,10 +36,12 @@ probe_profile() {
 		return 77 # kselftest skip
 	fi
 
-	# Use 256M — fuzz-deep and research carry KASAN + heavy
+	# Use 512M — fuzz-deep and research carry KASAN + heavy
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
-	out=$(timeout 20 "$binary" init="$GUEST_SCRIPT" mem=256M \
-		con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
+	# 40s timeout — KCSAN (race profile) adds several seconds of
+	# lockdep/selftest init at boot before the probe runs.
+	out=$(timeout 40 "$binary" init="$GUEST_SCRIPT" mem=512M \
+		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 
 	# UML's console delivers CRLF line endings; strip CRs so the
 	# PRESENT/ABSENT tokens compare cleanly downstream.
@@ -153,6 +155,15 @@ run_one fuzz-deep \
 	debugfs_kfence=PRESENT \
 	tracefs=PRESENT \
 	tracefs_user_events=PRESENT \
+	|| any_fail=1
+
+# race: KCSAN-focused, no KASAN, debugfs/kcsan present.
+run_one race \
+	debugfs_um=PRESENT \
+	debugfs_kcsan=PRESENT \
+	debugfs_kcov=ABSENT \
+	tracefs=PRESENT \
+	proc_sysrq=ABSENT \
 	|| any_fail=1
 
 # sandbox: minimum TCB — everything off including proc_kcore.

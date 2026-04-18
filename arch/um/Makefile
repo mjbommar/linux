@@ -110,7 +110,7 @@ linux: vmlinux
 # kernel's standard defconfig path.
 
 UML_PROFILES := prod-fast prod-with-hooks research fuzz fuzz-deep \
-		sandbox embedded time-travel
+		race sandbox embedded time-travel
 
 PHONY += $(addprefix uml/,$(UML_PROFILES)) uml/list-profiles
 
@@ -138,7 +138,7 @@ define archhelp
   echo '		    find in the kernel root.'
   echo '  uml/<profile>   - Configure for a named UML profile'
   echo '                    (prod-fast, prod-with-hooks, research, fuzz,'
-  echo '                    fuzz-deep, sandbox, embedded, time-travel).'
+  echo '                    fuzz-deep, race, sandbox, embedded, time-travel).'
   echo '                    See Documentation/virt/uml/profiles/.'
   echo '  uml/list-profiles - List available UML profile targets.'
 endef

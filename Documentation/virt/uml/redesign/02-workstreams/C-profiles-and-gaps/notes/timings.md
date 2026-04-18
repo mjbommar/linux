@@ -16,3 +16,7 @@ Hardware: 4 CPU, 61 GiB RAM, Ubuntu 26.04, gcc 15.2.
 | 2026-04-18 | C-02 matrix rebuild (ptrace_only + seccomp_only + dynamic) | 11s + 11s + 12s | 4 | Incremental; only trap.c touched |
 | 2026-04-18 | C-02 KFENCE KUnit at boot | ~10 s | – | 13/27 pass; 12 fail on stack-walker symbol resolution (UML limitation, not KFENCE arch). `total bugs: 23` visible in `/sys/kernel/debug/kfence/stats` — every OOB caught. |
 | 2026-04-18 | C-02 full-profile smoke (8 profiles boot + selftest PASS) | ~30 s | – | 8/8 boot ok; 8/8 selftest PASS (research + fuzz-deep add `debugfs_kfence=PRESENT` row) |
+| 2026-04-18 | C-03 debugging USER-TU KCSAN leak (__READ_ONCE via kcsan-checks.h) | ~15 min | – | Added `KCSAN_SANITIZE := n` + friends to os-Linux/{,skas/}Makefile. Replaced lone `__READ_ONCE` in skas/process.c with local `UM_USER_READ_ONCE` to drop `asm-generic/rwonce.h` kernel-header include from USER TU. |
+| 2026-04-18 | C-03 race build (cold, KCSAN + lockdep + SMP + kunit test compiled) | 246s | 4 | vmlinux 139 MB; boot at `ncpus=2 mem=512M` |
+| 2026-04-18 | C-03 KCSAN at boot | ~2 s | – | `kcsan: selftest: 3/3 tests passed`; KUnit suite detects 20+ real races when run |
+| 2026-04-18 | C-03 full selftest (9 profiles) | ~4 min | 4 | 9/9 PASS; race adds `debugfs_kcsan=PRESENT` row; selftest harness timeout bumped 20s→40s for KCSAN's slower boot |

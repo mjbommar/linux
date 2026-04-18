@@ -3,6 +3,16 @@
 **One-line:** fuzz + KCSAN + record-replay; slower iteration but
 catches more bug classes; replayable crashes.
 
+> **Reconciliation note (2026-04-18, D26):** upstream Linux
+> (``lib/Kconfig.kcsan``) declares `depends on DEBUG_KERNEL && !KASAN`,
+> so KASAN and KCSAN cannot be enabled in the same build. The
+> `fuzz-deep = KASAN + KCSAN` aspiration in this doc is therefore
+> not achievable on a stock kernel. The delivered solution ships
+> KASAN-focused `fuzz-deep` and adds a separate KCSAN-focused
+> `race` profile (see `arch/um/configs/profiles/race.config` and
+> `Documentation/virt/uml/profiles/race.rst`). Pick one detector
+> per build.
+
 ## Intended user
 
 - Researchers hunting concurrency bugs (KCSAN).

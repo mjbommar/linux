@@ -49,14 +49,31 @@ What's still off
   gate ships, but its slow path is still the stub counter that B-02
   landed. A real record/replay consumer is phase-F work.
 
+KCSAN availability
+==================
+
+The original plan matrix listed ``fuzz-deep`` as ``KASAN + KCSAN``.
+That combination is **not achievable on a stock kernel**:
+``lib/Kconfig.kcsan`` declares ``depends on DEBUG_KERNEL && !KASAN``,
+so a single build can have one or the other, not both.
+
+Rather than modify the upstream constraint or fork fuzz-deep into
+two variants, this release ships:
+
+- **``fuzz-deep``** — KASAN-focused (the current profile).
+- **``race``** — KCSAN-focused. See :doc:`race`.
+
+Pick the detector matching your bug class. The decision is
+recorded as D26 in
+``Documentation/virt/uml/redesign/04-risks/decisions-log.md``.
+
 Gap note
 ========
 
-This profile name promises more than it currently delivers:
-fuzz-deep's distinctive features vs fuzz are today only
-``KASAN_INLINE`` + lockdep. When C-03 lands ``KCSAN`` the diff
-widens; when phase F lands real record/replay the diff widens
-again. The fragment comment tracks the gap so the profile's name
+Beyond the KCSAN constraint above, fuzz-deep's distinctive
+features vs fuzz are ``KASAN_INLINE`` + lockdep + KFENCE. When
+phase F lands real record/replay the diff widens again. The
+fragment comment tracks the remaining gap so the profile's name
 doesn't quietly drift.
 
 When to use something else
