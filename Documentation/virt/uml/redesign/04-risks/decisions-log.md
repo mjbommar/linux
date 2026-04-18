@@ -820,4 +820,61 @@ published there), `08-future-phases/notes/uprobes-spike.md`
 
 ---
 
+## D25: Non-kernel artifacts (rootfs recipes, image data) live out-of-tree
+
+**Date:** 2026-04-18
+**Status:** Accepted (user directive during workstream C kickoff)
+
+**Decision:** Everything needed to *run* a workload inside UML that
+isn't itself kernel source — rootfs build recipes, golden guest
+images, test workload bundles, captured trace artifacts, large data
+fixtures — lives in **separate GitHub repositories**, not in this
+kernel tree.
+
+What stays in-tree:
+
+- ``arch/um/configs/base_defconfig`` and
+  ``arch/um/configs/profiles/*.config`` — these are text Kconfig
+  fragments and belong with the code they configure.
+- ``Documentation/virt/uml/profiles/*.rst`` — user-facing
+  documentation.
+- ``tools/testing/selftests/um/`` — selftest scripts that run
+  against in-tree builds.
+- Shell scripts and JSON baselines under
+  ``Documentation/virt/uml/redesign/scripts/`` and
+  ``Documentation/virt/uml/redesign/02-workstreams/.../notes/`` —
+  these reference in-tree behaviour and are small.
+
+What moves out-of-tree (repos to be created when phase E lands):
+
+- **uml-recipes**: rootfs build recipes for Debian, Alpine, etc.
+  Makefiles / Dockerfiles / debootstrap invocations that produce a
+  bootable UML rootfs.
+- **uml-images** (or a data branch / release artifact): prebuilt
+  rootfs images for reviewer convenience. Binary data does not belong
+  in the kernel git history.
+- **uml-workloads** (optional, may fold into uml-recipes): golden
+  service workloads (FastAPI, nginx, redis) used by phases I and H.
+
+**Reasoning:**
+
+- Linux kernel convention: the tree holds source, not large data
+  artifacts. kselftest's bpf harness, rust-for-linux's CI images,
+  KVM's testing artifacts all use external storage.
+- Keeps the kernel tree small; rootfs builders churn on a different
+  cadence than kernel code.
+- Separates upstream-LKML audience (needs kernel code) from
+  end-user-reviewer audience (wants a CLI and images).
+
+**Applied in this pass (C-01):** everything we shipped is in-tree
+because it's text. The ``uml run`` launcher, rootfs builder, and
+golden workloads that phase E introduces will all live in the
+separate repositories.
+
+**Cross-reference:**
+``08-future-phases/01-end-user-ideal-world.md`` §"Phase E" (will be
+updated to name the specific repos once they exist).
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -1,6 +1,6 @@
 # C-01: Defconfig design + skeleton
 
-**Status:** planned
+**Status:** landed (2026-04-18) — base + 8 profile fragments + Makefile targets + user docs + selftest harness.
 **Effort:** 3 weeks
 **Dependencies:** A-04 (Kconfig backend selection)
 **Blocks:** every other C task (they wire into defconfigs)

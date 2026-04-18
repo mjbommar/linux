@@ -13,6 +13,7 @@ Virtualization Support
    uml/backend-contract
    uml/debugfs
    uml/section-split
+   uml/profiles/index
    paravirt_ops
    guest-halt-polling
    ne_overview

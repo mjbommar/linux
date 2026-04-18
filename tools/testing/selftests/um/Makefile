@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-TARGETS = hooks-flip
+TARGETS = hooks-flip profiles
 include ../lib.mk
 
 all:

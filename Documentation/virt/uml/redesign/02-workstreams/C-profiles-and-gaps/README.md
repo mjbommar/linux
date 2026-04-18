@@ -23,7 +23,7 @@ the others.
 
 | # | Task | Effort | Status | Parallelizable |
 |---|---|---|---|---|
-| 01 | [Defconfig design + skeleton](01-defconfig-design.md) | 3 wk | planned | No (gates rest) |
+| 01 | [Defconfig design + skeleton](01-defconfig-design.md) | 3 wk | **in progress (2026-04-18); base + 8 fragments + `uml/<profile>` Makefile targets + 8 user docs + selftest landed; per-profile build-boot matrix in flight** | No (gates rest) |
 | 02 | [Port KFENCE](02-port-kfence.md) | 2 wk | planned | Yes |
 | 03 | [Port KCSAN](03-port-kcsan.md) | 4 wk | planned | Yes |
 | 04 | [Port kprobes](04-port-kprobes.md) | 4 wk | planned | Yes |

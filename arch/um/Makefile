@@ -102,11 +102,45 @@ linux: vmlinux
 	@echo '  LINK $@'
 	$(Q)ln -f $< $@
 
+# --- uml/<profile> configure targets (workstream C-01) -------------
+#
+# Merge arch/um/configs/base_defconfig with
+# arch/um/configs/profiles/<profile>.config into .config, then let
+# the user run `make ARCH=um -j N` to build. Same workflow as the
+# kernel's standard defconfig path.
+
+UML_PROFILES := prod-fast prod-with-hooks research fuzz fuzz-deep \
+		sandbox embedded time-travel
+
+PHONY += $(addprefix uml/,$(UML_PROFILES)) uml/list-profiles
+
+$(addprefix uml/,$(UML_PROFILES)): uml/%:
+	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/kconfig/merge_config.sh \
+		-m -O $(objtree) \
+		$(srctree)/arch/um/configs/base_defconfig \
+		$(srctree)/arch/um/configs/profiles/$*.config
+	$(Q)$(MAKE) -f $(srctree)/Makefile ARCH=um olddefconfig
+	@echo
+	@echo 'Configured for UML profile: $*'
+	@echo 'See Documentation/virt/uml/profiles/$*.rst for details.'
+	@echo 'Now run:  make ARCH=um -j$$(nproc)'
+
+uml/list-profiles:
+	@echo 'Available UML profiles (use: make ARCH=um uml/<profile>):'
+	@for p in $(UML_PROFILES); do echo "    uml/$$p"; done
+	@echo
+	@echo 'Per-profile documentation in Documentation/virt/uml/profiles/.'
+
 define archhelp
-  echo '* linux		- Binary kernel image (./linux) - for backward'
-  echo '		   compatibility only, this creates a hard link to the'
-  echo '		   real kernel binary, the "vmlinux" binary you'
-  echo '		   find in the kernel root.'
+  echo '* linux		  - Binary kernel image (./linux) - for backward'
+  echo '		    compatibility only, this creates a hard link to the'
+  echo '		    real kernel binary, the "vmlinux" binary you'
+  echo '		    find in the kernel root.'
+  echo '  uml/<profile>   - Configure for a named UML profile'
+  echo '                    (prod-fast, prod-with-hooks, research, fuzz,'
+  echo '                    fuzz-deep, sandbox, embedded, time-travel).'
+  echo '                    See Documentation/virt/uml/profiles/.'
+  echo '  uml/list-profiles - List available UML profile targets.'
 endef
 
 archheaders:

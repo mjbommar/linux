@@ -129,6 +129,7 @@ TARGETS += tty
 TARGETS += ublk
 TARGETS += uevent
 TARGETS += um/hooks-flip
+TARGETS += um/profiles
 TARGETS += user_events
 TARGETS += vDSO
 TARGETS += mm
