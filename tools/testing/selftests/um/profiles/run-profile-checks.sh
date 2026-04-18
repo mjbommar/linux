@@ -127,6 +127,7 @@ run_one prod-with-hooks \
 run_one research \
 	debugfs_um=PRESENT \
 	debugfs_kcov=PRESENT \
+	debugfs_kfence=PRESENT \
 	tracefs=PRESENT \
 	tracefs_syscalls=PRESENT \
 	tracefs_user_events=PRESENT \
@@ -145,10 +146,11 @@ run_one fuzz \
 	proc_sysrq=ABSENT \
 	|| any_fail=1
 
-# fuzz-deep: same as fuzz today (KCSAN pending C-03).
+# fuzz-deep: fuzz + KFENCE (C-02) + KASAN_INLINE (KCSAN still pending C-03).
 run_one fuzz-deep \
 	debugfs_um=PRESENT \
 	debugfs_kcov=PRESENT \
+	debugfs_kfence=PRESENT \
 	tracefs=PRESENT \
 	tracefs_user_events=PRESENT \
 	|| any_fail=1

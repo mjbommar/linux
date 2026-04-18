@@ -6,6 +6,7 @@
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/hardirq.h>
+#include <linux/kfence.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/sched/debug.h>
@@ -318,6 +319,22 @@ unsigned long segv(struct faultinfo fi, unsigned long ip, int is_user,
 
 	if (!is_user && regs)
 		current->thread.segv_regs = container_of(regs, struct pt_regs, regs);
+
+	/*
+	 * KFENCE: kernel-space faults on a page inside the KFENCE pool
+	 * are almost always intentional — KFENCE protects guard pages
+	 * so out-of-bounds accesses fault. kfence_handle_page_fault()
+	 * reports the error, makes the page accessible, and returns
+	 * true; we then return without further fault processing.
+	 * Checking BEFORE the start_vm/end_vm TLB-sync branch is
+	 * critical — the kfence pool lives in kernel-mapped memory but
+	 * its page protections are managed by kfence itself, not by
+	 * set_ptes, so the TLB-sync path would misinterpret the fault.
+	 */
+	if (!is_user && regs &&
+	    kfence_handle_page_fault(address, is_write,
+				     container_of(regs, struct pt_regs, regs)))
+		goto out;
 
 	if (!is_user && address >= start_vm && address < end_vm) {
 		/*

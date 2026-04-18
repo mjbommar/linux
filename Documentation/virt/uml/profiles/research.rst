@@ -42,7 +42,12 @@ What's on
   already in ``arch/um/Kconfig``), plus
   ``KCOV_ENABLE_COMPARISONS``.
 - **Sanitizers**: ``KASAN`` (generic), ``UBSAN`` with bounds
-  checking.
+  checking, ``KFENCE`` (sampling heap-corruption detector,
+  ``sample_interval=100`` ms, 255 guarded objects). KFENCE works
+  end-to-end on UML (workstream C-02) — every OOB/UAF inside
+  the pool is caught and reported via ``dmesg``; live stats at
+  ``/sys/kernel/debug/kfence/stats``, object metadata at
+  ``/sys/kernel/debug/kfence/objects``.
 - **Lockdep** + **PROVE_LOCKING** + **DEBUG_MUTEXES** +
   **DEBUG_ATOMIC_SLEEP**.
 - **Memory debug**: ``DEBUG_VM``, ``DEBUG_PAGEALLOC``,

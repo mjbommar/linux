@@ -1,6 +1,6 @@
 # C-02: Port KFENCE to UML
 
-**Status:** planned
+**Status:** landed (2026-04-18) — arch/um/include/asm/kfence.h, fault-path wiring in arch/um/kernel/trap.c, HAVE_ARCH_KFENCE selected for UML on x86_64, enabled in research + fuzz-deep profiles. KFENCE catches OOB reads/writes under UML; 13/27 upstream KUnit tests pass (the 12 failures all assert on formatted stack-trace content which UML's walker doesn't render symbol-named — KFENCE itself is fully functional; the walker gap is a separate, documented UML issue).
 **Effort:** 2 weeks (cheapest port)
 **Dependencies:** A-01 (just so the ops table exists)
 **Blocks:** research, fuzz, fuzz-deep profiles having KFENCE

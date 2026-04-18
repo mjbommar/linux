@@ -34,6 +34,10 @@ What's on (in addition to ``fuzz``)
 ====================================
 
 - ``KASAN_INLINE`` — tighter poison catch.
+- ``KFENCE`` (C-02) — sampling OOB/UAF detector with guard pages.
+  Complements KASAN by catching bugs in paths that KASAN's shadow
+  cost would cover up. Stats at
+  ``/sys/kernel/debug/kfence/stats``.
 - ``PROVE_LOCKING``, ``DEBUG_ATOMIC_SLEEP`` — lockdep catches some
   of the races KCSAN would eventually catch.
 
