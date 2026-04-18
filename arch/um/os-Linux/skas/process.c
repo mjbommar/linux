@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <asm/unistd.h>
+#include <backend.h>
 #include <as-layout.h>
 #include <init.h>
 #include <kern_util.h>
@@ -248,32 +249,11 @@ out_kill:
 
 extern unsigned long current_stub_stack(void);
 
-static void get_skas_faultinfo(int pid, struct faultinfo *fi)
-{
-	int err;
-
-	err = ptrace(PTRACE_CONT, pid, 0, SIGSEGV);
-	if (err) {
-		printk(UM_KERN_ERR "Failed to continue stub, pid = %d, "
-		       "errno = %d\n", pid, errno);
-		fatal_sigsegv();
-	}
-	wait_stub_done(pid);
-
-	/*
-	 * faultinfo is prepared by the stub_segv_handler at start of
-	 * the stub stack page. We just have to copy it.
-	 */
-	memcpy(fi, (void *)current_stub_stack(), sizeof(*fi));
-}
-
-static void handle_trap(struct uml_pt_regs *regs)
-{
-	if ((UPT_IP(regs) >= STUB_START) && (UPT_IP(regs) < STUB_END))
-		fatal_sigsegv();
-
-	handle_syscall(regs);
-}
+/*
+ * get_skas_faultinfo() and handle_trap() moved into
+ * arch/um/backend/ptrace/trap_user.c with workstream A-02.HOT-1
+ * (they're ptrace-only).
+ */
 
 extern char __syscall_stub_start[];
 
@@ -540,254 +520,32 @@ out_close:
 	return err;
 }
 
-static int unscheduled_userspace_iterations;
-extern unsigned long tt_extra_sched_jiffies;
+/*
+ * Counter shared between both backends' run_userspace impls and
+ * reset by switch_threads (below) on every context switch. It
+ * implements the time-travel-mode rate-limit on extra scheduler
+ * jiffies — counting UNSCHEDULED iterations of the per-backend trap
+ * loop body. Per-backend trap loops extern-declare it.
+ */
+unsigned int unscheduled_userspace_iterations;
 
+/*
+ * Trap loop. Per-iteration body lives in the active backend's
+ * run_userspace op; this function is just the loop scaffolding.
+ *
+ * The dispatch macro is the single source of truth for which backend
+ * runs: in *_ONLY builds it expands to a direct call to the chosen
+ * backend; in DYNAMIC builds init_backend() set `um_backend` to
+ * match the host probe (`using_seccomp`) before this function is
+ * ever entered.
+ */
 void userspace(struct uml_pt_regs *regs)
 {
-	int err, status, op;
-	siginfo_t si_local;
-	siginfo_t *si;
-	int sig;
-
 	/* Handle any immediate reschedules or signals */
 	interrupt_end();
 
-	while (1) {
-		struct mm_id *mm_id = current_mm_id();
-
-		/*
-		 * At any given time, only one CPU thread can enter the
-		 * turnstile to operate on the same stub process, including
-		 * executing stub system calls (mmap and munmap).
-		 */
-		enter_turnstile(mm_id);
-
-		/*
-		 * When we are in time-travel mode, userspace can theoretically
-		 * do a *lot* of work without being scheduled. The problem with
-		 * this is that it will prevent kernel bookkeeping (primarily
-		 * the RCU) from running and this can for example cause OOM
-		 * situations.
-		 *
-		 * This code accounts a jiffie against the scheduling clock
-		 * after the defined userspace iterations in the same thread.
-		 * By doing so the situation is effectively prevented.
-		 */
-		if (time_travel_mode == TT_MODE_INFCPU ||
-		    time_travel_mode == TT_MODE_EXTERNAL) {
-#ifdef CONFIG_UML_MAX_USERSPACE_ITERATIONS
-			if (CONFIG_UML_MAX_USERSPACE_ITERATIONS &&
-			    unscheduled_userspace_iterations++ >
-			    CONFIG_UML_MAX_USERSPACE_ITERATIONS) {
-				tt_extra_sched_jiffies += 1;
-				unscheduled_userspace_iterations = 0;
-			}
-#endif
-		}
-
-		time_travel_print_bc_msg();
-
-		current_mm_sync();
-
-		if (using_seccomp) {
-			struct stub_data *proc_data = (void *) mm_id->stack;
-
-			err = set_stub_state(regs, proc_data, singlestepping());
-			if (err) {
-				printk(UM_KERN_ERR "%s - failed to set regs: %d",
-				       __func__, err);
-				fatal_sigsegv();
-			}
-
-			/* Must have been reset by the syscall caller */
-			if (proc_data->restart_wait != 0)
-				panic("Programming error: Flag to only run syscalls in child was not cleared!");
-
-			/* Mark pending syscalls for flushing */
-			proc_data->syscall_data_len = mm_id->syscall_data_len;
-
-			wait_stub_done_seccomp(mm_id, 0, 0);
-
-			sig = proc_data->signal;
-
-			if (sig == SIGTRAP && proc_data->err != 0) {
-				printk(UM_KERN_ERR "%s - Error flushing stub syscalls",
-				       __func__);
-				syscall_stub_dump_error(mm_id);
-				mm_id->syscall_data_len = proc_data->err;
-				fatal_sigsegv();
-			}
-
-			mm_id->syscall_data_len = 0;
-			mm_id->syscall_fd_num = 0;
-
-			err = get_stub_state(regs, proc_data, NULL);
-			if (err) {
-				printk(UM_KERN_ERR "%s - failed to get regs: %d",
-				       __func__, err);
-				fatal_sigsegv();
-			}
-
-			if (proc_data->si_offset > sizeof(proc_data->sigstack) - sizeof(*si))
-				panic("%s - Invalid siginfo offset from child", __func__);
-
-			si = &si_local;
-			memcpy(si, &proc_data->sigstack[proc_data->si_offset], sizeof(*si));
-
-			regs->is_user = 1;
-
-			/* Fill in ORIG_RAX and extract fault information */
-			PT_SYSCALL_NR(regs->gp) = si->si_syscall;
-			if (sig == SIGSEGV) {
-				mcontext_t *mcontext = (void *)&proc_data->sigstack[proc_data->mctx_offset];
-
-				GET_FAULTINFO_FROM_MC(regs->faultinfo, mcontext);
-			}
-		} else {
-			int pid = mm_id->pid;
-
-			/* Flush out any pending syscalls */
-			err = syscall_stub_flush(mm_id);
-			if (err) {
-				if (err == -ENOMEM)
-					report_enomem();
-
-				printk(UM_KERN_ERR "%s - Error flushing stub syscalls: %d",
-					__func__, -err);
-				fatal_sigsegv();
-			}
-
-			/*
-			 * This can legitimately fail if the process loads a
-			 * bogus value into a segment register.  It will
-			 * segfault and PTRACE_GETREGS will read that value
-			 * out of the process.  However, PTRACE_SETREGS will
-			 * fail.  In this case, there is nothing to do but
-			 * just kill the process.
-			 */
-			if (ptrace(PTRACE_SETREGS, pid, 0, regs->gp)) {
-				printk(UM_KERN_ERR "%s - ptrace set regs failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (put_fp_registers(pid, regs->fp)) {
-				printk(UM_KERN_ERR "%s - ptrace set fp regs failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (singlestepping())
-				op = PTRACE_SYSEMU_SINGLESTEP;
-			else
-				op = PTRACE_SYSEMU;
-
-			if (ptrace(op, pid, 0, 0)) {
-				printk(UM_KERN_ERR "%s - ptrace continue failed, op = %d, errno = %d\n",
-				       __func__, op, errno);
-				fatal_sigsegv();
-			}
-
-			CATCH_EINTR(err = waitpid(pid, &status, WUNTRACED | __WALL));
-			if (err < 0) {
-				printk(UM_KERN_ERR "%s - wait failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			regs->is_user = 1;
-			if (ptrace(PTRACE_GETREGS, pid, 0, regs->gp)) {
-				printk(UM_KERN_ERR "%s - PTRACE_GETREGS failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (get_fp_registers(pid, regs->fp)) {
-				printk(UM_KERN_ERR "%s -  get_fp_registers failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (WIFSTOPPED(status)) {
-				sig = WSTOPSIG(status);
-
-				/*
-				 * These signal handlers need the si argument
-				 * and SIGSEGV needs the faultinfo.
-				 * The SIGIO and SIGALARM handlers which constitute
-				 * the majority of invocations, do not use it.
-				 */
-				switch (sig) {
-				case SIGSEGV:
-					get_skas_faultinfo(pid,
-							   &regs->faultinfo);
-					fallthrough;
-				case SIGTRAP:
-				case SIGILL:
-				case SIGBUS:
-				case SIGFPE:
-				case SIGWINCH:
-					ptrace(PTRACE_GETSIGINFO, pid, 0,
-					       (struct siginfo *)&si_local);
-					si = &si_local;
-					break;
-				default:
-					si = NULL;
-					break;
-				}
-			} else {
-				sig = 0;
-			}
-		}
-
-		exit_turnstile(mm_id);
-
-		UPT_SYSCALL_NR(regs) = -1; /* Assume: It's not a syscall */
-
-		if (sig) {
-			switch (sig) {
-			case SIGSEGV:
-				if (using_seccomp || PTRACE_FULL_FAULTINFO)
-					(*sig_info[SIGSEGV])(SIGSEGV,
-							     (struct siginfo *)si,
-							     regs, NULL);
-				else
-					segv(regs->faultinfo, 0, 1, NULL, NULL);
-
-				break;
-			case SIGSYS:
-				handle_syscall(regs);
-				break;
-			case SIGTRAP + 0x80:
-				handle_trap(regs);
-				break;
-			case SIGTRAP:
-				relay_signal(SIGTRAP, (struct siginfo *)si, regs, NULL);
-				break;
-			case SIGALRM:
-				break;
-			case SIGIO:
-			case SIGILL:
-			case SIGBUS:
-			case SIGFPE:
-			case SIGWINCH:
-				block_signals_trace();
-				(*sig_info[sig])(sig, (struct siginfo *)si, regs, NULL);
-				unblock_signals_trace();
-				break;
-			default:
-				printk(UM_KERN_ERR "%s - child stopped with signal %d\n",
-				       __func__, sig);
-				fatal_sigsegv();
-			}
-			interrupt_end();
-
-			/* Avoid -ERESTARTSYS handling in host */
-			if (PT_SYSCALL_NR_OFFSET != PT_SYSCALL_RET_OFFSET)
-				PT_SYSCALL_NR(regs->gp) = -1;
-		}
-	}
+	while (1)
+		um_backend_dispatch(run_userspace, regs);
 }
 
 void new_thread(void *stack, jmp_buf *buf, void (*handler)(void))

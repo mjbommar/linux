@@ -13,6 +13,7 @@
 #include <sys/resource.h>
 #include <sys/personality.h>
 #include <as-layout.h>
+#include <backend.h>
 #include <init.h>
 #include <kern_util.h>
 #include <os.h>
@@ -167,7 +168,7 @@ int __init main(int argc, char **argv, char **envp)
 	 */
 
 	/* stop timers and set timer signal to be ignored */
-	os_timer_disable(0);
+	um_backend_dispatch(set_timer, 0, 0, UM_TIMER_DISABLE);
 
 	/* disable SIGIO for the fds and set SIGIO to be ignored */
 	err = deactivate_all_fds();

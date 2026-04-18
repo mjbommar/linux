@@ -17,6 +17,7 @@
 #include <linux/hardirq.h>
 #include <linux/smp.h>
 #include <linux/smp-internal.h>
+#include <asm/backend.h>
 #include <init.h>
 #include <kern.h>
 #include <os.h>
@@ -31,12 +32,12 @@ enum {
 
 void arch_smp_send_reschedule(int cpu)
 {
-	os_send_ipi(cpu, UML_IPI_RES);
+	um_backend_dispatch(ipi_send, cpu, UML_IPI_RES);
 }
 
 void arch_send_call_function_single_ipi(int cpu)
 {
-	os_send_ipi(cpu, UML_IPI_CALL_SINGLE);
+	um_backend_dispatch(ipi_send, cpu, UML_IPI_CALL_SINGLE);
 }
 
 void arch_send_call_function_ipi_mask(const struct cpumask *mask)
@@ -44,7 +45,7 @@ void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 	int cpu;
 
 	for_each_cpu(cpu, mask)
-		os_send_ipi(cpu, UML_IPI_CALL);
+		um_backend_dispatch(ipi_send, cpu, UML_IPI_CALL);
 }
 
 void smp_send_stop(void)
@@ -54,7 +55,7 @@ void smp_send_stop(void)
 	for_each_online_cpu(cpu) {
 		if (cpu == me)
 			continue;
-		os_send_ipi(cpu, UML_IPI_STOP);
+		um_backend_dispatch(ipi_send, cpu, UML_IPI_STOP);
 	}
 }
 

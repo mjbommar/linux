@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# A-07 perf-CI workflow template.
+#
+# Drop into .github/workflows/uml-perf.yml on a fork to wire up the
+# perf-regression gate. The mainline UML tree doesn't (yet) host CI;
+# adopting this template is part of the upstream conversation.
+#
+# Behavior:
+#   - On PRs that touch arch/um/, builds PTRACE_ONLY/SECCOMP_ONLY/DYNAMIC.
+#   - Runs uml-boot-matrix.sh for build-and-boot validation (12 rows).
+#   - Runs uml-perf-compare.sh against the committed baseline.
+#   - Fails on any boot regression OR any cycle-count regression >5%.
+#   - Warns on 2-5% cycle regressions; reviewer must explicitly ack.
+#
+# Required runner capability: hardware perf counters
+# (sysctl kernel.perf_event_paranoid<=1).
+
+name: UML backend perf
+
+on:
+  pull_request:
+    paths:
+      - 'arch/um/**'
+      - 'Documentation/virt/uml/**'
+  push:
+    branches: [master]
+    paths:
+      - 'arch/um/**'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix-and-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bison flex bc libelf-dev libssl-dev pahole \
+            kmod cpio rsync zstd lz4 \
+            linux-tools-generic
+          sudo sysctl kernel.perf_event_paranoid=1
+
+      - name: Boot matrix (build + boot all 3 dispatch modes)
+        run: |
+          Documentation/virt/uml/redesign/scripts/uml-boot-matrix.sh
+
+      - name: Perf comparison vs baseline
+        # The baseline lives at
+        # Documentation/virt/uml/redesign/02-workstreams/
+        # A-backend-abstraction/perf-baseline.json
+        # Maintainers update it via uml-perf-capture.sh; that's an
+        # explicit batched step, not part of this PR check.
+        run: |
+          Documentation/virt/uml/redesign/scripts/uml-perf-compare.sh

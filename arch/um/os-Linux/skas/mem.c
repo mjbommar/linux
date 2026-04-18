@@ -231,8 +231,9 @@ static int get_stub_fd(struct mm_id *mm_idp, int fd)
 	return 0;
 }
 
-int map(struct mm_id *mm_idp, unsigned long virt, unsigned long len, int prot,
-	int phys_fd, unsigned long long offset)
+int um_stub_mm_map(struct mm_id *mm_idp, unsigned long virt,
+		   unsigned long len, int prot, int phys_fd,
+		   unsigned long long offset)
 {
 	struct stub_syscall *sc;
 
@@ -264,7 +265,8 @@ int map(struct mm_id *mm_idp, unsigned long virt, unsigned long len, int prot,
 	return 0;
 }
 
-int unmap(struct mm_id *mm_idp, unsigned long addr, unsigned long len)
+int um_stub_mm_unmap(struct mm_id *mm_idp, unsigned long addr,
+		     unsigned long len)
 {
 	struct stub_syscall *sc;
 

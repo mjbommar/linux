@@ -289,6 +289,98 @@ config KASAN_SHADOW_OFFSET
 	  set to a large value. On low-memory systems, try 0x7fff8000, as it fits
 	  into the immediate of most instructions, improving performance.
 
+#
+# Backend selection (workstream A; matches the planned shape in
+# Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/04-kconfig.md).
+#
+# The typed backend ops table lives at arch/um/include/asm/backend.h.
+# Two questions, in order:
+#   1. Which backend implementations get compiled in?
+#   2. How does um_backend_dispatch() resolve?
+#
+# Invariants:
+#   *_ONLY  ⇒ exactly one backend compiled in (no other backends)
+#   DYNAMIC ⇒ at least two backends compiled in
+#
+# The dispatch-mode choice block enforces this via `select` so the
+# user picks intent first and the backend set follows automatically.
+#
+config UM_BACKEND_PTRACE
+	bool
+	help
+	  Selected by the dispatch mode below. Don't toggle this directly.
+	  Compiles arch/um/backend/ptrace/ — the original SKAS trap
+	  mechanism (Jeff Dike, 1990s); works on any Linux host with ptrace.
+
+config UM_BACKEND_SECCOMP
+	bool
+	depends on HAVE_ARCH_SECCOMP_FILTER
+	help
+	  Selected by the dispatch mode below. Don't toggle this directly.
+	  Compiles arch/um/backend/seccomp/ — the seccomp-trapped trap
+	  mechanism merged in 6.16 (Benjamin Berg). ~3-4× faster syscall
+	  round-trip than ptrace via SIGSYS + futex.
+
+choice
+	prompt "UML backend dispatch mode"
+	default UM_BACKEND_DYNAMIC if HAVE_ARCH_SECCOMP_FILTER
+	default UM_BACKEND_PTRACE_ONLY
+	help
+	  How um_backend_dispatch() resolves and which backends compile.
+
+	  *_ONLY modes inline the dispatch macro to a direct call to the
+	  chosen backend; zero indirect-dispatch cost, smallest binary,
+	  smallest TCB. Pick this for sandbox / embedded profiles.
+
+	  DYNAMIC compiles every available backend and chooses at boot
+	  via the `backend=` kernel command line. One well-predicted
+	  indirect call per dispatch site (~5-10 cycles). Pick this for
+	  distros and CI matrices that need a single binary to run
+	  anywhere.
+
+config UM_BACKEND_PTRACE_ONLY
+	bool "ptrace backend only (single-backend inline)"
+	select UM_BACKEND_PTRACE
+	help
+	  um_backend_dispatch() expands to direct ptrace_<op>() calls.
+	  Smallest binary, zero indirect-dispatch cost. Pick this for
+	  embedded or sandbox profiles where seccomp isn't available
+	  or isn't wanted.
+
+config UM_BACKEND_SECCOMP_ONLY
+	bool "seccomp backend only (single-backend inline)"
+	depends on HAVE_ARCH_SECCOMP_FILTER
+	select UM_BACKEND_SECCOMP
+	help
+	  um_backend_dispatch() expands to direct seccomp_<op>() calls.
+	  Smallest binary, zero indirect-dispatch cost. ~3-4× faster
+	  syscall path than ptrace via SIGSYS. Requires the host to
+	  support seccomp filter installation.
+
+config UM_BACKEND_DYNAMIC
+	bool "Dynamic backend selection (both backends compiled in)"
+	depends on HAVE_ARCH_SECCOMP_FILTER
+	select UM_BACKEND_PTRACE
+	select UM_BACKEND_SECCOMP
+	help
+	  Both backends compiled in; init_backend() picks one at boot
+	  based on host capability + the `backend=` kernel command line.
+	  Default for distros.
+
+endchoice
+
+config UM_BACKEND_CONTRACT_TEST
+	tristate "UML backend conformance tests (KUnit)"
+	depends on KUNIT
+	default n
+	help
+	  Build the per-op KUnit conformance tests under
+	  arch/um/backend/contract/. Each op in struct um_backend_ops gets
+	  one test; cross-backend equivalence and perf-regression tests
+	  land with workstream A-05.
+
+	  Say N for production builds; Y or M to validate a backend.
+
 endmenu
 
 source "arch/um/drivers/Kconfig"

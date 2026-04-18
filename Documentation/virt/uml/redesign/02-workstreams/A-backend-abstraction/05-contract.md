@@ -1,9 +1,30 @@
 # A-05: Backend conformance test suite
 
-**Status:** planned
-**Effort:** 4 weeks
-**Dependencies:** A-01, A-02 (need ptrace as ground truth)
-**Blocks:** A-03 (seccomp can't claim conformance until tests exist)
+**Status:** **first pass complete (2026-04-18)** — 20-test KUnit
+suite covering all 18 ops + sanity, runs at boot in PTRACE_ONLY /
+SECCOMP_ONLY / DYNAMIC. Cross-backend equivalence + perf-baseline
+skeletons in `Documentation/virt/uml/redesign/scripts/`. LTP
+integration + per-op functional tests for the few ops that need a
+real guest are deferred to follow-up workstreams (notably C-09
+syzkaller harness for syscall coverage and A-07 for cycle-accurate
+perf gates).
+**Effort:** 4 weeks; this slice consumed ~3 (kunit suite + 2
+skeleton scripts); the LTP/Python harness in tools/testing/selftests/
+is the remaining ~1 wk equivalent.
+**Dependencies:** A-01, A-02 (need ptrace as ground truth) — both
+landed.
+**Blocks:** A-03 (seccomp now tested), C profiles' validation gates.
+
+## Status detail
+
+| Aspect | Status |
+|---|---|
+| Per-op KUnit tests | `arch/um/backend/contract/test_ops.c`: 20 tests covering all 18 ops (wired-up checks + functional checks for read_clock_ns, set_timer DISABLE, init_thread_regs, read/write_guest_regs stubs, read_persistent_clock_ns) plus 2 sanity tests (contract_version, all_ops_populated) |
+| Single-backend assertion | each test uses ASSERT_OP_PTR_EQ helper that verifies the symbol matches the dispatch macro expansion in PTRACE_ONLY/SECCOMP_ONLY builds |
+| Suite gating | `CONFIG_UM_BACKEND_CONTRACT_TEST` (tristate, default n); enabling with `CONFIG_KUNIT=y` makes the suite auto-run at boot via `kunit_test_suite()` |
+| Cross-backend equivalence skeleton | `scripts/uml-cross-backend.sh`: builds PTRACE_ONLY + SECCOMP_ONLY, boots identical init, normalizes + diffs dmesg. Pass criterion is documented as "diff only on backend-identification line"; full LTP harness is follow-up. |
+| Perf regression skeleton | `scripts/uml-perf.sh`: 5-iter wall-time per backend (PTRACE_ONLY, SECCOMP_ONLY, DYN/{ptrace,seccomp}). Establishes baseline; A-07 wires CI gates against it. |
+| Matrix integration | `uml-boot-matrix.sh` accepts `UML_MATRIX_KUNIT=1` env to enable the contract suite during matrix runs |
 
 ## Goal
 

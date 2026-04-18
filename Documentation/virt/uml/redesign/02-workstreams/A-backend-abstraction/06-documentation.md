@@ -1,9 +1,22 @@
 # A-06: Documentation — contract + cost model
 
-**Status:** planned
-**Effort:** 2 weeks
-**Dependencies:** A-01..A-05 (must reflect the actual implementation)
+**Status:** **complete (2026-04-18)** — 3 docs landed, Sphinx
+builds clean.
+**Effort:** 2 weeks budget; consumed ~3 hours since most content
+already existed (backend-contract.rst from A-01.9, status text
+from notes/) and only needed digestion + cross-linking.
+**Dependencies:** A-01..A-05 (must reflect the actual implementation) — all landed
 **Blocks:** maintainer review for upstream submission
+
+## Status detail
+
+| Doc | Location | Audience | Status |
+|---|---|---|---|
+| `backends.rst` | `Documentation/virt/uml/backends.rst` | end users | landed; ASCII trap-path diagrams per backend; cross-links to contract spec |
+| `backend-contract.rst` | `Documentation/virt/uml/backend-contract.rst` | developers writing/extending backends | polished from A-01.9 draft; planning vocabulary stripped; `:ref:` anchor `backend-contract` for cross-doc linking |
+| `backend-cost-model.md` | `Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/backend-cost-model.md` | planning artifact tracking measured numbers | landed with current boot wall-time per backend; placeholder for A-07 microbenchmarks |
+| Sphinx index | `Documentation/virt/index.rst` | site nav | added `uml/backends` and `uml/backend-contract` to toctree |
+| Sphinx build | `make htmldocs SPHINXDIRS=virt` | – | clean (only `dot(1) not found` env warning, unrelated) |
 
 ## Goal
 

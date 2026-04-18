@@ -1,9 +1,28 @@
 # A-01: Design the ops table
 
-**Status:** planned
-**Effort:** 2 weeks
+**Status:** design draft complete (2026-04-17)
+**Owner:** claude-code session
+**Effort:** 2 weeks (design pass; LKML review cycle separate)
 **Dependencies:** none (foundation task)
 **Blocks:** every other task in workstreams A, B, C, D
+
+## Status detail
+
+| Deliverable | Location | State |
+|---|---|---|
+| Backend ops header | `arch/um/include/asm/backend.h` | landed (compiles standalone; dispatch macro tested across all 4 build variants) |
+| Contract spec | `Documentation/virt/uml/backend-contract.rst` | landed |
+| LKML design memo (draft) | `notes/10-lkml-memo.md` | drafted; pending project-owner review before sending |
+| Skas survey | `notes/00-skas-survey.md` | landed |
+| Call-site inventory | `notes/01-call-site-inventory.md` | landed (87 sites, 23 files) |
+| Op categorization | `notes/02-categories.md` | landed (18 ops, 5 hot) |
+| Per-backend sketches | `notes/04-ptrace-sketch.md`, `05-seccomp-sketch.md`, `06-kvm-sketch.md` | landed; all three fit the contract without per-backend extensions |
+| Inventory ↔ ops coverage | `notes/07-coverage.md` | landed; all sites accounted for |
+| Open-question resolutions | `notes/08-decisions.md` | landed; logged as D8 in `04-risks/decisions-log.md` |
+
+Next steps: send LKML memo (after project-owner sign-off), then begin
+A-02 (ptrace refactor, 6 wk) targeting an interface freeze in month 2
+of the workstream calendar.
 
 ## Goal
 

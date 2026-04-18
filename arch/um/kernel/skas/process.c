@@ -11,6 +11,7 @@
 
 #include <asm/tlbflush.h>
 
+#include <asm/backend.h>
 #include <as-layout.h>
 #include <kern.h>
 #include <os.h>
@@ -38,8 +39,9 @@ int __init start_uml(void)
 
 	init_task.thread.request.thread.proc = start_kernel_proc;
 	init_task.thread.request.thread.arg = NULL;
-	return start_idle_thread(task_stack_page(&init_task),
-				 &init_task.thread.switch_buf);
+	return um_backend_dispatch(thread_start_idle,
+				   task_stack_page(&init_task),
+				   &init_task.thread);
 }
 
 unsigned long current_stub_stack(void)

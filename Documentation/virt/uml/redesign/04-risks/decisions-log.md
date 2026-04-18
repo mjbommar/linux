@@ -179,4 +179,342 @@ from upstream; semantic drift is endless.
 
 ---
 
+## D8: Backend ops table — 18 ops, 5 hot, sync, contract-versioned
+
+**Date:** 2026-04-17
+**Status:** Accepted (design draft; pending LKML review)
+**Decided by:** claude-code session, working from project owner's
+brief, A-01.0 through A-01.7 analysis, and the gating rules in
+01-architecture/three-layers.md
+
+**Decision:** Workstream A-01 has produced
+`arch/um/include/asm/backend.h` and
+`Documentation/virt/uml/backend-contract.rst` with the following
+shape:
+
+- 18 ops in 5 categories (lifecycle/trap=4, memory=4, scheduling=4,
+  time=3, debug=3).
+- 5 ops marked HOT (`run_userspace`, `mm_map`, `mm_unmap`,
+  `context_switch`, `read_clock_ns`); these are inlinable in
+  single-backend builds via the `um_backend_dispatch()` macro.
+- All ops are synchronous; no completion handles.
+- Per-backend state lives in `arch/um/backend/<kind>/` module
+  globals; per-mm state in `struct mm_id`; per-thread state in
+  `task->thread`. **No `void *backend_private`** in the ops table.
+- Selection: `CONFIG_UM_BACKEND_*_ONLY` for single-backend inline
+  builds (sandbox/embedded profiles); `CONFIG_UM_BACKEND_DYNAMIC`
+  with `backend=` boot param for multi-backend builds. Default
+  arbiter probes in order kvm → seccomp → ptrace.
+- Versioning: `UM_BACKEND_CONTRACT_VERSION = 1` (u32). Op
+  additions don't bump; signature changes do.
+
+**Sub-resolutions** (resolves A-01 task questions Q1–Q4 and
+workstream A README questions Q1–Q4):
+
+- A-01.Q1 sync vs async → sync. (`notes/08-decisions.md`)
+- A-01.Q2 backend_private → no slot; mm_id + task->thread.
+- A-01.Q3 hot vs cold dispatch → 5 hot via macro inlining,
+  13 cold always indirect.
+- A-01.Q4 contract version → exposed as a u32 field; bump policy
+  defined.
+- README.Q1 selection mechanism → both Kconfig and boot param.
+- README.Q2 force= behavior → panic on probe failure.
+- README.Q3 granularity → 18 ops (architecture doc target was ~15;
+  the +3 is justified by the per-backend sketches).
+- README.Q4 add ops without bump → yes, supported by the
+  versioning policy.
+
+**Validation:**
+
+- All 87 backend-relevant call sites in `arch/um/` (inventory in
+  `02-workstreams/A-backend-abstraction/notes/01-call-site-inventory.md`)
+  map cleanly to one of: an op, shared kernel/host code, a Layer-2
+  static-key gate (workstream B), or a `using_seccomp` branch that
+  becomes per-backend impl.
+- ptrace, seccomp, and KVM sketches (`notes/04-`, `05-`, `06-`)
+  each fit the contract without a per-backend extension to the
+  core ops.
+- Header compiles standalone; dispatch macro tested correct
+  across all 4 build variants (PTRACE_ONLY, SECCOMP_ONLY,
+  KVM_ONLY, DYNAMIC).
+
+**Alternatives considered:**
+
+1. Bigger ops table (split `set_timer` into 3 separate ops).
+   **Rejected** for granularity rule (cold ops with mode tag are
+   indistinguishable in cost from N separate cold ops).
+2. Smaller ops table (fold `mm_attach`/`mm_detach` into `init`/
+   `shutdown`). **Rejected** because mm lifecycle is per-mm and
+   independent from backend lifecycle.
+3. `void *backend_private` per op. **Rejected** (see Q2 above).
+4. Separate `struct mm_id_kvm` etc with per-backend allocation.
+   **Rejected** for ≤24 byte cost vs allocator round-trip + cross-
+   backend access discipline.
+
+**Lifetime:** Indefinite. The ops set is expected to grow (new
+ops appended without contract bump) but the existing 18 ops are
+expected to be stable through workstreams A, B, C, and D.
+
+**Revisit if:**
+
+- LKML feedback on the RFC memo (`notes/10-lkml-memo.md`)
+  identifies a missing op or wrong granularity.
+- Workstream D's KVM implementation discovers a side channel that
+  forces a signature change (would bump
+  `UM_BACKEND_CONTRACT_VERSION` to 2).
+- Performance CI in A-07 shows the indirect-call cost on a HOT op
+  exceeding invariant I2 (≤5% prod-fast regression).
+
+**Cross-references:**
+
+- Header: `arch/um/include/asm/backend.h`
+- Contract: `Documentation/virt/uml/backend-contract.rst`
+- Workstream task: `02-workstreams/A-backend-abstraction/01-ops-table.md`
+- Design notes: `02-workstreams/A-backend-abstraction/notes/`
+
+---
+
+## D9: Per-backend op prototypes live in asm/backend.h
+
+**Date:** 2026-04-17
+**Status:** Accepted
+**Decided by:** claude-code session, during A-02.6
+
+**Decision:** The per-backend op prototypes (e.g.
+`u64 ptrace_read_persistent_clock_ns(void)`) are declared in
+`arch/um/include/asm/backend.h` under per-Kconfig blocks
+(`#ifdef CONFIG_UM_BACKEND_PTRACE` etc.), not in per-backend
+headers (`arch/um/backend/<kind>/<kind>_backend.h`).
+
+**Reasoning:** The `um_backend_dispatch()` macro token-pastes
+`<kind>_<op>` at the call site. For the symbol to resolve at compile
+time, its prototype must be visible wherever the macro is used —
+which is across the whole arch/um tree. Forcing every dispatch caller
+to `#include "arch/um/backend/<kind>/<kind>_backend.h"` is fragile
+(the right header depends on which `*_ONLY` config is set) and
+defeats the macro's "transparent dispatch" property.
+
+**Alternative considered:** Per-backend headers in
+`arch/um/backend/<kind>/`. Rejected: violates the "dispatch is
+transparent" property; would require call sites to know the active
+backend.
+
+**Lifetime:** Stable. The prototype list grows as ops migrate
+(workstreams A-02, A-03, D); the structural choice doesn't change.
+
+**Revisit if:** Out-of-tree backends become a goal (they aren't
+per the contract spec). In that case the prototypes would need to
+move to a generic op-table macro pattern.
+
+**Cross-reference:** `arch/um/include/asm/backend.h`
+"per-backend op declarations" section.
+
+---
+
+## D10: A-02 ships in slices, not as one 6-week megaseries
+
+**Date:** 2026-04-17
+**Status:** Accepted (operational; aligns with upstream-strategy.md)
+**Decided by:** claude-code session, A-02.0
+
+**Decision:** Workstream A-02 (ptrace refactor) is broken into
+slices that each land as a small (3–5 patch) reviewable series.
+First slice = scaffolding + one cold-op migration + conformance
+skeleton. Subsequent slices migrate one HOT op at a time
+(`run_userspace`, `mm_map`+`mm_unmap`, `context_switch`) plus a
+final cleanup pass for remaining cold ops.
+
+**Reasoning:** `05-validation/upstream-strategy.md` is explicit that
+the first deliverable is "3-5 patches." The 6-week budget is
+calendar time, not patch volume. Compressing 6 weeks of refactor
+into one megaseries would:
+
+- Violate the "no 50-patch monsters" rule.
+- Make bisection harder (each intermediate patch must build & run).
+- Miss the chance to incorporate maintainer feedback on the
+  scaffolding before doing 5 more weeks of mechanical migration.
+
+**Alternative considered:** One-shot full refactor as a single
+series. Rejected as above.
+
+**Lifetime:** Operational, applies to A-02 only. Future workstreams
+follow the same pattern (small reviewable series) but the slicing
+boundaries are workstream-specific.
+
+**Revisit if:** Maintainer feedback on the first slice indicates the
+ops table needs structural revision (then we restart from A-01.3).
+
+---
+
+## D11: Dispatch surface lives in arch/um/include/shared/backend.h; struct stays in asm/backend.h
+
+**Date:** 2026-04-17
+**Status:** Accepted
+**Decided by:** claude-code session, during A-02.HOT-1.2
+
+**Decision:** The `um_backend_dispatch()` macro, the `extern const
+struct um_backend_ops *um_backend` declaration, and the per-backend
+op prototypes live in `arch/um/include/shared/backend.h`. The full
+struct definitions (`struct um_backend_ops`, `struct um_backend_args`,
+`enum um_timer_mode`, `enum um_backend_kind`, `init_backend()` and
+the `UM_BACKEND_CONTRACT_VERSION` macro) stay in
+`arch/um/include/asm/backend.h`, which now `#include <backend.h>`.
+
+**Reasoning:** USER TUs in `arch/um/` (those built with `USER_CFLAGS`
+via `arch/um/scripts/Makefile.rules`, including legacy
+`os-Linux/skas/*` and the new `arch/um/backend/<kind>/*_user.c` files
+introduced by HOT-1) cannot include `<asm/backend.h>` because
+`asm/` is on the kernel-only include path. They CAN include shared
+headers (those under `arch/um/include/shared/`).
+
+The `um_backend_dispatch()` macro is needed at every call site that
+goes through the ops table — including USER-side trap loop code like
+`os-Linux/skas/process.c::userspace()`. Splitting the header lets
+USER TUs use the dispatch macro while keeping the kernel-only struct
+definitions out of USER TU build context (those use kernel types like
+`struct task_struct` that USER TUs don't see).
+
+**Alternative considered:** Keep everything in `asm/backend.h` and
+have USER TUs call per-backend symbols directly (bypass the dispatch
+macro). Rejected: leaks build-mode dependencies (`PTRACE_ONLY` vs
+`SECCOMP_ONLY` vs `DYNAMIC`) into every call site.
+
+**Lifetime:** Stable. Future ops added to the prototype list go into
+shared/backend.h.
+
+**Cross-reference:** `arch/um/include/shared/backend.h`,
+`arch/um/include/asm/backend.h`, A-01.3 deliverable.
+
+---
+
+## D12: init_backend() is the single source of truth for backend selection
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to external review)
+**Decided by:** External review + claude-code session
+
+**Decision:** All backend selection runs through
+`arch/um/kernel/backend.c::init_backend()`, called from
+`arch/um/kernel/um_arch.c::linux_main()` immediately after
+`os_early_checks()`. After init_backend returns:
+
+- `um_backend` points at the chosen ops table (immutable thereafter).
+- `using_seccomp` (the legacy global flag) is set to match
+  `um_backend->kind == UM_BACKEND_KIND_SECCOMP`. Both representations
+  agree from this point on.
+- `validate_hot_ops()` has panicked the kernel if any HOT op is NULL.
+
+`os_early_checks()` is now Kconfig-aware: it only runs the seccomp
+probe if `CONFIG_UM_BACKEND_SECCOMP=y` (and `seccomp=on`), and only
+runs the ptrace probe if `CONFIG_UM_BACKEND_PTRACE=y`. The trap-loop
+router in `arch/um/os-Linux/skas/process.c::userspace()` is a single
+`um_backend_dispatch(run_userspace, regs)` call — no `using_seccomp`
+branching.
+
+**Reasoning:** Pre-D12 there were three independent authorities:
+
+1. `init_backend()` (Kconfig only).
+2. `os_early_checks()` setting `using_seccomp` from boot probe.
+3. `userspace()` routing on `using_seccomp`.
+
+These could disagree — e.g. DYNAMIC builds compiled in seccomp_ops
+but `using_seccomp=0` (default) → dispatch went to seccomp_run_userspace
+through um_backend, but mm_attach (sharing the global) ran the
+ptrace setup. External review flagged this as a "high" finding.
+
+**Alternative considered:** Keep `using_seccomp` as the source of
+truth, derive `um_backend` from it. Rejected because the dispatch
+macro needs a compile-time decision in `*_ONLY` builds — it can't
+read a runtime flag.
+
+**Lifetime:** Stable. The selection logic gets refined by A-04
+(boot-param parsing, `force=` panic) but the single-source-of-truth
+shape remains.
+
+**Cross-reference:** REVIEW.2 in this session's task list;
+`arch/um/kernel/backend.c::init_backend()`,
+`arch/um/os-Linux/start_up.c::os_early_checks()`,
+`arch/um/kernel/um_arch.c::linux_main()`,
+`arch/um/os-Linux/skas/process.c::userspace()`.
+
+---
+
+## D13: Kconfig invariant — _ONLY = exactly one backend; DYNAMIC = both
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to external review)
+
+**Decision:** The dispatch-mode choice block uses `select` to
+auto-include the right set of backend implementations:
+
+- `CONFIG_UM_BACKEND_PTRACE_ONLY` selects `UM_BACKEND_PTRACE` only.
+- `CONFIG_UM_BACKEND_SECCOMP_ONLY` selects `UM_BACKEND_SECCOMP` only.
+- `CONFIG_UM_BACKEND_DYNAMIC` selects both.
+
+The previous Kconfig allowed mixed builds (PTRACE+SECCOMP both
+compiled in, *_ONLY chosen for dispatch) which permitted the
+split-brain bug behind D12 and wasted binary size. Per the planned
+shape in `02-workstreams/A-backend-abstraction/04-kconfig.md`.
+
+**Lifetime:** Stable through workstream A; KVM_ONLY/KVM-included-in-
+DYNAMIC slots open for workstream D.
+
+---
+
+## D14: All ops must be non-NULL — no NULL/-ENOSYS fallback
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to external review)
+
+**Decision:** The contract spec previously promised that cold ops
+could be NULL with -ENOSYS fallback. The dispatch macro can't
+deliver this (it's a plain function-pointer call; can't return
+-ENOSYS for void or u64 ops). All in-tree backends must populate
+every op. Stubs that aren't yet meaningful return -EOPNOTSUPP (for
+ops returning int) — see `ptrace_read_guest_regs` and
+`seccomp_read_guest_regs`.
+
+`init_backend()`'s `validate_hot_ops()` enforces this for the 5
+HOT ops at boot; cold ops are convention-enforced.
+
+**Lifetime:** Stable.
+
+**Cross-reference:** `Documentation/virt/uml/backend-contract.rst`
+"Conventions" + "Versioning policy" sections, REVIEW.3 in this
+session's task list.
+
+---
+
+## D15: backend=seccomp triggers the seccomp probe; backend=auto stays legacy-compatible
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to second external review pass)
+
+**Decision:** `os_early_checks()` runs the seccomp probe whenever
+the new `backend=` boot param requested seccomp (either named or
+forced), in addition to the legacy `seccomp=on/auto` trigger. This
+makes `backend=seccomp` self-sufficient — users no longer need to
+also pass `seccomp=on` for the new param to actually take effect.
+
+`backend=auto` (the default) keeps the historical behavior:
+seccomp probe runs only if `seccomp=` opted in. A future release
+may change `auto` to unconditionally probe seccomp first (gVisor
+pattern), but that's a UX change and is deferred.
+
+**Reasoning:** External review caught that `backend=seccomp`
+silently degraded to ptrace because the probe never ran. The probe
+is the prerequisite for `using_seccomp = 1`, which the dynamic
+arbiter reads to pick the backend.
+
+**Alternatives considered:** Make `auto` unconditionally probe
+seccomp. Rejected for now — it's a behavior change for default
+users.
+
+**Cross-reference:** `arch/um/os-Linux/start_up.c::os_early_checks`,
+`Documentation/virt/uml/backend-contract.rst` (selection mechanism
+section), `Documentation/virt/uml/redesign/scripts/uml-boot-matrix.sh`
+(updated DYNAMIC rows).
+
+---
+
 ## (Future entries here, as decisions are made)

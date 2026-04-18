@@ -30,6 +30,7 @@
 #include <asm/switch_to.h>
 #include <asm/exec.h>
 #include <linux/uaccess.h>
+#include <asm/backend.h>
 #include <as-layout.h>
 #include <kern_util.h>
 #include <os.h>
@@ -75,7 +76,7 @@ struct task_struct *__switch_to(struct task_struct *from, struct task_struct *to
 	to->thread.prev_sched = from;
 	set_current(to);
 
-	switch_threads(&from->thread.switch_buf, &to->thread.switch_buf);
+	um_backend_dispatch(context_switch, from, to);
 	arch_switch_to(current);
 
 	return current->thread.prev_sched;
@@ -164,13 +165,14 @@ int copy_thread(struct task_struct * p, const struct kernel_clone_args *args)
 
 		arch_copy_thread(&current->thread.arch, &p->thread.arch);
 	} else {
-		get_safe_registers(p->thread.regs.regs.gp, p->thread.regs.regs.fp);
+		um_backend_dispatch(init_thread_regs, p->thread.regs.regs.gp,
+				    p->thread.regs.regs.fp);
 		p->thread.request.thread.proc = args->fn;
 		p->thread.request.thread.arg = args->fn_arg;
 		handler = new_thread_handler;
 	}
 
-	new_thread(task_stack_page(p), &p->thread.switch_buf, handler);
+	um_backend_dispatch(thread_create, p, task_stack_page(p), handler);
 
 	if (!args->fn) {
 		clear_flushed_tls(p);

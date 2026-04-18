@@ -21,6 +21,7 @@
 #include <linux/random.h>
 #include <linux/smp-internal.h>
 
+#include <asm/backend.h>
 #include <asm/processor.h>
 #include <asm/cpufeature.h>
 #include <asm/sections.h>
@@ -345,6 +346,21 @@ int __init linux_main(int argc, char **argv, char **envp)
 	/* OS sanity checks that need to happen before the kernel runs */
 	os_early_checks();
 
+	/*
+	 * Pick a backend RIGHT NOW — before start_uml() calls
+	 * thread_start_idle() (which dispatches through um_backend) and
+	 * before timekeeping_init() calls read_persistent_clock64()
+	 * (likewise). os_early_checks() above set `using_seccomp` based
+	 * on the host probe; init_backend() consumes that. A-04 will
+	 * populate backend_args from the kernel command line; for now
+	 * the arbiter ignores them.
+	 */
+	{
+		struct um_backend_args backend_args = { 0 };
+
+		init_backend(&backend_args);
+	}
+
 	get_host_cpu_features(parse_host_cpu_flags, parse_cache_line);
 
 	brk_start = (unsigned long) sbrk(0);
@@ -407,6 +423,13 @@ int __init __weak read_initrd(void)
 void __init setup_arch(char **cmdline_p)
 {
 	u8 rng_seed[32];
+
+	/*
+	 * init_backend() runs from linux_main() above (right after
+	 * os_early_checks), not here — that's required so that
+	 * start_uml()'s thread_start_idle() dispatch has um_backend
+	 * already set. setup_arch must NOT re-run init_backend.
+	 */
 
 	stack_protections((unsigned long) init_task.stack);
 	setup_physmem(uml_physmem, uml_reserved, physmem_size);

@@ -1,9 +1,43 @@
 # A-07: Performance regression CI
 
-**Status:** planned
-**Effort:** 2 weeks
-**Dependencies:** A-05 (perf benchmarks exist)
-**Blocks:** invariant I2 enforcement going forward
+**Status:** **complete (2026-04-18)** — perf-event-counter
+benchmarks (cycles, instructions, task-clock; median + IQR over
+N runs) + capture + compare scripts + GitHub Actions template +
+checked-in baseline.
+**Effort:** 2 weeks budget; consumed ~1 hour since the skeleton
+from A-05.S3 was already in place.
+**Dependencies:** A-05 (perf benchmarks exist) — landed
+**Blocks:** invariant I2 enforcement going forward — now wired
+
+## Status detail
+
+| Aspect | Status |
+|---|---|
+| Microbench harness | `scripts/uml-perf.sh` upgraded from wall-clock to `perf stat -e cycles,instructions,task-clock`; reports p25/p50/p75 over N=10 iters per backend |
+| Baseline capture | `scripts/uml-perf-capture.sh` writes `perf-baseline.json` with backend numbers + host context (CPU/glibc/gcc/kernel/git-head) |
+| Regression checker | `scripts/uml-perf-compare.sh` runs current measurements + diffs vs baseline; bot policy: <2% silent, 2-5% WARN (reviewer ack), >5% FAIL |
+| CI workflow template | `uml-perf.yml.template` (ready to drop into `.github/workflows/` on a fork; mainline UML doesn't host CI yet) |
+| Initial baseline | `perf-baseline.json` committed; PTRACE_ONLY/SECCOMP_ONLY/DYN_ptrace/DYN_seccomp captured |
+
+## Known noise on this host
+
+The 10-iter baseline shows wide IQR on PTRACE_ONLY and SECCOMP_ONLY
+(p25-to-p75 spans up to 80% of the median). A re-run hit +83%
+"regression" on SECCOMP_ONLY purely from variance — the compare
+tool correctly fired its FAIL policy, but the underlying perf is
+unchanged.
+
+Mitigations for production CI (per A-07 Q1):
+
+- Bump iterations: `UML_PERF_ITERS=30` halves the noise floor.
+- Use a dedicated runner with consistent thermals + no other
+  workloads.
+- Consider replacing point-median compare with IQR-overlap (current:
+  fail if `current_p50 > baseline_p50 * 1.05`; better: fail if
+  `current_p25 > baseline_p75 * 1.05`).
+
+The current scripts ship the simple policy because it's the
+A-07-spec'd one; tuning happens after some real CI miles.
 
 ## Goal
 

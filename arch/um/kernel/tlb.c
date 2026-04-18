@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/sched/signal.h>
 
+#include <asm/backend.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
 #include <as-layout.h>
@@ -175,8 +176,14 @@ int um_tlb_sync(struct mm_struct *mm)
 		ops.mmap = kern_map;
 		ops.unmap = kern_unmap;
 	} else {
-		ops.mmap = map;
-		ops.unmap = unmap;
+		/*
+		 * User-mm sync goes through the active backend. The
+		 * function-pointer load is one-shot per um_tlb_sync()
+		 * call; the inner update_*_range() helpers continue to
+		 * indirect through ops.{mmap,unmap} as before.
+		 */
+		ops.mmap = um_backend->mm_map;
+		ops.unmap = um_backend->mm_unmap;
 	}
 
 	addr = mm->context.sync_tlb_range_from;

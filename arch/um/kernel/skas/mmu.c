@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 
 #include <shared/irq_kern.h>
+#include <asm/backend.h>
 #include <asm/pgalloc.h>
 #include <asm/sections.h>
 #include <asm/mmu_context.h>
@@ -56,18 +57,26 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	new_id->stack = stack;
 	new_id->syscall_data_len = 0;
 	new_id->syscall_fd_num = 0;
+	/*
+	 * sock is set to a real fd by the seccomp backend's mm_attach;
+	 * initialize to -1 so destroy_context()'s teardown can use a
+	 * valid-fd check (>= 0) rather than truthiness, which would
+	 * mistreat fd 0 as closed.
+	 */
+	new_id->sock = -1;
+	new_id->pid = -1;
 
 	scoped_guard(spinlock_irqsave, &mm_list_lock) {
 		/* Insert into list, used for lookups when the child dies */
 		list_add(&mm->context.list, &mm_list);
 	}
 
-	ret = start_userspace(new_id);
+	ret = um_backend_dispatch(mm_attach, new_id);
 	if (ret < 0)
 		goto out_free;
 
 	/* Ensure the new MM is clean and nothing unwanted is mapped */
-	unmap(new_id, 0, STUB_START);
+	um_backend_dispatch(mm_unmap, new_id, 0, STUB_START);
 
 	return 0;
 
@@ -98,13 +107,12 @@ void destroy_context(struct mm_struct *mm)
 	scoped_guard(spinlock_irqsave, &mm_list_lock)
 		list_del(&mm->context.list);
 
-	if (mmu->id.pid > 0) {
-		os_kill_ptraced_process(mmu->id.pid, 1);
-		mmu->id.pid = -1;
-	}
-
-	if (using_seccomp && mmu->id.sock)
-		os_close_file(mmu->id.sock);
+	/*
+	 * mm_detach owns per-mm teardown of backend-private state (stub
+	 * child, per-mm socketpair). Don't repeat the seccomp socket
+	 * close here — see seccomp_mm_detach().
+	 */
+	um_backend_dispatch(mm_detach, &mmu->id);
 
 	free_pages(mmu->id.stack, ilog2(STUB_DATA_PAGES));
 }

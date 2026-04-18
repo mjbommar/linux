@@ -20,6 +20,7 @@
 #include <sys/resource.h>
 #include <asm/ldt.h>
 #include <asm/unistd.h>
+#include <backend.h>
 #include <init.h>
 #include <os.h>
 #include <smp.h>
@@ -421,6 +422,60 @@ void  __init get_host_cpu_features(
 	}
 }
 
+/*
+ * `backend=` boot param (workstream A-04). Parsed early in linux_main
+ * via __uml_setup; consumed by init_backend() in arch/um/kernel/backend.c.
+ *
+ *   backend=auto                  — Kconfig default + using_seccomp probe
+ *   backend=ptrace                — prefer ptrace; fall through if N/A
+ *   backend=seccomp               — prefer seccomp; fall through if N/A
+ *   backend=force=ptrace          — require ptrace; panic if N/A
+ *   backend=force=seccomp         — require seccomp; panic if N/A
+ *
+ * The legacy `seccomp=on/auto/off` boot param is preserved for one
+ * release as an alias; `backend=` takes precedence when both are set.
+ */
+int backend_arg_requested __initdata;	/* enum um_backend_kind */
+int backend_arg_force __initdata;
+
+static int __init uml_backend_config(char *line, int *add)
+{
+	*add = 0;
+
+	if (strcmp(line, "auto") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_NONE;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "ptrace") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_PTRACE;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "seccomp") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "force=ptrace") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_PTRACE;
+		backend_arg_force = 1;
+	} else if (strcmp(line, "force=seccomp") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
+		backend_arg_force = 1;
+	} else {
+		fatal("Invalid backend option '%s', expected one of: auto, ptrace, seccomp, force=ptrace, force=seccomp\n",
+		      line);
+	}
+	return 0;
+}
+
+__uml_setup("backend=", uml_backend_config,
+"backend=<auto|ptrace|seccomp|force=ptrace|force=seccomp>\n"
+"    Pick the trap mechanism. `auto' (default) uses Kconfig +\n"
+"    runtime probe. Bare names `ptrace'/`seccomp' are preferences\n"
+"    that fall through to whichever backend is actually available.\n"
+"    `force=' makes the choice mandatory and panics if the requested\n"
+"    backend isn't compiled in or fails its probe.\n"
+"\n"
+"    Replaces the legacy `seccomp=on/auto/off' param (still accepted\n"
+"    for one release).\n\n"
+);
+
 static int seccomp_config __initdata;
 
 static int __init uml_seccomp_config(char *line, int *add)
@@ -472,7 +527,29 @@ void __init os_early_checks(void)
 	 */
 	check_tmpexec();
 
-	if (seccomp_config) {
+	/*
+	 * Run only the probe(s) for backend(s) that are actually
+	 * compiled in. Run the seccomp probe if EITHER:
+	 *
+	 *   - the legacy `seccomp=on/auto` boot param requested it
+	 *     (seccomp_config != 0); or
+	 *   - the new `backend=seccomp` (or force=seccomp) param
+	 *     requested it.
+	 *
+	 * Without this OR clause, `backend=seccomp` would silently
+	 * degrade to ptrace because the probe wouldn't run and
+	 * using_seccomp would stay 0 — the gap the external review
+	 * caught. SECCOMP_ONLY builds always need the probe run too,
+	 * since init_backend forces using_seccomp=1 there.
+	 *
+	 * init_backend() (called from linux_main() right after this
+	 * function) consumes the using_seccomp result + boot params
+	 * and selects the backend authoritatively.
+	 */
+	if (IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
+	    (seccomp_config ||
+	     backend_arg_requested == UM_BACKEND_KIND_SECCOMP ||
+	     IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP_ONLY))) {
 		if (init_seccomp()) {
 			using_seccomp = 1;
 			return;
@@ -480,7 +557,15 @@ void __init os_early_checks(void)
 
 		if (seccomp_config == 2)
 			fatal("SECCOMP userspace requested but not functional!\n");
+		/*
+		 * `backend=force=seccomp` will be panicked by init_backend
+		 * once it sees using_seccomp == 0; we don't fatal here so
+		 * the non-force `backend=seccomp` can fall through to ptrace.
+		 */
 	}
+
+	if (!IS_ENABLED(CONFIG_UM_BACKEND_PTRACE))
+		fatal("seccomp probe failed and ptrace backend is not compiled in\n");
 
 	if (uml_ncpus > 1)
 		fatal("SMP is not supported with PTRACE userspace.\n");

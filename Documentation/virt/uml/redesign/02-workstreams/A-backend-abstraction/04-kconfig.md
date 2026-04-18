@@ -1,9 +1,27 @@
 # A-04: Kconfig — single vs multi-backend builds
 
-**Status:** planned
-**Effort:** 2 weeks
+**Status:** **complete (2026-04-18)** — Kconfig invariants enforced
+(D13), boot-param parser (`backend=auto|ptrace|seccomp|force=…`)
+landed, init_backend() honors them with `force=` panic semantics,
+build matrix exercises 12 boot variants (3 dispatch modes × 4
+boot-param combinations).
+**Effort:** 2 weeks (most of the work folded into REVIEW.* fixes
+and HOT-1.3; this slice only added the boot-param parser)
 **Dependencies:** A-02, A-03 (need impls to select between)
 **Blocks:** C-01 (defconfig design)
+
+## Status detail
+
+| Aspect | Status |
+|---|---|
+| Kconfig choice block | landed (D13); _ONLY=exactly one backend, DYNAMIC=both |
+| Single-source-of-truth selection | landed (D12); init_backend in linux_main, validates HOT ops, sets using_seccomp |
+| `backend=` boot param parser | landed in `arch/um/os-Linux/start_up.c::uml_backend_config` via `__uml_setup` |
+| `force=` panic semantics | landed in `arch/um/kernel/backend.c::pick_dynamic_backend` + `*_ONLY` mismatch check |
+| Boot matrix coverage | 12 rows: 3 dispatch modes × {default, named, force=, force=opposite} |
+| Boot-param documentation | `Documentation/virt/uml/backend-contract.rst` selection section |
+| `seccomp=on/auto/off` legacy | preserved one release; aliases documented; consumed by init_seccomp probe which feeds into `using_seccomp` (read by init_backend in `auto` mode) |
+| objdump verification of *_ONLY direct calls | done in HOT-1.3 (read_persistent_clock_ns), HOT-1.4 (run_userspace via register-hoist) |
 
 ## Goal
 

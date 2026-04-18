@@ -1,6 +1,6 @@
 # Validation
 
-How we know the architecture works. Four documents:
+How we know the architecture works. Five documents:
 
 - [benchmarks.md](benchmarks.md) — what we measure
 - [conformance-tests.md](conformance-tests.md) — LTP, kselftest,
@@ -9,6 +9,10 @@ How we know the architecture works. Four documents:
   kernel-version
 - [upstream-strategy.md](upstream-strategy.md) — how patches land
   in mainline without a 7-year RFC chain
+- [kernel-dev-checklist.md](kernel-dev-checklist.md) — distilled from
+  the kernel's own `Documentation/process/` docs; gates at 7 scales
+  (project / workstream / series / patch / file / AI-disclosure /
+  KVM-subsystem) plus our project-specific architecture-shape gates
 
 ## What "validated" means per profile
 
