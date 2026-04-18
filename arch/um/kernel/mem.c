@@ -10,6 +10,7 @@
 #include <linux/swap.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <asm/patchable.h>
 #include <asm/sections.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -136,4 +137,6 @@ void mark_rodata_ro(void)
 	unsigned long rodata_end = PFN_ALIGN(__end_rodata);
 
 	os_protect_memory((void *)rodata_start, rodata_end - rodata_start, 1, 0, 0);
+
+	um_section_split_finalize();
 }

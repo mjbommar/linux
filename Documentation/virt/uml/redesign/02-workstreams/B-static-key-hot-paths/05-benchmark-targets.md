@@ -1,6 +1,6 @@
 # B-05: Benchmark gate cost — off and on
 
-**Status:** planned
+**Status:** complete (2026-04-18) — kernel-side bench in arch/um/kernel/hooks_bench.c, host scripts in redesign/scripts/uml-gate-bench{,-compare}.sh, baseline checked in; I3 met (0.45–0.68 ns/gate off)
 **Effort:** 3 weeks
 **Dependencies:** B-02 (gates), A-07 (perf CI infra)
 **Blocks:** invariant I3 (off-state cost <2 ns) enforcement

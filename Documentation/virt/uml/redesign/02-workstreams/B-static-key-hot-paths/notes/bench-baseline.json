@@ -1,0 +1,31 @@
+{
+  "format": "b05-v1",
+  "date": "2026-04-18",
+  "machine": "ubuntu 26.04, 4-cpu, gcc 15.2",
+  "kernel_config": "DYNAMIC + DEBUG_FS",
+  "backend_default": "ptrace",
+  "jump_label": "c-fallback (HAVE_ARCH_JUMP_LABEL=n; see D19)",
+  "methodology": {
+    "iters_per_batch": 100000,
+    "batches": 10,
+    "metric": "median ns per call, scaled by 1000",
+    "clock": "ktime_get_ns",
+    "measurement_site": "kernel-side tight loop (arch/um/kernel/hooks_bench.c)"
+  },
+  "results_ns_per_call_x1000": {
+    "syscall_entry":   { "off": 2734, "on": 6118, "gates_checked": 4 },
+    "syscall_exit":    { "off":  911, "on": 3343, "gates_checked": 2 },
+    "context_switch":  { "off": 1520, "on": 4285, "gates_checked": 3 },
+    "clock_read":      { "off": 1925, "on": 4587, "gates_checked": 3 }
+  },
+  "derived_per_gate_ns_x1000": {
+    "syscall_entry_off_per_gate":   684,
+    "syscall_exit_off_per_gate":    456,
+    "context_switch_off_per_gate":  507,
+    "clock_read_off_per_gate":      642
+  },
+  "invariant_i3_ceiling_ns": 2.0,
+  "invariant_i3_status": "met — worst per-gate off-state cost (0.68 ns) is below the 2 ns ceiling",
+  "ci_regression_ceiling_pct": 10,
+  "revisit_when": "HAVE_ARCH_JUMP_LABEL lands (see D19); numbers should drop to ~0.3 ns/gate"
+}

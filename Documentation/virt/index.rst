@@ -11,6 +11,8 @@ Virtualization Support
    uml/user_mode_linux_howto_v2
    uml/backends
    uml/backend-contract
+   uml/debugfs
+   uml/section-split
    paravirt_ops
    guest-halt-polling
    ne_overview

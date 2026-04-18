@@ -1,6 +1,6 @@
 # B-03: debugfs controls
 
-**Status:** planned
+**Status:** complete (2026-04-18) — /sys/kernel/debug/um/{backend,hooks/*,stats} live; end-to-end flip verified with 4421 trace_syscalls hits on a small workload
 **Effort:** 2 weeks
 **Dependencies:** B-02 (gates exist)
 **Blocks:** B-06 (end-to-end demo needs runtime control)

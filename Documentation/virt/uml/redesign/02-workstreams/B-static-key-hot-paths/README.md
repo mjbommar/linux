@@ -32,12 +32,12 @@ ship one binary and let users flip observability on at runtime.
 
 | # | Task | Effort | Status |
 |---|---|---|---|
-| 01 | [Audit hot-path entry points](01-audit-entry-points.md) | 2 wk | planned |
-| 02 | [Gate design and hook-helper macros](02-gate-design.md) | 3 wk | planned |
-| 03 | [debugfs controls](03-debugfs-controls.md) | 2 wk | planned |
-| 04 | [.text section split (RWX vs frozen)](04-section-split.md) | 4 wk | planned |
-| 05 | [Benchmark gate cost: off and on](05-benchmark-targets.md) | 3 wk | planned |
-| 06 | [First end-to-end: KCOV gate flippable mid-run](06-first-flip-demo.md) | 2 wk | planned |
+| 01 | [Audit hot-path entry points](01-audit-entry-points.md) | 2 wk | **complete (2026-04-18); 6 sites × 7 gates; see notes/hot-paths.md** |
+| 02 | [Gate design and hook-helper macros](02-gate-design.md) | 3 wk | **complete (2026-04-18); 7 gates × 6 hook sites; C-fallback pending B-04 (D19)** |
+| 03 | [debugfs controls](03-debugfs-controls.md) | 2 wk | **complete (2026-04-18); /sys/kernel/debug/um/{backend,hooks/*,stats}; end-to-end flip verified** |
+| 04 | [.text section split (RWX vs frozen)](04-section-split.md) | 4 wk | **complete (2026-04-18); .um_patch_text + mprotect helpers; verified in 3 configs** |
+| 05 | [Benchmark gate cost: off and on](05-benchmark-targets.md) | 3 wk | **complete (2026-04-18); I3 met (0.45–0.68 ns/gate off); baseline + compare script landed** |
+| 06 | [First end-to-end: KCOV gate flippable mid-run](06-first-flip-demo.md) | 2 wk | **complete (2026-04-18); trace_syscalls flip demo PASSes under kselftest harness (KCOV deferred to C)** |
 
 Total: ~16 weeks ≈ 4 EM.
 

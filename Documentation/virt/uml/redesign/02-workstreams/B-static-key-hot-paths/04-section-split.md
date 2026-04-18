@@ -1,6 +1,6 @@
 # B-04: .text section split (RWX vs frozen)
 
-**Status:** planned
+**Status:** complete (2026-04-18) — sections + mprotect helpers landed; .um_patch_text empty today; jump-label port unblocked (see D19)
 **Effort:** 4 weeks
 **Dependencies:** A-01 (ops table), B-02 (gates exist)
 **Blocks:** D KVM backend (depends on RO `.text.frozen`)

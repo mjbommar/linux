@@ -1,6 +1,6 @@
 # B-01: Audit hot-path entry points
 
-**Status:** planned
+**Status:** complete (2026-04-18) — see `notes/hot-paths.md`
 **Effort:** 2 weeks
 **Dependencies:** A-01 (ops table) merged
 **Blocks:** B-02 (can't insert gates without knowing where)

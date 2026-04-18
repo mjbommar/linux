@@ -31,6 +31,7 @@
 #include <asm/exec.h>
 #include <linux/uaccess.h>
 #include <asm/backend.h>
+#include <asm/um-hooks.h>
 #include <as-layout.h>
 #include <kern_util.h>
 #include <os.h>
@@ -76,6 +77,7 @@ struct task_struct *__switch_to(struct task_struct *from, struct task_struct *to
 	to->thread.prev_sched = from;
 	set_current(to);
 
+	um_on_context_switch(from, to);
 	um_backend_dispatch(context_switch, from, to);
 	arch_switch_to(current);
 

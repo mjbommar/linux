@@ -33,6 +33,7 @@ SECTIONS
   .text      :
   {
     _stext = .;
+    __start_text_frozen = .;
     TEXT_TEXT
     SCHED_TEXT
     LOCK_TEXT
@@ -42,6 +43,26 @@ SECTIONS
     /* .gnu.warning sections are handled specially by elf32.em.  */
     *(.gnu.warning)
     *(.gnu.linkonce.t*)
+    __end_text_frozen = .;
+  }
+
+  /*
+   * .um_patch_text holds UML runtime-patchable code: static_branch
+   * call sites, future ftrace mcount stubs, kprobe insertion points.
+   * Named with a leading `.um` so the generic `.text.*` wildcard does
+   * not claim it. Given its own page range so mprotect-writable windows
+   * during patching don't expose the bulk of .text. Functions land here
+   * via the __patchable_function attribute
+   * (arch/um/include/asm/patchable.h). See
+   * Documentation/virt/uml/section-split.rst (workstream B-04).
+   */
+  . = ALIGN(PAGE_SIZE);
+  .um_patch_text : {
+    __start_um_patch_text = .;
+    *(.um_patch_text)
+    *(.um_patch_text.*)
+    __end_um_patch_text = .;
+    . = ALIGN(PAGE_SIZE);
   }
 
   . = ALIGN(PAGE_SIZE);

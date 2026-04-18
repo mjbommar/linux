@@ -1,6 +1,6 @@
 # B-02: Gate design and hook-helper macros
 
-**Status:** planned
+**Status:** complete (2026-04-18) — see notes/jump-label-status.md for the C-fallback caveat (D19)
 **Effort:** 3 weeks
 **Dependencies:** B-01 (know where gates go)
 **Blocks:** B-03 (debugfs controls them), B-05 (benchmarks need

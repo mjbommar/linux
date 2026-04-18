@@ -72,6 +72,7 @@ SECTIONS
   .plt            : { *(.plt) }
   .text           : {
     _stext = .;
+    __start_text_frozen = .;
     TEXT_TEXT
     SCHED_TEXT
     LOCK_TEXT
@@ -81,9 +82,28 @@ SECTIONS
     *(.stub .text.* .gnu.linkonce.t.*)
     /* .gnu.warning sections are handled specially by elf32.em.  */
     *(.gnu.warning)
+    __end_text_frozen = .;
 
     . = ALIGN(PAGE_SIZE);
   } =0x90909090
+
+  /*
+   * .um_patch_text — UML runtime-patchable code (static_branch call
+   * sites, future ftrace mcount stubs, kprobe insertion points).
+   * Deliberately named with a leading `.um` so it does not match the
+   * generic `.text.*` wildcard above. Kept in its own page-aligned
+   * range so B-04's mprotect helpers can make *only* this region
+   * writable during a poke. See Documentation/virt/uml/section-split.rst.
+   */
+  . = ALIGN(PAGE_SIZE);
+  .um_patch_text : {
+    __start_um_patch_text = .;
+    *(.um_patch_text)
+    *(.um_patch_text.*)
+    __end_um_patch_text = .;
+    . = ALIGN(PAGE_SIZE);
+  }
+
   . = ALIGN(PAGE_SIZE);
   .syscall_stub : {
 	__syscall_stub_start = .;

@@ -572,4 +572,59 @@ commit window").
 
 ---
 
+## D19: Layer 2 gates ship on C fallback until B-04 unlocks JIT patching
+
+**Date:** 2026-04-18
+**Status:** Accepted
+
+**Decision:** Workstream B-02 lands the seven static-key gates and
+six hook sites using the kernel's generic `static_branch_unlikely`
+machinery. Because `arch/um/Kconfig` does not yet
+`select HAVE_ARCH_JUMP_LABEL`, off-state gates compile to the
+C-fallback form (load + test + predicted-not-taken branch) rather
+than the 5-byte JIT NOP. Off-state cost is ~1–2 ns per gate
+today, not the ~0.3 ns the three-layers.md model assigns to the
+JIT form.
+
+Full JIT patching is gated on **B-04** (`.text` section split), which
+provides the writable `.text.patchable` region required for
+`text_poke`-style runtime transformation. Once B-04 lands,
+`arch/um/kernel/jump_label.c` is a thin wrapper over B-04's
+mprotect helpers and `select HAVE_ARCH_JUMP_LABEL` becomes
+trivial to enable.
+
+**Reasoning:** UML's `.text` is mapped RO by the host loader, so
+in-place instruction rewriting requires an explicit writable window.
+Building that window without the section split risks making the
+*entire* kernel `.text` RW for the duration of a patch — a security
+regression relative to today's host-enforced RO text.
+
+Until B-04 lands, invariant I3 ("gates JITted to NOPs") is met **in
+spirit** (~1 ns per gate, well under the 2 ns ceiling) but not **in
+letter**. Progressing B-02 on C fallback unblocks B-03/B-05/B-06
+and workstream C's consumers; holding B-02 for B-04 would serialize
+the workstream unnecessarily.
+
+**Alternatives considered:**
+
+1. Implement `text_poke` without section split — rejected; makes
+   all of `.text` writable.
+2. Port x86's jump-label machinery wholesale — rejected; `text_poke_bp`
+   depends on fixmap + INT3 trampoline that UML (userspace-hosted)
+   doesn't share.
+3. Hold B-02 until B-04 lands — rejected; serializes B workstream
+   for no capability gain. Gates work today; the cost delta is
+   within the architecture's I3 budget.
+
+**Revisit:** When B-04 lands. At that point add `HAVE_ARCH_JUMP_LABEL`,
+implement `arch/um/kernel/jump_label.c`, verify objdump shows NOPs,
+re-measure in B-05, and mark D19 as superseded.
+
+**Cross-reference:**
+`02-workstreams/B-static-key-hot-paths/notes/jump-label-status.md`,
+`02-workstreams/B-static-key-hot-paths/04-section-split.md` (the
+unblocking workstream), `01-architecture/invariants.md §I3`.
+
+---
+
 ## (Future entries here, as decisions are made)

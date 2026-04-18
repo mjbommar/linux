@@ -18,6 +18,7 @@
 #include <asm/backend.h>
 #include <asm/irq.h>
 #include <asm/param.h>
+#include <asm/um-hooks.h>
 #include <kern_util.h>
 #include <os.h>
 #include <linux/delay.h>
@@ -909,7 +910,12 @@ static u64 timer_read(struct clocksource *cs)
 		return time_travel_time / TIMER_MULTIPLIER;
 	}
 
-	return um_backend_dispatch(read_clock_ns) / TIMER_MULTIPLIER;
+	{
+		u64 ns = um_backend_dispatch(read_clock_ns);
+
+		um_on_clock_read(ns);
+		return ns / TIMER_MULTIPLIER;
+	}
 }
 
 static struct clocksource timer_clocksource = {

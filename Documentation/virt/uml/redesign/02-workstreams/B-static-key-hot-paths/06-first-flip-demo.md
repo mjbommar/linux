@@ -1,6 +1,6 @@
 # B-06: First end-to-end demo — KCOV flippable mid-run
 
-**Status:** planned
+**Status:** complete (2026-04-18) — selftest at tools/testing/selftests/um/hooks-flip/ PASSes (baseline=0, on_delta=18340, settle_delta=0)
 **Effort:** 2 weeks
 **Dependencies:** B-02..B-05 (all gates and infra in place)
 **Blocks:** workstream B "done" milestone; informs C-08

@@ -11,6 +11,7 @@
 #include <sysdep/ptrace_user.h>
 #include <linux/time-internal.h>
 #include <asm/syscall.h>
+#include <asm/um-hooks.h>
 #include <asm/unistd.h>
 #include <asm/delay.h>
 
@@ -22,6 +23,8 @@ void handle_syscall(struct uml_pt_regs *r)
 	/* Initialize the syscall number and default return value. */
 	UPT_SYSCALL_NR(r) = PT_SYSCALL_NR(r->gp);
 	PT_REGS_SET_SYSCALL_RETURN(regs, -ENOSYS);
+
+	um_on_syscall_entry(regs);
 
 	if (syscall_trace_enter(regs))
 		goto out;
@@ -70,5 +73,6 @@ void handle_syscall(struct uml_pt_regs *r)
 	}
 
 out:
+	um_on_syscall_exit(regs);
 	syscall_trace_leave(regs);
 }

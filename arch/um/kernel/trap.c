@@ -11,6 +11,7 @@
 #include <linux/sched/debug.h>
 #include <asm/current.h>
 #include <asm/tlbflush.h>
+#include <asm/um-hooks.h>
 #include <arch.h>
 #include <as-layout.h>
 #include <kern_util.h>
@@ -312,6 +313,8 @@ unsigned long segv(struct faultinfo fi, unsigned long ip, int is_user,
 	int err;
 	int is_write = FAULT_WRITE(fi);
 	unsigned long address = FAULT_ADDRESS(fi);
+
+	um_on_page_fault(&fi, ip, is_user);
 
 	if (!is_user && regs)
 		current->thread.segv_regs = container_of(regs, struct pt_regs, regs);

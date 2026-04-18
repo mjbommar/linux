@@ -1,0 +1,285 @@
+
+/tmp/uml-matrix-dynamic/arch/um/kernel/time.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <itimer_shutdown>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+   b:	00 00 00 
+   e:	55                   	push   %rbp
+   f:	31 d2                	xor    %edx,%edx
+  11:	31 f6                	xor    %esi,%esi
+  13:	48 29 c7             	sub    %rax,%rdi
+  16:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+  1d:	00 00 00 
+  20:	48 c1 ff 08          	sar    $0x8,%rdi
+  24:	48 89 e5             	mov    %rsp,%rbp
+  27:	ff 50 78             	call   *0x78(%rax)
+  2a:	31 c0                	xor    %eax,%eax
+  2c:	5d                   	pop    %rbp
+  2d:	c3                   	ret
+
+000000000000002e <itimer_set_periodic>:
+  2e:	f3 0f 1e fa          	endbr64
+  32:	55                   	push   %rbp
+  33:	ba 02 00 00 00       	mov    $0x2,%edx
+  38:	be 80 96 98 00       	mov    $0x989680,%esi
+  3d:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  44:	00 00 00 
+  47:	48 29 c7             	sub    %rax,%rdi
+  4a:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+  51:	00 00 00 
+  54:	48 c1 ff 08          	sar    $0x8,%rdi
+  58:	48 89 e5             	mov    %rsp,%rbp
+  5b:	ff 50 78             	call   *0x78(%rax)
+  5e:	31 c0                	xor    %eax,%eax
+  60:	5d                   	pop    %rbp
+  61:	c3                   	ret
+
+0000000000000062 <itimer_next_event>:
+  62:	f3 0f 1e fa          	endbr64
+  66:	55                   	push   %rbp
+  67:	48 8d 77 01          	lea    0x1(%rdi),%rsi
+  6b:	ba 01 00 00 00       	mov    $0x1,%edx
+  70:	31 ff                	xor    %edi,%edi
+  72:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+  79:	00 00 00 
+  7c:	48 89 e5             	mov    %rsp,%rbp
+  7f:	ff 50 78             	call   *0x78(%rax)
+  82:	5d                   	pop    %rbp
+  83:	c3                   	ret
+
+0000000000000084 <itimer_one_shot>:
+  84:	f3 0f 1e fa          	endbr64
+  88:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  8f:	00 00 00 
+  92:	55                   	push   %rbp
+  93:	48 89 fe             	mov    %rdi,%rsi
+  96:	31 ff                	xor    %edi,%edi
+  98:	48 89 e5             	mov    %rsp,%rbp
+  9b:	ff d0                	call   *%rax
+  9d:	5d                   	pop    %rbp
+  9e:	c3                   	ret
+
+000000000000009f <timer_read>:
+  9f:	f3 0f 1e fa          	endbr64
+  a3:	55                   	push   %rbp
+  a4:	48 89 e5             	mov    %rsp,%rbp
+  a7:	53                   	push   %rbx
+  a8:	51                   	push   %rcx
+  a9:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+  b0:	00 00 00 
+  b3:	ff 50 70             	call   *0x70(%rax)
+  b6:	48 89 c3             	mov    %rax,%rbx
+  b9:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+  c0:	00 00 
+  c2:	85 c0                	test   %eax,%eax
+  c4:	7e 0f                	jle    d5 <timer_read+0x36>
+  c6:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  cd:	00 00 00 
+  d0:	48 89 df             	mov    %rbx,%rdi
+  d3:	ff d0                	call   *%rax
+  d5:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+  dc:	00 00 
+  de:	85 c0                	test   %eax,%eax
+  e0:	7e 0f                	jle    f1 <timer_read+0x52>
+  e2:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  e9:	00 00 00 
+  ec:	48 89 df             	mov    %rbx,%rdi
+  ef:	ff d0                	call   *%rax
+  f1:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+  f8:	00 00 
+  fa:	85 c0                	test   %eax,%eax
+  fc:	7e 0f                	jle    10d <timer_read+0x6e>
+  fe:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 105:	00 00 00 
+ 108:	48 89 df             	mov    %rbx,%rdi
+ 10b:	ff d0                	call   *%rax
+ 10d:	48 89 d8             	mov    %rbx,%rax
+ 110:	5a                   	pop    %rdx
+ 111:	5b                   	pop    %rbx
+ 112:	48 c1 e8 08          	shr    $0x8,%rax
+ 116:	5d                   	pop    %rbp
+ 117:	c3                   	ret
+
+0000000000000118 <um_timer>:
+ 118:	f3 0f 1e fa          	endbr64
+ 11c:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 123:	00 00 00 
+ 126:	55                   	push   %rbp
+ 127:	48 8b 80 d0 03 00 00 	mov    0x3d0(%rax),%rax
+ 12e:	48 89 e5             	mov    %rsp,%rbp
+ 131:	48 85 c0             	test   %rax,%rax
+ 134:	74 12                	je     148 <um_timer+0x30>
+ 136:	8b b8 40 03 00 00    	mov    0x340(%rax),%edi
+ 13c:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 143:	00 00 00 
+ 146:	ff d0                	call   *%rax
+ 148:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 14f:	00 00 00 
+ 152:	48 89 c7             	mov    %rax,%rdi
+ 155:	ff 10                	call   *(%rax)
+ 157:	b8 01 00 00 00       	mov    $0x1,%eax
+ 15c:	5d                   	pop    %rbp
+ 15d:	c3                   	ret
+
+000000000000015e <timer_handler>:
+ 15e:	f3 0f 1e fa          	endbr64
+ 162:	55                   	push   %rbp
+ 163:	48 89 e5             	mov    %rsp,%rbp
+ 166:	41 55                	push   %r13
+ 168:	49 89 d5             	mov    %rdx,%r13
+ 16b:	41 54                	push   %r12
+ 16d:	53                   	push   %rbx
+ 16e:	48 bb 00 00 00 00 00 	movabs $0x0,%rbx
+ 175:	00 00 00 
+ 178:	50                   	push   %rax
+ 179:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 180:	00 00 00 
+ 183:	ff d0                	call   *%rax
+ 185:	31 ff                	xor    %edi,%edi
+ 187:	41 89 c4             	mov    %eax,%r12d
+ 18a:	ff d3                	call   *%rbx
+ 18c:	4c 89 ee             	mov    %r13,%rsi
+ 18f:	31 ff                	xor    %edi,%edi
+ 191:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 198:	00 00 00 
+ 19b:	ff d0                	call   *%rax
+ 19d:	44 89 e7             	mov    %r12d,%edi
+ 1a0:	ff d3                	call   *%rbx
+ 1a2:	5a                   	pop    %rdx
+ 1a3:	5b                   	pop    %rbx
+ 1a4:	41 5c                	pop    %r12
+ 1a6:	41 5d                	pop    %r13
+ 1a8:	5d                   	pop    %rbp
+ 1a9:	c3                   	ret
+
+00000000000001aa <um_setup_timer>:
+ 1aa:	f3 0f 1e fa          	endbr64
+ 1ae:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1b5:	00 00 00 
+ 1b8:	55                   	push   %rbp
+ 1b9:	48 89 e5             	mov    %rsp,%rbp
+ 1bc:	41 54                	push   %r12
+ 1be:	53                   	push   %rbx
+ 1bf:	ff d0                	call   *%rax
+ 1c1:	41 89 c4             	mov    %eax,%r12d
+ 1c4:	85 c0                	test   %eax,%eax
+ 1c6:	75 4f                	jne    217 <um_setup_timer+0x6d>
+ 1c8:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 1cf:	00 00 00 
+ 1d2:	ba 00 01 00 00       	mov    $0x100,%edx
+ 1d7:	48 be 00 00 00 00 00 	movabs $0x0,%rsi
+ 1de:	00 00 00 
+ 1e1:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1e8:	00 00 00 
+ 1eb:	ff d0                	call   *%rax
+ 1ed:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1f4:	00 00 00 
+ 1f7:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 1fe:	00 00 00 
+ 201:	48 a3 00 00 00 00 00 	movabs %rax,0x0
+ 208:	00 00 00 
+ 20b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 212:	00 00 00 
+ 215:	ff d0                	call   *%rax
+ 217:	44 89 e0             	mov    %r12d,%eax
+ 21a:	5b                   	pop    %rbx
+ 21b:	41 5c                	pop    %r12
+ 21d:	5d                   	pop    %rbp
+ 21e:	c3                   	ret
+
+000000000000021f <read_persistent_clock64>:
+ 21f:	f3 0f 1e fa          	endbr64
+ 223:	55                   	push   %rbp
+ 224:	48 89 e5             	mov    %rsp,%rbp
+ 227:	53                   	push   %rbx
+ 228:	48 89 fb             	mov    %rdi,%rbx
+ 22b:	50                   	push   %rax
+ 22c:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 233:	00 00 00 
+ 236:	ff 90 80 00 00 00    	call   *0x80(%rax)
+ 23c:	b9 00 ca 9a 3b       	mov    $0x3b9aca00,%ecx
+ 241:	48 89 df             	mov    %rbx,%rdi
+ 244:	48 99                	cqto
+ 246:	48 f7 f9             	idiv   %rcx
+ 249:	48 89 c6             	mov    %rax,%rsi
+ 24c:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 253:	00 00 00 
+ 256:	ff d0                	call   *%rax
+ 258:	5a                   	pop    %rdx
+ 259:	5b                   	pop    %rbx
+ 25a:	5d                   	pop    %rbp
+ 25b:	c3                   	ret
+
+Disassembly of section .init.text:
+
+0000000000000000 <um_timer_init>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	55                   	push   %rbp
+   5:	45 31 c9             	xor    %r9d,%r9d
+   8:	31 d2                	xor    %edx,%edx
+   a:	31 ff                	xor    %edi,%edi
+   c:	49 b8 00 00 00 00 00 	movabs $0x0,%r8
+  13:	00 00 00 
+  16:	b9 00 42 21 00       	mov    $0x214200,%ecx
+  1b:	48 be 00 00 00 00 00 	movabs $0x0,%rsi
+  22:	00 00 00 
+  25:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  2c:	00 00 00 
+  2f:	48 89 e5             	mov    %rsp,%rbp
+  32:	ff d0                	call   *%rax
+  34:	85 c0                	test   %eax,%eax
+  36:	74 1c                	je     54 <um_timer_init+0x54>
+  38:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+  3f:	00 00 00 
+  42:	f7 d8                	neg    %eax
+  44:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+  4b:	00 00 00 
+  4e:	89 c6                	mov    %eax,%esi
+  50:	31 c0                	xor    %eax,%eax
+  52:	ff d2                	call   *%rdx
+  54:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  5b:	00 00 00 
+  5e:	ff d0                	call   *%rax
+  60:	85 c0                	test   %eax,%eax
+  62:	74 10                	je     74 <um_timer_init+0x74>
+  64:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+  6b:	00 00 00 
+  6e:	f7 d8                	neg    %eax
+  70:	89 c6                	mov    %eax,%esi
+  72:	eb 30                	jmp    a4 <um_timer_init+0xa4>
+  74:	ba ca 9a 3b 00       	mov    $0x3b9aca,%edx
+  79:	be 01 00 00 00       	mov    $0x1,%esi
+  7e:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+  85:	00 00 00 
+  88:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  8f:	00 00 00 
+  92:	ff d0                	call   *%rax
+  94:	85 c0                	test   %eax,%eax
+  96:	74 1a                	je     b2 <um_timer_init+0xb2>
+  98:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+  9f:	00 00 00 
+  a2:	89 c6                	mov    %eax,%esi
+  a4:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+  ab:	00 00 00 
+  ae:	31 c0                	xor    %eax,%eax
+  b0:	ff d2                	call   *%rdx
+  b2:	5d                   	pop    %rbp
+  b3:	c3                   	ret
+
+00000000000000b4 <time_init>:
+  b4:	f3 0f 1e fa          	endbr64
+  b8:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  bf:	00 00 00 
+  c2:	55                   	push   %rbp
+  c3:	48 89 e5             	mov    %rsp,%rbp
+  c6:	ff d0                	call   *%rax
+  c8:	5d                   	pop    %rbp
+  c9:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  d0:	00 00 00 
+  d3:	48 a3 00 00 00 00 00 	movabs %rax,0x0
+  da:	00 00 00 
+  dd:	c3                   	ret
