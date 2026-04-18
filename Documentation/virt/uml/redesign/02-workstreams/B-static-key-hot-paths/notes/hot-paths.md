@@ -46,7 +46,7 @@ actual numbers are measured in B-05.
 | 2 | `um_on_syscall_exit(regs)` | `handle_syscall` tail (after the `out:` label), before `syscall_trace_leave` | `arch/um/kernel/skas/syscall.c:72` | trace_syscalls, record_replay |
 | 3 | `um_on_page_fault(fi, ip, is_user)` | `segv` head, before the kernel-addr branches | `arch/um/kernel/trap.c:308` | trace_syscalls (labeled "trace_traps"), record_replay |
 | 4 | `um_on_context_switch(from, to)` | `__switch_to`, right before `um_backend_dispatch(context_switch, ...)` | `arch/um/kernel/process.c:74` | trace_syscalls (schedule trace), record_replay, perf_dispatch |
-| 5 | `um_on_irq_entry(irq, regs)` | `do_IRQ` top, between `irq_enter()` and `generic_handle_irq()` | `arch/um/kernel/irq.c:472` | trace_syscalls (IRQ trace), record_replay |
+| 5 | `um_on_irq_entry(irq, regs)` | `do_IRQ` top, between `irq_enter()` and `generic_handle_irq()`; also both time-travel synthetic-IRQ dispatch points (`irq_event_handler` direct delivery and `irq_do_pending_events` pending replay) | `arch/um/kernel/irq.c:472`, `:100`, `:145` | trace_syscalls (IRQ trace), record_replay |
 | 6 | `um_on_clock_read(ns)` | `timer_read` tail, around the `um_backend_dispatch(read_clock_ns)` return | `arch/um/kernel/time.c:912` | time_travel_active, kfence_sample, record_replay |
 
 ### Per-hook semantics
@@ -55,12 +55,14 @@ actual numbers are measured in B-05.
 Called once per guest syscall, just after `handle_syscall` has pulled
 the syscall number off `UPT_SYSCALL_NR`. Passes `struct pt_regs *`
 so slow paths can read arg registers. Placement note: this is
-**after** `syscall_trace_enter()` (the generic ptrace/seccomp hook)
-and after `secure_computing()`, because those are already gated
-elsewhere (ptrace-tracer attach, seccomp filter install) and we
-don't want to double-account. Our gate covers kernel-internal
-observability consumers (ftrace syscall tracer, kcov, record/replay,
-perf) rather than the existing tracer/secure_computing paths.
+**before** `syscall_trace_enter()` (the generic ptrace/seccomp hook)
+and before `secure_computing()`, so the gate observes *every* guest
+syscall regardless of whether ptrace or seccomp later diverts it. A
+record/replay consumer must see the entry even if seccomp is about
+to kill the syscall; a kcov consumer must count it even if ptrace
+stops the tracee. Slow paths that want to observe only *executed*
+syscalls should consult the generic `syscall_trace_*` tracepoints
+instead; our gate is the universal fan-out point.
 
 **Hook 2 — `um_on_syscall_exit`**
 Symmetric to hook 1. Placed at the `out:` label before
@@ -83,14 +85,16 @@ while `current` is still `from`.
 
 **Hook 5 — `um_on_irq_entry`**
 At the top of `do_IRQ`, after `irq_enter()`. Gives slow-path
-handlers a consistent "IRQ delivered" observation point across
-all IRQ sources (epoll FD IRQs + time-travel synthetic IRQs both
-flow through `generic_handle_irq`, which is called both from
-`do_IRQ` and from internal time-travel pending-event loops). For
-B-02 we gate at `do_IRQ` only — the time-travel handlers already
-funnel back into `do_IRQ` for real IRQs. Open: whether the
-time-travel pending-event path needs its own hook; tentative answer
-is **no** because time-travel consumers observe at `um_on_clock_read`.
+handlers a consistent "IRQ delivered" observation point across all
+IRQ sources. Time-travel mode has two additional direct-dispatch
+paths (`irq_event_handler` for synthetic events, `irq_do_pending_events`
+for replay of events that arrived while suspended) that do NOT flow
+through `do_IRQ`; both are gated with the same hook so a record/replay
+consumer sees every IRQ delivery regardless of time-travel state. The
+synthetic paths don't have a trap `uml_pt_regs`, so the hook is
+called with `regs=NULL` there; the B-02 slow paths swallow the
+argument, and any future consumer that dereferences `regs` must
+handle NULL for those two sites. See D20 in `04-risks/decisions-log.md`.
 
 **Hook 6 — `um_on_clock_read`**
 At the tail of `timer_read`, after the `um_backend_dispatch(read_clock_ns)`
@@ -108,17 +112,24 @@ replay uses it to log clock observations for replay determinism.
 | `um_kfence_sample` | off | research | future KFENCE port (workstream C) — stub today |
 | `um_record_replay` | off (by Kconfig) | fuzz-deep, time-travel | future record/replay (workstream C) — stub today |
 | `um_perf_dispatch` | off | research | perf context-switch / syscall tracer |
-| `um_sanitize_paranoid` | off | fuzz-deep | future aggressive sanitizer checks — stub today |
 
 The gates whose consumers are not yet in the tree (kcov, kfence,
-record_replay, sanitize_paranoid) ship with trivial slow paths that
-bump a per-gate stats counter. That stats counter is the B-06 demo
-vehicle; workstream C will replace each trivial slow path with the
-real consumer when that consumer is ported.
+record_replay) ship with trivial slow paths that bump a per-gate
+stats counter. That stats counter is the B-06 demo vehicle;
+workstream C will replace each trivial slow path with the real
+consumer when that consumer is ported. New gates land together with
+their first real consumer — we do not ship a named-but-dead gate
+(see D21; this policy is why the earlier `sanitize_paranoid`
+placeholder was removed).
 
-This staging preserves I3 — stub slow paths still cost 0.3 ns when
-the gate is off, because the gate itself is what's NOP-patched.
-Consumer work, trivial or real, only happens on the on-path.
+This staging preserves the off-state cost budget — stub slow paths
+do nothing when the gate is off, because the gate itself is what
+short-circuits. Consumer work, trivial or real, only happens on the
+on-path. Under today's C-fallback jump-label form (HAVE_ARCH_JUMP_LABEL
+unset in UML; see D19) the gate cost is ~1–2 ns per gate, not the
+~0.3 ns literal NOP form; invariant I3 is met in spirit (well under
+the 2 ns ceiling) but not literally until B-04's mprotect helpers
+unblock the JIT transform.
 
 ## What we are NOT gating (explicitly)
 
@@ -141,23 +152,28 @@ Consumer work, trivial or real, only happens on the on-path.
 ## Decisions recorded in this audit
 
 - **D17 (tentative; filed to `04-risks/decisions-log.md`):** six
-  hook points, not eight. `interrupt_end` and the second `do_IRQ`
-  call site (`generic_handle_irq` inside `irq_do_pending_events`)
-  are **not** gated — the first is degenerate, the second is already
-  covered because it funnels through the same `do_IRQ` instance when
-  real IRQs fire. Time-travel synthetic IRQs are observed at
-  `um_on_clock_read` instead.
+  distinct *hook helpers* (not eight). `interrupt_end` is not gated
+  because its after-IRQ flag-processing is degenerate (the flags are
+  already the decision point). The `um_on_irq_entry` helper is
+  invoked from *three* IRQ-delivery call sites (one per delivery
+  path: `do_IRQ`, time-travel synthetic `irq_event_handler`,
+  time-travel pending `irq_do_pending_events`); that is still one
+  helper / one gate, not three.
 - **D18 (tentative):** gates are declared in the kernel side
   (`arch/um/include/asm/um-hooks.h` — kernel-only, not shared),
   because USER TUs never call these hooks. The naming and location
   mirror `asm/backend.h` (kernel-only partner to
   `shared/backend.h`) — D11 already established this split.
-- The `hot-paths-off` state has exactly **six sites × N gates**
-  NOPs per pass through the kernel (not per syscall; per kernel
-  entry). Rough budget for a cold `getpid()` syscall:
-  hook 1 fires (4 gates NOP = 4×0.3 ns = 1.2 ns) + hook 2 fires
-  (2 gates NOP = 0.6 ns). Total Layer 2 off-state tax on a cold
-  `getpid()`: ~1.8 ns. Well inside invariant I3.
+- The `hot-paths-off` state has **six hook helpers** (syscall_entry,
+  syscall_exit, page_fault, context_switch, irq_entry, clock_read)
+  invoked from seven call sites — the IRQ helper is the one with
+  multiple delivery paths (see D20). Rough budget for a cold
+  `getpid()` syscall, under the C-fallback jump-label form UML uses
+  today (~0.5–1 ns per gate branch): hook 1 fires (4 gates = ~2–4 ns)
+  + hook 2 fires (2 gates = ~1–2 ns). Total Layer 2 off-state tax on
+  a cold `getpid()`: ~3–6 ns. Well inside invariant I3's 2 ns-per-
+  gate ceiling. Under the future JIT-NOP form (post-B-04, see D19)
+  the same budget drops to ~1.8 ns total.
 
 ## Open questions closed in this pass
 

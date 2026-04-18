@@ -40,7 +40,10 @@ CONFIG_KCOV=y                # gate exists; default off
 
 - Binary size: ~32 MB (slow paths added; ~2 MB)
 - Boot: ~300 ms (same as prod-fast)
-- Syscall: ~85 ns (~5 ns per gate with all NOPs)
+- Syscall: under C-fallback jump-label form (today) ~85 ns + ~1–2 ns
+  per off-gate. When `HAVE_ARCH_JUMP_LABEL` lands on UML via
+  workstream B-04's mprotect helpers, per-gate off cost drops to
+  ~0.3 ns (literal NOP) per three-layers.md. See D19.
 - RAM: ~30 MB
 
 ## The killer use case

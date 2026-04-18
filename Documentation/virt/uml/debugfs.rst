@@ -25,8 +25,7 @@ Layout
   │   ├── time_travel_active    (rw, 0600)  0|1
   │   ├── kfence_sample         (rw, 0600)  0|1
   │   ├── record_replay         (rw, 0600)  0|1
-  │   ├── perf_dispatch         (rw, 0600)  0|1
-  │   └── sanitize_paranoid     (rw, 0600)  0|1
+  │   └── perf_dispatch         (rw, 0600)  0|1
   └── stats              (ro, 0400)  per-hook on-state + hit counter
 
 ``backend``
@@ -84,10 +83,6 @@ slow paths bump a hit counter in ``stats``):
     Fires on syscall entry and context switch. Feeds the kernel's
     perf subsystem.
 
-``sanitize_paranoid``
-    Reserved for aggressive sanitizer mode. Currently unused on
-    any hook site; exists for forward compatibility.
-
 ``stats``
 ---------
 
@@ -102,7 +97,6 @@ cumulative hit count since boot. Example on an idle system with
   kfence_sample        on=0 hits=0
   record_replay        on=0 hits=0
   perf_dispatch        on=0 hits=0
-  sanitize_paranoid    on=0 hits=0
 
 Cost impact
 ===========

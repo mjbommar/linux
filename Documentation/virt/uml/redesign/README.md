@@ -20,6 +20,7 @@ contact with reviewers.
 | A reviewer questioning scope | [04-risks/](04-risks/) |
 | A planner sequencing | [06-sequencing/](06-sequencing/) |
 | Looking for cited prior art | [07-references/](07-references/) |
+| Thinking beyond A-D | [08-future-phases/](08-future-phases/) |
 
 ## The architecture in one paragraph
 
@@ -89,10 +90,14 @@ docs/uml-redesign/
 │   ├── critical-path.md              what blocks what
 │   └── parallelism-map.md            what can run concurrently
 │
-└── 07-references/
-    ├── README.md
-    ├── prior-art.md                  gVisor, LKL, Firecracker, crosvm — what we steal
-    └── sources.md                    URLs from the original research agents
+├── 07-references/
+│   ├── README.md
+│   ├── prior-art.md                  gVisor, LKL, Firecracker, crosvm — what we steal
+│   └── sources.md                    URLs from the original research agents
+│
+└── 08-future-phases/
+    ├── README.md                     parking lot for work beyond A-D
+    └── 01-end-user-ideal-world.md    ideal end-user UX and roadmap gaps
 ```
 
 ## Status of this plan

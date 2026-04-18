@@ -627,4 +627,197 @@ unblocking workstream), `01-architecture/invariants.md §I3`.
 
 ---
 
+## D20: Gate every IRQ-delivery path, including time-travel direct dispatch
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to external review finding B-02.IRQ)
+
+**Decision:** `um_on_irq_entry` is invoked from every path that
+reaches `generic_handle_irq()` — the three paths are `do_IRQ` (the
+standard trap-delivered IRQ entry), the time-travel
+`irq_event_handler` (synthetic event delivery), and
+`irq_do_pending_events` (replay of events that arrived while IRQs
+were suspended). The single gate fires from all three call sites
+so a record/replay consumer observes every IRQ regardless of
+time-travel state.
+
+The two synthetic paths do not have a trap `struct uml_pt_regs`
+available; the hook is called with `regs = NULL` there. The B-02
+slow paths swallow `regs`, so this is harmless today; a future
+real consumer that dereferences `regs` must explicitly handle NULL
+for those two sites.
+
+**Reasoning:** External review pointed out that the original B-01
+audit claimed "one `do_IRQ` hook covers all meaningful IRQ delivery",
+but the time-travel direct-dispatch path bypasses `do_IRQ` and hit
+`generic_handle_irq` directly. Leaving that path ungated would give
+observability consumers a lopsided view (real IRQs observed, time-
+travel IRQs invisible). The fix is four lines of code; narrowing
+the doc to declare the gap "out of scope" was the alternative but
+produces a worse architectural story.
+
+**Alternatives considered:** Narrow the audit doc to say "do_IRQ
+path only; time-travel synthetic IRQs observed via `um_on_clock_read`
+not `um_on_irq_entry`." Rejected — `um_on_clock_read` is semantically
+different (it observes clock reads, not IRQ delivery); a record/replay
+consumer that wants every IRQ delivery would silently miss the
+time-travel path.
+
+**Cross-reference:** `arch/um/kernel/irq.c` (three call sites),
+`02-workstreams/B-static-key-hot-paths/notes/hot-paths.md` §"Hook 5".
+
+---
+
+## D21: Drop `sanitize_paranoid` as named-but-dead infrastructure
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to external review finding B-sanitize_paranoid)
+
+**Decision:** The `um_hook_sanitize_paranoid` gate introduced in
+B-02 is removed. It was declared in `arch/um/include/asm/um-hooks.h`
+and defined in `arch/um/kernel/hooks.c` but not dispatched from any
+`um_on_*()` helper. Reviewer feedback: a named-but-dead gate draws
+pushback as "dead infrastructure" rather than praise for forward
+compatibility.
+
+**Policy going forward:** new gates land together with their first
+real call site. The comment in `um-hooks.h` §"Gate declarations"
+states the rule explicitly. The `sanitize_paranoid` intent
+(reserved for aggressive sanitizer-mode fuzz work) is preserved in
+`08-future-phases/01-end-user-ideal-world.md` as a phase-F item; it
+will be reintroduced as a real gate when a consumer lands.
+
+**Reasoning:** The cost of re-adding a gate when its consumer is
+ready is near-zero (one enum entry + one declaration + one dispatch
+line). The cost of shipping an undispatched gate is a credibility
+hit in maintainer review.
+
+**Cross-reference:**
+`arch/um/include/asm/um-hooks.h` (declaration removed),
+`arch/um/kernel/hooks.c` (definition + EXPORT_SYMBOL_GPL removed,
+enum row removed, names/keys tables trimmed).
+
+---
+
+## D22: Per-CPU slow-path counters (replacing the global atomic64_t)
+
+**Date:** 2026-04-18
+**Status:** Accepted (in response to external review finding B-stats)
+
+**Decision:** `um_hook_hits` moves from a global
+`atomic64_t[UM_HOOK__COUNT]` to a per-CPU
+`struct um_hook_percpu_counters` with a plain `u64[]` per CPU.
+Writes are `this_cpu_ptr() + ++`; reads sum across
+`for_each_possible_cpu`.
+
+**Reasoning:** The global atomic form introduced cross-CPU
+cacheline contention on every slow-path invocation, which distorts
+"gate on" benchmarks — every gate-on measurement was measuring a
+shared-cacheline atomic, not the hook's actual cost. A future
+workstream C consumer (real ftrace, real kcov) would inherit the
+distortion when comparing its own overhead against this baseline.
+
+Per-CPU counters are the kernel-standard pattern for high-frequency
+observability counters (see `kernel/trace/`, `kernel/sched/stats.c`).
+Read-side sum is O(nr_cpus), which matters only for the `stats`
+file read — not a hot path.
+
+Reads are inherently racy against concurrent writers on other CPUs;
+acceptable for observability telemetry where rate of change matters
+more than a precise snapshot.
+
+**Measurement impact:** baseline rebuilt at `notes/bench-baseline.json`.
+On-state numbers rose (per-CPU write + function-call overhead >
+single-atomic cost on an uncontended single-CPU UML, but this
+reflects the real steady-state cost of a non-inlined stub with a
+real counter write). The baseline is now a cleaner comparison
+target for workstream C's real consumers.
+
+**Cross-reference:** `arch/um/kernel/hooks.c`
+(`DEFINE_PER_CPU_ALIGNED` + `um_hook_stats_inc`/`um_hook_stats_read`
+rewrite), `02-workstreams/B-static-key-hot-paths/notes/bench-baseline.json`.
+
+---
+
+## D23: RFC patch-series split by compile boundary (not by B-NN task)
+
+**Date:** 2026-04-18
+**Status:** Accepted (policy for upstream send)
+
+**Decision:** The workstream-B commit (`570b0c386e0c`) will not be
+RFC'd as a single 33-file, ~1500-LOC patch, nor will it be split
+into six patches by B-NN task boundary. Instead it splits by
+**compile boundary** into six logically independent patches, in
+the order:
+
+1. Gate infrastructure + first live hook site (header, `hooks.c`,
+   one insertion so the call site is immediately visible).
+2. Remaining five hook-site insertions.
+3. debugfs + stats (`um_debugfs.c`, `debugfs.rst`).
+4. Section split + patchable text helpers (`patchable.h`,
+   `section_split.c`, linker-script edits, `section-split.rst`).
+5. Benchmark harness + baseline + host scripts (`hooks_bench.c`,
+   `uml-gate-bench.sh`, `uml-gate-bench-compare.sh`,
+   `bench-baseline.json`).
+6. Docs + selftest + any review-response artifact.
+
+Each intermediate patch must compile and boot (bisect-clean). The
+B-NN task boundary is too fine-grained for LKML review — B-NN
+steps often touch files that only make sense in context of the
+next B-NN step. The compile-boundary split keeps each patch
+functionally self-contained: reviewers can apply patch 1 alone,
+build, and observe the gate in action at a single call site
+before seeing how it grows.
+
+**Execution:** not yet executed; hold until the user decides to
+RFC. Splitting now would complicate any further review-driven
+fix commits. Expected mechanism: `git rebase -i` on
+`570b0c386e0c` to split, or a fresh branch + cherry-pick; pick
+whichever produces a cleaner history.
+
+**Cross-reference:** `02-workstreams/B-static-key-hot-paths/README.md`
+task table (B-01..B-06 map to the compile-boundary patches in the
+order above), `05-validation/kernel-dev-checklist.md` §Scale 2.
+
+---
+
+## D24: Future-phases parking lot begins strictly where workstream C ends
+
+**Date:** 2026-04-18
+**Status:** Accepted
+
+**Decision:** `08-future-phases/` is a parking lot for ideas
+beyond the current A-D roadmap. To prevent it from quietly
+re-planning workstream C, the policy is:
+
+- Items in `08-future-phases/` begin strictly where C's task
+  list ends. Any item that fits an existing `C-NN.md` spec
+  is a C task, not a future phase.
+- When scope is ambiguous, it moves to C first. Future phases
+  inherit only what C has explicitly written off.
+- "Phase E wants X" does not override "C plans X" — C wins by
+  default; phase E takes over only if C's owner says so in
+  writing.
+- Adding a new note here requires a one-line check against C's
+  task list; on match, reclassify the note as a C proposal and
+  move it to `02-workstreams/C-profiles-and-gaps/`.
+
+**Reasoning:** Parking-lot drift is a slow-motion failure mode:
+ideas accumulate, the team later rediscovers that two-thirds
+overlap with the next workstream, and decisions get re-litigated.
+An explicit boundary avoids that.
+
+**Applied in this pass:** PARK.8's spike (which found that
+`user_events`, `ftrace`, KCOV already work in UML) resulted in
+three "missing" items being reclassified as C-workstream work
+(document + selftest) rather than future-phase engineering.
+`uprobes` stays in the "needs real port" bucket but should land
+as a C task, not a Phase-F task.
+
+**Cross-reference:** `08-future-phases/README.md` (boundary rule
+published there), `08-future-phases/notes/uprobes-spike.md`
+(spike findings that exercised the boundary).
+
+---
+
 ## (Future entries here, as decisions are made)

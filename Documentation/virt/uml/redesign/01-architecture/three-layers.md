@@ -174,7 +174,8 @@ DECLARE_STATIC_KEY_FALSE(um_time_travel_active);
 DECLARE_STATIC_KEY_FALSE(um_kfence_sample);
 DECLARE_STATIC_KEY_FALSE(um_record_replay);
 DECLARE_STATIC_KEY_FALSE(um_perf_dispatch);
-DECLARE_STATIC_KEY_FALSE(um_sanitize_paranoid);
+/* um_sanitize_paranoid was removed (D21) — new gates land with
+ * their first real consumer, not as placeholders. */
 
 static __always_inline void um_on_syscall_entry(struct pt_regs *regs)
 {
@@ -243,8 +244,7 @@ is a runtime decision per-event.
 │   ├── time_travel_active           rw   0|1
 │   ├── kfence_sample                rw   0|1
 │   ├── record_replay                rw   0|1
-│   ├── perf_dispatch                rw   0|1
-│   └── sanitize_paranoid            rw   0|1
+│   └── perf_dispatch                rw   0|1
 ├── trace_syscall_filter             rw   "openat,read,write" or "*"
 ├── kcov_buffer_size                 rw   bytes
 └── stats                            ro   per-hook cost summary

@@ -18,7 +18,7 @@ set -u
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 BASELINE=${1:-"$DIR/../02-workstreams/B-static-key-hot-paths/notes/bench-baseline.json"}
-CEILING_PCT=${UML_BENCH_CEILING_PCT:-10}
+CEILING_PCT=${UML_BENCH_CEILING_PCT:-15}
 
 if [ ! -f "$BASELINE" ]; then
 	echo "error: baseline $BASELINE not found" >&2

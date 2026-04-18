@@ -4,10 +4,17 @@
 
 /*
  * Layer 2 of the UML redesign: static-key gates on kernel-side hot
- * paths. When off, each gate compiles to a 5-byte NOP via the
- * jump-label machinery; when on, it becomes a JMP to a slow-path
- * helper. Runtime toggled via /sys/kernel/debug/um/hooks/<name>
- * (see arch/um/kernel/debugfs.c).
+ * paths. Gate state is toggled at runtime via
+ * /sys/kernel/debug/um/hooks/<name> (see arch/um/kernel/um_debugfs.c).
+ *
+ * Off-state cost today: ~1–2 ns per gate (C fallback form — a load,
+ * compare, and predicted-not-taken branch). UML does not currently
+ * select HAVE_ARCH_JUMP_LABEL, so the JIT-patched 5-byte-NOP form
+ * described in three-layers.md is not yet in force. Invariant I3
+ * ("~0.3 ns per gate when off") is met in spirit (the C fallback is
+ * comfortably under the 2 ns ceiling) but not literally; see D19 in
+ * 04-risks/decisions-log.md and workstream B-04 for the path to
+ * literal-NOP parity.
  *
  * Architecture contract: see Documentation/virt/uml/redesign/
  *   01-architecture/three-layers.md §"Layer 2".
@@ -36,7 +43,12 @@ struct task_struct;
 struct faultinfo;
 struct uml_pt_regs;
 
-/* --- Gate declarations (7) ------------------------------------------ */
+/* --- Gate declarations (6) ------------------------------------------
+ *
+ * New gates ship together with their first real call site. Do not
+ * add a gate here that isn't dispatched from one of the um_on_*()
+ * helpers below — a named-but-dead gate is dead infrastructure.
+ */
 
 DECLARE_STATIC_KEY_FALSE(um_hook_trace_syscalls);
 DECLARE_STATIC_KEY_FALSE(um_hook_kcov_enabled);
@@ -44,7 +56,6 @@ DECLARE_STATIC_KEY_FALSE(um_hook_time_travel_active);
 DECLARE_STATIC_KEY_FALSE(um_hook_kfence_sample);
 DECLARE_STATIC_KEY_FALSE(um_hook_record_replay);
 DECLARE_STATIC_KEY_FALSE(um_hook_perf_dispatch);
-DECLARE_STATIC_KEY_FALSE(um_hook_sanitize_paranoid);
 
 /* --- Stats: per-gate hit counters the slow paths bump --------------- */
 
@@ -55,7 +66,6 @@ enum um_hook_id {
 	UM_HOOK_KFENCE_SAMPLE,
 	UM_HOOK_RECORD_REPLAY,
 	UM_HOOK_PERF_DISPATCH,
-	UM_HOOK_SANITIZE_PARANOID,
 	UM_HOOK__COUNT,
 };
 
