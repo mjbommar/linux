@@ -44,6 +44,26 @@ extern char __end_um_patch_text[];
 int um_text_patch_begin(void *addr, unsigned long len);
 int um_text_patch_end(void *addr, unsigned long len);
 
+/* Kernel-text-wide patching helpers used by ftrace (workstream C-05)
+ * and, in the future, kprobes. Scope is [_text, _etext) (the kernel
+ * image's code range, including .init.text) with a two-page
+ * invariant: [addr, addr+len) may straddle at most one page
+ * boundary. Any 5-byte ftrace patch can cross a page edge, so the
+ * helper opens the RW window on 1 or 2 adjacent pages as needed.
+ *
+ * Callers are responsible for any broader serialization (typically
+ * text_mutex + stop_machine_cpuslocked(); see
+ * Documentation/virt/uml/redesign/04-risks/decisions-log.md §D28
+ * for rationale). Internally, these helpers take the same spinlock
+ * as um_text_patch_begin/end, so the two pairs serialize against
+ * each other.
+ *
+ * Returns 0 on success, -errno on range violation or mprotect
+ * failure.
+ */
+int um_kernel_text_patch_begin(void *addr, unsigned long len);
+int um_kernel_text_patch_end(void *addr, unsigned long len);
+
 /* Called once from mark_rodata_ro() after initcalls complete. Logs the
  * frozen + patchable boundaries via pr_info; a belt-and-suspenders
  * mprotect(RX) is already applied by the host ELF loader, so this

@@ -61,6 +61,45 @@ static bool range_in_patchable(const void *addr, unsigned long len)
 	       end   <= __end_um_patch_text;
 }
 
+/* Kernel text spans [_text, _etext) per arch/um/kernel/uml.lds.S and
+ * arch/um/include/asm/common.lds.S. This includes .init.text (which
+ * lives before _stext and has its own patchable sites during the
+ * window between ftrace_init() and free_initmem()), the main .text,
+ * .um_patch_text, .syscall_stub, and .fini. Patching callers
+ * (ftrace, future kprobes) target compiled function bodies anywhere
+ * in that range; the at-most-two-page invariant below is the real
+ * safeguard against wild writes.
+ */
+extern char _text[], _etext[];
+
+static bool range_in_kernel_text(const void *addr, unsigned long len)
+{
+	const char *start = addr;
+	const char *end   = start + len;
+
+	if (!len)
+		return true;
+	if (end < start)
+		return false; /* overflow */
+	return start >= _text && end <= _etext;
+}
+
+/* A 5-byte ftrace patch can straddle a page boundary (compiler can
+ * place the 5-byte NOP sequence right at a page edge). We allow the
+ * RW window to cover at most two adjacent pages; longer ranges are
+ * rejected to keep the blast radius bounded.
+ */
+static unsigned long kernel_text_pages(const void *addr, unsigned long len)
+{
+	unsigned long start_page, last_page;
+
+	if (!len)
+		return 0;
+	start_page = (unsigned long)addr & ~(PAGE_SIZE - 1UL);
+	last_page  = ((unsigned long)addr + len - 1UL) & ~(PAGE_SIZE - 1UL);
+	return ((last_page - start_page) >> PAGE_SHIFT) + 1;
+}
+
 static unsigned long page_floor(unsigned long v)
 {
 	return v & ~(PAGE_SIZE - 1UL);
@@ -108,6 +147,54 @@ int um_text_patch_end(void *addr, unsigned long len)
 
 	/* Back to RX. Pair with um_text_patch_begin(). */
 	err = os_protect_memory((void *)start, aligned_len, 1, 0, 1);
+	spin_unlock(&um_patch_lock);
+	return err;
+}
+
+int um_kernel_text_patch_begin(void *addr, unsigned long len)
+{
+	unsigned long page_start, pages;
+	int err;
+
+	if (!range_in_kernel_text(addr, len)) {
+		pr_err_once("um: kernel_text_patch_begin: range %p+%lu outside [_text, _etext)\n",
+			    addr, len);
+		return -EINVAL;
+	}
+
+	pages = kernel_text_pages(addr, len);
+	if (pages > 2) {
+		pr_err_once("um: kernel_text_patch_begin: range %p+%lu spans %lu pages (max 2)\n",
+			    addr, len, pages);
+		return -EINVAL;
+	}
+
+	page_start = (unsigned long)addr & ~(PAGE_SIZE - 1UL);
+
+	spin_lock(&um_patch_lock);
+	err = os_protect_memory((void *)page_start, pages * PAGE_SIZE,
+				1, 1, 1);
+	if (err)
+		spin_unlock(&um_patch_lock);
+	return err;
+}
+
+int um_kernel_text_patch_end(void *addr, unsigned long len)
+{
+	unsigned long page_start, pages;
+	int err;
+
+	if (!range_in_kernel_text(addr, len))
+		return -EINVAL;
+
+	pages = kernel_text_pages(addr, len);
+	if (pages > 2)
+		return -EINVAL;
+
+	page_start = (unsigned long)addr & ~(PAGE_SIZE - 1UL);
+
+	err = os_protect_memory((void *)page_start, pages * PAGE_SIZE,
+				1, 0, 1);
 	spin_unlock(&um_patch_lock);
 	return err;
 }
