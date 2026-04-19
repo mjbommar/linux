@@ -130,20 +130,74 @@ the "big" commit in the series.
 - Validation: `modprobe kprobe_example` loads, fires on
   `do_sys_open`, prints the entry message. Remove cleanly.
 
-### Commit 2 — Kretprobes trampoline
+### Commit 2 — Kretprobes via rethook (revised 2026-04-19)
 
-Delivers return-probe support. Requires a trampoline that
-captures the return from every probed call and dispatches to
-user handlers.
+Delivers return-probe support. Implemented as a **rethook**
+port, not the legacy `arch_prepare_kretprobe` /
+`kretprobe_trampoline` pair that the earlier draft of this
+section called for. Upstream x86_64 switched to rethook several
+cycles ago (`arch/x86/kernel/rethook.c`, 128 lines); the legacy
+`HAVE_KRETPROBES` shape is effectively a backward-compat stub
+at this point. `arch/Kconfig:252` auto-selects
+`CONFIG_KRETPROBE_ON_RETHOOK` whenever `HAVE_RETHOOK` is
+selected, so `select HAVE_RETHOOK` is enough to bring up the
+entire kretprobe surface. See D33 for the pivot rationale.
 
-- `arch/um/kernel/kprobes/core.c`: add `kretprobe_trampoline`
-  assembly (saves regs, calls `__kretprobe_trampoline_handler`,
-  restores), `arch_prepare_kretprobe` (install trampoline as
-  the return address, save original in per-task ret-stack),
-  `arch_deref_entry_point`.
-- Validation: `modprobe kretprobe_example` on
-  `kernel_clone` — reports return values. Trampoline balances
-  (no leaked frames after 1000 probes).
+**UML pt_regs layout is trampoline-compatible with x86 native.**
+`arch/x86/um/user-offsets.c` derives `HOST_xxx` indices from the
+host `struct user_regs_struct`, which for the fields the
+trampoline touches (ax, bx, cx, dx, si, di, bp, r8-r15, orig_ax,
+ip, cs, flags, sp, ss) is byte-for-byte identical to the
+in-kernel x86_64 `struct pt_regs` layout. Therefore the
+register-save assembly from `arch/x86/kernel/rethook.c` produces
+a memory image that UML's `UPT_IP()` / `UPT_SP()` / `UPT_EFLAGS()`
+macros can read correctly — the kretprobe trampoline can be
+ported almost verbatim, rewriting only the C callback to use
+`UPT_xxx(&regs->regs)` accessors instead of native `regs->xxx`
+member access.
+
+Deliverable:
+
+- `arch/um/kernel/rethook.c` (new): port of
+  `arch/x86/kernel/rethook.c`.
+  - Inline asm trampoline `arch_rethook_trampoline` saves regs
+    in the x86-native pt_regs order (matches UML gp[] indexing).
+  - `arch_rethook_trampoline_callback(struct pt_regs *)` uses
+    `UPT_xxx` accessors; calls `rethook_trampoline_handler()`.
+  - `arch_rethook_prepare` writes trampoline address to
+    `stack[0]` at function entry.
+  - `arch_rethook_fixup_return` writes the real return address
+    back at the end of handler dispatch.
+- `arch/um/kernel/Makefile`: `obj-$(CONFIG_RETHOOK) += rethook.o`
+  with `CFLAGS_REMOVE_rethook.o = -pg` so the trampoline itself
+  isn't traced.
+- `arch/x86/um/shared/sysdep/ptrace.h`: add `UPT_ORIG_AX` macro
+  (the existing UPT_ family doesn't define one; the trampoline
+  callback sets orig_ax = ~0UL to signal "not a syscall").
+- `arch/um/Kconfig`: `select HAVE_RETHOOK if X86_64`. Drops the
+  `HAVE_KRETPROBES if X86_64` precedent — `KRETPROBES` is pulled
+  in by `HAVE_RETHOOK` via `arch/Kconfig:250`.
+- `arch/um/kernel/kprobes/core.c`: the `kretprobe_blacklist[]`
+  stub (landed in commit 1a) stays; nothing else changes here.
+
+Validation:
+
+- `samples/kprobes/kretprobe_example.ko` loads, fires on
+  `kernel_clone`, reports return values, unloads cleanly.
+- 1000-iteration stress loop (open/close or fork) with an
+  active kretprobe — no leaked frames, pre/post balanced.
+- `/sys/kernel/debug/kprobes/list` shows active kretprobes.
+- Trampoline symbol blacklisted:
+  `cat /sys/kernel/debug/kprobes/blacklist | grep rethook` lists
+  `arch_rethook_trampoline`.
+
+Scope discipline:
+
+- No changes to `arch/um/kernel/kprobes/core.c` beyond the
+  blacklist entry (already landed).
+- No mcount.S edits; function_graph lands in commit 3 via its
+  own trampoline (same register-save pattern, different
+  dispatch target).
 
 ### Commit 3 — HAVE_FUNCTION_GRAPH_TRACER (supersedes D27)
 

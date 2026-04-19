@@ -1794,4 +1794,110 @@ result retires D27.
 
 ---
 
+## D33: C-04 commit 2 implements rethook, not the legacy kretprobe_trampoline
+
+**Date:** 2026-04-19
+**Status:** Accepted (supersedes the "kretprobe_trampoline" phrasing
+in D32 and in the C-04 task spec's earlier draft of commit 2)
+
+**Decision:** C-04 commit 2 selects `HAVE_RETHOOK` and ports
+`arch/x86/kernel/rethook.c` to `arch/um/kernel/rethook.c`. It
+does **not** implement the legacy
+`arch_prepare_kretprobe` + `kretprobe_trampoline` pair that the
+earlier draft of `04-port-kprobes.md` described.
+
+**Why the pivot:**
+
+1. **Upstream x86_64 has moved.** `arch/x86/kernel/kprobes/core.c`
+   no longer contains a `kretprobe_trampoline`; the last legacy
+   shape was removed years ago. The current x86_64 kretprobe
+   implementation is a 128-line `arch/x86/kernel/rethook.c` file
+   plus the generic core in `kernel/trace/rethook.c`. Mirroring
+   x86 means porting rethook.
+
+2. **`KRETPROBE_ON_RETHOOK` auto-activates.** `arch/Kconfig:252`:
+   ```
+   config KRETPROBE_ON_RETHOOK
+       def_bool y
+       depends on HAVE_RETHOOK
+       depends on KRETPROBES
+       select RETHOOK
+   ```
+   Selecting `HAVE_RETHOOK` is the whole contract. `HAVE_KRETPROBES`
+   on the UML Kconfig line becomes unnecessary and is dropped.
+
+3. **Less assembly, cleaner contract.** Rethook is four ops:
+   `arch_rethook_trampoline` (asm), `arch_rethook_trampoline_callback`
+   (C), `arch_rethook_prepare` (C), `arch_rethook_fixup_return`
+   (C). The generic `rethook_trampoline_handler()` in
+   `kernel/trace/rethook.c` drives the shadow-stack walk and
+   handler dispatch. The legacy trampoline had to duplicate
+   that logic per-arch.
+
+4. **UML pt_regs is byte-compatible with the x86 rethook
+   trampoline.** The trampoline builds a pt_regs image on the
+   stack using x86-native field ordering (R15 … SS). UML's
+   `struct pt_regs` wraps `struct uml_pt_regs` whose `gp[]`
+   indexing (`HOST_IP=16`, `HOST_SP=19`, `HOST_EFLAGS=18`, …)
+   is derived from the host's `struct user_regs_struct` and
+   matches that same ordering for every field the trampoline
+   reads or writes. This is why the port is copy-paste plus an
+   accessor swap (`regs->ip` → `UPT_IP(&regs->regs)`, etc.)
+   rather than a ground-up redesign.
+
+**What the earlier D32 phrasing implied (now superseded):**
+
+D32 says "`HAVE_KRETPROBES` via a return-address-rewrite
+trampoline (return probes)." The *user-visible* effect is
+unchanged — kretprobes work, kernel_clone return values get
+reported, bpftrace's `kretprobe:` works. The internal contract
+shifts from per-arch to generic-via-rethook. Commit 2's task
+spec (`02-workstreams/C-profiles-and-gaps/04-port-kprobes.md`
+§"Commit 2") now describes the rethook port explicitly.
+
+**Alternatives considered and why rejected:**
+
+- **Implement the legacy `kretprobe_trampoline` / `arch_prepare_kretprobe`
+  anyway for symmetry with s390 / arm64.** Rejected: both of
+  those arches also provide rethook paths (s390 ships both; arm64
+  has moved entirely to rethook). Nothing in the UML plan
+  benefits from the legacy path. Would be dead code the moment
+  it landed.
+- **Skip kretprobes for now; re-land commit 2 post-C-05b.**
+  Rejected: D32 is already the scope-expansion decision. Walking
+  that back on discovering rethook is easier than the legacy
+  path would be self-defeating.
+- **Port rethook to `arch/um/kernel/kprobes/rethook.c` so it
+  lives under the kprobes subdirectory.** Rejected: rethook is
+  a generic return-hooking framework used by fprobe and
+  (optionally) kprobes, not a kprobes subcomponent. Its home on
+  every other arch is `arch/<arch>/kernel/rethook.c`; follow
+  that convention so grep discovery and file-reviewer
+  expectations hold.
+
+**Revisit triggers:**
+
+- Upstream revives a per-arch legacy kretprobe path (unlikely;
+  the trend is the other direction).
+- UML grows a KVM backend (workstream D) and its pt_regs
+  layering differs from the ptrace/seccomp backends — may
+  require a kind-indexed rethook dispatch.
+- FINEIBT / IBT / kCFI lands for UML (currently a no-op on UML;
+  the `ANNOTATE_NOENDBR` in the trampoline stays harmless).
+
+**Cross-references:**
+
+- `02-workstreams/C-profiles-and-gaps/04-port-kprobes.md`
+  §"Commit 2 — Kretprobes via rethook (revised 2026-04-19)".
+- `arch/x86/kernel/rethook.c` — the reference implementation.
+- `arch/s390/kernel/rethook.c` — shortest rethook port; useful
+  sanity check for how minimal the callback can be.
+- `arch/Kconfig:248..256` — `KRETPROBES` + `KRETPROBE_ON_RETHOOK`
+  selection logic.
+- `include/linux/rethook.h` — the four-op arch contract.
+- `kernel/trace/rethook.c` — generic shadow-stack driver.
+- D32 — the scope decision this refines.
+
+---
+
 ## (Future entries here, as decisions are made)
