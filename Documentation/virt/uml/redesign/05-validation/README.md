@@ -7,6 +7,8 @@ How we know the architecture works. Five documents:
   syzkaller corpus reproduction
 - [ci-matrix.md](ci-matrix.md) — profile × backend × arch ×
   kernel-version
+- [a-plus-quality-plan.md](a-plus-quality-plan.md) — how to use the
+  full kernel toolchain to maximize quality, safety, and performance
 - [upstream-strategy.md](upstream-strategy.md) — how patches land
   in mainline without a 7-year RFC chain
 - [kernel-dev-checklist.md](kernel-dev-checklist.md) — distilled from

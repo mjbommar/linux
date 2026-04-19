@@ -81,6 +81,7 @@ docs/uml-redesign/
 │   ├── benchmarks.md                 syscall cycles, boot time, fuzz iters/sec
 │   ├── conformance-tests.md          LTP, kselftest, syzkaller corpus reproduction
 │   ├── ci-matrix.md                  profile × backend × arch × kernel-version
+│   ├── a-plus-quality-plan.md        all-tools quality/safety/perf playbook
 │   └── upstream-strategy.md          how patches land in mainline without a 7-year RFC chain
 │
 ├── 06-sequencing/                    when and how
