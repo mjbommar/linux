@@ -21,6 +21,17 @@ obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 obj-$(CONFIG_DEBUG_FS) += um_debugfs.o hooks_bench.o
 obj-y += load_file.o
 
+obj-$(CONFIG_FUNCTION_TRACER) += mcount.o
+obj-$(CONFIG_DYNAMIC_FTRACE)  += ftrace.o
+
+# Prevent recursion: ftrace's own machinery must not be traced.
+CFLAGS_REMOVE_ftrace.o        := $(CC_FLAGS_FTRACE)
+# section_split.c backs um_kernel_text_patch_{begin,end}, which
+# ftrace calls under stop_machine. Must not itself be traced.
+CFLAGS_REMOVE_section_split.o := $(CC_FLAGS_FTRACE)
+# early_printk runs before ftrace_init().
+CFLAGS_REMOVE_early_printk.o  := $(CC_FLAGS_FTRACE)
+
 obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
 obj-$(CONFIG_GPROF)	+= gprof_syms.o
 obj-$(CONFIG_OF) += dtb.o

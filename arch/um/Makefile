@@ -34,6 +34,17 @@ ifdef CONFIG_64BIT
 	KBUILD_CFLAGS += -mcmodel=large
 endif
 
+# Ftrace call-site emission (workstream C-05, decisions-log D29).
+# Under -mcmodel=large, GCC's -pg -mfentry expands to a 33-byte
+# indirect call sequence that recordmcount cannot recognize. Use
+# -fpatchable-function-entry=5,0 instead: the compiler emits a
+# 5-byte NOP at function entry and records the address in
+# __patchable_function_entries. Matches arm64/riscv/parisc.
+ifeq ($(CONFIG_DYNAMIC_FTRACE),y)
+  KBUILD_CPPFLAGS += -DCC_USING_PATCHABLE_FUNCTION_ENTRY
+  CC_FLAGS_FTRACE := -fpatchable-function-entry=5,0
+endif
+
 HOST_DIR := arch/$(HEADER_ARCH)
 
 include $(srctree)/$(ARCH_DIR)/Makefile-skas
