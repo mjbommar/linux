@@ -255,6 +255,17 @@ void set_handler(int sig)
 	if (sig == SIGSEGV)
 		flags |= SA_NODEFER;
 
+	/*
+	 * Kprobes needs nested SIGTRAP too: a kprobe's pre_handler can
+	 * legitimately call a function that is itself probed
+	 * (lib/tests/test_kprobes.c "test_kprobe_missed" exercises
+	 * exactly this). Without SA_NODEFER, a SIGTRAP while we're
+	 * already in the SIGTRAP handler is masked, and the host
+	 * delivers the default "terminate + core dump" action instead.
+	 */
+	if (IS_ENABLED(CONFIG_KPROBES) && sig == SIGTRAP)
+		flags |= SA_NODEFER;
+
 	if (sigismember(&action.sa_mask, sig))
 		flags |= SA_RESTART; /* if it's an irq signal */
 
