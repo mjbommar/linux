@@ -18,9 +18,11 @@
 #include <linux/kprobes.h>
 #include <linux/percpu.h>
 #include <linux/ptrace.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #include <asm/kprobes.h>
+#include <asm/patchable.h>
 
 /*
  * Per-CPU kprobe control block storage. Declared extern in
@@ -47,29 +49,63 @@ struct kretprobe_blackpoint kretprobe_blacklist[] = { };
 const int kretprobe_blacklist_size = ARRAY_SIZE(kretprobe_blacklist);
 
 /*
- * Arch hooks required by kernel/kprobes.c. Commit 1a stubs them with
- * WARN_ONCE + -EOPNOTSUPP so a premature register_kprobe() fails
- * loudly rather than silently.
+ * Allocate an out-of-line instruction slot and copy the original
+ * bytes. The generic kprobes core's insn-slot cache (backed by
+ * execmem_alloc(EXECMEM_KPROBES)) gives us an RWX page-backed slot
+ * guaranteed to be within ±2GB of the kernel image — enough for
+ * rip-relative instructions to remain correct when single-stepped
+ * out of line.
+ *
+ * We copy MAX_INSN_SIZE bytes (x86_64 max instruction length = 15,
+ * we round up to 16). Commit 1b doesn't decode; commit 1c relies
+ * on TF-driven single-step to trap after the first instruction,
+ * then uses (regs->ip - insn_slot) as the effective length.
  */
-
 int arch_prepare_kprobe(struct kprobe *p)
 {
-	WARN_ONCE(1, "um: kprobes: arch_prepare_kprobe stub (commit 1b wires this up)\n");
-	return -EOPNOTSUPP;
+	p->ainsn.insn = get_insn_slot();
+	if (!p->ainsn.insn)
+		return -ENOMEM;
+
+	memcpy(p->ainsn.insn, p->addr, MAX_INSN_SIZE);
+	p->ainsn.size = MAX_INSN_SIZE;
+	p->opcode = *(kprobe_opcode_t *)p->addr;
+
+	return 0;
 }
 
+/*
+ * Install the int3 (0xcc) breakpoint. UML has no text_poke_bp; we
+ * use the B-04 C-05-extended mprotect helpers to open the one
+ * page containing p->addr RW, write the single byte, and restore
+ * RX. Caller (kernel/kprobes.c) already holds text_mutex; UML is
+ * effectively UP-serialized for the purposes of this write, so no
+ * stop_machine needed for a 1-byte atomic store.
+ */
 void arch_arm_kprobe(struct kprobe *p)
 {
-	WARN_ONCE(1, "um: kprobes: arch_arm_kprobe stub\n");
+	kprobe_opcode_t int3 = BREAKPOINT_INSTRUCTION;
+
+	if (um_kernel_text_patch_begin(p->addr, sizeof(int3)))
+		return;
+	*(kprobe_opcode_t *)p->addr = int3;
+	um_kernel_text_patch_end(p->addr, sizeof(int3));
 }
 
 void arch_disarm_kprobe(struct kprobe *p)
 {
-	WARN_ONCE(1, "um: kprobes: arch_disarm_kprobe stub\n");
+	if (um_kernel_text_patch_begin(p->addr, sizeof(p->opcode)))
+		return;
+	*(kprobe_opcode_t *)p->addr = p->opcode;
+	um_kernel_text_patch_end(p->addr, sizeof(p->opcode));
 }
 
 void arch_remove_kprobe(struct kprobe *p)
 {
+	if (p->ainsn.insn) {
+		free_insn_slot(p->ainsn.insn, 0);
+		p->ainsn.insn = NULL;
+	}
 }
 
 /*

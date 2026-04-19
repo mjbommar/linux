@@ -7,6 +7,7 @@
 #include <linux/sched/signal.h>
 #include <linux/hardirq.h>
 #include <linux/kfence.h>
+#include <linux/kprobes.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/sched/debug.h>
@@ -419,6 +420,28 @@ void relay_signal(int sig, struct siginfo *si, struct uml_pt_regs *regs,
 {
 	int code, err;
 	if (!UPT_IS_USER(regs)) {
+#ifdef CONFIG_KPROBES
+		/*
+		 * Route kernel-mode SIGTRAP through the kprobes machinery
+		 * before the panic path. int3 (0xcc) at a kprobe site is
+		 * delivered here as SIGTRAP from the host; single-step
+		 * completion after TF arrives as SIGTRAP too. The handlers
+		 * return non-zero if they consumed the trap.
+		 *
+		 * struct pt_regs wraps struct uml_pt_regs on UML (see
+		 * arch/um/include/asm/ptrace-generic.h), so the container_of
+		 * gives us the pt_regs* the generic kprobes core expects.
+		 */
+		if (sig == SIGTRAP) {
+			struct pt_regs *ptregs =
+				container_of(regs, struct pt_regs, regs);
+
+			if (kprobe_int3_handler(ptregs))
+				return;
+			if (kprobe_debug_handler(ptregs))
+				return;
+		}
+#endif
 		if (sig == SIGBUS)
 			printk(KERN_ERR "Bus error - the host /dev/shm or /tmp "
 			       "mount likely just ran out of space\n");
