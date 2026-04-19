@@ -7,20 +7,26 @@
  * decisions-log D29). This file implements the arch hooks that
  * patch those NOPs to `call ftrace_caller` and back.
  *
- * The patch mechanism is deliberately simple (decisions-log D28):
- *   1. text_mutex is already held by the generic ftrace core.
- *   2. arch_ftrace_update_code() wraps ftrace_modify_all_code() in
- *      stop_machine_cpuslocked() so no peer UML vCPU host thread
- *      runs kernel code during the window.
- *   3. Each per-record patch uses um_kernel_text_patch_begin/end()
- *      (workstream B-04 extension) to mprotect exactly the one
- *      PAGE_SIZE page containing the patch site RW, memcpy 5 bytes,
- *      and mprotect it back to RX.
+ * Patch mechanism (decisions-log D28 + D30):
+ *   1. text_mutex is held by the generic ftrace core across the
+ *      arch_ftrace_update_code() callback (see
+ *      ftrace_arch_code_modify_prepare()).
+ *   2. arch_ftrace_update_code() runs inside stop_machine_cpuslocked()
+ *      so no peer UML vCPU host thread runs kernel code during the
+ *      patch window.
+ *   3. Inside the stop_machine callback we mprotect the kernel text
+ *      image [_text, _etext) RW **once**, call ftrace_modify_all_code()
+ *      which iterates every record and invokes our per-site memcpy
+ *      helpers, then mprotect back to RX **once**. Two mprotect
+ *      syscalls per enable/disable, regardless of how many records
+ *      are patched. Per-site mprotect would turn one enable into
+ *      2 * N syscalls (N ≈ 21000) and cumulative VMA fragmentation
+ *      hangs the host process (D30).
  *
- * UML cannot replicate the arm/arm64/riscv fixmap-alias or x86
+ * UML cannot replicate arm/arm64/riscv's fixmap-alias or x86's
  * text_poke_mm pattern because UML has exactly one mm (its host
- * process's). stop_machine is what guarantees no peer kernel path
- * observes the transient RW window.
+ * process's). stop_machine + bulk mprotect is the closest analogue:
+ * no peer kernel path observes the transient RW window.
  *
  * Function graph is deferred to a follow-up per D27; this file
  * intentionally does not implement prepare_ftrace_return() or any
@@ -33,8 +39,9 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <asm/sections.h>
 
-#include <asm/patchable.h>
+#include <os.h>
 
 #define CALL_INSN_OPCODE	0xe8
 #define CALL_INSN_SIZE		5	/* = MCOUNT_INSN_SIZE */
@@ -55,24 +62,29 @@ static void um_ftrace_build_call(u8 buf[CALL_INSN_SIZE],
 	memcpy(&buf[1], &disp, sizeof(disp));
 }
 
-static int um_ftrace_write(unsigned long site, const u8 buf[CALL_INSN_SIZE])
+/*
+ * Per-record patchers. Invoked from ftrace_modify_all_code() which
+ * we run inside arch_ftrace_update_code()'s stop_machine callback,
+ * where [_text, _etext) is already mprotect'd RW. Plain memcpy.
+ */
+
+int ftrace_init_nop(struct module *mod, struct dyn_ftrace *rec)
 {
-	int err;
-
-	err = um_kernel_text_patch_begin((void *)site, CALL_INSN_SIZE);
-	if (err)
-		return err;
-
-	memcpy((void *)site, buf, CALL_INSN_SIZE);
-
-	err = um_kernel_text_patch_end((void *)site, CALL_INSN_SIZE);
-	return err;
+	/*
+	 * -fpatchable-function-entry=5,0 places the 5-byte NOP at
+	 * compile time, so init has nothing to write. Skipping this
+	 * avoids per-record work during ftrace_init() entirely; any
+	 * drift (corrupted build, in-tree poisoning) will be caught
+	 * by the generic verification path on first ftrace_make_call.
+	 */
+	return 0;
 }
 
 int ftrace_make_nop(struct module *mod, struct dyn_ftrace *rec,
 		    unsigned long addr)
 {
-	return um_ftrace_write(rec->ip, um_ftrace_nop5);
+	memcpy((void *)rec->ip, um_ftrace_nop5, CALL_INSN_SIZE);
+	return 0;
 }
 
 int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
@@ -80,7 +92,8 @@ int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 	u8 new[CALL_INSN_SIZE];
 
 	um_ftrace_build_call(new, rec->ip, addr);
-	return um_ftrace_write(rec->ip, new);
+	memcpy((void *)rec->ip, new, CALL_INSN_SIZE);
+	return 0;
 }
 
 /*
@@ -96,28 +109,37 @@ int ftrace_update_ftrace_func(ftrace_func_t func)
 	u8 new[CALL_INSN_SIZE];
 
 	um_ftrace_build_call(new, site, (unsigned long)func);
-	return um_ftrace_write(site, new);
+	memcpy((void *)site, new, CALL_INSN_SIZE);
+	return 0;
 }
 
 static int um_ftrace_update_code_cb(void *data)
 {
 	int *command = data;
+	unsigned long text_len = (unsigned long)_etext - (unsigned long)_text;
+	int err;
+
+	/*
+	 * stop_machine dispatches to every online CPU in parallel; only
+	 * one needs to do the work. cpumask_first() picks a stable CPU
+	 * regardless of caller. Other CPUs' callback invocations return
+	 * 0 immediately but stay frozen until the chosen CPU returns,
+	 * preserving the no-peer-execution property.
+	 */
+	if (smp_processor_id() != cpumask_first(cpu_online_mask))
+		return 0;
+
+	err = os_protect_memory(_text, text_len, 1, 1, 1);
+	if (err)
+		return err;
 
 	ftrace_modify_all_code(*command);
-	return 0;
+
+	return os_protect_memory(_text, text_len, 1, 0, 1);
 }
 
 void arch_ftrace_update_code(int command)
 {
-	/*
-	 * Freeze every peer UML vCPU host thread while we patch, so no
-	 * other kernel path observes the transient RW window on the
-	 * target page. See decisions-log D28 for why this is required
-	 * on UML even though the single-mm bare-metal analogues
-	 * (fixmap, text_poke_mm) are unavailable here.
-	 *
-	 * text_mutex is held by the generic ftrace core across this
-	 * callback (see ftrace_arch_code_modify_prepare()).
-	 */
-	stop_machine_cpuslocked(um_ftrace_update_code_cb, &command, NULL);
+	stop_machine_cpuslocked(um_ftrace_update_code_cb, &command,
+				cpu_online_mask);
 }

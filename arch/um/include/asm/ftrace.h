@@ -45,6 +45,25 @@ struct dyn_arch_ftrace {
 	/* No extra per-record data needed on UML. */
 };
 
+/*
+ * Under -fpatchable-function-entry=5,0 every traced function's entry
+ * already contains a 5-byte NOP at compile time. The generic
+ * ftrace_init_nop() fallback calls ftrace_make_nop() on every record
+ * during ftrace_init(), which on UML means 21000+ mprotect round
+ * trips against the host process's one mm — fragmenting the VMA
+ * list and, in the research profile, hanging boot.
+ *
+ * Override with a no-op (see arch/um/kernel/ftrace.c): if a site is
+ * ever observed to hold anything other than the expected NOP5 at
+ * init (corrupted build, in-tree poisoning), ftrace_make_call on
+ * first enable will notice the mismatch via the generic ftrace
+ * core's own verification path.
+ */
+#define ftrace_init_nop ftrace_init_nop
+struct module;
+struct dyn_ftrace;
+int ftrace_init_nop(struct module *mod, struct dyn_ftrace *rec);
+
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
 #endif /* !__ASSEMBLER__ */

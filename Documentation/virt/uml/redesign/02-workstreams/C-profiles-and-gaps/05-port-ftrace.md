@@ -112,7 +112,17 @@ the tree consistent.
    - `arch/um/configs/profiles/research.config`:
      add `CONFIG_FUNCTION_TRACER=y`,
      `CONFIG_DYNAMIC_FTRACE=y`.
-   - `arch/um/configs/profiles/fuzz.config` similarly.
+   - `arch/um/configs/profiles/fuzz.config` is **NOT** changed
+     in this task. The fuzz profile's existing design intent
+     (comment at the top of `fuzz.config`) is to stay minimal —
+     "We enable FTRACE just enough to unlock USER_EVENTS; no
+     other tracers turn on." Function tracer adds a 5-byte NOP
+     to every traced function, which is near-free when off but
+     still pays an i-cache cost at fuzz-reboot density. Fuzz
+     consumers who want function tracing in a fuzz context can
+     either opt in at `make menuconfig` time or use the
+     `research` profile for a targeted fuzz-with-trace pass.
+     Fuzz-deep follows the same rationale.
    - **Invariant check (already satisfied 2026-04-18):**
      `arch/um/configs/profiles/prod-fast.config` and
      `arch/um/configs/profiles/sandbox.config` both contain
@@ -121,8 +131,8 @@ the tree consistent.
      not present in those profiles. C-05 must not regress
      this. The profile matrix in
      `03-profiles/README.md` should be updated in commit 6 to
-     name the invariant explicitly ("DYNAMIC_FTRACE = off in
-     prod-fast and sandbox; on in research/fuzz/fuzz-deep").
+     name the invariant explicitly ("`DYNAMIC_FTRACE` = on in
+     research, off everywhere else").
 
 4. **Selftest harness row.**
    - Add `tools/testing/selftests/um/ftrace-smoke/` (or extend

@@ -1294,4 +1294,128 @@ CALL differs: under D29 it resolves directly to `ftrace_caller`
 
 ---
 
+## D30: UML ftrace uses bulk mprotect inside stop_machine; per-site path kept for standalone callers
+
+**Date:** 2026-04-19 (pragmatic refinement of D28 after boot
+testing uncovered VMA fragmentation)
+**Status:** Accepted (supersedes D28's per-site mprotect mechanism
+for the ftrace batch path; D28's per-site semantics remain correct
+for standalone single-site callers — the helper pair stays in the
+B-04 API for future use)
+
+**Decision:** The ftrace batch path in
+`arch_ftrace_update_code()` does a **bulk** mprotect on
+`[_text, _etext)` once inside the `stop_machine_cpuslocked()`
+callback, calls `ftrace_modify_all_code()` which iterates every
+record and invokes per-record `ftrace_make_call` /
+`ftrace_make_nop` — those helpers now do a plain 5-byte
+`memcpy` with no mprotect of their own — then bulk mprotects back
+to RX. Two mprotect syscalls per enable/disable regardless of
+record count.
+
+In addition, `ftrace_init_nop` is a no-op: under
+`-fpatchable-function-entry=5,0` the compiler-emitted NOP5 is
+already in place at every traced function's entry, so init
+has nothing to write.
+
+The `um_kernel_text_patch_begin/end` helpers (B-04 extension)
+still exist and still validate single-or-two-page ranges within
+`[_text, _etext)`. They are the right surface for future
+single-site callers (kprobes, live-patch, standalone one-off
+patches) where taking the bulk hit is wrong. ftrace's batch path
+is the outlier where N patches per operation make per-site
+mprotect prohibitive.
+
+**Reasoning (what testing surfaced):**
+
+Per-site mprotect under the original D28 mechanism turned one
+"enable function tracer" call into `2 * N` mprotect syscalls,
+where N = `__mcount_loc` size (21275 on research profile with
+GCC; 19592 with clang). Each mprotect on a different address
+range splits the host-process VMA covering kernel text. After N
+such operations the host process holds `~N` VMAs for one
+formerly-contiguous region. VMA operations slow O(log N) per
+operation, total O(N²) — verified empirically: research-profile
+first-enable hangs for 5+ minutes, boot never reaches the
+tracer-ready state.
+
+x86 does not hit this because `text_poke_mm` uses one PTE in a
+dedicated mm; arm/arm64/riscv do not hit this because fixmap
+reuses one virtual slot. Both are single-mapping-slot designs.
+UML's "use the process's mprotect" has no analogue slot, so
+bulk-or-bust is the only practical design.
+
+`ftrace_init_nop` as a no-op eliminates an earlier boot-time hang
+from the same cause: `ftrace_process_locs()` calling
+`ftrace_make_nop()` per record during init produced the same
+42000-syscall avalanche before the tracer was ever enabled.
+
+**Security envelope (what D28 said vs what D30 delivers):**
+
+D28's "no other UML kernel code runs during the RW window" is
+preserved — `stop_machine_cpuslocked()` guarantees it. The change
+is that the window covers all of `[_text, _etext)` for the
+duration of the batch, not one page per patch. Given that
+`stop_machine` has frozen every peer kernel thread, the scope of
+the RW window does not change what code can write to text: no
+code is running except the one patching CPU. The D28 security
+argument stands; only the implementation tactic changed.
+
+**Alternatives considered:**
+
+1. Keep per-site mprotect and hope VMA operations stay fast.
+   Rejected — verified hang on research profile.
+2. Batch per-page rather than per-site. Rejected — still O(pages
+   in text) ≈ 6000 syscalls, still fragmenting.
+3. Use a pre-allocated "patching alias mm" à la x86
+   `text_poke_mm`. Rejected for this task as out of scope —
+   would require building a UML-side equivalent of
+   `mm_alloc()` + PTE aliasing, which the host process's mm
+   model does not naturally support. Revisit if C-10 (host
+   helper process, crosvm-style) lands — that's the place to
+   build a real alias mechanism if we want one.
+4. mprotect all of text permanently RWX at boot. Rejected —
+   defeats the point of `.text` being RX.
+
+**Known limitation (deferred follow-up):**
+
+Research profile's `CONFIG_FUNCTION_TRACER=y +
+CONFIG_DYNAMIC_FTRACE=y` still hangs on first `echo function >
+current_tracer` — inside `ftrace_modify_all_code()`, after our
+bulk mprotect completes. Not the VMA-fragmentation hang (which
+D30 fixed); something in the research profile's debug surface
+(KASAN + UBSAN + KFENCE + PROVE_LOCKING + DEBUG_PAGEALLOC +
+DEBUG_OBJECTS) interacts poorly with the generic
+`ftrace_modify_all_code()` iteration under UML's UP
+`stop_machine` (which falls through to `local_irq_save`).
+
+Minimal-config `CONFIG_FUNCTION_TRACER=y` works correctly:
+verified 51293 trace lines captured from a basic `ls /` run.
+Commit 3 of the C-05 series (enable tracer in research profile)
+is therefore **deferred** pending root-cause analysis of the
+research-specific hang. The ftrace port itself is correct; the
+research-profile interaction is a separate bug to investigate.
+
+**Revisit triggers:**
+
+- If a UML C-10 host helper lands, reconsider alias-based
+  patching (removes the "bulk RW in primary mm" property).
+- Once the research-profile hang is root-caused, commit 3 of
+  C-05 can land with whichever debug feature the investigation
+  identifies as the culprit gated or reported upstream.
+
+**Cross-reference:**
+`arch/um/kernel/ftrace.c`
+(`um_ftrace_update_code_cb`, `ftrace_init_nop`),
+`arch/um/include/asm/ftrace.h`
+(`ftrace_init_nop` arch-override),
+`arch/um/kernel/section_split.c`
+(per-site helpers kept for standalone callers),
+`04-risks/decisions-log.md` §D28 (original per-site spec,
+partially superseded), §D27 (graph deferred, independent),
+§D29 (toolchain choice, independent),
+`02-workstreams/C-profiles-and-gaps/05-port-ftrace.md` §Approach.
+
+---
+
 ## (Future entries here, as decisions are made)
