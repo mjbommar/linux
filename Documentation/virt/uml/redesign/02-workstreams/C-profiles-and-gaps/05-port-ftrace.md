@@ -1,14 +1,28 @@
 # C-05: Port ftrace to UML
 
-**Status:** planned (design pass 2026-04-18 — see "Approach" below
-for the concrete slice plan; implementation pending)
-**Effort:** 4 weeks (function tracer + dynamic ftrace); function
-graph deferred to a follow-up task per D27
+**Status:** landed (2026-04-19) — `HAVE_FUNCTION_TRACER` +
+`HAVE_DYNAMIC_FTRACE` + `FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY`
+selected for UML/x86_64. Research profile enables the tracer (KCOV
+moved to fuzz/fuzz-deep per D31). Selftest
+`tools/testing/selftests/um/ftrace-smoke/` reports
+"FTRACE_SMOKE: PASS trace_lines=51316" on a minimal `ls /`
+workload. Research profile boot (init=/bin/true): median 3.48 s
+tracer-on vs 3.37 s tracer-off (+3.3%, NOP5 i-cache residency;
+within the profile's "accept the cost" envelope and well below
+A-07's 5% blocker). Function graph deferred per D27; REGS /
+WITH_ARGS / WITH_CALL_OPS / WITH_DIRECT_CALLS out of scope. User
+doc at `Documentation/virt/uml/ftrace.rst`.
+**Effort:** ~4 engineer-days wall-clock (shorter than the 4-week
+estimate; the toolchain pivot to `-fpatchable-function-entry`
+simplified the port, while D30 + D31 cost a day each of
+debugging).
 **Dependencies:** B-04 (.text section split, landed 2026-04-18 —
-see `arch/um/include/asm/patchable.h` and `arch/um/kernel/section_split.c`)
-**Blocks:** research profile having function tracer; trace events
-become useful at function granularity; unblocks
-`HAVE_KPROBES_ON_FTRACE` path in C-04
+see `arch/um/include/asm/patchable.h` and `arch/um/kernel/section_split.c`).
+C-05 extended B-04 with companion kernel-text-wide helpers
+`um_kernel_text_patch_begin/end`.
+**Blocks:** was blocking research profile having function tracer
+(now landed); `HAVE_KPROBES_ON_FTRACE` in C-04 can now build on
+this infrastructure.
 
 ## Goal
 

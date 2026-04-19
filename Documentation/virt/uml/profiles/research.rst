@@ -34,13 +34,16 @@ What's on
   ``DEBUG_INFO`` (DWARF5), ``MAGIC_SYSRQ``, ``IKCONFIG``,
   ``PROC_KCORE``, ``BSD_PROCESS_ACCT``.
 - **Tracing**: ``FTRACE``, ``FTRACE_SYSCALLS``, ``USER_EVENTS``,
-  ``DYNAMIC_EVENTS``, ``HIST_TRIGGERS`` — all the standard Linux
-  tracing surfaces. See the PARK.8 spike findings
-  (``Documentation/virt/uml/redesign/08-future-phases/notes/uprobes-spike.md``)
-  for which guest-side tracing mechanisms already work on UML.
-- **Coverage**: ``KCOV`` (selectable because ``ARCH_HAS_KCOV`` is
-  already in ``arch/um/Kconfig``), plus
-  ``KCOV_ENABLE_COMPARISONS``.
+  ``DYNAMIC_EVENTS``, ``HIST_TRIGGERS``, and — since workstream
+  C-05 — ``FUNCTION_TRACER`` + ``DYNAMIC_FTRACE`` (see
+  :doc:`../ftrace` for mechanism and limitations). Function graph
+  is deferred per decisions-log D27.
+- **Coverage**: *none*. ``CONFIG_KCOV`` is explicitly off in
+  ``research``; coverage-guided fuzzing lives in the ``fuzz`` and
+  ``fuzz-deep`` profiles (which do not enable the function
+  tracer — fast reboots beat observability in a fuzz loop). See
+  decisions-log D31 for why ``KCOV`` and ``FUNCTION_TRACER``
+  cohabiting on UML-UP compounds under ``stop_machine``.
 - **Sanitizers**: ``KASAN`` (generic), ``UBSAN`` with bounds
   checking, ``KFENCE`` (sampling heap-corruption detector,
   ``sample_interval=100`` ms, 255 guarded objects). KFENCE works
@@ -90,3 +93,4 @@ See also
 - :doc:`index`
 - :doc:`fuzz`
 - :doc:`time-travel`
+- :doc:`../ftrace` — how the function tracer works on UML
