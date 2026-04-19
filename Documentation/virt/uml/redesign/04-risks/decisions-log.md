@@ -1646,4 +1646,139 @@ information value is near zero.
 
 ---
 
+## D32: C-04 ships the full kprobes surface; supersedes D27 with empirical validation
+
+**Date:** 2026-04-19
+**Status:** Accepted (scope decision for C-04, supersedes D27's
+function_graph deferral pending commit 7's stress test result)
+
+**Decision:** C-04 (port kprobes to UML) delivers the full dynamic-
+instrumentation surface in one workstream rather than a phased
+C-04a/C-04b split:
+
+- `HAVE_KPROBES` via int3 + single-step (mid-function probes)
+- `HAVE_KPROBES_ON_FTRACE` via C-05's ftrace + a new WITH_REGS
+  variant in mcount.S (entry probes, fast path)
+- `HAVE_KRETPROBES` via a return-address-rewrite trampoline
+  (return probes)
+- `HAVE_FUNCTION_GRAPH_TRACER` via the same return-trampoline
+  pattern (call graphs)
+
+As part of the same series, D27's deferral of function_graph
+(from the C-05 workstream) is lifted. An empirical validation —
+`tools/testing/selftests/um/kprobes-stress/` — runs kretprobes +
+function_graph under SIGALRM pressure for 10 000 iterations and
+asserts no lockdep splat / no KASAN report / no kernel oops. If
+that test passes, D27's theoretical race concern is superseded
+by observed correctness. If it fails, the specific failure mode
+becomes a narrow follow-up.
+
+**Reasoning:**
+
+Three inputs drove this scope up from the earlier phased
+proposals (Option B: ftrace-only; Option D: int3 + ftrace,
+defer kretprobes):
+
+1. **Vision alignment.** `00-vision.md` lists kprobes and ftrace
+   together in "full instrumentation," and the success criterion
+   is `make ARCH=um uml/research` producing a kernel with "all
+   sanitizers and tracing on" that reproduces a syzbot CVE in
+   <30 s. Shipping kprobes without kretprobes — "I can trace
+   every call but not returns" — is a visible gap against that
+   target. bpftrace's `kretprobe:` / `uretprobe:` and perf's
+   `--add probe=foo%return` are standard tools in the debugging
+   workflow.
+
+2. **Architectural research cleared the risks.** Reading the UML
+   signal infrastructure on 2026-04-19 produced three green-
+   lights (see `02-workstreams/C-profiles-and-gaps/
+   04-port-kprobes.md` §"Architectural research"):
+   - `arch/um/kernel/trap.c:417` (`relay_signal()`) has a clean
+     kernel-mode-SIGTRAP hook point already — just needs a
+     kprobe_int3_handler dispatch before the existing panic.
+   - `arch/x86/um/os-Linux/mcontext.c:81..84` already
+     propagates `X86_EFLAGS_TF` through the mcontext ↔ regs
+     roundtrip via an existing `single_stepping` mechanism; no
+     new single-step emulation work needed.
+   - Livepatch already rewrites return addresses on UML kernel
+     stacks without signal-race issues; the D27 concern about
+     return_to_handler racing SIGALRM was theoretical rather
+     than observed. UML's SIGALRM delivery
+     (`arch/um/os-Linux/signal.c:131..150`) runs in host
+     context against a captured mcontext and writes modified
+     registers back via `set_stub_state()`, without racy
+     mutation of the guest kernel stack mid-trampoline.
+
+3. **Window pressure (per `00-vision.md`).** "The window is open
+   now and is not large. Five years from now, either UML has
+   caught up or LKL + Rust VMM crates + crosvm + eBPF together
+   have eaten the niche." The incremental path (B → D →
+   A → lift-D27, across multiple sessions with C-04 carrying
+   "partially complete" status) burns calendar time on
+   conservatism that the architectural research showed was
+   unwarranted. Ship more, phase less.
+
+**On D27 specifically (function_graph deferral from C-05):**
+
+D27 was written on 2026-04-18 during the C-05 design pass. It
+cited signal-race risk between the function_graph return
+trampoline and UML's SIGALRM-delivered preemption. At the time,
+I had not read the UML signal-handling code in depth; the
+deferral was precautionary. The architectural research on
+2026-04-19 (informing this D32) showed the race is theoretical
+and that livepatch already does comparable return-address
+rewriting on UML without incident. D27 is therefore not wrong
+in spirit — "a stress test is good hygiene" — but the
+"defer until test exists" framing should have been "build the
+test alongside the feature and validate empirically." Commit 7
+in the C-04 series corrects this: it builds the test and
+exercises graph + kretprobes under SIGALRM pressure. The test
+result retires D27.
+
+**Alternatives considered and why rejected:**
+
+- **Option B: ship only HAVE_KPROBES_ON_FTRACE first.** Fastest
+  (~1 week), safe, but leaves both mid-function probes and
+  returns/graphs out. Research profile UX visibly incomplete
+  against vision.
+- **Option D: int3 + ftrace, defer kretprobes with D27.**
+  Consistent with D27 but leaves the biggest user-value gap
+  (return probes). Consistency is the wrong target when the
+  consistent position is itself empirically unvalidated.
+- **Full scope but keep D27 theoretical deferral (no stress
+  test).** Defers the question indefinitely. The right move is
+  to decide based on data; commit 7 generates the data.
+- **Split kretprobes from function_graph: ship kretprobes with
+  kprobes, defer function_graph via D27.** They share the
+  trampoline pattern, so if one is safe the other is. Splitting
+  is incoherent.
+
+**Revisit triggers:**
+
+- Commit 7's stress test fails: that specific failure gets a
+  narrow fix (likely signal masking across a small window) or
+  a narrow deferral with empirical evidence, not the broad
+  D27-style deferral.
+- A maintainer reviews the C-04 series and asks why UML ships
+  full kprobes while other arches phase: the answer is D32 —
+  we had the architectural research clearing the usual
+  concerns, and the stress test backed it.
+- C-10 host-launcher or D-* KVM-backend work changes the
+  signal-delivery model: revisit the stress test under the new
+  model.
+
+**Cross-reference:**
+- `02-workstreams/C-profiles-and-gaps/04-port-kprobes.md` (the
+  task spec with the full slice plan).
+- D27 — superseded by this entry pending commit 7 validation.
+- D29 (toolchain choice — `-fpatchable-function-entry`),
+  D30 (bulk mprotect) — C-05 decisions that C-04 builds on.
+- `arch/um/kernel/trap.c:417` — the SIGTRAP hook site.
+- `arch/x86/um/os-Linux/mcontext.c:81..84` — TF propagation
+  source.
+- `arch/x86/kernel/kprobes/{core.c,ftrace.c}` — primary
+  reference implementation.
+
+---
+
 ## (Future entries here, as decisions are made)
