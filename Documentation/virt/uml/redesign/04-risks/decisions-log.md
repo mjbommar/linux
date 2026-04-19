@@ -922,4 +922,376 @@ user the same menu of tools, just requiring a build-time choice.
 
 ---
 
+## D27: C-05 ships function tracer + dynamic ftrace; function-graph deferred
+
+**Date:** 2026-04-18
+**Status:** Accepted (scope decision for C-05 design pass)
+
+**Decision:** The C-05 (ftrace) task lands `HAVE_FUNCTION_TRACER`
+and `HAVE_DYNAMIC_FTRACE` but **not** `HAVE_FUNCTION_GRAPH_TRACER`
+in its first series. Graph lands in a follow-up task after a
+dedicated signal-stress test demonstrates that the return
+trampoline survives UML's SIGALRM-driven preemption.
+
+**Reasoning:**
+
+Function graph works by overwriting a traced function's saved
+return address on the kernel stack with the address of
+`return_to_handler`; the real return address is pushed on ftrace's
+per-task return stack. When the traced function executes RET, it
+jumps to `return_to_handler`, which pops from the return stack
+and tail-jumps to the real caller.
+
+On UML, preemption arrives as SIGALRM (see
+`arch/um/os-Linux/signal.c:64,128,156..158`). If SIGALRM fires
+between the return-address rewrite and the trampoline's pop-and-
+jump, the signal handler runs with the kernel stack in a
+transient state where the "return address" slot holds the
+trampoline target — not the real caller. Most signal paths don't
+care, but any code that walks the stack for unwinding (lockdep,
+KASAN report paths, soft-lockup watchdog) sees a frame that
+points to `return_to_handler` and may produce misleading traces
+or, worse, re-enter the trampoline.
+
+The bug shape is narrow but real and architecturally awkward.
+Shipping the function tracer first gets the bulk of the
+observability story — `trace_printk`, tracepoints,
+`set_ftrace_filter` — into the research profile without the
+hazard. Graph remains an achievable follow-up.
+
+**Alternatives considered:**
+
+1. Ship both at once. Rejected — more surface area, one race
+   delays the whole series.
+2. Ship graph with graph-specific disablement around signal
+   paths. Rejected — identifying every signal-walked frame is
+   open-ended; the surface isn't obvious without concrete
+   failure cases to drive it.
+3. Skip graph permanently. Rejected — kprobes-on-ftrace and
+   several selftests depend on the graph tracer being
+   available under `research`.
+
+**Revisit:** When a concrete signal-stress test exists
+(`tools/testing/selftests/um/ftrace-graph-signal-race/` or
+similar) and demonstrably passes 10k iterations without a lockdep
+splat, UBSAN report, or visible stack corruption. At that point a
+C-05-followup task lands graph and updates this entry to
+superseded.
+
+**Upstream precedent for conditional `HAVE_FUNCTION_GRAPH_TRACER`:**
+three in-tree arches already gate graph selection on a subordinate
+capability rather than selecting it unconditionally:
+
+- `arch/arm/Kconfig`: `select HAVE_FUNCTION_GRAPH_TRACER if (!THUMB2_KERNEL)`
+- `arch/x86/Kconfig`: `select HAVE_FUNCTION_GRAPH_TRACER if X86_32 || (X86_64 && DYNAMIC_FTRACE)`
+- `arch/riscv/Kconfig`: `select HAVE_FUNCTION_GRAPH_TRACER if HAVE_DYNAMIC_FTRACE_WITH_ARGS`
+
+UML deferring graph behind its own capability (a to-be-added
+`UM_FTRACE_GRAPH_SAFE` or equivalent) is well within existing
+kernel convention. The
+`Documentation/livepatch/reliable-stacktrace.rst` note on
+`return_to_handler` unwinder reliability is the upstream
+acknowledgment that this frame is architecturally tricky and
+may warrant per-arch opt-outs.
+
+**Cross-reference:**
+`02-workstreams/C-profiles-and-gaps/05-port-ftrace.md` §"Out of
+scope for this task",
+`arch/x86/kernel/ftrace_64.S` (`return_to_handler`, reference
+implementation).
+
+---
+
+## D28: UML ftrace text patching — page-scoped mprotect + stop_machine; no alias mm available
+
+**Date:** 2026-04-18 (revised after security review; earlier draft
+specified process-wide mprotect without stop_machine)
+**Status:** Accepted (mechanism decision for C-05 design pass)
+
+**Decision:** When C-05 patches nop5↔call __fentry__ at runtime,
+it uses the following sequence on UML:
+
+1. Acquire `text_mutex` (generic ftrace core already requires it).
+2. `stop_machine_cpuslocked()` — freeze all other UML vCPU host
+   threads so no peer UML kernel code can run while the target
+   page is writable.
+3. Inside the stopped region, on the patching CPU only:
+   a. `um_kernel_text_patch_begin(addr, 5)` — new companion helper
+      (see "B-04 extension" below) that `mprotect(RW)` on the one
+      (or, when the 5-byte site straddles a page boundary, two
+      adjacent) PAGE_SIZE page(s) containing `addr`, validated
+      to lie within `[_text, _etext)`. Longer ranges are
+      rejected with -EINVAL.
+   b. `memcpy(addr, new_insn, 5)`.
+   c. `um_kernel_text_patch_end(addr, 5)` — `mprotect(RX)` on
+      the same pages.
+4. `stop_machine_cpuslocked()` returns.
+5. Release `text_mutex`.
+
+No port of `text_poke_bp` or INT3 breakpoint emulation — UML is
+already explicitly excluded from the `int3_emulate_*` helpers via
+`#ifndef CONFIG_UML_X86` in `arch/x86/include/asm/text-patching.h:134..216`.
+
+**Why `stop_machine` is required (not optional):**
+
+UML has exactly one `struct mm_struct` — the host process's.
+Every UML vCPU is a host thread sharing that one mm. When we
+`mprotect(page, RW)` to patch, the page becomes writable for
+**every UML kernel host thread**, not just the patching CPU.
+
+This is architecturally weaker than what bare-metal arches do:
+
+- **arm32 and arm64** use `FIX_TEXT_POKE0` fixmap slots — the
+  target page is mapped RX in the primary `init_mm` throughout;
+  a separate virtual address (the fixmap slot) is mapped RW on
+  the patching CPU only, for the duration of the write. See
+  `arch/arm/kernel/patch.c` and `arch/arm64/kernel/patching.c`.
+- **riscv** uses the same fixmap pattern (`FIX_TEXT_POKE0/1`).
+  See `arch/riscv/kernel/patch.c`.
+- **x86** goes further: `text_poke_mm` (arch/x86/kernel/
+  alternative.c:2503..2637) is a dedicated `struct mm_struct`
+  with a per-PTE RW alias at a KASLR-randomized virtual address;
+  `use_temporary_mm()` loads its page tables on the local CPU
+  for the write. The primary kernel mm **never** has text RW.
+
+None of these approaches are available to UML. UML cannot
+create a second mm with page-table aliasing because UML is a
+userspace program and its host process has one mm by
+construction. A second `mmap()` of the same backing pages is
+not equivalent (MAP_PRIVATE COW, MAP_SHARED changes the
+semantic, and neither gives per-thread view control).
+
+Given that a RW window on the target page is structurally
+necessary, the mitigation is: **ensure no other UML kernel
+code runs during the window**. `stop_machine_cpuslocked()`
+gives exactly that property. The window is bounded in time
+(single 5-byte memcpy) and in space (one 4 KB page).
+
+This is the closest UML can approximate the arm/riscv/x86
+"primary mapping stays RX; only the patching CPU sees RW"
+property.
+
+**Security envelope (what D28 does and does not buy):**
+
+With D28 as specified, a memory-safety bug elsewhere in the
+UML kernel that produces a stray write cannot corrupt kernel
+text during the patch window, because `stop_machine` has
+paused every kernel path that could issue such a write.
+
+What D28 does **not** buy:
+
+- A concurrent host-side attacker with write access to the UML
+  host process's memory (e.g. a ptrace attacher) can still
+  write to the page during the window. UML has always assumed
+  the host process is trusted; this does not regress that
+  assumption.
+- If a future hardware interrupt handler runs without being
+  paused by `stop_machine` (unlikely on UML — signal-delivered
+  "IRQs" go through the UML scheduler which respects stop),
+  it would be exempt from the guarantee. The invariant should
+  be re-verified if UML ever grows a bottom-half path that
+  bypasses the scheduler.
+- `prod-fast` and `sandbox` profiles do not enable
+  `DYNAMIC_FTRACE` (verified: both profile fragments contain
+  `# CONFIG_FTRACE is not set`). The patch window therefore
+  never opens in those profiles. `research` / `fuzz` / `fuzz-deep`
+  accept the window as part of their instrumentation posture.
+
+**B-04 extension required (separate commit, same series):**
+
+B-04 shipped `um_text_patch_begin/end` that range-validate
+against `[__start_um_patch_text, __end_um_patch_text)`. Mcount
+call sites are scattered through every traceable function in
+`.text` at large, not confined to `.um_patch_text`. C-05
+therefore lands a companion pair in the same header:
+
+- `um_kernel_text_patch_begin(void *addr, unsigned long len)`
+- `um_kernel_text_patch_end(void *addr, unsigned long len)`
+
+scoped to `[_stext, _etext)` and enforcing single-page coverage
+(`addr..addr+len` must lie within one 4 KB page; otherwise
+-EINVAL). Keeping the two helper pairs distinct preserves
+B-04's tighter invariant for `.um_patch_text` (patchable-
+function JIT, future jump-label) and makes the call site
+reveal the intent.
+
+**Alternatives considered:**
+
+1. Port `text_poke_bp` anyway. Rejected — UML has no IDT, no
+   INT3 emulator, no need for cross-CPU instruction-fetch
+   atomicity.
+2. Widen existing `um_text_patch_begin/end` to accept any
+   `.text` page. Rejected — conflates B-04's patchable-function
+   scope with ftrace's kernel-wide scope; reviewers would
+   justifiably ask why the range check was loosened.
+3. Process-wide `mprotect` across all of `.text`. Rejected —
+   maximizes blast radius of any stray write during the window.
+4. Skip `stop_machine`, rely on `text_mutex` alone. Rejected —
+   `text_mutex` serializes *text patchers*, not *every kernel
+   thread that might write to memory by accident*. The
+   shared-mm property of UML makes `stop_machine` necessary
+   here even though it would be over-engineering on bare-metal.
+5. Move text patching into a dedicated host helper process
+   (crosvm-style; see C-10). This is the UML analog of
+   `text_poke_mm` and would return the primary UML process's
+   `.text` to permanent RX. Deferred as a future hardening
+   task once C-10 infrastructure exists — too big a dependency
+   for C-05's scope.
+
+**Revisit triggers:**
+
+- If UML ever grows a path that runs UML kernel C code without
+  honoring the scheduler (e.g. a signal handler that doesn't
+  trampoline through `irq_enter`/`irq_exit`), the `stop_machine`
+  guarantee weakens. Re-audit then.
+- When C-10 (crosvm-style launcher, planned) lands, re-evaluate
+  whether a helper-process text-patching path is viable and
+  worth the complexity. At that point the follow-up task
+  "D28-followup: move ftrace text patching to C-10 helper" is
+  the right entry point.
+
+**Cross-reference:**
+`arch/um/include/asm/patchable.h` (B-04's helpers + new C-05
+helpers to be added),
+`arch/x86/include/asm/text-patching.h:134..216`
+(`CONFIG_UML_X86` excludes UML from `int3_emulate_*`),
+`arch/arm/kernel/patch.c`, `arch/arm64/kernel/patching.c`,
+`arch/riscv/kernel/patch.c` (fixmap-based per-page alias
+precedent),
+`arch/x86/kernel/alternative.c:2503..2637` (`text_poke_mm`,
+the dedicated-mm approach that UML cannot replicate),
+`02-workstreams/C-profiles-and-gaps/05-port-ftrace.md` §Approach
+commit 2, §Risk,
+`02-workstreams/C-profiles-and-gaps/10-host-launcher-crosvm.md`
+(host helper process that may enable future hardening).
+
+---
+
+## D29: C-05 uses `-fpatchable-function-entry=5,0`, not `-pg -mfentry`
+
+**Date:** 2026-04-18
+**Status:** Accepted (toolchain decision for C-05 design pass, revised
+during pre-implementation verification)
+
+**Decision:** UML's ftrace port compiles ftrace-instrumented TUs
+with `-fpatchable-function-entry=5,0`, not `-pg -mfentry
+-mrecord-mcount`. The arch Makefile (`arch/um/Makefile`) gains:
+
+```make
+ifeq ($(CONFIG_DYNAMIC_FTRACE),y)
+  KBUILD_CPPFLAGS += -DCC_USING_PATCHABLE_FUNCTION_ENTRY
+  CC_FLAGS_FTRACE := -fpatchable-function-entry=5,0
+endif
+```
+
+and `arch/um/Kconfig` gains
+`select FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY if DYNAMIC_FTRACE`.
+No `__fentry__` symbol, no `scripts/recordmcount` post-processing,
+no `-pg`.
+
+**Reasoning:**
+
+UML unconditionally sets `-mcmodel=large` on 64-bit builds
+(`arch/um/Makefile:33..35`). Pre-implementation verification
+(2026-04-18) compiled a trivial translation unit with each
+combination and inspected the emitted prologue:
+
+| Compile flags                                  | Function prologue bytes |
+|------------------------------------------------|-------------------------|
+| `-mcmodel=small -pg -mfentry -mrecord-mcount`  | endbr64 + 5-byte `e8` CALL (recordmcount-compatible) |
+| `-mcmodel=medium -pg -mfentry -mrecord-mcount` | endbr64 + 5-byte `e8` CALL (recordmcount-compatible) |
+| `-mcmodel=large  -pg -mfentry -mrecord-mcount` | endbr64 + 33-byte `movabs/lea/add/movabs/add/call *%r10` (**indirect call; recordmcount cannot find the site**) |
+| `-mcmodel=kernel -pg -mfentry -mrecord-mcount` | **cc1 error: "code model kernel does not support PIC mode"** (UML is PIE) |
+| `-mcmodel=large  -fpatchable-function-entry=5,0` | **endbr64 + 5-byte NOP; `__patchable_function_entries` section populated** |
+
+The `-mfentry` path is therefore structurally broken for UML
+given the current `-mcmodel=large` global flag. Removing
+`-mcmodel=large` cross-cuts UML's addressing model (the reason
+for the large model is UML's nonstandard text layout — removing
+it was not investigated under C-05 and would expand scope
+materially). `-fpatchable-function-entry=5,0` works unchanged
+under `-mcmodel=large`: the 5 bytes of NOP at function entry
+are pure data (no relocation), and the
+`__patchable_function_entries` section records absolute
+addresses without depending on the call encoding.
+
+**Second benefit: Clang parity.** Prior research (see D27's
+upstream-precedent footnote and the web-search prior-art pass)
+documented that Clang rejects `-mrecord-mcount` on x86_64 (the
+flag is SystemZ-only in LLVM per review D71627). The
+`FTRACE_MCOUNT_USE_CC` Kconfig probe would therefore fail under
+`LLVM=1`, forcing a fallthrough to objtool or legacy
+`recordmcount`. `-fpatchable-function-entry` is supported
+identically by GCC ≥ 8 and Clang ≥ 10 on x86_64, giving a
+uniform toolchain path.
+
+**Alternatives considered:**
+
+1. **Remove `-mcmodel=large` from ftrace-instrumented TUs only**
+   (per-TU CFLAGS_REMOVE / CFLAGS_override). Rejected — needs
+   a UML mm-model audit to prove every ftrace-able TU is safe
+   under `-mcmodel=medium` (or small); affects thousands of
+   TUs; wide CFLAGS surgery; hard to reverse if a corner case
+   surfaces. Compiler-flag decisions of this scope belong in a
+   dedicated change, not C-05.
+2. **Remove `-mcmodel=large` globally.** Rejected for the same
+   reason, amplified — a cross-cutting change to UML's
+   addressing model is a separate workstream.
+3. **Keep `-mfentry` and post-process to patch the indirect
+   call sequence to a nop-equivalent.** Rejected — reinventing
+   recordmcount for a non-standard instruction form, unused by
+   any upstream arch; maintenance burden with no upside.
+4. **`-fpatchable-function-entry=5,0` (this decision).**
+   Accepted.
+
+**Upstream precedent:** Three architectures already wire ftrace
+this way — the arm64, riscv, and parisc patterns (cited below)
+are the closest analogues to UML's new configuration. Each
+overrides `CC_FLAGS_FTRACE` in its arch Makefile and selects
+`FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY` in its Kconfig:
+
+- `arch/arm64/Makefile:142,145` + `arch/arm64/Kconfig:195`
+- `arch/riscv/Makefile:18,20` + `arch/riscv/Kconfig:103`
+- `arch/parisc/Makefile:77` + `arch/parisc/Kconfig:89`
+
+UML joins that club. Reviewers with ftrace-on-arm64 background
+will recognize the Makefile stanza immediately; that is part of
+the upstreamability argument per `05-validation/upstream-strategy.md`.
+
+**Interaction with D28:** D28's patching mechanism is unchanged.
+D28 specifies patching 5 bytes under `text_mutex` + `stop_machine`
+through `um_kernel_text_patch_begin/end`. Whether the source of
+those 5 bytes is "compiler-emitted NOP5" (D29) or "GCC-emitted
+CALL patched to NOP5 by recordmcount" (pre-D29 plan) does not
+change the runtime patch mechanism at all. The target of the
+CALL differs: under D29 it resolves directly to `ftrace_caller`
+(no `__fentry__` indirection), which simplifies
+`arch/um/kernel/mcount.S`.
+
+**Revisit triggers:**
+
+- If a future UML change removes `-mcmodel=large` globally
+  (because the mm-layout rationale for it goes away), the
+  `-mfentry` path becomes viable again. D29 would not
+  automatically flip back — `-fpatchable-function-entry` is the
+  modern, simpler path and upstream is migrating arches onto
+  it, not off it.
+- If `-fpatchable-function-entry` develops a UML-breaking
+  regression in a future GCC/Clang, fall back to a recordmcount
+  path that accepts the large-model indirect-call sequence
+  (write a UML-specific scanner, paralleling `scripts/recordmcount.c`).
+
+**Cross-reference:**
+`arch/um/Makefile:33..35` (source of `-mcmodel=large`),
+`arch/arm64/Makefile:142,145`, `arch/arm64/Kconfig:195`,
+`arch/riscv/Makefile:18,20`, `arch/riscv/Kconfig:103`,
+`arch/parisc/Makefile:77`, `arch/parisc/Kconfig:89`,
+`kernel/trace/Kconfig:877..884`
+(FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY),
+`reviews.llvm.org/D71627` (Clang `-mrecord-mcount` is SystemZ-only),
+`Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/05-port-ftrace.md`
+§Approach.
+
+---
+
 ## (Future entries here, as decisions are made)
