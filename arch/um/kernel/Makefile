@@ -18,6 +18,8 @@ obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 	physmem.o process.o ptrace.o reboot.o section_split.o sigio.o \
 	signal.o sysrq.o time.o tlb.o trap.o \
 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
+
+obj-$(CONFIG_KPROBES) += kprobes/
 obj-$(CONFIG_DEBUG_FS) += um_debugfs.o hooks_bench.o
 obj-y += load_file.o
 
