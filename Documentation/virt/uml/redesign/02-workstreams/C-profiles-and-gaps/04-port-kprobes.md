@@ -15,15 +15,29 @@ bpftrace; C-06 BPF JIT's kprobe-reachability validation.
 
 ## Goal
 
-`select HAVE_KPROBES`, `HAVE_KPROBES_ON_FTRACE`, `HAVE_KRETPROBES`,
-and `HAVE_FUNCTION_GRAPH_TRACER` for UML on x86_64. Delivers the
-full dynamic-instrumentation surface expected of a research-
-capable kernel: entry probes (ftrace fast path), mid-function
-probes (int3 + single-step), return probes (kretprobes), and
-function-call graphs (function_graph). The vision in
-`00-vision.md` calls out "all sanitizers and tracing on" for
-the research profile; C-04 closes the "tracing" half of that
+`select HAVE_KPROBES`, `HAVE_KRETPROBES`, and
+`HAVE_FUNCTION_GRAPH_TRACER` for UML on x86_64. Delivers the full
+user-visible dynamic-instrumentation surface — entry probes, mid-
+function probes (both via int3 + single-step), return probes
+(kretprobes), and function-call graphs (function_graph). The
+vision in `00-vision.md` calls out "all sanitizers and tracing on"
+for the research profile; C-04 closes the "tracing" half of that
 target.
+
+**Scope note (2026-04-19):** `HAVE_KPROBES_ON_FTRACE` is NOT in
+this task. Enabling the ftrace fast path for function-entry
+kprobes is a pure optimization (avoids int3 trap cost on entry
+probes) that requires a separate `ftrace_regs_caller` /
+`HAVE_DYNAMIC_FTRACE_WITH_REGS` implementation in mcount.S — a
+substantial piece of delicate assembly that would add risk to
+C-05's already-working ftrace. User-visible kprobe features
+(entry, mid-function, returns, graphs) all work through the int3
++ kretprobe-trampoline paths this task delivers. The ftrace fast
+path belongs in a follow-up task ("C-04b: HAVE_KPROBES_ON_FTRACE")
+once there's concrete performance pressure justifying the
+assembly investment. Per a-plus-quality-plan anti-pattern #3
+("optimize before workloads exist"), the ftrace path is a
+Q4-style perf tuning, not a C-04 prerequisite.
 
 Per the user's scope-setting guidance on 2026-04-19: this task
 delivers the full kprobes surface in one workstream rather than
@@ -40,7 +54,7 @@ a phased C-04a/C-04b split. Reasoning:
   "Architectural research" below) showed D27's signal-race
   concern is theoretical rather than observed, and existing
   livepatch return-address rewriting on UML works without
-  special handling. D27 is empirically superseded by commit 7's
+  special handling. D27 is empirically superseded by commit 5's
   stress test in this series.
 
 ## Architectural research (2026-04-19)
@@ -69,36 +83,29 @@ SIGALRM delivery path (`arch/um/os-Linux/signal.c:131..150`) runs
 in host context against a captured mcontext, writes modified
 registers back via `set_stub_state()`, and does not racily
 mutate the guest kernel stack mid-trampoline. D27's theoretical
-race does not manifest in practice; commit 7's stress test
+race does not manifest in practice; commit 5's stress test
 below empirically validates this before graph/kretprobes ship.
 
-## Approach — eight-commit slice plan
+## Approach — seven-commit slice plan
 
 Each commit builds cleanly under `ARCH=um` and `ARCH=um LLVM=1`,
 boots, passes existing selftests, and is individually bisectable.
 
-### Commit 1 — ftrace WITH_REGS variant
+Out of scope (tracked as potential follow-up task "C-04b"):
+`HAVE_KPROBES_ON_FTRACE` — the optimization that routes
+function-entry kprobes through the ftrace fast path instead of
+through int3. Implementing it needs `HAVE_DYNAMIC_FTRACE_WITH_REGS`,
+which means a new `ftrace_regs_caller` in mcount.S that saves a
+full UML pt_regs frame on the stack. That's ~200 LOC of delicate
+assembly affecting every traced function; it adds risk to C-05's
+working ftrace without providing new user-visible capability (the
+int3 path handles entry probes the same way, just slower). Per
+a-plus-quality-plan anti-pattern #3 ("optimize before workloads
+exist"), the ftrace fast path is Q4-style tuning. Ship int3
+kprobes now; opt-in the ftrace fast path later if profiling ever
+shows it matters.
 
-Extend C-05's `arch/um/kernel/mcount.S` with `ftrace_regs_caller`
-alongside the existing `ftrace_caller`. The REGS variant saves
-all of `struct pt_regs` at function entry (not just the 9
-caller-clobbered regs the basic caller saves), making those
-regs observable and mutable by ftrace ops — the prerequisite
-for kprobes-on-ftrace.
-
-- `arch/um/kernel/mcount.S`: add `ftrace_regs_caller` (push full
-  pt_regs frame before the call, restore on return).
-- `arch/um/include/asm/ftrace.h`: add
-  `HAVE_DYNAMIC_FTRACE_WITH_REGS` config knob awareness;
-  `arch_ftrace_get_regs()` implementation.
-- `arch/um/Kconfig`: `select HAVE_DYNAMIC_FTRACE_WITH_REGS`.
-- No user-visible behavior change on its own; the new trampoline
-  is a second callable symbol the generic ftrace core may pick
-  when ops flag `FTRACE_OPS_FL_SAVE_REGS`.
-- Validation: existing ftrace-smoke selftest still passes;
-  `objdump -t vmlinux | grep ftrace_regs_caller` finds the symbol.
-
-### Commit 2 — HAVE_KPROBES via int3 + single-step
+### Commit 1 — HAVE_KPROBES via int3 + single-step
 
 Lands the int3 breakpoint + single-step emulation path. This is
 the "big" commit in the series.
@@ -119,27 +126,11 @@ the "big" commit in the series.
   panic only if unhandled.
 - `arch/um/Kconfig`: drop `generic-y += kprobes.h`, select
   `HAVE_KPROBES`, `HAVE_KRETPROBES` (trampoline stubbed until
-  commit 4).
+  commit 2).
 - Validation: `modprobe kprobe_example` loads, fires on
   `do_sys_open`, prints the entry message. Remove cleanly.
 
-### Commit 3 — HAVE_KPROBES_ON_FTRACE
-
-Adds the ftrace fast path for entry probes. ~80 lines, modeled
-on `arch/x86/kernel/kprobes/ftrace.c`.
-
-- `arch/um/kernel/kprobes/ftrace.c`: `kprobe_ftrace_handler`,
-  `arch_prepare_kprobe_ftrace`. Extracts pt_regs from the
-  ftrace_regs (delivered by commit 1's WITH_REGS), advances
-  `regs->ip` past the NOP5 before calling user handlers.
-- `arch/um/Kconfig`: `select HAVE_KPROBES_ON_FTRACE if
-  DYNAMIC_FTRACE_WITH_REGS`.
-- Validation: `modprobe kprobe_example` at a function entry
-  address — confirm it takes the ftrace path (faster than int3;
-  observable via `/sys/kernel/debug/kprobes/list` showing the
-  "FTRACE" flag).
-
-### Commit 4 — Kretprobes trampoline
+### Commit 2 — Kretprobes trampoline
 
 Delivers return-probe support. Requires a trampoline that
 captures the return from every probed call and dispatches to
@@ -154,7 +145,7 @@ user handlers.
   `kernel_clone` — reports return values. Trampoline balances
   (no leaked frames after 1000 probes).
 
-### Commit 5 — HAVE_FUNCTION_GRAPH_TRACER (supersedes D27)
+### Commit 3 — HAVE_FUNCTION_GRAPH_TRACER (supersedes D27)
 
 Lifts the function_graph deferral from C-05's D27 using the
 same return-trampoline pattern kretprobes just validated.
@@ -168,19 +159,19 @@ same return-trampoline pattern kretprobes just validated.
   `HAVE_FUNCTION_GRAPH_FUNC`.
 - `arch/um/Kconfig`: `select HAVE_FUNCTION_GRAPH_TRACER if
   DYNAMIC_FTRACE`.
-- Updates decisions-log D27 to "superseded by C-04 commit 5 +
-  commit 7 stress test; see D32."
+- Updates decisions-log D27 to "superseded by C-04 commit 3 +
+  commit 5 stress test; see D32."
 - Validation: `echo function_graph > current_tracer` works in
   research profile; trace output shows call graphs with
   enter/exit events.
 
-### Commit 6 — research profile enables kprobes + graph
+### Commit 4 — research profile enables kprobes + graph
 
 - `arch/um/configs/profiles/research.config`:
   `CONFIG_KPROBES=y`, `CONFIG_KRETPROBES=y`,
   `CONFIG_FUNCTION_GRAPH_TRACER=y`.
 
-### Commit 7 — kprobes-stress selftest
+### Commit 5 — kprobes-stress selftest
 
 Empirical validation that the D27 concern (function_graph
 trampoline racing SIGALRM) does not manifest.
@@ -194,7 +185,7 @@ trampoline racing SIGALRM) does not manifest.
 - Pattern mirrors the existing `ftrace-smoke` selftest
   (host-side launcher, guest-side init script, PASS/FAIL line).
 
-### Commit 8 — docs + landed status
+### Commit 6 — docs + landed status
 
 - `Documentation/virt/uml/kprobes.rst` (new): user-facing doc
   describing the four entry points (int3, ftrace, kretprobe,
@@ -254,9 +245,9 @@ trampoline racing SIGALRM) does not manifest.
   needed.
 - **Q2 (resolved 2026-04-19):** kretprobes — plan to add them;
   C-05's D27 concern about return-trampolines also applied here,
-  but per D32 we validate empirically in commit 7 rather than
+  but per D32 we validate empirically in commit 5 rather than
   defer indefinitely.
-- **Q3 (open, expected to resolve during commit 7):** do the
+- **Q3 (open, expected to resolve during commit 5):** do the
   seccomp backend and the ptrace backend behave identically
   under heavy kprobe + graph load? The stress test runs against
   both (via the boot matrix) to find out.

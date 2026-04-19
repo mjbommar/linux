@@ -1652,17 +1652,30 @@ information value is near zero.
 **Status:** Accepted (scope decision for C-04, supersedes D27's
 function_graph deferral pending commit 7's stress test result)
 
-**Decision:** C-04 (port kprobes to UML) delivers the full dynamic-
-instrumentation surface in one workstream rather than a phased
-C-04a/C-04b split:
+**Decision:** C-04 (port kprobes to UML) delivers the full
+user-visible dynamic-instrumentation surface in one workstream:
 
-- `HAVE_KPROBES` via int3 + single-step (mid-function probes)
-- `HAVE_KPROBES_ON_FTRACE` via C-05's ftrace + a new WITH_REGS
-  variant in mcount.S (entry probes, fast path)
+- `HAVE_KPROBES` via int3 + single-step (entry + mid-function
+  probes, both through the int3 path)
 - `HAVE_KRETPROBES` via a return-address-rewrite trampoline
   (return probes)
 - `HAVE_FUNCTION_GRAPH_TRACER` via the same return-trampoline
   pattern (call graphs)
+
+**Out of scope (follow-up task "C-04b"):**
+`HAVE_KPROBES_ON_FTRACE` — the ftrace fast path for function-
+entry kprobes. Would need `HAVE_DYNAMIC_FTRACE_WITH_REGS`, which
+means a new `ftrace_regs_caller` in mcount.S that saves a full
+UML pt_regs frame on every traced function's entry. ~200 LOC of
+delicate assembly that adds risk to C-05's working ftrace without
+providing new user-visible capability — int3 kprobes covers the
+same function-entry use case at the cost of ~400 ns per probe
+hit (trap + single-step overhead vs ftrace's ~50 ns dispatch).
+On the research profile (~14× native baseline already), the
+difference is imperceptible. Per a-plus-quality-plan anti-
+pattern #3 ("optimize before workloads exist"), the ftrace fast
+path is a Q4-style tuning task, not a C-04 prerequisite. Defer
+until profiling shows it matters.
 
 As part of the same series, D27's deferral of function_graph
 (from the C-05 workstream) is lifted. An empirical validation —
