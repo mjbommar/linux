@@ -1418,4 +1418,232 @@ partially superseded), §D27 (graph deferred, independent),
 
 ---
 
+## D31: KCOV × FUNCTION_TRACER compounds on UML-UP; defer fix, profile-separate for now
+
+**Date:** 2026-04-19
+**Status:** Deferred (documented so a future engineer returning to this
+can pick up where we left off without re-discovering the bisect)
+
+**Decision:** Do not ship an upstream or in-tree fix for the
+interaction between `CONFIG_KCOV=y` and `CONFIG_FUNCTION_TRACER=y`
+on UML-UP. Instead, the `research` profile disables KCOV (it
+already has the tracer + sanitizers for observability), and
+`fuzz` / `fuzz-deep` remain the profiles that want KCOV (they
+don't enable FUNCTION_TRACER — fast reboots beat observability in
+fuzz-loop contexts). This is consistent with the a-plus-quality
+anti-pattern #1 ("don't chase all checks in one image").
+
+**The reproducer (preserve for future debugging):**
+
+Host: Ubuntu 25.10, gcc 15.2, clang 21.1.8, Linux 7.0.0-13-generic.
+Tree: this branch post `81779620ea8a` (ftrace port + bulk
+mprotect).
+
+Hanging config:
+
+```
+make ARCH=um uml/research
+scripts/config --file .config -e FUNCTION_TRACER -e DYNAMIC_FTRACE
+make ARCH=um olddefconfig
+make ARCH=um -j"$(nproc)"
+./linux mem=512M rootfstype=hostfs rootflags=/ rw \
+        init=/tmp/ftrace-test.sh panic=1 console=tty
+```
+
+where `/tmp/ftrace-test.sh`:
+
+```sh
+#!/bin/sh
+mount -t tracefs none /sys/kernel/tracing
+echo function > /sys/kernel/tracing/current_tracer   # <-- hangs 5+ min
+```
+
+Symptom: boot reaches userspace, writes the `current_tracer` file,
+kernel enters `ftrace_modify_all_code()` inside
+`stop_machine_cpuslocked()` with IRQs disabled (UML UP:
+`local_irq_save` ≡ `block_signals`), and stays there > 5 minutes
+with no progress. No ftrace_bug, no WARNING, no panic — just
+the kernel thread pegged at 99% CPU on the host process.
+
+Minimal config (defconfig + FUNCTION_TRACER + DYNAMIC_FTRACE)
+works in milliseconds: 51228 trace lines captured from
+`ls /`, tracer on+off cleanly.
+
+**Bisect matrix (which configs hang, which don't):**
+
+| Config                                              | `echo function > current_tracer` |
+|-----------------------------------------------------|----------------------------------|
+| defconfig + FUNCTION_TRACER                         | ~1 s ✅ 51228 lines              |
+| defconfig + FUNCTION_TRACER + DEBUG_OBJECTS         | ~1 s ✅ 51217 lines              |
+| defconfig + FUNCTION_TRACER + KASAN                 | ~1 s ✅ 51248 lines              |
+| defconfig + FUNCTION_TRACER + PROVE_LOCKING         | ~1 s ✅ 51261 lines              |
+| defconfig + FUNCTION_TRACER + DEBUG_VM              | ~1 s ✅                           |
+| defconfig + FUNCTION_TRACER + DEBUG_PAGEALLOC       | ~1 s ✅ 51297 lines              |
+| defconfig + FUNCTION_TRACER + KFENCE                | ~1 s ✅ 51209 lines              |
+| defconfig + FUNCTION_TRACER + MODULES               | ~1 s ✅ 51309 lines              |
+| defconfig + FUNCTION_TRACER + SECCOMP_ONLY backend  | ~1 s ✅ 51281 lines              |
+| defconfig + FUNCTION_TRACER + all three debug blocks (KASAN + UBSAN + KFENCE + PROVE_LOCKING + DEBUG_SPINLOCK + DEBUG_MUTEXES + DEBUG_ATOMIC_SLEEP + DEBUG_VM + DEBUG_PAGEALLOC + DEBUG_OBJECTS + DEBUG_OBJECTS_RCU_HEAD) | ~1 s ✅ 51268 lines              |
+| base_defconfig + FUNCTION_TRACER + DEBUG_KERNEL     | ~1 s ✅ 51293 lines              |
+| **research** (full)                                 | **hangs 5+ min ❌**              |
+| research minus CC_OPTIMIZE_FOR_DEBUGGING + UML_TIME_TRAVEL_SUPPORT | hangs 5+ min ❌ |
+| **research minus KCOV (just KCOV_ENABLE_COMPARISONS on or off)** | **~1 s ✅ 51225 lines** |
+| research minus KCOV_ENABLE_COMPARISONS (KCOV still on) | hangs 5+ min ❌              |
+
+Conclusion: the sole necessary ingredient on top of the already-
+hefty debug surface is **plain `CONFIG_KCOV=y` (PC-trace)**. Once
+`CONFIG_KCOV=n`, research's full debug surface + the function
+tracer enable path completes in normal time.
+
+**Root-cause narrative:**
+
+`ftrace_modify_all_code()` runs under `stop_machine_cpuslocked()`
+and iterates ~21000 `dyn_ftrace` records, for each calling
+`ftrace_update_record()` → `__ftrace_replace_code()` → our
+`ftrace_make_call()` / `ftrace_make_nop()`. Per record it touches
+on the order of tens of internal function calls in kernel/trace/
+ftrace.c and its inlined helpers.
+
+Under `CONFIG_KCOV=y`, the compiler emits `call
+__sanitizer_cov_trace_pc` at the start of every basic block of
+every function in `kernel/trace/ftrace.c` (the tracer's source
+file is not excluded from KCOV — see "Why we didn't upstream a fix"
+below). Each `__sanitizer_cov_trace_pc` call is cheap when no task
+has KCOV enabled (early-exit on `current->kcov_mode`), but cheap ≠
+free. On top of that:
+
+- Under `CONFIG_KASAN=y`, each `current->kcov_mode` load goes
+  through a KASAN shadow-memory check.
+- Under `CONFIG_PROVE_LOCKING=y` the bookkeeping around any
+  per-basic-block return path adds instructions.
+- Under UML UP, `stop_machine_cpuslocked` falls through to
+  `local_irq_save` (which UML translates to `block_signals`),
+  so no SIGALRM tick advances — we can't break up the batch with
+  `cond_resched()`.
+- Bulk mprotect (D30) already made the batch a single pair of
+  syscalls around ~21000 memcpy. That's not the bottleneck; the
+  bottleneck is what happens between the two mprotects.
+
+21000 records × ~50 instrumented function calls per record × the
+compounded per-call overhead (KCOV + KASAN shadow + lockdep
+bookkeeping) = empirically > 5 minutes on this host, with no
+cond_resched point.
+
+On x86 SMP bare-metal with the same configs, the overhead exists
+but is hidden behind parallel CPU throughput and is "slow" rather
+than "hang." That's why this has been latent in syzkaller fleets
+for ~9 years without complaint — real hardware absorbs it.
+
+**Why we didn't upstream a fix (2026-04-19 review):**
+
+Initial reflex (before researching): add `KCOV_INSTRUMENT := n`
+to `kernel/trace/Makefile` next to the existing `KCSAN_SANITIZE
+:= n`. Review by the project owner rejected this framing for
+three correct reasons:
+
+1. **KCSAN exclusion ≠ KCOV exclusion.** The comment "Avoid
+   recursion due to instrumentation" on `KCSAN_SANITIZE := n`
+   applies to KCSAN's genuine reentrancy hazards in ftrace's
+   recursion-lock paths. KCOV has no analogous reentrancy — its
+   recursion was already solved years ago from the KCOV side
+   with `notrace` on `__sanitizer_cov_trace_pc`,
+   `check_kcov_mode`, `canonicalize_ip`, `write_comp_data` (see
+   Anders Roxell, "kcov: Don't trace the code coverage code",
+   `https://lkml.iu.edu/hypermail/linux/kernel/1811.0/04706.html`).
+   Framing a patch as "mirror the KCSAN exclusion" would land
+   badly with a reviewer who knows the KCOV history (Vyukov
+   definitely does).
+
+2. **KCOV is coverage-maximizing by design.** Vyukov's original
+   commit `33787098ffc3` sets `KCOV_INSTRUMENT_ALL=y` and opts
+   out only where coverage is *meaningless* (early boot, VDSO,
+   idle loops) — not merely where it's expensive. `ftrace.c`
+   coverage *is* meaningful: syzkaller reaches it via `tracefs`,
+   `perf_event_open`, `kprobe_events`. Blanket exclusion narrows
+   the fuzz surface for a benefit that only UML-UP observes
+   dramatically.
+
+3. **No upstream complaint history.** 9+ years of syzkaller
+   running `CONFIG_KCOV=y` + `CONFIG_FUNCTION_TRACER=y` on real
+   hardware with zero LKML thread about the compounding cost.
+   That's weak evidence of "it's not a kernel-wide problem,"
+   strong evidence of "Rostedt will correctly point at the UML
+   config."
+
+**Three angles for later engineering:**
+
+Preserving the analysis so a future session can pick up without
+re-doing the research:
+
+- **Angle 0: Bug report.** Write a mail to linux-trace-kernel +
+  kasan-dev + Dvyukov describing the UML-UP timing and the
+  instrumentation compounding, *asking* "is there a targeted
+  workaround you'd accept" rather than proposing a patch. Low
+  cost; high information-yield if the maintainers respond;
+  maintainer-blessed scope for subsequent patch work.
+
+- **Angle 1: `__no_sanitize_coverage` on ftrace hot-loop
+  helpers.** Per-function attribute (GCC ≥ 10, Clang supported)
+  on `ftrace_replace_code`, `ftrace_update_record`,
+  `__ftrace_replace_code`, and the 2–3 other inner-loop helpers
+  that drive the 21k-iteration batch. Argument: "coverage under
+  `stop_machine` is structurally meaningless because no userspace
+  fuzzer context is observing new PCs during the freeze window."
+  Small patch (5ish annotations) but requires x86 SMP perf
+  measurement to justify — this host can't provide that.
+  Vyukov's counter may be "the coverage is still recorded and
+  observed on the next KCOV_DISABLE read," which is technically
+  true but weakly relevant to the 5+ minute UML hang.
+
+- **Angle 2: Per-CPU static-key KCOV soft-off.** Rewrite
+  `__sanitizer_cov_trace_pc`'s opening check to use a per-CPU
+  static key rather than a `current->kcov_mode` load. Goal:
+  ~1 cycle when KCOV is compiled in but no task has enabled it,
+  vs ~10+ cycles today. Generic upstream contribution, not
+  UML-specific. Requires ~50–200 LOC in `kernel/kcov.c` plus
+  careful x86 SMP benchmarks (e.g., `stress-ng --switch 0` with
+  KCOV=y vs KCOV=n). This is a week-scope project, not a
+  fresh-context one-shot. Worth doing separately from the UML
+  redesign if someone wants a real upstream contribution.
+
+**Semantic argument worth reusing** (shows up in angle 1 and
+angle 2): coverage collection inside a `stop_machine` callback
+has no live observer. Syzkaller's fuzzer thread is frozen
+alongside every other userspace thread; the kernel is running one
+CPU's callback. Coverage samples collected in that window can be
+read after the freeze lifts, but by then the instrumentation
+target (a batch-text-patching loop) has completed and the fuzzer's
+decision point has moved on. The instrumentation cost is paid; the
+information value is near zero.
+
+**Revisit triggers:**
+
+- When a future UML engineer or syzkaller user file an LKML bug
+  about similar compounding on x86 (likely eventually — the issue
+  is real, just hidden by SMP throughput).
+- If someone wants a Real upstream Kernel Contribution from this
+  project, angle 2 is the right-sized target.
+- When C-10 (host launcher) lands, revisit whether the patch can
+  move to the helper process — removing the instrumentation
+  concern entirely because ftrace.c isn't running in the main UML
+  process anymore.
+
+**Cross-reference:**
+
+- `kernel/trace/Makefile` (existing `KCSAN_SANITIZE := n`, the
+  anchor for angle-1's reasoning; not itself being modified).
+- `kernel/kcov.c` (the target of angle 2).
+- `33787098ffc3` "kernel: add kcov code coverage" (Vyukov,
+  Kconfig + semantic stance).
+- Anders Roxell, "kcov: Don't trace the code coverage code"
+  (`notrace` on kcov hooks — the prior art that shows KCOV
+  recursion is already solved and my initial "recursion bomb"
+  framing was wrong).
+- `02-workstreams/C-profiles-and-gaps/05-port-ftrace.md`
+  §Approach commit 3 (the resolution in-tree: research disables
+  KCOV).
+- §D30 (bulk mprotect — the *previous* hang, which this one
+  supersedes as the current research-profile blocker).
+
+---
+
 ## (Future entries here, as decisions are made)
