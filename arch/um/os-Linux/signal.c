@@ -37,6 +37,7 @@ void (*sig_info[NSIG])(int, struct siginfo *, struct uml_pt_regs *, void *mc) = 
 static void sig_handler_common(int sig, struct siginfo *si, mcontext_t *mc)
 {
 	struct uml_pt_regs r;
+	bool kprobes_sigtrap;
 
 	r.is_user = 0;
 	if (sig == SIGSEGV) {
@@ -45,11 +46,34 @@ static void sig_handler_common(int sig, struct siginfo *si, mcontext_t *mc)
 		GET_FAULTINFO_FROM_MC(r.faultinfo, mc);
 	}
 
+	/*
+	 * Kprobes on UML needs the guest register state populated from
+	 * the sigcontext so kprobe_int3_handler() / kprobe_debug_handler()
+	 * can find the probe site (IP) and drive single-step via TF. On
+	 * return we write the (possibly mutated) regs back to the
+	 * mcontext so the host's sigreturn resumes with the handler's
+	 * changes — different IP for out-of-line single-step, adjusted
+	 * EFLAGS for TF management.
+	 */
+	kprobes_sigtrap = IS_ENABLED(CONFIG_KPROBES) && sig == SIGTRAP;
+	if (kprobes_sigtrap)
+		get_regs_from_mc(&r, mc);
+
 	/* enable signals if sig isn't IRQ signal */
 	if ((sig != SIGIO) && (sig != SIGWINCH) && (sig != SIGCHLD))
 		unblock_signals_trace();
 
 	(*sig_info[sig])(sig, si, &r, mc);
+
+	if (kprobes_sigtrap && !r.is_user) {
+		/*
+		 * X86_EFLAGS_TF = 0x100 (kernel header isn't usable
+		 * in this USER-side TU).
+		 */
+		bool tf = r.gp[HOST_EFLAGS] & 0x100UL;
+
+		get_mc_from_regs(&r, mc, tf);
+	}
 }
 
 /*
