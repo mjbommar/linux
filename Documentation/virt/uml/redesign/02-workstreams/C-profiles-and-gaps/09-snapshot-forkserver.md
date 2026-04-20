@@ -530,24 +530,43 @@ requires a new dedicated commit.
        unblocking the crash documented in D41; if it does
        not, fallback strategies are named there (pidfd +
        poll, SIGCHLD-driven IRQ reap, or no-status-byte).
-     - **commit 3d-d:** scheduler sanitization. After commit 3d-c
-       proved the worker CAN run guest code (echo, /bin/true) but
-       crashes on the next voluntary `schedule()` at
-       `__set_next_task_fair` because the CFS runqueue still
-       references parent-enqueued kthreads, 3d-d adds one small
-       exported helper in `kernel/sched/core.c`
+     - **commit 3d-d:** scheduler sanitization — necessary but not
+       sufficient (v1 limit). After commit 3d-c proved the worker
+       CAN run guest code (echo, /bin/true) but crashes on the next
+       voluntary `schedule()` at `__set_next_task_fair` because the
+       CFS runqueue still references parent-enqueued kthreads, 3d-d
+       adds one small exported helper in `kernel/sched/core.c`
        (`sched_worker_detach_other_tasks()`) that strips non-
        current tasks from `rq->cfs_tasks` under `rq_lock_irqsave`
        via `deactivate_task()`. Called from
        `um_snapshot_worker_init()` between the forget and rebuild
        helpers. Per D42 this is the one explicit cross-subsystem
-       touch the C-09 v1 makes; v2 (when someone needs it) replaces
-       it with a freezer-cgroup pre-fork barrier per D41's revisit
-       triggers.
-     **Once 3d-d lands cleanly, a worker runs blocking guest code
-     (execve, fork+wait, filesystem I/O) without crashing the
-     scheduler — the load-bearing "sustained fuzz is possible"
-     test.**
+       touch the C-09 v1 makes.
+       **Observed outcome:** the helper builds + links on gcc and
+       clang, the worker continues to run 1-2 guest syscalls
+       (`/bin/echo`, `/bin/true`) per 3d-c, but the KASAN slab-OOB
+       at `__set_next_task_fair+0x11b` persists on the first
+       `schedule()` after the helper returns. The scheduler has
+       invariants beyond `rq->cfs_tasks` list membership (observed
+       secondary signal: a `WARN` at `fair.c:5637` complaining
+       about `sched_delayed` state). That means detaching from the
+       CFS list alone is not enough to sanitize the inherited
+       scheduler state; the `sched_entity` in-tree linkage, the
+       per-task `thread.switch_buf` jmp_buf, or both, remain
+       load-bearing. The v1 helper is kept in place because (a) it
+       documents the shape of the problem in one place, (b) it is
+       a precondition for any future fix, and (c) ripping it back
+       out would hide the fact that we actually need a deeper fix.
+       v2 (when someone needs sustained fuzz on blocking guest
+       syscalls) replaces it with a freezer-cgroup pre-fork barrier
+       + per-task re-clone path per D41's revisit triggers; at that
+       point this narrow helper becomes dead code and is removed
+       in the same series.
+     **Current C-09 v1 ceiling:** a worker runs short non-blocking
+     guest programs (trivial execve + exit paths — the 3d-c
+     demonstration). Sustained fuzz with execve+wait+filesystem
+     I/O remains gated on the v2 freezer-cgroup design. This is
+     an honest v1 delivery, not the hypothesised 3d-d breakthrough.
 4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
    disposition annotations** (pull-forward #3). One patch
    touching every `socket()` / `open()` site; largely

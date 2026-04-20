@@ -3131,12 +3131,25 @@ it is not going away.
 ## D42: C-09 3d-d sanitizes the worker's CFS runqueue via one exported sched helper
 
 **Date:** 2026-04-20
-**Status:** Accepted after commit 3d-c demonstrated that a forked
-worker CAN run guest code (`/bin/echo`, `/bin/true` observed in the
-worker's output stream), and the next voluntary `schedule()` tripped
-a KASAN slab-out-of-bounds in `__set_next_task_fair +
-dequeue_entities` — exactly the scheduler-state-sharing hazard
-predicted in the D40 testing plan.
+**Status:** Accepted and shipped as a v1 building block; observed
+insufficient in isolation — the slab-OOB at
+`__set_next_task_fair+0x11b` persists even with the helper in place.
+Commit 3d-c demonstrated that a forked worker CAN run guest code
+(`/bin/echo`, `/bin/true` observed in the worker's output stream),
+and the next voluntary `schedule()` tripped a KASAN slab-out-of-
+bounds in `__set_next_task_fair + dequeue_entities` — exactly the
+scheduler-state-sharing hazard predicted in the D40 testing plan.
+The 3d-d helper removes parent-inherited tasks from `rq->cfs_tasks`
+under the scheduler's normal `deactivate_task` primitive; however,
+real-world runtime shows the scheduler retains additional
+invariants beyond list membership (secondary signal: a `WARN` at
+`fair.c:5637` about `sched_delayed` state). We keep the helper in
+the tree because (a) the detach is a strict precondition for any
+deeper fix, (b) it documents the failure shape in code, and (c)
+removing it would hide the fact that v1 is ceilinged at non-
+blocking guest programs. v2 replaces this with a freezer-cgroup
+pre-fork + per-task re-clone design per D41's revisit triggers;
+this helper is removed in the same series that lands v2.
 
 **Decision:** Commit 3d-d adds one small exported helper in
 `kernel/sched/core.c` that arch/um calls from

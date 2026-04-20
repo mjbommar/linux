@@ -2518,4 +2518,15 @@ extern void migrate_enable(void);
 
 DEFINE_LOCK_GUARD_0(migrate, migrate_disable(), migrate_enable())
 
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+/*
+ * arch/um-only: UML snapshot/forkserver worker calls this in its
+ * post-fork reinit path to strip parent-inherited tasks from the
+ * worker's CFS runqueue. See kernel/sched/core.c for the body and
+ * Documentation/virt/uml/redesign/04-risks/decisions-log.md D42
+ * for the rationale.
+ */
+extern void sched_worker_detach_other_tasks(void);
+#endif
+
 #endif

@@ -2229,6 +2229,66 @@ static void block_task(struct rq *rq, struct task_struct *p, int flags)
 		__block_task(rq, p);
 }
 
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+/**
+ * sched_worker_detach_other_tasks - strip fork-inherited tasks from
+ *	the current CPU's CFS runqueue.
+ *
+ * Called from arch/um/kernel/snapshot.c's um_snapshot_worker_init()
+ * in a forkserver worker (a UML process forked from the parent's
+ * cooperative ready point — see D35). In that worker, the current
+ * CPU's rq still references task_structs that the parent enqueued
+ * before fork — kthreads like ksoftirqd, migration, and kworker.
+ * The task_struct pages themselves are CoW'd and appear valid, but
+ * their scheduling context (jmp_buf'd stack pointers in
+ * thread.switch_buf, per-task irqstacks, etc.) targets host-thread
+ * state that does not exist in the worker's address space.
+ * Selecting one of these via __set_next_task_fair dereferences
+ * stale memory; observed as KASAN slab-OOB in C-09 commit 3d-c's
+ * bring-up.
+ *
+ * Detach every non-current task from rq->cfs_tasks via
+ * deactivate_task(). This removes them from the runqueue so
+ * schedule() can only pick current. Task_structs remain alive;
+ * the worker host process exits shortly via exit_group() and the
+ * host kernel reclaims everything together.
+ *
+ * Prerequisites (enforced by the caller side in arch/um per D41):
+ *   - UML's signals_enabled TLS gate is 0 during this call. No
+ *     host-signal-driven IRQ dispatch can enter scheduler while we
+ *     mutate the rq.
+ *   - The calling thread is the worker's main (and only) thread.
+ *     Other parent-side host threads don't exist in the child.
+ *
+ * v2 replaces this narrow helper with a freezer-cgroup pre-fork
+ * barrier per the UML redesign decisions-log D41/D42 triggers.
+ */
+void sched_worker_detach_other_tasks(void)
+{
+	struct rq *rq;
+	struct rq_flags rf;
+	struct sched_entity *se, *tmp;
+	struct task_struct *p;
+
+	rq = this_rq();
+	rq_lock_irqsave(rq, &rf);
+	update_rq_clock(rq);
+
+	list_for_each_entry_safe(se, tmp, &rq->cfs_tasks, group_node) {
+		p = task_of(se);
+		if (p == current)
+			continue;
+		if (!task_on_rq_queued(p))
+			continue;
+		deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+	}
+
+	rq_unlock_irqrestore(rq, &rf);
+}
+EXPORT_SYMBOL_GPL(sched_worker_detach_other_tasks);
+#endif /* CONFIG_UM_SNAPSHOT_FORKSERVER */
+
+
 /**
  * task_curr - is this task currently executing on a CPU?
  * @p: the task in question.

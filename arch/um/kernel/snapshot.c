@@ -40,6 +40,7 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/preempt.h>
+#include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/signal.h>
 #include <linux/spinlock.h>
@@ -466,6 +467,20 @@ void um_snapshot_worker_init(void)
 	 */
 	os_sigio_worker_forget();
 	os_timer_worker_forget();
+
+	/*
+	 * Step 1b (commit 3d-d, D42): detach fork-inherited tasks from
+	 * the worker's CFS runqueue. Before this, schedule() can pick
+	 * kthreads like ksoftirqd whose saved jmp_buf targets parent-
+	 * side host-thread state that doesn't exist in the worker —
+	 * observed as KASAN slab-OOB in __set_next_task_fair in
+	 * commit 3d-c's bring-up. The helper is defined in
+	 * kernel/sched/core.c, guarded by CONFIG_UM_SNAPSHOT_FORKSERVER,
+	 * and is the one explicit cross-subsystem touch the C-09 v1
+	 * makes. v2 replaces it with a freezer-cgroup pre-fork barrier
+	 * per D41's revisit triggers.
+	 */
+	sched_worker_detach_other_tasks();
 
 	/*
 	 * Step 2 (commit 3d-b): rebuild fresh host-side infrastructure
