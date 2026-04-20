@@ -1900,4 +1900,181 @@ spec (`02-workstreams/C-profiles-and-gaps/04-port-kprobes.md`
 
 ---
 
+## D34: C-04 commit 3 (HAVE_FUNCTION_GRAPH_TRACER) deferred — generic fgraph assumptions conflict with UML's execution model
+
+**Date:** 2026-04-19 (findings); deferral decision 2026-04-20
+**Status:** Accepted (narrow-scope retreat from D32's commit-3 deliverable;
+commit 3 held out of C-04 until the blocker below is resolved upstream
+or worked around end-to-end)
+
+**Decision:** C-04 ships **commits 1a–1d + commit 2 (kretprobes via
+rethook)** only. `HAVE_FUNCTION_GRAPH_TRACER` is not selected. Commit 3
+as described in D32 / `04-port-kprobes.md` stays `planned` and blocked
+on #33 + #34 + a new generic-kernel question captured below. The
+downstream commits that depended on commit 3 are adjusted:
+
+- Commit 4 (research profile): enables kprobes, kretprobes, function
+  tracer — **not** function_graph.
+- Commit 5 (kprobes-stress selftest): reframed as the harness that
+  would have validated commit 3; useful on its own for kretprobes
+  regressions and kept on the critical path.
+- Commit 6 (docs + landed status): lands with a §"Function graph —
+  deferred" subsection pointing at this decision.
+
+**Why commit 3 cannot land as-designed:**
+
+The generic function_graph trampoline (`kernel/trace/fgraph.c`) assumes
+every traced function return executes via a `ret` that pops the
+graph-rewritten parent slot. On native x86 this holds — including
+across `__switch_to`, because the switch restores %rsp such that the
+outgoing task's ret resumes at a call site with the trampoline's
+rewritten slot still in place. On UML it does not, for three distinct
+reasons discovered empirically over a debugging session on
+2026-04-19:
+
+1. **UML signal dispatch uses `rt_sigreturn`, not `ret`.** The host-
+   delivered signal handler (`hard_handler` in
+   `arch/um/os-Linux/signal.c`) and its downstream (`sig_handler`,
+   `timer_alarm_handler`, `sig_handler_common`, `block_signals_trace`,
+   …) runs on the task's kernel stack. If any of them is graphed, its
+   prepare_ftrace_return rewrites a parent slot on the signal frame,
+   but that frame is torn down by the kernel's `rt_sigreturn` syscall
+   rather than the function's normal `ret`. The shadow stack entry is
+   never popped. One leak per signal delivery; SIGALRM fires HZ times
+   per second. Observed: `curr_ret_stack` climbing from 0 into the
+   100s within seconds.
+
+2. **UML enters new kernel tasks via `kernel_longjmp`.** `new_thread_handler`
+   and `fork_handler` in `arch/um/kernel/process.c` are not reached
+   via a `call`; they are the landing sites of a `UML_LONGJMP` during
+   task creation. Their prologue prepare_ftrace_return rewrites
+   whatever garbage happens to sit at `8(%rsp)` when the new task's
+   kernel stack is first activated. That rewrite is never popped.
+   One leak per task creation.
+
+3. **Generic `kthread()` and `smpboot_thread_fn()` never return.**
+   Both live in `kernel/kthread.c` / `kernel/smpboot.c`. Both end in
+   `do_exit`. Neither can be stripped from arch/um/'s Makefiles
+   (they're generic kernel code, not UML-specific). Graph push happens
+   at entry; the corresponding pop never fires because the function
+   doesn't return. One leak per kthread created (ksoftirqd, migration
+   threads, kworkers). `ftrace_graph_exit_task` cleans up on
+   `free_task`, but between `do_exit` and `free_task` the entry sits
+   on the task's shadow stack as a "live" leaked push.
+
+**What we tried and what it bought us:**
+
+| Attempt | Result |
+|---|---|
+| Wrap `hard_handler` body with `atomic_inc/dec(&current->tracing_graph_pause)` so prepare_ftrace_return skips pushes during signal handling | Didn't help — hard_handler's own prologue push happens BEFORE the inc, so the signal-frame leak persisted |
+| `ccflags-remove-y := $(CC_FLAGS_FTRACE)` in `arch/um/kernel/Makefile` and `arch/um/kernel/skas/Makefile` | Stripped patch sites from new_thread_handler, fork_handler, hard_handler (kernel-side glue), sched_clock, and all arch/um/kernel/ functions. Closes sources (1) and (2) |
+| `USER_CFLAGS := $(filter-out $(CC_FLAGS_FTRACE),$(USER_CFLAGS))` in `arch/um/Makefile` | Closes USER_OBJS patch sites (os-Linux/signal.c, sigio.c, irq.c, skas/process.c). `CFLAGS_REMOVE_<file>.o` can't do this because `arch/um/scripts/Makefile.rules` overrides c_flags for USER_OBJS |
+| Combined: all arch/um/ patch sites stripped | Reduced shadow-stack growth. Didn't eliminate crashes under workload. ksoftirqd eventually SEGVs in `schedule+0x4a` — reproducibly. The residual leak is reason (3). |
+
+**Two concrete crashes from the last build (arch/um/ stripped, no
+graph pause):**
+
+- **Under fork+exec workload (`/bin/ls /etc`):** `Kernel panic - not
+  syncing: Segfault with no mm`. RIP=`schedule+0x4a` (`mov (%rax), %rax`
+  with RAX=0). Stack shows `return_to_handler+0` twice, `ftrace_graph_caller`,
+  `__schedule`, `kthread_should_park`, `smpboot_thread_fn`, `kthread`,
+  `new_thread_handler+0x48`. The crash address isn't a real instruction
+  pointer — it's where a leaked `return_to_handler` pop landed.
+- **Under `wc -l /sys/kernel/tracing/trace` with graph active:**
+  `Kernel panic - not syncing: Kernel tried to access user memory at
+  addr 0xb00000000`. Six `return_to_handler+0` entries on the stack.
+  The trace-reading code (`print_graph_function` → `s_show` →
+  `seq_read_iter`) walks a ret_stack that has leaked entries and
+  dereferences what should have been a valid shadow-stack pointer.
+
+Both crashes are the same root cause manifesting via different stack
+walks.
+
+**Alternatives considered for closing reason (3):**
+
+1. **Generic-kernel annotation** — mark `kthread()` and
+   `smpboot_thread_fn()` `notrace`. Would suppress the leak but leaves
+   any user-written kthread-entry function that ends in `do_exit` to
+   leak. Cross-subsystem change; would need tracing maintainer sign-off.
+   Per AGENT-PROMPT "when to stop and ask," cross-subsystem changes need
+   explicit user sign-off first — out of scope for commit 3's arch
+   work.
+2. **UML-local graph gate around do_exit** — arch/um/kernel/exit.c or
+   equivalent could `atomic_inc(&current->tracing_graph_pause)` when
+   `do_exit` is entered. Doesn't help because the push happened at
+   kthread()'s entry, long before do_exit. The gate would need to
+   retroactively un-push, which would require new generic API.
+3. **Relax fgraph's pop-failure behavior** — today `__ftrace_return_to_handler`
+   returns `(unsigned long)panic` on a failed pop (kernel/trace/fgraph.c:828).
+   If it instead returned 0 (or the most recent valid ret on the
+   stack), stale entries would at worst cause a skip, not a crash.
+   Generic change; upstream-able but needs a real discussion with
+   the tracing maintainers about what "failed pop" should mean.
+4. **Per-task shadow-stack compaction** — on task yield, walk
+   current->ret_stack and drop entries whose retp no longer matches
+   the task's actual kernel stack. Expensive at every context switch.
+5. **UML-specific fgraph implementation** — fork the generic
+   trampoline semantics to tolerate longjmp + do_exit. Large
+   engineering investment; probably not worth it compared to (1) or (3).
+6. **Accept that commit 3 is not a one-commit task.** Ship what we
+   have, defer graph until the blocker is addressed upstream.
+
+Going with (6) for now. (1) and (3) stay open as the real paths to
+unblocking commit 3 — either in a future workstream or via an
+upstream discussion. Task #34 tracks the gcc/clang `notrace` +
+patchable-function-entry ineffectiveness that caused us to reach for
+Makefile workarounds; task #33 tracks the arch-level patch-site
+audit (partially done in the stashed WIP); a new upstream-discussion
+task would capture (1)/(3) once someone is ready to file the
+tracing-maintainer RFC.
+
+**What D32 promised and what we're shipping:**
+
+D32 said C-04 would ship HAVE_KPROBES + HAVE_KRETPROBES +
+HAVE_FUNCTION_GRAPH_TRACER as a unit, with commit 5's stress test
+empirically validating the return-trampoline family. D32's
+architectural research was right about the int3 kprobes path and the
+rethook path — both landed clean. D32 was wrong about function_graph:
+the research focused on D27's signal-race concern, which turned out to
+be real but fixable via patch-site stripping; it missed the
+generic-kernel leak (kthread/do_exit) because that's not a UML-specific
+issue. This D34 corrects D32 narrowly: scope drops to
+HAVE_KPROBES + HAVE_RETHOOK (commits 1 + 2 of the C-04 series), with
+graph held.
+
+**Revisit triggers:**
+
+- A generic change to fgraph that tolerates pop failures (alternative 3
+  above) lands upstream. The block to commit 3 disappears.
+- A maintainer accepts `notrace` annotations on `kthread()` /
+  `smpboot_thread_fn()` (alternative 1).
+- Someone writes the UML-specific fgraph shim (alternative 5), at which
+  point the commit 5 stress harness in task #24 becomes the regression
+  guard.
+- Toolchain (`notrace` + `-fpatchable-function-entry`) behavior
+  improves so per-file stripping is less necessary; surfaces whether
+  the leak from (1) and (2) alone is tolerable.
+
+**Cross-references:**
+
+- `02-workstreams/C-profiles-and-gaps/04-port-kprobes.md` §"Commit 3"
+  (updated with the findings and the deferral).
+- D32 — scope decision this narrows.
+- D27 — original function_graph deferral; superseded by D32, then
+  re-asserted-in-spirit by this D34.
+- Task #22 (C-04 commit 3) — held `planned`, blocked by #33 + #34.
+- Task #33 (signal-path patch-site audit) — partial work in the
+  `c04-c3-wip-after-arch-strip-still-crashes` stash.
+- Task #34 (notrace + patchable-function-entry workaround) —
+  diagnosed: both gcc 15.2 and clang 21.1.8 leave patchable entries
+  in place despite the attribute expansion.
+- Task #24 (kprobes-stress selftest) — now the next critical-path
+  task; its harness will validate any future graph-trampoline fix.
+- `kernel/trace/fgraph.c:828` — the `return (unsigned long)panic`
+  pop-failure behavior that alternative 3 would soften.
+- `kernel/kthread.c`, `kernel/smpboot.c` — the generic kthread
+  entrypoints that leak graph pushes.
+
+---
+
 ## (Future entries here, as decisions are made)

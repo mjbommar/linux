@@ -1,19 +1,40 @@
 # C-04: Port kprobes to UML
 
-**Status:** planned (full-scope design pass 2026-04-19 — see
-"Approach" below; implementation in progress)
-**Effort:** 3–4 focused days (original 4-week estimate revised
-down — C-05's ftrace plumbing covers most of the infrastructure,
-and the architectural research below cleared the two risks the
-original spec flagged)
+**Status:** partially landed (2026-04-20) — HAVE_KPROBES (commits
+1a–1d) and HAVE_RETHOOK/KRETPROBES (commit 2) are in the tree
+and tested. HAVE_FUNCTION_GRAPH_TRACER (commit 3) is deferred per
+D34 — the generic fgraph trampoline contract conflicts with UML's
+longjmp-based task entry and the kthread/do_exit leak. Commits
+4–6 adjusted to reflect the narrower scope; commit 5 (stress
+selftest) remains on the critical path as the regression guard
+for any future graph port attempt.
+**Effort:** 3–4 focused days for commits 1+2 (actual: ~2 days);
+commit 3 is out of scope until the generic-fgraph cooperation
+story is resolved (see D34 revisit triggers).
 **Dependencies:** B-04 (.text section split, landed; helpers
 extended by C-05 commit 1), C-05 (ftrace port, landed 2026-04-19
 — provides the mcount.S / ftrace.c baseline that commits 1 and
 5 extend).
-**Blocks:** research profile having kprobes + function_graph;
-bpftrace; C-06 BPF JIT's kprobe-reachability validation.
+**Blocks:** research profile having kprobes + kretprobes;
+bpftrace's `kprobe:` / `kretprobe:`; C-06 BPF JIT's kprobe-
+reachability validation. (Function_graph side of the research
+profile stays blocked by D34 until commit 3 is unblocked.)
 
 ## Goal
+
+`select HAVE_KPROBES` and `HAVE_RETHOOK` (the latter auto-activates
+`KRETPROBES` / `KRETPROBE_ON_RETHOOK`) for UML on x86_64. Delivers
+entry probes + mid-function probes (int3 + single-step) and return
+probes (rethook shadow stack). `HAVE_FUNCTION_GRAPH_TRACER` is
+**out of scope** per D34; see the §"Commit 3 — deferred" section
+below for the full analysis. The vision in `00-vision.md` calls
+out "all sanitizers and tracing on" for the research profile;
+C-04 closes the "tracing" half of that target except for the
+graph tracer, which remains a known gap until the cross-subsystem
+fix lands.
+
+Original goal text (kept for historical context — supersede with
+the §"Commit 3 — deferred" note below for current scope):
 
 `select HAVE_KPROBES`, `HAVE_KRETPROBES`, and
 `HAVE_FUNCTION_GRAPH_TRACER` for UML on x86_64. Delivers the full
@@ -199,45 +220,85 @@ Scope discipline:
   own trampoline (same register-save pattern, different
   dispatch target).
 
-### Commit 3 — HAVE_FUNCTION_GRAPH_TRACER (supersedes D27)
+### Commit 3 — deferred (HAVE_FUNCTION_GRAPH_TRACER)
 
-Lifts the function_graph deferral from C-05's D27 using the
-same return-trampoline pattern kretprobes just validated.
+**Status: deferred per decisions-log D34 (2026-04-20).** The
+implementation attempt on 2026-04-19 produced working
+`ftrace_graph_caller` + `return_to_handler` assembly and a C
+`prepare_ftrace_return`, all compiling cleanly under gcc and
+clang. Under sustained workload the kernel crashes — NOT with the
+original D27 signal-race shape, but with a deeper architectural
+mismatch between the generic fgraph trampoline contract and
+UML's execution model. The WIP sits in the git stash entry
+`c04-c3-wip-after-arch-strip-still-crashes`.
 
-- `arch/um/kernel/mcount.S`: add `ftrace_graph_caller` and
-  `return_to_handler` trampolines.
-- `arch/um/kernel/ftrace.c`: `prepare_ftrace_return` (overwrite
-  return address, push real return address to the current
-  task's `ret_stack`).
-- `arch/um/include/asm/ftrace.h`: `FTRACE_GRAPH_TRAMP_ADDR`,
-  `HAVE_FUNCTION_GRAPH_FUNC`.
-- `arch/um/Kconfig`: `select HAVE_FUNCTION_GRAPH_TRACER if
-  DYNAMIC_FTRACE`.
-- Updates decisions-log D27 to "superseded by C-04 commit 3 +
-  commit 5 stress test; see D32."
-- Validation: `echo function_graph > current_tracer` works in
-  research profile; trace output shows call graphs with
-  enter/exit events.
+Three distinct leak sources identified and measured:
 
-### Commit 4 — research profile enables kprobes + graph
+1. Signal dispatch unwound via `rt_sigreturn` (not `ret`) — leaks
+   one shadow-stack entry per signal delivery. Fixable by
+   stripping patch sites from `arch/um/os-Linux/signal.c` etc.
+2. `new_thread_handler` / `fork_handler` entered via
+   `kernel_longjmp` — leaks one entry per task creation. Fixable
+   by stripping patch sites from `arch/um/kernel/process.c`.
+3. Generic `kthread()` / `smpboot_thread_fn()` in `kernel/kthread.c`
+   end in `do_exit` and never return — leak one entry per kthread
+   creation. **Not fixable at the arch level** — requires
+   generic-kernel cooperation (either `notrace` annotations on
+   those specific functions, or softening
+   `__ftrace_return_to_handler`'s pop-failure behavior upstream).
+
+Sources (1) and (2) are closable via `ccflags-remove-y` in
+`arch/um/kernel/Makefile` and friends, plus a `USER_CFLAGS`
+filter in `arch/um/Makefile`. The stashed WIP implements these.
+Source (3) is the blocker.
+
+See D34 for the full analysis including:
+- What we tried (`tracing_graph_pause`, patch-site stripping via
+  `ccflags-remove-y` and `CFLAGS_<file>.o += -fpatchable-function-entry=0`),
+- Exact crash signatures (Segfault with no mm at `schedule+0x4a`
+  under exec workload; user-memory access while reading
+  `/sys/kernel/tracing/trace` with graph active),
+- Alternatives considered and why each falls short.
+
+Revisit when any of the D34 triggers fire — generic fgraph change,
+accepted `notrace` on `kthread()`, or a UML-specific fgraph shim.
+
+### Commit 4 — research profile enables kprobes + function tracer
+
+Adjusted per D34 to drop function_graph from the enabled set
+(function_graph stays gated until commit 3 lands).
 
 - `arch/um/configs/profiles/research.config`:
-  `CONFIG_KPROBES=y`, `CONFIG_KRETPROBES=y`,
-  `CONFIG_FUNCTION_GRAPH_TRACER=y`.
+  `CONFIG_KPROBES=y`, `CONFIG_KRETPROBES=y` (auto-selected via
+  HAVE_RETHOOK). `CONFIG_FUNCTION_GRAPH_TRACER` intentionally
+  NOT enabled — per D34, leave the Kconfig out-of-select until
+  the generic-kernel blocker is resolved. Document the gap in
+  `Documentation/virt/uml/profiles/research.rst`.
 
 ### Commit 5 — kprobes-stress selftest
 
-Empirical validation that the D27 concern (function_graph
-trampoline racing SIGALRM) does not manifest.
+Stress harness for the kprobe / kretprobe / (eventual)
+function_graph surface. Originally framed as empirical
+validation of D27 (function_graph racing SIGALRM); with graph
+deferred per D34, the immediate value of this selftest is the
+kretprobes regression guard, with graph exercise written but
+gated on `CONFIG_FUNCTION_GRAPH_TRACER=y` so the harness is
+ready the moment commit 3 lands.
 
 - `tools/testing/selftests/um/kprobes-stress/`: guest-side
-  script enables function_graph, registers kretprobes on hot
-  functions, runs a workload (`ls /` in a loop, syscall-heavy),
-  and asserts no lockdep splat / no KASAN report / no kernel
-  oops after 10 000 iterations. Reports `KPROBES_STRESS: PASS
-  iters=10000 lockdep=clean kasan=clean`.
+  script registers kretprobes on hot functions (`kernel_clone`,
+  `do_sys_openat2`, `ksys_read`), runs a syscall-heavy
+  workload (`ls /` in a loop), asserts no lockdep splat / no
+  KASAN report / no kernel oops after 10 000 iterations. When
+  `CONFIG_FUNCTION_GRAPH_TRACER=y`, additionally enables
+  `function_graph` and stresses both surfaces together. Reports
+  `KPROBES_STRESS: PASS iters=10000 lockdep=clean kasan=clean
+  graph=<on|deferred>`.
 - Pattern mirrors the existing `ftrace-smoke` selftest
   (host-side launcher, guest-side init script, PASS/FAIL line).
+- Validates that C-04's landed commits (1a–1d + 2) don't
+  regress under repeated workload. When someone unblocks
+  commit 3, re-running this harness is the green-or-red gate.
 
 ### Commit 6 — docs + landed status
 
