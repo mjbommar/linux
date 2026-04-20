@@ -58,6 +58,18 @@ void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
  *
  * The memory mapped memory of the temporary file is used as backing memory
  * of all user space processes/kernel tasks.
+ *
+ * Contract (workstream C-09, D37 pull-forward #5): physmem_fd must
+ * be a regular host file — not an anonymous mapping — and the range
+ * mapped by os_map_memory() below must use MAP_SHARED. Both hold
+ * today: create_mem_file() → create_tmp_file() returns a real
+ * tempfile in tmpfs, and os_map_memory() always maps with
+ * MAP_SHARED | MAP_FIXED (arch/um/os-Linux/process.c:96). Do not
+ * silently flip either property without re-reading
+ * `Documentation/virt/uml/redesign/04-risks/decisions-log.md` D37:
+ * v2 snapshot-to-disk depends on being able to write out guest RAM
+ * by reading this one fd, and the fork-server worker depends on
+ * inheriting guest RAM via MAP_SHARED COW.
  */
 void __init setup_physmem(unsigned long start, unsigned long reserve_end,
 			  unsigned long len)

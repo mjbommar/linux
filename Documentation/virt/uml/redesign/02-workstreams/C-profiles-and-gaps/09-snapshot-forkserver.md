@@ -403,20 +403,25 @@ requires a new dedicated commit.
 
 ## Commit plan
 
-1. **commit 1:** skeleton + Kconfig + refactor
-   `um_vcpus_start_all()` out of boot code + **mmap
-   enumeration table** (pull-forward #1) + **physmem_fd
-   invariant assert** (pull-forward #5). No behavior change
-   yet. Builds `UM_FUZZ_HOOKS=y` clean but does nothing when
-   `um_snapshot_enabled` is off.
+1. **commit 1:** skeleton + Kconfig + **mmap enumeration
+   table** (pull-forward #1) + **physmem_fd invariant
+   documented in setup_physmem()** (pull-forward #5). No
+   behavior change yet. Builds `UM_FUZZ_HOOKS=y` clean;
+   `um_snapshot_ready()` / `um_snapshot_worker_init()` are
+   WARN-stubs until commits 2 and 3. The `um_vcpus_start_all()`
+   refactor originally scoped here moves to commit 3, where
+   it is first used; doing it earlier would export an unused
+   symbol and split the SMP-boot diff from its one caller.
 2. **commit 2:** `um_snapshot_ready()` quiesce-and-fork path +
    **strict ready-point assertions** (pull-forward #2). Parent
    enters a minimal forkserver loop; worker exits immediately.
    Enough to hit the AFL handshake from a host harness.
-3. **commit 3:** `um_snapshot_worker_init()` — vCPU re-create,
-   stub respawn, timerfd/signalfd recreate + **KASAN
-   MADV_DONTFORK fix** (pull-forward #6). Worker now runs
-   actual guest code, including under CONFIG_KASAN=y.
+3. **commit 3:** `um_snapshot_worker_init()` — vCPU re-create
+   (via a new `um_vcpus_start_all()` extracted from
+   `smp_prepare_cpus()` in this same commit), stub respawn,
+   timerfd/signalfd recreate + **KASAN MADV_DONTFORK fix**
+   (pull-forward #6). Worker now runs actual guest code,
+   including under CONFIG_KASAN=y.
 4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
    disposition annotations** (pull-forward #3). One patch
    touching every `socket()` / `open()` site; largely

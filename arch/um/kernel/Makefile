@@ -21,6 +21,7 @@ obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 
 obj-$(CONFIG_KPROBES) += kprobes/
 obj-$(CONFIG_RETHOOK) += rethook.o
+obj-$(CONFIG_UM_SNAPSHOT_FORKSERVER) += snapshot.o
 # rethook's trampoline runs on every probed function's return;
 # it must not itself be traced (same discipline as kprobes).
 KASAN_SANITIZE_rethook.o  := n

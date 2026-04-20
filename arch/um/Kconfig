@@ -393,6 +393,48 @@ config UM_BACKEND_CONTRACT_TEST
 
 	  Say N for production builds; Y or M to validate a backend.
 
+#
+# Fuzzer-oriented hooks (workstream C-09).
+#
+# Umbrella Kconfig option for fuzzing-only kernel features. Its job is
+# to give the fuzz and fuzz-deep profiles a single toggle that turns on
+# snapshot/forkserver, future KCOV hot-loop optimisations, and the
+# `prctl(PR_SET_CHILD_SUBREAPER)` infrastructure needed to reap
+# forkserver workers cleanly at >=1000 iter/s.
+#
+# See Documentation/virt/uml/redesign/03-profiles/fuzz.md and
+# 02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md for the
+# surface this enables.
+#
+config UM_FUZZ_HOOKS
+	bool "Fuzzer-oriented hooks (forkserver, KCOV hot-loop, reaping)"
+	default n
+	help
+	  Enable fuzzer-oriented kernel features: the snapshot/forkserver
+	  seam (CONFIG_UM_SNAPSHOT_FORKSERVER below), and future KCOV hot-
+	  loop and reaping refinements. Off by default; enabled by the
+	  fuzz and fuzz-deep profile defconfigs.
+
+	  Say N for production and research builds; Y for fuzz builds.
+
+config UM_SNAPSHOT_FORKSERVER
+	bool "Snapshot/forkserver seam (workstream C-09)"
+	depends on UM_FUZZ_HOOKS
+	default n
+	help
+	  Compile arch/um/kernel/snapshot.c: the cooperative in-kernel
+	  seam that lets UML quiesce to a known-good "ready point" and
+	  fork() itself for each fuzz iteration. Implements the AFL-style
+	  forkserver wire protocol on fds 198/199 and binds onto
+	  syzkaller's RunSnapshot API.
+
+	  Details, rationale (D35), format choice for v2 snapshot-to-disk
+	  (D36), and v1 pull-forward scope (D37) live in
+	  Documentation/virt/uml/redesign/02-workstreams/
+	  C-profiles-and-gaps/09-snapshot-forkserver.md.
+
+	  Say N unless you're building a fuzz-profile UML.
+
 endmenu
 
 source "arch/um/drivers/Kconfig"
