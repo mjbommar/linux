@@ -1,59 +1,356 @@
 # C-07: Port KMSAN to UML
 
-**Status:** planned
-**Effort:** 6 weeks (heaviest port)
-**Dependencies:** stable A, stable B, KASAN port working
-**Blocks:** research profile having uninit-memory detection
+**Status:** design (2026-04-20); implementation commits to follow
+once v1 scope is locked and the memory-pressure unknown (U1
+below) is probed with a throwaway build. This is the heaviest
+remaining C-port; treat the 6-week budget as the ceiling, not
+the target.
+**Effort:** 6 weeks (budget). Optimistic-case scope — KASAN's
+UML port paved the mmap pattern we reuse — is closer to **2-3
+weeks of disciplined work** if U1/U2/U3 hold. Kept at 6 weeks
+in `00-vision.md` because KMSAN is historically the highest-
+risk sanitizer port (see "Risk summary" below).
+**Dependencies:** stable A (backend ops), stable B (section
+                  split + static-key gates), **KASAN port
+                  working on UML** (all landed; KASAN is the
+                  template). `HAVE_ARCH_KASAN if X86_64` is
+                  currently in `arch/um/Kconfig:20`.
+**Blocks:** research profile having uninit-memory detection;
+            closing out the "sanitizer trio" (KASAN + KCSAN +
+            KMSAN) for UML-on-x86_64.
 
 ## Goal
 
-`select HAVE_ARCH_KMSAN` for UML. Detect uninitialized-memory
-reads — a 10-15% slice of recent kernel CVEs.
+`select HAVE_ARCH_KMSAN if X86_64` for UML. Detect uninitialized-
+memory reads (roughly a 10-15 percent slice of recent
+kernel CVEs per syzkaller telemetry) via the in-tree KMSAN
+instrumentation, running under the research profile with the
+clang toolchain and the existing host-mmap-backed shadow-region
+pattern we already proved in KASAN.
 
-## Approach
+## Prior-art survey
 
-1. KMSAN needs a 16 TB shadow region (like KASAN) plus a 16 TB
-   origin region (where the uninit was created). UML's KASAN port
-   already has the shadow `mmap` model; KMSAN extends it.
-2. KMSAN's compile-time wraps add origin tracking to every
-   allocation/store.
-3. Boot-time init: pre-`main()` constructor mmaps both shadow
-   and origin regions.
-4. `select HAVE_ARCH_KMSAN` and dependencies in `arch/um/Kconfig`.
-5. Run KMSAN kunit tests.
+### What we reuse unchanged
 
-## Deliverable
+- **`mm/kmsan/`** (the KMSAN core): init, shadow lookup, hook
+  machinery, report generation. Arch-generic.
+- **Clang's `-fsanitize=kernel-memory`**. Already how KMSAN
+  lands on bare-metal x86; UML just needs to turn it on via
+  `HAVE_ARCH_KMSAN + LLVM=1`. UML's LLVM build support already
+  landed via the A/B workstreams.
+- **UML's own `kasan_map_memory()` + `.kasan_init` section
+  pattern** (`arch/um/kernel/mem.c:48-72`, `arch/um/include/asm/
+  kasan.h`). This is the shadow-mmap bootstrap template; KMSAN
+  extends it with one additional 16 TB mmap for the origin
+  region and mirrors the `.kmsan_init` pre-`main()` constructor
+  trick.
+- **`um_register_mmap_region()`** (`arch/um/kernel/physmem.c`,
+  landed as part of C-09 commit 3b's D37 pull-forward #1). KMSAN
+  shadow + origin both register through this so snapshot/fork-
+  server inherits them correctly.
 
-- `arch/um/include/asm/kmsan.h`
-- `arch/um/mm/kmsan.c`
-- KMSAN-instrumented build works; tests pass
-- Documentation in `arch/um/Documentation/kmsan.rst`
+### What's different from the bare-metal x86 KMSAN port
+
+- **No CPU entry area, no lowcore, no fixmap-level per-CPU
+  blocks.** x86's `arch/x86/mm/kmsan_shadow.c` has per-CPU
+  metadata for the CPU entry area (`cpu_entry_area_{shadow,
+  origin}`) so exception and IDT handling can read metadata
+  without page-table walks. UML has no IDT, no real exception
+  entry, and no CPU entry area; the metadata hook
+  (`arch_kmsan_get_meta_or_null`) returns `NULL` for everything
+  on UML and defers to the generic page-struct lookup. Much
+  simpler than s390 or x86_64.
+- **No `KMSAN_INIT_RUNTIME` dance.** x86 special-cases the
+  bootstrap path for early-boot code that runs before shadow is
+  up. UML's boot is later-stage-by-construction — by the time
+  kernel code runs, the `.kasan_init` constructor has already
+  mmap'd the shadow; KMSAN piggybacks on the same seam via a
+  `.kmsan_init` constructor that mmaps shadow + origin in the
+  same pre-`main()` window.
+- **mmap'd, not direct-mapped.** KMSAN on bare metal uses a
+  VMALLOC-region quarter-split (1/4 vmalloc, 1/4 shadow, 1/4
+  origin, 1/4 module shadow+origin). UML's shadow lives in a
+  host `mmap()` at `KASAN_SHADOW_OFFSET`; KMSAN's shadow and
+  origin sit in two more `mmap()`s at fixed UML-specific
+  offsets. Same lookup math, different backing store.
+- **Host-memory amplification: 3x kernel-memory at runtime.**
+  Every byte of kernel memory needs 1 byte of shadow and 4
+  bytes of origin metadata (depth-compressed stack depot IDs).
+  Under the fuzz profile's snapshot/fork loops this triples peak
+  host RSS — documented as U1 below.
+
+## Proposed shadow + origin VA layout
+
+UML on x86_64 already uses a 16 TB shadow at
+`KASAN_SHADOW_OFFSET` (`arch/um/include/asm/kasan.h:8-23`). Add
+two parallel 16 TB regions for KMSAN:
+
+```
+ ┌─────────────────────┬────────────────────────────────────────┐
+ │ region              │ offset                                 │
+ ├─────────────────────┼────────────────────────────────────────┤
+ │ KASAN shadow        │ CONFIG_KASAN_SHADOW_OFFSET              │
+ │                     │   16 TB @ shadow-scale-3               │
+ │ KMSAN shadow        │ CONFIG_KMSAN_SHADOW_OFFSET              │
+ │                     │   16 TB, 1 shadow-byte per kernel-byte │
+ │ KMSAN origin        │ CONFIG_KMSAN_ORIGIN_OFFSET              │
+ │                     │   16 TB, 1 u32 per kernel-u32 (4-byte) │
+ └─────────────────────┴────────────────────────────────────────┘
+```
+
+Kconfig gets three new `*_SHADOW_OFFSET` / `*_ORIGIN_OFFSET`
+values. Exact numeric choice lives in `arch/um/Kconfig` alongside
+the existing `KASAN_SHADOW_OFFSET` (see D15 for how that offset
+was chosen; KMSAN picks the next free aligned 16 TB window per
+the host x86_64 canonical-hole layout).
+
+`arch_kmsan_get_meta_or_null(addr, is_origin)` returns NULL for
+every caller on UML v1 — no special-region metadata pools to
+route around — and all lookups walk the standard shadow/origin
+mmap ranges. If future UML work adds a CPU entry area analogue
+(say, for seccomp backend entry trampolines), the hook grows a
+branch; v1 doesn't need it.
+
+## Arch contract (what UML must implement)
+
+Minimum surface. Per file with a one-line rationale:
+
+- `arch/um/include/asm/kmsan.h` (new). Declares
+  `KMSAN_SHADOW_START`, `KMSAN_SHADOW_END`, `KMSAN_ORIGIN_START`,
+  `KMSAN_ORIGIN_END`, `kmsan_init()`,
+  `arch_kmsan_get_meta_or_null()`, `kmsan_virt_addr_valid()`,
+  `kmsan_phys_addr_valid()`. Mirrors `asm/kasan.h`.
+- `arch/um/kernel/mem.c` (modified). Add `kmsan_init()`
+  calling `kasan_map_memory(KMSAN_SHADOW_START,
+  KMSAN_SHADOW_SIZE)` + same for origin; register both as mmap
+  regions via `um_register_mmap_region()`; wire a
+  `.kmsan_init`-section function pointer matching the
+  `.kasan_init` trick at `mem.c:70-72`.
+- `arch/um/Kconfig` (modified). `select HAVE_ARCH_KMSAN if
+  X86_64` + `select HAVE_ARCH_KMSAN_VMALLOC if HAVE_ARCH_KMSAN`
+  alongside existing KASAN selects. Kconfig help text should
+  call out U1 (memory overhead) + U2 (clang-only) so config
+  users aren't surprised.
+- `arch/um/Makefile` (modified, likely one or two lines).
+  `KMSAN_SANITIZE := n` for `arch/um/os-Linux/` (host-
+  interfacing code that shouldn't be instrumented; same posture
+  as existing KASAN overrides for `os-Linux/` paths).
+- `Documentation/virt/uml/kmsan.rst` (new, ~150 LOC). User-
+  facing doc: which profile enables it, how to reproduce a
+  canonical uninit finding, memory-overhead expectations,
+  selftest pointer, Invariant-I5 caveat about snapshot/fork
+  interaction (U3).
+
+What UML explicitly does NOT need:
+
+- `arch/um/mm/kmsan_shadow.c` (per-CPU entry-area metadata).
+  UML has no CPU entry area; the arch_kmsan_get_meta_or_null
+  default (returns NULL) handles every path. Defer to v2 if a
+  future UML feature ever needs its own special region.
+- ORIGIN_SIZE special-casing. Generic KMSAN already handles 1:1
+  shadow and 4:1 origin ratios.
+- Any touches to `mm/kmsan/` core. Arch-generic by design.
+
+## Commit plan (bisectable)
+
+All commits build clean on `ARCH=um LLVM=1` (KMSAN is clang-
+only) and boot the research profile with `CONFIG_KMSAN=y`. Plain
+`ARCH=um` (gcc) builds must also remain clean — with
+`CONFIG_KMSAN=n` the code compiles to nothing.
+
+1. **commit 1:** Kconfig + header + Makefile scaffold.
+   - `select HAVE_ARCH_KMSAN if X86_64` and
+     `HAVE_ARCH_KMSAN_VMALLOC if HAVE_ARCH_KMSAN` in
+     `arch/um/Kconfig`.
+   - `arch/um/include/asm/kmsan.h` with VA-layout macros +
+     function prototypes (extern).
+   - `arch/um/Makefile` `KMSAN_SANITIZE := n` for
+     `arch/um/os-Linux/`.
+   - No `kmsan_init` body yet; KMSAN is selectable but the
+     shadow isn't populated. Build verifies Kconfig deps are
+     right; runtime is KMSAN-off-by-default.
+
+2. **commit 2:** Shadow + origin mmap + init.
+   - `kmsan_init()` in `arch/um/kernel/mem.c`:
+     `kasan_map_memory(KMSAN_SHADOW_START, KMSAN_SHADOW_SIZE)`
+     and same for origin; `um_register_mmap_region()` both.
+   - `.kmsan_init` section function pointer matching
+     `.kasan_init`.
+   - Verifiable: `make ARCH=um LLVM=1 uml/research` with
+     `CONFIG_KMSAN=y` boots, `/proc/self/maps` shows the two new
+     regions, no panic at first allocation.
+
+3. **commit 3:** arch_kmsan_get_meta_or_null stub + UML-
+   specific arch hook bodies.
+   - `arch_kmsan_get_meta_or_null` returning NULL (all paths
+     take the generic shadow-lookup).
+   - `kmsan_virt_addr_valid` / `kmsan_phys_addr_valid` tied to
+     UML's existing `virt_addr_valid` where appropriate.
+   - Verifiable: mm/kmsan/kmsan_test.c kunit passes under UML.
+
+4. **commit 4:** selftest + user doc + research defconfig flip.
+   - `tools/testing/selftests/um/kmsan-smoke/` host-driven
+     selftest modeled on snapshot-smoke / kprobes-stress.
+     Loads a guest init that deliberately reads uninitialized
+     memory; asserts the KMSAN report appears in dmesg.
+   - `Documentation/virt/uml/kmsan.rst` + toctree entry.
+   - `arch/um/configs/profiles/research.config` —
+     `CONFIG_KMSAN=y` (or `research-kmsan.config` as a sibling
+     profile if memory overhead disqualifies it from default
+     research per U1).
+   - `07-port-kmsan.md` Status → `landed (YYYY-MM-DD)` with
+     kmsan_test + selftest evidence.
 
 ## Validation
 
-- `kunit_test_kmsan` passes
-- Inject a known uninit read; KMSAN catches it
-- Reproduce a known kernel CVE found by KMSAN under QEMU; verify
-  UML reproduces it identically (invariant I5)
+Per AGENT-PROMPT §3 Q1 bar on each commit:
 
-## Open questions
+- `uml-quality-q1.sh research` clean vs committed baseline.
+- `scripts/checkpatch.pl --strict -g HEAD` on each commit.
+- `uml-boot-matrix.sh` clean across PTRACE_ONLY / SECCOMP_ONLY /
+  DYNAMIC.
 
-- **Q1**: Origin tracking is expensive — does UML's mmap mechanism
-  scale to 32 TB total shadow + origin? (Plan: yes; UML routinely
-  mmaps 16 TB for KASAN. Doubling is fine on x86_64.)
-- **Q2**: KMSAN's boot is delicate (constructor order matters,
-  things get instrumented before shadow is ready). Validate
-  early.
+C-07-specific validation:
 
-## Risk
+- **Compile symbol visibility:**
+  `nm vmlinux | grep -E "kmsan_init|__msan_"` must show defined
+  (T) symbols. Clang instrumentation inserts `__msan_*` stubs
+  KMSAN core resolves; UML v1 doesn't override any of them.
+- **Boot-time plumbing:** `/proc/self/maps` for a booted UML
+  shows KMSAN_SHADOW_START and KMSAN_ORIGIN_START as PROT_READ|
+  PROT_WRITE mappings the size they should be (16 TB each).
+- **Functional proof:** mm/kmsan/kmsan_test.c kunit (in-tree,
+  `tools/testing/selftests/lib/` or similar — see
+  `Documentation/dev-tools/kmsan.rst`). Run under UML research
+  profile with `CONFIG_KMSAN=y`. Expect the same report counts
+  the x86 host kernel produces — Invariant I5.
+- **Targeted reproducer:** Inject a known uninit read
+  (`u8 buf[16]; WRITE_ONCE(*(u8 *)0x0, buf[3]);` sort of thing)
+  in a module; verify KMSAN prints a report naming the uninit
+  origin stack. Compare byte-for-byte to the same reproducer
+  on a bare-metal x86_64 build. Invariant I5 says they must
+  match.
+- **Fuzz-profile interaction (per U3):** Build a fuzz-kmsan
+  combined profile (or override fuzz with
+  `CONFIG_KMSAN=y` for the test), run the C-09
+  `snapshot-smoke-driver.py` for a handful of iterations, and
+  confirm no KMSAN-report corruption across worker fork.
 
-Highest of the C ports. KASAN took 2.5 years on UML; KMSAN
-likely shorter (KASAN paved the way) but still hard.
+## Unknowns
 
-**Mitigation:**
-- Do this last (after KFENCE, KCSAN, kprobes, ftrace already
-  working — those are easier and demonstrate workstream
-  capability)
-- Engage Patricia Alfonso / Vincent Whitchurch (KASAN-on-UML
-  authors) early
-- If it stalls, ship without; KMSAN is the most-skippable port
+**U1: 3x host-memory overhead under fuzz workloads.**
+
+- Question: KMSAN adds 1x shadow + 4:1 origin to every kernel
+  allocation. On a 4 GB UML guest that's ~12 GB effective host
+  RSS. Fuzz profile forks workers via `um_snapshot_ready()`;
+  each fork CoW's the kernel but grows metadata as the worker
+  dirties pages. Does a sustained fuzz run OOM the host?
+- Probe: commit 2 boot with `mem=4G` fuzz profile, count peak
+  RSS via `/proc/<uml_pid>/status` across 100 forkserver
+  iterations. If peak > 16 GB we flag v1 as "research profile
+  only; fuzz+KMSAN deferred until an opt-in sampling mode".
+- Mitigation if over: defer KMSAN-in-fuzz to v2 and add a
+  `CONFIG_KMSAN_SAMPLING` path (upstream has discussed it;
+  upstream work, not UML-local). Research profile keeps full
+  KMSAN; fuzz stays KMSAN-off. **Medium risk; measurable pre-
+  land.**
+
+**U2: Clang version gate + LLVM=1 build wrinkles across
+backends.**
+
+- Question: KMSAN requires clang ≥ 14 with
+  `-fsanitize=kernel-memory`. UML's LLVM=1 builds work (A/B
+  workstreams) but is the clang instrumentation stable across
+  UML's three backends (ptrace / seccomp / KVM)? Different
+  backends have different entry paths; clang's inline instru-
+  mentation might emit different metadata writes depending on
+  -mcmodel or -fno-common flags UML sets.
+- Probe: commit 1 adds a Kconfig `depends on
+  CC_IS_CLANG_VERSION >= 14` or similar. Build each backend
+  via `uml-boot-matrix.sh` with KMSAN=y; verify no link
+  errors. Run kmsan_test under each; expect identical report
+  shape.
+- Mitigation: if a backend diverges (e.g., seccomp entry
+  triggers a false positive clang doesn't know to skip),
+  narrow the Kconfig to that backend subset and document in
+  the user doc. Clang-version bumps of the host distro aren't
+  our problem. **Low-to-medium risk.**
+
+**U3: Origin-chain coherence across snapshot/fork worker
+reinit.**
+
+- Question: C-09's worker reinit path calls
+  `sched_worker_detach_other_tasks` (D42) and drops various
+  host-state handles. KMSAN's origin stack depot is global
+  state with a spinlock; after a fork, both parent and worker
+  have the same depot but the worker's origin-chain entries
+  may index stack-frame addresses that no longer exist (the
+  parent's unmapped vmas). Does a KMSAN report in the worker
+  dereference a stale origin stack pointer and panic?
+- Probe: alloc an uninit value before the ready-point, snapshot,
+  worker reads the uninit. Generate a KMSAN report. Check that
+  the origin trace points at valid pages in the worker's
+  address space.
+- Mitigation: if origin-chain dereferencing crashes the worker,
+  add an origin-chain re-anchoring step to
+  `um_snapshot_worker_init()` (D41-style signal-gated,
+  mirroring the sigio/timer rebuild). In the worst case,
+  document a v1 limitation: "KMSAN reports across snapshot
+  may point at stale origin frames; source frame info is
+  best-effort." **Medium risk.**
+
+## Risk summary
+
+- **v1 implementation risk: low-to-medium.** KASAN's mmap
+  pattern is the template. The arch contract is small; every
+  item has a concrete prior-art reference (KASAN, x86 KMSAN).
+- **Memory risk: the dominant concern.** Triples kernel RSS.
+  Research profile is fine; fuzz profile will be measured
+  pre-land (U1).
+- **Toolchain risk: accepted.** Clang-only. LLVM=1 UML builds
+  already work; adding `-fsanitize=kernel-memory` is the
+  standard recipe.
+- **Maintenance risk: low.** No UML-specific KMSAN engine; we
+  piggyback on `mm/kmsan/` core.
+
+## Sequencing note
+
+This doc is the design; no implementation commits here. v1
+implementation starts only once:
+
+- C-06 BPF JIT is either landed (option B sign-off + upstream
+  merge) or explicitly deferred via D43's option C. Mixing a
+  blocked workstream with a new one muddles the branch state.
+- A 30-minute throwaway build probes U1 (memory overhead
+  measurement) so we're not committing to a path that OOMs the
+  fuzz profile.
+
+If both are satisfied, the four commits above land in roughly 2
+weeks with the usual "build + Q1 + boot-matrix + checkpatch"
+per AGENT-PROMPT §§3-4 on each.
+
+## Cross-references
+
+- `01-architecture/three-layers.md` — KMSAN is Layer 2
+  instrumentation gated by `CONFIG_KMSAN`; no static-key gate
+  because the compile-time instrumentation is on-or-off at
+  build time (same as KASAN).
+- `04-risks/decisions-log.md` D15 — how
+  `KASAN_SHADOW_OFFSET` was chosen; KMSAN offsets follow the
+  same process.
+- `04-risks/decisions-log.md` D37 — v1 pull-forwards for C-09;
+  the `um_register_mmap_region()` seam KMSAN shadow + origin
+  both hook into.
+- `05-validation/a-plus-quality-plan.md` — Q1 bar KMSAN commits
+  must pass.
+- `arch/um/include/asm/kasan.h` — KASAN arch header, the
+  template `arch/um/include/asm/kmsan.h` mirrors.
+- `arch/um/kernel/mem.c:48-72` — existing `kasan_init` +
+  `.kasan_init` section pattern KMSAN extends.
+- `arch/x86/include/asm/kmsan.h`, `arch/x86/mm/kmsan_shadow.c`
+  — bare-metal x86 KMSAN arch hooks. UML's arch_kmsan_get_meta_
+  or_null simplifies compared to x86 because we have no CPU
+  entry area.
+- `Documentation/dev-tools/kmsan.rst` — upstream KMSAN user
+  doc; the UML-specific `Documentation/virt/uml/kmsan.rst`
+  points back to this for the generic semantics.
