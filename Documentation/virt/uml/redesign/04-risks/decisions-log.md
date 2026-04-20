@@ -2077,4 +2077,190 @@ graph held.
 
 ---
 
+## D35: C-09 v1 is a cooperative AFL-style forkserver; CRIU-style snapshot-to-disk deferred to v2
+
+**Date:** 2026-04-20
+**Status:** Accepted (closes `09-snapshot-forkserver.md`'s Q1/Q2/Q3
+design questions; narrows the v1 scope of workstream C-09)
+
+**Decision:** C-09 v1 achieves the fuzz profile's <50 ms restart
+target by having UML boot to a named "ready point" and then
+`fork()` itself for each fuzz iteration. Parent = forkserver
+(pristine, quiesced). Child = worker that runs one testcase and
+exits. The wire protocol is AFL-compatible (fds 198/199; 12 bytes
+per iteration).
+
+CRIU-style serialize-to-disk snapshot/restore is **not** in v1.
+It stays parked for a later v2 that needs to survive host
+reboots; the fuzz milestone (M8) does not need it.
+
+**Why this shape (model selection):**
+
+1. **UML is one cooperative process that owns its state.** The
+   CRIU playbook — ptrace-injected parasite, pagemap walking,
+   TCP-repair, mount-tree reconstruction, `/proc/self/fd`
+   enumeration — exists because CRIU is dumping uncooperative
+   targets from outside. UML already knows every host fd it
+   opened (`os-Linux/file.c`), every mmap region (one RAM
+   `mmap`, optional KASAN shadow `mmap`, vmalloc area), and
+   every vCPU thread (it created them). So the useful
+   machinery is tiny: a fork point, a post-fork re-init. The
+   expensive CRIU machinery is dead weight.
+
+2. **`fork()` gives COW of guest RAM for free.** A worker that
+   touches 16 MB of guest RAM pays ~4k minor faults; 4k × ~2 µs
+   ≈ 8 ms. Nyx (Schumilo et al., USENIX Sec '21, [link][nyx])
+   reaches 1000+ iter/s in KVM by implementing dirty-page
+   bitmaps and incremental restore from a userfaultfd-backed
+   pages file — effectively reinventing `fork()`'s COW by
+   hand because KVM doesn't expose host process fork semantics
+   cleanly. UML inherits them for free by being a regular host
+   process.
+
+3. **The syzkaller API we're implementing is already the
+   forkserver contract.** `Instance.SetupSnapshot(input)` +
+   `Instance.RunSnapshot(input) -> (result, output, err)` in
+   syzkaller's `pkg/vm/vmimpl` ([link][syz-snap]) maps
+   precisely onto "boot to ready point once; per-iter feed
+   testcase and wait for result". The contract is published;
+   we bind onto it. No new syzkaller API negotiation is part
+   of this.
+
+4. **gVisor validated the architectural shape we need.**
+   gVisor's checkpoint/restore owns its "kernel" (Sentry) and
+   serializes directly without CRIU ([link][gvisor-cr]).
+   gVisor's demand-faulted pages file is the model for UML's
+   eventual v2; v1 omits the file because `fork()` suffices
+   for in-process fuzzing.
+
+**Alternatives considered and why rejected:**
+
+- **Full CRIU-style snapshot-to-disk in v1.** Rejected: 3-4×
+  the engineering effort for v1 value that only materializes
+  on host reboot. The fuzz profile is a long-lived host
+  process; 1000+ iter/s from a `fork()`-based forkserver
+  already saturates host CPU. Snapshot-to-disk is a M8+ "nice
+  to have".
+
+- **AFL persistent mode (`__AFL_LOOP(N)`) inside the kernel.**
+  Rejected: persistent mode reuses the same child process
+  across iterations and relies on the harness to "fully reset
+  critical state" between iters (AFL++ surfaces this as
+  "stability %"). A running kernel has no defensible notion of
+  "reset critical state" — timer ticks, RCU grace periods, and
+  kthread work between iters all mutate non-harness state.
+  Forkserver (fresh child per iter) is correct; persistent is
+  a fuzz-only optimization whose correctness precondition the
+  kernel does not satisfy.
+
+- **Nyx-style in-kernel dirty-page bitmap + userfaultfd
+  restore.** Rejected for v1: we don't have a UML KVM backend
+  yet (workstream D), and replicating the KVM dirty-log
+  mechanism against UML's seccomp backend is a substantial
+  project on its own. Rebuilds what `fork()` already gives us.
+  Revisit post-D if v1 forkserver proves insufficient.
+
+- **mconsole-only trigger for the "ready point."** Rejected:
+  `03-profiles/fuzz.md` explicitly sets `CONFIG_MCONSOLE=n`
+  for the fuzz profile (mconsole is debug surface; fuzz wants
+  minimum TCB). The fuzz profile is the *only* profile that
+  needs the forkserver. An mconsole-only trigger would mean
+  fuzz profile cannot use the feature C-09 is specifically
+  for. We compose three channels (AFL fd handshake, debugfs
+  trigger, mconsole command); fuzz profile gets the first,
+  research gets the second, `prod-with-hooks` gets all three.
+
+- **Snapshot at arbitrary points via stop_machine + serialize.**
+  Rejected: the 50 ms budget cannot absorb the cost of
+  serializing 16 TB of KASAN shadow VA + the RAM image, even
+  sparsely. Cooperative ready-point with `fork()` sidesteps
+  the entire serialize step.
+
+**What v1 commits to:**
+
+- `CONFIG_UM_FUZZ_HOOKS=y` gates compilation of
+  `arch/um/kernel/snapshot.c`.
+- Three trigger channels (AFL fds 198/199, debugfs, mconsole)
+  composed through one `um_snapshot_ready(const char *point)`
+  entry point.
+- Post-fork `um_snapshot_worker_init()` handling the five
+  things `fork()` does not inherit: vCPU pthreads, seccomp
+  stub children, timerfd + signalfd, host-fd allowlist,
+  pending signals.
+- Selftest `tools/testing/selftests/um/snapshot-smoke/` speaks
+  the AFL protocol to validate end-to-end without waiting on
+  syzkaller's `vm/uml` backend (C-08) to land.
+- Nothing committed to `tools/uml/snapshot/`; host-side CLI
+  is deferred to a later workstream gated by explicit user
+  sign-off per the AGENT-PROMPT cross-subsystem rule.
+
+**Six named risks that v1 budgets for (each → one Open-question
+in `09-snapshot-forkserver.md`):**
+
+1. Post-fork page-fault storm (fault path dominates if guest
+   working set > ~8 MB).
+2. KASAN shadow COW amplification (1/8 of touched VA, scattered
+   faults).
+3. Stub-child respawn latency (~1–3 ms per stub; multiplies
+   by N-vCPU × guest-userspace processes).
+4. Host fd hygiene (any leaked fd is a correctness bomb or a
+   cleanup-time sink; ~30 call sites to audit).
+5. Reaping / pid contention at high rate (above ~500 iter/s).
+6. Snapshot drift (AFL "stability < 100%" analogue; any
+   parent-side mutation between forks).
+
+Risk #6 is the engineering-effort dominator; commit 2 of C-09
+is budgeted against it.
+
+**Lifetime:** Until v1 ships and runs long enough to prove the
+50 ms target is reachable. If post-fork fault storms (risk #1)
+or stub respawn (risk #3) make 50 ms unreachable, revisit in
+favor of the Nyx-like in-kernel dirty-log approach.
+
+**Revisit triggers:**
+
+- The fuzz profile reaches `<<50 ms` steady-state per
+  iteration but adding new instrumentation (e.g., KMSAN in
+  C-07) pushes it over budget. Re-examine whether snapshot-
+  to-disk or Nyx-style incremental restore would be cheaper
+  than shrinking instrumentation.
+- A host-side use case materializes that genuinely needs
+  survive-reboot snapshots (replay of a rare syzkaller
+  reproducer across host reboots; CI stamp of a "golden boot
+  state"). Open the v2 design thread with gVisor's pages-file
+  + demand-fault model as the starting point.
+- Workstream D (KVM backend) lands and the KVM backend exposes
+  dirty-log cleanly. May be cheaper than the forkserver in the
+  prod-with-hooks profile where KVM is the backend anyway.
+- `CONFIG_MCONSOLE=n` changes in the fuzz profile (unlikely;
+  it's a TCB decision). Would let us collapse the three
+  trigger channels into one.
+
+**Cross-references:**
+
+- `02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`
+  — the full v1 design.
+- `03-profiles/fuzz.md` §"Kconfig fragment" line 46:
+  `# CONFIG_MCONSOLE is not set` — the constraint that pins
+  the AFL-fd trigger as the required channel.
+- `04-risks/decisions-log.md` D1 — three-layer architecture
+  the snapshot static key fits under (Layer 2).
+- [AFL forkserver technical notes (lcamtuf)][afl-tech]
+- [AFL++ `src/afl-forkserver.c`][afl-fs]
+- [Nyx: Greybox Hypervisor Fuzzing (Schumilo et al., USENIX
+  Sec '21)][nyx]
+- [gVisor Checkpoint/Restore user guide][gvisor-cr]
+- [syzkaller `pkg/vm` Snapshot API][syz-snap]
+- [CRIU Checkpoint/Restore overview][criu-cr] — the playbook
+  we are explicitly not using for v1.
+
+[afl-tech]: https://github.com/google/AFL/blob/master/docs/technical_details.txt
+[afl-fs]: https://github.com/AFLplusplus/AFLplusplus/blob/stable/src/afl-forkserver.c
+[nyx]: https://www.usenix.org/system/files/sec21-schumilo.pdf
+[gvisor-cr]: https://gvisor.dev/docs/user_guide/checkpoint_restore/
+[syz-snap]: https://pkg.go.dev/github.com/google/syzkaller/vm
+[criu-cr]: https://criu.org/Checkpoint/Restore
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -31,7 +31,7 @@ the others.
 | 06 | [Port BPF JIT](06-port-bpf-jit.md) | 3 wk | planned | Yes |
 | 07 | [Port KMSAN](07-port-kmsan.md) | 6 wk | planned | Last (heaviest) |
 | 08 | [Syzkaller `vm/uml` backend](08-syzkaller-vm-uml.md) | 4 wk | planned | Yes (early!) |
-| 09 | [Snapshot/forkserver host launcher](09-snapshot-forkserver.md) | 6 wk | planned | Yes |
+| 09 | [Snapshot/forkserver host launcher](09-snapshot-forkserver.md) | 6 wk | **design (2026-04-20); v1 is AFL-style forkserver via cooperative `fork()`, CRIU-style deferred to v2 per D35; 6-commit plan documented** | Yes |
 | 10 | [Crosvm-style host launcher](10-host-launcher-crosvm.md) | 6 wk | planned | Yes |
 
 Total: ~42 weeks ≈ ~10 EM if serialized; ~8 EM with reasonable
