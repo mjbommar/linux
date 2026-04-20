@@ -449,16 +449,40 @@ requires a new dedicated commit.
      *fundamentally* resolved: even if caller did return,
      reinit has swept up the inconsistent state. High risk;
      2-5 days.
-   - **commit 3d:** worker runs guest code. Worker returns
-     from `um_snapshot_worker_init()` back through
-     `um_snapshot_ready` back through the debugfs-write
-     caller; UML continues guest execution in the worker;
-     stubs lazily respawned per guest-userspace syscall.
-     Parent's loop now actually `waitpid()`s each worker and
-     writes the 4-byte status byte per AFL protocol. Very
-     high risk (UML host-thread model corners); 1-2 weeks.
-     **After this commit lands, a worker can `/bin/echo
-     hello` — the load-bearing "fuzz is possible" test.**
+   - **commit 3d split into 3d-a/3d-b/3d-c/3d-d per D40.**
+     The originally-scoped 3d combined four high-risk pieces
+     — parent waitpid, worker rebuild, worker-returns,
+     worker-runs-guest-code — each with distinct failure
+     modes and test signals. The same bisectability argument
+     that drove D39's 3-split applies: shipping one monolith
+     makes any regression bisect to "commit 3d" when in fact
+     the useful diagnostic is "bisect to 3d-b vs 3d-c."
+     Sub-commits:
+     - **commit 3d-a:** parent-side only. After writing worker
+       pid, call `os_snapshot_waitpid_status(pid)` + write
+       4-byte status to fd 199 per AFL protocol. Worker still
+       `exit_group(0)`. Tests commit-2's waitpid-crash
+       hypothesis in the commit-3c-stable world.
+     - **commit 3d-b:** add the REBUILD half of worker reinit
+       that pairs with the FORGET half from commit 3c. New
+       helpers: `os_sigio_worker_rebuild`,
+       `os_timer_worker_rebuild`, plus `mm_list` clear.
+       Worker still exits at end; tests "rebuild itself
+       doesn't crash" in isolation.
+     - **commit 3d-c:** flip the worker path from
+       `os_snapshot_worker_exit(0)` to `return 0`; worker
+       unwinds through `um_snapshot_ready` and continues
+       guest execution. Init script: `echo hello; exit 0`.
+       Highest-risk sub-commit: RCU / scheduler / kthread
+       state inherited from parent may not survive the
+       unwind. Bugs here may require changes outside
+       `arch/um/` and trigger AGENT-PROMPT cross-subsystem
+       sign-off.
+     - **commit 3d-d:** worker runs `/bin/echo hello` via
+       execve → `start_userspace()` → fresh seccomp stub.
+       Tests multi-task + stub-spawn post-fork.
+     **Once 3d-d lands cleanly, a worker runs guest code —
+     the load-bearing "fuzz is possible" test.**
 4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
    disposition annotations** (pull-forward #3). One patch
    touching every `socket()` / `open()` site; largely

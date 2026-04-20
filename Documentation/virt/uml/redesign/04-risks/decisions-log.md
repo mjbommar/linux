@@ -2829,4 +2829,132 @@ decision becomes historical.
 
 ---
 
+## D40: C-09 commit 3d splits into 3d-a/3d-b/3d-c/3d-d (same rationale as D39)
+
+**Date:** 2026-04-20
+**Status:** Accepted after commits 3a, 3b, 3c landed and a careful
+testing-plan analysis exposed 3d's four distinct risk tranches.
+
+**Decision:** Split the originally-scoped commit 3d ("worker runs
+guest code + waitpid/status in parent") from D39 into four sub-
+commits, each independently buildable + bootable + bisectable:
+
+- **3d-a:** parent-side waitpid + 4-byte status byte. Worker
+  unchanged (still exit_group). Tests whether the commit-2
+  waitpid-call-site crash reproduces in the commit-3c-stable
+  world. Low-medium risk; the only change is parent adding one
+  blocking syscall + one 4-byte write.
+- **3d-b:** REBUILD half of worker reinit (pairs with the FORGET
+  half in commit 3c). Adds `os_sigio_worker_rebuild`,
+  `os_timer_worker_rebuild`, and mm_list clear in
+  `um_snapshot_worker_init()`. Worker still exits at end of
+  `um_snapshot_ready`. Tests "rebuild itself doesn't crash"
+  without also testing "return path works" at the same time.
+  Medium risk.
+- **3d-c:** flip the worker path from `os_snapshot_worker_exit(0)`
+  to `return 0`. Worker unwinds up through `um_snapshot_ready`,
+  past the debugfs-write handler, back into init userspace.
+  Init script runs its next trivial command
+  (`echo hello; exit 0`). Highest-risk sub-commit: RCU,
+  scheduler, kthread state inherited from parent may not
+  survive. Bugs may require changes outside `arch/um/`.
+  2-5 days.
+- **3d-d:** worker `exec /bin/echo hello` — first real guest
+  userspace task post-fork, triggers `start_userspace()` →
+  fresh seccomp stub owned by the worker. 1-2 weeks worst
+  case.
+
+**Why split rather than one commit:**
+
+Same argument as D39. The four pieces have distinct failure modes
+with distinct test signals: 3d-a would crash during `waitpid`, 3d-b
+during a rebuild helper, 3d-c during return-to-user, 3d-d during
+execve. A regression in a combined 3d would bisect to "3d" and
+then require reading the full diff to isolate. Splitting lets
+bisect point at the specific sub-commit.
+
+Also: the user-visible testing plan I wrote through
+(conversation transcript; summarized below as §"Step-by-step
+testing approach") naturally has four steps matching these four
+sub-commits. Each step has a single incremental test; each sub-
+commit's validation is exactly one step.
+
+**Step-by-step testing approach (recorded for context):**
+
+1. Baseline (commit 3c already landed): 100 fork iterations,
+   worker exits immediately, no leaks.
+2. **3d-a test:** parent survives `waitpid`. Fuzz harness sends
+   a cmd, reads pid, reads status; status == 0 (worker's
+   exit_group(0)).
+3. **3d-b test:** worker runs the rebuild helpers before exit;
+   dmesg clean; new timer/signalfd visible in `/proc/$child_pid/fd`
+   (captured at a debug break).
+4. **3d-c test:** init script `echo hello; exit 0`. Worker
+   prints "hello" via existing stderr plumbing and exits(0).
+   Parent reaps with status 0.
+5. **3d-d test:** init script `exec /bin/echo hello`. Worker's
+   first guest-userspace task runs. 10 iterations back to back.
+6. Stability: 1000 iterations of `/bin/true` back to back; no
+   growth in parent's fd count / mm_list length / rss.
+
+Expected failure modes, each addressed by a specific sub-commit:
+
+- Parent-post-fork `waitpid` null-jump — isolated by 3d-a.
+- Worker's first schedule after inheriting parent's runqueue —
+  surfaces at 3d-c.
+- RCU grace-period stall (worker inherits RCU bookkeeping) —
+  surfaces at 3d-c.
+- Seccomp stub ptrace-permission — surfaces at 3d-d.
+- Stub clone of fresh mm_id — surfaces at 3d-d.
+- Leaks / state growth across iterations — surfaces only at
+  step 6, not a commit of its own.
+
+**Alternatives considered and why rejected:**
+
+- **Keep commit 3d as one big patch per D39.** Rejected for the
+  same bisectability + risk-mixing reasons D39 rejected the
+  commit-3 monolith.
+- **Split further into 6 sub-commits mirroring the 6 testing
+  steps.** Rejected: steps 1 and 6 don't have code deltas
+  (step 1 is baseline; step 6 is stability test, not a commit).
+  Steps 2-5 map naturally to 3d-a, 3d-b, 3d-c, 3d-d.
+- **Land commit 5 (snapshot-smoke selftest) early so 3d's
+  sub-commits can use it for validation.** Considered. Rejected
+  for v1 of the split because the minimum tests for 3d-a (one
+  iteration with status byte check) and 3d-b (fd-count assertion)
+  are cheap to write as quick Python drivers. Pulling the full
+  commit-5 selftest scaffold forward would itself need the
+  state_version sysfs node (pull-forward #4 from D37), which
+  isn't blocking the 3d split. Commit 5 still lands after 3d-d
+  per the original plan.
+
+**Lifetime:** Until commits 3d-a through 3d-d are all landed.
+Then this decision becomes historical.
+
+**Revisit triggers:**
+
+- 3d-c turns out to be >1 week of work (likely: sub-split again
+  — return path vs scheduler fixup vs RCU fixup as separate
+  sub-sub-commits).
+- A failure mode emerges that needs cross-subsystem changes
+  (`kernel/sched/core.c`, `kernel/rcu/*`, etc.) and the AGENT-
+  PROMPT cross-subsystem sign-off rule fires.
+- The commit-2 waitpid crash reproduces in 3d-a: suggests the
+  crash wasn't about post-fork parent state (ruled out by
+  commit 3a's "parent doesn't return" path), and we need a
+  narrower investigation.
+
+**Cross-references:**
+
+- `02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`
+  §"Commit plan" — updated with the 3d-a/3d-b/3d-c/3d-d split.
+- D39 — commit-3 split that set the precedent for this kind of
+  decomposition.
+- D35 — the original v1 scope.
+- Commit `8f5e8b2159ea` — C-09 commit 3c (worker_init forgets
+  parent state); the FORGET half that 3d-b's REBUILD half
+  pairs with.
+
+---
+
 ## (Future entries here, as decisions are made)
