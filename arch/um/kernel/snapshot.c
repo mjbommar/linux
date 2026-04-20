@@ -149,36 +149,39 @@ static int um_snapshot_assert_ready(const char *named_point)
 }
 
 /*
- * Minimal AFL forkserver one-shot: handshake + one fork + worker
- * self-exit. The parent reports the worker pid and returns without
- * blocking on wait; blocking reap, iteration loop, and the worker-
- * side post-fork reinit all arrive in commit 3, where
- * um_snapshot_worker_init() lands and workers begin to run guest
- * code.
+ * AFL forkserver loop: handshake once, then iterate
+ * {read cmd, fork, report pid} forever until the fuzzer
+ * disconnects (fd 198 closes / fd 199 breaks).
  *
- * Commit-2 validation — what you can observe with this code:
- *   1. A host harness that pre-opens fds 198/199 sees 4 bytes
- *      ``AFL\0`` on fd 199 (handshake).
- *   2. After sending any 4 bytes on fd 198, the host reads 4 more
- *      bytes on fd 199: the worker's host pid.
- *   3. The worker host process exits immediately with status 0 —
- *      observable via waitpid() from whatever parent reaps it.
+ * The parent never returns from this function in the happy path
+ * — real fuzz use sits here for the UML process's entire lifetime.
+ * On fuzzer disconnect, the function returns so the caller can tear
+ * down. Iteration count is tracked for the diagnostic printk so
+ * operators can see forkserver is making progress.
  *
- * This is the minimum that proves the forkserver seam is wired
- * correctly. Protocol on fds 198/199 matches AFL++ afl-forkserver.c:
+ * Commit 3a scope: worker still exits immediately (no reinit, no
+ * guest code); parent still does not waitpid (status-byte response
+ * arrives in 3c/3d). The multi-iteration loop alone lets a host
+ * harness drive arbitrarily many iterations and catches at-scale
+ * bugs (leaks across iterations, stale fd state, parent drift) that
+ * commit 2's one-shot could not see.
  *
- *   parent -> 199: 4 bytes "AFL\0"                   (handshake)
- *   198    -> parent: 4 bytes testcase descriptor    (ignored today)
- *   parent forks
- *   parent -> 199: 4 bytes worker host pid
- *   worker exit_group(0)
- *   parent returns
+ * Protocol on fds 198/199 matches AFL++ afl-forkserver.c:
  *
- * Commit 3 adds blocking ``os_snapshot_waitpid_status()`` and the
- * status-byte response, and converts the one-shot into a loop.
+ *   one time:
+ *     parent -> 199: 4 bytes "AFL\0"                   (handshake)
+ *
+ *   per iteration:
+ *     198    -> parent: 4 bytes testcase descriptor    (ignored today)
+ *     parent forks
+ *     parent -> 199: 4 bytes worker host pid
+ *     worker exit_group(0)
+ *
+ * Commit 3c/3d extend per-iteration with waitpid + status byte.
  */
-static int um_snapshot_forkserver_one_shot(const char *named_point)
+static int um_snapshot_forkserver_loop(const char *named_point)
 {
+	unsigned long iter = 0;
 	u32 cmd;
 	int pid;
 	ssize_t n;
@@ -204,50 +207,76 @@ static int um_snapshot_forkserver_one_shot(const char *named_point)
 		return (int)n;
 	}
 
-	n = os_snapshot_read_all(UM_FORKSERVER_CTL_FD, &cmd, sizeof(cmd));
-	if (n < 0) {
-		pr_err("snapshot: command read failed: %zd\n", n);
-		return (int)n;
-	}
+	pr_info("snapshot: forkserver up at \"%s\"; entering loop\n",
+		named_point);
 
-	pid = os_snapshot_fork_worker();
-	if (pid < 0) {
-		pr_err("snapshot: fork failed: %d\n", pid);
-		return pid;
-	}
+	for (;;) {
+		n = os_snapshot_read_all(UM_FORKSERVER_CTL_FD,
+					 &cmd, sizeof(cmd));
+		if (n < 0) {
+			/* EPIPE / EOF: fuzzer disconnected — normal exit
+			 * path. Anything else is a loud failure.
+			 */
+			if (n == -EPIPE)
+				pr_info("snapshot: fuzzer disconnected after %lu iteration(s)\n",
+					iter);
+			else
+				pr_err("snapshot: command read failed at iter %lu: %zd\n",
+				       iter, n);
+			return (int)n;
+		}
 
-	if (pid == 0) {
-		/* Worker. Exit the forked host process immediately.
-		 * Commit 3 will replace this with a call to
-		 * um_snapshot_worker_init() + return, which will let
-		 * the worker run guest code; for now the cleanest
-		 * termination is a raw exit_group so no UML shutdown
-		 * machinery fires twice. Never returns.
+		pid = os_snapshot_fork_worker();
+		if (pid < 0) {
+			pr_err("snapshot: fork failed at iter %lu: %d\n",
+			       iter, pid);
+			return pid;
+		}
+
+		if (pid == 0) {
+			/* Worker. Exit the forked host process
+			 * immediately. Commit 3c will replace this with
+			 * a call to um_snapshot_worker_init() and commit
+			 * 3d will let the worker run guest code; for
+			 * now the cleanest termination is a raw
+			 * exit_group. Never returns.
+			 */
+			os_snapshot_worker_exit(0);
+		}
+
+		/* Parent: report the worker pid. Commit 3c/3d add
+		 * waitpid + 4-byte status response here.
 		 */
-		os_snapshot_worker_exit(0);
+		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
+					  &pid, sizeof(pid));
+		if (n < 0) {
+			if (n == -EPIPE)
+				pr_info("snapshot: fuzzer disconnected mid-iter %lu\n",
+					iter);
+			else
+				pr_err("snapshot: pid write failed at iter %lu: %zd\n",
+				       iter, n);
+			return (int)n;
+		}
+
+		iter++;
 	}
-
-	/* Parent: tell the fuzzer the worker pid and return. Commit 3
-	 * adds waitpid + status-byte response.
-	 */
-	n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD, &pid, sizeof(pid));
-	if (n < 0)
-		pr_err("snapshot: pid write failed: %zd\n", n);
-
-	return pid;
 }
 
 /**
  * um_snapshot_ready() - reach the named "ready point" and quiesce.
  * @named_point: printable identifier of the call site.
  *
- * Commit 2 semantics: runs one round-trip of the AFL wire protocol if
- * fds 198/199 are open; otherwise emits an info message and returns.
- * Workers return with ``um_snapshot_enabled`` disabled locally so hot
- * paths run at zero overhead.
+ * Commit 3a semantics: runs the multi-iteration AFL forkserver loop
+ * until the fuzzer disconnects, if fds 198/199 are open; otherwise
+ * emits an info message and returns. In the happy path, this
+ * function does not return — the parent sits in the forkserver loop
+ * for the UML process's entire lifetime, and only workers return
+ * (via os_snapshot_worker_exit in commit 3a; via
+ * um_snapshot_worker_init + caller unwind in commits 3c/3d).
  *
- * Commit 3 extends this into a multi-iteration loop and wires in the
- * worker-side reinit path.
+ * Commits 3c/3d extend per-iteration with worker-side reinit +
+ * waitpid + status-byte response.
  */
 void um_snapshot_ready(const char *named_point)
 {
@@ -264,27 +293,17 @@ void um_snapshot_ready(const char *named_point)
 	}
 
 	static_branch_enable(&um_snapshot_enabled);
-	ret = um_snapshot_forkserver_one_shot(named_point);
+	ret = um_snapshot_forkserver_loop(named_point);
 
-	/* Parent returns here after reaping the worker, or if the
-	 * forkserver loop declined to run (no fds, handshake failure).
-	 * Worker also returns here — it's path is: return from this
-	 * function, caller runs commit-3's worker_init stub, caller
-	 * falls off the end of whatever called um_snapshot_ready(), and
-	 * the worker continues execution unaware it was ever forked.
-	 * In commit 2 this means the worker's caller hits the debugfs-
-	 * write return path and the worker host process exits cleanly
-	 * when init userspace decides to; that is the cleanest "worker
-	 * exits immediately" shape we get without the commit-3 reinit
-	 * path, and it is enough for a host harness to observe the
-	 * handshake happened.
+	/* Parent reaches here only on disconnect / error (fuzzer
+	 * closed its end, fork failed, write failed). In commit 3a
+	 * workers never reach this point — os_snapshot_worker_exit
+	 * in the forkserver loop terminates the worker host process.
+	 * Commits 3c/3d change that: workers return through the loop
+	 * back here and continue guest execution.
 	 */
-	if (ret < 0)
-		pr_info("snapshot: ready point \"%s\" completed without forkserver: %d\n",
-			named_point, ret);
-	else
-		pr_info("snapshot: ready point \"%s\" one-shot fork done (pid was %d)\n",
-			named_point, ret);
+	pr_info("snapshot: ready point \"%s\" returning: %d\n",
+		named_point, ret);
 }
 EXPORT_SYMBOL_GPL(um_snapshot_ready);
 
