@@ -403,42 +403,89 @@ requires a new dedicated commit.
 
 ## Commit plan
 
-1. **commit 1:** skeleton + Kconfig + **mmap enumeration
-   table** (pull-forward #1) + **physmem_fd invariant
-   documented in setup_physmem()** (pull-forward #5). No
-   behavior change yet. Builds `UM_FUZZ_HOOKS=y` clean;
+1. **commit 1 (landed b78df759dfbd):** skeleton + Kconfig +
+   **mmap enumeration table** (pull-forward #1) + **physmem_fd
+   invariant documented in setup_physmem()** (pull-forward #5).
+   No behavior change yet. Builds `UM_FUZZ_HOOKS=y` clean;
    `um_snapshot_ready()` / `um_snapshot_worker_init()` are
-   WARN-stubs until commits 2 and 3. The `um_vcpus_start_all()`
-   refactor originally scoped here moves to commit 3, where
-   it is first used; doing it earlier would export an unused
-   symbol and split the SMP-boot diff from its one caller.
-2. **commit 2:** `um_snapshot_ready()` quiesce-and-fork path +
-   **strict ready-point assertions** (pull-forward #2). Parent
-   enters a minimal forkserver loop; worker exits immediately.
-   Enough to hit the AFL handshake from a host harness.
-3. **commit 3:** `um_snapshot_worker_init()` — vCPU re-create
-   (via a new `um_vcpus_start_all()` extracted from
-   `smp_prepare_cpus()` in this same commit), stub respawn,
-   timerfd/signalfd recreate + **KASAN MADV_DONTFORK fix**
-   (pull-forward #6). Worker now runs actual guest code,
-   including under CONFIG_KASAN=y.
+   WARN-stubs. The `um_vcpus_start_all()` refactor originally
+   scoped here moves to commit 3c where it is first used.
+2. **commit 2 (landed c29a9ed9960c):** `um_snapshot_ready()`
+   quiesce-and-fork path + **strict ready-point assertions**
+   (pull-forward #2). AFL-compatible handshake on fds 198/199,
+   single fork, worker `exit_group(0)`. Parent returns to the
+   debugfs-write caller. Tested: handshake byte-correct,
+   worker pid delivered. Known limitation: parent is unstable
+   after return because UML's internal host-thread model
+   doesn't expect to have been the parent of a fork; that path
+   disappears in commit 3a, which makes parent loop forever.
+3. **commit 3 split into 3a/3b/3c/3d per D39.** Commit 3 as
+   originally scoped in D35 had four distinct risk tranches —
+   parent loop (trivial), KASAN DOFORK (surgical), worker
+   reinit (gnarly), worker-runs-guest-code (very gnarly) —
+   with wildly different dev costs. Shipping them as one
+   commit broke the bisectability rule; splitting into sub-
+   commits is mechanical and lets each land on its own merits:
+   - **commit 3a:** parent loops forever. Replace one-shot
+     body with `while (true) { handshake_iteration() }`. Worker
+     still exits immediately. Fixes commit 2's "parent returns
+     and panics" limitation by construction: parent never
+     returns. Low risk; half a day. Enables multi-iteration
+     testing with a trivial host harness.
+   - **commit 3b:** KASAN `MADV_DOFORK` fix (D37 pull-forward
+     #6) + populate mmap registry with physmem_fd region +
+     KASAN shadow region. Under `CONFIG_UM_FUZZ_HOOKS`, flip
+     `arch/um/os-Linux/mem.c:49` from DONTFORK → DOFORK so
+     workers inherit shadow via COW instead of SEGVing on first
+     KASAN access. Low risk; half a day.
+   - **commit 3c:** `um_snapshot_worker_init()` minimum — the
+     no-crash reinit. Abandon parent-inherited host threads
+     (IRQ driver, timer, mconsole), kill inherited seccomp
+     stub children, close-and-recreate timerfd/signalfd,
+     re-install signal handlers where fork-inheritance isn't
+     correct. Worker still exits at end of um_snapshot_ready;
+     no guest code yet. Validates that reinit itself doesn't
+     crash. Where commit 2's post-fork parent-panic is
+     *fundamentally* resolved: even if caller did return,
+     reinit has swept up the inconsistent state. High risk;
+     2-5 days.
+   - **commit 3d:** worker runs guest code. Worker returns
+     from `um_snapshot_worker_init()` back through
+     `um_snapshot_ready` back through the debugfs-write
+     caller; UML continues guest execution in the worker;
+     stubs lazily respawned per guest-userspace syscall.
+     Parent's loop now actually `waitpid()`s each worker and
+     writes the 4-byte status byte per AFL protocol. Very
+     high risk (UML host-thread model corners); 1-2 weeks.
+     **After this commit lands, a worker can `/bin/echo
+     hello` — the load-bearing "fuzz is possible" test.**
 4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
    disposition annotations** (pull-forward #3). One patch
    touching every `socket()` / `open()` site; largely
    mechanical; Coccinelle eligible per AGENT-PROMPT §2.
 5. **commit 5:** `snapshot-smoke` kselftest + user doc
    `Documentation/virt/uml/snapshot.rst` + **state_version
-   sysfs node** (pull-forward #4). Validates commits 2–4
+   sysfs node** (pull-forward #4). Validates commits 3a-4
    end-to-end; emits latency and throughput numbers. Selftest
    reads `/sys/kernel/um/state_version` and asserts == 1.
 6. **commit 6:** fuzz defconfig enables `UM_SNAPSHOT_FORKSERVER`;
    status-header flip to `landed` in this file.
 
-Commits 1–3 are the core; 4 is defensive hygiene; 5 is the Q1
-bar; 6 is the wire-up. Each commit builds+boots clean on both
-gcc and clang per the AGENT-PROMPT bisectability rule. Pull-
-forward items fold into commits 1–5 without adding dedicated
-commits — see D37 for the rationale.
+Commits 1, 2 landed; 3a-3d are the core; 4 is defensive
+hygiene; 5 is the Q1 bar; 6 is the wire-up. Each commit
+builds+boots clean on both gcc and clang per the AGENT-PROMPT
+bisectability rule. Pull-forward items fold into commits 1-5
+without adding dedicated commits — see D37 for the rationale
+and D39 for the 3-split rationale.
+
+**Realistic timeline to fuzz-works:** commits 3a-3d are the
+gating set; best-case 3-5 weeks of disciplined work (with the
+commit-3d UML-internals unknown as the dominant risk).
+Commits 4-6 add another ~1 week. Then C-08 (syzkaller
+`vm/uml` backend, external to linux.git) adds ~4 weeks + LKML/
+syzkaller review cycles. Total from today to "researcher runs
+`syz-manager --vm=uml`": **2-4 months**, with commit-3d as the
+dominant unknown.
 
 ## Risk (summary)
 

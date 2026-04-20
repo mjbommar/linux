@@ -2729,4 +2729,104 @@ be a regression.
 
 ---
 
+## D39: C-09 commit 3 splits into 3a/3b/3c/3d due to risk tranches
+
+**Date:** 2026-04-20
+**Status:** Accepted after commits 1-2 landed and exposed the
+four distinct risk classes inside what was originally scoped
+as a single commit 3.
+
+**Decision:** Split the original commit 3 ("um_snapshot_worker_init
++ KASAN fix") from `09-snapshot-forkserver.md` into four
+sub-commits, each independently buildable + bootable:
+
+- **3a:** parent loops forever (replace one-shot with while(1)).
+- **3b:** KASAN `MADV_DOFORK` fix + populate mmap registry.
+- **3c:** `um_snapshot_worker_init()` minimum (no-crash reinit
+  in worker; worker still exits at end).
+- **3d:** worker runs guest code + parent does waitpid + status
+  byte.
+
+**Why the split:**
+
+Working commit-2 in place, the four pieces have very different
+risk profiles, and bundling them would have broken the AGENT-
+PROMPT bisectability rule in practice:
+
+- 3a is trivial. `while (true) { handshake_iteration() }`. Parent
+  never returns from `um_snapshot_ready`, so commit 2's
+  "parent-panics-after-return" limitation disappears by
+  construction. Half a day.
+- 3b is surgical. One-line `MADV_DONTFORK` → `MADV_DOFORK` flip
+  plus two `um_register_mmap_region()` call sites. Half a day.
+  Independently valuable (unblocks KASAN-enabled workers even
+  if 3c/3d stall).
+- 3c is where UML's host-thread model fights back. Fork
+  inherits exactly the calling thread; every other helper
+  (IRQ driver, timer, mconsole, seccomp stubs) is lost in the
+  child. Worker has to either abandon them or recreate them
+  in a fresh shape. The scope is bounded — worker still exits
+  at the end — so the validation bar is "reinit doesn't
+  crash" rather than "worker runs real code". 2-5 days.
+- 3d is where we learn what we don't know. Worker returns from
+  reinit and continues as a real UML guest. The lazy stub
+  respawn path gets exercised for the first time. Guest
+  userspace syscalls start flowing. Any residual inherited
+  state that reinit missed shows up as a SEGV, hang, or
+  corruption. 1-2 weeks, possibly longer if UML's internals
+  have surprises.
+
+Bundling these into one commit means a regression anywhere
+above can only be bisected to "commit 3". Splitting lets us
+bisect to the specific sub-commit, which is more useful when
+the failure mode is "kernel panic at iteration 37" rather than
+"kernel panic at boot".
+
+**Alternatives considered and why rejected:**
+
+- **Keep commit 3 as one big patch per the original plan.**
+  Rejected: bisectability, reviewability, and the dev-cost
+  imbalance (half-day items gated by 2-week items in the same
+  commit) all push against this.
+- **Split commit 3 into only two parts (3a+3b together; 3c+3d
+  together).** Rejected: 3a's risk profile (trivial) and 3c's
+  (gnarly) are incompatible; if 3c breaks something subtle,
+  bisect would finger 3a+3c jointly. Each sub-commit in the
+  split is its own logical change per AGENT-PROMPT.
+- **Slip the pull-forward items (KASAN DOFORK, mmap registry
+  populate) out of commit 3 into a separate "infra" commit
+  series.** Rejected: the items are load-bearing for 3c/3d's
+  worker-side logic (the registry is what 3c iterates; the
+  DOFORK flip is what lets 3c/3d run under KASAN). Shipping
+  them as "infra" before the consumer exists means they sit
+  as dead code.
+
+**Lifetime:** Until commits 3a-3d are all landed. Then this
+decision becomes historical.
+
+**Revisit triggers:**
+
+- 3c turns out to be >2 weeks of work (likely: split 3c
+  further — worker signal handling, worker stub teardown,
+  worker thread abandonment as separate sub-sub-commits).
+- 3d turns out to be >4 weeks (likely: add a formal pause +
+  pre-3d design pass + possibly a decisions-log entry on
+  "which UML subsystems can't survive a fork and must be
+  turned off in fuzz profile").
+- A user shows up wanting the forkserver at a different
+  stability point (e.g. "fork for snapshot-to-disk Mode A"
+  — but that's v2 territory per D35/D36/D38, not this split).
+
+**Cross-references:**
+
+- `02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`
+  §"Commit plan" — updated with the 3a/3b/3c/3d split.
+- D35 — original C-09 v1 scope and the 6-commit plan.
+- D37 — v1 pull-forward items consumed by 3b, 3c, 3d.
+- Commit `b78df759dfbd` — C-09 commit 1 (skeleton + registry).
+- Commit `c29a9ed9960c` — C-09 commit 2 (handshake + one-shot
+  fork); exposed the need for this split.
+
+---
+
 ## (Future entries here, as decisions are made)
