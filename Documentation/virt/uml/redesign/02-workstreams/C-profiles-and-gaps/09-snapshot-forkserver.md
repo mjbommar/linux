@@ -29,9 +29,12 @@ free via host `fork()` COW. See §"Prior art" below.
 seam.** The UML guest boots once to a user-named "ready point,"
 quiesces vCPU threads and I/O to a barrier, and `fork()`s itself.
 Parent = forkserver (pristine). Child = worker that runs one
-testcase and exits. Guest RAM, KASAN shadow, and hostfs page
-cache inherit via copy-on-write automatically — only pages the
-testcase actually touches cost a minor fault.
+testcase and exits. Guest RAM and hostfs page cache inherit via
+copy-on-write automatically — only pages the testcase actually
+touches cost a minor fault. **KASAN shadow requires one
+mmap-flag flip to inherit** (see Q2 below and pull-forward #6);
+without that flip the shadow is `MADV_DONTFORK` and the worker
+SEGVs on first KASAN access.
 
 **Explicitly not in v1: CRIU-style snapshot-to-disk.** See D35
 for the full decision. Short version: UML is one cooperative
@@ -202,15 +205,32 @@ there.
 - `arch/um/Kconfig`:
   - New `config UM_SNAPSHOT_FORKSERVER` under
     `UM_FUZZ_HOOKS` with help text pointing here.
+- `arch/um/include/asm/um-mmaps.h` (new, pull-forward #1):
+  `struct um_mmap_region` + a table enumerating every kernel
+  mmap region (physmem_fd RAM, KASAN shadow, vmalloc runs,
+  stub pages, time-travel shm). Consumed by snapshot.c, the
+  FD hygiene sweep, and the KASAN MADV_DOFORK flip. Also the
+  v2 writer's input when v2 opens.
 - `arch/um/kernel/snapshot.c` (new):
   - `um_snapshot_ready()` + `um_snapshot_worker_init()` as
     sketched in §1.
   - Static-key definition + trigger plumbing.
+  - Strict ready-point assertions (pull-forward #2).
+  - `/sys/kernel/um/state_version` sysfs node, value = 1
+    (pull-forward #4).
 - `arch/um/kernel/Makefile`: conditional build under
   `UM_SNAPSHOT_FORKSERVER`.
+- `arch/um/kernel/physmem.c`: inline assert that `physmem_fd`
+  stays `MAP_SHARED` + file-backed + RWX, plus a comment
+  explaining the contract v2 depends on (pull-forward #5).
+- `arch/um/os-Linux/mem.c`: the KASAN-shadow MADV_DONTFORK
+  → MADV_DOFORK flip under `CONFIG_UM_FUZZ_HOOKS`
+  (pull-forward #6 / Q2 fix).
 - `arch/um/os-Linux/file.c` audit: every host-fd creation site
-  marked `O_CLOEXEC` or added to the snapshot "close list".
-  Mechanical sweep, one patch.
+  marked `O_CLOEXEC` or added to the snapshot "close list",
+  with per-FD disposition tag (`INHERIT_ACROSS_FORK`,
+  `SERIALIZE_CONTENT`, `RECONSTRUCT_BY_PATH`, `SKIP`) — pull-
+  forward #3. Mechanical sweep, one patch, Coccinelle-eligible.
 - `arch/um/os-Linux/skas/process.c` refactor: carve out
   `um_vcpus_start_all()` so both boot and `worker_init()` share
   it.
@@ -222,7 +242,8 @@ there.
 - `tools/testing/selftests/um/snapshot-smoke/`: AFL-protocol-
   speaking smoke test that boots UML, performs the handshake,
   forks 10 workers, verifies each reports a distinct pid and
-  exits cleanly. Models `kprobes-stress/`.
+  exits cleanly, asserts `/sys/kernel/um/state_version` == 1.
+  Models `kprobes-stress/`.
 
 **Explicitly deferred (needs user sign-off before landing):**
 
@@ -263,12 +284,24 @@ budget; each becomes a tracked item in `04-risks/`:
   shadow for unmapped kernel VAs); pre-fault the guest working
   set in the parent with `madvise(MADV_WILLNEED)`;
   `MAP_SHARED` for genuinely read-only regions.
-- **Q2: KASAN shadow COW amplification.** Every kernel VA the
-  testcase dirties also dirties 1/8 of that in shadow; scatter
-  over 256 MB VA → 32 MB shadow → ~8k extra COWs. Plan: in the fuzz
-  hot loop, accept SW_TAGS or classic KASAN with the smaller
-  shadow; KASAN+KMSAN together go to a "triage" profile that
-  explicitly skips the forkserver loop.
+- **Q2: KASAN shadow + fork() interaction
+  (correctness, not perf).** `arch/um/os-Linux/mem.c:49` sets
+  `MADV_DONTFORK` on the KASAN shadow region. Contrary to an
+  earlier reading of this risk (D35's Q2 text), fork() does
+  not COW the shadow — it **unmaps** the shadow range in the
+  child. Workers under fuzz profile (which has
+  `CONFIG_KASAN=y`) would therefore SEGV on first KASAN-
+  instrumented kernel access. Plan (pull-forward item #6 from
+  D37): under `CONFIG_UM_FUZZ_HOOKS`, flip the shadow mapping's
+  disposition to `MADV_DOFORK` so the child inherits shadow via
+  COW like RAM does. Alternative considered: re-call
+  `kasan_map_memory()` in `um_snapshot_worker_init()` and
+  reconstruct shadow — rejected because it loses valid
+  poisoning state, meaning KASAN would miss any use-after-free
+  on slabs that were freed before snapshot-ready. The COW
+  amplification concern from D35's original Q2 text is real but
+  secondary (typical fuzz testcases touch well under 32 MB of
+  kernel VA per iteration; amplification costs << 1 ms per iter).
 - **Q3: Stub-child respawn latency.** `clone + seccomp_install +
   stub mmap` ≈ 1–3 ms per stub × N vCPUs × guest-userspace
   processes. Plan: pool pre-created stubs in the parent and pass
@@ -322,32 +355,85 @@ budget; each becomes a tracked item in `04-risks/`:
 5. **CRIU** (<https://criu.org/Checkpoint/Restore>). Not used;
    its ptrace-parasite + pagemap-walk + TCP-repair machinery is
    overkill for a single cooperative process. See D35.
+6. **v2 snapshot-to-disk design.** Parked at
+   `08-future-phases/02-snapshot-to-disk.md` with format
+   decision in D36 (ELF64 core + UML `PT_NOTE` types) and the
+   pull-forward items it surfaced in D37. v1 and v2 share the
+   kernel-side seam, the mmap enumeration table, the ready-
+   point contract, the FD disposition annotations, and the
+   state_version sysfs node.
+
+## Pull-forward items from v2 design (D37)
+
+The v2 snapshot-to-disk design in
+`08-future-phases/02-snapshot-to-disk.md` surfaced five pieces
+of infrastructure plus one v1 correctness bug (Q2 above) that
+are load-bearing for v2 but also cheap and useful to land now.
+D37 records the decision to pull them into v1 rather than
+retrofit. Each folds into a specific v1 commit below; none
+requires a new dedicated commit.
+
+1. **Kernel mmap enumeration table** — new
+   `arch/um/include/asm/um-mmaps.h` with a
+   `struct um_mmap_region { name, base, len, disposition,
+   flags }` array populated from every `mmap` call site in
+   arch/um. Feeds the Q2 KASAN fix and the fd hygiene sweep.
+   Lands in commit 1.
+2. **Strict ready-point contract (assert-on-entry)** —
+   `um_snapshot_ready()` entry `WARN_ON_ONCE`s on dirty
+   inodes, pending RCU callbacks, non-caller kthreads running,
+   IRQ in flight, or pending non-SIGCHLD signals. Promotes
+   Q6 from "should probably check" to "check loudly, always".
+   Lands in commit 2.
+3. **FD allowlist extended with disposition annotation** —
+   `INHERIT_ACROSS_FORK`, `SERIALIZE_CONTENT`,
+   `RECONSTRUCT_BY_PATH`, `SKIP`. One-tag-per-site addition
+   to the commit-4 FD_CLOEXEC sweep. Unblocks v2 fd handling
+   with no extra kernel work now. Lands in commit 4.
+4. **`/sys/kernel/um/state_version` sysfs node** — one
+   integer, schema version = 1 at v1 landing. Lands in commit
+   5 alongside the selftest (selftests assert this).
+5. **`physmem_fd` MAP_SHARED invariant documented + asserted**
+   — `BUILD_BUG_ON`-style assert at `create_mem_file()` +
+   comment explaining the contract. Lands in commit 1.
+6. **KASAN shadow `MADV_DONTFORK` fix (Q2 above)** — flip to
+   `MADV_DOFORK` under `CONFIG_UM_FUZZ_HOOKS`. Lands in
+   commit 3 alongside `um_snapshot_worker_init()`, which is
+   the call site that depends on the fix.
 
 ## Commit plan
 
 1. **commit 1:** skeleton + Kconfig + refactor
-   `um_vcpus_start_all()` out of boot code. No behavior change
+   `um_vcpus_start_all()` out of boot code + **mmap
+   enumeration table** (pull-forward #1) + **physmem_fd
+   invariant assert** (pull-forward #5). No behavior change
    yet. Builds `UM_FUZZ_HOOKS=y` clean but does nothing when
    `um_snapshot_enabled` is off.
-2. **commit 2:** `um_snapshot_ready()` quiesce-and-fork path.
-   Parent enters a minimal forkserver loop; worker exits
-   immediately. Enough to hit the AFL handshake from a host
-   harness.
+2. **commit 2:** `um_snapshot_ready()` quiesce-and-fork path +
+   **strict ready-point assertions** (pull-forward #2). Parent
+   enters a minimal forkserver loop; worker exits immediately.
+   Enough to hit the AFL handshake from a host harness.
 3. **commit 3:** `um_snapshot_worker_init()` — vCPU re-create,
-   stub respawn, timerfd/signalfd recreate. Worker now runs
-   actual guest code.
-4. **commit 4:** fd hygiene sweep in `os-Linux/`. One patch
+   stub respawn, timerfd/signalfd recreate + **KASAN
+   MADV_DONTFORK fix** (pull-forward #6). Worker now runs
+   actual guest code, including under CONFIG_KASAN=y.
+4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
+   disposition annotations** (pull-forward #3). One patch
    touching every `socket()` / `open()` site; largely
    mechanical; Coccinelle eligible per AGENT-PROMPT §2.
 5. **commit 5:** `snapshot-smoke` kselftest + user doc
-   `Documentation/virt/uml/snapshot.rst`. Validates commits 2–4
-   end-to-end; emits latency and throughput numbers.
+   `Documentation/virt/uml/snapshot.rst` + **state_version
+   sysfs node** (pull-forward #4). Validates commits 2–4
+   end-to-end; emits latency and throughput numbers. Selftest
+   reads `/sys/kernel/um/state_version` and asserts == 1.
 6. **commit 6:** fuzz defconfig enables `UM_SNAPSHOT_FORKSERVER`;
    status-header flip to `landed` in this file.
 
 Commits 1–3 are the core; 4 is defensive hygiene; 5 is the Q1
 bar; 6 is the wire-up. Each commit builds+boots clean on both
-gcc and clang per the AGENT-PROMPT bisectability rule.
+gcc and clang per the AGENT-PROMPT bisectability rule. Pull-
+forward items fold into commits 1–5 without adding dedicated
+commits — see D37 for the rationale.
 
 ## Risk (summary)
 
