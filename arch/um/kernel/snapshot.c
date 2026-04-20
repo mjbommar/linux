@@ -259,14 +259,33 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 		}
 
 		if (pid == 0) {
-			/* Worker. Commit 3c: drop parent-inherited host-
-			 * side state before exit so we don't leave
-			 * helper threads or timers attempting to signal
-			 * this child. Commit 3d will replace the exit
-			 * with a return so the worker can run guest code.
+			/*
+			 * Worker path — 3d-c iteration.
+			 *
+			 * Intermediate scope: worker returns from the
+			 * forkserver loop (so it can eventually resume
+			 * guest code) but does NOT open the UML signal
+			 * gate. The first attempt at 3d-c (with unblock
+			 * here) crashed both parent and worker at the
+			 * same BSS/heap addresses as the waitpid
+			 * investigation from D41, consistent with the
+			 * scheduler re-entering via SIGALRM / timer
+			 * dispatch and longjmp'ing into a jmp_buf that
+			 * was saved by the parent pre-fork (stale).
+			 *
+			 * Keeping signals gated in the worker means no
+			 * preemption, no SIGIO, no scheduler re-entry
+			 * via the timer path. The return still unwinds
+			 * up through um_snapshot_ready → debugfs_write
+			 * → sys_write; if THAT path doesn't crash, the
+			 * worker has reached guest-userspace and can
+			 * run un-preemptible code (echo, exit) before
+			 * halting. 3d-d's job is to then re-enable
+			 * signals only after the scheduler has been
+			 * rebuilt so that longjmp targets are valid.
 			 */
 			um_snapshot_worker_init();
-			os_snapshot_worker_exit(0);
+			return 0;
 		}
 
 		/* Parent: AFL protocol per iteration -
@@ -373,15 +392,25 @@ void um_snapshot_ready(const char *named_point)
 	static_branch_enable(&um_snapshot_enabled);
 	ret = um_snapshot_forkserver_loop(named_point);
 
-	/* Parent reaches here only on disconnect / error (fuzzer
-	 * closed its end, fork failed, write failed). In commit 3a
-	 * workers never reach this point — os_snapshot_worker_exit
-	 * in the forkserver loop terminates the worker host process.
-	 * Commits 3c/3d change that: workers return through the loop
-	 * back here and continue guest execution.
+	/*
+	 * Two classes of callers reach this point:
+	 *   - Parent, on disconnect / error (fuzzer closed its end,
+	 *     fork failed, write failed). This path currently still
+	 *     panics shortly afterwards on the parent-unwind bug
+	 *     noted in commit 2's header; fuzz-profile use never
+	 *     reaches it in the happy path.
+	 *   - Worker, from commit 3d-c onwards, returning up through
+	 *     the forkserver loop to continue guest execution.
+	 *
+	 * Deliberately no pr_info here. The worker's kernel state
+	 * immediately post-fork has seen fork-inheritance quirks
+	 * that trip vsnprintf via its per-CPU / TLS lookups
+	 * (observed in commits 3c and 3d-c's bring-up). A future
+	 * commit can re-introduce a diagnostic print once the
+	 * worker-side state is consistent enough for printk.
+	 * Suppress ret to silence unused-variable warnings.
 	 */
-	pr_info("snapshot: ready point \"%s\" returning: %d\n",
-		named_point, ret);
+	(void)ret;
 }
 EXPORT_SYMBOL_GPL(um_snapshot_ready);
 
