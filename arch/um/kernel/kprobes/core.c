@@ -258,14 +258,38 @@ int kprobe_int3_handler(struct pt_regs *regs)
 	addr = (kprobe_opcode_t *)(instruction_pointer(regs) -
 				   sizeof(kprobe_opcode_t));
 
-	kcb = get_kprobe_ctlblk();
 	p = get_kprobe(addr);
 
 	if (!p)
 		return 0;
 
-	if (kprobe_running())
+	/*
+	 * Generic kprobes contract (enforced by lib/tests/test_kprobes.c
+	 * and PROVE_LOCKING under research profile): pre/post handlers
+	 * run with preemption disabled. On architectural int3 this is
+	 * provided by the exception entry path; UML's SIGTRAP handler
+	 * is just a signal handler, so preempt state is whatever the
+	 * interrupted guest-kernel context had. Disable explicitly
+	 * before touching per-CPU kprobe state or running user handlers.
+	 *
+	 * Matched by preempt_enable_notrace() on every return path.
+	 */
+	preempt_disable_notrace();
+
+	kcb = get_kprobe_ctlblk();
+
+	if (kprobe_running()) {
+		/*
+		 * Re-entry: reenter_kprobe() sets up the inner probe's
+		 * single-step. The matching preempt_enable_notrace()
+		 * happens in kprobe_debug_handler() when the inner
+		 * single-step completes (status == KPROBE_REENTER
+		 * restores the outer state via restore_previous_kprobe).
+		 * Do NOT re-enable here — a double-enable would
+		 * underflow preempt_count across the re-entry pair.
+		 */
 		return reenter_kprobe(p, regs, kcb);
+	}
 
 	set_current_kprobe(p, regs, kcb);
 	kcb->kprobe_status = KPROBE_HIT_ACTIVE;
@@ -280,10 +304,18 @@ int kprobe_int3_handler(struct pt_regs *regs)
 	 * a jprobe-style emulation that already adjusted regs). Returns
 	 * non-zero to skip.
 	 */
-	if (!p->pre_handler || !p->pre_handler(p, regs))
+	if (!p->pre_handler || !p->pre_handler(p, regs)) {
 		setup_singlestep(p, regs, kcb, 0);
-	else
+		/*
+		 * The probed instruction will single-step out-of-line and
+		 * trap back into kprobe_debug_handler(), which does the
+		 * matching preempt_enable_notrace() for this path. Do NOT
+		 * re-enable here.
+		 */
+	} else {
 		reset_current_kprobe();
+		preempt_enable_notrace();
+	}
 
 	return 1;
 }
@@ -327,6 +359,13 @@ int kprobe_debug_handler(struct pt_regs *regs)
 	KPROBE_REGS_FLAGS(regs) |= (kcb->kprobe_saved_flags & X86_EFLAGS_IF);
 
 	kprobe_post_process(p, regs, kcb);
+	/*
+	 * Matched pair to the preempt_disable_notrace() in
+	 * kprobe_int3_handler(). Preemption was disabled when the int3
+	 * fired; this is the single-step-completion path and the
+	 * natural place to re-enable it.
+	 */
+	preempt_enable_notrace();
 	return 1;
 }
 NOKPROBE_SYMBOL(kprobe_debug_handler);
