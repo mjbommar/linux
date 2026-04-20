@@ -258,30 +258,44 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 
 		/* Parent: AFL protocol per iteration -
 		 *   1. report the worker pid (4 bytes)
-		 *   2. report the exit status (4 bytes)
+		 *   2. report the exit status (4 bytes, placeholder 0)
 		 *
-		 * Status is the raw wait status encoded by the host
-		 * kernel (WIFEXITED / WEXITSTATUS / WIFSIGNALED etc.
-		 * are host-side macros the fuzzer applies).
+		 * KNOWN LIMITATION (reverted from 3d-a v2 after several
+		 * failed attempts). Calling os_snapshot_waitpid_status()
+		 * from this UML-kernel context crashes the parent with
+		 * a null-jump or heap-jump regardless of whether we use
+		 *   - glibc waitpid() with no masking,
+		 *   - glibc waitpid() with host sigprocmask blocking
+		 *     {SIGCHLD, SIGALRM, SIGIO, SIGUSR1},
+		 *   - glibc waitpid() with um_set_signals(0) (UML-native
+		 *     deferred-signal gate),
+		 *   - raw syscall(__NR_wait4, ...) with the same
+		 *     UML-native gate.
 		 *
-		 * KNOWN LIMITATION (commit 3d-a): we do not call
-		 * os_snapshot_waitpid_status() here and write a
-		 * placeholder 0 status instead. Empirically, host
-		 * waitpid() from inside this UML kernel context
-		 * crashes the parent with a null-jump even with all
-		 * plausible host signals masked. Root cause appears
-		 * to live in UML's host-signal-to-kernel-IRQ
-		 * dispatch path during host syscalls; fixing it
-		 * reliably is out of scope for 3d-a and will be
-		 * re-attempted in commit 3d-c when the worker-side
-		 * rebuild has landed and changes the parent's state
-		 * during the wait window. Workers still terminate
-		 * cleanly via os_snapshot_worker_exit(0); the host
-		 * kernel eventually reaps zombies when the UML
-		 * process exits. Callers that care about status
-		 * today see a zero placeholder. See the runtime
-		 * observations in D40 and the test log noted in
-		 * 09-snapshot-forkserver.md §"Known limitations".
+		 * The failure mode is consistent with UML's signal-driven
+		 * scheduler re-entering during the host waitpid, but the
+		 * UML-native gate isn't enough to stop it — a path we
+		 * haven't yet traced is bypassing signals_enabled==0 and
+		 * running either a longjmp-based task switch into a
+		 * stale jmp_buf or a function-pointer dispatch whose
+		 * target has been clobbered. The crash addresses (0x0
+		 * and 0x610XXXXX inside UML's own VA) match this shape.
+		 *
+		 * Deferred to commit 3d-c, where the worker-side rebuild
+		 * and return-path changes re-arrange the parent's state
+		 * during the wait window. If the root cause is in the
+		 * parent, 3d-c's diagnostics will narrow it; if it's in
+		 * cross-process SIGCHLD handling, 3d-c's stub respawn
+		 * will expose that separately.
+		 *
+		 * Workers still terminate cleanly via
+		 * os_snapshot_worker_exit(0). Until we call wait() in a
+		 * way that doesn't crash, zombies accumulate in the host
+		 * and get reaped when the UML process exits — fine for
+		 * short selftest runs, not for sustained fuzzing. The
+		 * fuzzer reads a well-formed zero status byte per
+		 * iteration, so the wire protocol is correct even though
+		 * the status value is uninformative.
 		 */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &pid, sizeof(pid));
@@ -296,7 +310,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			return (int)n;
 		}
 
-		status = 0;	/* commit 3d-a placeholder; see comment. */
+		status = 0;	/* see comment above; 3d-c revisits. */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &status, sizeof(status));
 		if (n < 0) {

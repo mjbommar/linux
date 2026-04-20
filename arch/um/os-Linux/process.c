@@ -167,51 +167,62 @@ ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len)
 int os_snapshot_waitpid_status(int pid)
 {
 	int status;
-	int ret;
+	long ret;
 
+	/*
+	 * Use raw syscall(__NR_wait4, ...) rather than glibc's
+	 * waitpid() wrapper. In commit 3d-a v1 the glibc wrapper
+	 * crashed the parent with a null-jump even under UML-level
+	 * signal gating; one plausible cause is glibc's cancellation-
+	 * point machinery (__syscall_cancel in modern glibc) doing an
+	 * indirect call through a pthread-specific pointer that is
+	 * inconsistent when we call it from UML kernel context. The
+	 * raw syscall bypasses all that and just returns the kernel's
+	 * answer. wait4() is the canonical kernel entry (waitpid() is
+	 * historically a libc wrapper over wait4 with rusage=NULL).
+	 */
 	for (;;) {
-		ret = waitpid(pid, &status, 0);
+		ret = syscall(__NR_wait4, pid, &status, 0, NULL);
 		if (ret == pid)
 			return status;
-		if (errno == EINTR)
-			continue;
-		return -errno;
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		/* Shouldn't happen for a specific pid, but be defensive. */
+		return -EINVAL;
 	}
 }
 
 /*
- * Block/unblock the host signals that UML's in-kernel handlers
- * consume, for the duration of the forkserver loop body. Commit
- * 3d-a observed repeated post-fork null-jumps in the parent's
- * path, which turned out to be UML's signal-handler dispatch
- * re-entering UML kernel code from a host-syscall context during
- * waitpid / write. The cleanest mitigation is to run the entire
- * forkserver loop with those signals masked — the loop does no
- * useful UML kernel work (it is pure host syscalls) so no UML
- * async event is lost that the loop itself needed.
+ * Gate UML's in-kernel signal dispatch for the duration of the
+ * forkserver loop body. Not the host sigprocmask — that only stops
+ * host delivery, and when unblocked UML's sig_handler runs queued
+ * signals back-to-back from whatever context we happen to be in,
+ * which is exactly the crash mode commit 3d-a v1 hit. UML provides
+ * its own TLS flag (`signals_enabled` in arch/um/os-Linux/signal.c)
+ * that sig_handler checks on every delivery; when it's 0, the
+ * handler stores the signal in `signals_pending` and returns
+ * without running any UML kernel code. When we flip it back to 1,
+ * `unblock_signals()` drains `signals_pending` synchronously and
+ * in a deterministic order that UML expects.
  *
- * The saved sigset is a static inside this TU so the kernel-side
- * caller does not need to declare sigset_t. One outstanding save
- * per UML process is fine because the forkserver runs on exactly
- * one thread and the calls are strictly block / unblock paired.
+ * Using um_set_signals(0)/um_set_signals(saved) gives us that
+ * synchronous-drain behavior for free. One static saves the old
+ * state across the paired calls; the forkserver runs on exactly
+ * one thread so the save slot is race-free.
  */
-static sigset_t os_snapshot_signal_save;
+static int os_snapshot_signals_save;
 
 void os_snapshot_block_iter_signals(void)
 {
-	sigset_t blockset;
-
-	sigemptyset(&blockset);
-	sigaddset(&blockset, SIGCHLD);
-	sigaddset(&blockset, SIGALRM);
-	sigaddset(&blockset, SIGIO);
-	sigaddset(&blockset, SIGUSR1);
-	sigprocmask(SIG_BLOCK, &blockset, &os_snapshot_signal_save);
+	os_snapshot_signals_save = um_set_signals(0);
 }
 
 void os_snapshot_unblock_iter_signals(void)
 {
-	sigprocmask(SIG_SETMASK, &os_snapshot_signal_save, NULL);
+	um_set_signals(os_snapshot_signals_save);
 }
 
 /*
