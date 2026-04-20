@@ -14,6 +14,7 @@ Virtualization Support
    uml/debugfs
    uml/section-split
    uml/ftrace
+   uml/kprobes
    uml/profiles/index
    paravirt_ops
    guest-halt-polling
