@@ -44,6 +44,45 @@ CRIU pays for is solved by `fork()` + a small post-fork re-init.
 Snapshot-to-disk stays parked as a v2 "survive host reboot"
 feature; M8 does not need it.
 
+## Signal-gating contract (D41)
+
+Every C-09 critical section that runs a blocking host syscall
+from inside UML kernel context uses UML's per-thread
+`signals_enabled` flag as its primitive — NOT host
+`sigprocmask`. See D41 for the full rationale and the
+historical investigation that led to this decision.
+
+The one-line statement: *host sigprocmask stops host delivery
+but not UML's in-kernel IRQ dispatch; `signals_enabled` is what
+the dispatch actually consults, so that is what gates UML
+kernel critical sections.*
+
+C-09 code obligations:
+
+- Parent forkserver loop (commit 3a+): surround the loop body
+  with `os_snapshot_block_iter_signals()` /
+  `os_snapshot_unblock_iter_signals()`. These internally use
+  `um_set_signals()` per D41.
+- Worker `um_snapshot_worker_init()` (commit 3c+): operates
+  with `signals_enabled == 0` inherited from the parent's
+  pre-fork block. Forget-helpers (commit 3c) don't touch the
+  gate. Rebuild-helpers (commit 3d-b) must register new
+  handlers / fds / timers FIRST and open the gate LAST.
+- Worker return path (commit 3d-c): the tail of
+  `um_snapshot_worker_init()` calls `um_set_signals(1)` so
+  SIGALRM / SIGIO / SIGCHLD start driving the worker's timer,
+  I/O, and stub-reap paths before guest code resumes.
+- Ready-point assertions (`um_snapshot_assert_ready()`):
+  require `signals_enabled == 1` at ready-point entry so we
+  fail loud if a future caller enters an already-gated
+  critical section and our block-iter call degenerates into
+  a no-op.
+
+Canonical in-tree examples of this pattern:
+`os_kill_process` and `os_kill_ptraced_process` in
+`arch/um/os-Linux/process.c`, which wrap their `waitpid()`
+with `block_signals()` / `unblock_signals()`.
+
 ## Approach
 
 ### 1. Kernel-side seam (this workstream; in-tree)
@@ -468,7 +507,11 @@ requires a new dedicated commit.
        helpers: `os_sigio_worker_rebuild`,
        `os_timer_worker_rebuild`, plus `mm_list` clear.
        Worker still exits at end; tests "rebuild itself
-       doesn't crash" in isolation.
+       doesn't crash" in isolation. Per D41, rebuild helpers
+       must not flip `signals_enabled` to 1 prematurely —
+       handlers must be re-registered first, THEN the gate
+       opens. End-of-3d-b state: `signals_enabled` stays 0
+       in the worker (worker still exits).
      - **commit 3d-c:** flip the worker path from
        `os_snapshot_worker_exit(0)` to `return 0`; worker
        unwinds through `um_snapshot_ready` and continues
@@ -477,7 +520,16 @@ requires a new dedicated commit.
        state inherited from parent may not survive the
        unwind. Bugs here may require changes outside
        `arch/um/` and trigger AGENT-PROMPT cross-subsystem
-       sign-off.
+       sign-off. Per D41, the tail of this commit's worker
+       path must `um_set_signals(1)` before returning guest-
+       side so SIGALRM/SIGIO/SIGCHLD start driving the
+       worker's timer, I/O, and stub-reap paths. This
+       commit is also where the waitpid retry lives — the
+       parent's state during the wait window changes
+       substantively under 3d-b's rebuild, possibly
+       unblocking the crash documented in D41; if it does
+       not, fallback strategies are named there (pidfd +
+       poll, SIGCHLD-driven IRQ reap, or no-status-byte).
      - **commit 3d-d:** worker runs `/bin/echo hello` via
        execve → `start_userspace()` → fresh seccomp stub.
        Tests multi-task + stub-spawn post-fork.
@@ -528,3 +580,36 @@ implementing a published contract, not negotiating one.
 - Snapshot-to-disk (CRIU-like) stays explicitly deferred per
   D35; its risk profile is re-entered only if forkserver
   proves insufficient.
+
+## Shipped-commit audit (post-D41)
+
+Recorded after commit 3d-a's waitpid investigation surfaced
+that UML's `signals_enabled` TLS gate is the right primitive
+for snapshot-forkserver critical sections (see D41). Each
+shipped commit audited for signal-gating correctness; the
+conclusion for each is noted inline.
+
+| Commit | SHA | Touches UML signal state? | Correct per D41? |
+|---|---|---|---|
+| 1 | `b78df759dfbd` | No | N/A — skeleton + Kconfig + registry; no signal path |
+| 2 | `c29a9ed9960c` | No (handshake + fork; fork is raw syscall) | Correct |
+| 3a | `2bf287b64b16` | Yes (forkserver loop critical section) | Was using `sigprocmask` initially; fixed in `b2e391348e80` hardening |
+| 3b | `56a1b0961e44` | No (KASAN DONTFORK→DOFORK; registry populate) | N/A |
+| 3c | `8f5e8b2159ea` | Yes (worker_init forget path) | Correct: runs with `signals_enabled == 0` inherited from parent's pre-fork block; forget helpers don't touch signal state; worker exits before the gate matters |
+| 3d-a | `a0328b6011ed` | Yes (same critical section as 3a) | See hardening below |
+| 3d-a hardening | `b2e391348e80` | Yes (same critical section) | Correct: switched to `um_set_signals` per D41; raw `wait4` via `syscall(__NR_wait4)` to bypass glibc cancellation point |
+
+No shipped commit is retroactively incorrect under D41's framing.
+The only code change that the audit warrants is the hardening
+already landed in `b2e391348e80` (switches
+`os_snapshot_block_iter_signals` /
+`os_snapshot_unblock_iter_signals` from `sigprocmask` to
+`um_set_signals`). Commit 3d-a's waitpid-crash remains open;
+D41 names the concrete fallback strategies for commit 3d-c to
+try if the primitives alone don't unblock it.
+
+Follow-up code change (this series): extend
+`um_snapshot_assert_ready()` to assert
+`signals_enabled == 1` at ready-point entry. Fails loud when a
+future caller enters an already-gated critical section; the
+assertion is cheap and has zero false-positives today.

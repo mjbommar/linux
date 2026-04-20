@@ -2957,4 +2957,175 @@ Then this decision becomes historical.
 
 ---
 
+## D41: UML `signals_enabled` is the canonical signal-gating primitive for snapshot/forkserver critical sections
+
+**Date:** 2026-04-20
+**Status:** Accepted after commit 3d-a's waitpid-crash investigation
+surfaced that host `sigprocmask` is the wrong level of abstraction for
+gating UML's in-kernel IRQ dispatch.
+
+**Decision:** Any snapshot/forkserver code that runs a blocking host
+syscall from inside UML kernel context MUST use UML's
+`signals_enabled` machinery (via `um_set_signals()` /
+`um_get_signals()` / `block_signals()` / `unblock_signals()` from
+`arch/um/os-Linux/signal.c`), NOT raw `sigprocmask`. This applies to:
+
+- The forkserver loop body (handshake + fork + waitpid + status
+  write), already using `um_set_signals` since the 3d-a hardening
+  commit.
+- The worker-side `um_snapshot_worker_init()` rebuild path (commit
+  3d-b) — any `waitpid` / `poll` / blocking helper the rebuild uses
+  must run under UML signal gating.
+- The worker-returns path (commit 3d-c) — when the worker unwinds
+  back through `um_snapshot_ready` to run guest code, `signals_enabled`
+  must be set to 1 before guest-kernel-mode execution resumes, so
+  SIGALRM, SIGIO, SIGCHLD actually drive the worker's timer, I/O,
+  and stub-child-reap paths. The worker inherits
+  `signals_enabled == 0` from the parent's pre-fork block; 3d-b's
+  rebuild helpers, or the tail of `um_snapshot_worker_init()`,
+  own re-enabling it.
+- Any future v2 snapshot-to-disk code that blocks in a kernel-side
+  syscall while writing the ELF file (D36).
+
+**The mechanism, stated concretely:**
+
+UML maintains a per-thread TLS `signals_enabled` flag
+(`arch/um/os-Linux/signal.c:94`) that the in-kernel hard signal
+handler consults at every delivery (`sig_handler` line 101,
+`timer_alarm_handler` line 155). When `signals_enabled == 0`,
+inbound SIGIO / SIGCHLD / SIGALRM are queued into
+`signals_pending` (a bitmask) and the handler returns immediately
+without entering `do_IRQ` / scheduler / RCU / any UML kernel
+path. `unblock_signals()` drains the queue synchronously in a
+well-defined order (SIGIO, then SIGCHLD, then SIGALRM) when the
+caller flips the flag back to 1.
+
+Raw host `sigprocmask(SIG_BLOCK, …)` by contrast stops the host
+kernel from *delivering* signals. The UML dispatch layer's flag
+is unchanged. When the mask is restored, queued signals fire the
+UML handler, which finds `signals_enabled == 1` and enters the
+IRQ path from whatever context we happen to be in — including
+from the tail of a host syscall that has just returned. That is
+the wrong shape for protecting a critical section.
+
+The canonical UML-internal users of this pattern are
+`os_kill_process` and `os_kill_ptraced_process`
+(`arch/um/os-Linux/process.c:33,53`), which wrap their
+`waitpid()` in `block_signals()` / `unblock_signals()`.
+
+**Waitpid investigation (what we tried, what failed):**
+
+During commit 3d-a we attempted to call `os_snapshot_waitpid_status()`
+from the parent side of the forkserver loop. Every variant crashed
+the parent with a null-jump or a UML-VA-heap-jump consistent with
+a longjmp-into-a-stale-target or an indirect call through a
+corrupted function pointer:
+
+| Attempt | Signal gate | Wait primitive | Crash RIP |
+|---------|-------------|----------------|-----------|
+| 1 | none | glibc `waitpid` | `0x0` |
+| 2 | host `sigprocmask` block of SIGCHLD / SIGALRM / SIGIO / SIGUSR1 | glibc `waitpid` | `0x61093b80` |
+| 3 | UML `um_set_signals(0)` | glibc `waitpid` | `0x0` |
+| 4 | UML `um_set_signals(0)` | raw `syscall(__NR_wait4)` | `0x61093bc0` |
+
+The UML-native gate (attempts 3, 4) is the right primitive for the
+general class of problem, but does not by itself fix the waitpid
+crash. Suspect paths: (a) fault signals (SIGSEGV, SIGBUS, SIGFPE,
+SIGILL) that `sig_handler_common` dispatches regardless of
+`signals_enabled`; (b) some glibc syscall-wrapper machinery
+(cancellation-point hooks, pthread-specific state) that we have
+not traced; (c) a UML scheduler re-entry via a path independent
+of the host signal flow. The consistent heap-address cluster in
+attempts 2 and 4 is structurally similar to `longjmp` into a
+jmp_buf whose saved `rip` has been overwritten post-fork.
+
+Deferred to commit 3d-c. By the time 3d-c runs, the worker-side
+rebuild (3d-b) changes what state exists in the parent during
+the wait window — `signals_enabled` may already be 1 again in
+worker paths, timer/sigio helpers exist in the worker's own
+address space, etc. If 3d-c still can't call `waitpid()` safely,
+the fallback is either (i) pidfd_open + poll, which may have a
+different signal profile; (ii) a SIGCHLD-driven wait where the
+UML IRQ handler does the reap via the existing mm_sigchld_irq
+machinery instead of a host blocking call; or (iii) explicitly
+accept "no status byte, just zombies" and document.
+
+**Impact on already-shipped commits 1–3c + 3d-a:**
+
+None. Audited in the same series as this commit and noted in the
+"Shipped-commit audit" section of
+`02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`.
+Commits 1, 2, 3b do not touch UML signal state. Commits 3a, 3c,
+3d-a use `os_snapshot_block_iter_signals` /
+`os_snapshot_unblock_iter_signals` which (since the 3d-a
+hardening commit) internally use `um_set_signals`, the right
+primitive. The worker path in 3a/3c inherits
+`signals_enabled == 0` from the pre-fork block and exits
+immediately via `os_snapshot_worker_exit(0)`, bypassing any
+code that would consult the flag.
+
+**What this commit adds to the code:**
+
+`um_snapshot_assert_ready()` gains a check that
+`signals_enabled == 1` at ready-point entry. This documents
+that the ready-point contract expects a fully operational UML
+signal state before we start quiescing. If a future caller
+enters `um_snapshot_ready()` with signals already gated, a
+WARN_ONCE fires and the ready-point is refused, preventing a
+subtle re-entry where our `block_iter` call is a no-op and the
+critical section is already "open" from someone else's
+perspective.
+
+**Alternatives considered and why rejected:**
+
+- **Keep using raw `sigprocmask` and document the limitation.**
+  Rejected: hides the bug class. Future contributors writing new
+  forkserver-adjacent code would re-introduce the same shape.
+- **Write a new UML-kernel-side wrapper that combines
+  `sigprocmask` + `um_set_signals`.** Rejected: the two primitives
+  live at different layers; combining them doesn't add value over
+  just using the higher-level one. `os_kill_process` uses only
+  `block_signals`.
+- **Add a `CONFIG_UM_SIGNAL_CONTRACT_STRICT` Kconfig gate
+  around the assertion.** Rejected for now: the assertion is
+  cheap and has zero false-positives; adding config complexity
+  is premature.
+
+**Lifetime:** Indefinite. `signals_enabled` has been UML's signal
+gate since time-travel-mode landing (and conceptually earlier);
+it is not going away.
+
+**Revisit triggers:**
+
+- Upstream UML grows a different signal-gating primitive for
+  kernel-mode critical sections (e.g., a per-CPU variant for SMP).
+  Update D41 to cover the new primitive.
+- 3d-c's waitpid retry succeeds with the current primitives —
+  update D41 with the specific additional state change that
+  unblocked it, so future readers know what was load-bearing.
+- 3d-c's waitpid retry fails: D41 becomes the spec for
+  alternative wait strategies (pidfd_open + poll, SIGCHLD-IRQ
+  reap) and which one we adopt.
+
+**Cross-references:**
+
+- D35 — original C-09 v1 scope.
+- D39 — commit-3 split.
+- D40 — commit-3d split; gets a follow-up paragraph in this
+  series noting that 3d-b/3d-c have explicit signals_enabled
+  contracts.
+- `arch/um/os-Linux/signal.c` lines 94–316 — the signal-gating
+  code: declaration of `signals_enabled`, `sig_handler`,
+  `timer_alarm_handler`, `block_signals`/`unblock_signals`,
+  `__block_signals`/`__unblock_signals`, `um_set_signals`.
+- `arch/um/os-Linux/process.c:33,53` —
+  `os_kill_process`/`os_kill_ptraced_process`: the canonical
+  existing in-tree pattern of "block UML signals before
+  waitpid".
+- Commits on this branch that use the right primitive:
+  `a0328b6011ed` (3d-a, original sigprocmask shipped, superseded),
+  `b2e391348e80` (3d-a hardening, switched to um_set_signals).
+
+---
+
 ## (Future entries here, as decisions are made)
