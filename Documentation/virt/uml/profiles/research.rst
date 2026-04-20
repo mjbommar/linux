@@ -37,7 +37,24 @@ What's on
   ``DYNAMIC_EVENTS``, ``HIST_TRIGGERS``, and — since workstream
   C-05 — ``FUNCTION_TRACER`` + ``DYNAMIC_FTRACE`` (see
   :doc:`../ftrace` for mechanism and limitations). Function graph
-  is deferred per decisions-log D27.
+  (``CONFIG_FUNCTION_GRAPH_TRACER``) is deferred per decisions-log
+  D34: the generic fgraph trampoline's balanced push/pop contract
+  doesn't hold for UML's longjmp-entered tasks and kthreads that
+  end in ``do_exit``. Kretprobes via the rethook shadow stack
+  (below) provides a return-instrumentation story in the interim.
+- **Dynamic probes**: since workstream C-04 — ``KPROBES`` (entry
+  and mid-function probes via ``int3`` + single-step) and
+  ``KRETPROBES`` (return probes via the generic rethook shadow
+  stack, auto-selected by ``HAVE_RETHOOK``). ``samples/kprobes/
+  kprobe_example.ko`` and ``kretprobe_example.ko`` both load and
+  fire; ``/sys/kernel/debug/kprobes/list`` and ``/sys/kernel/debug/
+  kprobes/blacklist`` work as expected. ``bpftrace``'s
+  ``kprobe:``/``kretprobe:`` matchers are reachable from here
+  once the ``C-06`` BPF JIT port lands. ``KPROBE_EVENTS``
+  (tracefs-based probe installation) depends on
+  ``HAVE_REGS_AND_STACK_ACCESS_API`` which UML does not yet
+  provide — tracked as a follow-up port. ``CONFIG_KPROBES_SANITY_TEST``
+  is enabled; the kunit sanity suite runs at boot.
 - **Coverage**: *none*. ``CONFIG_KCOV`` is explicitly off in
   ``research``; coverage-guided fuzzing lives in the ``fuzz`` and
   ``fuzz-deep`` profiles (which do not enable the function
