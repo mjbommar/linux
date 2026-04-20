@@ -2263,4 +2263,311 @@ favor of the Nyx-like in-kernel dirty-log approach.
 
 ---
 
+## D36: UML v2 snapshot file format is ELF64 core dump + UML `PT_NOTE` types
+
+**Date:** 2026-04-20
+**Status:** Accepted as the format choice for the parking-lot v2
+design in `08-future-phases/02-snapshot-to-disk.md`. Does not
+commit us to building v2; commits us to what v2 will look like
+*if* its D35 revisit triggers fire.
+
+**Decision:** When UML v2 snapshot-to-disk opens, the on-disk
+format is an ELF64 core dump with:
+
+- One `PT_LOAD` per enumerated kernel mmap region (guest
+  `physmem_fd`-backed RAM, KASAN shadow, populated vmalloc
+  runs, stub pages). Sparse representation via filesystem
+  holes; never materialize zero regions.
+- Standard ELF notes: `NT_PRSTATUS` (per-vCPU registers, via
+  the backend ops table's `read_guest_regs`), `NT_FILE`,
+  `NT_AUXV`.
+- UML-specific `PT_NOTE` types under vendor name `"UML"` for
+  state with no standard ELF home: `UML_VERSION`,
+  `UML_BACKEND`, `UML_MMAP_TABLE`, `UML_FD_TABLE`,
+  `UML_TIMERS`, `UML_STUB_TABLE`, `UML_READY_POINT`. Type
+  numbers start at `0x554d4c00` (`'UML\0'`) + ordinal.
+
+See `08-future-phases/02-snapshot-to-disk.md` §"Layout" for the
+detailed schema.
+
+**Alternatives considered and why rejected:**
+
+- **QEMU savevm / live-migration stream format** (`QEMU_VM_FILE_MAGIC
+  0x5145564D` + `VMStateDescription` device tables). Rejected:
+  (1) no existing non-QEMU producer of this format exists —
+  the only third-party tool in this space (`lqs2mem`) reads it,
+  does not write it; reproducing `VMStateDescription` tables
+  from outside QEMU means vendoring QEMU's device catalog.
+  (2) UML's "devices" (hostfs, mconsole, virtio-over-unix) have
+  no QEMU peers, so **zero real interop is unlocked** — QEMU
+  still could not load a UML-produced savevm stream even if we
+  wrote one byte-for-byte compatible. (3) LKML has no precedent
+  for a kernel producer of a QEMU-private userspace wire
+  format; reviewer friction would be high. Pay-for-what-you-
+  don't-use.
+
+- **CRIU image format** (`.img` files, protocol buffers,
+  per-subsystem schemas). Rejected: (1) libprotobuf-c is not
+  realistically landable as a kernel dependency — it would
+  need to be a userspace-only post-processor, meaning the
+  kernel writes some intermediate format anyway. (2) CRIU's
+  per-subsystem image proliferation (`mm-*.img`, `pagemap-*.img`,
+  `fdinfo-*.img`, `files.img`, `core-*.img`, `tcp-stream-*.img`,
+  …) is shaped for dumping uncooperative multi-process targets
+  from outside; UML is one cooperative process. The format's
+  value-add over a flatter scheme is the subset we don't need.
+  (3) No in-kernel precedent for protobuf-shaped state dumps.
+
+- **gVisor statefile (Go `gob` + reflection).** Rejected: Go-
+  only; no C equivalent to reflection-driven per-object
+  serialization. Not a proposal path.
+
+- **Firecracker snapshot format (Serde + bitcode).** Rejected:
+  Rust/userspace only; every field addition requires a MAJOR
+  version bump per Firecracker's own versioning docs — their
+  own maintainers call this a "sharp edge" that forces migration
+  work on every clone-user. Wrong shape for a kernel that wants
+  long-term format stability.
+
+- **kexec/kdump ELF + vmcoreinfo (`/proc/vmcore`).** Strongly
+  considered; adopted as the template. The decision is not
+  "reuse kexec's format as-is" but "reuse ELF64 + `PT_NOTE`
+  and produce it from the same kernel-side shape that
+  `fs/binfmt_elf.c` and `fs/proc/vmcore.c` already produce."
+  This gives us their battle-tested ELF producer code patterns
+  without inheriting kdump's "post-mortem read-only" posture
+  (v2 needs restore, kdump does not).
+
+- **Plain ELF64 core with no UML-specific notes.** Rejected:
+  insufficient. A stock ELF core captures registers, memory,
+  and a couple of standard notes; it does not capture
+  UML-specific state like backend kind, stub-child table,
+  timer state, or ready-point identity. The `PT_NOTE`
+  extensibility pattern is the whole point of picking ELF.
+
+**Why ELF + vendor `PT_NOTE` is the right shape:**
+
+1. **LKML precedent.** `fs/binfmt_elf.c` and
+   `fs/proc/vmcore.c` already produce ELF from kernel context.
+   Reviewers recognize the shape; the code idiom is in-tree.
+   No new wire format is being proposed — we're reusing the
+   one the kernel already owns.
+
+2. **Sparseness is native.** `PT_LOAD` + FS holes handle UML's
+   16 TB sparse KASAN shadow natively; per-segment `p_filesz
+   != p_memsz` encodes "this region is larger in memory than
+   on disk" cleanly. No zero-page compression schemes needed.
+
+3. **Extensibility is linear.** New UML subsystems add new
+   `PT_NOTE` types. Adding a field = new type number OR
+   backward-compatible suffix in existing type. Dropping a
+   field = keep reading, ignore, bump minor in `UML_VERSION`.
+   Never renumber existing types. This is the versioning model
+   kdump vmcoreinfo uses and has lived with for years.
+
+4. **Tooling is free.** Stock `gdb`, `objdump`, `readelf`,
+   `crash(8)` all already parse ELF core dumps. Scenario 4
+   (read-only post-mortem review) falls out of the format
+   choice for zero additional engineering — open the
+   `.umsnap` in gdb, walk the state. This is the strongest
+   single argument for ELF.
+
+5. **UML's self-knowledge collapses the hard part.** CRIU's
+   ~5.6 kLOC memory-path machinery (parasite injection,
+   pagemap walking, page-pipe bulk xfer, TCP repair) exists
+   because CRIU dumps processes from outside. UML knows its
+   own mmaps by construction — the mmap-table pull-forward
+   from D37 makes the memory-path ~hundreds of LOC, not
+   thousands. Picking a format that takes advantage of this
+   (ELF PT_LOAD per-region) rather than one that doesn't
+   (CRIU's per-page-tuple scheme) matters.
+
+**What we give up:**
+
+- No out-of-the-box loader. A new `uml-restore` host tool
+  lives in `tools/uml/snapshot/` (AGENT-PROMPT sign-off gated)
+  or as a `scripts/` shim. Cost: bounded, small.
+- No postcopy-grade live migration. Acceptable for now; can
+  layer `userfaultfd` on top as the lazy-pages tier (v2 phase
+  3) later.
+- No ecosystem compatibility with QEMU's snapshot tooling.
+  Acceptable — there was never going to be any, because UML
+  devices don't round-trip into QEMU.
+
+**Lifetime:** Indefinite once adopted. The ELF + `PT_NOTE`
+shape is deliberately stable; the mutable part is the set of
+UML-specific note types, which grow linearly and never shrink
+(deleted types remain read-only-tolerant for back-compat).
+
+**Revisit triggers:**
+
+- A concrete user / maintainer asks for QEMU-savevm interop
+  and we discover a real use case (not just the abstract idea
+  of it).
+- kexec/kdump format evolves in a way that invalidates our
+  reuse of its in-kernel producer shape.
+- We learn that `PT_NOTE` type-number collisions with other
+  vendor extensions are causing tooling confusion.
+- The format layer starts accumulating its own correctness
+  bugs (serialization bugs we didn't anticipate); may indicate
+  the schema-per-note pattern needs to move to something
+  typed-and-versioned like protobuf after all.
+
+**Cross-references:**
+
+- `08-future-phases/02-snapshot-to-disk.md` — the v2 design
+  this format decision underpins.
+- D35 — the v1-vs-v2 split this format decision follows on
+  from.
+- D37 — v1 pull-forward items that make this format cheap to
+  produce.
+- `fs/binfmt_elf.c`, `fs/proc/vmcore.c` — in-tree ELF
+  producers whose code shape the v2 writer will mirror.
+- QEMU savevm format: <https://www.qemu.org/docs/master/devel/migration/main.html>
+- CRIU image format: <https://criu.org/Images>
+- gVisor checkpoint/restore: <https://pkg.go.dev/gvisor.dev/gvisor/pkg/sentry/pgalloc>
+- Firecracker versioning: <https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/versioning.md>
+- `juergh/lqs2mem`: <https://github.com/juergh/lqs2mem>
+  (the one non-QEMU *reader* of savevm format, cited as evidence
+  that no non-QEMU *writers* exist).
+
+---
+
+## D37: Five v1 scope additions pulled forward from v2 snapshot-to-disk design
+
+**Date:** 2026-04-20
+**Status:** Accepted (expands the C-09 v1 commit plan committed
+in D35; each item is cheap now and expensive to retrofit later).
+
+**Decision:** The design research for v2 snapshot-to-disk (see
+D36 and `08-future-phases/02-snapshot-to-disk.md`) surfaced five
+pieces of infrastructure that are **load-bearing for v2 but also
+useful for v1**, plus one v1 correctness bug found during the
+deep-reading. Rather than ship v1 and then retrofit these when
+v2 opens, land them as part of C-09 v1.
+
+Items pulled forward (updates the C-09 v1 commit plan from D35's
+original 6 commits to the revised plan in
+`02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`):
+
+1. **Kernel mmap enumeration table** (`arch/um/include/asm/
+   um-mmaps.h` + population in the call sites that today `mmap`
+   blindly). One `struct um_mmap_region { name, base, len,
+   disposition, flags }` array. Why pull forward: v1 fork-server
+   already wants this for the FD-hygiene audit, for KASAN
+   workaround logic (item 6 below), and for the selftest's
+   ready-point assertion. Retrofit cost: find every `mmap` call
+   site, wire into a table — high. Forward cost: ~100 LOC.
+
+2. **Strict ready-point contract (assert-on-entry).** At
+   `um_snapshot_ready()` entry, assert: no dirty inodes, no
+   pending RCU callbacks, no kthread in `TASK_RUNNING` other
+   than caller, no IRQ in flight, no pending signals except
+   SIGCHLD. Already named as Risk Q6 in the C-09 v1 design;
+   pull-forward promotes it from "we should probably check" to
+   "we check, loudly, on every snapshot-ready". Retrofit cost:
+   classes of Heisenbugs that live under it without assertion.
+   Forward cost: ~50 LOC.
+
+3. **FD allowlist extended with disposition annotation.** v1's
+   existing `FD_CLOEXEC` sweep already walks every
+   `socket()`/`open()` site in `arch/um/os-Linux/`. At each
+   site, record disposition: `INHERIT_ACROSS_FORK`,
+   `SERIALIZE_CONTENT` (hostfs files, etc.),
+   `RECONSTRUCT_BY_PATH` (sockets re-openable from a name),
+   `SKIP` (fuzz control socket, log fd, etc.). Retrofit cost:
+   second sweep of the same 30 sites at a later date. Forward
+   cost: ~1 extra line per site (a disposition tag).
+
+4. **`/sys/kernel/um/state_version` sysfs node.** One integer
+   that represents the current snapshot schema version.
+   Commits us to a versioning narrative; surfaces in boot logs;
+   lets selftests assert compatibility. Retrofit cost: low, but
+   surfacing it now sets expectations. Forward cost: ~20 LOC.
+
+5. **`physmem_fd` + other file-backed mmap invariants
+   documented and asserted.** `arch/um/kernel/physmem.c`
+   already sets up `physmem_fd` as a tempfile-backed
+   `MAP_SHARED` region — v2 depends on this (v2 reads the fd
+   directly to serialize RAM). v1 pull-forward: add a
+   `BUILD_BUG_ON`-style assert that `physmem_fd` remains
+   `MAP_SHARED` and file-backed, and comment the invariant at
+   the call site. Retrofit cost: none if it stays, potentially
+   enormous if someone flips it to `MAP_PRIVATE` without
+   realizing. Forward cost: ~5 LOC + comment.
+
+**Plus one v1 bug found in deep-reading:**
+
+6. **KASAN shadow has `MADV_DONTFORK` set
+   (`arch/um/os-Linux/mem.c:49`).** D35 Q2 assumed fork() COWs
+   the shadow — it **doesn't**, it unmaps it in the child.
+   Workers under fuzz profile (which has `CONFIG_KASAN=y`) would
+   SEGV on first KASAN-instrumented access. Fix: under
+   `CONFIG_UM_FUZZ_HOOKS`, either (a) drop the
+   `MADV_DONTFORK` on shadow so it COWs like RAM, or (b)
+   re-call `kasan_map_memory()` in `um_snapshot_worker_init()`.
+   Choosing (a) is simpler and matches the RAM mapping's
+   disposition; (b) is cleaner isolation but requires careful
+   re-poisoning of in-use slabs in the child. Picking (a) in
+   v1; note in the workstream that (b) remains open if (a)
+   shows drift bugs.
+
+**Why all of these pull forward:**
+
+Each item is under ~100 LOC of kernel code. Each item is useful
+for v1 regardless of whether v2 ever lands. Together they
+make v2's writer-side ~hundreds of LOC instead of thousands.
+And — critically — item 6 is a v1 correctness bug; not doing
+it is not an option once fuzz profile enables both KASAN and
+`UM_FUZZ_HOOKS`.
+
+**Alternatives considered:**
+
+- **Defer all five to v2, ship v1 without them.** Rejected:
+  each is cheap now and expensive to retrofit. Ready-point
+  contract assertions (item 2) in particular are the kind
+  of thing that "should have been there from day 1" a year
+  later when a Heisenbug surfaces.
+
+- **Pull forward only the correctness bug (item 6), defer the
+  others.** Rejected: item 1 (mmap table) is the enabler for
+  cleanly fixing item 6 (you want to flip DONTFORK based on a
+  per-region disposition, not hardcode it in one call site).
+  The set is load-bearing together.
+
+- **Treat all five as v1 re-scope needing new design.**
+  Rejected: each item fits cleanly into a C-09 v1 commit the
+  plan already budgets for. They're refinements to an existing
+  commit plan, not new commits.
+
+**Lifetime:** Permanent. These five items become part of UML's
+snapshot/restore contract; removing any of them in a later
+version would be a semantic regression.
+
+**Revisit triggers:**
+
+- v1 lands and an item above shows no concrete benefit. Would
+  indicate the design research overestimated its usefulness.
+- v2 opens and an item's shape is wrong for v2. Would mean
+  the pull-forward guessed wrong about v2's needs; retrofit
+  at that point is still cheaper than the alternative of
+  having not pulled anything forward.
+
+**Cross-references:**
+
+- D35 — original C-09 v1 scope and the v1-vs-v2 split this
+  expands.
+- D36 — v2 format choice (ELF + `PT_NOTE`) that these items
+  make cheap to produce.
+- `02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`
+  — updated v1 commit plan reflecting these additions.
+- `08-future-phases/02-snapshot-to-disk.md` — the v2 design
+  whose research surfaced the pull-forward opportunities.
+- `arch/um/os-Linux/mem.c:49` — the `MADV_DONTFORK` call
+  site on KASAN shadow addressed by item 6.
+- `arch/um/kernel/physmem.c:75` — the `create_mem_file(len)`
+  + `os_map_memory` call pattern that item 5 asserts.
+
+---
+
 ## (Future entries here, as decisions are made)

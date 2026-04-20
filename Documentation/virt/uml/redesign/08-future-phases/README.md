@@ -53,3 +53,7 @@ Logged as D24 in `04-risks/decisions-log.md`.
 - [01-end-user-ideal-world.md](01-end-user-ideal-world.md) — external
   expectations, ideal end-user UX, and the biggest gaps between that UX
   and the current roadmap.
+- [02-snapshot-to-disk.md](02-snapshot-to-disk.md) — the v2 design for
+  snapshot-to-disk / resume / review beyond C-09 v1's in-memory fork-
+  server. Chosen format is ELF64 core dump + UML `PT_NOTE` types; opens
+  when D35's revisit triggers fire.
