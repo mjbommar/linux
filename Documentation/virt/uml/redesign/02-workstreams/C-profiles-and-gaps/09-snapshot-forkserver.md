@@ -530,11 +530,24 @@ requires a new dedicated commit.
        unblocking the crash documented in D41; if it does
        not, fallback strategies are named there (pidfd +
        poll, SIGCHLD-driven IRQ reap, or no-status-byte).
-     - **commit 3d-d:** worker runs `/bin/echo hello` via
-       execve → `start_userspace()` → fresh seccomp stub.
-       Tests multi-task + stub-spawn post-fork.
-     **Once 3d-d lands cleanly, a worker runs guest code —
-     the load-bearing "fuzz is possible" test.**
+     - **commit 3d-d:** scheduler sanitization. After commit 3d-c
+       proved the worker CAN run guest code (echo, /bin/true) but
+       crashes on the next voluntary `schedule()` at
+       `__set_next_task_fair` because the CFS runqueue still
+       references parent-enqueued kthreads, 3d-d adds one small
+       exported helper in `kernel/sched/core.c`
+       (`sched_worker_detach_other_tasks()`) that strips non-
+       current tasks from `rq->cfs_tasks` under `rq_lock_irqsave`
+       via `deactivate_task()`. Called from
+       `um_snapshot_worker_init()` between the forget and rebuild
+       helpers. Per D42 this is the one explicit cross-subsystem
+       touch the C-09 v1 makes; v2 (when someone needs it) replaces
+       it with a freezer-cgroup pre-fork barrier per D41's revisit
+       triggers.
+     **Once 3d-d lands cleanly, a worker runs blocking guest code
+     (execve, fork+wait, filesystem I/O) without crashing the
+     scheduler — the load-bearing "sustained fuzz is possible"
+     test.**
 4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
    disposition annotations** (pull-forward #3). One patch
    touching every `socket()` / `open()` site; largely

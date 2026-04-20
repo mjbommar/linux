@@ -3128,4 +3128,217 @@ it is not going away.
 
 ---
 
+## D42: C-09 3d-d sanitizes the worker's CFS runqueue via one exported sched helper
+
+**Date:** 2026-04-20
+**Status:** Accepted after commit 3d-c demonstrated that a forked
+worker CAN run guest code (`/bin/echo`, `/bin/true` observed in the
+worker's output stream), and the next voluntary `schedule()` tripped
+a KASAN slab-out-of-bounds in `__set_next_task_fair +
+dequeue_entities` — exactly the scheduler-state-sharing hazard
+predicted in the D40 testing plan.
+
+**Decision:** Commit 3d-d adds one small exported helper in
+`kernel/sched/core.c` that arch/um calls from
+`um_snapshot_worker_init()` after the forget step and before the
+rebuild step. The helper walks `rq->cfs_tasks` on the local CPU's
+runqueue under `rq_lock_irqsave` and calls `deactivate_task(rq, p,
+DEQUEUE_NOCLOCK)` on every queued task other than `current`. Non-
+current tasks' `task_struct`s are inherited from the parent via
+fork CoW; their scheduling state (saved jmp_buf in
+`thread.switch_buf`, per-task irqstack, etc.) references memory
+that is valid AS ADDRESSES post-fork but semantically belongs to
+the parent's host-thread graph, and attempting to switch to them
+in the worker is the load-bearing crash path. Deactivating them
+from the rq keeps their `task_struct`s alive (they're not
+`do_exit`'d) and simply prevents the scheduler from ever picking
+them; they leak for the lifetime of the short-lived worker host
+process and the host kernel reclaims them at `exit_group`.
+
+Proposed helper (goes into `kernel/sched/core.c`, ~20 LOC):
+
+```c
+/*
+ * Arch-specific helper for processes that fork() the UML kernel
+ * (workstream C-09, D42). In the forked child (the "worker"), the
+ * current CPU's CFS runqueue still references task_structs that
+ * were enqueued by the parent before fork. Those tasks exist as
+ * memory — the task_struct pages CoW'd — but their scheduling
+ * context (jmp_buf'd stack pointers, etc.) targets host-thread
+ * state that does not exist in the worker. Picking one via
+ * __set_next_task_fair would dereference stale pointers (observed
+ * as KASAN slab-OOB in 3d-c's bring-up). Detach them all from the
+ * rq so `schedule()` picks only `current`.
+ *
+ * Called only from arch/um/kernel/snapshot.c's
+ * um_snapshot_worker_init(), under that worker's signals_enabled
+ * == 0 guard (see UML decisions-log D41).
+ */
+void sched_worker_detach_other_tasks(void)
+{
+	struct rq *rq = this_rq();
+	struct rq_flags rf;
+	struct task_struct *p;
+	struct sched_entity *se, *tmp;
+
+	rq_lock_irqsave(rq, &rf);
+	update_rq_clock(rq);
+	list_for_each_entry_safe(se, tmp, &rq->cfs_tasks, group_node) {
+		p = task_of(se);
+		if (p == current)
+			continue;
+		if (!task_on_rq_queued(p))
+			continue;
+		deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+	}
+	rq_unlock_irqrestore(rq, &rf);
+}
+EXPORT_SYMBOL_GPL(sched_worker_detach_other_tasks);
+```
+
+Plus one `extern void` declaration in `include/linux/sched.h` so
+arch/um can call it without reaching into `kernel/sched/sched.h`
+(which is explicitly an internal header).
+
+**User sign-off:** explicitly given in-conversation after the 3d-c
+breakthrough ("don't give up now, it's working; either way is ok")
+as the concrete go-ahead to touch `kernel/sched/core.c` per the
+AGENT-PROMPT cross-subsystem rule.
+
+**Why this shape and not one of the alternatives:**
+
+1. **Most narrowly scoped fix that actually works.** Agent research
+   surveyed the failure site (`__set_next_task_fair` list/rbtree
+   walks in fair.c), the canonical deactivation primitive
+   (`deactivate_task` — the "dequeue from rq, leave task_struct
+   alive" API that every cpu-hotplug-down and per-task-migration
+   path uses internally), and four alternatives (B: raw CFS rbtree
+   surgery; C: PF_KTHREAD flag tricks; D: permanent
+   `preempt_disable`; E: freezer-cgroup pre-fork barrier). Only the
+   chosen path uses the scheduler's own bookkeeping correctly;
+   raw rbtree surgery bypasses psi/uclamp/bandwidth accounting and
+   PF_KTHREAD flags are not scheduler skip-predicates.
+
+2. **Zero impact on the parent.** The helper operates on `this_rq()`
+   under `rq_lock_irqsave`. In the worker, "this_rq" is the
+   worker's CoW'd rq struct; deactivations happen in the worker's
+   copy. Parent's rq is untouched.
+
+3. **Zero new locking.** Uses existing `rq_lock_irqsave` which the
+   rest of `kernel/sched/core.c` uses for exactly this kind of
+   rq-scoped mutation.
+
+4. **Bisectable.** One exported symbol, one `extern` in
+   `include/linux/sched.h`, one call site in arch/um. Every other
+   part of C-09 (commits 1 through 3d-c) still builds without it.
+   Reverting the sched patch cleanly leaves the forkserver working
+   for non-blocking testcases — the arch-local v1 limit.
+
+5. **Honest upstream posture.** On upstream submission, sched
+   maintainers will ask "is there no other way?" and a freezer-
+   cgroup-pre-fork design (D41 / agent alternative E) is the
+   cleaner architecture. D42 explicitly scopes the present helper
+   as a v1-for-UML choice, not a general-purpose API, and calls
+   out the v2 freezer design as the upstream-preferred replacement.
+
+**Alternatives considered and why rejected (recap from the agent's
+research, summary form):**
+
+- **B. Direct `dequeue_entity` / rbtree surgery from arch/um.**
+  Bypasses `psi_dequeue`, `uclamp_rq_dec`, `update_h_nr_running`
+  bookkeeping; duplicates state `deactivate_task` already handles
+  correctly.
+- **C. `PF_KTHREAD | PF_NOFREEZE` flags as "skip-me" markers.**
+  The scheduler does not use task flags as skip predicates;
+  state-based only (`__state != TASK_RUNNING` gets dequeued, but
+  only for `current` at `schedule()` time, not retroactively for
+  queued tasks).
+- **D. Permanent `preempt_disable()` in the worker.**
+  `preempt_disable` only prevents preemptive scheduling from
+  interrupts; voluntary `schedule()` calls (wait_event,
+  mutex_lock sleeps, page faults, execve, any blocking syscall)
+  still walk the rq. The fuzz init script cannot avoid all of
+  these.
+- **E. Freezer-cgroup barrier pre-fork, restore by recloning
+  every task.**
+  Architecturally the cleanest (CRIU's pattern, gVisor's task-
+  goroutine model). Large. Cross-multiple-subsystems. Deferred
+  to v2 per D41; v1 gets the narrow helper.
+
+**What 3d-d code changes:**
+
+- `include/linux/sched.h`: one `extern void
+  sched_worker_detach_other_tasks(void);` declaration, guarded by
+  `CONFIG_UM_SNAPSHOT_FORKSERVER` or similar so it only exists
+  when the UML snapshot path is compiled in.
+- `kernel/sched/core.c`: the ~20-LOC helper above, similarly
+  guarded. Exports via `EXPORT_SYMBOL_GPL` so arch/um can link
+  against it.
+- `arch/um/kernel/snapshot.c`: call
+  `sched_worker_detach_other_tasks()` inside
+  `um_snapshot_worker_init()`, between the forget helpers
+  (`os_sigio_worker_forget`, `os_timer_worker_forget`) and the
+  rebuild helpers (`os_sigio_worker_rebuild`,
+  `os_timer_worker_rebuild`). Signal-gating contract (D41) holds:
+  `signals_enabled` is 0 throughout, so no IRQ dispatch enters
+  the scheduler before the detach completes.
+
+**Risk notes:**
+
+- If `list_for_each_entry_safe(&rq->cfs_tasks)` encounters a
+  partially-linked sched_entity (e.g. from a fork race), it may
+  dereference a stale `group_node` pointer. Mitigation: the pre-
+  fork block via `os_snapshot_block_iter_signals` keeps the
+  parent from mutating the list during fork; only fully-queued
+  entries are present at the detach point. If this proves
+  fragile in practice (e.g. under SMP, which commit 3d-d does
+  not yet support), add a defensive pointer-sanity check before
+  dereferencing `se->group_node`.
+- CONFIG_FAIR_GROUP_SCHED: fuzz profile currently inherits
+  defconfig; verify at build time whether group scheduling is
+  on. If yes, `cfs_tasks` is per-group, and the single-root walk
+  may miss nested groups. Mitigation: for-each also over cfs_rqs
+  in the root task_group. Defer this nuance to a follow-up if it
+  turns out to matter; fuzz profile should eventually disable
+  FAIR_GROUP_SCHED for other reasons too.
+
+**Lifetime:** Until upstream lands a freezer-cgroup-based v2 per
+D41's revisit triggers, at which point this helper becomes dead
+code and is removed in the same series.
+
+**Revisit triggers:**
+
+- Upstream sched maintainers reject the helper on review. We
+  fall back to the A2 "scoped-down 3d-d" path and document the
+  limitation in commit 6.
+- FAIR_GROUP_SCHED edge cases surface in real testing. Helper
+  grows to walk nested cfs_rqs.
+- v2 freezer-cgroup design arrives (per D41). Helper is removed
+  in the same series that lands the freezer path.
+- A different scheduler class (deadline / rt / idle) gains queued
+  tasks we didn't anticipate. Helper extends to detach those
+  classes too.
+
+**Cross-references:**
+
+- `02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md`
+  §"Commit plan" — 3d-d paragraph updated in this series.
+- D40 — commit-3d split.
+- D41 — UML signal-gating contract. Helper relies on
+  `signals_enabled == 0` during the detach.
+- Commit `9d0dd8ed3181` (3d-c) — demonstrated worker runs guest
+  code; crash at `__set_next_task_fair+0x11b` is the trigger for
+  this decision.
+- `kernel/sched/fair.c:13825` — `__set_next_task_fair` (crash site).
+- `kernel/sched/fair.c:7293` — `dequeue_entities` (crash stack
+  frame).
+- `kernel/sched/core.c:2211` — `deactivate_task` (the primitive
+  the helper wraps).
+- `kernel/sched/core.c:8771` — `dump_rq_tasks` (existing
+  precedent for iterating `rq->cfs_tasks` under rq_lock).
+- `arch/um/kernel/reboot.c:20-37` — existing arch/um precedent
+  for walking the task list.
+
+---
+
 ## (Future entries here, as decisions are made)
