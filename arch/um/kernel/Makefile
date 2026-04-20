@@ -20,6 +20,13 @@ obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
 
 obj-$(CONFIG_KPROBES) += kprobes/
+obj-$(CONFIG_RETHOOK) += rethook.o
+# rethook's trampoline runs on every probed function's return;
+# it must not itself be traced (same discipline as kprobes).
+KASAN_SANITIZE_rethook.o  := n
+KCSAN_SANITIZE_rethook.o  := n
+KCOV_INSTRUMENT_rethook.o := n
+CFLAGS_REMOVE_rethook.o   := $(CC_FLAGS_FTRACE)
 obj-$(CONFIG_DEBUG_FS) += um_debugfs.o hooks_bench.o
 obj-y += load_file.o
 

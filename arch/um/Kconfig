@@ -47,6 +47,11 @@ config UML
 	select FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
 		if DYNAMIC_FTRACE
 	select HAVE_KPROBES if X86_64
+	# HAVE_RETHOOK auto-selects RETHOOK and turns on KRETPROBE_ON_RETHOOK,
+	# which is how modern x86_64 supplies KRETPROBES (see D33). No need
+	# to also select HAVE_KRETPROBES — arch/Kconfig's KRETPROBES depends
+	# on (HAVE_KRETPROBES || HAVE_RETHOOK).
+	select HAVE_RETHOOK if X86_64
 	select THREAD_INFO_IN_TASK
 	select SPARSE_IRQ
 	select MMU_GATHER_RCU_TABLE_FREE

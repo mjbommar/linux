@@ -37,6 +37,11 @@
 #define UPT_SS(r) REGS_SS((r)->gp)
 #define UPT_DS(r) REGS_DS((r)->gp)
 #define UPT_ES(r) REGS_ES((r)->gp)
+/* Wanted by rethook's arch_rethook_trampoline_callback, which sets
+ * orig_ax = ~0UL to flag "not a syscall frame". HOST_ORIG_AX is
+ * already defined in include/generated/user_constants.h.
+ */
+#define UPT_ORIG_AX(r) ((r)->gp[HOST_ORIG_AX])
 
 #ifdef __i386__
 #include "ptrace_32.h"

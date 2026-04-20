@@ -56,6 +56,22 @@ DEFINE_PER_CPU(struct kprobe *, current_kprobe);
 struct kretprobe_blackpoint kretprobe_blacklist[] = { };
 const int kretprobe_blacklist_size = ARRAY_SIZE(kretprobe_blacklist);
 
+#ifdef CONFIG_KRETPROBES
+/*
+ * Arch hook that tells the kprobes core whether a given kprobe sits
+ * inside a trampoline (and so must not be handled via the normal
+ * re-entry path). With CONFIG_KRETPROBE_ON_RETHOOK=y the arch
+ * trampoline is owned by rethook, not kprobes — matching x86 we
+ * always answer "no". When CONFIG_KRETPROBES=n, <linux/kprobes.h>
+ * provides a static inline definition, so this one is guarded.
+ */
+int arch_trampoline_kprobe(struct kprobe *p)
+{
+	return 0;
+}
+NOKPROBE_SYMBOL(arch_trampoline_kprobe);
+#endif
+
 /*
  * Allocate an out-of-line instruction slot and copy the original
  * bytes. The generic kprobes core's insn-slot cache (backed by
