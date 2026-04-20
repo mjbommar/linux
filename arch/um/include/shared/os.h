@@ -221,6 +221,15 @@ extern void os_snapshot_worker_exit(int status) __attribute__((noreturn));
 extern void os_sigio_worker_forget(void);
 extern void os_timer_worker_forget(void);
 
+/* Parent-side signal masking around the forkserver loop (commit
+ * 3d-a). Wraps one static sigset_t inside os-Linux so the kernel-
+ * side caller doesn't need sigset_t visibility. Paired calls only.
+ * See the comment block near the definitions in
+ * arch/um/os-Linux/process.c for the rationale.
+ */
+extern void os_snapshot_block_iter_signals(void);
+extern void os_snapshot_unblock_iter_signals(void);
+
 extern void init_new_thread_signals(void);
 
 extern int os_map_memory(void *virt, int fd, unsigned long long off,

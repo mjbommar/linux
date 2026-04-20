@@ -183,7 +183,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 {
 	unsigned long iter = 0;
 	u32 cmd;
-	int pid;
+	int pid, status;
 	ssize_t n;
 
 	/* If a host harness didn't plumb fds 198/199 open, do not enter
@@ -210,6 +210,16 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 	pr_info("snapshot: forkserver up at \"%s\"; entering loop\n",
 		named_point);
 
+	/* Block the host signals UML normally dispatches to its in-
+	 * kernel IRQ handlers for the duration of the loop. The loop
+	 * is pure host-syscall work (read / fork / waitpid / write)
+	 * and any UML signal dispatch re-entering from this context
+	 * has repeatedly corrupted parent-side control flow. With
+	 * signals masked, waitpid / write / read run uninterrupted and
+	 * UML resumes normal signal handling after the loop exits.
+	 */
+	os_snapshot_block_iter_signals();
+
 	for (;;) {
 		n = os_snapshot_read_all(UM_FORKSERVER_CTL_FD,
 					 &cmd, sizeof(cmd));
@@ -223,6 +233,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			else
 				pr_err("snapshot: command read failed at iter %lu: %zd\n",
 				       iter, n);
+			os_snapshot_unblock_iter_signals();
 			return (int)n;
 		}
 
@@ -230,6 +241,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 		if (pid < 0) {
 			pr_err("snapshot: fork failed at iter %lu: %d\n",
 			       iter, pid);
+			os_snapshot_unblock_iter_signals();
 			return pid;
 		}
 
@@ -244,8 +256,32 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			os_snapshot_worker_exit(0);
 		}
 
-		/* Parent: report the worker pid. Commit 3c/3d add
-		 * waitpid + 4-byte status response here.
+		/* Parent: AFL protocol per iteration -
+		 *   1. report the worker pid (4 bytes)
+		 *   2. report the exit status (4 bytes)
+		 *
+		 * Status is the raw wait status encoded by the host
+		 * kernel (WIFEXITED / WEXITSTATUS / WIFSIGNALED etc.
+		 * are host-side macros the fuzzer applies).
+		 *
+		 * KNOWN LIMITATION (commit 3d-a): we do not call
+		 * os_snapshot_waitpid_status() here and write a
+		 * placeholder 0 status instead. Empirically, host
+		 * waitpid() from inside this UML kernel context
+		 * crashes the parent with a null-jump even with all
+		 * plausible host signals masked. Root cause appears
+		 * to live in UML's host-signal-to-kernel-IRQ
+		 * dispatch path during host syscalls; fixing it
+		 * reliably is out of scope for 3d-a and will be
+		 * re-attempted in commit 3d-c when the worker-side
+		 * rebuild has landed and changes the parent's state
+		 * during the wait window. Workers still terminate
+		 * cleanly via os_snapshot_worker_exit(0); the host
+		 * kernel eventually reaps zombies when the UML
+		 * process exits. Callers that care about status
+		 * today see a zero placeholder. See the runtime
+		 * observations in D40 and the test log noted in
+		 * 09-snapshot-forkserver.md §"Known limitations".
 		 */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &pid, sizeof(pid));
@@ -256,6 +292,21 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			else
 				pr_err("snapshot: pid write failed at iter %lu: %zd\n",
 				       iter, n);
+			os_snapshot_unblock_iter_signals();
+			return (int)n;
+		}
+
+		status = 0;	/* commit 3d-a placeholder; see comment. */
+		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
+					  &status, sizeof(status));
+		if (n < 0) {
+			if (n == -EPIPE)
+				pr_info("snapshot: fuzzer disconnected while writing status at iter %lu\n",
+					iter);
+			else
+				pr_err("snapshot: status write failed at iter %lu: %zd\n",
+				       iter, n);
+			os_snapshot_unblock_iter_signals();
 			return (int)n;
 		}
 

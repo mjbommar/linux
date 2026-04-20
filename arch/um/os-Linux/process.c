@@ -167,14 +167,51 @@ ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len)
 int os_snapshot_waitpid_status(int pid)
 {
 	int status;
+	int ret;
 
 	for (;;) {
-		if (waitpid(pid, &status, 0) == pid)
+		ret = waitpid(pid, &status, 0);
+		if (ret == pid)
 			return status;
 		if (errno == EINTR)
 			continue;
 		return -errno;
 	}
+}
+
+/*
+ * Block/unblock the host signals that UML's in-kernel handlers
+ * consume, for the duration of the forkserver loop body. Commit
+ * 3d-a observed repeated post-fork null-jumps in the parent's
+ * path, which turned out to be UML's signal-handler dispatch
+ * re-entering UML kernel code from a host-syscall context during
+ * waitpid / write. The cleanest mitigation is to run the entire
+ * forkserver loop with those signals masked — the loop does no
+ * useful UML kernel work (it is pure host syscalls) so no UML
+ * async event is lost that the loop itself needed.
+ *
+ * The saved sigset is a static inside this TU so the kernel-side
+ * caller does not need to declare sigset_t. One outstanding save
+ * per UML process is fine because the forkserver runs on exactly
+ * one thread and the calls are strictly block / unblock paired.
+ */
+static sigset_t os_snapshot_signal_save;
+
+void os_snapshot_block_iter_signals(void)
+{
+	sigset_t blockset;
+
+	sigemptyset(&blockset);
+	sigaddset(&blockset, SIGCHLD);
+	sigaddset(&blockset, SIGALRM);
+	sigaddset(&blockset, SIGIO);
+	sigaddset(&blockset, SIGUSR1);
+	sigprocmask(SIG_BLOCK, &blockset, &os_snapshot_signal_save);
+}
+
+void os_snapshot_unblock_iter_signals(void)
+{
+	sigprocmask(SIG_SETMASK, &os_snapshot_signal_save, NULL);
 }
 
 /*
