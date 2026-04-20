@@ -212,14 +212,21 @@ extern ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len);
 extern int os_snapshot_waitpid_status(int pid);
 extern void os_snapshot_worker_exit(int status) __attribute__((noreturn));
 
-/* Forget inherited host-side state in a forkserver worker (C-09
- * commit 3c). Each "forget" drops references that fork() inherited
- * but that point at threads/tids/pthread handles unique to the
- * parent process. Safe to call exactly once per forked child; the
- * caller is the in-kernel um_snapshot_worker_init() wrapper.
+/* Forget / rebuild inherited host-side state in a forkserver worker
+ * (C-09 commits 3c and 3d-b). Each "forget" drops references that
+ * fork() inherited but that point at threads/tids/pthread handles
+ * unique to the parent process. Each "rebuild" creates fresh
+ * equivalents targeting the worker's own thread. Paired: call
+ * forget then rebuild; the caller is the in-kernel
+ * um_snapshot_worker_init() wrapper. Per D41 (signal-gating
+ * contract), rebuilds install handlers/fds/timers FIRST and
+ * signals_enabled stays 0 until the caller explicitly re-enables
+ * it in the tail of worker_init — 3d-b does not flip the gate.
  */
 extern void os_sigio_worker_forget(void);
 extern void os_timer_worker_forget(void);
+extern int os_sigio_worker_rebuild(void);
+extern int os_timer_worker_rebuild(void);
 
 /* Parent-side signal masking around the forkserver loop (commit
  * 3d-a). Wraps one static sigset_t inside os-Linux so the kernel-

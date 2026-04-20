@@ -179,6 +179,46 @@ void os_sigio_worker_forget(void)
 	write_sigio_td = NULL;
 }
 
+/*
+ * Re-install SIGIO helper-thread state in a forkserver worker
+ * (workstream C-09, commit 3d-b). Pair with os_sigio_worker_forget:
+ * that call dropped the parent-inherited epollfd + pthread handle;
+ * this one creates a fresh epollfd and spawns a new helper thread
+ * in the worker's own address space.
+ *
+ * Mirrors write_sigio_workaround() above. Returns 0 on success or
+ * -errno on failure; the worker path treats failure as non-fatal
+ * for commit 3d-b (worker exits immediately at end of
+ * um_snapshot_worker_init either way), but commit 3d-c will use
+ * the return to decide whether to resume guest code.
+ */
+int os_sigio_worker_rebuild(void)
+{
+	int err;
+
+	if (epollfd != -1)
+		return 0;	/* already rebuilt; idempotent */
+
+	epollfd = epoll_create(MAX_EPOLL_EVENTS);
+	if (epollfd < 0) {
+		err = -errno;
+		printk(UM_KERN_ERR "%s: epoll_create failed, errno = %d\n",
+		       __func__, errno);
+		return err;
+	}
+
+	err = os_run_helper_thread(&write_sigio_td, write_sigio_thread, NULL);
+	if (err < 0) {
+		printk(UM_KERN_ERR "%s: os_run_helper_thread failed, errno = %d\n",
+		       __func__, -err);
+		close(epollfd);
+		epollfd = -1;
+		return err;
+	}
+
+	return 0;
+}
+
 /* Used as a flag during SIGIO testing early in boot */
 static int got_sigio;
 

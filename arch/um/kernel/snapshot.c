@@ -427,28 +427,58 @@ EXPORT_SYMBOL_GPL(um_snapshot_ready);
  */
 void um_snapshot_worker_init(void)
 {
+	int err;
+
+	/*
+	 * Step 1 (commit 3c): forget parent-inherited state. Drops
+	 * stale references that point at threads / tids / pthread
+	 * handles unique to the parent. Must happen before any
+	 * rebuild so the rebuild doesn't inherit stale state.
+	 */
 	os_sigio_worker_forget();
 	os_timer_worker_forget();
 
-	/* Additional child-side state that needs to match reality:
-	 * commit 3d turns these from comments into code when it needs
-	 * the worker to actually run. For commit 3c it is enough that
-	 * we don't crash while forgetting.
+	/*
+	 * Step 2 (commit 3d-b): rebuild fresh host-side infrastructure
+	 * in the worker's own address space. Per D41, register
+	 * handlers / fds / timers FIRST and leave signals_enabled at
+	 * 0. Commit 3d-c adds the final um_set_signals(1) before
+	 * guest code resumes.
 	 *
-	 *   - cpu_online_mask / cpu_present_mask: on SMP, parent's
-	 *     secondary vCPU threads are gone. For UP (fuzz default)
-	 *     cpu_online_mask is just {0} already; no action.
-	 *   - current->thread.* scheduler state: valid-for-us because
-	 *     we are the thread that ran um_snapshot_ready().
-	 *   - __curr_cpu / signals_active TLS: defaults are fine until
-	 *     the worker does something that consults them.
+	 * Rebuild failures are non-fatal in commit 3d-b because the
+	 * worker still exits immediately via os_snapshot_worker_exit
+	 * at the end of um_snapshot_forkserver_loop — the rebuilt
+	 * infrastructure is not exercised. A pr_err records the
+	 * failure so future bring-up (3d-c) knows what broke.
+	 */
+	err = os_sigio_worker_rebuild();
+	if (err)
+		pr_err("snapshot: worker sigio rebuild failed: %d\n", err);
+
+	err = os_timer_worker_rebuild();
+	if (err)
+		pr_err("snapshot: worker timer rebuild failed: %d\n", err);
+
+	/*
+	 * mm_list clear deliberately omitted in commit 3d-b. At the
+	 * current ready-point (before first guest-userspace task),
+	 * mm_list is empty by construction. Commit 3d-c moves the
+	 * ready point later or the worker starts creating guest
+	 * tasks, at which point mm_list clearing under the
+	 * mm_list_lock spinlock becomes meaningful and load-bearing.
 	 *
-	 * Deliberately no printk here: the worker's kernel state
-	 * immediately post-fork has seen fork-inheritance quirks that
-	 * trip vsnprintf via its per-CPU / TLS lookups. Commit 3d will
-	 * re-enable the worker's printk path after it rebuilds enough
-	 * per-CPU state; for commit 3c's "no-crash" bar we simply
-	 * avoid it.
+	 * Other child-side state the commit-plan docs mention
+	 * (cpu_online_mask / __curr_cpu / signals_active) defaults
+	 * are fine for a worker that exits immediately. Commit 3d-c
+	 * revisits when those consumers appear.
+	 *
+	 * Deliberately no printk-on-success here: the worker's
+	 * kernel state immediately post-fork has seen fork-
+	 * inheritance quirks that trip vsnprintf via its per-CPU /
+	 * TLS lookups. pr_err above is tolerated because it only
+	 * fires on failure, which in the happy path doesn't happen.
+	 * Commit 3d-c will re-enable normal printk in workers once
+	 * enough per-CPU state is rebuilt.
 	 */
 }
 EXPORT_SYMBOL_GPL(um_snapshot_worker_init);

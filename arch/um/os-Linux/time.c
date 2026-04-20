@@ -130,6 +130,41 @@ void os_timer_worker_forget(void)
 	}
 }
 
+/*
+ * Re-create a POSIX timer in a forkserver worker (workstream C-09,
+ * commit 3d-b). Pair with os_timer_worker_forget: that call
+ * disabled parent-inherited timers whose SIGEV_THREAD_ID pointed
+ * at threads that no longer exist in the child; this one installs
+ * a fresh timer targeting the current thread's gettid(), which
+ * IS valid in the worker.
+ *
+ * Overwrites event_high_res_timer[0] with the new handle. The
+ * parent's handles survive in its own address space (fork COW'd
+ * the timer_t array; the worker's writes here are local). Only
+ * CPU 0 is rebuilt; UP is the fuzz-profile constraint today per
+ * um_snapshot_assert_ready's num_online_cpus > 1 refusal.
+ *
+ * Returns 0 on success or -errno on failure. Commit 3d-b tolerates
+ * failure (worker exits immediately anyway); commit 3d-c will
+ * treat failure as a reason to skip the guest-code-resume path.
+ */
+int os_timer_worker_rebuild(void)
+{
+	int cpu = 0;	/* UP per D41; SMP deferred */
+	timer_t *t = &event_high_res_timer[cpu];
+	struct sigevent sev = {
+		.sigev_notify = SIGEV_THREAD_ID,
+		.sigev_signo = SIGALRM,
+		.sigev_value.sival_ptr = t,
+		.sigev_notify_thread_id = gettid(),
+	};
+
+	if (timer_create(CLOCK_MONOTONIC, &sev, t) == -1)
+		return -errno;
+
+	return 0;
+}
+
 long long os_nsecs(void)
 {
 	struct timespec ts;
