@@ -212,6 +212,15 @@ extern ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len);
 extern int os_snapshot_waitpid_status(int pid);
 extern void os_snapshot_worker_exit(int status) __attribute__((noreturn));
 
+/* Forget inherited host-side state in a forkserver worker (C-09
+ * commit 3c). Each "forget" drops references that fork() inherited
+ * but that point at threads/tids/pthread handles unique to the
+ * parent process. Safe to call exactly once per forked child; the
+ * caller is the in-kernel um_snapshot_worker_init() wrapper.
+ */
+extern void os_sigio_worker_forget(void);
+extern void os_timer_worker_forget(void);
+
 extern void init_new_thread_signals(void);
 
 extern int os_map_memory(void *virt, int fd, unsigned long long off,

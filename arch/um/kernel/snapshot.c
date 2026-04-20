@@ -234,13 +234,13 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 		}
 
 		if (pid == 0) {
-			/* Worker. Exit the forked host process
-			 * immediately. Commit 3c will replace this with
-			 * a call to um_snapshot_worker_init() and commit
-			 * 3d will let the worker run guest code; for
-			 * now the cleanest termination is a raw
-			 * exit_group. Never returns.
+			/* Worker. Commit 3c: drop parent-inherited host-
+			 * side state before exit so we don't leave
+			 * helper threads or timers attempting to signal
+			 * this child. Commit 3d will replace the exit
+			 * with a return so the worker can run guest code.
 			 */
+			um_snapshot_worker_init();
 			os_snapshot_worker_exit(0);
 		}
 
@@ -307,12 +307,71 @@ void um_snapshot_ready(const char *named_point)
 }
 EXPORT_SYMBOL_GPL(um_snapshot_ready);
 
+/**
+ * um_snapshot_worker_init() - drop parent-inherited host-side state
+ * in a fork-server worker.
+ *
+ * Called exactly once in the forked child right after the
+ * os_snapshot_fork_worker() return discriminates parent vs worker.
+ * Commit 3c scope (this commit): a no-crash "forget" that drops
+ * stale references to parent-owned host threads, POSIX timers, and
+ * SIGIO infrastructure. The worker still exits immediately via
+ * os_snapshot_worker_exit(0) after this returns — running actual
+ * guest code is commit 3d's job, and needs the additional recreate
+ * logic (timer re-arm, new SIGIO thread, stub respawn).
+ *
+ * What fork() inherits but child cannot safely use:
+ *   - write_sigio_td (pthread_t of parent's SIGIO helper thread):
+ *     stale; child has no such thread. Abandon, do not join.
+ *   - epollfd (file descriptor parent's SIGIO thread was waiting on):
+ *     inherited but has no reader in the child. Close.
+ *   - POSIX timers (per-CPU): timer_create()'d with SIGEV_THREAD_ID
+ *     pointing at parent CPU threads' gettid()s; those tids do not
+ *     exist in the child. Disable so no signal delivery is
+ *     attempted.
+ *
+ * Explicitly out of scope for commit 3c:
+ *   - Recreating a child-side SIGIO thread / timer / signalfd.
+ *     That's commit 3d, where the worker needs them to run code.
+ *   - Seccomp stub children: no stubs exist at ready-point because
+ *     no guest userspace task has run yet. First user-space
+ *     syscall in a worker (commit 3d) will lazily spawn one via
+ *     start_userspace().
+ *   - Mconsole socket: compiled out in the fuzz profile per
+ *     `03-profiles/fuzz.md`; nothing to forget.
+ *   - UBD / winch / virtio: not present in the fuzz profile init;
+ *     if a future profile enables them with snapshot, they'll want
+ *     their own "forget" helpers here.
+ *
+ * See D39 (the commit-3 split) and the agent research captured in
+ * the implementation notes for `09-snapshot-forkserver.md` for the
+ * full host-side inventory.
+ */
 void um_snapshot_worker_init(void)
 {
-	WARN_ONCE(1,
-		  "%s: only commits 1-2 have landed; post-fork reinit is in commit 3 per %s\n",
-		  __func__,
-		  "Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md");
+	os_sigio_worker_forget();
+	os_timer_worker_forget();
+
+	/* Additional child-side state that needs to match reality:
+	 * commit 3d turns these from comments into code when it needs
+	 * the worker to actually run. For commit 3c it is enough that
+	 * we don't crash while forgetting.
+	 *
+	 *   - cpu_online_mask / cpu_present_mask: on SMP, parent's
+	 *     secondary vCPU threads are gone. For UP (fuzz default)
+	 *     cpu_online_mask is just {0} already; no action.
+	 *   - current->thread.* scheduler state: valid-for-us because
+	 *     we are the thread that ran um_snapshot_ready().
+	 *   - __curr_cpu / signals_active TLS: defaults are fine until
+	 *     the worker does something that consults them.
+	 *
+	 * Deliberately no printk here: the worker's kernel state
+	 * immediately post-fork has seen fork-inheritance quirks that
+	 * trip vsnprintf via its per-CPU / TLS lookups. Commit 3d will
+	 * re-enable the worker's printk path after it rebuilds enough
+	 * per-CPU state; for commit 3c's "no-crash" bar we simply
+	 * avoid it.
+	 */
 }
 EXPORT_SYMBOL_GPL(um_snapshot_worker_init);
 

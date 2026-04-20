@@ -157,6 +157,28 @@ static void sigio_cleanup(void)
 
 __uml_exitcall(sigio_cleanup);
 
+/*
+ * Abandon inherited SIGIO helper-thread state after a fork()
+ * (workstream C-09, commit 3c). Unlike sigio_cleanup(), this does
+ * NOT try to signal/join the helper thread: in a forked child the
+ * pthread handle in write_sigio_td is stale (the thread only exists
+ * in the parent) and joining would either hang or corrupt state.
+ * Safe action is to close our copy of epollfd, drop the handle, and
+ * let the OS reclaim anything else on exit_group.
+ *
+ * Called only from the forkserver worker path via the public wrapper
+ * in arch/um/kernel/snapshot.c.
+ */
+void os_sigio_worker_forget(void)
+{
+	if (epollfd != -1) {
+		close(epollfd);
+		epollfd = -1;
+	}
+	/* Drop without kill: the pthread handle is from the parent. */
+	write_sigio_td = NULL;
+}
+
 /* Used as a flag during SIGIO testing early in boot */
 static int got_sigio;
 

@@ -100,6 +100,36 @@ void os_timer_disable(int cpu)
 	timer_settime(event_high_res_timer[cpu], 0, &its, NULL);
 }
 
+/*
+ * Forget inherited POSIX timer state after a fork() (workstream C-09,
+ * commit 3c). Each CPU's timer was created with SIGEV_THREAD_ID
+ * targeting the CPU thread's gettid() in the parent; in the forked
+ * child those tids refer to threads that do not exist, and any
+ * SIGALRM the kernel tries to deliver would be misdirected or lost.
+ *
+ * Disable all inherited timers. Do NOT timer_delete() them: the
+ * child shares the timer_t handles with the parent, and timer_delete
+ * in the child would destroy the parent's timers too. timer_settime
+ * with a zero itimerspec is local to the caller and safe.
+ *
+ * Called only from the forkserver worker path via the wrapper in
+ * arch/um/kernel/snapshot.c.
+ */
+void os_timer_worker_forget(void)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+		/* event_high_res_timer[] is zero-initialized; os_timer_create()
+		 * populates only the CPUs that were brought up. Disable only
+		 * the populated ones.
+		 */
+		if (event_high_res_timer[cpu] == 0)
+			continue;
+		os_timer_disable(cpu);
+	}
+}
+
 long long os_nsecs(void)
 {
 	struct timespec ts;
