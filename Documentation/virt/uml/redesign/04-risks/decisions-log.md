@@ -2570,4 +2570,163 @@ version would be a semantic regression.
 
 ---
 
+## D38: v2 snapshot has two capture modes — crash-consistent (Mode A) and application-consistent (Mode B)
+
+**Date:** 2026-04-20
+**Status:** Accepted (expands the v2 parking-lot design in
+`08-future-phases/02-snapshot-to-disk.md`; does not touch the
+C-09 v1 forkserver design).
+
+**Decision:** UML v2 snapshot-to-disk offers two capture modes
+with the same on-disk ELF + `PT_NOTE` format (from D36), but
+different coordination stories with the running UML guest:
+
+- **Mode A (crash-consistent, external, non-interruptive):** an
+  outside-the-UML process (sidecar, `uml-snapshot` CLI) reads
+  UML state via `ptrace(PTRACE_GETREGS)` for registers,
+  `cp --reflink=always` of `physmem_fd` from `/proc/$pid/fd/`
+  for RAM, and `/proc/$pid/fd/` enumeration for the fd table.
+  UML is never asked to cooperate; it sees no pause, no signal,
+  no quiesce. On restore, a **recovery pass** (documented in
+  the design doc §"Recovery pass") walks scheduler / RCU /
+  writeback / lock state to fix up anything caught mid-
+  mutation, then runs normal restore.
+- **Mode B (application-consistent, internal, cooperative):** a
+  signal (`SIGRTMIN+N`), debugfs write, mconsole command, or
+  AFL-fd handshake pokes the UML kernel to hit the cooperative
+  ready point from the C-09 v1 design. Kernel quiesces
+  (parks kthreads, drains RCU, stops timer, asserts D37 pull-
+  forward #2 contract), serializes itself to an ELF file,
+  resumes. Restore is deterministic; no recovery pass needed.
+
+A `PT_NOTE` of type `UML_CAPTURE_MODE` records which mode
+produced the file; the restore path branches on it.
+
+**Why two modes (the honest argument for not picking one):**
+
+1. **Crash-consistent is uniquely cheap on UML.** `physmem_fd`
+   is already a tmpfs file (C-09 D37 pull-forward #5 documents
+   the contract); capturing RAM is a `cp --reflink=always` from
+   `/proc/$pid/fd/`. On btrfs/xfs this is O(1). On any
+   filesystem it is ≤ 100 ms for a 2 GB guest. **Zero UML
+   pause**, because the UML kernel doesn't know it happened.
+   Every other hypervisor has to work for this property —
+   VMware pauses briefly to mark pages read-only, qemu does a
+   live-migration-style dirty-bitmap dance. UML gets it for
+   free. Declining to ship Mode A would be leaving load-bearing
+   value on the table.
+
+2. **Application-consistent is the semantics users expect for
+   "save and resume".** Survive-reboot, portable-reproducer,
+   "checkpoint here and resume later with deterministic
+   behavior" — all expect Mode B semantics. Shipping only Mode
+   A and saying "call the recovery pass and hope" is not the
+   snapshot contract mainstream hypervisors offer.
+
+3. **The same .umsnap file format works for both.** One writer
+   layer (serialize mmaps + notes to ELF); two capture drivers
+   (external ptrace+cp; internal quiesce+write). One restore
+   layer with a single `if mode == A: recovery_pass()` branch.
+   Incremental engineering cost of Mode A on top of Mode B is
+   ~host-side tool + ~200 LOC of kernel-side recovery pass.
+
+4. **The dichotomy is the industry norm.** Microsoft VSS
+   formalizes it (crash-consistent vs application-consistent);
+   MySQL ships both (`cp` of InnoDB tablespace vs `FLUSH TABLES
+   WITH READ LOCK; mysqldump`); qemu ships both (external snapshot
+   via LVM/disk-level vs `savevm` internal). Committing to both
+   aligns UML with the precedent users arrive expecting.
+
+5. **Different use cases need different modes.** CI + forensics
+   + "snapshot everything hourly in production" want Mode A
+   (zero pause, fsck-on-restore). Survive-reboot + portable
+   reproducer + "clean handoff to a maintainer" want Mode B
+   (deterministic restore). Forcing either camp to use the
+   other mode's semantics would be user-hostile. (See the
+   per-use-case matrix in the design doc.)
+
+**Alternatives considered and why rejected:**
+
+- **Mode A only; skip Mode B.** Rejected: the "I want to
+  snapshot and then resume deterministically tomorrow" use
+  case is load-bearing for scenarios 1 and 2 in the design
+  doc. Mode A's recovery pass is best-effort by definition;
+  users who need determinism need Mode B.
+- **Mode B only; skip Mode A.** Rejected: leaves the "zero
+  pause" lever unused. Mode A is almost free on UML
+  specifically because `physmem_fd` is already tmpfs-backed;
+  not shipping it means every CI / forensics caller pays a
+  pause they don't need.
+- **One "auto" mode that picks based on some heuristic.**
+  Rejected: the two modes have different restore semantics
+  (recovery pass runs or not). Caller MUST know which one
+  they got. Auto-mode hides that decision and creates
+  surprising behavior on restore.
+- **Three-mode variant** (also a "live" mode that uses
+  userfaultfd-driven dirty tracking for no-pause-no-recovery-
+  pass). Rejected for now: that's the Nyx-shaped approach,
+  requires in-kernel dirty-page tracking infrastructure that
+  UML doesn't have yet, and the use-case matrix doesn't show
+  it adding value over Mode A for the forensics/CI cases or
+  over Mode B for the handoff cases. Revisit if a concrete
+  user lands that needs "snapshot while running with
+  guaranteed clean restore" — that's the gap a live mode
+  would close.
+- **Adopting qemu's external/internal terminology verbatim.**
+  Considered; the terms overload with too many other meanings
+  in the UML codebase (external vs internal backends,
+  user-external modules, etc.). Crash-consistent / application-
+  consistent is unambiguous and matches the VSS terminology
+  that wider industry uses.
+
+**What this does NOT change:**
+
+- v1 (C-09, `09-snapshot-forkserver.md`) is unchanged. v1's
+  forkserver is Mode B by construction (cooperative ready
+  point + fork). The v1 commits proceed as planned; no re-
+  scope.
+- The ELF + `PT_NOTE` format (D36) is unchanged. Adding the
+  `UML_CAPTURE_MODE` note is a new type in the existing
+  namespace; no breaking change.
+- The v1 pull-forward items (D37) are unchanged. They
+  remain load-bearing for v2 regardless of mode.
+
+**Lifetime:** Stable once v2 opens. The two-mode split is
+deliberately the industry norm; reversing to single-mode would
+be a regression.
+
+**Revisit triggers:**
+
+- A concrete user arrives with a "snapshot while running +
+  deterministic restore" requirement that neither Mode A nor
+  Mode B satisfies. Opens the v3 "live mode" design thread.
+- The Mode A recovery pass proves too fragile in practice
+  (too many "can't recover, abort" outcomes). May narrow
+  Mode A's recommended use cases to forensics-only.
+- The Mode B kernel-side writer proves inordinately expensive
+  (e.g. `um_snapshot_write()` interacts badly with some
+  subsystem's quiesce). May push us toward "Mode B = fork +
+  async write from worker" which reuses more v1 plumbing.
+
+**Cross-references:**
+
+- `08-future-phases/02-snapshot-to-disk.md` §"Two capture
+  modes: crash-consistent and application-consistent" — the
+  full design.
+- `08-future-phases/02-snapshot-to-disk.md` §"Recovery pass
+  (Mode A only)" — what the restore does for Mode A captures.
+- D35 — v1 scope (cooperative-only forkserver).
+- D36 — on-disk format; `UML_CAPTURE_MODE` is a new note type
+  in that namespace.
+- D37 — v1 pull-forward items; the mmap registry and
+  ready-point assertions are consumed by both modes.
+- Microsoft VSS "shadow copy" terminology:
+  <https://learn.microsoft.com/en-us/windows-server/storage/file-server/volume-shadow-copy-service>
+- MySQL hot-backup vs cold-backup terminology:
+  <https://dev.mysql.com/doc/refman/8.4/en/backup-types.html>
+- qemu external vs internal snapshots:
+  <https://www.qemu.org/docs/master/system/images.html#vm-snapshots>
+
+---
+
 ## (Future entries here, as decisions are made)

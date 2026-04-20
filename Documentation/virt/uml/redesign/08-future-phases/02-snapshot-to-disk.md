@@ -41,6 +41,150 @@ These are different users. Scenarios 1 and 3 need full restore;
 format must be expressive enough for all four without
 over-engineering.
 
+## Two capture modes: crash-consistent and application-consistent
+
+v2 provides **two capture modes** with the same on-disk format
+(ELF + `PT_NOTE`; §"Chosen format" below) but different
+coordination stories with the running UML guest. This is the
+standard dichotomy every mature snapshot system eventually
+lands on: Microsoft VSS calls it "crash-consistent vs
+application-consistent", MySQL calls it "hot vs cold", qemu
+calls it "external vs internal". See D38 for why we commit
+to both.
+
+### Mode A — crash-consistent, external, no guest pause
+
+**Mechanism.** An *outside-the-UML-guest* process (a sidecar,
+a CI wrapper, an `uml-snapshot` CLI) captures UML's state
+without asking the UML kernel to cooperate. The UML guest
+keeps running; it does not know a snapshot is being taken.
+
+Three tricks make this almost-free on UML specifically:
+
+1. **Guest RAM is already a tmpfs file.** `physmem_fd` is an
+   unlinked tempfile in `/dev/shm` or similar (see D37 pull-
+   forward #5). Capturing RAM is literally
+   `cp /proc/$uml_pid/fd/$physmem_fd ram.bin` — no ptrace,
+   no pagemap walk, no COW dance. On btrfs/xfs,
+   `cp --reflink=always` makes it O(1).
+2. **Registers come from `ptrace(PTRACE_GETREGS)`.** A brief
+   (~µs) host-level pause per UML thread, nothing the UML
+   kernel notices.
+3. **FD table comes from `/proc/$uml_pid/fd/`.** Just an
+   `ls` + `readlink` of the directory.
+
+UML sees no pause, no quiesce, no signal. The captured state
+is "whatever happened to be in RAM at the moment the tool
+read it" — some kernel structures may be mid-mutation, some
+locks may be held, some RCU callbacks may be partway through.
+Restore requires a recovery pass (analogous to filesystem
+`fsck` after a crash): drop in-flight state, re-derive
+invariants, continue.
+
+**Cost.** A 2 GB guest: ~100 ms of tmpfs read, 0 ms of UML
+pause. On btrfs/xfs with reflink: O(1) snapshot, still 0 ms
+pause. Recovery pass on restore adds ~10-100 ms depending on
+how much state was mid-mutation.
+
+**Use cases.**
+- CI "snapshot everything every hour in production" where
+  pausing prod is unacceptable.
+- Regression reproducers where we want the state that existed
+  *before* we knew there was a problem; asking the guest to
+  quiesce first would lose the evidence.
+- Forensics / debugging; "what was the kernel actually doing
+  when the bug happened?"
+
+**Known failure modes.**
+- Kernel scheduler queues caught mid-link-update: recovery
+  pass rebuilds.
+- `rcu_pending()` cbs snapshotted but corresponding data
+  already freed in restore: recovery pass drops them.
+- Dirty inodes half-written: recovery re-queues or drops.
+- Restore-time crashes are real and have to be tolerated by
+  the caller. Mode A is "best effort with a recovery pass";
+  it is not a guarantee.
+
+### Mode B — application-consistent, cooperative, brief pause
+
+**Mechanism.** The UML kernel is signalled (`SIGRTMIN+N`,
+debugfs write, mconsole command, AFL fd handshake — see
+§"Trigger channels" below) to hit the cooperative ready
+point. From there, the same path v1 uses (§`09-snapshot-
+forkserver.md`): park kthreads, drain RCU, stop timer, assert
+strict ready-point contract. Then instead of (or in addition
+to) forking, the kernel walks the mmap-registry table and
+writes the ELF snapshot file. Resumes after the write.
+
+Everything is guaranteed consistent. Restore is deterministic.
+No recovery pass needed.
+
+**Cost.** Quiesce takes microseconds; writing the file takes
+O(RAM) host-write time. A 2 GB guest: ~50-500 ms depending on
+disk, all of it UML-paused. On tmpfs restore-target: ~100 ms.
+
+**Use cases.**
+- Survive host reboot — where the guarantee matters and 50 ms
+  of pause is nothing.
+- Portable reproducer packaging where the recipient will
+  restore and expect deterministic behavior.
+- Deliberate "checkpoint here" with production-grade
+  consistency guarantees.
+
+**Known failure modes.** The same six from
+§"Known failure modes to design against" below — they apply
+equally to Mode B, because the external-world coupling (PRNG
+reseed, CPUID drift, host clock jump) happens on restore
+regardless of whether capture was atomic.
+
+### Side-by-side
+
+| Property | Mode A (crash-consistent) | Mode B (application-consistent) |
+|---|---|---|
+| UML pause on capture | 0 ms (ptrace: ~µs) | ~µs quiesce + O(RAM) file-write |
+| UML cooperation required | none | yes (ready-point; signal trigger) |
+| Restore semantics | recovery pass needed | deterministic |
+| Implementation cost | ~200 LOC host-side tool | kernel-side writer + host restore |
+| When it is right | live-running systems, forensics, CI | deliberate checkpoints, handoff |
+| When it is wrong | caller can't tolerate restore failures | cost of UML pause matters |
+
+Both modes produce the **same ELF file format** (§"Chosen
+format" below). An `ELF_NT_NOTE` of type `UML_CAPTURE_MODE`
+records which mode produced the file, and the restore path
+branches accordingly: Mode A → run recovery pass first; Mode B
+→ resume directly.
+
+### Mode selection
+
+Caller-driven. The host-side CLI offers:
+
+```
+uml-snapshot --mode=crash-consistent $PID $FILE   # Mode A
+uml-snapshot --mode=app-consistent   $PID $FILE   # Mode B (default)
+```
+
+Per-use-case defaults: CI / forensics → A; survive-reboot /
+portable-reproducer → B.
+
+### Trigger channels (Mode B)
+
+Four channels, composed through the one
+`um_snapshot_ready(point)` entry point that v1 already
+introduces:
+
+| Channel | When it fires | Profile availability |
+|---|---|---|
+| `SIGRTMIN+N` signal | host sends signal to UML pid | any profile (signals are universal) |
+| `/sys/kernel/debug/um/snapshot_ready` write | guest userspace or mconsole pokes it | profiles with DEBUGFS=y |
+| `mconsole snapshot-ready` | host sends mconsole command | profiles with MCONSOLE=y (not fuzz) |
+| AFL fd 198/199 handshake | host pre-opens fds; init checks | profiles with UM_SNAPSHOT_FORKSERVER=y |
+
+The signal channel is new in v2 — v1 (09-snapshot-
+forkserver.md) doesn't need it because the fuzz profile only
+ever triggers via AFL fds. v2 adds the signal channel for
+reach-from-outside scenarios (CI, sidecar) where none of the
+other three are guaranteed available.
+
 ## Chosen format: ELF64 core dump + UML `PT_NOTE` types
 
 See D36 in `04-risks/decisions-log.md` for the full rationale.
@@ -69,6 +213,10 @@ ELF64 header
 ├── PT_NOTE: NT_FILE                (open FD table summary, standard note)
 ├── PT_NOTE: NT_AUXV                (process auxv, standard note)
 ├── PT_NOTE: UML_VERSION            (schema version; points at D-log entry)
+├── PT_NOTE: UML_CAPTURE_MODE       (Mode A crash-consistent or Mode B
+│                                    application-consistent; restore branches
+│                                    on this — Mode A runs recovery pass first,
+│                                    Mode B resumes directly. See D38.)
 ├── PT_NOTE: UML_BACKEND            (backend kind + contract_version +
 │                                    backend-specific reinit state)
 ├── PT_NOTE: UML_MMAP_TABLE         (canonical enumeration of kernel mmap
@@ -149,7 +297,10 @@ Three categories for every piece of UML state:
 
 ## Restore model — three tiers, pick per-use-case
 
-Same file, three restore paths:
+Same file, three restore paths. Mode A (crash-consistent)
+captures run through an extra **recovery pass** before any
+tier; Mode B (application-consistent) captures skip the
+recovery pass.
 
 1. **Full preload (simplest, correctness first).** Read the
    whole file into memory, mmap regions, restore state, resume.
@@ -170,8 +321,41 @@ Same file, three restore paths:
    `crash(8)` + `umcrash` symbol helper; inspect state; don't
    resume. Scenario 4. Zero new code beyond symbol helpers.
 
+### Recovery pass (Mode A only)
+
+Mode A captures may contain mid-mutation kernel state. Before
+any restore tier runs, the recovery pass must:
+
+- Walk the scheduler runqueues and drop any task in
+  `TASK_RUNNING` that is also mid-`__schedule()`
+  (`prev->on_cpu != 0` when we weren't `prev`). Those tasks
+  had already decided to yield; force them to re-enter
+  `schedule()`.
+- Walk the RCU callback lists and drop any callback whose
+  target struct has already been re-allocated (checked via a
+  slab generation counter captured at snapshot time).
+- Drop inflight writeback — any inode with `I_DIRTY` set and
+  a writeback bio partway through gets re-marked dirty with
+  bio reset, so the restored kernel re-initiates the write.
+- Drop any `wait_queue` entry whose `waker` refers to a
+  freed address.
+- Re-validate every lock: if any `raw_spinlock_t` is "held"
+  at snapshot time (owner != -1), WARN and release — the
+  captured state was mid-critical-section; the caller asked
+  for crash-consistent, they get fsck semantics.
+
+This is explicitly a best-effort pass. If it cannot recover
+cleanly, it logs the violation and fails the restore. Mode A
+callers know this is a risk; that's what "crash-consistent"
+means.
+
+Mode B captures skip this pass entirely: the ready-point
+assertions from D37 pull-forward #2 guarantee none of the
+above conditions held at capture.
+
 Tier 1 is the mandatory starting point. Tiers 2 and 3 are
-independent layers on top.
+independent layers on top. Recovery pass is mandatory for
+Mode A, skipped for Mode B.
 
 ## Known failure modes to design against
 
@@ -244,32 +428,72 @@ agent's corpus; dates verified 2026-04-20):
   Alternatively, ship `uml-restore` as a Python script under
   `scripts/` that shells out to the UML binary with
   `--restore=<file>` and does setup. TBD.
+- **Q6:** For Mode A, does `ptrace(PTRACE_GETREGS)` on UML's
+  vCPU host threads give us the actual guest register state,
+  or UML-kernel-side state? The backend ops table already
+  provides `read_guest_regs`; Mode A would need a kernel-
+  cooperative version (e.g. a tiny mconsole command that
+  dumps regs to a sidecar fd) OR would need to translate
+  from host-thread state to guest state offline. Leaning
+  toward the former; Mode A would then ask the kernel for
+  regs but not for quiesce — the pause is still only
+  ~microseconds.
+- **Q7:** Can Mode A + Mode B coexist in one `.umsnap` file
+  (for use cases like "snapshot fast and then refine with
+  cooperative rewrite in the background")? Plan: no, keep
+  the format single-mode. Two files, two separate captures
+  is clearer for restore-time reasoning.
+- **Q8:** Recovery pass failure modes — if the pass cannot
+  recover cleanly, should it print-and-abort, print-and-
+  continue-with-warnings, or fall back to read-only walk?
+  Plan: print-and-abort for anything that would compromise
+  correctness; print-and-continue for drift that is only
+  observable externally. Needs per-violation triage in the
+  actual implementation.
 
 ## Commit plan (when v2 opens)
 
-Three phases, each independently useful:
+Four phases. Mode A (crash-consistent) ships first because it
+is strictly cheaper — no kernel-side writer, no new ready-point
+channel. Mode B (application-consistent) layers on top of v1's
+cooperative ready-point infrastructure.
 
-**Phase 1: Snapshot producer (ELF writer).** Kernel gains
-`um_snapshot_write(struct file *, enum um_snapshot_mode)`. Walks
-the mmap table (pull-forward from v1), serializes UML state
-into ELF PT_LOAD + PT_NOTE form, writes to `struct file`. Can
-be triggered from mconsole, debugfs, AFL-fd path. Tier-1
-(full-preload) consumers can already use this for scenarios 2
-and 4 via standalone ELF tooling. Commit count: 4-6.
+**Phase 1: Mode A host-side capture.** New `tools/uml/snapshot/
+uml-snapshot` CLI that takes `--mode=crash-consistent <pid>
+<file>` and produces an ELF + `PT_NOTE` file by: `ptrace`'ing
+UML briefly to read registers, `cp --reflink=always` (or plain
+`cp`) of `physmem_fd` from `/proc/$pid/fd/$n`, enumeration of
+open fds via `/proc/$pid/fd/`, write ELF header + notes. No
+kernel changes. Host-side only; needs user sign-off per AGENT-
+PROMPT cross-subsystem rule. Commit count: 3-5.
 
-**Phase 2: Full-preload restore.** New `uml-restore` tool (in
-`tools/uml/snapshot/`, needs sign-off) + kernel-side
-`um_snapshot_load(const char *path)` that mirrors
-`um_snapshot_write`. Scenarios 1 and 3 light up. Commit count:
-3-5.
+**Phase 2: Recovery pass + full-preload restore (both modes).**
+Kernel gains `um_snapshot_load(const char *path,
+enum um_snapshot_mode)` that mirrors the reader side. Implements
+the Mode A recovery pass (§"Recovery pass" above). Scenarios 2
+and 4 (read-only review + portable reproducer with recovery)
+light up. Scenario 3 (CI golden stamp) lights up for Mode A.
+Commit count: 4-6.
 
-**Phase 3: Lazy-pages tier.** Userfaultfd handler for the
-RAM / shadow PT_LOAD regions. Scenario 1 becomes interactive.
+**Phase 3: Mode B kernel-side writer.** Kernel gains
+`um_snapshot_write(struct file *)` driven by the cooperative
+ready-point path. Walks the mmap table (pull-forward from v1),
+serializes UML state into ELF `PT_LOAD` + `PT_NOTE` form,
+writes to `struct file`. Triggered from the signal channel
+(new) + debugfs + mconsole + AFL-fd path (existing from v1).
+Scenario 1 (survive reboot with determinism) now has its
+guaranteed-clean path. Commit count: 4-6.
+
+**Phase 4: Lazy-pages tier.** `userfaultfd` handler for the
+RAM / shadow `PT_LOAD` regions. Scenario 1 becomes interactive.
 Commit count: 2-3.
 
-Total v2: ~10-14 commits, ~8-12 weeks wall-clock given one
+Total v2: ~13-20 commits, ~10-14 weeks wall-clock given one
 engineer who has C-09 v1 context. Shorter than CRIU's per-
-subsystem porting cost because we skip most of it.
+subsystem porting cost because we skip most of it. The Mode A
+/ Mode B split adds ~2 weeks over the original estimate; the
+benefit is that Mode A can ship independently and provides the
+use cases (forensics, CI) that most users will actually hit.
 
 ## What v2 explicitly does not promise
 
