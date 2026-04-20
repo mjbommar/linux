@@ -41,7 +41,7 @@ extract() {
 	[ -f "$log" ] || return 0
 	grep -E '\bwarning:|\berror:' "$log" |
 		sed -E "s|$SRC/||g" |
-		sort -u
+		LC_ALL=C sort -u
 }
 
 regressions=0
@@ -52,8 +52,8 @@ for chk in gcc clang sparse smatch; do
 	base=""
 	[ -f "$BASELINE_DIR/$chk.txt" ] && base=$(cat "$BASELINE_DIR/$chk.txt")
 
-	new=$(comm -23 <(echo "$cur") <(echo "$base"))
-	gone=$(comm -13 <(echo "$cur") <(echo "$base"))
+	new=$(LC_ALL=C comm -23 <(echo "$cur") <(echo "$base"))
+	gone=$(LC_ALL=C comm -13 <(echo "$cur") <(echo "$base"))
 
 	if [ -z "$new" ] && [ -z "$gone" ]; then
 		echo "$chk: clean (matches baseline)"

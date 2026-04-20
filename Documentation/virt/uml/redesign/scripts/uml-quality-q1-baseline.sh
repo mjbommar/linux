@@ -31,7 +31,7 @@ for chk in gcc clang sparse smatch; do
 	fi
 	grep -E '\bwarning:|\berror:' "$log" |
 		sed -E "s|$SRC/||g" |
-		sort -u > "$out"
+		LC_ALL=C sort -u > "$out"
 	printf '%s: baseline updated (%d lines) -> %s\n' \
 		"$chk" "$(wc -l < "$out")" "$out"
 done
