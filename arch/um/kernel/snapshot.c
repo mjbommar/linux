@@ -38,12 +38,14 @@
 #include <linux/hardirq.h>
 #include <linux/jump_label.h>
 #include <linux/kernel.h>
+#include <linux/kobject.h>
 #include <linux/list.h>
 #include <linux/preempt.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/signal.h>
 #include <linux/spinlock.h>
+#include <linux/sysfs.h>
 #include <linux/uaccess.h>
 
 #include <asm/um-mmaps.h>
@@ -587,3 +589,50 @@ static int __init um_snapshot_debugfs_init(void)
 late_initcall_sync(um_snapshot_debugfs_init);
 
 #endif /* CONFIG_DEBUG_FS */
+
+/*
+ * /sys/kernel/um/state_version — read-only unsigned integer telling
+ * userspace which version of the UML snapshot/forkserver wire contract
+ * this kernel speaks. Incremented on protocol-breaking changes; v1 is
+ * the initial AFL-compatible 12-bytes-per-iteration protocol landed in
+ * commits 1 through 4 of workstream C-09.
+ *
+ * Consumed by tools/testing/selftests/um/snapshot-smoke to gate its
+ * assertions, and by any external fuzzer harness (AFL++, syzkaller's
+ * upcoming vm/uml backend) to refuse to bind to a kernel it doesn't
+ * understand. Note: "state_version" is the wire-protocol version, not
+ * a kernel build version — it stays 1 across unrelated kernel bumps
+ * as long as the 12-byte protocol is unchanged.
+ */
+#define UM_SNAPSHOT_STATE_VERSION 1u
+
+static struct kobject *um_snapshot_kobj;
+
+static ssize_t state_version_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", UM_SNAPSHOT_STATE_VERSION);
+}
+
+static struct kobj_attribute um_snapshot_state_version_attr =
+	__ATTR_RO(state_version);
+
+static int __init um_snapshot_sysfs_init(void)
+{
+	int err;
+
+	um_snapshot_kobj = kobject_create_and_add("um", kernel_kobj);
+	if (!um_snapshot_kobj)
+		return -ENOMEM;
+
+	err = sysfs_create_file(um_snapshot_kobj,
+				&um_snapshot_state_version_attr.attr);
+	if (err) {
+		kobject_put(um_snapshot_kobj);
+		um_snapshot_kobj = NULL;
+		return err;
+	}
+
+	return 0;
+}
+late_initcall(um_snapshot_sysfs_init);

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-TARGETS = ftrace-smoke hooks-flip kprobes-stress profiles
+TARGETS = ftrace-smoke hooks-flip kprobes-stress profiles snapshot-smoke
 include ../lib.mk
 
 all:
