@@ -107,9 +107,16 @@ static void write_sigio_workaround(void)
 	if (write_sigio_td)
 		goto out;
 
-	epollfd = epoll_create(MAX_EPOLL_EVENTS);
+	/*
+	 * FD disposition (C-09 commit 4): worker-rebuild. The SIGIO
+	 * helper thread's epollfd is dropped in
+	 * os_sigio_worker_forget() and recreated in
+	 * os_sigio_worker_rebuild() (see below) after a forkserver
+	 * fork(). EPOLL_CLOEXEC ensures no leaks into exec().
+	 */
+	epollfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epollfd < 0) {
-		printk(UM_KERN_ERR "%s: epoll_create failed, errno = %d\n",
+		printk(UM_KERN_ERR "%s: epoll_create1 failed, errno = %d\n",
 		       __func__, errno);
 		goto out;
 	}
@@ -199,10 +206,15 @@ int os_sigio_worker_rebuild(void)
 	if (epollfd != -1)
 		return 0;	/* already rebuilt; idempotent */
 
-	epollfd = epoll_create(MAX_EPOLL_EVENTS);
+	/*
+	 * FD disposition (C-09 commit 4): worker-rebuild — this is the
+	 * rebuild-side creation. EPOLL_CLOEXEC is atomic to match
+	 * write_sigio_workaround() above.
+	 */
+	epollfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epollfd < 0) {
 		err = -errno;
-		printk(UM_KERN_ERR "%s: epoll_create failed, errno = %d\n",
+		printk(UM_KERN_ERR "%s: epoll_create1 failed, errno = %d\n",
 		       __func__, errno);
 		return err;
 	}

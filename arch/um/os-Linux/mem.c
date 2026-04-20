@@ -165,6 +165,17 @@ static int __init make_tempfile(const char *template)
 		}
 	}
 
+	/*
+	 * FD disposition (C-09 commit 4): inherit (physmem fd).
+	 * This fd backs the UML kernel's physical-memory file and
+	 * is the target of all kernel-page mmap()s. Across a
+	 * forkserver fork() the worker inherits this fd and the
+	 * associated mappings (MAP_SHARED on the same inode via
+	 * MADV_DOFORK; see arch/um/kernel/physmem.c). Closing or
+	 * re-creating it in the worker would unmap the kernel's
+	 * .data and heap. Must remain CLOEXEC to avoid leaks into
+	 * the userspace stub's exec().
+	 */
 #ifdef O_TMPFILE
 	fd = open(tempdir, O_CLOEXEC | O_RDWR | O_EXCL | O_TMPFILE, 0700);
 	/*
@@ -187,6 +198,15 @@ static int __init make_tempfile(const char *template)
 		os_warn("open - cannot create %s: %s\n", tempname,
 			strerror(errno));
 		goto out;
+	}
+	/*
+	 * mkstemp() has no SOCK_CLOEXEC-style atomic flag; set
+	 * FD_CLOEXEC immediately after create to match the
+	 * O_TMPFILE path's disposition.
+	 */
+	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+		perror("fcntl FD_CLOEXEC");
+		goto close;
 	}
 	if (unlink(tempname) < 0) {
 		perror("unlink");

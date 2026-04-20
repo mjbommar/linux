@@ -569,8 +569,56 @@ requires a new dedicated commit.
      an honest v1 delivery, not the hypothesised 3d-d breakthrough.
 4. **commit 4:** fd hygiene sweep in `os-Linux/` + **per-FD
    disposition annotations** (pull-forward #3). One patch
-   touching every `socket()` / `open()` site; largely
-   mechanical; Coccinelle eligible per AGENT-PROMPT §2.
+   touching every `socket()` / `open()` / `epoll_create*()` /
+   `eventfd()` / `accept*()` / `socketpair()` site in
+   `arch/um/os-Linux/`. Two components:
+
+   - **Atomic-CLOEXEC hygiene.** Every FD creator now passes
+     `SOCK_CLOEXEC` / `EPOLL_CLOEXEC` / `EFD_CLOEXEC` /
+     `O_CLOEXEC` on the creation syscall itself, closing the
+     race window between the old `socket()+fcntl(F_SETFD)`
+     pair (a fork between them leaked an unsealed fd into the
+     child). `epoll_create(N)` → `epoll_create1(EPOLL_CLOEXEC)`
+     (N was ignored since the 2.6 rewrite anyway).
+     `accept(...)` → `accept4(..., SOCK_CLOEXEC)`. Callers that
+     deliberately want FDs to survive exec — `os_pipe(..., 0)`,
+     `os_create_unix_socket(..., 0)` — get CLOEXEC cleared via
+     `fcntl(F_SETFD, 0)` after the atomic create.
+
+   - **Per-FD disposition annotations.** Every FD creation
+     site gets a comment of the form:
+     `/* FD disposition (C-09 commit 4): <label> — <reason> */`
+     Taxonomy:
+       - `inherit` — safe across fork; worker keeps CoW'd fd
+         as-is (physmem fd, stub binary fd, signalfd wake).
+       - `inherit-and-mutate` — worker keeps the fd and adds/
+         removes entries as its guest syscalls run (main IRQ
+         epollfd).
+       - `worker-rebuild` — dropped in `*_worker_forget()`,
+         recreated in `*_worker_rebuild()` in the snapshot
+         worker path (sigio epollfd, POSIX timer).
+       - `consumer-disposition` — creation helper doesn't decide;
+         the caller (driver) owns how the fd behaves at
+         snapshot (os_connect_socket, os_accept_connection,
+         os_create_unix_socket, os_eventfd, os_pipe).
+       - `exec-transmit` — intentionally NOT CLOEXEC because
+         the stub child exec()s into the stub binary and must
+         inherit this fd (one site: `start_userspace()`
+         tramp socketpair).
+       - `exec-probe` — CLOEXEC specifically so exec-success
+         closes the fd and the parent's read() returns 0 (one
+         site: `run_helper()` socketpair).
+       - `ephemeral` — opened, used, closed within one
+         function; never reaches a snapshot ready-point
+         (block-size probe, umdir check).
+       - `parent-only, long-lived` — parent holds for the
+         UML process lifetime; worker inherits CoW but must
+         not write (umid pid file).
+
+     The annotations turn "what happens to this fd at
+     snapshot" into a self-evident property of the creation
+     site rather than an oral-tradition decision that has to be
+     re-derived per workstream.
 5. **commit 5:** `snapshot-smoke` kselftest + user doc
    `Documentation/virt/uml/snapshot.rst` + **state_version
    sysfs node** (pull-forward #4). Validates commits 3a-4

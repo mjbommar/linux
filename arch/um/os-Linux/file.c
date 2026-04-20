@@ -206,7 +206,15 @@ int os_connect_socket(const char *name)
 	sock.sun_family = AF_UNIX;
 	snprintf(sock.sun_path, sizeof(sock.sun_path), "%s", name);
 
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * Caller owns the fd; SOCK_CLOEXEC is atomic-safe default.
+	 * Currently consumed by arch/um/kernel/time.c (time-travel
+	 * controller socket) and drivers/virtio_uml.c (vhost-user
+	 * socket) — both retained across snapshot fork as CoW'd
+	 * file table entries, neither needs exec-survival.
+	 */
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0) {
 		err = -errno;
 		goto out;
@@ -313,7 +321,14 @@ int os_file_size(const char *file, unsigned long long *size_out)
 		int fd;
 		long blocks;
 
-		fd = open(file, O_RDONLY, 0);
+		/*
+		 * FD disposition (C-09 commit 4): ephemeral. Opened,
+		 * ioctl'd for BLKGETSIZE, closed synchronously in this
+		 * function. Never held across a snapshot ready-point;
+		 * O_CLOEXEC is belt-and-braces defense against stray
+		 * exec() between open and close.
+		 */
+		fd = open(file, O_RDONLY | O_CLOEXEC, 0);
 		if (fd < 0) {
 			err = -errno;
 			printk(UM_KERN_ERR "Couldn't open \"%s\", "
@@ -366,25 +381,40 @@ int os_pipe(int *fds, int stream, int close_on_exec)
 {
 	int err, type = stream ? SOCK_STREAM : SOCK_DGRAM;
 
-	err = socketpair(AF_UNIX, type, 0, fds);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * close_on_exec=1 callers (chan/rtc/virtio/ubd) hold the
+	 * pipe inside the UML process only; close_on_exec=0
+	 * callers (harddog, port) intentionally exec a helper and
+	 * rely on the child inheriting the fd.
+	 *
+	 * Create atomically with SOCK_CLOEXEC; for
+	 * !close_on_exec callers, clear FD_CLOEXEC on both ends
+	 * after the fact. This closes the pre-fcntl race window
+	 * for the common close_on_exec=1 path — previously a
+	 * fork() between socketpair() and the fcntl() loop
+	 * leaked an unsealed fd into the child.
+	 */
+	err = socketpair(AF_UNIX, type | SOCK_CLOEXEC, 0, fds);
 	if (err < 0)
 		return -errno;
 
-	if (!close_on_exec)
+	if (close_on_exec)
 		return 0;
 
-	err = os_set_exec_close(fds[0]);
+	err = fcntl(fds[0], F_SETFD, 0);
 	if (err < 0)
 		goto error;
 
-	err = os_set_exec_close(fds[1]);
+	err = fcntl(fds[1], F_SETFD, 0);
 	if (err < 0)
 		goto error;
 
 	return 0;
 
  error:
-	printk(UM_KERN_ERR "os_pipe : Setting FD_CLOEXEC failed, err = %d\n",
+	err = -errno;
+	printk(UM_KERN_ERR "os_pipe : Clearing FD_CLOEXEC failed, err = %d\n",
 	       -err);
 	close(fds[1]);
 	close(fds[0]);
@@ -455,7 +485,14 @@ int os_accept_connection(int fd)
 {
 	int new;
 
-	new = accept(fd, NULL, 0);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * accept4 with SOCK_CLOEXEC is atomic (races with fork
+	 * were possible under plain accept()+fcntl). The accepted
+	 * fd is handed to the caller's driver; snapshot behavior
+	 * inherits the caller's disposition.
+	 */
+	new = accept4(fd, NULL, 0, SOCK_CLOEXEC);
 	if (new < 0)
 		return -errno;
 	return new;
@@ -544,15 +581,23 @@ int os_create_unix_socket(const char *file, int len, int close_on_exec)
 	struct sockaddr_un addr;
 	int sock, err;
 
-	sock = socket(PF_UNIX, SOCK_DGRAM, 0);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * Only two callers today: mconsole (close_on_exec=1,
+	 * owns socket for UML lifetime) and xterm driver
+	 * (close_on_exec=1, bootstrap). Both pass 1; we still
+	 * honour the parameter for the theoretical 0 case by
+	 * clearing CLOEXEC after the atomic create.
+	 */
+	sock = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (sock < 0)
 		return -errno;
 
-	if (close_on_exec) {
-		err = os_set_exec_close(sock);
+	if (!close_on_exec) {
+		err = fcntl(sock, F_SETFD, 0);
 		if (err < 0)
 			printk(UM_KERN_ERR "create_unix_socket : "
-			       "close_on_exec failed, err = %d", -err);
+			       "clearing CLOEXEC failed, err = %d", -errno);
 	}
 
 	addr.sun_family = AF_UNIX;
@@ -633,7 +678,13 @@ int os_falloc_zeroes(int fd, unsigned long long offset, int len)
 
 int os_eventfd(unsigned int initval, int flags)
 {
-	int fd = eventfd(initval, flags);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * Currently only consumed by drivers/virtio_uml.c with
+	 * flags=0; force EFD_CLOEXEC so the fd never leaks into
+	 * exec() (stub trampoline, helper subprocess).
+	 */
+	int fd = eventfd(initval, flags | EFD_CLOEXEC);
 
 	if (fd < 0)
 		return -errno;

@@ -188,6 +188,15 @@ void os_idle_prepare(void)
 	 * because the IPI signal is a real-time signal that carries data,
 	 * and unlike handling SIGALRM, we cannot simply flag it in
 	 * signals_pending.
+	 *
+	 * FD disposition (C-09 commit 4): inherit. The signalfd
+	 * targets signals blocked in the calling thread's mask; after
+	 * a forkserver fork the worker inherits both the signal mask
+	 * and the fd, and the fd remains correctly wired for the
+	 * worker's own thread-local mask. No rebuild is needed. The
+	 * separate POSIX timer is what gets rebuilt in
+	 * os_timer_worker_rebuild() — that's the per-thread timer-
+	 * delivery target; this fd is the idle-sleep wake source.
 	 */
 	wake_signals = signalfd(-1, &set, SFD_CLOEXEC);
 	if (wake_signals < 0)

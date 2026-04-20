@@ -391,6 +391,16 @@ static int __init init_stub_exe_fd(void)
 		}
 
 		close(stub_exe_fd);
+		/*
+		 * FD disposition (C-09 commit 4): inherit. The stub
+		 * binary fd is the fexecve() target for every
+		 * userspace stub spawn and is held for the UML
+		 * kernel's entire lifetime. Workers inherit it CoW
+		 * and reuse it to spawn their own stubs. O_CLOEXEC
+		 * here is correct: start_userspace() separately
+		 * unshares fds into the stub child's file table
+		 * via the tramp socketpair.
+		 */
 		stub_exe_fd = open(tmpfile, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 		if (stub_exe_fd < 0) {
 			unlink(tmpfile);
@@ -442,7 +452,15 @@ int start_userspace(struct mm_id *mm_id)
 	/* set stack pointer to the end of the stack page, so it can grow downwards */
 	sp = (unsigned long)stack + UM_KERN_PAGE_SIZE;
 
-	/* socket pair for init data and SECCOMP FD passing (no CLOEXEC here) */
+	/*
+	 * Socket pair for init data and SECCOMP FD passing.
+	 * FD disposition (C-09 commit 4): exec-transmit. No
+	 * SOCK_CLOEXEC on purpose — the userspace stub child
+	 * exec()s into the stub binary and must inherit this fd to
+	 * receive init data and (optionally) a seccomp fd from the
+	 * UML kernel. This is the one socketpair() in arch/um that
+	 * intentionally survives exec; do not "fix" it.
+	 */
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, tramp_data.sockpair)) {
 		err = -errno;
 		printk(UM_KERN_ERR "%s : socketpair failed, errno = %d\n",
