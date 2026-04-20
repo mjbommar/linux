@@ -3354,4 +3354,122 @@ code and is removed in the same series.
 
 ---
 
+## D43: C-06 BPF JIT v1 blocked on three cross-subsystem touches in arch/x86/net/
+
+**Date:** 2026-04-20
+**Status:** Blocked pending user sign-off on cross-subsystem patch.
+Design doc (`02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md`)
+assumed arch/x86/net/bpf_jit_comp.c would compile unchanged under
+UML; empirical build (C-06 commit 1 attempt) shows three real
+divergences. Reverted the attempted Kconfig + Makefile nudge
+(nothing pushed); surfacing decision here per AGENT-PROMPT
+§"When to stop and ask" (cross-subsystem touch requires explicit
+user sign-off).
+
+**The three divergences:**
+
+1. `arch/x86/net/bpf_jit_comp.c:1493,1499` — `regs->ip` direct
+   field access on `struct pt_regs`. x86's bare-metal pt_regs
+   carries `ip` as a named field (`arch/x86/include/asm/
+   ptrace.h`); UML's `struct pt_regs` is a wrapper around
+   `struct uml_pt_regs` (`arch/um/include/asm/ptrace-generic.h:13`)
+   and IP is accessed via the `PT_REGS_IP(regs)` /
+   `instruction_pointer(regs)` macros. This is a genuine layout
+   divergence, not a header forwarding problem.
+
+2. `arch/x86/net/bpf_jit_comp.c:1997` — `boot_cpu_has(X86_FEATURE_BMI2)`
+   implicit declaration. UML has a working `boot_cpu_has` macro
+   at `arch/um/include/asm/cpufeature.h:54`; the problem is that
+   `bpf_jit_comp.c` does NOT explicitly `#include <asm/cpufeature.h>`
+   and relies on transitive inclusion through `<asm/nospec-branch.h>`
+   or similar that holds on bare-metal x86 but not via UML's
+   include path. Minimal fix: add the explicit include.
+
+3. `arch/x86/net/bpf_jit_comp.c:2255` — `VSYSCALL_ADDR` undeclared.
+   UML has no vsyscall page (it's a host-userspace ELF, not a
+   kernel). The JIT uses this constant as the upper limit of an
+   arena-access sanity check; the equivalent constant under UML
+   is zero / `TASK_SIZE_MAX` (no reserved region above).
+
+**Why this wasn't caught in the design pass.** The design doc's
+U3 unknown anticipated "<asm/*> header resolution" issues with
+a mitigation plan of "add minimal forwarders in
+`arch/um/include/asm/`". That plan works for (2) and (3) — those
+can be solved entirely in `arch/um/` with a UML-only header and
+a force-include from UML's Makefile. It does NOT work for (1):
+`#define ip ...` at translation-unit scope would collide with
+every other `.ip` field reference in the TU (struct stat, struct
+sockaddr_in, other pt_regs users). The `regs->ip` access is a
+pt_regs layout assumption that has no clean UML-only workaround.
+
+**Options considered.**
+
+**A. UML-side preprocessor shim + scoped wrapper.** Create
+`arch/um/include/asm/bpf_jit_umhost.h` with `#define VSYSCALL_ADDR 0UL`
+and `#include <asm/cpufeature.h>`; force-include it only when
+building `arch/x86/net/bpf_jit_comp.o` under UML (via
+`CFLAGS_bpf_jit_comp.o` in arch/um/Makefile). For the `regs->ip`
+divergence, write `arch/um/net/bpf_jit_comp.c` that `#include`s
+the x86 source after `#define ip <uml_pt_regs_gp_lvalue>`.
+  - Scope: entirely `arch/um/`. No LKML sign-off needed.
+  - Fragility: the `#define ip` at TU scope bleeds into every
+    transitive header; collisions are likely (e.g. `struct
+    sockaddr_in.sin_addr.s_addr` is unaffected but other `.ip`
+    lvalues exist). Would need a tightly-bound TU with no
+    network/pt_regs header pollution — hard to guarantee
+    stable across upstream x86 BPF JIT revisions.
+  - Maintenance: every time `arch/x86/net/bpf_jit_comp.c`
+    changes upstream the shim may silently break. UML CI would
+    need to guard against it.
+
+**B. Small upstream patch to `arch/x86/net/bpf_jit_comp.c` +
+paired UML shim headers.** Estimated ~10-15 LOC:
+  - Add `#include <asm/cpufeature.h>` at the top (unconditional,
+    harmless; fixes #2 for UML and is good hygiene anyway).
+  - Replace two `regs->ip` accesses with a tiny inline helper
+    `bpf_jit_pt_regs_ip(regs)` that has a one-line x86 body
+    (`regs->ip`) and a UML body using `PT_REGS_IP(regs)`. New
+    header in `arch/x86/include/asm/bpf_jit.h` or similar with
+    the two definitions.
+  - Add `arch/um/include/asm/vsyscall.h` with
+    `#define VSYSCALL_ADDR 0UL` (UML-only; no bare-metal change).
+  - Scope: touches `arch/x86/net/bpf_jit_comp.c` and adds one
+    new x86 header. Requires LKML + BPF-maintainer review
+    (Daniel Borkmann / Alexei Starovoitov).
+  - Cleanness: small, matches how arch/x86 abstracts other UML-
+    vs-bare-metal concerns (e.g., `__uml_cant_sleep`).
+  - Lead time: days to weeks for review.
+
+**C. Defer C-06 v1 entirely.** Mark C-06 `planned (blocked on
+   upstream BPF-JIT abstraction work; reopen once (B) patch
+   lands or option A's fragility is deemed acceptable)`. Move
+   to next unblocked leaf task (C-07 KMSAN design pass, or
+   continued C-09 v2 groundwork).
+
+**User sign-off required for option B** because the patch
+touches `arch/x86/net/` and `arch/x86/include/asm/`, which is
+outside the "arch/um/ and Documentation/virt/uml/" scope the
+AGENT-PROMPT allows me to work in autonomously.
+
+**Current state:** C-06 design doc (`02-workstreams/
+C-profiles-and-gaps/06-port-bpf-jit.md`, commit f0bdb61447ef)
+updated in the same series as this entry to reference D43 and
+flip Status from `design` to `blocked on D43 option-B sign-off
+or option-A fragility acceptance`. No arch/ code changes made.
+
+**Cross-references:**
+- `02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md` —
+  design doc; will be updated to reflect this blocker.
+- `arch/x86/net/bpf_jit_comp.c:1493,1499,1997,2255` — the four
+  divergence sites.
+- `arch/um/include/asm/ptrace-generic.h:13,21` — UML's pt_regs
+  wrapper and `PT_REGS_IP` macro.
+- `arch/um/include/asm/cpufeature.h:54` — UML's working
+  `boot_cpu_has`.
+- D34 — similar "external upstream fix needed" pattern for
+  C-04 commit 3 (HAVE_FUNCTION_GRAPH_TRACER); C-06 joins D34 in
+  the "blocked on upstream abstraction" bucket.
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -1,12 +1,23 @@
 # C-06: Port BPF JIT to UML
 
-**Status:** design (2026-04-20); implementation commits to follow
+**Status:** blocked (2026-04-20) on D43 decision. Empirical
+commit-1 build revealed three real x86-vs-UML divergences in
+`arch/x86/net/bpf_jit_comp.c` that don't fit the U3 mitigation
+plan (see §"Blocker: what the empirical build found" below).
+Options A (UML-side shim, fragile), B (small upstream patch to
+arch/x86/net/, needs LKML sign-off), or C (defer) are spelled
+out in `04-risks/decisions-log.md` D43. Pending user sign-off
+for option B or acceptance of option A's fragility. No code
+pushed. Design-doc shape below describes the landing target; the
+"Commit plan" section below is accurate for whichever option
+lands, with commit 1's mechanics differing between A and B.
 **Effort:** 3 weeks (budget); see "Reality-check" below — actual
 scope after investigation is closer to **~3 days of disciplined
-work** if the optimistic code-reuse path holds, or **~1 week** if
-it unravels and we need arch-specific glue. Kept at the 3-week
-line-item in `00-vision.md` only because Q (unknowns) is not zero
-and we do not compress the plan preemptively.
+work** if the optimistic code-reuse path holds (option B +
+upstream review lead time ignored), or **~1 week** if it
+unravels and we need arch-specific glue (option A path). Kept at
+the 3-week line-item in `00-vision.md` only because Q (unknowns)
+is not zero and we do not compress the plan preemptively.
 **Dependencies:** B-04 (`.text` section + JIT allocator seam).
                   All landed.
 **Blocks:** research profile getting realistic BPF perf; C-08
@@ -253,3 +264,46 @@ Success shape: `make ARCH=um uml/research && make ARCH=um -j$(nproc)`
 → `bpftool prog loadall /path/to/prog.bpf` → `bpftool prog show id N`
 prints `jited: yes`. Selftest in `tools/testing/selftests/um/bpf-
 smoke/` codifies that assertion.
+
+## Blocker: what the empirical build found
+
+The commit-1 attempt (2026-04-20; reverted, nothing pushed) set
+`select HAVE_EBPF_JIT if X86_64` + `core-$(CONFIG_BPF_JIT) +=
+$(HOST_DIR)/net/` and built the research profile with
+`CONFIG_BPF_SYSCALL=y CONFIG_BPF_JIT=y`. The compile of
+`arch/x86/net/bpf_jit_comp.c` surfaced three real divergences:
+
+1. **`regs->ip` direct-field access** at
+   `bpf_jit_comp.c:1493,1499` (function `ex_handler_bpf`). x86's
+   bare-metal `struct pt_regs` has `ip` as a named field
+   (`arch/x86/include/asm/ptrace.h`); UML's `struct pt_regs`
+   wraps `struct uml_pt_regs` and exposes IP via the
+   `PT_REGS_IP(regs)` / `instruction_pointer(regs)` macros.
+   **Pt_regs layout divergence, not a header fix.**
+
+2. **`boot_cpu_has(X86_FEATURE_BMI2)` implicit declaration** at
+   `bpf_jit_comp.c:1997`. UML has a working `boot_cpu_has` macro
+   at `arch/um/include/asm/cpufeature.h:54`; `bpf_jit_comp.c`
+   doesn't explicitly `#include <asm/cpufeature.h>` and relies
+   on transitive inclusion that holds on bare-metal x86 but not
+   under UML. **Fix: add the explicit include.**
+
+3. **`VSYSCALL_ADDR` undeclared** at `bpf_jit_comp.c:2255`. UML
+   has no vsyscall page. **Fix: `#define VSYSCALL_ADDR 0UL` in a
+   UML-only header.**
+
+(2) and (3) fit the U3 mitigation plan (UML-only header
+forwarders). (1) does not: `#define ip ...` at translation-unit
+scope at the `#include <asm/x86_bpf_jit_comp.c>` site collides
+with unrelated `.ip` field accesses in other kernel headers
+pulled in transitively.
+
+The full three-way A/B/C decision (UML-side shim, small upstream
+patch, defer) is in `04-risks/decisions-log.md` D43. Per
+AGENT-PROMPT §"When to stop and ask", option B (touches
+`arch/x86/net/`) requires user sign-off; option A (all
+`arch/um/`) does not but is fragile; option C defers C-06.
+
+Until the decision arrives, C-06 remains `blocked`. Other
+workstream leaves (C-07 KMSAN, C-09 v2 groundwork) are not
+blocked and continue to advance.
