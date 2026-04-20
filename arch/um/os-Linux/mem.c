@@ -46,10 +46,33 @@ void kasan_map_memory(void *start, size_t len)
 		exit(1);
 	}
 
-	if (madvise(start, len, MADV_DONTFORK)) {
-		os_info("Couldn't set MADV_DONTFORK on shadow memory: %s\n.",
-			strerror(errno));
-		exit(1);
+	/*
+	 * Workstream C-09 / D37 pull-forward #6.
+	 *
+	 * Historically we set MADV_DONTFORK on the KASAN shadow so it
+	 * wasn't inherited into child processes. That is still the
+	 * right default for non-fuzz profiles — the shadow is a 16 TB
+	 * VA region, and needlessly COW'ing it into every host fork
+	 * wastes kernel page-table memory and makes strace/ps output
+	 * confusing. But the C-09 snapshot/forkserver (CONFIG_UM_FUZZ_HOOKS)
+	 * forks the UML process itself per fuzz iteration, and the
+	 * forked worker needs to inherit the shadow via COW — otherwise
+	 * the first KASAN-instrumented kernel access in the worker
+	 * SEGVs on an unmapped shadow range. See D35's Q2 and D37 #6
+	 * for the analysis.
+	 *
+	 * Under CONFIG_UM_FUZZ_HOOKS, skip the MADV_DONTFORK so fork()
+	 * propagates the shadow mapping. The per-iteration COW cost on
+	 * sparsely-populated shadow is bounded by how much kernel VA
+	 * the testcase touches; empirically well under 1 ms per iter
+	 * for syzkaller-shaped workloads.
+	 */
+	if (!IS_ENABLED(CONFIG_UM_FUZZ_HOOKS)) {
+		if (madvise(start, len, MADV_DONTFORK)) {
+			os_info("Couldn't set MADV_DONTFORK on shadow memory: %s\n.",
+				strerror(errno));
+			exit(1);
+		}
 	}
 }
 

@@ -15,12 +15,34 @@
 #include <kern_util.h>
 #include <mem_user.h>
 #include <os.h>
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+#include <asm/um-mmaps.h>
+#endif
 
 static int physmem_fd = -1;
 
 /* Changed during early boot */
 unsigned long high_physmem;
 EXPORT_SYMBOL(high_physmem);
+
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+/*
+ * Entry in the C-09 kernel mmap registry (D37 pull-forward #1) that
+ * describes the guest-RAM mapping set up by setup_physmem(). Filled
+ * in at boot and registered once, before user tasks exist. Static
+ * storage so the registry's list linkage outlives the kernel's init
+ * phase.
+ *
+ * INHERIT_COW: guest RAM is MAP_SHARED file-backed; fork() gives the
+ * child a COW view of the same file-backed pages. SERIALIZE: v2
+ * snapshot-to-disk reads the physmem_fd's content directly rather
+ * than walking pagemap. See D36.
+ */
+static struct um_mmap_region physmem_mmap_region = {
+	.name  = "physmem",
+	.flags = UM_MMAP_INHERIT_COW | UM_MMAP_SERIALIZE,
+};
+#endif
 
 void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
 		int r, int w, int x)
@@ -107,6 +129,18 @@ void __init setup_physmem(unsigned long start, unsigned long reserve_end,
 
 	min_low_pfn = PFN_UP(__pa(reserve_end));
 	max_low_pfn = min_low_pfn + (map_size >> PAGE_SHIFT);
+
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+	/* Register the guest-RAM region with the C-09 mmap registry.
+	 * Consumers: the fork-server worker reinit path (commit 3c),
+	 * v2 snapshot-to-disk (D36; reads this region out of the
+	 * backing file instead of walking pagemap).
+	 */
+	physmem_mmap_region.base = (void *)reserve_end;
+	physmem_mmap_region.len  = map_size;
+	physmem_mmap_region.backing_fd = physmem_fd;
+	um_register_mmap_region(&physmem_mmap_region);
+#endif
 }
 
 int phys_mapping(unsigned long phys, unsigned long long *offset_out)

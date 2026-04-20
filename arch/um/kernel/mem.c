@@ -23,8 +23,28 @@
 #include <um_malloc.h>
 #include <linux/sched/task.h>
 #include <linux/kasan.h>
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+#include <asm/um-mmaps.h>
+#endif
 
 #ifdef CONFIG_KASAN
+#if defined(CONFIG_UM_SNAPSHOT_FORKSERVER)
+/* Entry in the C-09 kernel mmap registry (D37 pull-forward #1) that
+ * describes the KASAN shadow mapping. Registered after
+ * kasan_map_memory(). REMAP_IN_WORKER is not set because D37 pull-
+ * forward #6 drops MADV_DONTFORK on the shadow under
+ * CONFIG_UM_FUZZ_HOOKS, so workers inherit via COW instead. Shadow
+ * contents are not in v2 snapshots by default — too sparse to
+ * justify; snapshot restore reconstructs the needed shadow from the
+ * allocator state.
+ */
+static struct um_mmap_region kasan_shadow_mmap_region = {
+	.name  = "kasan-shadow",
+	.flags = UM_MMAP_INHERIT_COW,
+	.backing_fd = -1,
+};
+#endif
+
 void __init kasan_init(void)
 {
 	/*
@@ -32,6 +52,13 @@ void __init kasan_init(void)
 	 * the host machine will allocate physical memory as necessary.
 	 */
 	kasan_map_memory((void *)KASAN_SHADOW_START, KASAN_SHADOW_SIZE);
+
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+	kasan_shadow_mmap_region.base = (void *)KASAN_SHADOW_START;
+	kasan_shadow_mmap_region.len  = KASAN_SHADOW_SIZE;
+	um_register_mmap_region(&kasan_shadow_mmap_region);
+#endif
+
 	init_task.kasan_depth = 0;
 	/*
 	 * Since kasan_init() is called before main(),
