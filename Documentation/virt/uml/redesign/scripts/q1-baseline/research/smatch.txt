@@ -3,7 +3,7 @@
 arch/um/drivers/ssl.c:67:32: warning: array of flexible structures
 arch/um/drivers/stdio_console.c:73:23: warning: array of flexible structures
 arch/um/kernel/kmsg_dump.c:27:9: error: static assertion failed: "pointer type mismatch in container_of()"
-arch/um/kernel/mem.c:111:16: warning: incorrect type in argument 2 (different base types)
+arch/um/kernel/mem.c:138:16: warning: incorrect type in argument 2 (different base types)
 block/blk-cgroup.c:1244:9: error: static assertion failed: "pointer type mismatch in container_of()"
 block/blk-cgroup.c:718:9: error: static assertion failed: "pointer type mismatch in container_of()"
 block/blk-cgroup.c:841 blkg_conf_open_bdev_frozen() error: we previously assumed 'ctx->bdev' could be null (see line 829)
@@ -77,7 +77,7 @@ kernel/printk/printk.c:3504:9: error: static assertion failed: "pointer type mis
 kernel/printk/printk.c:3579:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/printk/printk.c:3662:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/printk/printk.c:4520:17: error: static assertion failed: "pointer type mismatch in container_of()"
-kernel/sched/completion.c:172 wait_for_completion_timeout() error: 'wait_for_common()' returns negative and '__fake_return_0x79f96873c460' is unsigned
+kernel/sched/completion.c:172 wait_for_completion_timeout() error: 'wait_for_common()' returns negative and '__fake_return_0x78715676c460' is unsigned
 kernel/signal.c:1432:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/sys.c:294:17: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/sys.c:360:17: error: static assertion failed: "pointer type mismatch in container_of()"
