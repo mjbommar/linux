@@ -204,6 +204,14 @@ extern void os_kill_ptraced_process(int pid, int reap_child);
 
 extern int os_getpid(void);
 
+/* Snapshot/forkserver primitives (workstream C-09). */
+extern int os_snapshot_fd_is_open(int fd);
+extern int os_snapshot_fork_worker(void);
+extern ssize_t os_snapshot_read_all(int fd, void *buf, size_t len);
+extern ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len);
+extern int os_snapshot_waitpid_status(int pid);
+extern void os_snapshot_worker_exit(int status) __attribute__((noreturn));
+
 extern void init_new_thread_signals(void);
 
 extern int os_map_memory(void *virt, int fd, unsigned long long off,

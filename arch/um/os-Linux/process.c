@@ -75,6 +75,129 @@ pid_t os_reap_child(void)
 	return waitpid(-1, &status, WNOHANG);
 }
 
+/*
+ * Snapshot / forkserver primitives (workstream C-09).
+ *
+ * These live here rather than in a separate TU because they are thin
+ * wrappers around host libc calls that the in-kernel snapshot.c needs
+ * to reach through the os-Linux boundary. Semantics:
+ *
+ *   os_snapshot_fd_is_open(fd):
+ *	Return 1 if the host fd is open on this process, 0 otherwise.
+ *	Used to detect whether an AFL-style host launcher has pre-
+ *	opened fds 198/199 before UML's main() ran.
+ *
+ *   os_snapshot_fork_worker(void):
+ *	Raw ``fork()`` via syscall(__NR_fork). Unlike ``helper.c``'s
+ *	``clone(CLONE_VM)``, this gives the child its own copy-on-
+ *	write address space, which is what the fuzz forkserver wants
+ *	(child mutates RAM, parent stays pristine). Returns the host
+ *	pid of the child in the parent and 0 in the child, as fork()
+ *	does. A negative return carries ``-errno``.
+ *
+ *   os_snapshot_{read,write}_all(fd, buf, len):
+ *	Loop until ``len`` bytes have been read/written or an error
+ *	occurs. Partial reads/writes are handled internally. These
+ *	are the 4-byte AFL wire-protocol moves; wrappers keep the
+ *	in-kernel caller free of EINTR handling.
+ *
+ *   os_snapshot_waitpid_status(pid):
+ *	Block-reap the given pid. Returns the encoded wait status, or
+ *	``-errno`` on failure.
+ *
+ * All five are USER_OBJS-scope helpers; they must not call into
+ * kernel code. The in-kernel driver lives in arch/um/kernel/snapshot.c.
+ */
+int os_snapshot_fd_is_open(int fd)
+{
+	int flags;
+
+	flags = fcntl(fd, F_GETFD);
+	if (flags < 0)
+		return 0;
+	return 1;
+}
+
+int os_snapshot_fork_worker(void)
+{
+	long ret;
+
+	ret = syscall(__NR_fork);
+	if (ret < 0)
+		return -errno;
+	return (int)ret;
+}
+
+ssize_t os_snapshot_read_all(int fd, void *buf, size_t len)
+{
+	size_t got = 0;
+	ssize_t n;
+
+	while (got < len) {
+		n = read(fd, (char *)buf + got, len - got);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		if (n == 0)
+			return -EPIPE;
+		got += n;
+	}
+	return (ssize_t)got;
+}
+
+ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len)
+{
+	size_t sent = 0;
+	ssize_t n;
+
+	while (sent < len) {
+		n = write(fd, (const char *)buf + sent, len - sent);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		sent += n;
+	}
+	return (ssize_t)sent;
+}
+
+int os_snapshot_waitpid_status(int pid)
+{
+	int status;
+
+	for (;;) {
+		if (waitpid(pid, &status, 0) == pid)
+			return status;
+		if (errno == EINTR)
+			continue;
+		return -errno;
+	}
+}
+
+/*
+ * Terminate the current host process immediately with the given
+ * status. Used by the snapshot-forkserver worker child so it exits
+ * cleanly without running any further UML init or kernel shutdown
+ * machinery. Called only from the forked child after the parent has
+ * reported its pid over the AFL status fd.
+ *
+ * Uses exit_group() rather than exit() so all host threads the child
+ * inherited from the parent (e.g. UML IRQ driver helper threads that
+ * fork did not sever) terminate together. Does not return.
+ */
+void os_snapshot_worker_exit(int status)
+{
+	syscall(__NR_exit_group, status);
+	/* unreachable; if the syscall somehow returns, panic the host
+	 * process via a raw abort so the parent sees a clean SIGABRT
+	 * rather than the child hanging in a half-alive state.
+	 */
+	__builtin_trap();
+}
+
 /* Don't use the glibc version, which caches the result in TLS. It misses some
  * syscalls, and also breaks with clone(), which does not unshare the TLS.
  */
