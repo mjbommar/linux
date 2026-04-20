@@ -1,12 +1,24 @@
 # C-09: Snapshot/forkserver host launcher
 
-**Status:** design (2026-04-20); implementation commits to follow
-**Effort:** 6 weeks
+**Status:** landed v1 (2026-04-20). Kernel-side plumbing,
+            AFL-compatible wire protocol on fds 198/199,
+            `/sys/kernel/um/state_version`, per-FD disposition
+            taxonomy, snapshot-smoke selftest, and
+            fuzz/fuzz-deep defconfig wire-up all in tree. v1
+            ceiling = short non-blocking guest programs (trivial
+            `execve` + exit, per commits 3d-c + 3d-d). Sustained
+            fuzz on blocking guest syscalls is gated on the v2
+            freezer-cgroup pre-fork design per D41/D42; tracked
+            in `08-future-phases/02-snapshot-to-disk.md` as the
+            dominant v2 effort. The "planned" status stays on v2
+            until that design lands.
+**Effort:** 6 weeks (actual v1 landing window)
 **Dependencies:** A (backend ops) and B (Layer 2 static-key
                   infrastructure) — both landed
-**Blocks:** fuzz profile achieving <50 ms restart; the entire
-            "shippable fuzz" milestone (M8); syzkaller's
-            `RunSnapshot` API contract (see Prior art §4)
+**Blocks:** fuzz profile achieving <50 ms restart (v2 goal
+            — v1 demonstrates the path); the entire "shippable
+            fuzz" milestone (M8); syzkaller's `RunSnapshot` API
+            contract (see Prior art §4)
 
 ## Goal
 
