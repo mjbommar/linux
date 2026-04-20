@@ -116,10 +116,18 @@ EXPORT_SYMBOL_GPL(um_register_mmap_region);
  * snapshotting from an inconsistent state breaks both the fork-
  * server (Q6 drift) and the future v2 writer.
  *
+/*
  * Today we check the cheapest/most-load-bearing subset:
  *   - caller is in task context (not in IRQ or softirq)
  *   - caller has no pending non-SIGCHLD signals
  *   - UML is UP (multi-vCPU quiesce is commit-3+ scope)
+ *   - UML's own signals_enabled flag is 1 (D41): the ready-point
+ *     contract requires a caller who has NOT already gated UML
+ *     signals, so our own os_snapshot_block_iter_signals() call
+ *     inside the forkserver loop actually takes effect. A future
+ *     caller who enters the ready point already-gated would
+ *     otherwise silently make the block-iter a no-op and the
+ *     crash mode from D41's investigation would return.
  *
  * The richer assertions the design doc describes — dirty inodes,
  * pending RCU callbacks, non-caller kthreads in TASK_RUNNING — are
@@ -143,6 +151,11 @@ static int um_snapshot_assert_ready(const char *named_point)
 	if (WARN_ONCE(num_online_cpus() > 1,
 		      "%s(\"%s\"): SMP ready point not yet supported; commit 3+ will park secondary vCPUs. Build with NR_CPUS=1 for now.\n",
 		      __func__, named_point))
+		violations++;
+
+	if (WARN_ONCE(um_get_signals() != 1,
+		      "%s(\"%s\"): UML signals_enabled is %d at ready-point entry; must be 1 per D41 signal-gating contract\n",
+		      __func__, named_point, um_get_signals()))
 		violations++;
 
 	return violations ? -EBUSY : 0;
