@@ -47,6 +47,24 @@ SYM_FUNC_START(ftrace_caller)
 	/* Save all SysV AMD64 caller-clobbered regs, in a stable order
 	 * so we can reach parent_ip and the return address by offset.
 	 *
+	 * x86_64 `pushq` decrements rsp then stores, so after 9 pushes
+	 * rsp has dropped by 72 and the last-pushed reg (r11) sits at
+	 * the new (%rsp). The two slots sitting above the pushed frame
+	 * are the two return addresses the two nested `call`s pushed
+	 * onto the stack before we got here:
+	 *
+	 *   [entry_rsp+0] = return-to-traced-fn
+	 *                   (pushed by the patched `call ftrace_caller`
+	 *                   inside traced_fn's 5-byte prologue slot)
+	 *   [entry_rsp+8] = parent_ip
+	 *                   (pushed by the outer `call traced_fn` in
+	 *                   traced_fn's caller)
+	 *
+	 * So after the 9 pushes, 72(%rsp) is return-to-traced-fn and
+	 * 80(%rsp) is parent_ip. This matches arch/x86/kernel/
+	 * ftrace_64.S's save_mcount_regs: MCOUNT_REG_SIZE+0 = ip-source,
+	 * MCOUNT_REG_SIZE+8 = parent_ip.
+	 *
 	 * Layout after the nine pushes (bottom → top of stack):
 	 *   (%rsp)    = r11
 	 *   8(%rsp)   = r10
@@ -57,18 +75,12 @@ SYM_FUNC_START(ftrace_caller)
 	 *   48(%rsp)  = rdx
 	 *   56(%rsp)  = rcx
 	 *   64(%rsp)  = rax
-	 *   72(%rsp)  = return address to the traced function's caller
-	 *               (this is the "parent_ip" the callback wants)
-	 *   80(%rsp)  = return address to the traced function
-	 *               (this is one past the patched 5 bytes; the
-	 *               "ip" the callback wants is 5 bytes before it)
-	 *
-	 * Note: the "return address to the traced function" here refers
-	 * to the address the `call` in the traced function's prologue
-	 * will return to, which is the instruction immediately following
-	 * the 5-byte `call ftrace_caller` we were reached through.
-	 * ftrace wants the IP of the call itself, so we subtract 5
-	 * (MCOUNT_INSN_SIZE) below.
+	 *   72(%rsp)  = return address to the traced function
+	 *               (one past the 5-byte `call ftrace_caller` in
+	 *               traced_fn's prologue; subtract 5 to get the
+	 *               "ip" the callback wants)
+	 *   80(%rsp)  = return address to the traced function's caller
+	 *               (the "parent_ip" the callback wants)
 	 */
 	pushq	%rax
 	pushq	%rcx
@@ -81,11 +93,11 @@ SYM_FUNC_START(ftrace_caller)
 	pushq	%r11
 
 	/* Arg 1 (%rdi): ip = (return to traced fn) - 5 */
-	movq	80(%rsp), %rdi
+	movq	72(%rsp), %rdi
 	subq	$5, %rdi
 
 	/* Arg 2 (%rsi): parent_ip = return to traced fn's caller */
-	movq	72(%rsp), %rsi
+	movq	80(%rsp), %rsi
 
 	/* Arg 3 (%rdx): op = function_trace_op */
 	movq	function_trace_op(%rip), %rdx
