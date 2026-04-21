@@ -60,6 +60,12 @@ Precedence (highest first): CLI flags > `UML_*` env vars > TOML
 config > built-in defaults. Merged via
 [figment](https://crates.io/crates/figment).
 
+Ready-made example configs live in [`examples/`](examples/) —
+one per common UML profile (fuzz, research, sandbox) plus a
+daily-driver `dev.toml`. Copy to `~/.config/uml-launcher/` or
+alongside your kernel tree, edit the paths, and run
+`uml-launcher run --config <name>.toml`.
+
 Structured logging:
 
 ```

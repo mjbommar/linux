@@ -78,6 +78,16 @@ Invoke with ::
 CLI flags override file values; file values override env; env
 overrides defaults.
 
+Copy-paste starting points for common profiles ship in
+``tools/uml/uml-launcher/examples/``:
+
+* ``fuzz.toml`` — fuzz-profile binary + forkserver-ready init.
+* ``research.toml`` — research-profile (KASAN/KCOV/ftrace/kprobes)
+  interactive shell.
+* ``sandbox.toml`` — sandbox-profile v1 shape (v2 will add
+  per-device isolation declarations).
+* ``dev.toml`` — daily-driver defconfig + ``/bin/sh``.
+
 Signal handling
 ---------------
 

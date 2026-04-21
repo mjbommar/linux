@@ -25,6 +25,21 @@ Build
    make ARCH=um uml/sandbox
    make ARCH=um -j$(nproc)
 
+Run
+===
+
+Invoke via ``uml-launcher`` (workstream C-10). v1 runs the
+sandbox-profile kernel under a single launcher process; v2 adds
+per-device vhost-user helpers with seccomp filters for real
+host-side isolation. Example config at
+``tools/uml/uml-launcher/examples/sandbox.toml``::
+
+   uml-launcher run \\
+       --config tools/uml/uml-launcher/examples/sandbox.toml
+
+See ``Documentation/virt/uml/launcher.rst`` for the launcher
+surface and the v2 roadmap.
+
 What's on
 =========
 

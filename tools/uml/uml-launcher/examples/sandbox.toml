@@ -1,0 +1,21 @@
+# uml-launcher config for the sandbox profile.
+#
+# In v1 this runs the sandbox-profile kernel under a single
+# launcher process with no per-device isolation — the kernel is
+# built with tight Kconfig but the host attack surface is the
+# same as any UML process.
+#
+# The sandbox isolation story (per-device vhost-user helpers
+# with seccomp filters + AppArmor profiles) is C-10 v2 work.
+# Once v2 lands this config will grow device-helper sections;
+# today it's just the launch knobs.
+#
+# Pair with:
+#   make ARCH=um uml/sandbox
+#   make ARCH=um O=/tmp/uml-sandbox -j$(nproc)
+
+kernel = "/tmp/uml-sandbox/linux"
+init   = "/bin/sh"
+mem    = "256M"
+root   = "hostfs"
+console = "stdio"

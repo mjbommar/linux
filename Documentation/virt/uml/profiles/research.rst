@@ -25,6 +25,18 @@ Build
    make ARCH=um uml/research
    make ARCH=um -j$(nproc)
 
+Run
+===
+
+Invoke the ``./linux`` binary directly or via ``uml-launcher``
+(workstream C-10). Example config at
+``tools/uml/uml-launcher/examples/research.toml``::
+
+   uml-launcher -v run \\
+       --config tools/uml/uml-launcher/examples/research.toml
+
+See ``Documentation/virt/uml/launcher.rst``.
+
 What's on
 =========
 

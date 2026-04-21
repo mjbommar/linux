@@ -1,0 +1,18 @@
+# uml-launcher config for the research profile.
+#
+# The research profile turns on the debug + introspection stack —
+# KASAN, KCOV, ftrace, kprobes — for hands-on kernel feature work.
+# Slower boot than fuzz; not appropriate for production.
+#
+# Pair this with:
+#   make ARCH=um uml/research
+#   make ARCH=um O=/tmp/uml-research -j$(nproc)
+#
+# Invoke interactively:
+#   uml-launcher -v run --config ~/.config/uml-launcher/research.toml
+
+kernel = "/tmp/uml-research/linux"
+init   = "/bin/sh"
+mem    = "512M"
+root   = "hostfs"
+console = "stdio"
