@@ -99,7 +99,16 @@ enum {
  *
  * Returns 1 when the thread should exit, 0 otherwise.
  */
-static int smpboot_thread_fn(void *data)
+/*
+ * notrace: reached via kthread_create_on_cpu() and entered from
+ * the generic kthread() wrapper; ends in do_exit() rather than a
+ * return. See kernel/kthread.c::kthread for the full rationale
+ * on why the unterminated graph-shadow-stack push is observable
+ * as a crash specifically on UML (kernel_longjmp-based task
+ * resume walks a ret_stack whose leaked retp doesn't match the
+ * actual stack). Same fix pattern; UML redesign D34 addendum.
+ */
+static notrace int smpboot_thread_fn(void *data)
 {
 	struct smpboot_thread_data *td = data;
 	struct smp_hotplug_thread *ht = td->ht;
