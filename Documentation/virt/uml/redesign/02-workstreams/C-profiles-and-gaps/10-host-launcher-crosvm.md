@@ -1,13 +1,17 @@
 # C-10: Crosvm-style host launcher
 
-**Status:** landed v1 (2026-04-20). `tools/uml/uml-launcher/`
-Rust binary + Makefile + user doc + `launcher-smoke` regression
+**Status:** landed v1 (2026-04-20); post-landing fix
+`672edefe415a` (2026-04-21) corrected `--root` / `--console`
+precedence so TOML/env overlays actually take effect when the
+CLI flag is absent (see D46). `tools/uml/uml-launcher/` Rust
+binary + Makefile + user doc + `launcher-smoke` regression
 selftest all shipped. `cargo build --release` clean, `cargo
-test` 11/11 pass, end-to-end spawn + signal-forward + exit-code
-passthrough validated (UML boot with `init=/bin/true` → launcher
-returns 134 per 128+SIGABRT convention, selftest asserts). v2
-(per-device vhost-user + seccomp) remains tracked in the Roadmap
-section below; this series delivers v1 only.
+test` 13/13 pass (2 new precedence-regression tests), end-to-end
+spawn + signal-forward + exit-code passthrough validated (UML
+boot with `init=/bin/true` → launcher returns 134 per 128+SIGABRT
+convention, selftest asserts). v2 (per-device vhost-user +
+seccomp) remains tracked in the Roadmap section below; this
+series delivers v1 only.
 **Effort:** 6 weeks (budget). v1 scope below was **~1 session of
 disciplined work** given the locked crate stack and small v1
 feature set; v2 (vhost-user device decomposition + seccomp)

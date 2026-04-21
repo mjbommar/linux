@@ -1,8 +1,20 @@
 # C-06: Port BPF JIT to UML
 
-**Status:** deferred (2026-04-20); **two arch-generic hygiene
-fixes landed on-branch and queued for independent upstream
-submission** (`bpf, x86: explicitly include <asm/cpufeature.h>`
+**Status (2026-04-21 addendum):** option A (the smaller path)
+landed on-branch in commits `1a2c96a94008` (shim infrastructure)
+and `611d94ef6184` (JIT working end-to-end). A same-day review
+pass then caught that the `arch/um/include/asm/segment.h` shim
+that option A added silently shadowed `arch/x86/um/asm/segment.h`
+and broke the uml/fuzz build. Fixed in commit `48aa69e2d4a7` by
+deleting the arch/um shim and extending the x86-UML shim with
+the missing selector macros instead. See D46 in
+`04-risks/decisions-log.md` for the fix-discipline consequences.
+Option B2 (portable-emitter refactor) is still the long-term
+shape for upstream; D45 clarifies that fork-first is acceptable.
+
+**Original status (2026-04-20):** deferred; **two arch-generic
+hygiene fixes landed on-branch and queued for independent
+upstream submission** (`bpf, x86: explicitly include <asm/cpufeature.h>`
 and `bpf, x86: use instruction_pointer helpers in ex_handler_bpf`).
 The full UML port is blocked on a bigger refactor — see D43
 addendum: after the three initial D43 divergences (which the

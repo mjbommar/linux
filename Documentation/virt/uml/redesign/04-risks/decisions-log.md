@@ -4276,4 +4276,111 @@ question of "when to propose upstream adoption."
 
 ---
 
+## D46: Three post-landing review bugs (fuzz build, launcher precedence, snapshot latch) — fix discipline going forward
+
+**Date:** 2026-04-21
+**Status:** Accepted (all three fixed in the same session).
+
+A review pass over C-06 / C-09 / C-10 — the three workstreams we
+had just declared "landed" — surfaced three real bugs that the
+normal build-and-selftest flow hadn't caught. Recording them
+here so the pattern that let them land stays visible and so the
+fix choices are documented for future reviewers.
+
+**The three bugs:**
+
+1. **C-06 broke uml/fuzz.** Option A's
+   `arch/um/include/asm/segment.h` shim (added to give
+   `arch/x86/net/bpf_jit_comp.c` access to `__KERNEL_DS`) took
+   include-path precedence over `arch/x86/um/asm/segment.h` and
+   silently shadowed its `GDT_ENTRY_TLS_ENTRIES` definition. The
+   uml/fuzz profile (no BPF JIT, so nobody had validated the new
+   shim under it) failed at `arch/um/kernel/asm-offsets.c`.
+   Severity: HIGH — we had claimed this profile built clean when
+   landing C-09.
+
+2. **C-10 launcher precedence was wrong.** `RunArgs.root` and
+   `RunArgs.console` were bare `String` / `Console` with clap
+   `default_value` attributes, so clap populated them on every
+   invocation. The `CliOverlay` faithfully forwarded the clap-
+   supplied default into figment as the highest-priority layer,
+   defeating the documented CLI > env > TOML > defaults
+   precedence for those two knobs. Any `root = "/dev/ubda"` or
+   `UML_ROOT=...` silently lost to clap's `"hostfs"` default.
+   Severity: MEDIUM — config was wrong but functional; the
+   TOML/env paths existed but didn't take effect for two fields.
+
+3. **C-09 snapshot static-key latch.** `um_snapshot_ready`
+   enabled the `um_snapshot_enabled` static key unconditionally
+   before calling `um_snapshot_forkserver_loop`. The loop's
+   first action was an fd-open check that returned -ENODEV if
+   fds 198/199 weren't plumbed (the common debugfs-poke case) —
+   but the key stayed on forever. Every kernel hot path gated
+   by `static_branch_unlikely(&um_snapshot_enabled)` paid the
+   taken-branch cost permanently after a single benign poke.
+   Same latch on every non-happy-path loop exit. Severity:
+   MEDIUM — correctness-adjacent (silent perf regression after
+   a diagnostic write).
+
+**How they landed together.** All three cleared our actual
+validation gates: the binary built (for the profile used during
+bring-up), the selftest passed (for the path it exercised), the
+docs read correctly. None of them were caught because each gate
+had a blind spot the bug sat in exactly:
+
+  - Bug 1: the fuzz build was only exercised after C-06 landed;
+    C-06 exercised the profile that needed the shim, not the
+    profile the shim broke.
+  - Bug 2: launcher selftests covered kernel/init/mem but not
+    the root/console precedence-through-TOML path, because
+    those fields had been "working" on the CLI under their
+    clap defaults.
+  - Bug 3: no test exercised "call `um_snapshot_ready` without
+    a fuzzer attached, then measure hot-path cost." The debugfs
+    path existed but only for the happy-path "fuzzer connects
+    immediately" case.
+
+**Fix discipline going forward.** Three changes:
+
+  - **Cross-profile build matrix.** When a workstream ships a
+    new `arch/um/include/asm/` shim or touches shared build
+    infrastructure, it must build at least `uml/prod-fast`,
+    `uml/research`, and `uml/fuzz` before declaring done. The
+    Q1 quality-bar runner already lists these; we just didn't
+    run it after landing the shim. (Running it would have
+    caught bug 1 in under 10 minutes.)
+
+  - **Regression test for every precedence bug.** The launcher
+    fix added two tempfile-backed TOML tests covering "CLI
+    absent → TOML wins" and "CLI present → CLI wins" for each
+    knob. Any future field that goes through the same
+    Config/CliOverlay path gets the same pair. (This is worth
+    codifying as a lint in the config.rs tests module: for
+    every field X in `Config`, assert `assert_field_respects_precedence!(X)`.)
+
+  - **Benign-poke test for every static key.** The snapshot
+    fix is a specific instance of a class: any static key flipped
+    in response to a runtime trigger must have a matching disable
+    on every failure path. For future static-key additions (KFENCE
+    sample rate, time-travel active, …) require a "poke that
+    doesn't complete the action" test that confirms the key
+    returns to baseline.
+
+**Cross-references:**
+- Commit `48aa69e2d4a7` — fix 1 (segment.h split).
+- Commit `672edefe415a` — fix 2 (launcher precedence).
+- Commit `e65cedc6b3a6` — fix 3 (snapshot static-key latch).
+- `02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md` —
+  C-06 close-out should note the shim split.
+- `02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md` —
+  static-key lifecycle should be called out in v1's scope notes.
+- `02-workstreams/C-profiles-and-gaps/10-host-launcher-crosvm.md` —
+  precedence chain should be framed as "CliOverlay only
+  serializes what the user actually passed."
+- `05-validation/` — the Q1 quality-bar runner should include
+  the three profile builds plus a smoke test that runs
+  `um_snapshot_ready` from debugfs without fds plumbed.
+
+---
+
 ## (Future entries here, as decisions are made)

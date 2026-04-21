@@ -1,6 +1,9 @@
 # C-09: Snapshot/forkserver host launcher
 
-**Status:** landed v1 (2026-04-20). Kernel-side plumbing,
+**Status:** landed v1 (2026-04-20); post-landing fix
+            `e65cedc6b3a6` (2026-04-21) corrected a
+            `um_snapshot_enabled` static-key latch found in
+            review — see D46. Kernel-side plumbing,
             AFL-compatible wire protocol on fds 198/199,
             `/sys/kernel/um/state_version`, per-FD disposition
             taxonomy, snapshot-smoke selftest, and
