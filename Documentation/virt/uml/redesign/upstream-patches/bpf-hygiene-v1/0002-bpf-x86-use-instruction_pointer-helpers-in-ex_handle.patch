@@ -1,0 +1,64 @@
+From 5b95b1bb3e6aa9b589b417f376cd0992902abd6c Mon Sep 17 00:00:00 2001
+From: mjbommar <michael.bommarito@gmail.com>
+Date: Mon, 20 Apr 2026 22:02:27 -0400
+Subject: [PATCH bpf-next 2/2] bpf, x86: use instruction_pointer helpers in
+ ex_handler_bpf
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ex_handler_bpf accesses the trapped PC via regs->ip directly
+(once to report the arena violation, once to skip past the
+faulting instruction). The kernel already exposes
+instruction_pointer() and instruction_pointer_set() as the
+arch-generic accessors for exactly this pt_regs field (see
+arch/x86/include/asm/ptrace.h:285-294), and they compile to
+the same trivial code on x86 as the direct field access.
+
+Convert both call sites to use the helpers. No functional
+change on x86 — the helpers are static-always-inline wrappers
+around regs->ip. Matches the pattern used by kprobes, uprobes,
+and ftrace throughout the tree, where direct pt_regs field
+accesses have been migrated to the generic helpers over time.
+
+Before:
+    bpf_prog_report_arena_violation(is_write, addr, regs->ip);
+    regs->ip += insn_len;
+After:
+    bpf_prog_report_arena_violation(is_write, addr, instruction_pointer(regs));
+    instruction_pointer_set(regs, instruction_pointer(regs) + insn_len);
+
+Generated code identical on x86 defconfig; bpf_jit_comp.o byte-
+for-byte size unchanged (verified with make ARCH=x86_64 defconfig
++ BPF_JIT=y).
+
+Signed-off-by: mjbommar <michael.bommarito@gmail.com>
+
+Co-authored-by: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ arch/x86/net/bpf_jit_comp.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
+index 28e6041ea145..8a217fd3a006 100644
+--- a/arch/x86/net/bpf_jit_comp.c
++++ b/arch/x86/net/bpf_jit_comp.c
+@@ -1491,13 +1491,13 @@ bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs)
+ 		arena_reg = FIELD_GET(FIXUP_ARENA_REG_MASK, x->fixup);
+ 		off = FIELD_GET(DATA_ARENA_OFFSET_MASK, x->data);
+ 		addr = *(unsigned long *)((void *)regs + arena_reg) + off;
+-		bpf_prog_report_arena_violation(is_write, addr, regs->ip);
++		bpf_prog_report_arena_violation(is_write, addr, instruction_pointer(regs));
+ 	}
+ 
+ 	/* jump over faulting load and clear dest register */
+ 	if (reg != DONT_CLEAR)
+ 		*(unsigned long *)((void *)regs + reg) = 0;
+-	regs->ip += insn_len;
++	instruction_pointer_set(regs, instruction_pointer(regs) + insn_len);
+ 
+ 	return true;
+ }
+-- 
+2.53.0
+

@@ -1,0 +1,7 @@
+# The top-level .gitignore excludes *.patch across the tree to keep
+# `git send-email` output, review-round scratch, and personal
+# work-in-progress from accidentally being committed. Inside THIS
+# directory the .patch files are deliberately checked in — they
+# are pre-formatted upstream submissions held alongside their
+# motivating decisions-log entries. Negate the top-level rule.
+!*.patch

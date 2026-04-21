@@ -3592,6 +3592,16 @@ Borkmann). Their commit messages were deliberately written in
 upstream-kernel style with no UML references, so they can be
 cherry-picked to a submission branch without rewording.
 
+A pre-formatted series lives at
+`Documentation/virt/uml/redesign/upstream-patches/bpf-hygiene-v1/`
+with `git format-patch` output (cover letter + 2 patches) and a
+`SUBMISSION-NOTES.md` covering pre-flight cleanups (strip the
+`Co-authored-by:` trailer, fix the `From:` author email),
+checkpatch false positives (`<linux/cpufeature.h>` isn't the
+right include), build verification record, and suggested LKML
+routing. See `upstream-patches/README.md` for the directory
+conventions.
+
 Once they land upstream, a future C-06 v1 attempt rebases onto
 post-hygiene `arch/x86/net/bpf_jit_comp.c` and has two fewer
 divergences to worry about. The remaining barrier is still
