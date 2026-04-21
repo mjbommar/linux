@@ -22,24 +22,7 @@
 #include <linux/string.h>
 #include <linux/bug.h>
 #include <asm/cfi.h>
-
-/*
- * Forward declarations matching the upstream x86 prototypes so
- * -Wmissing-prototypes stays clean under sparse / smatch / gcc.
- * The real prototypes live in:
- *   arch/x86/include/asm/nospec-branch.h  (clear_bhb_loop)
- *   arch/x86/include/asm/text-patching.h  (text_poke_set,
- *                                          smp_text_poke_single)
- * but those headers transitively pull in declarations UML's
- * include path doesn't fully assemble (mm_struct under
- * __ro_after_init, etc.), so we restate the signatures here.
- * A mismatch with upstream would be a caller-side build error;
- * the link-time resolution is the primary guardrail.
- */
-extern void clear_bhb_loop(void);
-extern void *text_poke_set(void *addr, int c, size_t len);
-extern void smp_text_poke_single(void *addr, const void *opcode,
-				  size_t len, const void *emulate);
+#include <asm/bpf_jit_shims.h>
 
 /*
  * Retpoline indirect-thunk arrays. The BPF JIT's emit_rsb_call /
