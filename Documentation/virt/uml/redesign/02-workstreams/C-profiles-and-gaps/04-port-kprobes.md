@@ -1,24 +1,45 @@
 # C-04: Port kprobes to UML
 
-**Status:** partially landed (2026-04-20) — HAVE_KPROBES (commits
-1a–1d) and HAVE_RETHOOK/KRETPROBES (commit 2) are in the tree
-and tested. HAVE_FUNCTION_GRAPH_TRACER (commit 3) is deferred per
-D34 — the generic fgraph trampoline contract conflicts with UML's
-longjmp-based task entry and the kthread/do_exit leak. Commits
-4–6 adjusted to reflect the narrower scope; commit 5 (stress
-selftest) remains on the critical path as the regression guard
-for any future graph port attempt.
+**Status:** partially landed (2026-04-20), commit 3 progress
+(2026-04-21). HAVE_KPROBES (commits 1a–1d) and HAVE_RETHOOK/
+KRETPROBES (commit 2) are in the tree and tested. Commit 3
+(HAVE_FUNCTION_GRAPH_TRACER) is progressing in-tree under D45's
+in-fork scope policy:
+- **Source (3) closed** (commit `a2e01ee58c53`, 2026-04-21):
+  narrow `notrace` annotations on `kernel/kthread.c::kthread`
+  and `kernel/smpboot.c::smpboot_thread_fn` prevent the
+  shadow-stack push that otherwise leaks because those wrappers
+  end in `do_exit` rather than a return. `uml/research` build
+  + `userspace-smoke` selftest pass with the notrace landed and
+  function_graph deselected — the annotations are a pure win
+  regardless of the rest.
+- **Sources (1) and (2) still open**: the arch/um patch-site
+  stripping (strip `-fpatchable-function-entry` from
+  `arch/um/kernel/`, `arch/um/kernel/skas/`, and USER_CFLAGS)
+  plus the `ftrace_graph_caller` + `return_to_handler`
+  trampolines in `arch/um/kernel/mcount.S` sit in the git stash
+  entry `c04-c3-wip-after-arch-strip-still-crashes`. Applying
+  the stash as-is causes `userspace-smoke` init to segfault at
+  IP=0 SP=0 — a new regression the 2026-04-19 investigation
+  didn't surface because that session was focused on graph-
+  active crashes, not boot-without-graph. Root cause to be
+  identified in a follow-up session; candidates are the
+  USER_CFLAGS filter (affects stub-loading TUs), the broad
+  `ccflags-remove-y` (affects ftrace's view of arch/um/kernel/
+  functions), or a combination.
 **Effort:** 3–4 focused days for commits 1+2 (actual: ~2 days);
-commit 3 is out of scope until the generic-fgraph cooperation
-story is resolved (see D34 revisit triggers).
+commit 3 split across two sessions — session 1 (2026-04-19)
+surfaced the three-source leak; session 2 (2026-04-21) landed
+source (3) and identified the new boot regression blocking
+sources (1)+(2). Session 3 to investigate and close.
 **Dependencies:** B-04 (.text section split, landed; helpers
 extended by C-05 commit 1), C-05 (ftrace port, landed 2026-04-19
-— provides the mcount.S / ftrace.c baseline that commits 1 and
-5 extend).
-**Blocks:** research profile having kprobes + kretprobes;
-bpftrace's `kprobe:` / `kretprobe:`; C-06 BPF JIT's kprobe-
-reachability validation. (Function_graph side of the research
-profile stays blocked by D34 until commit 3 is unblocked.)
+— provides the mcount.S / ftrace.c baseline that commits 1, 3,
+and 5 extend).
+**Blocks:** research profile having function_graph
+(kprobes/kretprobes already unblocked); bpftrace's
+`fentry:`/`fexit:`; future selftests that exercise the graph
+surface.
 
 ## Goal
 
@@ -220,19 +241,52 @@ Scope discipline:
   own trampoline (same register-save pattern, different
   dispatch target).
 
-### Commit 3 — deferred (HAVE_FUNCTION_GRAPH_TRACER)
+### Commit 3 — progressing (HAVE_FUNCTION_GRAPH_TRACER)
 
-**Status: deferred per decisions-log D34 (2026-04-20).** The
-implementation attempt on 2026-04-19 produced working
-`ftrace_graph_caller` + `return_to_handler` assembly and a C
-`prepare_ftrace_return`, all compiling cleanly under gcc and
-clang. Under sustained workload the kernel crashes — NOT with the
-original D27 signal-race shape, but with a deeper architectural
-mismatch between the generic fgraph trampoline contract and
-UML's execution model. The WIP sits in the git stash entry
-`c04-c3-wip-after-arch-strip-still-crashes`.
+**Status: source (3) landed 2026-04-21 under D34's 2026-04-21
+addendum (partial resolution under D45); sources (1) and (2)
+blocked on a newly-identified boot regression, session 3 to
+close.**
 
-Three distinct leak sources identified and measured:
+The kernel/kthread.c + kernel/smpboot.c `notrace` annotations
+(source (3)) landed in commit `a2e01ee58c53`. They are a pure
+win even without the rest of commit 3 — they prevent the
+unterminated graph-shadow-stack push in two well-known
+never-returning wrappers, on every architecture, not just UML.
+See `04-risks/decisions-log.md` D34 2026-04-21 addendum for
+the scope policy that permitted them to land on the fork.
+
+Sources (1) and (2) remain blocked. The stashed WIP
+(`c04-c3-wip-after-arch-strip-still-crashes`) applies
+`ccflags-remove-y := $(CC_FLAGS_FTRACE)` broadly across
+`arch/um/kernel/` and `arch/um/kernel/skas/`, filters the same
+flag out of `USER_CFLAGS` in `arch/um/Makefile`, and adds the
+`ftrace_graph_caller` + `return_to_handler` trampolines in
+`arch/um/kernel/mcount.S`. That combination builds clean but
+fails `userspace-smoke` at boot: init segfaults at IP=0 SP=0
+before the smoke script runs. The regression happens with
+`CONFIG_FUNCTION_GRAPH_TRACER=n` too, so it is not a graph-
+trampoline bug — it is caused by the patch-site stripping
+itself. 2026-04-19's session didn't hit this because that
+session never ran `userspace-smoke` under the stripped-arch
+build.
+
+Session-3 plan:
+
+1. Narrow the strip: start from the pre-strip (committed) arch/um
+   Makefiles, then progressively strip individual files
+   (process.c, time.c, irq.c, …) until `userspace-smoke` breaks.
+   The first broken file names the culprit. Likely candidates
+   are `arch/um/os-Linux/` TUs via USER_CFLAGS — those build
+   the seccomp stub loader and signal dispatcher.
+2. Once the culprit is isolated, choose the minimum strip set
+   that (a) closes sources (1)+(2) and (b) keeps
+   `userspace-smoke` green.
+3. Land the minimum strip set + trampolines + Kconfig select in
+   one bisectable commit with the smoke test as validation.
+
+Three distinct leak sources identified and measured (sources
+(1) and (2) still open; source (3) closed in a2e01ee58c53):
 
 1. Signal dispatch unwound via `rt_sigreturn` (not `ret`) — leaks
    one shadow-stack entry per signal delivery. Fixable by
@@ -242,15 +296,23 @@ Three distinct leak sources identified and measured:
    by stripping patch sites from `arch/um/kernel/process.c`.
 3. Generic `kthread()` / `smpboot_thread_fn()` in `kernel/kthread.c`
    end in `do_exit` and never return — leak one entry per kthread
-   creation. **Not fixable at the arch level** — requires
-   generic-kernel cooperation (either `notrace` annotations on
-   those specific functions, or softening
-   `__ftrace_return_to_handler`'s pop-failure behavior upstream).
+   creation. **Closed (commit `a2e01ee58c53`, 2026-04-21) by
+   adding `notrace` to those two functions** in
+   `kernel/kthread.c` and `kernel/smpboot.c`. On native x86 this
+   is a no-op (the graph leak there is harmless because frame
+   unwinding doesn't dereference stale ret_stack entries); on
+   UML it prevents the push that otherwise gets popped via a
+   longjmp'd task's graphed-function return and jumped through
+   as garbage. See D34's 2026-04-21 addendum for the merge-
+   surface tracking.
 
-Sources (1) and (2) are closable via `ccflags-remove-y` in
-`arch/um/kernel/Makefile` and friends, plus a `USER_CFLAGS`
-filter in `arch/um/Makefile`. The stashed WIP implements these.
-Source (3) is the blocker.
+Sources (1) and (2) remain open. The stashed WIP's broad
+`ccflags-remove-y` + USER_CFLAGS filter closes them in
+principle but also breaks `userspace-smoke` at boot (init
+segfaults at IP=0 SP=0 with `CONFIG_FUNCTION_GRAPH_TRACER=n` —
+so it is not a trampoline issue, it is the strip itself). The
+session-3 plan (above) progressively narrows the strip until
+the smoke test stays green.
 
 See D34 for the full analysis including:
 - What we tried (`tracing_graph_pause`, patch-site stripping via
@@ -260,19 +322,17 @@ See D34 for the full analysis including:
   `/sys/kernel/tracing/trace` with graph active),
 - Alternatives considered and why each falls short.
 
-Revisit when any of the D34 triggers fire — generic fgraph change,
-accepted `notrace` on `kthread()`, or a UML-specific fgraph shim.
-
 ### Commit 4 — research profile enables kprobes + function tracer
 
 Adjusted per D34 to drop function_graph from the enabled set
-(function_graph stays gated until commit 3 lands).
+(function_graph stays gated until commit 3's sources (1)+(2)
+are closed).
 
 - `arch/um/configs/profiles/research.config`:
   `CONFIG_KPROBES=y`, `CONFIG_KRETPROBES=y` (auto-selected via
   HAVE_RETHOOK). `CONFIG_FUNCTION_GRAPH_TRACER` intentionally
   NOT enabled — per D34, leave the Kconfig out-of-select until
-  the generic-kernel blocker is resolved. Document the gap in
+  the arch/um strip-set is identified. Document the gap in
   `Documentation/virt/uml/profiles/research.rst`.
 
 ### Commit 5 — kprobes-stress selftest

@@ -2127,6 +2127,49 @@ scoped to the lateral question of "what does the 5-byte NOP look
 like"; it is not a blocker for the functional goal of "graph
 tracer doesn't leak ret_stack entries into these functions."
 
+### 2026-04-21 addendum-2 — source (3) landed; sources (1)+(2) hit a new boot regression
+
+Validation pass after landing the two `notrace` annotations
+(commit `a2e01ee58c53`) and attempting to apply the stashed
+arch/um patch-site stripping uncovered a bug the 2026-04-19
+session didn't surface: applying the stashed WIP *as-is* breaks
+`tools/testing/selftests/um/userspace-smoke/userspace-smoke.sh`
+at boot. The init script segfaults at IP=0 SP=0 before running
+any of its body; `/bin/true` does the same. The regression
+reproduces with `CONFIG_FUNCTION_GRAPH_TRACER=n` built on top of
+the stashed arch/um changes — so it is not a graph-trampoline
+bug, it is caused by the patch-site strip itself.
+
+Why 2026-04-19 missed it: that session ran the graph tracer and
+measured crashes under active graph workload; no one ran
+`userspace-smoke` against a stripped-arch build with graph
+*off*. The stash was saved with the "still crashes under graph"
+framing, obscuring that the stash's boot-path side effect is
+independent of the graph.
+
+**Source (3) still counts as closed:** the two generic-kernel
+`notrace` annotations are validated against a clean (un-
+stripped) arch/um. They are a pure win regardless of the rest
+of commit 3. They ship.
+
+**Sources (1) and (2) re-opened:** the stashed WIP's
+`ccflags-remove-y := $(CC_FLAGS_FTRACE)` covers all of
+`arch/um/kernel/` and `arch/um/kernel/skas/`; its
+`USER_CFLAGS := $(filter-out $(CC_FLAGS_FTRACE),$(USER_CFLAGS))`
+covers USER_OBJS. Somewhere in that broad sweep is a file whose
+-fpatchable-function-entry=5,0 nop is load-bearing (or whose
+recordmcount registration is). The session-3 path to identify
+it is documented in `02-workstreams/C-profiles-and-gaps/
+04-port-kprobes.md` §"Commit 3" "Session-3 plan": bisect
+individual files progressively until `userspace-smoke` breaks,
+then ship the minimum strip set + trampolines in one commit.
+
+**Task list update:** session 3 is its own entry in the redesign
+task list, sized as one focused session (probably 1-3 files to
+bisect). Commit 3 is a 3-session arc overall: session 1 write,
+session 2 resolve source (3), session 3 close sources (1)+(2)
+with a narrow strip set.
+
 ---
 
 ## D35: C-09 v1 is a cooperative AFL-style forkserver; CRIU-style snapshot-to-disk deferred to v2
