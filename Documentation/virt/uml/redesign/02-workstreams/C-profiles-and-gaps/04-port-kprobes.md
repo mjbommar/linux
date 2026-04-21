@@ -1,37 +1,40 @@
 # C-04: Port kprobes to UML
 
-**Status:** partially landed (2026-04-20), commit 3 progress
-(2026-04-21). HAVE_KPROBES (commits 1a–1d) and HAVE_RETHOOK/
-KRETPROBES (commit 2) are in the tree and tested. Commit 3
-(HAVE_FUNCTION_GRAPH_TRACER) is progressing in-tree under D45's
-in-fork scope policy:
+**Status:** partially landed (2026-04-20), commit 3 in a 3a/3b
+split (2026-04-21). HAVE_KPROBES (commits 1a–1d) and HAVE_RETHOOK/
+KRETPROBES (commit 2) are in the tree and tested. Commit 3 is
+split under D45's in-fork scope policy:
 - **Source (3) closed** (commit `a2e01ee58c53`, 2026-04-21):
-  narrow `notrace` annotations on `kernel/kthread.c::kthread`
-  and `kernel/smpboot.c::smpboot_thread_fn` prevent the
-  shadow-stack push that otherwise leaks because those wrappers
-  end in `do_exit` rather than a return. `uml/research` build
-  + `userspace-smoke` selftest pass with the notrace landed and
-  function_graph deselected — the annotations are a pure win
-  regardless of the rest.
-- **Sources (1) and (2) still open**: the arch/um patch-site
-  stripping (strip `-fpatchable-function-entry` from
-  `arch/um/kernel/`, `arch/um/kernel/skas/`, and USER_CFLAGS)
-  plus the `ftrace_graph_caller` + `return_to_handler`
-  trampolines in `arch/um/kernel/mcount.S` sit in the git stash
-  entry `c04-c3-wip-after-arch-strip-still-crashes`. Applying
-  the stash as-is causes `userspace-smoke` init to segfault at
-  IP=0 SP=0 — a new regression the 2026-04-19 investigation
-  didn't surface because that session was focused on graph-
-  active crashes, not boot-without-graph. Root cause to be
-  identified in a follow-up session; candidates are the
-  USER_CFLAGS filter (affects stub-loading TUs), the broad
-  `ccflags-remove-y` (affects ftrace's view of arch/um/kernel/
-  functions), or a combination.
+  narrow `notrace` on `kernel/kthread.c::kthread` and
+  `kernel/smpboot.c::smpboot_thread_fn`.
+- **Sources (1) and (2) closed** (commit `dc623a9dfd0a`,
+  2026-04-21): narrow `CFLAGS_REMOVE_<file>.o` strips on the
+  signal-dispatch and longjmp-entry TUs, plus a one-line
+  `filter-out` addition to `arch/um/scripts/Makefile.rules` so
+  the standard per-file CFLAGS_REMOVE hook reaches USER_OBJS.
+  The broader USER_CFLAGS-wide strip tried in the stashed WIP
+  broke `userspace-smoke` at boot; the narrow per-file strip
+  does not. `uml/research` + `userspace-smoke`: PASS. uml/fuzz,
+  uml/prod-fast builds: clean.
+- **Commit 3b deferred** (HAVE_FUNCTION_GRAPH_TRACER select +
+  `arch/um/kernel/mcount.S` trampolines + `prepare_ftrace_return`
+  in `arch/um/kernel/ftrace.c`). First runtime activation of
+  the graph tracer under the session's build triggered
+  "BUG: sleeping function called from invalid context" in
+  `prepare_ftrace_return → function_graph_enter → __mutex_lock`
+  with `preempt_count: 6`. The trampoline fires on a return
+  inside an atomic-context function chain reached via
+  `um_set_signals` (UML's signal gate). Fix class: add
+  `notrace` to `um_set_signals` and/or trampoline-level
+  atomic-context skip. See D34's 2026-04-21 addendum-3. One
+  focused session.
 **Effort:** 3–4 focused days for commits 1+2 (actual: ~2 days);
-commit 3 split across two sessions — session 1 (2026-04-19)
+commit 3 split across three sessions — session 1 (2026-04-19)
 surfaced the three-source leak; session 2 (2026-04-21) landed
-source (3) and identified the new boot regression blocking
-sources (1)+(2). Session 3 to investigate and close.
+source (3) and identified a new boot regression; session 3
+(2026-04-21) closed sources (1)+(2) with a narrow strip and
+identified the atomic-context blocker for 3b. Session 4 to
+close 3b.
 **Dependencies:** B-04 (.text section split, landed; helpers
 extended by C-05 commit 1), C-05 (ftrace port, landed 2026-04-19
 — provides the mcount.S / ftrace.c baseline that commits 1, 3,

@@ -2170,6 +2170,87 @@ bisect). Commit 3 is a 3-session arc overall: session 1 write,
 session 2 resolve source (3), session 3 close sources (1)+(2)
 with a narrow strip set.
 
+### 2026-04-21 addendum-3 — sources (1) and (2) closed with a narrow strip; commit 3b needs atomic-context fix
+
+Session-3 bisection completed. Findings:
+
+**Root cause of the session-2 boot regression:** the stashed
+WIP's `USER_CFLAGS := $(filter-out $(CC_FLAGS_FTRACE),$(USER_CFLAGS))`
+was too broad. It stripped `-fpatchable-function-entry=5,0` from
+every USER_OBJ — including TUs whose 5-byte NOP prologue turned
+out to be load-bearing at boot for reasons this session didn't
+fully isolate (probeB: only the USER_CFLAGS filter; probeE:
+only `-fpatchable-function-entry` from the filter — both SEGV
+init at IP=0 SP=0 before smoke runs). The generic fix
+is narrow stripping.
+
+**Narrow strip set (probeG, commit `dc623a9dfd0a`):**
+  - arch/um/os-Linux/signal.o, sigio.o, irq.o (source 1 —
+    rt_sigreturn-unwound TUs).
+  - arch/um/os-Linux/skas/process.o (source 1 — skas signal
+    dispatch entry).
+  - arch/um/kernel/process.o (source 2 — new_thread_handler,
+    fork_handler).
+
+Reaching the USER_OBJ subset required an enhancement to
+`arch/um/scripts/Makefile.rules`: the wholesale c_flags
+override was not honoring CFLAGS_REMOVE_<file>.o. One-line
+filter-out addition fixes that, and is useful general
+infrastructure.
+
+**Validation:** userspace-smoke.sh PASS on uml/research with
+the narrow strip alone (no FUNCTION_GRAPH_TRACER selected yet).
+uml/fuzz and uml/prod-fast build clean.
+
+**Commit 3 split:** the narrow strip ships as commit 3a
+(`dc623a9dfd0a`). Enabling HAVE_FUNCTION_GRAPH_TRACER + the
+trampolines is commit 3b, deferred pending investigation into
+a new finding:
+
+**New blocker for commit 3b — prepare_ftrace_return enters
+atomic context.** First activation test
+(`echo function_graph > current_tracer` writing from init) hit:
+
+    BUG: sleeping function called from invalid context at
+    kernel/locking/mutex.c:609
+    in_atomic(): 1, ... preempt_count: 6
+
+with a stack showing:
+
+    __mutex_lock → mutex_lock_nested → free_irq
+    → ... → prepare_ftrace_return → ftrace_graph_caller
+    → um_set_signals
+
+The graph-caller trampoline fired on a return from a function
+that was in atomic context (preempt_count: 6). That context
+reached prepare_ftrace_return, which called
+function_graph_enter, which on this path needed
+sched_register_mutex or tracepoints_mutex (both seen in held
+locks), and that's a sleeping acquisition.
+
+The fix class is likely one of:
+1. Add `notrace` to `um_set_signals` (the trampoline-entry
+   function, which gates UML signal delivery — calling into
+   fgraph from inside that gate is by construction fragile).
+2. Convert the mcount.S trampoline to check preempt_count and
+   skip-trace in atomic context, matching x86's
+   `trace_function_call` guard.
+3. Skip-trace the whole signal gate family explicitly.
+
+Option (1) is the narrowest. Probably also need `notrace` on
+the small set of helpers um_set_signals calls. The
+investigation for commit 3b is its own focused session; likely
+1–3 notrace annotations and a re-run of the fgraph activation
+smoke.
+
+**Revisit triggers (updated):**
+- Option (1) or (3) identified via diagnostic probes and
+  commit 3b lands.
+- Upstream softens `__ftrace_return_to_handler`'s pop-failure
+  to return 0 instead of panic — that would make the leak
+  signatures from sources (1)+(2) harmless even without the
+  strip, and the narrow strip from 3a becomes optional.
+
 ---
 
 ## D35: C-09 v1 is a cooperative AFL-style forkserver; CRIU-style snapshot-to-disk deferred to v2
