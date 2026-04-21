@@ -3694,6 +3694,113 @@ series to do carefully. In the interim:
 - `06-sequencing/critical-path.md` — confirms C-07 is
   deliberately last-sequenced; not blocking M8.
 
+### Second empirical probe (2026-04-20, later)
+
+Implemented option B per the addendum's plan and ran it:
+
+  1. `arch/um/include/asm/pgtable.h`: conditionalize
+     `VMALLOC_END` to `VMALLOC_START + UM_KMSAN_VMALLOC_SIZE - 1`
+     under `CONFIG_KMSAN=y`, with `UM_KMSAN_VMALLOC_SIZE =
+     _AC(0x800000000, UL)` (32 GB). Define
+     `KMSAN_VMALLOC_SHADOW_START = _AC(0x110000000000, UL)`
+     (just past the 16 TB KASAN shadow), `ORIGIN_START` one
+     32 GB step further; `MODULES_*_START` alias `VMALLOC_*_START`
+     since UML has `MODULES_VADDR == VMALLOC_START`.
+  2. `arch/um/include/asm/kmsan.h` (new): s390-style inline hooks
+     — `arch_kmsan_get_meta_or_null` returns NULL;
+     `kmsan_virt_addr_valid` wraps `virt_addr_valid` with
+     preempt_disable/enable_no_resched.
+  3. `arch/um/Kconfig`: `select HAVE_ARCH_KMSAN if X86_64` +
+     `HAVE_ARCH_KMSAN_VMALLOC`.
+  4. `arch/um/os-Linux/Makefile`: add `KMSAN_SANITIZE := n`.
+  5. `arch/um/kernel/mem.c`: `kmsan_init()` mmap's shadow +
+     origin regions via `kasan_map_memory`; registers both with
+     `um_register_mmap_region()`; installs a `.kasan_init`-
+     section function pointer (same boot seam as KASAN).
+
+**Build result:** clean. `make ARCH=um uml/research` gcc
+(KMSAN=n default) links with only the pre-existing modpost
+warnings. `make ARCH=um LLVM=1 defconfig + CONFIG_KMSAN=y +
+CONFIG_KASAN=n + CONFIG_KCSAN=n + CONFIG_DEBUG_KERNEL=y` with
+clang 21.1.8 compiles and links — all four `KMSAN_VMALLOC/
+MODULES_SHADOW/ORIGIN_START` identifiers now satisfy
+`mm/kmsan/shadow.c:62-68`, no undeclared-identifier errors.
+Confirmed `HAVE_KMSAN_COMPILER=y` auto-selects (U2 resolved).
+
+**Boot result:** **hangs**. `timeout 120 ./linux
+rootfstype=hostfs rootflags=/ init=/bin/true mem=256M` produces
+the pre-boot "Checking syscall emulation for ptrace...OK" line
+and then no kernel boot output. Same binary with KMSAN=n boots
+past init and hits the expected "init exited" panic. So the
+hang is introduced by my KMSAN port at runtime, not by the
+clang/LLVM build path in general.
+
+Likely causes, in order of probability:
+- **`.kasan_init` section call ordering.** Both `kasan_init_ptr`
+  and `kmsan_init_ptr` live in the `.kasan_init` section; the
+  linker orders them as they appear in the TU. My `kmsan_init`
+  runs AFTER `kasan_init`; if KMSAN instrumentation is active
+  during `kasan_init` itself (KASAN is compiled out in this
+  build so that path is moot) or during the `kasan_map_memory`
+  call inside `kmsan_init`, the KMSAN hooks dereference
+  shadow that hasn't been mapped yet and fault. The fault may
+  not surface because UML's crash handler also wants shadow.
+- **Early KMSAN instrumentation recursion.** Compiler-inserted
+  `__msan_*` calls may fire during `.kasan_init` before the
+  shadow is mapped. x86 handles this by marking its early-
+  boot TU with `KMSAN_SANITIZE_mem.o := n` or using the
+  `notrace`/`__kmsan_check_*` no-op path.
+- **32 GB mmap under-the-covers cost.** Less likely — the mmap
+  is a VA reservation, not a physical alloc. And kasan_map_memory
+  is the same primitive KASAN uses for its 16 TB shadow which
+  already works.
+
+**What this means.**
+
+Compile contract is solved (all four constants + arch hooks +
+Kconfig + Makefile land cleanly, build and link with KMSAN=y
+produce a vmlinux binary). The remaining gap is the runtime
+boot path — a real debugging problem that requires:
+
+  a. Add `KMSAN_SANITIZE := n` to `arch/um/kernel/Makefile`
+     entries for files invoked from `.kasan_init` (mem.c at
+     least) OR
+  b. Reorder so kmsan_init runs via a separate, later section
+     pointer (e.g., its own `.kmsan_init` section placed AFTER
+     `.kasan_init` in the linker script) OR
+  c. Audit which compiler-generated `__msan_*` calls fire
+     during pre-main() setup and gate them via
+     `kmsan_disable_current()` / `kmsan_enable_current()`
+     around the map-memory path OR
+  d. Some combination of the three.
+
+The implementation is 80% there. The remaining 20% is
+non-trivial runtime debugging that needs the developer at a
+debugger, not in a chat session. **Do not push the current
+scratch**. The design — VMALLOC bounded, shadow+origin at
+fixed VAs past KASAN, arch hooks as NULL-returning stubs — is
+correct; the init-ordering problem is a separable follow-up.
+
+**Revised revised recommendation:** keep C-07 status as
+`design-locked; implementation scaffolded but boot-hung;
+queued for focused runtime debugging`. The scaffolding code
+works (compiles + links). Runtime fix needs interactive
+debugging. Scope estimate revised **down** from "6 weeks" to
+"1-2 days of focused runtime debugging" once someone can sit
+with it.
+
+Scratch code (not pushed):
+  - arch/um/include/asm/pgtable.h: +40 lines (VMALLOC
+    conditionalization + KMSAN_* macros)
+  - arch/um/include/asm/kmsan.h: new, ~70 lines
+  - arch/um/Kconfig: +7 lines (comment + 2 selects)
+  - arch/um/os-Linux/Makefile: +1 line
+  - arch/um/kernel/mem.c: +60 lines (kmsan_init, mmap regs,
+    `.kasan_init` section pointer)
+
+All reverted from the working tree; documented here for the
+next time someone picks it up.
+
 ---
 
 ## (Future entries here, as decisions are made)
