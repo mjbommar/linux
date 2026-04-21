@@ -4,6 +4,7 @@ arch/um/drivers/ssl.c:67:32: warning: array of flexible structures
 arch/um/drivers/stdio_console.c:73:23: warning: array of flexible structures
 arch/um/kernel/kmsg_dump.c:27:9: error: static assertion failed: "pointer type mismatch in container_of()"
 arch/um/kernel/mem.c:138:16: warning: incorrect type in argument 2 (different base types)
+arch/x86/net/bpf_jit_comp.c:3463 __arch_prepare_bpf_trampoline() error: we previously assumed 'im' could be null (see line 3376)
 block/blk-cgroup.c:1244:9: error: static assertion failed: "pointer type mismatch in container_of()"
 block/blk-cgroup.c:718:9: error: static assertion failed: "pointer type mismatch in container_of()"
 block/blk-cgroup.c:841 blkg_conf_open_bdev_frozen() error: we previously assumed 'ctx->bdev' could be null (see line 829)
@@ -55,6 +56,16 @@ io_uring/napi.c:116 __io_napi_remove_stale() error: dereferencing freed memory '
 io_uring/napi.c:259 io_napi_free() error: dereferencing freed memory 'e' (line 261)
 io_uring/napi.c:26:9: error: static assertion failed: "pointer type mismatch in container_of()"
 io_uring/uring_cmd.c:350:59: warning: array of flexible structures
+kernel/bpf/bpf_local_storage.c:746:9: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/bpf_local_storage.c:847:17: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/devmap.c:283:9: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/devmap.c:309:20: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/devmap.c:324:28: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/devmap.c:667:25: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/devmap.c:789:25: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/hashtab.c:918:18: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/hashtab.c:937:26: error: static assertion failed: "pointer type mismatch in container_of()"
+kernel/bpf/helpers.c:3289 bpf_throw() error: we previously assumed 'ctx.aux' could be null (see line 3280)
 kernel/exit.c:356:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/exit.c:385:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/kprobes.c:2866:9: error: static assertion failed: "pointer type mismatch in container_of()"
@@ -77,7 +88,7 @@ kernel/printk/printk.c:3504:9: error: static assertion failed: "pointer type mis
 kernel/printk/printk.c:3579:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/printk/printk.c:3662:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/printk/printk.c:4520:17: error: static assertion failed: "pointer type mismatch in container_of()"
-kernel/sched/completion.c:172 wait_for_completion_timeout() error: 'wait_for_common()' returns negative and '__fake_return_0x78715676c460' is unsigned
+kernel/sched/completion.c:172 wait_for_completion_timeout() error: 'wait_for_common()' returns negative and '__fake_return_0x73c0310fb6f0' is unsigned
 kernel/signal.c:1432:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/sys.c:294:17: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/sys.c:360:17: error: static assertion failed: "pointer type mismatch in container_of()"
@@ -92,12 +103,19 @@ lib/iomem_copy.c:64:26: warning: cast removes address space '__iomem' of express
 lib/maple_tree.c:3117:1: warning: the frame size of 1168 bytes is larger than 1024 bytes [-Wframe-larger-than=]
 mm/gup.c:1597 fixup_user_fault() error: we previously assumed 'unlocked' could be null (see line 1573)
 mm/vma.c:2804:1: warning: the frame size of 1392 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+net/core/bpf_sk_storage.c:169:9: error: static assertion failed: "pointer type mismatch in container_of()"
+net/core/bpf_sk_storage.c:597:9: error: static assertion failed: "pointer type mismatch in container_of()"
+net/core/bpf_sk_storage.c:719:25: error: static assertion failed: "pointer type mismatch in container_of()"
+net/core/bpf_sk_storage.c:740:17: error: static assertion failed: "pointer type mismatch in container_of()"
 net/core/dev.c:332:9: error: static assertion failed: "pointer type mismatch in container_of()"
 net/core/dev.c:799:9: error: static assertion failed: "pointer type mismatch in container_of()"
 net/core/dev.c:987:9: error: static assertion failed: "pointer type mismatch in container_of()"
 net/core/neighbour.c:2819:17: error: static assertion failed: "pointer type mismatch in container_of()"
 net/core/rtnetlink.c:2557:1: warning: the frame size of 1056 bytes is larger than 1024 bytes [-Wframe-larger-than=]
 net/core/skbuff.c:4862 skb_segment() error: we previously assumed 'list_skb' could be null (see line 4797)
+net/core/sock_map.c:1073:21: error: static assertion failed: "pointer type mismatch in container_of()"
+net/core/sock_map.c:1085:29: error: static assertion failed: "pointer type mismatch in container_of()"
+net/core/sock_map.c:884:9: error: static assertion failed: "pointer type mismatch in container_of()"
 net/core/sysctl_net_core.c:350:1: warning: the frame size of 1088 bytes is larger than 1024 bytes [-Wframe-larger-than=]
 net/ipv4/devinet.c:179:9: error: static assertion failed: "pointer type mismatch in container_of()"
 net/ipv4/devinet.c:726:17: error: static assertion failed: "pointer type mismatch in container_of()"
