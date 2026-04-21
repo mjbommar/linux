@@ -207,6 +207,15 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 	 * from debugfs even when no fuzzer is listening — the caller
 	 * gets a clean printk and a non-zero return, and nothing in
 	 * kernel state is disturbed.
+	 *
+	 * Returning here BEFORE flipping um_snapshot_enabled is load-
+	 * bearing: a benign debugfs poke (someone writing a name to
+	 * /sys/kernel/debug/um/snapshot_ready in a non-fuzz profile or
+	 * before a fuzzer has attached) must not permanently latch the
+	 * hot-path check on. If the key were enabled in the caller and
+	 * we returned here, every subsequent kernel hot path gated by
+	 * um_snapshot_enabled would pay the taken-branch cost forever,
+	 * turning a diagnostic poke into a performance regression.
 	 */
 	if (!os_snapshot_fd_is_open(UM_FORKSERVER_CTL_FD) ||
 	    !os_snapshot_fd_is_open(UM_FORKSERVER_STATUS_FD)) {
@@ -222,6 +231,17 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 		pr_err("snapshot: handshake write failed: %zd\n", n);
 		return (int)n;
 	}
+
+	/*
+	 * Forkserver is committed: fds plumbed, handshake sent. Flip
+	 * the static key on so any hot-path call site gated by
+	 * um_snapshot_enabled sees the enabled branch for the life of
+	 * the loop. Every exit path below disables the key again so
+	 * the parent never lives past the loop with the key latched
+	 * on. Workers flip the key off in their own address space
+	 * right after fork (see pid == 0 branch below).
+	 */
+	static_branch_enable(&um_snapshot_enabled);
 
 	pr_info("snapshot: forkserver up at \"%s\"; entering loop\n",
 		named_point);
@@ -250,6 +270,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 				pr_err("snapshot: command read failed at iter %lu: %zd\n",
 				       iter, n);
 			os_snapshot_unblock_iter_signals();
+			static_branch_disable(&um_snapshot_enabled);
 			return (int)n;
 		}
 
@@ -258,6 +279,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			pr_err("snapshot: fork failed at iter %lu: %d\n",
 			       iter, pid);
 			os_snapshot_unblock_iter_signals();
+			static_branch_disable(&um_snapshot_enabled);
 			return pid;
 		}
 
@@ -342,6 +364,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 				pr_err("snapshot: pid write failed at iter %lu: %zd\n",
 				       iter, n);
 			os_snapshot_unblock_iter_signals();
+			static_branch_disable(&um_snapshot_enabled);
 			return (int)n;
 		}
 
@@ -356,6 +379,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 				pr_err("snapshot: status write failed at iter %lu: %zd\n",
 				       iter, n);
 			os_snapshot_unblock_iter_signals();
+			static_branch_disable(&um_snapshot_enabled);
 			return (int)n;
 		}
 
@@ -392,7 +416,15 @@ void um_snapshot_ready(const char *named_point)
 		return;
 	}
 
-	static_branch_enable(&um_snapshot_enabled);
+	/*
+	 * um_snapshot_enabled is flipped on INSIDE the forkserver loop
+	 * only after the fd-open check passes and the handshake lands,
+	 * and flipped off again on every loop exit path. That keeps a
+	 * benign debugfs poke (ready-point hit with no fuzzer plumbed)
+	 * from latching the hot-path cost on — a bug we regressed into
+	 * once before (see commit history around 2026-04 snapshot
+	 * review).
+	 */
 	ret = um_snapshot_forkserver_loop(named_point);
 
 	/*
@@ -460,6 +492,19 @@ EXPORT_SYMBOL_GPL(um_snapshot_ready);
 void um_snapshot_worker_init(void)
 {
 	int err;
+
+	/*
+	 * Step 0: flip um_snapshot_enabled off in the child's own
+	 * address space. The key was forked-in ON from the parent
+	 * (enabled inside um_snapshot_forkserver_loop before we
+	 * reached fork_worker). The worker resumes guest execution
+	 * and must not pay the snapshot hot-path cost — every gate
+	 * guarded by static_branch_unlikely(&um_snapshot_enabled)
+	 * should fall through the same way as on a non-snapshot
+	 * kernel. Matches the documented contract in
+	 * arch/um/include/asm/um-snapshot.h.
+	 */
+	static_branch_disable(&um_snapshot_enabled);
 
 	/*
 	 * Step 1 (commit 3c): forget parent-inherited state. Drops
