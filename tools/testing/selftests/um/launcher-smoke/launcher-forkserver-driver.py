@@ -35,7 +35,8 @@ import threading
 
 def main():
     if len(sys.argv) < 4:
-        print("DRV: FAIL usage: launcher-forkserver-driver.py LAUNCHER UML_BINARY INIT [MEM]",
+        print("DRV: FAIL usage: launcher-forkserver-driver.py "
+              "LAUNCHER UML_BINARY INIT [MEM] [ITERATIONS]",
               file=sys.stderr)
         return 1
 
@@ -43,6 +44,21 @@ def main():
     uml = sys.argv[2]
     init = sys.argv[3]
     mem = sys.argv[4] if len(sys.argv) > 4 else "128M"
+    # Iteration count knob. DEFAULT: 1.
+    #
+    # The C-09 v1 ceiling (documented in decisions-log D42 and
+    # 09-snapshot-forkserver.md commit-3d-d status note) is that
+    # a single worker can run short non-blocking guest code but
+    # the inherited CFS runqueue state is not fully sanitized;
+    # multi-iteration parent-side operation trips the slab-OOB
+    # at __set_next_task_fair+0x11b somewhere between iteration
+    # 1's reap and iteration 2's fork, hanging or crashing the
+    # parent. v2 freezer-cgroup redesign unblocks iterations > 1.
+    #
+    # This knob lets a caller who is debugging v2 crank iterations
+    # up past 1 to validate the fix. Selftest keeps it at 1
+    # because that's what v1 ships.
+    iterations = int(sys.argv[5]) if len(sys.argv) > 5 else 1
 
     if not os.access(launcher, os.X_OK):
         print(f"DRV: SKIP launcher {launcher} not executable")
@@ -93,29 +109,47 @@ def main():
     threading.Thread(target=drain, daemon=True).start()
 
     try:
-        # 4-byte AFL\0 handshake from the UML kernel.
+        # 4-byte AFL\0 handshake from the UML kernel (once, before
+        # the iteration loop).
         hs = status_fd.read(4)
         if hs != b"AFL\x00":
             print(f"DRV: FAIL handshake expected b'AFL\\x00', got {hs!r}")
             return 1
 
-        # One iteration: ask the forkserver to spawn a worker.
-        ctl_fd.write(b"\x00\x00\x00\x00")
+        pids = []
+        last_status = 0
+        for i in range(iterations):
+            # Request one iteration.
+            ctl_fd.write(b"\x00\x00\x00\x00")
 
-        pid_bytes = status_fd.read(4)
-        if len(pid_bytes) != 4:
-            print(f"DRV: FAIL short pid read ({len(pid_bytes)} bytes)")
-            return 1
-        pid = struct.unpack("<i", pid_bytes)[0]
-        if pid <= 0:
-            print(f"DRV: FAIL non-positive pid {pid}")
-            return 1
+            pid_bytes = status_fd.read(4)
+            if len(pid_bytes) != 4:
+                print(f"DRV: FAIL iter={i} short pid read ({len(pid_bytes)} bytes)")
+                return 1
+            pid = struct.unpack("<i", pid_bytes)[0]
+            if pid <= 0:
+                print(f"DRV: FAIL iter={i} non-positive pid {pid}")
+                return 1
 
-        status_bytes = status_fd.read(4)
-        if len(status_bytes) != 4:
-            print(f"DRV: FAIL short status read ({len(status_bytes)} bytes)")
+            status_bytes = status_fd.read(4)
+            if len(status_bytes) != 4:
+                print(f"DRV: FAIL iter={i} short status read ({len(status_bytes)} bytes)")
+                return 1
+            last_status = struct.unpack("<i", status_bytes)[0]
+            pids.append(pid)
+
+        # Across iterations the parent should be allocating fresh
+        # host pids — distinct pids each round confirm the fork()
+        # path is genuinely re-running, not replaying a cached
+        # response. On a severely hung parent we'd either see the
+        # same pid repeatedly or hang on the status read above.
+        # With iterations=1 (default) this check is trivially
+        # satisfied; for iterations>=2 it becomes meaningful once
+        # v2 lands and multi-iteration works.
+        if iterations >= 2 and len(set(pids)) < 2:
+            print(f"DRV: FAIL iterations returned the same pid "
+                  f"{pids} (parent not re-forking?)")
             return 1
-        status = struct.unpack("<i", status_bytes)[0]
 
         # Clean disconnect: close the ctl pipe; kernel loop exits,
         # launcher waits on the child, then exits itself.
@@ -127,7 +161,9 @@ def main():
             proc.kill()
             proc.wait()
 
-        print(f"DRV: PASS pid={pid} status=0x{status:x}")
+        pids_str = ",".join(str(p) for p in pids)
+        print(f"DRV: PASS iterations={iterations} "
+              f"pids=[{pids_str}] last_status=0x{last_status:x}")
         return 0
 
     except Exception as e:
