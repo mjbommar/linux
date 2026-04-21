@@ -4031,6 +4031,94 @@ and almost certainly unblocks.
   correctly mirrored for VA-layout but incorrectly duplicated
   for the init-sequence itself.
 
+### Fourth probe (2026-04-21): third-probe hypothesis INSUFFICIENT
+
+Attempted the third-probe fix concretely as a scratch (reverted,
+not pushed):
+
+  - Recreated second-probe scaffold (pgtable.h + asm/kmsan.h +
+    Kconfig + os-Linux/Makefile + mem.c kmsan_init via
+    .kasan_init).
+  - **Plus** added `KMSAN_SANITIZE_mem.o := n` and
+    `KMSAN_SANITIZE_physmem.o := n` to arch/um/kernel/Makefile.
+
+Build: clean under `make ARCH=um LLVM=1 O=/tmp/uml-kmsan-probe
+-j$(nproc)` with CONFIG_KMSAN=y + KASAN=n + KCSAN=n.
+
+Boot: **same hang**. `timeout 60 ./linux init=/bin/true mem=256M`
+stops at "Checking syscall emulation for ptrace...OK" with zero
+kernel output after that. Identical failure mode to the second
+probe. The third-probe `KMSAN_SANITIZE_*.o := n` hypothesis was
+not sufficient.
+
+**What the fourth probe teaches:** the hang is not just the
+phase-1 mmap TU being instrumented. The issue is deeper —
+probably the architectural difference between KASAN's shadow
+(raw memory; any read returns mmap zero-fill) and KMSAN's
+shadow (per-page-struct metadata pointers that must be
+populated before any hook runs).
+
+KASAN works on UML because its shadow is **stateless at phase
+1** — reading shadow VA returns whatever mmap zero-filled, and
+zero means "addr ok". KMSAN expects each shadow page to have a
+real `struct page` with `page->kmsan_shadow` +
+`page->kmsan_origin` populated. The arch-side phase-1 mmap
+gives the VA but doesn't populate those struct-page pointers.
+Any KMSAN hook that runs before generic `kmsan_init_shadow()`
+(called from `mm_core_init` much later than `.kasan_init`)
+dereferences `page->kmsan_shadow` → NULL pointer → hang or
+fault.
+
+**Revised recommendation for task #67:**
+
+Do NOT retry the `.kasan_init` phase-1 pattern. It fought the
+architecture across three probes. The v2+ implementation should
+instead:
+
+  a. Drop the UML-specific `kmsan_init()` entirely.
+  b. Let `kmsan_init_shadow()` / `_runtime()` run at their
+     generic call sites from `mm_core_init`.
+  c. Hook into `kmsan_record_future_shadow_range()` or
+     `kmsan_init_alloc_meta_for_range()` with an arch-
+     callback that does a map-on-demand mmap for each range
+     as it's registered, so shadow VA becomes real memory at
+     the same moment generic code populates the per-page
+     metadata.
+  d. Every arch/um/ TU instrumented by clang between `.init`
+     section and `mm_core_init` needs a consistent KMSAN
+     disable/global-suppress mechanism — probably the
+     canonical `kmsan_disable_current()` guard wrapped around
+     the early-boot path, matching how x86 handles early init.
+
+This is more invasive than the phase-1 mmap approach (probably
+requires a small arch-callback addition to mm/kmsan/init.c that
+UML would use, which in turn needs LKML coordination with
+KMSAN maintainer Alexander Potapenko). Scope re-estimated
+**back up** to ~1 week including upstream review.
+
+**Task #67 status unchanged:** still design-locked,
+implementation-queued. The fourth probe narrowed the solution
+space: we now know phase-1 mmap + per-TU SANITIZE opt-outs is
+the WRONG approach. The right approach is "defer to generic
+init timing, provide a map-on-demand arch callback." That is
+concrete guidance for the next picker, not speculation.
+
+No code pushed; all scratch reverted. D44 now has three
+empirical probes plus this fourth-probe negative result, each
+narrowing the design. Future picker starts at "fourth probe
+failed; follow the deferred-init recommendation in the next
+section."
+
+**Cross-references (fourth probe):**
+- `mm/kmsan/init.c:82-90` — `kmsan_record_future_shadow_range`
+  + the `kmsan_init_alloc_meta_for_range` loop; candidate
+  extension points for the arch map-on-demand callback.
+- `include/linux/kmsan.h:`
+  `kmsan_{enter,leave}_runtime` / `kmsan_disable_current` —
+  the suppress mechanism for early-boot paths.
+- KMSAN maintainer: Alexander Potapenko
+  `<glider@google.com>` (per MAINTAINERS).
+
 ---
 
 ## (Future entries here, as decisions are made)
