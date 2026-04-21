@@ -73,7 +73,13 @@ build_mode() {
 				-d UM_BACKEND_SECCOMP_ONLY ;;
 	esac
 	make -C "$SRC" O="$build_dir" ARCH=um olddefconfig >/dev/null 2>&1
-	make -C "$SRC" O="$build_dir" ARCH=um -j"$JOBS" 2>&1 | tee "$logfile" | tail -1
+	# Build output goes to stderr (still visible to the terminal)
+	# so the caller's `warn=$(build_mode ...)` captures ONLY the
+	# warning count on stdout. Previously `| tail -1` printed
+	# make's "Leaving directory" line to stdout, which made
+	# `[ "$warn" -gt 0 ]` fail with "integer expected".
+	make -C "$SRC" O="$build_dir" ARCH=um -j"$JOBS" 2>&1 \
+		| tee "$logfile" >&2
 	grep -E "warning:" "$logfile" | grep -vE "UM_KERN_|cow_user" | wc -l
 }
 
