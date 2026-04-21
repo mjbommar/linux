@@ -3470,6 +3470,86 @@ or option-A fragility acceptance`. No arch/ code changes made.
   C-04 commit 3 (HAVE_FUNCTION_GRAPH_TRACER); C-06 joins D34 in
   the "blocked on upstream abstraction" bucket.
 
+### Addendum (2026-04-20, later in session)
+
+User signed off on option B. I implemented the small upstream
+patch and ran it:
+
+  - `arch/x86/net/bpf_jit_comp.c`: added `#include <asm/
+    cpufeature.h>` and `#include <asm/vsyscall.h>`; replaced
+    `regs->ip` (2 sites) with `instruction_pointer(regs)` and
+    `instruction_pointer_set(regs, instruction_pointer(regs) +
+    insn_len)`. Arch-generic — same codegen on bare-metal x86.
+  - `arch/um/include/asm/vsyscall.h` (new): `#define
+    VSYSCALL_ADDR 0UL`. UML has no vsyscall page; collapsing
+    the upper bound to zero is semantically correct.
+  - `arch/um/Kconfig`: `select HAVE_EBPF_JIT if X86_64`.
+  - `arch/um/Makefile`: `core-$(CONFIG_BPF_JIT) += $(HOST_DIR)/net/`.
+
+Build result: **the three original divergences are fixed, but
+the compile now reaches a DEEPER layer of `arch/x86/kernel/`-
+internal symbols UML does not build.** Specifically:
+
+  1. `arch/x86/net/bpf_jit_comp.c:407,597` — `x86_nops[noplen][i]`
+     / `x86_nops[5]` undeclared. `x86_nops` is the NOP-sequence
+     table defined in `arch/x86/kernel/alternative.c`; UML
+     doesn't compile `arch/x86/kernel/` so the symbol is
+     unresolvable.
+  2. `arch/um/include/asm/cpufeature.h:52` — `DISABLED_MASK_BIT_SET`
+     implicit declaration when `cpu_feature_enabled()` is
+     expanded from `bpf_jit_comp.c:676` on
+     `X86_FEATURE_INDIRECT_THUNK_ITS`. The macro is defined in
+     `arch/x86/include/asm/cpufeatures.h`; UML's cpufeature.h
+     references it without guaranteeing the include path
+     resolves.
+  3. (Likely more after these two are fixed — I stopped here.)
+
+**The initial "3 divergences" framing in D43 was too optimistic.**
+The JIT's body touches arch/x86/kernel/-internal state across
+multiple subsystems (alternatives, CPU-features-with-
+mitigations, probably also text_poke / unwind / cfi). Each
+layer requires either a UML stub, a header-forwarder, or a
+patch to the JIT to factor out the x86-host dependency. This
+is not a single small upstream patch; it is an iceberg.
+
+**Revised options:**
+  - **B1 (original option B, too narrow).** 3-fix patch.
+    **Does not work alone** — empirically confirmed 2026-04-20.
+  - **B2 (new refined option B).** Upstream-collaborative
+    `arch/x86/net/bpf_jit_comp.c` factoring into a portable
+    emitter (byte arrays, no x86_nops / cpu-features /
+    alternatives references) + an x86-host-only glue that
+    layers the mitigations on top. UML compiles only the
+    portable emitter plus its own thin glue with feature-
+    detection stubs. Right long-term shape. Multi-week effort.
+    Needs LKML coordination with BPF maintainers (Alexei
+    Starovoitov / Daniel Borkmann) before code.
+  - **C (defer).** Mark C-06 as `blocked on upstream BPF-JIT
+    portability refactor`; advance other work.
+
+**Recommendation:** **C (defer) for this branch**, with the
+three arch-generic fixes (instruction_pointer, cpufeature
+include, vsyscall header) queued for **separate tiny upstream
+patches** independent of the UML port. Those three fixes are
+hygiene improvements that benefit the x86 JIT regardless —
+submitting them as their own series (one patch per fix via
+proper BPF/netdev routing) is the "build for the long term,
+correctly" move. The big C-06 port then rebases onto those
+once they land, reducing its novel scope to just the UML side.
+
+**Scratch reverted (nothing pushed):**
+  - `arch/x86/net/bpf_jit_comp.c`: 5 lines modified (+2
+    includes, 2 instruction_pointer conversions).
+  - `arch/um/include/asm/vsyscall.h`: new, 19 lines.
+  - `arch/um/Kconfig`: +11 lines.
+  - `arch/um/Makefile`: +8 lines.
+
+Full-session C-06 outcome: went from "3-line patch would fix
+it" to "portable-emitter refactor needed; three hygiene fixes
+independently landable upstream." That IS progress — the scope
+is now honest. Future picker starts here rather than at the
+D43 first framing.
+
 ---
 
 ## D44: C-07 KMSAN v1 shadow+origin layout decision (VMALLOC subdivision vs dedicated-mmap)
