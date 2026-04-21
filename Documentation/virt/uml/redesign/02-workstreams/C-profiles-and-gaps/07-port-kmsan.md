@@ -1,10 +1,23 @@
 # C-07: Port KMSAN to UML
 
-**Status:** design (2026-04-20); implementation commits to follow
-once v1 scope is locked and the memory-pressure unknown (U1
-below) is probed with a throwaway build. This is the heaviest
-remaining C-port; treat the 6-week budget as the ceiling, not
-the target.
+**Status:** design (2026-04-20); **commit-1 scratch probe ran
+2026-04-20; revealed a v1 layout decision that blocks
+implementation pending D44 sign-off.** Probe found that KMSAN
+requires `KMSAN_VMALLOC_SHADOW_START`, `KMSAN_VMALLOC_ORIGIN_START`,
+`KMSAN_MODULES_SHADOW_START`, `KMSAN_MODULES_ORIGIN_START` as
+virtual-address constants consumed by `mm/kmsan/shadow.c:55-71`,
+and UML's `VMALLOC_END = TASK_SIZE - 2*PAGE_SIZE` +
+`MODULES_VADDR = VMALLOC_START` geometry doesn't accommodate a
+straight x86-style quarter-split without either (A) shrinking
+VMALLOC under `CONFIG_KMSAN=y` (invasive to UML's memory layout
+but UML-local), or (B) dedicating host-mmap regions outside
+VMALLOC and choosing offsets that make shadow.c's math work
+(matches UML's KASAN precedent; cleanest if feasible).
+Implementation commits hold pending user pick of A, B, or C
+(defer). See §"Blocker: what the empirical probe found" below
+and decisions-log D44 for the full writeup. This is still the
+heaviest remaining C-port; treat the 6-week budget as the
+ceiling, not the target.
 **Effort:** 6 weeks (budget). Optimistic-case scope — KASAN's
 UML port paved the mmap pattern we reuse — is closer to **2-3
 weeks of disciplined work** if U1/U2/U3 hold. Kept at 6 weeks
@@ -312,6 +325,53 @@ reinit.**
   standard recipe.
 - **Maintenance risk: low.** No UML-specific KMSAN engine; we
   piggyback on `mm/kmsan/` core.
+
+## Blocker: what the empirical probe found
+
+Commit-1 scratch (Kconfig + s390-style header + Makefile) built
+clean under gcc (KMSAN=n default) and failed under clang with
+`CONFIG_KMSAN=y` at `mm/kmsan/shadow.c:62-68`:
+
+```
+error: use of undeclared identifier 'KMSAN_VMALLOC_ORIGIN_START'
+error: use of undeclared identifier 'KMSAN_VMALLOC_SHADOW_START'
+error: use of undeclared identifier 'KMSAN_MODULES_ORIGIN_START'
+error: use of undeclared identifier 'KMSAN_MODULES_SHADOW_START'
+warning: 'KMSAN_ORIGIN_SIZE' macro redefined (scratch collided
+         with mm/kmsan/kmsan.h:30's existing 4-byte value)
+```
+
+These are not "arch hooks" — they're virtual-address constants
+that `mm/kmsan/shadow.c`'s `vmalloc_meta()` uses to compute
+shadow/origin addresses for vmalloc'd and module-area pointers.
+Every arch with KMSAN support must define them; the values
+encode a geometric assumption about how VMALLOC is carved.
+
+UML's VMALLOC layout (`arch/um/include/asm/pgtable.h:49-53`):
+```
+VMALLOC_END   = TASK_SIZE - 2 * PAGE_SIZE
+MODULES_VADDR = VMALLOC_START  (modules overlap vmalloc)
+MODULES_END   = VMALLOC_END
+```
+
+Straight x86 quarter-split (`arch/x86/include/asm/pgtable_64_
+types.h:132-168`) doesn't map cleanly because UML's VMALLOC is
+bounded by TASK_SIZE (not a fixed canonical-hole range) and
+modules live INSIDE vmalloc rather than above it.
+
+Three options in D44: (A) shrink UML's VMALLOC_END to 1/4
+under CONFIG_KMSAN=y and x86-style subdivide; (B) dedicated
+host-mmap regions outside VMALLOC with offsets that make the
+shadow.c math work (UML-KASAN pattern extended); (C) defer.
+Implementation held pending decision.
+
+The scratch probe also confirmed **U2 on the positive side**:
+clang 21.1.8 + `-fsanitize=kernel-memory` works
+(`HAVE_KMSAN_COMPILER=y` auto-selected), and UML's LLVM=1 build
+reaches the KMSAN compile stage without toolchain friction.
+U1 (memory pressure) remains unmeasured because the build
+didn't complete. U3 (origin chain across snapshot/fork) is
+still purely speculative.
 
 ## Sequencing note
 

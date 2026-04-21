@@ -3472,4 +3472,142 @@ or option-A fragility acceptance`. No arch/ code changes made.
 
 ---
 
+## D44: C-07 KMSAN v1 shadow+origin layout decision (VMALLOC subdivision vs dedicated-mmap)
+
+**Date:** 2026-04-20
+**Status:** Open — needs user sign-off on layout approach before
+C-07 commit 1 can land. Empirical scratch-build probe (reverted,
+not pushed) turned the C-07 design-doc "mirror KASAN mmap" plan
+into a concrete architectural decision.
+
+**What the probe found.**
+
+Attempted a scratch version of C-07 commit 1:
+- `select HAVE_ARCH_KMSAN if X86_64` + `HAVE_ARCH_KMSAN_VMALLOC`
+  in `arch/um/Kconfig`.
+- `arch/um/include/asm/kmsan.h` modeled on `arch/s390/include/
+  asm/kmsan.h`: `arch_kmsan_get_meta_or_null` returns NULL;
+  `kmsan_virt_addr_valid` wraps `virt_addr_valid` with preempt
+  disable.
+- `KMSAN_SANITIZE := n` in `arch/um/os-Linux/Makefile`.
+
+Build result: gcc ARCH=um (KMSAN=n default) clean. But clang
+`LLVM=1 CONFIG_KMSAN=y` fails at `mm/kmsan/shadow.c:62-68` with
+four "undeclared identifier" errors:
+
+  - `KMSAN_VMALLOC_SHADOW_START`
+  - `KMSAN_VMALLOC_ORIGIN_START`
+  - `KMSAN_MODULES_SHADOW_START`
+  - `KMSAN_MODULES_ORIGIN_START`
+
+These are not "arch hooks" in the sense
+`arch_kmsan_get_meta_or_null` is — they are **virtual-address
+constants** that `mm/kmsan/shadow.c`'s `vmalloc_meta()` uses to
+compute the shadow/origin address of a vmalloc or module pointer.
+Every arch with KMSAN support must define them, and they embed
+a geometric assumption: the arch has carved its VMALLOC (and
+module region) into a shape where shadow + origin addresses can
+be computed by a fixed offset from the primary address.
+
+Plus one macro collision: my scratch defined `KMSAN_ORIGIN_SIZE`
+as a "size of the origin region" (a 16 TB value). `mm/kmsan/
+kmsan.h:30` already defines `KMSAN_ORIGIN_SIZE = 4` (bytes per
+origin slot, i.e., `sizeof(depot_stack_handle_t)`). My naming
+collides; I'd need a UML-specific `UM_KMSAN_ORIGIN_REGION_SIZE`
+or equivalent.
+
+**The geometric mismatch.**
+
+x86's layout (`arch/x86/include/asm/pgtable_64_types.h:132-168`)
+under `CONFIG_KMSAN=y`:
+  - `VMALLOC_END` shrinks to `VMALLOC_START + VMALLOC_QUARTER_SIZE - 1`
+    (1/4 of the normal value).
+  - 2nd quarter is shadow of vmalloc.
+  - 3rd quarter is origin of vmalloc.
+  - 4th quarter (above the reduced VMALLOC_END) is modules
+    shadow + origin.
+
+s390's layout (`arch/s390/include/asm/pgtable.h:112-117`) puts
+`KMSAN_VMALLOC_SHADOW_START = VMALLOC_END` (appended after
+vmalloc rather than subdividing it) with its own
+`KMSAN_VMALLOC_SIZE`.
+
+UML's layout (`arch/um/include/asm/pgtable.h:49-53`):
+```
+VMALLOC_OFFSET  = __va_space
+VMALLOC_START   = (high_physmem + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1)
+VMALLOC_END     = TASK_SIZE - 2 * PAGE_SIZE
+MODULES_VADDR   = VMALLOC_START   # modules overlap vmalloc
+MODULES_END     = VMALLOC_END
+```
+
+Three things make a straight x86-style quarter-split hard on UML:
+
+1. `VMALLOC_END = TASK_SIZE - 2*PAGE_SIZE`. UML's address space
+   is the host userspace process's address space minus the
+   physmem + kernel-image regions; there may not be 4x the
+   current VMALLOC extent available.
+2. `MODULES_VADDR == VMALLOC_START`. UML packs modules inside
+   vmalloc rather than above it, so the "4th quarter" x86 uses
+   for module shadow+origin isn't free real estate.
+3. UML's existing KASAN shadow lives outside VMALLOC at
+   `KASAN_SHADOW_OFFSET` via a dedicated host `mmap()`. The
+   design doc assumed KMSAN could do the same; the shadow.c
+   requirement that `KMSAN_VMALLOC_SHADOW_START` be computable
+   as `VMALLOC_START + fixed_offset` means dedicated-mmap needs
+   extra plumbing to make the math work.
+
+**Three options:**
+
+**A. x86-style VMALLOC quarter-split on UML.** Make UML's
+`VMALLOC_END` conditional on `CONFIG_KMSAN=y` so it shrinks to
+1/4 of normal, and define `KMSAN_VMALLOC_{SHADOW,ORIGIN}_START`
++ `KMSAN_MODULES_{SHADOW,ORIGIN}_START` accordingly. Requires
+touching `arch/um/include/asm/pgtable.h` — UML-local, no cross-
+subsystem sign-off needed. Costs: 4x smaller vmalloc under
+KMSAN (acceptable for research profile — KMSAN is debug-only),
+and module range overlaps vmalloc needs a separate carve-out.
+
+**B. Dedicated host-mmap regions + generic-code patch.** Keep
+`VMALLOC_END` unchanged; put `KMSAN_VMALLOC_SHADOW_START` +
+friends at fixed addresses outside VMALLOC (host mmap'd like
+KASAN shadow). But `mm/kmsan/shadow.c:60-63` computes
+`addr64 - VMALLOC_START + KMSAN_VMALLOC_SHADOW_START`; as long
+as KMSAN_VMALLOC_SHADOW_START is a valid constant address with
+enough range ahead of it, the math works. No generic-code
+patch needed if we pick the offsets carefully. **This is the
+cleanest option if we can find a canonical-hole region to sit
+the shadow in.** All-UML-local; no sign-off needed.
+
+**C. Defer C-07 entirely.** Mark as `blocked on v1 layout
+decision; reopen when option A or B is signed off`. Advance
+some other leaf in the meantime. The design doc's v1 ceiling
+assumed memory overhead was the primary risk; the real v1
+blocker turned out to be VA layout, which is a cheaper
+decision to make but needs to be made.
+
+**Cross-references:**
+- `02-workstreams/C-profiles-and-gaps/07-port-kmsan.md` —
+  design doc; will be updated to reflect this blocker.
+- `arch/um/include/asm/pgtable.h:49-53` — UML VMALLOC layout.
+- `arch/x86/include/asm/pgtable_64_types.h:132-168` — x86
+  quarter-split geometry under KMSAN.
+- `arch/s390/include/asm/pgtable.h:112-117` — s390
+  KMSAN_VMALLOC_SHADOW_START pattern (appended after vmalloc).
+- `mm/kmsan/shadow.c:55-71` — `vmalloc_meta()` that consumes
+  these macros.
+- `mm/kmsan/kmsan.h:30` — pre-existing `KMSAN_ORIGIN_SIZE = 4`
+  that collided with my scratch's region-size macro.
+- D43 — parallel "blocked on architectural decision" pattern
+  for C-06 BPF JIT.
+
+**Recommendation (mine):** **option B**. It's all-arch/um/, no
+cross-subsystem touch, reuses the UML-KASAN "dedicated mmap"
+pattern that already works, and picks offsets that make the
+generic shadow.c math work without patching it. If B turns
+out infeasible on further investigation (e.g., we can't find
+enough unmapped canonical-hole region), fall back to A.
+
+---
+
 ## (Future entries here, as decisions are made)
