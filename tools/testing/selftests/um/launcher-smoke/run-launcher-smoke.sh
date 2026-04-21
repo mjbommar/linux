@@ -6,12 +6,19 @@
 #
 # Exercises the launcher end-to-end:
 #
-#   1. `uml-launcher run --dry-run` synthesizes a correct argv
+#   A. `uml-launcher run --dry-run` synthesizes a correct argv
 #      without spawning (catches bitrot in the argv builder).
-#   2. `uml-launcher run --kernel ... --init /bin/true` boots UML
+#   B. `uml-launcher run --kernel ... --init /bin/true` boots UML
 #      and exits with 128 + SIGABRT = 134 (the expected init-
 #      exit panic — init=/bin/true returns, kernel panics,
 #      launcher returns that exit code).
+#   C. `uml-launcher run --forkserver <ctl>,<status>` plumbs the
+#      caller's pipe fds to UML's 198/199 via the launcher's
+#      pre_exec dup2. Driven by launcher-forkserver-driver.py
+#      which opens pipes, invokes the launcher, does the AFL\\0
+#      handshake + one fork iteration, and checks the pid +
+#      status bytes come back. Skipped if the UML binary isn't
+#      fuzz-profile (doesn't have CONFIG_UM_SNAPSHOT_FORKSERVER=y).
 #
 # Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
 #
@@ -80,12 +87,10 @@ RC_B=$?
 # the exit code.
 case "$RC_B" in
 	134)
-		echo "LAUNCHER_SMOKE: PASS dry_run_ok=1 spawn_exit=134"
-		exit 0
+		: # fall through to Part C
 		;;
 	1[3-9][0-9]|1[0-2][0-9])
-		echo "LAUNCHER_SMOKE: PASS dry_run_ok=1 spawn_exit=$RC_B (non-134 signal-ish)"
-		exit 0
+		: # fall through
 		;;
 	0)
 		echo "LAUNCHER_SMOKE: FAIL spawn returned 0 (expected init-killed panic exit 128+sig)"
@@ -95,6 +100,67 @@ case "$RC_B" in
 	*)
 		echo "LAUNCHER_SMOKE: FAIL unexpected exit rc=$RC_B"
 		echo "$OUT_B" | tail -20
+		exit 1
+		;;
+esac
+
+# --- Part C: --forkserver fd plumbing end-to-end ---
+#
+# Only meaningful if the UML binary has CONFIG_UM_SNAPSHOT_FORKSERVER=y
+# (fuzz / fuzz-deep profiles). Auto-detect by grepping the binary
+# for the forkserver handshake string "AFL\0" — present only when
+# the Kconfig is on.
+PART_C=${PART_C:-auto}
+DRIVER="$DIR/launcher-forkserver-driver.py"
+# The forkserver only fires when an in-guest write to
+# /sys/kernel/debug/um/snapshot_ready reaches the kernel-side
+# um_snapshot_ready() entry point. Our bundled init script
+# mounts debugfs and triggers it; the driver's handshake is what
+# the ready-point writes.
+INIT_C=${UML_FORKSERVER_INIT:-$DIR/forkserver-init.sh}
+
+run_part_c=0
+if [ "$PART_C" = "1" ]; then
+	run_part_c=1
+elif [ "$PART_C" = "auto" ]; then
+	# Cheap detection: the forkserver handshake string is in the
+	# kernel image .rodata iff CONFIG_UM_SNAPSHOT_FORKSERVER=y.
+	if grep -q "snapshot: forkserver up" "$BINARY" 2>/dev/null; then
+		run_part_c=1
+	fi
+fi
+
+if [ "$run_part_c" != "1" ]; then
+	echo "LAUNCHER_SMOKE: PASS dry_run_ok=1 spawn_exit=$RC_B part_c=skipped"
+	exit 0
+fi
+
+PY=$(command -v python3 || true)
+if [ -z "$PY" ]; then
+	echo "LAUNCHER_SMOKE: PASS dry_run_ok=1 spawn_exit=$RC_B part_c=skipped_no_python3"
+	exit 0
+fi
+if [ ! -x "$DRIVER" ]; then
+	echo "LAUNCHER_SMOKE: FAIL driver $DRIVER not executable"
+	exit 1
+fi
+
+DRV_OUT=$("$PY" "$DRIVER" "$LAUNCHER" "$BINARY" "$INIT_C" "$MEM" 2>&1 || true)
+DRV_LINE=$(echo "$DRV_OUT" | grep -E '^DRV: (PASS|FAIL|SKIP)' | tail -1)
+case "$DRV_LINE" in
+	*PASS*)
+		echo "LAUNCHER_SMOKE: PASS dry_run_ok=1 spawn_exit=$RC_B part_c=pass"
+		echo "  part_c: $DRV_LINE"
+		exit 0
+		;;
+	*SKIP*)
+		echo "LAUNCHER_SMOKE: PASS dry_run_ok=1 spawn_exit=$RC_B part_c=skipped"
+		echo "  part_c: $DRV_LINE"
+		exit 0
+		;;
+	*FAIL*|"")
+		echo "LAUNCHER_SMOKE: FAIL part_c: ${DRV_LINE:-no DRV line}"
+		echo "$DRV_OUT" | tail -10
 		exit 1
 		;;
 esac
