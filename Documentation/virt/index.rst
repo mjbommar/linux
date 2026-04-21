@@ -16,6 +16,7 @@ Virtualization Support
    uml/ftrace
    uml/kprobes
    uml/snapshot
+   uml/launcher
    uml/profiles/index
    paravirt_ops
    guest-halt-polling

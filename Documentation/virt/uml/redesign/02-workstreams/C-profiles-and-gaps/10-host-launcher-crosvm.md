@@ -1,8 +1,16 @@
 # C-10: Crosvm-style host launcher
 
-**Status:** design (2026-04-20); implementation commits to follow.
-**Effort:** 6 weeks (budget). v1 scope below is **~1 week of
-disciplined work**; v2 (vhost-user device decomposition + seccomp)
+**Status:** landed v1 (2026-04-20). `tools/uml/uml-launcher/`
+Rust binary + Makefile + user doc + `launcher-smoke` regression
+selftest all shipped. `cargo build --release` clean, `cargo
+test` 11/11 pass, end-to-end spawn + signal-forward + exit-code
+passthrough validated (UML boot with `init=/bin/true` → launcher
+returns 134 per 128+SIGABRT convention, selftest asserts). v2
+(per-device vhost-user + seccomp) remains tracked in the Roadmap
+section below; this series delivers v1 only.
+**Effort:** 6 weeks (budget). v1 scope below was **~1 session of
+disciplined work** given the locked crate stack and small v1
+feature set; v2 (vhost-user device decomposition + seccomp)
 is the remainder of the budget and lands separately.
 **Dependencies:** A (backend ops), B (static-key gates) — both
                   landed. No kernel changes needed for v1.
