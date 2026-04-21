@@ -107,9 +107,80 @@ docs/uml-redesign/
 - [x] Workstream decomposition (`02-workstreams/`)
 - [x] Profile matrix (`03-profiles/`)
 - [x] First-pass sequencing (`06-sequencing/`)
-- [ ] Decisions log open and ready to grow
-- [ ] Open question resolution (see each workstream)
-- [ ] Upstream strategy validation (talk to maintainers)
+- [x] Decisions log open and ready to grow (`04-risks/decisions-log.md`
+      now runs from D1 through D44)
+- [ ] Open question resolution (per-workstream; mostly closed via
+      decisions-log entries; remaining open Qs flagged in each
+      workstream doc)
+- [ ] Upstream strategy validation (ongoing; hygiene patches
+      staged for LKML in `02-workstreams/C-profiles-and-gaps/`,
+      see "Landed in tree" below)
+
+## Landed in tree (as of 2026-04-21)
+
+This plan has outgrown "paper design" — much of it is now code
+on `uml-redesign-plan` branch, tracked in the per-workstream
+status headers but rolled up here:
+
+**Workstream A (backend ops):** complete. All 7 sub-tasks landed
+2026-04-17/18. `struct um_backend_ops` + ptrace + seccomp + KVM
+stub + Kconfig + KUnit contract + perf-CI all in tree.
+
+**Workstream B (static-key hot paths):** complete. All 6
+sub-tasks landed 2026-04-18. Hot paths gated, debugfs controls
+live (`/sys/kernel/debug/um/{backend,hooks/*,stats}`), first
+runtime flip demonstrated via selftest.
+
+**Workstream C (profiles + gap-fill):** mostly landed. See
+`02-workstreams/C-profiles-and-gaps/README.md` for the cell-
+level table. Summary:
+
+  - C-01 defconfig: landed 2026-04-18
+  - C-02 KFENCE: landed 2026-04-18
+  - C-03 KCSAN: landed 2026-04-18
+  - C-04 kprobes: partially landed 2026-04-20 (commit 3 deferred
+    per D34 pending upstream fgraph work)
+  - C-05 ftrace: landed 2026-04-19
+  - C-06 BPF JIT: deferred per D43; 2 upstream-bound hygiene
+    commits landed on-branch
+  - C-07 KMSAN: design-locked per D44's four-probe investigation;
+    implementation queued on a map-on-demand arch callback +
+    LKML coordination
+  - C-08 syzkaller `vm/uml` backend: external to linux.git
+  - C-09 snapshot/forkserver: landed v1 2026-04-20
+  - C-10 crosvm-style launcher: landed v1 2026-04-20
+    (`tools/uml/uml-launcher/`)
+
+**Workstream D (KVM backend):** deliberately not started. D-01
+through D-06 remain `planned`; per `06-sequencing/critical-
+path.md` D begins around month 13 of the 24-month plan. D
+failure is explicitly acceptable (prod-fast falls back to
+seccomp).
+
+**Selftests under `tools/testing/selftests/um/`:**
+ftrace-smoke, hooks-flip, kprobes-stress, launcher-smoke
+(Parts A/B/C), profiles, snapshot-smoke, userspace-smoke.
+Direct-invocation regression coverage for every landed
+sub-system.
+
+**Upstream patches staged for LKML:**
+`02-workstreams/C-profiles-and-gaps/upstream-patches/
+bpf-hygiene-v1/` — two arch-generic fixes (cpufeature.h
+include + instruction_pointer helpers) in `arch/x86/net/
+bpf_jit_comp.c` with cover letter + submission notes. Ready
+for `git send-email` to BPF + netdev lists.
+
+**Known blocked-on-upstream work:**
+  - C-04 commit 3 HAVE_FUNCTION_GRAPH_TRACER — D34 (notrace +
+    -fpatchable-function-entry interaction, compiler/kernel).
+  - C-06 full port — D43 option B2 (arch/x86/net/bpf_jit_comp.c
+    portable-emitter refactor; multi-week + LKML with BPF
+    maintainers).
+  - C-07 KMSAN — D44 fourth probe (map-on-demand arch
+    callback; LKML coordination with Alexander Potapenko).
+
+Each blocker has a concrete next-step recommendation in the
+linked decisions-log entry.
 
 ## How to extend this plan
 
