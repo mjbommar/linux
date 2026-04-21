@@ -170,17 +170,33 @@ include + instruction_pointer helpers) in `arch/x86/net/
 bpf_jit_comp.c` with cover letter + submission notes. Ready
 for `git send-email` to BPF + netdev lists.
 
-**Known blocked-on-upstream work:**
-  - C-04 commit 3 HAVE_FUNCTION_GRAPH_TRACER — D34 (notrace +
-    -fpatchable-function-entry interaction, compiler/kernel).
-  - C-06 full port — D43 option B2 (arch/x86/net/bpf_jit_comp.c
-    portable-emitter refactor; multi-week + LKML with BPF
-    maintainers).
-  - C-07 KMSAN — D44 fourth probe (map-on-demand arch
-    callback; LKML coordination with Alexander Potapenko).
+**Cross-subsystem work carried on the fork (per D45):**
 
-Each blocker has a concrete next-step recommendation in the
-linked decisions-log entry.
+  D45 (2026-04-21) clarifies this plan's posture: the fork
+  demonstrates the working end state first; LKML adoption
+  follows, motivated by the running artifact. Items previously
+  framed as "blocked on upstream review" are in fact just
+  "work to do on the fork."
+
+  - C-04 commit 3 HAVE_FUNCTION_GRAPH_TRACER — D34 identifies a
+    `notrace` + `-fpatchable-function-entry` interaction.
+    Under D45, we write the `kernel/trace/` fix ourselves,
+    carry it on the fork, unblock commit 3 locally, defer the
+    upstream submission to later.
+  - C-06 full port — D43 option B2 is a
+    `arch/x86/net/bpf_jit_comp.c` portable-emitter refactor.
+    Under D45, land the split on the fork; the two hygiene
+    commits (already on-branch as e2b686c962 / 5b95b1bb3e)
+    stay as-is in `upstream-patches/bpf-hygiene-v1/` for when
+    the upstream conversation opens.
+  - C-07 KMSAN — D44 fourth probe calls for a map-on-demand
+    arch-extension point in `mm/kmsan/init.c`. Under D45,
+    add it on the fork; implement UML's callback; demonstrate
+    the full sanitizer trio (KASAN + KCSAN + KMSAN) working
+    before engaging KMSAN maintainer upstream.
+
+Each item still has a concrete next-step recommendation in the
+linked decisions-log entry; D45 removes the LKML-timing gate.
 
 ## How to extend this plan
 

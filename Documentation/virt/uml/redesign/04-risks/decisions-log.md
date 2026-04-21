@@ -4121,4 +4121,88 @@ section."
 
 ---
 
+## D45: In-fork scope policy — show the end state, treat LKML as later discussion
+
+**Date:** 2026-04-21
+**Status:** Accepted.
+
+The UML redesign runs on a personal branch (`uml-redesign-plan`)
+whose purpose is to **demonstrate the working end state** of the
+architecture — `prod-fast`, `research`, `fuzz`, `sandbox`
+profiles actually delivering their promise, with snapshot/
+forkserver and the host launcher working — so that when upstream
+discussion of individual sub-components begins, there is a
+running artifact rather than a paper proposal.
+
+This changes how D34, D43, D44, and similar "blocked on
+upstream" classifications should be read:
+
+**Before D45:** "Cross-subsystem change. Wait for LKML
+discussion + maintainer ack + merge cycles before implementing
+on the fork."
+
+**After D45:** "Cross-subsystem change. Implement on the fork
+now. Track the merge-surface-area growth so a future upstream
+conversation has a concrete artifact to point at. Do not gate
+fork progress on LKML review cycles."
+
+**Decision scope.** D45 applies specifically to changes this
+plan motivates: refactors in `arch/x86/` that make UML consume
+x86 host code cleanly (C-06 B2), extensions to `mm/kmsan/` that
+give UML an arch-extension point (C-07 map-on-demand callback),
+`kernel/trace/` fixes that make `notrace` cooperate with
+`-fpatchable-function-entry` (C-04 commit 3 / D34), and similar.
+It does NOT apply to:
+
+  - Changes that would semantically break bare-metal x86
+    (D45 requires our fork's patches remain fully compatible
+    with x86 defconfig).
+  - Changes to subsystems the plan does not need to motivate
+    (random scheduler refactors, filesystem rewrites, etc.).
+  - Anything the owner has explicitly flagged as "not time yet."
+
+**Upstream tracking.** Each in-fork cross-subsystem commit is
+written with an upstream-submittable message (no UML references
+in the subject line; rationale that stands alone for
+bare-metal x86 if possible). The `upstream-patches/` directory
+under `02-workstreams/C-profiles-and-gaps/` holds
+`format-patch`-ready series for eventual submission. This
+posture matches D45's intent: the fork is the demo; upstream
+adoption happens after we have a running artifact.
+
+**Implications for existing blocked-on-upstream items:**
+
+  - **D34** (C-04 commit 3 / HAVE_FUNCTION_GRAPH_TRACER):
+    becomes "write the `kernel/trace/` + `notrace`
+    cooperation fix on the fork; unblock C-04 commit 3 locally;
+    defer upstream submission."
+  - **D43 option B2** (C-06 / BPF JIT portable-emitter
+    refactor): becomes "split `arch/x86/net/bpf_jit_comp.c` on
+    the fork; ship a working UML BPF JIT; defer the upstream
+    RFC to the BPF maintainers until we have the demo."
+  - **D44 fourth probe** (C-07 KMSAN / map-on-demand callback):
+    becomes "add the arch-extension point to
+    `mm/kmsan/init.c` on the fork; implement UML's callback;
+    unblock KMSAN locally; defer upstream Potapenko coordination
+    until the full sanitizer trio is demonstrably working on
+    the fork."
+
+**What this re-opens.** Tasks previously classified as
+READY-BIG with LKML coordination as the gating cost are now
+"doable in focused sessions." The actual engineering work
+remains; the LKML review cycle is deferred to the separate
+question of "when to propose upstream adoption."
+
+**Cross-references:**
+- `00-vision.md` — "Why now" section's LKML-acceptance framing
+  stays accurate for the eventual upstream story; D45 just
+  clarifies that the fork demonstration comes first.
+- `04-risks/political-lkml-acceptance.md` — the structural
+  reasons Tazaki's RFC stalled inform the fork-first strategy.
+- `07-references/prior-art.md` — gVisor and LKL both carried
+  significant out-of-tree code before upstream conversations;
+  D45 adopts that pattern.
+
+---
+
 ## (Future entries here, as decisions are made)
