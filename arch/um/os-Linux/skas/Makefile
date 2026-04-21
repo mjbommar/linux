@@ -14,4 +14,12 @@ obj-y := mem.o process.o
 
 USER_OBJS := $(obj-y)
 
+# process.c here is the skas dispatch loop; its functions run as
+# part of UML's userspace-entry path and, like the os-Linux/
+# signal.c handlers, are entered via signal delivery / longjmp
+# rather than a normal call/ret. Strip CC_FLAGS_FTRACE so graph
+# tracing doesn't push shadow-stack entries that never pop. See
+# decisions-log D34.
+CFLAGS_REMOVE_process.o := $(CC_FLAGS_FTRACE)
+
 include $(srctree)/arch/um/scripts/Makefile.rules

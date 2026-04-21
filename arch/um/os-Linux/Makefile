@@ -18,6 +18,19 @@ obj-y = elf_aux.o execvp.o file.o helper.o irq.o main.o mem.o process.o \
 
 CFLAGS_signal.o += -Wframe-larger-than=4096
 
+# Strip CC_FLAGS_FTRACE from the USER_OBJS that dispatch host
+# signals into UML's in-kernel handlers. Without this strip,
+# graph-tracing these TUs leaks one shadow-stack entry per signal
+# delivery because the signal frame is torn down via rt_sigreturn
+# rather than a function `ret`. See UML redesign decisions-log
+# D34 (source 1). Reaching these files required a per-file
+# CFLAGS_REMOVE hook in arch/um/scripts/Makefile.rules; before
+# that hook, CFLAGS_REMOVE_<file>.o did nothing for USER_OBJS
+# because the rule overrode c_flags wholesale.
+CFLAGS_REMOVE_signal.o := $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_sigio.o := $(CC_FLAGS_FTRACE)
+CFLAGS_REMOVE_irq.o := $(CC_FLAGS_FTRACE)
+
 CFLAGS_main.o += -Wno-frame-larger-than
 
 obj-$(CONFIG_SMP) += smp.o

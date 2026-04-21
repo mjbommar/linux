@@ -48,6 +48,13 @@ CFLAGS_REMOVE_ftrace.o        := $(CC_FLAGS_FTRACE)
 CFLAGS_REMOVE_section_split.o := $(CC_FLAGS_FTRACE)
 # early_printk runs before ftrace_init().
 CFLAGS_REMOVE_early_printk.o  := $(CC_FLAGS_FTRACE)
+# process.c contains new_thread_handler and fork_handler. Both
+# are entered via UML_LONGJMP during task creation rather than a
+# normal `call`; their function_graph prologue push would
+# therefore rewrite garbage at 8(%rsp) and never see a matching
+# return_to_handler pop, leaking one shadow-stack entry per
+# task creation. See decisions-log D34 (source 2).
+CFLAGS_REMOVE_process.o       := $(CC_FLAGS_FTRACE)
 
 obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
 obj-$(CONFIG_GPROF)	+= gprof_syms.o
