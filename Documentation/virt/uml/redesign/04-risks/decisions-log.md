@@ -3608,6 +3608,92 @@ generic shadow.c math work without patching it. If B turns
 out infeasible on further investigation (e.g., we can't find
 enough unmapped canonical-hole region), fall back to A.
 
+### Addendum (2026-04-20, later in session)
+
+Deeper probe after "build for the long term, correctly"
+guidance: options A and B in fact converge on the same
+underlying design question, which is bigger than a single
+commit and needs a dedicated multi-commit series.
+
+UML's `task_size` (`arch/um/kernel/um_arch.c:261,330-344`) is
+**runtime-determined** from `get_top_address(envp)` — the host
+process's actual top of user address space at boot. So
+`VMALLOC_END = TASK_SIZE - 2 * PAGE_SIZE` is a runtime value.
+KMSAN's wire contract (`mm/kmsan/shadow.c:62-68`) requires
+`KMSAN_VMALLOC_SHADOW_START` as a **compile-time constant**
+macro used directly in the shadow-address computation:
+`off + KMSAN_VMALLOC_SHADOW_START`.
+
+The concrete consequence: for KMSAN to work on UML, we must
+either (a) make `VMALLOC_END` a compile-time bound under
+`CONFIG_KMSAN=y` — i.e. shrink it to something like
+`VMALLOC_START + _AC(0x800000000, UL)` (32 GB) — OR (b) patch
+`mm/kmsan/shadow.c` to allow a runtime shadow-start (cross-
+subsystem, out of scope here without explicit sign-off).
+
+The correct "build for the long term" shape is (a), but it is
+NOT a single-commit affair:
+
+  1. `arch/um/include/asm/pgtable.h`: conditionalize
+     `VMALLOC_END` and `MODULES_END` on `CONFIG_KMSAN=y`. Keep
+     the non-KMSAN path unchanged so gcc defconfig builds are
+     bit-identical.
+  2. Audit every call site that assumes VMALLOC_END is
+     runtime-bounded by task_size — especially
+     `arch/um/kernel/um_arch.c` (memory-mapping at boot) and
+     `arch/um/kernel/mem.c` (the KASAN shadow placement, which
+     we'd need to fit alongside the KMSAN reservations). The
+     existing KASAN shadow at `0x100000000000` (16 TB) already
+     implicitly constrains where VMALLOC can end; KMSAN adds
+     two more reservations and we need to confirm the
+     canonical-hole budget is enough for all three.
+  3. `arch/um/include/asm/kmsan.h`: define
+     `KMSAN_VMALLOC_SHADOW_START`, `KMSAN_VMALLOC_ORIGIN_START`,
+     `KMSAN_MODULES_{SHADOW,ORIGIN}_START` at chosen VAs past
+     the KASAN shadow (e.g. `0x140000000000` and
+     `0x180000000000`), each sized to the bounded VMALLOC
+     range. On UML, MODULES_VADDR == VMALLOC_START, so the
+     module macros alias the vmalloc macros (the
+     kmsan_internal_is_vmalloc_addr check fires first anyway
+     per `mm/kmsan/kmsan.h:182-185`).
+  4. `arch/um/Kconfig`: `select HAVE_ARCH_KMSAN if X86_64`
+     with deps on the bounded-VMALLOC invariant.
+  5. `arch/um/kernel/mem.c`: `kmsan_init()` mmap'ing shadow +
+     origin regions via `kasan_map_memory` or equivalent;
+     register both with `um_register_mmap_region()` for
+     snapshot/fork inheritance (D37 pull-forward).
+  6. Selftest + user doc + defconfig flip (as originally
+     designed in the C-07 commit plan).
+
+This is 4-6 commits minimum, touches UML's memory-model
+invariants, and each step needs boot-testing on all three
+backends (PTRACE_ONLY / SECCOMP_ONLY / DYNAMIC). The design
+doc's "6-week budget" accurately reflects THIS effort, not the
+thinner "reuse KASAN mmap pattern" framing the doc started
+with.
+
+**Revised recommendation:** option B (with the refined shape
+above) is still the right long-term path. The implementation
+is not a single-session job; it needs a dedicated multi-day
+series to do carefully. In the interim:
+
+- Leave C-07 as `design-locked; implementation queued` until
+  the user allocates focused time for it.
+- **Do not ram through a VMALLOC_END change in a hurry.**
+  Bisecting a half-broken UML memory layout is costly, and
+  C-07 is not on the critical path per
+  `06-sequencing/critical-path.md` — KMSAN is the last-
+  sequenced C-port by deliberate design.
+
+**Cross-references (addendum):**
+- `arch/um/kernel/um_arch.c:261,330-344` — runtime task_size.
+- `arch/um/include/asm/processor-generic.h:53` —
+  `TASK_SIZE (task_size)` runtime indirection.
+- `mm/kmsan/kmsan.h:182-185` — vmalloc-addr check that fires
+  before module-addr check.
+- `06-sequencing/critical-path.md` — confirms C-07 is
+  deliberately last-sequenced; not blocking M8.
+
 ---
 
 ## (Future entries here, as decisions are made)
