@@ -52,10 +52,13 @@ include $(srctree)/$(HOST_DIR)/Makefile.um
 
 core-y += $(HOST_DIR)/um/
 
-# Workstream C-06: arch/x86/net/ will be pulled into the UML
-# build once the BPF JIT port's remaining shim work lands
-# (currently gated on a pt_regs layout translation — see D43
-# fifth-view in decisions-log). Not yet wired.
+# Workstream C-06 v1: pull arch/x86/net/ into the UML build when
+# BPF JIT is configured. UML-local shim headers in
+# arch/um/include/asm/ + arch/um/kernel/x86_nops.c +
+# bpf_jit_comp.c's CONFIG_UM reg2pt_regs[] branch satisfy the
+# x86-host divergences. See Documentation/virt/uml/redesign/
+# 02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md.
+core-$(CONFIG_BPF_JIT) += $(HOST_DIR)/net/
 
 SHARED_HEADERS	:= $(ARCH_DIR)/include/shared
 ARCH_INCLUDE	:= -I$(srctree)/$(SHARED_HEADERS)

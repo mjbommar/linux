@@ -15,6 +15,7 @@
 #include <asm/cpufeature.h>
 #include <asm/extable.h>
 #include <asm/ftrace.h>
+#include <asm/nops.h>
 #include <asm/set_memory.h>
 #include <asm/nospec-branch.h>
 #include <asm/text-patching.h>
@@ -199,6 +200,28 @@ static const int reg2hex[] = {
 };
 
 static const int reg2pt_regs[] = {
+#ifdef CONFIG_UML
+	/*
+	 * UML's struct pt_regs wraps struct uml_pt_regs with a
+	 * gp[] array indexed by HOST_* constants; the x86 member
+	 * names (ax, di, r14, ...) don't exist. Map each BPF
+	 * register to the equivalent gp[] index so the emitted
+	 * arena-access exception handler can find the faulting
+	 * register correctly. Workstream C-06 per
+	 * Documentation/virt/uml/redesign/04-risks/decisions-log.md
+	 * D43 fifth-view. Bare-metal x86 (#else) is unchanged.
+	 */
+	[BPF_REG_0] = offsetof(struct pt_regs, regs.gp[HOST_AX]),
+	[BPF_REG_1] = offsetof(struct pt_regs, regs.gp[HOST_DI]),
+	[BPF_REG_2] = offsetof(struct pt_regs, regs.gp[HOST_SI]),
+	[BPF_REG_3] = offsetof(struct pt_regs, regs.gp[HOST_DX]),
+	[BPF_REG_4] = offsetof(struct pt_regs, regs.gp[HOST_CX]),
+	[BPF_REG_5] = offsetof(struct pt_regs, regs.gp[HOST_R8]),
+	[BPF_REG_6] = offsetof(struct pt_regs, regs.gp[HOST_BX]),
+	[BPF_REG_7] = offsetof(struct pt_regs, regs.gp[HOST_R13]),
+	[BPF_REG_8] = offsetof(struct pt_regs, regs.gp[HOST_R14]),
+	[BPF_REG_9] = offsetof(struct pt_regs, regs.gp[HOST_R15]),
+#else
 	[BPF_REG_0] = offsetof(struct pt_regs, ax),
 	[BPF_REG_1] = offsetof(struct pt_regs, di),
 	[BPF_REG_2] = offsetof(struct pt_regs, si),
@@ -209,6 +232,7 @@ static const int reg2pt_regs[] = {
 	[BPF_REG_7] = offsetof(struct pt_regs, r13),
 	[BPF_REG_8] = offsetof(struct pt_regs, r14),
 	[BPF_REG_9] = offsetof(struct pt_regs, r15),
+#endif
 };
 
 /*

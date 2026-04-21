@@ -490,11 +490,21 @@ void alternatives_smp_module_del(struct module *mod)
 void *text_poke(void *addr, const void *opcode, size_t len)
 {
 	/*
-	 * In UML, the only reference to this function is in
-	 * apply_relocate_add(), which shouldn't ever actually call this
-	 * because UML doesn't have live patching.
+	 * Historically a no-op WARN on UML because the only caller
+	 * was apply_relocate_add() which shouldn't ever fire (UML
+	 * has no live patching). With workstream C-06 (BPF JIT),
+	 * arch/x86/net/bpf_jit_comp.c now calls via text_poke_copy()
+	 * during JIT image finalization — a legitimate callsite.
+	 * Keep the WARN so genuinely-unexpected callers still
+	 * surface, but gate it on !in_task() to silence the common
+	 * JIT-compile path (which runs in task context with
+	 * preemption enabled).
+	 *
+	 * If anyone calls text_poke from IRQ or hardirq context on
+	 * UML they really do need to be flagged — that would be a
+	 * cross-subsystem bug.
 	 */
-	WARN_ON(1);
+	WARN_ON(!in_task());
 
 	return memcpy(addr, opcode, len);
 }
