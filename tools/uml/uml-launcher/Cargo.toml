@@ -1,0 +1,51 @@
+[package]
+name = "uml-launcher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Host-side launcher for User-Mode Linux kernels"
+license = "GPL-2.0"
+repository = "https://github.com/torvalds/linux"
+readme = "README.md"
+keywords = ["uml", "user-mode-linux", "linux", "kernel"]
+categories = ["command-line-utilities", "virtualization"]
+
+[[bin]]
+name = "uml-launcher"
+path = "src/main.rs"
+
+[dependencies]
+# CLI parsing + env-var fallbacks + shell completions.
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+# Hierarchical config: CLI > env > TOML > defaults, merged via providers.
+figment = { version = "0.10", features = ["toml", "env"] }
+serde = { version = "1", features = ["derive"] }
+# Supervision: same Child handle across signal thread + main thread.
+shared_child = "1.0"
+# SIGINT/SIGTERM/SIGCHLD dispatch on a dedicated thread.
+signal-hook = "0.3"
+# Structured logging + JSON output + EnvFilter.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Error context at boundaries. Binary-only — no library API, no eyre ceremony.
+anyhow = "1"
+# dup2(2) inside CommandExt::pre_exec for forkserver fd 198/199 plumbing.
+# MSRV-safe subset; don't chase the full nix surface.
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
+# Owned fds for passing raw host fds into the child.
+libc = "0.2"
+
+[dev-dependencies]
+# Table-driven config-merge tests want no extra deps; std::assert_eq is enough.
+
+[profile.release]
+# Small, fast, distro-friendly: keep symbols for debuginfo
+# packages, strip at install-time if packagers want that.
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
+[profile.dev]
+# Fast iteration; debug assertions on.
+opt-level = 0
