@@ -3561,6 +3561,77 @@ independently landable upstream." That IS progress — the scope
 is now honest. Future picker starts here rather than at the
 D43 first framing.
 
+### Fifth view (2026-04-21, post-D45): revised survey + option A preferred
+
+After D45 lifted the "cross-subsystem change = LKML-first" gate,
+a full cover-to-cover survey of arch/x86/net/bpf_jit_comp.c
+(3800 LOC, 110 top-level symbols, 37 references to x86-host-
+specific bits) found that the divergences group cleanly into
+**two small abstractable categories**, not a structural refactor:
+
+  **Category 1 — macro/symbol resolutions UML doesn't yet
+  forward** (addressable via UML-local `<asm/*>` shim headers):
+
+    * `VSYSCALL_ADDR` (lines 2253-2261) — add
+      arch/um/include/asm/vsyscall.h with `#define 0UL`.
+    * `x86_nops[]` (lines 406, 596) — NOP sequences table. UML
+      can either forward arch/x86/include/asm/nops.h or carry
+      a local copy.
+    * `gen_endbr()` / `gen_endbr_poison()` (59-60) — IBT
+      instrumentation. Under non-CFI (UML default) these are
+      effectively 4-byte NOPs; provide no-op stubs.
+    * `cpu_feature_enabled(X86_FEATURE_*)` (675-683, 1617-1634,
+      1997) — retpoline / ITS / BHB / BMI2 mitigations. UML
+      runs in userspace and can skip these; provide stubs
+      returning false.
+    * unwind_state / unwind_start / unwind_next_frame /
+      unwind_done / unwind_get_return_address (3996-4016) —
+      ORC unwinder for bpf_throw. UML's stack walk is
+      different; provide stubs that say "no frames" (bpf_throw
+      will silently not unwind, which is a reasonable
+      limitation for the fork demo).
+    * text_poke_set / text_poke_copy /
+      smp_text_poke_single / __bpf_arch_text_poke
+      (308, 592-652, 3943) — JIT program patching. UML's
+      BPF programs live in execmem which has its own
+      mprotect-based mutate path; stub these to memcpy+
+      mprotect or no-op (latter = JIT tail-call fixup not
+      supported, acceptable for initial fork demo).
+
+  **Category 2 — already fixed by the two hygiene commits
+  (e2b686c96218 + 5b95b1bb3e6a):**
+
+    * `#include <asm/cpufeature.h>` explicit.
+    * `regs->ip` → instruction_pointer helpers.
+
+**Revised option A (PREFERRED under D45):** UML-side shims +
+the two hygiene commits. No arch/x86/net/ body changes
+beyond what's already landed. ~7 small UML-only shim headers;
+bare-metal x86 is untouched past the hygiene fixes.
+
+  * Pro: minimal, localised, doesn't change upstream BPF JIT
+    semantics. Fits D45's "demonstrate on fork; upstream
+    later" posture perfectly.
+  * Pro: ~1 session of work. Each shim is <30 LOC.
+  * Con: some JIT features are stubbed (bpf_throw unwinder
+    silent, tail-call text_poke fixup no-op). Documented as
+    known limitations; acceptable for the demo.
+
+**Revised option B** (portable-emitter refactor) remains the
+right long-term upstream shape but is now over-scoped for the
+fork demo. Defer it to a future upstream conversation motivated
+by the running artifact from option A.
+
+**Recommendation:** proceed with option A. Start in this
+session: implement the shim headers + Kconfig select + Makefile
+hook, rebuild, test. If bpf_jit_comp.o compiles under
+ARCH=um and a trivial BPF program loads on a fuzz-profile UML,
+option A shipped.
+
+Each shim/stub gets a comment naming what it's replacing and
+why it's safe to stub on UML. The "known limitations" list
+goes into the C-06 design doc once option A lands.
+
 ### Status note (2026-04-20, deferral with landed hygiene)
 
 User chose the "do the smaller set now and document the

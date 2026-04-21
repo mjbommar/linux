@@ -9,6 +9,19 @@
 #include <asm/asm.h>
 #include <linux/bitops.h>
 
+/*
+ * DISABLED_MASK_BIT_SET() is referenced in the cpu_feature_enabled
+ * compile-time-constant short-circuit below. On bare-metal x86 it's
+ * supplied by a generated cpufeaturemasks.h; UML doesn't pull that
+ * generator in. Stub it to zero so the short-circuit always falls
+ * through to static_cpu_has() which reads boot_cpu_data (UML
+ * inherits the host's CPUID bits). Workstream C-06 shim per D43
+ * fifth-view.
+ */
+#ifndef DISABLED_MASK_BIT_SET
+#define DISABLED_MASK_BIT_SET(bit)	0
+#endif
+
 extern const char * const x86_cap_flags[NCAPINTS*32];
 extern const char * const x86_power_flags[32];
 #define X86_CAP_FMT "%s"

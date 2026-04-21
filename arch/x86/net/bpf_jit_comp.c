@@ -19,6 +19,7 @@
 #include <asm/nospec-branch.h>
 #include <asm/text-patching.h>
 #include <asm/unwind.h>
+#include <asm/vsyscall.h>
 #include <asm/cfi.h>
 
 static bool all_callee_regs_used[4] = {true, true, true, true};

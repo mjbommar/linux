@@ -52,6 +52,11 @@ include $(srctree)/$(HOST_DIR)/Makefile.um
 
 core-y += $(HOST_DIR)/um/
 
+# Workstream C-06: arch/x86/net/ will be pulled into the UML
+# build once the BPF JIT port's remaining shim work lands
+# (currently gated on a pt_regs layout translation — see D43
+# fifth-view in decisions-log). Not yet wired.
+
 SHARED_HEADERS	:= $(ARCH_DIR)/include/shared
 ARCH_INCLUDE	:= -I$(srctree)/$(SHARED_HEADERS)
 ARCH_INCLUDE	+= -I$(srctree)/$(HOST_DIR)/um/shared

@@ -19,6 +19,11 @@ obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 	signal.o sysrq.o time.o tlb.o trap.o \
 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
 
+# x86_nops[] — UML-local copy for BPF JIT consumers (workstream
+# C-06, per D43 fifth-view). Bare-metal x86 gets this from
+# arch/x86/kernel/alternative.c which UML doesn't build.
+obj-$(CONFIG_BPF_JIT) += x86_nops.o
+
 obj-$(CONFIG_KPROBES) += kprobes/
 obj-$(CONFIG_RETHOOK) += rethook.o
 obj-$(CONFIG_UM_SNAPSHOT_FORKSERVER) += snapshot.o

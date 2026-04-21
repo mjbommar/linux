@@ -52,6 +52,13 @@ config UML
 	# to also select HAVE_KRETPROBES — arch/Kconfig's KRETPROBES depends
 	# on (HAVE_KRETPROBES || HAVE_RETHOOK).
 	select HAVE_RETHOOK if X86_64
+	# HAVE_EBPF_JIT is deliberately NOT selected yet — workstream
+	# C-06 infrastructure is landing incrementally (shim headers
+	# in arch/um/include/asm/, x86_nops table in
+	# arch/um/kernel/x86_nops.c), but a structural pt_regs layout
+	# divergence in arch/x86/net/bpf_jit_comp.c's reg2pt_regs[]
+	# table still needs resolution before the select is safe. See
+	# D43 fifth-view in decisions-log + 06-port-bpf-jit.md.
 	select THREAD_INFO_IN_TASK
 	select SPARSE_IRQ
 	select MMU_GATHER_RCU_TABLE_FREE
