@@ -36,7 +36,9 @@ nix = { version = "0.29", default-features = false, features = ["fs", "process",
 libc = "0.2"
 
 [dev-dependencies]
-# Table-driven config-merge tests want no extra deps; std::assert_eq is enough.
+# tempfile backs the precedence regression tests that materialize
+# a real TOML config file (see config.rs::tests). No runtime dep.
+tempfile = "3"
 
 [profile.release]
 # Small, fast, distro-friendly: keep symbols for debuginfo

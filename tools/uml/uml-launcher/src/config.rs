@@ -47,6 +47,16 @@ impl Default for Config {
 
 /// CLI-provided overlay: only fields the user set. figment merges
 /// this as the highest-priority provider.
+///
+/// Every CLI field is Option<_> and `skip_serializing_if =
+/// "Option::is_none"`: if the user did not pass the flag, the
+/// overlay contributes nothing and the lower-priority layers
+/// (env, TOML, Config::default) decide the value. This is what
+/// keeps CLI > env > file > defaults actually working. If a field
+/// were passed as a bare String with a clap default_value, clap
+/// would always populate it, the overlay would always serialize
+/// it, and the TOML/env layers would never be visible to the
+/// merged output.
 #[derive(Serialize, Default)]
 struct CliOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,8 +65,8 @@ struct CliOverlay {
     init: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mem: Option<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     console: Option<Console>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,10 +83,8 @@ impl From<&RunArgs> for CliOverlay {
             kernel: args.kernel.clone(),
             init: args.init.clone(),
             mem: args.mem.clone(),
-            // `root` has a clap default, so empty-string check
-            // won't fire; we always pass through.
             root: args.root.clone(),
-            console: Some(args.console),
+            console: args.console,
             forkserver: args.forkserver,
             append: args.append.clone(),
             dry_run: args.dry_run,
@@ -125,8 +133,8 @@ mod tests {
             kernel: Some(PathBuf::from(k)),
             init: None,
             mem: None,
-            root: "hostfs".to_string(),
-            console: Console::Stdio,
+            root: None,
+            console: None,
             forkserver: None,
             append: Vec::new(),
             config: None,
@@ -175,5 +183,52 @@ mod tests {
         args.append = vec!["quiet".to_string(), "foo=bar".to_string()];
         let cfg = load(&args).unwrap();
         assert_eq!(cfg.append, vec!["quiet", "foo=bar"]);
+    }
+
+    /// Regression: root and console default through the CLI layer
+    /// without silently clobbering lower-priority overlays. When
+    /// the user omits `--root` / `--console`, the CliOverlay must
+    /// serialize them as absent so a TOML file's `root =
+    /// "/dev/ubda"` or `console = "null"` is visible to the
+    /// merged Config. Previously these were bare String/enum with
+    /// clap defaults, which defeated the precedence chain.
+    #[test]
+    fn toml_overrides_apply_when_cli_absent() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "kernel = \"/tmp/linux\"\nroot = \"/dev/ubda\"\nconsole = \"null\"\n"
+        )
+        .unwrap();
+
+        let mut args = run_args_with_kernel("");
+        args.kernel = None; // let TOML provide kernel too
+        args.config = Some(f.path().to_path_buf());
+
+        let cfg = load(&args).unwrap();
+        assert_eq!(cfg.root, "/dev/ubda");
+        assert!(matches!(cfg.console, Console::Null));
+    }
+
+    #[test]
+    fn cli_overrides_toml_for_root_and_console() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "kernel = \"/tmp/linux\"\nroot = \"/dev/ubda\"\nconsole = \"null\"\n"
+        )
+        .unwrap();
+
+        let mut args = run_args_with_kernel("");
+        args.kernel = None;
+        args.config = Some(f.path().to_path_buf());
+        args.root = Some("hostfs".to_string());
+        args.console = Some(Console::Stdio);
+
+        let cfg = load(&args).unwrap();
+        assert_eq!(cfg.root, "hostfs");
+        assert!(matches!(cfg.console, Console::Stdio));
     }
 }

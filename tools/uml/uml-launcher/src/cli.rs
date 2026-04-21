@@ -82,12 +82,18 @@ pub struct RunArgs {
 
     /// Root filesystem mode: `hostfs` (default) or a path to a
     /// ubd image (not yet wired in v1 — hostfs only).
-    #[arg(long, env = "UML_ROOT", default_value = "hostfs")]
-    pub root: String,
+    ///
+    /// Left as Option<_> with no clap default so TOML/env layers
+    /// can override; the final default lives in Config::default().
+    #[arg(long, env = "UML_ROOT")]
+    pub root: Option<String>,
 
     /// Console wiring for the UML kernel.
-    #[arg(long, value_enum, default_value_t = Console::default())]
-    pub console: Console,
+    ///
+    /// Left as Option<_> with no clap default so TOML/env layers
+    /// can override; the final default lives in Config::default().
+    #[arg(long, value_enum)]
+    pub console: Option<Console>,
 
     /// Plumb host fds 198 (ctl) and 199 (status) into the UML
     /// child for the C-09 AFL forkserver protocol. The CTL fd is
