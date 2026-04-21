@@ -705,3 +705,53 @@ Follow-up code change (this series): extend
 `signals_enabled == 1` at ready-point entry. Fails loud when a
 future caller enters an already-gated critical section; the
 assertion is cheap and has zero false-positives today.
+
+## Post-landing validation (2026-04-20)
+
+Evidence for the "landed v1" status header above. Gathered
+after commits 1 through 6 shipped; this section is the
+concrete backing for AGENT-PROMPT §5's "Include concrete
+evidence (test counts, selftest names, perf deltas)."
+
+**Q1 quality gate (research profile).** gcc/clang/sparse all
+clean vs committed baseline. smatch had two stochastic drifts
+(one line-shift in `arch/um/kernel/mem.c` from the C-09 3b
+KASAN-shadow-registration insertion; one `__fake_return_0x…`
+hex-id change that smatch emits non-deterministically);
+baseline refreshed in commit `b2921ed433c4`. Zero real
+regressions introduced by the C-09 series.
+
+**Boot matrix.** `Documentation/virt/uml/redesign/scripts/
+uml-boot-matrix.sh` run post-landing: **12/12 configs pass**
+across `PTRACE_ONLY`, `SECCOMP_ONLY`, and `DYNAMIC` backend
+modes with their respective default, force, and legacy
+override variants. Summary line: "OK: all 12 configs built
+clean and booted". No C-09 changes surfaced as boot-time
+regressions on any backend.
+
+**Functional selftest.** `tools/testing/selftests/um/
+snapshot-smoke/run-snapshot-smoke.sh` against the fuzz-profile
+build (`make ARCH=um uml/fuzz && make ARCH=um`) exits 0:
+  - Part A: `SNAPSHOT_SMOKE: PASS state_version=1 ready=present`.
+  - Part B: `DRV: PASS pid=<N> status=0x0` — full AFL
+    forkserver handshake + fork + status round-trip completes
+    end-to-end on the real fuzz defconfig binary.
+
+**v1 ceiling, honestly recorded.** A worker can run short non-
+blocking guest programs (trivial `execve` + exit) per 3d-c.
+Sustained fuzz on blocking guest syscalls is gated on the v2
+freezer-cgroup design per D41/D42 — not a regression, the
+pre-landing scope. `D42` Status line records this limit.
+
+**What was NOT tested post-landing.**
+  - `uml-perf-compare.sh` — C-09 doesn't touch a hot path
+    (forkserver runs once on ready-point entry; zero cost to
+    non-fuzz profiles that don't select the Kconfig). Per
+    AGENT-PROMPT §4 the perf comparison is only required for
+    hot-path changes; skipped with cause.
+  - Sustained multi-iteration fuzz beyond what 3d-c allows;
+    out of scope per the v1 ceiling.
+
+The above validation run was doc-level; no code changes
+needed. This section exists so future pickers see concrete
+evidence alongside the "landed v1" claim, not just assertion.
