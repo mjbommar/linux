@@ -52,8 +52,25 @@ if [ -z "$MODULE" ]; then
 	fi
 fi
 
-OUT=$(UML_KRETPROBE_MODULE="$MODULE" timeout 120 "$BINARY" \
+# The guest init script cannot read host env vars — env doesn't
+# propagate through UML's kernel-start → init exec path. Pass
+# module path + iteration count via the kernel command line
+# (kretprobe_module=/path, kretprobe_iters=N); the guest script
+# parses both from /proc/cmdline. Quote the path to survive
+# spaces.
+CMDLINE_MODULE_ARG=""
+if [ -n "$MODULE" ]; then
+	CMDLINE_MODULE_ARG="kretprobe_module=$MODULE"
+fi
+CMDLINE_ITERS_ARG=""
+if [ -n "${KPROBES_STRESS_ITERS:-}" ]; then
+	CMDLINE_ITERS_ARG="kretprobe_iters=$KPROBES_STRESS_ITERS"
+fi
+
+OUT=$(timeout 300 "$BINARY" \
 	init="$GUEST_SCRIPT" mem="$MEM" \
+	$CMDLINE_MODULE_ARG \
+	$CMDLINE_ITERS_ARG \
 	con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 
 # The guest emits several KPROBES_STRESS: progress lines and

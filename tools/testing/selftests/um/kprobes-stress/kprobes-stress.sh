@@ -32,11 +32,21 @@
 ITERS=${KPROBES_STRESS_ITERS:-200}
 MODULE=${UML_KRETPROBE_MODULE:-}
 
-echo "KPROBES_STRESS: init running iters=$ITERS"
-
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
 mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+# Env vars don't propagate through UML's kernel-start → init exec
+# path. Allow the host-side runner to override ITERS via the
+# kernel command line (kretprobe_iters=N); the env var still
+# works for manual invocations.
+CMDLINE_ITERS=$(cat /proc/cmdline 2>/dev/null \
+	| tr ' ' '\n' | sed -n 's/^kretprobe_iters=//p' | head -1)
+if [ -n "$CMDLINE_ITERS" ] && [ "$CMDLINE_ITERS" -gt 0 ] 2>/dev/null; then
+	ITERS="$CMDLINE_ITERS"
+fi
+
+echo "KPROBES_STRESS: init running iters=$ITERS"
 
 if [ ! -d /sys/kernel/debug/kprobes ]; then
 	echo "KPROBES_STRESS: SKIP debugfs/kprobes not mounted (CONFIG_KPROBES missing?)"
@@ -44,6 +54,18 @@ if [ ! -d /sys/kernel/debug/kprobes ]; then
 	exit 0
 fi
 
+if [ -z "$MODULE" ] || [ ! -f "$MODULE" ]; then
+	# Environment variables don't propagate from the host into
+	# the UML guest's init process — kernel cmdline is the portable
+	# channel. Try kretprobe_module=/path/to/ko on /proc/cmdline
+	# first (set by run-kprobes-stress.sh), then fall back to a
+	# few well-known build-tree locations.
+	CMDLINE_MODULE=$(cat /proc/cmdline 2>/dev/null \
+		| tr ' ' '\n' | sed -n 's/^kretprobe_module=//p' | head -1)
+	if [ -n "$CMDLINE_MODULE" ] && [ -f "$CMDLINE_MODULE" ]; then
+		MODULE="$CMDLINE_MODULE"
+	fi
+fi
 if [ -z "$MODULE" ] || [ ! -f "$MODULE" ]; then
 	# Fall back to a couple of common build-tree locations.
 	for cand in \
