@@ -138,11 +138,20 @@ level table. Summary:
   - C-01 defconfig: landed 2026-04-18
   - C-02 KFENCE: landed 2026-04-18
   - C-03 KCSAN: landed 2026-04-18
-  - C-04 kprobes: partially landed 2026-04-20 (commit 3 deferred
-    per D34 pending upstream fgraph work)
+  - C-04 kprobes: partially landed 2026-04-20 (commits 1+2
+    + commit 3a strip infrastructure 2026-04-21; commit 3b —
+    the actual HAVE_FUNCTION_GRAPH_TRACER flip + trampolines —
+    deferred one session pending an atomic-context fix in
+    prepare_ftrace_return, see D34 addendum-3)
   - C-05 ftrace: landed 2026-04-19
-  - C-06 BPF JIT: deferred per D43; 2 upstream-bound hygiene
-    commits landed on-branch
+  - C-06 BPF JIT: landed v1 2026-04-21 (option A per D43
+    fifth-view — UML consumes arch/x86/net/bpf_jit_comp.c with
+    UML-local shim headers + reg2pt_regs[] CONFIG_UM branch;
+    `uml/research` profile now enables CONFIG_BPF_SYSCALL +
+    CONFIG_BPF_JIT out of the box). Option B2 portable-emitter
+    refactor tracked separately as task #68. Two upstream-bound
+    hygiene commits (e2b686c962, 5b95b1bb3e) remain staged in
+    `upstream-patches/bpf-hygiene-v1/`.
   - C-07 KMSAN: design-locked per D44's four-probe investigation;
     implementation queued on a map-on-demand arch callback +
     LKML coordination

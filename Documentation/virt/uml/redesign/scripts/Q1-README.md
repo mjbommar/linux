@@ -41,9 +41,10 @@ If the diff shows regressions, fix them and rerun. If it shows improvements, low
 
 ## Per-profile notes
 
-- **research** is the recommended Q1 target — it has the largest configured surface (KASAN + UBSAN + KFENCE + FTRACE + KCOV + …) so it exercises the most code paths through each tool.
+- **research** is the default Q1 target — it has the largest non-KCOV configured surface (KASAN + UBSAN + KFENCE + FTRACE + kprobes + BPF JIT + …) so it exercises the most code paths through each tool. KCOV is intentionally **off** in `research` per D31 (the KCOV + FUNCTION_TRACER + stop_machine interaction wedges under load); run Q1 against `fuzz` or `fuzz-deep` when you need to cover KCOV-on build paths.
 - **sandbox** is the fastest (smallest config; ~3 min for gcc alone). Use for quick mechanical checks.
 - **race** is the only profile with KCSAN; run Q1 on it occasionally to catch any KCSAN-triggered build regressions.
+- **fuzz / fuzz-deep** are the only profiles with KCOV; the Q1 default does not cover KCOV. Run `uml-quality-q1.sh fuzz` explicitly before touching anything in `kernel/kcov.c`, the forkserver, or the sanitizer coverage plumbing.
 - All profiles must pass `gcc` and `clang` builds; the `sparse`/`smatch` warning sets vary per profile (each surfaces different code).
 
 ## Cost on a 4-CPU host

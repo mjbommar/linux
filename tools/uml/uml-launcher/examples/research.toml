@@ -1,7 +1,10 @@
 # uml-launcher config for the research profile.
 #
 # The research profile turns on the debug + introspection stack —
-# KASAN, KCOV, ftrace, kprobes — for hands-on kernel feature work.
+# KASAN, KFENCE, ftrace, kprobes, BPF JIT — for hands-on kernel
+# feature work. KCOV is intentionally OFF in this profile (see
+# the D31 rationale and arch/um/configs/profiles/research.config
+# comments); use uml/fuzz or uml/fuzz-deep when you need KCOV.
 # Slower boot than fuzz; not appropriate for production.
 #
 # Pair this with:

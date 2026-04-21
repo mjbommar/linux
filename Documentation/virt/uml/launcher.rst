@@ -82,8 +82,10 @@ Copy-paste starting points for common profiles ship in
 ``tools/uml/uml-launcher/examples/``:
 
 * ``fuzz.toml`` — fuzz-profile binary + forkserver-ready init.
-* ``research.toml`` — research-profile (KASAN/KCOV/ftrace/kprobes)
-  interactive shell.
+* ``research.toml`` — research-profile (KASAN/KFENCE/ftrace/
+  kprobes + BPF JIT) interactive shell. Note: KCOV coverage is
+  intentionally off in ``research`` (see the profile doc for
+  rationale); use ``fuzz`` / ``fuzz-deep`` when KCOV is needed.
 * ``sandbox.toml`` — sandbox-profile v1 shape (v2 will add
   per-device isolation declarations).
 * ``dev.toml`` — daily-driver defconfig + ``/bin/sh``.
