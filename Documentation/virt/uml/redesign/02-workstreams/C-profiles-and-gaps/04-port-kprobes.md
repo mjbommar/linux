@@ -340,28 +340,41 @@ are closed).
 
 ### Commit 5 — kprobes-stress selftest
 
-Stress harness for the kprobe / kretprobe / (eventual)
-function_graph surface. Originally framed as empirical
-validation of D27 (function_graph racing SIGALRM); with graph
-deferred per D34, the immediate value of this selftest is the
-kretprobes regression guard, with graph exercise written but
-gated on `CONFIG_FUNCTION_GRAPH_TRACER=y` so the harness is
-ready the moment commit 3 lands.
+**Status: landed 2026-04-21** (commit `8a6f5087d03c`). Stress
+harness for the kprobe / kretprobe / (eventual) function_graph
+surface. With graph deferred to 3b, the immediate value of this
+selftest is the kretprobes regression guard; graph exercise
+remains `graph=deferred` until 3b flips the Kconfig.
 
 - `tools/testing/selftests/um/kprobes-stress/`: guest-side
-  script registers kretprobes on hot functions (`kernel_clone`,
-  `do_sys_openat2`, `ksys_read`), runs a syscall-heavy
-  workload (`ls /` in a loop), asserts no lockdep splat / no
-  KASAN report / no kernel oops after 10 000 iterations. When
-  `CONFIG_FUNCTION_GRAPH_TRACER=y`, additionally enables
-  `function_graph` and stresses both surfaces together. Reports
-  `KPROBES_STRESS: PASS iters=10000 lockdep=clean kasan=clean
+  script registers a kretprobe on `kernel_clone` via
+  `samples/kprobes/kretprobe_example.ko`, runs a fork-heavy
+  workload (`/bin/true` in a loop), asserts no
+  BUG/Oops/WARN/panic/Segfault-with-no-mm after N iterations.
+  Reports `KPROBES_STRESS: PASS iters=N fires=M errors=0
   graph=<on|deferred>`.
 - Pattern mirrors the existing `ftrace-smoke` selftest
   (host-side launcher, guest-side init script, PASS/FAIL line).
 - Validates that C-04's landed commits (1a–1d + 2) don't
   regress under repeated workload. When someone unblocks
-  commit 3, re-running this harness is the green-or-red gate.
+  commit 3b, the `graph=deferred` token flips to `graph=on`
+  and the same harness gates that landing too.
+
+Validation:
+- `arch/um/configs/profiles/research.config` now enables
+  `CONFIG_SAMPLES=y` + `CONFIG_SAMPLE_KPROBES=m` +
+  `CONFIG_SAMPLE_KRETPROBES=m` so `kretprobe_example.ko`
+  builds alongside the kernel.
+- Host runner passes module path + iteration count via the
+  UML kernel command line (`kretprobe_module=/path`,
+  `kretprobe_iters=N`) because UML's kernel-start → init exec
+  path drops env vars; guest script parses both from
+  `/proc/cmdline`.
+- 200-iteration default: `PASS iters=200 fires=204 errors=0`.
+- 2000-iteration stress: `PASS iters=2000 fires=227 errors=0`.
+  (Fire count compresses at high iteration counts because the
+  dmesg ring buffer rolls; PASS condition is `fires >= 1` with
+  no observed kernel error, which remains exact.)
 
 ### Commit 6 — docs + landed status
 
