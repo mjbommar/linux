@@ -2075,6 +2075,58 @@ graph held.
 - `kernel/kthread.c`, `kernel/smpboot.c` — the generic kthread
   entrypoints that leak graph pushes.
 
+### 2026-04-21 addendum — partial resolution under D45
+
+D45 (in-fork scope policy, 2026-04-21) re-classifies "cross-
+subsystem change with tracing-maintainer sign-off required" as
+"implement on the fork now; track the merge-surface-area growth
+for a future upstream conversation." That lifts the scope bar on
+D34's alternative (1) (mark `kthread()` and `smpboot_thread_fn()`
+`notrace`) — the only blocker that kept commit 3 held in the
+first place.
+
+Action taken 2026-04-21: apply alternative (1) to the fork. Two
+`notrace` annotations in `kernel/kthread.c::kthread` and
+`kernel/smpboot.c::smpboot_thread_fn`, both with a short comment
+explaining the generic-kernel-vs-UML graph-trampoline mismatch.
+Pair with a restoration of the stashed `c04-c3-wip-after-arch-
+strip-still-crashes` arch-level work (sources (1) and (2) — patch-
+site stripping in `arch/um/kernel/Makefile` and friends, plus the
+`ftrace_graph_caller` + `return_to_handler` trampolines in
+`arch/um/kernel/mcount.S` and `prepare_ftrace_return` in
+`arch/um/kernel/ftrace.c`). Together those close all three of
+D34's distinct leak sources.
+
+**Merge surface growth tracked here (per D45):** two notrace
+annotations in generic kernel files. If upstream accepts those
+(narrow, surgical, matches the D34 rationale), merge surface
+shrinks to zero. If upstream declines (they keep function_graph
+working on-native despite the same theoretical issue because the
+ret_stack walk doesn't dereference stale entries on x86 native),
+the fork carries two annotations indefinitely — acceptable cost.
+
+**Revisit triggers updated:**
+
+- If alternative (3) (soften `__ftrace_return_to_handler`'s pop-
+  failure to return 0 instead of panicking) lands upstream, the
+  two `notrace` annotations become unnecessary. Consider retiring
+  them on the fork at that point.
+- If upstream adopts the two `notrace` annotations, the fork's
+  diff to upstream drops to just the arch/um/ changes (which are
+  UML-specific by construction).
+
+Closes task #34 (notrace + patchable-function-entry workaround)
+— the `patchable_function_entry(0,0)` attribute from compiler_
+types.h's notrace expansion under `CC_USING_PATCHABLE_FUNCTION_
+ENTRY` IS respected by both toolchains at the mcount-location
+recording level (recordmcount scans `__patchable_function_
+entries`, and the attribute with args (0,0) tells the compiler to
+emit the function's own entry with zero patchable bytes AND not
+record it in that section). The task #34 blocker was real but
+scoped to the lateral question of "what does the 5-byte NOP look
+like"; it is not a blocker for the functional goal of "graph
+tracer doesn't leak ret_stack entries into these functions."
+
 ---
 
 ## D35: C-09 v1 is a cooperative AFL-style forkserver; CRIU-style snapshot-to-disk deferred to v2
