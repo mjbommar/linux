@@ -3945,6 +3945,92 @@ Scratch code (not pushed):
 All reverted from the working tree; documented here for the
 next time someone picks it up.
 
+### Third probe (2026-04-21, docs-only): generic KMSAN init contract
+
+Researched `mm/kmsan/` to understand the init sequence the second
+probe's scaffold was violating. Findings that materially shrink
+the remaining task-#67 scope:
+
+**KMSAN has two canonical init entry points**, both in
+`mm/kmsan/init.c`:
+
+  - `kmsan_init_shadow()` (line 75): allocates per-range shadow
+    metadata via `kmsan_record_future_shadow_range()` +
+    `kmsan_init_alloc_meta_for_range()`. Runs from generic
+    `mm_core_init()` at `mm/mm_init.c:2739`, between
+    `report_meminit()` and `stack_depot_early_init()`.
+  - `kmsan_init_runtime()` (line 229): enables KMSAN at runtime
+    (flips the "KMSAN is live" switch). Runs from
+    `mm_core_init()` at `mm/mm_init.c:2768`, after
+    `vmalloc_init()` + `pti_init()`.
+
+**Arch code does NOT wire its own kmsan_init** — the generic
+init sequence already exists. Arch provides:
+
+  1. **VA-layout macros** (`KMSAN_VMALLOC_{SHADOW,ORIGIN}_START`,
+     `KMSAN_MODULES_{SHADOW,ORIGIN}_START`). The second-probe
+     scaffold got these right in `arch/um/include/asm/pgtable.h`.
+  2. **Arch hooks** (`arch_kmsan_get_meta_or_null`,
+     `kmsan_virt_addr_valid`). Got these right in
+     `arch/um/include/asm/kmsan.h`.
+  3. **For UML specifically: an early-boot mmap of the shadow
+     + origin VA regions** so the VA exists before the generic
+     init code tries to allocate into it. This is analogous to
+     KASAN's two-phase init — `.kasan_init` section pointer
+     mmaps the shadow VA pre-main(), then `kasan_init_generic()`
+     populates it from `arch_mm_preinit`.
+
+**The second-probe hang was a direct consequence of doing item 3
+wrong.** The scaffold's `kmsan_init()` (registered via
+`.kasan_init` section pointer) called
+`kasan_map_memory(KMSAN_VMALLOC_SHADOW_START, UM_KMSAN_VMALLOC_SIZE)`
+— monolithic VA reservation of 32 GB — BEFORE the host-level
+kernel is ready to catch any compiler-inserted `__msan_*` call
+that would fire during `kasan_map_memory` itself. If any
+KMSAN-instrumented code path lies inside `kasan_map_memory` or
+its host-syscall wrappers, the hook dereferences shadow that
+isn't yet mapped (the mmap completes only after the call
+returns).
+
+**The fix shape for task #67:**
+
+  - Add `KMSAN_SANITIZE := n` to `arch/um/kernel/Makefile`
+    entry for `mem.o` (and any other TU touched by the early
+    phase 1 init). This matches the KASAN_SANITIZE pattern.
+  - Keep the `.kasan_init` section pointer or move to a
+    separate `.kmsan_init` linker section; order matters less
+    than the SANITIZE-off setting. Both are UML-only.
+  - Do NOT write a UML-specific `kmsan_init()` equivalent of
+    `kmsan_init_shadow()`/`_runtime()` — those are generic
+    and fire on their own. Arch's job is just to make the VA
+    available and provide the hooks.
+
+This finding reduces the task-#67 scope from "1-2 days focused
+debug" to "probably half a day": rebuild the second-probe
+scaffold + add `KMSAN_SANITIZE := n` to the right Makefile
+entries + retry. If that's insufficient, the next thing to
+check is whether any `__msan_*` call fires in the host-syscall
+wrappers (`arch/um/os-Linux/mem.c`'s `os_map_memory` etc.) —
+those TUs have `KASAN_SANITIZE := n` already but the second
+probe added `KMSAN_SANITIZE := n` only to `os-Linux/Makefile`,
+NOT to `arch/um/kernel/Makefile` where mem.c lives.
+
+No code changes in this session for this finding. The next
+picker of task #67 rebuilds the second-probe scaffold (files
+listed above), adds the SANITIZE lines to the right Makefiles,
+and almost certainly unblocks.
+
+**Cross-references:**
+- `mm/kmsan/init.c:75,229` — kmsan_init_shadow + runtime.
+- `mm/mm_init.c:2739,2768` — generic call sites.
+- `include/linux/kmsan.h:38-47` — canonical contract.
+- `arch/um/kernel/mem.c` — where UML's KASAN two-phase init
+  lives; KMSAN follows the same pattern.
+- KASAN's `arch/um/include/asm/kasan.h` + `.kasan_init` section
+  pointer in mem.c — the template the second-probe scaffold
+  correctly mirrored for VA-layout but incorrectly duplicated
+  for the init-sequence itself.
+
 ---
 
 ## (Future entries here, as decisions are made)
