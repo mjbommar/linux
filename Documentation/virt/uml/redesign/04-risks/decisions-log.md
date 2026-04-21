@@ -3357,7 +3357,18 @@ code and is removed in the same series.
 ## D43: C-06 BPF JIT v1 blocked on three cross-subsystem touches in arch/x86/net/
 
 **Date:** 2026-04-20
-**Status:** Blocked pending user sign-off on cross-subsystem patch.
+**Status:** Deferred (2026-04-20). Two arch-generic hygiene
+fixes landed on this branch (`bpf, x86: explicitly include
+<asm/cpufeature.h>` and `bpf, x86: use instruction_pointer
+helpers in ex_handler_bpf`) as standalone upstream-palatable
+patches; user sign-off captured in the chat ("let's do the
+smaller set now and document the deferral"). These two benefit
+bare-metal x86 regardless of UML and will be submitted to the
+BPF/netdev lists as their own series. The full UML port is
+blocked on D43 addendum's option B2 (portable-emitter refactor
+of arch/x86/net/bpf_jit_comp.c). See §"Status note (2026-04-20,
+deferral with landed hygiene)" at the end of this entry.
+**Original status:** Blocked pending user sign-off on cross-subsystem patch.
 Design doc (`02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md`)
 assumed arch/x86/net/bpf_jit_comp.c would compile unchanged under
 UML; empirical build (C-06 commit 1 attempt) shows three real
@@ -3549,6 +3560,49 @@ it" to "portable-emitter refactor needed; three hygiene fixes
 independently landable upstream." That IS progress — the scope
 is now honest. Future picker starts here rather than at the
 D43 first framing.
+
+### Status note (2026-04-20, deferral with landed hygiene)
+
+User chose the "do the smaller set now and document the
+deferral" path. Action taken:
+
+  1. **Landed** on `uml-redesign-plan` as commit
+     `e2b686c96218` — `bpf, x86: explicitly include
+     <asm/cpufeature.h>`. Hygiene-only; no functional change
+     on x86 defconfig. Validated by rebuilding
+     `arch/x86/net/bpf_jit_comp.o` under x86_64 defconfig +
+     BPF_JIT=y (same `.o` size, clean compile).
+  2. **Landed** on `uml-redesign-plan` as commit
+     `5b95b1bb3e6a` — `bpf, x86: use instruction_pointer
+     helpers in ex_handler_bpf`. Replaces `regs->ip` with
+     `instruction_pointer(regs)` and `instruction_pointer_set(
+     regs, instruction_pointer(regs) + insn_len)`. Same
+     codegen on x86; inline helpers resolve to the same field
+     access. Validated identically.
+  3. **Not landed**: the `arch/um/include/asm/vsyscall.h`
+     stub (VSYSCALL_ADDR = 0). That one only makes sense
+     alongside the actual UML port, which is deferred.
+  4. **Not landed**: any `select HAVE_EBPF_JIT` / Makefile
+     pull of arch/x86/net/ into UML. Those remain deferred
+     until the B2 refactor is upstream.
+
+These two landed commits are **ready for independent LKML
+submission** (BPF + netdev lists, Alexei Starovoitov / Daniel
+Borkmann). Their commit messages were deliberately written in
+upstream-kernel style with no UML references, so they can be
+cherry-picked to a submission branch without rewording.
+
+Once they land upstream, a future C-06 v1 attempt rebases onto
+post-hygiene `arch/x86/net/bpf_jit_comp.c` and has two fewer
+divergences to worry about. The remaining barrier is still
+option B2 (portable-emitter refactor), tracked here and in the
+C-06 design doc.
+
+C-06 status: **deferred**. Next action on this workstream
+requires either (a) someone picking up the B2 refactor as its
+own multi-week project, or (b) a re-scope decision that C-06
+v1 is not shippable without B2 and the redesign schedule
+reflects that.
 
 ---
 

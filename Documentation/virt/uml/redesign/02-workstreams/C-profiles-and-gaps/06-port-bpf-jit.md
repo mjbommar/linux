@@ -1,16 +1,23 @@
 # C-06: Port BPF JIT to UML
 
-**Status:** blocked (2026-04-20) on D43 decision. Empirical
-commit-1 build revealed three real x86-vs-UML divergences in
-`arch/x86/net/bpf_jit_comp.c` that don't fit the U3 mitigation
-plan (see §"Blocker: what the empirical build found" below).
-Options A (UML-side shim, fragile), B (small upstream patch to
-arch/x86/net/, needs LKML sign-off), or C (defer) are spelled
-out in `04-risks/decisions-log.md` D43. Pending user sign-off
-for option B or acceptance of option A's fragility. No code
-pushed. Design-doc shape below describes the landing target; the
-"Commit plan" section below is accurate for whichever option
-lands, with commit 1's mechanics differing between A and B.
+**Status:** deferred (2026-04-20); **two arch-generic hygiene
+fixes landed on-branch and queued for independent upstream
+submission** (`bpf, x86: explicitly include <asm/cpufeature.h>`
+and `bpf, x86: use instruction_pointer helpers in ex_handler_bpf`).
+The full UML port is blocked on a bigger refactor — see D43
+addendum: after the three initial D43 divergences (which the
+two landed hygiene patches + a UML-side `<asm/vsyscall.h>`
+together resolve) the JIT compile reaches a deeper iceberg of
+`arch/x86/kernel/`-internal symbols (`x86_nops[]`,
+`DISABLED_MASK_BIT_SET`, probably more: text_poke / unwind /
+cfi). Option B1 (3-fix patch) does not work alone as initially
+scoped in D43; option B2 (portable-emitter refactor of
+`arch/x86/net/bpf_jit_comp.c` splitting byte-emission from
+x86-host mitigation glue) is the correct long-term shape —
+4-6 weeks, LKML coordination with BPF maintainers. Until B2 is
+in flight or landed, C-06 v1 is explicitly deferred. The two
+hygiene fixes benefit bare-metal x86 independently and are
+ready for LKML submission as standalone patches.
 **Effort:** 3 weeks (budget); see "Reality-check" below — actual
 scope after investigation is closer to **~3 days of disciplined
 work** if the optimistic code-reuse path holds (option B +
