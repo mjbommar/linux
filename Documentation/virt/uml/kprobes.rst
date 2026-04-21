@@ -44,9 +44,11 @@ From inside a booted guest the standard in-tree samples work::
    rmmod kprobe_example
    rmmod kretprobe_example
 
-``bpftrace``'s ``kprobe:`` and ``kretprobe:`` matchers work once the
-workstream C-06 BPF JIT port lands. ``register_kprobe()`` /
-``register_kretprobe()`` from out-of-tree modules work today.
+``bpftrace``'s ``kprobe:`` and ``kretprobe:`` matchers work in the
+``research`` profile as of workstream C-06 v1 (2026-04-21): the
+profile enables ``CONFIG_BPF_SYSCALL`` + ``CONFIG_BPF_JIT``, and
+the UML x86_64 JIT compiles BPF programs natively. ``register_kprobe()``
+/ ``register_kretprobe()`` from out-of-tree modules work today.
 
 How it works
 ============
@@ -89,7 +91,7 @@ auto-promotes to ``CONFIG_KRETPROBES=y`` +
 - ``arch_rethook_fixup_return`` — restores the real return address
   after the handler runs.
 
-Limitations (2026-04-20)
+Limitations (2026-04-21)
 ========================
 
 Three user-visible gaps remain after the C-04 landing:
@@ -107,15 +109,21 @@ Three user-visible gaps remain after the C-04 landing:
   hit). Mid-function probes need ``int3`` regardless. Tracked as a
   Q4-phase follow-up; see D32 for the scope decision.
 
-``HAVE_FUNCTION_GRAPH_TRACER`` is deferred per decisions-log D34.
-  The generic fgraph trampoline assumes every traced function
-  returns via a matching ``ret`` that pops the rewritten parent
-  slot. UML violates that for a class of generic-kernel functions
-  (``kthread()``, ``smpboot_thread_fn()``) that end in ``do_exit``
-  and never return, plus UML-specific longjmp-entered paths. An
-  arch-local workaround would need generic-kernel cooperation or
-  a UML-specific graph shim. Until then, kretprobes cover the
-  return-instrumentation use case.
+``HAVE_FUNCTION_GRAPH_TRACER`` is still off but the path is now
+  partially cleared. Commit 3a of C-04 (2026-04-21) landed the
+  strip infrastructure (``notrace`` on generic ``kthread()`` /
+  ``smpboot_thread_fn()`` plus a narrow set of
+  ``CFLAGS_REMOVE_<file>.o`` strips on UML's signal-dispatch and
+  longjmp-entry TUs), which closes all three leak sources the
+  D34 analysis identified. Commit 3b (the actual Kconfig flip +
+  the ``ftrace_graph_caller`` / ``return_to_handler``
+  trampolines in ``arch/um/kernel/mcount.S``) is deferred one
+  session pending an atomic-context fix in
+  ``prepare_ftrace_return`` — see the D34 2026-04-21 addendum-3.
+  Until then, kretprobes cover the return-instrumentation use
+  case and the kprobes-stress selftest reports
+  ``graph=deferred`` so the eventual 3b landing is gated on the
+  same regression harness.
 
 Blacklist and ``NOKPROBE_SYMBOL``
 =================================
@@ -145,6 +153,32 @@ call ``might_sleep`` primitives. The generic kprobes sanity test
 under ``CONFIG_KPROBES_SANITY_TEST`` (on in the research profile)
 enforces this at boot.
 
+Regression harness
+==================
+
+``tools/testing/selftests/um/kprobes-stress/`` boots a UML binary
+built from the research profile, loads ``kretprobe_example.ko``
+against ``kernel_clone``, runs a fork-heavy workload, and asserts
+that no ``BUG``/``Oops``/``WARNING``/``panic``/``Segfault-with-no-mm``
+appears in ``dmesg`` across N iterations. Host-side driver
+``run-kprobes-stress.sh`` passes module path + iteration count
+through the UML kernel command line
+(``kretprobe_module=/path``, ``kretprobe_iters=N``) because env
+vars don't propagate through UML's kernel-start → init exec
+path.
+
+Typical run::
+
+   KPROBES_STRESS_ITERS=1000 \\
+      UML_BINARY=/tmp/uml-research/linux \\
+      UML_KRETPROBE_MODULE=/tmp/uml-research/samples/kprobes/kretprobe_example.ko \\
+      tools/testing/selftests/um/kprobes-stress/run-kprobes-stress.sh
+
+A clean run reports
+``KPROBES_STRESS: PASS iters=N fires=M errors=0 graph=<on|deferred>``.
+The ``graph=`` token flips to ``on`` once C-04 commit 3b lands;
+for now it's ``deferred``.
+
 Further reading
 ===============
 
@@ -156,4 +190,4 @@ Further reading
 - ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
   — architectural decisions and their rationale.
 - ``tools/testing/selftests/um/kprobes-stress/`` — the regression
-  harness.
+  harness described above.

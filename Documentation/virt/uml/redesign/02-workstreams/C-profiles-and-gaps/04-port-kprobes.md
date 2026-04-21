@@ -1,9 +1,15 @@
 # C-04: Port kprobes to UML
 
 **Status:** partially landed (2026-04-20), commit 3 in a 3a/3b
-split (2026-04-21). HAVE_KPROBES (commits 1a–1d) and HAVE_RETHOOK/
-KRETPROBES (commit 2) are in the tree and tested. Commit 3 is
-split under D45's in-fork scope policy:
+split (2026-04-21), commits 5 + 6 landed 2026-04-21.
+HAVE_KPROBES (commits 1a–1d) + HAVE_RETHOOK/KRETPROBES (commit 2)
+in tree and tested. Commit 5 kprobes-stress selftest PASS at 200
+and 2000 iterations with `errors=0` (commit `8a6f5087d03c`).
+Commit 6 user docs refreshed to match what actually shipped
+(commits `79d0e45b7d79`, this one, and the
+``Documentation/virt/uml/kprobes.rst`` +
+``Documentation/virt/uml/profiles/research.rst`` updates).
+Commit 3 is split under D45's in-fork scope policy:
 - **Source (3) closed** (commit `a2e01ee58c53`, 2026-04-21):
   narrow `notrace` on `kernel/kthread.c::kthread` and
   `kernel/smpboot.c::smpboot_thread_fn`.

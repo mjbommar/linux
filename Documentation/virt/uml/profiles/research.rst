@@ -49,24 +49,44 @@ What's on
   ``DYNAMIC_EVENTS``, ``HIST_TRIGGERS``, and — since workstream
   C-05 — ``FUNCTION_TRACER`` + ``DYNAMIC_FTRACE`` (see
   :doc:`../ftrace` for mechanism and limitations). Function graph
-  (``CONFIG_FUNCTION_GRAPH_TRACER``) is deferred per decisions-log
-  D34: the generic fgraph trampoline's balanced push/pop contract
-  doesn't hold for UML's longjmp-entered tasks and kthreads that
-  end in ``do_exit``. Kretprobes via the rethook shadow stack
+  (``CONFIG_FUNCTION_GRAPH_TRACER``) is still off: C-04 commit 3a
+  (2026-04-21) landed the strip infrastructure that lets graph
+  tracing coexist with UML's longjmp-entered tasks and
+  never-returning kthreads, but commit 3b (the actual Kconfig
+  flip + trampolines) is deferred one session pending an
+  atomic-context fix in ``prepare_ftrace_return``. See
+  decisions-log D34 for the full three-leak-source analysis and
+  the 2026-04-21 addenda. Kretprobes via the rethook shadow stack
   (below) provides a return-instrumentation story in the interim.
 - **Dynamic probes**: since workstream C-04 — ``KPROBES`` (entry
   and mid-function probes via ``int3`` + single-step) and
   ``KRETPROBES`` (return probes via the generic rethook shadow
   stack, auto-selected by ``HAVE_RETHOOK``). ``samples/kprobes/
   kprobe_example.ko`` and ``kretprobe_example.ko`` both load and
-  fire; ``/sys/kernel/debug/kprobes/list`` and ``/sys/kernel/debug/
-  kprobes/blacklist`` work as expected. ``bpftrace``'s
-  ``kprobe:``/``kretprobe:`` matchers are reachable from here
-  once the ``C-06`` BPF JIT port lands. ``KPROBE_EVENTS``
+  fire; ``/sys/kernel/debug/kprobes/list`` and
+  ``/sys/kernel/debug/kprobes/blacklist`` work as expected.
+  ``CONFIG_KPROBES_SANITY_TEST`` is enabled; the kunit sanity
+  suite runs at boot. ``CONFIG_SAMPLE_KPROBES=m`` +
+  ``SAMPLE_KRETPROBES=m`` build the example modules as
+  loadables; the ``tools/testing/selftests/um/kprobes-stress/``
+  selftest uses ``kretprobe_example.ko`` on ``kernel_clone`` to
+  regression-guard the port under a fork-heavy workload
+  (``PASS iters=N fires=M errors=0``). ``KPROBE_EVENTS``
   (tracefs-based probe installation) depends on
   ``HAVE_REGS_AND_STACK_ACCESS_API`` which UML does not yet
-  provide — tracked as a follow-up port. ``CONFIG_KPROBES_SANITY_TEST``
-  is enabled; the kunit sanity suite runs at boot.
+  provide — tracked as a follow-up port.
+- **BPF JIT**: since workstream C-06 v1 (2026-04-21) — UML x86_64
+  consumes ``arch/x86/net/bpf_jit_comp.c`` via UML-local shim
+  headers (option A per decisions-log D43 fifth-view).
+  ``CONFIG_BPF_SYSCALL=y`` + ``CONFIG_BPF_JIT=y`` + ``JIT_ALWAYS_ON``
+  are on by default in this profile, so ``bpftrace``'s
+  ``kprobe:`` / ``kretprobe:`` matchers and any other BPF program
+  type requiring the syscall + JIT are reachable here directly.
+  ``/proc/sys/net/core/bpf_jit_enable`` reads ``1`` in a freshly
+  booted guest. Upstream-bound hygiene commits (e2b686c962,
+  5b95b1bb3e) stay staged under ``Documentation/virt/uml/
+  redesign/02-workstreams/C-profiles-and-gaps/upstream-patches/
+  bpf-hygiene-v1/`` for later LKML coordination.
 - **Coverage**: *none*. ``CONFIG_KCOV`` is explicitly off in
   ``research``; coverage-guided fuzzing lives in the ``fuzz`` and
   ``fuzz-deep`` profiles (which do not enable the function
