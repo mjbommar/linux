@@ -42,25 +42,51 @@ probe_profile() {
 	# the "Run /path/to/init as init process" line (KERN_INFO)
 	# is visible.
 	local rc
+	# probe-features.sh writes its output to both stdout AND
+	# the hostfs path `/tmp/uml-probe-output`. Clear the file
+	# before each run so a stale hit from a prior profile
+	# can't false-positive us.
+	rm -f /tmp/uml-probe-output
+	# Use 512M — fuzz-deep and research carry KASAN + heavy
+	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
+	# 40s timeout — KCSAN (race profile) adds several seconds of
+	# lockdep/selftest init at boot before the probe runs.
+	# panic=0 keeps the kernel from instantly restarting if
+	# init fails to launch, so the failure path's printk output
+	# has a chance to flush to our captured fd before UML exits.
+	# loglevel=8 forces pr_info/debug into the console output so
+	# the "Run /path/to/init as init process" line (KERN_INFO)
+	# is visible.
 	out=$(timeout 40 "$binary" init="$GUEST_SCRIPT" mem=512M \
 		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw \
 		panic=0 loglevel=8 2>&1)
 	rc=$?
 
-	# UML's console delivers CRLF line endings; strip CRs so the
-	# PRESENT/ABSENT tokens compare cleanly downstream.
-	probe=$(echo "$out" | tr -d '\r' |
-		awk '/^PROBE_BEGIN/{on=1;next} /^PROBE_END/{on=0} on{print}')
+	# Prefer the hostfs file — it's written by direct host
+	# write() syscalls and survives UML's exit regardless of
+	# the tty driver's queue state. Fall back to the stdout
+	# capture for environments that don't write to the file
+	# (older probe-features.sh without that contract).
+	# UML's console may deliver CRLF line endings; strip CRs
+	# so the PRESENT/ABSENT tokens compare cleanly downstream.
+	if [ -s /tmp/uml-probe-output ]; then
+		probe=$(tr -d '\r' </tmp/uml-probe-output |
+			awk '/^PROBE_BEGIN/{on=1;next} /^PROBE_END/{on=0} on{print}')
+	else
+		probe=$(echo "$out" | tr -d '\r' |
+			awk '/^PROBE_BEGIN/{on=1;next} /^PROBE_END/{on=0} on{print}')
+	fi
 
-	# If the probe block is missing, the guest never reached
-	# its init script — usually a boot failure, ptrace/seccomp
-	# refusal, or OOM. Emit the raw captured stream on stderr
-	# so the caller's log makes the root cause visible without
-	# a second "what just happened" run. The empty-probe path
-	# is what surfaces in every FAIL-with-UNKNOWN mode of the
-	# assert step; showing the boot log next to those UNKNOWNs
-	# is the single biggest reducer of "is UML broken or is my
-	# config broken" triage time.
+	# If the probe block is missing from both sources, the
+	# guest never reached its init script — usually a boot
+	# failure, ptrace/seccomp refusal, or OOM. Emit the raw
+	# captured stream on stderr so the caller's log makes the
+	# root cause visible without a second "what just happened"
+	# run. The empty-probe path is what surfaces in every
+	# FAIL-with-UNKNOWN mode of the assert step; showing the
+	# boot log next to those UNKNOWNs is the single biggest
+	# reducer of "is UML broken or is my config broken" triage
+	# time.
 	if [ -z "$probe" ]; then
 		{
 			printf '=== %s: probe block missing (UML exit=%d)\n' \
