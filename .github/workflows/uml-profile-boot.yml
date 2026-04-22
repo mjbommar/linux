@@ -1,25 +1,31 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # GitHub Actions CI for workstream C-01 profile defconfigs.
+# Four sequential gates per matrix profile:
 #
-# Build-only guard: for each matrix profile, run
-# `make ARCH=um uml/<profile>` to merge the fragment with the
-# base defconfig, then `make -j` to build vmlinux + linux, and
-# assert the resulting binary exists and is non-empty. A runtime
-# boot validator exists in-tree
-# (`tools/testing/selftests/um/profiles/run-profile-checks.sh`)
-# and runs well locally, but UML boot under GHA's runner image
-# turns out to have a diagnostic-opaque early-exit that is not
-# worth chasing as a CI blocker — kernel prints "VFS: Mounted
-# root (hostfs)" and the UML process exits 0 before
-# `run_init_process()` prints its "Run /path/to/init as init
-# process" line, with no panic and no `/dev/kmsg` breadcrumb
-# reaching stdout. Leave the validator as in-tree tooling for
-# developer workflows; the CI job catches the regressions that
-# matter most: profile fragments that reference options that
-# no longer exist, kconfig merges that produce invalid
-# `.config`s, or common-option changes that break any profile's
-# build.
+#   1. Build: `make ARCH=um uml/<profile>` + `make -j` →
+#      asserts binary exists, is non-empty, and that the
+#      merged .config carries the fragment's distinguishing
+#      CONFIG_* options. Catches Kconfig drift.
+#   2. Marker boot: busybox-static init writes a marker file
+#      via hostfs, then halts. Proves UML boots to userspace
+#      and exec()s init through the dynamic-loader-free path.
+#   3. Userspace smoke: python3 runs twice inside UML,
+#      exercising the full dynamic-linker + libpython +
+#      syscall-translation stack via hostfs.
+#   4. Profile-features validator: probe-features.sh probes
+#      /proc, /sys, /sys/kernel/tracing, /sys/kernel/debug
+#      and asserts the matrix profile's FEATURE set matches
+#      the expected contract documented in
+#      03-profiles/*.md. Catches fragment-flag-regressions
+#      that happen to still compile.
+#
+# Getting UML to boot reliably on GHA runners took some
+# surgery: lift kernel.apparmor_restrict_unprivileged_userns
+# (Ubuntu 24.04 default), use `con=fd:0,fd:1 ssl=null` not
+# `con=null`, statically-linked init for gate 2, pass
+# `noreboot` + route all guest output to hostfs files since
+# UML's tty driver discards the queue when halt_skas unwinds.
 #
 # Fork-only workflow (kernel tree's top-level `.gitignore`
 # excludes dotfiles, so this ships via `git add -f`).
@@ -383,4 +389,39 @@ jobs:
             fi
           fi
           echo "::error::userspace-smoke did not PASS (rc=$rc)"
+          exit 1
+
+      # ---- profile-features validator (3rd gate) ----
+      #
+      # Runs the in-tree probe-features.sh inside UML and
+      # asserts the matrix profile delivers the exact FEATURE
+      # set its documentation promises (debugfs_um present for
+      # prod-with-hooks, absent for sandbox, etc.). This is the
+      # "profile fragments actually take effect and produce the
+      # advertised surface" gate — the thing the C-01 harness
+      # was designed for.
+      #
+      # The harness now writes probe output to
+      # /tmp/uml-probe-output via hostfs, so we can use it
+      # directly. We run only the current matrix profile; the
+      # harness's SKIP-on-missing-binary path handles the
+      # other 8 profiles that this leg didn't build.
+      - name: Probe-features validator (per profile)
+        run: |
+          set +e
+          bash tools/testing/selftests/um/profiles/run-profile-checks.sh 2>&1 \
+            | tee /tmp/profile-checks.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "---- /tmp/uml-probe-output (guest probe output via hostfs) ----"
+          if [ -s /tmp/uml-probe-output ]; then
+            cat /tmp/uml-probe-output
+          else
+            echo "(empty — probe block never written)"
+          fi
+          if grep -qE "^PASS ${{ matrix.profile }}( |$)" /tmp/profile-checks.log; then
+            echo "::notice::profile-features validator PASS for ${{ matrix.profile }}"
+            exit 0
+          fi
+          echo "::error::profile-features validator did not PASS for ${{ matrix.profile }} (rc=$rc)"
           exit 1
