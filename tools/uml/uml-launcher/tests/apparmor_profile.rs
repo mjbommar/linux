@@ -56,14 +56,45 @@ fn profile_preprocesses_cleanly() {
     );
 }
 
-// A `apparmor_parser -Q` (compile without load) test would be
-// the stronger check, but `-Q` exits non-zero when
-// /var/cache/apparmor isn't writable by the test user — a
-// cosmetic cache failure distinct from the correctness gate we
-// want to assert. `--preprocess` exercises the same syntax
-// validation without touching the cache; rely on that as the
-// automated check, and leave the full compile to installation
-// time.
+#[test]
+fn profile_compiles_without_loading() {
+    // `-Q` is the strongest offline check short of actually
+    // loading the profile into the kernel: it runs every
+    // stage of the pipeline — lex, parse, variable expansion,
+    // DFA construction, optimization — and only stops at
+    // kernel-load. `-K` (skip cache) keeps the cache
+    // directory out of the picture so a non-writable
+    // /var/cache/apparmor on the test runner doesn't turn
+    // into a cosmetic failure.
+    //
+    // This is the test that caught `@{exec_path}` being
+    // undefined in the initial profile; `--preprocess` alone
+    // wouldn't have (it stops before variable expansion).
+    // Every future profile edit flows through here as a
+    // precondition for shipping.
+    if !apparmor_parser_available() {
+        eprintln!(
+            "apparmor_parser not found on PATH; skipping profile compile test"
+        );
+        return;
+    }
+
+    let path = profile_path();
+    let output = Command::new("apparmor_parser")
+        .arg("-Q")
+        .arg("-K")
+        .arg(&path)
+        .output()
+        .expect("run apparmor_parser -Q -K");
+
+    assert!(
+        output.status.success(),
+        "apparmor_parser -Q -K failed for {}\nstdout:\n{}\nstderr:\n{}",
+        path.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn profile_names_expected_subprofiles() {

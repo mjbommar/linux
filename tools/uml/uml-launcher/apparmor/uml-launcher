@@ -29,6 +29,15 @@
 
 abi <abi/3.0>,
 
+# Expected install paths. Packagers installing to a
+# non-standard prefix (e.g., /opt/uml/bin/uml-launcher) should
+# override this via /etc/apparmor.d/tunables/local/uml-launcher
+# rather than editing the profile in place. The bare list here
+# is what the upstream profile asserts: the launcher ships as
+# an OS package into /usr/bin, or as a developer build into
+# /usr/local/bin.
+@{exec_path} = /usr/bin/uml-launcher /usr/local/bin/uml-launcher
+
 profile uml-launcher @{exec_path} {
   include <abstractions/base>
   include <abstractions/consoles>
