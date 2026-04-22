@@ -35,14 +35,23 @@ if [ ! -d "$BASELINE_DIR" ]; then
 fi
 
 # Extract the warning/error lines from a build log, normalize away
-# absolute source paths so the diff is portable. Case-insensitive
-# so modpost's uppercase `WARNING:` lines are in the baseline too
+# run-to-run noise so the diff is stable. Case-insensitive so
+# modpost's uppercase `WARNING:` lines are in the baseline too
 # (see uml-quality-q1.sh note).
+#
+# Normalizations applied (keep in sync with uml-quality-q1-baseline.sh):
+#   $SRC/               — absolute source path → portable relative.
+#   __fake_return_0x... — smatch's synthetic "fake return" names
+#                         carry an in-process pointer and re-hash
+#                         per build. Collapse to a stable token so
+#                         the same finding doesn't show as both a
+#                         regression (new hash) and an improvement
+#                         (old hash) every run.
 extract() {
 	local log=$1
 	[ -f "$log" ] || return 0
 	grep -iE '\bwarning:|\berror:' "$log" |
-		sed -E "s|$SRC/||g" |
+		sed -E "s|$SRC/||g; s|__fake_return_0x[0-9a-f]+|__fake_return|g" |
 		LC_ALL=C sort -u
 }
 

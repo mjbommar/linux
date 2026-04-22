@@ -29,8 +29,17 @@ for chk in gcc clang sparse smatch; do
 		echo "$chk: no log ($log) — skipping"
 		continue
 	fi
+	# Normalize away run-to-run noise before snapshotting:
+	#   $SRC/               — absolute source path (portable
+	#                         baselines).
+	#   __fake_return_0x... — smatch's synthetic "fake return"
+	#                         identifiers embed an in-process
+	#                         pointer; the same finding re-reports
+	#                         under a different hash every build.
+	#                         Collapse to a stable token so the
+	#                         baseline doesn't churn.
 	grep -E '\bwarning:|\berror:' "$log" |
-		sed -E "s|$SRC/||g" |
+		sed -E "s|$SRC/||g; s|__fake_return_0x[0-9a-f]+|__fake_return|g" |
 		LC_ALL=C sort -u > "$out"
 	printf '%s: baseline updated (%d lines) -> %s\n' \
 		"$chk" "$(wc -l < "$out")" "$out"

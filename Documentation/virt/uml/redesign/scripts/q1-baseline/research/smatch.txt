@@ -88,7 +88,7 @@ kernel/printk/printk.c:3504:9: error: static assertion failed: "pointer type mis
 kernel/printk/printk.c:3579:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/printk/printk.c:3662:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/printk/printk.c:4520:17: error: static assertion failed: "pointer type mismatch in container_of()"
-kernel/sched/completion.c:172 wait_for_completion_timeout() error: 'wait_for_common()' returns negative and '__fake_return_0x7d6d067f9eb0' is unsigned
+kernel/sched/completion.c:172 wait_for_completion_timeout() error: 'wait_for_common()' returns negative and '__fake_return' is unsigned
 kernel/signal.c:1432:9: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/sys.c:294:17: error: static assertion failed: "pointer type mismatch in container_of()"
 kernel/sys.c:360:17: error: static assertion failed: "pointer type mismatch in container_of()"
