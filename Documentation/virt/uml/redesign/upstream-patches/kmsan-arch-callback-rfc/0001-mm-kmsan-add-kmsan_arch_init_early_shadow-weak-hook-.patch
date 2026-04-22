@@ -1,0 +1,120 @@
+From 44aeccf6190385e353ff804d5f0f75d252ac73cb Mon Sep 17 00:00:00 2001
+From: Michael Bommarito <michael.bommarito@gmail.com>
+Date: Wed, 22 Apr 2026 12:29:42 -0400
+Subject: [RFC PATCH 1/1] mm/kmsan: add kmsan_arch_init_early_shadow() weak
+ hook for arch shadow VA init
+
+Some architectures need to reserve and map the shadow and origin
+virtual-address regions for KMSAN before the generic init sweep in
+kmsan_init_shadow() runs. Today this is not possible without patching
+mm/kmsan/init.c directly: the set of ranges that the sweep records
+into start_end_pairs[] is fixed (reserved memblock ranges, .data,
+per-node NODE_DATA), and the helper that records them,
+kmsan_record_future_shadow_range(), is file-local.
+
+Introduce kmsan_arch_init_early_shadow() as a __weak hook called
+from kmsan_init_shadow() before the existing sweep. The default is
+an empty no-op, so architectures that don't define an override (x86,
+s390) are byte-identical to today. An override can mmap its
+arch-specific shadow and origin VA regions and call
+kmsan_record_future_shadow_range() for each range so the subsequent
+kmsan_init_alloc_meta_for_range() loop sets up per-page metadata for
+them too.
+
+To make that last step possible, drop the 'static' qualifier from
+kmsan_record_future_shadow_range() and declare it in
+include/linux/kmsan.h alongside the new hook. No existing call site
+changes.
+
+This change is pure mechanism. There is no policy in mm/kmsan/;
+architectures opt in by defining the weak symbol.
+
+Signed-off-by: Michael Bommarito <michael.bommarito@gmail.com>
+---
+ include/linux/kmsan.h | 24 ++++++++++++++++++++++++
+ mm/kmsan/init.c       | 20 +++++++++++++++++++-
+ 2 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/kmsan.h b/include/linux/kmsan.h
+index 7da9fd506b39..95df8c41024f 100644
+--- a/include/linux/kmsan.h
++++ b/include/linux/kmsan.h
+@@ -46,6 +46,30 @@ void __init kmsan_init_shadow(void);
+  */
+ void __init kmsan_init_runtime(void);
+ 
++/**
++ * kmsan_arch_init_early_shadow() - Arch hook called from kmsan_init_shadow().
++ *
++ * Called once from kmsan_init_shadow() before the generic reserved-range
++ * sweep. Architectures that need to reserve additional shadow/origin VA
++ * regions (for example, to host-mmap() them) override this symbol and
++ * call kmsan_record_future_shadow_range() for each range they want the
++ * subsequent kmsan_init_alloc_meta_for_range() loop to process.
++ *
++ * The default is an empty no-op; architectures that do not override it
++ * see no behavioral change.
++ */
++void __init kmsan_arch_init_early_shadow(void);
++
++/**
++ * kmsan_record_future_shadow_range() - Record a range for later metadata alloc.
++ * @start: start of range (inclusive).
++ * @end:   end of range (exclusive).
++ *
++ * Recorded ranges are processed by kmsan_init_alloc_meta_for_range() after
++ * the reserved-range sweep completes.
++ */
++void __init kmsan_record_future_shadow_range(void *start, void *end);
++
+ /**
+  * kmsan_memblock_free_pages() - handle freeing of memblock pages.
+  * @page:	struct page to free.
+diff --git a/mm/kmsan/init.c b/mm/kmsan/init.c
+index b14ce3417e65..616d1233e253 100644
+--- a/mm/kmsan/init.c
++++ b/mm/kmsan/init.c
+@@ -27,7 +27,7 @@ static int future_index __initdata;
+  * Record a range of memory for which the metadata pages will be created once
+  * the page allocator becomes available.
+  */
+-static void __init kmsan_record_future_shadow_range(void *start, void *end)
++void __init kmsan_record_future_shadow_range(void *start, void *end)
+ {
+ 	u64 nstart = (u64)start, nend = (u64)end, cstart, cend;
+ 	bool merged = false;
+@@ -65,6 +65,18 @@ static void __init kmsan_record_future_shadow_range(void *start, void *end)
+ 	future_index++;
+ }
+ 
++/*
++ * Default arch hook. Architectures that need to reserve additional
++ * shadow/origin VA regions at early boot override this symbol; others
++ * get the empty no-op and behave identically to before this hook
++ * existed. An override typically host-mmap()s its shadow/origin
++ * regions and then calls kmsan_record_future_shadow_range() for each
++ * of them so the generic per-page metadata init covers them too.
++ */
++void __weak __init kmsan_arch_init_early_shadow(void)
++{
++}
++
+ /*
+  * Initialize the shadow for existing mappings during kernel initialization.
+  * These include kernel text/data sections, NODE_DATA and future ranges
+@@ -79,6 +91,12 @@ void __init kmsan_init_shadow(void)
+ 	u64 loop;
+ 	int nid;
+ 
++	/*
++	 * Let architectures register arch-specific shadow/origin VA
++	 * ranges before the generic reserved-range sweep picks them up.
++	 */
++	kmsan_arch_init_early_shadow();
++
+ 	for_each_reserved_mem_range(loop, &p_start, &p_end)
+ 		kmsan_record_future_shadow_range(phys_to_virt(p_start),
+ 						 phys_to_virt(p_end));
+-- 
+2.53.0
+
