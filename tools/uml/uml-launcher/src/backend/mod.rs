@@ -13,6 +13,7 @@ use anyhow::Result;
 use crate::cli::BackendClass;
 
 pub mod console;
+pub mod seccomp;
 
 /// Entry point for `uml-launcher backend <class>`.
 ///

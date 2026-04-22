@@ -39,6 +39,7 @@ use virtio_bindings::bindings::virtio_ring::{
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 
+use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendConsoleArgs;
 
 /// RX queue index (host → guest). Follows virtio-console convention:
@@ -210,6 +211,18 @@ pub fn run(args: BackendConsoleArgs) -> Result<i32> {
         mem,
     )
     .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
+
+    // Lock down the syscall surface before entering the event
+    // loop. The console class needs nothing beyond the shared
+    // vhost-user event-loop baseline; any deviation → SIGSYS via
+    // SECCOMP_RET_KILL_PROCESS. This is the "fd plumbing done,
+    // attack surface about to open" moment — Firecracker/crosvm
+    // both apply their filters at the analogous boundary.
+    tracing::debug!("console backend: applying seccomp filter");
+    FilterBuilder::new()
+        .with_vhost_user_event_loop()
+        .apply()
+        .context("locking down console backend with seccomp filter")?;
 
     daemon
         .serve(&socket)
