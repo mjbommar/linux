@@ -27,6 +27,7 @@ the patch bodies.
 | Series | Status | Motivating workstream | Decisions log |
 |---|---|---|---|
 | `bpf-hygiene-v1/` | prepared, not yet sent | C-06 (BPF JIT UML port) | D43 addendum |
+| `kmsan-arch-callback-rfc/` | staged (notes only; patch not written) — framing in D51 is the "no visible impact, just benefits" pitch: new weak `kmsan_arch_init_early_shadow()` hook + un-static `kmsan_record_future_shadow_range()`, byte-identical behavior for x86/s390 | C-07 (KMSAN UML port) | D44 resolution + D51 |
 
 ## Conventions
 

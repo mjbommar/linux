@@ -4470,6 +4470,235 @@ section."
 - KMSAN maintainer: Alexander Potapenko
   `<glider@google.com>` (per MAINTAINERS).
 
+### Resolution (2026-04-22): accept the fourth-probe path; upstream as new entrypoints, not behavior changes
+
+**Status flip:** Open → **Resolved.** Next steps move to D51
+(upstream strategy for the arch callback).
+
+**Decision recap.** Options A (VMALLOC quarter-split) and B
+(dedicated mmap past KASAN) both fight KMSAN's per-page-struct
+metadata model at phase-1; the fourth probe's empirical hang is
+the signal that neither works on UML without help from the
+generic init path. The decided path — aligned with what the
+fourth probe itself recommended — is option D:
+
+  **Hook into the generic init sequence via a new arch
+  callback.** Let `kmsan_init_shadow()` / `_runtime()` run at
+  their canonical call sites from `mm_core_init`; UML provides
+  a `kmsan_arch_init_early_shadow()` override that mmaps its
+  shadow/origin VA regions and registers them via the existing
+  `kmsan_record_future_shadow_range()` helper before the
+  generic sweep.
+
+**Upstream patch shape (no behavior change for existing archs).**
+
+The cross-subsystem patch is deliberately tiny and additive:
+
+  1. `mm/kmsan/init.c`: make `kmsan_record_future_shadow_range()`
+     non-`static` (or add a one-line public wrapper in
+     `include/linux/kmsan.h`). It already does the right thing
+     semantically; only visibility changes.
+  2. `include/linux/kmsan.h`: declare
+     `void __init kmsan_arch_init_early_shadow(void);`
+     with a `__weak` default empty definition in
+     `mm/kmsan/init.c`.
+  3. `mm/kmsan/init.c::kmsan_init_shadow()`: call
+     `kmsan_arch_init_early_shadow()` near the top, before the
+     existing `for_each_reserved_mem_range` sweep. Existing
+     archs that don't override get the no-op default —
+     byte-identical behavior to today.
+  4. `arch/um/kernel/mem.c` (+ `arch/um/include/asm/kmsan.h`):
+     override the weak symbol. mmap the VAs bounded by the
+     conditional VMALLOC_END from probes 2-3; call
+     `kmsan_record_future_shadow_range()` for each.
+
+**Why this is the right shape to pitch upstream.**
+
+- **Zero visible impact on x86 and s390.** They don't define
+  the weak override; their `kmsan_init_shadow()` path runs
+  byte-for-byte as it does today. No performance regression,
+  no ABI change, no reviewer-uncomfortable behavior delta.
+- **New entrypoints, not modified ones.** The only surface
+  change to the generic code is one new weak hook call and
+  one symbol becoming non-static. Maintenance burden for the
+  KMSAN core stays at zero — UML carries its own override.
+- **Semantic surface grows by exactly one override.** Easy
+  to review (diff is ~20 lines), easy to document, easy to
+  remove later if KMSAN core grows a better-factored arch
+  init framework.
+- **Unlocks a second architecture for KMSAN** (UML/x86_64
+  alongside native x86_64 and s390). That's strictly additive
+  for the KMSAN ecosystem.
+
+**The "sale" framing — why the KMSAN maintainer should want this.**
+
+The upstream pitch has to carry context that's not obvious
+from the diff alone: KMSAN's usefulness multiplies with
+testable platforms, and UML is re-emerging as a credible one.
+The cover letter should explicitly tie the arch callback to
+the rest of the redesign's output so Potapenko sees the
+payoff is platform capability, not just another arch port:
+
+- UML now runs the full Linux tracing surface — ftrace,
+  kprobes, kretprobes via rethook, and (since C-04 commit 3b)
+  function_graph — alongside KASAN, KFENCE, KCSAN, UBSAN in
+  their own profiles.
+- BPF JIT works verbatim from `arch/x86/net/bpf_jit_comp.c`;
+  `bpftrace` / `perf probe` run inside a UML guest.
+- AFL-compatible forkserver hits <50 ms per iteration without
+  KVM; syzkaller `vm/uml` backend (Go) is in flight.
+- Backend abstraction (PTRACE / SECCOMP / DYNAMIC) via
+  `struct um_backend_ops` — clean separation for future
+  cross-arch work.
+- Every commit passes a 12-variant boot matrix + four-check
+  static-analysis gate (gcc / clang / sparse / smatch).
+
+Adding KMSAN on top of that stack gives KMSAN developers a
+fast, host-process-native target for regression testing that
+doesn't require KVM or hardware — catch-rate parity with the
+bare-metal test matrix, without the per-test boot cost.
+That's the argument; the patch itself is the cheapest
+possible way to enable it.
+
+**Cross-references (resolution):**
+
+- D51 — upstream submission strategy + LKML framing
+  (cover letter skeleton + recipient routing).
+- `Documentation/virt/uml/redesign/upstream-patches/
+  kmsan-arch-callback-rfc/` — RFC series staging directory;
+  populated when the patch itself is written.
+- `07-port-kmsan.md` — status updated to match this resolution.
+- `mm/kmsan/init.c:30,75` — `kmsan_record_future_shadow_range`
+  (to be un-staticed) and `kmsan_init_shadow` (new hook
+  insertion point).
+
+---
+
+## D51: C-07 KMSAN upstream strategy — LKML RFC framing and routing
+
+**Date:** 2026-04-22
+**Status:** Prepared; awaiting user decision to send. RFC patch
+not yet written; this entry captures the framing so when the
+code is ready the cover letter and routing are already decided.
+
+**Who sees the patch first.**
+
+Recipients (from `scripts/get_maintainer.pl` on the files
+touched and `MAINTAINERS` entries for KMSAN + UML):
+
+| Role | Person | Why |
+|---|---|---|
+| KMSAN maintainer | Alexander Potapenko `<glider@google.com>` | Owns `mm/kmsan/`; authors of the file the new hook goes into. |
+| KMSAN reviewer / co-author | Dmitry Vyukov `<dvyukov@google.com>` | Usually on kmsan threads; deep KASAN/KMSAN context. |
+| UML maintainers | Johannes Berg, Anton Ivanov | Ack on the `arch/um/` side; their sign-off carries weight with Potapenko about whether UML is worth extending for. |
+| mm reviewers | Andrew Morton + linux-mm | Generic mm patch path. |
+| Lists | linux-kernel@, linux-mm@, linux-um@ | Standard cc. |
+
+**Cover-letter frame (what it argues).**
+
+The cover letter does three things in order:
+
+  1. **Show the diff is minimal and non-invasive.** Lead with
+     "this adds one weak hook and un-statics one helper;
+     existing architectures are byte-identical." That answers
+     the first maintainer question ("what breaks?") before
+     they ask.
+
+  2. **Anchor the UML side as a concrete, active platform.**
+     Link to the redesign directory
+     (`Documentation/virt/uml/redesign/`). Mention the
+     capabilities UML now has — ftrace, kprobes, kretprobes,
+     function_graph, KASAN/KFENCE/KCSAN/UBSAN, BPF JIT, AFL
+     forkserver, `uml-launcher` Rust host tool — so the
+     reviewer sees this isn't reviving a dead platform.
+
+  3. **Name the concrete payoff for KMSAN.** UML becomes a
+     fast, host-process-native test target for KMSAN itself.
+     No KVM dependency, no boot time. Regression-test coverage
+     for the sanitizer on a second architecture at essentially
+     zero cost to KMSAN maintenance.
+
+**What the cover letter does NOT do.**
+
+- **No UML partisanship.** The patch is a generic mm/kmsan/
+  improvement; the UML benefit is the user of it, not the
+  justification. Write it as "enable KMSAN on additional
+  architectures" — UML is an existence proof, not a plea.
+- **No decisions-log references in the commit bodies.** Patch
+  messages are self-contained for the generic reviewer. The
+  lineage back to D44/D51 stays in `SUBMISSION-NOTES.md`
+  alongside the patch series, per the precedent set by
+  `bpf-hygiene-v1/`.
+- **No speculation about future arch users.** If s390 or
+  others ever want their own shadow-init tweaks they can
+  override the same hook; we don't promise future users.
+
+**Pre-submission checks (to do when the RFC patch is written).**
+
+- `scripts/get_maintainer.pl` on the actual diff — confirm
+  the cc list above is complete and current.
+- `scripts/checkpatch.pl --strict` on each patch; expect
+  clean (this is ~20 LOC of generic code + an arch override).
+- Build-verify: `make defconfig + CONFIG_KMSAN=y` on x86_64
+  (existing user) and on UML with the companion arch-side
+  series. Both should boot to init without KMSAN warnings.
+- Include the KMSAN KUnit test results on UML in the cover
+  letter — concrete proof the new arch target works.
+
+**Routing suggestions.**
+
+- **First send as RFC** (`[RFC PATCH]` prefix, single series),
+  with "RFC because it introduces a new hook on a sanitizer's
+  init path; I want maintainer sign-off on the shape before
+  committing UML-side depends to it." That gives Potapenko an
+  exit valve without making him feel rushed.
+- Post-RFC: reshape based on feedback. If approved in shape,
+  send as `[PATCH v1]` with the same diff (assuming no
+  requested changes). If Potapenko proposes a different seam
+  (e.g., a callback registration API instead of a weak
+  symbol), revise.
+
+**Dependencies.**
+
+- The arch-side UML patches (`arch/um/include/asm/kmsan.h`,
+  `arch/um/kernel/mem.c` override, `arch/um/Kconfig`
+  `select HAVE_ARCH_KMSAN`) build on top of the generic
+  patch. They live on `uml-redesign-plan` and get their own
+  series once the generic one lands.
+- The bounded-`VMALLOC_END`-under-KMSAN change to
+  `arch/um/include/asm/pgtable.h` is in the UML series, not
+  the generic RFC. Rationale: it's UML-local; no other arch
+  cares.
+
+**What "done" looks like.**
+
+- Generic RFC accepted + merged into `mm-next` (probably via
+  Andrew).
+- UML arch-side series (5-6 commits per D44 addendum's plan)
+  lands on `uml-redesign-plan`; each commit passes Q1 +
+  boot-matrix. Specifically:
+  - commit 1: bounded-VMALLOC_END + `asm/kmsan.h` + Kconfig +
+    Makefile scaffold (compile-only, `CONFIG_KMSAN=y` doesn't
+    boot).
+  - commit 2: `kmsan_arch_init_early_shadow()` override +
+    research-kmsan profile (boots + KUnit passes).
+  - commit 3: selftest + user doc + status flip.
+- Task #67 moves to landed. C-07 workstream closes.
+- The D44 "four probes" history stays in the log as
+  background; D51 is the load-bearing reference for anyone
+  picking up KMSAN-on-UML after this.
+
+**Cross-references:**
+
+- D44 — four-probe investigation + resolution pointing here.
+- `Documentation/virt/uml/redesign/05-validation/
+  upstream-strategy.md` — redesign's general upstream-pitch
+  philosophy; this D51 is an instance.
+- `Documentation/virt/uml/redesign/upstream-patches/README.md`
+  — the in-tree layout for upstream-bound series; the
+  `kmsan-arch-callback-rfc/` entry lands here when the code
+  is written.
+
 ---
 
 ## D45: In-fork scope policy — show the end state, treat LKML as later discussion

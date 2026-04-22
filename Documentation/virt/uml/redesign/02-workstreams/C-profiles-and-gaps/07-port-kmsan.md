@@ -1,23 +1,28 @@
 # C-07: Port KMSAN to UML
 
-**Status:** design (2026-04-20); **commit-1 scratch probe ran
-2026-04-20; revealed a v1 layout decision that blocks
-implementation pending D44 sign-off.** Probe found that KMSAN
-requires `KMSAN_VMALLOC_SHADOW_START`, `KMSAN_VMALLOC_ORIGIN_START`,
-`KMSAN_MODULES_SHADOW_START`, `KMSAN_MODULES_ORIGIN_START` as
-virtual-address constants consumed by `mm/kmsan/shadow.c:55-71`,
-and UML's `VMALLOC_END = TASK_SIZE - 2*PAGE_SIZE` +
-`MODULES_VADDR = VMALLOC_START` geometry doesn't accommodate a
-straight x86-style quarter-split without either (A) shrinking
-VMALLOC under `CONFIG_KMSAN=y` (invasive to UML's memory layout
-but UML-local), or (B) dedicating host-mmap regions outside
-VMALLOC and choosing offsets that make shadow.c's math work
-(matches UML's KASAN precedent; cleanest if feasible).
-Implementation commits hold pending user pick of A, B, or C
-(defer). See §"Blocker: what the empirical probe found" below
-and decisions-log D44 for the full writeup. This is still the
-heaviest remaining C-port; treat the 6-week budget as the
-ceiling, not the target.
+**Status:** design-locked (2026-04-22); four empirical probes in
+D44 established that options A (VMALLOC quarter-split) and B
+(dedicated host-mmap past KASAN) both fight KMSAN's per-page-
+struct metadata model, and the fourth probe's boot hang
+confirmed phase-1 mmap is the wrong contract for KMSAN's
+runtime (unlike KASAN, whose stateless zero-filled shadow
+tolerates it). Resolution in the D44 "Resolution" addendum
+and D51: path forward is a new weak arch callback
+(`kmsan_arch_init_early_shadow`) on `mm/kmsan/init.c`, called
+from `kmsan_init_shadow()` before the existing reserved-range
+sweep. UML overrides it; x86 and s390 keep the default empty
+no-op and behave byte-identically to today. The core upstream
+patch is ~20 LOC and introduces a new entrypoint rather than
+changing any existing function — deliberately the least
+invasive shape to pitch to KMSAN maintainer Alexander
+Potapenko. See D51 for the upstream framing.
+
+Implementation-queued behind the upstream RFC. Effort estimate
+holds at 1 week of focused work once the generic callback
+merges (5-6 bisectable UML-side commits per the plan in D44's
+second-probe addendum). Still the heaviest remaining C-port,
+but the blocker has narrowed from "design question" to
+"upstream coordination".
 **Effort:** 6 weeks (budget). Optimistic-case scope — KASAN's
 UML port paved the mmap pattern we reuse — is closer to **2-3
 weeks of disciplined work** if U1/U2/U3 hold. Kept at 6 weeks
@@ -326,7 +331,38 @@ reinit.**
 - **Maintenance risk: low.** No UML-specific KMSAN engine; we
   piggyback on `mm/kmsan/` core.
 
-## Blocker: what the empirical probe found
+## Resolution path (2026-04-22)
+
+Four probes in D44 closed the design question. The accepted
+path is:
+
+1. **Upstream first:** one-patch RFC to `mm/kmsan/` adding a
+   weak `kmsan_arch_init_early_shadow()` hook called from
+   `kmsan_init_shadow()`, plus un-staticing
+   `kmsan_record_future_shadow_range()` so arch overrides can
+   reach it. Existing architectures (x86, s390) keep the
+   default empty no-op and are byte-identical to today —
+   **no visible impact, zero behavior change.** Framing + LKML
+   routing captured in D51.
+2. **UML side, gated on the generic patch landing:** 5-6
+   bisectable commits per D44 second-probe addendum — bounded
+   `VMALLOC_END` under `CONFIG_KMSAN=y`, `asm/kmsan.h`,
+   Kconfig `select HAVE_ARCH_KMSAN`, `KMSAN_SANITIZE := n`
+   where needed, and the `kmsan_arch_init_early_shadow()`
+   override that mmaps shadow+origin VAs and registers them
+   via the (now-public) `kmsan_record_future_shadow_range()`.
+3. **Selftest + docs + research-kmsan profile:** KMSAN KUnit
+   passes on UML, reproducer module catches a planted
+   uninit-read, user doc at `Documentation/virt/uml/kmsan.rst`.
+
+Why "new entrypoint, not behavior change" is the right
+upstream shape: it's the minimum semantic surface to add, keeps
+maintenance burden for KMSAN core at zero, and sells to the
+maintainer as "enable KMSAN on an additional architecture" —
+not as "rework KMSAN init." See D51 for the full cover-letter
+frame.
+
+## Historical: what the empirical probes found
 
 Commit-1 scratch (Kconfig + s390-style header + Makefile) built
 clean under gcc (KMSAN=n default) and failed under clang with
