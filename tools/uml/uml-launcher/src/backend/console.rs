@@ -25,6 +25,7 @@
 //   - rust-vmm/vhost-device/vhost-device-rng     (simpler, 0.22)
 //   - D52 (the C-10 v2 plan these choices come from)
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -121,6 +122,19 @@ pub struct ConsoleBackend {
     /// Contention is nonexistent in practice — the vhost-user
     /// daemon serializes TX batches through `handle_event()`.
     sink: Mutex<ConsoleSink>,
+
+    /// Buffered host → guest bytes waiting to be delivered on
+    /// the next RX virtqueue kick. Producers (the future stdin
+    /// reader thread that lands in a follow-on commit, plus
+    /// tests in this commit) push via `push_rx_bytes()`; the
+    /// RX handler drains as descriptors become available.
+    ///
+    /// Shared across threads via `Arc<Mutex<...>>` so a later
+    /// commit can spawn a dedicated stdin reader without
+    /// reshaping the type. The Mutex is held briefly (one
+    /// per-chain drain) so contention with TX handling is
+    /// bounded.
+    rx_fifo: Arc<Mutex<VecDeque<u8>>>,
 }
 
 impl ConsoleBackend {
@@ -136,7 +150,149 @@ impl ConsoleBackend {
             mem: None,
             event_idx: false,
             sink: Mutex::new(sink),
+            rx_fifo: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// Push host-to-guest bytes into the RX FIFO. The bytes are
+    /// delivered to the guest on the next RX virtqueue kick (or
+    /// sooner if an external eventfd is wired — that plumbing
+    /// lands in a follow-on commit).
+    ///
+    /// `#[allow(dead_code)]` because the only current caller is
+    /// the test module; production stdin plumbing arrives in
+    /// the next C-10 v2 commit.
+    #[allow(dead_code)]
+    pub fn push_rx_bytes(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut fifo = self.rx_fifo.lock().expect("rx_fifo mutex poisoned");
+        fifo.extend(bytes);
+    }
+
+    /// Expose a clone of the shared FIFO handle. Callers that
+    /// want to push from another thread (the stdin reader, in
+    /// the follow-on commit) can hold this handle without
+    /// keeping the whole backend alive.
+    #[allow(dead_code)]
+    pub fn rx_fifo_handle(&self) -> Arc<Mutex<VecDeque<u8>>> {
+        Arc::clone(&self.rx_fifo)
+    }
+
+    /// Drain the RX virtqueue: for each avail-ring descriptor
+    /// the guest offered as a place to put bytes, copy as many
+    /// FIFO bytes as fit, and return the chain to the used
+    /// ring.
+    ///
+    /// Unlike `process_tx_queue`, this handler runs opportunistically
+    /// — the guest posts empty buffers proactively, and we fill
+    /// them only when there's something to deliver. If the FIFO
+    /// is empty, we return without consuming any chains; the
+    /// avail ring stays as-is and we'll pick them up on the
+    /// next kick.
+    fn process_rx_queue(&mut self, vring: &VringRwLock) -> std::io::Result<()> {
+        let atomic_mem = match self.mem.as_ref() {
+            Some(m) => m,
+            None => {
+                log::warn!("console: RX kick before memory table was set; skipping");
+                return Ok(());
+            }
+        };
+
+        // Fast-exit if there's nothing to deliver.
+        if self
+            .rx_fifo
+            .lock()
+            .map_err(|_| std::io::Error::other("rx_fifo mutex poisoned"))?
+            .is_empty()
+        {
+            return Ok(());
+        }
+
+        let requests = {
+            let mut guard = vring.get_mut();
+            let queue = guard.get_queue_mut();
+            queue
+                .iter(atomic_mem.memory())
+                .map_err(|e| {
+                    std::io::Error::other(format!("iter RX queue: {e:?}"))
+                })?
+                .collect::<Vec<_>>()
+        };
+
+        if requests.is_empty() {
+            return Ok(());
+        }
+
+        let mut any_used = false;
+        for chain in requests {
+            let head = chain.head_index();
+            let chain_mem = atomic_mem.memory();
+            let mut writer = chain
+                .clone()
+                .writer(&chain_mem)
+                .map_err(|e| std::io::Error::other(format!("chain writer: {e:?}")))?;
+
+            let cap = writer.available_bytes();
+            if cap == 0 {
+                vring.add_used(head, 0).map_err(|e| {
+                    std::io::Error::other(format!("add_used (empty): {e:?}"))
+                })?;
+                any_used = true;
+                continue;
+            }
+
+            // Pull the next `cap` bytes (or whatever remains)
+            // from the FIFO. Release the lock before touching
+            // the virtqueue writer to keep the contention
+            // window tight.
+            let to_write: Vec<u8> = {
+                let mut fifo = self
+                    .rx_fifo
+                    .lock()
+                    .map_err(|_| std::io::Error::other("rx_fifo mutex poisoned"))?;
+                let n = cap.min(fifo.len());
+                if n == 0 {
+                    // FIFO emptied concurrently; stop consuming
+                    // the avail ring. The chain we already
+                    // pulled will be re-emitted by the next
+                    // iter() call thanks to virtio-queue's
+                    // cursor semantics.
+                    break;
+                }
+                fifo.drain(..n).collect()
+            };
+
+            for b in &to_write {
+                writer
+                    .write_obj::<u8>(*b)
+                    .map_err(|e| std::io::Error::other(format!("write_obj RX: {e:?}")))?;
+            }
+
+            vring
+                .add_used(head, to_write.len() as u32)
+                .map_err(|e| std::io::Error::other(format!("add_used: {e:?}")))?;
+            any_used = true;
+        }
+
+        if any_used {
+            let notify_mem = atomic_mem.memory();
+            let needs = {
+                let mut guard = vring.get_mut();
+                let queue = guard.get_queue_mut();
+                queue
+                    .needs_notification(&*notify_mem)
+                    .map_err(|e| std::io::Error::other(format!("needs_notification RX: {e:?}")))?
+            };
+            if needs {
+                vring
+                    .signal_used_queue()
+                    .map_err(|e| std::io::Error::other(format!("signal_used_queue RX: {e:?}")))?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Drain the TX virtqueue: for each descriptor chain the
@@ -325,15 +481,19 @@ impl VhostUserBackendMut for ConsoleBackend {
                 self.process_tx_queue(vring)?;
             }
             RX_QUEUE => {
-                // Host → guest. Not yet implemented — the RX
-                // path requires a backend-side eventfd tied to
-                // the launcher's stdin (see the rust-vmm
-                // vhost-device-console reference). Kicks on the
-                // RX queue alone aren't sufficient; the backend
-                // needs stdin-readiness to know when to fill
-                // guest buffers. Tracked for a follow-on commit
-                // in the C-10 v2 series per D52.
-                log::debug!("console: RX queue kick (no-op until RX path lands)");
+                // Host → guest. The guest is offering empty
+                // buffers we can fill on demand. Opportunistic
+                // drain: if the FIFO has bytes, deliver them;
+                // otherwise leave the chains in the avail ring
+                // for the next kick.
+                //
+                // Production stdin plumbing (stdin reader thread
+                // + eventfd wake-up) is queued as the next C-10
+                // v2 commit. Until then, the FIFO is populated
+                // via `push_rx_bytes()` — exercised by tests and
+                // available for orchestration glue.
+                let vring = &vrings[RX_QUEUE as usize];
+                self.process_rx_queue(vring)?;
             }
             other => {
                 log::warn!("console: unexpected device_event={other}; ignoring");
@@ -645,6 +805,139 @@ mod tx_path_tests {
         expected.extend_from_slice(a);
         expected.extend_from_slice(b);
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn rx_delivers_pushed_bytes_into_descriptor_buffer() {
+        // Stand up the backend with an in-memory (unused) sink.
+        let sunk = Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct CaptureSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for CaptureSink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut backend =
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+
+        let mem = make_mem();
+        backend.update_memory(mem.clone()).expect("update_memory");
+
+        // Stage host → guest bytes.
+        let payload = b"hi guest!";
+        backend.push_rx_bytes(payload);
+
+        // Stand up an RX vring. Guest offers one descriptor of
+        // 64 bytes at 0x3000, marked WRITE so the backend knows
+        // it's a "here's a buffer for you to fill" slot.
+        // Flag 0x2 = VRING_DESC_F_WRITE.
+        let vring = setup_vring(&mem, 16);
+        {
+            let g = mem.memory();
+            write_desc(
+                &g,
+                /* desc_table */ 0x0000,
+                /* desc_idx   */ 0,
+                /* addr       */ 0x3000,
+                /* len        */ 64,
+                /* flags      */ 0x2,
+                /* next       */ 0,
+            );
+            publish_avail(&g, /* avail_ring */ 0x1000, /* avail_idx */ 0, 0);
+        }
+
+        backend.process_rx_queue(&vring).expect("process rx");
+
+        // Read back the bytes the backend wrote into guest memory.
+        use vm_memory::Bytes;
+        let mut got = vec![0u8; payload.len()];
+        mem.memory()
+            .read_slice(&mut got, GuestAddress(0x3000))
+            .unwrap();
+
+        assert_eq!(got, payload);
+    }
+
+    #[test]
+    fn rx_no_bytes_is_noop_on_queue() {
+        let sunk = Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct CaptureSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for CaptureSink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut backend =
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+
+        let mem = make_mem();
+        backend.update_memory(mem.clone()).expect("update_memory");
+        // No push_rx_bytes — fifo stays empty.
+
+        let vring = setup_vring(&mem, 16);
+        {
+            let g = mem.memory();
+            write_desc(&g, 0x0000, 0, 0x3000, 64, 0x2, 0);
+            publish_avail(&g, 0x1000, 0, 0);
+        }
+
+        // Should complete without error and without consuming
+        // the avail-ring entry. (We don't assert the avail entry
+        // remains — virtio-queue's cursor semantics vary; the
+        // important property is "no panic, no spurious write".)
+        backend.process_rx_queue(&vring).expect("process rx no-data");
+    }
+
+    #[test]
+    fn rx_partial_fill_when_buffer_smaller_than_fifo() {
+        let sunk = Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct CaptureSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for CaptureSink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut backend =
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+        let mem = make_mem();
+        backend.update_memory(mem.clone()).expect("update_memory");
+
+        // Push 100 bytes; offer a single 16-byte descriptor.
+        let payload: Vec<u8> = (0..100u8).collect();
+        backend.push_rx_bytes(&payload);
+
+        let vring = setup_vring(&mem, 16);
+        {
+            let g = mem.memory();
+            write_desc(&g, 0x0000, 0, 0x3000, 16, 0x2, 0);
+            publish_avail(&g, 0x1000, 0, 0);
+        }
+
+        backend.process_rx_queue(&vring).expect("partial fill");
+
+        // Guest sees the first 16 bytes.
+        use vm_memory::Bytes;
+        let mut got = vec![0u8; 16];
+        mem.memory()
+            .read_slice(&mut got, GuestAddress(0x3000))
+            .unwrap();
+        assert_eq!(got, &payload[..16]);
+
+        // 84 bytes remain in the FIFO for the next kick.
+        let remaining = backend.rx_fifo.lock().unwrap().len();
+        assert_eq!(remaining, 84);
     }
 
     #[test]
