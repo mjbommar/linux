@@ -5077,4 +5077,100 @@ to the precision the evidence supports.
 
 ---
 
+## D50: last_ditch_exit signal handler must not call uml_cleanup — async-signal-safety
+
+**Date:** 2026-04-22
+**Status:** Accepted. Fix landed same day.
+
+**Decision:** `arch/um/os-Linux/main.c`'s `last_ditch_exit()`
+drops its `uml_cleanup()` call and becomes a minimal
+async-signal-safe handler that prints a short message via
+`write(2)` and calls `_exit(1)`. The host kernel handles the
+remaining cleanup: all fds close, all mmaps unmap, and every
+stub child receives SIGKILL via `PR_SET_PDEATHSIG` (already set
+in `arch/um/os-Linux/process.c` and
+`arch/um/kernel/skas/stub_exe.c`). The `um_backend->shutdown()`
+dispatch, the `__exitcall()` chain, and `kill_off_processes()`
+are all lost on the fatal-signal path; each was either a no-op
+(backend shutdowns are no-ops for ptrace/seccomp today) or
+redundant with host-kernel reclaim.
+
+**Why this was wrong before:**
+
+`last_ditch_exit` is installed for SIGINT / SIGTERM with
+`SA_NODEFER | SA_RESETHAND`. When a fatal signal arrives, it
+runs in **async-signal-handler context** with whatever preempt
+state the interrupted kernel code held. POSIX signal-safety(7)
+requires the handler to call only async-signal-safe functions;
+the old body violated that aggressively:
+
+  - `uml_cleanup()` runs `do_uml_exitcalls()` → `console_exit()`
+    → `close_lines()` → `close_chan()` → `close_one_chan()` →
+    `um_free_irq()` → `free_irq()`. `free_irq()` opens with
+    `WARN(in_interrupt(), "Trying to free IRQ %d from IRQ
+    context!")` and takes `desc->request_mutex` with
+    `mutex_lock()` (sleeps under PROVE_LOCKING +
+    DEBUG_ATOMIC_SLEEP).
+  - `kill_off_processes()` walks `tasklist_lock` under
+    `read_lock()` — not async-signal-safe.
+  - `kmalloc_ok = 0` plus `um_backend->shutdown()` dispatch
+    touches kmalloc-capable code paths.
+  - `exit(3)` (vs. `_exit(2)`) runs atexit handlers and stdio
+    cleanup, neither signal-safe.
+
+The bug was latent because orderly halt paths go through
+`reboot(2)` → `machine_halt()` → `uml_cleanup()` in normal
+process context (no signal-handler inheritance; preempt_count
+at 0; in_interrupt() false). `free_irq()`'s assertion passes
+there. The only trigger for the signal-handler-side call chain
+was fatal-signal delivery, which was rare until C-04's function
+graph tracer made individual traced-function overhead large
+enough that `timeout(1)`-driven SIGTERM began landing during
+ordinary test runs. The C-04 commit 3b investigation surfaced
+the warning; the fix is this D50 entry.
+
+**What was tried / considered:**
+
+| Option | Pick / reject |
+|---|---|
+| (a) Minimize `last_ditch_exit` to `_exit(1)` | **PICKED.** Simplest; correct per POSIX; loses zero load-bearing behavior (every component of `uml_cleanup` is either a no-op or redundant with host-kernel reclaim when UML itself exits). |
+| (b) Make `uml_cleanup` signal-safe | Rejected. The call chain is deep into generic kernel code (`free_irq`, `mutex_lock`, `tasklist_lock`); making it signal-safe would require auditing and reworking paths that live outside `arch/um/`. Way out of scope for a localized arch bug. |
+| (c) Deferred cleanup: set a flag from the handler, do work from the main kernel loop | Rejected as over-engineered. The current UML signal model doesn't have a "signal-requested work" queue; building one just for this case would be more surface than the problem warrants. |
+| (d) Raise the signal to default disposition via `raise(sig)` with `SA_RESETHAND` already armed | Equivalent functionally (host kills UML with signal default), but `_exit(1)` preserves the existing "UML exits with code 1 on fatal signal" convention and is more predictable for anything that checks exit codes (test harnesses, supervisors). |
+
+**Validation (arch/um/ on x86_64, uml/research, 2026-04-22):**
+
+- `kill -TERM` against a UML running with
+  `CONFIG_FUNCTION_GRAPH_TRACER=y + echo function_graph >
+  current_tracer`: rc=1, dmesg contains the
+  `"UML: fatal signal; exiting"` line, no BUG/WARN in the
+  output, no leftover stub children on the host.
+- Boot matrix (PTRACE_ONLY / SECCOMP_ONLY / DYNAMIC × default /
+  force / legacy): 12/12 PASS — the normal reboot path
+  (`machine_halt` → `uml_cleanup` in process context) is
+  unchanged by this commit.
+- Q1 runner: gcc/clang/sparse/smatch clean against the bumped
+  per-profile baseline.
+
+**What this explicitly does NOT fix:**
+
+- There is no follow-up work here on the generic `free_irq(3)`
+  assertion or on UML's signal-handler-context accounting. Those
+  are pre-existing architectural decisions in the kernel and
+  outside arch/um/; changing them would require cross-subsystem
+  discussion.
+- Future KVM backend's `shutdown()` will want signal-handler
+  visibility. At that point, option (c) (deferred cleanup
+  queue) becomes worth building. Not needed today.
+
+**Cross-references:**
+
+- `arch/um/os-Linux/main.c` `last_ditch_exit()` / `install_fatal_handler()` — the fix.
+- `arch/um/kernel/reboot.c` `uml_cleanup()` — the no-longer-called-from-signal-handler function.
+- `arch/um/os-Linux/process.c` / `arch/um/kernel/skas/stub_exe.c` `PR_SET_PDEATHSIG` — the host-kernel reap guarantee that makes `kill_off_processes()` redundant in the fatal-signal path.
+- D34 addendum-3/4 (C-04 commit 3b) — the investigation that surfaced this pre-existing bug.
+- Task #99 — closed by this commit.
+
+---
+
 ## (Future entries here, as decisions are made)

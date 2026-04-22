@@ -41,8 +41,53 @@ static void __init set_stklim(void)
 
 static void last_ditch_exit(int sig)
 {
-	uml_cleanup();
-	exit(1);
+	/*
+	 * Async-signal-handler context — only async-signal-safe
+	 * operations allowed here (see signal-safety(7)).
+	 *
+	 * The previous implementation called uml_cleanup() from here
+	 * and then exit(). That is unsafe: uml_cleanup() walks the
+	 * task list under tasklist_lock, runs the __exitcall() chain
+	 * (including console_exit → free_irq → __mutex_lock → might
+	 * _sleep), and dispatches um_backend->shutdown() through
+	 * kmalloc-capable code paths. free_irq(3) also WARN()s when
+	 * called with in_interrupt() == true, which is the state a
+	 * signal inherits when it preempts a kernel raw_spin_lock_
+	 * irqsave region. Under PROVE_LOCKING + DEBUG_ATOMIC_SLEEP
+	 * (research profile) the result is a "Trying to free IRQ
+	 * from IRQ context" WARN plus a sleeping-in-atomic BUG on
+	 * every SIGTERM.
+	 *
+	 * Instead, exit immediately. The host kernel closes all fds,
+	 * unmaps all mmaps, and delivers SIGKILL to every stub child
+	 * — every stub is forked with PR_SET_PDEATHSIG=SIGKILL (see
+	 * arch/um/os-Linux/process.c and arch/um/kernel/skas/stub_
+	 * exe.c). We lose the um_backend->shutdown() dispatch (no-op
+	 * today for PTRACE / SECCOMP, nice-to-have for a future KVM
+	 * backend but not load-bearing), the __exitcall chain (the
+	 * host reclaims the resources those exitcalls would release),
+	 * and the ptraced-task kill loop (pdeathsig covers it).
+	 *
+	 * install_fatal_handler() sets SA_RESETHAND, so a second
+	 * signal of the same type hits the default disposition —
+	 * safety net if something hangs before _exit completes.
+	 *
+	 * Use _exit() (async-signal-safe) rather than exit() to skip
+	 * atexit() and stdio cleanup, neither of which is signal-safe.
+	 */
+	static const char msg[] = "UML: fatal signal; exiting\n";
+	ssize_t ret;
+
+	/*
+	 * write(2) is marked warn_unused_result in glibc, and this
+	 * is an async-signal-handler context — the only sane
+	 * response to a short write or EINTR here is to exit anyway.
+	 * Consume the return value explicitly to silence the
+	 * warning; a bare `(void)write(...)` does not.
+	 */
+	ret = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+	(void)ret;
+	_exit(1);
 }
 
 static void __init install_fatal_handler(int sig)
