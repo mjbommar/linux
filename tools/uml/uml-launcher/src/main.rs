@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 
+mod backend;
 mod cli;
 mod config;
 mod launcher;
@@ -51,6 +52,7 @@ fn run(args: cli::Cli) -> Result<i32> {
             let cfg = config::load(&run_args)?;
             launcher::run(cfg)
         }
+        cli::Command::Backend(class) => backend::dispatch(class),
         cli::Command::Version => {
             println!("uml-launcher {}", env!("CARGO_PKG_VERSION"));
             Ok(0)

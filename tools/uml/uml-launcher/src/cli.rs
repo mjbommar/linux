@@ -42,8 +42,91 @@ pub enum Command {
     /// Launch a UML kernel.
     Run(RunArgs),
 
+    /// Run a per-device vhost-user backend process (C-10 v2).
+    ///
+    /// `uml-launcher backend <class>` is the multi-call-binary dispatch
+    /// that lets one binary ship all device classes (console, net,
+    /// block, …) rather than per-class binaries. Each class is a
+    /// separate subcommand so per-class flags stay close to the code
+    /// that uses them. Matches the `crosvm device <kind>` shape.
+    ///
+    /// Currently scaffolding only: every class returns 0 after
+    /// emitting a "not yet implemented" line. The real vhost-user
+    /// logic, seccomp filters, and LSM transitions land in the
+    /// per-class commits that follow (see decisions-log D52 for the
+    /// bisectable plan).
+    #[command(subcommand)]
+    Backend(BackendClass),
+
     /// Print the launcher version and exit.
     Version,
+}
+
+/// Device class served by `uml-launcher backend <class>`.
+///
+/// The class set mirrors crosvm's device decomposition (minus the
+/// niche ones — gpu, snd, wl, pmem — which are v3+ per D52). Each
+/// variant carries its own args struct so per-class flags stay
+/// type-checked without leaking into the common surface.
+#[derive(Subcommand, Debug, Clone)]
+pub enum BackendClass {
+    /// virtio-console backend. Simplest vhost-user surface: one RX
+    /// + one TX queue, byte-oriented.
+    Console(BackendConsoleArgs),
+
+    /// virtio-net backend. Tap-backed in v2; slirp is v3+.
+    Net(BackendNetArgs),
+
+    /// virtio-blk backend. File-backed image via O_DIRECT.
+    Block(BackendBlockArgs),
+}
+
+/// Common arguments shared by every `backend <class>` invocation.
+///
+/// Lives inline in each class's args struct (via `#[command(flatten)]`)
+/// rather than as a wrapping struct, so clap's help output shows the
+/// common flags under the class they apply to rather than in a
+/// surprising "global" position.
+#[derive(Parser, Debug, Clone)]
+pub struct BackendCommonArgs {
+    /// Path to the vhost-user Unix-domain socket this backend will
+    /// serve on. UML connects to this socket via
+    /// `virtio_uml.device=<socket>:<virtio_id>`.
+    #[arg(long, env = "UML_BACKEND_SOCKET")]
+    pub socket: PathBuf,
+}
+
+/// Per-class args for `backend console`.
+#[derive(Parser, Debug, Clone)]
+pub struct BackendConsoleArgs {
+    #[command(flatten)]
+    pub common: BackendCommonArgs,
+}
+
+/// Per-class args for `backend net`.
+#[derive(Parser, Debug, Clone)]
+pub struct BackendNetArgs {
+    #[command(flatten)]
+    pub common: BackendCommonArgs,
+
+    /// Name of the host tap device to attach.
+    #[arg(long, env = "UML_BACKEND_NET_TAP")]
+    pub tap: Option<String>,
+}
+
+/// Per-class args for `backend block`.
+#[derive(Parser, Debug, Clone)]
+pub struct BackendBlockArgs {
+    #[command(flatten)]
+    pub common: BackendCommonArgs,
+
+    /// Path to the disk image file the backend will serve.
+    #[arg(long, env = "UML_BACKEND_BLOCK_IMAGE")]
+    pub image: Option<PathBuf>,
+
+    /// Expose the image read-only.
+    #[arg(long)]
+    pub read_only: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, Serialize, Deserialize)]
