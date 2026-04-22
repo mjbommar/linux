@@ -60,3 +60,17 @@ Single profile (cold trees, no cache reuse between checks):
 | **all four (research)** | **~30-45 min** |
 
 Logs are append-once and live under `/tmp/uml-q1/`; they are not checked in. Only the per-profile `q1-baseline/` text files are.
+
+## Related quality scripts in this directory
+
+`uml-quality-q1.sh` is the compile-side gate. Three complementary scripts live alongside it:
+
+- `uml-boot-matrix.sh` — builds the 12-variant PTRACE_ONLY / SECCOMP_ONLY / DYNAMIC backend-dispatch matrix and asserts each boots to `init=/bin/true` with the expected backend. Use after any change touching `arch/um/kernel/backend.c`, `arch/um/os-Linux/start_up.c`, or the per-backend `lifecycle.c` files.
+
+- `uml-cross-backend.sh` — boots PTRACE_ONLY and SECCOMP_ONLY kernels with identical boot args, diffs the normalized dmesg to assert observable equivalence between backends. Use to catch backend-specific divergence.
+
+- `uml-perf.sh` + `uml-perf-capture.sh` + `uml-perf-compare.sh` — cycle/instruction/task-clock measurement via `perf stat` across the four backends. Output is always two things:
+  - **Absolute-cycle delta** (per-backend p50 vs baseline). Same-host-only signal; meaningless across CPU generations (see `04-risks/decisions-log.md` D47/D49 for the cross-host confusion this caused).
+  - **Backend-ratio delta** (`SECCOMP / PTRACE`, `DYN_seccomp / DYN_ptrace`). Cross-host-portable — cancels per-CPU IPC/cache/microcode differences. This is the signal that matches invariant I2 ("seccomp retains its advantage vs ptrace"); when interpreting runs across different dev hosts, it's the one to trust.
+
+  All three perf scripts refuse to run unless the cpufreq governor on the pinned CPU is `performance` (env `UML_PERF_CPU=N` to pin to CPU N, default 0). Override with `UML_PERF_FORCE=1` for debug-only measurements.
