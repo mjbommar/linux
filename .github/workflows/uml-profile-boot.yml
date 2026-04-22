@@ -63,13 +63,15 @@ on:
     paths:
       - 'arch/um/**'
       - 'arch/x86/um/**'
-      - 'tools/testing/selftests/um/profiles/**'
+      - 'tools/testing/selftests/um/**'
+      - 'tools/uml/**'
       - '.github/workflows/uml-profile-boot.yml'
   pull_request:
     paths:
       - 'arch/um/**'
       - 'arch/x86/um/**'
-      - 'tools/testing/selftests/um/profiles/**'
+      - 'tools/testing/selftests/um/**'
+      - 'tools/uml/**'
       - '.github/workflows/uml-profile-boot.yml'
 
 concurrency:
