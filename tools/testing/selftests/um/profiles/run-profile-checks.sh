@@ -29,7 +29,7 @@ fi
 probe_profile() {
 	local profile=$1
 	local binary="$ROOT/uml-profile-$profile/linux"
-	local out
+	local out probe
 
 	# Use 512M — fuzz-deep and research carry KASAN + heavy
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
@@ -40,8 +40,27 @@ probe_profile() {
 
 	# UML's console delivers CRLF line endings; strip CRs so the
 	# PRESENT/ABSENT tokens compare cleanly downstream.
-	echo "$out" | tr -d '\r' |
-		awk '/^PROBE_BEGIN/{on=1;next} /^PROBE_END/{on=0} on{print}'
+	probe=$(echo "$out" | tr -d '\r' |
+		awk '/^PROBE_BEGIN/{on=1;next} /^PROBE_END/{on=0} on{print}')
+
+	# If the probe block is missing, the guest never reached
+	# its init script — usually a boot failure, ptrace/seccomp
+	# refusal, or OOM. Emit the raw captured stream on stderr
+	# so the caller's log makes the root cause visible without
+	# a second "what just happened" run. The empty-probe path
+	# is what surfaces in every FAIL-with-UNKNOWN mode of the
+	# assert step; showing the boot log next to those UNKNOWNs
+	# is the single biggest reducer of "is UML broken or is my
+	# config broken" triage time.
+	if [ -z "$probe" ]; then
+		{
+			echo "=== $profile: probe block missing — raw boot output follows ==="
+			echo "$out"
+			echo "=== end raw boot output ==="
+		} >&2
+	fi
+
+	echo "$probe"
 }
 
 # Returns the PRESENT/ABSENT state for a feature from a probe block.
