@@ -75,10 +75,27 @@ if [ $RC2 -ne 0 ]; then
 	exit 1
 fi
 
-# Parse the PIDs + version out for the terminal line.
-PYVER=$(echo "$OUT1" | sed -n 's/.*PYVER=\([0-9.]*\).*/\1/p')
-PID1=$(echo "$OUT1" | sed -n 's/.*PID1=\([0-9]*\).*/\1/p')
-PID2=$(echo "$OUT2" | sed -n 's/.*PID2=\([0-9]*\).*/\1/p')
+# Parse the PIDs + version out of the python output blobs.
+# POSIX parameter expansion rather than sed: stays portable
+# across host GNU sed / busybox sed / ash+dash variants (the
+# earlier sed pipeline silently returned empty under one
+# specific busybox build on GitHub Actions ubuntu-latest
+# runners — see Documentation/virt/uml/redesign/ for the
+# incident trail).
+extract() {
+	# extract <field> <blob> — prints the token that follows
+	# "<field>=" up to the next whitespace, or "" if no match.
+	case " $2 " in
+	*\ "$1"=*)
+		tmp=${2#*"$1"=}
+		printf '%s\n' "${tmp%% *}"
+		;;
+	*) ;;
+	esac
+}
+PYVER=$(extract PYVER "$OUT1")
+PID1=$(extract PID1 "$OUT1")
+PID2=$(extract PID2 "$OUT2")
 
 if [ -z "$PYVER" ] || [ -z "$PID1" ] || [ -z "$PID2" ]; then
 	echo "USERSPACE_SMOKE: FAIL parse: PYVER='$PYVER' PID1='$PID1' PID2='$PID2'"
