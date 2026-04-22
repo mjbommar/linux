@@ -212,12 +212,28 @@ jobs:
       # SIGABRT 134 before the panic pr_emerg flushes to
       # console. That path can never reliably surface a
       # user-visible "we booted" line.
+      # The init writes a marker file via hostfs rather than
+      # to /dev/console. That bypasses UML's tty driver
+      # entirely, which is important because even with
+      # `halt -f` the tty output can sit in the driver's
+      # output queue when the halt_skas longjmp unwinds UML
+      # — stdout bytes are lost to the capture. A filesystem
+      # write via hostfs turns into a real host write() and
+      # the file survives UML's exit.
       - name: Stage init script
         run: |
+          rm -f /tmp/uml-smoke-marker
           cat >/tmp/uml-smoke-init.sh <<'EOF'
           #!/bin/busybox sh
-          /bin/busybox echo UML_SMOKE_INIT_OK
-          /bin/busybox echo UML_SMOKE_INIT_OK > /dev/kmsg 2>/dev/null || true
+          # Redirect anything we do to a host-visible file in
+          # case the console path also works — helps diagnose
+          # partial-execution failure modes.
+          exec >/tmp/uml-smoke-log 2>&1
+          /bin/busybox echo "UML_SMOKE_INIT_OK pid=$$"
+          # Separate marker file for the cheap one-shot check
+          # below, so a truncation of uml-smoke-log (shouldn't
+          # happen but defensively) doesn't false-negative us.
+          /bin/busybox echo OK >/tmp/uml-smoke-marker
           /bin/busybox halt -f
           EOF
           chmod +x /tmp/uml-smoke-init.sh
@@ -232,10 +248,6 @@ jobs:
           file "$BIN" || true
           echo "---- running UML ----"
           set +e
-          # `noreboot` (UML-specific, see arch/um/os-Linux/
-          # skas/process.c:reboot_skas) makes reboot-paths
-          # halt instead → UML always exits cleanly on
-          # normal shutdown.
           out=$(timeout 40 "$BIN" init=/tmp/uml-smoke-init.sh \
                   noreboot mem=256M \
                   con=fd:0,fd:1 ssl=null \
@@ -244,18 +256,27 @@ jobs:
           rc=$?
           set -e
           echo "UML exit code: $rc"
-          echo "---- UML output (last 100 lines) ----"
-          echo "$out" | tail -100
-          echo "---- host dmesg tail (apparmor/seccomp/oom) ----"
-          sudo dmesg | tail -60 | grep -Ei 'apparmor|seccomp|oom|segfault|userns|denied' || echo "(no matches)"
-          if echo "$out" | grep -q 'UML_SMOKE_INIT_OK'; then
-            echo "::notice::UML booted, exec'd init, reached userspace"
+          echo "---- UML output (last 50 lines of captured stdout) ----"
+          echo "$out" | tail -50
+          echo "---- /tmp/uml-smoke-log (if init ran, this exists) ----"
+          if [ -s /tmp/uml-smoke-log ]; then
+            cat /tmp/uml-smoke-log
+          else
+            echo "(empty or missing — init script did NOT run)"
+          fi
+          echo "---- /tmp/uml-smoke-marker ----"
+          ls -la /tmp/uml-smoke-marker 2>&1 || echo "(missing)"
+          echo "---- host dmesg DENIED/oom only ----"
+          sudo dmesg | grep -Ei 'apparmor=.*DENIED|seccomp|oom-killer|segfault' | tail -10 || echo "(none)"
+          if [ -s /tmp/uml-smoke-marker ]; then
+            echo "::notice::UML booted, exec'd init (marker file present)"
             exit 0
           fi
           case "$rc" in
-            124) echo "::error::UML timed out — kernel hung, init never ran" ;;
-            134) echo "::error::UML SIGABRT — kernel panicked before init printed sentinel" ;;
-            139) echo "::error::UML SIGSEGV — stub crash during init-exec" ;;
-              *) echo "::error::UML exited rc=$rc without emitting sentinel" ;;
+            124) echo "::error::UML timed out — kernel hung" ;;
+            134) echo "::error::UML SIGABRT — panic path, init likely never exec'd cleanly" ;;
+            139) echo "::error::UML SIGSEGV — stub crash" ;;
+              0) echo "::error::UML exited 0 but left no marker — halt was reached without init running (fallback to /sbin/init → systemd halt?)" ;;
+              *) echo "::error::UML rc=$rc, no marker" ;;
           esac
           exit 1
