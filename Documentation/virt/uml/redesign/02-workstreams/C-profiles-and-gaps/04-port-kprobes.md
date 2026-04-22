@@ -1,15 +1,15 @@
 # C-04: Port kprobes to UML
 
-**Status:** partially landed (2026-04-20), commit 3 in a 3a/3b
-split (2026-04-21), commits 5 + 6 landed 2026-04-21.
-HAVE_KPROBES (commits 1a–1d) + HAVE_RETHOOK/KRETPROBES (commit 2)
-in tree and tested. Commit 5 kprobes-stress selftest PASS at 200
-and 2000 iterations with `errors=0` (commit `8a6f5087d03c`).
-Commit 6 user docs refreshed to match what actually shipped
-(commits `79d0e45b7d79`, this one, and the
+**Status:** landed (2026-04-22). HAVE_KPROBES (commits 1a–1d),
+HAVE_RETHOOK/KRETPROBES (commit 2), narrow strip + fgraph
+trampolines + atomic-context guard (commits 3a `dc623a9dfd0a` +
+3b this series), research profile kprobes + function_graph
+(commit 4), kprobes-stress selftest (commit 5, `8a6f5087d03c`;
+200 + 2000 iteration PASS with `errors=0`; `graph=on` token
+after 3b), and docs (commit 6, `79d0e45b7d79` +
 ``Documentation/virt/uml/kprobes.rst`` +
-``Documentation/virt/uml/profiles/research.rst`` updates).
-Commit 3 is split under D45's in-fork scope policy:
+``Documentation/virt/uml/profiles/research.rst``) all in tree.
+Commit 3 split under D45's in-fork scope policy:
 - **Source (3) closed** (commit `a2e01ee58c53`, 2026-04-21):
   narrow `notrace` on `kernel/kthread.c::kthread` and
   `kernel/smpboot.c::smpboot_thread_fn`.
@@ -18,22 +18,20 @@ Commit 3 is split under D45's in-fork scope policy:
   signal-dispatch and longjmp-entry TUs, plus a one-line
   `filter-out` addition to `arch/um/scripts/Makefile.rules` so
   the standard per-file CFLAGS_REMOVE hook reaches USER_OBJS.
-  The broader USER_CFLAGS-wide strip tried in the stashed WIP
-  broke `userspace-smoke` at boot; the narrow per-file strip
-  does not. `uml/research` + `userspace-smoke`: PASS. uml/fuzz,
-  uml/prod-fast builds: clean.
-- **Commit 3b deferred** (HAVE_FUNCTION_GRAPH_TRACER select +
-  `arch/um/kernel/mcount.S` trampolines + `prepare_ftrace_return`
-  in `arch/um/kernel/ftrace.c`). First runtime activation of
-  the graph tracer under the session's build triggered
-  "BUG: sleeping function called from invalid context" in
-  `prepare_ftrace_return → function_graph_enter → __mutex_lock`
-  with `preempt_count: 6`. The trampoline fires on a return
-  inside an atomic-context function chain reached via
-  `um_set_signals` (UML's signal gate). Fix class: add
-  `notrace` to `um_set_signals` and/or trampoline-level
-  atomic-context skip. See D34's 2026-04-21 addendum-3. One
-  focused session.
+- **Commit 3b landed** (2026-04-22, this series): adds
+  `ftrace_graph_caller` + `return_to_handler` to
+  `arch/um/kernel/mcount.S`, `prepare_ftrace_return` +
+  `ftrace_enable/disable_ftrace_graph_caller` to
+  `arch/um/kernel/ftrace.c`, `notrace` annotations on the
+  arch_local_irq_* family (`arch/um/{kernel,os-Linux}/signal.c`),
+  `select HAVE_FUNCTION_GRAPH_TRACER` in `arch/um/Kconfig`, and
+  `CONFIG_FUNCTION_GRAPH_TRACER=y` in the research profile. A
+  preempt-count guard inside `prepare_ftrace_return` skips the
+  shadow-stack push from atomic context — UML-UP's TINY_RCU
+  maps `rcu_read_lock()` to `preempt_disable()`, so fgraph
+  events would otherwise trip `__might_resched` inside the
+  traced-function body (e.g., `free_irq → __mutex_lock`). See
+  D34 addendum-4.
 **Effort:** 3–4 focused days for commits 1+2 (actual: ~2 days);
 commit 3 split across three sessions — session 1 (2026-04-19)
 surfaced the three-source leak; session 2 (2026-04-21) landed

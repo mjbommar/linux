@@ -2251,6 +2251,110 @@ smoke.
   signatures from sources (1)+(2) harmless even without the
   strip, and the narrow strip from 3a becomes optional.
 
+### 2026-04-22 addendum-4 — commit 3b landed, atomic-context fix shipped
+
+Commit 3b ships with the full fix class union recommended in
+addendum-3. Options (1), (2), and (3) are all applied —
+defense-in-depth against the fgraph-on-UML-UP failure mode:
+
+- **Option (1) — `notrace` on `um_set_signals` and helpers**
+  (`arch/um/os-Linux/signal.c`). Belt-and-suspenders even though
+  `CFLAGS_REMOVE_signal.o := $(CC_FLAGS_FTRACE)` already strips
+  the patchable entry — the source-level annotation survives a
+  future Makefile edit and makes the intent unambiguous. Covers
+  `um_get_signals`, `um_set_signals`, `um_set_signals_trace`,
+  `block_signals`, `unblock_signals`.
+
+- **Option (2) — preempt-count guard in `prepare_ftrace_return`**
+  (`arch/um/kernel/ftrace.c`). The root cause of addendum-3's BUG
+  is not specific to `um_set_signals` — it's structural: UML-UP
+  builds TINY_RCU, which maps `rcu_read_lock()` to
+  `preempt_disable()`. Any call site that legitimately holds
+  `rcu_read_lock` around kallsyms / BPF / tracepoint lookup
+  (`is_bpf_text_address()` + `bpf_prog_kallsyms_find()` are the
+  most visible on the path) therefore runs with
+  `preempt_count > 0`. If fgraph pushes a shadow-stack entry for
+  a function whose body then takes a sleeping lock (free_irq →
+  __mutex_lock, tracer activation → tracepoints_mutex, …),
+  `__might_resched` WARNs under PROVE_LOCKING /
+  DEBUG_ATOMIC_SLEEP. Native x86 never hits this because it
+  builds TREE_RCU, where `rcu_read_lock()` does not touch
+  `preempt_count`. UML-UP has no equivalent option (TINY_RCU is
+  the UP choice). The guard is:
+
+      if (unlikely(in_atomic()))
+          return;
+
+  placed after the `ftrace_graph_is_dead` / `tracing_graph_pause`
+  checks in `prepare_ftrace_return`. Graph events inside the
+  atomic-context window are lost; the traced function still
+  executes; all events outside atomic context are still
+  captured. This matches the option-(2) trampoline-level guard
+  addendum-3 pointed at, with the preempt check in C rather than
+  assembly for clarity (no measurable hot-path difference — the
+  check reduces to a single memory load + branch).
+
+- **Option (3) — `notrace` on the signal-gate trace family**
+  (`arch/um/kernel/signal.c`: `block_signals_trace`,
+  `unblock_signals_trace`, `um_trace_signals_on`,
+  `um_trace_signals_off`). These kernel-side wrappers call
+  `trace_hardirqs_on/off` around
+  `block_signals()`/`unblock_signals()` and run from trap-return
+  paths that can be atomic by construction. They are NOT covered
+  by any `CFLAGS_REMOVE_<file>.o` strip on the branch today.
+
+Validation (SECCOMP_ONLY, uml/research, 2026-04-22):
+
+- `echo function_graph > /sys/kernel/tracing/current_tracer` from
+  init: rc=0, no BUG, no WARNING, `current_tracer=function_graph`
+  visible.
+- `echo function_graph > …` then `halt -f` with graph still
+  active: clean shutdown, no `Trying to free IRQ from IRQ
+  context` WARN, no sleeping-in-atomic BUG, no lockdep RCU
+  suspicious.
+- `echo function_graph > …` then workload (`ls`, `head -6
+  trace`) then `echo nop > …` then `halt -f`: full user-flow
+  clean; `trace` contains real call-graph output
+  (`is_bpf_text_address`, `kernel_text_address`,
+  `__is_insn_slot_addr`, …).
+- Boot matrix (12/12 configs): PASS, unchanged from 3a.
+- kprobes-stress selftest: PASS iters=200 fires=204 errors=0
+  graph=on (token flipped from `graph=deferred` in the same
+  commit).
+
+**Why the guard is authoritative, not a workaround:** addendum-3
+already enumerated this as one of the three valid fix classes.
+The UML-UP + TINY_RCU + PROVE_LOCKING combination is not a
+configuration we can shed — UML is UP by construction on the
+single-vCPU default, and TINY_RCU is the UP-only RCU flavour.
+Changing the research profile to SMP + TREE_RCU would avoid the
+guard but trade one set of constraints (TINY_RCU's preempt
+coupling) for another (SMP stop_machine costs + additional
+backend work). The guard costs a single `in_atomic()` read per
+traced-function entry (one load + one branch after both
+compile-time optimizations) and keeps the profile's research
+posture intact.
+
+**Merge surface growth (per D45):** the five `notrace`
+annotations in arch/um/ are UML-specific by construction
+(signal.c wrappers for UML's signal-driven IRQ model). They
+don't need upstream discussion. The preempt-count guard in
+`prepare_ftrace_return` is arch-local. None of the commit's
+changes introduce merge surface beyond existing arch/um/
+boundaries except the `select HAVE_FUNCTION_GRAPH_TRACER` line
+in `arch/um/Kconfig`, which is the intended deliverable.
+
+**Revisit triggers (closing):**
+- If UML gains a way to use TREE_RCU under UP (unlikely), the
+  preempt-count guard becomes strictly unnecessary and its
+  removal can be considered.
+- If upstream softens `__ftrace_return_to_handler`'s pop-failure
+  to return 0, the narrow `CFLAGS_REMOVE` strips from 3a become
+  optional. The `notrace` annotations from 3b are source-level
+  intent and stay either way.
+
+Closes task #77.
+
 ---
 
 ## D35: C-09 v1 is a cooperative AFL-style forkserver; CRIU-style snapshot-to-disk deferred to v2

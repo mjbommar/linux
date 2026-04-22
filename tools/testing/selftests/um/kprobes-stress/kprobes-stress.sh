@@ -151,6 +151,6 @@ if [ "$FIRES" -lt 1 ]; then
 	exit 1
 fi
 
-echo "KPROBES_STRESS: PASS iters=$ITERS fires=$FIRES errors=0 graph=deferred"
+echo "KPROBES_STRESS: PASS iters=$ITERS fires=$FIRES errors=0 graph=on"
 halt -f 2>/dev/null
 poweroff -f 2>/dev/null

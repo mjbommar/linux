@@ -28,9 +28,12 @@
  * process's). stop_machine + bulk mprotect is the closest analogue:
  * no peer kernel path observes the transient RW window.
  *
- * Function graph is deferred to a follow-up per D27; this file
- * intentionally does not implement prepare_ftrace_return() or any
- * return-trampoline machinery.
+ * Function graph is added here in C-04 commit 3b. The trampolines
+ * themselves live in arch/um/kernel/mcount.S; this file implements
+ * the three hooks fgraph needs: prepare_ftrace_return() (called
+ * from ftrace_graph_caller on every traced function entry when
+ * fgraph is active) and the enable/disable pair that patches the
+ * ftrace_graph_call site inside ftrace_caller.
  */
 
 #include <linux/ftrace.h>
@@ -143,3 +146,119 @@ void arch_ftrace_update_code(int command)
 	stop_machine_cpuslocked(um_ftrace_update_code_cb, &command,
 				cpu_online_mask);
 }
+
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+/*
+ * ftrace_graph_call / ftrace_graph_caller / return_to_handler are
+ * declared in <asm/ftrace.h>. They resolve to the mcount.S
+ * trampolines this file patches and hooks via prepare_ftrace_return.
+ *
+ * ftrace_graph_call is a 5-byte JMP rel32 site inside ftrace_caller
+ * that starts as `jmp ftrace_stub` (a no-op return path) and gets
+ * patched to `jmp ftrace_graph_caller` when the function graph
+ * tracer activates. Patching happens from inside
+ * ftrace_modify_all_code() (generic kernel/trace/ftrace.c, see
+ * FTRACE_START_FUNC_RET/FTRACE_STOP_FUNC_RET), which on UML runs
+ * inside arch_ftrace_update_code()'s stop_machine callback — so
+ * [_text, _etext) is already mapped RW and no peer CPU is
+ * executing kernel code. Plain memcpy is safe; we do not need the
+ * per-patch mprotect dance that native x86's smp_text_poke_single()
+ * provides.
+ */
+#define JMP_INSN_OPCODE		0xe9
+#define JMP_INSN_SIZE		5	/* = MCOUNT_INSN_SIZE */
+
+static int um_ftrace_mod_jmp(unsigned long site, void *target)
+{
+	u8 new[JMP_INSN_SIZE];
+	s32 disp = (s32)((unsigned long)target - (site + JMP_INSN_SIZE));
+
+	new[0] = JMP_INSN_OPCODE;
+	memcpy(&new[1], &disp, sizeof(disp));
+	memcpy((void *)site, new, JMP_INSN_SIZE);
+	return 0;
+}
+
+int ftrace_enable_ftrace_graph_caller(void)
+{
+	return um_ftrace_mod_jmp((unsigned long)&ftrace_graph_call,
+				 &ftrace_graph_caller);
+}
+
+int ftrace_disable_ftrace_graph_caller(void)
+{
+	return um_ftrace_mod_jmp((unsigned long)&ftrace_graph_call,
+				 &ftrace_stub);
+}
+
+/*
+ * Hook the return address of a traced function via the fgraph
+ * shadow stack. Called from ftrace_graph_caller (mcount.S) on
+ * every traced-function entry while fgraph is active.
+ *
+ * - @ip: address of the patched NOP at the traced function's
+ *   entry (== traced_fn's real start on UML).
+ * - @parent: pointer to the return-address slot on the traced
+ *   function's stack. Rewriting *parent sends the traced
+ *   function's `ret` to return_to_handler instead of the real
+ *   caller.
+ * - @frame_pointer: 0 on UML (no frame pointers through the
+ *   ftrace trampoline path).
+ *
+ * function_graph_enter() pushes a shadow-stack entry keyed by the
+ * original parent address; return_to_handler() → ftrace_return_
+ * to_handler() pops it to recover the real caller ip.
+ *
+ * Safety: the signal-gate family in arch/um/{kernel,os-Linux}/
+ * signal.c is marked `notrace` (kernel/signal.c) or built without
+ * patchable NOPs (os-Linux/signal.c, per the strip set added in
+ * C-04 commit 3a) so that this path never fires from inside
+ * arch_local_irq_* callers. Without that, the activation-path
+ * mutex inside function_graph_enter would sleep in atomic context
+ * (decisions-log D34 addendum-3).
+ */
+void notrace prepare_ftrace_return(unsigned long ip, unsigned long *parent,
+				   unsigned long frame_pointer)
+{
+	unsigned long return_hooker = (unsigned long)&return_to_handler;
+
+	if (unlikely(ftrace_graph_is_dead()))
+		return;
+
+	if (unlikely(atomic_read(&current->tracing_graph_pause)))
+		return;
+
+	/*
+	 * UML-UP kernels use TINY_RCU, where rcu_read_lock() is
+	 * implemented as preempt_disable(). Kernel call sites that
+	 * legitimately hold rcu_read_lock around kallsyms / BPF /
+	 * tracepoint lookup (is_bpf_text_address() is the one most
+	 * visibly on the path) therefore run with preempt_count > 0.
+	 * Under PROVE_LOCKING + DEBUG_ATOMIC_SLEEP, the body of a
+	 * graph-traced function that happens to take a sleeping lock
+	 * (free_irq → __mutex_lock, tracer activation →
+	 * tracepoints_mutex, …) will then trip __might_resched() and
+	 * emit a lockdep-flavoured BUG. Native x86 escapes because it
+	 * builds with TREE_RCU, where rcu_read_lock() does not touch
+	 * preempt_count; UML-UP has no equivalent option.
+	 *
+	 * Skip the shadow-stack push when preempt_count is already
+	 * non-zero. We lose graph events for the traced-function
+	 * window that sits inside the rcu_read_lock / atomic
+	 * context, which is exactly the window where the generic
+	 * fgraph trampoline's push-then-callback-then-pop contract is
+	 * unsafe on UML. The traced function still executes normally,
+	 * and all fgraph events that happen outside atomic context
+	 * are still captured. Matches the option-(2) guard sketched in
+	 * Documentation/virt/uml/redesign/04-risks/decisions-log.md
+	 * D34 addendum-3, formalized in addendum-4 as the landing fix.
+	 * We read preempt_count() directly rather than in_atomic() so
+	 * the check is explicit — the same bits, named what they are.
+	 */
+	if (unlikely(preempt_count()))
+		return;
+
+	if (!function_graph_enter(*parent, ip, frame_pointer, parent))
+		*parent = return_hooker;
+}
+#endif /* CONFIG_FUNCTION_GRAPH_TRACER */

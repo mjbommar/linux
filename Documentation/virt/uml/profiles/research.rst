@@ -46,18 +46,21 @@ What's on
   ``DEBUG_INFO`` (DWARF5), ``MAGIC_SYSRQ``, ``IKCONFIG``,
   ``PROC_KCORE``, ``BSD_PROCESS_ACCT``.
 - **Tracing**: ``FTRACE``, ``FTRACE_SYSCALLS``, ``USER_EVENTS``,
-  ``DYNAMIC_EVENTS``, ``HIST_TRIGGERS``, and — since workstream
-  C-05 — ``FUNCTION_TRACER`` + ``DYNAMIC_FTRACE`` (see
-  :doc:`../ftrace` for mechanism and limitations). Function graph
-  (``CONFIG_FUNCTION_GRAPH_TRACER``) is still off: C-04 commit 3a
-  (2026-04-21) landed the strip infrastructure that lets graph
-  tracing coexist with UML's longjmp-entered tasks and
-  never-returning kthreads, but commit 3b (the actual Kconfig
-  flip + trampolines) is deferred one session pending an
-  atomic-context fix in ``prepare_ftrace_return``. See
-  decisions-log D34 for the full three-leak-source analysis and
-  the 2026-04-21 addenda. Kretprobes via the rethook shadow stack
-  (below) provides a return-instrumentation story in the interim.
+  ``DYNAMIC_EVENTS``, ``HIST_TRIGGERS``, ``FUNCTION_TRACER`` +
+  ``DYNAMIC_FTRACE`` (workstream C-05), and
+  ``FUNCTION_GRAPH_TRACER`` (C-04 commit 3b, 2026-04-22). See
+  :doc:`../ftrace` and :doc:`../kprobes` for mechanism and
+  limitations. The function graph path uses the trampolines in
+  ``arch/um/kernel/mcount.S`` and closes all three shadow-stack
+  leak sources from D34 (two ``notrace`` annotations in
+  ``kernel/{kthread,smpboot}.c`` + the narrow
+  ``CFLAGS_REMOVE_<file>.o`` strip set on UML's signal-dispatch
+  and longjmp-entry TUs). A preempt-count guard in
+  ``prepare_ftrace_return`` suppresses graph events that would
+  otherwise fire from inside an outer ``rcu_read_lock``
+  (TINY_RCU maps that to ``preempt_disable`` on UML-UP). Kretprobes
+  via the rethook shadow stack (below) remains the supported
+  return-probe primitive.
 - **Dynamic probes**: since workstream C-04 — ``KPROBES`` (entry
   and mid-function probes via ``int3`` + single-step) and
   ``KRETPROBES`` (return probes via the generic rethook shadow

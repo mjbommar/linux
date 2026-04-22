@@ -29,6 +29,33 @@
  */
 void ftrace_call(void);
 
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+/*
+ * ftrace_graph_call is an inner label inside ftrace_caller — the
+ * 5-byte patchable JMP site that ftrace_enable_ftrace_graph_caller
+ * rewrites from `jmp ftrace_stub` (the no-op return path) to
+ * `jmp ftrace_graph_caller` when the graph tracer activates.
+ *
+ * ftrace_graph_caller and return_to_handler are the trampolines
+ * defined in arch/um/kernel/mcount.S; arch/um/kernel/ftrace.c's
+ * enable/disable hooks need their addresses for patching and
+ * fgraph parent-slot rewriting.
+ */
+void ftrace_graph_call(void);
+void ftrace_graph_caller(void);
+void return_to_handler(void);
+
+/*
+ * prepare_ftrace_return is the C-side fgraph hook that
+ * ftrace_graph_caller (mcount.S) tail-calls on every traced
+ * function entry. Mirrors arch/x86/include/asm/ftrace.h's
+ * declaration so generic trace code + our own .c impl both see
+ * a prototype.
+ */
+void prepare_ftrace_return(unsigned long ip, unsigned long *parent,
+			   unsigned long frame_pointer);
+#endif
+
 static inline unsigned long ftrace_call_adjust(unsigned long addr)
 {
 	/*

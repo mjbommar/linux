@@ -46,6 +46,15 @@ config UML
 	select HAVE_DYNAMIC_FTRACE if HAVE_FUNCTION_TRACER
 	select FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
 		if DYNAMIC_FTRACE
+	# HAVE_FUNCTION_GRAPH_TRACER depends on CC_FLAGS_FTRACE being
+	# stripped from arch/um's signal-dispatch + longjmp-entry TUs
+	# (see arch/um/os-Linux/Makefile + arch/um/kernel/Makefile
+	# CFLAGS_REMOVE_<file>.o lines, landed as C-04 commit 3a) and
+	# on the notrace annotations in arch/um/kernel/signal.c's
+	# arch_local_irq_* helpers. See Documentation/virt/uml/
+	# redesign/04-risks/decisions-log.md D34 for the full
+	# background.
+	select HAVE_FUNCTION_GRAPH_TRACER if HAVE_FUNCTION_TRACER
 	select HAVE_KPROBES if X86_64
 	# HAVE_RETHOOK auto-selects RETHOOK and turns on KRETPROBE_ON_RETHOOK,
 	# which is how modern x86_64 supplies KRETPROBES (see D33). No need

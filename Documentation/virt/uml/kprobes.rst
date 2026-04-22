@@ -109,21 +109,25 @@ Three user-visible gaps remain after the C-04 landing:
   hit). Mid-function probes need ``int3`` regardless. Tracked as a
   Q4-phase follow-up; see D32 for the scope decision.
 
-``HAVE_FUNCTION_GRAPH_TRACER`` is still off but the path is now
-  partially cleared. Commit 3a of C-04 (2026-04-21) landed the
-  strip infrastructure (``notrace`` on generic ``kthread()`` /
-  ``smpboot_thread_fn()`` plus a narrow set of
-  ``CFLAGS_REMOVE_<file>.o`` strips on UML's signal-dispatch and
-  longjmp-entry TUs), which closes all three leak sources the
-  D34 analysis identified. Commit 3b (the actual Kconfig flip +
-  the ``ftrace_graph_caller`` / ``return_to_handler``
-  trampolines in ``arch/um/kernel/mcount.S``) is deferred one
-  session pending an atomic-context fix in
-  ``prepare_ftrace_return`` — see the D34 2026-04-21 addendum-3.
-  Until then, kretprobes cover the return-instrumentation use
-  case and the kprobes-stress selftest reports
-  ``graph=deferred`` so the eventual 3b landing is gated on the
-  same regression harness.
+``HAVE_FUNCTION_GRAPH_TRACER`` is on (C-04 commit 3b, 2026-04-22).
+  Commit 3a (2026-04-21) closed the three shadow-stack leak sources
+  D34 identified (``notrace`` on generic ``kthread()`` /
+  ``smpboot_thread_fn()`` plus a narrow ``CFLAGS_REMOVE_<file>.o``
+  strip set on UML's signal-dispatch and longjmp-entry TUs).
+  Commit 3b adds the ``ftrace_graph_caller`` / ``return_to_handler``
+  trampolines in ``arch/um/kernel/mcount.S``, ``prepare_ftrace_return``
+  in ``arch/um/kernel/ftrace.c``, and selects
+  ``HAVE_FUNCTION_GRAPH_TRACER``. One small UML-specific quirk
+  remains: ``prepare_ftrace_return`` skips the shadow-stack push
+  when ``preempt_count`` is non-zero. UML-UP builds with
+  ``TINY_RCU``, where ``rcu_read_lock()`` is
+  ``preempt_disable()``, so a graph-traced function body that
+  takes a sleeping lock while an outer ``rcu_read_lock`` is held
+  would otherwise trip ``__might_resched`` under
+  ``PROVE_LOCKING``. The guard loses graph events only for that
+  narrow window; the traced function still executes and all
+  events outside atomic context are still captured. See D34
+  addendum-3 / addendum-4 for the full analysis.
 
 Blacklist and ``NOKPROBE_SYMBOL``
 =================================
