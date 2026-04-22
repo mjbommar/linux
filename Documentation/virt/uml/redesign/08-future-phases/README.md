@@ -57,3 +57,10 @@ Logged as D24 in `04-risks/decisions-log.md`.
   snapshot-to-disk / resume / review beyond C-09 v1's in-memory fork-
   server. Chosen format is ELF64 core dump + UML `PT_NOTE` types; opens
   when D35's revisit triggers fire.
+- [03-uml-fuzz-rust-companion.md](03-uml-fuzz-rust-companion.md) — a
+  Rust, in-tree, syzlang-compatible companion fuzzer under
+  `tools/fuzz/uml-fuzz/`. Positions itself around two capabilities
+  syzkaller-as-is doesn't exploit: direct C-09 forkserver integration
+  (speed wedge) and UML time-travel / record-replay integration
+  (research-capability wedge). Opens only after C-08 lands upstream
+  and produces measured data on its limits. See D48.

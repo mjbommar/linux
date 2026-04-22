@@ -258,4 +258,16 @@ traditional out-of-tree driver-integration PR.
   the forkserver wire protocol.
 - `04-risks/decisions-log.md` D35/D36/D37/D41/D42 — the
   forkserver design decisions this driver inherits.
+- `04-risks/decisions-log.md` D48 — "C-08 first, then evaluate
+  whether a Rust companion fuzzer is worth building." Records
+  the sequence decision between C-08 and the parked
+  `tools/fuzz/uml-fuzz/` proposal.
+- `08-future-phases/03-uml-fuzz-rust-companion.md` — the
+  parked follow-on proposal for a Rust, in-tree,
+  syzlang-compatible companion fuzzer that would exploit UML-
+  specific capabilities syzkaller-as-is doesn't (direct
+  forkserver integration + time-travel-aware fuzzing). Not a
+  replacement for this workstream; opens only if C-08 lands
+  and accumulates evidence that specific wedges are worth
+  building.
 - google/syzkaller#1288 — the upstream feature request.

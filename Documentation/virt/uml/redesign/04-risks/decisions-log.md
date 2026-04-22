@@ -4684,4 +4684,120 @@ away from the code in ways only a careful review caught."
 
 ---
 
+## D48: Sequence C-08 (syzkaller vm/uml) before any own-fuzzer build; record the Rust companion as a future phase
+
+**Date:** 2026-04-21
+**Status:** Accepted (sequence decision, no code impact yet).
+
+A reasonable line of questioning surfaced while reviewing C-08:
+"why can't we just write our own fuzzer, in Rust, in-tree,
+syzlang-compatible?" The answer is a sequence decision, not a
+yes/no. Capturing it here so the question doesn't re-open
+during C-08 implementation.
+
+**The claim the question challenges:**
+
+C-08's "kernel side ready" framing implied the only remaining
+work was writing `pkg/vm/uml/` in the syzkaller repo (Go,
+~2–3 weeks, upstream PR). Rust-in-tree-with-syzlang-reuse is an
+alternative approach that consumes syzkaller's ecosystem (`.txt`
+grammar, syz-db corpus format) but runs its own
+executor+mutator loop. Structurally feasible — syzkaller is
+Apache 2.0, GPL-2.0-compatible; syzlang parser in Rust is
+2–3k LOC with nom/pest; `tools/uml/uml-launcher/` establishes
+Rust-in-tree precedent.
+
+**What the alternative changes:**
+
+  - Direct fd-198/199 integration with the C-09 forkserver,
+    no `pkg/vm/vmimpl` layer. Theoretical speed gain over
+    syzkaller-through-generic-VM-abstraction: 5–10× iter/s.
+  - UML time-travel / record-replay integration. Rewind-and-
+    mutate fuzzing is a genuinely syzkaller-can't-do-it
+    capability (no other syzkaller target supports it).
+
+**What the alternative does NOT change:**
+
+  - **syzbot integration stays syzkaller's.** Running our own
+    fuzzer doesn't get bugs into the auto-triage email loop.
+    Vision success criterion #6 ("syzbot has UML in rotation")
+    requires syzkaller adoption regardless of which local
+    fuzzer we eventually write.
+  - **Grammar curation stays upstream.** Kernel developers
+    land new syscalls by submitting to syzkaller's
+    `sys/linux/`. Our tool reads those files; it doesn't own
+    them. That's fine — it's the correct layer to consume at
+    — but it means we track syzkaller's upstream indefinitely.
+  - **Corpus compounding depends on continuous sync.** We
+    inherit the existing corpus on day one (syzlang format is
+    parseable). Whether we keep up with the growing corpus
+    depends on how often we re-ingest syzkaller's exports.
+
+**Alternatives considered:**
+
+1. **Just do C-08; never build `uml-fuzz`.** Simplest. Vision
+   criteria #2 and #6 covered by C-08's 2–3-week PR. Leaves
+   the speed and time-travel wedges unexploited, which is
+   acceptable if those wedges turn out to be research-interest
+   rather than shippable-product-interest.
+
+2. **Skip C-08; build `uml-fuzz` instead.** Tempting because
+   "our Rust tool" feels more controllable than "a Go PR to a
+   Google repo." Rejected: this reverses the sequencing and
+   gets NEITHER syzbot adoption NOR a shipping companion
+   (because the companion has no reference target to be a
+   companion to). Also wastes the existing ecosystem — we'd
+   be building from scratch what C-08 gives us for free.
+
+3. **Both, in sequence.** C-08 first (2–3 weeks, unambiguous
+   win, unblocks syzbot adoption and vision criteria #2 + #6).
+   `uml-fuzz` later, **only if evidence accumulates** that
+   C-08-via-syzkaller leaves material capability on the table.
+   The "only if" is important: we don't know yet whether
+   syzkaller-via-pkg/vm/uml/ saturates the forkserver or
+   leaves 10× on the floor. We'll have numbers after C-08
+   lands and runs for a month. Decision made with data
+   beats decision made from armchair.
+
+**Selected:** alternative 3.
+
+**Triggers to revisit:**
+
+- C-08 has been landed in syzkaller upstream for ≥6 months AND
+  syzbot is running UML in rotation.
+- Measured iter/s on workstation hardware via syzkaller-on-UML
+  is below 1000 (vision criterion #2 target) AND the C-09 v2
+  freezer-cgroup redesign has shipped, so the bottleneck
+  explanation isn't just "v1 wasn't designed for sustained."
+- An operator has written a one-pager demonstrating a
+  specific bug class that requires time-travel/rewind fuzzing
+  (not "wouldn't it be cool if" — "this specific bug escaped
+  syzkaller's reach because it needs rewind-and-mutate").
+
+Without all three, `uml-fuzz` stays parked. With all three,
+it graduates into a proper workstream task (likely numbered
+E-01 or similar, outside the current A–D plan per the
+`08-future-phases/README.md` scope policy).
+
+**Why this entry exists despite "no code impact":**
+
+The question "why not Rust-in-tree" is natural and will come
+up again. Without this entry a future reader (or a future me)
+has to re-derive the sequencing from first principles. D48
+preserves the reasoning so "land C-08 first" doesn't read as
+a preference against Rust tooling — it's a consequence of
+"syzbot adoption is on vision criterion #6, and `uml-fuzz`
+doesn't deliver that, so it can't be first."
+
+**Cross-references:**
+- `02-workstreams/C-profiles-and-gaps/08-syzkaller-vm-uml.md`
+  — the C-08 workstream that must land first.
+- `08-future-phases/03-uml-fuzz-rust-companion.md` — the
+  design-sketch for the parked companion tool.
+- D45 — the in-fork scope policy (covers any kernel-side
+  changes `uml-fuzz` turns out to need beyond what C-08
+  already motivates).
+
+---
+
 ## (Future entries here, as decisions are made)
