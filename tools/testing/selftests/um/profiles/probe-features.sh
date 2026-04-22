@@ -12,6 +12,14 @@
 # per-profile expected set. Works under every profile (including
 # sandbox, where most probes should report ABSENT).
 
+# Breadcrumb: write to /dev/kmsg so that even if init's stdout is
+# wired to a dead console (seen on GHA runners where `con=null`
+# is our default), the "init reached" signal still lands in the
+# kernel log ring — which the harness captures via the UML
+# process's stdout. First thing, before any mount/exec that
+# could fail.
+echo 'probe-features.sh: init running' >/dev/kmsg 2>/dev/null || true
+
 # hostfs is root; the guest sees the host's /proc, /sys, /dev
 # until it overlays its own. Mount proc and sysfs FIRST so the
 # rest of the probe sees guest-kernel state, not host-kernel state.

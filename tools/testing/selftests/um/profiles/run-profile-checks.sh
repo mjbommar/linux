@@ -35,8 +35,18 @@ probe_profile() {
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
 	# 40s timeout — KCSAN (race profile) adds several seconds of
 	# lockdep/selftest init at boot before the probe runs.
+	#
+	# `rootflags=/` mounts the host's root as the guest's root
+	# so that the absolute path we hand to `init=` resolves the
+	# same way inside the guest as on the host. Without it,
+	# hostfs defaults to the launch CWD and the kernel silently
+	# fails to exec an absolute-path init — no panic, no
+	# "Failed to execute /path (error -2)", just a hang until
+	# the outer timeout fires. Surfaced by the first GHA CI
+	# run of this harness.
 	out=$(timeout 40 "$binary" init="$GUEST_SCRIPT" mem=512M \
-		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
+		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs \
+		rootflags=/ rw 2>&1)
 
 	# UML's console delivers CRLF line endings; strip CRs so the
 	# PRESENT/ABSENT tokens compare cleanly downstream.
