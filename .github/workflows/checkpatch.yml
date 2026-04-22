@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Per-commit checkpatch gate.
+#
+# Runs `scripts/checkpatch.pl --strict -g <sha>` against every
+# commit touched by a push or PR to `uml-redesign-plan`. This
+# matches AGENT-PROMPT.md's "every PR" policy for the Q1 quality
+# bar — no commit should merge with checkpatch errors. The
+# --strict flag elevates `CHECK:` lines to warnings so the
+# column-width nits (which we've hit multiple times during
+# mid-session development) fail the job rather than pass
+# silently.
+#
+# Fork-only workflow (kernel tree's top-level `.gitignore`
+# excludes `.github`, so this ships via `git add -f` like the
+# other CI workflows). Runs fast (seconds per commit on
+# runner-hardware) so it's appropriate as a per-commit gate.
+
+name: checkpatch
+
+on:
+  push:
+    branches: [uml-redesign-plan]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checkpatch:
+    name: checkpatch --strict
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 so checkpatch can walk the commit
+          # range backwards on pushes that land multiple
+          # commits at once. Default depth 1 would only see
+          # HEAD.
+          fetch-depth: 50
+
+      - name: Install checkpatch deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            perl python3 python3-ply python3-git
+
+      - name: Determine commit range
+        id: range
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)
+              # PR events: compare against the PR base, walk
+              # all PR commits.
+              base='${{ github.event.pull_request.base.sha }}'
+              head='${{ github.event.pull_request.head.sha }}'
+              ;;
+            push)
+              # Push events: walk the commits pushed in this
+              # event. github.event.before is the ref's SHA
+              # before the push.
+              base='${{ github.event.before }}'
+              head='${{ github.event.after }}'
+              # First push to a branch has before = all-zeros;
+              # fall back to checking just the head commit in
+              # that case.
+              if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+                base=HEAD~1
+              fi
+              ;;
+            *)
+              base=HEAD~1
+              head=HEAD
+              ;;
+          esac
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "head=$head" >>"$GITHUB_OUTPUT"
+          echo "Range: $base..$head"
+
+      - name: Run checkpatch per commit
+        run: |
+          set -e
+          base='${{ steps.range.outputs.base }}'
+          head='${{ steps.range.outputs.head }}'
+          fail=0
+          for sha in $(git rev-list --reverse "$base..$head"); do
+            echo "::group::checkpatch $sha $(git log -1 --format=%s "$sha")"
+            if ! scripts/checkpatch.pl --strict --no-summary -g "$sha"; then
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::checkpatch reported errors on one or more commits"
+            exit 1
+          fi
