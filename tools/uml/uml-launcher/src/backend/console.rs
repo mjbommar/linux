@@ -25,18 +25,20 @@
 //   - rust-vmm/vhost-device/vhost-device-rng     (simpler, 0.22)
 //   - D52 (the C-10 v2 plan these choices come from)
 
-use std::sync::{Arc, RwLock};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock};
+use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT};
 use virtio_bindings::bindings::virtio_config::{
     VIRTIO_F_NOTIFY_ON_EMPTY, VIRTIO_F_VERSION_1,
 };
 use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+use virtio_queue::{QueueOwnedT, QueueT};
+use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 
 use crate::backend::seccomp::FilterBuilder;
@@ -89,6 +91,11 @@ fn protocol_features() -> VhostUserProtocolFeatures {
     VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::REPLY_ACK
 }
 
+/// Where guest TX bytes go. Boxed so tests can swap stdout for
+/// an in-memory `Vec<u8>` and verify end-to-end behavior without
+/// spawning a process.
+pub type ConsoleSink = Box<dyn Write + Send>;
+
 /// Mutable state for a live console backend. Wrapped in
 /// `Arc<RwLock<...>>` so both `VhostUserDaemon` (via the blanket
 /// `VhostUserBackend` impl for `RwLock<T: VhostUserBackendMut>`)
@@ -102,14 +109,160 @@ pub struct ConsoleBackend {
     /// notification path consults this; the scaffold path just
     /// records it.
     event_idx: bool,
+
+    /// Sink that the TX path writes guest bytes to. Defaults to
+    /// stdout when the backend is constructed for the production
+    /// `run()` path; tests substitute an in-memory buffer.
+    ///
+    /// Wrapped in `Mutex` so `ConsoleBackend` stays `Send + Sync`
+    /// (required by the `VhostUserBackend: Send + Sync` bound via
+    /// the `VhostUserBackendMut` blanket impl). `std::io::Stdout`
+    /// is `Send` but not `Sync`; the `Mutex` bridges the gap.
+    /// Contention is nonexistent in practice — the vhost-user
+    /// daemon serializes TX batches through `handle_event()`.
+    sink: Mutex<ConsoleSink>,
 }
 
 impl ConsoleBackend {
     pub fn new() -> Result<Self> {
-        Ok(Self {
+        Ok(Self::with_sink(Box::new(std::io::stdout())))
+    }
+
+    /// Construct with a caller-supplied sink. Used by tests to
+    /// swap stdout for an in-memory buffer; the `new()` entry
+    /// point is the one the production `run()` path uses.
+    pub fn with_sink(sink: ConsoleSink) -> Self {
+        Self {
             mem: None,
             event_idx: false,
-        })
+            sink: Mutex::new(sink),
+        }
+    }
+
+    /// Drain the TX virtqueue: for each descriptor chain the
+    /// guest published, read the bytes it wrote into guest
+    /// memory, forward them to the backend's sink (stdout by
+    /// default), and return the chain to the used ring.
+    ///
+    /// Follows the pattern used by rust-vmm/vhost-device-console's
+    /// `process_tx_queue()` with the `event_idx`-aware notification
+    /// that crate omits: we consult `needs_notification()` on the
+    /// queue state before calling `signal_used_queue()` so the
+    /// guest's event-index suppression kicks in as negotiated.
+    fn process_tx_queue(&mut self, vring: &VringRwLock) -> std::io::Result<()> {
+        let atomic_mem = match self.mem.as_ref() {
+            Some(m) => m,
+            None => {
+                // Guest kicked TX before SET_MEM_TABLE landed.
+                // Shouldn't happen with a well-behaved frontend;
+                // silently skip rather than panic.
+                log::warn!("console: TX kick before memory table was set; skipping");
+                return Ok(());
+            }
+        };
+
+        // Collect descriptor chains up front; draining the queue
+        // iterator while the vring is borrowed mutably by
+        // `add_used()` would tangle the borrow checker.
+        // `.memory()` returns a short-lived LoadGuard; pass it
+        // directly into `.iter()` per the rust-vmm/vhost-device
+        // console reference.
+        let requests = {
+            let mut guard = vring.get_mut();
+            let queue = guard.get_queue_mut();
+            queue
+                .iter(atomic_mem.memory())
+                .map_err(|e| {
+                    std::io::Error::other(format!("iter TX queue: {e:?}"))
+                })?
+                .collect::<Vec<_>>()
+        };
+
+        if requests.is_empty() {
+            return Ok(());
+        }
+
+        let mut any_used = false;
+        for chain in requests {
+            let head = chain.head_index();
+            let chain_mem = atomic_mem.memory();
+            let mut reader = chain
+                .clone()
+                .reader(&chain_mem)
+                .map_err(|e| std::io::Error::other(format!("chain reader: {e:?}")))?;
+
+            let available = reader.available_bytes();
+            if available == 0 {
+                // Zero-length chain — mark used for the guest's
+                // bookkeeping and move on.
+                vring.add_used(head, 0).map_err(|e| {
+                    std::io::Error::other(format!("add_used (empty): {e:?}"))
+                })?;
+                any_used = true;
+                continue;
+            }
+
+            // Stream the bytes straight to the sink. Use a small
+            // stack buffer so we avoid one allocation per chain;
+            // 4096 is the max descriptor-chain size virtio-console
+            // guests typically use, but we loop if the chain is
+            // bigger.
+            let mut buf = [0u8; 4096];
+            let mut remaining = available;
+            while remaining > 0 {
+                let take = remaining.min(buf.len());
+                reader.read_exact(&mut buf[..take]).map_err(|e| {
+                    std::io::Error::other(format!("read TX bytes: {e:?}"))
+                })?;
+                self.sink
+                    .lock()
+                    .map_err(|_| std::io::Error::other("sink mutex poisoned"))?
+                    .write_all(&buf[..take])?;
+                remaining -= take;
+            }
+
+            let written = reader.bytes_read() as u32;
+            vring
+                .add_used(head, written)
+                .map_err(|e| std::io::Error::other(format!("add_used: {e:?}")))?;
+            any_used = true;
+        }
+
+        // Best-effort flush; if the sink is a stdout the guest
+        // kernel expected its line to appear promptly.
+        if let Ok(mut sink) = self.sink.lock() {
+            let _ = sink.flush();
+        }
+
+        if any_used {
+            // Honor event-index suppression when the guest
+            // negotiated VIRTIO_RING_F_EVENT_IDX. The guest sets
+            // a threshold in the avail ring's `used_event` field
+            // below which the backend must not signal; calling
+            // `needs_notification()` checks that and the basic
+            // "is notification suppressed" bit in one place.
+            let notify_mem = atomic_mem.memory();
+            let needs = {
+                let mut guard = vring.get_mut();
+                let queue = guard.get_queue_mut();
+                queue
+                    .needs_notification(&*notify_mem)
+                    .map_err(|e| std::io::Error::other(format!("needs_notification: {e:?}")))?
+            };
+            if needs {
+                vring
+                    .signal_used_queue()
+                    .map_err(|e| std::io::Error::other(format!("signal_used_queue: {e:?}")))?;
+            } else {
+                log::trace!("console: TX batch completed; guest suppressed notification");
+            }
+        }
+
+        // Silence "unused field" warning about event_idx on paths
+        // where trace-level logging is compiled out.
+        let _ = self.event_idx;
+
+        Ok(())
     }
 }
 
@@ -156,24 +309,34 @@ impl VhostUserBackendMut for ConsoleBackend {
         &mut self,
         device_event: u16,
         evset: EventSet,
-        _vrings: &[VringRwLock],
+        vrings: &[VringRwLock],
         _thread_id: usize,
     ) -> std::io::Result<()> {
-        // Scaffold: log and drain. The rust-vmm daemon only calls
-        // handle_event for device-class queues that we registered
-        // (RX + TX for console). Data-path logic lands in the next
-        // commit; this stub keeps the protocol surface live so
-        // frontend connection + negotiation can be exercised now.
-        log::debug!(
-            "console: handle_event device_event={} evset={:?} (scaffold no-op)",
-            device_event,
-            evset
-        );
+        if evset != EventSet::IN {
+            log::warn!("console: unexpected evset {evset:?}; ignoring");
+            return Ok(());
+        }
+
         match device_event {
-            RX_QUEUE => {}
-            TX_QUEUE => {}
+            TX_QUEUE => {
+                // Guest → host. Drain the TX queue into the
+                // backend's stdout.
+                let vring = &vrings[TX_QUEUE as usize];
+                self.process_tx_queue(vring)?;
+            }
+            RX_QUEUE => {
+                // Host → guest. Not yet implemented — the RX
+                // path requires a backend-side eventfd tied to
+                // the launcher's stdin (see the rust-vmm
+                // vhost-device-console reference). Kicks on the
+                // RX queue alone aren't sufficient; the backend
+                // needs stdin-readiness to know when to fill
+                // guest buffers. Tracked for a follow-on commit
+                // in the C-10 v2 series per D52.
+                log::debug!("console: RX queue kick (no-op until RX path lands)");
+            }
             other => {
-                log::warn!("console: unexpected device_event={other}");
+                log::warn!("console: unexpected device_event={other}; ignoring");
             }
         }
         Ok(())
@@ -276,4 +439,238 @@ mod tests {
         b.set_event_idx(false);
         assert!(!b.event_idx);
     }
+}
+
+/// End-to-end tests for the TX data path. Build a real
+/// `GuestMemoryMmap` + `VringRwLock`, place a descriptor that
+/// points into guest memory, wire it into the queue's avail
+/// ring, let `process_tx_queue()` drain it, and assert the
+/// bytes arrive on the backend's sink.
+///
+/// This exercises the actual flow bytes take from guest to host —
+/// `process_tx_queue()` is the only thing that changes per
+/// backend class, and without this harness the anti-pattern-6
+/// concern ("land a commit whose tests you haven't actually
+/// run") would be real: the handler either works byte-for-byte
+/// or not. The real UML integration test still belongs with the
+/// orchestration commit, but the data-path correctness is
+/// provable here without it.
+#[cfg(test)]
+mod tx_path_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use vm_memory::{GuestAddress, GuestMemoryAtomic, GuestMemoryMmap};
+
+    /// Allocate a 64 KiB guest-memory region at guest-physical
+    /// address 0, suitable for holding both the virtqueue
+    /// structures and the TX data buffers.
+    fn make_mem() -> GuestMemoryAtomic<GuestMemoryMmap<()>> {
+        let gmm = GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x10000)])
+            .expect("guest memory");
+        GuestMemoryAtomic::new(gmm)
+    }
+
+    /// Build a vring backed by @mem at queue-size @size and
+    /// return the `VringRwLock` the backend will consume plus
+    /// the descriptor-table base address so the test can write
+    /// descriptors directly.
+    ///
+    /// Layout in guest memory (chosen to give clean alignment):
+    ///   - 0x0000..0x1000 : descriptor table (16 entries × 16 B)
+    ///   - 0x1000..0x1800 : avail ring + used ring
+    ///   - 0x2000..       : data buffers the TX descriptors point at
+    fn setup_vring(
+        mem: &GuestMemoryAtomic<GuestMemoryMmap<()>>,
+        size: u16,
+    ) -> VringRwLock {
+        let vring = VringRwLock::new(mem.clone(), size).expect("new vring");
+        // Enable + configure. The addresses match the layout
+        // above.
+        vring.set_queue_info(0x0, 0x1000, 0x1800).expect("queue info");
+        vring.set_queue_ready(true);
+        vring.set_queue_size(size);
+        vring
+    }
+
+    /// Write a raw split-ring descriptor at index @desc_idx.
+    /// Fields per virtio 1.x spec § 2.7.5.
+    fn write_desc(
+        mem: &GuestMemoryMmap<()>,
+        desc_table: u64,
+        desc_idx: u16,
+        addr: u64,
+        len: u32,
+        flags: u16,
+        next: u16,
+    ) {
+        use vm_memory::Bytes;
+        let desc = desc_table + (desc_idx as u64) * 16;
+        mem.write_obj::<u64>(addr, GuestAddress(desc)).unwrap();
+        mem.write_obj::<u32>(len, GuestAddress(desc + 8)).unwrap();
+        mem.write_obj::<u16>(flags, GuestAddress(desc + 12)).unwrap();
+        mem.write_obj::<u16>(next, GuestAddress(desc + 14)).unwrap();
+    }
+
+    /// Publish descriptor @desc_idx into the avail ring at
+    /// ring slot @avail_idx, and bump the avail-ring `idx`
+    /// field. Layout per virtio 1.x spec § 2.7.6.
+    fn publish_avail(
+        mem: &GuestMemoryMmap<()>,
+        avail_ring: u64,
+        avail_idx: u16,
+        desc_idx: u16,
+    ) {
+        use vm_memory::Bytes;
+        // avail.ring[avail_idx]
+        mem.write_obj::<u16>(
+            desc_idx,
+            GuestAddress(avail_ring + 4 + (avail_idx as u64) * 2),
+        )
+        .unwrap();
+        // avail.idx (bump)
+        mem.write_obj::<u16>(avail_idx + 1, GuestAddress(avail_ring + 2))
+            .unwrap();
+    }
+
+    #[test]
+    fn tx_single_descriptor_delivers_bytes_to_sink() {
+        // Capturing sink. Mutex wraps the Vec because
+        // ConsoleBackend::with_sink takes `Box<dyn Write + Send>`
+        // — we need the test to reach inside after the call.
+        struct CaptureSink {
+            out: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for CaptureSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.out.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = CaptureSink {
+            out: captured.clone(),
+        };
+
+        let mut backend = ConsoleBackend::with_sink(Box::new(sink));
+
+        let mem = make_mem();
+        backend.update_memory(mem.clone()).expect("update_memory");
+
+        // Place the payload "hello" at guest-physical 0x2000.
+        let payload = b"hello";
+        {
+            use vm_memory::Bytes;
+            mem.memory()
+                .write_slice(payload, GuestAddress(0x2000))
+                .unwrap();
+        }
+
+        // Stand up a TX vring. Write a single descriptor at
+        // index 0 pointing at the payload, then publish it via
+        // the avail ring.
+        let vring = setup_vring(&mem, 16);
+        {
+            let g = mem.memory();
+            write_desc(
+                &g,
+                /* desc_table */ 0x0000,
+                /* desc_idx   */ 0,
+                /* addr       */ 0x2000,
+                /* len        */ payload.len() as u32,
+                /* flags      */ 0, // no NEXT, no WRITE — guest→host
+                /* next       */ 0,
+            );
+            publish_avail(&g, /* avail_ring */ 0x1000, /* avail_idx */ 0, 0);
+        }
+
+        backend.process_tx_queue(&vring).expect("process tx");
+
+        let got = captured.lock().unwrap().clone();
+        assert_eq!(
+            got, payload,
+            "TX path should have delivered 'hello' to the sink"
+        );
+    }
+
+    #[test]
+    fn tx_multiple_chains_in_one_batch() {
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct CaptureSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for CaptureSink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut backend =
+            ConsoleBackend::with_sink(Box::new(CaptureSink(captured.clone())));
+        let mem = make_mem();
+        backend.update_memory(mem.clone()).expect("update_memory");
+
+        // Two payloads, at different guest addresses.
+        let a = b"one\n";
+        let b = b"two\n";
+        {
+            use vm_memory::Bytes;
+            let g = mem.memory();
+            g.write_slice(a, GuestAddress(0x2000)).unwrap();
+            g.write_slice(b, GuestAddress(0x2100)).unwrap();
+        }
+
+        let vring = setup_vring(&mem, 16);
+        {
+            let g = mem.memory();
+            // descriptor 0 → payload A
+            write_desc(&g, 0x0000, 0, 0x2000, a.len() as u32, 0, 0);
+            // descriptor 1 → payload B
+            write_desc(&g, 0x0000, 1, 0x2100, b.len() as u32, 0, 0);
+            // Publish both in one avail-ring bump. avail.idx
+            // ends at 2, and ring[0]=0, ring[1]=1.
+            use vm_memory::Bytes;
+            g.write_obj::<u16>(0, GuestAddress(0x1000 + 4)).unwrap();
+            g.write_obj::<u16>(1, GuestAddress(0x1000 + 4 + 2)).unwrap();
+            g.write_obj::<u16>(2, GuestAddress(0x1000 + 2)).unwrap();
+        }
+
+        backend.process_tx_queue(&vring).expect("process tx batch");
+
+        let got = captured.lock().unwrap().clone();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(a);
+        expected.extend_from_slice(b);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn tx_without_memory_no_ops() {
+        // Suppress stdout noise by redirecting the sink.
+        let sunk = Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct CaptureSink(Arc<Mutex<Vec<u8>>>);
+        impl Write for CaptureSink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut backend =
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+
+        let mem = make_mem();
+        // Don't call update_memory() — backend.mem stays None.
+        let vring = setup_vring(&mem, 16);
+
+        // Should not panic even though no memory is set.
+        backend.process_tx_queue(&vring).expect("no-op");
+        assert!(sunk.lock().unwrap().is_empty());
+    }
+
 }
