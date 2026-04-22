@@ -80,7 +80,11 @@ build_mode() {
 	# `[ "$warn" -gt 0 ]` fail with "integer expected".
 	make -C "$SRC" O="$build_dir" ARCH=um -j"$JOBS" 2>&1 \
 		| tee "$logfile" >&2
-	grep -E "warning:" "$logfile" | grep -vE "UM_KERN_|cow_user" | wc -l
+	# Case-insensitive so modpost's uppercase `WARNING:` lines are
+	# counted (they slipped past the lowercase-only pattern and
+	# masked a section-mismatch regression — see the init_backend
+	# __init commit).
+	grep -iE "warning:" "$logfile" | grep -vE "UM_KERN_|cow_user" | wc -l
 }
 
 # boot_test <label> <build_dir> <expect_backend> <extra args ...>

@@ -75,9 +75,12 @@ run_check() {
 	local t1=$(date +%s)
 	local elapsed=$((t1-t0))
 
-	# Common warning detection.
+	# Common warning detection. Case-insensitive so modpost's
+	# uppercase `WARNING:` lines are counted too — missing those
+	# left four init_backend section-mismatch warnings latent in
+	# the baseline until a separate review caught them.
 	local warns errors
-	warns=$(grep -cE '\bwarning:|\bWARN:' "$log")
+	warns=$(grep -ciE '\bwarning:|\bwarn(ing)?:' "$log")
 	errors=$(grep -cE '\berror:|\bError:|\bERROR\b' "$log" | head -1)
 
 	if [ $rc -eq 0 ]; then
