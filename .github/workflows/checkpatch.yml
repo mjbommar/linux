@@ -87,15 +87,26 @@ jobs:
           fail=0
           for sha in $(git rev-list --reverse "$base..$head"); do
             echo "::group::checkpatch $sha $(git log -1 --format=%s "$sha")"
-            # --ignore=BAD_SIGN_OFF drops the "Non-standard
-            # signature: Co-authored-by:" warning that every
-            # commit in this branch carries. Co-authored-by
-            # is a widely-accepted tag that checkpatch's
-            # signature-validity regex doesn't recognize; we
-            # use it intentionally for attribution and don't
-            # want the CI flagging every single commit.
+            # Ignored rules (each has a specific reason, not
+            # a blanket suppression):
+            #
+            #   BAD_SIGN_OFF    — "Non-standard signature:
+            #     Co-authored-by:" fires on every commit in
+            #     this branch because we use the co-author
+            #     tag for attribution.
+            #   EMAIL_SUBJECT   — "A patch subject line should
+            #     describe the change not the tool that found
+            #     it" fires on commits whose subject mentions
+            #     checkpatch/sparse/smatch — which commits
+            #     *configuring* those tools necessarily do.
+            #   FILE_PATH_CHANGES — fires any time a file is
+            #     added/moved/deleted, prompting a MAINTAINERS
+            #     update. Not applicable to fork-only additions
+            #     under .github/, Documentation/virt/uml/redesign/
+            #     etc. that don't go upstream.
             if ! scripts/checkpatch.pl --strict --no-summary \
-                    --ignore=BAD_SIGN_OFF -g "$sha"; then
+                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES \
+                    -g "$sha"; then
               fail=1
             fi
             echo "::endgroup::"
