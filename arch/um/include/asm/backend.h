@@ -12,6 +12,7 @@
 #ifndef __ASM_UM_BACKEND_H
 #define __ASM_UM_BACKEND_H
 
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/compiler_types.h>
 #include <backend.h>
@@ -24,6 +25,6 @@
  * kind. Single source of truth for backend selection — nothing
  * else writes um_backend after this.
  */
-enum um_backend_kind init_backend(const struct um_backend_args *args);
+enum um_backend_kind __init init_backend(const struct um_backend_args *args);
 
 #endif /* __ASM_UM_BACKEND_H */

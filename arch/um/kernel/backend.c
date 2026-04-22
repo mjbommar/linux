@@ -71,7 +71,7 @@ static void validate_hot_ops(const struct um_backend_ops *ops)
  *   3. `backend=auto` (default) / no boot param: defer to using_seccomp.
  */
 #ifdef CONFIG_UM_BACKEND_DYNAMIC
-static const struct um_backend_ops *pick_dynamic_backend(void)
+static const struct um_backend_ops * __init pick_dynamic_backend(void)
 {
 	enum um_backend_kind want = (enum um_backend_kind)backend_arg_requested;
 	bool force = backend_arg_force != 0;
@@ -98,7 +98,7 @@ static const struct um_backend_ops *pick_dynamic_backend(void)
 }
 #endif
 
-enum um_backend_kind init_backend(const struct um_backend_args *args)
+enum um_backend_kind __init init_backend(const struct um_backend_args *args)
 {
 	(void)args;	/* parser writes backend_arg_* directly via __uml_setup */
 
