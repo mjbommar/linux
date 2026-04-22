@@ -257,6 +257,19 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 	os_snapshot_block_iter_signals();
 
 	for (;;) {
+		/*
+		 * Drain any zombies from previous iterations before the
+		 * fuzzer's next command. Non-blocking so it never enters
+		 * the wait-crash path; between iterations the fuzzer's
+		 * think time is plenty for prior workers to have exited
+		 * via os_snapshot_worker_exit(0), so in practice this
+		 * reaps them all on the first call. If a worker hasn't
+		 * exited yet (extremely tight fuzz loop with a slow
+		 * worker), the zombie sticks around one more iteration
+		 * — tolerable at any real fuzz cadence.
+		 */
+		(void)os_snapshot_reap_zombies();
+
 		n = os_snapshot_read_all(UM_FORKSERVER_CTL_FD,
 					 &cmd, sizeof(cmd));
 		if (n < 0) {
@@ -315,44 +328,34 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 
 		/* Parent: AFL protocol per iteration -
 		 *   1. report the worker pid (4 bytes)
-		 *   2. report the exit status (4 bytes, placeholder 0)
+		 *   2. report the exit status (4 bytes, hard 0 today)
 		 *
-		 * KNOWN LIMITATION (reverted from 3d-a v2 after several
-		 * failed attempts). Calling os_snapshot_waitpid_status()
-		 * from this UML-kernel context crashes the parent with
-		 * a null-jump or heap-jump regardless of whether we use
-		 *   - glibc waitpid() with no masking,
-		 *   - glibc waitpid() with host sigprocmask blocking
-		 *     {SIGCHLD, SIGALRM, SIGIO, SIGUSR1},
-		 *   - glibc waitpid() with um_set_signals(0) (UML-native
-		 *     deferred-signal gate),
-		 *   - raw syscall(__NR_wait4, ...) with the same
-		 *     UML-native gate.
+		 * KNOWN LIMITATION (still unresolved as of 2026-04-21).
+		 * A blocking wait between (1) and (2) crashes the parent
+		 * even with UML signal gating + raw wait4 syscall. Three
+		 * separate investigation sessions (3d-a v1, v2, and this
+		 * one) have all reached the same outcome: the snapshot-
+		 * smoke driver reads EOF on the status fd because the
+		 * parent dies mid-wait. Root cause is unidentified — the
+		 * signal-gate-isn't-enough theory from the original
+		 * KNOWN LIMITATION stands.
 		 *
-		 * The failure mode is consistent with UML's signal-driven
-		 * scheduler re-entering during the host waitpid, but the
-		 * UML-native gate isn't enough to stop it — a path we
-		 * haven't yet traced is bypassing signals_enabled==0 and
-		 * running either a longjmp-based task switch into a
-		 * stale jmp_buf or a function-pointer dispatch whose
-		 * target has been clobbered. The crash addresses (0x0
-		 * and 0x610XXXXX inside UML's own VA) match this shape.
+		 * What's new in this iteration: the non-blocking
+		 * os_snapshot_reap_zombies() drain at the top of the loop
+		 * (above the os_snapshot_read_all that reads the next
+		 * command) reaps dead workers from prior iterations
+		 * without entering the crash path. That closes the
+		 * zombie-accumulation side of the review's "zombies
+		 * accumulate in the host and get reaped when the UML
+		 * process exits" complaint — for any testcase with a
+		 * pause between iterations on the fuzzer side (which is
+		 * every real fuzzer cadence), prior workers are reaped
+		 * before the next fork.
 		 *
-		 * Deferred to commit 3d-c, where the worker-side rebuild
-		 * and return-path changes re-arrange the parent's state
-		 * during the wait window. If the root cause is in the
-		 * parent, 3d-c's diagnostics will narrow it; if it's in
-		 * cross-process SIGCHLD handling, 3d-c's stub respawn
-		 * will expose that separately.
-		 *
-		 * Workers still terminate cleanly via
-		 * os_snapshot_worker_exit(0). Until we call wait() in a
-		 * way that doesn't crash, zombies accumulate in the host
-		 * and get reaped when the UML process exits — fine for
-		 * short selftest runs, not for sustained fuzzing. The
-		 * fuzzer reads a well-formed zero status byte per
-		 * iteration, so the wire protocol is correct even though
-		 * the status value is uninformative.
+		 * The status slot still reports 0 regardless of real
+		 * worker exit; that's a semantic limitation the protocol
+		 * consumer documents in Documentation/virt/uml/snapshot.rst
+		 * §"Limitations (v1 ceiling)".
 		 */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &pid, sizeof(pid));
@@ -368,7 +371,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			return (int)n;
 		}
 
-		status = 0;	/* see comment above; 3d-c revisits. */
+		status = 0;	/* see comment above; blocking wait crashes. */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &status, sizeof(status));
 		if (n < 0) {

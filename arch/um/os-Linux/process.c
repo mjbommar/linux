@@ -180,6 +180,13 @@ int os_snapshot_waitpid_status(int pid)
 	 * raw syscall bypasses all that and just returns the kernel's
 	 * answer. wait4() is the canonical kernel entry (waitpid() is
 	 * historically a libc wrapper over wait4 with rusage=NULL).
+	 *
+	 * This blocking variant is currently unsafe to call from the
+	 * forkserver loop: even with UML signal gating + raw syscall,
+	 * the parent crashes during the wait (the 3d-a root cause
+	 * remains unresolved — see snapshot.c's historical-note
+	 * comment). The non-blocking drain below
+	 * (os_snapshot_reap_zombies) is what the loop currently uses.
 	 */
 	for (;;) {
 		ret = syscall(__NR_wait4, pid, &status, 0, NULL);
@@ -192,6 +199,43 @@ int os_snapshot_waitpid_status(int pid)
 		}
 		/* Shouldn't happen for a specific pid, but be defensive. */
 		return -EINVAL;
+	}
+}
+
+/*
+ * Non-blocking zombie drain. Walks any exited children that have
+ * not yet been reaped and reaps them, returning the count. Used
+ * between forkserver iterations to keep the host zombie table
+ * empty without the blocking-wait crash mode 3d-a hit.
+ *
+ * Same raw-wait4 rationale as os_snapshot_waitpid_status above;
+ * the WNOHANG flag makes this safe to call from the forkserver
+ * loop because it never blocks and therefore never invokes the
+ * scheduler-reentry path that crashed the blocking variant.
+ *
+ * A -ECHILD return from wait4 just means "no children left" —
+ * not an error for our purposes; return zero for clean-drain
+ * completion.
+ */
+int os_snapshot_reap_zombies(void)
+{
+	int status;
+	long ret;
+	int reaped = 0;
+
+	for (;;) {
+		ret = syscall(__NR_wait4, -1, &status, WNOHANG, NULL);
+		if (ret > 0) {
+			reaped++;
+			continue;
+		}
+		if (ret == 0)
+			return reaped;		/* nothing exited yet */
+		if (errno == ECHILD)
+			return reaped;		/* no children at all */
+		if (errno == EINTR)
+			continue;
+		return -errno;
 	}
 }
 

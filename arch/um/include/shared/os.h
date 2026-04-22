@@ -210,6 +210,7 @@ extern int os_snapshot_fork_worker(void);
 extern ssize_t os_snapshot_read_all(int fd, void *buf, size_t len);
 extern ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len);
 extern int os_snapshot_waitpid_status(int pid);
+extern int os_snapshot_reap_zombies(void);
 extern void os_snapshot_worker_exit(int status) __attribute__((noreturn));
 
 /* Forget / rebuild inherited host-side state in a forkserver worker
