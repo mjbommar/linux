@@ -19,14 +19,52 @@ set -u
 
 SRC=$(cd "$(dirname "$0")/../../../../.." && pwd)
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-BASELINE="$SRC/Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/perf-baseline.json"
+BASELINE_DIR="$SRC/Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction"
 
 WARN_PCT=${UML_PERF_WARN:-2}
 FAIL_PCT=${UML_PERF_FAIL:-5}
 
+# Per-host baseline file selection (task #94 resolution). Cycle
+# counts aren't portable across Xeon generations; each host owns
+# its own baseline at perf-baseline-<cpu-slug>.json. Slug the
+# current host's CPU model to find the matching file. Keep this
+# slug function in sync with uml-perf-capture.sh::baseline_slug_for_cpu.
+baseline_slug_for_cpu() {
+	local model=$1
+	printf '%s\n' "$model" \
+		| tr '[:upper:]' '[:lower:]' \
+		| sed -E 's/\(r\)|\(tm\)//g' \
+		| sed -E 's/@ [0-9.]+[gm]hz//g' \
+		| sed -E 's/\b(intel|amd|cpu)\b//g' \
+		| sed -E 's/[^a-z0-9]+/-/g' \
+		| sed -E 's/^-+|-+$//g' \
+		| cut -c1-40
+}
+
+HOST_CPU=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
+HOST_SLUG=$(baseline_slug_for_cpu "$HOST_CPU")
+BASELINE="$BASELINE_DIR/perf-baseline-$HOST_SLUG.json"
+
+# Fallback: if no per-host baseline exists, check for the legacy
+# un-slugged file (pre-task-#94) and warn. That file stays only
+# for migration; once every host has its own, the legacy file
+# should be deleted from tree.
+if [ ! -f "$BASELINE" ] && [ -f "$BASELINE_DIR/perf-baseline.json" ]; then
+	echo >&2 "uml-perf-compare: no per-host baseline for this CPU"
+	echo >&2 "  ($HOST_CPU, slug: $HOST_SLUG) at"
+	echo >&2 "    $BASELINE"
+	echo >&2 "  Legacy un-slugged baseline exists at"
+	echo >&2 "    $BASELINE_DIR/perf-baseline.json"
+	echo >&2 "  but that's from a different host and comparing it is"
+	echo >&2 "  meaningless (see D49). Capture a baseline for this host:"
+	echo >&2 "    $SCRIPT_DIR/uml-perf-capture.sh"
+	echo >&2 "    git add $BASELINE && git commit"
+	exit 2
+fi
+
 if [ ! -f "$BASELINE" ]; then
-	echo "No baseline at $BASELINE."
-	echo "Run uml-perf-capture.sh and commit the result first."
+	echo "No baseline for $HOST_CPU at $BASELINE."
+	echo "Run $SCRIPT_DIR/uml-perf-capture.sh to create one."
 	exit 2
 fi
 

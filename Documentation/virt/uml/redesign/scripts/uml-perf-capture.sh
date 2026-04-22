@@ -16,7 +16,30 @@ set -eu
 
 SRC=$(cd "$(dirname "$0")/../../../../.." && pwd)
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-OUT="$SRC/Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/perf-baseline.json"
+BASELINE_DIR="$SRC/Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction"
+
+# Per-host baseline file naming (task #94 resolution). A single
+# committed baseline doesn't work across dev hosts — cycle counts
+# aren't portable across Xeon generations (cross-host confusion
+# documented in D47/D49). Slugify the CPU model string to derive
+# a stable filename so each host owns its own baseline, and git
+# blame records who captured what on which machine.
+#
+# Slug: lowercase, strip vendor noise, collapse non-alphanumeric
+# to `-`, trim and truncate. Produces e.g.
+#   "Intel(R) Xeon(R) W-2123 CPU @ 3.60GHz" → "xeon-w-2123"
+#   "Intel(R) Xeon(R) CPU E3-1225 v6 @ 3.30GHz" → "xeon-e3-1225-v6"
+baseline_slug_for_cpu() {
+	local model=$1
+	printf '%s\n' "$model" \
+		| tr '[:upper:]' '[:lower:]' \
+		| sed -E 's/\(r\)|\(tm\)//g' \
+		| sed -E 's/@ [0-9.]+[gm]hz//g' \
+		| sed -E 's/\b(intel|amd|cpu)\b//g' \
+		| sed -E 's/[^a-z0-9]+/-/g' \
+		| sed -E 's/^-+|-+$//g' \
+		| cut -c1-40
+}
 
 # Refuse to bake a non-performance governor into the committed
 # baseline. Without this gate, a future baseline capture on a
@@ -46,6 +69,10 @@ HOST_GLIBC=$(ldd --version 2>&1 | head -1 | awk '{print $NF}')
 HOST_KERNEL=$(uname -r)
 DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TREE_HEAD=$(cd "$SRC" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
+# Per-host filename — capture/overwrite the baseline for THIS host.
+HOST_SLUG=$(baseline_slug_for_cpu "$HOST_CPU")
+OUT="$BASELINE_DIR/perf-baseline-$HOST_SLUG.json"
 
 # Run benchmarks; capture each backend line.
 TMP=$(mktemp)
