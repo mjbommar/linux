@@ -270,13 +270,96 @@ jobs:
           sudo dmesg | grep -Ei 'apparmor=.*DENIED|seccomp|oom-killer|segfault' | tail -10 || echo "(none)"
           if [ -s /tmp/uml-smoke-marker ]; then
             echo "::notice::UML booted, exec'd init (marker file present)"
+          else
+            case "$rc" in
+              124) echo "::error::UML timed out — kernel hung" ;;
+              134) echo "::error::UML SIGABRT — panic path, init likely never exec'd cleanly" ;;
+              139) echo "::error::UML SIGSEGV — stub crash" ;;
+                0) echo "::error::UML exited 0 but left no marker — halt was reached without init running (fallback to /sbin/init → systemd halt?)" ;;
+                *) echo "::error::UML rc=$rc, no marker" ;;
+            esac
+            exit 1
+          fi
+
+      # ---- userspace-smoke: python3 inside UML ----
+      #
+      # Second gate, layered on top of the marker-file smoke.
+      # The in-tree userspace-smoke test (see
+      # tools/testing/selftests/um/userspace-smoke/) launches
+      # python3 twice inside the booted guest to exercise:
+      #   - hostfs visibility of /bin, /usr/bin, /lib
+      #   - the dynamic loader path (dash + python3 + libpython
+      #     all chain through hostfs)
+      #   - fork+exec across two separate python invocations
+      #   - guest clocksource monotonicity
+      #   - halt/shutdown after real userspace work
+      # This catches regressions that the bare marker-file
+      # smoke can't, because marker only proves execve-one-
+      # static-binary works; userspace-smoke proves the full
+      # dynamic-linker + libpython + syscall-translation stack.
+      #
+      # Wrapper rationale: userspace-smoke.sh prints its result
+      # on stdout and calls `halt -f` right after. UML's tty
+      # driver discards in-flight output when halt_skas unwinds
+      # (same reason the bare marker test needed a hostfs file).
+      # We redirect the whole session to a hostfs file,
+      # symlink busybox as halt/sh/mount/etc. onto a PATH prefix
+      # so the test script's bare `halt -f` resolves, and the
+      # host-side check greps the file for the PASS sentinel.
+      - name: Stage userspace-smoke init wrapper
+        run: |
+          rm -f /tmp/uml-userspace-smoke.log
+          # Copy the test script into /tmp so the UML guest
+          # path doesn't depend on ${{ github.workspace }}
+          # interpolation into a heredoc.
+          cp tools/testing/selftests/um/userspace-smoke/userspace-smoke.sh \
+             /tmp/userspace-smoke.sh
+          chmod +x /tmp/userspace-smoke.sh
+          # Heredoc is 'EOF'-quoted so $? etc. are preserved
+          # literally for the guest shell to interpret.
+          cat >/tmp/uml-userspace-init.sh <<'EOF'
+          #!/bin/busybox sh
+          exec >/tmp/uml-userspace-smoke.log 2>&1
+          mkdir -p /tmp/uml-bin
+          for applet in halt sh mount echo sed command; do
+              /bin/busybox ln -sf /bin/busybox "/tmp/uml-bin/$applet"
+          done
+          PATH=/tmp/uml-bin:/bin:/usr/bin:/sbin:/usr/sbin
+          export PATH
+          /bin/busybox sh /tmp/userspace-smoke.sh
+          /bin/busybox echo "WRAPPER_RC=$?"
+          /bin/busybox halt -f
+          EOF
+          chmod +x /tmp/uml-userspace-init.sh
+          ls -la /tmp/uml-userspace-init.sh /tmp/userspace-smoke.sh
+
+      - name: Userspace smoke (python3 in guest)
+        run: |
+          BIN=/tmp/uml-profile-${{ matrix.profile }}/linux
+          set +e
+          out=$(timeout 90 "$BIN" init=/tmp/uml-userspace-init.sh \
+                  noreboot mem=512M \
+                  con=fd:0,fd:1 ssl=null \
+                  root=/dev/root rootfstype=hostfs rw \
+                  loglevel=7 2>&1)
+          rc=$?
+          set -e
+          echo "UML exit code: $rc"
+          echo "---- /tmp/uml-userspace-smoke.log (guest stdout/stderr via hostfs) ----"
+          if [ -s /tmp/uml-userspace-smoke.log ]; then
+            cat /tmp/uml-userspace-smoke.log
+          else
+            echo "(empty or missing)"
+            echo "---- last 40 lines of captured UML stdout ----"
+            echo "$out" | tail -40
+          fi
+          if grep -q '^USERSPACE_SMOKE: PASS' /tmp/uml-userspace-smoke.log 2>/dev/null; then
+            echo "::notice::userspace-smoke passed — python3 ran twice in UML"
             exit 0
           fi
-          case "$rc" in
-            124) echo "::error::UML timed out — kernel hung" ;;
-            134) echo "::error::UML SIGABRT — panic path, init likely never exec'd cleanly" ;;
-            139) echo "::error::UML SIGSEGV — stub crash" ;;
-              0) echo "::error::UML exited 0 but left no marker — halt was reached without init running (fallback to /sbin/init → systemd halt?)" ;;
-              *) echo "::error::UML rc=$rc, no marker" ;;
-          esac
+          if grep -q '^USERSPACE_SMOKE: SKIP' /tmp/uml-userspace-smoke.log 2>/dev/null; then
+            echo "::warning::userspace-smoke skipped (python3 not visible via hostfs?) — treating as non-fatal"
+            exit 0
+          fi
+          echo "::error::userspace-smoke did not PASS (rc=$rc)"
           exit 1
