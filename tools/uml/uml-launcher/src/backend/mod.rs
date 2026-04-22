@@ -12,6 +12,7 @@ use anyhow::Result;
 
 use crate::cli::BackendClass;
 
+pub mod block;
 pub mod console;
 pub mod net;
 pub mod seccomp;
@@ -38,50 +39,12 @@ fn run_net(args: crate::cli::BackendNetArgs) -> Result<i32> {
 }
 
 fn run_block(args: crate::cli::BackendBlockArgs) -> Result<i32> {
-    let image = args
-        .image
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<unset>".to_string());
-    tracing::info!(
-        socket = %args.common.socket.display(),
-        image = %image,
-        read_only = args.read_only,
-        "backend block: not yet implemented (C-10 v2 commit 1 scaffold)"
-    );
-    eprintln!(
-        "uml-launcher backend block: not yet implemented (socket={}, image={}, read_only={}).",
-        args.common.socket.display(),
-        image,
-        args.read_only
-    );
-    Ok(0)
+    block::run(args)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cli::{BackendBlockArgs, BackendCommonArgs};
-    use std::path::PathBuf;
-
-    fn common(path: &str) -> BackendCommonArgs {
-        BackendCommonArgs {
-            socket: PathBuf::from(path),
-        }
-    }
-
-    // Console + Net dispatch both run VhostUserDaemon::serve()
-    // under real-ish syscall surfaces; unit tests for those
-    // backends live in backend/{console,net}.rs. The Block stub
-    // still returns cheaply until its commit.
-
-    #[test]
-    fn dispatch_block_returns_zero() {
-        let class = BackendClass::Block(BackendBlockArgs {
-            common: common("/tmp/uml-block.sock"),
-            image: Some(PathBuf::from("/tmp/rootfs.img")),
-            read_only: true,
-        });
-        assert_eq!(dispatch(class).unwrap(), 0);
-    }
-}
+// Every backend class now runs a real VhostUserDaemon::serve()
+// that would block on accept() if exercised from `cargo test`.
+// Per-class unit tests live in backend/{console,net,block}.rs
+// and exercise the protocol surface + data path in isolation.
+// The dispatch function itself is a trivial three-arm match;
+// `cargo build` alone verifies the arms compile correctly.
