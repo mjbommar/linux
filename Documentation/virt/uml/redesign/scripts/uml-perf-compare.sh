@@ -92,13 +92,18 @@ FAIL=0
 WARN=0
 
 echo "===== uml-perf-compare ====="
+echo "# Per-backend absolute p50 cycles (same-host-only signal):"
 printf "%-15s %-15s %-15s %-10s %s\n" backend baseline current regression status
+
+declare -A BASE_P50 CUR_P50
 
 for backend in PTRACE_ONLY SECCOMP_ONLY DYN_ptrace DYN_seccomp; do
 	base=$(extract_p50 "$BASELINE" "$backend")
 	cur=$(extract_p50 "$TMP" "$backend")
 	[ -z "$base" ] && base=0
 	[ -z "$cur" ] && cur=0
+	BASE_P50[$backend]=$base
+	CUR_P50[$backend]=$cur
 
 	if [ "$base" -eq 0 ] || [ "$cur" -eq 0 ]; then
 		printf "%-15s %-15s %-15s %-10s %s\n" \
@@ -133,13 +138,68 @@ for backend in PTRACE_ONLY SECCOMP_ONLY DYN_ptrace DYN_seccomp; do
 		"$backend" "$base" "$cur" "$pct%" "$status"
 done
 
+# Cross-host-stable signal: the RATIO between seccomp and ptrace
+# backends. Per invariant I2 the interesting question is "does
+# seccomp retain its advantage over ptrace", not "are the absolute
+# cycle counts identical to some reference host." Ratios cancel
+# out per-CPU IPC/cache/microcode differences that dominate
+# absolute cycle counts across Xeon generations (the cross-host
+# confusion documented in D47/D49).
+echo
+echo "# Backend ratios (cross-host-stable, matches invariant I2):"
+printf "%-25s %-15s %-15s %-10s %s\n" "ratio" baseline current delta status
+
+compare_ratio() {
+	local label=$1 num_backend=$2 denom_backend=$3
+	local bn=${BASE_P50[$num_backend]} bd=${BASE_P50[$denom_backend]}
+	local cn=${CUR_P50[$num_backend]}  cd=${CUR_P50[$denom_backend]}
+
+	if [ "$bn" -eq 0 ] || [ "$bd" -eq 0 ] || \
+	   [ "$cn" -eq 0 ] || [ "$cd" -eq 0 ]; then
+		printf "%-25s %-15s %-15s %-10s %s\n" \
+			"$label" "n/a" "n/a" "n/a" "skip"
+		return
+	fi
+
+	# baseline ratio, current ratio, and percent-change-of-ratio:
+	local base_ratio cur_ratio ratio_delta_pct
+	base_ratio=$(python3 -c "print(f'{$bn / $bd:.3f}')")
+	cur_ratio=$(python3 -c "print(f'{$cn / $cd:.3f}')")
+	ratio_delta_pct=$(python3 -c "print(f'{(($cn/$cd - $bn/$bd) * 100.0 / ($bn/$bd)):+.2f}')")
+
+	# Ratio regression: seccomp-to-ptrace going UP means seccomp
+	# got slower (relative to ptrace) — that's the I2 violation.
+	# Going DOWN means seccomp kept or improved its advantage.
+	local abs_int status="ok"
+	abs_int=$(echo "$ratio_delta_pct" | tr -d '+-')
+	abs_int=${abs_int%.*}
+	if [[ "$ratio_delta_pct" == +* ]]; then
+		if [ "$abs_int" -ge "$FAIL_PCT" ]; then
+			status="FAIL (ratio regressed >${FAIL_PCT}%, I2)"
+			FAIL=$((FAIL + 1))
+		elif [ "$abs_int" -ge "$WARN_PCT" ]; then
+			status="WARN (ratio regressed ${WARN_PCT}-${FAIL_PCT}%)"
+			WARN=$((WARN + 1))
+		fi
+	elif [[ "$ratio_delta_pct" == -* ]] && \
+	     [ "$abs_int" -ge "$FAIL_PCT" ]; then
+		status="improvement (ratio tightened)"
+	fi
+
+	printf "%-25s %-15s %-15s %-10s %s\n" \
+		"$label" "$base_ratio" "$cur_ratio" "$ratio_delta_pct%" "$status"
+}
+
+compare_ratio "SECCOMP / PTRACE"       SECCOMP_ONLY PTRACE_ONLY
+compare_ratio "DYN_seccomp / DYN_ptrace" DYN_seccomp DYN_ptrace
+
 echo
 if [ "$FAIL" -gt 0 ]; then
-	echo "FAIL: $FAIL backend(s) regressed >${FAIL_PCT}% (invariant I2)"
+	echo "FAIL: $FAIL metric(s) regressed >${FAIL_PCT}% (invariant I2)"
 	exit 1
 elif [ "$WARN" -gt 0 ]; then
-	echo "WARN: $WARN backend(s) regressed ${WARN_PCT}-${FAIL_PCT}% (reviewer ack)"
+	echo "WARN: $WARN metric(s) regressed ${WARN_PCT}-${FAIL_PCT}% (reviewer ack)"
 	exit 0
 else
-	echo "OK: no regressions ≥${WARN_PCT}%"
+	echo "OK: no regressions ≥${WARN_PCT}% across absolute p50 or backend ratios"
 fi
