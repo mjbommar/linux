@@ -33,13 +33,22 @@ set -u
 BINARY=${UML_BINARY:-/tmp/uml-research/linux}
 MEM=${UML_MEM:-128M}
 
+# DIR always resolves to this script's directory; Part C (the
+# forkserver driver) looks up files next to this script via
+# $DIR, so we set it unconditionally rather than only in the
+# else-branch below. The previous conditional assignment
+# tripped `set -u` when UML_LAUNCHER was passed as env by CI:
+# DIR stayed unset, Part C's $DIR/launcher-forkserver-driver.py
+# expansion faulted with "unbound variable" and the script
+# failed before its own auto-skip path could run.
+DIR=$(cd "$(dirname "$0")" && pwd)
+
 # Locate uml-launcher. Prefer an explicit UML_LAUNCHER env var;
 # otherwise walk up from this script to the tree root and look
 # under tools/uml/uml-launcher/target/release/uml-launcher.
 if [ -n "${UML_LAUNCHER:-}" ]; then
 	LAUNCHER="$UML_LAUNCHER"
 else
-	DIR=$(cd "$(dirname "$0")" && pwd)
 	# tools/testing/selftests/um/launcher-smoke → up 4 → tree root.
 	ROOT=$(cd "$DIR/../../../../.." && pwd)
 	LAUNCHER="$ROOT/tools/uml/uml-launcher/target/release/uml-launcher"
