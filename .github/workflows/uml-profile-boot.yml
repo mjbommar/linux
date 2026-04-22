@@ -200,27 +200,39 @@ jobs:
       - name: Boot smoke test (init=/bin/busybox)
         run: |
           BIN=/tmp/uml-profile-${{ matrix.profile }}/linux
-          set +e
-          out=$(timeout 30 "$BIN" init=/bin/busybox mem=256M \
-                  con=fd:0,fd:1 ssl=null \
-                  root=/dev/root rootfstype=hostfs rw \
-                  panic=-1 loglevel=7 2>&1)
-          rc=$?
-          set -e
-          echo "UML exit code: $rc"
-          echo "---- UML output (last 80 lines) ----"
-          echo "$out" | tail -80
-          echo "---- host dmesg tail ----"
-          sudo dmesg | tail -40 || true
+          echo "---- init binary linkage (expect static) ----"
+          file /bin/busybox || true
           echo "---- UML binary linkage ----"
           file "$BIN" || true
+          echo "---- running UML ----"
+          set +e
+          # `panic=15` gives the kernel 15 s between the
+          # "Attempted to kill init!" pr_emerg and the
+          # emergency_restart that takes UML down with
+          # SIGABRT. That window is what lets the panic line
+          # flush through the console driver to our captured
+          # fd — `panic=-1` on the prior run took UML down so
+          # fast (rc=134, SIGABRT) that the panic message
+          # never cleared the printk ring before exit.
+          out=$(timeout 40 "$BIN" init=/bin/busybox mem=256M \
+                  con=fd:0,fd:1 ssl=null \
+                  root=/dev/root rootfstype=hostfs rw \
+                  panic=15 loglevel=7 2>&1)
+          rc=$?
+          set -e
+          echo "UML exit code: $rc (128+6=134 SIGABRT, 128+11=139 SIGSEGV, 124 outer timeout)"
+          echo "---- UML output (last 100 lines) ----"
+          echo "$out" | tail -100
+          echo "---- host dmesg tail (apparmor/seccomp/oom) ----"
+          sudo dmesg | tail -60 | grep -Ei 'apparmor|seccomp|oom|segfault|userns|denied' || echo "(no matches)"
           if echo "$out" | grep -qE 'Attempted to kill init|Kernel panic'; then
             echo "::notice::UML booted to userspace and exec'd init"
             exit 0
           fi
           case "$rc" in
-            124) echo "::error::UML timed out — kernel hung before init exec" ;;
-            139) echo "::error::UML crashed with SIGSEGV during init-exec stub setup" ;;
+            124) echo "::error::UML timed out — kernel hung" ;;
+            134) echo "::error::UML SIGABRT before panic line flushed — panic=15 not long enough, or host-side abort in stub setup" ;;
+            139) echo "::error::UML SIGSEGV during init-exec stub setup" ;;
               *) echo "::error::UML exited rc=$rc with no init-exec panic" ;;
           esac
           exit 1
