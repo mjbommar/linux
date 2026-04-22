@@ -425,3 +425,55 @@ jobs:
           fi
           echo "::error::profile-features validator did not PASS for ${{ matrix.profile }} (rc=$rc)"
           exit 1
+
+  # Clang / LLVM=1 build guard. AGENT-PROMPT.md calls out
+  # dual-toolchain building as mandatory: "Each commit builds
+  # cleanly for ARCH=um (gcc) and ARCH=um LLVM=1 (clang).
+  # Never land a commit that only compiles after a later one."
+  # The gcc side is covered by the matrix job above; this
+  # one-job guard adds the clang side.
+  #
+  # Scope: single profile (prod-fast), build-only, no boot.
+  # That catches the anti-pattern-2 class (clang-only
+  # divergence grown quietly) without tripling CI wall-clock
+  # by running a full clang matrix.
+  clang-build:
+    name: clang build (prod-fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kernel-build deps + llvm toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential flex libelf-dev libssl-dev pahole \
+            clang lld llvm
+          clang --version
+          ld.lld --version
+
+      - name: Cache build output
+        uses: actions/cache@v4
+        with:
+          path: /tmp/uml-clang-prod-fast
+          key: uml-clang-prod-fast-${{ runner.os }}-${{ hashFiles('arch/um/configs/base_defconfig', 'arch/um/configs/profiles/prod-fast.config', 'Makefile', 'arch/um/**/*.c', 'arch/um/**/*.h', 'arch/x86/um/**/*.c', 'arch/x86/um/**/*.h') }}
+          restore-keys: |
+            uml-clang-prod-fast-${{ runner.os }}-
+
+      - name: Configure prod-fast (.config)
+        run: |
+          make ARCH=um LLVM=1 O=/tmp/uml-clang-prod-fast uml/prod-fast
+
+      - name: Build vmlinux + linux (LLVM=1)
+        run: |
+          make ARCH=um LLVM=1 O=/tmp/uml-clang-prod-fast \
+               -j$(nproc) vmlinux linux
+
+      - name: Assert clang-built binary present + non-empty
+        run: |
+          BIN=/tmp/uml-clang-prod-fast/linux
+          test -x "$BIN" || { echo "::error::$BIN missing"; exit 1; }
+          test -s "$BIN" || { echo "::error::$BIN empty"; exit 1; }
+          file "$BIN"
+          echo "clang-built binary size: $(stat -c %s "$BIN") bytes"
