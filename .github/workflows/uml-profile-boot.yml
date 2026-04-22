@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# GitHub Actions CI for workstream C-01 profile defconfigs.
+#
+# Builds a small, representative subset of the UML profile
+# defconfigs (`arch/um/configs/profiles/*.config`) on each
+# push, boots the resulting UML binary, and runs the in-tree
+# validator (`tools/testing/selftests/um/profiles/run-profile-checks.sh`)
+# against it. The validator boots with `probe-features.sh` as
+# init, captures the `FEATURE <name> PRESENT|ABSENT` lines, and
+# asserts each profile delivers the exact feature set its
+# documentation promises.
+#
+# Fork-only workflow (kernel tree's top-level `.gitignore`
+# excludes dotfiles, so this ships via `git add -f`). Its job
+# is to catch profile-fragment regressions — somebody adding a
+# new option under `arch/um/configs/profiles/*.config` that
+# silently changes the effective set, or a common-option change
+# elsewhere that flips a feature bit that a profile was relying
+# on.
+#
+# Matrix choice: `prod-fast`, `sandbox`, `embedded` —
+#   - `prod-fast`     the "production-lean" baseline every
+#                     other profile is measured against;
+#                     fastest build (no sanitizers, no KCSAN).
+#   - `sandbox`       the most-restrictive profile (all debug
+#                     off, proc_kcore off); validates the
+#                     "minimum-TCB" path that fuzz / research
+#                     profiles rely on as a subtractive baseline.
+#   - `embedded`      ptrace backend variant; exercises a
+#                     different UML host code path than the
+#                     seccomp-backend default in prod-fast.
+#
+# The heavier profiles (`fuzz-deep`, `research`, `race`) are
+# intentionally out of this matrix for now — their KASAN +
+# KCSAN surface doubles build time and triples boot time, which
+# would push every PR's CI wall-clock beyond the point of
+# ignored-by-reviewers. They stay in the harness for local
+# `make run_tests` runs.
+
+name: uml profile boot
+
+on:
+  push:
+    branches: [uml-redesign-plan]
+    paths:
+      - 'arch/um/**'
+      - 'arch/x86/um/**'
+      - 'tools/testing/selftests/um/profiles/**'
+      - '.github/workflows/uml-profile-boot.yml'
+  pull_request:
+    paths:
+      - 'arch/um/**'
+      - 'arch/x86/um/**'
+      - 'tools/testing/selftests/um/profiles/**'
+      - '.github/workflows/uml-profile-boot.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      # One profile failure shouldn't mask the others — a
+      # sandbox regression and an embedded regression often
+      # share a root cause and we want to see both signals.
+      fail-fast: false
+      matrix:
+        profile: [prod-fast, sandbox, embedded]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu runners ship most of this but flex + bison +
+      # libelf-dev are not always pre-installed on minimal
+      # variants. The rest are cheap to assert for safety.
+      - name: Install kernel-build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            pahole
+
+      # Cache the per-profile O= directory. Keyed on the files
+      # that can change the build: the profile fragment itself,
+      # the base defconfig, the top-level Makefile (version
+      # bumps invalidate everything), and any arch/um changes.
+      # Warm cache: incremental builds take 1–3 min; cold:
+      # 8–12 min.
+      - name: Cache build output (O=/tmp/uml-profile-${{ matrix.profile }})
+        uses: actions/cache@v4
+        with:
+          path: /tmp/uml-profile-${{ matrix.profile }}
+          key: uml-profile-${{ matrix.profile }}-${{ runner.os }}-${{ hashFiles('arch/um/configs/base_defconfig', format('arch/um/configs/profiles/{0}.config', matrix.profile), 'Makefile', 'arch/um/**/*.c', 'arch/um/**/*.h', 'arch/x86/um/**/*.c', 'arch/x86/um/**/*.h') }}
+          restore-keys: |
+            uml-profile-${{ matrix.profile }}-${{ runner.os }}-
+
+      - name: Configure profile (.config)
+        run: make ARCH=um O=/tmp/uml-profile-${{ matrix.profile }} uml/${{ matrix.profile }}
+
+      - name: Build vmlinux + linux
+        run: |
+          make ARCH=um O=/tmp/uml-profile-${{ matrix.profile }} \
+               -j$(nproc) vmlinux linux
+
+      # The validator iterates every profile; with only one
+      # built, it SKIPs 8 and runs 1. The SKIP-doesn't-fail
+      # contract is guarded by `run-profile-checks.sh` itself
+      # (edit under workstream C-01), so this step is purely
+      # the boot + assert path.
+      #
+      # We pipe to `tee` so the assertion step below can grep
+      # the captured output without re-running the boot.
+      - name: Run profile validator
+        id: validator
+        run: |
+          set -o pipefail
+          bash tools/testing/selftests/um/profiles/run-profile-checks.sh \
+            | tee /tmp/validator.log
+
+      # `run-profile-checks.sh` exits 0 if no FAIL was asserted
+      # (SKIPs don't count). But an all-SKIP run also exits 0,
+      # which would silently turn a broken build into a green
+      # job. Explicitly require the PASS line for the profile
+      # this matrix job is supposed to cover.
+      - name: Assert this profile PASSed
+        run: |
+          if ! grep -E "^PASS ${{ matrix.profile }}( |$)" /tmp/validator.log; then
+            echo "::error::No PASS line for profile '${{ matrix.profile }}' in validator output"
+            echo "---- full validator output ----"
+            cat /tmp/validator.log
+            exit 1
+          fi

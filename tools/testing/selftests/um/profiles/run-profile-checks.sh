@@ -31,11 +31,6 @@ probe_profile() {
 	local binary="$ROOT/uml-profile-$profile/linux"
 	local out
 
-	if [ ! -x "$binary" ]; then
-		echo "SKIP: $binary not built (run: make ARCH=um O=$ROOT/uml-profile-$profile uml/$profile && make ARCH=um O=$ROOT/uml-profile-$profile -j\$(nproc))"
-		return 77 # kselftest skip
-	fi
-
 	# Use 512M — fuzz-deep and research carry KASAN + heavy
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
 	# 40s timeout — KCSAN (race profile) adds several seconds of
@@ -89,7 +84,21 @@ assert_profile() {
 run_one() {
 	local profile=$1
 	shift
+	local binary="$ROOT/uml-profile-$profile/linux"
 	local probe
+
+	# If the operator built only a subset of profiles (as CI
+	# does via the per-profile matrix), the missing ones are a
+	# clean SKIP — not a test failure. Return 0 so the caller's
+	# `|| any_fail=1` guard doesn't trip.
+	if [ ! -x "$binary" ]; then
+		local o="$ROOT/uml-profile-$profile"
+		printf 'SKIP %s (binary %s not built; run:\n' "$profile" "$binary"
+		printf '       make ARCH=um O=%s uml/%s &&\n' "$o" "$profile"
+		printf '       make ARCH=um O=%s -j$(nproc))\n' "$o"
+		return 0
+	fi
+
 	probe=$(probe_profile "$profile") || return $?
 	assert_profile "$profile" "$probe" "$@"
 }
