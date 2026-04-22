@@ -35,18 +35,17 @@ probe_profile() {
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
 	# 40s timeout — KCSAN (race profile) adds several seconds of
 	# lockdep/selftest init at boot before the probe runs.
-	#
-	# `rootflags=/` mounts the host's root as the guest's root
-	# so that the absolute path we hand to `init=` resolves the
-	# same way inside the guest as on the host. Without it,
-	# hostfs defaults to the launch CWD and the kernel silently
-	# fails to exec an absolute-path init — no panic, no
-	# "Failed to execute /path (error -2)", just a hang until
-	# the outer timeout fires. Surfaced by the first GHA CI
-	# run of this harness.
+	# panic=0 keeps the kernel from instantly restarting if
+	# init fails to launch, so the failure path's printk output
+	# has a chance to flush to our captured fd before UML exits.
+	# loglevel=8 forces pr_info/debug into the console output so
+	# the "Run /path/to/init as init process" line (KERN_INFO)
+	# is visible.
+	local rc
 	out=$(timeout 40 "$binary" init="$GUEST_SCRIPT" mem=512M \
-		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs \
-		rootflags=/ rw 2>&1)
+		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw \
+		panic=0 loglevel=8 2>&1)
+	rc=$?
 
 	# UML's console delivers CRLF line endings; strip CRs so the
 	# PRESENT/ABSENT tokens compare cleanly downstream.
@@ -64,7 +63,13 @@ probe_profile() {
 	# config broken" triage time.
 	if [ -z "$probe" ]; then
 		{
-			echo "=== $profile: probe block missing — raw boot output follows ==="
+			printf '=== %s: probe block missing (UML exit=%d)\n' \
+				"$profile" "$rc"
+			printf '    raw boot output follows ===\n'
+			# rc=124 → outer `timeout` tripped (UML hung).
+			# rc!=0 && rc!=124 → UML exited itself, likely a
+			# kernel panic that didn't flush or a host-side
+			# crash (segfault in the UML host stub, etc.).
 			echo "$out"
 			echo "=== end raw boot output ==="
 		} >&2
