@@ -17,27 +17,47 @@
 EXPORT_SYMBOL(block_signals);
 EXPORT_SYMBOL(unblock_signals);
 
-void block_signals_trace(void)
+/*
+ * These four helpers gate arch-level IRQ state on UML: they wrap
+ * block_signals()/unblock_signals() (which implement
+ * arch_local_irq_disable/enable) with the lockdep hardirqs-on/off
+ * tracepoints. They run from arch_local_irq_restore paths (via
+ * unblock_signals_trace() in the trap return path and friends) and
+ * from host-signal handlers; both contexts can be atomic
+ * (preempt_count > 0, or hardirqs already off inside a
+ * local_irq_save/restore window).
+ *
+ * The generic function_graph tracer's first activation takes
+ * sched_register_mutex / tracepoints_mutex; if it pushes a shadow-
+ * stack entry from inside one of these atomic-context callers the
+ * prepare_ftrace_return → function_graph_enter → __mutex_lock chain
+ * sleeps with preempt_count > 0 and the kernel panics (observed in
+ * decisions-log D34 addendum-3). On native x86 the analogous path
+ * cannot even exist because arch_local_irq_* is inline asm and has
+ * no function-entry NOP to patch; on UML these are real C functions
+ * so we need the notrace annotation to match.
+ */
+notrace void block_signals_trace(void)
 {
 	block_signals();
 	if (current_thread_info())
 		trace_hardirqs_off();
 }
 
-void unblock_signals_trace(void)
+notrace void unblock_signals_trace(void)
 {
 	if (current_thread_info())
 		trace_hardirqs_on();
 	unblock_signals();
 }
 
-void um_trace_signals_on(void)
+notrace void um_trace_signals_on(void)
 {
 	if (current_thread_info())
 		trace_hardirqs_on();
 }
 
-void um_trace_signals_off(void)
+notrace void um_trace_signals_off(void)
 {
 	if (current_thread_info())
 		trace_hardirqs_off();

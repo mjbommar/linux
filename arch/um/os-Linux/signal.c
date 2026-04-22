@@ -317,7 +317,7 @@ static inline void __unblock_signals(void)
 	os_local_ipi_enable();
 }
 
-void block_signals(void)
+void notrace block_signals(void)
 {
 	__block_signals();
 	/*
@@ -329,7 +329,7 @@ void block_signals(void)
 	barrier();
 }
 
-void unblock_signals(void)
+void notrace unblock_signals(void)
 {
 	int save_pending;
 
@@ -407,12 +407,29 @@ void unblock_signals(void)
 	}
 }
 
-int um_get_signals(void)
+/*
+ * um_get_signals / um_set_signals are the UML equivalents of
+ * arch_local_save_flags / arch_local_irq_restore (see
+ * arch/um/include/asm/irqflags.h). On native x86 those map to
+ * inline asm, so there is no function-entry NOP that ftrace could
+ * ever patch; on UML they are real C functions. Any future change
+ * to this file's Makefile strip-set (currently CFLAGS_REMOVE_
+ * signal.o := $(CC_FLAGS_FTRACE) in arch/um/os-Linux/Makefile)
+ * must keep these out of the traceable surface, because a graph-
+ * traced arch_local_irq_restore from inside free_irq's mutex
+ * window is the bug captured in decisions-log D34 addendum-3.
+ * The `notrace` keyword provides belt-and-suspenders even when
+ * the Makefile strip is in effect: it explicitly declares intent
+ * and suppresses the patchable-function-entry attribute at the
+ * source level so the file's ftrace-traceability does not change
+ * silently if someone edits the Makefile.
+ */
+int notrace um_get_signals(void)
 {
 	return signals_enabled;
 }
 
-int um_set_signals(int enable)
+int notrace um_set_signals(int enable)
 {
 	int ret;
 	if (signals_enabled == enable)
@@ -426,7 +443,7 @@ int um_set_signals(int enable)
 	return ret;
 }
 
-int um_set_signals_trace(int enable)
+int notrace um_set_signals_trace(int enable)
 {
 	int ret;
 	if (signals_enabled == enable)
