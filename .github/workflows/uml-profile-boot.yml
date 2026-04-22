@@ -197,42 +197,65 @@ jobs:
       # is what we've seen on `/bin/true` with glibc) has
       # concrete diagnostic context rather than a bare
       # "monitored command dumped core" line.
-      - name: Boot smoke test (init=/bin/busybox)
+      # Write a tiny busybox-sh init script that prints a
+      # well-known sentinel, then calls `halt -f` to exit UML
+      # cleanly (no kernel panic). `halt -f` via busybox
+      # reaches the reboot syscall → UML's `machine_halt` →
+      # `halt_skas` → `longjmp(INIT_JMP_HALT)` → UML exits
+      # with code 0. The sentinel in the captured output is
+      # the success signal.
+      #
+      # Why not just `init=/bin/busybox`: busybox with no args
+      # prints usage and exits 1 → kernel panics "Attempted
+      # to kill init!" → UML's panic_exit_notifier runs with
+      # INT_MAX-1 priority → os_dump_core → uml_abort →
+      # SIGABRT 134 before the panic pr_emerg flushes to
+      # console. That path can never reliably surface a
+      # user-visible "we booted" line.
+      - name: Stage init script
+        run: |
+          cat >/tmp/uml-smoke-init.sh <<'EOF'
+          #!/bin/busybox sh
+          /bin/busybox echo UML_SMOKE_INIT_OK
+          /bin/busybox echo UML_SMOKE_INIT_OK > /dev/kmsg 2>/dev/null || true
+          /bin/busybox halt -f
+          EOF
+          chmod +x /tmp/uml-smoke-init.sh
+          ls -la /tmp/uml-smoke-init.sh
+
+      - name: Boot smoke test (halting init)
         run: |
           BIN=/tmp/uml-profile-${{ matrix.profile }}/linux
-          echo "---- init binary linkage (expect static) ----"
+          echo "---- busybox linkage (expect static) ----"
           file /bin/busybox || true
           echo "---- UML binary linkage ----"
           file "$BIN" || true
           echo "---- running UML ----"
           set +e
-          # `panic=15` gives the kernel 15 s between the
-          # "Attempted to kill init!" pr_emerg and the
-          # emergency_restart that takes UML down with
-          # SIGABRT. That window is what lets the panic line
-          # flush through the console driver to our captured
-          # fd — `panic=-1` on the prior run took UML down so
-          # fast (rc=134, SIGABRT) that the panic message
-          # never cleared the printk ring before exit.
-          out=$(timeout 40 "$BIN" init=/bin/busybox mem=256M \
+          # `noreboot` (UML-specific, see arch/um/os-Linux/
+          # skas/process.c:reboot_skas) makes reboot-paths
+          # halt instead → UML always exits cleanly on
+          # normal shutdown.
+          out=$(timeout 40 "$BIN" init=/tmp/uml-smoke-init.sh \
+                  noreboot mem=256M \
                   con=fd:0,fd:1 ssl=null \
                   root=/dev/root rootfstype=hostfs rw \
-                  panic=15 loglevel=7 2>&1)
+                  loglevel=7 2>&1)
           rc=$?
           set -e
-          echo "UML exit code: $rc (128+6=134 SIGABRT, 128+11=139 SIGSEGV, 124 outer timeout)"
+          echo "UML exit code: $rc"
           echo "---- UML output (last 100 lines) ----"
           echo "$out" | tail -100
           echo "---- host dmesg tail (apparmor/seccomp/oom) ----"
           sudo dmesg | tail -60 | grep -Ei 'apparmor|seccomp|oom|segfault|userns|denied' || echo "(no matches)"
-          if echo "$out" | grep -qE 'Attempted to kill init|Kernel panic'; then
-            echo "::notice::UML booted to userspace and exec'd init"
+          if echo "$out" | grep -q 'UML_SMOKE_INIT_OK'; then
+            echo "::notice::UML booted, exec'd init, reached userspace"
             exit 0
           fi
           case "$rc" in
-            124) echo "::error::UML timed out — kernel hung" ;;
-            134) echo "::error::UML SIGABRT before panic line flushed — panic=15 not long enough, or host-side abort in stub setup" ;;
-            139) echo "::error::UML SIGSEGV during init-exec stub setup" ;;
-              *) echo "::error::UML exited rc=$rc with no init-exec panic" ;;
+            124) echo "::error::UML timed out — kernel hung, init never ran" ;;
+            134) echo "::error::UML SIGABRT — kernel panicked before init printed sentinel" ;;
+            139) echo "::error::UML SIGSEGV — stub crash during init-exec" ;;
+              *) echo "::error::UML exited rc=$rc without emitting sentinel" ;;
           esac
           exit 1
