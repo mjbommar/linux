@@ -170,30 +170,57 @@ jobs:
       - name: Lift unprivileged-userns AppArmor restriction
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      # Boot with `init=/bin/true`. `/bin/true` exits 0 the
-      # instant it's exec'd; the kernel then panics with
-      # `Kernel panic - not syncing: Attempted to kill init!`
-      # (see init/main.c:try_to_run_init_process). That panic
-      # line in the captured output is the strongest "UML
-      # successfully booted to userspace and exec'd init" signal
-      # we can get without a working rootfs.
+      # Statically-linked init rules out hostfs dynamic-loader
+      # path problems. busybox-static ships a single-file
+      # binary with no .so deps — if this runs, the execve path
+      # works through hostfs; if not, the problem is below the
+      # libc layer (kernel exec, binfmt, or UML's stub-process
+      # model).
+      - name: Install busybox-static
+        run: sudo apt-get install -y --no-install-recommends busybox-static
+
+      # Boot with `init=/bin/busybox`. busybox with no args
+      # prints its usage and exits 1; the kernel then panics
+      # with `Kernel panic - not syncing: Attempted to kill
+      # init!` (see init/main.c:try_to_run_init_process). That
+      # panic line in the captured output is the strongest
+      # "UML successfully booted to userspace and exec'd init"
+      # signal reachable without a real rootfs.
       #
       # `panic=-1` makes the kernel exit the UML host process
       # immediately on panic, rather than hanging — necessary
-      # because `panic=0` (our prior default) loops forever,
-      # which would hit the outer `timeout` every time.
-      - name: Boot smoke test (init=/bin/true)
+      # because `panic=0` loops forever and would always hit
+      # the outer `timeout`.
+      #
+      # Exit code + post-mortem dmesg are captured so a crash
+      # in UML's host-side stub (SIGSEGV → core dumped, which
+      # is what we've seen on `/bin/true` with glibc) has
+      # concrete diagnostic context rather than a bare
+      # "monitored command dumped core" line.
+      - name: Boot smoke test (init=/bin/busybox)
         run: |
-          set -o pipefail
           BIN=/tmp/uml-profile-${{ matrix.profile }}/linux
-          out=$(timeout 30 "$BIN" init=/bin/true mem=128M \
+          set +e
+          out=$(timeout 30 "$BIN" init=/bin/busybox mem=256M \
                   con=fd:0,fd:1 ssl=null \
                   root=/dev/root rootfstype=hostfs rw \
-                  panic=-1 loglevel=7 2>&1 || true)
-          echo "$out" | tail -40
-          echo "----"
-          if ! echo "$out" | grep -qE 'Attempted to kill init|Kernel panic'; then
-            echo "::error::UML never reached init. Last 60 lines of output above."
-            exit 1
+                  panic=-1 loglevel=7 2>&1)
+          rc=$?
+          set -e
+          echo "UML exit code: $rc"
+          echo "---- UML output (last 80 lines) ----"
+          echo "$out" | tail -80
+          echo "---- host dmesg tail ----"
+          sudo dmesg | tail -40 || true
+          echo "---- UML binary linkage ----"
+          file "$BIN" || true
+          if echo "$out" | grep -qE 'Attempted to kill init|Kernel panic'; then
+            echo "::notice::UML booted to userspace and exec'd init"
+            exit 0
           fi
-          echo "::notice::UML booted to userspace and exec'd init (panic line seen)"
+          case "$rc" in
+            124) echo "::error::UML timed out — kernel hung before init exec" ;;
+            139) echo "::error::UML crashed with SIGSEGV during init-exec stub setup" ;;
+              *) echo "::error::UML exited rc=$rc with no init-exec panic" ;;
+          esac
+          exit 1
