@@ -30,6 +30,30 @@ if [ ! -f "$BASELINE" ]; then
 	exit 2
 fi
 
+# Refuse to run when the cpufreq governor isn't 'performance' —
+# powersave/ondemand leave cycle counts 3-4× above steady state on
+# a sub-second boot and produce noise-dominated "regression"
+# reports. One explicit message beats a false-positive that takes
+# an hour to diagnose.
+CPUFREQ_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
+	2>/dev/null || echo unknown)
+if [ "$CPUFREQ_GOV" != "performance" ] && \
+   [ "${UML_PERF_FORCE:-0}" != "1" ]; then
+	echo >&2 "uml-perf-compare: cpufreq governor is '$CPUFREQ_GOV'."
+	echo >&2 "  The baseline at $BASELINE"
+	echo >&2 "  was captured with governor=performance. Comparing"
+	echo >&2 "  numbers against a non-performance governor produces"
+	echo >&2 "  meaningless-to-3x inflated regression reports."
+	echo >&2 ""
+	echo >&2 "  To run a real comparison:"
+	echo >&2 "    sudo cpupower frequency-set -g performance"
+	echo >&2 "    $0"
+	echo >&2 ""
+	echo >&2 "  To override (debug only):"
+	echo >&2 "    UML_PERF_FORCE=1 $0"
+	exit 2
+fi
+
 # Run the current measurement.
 TMP=$(mktemp)
 trap "rm -f $TMP" EXIT

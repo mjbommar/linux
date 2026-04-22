@@ -40,6 +40,25 @@ if ! perf stat -e cycles /bin/true 2>&1 | grep -q cycles; then
 	exit 1
 fi
 
+# CPU frequency governor detection. `powersave` keeps cores at
+# minimum clock during the sub-second /bin/true boot and never
+# ramps up — cycle counts end up 3-4× higher than on `performance`
+# (the governor's state when the committed baseline was captured).
+# That difference swamps any real kernel-side signal. Warn loudly
+# and record the governor in every measurement so noisy baselines
+# are at least diagnosable instead of mysterious.
+CPUFREQ_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
+	2>/dev/null || echo unknown)
+if [ "$CPUFREQ_GOV" != "performance" ]; then
+	echo >&2 "WARNING: cpufreq governor is '$CPUFREQ_GOV' — cycle counts"
+	echo >&2 "         will be dominated by frequency-scaling noise rather"
+	echo >&2 "         than kernel-side changes. For meaningful comparison"
+	echo >&2 "         against the baseline (captured on 'performance'):"
+	echo >&2 "           sudo cpupower frequency-set -g performance"
+	echo >&2 "         or"
+	echo >&2 "           echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+fi
+
 # Compute median, p25, p75 of integers from stdin.
 percentiles() {
 	mapfile -t values
@@ -89,8 +108,8 @@ run_backend() {
 	local clock_p50 clock_p25 clock_p75
 	read -r clock_p50 clock_p25 clock_p75 < <(printf '%s\n' "${clock_list[@]}" | percentiles)
 
-	printf '{"backend":"%s","iters":%d,"cycles":{"p25":%s,"p50":%s,"p75":%s},"instructions":{"p25":%s,"p50":%s,"p75":%s},"task_clock_us":{"p25":%s,"p50":%s,"p75":%s}}\n' \
-		"$label" "$ITERS" \
+	printf '{"backend":"%s","iters":%d,"governor":"%s","cycles":{"p25":%s,"p50":%s,"p75":%s},"instructions":{"p25":%s,"p50":%s,"p75":%s},"task_clock_us":{"p25":%s,"p50":%s,"p75":%s}}\n' \
+		"$label" "$ITERS" "$CPUFREQ_GOV" \
 		"$cycles_p25" "$cycles_p50" "$cycles_p75" \
 		"$instr_p25" "$instr_p50" "$instr_p75" \
 		"$clock_p25" "$clock_p50" "$clock_p75"
