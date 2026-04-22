@@ -64,6 +64,21 @@ jobs:
           fi
           apparmor_parser --version
 
+      # SELinux refpolicy devel Makefile — exercised by
+      # `tests/selinux_module.rs`. Installs
+      # /usr/share/selinux/devel/Makefile so the module-
+      # compile test elevates from "skip (devel missing)" to
+      # a real compile check. Harmless on AppArmor-only
+      # runner images; the SELinux tools don't require
+      # SELinux to be the active LSM on the host.
+      - name: Ensure selinux-policy-dev present
+        run: |
+          if [ ! -f /usr/share/selinux/devel/Makefile ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends selinux-policy-dev
+          fi
+          ls /usr/share/selinux/devel/Makefile
+
       - name: cargo build (tests)
         run: cargo build --all-targets --locked
 
