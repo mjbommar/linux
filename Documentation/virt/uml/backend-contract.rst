@@ -78,21 +78,38 @@ Per-op semantics
 Lifecycle and trap (4 ops)
 --------------------------
 
+All three cold lifecycle ops dispatch through the ops table from
+``arch/um/kernel/backend.c``: ``init_backend()`` calls
+``probe()`` and ``init()`` in sequence right after HOT-ops
+validation, and ``uml_cleanup()`` on the reboot/halt path calls
+``shutdown()``. Call sites panic on any non-zero return from
+probe/init; shutdown returns void. The in-tree ptrace and
+seccomp backends ship stub implementations that return 0 today —
+the real probe still runs in ``arch/um/os-Linux/start_up.c``
+pending the migration documented in each
+``arch/um/backend/<kind>/lifecycle.c`` — but the dispatch path
+itself is authoritative, so a future KVM backend's real
+``kvm_open()`` / vCPU-thread-spawn work has a wired call site.
+
 ``probe(void)``
     Cold. Returns 0 if this backend can run on the current host
     (hardware capability + kernel feature checks), or a negative
     errno otherwise. Must be cheap (≤1 ms typical) and side-effect
     free beyond opening probe FDs that are immediately closed.
+    Dispatched from ``init_backend()`` after HOT-ops validation.
 
 ``init(const struct um_backend_args *args)``
     Cold. Called once after this backend wins the arbiter. Sets up
     backend-private state (per-backend singleton). May fail with a
-    negative errno; on failure the kernel panics.
+    negative errno; on failure the kernel panics. Dispatched from
+    ``init_backend()`` immediately after ``probe()``.
 
 ``shutdown(void)``
     Cold. Called from the reboot/halt path. Releases backend
     resources. Must not sleep; called with interrupts off in some
-    paths.
+    paths. Dispatched from ``uml_cleanup()`` in
+    ``arch/um/kernel/reboot.c`` before any other teardown so the
+    backend can free things while kmalloc is still usable.
 
 ``run_userspace(struct uml_pt_regs *regs)``
     **HOT.** The trap loop. Resumes guest userspace with the state

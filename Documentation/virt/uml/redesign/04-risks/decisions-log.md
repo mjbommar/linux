@@ -4559,4 +4559,129 @@ had a blind spot the bug sat in exactly:
 
 ---
 
+## D47: Fourth-pass review fixes — five correctness/contract/ergonomics items in one series
+
+**Date:** 2026-04-21
+**Status:** Accepted (all five items landed as
+commits `e27b853264cc..257b8cf61b84`; selftest sweep clean;
+boot matrix 12/12 PASS).
+
+A fourth external review pass flagged three `Medium`/`High` bugs
+plus an open policy question, all with concrete line references
+against HEAD. Recording the fixes as a single decisions entry
+because the items share a theme — "the plan's invariants drifted
+away from the code in ways only a careful review caught."
+
+**The five items (severity / commit):**
+
+1. **Medium — `init_backend()` section mismatches** (commit
+   `e27b853264cc`): `init_backend()` and
+   `pick_dynamic_backend()` read `backend_arg_{requested,force}`
+   (both `__initdata`) without `__init` markers on either
+   function, producing four modpost `WARNING: section mismatch`
+   lines. Fix: add `__init` to both functions and to the extern
+   declaration in `arch/um/include/asm/backend.h`, plus pull in
+   `<linux/init.h>`. Warnings gone.
+
+2. **Latent Q1 grep-case bug** (commit `fef60bc030e7`): the Q1
+   runner, diff, and boot-matrix all grep'd for lowercase
+   `warning:` only. modpost emits uppercase `WARNING:`. The four
+   section-mismatch warnings had been sitting in the baseline
+   invisibly for the entire period since init_backend was
+   refactored — not flagged by the tripwire that's supposed to
+   catch exactly this class of regression. Fix: `-i` flag on all
+   three greps, widened runner pattern to `warn(ing)?:` to also
+   catch smatch's short-form `warn:` messages. Smatch count in
+   the Q1 output rose from 144 to 275 because we're now counting
+   the short-form lines that were always in the logs; baseline
+   `.txt` content unchanged because the extract() function
+   specifically matches `warning:` + `error:` (the set worth
+   diffing, not `warn:` which is noisier).
+
+3. **Open policy — `backend=auto` default drift** (commit
+   `79690a06d676`): prod-fast.rst / prod-fast.config advertised
+   "`backend=auto` picks seccomp where available, ptrace
+   otherwise", but the code in `os_early_checks()` only ran the
+   seccomp probe when `seccomp_config` or
+   `backend_arg_requested == SECCOMP`. Bare `backend=auto`
+   silently fell through to ptrace — a ~3-4× perf gap between
+   documented and delivered. Flipped the gate: probe runs for
+   any DYNAMIC build that compiled seccomp in and didn't
+   explicitly request ptrace. backends.rst "It just works" row
+   updated to match. `uml-boot-matrix.sh` DYNAMIC/default
+   expectation updated from `ptrace` to `seccomp`.
+
+   **Supersedes D15's deferral** of the seccomp-first default
+   flip: that deferral was keyed on the legacy `seccomp=` state
+   and predated the `backend=` param surface. With the modern
+   param set, there's no meaningful downside to making
+   `backend=auto` actually probe; the policy question D15
+   parked is now resolved by letting the code match
+   prod-fast's documented promise.
+
+4. **Medium — backend lifecycle skipped `probe()` / `init()`**
+   (commit `32fbf168e671`): `backend-contract.rst` advertises
+   three lifecycle ops (probe/init/shutdown), but
+   `init_backend()` only called `validate_hot_ops`. An earlier
+   commit (`90bee3502ab7`) wired `shutdown()` into the reboot
+   path; this commit closes the other two. Dispatch happens
+   immediately after HOT validation, panicking on non-zero
+   return per the contract. In-tree ptrace/seccomp stubs still
+   return 0 so the runtime effect is currently nil; the
+   structural value is that the next KVM backend's real
+   `kvm_open()` / vcpu-thread spawn has a wired call site.
+
+5. **High — snapshot forkserver wrote status without waitpid**
+   (commit `257b8cf61b84`): parent wrote worker pid + hard-coded
+   zero status immediately after `fork()`. Zombies accumulated;
+   fuzzer was told "iteration finished" before the worker had
+   exited; workers could overlap. Tried the obvious fix (a
+   blocking `waitpid(pid)` between pid-write and status-write)
+   — same 3d-a-era crash reappeared even with UML signal gate +
+   raw wait4 syscall. Root cause unidentified for three
+   sessions running; we stop burning time on it.
+
+   Narrower fix that works: non-blocking zombie drain at the
+   top of each loop iteration via new
+   `os_snapshot_reap_zombies()` (WNOHANG wait4 loop). The
+   reviewer's "zombies accumulate" complaint is now closed;
+   the "status uninformative" side stays documented as a v1
+   ceiling per D41/D42. Verified via `ps --ppid <uml_pid>`
+   post-iteration: no surviving children, worker reaped by
+   next-iter drain.
+
+**Discipline consequences (continues D46):**
+
+- **Every commit gets `git commit -s`**: memory note saved
+  under `feedback_commit_signoff.md`. The session prior to this
+  one landed ~10 commits without signoffs; none of them will be
+  rewritten (already pushed), but every commit this session
+  carries a proper `Signed-off-by:`.
+
+- **Every commit gets `scripts/checkpatch.pl --strict -g HEAD`
+  before the session ends**, not just "at some point." That is
+  the tripwire the session-prior omitted and that this series
+  runs religiously.
+
+- **The Q1 grep case bug is a reminder that quality gates can
+  have silent gaps**: when a regression class appears once
+  (init_backend section-mismatch was the once), look for why
+  the gate didn't catch it and fix the gate in the same series.
+
+**Cross-references:**
+- Commits `e27b853264cc` (fix 1), `fef60bc030e7` (fix 2),
+  `79690a06d676` (fix 3), `32fbf168e671` (fix 4),
+  `257b8cf61b84` (fix 5).
+- D15 — backend=auto legacy deferral; **superseded by this
+  entry's item 3**.
+- D41/D42 — snapshot forkserver v1 ceiling; this entry's item 5
+  partially closes the zombie side of D42's "sustained fuzz"
+  story without touching the waitpid crash.
+- D46 — the review-fix predecessor that established the
+  fix-discipline pattern this series extends.
+- `backend-contract.rst` — the lifecycle doc is now authoritative
+  (probe + init + shutdown all dispatch via the ops table).
+
+---
+
 ## (Future entries here, as decisions are made)

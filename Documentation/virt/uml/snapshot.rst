@@ -141,7 +141,23 @@ Limitations (v1 ceiling)
 
 - **Single status byte is a placeholder.** The 4-byte status sent
   back on fd 199 is zero in v1; a real exit-status bridge is
-  deferred to v2.
+  deferred to v2. The obvious fix — a blocking ``waitpid`` between
+  pid-write and status-write — crashes the parent reproducibly
+  even with UML's signal gate + raw ``wait4`` syscall; three
+  separate sessions have failed to root-cause the crash, and
+  further attempts are explicitly paused pending v2's
+  freezer-cgroup redesign. See the KNOWN LIMITATION comment at
+  the top of ``arch/um/kernel/snapshot.c``'s per-iteration AFL
+  protocol for the current working theory.
+
+- **Zombies no longer accumulate** (commit `257b8cf61b84`,
+  2026-04-21). Each forkserver iteration begins with a
+  non-blocking ``wait4(-1, ..., WNOHANG)`` drain
+  (``os_snapshot_reap_zombies()``), reaping any worker that
+  exited during the prior iteration's think time. The WNOHANG
+  flag keeps the drain off the crash path the blocking variant
+  hit. Verified by inspecting ``ps --ppid <uml_pid>`` after a
+  completed iteration — no surviving child processes.
 
 - **No on-disk snapshot.** v1 is a live-fork forkserver only. An
   ELF-core-with-PT_NOTE on-disk snapshot / resume path is

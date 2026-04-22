@@ -1,9 +1,11 @@
 # C-09: Snapshot/forkserver host launcher
 
-**Status:** landed v1 (2026-04-20); post-landing fix
-            `e65cedc6b3a6` (2026-04-21) corrected a
-            `um_snapshot_enabled` static-key latch found in
-            review — see D46. Kernel-side plumbing,
+**Status:** landed v1 (2026-04-20); two post-landing fixes
+            (2026-04-21) found in review:
+            `e65cedc6b3a6` — `um_snapshot_enabled` static-key
+            latch (see D46);
+            `257b8cf61b84` — zombie accumulation from
+            fork-without-wait (see D47). Kernel-side plumbing,
             AFL-compatible wire protocol on fds 198/199,
             `/sys/kernel/um/state_version`, per-FD disposition
             taxonomy, snapshot-smoke selftest, and
@@ -15,6 +17,15 @@
             in `08-future-phases/02-snapshot-to-disk.md` as the
             dominant v2 effort. The "planned" status stays on v2
             until that design lands.
+
+            **Known open (per D47 item 5):** the AFL status byte
+            is still uninformative — a blocking `waitpid` between
+            pid-write and status-write crashes the parent
+            reproducibly (three sessions' worth of unsuccessful
+            root-cause attempts). The 2026-04-21 fix closes the
+            zombie-leak side via a non-blocking `WNOHANG` drain
+            at the top of each iteration; the real-status side
+            waits for v2.
 **Effort:** 6 weeks (actual v1 landing window)
 **Dependencies:** A (backend ops) and B (Layer 2 static-key
                   infrastructure) — both landed

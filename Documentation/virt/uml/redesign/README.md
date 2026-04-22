@@ -170,7 +170,23 @@ seccomp).
 ftrace-smoke, hooks-flip, kprobes-stress, launcher-smoke
 (Parts A/B/C), profiles, snapshot-smoke, userspace-smoke.
 Direct-invocation regression coverage for every landed
-sub-system.
+sub-system. As of 2026-04-21 all seven pass against the
+current HEAD on the research profile; snapshot-smoke
+additionally passes on fuzz.
+
+**Review-fix series (continuing D46 discipline):** a fourth
+external review on 2026-04-21 caught five items the prior
+sessions' validation gates had missed. All fixed and landed in
+commits `e27b853264cc..257b8cf61b84` per D47 — modpost
+section mismatches in `init_backend()`, a Q1 warning-grep case
+bug that had masked those same mismatches (now fixed
+gate-level), the `backend=auto` policy drift between
+prod-fast.config and the actual probe gate (superseding D15),
+the `backend->probe()`/`init()` lifecycle ops that
+`init_backend()` never dispatched, and a non-blocking zombie
+drain in the snapshot forkserver so worker exits don't leak
+zombies across iterations. Q1 baseline + boot matrix + full
+selftest sweep all green after the series.
 
 **Upstream patches staged for LKML:**
 `02-workstreams/C-profiles-and-gaps/upstream-patches/
