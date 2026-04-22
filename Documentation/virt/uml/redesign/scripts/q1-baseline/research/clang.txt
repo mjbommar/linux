@@ -18,6 +18,7 @@ kernel/bpf/bpf_struct_ops.c:331:5: warning: stack frame size (1368) exceeds limi
 kernel/bpf/cpumap.c:293:12: warning: stack frame size (1144) exceeds limit (1024) in 'cpu_map_kthread_run' [-Wframe-larger-than]
 kernel/trace/ftrace.c:4946:1: warning: stack frame size (1144) exceeds limit (1024) in 'match_records' [-Wframe-larger-than]
 kernel/trace/ftrace.c:5591:1: warning: stack frame size (1336) exceeds limit (1024) in 'unregister_ftrace_function_probe_func' [-Wframe-larger-than]
+kernel/trace/ftrace.c:7350:1: warning: stack frame size (1112) exceeds limit (1024) in 'ftrace_graph_set_hash' [-Wframe-larger-than]
 kernel/trace/ftrace.c:8260:6: warning: stack frame size (1176) exceeds limit (1024) in 'ftrace_free_mem' [-Wframe-larger-than]
 lib/maple_tree.c:3514:20: warning: stack frame size (2424) exceeds limit (1024) in 'mas_wr_store_entry' [-Wframe-larger-than]
 mm/madvise.c:1909:12: warning: stack frame size (1688) exceeds limit (1024) in 'madvise_do_behavior' [-Wframe-larger-than]
