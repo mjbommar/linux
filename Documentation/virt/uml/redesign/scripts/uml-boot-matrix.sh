@@ -142,7 +142,12 @@ boot_test "SECCOMP_ONLY/force=ptrace(panic)" /tmp/uml-matrix-seccomp_only PANIC 
 echo "===== DYNAMIC ====="
 warn=$(build_mode DYNAMIC)
 [ "$warn" -gt 0 ] && { echo "DYNAMIC: $warn warnings"; FAILED=$((FAILED+1)); }
-boot_test "DYNAMIC/default" /tmp/uml-matrix-dynamic ptrace
+# DYNAMIC/default now expects seccomp: the probe runs for every
+# DYNAMIC build that compiled seccomp in, matching prod-fast's
+# documented "backend=auto picks seccomp where available" promise.
+# Prior behavior ("ptrace unless seccomp= is set") was silently
+# contradicting prod-fast and making the profile benchmark badly.
+boot_test "DYNAMIC/default" /tmp/uml-matrix-dynamic seccomp
 boot_test "DYNAMIC/seccomp=on(legacy)" /tmp/uml-matrix-dynamic seccomp seccomp=on
 boot_test "DYNAMIC/backend=ptrace" /tmp/uml-matrix-dynamic ptrace backend=ptrace
 # backend=seccomp now triggers the probe on its own (no seccomp=on needed)

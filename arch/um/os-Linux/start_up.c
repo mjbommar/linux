@@ -528,28 +528,32 @@ void __init os_early_checks(void)
 	check_tmpexec();
 
 	/*
-	 * Run only the probe(s) for backend(s) that are actually
-	 * compiled in. Run the seccomp probe if EITHER:
+	 * Run the seccomp probe whenever CONFIG_UM_BACKEND_SECCOMP is
+	 * compiled in. Previously the probe was gated on an explicit
+	 * `seccomp=` or `backend=seccomp` request, which made
+	 * `backend=auto` (the DYNAMIC default, and what every
+	 * `uml/<profile>` Makefile target bakes in) silently prefer
+	 * ptrace — contradicting prod-fast's documented "backend=auto
+	 * picks seccomp where available" and producing a ~3–4× slower
+	 * default than the profile advertises.
 	 *
-	 *   - the legacy `seccomp=on/auto` boot param requested it
-	 *     (seccomp_config != 0); or
-	 *   - the new `backend=seccomp` (or force=seccomp) param
-	 *     requested it.
+	 * The probe is cheap (a single fork+prctl pair under
+	 * init_seccomp), and `pick_dynamic_backend()` already chooses
+	 * ptrace when `using_seccomp == 0`, so there's no semantic
+	 * downside to always running it; only upside is closing the
+	 * prod-fast UX gap.
 	 *
-	 * Without this OR clause, `backend=seccomp` would silently
-	 * degrade to ptrace because the probe wouldn't run and
-	 * using_seccomp would stay 0 — the gap the external review
-	 * caught. SECCOMP_ONLY builds always need the probe run too,
-	 * since init_backend forces using_seccomp=1 there.
+	 * `backend=force=ptrace` still skips the probe entirely
+	 * (trivially satisfied by the ptrace branch further down) —
+	 * but nobody on DYNAMIC force-requests ptrace and then cares
+	 * whether the probe fired.
 	 *
 	 * init_backend() (called from linux_main() right after this
 	 * function) consumes the using_seccomp result + boot params
 	 * and selects the backend authoritatively.
 	 */
 	if (IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
-	    (seccomp_config ||
-	     backend_arg_requested == UM_BACKEND_KIND_SECCOMP ||
-	     IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP_ONLY))) {
+	    backend_arg_requested != UM_BACKEND_KIND_PTRACE) {
 		if (init_seccomp()) {
 			using_seccomp = 1;
 			return;

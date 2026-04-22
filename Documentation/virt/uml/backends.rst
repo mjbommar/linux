@@ -38,12 +38,18 @@ user gets the right behavior without thinking about it:
 You want…                     Use
 ============================  ==============================================
 "It just works"               No flags needed. Default config compiles in
-                              both backends; ``backend=auto`` picks ptrace
-                              unless ``seccomp=on`` is also set.
-Maximum speed                 ``backend=seccomp`` (or ``seccomp=on`` legacy).
-                              ~3–4× faster than ptrace on syscall-heavy
-                              workloads. Requires host seccomp filter
-                              support.
+                              both backends; ``backend=auto`` runs the
+                              seccomp probe at boot and picks seccomp
+                              when the host supports it, falling back
+                              to ptrace otherwise. Prior to 2026-04 the
+                              probe was gated on an explicit
+                              ``seccomp=`` / ``backend=seccomp`` request,
+                              so ``backend=auto`` silently preferred
+                              ptrace; that's been corrected.
+Maximum speed                 ``backend=seccomp`` (or just rely on
+                              ``backend=auto``). ~3–4× faster than
+                              ptrace on syscall-heavy workloads.
+                              Requires host seccomp filter support.
 Smallest binary / minimum     Build with ``CONFIG_UM_BACKEND_PTRACE_ONLY=y``
 TCB (sandbox profile)         or ``CONFIG_UM_BACKEND_SECCOMP_ONLY=y``. The
                               unselected backend is excluded entirely;
