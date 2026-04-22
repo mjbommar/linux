@@ -1,0 +1,158 @@
+#include <tunables/global>
+
+# AppArmor reference profile for the UML launcher and its
+# vhost-user backends (workstream C-10 v2).
+#
+# This file declares four profiles:
+#   - `uml-launcher`                    the main binary (run subcommand)
+#   - `uml-launcher//backend_console`   the console vhost-user backend
+#   - `uml-launcher//backend_net`       the net vhost-user backend
+#   - `uml-launcher//backend_block`     the block vhost-user backend
+#
+# The parent profile stays broad enough to orchestrate children
+# without doing I/O itself; each sub-profile narrows the
+# permission set to exactly what that backend class needs. The
+# launcher uses `change_profile` at backend-spawn time to
+# transition each child into its sub-profile (the code path that
+# installs the transition is its own follow-on commit per the D52
+# plan; this file ships the profile data so packagers can start
+# carrying it now).
+#
+# Installation: copy to /etc/apparmor.d/uml-launcher and run
+#   sudo apparmor_parser -r /etc/apparmor.d/uml-launcher
+# to load. On Debian/Ubuntu `apparmor_parser -a` loads a
+# *new* profile; `-r` replaces an existing one.
+#
+# This is a *reference* profile. Distros may tighten or relax it
+# per their posture; the in-tree copy is the starting point, not
+# the final word.
+
+abi <abi/3.0>,
+
+profile uml-launcher @{exec_path} {
+  include <abstractions/base>
+  include <abstractions/consoles>
+  include <abstractions/nameservice>
+
+  # The binary itself.
+  @{exec_path} mr,
+
+  # Child backend binaries run as the same exec (multi-call
+  # binary). Allow discretionary exec of self; the child
+  # transition into a sub-profile is explicit below via
+  # `change_profile`.
+  @{exec_path} ix,
+
+  # Config + state locations.
+  owner @{HOME}/.config/uml-launcher/*            r,
+  owner @{HOME}/.local/state/uml/**               rw,
+  /tmp/uml-launcher-*.sock                        rw,
+  /tmp/uml-*.sock                                 rw,
+
+  # The launcher reads the user's UML kernel binary and may
+  # pass it as an fd to children. Permit read-only access to
+  # a conventional set of build output directories; users
+  # running from elsewhere can add site-local rules.
+  owner @{HOME}/src/**/linux                      rix,
+  owner /tmp/uml-*/linux                          rix,
+
+  # The `run` subcommand invokes the UML kernel as a child.
+  # Children inherit stdin/stdout; network is via
+  # unix-domain sockets only from the launcher's side.
+
+  # Transition into sub-profiles for backend spawns.
+  change_profile -> uml-launcher//backend_console,
+  change_profile -> uml-launcher//backend_net,
+  change_profile -> uml-launcher//backend_block,
+
+  # The parent profile does not open TAP or disk images; those
+  # are the sub-profiles' concern.
+
+  # Sub-profile: console backend.
+  profile backend_console {
+    include <abstractions/base>
+
+    @{exec_path} mr,
+
+    # Unix-domain socket for vhost-user.
+    /tmp/uml-*-console-*.sock                     rw,
+    /tmp/uml-console-*.sock                       rw,
+
+    # Standard stdio — console bytes flow through the
+    # launcher's stdin/stdout.
+    owner /dev/tty*                               rw,
+    owner /dev/pts/*                              rw,
+
+    # Process bookkeeping.
+    @{PROC}/@{pid}/status                         r,
+    @{PROC}/@{pid}/task/                          r,
+    @{PROC}/@{pid}/task/**                        r,
+
+    # No network. No block I/O. No setuid. No ptrace.
+    deny capability sys_ptrace,
+    deny capability sys_module,
+    deny capability net_admin,
+  }
+
+  # Sub-profile: net backend.
+  profile backend_net {
+    include <abstractions/base>
+
+    @{exec_path} mr,
+
+    # Unix-domain socket for vhost-user.
+    /tmp/uml-*-net-*.sock                         rw,
+    /tmp/uml-net-*.sock                           rw,
+
+    # TAP device. On Linux, opening /dev/net/tun + TUNSETIFF
+    # attaches to the named interface.
+    /dev/net/tun                                  rw,
+
+    # Needed for the TUNSETIFF ioctl target: the if_name the
+    # launcher passes in via --tap. We don't know the name at
+    # profile-write time, so allow read on /sys/class/net/*
+    # so the backend can verify the interface exists before
+    # attaching.
+    /sys/class/net/                               r,
+    /sys/class/net/*/                             r,
+    /sys/class/net/*/address                      r,
+
+    # Net caps the tap data path conceivably needs.
+    capability net_admin,
+
+    deny capability sys_ptrace,
+    deny capability sys_module,
+    deny capability dac_override,
+  }
+
+  # Sub-profile: block backend.
+  profile backend_block {
+    include <abstractions/base>
+
+    @{exec_path} mr,
+
+    # Unix-domain socket for vhost-user.
+    /tmp/uml-*-block-*.sock                       rw,
+    /tmp/uml-block-*.sock                         rw,
+
+    # Disk image. The launcher passes the path in via --image;
+    # the profile opens it r or rw depending on whether
+    # --read-only was specified. AppArmor path-based
+    # enforcement can't distinguish the two at profile-write
+    # time, so allow rw here and rely on the backend's own
+    # --read-only gate (plus the kernel O_RDONLY/O_RDWR open
+    # flag) for write-prevention when the user asks for it.
+    #
+    # Site-local policy can tighten this to `r` when the site
+    # runs exclusively with --read-only.
+    owner @{HOME}/**.img                          rw,
+    owner @{HOME}/**.qcow2                        rw,
+    owner @{HOME}/**.raw                          rw,
+    owner /tmp/*.img                              rw,
+    owner /srv/uml/images/*                       rw,
+
+    deny capability sys_ptrace,
+    deny capability sys_module,
+    deny capability net_admin,
+  }
+}
