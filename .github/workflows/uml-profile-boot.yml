@@ -153,3 +153,47 @@ jobs:
               grep -q '^CONFIG_UM_BACKEND_PTRACE_ONLY=y' "$CFG" \
                 || { echo "::error::embedded fragment not applied (UM_BACKEND_PTRACE_ONLY expected y)"; exit 1; } ;;
           esac
+
+      # --- UML boot smoke test -----------------------------------
+      #
+      # Ubuntu 24.04 GHA runners default to
+      # `kernel.apparmor_restrict_unprivileged_userns=1`, which
+      # blocks the unprivileged user-namespace operations UML's
+      # child-process model needs at init-exec time. That's the
+      # same restriction that breaks bubblewrap / nested podman
+      # on these runners; see
+      # https://github.com/actions/runner-images/issues/12096 and
+      # https://github.com/chainguard-dev/melange/issues/1508 for
+      # the general pattern. Lifting it before UML launches lets
+      # the `/bin/true` init actually run, which is the smallest
+      # possible "boot-to-userspace" signal.
+      - name: Lift unprivileged-userns AppArmor restriction
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Boot with `init=/bin/true`. `/bin/true` exits 0 the
+      # instant it's exec'd; the kernel then panics with
+      # `Kernel panic - not syncing: Attempted to kill init!`
+      # (see init/main.c:try_to_run_init_process). That panic
+      # line in the captured output is the strongest "UML
+      # successfully booted to userspace and exec'd init" signal
+      # we can get without a working rootfs.
+      #
+      # `panic=-1` makes the kernel exit the UML host process
+      # immediately on panic, rather than hanging — necessary
+      # because `panic=0` (our prior default) loops forever,
+      # which would hit the outer `timeout` every time.
+      - name: Boot smoke test (init=/bin/true)
+        run: |
+          set -o pipefail
+          BIN=/tmp/uml-profile-${{ matrix.profile }}/linux
+          out=$(timeout 30 "$BIN" init=/bin/true mem=128M \
+                  con=fd:0,fd:1 ssl=null \
+                  root=/dev/root rootfstype=hostfs rw \
+                  panic=-1 loglevel=7 2>&1 || true)
+          echo "$out" | tail -40
+          echo "----"
+          if ! echo "$out" | grep -qE 'Attempted to kill init|Kernel panic'; then
+            echo "::error::UML never reached init. Last 60 lines of output above."
+            exit 1
+          fi
+          echo "::notice::UML booted to userspace and exec'd init (panic line seen)"
