@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// virtio-console vhost-user backend (C-10 v2 commit 2).
+// virtio-console vhost-user backend (workstream C-10 v2).
 //
 // This is the simplest vhost-user surface in UML's v2 device set:
 // two queues (RX at index 0, TX at index 1), byte-oriented, no
@@ -9,16 +9,19 @@
 // the socket we serve here and drives the queues on behalf of
 // the guest.
 //
-// This commit lands the vhost-user **protocol** wiring — socket
-// listen, feature negotiation, queue setup via the rust-vmm
-// VhostUserDaemon. Actual RX/TX data flow (reading guest bytes
-// off the TX queue into the backend's stdout, writing stdin
-// bytes through the RX queue) is intentionally a no-op here; it
-// lands in the next commit so this one stays reviewable in
-// isolation. A backend with a live protocol surface + stubbed
-// data path is still a bisectable unit — frontend connection +
-// negotiation can be exercised before any data-movement code
-// ships.
+// Data flow:
+//   - TX (guest → host): process_tx_queue() drains each avail-ring
+//     chain into the backend's sink (stdout in production).
+//   - RX (host → guest): a dedicated stdin reader thread
+//     (spawned in run() before seccomp applies) appends bytes to
+//     rx_fifo and wakes the daemon via an EventFd registered
+//     with VhostUserDaemon::get_epoll_handlers() under
+//     RX_EFD_ID. process_rx_queue() drains rx_fifo into
+//     avail-ring buffers.
+//
+// Notification discipline: both paths call needs_notification()
+// before signal_used_queue(), honoring the guest's
+// VIRTIO_RING_F_EVENT_IDX suppression.
 //
 // Design references:
 //   - rust-vmm/vhost-device/vhost-device-console (0.21 API)
@@ -41,6 +44,8 @@ use virtio_bindings::bindings::virtio_ring::{
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
+use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
+use std::os::fd::AsRawFd;
 
 use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendConsoleArgs;
@@ -63,6 +68,15 @@ const NUM_QUEUES: usize = 2;
 /// stream backend default and covers bursty interactive input
 /// without wasting memory.
 const QUEUE_SIZE: usize = 256;
+
+/// `data` value used when registering the backend-side RX eventfd
+/// with `VringEpollHandler::register_listener()`. Must be greater
+/// than the number of queues (the [0, NUM_QUEUES] range is
+/// reserved by the daemon for queue kicks + the exit event);
+/// picking `NUM_QUEUES + 1` keeps the mapping self-describing.
+/// `handle_event()` dispatches on this when the reader thread
+/// signals that stdin bytes have arrived.
+const RX_EFD_ID: u16 = NUM_QUEUES as u16 + 1;
 
 /// Device feature bits the backend negotiates with the frontend.
 /// Matches the canonical byte-stream feature set used by
@@ -124,34 +138,39 @@ pub struct ConsoleBackend {
     sink: Mutex<ConsoleSink>,
 
     /// Buffered host → guest bytes waiting to be delivered on
-    /// the next RX virtqueue kick. Producers (the future stdin
-    /// reader thread that lands in a follow-on commit, plus
-    /// tests in this commit) push via `push_rx_bytes()`; the
-    /// RX handler drains as descriptors become available.
-    ///
-    /// Shared across threads via `Arc<Mutex<...>>` so a later
-    /// commit can spawn a dedicated stdin reader without
-    /// reshaping the type. The Mutex is held briefly (one
-    /// per-chain drain) so contention with TX handling is
-    /// bounded.
+    /// the next RX virtqueue kick. The stdin reader thread
+    /// appends; `process_rx_queue` drains as descriptors
+    /// become available. Mutex is held briefly (one per-chain
+    /// drain) so contention with TX handling is bounded.
     rx_fifo: Arc<Mutex<VecDeque<u8>>>,
+
+    /// EventFd the stdin reader thread writes to after
+    /// appending bytes to `rx_fifo`. Registered with the
+    /// daemon's epoll via `register_listener(RX_EFD_ID)`
+    /// so the daemon calls `handle_event` with
+    /// `device_event = RX_EFD_ID` as soon as stdin bytes
+    /// arrive — no waiting for the next guest-initiated RX
+    /// kick.
+    rx_eventfd: Arc<EventFd>,
 }
 
 impl ConsoleBackend {
     pub fn new() -> Result<Self> {
-        Ok(Self::with_sink(Box::new(std::io::stdout())))
+        Self::with_sink(Box::new(std::io::stdout()))
     }
 
     /// Construct with a caller-supplied sink. Used by tests to
     /// swap stdout for an in-memory buffer; the `new()` entry
     /// point is the one the production `run()` path uses.
-    pub fn with_sink(sink: ConsoleSink) -> Self {
-        Self {
+    pub fn with_sink(sink: ConsoleSink) -> Result<Self> {
+        let eventfd = EventFd::new(EFD_NONBLOCK).context("rx eventfd")?;
+        Ok(Self {
             mem: None,
             event_idx: false,
             sink: Mutex::new(sink),
             rx_fifo: Arc::new(Mutex::new(VecDeque::new())),
-        }
+            rx_eventfd: Arc::new(eventfd),
+        })
     }
 
     /// Push host-to-guest bytes into the RX FIFO. The bytes are
@@ -172,12 +191,17 @@ impl ConsoleBackend {
     }
 
     /// Expose a clone of the shared FIFO handle. Callers that
-    /// want to push from another thread (the stdin reader, in
-    /// the follow-on commit) can hold this handle without
-    /// keeping the whole backend alive.
-    #[allow(dead_code)]
+    /// want to push from another thread (the stdin reader) can
+    /// hold this handle without keeping the whole backend alive.
     pub fn rx_fifo_handle(&self) -> Arc<Mutex<VecDeque<u8>>> {
         Arc::clone(&self.rx_fifo)
+    }
+
+    /// Handle to the RX-ready eventfd. The stdin reader writes
+    /// 1 here after appending bytes to `rx_fifo` so the daemon
+    /// wakes up via its epoll registration.
+    pub fn rx_eventfd_handle(&self) -> Arc<EventFd> {
+        Arc::clone(&self.rx_eventfd)
     }
 
     /// Drain the RX virtqueue: for each avail-ring descriptor
@@ -480,6 +504,19 @@ impl VhostUserBackendMut for ConsoleBackend {
                 let vring = &vrings[TX_QUEUE as usize];
                 self.process_tx_queue(vring)?;
             }
+            id if id == RX_EFD_ID => {
+                // Stdin reader thread signaled "bytes arrived".
+                // Drain the eventfd counter so epoll doesn't
+                // fire again until the next bytes, then process
+                // the RX queue (it may still be empty — the
+                // guest's buffer availability is independent of
+                // our byte arrival).
+                if let Err(e) = self.rx_eventfd.read() {
+                    log::warn!("console: rx_eventfd drain failed: {e}");
+                }
+                let vring = &vrings[RX_QUEUE as usize];
+                self.process_rx_queue(vring)?;
+            }
             RX_QUEUE => {
                 // Host → guest. The guest is offering empty
                 // buffers we can fill on demand. Opportunistic
@@ -511,13 +548,60 @@ impl VhostUserBackendMut for ConsoleBackend {
     // path.
 }
 
+/// Loop driving host → guest byte flow. Reads from `source`
+/// into a small stack buffer, appends each chunk to `fifo`, and
+/// writes `1` to `wake` so the daemon's epoll wakes and routes
+/// to `handle_event(RX_EFD_ID)`. Returns on EOF or on a
+/// non-EINTR read error.
+///
+/// Generic over `Read` so tests can feed a pipe or `Cursor`
+/// instead of stdin. Production path wraps `std::io::stdin()`.
+fn run_reader_loop<R: Read>(
+    mut source: R,
+    fifo: Arc<Mutex<VecDeque<u8>>>,
+    wake: Arc<EventFd>,
+) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match source.read(&mut buf) {
+            Ok(0) => {
+                log::info!("console reader: stdin EOF");
+                break;
+            }
+            Ok(n) => {
+                // Hold the lock only long enough to append.
+                match fifo.lock() {
+                    Ok(mut guard) => guard.extend(&buf[..n]),
+                    Err(_) => {
+                        log::error!("console reader: rx_fifo mutex poisoned");
+                        break;
+                    }
+                }
+                // Best-effort wake. NONBLOCK so a saturated
+                // counter doesn't stall the reader; daemon
+                // drains on every handle_event dispatch.
+                if let Err(e) = wake.write(1) {
+                    if e.raw_os_error() != Some(libc::EAGAIN) {
+                        log::warn!("console reader: eventfd write failed: {e}");
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                log::warn!("console reader: stdin read error: {e}");
+                break;
+            }
+        }
+    }
+}
+
 /// Entry point for `uml-launcher backend console --socket <path>`.
 ///
-/// Creates the backend state, hands it to a `VhostUserDaemon`, and
-/// calls `serve()`, which binds the Unix-domain socket, accepts a
-/// single frontend connection, runs the protocol handshake, dispatches
-/// queue events through `handle_event()`, and returns when the
-/// frontend disconnects or our `exit_event` fires.
+/// Creates the backend state + stdin reader thread + daemon,
+/// registers the backend-side RX eventfd with the daemon's
+/// epoll so stdin arrivals wake the event loop, applies the
+/// seccomp filter, and calls `serve()`. Returns when the
+/// frontend disconnects or the process receives a fatal signal.
 pub fn run(args: BackendConsoleArgs) -> Result<i32> {
     let socket = args.common.socket;
     tracing::info!(socket = %socket.display(), "console backend: starting vhost-user daemon");
@@ -525,6 +609,30 @@ pub fn run(args: BackendConsoleArgs) -> Result<i32> {
     let backend = Arc::new(RwLock::new(
         ConsoleBackend::new().context("constructing console backend")?,
     ));
+
+    // Grab shared handles before we hand `backend` to the
+    // daemon — the reader thread needs to outlive the run()
+    // stack frame but must not carry the whole `Arc<RwLock>`.
+    let (rx_fifo, rx_event) = {
+        let guard = backend.read().expect("rx init: backend lock poisoned");
+        (guard.rx_fifo_handle(), guard.rx_eventfd_handle())
+    };
+
+    // Spawn the reader BEFORE seccomp applies, so thread-
+    // creation syscalls (clone3, set_robust_list, …) aren't
+    // filtered. The thread's steady-state syscalls (read,
+    // write-to-eventfd, futex) are in the seccomp baseline.
+    let reader_thread = std::thread::Builder::new()
+        .spawn(move || {
+            let stdin = std::io::stdin();
+            let handle = stdin.lock();
+            run_reader_loop(handle, rx_fifo, rx_event);
+        })
+        .context("spawning console stdin reader thread")?;
+    // We deliberately do not join() — the thread exits on
+    // stdin EOF or when the process dies. Dropping the handle
+    // detaches it.
+    let _ = reader_thread;
 
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
@@ -534,6 +642,27 @@ pub fn run(args: BackendConsoleArgs) -> Result<i32> {
         mem,
     )
     .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
+
+    // Register the backend-side RX eventfd with the daemon's
+    // epoll. The daemon will route events on that fd through
+    // handle_event() with device_event = RX_EFD_ID.
+    let handlers = daemon.get_epoll_handlers();
+    let rx_event_handle = {
+        let guard = backend.read().expect("rx register: backend lock poisoned");
+        guard.rx_eventfd_handle()
+    };
+    if let Some(h) = handlers.first() {
+        h.register_listener(
+            rx_event_handle.as_raw_fd(),
+            EventSet::IN,
+            RX_EFD_ID as u64,
+        )
+        .map_err(|e| anyhow::anyhow!("register RX eventfd: {e:?}"))?;
+    } else {
+        return Err(anyhow::anyhow!(
+            "VhostUserDaemon returned no epoll handlers"
+        ));
+    }
 
     // Lock down the syscall surface before entering the event
     // loop. The console class needs nothing beyond the shared
@@ -714,7 +843,7 @@ mod tx_path_tests {
             out: captured.clone(),
         };
 
-        let mut backend = ConsoleBackend::with_sink(Box::new(sink));
+        let mut backend = ConsoleBackend::with_sink(Box::new(sink)).expect("backend");
 
         let mem = make_mem();
         backend.update_memory(mem.clone()).expect("update_memory");
@@ -769,7 +898,7 @@ mod tx_path_tests {
             }
         }
         let mut backend =
-            ConsoleBackend::with_sink(Box::new(CaptureSink(captured.clone())));
+            ConsoleBackend::with_sink(Box::new(CaptureSink(captured.clone()))).expect("backend");
         let mem = make_mem();
         backend.update_memory(mem.clone()).expect("update_memory");
 
@@ -822,7 +951,7 @@ mod tx_path_tests {
             }
         }
         let mut backend =
-            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone()))).expect("backend");
 
         let mem = make_mem();
         backend.update_memory(mem.clone()).expect("update_memory");
@@ -876,7 +1005,7 @@ mod tx_path_tests {
             }
         }
         let mut backend =
-            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone()))).expect("backend");
 
         let mem = make_mem();
         backend.update_memory(mem.clone()).expect("update_memory");
@@ -897,6 +1026,65 @@ mod tx_path_tests {
     }
 
     #[test]
+    fn reader_loop_moves_bytes_and_wakes_eventfd() {
+        // Run the reader loop against a Cursor<Vec<u8>> source.
+        // It should push all bytes into the FIFO and bump the
+        // eventfd counter at least once before the source
+        // reports EOF.
+        use std::io::Cursor;
+        let wake = Arc::new(EventFd::new(EFD_NONBLOCK).unwrap());
+        let fifo = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+        let source = Cursor::new(b"hello reader loop".to_vec());
+
+        let wake_clone = wake.clone();
+        let fifo_clone = fifo.clone();
+        std::thread::spawn(move || {
+            run_reader_loop(source, fifo_clone, wake_clone);
+        })
+        .join()
+        .expect("reader thread join");
+
+        let got: Vec<u8> = fifo.lock().unwrap().iter().copied().collect();
+        assert_eq!(got, b"hello reader loop");
+
+        // EventFd counter: NONBLOCK read returns the counter
+        // and resets to 0. Should be > 0 since at least one
+        // write(1) happened before the Cursor's EOF.
+        let counter = wake.read().expect("read eventfd");
+        assert!(counter > 0, "eventfd should have been bumped");
+    }
+
+    #[test]
+    fn reader_loop_handles_empty_source() {
+        // Zero-byte source: loop should exit on EOF without
+        // touching the FIFO or the eventfd.
+        use std::io::Cursor;
+        let wake = Arc::new(EventFd::new(EFD_NONBLOCK).unwrap());
+        let fifo = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+        let source = Cursor::new(Vec::<u8>::new());
+
+        let wake_clone = wake.clone();
+        let fifo_clone = fifo.clone();
+        std::thread::spawn(move || {
+            run_reader_loop(source, fifo_clone, wake_clone);
+        })
+        .join()
+        .expect("reader thread join");
+
+        assert!(fifo.lock().unwrap().is_empty());
+        // EventFd NONBLOCK read returns EAGAIN when counter == 0;
+        // that's the signal nothing was written.
+        match wake.read() {
+            Ok(n) => assert_eq!(n, 0, "no bytes should have been signaled"),
+            Err(e) => assert_eq!(
+                e.raw_os_error(),
+                Some(libc::EAGAIN),
+                "EAGAIN on empty eventfd"
+            ),
+        }
+    }
+
+    #[test]
     fn rx_partial_fill_when_buffer_smaller_than_fifo() {
         let sunk = Arc::new(Mutex::new(Vec::<u8>::new()));
         struct CaptureSink(Arc<Mutex<Vec<u8>>>);
@@ -910,7 +1098,7 @@ mod tx_path_tests {
             }
         }
         let mut backend =
-            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone()))).expect("backend");
         let mem = make_mem();
         backend.update_memory(mem.clone()).expect("update_memory");
 
@@ -955,7 +1143,7 @@ mod tx_path_tests {
             }
         }
         let mut backend =
-            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone())));
+            ConsoleBackend::with_sink(Box::new(CaptureSink(sunk.clone()))).expect("backend");
 
         let mem = make_mem();
         // Don't call update_memory() — backend.mem stays None.
