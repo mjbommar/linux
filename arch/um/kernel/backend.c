@@ -120,6 +120,33 @@ enum um_backend_kind __init init_backend(const struct um_backend_args *args)
 
 	validate_hot_ops(um_backend);
 
+	/*
+	 * Dispatch the contract's cold lifecycle ops. probe() here is
+	 * the "this backend can still run on this host" recheck — the
+	 * arbiter already trusted os_early_checks()'s probe result via
+	 * using_seccomp, but the ops-table probe is what
+	 * backend-contract.rst advertises, so invoking it keeps the
+	 * contract authoritative. init() sets up per-backend state;
+	 * currently a no-op for both in-tree backends pending the
+	 * os-Linux cleanup noted in each backend's lifecycle.c, but a
+	 * future KVM backend's real kvm_open / vcpu-thread spawn will
+	 * land here. Both ops panic on failure per the contract.
+	 */
+	if (um_backend->probe) {
+		int rc = um_backend->probe();
+
+		if (rc)
+			panic("um: backend %s probe failed: %d",
+			      um_backend->name, rc);
+	}
+	if (um_backend->init) {
+		int rc = um_backend->init(args);
+
+		if (rc)
+			panic("um: backend %s init failed: %d",
+			      um_backend->name, rc);
+	}
+
 	pr_info("um: backend = %s (contract v%u)\n",
 		um_backend->name, um_backend->contract_version);
 	return um_backend->kind;
