@@ -1,24 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Per-device vhost-user backend dispatcher (C-10 v2 commit 1 —
-// scaffolding only).
+// Per-device vhost-user backend dispatcher (C-10 v2).
 //
 // `uml-launcher backend <class>` dispatches to the matching per-
-// class handler. Each handler currently reports its args and
-// returns 0 without doing any vhost-user work; the real protocol
-// implementation, per-class seccomp filters, and LSM transitions
-// land in the follow-on commits (see decisions-log D52 for the
-// bisectable plan).
-//
-// This module exists so the subcommand surface and per-class arg
-// plumbing are in place, testable, and bisectable before any
-// runtime dependency on rust-vmm gets added. Building on a clean
-// subcommand scaffold keeps every follow-on commit small enough
-// to review in isolation.
+// class handler. Each class lives in its own sub-module and pulls
+// in the rust-vmm stack (vhost, vhost-user-backend, vm-memory,
+// virtio-queue) through a single-binary multi-call shape — see
+// decisions-log D52 for the rationale and commit plan.
 
 use anyhow::Result;
 
 use crate::cli::BackendClass;
+
+pub mod console;
 
 /// Entry point for `uml-launcher backend <class>`.
 ///
@@ -34,15 +28,7 @@ pub fn dispatch(class: BackendClass) -> Result<i32> {
 }
 
 fn run_console(args: crate::cli::BackendConsoleArgs) -> Result<i32> {
-    tracing::info!(
-        socket = %args.common.socket.display(),
-        "backend console: not yet implemented (C-10 v2 commit 1 scaffold)"
-    );
-    eprintln!(
-        "uml-launcher backend console: not yet implemented (socket={}).",
-        args.common.socket.display()
-    );
-    Ok(0)
+    console::run(args)
 }
 
 fn run_net(args: crate::cli::BackendNetArgs) -> Result<i32> {
@@ -83,7 +69,7 @@ fn run_block(args: crate::cli::BackendBlockArgs) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{BackendBlockArgs, BackendCommonArgs, BackendConsoleArgs, BackendNetArgs};
+    use crate::cli::{BackendBlockArgs, BackendCommonArgs, BackendNetArgs};
     use std::path::PathBuf;
 
     fn common(path: &str) -> BackendCommonArgs {
@@ -92,13 +78,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_console_returns_zero() {
-        let class = BackendClass::Console(BackendConsoleArgs {
-            common: common("/tmp/uml-console.sock"),
-        });
-        assert_eq!(dispatch(class).unwrap(), 0);
-    }
+    // The Console dispatch path spawns a real VhostUserDaemon in
+    // console::run() and would block on accept(); unit tests for
+    // the actual backend live in backend/console.rs. End-to-end
+    // coverage ships in the selftest.
 
     #[test]
     fn dispatch_net_returns_zero() {
