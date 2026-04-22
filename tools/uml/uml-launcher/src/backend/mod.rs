@@ -13,6 +13,7 @@ use anyhow::Result;
 use crate::cli::BackendClass;
 
 pub mod console;
+pub mod net;
 pub mod seccomp;
 
 /// Entry point for `uml-launcher backend <class>`.
@@ -33,17 +34,7 @@ fn run_console(args: crate::cli::BackendConsoleArgs) -> Result<i32> {
 }
 
 fn run_net(args: crate::cli::BackendNetArgs) -> Result<i32> {
-    tracing::info!(
-        socket = %args.common.socket.display(),
-        tap = args.tap.as_deref().unwrap_or("<unset>"),
-        "backend net: not yet implemented (C-10 v2 commit 1 scaffold)"
-    );
-    eprintln!(
-        "uml-launcher backend net: not yet implemented (socket={}, tap={}).",
-        args.common.socket.display(),
-        args.tap.as_deref().unwrap_or("<unset>")
-    );
-    Ok(0)
+    net::run(args)
 }
 
 fn run_block(args: crate::cli::BackendBlockArgs) -> Result<i32> {
@@ -70,7 +61,7 @@ fn run_block(args: crate::cli::BackendBlockArgs) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{BackendBlockArgs, BackendCommonArgs, BackendNetArgs};
+    use crate::cli::{BackendBlockArgs, BackendCommonArgs};
     use std::path::PathBuf;
 
     fn common(path: &str) -> BackendCommonArgs {
@@ -79,19 +70,10 @@ mod tests {
         }
     }
 
-    // The Console dispatch path spawns a real VhostUserDaemon in
-    // console::run() and would block on accept(); unit tests for
-    // the actual backend live in backend/console.rs. End-to-end
-    // coverage ships in the selftest.
-
-    #[test]
-    fn dispatch_net_returns_zero() {
-        let class = BackendClass::Net(BackendNetArgs {
-            common: common("/tmp/uml-net.sock"),
-            tap: Some("tap0".to_string()),
-        });
-        assert_eq!(dispatch(class).unwrap(), 0);
-    }
+    // Console + Net dispatch both run VhostUserDaemon::serve()
+    // under real-ish syscall surfaces; unit tests for those
+    // backends live in backend/{console,net}.rs. The Block stub
+    // still returns cheaply until its commit.
 
     #[test]
     fn dispatch_block_returns_zero() {
