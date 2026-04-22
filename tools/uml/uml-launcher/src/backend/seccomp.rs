@@ -78,6 +78,7 @@ impl FilterBuilder {
             // Polling + eventfds (rust-vmm's run loop).
             libc::SYS_epoll_create1,
             libc::SYS_epoll_ctl,
+            libc::SYS_epoll_wait,
             libc::SYS_epoll_pwait,
             libc::SYS_epoll_pwait2,
             libc::SYS_eventfd2,
@@ -105,6 +106,26 @@ impl FilterBuilder {
             libc::SYS_getpid,
             libc::SYS_gettid,
             libc::SYS_sched_yield,
+            // glibc's NPTL + pthread thread-creation path: when
+            // the daemon's internal request-handler thread spawns,
+            // its parent calls `clone3` (435) to create it, and
+            // the child's first syscalls include `set_robust_list`
+            // (register the robust-futex list), `set_tid_address`
+            // (where the kernel writes the exiting TID), `rseq`
+            // (restartable sequences init), `sched_getaffinity`
+            // (allocator topology), and `prctl` (the daemon's
+            // `thread::Builder::name(...)` flows through
+            // PR_SET_NAME). Without these in the baseline, the
+            // post-accept thread spawn SIGSYSes before the event
+            // loop starts. Verified end-to-end by
+            // tests/frontend_handshake.rs running the real
+            // binary through `Frontend::connect` + `get_features`.
+            libc::SYS_clone3,
+            libc::SYS_prctl,
+            libc::SYS_set_robust_list,
+            libc::SYS_set_tid_address,
+            libc::SYS_rseq,
+            libc::SYS_sched_getaffinity,
             // Orderly shutdown.
             libc::SYS_exit,
             libc::SYS_exit_group,

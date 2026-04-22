@@ -62,6 +62,13 @@ seccompiler = "0.5"
 # tempfile backs the precedence regression tests that materialize
 # a real TOML config file (see config.rs::tests). No runtime dep.
 tempfile = "3"
+# `vhost-user-frontend` pulls in Frontend::connect + GET_FEATURES /
+# SET_FEATURES / SET_MEM_TABLE / SET_VRING_* on the frontend side so
+# integration tests can drive a real vhost-user handshake against
+# our backends without spawning qemu or UML. Dev-only — production
+# only ships the backend half. Feature is additive with the
+# `vhost-user-backend` dep already declared.
+vhost = { version = "0.16", features = ["vhost-user-frontend"] }
 
 [profile.release]
 # Small, fast, distro-friendly: keep symbols for debuginfo

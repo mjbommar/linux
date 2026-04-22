@@ -28,6 +28,7 @@ use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock};
 use virtio_bindings::bindings::virtio_config::VIRTIO_F_VERSION_1;
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
+use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
 
 use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendNetArgs;
@@ -86,14 +87,23 @@ pub struct NetBackend {
     /// strictly additive.
     #[allow(dead_code)]
     tap_name: Option<String>,
+
+    /// Exit-event pair — see `ConsoleBackend::exit_event` for
+    /// the full rationale. Needed for clean shutdown when the
+    /// frontend disconnects; without it the daemon's internal
+    /// worker thread hangs in `epoll_wait`.
+    exit_event: (EventConsumer, EventNotifier),
 }
 
 impl NetBackend {
     pub fn new(tap_name: Option<String>) -> Result<Self> {
+        let exit_event = new_event_consumer_and_notifier(EventFlag::NONBLOCK)
+            .context("exit-event consumer/notifier pair")?;
         Ok(Self {
             mem: None,
             event_idx: false,
             tap_name,
+            exit_event,
         })
     }
 }
@@ -156,6 +166,20 @@ impl VhostUserBackendMut for NetBackend {
             other => log::warn!("net: unexpected device_event={other}; ignoring"),
         }
         Ok(())
+    }
+
+    /// Hand the daemon a cloned exit-event pair so its worker
+    /// thread can be woken at shutdown. See the same method on
+    /// `ConsoleBackend` for the rationale.
+    fn exit_event(
+        &self,
+        _thread_index: usize,
+    ) -> Option<(EventConsumer, EventNotifier)> {
+        let (c, n) = &self.exit_event;
+        Some((
+            c.try_clone().expect("clone exit consumer"),
+            n.try_clone().expect("clone exit notifier"),
+        ))
     }
 }
 

@@ -44,6 +44,7 @@ use virtio_bindings::bindings::virtio_ring::{
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
+use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
 use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
 use std::os::fd::AsRawFd;
 
@@ -152,6 +153,17 @@ pub struct ConsoleBackend {
     /// arrive — no waiting for the next guest-initiated RX
     /// kick.
     rx_eventfd: Arc<EventFd>,
+
+    /// Exit-event pair. The `VhostUserDaemon`'s main control
+    /// loop calls `send_exit_event()` on every
+    /// `VringEpollHandler` when the frontend disconnects or
+    /// `serve()` otherwise finishes; that notifier writes to
+    /// the consumer fd this pair registered with the epoll.
+    /// Without this wiring the worker thread's `epoll_wait`
+    /// has nothing to wake on and the subprocess hangs at
+    /// shutdown — verified by `tests/frontend_handshake.rs`
+    /// via `try_wait()` timeout.
+    exit_event: (EventConsumer, EventNotifier),
 }
 
 impl ConsoleBackend {
@@ -164,12 +176,15 @@ impl ConsoleBackend {
     /// point is the one the production `run()` path uses.
     pub fn with_sink(sink: ConsoleSink) -> Result<Self> {
         let eventfd = EventFd::new(EFD_NONBLOCK).context("rx eventfd")?;
+        let exit_event = new_event_consumer_and_notifier(EventFlag::NONBLOCK)
+            .context("exit-event consumer/notifier pair")?;
         Ok(Self {
             mem: None,
             event_idx: false,
             sink: Mutex::new(sink),
             rx_fifo: Arc::new(Mutex::new(VecDeque::new())),
             rx_eventfd: Arc::new(eventfd),
+            exit_event,
         })
     }
 
@@ -539,13 +554,22 @@ impl VhostUserBackendMut for ConsoleBackend {
         Ok(())
     }
 
-    // exit_event is left at its default (None). The frontend
-    // disconnect path already takes the daemon out of its serve
-    // loop cleanly; a future commit can plumb a proper EventConsumer
-    // + EventNotifier pair here if we want externally-triggered
-    // backend shutdown (e.g., an SIGTERM from the launcher
-    // supervisor). Not needed for the scaffold's negotiation-only
-    // path.
+    /// Hand the daemon a cloned copy of our exit-event pair so
+    /// the main control loop can wake the VringEpollHandler
+    /// thread(s) when `serve()` returns. Without this override
+    /// the default `None` leaves the worker thread blocked in
+    /// `epoll_wait` forever on frontend disconnect, which in
+    /// turn hangs the subprocess at shutdown.
+    fn exit_event(
+        &self,
+        _thread_index: usize,
+    ) -> Option<(EventConsumer, EventNotifier)> {
+        let (c, n) = &self.exit_event;
+        Some((
+            c.try_clone().expect("clone exit consumer"),
+            n.try_clone().expect("clone exit notifier"),
+        ))
+    }
 }
 
 /// Loop driving host → guest byte flow. Reads from `source`
