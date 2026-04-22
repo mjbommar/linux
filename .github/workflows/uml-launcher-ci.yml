@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# GitHub Actions CI for tools/uml/uml-launcher/ on the
+# `uml-redesign-plan` fork. Runs `cargo test` + `cargo clippy`
+# against every push + PR that touches the launcher crate.
+#
+# This workflow lives on the fork only — it is not an
+# upstream-bound patch. Its purpose is to catch regressions in
+# the launcher's Rust code (seccomp filter drift, missing
+# syscalls, shutdown hangs, etc.) before they land on the
+# branch rather than after.
+#
+# The `tools/uml/uml-launcher/tests/frontend_handshake.rs`
+# integration test spawns the compiled binary and drives a real
+# vhost-user `Frontend::connect` + `get_features` exchange —
+# which means this job exercises seccomp, socket setup, and
+# daemon shutdown end-to-end on the runner. Any future commit
+# that re-tightens the seccomp baseline beyond what rust-vmm's
+# event loop needs will break here first.
+
+name: uml-launcher CI
+
+on:
+  push:
+    branches: [uml-redesign-plan]
+    paths:
+      - 'tools/uml/uml-launcher/**'
+      - '.github/workflows/uml-launcher-ci.yml'
+  pull_request:
+    paths:
+      - 'tools/uml/uml-launcher/**'
+      - '.github/workflows/uml-launcher-ci.yml'
+
+# Cancel prior runs on the same branch when a new push lands.
+# Reruns are cheap enough that we'd rather not waste runner
+# minutes on superseded commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/uml/uml-launcher
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # apparmor_parser is used by the in-tree integration test
+      # `tests/apparmor_profile.rs`. Ubuntu runners ship it in
+      # the `apparmor` package, which is already installed in
+      # the default image — this step is a safety net for image
+      # variants that strip it.
+      - name: Ensure apparmor_parser present
+        run: |
+          if ! command -v apparmor_parser >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y apparmor
+          fi
+          apparmor_parser --version
+
+      - name: cargo build (tests)
+        run: cargo build --all-targets --locked
+
+      - name: cargo test
+        run: cargo test --all-targets --locked -- --test-threads=1
+        # --test-threads=1 keeps socket paths deterministic for
+        # the frontend-handshake integration test, which binds a
+        # Unix socket under a tempdir. Parallel runs don't
+        # actually conflict (each test gets its own tempdir) but
+        # serial execution keeps the failure mode easier to
+        # diagnose when a socket does leak.
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/uml/uml-launcher
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  # No `cargo fmt --check` job: the launcher crate is hand-
+  # formatted with narrower columns (~80 cols) than rustfmt's
+  # 100-col default to match the surrounding kernel-tree code
+  # style. Enforcing rustfmt here would reject every existing
+  # commit in the crate. Checkpatch (run per-commit locally via
+  # `scripts/checkpatch.pl --strict -g HEAD`) catches the
+  # column-width style that matters for this tree.
