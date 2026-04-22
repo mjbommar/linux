@@ -104,6 +104,31 @@ def main():
             return 1
         status = struct.unpack("<i", status_bytes)[0]
 
+        # Zombie-drain invariant (per D47 item 5 / commit 257b8cf61b84).
+        # After the iteration completes, the parent's loop body runs
+        # os_snapshot_reap_zombies() at the top of the next iteration
+        # (WNOHANG wait4) before blocking on read() for the next cmd.
+        # Give it a beat to get there, then assert that ps --ppid shows
+        # no surviving children: the iter-0 worker should have been
+        # reaped by the drain. If the drain regresses, this test fails
+        # visibly rather than letting zombies accumulate silently.
+        time.sleep(0.5)
+        ps = subprocess.run(
+            ["ps", "-o", "pid,stat", "--ppid", str(proc.pid), "--no-headers"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Each line: "<pid>  <stat>". Zombies carry 'Z' in stat.
+        # Any non-zombie child here means a worker that hasn't exited
+        # yet (not our bug) OR the dispatcher still running (also not
+        # our bug). Count only zombies.
+        zombie_lines = [
+            line for line in ps.stdout.splitlines()
+            if line.split() and "Z" in line.split()[-1]
+        ]
+        if zombie_lines:
+            print(f"DRV: FAIL zombies survived drain: {zombie_lines}")
+            return 1
+
         # Clean disconnect: close ctl pipe; kernel loop exits.
         ctl_fd.close()
 
@@ -114,7 +139,7 @@ def main():
             proc.kill()
             proc.wait()
 
-        print(f"DRV: PASS pid={pid} status=0x{status:x}")
+        print(f"DRV: PASS pid={pid} status=0x{status:x} zombies=0")
         return 0
     except Exception as e:
         print(f"DRV: FAIL exception: {e}")
