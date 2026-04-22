@@ -40,22 +40,33 @@ if ! perf stat -e cycles /bin/true 2>&1 | grep -q cycles; then
 	exit 1
 fi
 
-# CPU frequency governor detection. `powersave` keeps cores at
-# minimum clock during the sub-second /bin/true boot and never
-# ramps up — cycle counts end up 3-4× higher than on `performance`
-# (the governor's state when the committed baseline was captured).
-# That difference swamps any real kernel-side signal. Warn loudly
-# and record the governor in every measurement so noisy baselines
-# are at least diagnosable instead of mysterious.
-CPUFREQ_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
+# CPU pinning. We pin the benchmark to one specific CPU so the
+# governor/policy we check actually describes the CPU we
+# measure. On multi-policy hosts (hybrid P/E cores, some BIGLittle
+# boards) each CPU has its own scaling_governor file, and without
+# pinning the kernel can place the UML process on any of them.
+# The reviewer of 02dbc0c6ac6b caught this: cpu0-only governor
+# check vs unpinned run leaves the gate trivially bypassable.
+PERF_CPU=${UML_PERF_CPU:-0}
+if [ ! -d "/sys/devices/system/cpu/cpu$PERF_CPU" ]; then
+	echo >&2 "UML_PERF_CPU=$PERF_CPU but /sys/devices/system/cpu/cpu$PERF_CPU missing"
+	exit 1
+fi
+
+# CPU frequency governor detection on the CPU we'll actually
+# pin to. `powersave` keeps cores at minimum clock during the
+# sub-second /bin/true boot and never ramps up — cycle counts
+# end up 3-4× higher than on `performance`. That difference
+# swamps any real kernel-side signal.
+CPUFREQ_GOV=$(cat "/sys/devices/system/cpu/cpu$PERF_CPU/cpufreq/scaling_governor" \
 	2>/dev/null || echo unknown)
 if [ "$CPUFREQ_GOV" != "performance" ]; then
-	echo >&2 "WARNING: cpufreq governor is '$CPUFREQ_GOV' — cycle counts"
+	echo >&2 "WARNING: cpu$PERF_CPU governor is '$CPUFREQ_GOV' — cycle counts"
 	echo >&2 "         will be dominated by frequency-scaling noise rather"
 	echo >&2 "         than kernel-side changes. For meaningful comparison"
-	echo >&2 "         against the baseline (captured on 'performance'):"
-	echo >&2 "           sudo cpupower frequency-set -g performance"
-	echo >&2 "         or"
+	echo >&2 "         against the baseline (which should match):"
+	echo >&2 "           sudo cpupower -c $PERF_CPU frequency-set -g performance"
+	echo >&2 "         or, for all CPUs:"
 	echo >&2 "           echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
 fi
 
@@ -73,10 +84,20 @@ percentiles() {
 }
 
 # Run one boot under perf stat; emit "<cycles> <instructions> <us>".
+# `taskset -c $PERF_CPU` pins the benchmark to one specific CPU so
+# the cpufreq-policy check in the preamble actually describes the
+# CPU that runs the code. Without pinning, the kernel is free to
+# place the UML process on any of the 8 (on this host) per-policy
+# CPUs, each with its own scaling_governor — so a cpu0=performance
+# check doesn't tell us anything about cpu5 the benchmark might
+# actually run on. Hybrid P/E-core systems are the extreme case;
+# on a homogeneous box pinning also just reduces run-to-run
+# variance by avoiding migration.
 one_iter() {
 	local binary=$1; shift
 	local stat_out
-	stat_out=$(perf stat -x',' -e "$EVENTS" -- \
+	stat_out=$(taskset -c "$PERF_CPU" \
+		perf stat -x',' -e "$EVENTS" -- \
 		timeout 30 "$binary" \
 		init=/bin/true mem=64M con=null \
 		con0=fd:0,fd:1 root=/dev/root \
@@ -108,8 +129,8 @@ run_backend() {
 	local clock_p50 clock_p25 clock_p75
 	read -r clock_p50 clock_p25 clock_p75 < <(printf '%s\n' "${clock_list[@]}" | percentiles)
 
-	printf '{"backend":"%s","iters":%d,"governor":"%s","cycles":{"p25":%s,"p50":%s,"p75":%s},"instructions":{"p25":%s,"p50":%s,"p75":%s},"task_clock_us":{"p25":%s,"p50":%s,"p75":%s}}\n' \
-		"$label" "$ITERS" "$CPUFREQ_GOV" \
+	printf '{"backend":"%s","iters":%d,"cpu":%d,"governor":"%s","cycles":{"p25":%s,"p50":%s,"p75":%s},"instructions":{"p25":%s,"p50":%s,"p75":%s},"task_clock_us":{"p25":%s,"p50":%s,"p75":%s}}\n' \
+		"$label" "$ITERS" "$PERF_CPU" "$CPUFREQ_GOV" \
 		"$cycles_p25" "$cycles_p50" "$cycles_p75" \
 		"$instr_p25" "$instr_p50" "$instr_p75" \
 		"$clock_p25" "$clock_p50" "$clock_p75"

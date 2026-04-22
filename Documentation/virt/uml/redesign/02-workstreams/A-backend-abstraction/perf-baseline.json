@@ -1,18 +1,20 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-04-18T11:28:49Z",
-  "tree_head": "9dba3c374a62",
+  "captured_at": "2026-04-22T03:57:19Z",
+  "tree_head": "02dbc0c6ac6b",
   "host": {
-    "cpu": "Intel(R) Xeon(R) CPU E3-1225 v6 @ 3.30GHz",
-    "ncpu": 4,
+    "cpu": "Intel(R) Xeon(R) W-2123 CPU @ 3.60GHz",
+    "ncpu": 8,
     "gcc": "15.2.0",
     "glibc": "2.43",
-    "kernel": "7.0.0-13-generic"
+    "kernel": "7.0.0-13-generic",
+    "perf_cpu": 0,
+    "cpufreq_governor": "performance"
   },
   "backends": [
-    {"backend":"PTRACE_ONLY","iters":10,"cycles":{"p25":202005082,"p50":337982126,"p75":365810534},"instructions":{"p25":342063681,"p50":593398718,"p75":629193175},"task_clock_us":{"p25":63100,"p50":103700,"p75":112460}},
-    {"backend":"SECCOMP_ONLY","iters":10,"cycles":{"p25":195249313,"p50":195852365,"p75":359536708},"instructions":{"p25":335342912,"p50":338603772,"p75":614096386},"task_clock_us":{"p25":60410,"p50":60600,"p75":110150}},
-    {"backend":"DYN_ptrace","iters":10,"cycles":{"p25":200670594,"p50":200999183,"p75":365181717},"instructions":{"p25":339347146,"p50":345111330,"p75":627353171},"task_clock_us":{"p25":62300,"p50":62950,"p75":112390}},
-    {"backend":"DYN_seccomp","iters":10,"cycles":{"p25":194903542,"p50":195394985,"p75":196807900},"instructions":{"p25":335334671,"p50":338561895,"p75":340192536},"task_clock_us":{"p25":60180,"p50":60590,"p75":60740}}
+    {"backend":"PTRACE_ONLY","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":223915116,"p50":365751290,"p75":638819168},"instructions":{"p25":386930721,"p50":647322165,"p75":1112413805},"task_clock_us":{"p25":60340,"p50":99310,"p75":168410}},
+    {"backend":"SECCOMP_ONLY","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":222680393,"p50":335298472,"p75":408714978},"instructions":{"p25":358989502,"p50":600204096,"p75":665727155},"task_clock_us":{"p25":60380,"p50":90050,"p75":106860}},
+    {"backend":"DYN_ptrace","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":223330555,"p50":367480959,"p75":536604816},"instructions":{"p25":377580797,"p50":652479259,"p75":958004802},"task_clock_us":{"p25":60280,"p50":97770,"p75":140910}},
+    {"backend":"DYN_seccomp","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":224114575,"p50":369941532,"p75":403335145},"instructions":{"p25":376965591,"p50":657786868,"p75":684892930},"task_clock_us":{"p25":59580,"p50":98170,"p75":107000}}
   ]
 }

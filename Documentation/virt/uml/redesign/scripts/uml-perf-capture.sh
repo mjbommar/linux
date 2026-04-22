@@ -18,6 +18,26 @@ SRC=$(cd "$(dirname "$0")/../../../../.." && pwd)
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 OUT="$SRC/Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/perf-baseline.json"
 
+# Refuse to bake a non-performance governor into the committed
+# baseline. Without this gate, a future baseline capture on a
+# laptop with `powersave` default would silently record ~3–4×
+# inflated cycle counts and every subsequent comparison would
+# either FAIL (correct binaries appear regressed) or mask real
+# regressions (if baseline and current both happened to be
+# powersave). The governor goes into the baseline JSON so
+# uml-perf-compare.sh can validate current-vs-baseline match.
+PERF_CPU=${UML_PERF_CPU:-0}
+CPUFREQ_GOV=$(cat "/sys/devices/system/cpu/cpu$PERF_CPU/cpufreq/scaling_governor" \
+	2>/dev/null || echo unknown)
+if [ "$CPUFREQ_GOV" != "performance" ] && \
+   [ "${UML_PERF_FORCE:-0}" != "1" ]; then
+	echo >&2 "uml-perf-capture: cpu$PERF_CPU governor is '$CPUFREQ_GOV'."
+	echo >&2 "  Committed baselines must be captured on 'performance'."
+	echo >&2 "  Fix:   sudo cpupower -c $PERF_CPU frequency-set -g performance"
+	echo >&2 "  Force: UML_PERF_FORCE=1 $0 (ONLY for testing; don't commit)"
+	exit 2
+fi
+
 # Host context.
 HOST_CPU=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
 HOST_NCPU=$(nproc)
@@ -43,7 +63,9 @@ trap "rm -f $TMP" EXIT
 	printf '    "ncpu": %s,\n' "$HOST_NCPU"
 	printf '    "gcc": "%s",\n' "$HOST_GCC"
 	printf '    "glibc": "%s",\n' "$HOST_GLIBC"
-	printf '    "kernel": "%s"\n' "$HOST_KERNEL"
+	printf '    "kernel": "%s",\n' "$HOST_KERNEL"
+	printf '    "perf_cpu": %s,\n' "$PERF_CPU"
+	printf '    "cpufreq_governor": "%s"\n' "$CPUFREQ_GOV"
 	printf '  },\n'
 	printf '  "backends": [\n'
 	# Indent each line by 4 spaces, comma-separate.

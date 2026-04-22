@@ -30,28 +30,47 @@ if [ ! -f "$BASELINE" ]; then
 	exit 2
 fi
 
-# Refuse to run when the cpufreq governor isn't 'performance' —
-# powersave/ondemand leave cycle counts 3-4× above steady state on
-# a sub-second boot and produce noise-dominated "regression"
-# reports. One explicit message beats a false-positive that takes
-# an hour to diagnose.
-CPUFREQ_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
+# Read what the baseline was actually captured on. Baselines
+# pre-dating governor recording emit "unknown"; treat that as
+# "we don't know, refuse to compare until a fresh gated capture
+# replaces it." That's the right default — the previous
+# hardcoded "assume performance" was an unverified assertion
+# that cost a real investigation's worth of time.
+PERF_CPU=${UML_PERF_CPU:-0}
+BASELINE_GOV=$(sed -nE 's/.*"cpufreq_governor"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+	"$BASELINE" | head -1)
+BASELINE_CPU=$(sed -nE 's/.*"perf_cpu"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' \
+	"$BASELINE" | head -1)
+: "${BASELINE_GOV:=unknown}"
+: "${BASELINE_CPU:=0}"
+
+CURRENT_GOV=$(cat "/sys/devices/system/cpu/cpu$PERF_CPU/cpufreq/scaling_governor" \
 	2>/dev/null || echo unknown)
-if [ "$CPUFREQ_GOV" != "performance" ] && \
-   [ "${UML_PERF_FORCE:-0}" != "1" ]; then
-	echo >&2 "uml-perf-compare: cpufreq governor is '$CPUFREQ_GOV'."
-	echo >&2 "  The baseline at $BASELINE"
-	echo >&2 "  was captured with governor=performance. Comparing"
-	echo >&2 "  numbers against a non-performance governor produces"
-	echo >&2 "  meaningless-to-3x inflated regression reports."
-	echo >&2 ""
-	echo >&2 "  To run a real comparison:"
-	echo >&2 "    sudo cpupower frequency-set -g performance"
-	echo >&2 "    $0"
-	echo >&2 ""
-	echo >&2 "  To override (debug only):"
-	echo >&2 "    UML_PERF_FORCE=1 $0"
-	exit 2
+
+if [ "${UML_PERF_FORCE:-0}" != "1" ]; then
+	if [ "$BASELINE_GOV" = "unknown" ]; then
+		echo >&2 "uml-perf-compare: baseline at $BASELINE"
+		echo >&2 "  has no cpufreq_governor field (pre-governor-capture baseline)."
+		echo >&2 "  Without knowing what the baseline was captured on, any"
+		echo >&2 "  comparison is meaningless. Capture a fresh baseline:"
+		echo >&2 "    sudo cpupower -c $PERF_CPU frequency-set -g performance"
+		echo >&2 "    $SCRIPT_DIR/uml-perf-capture.sh"
+		echo >&2 "    git add $BASELINE && git commit"
+		echo >&2 "  Or force comparison anyway (debug only):"
+		echo >&2 "    UML_PERF_FORCE=1 $0"
+		exit 2
+	fi
+	if [ "$CURRENT_GOV" != "$BASELINE_GOV" ]; then
+		echo >&2 "uml-perf-compare: governor mismatch."
+		echo >&2 "  baseline: captured on cpu$BASELINE_CPU with governor=$BASELINE_GOV"
+		echo >&2 "  current:  cpu$PERF_CPU has governor=$CURRENT_GOV"
+		echo >&2 "  Comparing across different governors produces"
+		echo >&2 "  noise-dominated \"regressions\". Match the baseline:"
+		echo >&2 "    sudo cpupower -c $PERF_CPU frequency-set -g $BASELINE_GOV"
+		echo >&2 "  Or override (debug only):"
+		echo >&2 "    UML_PERF_FORCE=1 $0"
+		exit 2
+	fi
 fi
 
 # Run the current measurement.
