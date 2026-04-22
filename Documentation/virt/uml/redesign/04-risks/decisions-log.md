@@ -4800,4 +4800,125 @@ doesn't deliver that, so it can't be first."
 
 ---
 
+## D49: Temper the "41% PTRACE_ONLY speedup" in 3e1a7fa5f83d — bimodal sampling artifact, real delta likely <15%
+
+**Date:** 2026-04-22
+**Status:** Accepted (commit message stands as historical record;
+this entry is the correction to it).
+
+Commit `3e1a7fa5f83d` ("um: backend: restore s1 as perf-baseline
+host, record definitive no-regression result") compared the
+2026-04-18 baseline (`9dba3c374a62`) and current HEAD on the
+same host s1 and reported:
+
+```
+PTRACE_ONLY     337,982,126  →  198,405,986  -41% (IMPROVEMENT)
+SECCOMP_ONLY    195,852,365  →  191,190,938  -2.3% (noise)
+DYN_ptrace      200,999,183  →  190,537,405  -5.2% (noise)
+DYN_seccomp     195,394,985  →  190,671,958  -2.4% (noise)
+```
+
+The "no regression anywhere" part of that message is right. The
+"PTRACE_ONLY materially improved — ~41% faster" part is
+overstated to the point of being misleading. This entry
+documents why, so no future reader (or upstream pitch) cites
+the 41% as a supported claim.
+
+**The data is bimodal.** Looking at p25/p50/p75 of both runs:
+
+```
+baseline PTRACE_ONLY:  p25=202M  p50=338M  p75=365M
+HEAD PTRACE_ONLY:      p25=198M  p50=198M  p75=362M
+```
+
+Two distinct modes — "fast" around ~200M cycles, "slow" around
+~340–365M cycles. Both runs show both. What changed between the
+runs is the *fraction of iterations that landed in which mode*,
+not the speed of either mode:
+
+  - Baseline: ~25% fast / ~75% slow → p50 sits in slow mode → 338M
+  - HEAD:     ~50% fast / ~50% slow → p50 sits in fast mode → 198M
+
+At N=10 that's a 2.5-vs-5 split — well inside binomial sampling
+noise. The +70% between modes (slow/fast ≈ 1.7×) is almost
+certainly something CPU-state-transition (first-run cold cache,
+C-state wakeup latency, frequency ramp on a sub-second
+workload, thermal step) rather than kernel code paths.
+
+**What would be needed for an upstream-shippable claim:**
+
+1. **N ≥ 30** per datapoint, not 10. Kill the binomial noise so
+   a mode-fraction difference of 25%-vs-50% can be distinguished
+   from 50%-vs-50%-drift.
+2. **Warmup iterations discarded.** If the fast/slow split is
+   first-iter-cold-vs-subsequent-warm, measure steady state only.
+3. **Bisect the responsible commit.** "48 commits landed,
+   something sped things up" is not an upstream patch. "Commit X
+   reduced boot cycles by Y% via mechanism Z" is.
+4. **Identify the mechanism.** Candidates from 48 arch/um
+   commits since the baseline: backend-abstraction refactors
+   (A/B workstreams); ftrace patch-site stripping (reduces
+   per-function NOP pressure — but SECCOMP_ONLY should show the
+   same effect if this were it, and didn't); notrace on generic
+   kthread (saves some graph-init, but defconfig doesn't use
+   graph); backend-lifecycle probe/init dispatch (minor one-time
+   cost, direction wrong for a speedup). None of these
+   individually explain a 41% PTRACE-only improvement. The
+   symmetric-vs-asymmetric pattern (PTRACE improves, SECCOMP
+   doesn't) itself rules out generic-path explanations.
+5. **Confirm defconfig didn't change silently.** Between
+   `9dba3c374a62` and HEAD the defconfig may have gained or lost
+   Kconfig selections that affect the PTRACE_ONLY boot path
+   independent of UML-side work. `diff <(uml/matrix-cfg baseline)
+   <(uml/matrix-cfg HEAD)` before any perf claim.
+6. **Cross-reference with a microbenchmark.** If the speedup is
+   syscall-dispatch-side, a gettid-loop microbench should show
+   it too. If it's boot-path one-time setup, that's a smaller
+   story the upstream pitch should reflect.
+
+**My honest estimate of the real delta, pending the above:**
+somewhere between 0% and 15%. Of that, probably 5-10% is
+genuine UML-side improvement from the A/B cleanup (measurable
+as an instruction-count delta, not just cycles). The other
+25-35% in the p50-vs-p50 comparison is bimodal sampling on a
+small N. A 41% claim is roughly 3× the likely underlying truth.
+
+**Why the commit message stands anyway.** Rewriting pushed
+history to fix the claim would be worse than this correction —
+the original commit records the actual observed numbers
+truthfully (the p50 delta IS −41%; it's my interpretation of
+that number as "materially improved" that was premature). D49
+is the disciplined correction: the observation is data, the
+conclusion was wrong, both are part of the record.
+
+**Upstream posture.** The defensible current-state pitch to
+LKML is the two arch-generic BPF hygiene patches staged at
+`02-workstreams/C-profiles-and-gaps/upstream-patches/
+bpf-hygiene-v1/` — clean, small, reviewed, no perf claim
+attached. Everything else (including this 41% number) is
+in-fork investigation work that's not ready for LKML yet and
+shouldn't be framed that way.
+
+**Revisit triggers:**
+- The N=30-iter steady-state run + bisection gets done on s1
+  (task #95 reopened as the follow-up, or a new task spawned).
+  Produces either a defensible bisected commit-with-mechanism
+  or a retraction that collapses the remaining claim to noise.
+- The per-host baseline strategy (task #94) lands. With ratio-
+  based comparison rather than absolute cycles, the bimodal
+  issue still exists but cross-host confusion goes away.
+
+**Cross-references:**
+- `3e1a7fa5f83d` — the commit this tempers.
+- `23c5bc7d17ed` — the tooling commit that set up the
+  governor/cpu-pinning discipline (still valid and useful).
+- D15 — seccomp-default-policy; superseded by D47 item 3.
+- D47 — the fourth-pass review that this series traces back to.
+- D48 — Rust/syzlang-companion fuzzer park.
+- Task #94 — per-host perf-baseline strategy.
+- Task #95 (retracted post-evidence, could reopen for the
+  rigorous N=30 rerun).
+
+---
+
 ## (Future entries here, as decisions are made)
