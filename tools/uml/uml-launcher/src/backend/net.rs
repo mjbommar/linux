@@ -212,6 +212,21 @@ pub fn run(args: BackendNetArgs) -> Result<i32> {
     .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
 
     // Net class uses the shared vhost-user event-loop baseline
+    // Transition into the class's AppArmor sub-profile if
+    // available. See console.rs for the shape rationale; same
+    // graceful-skip contract here.
+    match crate::backend::apparmor::change_profile("uml-launcher//backend_net") {
+        Ok(crate::backend::apparmor::ChangeResult::Changed) => {
+            tracing::info!("net backend: entered AppArmor sub-profile");
+        }
+        Ok(crate::backend::apparmor::ChangeResult::Skipped) => {
+            tracing::debug!("net backend: AppArmor unavailable, continuing unconfined");
+        }
+        Err(e) => {
+            return Err(e).context("aa_change_profile(uml-launcher//backend_net)");
+        }
+    }
+
     // plus no extra syscalls for the scaffold (the data path
     // will add TUN ioctls — TUNSETIFF, TUNSETOFFLOAD, etc. —
     // and whatever packet-read syscalls TAP needs). `ioctl` is

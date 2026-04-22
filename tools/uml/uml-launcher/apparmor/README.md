@@ -47,20 +47,49 @@ CI.
 
 ## Automatic enforcement wire-up
 
-The launcher's code does **not** yet call `aa_change_profile()`
-to transition each backend into its sub-profile — that lands
-in a follow-on commit per the C-10 v2 plan (decisions-log D52).
-Today, enforcement is opt-in:
+Each backend subcommand (`uml-launcher backend console`,
+`... net`, `... block`) calls `aa_change_profile()` on
+startup, transitioning into the matching sub-profile before
+it opens sockets or applies its seccomp filter. libapparmor
+is loaded at runtime via `dlopen(3)` so the launcher still
+builds and runs on hosts without the LSM; the transition is
+silently skipped in that case.
+
+For the transition to take effect on a given host:
+
+  1. The in-tree profile (`/etc/apparmor.d/uml-launcher`) must
+     be loaded in the kernel — `sudo apparmor_parser -r
+     /etc/apparmor.d/uml-launcher`.
+  2. The launcher binary must be invoked at a path the
+     profile covers (`@{exec_path}` resolves to
+     `/usr/bin/uml-launcher` and `/usr/local/bin/uml-launcher`
+     by default), or the caller must pre-enter the parent
+     profile via `aa-exec -p uml-launcher …`.
+
+With both in place, running
 
 ```sh
-aa-exec -p uml-launcher//backend_console uml-launcher backend console --socket …
-aa-exec -p uml-launcher//backend_net     uml-launcher backend net     --socket … --tap tap0
-aa-exec -p uml-launcher//backend_block   uml-launcher backend block   --socket … --image …
+uml-launcher backend console --socket /tmp/uml-console.sock
 ```
 
-When the wire-up commit lands, `uml-launcher run --virtio …`
-will transition backend children automatically and this manual
-`aa-exec` dance becomes unnecessary.
+runs as `uml-launcher` (parent) until the `aa_change_profile`
+call, then as `uml-launcher//backend_console` for the rest of
+the daemon's lifetime. Verify with
+
+```sh
+sudo cat /proc/<pid>/attr/current
+```
+
+which should read `uml-launcher//backend_console (enforce)`.
+
+Advisory vs. mandatory: the backend treats `ENOENT`
+(profile not loaded), `EINVAL` (LSM not active), and
+`EPERM` (current context can't transition into the target)
+as graceful skips — the seccomp filter below is still
+load-bearing. `EACCES` and other unexpected errors abort
+the backend, because those indicate policy misconfig that
+could silently run the backend unconfined when the operator
+expected otherwise.
 
 ## Site-local tightening
 

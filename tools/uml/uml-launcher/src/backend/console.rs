@@ -688,6 +688,23 @@ pub fn run(args: BackendConsoleArgs) -> Result<i32> {
         ));
     }
 
+    // Transition into the class's AppArmor sub-profile if
+    // AppArmor is loaded and the uml-launcher profile is
+    // active. Silent-skip when the LSM isn't available or the
+    // profile isn't loaded — the seccomp filter below is
+    // load-bearing regardless.
+    match crate::backend::apparmor::change_profile("uml-launcher//backend_console") {
+        Ok(crate::backend::apparmor::ChangeResult::Changed) => {
+            tracing::info!("console backend: entered AppArmor sub-profile");
+        }
+        Ok(crate::backend::apparmor::ChangeResult::Skipped) => {
+            tracing::debug!("console backend: AppArmor unavailable, continuing unconfined");
+        }
+        Err(e) => {
+            return Err(e).context("aa_change_profile(uml-launcher//backend_console)");
+        }
+    }
+
     // Lock down the syscall surface before entering the event
     // loop. The console class needs nothing beyond the shared
     // vhost-user event-loop baseline; any deviation → SIGSYS via

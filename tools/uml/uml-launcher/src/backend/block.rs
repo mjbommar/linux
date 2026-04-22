@@ -219,6 +219,21 @@ pub fn run(args: BackendBlockArgs) -> Result<i32> {
     )
     .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
 
+    // Transition into the class's AppArmor sub-profile if
+    // available. See console.rs for the shape rationale; same
+    // graceful-skip contract here.
+    match crate::backend::apparmor::change_profile("uml-launcher//backend_block") {
+        Ok(crate::backend::apparmor::ChangeResult::Changed) => {
+            tracing::info!("block backend: entered AppArmor sub-profile");
+        }
+        Ok(crate::backend::apparmor::ChangeResult::Skipped) => {
+            tracing::debug!("block backend: AppArmor unavailable, continuing unconfined");
+        }
+        Err(e) => {
+            return Err(e).context("aa_change_profile(uml-launcher//backend_block)");
+        }
+    }
+
     // Block class uses the shared vhost-user event-loop
     // baseline. The data path will add preadv / pwritev /
     // fdatasync / fallocate on top; those are all real-data-

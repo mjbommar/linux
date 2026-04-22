@@ -12,6 +12,7 @@ use anyhow::Result;
 
 use crate::cli::BackendClass;
 
+pub mod apparmor;
 pub mod block;
 pub mod console;
 pub mod net;
