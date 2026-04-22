@@ -193,15 +193,129 @@ C-10-specific validation:
    `tools/testing/selftests/um/launcher-smoke/`, flip this
    doc's Status to `landed v1 (YYYY-MM-DD)`.
 
-v2 (separate future series):
+v2 (this section — per decisions-log D52):
 
-4. **commit 4+:** vhost-user helpers via rust-vmm `vhost` +
-   `vhost-user-backend`. One helper per device class
-   (console, net, block). Per-device seccomp via `seccompiler`.
-   Per-device namespaces.
+**Shape.** One multi-call binary, not per-device binaries. The
+same `uml-launcher` gains a `backend <class>` subcommand; each
+class (console, net, block, rng, vsock) dispatches to its own
+module. This matches crosvm's `crosvm device <kind>` precedent
+and keeps distro packaging to one binary + one manpage + one
+AppArmor profile family. Q2 (single vs per-device binaries)
+from the v1 Open Questions is closed: single.
 
-5. **commit N:** AppArmor reference profile, SELinux policy,
-   systemd unit template. Multi-instance supervisor.
+**Crate stack (v2 additions).**
+
+| Concern | Crate | Note |
+|---|---|---|
+| vhost-user protocol | `vhost` | frontend/backend bindings |
+| backend event loop | `vhost-user-backend` | `VhostUserBackend` trait + run loop |
+| guest memory | `vm-memory` | `GuestMemoryMmap` + region management |
+| virtio queue | `virtio-queue` | split-queue descriptor parsing (mandatory); packed optional |
+| uapi bindings | `virtio-bindings` | auto-generated from `<linux/virtio_*.h>` |
+| eventfd / ioctl | `vmm-sys-util` | rust-vmm utility crate |
+| seccomp | `seccompiler` | Firecracker-authored; now standalone rust-vmm |
+
+Per-class helper crates (`virtio-net`, `virtio-blk`, etc.) in
+rust-vmm are available but uneven; v2 consumes them where they
+cleanly fit and writes the device logic locally where they
+don't. Don't depend on one of those crates without verifying
+last-publish recency on docs.rs at the time of landing.
+
+**Bisectable commit plan.**
+
+4. **v2 commit 1:** subcommand scaffolding. `uml-launcher
+   backend <class>` clap subcommand dispatches to module-level
+   handlers. No actual vhost logic yet — each class's handler
+   prints a `not-yet-implemented` line and returns 0. Units
+   tested. Adds `backend` to cli.rs; no new runtime deps.
+   **Tests:** `cargo test` green on argv parsing + dispatch.
+   **Build-time:** no new crates; MSRV unchanged.
+
+5. **v2 commit 2:** first real backend — `console`. Simplest
+   vhost-user surface: one RX queue + one TX queue, byte-
+   oriented, maps naturally to stdin/stdout or a pty. Depends
+   on `vhost`, `vhost-user-backend`, `vm-memory`,
+   `virtio-queue`, `virtio-bindings`, `vmm-sys-util`. Adds
+   about 400-600 LOC of Rust. **Tests:** a selftest that
+   spawns `uml-launcher backend console --socket ...`, connects
+   a UML guest with `virtio_uml.device=<socket>:3` (virtio
+   console id), and exchanges bytes over the console.
+
+6. **v2 commit 3:** seccomp wrapper. Per-class filter loaded
+   from a const JSON blob compiled into the binary. Applied
+   *after* socket bind + fd plumbing, *before* the event-loop
+   enter — matches crosvm/Firecracker discipline. Filter for
+   `console` allows `read/write/ppoll/epoll_*/rt_sigreturn/
+   exit(_group)` and little else; any attempted syscall
+   outside the allowlist → `SIGSYS`. **Tests:** deny-list
+   unit test (invoke a banned syscall in a spawn-and-check
+   harness; expect SIGSYS).
+
+7. **v2 commit 4:** `net` backend. Taps rather than
+   user-networking in v1 to keep the scope tight; v2+ can add
+   slirp. Depends on the same rust-vmm stack plus tap ioctls
+   via `vmm-sys-util`. Adds ~800 LOC. Seccomp filter specific
+   to net (adds TUN/TAP ioctls, `recvmsg/sendmsg`,
+   `getsockname`). **Tests:** selftest spawns both backends,
+   boots UML with virtio-console + virtio-net, asserts
+   packet round-trip.
+
+8. **v2 commit 5:** `block` backend. File-backed image via
+   `O_DIRECT` + `preadv/pwritev`. ~500 LOC + class-specific
+   seccomp. **Tests:** selftest boots UML from a virtio-blk
+   image, reads/writes a canary file, compares to expected.
+
+9. **v2 commit 6:** AppArmor reference profile.
+   `tools/uml/uml-launcher/apparmor/uml-launcher` generic
+   profile + per-backend sub-profiles (`uml-launcher//backend_
+   console`, `//backend_net`, `//backend_block`). Covers the
+   `change_profile` transitions the backends execute post-
+   seccomp. **Tests:** a selftest that boots under an
+   apparmor-enforcing profile, asserts the profile is active
+   in `/proc/<pid>/attr/current`. Optional behind the
+   `apparmor_parser` tool being available on the host.
+
+10. **v2 commit 7:** SELinux reference policy module.
+    `tools/uml/uml-launcher/selinux/uml_launcher.te` with a
+    `uml_launcher_t` domain + per-backend types. Parallel to
+    AppArmor in intent; either LSM is enough, both are
+    redundant-safe. **Tests:** out-of-tree `make -f
+    /usr/share/selinux/devel/Makefile` builds the module
+    cleanly; runtime enforcement is a manual/optional
+    verification.
+
+11. **v2 commit 8:** orchestration. `uml-launcher run` gains
+    `--virtio <class>:<class-args>` options (e.g. `--virtio
+    console --virtio net:tap0 --virtio block:./rootfs.img`).
+    Launcher spawns the backend processes before UML, creates
+    the unix-domain sockets, passes them as file descriptors +
+    paths, supervises their lifetime. UML's cmdline gets the
+    corresponding `virtio_uml.device=<socket>:<id>` entries
+    appended automatically. **Tests:** end-to-end `uml-launcher
+    run --kernel ./linux --init /bin/true --virtio console` —
+    UML boots under decomposed backends and exits cleanly.
+
+12. **v2 commit 9:** docs + status flip.
+    `Documentation/virt/uml/launcher.rst` gains a "Per-device
+    decomposition" section. `03-profiles/sandbox.md` flips to
+    reference the decomposed mode as the default for `sandbox`.
+    `10-host-launcher-crosvm.md` Status line: `landed v2`.
+
+Each commit builds on the previous but is independently
+bisectable: `cargo build` + `cargo test` clean at every step.
+Every commit that ships runtime code passes the research-
+profile Q1 bar (checkpatch is not applicable to tools/; `cargo
+clippy -- -D warnings` is the analogue and runs in CI).
+
+**v2 out-of-scope (v3+).**
+
+- systemd unit templates (belongs with distro-packaging PRs
+  rather than in-tree).
+- Multi-instance supervisor / daemon mode.
+- JSON-RPC / gRPC control surface.
+- slirp user-networking backend (tap-only in v2 `net`).
+- vfio-user device passthrough.
+- gpu, snd, wl, pmem backends (niche; add on demand).
 
 ## Open questions
 

@@ -5402,4 +5402,79 @@ the warning; the fix is this D50 entry.
 
 ---
 
+## D52: C-10 v2 design — single-binary subcommands, seccompiler, AppArmor + SELinux in-tree
+
+**Date:** 2026-04-22
+**Status:** Accepted. Drives the C-10 v2 commit plan
+(`02-workstreams/C-profiles-and-gaps/10-host-launcher-crosvm.md`).
+
+**Decisions.**
+
+1. **Single multi-call binary, not per-device binaries.** The
+   existing `uml-launcher` gains a `backend <class>` subcommand
+   that dispatches to per-class modules. Matches crosvm's
+   `crosvm device <kind>` shape. Closes v1 Open-Question Q2.
+
+2. **rust-vmm stack for vhost-user backends.** `vhost`,
+   `vhost-user-backend`, `vm-memory`, `virtio-queue`,
+   `virtio-bindings`, `vmm-sys-util` are the required crates;
+   per-class helper crates (`virtio-net`, etc.) used where
+   they fit cleanly, open-coded where they don't. Recency of
+   each crate's last publish checked at landing time to avoid
+   depending on stale rust-vmm surface.
+
+3. **Seccomp via `seccompiler`** (Firecracker-authored, now
+   standalone rust-vmm). Per-backend allow-list filters
+   compiled into the binary from JSON, applied *after* fd
+   plumbing + socket bind, *before* entering the event loop —
+   matches both crosvm (minijail `enter()` timing) and
+   Firecracker (per-thread apply) discipline. No generic
+   backend-class default filter; each class writes its own.
+
+4. **Both AppArmor and SELinux reference profiles ship
+   in-tree** under `tools/uml/uml-launcher/apparmor/` and
+   `tools/uml/uml-launcher/selinux/`. Neither crosvm nor
+   Firecracker ship LSM profiles in their upstream trees;
+   UML can lead here. Either LSM alone is enough; both
+   together are redundant-safe. Each class gets its own
+   domain / sub-profile; the launcher transitions post-
+   seccomp.
+
+5. **Commit discipline.** 9 bisectable commits per the plan.
+   Each passes `cargo build` + `cargo test` + `cargo clippy
+   -- -D warnings` (the tools/ analogue of checkpatch). The
+   selftest per commit is a real end-to-end boot-and-measure,
+   not a "should work" claim — matches a-plus-plan anti-
+   pattern #6.
+
+**Alternatives considered + rejected.**
+
+| Option | Why rejected |
+|---|---|
+| Per-device binaries (`uml-launcher-net`, `uml-launcher-block`) | Larger packaging surface (N binaries + N manpages + N profiles); no benefit over subcommand dispatch. crosvm already made this call. |
+| libseccomp instead of `seccompiler` | Brings a C FFI dependency; `seccompiler` is pure Rust and idiomatic in the rust-vmm stack UML is already adopting. |
+| SELinux-only (skip AppArmor) | AppArmor is the path-based LSM distros like Ubuntu use by default; skipping it misses the majority of the non-enterprise install base. |
+| AppArmor-only (skip SELinux) | Mirror of above — misses RHEL / Fedora / anyone running SELinux. Reference policies cost little to maintain. |
+| slirp user-networking backend in v2 `net` | Unbounded scope; tap-only in v2 keeps the diff focused. v3+. |
+| Firecracker's monolithic-jailer model (one process, no decomposition) | Defeats the profile's entire point — `sandbox` exists to demonstrate strong host isolation per device class. |
+
+**Out of scope for v2** (tracked separately for future
+phases): systemd unit templates, daemon mode, JSON-RPC
+control surface, slirp, vfio-user, gpu/snd/wl/pmem backends.
+
+**Cross-references.**
+
+- `02-workstreams/C-profiles-and-gaps/10-host-launcher-crosvm.md`
+  §"v2 (this section — per decisions-log D52)" — the commit
+  plan this D52 drives.
+- `arch/um/drivers/virtio_uml.c` — the UML-side vhost-user
+  client v2 talks to. Already in tree; unchanged by v2.
+- `03-profiles/sandbox.md` — consumer profile that gains the
+  decomposed default when v2 lands.
+- rust-vmm: `vhost`, `vhost-user-backend`, `seccompiler`.
+- crosvm's `src/bin/crosvm.rs` subcommand dispatch — the
+  precedent this v2 shape follows.
+
+---
+
 ## (Future entries here, as decisions are made)
