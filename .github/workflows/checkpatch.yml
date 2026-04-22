@@ -87,7 +87,15 @@ jobs:
           fail=0
           for sha in $(git rev-list --reverse "$base..$head"); do
             echo "::group::checkpatch $sha $(git log -1 --format=%s "$sha")"
-            if ! scripts/checkpatch.pl --strict --no-summary -g "$sha"; then
+            # --ignore=BAD_SIGN_OFF drops the "Non-standard
+            # signature: Co-authored-by:" warning that every
+            # commit in this branch carries. Co-authored-by
+            # is a widely-accepted tag that checkpatch's
+            # signature-validity regex doesn't recognize; we
+            # use it intentionally for attribution and don't
+            # want the CI flagging every single commit.
+            if ! scripts/checkpatch.pl --strict --no-summary \
+                    --ignore=BAD_SIGN_OFF -g "$sha"; then
               fail=1
             fi
             echo "::endgroup::"
