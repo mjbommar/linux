@@ -1,0 +1,14 @@
+## SPDX-License-Identifier: GPL-2.0
+##
+## File-context rules for uml-launcher (C-10 v2).
+##
+## Paths: the upstream install paths match the `@{exec_path}`
+## list in the AppArmor profile (/usr/bin and /usr/local/bin).
+## /run/uml-launcher covers the mconsole + backend sockets.
+## Packagers installing elsewhere should either symlink under
+## one of the covered paths or ship a site-local .fc addendum
+## with the alternative path.
+
+/usr/bin/uml-launcher           --      gen_context(system_u:object_r:uml_launcher_exec_t,s0)
+/usr/local/bin/uml-launcher     --      gen_context(system_u:object_r:uml_launcher_exec_t,s0)
+/run/uml-launcher(/.*)?                 gen_context(system_u:object_r:uml_launcher_runtime_t,s0)

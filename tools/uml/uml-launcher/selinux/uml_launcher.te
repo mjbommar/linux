@@ -1,0 +1,79 @@
+## SPDX-License-Identifier: GPL-2.0
+##
+## SELinux reference policy for the UML host launcher
+## (workstream C-10 v2 commit 7). Parallel in intent to the
+## AppArmor profile at tools/uml/uml-launcher/apparmor/:
+## either LSM alone is some protection; both together are
+## defense-in-depth.
+##
+## This module ships a SINGLE parent domain (uml_launcher_t)
+## for now — no per-backend subdomains. Per-backend
+## transitions (console / net / block) are a follow-on once
+## the orchestrator lands (v2 commit 8) and can parallel the
+## aa_change_profile() wiring in src/backend/apparmor.rs
+## with a setcon()/libselinux equivalent. See the C-10 v2
+## commit plan in
+## Documentation/virt/uml/redesign/02-workstreams/
+## C-profiles-and-gaps/10-host-launcher-crosvm.md for the
+## decomposition plan and decisions-log D52 for the design.
+
+policy_module(uml_launcher, 0.1.0)
+
+########################################
+#
+# Declarations
+#
+
+type uml_launcher_t;
+type uml_launcher_exec_t;
+init_daemon_domain(uml_launcher_t, uml_launcher_exec_t)
+
+# Runtime directory (/run/uml-launcher) where the launcher
+# puts its mconsole socket + any backend vhost-user sockets
+# when orchestration lands.
+type uml_launcher_runtime_t;
+files_runtime_file(uml_launcher_runtime_t)
+
+########################################
+#
+# uml_launcher_t local policy
+#
+
+# The launcher manages subprocesses (the UML kernel child,
+# plus backend subcommand processes when orchestration lands)
+# and may need to set resource limits / signal them. Match
+# Firecracker's jailer posture: narrow capability set, no
+# DAC override.
+allow uml_launcher_t self:capability { setuid setgid sys_resource };
+allow uml_launcher_t self:process { getcap setcap signal };
+allow uml_launcher_t self:fifo_file rw_fifo_file_perms;
+
+# vhost-user uses unix-domain SOCK_STREAM sockets. Console /
+# net / block backends each bind a listener and the frontend
+# connects.
+allow uml_launcher_t self:unix_stream_socket create_stream_socket_perms;
+allow uml_launcher_t self:unix_dgram_socket create_socket_perms;
+
+# Runtime directory + socket-file management under
+# /run/uml-launcher/.
+manage_dirs_pattern(uml_launcher_t, uml_launcher_runtime_t, uml_launcher_runtime_t)
+manage_sock_files_pattern(uml_launcher_t, uml_launcher_runtime_t, uml_launcher_runtime_t)
+files_runtime_filetrans(uml_launcher_t, uml_launcher_runtime_t, { dir sock_file })
+
+# The launcher reads assorted host kernel state — proc for
+# child supervision, sysfs for TAP device presence checks.
+kernel_read_system_state(uml_launcher_t)
+kernel_read_proc_symlinks(uml_launcher_t)
+
+# /dev/net/tun for the net backend; /dev/kvm is anticipated
+# for the D-workstream KVM backend (no-op today).
+dev_rw_kvm(uml_launcher_t)
+corenet_rw_tun_tap_dev(uml_launcher_t)
+
+# Glibc loader, configuration, ld.so.cache.
+libs_use_ld_so(uml_launcher_t)
+libs_use_shared_libs(uml_launcher_t)
+miscfiles_read_localization(uml_launcher_t)
+
+# Logging to syslog / journald.
+logging_send_syslog_msg(uml_launcher_t)

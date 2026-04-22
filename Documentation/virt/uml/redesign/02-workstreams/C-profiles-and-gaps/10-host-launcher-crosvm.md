@@ -3,15 +3,17 @@
 **Status:** landed v1 (2026-04-20); post-landing fix
 `672edefe415a` (2026-04-21) corrected `--root` / `--console`
 precedence so TOML/env overlays actually take effect when the
-CLI flag is absent (see D46). `tools/uml/uml-launcher/` Rust
-binary + Makefile + user doc + `launcher-smoke` regression
-selftest all shipped. `cargo build --release` clean, `cargo
-test` 13/13 pass (2 new precedence-regression tests), end-to-end
-spawn + signal-forward + exit-code passthrough validated (UML
-boot with `init=/bin/true` → launcher returns 134 per 128+SIGABRT
-convention, selftest asserts). v2 (per-device vhost-user +
-seccomp) remains tracked in the Roadmap section below; this
-series delivers v1 only.
+CLI flag is absent (see D46). v2 in progress — commits 1-7
+of 9 landed (2026-04-22): subcommand scaffolding, console
+backend (TX + RX + stdin reader), seccomp baseline, net +
+block scaffolds, AppArmor reference profile + runtime
+`aa_change_profile()` wire-up, SELinux reference policy
+module. Total crate: 52 tests passing (46 unit + 3 apparmor +
+2 selinux + 1 frontend handshake) across gcc + clang builds;
+5-gate CI matrix (build + marker boot + userspace-smoke +
+probe-features + launcher-smoke) green on every push.
+Remaining v2 work: net + block data paths, orchestration
+(`--virtio` option), docs status flip.
 **Effort:** 6 weeks (budget). v1 scope below was **~1 session of
 disciplined work** given the locked crate stack and small v1
 feature set; v2 (vhost-user device decomposition + seccomp)
