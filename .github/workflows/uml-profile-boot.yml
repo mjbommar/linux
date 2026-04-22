@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # GitHub Actions CI for workstream C-01 profile defconfigs.
-# Four sequential gates per matrix profile:
+# Five sequential gates per matrix profile (gate 5 on
+# prod-fast only) plus a parallel clang-build guard:
 #
 #   1. Build: `make ARCH=um uml/<profile>` + `make -j` →
 #      asserts binary exists, is non-empty, and that the
@@ -19,6 +20,12 @@
 #      the expected contract documented in
 #      03-profiles/*.md. Catches fragment-flag-regressions
 #      that happen to still compile.
+#   5. Launcher-smoke (prod-fast only): builds
+#      tools/uml/uml-launcher and runs launcher-smoke against
+#      the prod-fast UML binary. Asserts dry-run argv +
+#      end-to-end spawn+signal+exit-code passthrough. The
+#      launcher is backend-independent so one profile
+#      covers it.
 #
 # Getting UML to boot reliably on GHA runners took some
 # surgery: lift kernel.apparmor_restrict_unprivileged_userns
@@ -425,6 +432,60 @@ jobs:
           fi
           echo "::error::profile-features validator did not PASS for ${{ matrix.profile }} (rc=$rc)"
           exit 1
+
+      # ---- launcher-smoke (5th gate, prod-fast only) ----
+      #
+      # Exercises tools/uml/uml-launcher end-to-end against the
+      # just-built UML kernel. Part A is the dry-run argv
+      # synthesis check (catches bitrot in the argv builder);
+      # Part B actually spawns UML via the launcher with
+      # `--init /bin/true` and asserts the expected SIGABRT-
+      # triggered exit code passes through cleanly; Part C
+      # (forkserver fd plumbing) auto-skips on prod-fast
+      # because CONFIG_UM_SNAPSHOT_FORKSERVER=y is a
+      # fuzz-profile feature.
+      #
+      # Only on prod-fast: the launcher's behavior is backend-
+      # independent, so one profile's worth of coverage is
+      # enough and keeps the cargo-build cost from tripling
+      # across the matrix.
+      - name: Install Rust toolchain (for launcher build)
+        if: matrix.profile == 'prod-fast'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache uml-launcher cargo state
+        if: matrix.profile == 'prod-fast'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/uml/uml-launcher/target
+          key: uml-launcher-cargo-${{ runner.os }}-${{ hashFiles('tools/uml/uml-launcher/Cargo.lock') }}
+          restore-keys: |
+            uml-launcher-cargo-${{ runner.os }}-
+
+      - name: Build uml-launcher (release)
+        if: matrix.profile == 'prod-fast'
+        working-directory: tools/uml/uml-launcher
+        run: cargo build --release --locked
+
+      - name: launcher-smoke
+        if: matrix.profile == 'prod-fast'
+        env:
+          UML_BINARY: /tmp/uml-profile-prod-fast/linux
+          UML_LAUNCHER: ${{ github.workspace }}/tools/uml/uml-launcher/target/release/uml-launcher
+          UML_MEM: 256M
+        run: |
+          set +e
+          bash tools/testing/selftests/um/launcher-smoke/run-launcher-smoke.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "::notice::launcher-smoke PASS" ;;
+            4) echo "::warning::launcher-smoke SKIP (missing dep)" ;;
+            *) echo "::error::launcher-smoke FAIL (rc=$rc)"; exit 1 ;;
+          esac
 
   # Clang / LLVM=1 build guard. AGENT-PROMPT.md calls out
   # dual-toolchain building as mandatory: "Each commit builds
