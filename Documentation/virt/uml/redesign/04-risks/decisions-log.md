@@ -4912,12 +4912,64 @@ shouldn't be framed that way.
 - `3e1a7fa5f83d` — the commit this tempers.
 - `23c5bc7d17ed` — the tooling commit that set up the
   governor/cpu-pinning discipline (still valid and useful).
+- `7a7d365c5872` — ratio-based comparison added to the
+  compare script (task #97).
 - D15 — seccomp-default-policy; superseded by D47 item 3.
 - D47 — the fourth-pass review that this series traces back to.
 - D48 — Rust/syzlang-companion fuzzer park.
 - Task #94 — per-host perf-baseline strategy.
-- Task #95 (retracted post-evidence, could reopen for the
-  rigorous N=30 rerun).
+- Task #95 — closed-with-evidence, see the addendum below.
+
+### 2026-04-22 addendum — N=30 on s1 stabilizes HEAD, baseline tree is unrebuildable
+
+Ran N=30 on s1 at HEAD (`0e108dd7c80f`), performance governor,
+cpu0-pinned. Result:
+
+```
+backend        p25          p50          p75          variance-shape
+PTRACE_ONLY    198,240,168  198,568,927  362,953,049  bimodal (p75 in slow mode)
+SECCOMP_ONLY   191,502,742  191,662,954  192,779,997  tight (all fast mode)
+DYN_ptrace     190,928,359  191,117,725  355,459,656  bimodal (p75 in slow mode)
+DYN_seccomp    190,746,873  191,035,639  355,425,097  bimodal (p75 in slow mode)
+```
+
+**HEAD's p50 is stable at ~199M (PTRACE) / ~192M (SECCOMP) on
+s1.** Bimodal mode gap ~1.85× is consistent across all four
+backends; "fast mode" clusters at ~190M cycles, "slow mode" at
+~360M cycles. SECCOMP_ONLY tightens into the fast mode (p25 =
+p75 to within 1%), which is what we'd want — the three other
+backends still flirt with the slow mode at p75.
+
+**The baseline tree (`9dba3c374a62`) cannot be rebuilt with
+current scripts.** That commit pre-dates the A/B backend-
+abstraction work: `CONFIG_UM_BACKEND_PTRACE_ONLY` /
+`SECCOMP_ONLY` / `DYNAMIC` Kconfig options don't exist yet,
+and the `uml-boot-matrix.sh` + `uml-perf.sh` scripts don't
+exist either. A fresh N=30 at the baseline would need (a)
+back-porting the script infrastructure to the baseline tree
+or (b) reconstructing the legacy invocation (bare defconfig +
+boot-matrix-era CONFIG_*) by archaeology. Neither is worth
+the time to settle a "was there a regression between baseline
+and HEAD" question that D49 already answered "no."
+
+**What the N=30 + baseline-tree-unavailability jointly mean:**
+
+  - The "41% PTRACE_ONLY improvement" the original commit
+    message claimed is now explicitly understood as **"the A/B
+    refactor moved PTRACE_ONLY from slow-mode-dominant
+    sampling to fast-mode-dominant sampling."** That's a real
+    behavioral improvement but it's much less than 41% in any
+    steady-state sense (both fast and slow modes exist at HEAD
+    too; we just sample them differently now).
+  - There's no specific commit to bisect to. The A/B refactor
+    is dozens of commits across months; the improvement is
+    structural.
+  - No upstream pitch exists around "UML boots 41% faster"
+    without rebuilding that history with proper instrumentation
+    (steady-state-only, both-mode-sampled, microbenchmarks).
+
+**Task #95 accordingly stays closed.** The question is answered
+to the precision the evidence supports.
 
 ---
 
