@@ -101,6 +101,27 @@
 #define KVM_HARNESS_RING3_SYSCALL_OFFSET  0x7100
 #define KVM_HARNESS_LSTAR_ADD_OFFSET	  0x9000
 #define KVM_HARNESS_SYSRETQ_TRAMP2_OFFSET 0x9100
+/*
+ * Phase III Lift #1d: ring-3 page-fault demonstration. Ring-3
+ * sled at 0x7200 loads a hardcoded unmapped guest-physical
+ * address (0x30000000 — past the end of slot 1's UML memory
+ * mapping) and dereferences it; a third SYSRETQ tramp at 0x9200
+ * targets it. Expected exit: KVM_EXIT_MMIO with
+ * run->mmio.phys_addr == 0x30000000 — the signal that the
+ * guest took a page-fault equivalent and KVM surfaced it to
+ * userspace as a memory operation.
+ *
+ * 0x30000000 = 768 MiB, chosen because it's (a) past slot 0
+ * (ends at 4 MiB), (b) past slot 1 (starts at 256 MiB, covers
+ * physmem_size ≤ 256 MiB for any reasonable UML), and (c)
+ * inside the 1 GiB identity map the harness page tables
+ * install (so the guest's CR3 walk succeeds; the MMIO exit is
+ * from the *EPT* layer failing to back the gpa, not from
+ * guest-side #PF).
+ */
+#define KVM_HARNESS_RING3_FAULT_OFFSET    0x7200
+#define KVM_HARNESS_SYSRETQ_TRAMP3_OFFSET 0x9200
+#define KVM_HARNESS_FAULT_GPA		  0x30000000UL
 #define KVM_HARNESS_SLOT		0
 
 /*
@@ -246,6 +267,41 @@ static const u8 kvm_harness_sysretq_tramp2[] = {
 	0xf4,						/* hlt */
 };
 
+/*
+ * Phase III Lift #1d: ring-3 sled that loads an unmapped
+ * guest-physical address into RAX and dereferences it. The
+ * dereference causes an EPT violation (KVM_EXIT_MMIO to host)
+ * because 0x30000000 is not backed by any registered memslot.
+ * 14 bytes.
+ *
+ * Note: the guest's own page tables identity-map [0, 1 GiB),
+ * so CR3 walk succeeds — the failure is entirely at the EPT
+ * layer. This matches the real-backend fault path: a ring-3
+ * access to an address that's in the process's VA map but
+ * whose backing page has been invalidated by the host exits
+ * with KVM_EXIT_MMIO, and the backend's fault handler
+ * translates gpa → host VA to locate the underlying
+ * vm_area_struct for fault servicing.
+ */
+static const u8 kvm_harness_ring3_fault[] = {
+	0x48, 0xb8, 0x00, 0x00, 0x00, 0x30,
+	0x00, 0x00, 0x00, 0x00,			/* mov $0x30000000, %rax */
+	0x48, 0x8b, 0x00,			/* mov (%rax), %rax */
+	0xf4,					/* hlt */
+};
+
+/*
+ * Phase III Lift #1d: third SYSRETQ trampoline targeting the
+ * fault sled. Same structure as tramps 1 + 2, different target
+ * address. 20 bytes.
+ */
+static const u8 kvm_harness_sysretq_tramp3[] = {
+	0x48, 0xc7, 0xc1, 0x00, 0x72, 0x00, 0x00,	/* mov $0x7200, %rcx */
+	0x49, 0xc7, 0xc3, 0x02, 0x32, 0x00, 0x00,	/* mov $0x3202, %r11 */
+	0x48, 0x0f, 0x07,				/* sysretq */
+	0xf4,						/* hlt */
+};
+
 static const char *kvm_harness_exit_name(u32 r)
 {
 	switch (r) {
@@ -381,6 +437,17 @@ int kvm_run_harness(void)
 	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP2_OFFSET,
 	       kvm_harness_sysretq_tramp2,
 	       sizeof(kvm_harness_sysretq_tramp2));
+
+	/*
+	 * Phase III Lift #1d: ring-3 fault sled + third SYSRETQ tramp.
+	 * Exercised after the Lift #1c test.
+	 */
+	memcpy(mem + KVM_HARNESS_RING3_FAULT_OFFSET,
+	       kvm_harness_ring3_fault,
+	       sizeof(kvm_harness_ring3_fault));
+	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP3_OFFSET,
+	       kvm_harness_sysretq_tramp3,
+	       sizeof(kvm_harness_sysretq_tramp3));
 
 	region = (struct kvm_userspace_memory_region){
 		.slot			= KVM_HARNESS_SLOT,
@@ -929,6 +996,106 @@ d04c_done:
 			}
 		}
 	}
+
+	/*
+	 * Phase III Lift #1d: ring-3 page-fault decode. Ring-3
+	 * sled at 0x7200 loads 0x30000000 (a deliberately unmapped
+	 * gpa past slot 1's UML memory range) and dereferences it.
+	 * Guest-side page-table walk succeeds (identity-mapped
+	 * 1 GiB covers the address) so the failure surfaces at
+	 * the EPT layer as KVM_EXIT_MMIO with
+	 * run->mmio.phys_addr == 0x30000000.
+	 *
+	 * Reset sequence mirrors Lift #1c's: Lift #1c ended in
+	 * CPL=3 (ring-3 IO exit), so we reapply ring-0 SREGS
+	 * before running the Lift #1d tramp (ring-0 code). GDT
+	 * limit stays at 47 since the SYSRETQ inside tramp3 needs
+	 * the ring-3 descriptors.
+	 *
+	 * Scope: this lift demonstrates the DECODE path — receive
+	 * MMIO exit, recover gpa, translate to UML kernel VA if
+	 * inside a known slot, identify "unmapped" otherwise.
+	 * Actually calling UML's segv() with a synthesized
+	 * faultinfo requires per-task state (current, pt_regs,
+	 * kernel stack) that this early-boot harness doesn't have;
+	 * that wiring lands in Lifts #1e/1f. The PASS criterion
+	 * here is the gpa recovery itself.
+	 */
+	{
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1d KVM_GET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+		kvm_setup_harness_sregs(&sregs);
+		sregs.gdt.limit = 47;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1d KVM_SET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		regs = (struct kvm_regs){
+			.rip	= KVM_HARNESS_SYSRETQ_TRAMP3_OFFSET,
+			.rflags	= 0x2,
+		};
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				      (unsigned long)&regs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1d KVM_SET_REGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		os_info("um: kvm harness: 1d KVM_RUN rc=%d exit_reason=%u (%s)\n",
+			rc, run->exit_reason,
+			kvm_harness_exit_name(run->exit_reason));
+
+		if (rc >= 0 && run->exit_reason == KVM_EXIT_MMIO) {
+			unsigned long gpa = (unsigned long)run->mmio.phys_addr;
+			unsigned int len = run->mmio.len;
+			unsigned int is_write = run->mmio.is_write;
+
+			/*
+			 * Decode: is gpa inside slot 0 (harness [0, 4 MiB)),
+			 * slot 1 (UML mem [GPA_BASE, GPA_BASE+physmem_size)),
+			 * or unmapped? The faulting gpa the harness injects
+			 * is deliberately in the third category — the
+			 * equivalent of a userspace access to an unmapped
+			 * page in real-backend operation.
+			 */
+			const char *region;
+			unsigned long uml_va = 0;
+
+			if (gpa < KVM_HARNESS_MEM_SIZE) {
+				region = "harness-slot";
+			} else if (uml_physmem && physmem_size &&
+				   gpa >= KVM_HARNESS_UML_GPA_BASE &&
+				   gpa < KVM_HARNESS_UML_GPA_BASE + physmem_size) {
+				region = "uml-slot";
+				uml_va = uml_physmem + (gpa - KVM_HARNESS_UML_GPA_BASE);
+			} else {
+				region = "unmapped";
+			}
+
+			os_info("um: kvm harness: 1d mmio gpa=0x%lx len=%u is_write=%u region=%s uml_va=0x%lx\n",
+				gpa, len, is_write, region, uml_va);
+
+			if (gpa == KVM_HARNESS_FAULT_GPA) {
+				os_info("um: kvm harness: 1d PASS — fault decode recovered injected gpa (0x%lx, unmapped region)\n",
+					gpa);
+				os_info("um: kvm harness: 1d note — in full-backend integration, unmapped/slot-misalignment faults dispatch into segv() via arch/um/kernel/trap.c; the gpa→uml_va translation above is the pre-dispatch decode step\n");
+			} else {
+				os_info("um: kvm harness: 1d UNEXPECTED gpa=0x%lx (expected 0x%lx)\n",
+					gpa, (unsigned long)KVM_HARNESS_FAULT_GPA);
+			}
+		}
+	}
 phase3_1b_done:
 	/*
 	 * The harness is one-shot by design. Report the final exit
@@ -939,7 +1106,7 @@ phase3_1b_done:
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c architectural validation complete");
+	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c/1d architectural validation complete");
 }
 
 /*
