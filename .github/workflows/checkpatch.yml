@@ -104,8 +104,16 @@ jobs:
             #     update. Not applicable to fork-only additions
             #     under .github/, Documentation/virt/uml/redesign/
             #     etc. that don't go upstream.
+            #   USE_RELATIVE_PATH — warns when a changelog body
+            #     mentions an absolute path. For workflow +
+            #     tool-config commits the absolute paths (e.g.
+            #     `/usr/share/selinux/devel/Makefile`,
+            #     `/etc/apparmor.d/uml-launcher`) are part of
+            #     the system contract being documented — not
+            #     an in-tree path that should be rewritten
+            #     relative to the kernel source root.
             if ! scripts/checkpatch.pl --strict --no-summary \
-                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES \
+                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH \
                     -g "$sha"; then
               fail=1
             fi
