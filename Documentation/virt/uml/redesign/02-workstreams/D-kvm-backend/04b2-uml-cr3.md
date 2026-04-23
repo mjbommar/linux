@@ -103,25 +103,74 @@ arch-mm helpers.
 
 Two landable steps:
 
-**D-04b.2a** — extend the handcrafted tree to cover
-physmem_size. Still uses the harness slot for the PGD
-itself, but the identity map now covers UML's actual
-memory range (not just 2 MiB). Add `kvm_setup_harness_
-paging_range()` to sregs.c. Keep harness.c's RIP pointing
-at the in-slot code sled so the harness still exits
-KVM_EXIT_IO — this commit is pure page-table-coverage
-expansion, no new execution path.
+**D-04b.2a** ✓ (landed 62287f311f60) — extend the
+handcrafted tree to cover up to 1 GiB. Adds
+`kvm_setup_harness_paging_range()` to sregs.c. Harness.c
+keeps RIP pointing at the in-slot code sled so the
+harness still exits KVM_EXIT_IO — this commit is pure
+page-table-coverage expansion, no new execution path.
+Measurements confirmed wider coverage is free at runtime:
+Skylake-W delta +0.3 %, w1 Alder Lake -1.7 % (both noise).
 
-**D-04b.2b** — swap harness's RIP to point at a UML-kernel
-function. Add a `kvm_harness_hlt_target` function in
-harness.c (or a new tu) that's just `asm("hlt")` — address
-known to linker. Harness `regs.rip = (u64)&
-kvm_harness_hlt_target`, KVM_RUN, expect KVM_EXIT_HLT.
-This proves the vCPU can execute real UML kernel text.
+**D-04b.2b** — swap harness's RIP to point at UML kernel
+text. **Scope larger than originally projected**, three
+sub-pieces identified during .2a wiring:
 
-After .2a + .2b, D-04b is structurally complete: SREGS +
-CR3 + GDT/IDT + memslot + real UML-text execution, no
-LSTAR bypass. D-04c adds LSTAR.
+  - The harness currently registers its own 2 MiB slot
+    at KVM slot 0 (in harness.c's kvm_run_harness()).
+    UML kernel text lives at host-VA offsets
+    `&_stext` ≈ uml_physmem + 0x22000 — within the
+    Policy A memslot (host_VA = uml_physmem..+physmem_
+    size) but outside the harness's own 2 MiB slot.
+    So either:
+    (a) The harness switches to registering the Policy
+        A memslot instead of its own 2 MiB (must coord
+        with kvm_ensure_memslot's deferred
+        registration so we don't double-register
+        slot 0), OR
+    (b) The harness keeps its own slot but uses a
+        DIFFERENT KVM slot number for UML kernel
+        memory — KVM supports up to KVM_USER_MEM_SLOTS
+        (509 on x86_64) simultaneous slots.
+    (a) is cleaner once we can run the harness AFTER
+    uml_physmem / physmem_size are populated (post-
+    arch_setup). (b) is available sooner but needs a
+    memslot-tracking index.
+
+  - RIP arithmetic: guest_VA = host_VA - uml_physmem
+    under Policy A. So for
+    `regs.rip = (unsigned long)&kvm_harness_hlt_target
+                 - uml_physmem` to compute correctly at
+    harness-run time, uml_physmem must be set — same
+    boot-ordering constraint as the memslot (set at
+    arch_setup after init_backend).
+
+  - Stack: the HLT target function must NOT use a
+    stack pointer that touches unmapped pages. Ensure
+    with `__attribute__((naked))` + raw `asm("hlt")`.
+
+The cleanest resolution is to move the harness out of
+kvm_init() into a late_initcall (or a dedicated boot-
+param gate that fires after arch_setup completes). At
+that point uml_physmem is set, mm_map has registered
+the Policy A memslot via kvm_ensure_memslot, and the
+harness can just switch RIP to the UML-text target
+without any memslot shuffling.
+
+D-04b.2b proper is therefore a two-landing set:
+
+  - D-04b.2b.1: relocate kvm_run_harness invocation to
+    a late_initcall, remove the self-registered 2 MiB
+    slot, use kvm_ensure_memslot's Policy A slot
+    directly. Keep the RIP-at-in-memory-code-sled that
+    D-04b.2a's run reports.
+  - D-04b.2b.2: add `kvm_harness_hlt_target` naked
+    function, point RIP at its guest-VA translation.
+    Expect KVM_EXIT_HLT.
+
+After those, D-04b is structurally complete: SREGS +
+CR3 + GDT + Policy A memslot + real UML-text
+execution, no LSTAR bypass. D-04c adds LSTAR.
 
 ## Open questions
 
