@@ -85,6 +85,38 @@ static const char *kvm_harness_exit_name(u32 r)
 	}
 }
 
+/*
+ * Local rdtsc — x86_64 only (UML x86_64 runs on host x86_64 CPUs,
+ * so the instruction is always available in harness-mode). Not
+ * serializing; the loop's KVM_RUN ioctls provide enough implicit
+ * ordering for the ~4000+-cycle VMEXIT round-trips we're
+ * measuring.
+ */
+static inline u64 kvm_harness_rdtsc(void)
+{
+	u32 lo, hi;
+
+	asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((u64)hi << 32) | lo;
+}
+
+/* Ascending integer-quickselect-free median via simple sort. */
+static void kvm_harness_insertion_sort(u64 *a, unsigned int n)
+{
+	unsigned int i, j;
+
+	for (i = 1; i < n; i++) {
+		u64 key = a[i];
+
+		j = i;
+		while (j > 0 && a[j - 1] > key) {
+			a[j] = a[j - 1];
+			j--;
+		}
+		a[j] = key;
+	}
+}
+
 int kvm_run_harness(void)
 {
 	struct kvm_um *ctx = kvm_backend_ctx();
@@ -160,27 +192,108 @@ int kvm_run_harness(void)
 		return rc;
 	}
 
-	pr_info("um: kvm harness: entering KVM_RUN (rip=0x%lx)\n",
+	pr_info("um: kvm harness: entering KVM_RUN loop (rip=0x%lx)\n",
 		(unsigned long)KVM_HARNESS_CODE_OFFSET);
-	rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
 
 	/*
-	 * The harness is one-shot by design. Whatever exit we hit
-	 * is what we report; there's no "continue booting" path
-	 * after this.
+	 * D-04b.1c: N iterations, per-iteration rdtsc bracketing.
+	 * Each iteration resets RIP to CODE_OFFSET so the same
+	 * two-byte `out %al, $0xf4` executes. Record cycles; at
+	 * the end report min / median / max via os_info() (direct
+	 * stderr; the printk buffer isn't flushed until console
+	 * registration, which never happens on this one-shot).
 	 *
-	 * Emit the result through os_info() BEFORE panic() because
-	 * panic() at this early boot stage buffers its printk
-	 * output — console registration happens later in
-	 * start_kernel() and the buffer never flushes if we
-	 * reboot_skas() out of linux_main(). os_info() writes
-	 * directly to stderr via the host libc, bypassing the
-	 * printk buffer entirely.
+	 * ITERS=1000 matches spike 04's methodology; fits comfortably
+	 * in the harness's 2 MiB slot + a small bss array.
 	 */
-	os_info("um: kvm harness: KVM_RUN rc=%d, exit_reason=%u (%s)\n",
+	{
+		enum { ITERS = 1000 };
+		static u64 cycles[ITERS];
+		unsigned int n = 0, i;
+		u32 last_exit = 0;
+		int last_rc = 0;
+
+		for (i = 0; i < ITERS; i++) {
+			u64 t0, t1;
+
+			/*
+			 * KVM leaves the vCPU in a "pending I/O
+			 * emulation" state after KVM_EXIT_IO; a bare
+			 * second KVM_RUN completes it (advancing RIP
+			 * past `out`) regardless of any KVM_SET_REGS
+			 * we do in between. Matches spike 04's
+			 * pattern: after the IO exit, explicitly advance
+			 * RIP to the hlt, run once to clear the pending
+			 * state (exits with HLT), then reset RIP to
+			 * CODE_OFFSET for the next iteration.
+			 */
+			regs.rip = KVM_HARNESS_CODE_OFFSET;
+			regs.rflags = 0x2;
+			regs.rax = 0;
+			rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+					      (unsigned long)&regs);
+			if (rc < 0) {
+				last_rc = rc;
+				break;
+			}
+
+			t0 = kvm_harness_rdtsc();
+			rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+			t1 = kvm_harness_rdtsc();
+			last_rc = rc;
+			last_exit = run->exit_reason;
+			if (rc < 0 || run->exit_reason != KVM_EXIT_IO)
+				break;
+			cycles[n++] = t1 - t0;
+
+			/*
+			 * Advance RIP past `out` (2 bytes) and KVM_RUN
+			 * once more to let KVM complete the pending I/O
+			 * emulation — the vCPU runs `hlt` next and exits
+			 * cleanly, leaving it ready for the next
+			 * iteration's RIP reset. The HLT exit itself
+			 * isn't measured; we only care about the IO exit
+			 * cost here.
+			 */
+			regs.rip = KVM_HARNESS_CODE_OFFSET + 2;
+			rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+					      (unsigned long)&regs);
+			if (rc < 0) {
+				last_rc = rc;
+				break;
+			}
+			rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+			if (rc < 0 || run->exit_reason != KVM_EXIT_HLT) {
+				last_rc = rc;
+				last_exit = run->exit_reason;
+				break;
+			}
+		}
+
+		if (n >= 2) {
+			kvm_harness_insertion_sort(cycles, n);
+			os_info("um: kvm harness: %u/%u IO exits measured; "
+				"min=%llu median=%llu p95=%llu max=%llu cyc\n",
+				n, ITERS,
+				(unsigned long long)cycles[0],
+				(unsigned long long)cycles[n / 2],
+				(unsigned long long)cycles[(n * 95) / 100],
+				(unsigned long long)cycles[n - 1]);
+		} else {
+			os_info("um: kvm harness: only %u iterations measurable; last rc=%d exit=%u (%s)\n",
+				n, last_rc, last_exit,
+				kvm_harness_exit_name(last_exit));
+		}
+	}
+
+	/*
+	 * The harness is one-shot by design. Report the final exit
+	 * state (via os_info so it bypasses the unregistered printk
+	 * buffer) and panic to stop the UML process — this is a
+	 * diagnostic, not a continue-booting path.
+	 */
+	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: KVM_RUN rc=%d, exit_reason=%u (%s) — D-04b.1b sanity complete, D-04b.2 swaps UML CR3 next",
-	      rc, run->exit_reason,
-	      kvm_harness_exit_name(run->exit_reason));
+	panic("um: kvm harness: done — D-04b.1c measurement complete, D-04b.2 swaps UML CR3 next");
 }
