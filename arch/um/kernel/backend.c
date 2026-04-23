@@ -40,6 +40,9 @@ extern const struct um_backend_ops um_backend_ptrace_ops;
 #ifdef CONFIG_UM_BACKEND_SECCOMP
 extern const struct um_backend_ops um_backend_seccomp_ops;
 #endif
+#ifdef CONFIG_UM_BACKEND_KVM
+extern const struct um_backend_ops um_backend_kvm_ops;
+#endif
 
 /* Set by arch/um/os-Linux/start_up.c::os_early_checks() based on
  * the host probe. init_backend reads it for DYNAMIC selection.
@@ -90,6 +93,19 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 		if (force)
 			panic("um: backend=force=seccomp but seccomp not compiled in or probe failed");
 	}
+#ifdef CONFIG_UM_BACKEND_KVM
+	else if (want == UM_BACKEND_KIND_KVM) {
+		/*
+		 * KVM is opt-in under DYNAMIC dispatch — users must
+		 * ask for it via `backend=kvm` because the scaffold
+		 * doesn't boot past init yet. force=kvm panics if
+		 * /dev/kvm isn't available; non-force defers
+		 * to the using_seccomp / ptrace default.
+		 */
+		using_seccomp = 0;
+		return &um_backend_kvm_ops;
+	}
+#endif
 
 	/* auto / fall-through */
 	if (using_seccomp)
@@ -111,6 +127,15 @@ enum um_backend_kind __init init_backend(const struct um_backend_args *args)
 	if (backend_arg_requested == UM_BACKEND_KIND_SECCOMP && backend_arg_force)
 		panic("um: backend=force=seccomp but kernel built PTRACE_ONLY");
 	um_backend = &um_backend_ptrace_ops;
+	using_seccomp = 0;
+#elif defined(CONFIG_UM_BACKEND_KVM_ONLY)
+	if ((backend_arg_requested == UM_BACKEND_KIND_PTRACE ||
+	     backend_arg_requested == UM_BACKEND_KIND_SECCOMP) &&
+	    backend_arg_force)
+		panic("um: backend=force=%s but kernel built KVM_ONLY",
+		      backend_arg_requested == UM_BACKEND_KIND_PTRACE ?
+		      "ptrace" : "seccomp");
+	um_backend = &um_backend_kvm_ops;
 	using_seccomp = 0;
 #elif defined(CONFIG_UM_BACKEND_DYNAMIC)
 	um_backend = pick_dynamic_backend();

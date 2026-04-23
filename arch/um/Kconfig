@@ -381,6 +381,20 @@ config UM_BACKEND_SECCOMP
 	  mechanism merged in 6.16 (Benjamin Berg). ~3-4× faster syscall
 	  round-trip than ptrace via SIGSYS + futex.
 
+config UM_BACKEND_KVM
+	bool
+	depends on X86_64
+	help
+	  Selected by the dispatch mode below. Don't toggle this directly.
+	  Compiles arch/um/backend/kvm/ — the KVM-platform-style backend
+	  (workstream D). Trap mechanism is a userspace-visible VMEXIT
+	  from a SYSCALL trampoline; handler runs host-side. Per-syscall
+	  floor empirically ~1-11 µs depending on silicon (see
+	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+	  measurements.md), 2-20× faster than seccomp. Requires /dev/kvm
+	  on the host. Scaffold only today; full path lands across
+	  D-02..D-06.
+
 choice
 	prompt "UML backend dispatch mode"
 	default UM_BACKEND_DYNAMIC if HAVE_ARCH_SECCOMP_FILTER
@@ -417,15 +431,28 @@ config UM_BACKEND_SECCOMP_ONLY
 	  syscall path than ptrace via SIGSYS. Requires the host to
 	  support seccomp filter installation.
 
+config UM_BACKEND_KVM_ONLY
+	bool "KVM backend only (single-backend inline)"
+	depends on X86_64
+	select UM_BACKEND_KVM
+	help
+	  um_backend_dispatch() expands to direct kvm_<op>() calls.
+	  Smallest binary, zero indirect-dispatch cost. Per-syscall
+	  floor ~1-11 µs depending on silicon (see
+	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+	  measurements.md). Requires /dev/kvm on the host. Scaffold
+	  only today.
+
 config UM_BACKEND_DYNAMIC
-	bool "Dynamic backend selection (both backends compiled in)"
+	bool "Dynamic backend selection (ptrace + seccomp [+ kvm])"
 	depends on HAVE_ARCH_SECCOMP_FILTER
 	select UM_BACKEND_PTRACE
 	select UM_BACKEND_SECCOMP
+	select UM_BACKEND_KVM if X86_64
 	help
-	  Both backends compiled in; init_backend() picks one at boot
-	  based on host capability + the `backend=` kernel command line.
-	  Default for distros.
+	  ptrace + seccomp backends compiled in (+ KVM on X86_64);
+	  init_backend() picks one at boot based on host capability +
+	  the `backend=` kernel command line. Default for distros.
 
 endchoice
 

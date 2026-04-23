@@ -208,7 +208,36 @@ int seccomp_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
 #endif
 
 #ifdef CONFIG_UM_BACKEND_KVM
-/* Populated by workstream D as ops migrate. */
+/*
+ * D-02 scaffold. Every op lives in arch/um/backend/kvm/. `probe` and
+ * `init` are the only ones that do real work today: probe opens
+ * /dev/kvm to confirm the host has KVM available, init stashes the
+ * fd for the real runtime code that lands in D-03..D-06. Every other
+ * op returns -EOPNOTSUPP for now; dispatch to them would panic per
+ * the contract, so this backend is only selectable when the operator
+ * has explicitly asked for it via Kconfig + boot arg and is ready
+ * for "it doesn't boot yet" semantics.
+ */
+int kvm_probe(void);
+int kvm_init(const struct um_backend_args *args);
+void kvm_shutdown(void);
+void kvm_run_userspace(struct uml_pt_regs *regs);
+int kvm_mm_attach(struct mm_id *id);
+void kvm_mm_detach(struct mm_id *id);
+int kvm_mm_map(struct mm_id *id, unsigned long va, unsigned long len,
+	       int prot, int phys_fd, u64 offset);
+int kvm_mm_unmap(struct mm_id *id, unsigned long va, unsigned long len);
+int kvm_thread_create(struct task_struct *p, void *stack,
+		      void (*handler)(void));
+int kvm_thread_start_idle(void *stack, struct thread_struct *t);
+void kvm_context_switch(struct task_struct *prev, struct task_struct *next);
+int kvm_ipi_send(int cpu, int vector);
+u64 kvm_read_clock_ns(void);
+int kvm_set_timer(int cpu, u64 deadline_ns, enum um_timer_mode mode);
+u64 kvm_read_persistent_clock_ns(void);
+void kvm_init_thread_regs(unsigned long *gp, unsigned long *fp);
+int kvm_read_guest_regs(struct task_struct *t, struct pt_regs *regs);
+int kvm_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
 #endif
 
 /*

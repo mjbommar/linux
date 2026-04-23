@@ -451,26 +451,36 @@ static int __init uml_backend_config(char *line, int *add)
 	} else if (strcmp(line, "seccomp") == 0) {
 		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
 		backend_arg_force = 0;
+	} else if (strcmp(line, "kvm") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_KVM;
+		backend_arg_force = 0;
 	} else if (strcmp(line, "force=ptrace") == 0) {
 		backend_arg_requested = UM_BACKEND_KIND_PTRACE;
 		backend_arg_force = 1;
 	} else if (strcmp(line, "force=seccomp") == 0) {
 		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
 		backend_arg_force = 1;
+	} else if (strcmp(line, "force=kvm") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_KVM;
+		backend_arg_force = 1;
 	} else {
-		fatal("Invalid backend option '%s', expected one of: auto, ptrace, seccomp, force=ptrace, force=seccomp\n",
-		      line);
+		static const char valid[] =
+			"auto ptrace seccomp kvm force=ptrace force=seccomp force=kvm";
+
+		fatal("Invalid backend option '%s'; valid: %s\n", line, valid);
 	}
 	return 0;
 }
 
 __uml_setup("backend=", uml_backend_config,
-"backend=<auto|ptrace|seccomp|force=ptrace|force=seccomp>\n"
+"backend=<auto|ptrace|seccomp|kvm|force=ptrace|force=seccomp|force=kvm>\n"
 "    Pick the trap mechanism. `auto' (default) uses Kconfig +\n"
-"    runtime probe. Bare names `ptrace'/`seccomp' are preferences\n"
+"    runtime probe. Bare names `ptrace'/`seccomp'/`kvm' are preferences\n"
 "    that fall through to whichever backend is actually available.\n"
 "    `force=' makes the choice mandatory and panics if the requested\n"
-"    backend isn't compiled in or fails its probe.\n"
+"    backend isn't compiled in or fails its probe. `kvm' is the\n"
+"    workstream-D scaffold today; don't select it unless you're\n"
+"    testing the scaffold, it won't boot past init yet.\n"
 "\n"
 "    Replaces the legacy `seccomp=on/auto/off' param (still accepted\n"
 "    for one release).\n\n"

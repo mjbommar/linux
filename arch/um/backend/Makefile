@@ -9,5 +9,6 @@
 
 obj-$(CONFIG_UM_BACKEND_PTRACE)  += ptrace/
 obj-$(CONFIG_UM_BACKEND_SECCOMP) += seccomp/
+obj-$(CONFIG_UM_BACKEND_KVM)     += kvm/
 obj-y                            += common/
 obj-$(CONFIG_UM_BACKEND_CONTRACT_TEST) += contract/
