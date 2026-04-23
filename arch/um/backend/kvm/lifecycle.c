@@ -6,6 +6,11 @@
  * Workstream D-03b: eager KVM_CREATE_VM in init(); per-mm state
  * lives in mm.c and refcounts the single shared VM per the
  * decisions-log D57 one-VM-per-UML-process model.
+ * Workstream D-03c: single giant memslot covering the UML
+ * address space registered at init time per the D-03c memslot-
+ * policy design note (Policy A). mm_map / mm_unmap then reduce
+ * to host-side mmap / munmap (follow-on commit); the memslot
+ * itself is static after init.
  *
  *   - probe()    opens /dev/kvm and issues KVM_GET_API_VERSION
  *                to confirm the host kernel speaks the stable
@@ -13,11 +18,14 @@
  *                returns the errno so the arbiter can fall back
  *                per the A-01 contract. Does not retain host
  *                state.
- *   - init()     reopens /dev/kvm, issues KVM_CREATE_VM, and
- *                stashes both fds in the module-static kvm_um
- *                for the rest of the backend to reach via
- *                kvm_backend_vm_fd() / kvm_backend_fd().
- *   - shutdown() closes vm_fd then kvm_fd.
+ *   - init()     reopens /dev/kvm, issues KVM_CREATE_VM, then
+ *                registers a single KVM_USER_MEMORY_REGION
+ *                slot covering guest-physical [0, task_size)
+ *                mapped identity-style to host-VA [0, task_size).
+ *                Stashes kvm_fd + vm_fd in the module-static
+ *                kvm_um for the rest of the backend.
+ *   - shutdown() closes vm_fd then kvm_fd. KVM tears down
+ *                memslots on vm_fd close; no explicit free.
  *
  * No USER TU is needed at this layer — os_open_file() and
  * os_ioctl_generic() both run in kernel context on UML and call
@@ -35,6 +43,7 @@
 
 #include <os.h>
 #include <asm/backend.h>
+#include <asm/processor-generic.h>	/* task_size */
 
 #include "kvm_backend.h"
 
@@ -119,12 +128,41 @@ int kvm_init(const struct um_backend_args *args)
 		return vmfd;
 	}
 
+	/*
+	 * Policy A from 03b-memslot-policy.md: one giant memslot at
+	 * init covers the whole UML address space. guest_phys_addr =
+	 * 0, userspace_addr = 0, memory_size = task_size. KVM's EPT
+	 * populates lazily on first guest access, so this is cheap
+	 * even at the ~128 TiB task_size ceiling — we're not
+	 * pre-faulting anything, just declaring the range as "valid
+	 * guest-physical memory backed by the UML kernel's own VA".
+	 */
+	{
+		struct kvm_userspace_memory_region region = {
+			.slot			= 0,
+			.flags			= 0,
+			.guest_phys_addr	= 0,
+			.memory_size		= task_size,
+			.userspace_addr		= 0,
+		};
+		int rc = os_ioctl_generic(vmfd, KVM_SET_USER_MEMORY_REGION,
+					  (unsigned long)&region);
+
+		if (rc < 0) {
+			pr_err("um: kvm init: KVM_SET_USER_MEMORY_REGION failed (%d)\n",
+			       rc);
+			os_close_file(vmfd);
+			os_close_file(kfd);
+			return rc;
+		}
+	}
+
 	kvm_ctx.kvm_fd = kfd;
 	kvm_ctx.vm_fd  = vmfd;
 	refcount_set(&kvm_ctx.mm_refcount, 0);
 
-	pr_info("um: kvm init: /dev/kvm fd %d, vm fd %d acquired; memslots pending (D-03c)\n",
-		kvm_ctx.kvm_fd, kvm_ctx.vm_fd);
+	pr_info("um: kvm init: /dev/kvm fd %d, vm fd %d, memslot [0,%lx) registered\n",
+		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, task_size);
 	return 0;
 }
 
