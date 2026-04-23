@@ -13,6 +13,7 @@ obj-y += lifecycle.o
 obj-y += mm.o
 obj-y += sregs.o
 obj-y += thread.o
+obj-y += time.o
 obj-y += stubs.o
 
 obj-$(CONFIG_UM_BACKEND_KVM_HARNESS) += harness.o
