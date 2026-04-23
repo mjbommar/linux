@@ -8,6 +8,11 @@ When and in what order. Three views of the same plan:
 - [critical-path.md](critical-path.md) — what blocks what
 - [parallelism-map.md](parallelism-map.md) — what can run
   concurrently
+- [post-q1-push.md](post-q1-push.md) — 2026-04-23: the ten
+  remaining big-unknown / engineering-lift items, grouped into
+  seven phases with explicit dependency + risk-retiring
+  sequencing. Drives execution after the Q1 milestone cluster
+  landed.
 
 ## The shape
 
