@@ -91,6 +91,18 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		      vcpu_fd, run);
 	}
 
+	/*
+	 * First call registers the memslot now that arch_setup() has
+	 * populated uml_physmem / physmem_size. Subsequent calls are
+	 * idempotent no-ops. If registration fails we still attempt
+	 * KVM_RUN so the panic below reports the real KVM exit reason
+	 * rather than hiding behind a memslot-unavailable message.
+	 */
+	rc = kvm_ensure_memslot();
+	if (rc < 0)
+		pr_warn_once("um: kvm run_userspace: memslot registration failed (%d)\n",
+			     rc);
+
 	rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
 
 	/*

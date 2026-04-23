@@ -49,4 +49,13 @@ int kvm_backend_vm_fd(void);
 int kvm_backend_vcpu0_fd(void);
 struct kvm_um *kvm_backend_ctx(void);
 
+/*
+ * Lazy memslot registration (D-04a). Call once before entering
+ * KVM_RUN; subsequent calls are idempotent no-ops. Returns 0 on
+ * success, -errno on failure (caller decides to continue or
+ * panic). See lifecycle.c for the "deferred because uml_physmem
+ * is set after init_backend()" rationale.
+ */
+int kvm_ensure_memslot(void);
+
 #endif /* __ARCH_UM_BACKEND_KVM_H */

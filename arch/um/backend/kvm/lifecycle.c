@@ -42,6 +42,8 @@
 #include <linux/printk.h>
 
 #include <os.h>
+#include <mem.h>			/* uml_physmem */
+#include <as-layout.h>			/* physmem_size */
 #include <asm/backend.h>
 #include <asm/processor-generic.h>	/* task_size */
 
@@ -133,40 +135,15 @@ int kvm_init(const struct um_backend_args *args)
 	pr_info("um: kvm init: KVM_CREATE_VM ok vmfd=%d\n", vmfd);
 
 	/*
-	 * Policy A from 03b-memslot-policy.md: one giant memslot at
-	 * init covers the whole UML address space. guest_phys_addr =
-	 * 0, userspace_addr = 0, memory_size = task_size. KVM's EPT
-	 * populates lazily on first guest access, so this is cheap
-	 * even at the ~128 TiB task_size ceiling — we're not
-	 * pre-faulting anything, just declaring the range as "valid
-	 * guest-physical memory backed by the UML kernel's own VA".
-	 *
-	 * D-04a: KVM rejects userspace_addr=0 + oversized slot on
-	 * real hosts. Treat registration failure as non-fatal for
-	 * the scaffold — D-04b revisits the memslot parameters
-	 * alongside SREGS/CR3 setup. Without the slot, KVM_RUN will
-	 * fault on any guest access, which is exactly the expected
-	 * failure mode for D-04a ("first KVM_RUN returns with a
-	 * readable error").
+	 * Memslot registration was originally here (D-03c) but
+	 * uml_physmem / physmem_size are set by arch_setup() AFTER
+	 * init_backend() returns — see arch/um/kernel/um_arch.c
+	 * linux_main() line ordering. At this point both globals are
+	 * 0, so we can't compute the right userspace_addr /
+	 * memory_size. D-04a defers registration to
+	 * kvm_ensure_memslot() below, invoked on first run_userspace
+	 * call (by which time memory layout is finalized).
 	 */
-	{
-		struct kvm_userspace_memory_region region = {
-			.slot			= 0,
-			.flags			= 0,
-			.guest_phys_addr	= 0,
-			.memory_size		= task_size,
-			.userspace_addr		= 0,
-		};
-		int rc = os_ioctl_generic(vmfd, KVM_SET_USER_MEMORY_REGION,
-					  (unsigned long)&region);
-
-		if (rc < 0)
-			pr_warn("um: kvm init: KVM_SET_USER_MEMORY_REGION failed (%d); deferring to D-04b\n",
-				rc);
-		else
-			pr_info("um: kvm init: memslot [0,%lx) registered\n",
-				task_size);
-	}
 
 	/*
 	 * D-04a: create the first vCPU now. For ncpus=1 UML (the
@@ -249,6 +226,54 @@ void kvm_shutdown(void)
 		os_close_file(kvm_ctx.kvm_fd);
 		kvm_ctx.kvm_fd = -1;
 	}
+}
+
+/*
+ * Lazy memslot registration. D-04a defers this out of kvm_init()
+ * because uml_physmem / physmem_size aren't set at that point —
+ * linux_main() runs init_backend() first, then arch_setup() which
+ * populates those globals. run_userspace() (D-04a) calls this
+ * once, before the first KVM_RUN, at which point memory layout
+ * is final.
+ *
+ * Returns 0 on success (or if already registered), -errno on
+ * failure. Caller decides whether to proceed without a slot.
+ */
+int kvm_ensure_memslot(void)
+{
+	static bool registered;
+	struct kvm_userspace_memory_region region;
+	int rc;
+
+	if (registered)
+		return 0;
+	if (kvm_ctx.vm_fd < 0)
+		return -EIO;
+	if (!uml_physmem || !physmem_size) {
+		pr_warn("um: kvm memslot: uml_physmem=%lx physmem_size=%llx — boot ordering bug?\n",
+			uml_physmem, physmem_size);
+		return -EAGAIN;
+	}
+
+	region = (struct kvm_userspace_memory_region){
+		.slot			= 0,
+		.flags			= 0,
+		.guest_phys_addr	= 0,
+		.memory_size		= physmem_size,
+		.userspace_addr		= uml_physmem,
+	};
+	rc = os_ioctl_generic(kvm_ctx.vm_fd, KVM_SET_USER_MEMORY_REGION,
+			      (unsigned long)&region);
+	if (rc < 0) {
+		pr_err("um: kvm memslot: KVM_SET_USER_MEMORY_REGION(uaddr=%lx size=%llx) failed (%d)\n",
+		       uml_physmem, physmem_size, rc);
+		return rc;
+	}
+
+	registered = true;
+	pr_info("um: kvm memslot: guest_phys=0 host_va=%lx size=%llx\n",
+		uml_physmem, physmem_size);
+	return 0;
 }
 
 int kvm_backend_fd(void)
