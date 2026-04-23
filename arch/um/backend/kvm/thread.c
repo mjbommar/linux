@@ -55,6 +55,25 @@ void kvm_init_thread_regs(unsigned long *gp, unsigned long *fp)
 }
 
 /*
+ * D-05b: backend-neutral host-side IPI — the UML kernel's
+ * inter-CPU signal machinery, not a KVM vCPU IPI. Mirrors
+ * seccomp_ipi_send + ptrace_ipi_send almost exactly. Under
+ * ncpus=1 (default) nobody calls this; the contract still
+ * requires a non-NULL slot in the ops table, so we provide
+ * the thin wrapper rather than a -EOPNOTSUPP stub.
+ */
+int kvm_ipi_send(int cpu, int vector)
+{
+#if IS_ENABLED(CONFIG_SMP)
+	return os_send_ipi(cpu, vector);
+#else
+	(void)cpu;
+	(void)vector;
+	return 0;
+#endif
+}
+
+/*
  * Map an exit_reason back to its symbol for pr_info. The list
  * matches arch/x86/kvm/kvm_host.h / Documentation/virt/kvm/api.rst;
  * we only enumerate reasons we expect to see during D-04a..D-04c
