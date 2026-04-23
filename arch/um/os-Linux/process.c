@@ -17,6 +17,7 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <asm/unistd.h>
+#include <backend.h>
 #include <init.h>
 #include <longjmp.h>
 #include <os.h>
@@ -397,8 +398,15 @@ void init_new_thread_signals(void)
 	set_handler(SIGBUS);
 	signal(SIGHUP, SIG_IGN);
 	set_handler(SIGIO);
-	/* We (currently) only use the child reaper IRQ in seccomp mode */
-	if (using_seccomp)
+	/*
+	 * Only install the SIGCHLD reaper when the active backend
+	 * uses the child-reaper IRQ. The seccomp backend does;
+	 * ptrace reaps inline via waitpid in the trap loop; KVM
+	 * has no host stub child. Reads the ops-table capability
+	 * flag rather than the legacy `using_seccomp` int per D59
+	 * Phase II Lift #4a.
+	 */
+	if (um_backend && um_backend->uses_stub_reaper)
 		set_handler(SIGCHLD);
 	signal(SIGWINCH, SIG_IGN);
 }

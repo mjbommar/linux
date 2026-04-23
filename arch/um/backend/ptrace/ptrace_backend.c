@@ -20,6 +20,15 @@ const struct um_backend_ops um_backend_ptrace_ops = {
 	.kind			= UM_BACKEND_KIND_PTRACE,
 	.contract_version	= UM_BACKEND_CONTRACT_VERSION,
 
+	/*
+	 * Capability flags — see backend.h.
+	 *
+	 * uses_stub_reaper=false: ptrace reaps the stub child
+	 * inline via waitpid inside the trap loop, not via a
+	 * SIGCHLD-registered reaper IRQ.
+	 */
+	.uses_stub_reaper	= false,
+
 	/* Lifecycle and trap (4) */
 	.probe			= ptrace_probe,
 	.init			= ptrace_init,

@@ -27,6 +27,15 @@ const struct um_backend_ops um_backend_kvm_ops = {
 	.kind			= UM_BACKEND_KIND_KVM,
 	.contract_version	= UM_BACKEND_CONTRACT_VERSION,
 
+	/*
+	 * Capability flags — see backend.h.
+	 *
+	 * uses_stub_reaper=false: KVM has no host stub child; the
+	 * guest runs under KVM_RUN, not as a ptraced/seccomp'd
+	 * peer process.
+	 */
+	.uses_stub_reaper	= false,
+
 	/* Lifecycle and trap (4) */
 	.probe			= kvm_probe,
 	.init			= kvm_init,

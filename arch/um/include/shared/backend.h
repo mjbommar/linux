@@ -103,6 +103,28 @@ struct um_backend_ops {
 	enum um_backend_kind		kind;
 	u32				contract_version;
 
+	/*
+	 * Capability flags — observable metadata that host-side
+	 * (os-Linux/) code consults instead of the legacy
+	 * `using_seccomp` int. Added as the first step of the
+	 * A-workstream Phase 2 extraction per D59; each flag is
+	 * populated alongside the backend's ops struct and read
+	 * via `um_backend->flag`.
+	 *
+	 * uses_stub_reaper: true when the backend's mm_attach
+	 * creates a host child (`mm_id->pid > 0`) whose lifecycle
+	 * is driven by a SIGCHLD-registered reaper IRQ. Seccomp
+	 * sets this because Berg's seccomp-mode stub is reaped
+	 * asynchronously; ptrace and KVM leave it false (ptrace
+	 * handles reaping inline within the trap loop via the
+	 * ptrace stop mechanism; KVM has no host stub child).
+	 * Consulted by arch/um/os-Linux/signal.c::set_handler
+	 * (mask SIGCHLD in other handlers) and arch/um/os-Linux/
+	 * process.c::init_new_thread_signals (install the SIGCHLD
+	 * handler itself).
+	 */
+	bool				uses_stub_reaper;
+
 	/* Lifecycle and trap (4) */
 	int  (*probe)(void);
 	int  (*init)(const struct um_backend_args *args);

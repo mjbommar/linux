@@ -20,6 +20,9 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	.kind			= UM_BACKEND_KIND_SECCOMP,
 	.contract_version	= UM_BACKEND_CONTRACT_VERSION,
 
+	/* Capability flags — see backend.h */
+	.uses_stub_reaper	= true,
+
 	/* Lifecycle and trap (4) */
 	.probe			= seccomp_probe,
 	.init			= seccomp_init,

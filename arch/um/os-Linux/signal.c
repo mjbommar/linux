@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <as-layout.h>
+#include <backend.h>
 #include <kern_util.h>
 #include <os.h>
 #include <skas.h>
@@ -249,7 +250,19 @@ void set_handler(int sig)
 	sigaddset(&action.sa_mask, SIGIO);
 	sigaddset(&action.sa_mask, SIGWINCH);
 	sigaddset(&action.sa_mask, SIGALRM);
-	if (using_seccomp)
+	/*
+	 * Mask SIGCHLD inside other handlers only when the active
+	 * backend actually uses it as a child-reaper IRQ — the
+	 * seccomp backend does, ptrace+KVM don't. Reads the ops-
+	 * table capability flag rather than the legacy
+	 * `using_seccomp` int per D59 Phase II Lift #4a. um_backend
+	 * is non-NULL here because set_handler() is invoked from
+	 * start_uml() after init_backend() populates the pointer
+	 * (see arch/um/kernel/um_arch.c::linux_main); the NULL
+	 * guard stays as belt-and-suspenders for any future
+	 * early-boot caller.
+	 */
+	if (um_backend && um_backend->uses_stub_reaper)
 		sigaddset(&action.sa_mask, SIGCHLD);
 
 	if (sig == SIGSEGV)
