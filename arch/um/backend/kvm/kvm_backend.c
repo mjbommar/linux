@@ -37,9 +37,13 @@ const struct um_backend_ops um_backend_kvm_ops = {
 	 * has_syscall_stub_fd_map=false: KVM doesn't use the
 	 * stub-syscall ABI at all; it dispatches through VMEXIT
 	 * + VMCALL, not through a ring-3 stub child.
+	 *
+	 * stub_syscall_uses_futex=false: same reason —
+	 * do_syscall_stub() is never reached on the KVM path.
 	 */
 	.uses_stub_reaper	= false,
 	.has_syscall_stub_fd_map = false,
+	.stub_syscall_uses_futex = false,
 
 	/* Lifecycle and trap (4) */
 	.probe			= kvm_probe,

@@ -23,6 +23,7 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	/* Capability flags — see backend.h */
 	.uses_stub_reaper	= true,
 	.has_syscall_stub_fd_map = true,
+	.stub_syscall_uses_futex = true,
 
 	/* Lifecycle and trap (4) */
 	.probe			= seccomp_probe,

@@ -106,7 +106,16 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 	/* Inform process how much we have filled in. */
 	proc_data->syscall_data_len = mm_idp->syscall_data_len;
 
-	if (using_seccomp) {
+	/*
+	 * Dispatch mechanism — seccomp wakes the stub via futex
+	 * + wait_stub_done_seccomp round-trip; ptrace drives it
+	 * via PTRACE_SETREGS + PTRACE_CONT + wait_stub_done.
+	 * Routed through um_backend->stub_syscall_uses_futex per
+	 * D59 Phase II Lift #4c. Hot path: the capability deref
+	 * reads one byte of a const singleton — compiler folds
+	 * it into the branch predicate.
+	 */
+	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		proc_data->restart_wait = 1;
 		wait_stub_done_seccomp(mm_idp, 0, 1);
 	} else {
@@ -141,7 +150,12 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 		mm_idp->syscall_data_len = 0;
 	}
 
-	if (using_seccomp)
+	/*
+	 * Reset the FD-map count only for backends that populate
+	 * it. Routed through um_backend->has_syscall_stub_fd_map
+	 * per D59 Phase II Lift #4c.
+	 */
+	if (um_backend && um_backend->has_syscall_stub_fd_map)
 		mm_idp->syscall_fd_num = 0;
 
 	return mm_idp->syscall_data_len;
@@ -210,8 +224,14 @@ static int get_stub_fd(struct mm_id *mm_idp, int fd)
 {
 	int i;
 
-	/* Find an FD slot (or flush and use first) */
-	if (!using_seccomp)
+	/*
+	 * Only the seccomp backend maintains an FD indirection
+	 * table for SCM_RIGHTS; ptrace returns the raw FD
+	 * straight through. Routed through
+	 * um_backend->has_syscall_stub_fd_map per D59 Phase II
+	 * Lift #4c.
+	 */
+	if (!um_backend || !um_backend->has_syscall_stub_fd_map)
 		return fd;
 
 	/* Already crashed, value does not matter */
@@ -256,7 +276,13 @@ int um_stub_mm_map(struct mm_id *mm_idp, unsigned long virt,
 	    sc->mem.offset == MMAP_OFFSET(offset - sc->mem.length)) {
 		int prev_fd = sc->mem.fd;
 
-		if (using_seccomp)
+		/*
+		 * The stored sc->mem.fd is a slot-index on seccomp
+		 * (indirection through mm_id->syscall_fd_map), a raw
+		 * FD on ptrace. Routed through um_backend->has_
+		 * syscall_stub_fd_map per D59 Phase II Lift #4c.
+		 */
+		if (um_backend && um_backend->has_syscall_stub_fd_map)
 			prev_fd = mm_idp->syscall_fd_map[sc->mem.fd];
 
 		if (phys_fd == prev_fd) {

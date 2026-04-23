@@ -29,9 +29,14 @@ const struct um_backend_ops um_backend_ptrace_ops = {
 	 *
 	 * has_syscall_stub_fd_map=false: ptrace stub syscalls
 	 * use plain FDs (no per-mm SCM_RIGHTS indirection table).
+	 *
+	 * stub_syscall_uses_futex=false: ptrace dispatch walks
+	 * PTRACE_SETREGS + PTRACE_CONT + wait_stub_done, not the
+	 * futex + wait_stub_done_seccomp path.
 	 */
 	.uses_stub_reaper	= false,
 	.has_syscall_stub_fd_map = false,
+	.stub_syscall_uses_futex = false,
 
 	/* Lifecycle and trap (4) */
 	.probe			= ptrace_probe,
