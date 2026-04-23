@@ -119,15 +119,30 @@ Sandbox profile uses this — minimum TCB, no flexibility paid for.
 
 **Multi-backend, indirect.** `CONFIG_UM_BACKEND_DYNAMIC=y` and at
 least two of the three backends compiled in. Then `um_backend` is
-selected at boot by `init_backend()` based on:
+selected at boot by `init_backend()` based on (see
+`arch/um/kernel/backend.c::pick_dynamic_backend` for the canonical
+source):
 
-1. Boot param `backend=ptrace|seccomp|force=<kind>`.
-2. `backend=auto` (default) defers to the `seccomp=` legacy alias
-   (preserves prior default: ptrace unless seccomp was requested).
-   A future release may flip this to "prefer seccomp if available"
-   (see D15; maintainer-visible behavior change, held for now).
-3. `force=` panics if the requested backend isn't compiled in or
-   its probe fails.
+1. Boot param `backend=force=<kind>` — panics if the requested
+   backend isn't compiled in or its probe fails.
+2. Boot param `backend=<kind>` (non-force) — preferred backend
+   if compiled in, else falls through to the default.
+3. `backend=auto` (the default when no boot param is passed) —
+   prefers seccomp when the host probe succeeds, falls back to
+   ptrace otherwise. The legacy `seccomp=on/auto/off` alias is
+   still accepted for one release but redundant with the
+   seccomp-first default. D46 superseded the older D15
+   ptrace-first behavior after a review flagged the drift
+   between the docs and the probe code; the current
+   prefer-seccomp semantics are authoritative.
+4. `backend=kvm` — routes into the KVM backend only in
+   `CONFIG_UM_BACKEND_KVM_HARNESS=y` builds (per Finding #3,
+   D46). Non-harness `backend=kvm` falls through to the
+   seccomp / ptrace default because the KVM backend's
+   `run_userspace` still panics on first guest entry pending
+   the real trap loop (post-Phase-III integration, task #162).
+   `backend=force=kvm` is always honored (user-explicit; panic
+   is the documented contract for `force=`).
 
 Indirect calls cost ~5-10 cycles (modern CPUs predict them well
 when the target is stable, which ours is — `um_backend` doesn't

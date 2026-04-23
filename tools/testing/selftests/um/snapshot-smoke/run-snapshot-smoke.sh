@@ -12,10 +12,21 @@
 #      Always run. FAIL here aborts the selftest.
 #
 #   B) snapshot-smoke-driver.py drives the AFL-compatible
-#      forkserver protocol on fds 198/199: handshake, fork,
-#      parent-waitpid, read pid + status, clean disconnect. This
-#      is the C-09 v1-ceiling exercise. Requires python3 at the
-#      host; SKIP'd if python3 isn't found.
+#      forkserver protocol on fds 198/199: handshake, fork, read
+#      the 4-byte pid followed by the 4-byte status, clean
+#      disconnect. Per the C-09 v1 ceiling documented in
+#      Documentation/virt/uml/snapshot.rst §"v1 ceiling:
+#      exit-status semantics" (and the Finding #1 forensic memo
+#      at Documentation/virt/uml/redesign/04-risks/
+#      signal-reentry-in-fork-window.md), status is a
+#      hard-coded 0 rather than the worker's real exit —
+#      parent-side waitpid crashed via SIGALRM reentry across
+#      four wait4-variant attempts, so this v1 skips the reap
+#      and drains zombies non-synchronously at the top of the
+#      next iteration. The driver asserts status == 0 so a
+#      future real-status fix changing the wire format can't
+#      slip past this test. Requires python3 at the host;
+#      SKIP'd if python3 isn't found.
 #
 # Pattern mirrors um/kprobes-stress/run-kprobes-stress.sh. Final
 # exit status follows kselftest convention: 0 PASS, 1 FAIL, 4 SKIP.
