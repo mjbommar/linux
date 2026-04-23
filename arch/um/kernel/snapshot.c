@@ -328,34 +328,30 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 
 		/* Parent: AFL protocol per iteration -
 		 *   1. report the worker pid (4 bytes)
-		 *   2. report the exit status (4 bytes, hard 0 today)
+		 *   2. report the REAL exit status (4 bytes) — real as of
+		 *      2026-04-23's Finding #1 fix below.
 		 *
-		 * KNOWN LIMITATION (still unresolved as of 2026-04-21).
-		 * A blocking wait between (1) and (2) crashes the parent
-		 * even with UML signal gating + raw wait4 syscall. Three
-		 * separate investigation sessions (3d-a v1, v2, and this
-		 * one) have all reached the same outcome: the snapshot-
-		 * smoke driver reads EOF on the status fd because the
-		 * parent dies mid-wait. Root cause is unidentified — the
-		 * signal-gate-isn't-enough theory from the original
-		 * KNOWN LIMITATION stands.
+		 * Historical context (kept on-record for future debuggers
+		 * of the same class of issue): three prior iterations
+		 * (3d-a v1, v2, and the one that landed this loop body
+		 * originally) all tried a bare blocking wait4 between (1)
+		 * and (2) and all crashed the parent. The failure mode
+		 * was: the parent dies mid-wait, fuzzer reads EOF on the
+		 * status fd, driver reports "worker didn't report
+		 * status". Root cause was ultimately identified as glibc's
+		 * wait4() cancellation-point + UML's scheduler re-entering
+		 * via a timer signal during the syscall, longjmp'ing into
+		 * a jmp_buf captured before the fork.
 		 *
-		 * What's new in this iteration: the non-blocking
-		 * os_snapshot_reap_zombies() drain at the top of the loop
-		 * (above the os_snapshot_read_all that reads the next
-		 * command) reaps dead workers from prior iterations
-		 * without entering the crash path. That closes the
-		 * zombie-accumulation side of the review's "zombies
-		 * accumulate in the host and get reaped when the UML
-		 * process exits" complaint — for any testcase with a
-		 * pause between iterations on the fuzzer side (which is
-		 * every real fuzzer cadence), prior workers are reaped
-		 * before the next fork.
-		 *
-		 * The status slot still reports 0 regardless of real
-		 * worker exit; that's a semantic limitation the protocol
-		 * consumer documents in Documentation/virt/uml/snapshot.rst
-		 * §"Limitations (v1 ceiling)".
+		 * Resolution: use os_snapshot_poll_waitpid_status(), which
+		 * polls wait4(pid, &status, WNOHANG) in a 1 ms loop with
+		 * clock_nanosleep between polls. The WNOHANG variant is
+		 * already proven safe in os_snapshot_reap_zombies — it
+		 * never blocks inside wait4, so the scheduler-reentry
+		 * timer-signal path never fires from within the syscall.
+		 * Real worker status is now plumbed to the fuzzer, closing
+		 * the contract violation documented in
+		 * Documentation/virt/uml/snapshot.rst.
 		 */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &pid, sizeof(pid));
@@ -371,7 +367,14 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			return (int)n;
 		}
 
-		status = 0;	/* see comment above; blocking wait crashes. */
+		status = os_snapshot_poll_waitpid_status(pid, 0);
+		if (status < 0) {
+			pr_err("snapshot: poll-wait for worker %d at iter %lu failed: %d\n",
+			       pid, iter, status);
+			os_snapshot_unblock_iter_signals();
+			static_branch_disable(&um_snapshot_enabled);
+			return status;
+		}
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &status, sizeof(status));
 		if (n < 0) {

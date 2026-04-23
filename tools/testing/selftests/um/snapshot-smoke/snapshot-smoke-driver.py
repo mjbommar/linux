@@ -86,23 +86,51 @@ def main():
             print(f"DRV: FAIL handshake expected b'AFL\\x00', got {hs!r}")
             return 1
 
-        # Request one iteration.
-        ctl_fd.write(b"\x00\x00\x00\x00")
+        # Run three iterations — the Finding #1 fix (real worker
+        # reap via os_snapshot_poll_waitpid_status) replaces the
+        # earlier hardcoded-zero-status behaviour, so this driver
+        # must cycle multiple iterations to catch any regression
+        # where zombies accumulate or the loop body corrupts its
+        # state between iterations.
+        iters = 3
+        pids = []
+        statuses = []
+        for i in range(iters):
+            ctl_fd.write(b"\x00\x00\x00\x00")
 
-        pid_bytes = status_fd.read(4)
-        if len(pid_bytes) != 4:
-            print(f"DRV: FAIL short pid read ({len(pid_bytes)} bytes)")
-            return 1
-        pid = struct.unpack("<i", pid_bytes)[0]
-        if pid <= 0:
-            print(f"DRV: FAIL non-positive pid {pid}")
-            return 1
+            pid_bytes = status_fd.read(4)
+            if len(pid_bytes) != 4:
+                print(f"DRV: FAIL iter {i} short pid read ({len(pid_bytes)} bytes)")
+                return 1
+            pid = struct.unpack("<i", pid_bytes)[0]
+            if pid <= 0:
+                print(f"DRV: FAIL iter {i} non-positive pid {pid}")
+                return 1
+            pids.append(pid)
 
-        status_bytes = status_fd.read(4)
-        if len(status_bytes) != 4:
-            print(f"DRV: FAIL short status read ({len(status_bytes)} bytes)")
+            status_bytes = status_fd.read(4)
+            if len(status_bytes) != 4:
+                print(f"DRV: FAIL iter {i} short status read ({len(status_bytes)} bytes)")
+                return 1
+            status = struct.unpack("<i", status_bytes)[0]
+            statuses.append(status)
+
+            # Each reported status must be a normal exit (WIFEXITED ==
+            # (status & 0x7f) == 0). Anything else means the worker
+            # was signal-killed or something upstream mis-reported
+            # (pre-fix the hardcoded 0 always passed this; the real
+            # wait status from a clean worker exit also reports 0).
+            if (status & 0x7f) != 0:
+                print(f"DRV: FAIL iter {i} worker {pid} non-normal-exit status=0x{status:x}")
+                return 1
+
+        # Every iteration must have produced a distinct pid — if the
+        # loop body somehow reused a pid we'd want to notice.
+        if len(set(pids)) != iters:
+            print(f"DRV: FAIL duplicate pids across iters: {pids}")
             return 1
-        status = struct.unpack("<i", status_bytes)[0]
+        pid = pids[-1]
+        status = statuses[-1]
 
         # Zombie-drain invariant (per D47 item 5 / commit 257b8cf61b84).
         # After the iteration completes, the parent's loop body runs
@@ -139,7 +167,7 @@ def main():
             proc.kill()
             proc.wait()
 
-        print(f"DRV: PASS pid={pid} status=0x{status:x} zombies=0")
+        print(f"DRV: PASS iters={iters} pids={pids} last_status=0x{status:x} zombies=0")
         return 0
     except Exception as e:
         print(f"DRV: FAIL exception: {e}")
