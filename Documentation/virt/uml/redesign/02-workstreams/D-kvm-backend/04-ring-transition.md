@@ -1,22 +1,33 @@
 # D-04: vCPU bring-up + ring transitions (kernel ↔ user)
 
-**Status:** D-04a + D-04b.0/.1a/.1b/.1c landed (2026-04-23).
-First KVM-backend VMEXIT measured at **median 22252 cyc on
-Skylake-W** — at-floor with spike 04's Skylake-SP baseline
-(22994 cyc), i.e. the port from standalone spike into the
-backend's binary form adds no measurable overhead. See
-measurements.md for the full table. D-04b.2 (swap handcrafted
-page tables for UML's init_mm.pgd) and D-04c (LSTAR
-trampoline + SYSCALL dispatch) remain.
+**Status:** **D-04a + D-04b architecturally complete**
+(2026-04-23). Backend boots under `backend=kvm` through
+start_kernel, vCPU executes UML's own kernel binary via the
+guest MMU, VMEXIT round-trip measured at-floor on two
+microarchitectures (22252 cyc median on Skylake-W Xeon
+W-2123, 5568 cyc boost-locked on Alder Lake i7-12700K).
 
 **Commit trail:**
-  - D-04a  (vCPU + KVM_RUN skeleton)   — 340eaae2bdc9
-  - D-04b.0 (defer memslot)            — 153017d8eeda
-  - D-04b.1a (SREGS helpers)           — 06d1cb4063c2
-  - D-04b.1b (harness wiring)          — ebdfcb5d0fcc
-  - stacktrace walker bound fix        — f68398447394
-  - harness os_info visibility         — d46f5227b845
-  - D-04b.1c (per-iter cycle counts)   — c461e178da68
+  - D-04a   (vCPU + KVM_RUN skeleton)       — 340eaae2bdc9
+  - D-04b.0 (defer memslot, EINVAL fix)     — 153017d8eeda
+  - D-04b.1a (SREGS helpers)                — 06d1cb4063c2
+  - D-04b.1b (harness wiring)               — ebdfcb5d0fcc
+  - stacktrace walker bound fix             — f68398447394
+  - harness os_info visibility              — d46f5227b845
+  - D-04b.1c (per-iter cycle counts)        — c461e178da68
+  - D-04b.2a (paging-range helper)          — 9c3ce166f667
+  - D-04b.2a harness 1 GiB coverage         — 62287f311f60
+  - D-04b.2b.alt (arbitrary-RIP validation) — bc97d1692c10
+  - D-05a (real time ops — unblocker)       — aa8789bc4311
+  - D-04b.2b.1 (late_initcall relocation)   — 0fb063d1ad2e
+  - D-04b.2b.2 (UML-kernel-text execution)  — 3518ff9c562b
+
+Remaining for the naive-backend phase-1:
+  - D-04c: LSTAR trampoline + SYSCALL dispatch. Reuses
+    spike 07's ~270-cyc SYSCALL+SYSRETQ pattern. Demonstrates
+    guest-user → ring-0 → sys_call_table → resume round-trip.
+  - D-05 full: signal delivery + IPI. Beyond D-05a's time ops.
+  - D-06: conformance + KGDB integration.
 
 **Effort:** 4–5 weeks (widest D task with D-03 at ~6 weeks);
 .2 + .c are the remaining pieces.
