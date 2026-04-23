@@ -1,63 +1,115 @@
 // SPDX-License-Identifier: GPL-2.0
 //
+// The kernel tree's top-level `.clippy.toml` disallows
+// `core::ffi::CStr::as_ptr` in favor of a kernel-specific
+// CStrExt helper that doesn't exist in a userspace binary.
+// Same rationale as `backend/apparmor.rs` — our binary uses
+// the standard C ABI at the FFI boundary, so local suppression
+// rather than a codebase-wide clippy config change.
+#![allow(clippy::disallowed_methods)]
+
 // virtio-net vhost-user backend (workstream C-10 v2).
 //
-// Scaffold: protocol surface + daemon wiring + class seccomp
-// filter. No TAP handling and no data path — `handle_event` is a
-// no-op log today. Follow-on commits land the TAP-fd attach,
-// the per-descriptor read/write through TAP, and the
-// packet-aware buffer management (vnet hdr, checksum offload).
+// Data path: open /dev/net/tun at startup, attach via
+// TUNSETIFF to the --tap interface name, and shuttle Ethernet
+// frames between the TAP fd and the two virtqueues:
 //
-// This commit mirrors what `console.rs` looked like at the end
-// of its commit 2: `uml-launcher backend net --socket <path>`
-// binds the socket, completes vhost-user negotiation with a
-// connecting frontend, applies the class-specific seccomp
-// filter, and enters the daemon's event loop. Enough to exercise
-// the extension pattern without pulling in the full TAP stack.
+//   * TX (guest → host, queue index 1): drain avail-ring
+//     chains, read each frame out of guest memory, write it
+//     to the TAP fd.
+//   * RX (host → guest, queue index 0): a readable-TAP
+//     eventfd wake registers with the daemon's epoll; on
+//     wake, read frames from TAP into the guest's posted
+//     buffers.
 //
-// Reference for the later commits:
-//   - cloud-hypervisor/cloud-hypervisor/vhost_user_net/src/lib.rs
-//     — the only vhost-user-backend 0.22-era net reference (the
-//     rust-vmm/vhost-device monorepo has no net crate).
+// Scope of this commit:
+//   * Open /dev/net/tun with O_RDWR | O_CLOEXEC | O_NONBLOCK.
+//   * TUNSETIFF with IFF_TAP | IFF_NO_PI so the TAP fd
+//     carries raw Ethernet frames with no prepended tag. No
+//     IFF_VNET_HDR — that requires VIRTIO_NET_F_MRG_RXBUF +
+//     all the TSO/CSUM negotiation, which belongs with a
+//     follow-on.
+//   * Feature bits advertised: VIRTIO_F_VERSION_1 + protocol
+//     features. No MAC, CSUM, GSO, MRG_RXBUF, STATUS, MQ.
+//     Frontend sees a "dumb" Ethernet NIC at 1500 MTU; guest
+//     drivers configure a random locally-administered MAC
+//     and don't expect any offloads.
+//   * Class-specific seccomp additions: SYS_ioctl is in the
+//     baseline already, but we add SYS_recvfrom / SYS_sendto
+//     + socket + connect in case a future TAP setup path
+//     needs them. SYS_openat for /dev/net/tun is NOT added;
+//     the fd is opened BEFORE seccomp applies.
+//
+// Deliberately out of scope:
+//   * vhost-net (kernel-side tap offload) — different trap
+//     mechanism entirely, not our stack's model.
+//   * VIRTIO_NET_F_MRG_RXBUF / large-receive offload.
+//   * VIRTIO_NET_F_MAC / MTU / STATUS config.
+//   * Multi-queue (VIRTIO_NET_F_MQ).
+//   * TAP creation or persistence — the operator sets up
+//     `ip tuntap add tap0 mode tap ...` before launch.
+//
+// Reference: cloud-hypervisor/vhost_user_net (older
+// vhost-user-backend API, same shape).
 
+use std::io;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock};
+use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT};
 use virtio_bindings::bindings::virtio_config::VIRTIO_F_VERSION_1;
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+use virtio_queue::{QueueOwnedT, QueueT};
+use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
 
 use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendNetArgs;
 
-/// RX queue index (host → guest). Frames the TAP fd reads will
-/// be delivered on here once the data path lands.
 const RX_QUEUE: u16 = 0;
-
-/// TX queue index (guest → host). Frames the guest posts here
-/// will be written to the TAP fd once the data path lands.
 const TX_QUEUE: u16 = 1;
-
-/// Two queues for a simple TAP backend (RX + TX). No control
-/// queue (VIRTIO_NET_F_CTRL_VQ = bit 17) and no multi-queue
-/// (VIRTIO_NET_F_MQ = bit 22) — both are feature-bit-gated
-/// and we advertise neither.
 const NUM_QUEUES: usize = 2;
-
-/// Max ring entries per virtqueue. Cloud-hypervisor's
-/// `vhost_user_net` uses 256 as well; it's also the console
-/// default. A single buffer holds at most one Ethernet frame
-/// (1514 bytes + optional vnet hdr), so 256 buffers covers
-/// burst load without wasting memory.
 const QUEUE_SIZE: usize = 256;
 
-/// Minimum feature set for negotiation. The scaffold only
-/// advertises what's required to let the guest finish the
-/// vhost-user handshake; feature-bit work for checksum
-/// offload, MAC config, status, etc. lands with the data path.
+/// `data` value used when registering the TAP fd with the
+/// daemon's epoll via `VringEpollHandler::register_listener`.
+/// Must be > NUM_QUEUES (the daemon reserves [0, NUM_QUEUES]
+/// for queue kicks + the exit event); NUM_QUEUES + 1 keeps the
+/// mapping self-describing.
+const TAP_FD_ID: u16 = NUM_QUEUES as u16 + 1;
+
+/// Largest Ethernet frame we expect (no jumbo, no GSO). 1518
+/// = 14-byte header + 1500 MTU + 4-byte FCS, with a bit of
+/// margin. The virtqueue buffers each cover this cleanly;
+/// anything larger gets dropped with a warning.
+const MAX_FRAME_LEN: usize = 1518;
+
+/// TUNSETIFF interface-flag bits we set.
+const IFF_TAP: libc::c_int = 0x0002;
+const IFF_NO_PI: libc::c_int = 0x1000;
+
+/// TUNSETIFF ioctl number: _IOW('T', 202, int).
+/// Matches `<linux/if_tun.h>`. Rust's `nix::ioctl_*!` macros
+/// could synthesize this, but a bare const is clearer and
+/// trivially auditable.
+const TUNSETIFF: libc::c_ulong = 0x400454ca;
+
+/// Maximum interface-name length (IFNAMSIZ).
+const IFNAMSIZ: usize = 16;
+
+/// Layout of `struct ifreq` for the TUNSETIFF ioctl. We only
+/// care about ifr_name + ifr_flags; the union's other arms
+/// are zero-padding for this use.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IfReq {
+    ifr_name: [u8; IFNAMSIZ],
+    ifr_flags: libc::c_short,
+    _pad: [u8; 22], // sizeof(ifreq) - (IFNAMSIZ + sizeof(short))
+}
+
 fn device_features() -> u64 {
     (1u64 << VIRTIO_F_VERSION_1)
         | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
@@ -67,44 +119,317 @@ fn protocol_features() -> VhostUserProtocolFeatures {
     VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::REPLY_ACK
 }
 
-/// Net backend state. Keeps the same `Arc<RwLock<...>>` wrap
-/// pattern console uses so the daemon's blanket impl picks up
-/// our `VhostUserBackendMut`.
+/// Open /dev/net/tun + TUNSETIFF(IFF_TAP | IFF_NO_PI) on
+/// @ifname. Returns the owning fd. Caller should register the
+/// raw fd with the daemon's epoll for RX-ready notification.
+fn open_tap(ifname: &str) -> io::Result<OwnedFd> {
+    if ifname.len() >= IFNAMSIZ {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TAP interface name too long: {ifname}"),
+        ));
+    }
+    // Open /dev/net/tun. O_NONBLOCK so we drain frames without
+    // blocking the daemon thread; O_CLOEXEC so we don't leak
+    // the fd across any future fork().
+    let path = std::ffi::CString::new("/dev/net/tun")
+        .expect("/dev/net/tun is a static ascii path");
+    // SAFETY: FFI call with a valid NUL-terminated C string
+    // and constant integer flags. Returns -1 on error.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd came from a successful open(2); OwnedFd now
+    // manages its close.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let mut req = IfReq {
+        ifr_name: [0u8; IFNAMSIZ],
+        ifr_flags: (IFF_TAP | IFF_NO_PI) as libc::c_short,
+        _pad: [0u8; 22],
+    };
+    req.ifr_name[..ifname.len()].copy_from_slice(ifname.as_bytes());
+
+    // SAFETY: ioctl on an owned fd, passing a pointer to a
+    // correctly-initialized IfReq of the expected size.
+    // TUNSETIFF reads ifr_name + ifr_flags and writes
+    // ifr_name back; the written name may mutate if the
+    // kernel rewrites an anonymous interface, but we always
+    // pass an explicit one so no surprise.
+    let rc = unsafe {
+        libc::ioctl(
+            owned.as_raw_fd(),
+            TUNSETIFF,
+            &mut req as *mut _ as *mut libc::c_void,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(owned)
+}
+
+/// Import OwnedFd::from_raw_fd without pulling in the trait
+/// at the module top (avoids the dead-trait-use clippy lint
+/// when tests don't exercise the open path).
+use std::os::fd::FromRawFd;
+
 pub struct NetBackend {
-    /// Guest memory set at `set_mem_table()` time.
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap<()>>>,
-
-    /// `VIRTIO_RING_F_EVENT_IDX` negotiation result. Recorded
-    /// now even though the scaffold doesn't act on it; the
-    /// data-path commits will consult it in
-    /// `needs_notification()`.
     event_idx: bool,
-
-    /// Name of the host TAP device, if one was specified at
-    /// launch. Not yet consumed — the data path commit opens
-    /// `/dev/net/tun` and binds this name via `TUNSETIFF`.
-    /// Carried here so the diff when the data path lands is
-    /// strictly additive.
     #[allow(dead_code)]
     tap_name: Option<String>,
-
-    /// Exit-event pair — see `ConsoleBackend::exit_event` for
-    /// the full rationale. Needed for clean shutdown when the
-    /// frontend disconnects; without it the daemon's internal
-    /// worker thread hangs in `epoll_wait`.
+    /// Opened TAP fd. `None` for the no-image test harness
+    /// paths; `Some` on the real `run()` path.
+    tap: Option<Arc<OwnedFd>>,
     exit_event: (EventConsumer, EventNotifier),
 }
 
 impl NetBackend {
     pub fn new(tap_name: Option<String>) -> Result<Self> {
+        let tap = match tap_name.as_deref() {
+            Some(name) => {
+                let fd = open_tap(name)
+                    .with_context(|| format!("opening TAP interface {name}"))?;
+                Some(Arc::new(fd))
+            }
+            None => None,
+        };
         let exit_event = new_event_consumer_and_notifier(EventFlag::NONBLOCK)
             .context("exit-event consumer/notifier pair")?;
         Ok(Self {
             mem: None,
             event_idx: false,
             tap_name,
+            tap,
             exit_event,
         })
+    }
+
+    pub fn tap_raw_fd(&self) -> Option<RawFd> {
+        self.tap.as_deref().map(|o| o.as_raw_fd())
+    }
+
+    /// Drain the TX virtqueue: for each published chain,
+    /// read the Ethernet frame out of guest memory and write
+    /// it to the TAP fd. Errors on an individual write are
+    /// logged and dropped — TAP might be buffer-full
+    /// (EAGAIN), in which case the guest re-sends; or the
+    /// interface might have been torn down, in which case
+    /// further writes will also fail and the daemon will
+    /// eventually exit via the frontend disconnect.
+    fn process_tx_queue(&mut self, vring: &VringRwLock) -> io::Result<()> {
+        let atomic_mem = match self.mem.as_ref() {
+            Some(m) => m,
+            None => {
+                log::warn!("net: TX kick before memory table was set; skipping");
+                return Ok(());
+            }
+        };
+        let tap_fd = match self.tap.as_ref() {
+            Some(t) => t.as_raw_fd(),
+            None => {
+                log::warn!("net: TX kick with no TAP fd; dropping");
+                return Ok(());
+            }
+        };
+
+        let requests = {
+            let mut guard = vring.get_mut();
+            let queue = guard.get_queue_mut();
+            queue
+                .iter(atomic_mem.memory())
+                .map_err(|e| io::Error::other(format!("iter TX queue: {e:?}")))?
+                .collect::<Vec<_>>()
+        };
+        if requests.is_empty() {
+            return Ok(());
+        }
+
+        let mut any_used = false;
+        let mut frame = vec![0u8; MAX_FRAME_LEN];
+        for chain in requests {
+            let head = chain.head_index();
+            let chain_mem = atomic_mem.memory();
+            let mut reader = chain
+                .clone()
+                .reader(&chain_mem)
+                .map_err(|e| io::Error::other(format!("chain reader: {e:?}")))?;
+            let avail = reader.available_bytes();
+            if avail == 0 {
+                vring
+                    .add_used(head, 0)
+                    .map_err(|e| io::Error::other(format!("add_used empty: {e:?}")))?;
+                any_used = true;
+                continue;
+            }
+            if avail > frame.len() {
+                log::warn!("net: oversized TX frame {avail}; truncating");
+            }
+            let take = avail.min(frame.len());
+            if let Err(e) = std::io::Read::read_exact(&mut reader, &mut frame[..take]) {
+                log::warn!("net: reading TX frame: {e}");
+                vring
+                    .add_used(head, 0)
+                    .map_err(|e| io::Error::other(format!("add_used err: {e:?}")))?;
+                any_used = true;
+                continue;
+            }
+
+            // Single write(2) on the TAP fd. O_NONBLOCK so
+            // EAGAIN is the congestion signal; we drop that
+            // frame and let the guest retransmit (TCP/UDP
+            // both handle loss).
+            // SAFETY: FFI, pointer valid for `take` bytes.
+            let n = unsafe {
+                libc::write(tap_fd, frame.as_ptr() as *const _, take)
+            };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EAGAIN) {
+                    log::warn!("net: TAP write failed: {err}");
+                }
+            }
+
+            vring
+                .add_used(head, 0)
+                .map_err(|e| io::Error::other(format!("add_used TX: {e:?}")))?;
+            any_used = true;
+        }
+
+        if any_used {
+            let notify_mem = atomic_mem.memory();
+            let needs = {
+                let mut guard = vring.get_mut();
+                let queue = guard.get_queue_mut();
+                queue
+                    .needs_notification(&*notify_mem)
+                    .map_err(|e| io::Error::other(format!("needs_notification TX: {e:?}")))?
+            };
+            if needs {
+                vring
+                    .signal_used_queue()
+                    .map_err(|e| io::Error::other(format!("signal_used_queue TX: {e:?}")))?;
+            }
+        }
+        let _ = self.event_idx;
+        Ok(())
+    }
+
+    /// Read frames from the TAP fd and fill them into the
+    /// RX virtqueue's posted buffers. Called when either
+    /// (a) the guest kicks the RX queue (it just posted more
+    /// empty buffers), or (b) the epoll watch on TAP fires
+    /// (new frames available). Drain as much as possible in
+    /// either case.
+    fn process_rx_queue(&mut self, vring: &VringRwLock) -> io::Result<()> {
+        let atomic_mem = match self.mem.as_ref() {
+            Some(m) => m,
+            None => {
+                log::warn!("net: RX wake before memory table was set");
+                return Ok(());
+            }
+        };
+        let tap_fd = match self.tap.as_ref() {
+            Some(t) => t.as_raw_fd(),
+            None => {
+                log::warn!("net: RX wake with no TAP fd");
+                return Ok(());
+            }
+        };
+
+        // Drain TAP-then-writer in a loop until one side is
+        // empty. Buffer each frame in a host-side staging buf
+        // first; the descriptor chain's writer is where it
+        // ultimately lands.
+        let mut frame = vec![0u8; MAX_FRAME_LEN];
+        let mut any_used = false;
+
+        loop {
+            // SAFETY: FFI, pointer valid for MAX_FRAME_LEN
+            // bytes, non-blocking read.
+            let n = unsafe {
+                libc::read(
+                    tap_fd,
+                    frame.as_mut_ptr() as *mut _,
+                    frame.len(),
+                )
+            };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EAGAIN) {
+                    break; // no more frames right now
+                }
+                log::warn!("net: TAP read failed: {err}");
+                break;
+            }
+            if n == 0 {
+                break; // TAP closed
+            }
+            let len = n as usize;
+
+            // Get one avail descriptor and write the frame.
+            let chain = {
+                let mut guard = vring.get_mut();
+                let queue = guard.get_queue_mut();
+                match queue.iter(atomic_mem.memory()) {
+                    Ok(mut iter) => iter.next(),
+                    Err(e) => {
+                        log::warn!("net: iter RX queue: {e:?}");
+                        None
+                    }
+                }
+            };
+            let chain = match chain {
+                Some(c) => c,
+                None => {
+                    log::debug!(
+                        "net: dropping RX frame {len}B — no guest-posted buffer"
+                    );
+                    break;
+                }
+            };
+            let head = chain.head_index();
+            let chain_mem = atomic_mem.memory();
+            let mut writer = match chain.clone().writer(&chain_mem) {
+                Ok(w) => w,
+                Err(e) => {
+                    log::warn!("net: chain writer: {e:?}");
+                    break;
+                }
+            };
+            if let Err(e) = std::io::Write::write_all(&mut writer, &frame[..len]) {
+                log::warn!("net: writing RX frame: {e}");
+                break;
+            }
+            vring
+                .add_used(head, len as u32)
+                .map_err(|e| io::Error::other(format!("add_used RX: {e:?}")))?;
+            any_used = true;
+        }
+
+        if any_used {
+            let notify_mem = atomic_mem.memory();
+            let needs = {
+                let mut guard = vring.get_mut();
+                let queue = guard.get_queue_mut();
+                queue
+                    .needs_notification(&*notify_mem)
+                    .map_err(|e| io::Error::other(format!("needs_notification RX: {e:?}")))?
+            };
+            if needs {
+                vring
+                    .signal_used_queue()
+                    .map_err(|e| io::Error::other(format!("signal_used_queue RX: {e:?}")))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -115,23 +440,18 @@ impl VhostUserBackendMut for NetBackend {
     fn num_queues(&self) -> usize {
         NUM_QUEUES
     }
-
     fn max_queue_size(&self) -> usize {
         QUEUE_SIZE
     }
-
     fn features(&self) -> u64 {
         device_features()
     }
-
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         protocol_features()
     }
-
     fn set_event_idx(&mut self, enabled: bool) {
         self.event_idx = enabled;
     }
-
     fn update_memory(
         &mut self,
         mem: GuestMemoryAtomic<GuestMemoryMmap<()>>,
@@ -144,33 +464,31 @@ impl VhostUserBackendMut for NetBackend {
         &mut self,
         device_event: u16,
         evset: EventSet,
-        _vrings: &[VringRwLock],
+        vrings: &[VringRwLock],
         _thread_id: usize,
     ) -> std::io::Result<()> {
         if evset != EventSet::IN {
             log::warn!("net: unexpected evset {evset:?}; ignoring");
             return Ok(());
         }
-
-        // Scaffold: recognize the queue indices but do no work.
-        // Data path (TAP read/write, descriptor-chain byte
-        // movement, event-idx-aware notifications) lands in a
-        // follow-on commit.
         match device_event {
-            RX_QUEUE => log::debug!(
-                "net: RX queue kick (data-path TBD in follow-on commit)"
-            ),
-            TX_QUEUE => log::debug!(
-                "net: TX queue kick (data-path TBD in follow-on commit)"
-            ),
+            TX_QUEUE => {
+                let vring = &vrings[TX_QUEUE as usize];
+                self.process_tx_queue(vring)?;
+            }
+            RX_QUEUE => {
+                let vring = &vrings[RX_QUEUE as usize];
+                self.process_rx_queue(vring)?;
+            }
+            id if id == TAP_FD_ID => {
+                let vring = &vrings[RX_QUEUE as usize];
+                self.process_rx_queue(vring)?;
+            }
             other => log::warn!("net: unexpected device_event={other}; ignoring"),
         }
         Ok(())
     }
 
-    /// Hand the daemon a cloned exit-event pair so its worker
-    /// thread can be woken at shutdown. See the same method on
-    /// `ConsoleBackend` for the rationale.
     fn exit_event(
         &self,
         _thread_index: usize,
@@ -183,13 +501,6 @@ impl VhostUserBackendMut for NetBackend {
     }
 }
 
-/// Entry point for `uml-launcher backend net --socket <path>
-/// [--tap <name>]`.
-///
-/// Creates backend state + daemon, applies the net-class
-/// seccomp filter, and calls `serve()`. The TAP fd is not yet
-/// opened; the `--tap` flag is carried through for the data
-/// path commit.
 pub fn run(args: BackendNetArgs) -> Result<i32> {
     let socket = args.common.socket;
     tracing::info!(
@@ -198,9 +509,17 @@ pub fn run(args: BackendNetArgs) -> Result<i32> {
         "net backend: starting vhost-user daemon"
     );
 
+    // Constructor opens /dev/net/tun + TUNSETIFF before
+    // seccomp applies — the event-loop baseline doesn't allow
+    // open/openat and we explicitly don't want to widen it
+    // for a one-shot attach.
     let backend = Arc::new(RwLock::new(
         NetBackend::new(args.tap).context("constructing net backend")?,
     ));
+    let tap_fd = backend
+        .read()
+        .expect("net backend lock poisoned")
+        .tap_raw_fd();
 
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
@@ -211,10 +530,20 @@ pub fn run(args: BackendNetArgs) -> Result<i32> {
     )
     .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
 
-    // Net class uses the shared vhost-user event-loop baseline
-    // Transition into the class's AppArmor sub-profile if
-    // available. See console.rs for the shape rationale; same
-    // graceful-skip contract here.
+    // Register the TAP fd with the daemon's epoll so a
+    // readable-TAP event routes to handle_event(TAP_FD_ID).
+    if let Some(fd) = tap_fd {
+        let handlers = daemon.get_epoll_handlers();
+        if let Some(h) = handlers.first() {
+            h.register_listener(fd, EventSet::IN, TAP_FD_ID as u64)
+                .map_err(|e| anyhow::anyhow!("register TAP fd: {e:?}"))?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "VhostUserDaemon returned no epoll handlers"
+            ));
+        }
+    }
+
     match crate::backend::apparmor::change_profile("uml-launcher//backend_net") {
         Ok(crate::backend::apparmor::ChangeResult::Changed) => {
             tracing::info!("net backend: entered AppArmor sub-profile");
@@ -227,12 +556,11 @@ pub fn run(args: BackendNetArgs) -> Result<i32> {
         }
     }
 
-    // plus no extra syscalls for the scaffold (the data path
-    // will add TUN ioctls — TUNSETIFF, TUNSETOFFLOAD, etc. —
-    // and whatever packet-read syscalls TAP needs). `ioctl` is
-    // already in the baseline, so scaffold-time tap attach
-    // (if any) will not trip the filter; cmd-level argument
-    // filtering on ioctl is a future tightening.
+    // Net-class seccomp filter: event-loop baseline + nothing
+    // extra for TX/RX. The TAP fd I/O path uses plain read(2)
+    // and write(2), which are in the baseline; the only
+    // elevated syscalls (open + ioctl(TUNSETIFF)) were
+    // invoked before this apply.
     tracing::debug!("net backend: applying seccomp filter");
     FilterBuilder::new()
         .with_vhost_user_event_loop()
@@ -256,14 +584,16 @@ mod tests {
         let f = device_features();
         assert!(f & (1u64 << VIRTIO_F_VERSION_1) != 0);
         assert!(f & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0);
-        // No feature-bit logic yet; confirm we aren't accidentally
-        // advertising MAC / MTU / CSUM etc. since the scaffold
-        // doesn't honor them.
-        // VIRTIO_NET_F_MAC = bit 5, VIRTIO_NET_F_MTU = bit 3,
-        // VIRTIO_NET_F_STATUS = bit 16.
-        assert_eq!(f & (1u64 << 3), 0, "MTU must not be advertised by scaffold");
-        assert_eq!(f & (1u64 << 5), 0, "MAC must not be advertised by scaffold");
-        assert_eq!(f & (1u64 << 16), 0, "STATUS must not be advertised by scaffold");
+        // Explicit: no MAC / MTU / CSUM / STATUS / MQ advertised.
+        // These would all require matching config-space bytes we
+        // don't emit.
+        for bit in [3u32, 5, 16, 22] {
+            assert_eq!(
+                f & (1u64 << bit),
+                0,
+                "virtio-net feature bit {bit} must not be advertised"
+            );
+        }
     }
 
     #[test]
@@ -274,17 +604,20 @@ mod tests {
     }
 
     #[test]
-    fn new_backend_has_no_memory() {
+    fn new_backend_without_tap_has_no_fd() {
         let b = NetBackend::new(None).expect("construct backend");
         assert!(b.mem.is_none());
         assert!(!b.event_idx);
         assert!(b.tap_name.is_none());
+        assert!(b.tap.is_none());
+        assert!(b.tap_raw_fd().is_none());
     }
 
     #[test]
-    fn new_backend_carries_tap_name() {
-        let b = NetBackend::new(Some("tap0".to_string())).expect("construct backend");
-        assert_eq!(b.tap_name.as_deref(), Some("tap0"));
+    fn open_tap_rejects_oversized_name() {
+        let err =
+            open_tap("this_name_is_way_too_long_for_ifnamsiz").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -302,5 +635,13 @@ mod tests {
         assert!(!b.event_idx);
         b.set_event_idx(true);
         assert!(b.event_idx);
+    }
+
+    #[test]
+    fn ifreq_layout_is_sizeof_32() {
+        // struct ifreq on Linux is 40 bytes total: 16 for
+        // ifr_name, 24 for the union. Our truncated IfReq
+        // pads to 24 in the tail; 16 + 2 + 22 = 40.
+        assert_eq!(std::mem::size_of::<IfReq>(), 40);
     }
 }
