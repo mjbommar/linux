@@ -14,6 +14,7 @@ What could derail the plan, ranked by likelihood × impact.
 | R6 | Single-engineer bus factor on a workstream | High | Medium | (covered in 02-workstreams/README) |
 | R7 | KVM backend doesn't reach <100 ns | Medium | Low | (covered in D-06) |
 | R8 | Snapshot/forkserver harder than CRIU-lite | Medium | Medium | (covered in C-09) |
+| R9 | SIGALRM reentry into stale `jmp_buf` during fork-parent non-kernel-exec window (Finding #1 hazard class) | Low (with v1 ceiling) / High (if Phase II Lift #4d authors don't read the memo) | High | [signal-reentry-in-fork-window.md](signal-reentry-in-fork-window.md) |
 
 ## The decisions log
 

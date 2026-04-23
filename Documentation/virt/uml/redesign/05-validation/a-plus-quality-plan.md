@@ -755,6 +755,34 @@ If we want to start moving toward this now, the next actions should be:
 5. Keep `AutoFDO` / `Propeller` parked until the workload and KVM/backend
    story is mature enough to justify serious tuning.
 
+## Blocked on host toolchain: Context Analysis (clang-22+)
+
+**Status as of 2026-04-23:** host clang is **21.1.8** (Ubuntu
+package `clang`). Compiler-Based Context Analysis was added
+to mainline Linux in 2026 and requires **clang 22 or newer**.
+Until the host toolchain is bumped we cannot exercise this
+surface under UML, so no `CONFIG_WARN_CONTEXT_ANALYSIS=y`
+pilot is scheduled.
+
+Captured as post-Q1 push **Lift #10** in
+`06-sequencing/post-q1-push.md`, where it lives in Phase VII
+(deferred) precisely because the only engineering lever here
+is "wait for Ubuntu/Debian to ship clang 22". No in-tree
+fix. Revisit triggers:
+
+- A system clang rebase to 22.x or newer on any CI runner
+  (`clang --version` ≥ `22.`).
+- A kernel patch series that moves Context Analysis behind a
+  fallback so clang-21 can opt in with reduced coverage —
+  unlikely but worth watching `lore.kernel.org` filter
+  `subject:"context analysis"`.
+
+When the unblock happens, the implementation plan is the
+`CONFIG_WARN_CONTEXT_ANALYSIS=y` narrow-pilot in bullet 3
+of §"Tools I think are worth serious consideration" above
+(line ~645 of this document). Not blocked on any in-tree
+UML work.
+
 ## Sources
 
 - Linux kernel: Building with Clang/LLVM

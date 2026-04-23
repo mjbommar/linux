@@ -12,6 +12,18 @@ Runs and tracks the Phase Q1 checks from
 
 `checkpatch` is per-patch, run separately, and not in this script.
 
+**Not included (blocked on host toolchain):** Compiler-Based
+Context Analysis (`CONFIG_WARN_CONTEXT_ANALYSIS=y`) requires
+**clang 22 or newer**. The host in this tree ships clang
+21.x, so Context Analysis is out of scope for Q1 today —
+tracked as Lift #10 in `06-sequencing/post-q1-push.md`
+(Phase VII, deferred). No script plumbing needed until the
+toolchain upgrade unblocks it; when that lands, a third
+`*_context_analysis.sh` clang-invocation alongside
+`gcc`/`clang`/`sparse`/`smatch` is the expected shape (see
+`05-validation/a-plus-quality-plan.md` §"Blocked on host
+toolchain").
+
 ## Scripts
 
 - `uml-quality-q1.sh [profile]`  
