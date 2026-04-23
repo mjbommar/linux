@@ -128,8 +128,8 @@ linux: vmlinux
 # the user run `make ARCH=um -j N` to build. Same workflow as the
 # kernel's standard defconfig path.
 
-UML_PROFILES := prod-fast prod-with-hooks research fuzz fuzz-deep \
-		race sandbox embedded time-travel
+UML_PROFILES := prod-fast prod-with-hooks research research-kmsan \
+		fuzz fuzz-deep race sandbox embedded time-travel
 
 PHONY += $(addprefix uml/,$(UML_PROFILES)) uml/list-profiles
 

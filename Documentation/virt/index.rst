@@ -15,6 +15,7 @@ Virtualization Support
    uml/section-split
    uml/ftrace
    uml/kprobes
+   uml/kmsan
    uml/snapshot
    uml/launcher
    uml/profiles/index

@@ -1,28 +1,19 @@
 # C-07: Port KMSAN to UML
 
-**Status:** design-locked (2026-04-22); four empirical probes in
-D44 established that options A (VMALLOC quarter-split) and B
-(dedicated host-mmap past KASAN) both fight KMSAN's per-page-
-struct metadata model, and the fourth probe's boot hang
-confirmed phase-1 mmap is the wrong contract for KMSAN's
-runtime (unlike KASAN, whose stateless zero-filled shadow
-tolerates it). Resolution in the D44 "Resolution" addendum
-and D51: path forward is a new weak arch callback
-(`kmsan_arch_init_early_shadow`) on `mm/kmsan/init.c`, called
-from `kmsan_init_shadow()` before the existing reserved-range
-sweep. UML overrides it; x86 and s390 keep the default empty
-no-op and behave byte-identically to today. The core upstream
-patch is ~20 LOC and introduces a new entrypoint rather than
-changing any existing function — deliberately the least
-invasive shape to pitch to KMSAN maintainer Alexander
-Potapenko. See D51 for the upstream framing.
-
-Implementation-queued behind the upstream RFC. Effort estimate
-holds at 1 week of focused work once the generic callback
-merges (5-6 bisectable UML-side commits per the plan in D44's
-second-probe addendum). Still the heaviest remaining C-port,
-but the blocker has narrowed from "design question" to
-"upstream coordination".
+**Status:** landed on-fork (2026-04-23) across four UML-side
+commits plus the generic `kmsan_arch_init_early_shadow()` weak
+hook carried on-branch (upstream RFC submission deferred per
+D51 until maintainer coordination). `ARCH=um LLVM=1 uml/
+research-kmsan` + `-j$(nproc)` produces a full `vmlinux`
+end-to-end on this tree — first UML image with
+`HAVE_ARCH_KMSAN=y`. gcc prod-fast stays clean (KMSAN=n
+default). `tools/testing/selftests/um/kmsan-smoke/` boots and
+asserts `/sys/kernel/debug/kmsan/` present + optional planted
+uninit-read report; registered in the in-tree selftest target
+list. Boot-time runtime verification (KMSAN KUnit pass, dmesg
+report on planted uninit) is the operator's responsibility per
+the usual `run_tests` + manual-reproducer flow documented in
+`Documentation/virt/uml/kmsan.rst`.
 **Effort:** 6 weeks (budget). Optimistic-case scope — KASAN's
 UML port paved the mmap pattern we reuse — is closer to **2-3
 weeks of disciplined work** if U1/U2/U3 hold. Kept at 6 weeks

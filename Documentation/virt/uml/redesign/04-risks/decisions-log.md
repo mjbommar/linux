@@ -5529,4 +5529,73 @@ rejected at orchestrate time rather than silently colliding.
 
 ---
 
+## D54 (2026-04-23) — C-07 lands on-fork ahead of upstream submission
+
+**Decision.** The generic `kmsan_arch_init_early_shadow()`
+weak hook patch (previously staged for upstream RFC in
+`Documentation/virt/uml/redesign/upstream-patches/kmsan-arch-
+callback-rfc/`) is committed directly to this fork as
+`mm/kmsan: add kmsan_arch_init_early_shadow()` (commit
+f3307a2f1c99), and the four UML-side commits (asm/kmsan.h
+scaffold, kmsan_arch_init_early_shadow UML override,
+arch_kmsan_get_meta_or_null stub, selftest + docs + profile)
+land immediately after. Upstream RFC submission to
+linux-mm + kmsan maintainers remains deferred until the
+ARCH=um maintainer coordination the user asked us not to
+pre-empt; the on-fork series unblocks the rest of the
+redesign without waiting.
+
+**Alternatives considered.**
+
+- *Hold entire series behind upstream merge:* matches the
+  original D51 plan. Rejected because the user explicitly
+  cleared "landing code in our fork" from the upstream-
+  coordination gate; that gate applies only to submission,
+  not local iteration.
+- *Carry UML-side patches only, rebase on upstream weak
+  hook when it lands:* would force either a dummy inline
+  for `kmsan_arch_init_early_shadow` in UML's own tree (to
+  keep the UML build clean before the weak hook merges) or
+  accept a broken intermediate state. Neither matches the
+  "bisectable at every commit" discipline §2 of
+  AGENT-PROMPT requires. Carrying the weak-hook commit on-
+  branch fixes that cleanly.
+- *Extend `asm/kmsan.h` to match x86's VMALLOC quarter-
+  split rather than the dedicated-region layout:* already
+  resolved by D44 probes 1-4 and the header comments —
+  UML's VMALLOC_END is TASK_SIZE-bounded, not canonical-
+  hole-bounded, so the x86 math has nowhere to land. Not
+  re-opened here.
+
+**How to apply.**
+
+- Upstream submission: when ARCH=um maintainer buy-in
+  materializes, the cover-letter in `upstream-patches/
+  kmsan-arch-callback-rfc/` is still the right framing;
+  rebase it onto whichever linux-mm tree is then current.
+  The UML-side commits are fork-only in the sense that
+  they depend on the weak hook landing upstream, so
+  they'd go as a follow-on series after.
+- Profile selection: `research-kmsan` is the sibling
+  profile for KMSAN work. Don't try to enable KMSAN via a
+  flag on top of `research` — Kconfig would need to handle
+  the KASAN/KMSAN mutual exclusion and the memory-pressure
+  overhead that only KMSAN users want to pay for. Keep
+  them siblings.
+- Follow-on work tracked in `07-port-kmsan.md` v3 roadmap
+  (origin chain across snapshot/fork, KMSAN KUnit
+  enablement under research-kmsan, memory-pressure
+  measurement for the fuzz-kmsan idea).
+
+**Cross-references.**
+
+- D44 — four-probe empirical investigation that produced
+  the dedicated-region layout.
+- D51 — upstream framing for the weak-hook patch.
+- `mm/kmsan/init.c::kmsan_arch_init_early_shadow`.
+- `arch/um/include/asm/kmsan.h`, `arch/um/kernel/mem.c`.
+- `Documentation/virt/uml/kmsan.rst`.
+
+---
+
 ## (Future entries here, as decisions are made)
