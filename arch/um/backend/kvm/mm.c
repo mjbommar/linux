@@ -67,8 +67,16 @@ void kvm_mm_detach(struct mm_id *id)
 	 * for "don't close under an attached mm" not ownership
 	 * transfer.
 	 */
-	if (refcount_read(&ctx->mm_refcount) > 0)
-		refcount_dec_and_test(&ctx->mm_refcount);
+	if (refcount_read(&ctx->mm_refcount) > 0) {
+		/*
+		 * refcount_dec_and_test returns true on 1→0; we don't
+		 * act on that here (shutdown still closes vm_fd
+		 * unconditionally) but the helper is
+		 * __must_check, so cast the return to void to silence
+		 * -Wunused-result.
+		 */
+		(void)refcount_dec_and_test(&ctx->mm_refcount);
+	}
 }
 
 /*

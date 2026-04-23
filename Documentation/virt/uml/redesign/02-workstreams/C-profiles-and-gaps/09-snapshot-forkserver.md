@@ -167,10 +167,10 @@ entry point. The only channel this workstream commits to
 landing in v1 is the AFL fd handshake; debugfs and mconsole are
 opportunistic follow-ups.
 
-### 3. Per-iteration protocol (AFL-compatible)
+### 3. Per-iteration protocol (AFL-compatible wire format, v1 ceiling on status)
 
 After `um_snapshot_ready()` returns in the parent, the
-forkserver loop is the canonical AFL protocol:
+forkserver loop emits the AFL wire format:
 
 ```
 handshake (once):
@@ -178,18 +178,43 @@ handshake (once):
 
 per iteration:
     198 ->  parent: [4 bytes: testcase descriptor or length]
-    parent ->  199: [4 bytes: worker pid]
     parent ->       fork() -> child = worker
+    parent ->  199: [4 bytes: worker pid]
+    parent ->  199: [4 bytes: status = 0 (v1 ceiling — see below)]
     worker <-  198: [testcase payload, shmem or pipe]
     worker runs testcase
     worker exit(status)
-    parent reaps via waitpid, -> 199: [4 bytes: status]
+    parent drains zombies via wait4(-1, WNOHANG) at next iter's top
 ```
 
 Twelve bytes per iteration; no execve, no linker, no libc init.
 Wire format matches AFL++ exactly so `syz-manager`'s existing
 `SnapshotInstance` code path (Prior art §4) binds without a new
 protocol.
+
+**v1 ceiling on the status word.** The parent does *not*
+`waitpid()` the specific worker between pid-report and
+status-report — that path has been attempted four times
+(2026-04-21 / 2026-04-23) and crashes the parent with SIGILL
+every time. Root cause: UML's `SIGALRM` timer dispatched into
+UML's signal handler during any parent non-kernel-exec window
+calls `switch_threads()` → `longjmp()` into a `jmp_buf`
+captured pre-fork (stale stack, garbage instruction, SIGILL).
+Attempts included: bare blocking `wait4`, `WNOHANG` spin-poll,
+spin-poll with `clock_nanosleep` / `sched_yield` between polls,
+spin-poll with host-level `sigprocmask SIG_BLOCK` for the
+duration. All reproduced the crash.
+
+Consequence: the status word is hard-coded `0` for v1. Fuzzer
+consumers that need real worker-exit signalling (beyond
+coverage-map-encoded crash detection) must use a side channel
+until the infrastructure issue is resolved — or until the
+design is refactored so the WORKER writes its own status
+before `exit()`, sidestepping the parent-reap path entirely.
+Full rationale + the enumerated attempts live in the public
+user doc at `Documentation/virt/uml/snapshot.rst` §"v1
+ceiling: exit-status semantics" and in the in-kernel
+`KNOWN LIMITATION` block in `arch/um/kernel/snapshot.c`.
 
 ### 4. Post-fork worker re-init
 
