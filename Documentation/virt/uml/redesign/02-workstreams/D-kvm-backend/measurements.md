@@ -431,6 +431,25 @@ This establishes the methodology; per-host entries follow
 in the pending-measurements section below as new targets
 report in.
 
+### 2026-04-23 add-on — D-04b.2b.alt arbitrary-RIP validation
+
+In addition to the 1000-iter IO-exit timing, the harness
+now runs a single KVM_RUN with RIP pointing at a lone
+`hlt` byte placed at slot offset 0x210000 (2 MiB + 64 KiB,
+past the first hugepage boundary). Expected exit:
+KVM_EXIT_HLT (value 5). Observed on both hosts:
+
+  dev host Skylake-W: exit_reason=5 (HLT) rip=0x210000
+  w1 Alder Lake     : exit_reason=5 (HLT) rip=0x210000
+
+Validates the kvm-owned pgd can route arbitrary RIP
+positions through pd entries beyond pd[0] — the
+architectural piece D-04b.2b wanted. Together with the
+IO-exit timing above, D-04b is architecturally complete
+through D-04b.2b.alt; actual UML-kernel-text RIP execution
+waits for D-05 timekeeping to unblock a late_initcall
+relocation.
+
 ### 2026-04-23 add-on — D-04b.1c on w1 (Alder Lake i7-12700K)
 
 Second host for the instrumented harness. i7-12700K (Alder
