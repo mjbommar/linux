@@ -34,6 +34,8 @@
 #include <linux/types.h>
 
 #include <os.h>
+#include <mem.h>		/* uml_physmem */
+#include <as-layout.h>		/* physmem_size */
 #include <asm/backend.h>
 
 #include "kvm_backend.h"
@@ -60,6 +62,33 @@
  */
 #define KVM_HARNESS_HLT2_OFFSET		0x210000
 #define KVM_HARNESS_SLOT		0
+
+/*
+ * D-04b.2b.2: a second KVM memslot covering UML's own memory
+ * at a non-overlapping guest_phys base. Slot 0 is the harness's
+ * 4 MiB self-owned region at guest_phys 0; slot 1 covers
+ * guest_phys [UML_GPA_BASE, UML_GPA_BASE + physmem_size)
+ * mapped to host-VA [uml_physmem, uml_physmem + physmem_size).
+ * 256 MiB is chosen because it's past the 4 MiB harness slot
+ * with room to spare and still falls within the 1 GiB pd[0..512)
+ * identity mapping the harness installs.
+ */
+#define KVM_HARNESS_UML_SLOT		1
+#define KVM_HARNESS_UML_GPA_BASE	0x10000000UL	/* 256 MiB */
+
+/*
+ * D-04b.2b.2: a naked function whose body is exactly `hlt`. KVM
+ * resumes after VMEXIT back into the same RIP, so we never
+ * execute the next instruction — no ret / push needed, so
+ * __attribute__((naked)) is safe (no frame setup either). The
+ * function's address is UML-kernel-text; the harness subtracts
+ * uml_physmem to translate into guest-VA, and the guest sees
+ * the same bytes via slot 1's EPT mapping.
+ */
+__attribute__((naked)) static void kvm_harness_hlt_target(void)
+{
+	asm volatile("hlt");
+}
 
 /*
  * Guest code at CODE_OFFSET (ring 0 long mode):
@@ -338,6 +367,69 @@ int kvm_run_harness(void)
 	}
 
 	/*
+	 * D-04b.2b.2: register a second memslot covering UML's own
+	 * memory, then set RIP to the guest-VA of
+	 * kvm_harness_hlt_target (a naked `hlt`-only function in
+	 * UML kernel text). This proves the vCPU executes real UML
+	 * kernel binary bytes, not just our handcrafted sled.
+	 *
+	 * Layout:
+	 *   slot 0 (registered above): guest_phys [0, 4 MiB)
+	 *          → harness's self-owned 4 MiB region
+	 *   slot 1 (registered here):  guest_phys [256 MiB,
+	 *          256 MiB + physmem_size) → UML's uml_physmem
+	 *          onwards
+	 *
+	 * Guest page tables identity-map guest_VA = guest_phys for
+	 * both ranges (they're both inside the pd[0..512) 2 MiB
+	 * hugepage coverage kvm_setup_harness_paging_range
+	 * installed). So:
+	 *   guest_VA of target = 256 MiB + (&target - uml_physmem)
+	 */
+	if (uml_physmem && physmem_size) {
+		struct kvm_userspace_memory_region uml_region = {
+			.slot			= KVM_HARNESS_UML_SLOT,
+			.flags			= 0,
+			.guest_phys_addr	= KVM_HARNESS_UML_GPA_BASE,
+			.memory_size		= physmem_size,
+			.userspace_addr		= uml_physmem,
+		};
+		int rc2 = os_ioctl_generic(vmfd, KVM_SET_USER_MEMORY_REGION,
+					   (unsigned long)&uml_region);
+		if (rc2 < 0) {
+			os_info("um: kvm harness: UML slot register failed (%d)\n",
+				rc2);
+		} else {
+			unsigned long target = (unsigned long)&kvm_harness_hlt_target;
+			unsigned long guest_va =
+				KVM_HARNESS_UML_GPA_BASE + (target - uml_physmem);
+
+			os_info("um: kvm harness: UML slot registered (host_va=%lx size=%llx gpa_base=%lx); target &hlt=%lx → guest_va=%lx\n",
+				uml_physmem, physmem_size,
+				KVM_HARNESS_UML_GPA_BASE, target, guest_va);
+
+			regs = (struct kvm_regs){
+				.rip	= guest_va,
+				.rflags	= 0x2,
+			};
+			rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+					      (unsigned long)&regs);
+			if (rc < 0) {
+				os_info("um: kvm harness: UML-text KVM_SET_REGS failed (%d)\n",
+					rc);
+			} else {
+				rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+				os_info("um: kvm harness: UML-text KVM_RUN rc=%d exit_reason=%u (%s) rip=0x%lx\n",
+					rc, run->exit_reason,
+					kvm_harness_exit_name(run->exit_reason),
+					guest_va);
+			}
+		}
+	} else {
+		os_info("um: kvm harness: uml_physmem or physmem_size zero; skipping UML-text test\n");
+	}
+
+	/*
 	 * The harness is one-shot by design. Report the final exit
 	 * state (via os_info so it bypasses the unregistered printk
 	 * buffer) and panic to stop the UML process — this is a
@@ -346,7 +438,7 @@ int kvm_run_harness(void)
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b.1c + D-04b.2b.alt complete");
+	panic("um: kvm harness: done — D-04b full architectural validation complete");
 }
 
 /*
