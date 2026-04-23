@@ -4,17 +4,19 @@
 
 A version of `arch/um/` that delivers, **from one source tree**:
 
-- **~0.8-5 µs syscall overhead** on naive KVM backend (vs.
-  ~20 µs on the seccomp backend today — so 4× on old Intel,
-  ~25× on Alder Lake i9). **~100 ns** as an aspirational
-  later target, likely reachable with a systrap-equivalent
-  in-guest gadget layer. Empirical floor measured 2026-04-23
-  across eight hosts spanning Skylake-S through Zen 4 and
-  Alder Lake — see `02-workstreams/D-kvm-backend/spikes/
-  01-getpid-roundtrip/` for the spike + `02-workstreams/
-  D-kvm-backend/measurements.md` for the durable timing log
-  that later spikes + real-implementation benchmarks
-  extend.
+- **~1-11 µs syscall overhead** on naive KVM backend
+  (vs. ~20 µs seccomp baseline today — 2× on Skylake-S,
+  ~20× on Alder Lake i9 @ 960 ns). **~100 ns** as an
+  aspirational later target, likely reachable with a
+  systrap-equivalent in-guest gadget layer. Empirical
+  floor measured 2026-04-23 across 8 hosts spanning
+  Skylake-S through Zen 4 / Alder Lake, plus GHA nested-
+  virt confirmed working (EPYC 7763 under Hyper-V),
+  P-state-locked re-runs resolving initial measurement
+  variance. See `02-workstreams/D-kvm-backend/spikes/`
+  for spike harnesses + `02-workstreams/D-kvm-backend/
+  measurements.md` for the durable timing log that
+  later spikes + real-implementation benchmarks extend.
 - **Full instrumentation** — KASAN, KMSAN, KCSAN, KFENCE, KCOV,
   kprobes, ftrace, BPF JIT, KGDB — all working, with research mode
   defaults that turn them on.
