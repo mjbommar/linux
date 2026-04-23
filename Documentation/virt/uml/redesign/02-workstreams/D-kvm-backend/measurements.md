@@ -393,7 +393,9 @@ GDT setup code is correct, not just the standalone spike's.
 ("um: backend: D-04b.1c KVM harness — per-iteration cycle counting (workstream D-04)")):**
 1000-iteration timing loop added, same two-KVM_RUN-per-iter
 pattern as spike 04 so KVM's pending-I/O-emulation state
-doesn't break the loop. Zen 4 dev host:
+doesn't break the loop. Intel Xeon W-2123 (Skylake-W,
+4c/8t @ 3.6-3.7 GHz) on Dell Precision 5820 bare metal,
+`systemd-detect-virt` = none:
 
 | Iterations | Min cyc | Median cyc | p95 cyc | Max cyc |
 |---:|---:|---:|---:|---:|
@@ -402,14 +404,28 @@ doesn't break the loop. Zen 4 dev host:
 Max is a single OS-preemption outlier (~4 ms for one
 iteration). Median and p95 are the comparable numbers.
 
-**Against the spike 04 floor for Zen 4 (13148 cyc boost /
-13186 cyc sustained):** the backend's median is **22252 cyc
-— ~1.7× the bare-spike number**. The delta is plausibly
-nested-virt overhead on this dev host (unverified; host
-CPU reports Zen 4 but is possibly itself a guest) plus any
-additional work the UML kernel's binary imposes compared
-to a minimal standalone spike. Real bare-metal comparison
-lands as hardware becomes available.
+**Compared to spike 04's Skylake-class measurements** (spike
+04 didn't measure Skylake-W specifically but has the same-
+microarchitecture numbers):
+
+| Source | Host | Median cyc |
+|---|---|---:|
+| spike 04 | s2 Skylake-S @ 3.4 GHz | 22296 |
+| spike 04 | s3 Skylake-SP @ 3.7 GHz | 22994 |
+| D-04b.1c harness | dev host Skylake-W @ 3.7 GHz | **22252** |
+
+**The backend sits at the spike floor — ~3% UNDER the Skylake-
+SP spike number, which is within run-to-run noise.** The port
+from spike-04 standalone into the backend's binary form
+adds no measurable overhead. First empirical evidence that
+the D-workstream plan's cost model holds once the scaffolding
+lands.
+
+My earlier guess that this was Zen 4 was wrong (I read the
+sustained-clock cpuinfo from a different host's
+measurements.md row); this is a Skylake-W. Apology on-record
+here in the durable log so the next reader doesn't chase the
+wrong-generation comparison.
 
 This establishes the methodology; per-host entries follow
 in the pending-measurements section below as new targets
