@@ -69,6 +69,9 @@ int kvm_ensure_memslot(void);
 struct kvm_sregs;
 void kvm_setup_harness_gdt(u64 *gdt);
 void kvm_setup_harness_paging(u64 *pml4, u64 *pdpt, u64 *pd);
+int kvm_setup_harness_paging_range(u64 *pml4, u64 *pdpt, u64 *pd,
+				   unsigned int pd_offset_in_slot,
+				   unsigned int npages_2m);
 void kvm_setup_harness_sregs(struct kvm_sregs *sregs);
 
 /*

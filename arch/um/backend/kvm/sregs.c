@@ -84,6 +84,47 @@ void kvm_setup_harness_paging(u64 *pml4, u64 *pdpt, u64 *pd)
 }
 
 /*
+ * D-04b.2a extension of kvm_setup_harness_paging: identity-map
+ * a caller-specified range via 2 MiB huge pages. Used when the
+ * harness wants to cover more than the initial 2 MiB of the
+ * slot (e.g. reaching UML kernel text at physmem offsets
+ * beyond 2 MiB). pml4 + pdpt are populated to point at pd_pages
+ * enough PD pages to cover `npages_2m` 2 MiB pages; caller
+ * provides a contiguous array of PD pages of the right count.
+ *
+ * Returns the number of PD entries written, or -1 if npages_2m
+ * exceeds what the provided PD pages can hold.
+ *
+ * Layout assumption: this helper targets small ranges (up to
+ * a few GiB). For physmem_size ≤ 1 GiB one PD page (512
+ * entries × 2 MiB = 1 GiB) is sufficient; caller passes
+ * `pd_pages` as a single-page pointer and npages_2m ≤ 512.
+ * For larger ranges, the caller stitches PDPT entries to
+ * multiple PD pages themselves (out of scope for D-04b.2a).
+ */
+int kvm_setup_harness_paging_range(u64 *pml4, u64 *pdpt, u64 *pd,
+				   unsigned int pd_offset_in_slot,
+				   unsigned int npages_2m)
+{
+	unsigned int i;
+
+	if (npages_2m > 512)
+		return -1;
+
+	pml4[0] = KVM_HARNESS_PDPT_OFFSET |
+		  KVM_PTE_P | KVM_PTE_RW | KVM_PTE_US;
+	pdpt[0] = pd_offset_in_slot |
+		  KVM_PTE_P | KVM_PTE_RW | KVM_PTE_US;
+
+	for (i = 0; i < npages_2m; i++) {
+		pd[i] = ((u64)i << 21) |	/* 2 MiB-aligned */
+			KVM_PTE_P | KVM_PTE_RW | KVM_PTE_US | KVM_PTE_PS;
+	}
+
+	return (int)npages_2m;
+}
+
+/*
  * Populate SREGS for long-mode ring-0 execution with the GDT
  * and page tables placed at their spike-04-style fixed
  * offsets in the harness slot. kvm_segment fields mirror what
