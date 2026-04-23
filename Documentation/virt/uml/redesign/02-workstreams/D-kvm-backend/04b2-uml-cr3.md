@@ -1,6 +1,20 @@
 # D-04b.2 design note: CR3 over UML's address space
 
-**Status:** design (2026-04-23) — pre-code
+**Status:** landed (2026-04-22) — shipped as the D-04b.2
+           series against a KVM-owned PGD rather than
+           `init_mm.pgd`: D-04b.2a extended the paging helper
+           to arbitrary 2 MiB ranges (impl `9c3ce166f667`,
+           1 GiB harness coverage `62287f311f60`); D-04b.2b.alt
+           validated arbitrary RIPs via a second HLT beyond
+           the 2 MiB boundary (`bc97d1692c10`); D-04b.2b.1
+           relocated the harness to `late_initcall`
+           (`0fb063d1ad2e`) unblocking actual UML-text
+           execution; D-04b.2b.2 ran UML kernel text under
+           KVM via a dual-memslot split
+           (`3518ff9c562b`), confirmed on w1 per
+           `measurements.md`. The full D-04 family is
+           architecturally complete through D-04b.2b.2 — see
+           `04-ring-transition.md` for the surviving scope.
 **Follows:** D-04b.1a ✓ 06d1cb4063c2, D-04b.1b ✓ ebdfcb5d0fcc,
            D-04b.1c ✓ c461e178da68.
 **Supersedes:** The "CR3 = init_mm.pgd - kvm_guest_mem_base"

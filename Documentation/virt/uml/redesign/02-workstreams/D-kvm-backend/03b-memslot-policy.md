@@ -1,6 +1,15 @@
 # D-03c design note: memslot policy for `mm_map` / `mm_unmap`
 
-**Status:** design (2026-04-23) — pre-code
+**Status:** landed (2026-04-22) — Policy A shipped as D-03c
+           (`8be68ed2ca20`, "one giant memslot at init"
+           covering UML's VA) plus D-03d host-side
+           `mm_map`/`mm_unmap` wiring (`184471f40ec9`). Memslot
+           registration itself deferred to first
+           `run_userspace` via D-04b.0 (`153017d8eeda`) so
+           `backend=kvm` probe phase stays silent on hosts
+           where early-boot VA layout would otherwise race
+           registration. See `03-page-table-mgmt.md` for the
+           per-op landing table.
 **Follows:** D-03a (probe) ✓ 64aa06142e8f, D-03b (kvm_um +
            mm_attach) ✓ b27088ca79e9
 **Companion to:** `03-page-table-mgmt.md`,

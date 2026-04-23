@@ -1,7 +1,19 @@
 # D-02: MSR_LSTAR trap path
 
-**Status:** planned
-**Effort:** 4 weeks
+**Status:** landed (2026-04-22) — shipped as D-04c
+           (`3aeaeb8b6f5a`) after the D-04b harness proved the
+           backend sits at spike floor. The SYSCALL + LSTAR
+           dispatch path was measured via spike-07 variant-B
+           methodology and `measurements.md` documents the
+           silicon-invariant ~370-cyc delta
+           (`d6d510bf497b`). The microbenchmark goal in this
+           memo ("<100 ns round-trip") became the harness's
+           per-iteration cycle-counter bar rather than a
+           separate benchmark — D-04b.1c landed that surface
+           (`c461e178da68`). D-02's original 4-week effort
+           estimate was folded into the D-04 family; no
+           separate D-02 landing commit exists.
+**Effort:** 4 weeks (folded into D-04 family; see status)
 **Dependencies:** D-01
 **Blocks:** D-04 (ring transitions), D-06 (conformance)
 

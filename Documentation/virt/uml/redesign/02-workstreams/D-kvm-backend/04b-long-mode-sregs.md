@@ -1,10 +1,22 @@
 # D-04b design note: long-mode SREGS + fixed memslot
 
-**Status:** design (2026-04-23) — pre-code
+**Status:** landed (2026-04-22) — shipped as the D-04b.1
+           series: long-mode SREGS helpers in D-04b.1a
+           (`06d1cb4063c2`), harness wiring in D-04b.1b
+           (`ebdfcb5d0fcc`) first KVM-exit on a handcrafted
+           2 MiB identity-mapped slab, per-iteration cycle
+           accounting in D-04b.1c (`c461e178da68`). D-04b.1c
+           measurements on both hosts (Skylake-W + Alder Lake
+           w1) sit at the spike-floor per
+           `measurements.md`. The "CR3 over UML's own VA"
+           half of the original scope moved to `04b2-uml-cr3.md`
+           after examination showed UML's `init_mm.pgd` isn't
+           a hardware-valid tree.
 **Follows:** D-04a (vCPU + KVM_RUN skeleton) ✓ 340eaae2bdc9
 **Companion to:** `04-ring-transition.md` (D-04 sub-step
            breakdown), `03b-memslot-policy.md` (the memslot
-           policy D-03c shipped).
+           policy D-03c shipped), `04b2-uml-cr3.md` (the
+           successor scope covering D-04b.2).
 
 D-04a left two known-broken pieces on the floor that D-04b
 needs to land together:
