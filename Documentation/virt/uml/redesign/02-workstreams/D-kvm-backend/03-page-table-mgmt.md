@@ -1,11 +1,20 @@
 # D-03: Page-table management (host vs guest)
 
-**Status:** in progress — D-03a (probe + fallback) landed
-2026-04-22 in 5b2014682731; D-03b (per-process `struct kvm_um`
-+ `KVM_CREATE_VM` wired to `mm_attach`/`mm_detach`) in flight.
-D-03c (memslot plumbing for `mm_map`/`mm_unmap`) is the next
-sub-step, then CR3 programming on `context_switch` lands with
-D-04's vCPU bring-up.
+**Status:** mm-ops complete (2026-04-23) — all four
+`mm_attach` / `mm_detach` / `mm_map` / `mm_unmap` ops now
+live in `arch/um/backend/kvm/mm.c` with the host-side mmap /
+munmap + refcount shape documented below. Commit trail:
+
+  - D-03a probe + fallback — 5b2014682731
+  - D-03b per-process `struct kvm_um` — b27088ca79e9
+  - D-03c one giant memslot at init — 8be68ed2ca20
+  - D-03d host-side mmap / munmap on hot path — 184471f40ec9
+  - (design authority for D-03c/d: 03b-memslot-policy.md)
+
+CR3 programming on `context_switch` lands with D-04's vCPU
+bring-up — until then the scaffold still panics when the
+first stub hot-op (run_userspace / context_switch /
+thread_create) is dispatched under sudo+kvm boot.
 **Effort:** 6 weeks (largest D task)
 **Dependencies:** D-02 ✓ (64aa06142e8f), D-03a ✓ (5b2014682731)
 **Blocks:** D-06
