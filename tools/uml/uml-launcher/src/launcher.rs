@@ -9,6 +9,7 @@
 // need it.
 
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -18,15 +19,59 @@ use shared_child::SharedChild;
 use crate::cli::Console;
 use crate::config::Config;
 use crate::signal;
+use crate::virtio;
 
 /// Build + spawn + supervise UML. Returns its exit code.
 pub fn run(cfg: Config) -> Result<i32> {
-    let argv = build_argv(&cfg)?;
+    // Parse --virtio specs early so a typo fails before we
+    // spawn anything. `virtio` can be empty (v1 classic run),
+    // which leaves both `backends` and `virtio_argv` empty.
+    let specs: Vec<virtio::VirtioSpec> = cfg
+        .virtio
+        .iter()
+        .map(|raw| virtio::parse_virtio_spec(raw))
+        .collect::<Result<Vec<_>>>()
+        .context("parsing --virtio spec")?;
 
+    let mut argv = build_argv(&cfg)?;
+
+    // Dry run short-circuits before orchestration: show the
+    // kernel argv without starting backends. The --virtio
+    // entries the orchestrator would append are rendered
+    // with the placeholder pid 0 so the dry-run output is
+    // deterministic + auditable.
     if cfg.dry_run {
+        let parent_pid: u32 = 0;
+        for spec in &specs {
+            argv.push(format!(
+                "virtio_uml.device=/tmp/uml-{parent_pid}-{}.sock:{}",
+                spec.class_name_public(),
+                spec.virtio_id_public()
+            ));
+        }
         println!("{} {}", cfg.kernel.display(), argv.join(" "));
         return Ok(0);
     }
+
+    // Spawn backends first; each one binds its socket +
+    // enters the vhost-user event loop. We only start UML
+    // once all backends are ready. Handles live for the
+    // duration of this function; their Drop reaps the
+    // children in the right order at the end (or on any
+    // early return).
+    let (backends, virtio_argv) = if specs.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let launcher_bin = std::env::current_exe()
+            .context("resolving uml-launcher binary path for backend spawn")?;
+        virtio::orchestrate(virtio::OrchestrateArgs {
+            launcher_bin,
+            specs,
+            socket_dir: PathBuf::from("/tmp"),
+        })
+        .context("orchestrating vhost-user backends")?
+    };
+    argv.extend(virtio_argv);
 
     tracing::info!(
         kernel = %cfg.kernel.display(),
@@ -88,6 +133,15 @@ pub fn run(cfg: Config) -> Result<i32> {
         .context("waiting for UML child")?;
 
     sig_handle.close();
+
+    // Explicitly keep `backends` alive until AFTER UML's
+    // wait() returns. Dropping here triggers BackendProcess's
+    // Drop, which SIGTERMs each backend + reaps + unlinks
+    // the socket file. Without this, a clever compiler could
+    // (in theory) drop backends earlier if it proved they
+    // weren't used; the explicit drop makes the lifecycle
+    // visible to reviewers.
+    drop(backends);
 
     let code = status.code().unwrap_or_else(|| {
         // The child was signaled; pick the conventional
@@ -163,6 +217,7 @@ mod tests {
             forkserver: None,
             append: Vec::new(),
             dry_run: false,
+            virtio: Vec::new(),
         }
     }
 

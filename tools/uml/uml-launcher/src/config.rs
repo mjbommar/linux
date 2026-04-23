@@ -27,6 +27,13 @@ pub struct Config {
     pub forkserver: Option<(i32, i32)>,
     pub append: Vec<String>,
     pub dry_run: bool,
+    /// Raw `--virtio <class>[:<args>]` specs. Parsed into
+    /// `crate::virtio::VirtioSpec` at launch time; keeping
+    /// the String form here means figment serde stays
+    /// type-stable + TOML `virtio = ["console", "net:tap0"]`
+    /// works without a custom deserializer.
+    #[serde(default)]
+    pub virtio: Vec<String>,
 }
 
 impl Default for Config {
@@ -41,6 +48,7 @@ impl Default for Config {
             forkserver: None,
             append: Vec::new(),
             dry_run: false,
+            virtio: Vec::new(),
         }
     }
 }
@@ -75,6 +83,8 @@ struct CliOverlay {
     append: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     dry_run: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    virtio: Vec<String>,
 }
 
 impl From<&RunArgs> for CliOverlay {
@@ -88,6 +98,7 @@ impl From<&RunArgs> for CliOverlay {
             forkserver: args.forkserver,
             append: args.append.clone(),
             dry_run: args.dry_run,
+            virtio: args.virtio.clone(),
         }
     }
 }
@@ -139,6 +150,7 @@ mod tests {
             append: Vec::new(),
             config: None,
             dry_run: false,
+            virtio: Vec::new(),
         }
     }
 

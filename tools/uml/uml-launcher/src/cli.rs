@@ -191,6 +191,22 @@ pub struct RunArgs {
     #[arg(long = "append")]
     pub append: Vec<String>,
 
+    /// Per-device vhost-user backend to spawn + attach
+    /// (repeatable). Syntax: `--virtio <class>[:<args>]` where
+    /// `<class>` is one of `console`, `net`, `block`:
+    ///
+    ///   `--virtio console`
+    ///   `--virtio net:<tap-name>`
+    ///   `--virtio block:<image-path>[,ro]`
+    ///
+    /// Each spec spawns a `uml-launcher backend <class>` child
+    /// process, binds a unix-domain socket under /tmp, and
+    /// appends the matching `virtio_uml.device=<sock>:<id>`
+    /// kernel cmdline entry. The children live for the
+    /// lifetime of the parent launcher.
+    #[arg(long = "virtio")]
+    pub virtio: Vec<String>,
+
     /// TOML config file to merge with CLI and env vars.
     /// Precedence: CLI > env > file > defaults.
     #[arg(long, env = "UML_CONFIG")]

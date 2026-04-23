@@ -22,6 +22,7 @@ mod cli;
 mod config;
 mod launcher;
 mod signal;
+mod virtio;
 
 fn main() -> ExitCode {
     let args = cli::Cli::parse();
