@@ -21,6 +21,8 @@ config UML
 	select HAVE_ARCH_KASAN_VMALLOC if HAVE_ARCH_KASAN
 	select HAVE_ARCH_KCSAN if X86_64
 	select HAVE_ARCH_KFENCE if X86_64
+	select HAVE_ARCH_KMSAN if X86_64
+	select HAVE_ARCH_KMSAN_VMALLOC if HAVE_ARCH_KMSAN
 	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ASM_MODVERSIONS
 	select HAVE_UID16
@@ -320,6 +322,32 @@ config KASAN_SHADOW_OFFSET
 	  with anything. The default is 0x100000000000, which works even if mem is
 	  set to a large value. On low-memory systems, try 0x7fff8000, as it fits
 	  into the immediate of most instructions, improving performance.
+
+config KMSAN_SHADOW_OFFSET
+	hex
+	depends on KMSAN
+	default 0x200000000000
+	help
+	  Base of the KMSAN shadow region for UML. The shadow region
+	  stores one byte per kernel byte (no shift) and must be the
+	  full size of the host userspace address range KMSAN covers.
+	  The default places the 16 TiB shadow immediately above the
+	  KASAN shadow at 0x100000000000; KASAN and KMSAN are
+	  mutually exclusive under the current Kconfig, so the
+	  placement is a range convention — not a constraint the
+	  kernel will let you violate.
+
+config KMSAN_ORIGIN_OFFSET
+	hex
+	depends on KMSAN
+	default 0x300000000000
+	help
+	  Base of the KMSAN origin region for UML. The origin region
+	  stores one 32-bit origin id per kernel u32 (1:1 by u32,
+	  same byte size as the shadow). Placed above the shadow at
+	  0x300000000000 so UML maps three consecutive 16 TiB slices
+	  for its sanitizer metadata (KASAN, KMSAN shadow, KMSAN
+	  origin), all within the canonical lower half on x86_64.
 
 #
 # Backend selection (workstream A; matches the planned shape in

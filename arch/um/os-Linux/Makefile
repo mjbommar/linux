@@ -10,6 +10,7 @@
 KCOV_INSTRUMENT                := n
 KASAN_SANITIZE                 := n
 KCSAN_SANITIZE                 := n
+KMSAN_SANITIZE                 := n
 UBSAN_SANITIZE                 := n
 
 obj-y = elf_aux.o execvp.o file.o helper.o irq.o main.o mem.o process.o \
