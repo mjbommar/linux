@@ -734,6 +734,66 @@ um: kvm harness: 1d PASS — fault decode recovered injected
   faultinfo, which this lift demonstrated the backend can
   produce.
 
+## 2026-04-23 — Phase III Lift #1e: host-injected IRQ delivery via KVM_INTERRUPT
+
+Methodology: extend the harness with a minimal 33-entry IDT
+at slot offset 0xa000, an IRQ handler at 0x9300 that emits
+port 0xf8 on entry, and a ring-0 pause-loop at 0xb000. Set
+sregs.idt.base + idt.limit, enter the pause-loop with
+RFLAGS.IF=1 and a ring-0 stack. Host runs with
+request_interrupt_window=1 until KVM reports
+ready_for_interrupt_injection, then issues
+KVM_INTERRUPT(vec=32). Guest vectors through IDT[32] to
+the handler, which OUTs 0xf8 triggering KVM_EXIT_IO.
+
+Result (Skylake-W dev host):
+
+```
+um: kvm harness: 1e post-inject KVM_RUN rc=0 exit_reason=2 (IO)
+um: kvm harness: 1e PASS — IRQ delivery via KVM_INTERRUPT
+    verified (vector=32, port=0xf8)
+```
+
+**Observations:**
+
+- Injection succeeded on the first iteration of the
+  request_interrupt_window loop — the ring-0 guest with
+  RFLAGS.IF=1 was immediately ready for injection. No
+  bounded-retry path taken; the 64-iteration guard is
+  defensive for future variants where the guest might
+  temporarily disable interrupts.
+- No TSS needed: the guest loop runs in ring-0 so the IRQ
+  transition is within-CPL. The CPL-crossing variant
+  (ring-3 → ring-0 handler, which is what real signal
+  delivery to UML userspace processes needs) requires a
+  TSS populated with RSP0. That increment is scoped to the
+  real-backend signal path in post-Phase III integration.
+
+**What this settles for D-05 / Phase III:**
+
+- The signal-delivery *mechanism* (host KVM_INTERRUPT →
+  guest IDT dispatch → distinctive handler exit) works
+  in-backend on the first attempt. No spec-level KVM
+  surprises on the injection path.
+- Real signal plumbing (SIGIO/SIGALRM/SIGUSR1 mapped to
+  specific guest-IDT vectors, TSS for CPL-crossing,
+  in-kernel handler dispatch) now has a validated
+  foundation to build on.
+
+**What this does NOT demonstrate:**
+
+- Ring-3 → ring-0 IRQ delivery (needs TSS).
+- Real signal-to-vector mapping (which host signal goes
+  to which guest IDT vector; today all UML signals go
+  through the host's generic sig_handler path — Lift #1e
+  proves the machinery, the mapping design lives in
+  real-backend Lift #1f).
+- IRET back to the interrupted instruction; the handler
+  uses OUT+HLT as an exit shortcut rather than a proper
+  IRET. Sustained delivery (multiple IRQs in a row)
+  would need IRET; the harness's one-shot validation
+  doesn't.
+
 ## 2026-04-23 — Phase III Lift #1a (kvm_um attach-cost benchmark) retired
 
 **Not run.** Decisions-log D60 closes this placeholder as
