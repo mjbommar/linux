@@ -581,6 +581,28 @@ silicon that hits it architecturally.
 - spike 04 measurements above — what this harness
   validates the port against.
 
+## 2026-04-23 — Phase III Lift #1a (kvm_um attach-cost benchmark) retired
+
+**Not run.** Decisions-log D60 closes this placeholder as
+superseded by D57. The framing assumed per-mm KVM VMs;
+D57 chose per-UML-process VMs. `kvm_mm_attach()` reduces
+to `refcount_inc()` on a shared `struct kvm_um` — see
+`arch/um/backend/kvm/mm.c::kvm_mm_attach` lines 29-52.
+There is no per-mm KVM ioctl cost to measure; the
+benchmark's go/no-go role in Phase III was retired by
+D57 before it was written.
+
+The one-shot boot-time costs (`KVM_CREATE_VM` +
+`KVM_SET_USER_MEMORY_REGION`) live in the D-04b.1b and
+D-04b.2b.2 entries above as part of each measurement
+session's successful init, not a standalone row.
+
+A future UML-vs-seccomp per-syscall comparison would
+measure the full dispatch path (kvm_run_userspace vs.
+seccomp_run_userspace), not the attach path; that
+belongs to Phase III Lift #1f (D-06 conformance), not to
+a retired #1a.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream

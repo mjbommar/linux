@@ -6076,4 +6076,117 @@ correct.
 
 ---
 
+## D60 (2026-04-23) — Phase III Lift #1a (kvm_um attach-cost benchmark) retired by D57; proceed directly to Lift #1b
+
+**Status:** Accepted (supersession of the original
+Lift #1a framing; no benchmark run).
+
+**Context.** The post-Q1 push plan
+(`06-sequencing/post-q1-push.md`) Phase III Lift #1a is
+written as "per-mm `kvm_um` attach-cost microbench vs.
+seccomp baseline" — a go/no-go gate for Lift #1b. The
+framing assumed the naive mapping `one KVM VM fd per UML
+mm`, where each `mm_attach()` pays a `KVM_CREATE_VM` +
+`KVM_SET_USER_MEMORY_REGION` + SREGS init on the order of
+tens of microseconds. If that cost ran above 5× the
+seccomp baseline, the plan said "stop and redesign,
+probably pooled VMs, not per-mm."
+
+**Actual backend shape (landed in D-03b).** D57
+(2026-04-23) picked **one VM fd per UML process**, not per
+UML mm. The VM is created eagerly in `kvm_init()`;
+`mm_attach()` does `refcount_inc()` on a shared
+`struct kvm_um`; `mm_detach()` does
+`refcount_dec_and_test()`. No KVM ioctl on the per-mm
+attach path. See `arch/um/backend/kvm/mm.c::kvm_mm_attach`
+(lines 29–52) and `arch/um/backend/kvm/lifecycle.c` — the
+expensive `KVM_CREATE_VM` is amortized once per UML-
+process boot, not per `mm_attach`.
+
+**Decision.** Lift #1a as originally framed has no
+measurable content on the current backend. The attach-
+cost unknown the lift was supposed to retire was
+architecturally retired by D57 before the lift was
+written.
+
+Retire Lift #1a as **closed by supersession**. Do NOT
+run a new benchmark:
+
+1. Measuring `refcount_inc()` against a seccomp
+   `start_userspace()` (clone + execveat + futex-wait)
+   would produce a meaningless ratio (ns vs. ms;
+   ~6 orders of magnitude apart) that confirms nothing.
+2. The relevant per-process `KVM_CREATE_VM` + memslot
+   registration cost is already recorded in
+   `measurements.md` under D-04b.1b / D-04b.2b.2 — boot
+   -time one-shot values, not per-attach.
+3. The Lift #1b go/no-go gate that Lift #1a was
+   supposed to inform is unchanged: it's "does ring-3
+   entry + SYSRETQ work", not "is attach cost
+   acceptable".
+
+**Updates required.**
+
+- `06-sequencing/post-q1-push.md` §"Phase III Lift #1a"
+  gets reframed to point at this entry + D57 as the
+  supersession record, and Phase III execution order
+  becomes 1b → 1c → 1d → 1e → 1f (one fewer sub-lift).
+- `02-workstreams/D-kvm-backend/measurements.md` gets a
+  one-paragraph pointer so a future reader looking for
+  "attach-cost benchmark data" finds the supersession
+  here, not a missing row.
+
+**Alternatives considered.**
+
+1. **Run the benchmark anyway for completeness.**
+   Rejected. A benchmark that tests "did the compiler
+   optimize `refcount_inc` into the expected atomic
+   instruction" is not the unknown-retiring research
+   the lift existed to do. If someone ever wants that
+   datapoint, it lives in a perf-regression CI gate,
+   not in Phase III's go/no-go sequence.
+2. **Keep Lift #1a open as a tracking placeholder.**
+   Rejected. An open lift with no actionable content
+   is worse than a closed one — it pollutes the
+   remaining-work surface and invites re-debate of
+   D57's settled scope.
+3. **Write a "pool-sizing" benchmark hypothesizing a
+   future pooled-VM shape.** Rejected as premature
+   optimization (a-plus-quality-plan §7 anti-pattern
+   #3). D57 explicitly considered and rejected VM
+   pooling; re-exploring it without a workload-driven
+   reason re-opens a closed question.
+
+**Lifetime / revisit triggers.**
+
+- Revisit if D57 itself is revisited (its own revisit
+  triggers are "D-04 finds a reason to isolate KVM VMs
+  per mm" and "single-VM model causes resource-limit
+  pressure"). If D57 flips to per-mm VMs, Lift #1a
+  un-retires and runs with the new framing.
+- Revisit if someone writes a benchmark that compares
+  `um_backend_kvm_ops` dispatch path vs.
+  `um_backend_seccomp_ops` dispatch path end-to-end
+  (not just the attach sub-step). That's a different
+  measurement than this lift — and it lives naturally
+  in Lift #1f (D-06 conformance).
+
+**Cross-references.**
+
+- D57 (2026-04-23) — the retiring decision; its
+  §"Alternatives considered" enumerates the exact
+  "per-mm VM" framing this lift was written against.
+- `arch/um/backend/kvm/mm.c::kvm_mm_attach`
+  (lines 29–52) — the actual landed attach path,
+  refcount-only.
+- `arch/um/backend/kvm/lifecycle.c::kvm_init`
+  + the memslot registration at line 276 — the
+  one-shot-per-UML-process KVM_CREATE_VM +
+  KVM_SET_USER_MEMORY_REGION costs whose per-attach
+  amortization makes this lift trivial.
+- `06-sequencing/post-q1-push.md` §"Phase III" — the
+  lift-plan this entry retires.
+
+---
+
 ## (Future entries here, as decisions are made)

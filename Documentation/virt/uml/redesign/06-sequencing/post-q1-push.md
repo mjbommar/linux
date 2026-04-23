@@ -125,13 +125,16 @@ real ring-3 entry + signal delivery + page-fault handling
 post-Phase II. Decompose into five sub-lifts:
 
 - **1a. Per-mm `kvm_um` attach-cost microbench.**
-  *Unknown-retiring, not implementation.* Measure the
-  actual attach cost (KVM_CREATE_VM + KVM_SET_USER_MEMORY_
-  REGION + SREGS init) against the existing seccomp
-  `mm_attach` baseline, per the D-01 spike methodology.
-  Deliverable: a row in `D-kvm-backend/measurements.md`.
-  Go/no-go for 1b. If attach cost is >5× seccomp, stop
-  and redesign (probably pooled VMs, not per-mm).
+  **RETIRED by supersession (2026-04-23 — see D60).**
+  The framing assumed one KVM VM fd per UML mm; D57
+  (one VM fd per UML *process*) pre-empted that by
+  making `kvm_mm_attach()` a pure `refcount_inc()` on
+  a shared `struct kvm_um`. No KVM ioctls on the
+  per-mm attach path, so there is nothing meaningful
+  to benchmark against the seccomp `start_userspace`
+  baseline. See decisions-log D60 for the full
+  reasoning; Phase III execution proceeds directly
+  to Lift #1b.
 - **1b. Real ring-3 entry + `SYSRETQ`.** Swap the
   dual-memslot harness's `HLT`-on-ring-0 for a real
   `SYSRETQ` into ring 3 with a stub-executable guest
@@ -254,7 +257,7 @@ Phase I (cheap retirement)
 └── #10 toolchain blocker note    │
                                   │
 Phase II (extraction) ──> Phase III (KVM real)
-├── 4a SIGCHLD split               │   ├── 1a attach-cost bench
+├── 4a SIGCHLD split               │   ├── ~~1a attach-cost bench~~ (retired, D60)
 ├── 4b dump_error split            │   ├── 1b ring-3 entry
 ├── 4c stub-syscall split          │   ├── 1c syscall dispatch
 └── 4d start_userspace split       │   ├── 1d page-fault
@@ -363,7 +366,7 @@ Assuming one AI-assisted session ≈ 1 day of engineering:
 |-------|------------|-----------|
 | Phase I (cheap retirement) | 3 sessions | 5 sessions |
 | Phase II (A-Phase-2) | 4 sessions | 8 sessions |
-| Phase III (KVM real) | 6 sessions | 12 sessions |
+| Phase III (KVM real) | 5 sessions | 10 sessions |
 | Phase IV (systrap spike) | 2 sessions | 4 sessions |
 | Phase V (KMSAN) | 3 sessions | 6 sessions |
 | Phase VI-6 (C-08 off-tree) | 3 sessions | 6 sessions |
