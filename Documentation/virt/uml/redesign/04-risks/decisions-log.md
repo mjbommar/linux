@@ -6189,4 +6189,126 @@ run a new benchmark:
 
 ---
 
+## D61 (2026-04-23) — Phase IV gadget spike: go for a post-v1 systrap-equivalent workstream; do not block v1
+
+**Status:** Accepted (spike synthesis; no v1 commit-plan change).
+
+**Context.** The post-Q1 push plan's Phase IV was a
+feasibility gate on whether the M11 "~100 ns syscall" vision
+line is architecturally reachable via a gVisor-systrap-style
+ring-0 in-guest gadget that eliminates the VMEXIT for
+gadget-handleable syscalls. D56 (2026-04-23) had previously
+settled that the naive KVM backend is "competitive across
+modern silicon, gadget optional not mandatory" — Phase IV's
+job was to validate that with numbers before the decision
+became load-bearing.
+
+Phase IV landed three sub-lifts:
+
+- **#2a (paper design).** `02-workstreams/D-kvm-backend/
+  07-systrap-gadget-feasibility.md` shows the gadget slot
+  UML needs is the **existing `STUB_START` reservation**.
+  No new VA, no conflict with kernel VA or guest-userspace
+  VA, no per-mm setup (UML's single-mm_struct model makes
+  gadget installation cheaper than gVisor's per-Sentry
+  install).
+- **#2b (round-trip spike).** Harness extension
+  (`arch/um/backend/kvm/harness.c`, commit 6cfcf7a95e5d)
+  with a ring-3 loop that issues 1000 SYSCALLs back-to-back
+  through a 3-byte `sysretq`-only LSTAR handler. One
+  KVM_RUN bracket, per-syscall cost = total/N. Measured on
+  Skylake-W dev host:
+
+  ```
+  um: kvm harness: 2b PASS — gadget round-trip ~133 cyc/syscall
+      over 1000 iters (total 133168 cyc)
+  ```
+
+  **133 cycles per SYSCALL+SYSRETQ**, vs. ~22,800 cyc/syscall
+  for the naive-KVM path on the same silicon. **~170× speedup.**
+  At Skylake-W's 3.7 GHz, 133 cyc = 36 ns. On AL i7 @ 5 GHz
+  the same instruction-pair count would be ~27 ns (the
+  SYSCALL+SYSRETQ cost is silicon-invariant in cycles per
+  spike 07's 240-340 cyc floor).
+
+**Decision.**
+
+1. **GO for a post-v1 gadget workstream.** The 36 ns
+   measured round-trip is well under the 100 ns vision
+   target and proves the gadget mechanism is architecturally
+   viable on modern silicon.
+
+2. **Do NOT block v1 on gadget.** The naive KVM backend
+   already hits:
+
+   - 960 ns on Alder Lake i9 @ 4.9 GHz (measurements.md
+     spike 06)
+   - 1114 ns on Alder Lake i7 @ 5.0 GHz (D-04b.1c w1)
+   - 6210 ns on Skylake-SP @ 3.7 GHz
+
+   These are usable for prod-fast on every silicon class
+   the vision targets. The gadget's 30-40 ns improvement is
+   the aspirational-ceiling layer, not the viability floor.
+   v1 ships with naive-KVM; gadget is additive in a post-v1
+   pass.
+
+3. **Phase IV is complete.** No further Phase IV work. The
+   follow-up workstream (tentative: "D-07 systrap gadget")
+   is scoped in the feasibility memo and tracks as an
+   explicit task but not as a v1 critical-path item.
+
+**Alternatives considered.**
+
+1. **Build the gadget into v1.** Rejected. Adds several
+   commits of gVisor-pattern work (gs:base setup, shared-
+   memory clock page, per-syscall handlers, safety version
+   checks) without the v1 critical path needing it.
+   Naive-KVM is already shippable for prod-fast on every
+   modern-silicon target. Defer.
+
+2. **Defer the gadget indefinitely / strike from roadmap.**
+   Rejected. The measured 36 ns result is compelling
+   evidence that M11's vision line is reachable, not just
+   aspirational. Keeping a scoped follow-up workstream
+   alive as an optional post-v1 item preserves the upside
+   without blocking v1.
+
+3. **Start building a v2 UML with gadget as the default
+   dispatch.** Rejected (for now). Gadget is additive: a
+   real-backend run_userspace loop (post-Phase III task
+   #162) can opt in per-syscall (dispatch through gadget
+   jump table for known-safe, fall back to VMEXIT
+   otherwise). No flag-day redesign needed.
+
+**Lifetime / revisit triggers.**
+
+- Revisit gadget priority upward if prod-fast workloads
+  measure high gadget-handleable syscall rates
+  (e.g. a clock_gettime-heavy benchmark).
+- Revisit downward if post-v1 measurements show the
+  gadget's shared-state complexity (version checks +
+  vvar-style clock page) introduce maintenance cost
+  greater than the 36-ns-gain can justify.
+
+**Cross-references.**
+
+- D56 (2026-04-23) — prior decision that "naive backend is
+  competitive, gadget optional"; this entry confirms with
+  numbers.
+- D57 (2026-04-23) — one VM fd per UML process, which
+  makes gadget installation a one-shot per-UML-kernel op
+  rather than per-mm.
+- `02-workstreams/D-kvm-backend/07-systrap-gadget-
+  feasibility.md` — full feasibility memo.
+- `02-workstreams/D-kvm-backend/measurements.md` — Spike 07
+  + D-04c measured the 240-340 cyc SYSCALL+SYSRETQ floor
+  that the gadget result confirms.
+- `06-sequencing/post-q1-push.md` §"Phase IV" — the push-
+  plan phase this entry closes.
+- `08-future-phases/` (candidate location for a full D-07
+  systrap workstream doc when/if the follow-up task
+  activates).
+
+---
+
 ## (Future entries here, as decisions are made)

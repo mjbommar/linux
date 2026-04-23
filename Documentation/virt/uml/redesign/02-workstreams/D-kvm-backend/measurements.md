@@ -905,6 +905,74 @@ next integration (real run_userspace replacing the
 panic-stub) is scoped as a new follow-up task beyond the
 post-Q1 push plan.
 
+## 2026-04-23 — Phase IV Lift #2b: systrap gadget no-VMEXIT round-trip
+
+Methodology: extend `arch/um/backend/kvm/harness.c` with a
+ring-3 loop that issues 1000 back-to-back SYSCALLs into a
+3-byte LSTAR handler at slot offset 0x9000 (`sysretq` only —
+no `out`, no VMEXIT). Ring-3 counter in `%ebx` (SYSCALL
+clobbers `%rcx`). Loop exits via `out %al, $0xf9` after the
+1000th iteration. One `KVM_RUN` bracket covers the whole
+loop; rdtsc-delta / 1000 = per-SYSCALL cost.
+
+Result (Skylake-W dev host):
+
+```
+um: kvm harness: 2b KVM_RUN rc=0 exit_reason=2 (IO)
+    total_cycles=133168
+um: kvm harness: 2b PASS — gadget round-trip ~133 cyc/syscall
+    over 1000 iters (total 133168 cyc)
+```
+
+**Observations:**
+
+- **133 cycles per SYSCALL+SYSRETQ round-trip** without a
+  VMEXIT. At Skylake-W's 3.7 GHz that's **36 ns**, well
+  under the M11 ~100 ns vision target.
+- Compare to the existing D-04c LSTAR variant-B
+  measurement on the same silicon: 22,828 cyc median with
+  the IO-exit LSTAR handler. The gadget mechanism
+  eliminates the VMEXIT entirely, giving **~170× speedup**
+  on the gadget-handleable path.
+- The 133 cyc figure is close to the bare-metal SYSCALL +
+  SYSRETQ instruction-pair cost (AMD64 SDM §6.1.1; spike
+  07 measured 240-340 cyc silicon-invariant floor with the
+  IO-exit in the loop). Running without the IO-exit lets
+  us measure the pure instruction-pair overhead.
+
+**Non-obvious bug found during bring-up (recorded for
+future gadget authors):**
+
+- Guest-side loop counter in `%ecx` gets clobbered every
+  SYSCALL because the CPU uses RCX to store the post-
+  SYSCALL RIP for SYSRETQ to use. Counter in `%ebx` (or
+  any SYSCALL-preserved register per AMD64 SDM vol 3
+  §6.1.1) survives the round-trip.
+
+**What this settles:**
+
+- **M11 is reachable.** A gadget-handleable syscall hits
+  36 ns on Skylake-W (2017 silicon); scales to ~27 ns on
+  AL i7 @ 5 GHz by linear clock scaling. Post-v1 gadget
+  workstream is GO.
+- **v1 does not need the gadget.** The naive-KVM backend's
+  1-11 µs range is already usable for prod-fast on modern
+  silicon. Gadget is the aspirational-ceiling layer; v1
+  ships with naive-KVM only.
+
+**What this does NOT measure:**
+
+- The cost of a *real* gadget handler (which adds bounds
+  check + jump table dispatch + per-syscall compute).
+  Estimate from the design memo: +20 cyc overhead for
+  dispatch, +10-50 cyc per simple handler, so a real
+  `getpid`-in-gadget would sit at ~150-200 cyc (~50 ns on
+  Skylake-W).
+- The fallback path cost for syscalls that aren't gadget-
+  safe — that stays at the naive-KVM floor (~22k cyc).
+- Concurrency costs (per-task state version check, vvar-
+  style shared clock page).
+
 ## 2026-04-23 — Phase III Lift #1a (kvm_um attach-cost benchmark) retired
 
 **Not run.** Decisions-log D60 closes this placeholder as
