@@ -315,6 +315,58 @@ Lake i9 at 4.9 GHz boost is 960 ns — within 10× of the
 ~100 ns vision line without any gadget work. This is the
 number that goes into the memo's perf-envelope section.
 
+## 2026-04-23 — Spike 07: SYSCALL-via-LSTAR A/B
+
+Methodology: `spikes/07-syscall-lstar-ab/spike.c` — two
+guest-code variants, back-to-back on the same vCPU, 1000
+iterations each:
+
+- Variant A: `out %al, $0xf4; hlt` (direct IO exit)
+- Variant B: `mov eax, 39; syscall; hlt` with LSTAR
+  trampoline `out %al, $0xf4; sysretq`
+
+Median(B) − Median(A) = pure SYSCALL + SYSRETQ instruction-
+pair cost, isolated from the VMEXIT round-trip.
+
+| Host | CPU | MHz | A cyc | B cyc | Δ (SYSCALL+SYSRET) |
+|---|---|---:|---:|---:|---:|
+| s1 | Kaby Lake | 3300 | 20494 | 20732 | **+238 cyc (~72 ns)** |
+| s2 | Skylake-S | 3404 | 22296 | 22556 | **+260 cyc (~76 ns)** |
+| s3 | Skylake-SP | 3700 | 19922 | 20220 | **+298 cyc (~81 ns)** |
+| s5 | Zen 4 @ 1.1 GHz | 1101 | 13186 | 13490 | **+304 cyc (~276 ns)** |
+| s6 | Zen 4 @ 4.9 GHz | 4939 | 13566 | 13832 | **+266 cyc (~54 ns)** |
+| s7 | Zen 4 @ 2.0 GHz | 1985 | 13452 | 13794 | **+342 cyc (~172 ns)** |
+
+s0 and s4 (Alder Lake) showed variant A tail-heavy due to
+IO-exit state leaking across iterations; their B-variant
+numbers are clean (s0: 5375, s4: 6754) but the A/B delta
+isn't reliable on those hosts. Using the six clean data
+points, **SYSCALL + SYSRETQ adds ~240-340 cycles,
+silicon-invariant across Intel and AMD from 2015-2023.**
+
+**Key observation:**
+
+- At 50-100 ns (on 3+ GHz hosts) this is a rounding error
+  on the 4-30 µs VMEXIT round-trip. The bounce trampoline's
+  SYSCALL overhead is not where optimization should focus.
+- The design memo's D-04 systrap-gadget direction stays
+  correct: the gadget eliminates VMEXITs for common
+  syscalls, which saves thousands of cycles — not the 250
+  cycles SYSCALL/SYSRET contributes.
+
+**Full naive-backend cost model (all three spikes
+integrated):**
+
+  per-syscall cost = VMEXIT-RTT (~4k-30k cyc, silicon)
+                   + SYSCALL+SYSRETQ (~250-340 cyc, flat)
+                   + host-side handler work (depends)
+
+On Alder Lake i9 at boost: 4705 (spike 04) + ~270 (this) =
+~4975 cycles ≈ **~1015 ns per syscall**, design-memo
+floor for modern silicon. Still 20× seccomp; 10× away
+from the ~100 ns vision line (gap closable by D-04 gadget
+but not by any SYSCALL-side work).
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
