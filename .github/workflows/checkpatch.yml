@@ -140,8 +140,18 @@ jobs:
             #     include kernel headers. Ignored so the
             #     D-workstream KVM spike harness doesn't
             #     trip the CI gate.
+            #   PREFER_KERNEL_TYPES — "prefer u64 over
+            #     uint64_t, u32 over uint32_t, ..." is the
+            #     kernel-internal-style rule. Wrong for
+            #     standalone userspace C under Documentation/
+            #     that includes <stdint.h>. Same class of
+            #     false-positive as BIT_MACRO.
+            #   UNSPECIFIED_INT — "prefer 'unsigned int' over
+            #     bare 'unsigned'" — pedantic style point
+            #     not applicable to throwaway spike code
+            #     whose only consumer is the spike itself.
             if ! scripts/checkpatch.pl --strict --no-summary \
-                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL,BIT_MACRO \
+                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL,BIT_MACRO,PREFER_KERNEL_TYPES,UNSPECIFIED_INT \
                     -g "$sha"; then
               fail=1
             fi

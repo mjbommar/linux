@@ -422,19 +422,23 @@ int main(void)
 		printf("io_exit p10 cycles  : %" PRIu64 "%s\n", p10,
 		       mhz > 0 ? "" : "");
 		printf("io_exit median      : %" PRIu64, p50);
-		if (mhz > 0) printf(" (~%.0f ns)", p50 * 1000.0 / mhz);
+		if (mhz > 0)
+			printf(" (~%.0f ns)", p50 * 1000.0 / mhz);
 		printf("\n");
 		printf("io_exit mean        : %" PRIu64, mean);
-		if (mhz > 0) printf(" (~%.0f ns)", mean * 1000.0 / mhz);
+		if (mhz > 0)
+			printf(" (~%.0f ns)", mean * 1000.0 / mhz);
 		printf("\n");
 		printf("io_exit p90 cycles  : %" PRIu64, p90);
-		if (mhz > 0) printf(" (~%.0f ns)", p90 * 1000.0 / mhz);
+		if (mhz > 0)
+			printf(" (~%.0f ns)", p90 * 1000.0 / mhz);
 		printf("\n");
 	}
 	if (hlt_n > 0) {
 		uint64_t p50 = cycles_hlt[hlt_n / 2];
 		printf("hlt median            : %" PRIu64, p50);
-		if (mhz > 0) printf(" (~%.0f ns)", p50 * 1000.0 / mhz);
+		if (mhz > 0)
+			printf(" (~%.0f ns)", p50 * 1000.0 / mhz);
 		printf("\n");
 	}
 
