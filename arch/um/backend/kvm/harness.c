@@ -44,12 +44,20 @@
  * pages; a shared header would be over-abstraction for ~5
  * #defines that move together.
  */
-#define KVM_HARNESS_MEM_SIZE		(2UL * 1024 * 1024)
+#define KVM_HARNESS_MEM_SIZE		(4UL * 1024 * 1024)
 #define KVM_HARNESS_PML4_OFFSET		0x0000
 #define KVM_HARNESS_PDPT_OFFSET		0x1000
 #define KVM_HARNESS_PD_OFFSET		0x2000
 #define KVM_HARNESS_GDT_OFFSET		0x3000
 #define KVM_HARNESS_CODE_OFFSET		0x4000
+/*
+ * D-04b.2b.alt: a second HLT byte placed at offset 0x210000
+ * (2 MiB + 64 KiB into the 4 MiB slot). Validates the kvm-owned
+ * pgd's arbitrary-RIP execution: guest accesses beyond the
+ * first 2 MiB hugepage still resolve through the PD's subsequent
+ * entries, and the memslot expansion covers the guest_phys.
+ */
+#define KVM_HARNESS_HLT2_OFFSET		0x210000
 #define KVM_HARNESS_SLOT		0
 
 /*
@@ -161,6 +169,14 @@ int kvm_run_harness(void)
 				       KVM_HARNESS_PD_OFFSET, 512);
 	memcpy(mem + KVM_HARNESS_CODE_OFFSET,
 	       kvm_harness_code, sizeof(kvm_harness_code));
+
+	/*
+	 * D-04b.2b.alt: a lone `hlt` byte at an offset beyond the
+	 * first 2 MiB hugepage boundary. Executing from here
+	 * exercises the PD's second entry (pd[1]) and proves the
+	 * kvm-owned pgd can route arbitrary RIP.
+	 */
+	*(u8 *)(mem + KVM_HARNESS_HLT2_OFFSET) = 0xf4;	/* hlt */
 
 	region = (struct kvm_userspace_memory_region){
 		.slot			= KVM_HARNESS_SLOT,
@@ -298,6 +314,29 @@ int kvm_run_harness(void)
 	}
 
 	/*
+	 * D-04b.2b.alt arbitrary-RIP validation: program RIP at
+	 * the HLT byte placed beyond the first 2 MiB hugepage
+	 * boundary, KVM_RUN once, assert KVM_EXIT_HLT. Proves the
+	 * kvm-owned pgd routes RIP correctly through pd[1]
+	 * (covering 2..4 MiB) rather than just pd[0].
+	 */
+	regs = (struct kvm_regs){
+		.rip	= KVM_HARNESS_HLT2_OFFSET,
+		.rflags	= 0x2,
+	};
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS, (unsigned long)&regs);
+	if (rc < 0) {
+		os_info("um: kvm harness: arbitrary-RIP KVM_SET_REGS failed (%d)\n",
+			rc);
+	} else {
+		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		os_info("um: kvm harness: arbitrary-RIP KVM_RUN rc=%d exit_reason=%u (%s) rip=0x%lx\n",
+			rc, run->exit_reason,
+			kvm_harness_exit_name(run->exit_reason),
+			(unsigned long)KVM_HARNESS_HLT2_OFFSET);
+	}
+
+	/*
 	 * The harness is one-shot by design. Report the final exit
 	 * state (via os_info so it bypasses the unregistered printk
 	 * buffer) and panic to stop the UML process — this is a
@@ -306,5 +345,5 @@ int kvm_run_harness(void)
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b.1c measurement complete, D-04b.2 swaps UML CR3 next");
+	panic("um: kvm harness: done — D-04b.1c + D-04b.2b.alt complete");
 }
