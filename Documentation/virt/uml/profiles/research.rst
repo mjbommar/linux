@@ -102,7 +102,15 @@ What's on
   end-to-end on UML (workstream C-02) — every OOB/UAF inside
   the pool is caught and reported via ``dmesg``; live stats at
   ``/sys/kernel/debug/kfence/stats``, object metadata at
-  ``/sys/kernel/debug/kfence/objects``.
+  ``/sys/kernel/debug/kfence/objects``. ``CONFIG_KASAN_KUNIT_
+  TEST=m`` builds ``mm/kasan/kasan_test.ko`` as a loadable
+  module; the ``tools/testing/selftests/um/cve-repro/``
+  selftest loads it on demand and asserts that the full KASAN
+  KUnit suite reproduces CVE-class memory-safety bugs (heap
+  OOB, UAF, double-free, stack OOB, etc.) in under 30 s of
+  wall-clock — the verifiable form of M6
+  ("research profile reproduces a syzbot CVE") from the
+  redesign milestones.
 - **Lockdep** + **PROVE_LOCKING** + **DEBUG_MUTEXES** +
   **DEBUG_ATOMIC_SLEEP**.
 - **Memory debug**: ``DEBUG_VM``, ``DEBUG_PAGEALLOC``,

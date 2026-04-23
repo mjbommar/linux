@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-TARGETS = ftrace-smoke hooks-flip kmsan-smoke kprobes-stress launcher-smoke profiles snapshot-smoke userspace-smoke
+TARGETS = cve-repro ftrace-smoke hooks-flip kmsan-smoke kprobes-stress launcher-smoke profiles snapshot-smoke userspace-smoke
 include ../lib.mk
 
 all:

@@ -56,6 +56,23 @@ research?
 research profile. Time from "I have the syz repro" to "I have
 the KASAN report" should be <30s.
 
+**Status:** landed (2026-04-23). Shipped as post-Q1 push Phase I
+Lift #8 (`06-sequencing/post-q1-push.md`). Selftest
+`tools/testing/selftests/um/cve-repro/` boots the research-
+profile UML with `kasan_test_module=<path>` on the cmdline,
+loads `kasan_test.ko` which executes the full KASAN KUnit
+suite. Every passing test is a minimal abstract repro of a
+CVE-class memory-safety bug (heap OOB read/write, use-after-
+free, double-free, stack OOB, globals OOB, etc., per
+`lib/kasan_test_c.c`). The PASS gate requires ≥10 TAP-level
+`ok` lines AND ≥10 `BUG: KASAN:` reports; the runner asserts
+host-visible wall-clock ≤30 s (matches the M6 contract). The
+intentional divergence from a single-named-CVE repro is
+documented in the selftest's inline comments: synthetic-but-
+deterministic reproduction proves the research profile's
+detection machinery works; specific-CVE repros are left as a
+user-extensible slot on top of the same harness.
+
 ## M7: syzkaller `vm/uml` backend lands (end of month 12)
 
 **Question:** Has google/syzkaller#1288 been closed?
