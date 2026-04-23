@@ -1,9 +1,12 @@
 # D-workstream design memo: naive `um_backend_kvm`
 
-**Status:** draft (2026-04-23)
+**Status:** draft (2026-04-23), calibrated with spike 04
+results.
 **Companion to:** `01-kvm-platform-design.md` (status + spike
-result summary), `measurements.md` (timing data), spike 01/02
-(the empirical floor this memo is designed around).
+result summary), `measurements.md` (timing data), spikes
+01/02 (real-mode floor across 8 hosts) and 04 (long-mode
++ userspace-visible VMEXIT, the shape the naive backend
+ships).
 
 This is the implementation-shaping memo for the first-phase
 KVM backend. Scope: replace the ptrace/seccomp trap mechanism

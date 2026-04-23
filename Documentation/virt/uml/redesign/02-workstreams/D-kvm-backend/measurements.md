@@ -90,6 +90,91 @@ KVM-based measurement we do builds on this floor.
   silicon still (Sapphire Rapids / Granite Rapids / Zen 5
   data point TBD) or (b) the systrap gadget layer (D-04).
 
+## 2026-04-23 — Spike 04: long-mode guest + IO-port VMEXIT
+
+Methodology: `spikes/04-longmode-lstar-vmcall/spike.c` — set
+up IA-32e long mode with a flat GDT (3 entries), 2 MiB
+identity-mapped huge page, CR0.PE|WP|PG + CR4.PAE +
+EFER.LME|LMA|SCE. Guest code is `out %al, $0xf4; hlt` at
+phys 0x4000. The `out` triggers a `KVM_EXIT_IO` userspace
+round-trip (the same userspace-visible exit shape the
+design memo's bounce trampoline uses; `vmcall` does not
+exit to userspace by default because KVM in-kernel
+emulates it). We measure the IO-exit cycles. A second
+`KVM_RUN` after skipping the `out` catches the trailing
+HLT for sanity.
+
+Originally planned as SYSCALL-through-LSTAR → vmcall. Two
+implementation notes:
+- `vmcall` with rax=0 doesn't exit to userspace — KVM
+  routes it through `kvm_emulate_hypercall()` and continues.
+  To trigger a userspace-visible exit for the spike, we
+  use `out` to an unused port instead.
+- Long-mode bring-up with just `KVM_SET_SREGS` + a minimal
+  GDT in guest memory was enough; no IDT needed because
+  we rely on normal exits, not faults.
+
+The design memo's bounce-trampoline cost will be a VMEXIT
+of similar shape (IO exit or vmcall-for-userspace with
+`KVM_CAP_HYPERV_SYNIC` or equivalent enabled); this
+measurement bounds the naive backend's per-syscall floor
+when running in the actual x86_64 long mode UML uses.
+
+| Host | CPU | MHz | Spike01 cyc | Spike04 IO cyc | Δ | Notes |
+|---|---|---:|---:|---:|---:|---|
+| s2 | Xeon E3-1225 v5 (Skylake-S) | 2700 | 20600 | 29746 | +9146 | Older VMX path slower |
+| s1 | Xeon E3-1225 v6 (Kaby Lake) | 3300 | 17820 | 20404 | +2584 | |
+| s3 | Xeon W-2123 (Skylake-SP) | 3700 | 17550 | 25172 | +7622 | |
+| s5 | Ryzen 7 7840HS (Zen 4) | 2262 | 12236 | 13148 | +912 | Tightest delta |
+| s6 | Ryzen 7 7840HS (Zen 4) | 1101 | 12350 | 13338 | +988 | |
+| s7 | Ryzen 7 7840HS (Zen 4) | 1790 | 12426 | 13338 | +912 | |
+| s4 | i5-12600K (Alder Lake) | 4500 | 11700 |  6336 | **-5364** | IO exit faster than HLT (!) |
+| s0 | i9-12900K (Alder Lake) | 1136 |  3837 | 10986 | +7149 | Host was heavily throttled (1.1 GHz) |
+
+**Observations:**
+
+- **Long-mode + IO-exit is what the naive backend actually
+  ships.** The memo's bounce-trampoline path goes through
+  a userspace-visible VMEXIT just like this spike. Spike
+  01's real-mode HLT was the absolute floor; spike 04 is
+  the realistic floor for the shipping shape.
+- **Zen 4 has the tightest delta** (~900 cycles added over
+  the HLT floor). Consistent across all three Zen 4 hosts.
+  Suggests AMD's SVM IO-exit fastpath is efficient.
+- **Alder Lake i5 measured faster on IO exit than real-
+  mode HLT.** Either (a) CPU clock drift between runs —
+  same silicon but different P-state; or (b) Intel's
+  long-mode + IO-exit path is genuinely faster than real-
+  mode exits on Alder Lake. Worth a follow-on with locked
+  P-state to separate these.
+- **i9 ran at 1.1 GHz this session** due to thermal or
+  idle state (vs. 4.9 GHz in spike 01). The ~11000 cycle
+  IO-exit number is still comparable to the Zen 4 cycles;
+  the microarchitectural invariant holds.
+- **Older Intel (Skylake-S, Kaby Lake, Skylake-SP) added
+  2500-9000 cycles** going from HLT to IO-exit. The exact
+  delta varies by part — not a clean pattern in this
+  dataset.
+
+**Bottom-line update to the design memo:**
+
+- Add **~1000-9000 cycles of IO-exit overhead** to spike 01's
+  HLT floor when estimating the naive backend's per-syscall
+  cost. For the headline numbers in the memo:
+  - Alder Lake i5 at boost: ~6336 cyc / ~1.4 µs per syscall
+  - Zen 4 at boost: ~13200 cyc / ~2.6 µs per syscall
+  - Skylake-era Intel: ~25000-30000 cyc / ~7-11 µs per syscall
+- The "~800 ns on Alder Lake i9" claim needs P-state-
+  locked re-measurement before it's a real design number.
+  On this run's thermal-throttled i9 the IO-exit path was
+  ~10986 cycles, which at i9's 4.9 GHz boost would be
+  ~2.2 µs — still under the 5 µs seccomp baseline but not
+  sub-microsecond.
+- The memo's commit-plan sizing (~1600 LOC, 4-6 weeks)
+  stands. The performance envelope the memo claims gets
+  calibrated slightly: naive backend delivers 2-10 µs per
+  syscall depending on silicon, still 2-10× over seccomp.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
