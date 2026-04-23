@@ -168,7 +168,18 @@ int kvm_run_harness(void)
 	 * The harness is one-shot by design. Whatever exit we hit
 	 * is what we report; there's no "continue booting" path
 	 * after this.
+	 *
+	 * Emit the result through os_info() BEFORE panic() because
+	 * panic() at this early boot stage buffers its printk
+	 * output — console registration happens later in
+	 * start_kernel() and the buffer never flushes if we
+	 * reboot_skas() out of linux_main(). os_info() writes
+	 * directly to stderr via the host libc, bypassing the
+	 * printk buffer entirely.
 	 */
+	os_info("um: kvm harness: KVM_RUN rc=%d, exit_reason=%u (%s)\n",
+		rc, run->exit_reason,
+		kvm_harness_exit_name(run->exit_reason));
 	panic("um: kvm harness: KVM_RUN rc=%d, exit_reason=%u (%s) — D-04b.1b sanity complete, D-04b.2 swaps UML CR3 next",
 	      rc, run->exit_reason,
 	      kvm_harness_exit_name(run->exit_reason));
