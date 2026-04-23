@@ -48,7 +48,62 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 
 #define VMALLOC_OFFSET	(__va_space)
 #define VMALLOC_START	((high_physmem + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
+
+/*
+ * Under CONFIG_KMSAN, split the original VMALLOC range
+ * [VMALLOC_START, TASK_SIZE - 2 * PAGE_SIZE) into four
+ * equal quarters matching x86_64's layout
+ * (arch/x86/include/asm/pgtable_64_types.h:124-169). This
+ * is the D62-selected resolution for the D58 "dedicated
+ * KMSAN shadow slab doesn't fit" breakage. See
+ * `Documentation/virt/uml/redesign/02-workstreams/
+ * C-profiles-and-gaps/07-port-kmsan-redesign.md` for the
+ * feasibility comparison.
+ *
+ *   quarter 1 [VMALLOC_START, VMALLOC_END)
+ *                              — the effective vmalloc area
+ *                                (1/4 of original size)
+ *   quarter 2 [KMSAN_VMALLOC_SHADOW_START, ...)
+ *                              — shadow for vmalloc range
+ *                                (1 byte per byte)
+ *   quarter 3 [KMSAN_VMALLOC_ORIGIN_START, ...)
+ *                              — origin for vmalloc range
+ *   quarter 4 [KMSAN_MODULES_SHADOW_START, ...) +
+ *             [KMSAN_MODULES_ORIGIN_START, ...)
+ *                              — modules shadow + origin
+ *
+ * The generic KMSAN code (mm/kmsan/shadow.c::vmalloc_meta)
+ * computes shadow/origin addresses as VMALLOC_START +
+ * offset + KMSAN_VMALLOC_*_OFFSET; our macros feed that
+ * arithmetic with the same shapes x86 uses.
+ */
+#ifndef CONFIG_KMSAN
 #define VMALLOC_END	(TASK_SIZE-2*PAGE_SIZE)
+#else
+#define VMALLOC_QUARTER_SIZE	\
+	(((TASK_SIZE - 2 * PAGE_SIZE) - VMALLOC_START) / 4)
+#define VMALLOC_END		(VMALLOC_START + VMALLOC_QUARTER_SIZE - 1)
+
+#define KMSAN_VMALLOC_SHADOW_OFFSET	VMALLOC_QUARTER_SIZE
+#define KMSAN_VMALLOC_ORIGIN_OFFSET	(VMALLOC_QUARTER_SIZE << 1)
+
+#define KMSAN_VMALLOC_SHADOW_START	\
+	(VMALLOC_START + KMSAN_VMALLOC_SHADOW_OFFSET)
+#define KMSAN_VMALLOC_ORIGIN_START	\
+	(VMALLOC_START + KMSAN_VMALLOC_ORIGIN_OFFSET)
+
+/*
+ * UML overlaps MODULES_VADDR with VMALLOC_START (below), so
+ * modules shadow/origin live in the 4th quarter of the
+ * original VMALLOC range. The layout mirrors x86's
+ * KMSAN_MODULES_*_START formulas.
+ */
+#define KMSAN_MODULES_SHADOW_START	\
+	(VMALLOC_END + KMSAN_VMALLOC_ORIGIN_OFFSET + 1)
+#define KMSAN_MODULES_ORIGIN_START	\
+	(KMSAN_MODULES_SHADOW_START + VMALLOC_QUARTER_SIZE / 2)
+#endif /* CONFIG_KMSAN */
+
 #define MODULES_VADDR	VMALLOC_START
 #define MODULES_END	VMALLOC_END
 

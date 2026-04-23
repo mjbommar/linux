@@ -4,91 +4,102 @@
 UML KMSAN port
 ==============
 
-**STATUS: BROKEN.** The UML KMSAN port is currently gated on
-``BROKEN`` in ``arch/um/Kconfig`` (``select HAVE_ARCH_KMSAN if
-X86_64 && BROKEN``) and cannot be selected in a normal build.
-This document describes the intended surface and the reason
-for the gate; it is kept on-tree so the C-07 redesign follow-up
-has a starting point, not because KMSAN works today. See
-``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-entry ``D58`` for the full story.
+The UML KMSAN port uses the **VMALLOC quarter-split** layout
+matching ``arch/x86/include/asm/pgtable_64_types.h:124-169``.
+Under ``CONFIG_KMSAN=y``, the VMALLOC range is split into
+four equal quarters: new vmalloc, vmalloc shadow, vmalloc
+origin, and modules shadow+origin. See
+``Documentation/virt/uml/redesign/02-workstreams/
+C-profiles-and-gaps/07-port-kmsan-redesign.md`` for the
+feasibility comparison against the alternative (``task_size``
+cap) and ``Documentation/virt/uml/redesign/04-risks/
+decisions-log.md`` entries D58 + D62 for the decision
+history.
 
-The original design (when unbroken) exposes the standard Linux
-uninitialized-memory detector surface —
-``/sys/kernel/debug/kmsan/``, clang
+The port exposes the standard Linux uninitialized-memory
+detector surface — ``/sys/kernel/debug/kmsan/``, clang
 ``-fsanitize=kernel-memory`` instrumentation, the
-``BUG: KMSAN: uninit-value`` report style — to UML guests,
-running inside the host UML process under a dedicated-region
-shadow + origin host-mmap scheme.
+``BUG: KMSAN: uninit-value`` report style — to UML guests.
 
-Why it's broken
-===============
+Memory layout
+=============
 
-The dedicated-region scheme worked for KASAN because KASAN
-shadow is 1 byte per 8 bytes of kernel VA: 128 TiB of kernel
-addresses compresses into 16 TiB of shadow, which fits
-comfortably in a dedicated host-mmap region above the UML
-binary. KMSAN's shadow is 1 byte per 1 kernel byte, so the
-same kernel-VA range wants 128 TiB of shadow, plus another
-128 TiB for origin (1 u32 per kernel u32 = same byte size).
-256 TiB of reservation does not fit anywhere in the lower
-canonical half on x86_64.
+Under ``CONFIG_KMSAN=y`` on UML/x86_64, the original VMALLOC
+range ``[VMALLOC_START, TASK_SIZE - 2 * PAGE_SIZE)`` is
+divided into four equal quarters::
 
-The current code (``arch/um/include/asm/kmsan.h``) sizes both
-regions to the full 128 TiB, while the Kconfig defaults
-(``arch/um/Kconfig``) place them only 16 TiB apart — the
-SHADOW region overflows catastrophically into the ORIGIN
-region and beyond. Runtime smoke fails at early shadow mmap
-with ``Couldn't allocate shadow memory``.
+   quarter 1  VMALLOC_START            .. VMALLOC_END
+              — effective vmalloc area (1/4 original size)
+   quarter 2  KMSAN_VMALLOC_SHADOW_START ..
+              — shadow for quarter 1 (1 byte per byte)
+   quarter 3  KMSAN_VMALLOC_ORIGIN_START ..
+              — origin for quarter 1 (1 u32 per kernel u32,
+                same byte total as shadow)
+   quarter 4  KMSAN_MODULES_SHADOW_START + ORIGIN
+              — modules shadow + origin
 
-Resolution paths (C-07 follow-up)
+The generic KMSAN core
+(``mm/kmsan/shadow.c::vmalloc_meta``) computes each address
+as ``VMALLOC_START + offset + KMSAN_VMALLOC_*_OFFSET``; the
+arch/um macros in ``arch/um/include/asm/pgtable.h`` plug
+that arithmetic directly.
+
+Under ``CONFIG_KMSAN=n``, VMALLOC extends to
+``TASK_SIZE - 2 * PAGE_SIZE`` as before — no impact on
+non-KMSAN builds.
+
+Why not a dedicated shadow slab?
+================================
+
+The original (D44) design reserved two 128 TiB host-mmap
+slabs above the KASAN shadow. That scheme worked for KASAN
+because KASAN's shadow is 1 byte per 8 kernel bytes —
+16 TiB of shadow for 128 TiB of VA. KMSAN's shadow is 1:1,
+so the same VA range wants 128 TiB of shadow plus another
+128 TiB of origin. 256 TiB of reservation doesn't fit in
+the lower canonical half on x86_64 (128 TiB total). D58
+records the breakage; D62 records the VMALLOC-quarter-split
+pick.
+
+Comparison with x86:
+
+* x86's ``VMALLOC_SIZE_TB`` is 32 TiB, so each quarter is
+  8 TiB.
+* UML's effective VMALLOC range is ``TASK_SIZE -
+  VMALLOC_START`` which varies by build. Typical UML with
+  a few GiB of ``mem=`` argument gives ~10 GiB of VMALLOC,
+  so each quarter is ~2.5 GiB. Still ample for research-
+  profile workloads (the only builds likely to enable
+  KMSAN).
+
+Cost: VMALLOC-quarter-split shrinks effective VMALLOC to
+1/4 its normal size under ``CONFIG_KMSAN``. For research
+profile this is acceptable; for profiles that rely on
+large vmalloc reservations, don't enable KMSAN there.
+
+Relationship to KASAN and KCSAN
+===============================
+
+* **KASAN** detects out-of-bounds and use-after-free.
+  Complementary. KASAN + KMSAN cannot co-exist in a single
+  image (by upstream convention and Kconfig) — ship each
+  in its own profile.
+
+* **KCSAN** detects data races. Complementary. KMSAN + KCSAN
+  share no shadow state and CAN co-exist; the research-
+  kmsan profile can select both if desired.
+
+* **KFENCE** detects sampling-based heap bugs. Orthogonal.
+  Strictly additive with KMSAN.
+
+Snapshot / forkserver integration
 =================================
 
-Two workable paths have been identified; neither has been
-implemented yet:
-
-1. **Adopt x86's VMALLOC quarter-split.** Put shadow and
-   origin inside the VMALLOC range itself, sized as 1/4 each
-   of VMALLOC. This matches ``mm/kmsan/shadow.c``'s existing
-   arithmetic without any UML-side slab.
-2. **Cap ``task_size`` under KMSAN.** Limit the UML kernel's
-   addressable VA to a size where two 1:1 slabs fit in the
-   lower canonical half. Preserves the dedicated-region
-   scheme at the cost of a smaller kernel VA ceiling.
-
-Either path requires careful measurement against real UML
-workloads; the choice is the follow-up's job. Until then,
-this port stays gated behind ``BROKEN``.
-
-Intended (non-functional) memory layout
-=======================================
-
-On UML, KMSAN reserves two dedicated 128 TiB host-mmap regions
-for shadow and origin, placed immediately above the existing
-KASAN shadow::
-
-   KASAN shadow    0x100000000000   (16 TiB, existing)
-   KMSAN shadow    0x200000000000   (128 TiB, 1 byte / kernel byte)
-   KMSAN origin    0x300000000000   (128 TiB, 1 u32 / kernel u32)
-
-KASAN and KMSAN are Kconfig-mutually-exclusive. The two 128
-TiB regions would need to live at non-overlapping offsets in
-the lower canonical half — which they don't today, per the
-"Why it's broken" section above.
-
-Both regions would be reserved via ``kasan_map_memory()`` —
-despite its name, that helper is a generic "mmap a host VA
-range with PROT_READ|PROT_WRITE + MADV_DONTDUMP" routine UML
-uses for every arch-shadow bootstrap. The mmap would run once
-from ``kmsan_arch_init_early_shadow()``, which the
-``mm/kmsan/`` core calls before its own reserved-range sweep.
-
-Host RSS follows touched pages, not the reservation total:
-``mmap`` with ``MAP_NORESERVE`` + demand-paging would mean
-the kernel only spends real memory on shadow/origin bytes
-that KMSAN-instrumented code actually touches — still not a
-workable design because the reservation itself fails before
-the first touch.
+When ``CONFIG_UM_SNAPSHOT_FORKSERVER=y``, the KMSAN shadow
+and origin regions live inside VMALLOC — already part of
+the mm_map-registered snapshot scope the C-09 forkserver
+exposes. No additional ``um_register_mmap_region()``
+plumbing beyond what VMALLOC itself registers.
 
 Usage
 =====
@@ -108,36 +119,11 @@ KMSAN reports land in dmesg as::
    Local variable <name> created at ...
    the first 8 bytes of this origin chain are ...
 
-Relationship to KASAN and KCSAN
-===============================
-
-* **KASAN** detects out-of-bounds and use-after-free. Complementary.
-  KASAN + KMSAN cannot co-exist in a single image (by upstream
-  convention and Kconfig) — ship each in its own profile.
-
-* **KCSAN** detects data races. Complementary. KMSAN + KCSAN share
-  no shadow state and CAN co-exist; the research-kmsan profile
-  can select both if desired.
-
-* **KFENCE** detects sampling-based heap bugs. Orthogonal.
-  Strictly additive with KMSAN.
-
-Snapshot / forkserver integration
-=================================
-
-When ``CONFIG_UM_SNAPSHOT_FORKSERVER=y``, both the KMSAN shadow
-and origin regions register with the C-09 ``um_register_mmap_
-region()`` registry so snapshot/fork workers inherit the
-mappings via COW. Shadow contents are not deduplicated into
-snapshots (same policy as KASAN) — they reconstruct from
-allocator state on restore and are too sparse to pay the
-serialization cost.
-
 Regression test
 ===============
 
 ``tools/testing/selftests/um/kmsan-smoke/`` boots a
-CONFIG_KMSAN=y UML image and asserts that
+``CONFIG_KMSAN=y`` UML image and asserts that
 ``/sys/kernel/debug/kmsan/`` exists and, optionally, that
 a planted uninit-read reproducer triggered the
 ``BUG: KMSAN:`` report. Drives via::
@@ -150,9 +136,13 @@ Further reading
 * ``Documentation/dev-tools/kmsan.rst`` — generic KMSAN docs
   (bare-metal x86 + s390 + UML).
 * ``Documentation/virt/uml/redesign/02-workstreams/
-  C-profiles-and-gaps/07-port-kmsan.md`` — design rationale,
-  decisions-log D44 + D51 for the shape.
-* ``arch/um/include/asm/kmsan.h`` — VA layout + arch hooks.
-* ``mm/kmsan/init.c`` — generic core; the
-  ``kmsan_arch_init_early_shadow()`` hook UML overrides is
-  a weak symbol introduced upstream by the C-07 series.
+  C-profiles-and-gaps/07-port-kmsan-redesign.md`` — the D62
+  redesign's feasibility comparison.
+* ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
+  D58 (broken original) + D62 (VMALLOC-split pick).
+* ``arch/um/include/asm/pgtable.h`` — ``VMALLOC_END`` /
+  ``KMSAN_VMALLOC_*_START`` / ``KMSAN_MODULES_*_START``
+  macros (the quarter-split layout).
+* ``arch/um/include/asm/kmsan.h`` — arch-hook inlines.
+* ``mm/kmsan/shadow.c::vmalloc_meta`` — the generic
+  consumer of the quarter-split layout.

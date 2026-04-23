@@ -6311,4 +6311,152 @@ Phase IV landed three sub-lifts:
 
 ---
 
+## D62 (2026-04-23) — KMSAN-on-UML adopts VMALLOC quarter-split; D58's dedicated-slab scheme superseded
+
+**Status:** Accepted. Supersedes D58 (2026-04-23) which
+gated HAVE_ARCH_KMSAN on BROKEN pending a workable design.
+
+**Context.** D58 recorded that the first-pass KMSAN port
+reserved two 128 TiB dedicated slabs for shadow + origin,
+which doesn't fit in the lower canonical half and runtime
+smoke failed at early shadow mmap with ENOMEM. D58
+identified two resolution paths without picking one:
+(a) adopt x86's VMALLOC quarter-split, (b) cap task_size
+under KMSAN. Phase V Lifts #3a and #3b (landed in commit
+1f75a270b701) probed both as paper designs with side-by-
+side TCO analysis. See
+`02-workstreams/C-profiles-and-gaps/07-port-kmsan-redesign.md`
+for the full comparison.
+
+**Decision.** Pick **path (a) — VMALLOC quarter-split**,
+mirroring `arch/x86/include/asm/pgtable_64_types.h:124-169`.
+Under `CONFIG_KMSAN`, UML's VMALLOC range is divided into
+four equal quarters: effective vmalloc (1), shadow (2),
+origin (3), modules shadow+origin (4). Shadow/origin VAs
+derive from `VMALLOC_START` arithmetic that the generic
+`mm/kmsan/shadow.c::vmalloc_meta()` already consumes.
+
+**Decision basis — why path (a) over path (b).**
+
+1. **Idiomatic upstream.** x86_64 and s390 both use VMALLOC
+   quarter-split. UML adopting the same shape is a
+   one-line reviewer query ("yes, matches x86").
+   Path (b)'s `task_size` cap is a novel-to-UML scheme
+   the reviewer has to validate from scratch.
+2. **Localized blast radius.** Path (a) touches pgtable.h,
+   kmsan.h, and Kconfig — ~150 lines of code. Path (b)
+   cascades into every `TASK_SIZE` consumer (uaccess,
+   elf, stack, vsyscall, ~30 sites) — ~400-500 lines.
+3. **User-visible VA ceiling preserved.** Path (a) keeps
+   `task_size` identical under `CONFIG_KMSAN`; guest
+   userspace sees the same VA it would without KMSAN.
+   Path (b) shrinks guest VA from ~128 TiB to ~32 TiB
+   based on a config flag.
+4. **Effective VMALLOC still ample.** Path (a) gives
+   each quarter ~2.5 GiB on a typical UML (mem= of a few
+   GiB). Research profile (the only profile expected to
+   enable KMSAN) doesn't approach this limit. Path (b)
+   preserves full VMALLOC but costs user-visible
+   `task_size`; the tradeoff is wrong-shaped for UML's
+   profile matrix.
+5. **Generic KMSAN code already designed for it.**
+   `mm/kmsan/shadow.c::vmalloc_meta` expects shadow/origin
+   as `VMALLOC_START + offset + KMSAN_VMALLOC_*_OFFSET`.
+   Path (a) plugs those macros directly. Path (b) would
+   require retaining the non-standard dedicated-slab
+   arch hook we started with, keeping UML an outlier.
+
+**Implementation footprint (landed same commit).**
+
+1. `arch/um/Kconfig`: drop `BROKEN` gate on
+   `HAVE_ARCH_KMSAN`; remove the now-moot
+   `KMSAN_SHADOW_OFFSET` and `KMSAN_ORIGIN_OFFSET`
+   Kconfig entries (the VMALLOC-split layout derives
+   shadow/origin VAs at compile time).
+2. `arch/um/include/asm/pgtable.h`: split-aware
+   `VMALLOC_END` under `CONFIG_KMSAN`
+   (`VMALLOC_START + (TASK_SIZE - 2*PAGE_SIZE -
+   VMALLOC_START) / 4`). Define
+   `KMSAN_VMALLOC_SHADOW_START`,
+   `KMSAN_VMALLOC_ORIGIN_START`,
+   `KMSAN_MODULES_SHADOW_START`,
+   `KMSAN_MODULES_ORIGIN_START`.
+3. `arch/um/include/asm/kmsan.h`: drop the dedicated-slab
+   `KMSAN_SHADOW_SIZE` / `KMSAN_ORIGIN_SIZE` /
+   `KMSAN_SHADOW_START` / `KMSAN_SHADOW_END` defines.
+   Pull `KMSAN_VMALLOC_*` via `<asm/pgtable.h>`
+   include. Preserve the two required arch-hook
+   inlines (`arch_kmsan_get_meta_or_null` returning NULL,
+   `kmsan_virt_addr_valid` returning true under
+   `CONFIG_KMSAN`).
+4. `Documentation/virt/uml/kmsan.rst`: flip the
+   "STATUS: BROKEN" banner to a VMALLOC-split layout
+   description. User-facing surface (`/sys/kernel/debug/
+   kmsan/`, BUG: KMSAN: report style) unchanged.
+
+**Alternatives considered.**
+
+1. **Land path (a) but keep the Kconfig
+   `KMSAN_SHADOW_OFFSET` / `_ORIGIN_OFFSET` entries as
+   dead-but-tunable knobs.** Rejected. Carrying dead
+   Kconfig surface invites confusion; the
+   quarter-split layout is fully determined by
+   `VMALLOC_START` + `VMALLOC_SIZE_TB`.
+2. **Path (a) under a new Kconfig `UM_KMSAN_VMALLOC_SPLIT`
+   toggle with path (b) as an alternative.** Rejected.
+   Single-scheme-per-arch convention; offering both at
+   build-time invites mismatched combinations and tripling
+   the test matrix.
+3. **Defer the redesign entirely; wait for a UML KMSAN
+   workload request.** Rejected. D58 already recorded the
+   breakage as a shipped-lie Kconfig (HAVE_ARCH_KMSAN
+   visible but BROKEN-gated). Landing the working scheme
+   closes the gap; the upstream LKML submission for
+   C-07 (kmsan-arch-callback-rfc series) also benefits
+   from the arch side actually working.
+
+**Lifetime / revisit triggers.**
+
+- Revisit if the 1/4 VMALLOC ceiling is hit by a real
+  workload. Unlikely for research profile; possible if
+  KMSAN is ever enabled in a profile with large vmalloc
+  consumers (BPF JIT, eBPF maps).
+- Revisit if x86_64's quarter-split layout changes
+  upstream (unlikely; stable since 2022).
+- Revisit if a third path (e.g. per-cpu shadow banking)
+  proves preferable; D62 doesn't foreclose future
+  supersession.
+
+**Boot validation.**
+
+The redesign lands with a compile-clean build under
+`CONFIG_KMSAN=y`. Full real-workload validation (run the
+existing `tools/testing/selftests/um/kmsan-smoke/` harness
+against a booted KMSAN-enabled UML image, plus a planted
+uninit-value reproducer) is a follow-up pass; this entry
+closes the architectural blocker, not the end-to-end
+detection story.
+
+**Cross-references.**
+
+- D58 (2026-04-23) — superseded; the dedicated-slab
+  scheme this entry replaces.
+- D51 (2026-04-22) — C-07 KMSAN upstream strategy;
+  unchanged but now has a working arch side to
+  submit.
+- D44 (2026-04-22) — original dedicated-host-mmap
+  rationale; explicitly rejected here.
+- `arch/um/include/asm/pgtable.h` — the landed macros.
+- `arch/um/include/asm/kmsan.h` — the rewritten arch
+  hooks.
+- `Documentation/virt/uml/kmsan.rst` — user-facing
+  surface.
+- `02-workstreams/C-profiles-and-gaps/07-port-kmsan-
+  redesign.md` — Phase V Lifts #3a + #3b feasibility
+  memo.
+- `06-sequencing/post-q1-push.md` §"Phase V" —
+  parent-plan reference.
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -1,44 +1,30 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * UML-side KMSAN shadow/origin virtual-address layout and
- * the arch-specific interfaces mm/kmsan/ expects when
- * CONFIG_KMSAN=y.
+ * UML-side KMSAN arch hooks.
  *
- * *** CURRENT STATUS: BROKEN BY DESIGN ***
+ * This header ships the arch-side pieces `mm/kmsan/` expects
+ * when CONFIG_KMSAN=y on UML/x86_64: the vmalloc-shadow
+ * address macros (delegated to arch/um/include/asm/pgtable.h
+ * under the D62 VMALLOC-quarter-split scheme) and the
+ * required arch-override inlines (`arch_kmsan_get_meta_or_
+ * null`, `kmsan_virt_addr_valid`).
  *
- * Gated on BROKEN in arch/um/Kconfig (Finding #2, 2026-04-23
- * review; decisions-log D58). The header's SHADOW/ORIGIN sizes
- * are 128 TiB each (1 byte per kernel byte × full
- * KASAN_HOST_USER_SPACE_END_ADDR range), but the matching
- * KMSAN_SHADOW_OFFSET/KMSAN_ORIGIN_OFFSET defaults in
- * arch/um/Kconfig place them only 16 TiB apart
- * (0x200000000000 and 0x300000000000). The shadow extends
- * 112 TiB past the origin base; early shadow mmap fails with
- * ENOMEM. The code below is retained for the redesign to
- * build on — the sizing scheme itself is the thing that has
- * to change.
+ * History: an earlier dedicated-host-mmap slab scheme
+ * (D44) reserved two 128 TiB regions for shadow + origin
+ * above KASAN's 16 TiB slab. That layout didn't fit in
+ * the lower canonical half (D58, 2026-04-23). D62
+ * (2026-04-23) selects the VMALLOC-quarter-split approach
+ * mirroring `arch/x86/include/asm/pgtable_64_types.h`
+ * 124-169: VMALLOC is sized at 1/4 its normal range
+ * under CONFIG_KMSAN, and the other 3 quarters hold
+ * vmalloc shadow, vmalloc origin, and modules shadow+origin.
  *
- * Original design intent (kept for context; applies if the
- * redesign picks path (b) — task_size cap under KMSAN):
- *
- *   UML v1 picks a dedicated-host-mmap scheme rather than
- *   x86's quarter-split of VMALLOC. Reasons (see decisions-log
- *   D44):
- *     - UML's VMALLOC is bounded by TASK_SIZE, not a fixed
- *       canonical hole, so the x86 VA arithmetic in
- *       mm/kmsan/shadow.c::vmalloc_meta() has nowhere to land.
- *     - Splitting VMALLOC to 1/4 size under CONFIG_KMSAN=y
- *       creates an ABI fork between kmsan-on and kmsan-off
- *       UML images — the other sanitizer ports avoided that.
- *     - UML already owns the "mmap a 16 TiB slab and use it as
- *       arch shadow" pattern from KASAN; KMSAN extends it with
- *       one additional mmap for the origin region.
- *
- * The third bullet is where the design broke: KASAN needs
- * 16 TiB of shadow for 128 TiB of VA (1 byte per 8 bytes),
- * but KMSAN's 1:1 shadow for the same range needs 128 TiB —
- * times two (shadow + origin), which doesn't fit anywhere in
- * the lower canonical half.
+ * See `Documentation/virt/uml/kmsan.rst` for the user-
+ * visible design; `Documentation/virt/uml/redesign/
+ * 02-workstreams/C-profiles-and-gaps/07-port-kmsan-redesign.md`
+ * for the feasibility comparison against the task_size-cap
+ * alternative; and `arch/um/redesign/04-risks/decisions-log.md`
+ * D58 + D62 for the decision history.
  */
 
 #ifndef __ASM_UM_KMSAN_H
@@ -48,82 +34,25 @@
 #include <linux/types.h>
 
 /*
- * Shadow region: one byte per kernel byte. Size matches the
- * host userspace address range that UML's kernel addresses
- * can occupy — same ceiling KASAN uses, so shadow/origin
- * sizing stays a single KASAN_HOST_USER_SPACE_END_ADDR
- * define (declared in asm/kasan.h) shared across both.
- */
-#include <asm/kasan.h>
-
-#define KMSAN_SHADOW_OFFSET _AC(CONFIG_KMSAN_SHADOW_OFFSET, UL)
-#define KMSAN_ORIGIN_OFFSET _AC(CONFIG_KMSAN_ORIGIN_OFFSET, UL)
-
-/*
- * Size is the full covered VA range (KASAN_HOST_USER_SPACE_
- * END_ADDR + 1 = 128 TiB on x86_64) — 1 byte per kernel byte
- * for shadow, 1 u32 per kernel u32 for origin (same byte
- * total as shadow since it's 1:1 in word-size terms).
- *
- * Total extra VA reserved under CONFIG_KMSAN=y: 2 * 128 TiB,
- * but both are populated on demand via host mmap so RSS
- * only grows for touched pages. See D44 Probe 4 addendum
- * for the memory-pressure bounds measured empirically.
- */
-#ifdef CONFIG_X86_64
-#define KMSAN_SHADOW_SIZE (KASAN_HOST_USER_SPACE_END_ADDR + 1)
-#define KMSAN_ORIGIN_SIZE (KASAN_HOST_USER_SPACE_END_ADDR + 1)
-#else
-#error "KMSAN on UML is only defined for x86_64 today"
-#endif /* CONFIG_X86_64 */
-
-#define KMSAN_SHADOW_START (KMSAN_SHADOW_OFFSET)
-#define KMSAN_SHADOW_END   (KMSAN_SHADOW_START + KMSAN_SHADOW_SIZE)
-#define KMSAN_ORIGIN_START (KMSAN_ORIGIN_OFFSET)
-#define KMSAN_ORIGIN_END   (KMSAN_ORIGIN_START + KMSAN_ORIGIN_SIZE)
-
-/*
- * The VMALLOC quarter-split constants that
- * mm/kmsan/shadow.c::vmalloc_meta() consults when computing
- * the shadow/origin address of a vmalloc'd pointer. UML
- * puts vmalloc metadata in the same dedicated host-mmap
- * regions as everything else — vmalloc_meta() on UML just
- * returns the offset-added shadow/origin address without
- * any special bucketing, so the quarter-split constants
- * collapse to "map the whole VMALLOC range into shadow at
- * +KMSAN_SHADOW_OFFSET".
- *
- * Modules on UML overlap VMALLOC (MODULES_VADDR==VMALLOC_
- * START), so the MODULES_* constants mirror the VMALLOC_*
- * ones exactly. That's the minimum that lets
- * mm/kmsan/shadow.c compile with CONFIG_KMSAN_VMALLOC=y.
+ * The KMSAN_VMALLOC_* / KMSAN_MODULES_* macros are defined
+ * in asm/pgtable.h under `#ifdef CONFIG_KMSAN` so the
+ * compile-time constants match whatever TASK_SIZE +
+ * VMALLOC_START resolve to in a given build. Include the
+ * pgtable header to pull them in here.
  */
 #include <asm/pgtable.h>
-
-#define KMSAN_VMALLOC_SHADOW_START \
-	((unsigned long)KMSAN_SHADOW_OFFSET + (unsigned long)VMALLOC_START)
-#define KMSAN_VMALLOC_ORIGIN_START \
-	((unsigned long)KMSAN_ORIGIN_OFFSET + (unsigned long)VMALLOC_START)
-#define KMSAN_MODULES_SHADOW_START KMSAN_VMALLOC_SHADOW_START
-#define KMSAN_MODULES_ORIGIN_START KMSAN_VMALLOC_ORIGIN_START
 
 #ifdef CONFIG_KMSAN
 /*
  * UML's arch_kmsan_get_meta_or_null returns NULL for every
- * caller in v1 — no per-CPU fixmap-equivalent regions and no
- * IDT/entry trampolines to special-case. The generic page-
- * struct lookup in mm/kmsan/ handles every address we
- * allocate. If a future UML subsystem adds a private
- * memory pool (e.g. seccomp backend entry pages) this hook
- * grows a class-of-address branch.
- *
- * x86 uses this hook to map per-CPU `cpu_entry_area`
- * addresses to their private shadow/origin pools so
- * exception entry can read metadata without a page-table
- * walk. s390 uses it for lowcore. UML has no equivalent —
- * signal-delivery is the only quasi-exception path and it
- * reaches the generic KMSAN metadata via ordinary vmalloc-
- * backed per-CPU structures.
+ * caller today. Unlike x86 (which has a CPU_ENTRY_AREA
+ * private pool) and s390 (which has lowcore), UML has no
+ * per-CPU fixmap-equivalent and no IDT/entry trampolines
+ * to special-case. The generic page-struct lookup in
+ * mm/kmsan/ handles every address UML allocates. If a
+ * future UML subsystem adds a private memory pool (e.g.
+ * seccomp backend entry pages) this hook grows a
+ * class-of-address branch.
  */
 struct page;
 static inline void *arch_kmsan_get_meta_or_null(void *addr, bool is_origin)
@@ -136,16 +65,19 @@ static inline void *arch_kmsan_get_meta_or_null(void *addr, bool is_origin)
 static inline bool kmsan_virt_addr_valid(const void *addr)
 {
 	/*
-	 * On UML, every kernel address is a host-userspace
-	 * address served by the UML process's own mmap. The
-	 * shadow mapping covers the same range (by construction
-	 * of KMSAN_SHADOW_SIZE above), so validity checks
-	 * collapse to a range test. mm/kmsan/ callers use this
-	 * to short-circuit metadata lookups for out-of-range
-	 * pointers; we always return true because every
-	 * address a KMSAN-instrumented UML kernel passes has
-	 * valid shadow/origin under the size constraint above.
+	 * UML's kernel VA range is everything above TASK_SIZE
+	 * (physmem + vmalloc + modules). Under the VMALLOC-
+	 * quarter-split every shadow/origin address derives
+	 * from VMALLOC_START arithmetic, which is itself
+	 * inside that kernel VA range. Valid-range checks
+	 * therefore collapse to "is this at or above
+	 * VMALLOC_START". The generic vmalloc_meta() call
+	 * site already validates the shadow region bounds
+	 * before dereferencing, so returning true
+	 * unconditionally is safe for every code path that
+	 * reaches this predicate.
 	 */
+	(void)addr;
 	return true;
 }
 
