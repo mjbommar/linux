@@ -96,14 +96,25 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 #ifdef CONFIG_UM_BACKEND_KVM
 	else if (want == UM_BACKEND_KIND_KVM) {
 		/*
-		 * KVM is opt-in under DYNAMIC dispatch — users must
-		 * ask for it via `backend=kvm` because the scaffold
-		 * doesn't boot past init yet. force=kvm panics if
-		 * /dev/kvm isn't available; non-force defers
-		 * to the using_seccomp / ptrace default.
+		 * Non-force `backend=kvm` runs probe() here — if the
+		 * host is missing /dev/kvm or the kvm API version
+		 * drifted, we defer to the using_seccomp / ptrace
+		 * default with a warning rather than letting
+		 * init_backend() panic. That matches the design
+		 * memo's "detect at runtime, fall back to seccomp
+		 * backend with a warning" mitigation for the nested-
+		 * KVM / CI-host case. force=kvm skips this and lets
+		 * init_backend() panic per the arbiter contract.
 		 */
-		using_seccomp = 0;
-		return &um_backend_kvm_ops;
+		if (force) {
+			using_seccomp = 0;
+			return &um_backend_kvm_ops;
+		}
+		if (um_backend_kvm_ops.probe() == 0) {
+			using_seccomp = 0;
+			return &um_backend_kvm_ops;
+		}
+		pr_warn("um: backend=kvm requested but probe failed; falling back\n");
 	}
 #endif
 

@@ -15,8 +15,12 @@
 #include <backend.h>
 
 /*
- * Scaffold-stage kvm backend: no shared state yet. D-03 adds the
- * host-fd struct + per-VM plumbing and grows this header.
+ * D-03a: the /dev/kvm fd is held in lifecycle.c. Consumers that
+ * need it (D-03b+ — mm_attach issuing KVM_CREATE_VM, etc.) go
+ * through this accessor rather than touching the static in
+ * lifecycle.c directly. Returns -1 until init() has run; callers
+ * ordered against init_backend() can treat that as a bug.
  */
+int kvm_backend_fd(void);
 
 #endif /* __ARCH_UM_BACKEND_KVM_H */

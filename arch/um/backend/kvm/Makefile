@@ -3,10 +3,13 @@
 # KVM backend (workstream D).
 #
 # D-02 scaffold: ops-table singleton + scaffold lifecycle +
-# stubs for every hot op. Full data path lands across D-03..D-06
-# with its own TUs as needed.
+# stubs for every hot op.
+# D-03a: real /dev/kvm probe + init + shutdown in lifecycle.o.
+# Later D-03..D-06 add their own TUs (mm.o, thread.o, etc.) as
+# the data path lands.
 
 obj-y += kvm_backend.o
+obj-y += lifecycle.o
 obj-y += stubs.o
 
 include $(srctree)/arch/um/scripts/Makefile.rules
