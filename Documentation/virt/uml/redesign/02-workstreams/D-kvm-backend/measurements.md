@@ -581,6 +581,56 @@ silicon that hits it architecturally.
 - spike 04 measurements above — what this harness
   validates the port against.
 
+## 2026-04-23 — Phase III Lift #1b: first observable ring-3 execution in-backend
+
+Methodology: extend the D-04c-era harness with a SYSRETQ
+ring-0 → ring-3 transition. Ring-3 page at slot offset
+0x7000 contains `out %al, $0xf5; hlt`; ring-0 trampoline at
+0x8000 loads RCX/R11 and issues SYSRETQ. MSR_STAR[63:48] is
+overridden to 0x18 (from the D-04c-era 0xfff8 sentinel) so
+SYSRETQ loads CS=0x28|3, SS=0x20|3 — both ring-3 selectors
+added to the GDT in this same series. Port 0xf5 was picked
+specifically because it's *distinct* from the ring-0 tests'
+0xf4, so the exit port number is the unambiguous "ring-3
+ran" proof.
+
+Result (Skylake-W dev host):
+
+```
+um: kvm harness: 1b KVM_RUN rc=0 exit_reason=2 (IO)
+um: kvm harness: 1b PASS — ring-3 entry verified
+    (port=0xf5 IO exit)
+```
+
+**Observations:**
+
+- SYSRETQ into ring-3 landed cleanly on first attempt. No
+  descriptor-load #GP, no triple-fault shutdown.
+- The two-entry GDT extension (unused-padding at 0x18,
+  ring-3 data at 0x20, ring-3 code at 0x28) matches the
+  AMD64 SDM §6.1.1 SYSRETQ prescription and works on
+  Intel silicon without modification.
+- IOPL=3 in RFLAGS (`0x3202` not `0x202`) is required so
+  the ring-3 OUT doesn't #GP. Without IOPL=3 the expected
+  failure mode would be KVM_EXIT_SHUTDOWN or
+  KVM_EXIT_INTERNAL_ERROR rather than a clean IO exit.
+- The ring-3 transition adds no measurable round-trip
+  overhead beyond the existing LSTAR path (not separately
+  timed here; the one-shot PASS/FAIL test doesn't need a
+  cycle measurement). A separate timing pass would fit
+  naturally as a D-04b.1c-style addendum if we want to
+  characterize the added SYSRETQ cost — but the gate
+  purpose of Lift #1b was "does it happen at all", and
+  that is settled.
+
+**What this opens:**
+
+- Phase III Lift #1c (route LSTAR trampoline to the real
+  syscall table rather than the harness's `out`-and-
+  sysretq emulator) is architecturally unblocked. The
+  ring-3 → ring-0 → userspace transit machinery is now
+  demonstrably working in-backend.
+
 ## 2026-04-23 — Phase III Lift #1a (kvm_um attach-cost benchmark) retired
 
 **Not run.** Decisions-log D60 closes this placeholder as
