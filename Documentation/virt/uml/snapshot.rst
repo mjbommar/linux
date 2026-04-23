@@ -101,9 +101,40 @@ When ``um_snapshot_ready`` fires with both fds open, the kernel
 (a) writes the AFL\\0 handshake on 199, (b) blocks the UML-
 dispatched host signal set via the ``signals_enabled`` thread-
 local gate (see decisions-log ``D41``), (c) reads one 4-byte
-testcase descriptor on 198, (d) ``fork()``s a worker, and (e)
-``waitpid``s on the worker. The parent writes the worker's pid
-and exit status back on 199, then loops for the next testcase.
+testcase descriptor on 198, (d) ``fork()``s a worker, (e) writes
+the worker's pid back on 199, and (f) writes a hard-coded
+exit status of ``0`` on 199 — see the v1-ceiling caveat
+below. At the top of the next iteration the parent drains any
+zombies from prior iterations via a non-blocking
+``wait4(-1, WNOHANG)``. The parent does NOT ``waitpid()`` on
+the specific worker before reporting status — the v1 ceiling
+prevents that path from working today.
+
+**v1 ceiling: exit-status semantics.** The status slot is
+hard-coded to ``0`` regardless of the worker's real exit. Four
+separate attempts (2026-04-21 / 2026-04-23) to insert any
+form of ``waitpid(pid)`` between pid-report and status-report
+crashed the parent with ``Kernel mode signal 4`` (SIGILL) in
+UML kernel context. Root cause: UML's timer ``SIGALRM``
+dispatched into UML's signal handler during the non-UML-
+kernel parent-execution window, calling ``switch_threads()``
+and ``longjmp()``'ing into a ``jmp_buf`` captured pre-fork —
+stale stack, next instruction decoded from garbage, SIGILL.
+Attempts tried: bare blocking ``wait4``, ``wait4(WNOHANG)``
+spin-poll, ``WNOHANG`` + ``clock_nanosleep``, ``WNOHANG`` +
+``sched_yield``, ``WNOHANG`` + host-level ``sigprocmask
+SIG_BLOCK``; all four reproduced the crash.
+
+Consumers that care about worker exit status must use a side
+channel until this is fixed. For AFL-compatible fuzzing the
+shared-memory coverage map already encodes worker crashes;
+the status-fd ``0`` is documented-and-expected for v1.
+
+Proper fix requires UML infrastructure work on the signal/
+schedule interaction during parent non-kernel-exec windows —
+or a refactor where the worker writes its status via the
+status fd BEFORE calling ``exit``, sidestepping the whole
+parent-side reap path.
 
 Worker reinit
 -------------

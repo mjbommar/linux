@@ -16,7 +16,6 @@
 #include <sys/ptrace.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <asm/unistd.h>
 #include <init.h>
 #include <longjmp.h>
@@ -240,49 +239,6 @@ int os_snapshot_reap_zombies(void)
 	}
 }
 
-/*
- * Poll-reap a specific worker pid to get its real exit status. Does
- * the WNOHANG loop + clock_nanosleep backoff instead of a single
- * blocking wait4 — the blocking variant has an unresolved crash mode
- * in the snapshot/forkserver context (os_snapshot_waitpid_status's
- * long comment documents the three failed attempts to fix it). Poll
- * with WNOHANG avoids the crash class because it never blocks inside
- * wait4; the nanosleep between polls is a different syscall class and
- * has not exhibited the issue.
- *
- * Returns the encoded wait status on success, -errno on failure,
- * -ETIMEDOUT if the worker hasn't exited within timeout_ns (call
- * with 0 for "infinite" — matches AFL protocol which expects the
- * forkserver to wait as long as needed; AFL itself enforces a
- * testcase timeout on the fuzzer side).
- *
- * Short nanosleep (1 ms) keeps poll overhead reasonable while
- * staying responsive to fast-exiting workers.
- */
-int os_snapshot_poll_waitpid_status(int pid, unsigned long long timeout_ns)
-{
-	const struct timespec slp = { .tv_sec = 0, .tv_nsec = 1000 * 1000 };
-	unsigned long long waited_ns = 0;
-	int status;
-	long ret;
-
-	for (;;) {
-		ret = syscall(__NR_wait4, pid, &status, WNOHANG, NULL);
-		if (ret == pid)
-			return status;
-		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
-			return -errno;
-		}
-		/* ret == 0: not yet exited — backoff and retry. */
-		if (timeout_ns && waited_ns >= timeout_ns)
-			return -ETIMEDOUT;
-		(void)syscall(__NR_clock_nanosleep, CLOCK_MONOTONIC, 0,
-			      &slp, NULL);
-		waited_ns += 1000ULL * 1000ULL;
-	}
-}
 
 /*
  * Gate UML's in-kernel signal dispatch for the duration of the

@@ -328,30 +328,39 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 
 		/* Parent: AFL protocol per iteration -
 		 *   1. report the worker pid (4 bytes)
-		 *   2. report the REAL exit status (4 bytes) — real as of
-		 *      2026-04-23's Finding #1 fix below.
+		 *   2. report the exit status (4 bytes, hard 0 today)
 		 *
-		 * Historical context (kept on-record for future debuggers
-		 * of the same class of issue): three prior iterations
-		 * (3d-a v1, v2, and the one that landed this loop body
-		 * originally) all tried a bare blocking wait4 between (1)
-		 * and (2) and all crashed the parent. The failure mode
-		 * was: the parent dies mid-wait, fuzzer reads EOF on the
-		 * status fd, driver reports "worker didn't report
-		 * status". Root cause was ultimately identified as glibc's
-		 * wait4() cancellation-point + UML's scheduler re-entering
-		 * via a timer signal during the syscall, longjmp'ing into
-		 * a jmp_buf captured before the fork.
+		 * KNOWN LIMITATION (v1 ceiling — four iterations of
+		 * investigation have failed to resolve, most recently
+		 * on 2026-04-23 during the Finding #1 fix attempt).
+		 * Inserting ANY wait4 path between (1) and (2) — blocking
+		 * wait4, WNOHANG poll loop, poll loop with
+		 * clock_nanosleep / sched_yield between polls, poll loop
+		 * with host sigprocmask SIG_BLOCK around the poll — all
+		 * crash the parent with "Kernel mode signal 4" (SIGILL)
+		 * in kernel context. The underlying hazard is UML's timer
+		 * SIGALRM (or any host signal queued while we're in
+		 * non-UML-kernel code) being delivered into UML's signal
+		 * handler mid-poll, which runs switch_threads() and
+		 * longjmp()s into a jmp_buf captured pre-fork — stale
+		 * stack, next instruction decoded from garbage, SIGILL.
 		 *
-		 * Resolution: use os_snapshot_poll_waitpid_status(), which
-		 * polls wait4(pid, &status, WNOHANG) in a 1 ms loop with
-		 * clock_nanosleep between polls. The WNOHANG variant is
-		 * already proven safe in os_snapshot_reap_zombies — it
-		 * never blocks inside wait4, so the scheduler-reentry
-		 * timer-signal path never fires from within the syscall.
-		 * Real worker status is now plumbed to the fuzzer, closing
-		 * the contract violation documented in
-		 * Documentation/virt/uml/snapshot.rst.
+		 * Workaround that ACTUALLY works today: the non-blocking
+		 * os_snapshot_reap_zombies() drain at the top of the loop
+		 * reaps any workers that exited since the prior iteration.
+		 * Status is reported as hard 0 for now. Consumers that
+		 * care about worker status must use a side channel (e.g.
+		 * AFL's shared-memory coverage map encodes crashes
+		 * independently; fuzzer-facing status=0 is the documented
+		 * v1 ceiling — see Documentation/virt/uml/snapshot.rst
+		 * §"Limitations (v1 ceiling)").
+		 *
+		 * Proper fix requires UML infrastructure work on the
+		 * signal/schedule interaction during parent non-kernel
+		 * execution windows (or a refactor where the worker
+		 * reports its own status via the status fd before
+		 * exit — which sidesteps the whole parent-reap path).
+		 * Tracked as a follow-on to Finding #1.
 		 */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &pid, sizeof(pid));
@@ -367,14 +376,7 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 			return (int)n;
 		}
 
-		status = os_snapshot_poll_waitpid_status(pid, 0);
-		if (status < 0) {
-			pr_err("snapshot: poll-wait for worker %d at iter %lu failed: %d\n",
-			       pid, iter, status);
-			os_snapshot_unblock_iter_signals();
-			static_branch_disable(&um_snapshot_enabled);
-			return status;
-		}
+		status = 0;	/* see KNOWN LIMITATION above. */
 		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 					  &status, sizeof(status));
 		if (n < 0) {
