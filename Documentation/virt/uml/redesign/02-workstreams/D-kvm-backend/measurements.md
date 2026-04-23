@@ -389,12 +389,31 @@ as the first exit on `out %al, $0xf4`. Confirms end-to-end
 that the backend's ported SREGS / CR0 / CR3 / CR4 / EFER /
 GDT setup code is correct, not just the standalone spike's.
 
-**No timing measurement yet.** The harness is a single-shot
-"does it work" gate, not instrumented for per-iteration
-cycle counts. D-04b.2 (swap handcrafted page tables for
-UML's own init_mm.pgd) and D-04c (LSTAR trampoline +
-SYSCALL dispatch) will ship the instrumented run loop that
-reports cycle counts against the spike 04 floor.
+**Instrumented (2026-04-23 same day, commit c461e178da68
+("um: backend: D-04b.1c KVM harness — per-iteration cycle counting (workstream D-04)")):**
+1000-iteration timing loop added, same two-KVM_RUN-per-iter
+pattern as spike 04 so KVM's pending-I/O-emulation state
+doesn't break the loop. Zen 4 dev host:
+
+| Iterations | Min cyc | Median cyc | p95 cyc | Max cyc |
+|---:|---:|---:|---:|---:|
+| 1000/1000 | 21966 | **22252** | 22394 | 21661472 |
+
+Max is a single OS-preemption outlier (~4 ms for one
+iteration). Median and p95 are the comparable numbers.
+
+**Against the spike 04 floor for Zen 4 (13148 cyc boost /
+13186 cyc sustained):** the backend's median is **22252 cyc
+— ~1.7× the bare-spike number**. The delta is plausibly
+nested-virt overhead on this dev host (unverified; host
+CPU reports Zen 4 but is possibly itself a guest) plus any
+additional work the UML kernel's binary imposes compared
+to a minimal standalone spike. Real bare-metal comparison
+lands as hardware becomes available.
+
+This establishes the methodology; per-host entries follow
+in the pending-measurements section below as new targets
+report in.
 
 **Mechanical prerequisites that landed to make this visible:**
 
