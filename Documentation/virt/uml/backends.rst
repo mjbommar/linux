@@ -70,12 +70,18 @@ Force a specific backend      ``backend=force=ptrace`` or
 Boot parameters
 ******************
 
-``backend=<auto|ptrace|seccomp|force=ptrace|force=seccomp>``
-    Pick the trap mechanism. ``auto`` (default) defers to the legacy
-    ``seccomp=`` alias. ``backend=seccomp`` triggers the host
-    seccomp probe even if ``seccomp=`` is unset, and falls back to
-    ptrace if the probe fails. ``force=`` makes the choice mandatory
-    and panics if the requested backend isn't available.
+``backend=<auto|ptrace|seccomp|kvm|force=ptrace|force=seccomp|force=kvm>``
+    Pick the trap mechanism. ``auto`` (default) runs the host
+    seccomp probe at boot and picks seccomp when the host supports
+    it, falling back to ptrace otherwise — matches the table above.
+    Bare ``backend=seccomp`` / ``backend=ptrace`` / ``backend=kvm``
+    are *preferences* that still fall through to whichever backend
+    the host actually supports. ``force=`` makes the choice
+    mandatory and panics if the requested backend isn't compiled
+    in or fails its host probe. ``kvm`` is a workstream-D scaffold
+    today — selectable for diagnostic builds, not for production
+    use (the non-harness path still panics on missing hot-op
+    implementations).
 
 ``seccomp=<on|auto|off>`` (legacy alias)
     Preserved for one transitional release. Maps to:

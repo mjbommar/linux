@@ -304,22 +304,30 @@ Boot-time (multi-backend builds)
 In ``CONFIG_UM_BACKEND_DYNAMIC`` builds the active backend is chosen
 at boot from the kernel command line:
 
-- ``backend=auto`` — **Default.** Defers to the legacy ``seccomp=``
-  alias: if ``seccomp=on`` or ``seccomp=auto`` was passed AND its
-  probe succeeded, picks seccomp; otherwise ptrace. (In a future
-  release ``auto`` may be changed to *unconditionally* probe
-  seccomp first, matching the gVisor pattern; for now it preserves
-  the historical "ptrace unless asked otherwise" behavior.)
-- ``backend=ptrace`` — pick ptrace; the seccomp probe is skipped
-  unless legacy ``seccomp=`` requested it independently.
-- ``backend=seccomp`` — pick seccomp; the seccomp probe is run even
-  if ``seccomp=`` is unset. Falls back to ptrace if the probe fails
-  on this host.
+- ``backend=auto`` — **Default.** Runs the host seccomp probe at
+  boot and picks seccomp when the host supports it, falling back
+  to ptrace otherwise. Matches ``os_early_checks()`` behavior in
+  ``arch/um/os-Linux/start_up.c`` (which runs the probe
+  unconditionally) and the selector in
+  ``arch/um/kernel/backend.c::pick_dynamic_backend()``. Prior to
+  2026-04 the probe was gated on an explicit ``seccomp=`` request
+  so ``backend=auto`` silently preferred ptrace; that's been
+  corrected.
+- ``backend=ptrace`` — preference for ptrace; falls through to
+  whichever backend is actually available if ptrace isn't.
+- ``backend=seccomp`` — preference for seccomp; falls through
+  similarly.
+- ``backend=kvm`` — preference for the workstream-D KVM backend
+  (``CONFIG_UM_BACKEND_KVM=y``). Diagnostic / scaffold today;
+  non-harness builds still panic on missing hot ops. Falls
+  through to seccomp/ptrace on probe failure.
 - ``backend=force=ptrace`` — require ptrace; **panic** if the
   ptrace backend isn't compiled in.
-- ``backend=force=seccomp`` — require seccomp; the probe runs (no
-  need to also set ``seccomp=on``); **panic** if the probe fails or
-  the seccomp backend isn't compiled in.
+- ``backend=force=seccomp`` — require seccomp; the probe runs
+  (no need to also set ``seccomp=on``); **panic** if the probe
+  fails or the seccomp backend isn't compiled in.
+- ``backend=force=kvm`` — require KVM; **panic** if ``/dev/kvm``
+  isn't accessible or the KVM backend isn't compiled in.
 
 In ``*_ONLY`` builds the boot param is honored only as a sanity
 check: ``backend=force=<other>`` against an ``*_ONLY`` build that
