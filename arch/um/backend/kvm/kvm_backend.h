@@ -24,10 +24,18 @@
  * under a still-attached mm. Fields are populated by kvm_init()
  * and stay read-only thereafter; mm.c is the only consumer of
  * the refcount.
+ *
+ * vcpu0_fd + run0 + run_size are the D-04a vCPU scaffold: one
+ * vCPU sufficient for ncpus=1 UML (the default). SMP (ncpus>1)
+ * wants one vCPU per UML CPU and moves creation to
+ * thread_start_idle — tracked for D-05 in 04-ring-transition.md.
  */
 struct kvm_um {
 	int		kvm_fd;		/* /dev/kvm */
 	int		vm_fd;		/* KVM_CREATE_VM */
+	int		vcpu0_fd;	/* KVM_CREATE_VCPU, slot 0 */
+	void		*run0;		/* mmap'd kvm_run for vcpu0 */
+	size_t		run_size;	/* KVM_GET_VCPU_MMAP_SIZE */
 	refcount_t	mm_refcount;	/* attached mm_ids */
 };
 
@@ -38,6 +46,7 @@ struct kvm_um {
  */
 int kvm_backend_fd(void);
 int kvm_backend_vm_fd(void);
+int kvm_backend_vcpu0_fd(void);
 struct kvm_um *kvm_backend_ctx(void);
 
 #endif /* __ARCH_UM_BACKEND_KVM_H */

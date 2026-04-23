@@ -55,8 +55,11 @@
  * read-only after init().
  */
 static struct kvm_um kvm_ctx = {
-	.kvm_fd = -1,
-	.vm_fd  = -1,
+	.kvm_fd		= -1,
+	.vm_fd		= -1,
+	.vcpu0_fd	= -1,
+	.run0		= NULL,
+	.run_size	= 0,
 };
 
 int kvm_probe(void)
@@ -127,6 +130,7 @@ int kvm_init(const struct um_backend_args *args)
 		os_close_file(kfd);
 		return vmfd;
 	}
+	pr_info("um: kvm init: KVM_CREATE_VM ok vmfd=%d\n", vmfd);
 
 	/*
 	 * Policy A from 03b-memslot-policy.md: one giant memslot at
@@ -136,6 +140,14 @@ int kvm_init(const struct um_backend_args *args)
 	 * even at the ~128 TiB task_size ceiling — we're not
 	 * pre-faulting anything, just declaring the range as "valid
 	 * guest-physical memory backed by the UML kernel's own VA".
+	 *
+	 * D-04a: KVM rejects userspace_addr=0 + oversized slot on
+	 * real hosts. Treat registration failure as non-fatal for
+	 * the scaffold — D-04b revisits the memslot parameters
+	 * alongside SREGS/CR3 setup. Without the slot, KVM_RUN will
+	 * fault on any guest access, which is exactly the expected
+	 * failure mode for D-04a ("first KVM_RUN returns with a
+	 * readable error").
 	 */
 	{
 		struct kvm_userspace_memory_region region = {
@@ -148,26 +160,87 @@ int kvm_init(const struct um_backend_args *args)
 		int rc = os_ioctl_generic(vmfd, KVM_SET_USER_MEMORY_REGION,
 					  (unsigned long)&region);
 
-		if (rc < 0) {
-			pr_err("um: kvm init: KVM_SET_USER_MEMORY_REGION failed (%d)\n",
-			       rc);
+		if (rc < 0)
+			pr_warn("um: kvm init: KVM_SET_USER_MEMORY_REGION failed (%d); deferring to D-04b\n",
+				rc);
+		else
+			pr_info("um: kvm init: memslot [0,%lx) registered\n",
+				task_size);
+	}
+
+	/*
+	 * D-04a: create the first vCPU now. For ncpus=1 UML (the
+	 * default) this is the only vCPU; SMP moves creation to
+	 * thread_start_idle per 04-ring-transition.md. The run
+	 * structure is mmap'd from the vcpu_fd — KVM_GET_VCPU_MMAP_
+	 * SIZE reports the size first. On error, close everything
+	 * and fall back.
+	 */
+	{
+		int vcpu_fd, mmap_size;
+		void *run;
+
+		vcpu_fd = os_ioctl_generic(vmfd, KVM_CREATE_VCPU, 0);
+		if (vcpu_fd < 0) {
+			pr_err("um: kvm init: KVM_CREATE_VCPU failed (%d)\n",
+			       vcpu_fd);
 			os_close_file(vmfd);
 			os_close_file(kfd);
-			return rc;
+			return vcpu_fd;
 		}
+
+		mmap_size = os_ioctl_generic(kfd, KVM_GET_VCPU_MMAP_SIZE, 0);
+		if (mmap_size <= 0) {
+			pr_err("um: kvm init: KVM_GET_VCPU_MMAP_SIZE failed (%d)\n",
+			       mmap_size);
+			os_close_file(vcpu_fd);
+			os_close_file(vmfd);
+			os_close_file(kfd);
+			return mmap_size ? mmap_size : -EIO;
+		}
+
+		run = os_mmap_rw_shared(vcpu_fd, mmap_size);
+		if (!run) {
+			pr_err("um: kvm init: mmap of kvm_run (size %d) failed\n",
+			       mmap_size);
+			os_close_file(vcpu_fd);
+			os_close_file(vmfd);
+			os_close_file(kfd);
+			return -ENOMEM;
+		}
+
+		kvm_ctx.vcpu0_fd = vcpu_fd;
+		kvm_ctx.run0     = run;
+		kvm_ctx.run_size = mmap_size;
 	}
 
 	kvm_ctx.kvm_fd = kfd;
 	kvm_ctx.vm_fd  = vmfd;
 	refcount_set(&kvm_ctx.mm_refcount, 0);
 
-	pr_info("um: kvm init: /dev/kvm fd %d, vm fd %d, memslot [0,%lx) registered\n",
-		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, task_size);
+	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu memslot [0,%lx)\n",
+		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
+		kvm_ctx.run_size, task_size);
 	return 0;
 }
 
 void kvm_shutdown(void)
 {
+	/*
+	 * Order: vCPU resources, then VM, then /dev/kvm. mmap of
+	 * kvm_run survives the vcpu_fd close (the mapping is
+	 * refcounted in the kernel), so we munmap first via
+	 * os_unmap_memory() before closing the fd.
+	 */
+	if (kvm_ctx.run0) {
+		os_unmap_memory(kvm_ctx.run0, kvm_ctx.run_size);
+		kvm_ctx.run0 = NULL;
+		kvm_ctx.run_size = 0;
+	}
+	if (kvm_ctx.vcpu0_fd >= 0) {
+		os_close_file(kvm_ctx.vcpu0_fd);
+		kvm_ctx.vcpu0_fd = -1;
+	}
 	if (kvm_ctx.vm_fd >= 0) {
 		os_close_file(kvm_ctx.vm_fd);
 		kvm_ctx.vm_fd = -1;
@@ -186,6 +259,11 @@ int kvm_backend_fd(void)
 int kvm_backend_vm_fd(void)
 {
 	return kvm_ctx.vm_fd;
+}
+
+int kvm_backend_vcpu0_fd(void)
+{
+	return kvm_ctx.vcpu0_fd;
 }
 
 struct kvm_um *kvm_backend_ctx(void)
