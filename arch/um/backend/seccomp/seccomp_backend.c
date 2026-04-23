@@ -24,6 +24,7 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	.uses_stub_reaper	= true,
 	.has_syscall_stub_fd_map = true,
 	.stub_syscall_uses_futex = true,
+	.stub_child_runs_seccomp = true,
 
 	/* Lifecycle and trap (4) */
 	.probe			= seccomp_probe,

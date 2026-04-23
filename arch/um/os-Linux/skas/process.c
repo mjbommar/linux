@@ -273,13 +273,26 @@ static int userspace_tramp(void *data)
 	struct tramp_data *tramp_data = data;
 	char *const argv[] = { "uml-userspace", NULL };
 	unsigned long long offset;
+	/*
+	 * Stub-child seccomp wiring. init_data.seccomp is the
+	 * boolean "install the SIGSYS filter" flag the stub
+	 * binary reads; the handler/restorer trampoline offsets
+	 * pick between stub_signal_interrupt (seccomp SIGSYS
+	 * entry) and stub_segv_handler (ptrace SIGSEGV entry).
+	 * Routed through um_backend->stub_child_runs_seccomp
+	 * per D59 Phase II Lift #4d. um_backend is populated
+	 * because userspace_tramp runs inside clone() of the
+	 * first start_userspace call, which is post-init_backend
+	 * (um_arch.c::linux_main ordering).
+	 */
+	bool want_seccomp = um_backend && um_backend->stub_child_runs_seccomp;
 	struct stub_init_data init_data = {
-		.seccomp = using_seccomp,
+		.seccomp = want_seccomp,
 		.stub_start = STUB_START,
 	};
 	int ret;
 
-	if (using_seccomp) {
+	if (want_seccomp) {
 		init_data.signal_handler = STUB_CODE +
 					   (unsigned long) stub_signal_interrupt -
 					   (unsigned long) __syscall_stub_start;
@@ -468,7 +481,14 @@ int start_userspace(struct mm_id *mm_id)
 		return err;
 	}
 
-	if (using_seccomp)
+	/*
+	 * Pre-clone futex seed — only meaningful for backends
+	 * whose stub dispatch uses the futex-wait_stub_done_
+	 * seccomp round-trip. Routed through
+	 * um_backend->stub_syscall_uses_futex per D59 Phase II
+	 * Lift #4d (mirrors the 4c dispatch-mechanism flag).
+	 */
+	if (um_backend && um_backend->stub_syscall_uses_futex)
 		proc_data->futex = FUTEX_IN_CHILD;
 
 	mm_id->pid = clone(userspace_tramp, (void *) sp,
@@ -481,7 +501,26 @@ int start_userspace(struct mm_id *mm_id)
 		goto out_close;
 	}
 
-	if (using_seccomp) {
+	/*
+	 * Wait for the stub child to reach its initial ready
+	 * state. Seccomp uses the futex primitive
+	 * (wait_stub_done_seccomp); ptrace waits for the
+	 * SIGSTOP that userspace_tramp raises, allowing any
+	 * intervening SIGALRMs to pass, then sets
+	 * PTRACE_O_TRACESYSGOOD. KVM doesn't reach this code
+	 * path. Routed through um_backend->stub_syscall_uses_
+	 * futex per D59 Phase II Lift #4d.
+	 *
+	 * Finding #1 hazard check (04-risks/signal-reentry-in-
+	 * fork-window.md): the ptrace waitpid below is safe
+	 * today because start_userspace runs during early boot
+	 * when signals_enabled == 0 and no SIGALRM timer has
+	 * been armed yet. The `while (... SIGALRM)` loop was
+	 * defensive for future-timer delivery. DO NOT relocate
+	 * this wait to a post-boot call site without reading
+	 * the hazard memo first.
+	 */
+	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		wait_stub_done_seccomp(mm_id, 1, 1);
 	} else {
 		do {
@@ -519,7 +558,15 @@ int start_userspace(struct mm_id *mm_id)
 	}
 
 	close(tramp_data.sockpair[0]);
-	if (using_seccomp)
+	/*
+	 * Retain the parent-side sockpair FD only for backends
+	 * that use it for subsequent SCM_RIGHTS FD passing to
+	 * the stub child (seccomp). Ptrace closes it; KVM never
+	 * gets here. Routed through um_backend->has_syscall_
+	 * stub_fd_map per D59 Phase II Lift #4d (the sockpair
+	 * retention is part of the same fd-map mechanism).
+	 */
+	if (um_backend && um_backend->has_syscall_stub_fd_map)
 		mm_id->sock = tramp_data.sockpair[1];
 	else
 		close(tramp_data.sockpair[1]);

@@ -40,10 +40,13 @@ const struct um_backend_ops um_backend_kvm_ops = {
 	 *
 	 * stub_syscall_uses_futex=false: same reason —
 	 * do_syscall_stub() is never reached on the KVM path.
+	 *
+	 * stub_child_runs_seccomp=false: no stub child at all.
 	 */
 	.uses_stub_reaper	= false,
 	.has_syscall_stub_fd_map = false,
 	.stub_syscall_uses_futex = false,
+	.stub_child_runs_seccomp = false,
 
 	/* Lifecycle and trap (4) */
 	.probe			= kvm_probe,

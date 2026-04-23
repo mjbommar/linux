@@ -33,10 +33,15 @@ const struct um_backend_ops um_backend_ptrace_ops = {
 	 * stub_syscall_uses_futex=false: ptrace dispatch walks
 	 * PTRACE_SETREGS + PTRACE_CONT + wait_stub_done, not the
 	 * futex + wait_stub_done_seccomp path.
+	 *
+	 * stub_child_runs_seccomp=false: the ptrace stub child
+	 * does not install a SIGSYS filter; it is ptraced by the
+	 * parent and uses the stub_segv_handler trampoline.
 	 */
 	.uses_stub_reaper	= false,
 	.has_syscall_stub_fd_map = false,
 	.stub_syscall_uses_futex = false,
+	.stub_child_runs_seccomp = false,
 
 	/* Lifecycle and trap (4) */
 	.probe			= ptrace_probe,

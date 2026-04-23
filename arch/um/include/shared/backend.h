@@ -141,11 +141,27 @@ struct um_backend_ops {
 	 * instead. Seccomp true, ptrace false, KVM false (KVM
 	 * doesn't use do_syscall_stub at all). Consulted by the
 	 * dispatch-mechanism branch of arch/um/os-Linux/skas/
-	 * mem.c::do_syscall_stub.
+	 * mem.c::do_syscall_stub and the stub-child-initial-wait
+	 * branch of arch/um/os-Linux/skas/process.c::
+	 * start_userspace, plus the pre-clone futex seed
+	 * (proc_data->futex = FUTEX_IN_CHILD) in that same
+	 * function.
+	 *
+	 * stub_child_runs_seccomp: true when the stub child
+	 * installs its own SIGSYS-filter (and dispatches via
+	 * stub_signal_interrupt); false when the parent traces
+	 * it via ptrace (and dispatches via stub_segv_handler).
+	 * Seccomp true, ptrace false, KVM false (no stub child
+	 * on KVM). Consulted by the clone-tramp init-data
+	 * builder in arch/um/os-Linux/skas/process.c::
+	 * userspace_tramp — both the .seccomp field sent over
+	 * the tramp sockpair and the signal_handler /
+	 * signal_restorer trampoline-offset choice.
 	 */
 	bool				uses_stub_reaper;
 	bool				has_syscall_stub_fd_map;
 	bool				stub_syscall_uses_futex;
+	bool				stub_child_runs_seccomp;
 
 	/* Lifecycle and trap (4) */
 	int  (*probe)(void);
