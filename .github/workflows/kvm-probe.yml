@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# GitHub Actions KVM-availability probe for the D workstream.
+#
+# Runs the spike 01 (real-mode HLT) and spike 04 (long-mode
+# IO-exit) harnesses on GHA runners to answer one question:
+# can the D-workstream CI eventually run its own KVM-backend
+# builds + smoke-boots on the standard runner pool, or does
+# it need a dedicated bare-metal runner set?
+#
+# Expected result: no. Standard GHA runners are Hyper-V
+# guests with nested virtualization disabled; /dev/kvm
+# either doesn't exist or opening it fails with EPERM /
+# ENODEV. That negative result is itself load-bearing — it
+# tells us D's CI plan needs self-hosted runners or a
+# hardware-accelerated runner class (larger GHA plans), and
+# makes the test-plan section of design-memo.md actionable.
+#
+# If a future GHA image does expose /dev/kvm (nested virt
+# gets enabled, or the runner class changes), the workflow
+# will catch it automatically and the measurements land in
+# the workflow log. Re-run any time by dispatching manually.
+#
+# Fork-only workflow (git add -f past the kernel tree's
+# `.github` gitignore, same pattern as the other CI files).
+
+name: D-workstream KVM probe
+
+on:
+  workflow_dispatch:   # manual re-run
+  push:
+    branches: [uml-redesign-plan]
+    paths:
+      - 'Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/spikes/**'
+      - '.github/workflows/kvm-probe.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: ${{ matrix.image }}
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host inventory
+        run: |
+          echo "--- uname ---"
+          uname -a
+          echo "--- /proc/cpuinfo (model + vmx/svm flags) ---"
+          grep -m1 "model name" /proc/cpuinfo || true
+          grep -oE 'vmx|svm' /proc/cpuinfo | sort -u || true
+          echo "--- virt type (systemd-detect-virt) ---"
+          sudo apt-get -qq install -y systemd 2>/dev/null >/dev/null || true
+          systemd-detect-virt || echo "(unavailable)"
+          echo "--- /dev/kvm presence + perms ---"
+          ls -la /dev/kvm 2>&1 || echo "(no /dev/kvm)"
+          echo "--- kvm-ok (if cpu-checker installed) ---"
+          sudo apt-get -qq install -y cpu-checker 2>/dev/null >/dev/null || true
+          kvm-ok || echo "(kvm-ok failed or unavailable)"
+          echo "--- capabilities check ---"
+          if [ -c /dev/kvm ]; then
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              echo "/dev/kvm r+w OK for current user"
+            else
+              echo "/dev/kvm exists but not accessible; trying sudo"
+              sudo test -r /dev/kvm && sudo test -w /dev/kvm && \
+                echo "/dev/kvm r+w OK under sudo"
+            fi
+          fi
+
+      - name: Build spike 01 (real-mode HLT)
+        working-directory: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/spikes/01-getpid-roundtrip
+        run: make
+
+      - name: Build spike 04 (long-mode IO exit)
+        working-directory: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/spikes/04-longmode-lstar-vmcall
+        run: make
+
+      # Try running both spikes. If /dev/kvm is unavailable or
+      # EPERM on open, the spike fails loudly with the reason
+      # and we record that as the answer. Not marked
+      # continue-on-error because we want the workflow to
+      # record rc≠0 for the negative case — the step log is
+      # what we mine, not pass/fail.
+      - name: Run spike 01 (if /dev/kvm works)
+        continue-on-error: true
+        working-directory: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/spikes/01-getpid-roundtrip
+        run: |
+          if [ ! -c /dev/kvm ]; then
+            echo "::notice::spike 01 skipped — no /dev/kvm on this runner"
+            exit 0
+          fi
+          # Try without sudo first (runner user may be in kvm group on some images)
+          if ./spike 2>&1; then
+            echo "::notice::spike 01 ran without sudo"
+          else
+            echo "::notice::spike 01 without sudo failed; retrying with sudo"
+            sudo ./spike 2>&1 || echo "::warning::spike 01 failed even with sudo"
+          fi
+
+      - name: Run spike 04 (if /dev/kvm works)
+        continue-on-error: true
+        working-directory: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/spikes/04-longmode-lstar-vmcall
+        run: |
+          if [ ! -c /dev/kvm ]; then
+            echo "::notice::spike 04 skipped — no /dev/kvm on this runner"
+            exit 0
+          fi
+          if ./spike 2>&1; then
+            echo "::notice::spike 04 ran without sudo"
+          else
+            echo "::notice::spike 04 without sudo failed; retrying with sudo"
+            sudo ./spike 2>&1 || echo "::warning::spike 04 failed even with sudo"
+          fi
+
+      - name: Summary
+        run: |
+          if [ -c /dev/kvm ]; then
+            echo "::notice::/dev/kvm is present on ${{ matrix.image }}"
+            echo "This means D-workstream CI MIGHT be runnable on standard GHA."
+            echo "Inspect the spike step logs above for measured cycle counts."
+          else
+            echo "::notice::/dev/kvm absent on ${{ matrix.image }}"
+            echo "D-workstream CI needs self-hosted runners or larger plan tier."
+          fi
