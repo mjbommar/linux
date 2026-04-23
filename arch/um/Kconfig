@@ -21,7 +21,20 @@ config UML
 	select HAVE_ARCH_KASAN_VMALLOC if HAVE_ARCH_KASAN
 	select HAVE_ARCH_KCSAN if X86_64
 	select HAVE_ARCH_KFENCE if X86_64
-	select HAVE_ARCH_KMSAN if X86_64
+	# KMSAN on UML is currently broken by design (Finding #2,
+	# 2026-04-23 review; see
+	# Documentation/virt/uml/redesign/04-risks/decisions-log.md
+	# entry D58). The dedicated-host-mmap scheme in
+	# arch/um/include/asm/kmsan.h wants two 128 TiB slabs but
+	# arch/um/Kconfig's KMSAN_SHADOW_OFFSET / KMSAN_ORIGIN_OFFSET
+	# place them 16 TiB apart, so the shadow range overflows
+	# into origin (and together would exceed the canonical lower
+	# half). Runtime smoke fails at early shadow mmap. Gate on
+	# BROKEN until a workable design lands (either VMALLOC
+	# quarter-split mirroring x86, or a UML-side task_size cap
+	# under KMSAN). Remove this BROKEN gate when the redesign
+	# lands.
+	select HAVE_ARCH_KMSAN if X86_64 && BROKEN
 	select HAVE_ARCH_KMSAN_VMALLOC if HAVE_ARCH_KMSAN
 	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ASM_MODVERSIONS
@@ -328,26 +341,38 @@ config KMSAN_SHADOW_OFFSET
 	depends on KMSAN
 	default 0x200000000000
 	help
-	  Base of the KMSAN shadow region for UML. The shadow region
-	  stores one byte per kernel byte (no shift) and must be the
-	  full size of the host userspace address range KMSAN covers.
-	  The default places the 16 TiB shadow immediately above the
-	  KASAN shadow at 0x100000000000; KASAN and KMSAN are
-	  mutually exclusive under the current Kconfig, so the
-	  placement is a range convention — not a constraint the
-	  kernel will let you violate.
+	  Base of the KMSAN shadow region for UML.
+
+	  CURRENTLY BROKEN — see the HAVE_ARCH_KMSAN select line
+	  near the top of arch/um/Kconfig and decisions-log D58.
+	  The shadow code in arch/um/include/asm/kmsan.h sizes both
+	  SHADOW and ORIGIN to 128 TiB each (one byte per kernel
+	  byte × 128 TiB of kernel-addressable VA). That means a
+	  shadow starting at 0x200000000000 occupies up to
+	  0xa00000000000 — 112 TiB past the ORIGIN base at
+	  0x300000000000, and together the two regions exceed the
+	  canonical lower half on x86_64. Early-boot mmap of the
+	  shadow fails with ENOMEM. This Kconfig value is retained
+	  unchanged so the eventual redesign can pick it up
+	  verbatim or adjust; consumers today cannot build a
+	  working KMSAN image.
+
+	  Resolution paths (tracked for C-07 follow-up):
+	    (a) Adopt x86's VMALLOC quarter-split so shadow/origin
+	        live inside VMALLOC instead of a dedicated slab.
+	    (b) Cap task_size under CONFIG_KMSAN to a size where
+	        two 1:1 slabs fit in the lower canonical half.
 
 config KMSAN_ORIGIN_OFFSET
 	hex
 	depends on KMSAN
 	default 0x300000000000
 	help
-	  Base of the KMSAN origin region for UML. The origin region
-	  stores one 32-bit origin id per kernel u32 (1:1 by u32,
-	  same byte size as the shadow). Placed above the shadow at
-	  0x300000000000 so UML maps three consecutive 16 TiB slices
-	  for its sanitizer metadata (KASAN, KMSAN shadow, KMSAN
-	  origin), all within the canonical lower half on x86_64.
+	  Base of the KMSAN origin region for UML. See
+	  KMSAN_SHADOW_OFFSET above — this base is architecturally
+	  wrong today (it falls inside the shadow region's 128 TiB
+	  footprint) and will be revisited in the redesign. Kept
+	  unchanged so the value's intent is preserved.
 
 #
 # Backend selection (workstream A; matches the planned shape in

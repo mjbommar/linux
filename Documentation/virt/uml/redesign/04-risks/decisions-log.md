@@ -5834,4 +5834,90 @@ the active vCPU's page tables respectively.
 
 ---
 
+## D58 (2026-04-23) — KMSAN-on-UML dedicated-slab scheme is architecturally broken; gate on BROKEN pending redesign
+
+**Status:** Accepted (damage-control; the real choice between
+the two redesign paths is deferred).
+
+**Context.** Review finding #2 (2026-04-23) flagged that the
+KMSAN-on-UML port advertised in Kconfig + documentation
+(16 TiB slices at 0x200000000000 / 0x300000000000) doesn't
+match the code in `arch/um/include/asm/kmsan.h:55`, which
+sizes both SHADOW and ORIGIN to
+`KASAN_HOST_USER_SPACE_END_ADDR + 1` = **128 TiB** each. The
+Kconfig offsets are only 16 TiB apart, so the 128 TiB shadow
+region at 0x200000000000 overflows 112 TiB past the origin
+base at 0x300000000000 and well beyond it. Runtime smoke
+fails at early shadow mmap with `Couldn't allocate shadow
+memory`.
+
+**Root cause.** The "dedicated-host-mmap slab" scheme that
+worked for KASAN (16 TiB of shadow covering 128 TiB of
+kernel VA, thanks to the 1-byte-per-8-bytes shift) does not
+generalize to KMSAN's 1:1 shadow. KMSAN would need 128 TiB
+of shadow for the same kernel VA range, plus another 128
+TiB for origin. 256 TiB doesn't fit in the lower canonical
+half on x86_64 (128 TiB total), let alone alongside KASAN
+and UML's own kernel mappings.
+
+**Decision.** Gate `HAVE_ARCH_KMSAN` on `BROKEN` in
+`arch/um/Kconfig` so KMSAN can't be selected in normal
+builds. Retain the code + Kconfig + docs on-tree but
+prominently mark all three as broken-by-design with a
+pointer at this entry. Consumers that want KMSAN on UML
+today cannot get it; this is a shipped-lie fix, not a
+functional fix.
+
+**Alternatives considered.**
+
+1. **Flip Kconfig/docs to claim 16 TiB each.** Rejected:
+   the 16 TiB doesn't actually cover the 128 TiB of kernel
+   addresses UML can hand out, so KMSAN-instrumented
+   accesses to unshadowed addresses fault. This would
+   trade a shipped-lie doc for a shipped-lie runtime.
+2. **Flip Kconfig/docs to admit the 128 TiB + rearrange
+   offsets.** Rejected: 256 TiB of shadow+origin doesn't
+   fit in the lower canonical half at all. No offset
+   arrangement works within the current address-space
+   ceiling.
+3. **Adopt x86's VMALLOC quarter-split.** Deferred to
+   follow-up. Would put shadow/origin inside VMALLOC,
+   sized as 1/4 of VMALLOC each, and let
+   `mm/kmsan/shadow.c::vmalloc_meta()`'s existing
+   arithmetic apply directly. Requires careful measurement
+   against real UML workloads (VMALLOC becomes 1/4 its
+   normal size under KMSAN).
+4. **Cap `task_size` under CONFIG_KMSAN.** Deferred to
+   follow-up. Would preserve the dedicated-slab scheme by
+   shrinking UML's kernel VA ceiling so two 1:1 slabs fit
+   in the lower canonical half. Cost: smaller max UML
+   kernel footprint under KMSAN.
+
+**Lifetime.** The BROKEN gate is temporary; it stays until
+one of the two follow-up paths lands. No consumer should
+build against this.
+
+**Revisit triggers.**
+
+- Someone picks up the C-07 follow-up and chooses between
+  path (3) and path (4) above, along with workload data to
+  back the choice.
+- KMSAN upstream acquires a less address-space-hungry
+  shadow scheme (e.g. a tagged-pointer variant). Unlikely
+  short term.
+
+**Cross-references.**
+
+- Review-finding commit (this): 2026-04-23 session; see
+  `Documentation/virt/uml/kmsan.rst` §"Why it's broken"
+  and the header-comment block at the top of
+  `arch/um/include/asm/kmsan.h`.
+- Prior decisions-log entry D44: original
+  "dedicated-host-mmap" justification (rejected — the
+  KMSAN redesign supersedes it).
+- `lib/Kconfig.kmsan` — upstream KMSAN gate; unchanged by
+  this decision.
+
+---
+
 ## (Future entries here, as decisions are made)

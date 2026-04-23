@@ -4,22 +4,41 @@
  * the arch-specific interfaces mm/kmsan/ expects when
  * CONFIG_KMSAN=y.
  *
- * UML v1 picks a dedicated-host-mmap scheme rather than x86's
- * quarter-split of VMALLOC. Reasons (see decisions-log D44):
- *   - UML's VMALLOC is bounded by TASK_SIZE, not a fixed
- *     canonical hole, so the x86 VA arithmetic in
- *     mm/kmsan/shadow.c::vmalloc_meta() has nowhere to land.
- *   - Splitting VMALLOC to 1/4 size under CONFIG_KMSAN=y
- *     creates an ABI fork between kmsan-on and kmsan-off
- *     UML images — the other sanitizer ports avoided that.
- *   - UML already owns the "mmap a 16 TiB slab and use it as
- *     arch shadow" pattern from KASAN; KMSAN extends it with
- *     one additional mmap for the origin region.
+ * *** CURRENT STATUS: BROKEN BY DESIGN ***
  *
- * Shape per commit-1 of the C-07 plan: this header provides
- * the VA constants + extern prototypes, but no runtime body
- * yet. kmsan_init() wiring lands in commit-2; the arch
- * metadata stubs land in commit-3.
+ * Gated on BROKEN in arch/um/Kconfig (Finding #2, 2026-04-23
+ * review; decisions-log D58). The header's SHADOW/ORIGIN sizes
+ * are 128 TiB each (1 byte per kernel byte × full
+ * KASAN_HOST_USER_SPACE_END_ADDR range), but the matching
+ * KMSAN_SHADOW_OFFSET/KMSAN_ORIGIN_OFFSET defaults in
+ * arch/um/Kconfig place them only 16 TiB apart
+ * (0x200000000000 and 0x300000000000). The shadow extends
+ * 112 TiB past the origin base; early shadow mmap fails with
+ * ENOMEM. The code below is retained for the redesign to
+ * build on — the sizing scheme itself is the thing that has
+ * to change.
+ *
+ * Original design intent (kept for context; applies if the
+ * redesign picks path (b) — task_size cap under KMSAN):
+ *
+ *   UML v1 picks a dedicated-host-mmap scheme rather than
+ *   x86's quarter-split of VMALLOC. Reasons (see decisions-log
+ *   D44):
+ *     - UML's VMALLOC is bounded by TASK_SIZE, not a fixed
+ *       canonical hole, so the x86 VA arithmetic in
+ *       mm/kmsan/shadow.c::vmalloc_meta() has nowhere to land.
+ *     - Splitting VMALLOC to 1/4 size under CONFIG_KMSAN=y
+ *       creates an ABI fork between kmsan-on and kmsan-off
+ *       UML images — the other sanitizer ports avoided that.
+ *     - UML already owns the "mmap a 16 TiB slab and use it as
+ *       arch shadow" pattern from KASAN; KMSAN extends it with
+ *       one additional mmap for the origin region.
+ *
+ * The third bullet is where the design broke: KASAN needs
+ * 16 TiB of shadow for 128 TiB of VA (1 byte per 8 bytes),
+ * but KMSAN's 1:1 shadow for the same range needs 128 TiB —
+ * times two (shadow + origin), which doesn't fit anywhere in
+ * the lower canonical half.
  */
 
 #ifndef __ASM_UM_KMSAN_H

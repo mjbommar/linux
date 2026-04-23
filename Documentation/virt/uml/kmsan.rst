@@ -4,62 +4,91 @@
 UML KMSAN port
 ==============
 
-The UML port of KMSAN (Kernel Memory Sanitizer) landed in
-workstream C-07 of the redesign (see
-``Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/07-port-kmsan.md``). It exposes the
-standard Linux uninitialized-memory detector surface —
+**STATUS: BROKEN.** The UML KMSAN port is currently gated on
+``BROKEN`` in ``arch/um/Kconfig`` (``select HAVE_ARCH_KMSAN if
+X86_64 && BROKEN``) and cannot be selected in a normal build.
+This document describes the intended surface and the reason
+for the gate; it is kept on-tree so the C-07 redesign follow-up
+has a starting point, not because KMSAN works today. See
+``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
+entry ``D58`` for the full story.
+
+The original design (when unbroken) exposes the standard Linux
+uninitialized-memory detector surface —
 ``/sys/kernel/debug/kmsan/``, clang
 ``-fsanitize=kernel-memory`` instrumentation, the
 ``BUG: KMSAN: uninit-value`` report style — to UML guests,
 running inside the host UML process under a dedicated-region
 shadow + origin host-mmap scheme.
 
-Availability
-============
+Why it's broken
+===============
 
-KMSAN on UML requires:
+The dedicated-region scheme worked for KASAN because KASAN
+shadow is 1 byte per 8 bytes of kernel VA: 128 TiB of kernel
+addresses compresses into 16 TiB of shadow, which fits
+comfortably in a dedicated host-mmap region above the UML
+binary. KMSAN's shadow is 1 byte per 1 kernel byte, so the
+same kernel-VA range wants 128 TiB of shadow, plus another
+128 TiB for origin (1 u32 per kernel u32 = same byte size).
+256 TiB of reservation does not fit anywhere in the lower
+canonical half on x86_64.
 
-* ``ARCH=um LLVM=1`` — KMSAN is clang-only.
-* ``CONFIG_X86_64`` — the only host architecture wired via
-  ``select HAVE_ARCH_KMSAN if X86_64`` in ``arch/um/Kconfig``.
-* A profile that enables ``CONFIG_KMSAN=y``. Shipped in
-  ``arch/um/configs/profiles/research-kmsan.config`` as a
-  sibling of the default research profile, because KMSAN
-  triples RSS for touched pages and that trade-off is too
-  invasive for the default ``research`` profile.
+The current code (``arch/um/include/asm/kmsan.h``) sizes both
+regions to the full 128 TiB, while the Kconfig defaults
+(``arch/um/Kconfig``) place them only 16 TiB apart — the
+SHADOW region overflows catastrophically into the ORIGIN
+region and beyond. Runtime smoke fails at early shadow mmap
+with ``Couldn't allocate shadow memory``.
 
-To build a KMSAN-capable UML::
+Resolution paths (C-07 follow-up)
+=================================
 
-   make ARCH=um LLVM=1 uml/research-kmsan
-   make ARCH=um LLVM=1 -j$(nproc)
+Two workable paths have been identified; neither has been
+implemented yet:
 
-Memory layout
-=============
+1. **Adopt x86's VMALLOC quarter-split.** Put shadow and
+   origin inside the VMALLOC range itself, sized as 1/4 each
+   of VMALLOC. This matches ``mm/kmsan/shadow.c``'s existing
+   arithmetic without any UML-side slab.
+2. **Cap ``task_size`` under KMSAN.** Limit the UML kernel's
+   addressable VA to a size where two 1:1 slabs fit in the
+   lower canonical half. Preserves the dedicated-region
+   scheme at the cost of a smaller kernel VA ceiling.
 
-On UML, KMSAN reserves two dedicated 16 TiB host-mmap regions
+Either path requires careful measurement against real UML
+workloads; the choice is the follow-up's job. Until then,
+this port stays gated behind ``BROKEN``.
+
+Intended (non-functional) memory layout
+=======================================
+
+On UML, KMSAN reserves two dedicated 128 TiB host-mmap regions
 for shadow and origin, placed immediately above the existing
 KASAN shadow::
 
    KASAN shadow    0x100000000000   (16 TiB, existing)
-   KMSAN shadow    0x200000000000   (16 TiB, 1 byte / kernel byte)
-   KMSAN origin    0x300000000000   (16 TiB, 1 u32 / kernel u32)
+   KMSAN shadow    0x200000000000   (128 TiB, 1 byte / kernel byte)
+   KMSAN origin    0x300000000000   (128 TiB, 1 u32 / kernel u32)
 
-KASAN and KMSAN are Kconfig-mutually-exclusive (same constraint
-as bare-metal x86 and s390), so the placement is a convention,
-not a constraint the kernel will enforce.
+KASAN and KMSAN are Kconfig-mutually-exclusive. The two 128
+TiB regions would need to live at non-overlapping offsets in
+the lower canonical half — which they don't today, per the
+"Why it's broken" section above.
 
-Both regions are reserved via ``kasan_map_memory()`` — despite
-its name, that helper is a generic "mmap a host VA range with
-PROT_READ|PROT_WRITE + MADV_DONTDUMP" routine UML uses for
-every arch-shadow bootstrap. The mmap runs once from
-``kmsan_arch_init_early_shadow()``, which the mm/kmsan/ core
-calls before its own reserved-range sweep.
+Both regions would be reserved via ``kasan_map_memory()`` —
+despite its name, that helper is a generic "mmap a host VA
+range with PROT_READ|PROT_WRITE + MADV_DONTDUMP" routine UML
+uses for every arch-shadow bootstrap. The mmap would run once
+from ``kmsan_arch_init_early_shadow()``, which the
+``mm/kmsan/`` core calls before its own reserved-range sweep.
 
-Host RSS follows touched pages, not the 32 TiB reservation:
-mmap with ``MAP_NORESERVE`` + demand-paging means the kernel
-only spends real memory on shadow/origin bytes that
-KMSAN-instrumented code actually touches.
+Host RSS follows touched pages, not the reservation total:
+``mmap`` with ``MAP_NORESERVE`` + demand-paging would mean
+the kernel only spends real memory on shadow/origin bytes
+that KMSAN-instrumented code actually touches — still not a
+workable design because the reservation itself fails before
+the first touch.
 
 Usage
 =====
