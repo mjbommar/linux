@@ -58,4 +58,17 @@ struct kvm_um *kvm_backend_ctx(void);
  */
 int kvm_ensure_memslot(void);
 
+/*
+ * Long-mode SREGS setup helpers (D-04b.1a, arch/um/backend/kvm/
+ * sregs.c). Pure data-structure fills; callers are responsible
+ * for placing the GDT / page-tables at matching offsets within
+ * the vCPU's memslot and invoking KVM_SET_SREGS themselves. See
+ * 03b-memslot-policy.md and 04b-long-mode-sregs.md for the
+ * address-space model.
+ */
+struct kvm_sregs;
+void kvm_setup_harness_gdt(u64 *gdt);
+void kvm_setup_harness_paging(u64 *pml4, u64 *pdpt, u64 *pd);
+void kvm_setup_harness_sregs(struct kvm_sregs *sregs);
+
 #endif /* __ARCH_UM_BACKEND_KVM_H */
