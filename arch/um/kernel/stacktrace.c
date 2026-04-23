@@ -8,6 +8,7 @@
 #include <linux/kallsyms.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
@@ -19,11 +20,27 @@ void dump_trace(struct task_struct *tsk,
 {
 	int reliable = 0;
 	unsigned long *sp, bp, addr;
+	unsigned long *stack_start, *stack_end;
 	struct pt_regs *segv_regs = tsk->thread.segv_regs;
 	struct stack_frame *frame;
 
 	bp = get_frame_pointer(tsk, segv_regs);
 	sp = get_stack_pointer(tsk, segv_regs);
+
+	/*
+	 * Bound the walk by the task's actual thread stack. Without
+	 * this, an early-boot panic (where `current` is init_task and
+	 * the saved SP is still in the main() stack, not a thread
+	 * stack) walks past the end of mapped memory and segfaults on
+	 * the first READ_ONCE_NOCHECK — masking the real panic
+	 * message. A SIGSEGV inside panic() is the worst-case UML
+	 * failure mode because printk buffer never flushes and the
+	 * operator sees a silent crash loop.
+	 */
+	stack_start = (unsigned long *)task_stack_page(tsk);
+	stack_end = stack_start + THREAD_SIZE / sizeof(unsigned long);
+	if (sp < stack_start || sp >= stack_end)
+		return;
 
 	frame = (struct stack_frame *)bp;
 	while (((long) sp & (THREAD_SIZE-1)) != 0) {
