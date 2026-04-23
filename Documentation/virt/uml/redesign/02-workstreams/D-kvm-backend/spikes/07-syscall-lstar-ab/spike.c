@@ -189,13 +189,19 @@ static void setup_msrs(int vcpu)
 	} msrs = {
 		.info = { .nmsrs = 3 },
 		.entries = {
-			{ .index = 0xc0000081, /* STAR: kernel CS=0x08 */
-			  .data = ((uint64_t)0xfff8 << 48) |
-			          ((uint64_t)0x0008 << 32) },
-			{ .index = 0xc0000082, /* LSTAR */
-			  .data = LSTAR_OFFSET },
-			{ .index = 0xc0000084, /* SFMASK */
-			  .data = 0 },
+			{
+				.index = 0xc0000081, /* STAR: kernel CS=0x08 */
+				.data = ((uint64_t)0xfff8 << 48) |
+					((uint64_t)0x0008 << 32)
+			},
+			{
+				.index = 0xc0000082, /* LSTAR */
+				.data = LSTAR_OFFSET
+			},
+			{
+				.index = 0xc0000084, /* SFMASK */
+				.data = 0
+			},
 		},
 	};
 	if (ioctl(vcpu, KVM_SET_MSRS, &msrs) < 0)

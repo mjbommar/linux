@@ -150,8 +150,12 @@ jobs:
             #     bare 'unsigned'" — pedantic style point
             #     not applicable to throwaway spike code
             #     whose only consumer is the spike itself.
+            #   CAMELCASE — flags PRIu64 / PRId64 / PRIx64
+            #     from <inttypes.h>. Those are standard C
+            #     library macros, not an in-tree naming
+            #     convention we should rewrite.
             if ! scripts/checkpatch.pl --strict --no-summary \
-                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL,BIT_MACRO,PREFER_KERNEL_TYPES,UNSPECIFIED_INT \
+                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL,BIT_MACRO,PREFER_KERNEL_TYPES,UNSPECIFIED_INT,CAMELCASE \
                     -g "$sha"; then
               fail=1
             fi
