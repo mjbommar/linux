@@ -122,8 +122,20 @@ struct um_backend_ops {
 	 * (mask SIGCHLD in other handlers) and arch/um/os-Linux/
 	 * process.c::init_new_thread_signals (install the SIGCHLD
 	 * handler itself).
+	 *
+	 * has_syscall_stub_fd_map: true when the backend's stub-
+	 * syscall ABI carries per-mm FD indirection
+	 * (`mm_id->syscall_fd_map` / `syscall_fd_num`) for
+	 * SCM_RIGHTS fd-passing into the stub child. Seccomp
+	 * sets this (Berg's stub uses a per-mm sendmsg-delivered
+	 * fd table); ptrace and KVM leave it false. Consulted
+	 * by arch/um/os-Linux/skas/mem.c::syscall_stub_dump_error
+	 * (dump the fd-map on error) and the fd-remap branches of
+	 * do_syscall_stub / get_stub_fd / um_stub_mm_map (those
+	 * extraction sites are Phase II Lifts #4c).
 	 */
 	bool				uses_stub_reaper;
+	bool				has_syscall_stub_fd_map;
 
 	/* Lifecycle and trap (4) */
 	int  (*probe)(void);

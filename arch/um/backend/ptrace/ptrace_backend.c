@@ -26,8 +26,12 @@ const struct um_backend_ops um_backend_ptrace_ops = {
 	 * uses_stub_reaper=false: ptrace reaps the stub child
 	 * inline via waitpid inside the trap loop, not via a
 	 * SIGCHLD-registered reaper IRQ.
+	 *
+	 * has_syscall_stub_fd_map=false: ptrace stub syscalls
+	 * use plain FDs (no per-mm SCM_RIGHTS indirection table).
 	 */
 	.uses_stub_reaper	= false,
+	.has_syscall_stub_fd_map = false,
 
 	/* Lifecycle and trap (4) */
 	.probe			= ptrace_probe,

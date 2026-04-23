@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <init.h>
 #include <as-layout.h>
+#include <backend.h>
 #include <mm_id.h>
 #include <os.h>
 #include <ptrace_user.h>
@@ -44,7 +45,19 @@ void syscall_stub_dump_error(struct mm_id *mm_idp)
 	print_hex_dump(UM_KERN_ERR, "    syscall data: ", 0,
 		       16, 4, sc, sizeof(*sc), 0);
 
-	if (using_seccomp) {
+	/*
+	 * Dump the per-mm SCM_RIGHTS fd map only for backends
+	 * that actually populate it (seccomp today). Reads the
+	 * ops-table capability flag rather than the legacy
+	 * `using_seccomp` int per D59 Phase II Lift #4b. Debug-
+	 * path only — called from the error branch of
+	 * do_syscall_stub below and from the seccomp backend's
+	 * run_userspace when the stub reports an errored
+	 * syscall batch. um_backend is guaranteed non-NULL here
+	 * (all callers run post-init_backend); the guard is
+	 * belt-and-suspenders.
+	 */
+	if (um_backend && um_backend->has_syscall_stub_fd_map) {
 		printk(UM_KERN_ERR "%s: FD map num: %d", __func__,
 		       mm_idp->syscall_fd_num);
 		print_hex_dump(UM_KERN_ERR,
