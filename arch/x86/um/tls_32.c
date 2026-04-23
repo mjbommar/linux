@@ -8,6 +8,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <asm/ptrace-abi.h>
+#include <backend.h>
 #include <os.h>
 #include <skas.h>
 #include <sysdep/tls.h>
@@ -30,7 +31,19 @@ static int do_set_thread_area(struct task_struct* task, struct user_desc *info)
 	    info->entry_number >= host_gdt_entry_tls_min + GDT_ENTRY_TLS_ENTRIES)
 		return -EINVAL;
 
-	if (using_seccomp) {
+	/*
+	 * Route TLS updates through the stub-data ABI when the
+	 * backend uses the futex-based stub dispatch (seccomp);
+	 * otherwise fall through to PTRACE_SET_THREAD_AREA via
+	 * os_set_thread_area (ptrace). The stub reads arch_data.
+	 * tls[] + arch_data.sync on its next futex-driven
+	 * round-trip and applies the descriptor before resuming.
+	 * Routed through um_backend->stub_syscall_uses_futex
+	 * per D59 Phase II Lift #4d+ (this call site was not
+	 * originally cataloged in D59; discovered during the
+	 * extern-removal cleanup).
+	 */
+	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		int idx = info->entry_number - host_gdt_entry_tls_min;
 		struct stub_data *data = (void *)task->mm->context.id.stack;
 

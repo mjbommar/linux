@@ -36,6 +36,23 @@ extern __thread int signals_enabled;
 int timer_alarm_pending(void);
 
 /*
+ * start_up.c / skas/process.c — `using_seccomp` intermediary.
+ *
+ * Defined in arch/um/os-Linux/skas/process.c. Written by
+ * os_early_checks (start_up.c) based on the host seccomp
+ * probe. Read by init_backend (arch/um/kernel/backend.c, has
+ * its own extern) to pick the dynamic-mode backend.
+ *
+ * USER-TU-private by design as of 2026-04-23 (D59 Phase II
+ * Lift #4d+). The public skas.h declaration was removed
+ * after all twelve runtime readers in arch/um/os-Linux/
+ * moved to um_backend_ops capability flags; do NOT add it
+ * back — backend-discriminating runtime code should consult
+ * um_backend->*flag instead.
+ */
+extern int using_seccomp;
+
+/*
  * skas/process.c
  */
 void wait_stub_done(int pid);
