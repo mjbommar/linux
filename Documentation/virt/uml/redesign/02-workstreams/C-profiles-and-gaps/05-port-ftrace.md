@@ -37,6 +37,14 @@ the kernel stack and has a concrete race against UML's signal-
 based preemption. Function graph lands in a follow-up after a
 signal-stress test validates the interaction.
 
+**2026-04-22 follow-up note:** `HAVE_FUNCTION_GRAPH_TRACER` did
+land, as the C-04 commit 3a/3b series
+(`858f25db662d` + `e0361af1c605`), guarded by the preempt_count
+check in `prepare_ftrace_return()` captured in D34 addendum-4.
+The "Out of scope" line above reflects C-05's original series
+intent; see `Documentation/virt/uml/ftrace.rst` §"Function graph"
+for the shipped-state description.
+
 **Prior art check (2026-04-18):** no prior patch series
 proposing `HAVE_FUNCTION_TRACER` for UML surfaced on
 `lore.kernel.org`. This is a greenfield port; expect extra
@@ -203,7 +211,8 @@ the tree consistent.
 - No `HAVE_FUNCTION_GRAPH_TRACER`. See D27. Graph needs return-
   address rewrite on the kernel stack; UML's SIGALRM-driven
   preemption can race with the trampoline's in-flight state.
-  Not unsolvable; not in scope here.
+  Not unsolvable; not in scope here. *(2026-04-22: picked up
+  and shipped as C-04 3a/3b — see D34 addendum-4.)*
 - No `HAVE_DYNAMIC_FTRACE_WITH_REGS` /
   `HAVE_DYNAMIC_FTRACE_WITH_ARGS`. Those require a REGS
   variant of the mcount caller that spills full `pt_regs`.

@@ -80,17 +80,39 @@ call site. Well inside the research profile's design envelope
 ``prod-fast`` and ``sandbox`` profiles do not pay this cost —
 they leave ``CONFIG_FTRACE`` off.
 
+Function graph
+==============
+
+``HAVE_FUNCTION_GRAPH_TRACER`` landed in workstream C-04 commit 3b
+(``e0361af1c605``, 2026-04-22). The research profile enables it
+via ``CONFIG_FUNCTION_GRAPH_TRACER=y`` and the generic
+``function_graph`` tracer is reachable as ``echo function_graph >
+/sys/kernel/tracing/current_tracer`` from inside a booted guest.
+
+Commit 3a (``858f25db662d``, 2026-04-21) prepared the way by
+closing the three shadow-stack leak sources D34 identified:
+``notrace`` on generic ``kthread()`` / ``smpboot_thread_fn()``
+plus a narrow ``CFLAGS_REMOVE_<file>.o`` strip set on UML's
+signal-dispatch and longjmp-entry TUs. Commit 3b added the
+``ftrace_graph_caller`` / ``return_to_handler`` trampolines in
+``arch/um/kernel/mcount.S``, ``prepare_ftrace_return()`` in
+``arch/um/kernel/ftrace.c``, and the Kconfig select.
+
+One UML-specific quirk remains: ``prepare_ftrace_return()`` skips
+the shadow-stack push when ``preempt_count`` is non-zero. UML-UP
+builds with ``TINY_RCU``, where ``rcu_read_lock()`` is
+``preempt_disable()``, so a graph-traced function body that takes
+a sleeping lock while an outer ``rcu_read_lock`` is held would
+otherwise trip ``__might_resched`` under ``PROVE_LOCKING``. The
+guard loses graph events only for that narrow window; the traced
+function still executes and all events outside atomic context are
+still captured. See D34 addendum-3 / addendum-4 for the full
+analysis. D27 (original defer-the-graph decision) is superseded
+by the 3a/3b series.
+
 What is not supported yet
 =========================
 
-- **Function graph** (``HAVE_FUNCTION_GRAPH_TRACER``) is
-  deliberately deferred. D27 in the decisions log explains: UML's
-  signal-based preemption can race with the ``return_to_handler``
-  trampoline's in-flight state; before lighting graph up we want
-  a signal-stress selftest. Arm (Thumb2), x86 (non-DYNAMIC), and
-  RISC-V (non-WITH_ARGS) similarly gate graph on a subordinate
-  capability, so UML deferring it is within existing kernel
-  convention.
 - ``HAVE_DYNAMIC_FTRACE_WITH_REGS`` / ``_WITH_ARGS`` /
   ``_WITH_DIRECT_CALLS``: not yet implemented. The minimal port
   in C-05 ships only the basic function tracer. REGS is expected
@@ -137,5 +159,7 @@ See also
 - ``Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/05-port-ftrace.md``
   (design)
 - ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-  §§ D27 (graph deferred), D28 (patch mechanism), D29 (toolchain),
-  D30 (bulk mprotect), D31 (KCOV interaction)
+  §§ D27 (graph originally deferred — superseded by C-04 3a/3b),
+  D28 (patch mechanism), D29 (toolchain), D30 (bulk mprotect),
+  D31 (KCOV interaction), D34 (function-graph design + its
+  addendum-3/4 landing fix)
