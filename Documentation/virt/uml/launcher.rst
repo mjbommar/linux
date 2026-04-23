@@ -157,26 +157,89 @@ implementation on the fuzzer side; it uses ``os.dup2`` directly,
 but an AFL++ or syzkaller driver would typically hand off
 already-open pipes and let ``uml-launcher`` do the plumbing.
 
+Per-device decomposition (--virtio)
+===================================
+
+The launcher's ``run`` subcommand accepts repeatable
+``--virtio <class>[:<args>]`` flags that spawn dedicated
+backend processes over vhost-user:
+
+   * ``--virtio console`` — console backend; bytes flow
+     through the launcher's stdio like the bare-kernel path
+     did, but the TX / RX / stdin work happens in its own
+     process with a seccomp filter applied.
+   * ``--virtio net:<tap>`` — net backend; attaches to a
+     pre-created TAP interface on the host via
+     ``ioctl(TUNSETIFF, IFF_TAP | IFF_NO_PI)``. Operator
+     sets up the tap with ``ip tuntap add <name> mode tap``
+     before launch.
+   * ``--virtio block:<image>[,ro]`` — block backend;
+     file-backed virtio-blk with optional read-only.
+
+Each backend runs with:
+
+   * The same binary (``uml-launcher backend <class>``), so
+     packaging is one ELF + one systemd unit + one
+     AppArmor/SELinux profile per class.
+   * An ``seccompiler`` allowlist: ~40 syscalls baseline
+     (epoll, recvmsg, eventfd2, mmap, etc.) plus class
+     extras (``preadv``/``pwritev`` for block,
+     ``TUNSETIFF`` is pre-seccomp). Anything outside →
+     ``SIGSYS`` via ``SECCOMP_RET_KILL_PROCESS``.
+   * An AppArmor sub-profile transition
+     (``uml-launcher//backend_{console,net,block}``) via
+     ``aa_change_profile()`` when the profile is loaded;
+     silent skip otherwise.
+
+Example::
+
+   # Console + a block disk, no network:
+   uml-launcher run --kernel ./linux --init /bin/sh --mem 512M \\
+       --virtio console \\
+       --virtio block:/srv/uml/rootfs.img
+
+   # All three classes:
+   sudo ip tuntap add tap0 mode tap user $USER
+   sudo ip link set tap0 up
+   uml-launcher run --kernel ./linux --init /sbin/init \\
+       --virtio console \\
+       --virtio net:tap0 \\
+       --virtio block:/srv/uml/rootfs.img,ro
+
+The launcher spawns each backend before it starts UML, waits
+for each socket to appear, appends
+``virtio_uml.device=<socket>:<id>`` entries to the kernel
+cmdline, then supervises both UML and the backends. On UML
+exit (or SIGTERM to the launcher), each backend is sent
+``SIGTERM``, given 500 ms to clean up, then ``SIGKILL`` d if
+still alive, and its socket file is unlinked. No orphan
+processes survive a clean exit.
+
 Roadmap
 =======
 
-v1 (this release)
+v1 (shipped 2026-04-20)
   * Spawn, supervise, reap. One UML process.
   * CLI + env + TOML config merge.
   * Signal forwarding + exit-code passthrough.
   * Forkserver fd plumbing.
   * hostfs root, stdio/null console.
 
-v2 (planned; see design doc)
-  * Per-device host processes over vhost-user. Each helper
-    (net, block, console) gets its own process with a
-    ``seccompiler``-authored allowlist of ~7-15 syscalls.
-    Matches crosvm / Firecracker isolation posture.
-  * Reference AppArmor + SELinux profiles.
-  * Block-device (``ubd``) root support.
-  * PTY console.
+v2 (shipped 2026-04-23)
+  * Per-device host processes over vhost-user: console
+    (full TX + RX + stdin reader), net (TAP, no offloads),
+    block (preadv/pwritev, FLUSH, GET_ID, RO gate).
+  * ``seccompiler``-authored per-class allowlist filters.
+  * Reference AppArmor profile + runtime
+    ``aa_change_profile()`` into per-backend sub-profiles.
+  * Reference SELinux refpolicy module
+    (``selinux-policy-dev`` builds ``uml_launcher.pp``).
+  * ``--virtio <class>[:<args>]`` orchestration.
 
 v3 (later)
+  * VIRTIO_NET_F_MRG_RXBUF + CSUM/GSO offloads.
+  * virtio-blk DISCARD / WRITE_ZEROES / O_DIRECT.
+  * Multi-instance of the same class (two disks etc.).
   * Multi-instance daemon with JSON-RPC control.
   * Systemd unit template.
   * Distro packaging (``.deb``, ``.rpm``).

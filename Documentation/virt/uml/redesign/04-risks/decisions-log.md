@@ -5477,4 +5477,56 @@ control surface, slirp, vfio-user, gpu/snd/wl/pmem backends.
 
 ---
 
+## D53 (2026-04-23) — C-10 v2 orchestration: same-binary multi-call + per-class virtio-id constants
+
+**Decision.** `uml-launcher run --virtio <class>[:<args>]`
+re-invokes the launcher binary (`std::env::current_exe()`)
+as `uml-launcher backend <class> …` for each spec rather
+than linking the backend modules directly into the run
+path. Virtio-IDs are stable per-class constants (console=1,
+net=2, block=3); multiple instances of the same class are
+rejected at orchestrate time rather than silently colliding.
+
+**Alternatives considered.**
+
+- *Link backends into the run path (threads, no subprocess):*
+  saves one fork+exec per backend but loses the per-class
+  seccomp / AppArmor isolation that's the whole point of
+  the per-device decomposition. A kernel-side bug in one
+  backend class could then reach the UML control path.
+- *Separate binary per backend* (`uml-backend-console`, …):
+  matches what cloud-hypervisor historically did. Rejected
+  in D52 — multi-call keeps packaging to one ELF + one
+  manpage + one profile family per LSM. Re-affirmed here.
+- *Runtime virtio-ID allocator that hands out successive
+  slots:* needed the moment someone wants two disks, but
+  the v2 scope is one instance per class. Deferred to a
+  follow-on when multi-disk is the blocking need.
+
+**How to apply.**
+
+- New backend class: assign the next virtio-id constant in
+  `src/virtio.rs`, add a case to `VirtioClass` + the parser
+  + `orchestrate()`'s arg-building switch. The guest-side
+  virtio_uml driver accepts any ID so there's no handshake
+  to update.
+- Relaxing "one instance per class": replace the per-class
+  constant with an allocator that increments per spec, turn
+  the duplicate-class check into a range-collision check.
+  Don't do this preemptively; wait for the real use case.
+- The `BackendProcess::Drop` contract (SIGTERM → 500 ms →
+  SIGKILL + unlink socket) is load-bearing for the
+  no-orphan invariant tested in launcher-smoke. Any change
+  to lifecycle semantics needs matching test updates.
+
+**Cross-references.**
+
+- D52 — the shape decision this closes out.
+- `tools/uml/uml-launcher/src/virtio.rs` — implementation.
+- `tools/uml/uml-launcher/src/launcher.rs` — orchestrate
+  call site + explicit `drop(backends)` after UML's
+  `wait()` returns.
+
+---
+
 ## (Future entries here, as decisions are made)

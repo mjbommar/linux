@@ -1,19 +1,25 @@
 # C-10: Crosvm-style host launcher
 
-**Status:** landed v1 (2026-04-20); post-landing fix
-`672edefe415a` (2026-04-21) corrected `--root` / `--console`
-precedence so TOML/env overlays actually take effect when the
-CLI flag is absent (see D46). v2 in progress — commits 1-7
-of 9 landed (2026-04-22): subcommand scaffolding, console
-backend (TX + RX + stdin reader), seccomp baseline, net +
-block scaffolds, AppArmor reference profile + runtime
-`aa_change_profile()` wire-up, SELinux reference policy
-module. Total crate: 52 tests passing (46 unit + 3 apparmor +
-2 selinux + 1 frontend handshake) across gcc + clang builds;
-5-gate CI matrix (build + marker boot + userspace-smoke +
-probe-features + launcher-smoke) green on every push.
-Remaining v2 work: net + block data paths, orchestration
-(`--virtio` option), docs status flip.
+**Status:** landed v2 (2026-04-23). v1 shipped 2026-04-20 +
+D46 precedence fix 2026-04-21. v2 delivered per-device
+decomposition across 11 bisectable commits: console TX + RX +
+stdin reader, seccomp allowlist, net scaffold + TAP data
+path, block scaffold + preadv/pwritev data path, AppArmor
+reference profile + runtime `aa_change_profile()`, SELinux
+reference policy module, and `--virtio <class>[:<args>]`
+orchestration. Each backend subcommand installs its
+seccomp filter + transitions into its AppArmor sub-profile
+before entering the vhost-user event loop; orchestrator
+tears down backends cleanly on UML exit. Crate: 74 tests
+passing (68 unit + 3 apparmor + 2 selinux + 1 real
+frontend-handshake) across gcc + clang builds. 5-gate CI
+matrix (build + marker boot + userspace-smoke +
+probe-features + launcher-smoke) + checkpatch + uml-launcher
+cargo test/clippy green on every push to the fork. See the
+v3 block at the end of `Documentation/virt/uml/launcher.rst`
+for what intentionally rolls forward: MRG_RXBUF /
+CSUM/GSO offloads, block DISCARD / WRITE_ZEROES / O_DIRECT,
+multi-instance per class, systemd unit + distro packaging.
 **Effort:** 6 weeks (budget). v1 scope below was **~1 session of
 disciplined work** given the locked crate stack and small v1
 feature set; v2 (vhost-user device decomposition + seccomp)
