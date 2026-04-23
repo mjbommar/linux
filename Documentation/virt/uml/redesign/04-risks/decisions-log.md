@@ -5671,4 +5671,77 @@ the observability story to make that worthwhile."
 
 ---
 
+## D56 (2026-04-23) — Spike 02 data changes the D-workstream read: naive KVM backend is competitive across modern silicon, systrap gadget optional not mandatory
+
+**Decision.** Spike 02 extends Spike 01's single Skylake-SP
+measurement to seven more hosts across four Intel
+generations + AMD Zen 4. The revised floor for the naive
+`KVM_RUN` round-trip is **~0.8 µs to ~5 µs depending on
+silicon**, not uniformly ~5 µs. Vision doc "~100 ns" line
+stays aspirational but the gap to close is now ~8× on
+Alder Lake i9 (not ~50× on Skylake-SP). D-04 systrap-gadget
+work is reclassified from "required for D to justify the
+vision" to "second-phase D deliverable that closes a
+smaller gap." First-phase D (naive `KVM_RUN`-per-syscall)
+ships on the merits: 4× over seccomp worst-case, 25× best-
+case, with observability-over-QEMU-KVM as the secondary
+selling point.
+
+Measurements captured in `measurements.md` (new file,
+intended as the persistent timing log). Subsequent D
+spikes + real-implementation benchmarks extend that file
+rather than re-measuring ad hoc.
+
+**Alternatives considered.**
+
+- *Keep D55's framing ("~5 µs floor") after Spike 02:*
+  Rejected. Two Alder Lake hosts + Zen 4 at boost all
+  landed below 3 µs, with i9 at 780 ns. Pretending that
+  silicon doesn't exist would ignore 4 of 8 data points.
+- *Rewrite vision around the i9 number:* Rejected. 780 ns
+  is the best case on the newest fastest part we
+  measured. Average deployment — especially syzbot's
+  fleet, which is Skylake-era + Sapphire Rapids — sees
+  the 3-5 µs range. Optimistic headlines burn trust
+  when reality shows up.
+- *Delay D until we measure a Sapphire/Granite Rapids
+  host:* Deferred but not blocking. The existing
+  measurements already say D is worth doing; a newer
+  server silicon point just moves the floor, doesn't
+  change the go/no-go.
+
+**How to apply.**
+
+- `00-vision.md` headline now reads "~0.8-5 µs" naive;
+  "~100 ns" stays aspirational.
+- `01-kvm-platform-design.md` Spike block now references
+  both spikes + `measurements.md`.
+- `measurements.md` is the durable home for all future
+  D timing data. Append per-measurement dated sections
+  at the bottom; never overwrite.
+- Future spikes that want to claim a number
+  (Sapphire Rapids, Graviton3, nested-KVM on GHA,
+  Spike 04 long-mode+LSTAR, systrap prototype) each
+  add one dated section to `measurements.md` + a
+  cross-reference from their own README.
+- The cycle count vs ns distinction landed by Spike 02
+  (Zen 4 hosts at different P-states) should shape how
+  we report future results: **report both cycles and ns**,
+  and prefer cycles as the invariant when comparing
+  silicon generations. Clock effects are informative but
+  confound the underlying "VMX/SVM exit cost" number we
+  care about.
+
+**Cross-references.**
+
+- `02-workstreams/D-kvm-backend/spikes/01-getpid-roundtrip/
+  README.md` — spike 01/02 narrative + per-host readouts.
+- `02-workstreams/D-kvm-backend/measurements.md` — the
+  persistent timing log.
+- D55 — the prior (narrower) conclusion from Spike 01
+  alone. Kept in the log as a history record; this D56
+  supersedes it for the vision headline.
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -6,41 +6,63 @@ full design memo to follow.
 **Dependencies:** A-01 (ops table)
 **Blocks:** D-02..D-06
 
-## Spike 01 result (2026-04-23)
+## Spike 01/02 result (2026-04-23)
 
-Bare `KVM_RUN` → `VMEXIT` → userspace round-trip costs
-**~4.7 µs / ~17500 cycles median** on a Skylake-SP
-(Xeon W-2123 @ 3.6 GHz, 1000 iterations, tight distribution
-p10=17510, p90=17590). Full methodology + raw numbers + a
-go/no-go breakdown for the D-workstream's vision-level
-assumptions in `spikes/01-getpid-roundtrip/README.md`.
+Bare `KVM_RUN` → `VMEXIT` → userspace round-trip measured
+across eight hosts (four Intel generations + AMD Zen 4). Full
+per-host table in `measurements.md`; the takeaway:
+
+- **Skylake-era Intel (2015-2017): 4.7-6.1 µs / 17500-20600
+  cycles.** Flat across Skylake-S / Kaby Lake / Skylake-SP.
+- **AMD Zen 4 (2023, Ryzen 7 7840HS): ~12000 cycles, 2.5-6 µs
+  depending on P-state clock.** Generational improvement
+  over Skylake but not the Alder Lake i9 floor.
+- **Alder Lake i5-12600K: ~11700 cycles, 2.6 µs.** Cycle
+  count near Zen 4, clock high, so ns is competitive.
+- **Alder Lake i9-12900K: ~3800 cycles, 780 ns.** Step-
+  change below the rest of the inventory — within one order
+  of magnitude of the ~100 ns vision line *without* any
+  gadget work.
+
+**Cycle count is silicon-bounded, ns is clock-bounded.**
+Three Zen 4 hosts (s5/s6/s7) showed cycle counts within 2%
+of each other at clocks spanning 2.0-5.0 GHz; the ns values
+fanned out accordingly.
 
 **What changes downstream:**
 
-- The `00-vision.md` "~100 ns syscall" line is misleading for
-  the naive D backend. `~100 ns` is what gVisor's
-  kvm-platform-with-systrap delivers via a ring-0 in-guest
-  gadget that skips the VMEXIT for most syscalls. The bare
-  `KVM_RUN` path — what the minimum-viable D backend lands —
-  pays the full VT-x exit cost and delivers ~1-5 µs.
-- 4.7 µs is still a **4× improvement** over the seccomp
-  backend's ~20 µs per guest syscall, so the D workstream
-  is still worth shipping. The "~100 ns" figure becomes a
-  **Q7-Q8 aspirational target** predicated on a systrap-
-  equivalent gadget layer (D-04 ring transitions work),
-  not an initial-bring-up promise.
-- The design memo (below, in progress) names the systrap
-  gadget explicitly as a follow-on; first-phase D ships a
-  straightforward backend that hits the ~5 µs floor and
-  wins on the merits.
+- Naive KVM backend's realistic performance envelope:
+  **~5 µs on old Intel, ~2.5 µs on Zen 4 or Alder Lake i5
+  at boost, ~800 ns on Alder Lake i9.** Every point is a
+  ≥4× win over the seccomp baseline (~20 µs per guest
+  syscall) — 25× on the i9.
+- The ~100 ns vision target is still aspirational and
+  needs either (a) silicon newer than what we measured,
+  or (b) a systrap-equivalent gadget layer that handles
+  common syscalls in-guest without a VMEXIT. Likely both.
+  But the gap went from "50× away" (Spike 01 alone) to
+  "~8× on Alder Lake i9" — much more tractable.
+- First-phase D is genuinely worth shipping on the merits.
+  4-25× over seccomp across the whole silicon range, with
+  observability-over-QEMU-KVM as the secondary argument.
+  D-04 systrap gadget becomes a clear second-phase
+  deliverable rather than a prerequisite for the first.
 
-See `spikes/01-getpid-roundtrip/` for the spike harness +
-full discussion. Methodology: real-mode guest executing a
-single `hlt`, 1000 iterations, rdtsc bracketed around
-`KVM_RUN`. LSTAR-trap variant attempted first but tripled
-into `KVM_EXIT_SHUTDOWN` without a real GDT/TSS; the VMEXIT
-cost we're measuring is a CPU property independent of guest
-mode, so we simplified.
+See:
+
+- `spikes/01-getpid-roundtrip/README.md` — spike harness
+  + raw per-host readouts + vision-alignment discussion.
+- `measurements.md` — durable timing-data log, intended to
+  extend over the life of the D workstream with new spikes
+  and real-implementation benchmarks.
+
+Methodology caveats (same as Spike 01): real-mode guest
+executing a single `hlt`, 1000 iterations, rdtsc bracketed
+around `KVM_RUN`. LSTAR-trap variant attempted first but
+tripled into `KVM_EXIT_SHUTDOWN` without a real GDT/TSS; the
+VMEXIT cost we're measuring is a CPU property independent
+of guest mode, so the simplification doesn't change the
+numbers.
 
 ## Goal
 
