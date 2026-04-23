@@ -1,12 +1,23 @@
 # D-workstream design memo: naive `um_backend_kvm`
 
-**Status:** draft (2026-04-23), calibrated with spike 04
-results.
-**Companion to:** `01-kvm-platform-design.md` (status + spike
-result summary), `measurements.md` (timing data), spikes
-01/02 (real-mode floor across 8 hosts) and 04 (long-mode
-+ userspace-visible VMEXIT, the shape the naive backend
-ships).
+**Status:** draft (2026-04-23), calibrated with spikes
+01, 02, 04, 05 (GHA nested-virt), and 06 (P-state-locked
+re-measurement).
+**Companion to:** `01-kvm-platform-design.md` (status +
+spike result summary), `measurements.md` (timing data).
+
+**Per-syscall floor across silicon (spike 04 numbers,
+P-state-locked where applicable):**
+
+  - Alder Lake i9 @ 4.9 GHz:    4705 cyc  /  960 ns
+  - Zen 4 @ 5.0 GHz:           13148 cyc  / 2463 ns
+  - Alder Lake i5 @ 4.5 GHz:   14260 cyc  / 3170 ns
+  - Kaby Lake @ 3.3 GHz:       20404 cyc  / 6180 ns
+  - Skylake-SP @ 3.7 GHz:      22994 cyc  / 6210 ns
+  - Skylake-S @ 2.7 GHz:       29746 cyc  / 11000 ns
+  - GHA nested (EPYC 7763):    ~22000 cyc / ~7 µs
+
+See `measurements.md` for per-host detail + methodology.
 
 This is the implementation-shaping memo for the first-phase
 KVM backend. Scope: replace the ptrace/seccomp trap mechanism

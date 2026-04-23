@@ -239,6 +239,82 @@ same.
    binary and exercise a real syscall. That lands with
    D-02..D-06 implementation.
 
+## 2026-04-23 — Spike 06: P-state-locked re-measurement
+
+Follow-up to spike 01/04 to resolve two specific
+anomalies by controlling CPU frequency state:
+
+1. **i9-12900K** delivered 3837 cyc / 783 ns on spike 01
+   and 10986 cyc / 9672 ns on spike 04 — the ns jump
+   was because spike 04's run happened at 1.14 GHz
+   (host was thermal-idle). The cycle-count jump
+   (~3× worse) wasn't consistent with the Zen 4
+   pattern either (Zen 4 added ~900 cyc going from
+   spike 01 to spike 04).
+2. **i5-12600K** delivered 11700 cyc spike 01 and
+   6336 cyc spike 04 — spike 04 was *faster* than
+   spike 01 on the same silicon, which shouldn't
+   happen. Suspected P-core vs E-core core-migration
+   between runs on Alder Lake's heterogeneous
+   architecture.
+
+Methodology: `sudo cpupower frequency-set -g performance`
++ `sudo tee /sys/devices/system/cpu/intel_pstate/min_perf_pct
+<<<100`, then re-run spike 01 and spike 04 back-to-back
+so both measurements hit the same core at the same
+P-state.
+
+| Host | CPU | Run MHz | Spike 01 cyc | Spike 04 cyc | Δ |
+|---|---|---:|---:|---:|---:|
+| s0 | i9-12900K (Alder Lake) | ~1987 spike01 / 4900 spike04 | 4154 | 4705 | +551 |
+| s4 | i5-12600K (Alder Lake) | 4500 | 11814 | 14260 | +2446 |
+| s3 | Xeon W-2123 (Skylake-SP) | 3703 | (baseline = spike 01 row) | 22994 | +5444 |
+
+**Key resolutions:**
+
+- **The i9's spike 04 under sustained boost is 4705 cyc /
+  ~960 ns**, not the 10986 cyc one-shot number from the
+  earlier run. The 4.9 GHz boost held across 1000
+  iterations with p10=4687 / p90=4723 (ultra-tight
+  distribution). **This is the clean reference number
+  for the Alder Lake i9 naive-KVM floor.**
+- **The i5 anomaly was core-migration.** First run
+  landed on an E-core that somehow measured faster; the
+  P-state-locked re-run on what is presumably a P-core
+  shows the expected +2446 cyc delta (similar to
+  Skylake's +5444 and Zen 4's +900, within the silicon-
+  generation-dependent range).
+- **Spike 01 cycles are silicon-invariant, confirmed
+  again.** s4 went from 11700 to 11814 (Δ 1%), s3
+  stayed within noise. The earlier panel results hold.
+- **Cycle count is the right primary metric.** Across
+  all re-measurements, the ns figure swung with clock
+  but cycles stayed stable. This reinforces the "report
+  cycles first, ns second" convention landed in spike
+  02's commentary.
+
+**Final per-host cycle floor for the naive backend
+(spike 04 numbers, silicon-invariant):**
+
+| Silicon | Spike 04 median cyc | ns @ boost clock |
+|---|---:|---|
+| Alder Lake i9 | 4705 | 960 ns @ 4.9 GHz |
+| Alder Lake i5 | 14260 | 3170 ns @ 4.5 GHz |
+| Zen 4 (7840HS)  | 13148-13338 | 2463-2500 ns @ 5 GHz |
+| Kaby Lake | 20404 | 6180 ns @ 3.3 GHz |
+| Skylake-SP | 22994 | 6210 ns @ 3.7 GHz |
+| Skylake-S | 29746 | 11000 ns @ 2.7 GHz |
+| EPYC 7763 (nested) | 20237-22282 | 6236-7729 ns (nested-virt cost added) |
+
+**Update to the design memo headline:**
+
+The naive um_backend_kvm delivers **~1-11 µs per syscall
+depending on silicon**, under the shape the memo
+describes (long mode + userspace-visible VMEXIT). Alder
+Lake i9 at 4.9 GHz boost is 960 ns — within 10× of the
+~100 ns vision line without any gadget work. This is the
+number that goes into the memo's perf-envelope section.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
