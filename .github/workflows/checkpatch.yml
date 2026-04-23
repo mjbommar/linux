@@ -132,8 +132,16 @@ jobs:
             #     longer commit bodies. The messages land
             #     intact because `git commit -m` doesn't
             #     strip comments from -m input.
+            #   PREFER_KERNEL_TYPES / BIT_MACRO — suggests
+            #     the kernel's <linux/bits.h> BIT / BIT_ULL
+            #     helpers over (1UL<<n). Correct for kernel
+            #     sources; wrong for standalone userspace
+            #     spikes under Documentation/ that can't
+            #     include kernel headers. Ignored so the
+            #     D-workstream KVM spike harness doesn't
+            #     trip the CI gate.
             if ! scripts/checkpatch.pl --strict --no-summary \
-                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL \
+                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL,BIT_MACRO \
                     -g "$sha"; then
               fail=1
             fi

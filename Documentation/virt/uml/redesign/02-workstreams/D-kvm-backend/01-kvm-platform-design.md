@@ -1,7 +1,10 @@
 # D-01: KVM platform design
 
-**Status:** in progress (2026-04-23) — spike 01 landed + measured,
-full design memo to follow.
+**Status:** design memo draft landed (2026-04-23) — see
+`design-memo.md` for the implementation-shaping pass.
+Spikes 01+02 anchored the performance envelope (full
+results in `measurements.md`). Implementation commits
+(D-02..D-06) can start after a reviewer pass on the memo.
 **Effort:** 4 weeks
 **Dependencies:** A-01 (ops table)
 **Blocks:** D-02..D-06
@@ -63,6 +66,16 @@ tripled into `KVM_EXIT_SHUTDOWN` without a real GDT/TSS; the
 VMEXIT cost we're measuring is a CPU property independent
 of guest mode, so the simplification doesn't change the
 numbers.
+
+## Note (2026-04-23)
+
+The sections below — Goal / Approach / Deliverable /
+Validation / Open questions / Risk — captured the original
+planning-shell for D-01 when it was still a placeholder.
+The design memo at `design-memo.md` now owns the
+substantive content of each; the shell is kept here as
+history for anyone reconstructing how the workstream
+evolved. For current guidance, read `design-memo.md` first.
 
 ## Goal
 
