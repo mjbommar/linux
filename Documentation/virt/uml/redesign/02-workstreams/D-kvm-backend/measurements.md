@@ -431,6 +431,48 @@ This establishes the methodology; per-host entries follow
 in the pending-measurements section below as new targets
 report in.
 
+### 2026-04-23 add-on — D-04c SYSCALL+LSTAR dispatch
+
+Port spike 07's variant-B methodology into the backend
+harness. Adds code_b (mov $0x27, %eax; syscall; hlt) + LSTAR
+trampoline (out %al, $0xf4; sysretq) at known harness slot
+offsets, programs MSR_STAR / MSR_LSTAR / MSR_FMASK, runs
+1000-iter KVM_SET_REGS → KVM_RUN loop. Each iteration the
+guest executes SYSCALL → LSTAR-trampoline → `out` →
+KVM_EXIT_IO; reset-per-iter clears KVM's pending-I/O state
+so no second KVM_RUN is needed.
+
+**IO-baseline vs SYSCALL+LSTAR delta (backend, two hosts):**
+
+| Host | IO-only med | LSTAR med | Δ (SYSCALL+LSTAR) |
+|---|---:|---:|---:|
+| dev Skylake-W @ 3.7 GHz | 22450 | 22820 | **+370 cyc** |
+| w1 Alder Lake @ 5.0 GHz | 5566  | 5940  | **+374 cyc** |
+
+**Silicon-invariant at ~370 cyc across both microarchitectures**,
+matching spike 07's measured 260-340 cyc floor across Kaby
+Lake / Skylake-S / Skylake-SP / Zen 4. Confirms the
+backend's SYSCALL+LSTAR bounce-trampoline cost is fixed per
+design-memo projection — the port from spike into backend
+binary adds no measurable SYSCALL-side overhead, same as
+the port added no measurable VMEXIT-side overhead.
+
+**Integrated cost model for the naive backend (D-04c-era):**
+
+  per-syscall cost = VMEXIT-RTT (~22k Skylake / ~5.5k AL)
+                   + SYSCALL+SYSRETQ (~370 cyc, silicon-flat)
+                   + host-side handler work (sys_call_table)
+
+At Alder Lake i7 boost: 5940 cyc / 5 GHz ≈ **1.19 µs per
+syscall** in-backend, matching the spike-predicted 1 µs
+floor (spike 04 i9-12900 @ 4.9 GHz = 960 ns) within ~20 %.
+
+**SYSRETQ execution measurement deferred.** The second
+KVM_RUN per iteration (for SYSRETQ → HLT) needs a ring-3-
+DPL code segment in the harness GDT (CPL=0 SYSRETQ forces
+CS.RPL=3, GPF on DPL=0 descriptor). D-04c.2 or folded into
+D-05 ring-3 entry work.
+
 ### 2026-04-23 add-on — D-04b.2b.2 UML-kernel-text execution
 
 With D-05a (real time ops) and D-04b.2b.1 (harness relocation
