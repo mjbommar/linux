@@ -122,6 +122,31 @@
 #define KVM_HARNESS_RING3_FAULT_OFFSET    0x7200
 #define KVM_HARNESS_SYSRETQ_TRAMP3_OFFSET 0x9200
 #define KVM_HARNESS_FAULT_GPA		  0x30000000UL
+/*
+ * Phase III Lift #1e: host → guest signal-equivalent delivery.
+ *   IRQ_HANDLER_OFFSET — minimal IRQ handler: out %al, $0xf8; hlt
+ *                        (port 0xf8 is the Lift #1e-distinctive
+ *                        exit signal).
+ *   IDT_OFFSET         — 33-entry IDT (vectors 0..32). Only entry
+ *                        32 is populated; 0..31 are null and
+ *                        would triple-fault if hit.
+ *   PAUSE_LOOP_OFFSET  — ring-0 pause-loop sled where the vCPU
+ *                        waits for the injected interrupt.
+ *   STACK_TOP          — ring-0 stack top; interrupt-frame push
+ *                        lands below this address.
+ *
+ * Ring-0-only delivery (CS=0x08 throughout): the guest loop
+ * runs in ring-0 so the IRQ transition is within-CPL, which
+ * avoids needing a TSS (CPL-crossing interrupts require RSP0
+ * from TSS; ring-0→ring-0 just pushes onto the current stack).
+ * Demonstrates the delivery mechanism; Lifts #1f + follow-ons
+ * extend to ring-3→ring-0 signal delivery with a real TSS.
+ */
+#define KVM_HARNESS_IRQ_HANDLER_OFFSET	0x9300
+#define KVM_HARNESS_IDT_OFFSET		0xa000
+#define KVM_HARNESS_PAUSE_LOOP_OFFSET	0xb000
+#define KVM_HARNESS_RING0_STACK_TOP	0x100000UL
+#define KVM_HARNESS_IRQ_VECTOR		32
 #define KVM_HARNESS_SLOT		0
 
 /*
@@ -302,6 +327,31 @@ static const u8 kvm_harness_sysretq_tramp3[] = {
 	0xf4,						/* hlt */
 };
 
+/*
+ * Phase III Lift #1e: IRQ handler at 0x9300. Writes the Lift
+ * #1e-distinctive port 0xf8 then halts. The `out` itself
+ * triggers KVM_EXIT_IO before HLT executes (OUT is always a
+ * VMEXIT); the HLT is the fallback if for any reason the
+ * OUT fails to exit. 3 bytes.
+ */
+static const u8 kvm_harness_irq_handler[] = {
+	0xe6, 0xf8,		/* out %al, $0xf8 */
+	0xf4,			/* hlt */
+};
+
+/*
+ * Phase III Lift #1e: ring-0 pause-loop. `pause` is a hint to
+ * the CPU that this is a spin-wait; `jmp .-2` jumps back to
+ * the pause. The loop never terminates under guest execution —
+ * it runs until the injected IRQ vectors the CPU to the IDT
+ * handler. HLT is the fallback. 5 bytes.
+ */
+static const u8 kvm_harness_pause_loop[] = {
+	0xf3, 0x90,		/* pause */
+	0xeb, 0xfc,		/* jmp .-2 (back to pause) */
+	0xf4,			/* hlt (fallback) */
+};
+
 static const char *kvm_harness_exit_name(u32 r)
 {
 	switch (r) {
@@ -448,6 +498,36 @@ int kvm_run_harness(void)
 	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP3_OFFSET,
 	       kvm_harness_sysretq_tramp3,
 	       sizeof(kvm_harness_sysretq_tramp3));
+
+	/*
+	 * Phase III Lift #1e: IRQ handler, pause-loop, and a 33-entry
+	 * IDT. IDT entry layout per AMD64 SDM vol 2 §4.8.4 (interrupt
+	 * gate, 16 bytes): offset[15:0], selector, IST=0, type_attr
+	 * (0x8e = P=1, DPL=0, interrupt-gate), offset[31:16],
+	 * offset[63:32], reserved(4). Vectors 0..31 stay null;
+	 * vector KVM_HARNESS_IRQ_VECTOR (32) is populated to point
+	 * at kvm_harness_irq_handler.
+	 */
+	memcpy(mem + KVM_HARNESS_IRQ_HANDLER_OFFSET,
+	       kvm_harness_irq_handler, sizeof(kvm_harness_irq_handler));
+	memcpy(mem + KVM_HARNESS_PAUSE_LOOP_OFFSET,
+	       kvm_harness_pause_loop, sizeof(kvm_harness_pause_loop));
+	{
+		u8 *idt = (u8 *)mem + KVM_HARNESS_IDT_OFFSET;
+		u32 handler = KVM_HARNESS_IRQ_HANDLER_OFFSET;
+		u8 *e = idt + KVM_HARNESS_IRQ_VECTOR * 16;
+
+		memset(idt, 0, 33 * 16);
+		e[0] = (u8)(handler & 0xff);
+		e[1] = (u8)((handler >> 8) & 0xff);
+		e[2] = 0x08;		/* selector: ring-0 code */
+		e[3] = 0x00;
+		e[4] = 0x00;		/* IST */
+		e[5] = 0x8e;		/* type_attr: P=1 DPL=0 int-gate */
+		e[6] = (u8)((handler >> 16) & 0xff);
+		e[7] = (u8)((handler >> 24) & 0xff);
+		/* offset[63:32] + reserved stay zero (memset above). */
+	}
 
 	region = (struct kvm_userspace_memory_region){
 		.slot			= KVM_HARNESS_SLOT,
@@ -1096,6 +1176,127 @@ d04c_done:
 			}
 		}
 	}
+
+	/*
+	 * Phase III Lift #1e: host-injected IRQ delivery via
+	 * KVM_INTERRUPT. Guest runs in ring-0 at a pause-loop; host
+	 * waits for ready_for_interrupt_injection, then issues
+	 * KVM_INTERRUPT(vec=32). Guest vectors to IDT[32] which
+	 * writes port 0xf8 and halts. PASS when
+	 * KVM_EXIT_IO port=0xf8 is observed.
+	 *
+	 * Ring-0 delivery scope: the guest loop runs in ring-0 so
+	 * the IRQ is within-CPL (no TSS needed for RSP0 load on
+	 * CPL transition). The ring-3 variant (signal delivery
+	 * across CPL) needs a TSS populated with RSP0 — that's a
+	 * follow-on increment scoped to the real-backend signal
+	 * path (Lift #1f / post-Phase III). This lift proves the
+	 * delivery *mechanism* works.
+	 *
+	 * Ring-0 SREGS are re-applied (after Lift #1d's MMIO exit,
+	 * the vCPU is parked in ring-3) along with the new IDT
+	 * base/limit. RFLAGS = 0x202 (IF=1, bit 1 reserved).
+	 * RSP points at a high address inside slot 0 so the
+	 * interrupt-frame push lands in backed memory.
+	 */
+	{
+		enum { KVM_REQ_IRQ_WIN_TIMEOUT = 64 };
+		unsigned int irq_win_iters = 0;
+		bool delivered = false;
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1e KVM_GET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+		kvm_setup_harness_sregs(&sregs);
+		sregs.gdt.limit = 47;
+		sregs.idt.base  = KVM_HARNESS_IDT_OFFSET;
+		sregs.idt.limit = 33 * 16 - 1;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1e KVM_SET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		regs = (struct kvm_regs){
+			.rip	= KVM_HARNESS_PAUSE_LOOP_OFFSET,
+			.rsp	= KVM_HARNESS_RING0_STACK_TOP,
+			.rflags	= 0x202,	/* IF=1, bit 1 reserved */
+		};
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				      (unsigned long)&regs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1e KVM_SET_REGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		/*
+		 * Run until KVM reports ready_for_interrupt_injection,
+		 * then inject. With request_interrupt_window=1, KVM
+		 * exits as soon as the guest is in a state where the
+		 * injection can proceed (typically immediately for
+		 * ring-0 with IF=1). Bounded retries guard against
+		 * stuck states.
+		 */
+		while (!delivered && irq_win_iters++ < KVM_REQ_IRQ_WIN_TIMEOUT) {
+			struct kvm_interrupt intr = {
+				.irq = KVM_HARNESS_IRQ_VECTOR,
+			};
+
+			run->request_interrupt_window = 1;
+			rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+			run->request_interrupt_window = 0;
+			if (rc < 0) {
+				os_info("um: kvm harness: 1e KVM_RUN (pre-inject) failed (%d) exit=%u (%s)\n",
+					rc, run->exit_reason,
+					kvm_harness_exit_name(run->exit_reason));
+				break;
+			}
+
+			if (run->exit_reason == KVM_EXIT_IRQ_WINDOW_OPEN ||
+			    run->ready_for_interrupt_injection) {
+				rc = os_ioctl_generic(vcpu_fd, KVM_INTERRUPT,
+						      (unsigned long)&intr);
+				if (rc < 0) {
+					os_info("um: kvm harness: 1e KVM_INTERRUPT failed (%d)\n",
+						rc);
+					break;
+				}
+
+				rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+				os_info("um: kvm harness: 1e post-inject KVM_RUN rc=%d exit_reason=%u (%s)\n",
+					rc, run->exit_reason,
+					kvm_harness_exit_name(run->exit_reason));
+
+				if (rc >= 0 && run->exit_reason == KVM_EXIT_IO &&
+				    run->io.port == 0xf8) {
+					delivered = true;
+				}
+				break;
+			}
+
+			if (run->exit_reason != KVM_EXIT_INTR) {
+				os_info("um: kvm harness: 1e unexpected exit before injection: %u (%s)\n",
+					run->exit_reason,
+					kvm_harness_exit_name(run->exit_reason));
+				break;
+			}
+		}
+
+		if (delivered) {
+			os_info("um: kvm harness: 1e PASS — IRQ delivery via KVM_INTERRUPT verified (vector=%u, port=0xf8)\n",
+				KVM_HARNESS_IRQ_VECTOR);
+		} else {
+			os_info("um: kvm harness: 1e FAIL — IRQ not delivered (iters=%u)\n",
+				irq_win_iters);
+		}
+	}
 phase3_1b_done:
 	/*
 	 * The harness is one-shot by design. Report the final exit
@@ -1106,7 +1307,7 @@ phase3_1b_done:
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c/1d architectural validation complete");
+	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c/1d/1e architectural validation complete");
 }
 
 /*
