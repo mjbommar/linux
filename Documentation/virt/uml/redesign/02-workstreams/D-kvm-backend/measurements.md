@@ -631,6 +631,54 @@ um: kvm harness: 1b PASS — ring-3 entry verified
   ring-3 → ring-0 → userspace transit machinery is now
   demonstrably working in-backend.
 
+## 2026-04-23 — Phase III Lift #1c: ring-3 ↔ LSTAR ↔ ring-3 syscall round-trip
+
+Methodology: extend the Lift #1b ring-3-entry demo with a
+full round-trip. Ring-3 page at slot offset 0x7100 does
+`mov $0x2a, %eax; syscall; out %al, $0xf6; hlt`; the LSTAR
+handler at 0x9000 does `add $100, %rax; sysretq`. Host
+observes the exit port AND data byte.
+
+Result (Skylake-W dev host):
+
+```
+um: kvm harness: 1c KVM_RUN rc=0 exit_reason=2 (IO)
+um: kvm harness: 1c PASS — ring-3 → LSTAR → ring-3
+    round-trip verified (port=0xf6 data=0x8e)
+```
+
+**Observations:**
+
+- Port 0xf6 + data 0x8e (0x2a + 100) is the cross-signal
+  that ring-3 executed after SYSRETQ *and* LSTAR actually
+  ran and mutated RAX. Either one alone would be
+  insufficient proof.
+- A KVM_EXIT_SHUTDOWN trap was required to discover that
+  after Lift #1b's ring-3 IO exit, the vCPU is parked in
+  CPL=3 and subsequent ring-0 code (Lift #1c's SYSRETQ
+  tramp) triple-faults. The fix — KVM_GET_SREGS +
+  kvm_setup_harness_sregs + KVM_SET_SREGS between tests
+  — is the expected "reset to ring-0" pattern a real
+  hypervisor would apply on vCPU re-entry.
+
+**Scope — what this does NOT demonstrate:**
+
+- The LSTAR handler is a 7-byte `add $100, %rax; sysretq`
+  compute, not a dispatch through `sys_call_table`. A
+  real dispatch requires guest-side `current` / percpu /
+  kernel-stack setup which the handcrafted harness
+  doesn't provide. That lands in Phase III Lifts #1e/1f
+  where the full guest-kernel-entry path is plumbed.
+  Lift #1c's value is the round-trip machinery itself —
+  the scaffolding on which a real dispatch sits.
+
+**What this opens:**
+
+- Phase III Lift #1d (page-fault handling: decode
+  KVM_EXIT_MMIO / KVM_EXIT_SHUTDOWN into UML's existing
+  arch/um/kernel/trap.c fault path) is architecturally
+  unblocked.
+
 ## 2026-04-23 — Phase III Lift #1a (kvm_um attach-cost benchmark) retired
 
 **Not run.** Decisions-log D60 closes this placeholder as
