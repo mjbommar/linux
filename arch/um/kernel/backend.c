@@ -96,25 +96,29 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 #ifdef CONFIG_UM_BACKEND_KVM
 	else if (want == UM_BACKEND_KIND_KVM) {
 		/*
-		 * Non-force `backend=kvm` runs probe() here — if the
-		 * host is missing /dev/kvm or the kvm API version
-		 * drifted, we defer to the using_seccomp / ptrace
-		 * default with a warning rather than letting
-		 * init_backend() panic. That matches the design
-		 * memo's "detect at runtime, fall back to seccomp
-		 * backend with a warning" mitigation for the nested-
-		 * KVM / CI-host case. force=kvm skips this and lets
-		 * init_backend() panic per the arbiter contract.
+		 * force=kvm is always honored (user-explicit; panic
+		 * on unavailable is the documented contract for
+		 * force=*). Bare backend=kvm only routes into the KVM
+		 * backend when CONFIG_UM_BACKEND_KVM_HARNESS=y —
+		 * non-harness builds still stub run_userspace and
+		 * will panic the moment the kernel tries to enter
+		 * user mode (Finding #3). Falling through to
+		 * using_seccomp keeps DYNAMIC users out of that
+		 * trap unless they asked for it.
 		 */
 		if (force) {
 			using_seccomp = 0;
 			return &um_backend_kvm_ops;
 		}
+#ifdef CONFIG_UM_BACKEND_KVM_HARNESS
 		if (um_backend_kvm_ops.probe() == 0) {
 			using_seccomp = 0;
 			return &um_backend_kvm_ops;
 		}
-		pr_warn("um: backend=kvm requested but probe failed; falling back\n");
+		pr_warn("um: backend=kvm (harness) requested but probe failed; falling back\n");
+#else
+		pr_warn("um: backend=kvm requires force=kvm or CONFIG_UM_BACKEND_KVM_HARNESS=y in DYNAMIC builds (non-harness run_userspace panics on user-mode entry); falling back\n");
+#endif
 	}
 #endif
 
