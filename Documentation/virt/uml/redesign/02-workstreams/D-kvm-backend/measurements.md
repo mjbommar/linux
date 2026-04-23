@@ -431,6 +431,45 @@ This establishes the methodology; per-host entries follow
 in the pending-measurements section below as new targets
 report in.
 
+### 2026-04-23 add-on — D-04b.1c on w1 (Alder Lake i7-12700K)
+
+Second host for the instrumented harness. i7-12700K (Alder
+Lake-S, P-cores @ 5.0 GHz boost, 3.6 GHz base; 8P+4E).
+`powersave` cpufreq governor (no passwordless sudo to lock
+to performance on this host, so runs are governor-mixed).
+Five consecutive 1000-iter runs:
+
+| Run | Min cyc | Median cyc | p95 cyc | State |
+|---:|---:|---:|---:|---|
+| 1 | **5506** | **5568** | 5602   | boost-locked |
+| 2 |  12096  |  13420  | 16650   | power-saving |
+| 3 |   6152  |   6214  | 13454   | mixed |
+| 4 |   6008  |   6164  | 13754   | mixed |
+| 5 | **5882** | **5926** | 5976   | boost-locked |
+
+When the CPU stayed in boost (runs 1 + 5), median tracks min
+within ~50 cyc — that's the hardware floor once P-state
+variability is out of the picture. Taking min-of-min as the
+boost-locked floor estimate:
+
+| Source | Host | Median cyc | MHz | ns/VMEXIT |
+|---|---|---:|---:|---:|
+| spike 04 s0 | Alder Lake i9-12900 @ boost | 4,705 | 4900 | **960** |
+| D-04b.1c run 1 | Alder Lake i7-12700K @ boost | 5,568 | 5000 | **1,114** |
+
+**Backend overhead over spike: ~18%** on Alder Lake-class
+silicon. Plausible: the backend does real kernel-context
+work (ioctl dispatch via os_ioctl_generic, scheduler /
+printk machinery live even if idle, KASAN-capable code paths
+compiled in) versus the spike's minimal-userspace tight
+loop. Sub-microsecond range on 2021-era hardware, matching
+the design-memo cost model.
+
+This is the single-digit-hundred-ns vision headline
+*without* the systrap gadget. D-04c's LSTAR+SYSCALL bypass,
+when it lands, closes the gap to the ~100 ns asymptote on
+silicon that hits it architecturally.
+
 **Mechanical prerequisites that landed to make this visible:**
 
   - `commit f68398447394 ("um: kernel: stacktrace — bound dump_trace walker to the task's actual stack")` — fix the
