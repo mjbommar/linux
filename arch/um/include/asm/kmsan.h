@@ -97,8 +97,23 @@
  * allocate. If a future UML subsystem adds a private
  * memory pool (e.g. seccomp backend entry pages) this hook
  * grows a class-of-address branch.
+ *
+ * x86 uses this hook to map per-CPU `cpu_entry_area`
+ * addresses to their private shadow/origin pools so
+ * exception entry can read metadata without a page-table
+ * walk. s390 uses it for lowcore. UML has no equivalent —
+ * signal-delivery is the only quasi-exception path and it
+ * reaches the generic KMSAN metadata via ordinary vmalloc-
+ * backed per-CPU structures.
  */
 struct page;
+static inline void *arch_kmsan_get_meta_or_null(void *addr, bool is_origin)
+{
+	(void)addr;
+	(void)is_origin;
+	return NULL;
+}
+
 static inline bool kmsan_virt_addr_valid(const void *addr)
 {
 	/*
