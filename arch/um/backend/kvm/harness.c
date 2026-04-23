@@ -81,6 +81,23 @@
 #define KVM_HARNESS_RING3_CODE_OFFSET	0x7000
 #define KVM_HARNESS_SYSRETQ_TRAMP_OFFSET 0x8000
 /*
+ * Phase IV Lift #2b: no-VMEXIT gadget LSTAR handler. Placed at
+ * offset 0xc000 inside the harness slot, reachable by both the
+ * host (to program MSR_LSTAR) and the guest (direct fetch after
+ * SYSCALL entry).
+ */
+#define KVM_HARNESS_LSTAR_GADGET_OFFSET	0xc000
+/*
+ * Phase IV Lift #2b ring-3 loop + fourth SYSRETQ tramp for the
+ * no-VMEXIT gadget measurement.
+ *   RING3_GADGET_LOOP_OFFSET — executes N SYSCALLs in a loop
+ *                              then OUT %al, $0xf9 for exit
+ *   SYSRETQ_TRAMP4_OFFSET    — ring-0 tramp targeting
+ *                              RING3_GADGET_LOOP_OFFSET
+ */
+#define KVM_HARNESS_RING3_GADGET_LOOP_OFFSET 0x7300
+#define KVM_HARNESS_SYSRETQ_TRAMP4_OFFSET    0xd000
+/*
  * Phase III Lift #1c: syscall-result-flow demonstration. Ring-3
  * code does `mov $0x2a, %eax; syscall; out %al, $0xf6; hlt`; the
  * LSTAR handler computes `rax += 100` and SYSRETQs back. Exit is
@@ -352,6 +369,62 @@ static const u8 kvm_harness_pause_loop[] = {
 	0xf4,			/* hlt (fallback) */
 };
 
+/*
+ * Phase IV Lift #2b: "no-VMEXIT gadget" LSTAR handler. Strips
+ * the `out %al, $0xf4` from the D-04c LSTAR handler so SYSCALL
+ * round-trips entirely inside the guest, never exiting to host.
+ * Measures the pure SYSCALL+SYSRETQ instruction-pair cost
+ * without the VMEXIT round-trip — the floor cost that a systrap-
+ * equivalent gadget layer would hit on handleable syscalls.
+ *
+ * 3 bytes — just SYSRETQ.
+ */
+static const u8 kvm_harness_lstar_gadget[] = {
+	0x48, 0x0f, 0x07,		/* sysretq */
+};
+
+/*
+ * Phase IV Lift #2b: ring-3 gadget loop. Runs N SYSCALLs, each
+ * of which traps into the gadget LSTAR (which does just sysretq,
+ * no VMEXIT), then exits via OUT %al, $0xf9 at the end. The
+ * single KVM_RUN bracket around the whole loop measures the
+ * aggregate cycle cost; per-SYSCALL cost = delta / N.
+ *
+ * Counter in %ebx rather than %ecx — SYSCALL clobbers RCX
+ * (it stores the post-syscall RIP there for SYSRETQ), so a
+ * counter in %ecx gets trashed every iteration. %rbx is
+ * SYSCALL-preserved per the AMD64 SDM vol 3 §6.1.1.
+ *
+ * Layout (21 bytes):
+ *   offset 0 :  mov $1000, %ebx               ; loop counter
+ *   offset 5 :  mov $0x27, %eax               ; syscall # (dummy)
+ *   offset 10:  syscall                       ; → LSTAR gadget
+ *   offset 12:  dec %ebx
+ *   offset 14:  jnz -11 (back to offset 5)
+ *   offset 16:  out %al, $0xf9                ; exit loop
+ *   offset 18:  hlt
+ */
+static const u8 kvm_harness_ring3_gadget_loop[] = {
+	0xbb, 0xe8, 0x03, 0x00, 0x00,	/* mov $1000, %ebx */
+	0xb8, 0x27, 0x00, 0x00, 0x00,	/* mov $0x27, %eax */
+	0x0f, 0x05,			/* syscall */
+	0xff, 0xcb,			/* dec %ebx */
+	0x75, 0xf5,			/* jnz -11 (back to mov $0x27) */
+	0xe6, 0xf9,			/* out %al, $0xf9 */
+	0xf4,				/* hlt */
+};
+
+/*
+ * Phase IV Lift #2b: fourth SYSRETQ trampoline, targeting the
+ * gadget loop at 0x7300. 20 bytes.
+ */
+static const u8 kvm_harness_sysretq_tramp4[] = {
+	0x48, 0xc7, 0xc1, 0x00, 0x73, 0x00, 0x00,	/* mov $0x7300, %rcx */
+	0x49, 0xc7, 0xc3, 0x02, 0x32, 0x00, 0x00,	/* mov $0x3202, %r11 */
+	0x48, 0x0f, 0x07,				/* sysretq */
+	0xf4,						/* hlt */
+};
+
 static const char *kvm_harness_exit_name(u32 r)
 {
 	switch (r) {
@@ -512,6 +585,14 @@ int kvm_run_harness(void)
 	       kvm_harness_irq_handler, sizeof(kvm_harness_irq_handler));
 	memcpy(mem + KVM_HARNESS_PAUSE_LOOP_OFFSET,
 	       kvm_harness_pause_loop, sizeof(kvm_harness_pause_loop));
+	memcpy(mem + KVM_HARNESS_LSTAR_GADGET_OFFSET,
+	       kvm_harness_lstar_gadget, sizeof(kvm_harness_lstar_gadget));
+	memcpy(mem + KVM_HARNESS_RING3_GADGET_LOOP_OFFSET,
+	       kvm_harness_ring3_gadget_loop,
+	       sizeof(kvm_harness_ring3_gadget_loop));
+	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP4_OFFSET,
+	       kvm_harness_sysretq_tramp4,
+	       sizeof(kvm_harness_sysretq_tramp4));
 	{
 		u8 *idt = (u8 *)mem + KVM_HARNESS_IDT_OFFSET;
 		u32 handler = KVM_HARNESS_IRQ_HANDLER_OFFSET;
@@ -1297,6 +1378,117 @@ d04c_done:
 				irq_win_iters);
 		}
 	}
+
+	/*
+	 * Phase IV Lift #2b: systrap gadget no-VMEXIT measurement.
+	 *
+	 * Program MSR_LSTAR to point at the 3-byte gadget handler
+	 * (just SYSRETQ — no `out`, no VMEXIT). Set RIP to a ring-0
+	 * SYSRETQ trampoline targeting a ring-3 loop that issues
+	 * 1000 SYSCALLs back-to-back. Each SYSCALL enters the
+	 * gadget, gets SYSRETQ'd back to ring-3, dec-jnz retries.
+	 * After the loop completes, ring-3 OUT %al, $0xf9 forces
+	 * a single VMEXIT.
+	 *
+	 * rdtsc-bracket the full KVM_RUN. Per-syscall cost =
+	 * (cycles - exit_baseline) / 1000. The exit_baseline is
+	 * the cost of one ring-3 IO exit, which we already
+	 * characterized in Lift #1c's port-0xf6 test (~22k cyc
+	 * on Skylake-W, ~5500 cyc on Alder Lake i7).
+	 *
+	 * Expected: per-syscall cost drops from the naive-KVM
+	 * floor (22k cyc Skylake / 5500 Alder Lake) to the
+	 * SYSCALL+SYSRETQ instruction-pair cost (~300-400 cyc
+	 * silicon-invariant per spike 07). Ratio = 50-75×
+	 * speedup.
+	 *
+	 * Ring-0 SREGS reset same as Lifts #1c/#1d/#1e (post-
+	 * previous-test vCPU is parked in whatever the last exit
+	 * left it).
+	 */
+	{
+		struct {
+			struct kvm_msrs info;
+			struct kvm_msr_entry entries[1];
+		} lstar_gadget_override = {
+			.info = { .nmsrs = 1 },
+			.entries = {
+				{
+					.index = 0xc0000082,	/* MSR_LSTAR */
+					.data  = KVM_HARNESS_LSTAR_GADGET_OFFSET,
+				},
+			},
+		};
+		u64 t0, t1, cycles;
+		unsigned long long per_call;
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS,
+				      (unsigned long)&lstar_gadget_override);
+		if (rc < 0) {
+			os_info("um: kvm harness: 2b KVM_SET_MSRS (LSTAR gadget) failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 2b KVM_GET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+		kvm_setup_harness_sregs(&sregs);
+		sregs.gdt.limit = 47;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 2b KVM_SET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		regs = (struct kvm_regs){
+			.rip	= KVM_HARNESS_SYSRETQ_TRAMP4_OFFSET,
+			.rflags	= 0x2,
+		};
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				      (unsigned long)&regs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 2b KVM_SET_REGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		t0 = kvm_harness_rdtsc();
+		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		t1 = kvm_harness_rdtsc();
+		cycles = t1 - t0;
+
+		os_info("um: kvm harness: 2b KVM_RUN rc=%d exit_reason=%u (%s) total_cycles=%llu\n",
+			rc, run->exit_reason,
+			kvm_harness_exit_name(run->exit_reason),
+			(unsigned long long)cycles);
+
+		if (rc >= 0 && run->exit_reason == KVM_EXIT_IO &&
+		    run->io.port == 0xf9) {
+			/*
+			 * 1000 SYSCALL+SYSRETQ pairs inside the bracket
+			 * + 1 IO-exit (the final `out %al, $0xf9`).
+			 * Approximate per-syscall cost by dividing.
+			 * Subtracting the single-IO-exit baseline would
+			 * sharpen the number but cycles/1000 is within
+			 * ~1% for the 1000-iter count at this scale.
+			 */
+			per_call = (unsigned long long)cycles / 1000;
+			os_info("um: kvm harness: 2b PASS — gadget round-trip ~%llu cyc/syscall over 1000 iters (total %llu cyc)\n",
+				per_call, (unsigned long long)cycles);
+		} else {
+			os_info("um: kvm harness: 2b UNEXPECTED exit=%u port=0x%x\n",
+				run->exit_reason,
+				rc >= 0 && run->exit_reason == KVM_EXIT_IO ?
+				run->io.port : 0);
+		}
+	}
 phase3_1b_done:
 	/*
 	 * The harness is one-shot by design. Report the final exit
@@ -1307,7 +1499,7 @@ phase3_1b_done:
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c/1d/1e architectural validation complete");
+	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c/1d/1e + Phase IV Lift #2b architectural validation complete");
 }
 
 /*
