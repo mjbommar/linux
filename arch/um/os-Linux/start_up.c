@@ -538,6 +538,27 @@ void __init os_early_checks(void)
 	check_tmpexec();
 
 	/*
+	 * KVM_ONLY builds (CONFIG_UM_BACKEND_KVM_ONLY=y, with
+	 * PTRACE + SECCOMP both deselected) have nothing to probe
+	 * here — there is no stub-child backend to validate the
+	 * host supports. Short-circuit before the seccomp+ptrace
+	 * probe block so we don't fatal on "seccomp probe failed
+	 * and ptrace backend is not compiled in" in a configuration
+	 * where neither is even relevant. init_backend() (called
+	 * immediately after this function from linux_main()) picks
+	 * um_backend_kvm_ops directly via the KVM_ONLY branch in
+	 * arch/um/kernel/backend.c, leaving using_seccomp = 0.
+	 *
+	 * This short-circuit is the mirror of backend.c's KVM_ONLY
+	 * selection path: both sides of the early-boot pipeline
+	 * need to tolerate "no stub-child backend compiled in" for
+	 * KVM_ONLY images to reach multi-user.
+	 */
+	if (!IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
+	    !IS_ENABLED(CONFIG_UM_BACKEND_PTRACE))
+		return;
+
+	/*
 	 * Run the seccomp probe whenever CONFIG_UM_BACKEND_SECCOMP is
 	 * compiled in. Previously the probe was gated on an explicit
 	 * `seccomp=` or `backend=seccomp` request, which made

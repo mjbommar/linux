@@ -36,6 +36,8 @@
 # define EXPECTED_BACKEND_NAME "ptrace"
 #elif defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
 # define EXPECTED_BACKEND_NAME "seccomp"
+#elif defined(CONFIG_UM_BACKEND_KVM_ONLY)
+# define EXPECTED_BACKEND_NAME "kvm"
 #else
 # define EXPECTED_BACKEND_NAME NULL
 #endif
@@ -47,8 +49,8 @@
  * we skip the equality check (any non-NULL field is correct since
  * dispatch always goes through the pointer).
  *
- * The macro token-pastes `ptrace_<op>` or `seccomp_<op>` so the
- * unused-backend's symbols are NEVER referenced from this TU,
+ * The macro token-pastes `ptrace_<op>` / `seccomp_<op>` / `kvm_<op>`
+ * so the unused-backend's symbols are NEVER referenced from this TU,
  * avoiding the missing-prototype problem when one backend is
  * not compiled in.
  */
@@ -65,6 +67,13 @@
 		KUNIT_EXPECT_NOT_NULL(test, um_backend->field);		\
 		KUNIT_EXPECT_PTR_EQ(test, (void *)um_backend->field,	\
 				    (void *)(seccomp_##field));		\
+	} while (0)
+#elif defined(CONFIG_UM_BACKEND_KVM_ONLY)
+# define ASSERT_OP_DISPATCH(test, field)				\
+	do {								\
+		KUNIT_EXPECT_NOT_NULL(test, um_backend->field);		\
+		KUNIT_EXPECT_PTR_EQ(test, (void *)um_backend->field,	\
+				    (void *)(kvm_##field));		\
 	} while (0)
 #else /* DYNAMIC */
 # define ASSERT_OP_DISPATCH(test, field)				\
@@ -138,6 +147,9 @@ static void backend_probe_wired_test(struct kunit *test)
 #endif
 #ifdef CONFIG_UM_BACKEND_SECCOMP
 	(void)seccomp_probe;
+#endif
+#ifdef CONFIG_UM_BACKEND_KVM
+	(void)kvm_probe;
 #endif
 	ASSERT_OP_DISPATCH(test, probe);
 }

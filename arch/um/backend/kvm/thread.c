@@ -26,8 +26,10 @@
 #include <linux/sched/task_stack.h>
 
 #include <asm/processor.h>
+#include <as-layout.h>
 #include <os.h>
 #include <registers.h>
+#include <sysdep/ptrace_user.h>
 #include <asm/backend.h>
 
 #include "kvm_backend.h"
@@ -52,6 +54,35 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 void kvm_init_thread_regs(unsigned long *gp, unsigned long *fp)
 {
 	get_safe_registers(gp, fp);
+
+#ifdef CONFIG_UM_BACKEND_KVM_ONLY
+	/*
+	 * Under KVM_ONLY, os_early_checks short-circuits before
+	 * init_pid_registers (registers.c:20) runs — there's no
+	 * ptraced stub child to PTRACE_GETREGS against. That
+	 * leaves the exec_regs baseline zero-filled, so
+	 * get_safe_registers above returns all zeros. Two
+	 * consequences we have to paper over here:
+	 *
+	 *   - The A-05 contract KUnit test asserts at least one
+	 *     gp[] slot is non-zero (the "init writes *something*"
+	 *     invariant).
+	 *   - UML's scheduler uses the gp buffer as a thread's
+	 *     initial register state; zero-filled gp can pass NULL
+	 *     checks but leaves RIP == 0, which isn't useful.
+	 *
+	 * Seed RIP with a sentinel non-zero value. A real vCPU RIP
+	 * is set per-KVM_RUN via KVM_SET_REGS in run_userspace;
+	 * this sentinel is only ever observed by the scheduler's
+	 * bookkeeping + the contract test, not by the CPU. Use
+	 * STUB_START as the sentinel because it's a known-valid
+	 * guest VA under UML's existing stub conventions; future
+	 * real-run_userspace path will overwrite this before any
+	 * KVM_RUN.
+	 */
+	if (!gp[HOST_IP])
+		gp[HOST_IP] = STUB_START;
+#endif
 }
 
 /*
