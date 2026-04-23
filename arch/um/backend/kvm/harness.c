@@ -61,6 +61,14 @@
  * entries, and the memslot expansion covers the guest_phys.
  */
 #define KVM_HARNESS_HLT2_OFFSET		0x210000
+/*
+ * D-04c: SYSCALL-via-LSTAR variant-B guest code + its LSTAR
+ * trampoline. Ports spike 07's exact byte layout.
+ *   CODE_B: mov $0x27, %eax; syscall; hlt    (8 bytes)
+ *   LSTAR:  out %al, $0xf4; sysretq          (5 bytes)
+ */
+#define KVM_HARNESS_CODE_B_OFFSET	0x5000
+#define KVM_HARNESS_LSTAR_OFFSET	0x6000
 #define KVM_HARNESS_SLOT		0
 
 /*
@@ -105,6 +113,29 @@ __attribute__((naked)) static void kvm_harness_hlt_target(void)
 static const u8 kvm_harness_code[] = {
 	0xe6, 0xf4,	/* out %al, $0xf4 */
 	0xf4,		/* hlt */
+};
+
+/*
+ * D-04c variant-B guest code: set RAX to __NR_getpid (0x27),
+ * SYSCALL (traps via LSTAR), HLT on SYSRETQ return.
+ */
+static const u8 kvm_harness_code_b[] = {
+	0xb8, 0x27, 0x00, 0x00, 0x00,	/* mov $0x27, %eax */
+	0x0f, 0x05,			/* syscall */
+	0xf4,				/* hlt */
+};
+
+/*
+ * D-04c LSTAR trampoline: on SYSCALL entry the CPU jumps here
+ * with RCX = saved post-syscall RIP. The `out` triggers
+ * KVM_EXIT_IO; host advances vCPU RIP past the 2-byte `out`
+ * (to the SYSRETQ) and KVM_RUNs again. SYSRETQ returns to RCX
+ * (the `hlt` following the SYSCALL in code_b). Matches
+ * spike 07's lstar_tramp byte layout exactly.
+ */
+static const u8 kvm_harness_lstar[] = {
+	0xe6, 0xf4,		/* out %al, $0xf4 */
+	0x48, 0x0f, 0x07,	/* sysretq */
 };
 
 static const char *kvm_harness_exit_name(u32 r)
@@ -207,6 +238,16 @@ int kvm_run_harness(void)
 	 * kvm-owned pgd can route arbitrary RIP.
 	 */
 	*(u8 *)(mem + KVM_HARNESS_HLT2_OFFSET) = 0xf4;	/* hlt */
+
+	/*
+	 * D-04c: variant-B guest code + LSTAR trampoline at
+	 * spike-07-matching offsets. Unreferenced until the
+	 * SYSCALL+LSTAR test after the main IO-exit loop.
+	 */
+	memcpy(mem + KVM_HARNESS_CODE_B_OFFSET,
+	       kvm_harness_code_b, sizeof(kvm_harness_code_b));
+	memcpy(mem + KVM_HARNESS_LSTAR_OFFSET,
+	       kvm_harness_lstar, sizeof(kvm_harness_lstar));
 
 	region = (struct kvm_userspace_memory_region){
 		.slot			= KVM_HARNESS_SLOT,
@@ -430,6 +471,113 @@ int kvm_run_harness(void)
 	}
 
 	/*
+	 * D-04c: SYSCALL-via-LSTAR round-trip measurement. Ports
+	 * spike 07's variant-B methodology: program MSR_STAR /
+	 * MSR_LSTAR / MSR_FMASK, loop KVM_SET_REGS → KVM_RUN 1000
+	 * times, record cycles per iteration, report min/median/
+	 * p95/max. Each iteration:
+	 *
+	 *   1. KVM_SET_REGS resets RIP=CODE_B_OFFSET, all other
+	 *      regs 0, rflags=0x2.
+	 *   2. KVM_RUN → guest executes mov+syscall → traps
+	 *      through LSTAR → LSTAR-tramp's `out %al, $0xf4`
+	 *      → KVM_EXIT_IO.
+	 *
+	 * Reset at step 1 clears KVM's pending-I/O state from the
+	 * previous iteration's out, so no second KVM_RUN is needed
+	 * (matches spike 07 exactly). The SYSRETQ after the `out`
+	 * never executes in the measured path — its cost shows up
+	 * in real-backend syscall dispatch (D-04c.2+) but isn't
+	 * part of the spike-comparable measurement.
+	 *
+	 * MSR_STAR encoding per AMD64 SDM vol 3 §6.1.1:
+	 *   bits 47:32 — kernel CS selector (SYSCALL loads this;
+	 *                0x0008 = harness ring-0 CS).
+	 *   bits 63:48 — "STAR.SYSRET_CS_SEL"; we set 0xfff8 so
+	 *                (0xfff8 + 16) = 0x0008. Unused in the
+	 *                measured path since SYSRETQ doesn't
+	 *                execute.
+	 */
+	{
+		struct {
+			struct kvm_msrs info;
+			struct kvm_msr_entry entries[3];
+		} msrs = {
+			.info = { .nmsrs = 3 },
+			.entries = {
+				{
+					.index = 0xc0000081,	/* MSR_STAR */
+					.data  = ((u64)0xfff8 << 48) |
+						 ((u64)0x0008 << 32),
+				},
+				{
+					.index = 0xc0000082,	/* MSR_LSTAR */
+					.data  = KVM_HARNESS_LSTAR_OFFSET,
+				},
+				{
+					.index = 0xc0000084,	/* MSR_FMASK */
+					.data  = 0,
+				},
+			},
+		};
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS,
+				      (unsigned long)&msrs);
+		if (rc < 0) {
+			os_info("um: kvm harness: KVM_SET_MSRS (LSTAR/STAR) failed (%d)\n",
+				rc);
+			goto d04c_done;
+		}
+	}
+
+	{
+		enum { ITERS_B = 1000 };
+		static u64 cyc_b[ITERS_B];
+		unsigned int n = 0, i;
+		u32 last_exit = 0;
+		int last_rc = 0;
+
+		for (i = 0; i < ITERS_B; i++) {
+			u64 t0, t1;
+
+			regs = (struct kvm_regs){
+				.rip	= KVM_HARNESS_CODE_B_OFFSET,
+				.rflags	= 0x2,
+			};
+			rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+					      (unsigned long)&regs);
+			if (rc < 0) {
+				last_rc = rc;
+				break;
+			}
+
+			t0 = kvm_harness_rdtsc();
+			rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+			t1 = kvm_harness_rdtsc();
+			last_rc = rc;
+			last_exit = run->exit_reason;
+			if (rc < 0 || run->exit_reason != KVM_EXIT_IO)
+				break;
+			cyc_b[n++] = t1 - t0;
+		}
+
+		if (n >= 2) {
+			kvm_harness_insertion_sort(cyc_b, n);
+			os_info("um: kvm harness: LSTAR %u/%u variant-B IO exits; min=%llu median=%llu p95=%llu max=%llu cyc\n",
+				n, ITERS_B,
+				(unsigned long long)cyc_b[0],
+				(unsigned long long)cyc_b[n / 2],
+				(unsigned long long)cyc_b[(n * 95) / 100],
+				(unsigned long long)cyc_b[n - 1]);
+		} else {
+			os_info("um: kvm harness: LSTAR only %u iters; last rc=%d exit=%u (%s)\n",
+				n, last_rc, last_exit,
+				kvm_harness_exit_name(last_exit));
+		}
+	}
+
+d04c_done:
+	/*
 	 * The harness is one-shot by design. Report the final exit
 	 * state (via os_info so it bypasses the unregistered printk
 	 * buffer) and panic to stop the UML process — this is a
@@ -438,7 +586,7 @@ int kvm_run_harness(void)
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b full architectural validation complete");
+	panic("um: kvm harness: done — D-04b + D-04c architectural validation complete");
 }
 
 /*
