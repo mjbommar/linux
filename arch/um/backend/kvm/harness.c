@@ -28,6 +28,7 @@
  * scope, with UML kernel code, not the handcrafted sled.
  */
 #include <linux/errno.h>
+#include <linux/init.h>
 #include <linux/kvm.h>
 #include <linux/printk.h>
 #include <linux/types.h>
@@ -347,3 +348,26 @@ int kvm_run_harness(void)
 		kvm_harness_exit_name(run->exit_reason));
 	panic("um: kvm harness: done — D-04b.1c + D-04b.2b.alt complete");
 }
+
+/*
+ * D-04b.2b.1: harness fires from a late_initcall rather than
+ * kvm_init(). By late_initcall firing, uml_physmem /
+ * physmem_size are populated (arch_setup ran; D-05a lets
+ * time_init progress so jiffies advance through do_initcalls).
+ *
+ * Still uses the self-registered 2/4 MiB harness slot, not the
+ * Policy A memslot — that's a follow-on refactor. All this sub-
+ * step does is relocate the timing.
+ */
+static int __init kvm_harness_late_start(void)
+{
+	if (!kvm_backend_ctx() || kvm_backend_vcpu0_fd() < 0) {
+		pr_info("um: kvm harness: backend not initialized (not backend=kvm?); skipping\n");
+		return 0;
+	}
+	os_info("um: kvm harness: late_initcall firing\n");
+	pr_warn("um: kvm harness: late_initcall firing — replacing normal boot with diagnostic\n");
+	kvm_run_harness();
+	panic("um: kvm harness returned — should not happen");
+}
+late_initcall(kvm_harness_late_start);

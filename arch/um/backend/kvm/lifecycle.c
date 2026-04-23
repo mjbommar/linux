@@ -199,17 +199,15 @@ int kvm_init(const struct um_backend_args *args)
 		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
 		kvm_ctx.run_size);
 
-#ifdef CONFIG_UM_BACKEND_KVM_HARNESS
 	/*
-	 * Diagnostic build. kvm_run_harness() is a one-shot that
-	 * replaces normal UML boot; it registers its own memslot
-	 * (slot 0) directly and panics with the KVM_RUN exit
-	 * reason. Never returns.
+	 * Harness invocation relocated to a late_initcall in
+	 * harness.c (D-04b.2b.1, unblocked by D-05a's real time
+	 * ops). By late_initcall firing, uml_physmem /
+	 * physmem_size are populated, which D-04b.2b.2's RIP-into-
+	 * UML-text arithmetic needs. kvm_init() always returns
+	 * normally now; CONFIG_UM_BACKEND_KVM_HARNESS builds just
+	 * delay the harness-and-panic until late_initcall time.
 	 */
-	pr_warn("um: kvm init: CONFIG_UM_BACKEND_KVM_HARNESS=y, running diagnostic harness instead of normal boot\n");
-	kvm_run_harness();
-	panic("um: kvm harness returned — should not happen");
-#endif
 
 	return 0;
 }
