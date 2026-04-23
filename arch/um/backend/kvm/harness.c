@@ -80,6 +80,27 @@
  */
 #define KVM_HARNESS_RING3_CODE_OFFSET	0x7000
 #define KVM_HARNESS_SYSRETQ_TRAMP_OFFSET 0x8000
+/*
+ * Phase III Lift #1c: syscall-result-flow demonstration. Ring-3
+ * code does `mov $0x2a, %eax; syscall; out %al, $0xf6; hlt`; the
+ * LSTAR handler computes `rax += 100` and SYSRETQs back. Exit is
+ * observed at port 0xf6 with data byte 0x8e (0x2a + 100) — the
+ * port-data combination is the signal that (a) SYSCALL trapped
+ * into LSTAR, (b) LSTAR ran and mutated RAX, (c) SYSRETQ
+ * returned to ring-3, (d) ring-3 saw the mutated value.
+ *
+ * Scope note: this is deliberately NOT a dispatch through the
+ * real sys_call_table. That requires guest-side `current` /
+ * percpu / kernel-stack setup which the handcrafted harness
+ * doesn't provide; the real dispatch lands with Phase III
+ * Lift #1e/1f when the full guest-kernel-entry path is
+ * plumbed. Lift #1c's role is to prove the ring-3 ↔ ring-0 ↔
+ * ring-3 round-trip *returns a computed result to ring-3*, not
+ * that the computation is the real syscall table.
+ */
+#define KVM_HARNESS_RING3_SYSCALL_OFFSET  0x7100
+#define KVM_HARNESS_LSTAR_ADD_OFFSET	  0x9000
+#define KVM_HARNESS_SYSRETQ_TRAMP2_OFFSET 0x9100
 #define KVM_HARNESS_SLOT		0
 
 /*
@@ -178,6 +199,48 @@ static const u8 kvm_harness_ring3_code[] = {
  */
 static const u8 kvm_harness_sysretq_tramp[] = {
 	0x48, 0xc7, 0xc1, 0x00, 0x70, 0x00, 0x00,	/* mov $0x7000, %rcx */
+	0x49, 0xc7, 0xc3, 0x02, 0x32, 0x00, 0x00,	/* mov $0x3202, %r11 */
+	0x48, 0x0f, 0x07,				/* sysretq */
+	0xf4,						/* hlt */
+};
+
+/*
+ * Phase III Lift #1c: ring-3 sled that issues a SYSCALL with a
+ * known number in RAX, then exports the post-SYSCALL RAX byte
+ * via `out %al, $0xf6`. The LSTAR handler (below) adds 100 to
+ * RAX before SYSRETQing back, so a PASS is the host observing
+ * KVM_EXIT_IO at port 0xf6 with data = input + 100. 10 bytes.
+ */
+static const u8 kvm_harness_ring3_syscall[] = {
+	0xb8, 0x2a, 0x00, 0x00, 0x00,	/* mov $0x2a, %eax */
+	0x0f, 0x05,			/* syscall */
+	0xe6, 0xf6,			/* out %al, $0xf6 */
+	0xf4,				/* hlt */
+};
+
+/*
+ * Phase III Lift #1c: ring-0 LSTAR handler that does one
+ * computation on RAX and returns. The "add $100" body is the
+ * smallest operation that produces an observable result delta
+ * in ring-3. Future lifts replace this body with a full syscall
+ * dispatch (a stack switch + `call *sys_call_table(,%rax,8)` +
+ * restore), but Lift #1c only demonstrates the round-trip shape.
+ * 7 bytes.
+ */
+static const u8 kvm_harness_lstar_add[] = {
+	0x48, 0x83, 0xc0, 0x64,		/* add $100, %rax */
+	0x48, 0x0f, 0x07,		/* sysretq */
+};
+
+/*
+ * Phase III Lift #1c: second SYSRETQ trampoline targeting the
+ * ring-3 syscall sled (0x7100 instead of 0x7000). Otherwise
+ * identical to the Lift #1b trampoline; we use a fresh copy
+ * rather than patching the 0x8000 tramp in-place so the two
+ * tests remain independent and diagnosable. 20 bytes.
+ */
+static const u8 kvm_harness_sysretq_tramp2[] = {
+	0x48, 0xc7, 0xc1, 0x00, 0x71, 0x00, 0x00,	/* mov $0x7100, %rcx */
 	0x49, 0xc7, 0xc3, 0x02, 0x32, 0x00, 0x00,	/* mov $0x3202, %r11 */
 	0x48, 0x0f, 0x07,				/* sysretq */
 	0xf4,						/* hlt */
@@ -303,6 +366,21 @@ int kvm_run_harness(void)
 	       kvm_harness_ring3_code, sizeof(kvm_harness_ring3_code));
 	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP_OFFSET,
 	       kvm_harness_sysretq_tramp, sizeof(kvm_harness_sysretq_tramp));
+
+	/*
+	 * Phase III Lift #1c: alternate ring-3 syscall sled, LSTAR
+	 * handler that computes a result, and a second SYSRETQ
+	 * trampoline targeting the 0x7100 sled. Exercised after the
+	 * Lift #1b test.
+	 */
+	memcpy(mem + KVM_HARNESS_RING3_SYSCALL_OFFSET,
+	       kvm_harness_ring3_syscall,
+	       sizeof(kvm_harness_ring3_syscall));
+	memcpy(mem + KVM_HARNESS_LSTAR_ADD_OFFSET,
+	       kvm_harness_lstar_add, sizeof(kvm_harness_lstar_add));
+	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP2_OFFSET,
+	       kvm_harness_sysretq_tramp2,
+	       sizeof(kvm_harness_sysretq_tramp2));
 
 	region = (struct kvm_userspace_memory_region){
 		.slot			= KVM_HARNESS_SLOT,
@@ -749,6 +827,108 @@ d04c_done:
 			}
 		}
 	}
+
+	/*
+	 * Phase III Lift #1c: ring-3 → LSTAR → ring-3 round-trip
+	 * returning a computed result. Reuses the STAR[63:48]=0x18
+	 * / ring-3 selector setup from Lift #1b (MSRs still
+	 * programmed; GDT still loaded). Overrides MSR_LSTAR to
+	 * point at the "add $100, %rax; sysretq" handler, sets RIP
+	 * to the second SYSRETQ tramp (targeting the syscall sled
+	 * at 0x7100), runs.
+	 *
+	 * Expected: KVM_EXIT_IO port=0xf6, io-data byte=0x8e
+	 * (0x2a input + 100 = 0x8e). Any other port or any other
+	 * data value means the round-trip is broken somewhere —
+	 * the port proves ring-3 executed after SYSRETQ, and the
+	 * data byte proves LSTAR ran and mutated RAX.
+	 */
+	{
+		struct {
+			struct kvm_msrs info;
+			struct kvm_msr_entry entries[1];
+		} lstar_override = {
+			.info = { .nmsrs = 1 },
+			.entries = {
+				{
+					.index = 0xc0000082,	/* MSR_LSTAR */
+					.data  = KVM_HARNESS_LSTAR_ADD_OFFSET,
+				},
+			},
+		};
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS,
+				      (unsigned long)&lstar_override);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1c KVM_SET_MSRS (LSTAR override) failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		/*
+		 * Reset vCPU to ring-0 SREGS. After Lift #1b's IO
+		 * exit the vCPU is parked in CPL=3 (CS=0x2b). Lift
+		 * #1c's trampoline at 0x9100 is ring-0 code — without
+		 * a CS reset the first instruction (mov imm → rcx)
+		 * runs fine but `sysretq` from CPL=3 is #UD, which
+		 * triple-faults without an IDT handler and exits as
+		 * KVM_EXIT_SHUTDOWN. kvm_setup_harness_sregs re-
+		 * applies the ring-0 CS/SS/flat-data layout; the
+		 * GDT limit stays at 47 (6 entries) since we
+		 * still need the ring-3 descriptors for the SYSRETQ
+		 * inside this test's LSTAR handler.
+		 */
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1c KVM_GET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+		kvm_setup_harness_sregs(&sregs);
+		sregs.gdt.limit = 47;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1c KVM_SET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		regs = (struct kvm_regs){
+			.rip	= KVM_HARNESS_SYSRETQ_TRAMP2_OFFSET,
+			.rflags	= 0x2,
+		};
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				      (unsigned long)&regs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1c KVM_SET_REGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		os_info("um: kvm harness: 1c KVM_RUN rc=%d exit_reason=%u (%s)\n",
+			rc, run->exit_reason,
+			kvm_harness_exit_name(run->exit_reason));
+
+		if (rc >= 0 && run->exit_reason == KVM_EXIT_IO) {
+			unsigned int port = run->io.port;
+			u8 data = *((u8 *)run + run->io.data_offset);
+			u8 expected = 0x2a + 100;
+
+			if (port == 0xf6 && data == expected) {
+				os_info("um: kvm harness: 1c PASS — ring-3 → LSTAR → ring-3 round-trip verified (port=0xf6 data=0x%x)\n",
+					data);
+			} else if (port == 0xf6) {
+				os_info("um: kvm harness: 1c UNEXPECTED data=0x%x on port 0xf6 (expected 0x%x = 0x2a + 100)\n",
+					data, expected);
+			} else {
+				os_info("um: kvm harness: 1c UNEXPECTED port=0x%x data=0x%x (expected port=0xf6 data=0x%x)\n",
+					port, data, expected);
+			}
+		}
+	}
 phase3_1b_done:
 	/*
 	 * The harness is one-shot by design. Report the final exit
@@ -759,7 +939,7 @@ phase3_1b_done:
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b architectural validation complete");
+	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b/1c architectural validation complete");
 }
 
 /*
