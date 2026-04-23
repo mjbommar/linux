@@ -23,6 +23,10 @@
 #include <um_malloc.h>
 #include <linux/sched/task.h>
 #include <linux/kasan.h>
+#include <linux/kmsan.h>
+#ifdef CONFIG_KMSAN
+#include <asm/kmsan.h>
+#endif
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
 #include <asm/um-mmaps.h>
 #endif
@@ -71,6 +75,63 @@ static void (*kasan_init_ptr)(void)
 __section(".kasan_init") __used
 = kasan_init;
 #endif
+
+#ifdef CONFIG_KMSAN
+#if defined(CONFIG_UM_SNAPSHOT_FORKSERVER)
+/*
+ * Mirror of the KASAN shadow registration above for KMSAN's
+ * shadow + origin regions. Snapshot/forkserver inherits both
+ * via COW, same rationale as KASAN (shadow is too sparse to
+ * deduplicate; contents reconstruct from allocator state on
+ * restore).
+ */
+static struct um_mmap_region kmsan_shadow_mmap_region = {
+	.name  = "kmsan-shadow",
+	.flags = UM_MMAP_INHERIT_COW,
+	.backing_fd = -1,
+};
+static struct um_mmap_region kmsan_origin_mmap_region = {
+	.name  = "kmsan-origin",
+	.flags = UM_MMAP_INHERIT_COW,
+	.backing_fd = -1,
+};
+#endif
+
+/*
+ * Arch override of mm/kmsan/init.c's weak hook. Reserve the
+ * two host-mmap regions for KMSAN shadow + origin BEFORE the
+ * generic kmsan_init_shadow() sweep records reserved-range
+ * metadata. The record calls below are what hand the ranges
+ * to kmsan_init_alloc_meta_for_range() so per-page metadata
+ * is allocated for them at init time.
+ *
+ * The regions themselves are reserved via kasan_map_memory()
+ * — despite the name, that helper is a generic "mmap a
+ * host VA range with PROT_READ|PROT_WRITE + MADV_DONTDUMP"
+ * routine UML already uses for KASAN shadow. Re-using it keeps
+ * the bootstrap code path shared and tested.
+ */
+void __init kmsan_arch_init_early_shadow(void)
+{
+	kasan_map_memory((void *)KMSAN_SHADOW_START, KMSAN_SHADOW_SIZE);
+	kasan_map_memory((void *)KMSAN_ORIGIN_START, KMSAN_ORIGIN_SIZE);
+
+	kmsan_record_future_shadow_range((void *)KMSAN_SHADOW_START,
+					 (void *)KMSAN_SHADOW_END);
+	kmsan_record_future_shadow_range((void *)KMSAN_ORIGIN_START,
+					 (void *)KMSAN_ORIGIN_END);
+
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+	kmsan_shadow_mmap_region.base = (void *)KMSAN_SHADOW_START;
+	kmsan_shadow_mmap_region.len  = KMSAN_SHADOW_SIZE;
+	um_register_mmap_region(&kmsan_shadow_mmap_region);
+
+	kmsan_origin_mmap_region.base = (void *)KMSAN_ORIGIN_START;
+	kmsan_origin_mmap_region.len  = KMSAN_ORIGIN_SIZE;
+	um_register_mmap_region(&kmsan_origin_mmap_region);
+#endif
+}
+#endif /* CONFIG_KMSAN */
 
 /*
  * Initialized during boot, and readonly for initializing page tables
