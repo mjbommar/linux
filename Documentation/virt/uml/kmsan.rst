@@ -35,8 +35,22 @@ divided into four equal quarters::
    quarter 3  KMSAN_VMALLOC_ORIGIN_START ..
               — origin for quarter 1 (1 u32 per kernel u32,
                 same byte total as shadow)
-   quarter 4  KMSAN_MODULES_SHADOW_START + ORIGIN
-              — modules shadow + origin
+   quarter 4  unused
+
+**Modules-vs-vmalloc note.** On UML, ``MODULES_VADDR ==
+VMALLOC_START``: modules live inside the vmalloc range.
+The generic ``mm/kmsan/shadow.c::vmalloc_meta()`` checks
+the vmalloc predicate before the module predicate, so
+every module address is classified as vmalloc and routed
+through quarter 2 (shadow) / quarter 3 (origin). The
+``KMSAN_MODULES_SHADOW_START`` and
+``KMSAN_MODULES_ORIGIN_START`` macros alias to their
+``KMSAN_VMALLOC_*_START`` equivalents so any caller that
+does reach the module branch gets a consistent address
+in quarters 2 / 3. Quarter 4 is therefore unreserved
+under UML and available for a future subsystem that
+needs a fixed VA slot (e.g. a dedicated per-CPU shadow
+bank, if one ever materializes).
 
 The generic KMSAN core
 (``mm/kmsan/shadow.c::vmalloc_meta``) computes each address

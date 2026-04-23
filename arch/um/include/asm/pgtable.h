@@ -68,9 +68,23 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
  *                                (1 byte per byte)
  *   quarter 3 [KMSAN_VMALLOC_ORIGIN_START, ...)
  *                              — origin for vmalloc range
- *   quarter 4 [KMSAN_MODULES_SHADOW_START, ...) +
- *             [KMSAN_MODULES_ORIGIN_START, ...)
- *                              — modules shadow + origin
+ *   quarter 4 — unused on UML
+ *
+ * **Modules-vs-vmalloc note.** On UML, MODULES_VADDR ==
+ * VMALLOC_START (see the definitions below); modules live
+ * inside the same VA range as vmalloc. The generic
+ * mm/kmsan/shadow.c::vmalloc_meta() checks the vmalloc
+ * predicate before the module predicate, so every module
+ * address is classified as vmalloc and routed through
+ * quarter 2 (shadow) / quarter 3 (origin). The modules-
+ * shadow and modules-origin 4th-quarter slots x86 uses
+ * therefore have no corresponding consumer on UML; we
+ * alias the `KMSAN_MODULES_*_START` macros to their
+ * VMALLOC equivalents so any caller that does reach the
+ * module branch gets a consistent address in quarters
+ * 2 / 3 rather than an otherwise-unused quarter 4 region.
+ * The 4th quarter is left unreserved — future subsystems
+ * (e.g. a dedicated per-CPU shadow bank) can claim it.
  *
  * The generic KMSAN code (mm/kmsan/shadow.c::vmalloc_meta)
  * computes shadow/origin addresses as VMALLOC_START +
@@ -93,15 +107,11 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 	(VMALLOC_START + KMSAN_VMALLOC_ORIGIN_OFFSET)
 
 /*
- * UML overlaps MODULES_VADDR with VMALLOC_START (below), so
- * modules shadow/origin live in the 4th quarter of the
- * original VMALLOC range. The layout mirrors x86's
- * KMSAN_MODULES_*_START formulas.
+ * Modules overlap vmalloc on UML — alias to vmalloc shadow
+ * and origin. See the "Modules-vs-vmalloc note" above.
  */
-#define KMSAN_MODULES_SHADOW_START	\
-	(VMALLOC_END + KMSAN_VMALLOC_ORIGIN_OFFSET + 1)
-#define KMSAN_MODULES_ORIGIN_START	\
-	(KMSAN_MODULES_SHADOW_START + VMALLOC_QUARTER_SIZE / 2)
+#define KMSAN_MODULES_SHADOW_START	KMSAN_VMALLOC_SHADOW_START
+#define KMSAN_MODULES_ORIGIN_START	KMSAN_VMALLOC_ORIGIN_START
 #endif /* CONFIG_KMSAN */
 
 #define MODULES_VADDR	VMALLOC_START
