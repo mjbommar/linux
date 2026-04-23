@@ -5744,4 +5744,94 @@ rather than re-measuring ad hoc.
 
 ---
 
+## D57 (2026-04-23) — KVM backend uses one VM fd per UML process, not per UML mm_struct
+
+**Status:** Accepted
+**Decided by:** Project owner + agent, in the D-03b design pass
+
+**Context.** UML's backend-contract exposes `mm_attach(struct
+mm_id *)` and `mm_detach(struct mm_id *)` as per-mm hooks — one
+pair of calls per UML guest process (each UML guest process
+owns its own `mm_struct`). The obvious default for the KVM
+backend is to create one KVM VM fd per UML mm, so each UML
+guest process gets its own isolated KVM context.
+
+The D-workstream design memo
+(`Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+design-memo.md`) argues the opposite: **one `struct kvm_um` per
+UML kernel process** (i.e. per outer host process), with one
+`kvm_vm_fd` shared across all UML guest processes, vCPUs created
+per UML CPU, and CR3 switched on `context_switch()` to select
+the active UML mm. That's gVisor's KVM-platform shape and is
+~1 VM's worth of host-side KVM overhead instead of N VMs'.
+
+**Decision.** Adopt the design-memo model: one host-side
+`struct kvm_um` per UML process; one VM fd created eagerly in
+`kvm_init()`; `mm_attach`/`mm_detach` are per-UML-mm
+bookkeeping hooks (refcount the shared VM so `uml_cleanup`
+closes it at the right time, but do not `KVM_CREATE_VM` on
+every `mm_attach`).
+
+**Alternatives considered.**
+
+1. **One VM fd per UML mm (naive mapping).** Rejected. Would
+   create `KVM_CREATE_VM` traffic on every UML process fork
+   — a cost the host kernel doesn't hide (~tens of µs each)
+   and which serializes behind KVM's global lock. Also
+   complicates the D-04 vCPU plan: vCPUs are per UML CPU,
+   not per UML mm; attaching them to per-mm VMs means the
+   vCPU set churns on every context switch rather than on
+   CPU-hotplug / init boundaries.
+
+2. **One VM fd per UML mm but cached/pooled.** Rejected for
+   scaffold. Pooling adds non-trivial state machinery
+   (freelist, max-pool, rebalance on OOM) that earns its
+   keep only if we actually find per-mm VMs are the right
+   shape. We don't; the design memo shows we don't.
+
+3. **Lazy VM creation (on first `mm_map` rather than
+   `kvm_init`).** Considered for D-03b, rejected for now.
+   Eager creation at `kvm_init` time matches the "probe +
+   init commit resources" pattern the arbiter already runs,
+   keeps the `mm_attach` fast-path trivial, and surfaces
+   `KVM_CREATE_VM` failure at a sensible point (boot, not
+   mid-process-fork).
+
+**Implementation implication for D-03b.** A new
+`struct kvm_um` holds `kvm_fd`, `vm_fd`, and a refcount.
+`kvm_init()` opens /dev/kvm and issues `KVM_CREATE_VM`
+exactly once. `mm_attach()` bumps the refcount (ties VM
+lifetime to outstanding UML mms so a late shutdown during
+teardown doesn't close the fd from under a still-attached
+mm). `mm_detach()` decrements. `kvm_shutdown()` closes
+`vm_fd` then `kvm_fd`. We defer per-mm KVM state
+(memslots, CR3 programming) to D-03c + D-04 — those are
+the pieces where "is this per-mm or per-process" matters
+for real, because they touch guest physical memory and
+the active vCPU's page tables respectively.
+
+**Lifetime / revisit triggers.**
+
+- Revisit if D-04's vCPU bring-up finds a reason to
+  isolate KVM VMs per mm (e.g. if a future KVM feature
+  we want only exposes itself per-VM and UML wants it
+  scoped to one guest process). Nothing today suggests
+  this.
+- Revisit if the single-VM model causes resource-limit
+  pressure (unlikely: UML is typically one host process
+  per UML instance; one VM fd per process is well
+  within any reasonable rlimit / cgroup).
+
+**Cross-references.**
+
+- `02-workstreams/D-kvm-backend/design-memo.md` §"Data
+  structures" — original articulation.
+- `02-workstreams/D-kvm-backend/03-page-table-mgmt.md`
+  §"Address-space model" — per-file detail on the CR3-
+  switching that makes a shared VM fd workable.
+- D-02 / D-03a commits (64aa06142e8f, 5b2014682731) —
+  prerequisites: ops-table scaffold + real /dev/kvm probe.
+
+---
+
 ## (Future entries here, as decisions are made)

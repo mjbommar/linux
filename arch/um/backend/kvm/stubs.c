@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KVM backend — stubbed ops pending D-03b..D-06.
+ * KVM backend — stubbed ops pending D-03c..D-06.
  *
  * Workstream D-02 wired these up as pr_warn_once + -EOPNOTSUPP
  * canaries; dispatching any of them panics per the A-01 contract.
  * Every stub below will be replaced as the corresponding op
  * migrates across D-03..D-06:
  *
- *   D-03: mm_attach, mm_detach, mm_map, mm_unmap
- *   D-04: run_userspace, context_switch, thread_create,
- *         thread_start_idle, init_thread_regs
- *   D-05: ipi_send, set_timer, read_clock_ns,
- *         read_persistent_clock_ns
- *   D-06: read_guest_regs, write_guest_regs (KGDB integration)
+ *   D-03c: mm_map, mm_unmap (memslots)
+ *   D-04:  run_userspace, context_switch, thread_create,
+ *          thread_start_idle, init_thread_regs
+ *   D-05:  ipi_send, set_timer, read_clock_ns,
+ *          read_persistent_clock_ns
+ *   D-06:  read_guest_regs, write_guest_regs (KGDB integration)
  *
  * Lifecycle (probe, init, shutdown) moved to lifecycle.c in
- * D-03a — it now does a real /dev/kvm open + KVM_GET_API_VERSION
- * check rather than the D-02 pr_info placeholder.
+ * D-03a. mm_attach / mm_detach moved to mm.c in D-03b.
  */
 #include <linux/err.h>
 #include <linux/printk.h>
@@ -39,17 +38,6 @@
 void kvm_run_userspace(struct uml_pt_regs *regs)
 {
 	pr_warn_once("um: kvm run_userspace not implemented yet (see design-memo.md)\n");
-}
-
-int kvm_mm_attach(struct mm_id *id)
-{
-	pr_warn_once("um: kvm mm_attach not implemented yet (see design-memo.md)\n");
-	return -EOPNOTSUPP;
-}
-
-void kvm_mm_detach(struct mm_id *id)
-{
-	pr_warn_once("um: kvm mm_detach not implemented yet (see design-memo.md)\n");
 }
 
 int kvm_mm_map(struct mm_id *id, unsigned long va, unsigned long len,

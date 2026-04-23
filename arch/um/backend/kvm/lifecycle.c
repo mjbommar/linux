@@ -2,19 +2,22 @@
 /*
  * KVM backend — lifecycle (probe, init, shutdown).
  *
- * Workstream D-03a. Replaces the pr_info placeholders shipped in
- * D-02's stubs.c with a real /dev/kvm probe:
+ * Workstream D-03a: real /dev/kvm probe.
+ * Workstream D-03b: eager KVM_CREATE_VM in init(); per-mm state
+ * lives in mm.c and refcounts the single shared VM per the
+ * decisions-log D57 one-VM-per-UML-process model.
  *
- *   - probe()    opens /dev/kvm via os_open_file() and issues
- *                KVM_GET_API_VERSION to confirm the host kernel
- *                speaks at least the stable ABI version (12,
- *                introduced in 2.6.22 — every kernel we care
- *                about supports it). Failure to open or a
- *                version mismatch returns an error so the
- *                arbiter can fall back per the A-01 contract.
- *   - init()     stashes the kvm fd for the rest of the backend
- *                (D-03b: mm_attach uses it for KVM_CREATE_VM).
- *   - shutdown() closes the kvm fd.
+ *   - probe()    opens /dev/kvm and issues KVM_GET_API_VERSION
+ *                to confirm the host kernel speaks the stable
+ *                ABI version (12, since 2.6.22). On failure,
+ *                returns the errno so the arbiter can fall back
+ *                per the A-01 contract. Does not retain host
+ *                state.
+ *   - init()     reopens /dev/kvm, issues KVM_CREATE_VM, and
+ *                stashes both fds in the module-static kvm_um
+ *                for the rest of the backend to reach via
+ *                kvm_backend_vm_fd() / kvm_backend_fd().
+ *   - shutdown() closes vm_fd then kvm_fd.
  *
  * No USER TU is needed at this layer — os_open_file() and
  * os_ioctl_generic() both run in kernel context on UML and call
@@ -23,9 +26,8 @@
  * link context segfaulted during early-probe; the kernel-side
  * approach here avoids that class of failure entirely.
  *
- * Subsequent D-03 commits build on this: D-03b wires mm_attach
- * to KVM_CREATE_VM using `kvm_fd`; D-03c adds memslot plumbing
- * via KVM_SET_USER_MEMORY_REGION for mm_map/mm_unmap.
+ * Subsequent D-03c lands memslot plumbing (KVM_SET_USER_MEMORY_
+ * REGION for mm_map/mm_unmap); D-04 creates vCPUs on top.
  */
 #include <linux/errno.h>
 #include <linux/kvm.h>
@@ -37,12 +39,16 @@
 #include "kvm_backend.h"
 
 /*
- * The /dev/kvm fd. Held for the lifetime of the UML process once
- * init() succeeds. -1 until probe() opens it. Single global is
- * fine: KVM gives one /dev/kvm handle per process and the backend
- * is per-process (one UML kernel = one host process).
+ * Single per-UML-process KVM context. Lifetime matches
+ * init_backend() → uml_cleanup() / backend shutdown(). The
+ * mm_attach/mm_detach refcount that ties UML mm lifetime into
+ * this struct lives in mm.c; everything kvm_um exposes here is
+ * read-only after init().
  */
-static int kvm_fd = -1;
+static struct kvm_um kvm_ctx = {
+	.kvm_fd = -1,
+	.vm_fd  = -1,
+};
 
 int kvm_probe(void)
 {
@@ -82,39 +88,69 @@ int kvm_probe(void)
 
 int kvm_init(const struct um_backend_args *args)
 {
-	int fd;
+	int kfd, vmfd;
 
 	(void)args;
 
-	if (kvm_fd >= 0) {
-		pr_warn("um: kvm init called twice (fd %d already open)\n",
-			kvm_fd);
+	if (kvm_ctx.kvm_fd >= 0) {
+		pr_warn("um: kvm init called twice (kvm_fd %d already open)\n",
+			kvm_ctx.kvm_fd);
 		return -EBUSY;
 	}
 
-	fd = os_open_file("/dev/kvm", of_rdwr(OPENFLAGS()), 0);
-	if (fd < 0) {
+	kfd = os_open_file("/dev/kvm", of_rdwr(OPENFLAGS()), 0);
+	if (kfd < 0) {
 		pr_err("um: kvm init: /dev/kvm reopen failed (%d) — probe succeeded?\n",
-		       fd);
-		return fd;
+		       kfd);
+		return kfd;
 	}
 
-	kvm_fd = fd;
-	pr_info("um: kvm init: /dev/kvm fd %d acquired; D-03b memslots pending\n",
-		kvm_fd);
+	/*
+	 * KVM_CREATE_VM with machine-type 0 = default (x86_64 long-
+	 * mode VM on Intel/AMD). Per-process, shared across every UML
+	 * guest mm; individual UML address spaces are isolated via
+	 * CR3 switching on context_switch (D-04), not via separate
+	 * VMs. See decisions-log D57.
+	 */
+	vmfd = os_ioctl_generic(kfd, KVM_CREATE_VM, 0);
+	if (vmfd < 0) {
+		pr_err("um: kvm init: KVM_CREATE_VM failed (%d)\n", vmfd);
+		os_close_file(kfd);
+		return vmfd;
+	}
+
+	kvm_ctx.kvm_fd = kfd;
+	kvm_ctx.vm_fd  = vmfd;
+	refcount_set(&kvm_ctx.mm_refcount, 0);
+
+	pr_info("um: kvm init: /dev/kvm fd %d, vm fd %d acquired; memslots pending (D-03c)\n",
+		kvm_ctx.kvm_fd, kvm_ctx.vm_fd);
 	return 0;
 }
 
 void kvm_shutdown(void)
 {
-	if (kvm_fd < 0)
-		return;
-
-	os_close_file(kvm_fd);
-	kvm_fd = -1;
+	if (kvm_ctx.vm_fd >= 0) {
+		os_close_file(kvm_ctx.vm_fd);
+		kvm_ctx.vm_fd = -1;
+	}
+	if (kvm_ctx.kvm_fd >= 0) {
+		os_close_file(kvm_ctx.kvm_fd);
+		kvm_ctx.kvm_fd = -1;
+	}
 }
 
 int kvm_backend_fd(void)
 {
-	return kvm_fd;
+	return kvm_ctx.kvm_fd;
+}
+
+int kvm_backend_vm_fd(void)
+{
+	return kvm_ctx.vm_fd;
+}
+
+struct kvm_um *kvm_backend_ctx(void)
+{
+	return &kvm_ctx;
 }

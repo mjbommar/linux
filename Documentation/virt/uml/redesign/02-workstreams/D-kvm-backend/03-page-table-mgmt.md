@@ -1,9 +1,23 @@
 # D-03: Page-table management (host vs guest)
 
-**Status:** planned
+**Status:** in progress — D-03a (probe + fallback) landed
+2026-04-22 in 5b2014682731; D-03b (per-process `struct kvm_um`
++ `KVM_CREATE_VM` wired to `mm_attach`/`mm_detach`) in flight.
+D-03c (memslot plumbing for `mm_map`/`mm_unmap`) is the next
+sub-step, then CR3 programming on `context_switch` lands with
+D-04's vCPU bring-up.
 **Effort:** 6 weeks (largest D task)
-**Dependencies:** D-02
+**Dependencies:** D-02 ✓ (64aa06142e8f), D-03a ✓ (5b2014682731)
 **Blocks:** D-06
+
+## Per-process VM fd shape (see decisions-log D57)
+
+One `kvm_vm_fd` per UML kernel process, not per UML mm, per
+the D-workstream design memo. `mm_attach`/`mm_detach` are
+per-UML-mm bookkeeping hooks that refcount the shared VM;
+actual `KVM_CREATE_VM` happens once in `kvm_init()`. Per-mm
+isolation comes from CR3 switching on `context_switch`
+(D-04), not from separate VMs.
 
 ## Goal
 
