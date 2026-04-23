@@ -431,6 +431,38 @@ This establishes the methodology; per-host entries follow
 in the pending-measurements section below as new targets
 report in.
 
+### 2026-04-23 add-on — D-04b.2b.2 UML-kernel-text execution
+
+With D-05a (real time ops) and D-04b.2b.1 (harness relocation
+to late_initcall) landed, D-04b.2b.2 wires a dual-memslot
+setup: harness slot 0 at guest_phys 0 + UML memory slot 1
+at guest_phys 0x10000000 → host_va uml_physmem. A naked
+`hlt`-only function `kvm_harness_hlt_target` lives in UML
+kernel text; the harness sets RIP to its translated
+guest_VA and runs.
+
+Observed on Skylake-W dev host:
+
+  um: kvm harness: UML slot registered (host_va=60000000
+      size=8000000 gpa_base=10000000); target &hlt=6004170b
+      → guest_va=1004170b
+  um: kvm harness: UML-text KVM_RUN rc=0 exit_reason=5 (HLT)
+      rip=0x1004170b
+
+The guest vCPU:
+  1. walked the kvm-owned pgd from guest_VA 0x1004170b,
+  2. resolved guest_phys = 0x1004170b (identity-mapped),
+  3. the EPT walked slot 1 (gpa_base=0x10000000) and
+     redirected to host_va 0x6004170b — which is UML
+     kernel text,
+  4. executed the `hlt` byte compiled into that function,
+  5. VMEXIT with KVM_EXIT_HLT at the expected RIP.
+
+**End-to-end validation: the backend reads UML's own
+compiled binary through the guest MMU and executes an
+instruction from it.** This closes the D-04b workstream's
+architectural goal.
+
 ### 2026-04-23 add-on — D-04b.2b.alt arbitrary-RIP validation
 
 In addition to the 1000-iter IO-exit timing, the harness
