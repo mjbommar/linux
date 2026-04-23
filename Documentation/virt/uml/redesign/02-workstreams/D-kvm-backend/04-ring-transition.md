@@ -1,9 +1,25 @@
 # D-04: vCPU bring-up + ring transitions (kernel ↔ user)
 
-**Status:** planned (2026-04-23). D-03 mm-ops complete
-(64aa06142e8f → eefc8fc50acc); D-04 is the next workstream
-where the `backend=kvm` scaffold stops pre-console-panicking.
-**Effort:** 4–5 weeks (widest D task with D-03 at ~6 weeks).
+**Status:** D-04a + D-04b.0/.1a/.1b/.1c landed (2026-04-23).
+First KVM-backend VMEXIT measured at **median 22252 cyc on
+Skylake-W** — at-floor with spike 04's Skylake-SP baseline
+(22994 cyc), i.e. the port from standalone spike into the
+backend's binary form adds no measurable overhead. See
+measurements.md for the full table. D-04b.2 (swap handcrafted
+page tables for UML's init_mm.pgd) and D-04c (LSTAR
+trampoline + SYSCALL dispatch) remain.
+
+**Commit trail:**
+  - D-04a  (vCPU + KVM_RUN skeleton)   — 340eaae2bdc9
+  - D-04b.0 (defer memslot)            — 153017d8eeda
+  - D-04b.1a (SREGS helpers)           — 06d1cb4063c2
+  - D-04b.1b (harness wiring)          — ebdfcb5d0fcc
+  - stacktrace walker bound fix        — f68398447394
+  - harness os_info visibility         — d46f5227b845
+  - D-04b.1c (per-iter cycle counts)   — c461e178da68
+
+**Effort:** 4–5 weeks (widest D task with D-03 at ~6 weeks);
+.2 + .c are the remaining pieces.
 **Dependencies:** D-02 ✓ (64aa06142e8f), D-03 ✓
              (eefc8fc50acc).
 **Blocks:** D-05, D-06.
