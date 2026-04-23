@@ -33,7 +33,15 @@
 #define KVM_HARNESS_GDT_OFFSET		0x3000
 #define KVM_HARNESS_CODE_OFFSET		0x4000
 
-#define KVM_HARNESS_GDT_ENTRIES		3
+/*
+ * Six-entry GDT: null, ring-0 code, ring-0 data, unused padding,
+ * ring-3 data, ring-3 code. The padding slot at selector 0x18 is
+ * required so that SYSRETQ-with-STAR[63:48]=0x18 lands CS at
+ * 0x28 (idx 5) and SS at 0x20 (idx 4) — AMD64 SDM §6.1.1. Entries
+ * 4 + 5 are DPL=3 so SYSRETQ's forced RPL=3 doesn't trip #GP on
+ * descriptor-load.
+ */
+#define KVM_HARNESS_GDT_ENTRIES		6
 #define KVM_HARNESS_GDT_LIMIT		(KVM_HARNESS_GDT_ENTRIES * 8 - 1)
 
 /* Control-register bits (CR0/CR4/EFER) for long-mode ring-0. */
@@ -54,17 +62,34 @@
 #define KVM_PTE_PS	(1ULL << 7)	/* 2 MiB page */
 
 /*
- * Minimal flat 64-bit GDT. Three entries: null, ring-0 code
- * (selector 0x08), ring-0 data (selector 0x10). Ring-0 code has
- * L=1 (long mode) + P=1 + S=1 + type=11 (code r/x, accessed);
- * data is L=0 + P=1 + S=1 + type=3 (r/w). Written in-place at
- * `gdt` (which must point at the harness region's GDT_OFFSET).
+ * Flat 64-bit GDT for the harness. Six entries:
+ *
+ *   idx 0 sel 0x00 — null
+ *   idx 1 sel 0x08 — ring-0 code, L=1
+ *   idx 2 sel 0x10 — ring-0 data
+ *   idx 3 sel 0x18 — unused padding (SYSRETQ offset anchor; see
+ *                    AMD64 SDM §6.1.1: STAR[63:48] is the "base"
+ *                    from which SS = base+8, CS = base+16)
+ *   idx 4 sel 0x20 — ring-3 data (DPL=3)
+ *   idx 5 sel 0x28 — ring-3 code, L=1, DPL=3
+ *
+ * The Ring-0 pair is identical to the pre-D-04d 3-entry GDT; the
+ * ring-3 pair is new in Phase III Lift #1b. Descriptor bit
+ * derivation per AMD64 SDM vol 3 §3.4.5:
+ *   ring-3 code = 0x00af_fa_00_000000_ffff (base 0x9a | (DPL3<<5))
+ *   ring-3 data = 0x00cf_f2_00_000000_ffff (base 0x92 | (DPL3<<5))
+ *
+ * Written in-place at `gdt` (must point at the harness region's
+ * GDT_OFFSET).
  */
 void kvm_setup_harness_gdt(u64 *gdt)
 {
 	gdt[0] = 0x0000000000000000ULL;	/* null */
 	gdt[1] = 0x00af9a000000ffffULL;	/* ring-0 code, L=1 */
 	gdt[2] = 0x00cf92000000ffffULL;	/* ring-0 data */
+	gdt[3] = 0x0000000000000000ULL;	/* unused padding */
+	gdt[4] = 0x00cff2000000ffffULL;	/* ring-3 data, DPL=3 */
+	gdt[5] = 0x00affa000000ffffULL;	/* ring-3 code, L=1, DPL=3 */
 }
 
 /*

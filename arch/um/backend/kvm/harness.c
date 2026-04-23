@@ -69,6 +69,17 @@
  */
 #define KVM_HARNESS_CODE_B_OFFSET	0x5000
 #define KVM_HARNESS_LSTAR_OFFSET	0x6000
+/*
+ * Phase III Lift #1b: ring-3 entry via SYSRETQ.
+ *   RING3_CODE_OFFSET — ring-3 page: `out %al, $0xf5; hlt`
+ *                       (port 0xf5 is ring-3-only; KVM_EXIT_IO
+ *                       on 0xf5 proves SYSRETQ landed in CPL=3).
+ *   SYSRETQ_TRAMP_OFFSET — ring-0 trampoline: set RCX, R11, do
+ *                          SYSRETQ. Falls back to HLT if SYSRETQ
+ *                          fails to transfer control.
+ */
+#define KVM_HARNESS_RING3_CODE_OFFSET	0x7000
+#define KVM_HARNESS_SYSRETQ_TRAMP_OFFSET 0x8000
 #define KVM_HARNESS_SLOT		0
 
 /*
@@ -136,6 +147,40 @@ static const u8 kvm_harness_code_b[] = {
 static const u8 kvm_harness_lstar[] = {
 	0xe6, 0xf4,		/* out %al, $0xf4 */
 	0x48, 0x0f, 0x07,	/* sysretq */
+};
+
+/*
+ * Phase III Lift #1b: ring-3 page. The `out` touches port 0xf5
+ * (distinct from the ring-0 tests' 0xf4) — the VMEXIT's port
+ * number is the ring-3-entry proof. IOPL=3 is set in RFLAGS
+ * before SYSRETQ so CPL=3 OUT doesn't #GP.
+ */
+static const u8 kvm_harness_ring3_code[] = {
+	0xe6, 0xf5,		/* out %al, $0xf5 */
+	0xf4,			/* hlt (fallback) */
+};
+
+/*
+ * Phase III Lift #1b: ring-0 SYSRETQ trampoline. Loads RCX with
+ * the ring-3 target RIP, R11 with the ring-3 RFLAGS (bit 1
+ * reserved + IF + IOPL=3 = 0x3202), then executes SYSRETQ. The
+ * CPU loads CS from STAR[63:48]+16 with forced RPL=3, SS from
+ * STAR[63:48]+8 with forced RPL=3, RIP from RCX, RFLAGS from
+ * R11. The trailing HLT is the fallback path if SYSRETQ somehow
+ * fails to transfer control (it shouldn't — misconfiguration
+ * would have surfaced as #GP on the SYSRETQ decode).
+ *
+ * Byte layout (20 bytes total):
+ *   48 c7 c1 00 70 00 00   mov    $0x7000, %rcx
+ *   49 c7 c3 02 32 00 00   mov    $0x3202, %r11
+ *   48 0f 07               sysretq
+ *   f4                     hlt
+ */
+static const u8 kvm_harness_sysretq_tramp[] = {
+	0x48, 0xc7, 0xc1, 0x00, 0x70, 0x00, 0x00,	/* mov $0x7000, %rcx */
+	0x49, 0xc7, 0xc3, 0x02, 0x32, 0x00, 0x00,	/* mov $0x3202, %r11 */
+	0x48, 0x0f, 0x07,				/* sysretq */
+	0xf4,						/* hlt */
 };
 
 static const char *kvm_harness_exit_name(u32 r)
@@ -248,6 +293,16 @@ int kvm_run_harness(void)
 	       kvm_harness_code_b, sizeof(kvm_harness_code_b));
 	memcpy(mem + KVM_HARNESS_LSTAR_OFFSET,
 	       kvm_harness_lstar, sizeof(kvm_harness_lstar));
+
+	/*
+	 * Phase III Lift #1b: ring-3 sled + ring-0 SYSRETQ tramp.
+	 * Unreferenced until the ring-3 test routine after the D-04c
+	 * LSTAR loop.
+	 */
+	memcpy(mem + KVM_HARNESS_RING3_CODE_OFFSET,
+	       kvm_harness_ring3_code, sizeof(kvm_harness_ring3_code));
+	memcpy(mem + KVM_HARNESS_SYSRETQ_TRAMP_OFFSET,
+	       kvm_harness_sysretq_tramp, sizeof(kvm_harness_sysretq_tramp));
 
 	region = (struct kvm_userspace_memory_region){
 		.slot			= KVM_HARNESS_SLOT,
@@ -578,6 +633,124 @@ int kvm_run_harness(void)
 
 d04c_done:
 	/*
+	 * Phase III Lift #1b: SYSRETQ into ring-3, execute `out %al,
+	 * $0xf5; hlt`, observe KVM_EXIT_IO on port 0xf5. Port 0xf5
+	 * is deliberately distinct from the 0xf4 the ring-0 tests
+	 * use — a 0xf5 exit is the unambiguous signal that SYSRETQ
+	 * landed CPL=3 and the ring-3 code executed. Anything else
+	 * (exit on 0xf4, KVM_EXIT_SHUTDOWN, KVM_EXIT_FAIL_ENTRY)
+	 * indicates the SYSRETQ transition failed or never happened.
+	 *
+	 * Sequence:
+	 *   1. KVM_SET_MSRS overrides STAR[63:48] to 0x18, so
+	 *      SYSRETQ loads CS=0x28|3=0x2b (ring-3 code; GDT idx 5)
+	 *      and SS=0x20|3=0x23 (ring-3 data; GDT idx 4). The
+	 *      kernel half STAR[47:32]=0x0008 is preserved from the
+	 *      D-04c program (unused here since we never SYSCALL
+	 *      out of ring 3).
+	 *   2. KVM_SET_REGS sets RIP = SYSRETQ_TRAMP_OFFSET so the
+	 *      ring-0 vCPU starts at the tramp. The tramp sets
+	 *      RCX/R11 and issues SYSRETQ itself — we don't hand-
+	 *      fill RCX/R11 from the host because SYSRETQ's "load
+	 *      RFLAGS from R11" semantics require R11's bit-1
+	 *      reserved to be 1, and letting the guest tramp set
+	 *      it is closer to how a real kernel-to-userspace
+	 *      return is coded.
+	 *   3. KVM_RUN → ring-0 tramp → SYSRETQ → ring-3 code →
+	 *      out %al, $0xf5 → KVM_EXIT_IO port=0xf5.
+	 */
+	{
+		struct kvm_userspace_memory_region region;
+		struct {
+			struct kvm_msrs info;
+			struct kvm_msr_entry entries[1];
+		} star_override = {
+			.info = { .nmsrs = 1 },
+			.entries = {
+				{
+					.index = 0xc0000081,	/* MSR_STAR */
+					/*
+					 * Ring-3 SYSRET base = 0x18 (selector
+					 * anchor); kernel CS stays 0x0008.
+					 */
+					.data  = ((u64)0x0018 << 48) |
+						 ((u64)0x0008 << 32),
+				},
+			},
+		};
+
+		/*
+		 * Re-register slot 0 to force KVM to re-read the
+		 * harness-area bytes. The GDT was rewritten in the
+		 * 6-entry layout above (kvm_setup_harness_gdt) but the
+		 * vCPU cached the 3-entry descriptor via KVM_SET_SREGS
+		 * earlier. Re-loading SREGS with the updated GDT limit
+		 * is enough; no slot re-register needed (shared host
+		 * mapping).
+		 */
+		(void)region;
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1b KVM_GET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+		/*
+		 * GDT limit now covers all 6 entries (48 bytes - 1 = 47).
+		 * Must match sregs.c::KVM_HARNESS_GDT_LIMIT; duplicated
+		 * here rather than via a shared header for the same
+		 * reason other GDT/paging constants are duplicated — the
+		 * harness's layout + offsets move together with sregs.c's.
+		 */
+		sregs.gdt.limit = 47;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+				      (unsigned long)&sregs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1b KVM_SET_SREGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS,
+				      (unsigned long)&star_override);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1b KVM_SET_MSRS (STAR override) failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		regs = (struct kvm_regs){
+			.rip	= KVM_HARNESS_SYSRETQ_TRAMP_OFFSET,
+			.rflags	= 0x2,
+		};
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				      (unsigned long)&regs);
+		if (rc < 0) {
+			os_info("um: kvm harness: 1b KVM_SET_REGS failed (%d)\n",
+				rc);
+			goto phase3_1b_done;
+		}
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		os_info("um: kvm harness: 1b KVM_RUN rc=%d exit_reason=%u (%s)\n",
+			rc, run->exit_reason,
+			kvm_harness_exit_name(run->exit_reason));
+
+		if (rc >= 0 && run->exit_reason == KVM_EXIT_IO) {
+			unsigned int port = run->io.port;
+
+			if (port == 0xf5) {
+				os_info("um: kvm harness: 1b PASS — ring-3 entry verified (port=0xf5 IO exit)\n");
+			} else {
+				os_info("um: kvm harness: 1b UNEXPECTED port=0x%x (expected 0xf5; 0xf4 would mean we stayed in ring-0)\n",
+					port);
+			}
+		}
+	}
+phase3_1b_done:
+	/*
 	 * The harness is one-shot by design. Report the final exit
 	 * state (via os_info so it bypasses the unregistered printk
 	 * buffer) and panic to stop the UML process — this is a
@@ -586,7 +759,7 @@ d04c_done:
 	os_info("um: kvm harness: final KVM_RUN rc=%d, exit_reason=%u (%s)\n",
 		rc, run->exit_reason,
 		kvm_harness_exit_name(run->exit_reason));
-	panic("um: kvm harness: done — D-04b + D-04c architectural validation complete");
+	panic("um: kvm harness: done — D-04b + D-04c + Phase III Lift #1b architectural validation complete");
 }
 
 /*
