@@ -172,6 +172,57 @@ After those, D-04b is structurally complete: SREGS +
 CR3 + GDT + Policy A memslot + real UML-text
 execution, no LSTAR bypass. D-04c adds LSTAR.
 
+### D-04b.2b.1 attempt 2026-04-23 — reverted, deeper
+### than expected
+
+First try at the late_initcall relocation uncovered a
+chain of pre-initcall stub panics and hangs. Reverted
+the code change; capturing the finding here so the
+next attempt starts with the full list:
+
+  1. `set_timer` — called via clockevents_register_
+     device during time_init(). Returning -EOPNOTSUPP
+     trips a caller panic. Flipping to `return 0` under
+     HARNESS gets past this but doesn't help (2).
+  2. `read_clock_ns` — HOT, called on every clock read.
+     Currently returns 0 unconditionally. No panic, but
+     timekeeping sees time as frozen; kernel hangs
+     waiting for jiffies to advance BEFORE late_initcall
+     fires.
+  3. `run_userspace` — panics "SREGS/CR3 setup pending"
+     when the scheduler dispatches to user mode.
+     Flipping to noop under HARNESS is simple but
+     doesn't help because (2) blocks first.
+
+The upshot: to make the harness fire from a late_initcall,
+the boot path needs real timekeeping — which is D-05
+territory (host-clock-backed read_clock_ns + KVM-side
+clockevent), not a one-line HARNESS ifdef.
+
+**Revised D-04b.2b sub-plan:**
+
+  - D-04b.2b.1 (blocked on D-05): relocate harness to
+    late_initcall + implement real read_clock_ns /
+    set_timer enough for jiffies to advance. Lands once
+    D-05's clock work does.
+
+  - D-04b.2b.alt (unblocked today): keep harness in
+    kvm_init(). Expand the 2 MiB harness slot (or
+    allocate a second, say 4 MiB). Place an additional
+    HLT target at an offset ≥ 2 MiB inside the
+    expanded slot. Point RIP at it. Expect
+    KVM_EXIT_HLT. This proves the vCPU can execute
+    arbitrary RIP positions without needing UML's
+    actual kernel text to be reachable — which is the
+    architectural validation D-04b.2b wants. Concrete
+    UML-text execution still waits for D-05, but the
+    hardware-paging + CR3 verification lands.
+
+Either path reaches the same architectural conclusion
+(vCPU executes arbitrary RIP via the kvm-owned
+pgd). The alt path is preferred today because it
+doesn't stall on D-05 prerequisites.
+
 ## Open questions
 
   1. **Page-table entry layout.** PML4/PDPT/PD entries are
