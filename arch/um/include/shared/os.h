@@ -180,6 +180,7 @@ extern int os_sendmsg_fds(int fd, const void *buf, unsigned int len,
 			  const int *fds, unsigned int fds_num);
 int os_poll(unsigned int n, const int *fds);
 void *os_mmap_rw_shared(int fd, size_t size);
+void *os_mmap_rw_anon_shared(size_t size);
 void *os_mremap_rw_shared(void *old_addr, size_t old_size, size_t new_size);
 
 /* start_up.c */

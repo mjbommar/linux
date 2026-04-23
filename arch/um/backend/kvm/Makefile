@@ -15,4 +15,6 @@ obj-y += sregs.o
 obj-y += thread.o
 obj-y += stubs.o
 
+obj-$(CONFIG_UM_BACKEND_KVM_HARNESS) += harness.o
+
 include $(srctree)/arch/um/scripts/Makefile.rules

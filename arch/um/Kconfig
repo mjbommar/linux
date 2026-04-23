@@ -468,6 +468,26 @@ config UM_BACKEND_CONTRACT_TEST
 
 	  Say N for production builds; Y or M to validate a backend.
 
+config UM_BACKEND_KVM_HARNESS
+	bool "KVM backend long-mode harness (diagnostic, D-04b.1b)"
+	depends on UM_BACKEND_KVM
+	default n
+	help
+	  Run an in-init diagnostic that registers a hand-crafted 2 MiB
+	  KVM memslot with a minimal GDT, identity page tables, and an
+	  `out %al,$0xf4 ; hlt` code sled, then invokes KVM_RUN once
+	  and panics with the observed kvm_run->exit_reason. Ports the
+	  validated D-workstream spike 04 bring-up into the backend's
+	  binary form so we can verify the SREGS / CR0 / CR4 / EFER
+	  setup code path works BEFORE the full UML-CR3 integration
+	  lands with D-04b.2.
+
+	  Enabling this replaces normal UML boot behaviour with a one-
+	  shot harness; do NOT enable it outside bring-up work. Say N.
+
+	  See Documentation/virt/uml/redesign/02-workstreams/
+	  D-kvm-backend/04b-long-mode-sregs.md for the design note.
+
 #
 # Fuzzer-oriented hooks (workstream C-09).
 #

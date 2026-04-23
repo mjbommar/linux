@@ -764,6 +764,25 @@ void *os_mmap_rw_shared(int fd, size_t size)
 	return res;
 }
 
+/*
+ * MAP_ANONYMOUS | MAP_SHARED allocation. Same shape as
+ * os_mmap_rw_shared() but fd-less — the kernel backs the mapping
+ * with a fresh anonymous shmem file visible only to this process.
+ * Needed by the KVM backend's D-04b.1b harness, which wants a
+ * host-VA region that KVM can back memslots with (MAP_PRIVATE
+ * would COW on guest writes and diverge from the host copy).
+ */
+void *os_mmap_rw_anon_shared(size_t size)
+{
+	void *res = mmap(NULL, size, PROT_READ | PROT_WRITE,
+			 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+	if (res == MAP_FAILED)
+		return NULL;
+
+	return res;
+}
+
 void *os_mremap_rw_shared(void *old_addr, size_t old_size, size_t new_size)
 {
 	void *res;

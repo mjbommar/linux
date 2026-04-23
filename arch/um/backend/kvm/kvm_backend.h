@@ -71,4 +71,14 @@ void kvm_setup_harness_gdt(u64 *gdt);
 void kvm_setup_harness_paging(u64 *pml4, u64 *pdpt, u64 *pd);
 void kvm_setup_harness_sregs(struct kvm_sregs *sregs);
 
+/*
+ * D-04b.1b diagnostic harness (arch/um/backend/kvm/harness.c).
+ * Only compiled when CONFIG_UM_BACKEND_KVM_HARNESS=y. Panics
+ * with KVM_RUN exit_reason — never returns. kvm_init() invokes
+ * it after vCPU creation on harness builds.
+ */
+#ifdef CONFIG_UM_BACKEND_KVM_HARNESS
+int kvm_run_harness(void);
+#endif
+
 #endif /* __ARCH_UM_BACKEND_KVM_H */

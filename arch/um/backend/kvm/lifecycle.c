@@ -195,9 +195,22 @@ int kvm_init(const struct um_backend_args *args)
 	kvm_ctx.vm_fd  = vmfd;
 	refcount_set(&kvm_ctx.mm_refcount, 0);
 
-	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu memslot [0,%lx)\n",
+	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu (memslot deferred to first KVM_RUN)\n",
 		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
-		kvm_ctx.run_size, task_size);
+		kvm_ctx.run_size);
+
+#ifdef CONFIG_UM_BACKEND_KVM_HARNESS
+	/*
+	 * Diagnostic build. kvm_run_harness() is a one-shot that
+	 * replaces normal UML boot; it registers its own memslot
+	 * (slot 0) directly and panics with the KVM_RUN exit
+	 * reason. Never returns.
+	 */
+	pr_warn("um: kvm init: CONFIG_UM_BACKEND_KVM_HARNESS=y, running diagnostic harness instead of normal boot\n");
+	kvm_run_harness();
+	panic("um: kvm harness returned — should not happen");
+#endif
+
 	return 0;
 }
 
