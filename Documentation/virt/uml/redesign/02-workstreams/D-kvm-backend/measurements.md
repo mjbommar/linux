@@ -175,6 +175,70 @@ when running in the actual x86_64 long mode UML uses.
   calibrated slightly: naive backend delivers 2-10 µs per
   syscall depending on silicon, still 2-10× over seccomp.
 
+## 2026-04-23 — Spike 05: GHA nested-KVM probe
+
+Methodology: `.github/workflows/kvm-probe.yml` — runs
+spike 01 + spike 04 on GitHub Actions `ubuntu-latest` and
+`ubuntu-24.04` runners with sudo fallback; records
+per-host inventory + measured cycles. Workflow triggers
+on spike edits or manual dispatch.
+
+**Headline result: nested KVM works on standard GHA
+runners.** Both images, AMD EPYC 7763 silicon under Hyper-V,
+`/dev/kvm` present (root-writable, runner user isn't in
+the kvm group so sudo is required but the dev-box pattern
+of group-add isn't available; the workflow just uses sudo).
+
+| Runner | Host CPU | MHz | Virt | Spike 01 cyc | Spike 04 cyc | Δ |
+|---|---|---:|---|---:|---:|---:|
+| ubuntu-latest (24.04.2) | AMD EPYC 7763 (Zen 3 Milan) | 3207 | Hyper-V | 19723 | 20237 | +514 |
+| ubuntu-24.04 | AMD EPYC 7763 (Zen 3 Milan) | 2871 | Hyper-V | 16640 | 22282 | +5642 |
+
+Both spikes ran to completion with 1000 iterations. Spike
+01 used sudo after the non-sudo attempt got EPERM; spike 04
+same.
+
+**Observations:**
+
+- **ubuntu-latest currently resolves to ubuntu-24.04.2** per
+  uname output, but the two runner labels produced
+  different cycle counts anyway. Probably they landed on
+  different hypervisor hosts (different customers / load
+  profiles in the Azure pool).
+- **Nested-KVM overhead is bounded.** Spike 01 median on
+  bare s5/s6/s7 Zen 4 (desktop): 12236-12426 cyc. On nested
+  EPYC Zen 3: 16640-19723 cyc. That's a +30-60% overhead
+  for running under Hyper-V — meaningful but not
+  prohibitive for CI measurements.
+- **Spike 04's Δ on GHA (ubuntu-24.04) is +5642 cyc.** Much
+  higher than any bare host we measured (where Zen 4 was
+  +900). Under nested virt, IO-exit VMEXITs take an extra
+  round-trip through Hyper-V L0. Expected shape; captures
+  the nested-virt performance cost cleanly.
+- **EPYC 7763 is the Microsoft Azure Dv5-class silicon.**
+  64-core Milan; runners get a small slice. That we see
+  consistent 1000/1000 measurable iterations means the
+  runner's slice is stable enough to measure.
+
+**What this settles for the D-workstream CI plan:**
+
+1. ✅ **D-workstream CI can use the standard GHA runner
+   pool.** No need for self-hosted bare-metal runners.
+   Sudo is required (runner user → /dev/kvm group
+   membership) but `sudo` works without password on GHA.
+2. ✅ **Spike + smoke jobs for the KVM backend are viable
+   as per-commit CI gates.** Build time + spike run time
+   fit comfortably inside a 10-minute job.
+3. ⚠️ **Performance numbers from CI runs are nested-
+   virt-inflated.** Treat them as a regression canary
+   (drift detection), not as absolute performance claims.
+   The bare-metal measurements above remain the
+   authoritative floor for the design memo.
+4. 📌 **Follow-on**: once the real um_backend_kvm ships,
+   extend kvm-probe.yml to also boot a minimal UML-on-KVM
+   binary and exercise a real syscall. That lands with
+   D-02..D-06 implementation.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
@@ -188,11 +252,11 @@ the measurement runs; removing its placeholder here.
   virt, full generation gap from the Intel/AMD data points
   above. Would tell us whether the ARM KVM exit path has a
   different cost profile.
-- **GHA ubuntu-latest runner (nested KVM)** — baseline for
-  "can D's CI story use standard runners?" Probably not
-  (runners are Hyper-V guests, nested typically off), but
-  the measurement is worth capturing so the failure mode
-  is diffable not re-debated.
+- ~~**GHA ubuntu-latest runner (nested KVM)**~~ — done
+  2026-04-23; the answer turned out to be "yes, nested
+  KVM works on standard runners" (see the Spike 05
+  section above). Retained placeholder moved to
+  "Completed" above.
 - **Spike 04: full long-mode guest + LSTAR trap.** Same
   hosts as Spike 01/02. Adds guest-side mode setup +
   SYSCALL-induced VMEXIT; expected to add ~0 cycles vs
