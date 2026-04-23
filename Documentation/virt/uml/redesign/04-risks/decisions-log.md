@@ -5920,4 +5920,160 @@ build against this.
 
 ---
 
+## D59 (2026-04-23) — `using_seccomp` Layer-1 leakage is finished A-workstream work, not a separate fix
+
+**Status:** Accepted (catalog + defer; no mechanical
+Coccinelle sweep this pass).
+
+**Context.** Review finding #4 (2026-04-23) flagged that the
+`using_seccomp` boot-probe flag still threads through the
+shared host-abstraction (Layer 1) code in
+`arch/um/os-Linux/` at 12 reader sites after the
+A-workstream extraction landed. The flag is authoritatively
+set by `os_early_checks()` in
+`arch/um/os-Linux/start_up.c` and consumed by the arbiter
+`init_backend()` in `arch/um/kernel/backend.c`; after init
+both `using_seccomp` and `um_backend->kind ==
+UM_BACKEND_KIND_SECCOMP` are kept in sync, so the twelve
+reader sites in os-Linux/ run against a valid (but
+duplicate) source of truth. The extern declaration also
+leaks into the public
+`arch/um/include/shared/skas/skas.h`.
+
+**Inventory (12 reader sites + 1 definition + 1 extern).**
+
+| File | Line | Role |
+|------|------|------|
+| `arch/um/os-Linux/skas/process.c` | 277 | `.seccomp = using_seccomp,` in stub `init_data` (value sent to the stub child — needs a raw int, not a helper wrapper) |
+| `arch/um/os-Linux/skas/process.c` | 282 | `if (using_seccomp)` — chooses signal-handler/restorer trampoline offsets in `init_data` |
+| `arch/um/os-Linux/skas/process.c` | 418 | definition `int using_seccomp;` |
+| `arch/um/os-Linux/skas/process.c` | 471 | `if (using_seccomp) proc_data->futex = FUTEX_IN_CHILD;` — futex-child coordination setup |
+| `arch/um/os-Linux/skas/process.c` | 484 | `if (using_seccomp) { wait_stub_done_seccomp(...) } else { waitpid+ptrace }` — stub-child wait semantics |
+| `arch/um/os-Linux/skas/process.c` | 522 | `if (using_seccomp) mm_id->sock = sockpair[1]; else close(sockpair[1])` — per-mm socketpair retention |
+| `arch/um/os-Linux/skas/mem.c` | 47 | `if (using_seccomp)` in `syscall_stub_dump_error()` — prints FD map (seccomp-only state) |
+| `arch/um/os-Linux/skas/mem.c` | 96 | `if (using_seccomp) { wait_stub_done_seccomp } else { ptrace SETREGS+CONT+wait_stub_done }` in `do_syscall_stub()` |
+| `arch/um/os-Linux/skas/mem.c` | 131 | `if (using_seccomp) mm_idp->syscall_fd_num = 0` — reset seccomp-only FD map |
+| `arch/um/os-Linux/skas/mem.c` | 201 | `if (!using_seccomp) return fd` in `get_stub_fd()` — whole function is seccomp-specific |
+| `arch/um/os-Linux/skas/mem.c` | 246 | `if (using_seccomp)` in `um_stub_mm_map()` — FD-map indirection for SCM_RIGHTS fd |
+| `arch/um/os-Linux/signal.c` | 252 | `if (using_seccomp) sigaddset(&action.sa_mask, SIGCHLD)` — mask SIGCHLD in other handlers |
+| `arch/um/os-Linux/process.c` | 401 | `if (using_seccomp) set_handler(SIGCHLD)` — register child-reaper IRQ only in seccomp mode |
+| `arch/um/include/shared/skas/skas.h` | 11 | `extern int using_seccomp;` — publicly exposed in the cross-cutting skas header |
+
+**A-01.7 disposition.** The A-workstream coverage table
+(`02-workstreams/A-backend-abstraction/notes/07-coverage.md`
+items #1, #2, #3, #4, #12, #26, #27, #28) already marked
+these sites as REMOVED — internal to per-backend `mm_attach`
+/ `run_userspace` / `mm_map` implementations under
+`arch/um/backend/{ptrace,seccomp}/`. What landed was the
+**extraction of the trap-loop body** (A-02.HOT-1 + A-03.S1.3
+→ `trap_user.c` per-backend) and the thin wrapper
+`mm_attach/mm_detach` in `arch/um/backend/{ptrace,seccomp}/
+mm.c`. What did **not** land was:
+
+- `start_userspace()` body's per-mode divergence (sites 277,
+  282, 471, 484, 522) splitting into `seccomp_mm_attach()`
+  and `ptrace_mm_attach()` private helpers.
+- `do_syscall_stub()` + `get_stub_fd()` + `um_stub_mm_map()`
+  FD-map logic (sites 96, 201, 246) splitting into
+  `seccomp_syscall_stub()` + `ptrace_syscall_stub()` private
+  helpers.
+- `syscall_stub_dump_error()` (site 47) and the
+  `syscall_fd_num` reset (site 131) moving behind the
+  seccomp backend's private debug helper.
+- `init_new_thread_signals()` (site 401) and `set_handler()`
+  (site 252) gaining per-backend signal-setup ops.
+
+**Decision.** Catalog the residue and treat it as **finished
+A-workstream Phase 2 work**, not a new line item. Do **not**
+land a Coccinelle rename-sweep this pass. Reasoning:
+
+1. A mechanical rename (e.g. replace every `using_seccomp`
+   read with `um_backend->kind == UM_BACKEND_KIND_SECCOMP`)
+   doesn't remove any branch — it just relabels the
+   discriminator. The true Layer-1 leak is the **shape**
+   of the shared functions (each one has a seccomp-vs-ptrace
+   fork inside its body), not the **name** of the
+   discriminator.
+2. Real extraction (moving the bodies into per-backend
+   files) is non-trivial. `start_userspace()` in particular
+   threads a clone() tramp-data struct across both modes
+   and intermixes socketpair setup with wait semantics;
+   splitting it cleanly is at least a multi-commit
+   patchset, not a sed-able rewrite.
+3. The v1 ceiling concerns validated by Finding #1 (SIGALRM
+   reentrancy during fork parent non-kernel-exec windows,
+   fragile `wait_stub_done` semantics) apply directly to
+   any refactor of these paths. Getting the split wrong
+   crashes the UML kernel in hard-to-diagnose ways. The
+   A-workstream Phase 2 commits need to be small, one-call-
+   site-at-a-time, and individually boot-tested.
+4. The current duplicate-source-of-truth
+   (`using_seccomp` flag vs `um_backend->kind`) is
+   benign in practice: the arbiter explicitly keeps them
+   in sync, and the arbiter is the only writer once init
+   completes. "Benign redundancy" is a reasonable parking
+   spot while the bigger extraction is planned.
+
+**Alternatives considered.**
+
+1. **Coccinelle-style rename to `backend_is_seccomp()`
+   helper.** Rejected for this pass: produces 12-site churn
+   with no reduction in branch count, and risks destabilizing
+   boot during refactor of `start_userspace()`-adjacent code
+   right before the D-workstream lands. Keep in toolbox for
+   a later "rename-only" commit if it makes the Phase 2
+   diffs cleaner.
+2. **Full per-backend extraction (Phase 2) now.** Rejected
+   for this pass: scope creep. Each of the four target
+   helpers (`start_userspace`, `do_syscall_stub`,
+   `syscall_stub_dump_error`, `init_new_thread_signals`)
+   needs its own design pass, test matrix, and boot-gate
+   verification. Tracked as a new workstream item, not a
+   single commit.
+3. **Move the `extern int using_seccomp;` declaration out
+   of the public skas.h header into os-Linux/internal.h.**
+   A real cleanup — declaration is USER-TU-internal and
+   leaking it into the cross-cutting header is an A-01.7
+   item #3 residue. Candidate for a small follow-up commit
+   (separable from the per-backend extraction); hold for
+   when the skas.h consumers are reviewed in Phase 2.
+
+**Lifetime.** The 12-site residue is expected to stay until
+A-workstream Phase 2 lands. No behavioral consequences for
+v1 ceiling; the redundancy is visible but the code path is
+correct.
+
+**Revisit triggers.**
+
+- A-workstream Phase 2 picks up (likely post-D-05/D-06 when
+  KVM ring-3 entry lands and the KVM backend gets its own
+  `run_userspace`/`mm_attach` body — at that point the
+  three-way ops table makes the per-backend split more
+  valuable than it was with just two).
+- If a bug ever turns on `using_seccomp` diverging from
+  `um_backend->kind` (today impossible by construction;
+  a refactor could accidentally break the invariant). If
+  so, converge on `um_backend->kind` as the single source
+  and make `using_seccomp` a `#define`.
+
+**Cross-references.**
+
+- `02-workstreams/A-backend-abstraction/notes/07-coverage.md`
+  items #1 (start_up.c:477,488), #2 (skas/process.c:429),
+  #3 (skas/skas.h:11), #4 (start_userspace def), #12
+  (clone() pattern), #26 (syscall_stub_flush), #27
+  (syscall_stub_alloc), #28 (syscall_stub_dump_error) —
+  the A-01.7 disposition column said REMOVED for all of
+  these; this entry records that they are REMOVED in
+  intent only, not yet in code.
+- `arch/um/kernel/backend.c` (the arbiter, lines 18–20)
+  explicitly documents the
+  `using_seccomp` ↔ `um_backend->kind` sync invariant.
+- Finding #1 (2026-04-23) + v1 ceiling in
+  `Documentation/virt/uml/snapshot.rst` — directly
+  informs the "extraction must be small and boot-tested"
+  caution in this entry.
+
+---
+
 ## (Future entries here, as decisions are made)

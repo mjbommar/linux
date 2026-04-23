@@ -5,6 +5,21 @@ Owner: claude-code session
 Inputs: A-01.1 (inventory, 87 sites), A-01.2 (18 ops), A-01.4/.5/.6
 (per-backend sketches).
 
+**2026-04-23 addendum (review finding #4, decisions-log D59).**
+Items below marked REMOVED for the twelve `using_seccomp` reader
+sites in `arch/um/os-Linux/` are REMOVED **in intent only**: the
+shared host-abstraction (Layer 1) code still contains per-mode
+branches guarded by the flag. The A-workstream landed the
+trap-loop and mm-op extractions but left the
+`start_userspace()` body, `do_syscall_stub()` FD-map branch,
+`syscall_stub_dump_error()` printout, and signal-handler
+registration sites as residue. D59 catalogs all 12 sites, the
+definition (`skas/process.c:418`), and the leaked extern
+(`skas/skas.h:11`), and defers the real extraction to
+A-workstream Phase 2. Sites specifically affected below: **#1,
+#2, #3, #4, #12, #26, #27, #28**. See D59 for the full disposition
+rationale.
+
 ## Validation criterion (from `01-ops-table.md`)
 
 > All ~50 existing backend-relevant call sites in `arch/um/` map
