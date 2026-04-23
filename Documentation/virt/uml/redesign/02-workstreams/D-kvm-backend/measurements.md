@@ -367,6 +367,53 @@ floor for modern silicon. Still 20× seccomp; 10× away
 from the ~100 ns vision line (gap closable by D-04 gadget
 but not by any SYSCALL-side work).
 
+## 2026-04-23 — First KVM-backend round-trip (D-04b.1b harness)
+
+First KVM_RUN invocation from the actual backend binary, not
+a standalone spike. The D-04b.1b diagnostic harness
+(`arch/um/backend/kvm/harness.c`, landed in
+commit ebdfcb5d0fcc ("um: backend: D-04b.1b KVM backend long-mode harness wiring (workstream D-04)"))
+allocates a 2 MiB anonymous-shared region, lays down the
+spike-04-matching GDT / identity page tables / `out %al,
+$0xf4; hlt` code sled, registers the region as KVM
+memslot 0, programs vcpu0 SREGS + REGS, and invokes KVM_RUN.
+
+**Result, dev host (Zen 4 @ 5.0 GHz boost, ~2.0 GHz sustained):**
+
+```
+um: kvm harness: KVM_RUN rc=0, exit_reason=2 (IO)
+```
+
+`KVM_EXIT_IO` (value 2) — exactly what spike 04 validated
+as the first exit on `out %al, $0xf4`. Confirms end-to-end
+that the backend's ported SREGS / CR0 / CR3 / CR4 / EFER /
+GDT setup code is correct, not just the standalone spike's.
+
+**No timing measurement yet.** The harness is a single-shot
+"does it work" gate, not instrumented for per-iteration
+cycle counts. D-04b.2 (swap handcrafted page tables for
+UML's own init_mm.pgd) and D-04c (LSTAR trampoline +
+SYSCALL dispatch) will ship the instrumented run loop that
+reports cycle counts against the spike 04 floor.
+
+**Mechanical prerequisites that landed to make this visible:**
+
+  - `commit f68398447394 ("um: kernel: stacktrace — bound dump_trace walker to the task's actual stack")` — fix the
+    pre-console-panic silent-segfault so the harness's
+    panic message could actually reach the operator.
+  - `commit d46f5227b845 ("um: backend: kvm harness — write exit reason to stderr via os_info before panic (workstream D-04)")` — route the
+    exit_reason line through os_info() (direct stderr)
+    rather than pr_info() (buffered printk) since consoles
+    aren't registered at harness-invocation time.
+
+**Cross-references:**
+
+- `04b-long-mode-sregs.md` — design note that prescribed
+  the handcrafted-trampoline first, UML-CR3 second sub-
+  steps.
+- spike 04 measurements above — what this harness
+  validates the port against.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
