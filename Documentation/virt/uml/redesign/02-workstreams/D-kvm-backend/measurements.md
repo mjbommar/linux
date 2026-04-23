@@ -679,6 +679,61 @@ um: kvm harness: 1c PASS — ring-3 → LSTAR → ring-3
   arch/um/kernel/trap.c fault path) is architecturally
   unblocked.
 
+## 2026-04-23 — Phase III Lift #1d: KVM_EXIT_MMIO fault-decode
+
+Methodology: extend the harness with a ring-3 fault sled
+that loads `0x30000000` (unmapped gpa, past slot 1's UML
+memory range but inside the 1 GiB identity-mapped guest
+VA) into RAX and dereferences it. Guest-CR3 walk
+succeeds; EPT layer fails to back the gpa; KVM surfaces
+the fault as KVM_EXIT_MMIO with
+`run->mmio.phys_addr == 0x30000000`. Harness classifies
+the gpa against slot 0 / slot 1 / unmapped regions and
+computes the UML kernel VA for slot-1 hits.
+
+Result (Skylake-W dev host):
+
+```
+um: kvm harness: 1d KVM_RUN rc=0 exit_reason=6 (MMIO)
+um: kvm harness: 1d mmio gpa=0x30000000 len=8 is_write=0
+    region=unmapped uml_va=0x0
+um: kvm harness: 1d PASS — fault decode recovered injected
+    gpa (0x30000000, unmapped region)
+```
+
+**Observations:**
+
+- `run->mmio.len = 8` matches the 64-bit `mov (%rax), %rax`
+  dereference; `is_write = 0` matches the load direction.
+  Both fields propagate through the EPT-exit path correctly.
+- Region classification produces "unmapped" as expected.
+  A slot-1-hit variant would produce `region=uml-slot
+  uml_va=<uml_physmem + gpa - GPA_BASE>` — the translation
+  the real-backend fault handler uses to find the struct
+  vm_area_struct backing the fault.
+- No timing; the lift's purpose is architectural (can we
+  decode?), not performance.
+
+**Scope — what this does NOT demonstrate:**
+
+- Actually calling `segv()` / `handle_page_fault` from the
+  harness with a synthesized `faultinfo`. That requires
+  per-task state (current, pt_regs, kernel stack) the
+  early-boot harness doesn't have. The full integration
+  lands with Phase III Lifts #1e (signal delivery) + #1f
+  (D-06 conformance), where the real guest-kernel-entry
+  path sits on top of the Lift #1d decode stage.
+
+**What this opens:**
+
+- Phase III Lift #1e (signal delivery: SIGALRM/SIGIO/
+  SIGUSR1 via KVM_INTERRUPT + in-guest IDT) is next. The
+  fault-decode step validated here is a prerequisite:
+  signal delivery to a guest with an active fault requires
+  the fault to already be materialized as a synthesized
+  faultinfo, which this lift demonstrated the backend can
+  produce.
+
 ## 2026-04-23 — Phase III Lift #1a (kvm_um attach-cost benchmark) retired
 
 **Not run.** Decisions-log D60 closes this placeholder as
