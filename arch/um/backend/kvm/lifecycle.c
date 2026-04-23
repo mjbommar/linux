@@ -81,7 +81,7 @@ int kvm_probe(void)
 		pr_warn("um: kvm probe: host API version %d, built for %d\n",
 			api, KVM_API_VERSION);
 		os_close_file(fd);
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	/*
