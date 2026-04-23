@@ -4,7 +4,14 @@
 
 A version of `arch/um/` that delivers, **from one source tree**:
 
-- **~100 ns syscall overhead** in production mode (vs. ~1-5 µs today).
+- **~1-5 µs syscall overhead** on naive KVM backend (vs. ~20 µs
+  on the seccomp backend today); **~100 ns** as an aspirational
+  target once a systrap-equivalent in-guest gadget layer lands.
+  The ~4.7 µs empirical floor on a bare `KVM_RUN` round-trip
+  (measured 2026-04-23 — see `02-workstreams/D-kvm-backend/
+  spikes/01-getpid-roundtrip/`) is what D's first delivery
+  will hit; closing the remaining gap to ~100 ns is D-04
+  ring-transition work or a follow-on phase.
 - **Full instrumentation** — KASAN, KMSAN, KCSAN, KFENCE, KCOV,
   kprobes, ftrace, BPF JIT, KGDB — all working, with research mode
   defaults that turn them on.

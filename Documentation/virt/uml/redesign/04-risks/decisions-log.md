@@ -5598,4 +5598,77 @@ redesign without waiting.
 
 ---
 
+## D55 (2026-04-23) — D-workstream spike confirms KVM round-trip is ~5 µs, not ~100 ns; vision line updated
+
+**Decision.** A bare `KVM_RUN` → `VMEXIT` → userspace
+round-trip costs **~4.7 µs / ~17500 cycles median** on the
+dev host (Skylake-SP, 3.7 GHz), empirically measured over
+1000 iterations. The vision doc line "~100 ns syscall
+overhead in production mode" is revised to "~1-5 µs on the
+naive KVM backend (~4× win over seccomp); ~100 ns as a
+later aspirational target predicated on an in-guest
+systrap-equivalent gadget layer." The D workstream still
+ships; the rebranding is from "KVM makes UML as fast as
+bare metal" to "KVM makes UML as fast as QEMU-KVM, with
+the observability story to make that worthwhile."
+
+**Alternatives considered.**
+
+- *Keep the ~100 ns vision line unchanged, hope the
+  systrap gadget lands in first-phase D:* Rejected. The
+  gadget is substantial independent engineering (gVisor's
+  kvm platform has been iterating on its systrap for
+  years), and selling the D workstream on a number the
+  first landing can't hit would burn trust with both
+  reviewers and consumers when they measure actual
+  behavior.
+- *Pick a different backend mechanism to hit ~100 ns:*
+  Xen hypercalls, user-mode KVM, LXC — all rejected for
+  reasons already documented (D-01 preface + this
+  session's "KVM still the right choice" analysis). KVM
+  stays; the number is what it is on this CPU family.
+- *Defer D and re-sequence:* Rejected. Even at 5 µs, D
+  delivers the "run research profile under KVM for 4×
+  seccomp-baseline syscall speed, with real CPU rings for
+  the sanitizer trio's edge cases" product win. D failing
+  would be acceptable per the critical-path doc
+  (`prod-fast on seccomp is the realistic default`), but
+  D succeeding at 5 µs is better than not trying.
+
+**How to apply.**
+
+- New D workstream deliverable shape: `um_backend_kvm`
+  lands as the naive "`KVM_RUN` per guest syscall" path
+  first (D-02..D-06), hits the ~5 µs number, ships. The
+  systrap gadget (D-04 ring transitions) becomes an
+  explicit follow-on phase, not expected in the initial
+  4-week D-01 design-memo scope.
+- Performance bar for D ship: median syscall under
+  research-kvm profile <10 µs, perf-vs-baseline regression
+  flags at >20%. Currently at `perf-compare.sh`'s 5%
+  blocker threshold for C-workstream work, which is
+  stricter than D needs — the D profile's perf floor is
+  "beat seccomp by ≥2×", not "bit-for-bit with bare
+  metal."
+- Vision doc stays honest: edit the headline so reviewers
+  don't see a 100 ns claim the code can't back up, and
+  reference this entry so the history is diffable.
+- Second data point needed: run the spike on a modern
+  CPU (Ice Lake, Sapphire Rapids, Zen 4) to bound the
+  newer-CPU floor. If a recent CPU hits 1-2 µs, we're in
+  good shape. If it still hits 5 µs, the VT-x exit cost
+  hasn't scaled and the D backend's floor stays here.
+
+**Cross-references.**
+
+- `spikes/01-getpid-roundtrip/README.md` — full spike
+  methodology + raw numbers.
+- `00-vision.md` — updated "~1-5 µs" line.
+- `01-kvm-platform-design.md` — spike-01 result block
+  added to the top.
+- `06-sequencing/critical-path.md` — D still off critical
+  path; unchanged.
+
+---
+
 ## (Future entries here, as decisions are made)
