@@ -143,11 +143,22 @@ int kvm_run_harness(void)
 		return -ENOMEM;
 	}
 
-	/* GDT + page tables + code at their spike-04 offsets. */
+	/*
+	 * GDT + page tables + code at their spike-04 offsets. Use
+	 * the range-covering paging helper (D-04b.2a) so the guest
+	 * sees all 1024 × 2 MiB = 1 GiB of identity-mapped address
+	 * space, not just the initial 2 MiB that fits inside the
+	 * harness slot. Over-mapping is fine — accesses past the
+	 * harness slot end hit the Policy A memslot (via
+	 * kvm_ensure_memslot's deferred registration) so EPT
+	 * redirects them to UML's own VA. Sets up the infrastructure
+	 * for D-04b.2b where RIP points at UML kernel text.
+	 */
 	kvm_setup_harness_gdt((u64 *)(mem + KVM_HARNESS_GDT_OFFSET));
-	kvm_setup_harness_paging((u64 *)(mem + KVM_HARNESS_PML4_OFFSET),
-				 (u64 *)(mem + KVM_HARNESS_PDPT_OFFSET),
-				 (u64 *)(mem + KVM_HARNESS_PD_OFFSET));
+	kvm_setup_harness_paging_range((u64 *)(mem + KVM_HARNESS_PML4_OFFSET),
+				       (u64 *)(mem + KVM_HARNESS_PDPT_OFFSET),
+				       (u64 *)(mem + KVM_HARNESS_PD_OFFSET),
+				       KVM_HARNESS_PD_OFFSET, 512);
 	memcpy(mem + KVM_HARNESS_CODE_OFFSET,
 	       kvm_harness_code, sizeof(kvm_harness_code));
 
