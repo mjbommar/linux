@@ -88,6 +88,11 @@ enum Cmd {
     /// on any violation, 0 otherwise. Replaces dmesg-grep in
     /// kselftests.
     Assert(AssertArgs),
+    /// Archive a run bundle as a .umlbundle.tar.zst for
+    /// sharing / post-mortem. Self-contained: includes
+    /// run.json, init.log, events.jsonl, and a snapshot of
+    /// the manifest.
+    Export(ExportArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -304,6 +309,15 @@ pub struct AssertArgs {
     pub require: Vec<String>,
 }
 
+#[derive(clap::Args, Debug)]
+pub struct ExportArgs {
+    pub name_or_run_id: String,
+
+    /// Destination file. Suggested extension `.umlbundle.tar.zst`.
+    #[arg(long, value_name = "PATH")]
+    pub bundle: std::path::PathBuf,
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("umlctl: {e:#}");
@@ -329,6 +343,7 @@ fn run() -> Result<()> {
         Cmd::Schema(_) => cmd_schema(cli.json),
         Cmd::Events(args) => cmd_events(&paths, args),
         Cmd::Assert(args) => cmd_assert(&paths, args, cli.quiet),
+        Cmd::Export(args) => cmd_export(&paths, args, cli.quiet),
     }
 }
 
@@ -338,6 +353,10 @@ fn cmd_events(paths: &paths::Paths, args: EventsArgs) -> Result<()> {
 
 fn cmd_assert(paths: &paths::Paths, args: AssertArgs, quiet: bool) -> Result<()> {
     events::cmd_assert(paths, &args, quiet)
+}
+
+fn cmd_export(paths: &paths::Paths, args: ExportArgs, quiet: bool) -> Result<()> {
+    events::cmd_export(paths, &args, quiet)
 }
 
 fn cmd_schema(json: bool) -> Result<()> {

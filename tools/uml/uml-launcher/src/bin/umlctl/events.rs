@@ -29,7 +29,7 @@ use std::io::Write;
 use super::manifest;
 use super::paths::Paths;
 use super::run;
-use super::{AssertArgs, EventsArgs};
+use super::{AssertArgs, EventsArgs, ExportArgs};
 
 /// A single spine event. `extra` carries the schema-specific
 /// payload as a pre-serialized JSON object; it's spliced into
@@ -477,6 +477,91 @@ pub fn cmd_assert(paths: &Paths, args: &AssertArgs, quiet: bool) -> Result<()> {
         eprintln!("{v}");
     }
     std::process::exit(1);
+}
+
+/// `umlctl export --bundle <path>` — archive a run bundle as
+/// `.tar.zst` for sharing. Before tarring, splice a snapshot
+/// of the manifest into the bundle directory so the export
+/// is self-contained (the manifest outlives `umlctl rm`).
+///
+/// Shells out to `tar --zstd` rather than pulling a Rust
+/// zstd crate. GNU tar ≥ 1.31 + zstd are both packaged on
+/// every modern distro; the format is the one the memo
+/// calls out verbatim; no runtime footprint for the tar+zstd
+/// path means `tools/uml/uml-launcher`'s dep graph stays
+/// small. If either binary is missing, the error message
+/// points the user at the fix (`apt install zstd` or
+/// equivalent).
+pub fn cmd_export(paths: &Paths, args: &ExportArgs, quiet: bool) -> Result<()> {
+    let run_id = resolve_name_or_run_id(paths, &args.name_or_run_id);
+    let run_dir = paths.run_dir(&run_id);
+    if !run_dir.exists() {
+        eprintln!("umlctl: run {run_id} has no bundle directory");
+        std::process::exit(7);
+    }
+
+    // Snapshot the manifest into the bundle if it's not
+    // already there. After export-then-rm, the .umlbundle is
+    // the last known good record of the manifest.
+    let snapshot = run_dir.join("manifest.toml");
+    if !snapshot.exists() {
+        let run = run::Run::read(&run_dir.join("run.json"))
+            .context("read run.json while snapshotting manifest")?;
+        let mf = paths.manifest_path(&run.instance);
+        if mf.exists() {
+            std::fs::copy(&mf, &snapshot)
+                .with_context(|| format!("snapshot manifest into {}", snapshot.display()))?;
+        }
+    }
+
+    // Resolve absolute dest path so tar's cwd tricks don't
+    // surprise the user. Ensure the parent directory exists.
+    let dest = &args.bundle;
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create dest dir {}", parent.display()))?;
+        }
+    }
+
+    let status = std::process::Command::new("tar")
+        .arg("--zstd")
+        .arg("-cf")
+        .arg(dest)
+        .arg("-C")
+        .arg(paths.runs_dir())
+        .arg(&run_id)
+        .status()
+        .context("spawn `tar --zstd` (is GNU tar + zstd installed?)")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "tar --zstd failed with status {:?}; GNU tar ≥1.31 + zstd must be on PATH",
+            status.code()
+        );
+    }
+
+    if !quiet {
+        println!(
+            "exported run {run_id} → {} ({})",
+            dest.display(),
+            human_bytes(std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0))
+        );
+    }
+    Ok(())
+}
+
+fn human_bytes(n: u64) -> String {
+    const K: u64 = 1024;
+    if n < K {
+        format!("{n} B")
+    } else if n < K * K {
+        format!("{:.1} KiB", n as f64 / K as f64)
+    } else if n < K * K * K {
+        format!("{:.1} MiB", n as f64 / (K * K) as f64)
+    } else {
+        format!("{:.2} GiB", n as f64 / (K * K * K) as f64)
+    }
 }
 
 fn resolve_name_or_run_id(paths: &Paths, raw: &str) -> String {

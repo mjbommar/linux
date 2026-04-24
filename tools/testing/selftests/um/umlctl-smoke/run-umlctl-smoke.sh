@@ -312,6 +312,29 @@ rc=$?
 rc=$?
 [ $rc -eq 2 ] || fail "assert with no predicates should exit 2 (got $rc)"
 
+# umlctl export --bundle produces a self-contained .tar.zst.
+# Skip if `tar --zstd` isn't available on this host.
+if tar --zstd --version >/dev/null 2>&1; then
+	BUNDLE_OUT="$TMP/$N2.umlbundle.tar.zst"
+	"$UMLCTL_BIN" $ARGS --quiet export "$N2" --bundle "$BUNDLE_OUT" \
+		|| fail "export --bundle failed"
+	[ -s "$BUNDLE_OUT" ] || fail "export produced empty bundle"
+
+	# Unpack and verify the shape.
+	UNPACK="$TMP/unpack"
+	mkdir -p "$UNPACK"
+	tar --zstd -xf "$BUNDLE_OUT" -C "$UNPACK" \
+		|| fail "unpack exported bundle failed"
+	[ -d "$UNPACK/$N2_RUN_ID" ] || fail "unpacked bundle missing $N2_RUN_ID/"
+	[ -f "$UNPACK/$N2_RUN_ID/run.json" ] || fail "bundle missing run.json"
+	[ -f "$UNPACK/$N2_RUN_ID/events.jsonl" ] || fail "bundle missing events.jsonl"
+	[ -f "$UNPACK/$N2_RUN_ID/manifest.toml" ] || fail "bundle missing manifest snapshot"
+	grep -q "\"run_id\": \"$N2_RUN_ID\"" "$UNPACK/$N2_RUN_ID/run.json" \
+		|| fail "unpacked run.json missing run_id"
+else
+	echo "SKIP: tar --zstd unavailable; export assertions skipped"
+fi
+
 "$UMLCTL_BIN" $ARGS rm "$N2" >/dev/null
 
 # --- Part F: no orphans ---

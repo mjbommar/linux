@@ -1,10 +1,11 @@
 # uml-observability-spine — the unifying telemetry architecture for UML tooling
 
 **Status:** PROPOSED — future phase. Parking lot (2026-04-23).
-Phase O1 is ~67% landed as of 2026-04-23 (sub-lifts O1.1 +
-O1.3 + O1.5 + O1.6, four of six); sub-lifts O1.2 (split
-kernel console + dmesg verb) and O1.4 (umlctl export)
-remain parking-lot. O2-O6 also remain parking-lot. Not in the A/B/C/D plan. This memo is
+Phase O1 is ~83% landed as of 2026-04-23 (sub-lifts O1.1 +
+O1.3 + O1.4 + O1.5 + O1.6, five of six); only O1.2 (split
+kernel console + dmesg verb — needs real UML kernel
+cooperation for a meaningful end-to-end test) remains
+parking-lot inside O1. O2-O6 also remain parking-lot. Not in the A/B/C/D plan. This memo is
 an **architectural spine**, not a shippable tool — it
 specifies the shared schema + transport + bundle format
 that the seven already-proposed observability tools in this
@@ -428,8 +429,13 @@ status trails each line (**[LANDED]** / **[pending]**).
   for now; extraction to a standalone
   `tools/uml/uml-observe/` crate waits for a second
   consumer. **[LANDED 2026-04-23]**
-- O1.4 — `umlctl export --bundle` → `.umlbundle.tar.zst`.
-  **[pending]**
+- O1.4 — `umlctl export <name_or_run_id> --bundle
+  <path>.umlbundle.tar.zst`. Snapshots the manifest into
+  the bundle directory, then shells out to `tar --zstd`
+  to archive. Self-contained export survives `umlctl rm`.
+  Shell-out (no zstd-sys dep) keeps the umlctl binary
+  surface small; GNU tar ≥1.31 + zstd are assumed on
+  PATH. **[LANDED 2026-04-23]**
 - O1.5 — `umlctl events <name_or_run_id> --filter ...
   --since ... --tail N [-f]` verb. Reads events.jsonl from
   the resolved bundle, applies AND-combined key=value
