@@ -28,15 +28,43 @@
 #include "kvm_backend.h"
 
 static const enum kvm_syscall_class kvm_syscall_class_map[NR_syscalls] = {
-	/* Class B — vCPU-state propagate (memo 10 §B). */
+	/*
+	 * Class B — vCPU-state propagate (memo 10 §B).
+	 *
+	 * Audit round-5 F10: modify_ldt and set_thread_area were
+	 * previously classified B but had NO dispatcher branch.
+	 * modify_ldt is legacy x86 LDT programming that UML
+	 * doesn't virtualize through KVM (no LDT SREGS refresh
+	 * after sys_modify_ldt), and set_thread_area is a 32-bit
+	 * compat syscall that 64-bit glibc never calls. Demoted
+	 * to D so the dispatcher returns -EPERM, which is the
+	 * accurate "UML KVM doesn't support this" answer —
+	 * previously the syscalls passed silently through to
+	 * handle_syscall with no vCPU propagation.
+	 *
+	 * arch_prctl remains the only live class-B entry: the
+	 * kvm_decode_syscall dispatcher has a specific branch
+	 * for it that calls kvm_propagate_fs_gs_base (see
+	 * thread.c's post-syscall block).
+	 */
 	[__NR_arch_prctl]	= KVM_SYSCALL_CLASS_VCPU_STATE,
-	[__NR_modify_ldt]	= KVM_SYSCALL_CLASS_VCPU_STATE,
-	[__NR_set_thread_area]	= KVM_SYSCALL_CLASS_VCPU_STATE,
 
-	/* Class C — signal-frame (memo 10 §C). */
+	/*
+	 * Class C — signal-frame (memo 10 §C).
+	 *
+	 * Audit round-5 F10: rt_sigreturn needs no dedicated
+	 * dispatcher branch because the common post-syscall
+	 * KVM_SET_REGS in run_userspace (thread.c:1747) already
+	 * pushes the sigreturn-restored regs into the vCPU. The
+	 * C classification stays as a documentation tag so the
+	 * memo inventory matches the live behaviour.
+	 */
 	[__NR_rt_sigreturn]	= KVM_SYSCALL_CLASS_SIGFRAME,
 
-	/* Class D — deny (memo 10 §D). */
+	/*
+	 * Class D — deny (memo 10 §D). Includes modify_ldt +
+	 * set_thread_area post-F10.
+	 */
 	[__NR_ptrace]		= KVM_SYSCALL_CLASS_TRAP,
 	[__NR_reboot]		= KVM_SYSCALL_CLASS_TRAP,
 	[__NR_init_module]	= KVM_SYSCALL_CLASS_TRAP,
@@ -45,6 +73,8 @@ static const enum kvm_syscall_class kvm_syscall_class_map[NR_syscalls] = {
 	[__NR_kexec_load]	= KVM_SYSCALL_CLASS_TRAP,
 	[__NR_kexec_file_load]	= KVM_SYSCALL_CLASS_TRAP,
 	[__NR_bpf]		= KVM_SYSCALL_CLASS_TRAP,
+	[__NR_modify_ldt]	= KVM_SYSCALL_CLASS_TRAP,
+	[__NR_set_thread_area]	= KVM_SYSCALL_CLASS_TRAP,
 
 	/*
 	 * Class E — gadget-handled (memo 11 G4-G6 + G7). The fast

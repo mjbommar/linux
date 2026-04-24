@@ -153,7 +153,7 @@ nr	name	class	rationale
 151	mlockall	A	passthrough: sys_call_table[nr]
 152	munlockall	A	passthrough: sys_call_table[nr]
 153	vhangup	A	passthrough: sys_call_table[nr]
-154	modify_ldt	B	LDTR descriptor table; push via KVM_SET_SREGS
+154	modify_ldt	D	trap: UML KVM backend does not virtualize LDT via KVM; sys_modify_ldt demoted to -EPERM under audit round-5 F10
 155	pivot_root	A	passthrough: sys_call_table[nr]
 156	_sysctl	A	passthrough: sys_call_table[nr]
 157	prctl	A	passthrough: sys_call_table[nr]
@@ -204,7 +204,7 @@ nr	name	class	rationale
 202	futex	A	passthrough: sys_call_table[nr]
 203	sched_setaffinity	A	passthrough: sys_call_table[nr]
 204	sched_getaffinity	A	passthrough: sys_call_table[nr]
-205	set_thread_area	B	32-bit TLS segment (compat only; unreachable from x86_64 glibc)
+205	set_thread_area	D	trap: 32-bit compat set_thread_area; unreachable from 64-bit glibc (audit round-5 F10)
 206	io_setup	A	passthrough: sys_call_table[nr]
 207	io_destroy	A	passthrough: sys_call_table[nr]
 208	io_getevents	A	passthrough: sys_call_table[nr]

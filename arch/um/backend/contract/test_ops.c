@@ -1013,15 +1013,12 @@ static void kvm_gadget_vvar_refresh_test(struct kunit *test)
  */
 static void kvm_syscall_classification_test(struct kunit *test)
 {
-	/* Class B — vCPU-state propagate (memo 10 §B). */
+	/* Class B — vCPU-state propagate (memo 10 §B).
+	 * Post-F10: only arch_prctl remains — modify_ldt +
+	 * set_thread_area demoted to D.
+	 */
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_arch_prctl),
-			_TEST_KVM_SYSCALL_CLASS_VCPU_STATE);
-	KUNIT_EXPECT_EQ(test,
-			kvm_classify_syscall(__NR_modify_ldt),
-			_TEST_KVM_SYSCALL_CLASS_VCPU_STATE);
-	KUNIT_EXPECT_EQ(test,
-			kvm_classify_syscall(__NR_set_thread_area),
 			_TEST_KVM_SYSCALL_CLASS_VCPU_STATE);
 
 	/* Class C — signal-frame (memo 10 §C). */
@@ -1029,7 +1026,10 @@ static void kvm_syscall_classification_test(struct kunit *test)
 			kvm_classify_syscall(__NR_rt_sigreturn),
 			_TEST_KVM_SYSCALL_CLASS_SIGFRAME);
 
-	/* Class D — deny (memo 10 §D). */
+	/* Class D — deny (memo 10 §D). modify_ldt + set_thread_area
+	 * demoted here under F10 since UML doesn't virtualize LDT
+	 * through KVM and set_thread_area is 32-bit-compat-only.
+	 */
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_ptrace),
 			_TEST_KVM_SYSCALL_CLASS_TRAP);
@@ -1053,6 +1053,12 @@ static void kvm_syscall_classification_test(struct kunit *test)
 			_TEST_KVM_SYSCALL_CLASS_TRAP);
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_bpf),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_modify_ldt),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_set_thread_area),
 			_TEST_KVM_SYSCALL_CLASS_TRAP);
 
 	/*
@@ -1129,19 +1135,22 @@ static void kvm_syscall_classification_test(struct kunit *test)
 }
 
 /*
- * Inventory-size invariant. Memo 10 records "12 of 385 non-A"
- * as the classifier-dispatched set (B + C + D); memo 11 G7 adds
- * the class-E gadget-handled set, 9 entries post-G7; G6-follow-
- * on adds 2 more (time, getcpu). Walk every NR and count non-
- * passthrough classifications to catch drift (forgotten
- * addition OR accidental promotion of a passthrough entry).
- * Total expected: 12 + 11 = 23.
+ * Inventory-size invariant. Post-F10 breakdown:
+ *   class B (VCPU_STATE)  = 1  (arch_prctl)
+ *   class C (SIGFRAME)    = 1  (rt_sigreturn)
+ *   class D (TRAP)        = 10 (+modify_ldt + set_thread_area
+ *                                demoted from B per F10)
+ *   class E (GADGET)      = 11 (G7 + G6-follow-on)
+ * Total non-A: 23.
  */
 static void kvm_syscall_class_count_test(struct kunit *test)
 {
 	unsigned long nr;
 	unsigned int non_a = 0;
 	unsigned int gadget = 0;
+	unsigned int trap = 0;
+	unsigned int vcpu_state = 0;
+	unsigned int sigframe = 0;
 
 	for (nr = 0; nr < NR_syscalls; nr++) {
 		enum kvm_syscall_class c = kvm_classify_syscall(nr);
@@ -1150,9 +1159,18 @@ static void kvm_syscall_class_count_test(struct kunit *test)
 			non_a++;
 		if (c == _TEST_KVM_SYSCALL_CLASS_GADGET)
 			gadget++;
+		if (c == _TEST_KVM_SYSCALL_CLASS_TRAP)
+			trap++;
+		if (c == _TEST_KVM_SYSCALL_CLASS_VCPU_STATE)
+			vcpu_state++;
+		if (c == _TEST_KVM_SYSCALL_CLASS_SIGFRAME)
+			sigframe++;
 	}
 	KUNIT_EXPECT_EQ(test, non_a, 23U);
 	KUNIT_EXPECT_EQ(test, gadget, 11U);
+	KUNIT_EXPECT_EQ(test, trap, 10U);
+	KUNIT_EXPECT_EQ(test, vcpu_state, 1U);
+	KUNIT_EXPECT_EQ(test, sigframe, 1U);
 }
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */

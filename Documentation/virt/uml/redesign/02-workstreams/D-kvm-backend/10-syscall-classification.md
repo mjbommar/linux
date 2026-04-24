@@ -44,9 +44,9 @@ Each syscall goes in exactly one of five boxes:
 | Class | Post-dispatch delta | Count on x86_64 |
 |---|---|---|
 | **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 362 of 385 |
-| **B — vCPU-state propagate** | dispatch, then push an MSR/SREG delta to the vCPU via `KVM_SET_MSRS` / `KVM_SET_SREGS` | 3 |
+| **B — vCPU-state propagate** | dispatch, then push an MSR/SREG delta to the vCPU via `KVM_SET_MSRS` / `KVM_SET_SREGS` | 1 (arch_prctl only, post-F10) |
 | **C — signal-frame** | `KVM_GET_REGS` → rebuild frame in guest memory → `KVM_SET_REGS` | 1 |
-| **D — deny** | return `-ENOSYS` or deliver `SIGSYS` without dispatching | 8 |
+| **D — deny** | return `-ENOSYS` or deliver `SIGSYS` without dispatching | 10 (includes modify_ldt + set_thread_area demoted under F10) |
 | **E — gadget-handled** | in-guest LSTAR gadget fast path (no VMEXIT); fallback behaves like class A | 11 (memo 11 G7 + G6-follow-on) |
 
 That's 23 non-A entries total — exhaustive. Every other
@@ -60,22 +60,26 @@ round-4 review confirmed we don't need a hypercall class for UML
 the in-guest gadget fast path landed in memo 11 G4-G6. See
 §"Class E — gadget-handled" below.
 
-## Class B — vCPU-state propagation (3 entries)
+## Class B — vCPU-state propagation (1 entry, post-F10)
 
 The complete list. Source-of-truth grep:
-`SYSCALL_DEFINE.*(arch_prctl|modify_ldt|set_thread_area)`
-across `arch/x86/kernel/*.c`.
+`SYSCALL_DEFINE.*arch_prctl` across `arch/x86/kernel/*.c`
+and `arch/x86/um/syscalls_64.c`.
 
 | NR | Name | State touched | Propagation |
 |---|---|---|---|
-| 158 | `arch_prctl` | MSR_FS_BASE (option `ARCH_SET_FS` / `ARCH_GET_FS`), MSR_GS_BASE (`ARCH_SET_GS` / `ARCH_GET_GS`) | `KVM_SET_MSRS` after dispatch on the "set" path; for the "get" path, `KVM_GET_MSRS` + copy to `arg2` user-pointer |
-| 154 | `modify_ldt` | LDTR descriptor table | `KVM_SET_SREGS` refresh of `sregs.ldt.selector` + `sregs.ldt.base` + `sregs.ldt.limit` |
-| 205 | `set_thread_area` | 32-bit TLS segment | 32-bit compat only; unreachable from x86_64 glibc, so practically dead code — classify B for correctness, land last |
+| 158 | `arch_prctl` | MSR_FS_BASE (option `ARCH_SET_FS` / `ARCH_GET_FS`), MSR_GS_BASE (`ARCH_SET_GS` / `ARCH_GET_GS`) | `KVM_SET_MSRS` after dispatch on the "set" path; for the "get" path, UML's sys_arch_prctl already writes the user-pointer before returning, and the MSR_GS_BASE value round-trips via handle_syscall → regs[HOST_GS_BASE] → KVM_SET_MSRS. Live dispatcher branch in arch/um/backend/kvm/thread.c::kvm_decode_syscall. |
 
 `arch_prctl` alone covers ~90 % of real-world breakage —
 every glibc-linked binary calls `ARCH_SET_FS` from
-`_start` before `main()` runs. Landing just this one entry
-unblocks `/bin/true` and every static glibc binary.
+`_start` before `main()` runs.
+
+### Previously classified B, demoted by audit round-5 F10
+
+| NR | Name | Reason for demotion |
+|---|---|---|
+| 154 | `modify_ldt` | UML KVM backend does not virtualize the LDT through KVM. The previous B classification implied a KVM_SET_SREGS refresh after sys_modify_ldt, but that refresh was never wired — syscall silently passed through handle_syscall with no vCPU update. Demoted to class D (return -EPERM) so the behaviour matches the declaration; re-promote when a proper LDT-virtualization branch lands. |
+| 205 | `set_thread_area` | 32-bit compat syscall, unreachable from x86_64 glibc. Class B classification was aspirational for a 32-bit guest support path that never materialized. Demoted to D. |
 
 ### MSR dance the B handler implements
 
@@ -129,7 +133,7 @@ UML's own signal dispatch. But it uses the same
 frame-construction primitives. Budget the two paths
 together as one coherent body of work.
 
-## Class D — deny (8 entries)
+## Class D — deny (10 entries, post-F10)
 
 Not a security wall — UML's `sys_call_table` already
 enforces CAP_SYS_ADMIN and similar on the privileged
@@ -150,6 +154,8 @@ regardless of capability state.
 | 313 | `finit_module` | same as `init_module` |
 | 320 | `kexec_file_load` | same as `kexec_load` |
 | 321 | `bpf` | BPF attach to host kernel structures via a guest syscall is the obvious bypass vector; UML's BPF JIT port (workstream C-06) runs at the UML-kernel layer, not the guest's |
+| 154 | `modify_ldt` | UML KVM backend does not virtualize LDT through KVM. Returning -EPERM is the accurate answer for a bare-userspace guest; can be re-promoted to a real class-B branch if a workload ever needs it (audit round-5 F10). |
+| 205 | `set_thread_area` | 32-bit compat syscall that 64-bit glibc never calls. Class B classification was aspirational and unreachable (audit round-5 F10). |
 
 Denial shape: return `-EPERM`. That's the accepted "we
 saw the syscall and refuse it at this layer" convention

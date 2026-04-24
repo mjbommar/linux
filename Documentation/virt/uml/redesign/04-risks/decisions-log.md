@@ -8419,4 +8419,103 @@ or sched_yield handlers.
 
 ---
 
+## D84 (2026-04-24) — F10: reconcile B/C classifier with live dispatcher
+
+**Decision.** Demote `__NR_modify_ldt` and
+`__NR_set_thread_area` from class B to class D. Keep
+`__NR_rt_sigreturn` as class C but annotate that no
+dedicated dispatcher branch is needed because the
+common post-syscall `KVM_SET_REGS` in run_userspace
+already propagates the restored register context.
+Class B collapses to one entry (arch_prctl).
+
+**Finding.** Audit round-5 P2 #7 (F10) — "classes
+B/C are classified but mostly not implemented.
+modify_ldt, set_thread_area, and rt_sigreturn are
+non-A in the classifier, but the dispatcher only
+branches on class D and has a one-off arch_prctl
+propagation path."
+
+Accurate on both counts:
+
+1. `kvm_decode_syscall` has `if (syscall_nr ==
+   __NR_arch_prctl)` — works for arch_prctl.
+2. No dispatcher branch for modify_ldt or
+   set_thread_area; the syscalls went through
+   handle_syscall with no vCPU propagation.
+3. No dispatcher branch for rt_sigreturn either;
+   the common post-syscall KVM_SET_REGS handles the
+   restored register context.
+
+**Why demote modify_ldt + set_thread_area.** Both are
+rarely used on 64-bit Linux:
+
+- `modify_ldt` — legacy LDT programming. Modern
+  glibc (since ~2015) doesn't use it. UML's KVM
+  backend doesn't virtualize the hardware LDT
+  through KVM_SET_SREGS, so the previous B
+  classification was aspirational and the missing
+  branch meant the syscall silently no-op'd (worse
+  than -EPERM).
+- `set_thread_area` — 32-bit compat syscall for
+  TLS. Unreachable from 64-bit glibc's `_start` /
+  TLS setup (which uses `arch_prctl(ARCH_SET_FS,
+  ...)` instead).
+
+Demoting to D gives honest semantics: `-EPERM`
+("UML KVM doesn't support this"). Re-promote to a
+real class-B branch if a workload ever needs it.
+
+**Why keep rt_sigreturn as C without a branch.** The
+C classification is a documentation tag asserting
+"this syscall touches register state that must land
+in the vCPU." The COMMON post-syscall KVM_SET_REGS
+at arch/um/backend/kvm/thread.c:1747 already pushes
+the regs — there's nothing class-specific to do.
+Keeping the tag lets a future rt_sigreturn
+optimization (e.g. skip redundant KVM_SET_REGS for
+non-signal-returning syscalls) find this entry via
+the classifier.
+
+**Post-F10 tallies.**
+
+| Class | Count | Entries |
+|---|---|---|
+| B (VCPU_STATE) | 1 | arch_prctl |
+| C (SIGFRAME) | 1 | rt_sigreturn |
+| D (TRAP) | 10 | ptrace, reboot, init_module, finit_module, delete_module, kexec_load, kexec_file_load, bpf, modify_ldt, set_thread_area |
+| E (GADGET) | 11 | 7 pid-family + sched_yield + clock_gettime + time + getcpu |
+
+Total non-A: 23 (unchanged from post-G6-followon).
+
+**Validation.**
+
+- KUnit: 35/35 pass including the expanded
+  `kvm_syscall_classification_test` (explicit NR_time,
+  NR_getcpu, NR_modify_ldt=TRAP, NR_set_thread_area=
+  TRAP) and `kvm_syscall_class_count_test` (now
+  asserts all four class counts: B=1, C=1, D=10,
+  E=11 — any future regression that mis-classifies
+  one entry gets caught by whichever counter drifts).
+- syscall-inventory.tsv rows updated with F10
+  rationale strings.
+- memo 10 §"Class B" shrinks to the 1-entry arch_prctl
+  table; §"Class D" grows to 10 with modify_ldt +
+  set_thread_area rows explaining the demotion.
+
+**Refs.**
+
+- Audit round-5 finding #7 (F10).
+- arch/um/backend/kvm/syscall_class.c — 2 rows moved
+  from VCPU_STATE to TRAP with F10 annotation.
+- arch/um/backend/contract/test_ops.c — test
+  assertions + count test expanded per-class.
+- Documentation/virt/uml/redesign/02-workstreams/
+  D-kvm-backend/10-syscall-classification.md —
+  Class B/D sections rewritten.
+- syscall-inventory.tsv — NR 154 + 205 flipped.
+- task #229 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)
