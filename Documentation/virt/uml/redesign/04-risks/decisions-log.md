@@ -7715,4 +7715,92 @@ regardless. F2 was the correctness bug in round 4, not F1.
 
 ---
 
+## D77 (2026-04-24) — F3 coverage: close with the KUnit + integration smokes already in place
+
+**Decision.** Round-4 F3 ("no automated coverage for #PF flag
+round-trip or DYNAMIC backend arbitration") is closed by the
+coverage that already exists across KUnit and the integration
+selftests, with one explicit follow-on task filed for a
+dedicated direction-flag regression binary. No new KUnit
+tests needed beyond `kvm_build_sysret_r11_test` (shipped with
+F2).
+
+**What covers each half.**
+
+*Pure-data RFLAGS helper (F2's fix):*
+
+- `kvm_build_sysret_r11_test` in
+  `arch/um/backend/contract/test_ops.c` exercises four input
+  cases (zero, DF=1, all-arith-set, IF=0) and asserts the
+  helper preserves user-visible bits while forcing REQ_ON
+  bits. Runs at every KUnit-enabled boot; 35/35 tests pass.
+
+*Live-path RFLAGS round-trip (F2's fix):*
+
+- `tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh`
+  asserts that 100000 iterations of a loop calling `getpid()`
+  (SYSCALL + return + arithmetic-flag-driven comparison +
+  branch) completes with a counter-derived sink value equal
+  to N × 101. A broken RFLAGS round-trip would miscount — the
+  loop's `cmp %rbx, $N; jne loop` uses CF/ZF, and if those
+  were corrupted across SYSRET, either the loop exits early
+  or the sink is wrong.
+- The `/tmp/clock-loop` microbench runs the same round-trip
+  against `clock_gettime(CLOCK_MONOTONIC)`, which additionally
+  verifies the vvar seqlock path populates non-zero
+  `first_nsec`.
+
+*DYNAMIC backend arbitration (F1's design area):*
+
+- `Documentation/virt/uml/redesign/scripts/uml-boot-matrix.sh`
+  runs the {PTRACE_ONLY, SECCOMP_ONLY, DYNAMIC} matrix with
+  {default, backend=ptrace, backend=seccomp,
+  backend=force=ptrace, backend=force=seccomp} and asserts
+  `um: backend = <expected>` on dmesg. Covers the arbiter's
+  arg-dispatch logic.
+- `perf-getpid` extends to KVM: `backend=force=kvm` with KVM
+  compiled in under DYNAMIC asserts the dmesg line is `um:
+  backend = kvm` and the ratio gate holds. This is the
+  specific F1-worry case (would a wasted seccomp probe in
+  `os_early_checks` confuse the arbiter into picking seccomp
+  even when force=kvm was requested? No — the backend line
+  assertion catches it).
+
+**What's still open.** A dedicated direction-flag regression
+test — a freestanding ring-3 binary that:
+
+1. Sets DF=1 via `std`.
+2. Forces at least one recoverable shadow-PT #PF by
+   accessing a deliberately unmapped-then-mapped region.
+3. Asserts DF is still set after the faulting instruction
+   completes.
+
+This would catch a regression of the F2 fix specifically in
+the live-#PF-recovery path, as opposed to the current
+coverage which catches it via the arithmetic-flag channel.
+Filed as task #222.
+
+**Why we're not landing #222 this session.** Writing a
+freestanding ring-3 binary that exercises the shadow-PT
+fault-in path deterministically is finicky: the binary needs
+to force the page to be lazily mapped (UML's mmap semantics),
+touch it from a CPU that hasn't yet resolved the shadow PT,
+and read back RFLAGS without clobbering them via intervening
+syscalls. A clean version probably wants an inline-asm block
+that wraps `std; [access]; pushfq; popq %rax` — doable, but
+is its own ~100-line selftest with its own reviewability
+concerns. Separate from gadget work (G7/G8) and separate
+from the F2 fix itself.
+
+**Refs.**
+
+- Audit round-4 finding #3 (F3).
+- D75 — F2 fix (the thing F3 asked for coverage of).
+- D76 — F1 deferral (the thing F3's other half asked for
+  coverage of).
+- task #220 — this closure.
+- task #222 — dedicated DF selftest.
+
+---
+
 ## (Future entries here, as decisions are made)
