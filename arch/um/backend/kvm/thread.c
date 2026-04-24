@@ -600,6 +600,209 @@ EXPORT_SYMBOL_GPL(kvm_exit_guest_probe);
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
+/*
+ * kvm_run_userspace: backend's run_userspace op. Called in a
+ * loop by arch/um/os-Linux/skas/process.c::userspace(regs).
+ * Contract per Documentation/virt/uml/backend-contract.rst:
+ * set up vCPU, run guest until the next trap, fill `regs`
+ * with current state (+ regs->is_user=1 + HOST_ORIG_AX for
+ * syscalls), dispatch the kernel-side handler, return.
+ *
+ * Two compile-time flavors:
+ *   - CONFIG_UM_BACKEND_KVM_INTEGRATED=y: real KVM_RUN loop
+ *     + exit-reason decode (memo 08 sub-commit #2b).
+ *   - CONFIG_UM_BACKEND_KVM_INTEGRATED=n: D-04a scaffold
+ *     panic, unchanged.
+ */
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+
+/*
+ * Called from the syscall-exit branch of kvm_run_userspace.
+ * Populates `regs` with the guest's user-mode state read back
+ * from KVM_GET_REGS, advances the saved RIP past the 2-byte
+ * `out %al, $0xf4` so the post-dispatch KVM_RUN resumes at
+ * the trampoline's SYSRETQ, and dispatches the syscall into
+ * UML's common sys_call_table path. After dispatch, the
+ * caller marshals regs->gp[HOST_AX] (= syscall return) back
+ * to vCPU state for the SYSRETQ to deliver to ring-3.
+ */
+static void kvm_decode_syscall(struct uml_pt_regs *regs,
+			       struct kvm_regs *kregs, int vcpu_fd)
+{
+	/*
+	 * `regs->gp[]` already populated by the caller's KVM_GET_REGS
+	 * → kvm_regs_to_uml_regs(). RAX holds the guest's original
+	 * syscall number (the LSTAR trampoline's `out` didn't
+	 * clobber it — the post-out RIP/RFLAGS live in RCX/R11).
+	 */
+	PT_SYSCALL_NR(regs->gp) = regs->gp[HOST_AX];
+	regs->is_user = 1;
+
+	/*
+	 * Advance RIP past the 2-byte `out %al, $0xf4` so the next
+	 * KVM_RUN executes SYSRETQ. Mirrored into both regs and
+	 * kregs — the subsequent KVM_SET_REGS picks up kregs.rip.
+	 */
+	kregs->rip += 2;
+	regs->gp[HOST_IP] = kregs->rip;
+
+	/*
+	 * Common syscall dispatch path. Writes the return value
+	 * into regs->gp[HOST_AX]; the caller marshals that back
+	 * to vCPU state.
+	 */
+	handle_syscall(regs);
+
+	/*
+	 * Post-dispatch UML convention (lifted from seccomp_run_
+	 * userspace): clear UPT_SYSCALL_NR so the caller's is_user
+	 * sample doesn't re-dispatch, and reset ORIG_AX to -1 on
+	 * architectures where its offset differs from syscall-RET.
+	 * On x86_64 they're the same offset (HOST_AX); the guard
+	 * is a no-op there but kept for symmetry with the other
+	 * backends.
+	 */
+	UPT_SYSCALL_NR(regs) = -1;
+	if (PT_SYSCALL_NR_OFFSET != PT_SYSCALL_RET_OFFSET)
+		PT_SYSCALL_NR(regs->gp) = -1;
+
+	/*
+	 * Push the syscall return (now in regs->gp[HOST_AX]) plus
+	 * the advanced RIP back into the vCPU state so SYSRETQ
+	 * delivers the right RAX + resumes at the trampoline's
+	 * SYSRETQ.
+	 */
+	kvm_uml_regs_to_kvm_regs(kregs, regs);
+	(void)os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+			       (unsigned long)kregs);
+}
+
+void kvm_run_userspace(struct uml_pt_regs *regs)
+{
+	int vcpu_fd = kvm_backend_vcpu0_fd();
+	struct kvm_run *run = kvm_backend_ctx()->run0;
+	struct kvm_regs kregs;
+	int rc;
+
+	if (vcpu_fd < 0 || !run) {
+		panic("um: kvm run_userspace: vCPU not initialized (vcpu_fd=%d run=%p)",
+		      vcpu_fd, run);
+	}
+
+	rc = kvm_enter_guest(regs);
+	if (rc < 0)
+		panic("um: kvm run_userspace: enter_guest failed (%d)", rc);
+
+	/*
+	 * Inner loop: drive the vCPU through as many KVM_RUNs as it
+	 * takes to reach a point where the caller's outer userspace()
+	 * loop should regain control — HLT (rescheduling) or
+	 * KVM_EXIT_INTR (host signal). Syscall exits dispatch
+	 * in-line and immediately re-enter KVM_RUN for the SYSRETQ
+	 * back to ring-3; this keeps the host-side trap-loop shape
+	 * gVisor-compatible (one call into run_userspace = one
+	 * logical "resume until something interesting happens").
+	 */
+	for (;;) {
+		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		if (rc < 0) {
+			/*
+			 * -EINTR is the kernel's normal "host signal
+			 * interrupted KVM_RUN" path; treat it the same
+			 * as KVM_EXIT_INTR — bubble out so the outer
+			 * loop's interrupt_end() runs.
+			 */
+			if (rc == -EINTR)
+				goto out_read_regs;
+			panic("um: kvm run_userspace: KVM_RUN failed (%d)", rc);
+		}
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
+				      (unsigned long)&kregs);
+		if (rc < 0)
+			panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
+			      rc);
+		kvm_regs_to_uml_regs(regs, &kregs);
+
+		switch (run->exit_reason) {
+		case KVM_EXIT_IO:
+			if (run->io.port == UM_KVM_SYSCALL_PORT) {
+				kvm_decode_syscall(regs, &kregs, vcpu_fd);
+				/*
+				 * Next KVM_RUN consumes the trampoline's
+				 * SYSRETQ and resumes ring-3.
+				 */
+				continue;
+			}
+			if (run->io.port == UM_KVM_SYSRETQ_PORT) {
+				/*
+				 * Phase III Lift #1b-style ring-3 fallback
+				 * emit. Not a normal production flow;
+				 * surfaces as a panic so a confused guest
+				 * state is caught loudly rather than
+				 * silently consumed.
+				 */
+				panic("um: kvm run_userspace: unexpected ring-3 port 0xf5 exit\n");
+			}
+			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
+			      run->io.port);
+
+		case KVM_EXIT_HLT:
+			/*
+			 * Guest HLT. Return to the outer userspace()
+			 * loop so UML's scheduler can dispatch. is_user
+			 * stays 1; HOST_IP points past the HLT.
+			 */
+			regs->is_user = 1;
+			return;
+
+		case KVM_EXIT_INTR:
+			goto out_read_regs;
+
+		case KVM_EXIT_MMIO:
+			/*
+			 * Sub-commit #3 wires this into the fault
+			 * path (harness.c Phase III Lift #1d carries
+			 * the decode template). Panic until then so
+			 * the failure mode is diagnosable.
+			 */
+			panic("um: kvm run_userspace: KVM_EXIT_MMIO @ gpa=0x%llx len=%u write=%u (sub-commit #3 pending)",
+			      (unsigned long long)run->mmio.phys_addr,
+			      run->mmio.len, run->mmio.is_write);
+
+		case KVM_EXIT_SHUTDOWN:
+		case KVM_EXIT_FAIL_ENTRY:
+		case KVM_EXIT_INTERNAL_ERROR:
+		case KVM_EXIT_EXCEPTION:
+			panic("um: kvm run_userspace: unrecoverable exit %u (%s)",
+			      run->exit_reason,
+			      kvm_exit_reason_str(run->exit_reason));
+
+		default:
+			panic("um: kvm run_userspace: unknown exit reason %u (%s)",
+			      run->exit_reason,
+			      kvm_exit_reason_str(run->exit_reason));
+		}
+	}
+
+out_read_regs:
+	/*
+	 * Host-side INTR / EINTR path: the outer userspace() loop
+	 * calls interrupt_end() on re-entry. regs already reflects
+	 * the last successful KVM_GET_REGS (or the pre-KVM_RUN
+	 * state on -EINTR, in which case kregs is stale — re-read).
+	 */
+	if (rc == -EINTR) {
+		rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
+				      (unsigned long)&kregs);
+		if (rc >= 0)
+			kvm_regs_to_uml_regs(regs, &kregs);
+	}
+	regs->is_user = 1;
+}
+
+#else /* !CONFIG_UM_BACKEND_KVM_INTEGRATED */
+
 void kvm_run_userspace(struct uml_pt_regs *regs)
 {
 	int vcpu_fd = kvm_backend_vcpu0_fd();
@@ -637,3 +840,5 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	panic("um: kvm run_userspace: ioctl rc=%d, exit_reason=%u (%s) — D-04b SREGS/CR3 setup pending",
 	      rc, run->exit_reason, kvm_exit_reason_str(run->exit_reason));
 }
+
+#endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */

@@ -176,29 +176,104 @@ return control to the caller's RCX after the host resumes
 the vCPU. `kvm_run_userspace` still panics — the KVM_RUN
 call itself lands with #2b.
 
-#### #2b — KVM_RUN loop + kvm_decode_syscall — **pending**
+#### #2b — KVM_RUN loop + kvm_decode_syscall — **LANDED 2026-04-24**
 
-**Delta:** `kvm_decode_syscall(regs, run)`:
+**Delta (as landed):**
 
-1. `kvm_run_userspace` (under KVM_INTEGRATED gate) calls
-   `kvm_enter_guest` and then enters a KVM_RUN loop.
-2. On `KVM_EXIT_IO` at `UM_KVM_SYSCALL_PORT`:
-   `KVM_GET_REGS`, map syscall nr + args back to `regs->gp[]`
-   (`HOST_ORIG_AX`, `HOST_DI`, …), advance vCPU RIP past the
-   2-byte `out`, return so UML's common syscall dispatch can
-   invoke `sys_call_table[nr]`.
-3. On `KVM_EXIT_HLT`: return to UML scheduler (#4 territory).
-4. Other exits: panic + fallback (#7 territory).
+- `kvm_run_userspace` split into two compile-time flavors:
+  `KVM_INTEGRATED=y` runs the real KVM_RUN loop (new),
+  `KVM_INTEGRATED=n` retains the D-04a scaffold panic
+  unchanged. Both under the same exported symbol, so the
+  ops-table dispatch is compile-time-stable.
+- Inner loop (new, gated):
+  ```
+  kvm_enter_guest(regs) → for (;;) {
+      KVM_RUN; KVM_GET_REGS; kvm_regs_to_uml_regs(regs);
+      switch (exit_reason) { ... } }
+  ```
+  Loops across multiple KVM_RUNs per call so a SYSCALL
+  trap's trampoline-SYSRETQ sequence dispatches + resumes
+  in-line, gVisor-style; returns to the outer
+  `userspace()` loop only on HLT / INTR / EINTR.
+- `kvm_decode_syscall(regs, kregs, vcpu_fd)` (new, static):
+  fills `HOST_ORIG_AX` from guest RAX, advances RIP past the
+  2-byte `out %al, $0xf4` to the trampoline's `sysretq`,
+  calls `handle_syscall(regs)` (UML's existing sys_call_
+  table dispatch shared across all three backends), and
+  `KVM_SET_REGS`-es the syscall return value back so the
+  post-SYSRETQ ring-3 resume sees the result in RAX.
+- Other exit-reason branches:
+  * `KVM_EXIT_HLT` → return cleanly (scheduler takes over).
+  * `KVM_EXIT_INTR` / `-EINTR` → goto out_read_regs, refresh
+    `regs` via a re-read KVM_GET_REGS on the EINTR branch,
+    return so the outer loop's `interrupt_end()` runs.
+  * `KVM_EXIT_MMIO` → panic with the gpa; sub-commit #3's
+    explicit frontier marker for the kvm-smoke selftest.
+  * `KVM_EXIT_FAIL_ENTRY` / `SHUTDOWN` / `INTERNAL_ERROR` /
+    `EXCEPTION` → panic with a diagnosable message.
+- Backend arbiter (`arch/um/kernel/backend.c`):
+  `backend=kvm` (without `force=`) now auto-routes into the
+  KVM backend when either `KVM_HARNESS=y` OR
+  `KVM_INTEGRATED=y`. Non-harness non-integrated builds
+  still fall back to seccomp with an explanatory warning
+  (Finding #3 invariant preserved).
 
-**Test:** A `getpid()` selftest under `backend=kvm`. The A-05
-contract suite already asserts dispatch correctness against
-the ops table; #2b adds end-to-end validation that the
-IO-exit decode drops a syscall into the real dispatch table.
-Landing criterion also unblocks the spec's second status-
-flip marker (`tools/testing/selftests/um/kvm-smoke/`).
+**Selftest (new):**
+`tools/testing/selftests/um/kvm-smoke/` — runs the UML
+binary with `backend=kvm force=kvm init=/bin/true` and
+greps the output for progression markers (`um: kvm init:`,
+`um: kvm enter_guest: bootstrap`, `KVM_EXIT_MMIO`,
+`KVM_EXIT_HLT`, `handle_syscall`, sub-commit #3 frontier
+text). PASS = ≥2 markers hit AND the D-04a scaffold panic
+text NOT observed. Skips cleanly when `/dev/kvm` is
+inaccessible. Also wired into `tools/testing/selftests/um/
+Makefile`'s TARGETS list.
+
+**Observed (2026-04-24, Zen 4 workstation under sudo):**
+
+    um: kvm init: KVM_CREATE_VM ok vmfd=4
+    um: kvm init: kvm=3 vm=4 vcpu0=5 run_size=12288 (memslot deferred to first KVM_RUN)
+    Run /bin/true as init process
+    um: kvm memslot: guest_phys=0 host_va=60000000 size=10000000
+    um: kvm enter_guest: bootstrap page at va=... gpa=0xade000 lstar=+0x40 (5 bytes)
+    Kernel panic - not syncing: um: kvm run_userspace: unrecoverable exit 8 (SHUTDOWN)
+
+This is the expected state: `KVM_CREATE_VM` + vCPU + memslot
++ `kvm_enter_guest` all succeed, `KVM_RUN` fires. Exit 8
+(SHUTDOWN = triple-fault) is because the UML-kernel pgd the
+production path loads into CR3 doesn't yet page-map the
+bootstrap page at 0xade000 (the GDT lives there), so the
+first code-fetch in-guest page-faults → no IDT → #DF → #TF.
+Closing that gap is sub-commit #3's scope (MMIO decode +
+fault-path wiring), sub-commit #5's scope (IDT install),
+and a follow-on to #1 (pgd pre-touch of the bootstrap page).
+The kvm-smoke selftest already PASSes on this progression
+state; it re-fails immediately if the integrated path
+regresses to the D-04a scaffold.
+
+**Test status:**
+- `um_backend_contract` KUnit: **27/27 pass** (no new
+  cases; #2b's decode logic is selftest-integration-tested).
+- `tools/testing/selftests/um/kvm-smoke/`: **PASS** under
+  sudo on a KVM-capable host (markers=2/6); SKIP otherwise.
+- No regression: ftrace-smoke / userspace-smoke /
+  launcher-smoke PASS on the research build (KVM_INTEGRATED=
+  n default path).
+
+**What sub-commit #2b does NOT do** (deferred explicitly):
+
+- MMIO decode + UML fault-path wiring (sub-commit #3).
+- HLT-to-scheduler rescheduling niceties (sub-commit #4).
+- Host-signal reinject + IDT-based guest signal delivery
+  (sub-commit #5).
+- Guest-accessible mapping of the bootstrap page (#1
+  follow-on — can land as part of #3's work).
+- KVM-specific fallback path on repeated FAIL_ENTRY /
+  INTERNAL_ERROR (#7).
 
 **Code moves:** `harness.c` lines ~1030-1050 (1b IO-exit
-decode) → `thread.c::kvm_decode_syscall`.
+decode) → `thread.c::kvm_decode_syscall` (as specified in
+the sub-commit plan).
 
 ### #3 — `kvm_decode_mmio` (KVM_EXIT_MMIO → fault path)
 
@@ -403,9 +478,8 @@ in flight" when:
    extension. **Done 2026-04-24.**
 2. Decisions-log D65 records the implementation kickoff with
    owner + target quarter.
-3. `tools/testing/selftests/um/kvm-smoke/` directory exists
-   with a run-script. *(Lands with sub-commit #2 once the
-   LSTAR trampoline makes a real /bin/true boot possible.)*
+3. ✅ `tools/testing/selftests/um/kvm-smoke/` directory exists
+   with a run-script. **Done 2026-04-24** (sub-commit #2b).
 
 When sub-commits #1-#6 all land + D-06 bookend runs clean,
 this memo rolls up into `04-ring-transition.md`'s

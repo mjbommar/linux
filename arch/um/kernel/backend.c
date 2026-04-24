@@ -98,26 +98,29 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 		/*
 		 * force=kvm is always honored (user-explicit; panic
 		 * on unavailable is the documented contract for
-		 * force=*). Bare backend=kvm only routes into the KVM
-		 * backend when CONFIG_UM_BACKEND_KVM_HARNESS=y —
-		 * non-harness builds still stub run_userspace and
-		 * will panic the moment the kernel tries to enter
-		 * user mode (Finding #3). Falling through to
-		 * using_seccomp keeps DYNAMIC users out of that
-		 * trap unless they asked for it.
+		 * force=*). Bare backend=kvm auto-routes into the KVM
+		 * backend when either CONFIG_UM_BACKEND_KVM_HARNESS=y
+		 * (diagnostic harness, D-04b.1b) OR
+		 * CONFIG_UM_BACKEND_KVM_INTEGRATED=y (real
+		 * run_userspace path, memo 08). Non-harness non-
+		 * integrated builds still stub run_userspace and
+		 * will panic on user-mode entry (Finding #3); falling
+		 * through to using_seccomp keeps DYNAMIC users out of
+		 * that trap unless they asked for it.
 		 */
 		if (force) {
 			using_seccomp = 0;
 			return &um_backend_kvm_ops;
 		}
-#ifdef CONFIG_UM_BACKEND_KVM_HARNESS
+#if defined(CONFIG_UM_BACKEND_KVM_HARNESS) || \
+	defined(CONFIG_UM_BACKEND_KVM_INTEGRATED)
 		if (um_backend_kvm_ops.probe() == 0) {
 			using_seccomp = 0;
 			return &um_backend_kvm_ops;
 		}
-		pr_warn("um: backend=kvm (harness) requested but probe failed; falling back\n");
+		pr_warn("um: backend=kvm requested but probe failed; falling back\n");
 #else
-		pr_warn("um: backend=kvm requires force=kvm or CONFIG_UM_BACKEND_KVM_HARNESS=y in DYNAMIC builds (non-harness run_userspace panics on user-mode entry); falling back\n");
+		pr_warn("um: backend=kvm requires force=kvm, CONFIG_UM_BACKEND_KVM_HARNESS=y, or CONFIG_UM_BACKEND_KVM_INTEGRATED=y in DYNAMIC builds (non-harness non-integrated run_userspace panics on user-mode entry); falling back\n");
 #endif
 	}
 #endif
