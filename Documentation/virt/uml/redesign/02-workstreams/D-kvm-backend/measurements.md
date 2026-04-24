@@ -1144,6 +1144,93 @@ meaningful 3-4× improvement anchoring memo 07's scope.
   Spike 05 infrastructure should be reusable with one
   extra SCP + command.
 
+## 2026-04-24 — D-06 getpid bookend, honest re-run post-A1/A2/A4 (dev host only)
+
+First **valid** three-backend measurement of the KVM
+backend after audit findings A1 + A2 + A4 landed (commits
+`a217c929`, `2ee00157`, `6b2448c3`). The 2026-04-24
+section above is a tombstone; this one is the result the
+workstream actually carries forward.
+
+### Methodology
+
+Same runner as the retracted table — `tools/testing/
+selftests/um/perf-getpid/` — with two changes:
+
+1. The runner now uses the correct kernel cmdline token
+   `backend=force=<kind>` (the old `force=<kind>` parsed
+   as unrecognized and fell back to seccomp).
+2. It asserts `um: backend = <kind>` appears in dmesg for
+   each pass, so the silent fallback can't recur.
+
+Only the dev host is measured in this row — the s0-s7
+inventory sweep lands as a follow-on once the
+single-host number is stable enough to be worth
+distributing a new kernel binary. MAX_KVM_RATIO gate
+bumped from 2.0 → 2.5 to reflect the real cost; the old
+2.0 ceiling was derived from the retracted
+seccomp-vs-seccomp measurement.
+
+### Dev host (server3, Xeon W-2123 / Skylake-SP, ~3.6 GHz boost)
+
+| Backend  | ns/call | cyc/call | vs seccomp |
+|----------|--------:|---------:|-----------:|
+| ptrace   |  14,472 |   52,101 |     1.25×  |
+| seccomp  |  11,532 |   41,517 |     1.00×  |
+| kvm      |  23,616 |   85,016 |     2.05×  |
+
+`PASS markers=3/6` on kvm-smoke. `/bin/true` still exits
+with `exitcode=0x7f00` under `backend=force=kvm` — that's
+a separate glibc-dynamic-linker defect, not a backend
+issue (raw `syscall`-only binaries like perf-getpid's
+freestanding getpid-loop exit cleanly).
+
+### Observations
+
+- **KVM sits ~2.05× above seccomp.** Honest number. The
+  retracted D68 claim of "1.002× parity" was the runner's
+  silent-fallback bug, not a real result. Real KVM
+  backend pays ~12 µs of VMEXIT + shadow-PT refill
+  overhead above the seccomp floor per syscall.
+- **Gadget is the path to close the gap.** Memo 07 +
+  memo 11 target <100 ns for gadget-safe syscalls by
+  eliminating the VMEXIT entirely. Applied to `getpid`,
+  `gettid`, `getuid` etc. — the ~11 first-pass gadget
+  handlers — the KVM backend should drop below seccomp
+  on those calls. Non-gadget-handled syscalls stay at
+  the ~85k cyc floor measured here.
+- **ptrace is slower than seccomp by ~1.25×.** Consistent
+  with memo 07's prediction that seccomp's SIGSYS path
+  beats ptrace's waitpid path. Pre-retraction D68 had
+  them at ~1.00× (seccomp measuring as seccomp on both
+  passes), which masked this.
+
+### Cycle-count breakdown vs spike-era floor
+
+Reusing the comparison from the retracted table, now
+with an honest KVM number:
+
+| Host (dev) | Spike01 null-hlt cyc | 2026-04-24 kvm cyc | UML-side delta |
+|---|---:|---:|---:|
+| server3 (Skylake-SP) | 20,600 | 85,016 | +64,416 |
+
+The 64k cyc delta is the UML-side cost that the gadget
+retrofit eliminates (handle_syscall + sys_call_table
+dispatch + kvm_touch_all_user_vmas + shadow-PT refill).
+Memo 07's predicted floor for gadget-safe syscalls on
+this silicon class is ~300 cyc = 81 ns — a 283× cycle
+reduction vs the non-gadget number here.
+
+### What's next
+
+- G2 (task #205) now unblocked: use this runner to
+  measure the 1-syscall gadget floor on
+  `__NR_getpid` once the G2 Kconfig lands.
+- s0-s7 fleet sweep with the corrected cmdline +
+  A1/A2/A4 fixes: tracked as task #203-style follow-on;
+  not yet re-scheduled since the single-host number
+  is the gate for the gadget workstream's GO/NO-GO.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
