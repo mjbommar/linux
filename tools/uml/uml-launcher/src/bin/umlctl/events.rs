@@ -29,7 +29,7 @@ use std::io::Write;
 use super::manifest;
 use super::paths::Paths;
 use super::run;
-use super::EventsArgs;
+use super::{AssertArgs, EventsArgs};
 
 /// A single spine event. `extra` carries the schema-specific
 /// payload as a pre-serialized JSON object; it's spliced into
@@ -134,41 +134,7 @@ pub fn emit(paths: &Paths, run_id: &str, event: Event<'_>) -> Result<()> {
 /// name-or-run-id, applies filters + --since + --tail, prints
 /// matching lines; optionally follows.
 pub fn cmd_tail(paths: &Paths, args: &EventsArgs) -> Result<()> {
-    // Name-or-run-id: 26-char Crockford ULIDs are
-    // distinguishable from instance names — names must start
-    // with [a-z0-9] but may only contain [a-z0-9_.-], so they
-    // can't include the letters V/W/X/Y/Z that appear in
-    // Crockford base32 in uppercase. Simpler disambiguation:
-    // exactly 26 ASCII-uppercase-or-digit chars → treat as run_id.
-    let is_ulid = args.name_or_run_id.len() == 26
-        && args
-            .name_or_run_id
-            .chars()
-            .all(|c| c.is_ascii_digit() || (c.is_ascii_uppercase() && c != 'I' && c != 'L' && c != 'O' && c != 'U'));
-
-    let run_id = if is_ulid {
-        args.name_or_run_id.clone()
-    } else {
-        let manifest_path = paths.manifest_path(&args.name_or_run_id);
-        if !manifest_path.exists() {
-            eprintln!("umlctl: instance '{}' not found", args.name_or_run_id);
-            std::process::exit(3);
-        }
-        let live = super::supervise::read_run_id_file(
-            &paths.run_id_file_path(&args.name_or_run_id),
-        );
-        match live.or_else(|| run::latest_run_for(paths, &args.name_or_run_id)) {
-            Some(id) => id,
-            None => {
-                eprintln!(
-                    "umlctl: no events bundle for instance '{}'",
-                    args.name_or_run_id
-                );
-                std::process::exit(7);
-            }
-        }
-    };
-
+    let run_id = resolve_name_or_run_id(paths, &args.name_or_run_id);
     let events_path = paths.run_dir(&run_id).join("events.jsonl");
     if !events_path.exists() {
         eprintln!("umlctl: events.jsonl missing for run {}", run_id);
@@ -356,6 +322,182 @@ fn follow_events(
                 print!("{line}");
             }
             Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// `umlctl assert` dispatch. Reads the resolved bundle's
+/// events.jsonl and evaluates every `--no-*` / `--deny` /
+/// `--require` predicate. On any violation, writes a report
+/// to stderr and exits with code 1; on pass, prints a one-
+/// line OK summary (unless --quiet) and returns normally.
+///
+/// Designed so a kselftest can replace dmesg-grep with
+/// `umlctl assert $RUN --no-kasan --no-kcsan --no-panic`
+/// and get a structured pass/fail + counts + sample
+/// offending events — no more fragile regexes.
+pub fn cmd_assert(paths: &Paths, args: &AssertArgs, quiet: bool) -> Result<()> {
+    let run_id = resolve_name_or_run_id(paths, &args.name_or_run_id);
+    let events_path = paths.run_dir(&run_id).join("events.jsonl");
+    if !events_path.exists() {
+        eprintln!("umlctl: events.jsonl missing for run {}", run_id);
+        std::process::exit(7);
+    }
+
+    // Read everything into memory. Bundle sizes are bounded by
+    // the producer (ring overflow in later phases emits gap
+    // markers instead of growing unbounded); it's fine to
+    // slurp here.
+    let content = std::fs::read_to_string(&events_path)
+        .with_context(|| format!("read {}", events_path.display()))?;
+
+    // Build predicate list.
+    let mut denies: Vec<String> = Vec::new();
+    let mut requires: Vec<String> = Vec::new();
+
+    if args.no_panic {
+        denies.push("uml.panic.v1".into());
+    }
+    if args.no_oom {
+        denies.push("uml.oom.v1".into());
+    }
+    if args.no_kasan {
+        denies.push("uml.sanitizer.kasan.v1".into());
+    }
+    if args.no_kcsan {
+        denies.push("uml.sanitizer.kcsan.v1".into());
+    }
+    if args.no_kmsan {
+        denies.push("uml.sanitizer.kmsan.v1".into());
+    }
+    if args.no_kfence {
+        denies.push("uml.sanitizer.kfence.v1".into());
+    }
+    if args.no_ubsan {
+        denies.push("uml.sanitizer.ubsan.v1".into());
+    }
+    if args.no_rcu_stall {
+        denies.push("uml.rcu_stall.v1".into());
+    }
+    if args.no_lockdep {
+        denies.push("uml.lockdep.v1".into());
+    }
+    if args.no_watchdog_stall {
+        denies.push("uml.watchdog_stall.v1".into());
+    }
+
+    // Additional --deny / --require predicates. Preserve
+    // user order so the violation report matches invocation
+    // order.
+    denies.extend(args.deny.iter().cloned());
+    requires.extend(args.require.iter().cloned());
+
+    if denies.is_empty() && requires.is_empty() {
+        eprintln!("umlctl: assert needs at least one predicate (--no-*, --deny, or --require)");
+        std::process::exit(2);
+    }
+
+    // Tally per-schema. Pre-seed zero counts for --require
+    // schemas so "zero observed" registers.
+    let mut counts: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for s in denies.iter().chain(requires.iter()) {
+        counts.entry(s.clone()).or_default();
+    }
+
+    let mut total_events = 0usize;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        total_events += 1;
+        let Ok(parsed): serde_json::Result<serde_json::Value> = serde_json::from_str(line) else {
+            continue;
+        };
+        let schema = parsed
+            .get("schema")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if let Some(bucket) = counts.get_mut(schema) {
+            // Cap the sample per schema; full list wasteful in
+            // CI logs when a kernel spews 500 KASAN reports.
+            if bucket.len() < 3 {
+                bucket.push(line.to_string());
+            } else {
+                bucket.push(String::new()); // Count-only marker.
+            }
+        }
+    }
+
+    // Evaluate predicates.
+    let mut violations: Vec<String> = Vec::new();
+    for s in &denies {
+        let hits = counts.get(s).map(Vec::len).unwrap_or(0);
+        if hits > 0 {
+            let samples = counts.get(s).unwrap();
+            let sample_lines: Vec<&str> = samples
+                .iter()
+                .filter(|l| !l.is_empty())
+                .map(String::as_str)
+                .collect();
+            let mut msg = format!("  deny[{s}]: {hits} event(s)");
+            for sample in sample_lines.iter().take(3) {
+                msg.push_str(&format!("\n    {sample}"));
+            }
+            if hits > 3 {
+                msg.push_str(&format!("\n    ... + {} more suppressed", hits - 3));
+            }
+            violations.push(msg);
+        }
+    }
+    for s in &requires {
+        let hits = counts.get(s).map(Vec::len).unwrap_or(0);
+        if hits == 0 {
+            violations.push(format!("  require[{s}]: 0 events (expected >= 1)"));
+        }
+    }
+
+    if violations.is_empty() {
+        if !quiet {
+            println!(
+                "umlctl assert: OK (run {run_id}, {} event(s), {} predicate(s))",
+                total_events,
+                denies.len() + requires.len()
+            );
+        }
+        return Ok(());
+    }
+
+    eprintln!(
+        "umlctl assert FAILED for run {run_id} ({} event(s), {} violation(s))",
+        total_events,
+        violations.len()
+    );
+    for v in &violations {
+        eprintln!("{v}");
+    }
+    std::process::exit(1);
+}
+
+fn resolve_name_or_run_id(paths: &Paths, raw: &str) -> String {
+    let is_ulid = raw.len() == 26
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_digit() || (c.is_ascii_uppercase() && c != 'I' && c != 'L' && c != 'O' && c != 'U'));
+    if is_ulid {
+        return raw.to_string();
+    }
+    let manifest_path = paths.manifest_path(raw);
+    if !manifest_path.exists() {
+        eprintln!("umlctl: instance '{}' not found", raw);
+        std::process::exit(3);
+    }
+    let live = super::supervise::read_run_id_file(&paths.run_id_file_path(raw));
+    match live.or_else(|| run::latest_run_for(paths, raw)) {
+        Some(id) => id,
+        None => {
+            eprintln!("umlctl: no events bundle for instance '{}'", raw);
+            std::process::exit(7);
         }
     }
 }

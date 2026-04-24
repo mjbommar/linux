@@ -84,6 +84,10 @@ enum Cmd {
     Schema(SchemaArgs),
     /// Tail structured events.jsonl emitted by the spine.
     Events(EventsArgs),
+    /// CI-style predicate check against events.jsonl. Exits 1
+    /// on any violation, 0 otherwise. Replaces dmesg-grep in
+    /// kselftests.
+    Assert(AssertArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -253,6 +257,53 @@ struct EventsArgs {
     since: Option<String>,
 }
 
+#[derive(clap::Args, Debug)]
+pub struct AssertArgs {
+    /// Instance name or literal 26-char ULID run_id.
+    pub name_or_run_id: String,
+
+    /// Fail if any event with `schema=uml.panic.v1` is present.
+    #[arg(long)]
+    pub no_panic: bool,
+    /// Fail if any `uml.oom.v1` event is present.
+    #[arg(long)]
+    pub no_oom: bool,
+    /// Fail if any `uml.sanitizer.kasan.v1` event is present.
+    #[arg(long)]
+    pub no_kasan: bool,
+    /// Fail if any `uml.sanitizer.kcsan.v1` event is present.
+    #[arg(long)]
+    pub no_kcsan: bool,
+    /// Fail if any `uml.sanitizer.kmsan.v1` event is present.
+    #[arg(long)]
+    pub no_kmsan: bool,
+    /// Fail if any `uml.sanitizer.kfence.v1` event is present.
+    #[arg(long)]
+    pub no_kfence: bool,
+    /// Fail if any `uml.sanitizer.ubsan.v1` event is present.
+    #[arg(long)]
+    pub no_ubsan: bool,
+    /// Fail if any `uml.rcu_stall.v1` event is present.
+    #[arg(long)]
+    pub no_rcu_stall: bool,
+    /// Fail if any `uml.lockdep.v1` event is present.
+    #[arg(long)]
+    pub no_lockdep: bool,
+    /// Fail if any `uml.watchdog_stall.v1` event is present.
+    #[arg(long)]
+    pub no_watchdog_stall: bool,
+
+    /// Additional deny predicates: fail if the schema appears.
+    /// Repeatable (e.g. `--deny uml.custom.my_check.v1`).
+    #[arg(long, value_name = "SCHEMA", action = clap::ArgAction::Append)]
+    pub deny: Vec<String>,
+
+    /// Require-at-least predicates: fail if the schema does
+    /// NOT appear. Repeatable.
+    #[arg(long, value_name = "SCHEMA", action = clap::ArgAction::Append)]
+    pub require: Vec<String>,
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("umlctl: {e:#}");
@@ -277,11 +328,16 @@ fn run() -> Result<()> {
         Cmd::Logs(args) => cmd_logs(&paths, args),
         Cmd::Schema(_) => cmd_schema(cli.json),
         Cmd::Events(args) => cmd_events(&paths, args),
+        Cmd::Assert(args) => cmd_assert(&paths, args, cli.quiet),
     }
 }
 
 fn cmd_events(paths: &paths::Paths, args: EventsArgs) -> Result<()> {
     events::cmd_tail(paths, &args)
+}
+
+fn cmd_assert(paths: &paths::Paths, args: AssertArgs, quiet: bool) -> Result<()> {
+    events::cmd_assert(paths, &args, quiet)
 }
 
 fn cmd_schema(json: bool) -> Result<()> {

@@ -283,6 +283,35 @@ DIRECT_OUT=$("$UMLCTL_BIN" $ARGS events "$N2_RUN_ID" --filter event.action=stop)
 rc=$?
 [ $rc -eq 1 ] || fail "bad filter should exit 1, got $rc"
 
+# --- umlctl assert ---
+# Pass case: no sanitizer events in a fake-kernel run.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" \
+	--no-kasan --no-kcsan --no-panic --no-oom --no-rcu-stall \
+	|| fail "assert --no-* predicates should pass on a clean fake-kernel run"
+
+# Pass case: require a schema that IS emitted.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" --require uml.lifecycle.v1 \
+	|| fail "assert --require uml.lifecycle.v1 should pass"
+
+# Fail case: require a schema that is NOT emitted.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" --require uml.panic.v1 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "assert --require uml.panic.v1 should fail (rc=$rc)"
+
+# Fail case: inject a synthetic KASAN event + assert --no-kasan.
+EV2="$STATE_DIR/runs/$N2_RUN_ID/events.jsonl"
+cat >> "$EV2" <<SYNTH
+{"@timestamp":"2026-04-23T23:00:00Z","host_ts_ns":99,"run_id":"$N2_RUN_ID","instance":"$N2","schema":"uml.sanitizer.kasan.v1","event.category":"sanitizer","event.severity":"error","event.action":"use-after-free"}
+SYNTH
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" --no-kasan 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "assert --no-kasan should fail after synthetic injection (rc=$rc)"
+
+# Misuse: assert with no predicates → exit 2.
+"$UMLCTL_BIN" $ARGS assert "$N2" 2>/dev/null
+rc=$?
+[ $rc -eq 2 ] || fail "assert with no predicates should exit 2 (got $rc)"
+
 "$UMLCTL_BIN" $ARGS rm "$N2" >/dev/null
 
 # --- Part F: no orphans ---

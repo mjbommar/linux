@@ -1,10 +1,10 @@
 # uml-observability-spine — the unifying telemetry architecture for UML tooling
 
 **Status:** PROPOSED — future phase. Parking lot (2026-04-23).
-Phase O1.1 (run_id + bundle dir + boot-offset clock), O1.3
-(schema registry + events.jsonl), and O1.5 (events tail
-verb) landed 2026-04-23 as the umlctl follow-on; remaining
-O1 sub-lifts + O2-O6 remain parking-lot. Not in the A/B/C/D plan. This memo is
+Phase O1 is ~67% landed as of 2026-04-23 (sub-lifts O1.1 +
+O1.3 + O1.5 + O1.6, four of six); sub-lifts O1.2 (split
+kernel console + dmesg verb) and O1.4 (umlctl export)
+remain parking-lot. O2-O6 also remain parking-lot. Not in the A/B/C/D plan. This memo is
 an **architectural spine**, not a shippable tool — it
 specifies the shared schema + transport + bundle format
 that the seven already-proposed observability tools in this
@@ -439,9 +439,16 @@ status trails each line (**[LANDED]** / **[pending]**).
   or RFC3339 absolute, tails/follows. Name-vs-run_id
   disambiguation by shape (26-char Crockford =
   run_id). **[LANDED 2026-04-23]**
-- O1.6 — `umlctl assert <name> --no-kasan ...` CI-style
-  predicates over events. Replaces dmesg-grep in
-  selftests. **[pending]**
+- O1.6 — `umlctl assert <name_or_run_id> [predicates]`
+  CI-style pass/fail over events.jsonl. Built-in aliases
+  (`--no-panic`, `--no-oom`, `--no-kasan`, `--no-kcsan`,
+  `--no-kmsan`, `--no-kfence`, `--no-ubsan`,
+  `--no-rcu-stall`, `--no-lockdep`, `--no-watchdog-stall`)
+  plus generic `--deny <schema>` / `--require <schema>`.
+  Reports per-predicate counts + up to 3 sample matches
+  on failure; replaces dmesg-grep in kselftests. Exit 0
+  pass / 1 violation / 2 misuse (no predicates) / 3 not
+  found / 7 no bundle. **[LANDED 2026-04-23]**
 
 **Phase O2 — host-side observability (2-4 weeks):**
 
