@@ -82,6 +82,8 @@ enum Cmd {
     Logs(LogsArgs),
     /// List declared observability-spine event schemas.
     Schema(SchemaArgs),
+    /// Tail structured events.jsonl emitted by the spine.
+    Events(EventsArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -223,6 +225,34 @@ struct LogsArgs {
 #[derive(clap::Args, Debug)]
 struct SchemaArgs {}
 
+#[derive(clap::Args, Debug)]
+struct EventsArgs {
+    /// Instance name to resolve the latest run_id from, or a
+    /// literal 26-char ULID run_id to read directly.
+    name_or_run_id: String,
+
+    /// Follow new events as they arrive (like `tail -f`).
+    #[arg(short, long)]
+    follow: bool,
+
+    /// Show only the last N events before following.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    tail: usize,
+
+    /// Filter expressions, repeatable. Form: `<field>=<value>`
+    /// where `<field>` matches a top-level JSON key verbatim
+    /// (e.g. `event.category=sanitizer`, `schema=uml.panic.v1`,
+    /// `pid=12345`). Combined with AND.
+    #[arg(long = "filter", value_name = "K=V", action = clap::ArgAction::Append)]
+    filters: Vec<String>,
+
+    /// Only events with `host_ts_ns` >= now - <duration>.
+    /// Accepts `30s`, `10m`, `2h`, `1d`, or a raw RFC3339
+    /// wall-clock instant (compared against `@timestamp`).
+    #[arg(long, value_name = "DURATION_OR_RFC3339")]
+    since: Option<String>,
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("umlctl: {e:#}");
@@ -246,7 +276,12 @@ fn run() -> Result<()> {
         Cmd::Ps(args) => cmd_ps(&paths, args, cli.json, cli.quiet),
         Cmd::Logs(args) => cmd_logs(&paths, args),
         Cmd::Schema(_) => cmd_schema(cli.json),
+        Cmd::Events(args) => cmd_events(&paths, args),
     }
+}
+
+fn cmd_events(paths: &paths::Paths, args: EventsArgs) -> Result<()> {
+    events::cmd_tail(paths, &args)
 }
 
 fn cmd_schema(json: bool) -> Result<()> {

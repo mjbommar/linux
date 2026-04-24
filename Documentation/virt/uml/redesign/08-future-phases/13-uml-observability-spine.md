@@ -1,10 +1,10 @@
 # uml-observability-spine — the unifying telemetry architecture for UML tooling
 
 **Status:** PROPOSED — future phase. Parking lot (2026-04-23).
-Phase O1.1 (run_id + bundle dir + boot-offset clock) and
-O1.3 (schema registry + events.jsonl) landed 2026-04-23
-as the umlctl follow-on; remaining O1 sub-lifts + O2-O6
-remain parking-lot. Not in the A/B/C/D plan. This memo is
+Phase O1.1 (run_id + bundle dir + boot-offset clock), O1.3
+(schema registry + events.jsonl), and O1.5 (events tail
+verb) landed 2026-04-23 as the umlctl follow-on; remaining
+O1 sub-lifts + O2-O6 remain parking-lot. Not in the A/B/C/D plan. This memo is
 an **architectural spine**, not a shippable tool — it
 specifies the shared schema + transport + bundle format
 that the seven already-proposed observability tools in this
@@ -430,8 +430,15 @@ status trails each line (**[LANDED]** / **[pending]**).
   consumer. **[LANDED 2026-04-23]**
 - O1.4 — `umlctl export --bundle` → `.umlbundle.tar.zst`.
   **[pending]**
-- O1.5 — `umlctl events <name> --filter ...` verb.
-  **[pending]**
+- O1.5 — `umlctl events <name_or_run_id> --filter ...
+  --since ... --tail N [-f]` verb. Reads events.jsonl from
+  the resolved bundle, applies AND-combined key=value
+  filters against top-level JSON keys (so
+  `event.category=sanitizer` or `schema=uml.panic.v1` both
+  work), honors `--since` as duration (`30s`/`5m`/`2h`/`1d`)
+  or RFC3339 absolute, tails/follows. Name-vs-run_id
+  disambiguation by shape (26-char Crockford =
+  run_id). **[LANDED 2026-04-23]**
 - O1.6 — `umlctl assert <name> --no-kasan ...` CI-style
   predicates over events. Replaces dmesg-grep in
   selftests. **[pending]**

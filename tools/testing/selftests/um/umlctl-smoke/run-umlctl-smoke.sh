@@ -258,6 +258,31 @@ echo "$SCHEMA_OUT" | grep -q uml.panic.v1 \
 echo "$SCHEMA_OUT" | grep -q uml.oom.v1 \
 	|| fail "schema verb missing uml.oom.v1"
 
+# umlctl events <name> reads the latest bundle's events.jsonl.
+EVENTS_OUT=$("$UMLCTL_BIN" $ARGS events "$N2")
+[ "$(echo "$EVENTS_OUT" | wc -l)" = "2" ] \
+	|| fail "events verb should return 2 lifecycle events, got: $EVENTS_OUT"
+echo "$EVENTS_OUT" | grep -q '"event.action":"start"' \
+	|| fail "events output missing start action"
+echo "$EVENTS_OUT" | grep -q '"event.action":"stop"' \
+	|| fail "events output missing stop action"
+
+# --filter event.action=start narrows to one event.
+FILT_OUT=$("$UMLCTL_BIN" $ARGS events "$N2" --filter event.action=start)
+[ "$(echo "$FILT_OUT" | wc -l)" = "1" ] \
+	|| fail "filter event.action=start should narrow to 1, got: $FILT_OUT"
+
+# Name-or-run-id ambiguity: passing the literal run_id reads
+# the bundle directly without looking up the instance.
+DIRECT_OUT=$("$UMLCTL_BIN" $ARGS events "$N2_RUN_ID" --filter event.action=stop)
+[ "$(echo "$DIRECT_OUT" | wc -l)" = "1" ] \
+	|| fail "events <run_id> should resolve directly, got: $DIRECT_OUT"
+
+# Bad filter → exit 1.
+"$UMLCTL_BIN" $ARGS events "$N2" --filter bogus 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "bad filter should exit 1, got $rc"
+
 "$UMLCTL_BIN" $ARGS rm "$N2" >/dev/null
 
 # --- Part F: no orphans ---

@@ -22,13 +22,14 @@
 // means consumer tooling can be written against a stable
 // surface before the producers exist.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::io::Write;
 
 use super::manifest;
 use super::paths::Paths;
 use super::run;
+use super::EventsArgs;
 
 /// A single spine event. `extra` carries the schema-specific
 /// payload as a pre-serialized JSON object; it's spliced into
@@ -127,6 +128,236 @@ pub fn emit(paths: &Paths, run_id: &str, event: Event<'_>) -> Result<()> {
         .with_context(|| format!("open {}", path.display()))?;
     writeln!(f, "{line}").context("write event line")?;
     Ok(())
+}
+
+/// `umlctl events` dispatch. Resolves the bundle from a
+/// name-or-run-id, applies filters + --since + --tail, prints
+/// matching lines; optionally follows.
+pub fn cmd_tail(paths: &Paths, args: &EventsArgs) -> Result<()> {
+    // Name-or-run-id: 26-char Crockford ULIDs are
+    // distinguishable from instance names — names must start
+    // with [a-z0-9] but may only contain [a-z0-9_.-], so they
+    // can't include the letters V/W/X/Y/Z that appear in
+    // Crockford base32 in uppercase. Simpler disambiguation:
+    // exactly 26 ASCII-uppercase-or-digit chars → treat as run_id.
+    let is_ulid = args.name_or_run_id.len() == 26
+        && args
+            .name_or_run_id
+            .chars()
+            .all(|c| c.is_ascii_digit() || (c.is_ascii_uppercase() && c != 'I' && c != 'L' && c != 'O' && c != 'U'));
+
+    let run_id = if is_ulid {
+        args.name_or_run_id.clone()
+    } else {
+        let manifest_path = paths.manifest_path(&args.name_or_run_id);
+        if !manifest_path.exists() {
+            eprintln!("umlctl: instance '{}' not found", args.name_or_run_id);
+            std::process::exit(3);
+        }
+        let live = super::supervise::read_run_id_file(
+            &paths.run_id_file_path(&args.name_or_run_id),
+        );
+        match live.or_else(|| run::latest_run_for(paths, &args.name_or_run_id)) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "umlctl: no events bundle for instance '{}'",
+                    args.name_or_run_id
+                );
+                std::process::exit(7);
+            }
+        }
+    };
+
+    let events_path = paths.run_dir(&run_id).join("events.jsonl");
+    if !events_path.exists() {
+        eprintln!("umlctl: events.jsonl missing for run {}", run_id);
+        std::process::exit(7);
+    }
+
+    let filters = parse_filters(&args.filters)?;
+    let since = args
+        .since
+        .as_deref()
+        .map(parse_since)
+        .transpose()
+        .context("parse --since")?;
+
+    // Read existing content, apply tail/since/filters.
+    let content = std::fs::read_to_string(&events_path)
+        .with_context(|| format!("read {}", events_path.display()))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut matched: Vec<String> = Vec::new();
+    for line in &lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // Skip corrupt lines.
+        };
+        if !event_matches(&parsed, &filters) {
+            continue;
+        }
+        if let Some(since) = &since {
+            if !event_is_after(&parsed, since) {
+                continue;
+            }
+        }
+        matched.push((*line).to_string());
+    }
+
+    let start = if args.tail > 0 && args.tail < matched.len() {
+        matched.len() - args.tail
+    } else {
+        0
+    };
+    for line in &matched[start..] {
+        println!("{line}");
+    }
+
+    if args.follow {
+        follow_events(&events_path, &filters, since.as_ref())?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct FilterExpr {
+    key: String,
+    value: String,
+}
+
+fn parse_filters(raw: &[String]) -> Result<Vec<FilterExpr>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for s in raw {
+        let (k, v) = s
+            .split_once('=')
+            .ok_or_else(|| anyhow!("filter must be K=V, got {s:?}"))?;
+        out.push(FilterExpr {
+            key: k.to_string(),
+            value: v.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn event_matches(ev: &serde_json::Value, filters: &[FilterExpr]) -> bool {
+    let Some(obj) = ev.as_object() else {
+        return false;
+    };
+    for f in filters {
+        let actual = match obj.get(&f.key) {
+            Some(v) => match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
+            None => return false,
+        };
+        // Allow filter values to match either the exact string
+        // or the JSON-literal form (for numbers), so both
+        // `pid=12345` and `schema=uml.panic.v1` work the same.
+        let want = &f.value;
+        if actual != *want && actual.trim_matches('"') != want.as_str() {
+            return false;
+        }
+    }
+    true
+}
+
+/// `--since` accepts `30s|5m|2h|1d` relative or RFC3339 absolute.
+/// Returns a pair `(host_ts_ns_floor, wall_ts_floor_rfc3339)`;
+/// events pass if *either* comparison succeeds (we accept the
+/// later of the two clocks so operators don't get tripped by
+/// a clock skew between host_ts_ns and @timestamp).
+enum Since {
+    /// CLOCK_BOOTTIME floor in nanoseconds.
+    HostNs(u64),
+    /// RFC3339 wall-clock floor.
+    Wall(String),
+}
+
+fn parse_since(s: &str) -> Result<Since> {
+    if let Some(d) = parse_duration(s) {
+        let now_ns = run::boottime_ns();
+        let floor = now_ns.saturating_sub(d);
+        return Ok(Since::HostNs(floor));
+    }
+    // Assume RFC3339; defer to time's parser for validation.
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    OffsetDateTime::parse(s, &Rfc3339)
+        .map(|_| Since::Wall(s.to_string()))
+        .map_err(|e| anyhow!("--since {s:?} not a duration (30s/5m/2h/1d) or RFC3339: {e}"))
+}
+
+fn parse_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, unit_str) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num_str.parse().ok()?;
+    let ns = match unit_str {
+        "s" => n * 1_000_000_000,
+        "m" => n * 60 * 1_000_000_000,
+        "h" => n * 3600 * 1_000_000_000,
+        "d" => n * 86400 * 1_000_000_000,
+        _ => return None,
+    };
+    Some(ns)
+}
+
+fn event_is_after(ev: &serde_json::Value, since: &Since) -> bool {
+    match since {
+        Since::HostNs(floor) => ev
+            .get("host_ts_ns")
+            .and_then(|v| v.as_u64())
+            .map(|ns| ns >= *floor)
+            .unwrap_or(false),
+        Since::Wall(floor_rfc3339) => ev
+            .get("@timestamp")
+            .and_then(|v| v.as_str())
+            .map(|ts| ts >= floor_rfc3339.as_str())
+            .unwrap_or(false),
+    }
+}
+
+fn follow_events(
+    path: &std::path::Path,
+    filters: &[FilterExpr],
+    since: Option<&Since>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Seek};
+    let f = std::fs::File::open(path)
+        .with_context(|| format!("reopen events for follow: {}", path.display()))?;
+    let mut reader = BufReader::new(f);
+    reader.seek(std::io::SeekFrom::End(0)).ok();
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Ok(_) => {
+                let trimmed = line.trim_end_matches('\n');
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if !event_matches(&parsed, filters) {
+                    continue;
+                }
+                if let Some(since) = since {
+                    if !event_is_after(&parsed, since) {
+                        continue;
+                    }
+                }
+                print!("{line}");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 /// Convenience for the umlctl lifecycle emissions
