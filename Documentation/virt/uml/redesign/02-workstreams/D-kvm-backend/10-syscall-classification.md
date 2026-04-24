@@ -254,11 +254,15 @@ extra wiring.
 
 Memory-map-mutating syscalls in class A (`mmap`,
 `munmap`, `mprotect`, `brk`, `mremap`, `execve`) trigger
-`mm_map` / `mm_unmap` ops which already call
-`kvm_shadow_invalidate_va_range` (landed in memo 08
-sub-commit #5b). So even this subset needs no
+`mm_map` / `mm_unmap` ops which in turn call
+`kvm_shadow_invalidate_va_range` (landed 2026-04-24
+under audit round-5 F6). So even this subset needs no
 syscall-specific handling at the dispatcher — the mm
-layer's existing hooks are the right place.
+layer's existing hooks are the right place. Note: the
+earlier claim that the invalidator "landed in memo 08
+sub-commit #5b" was incorrect — no such code existed
+until F6; audit round 5 caught the doc/implementation
+drift.
 
 ## IDT / exception classification
 

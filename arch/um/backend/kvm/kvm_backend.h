@@ -61,6 +61,24 @@ struct kvm_um {
 	u64		shadow_pgd_gpa;
 
 	/*
+	 * Audit round-5 F6: shadow-PT invalidation state. Set
+	 * whenever a PTE in the shadow PGD is cleared or
+	 * overwritten from non-vCPU context (mm_unmap / mm_map
+	 * from UML's mm layer). Cleared by kvm_enter_guest after
+	 * issuing a CR3 reload via KVM_SET_SREGS, which forces
+	 * the vCPU to flush its TLB on the next KVM_RUN per the
+	 * AMD64 SDM's "writes to CR3 flush non-global TLB
+	 * entries" architectural guarantee.
+	 *
+	 * Without this flag, stale TLB entries could survive a
+	 * mm_unmap and the guest would observe the old mapping
+	 * until its next spontaneous TLB flush. The singleton
+	 * shadow PGD model means there's only one CR3 that
+	 * matters, so a single bool suffices.
+	 */
+	bool		shadow_dirty;
+
+	/*
 	 * Memo 11 G3 gadget state page. Allocated lazily on
 	 * first kvm_enter_guest call; freed in shutdown.
 	 *   gadget_state_page — backing struct page *.
@@ -284,6 +302,18 @@ void kvm_setup_production_sregs(struct kvm_sregs *sregs,
  */
 int kvm_shadow_pgd_alloc(void);
 void kvm_shadow_pgd_free(void);
+
+/*
+ * Audit round-5 F6: zero the shadow PTEs that cover
+ * [va_start, va_start + len) and mark the singleton shadow PGD
+ * dirty so the next kvm_enter_guest triggers a CR3 reload (i.e.
+ * a guest TLB flush). Range is rounded down to page boundaries
+ * on the start side and up on the end side.
+ *
+ * Returns 0 on success, -ENODEV if the shadow PGD hasn't been
+ * allocated yet, -EINVAL on NULL/zero len.
+ */
+int kvm_shadow_invalidate_va_range(u64 va_start, u64 len);
 
 /*
  * Test hook: returns the current singleton shadow_pgd_gpa (or 0

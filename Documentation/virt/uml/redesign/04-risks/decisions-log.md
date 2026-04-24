@@ -8204,4 +8204,104 @@ offsets or side-channel timing the dispatch layout.
 
 ---
 
+## D82 (2026-04-24) — F6: implement kvm_shadow_invalidate_va_range; retract false doc claim
+
+**Decision.** Land `kvm_shadow_invalidate_va_range()`
+in lifecycle.c and wire it into both `kvm_mm_map()`
+and `kvm_mm_unmap()`. Add `shadow_dirty` field to
+struct kvm_um so future optimizations can track the
+state explicitly (current kvm_enter_guest already
+issues KVM_SET_SREGS with CR3 on every entry, which
+architecturally flushes the TLB — the dirty flag is
+belt-and-suspenders for the eventual transition away
+from the per-entry SREGS reload).
+
+**Finding.** Audit round-5 P0 #3 (F6) — "shadow page
+table invalidation/isolation is still missing. The
+implementation uses a singleton shadow PGD, only
+adds/overwrites present mappings, and kvm_mm_unmap()
+only calls os_unmap_memory() with no shadow
+invalidation or KVM TLB flush. The docs currently
+claim `kvm_shadow_invalidate_va_range` landed, but no
+such code exists." Correct on both counts:
+
+1. `kvm_mm_unmap()` at arch/um/backend/kvm/mm.c:107
+   was a 3-line thunk over `os_unmap_memory()` —
+   nothing touched the shadow PT. Stale PTEs
+   accumulated on every munmap.
+2. `Documentation/virt/uml/redesign/02-workstreams/
+   D-kvm-backend/10-syscall-classification.md:253`
+   claimed the invalidator "landed in memo 08
+   sub-commit #5b". That claim was false — it
+   described a design intention that never became
+   code.
+
+**Implementation shape.**
+
+- `kvm_shadow_invalidate_va_range(va_start, len)`:
+  page-at-a-time walk over the shadow PGD's 4-level
+  page tables, clears any leaf PTEs in [va_start,
+  va_start + len). Skips absent higher-level
+  entries (nothing to invalidate for an unmapped
+  sub-range). Marks `kvm_ctx.shadow_dirty = true`
+  when any PTE was actually cleared.
+- `kvm_mm_unmap()` calls it after `os_unmap_memory()`
+  succeeds.
+- `kvm_mm_map()` calls it BEFORE populating the new
+  mapping — covers mmap-over-mmap and
+  mprotect-then-populate cases where the old
+  mapping's PA could still be TLB-cached on the
+  vCPU.
+- `kvm_shadow_map_page()` (leaf install) also marks
+  dirty — any leaf change could shadow an old
+  mapping.
+
+**TLB flush.** kvm_enter_guest already calls
+`KVM_SET_SREGS` with CR3=shadow_pgd_gpa on every
+entry. Per AMD64 SDM vol 2 §5.5, a CR3 write flushes
+non-global TLB entries. Our shadow PT doesn't use the
+G-bit, so this flush covers the entire shadow PT
+address space. KVM's `kvm_mmu_new_pgd()` may optimize
+out the flush when CR3 is unchanged, but empirically
+(KUnit 35/35 + perf-getpid PASS + clock-loop real
+vvar + time/getcpu smoke byte-identical) the current
+behaviour is correct on our test matrix. A followon
+(task #231) will force-flush explicitly via a
+CR3-toggle trick if we ever observe a TLB-staleness
+regression.
+
+**Stale doc claim retracted.** The
+`10-syscall-classification.md:253` claim is updated
+to reflect the actual landing (this decision). Keeps
+the docs honest about what exists vs. what was
+intended.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass.
+- perf-getpid: kvm cyc=96 (within noise of the
+  post-F5 100 cyc; no regression from the
+  invalidation hook firing on every mm_map during
+  boot), ratio 0.002, PASS.
+- No new sleeping / blocking in the mm hooks —
+  the walk is a pure in-memory traversal and the
+  existing os_unmap_memory / os_map_memory calls
+  already provide the error path.
+
+**Refs.**
+
+- Audit round-5 finding #3 (F6).
+- arch/um/backend/kvm/kvm_backend.h — `struct kvm_um`
+  gains `shadow_dirty`; prototype for
+  `kvm_shadow_invalidate_va_range`.
+- arch/um/backend/kvm/lifecycle.c — implementation +
+  EXPORT_SYMBOL_GPL.
+- arch/um/backend/kvm/mm.c — mm_map + mm_unmap now
+  invalidate.
+- 10-syscall-classification.md:253 — retraction of
+  the stale "landed in memo 08 sub-commit #5b" claim.
+- task #225 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

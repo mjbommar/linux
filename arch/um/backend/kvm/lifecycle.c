@@ -784,10 +784,80 @@ int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
 	if (rc)
 		return rc;
 
+	/*
+	 * Audit round-5 F6: flag the shadow PGD dirty on any leaf
+	 * install. Overwriting a present PTE (mmap-over-mmap,
+	 * mprotect-then-populate) means the old physical mapping
+	 * may still be TLB-cached at the vCPU — mark so
+	 * kvm_enter_guest flushes CR3 before the next KVM_RUN.
+	 * For fresh installs the flag is conservatively dirty
+	 * too; KVM_SET_SREGS is cheap relative to a missed-flush
+	 * bug.
+	 */
 	pte[pte_i] = (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) |
 		     (leaf_flags | KVM_X86_PTE_P | KVM_X86_PTE_A);
+	kvm_ctx.shadow_dirty = true;
 	return 0;
 }
+
+/*
+ * Audit round-5 F6: clear shadow PTEs for [va_start, va_start+len)
+ * and mark the shadow PGD dirty. Uses a page-at-a-time walk
+ * because UML mm_unmap is typically called with ranges of one to
+ * a handful of pages — the cost of iterating each 4 KiB leaf is
+ * dominated by the eventual CR3 reload, not by the walk itself.
+ *
+ * Pure data transform on the shadow-PGD page tree. The TLB flush
+ * is deferred to the next kvm_enter_guest: issuing KVM_SET_SREGS
+ * from this context would be incorrect (wrong-vCPU-thread), and
+ * batching per entry would amplify the ioctl cost on a range
+ * that spans many pages. Matches the pattern used by upstream
+ * KVM's own mmu_notifier path.
+ *
+ * Missing higher-level entries (pgd/pud/pmd not present) skip
+ * that subrange — nothing to invalidate.
+ */
+int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
+{
+	u64 *pgd = kvm_ctx.shadow_pgd;
+	u64 va, va_end;
+	unsigned int cleared = 0;
+
+	if (!pgd)
+		return -ENODEV;
+	if (!len)
+		return -EINVAL;
+
+	va_end = (va_start + len + 0xfffULL) & ~0xfffULL;
+	for (va = va_start & ~0xfffULL; va < va_end; va += PAGE_SIZE) {
+		unsigned int pgd_i = (va >> 39) & 0x1ff;
+		unsigned int pud_i = (va >> 30) & 0x1ff;
+		unsigned int pmd_i = (va >> 21) & 0x1ff;
+		unsigned int pte_i = (va >> 12) & 0x1ff;
+		u64 pgde = pgd[pgd_i];
+		u64 *pud, *pmd, *pte;
+
+		if (!(pgde & KVM_X86_PTE_P))
+			continue;
+		pud = (u64 *)__va(pgde & 0x000ffffffffff000ULL);
+		if (!(pud[pud_i] & KVM_X86_PTE_P))
+			continue;
+		pmd = (u64 *)__va(pud[pud_i] & 0x000ffffffffff000ULL);
+		if (!(pmd[pmd_i] & KVM_X86_PTE_P))
+			continue;
+		pte = (u64 *)__va(pmd[pmd_i] & 0x000ffffffffff000ULL);
+
+		if (pte[pte_i] & KVM_X86_PTE_P) {
+			pte[pte_i] = 0;
+			cleared++;
+		}
+	}
+
+	if (cleared)
+		kvm_ctx.shadow_dirty = true;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 int kvm_backend_fd(void)

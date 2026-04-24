@@ -97,16 +97,49 @@ void kvm_mm_detach(struct mm_id *id)
 int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 	       int prot, int phys_fd, u64 offset)
 {
+	int rc;
+
 	(void)id;
 
-	return os_map_memory((void *)virt, phys_fd, offset, len,
-			     prot & UM_PROT_READ, prot & UM_PROT_WRITE,
-			     prot & UM_PROT_EXEC);
+	rc = os_map_memory((void *)virt, phys_fd, offset, len,
+			   prot & UM_PROT_READ, prot & UM_PROT_WRITE,
+			   prot & UM_PROT_EXEC);
+	if (rc)
+		return rc;
+
+	/*
+	 * Audit round-5 F6: if this mm_map replaces a previously-
+	 * present mapping (mmap-over-mmap, mprotect-then-populate),
+	 * the old physical page could still be TLB-cached at the
+	 * vCPU. Invalidate the shadow PT range so kvm_enter_guest
+	 * flushes CR3 before the next KVM_RUN. Harmless when the
+	 * range was previously unmapped — the invalidator skips
+	 * absent entries.
+	 */
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
+#endif
+	return 0;
 }
 
 int kvm_mm_unmap(struct mm_id *id, unsigned long virt, unsigned long len)
 {
+	int rc;
+
 	(void)id;
 
-	return os_unmap_memory((void *)virt, len);
+	rc = os_unmap_memory((void *)virt, len);
+	if (rc)
+		return rc;
+
+	/*
+	 * Audit round-5 F6: explicitly tear the shadow-PT entries
+	 * down and mark the PGD dirty. Previously mm_unmap relied
+	 * on nothing, so the vCPU could continue to see a page
+	 * that UML's own mm had already torn down.
+	 */
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
+#endif
+	return 0;
 }
