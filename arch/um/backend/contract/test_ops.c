@@ -1010,6 +1010,41 @@ static void kvm_syscall_classification_test(struct kunit *test)
 			kvm_classify_syscall(__NR_bpf),
 			_TEST_KVM_SYSCALL_CLASS_TRAP);
 
+	/*
+	 * Class E — gadget-handled (memo 11 G4-G6 + G7). These
+	 * entries must match the live LSTAR dispatch table in
+	 * arch/um/backend/kvm/thread.c. Adding or removing a
+	 * gadget handler requires updating both the LSTAR table
+	 * and syscall_class.c; this cross-check catches drift.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_getpid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_gettid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_getppid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_getuid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_geteuid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_getgid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_getegid),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_clock_gettime),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_sched_yield),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+
 	/* Class A — passthrough. Spot-check the hot-path defaults. */
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_read),
@@ -1043,21 +1078,28 @@ static void kvm_syscall_classification_test(struct kunit *test)
 
 /*
  * Inventory-size invariant. Memo 10 records "12 of 385 non-A"
- * as the working set. Walk every NR and count non-passthrough
- * classifications to catch drift (forgotten addition OR
- * accidental promotion of a passthrough entry).
+ * as the classifier-dispatched set (B + C + D); memo 11 G7 adds
+ * the class-E gadget-handled set, currently 9 entries. Walk
+ * every NR and count non-passthrough classifications to catch
+ * drift (forgotten addition OR accidental promotion of a
+ * passthrough entry). Total expected: 12 + 9 = 21.
  */
 static void kvm_syscall_class_count_test(struct kunit *test)
 {
 	unsigned long nr;
 	unsigned int non_a = 0;
+	unsigned int gadget = 0;
 
 	for (nr = 0; nr < NR_syscalls; nr++) {
-		if (kvm_classify_syscall(nr) !=
-		    _TEST_KVM_SYSCALL_CLASS_PASSTHROUGH)
+		enum kvm_syscall_class c = kvm_classify_syscall(nr);
+
+		if (c != _TEST_KVM_SYSCALL_CLASS_PASSTHROUGH)
 			non_a++;
+		if (c == _TEST_KVM_SYSCALL_CLASS_GADGET)
+			gadget++;
 	}
-	KUNIT_EXPECT_EQ(test, non_a, 12U);
+	KUNIT_EXPECT_EQ(test, non_a, 21U);
+	KUNIT_EXPECT_EQ(test, gadget, 9U);
 }
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */

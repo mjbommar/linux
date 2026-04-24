@@ -23,7 +23,7 @@ nr	name	class	rationale
 21	access	A	passthrough: sys_call_table[nr]
 22	pipe	A	passthrough: sys_call_table[nr]
 23	select	A	passthrough: sys_call_table[nr]
-24	sched_yield	A	passthrough: sys_call_table[nr]
+24	sched_yield	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 25	mremap	A	passthrough: sys_call_table[nr]
 26	msync	A	passthrough: sys_call_table[nr]
 27	mincore	A	passthrough: sys_call_table[nr]
@@ -38,7 +38,7 @@ nr	name	class	rationale
 36	getitimer	A	passthrough: sys_call_table[nr]
 37	alarm	A	passthrough: sys_call_table[nr]
 38	setitimer	A	passthrough: sys_call_table[nr]
-39	getpid	A	passthrough: sys_call_table[nr]
+39	getpid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 40	sendfile	A	passthrough: sys_call_table[nr]
 41	socket	A	passthrough: sys_call_table[nr]
 42	connect	A	passthrough: sys_call_table[nr]
@@ -101,15 +101,15 @@ nr	name	class	rationale
 99	sysinfo	A	passthrough: sys_call_table[nr]
 100	times	A	passthrough: sys_call_table[nr]
 101	ptrace	D	trap: UML emulates ptrace at its own layer; guest-issued ptrace is a bypass vector
-102	getuid	A	passthrough: sys_call_table[nr]
+102	getuid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 103	syslog	A	passthrough: sys_call_table[nr]
-104	getgid	A	passthrough: sys_call_table[nr]
+104	getgid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 105	setuid	A	passthrough: sys_call_table[nr]
 106	setgid	A	passthrough: sys_call_table[nr]
-107	geteuid	A	passthrough: sys_call_table[nr]
-108	getegid	A	passthrough: sys_call_table[nr]
+107	geteuid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
+108	getegid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 109	setpgid	A	passthrough: sys_call_table[nr]
-110	getppid	A	passthrough: sys_call_table[nr]
+110	getppid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 111	getpgrp	A	passthrough: sys_call_table[nr]
 112	setsid	A	passthrough: sys_call_table[nr]
 113	setreuid	A	passthrough: sys_call_table[nr]
@@ -185,7 +185,7 @@ nr	name	class	rationale
 183	afs_syscall	A	passthrough: sys_call_table[nr]
 184	tuxcall	A	passthrough: sys_call_table[nr]
 185	security	A	passthrough: sys_call_table[nr]
-186	gettid	A	passthrough: sys_call_table[nr]
+186	gettid	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 187	readahead	A	passthrough: sys_call_table[nr]
 188	setxattr	A	passthrough: sys_call_table[nr]
 189	lsetxattr	A	passthrough: sys_call_table[nr]
@@ -227,7 +227,7 @@ nr	name	class	rationale
 225	timer_getoverrun	A	passthrough: sys_call_table[nr]
 226	timer_delete	A	passthrough: sys_call_table[nr]
 227	clock_settime	A	passthrough: sys_call_table[nr]
-228	clock_gettime	A	passthrough: sys_call_table[nr]
+228	clock_gettime	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 229	clock_getres	A	passthrough: sys_call_table[nr]
 230	clock_nanosleep	A	passthrough: sys_call_table[nr]
 231	exit_group	A	passthrough: sys_call_table[nr]

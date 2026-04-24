@@ -121,6 +121,19 @@ enum kvm_syscall_class {
 	KVM_SYSCALL_CLASS_VCPU_STATE,
 	KVM_SYSCALL_CLASS_SIGFRAME,
 	KVM_SYSCALL_CLASS_TRAP,
+	/*
+	 * Memo 11 G7: syscalls whose fast path lives in the
+	 * in-guest LSTAR gadget (memo 11 G4-G6). A VMEXIT on a
+	 * CLASS_GADGET syscall means the gadget chose the
+	 * fallback path (retry budget exhausted, unsupported
+	 * args, or !CONFIG_UM_BACKEND_KVM_GADGET), in which case
+	 * the dispatcher handles it exactly like CLASS_PASSTHROUGH
+	 * — the class is a categorization marker for perf gates
+	 * and documentation, not a dispatcher branch. See
+	 * arch/um/backend/kvm/thread.c::kvm_decode_syscall, which
+	 * intentionally only checks for CLASS_TRAP short-circuit.
+	 */
+	KVM_SYSCALL_CLASS_GADGET,
 };
 
 enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);

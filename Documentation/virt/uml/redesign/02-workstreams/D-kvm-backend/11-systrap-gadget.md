@@ -260,6 +260,25 @@ testable. Dependency arrows enforce the order.
   10's inventory; perf runner picks up a second pass
   under `gadget=on` and gates the kvm_gadget:kvm_
   fallback ratio. Blocked by G6.
+
+  **Status (2026-04-24): LANDED.** Added
+  `KVM_SYSCALL_CLASS_GADGET = 4` to
+  `arch/um/backend/kvm/kvm_backend.h`; populated 9
+  entries in `syscall_class.c` (7 pid-family +
+  `clock_gettime` + `sched_yield`); renamed inventory
+  rows from A to E; updated memo 10 §"Class E". KUnit
+  `kvm_syscall_classification_test` now checks the 9
+  CLASS_GADGET bindings + count invariant (21 non-A:
+  3 B + 1 C + 8 D + 9 E). Extended
+  `run-perf-getpid.sh` to accept `UML_GADGET_BINARY`;
+  when set, runs one pass against the gadget kernel
+  (logged as `kvm`) and one against the fallback
+  kernel (logged as `kvm-fallback`), then gates on
+  `ratio_gadget_over_fallback ≤ MAX_GADGET_RATIO`
+  (default 0.20). On dev host the measured ratio is
+  0.001 — 1631× faster than the VMEXIT fallback,
+  well under the 5× gate. Single-binary mode still
+  works unchanged.
 - **G8 — s0–s7 fleet bench + D70.** Full three-way
   comparison (ptrace / seccomp / kvm-fallback /
   kvm-gadget) across all eight hosts. Measurements.md

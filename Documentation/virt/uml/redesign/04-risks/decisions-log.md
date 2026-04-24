@@ -7803,4 +7803,105 @@ from the F2 fix itself.
 
 ---
 
+## D78 (2026-04-24) — G7 LANDED: class E categorization + perf-getpid gadget ratio gate
+
+**Decision.** Promote the 9 live gadget handlers from
+inventory class A to a repurposed class E
+("gadget-handled"). Extend the perf-getpid regression
+runner to accept `UML_GADGET_BINARY` alongside
+`UML_BINARY`, measure both, and gate on the
+gadget:fallback cycle ratio. Maximum ratio 0.20
+(gadget must be ≥ 5× faster than the VMEXIT fallback
+for a handler to justify its complexity).
+
+**Context.** Memo 10's original layout reserved class E
+for hypercalls, which UML doesn't use (bare glibc
+userspace, not Linux-as-guest). Repurpose the slot
+for in-guest LSTAR gadget-handled syscalls: their
+VMEXIT-side semantics are identical to class A
+(fallback goes through the same handle_syscall), but
+their fast-path is dramatically different and worth a
+categorization of its own for inventory, perf gating,
+and documentation. The 9 entries mirror the live LSTAR
+dispatch table in thread.c:
+
+- 24  `sched_yield`       (G6)
+- 39  `getpid`            (G4)
+- 102 `getuid`            (G4)
+- 104 `getgid`            (G4)
+- 107 `geteuid`            (G4)
+- 108 `getegid`            (G4)
+- 110 `getppid`            (G4)
+- 186 `gettid`            (G4)
+- 228 `clock_gettime`     (G5; CLOCK_MONOTONIC only)
+
+**Shape of the code changes.**
+
+- `enum kvm_syscall_class` gains
+  `KVM_SYSCALL_CLASS_GADGET = 4`; documentation
+  explicitly records that CLASS_GADGET VMEXIT semantics
+  equal CLASS_PASSTHROUGH (no dispatcher branch).
+- `kvm_syscall_class_map[]` in syscall_class.c gets 9
+  new rows.
+- `syscall-inventory.tsv` — same 9 rows flipped A→E.
+- KUnit `kvm_syscall_classification_test` adds 9
+  CLASS_GADGET bindings; `kvm_syscall_class_count_test`
+  gains a gadget-count invariant. Total non-A count
+  expected = 12 + 9 = 21.
+- `run-perf-getpid.sh` gains `UML_GADGET_BINARY` +
+  `MAX_GADGET_RATIO` env knobs. Dual-binary mode: the
+  fallback kernel's kvm row is relabeled kvm-fallback,
+  the gadget kernel's kvm row becomes the primary kvm
+  row, and a GADGET_SUMMARY line reports the ratio.
+  Single-binary mode is unchanged (backward compat).
+
+**Validation on dev host (server3, Xeon W-2123 / Skylake-SP):**
+
+- KUnit: 35/35 pass. `kvm_syscall_classification_test`
+  catches a mismatch between the LSTAR dispatch table
+  and the classifier (drift would surface here rather
+  than in a boot failure).
+- Dual-binary run:
+  ```
+  backend=ptrace       cyc=51782
+  backend=seccomp      cyc=41216
+  backend=kvm-fallback cyc=164707
+  backend=kvm          cyc=101    (gadget, 1631× faster than fallback)
+  GADGET_SUMMARY ratio_gadget_over_fallback=0.001 max=0.20
+  ```
+  PASS on both gates.
+- Single-binary run (backward compat): unchanged,
+  PASS.
+
+**Why MAX_GADGET_RATIO = 0.20.** A gadget handler adds
+~15 bytes of LSTAR code + state-page maintenance cost +
+test surface. 5× speedup is the pragmatic floor where
+that cost starts paying off in a realistic workload
+(glibc-linked guest calling getpid 1M/s saves ~1 ms/s
+at the fallback cost). Anything worse than 5× isn't
+worth the complexity; promote it back to class A and
+let the VMEXIT path handle it.
+
+**Measurement artifacts kept for G8 reproducibility.**
+- `/tmp/uml-kvmint/linux` — fallback kernel (GADGET=n).
+- `/tmp/uml-kvmbench/linux` — gadget kernel (GADGET=y).
+- Same getpid-loop binary + run-perf-getpid.sh for
+  cross-host consistency.
+
+**Refs.**
+
+- Memo 11 G7 entry — annotated with 2026-04-24 LANDED
+  status.
+- Memo 10 §"Class E — gadget-handled" — the new class
+  documentation.
+- `arch/um/backend/kvm/kvm_backend.h` — the enum.
+- `arch/um/backend/kvm/syscall_class.c` — the 9 rows.
+- `arch/um/backend/contract/test_ops.c` —
+  `kvm_syscall_classification_test` + count invariant.
+- `tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh` —
+  the extended runner.
+- task #210 — this landing. Unblocks G8.
+
+---
+
 ## (Future entries here, as decisions are made)

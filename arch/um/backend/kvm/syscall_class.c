@@ -46,6 +46,27 @@ static const enum kvm_syscall_class kvm_syscall_class_map[NR_syscalls] = {
 	[__NR_kexec_file_load]	= KVM_SYSCALL_CLASS_TRAP,
 	[__NR_bpf]		= KVM_SYSCALL_CLASS_TRAP,
 
+	/*
+	 * Class E — gadget-handled (memo 11 G4-G6 + G7). The fast
+	 * path is the in-guest LSTAR gadget; a CLASS_GADGET VMEXIT
+	 * means the gadget chose the fallback, in which case the
+	 * dispatcher routes through CLASS_PASSTHROUGH semantics.
+	 * See enum kvm_syscall_class definition in kvm_backend.h.
+	 * The 9 entries below mirror the live LSTAR dispatch table
+	 * in arch/um/backend/kvm/thread.c; any drift is caught by
+	 * the KUnit cross-check in arch/um/backend/contract/
+	 * test_ops.c (kvm_class_e_inventory_test).
+	 */
+	[__NR_getpid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_gettid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_getppid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_getuid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_geteuid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_getgid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_getegid]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_clock_gettime]	= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_sched_yield]	= KVM_SYSCALL_CLASS_GADGET,
+
 	/* Everything else defaults to 0 = CLASS_PASSTHROUGH. */
 };
 

@@ -105,6 +105,7 @@ enum kvm_syscall_class {
 	_TEST_KVM_SYSCALL_CLASS_VCPU_STATE,
 	_TEST_KVM_SYSCALL_CLASS_SIGFRAME,
 	_TEST_KVM_SYSCALL_CLASS_TRAP,
+	_TEST_KVM_SYSCALL_CLASS_GADGET,		/* memo 11 G7 */
 };
 enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);
 

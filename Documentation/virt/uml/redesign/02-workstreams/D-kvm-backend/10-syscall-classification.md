@@ -43,16 +43,22 @@ Each syscall goes in exactly one of five boxes:
 
 | Class | Post-dispatch delta | Count on x86_64 |
 |---|---|---|
-| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 373 of 385 |
+| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 364 of 385 |
 | **B — vCPU-state propagate** | dispatch, then push an MSR/SREG delta to the vCPU via `KVM_SET_MSRS` / `KVM_SET_SREGS` | 3 |
 | **C — signal-frame** | `KVM_GET_REGS` → rebuild frame in guest memory → `KVM_SET_REGS` | 1 |
 | **D — deny** | return `-ENOSYS` or deliver `SIGSYS` without dispatching | 8 |
-| **E — hypercall** | unused; our guest is bare glibc userspace, not Linux-as-guest | 0 |
+| **E — gadget-handled** | in-guest LSTAR gadget fast path (no VMEXIT); fallback behaves like class A | 9 (memo 11 G7) |
 
-That's 12 non-A entries total — exhaustive. Every other
+That's 21 non-A entries total — exhaustive. Every other
 syscall, including every syscall Linux will add next
 release, inherits A by default. No per-release maintenance
 treadmill on the KVM backend's dispatcher.
+
+Class E repurposes the original "hypercall" slot. The 2026-04-24
+round-4 review confirmed we don't need a hypercall class for UML
+(bare glibc userspace, not Linux-as-guest), so E is recycled for
+the in-guest gadget fast path landed in memo 11 G4-G6. See
+§"Class E — gadget-handled" below.
 
 ## Class B — vCPU-state propagation (3 entries)
 
@@ -153,7 +159,80 @@ using `-ENOSYS` for anything other than "unknown
 syscall NR." Future tightening can surface SIGSYS via
 signal delivery (class C) for audit visibility.
 
-## Class A — everything else (373 entries)
+## Class E — gadget-handled (9 entries)
+
+The in-guest systrap gadget (memo 11 G4-G6) handles a small
+set of hot-path syscalls entirely inside the LSTAR trampoline,
+with no VMEXIT. Per-syscall implementation cost dropped from
+~13 µs (class A passthrough via VMEXIT) to ~28 ns (class E
+gadget) — a 460× speedup.
+
+The complete list. Mirror of the LSTAR dispatch in
+`arch/um/backend/kvm/thread.c::kvm_bootstrap_lstar_bytes`
+and the classifier in `arch/um/backend/kvm/syscall_class.c`:
+
+| NR | Name | Gadget source | Landed |
+|---|---|---|---|
+| 24 | `sched_yield` | `xor %eax,%eax; swapgs; sysretq` | G6 (2026-04-24) |
+| 39 | `getpid` | `%gs:TGID` via per-vCPU state page | G4 (2026-04-24) |
+| 102 | `getuid` | `%gs:UID` | G4 |
+| 104 | `getgid` | `%gs:GID` | G4 |
+| 107 | `geteuid` | `%gs:EUID` | G4 |
+| 108 | `getegid` | `%gs:EGID` | G4 |
+| 110 | `getppid` | `%gs:PPID` | G4 |
+| 186 | `gettid` | `%gs:TID` | G4 |
+| 228 | `clock_gettime` (CLOCK_MONOTONIC) | seqlock vvar page | G5 (2026-04-24) |
+
+### Fallback semantics
+
+Every gadget handler ends in `sysretq`. If the gadget chose
+the fallback path (seqlock retry budget exhausted, syscall
+arg outside the fast path e.g. `clock_gettime(CLOCK_TAI)`,
+or `!CONFIG_UM_BACKEND_KVM_GADGET`), the handler jumps to
+the dispatch-table fallback `out $0xf4; sysretq`. That
+generates a KVM_EXIT_IO on the SYSCALL port; the host-side
+`kvm_decode_syscall` then reaches the classifier and:
+
+- sees `CLASS_GADGET` for this NR,
+- falls through to `handle_syscall` exactly like `CLASS_PASSTHROUGH`.
+
+The effect is that class E is an A-path fast-path overlay:
+gate-off / fallback / disable-the-gadget all degrade
+gracefully to A semantics. This is why
+`arch/um/backend/kvm/thread.c::kvm_decode_syscall` only
+short-circuits on `CLASS_TRAP` — every other non-A class
+still reaches the main dispatch.
+
+### When to promote a syscall to class E
+
+Two criteria, both required:
+
+1. **High call rate in realistic workloads.** A glibc-
+   linked guest calling `getpid` 1M times / sec is
+   worth ~13 ms/s saved; a syscall called < 1k/s is
+   noise.
+2. **Gadget-expressible semantics.** The handler must
+   fit in LSTAR reach (currently ≤ 64 B per handler,
+   shrinking as the dispatch table grows), need only
+   per-vCPU state page + vvar page, and have a trivial
+   fallback criterion (bounds check on one or two
+   arg bits).
+
+If both hold, land the handler + promote the inventory
+row from A to E. Every gadget handler has a KUnit
+cross-check asserting the classifier agrees with the
+live dispatch table (see `kvm_syscall_classification_test`
+in `arch/um/backend/contract/test_ops.c`).
+
+### Follow-on (G6 deferred)
+
+`__NR_time` (201) and `__NR_getcpu` (309) are tracked for
+G6-follow-on; both hit the LSTAR rel8-reach limit when G6
+tried to land them alongside `sched_yield`. Deferred until
+the LSTAR page is split or the gadget is reorganized for
+reach. See decisions-log D74.
+
+## Class A — everything else (364 entries)
 
 See `syscall-inventory.tsv` for the authoritative,
 per-NR list. The table starts at NR 0 (`read`) and runs
