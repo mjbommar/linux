@@ -512,7 +512,7 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 								    rc);
 						return rc;
 					}
-					if (installed < 8) {
+					if (installed < 128) {
 						u64 gpa = x86e &
 							0x000ffffffffff000ULL;
 						u64 fl  = x86e &

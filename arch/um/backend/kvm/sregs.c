@@ -51,6 +51,11 @@
 #define KVM_CR0_WP	(1UL << 16)	/* write protect */
 #define KVM_CR0_PG	(1UL << 31)	/* paging */
 #define KVM_CR4_PAE	(1UL << 5)	/* physical-addr extension */
+#define KVM_CR4_OSFXSR		(1UL << 9)	/* OS supports fxsave/fxrstor;
+						 * required for XMM / SSE
+						 * instructions
+						 */
+#define KVM_CR4_OSXMMEXCPT	(1UL << 10)	/* OS handles SIMD FP exceptions */
 #define KVM_EFER_SCE	(1UL << 0)	/* SYSCALL enable */
 #define KVM_EFER_LME	(1UL << 8)	/* long-mode enable */
 #define KVM_EFER_LMA	(1UL << 10)	/* long-mode active */
@@ -205,7 +210,15 @@ static void kvm_fill_longmode_segments(struct kvm_sregs *sregs)
 	sregs->gs = data;
 	sregs->ss = data;
 
-	sregs->cr4  = KVM_CR4_PAE;
+	/*
+	 * CR4 bits: PAE required for long mode. OSFXSR +
+	 * OSXMMEXCPT enable SSE/XMM — modern libc init code (incl.
+	 * /bin/true's dynamic loader) uses `pxor %xmm0, %xmm0` +
+	 * `movaps` for fast memset; without these bits such
+	 * instructions raise #UD and the guest triple-faults
+	 * before reaching its first real syscall.
+	 */
+	sregs->cr4  = KVM_CR4_PAE | KVM_CR4_OSFXSR | KVM_CR4_OSXMMEXCPT;
 	sregs->cr0  = KVM_CR0_PE | KVM_CR0_MP | KVM_CR0_NE |
 		      KVM_CR0_WP | KVM_CR0_PG;
 	sregs->efer = KVM_EFER_SCE | KVM_EFER_LME | KVM_EFER_LMA;

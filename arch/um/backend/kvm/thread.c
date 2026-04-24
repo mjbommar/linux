@@ -154,6 +154,45 @@ static const char *kvm_exit_reason_str(u32 r)
  */
 
 /*
+ * Force every page in every vma of `mm` to be paged-in by the
+ * UML kernel. For writable vmas, do a read-then-write so
+ * UML's fault handler installs a read-write PTE; read-only
+ * vmas just get a byte read. Called from kvm_enter_guest
+ * (pre-KVM_RUN) and again after each syscall dispatch so
+ * fresh mmap/brk/mremap regions become visible to the shadow
+ * PT refill that follows. Memo 09 step 3 MVP approach; a
+ * #5b IDT-based lazy fault-in is the follow-on.
+ *
+ * Returns the number of pages successfully touched.
+ */
+static int kvm_touch_all_user_vmas(struct mm_struct *mm)
+{
+	struct vma_iterator vmi;
+	struct vm_area_struct *vma;
+	char probe;
+	int touched = 0;
+
+	vma_iter_init(&vmi, mm, 0);
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma) {
+		bool writable = vma->vm_flags & VM_WRITE;
+		unsigned long addr;
+
+		for (addr = vma->vm_start; addr < vma->vm_end;
+		     addr += PAGE_SIZE) {
+			if (copy_from_user(&probe, (void __user *)addr, 1))
+				continue;
+			if (writable &&
+			    copy_to_user((void __user *)addr, &probe, 1))
+				continue;
+			touched++;
+		}
+	}
+	mmap_read_unlock(mm);
+	return touched;
+}
+
+/*
  * Bootstrap region: a single page inside UML's physmem hosts the
  * production GDT + LSTAR trampoline. Allocated once on first
  * entry and cached; freed only on backend shutdown (deferred to
@@ -599,45 +638,10 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	mm = current->active_mm;
 	if (mm && mm->pgd) {
-		struct vma_iterator vmi;
-		struct vm_area_struct *vma;
+		int touched;
 		int filled;
-		int touched = 0;
-		char probe;
 
-		vma_iter_init(&vmi, mm, 0);
-
-
-
-		/*
-		 * Memo 09 step 3 (MVP): UML normally pages in user
-		 * memory on first fault. Our KVM guest can't hit
-		 * that path because shadow-PT misses triple-fault
-		 * with no IDT. Walk every vma in current->mm and
-		 * touch the first byte of every page via
-		 * copy_from_user — that triggers UML's own fault
-		 * handler, which allocates + mm_maps the page into
-		 * the logical pgd. The subsequent shadow fill
-		 * picks them up.
-		 *
-		 * Wasteful on large mms but bounded (mlock'd +
-		 * mapped ranges only). Proper lazy fault-in via an
-		 * IDT #PF handler is a #5b follow-on; MVP just
-		 * unblocks /bin/true-scale workloads.
-		 */
-		mmap_read_lock(mm);
-		for_each_vma(vmi, vma) {
-			unsigned long addr;
-
-			for (addr = vma->vm_start; addr < vma->vm_end;
-			     addr += PAGE_SIZE) {
-				if (!copy_from_user(&probe,
-						    (void __user *)addr, 1))
-					touched++;
-			}
-		}
-		mmap_read_unlock(mm);
-
+		touched = kvm_touch_all_user_vmas(mm);
 		filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
 		if (filled < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow fill failed (%d)\n",
@@ -826,7 +830,27 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * into regs->gp[HOST_AX]; the caller marshals that back
 	 * to vCPU state.
 	 */
+	pr_info_ratelimited("um: kvm: dispatching handle_syscall nr=%lu (via LSTAR trampoline)\n",
+			    PT_SYSCALL_NR(regs->gp));
 	handle_syscall(regs);
+
+	/*
+	 * mmap/brk/mremap/mprotect syscalls can extend the user
+	 * mm with new mappings that are still lazy (present in
+	 * vmas but not yet in the logical pgd). Before the next
+	 * KVM_RUN, walk vmas + touch each page to force fault-in,
+	 * then re-fill the shadow PT. Expensive but correct;
+	 * sub-commit #5b's IDT #PF handler replaces this with
+	 * targeted on-demand installation.
+	 */
+	{
+		struct mm_struct *mm2 = current->active_mm;
+
+		if (mm2 && mm2->pgd) {
+			(void)kvm_touch_all_user_vmas(mm2);
+			(void)kvm_shadow_fill_from_uml_pgd(mm2->pgd);
+		}
+	}
 
 	/*
 	 * Post-dispatch UML convention (lifted from seccomp_run_
@@ -1120,6 +1144,36 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 
 				pr_err("um: kvm: FAIL_ENTRY hw_reason=0x%llx\n",
 				       (unsigned long long)hw);
+			}
+			/*
+			 * Dump 16 bytes of guest instruction bytes at the
+			 * failing RIP. RIP is a user VA; copy_from_user
+			 * reads it. Useful for deciding whether the fault
+			 * was at a syscall instruction, a mov-from-memory,
+			 * or a computed jump into nothing.
+			 */
+			{
+				unsigned char insn_bytes[16] = { 0 };
+				long cr_rc;
+
+				cr_rc = copy_from_user(insn_bytes,
+						       (void __user *)(unsigned long)guest_rip,
+						       sizeof(insn_bytes));
+				if (cr_rc == 0) {
+					pr_err("um: kvm: guest insn @ RIP=0x%llx: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+					       (unsigned long long)guest_rip,
+					       insn_bytes[0], insn_bytes[1],
+					       insn_bytes[2], insn_bytes[3],
+					       insn_bytes[4], insn_bytes[5],
+					       insn_bytes[6], insn_bytes[7],
+					       insn_bytes[8], insn_bytes[9],
+					       insn_bytes[10], insn_bytes[11],
+					       insn_bytes[12], insn_bytes[13],
+					       insn_bytes[14], insn_bytes[15]);
+				} else {
+					pr_err("um: kvm: guest insn @ RIP=0x%llx unreadable (copy_from_user=%ld)\n",
+					       (unsigned long long)guest_rip, cr_rc);
+				}
 			}
 			if (run->exit_reason == KVM_EXIT_INTERNAL_ERROR)
 				pr_err("um: kvm: INTERNAL_ERROR suberror=%u\n",
