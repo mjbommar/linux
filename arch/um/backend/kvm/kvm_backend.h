@@ -156,6 +156,31 @@ int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags);
 #define KVM_X86_PTE_D	(1ULL << 6)
 #define KVM_X86_PTE_NX	(1ULL << 63)
 
+/*
+ * Translate UML's software-encoded PTE → x86 hardware PTE.
+ * D66 finding: UML uses `_PAGE_RW = 0x020`, `_PAGE_USER =
+ * 0x040`, `_PAGE_ACCESSED = 0x080`, `_PAGE_DIRTY = 0x100` —
+ * all non-hardware positions. This helper maps each UML bit
+ * to its x86 equivalent + preserves the PFN. Used by the
+ * shadow-PT eager fill (memo 09 step 3) walking
+ * current->active_mm->pgd to mirror logical mappings as
+ * hardware-walkable entries.
+ */
+u64 kvm_um_pte_to_x86(u64 um_pte);
+
+/*
+ * Memo 09 step 3: walk `pgd` (UML's logical page table) and
+ * install every present mapping into the shadow PT via
+ * kvm_shadow_map_page. Bounded by the number of actually-
+ * present pages (most pgd entries are empty). Returns the
+ * number of leaf PTEs installed, or -errno on allocation
+ * failure.
+ *
+ * Caller is responsible for serialisation; today there's no
+ * concurrent access (single-threaded kvm_enter_guest).
+ */
+int kvm_shadow_fill_from_uml_pgd(void *pgd);
+
 struct uml_pt_regs;
 int kvm_enter_guest(struct uml_pt_regs *regs);
 

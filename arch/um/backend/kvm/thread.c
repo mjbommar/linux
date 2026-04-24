@@ -28,6 +28,7 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
 #include <linux/spinlock.h>
+#include <linux/uaccess.h>	/* copy_from_user */
 
 #include <linux/signal.h>	/* SIGSEGV for sig_info dispatch */
 
@@ -584,8 +585,68 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return -EIO;
 	}
 
+	/*
+	 * Memo 09 step 3: eager-fill the shadow PT from the current
+	 * process's logical pgd. Every present UML PTE gets a
+	 * matching x86-encoded entry via kvm_um_pte_to_x86. Bounded
+	 * by actually-mapped pages (typical /bin/true: 20-50 pages;
+	 * larger processes scale linearly).
+	 *
+	 * Called every kvm_enter_guest today — wasteful on repeat
+	 * entries but correct. Optimization (skip when UML pgd
+	 * hasn't changed since last fill) is a follow-on lift once
+	 * D-06 perf measurements quantify the cost.
+	 */
 	mm = current->active_mm;
-	(void)mm;	/* reserved for memo 09 step 3's fault-in */
+	if (mm && mm->pgd) {
+		struct vma_iterator vmi;
+		struct vm_area_struct *vma;
+		int filled;
+		int touched = 0;
+		char probe;
+
+		vma_iter_init(&vmi, mm, 0);
+
+
+
+		/*
+		 * Memo 09 step 3 (MVP): UML normally pages in user
+		 * memory on first fault. Our KVM guest can't hit
+		 * that path because shadow-PT misses triple-fault
+		 * with no IDT. Walk every vma in current->mm and
+		 * touch the first byte of every page via
+		 * copy_from_user — that triggers UML's own fault
+		 * handler, which allocates + mm_maps the page into
+		 * the logical pgd. The subsequent shadow fill
+		 * picks them up.
+		 *
+		 * Wasteful on large mms but bounded (mlock'd +
+		 * mapped ranges only). Proper lazy fault-in via an
+		 * IDT #PF handler is a #5b follow-on; MVP just
+		 * unblocks /bin/true-scale workloads.
+		 */
+		mmap_read_lock(mm);
+		for_each_vma(vmi, vma) {
+			unsigned long addr;
+
+			for (addr = vma->vm_start; addr < vma->vm_end;
+			     addr += PAGE_SIZE) {
+				if (!copy_from_user(&probe,
+						    (void __user *)addr, 1))
+					touched++;
+			}
+		}
+		mmap_read_unlock(mm);
+
+		filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
+		if (filled < 0) {
+			pr_warn_ratelimited("um: kvm enter_guest: shadow fill failed (%d)\n",
+					    filled);
+			return filled;
+		}
+		pr_info_ratelimited("um: kvm enter_guest: touched %d user pages, filled %d shadow PTEs\n",
+				    touched, filled);
+	}
 
 	/*
 	 * Start from the current SREGS so APIC / TR / LDT bits
@@ -907,9 +968,9 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			fi->cr2        = (unsigned long)run->mmio.phys_addr +
 					 uml_physmem;
 
-			pr_debug("um: kvm run_userspace: KVM_EXIT_MMIO gpa=0x%llx cr2=0x%lx len=%u write=%u\n",
-				 (unsigned long long)run->mmio.phys_addr,
-				 fi->cr2, run->mmio.len, run->mmio.is_write);
+			pr_info_ratelimited("um: kvm run_userspace: KVM_EXIT_MMIO gpa=0x%llx cr2=0x%lx len=%u write=%u\n",
+					    (unsigned long long)run->mmio.phys_addr,
+					    fi->cr2, run->mmio.len, run->mmio.is_write);
 
 			/*
 			 * Dispatch through the same sig_info[SIGSEGV]
@@ -920,11 +981,17 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			(*sig_info[SIGSEGV])(SIGSEGV, NULL, regs, NULL);
 
 			/*
-			 * If the handler returned, the VMA was found +
-			 * the fault was serviced (or queued as a deferred
-			 * SIGSEGV in the guest). Re-enter KVM_RUN to let
-			 * the guest retry the faulting access.
+			 * Re-fill the shadow PT: segv_handler may have
+			 * installed a new mapping via mm_map, but the
+			 * shadow PT still reflects the pre-fault state.
+			 * Walking current->active_mm->pgd again picks up
+			 * the new entry. Memo 09 step 3 follow-on:
+			 * targeted single-page invalidate is an
+			 * optimisation; for MVP the full refill works.
 			 */
+			if (current->active_mm && current->active_mm->pgd)
+				(void)kvm_shadow_fill_from_uml_pgd(
+					current->active_mm->pgd);
 			continue;
 		}
 

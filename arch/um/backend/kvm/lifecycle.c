@@ -399,6 +399,142 @@ static int kvm_shadow_table_step(u64 *parent, u64 **next_va)
 	return 0;
 }
 
+/*
+ * UML PTE bit encoding vs x86 hardware. Hard-coded rather than
+ * referencing `_PAGE_*` macros so the relationship is visible
+ * at the site (D66's finding is the reason this helper exists).
+ * If arch/um/include/asm/pgtable.h ever reshuffles bit
+ * positions, the translator below must be updated in lock-step.
+ */
+#define UM_PTE_PRESENT		0x001
+#define UM_PTE_NEEDSYNC		0x002
+#define UM_PTE_RW		0x020
+#define UM_PTE_USER		0x040
+#define UM_PTE_ACCESSED		0x080
+#define UM_PTE_DIRTY		0x100
+
+u64 kvm_um_pte_to_x86(u64 um_pte)
+{
+	u64 out = 0;
+
+	if (!(um_pte & UM_PTE_PRESENT))
+		return 0;
+
+	/*
+	 * Permissive mapping: if a UML PTE is present we install
+	 * an x86 PTE with the same semantic permissions. UML's
+	 * _PAGE_RW / _PAGE_USER / _PAGE_ACCESSED / _PAGE_DIRTY
+	 * each translate to their hardware counterparts.
+	 */
+	out |= KVM_X86_PTE_P;
+	if (um_pte & UM_PTE_RW)
+		out |= KVM_X86_PTE_RW;
+	if (um_pte & UM_PTE_USER)
+		out |= KVM_X86_PTE_US;
+	if (um_pte & UM_PTE_ACCESSED)
+		out |= KVM_X86_PTE_A;
+	if (um_pte & UM_PTE_DIRTY)
+		out |= KVM_X86_PTE_D;
+
+	/*
+	 * Preserve the PFN (bits 12..51). UML's bit 1
+	 * (_PAGE_NEEDSYNC) is software-only and has no x86
+	 * equivalent — safe to drop. NX (bit 63) copies through
+	 * unchanged if UML ever sets it.
+	 */
+	out |= um_pte & 0x000ffffffffff000ULL;
+	out |= um_pte & (1ULL << 63);
+	return out;
+}
+
+/*
+ * Eager-fill the shadow PT from a UML logical pgd. Iterates
+ * only through present entries (the overwhelming majority of
+ * pgd/pud/pmd slots are empty for a typical user process), so
+ * cost is O(pages-mapped), not O(VA-space).
+ */
+int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
+{
+	u64 *pgd = pgd_va;
+	unsigned int pgd_i, pud_i, pmd_i, pte_i;
+	int installed = 0;
+	int rc;
+
+	if (!pgd)
+		return -EINVAL;
+
+	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
+		u64 pgde = pgd[pgd_i];
+		u64 *pud;
+
+		if (!(pgde & UM_PTE_PRESENT))
+			continue;
+		pud = (u64 *)__va(pgde & 0x000ffffffffff000ULL);
+
+		for (pud_i = 0; pud_i < 512; pud_i++) {
+			u64 pude = pud[pud_i];
+			u64 *pmd;
+
+			if (!(pude & UM_PTE_PRESENT))
+				continue;
+			pmd = (u64 *)__va(pude & 0x000ffffffffff000ULL);
+
+			for (pmd_i = 0; pmd_i < 512; pmd_i++) {
+				u64 pmde = pmd[pmd_i];
+				u64 *pte;
+
+				if (!(pmde & UM_PTE_PRESENT))
+					continue;
+				pte = (u64 *)__va(pmde & 0x000ffffffffff000ULL);
+
+				for (pte_i = 0; pte_i < 512; pte_i++) {
+					u64 ume = pte[pte_i];
+					u64 x86e;
+					u64 va;
+
+					if (!(ume & UM_PTE_PRESENT))
+						continue;
+
+					x86e = kvm_um_pte_to_x86(ume);
+					if (!x86e)
+						continue;
+					va = ((u64)pgd_i << 39) |
+					     ((u64)pud_i << 30) |
+					     ((u64)pmd_i << 21) |
+					     ((u64)pte_i << 12);
+
+					rc = kvm_shadow_map_page(va,
+								 x86e & 0x000ffffffffff000ULL,
+								 x86e & ~0x000ffffffffff000ULL);
+					if (rc < 0) {
+						pr_warn_ratelimited("um: kvm shadow fill: map_page(va=0x%llx) failed (%d)\n",
+								    (unsigned long long)va,
+								    rc);
+						return rc;
+					}
+					if (installed < 8) {
+						u64 gpa = x86e &
+							0x000ffffffffff000ULL;
+						u64 fl  = x86e &
+							~0x000ffffffffff000ULL;
+
+						pr_info_ratelimited("um: kvm shadow fill[%d]: va=0x%llx -> gpa=0x%llx flags=0x%llx\n",
+								    installed,
+								    (unsigned long long)va,
+								    (unsigned long long)gpa,
+								    (unsigned long long)fl);
+					}
+					installed++;
+				}
+			}
+		}
+	}
+
+	pr_info_ratelimited("um: kvm shadow fill: installed %d leaf PTEs from pgd=%p\n",
+			    installed, pgd_va);
+	return installed;
+}
+
 int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
 {
 	u64 *pgd = kvm_ctx.shadow_pgd;
