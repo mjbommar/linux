@@ -348,6 +348,25 @@ void kvm_shadow_pgd_free(void);
 int kvm_shadow_invalidate_va_range(u64 va_start, u64 len);
 
 /*
+ * Audit round-6 G2: clear all leaf PTEs in the user half of the
+ * singleton shadow PGD (canonical low half, PGD slots 0..255).
+ * Kernel-half mappings (bootstrap data + code, gadget state, vvar)
+ * persist across the call so subsequent kvm_enter_guest doesn't
+ * have to reinstall them.
+ *
+ * Called from kvm_context_switch when the active mm changes:
+ * without it, prev->mm's user mappings leak into next->mm's view
+ * because kvm_shadow_fill_from_uml_pgd only INSTALLS present
+ * leaves and doesn't clear absent ones. The cleared shadow PGD
+ * gets refilled lazily on next entry / on demand via the #PF
+ * handler.
+ *
+ * Marks kvm_ctx.shadow_dirty so the next kvm_enter_guest's
+ * KVM_SET_SREGS triggers a guest TLB flush.
+ */
+void kvm_shadow_pgd_clear_user(void);
+
+/*
  * Test hook: returns the current singleton shadow_pgd_gpa (or 0
  * if unallocated). KUnit assertion target; never used from the
  * run_userspace path.

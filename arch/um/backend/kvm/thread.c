@@ -63,6 +63,29 @@ int kvm_thread_start_idle(void *stack, struct thread_struct *t)
 
 void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 {
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	/*
+	 * Audit round-6 G2: when the active mm changes, clear the
+	 * user half of the singleton shadow PGD so prev's mappings
+	 * don't leak into next's view. kvm_shadow_fill_from_uml_pgd
+	 * only INSTALLS present leaves — it never clears absent
+	 * ones — so a switch from a process with a populated VA to
+	 * one with the same VA unmapped would otherwise let the
+	 * second process read prev's data.
+	 *
+	 * active_mm (not mm) is the right hook: kernel threads
+	 * borrow the previous user task's mm via active_mm, and the
+	 * shadow PT was filled against that. We only need to clear
+	 * when active_mm actually changes.
+	 *
+	 * The clear marks kvm_ctx.shadow_dirty; next kvm_enter_guest
+	 * KVM_SET_SREGS does the CR3 reload that flushes the guest
+	 * TLB (per D89: KVM's kvm_set_cr3 always falls through to
+	 * kvm_invalidate_pcid).
+	 */
+	if (prev && next && prev->active_mm != next->active_mm)
+		kvm_shadow_pgd_clear_user();
+#endif
 	switch_threads(&prev->thread.switch_buf, &next->thread.switch_buf);
 }
 

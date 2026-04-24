@@ -8956,4 +8956,108 @@ implementation. No stale-TLB symptoms.
 
 ---
 
+## D90 (2026-04-24) — G2: clear shadow PGD user half on cross-mm context switch
+
+**Decision.** Add `kvm_shadow_pgd_clear_user()` and call it
+from `kvm_context_switch` when `prev->active_mm !=
+next->active_mm`. The clear walks the user half of the
+singleton shadow PGD (slots 0..255) and zeroes every leaf
+PTE table it finds. Kernel-half mappings (bootstrap data /
+code, gadget state, vvar — all in PGD slots ≥256 because
+they sit at canonical kernel VAs) are preserved so the
+next entry doesn't have to reinstall them.
+
+**Finding.** Audit round-6 P0 #2 (G2) — "the singleton
+shadow PGD still leaks mappings across mm switches.
+kvm_context_switch() only switches jmp_buf state, not
+CR3/shadow ownership, and kvm_shadow_fill_from_uml_pgd()
+only installs present leaves without clearing absent ones."
+
+Real bug. Concrete failure mode:
+
+1. Process A maps a page at VA X with sensitive data.
+2. UML scheduler switches A → B.
+3. kvm_context_switch only swaps jmp_buf; shadow PGD still
+   has A's mappings.
+4. kvm_shadow_fill_from_uml_pgd installs B's present
+   leaves but leaves A's stale entries in any slot B
+   doesn't overwrite.
+5. B accesses VA X — shadow PT walk finds A's PTE,
+   succeeds, B reads A's data.
+
+**Implementation shape.**
+
+- `kvm_shadow_pgd_clear_user` in lifecycle.c walks PGD
+  slots 0..255 (user-half canonical VA range), recurses
+  into each present PUD → PMD → PTE, and clears each leaf
+  table with one `memset(pte, 0, PAGE_SIZE)` (faster than
+  per-entry zeroing). Sets `kvm_ctx.shadow_dirty = true`
+  if any leaf table was zeroed.
+- Intermediate PUD/PMD pages stay attached to the PGD —
+  on the next mm fill they're reused without
+  reallocation. A bounded memory footprint per shadow
+  PGD lifetime, in line with the pre-existing shadow-PT
+  allocator pattern that doesn't free sub-tables.
+- `kvm_context_switch` checks `prev->active_mm !=
+  next->active_mm`. active_mm (not mm) is the right
+  hook because kernel threads borrow the previous user
+  task's mm via active_mm and the shadow PT was filled
+  against that — we only need to clear when the
+  shadow's content is actually about to be wrong for
+  the incoming task.
+
+**Why user half only.** The bootstrap page, gadget state
+page, and vvar page are mapped at kernel VAs (allocated
+via `get_zeroed_page` / `alloc_page` whose returns sit
+in the canonical kernel half). Their PGD indices are in
+256..511. Clearing the user half preserves them, which
+means the next kvm_enter_guest doesn't have to
+reinstall its 4 shadow_map_page calls — a meaningful
+hot-path saving (each shadow_map_page touches up to 4
+table-step allocations).
+
+**TLB flush.** The clear sets shadow_dirty; the next
+kvm_enter_guest's KVM_SET_SREGS reload picks it up via
+kvm_set_cr3 → kvm_invalidate_pcid (D89). Stale TLB
+entries from prev's view get flushed before next runs.
+
+**What this doesn't fix yet.** kvm_shadow_fill_from_uml_
+pgd still doesn't clear absent-in-source leaves on
+incremental refill. But after clear-on-switch, the
+incremental-refill case only matters within a single
+mm, where mm_unmap already invalidates ranges (D82)
+and there's no cross-mm leak to worry about.
+
+The deeper fix (per-mm shadow PGD with CR3 reload on
+switch) is a separate refactor. clear-user gets us to
+"correct, slightly slower than per-mm" — fine for
+upstream-ready; the perf-conscious per-mm variant can
+be a follow-on if the per-switch clear cost becomes
+measurable.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass.
+- perf-getpid: kvm cyc=97 (no regression — context
+  switches are rare during the 100k-iter loop).
+- The clear is O(populated_user_PGD_entries × 512^2)
+  per cross-mm switch, but for typical UML processes
+  with a few MB mapped, only PGD[0] has entries (UML
+  user VA range starts at 0x40000000 = PGD[0]) and
+  only a handful of PUDs / PMDs are populated.
+  Concrete walk depth: ~1 PGD × ~1 PUD × ~10 PMDs ×
+  one 4 KiB memset per leaf table = ~10 KB worth of
+  writes per switch. Negligible.
+
+**Refs.**
+
+- Audit round-6 finding #2 (G2).
+- D82 — F6's mm_unmap shadow invalidation. G2 covers
+  the cross-mm leak F6 didn't address.
+- D89 — same-CR3 KVM_SET_SREGS flush behaviour relied
+  on by the shadow_dirty path.
+- task #234 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

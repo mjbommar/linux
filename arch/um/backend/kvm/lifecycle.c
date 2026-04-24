@@ -829,6 +829,68 @@ int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
  * Missing higher-level entries (pgd/pud/pmd not present) skip
  * that subrange — nothing to invalidate.
  */
+/*
+ * Audit round-6 G2: clear all leaf PTEs in the user half of the
+ * singleton shadow PGD. PGD entries 0..255 cover canonical user
+ * VA (low 128 TB on x86_64); 256..511 cover the canonical kernel
+ * half where bootstrap data/code, gadget state, and vvar live.
+ *
+ * On every cross-mm context switch the user half must be cleared
+ * — without it kvm_shadow_fill_from_uml_pgd would happily layer
+ * the new mm's mappings on top of the previous mm's stale leaves,
+ * leaking pages across processes.
+ *
+ * Intermediate PUD/PMD pages are kept attached to their PGD
+ * entries so the next mm fill can reuse them without re-allocating
+ * — a bounded memory footprint per shadow PGD's lifetime, in line
+ * with the pre-existing kvm_shadow_pgd_free() shape that also
+ * doesn't free sub-tables. (A full sub-table free + alloc on
+ * every context switch is a separate optimization.)
+ */
+void kvm_shadow_pgd_clear_user(void)
+{
+	u64 *pgd = kvm_ctx.shadow_pgd;
+	unsigned int pgd_i, pud_i, pmd_i;
+	unsigned int leaf_tables = 0;
+
+	if (!pgd)
+		return;
+
+	for (pgd_i = 0; pgd_i < 256; pgd_i++) {
+		u64 pgde = pgd[pgd_i];
+		u64 *pud;
+
+		if (!(pgde & KVM_X86_PTE_P))
+			continue;
+		pud = (u64 *)__va(pgde & 0x000ffffffffff000ULL);
+
+		for (pud_i = 0; pud_i < 512; pud_i++) {
+			u64 pude = pud[pud_i];
+			u64 *pmd;
+
+			if (!(pude & KVM_X86_PTE_P))
+				continue;
+			pmd = (u64 *)__va(pude & 0x000ffffffffff000ULL);
+
+			for (pmd_i = 0; pmd_i < 512; pmd_i++) {
+				u64 pmde = pmd[pmd_i];
+				u64 *pte;
+
+				if (!(pmde & KVM_X86_PTE_P))
+					continue;
+				pte = (u64 *)__va(pmde &
+						  0x000ffffffffff000ULL);
+				memset(pte, 0, PAGE_SIZE);
+				leaf_tables++;
+			}
+		}
+	}
+
+	if (leaf_tables)
+		kvm_ctx.shadow_dirty = true;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_pgd_clear_user);
+
 int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 {
 	u64 *pgd = kvm_ctx.shadow_pgd;
