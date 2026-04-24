@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::console_split;
+use super::dmesg_parse;
 use super::manifest::Manifest;
 use super::paths::Paths;
 use super::run;
@@ -162,6 +163,7 @@ pub fn start(
         let code = status.and_then(|s| s.code());
         run::finalize_run(paths, &run_id, run::boottime_ns(), "FOREGROUND_EXIT", code);
         derive_kernel_log_best_effort(paths, &run_id);
+        parse_dmesg_best_effort(paths, &run_id, &args.name);
         let _ = std::fs::remove_file(&pidfile);
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
         return Ok(StartOutcome { pid, run_id });
@@ -278,6 +280,7 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
     if !run_id.is_empty() {
         run::finalize_run(paths, &run_id, run::boottime_ns(), &signal_name, None);
         derive_kernel_log_best_effort(paths, &run_id);
+        parse_dmesg_best_effort(paths, &run_id, &args.name);
     }
 
     let _ = std::fs::remove_file(&pidfile);
@@ -398,6 +401,15 @@ fn derive_kernel_log_best_effort(paths: &Paths, run_id: &str) {
     let init_log = dir.join("init.log");
     let kernel_log = dir.join("kernel.log");
     let _ = console_split::derive_kernel_log(&init_log, &kernel_log);
+}
+
+/// Scan the derived `kernel.log` for sanitizer/panic/oom
+/// splats and append one structured event per match to
+/// `events.jsonl`. Best-effort on the stop path — a parser
+/// hiccup must never block the signal-and-reap sequence.
+fn parse_dmesg_best_effort(paths: &Paths, run_id: &str, instance: &str) {
+    let kernel_log = paths.run_dir(run_id).join("kernel.log");
+    let _ = dmesg_parse::parse_and_emit(paths, run_id, instance, &kernel_log);
 }
 
 fn build_kernel_argv(m: &Manifest) -> Vec<String> {

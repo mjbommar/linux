@@ -23,6 +23,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 
 mod console_split;
+mod dmesg_parse;
 mod events;
 mod history;
 mod manifest;

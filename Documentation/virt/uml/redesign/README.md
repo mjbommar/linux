@@ -111,7 +111,7 @@ docs/uml-redesign/
     ├── 11-uml-api-daemon.md          rootless REST API surface
     ├── 12-uml-perfetto-trace.md      tracefs → Perfetto converter
     └── 13-uml-observability-spine.md run_id + schema + bundle format
-                                      (O1 + O2.1 LANDED 2026-04-24)
+                                      (O1 + O2.1 + O3.1 LANDED 2026-04-24)
 ```
 
 ## Status of this plan
@@ -239,7 +239,14 @@ prod-fast still falls back to seccomp.
     init.log on the fly for running runs). **Phase O2.1
     landed 2026-04-24** — `umlctl metrics` one-shot
     `/proc/<pid>/*` + cgroup v2 scraper (human or `--json`).
-    O2.2 (eBPF) + O2.3 (OpenMetrics HTTP) + O3-O6 parking-lot.
+    **Phase O3.1 landed 2026-04-24** — dmesg parser at
+    `umlctl stop` time converts sanitizer (KASAN / KFENCE /
+    KCSAN / KMSAN / UBSAN), panic, OOM-kill, RCU-stall,
+    lockdep, and watchdog splats in `kernel.log` into
+    structured events.jsonl records (10 schemas now
+    "emitted"). O2.2 (eBPF) + O2.3 (OpenMetrics HTTP) +
+    O3.2 (upstream tracepoints) + O3.3 (kselftest
+    migration) + O4-O6 parking-lot.
   - Selftest: `tools/testing/selftests/um/umlctl-smoke/`
     regression-locks the no-orphan guarantee (the motivation)
     plus the full lifecycle + spine event + assert + export

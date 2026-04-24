@@ -488,13 +488,27 @@ trails each line.
 
 **Phase O3 — sanitizer promotion (2-3 weeks):**
 
-- dmesg parser converts KASAN/KFENCE/KCSAN/KMSAN/UBSAN
-  printk lines to schema'd events (transitional path
-  while kernel-side native emission catches up).
-- Upstream-direction: add a tracepoint to each sanitizer's
-  "report" path so native event emission is a future
-  kernel change, not a permanent parser.
-- `umlctl assert` verb.
+- O3.1 — dmesg parser converts KASAN/KFENCE/KCSAN/KMSAN/
+  UBSAN printk lines to schema'd events (transitional path
+  while kernel-side native emission catches up). Also
+  covers `Kernel panic - not syncing:`, `Out of memory:` /
+  `oom-kill:`, RCU stalls, lockdep circular/recursive
+  warnings, and soft/hard lockup watchdog fires. Runs at
+  `umlctl stop` against the O1.2-derived `kernel.log`.
+  **[LANDED 2026-04-24]** Implementation:
+  `tools/uml/uml-launcher/src/bin/umlctl/dmesg_parse.rs`.
+  10 schemas promoted from "declared" to "emitted" in the
+  spine registry; `umlctl assert --no-kasan` etc. now
+  fires against real parser output instead of synthetic
+  injection.
+- O3.2 — Upstream-direction tracepoints. Add a tracepoint
+  to each sanitizer's "report" path so native event
+  emission is a future kernel change, not a permanent
+  parser. **[pending]**
+- O3.3 — `umlctl assert` verb wired into kselftest
+  `.umlbundle` outputs as the dmesg-grep replacement.
+  (The verb itself landed in O1.6; this sub-lift is the
+  migration of existing selftests.) **[pending]**
 
 **Phase O4 — guest-agent + transport (4-8 weeks):**
 

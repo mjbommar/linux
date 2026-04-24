@@ -67,7 +67,9 @@ trap cleanup EXIT INT TERM
 # (`[    0.000000] …`, `<4>…`) and bare init-stdout lines
 # exercises the O1.2 console split. Lines are dual-written
 # to stderr for detach-mode only (where umlctl redirects
-# stderr into init.log too).
+# stderr into init.log too). The "first" instance uses a
+# clean log so lifecycle tests that assume no-splat behave
+# as they did before O3.1.
 cat > "$TMP/linux" <<'FAKE'
 #!/bin/sh
 echo "Checking that host ptys support output SIGIO..."
@@ -80,6 +82,27 @@ echo "[   12.345678] Run /sbin/init as init process"
 exec sleep 120
 FAKE
 chmod +x "$TMP/linux"
+
+# A "splat" kernel fixture: emits canonical sanitizer /
+# panic / oom / stall lines so the O3.1 dmesg parser turns
+# them into events.jsonl records post-stop. Used in Part H
+# below; the lifecycle tests in Parts A-G use the clean
+# fixture above.
+cat > "$TMP/linux-splat" <<'SPLAT'
+#!/bin/sh
+echo "[    0.000000] Linux version fake"
+echo "Freeing unused kernel memory"
+echo "[    1.234567] BUG: KASAN: use-after-free in foo+0x1/0x2"
+echo "[    1.245678] BUG: KFENCE: out-of-bounds read in bar+0x5"
+echo "[    1.256789] BUG: KCSAN: data-race in baz (reads)"
+echo "[    1.267890] UBSAN: shift-out-of-bounds in file.c:12:4"
+echo "[    1.278901] Out of memory: Killed process 99 (hog)"
+echo "[    1.289012] rcu: INFO: rcu_sched detected stalls on CPUs/tasks"
+echo "[    1.290123] WARNING: possible circular locking dependency detected"
+echo "[    1.301234] watchdog: BUG: soft lockup - CPU#0 stuck for 22s!"
+exec sleep 120
+SPLAT
+chmod +x "$TMP/linux-splat"
 
 STATE_DIR="$TMP/state"
 RUNTIME_DIR="$TMP/run"
@@ -421,6 +444,61 @@ else
 fi
 
 "$UMLCTL_BIN" $ARGS rm "$N2" >/dev/null
+
+# --- Part H: O3.1 dmesg parser turns kernel splats into events ---
+#
+# Spin up a third instance backed by the splat fixture;
+# umlctl stop must emit one spine event per recognized
+# sanitizer / panic / oom / stall / lockdep / watchdog
+# line. `umlctl assert --no-*` must then fire.
+N3="smoke-splat"
+"$UMLCTL_BIN" $ARGS create "$N3" --kernel "$TMP/linux-splat" \
+	>/dev/null || fail "splat create failed"
+"$UMLCTL_BIN" $ARGS start "$N3" --ready-timeout 10 >/dev/null \
+	|| fail "splat start failed"
+N3_RUN_ID=$(cat "$RUNTIME_DIR/$N3.run_id")
+"$UMLCTL_BIN" $ARGS stop "$N3" >/dev/null || fail "splat stop failed"
+
+EV3="$STATE_DIR/runs/$N3_RUN_ID/events.jsonl"
+[ -f "$EV3" ] || fail "splat events.jsonl missing"
+
+# Each declared schema must appear exactly once (one splat
+# line per kind in the fixture).
+for schema in uml.sanitizer.kasan.v1 uml.sanitizer.kfence.v1 \
+		uml.sanitizer.kcsan.v1 uml.sanitizer.ubsan.v1 \
+		uml.oom.v1 uml.rcu_stall.v1 uml.lockdep.v1 \
+		uml.watchdog_stall.v1; do
+	COUNT=$(grep -c "\"schema\":\"$schema\"" "$EV3" || true)
+	[ "$COUNT" = "1" ] || fail "expected 1 $schema event, got $COUNT"
+done
+
+# Payload should carry a trimmed `message` field for the
+# sanitizer/panic families (the parser strips the splat
+# prefix before emitting).
+grep -q '"message":"use-after-free in foo+0x1/0x2"' "$EV3" \
+	|| fail "KASAN message payload not trimmed: $(grep KASAN "$EV3")"
+
+# assert --no-kasan must now fire against real parser output
+# (no synthetic injection).
+"$UMLCTL_BIN" $ARGS --quiet assert "$N3" --no-kasan 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "assert --no-kasan should catch real parser output (rc=$rc)"
+
+# assert --no-panic should PASS because the splat fixture
+# has no panic line.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N3" --no-panic \
+	|| fail "assert --no-panic should pass (no panic in fixture)"
+
+# umlctl schema lists the new sanitizer / stall / lockdep /
+# watchdog schemas after the O3.1 expansion.
+SCHEMA_OUT=$("$UMLCTL_BIN" schema)
+for s in uml.sanitizer.kfence.v1 uml.rcu_stall.v1 uml.lockdep.v1 \
+		uml.watchdog_stall.v1; do
+	echo "$SCHEMA_OUT" | grep -q "$s" \
+		|| fail "schema registry missing $s"
+done
+
+"$UMLCTL_BIN" $ARGS rm "$N3" >/dev/null
 
 # --- Part F: no orphans ---
 LEAK=$(pgrep -f "$TMP/linux" || true)
