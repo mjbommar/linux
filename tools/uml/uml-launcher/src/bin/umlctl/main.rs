@@ -20,11 +20,13 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Write;
 
 mod console_split;
 mod events;
 mod history;
 mod manifest;
+mod metrics;
 mod paths;
 mod registry;
 mod run;
@@ -86,6 +88,10 @@ enum Cmd {
     /// stop), prefers that; otherwise filters `init.log`
     /// on the fly.
     Dmesg(DmesgArgs),
+    /// One-shot host-side scrape of `/proc/<pid>/*` +
+    /// cgroup v2 for the named running instance. O2 lift
+    /// of the observability spine.
+    Metrics(MetricsArgs),
     /// List declared observability-spine event schemas.
     Schema(SchemaArgs),
     /// Tail structured events.jsonl emitted by the spine.
@@ -249,6 +255,13 @@ struct DmesgArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct MetricsArgs {
+    /// Instance name. The pid is resolved from the runtime
+    /// pidfile, so the instance must be running.
+    name: String,
+}
+
+#[derive(clap::Args, Debug)]
 struct SchemaArgs {}
 
 #[derive(clap::Args, Debug)]
@@ -358,6 +371,7 @@ fn run() -> Result<()> {
         Cmd::Ps(args) => cmd_ps(&paths, args, cli.json, cli.quiet),
         Cmd::Logs(args) => cmd_logs(&paths, args),
         Cmd::Dmesg(args) => cmd_dmesg(&paths, args),
+        Cmd::Metrics(args) => cmd_metrics(&paths, args, cli.json),
         Cmd::Schema(_) => cmd_schema(cli.json),
         Cmd::Events(args) => cmd_events(&paths, args),
         Cmd::Assert(args) => cmd_assert(&paths, args, cli.quiet),
@@ -637,6 +651,36 @@ fn cmd_logs(paths: &paths::Paths, args: LogsArgs) -> Result<()> {
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_metrics(paths: &paths::Paths, args: MetricsArgs, json: bool) -> Result<()> {
+    // Manifest presence gate mirrors logs/dmesg so a typo
+    // returns "instance not found" (exit 3) rather than a
+    // confusing "no pid."
+    let manifest_path = paths.manifest_path(&args.name);
+    if !manifest_path.exists() {
+        eprintln!("umlctl: instance '{}' not found", args.name);
+        std::process::exit(3);
+    }
+    let pidfile = paths.pidfile_path(&args.name);
+    let pid = match supervise::read_pidfile(&pidfile) {
+        Some(p) if supervise::process_alive(p) => p,
+        _ => {
+            eprintln!("umlctl: instance '{}' not running", args.name);
+            std::process::exit(6);
+        }
+    };
+
+    let m = metrics::scrape(pid).context("scrape /proc")?;
+    let stdout = std::io::stdout();
+    let mut w = stdout.lock();
+    if json {
+        metrics::render_json(&m, &mut w)?;
+        writeln!(&mut w)?;
+    } else {
+        metrics::render_human(&m, &mut w)?;
     }
     Ok(())
 }

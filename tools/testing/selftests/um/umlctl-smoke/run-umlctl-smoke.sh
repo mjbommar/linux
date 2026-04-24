@@ -187,6 +187,30 @@ if echo "$DMESG_LIVE" | grep -q '^Checking that host ptys'; then
 	fail "live dmesg should not include pre-printk: $DMESG_LIVE"
 fi
 
+# --- O2: umlctl metrics scrapes /proc/<pid>/* while live ---
+METRICS_OUT=$("$UMLCTL_BIN" $ARGS metrics "$NAME") \
+	|| fail "metrics failed while running"
+echo "$METRICS_OUT" | grep -Eq "^pid +$PID\$" \
+	|| fail "metrics missing pid $PID: $METRICS_OUT"
+echo "$METRICS_OUT" | grep -q "^state " \
+	|| fail "metrics missing state line"
+echo "$METRICS_OUT" | grep -q "^vm_rss_bytes " \
+	|| fail "metrics missing vm_rss_bytes"
+echo "$METRICS_OUT" | grep -q "^threads " \
+	|| fail "metrics missing threads"
+echo "$METRICS_OUT" | grep -q "^sched " \
+	|| fail "metrics missing sched"
+
+# --json rendering is valid JSON with the expected shape.
+JSON_METRICS=$("$UMLCTL_BIN" $ARGS --json metrics "$NAME") \
+	|| fail "json metrics failed"
+echo "$JSON_METRICS" | grep -q "\"pid\": $PID" \
+	|| fail "json metrics missing pid: $JSON_METRICS"
+echo "$JSON_METRICS" | grep -q '"proc"' \
+	|| fail "json metrics missing proc block"
+echo "$JSON_METRICS" | grep -q '"cgroup"' \
+	|| fail "json metrics missing cgroup block"
+
 # --- Part D: stop must actually kill the child ---
 STOP_OUT=$("$UMLCTL_BIN" $ARGS stop "$NAME") || fail "stop failed"
 echo "$STOP_OUT" | grep -q "run_id=$RUN_ID" \
@@ -246,6 +270,11 @@ echo "$DMESG_DIRECT" | grep -q 'Linux version fake' \
 "$UMLCTL_BIN" $ARGS stop "$NAME" 2>/dev/null
 rc=$?
 [ $rc -eq 6 ] || fail "stop-of-stopped exited $rc (want 6)"
+
+# metrics of a stopped instance → exit 6 (scrape needs a live pid).
+"$UMLCTL_BIN" $ARGS metrics "$NAME" 2>/dev/null
+rc=$?
+[ $rc -eq 6 ] || fail "metrics on stopped exited $rc (want 6)"
 
 # --- Part E: rm + history ---
 "$UMLCTL_BIN" $ARGS rm "$NAME" >/dev/null || fail "rm failed"

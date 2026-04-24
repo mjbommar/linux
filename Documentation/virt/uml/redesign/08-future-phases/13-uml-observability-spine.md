@@ -467,11 +467,24 @@ status trails each line (**[LANDED]** / **[pending]**).
 
 **Phase O2 — host-side observability (2-4 weeks):**
 
-- `/proc/<pid>/*` + cgroup scraper.
-- Host-side eBPF skeleton (off-CPU, wakeup-lat, KVM
-  exits for KVM backend).
-- OpenMetrics endpoint per instance.
-- `umlctl metrics` verb.
+Split into independently-landable sub-lifts; status bracket
+trails each line.
+
+- O2.1 — `/proc/<pid>/*` + cgroup v2 scraper +
+  `umlctl metrics` verb. **[LANDED 2026-04-24]** One-shot
+  scrape (no daemon): resolves the instance pid via the
+  runtime pidfile, reads `/proc/<pid>/{status,stat,io,
+  schedstat}` + the unified-v2 cgroup's `memory.current`,
+  `memory.peak`, `cpu.stat`, `pids.current`, renders as a
+  human-readable key/value listing or `--json`. Exit codes
+  mirror the other umlctl verbs (3=instance not found,
+  6=not running). Implementation:
+  `tools/uml/uml-launcher/src/bin/umlctl/metrics.rs`.
+- O2.2 — Host-side eBPF skeleton (off-CPU, wakeup-lat,
+  KVM exits for KVM backend). **[pending]**
+- O2.3 — OpenMetrics HTTP endpoint per instance (needs a
+  supervisor daemon or a shell-out to a per-run scraper
+  tick). **[pending]**
 
 **Phase O3 — sanitizer promotion (2-3 weeks):**
 
