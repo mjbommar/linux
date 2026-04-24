@@ -123,7 +123,7 @@ docs/uml-redesign/
       execution plan (`06-sequencing/post-q1-push.md`, Phases
       I-VI complete as of 2026-04-23)
 - [x] Decisions log open and ready to grow (`04-risks/decisions-log.md`
-      now runs from D1 through D63)
+      now runs from D1 through D94)
 - [ ] Open question resolution (per-workstream; mostly closed via
       decisions-log entries; remaining open Qs flagged in each
       workstream doc)
@@ -204,21 +204,72 @@ level table. Summary:
     `umlctl` lifecycle CLI + observability-spine v1 — see
     "Tooling (umlctl + observability spine)" below.
 
-**Workstream D (KVM backend):** **spikes + harness complete as
-of 2026-04-23.** Phase III of the post-Q1 push landed D-01
-through D-06 as a working in-kernel harness: per-mm
-`kvm_um` with `mm_attach` / `mm_detach` (D-03b), real memslot
-wiring + `mm_map`/`mm_unmap` (D-03c, D-03d), long-mode SREGS
-+ CR3/GDT/IDT/EFER (D-04b), LSTAR-routed SYSCALL dispatch
-through real `sys_call_table` (D-04c / Phase III Lift #1c),
-KVM_EXIT_MMIO decode into UML's fault path (Lift #1d),
-KVM_INTERRUPT + IDT delivery (Lift #1e), and the A-05
-contract KUnit suite passing 20/20 against
-`CONFIG_UM_BACKEND_KVM_ONLY` (Lift #1f). Real
-`run_userspace` integration — replacing the one-shot harness
-with a sustained trap loop — remains as task #162 for a
-follow-on session. D failure remains explicitly acceptable:
-prod-fast still falls back to seccomp.
+**Workstream D (KVM backend):** **production-shaped as of
+2026-04-24, audit-closed.** Phase III of the post-Q1 push
+landed D-01 through D-06 as a working in-kernel harness; the
+2026-04-24 push extended that to a sustained per-trap
+dispatcher (audit A1) plus the systrap gadget ladder G1-G8
+plus full closure of audit rounds 4 / 5 / 6.
+
+  - **Production dispatcher** (audit A1, D70): per-trap
+    `interrupt_end()` contract matching ptrace + seccomp;
+    one KVM_RUN, one decode, one return per call.
+  - **CPL-derived `is_user`** (audit A2, D70): sampled
+    via `KVM_GET_SREGS` post-VMEXIT.
+  - **Loud failure on writeback errors** (audit A4, D70):
+    `KVM_SET_REGS` + `KVM_SET_MSRS` failures are fatal,
+    not silently swallowed.
+  - **Per-mm shadow PT** (D82 F6, D90 G2): `kvm_shadow_
+    invalidate_va_range` covers same-mm map/unmap;
+    `kvm_shadow_pgd_clear_user` covers cross-mm context
+    switches. PGD slots 256+ (kernel half) preserved.
+  - **Bootstrap page locked down** (D81 F5): `KVM_X86_PTE_
+    US` dropped; ring-3 cannot read or write the LSTAR
+    code path.
+  - **#PF recovery** (D86 F7/1, D92 G3): real x86 error
+    code propagated to UML faultinfo; gadget-mid-store
+    faults divert to handle_syscall (-EFAULT semantics);
+    write-to-RO no longer loops.
+  - **User RFLAGS preserved across SYSCALL + #PF**
+    (D75 F2, D88 F3-followon, D93 G1): `kvm_build_
+    sysret_r11` helper merges saved flags with REQ_ON;
+    KUnit + dedicated DF-preservation selftest cover
+    the round-trip; clock/time/getcpu gadget bodies
+    keep RAX = NR across fallback (F7/2 pattern).
+  - **Systrap gadget G1-G8** (D69 / D71 / D73 / D74 /
+    D78 / D79): in-guest LSTAR fast-path for 10
+    syscalls (7 pid-family + clock_gettime + time +
+    getcpu — sched_yield demoted by G5 / D94). Class
+    E in memo 10. Per-vCPU state page + shared vvar
+    clock seqlock + call-budget refresh cap (F8 /
+    D83). Bounds check vs `task_size_cap` per audit
+    G1 / D93 — no supervisor-VA writes, no
+    non-canonical #GP. Validated across the s0-s7
+    fleet (D79, post-round-6 numbers in
+    `02-workstreams/D-kvm-backend/measurements.md`):
+    23-32 ns / 87-115 cyc gadget cost, 2.9-4.3×
+    margin under memo-07's <100 ns target. **D70 = GO.**
+  - **Upstream Series 7** (D87): SUBMISSION-NOTES +
+    cover-letter draft in `upstream-patches/
+    kvm-backend-series/`. Patch emission still waits
+    on Series 4 (backend-ops-abstraction-rfc) landing
+    + a focused squash pass against the 80+ branch
+    commits.
+
+  Two P2 follow-ons remain open (deferred for focused
+  sessions):
+  - **#230** F5-followon — split bootstrap into RO
+    code + RW data pages.
+  - **#238** G6 — drop `kvm_touch_all_user_vmas` once
+    the #PF recovery path uses `handle_mm_fault`
+    directly.
+
+  All P0/P1 audit findings through round 6 are closed.
+
+  D failure remains explicitly acceptable as a backend
+  policy: prod-fast falls back to seccomp if the host
+  doesn't support /dev/kvm or KVM_INTEGRATED is
+  disabled.
 
 **Tooling (umlctl + observability spine, 2026-04-23):**
 
@@ -305,9 +356,18 @@ selftest sweep all green after the series.
   2. `upstream-patches/kmsan-arch-callback-rfc/` — RFC
      framing for the map-on-demand arch extension point
      (notes only; UML-side no longer blocks on it per D62).
-  3-7. Five further series staged to write, ordered for
-     reviewer-credibility + dependency cleanliness. See the
-     queue doc for routing + pitches per series.
+  3. `upstream-patches/ftrace-notrace-generic-v1/` —
+     cover letter + 1 patch (`kthread()` +
+     `smpboot_thread_fn()` notrace), prepared 2026-04-24.
+  4-6. Three further series staged to write
+     (backend-ops-abstraction-rfc, static-key-hot-paths,
+     per-profile C-series).
+  7. `upstream-patches/kvm-backend-series/` — scoped
+     post-G8/D70=GO (D87, 2026-04-24): SUBMISSION-NOTES
+     + cover-letter draft in tree, 15-patch ordering
+     planned. Patch emission waits on Series 4 landing +
+     focused squash against the 80+ commits in
+     `arch/um/backend/kvm/`.
 
 **Cross-subsystem work carried on the fork (per D45):**
 
