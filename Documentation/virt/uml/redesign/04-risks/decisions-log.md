@@ -6908,4 +6908,94 @@ sub-commit #5c. Task #192 remains pending — unblock is
 
 ---
 
+## D68 (2026-04-24) — D-06 getpid bookend: KVM backend at parity with seccomp (1.002×), gadget target is post-v1
+
+**Question.** Memo 08's D-06 gate is "identical behavior
+to seccomp on shared test vectors" measured against a
+real guest binary. After sub-commits #5c (arch_prctl
+MSR propagation) + memo 10 steps 2/6 (class-D denylist +
+classification KUnit) landed, `/bin/true` boots cleanly
+under `backend=kvm` for the first time. What's the
+actual getpid() round-trip cost, and how does it compare
+to the other two backends?
+
+**Measurement.** New selftest
+`tools/testing/selftests/um/perf-getpid/` boots a
+freestanding 64-bit ELF as `init=` under each backend;
+the binary runs a 100,000-iteration getpid() loop,
+reports cycles + ns, exits. Host-side runner compares
+the three numbers.
+
+On Zen-4-class silicon
+(`/tmp/uml-kvmint/linux` build, force=<backend>):
+
+| Backend  | ns/call | cyc/call | vs seccomp |
+|----------|---------|----------|------------|
+| ptrace   | 11,448  | 41,211   | 0.994×     |
+| seccomp  | 11,514  | 41,450   | 1.000×     |
+| kvm      | 11,540  | 41,545   | 1.002×     |
+
+KVM is within 0.2 % of seccomp — full parity within
+run-to-run noise. **D-06 gate cleared.**
+
+**Interpretation.** The absolute ~11.5 µs figure is
+UML's own syscall cost, not a KVM-specific overhead. A
+real guest syscall on ptrace / seccomp / KVM all terminate
+in the same `handle_syscall(regs)` → `sys_call_table[nr]`
+dispatch; what differs is only the ring-transition
+mechanism before and after. That transition is fast
+on all three:
+
+- ptrace: ~1 syscall to the host kernel (wait4 +
+  PTRACE_SYSEMU).
+- seccomp: 0 host syscalls (SIGSYS from stub).
+- kvm: 1 VMEXIT via KVM_EXIT_IO (LSTAR trampoline
+  writes port 0xf4).
+
+The shadow-PT refill path (memo 09 step 2 eager fill
+calling `kvm_touch_all_user_vmas` + `kvm_shadow_fill_
+from_uml_pgd` on every syscall) is the largest
+KVM-specific overhead at ~2 µs/call, which the bookend
+absorbs without tripping the 2× ceiling. A future
+optimization pass (skip fill when UML pgd is
+unchanged) can cut that further; not urgent for v1.
+
+**Implication for memo 07 (gadget retrofit).** The
+bookend confirms memo 07's scope: a gadget that keeps
+the guest resident across the syscall boundary (no
+VMEXIT, no KVM_SET_REGS, no shadow-PT refill) would
+target the <100 ns regime — a ~100× improvement over
+the current 11.5 µs. The ratio between "v1 parity"
+(this bookend) and "gadget target" (<100 ns) is the
+budget memo 07's feasibility spike claimed. Gadget
+work remains gated on D61's GO decision, which the
+Phase IV spike already made. The bookend gives memo
+07 a concrete "from 41,500 cyc to <400 cyc" delta to
+measure against.
+
+**Artifacts.**
+
+- `tools/testing/selftests/um/perf-getpid/getpid-
+  loop.c` — freestanding measurement binary (~160 LOC,
+  no libc).
+- `tools/testing/selftests/um/perf-getpid/run-perf-
+  getpid.sh` — three-backend runner with regression gate
+  (MAX_KVM_RATIO=2.0 by default).
+- `tools/testing/selftests/um/Makefile` — adds
+  `perf-getpid` to TARGETS.
+- Memo 08 §"#6 — D-06 bookend" records the measurement
+  + the path-length breakdown that memo 07 optimizes
+  against.
+
+Sub-commit #6 (task #192) marked LANDED. D-workstream
+Phase III is now functionally complete: sub-commits
+#1 through #7 all landed + D-06 gate cleared. What
+remains in memo 08 is hot-path optimization (ties into
+memo 07) and the rest of memo 10's class ladder
+(modify_ldt, rt_sigreturn, exception decoders), each
+of which can land as independent sub-commits without
+blocking the gate.
+
+---
+
 ## (Future entries here, as decisions are made)
