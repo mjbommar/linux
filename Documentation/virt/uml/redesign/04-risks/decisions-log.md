@@ -8115,4 +8115,93 @@ separate commit.
 
 ---
 
+## D81 (2026-04-24) — F5 minimum: drop US from bootstrap page PTE
+
+**Decision.** Drop `KVM_X86_PTE_US` from the shadow-PT
+mapping of the bootstrap page so ring-3 guest code can
+no longer read or write the LSTAR trampoline / GDT /
+IDT / TSS / IST stack. Keep `KVM_X86_PTE_RW` because
+the CPU pushes the IDT iretq frame onto the IST stack
+(bottom of the page) at ring-0 when #PF fires.
+
+**Finding.** Audit round-5 P0 #2 (F5) — "the bootstrap
+page is mapped user-accessible and writable. That
+page contains the LSTAR trampoline, GDT, IDT, TSS,
+and IST stack, but it is installed with
+KVM_X86_PTE_RW | KVM_X86_PTE_US at arch/um/backend/
+kvm/thread.c:1115." Ring-3 guest code should not be
+able to read or write the ring-0 syscall path.
+
+**Why this is safe (why the gadget still works
+post-fix).** All accesses to the bootstrap page are
+from ring-0:
+
+- LSTAR trampoline code is fetched by the CPU at
+  CPL=0 (SYSCALL switches to CPL=0 before fetching).
+- GDT, IDT, TSS descriptors are read by the CPU
+  microcode during ring transitions, not by guest
+  code.
+- IST stack is used as the ring-0 stack during #PF
+  delivery — CPU pushes the iretq frame, our #PF
+  handler pops it, both at CPL=0. Ring-3 never
+  touches it.
+- First-entry bootstrap (kvm_enter_guest) sets RIP
+  to bootstrap_va + SYSRET_OFFSET with CPL=0; the
+  CPU fetches the 3-byte SYSRETQ from there at
+  ring-0. SYSRETQ then switches to ring-3 at user
+  RIP (not in the bootstrap page).
+
+CPL=0 bypasses the US check entirely, so ring-0
+accesses work regardless of US. CPL=3 reads/writes
+fail with #PF — exactly what we want.
+
+**Why RW stays on.** The CPU writes the iretq frame
+to the IST stack at ring-0 during #PF delivery. That
+write needs RW=1. (CPL=0 bypasses US but not RW for
+writes — AMD64 SDM vol 2 §5.4.)
+
+**Why this is a minimum.** F5 suggests as a longer-
+term refinement "split code/tables from the writable
+IST stack" — i.e., put GDT / IDT / TSS / LSTAR code
+on a RO page and only the IST stack on a RW page.
+That's a medium refactor: the bootstrap-page
+allocator needs to be rewritten to allocate two
+pages, the offsets need to be split across them, and
+the KUnit byte-match test needs to follow. Land the
+minimum US-drop first for the P0 mitigation; the
+split-into-two-pages refinement is tracked
+separately (see task #224 rescope below).
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass — the shadow-PT test setup
+  doesn't rely on ring-3 bootstrap-page access.
+- perf-getpid: kvm cyc=100 (vs 98 pre-fix; noise),
+  ratio 0.002, PASS.
+- time/getcpu smoke under gadget kernel: identical
+  output to fallback (time_ret, cpu, node). The
+  gadget still works — as expected, because its
+  accesses go through %gs to the state / vvar
+  pages, not the bootstrap page.
+
+**Defence-in-depth benefit.** Beyond preventing
+guest write to the LSTAR code path (the explicit
+F5 concern), dropping US also prevents ring-3 from
+*reading* the trampoline bytes. A malicious guest
+can no longer scrape our gadget structure for
+offsets or side-channel timing the dispatch layout.
+
+**Refs.**
+
+- Audit round-5 finding #2 (F5).
+- arch/um/backend/kvm/thread.c — kvm_enter_guest's
+  bootstrap-page shadow_map_page call, now P | RW
+  only (US dropped).
+- task #224 — this P0-minimum close; split-into-
+  two-pages tracked as its own separate follow-on
+  (will file as task #230 if we decide to land it
+  pre-upstream).
+
+---
+
 ## (Future entries here, as decisions are made)

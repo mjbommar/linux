@@ -1210,10 +1210,31 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	if (rc < 0)
 		return rc;
 
+	/*
+	 * Audit round-5 F5 (P0 security-adjacent): the bootstrap
+	 * page contains the LSTAR trampoline, GDT, IDT, TSS, and
+	 * IST stack — all ring-0 state. Previous versions mapped
+	 * it with KVM_X86_PTE_US set, which let ring-3 guest code
+	 * read (and with RW, write) the ring-0 syscall path. Drop
+	 * US so the shadow PT rejects ring-3 accesses at the CPU.
+	 *
+	 * Writability is still required because the CPU pushes the
+	 * IDT iretq frame onto the IST stack (at the bottom of the
+	 * bootstrap page) when #PF fires, and the host-side init
+	 * populates GDT / IDT / TSS / handler bytes during boot.
+	 * Both are ring-0 writes, which bypass the US check but
+	 * require RW=1.
+	 *
+	 * Splitting the page into a RO (code + tables) region and a
+	 * RW (IST stack) region is a medium refactor — tracked as
+	 * a follow-on to this minimum fix. With US=0, ring-3 can't
+	 * read the LSTAR bytes either (defence in depth against a
+	 * guest scraping our trampoline for offsets or side
+	 * channels).
+	 */
 	rc = kvm_shadow_map_page(kvm_bootstrap_va,
 				 (u64)__pa(kvm_bootstrap_page),
-				 KVM_X86_PTE_P | KVM_X86_PTE_RW |
-				 KVM_X86_PTE_US);
+				 KVM_X86_PTE_P | KVM_X86_PTE_RW);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(bootstrap) failed (%d)\n",
 				    rc);
