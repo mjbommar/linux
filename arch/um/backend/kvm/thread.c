@@ -28,6 +28,7 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
 #include <linux/spinlock.h>
+#include <linux/time-internal.h>	/* time_travel_mode + tt_extra_sched_jiffies */
 #include <linux/uaccess.h>	/* copy_from_user */
 
 #include <linux/signal.h>	/* SIGSEGV for sig_info dispatch */
@@ -1049,6 +1050,15 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 			       (unsigned long)kregs);
 }
 
+/*
+ * Forward-declared + used by run_userspace's time-travel
+ * bookkeeping below. Defined in arch/um/os-Linux/skas/process.c,
+ * shared across all run_userspace impls and reset by
+ * switch_threads on every context switch. Matches the pattern
+ * already landed in seccomp/trap_user.c + ptrace/trap_user.c.
+ */
+extern unsigned int unscheduled_userspace_iterations;
+
 void kvm_run_userspace(struct uml_pt_regs *regs)
 {
 	int vcpu_fd = kvm_backend_vcpu0_fd();
@@ -1060,6 +1070,42 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		panic("um: kvm run_userspace: vCPU not initialized (vcpu_fd=%d run=%p)",
 		      vcpu_fd, run);
 	}
+
+	/*
+	 * Time-travel bookkeeping (sub-commit #4 from memo 08).
+	 * Under TT_MODE_INFCPU / TT_MODE_EXTERNAL, UML's virtual
+	 * clock doesn't advance unless something forces it; a
+	 * userspace task spinning in a tight trap loop would freeze
+	 * simulated time. Bump tt_extra_sched_jiffies after
+	 * CONFIG_UML_MAX_USERSPACE_ITERATIONS unyielded iterations
+	 * so the scheduler gets a chance to tick. Matches the
+	 * identical guard in seccomp_run_userspace /
+	 * ptrace_run_userspace; the counter resets on
+	 * switch_threads.
+	 */
+	if (time_travel_mode == TT_MODE_INFCPU ||
+	    time_travel_mode == TT_MODE_EXTERNAL) {
+#ifdef CONFIG_UML_MAX_USERSPACE_ITERATIONS
+		if (CONFIG_UML_MAX_USERSPACE_ITERATIONS &&
+		    unscheduled_userspace_iterations++ >
+		    CONFIG_UML_MAX_USERSPACE_ITERATIONS) {
+			tt_extra_sched_jiffies += 1;
+			unscheduled_userspace_iterations = 0;
+		}
+#endif
+	}
+
+	/*
+	 * mm pinning note (sub-commit #4): UML's outer userspace()
+	 * loop runs in the context of the task owning
+	 * current->active_mm; KVM_RUN executes synchronously in
+	 * that same task's context so the mm can't be freed under
+	 * us without the task itself being destroyed first. No
+	 * explicit mmget/mmput needed here — matches the seccomp
+	 * + ptrace backends which also don't pin. If SMP KVM ever
+	 * adds cross-task vCPU dispatch, this invariant needs
+	 * revisiting.
+	 */
 
 	rc = kvm_enter_guest(regs);
 	if (rc < 0)
