@@ -6630,4 +6630,79 @@ changed; no new dependencies. Task #148 retired.
 
 ---
 
+## D65 (2026-04-23) — Real `kvm_run_userspace` integration: scope + 7-sub-commit decomposition
+
+**Source.** Task #162 "Post-Phase III: real KVM
+`run_userspace` integration" was the last large open item
+after the 2026-04-23 README reconciliation. Per the plan's
+"write the design doc for that task before writing code"
+rule (README "How to use this plan"), this entry records the
+scope decision; the full memo lives at
+`02-workstreams/D-kvm-backend/08-real-run-userspace.md`.
+
+**Scope.** Replace the D-04a scaffold `panic()` in
+`arch/um/backend/kvm/thread.c:165::kvm_run_userspace` with a
+real integrated loop. All primitives (SREGS setup, LSTAR
+trampoline, MMIO decode, IDT injection, ring-3 SYSRETQ) are
+already landed on the fork as harness code during Phase III
+Lifts #1b-#1f; the lift is a lift-out-of-harness-into-
+production refactor with new exit-reason wiring.
+
+**Decomposition — 7 sub-commits, each independently
+testable:**
+
+  1. `kvm_enter_guest` — vCPU state materialization (SREGS +
+     CR3 from active_mm + GP regs from `struct
+     uml_pt_regs`).
+  2. `kvm_decode_syscall` — KVM_EXIT_IO port 0xf4 bucket →
+     `sys_call_table[nr]`.
+  3. `kvm_decode_mmio` — KVM_EXIT_MMIO → UML fault path
+     (reuse Phase III Lift #1d landed code).
+  4. `kvm_handle_hlt` — return to UML scheduler on guest
+     HLT; fresh KVM_RUN on next schedule.
+  5. `kvm_handle_intr` — host SIGALRM/SIGIO/SIGCHLD reinject
+     path.
+  6. Hot-path optimizations + perf measurement vs D-06
+     `getpid()` <100 ns bookend.
+  7. Nested-virt fallback wiring (D-05 completion).
+
+**Sub-commits #1-#6 land behind
+`CONFIG_UM_BACKEND_KVM_INTEGRATED` (default n) until #6's
+measurements clear the D-06 gate; harness stays available
+via `CONFIG_UM_BACKEND_KVM_HARNESS` for regression probes.
+
+**Open questions resolved in the memo.** Single-vCPU vs
+per-task-vCPU (recommendation: single-vCPU with per-mm
+serialization; gVisor-style per-task is a v2 discussion).
+`current` handling during KVM_RUN (replicate seccomp
+pattern). Memslot lifetime vs process lifetime (already
+handled by D-03d `mm_map`/`mm_unmap`).
+
+**New selftests planned:** `tools/testing/selftests/um/
+kvm-smoke/`, `kvm-fault-smoke/`, `kvm-yield-smoke/`. A-05
+KUnit contract extended to exercise the integrated path,
+not only op-table dispatch.
+
+**Risks named in the memo:** CR3 ↔ mm lifetime, signal
+races, KVM ABI variance, nested-virt slowness, pt_regs ↔
+uml_pt_regs marshalling. Mitigations scoped per risk.
+
+**Effort estimate.** 2-3 weeks across the 7 sub-commits.
+No single sub-commit exceeds the size of a typical
+workstream-B lift (hot-path gate + debugfs + selftest).
+
+**What this memo doesn't do.** It doesn't pick an owner,
+start date, or mainline-merge target. Those belong to the
+implementation kickoff; this memo just fixes the shape of
+the work so the kickoff isn't re-arguing the decomposition.
+
+**Status flip.** When sub-commit #1 lands + its A-05
+extension passes, the memo's status moves from "design memo"
+to "implementation in flight." When #1-#6 all land + D-06
+runs clean, memo 08 rolls up into
+`04-ring-transition.md`'s completed block and
+`06-conformance.md` picks up the bookend narrative.
+
+---
+
 ## (Future entries here, as decisions are made)

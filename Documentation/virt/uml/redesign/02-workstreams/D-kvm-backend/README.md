@@ -30,15 +30,18 @@ in-kernel harness, validated end-to-end:
 The one piece *not yet* landed is **real `run_userspace`
 integration** — replacing the one-shot harness with a
 sustained trap loop driving genuine UML guest processes.
-That's tracked as task #162 for a follow-on session; the
-harness already demonstrates every primitive the integrated
-path needs.
+That's tracked as task #162; the design memo at
+`08-real-run-userspace.md` (2026-04-23) decomposes it into
+seven sub-commits, and decisions-log D65 records the scope
+decision. The harness already demonstrates every primitive
+the integrated path needs — the lift is a lift-out-of-
+harness-into-production refactor with exit-reason wiring.
 
 Decisions-log coverage: D49–D57 + D60–D61 walk through the
-shape choices; D63 sequences the upstream submission.
-`04-ring-transition.md`, `04b*-*.md`, and
-`07-systrap-gadget-feasibility.md` carry the per-sub-task
-detail.
+shape choices; D63 sequences the upstream submission; D65
+scopes task #162. `04-ring-transition.md`, `04b*-*.md`,
+`07-systrap-gadget-feasibility.md`, and
+`08-real-run-userspace.md` carry the per-sub-task detail.
 
 ## What this workstream produces
 
