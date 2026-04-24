@@ -8602,4 +8602,105 @@ retries and succeeds. Correct by construction.
 
 ---
 
+## D86 (2026-04-24) — F7/1: divert ring-0 gadget-mid-store faults to SYSCALL fallback for proper -EFAULT semantics
+
+**Decision.** When the #PF recovery path sees a fault
+whose RIP lies inside a user-memory-writing gadget
+body (clock_gettime / time / getcpu), short-circuit
+the cr2 probe and convert the fault into a SYSCALL
+fallback. handle_syscall then applies POSIX
+`copy_to_user` semantics: lazy-but-valid user VAs
+get populated; genuinely invalid pointers return
+-EFAULT. Replaces the previous behaviour which
+dispatched SIGSEGV even for what should have been a
+syscall error.
+
+**Finding.** Audit round-5 P1 #4 part 1 (F7/1) — "the
+clock_gettime gadget is not syscall-semantic for
+faulting output pointers. It writes directly to
+(%rsi) from ring 0, while the #PF recovery path
+assumes a user-mode interrupt frame and signals
+SIGSEGV on failed touch instead of returning -EFAULT."
+
+Correct in the letter and in the consequence: a guest
+calling `clock_gettime(CLOCK_MONOTONIC, bad_ptr)`
+against a gadget-enabled kernel got SIGSEGV and died,
+whereas the same call against a non-gadget kernel
+returned -EFAULT cleanly. Semantic divergence between
+gadget-on and gadget-off — exactly what G7's "fallback
+behaves like class A" promise was supposed to prevent.
+
+**Implementation shape.**
+
+Added `kvm_gadget_fault_nr(fault_rip)` in thread.c
+which maps a faulting RIP inside the LSTAR region to
+the originating syscall NR (clock_gettime / time /
+getcpu) or -1 for non-gadget-store faults.
+
+In the `UM_KVM_PF_PORT` branch of run_userspace's
+dispatcher:
+
+1. Read the faulting RIP from the IST frame at +8
+   (before the cr2 probe, so we can short-circuit).
+2. Call `kvm_gadget_fault_nr(fault_rip)`.
+3. If a NR comes back (gadget body fault):
+   - Restore the SYSCALL-entry state: HOST_AX =
+     gadget_nr (F7/2 preserved RAX for clock but
+     time / getcpu clobber it; the range-derived NR
+     covers all three), HOST_IP = user RIP from RCX
+     (SYSCALL semantic), HOST_SP = IST+32 (= RSP at
+     gadget entry = user RSP since SYSCALL
+     preserves RSP), HOST_EFLAGS = user RFLAGS from
+     R11.
+   - Set is_user = 1 (the SYSCALL itself was from
+     ring-3).
+   - Call `kvm_decode_syscall` to dispatch via the
+     normal handle_syscall path. RDI + RSI (the
+     output pointer args the gadget would have
+     written to) pass through unchanged — the
+     gadget only READS them, never writes them
+     before the store.
+4. If -1 (fault outside gadget-store ranges), fall
+   through to the existing cr2 probe + SIGSEGV
+   recovery path. User ring-3 faults keep their
+   existing behaviour.
+
+**Why this is correct.** After the diversion, control
+flows through exactly the same code that a non-gadget
+SYSCALL would follow: handle_syscall → sys_clock_get
+time → put_user/copy_to_user → fault-handled by
+UML's own mm layer. The gadget's intermediate
+register clobbers (RDX, R10, R8 for clock; RAX for
+time + getcpu) are harmless because sys_clock_gettime
+et al. don't read them as inputs — they only read
+RDI/RSI which the gadget preserves.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass.
+- New `/tmp/efault-smoke` binary (unpushed — the
+  EFAULT selftest variant of getpid-loop / clock-
+  loop) calls clock_gettime / time / getcpu each
+  with `ptr = 0xDEAD0000`. Output under both
+  kvmint (no gadget) and kvmbench (gadget):
+  `EFAULT_SMOKE: clock=-14 time=-14 getcpu=-14
+  expected=-14`. Behaviour is byte-identical —
+  the F7/1 concern ("gadget-on delivers SIGSEGV
+  where gadget-off returns -EFAULT") is resolved.
+- perf-getpid: kvm cyc=97, ratio 0.002, PASS (no
+  regression).
+- Previously-passing clock-advance, time/getcpu
+  smoke, dual-binary G7 gate all still green.
+
+**Refs.**
+
+- Audit round-5 finding #4 part 1 (F7/1).
+- arch/um/backend/kvm/thread.c — `kvm_gadget_
+  fault_nr` helper; #PF handler gains the pre-
+  probe diversion.
+- arch/um/backend/kvm/kvm_backend.h — prototype.
+- task #226 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

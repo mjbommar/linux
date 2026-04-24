@@ -910,6 +910,55 @@ u64 kvm_build_sysret_r11_probe(u64 saved_user_rflags)
 }
 EXPORT_SYMBOL_GPL(kvm_build_sysret_r11_probe);
 
+#ifdef CONFIG_UM_BACKEND_KVM_GADGET
+/*
+ * Audit round-5 F7/1: classify a faulting RIP as "inside a user-
+ * memory-writing gadget body" and return the NR the gadget was
+ * servicing. Used by the #PF recovery path to convert a ring-0
+ * gadget-mid-store fault into a proper SYSCALL fallback through
+ * handle_syscall, which then returns -EFAULT per POSIX semantics
+ * instead of delivering SIGSEGV.
+ *
+ * Only clock_gettime / time / getcpu issue stores to user
+ * memory; the pid-family + sched_yield handlers return via
+ * register only and cannot fault in the same way. A fault in
+ * any other LSTAR region is a bug (e.g. missing gadget-state
+ * page) and the caller should handle that case distinctly.
+ *
+ * Return: __NR_clock_gettime / __NR_time / __NR_getcpu if
+ * fault_rip lies inside one of those handler bodies, otherwise
+ * -1.
+ *
+ * Offset ranges mirror the LSTAR layout in
+ * kvm_bootstrap_lstar_bytes[]; any reshuffle there must update
+ * the ranges here (the KUnit byte-match test catches layout
+ * drift at boot, but doesn't catch range drift — this lookup
+ * is a derived invariant).
+ */
+int kvm_gadget_fault_nr(u64 fault_rip)
+{
+	u64 base = kvm_bootstrap_va + KVM_BOOTSTRAP_LSTAR_OFFSET;
+	u64 off;
+
+	if (fault_rip < base)
+		return -1;
+	off = fault_rip - base;
+
+	if (off >= 186 && off < 274)
+		return __NR_clock_gettime;
+	if (off >= 274 && off < 297)
+		return __NR_time;
+	if (off >= 297 && off < 327)
+		return __NR_getcpu;
+	return -1;
+}
+#else
+static inline int kvm_gadget_fault_nr(u64 fault_rip)
+{
+	return -1;
+}
+#endif /* CONFIG_UM_BACKEND_KVM_GADGET */
+
 /*
  * Program MSR_STAR / MSR_LSTAR / MSR_FMASK on vcpu0 so that a
  * guest-side SYSCALL traps into the LSTAR trampoline at
@@ -1961,14 +2010,97 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				unsigned long cr2;
 				char probe;
 				bool touched = false;
+				u64 fault_rip;
+				int gadget_nr;
+				unsigned long ist_off;
+				u8 *ist;
 
 				if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
 						     (unsigned long)&dump_sregs) < 0) {
 					panic("um: kvm PF handler: KVM_GET_SREGS failed");
 				}
 				cr2 = dump_sregs.cr2;
-				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx; fault-in + shadow refill\n",
-						    cr2);
+
+				/*
+				 * Audit round-5 F7/1: classify the fault
+				 * as ring-0 gadget-mid-store vs ring-3 user
+				 * instruction. The faulting RIP lives in the
+				 * IDT-pushed iretq frame on the IST stack at
+				 * offset +8. If the RIP lies within a gadget
+				 * handler that writes to user memory
+				 * (clock_gettime / time / getcpu), convert
+				 * the #PF into a SYSCALL fallback so the
+				 * user-visible result is -EFAULT per POSIX
+				 * semantics rather than SIGSEGV.
+				 *
+				 * The IST stack lives in the bootstrap page
+				 * (kernel-VA-aliased for the host). Resolving
+				 * fault_rip requires dereferencing the frame
+				 * before the cr2 probe so we can short-
+				 * circuit the probe path for gadget faults.
+				 */
+				ist_off = (unsigned long)(kregs.rsp -
+							  kvm_bootstrap_va);
+				if (ist_off >= PAGE_SIZE) {
+					pr_warn_ratelimited("um: kvm: PF IST out of range\n");
+					fatal_sigsegv();
+				}
+				ist = (u8 *)kvm_bootstrap_page + ist_off;
+				fault_rip = *(u64 *)(ist + 8);
+
+				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx; fault-in + shadow refill\n",
+						    cr2,
+						    (unsigned long long)fault_rip);
+
+				gadget_nr = kvm_gadget_fault_nr(fault_rip);
+				if (gadget_nr >= 0) {
+					/*
+					 * F7/1 fallback: a gadget tried to
+					 * write to (%rdi/%rsi) and faulted in
+					 * ring-0. Restart the SYSCALL through
+					 * handle_syscall, which then uses the
+					 * standard copy_to_user path:
+					 *
+					 *   - If cr2 was a lazy-but-valid user
+					 *     VA, UML's own fault path fills
+					 *     the PTE on access and the syscall
+					 *     completes normally (RAX = 0 for
+					 *     clock/getcpu, seconds for time).
+					 *   - If cr2 was genuinely bad, copy_
+					 *     to_user returns -EFAULT and the
+					 *     syscall return value propagates
+					 *     back to the guest as -EFAULT.
+					 *
+					 * SYSCALL-entry regs to restore:
+					 *   RAX = gadget_nr (NR; F7/2 preserves
+					 *         it across clock but time /
+					 *         getcpu handlers clobber it,
+					 *         so we restore from the
+					 *         range-derived NR here).
+					 *   RCX = user RIP (SYSCALL saved it
+					 *         there at dispatch time; gadget
+					 *         handlers preserve RCX for the
+					 *         sysretq tail).
+					 *   R11 = user RFLAGS (SYSCALL saved;
+					 *         gadget handlers preserve).
+					 *   RSP = IST+32 (user RSP at fault
+					 *         time; preserved across gadget
+					 *         entry).
+					 *
+					 * Args RDI / RSI (the output pointers
+					 * that would-have-faulted) pass through
+					 * unchanged — the gadget only READS
+					 * them for the address computation,
+					 * never writes them.
+					 */
+					regs->gp[HOST_AX]     = gadget_nr;
+					regs->gp[HOST_IP]     = regs->gp[HOST_CX];
+					regs->gp[HOST_SP]     = *(u64 *)(ist + 32);
+					regs->gp[HOST_EFLAGS] = regs->gp[HOST_R11];
+					regs->is_user = 1;
+					kvm_decode_syscall(regs, &kregs, vcpu_fd);
+					goto out_read_regs;
+				}
 
 				if (cr2 && current->active_mm &&
 				    current->active_mm->pgd) {

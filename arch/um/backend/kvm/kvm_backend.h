@@ -451,6 +451,15 @@ int kvm_bootstrap_force_init(void);
 u64 kvm_build_sysret_r11_probe(u64 saved_user_rflags);
 
 /*
+ * Audit round-5 F7/1: classify a faulting RIP as a user-memory-
+ * writing gadget body and return the NR the gadget was servicing
+ * (clock_gettime / time / getcpu), or -1 if the fault is elsewhere.
+ * Used by the #PF recovery path to convert ring-0 gadget-mid-store
+ * faults into SYSCALL fallbacks that surface -EFAULT per POSIX.
+ */
+int kvm_gadget_fault_nr(u64 fault_rip);
+
+/*
  * UM KVM wire constants: port numbers the LSTAR trampoline uses
  * to signal exit reasons to the host. Matches the harness wire
  * format so sub-commit #3's decode can lift the harness paths
