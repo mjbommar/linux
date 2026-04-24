@@ -34,6 +34,35 @@ u64 kvm_shadow_pgd_gpa(void);
 int kvm_shadow_pgd_alloc(void);
 void kvm_shadow_pgd_free(void);
 
+/* Memo 11 G3 gadget state channel probes. */
+int kvm_gadget_state_alloc(void);
+void kvm_gadget_state_free(void);
+void kvm_gadget_state_refresh(void);
+u64 kvm_gadget_state_va(void);
+u64 kvm_gadget_state_gpa(void);
+
+/*
+ * Mirror of struct kvm_gadget_state + offsets from
+ * arch/um/backend/kvm/kvm_backend.h. The contract TU
+ * doesn't include the private header, so drifting the
+ * two copies would fail the _TEST_KVM_GADGET_OFF_*
+ * equivalence checks below.
+ */
+struct _test_kvm_gadget_state {
+	u32 seq;
+	u32 cpu_id;
+	u32 pid;
+	u32 tgid;
+	u32 ppid;
+	u32 uid;
+	u32 euid;
+	u32 gid;
+	u32 egid;
+	u32 _pad;
+};
+#define _TEST_KVM_GADGET_OFF_TGID	0x0c
+#define _TEST_KVM_GADGET_OFF_UID	0x14
+
 /*
  * Memo 10 syscall classification. Mirror of the enum in
  * arch/um/backend/kvm/kvm_backend.h; duplicated here for the

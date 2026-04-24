@@ -37,11 +37,15 @@
  * Subsequent D-03c lands memslot plumbing (KVM_SET_USER_MEMORY_
  * REGION for mm_map/mm_unmap); D-04 creates vCPUs on top.
  */
+#include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
 #include <linux/kvm.h>
 #include <linux/mm.h>
+#include <linux/pid.h>
 #include <linux/printk.h>
+#include <linux/sched.h>
+#include <linux/sched/task.h>
 
 #include <asm/page.h>
 #include <os.h>
@@ -262,6 +266,7 @@ void kvm_shutdown(void)
 	 */
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	kvm_shadow_pgd_free();
+	kvm_gadget_state_free();
 #endif
 	if (kvm_ctx.run0) {
 		os_unmap_memory(kvm_ctx.run0, kvm_ctx.run_size);
@@ -389,6 +394,91 @@ void kvm_shadow_pgd_free(void)
 u64 kvm_shadow_pgd_gpa(void)
 {
 	return kvm_ctx.shadow_pgd_gpa;
+}
+
+/*
+ * Memo 11 G3 gadget state channel lifecycle. Same lazy-
+ * alloc + __free_page shape as the shadow PT above. The
+ * gadget_state_va field is populated by kvm_enter_guest
+ * when it maps the page into the shadow PT; alloc_page
+ * doesn't know the guest VA yet.
+ */
+int kvm_gadget_state_alloc(void)
+{
+	struct page *page;
+
+	if (kvm_ctx.gadget_state_page) {
+		pr_info_once("um: kvm gadget_state already allocated (va=%p gpa=0x%llx)\n",
+			     kvm_ctx.gadget_state,
+			     (unsigned long long)kvm_ctx.gadget_state_gpa);
+		return 0;
+	}
+
+	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!page) {
+		pr_err("um: kvm gadget_state: alloc_page failed\n");
+		return -ENOMEM;
+	}
+
+	kvm_ctx.gadget_state_page = page;
+	kvm_ctx.gadget_state      = page_address(page);
+	kvm_ctx.gadget_state_gpa  = (u64)__pa(kvm_ctx.gadget_state);
+	kvm_ctx.gadget_state_va   = 0;	/* filled in on first map */
+
+	pr_info("um: kvm gadget_state: va=%p gpa=0x%llx (memo 11 G3)\n",
+		kvm_ctx.gadget_state,
+		(unsigned long long)kvm_ctx.gadget_state_gpa);
+	return 0;
+}
+
+void kvm_gadget_state_free(void)
+{
+	if (!kvm_ctx.gadget_state_page)
+		return;
+	__free_page(kvm_ctx.gadget_state_page);
+	kvm_ctx.gadget_state_page = NULL;
+	kvm_ctx.gadget_state      = NULL;
+	kvm_ctx.gadget_state_gpa  = 0;
+	kvm_ctx.gadget_state_va   = 0;
+}
+
+u64 kvm_gadget_state_va(void)
+{
+	return kvm_ctx.gadget_state_va;
+}
+
+u64 kvm_gadget_state_gpa(void)
+{
+	return kvm_ctx.gadget_state_gpa;
+}
+
+/*
+ * Rewrite the gadget state page from the current task.
+ * Called from kvm_enter_guest right before KVM_RUN so
+ * the guest's gadget handlers see up-to-date state. No
+ * seqlock needed under ncpus=1 (single vCPU = single
+ * writer, host is quiescent during KVM_RUN). Memo 11
+ * §"Safety discipline" point 6 tracks the SMP v2
+ * seqlock story.
+ */
+void kvm_gadget_state_refresh(void)
+{
+	struct kvm_gadget_state *s = kvm_ctx.gadget_state;
+	const struct cred *c;
+
+	if (!s)
+		return;
+
+	c = current_cred();
+	s->seq     = 0;			/* SMP v2 reserved */
+	s->cpu_id  = 0;			/* ncpus=1 only for v1 */
+	s->pid     = task_pid_vnr(current);
+	s->tgid    = task_tgid_vnr(current);
+	s->ppid    = task_ppid_nr(current);
+	s->uid     = from_kuid_munged(current_user_ns(), c->uid);
+	s->euid    = from_kuid_munged(current_user_ns(), c->euid);
+	s->gid     = from_kgid_munged(current_user_ns(), c->gid);
+	s->egid    = from_kgid_munged(current_user_ns(), c->egid);
 }
 
 /*

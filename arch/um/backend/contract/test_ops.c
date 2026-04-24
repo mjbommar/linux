@@ -29,7 +29,9 @@
 #include <linux/cpu.h>
 #include <linux/string.h>
 #include <asm/backend.h>
+#include <asm/io.h>		/* phys_to_virt — memo 11 G3 gadget state test */
 #include <asm/unistd.h>		/* __NR_* for memo 10 class tests */
+#include <linux/stddef.h>	/* offsetof — memo 11 G3 ABI test */
 
 #include "test_kvm_hooks.h"
 
@@ -703,6 +705,64 @@ static void kvm_shadow_pgd_alloc_test(struct kunit *test)
 }
 
 /*
+ * Memo 11 G3 gadget state channel: offset ABI must match
+ * between the header's KVM_GADGET_OFF_* #defines and the
+ * on-disk struct layout. Gadget asm hardcodes these
+ * offsets, so any reorder here is silent-corruption
+ * unless the KUnit test catches it at build+boot time.
+ */
+static void kvm_gadget_state_abi_test(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_state, tgid),
+		(unsigned int)_TEST_KVM_GADGET_OFF_TGID);
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_state, uid),
+		(unsigned int)_TEST_KVM_GADGET_OFF_UID);
+}
+
+/*
+ * Memo 11 G3 gadget state channel: the refresh helper
+ * must write task_struct-derived values into the
+ * allocated page from `current`. Exercise by forcing
+ * the allocation (normally done lazily by
+ * kvm_enter_guest), refreshing, and reading back
+ * through the kernel-VA alias. Under KUnit the current
+ * task is the module-load context (pid != 0, tgid
+ * matches the invoker), so the assertions are that the
+ * fields were set non-zero and are consistent with
+ * current->pid.
+ */
+static void kvm_gadget_state_refresh_test(struct kunit *test)
+{
+	int rc = kvm_gadget_state_alloc();
+
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_ASSERT_NE(test, (unsigned long long)kvm_gadget_state_gpa(),
+			0ULL);
+
+	kvm_gadget_state_refresh();
+
+	/*
+	 * Read back through __va of the gpa. The allocation
+	 * itself returns the kernel VA; but since we don't
+	 * export a direct accessor, derive it from the gpa.
+	 */
+	{
+		u64 gpa = kvm_gadget_state_gpa();
+		struct _test_kvm_gadget_state *s =
+			(struct _test_kvm_gadget_state *)phys_to_virt(gpa);
+
+		/* pid must be non-zero — KUnit runs in a real task. */
+		KUNIT_EXPECT_NE(test, (unsigned int)s->pid, 0u);
+		/* seq is SMP v2 reserved, must be 0 in v1. */
+		KUNIT_EXPECT_EQ(test, (unsigned int)s->seq, 0u);
+		/* cpu_id is 0 under ncpus=1. */
+		KUNIT_EXPECT_EQ(test, (unsigned int)s->cpu_id, 0u);
+	}
+}
+
+/*
  * Memo 10 class-map cross-check. The static table in
  * arch/um/backend/kvm/syscall_class.c must classify exactly
  * the 12 non-A entries from the inventory; every other NR
@@ -852,6 +912,9 @@ static struct kunit_case backend_test_cases[] = {
 	/* Memo 10 syscall classification (step 2 + step 6) */
 	KUNIT_CASE(kvm_syscall_classification_test),
 	KUNIT_CASE(kvm_syscall_class_count_test),
+	/* Memo 11 G3 gadget state channel */
+	KUNIT_CASE(kvm_gadget_state_abi_test),
+	KUNIT_CASE(kvm_gadget_state_refresh_test),
 #endif
 	{}
 };

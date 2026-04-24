@@ -632,6 +632,58 @@ static int kvm_propagate_fs_gs_base(int vcpu_fd, u64 fs_base, u64 gs_base)
 	return 0;
 }
 
+/*
+ * Memo 11 G3: program MSR_KERNEL_GS_BASE to point at the
+ * gadget state page. The gadget's LSTAR handler runs in
+ * ring-0, where MSR_GS_BASE holds the USER's %gs (possibly
+ * zero, possibly something glibc / arch_prctl(ARCH_SET_GS)
+ * set). A `swapgs` at handler entry swaps MSR_GS_BASE
+ * with MSR_KERNEL_GS_BASE, making %gs:off resolve to
+ * the gadget state page; a second `swapgs` before
+ * SYSRETQ restores the user's GS.
+ *
+ * Separating the gadget state channel from the user's GS
+ * keeps userspace arch_prctl(ARCH_SET_GS) semantics
+ * intact (memo 11 §"Per-vCPU state channel"); the ~4 cyc
+ * cost of two swapgs per gadget call is accounted for in
+ * the D71 / memo 11 post-G2 cost model.
+ */
+static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
+{
+	int vcpu_fd = kvm_backend_vcpu0_fd();
+	struct {
+		struct kvm_msrs info;
+		struct kvm_msr_entry entries[1];
+	} msrs = {
+		.info = { .nmsrs = 1 },
+		.entries = {
+			{
+				.index = 0xc0000102,	/* MSR_KERNEL_GS_BASE */
+				.data  = gadget_state_va,
+			},
+		},
+	};
+	int rc;
+
+	if (vcpu_fd < 0)
+		return -EIO;
+	if (!gadget_state_va)
+		return 0;	/* unmapped; nothing to program */
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_MSRS(kernel_gs_base=0x%llx) failed (%d)\n",
+				    (unsigned long long)gadget_state_va, rc);
+		return rc;
+	}
+	if (rc != 1) {
+		pr_warn_once("um: kvm enter_guest: KVM_SET_MSRS wrote %d/1 gadget-MSRs\n",
+			     rc);
+		return -EIO;
+	}
+	return 0;
+}
+
 static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 {
 	int vcpu_fd = kvm_backend_vcpu0_fd();
@@ -854,6 +906,37 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 	}
 
+	/*
+	 * Memo 11 G3 — per-vCPU gadget state channel. Allocate
+	 * the page lazily (same shape as shadow_pgd_alloc), map
+	 * it one page above the bootstrap page (guest VA =
+	 * kvm_bootstrap_va + 0x1000), and refresh it from
+	 * `current` right before KVM_RUN so gadget handlers
+	 * read up-to-date pid/tgid/uid/gid via %gs:<off>. Maps
+	 * read-only from ring-3 (P | US) — only the host writes
+	 * via the kernel VA alias.
+	 */
+	rc = kvm_gadget_state_alloc();
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: gadget_state_alloc failed (%d)\n",
+				    rc);
+		return rc;
+	}
+	{
+		u64 gstate_va = kvm_bootstrap_va + PAGE_SIZE;
+
+		rc = kvm_shadow_map_page(gstate_va,
+					 kvm_gadget_state_gpa(),
+					 KVM_X86_PTE_P | KVM_X86_PTE_US);
+		if (rc < 0) {
+			pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(gadget_state) failed (%d)\n",
+					    rc);
+			return rc;
+		}
+		kvm_backend_ctx()->gadget_state_va = gstate_va;
+	}
+	kvm_gadget_state_refresh();
+
 	cr3_gpa = kvm_shadow_pgd_gpa();
 	if (!cr3_gpa) {
 		pr_warn_once("um: kvm enter_guest: shadow_pgd_gpa is zero after alloc\n");
@@ -1006,6 +1089,18 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	rc = kvm_enter_guest_program_msrs(kvm_bootstrap_va +
 					  KVM_BOOTSTRAP_LSTAR_OFFSET);
+	if (rc < 0)
+		return rc;
+
+	/*
+	 * Memo 11 G3: MSR_KERNEL_GS_BASE -> gadget state VA.
+	 * Programmed only when the gadget state page has been
+	 * mapped (kvm_gadget_state_va() returns 0 otherwise).
+	 * Gadget handlers `swapgs` at entry to swap in this
+	 * base; user's MSR_GS_BASE stays whatever sub-commit
+	 * #5c set for them.
+	 */
+	rc = kvm_enter_guest_program_kernel_gs_base(kvm_gadget_state_va());
 	if (rc < 0)
 		return rc;
 

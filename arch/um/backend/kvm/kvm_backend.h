@@ -59,6 +59,21 @@ struct kvm_um {
 	struct page	*shadow_pgd_page;
 	void		*shadow_pgd;
 	u64		shadow_pgd_gpa;
+
+	/*
+	 * Memo 11 G3 gadget state page. Allocated lazily on
+	 * first kvm_enter_guest call; freed in shutdown.
+	 *   gadget_state_page — backing struct page *.
+	 *   gadget_state      — kernel VA of the state struct.
+	 *   gadget_state_gpa  — __pa(gadget_state).
+	 *   gadget_state_va   — guest VA where the page is
+	 *                       mapped in the shadow PT;
+	 *                       MSR_GS_BASE is set to this.
+	 */
+	struct page	*gadget_state_page;
+	struct kvm_gadget_state *gadget_state;
+	u64		gadget_state_gpa;
+	u64		gadget_state_va;
 #endif
 };
 
@@ -92,6 +107,55 @@ enum kvm_syscall_class {
 };
 
 enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);
+
+/*
+ * Memo 11 G3: per-vCPU gadget state channel.
+ *
+ * The systrap gadget (memo 07 + memo 11) needs to read
+ * per-task state like current->tgid / uid / gid from
+ * ring-3 guest code without a VMEXIT. This struct is the
+ * shared page that holds those values; MSR_GS_BASE is
+ * programmed to point at it, so gadget handlers can do
+ * `mov %gs:KVM_GADGET_FIELD_TGID, %rax` and the CPU
+ * dereferences the current task's cached tgid in ~1 cycle.
+ *
+ * Host-side refresh discipline (v1, ncpus=1): the host
+ * rewrites this page at every kvm_enter_guest, right
+ * before KVM_RUN. Since the vCPU is single-threaded and
+ * KVM_RUN is synchronous, there's no concurrent writer
+ * while the guest is reading — seqlock elided. When SMP
+ * (ncpus>1) lands, each vCPU needs its own state page
+ * and a seqlock for reader-retry against concurrent
+ * cred-change syscalls hitting a sibling vCPU; memo 11
+ * §"Safety discipline" point 6 tracks that v2 shape.
+ *
+ * Field layout is ABI-stable: gadget asm hardcodes the
+ * offsets. Changing layout requires updating every
+ * handler in lockstep.
+ */
+struct kvm_gadget_state {
+	u32 seq;			/* reserved for SMP v2; always 0 in v1 */
+	u32 cpu_id;			/* vCPU index; 0 under ncpus=1 */
+	u32 pid;			/* task_tgid_vnr(current) — the POSIX pid */
+	u32 tgid;			/* task_tgid_vnr(current) — same in v1 */
+	u32 ppid;			/* task_ppid_nr(current) */
+	u32 uid;
+	u32 euid;
+	u32 gid;
+	u32 egid;
+	u32 _pad;			/* align to 8 bytes */
+};
+
+/* Gadget asm will reference these as %gs:<offset>. */
+#define KVM_GADGET_OFF_SEQ	0x00
+#define KVM_GADGET_OFF_CPU_ID	0x04
+#define KVM_GADGET_OFF_PID	0x08
+#define KVM_GADGET_OFF_TGID	0x0c
+#define KVM_GADGET_OFF_PPID	0x10
+#define KVM_GADGET_OFF_UID	0x14
+#define KVM_GADGET_OFF_EUID	0x18
+#define KVM_GADGET_OFF_GID	0x1c
+#define KVM_GADGET_OFF_EGID	0x20
 
 /*
  * Lazy memslot registration (D-04a). Call once before entering
@@ -247,6 +311,28 @@ int kvm_bootstrap_force_init(void);
  */
 #define UM_KVM_SYSCALL_PORT	0xf4	/* SYSCALL trap exit */
 #define UM_KVM_SYSRETQ_PORT	0xf5	/* ring-3 exit (post-SYSRETQ) */
+
+/*
+ * Memo 11 G3 gadget state lifecycle. Alloc/free mirror
+ * the shadow_pgd pair; both are lazy per-process under
+ * the singleton-vCPU model (will become per-vCPU in
+ * the SMP v2). No host-side syscall updates the state
+ * synchronously; kvm_gadget_state_refresh() rewrites
+ * the page from `current` right before each KVM_RUN,
+ * keeping the channel trivially coherent for ncpus=1.
+ *
+ * Allocation failure is not fatal for the non-gadget
+ * build (integrated without bench); the state page is
+ * only consumed by the bench + future G4 handlers. For
+ * builds that reference it, callers panic/fail in the
+ * usual way.
+ */
+int kvm_gadget_state_alloc(void);
+void kvm_gadget_state_free(void);
+void kvm_gadget_state_refresh(void);
+u64 kvm_gadget_state_va(void);
+u64 kvm_gadget_state_gpa(void);
+
 #endif
 
 /*
