@@ -245,8 +245,10 @@ prod-fast still falls back to seccomp.
     lockdep, and watchdog splats in `kernel.log` into
     structured events.jsonl records (10 schemas now
     "emitted"). O2.2 (eBPF) + O2.3 (OpenMetrics HTTP) +
-    O3.2 (upstream tracepoints) + O3.3 (kselftest
-    migration) + O4-O6 parking-lot.
+    O3.2 (upstream tracepoints) + O4-O6 parking-lot.
+    O3.3 is "pattern documented, per-test migrations
+    opt-in" — memo 13 carries the canonical shell
+    snippet that new host-side kselftests can copy.
   - Selftest: `tools/testing/selftests/um/umlctl-smoke/`
     regression-locks the no-orphan guarantee (the motivation)
     plus the full lifecycle + spine event + assert + export

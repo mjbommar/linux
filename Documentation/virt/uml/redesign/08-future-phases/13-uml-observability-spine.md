@@ -505,10 +505,51 @@ trails each line.
   to each sanitizer's "report" path so native event
   emission is a future kernel change, not a permanent
   parser. **[pending]**
-- O3.3 — `umlctl assert` verb wired into kselftest
-  `.umlbundle` outputs as the dmesg-grep replacement.
-  (The verb itself landed in O1.6; this sub-lift is the
-  migration of existing selftests.) **[pending]**
+- O3.3 — `umlctl assert` as the kselftest dmesg-grep
+  replacement. **[pattern documented 2026-04-24;
+  per-test migrations opt-in]** The canonical pattern
+  for new kselftests that need "no kernel BUG during
+  this run" predicates is below. Migrating existing
+  selftests is opt-in and done test-by-test as they
+  touch the tree: forcing a batch migration means
+  building a sanitizer-enabled UML kernel inside the
+  selftest path and risks disrupting unrelated
+  regression coverage, which is a worse trade than
+  letting each test migrate when it's already being
+  edited.
+
+  Canonical pattern for a new host-side kselftest:
+
+  ```bash
+  # Set up an ephemeral state/runtime dir so the test
+  # can't collide with the user's live instances.
+  STATE=$(mktemp -d); RUN=$(mktemp -d)
+  ARGS="--state-dir $STATE --runtime-dir $RUN"
+
+  umlctl $ARGS create T --kernel "$UML_BINARY"
+  umlctl $ARGS start  T --ready-timeout 30 >/dev/null
+  # … exercise the kernel (insmod, syscalls, workload …)
+  umlctl $ARGS stop   T >/dev/null   # derives kernel.log
+                                     # + runs dmesg_parse
+
+  # Assert the kernel is clean on the axes that matter.
+  # Exit 0 = clean, 1 = violation, 7 = no bundle.
+  umlctl $ARGS assert T --no-panic --no-kasan --no-kfence \
+                       --no-kcsan --no-rcu-stall --no-lockdep \
+    || { echo "FAIL: kernel-side regression"; exit 1; }
+
+  umlctl $ARGS rm T
+  rm -rf "$STATE" "$RUN"
+  ```
+
+  Running the kernel inside `umlctl start/stop` buys
+  the author the full spine bundle (run.json,
+  init.log, kernel.log, events.jsonl) without any
+  per-test plumbing, and keeps the assertion surface
+  declarative. The existing `umlctl-smoke` selftest is
+  the living reference implementation — Part H there
+  walks the full splat → events.jsonl → assert
+  round-trip against a synthetic splat kernel fixture.
 
 **Phase O4 — guest-agent + transport (4-8 weeks):**
 
