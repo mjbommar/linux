@@ -29,11 +29,16 @@
 #include <linux/sched/task_stack.h>
 #include <linux/spinlock.h>
 
+#include <linux/signal.h>	/* SIGSEGV for sig_info dispatch */
+
 #include <asm/page.h>
 #include <asm/processor.h>
 #include <as-layout.h>
+#include <kern_util.h>
+#include <mem.h>		/* uml_physmem */
 #include <os.h>
 #include <registers.h>
+#include <sysdep/faultinfo.h>
 #include <sysdep/ptrace.h>
 #include <sysdep/ptrace_user.h>
 #include <asm/backend.h>
@@ -759,16 +764,60 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		case KVM_EXIT_INTR:
 			goto out_read_regs;
 
-		case KVM_EXIT_MMIO:
+		case KVM_EXIT_MMIO: {
 			/*
-			 * Sub-commit #3 wires this into the fault
-			 * path (harness.c Phase III Lift #1d carries
-			 * the decode template). Panic until then so
-			 * the failure mode is diagnosable.
+			 * EPT-level fault: the guest walked its pgd to
+			 * a valid gpa, but no memslot backs that gpa.
+			 * Route through UML's common fault handler so
+			 * mmap-on-demand / swap-in / SIGSEGV delivery
+			 * all use the same code path as the ptrace +
+			 * seccomp backends.
+			 *
+			 * Faultinfo mapping (memo 08 sub-commit #3):
+			 *   trap_no = 14  (X86 #PF — SEGV_IS_FIXABLE)
+			 *   error_code = bit 1 set if write
+			 *                bit 2 set if user-mode access
+			 *                (regs->is_user already true
+			 *                 once the inner loop ran once)
+			 *   cr2 = gpa + uml_physmem — the host-VA
+			 *         equivalent under the Policy A
+			 *         identity memslot. In UML this is
+			 *         the address `segv` interprets as the
+			 *         faulting-VA; vma lookup uses it.
+			 *
+			 * Phase III Lift #1d's harness decode template
+			 * landed the same shape; this is that logic
+			 * lifted into production with regs + fault
+			 * handler hooked up.
 			 */
-			panic("um: kvm run_userspace: KVM_EXIT_MMIO @ gpa=0x%llx len=%u write=%u (sub-commit #3 pending)",
-			      (unsigned long long)run->mmio.phys_addr,
-			      run->mmio.len, run->mmio.is_write);
+			struct faultinfo *fi = UPT_FAULTINFO(regs);
+
+			fi->trap_no    = 14;
+			fi->error_code = (run->mmio.is_write ? 2 : 0) |
+					 (regs->is_user ? 4 : 0);
+			fi->cr2        = (unsigned long)run->mmio.phys_addr +
+					 uml_physmem;
+
+			pr_debug("um: kvm run_userspace: KVM_EXIT_MMIO gpa=0x%llx cr2=0x%lx len=%u write=%u\n",
+				 (unsigned long long)run->mmio.phys_addr,
+				 fi->cr2, run->mmio.len, run->mmio.is_write);
+
+			/*
+			 * Dispatch through the same sig_info[SIGSEGV]
+			 * table-entry seccomp + ptrace use. siginfo is
+			 * NULL here — segv_handler only consumes the
+			 * faultinfo we just populated.
+			 */
+			(*sig_info[SIGSEGV])(SIGSEGV, NULL, regs, NULL);
+
+			/*
+			 * If the handler returned, the VMA was found +
+			 * the fault was serviced (or queued as a deferred
+			 * SIGSEGV in the guest). Re-enter KVM_RUN to let
+			 * the guest retry the faulting access.
+			 */
+			continue;
+		}
 
 		case KVM_EXIT_SHUTDOWN:
 		case KVM_EXIT_FAIL_ENTRY:

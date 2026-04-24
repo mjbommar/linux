@@ -275,18 +275,42 @@ regresses to the D-04a scaffold.
 decode) → `thread.c::kvm_decode_syscall` (as specified in
 the sub-commit plan).
 
-### #3 — `kvm_decode_mmio` (KVM_EXIT_MMIO → fault path)
+### #3 — `kvm_decode_mmio` (KVM_EXIT_MMIO → fault path) — **LANDED 2026-04-24**
 
-**Delta:** reuse Phase III Lift #1d's landed MMIO decode
-(`harness.c:1200+`). The lift already routes an MMIO exit into
-`arch/um/kernel/trap.c::handle_page_fault` equivalent; this
-sub-commit just moves the code out of the harness + wires it
-through `regs`.
+**Delta (as landed):**
 
-**Test:** Accessing an unmapped guest page from userspace
-produces SIGSEGV in the guest process (not a host panic).
-Selftest:
-`tools/testing/selftests/um/kvm-fault-smoke/` (new, ~40 LOC).
+- `kvm_run_userspace`'s `KVM_EXIT_MMIO` case populates
+  `regs->faultinfo` (trap_no=14, error_code with write/user
+  bits, cr2 = gpa + uml_physmem to convert to the host-VA
+  space UML's fault handler speaks) and dispatches via the
+  shared `sig_info[SIGSEGV]` table — same entry seccomp +
+  ptrace call — so `segv_handler` → `segv` → vma lookup +
+  fault servicing run through UML's existing common path.
+- On return from the fault handler we `continue` the
+  KVM_RUN loop so the guest retries the faulting access
+  (same discipline as seccomp's SIGSEGV → handle → re-enter).
+
+**Test:** Unmapped-page access in ring-3 triggers SIGSEGV
+routing rather than a host panic. kvm-smoke selftest
+continues to PASS; once sub-commits #4/#5 carry the guest
+past the bootstrap triple-fault, the progression marker
+count rises as MMIO exits become observable. The harness
+Phase III Lift #1d decode template is the reference shape;
+the production path lifts it with production regs + fault
+handler instead of a harness printk.
+
+**Known current limit:** The kvm-smoke still exits with
+SHUTDOWN on /bin/true because the triple-fault happens
+entirely inside the guest CPU (guest #PF → no IDT → #DF →
+#TF) before any access reaches the EPT layer. MMIO decode
+is therefore armed but not yet *firing* on the current boot
+path; sub-commit #5 (IDT install) + #1 bootstrap-page pgd
+mapping are the next lifts that move the progression
+marker past SHUTDOWN.
+
+**Code moves:** `harness.c` MMIO decode template (Phase III
+Lift #1d) → `thread.c::kvm_run_userspace KVM_EXIT_MMIO`
+case (as specified in the sub-commit plan).
 
 ### #4 — `kvm_handle_hlt` (KVM_EXIT_HLT → idle path)
 
