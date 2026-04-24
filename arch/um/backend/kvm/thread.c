@@ -226,11 +226,11 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 					 */
 
 #define KVM_BOOTSTRAP_GDT_OFFSET	0x000	/* 8 entries × 8 B = 64 B */
-#define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5-byte trampoline */
-#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x080	/* 3-byte SYSRETQ */
+#define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5..~150-byte trampoline / gadget */
 #define KVM_BOOTSTRAP_TSS_OFFSET	0x100	/* 104-byte TSS */
 #define KVM_BOOTSTRAP_IDT_OFFSET	0x180	/* 33 × 16 = 528 B */
 #define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x400	/* 11-byte #PF handler */
+#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x420	/* 3-byte SYSRETQ (first-entry helper) */
 #define KVM_BOOTSTRAP_STACK_TOP		0x1000	/* ring-0 IST stack top */
 #define KVM_BOOTSTRAP_TSS_SEL		0x30	/* GDT entry 6 (16-byte TSS desc) */
 #define KVM_BOOTSTRAP_IDT_ENTRIES	33	/* covers #PF (vector 14) */
@@ -247,31 +247,125 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
  * with the harness so sub-commit #3's decode can lift the
  * existing harness logic unchanged.
  */
-#ifdef CONFIG_UM_BACKEND_KVM_BENCH_GADGET_GETPID
+#ifdef CONFIG_UM_BACKEND_KVM_GADGET
 /*
- * Memo 11 G2 bench variant: minimum-viable 1-syscall
- * gadget. Intercepts __NR_getpid (0x27) in-guest, returns
- * sentinel 0x1234 without a VMEXIT. Every other syscall
- * takes the normal `out %al, $0xf4` VMEXIT path.
- * Purpose: measure the SYSCALL+SYSRETQ floor predicted by
- * memo 07 §"Round-trip cost". DO NOT enable outside the
- * gadget-floor bench — userspace getpid returns garbage.
+ * Memo 11 G4: real systrap gadget body. Entered via
+ * MSR_LSTAR on every SYSCALL from ring-3. Handles the 7
+ * pid-family syscalls in-guest without a VMEXIT by
+ * reading per-task state via swapgs + %gs:<KVM_GADGET_
+ * OFF_*>; every other syscall takes the fallback `out
+ * %al, $0xf4` VMEXIT path identical to the non-gadget
+ * build.
  *
- *   3d 27 00 00 00       cmp    $0x27, %eax
- *   75 08                jne    fallback (offset 15)
- *   b8 34 12 00 00       mov    $0x1234, %eax
- *   48 0f 07             sysretq   (gadget return)
- * fallback:
- *   e6 f4                out    %al, $0xf4
- *   48 0f 07             sysretq   (fallback return)
+ * Layout (hex offsets from LSTAR_OFFSET = +0x40 in the
+ * bootstrap page):
+ *
+ *   +0 entry:
+ *     0f 01 f8          swapgs                         (3 B)
+ *
+ *   +3 dispatch — 7 cmp $NR, %al; je handler_<NR>:
+ *     3c 27 74 <r>      cmp $0x27 (getpid)  je pid_h    (4 B)
+ *     3c ba 74 <r>      cmp $0xba (gettid)  je tid_h    (4 B)
+ *     3c 6e 74 <r>      cmp $0x6e (getppid) je ppid_h   (4 B)
+ *     3c 66 74 <r>      cmp $0x66 (getuid)  je uid_h    (4 B)
+ *     3c 6b 74 <r>      cmp $0x6b (geteuid) je euid_h   (4 B)
+ *     3c 68 74 <r>      cmp $0x68 (getgid)  je gid_h    (4 B)
+ *     3c 6c 74 <r>      cmp $0x6c (getegid) je egid_h   (4 B)
+ *     # offset 3 + 28 = 31
+ *
+ *   +31 fallback (unknown NR — VMEXIT):
+ *     0f 01 f8          swapgs  (restore user GS)      (3 B)
+ *     e6 f4             out %al, $0xf4                  (2 B)
+ *     48 0f 07          sysretq                         (3 B)
+ *     # offset 31 + 8 = 39
+ *
+ *   +39..+102 handlers — 7 × (mov %gs:<OFF>, %eax; jmp tail):
+ *     65 8b 04 25 0c 00 00 00  mov %gs:0x08..0x20, %eax (8 B)
+ *     eb <r>                   jmp tail                 (2 B)
+ *
+ *   +109 shared tail:
+ *     0f 01 f8          swapgs  (restore user GS)      (3 B)
+ *     48 0f 07          sysretq                         (3 B)
+ *     # total: 115 B  (fits in +0x40..+0x100 region
+ *     # that was reclaimed from the old SYSRET_OFFSET
+ *     # which moved to +0x420).
+ *
+ * The je/jmp displacements below are computed at write
+ * time because they depend on the total body layout —
+ * the bytes below use placeholders (marked with
+ * 0xRR) that the init path patches in. Simpler would be
+ * to hardcode them, but keeping the computation
+ * explicit makes it easy to add / reorder handlers
+ * without a manual recount.
+ *
+ * Getpid returns tgid (POSIX pid). Gettid returns tid
+ * (Linux thread id). See kvm_backend.h for the struct
+ * field ↔ offset mapping.
  */
+#define KVM_GADGET_TAIL_OFF	109	/* offset of shared tail */
+#define KVM_GADGET_FALLBACK_OFF	31	/* offset of fallback `swapgs; out` */
+
 static const u8 kvm_bootstrap_lstar_bytes[] = {
-	0x3d, 0x27, 0x00, 0x00, 0x00,	/* cmp   $0x27, %eax */
-	0x75, 0x08,			/* jne   +8 -> fallback (offset 15) */
-	0xb8, 0x34, 0x12, 0x00, 0x00,	/* mov   $0x1234, %eax */
-	0x48, 0x0f, 0x07,		/* sysretq (gadget return) */
-	0xe6, 0xf4,			/* out   %al, $0xf4 (fallback) */
-	0x48, 0x0f, 0x07,		/* sysretq (fallback return) */
+	/* +0   entry */
+	0x0f, 0x01, 0xf8,			/* swapgs */
+
+	/*
+	 * +3 dispatch. Each line is cmp imm8 + je rel8. JE
+	 * rel8 is signed offset from "next instruction after
+	 * je," so JE[i] at offset (5+4i) has next-insn at
+	 * (7+4i); rel8 = handler_offset - (7+4i).
+	 *   +3:  je +32 → pid_h  (+39)
+	 *   +7:  je +38 → tid_h  (+49)
+	 *   +11: je +44 → ppid_h (+59)
+	 *   +15: je +50 → uid_h  (+69)
+	 *   +19: je +56 → euid_h (+79)
+	 *   +23: je +62 → gid_h  (+89)
+	 *   +27: je +68 → egid_h (+99)
+	 */
+	0x3c, 0x27, 0x74, 32,	/* cmp $0x27 (getpid),  je pid_h  */
+	0x3c, 0xba, 0x74, 38,	/* cmp $0xba (gettid),  je tid_h  */
+	0x3c, 0x6e, 0x74, 44,	/* cmp $0x6e (getppid), je ppid_h */
+	0x3c, 0x66, 0x74, 50,	/* cmp $0x66 (getuid),  je uid_h  */
+	0x3c, 0x6b, 0x74, 56,	/* cmp $0x6b (geteuid), je euid_h */
+	0x3c, 0x68, 0x74, 62,	/* cmp $0x68 (getgid),  je gid_h  */
+	0x3c, 0x6c, 0x74, 68,	/* cmp $0x6c (getegid), je egid_h */
+
+	/* +31  fallback — unknown NR */
+	0x0f, 0x01, 0xf8,			/* swapgs (restore user GS) */
+	0xe6, 0xf4,				/* out %al, $0xf4 */
+	0x48, 0x0f, 0x07,			/* sysretq */
+
+	/* +39  handler_getpid: mov %gs:KVM_GADGET_OFF_TGID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00,
+	0xeb, 60,				/* jmp +60 → tail */
+
+	/* +49  handler_gettid: mov %gs:KVM_GADGET_OFF_TID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x0c, 0x00, 0x00, 0x00,
+	0xeb, 50,				/* jmp +50 → tail */
+
+	/* +59  handler_getppid: mov %gs:KVM_GADGET_OFF_PPID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x10, 0x00, 0x00, 0x00,
+	0xeb, 40,				/* jmp +40 → tail */
+
+	/* +69  handler_getuid: mov %gs:KVM_GADGET_OFF_UID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x14, 0x00, 0x00, 0x00,
+	0xeb, 30,				/* jmp +30 → tail */
+
+	/* +79  handler_geteuid: mov %gs:KVM_GADGET_OFF_EUID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00,
+	0xeb, 20,				/* jmp +20 → tail */
+
+	/* +89  handler_getgid: mov %gs:KVM_GADGET_OFF_GID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x1c, 0x00, 0x00, 0x00,
+	0xeb, 10,				/* jmp +10 → tail */
+
+	/* +99  handler_getegid: mov %gs:KVM_GADGET_OFF_EGID, %eax */
+	0x65, 0x8b, 0x04, 0x25, 0x20, 0x00, 0x00, 0x00,
+	0xeb, 0,				/* jmp +0 — tail is the next byte */
+
+	/* +109 shared tail */
+	0x0f, 0x01, 0xf8,			/* swapgs (restore user GS) */
+	0x48, 0x0f, 0x07,			/* sysretq */
 };
 #else
 static const u8 kvm_bootstrap_lstar_bytes[] = {

@@ -496,37 +496,44 @@ config UM_BACKEND_KVM_INTEGRATED
 	  #2-#5. Users running the integrated path under a real guest
 	  workload should wait until the full series lands. Say N.
 
-config UM_BACKEND_KVM_BENCH_GADGET_GETPID
-	bool "KVM backend bench: 1-syscall getpid() gadget (memo 11 G2)"
+config UM_BACKEND_KVM_GADGET
+	bool "KVM backend systrap gadget (memo 11 G2-G6)"
 	depends on UM_BACKEND_KVM_INTEGRATED
 	default n
 	help
 	  Replace the LSTAR trampoline's 5-byte `out %al, $0xf4;
-	  sysretq` wire form with a minimum-viable 1-syscall gadget:
+	  sysretq` wire form with a real systrap gadget body
+	  that intercepts gadget-safe syscalls (getpid, getppid,
+	  gettid, getuid/euid, getgid/egid) in-guest and returns
+	  without a VMEXIT. Everything else falls through to the
+	  same `out %al, $0xf4` VMEXIT the default build uses.
 
-	    cmp $__NR_getpid, %eax
-	    jne fallback
-	    mov $0x1234, %eax   # sentinel return
-	    sysretq              # gadget path: no VMEXIT
-	  fallback:
-	    out %al, $0xf4        # everything else: normal VMEXIT
-	    sysretq
+	  Reads per-task state from a host-maintained shared
+	  page via %gs:<offset> after a SWAPGS bracket
+	  (memo 11 G3 state channel). Returns real kernel values,
+	  not sentinels.
 
-	  Purpose: validate memo 07's prediction that the pure
-	  SYSCALL+SYSRETQ floor is <100 ns per gadget-handled call.
-	  Memo 11 §"Gadget G2" is this deliverable. Once measured,
-	  G3-G8 build up to the full 11-syscall first-pass gadget.
+	  Staging:
+	    G2 (bench, 1 syscall + sentinel) — retired 2026-04-24
+	    G3 (per-vCPU state channel)      — landed
+	    G4 (7 pid-family handlers)       — this option enables
+	    G5 (clock_gettime + vvar)        — future
+	    G6 (sched_yield + time + getcpu) — future
 
-	  The sentinel return 0x1234 is intentionally WRONG — the
-	  bench cares about cycle counts, not correctness, and the
-	  wrong-pid surface lets the runner verify the gadget path
-	  actually fired (a valid pid back from `sink` means the
-	  fallback path ran instead).
+	  Performance goal: < 100 ns per gadget-handled syscall
+	  on modern silicon. G2's 1-syscall bench measured 21 ns
+	  on Skylake-SP; G4 adds ~8 cyc of state-read + swapgs
+	  bracket, landing around 30-40 ns per D71.
 
-	  DO NOT enable for anything except the bench. The
-	  1-syscall gadget silently corrupts getpid() semantics for
-	  every caller; userspace that depends on getpid returning
-	  a real pid will malfunction. Say N.
+	  Behaviour: getpid()/getppid()/gettid()/get{u,g}id()/
+	  get{e}{u,g}id() return real values via the state page.
+	  Any syscall outside the gadget set takes the usual
+	  VMEXIT path with identical semantics to the non-gadget
+	  build.
+
+	  Still experimental — v1 lands only under force=kvm.
+	  Say N unless specifically measuring or validating the
+	  gadget work.
 
 #
 # Fuzzer-oriented hooks (workstream C-09).

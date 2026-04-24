@@ -1320,6 +1320,127 @@ UML_BINARY=/tmp/uml-kvmbench/linux \
     bash tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh
 ```
 
+## 2026-04-24 — G4 landing: real 7-handler pid-family gadget, 28 ns / 97 cyc per getpid
+
+G4 lands the first **real** gadget body — 7 handlers
+(getpid, gettid, getppid, getuid, geteuid, getgid,
+getegid) that read per-task state from the G3 state
+page via `swapgs; mov %gs:<off>, %eax; swapgs;
+sysretq`. Replaces the G2 bench variant (hardcoded
+sentinel `0x1234`) with real kernel values.
+
+Kconfig has been RENAMED from
+`UM_BACKEND_KVM_BENCH_GADGET_GETPID` (G2-only) to
+`UM_BACKEND_KVM_GADGET` (covers G2-G6 staging). The
+old G2 bench is retired — same gadget dispatch
+framework, just with real handlers under
+KVM_GADGET=y.
+
+### Dev host (server3, Xeon W-2123 / Skylake-SP)
+
+| Backend            | ns/call | cyc/call | vs seccomp | sink signature |
+|--------------------|--------:|---------:|-----------:|----------------|
+| ptrace             |  14,529 |   52,306 |     1.26×  | 101,000 (real pid=1) |
+| seccomp            |  11,562 |   41,623 |     1.00×  | 101,000 (real pid=1) |
+| **kvm (gadget)**   |  **28** |   **97** | **0.002×** | 101,000 (real pid=1) |
+
+Gadget handler reads are real now — `sink = 101,000`
+confirms every call returned `init`'s pid = 1 via the
+G3 state page's `tgid` field. Pre-G4 (G2 bench), the
+same position would have shown
+`sink = 101,000 × 0x1234`.
+
+### G2 → G4 cost delta
+
+| Variant | cyc/call | Delta from G2 | What changed |
+|---------|---------:|---:|---|
+| G2 bench (hardcoded 0x1234)             |  76 | —      | baseline (1 cmp+je+mov imm+sysretq) |
+| G4 real (swapgs + %gs load + tail swapgs)| 97 | +21 cyc | 2 × swapgs (~8 cyc) + %gs:<off> load (~5 cyc) + jmp tail (~1 cyc) + cmp/je chain to reach handler past entry (~7 cyc) |
+
+D71's prediction for the realistic gadget was
+"~90-120 cyc / ~25-35 ns." Measured 97 cyc / 28 ns —
+**exactly in the predicted band**.
+
+### Against the non-gadget KVM baseline
+
+| Path | cyc/call |
+|------|---------:|
+| KVM fallback (no gadget, full VMEXIT + shadow-PT refill + handle_syscall + KVM_SET_REGS)  | 85,016 |
+| KVM G4 gadget (swapgs + %gs:<TGID> + swapgs + sysretq) | 97 |
+
+**~876× cycle reduction** on gadget-handled
+syscalls. The full picture for this fleet's syscall
+workload mix will depend on the gadget-hit ratio —
+getpid-heavy loops see the full ~876× speedup, mixed
+workloads see proportional gains on the fraction
+that maps to gadget-handleable NRs.
+
+### Layout changes for G4
+
+The 5-byte LSTAR trampoline expands to 115 bytes to
+fit the dispatch + 7 handlers + shared tail. To make
+room without overlapping TSS at +0x100, the 3-byte
+SYSRET gadget (used only by kvm_enter_guest's
+first-ring-3 transition) moved from +0x080 to +0x420
+(immediately after the #PF handler at +0x400..+0x40b,
+plenty of room before the IST stack at the top of
+the page).
+
+New bootstrap-page layout:
+
+```
++0x000  GDT                 64 B
++0x040  LSTAR (gadget)   5..115 B (depends on KVM_GADGET config)
++0x100  TSS                104 B
++0x180  IDT                528 B
++0x400  PF_HANDLER          11 B
++0x420  SYSRET               3 B   (moved from +0x080)
++0x1000 IST_STACK_TOP
+```
+
+### What G4 doesn't cover
+
+- `clock_gettime` and `time` (G5) — needs shared vvar
+  page for clock values the host writes on each timer
+  tick. Memo 11 §"Gadget G5" scopes this; it's the
+  last meaningful handler before G6 picks up the
+  tail of memo 07's first-11 list.
+- `sched_yield` and `getcpu` (G6) — small additions
+  once G5's vvar plumbing exists.
+- Multithreaded correctness — G3's v1 channel is
+  single-writer (host-only, ncpus=1). A pthread that
+  changes uid/gid mid-process doesn't get an atomic
+  view under the gadget's seqlock-less v1. Memo 11
+  §"Safety discipline" point 6 scopes the SMP v2
+  seqlock.
+- Binaries that actually use the gadget — right now
+  no in-tree glibc or selftest triggers G4 handlers
+  because the freestanding getpid-loop is the only
+  raw-syscall user. glibc goes through VDSO for
+  clock_gettime and often caches getpid(), so most
+  real workloads don't touch the gadget path
+  directly. G4's measurement still proves the
+  mechanism; extracting workload-level wins is G5-G7
+  work.
+
+### Reproducibility
+
+```
+# Default (non-gadget) build
+make ARCH=um O=/tmp/uml-kvmint -j$(nproc)
+
+# Gadget build (G3 state channel + G4 handlers active)
+sed -i 's/^# CONFIG_UM_BACKEND_KVM_GADGET is not set$/CONFIG_UM_BACKEND_KVM_GADGET=y/' \
+    /tmp/uml-kvmbench/.config
+make ARCH=um O=/tmp/uml-kvmbench olddefconfig
+make ARCH=um O=/tmp/uml-kvmbench -j$(nproc)
+
+# Measure
+UML_BINARY=/tmp/uml-kvmbench/linux \
+    bash tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh
+# Expect: kvm cyc_per_call ~100 on modern x86_64.
+```
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
