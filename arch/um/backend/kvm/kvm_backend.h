@@ -75,6 +75,42 @@ int kvm_setup_harness_paging_range(u64 *pml4, u64 *pdpt, u64 *pd,
 void kvm_setup_harness_sregs(struct kvm_sregs *sregs);
 
 /*
+ * Production analogue of kvm_setup_harness_sregs — same segment
+ * + CR0/CR4/EFER bits, caller-parameterized CR3 + GDT base.
+ * See memo 08 sub-commit #1 and sregs.c for the contract.
+ */
+void kvm_setup_production_sregs(struct kvm_sregs *sregs,
+				u64 cr3_gpa, u64 gdt_gpa);
+
+/*
+ * D-04/D-05 follow-on integration gate (memo 08, task #162).
+ * When CONFIG_UM_BACKEND_KVM_INTEGRATED=y, `kvm_run_userspace`
+ * enters the real KVM_RUN loop via `kvm_enter_guest` instead
+ * of panic-ing. Off by default; sub-commits #1-#6 extend the
+ * gated code path incrementally. The harness path
+ * (CONFIG_UM_BACKEND_KVM_HARNESS) stays independently
+ * selectable so regressions in either path are diagnosable
+ * separately.
+ */
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+struct uml_pt_regs;
+int kvm_enter_guest(struct uml_pt_regs *regs);
+
+/*
+ * Test hook: pure data-structure subset of kvm_enter_guest.
+ * Fills caller-provided kvm_sregs + kvm_regs via the
+ * production helpers without calling any ioctl. Exposed for
+ * arch/um/backend/contract/ KUnit; never called from the
+ * normal run_userspace path.
+ */
+struct kvm_sregs;
+struct kvm_regs;
+int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
+			  const struct uml_pt_regs *src,
+			  u64 cr3_gpa, u64 gdt_gpa);
+#endif
+
+/*
  * D-04b.1b diagnostic harness (arch/um/backend/kvm/harness.c).
  * Only compiled when CONFIG_UM_BACKEND_KVM_HARNESS=y. Panics
  * with KVM_RUN exit_reason — never returns. kvm_init() invokes

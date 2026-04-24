@@ -26,7 +26,23 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/cpu.h>
+#include <linux/string.h>
 #include <asm/backend.h>
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+# include <linux/kvm.h>
+# include <sysdep/ptrace.h>
+/*
+ * kvm_enter_guest_probe lives in arch/um/backend/kvm/thread.c
+ * (EXPORT_SYMBOL_GPL'd there). Prototype-local-to-test avoids
+ * pulling `arch/um/backend/kvm/kvm_backend.h` in via a fragile
+ * cross-subdir relative include; the probe signature is the
+ * stable contract, identical to what kvm_backend.h declares.
+ */
+int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
+			  const struct uml_pt_regs *src,
+			  u64 cr3_gpa, u64 gdt_gpa);
+#endif
 
 /* ---------------------------------------------------------------- */
 /* Helpers                                                          */
@@ -357,6 +373,170 @@ static void backend_write_guest_regs_stub_test(struct kunit *test)
 }
 
 /* ---------------------------------------------------------------- */
+/* KVM integrated-path state materialization (memo 08 sub-commit #1) */
+/* ---------------------------------------------------------------- */
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+
+/*
+ * Expected long-mode bits the production sregs path must emit.
+ * Mirrors sregs.c::kvm_fill_longmode_segments + the caller-side
+ * CR3/GDT pass-through. Any drift in production-sregs behaviour
+ * fails these assertions immediately — harness and production
+ * share kvm_fill_longmode_segments so this test also indirectly
+ * guards the harness bits, but the two paths can diverge later
+ * (e.g. production may grow TR + LDT for interrupt handling in
+ * sub-commit #4) and this test belongs to the production half.
+ */
+static void kvm_production_sregs_shape_test(struct kunit *test)
+{
+	struct kvm_sregs sregs;
+	struct kvm_regs kregs;
+	struct uml_pt_regs src;
+	const u64 fake_cr3 = 0x0000000040000000ULL;
+	const u64 fake_gdt = 0x0000000040001000ULL;
+	int rc;
+
+	memset(&sregs, 0xa5, sizeof(sregs));	/* poison */
+	memset(&kregs, 0xa5, sizeof(kregs));
+	memset(&src,   0,    sizeof(src));
+
+	/* Seed every HOST_* gp slot with a recognizable pattern so
+	 * the marshalling assertions below catch any bit-for-bit
+	 * drift without being tied to a particular register name's
+	 * value.
+	 */
+	src.gp[HOST_AX]      = 0x11;
+	src.gp[HOST_BX]      = 0x22;
+	src.gp[HOST_CX]      = 0x33;
+	src.gp[HOST_DX]      = 0x44;
+	src.gp[HOST_SI]      = 0x55;
+	src.gp[HOST_DI]      = 0x66;
+	src.gp[HOST_BP]      = 0x77;
+	src.gp[HOST_SP]      = 0x88;
+	src.gp[HOST_R8]      = 0x99;
+	src.gp[HOST_R9]      = 0xaa;
+	src.gp[HOST_R10]     = 0xbb;
+	src.gp[HOST_R11]     = 0xcc;
+	src.gp[HOST_R12]     = 0xdd;
+	src.gp[HOST_R13]     = 0xee;
+	src.gp[HOST_R14]     = 0xff;
+	src.gp[HOST_R15]     = 0x1010;
+	src.gp[HOST_IP]      = 0xdeadbeefUL;
+	src.gp[HOST_EFLAGS]  = 0x0;	/* bit 1 must be forced on */
+
+	rc = kvm_enter_guest_probe(&sregs, &kregs, &src, fake_cr3, fake_gdt);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+
+	/* CR3 / GDT pass-through. */
+	KUNIT_EXPECT_EQ(test, sregs.cr3, fake_cr3);
+	KUNIT_EXPECT_EQ(test, sregs.gdt.base, fake_gdt);
+	KUNIT_EXPECT_NE(test, (int)sregs.gdt.limit, 0);
+
+	/* Long-mode control bits.
+	 * Exact values mirror sregs.c's KVM_CR0_* / KVM_CR4_PAE /
+	 * KVM_EFER_* constants; any change there is a deliberate
+	 * contract bump and this test should be updated in the same
+	 * commit.
+	 */
+	KUNIT_EXPECT_TRUE(test, (sregs.cr0 & 0x80000001UL) ==
+				0x80000001UL);			/* PE | PG */
+	KUNIT_EXPECT_TRUE(test, (sregs.cr4 & (1UL << 5)) != 0);	/* PAE */
+	KUNIT_EXPECT_TRUE(test, (sregs.efer & (1UL << 0)) != 0);/* SCE */
+	KUNIT_EXPECT_TRUE(test, (sregs.efer & (1UL << 8)) != 0);/* LME */
+	KUNIT_EXPECT_TRUE(test, (sregs.efer & (1UL << 10)) != 0);/* LMA */
+
+	/* Ring-0 long-mode CS: L=1, selector=0x08, DPL=0. */
+	KUNIT_EXPECT_EQ(test, (int)sregs.cs.selector, 0x08);
+	KUNIT_EXPECT_EQ(test, (int)sregs.cs.l, 1);
+	KUNIT_EXPECT_EQ(test, (int)sregs.cs.dpl, 0);
+	KUNIT_EXPECT_EQ(test, (int)sregs.cs.present, 1);
+
+	/* Ring-0 SS/DS: selector=0x10. */
+	KUNIT_EXPECT_EQ(test, (int)sregs.ss.selector, 0x10);
+	KUNIT_EXPECT_EQ(test, (int)sregs.ds.selector, 0x10);
+}
+
+/*
+ * GP register marshalling: every HOST_* slot reaches the right
+ * kvm_regs field, RFLAGS has the reserved bit-1 forced on.
+ */
+static void kvm_production_regs_marshal_test(struct kunit *test)
+{
+	struct kvm_sregs sregs;
+	struct kvm_regs kregs;
+	struct uml_pt_regs src;
+
+	memset(&sregs, 0, sizeof(sregs));
+	memset(&kregs, 0xa5, sizeof(kregs));
+	memset(&src,   0,    sizeof(src));
+
+	src.gp[HOST_AX]     = 0x1111;
+	src.gp[HOST_BX]     = 0x2222;
+	src.gp[HOST_CX]     = 0x3333;
+	src.gp[HOST_DX]     = 0x4444;
+	src.gp[HOST_SI]     = 0x5555;
+	src.gp[HOST_DI]     = 0x6666;
+	src.gp[HOST_BP]     = 0x7777;
+	src.gp[HOST_SP]     = 0x8888;
+	src.gp[HOST_R8]     = 0x9999;
+	src.gp[HOST_R9]     = 0xaaaa;
+	src.gp[HOST_R10]    = 0xbbbb;
+	src.gp[HOST_R11]    = 0xcccc;
+	src.gp[HOST_R12]    = 0xdddd;
+	src.gp[HOST_R13]    = 0xeeee;
+	src.gp[HOST_R14]    = 0xffff;
+	src.gp[HOST_R15]    = 0x10101;
+	src.gp[HOST_IP]     = 0xaabbccddUL;
+	src.gp[HOST_EFLAGS] = 0;	/* bit 1 must be forced on */
+
+	KUNIT_EXPECT_EQ(test,
+			kvm_enter_guest_probe(&sregs, &kregs, &src, 0, 0), 0);
+
+	KUNIT_EXPECT_EQ(test, kregs.rax, 0x1111ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rbx, 0x2222ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rcx, 0x3333ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rdx, 0x4444ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rsi, 0x5555ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rdi, 0x6666ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rbp, 0x7777ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rsp, 0x8888ULL);
+	KUNIT_EXPECT_EQ(test, kregs.r8,  0x9999ULL);
+	KUNIT_EXPECT_EQ(test, kregs.r9,  0xaaaaULL);
+	KUNIT_EXPECT_EQ(test, kregs.r10, 0xbbbbULL);
+	KUNIT_EXPECT_EQ(test, kregs.r11, 0xccccULL);
+	KUNIT_EXPECT_EQ(test, kregs.r12, 0xddddULL);
+	KUNIT_EXPECT_EQ(test, kregs.r13, 0xeeeeULL);
+	KUNIT_EXPECT_EQ(test, kregs.r14, 0xffffULL);
+	KUNIT_EXPECT_EQ(test, kregs.r15, 0x10101ULL);
+	KUNIT_EXPECT_EQ(test, kregs.rip, 0xaabbccddULL);
+
+	/* RFLAGS bit 1 is reserved-one (AMD64 SDM §3.1.4). */
+	KUNIT_EXPECT_NE(test, kregs.rflags & (1ULL << 1), 0ULL);
+}
+
+/*
+ * -EINVAL / -EINVAL probes: the probe helper validates its
+ * inputs so the caller doesn't dereference NULLs when the test
+ * setup itself is broken. Trivial but catches a common refactor
+ * hazard.
+ */
+static void kvm_production_probe_null_test(struct kunit *test)
+{
+	struct kvm_sregs s = { 0 };
+	struct kvm_regs  r = { 0 };
+	struct uml_pt_regs u;
+
+	memset(&u, 0, sizeof(u));
+
+	KUNIT_EXPECT_EQ(test, kvm_enter_guest_probe(NULL, &r,   &u, 0, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, kvm_enter_guest_probe(&s,  NULL, &u, 0, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, kvm_enter_guest_probe(&s,  &r,  NULL, 0, 0), -EINVAL);
+}
+
+#endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
+
+/* ---------------------------------------------------------------- */
 /* Suite registration                                               */
 /* ---------------------------------------------------------------- */
 
@@ -387,6 +567,12 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(backend_init_thread_regs_test),
 	KUNIT_CASE(backend_read_guest_regs_stub_test),
 	KUNIT_CASE(backend_write_guest_regs_stub_test),
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	/* KVM integrated state materialization (memo 08 #1) */
+	KUNIT_CASE(kvm_production_sregs_shape_test),
+	KUNIT_CASE(kvm_production_regs_marshal_test),
+	KUNIT_CASE(kvm_production_probe_null_test),
+#endif
 	{}
 };
 

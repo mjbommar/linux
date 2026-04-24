@@ -477,6 +477,25 @@ config UM_BACKEND_KVM_HARNESS
 	  See Documentation/virt/uml/redesign/02-workstreams/
 	  D-kvm-backend/04b-long-mode-sregs.md for the design note.
 
+config UM_BACKEND_KVM_INTEGRATED
+	bool "KVM backend integrated run_userspace (memo 08, task #162)"
+	depends on UM_BACKEND_KVM
+	default n
+	help
+	  Gate for the real kvm_run_userspace integration path
+	  described in Documentation/virt/uml/redesign/02-workstreams/
+	  D-kvm-backend/08-real-run-userspace.md (decisions-log D65).
+	  Sub-commits #1-#7 land behind this before the final enable.
+	  When n, run_userspace still uses the D-04a panic scaffold;
+	  harness remains independently selectable via
+	  UM_BACKEND_KVM_HARNESS.
+
+	  Enabling this today only compiles in the state-materialization
+	  helpers (kvm_enter_guest + sregs/regs marshalling). The
+	  KVM_RUN loop + exit-reason decode arrive with sub-commits
+	  #2-#5. Users running the integrated path under a real guest
+	  workload should wait until the full series lands. Say N.
+
 #
 # Fuzzer-oriented hooks (workstream C-09).
 #

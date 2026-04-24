@@ -1,8 +1,9 @@
 # D-04/D-05 follow-on: real `kvm_run_userspace` integration
 
-**Status:** design memo (2026-04-23) — scopes the transition
-from the late_initcall harness to the integrated
-`run_userspace` hot path.
+**Status:** implementation in flight (2026-04-24) — sub-commit
+#1 landed (state materialization helpers + A-05 KUnit
+extension + KVM_INTEGRATED Kconfig gate, default n).
+Sub-commits #2-#7 pending.
 **Effort:** 2-3 weeks (several sub-commits; no single commit
 is larger than a workstream-B lift).
 **Dependencies:** D-04c (landed, LSTAR trampoline), D-04b.2b.2
@@ -67,30 +68,73 @@ Each sub-commit is independently testable + mergeable. Order
 follows data-flow: set up the guest, run it, decode exits,
 return state.
 
-### #1 — `kvm_enter_guest` (vCPU state materialization)
+### #1 — `kvm_enter_guest` (vCPU state materialization) — **LANDED 2026-04-24**
 
-**Delta:** `thread.c` grows a `kvm_enter_guest(regs)` that:
+**Delta (as landed):** `thread.c` grows a `kvm_enter_guest(regs)`
+and the peer probe helper `kvm_enter_guest_probe`. `sregs.c`
+factors `kvm_fill_longmode_segments` as shared between harness
+and production paths, and grows `kvm_setup_production_sregs`
+(caller-parameterized CR3 + GDT base). New Kconfig
+`UM_BACKEND_KVM_INTEGRATED` (default n) gates the production
+path so the D-04a panic() scaffold in `kvm_run_userspace` stays
+the default.
 
-1. Reads CR3 from `current->active_mm->pgd` (translated through
-   the Policy A identity memslot — the machinery is already in
-   `mm.c::kvm_ensure_memslot`).
-2. `KVM_SET_SREGS` with long-mode setup (lifts
-   `kvm_setup_harness_sregs` out of `harness.c` into
-   `sregs.c::kvm_setup_production_sregs` — same function minus
-   the hard-coded stub RIP).
-3. `KVM_SET_REGS` populates GP regs from `regs->gp[HOST_*]` and
-   seeds RIP from `regs->gp[HOST_IP]` / RSP from
-   `regs->gp[HOST_SP]`.
-4. `KVM_SET_MSRS` installs LSTAR (→ ring-0 bounce trampoline,
-   same gadget D-04c landed).
+1. Reads CR3 from `current->active_mm->pgd` → guest-phys via
+   Policy A identity memslot (`__pa(mm->pgd)`; see `mem.h`
+   `uml_to_phys` — UML-VA minus `uml_physmem`).
+2. `KVM_GET_SREGS` (preserve APIC/TR/LDT), `kvm_setup_production_sregs(&sregs,
+   cr3, gdt_gpa)`, `KVM_SET_SREGS`.
+3. Bootstrap-page allocation (one GFP_KERNEL zeroed page,
+   spinlock-guarded cache) hosts the production GDT + the
+   LSTAR trampoline slot sub-commit #2 will populate.
+   Bootstrap-page GPA = `__pa(page)`.
+4. `kvm_uml_regs_to_kvm_regs` marshals every HOST_* gp[] slot
+   into the matching `struct kvm_regs` field and forces
+   RFLAGS bit 1 (reserved-one) on defensively; `KVM_SET_REGS`.
+5. `KVM_SET_MSRS` (MSR_STAR/LSTAR/FMASK) — **NOT YET**; the
+   trampoline itself doesn't exist in production form yet.
+   Sub-commit #2 programs the MSRs after writing the
+   trampoline into the bootstrap page. Until then
+   `kvm_enter_guest` is call-safe only for workloads that
+   don't issue `syscall`.
 
-**Test:** extend the A-05 KUnit suite with
-`test_kvm_enter_guest_state` that pokes the vCPU post-enter and
-asserts CR3/RIP/RSP match the passed `regs`.
+**Test (landed):** 3 new KUnit cases under the existing A-05
+`um_backend_contract` suite, gated with
+`CONFIG_UM_BACKEND_KVM_INTEGRATED`:
 
-**Code moves:** `harness.c` lines ~900-950 (kvm_setup_harness_sregs)
-→ `sregs.c`, keep the harness wrapper as a thin adapter for
-the late_initcall spike path.
+- `kvm_production_sregs_shape_test` — CR3 + GDT pass-through,
+  CR0.PE|PG + CR4.PAE + EFER.SCE|LME|LMA, CS/SS/DS selectors.
+- `kvm_production_regs_marshal_test` — every HOST_* gp[]
+  reaches the right `kvm_regs` field; RFLAGS bit 1 forced on.
+- `kvm_production_probe_null_test` — NULL-input guards.
+
+All three pass: `um_backend_contract` 23/23 against
+`UM_BACKEND_DYNAMIC + UM_BACKEND_KVM_INTEGRATED=y` boot
+(/dev/kvm present). The tests are pure data-structure (no
+ioctl); sub-commit #2 grows a live-vCPU variant that
+round-trips via KVM_GET_SREGS/KVM_GET_REGS.
+
+**Code moves:** sregs.c refactored in-place (harness +
+production both delegate to `kvm_fill_longmode_segments`; no
+file moved).
+
+**What sub-commit #1 does NOT do** (per memo goal): program
+MSRs (LSTAR/STAR/FMASK); call KVM_RUN; decode any exit
+reason; pin `current->active_mm`. Those all arrive with
+sub-commit #2 under the same Kconfig gate.
+
+**Verification commands** (for future sub-commits):
+
+    make ARCH=um O=/tmp/uml-kvmint defconfig
+    { echo CONFIG_UM_BACKEND_KVM_INTEGRATED=y; \
+      echo CONFIG_KUNIT=y; \
+      echo CONFIG_UM_BACKEND_CONTRACT_TEST=y; } >> /tmp/uml-kvmint/.config
+    yes '' | make ARCH=um O=/tmp/uml-kvmint olddefconfig
+    make ARCH=um O=/tmp/uml-kvmint -j$(nproc)
+    timeout --kill-after=5 15 /tmp/uml-kvmint/linux \
+        rootfstype=hostfs rootflags=/ root=/dev/root rw \
+        init=/bin/sh mem=256M con=null con0=fd:0,fd:1 \
+        kunit.enable=1 panic=-1
 
 ### #2 — `kvm_decode_syscall` (KVM_EXIT_IO → sys_call_table)
 
@@ -315,12 +359,13 @@ Every sub-commit runs:
 This memo leaves "design memo" and becomes "implementation
 in flight" when:
 
-1. Sub-commit #1 (kvm_enter_guest) lands with its A-05 test
-   extension.
+1. ✅ Sub-commit #1 (kvm_enter_guest) lands with its A-05 test
+   extension. **Done 2026-04-24.**
 2. Decisions-log D65 records the implementation kickoff with
    owner + target quarter.
 3. `tools/testing/selftests/um/kvm-smoke/` directory exists
-   with a run-script.
+   with a run-script. *(Lands with sub-commit #2 once the
+   LSTAR trampoline makes a real /bin/true boot possible.)*
 
 When sub-commits #1-#6 all land + D-06 bookend runs clean,
 this memo rolls up into `04-ring-transition.md`'s

@@ -160,7 +160,18 @@ int kvm_setup_harness_paging_range(u64 *pml4, u64 *pdpt, u64 *pd,
  * vCPU-implicit fields (APIC state, etc.) are preserved. Only
  * the long-mode-relevant fields are overwritten here.
  */
-void kvm_setup_harness_sregs(struct kvm_sregs *sregs)
+/*
+ * Fill the long-mode ring-0 + ring-3 segment + control-register
+ * fields on `sregs`. Shared between the harness path
+ * (`kvm_setup_harness_sregs`) and the production path
+ * (`kvm_setup_production_sregs`) so the two paths can't drift on
+ * segment bits — only the caller-provided CR3 / GDT base
+ * differs between them.
+ *
+ * Writes: cs, ds, es, fs, gs, ss, cr0, cr4, efer. Caller is
+ * responsible for cr3, gdt.{base,limit}.
+ */
+static void kvm_fill_longmode_segments(struct kvm_sregs *sregs)
 {
 	struct kvm_segment code = {
 		.base		= 0,
@@ -194,12 +205,40 @@ void kvm_setup_harness_sregs(struct kvm_sregs *sregs)
 	sregs->gs = data;
 	sregs->ss = data;
 
-	sregs->gdt.base  = KVM_HARNESS_GDT_OFFSET;
-	sregs->gdt.limit = KVM_HARNESS_GDT_LIMIT;
-
-	sregs->cr3  = KVM_HARNESS_PML4_OFFSET;
 	sregs->cr4  = KVM_CR4_PAE;
 	sregs->cr0  = KVM_CR0_PE | KVM_CR0_MP | KVM_CR0_NE |
 		      KVM_CR0_WP | KVM_CR0_PG;
 	sregs->efer = KVM_EFER_SCE | KVM_EFER_LME | KVM_EFER_LMA;
+}
+
+void kvm_setup_harness_sregs(struct kvm_sregs *sregs)
+{
+	kvm_fill_longmode_segments(sregs);
+	sregs->gdt.base  = KVM_HARNESS_GDT_OFFSET;
+	sregs->gdt.limit = KVM_HARNESS_GDT_LIMIT;
+	sregs->cr3	 = KVM_HARNESS_PML4_OFFSET;
+}
+
+/*
+ * D-04/D-05 follow-on (memo 08, sub-commit #1): production
+ * analogue of `kvm_setup_harness_sregs`. Identical long-mode
+ * segment + CR0/CR4/EFER bits; caller supplies the guest-
+ * physical addresses for CR3 (= __pa(current->active_mm->pgd)
+ * under the Policy A identity memslot) and the GDT base. A
+ * 6-entry GDT with the same ring-0/ring-3 layout
+ * `kvm_setup_harness_gdt` populates is assumed to live at
+ * `gdt_gpa`; the caller owns that allocation.
+ *
+ * No KVM_SET_SREGS ioctl here — this is pure data-structure
+ * setup so it's unit-testable without /dev/kvm. Caller runs
+ * the ioctl after merging with `KVM_GET_SREGS` output
+ * (APIC state, etc.).
+ */
+void kvm_setup_production_sregs(struct kvm_sregs *sregs,
+				u64 cr3_gpa, u64 gdt_gpa)
+{
+	kvm_fill_longmode_segments(sregs);
+	sregs->gdt.base  = gdt_gpa;
+	sregs->gdt.limit = KVM_HARNESS_GDT_LIMIT;
+	sregs->cr3	 = cr3_gpa;
 }
