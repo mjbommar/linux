@@ -136,26 +136,66 @@ sub-commit #2 under the same Kconfig gate.
         init=/bin/sh mem=256M con=null con0=fd:0,fd:1 \
         kunit.enable=1 panic=-1
 
-### #2 — `kvm_decode_syscall` (KVM_EXIT_IO → sys_call_table)
+### #2 — LSTAR trampoline + MSR programming (partial: wire armed, decode pending)
+
+Split into **#2a (landed 2026-04-24)** and **#2b (pending)**.
+
+#### #2a — trampoline + MSRs — **LANDED 2026-04-24**
+
+**Delta (as landed):**
+
+- `thread.c` bootstrap page populated with the
+  `kvm_bootstrap_lstar_bytes` trampoline at
+  `KVM_BOOTSTRAP_LSTAR_OFFSET (0x40)`. Byte-identical to
+  `kvm_harness_lstar` from harness.c (`e6 f4 48 0f 07` —
+  `out %al, $0xf4; sysretq`), so sub-commit #2b's decode path
+  can lift the harness logic unchanged.
+- New `kvm_enter_guest_program_msrs(lstar_gpa)` helper:
+  `KVM_SET_MSRS` with STAR=0x0018<<48 | 0x0008<<32,
+  LSTAR=bootstrap_gpa+0x40, FMASK=0. Called unconditionally
+  from `kvm_enter_guest` after KVM_SET_REGS (idempotent on
+  repeat entry).
+- `kvm_backend.h` exports `UM_KVM_SYSCALL_PORT (0xf4)` and
+  `UM_KVM_SYSRETQ_PORT (0xf5)` as the named wire constants
+  sub-commit #2b decodes against.
+- Test plumbing: `kvm_bootstrap_copy_lstar(dst, len)` +
+  `kvm_bootstrap_force_init()` exposed for KUnit inspection.
+
+**Test (landed):** 2 new cases under
+`CONFIG_UM_BACKEND_KVM_INTEGRATED` contract suite —
+`kvm_bootstrap_lstar_bytes_test` force-allocates the page
+and memcmps the 5-byte trampoline against the expected wire
+form; `kvm_wire_ports_test` asserts the port constants equal
+0xf4 / 0xf5. Full `um_backend_contract` run: 25/25 pass.
+
+**Effect on kvm_enter_guest post-#2a:** the SYSCALL trap is
+armed. A guest that issues `syscall` will trap into the
+trampoline, `out %al, $0xf4` will produce `KVM_EXIT_IO` on
+port 0xf4, and the trampoline's trailing `sysretq` will
+return control to the caller's RCX after the host resumes
+the vCPU. `kvm_run_userspace` still panics — the KVM_RUN
+call itself lands with #2b.
+
+#### #2b — KVM_RUN loop + kvm_decode_syscall — **pending**
 
 **Delta:** `kvm_decode_syscall(regs, run)`:
 
-1. The IO exit bucket reserved for syscall dispatch is at port
-   `0xf4` in the harness (see `harness.c:900+`). Promote that
-   to a named constant `UM_KVM_SYSCALL_PORT` in
-   `kvm_backend.h`.
-2. Read the syscall nr + args from saved vCPU regs via
-   `KVM_GET_REGS`, map them into the `regs->gp[]` slots UML's
-   syscall framework expects (`HOST_ORIG_RAX`, `HOST_DI`, …).
-3. Return. The caller (common syscall dispatch) invokes
-   `sys_call_table[nr]` as on every other backend; that path
-   is already tested by Phase III Lift #1f's A-05 contract
-   pass.
+1. `kvm_run_userspace` (under KVM_INTEGRATED gate) calls
+   `kvm_enter_guest` and then enters a KVM_RUN loop.
+2. On `KVM_EXIT_IO` at `UM_KVM_SYSCALL_PORT`:
+   `KVM_GET_REGS`, map syscall nr + args back to `regs->gp[]`
+   (`HOST_ORIG_AX`, `HOST_DI`, …), advance vCPU RIP past the
+   2-byte `out`, return so UML's common syscall dispatch can
+   invoke `sys_call_table[nr]`.
+3. On `KVM_EXIT_HLT`: return to UML scheduler (#4 territory).
+4. Other exits: panic + fallback (#7 territory).
 
 **Test:** A `getpid()` selftest under `backend=kvm`. The A-05
 contract suite already asserts dispatch correctness against
-the ops table; we're adding end-to-end validation that the
+the ops table; #2b adds end-to-end validation that the
 IO-exit decode drops a syscall into the real dispatch table.
+Landing criterion also unblocks the spec's second status-
+flip marker (`tools/testing/selftests/um/kvm-smoke/`).
 
 **Code moves:** `harness.c` lines ~1030-1050 (1b IO-exit
 decode) → `thread.c::kvm_decode_syscall`.

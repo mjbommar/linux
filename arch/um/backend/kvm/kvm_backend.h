@@ -108,6 +108,35 @@ struct kvm_regs;
 int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
 			  const struct uml_pt_regs *src,
 			  u64 cr3_gpa, u64 gdt_gpa);
+
+/*
+ * Copy the LSTAR-trampoline bytes as they're written into the
+ * bootstrap page into a caller-provided buffer. Used by the
+ * A-05 KUnit tests to assert the trampoline wire-form matches
+ * the harness path; never called from run_userspace.
+ *
+ * Returns the number of bytes copied (always the full trampoline
+ * size if `len >= size`), or -EINVAL on NULL / undersized buffer.
+ */
+int kvm_bootstrap_copy_lstar(u8 *dst, size_t len);
+
+/*
+ * Test-only: force-allocate the bootstrap page so KUnit tests
+ * can exercise the populated path (normally allocated lazily
+ * on the first kvm_enter_guest call, which doesn't run in a
+ * KUnit-at-boot context). Returns 0 on success, -errno on
+ * failure. Idempotent.
+ */
+int kvm_bootstrap_force_init(void);
+
+/*
+ * UM KVM wire constants: port numbers the LSTAR trampoline uses
+ * to signal exit reasons to the host. Matches the harness wire
+ * format so sub-commit #3's decode can lift the harness paths
+ * unchanged.
+ */
+#define UM_KVM_SYSCALL_PORT	0xf4	/* SYSCALL trap exit */
+#define UM_KVM_SYSRETQ_PORT	0xf5	/* ring-3 exit (post-SYSRETQ) */
 #endif
 
 /*

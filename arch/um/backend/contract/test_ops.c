@@ -29,20 +29,7 @@
 #include <linux/string.h>
 #include <asm/backend.h>
 
-#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
-# include <linux/kvm.h>
-# include <sysdep/ptrace.h>
-/*
- * kvm_enter_guest_probe lives in arch/um/backend/kvm/thread.c
- * (EXPORT_SYMBOL_GPL'd there). Prototype-local-to-test avoids
- * pulling `arch/um/backend/kvm/kvm_backend.h` in via a fragile
- * cross-subdir relative include; the probe signature is the
- * stable contract, identical to what kvm_backend.h declares.
- */
-int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
-			  const struct uml_pt_regs *src,
-			  u64 cr3_gpa, u64 gdt_gpa);
-#endif
+#include "test_kvm_hooks.h"
 
 /* ---------------------------------------------------------------- */
 /* Helpers                                                          */
@@ -534,6 +521,68 @@ static void kvm_production_probe_null_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, kvm_enter_guest_probe(&s,  &r,  NULL, 0, 0), -EINVAL);
 }
 
+/*
+ * Memo 08 sub-commit #2 tests: LSTAR trampoline bytes in the
+ * bootstrap page (once allocated) + wire-port constants.
+ * Pure data-struct / #define comparison; no /dev/kvm needed.
+ *
+ * The trampoline-bytes test is double-purpose:
+ *  (a) `kvm_bootstrap_copy_lstar` correctly returns -ENODATA
+ *      when the bootstrap page hasn't been allocated (boot
+ *      context where kvm_enter_guest never runs — normal on
+ *      a seccomp-backend research kunit run).
+ *  (b) when allocated, the first 5 bytes match the known
+ *      harness wire form (`out %al,$0xf4; sysretq`).
+ *
+ * To exercise (b) without running the backend, we don't force
+ * allocation from the test. The expected behaviour on a
+ * UM_BACKEND_KVM_INTEGRATED=y kunit build is -ENODATA (kunit
+ * module loads pre-run_userspace); once sub-commit #3 wires
+ * kvm_enter_guest into the real dispatch, this test will
+ * start observing the populated bytes automatically.
+ */
+static const u8 kvm_expected_lstar_bytes[] = {
+	0xe6, 0xf4,		/* out %al, $0xf4 */
+	0x48, 0x0f, 0x07,	/* sysretq */
+};
+
+static void kvm_bootstrap_lstar_bytes_test(struct kunit *test)
+{
+	u8 buf[sizeof(kvm_expected_lstar_bytes)] = { 0 };
+	int rc;
+
+	/* Short buffer → -EINVAL. */
+	KUNIT_EXPECT_EQ(test,
+		kvm_bootstrap_copy_lstar(buf, 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test,
+		kvm_bootstrap_copy_lstar(NULL, sizeof(buf)), -EINVAL);
+
+	/* Force the lazy allocation so we can exercise the
+	 * populated path regardless of whether run_userspace has
+	 * run yet. Idempotent (subsequent kvm_enter_guest calls
+	 * see the same page).
+	 */
+	KUNIT_ASSERT_EQ(test, kvm_bootstrap_force_init(), 0);
+
+	rc = kvm_bootstrap_copy_lstar(buf, sizeof(buf));
+	KUNIT_EXPECT_EQ(test, rc, (int)sizeof(kvm_expected_lstar_bytes));
+	KUNIT_EXPECT_EQ(test,
+		memcmp(buf, kvm_expected_lstar_bytes,
+		       sizeof(kvm_expected_lstar_bytes)), 0);
+}
+
+static void kvm_wire_ports_test(struct kunit *test)
+{
+	/* The kvm_backend.h UM_KVM_SYSCALL_PORT / SYSRETQ_PORT
+	 * values must match the harness wire form so sub-commit
+	 * #3 can lift the harness decode unchanged. The contract
+	 * test carries a local duplicate so any drift fails here
+	 * and the fix is to update both sides in the same commit.
+	 */
+	KUNIT_EXPECT_EQ(test, _TEST_UM_KVM_SYSCALL_PORT, 0xf4);
+	KUNIT_EXPECT_EQ(test, _TEST_UM_KVM_SYSRETQ_PORT, 0xf5);
+}
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 /* ---------------------------------------------------------------- */
@@ -572,6 +621,9 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_production_sregs_shape_test),
 	KUNIT_CASE(kvm_production_regs_marshal_test),
 	KUNIT_CASE(kvm_production_probe_null_test),
+	/* KVM LSTAR trampoline + wire ports (memo 08 #2) */
+	KUNIT_CASE(kvm_bootstrap_lstar_bytes_test),
+	KUNIT_CASE(kvm_wire_ports_test),
 #endif
 	{}
 };

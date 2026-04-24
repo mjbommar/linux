@@ -173,6 +173,23 @@ static u64   kvm_bootstrap_gpa;		/* __pa() of the page; 0 if unallocated */
 #define KVM_BOOTSTRAP_GDT_OFFSET	0x000
 #define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040
 
+/*
+ * LSTAR trampoline: 5 bytes. Byte-identical to
+ * `kvm_harness_lstar` in harness.c (D-04c). On SYSCALL entry
+ * the CPU jumps here with RCX = post-SYSCALL RIP and R11 =
+ * saved RFLAGS. The `out %al, $0xf4` triggers KVM_EXIT_IO on
+ * UM_KVM_SYSCALL_PORT (0xf4); the host advances vCPU RIP past
+ * the 2-byte `out` to the SYSRETQ, then resumes the vCPU so
+ * SYSRETQ runs and delivers control back to the SYSCALL
+ * follow-on at RCX. The wire format is deliberately shared
+ * with the harness so sub-commit #3's decode can lift the
+ * existing harness logic unchanged.
+ */
+static const u8 kvm_bootstrap_lstar_bytes[] = {
+	0xe6, 0xf4,		/* out %al, $0xf4 */
+	0x48, 0x0f, 0x07,	/* sysretq */
+};
+
 static int kvm_enter_guest_init_bootstrap(void)
 {
 	void *page;
@@ -211,18 +228,125 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 * harness path so SYSRETQ-in-guest lands CS/SS correctly
 	 * (memo 08 #1 reuses the harness GDT shape exactly — only
 	 * the CR3 + page location differ between harness and
-	 * production). LSTAR trampoline bytes are zeroed and
-	 * populated by sub-commit #2.
+	 * production).
 	 */
 	kvm_setup_harness_gdt((u64 *)((char *)page +
 				       KVM_BOOTSTRAP_GDT_OFFSET));
+
+	/*
+	 * Write the LSTAR trampoline bytes at the fixed offset
+	 * (memo 08 sub-commit #2). Byte-identical to the harness
+	 * wire form; the trampoline is live once MSR_LSTAR is
+	 * programmed to point at bootstrap_gpa +
+	 * KVM_BOOTSTRAP_LSTAR_OFFSET.
+	 */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_LSTAR_OFFSET +
+		     sizeof(kvm_bootstrap_lstar_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_LSTAR_OFFSET,
+	       kvm_bootstrap_lstar_bytes, sizeof(kvm_bootstrap_lstar_bytes));
 
 	kvm_bootstrap_page = page;
 	kvm_bootstrap_gpa  = gpa;
 	spin_unlock_irqrestore(&kvm_bootstrap_lock, flags);
 
-	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx\n",
-		page, (unsigned long long)gpa);
+	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx lstar=+0x%x (%zu bytes)\n",
+		page, (unsigned long long)gpa, KVM_BOOTSTRAP_LSTAR_OFFSET,
+		sizeof(kvm_bootstrap_lstar_bytes));
+	return 0;
+}
+
+int kvm_bootstrap_force_init(void)
+{
+	return kvm_enter_guest_init_bootstrap();
+}
+EXPORT_SYMBOL_GPL(kvm_bootstrap_force_init);
+
+int kvm_bootstrap_copy_lstar(u8 *dst, size_t len)
+{
+	unsigned long flags;
+	void *page;
+
+	if (!dst || len < sizeof(kvm_bootstrap_lstar_bytes))
+		return -EINVAL;
+
+	spin_lock_irqsave(&kvm_bootstrap_lock, flags);
+	page = kvm_bootstrap_page;
+	spin_unlock_irqrestore(&kvm_bootstrap_lock, flags);
+
+	if (!page)
+		return -ENODATA;
+
+	memcpy(dst, (char *)page + KVM_BOOTSTRAP_LSTAR_OFFSET,
+	       sizeof(kvm_bootstrap_lstar_bytes));
+	return sizeof(kvm_bootstrap_lstar_bytes);
+}
+EXPORT_SYMBOL_GPL(kvm_bootstrap_copy_lstar);
+
+/*
+ * Program MSR_STAR / MSR_LSTAR / MSR_FMASK on vcpu0 so that a
+ * guest-side SYSCALL traps into the LSTAR trampoline at
+ * `lstar_gpa`. Encoding per AMD64 SDM §6.1.1:
+ *
+ *   MSR_STAR [47:32] = kernel CS selector (SYSCALL loads this)
+ *                    = 0x0008 (ring-0 code; GDT idx 1)
+ *   MSR_STAR [63:48] = SYSRET base selector (SYSRETQ loads
+ *                      (base+16)|3 as CS, (base+8)|3 as SS)
+ *                    = 0x0018 (unused padding slot; forces
+ *                      CS=0x28|3=0x2b, SS=0x20|3=0x23 which
+ *                      are GDT idx 5 + 4, the ring-3 pair)
+ *
+ * FMASK = 0 for now; real UML entry needs IF cleared among
+ * other bits, but sub-commit #2's trampoline doesn't run any
+ * code that races with interrupts — just `out`/`sysretq`.
+ * Sub-commit #5 (KVM_EXIT_INTR) revisits.
+ */
+static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
+{
+	int vcpu_fd = kvm_backend_vcpu0_fd();
+	struct {
+		struct kvm_msrs info;
+		struct kvm_msr_entry entries[3];
+	} msrs = {
+		.info = { .nmsrs = 3 },
+		.entries = {
+			{
+				.index = 0xc0000081,	/* MSR_STAR */
+				.data  = ((u64)0x0018 << 48) |
+					 ((u64)0x0008 << 32),
+			},
+			{
+				.index = 0xc0000082,	/* MSR_LSTAR */
+				.data  = lstar_gpa,
+			},
+			{
+				.index = 0xc0000084,	/* MSR_FMASK */
+				.data  = 0,
+			},
+		},
+	};
+	int rc;
+
+	if (vcpu_fd < 0)
+		return -EIO;
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_MSRS(lstar=0x%llx) failed (%d)\n",
+				    (unsigned long long)lstar_gpa, rc);
+		return rc;
+	}
+
+	/*
+	 * KVM_SET_MSRS returns the number of MSRs actually
+	 * written. 3 is the expected value; anything less means
+	 * one of STAR/LSTAR/FMASK was rejected and the trampoline
+	 * is not armed.
+	 */
+	if (rc != 3) {
+		pr_warn_once("um: kvm enter_guest: KVM_SET_MSRS wrote %d/3 MSRs\n",
+			     rc);
+		return -EIO;
+	}
 	return 0;
 }
 
@@ -376,6 +500,20 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 				    (unsigned long long)kregs.rsp, rc);
 		return rc;
 	}
+
+	/*
+	 * Arm the SYSCALL trap: MSR_LSTAR at the bootstrap page's
+	 * LSTAR trampoline, MSR_STAR with the ring-0 / ring-3
+	 * selectors. Safe to call every kvm_enter_guest — KVM
+	 * stores the MSRs on the vCPU, so a second SET_MSRS is
+	 * idempotent; follow-on sub-commits can make this smarter
+	 * (skip on unchanged bootstrap_gpa) when profiling shows
+	 * the SET_MSRS cost matters.
+	 */
+	rc = kvm_enter_guest_program_msrs(kvm_bootstrap_gpa +
+					  KVM_BOOTSTRAP_LSTAR_OFFSET);
+	if (rc < 0)
+		return rc;
 
 	return 0;
 }
