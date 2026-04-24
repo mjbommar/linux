@@ -452,7 +452,7 @@ without the guest needing to yield.
 
 ### #6 — D-06 bookend (getpid round-trip measurement)
 
-**LANDED 2026-04-24** (commit `<pending>`). Freestanding
+**LANDED 2026-04-24** (commit `f9760c9b29e5`). Freestanding
 `tools/testing/selftests/um/perf-getpid/getpid-loop.c`
 measures the cost of one `getpid()` syscall round-trip
 from guest userspace; host-side
