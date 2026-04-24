@@ -6,10 +6,13 @@
  * Validates that the F2 user-RFLAGS round-trip fix (decisions-log
  * D75) actually preserves DF across the two paths it claims to:
  *
- *   1. SYSCALL round-trip. Set DF=1, call a syscall the gadget
- *      services (getpid), read RFLAGS back via pushfq, check
- *      DF still set. Exercises the kvm_build_sysret_r11 helper
- *      that bridges saved user RFLAGS into the SYSRETQ R11 slot.
+ *   1. SYSCALL round-trip. Set DF=1, call a class-A passthrough
+ *      syscall (__NR_getsid — deliberately NOT a gadget-handled
+ *      NR; getsid VMEXITs to handle_syscall on every backend),
+ *      read RFLAGS back via pushfq, check DF still set.
+ *      Exercises the kvm_build_sysret_r11 helper that rebuilds
+ *      R11 (= user RFLAGS) on re-entry through kvm_enter_guest's
+ *      bootstrap SYSRETQ.
  *
  *   2. Recoverable #PF round-trip. Set DF=1, touch a fresh anon
  *      page (forcing a guest #PF that the host shadow-PT recovery
@@ -145,11 +148,15 @@ int main(void)
 	unsigned n;
 
 	/*
-	 * Path 1 — SYSCALL.
+	 * Path 1 — SYSCALL via the class-A fallback.
 	 *
-	 * Set DF=1, call __NR_getpid (gadget-handled), read RFLAGS.
-	 * F2 says the user-visible RFLAGS bits (including DF) survive
-	 * the kvm_build_sysret_r11 round-trip.
+	 * Set DF=1, call __NR_getsid(0) (class A — not gadget-
+	 * handled), read RFLAGS. F2 says the user-visible RFLAGS
+	 * bits (including DF) survive the kvm_build_sysret_r11
+	 * round-trip when handle_syscall returns and the next
+	 * kvm_enter_guest rebuilds R11. Using a class-A NR forces
+	 * that path; a gadget NR would short-circuit in the LSTAR
+	 * trampoline without touching the helper.
 	 */
 	rflags = with_df_then_pushf_syscall();
 	syscall_ok = !!(rflags & DF_BIT);

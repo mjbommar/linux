@@ -3,7 +3,8 @@
 #
 # Direction-flag preservation selftest (audit round-4 F3 follow-on,
 # task #222). Boots a freestanding ring-3 binary that sets DF=1,
-# invokes a gadget-handled SYSCALL and a recoverable #PF, then
+# invokes a class-A SYSCALL (forces the F2 helper round-trip)
+# and a recoverable #PF, then
 # checks DF survived both round-trips. F2 (decisions-log D75) is
 # the fix this validates; F2 KUnit covers the pure-data helper,
 # this selftest covers the live path.
