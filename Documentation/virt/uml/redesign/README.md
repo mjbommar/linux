@@ -161,11 +161,15 @@ level table. Summary:
   - C-01 defconfig: landed 2026-04-18
   - C-02 KFENCE: landed 2026-04-18
   - C-03 KCSAN: landed 2026-04-18
-  - C-04 kprobes: partially landed 2026-04-20 (commits 1+2
-    + commit 3a strip infrastructure 2026-04-21; commit 3b —
-    the actual HAVE_FUNCTION_GRAPH_TRACER flip + trampolines —
-    deferred one session pending an atomic-context fix in
-    prepare_ftrace_return, see D34 addendum-3)
+  - C-04 kprobes + function_graph: **fully landed.** Commits
+    1+2 (2026-04-20), commit 3a strip infrastructure
+    (2026-04-21), commit 3b HAVE_FUNCTION_GRAPH_TRACER flip
+    + trampolines (landed on-branch subsequently per D34
+    addendum-3's local fix path; `select HAVE_FUNCTION_GRAPH_TRACER
+    if HAVE_FUNCTION_TRACER` in `arch/um/Kconfig`).
+    `Documentation/virt/uml/ftrace.rst` + ftrace-smoke
+    selftest regression-test the result (Finding #5, task
+    #145).
   - C-05 ftrace: landed 2026-04-19
   - C-06 BPF JIT: landed v1 2026-04-21 (option A per D43
     fifth-view — UML consumes arch/x86/net/bpf_jit_comp.c with
@@ -296,27 +300,41 @@ selftest sweep all green after the series.
   demonstrates the working end state first; LKML adoption
   follows, motivated by the running artifact. Items previously
   framed as "blocked on upstream review" are in fact just
-  "work to do on the fork."
+  "work to do on the fork." As of 2026-04-23 two of D45's
+  three items are landed and only one remains:
 
-  - C-04 commit 3 HAVE_FUNCTION_GRAPH_TRACER — D34 identifies a
-    `notrace` + `-fpatchable-function-entry` interaction.
-    Under D45, we write the `kernel/trace/` fix ourselves,
-    carry it on the fork, unblock commit 3 locally, defer the
-    upstream submission to later.
+  - ~~C-04 commit 3 HAVE_FUNCTION_GRAPH_TRACER~~ — **landed.**
+    The local `kernel/trace/` fix anticipated by D45 proved
+    unnecessary once the strip-infrastructure (commit 3a)
+    was in place; `HAVE_FUNCTION_GRAPH_TRACER` is now
+    selected unconditionally under `HAVE_FUNCTION_TRACER`
+    in `arch/um/Kconfig`.
   - C-06 full port — D43 option B2 is a
     `arch/x86/net/bpf_jit_comp.c` portable-emitter refactor.
-    Under D45, land the split on the fork; the two hygiene
-    commits (already on-branch as e2b686c962 / 5b95b1bb3e)
-    stay as-is in `upstream-patches/bpf-hygiene-v1/` for when
-    the upstream conversation opens.
-  - C-07 KMSAN — D44 fourth probe calls for a map-on-demand
-    arch-extension point in `mm/kmsan/init.c`. Under D45,
-    add it on the fork; implement UML's callback; demonstrate
-    the full sanitizer trio (KASAN + KCSAN + KMSAN) working
-    before engaging KMSAN maintainer upstream.
+    Under D45, land the split on the fork. **Still
+    outstanding** as task #68 (deferred post-real-
+    deliverable). The two hygiene commits (e2b686c962 /
+    5b95b1bb3e) stay as-is in `upstream-patches/
+    bpf-hygiene-v1/` for when the upstream conversation
+    opens; submission order now tracked in
+    `upstream-patches/SUBMISSION-QUEUE.md` (D63).
+  - ~~C-07 KMSAN~~ — **landed.** D44's fourth-probe
+    map-on-demand arch callback turned out not to be
+    needed: D62 (Phase V Lift #3c of the post-Q1 push,
+    2026-04-23) redesigned the UML-side shadow/origin
+    layout as a VMALLOC quarter-split that works with
+    stock `mm/kmsan/init.c`, unblocking
+    `select HAVE_ARCH_KMSAN if X86_64` in
+    `arch/um/Kconfig` with no kernel-core patch required.
+    `kmsan-arch-callback-rfc/` remains staged in
+    `upstream-patches/` as a "no visible impact, just
+    benefits" offering for the KMSAN maintainer, but UML
+    is no longer blocked on it.
 
-Each item still has a concrete next-step recommendation in the
-linked decisions-log entry; D45 removes the LKML-timing gate.
+So D45's three-item "carried on the fork" list collapses to
+one item (C-06 B2) as of 2026-04-23; the other two items
+proved to be solvable on the fork-side alone without ever
+touching kernel-core / mm/kmsan infrastructure.
 
 ## How to extend this plan
 
