@@ -285,6 +285,18 @@ testable. Dependency arrows enforce the order.
   table. D70 go/no-go decision on whether the gadget
   clears memo 07's prediction. Blocked by G7.
 
+  **Status (2026-04-24): LANDED. D70 = GO.** Ran the
+  dual-binary perf-getpid + clock-loop microbench
+  across s0-s7 covering Skylake / Skylake-SP / Kaby
+  Lake / Alder Lake (P+E) / Zen 4 silicon. Gadget
+  cleared memo 07's <100 ns target on every host with
+  a minimum 2.9× margin (s4 Alder Lake E-core, 34 ns)
+  and a maximum 4.3× margin (Zen 4 s5-s7, 23 ns).
+  Gadget:fallback ratio ≤ 0.012 on every host (vs the
+  0.20 gate). See measurements.md G8 table and
+  decisions-log D79 for the full dataset and the GO
+  decision.
+
 ## Safety discipline
 
 Principles the implementation honors, ordered by

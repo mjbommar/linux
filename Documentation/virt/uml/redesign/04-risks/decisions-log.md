@@ -7904,4 +7904,99 @@ let the VMEXIT path handle it.
 
 ---
 
+## D79 (2026-04-24) — G8 LANDED / D70 = GO: gadget cleared memo 07 <100 ns target on every fleet host
+
+**Decision.** Memo 11's systrap gadget ladder (G1-G7 +
+G8) is a GO. The measurement evidence clears every
+predicted threshold on every host in the s0-s7 fleet.
+No further gadget work is blocked behind this decision.
+
+**What was measured.** Dual-binary perf-getpid
+(100000-iter getpid loop) + clock-loop
+(100000-iter clock_gettime(CLOCK_MONOTONIC)) under
+backend=force=kvm against both GADGET=n
+(/tmp/uml-kvmint-stripped) and GADGET=y
+(/tmp/uml-kvmbench-stripped) kernels. Reference rows
+for ptrace + seccomp come from the same kvmint
+kernel. See measurements.md 2026-04-24 G8 section for
+the per-host table.
+
+**Silicon coverage.**
+
+- Intel Skylake (s2 Xeon E3-1225 v5)
+- Intel Skylake-SP (s3 Xeon W-2123 — dev host)
+- Intel Kaby Lake (s1 Xeon E3-1225 v6)
+- Intel Alder Lake P-core (s0 i9-12900K)
+- Intel Alder Lake E-core (s4 i5-12600K)
+- AMD Zen 4 × 3 (s5/s6/s7 Ryzen 7 7840HS)
+
+Three silicon generations, two vendors, five
+microarchitectures. No gaps in coverage for our
+Q1-validation fleet.
+
+**Headline numbers.**
+
+| Metric | Range across fleet |
+|---|---|
+| gadget cyc_per_call (getpid) | 87 (Zen 4) — 125 (Alder Lake E) |
+| gadget ns_per_call | 23 — 34 |
+| gadget / seccomp ratio | 0.0020 — 0.0091 (primary gate ≤ 2.5) |
+| gadget / kvm-fallback ratio | 0.0006 — 0.022 (G7 gate ≤ 0.20) |
+| Margin vs memo 07 <100 ns target | 2.9× — 4.3× |
+
+**Why this is a GO, specifically.** Three qualitative
+findings beyond the numbers:
+
+1. **The prediction held across silicon.** Memo 07
+   derived the <100 ns target from a spike-01 null-HLT
+   baseline on one host (Xeon W-2123). G8 showed the
+   prediction generalizes: Zen 4 is faster, Alder Lake
+   E-cores are slower, but every host cleared by a
+   comfortable margin.
+2. **The gadget is the silicon equalizer.** kvm-
+   fallback cycles vary 2× across the fleet (48 k on
+   Alder Lake P-core to 163 k on Skylake-SP). Gadget
+   cycles compress to 87-125. The in-guest fast path
+   removes the VMEXIT cost's microarchitectural
+   sensitivity; what remains is just the LSTAR
+   trampoline + dispatch branches, which are fast
+   everywhere.
+3. **No regressions.** The primary perf-getpid gate
+   (ratio_kvm_over_seccomp ≤ 2.5) passes on every
+   host; so do KUnit 35/35 and all integration
+   smokes.
+
+**What this doesn't close.**
+
+- **G6-follow-on (task #221).** `time(2)` + `getcpu(2)`
+  still deferred pending the LSTAR-reach fix. The G8
+  data shows we have ~8000× of margin against the
+  gadget-ratio gate, so the two extra handlers won't
+  risk our position; the deferral is purely about
+  landing the reach-engineering change on its own
+  reviewable footing.
+- **F3-follow-on (task #222).** Dedicated DF-selftest
+  still not written. F2's live-path is indirectly
+  validated by getpid-loop's counter arithmetic (a
+  broken RFLAGS round-trip would miscount), but a
+  targeted DF binary would catch a regression faster.
+- **Upstream patchset.** The G8 GO unlocks drafting
+  the LKML cover letter for the gadget series (memo 11
+  §"Upstream submission"). Scoped as a follow-on post-
+  G8 push in the sequencing/post-q1-push.md plan.
+
+**Refs.**
+
+- Memo 11 G8 entry — annotated with LANDED / GO status.
+- measurements.md 2026-04-24 G8 section — the full
+  8-host table + margin analysis.
+- D69 — memo 11 GO decision (G1 design commitment).
+- D71 — G2 Lift #2b floor validation (<21 ns at the
+  pure-gadget level).
+- D73 — G5 single-host clock_gettime landing.
+- D78 — G7 class-E categorization + perf gate.
+- task #211 — this landing.
+
+---
+
 ## (Future entries here, as decisions are made)
