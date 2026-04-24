@@ -6998,4 +6998,89 @@ blocking the gate.
 
 ---
 
+## D69 (2026-04-24) — Systrap gadget workstream committed; memo 11 + G1-G8 sub-commit ladder
+
+**Context.** D-06 getpid() bookend (2026-04-24, D68)
+confirmed KVM backend is at parity with seccomp on 8/8
+hosts. That closes Phase III of the post-Q1 push. Memo
+07's gadget feasibility (2026-04-23) predicted a 40-150×
+speedup if the gadget lands — v1 scope explicitly
+excluded it. With Phase III closed, the gadget is now
+the highest-leverage remaining work on the D workstream.
+
+**Decision.** Commit to implementing the gadget as an
+explicit workstream, decomposed into 8 sub-commits G1-G8
+tracked as tasks #204-#211. Parent design doc:
+`02-workstreams/D-kvm-backend/11-systrap-gadget.md`
+(landed as G1 alongside this entry). The ladder:
+
+- G1: memo 11 design (this landing)
+- G2: Lift #2b pure-sysretq bench, floor validation
+- G3: per-vCPU state channel (MSR_GS_BASE + seqlock)
+- G4: LSTAR gadget body + 7 pid-family handlers
+- G5: clock_gettime + shared vvar clock page
+- G6: sched_yield + time + getcpu (rounds out to 11)
+- G7: class E in memo 10's map + perf-getpid gate
+- G8: s0-s7 fleet bench + D70 go/no-go landing
+
+Each G-step independently committable; ladder enforces
+ordering via TaskUpdate addBlockedBy chains.
+
+**Size budget** (per memo 11 §"Sub-commit ladder"):
+
+- Runtime: ~550 LOC (320 asm + 230 C)
+- Tests: ~150 LOC
+- Docs: memo 11 + D70 + measurements.md section
+
+Central estimate 6-8 weeks wall-clock at current
+session cadence.
+
+**Risks flagged in memo 11.**
+
+1. **Per-vCPU state channel (G3) is the single
+   architecturally novel piece.** Interaction with
+   UML's existing `current_thread_info()` (`%gs:0`
+   usage) needs a careful review. Safe in practice
+   because guest user-mode doesn't dereference `%gs`
+   today, but the design review is the point where
+   the ladder could stall a week.
+2. **Shared vvar page (G5) is from scratch.** Memo 07
+   assumed UML had vvar machinery to extend; reading
+   `arch/x86/um/vdso/um_vdso.c` shows UML's VDSO is
+   degenerate (every entry is just `syscall`). G5
+   builds a vvar shared page as new infrastructure.
+   Bumps G5 estimate from 20-40 hrs to 30-50 hrs.
+3. **SMP is NOT v1 scope.** Gadget lands with
+   ncpus=1 honored via `BUILD_BUG_ON(CONFIG_SMP)` so
+   the v1 claim stays tight. Multi-vCPU gadget is a
+   post-v1 ~1-week follow-on.
+
+**Safety invariants** (memo 11 §"Safety discipline"):
+
+- Fallback always armed: every handler ends in a path
+  that reaches the existing VMEXIT when anything is
+  uncertain.
+- `gadget=off` boot override bypasses the gadget
+  entirely; byte-identical behavior to today's
+  KVM backend.
+- Seqlock retry budget: 3 tries then fallback. Bounds
+  worst-case cost.
+- Per-handler KUnit equivalence: gadget output must
+  match fallback output or CI goes red.
+
+**Cross-references.**
+
+- Memo 11 (this landing) — design + ladder.
+- Memo 07 — the paper design this formalizes.
+- Memo 08 sub-commit #5c (arch_prctl MSR plumbing) —
+  G3 reuses the `KVM_SET_MSRS` infrastructure.
+- Memo 10 step 2+6 — class E extension in G7.
+- D68 (D-06 bookend) — the parity result that
+  makes gadget the next-highest-leverage work.
+- Upstream-patches submission queue — a future RFC
+  for the per-vCPU state channel is one of the open
+  queue slots; not yet scheduled.
+
+---
+
 ## (Future entries here, as decisions are made)

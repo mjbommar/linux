@@ -652,6 +652,11 @@ Every sub-commit runs:
   that unblocks sub-commit #6 / D-06 / task #192.
 - `syscall-inventory.tsv` — generated per-NR truth table
   naming the class of every x86_64 syscall.
+- `11-systrap-gadget.md` — post-v1 hot-path optimization
+  (~40-150× speedup on the 11 gadget-safe syscalls);
+  G1-G8 sub-commit ladder inherits this memo's
+  infrastructure (bootstrap page, LSTAR trampoline,
+  per-mm kvm_um, MSR propagation) as scaffolding.
 - `tools/testing/selftests/um/` — existing selftest harness
   model for new kvm-*-smoke tests.
 - decisions-log entries D49-D57 + D60-D61 — D-workstream

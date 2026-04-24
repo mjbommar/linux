@@ -295,6 +295,10 @@ on modern clocks. That's the M11 vision line.
 
 ## Cross-references
 
+- `11-systrap-gadget.md` — **implementation-side sibling
+  that consumes this feasibility memo.** Tracks the
+  G1-G8 sub-commit ladder + per-handler design. Lands
+  post-D68 parity result (D-06 cleared 2026-04-24).
 - `design-memo.md` §"Not in first-phase scope" — existing
   deferral; this memo formalizes the shape of the deferred
   work.
