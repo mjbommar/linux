@@ -74,6 +74,23 @@ struct kvm_um {
 	struct kvm_gadget_state *gadget_state;
 	u64		gadget_state_gpa;
 	u64		gadget_state_va;
+
+	/*
+	 * Memo 11 G5 gadget vvar page. Same lazy-alloc +
+	 * shadow-PT-map shape as the state page; maps one
+	 * page higher in the guest VA range so that a single
+	 * MSR_KERNEL_GS_BASE (pointing at the state page)
+	 * covers both structs via disp32 addressing:
+	 *   %gs:<KVM_GADGET_OFF_*>        → state fields
+	 *   %gs:<PAGE_SIZE + KVM_VVAR_OFF_*> → vvar fields
+	 * That keeps the gadget's `swapgs` bracket single
+	 * and lets disp32 reach both bands without the
+	 * handler having to reload GS mid-sequence.
+	 */
+	struct page	*gadget_vvar_page;
+	struct kvm_gadget_vvar *gadget_vvar;
+	u64		gadget_vvar_gpa;
+	u64		gadget_vvar_va;
 #endif
 };
 
@@ -167,6 +184,40 @@ struct kvm_gadget_state {
 #define KVM_GADGET_OFF_EUID	0x18
 #define KVM_GADGET_OFF_GID	0x1c
 #define KVM_GADGET_OFF_EGID	0x20
+
+/*
+ * Memo 11 G5 gadget vvar page. Separate from the per-task
+ * state page (above) because its update cadence is host
+ * timer-tick driven, not per-kvm_enter_guest; it's logically
+ * a time source, not a task-state snapshot.
+ *
+ * Seqlock layout follows the canonical x86 vdso pattern: seq
+ * is even when the writer isn't active, odd when a write is
+ * in progress. Readers retry if they observe an odd seq or a
+ * seq change between the pre-read and post-read samples.
+ * Handler asm in G5c implements the retry.
+ *
+ * v1 populates CLOCK_MONOTONIC and CLOCK_REALTIME from
+ * ktime_get_ns() + ktime_get_real_ts64(). Refresh runs at
+ * every kvm_enter_guest, same cadence as gadget_state. A
+ * future G5 follow-on can hook into UML's timer tick for
+ * higher-frequency updates.
+ */
+struct kvm_gadget_vvar {
+	u32 seq;			/* seqlock counter */
+	u32 _pad0;
+	s64 monotonic_sec;
+	s64 monotonic_nsec;
+	s64 realtime_sec;
+	s64 realtime_nsec;
+	u64 _pad1[4];			/* cache-line pad (64 B struct) */
+};
+
+#define KVM_VVAR_OFF_SEQ		0x00
+#define KVM_VVAR_OFF_MONO_SEC		0x08
+#define KVM_VVAR_OFF_MONO_NSEC		0x10
+#define KVM_VVAR_OFF_REAL_SEC		0x18
+#define KVM_VVAR_OFF_REAL_NSEC		0x20
 
 /*
  * Lazy memslot registration (D-04a). Call once before entering
@@ -343,6 +394,19 @@ void kvm_gadget_state_free(void);
 void kvm_gadget_state_refresh(void);
 u64 kvm_gadget_state_va(void);
 u64 kvm_gadget_state_gpa(void);
+
+/*
+ * Memo 11 G5 gadget vvar lifecycle. Same shape as the state
+ * page above. refresh() is called from kvm_enter_guest right
+ * before KVM_RUN — writes fresh CLOCK_MONOTONIC +
+ * CLOCK_REALTIME timestamps under a seqlock so the G5c handler
+ * asm reads a consistent pair.
+ */
+int kvm_gadget_vvar_alloc(void);
+void kvm_gadget_vvar_free(void);
+void kvm_gadget_vvar_refresh(void);
+u64 kvm_gadget_vvar_va(void);
+u64 kvm_gadget_vvar_gpa(void);
 
 #endif
 

@@ -796,6 +796,69 @@ static void kvm_gadget_state_refresh_test(struct kunit *test)
 }
 
 /*
+ * Memo 11 G5 gadget vvar clock-page: offset ABI must match
+ * the #defines in kvm_backend.h. Gadget asm in G5c will
+ * hardcode these offsets.
+ */
+static void kvm_gadget_vvar_abi_test(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_vvar, seq),
+		(unsigned int)_TEST_KVM_VVAR_OFF_SEQ);
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_vvar, monotonic_sec),
+		(unsigned int)_TEST_KVM_VVAR_OFF_MONO_SEC);
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_vvar, monotonic_nsec),
+		(unsigned int)_TEST_KVM_VVAR_OFF_MONO_NSEC);
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_vvar, realtime_sec),
+		(unsigned int)_TEST_KVM_VVAR_OFF_REAL_SEC);
+	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_vvar, realtime_nsec),
+		(unsigned int)_TEST_KVM_VVAR_OFF_REAL_NSEC);
+}
+
+/*
+ * Memo 11 G5 gadget vvar refresh: after lazy-alloc + refresh,
+ * the page should contain non-zero monotonic timestamps and a
+ * seq that's even (stable) post-write. Also verifies seq
+ * increments monotonically across refresh calls.
+ */
+static void kvm_gadget_vvar_refresh_test(struct kunit *test)
+{
+	int rc = kvm_gadget_vvar_alloc();
+	struct _test_kvm_gadget_vvar *v;
+	u32 seq_before, seq_after;
+	s64 mono_before, mono_after;
+
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_ASSERT_NE(test, (unsigned long long)kvm_gadget_vvar_gpa(),
+			0ULL);
+
+	v = (struct _test_kvm_gadget_vvar *)phys_to_virt(kvm_gadget_vvar_gpa());
+
+	kvm_gadget_vvar_refresh();
+	seq_before = v->seq;
+	mono_before = v->monotonic_nsec +
+		      v->monotonic_sec * (s64)NSEC_PER_SEC;
+	/*
+	 * Post-refresh: seq must be even (writer done), mono
+	 * clock non-zero (KUnit runs well after boot 0).
+	 */
+	KUNIT_EXPECT_EQ(test, (unsigned int)(seq_before & 1u), 0u);
+	KUNIT_EXPECT_NE(test, mono_before, 0);
+
+	/* A second refresh bumps seq by 2 (odd then even). */
+	kvm_gadget_vvar_refresh();
+	seq_after = v->seq;
+	mono_after = v->monotonic_nsec +
+		     v->monotonic_sec * (s64)NSEC_PER_SEC;
+	KUNIT_EXPECT_EQ(test, seq_after - seq_before, 2u);
+	KUNIT_EXPECT_GE(test, mono_after, mono_before);
+}
+
+/*
  * Memo 10 class-map cross-check. The static table in
  * arch/um/backend/kvm/syscall_class.c must classify exactly
  * the 12 non-A entries from the inventory; every other NR
@@ -948,6 +1011,9 @@ static struct kunit_case backend_test_cases[] = {
 	/* Memo 11 G3 gadget state channel */
 	KUNIT_CASE(kvm_gadget_state_abi_test),
 	KUNIT_CASE(kvm_gadget_state_refresh_test),
+	/* Memo 11 G5 gadget vvar clock page */
+	KUNIT_CASE(kvm_gadget_vvar_abi_test),
+	KUNIT_CASE(kvm_gadget_vvar_refresh_test),
 #endif
 	{}
 };

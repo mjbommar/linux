@@ -41,6 +41,28 @@ void kvm_gadget_state_refresh(void);
 u64 kvm_gadget_state_va(void);
 u64 kvm_gadget_state_gpa(void);
 
+/* Memo 11 G5 gadget vvar clock-page probes. */
+int kvm_gadget_vvar_alloc(void);
+void kvm_gadget_vvar_free(void);
+void kvm_gadget_vvar_refresh(void);
+u64 kvm_gadget_vvar_va(void);
+u64 kvm_gadget_vvar_gpa(void);
+
+struct _test_kvm_gadget_vvar {
+	u32 seq;
+	u32 _pad0;
+	s64 monotonic_sec;
+	s64 monotonic_nsec;
+	s64 realtime_sec;
+	s64 realtime_nsec;
+	u64 _pad1[4];
+};
+#define _TEST_KVM_VVAR_OFF_SEQ		0x00
+#define _TEST_KVM_VVAR_OFF_MONO_SEC	0x08
+#define _TEST_KVM_VVAR_OFF_MONO_NSEC	0x10
+#define _TEST_KVM_VVAR_OFF_REAL_SEC	0x18
+#define _TEST_KVM_VVAR_OFF_REAL_NSEC	0x20
+
 /*
  * Mirror of struct kvm_gadget_state + offsets from
  * arch/um/backend/kvm/kvm_backend.h. The contract TU

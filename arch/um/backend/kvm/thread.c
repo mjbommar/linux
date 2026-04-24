@@ -1031,6 +1031,35 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	}
 	kvm_gadget_state_refresh();
 
+	/*
+	 * Memo 11 G5: allocate + map the vvar clock page
+	 * immediately above the state page in guest VA so a
+	 * single MSR_KERNEL_GS_BASE (→ state page) covers both
+	 * structs via disp32 addressing in the G5c handler asm
+	 * (state at %gs:0x00+, vvar at %gs:0x1000+). Read-only
+	 * from ring-3 (P | US).
+	 */
+	rc = kvm_gadget_vvar_alloc();
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: gadget_vvar_alloc failed (%d)\n",
+				    rc);
+		return rc;
+	}
+	{
+		u64 vvar_va = kvm_bootstrap_va + 2 * PAGE_SIZE;
+
+		rc = kvm_shadow_map_page(vvar_va,
+					 kvm_gadget_vvar_gpa(),
+					 KVM_X86_PTE_P | KVM_X86_PTE_US);
+		if (rc < 0) {
+			pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(gadget_vvar) failed (%d)\n",
+					    rc);
+			return rc;
+		}
+		kvm_backend_ctx()->gadget_vvar_va = vvar_va;
+	}
+	kvm_gadget_vvar_refresh();
+
 	cr3_gpa = kvm_shadow_pgd_gpa();
 	if (!cr3_gpa) {
 		pr_warn_once("um: kvm enter_guest: shadow_pgd_gpa is zero after alloc\n");

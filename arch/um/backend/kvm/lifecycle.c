@@ -46,6 +46,8 @@
 #include <linux/printk.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/ktime.h>
+#include <linux/time.h>
 
 #include <asm/page.h>
 #include <os.h>
@@ -267,6 +269,7 @@ void kvm_shutdown(void)
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	kvm_shadow_pgd_free();
 	kvm_gadget_state_free();
+	kvm_gadget_vvar_free();
 #endif
 	if (kvm_ctx.run0) {
 		os_unmap_memory(kvm_ctx.run0, kvm_ctx.run_size);
@@ -479,6 +482,113 @@ void kvm_gadget_state_refresh(void)
 	s->euid    = from_kuid_munged(current_user_ns(), c->euid);
 	s->gid     = from_kgid_munged(current_user_ns(), c->gid);
 	s->egid    = from_kgid_munged(current_user_ns(), c->egid);
+}
+
+/*
+ * Memo 11 G5 gadget vvar lifecycle. Parallel to the state-page
+ * helpers above. Alloc is lazy (same shape as shadow_pgd /
+ * gadget_state). Free is called from kvm_shutdown. Refresh
+ * writes fresh CLOCK_MONOTONIC + CLOCK_REALTIME values under a
+ * seqlock so the G5c gadget handler reads a consistent pair.
+ */
+int kvm_gadget_vvar_alloc(void)
+{
+	struct page *page;
+
+	if (kvm_ctx.gadget_vvar_page) {
+		pr_info_once("um: kvm gadget_vvar already allocated (va=%p gpa=0x%llx)\n",
+			     kvm_ctx.gadget_vvar,
+			     (unsigned long long)kvm_ctx.gadget_vvar_gpa);
+		return 0;
+	}
+
+	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!page) {
+		pr_err("um: kvm gadget_vvar: alloc_page failed\n");
+		return -ENOMEM;
+	}
+
+	kvm_ctx.gadget_vvar_page = page;
+	kvm_ctx.gadget_vvar      = page_address(page);
+	kvm_ctx.gadget_vvar_gpa  = (u64)__pa(kvm_ctx.gadget_vvar);
+	kvm_ctx.gadget_vvar_va   = 0;	/* filled in by kvm_enter_guest map */
+
+	pr_info("um: kvm gadget_vvar: va=%p gpa=0x%llx (memo 11 G5)\n",
+		kvm_ctx.gadget_vvar,
+		(unsigned long long)kvm_ctx.gadget_vvar_gpa);
+	return 0;
+}
+
+void kvm_gadget_vvar_free(void)
+{
+	if (!kvm_ctx.gadget_vvar_page)
+		return;
+	__free_page(kvm_ctx.gadget_vvar_page);
+	kvm_ctx.gadget_vvar_page = NULL;
+	kvm_ctx.gadget_vvar      = NULL;
+	kvm_ctx.gadget_vvar_gpa  = 0;
+	kvm_ctx.gadget_vvar_va   = 0;
+}
+
+u64 kvm_gadget_vvar_va(void)
+{
+	return kvm_ctx.gadget_vvar_va;
+}
+
+u64 kvm_gadget_vvar_gpa(void)
+{
+	return kvm_ctx.gadget_vvar_gpa;
+}
+
+/*
+ * Write fresh monotonic + realtime timestamps into the vvar
+ * page. Seqlock write pattern:
+ *
+ *   seq++ (now odd → "write in progress")
+ *   store fields
+ *   seq++ (now even → "stable")
+ *
+ * Guest-side readers (G5c handler asm) sample seq, check
+ * even, read fields, re-sample seq, retry on mismatch.
+ * Under ncpus=1 the host is quiescent during KVM_RUN so a
+ * concurrent reader race is impossible — the seqlock
+ * discipline here is future-proofing for the SMP v2 per-
+ * vCPU vvar model and costs nothing (2 extra writes per
+ * refresh).
+ *
+ * ktime_get_ns() returns a monotonic nanosecond count;
+ * ktime_get_real_ts64() returns a timespec64. Both are
+ * cheap UML-side (~1 us each per kvm_enter_guest, lost in
+ * the ~3 us re-entry ioctl cost) and give us standard
+ * wallclock + monotonic pairs without hooking UML's
+ * timer tick machinery. Higher-frequency updates (via a
+ * timer hook) are a post-v1 optimization tracked in memo
+ * 11 §"Known limitations".
+ */
+void kvm_gadget_vvar_refresh(void)
+{
+	struct kvm_gadget_vvar *v = kvm_ctx.gadget_vvar;
+	u64 mono_ns;
+	struct timespec64 real_ts;
+
+	if (!v)
+		return;
+
+	/* Enter the write critical section. */
+	v->seq++;	/* odd → writer in progress */
+	smp_wmb();
+
+	mono_ns = ktime_get_ns();
+	ktime_get_real_ts64(&real_ts);
+
+	v->monotonic_sec  = (s64)(mono_ns / NSEC_PER_SEC);
+	v->monotonic_nsec = (s64)(mono_ns % NSEC_PER_SEC);
+	v->realtime_sec   = real_ts.tv_sec;
+	v->realtime_nsec  = real_ts.tv_nsec;
+
+	/* Publish: seq flips even → stable. */
+	smp_wmb();
+	v->seq++;
 }
 
 /*
