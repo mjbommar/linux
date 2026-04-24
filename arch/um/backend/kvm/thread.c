@@ -226,11 +226,11 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 					 */
 
 #define KVM_BOOTSTRAP_GDT_OFFSET	0x000	/* 8 entries × 8 B = 64 B */
-#define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5..~150-byte trampoline / gadget */
-#define KVM_BOOTSTRAP_TSS_OFFSET	0x100	/* 104-byte TSS */
-#define KVM_BOOTSTRAP_IDT_OFFSET	0x180	/* 33 × 16 = 528 B */
-#define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x400	/* 11-byte #PF handler */
-#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x420	/* 3-byte SYSRETQ (first-entry helper) */
+#define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5..~448-byte gadget region */
+#define KVM_BOOTSTRAP_TSS_OFFSET	0x200	/* 104-byte TSS (moved from 0x100 in G5b) */
+#define KVM_BOOTSTRAP_IDT_OFFSET	0x280	/* 33 × 16 = 528 B */
+#define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x4a0	/* 11-byte #PF handler (moved from 0x400 in G5b) */
+#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x4b0	/* 3-byte SYSRETQ (first-entry helper) */
 #define KVM_BOOTSTRAP_STACK_TOP		0x1000	/* ring-0 IST stack top */
 #define KVM_BOOTSTRAP_TSS_SEL		0x30	/* GDT entry 6 (16-byte TSS desc) */
 #define KVM_BOOTSTRAP_IDT_ENTRIES	33	/* covers #PF (vector 14) */
