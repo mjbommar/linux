@@ -1291,6 +1291,9 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	 * for-loop, so the stale vCPU never runs under us.
 	 */
 	for (;;) {
+		struct kvm_sregs exit_sregs;
+		bool sregs_valid = false;
+
 		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
 		if (rc < 0) {
 			if (rc == -EINTR)
@@ -1304,6 +1307,39 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
 			      rc);
 		kvm_regs_to_uml_regs(regs, &kregs);
+
+		/*
+		 * Audit finding A2 (memo D70): derive is_user from
+		 * the observed CPL at VMEXIT instead of hardcoding
+		 * it per-case. CPL = cs.selector & 3 (lowest 2
+		 * bits of the ring-3 CS selector are the RPL, which
+		 * equals CPL for any user-mode selector). seccomp /
+		 * ptrace backends only trap from ring-3 so they
+		 * always set is_user = 1, but the KVM backend can
+		 * also VMEXIT mid-ring-0 (e.g. MMIO fault while
+		 * executing the bootstrap #PF handler or an
+		 * exception decoder). Misclassifying a ring-0 exit
+		 * as is_user = 1 sends the fault through
+		 * arch/um/kernel/trap.c's user-signal path at
+		 * trap.c:321 instead of the panic path at
+		 * trap.c:292 — guest kernel code that faults would
+		 * silently signal a phantom user task instead of
+		 * panicking the host kernel, making KVM crash
+		 * diagnostics untrustworthy.
+		 *
+		 * Read SREGS best-effort: a failure here isn't
+		 * fatal because the per-case defaults below are
+		 * correct for their specific exit reasons (SYSCALL
+		 * is always CPL=3, the #PF handler entry is always
+		 * from CPL=3). The sregs_valid flag tells the MMIO
+		 * case (the one that actually needs runtime CPL)
+		 * whether to trust the fresh read or fall back.
+		 */
+		if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				     (unsigned long)&exit_sregs) >= 0) {
+			sregs_valid = true;
+			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
+		}
 
 		switch (run->exit_reason) {
 		case KVM_EXIT_IO:
@@ -1423,10 +1459,10 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			 * Guest HLT. Break out of the for-loop so
 			 * interrupt_end() drains pending resched +
 			 * signals before the next kvm_run_userspace call
-			 * re-enters the guest. is_user stays 1; HOST_IP
-			 * points past the HLT.
+			 * re-enters the guest. is_user was set above
+			 * from the observed CPL (audit A2); leave it.
+			 * HOST_IP points past the HLT.
 			 */
-			regs->is_user = 1;
 			break;
 
 		case KVM_EXIT_INTR:
@@ -1672,12 +1708,27 @@ out_read_regs:
 	 * operate on accurate regs.
 	 */
 	if (rc == -EINTR) {
+		struct kvm_sregs sregs;
+
 		rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
 				      (unsigned long)&kregs);
 		if (rc >= 0)
 			kvm_regs_to_uml_regs(regs, &kregs);
+		/*
+		 * Audit A2: derive is_user from CPL here too, so
+		 * a host-signal interrupt mid-ring-0 (e.g. inside
+		 * the LSTAR trampoline) doesn't mask as a user-
+		 * mode exit. Best-effort — if KVM_GET_SREGS
+		 * fails, fall back to user-mode since host
+		 * signals during normal workload almost always
+		 * fire while the guest is in ring-3.
+		 */
+		if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+				     (unsigned long)&sregs) >= 0)
+			regs->is_user = (sregs.cs.selector & 3) != 0;
+		else
+			regs->is_user = 1;
 	}
-	regs->is_user = 1;
 
 	/*
 	 * Drain resched + pending signals + resume work, matching

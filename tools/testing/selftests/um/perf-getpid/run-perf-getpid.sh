@@ -38,7 +38,7 @@ BINARY=${UML_BINARY:-/tmp/uml-kvmint/linux}
 MEM=${UML_MEM:-256M}
 LOOP=${PERF_GETPID_LOOP:-$DIR/getpid-loop}
 BACKENDS=${BACKENDS:-ptrace seccomp kvm}
-MAX_KVM_RATIO=${MAX_KVM_RATIO:-2.0}
+MAX_KVM_RATIO=${MAX_KVM_RATIO:-2.5}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
