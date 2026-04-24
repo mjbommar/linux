@@ -1487,27 +1487,37 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		panic("um: kvm run_userspace: enter_guest failed (%d)", rc);
 
 	/*
-	 * Inner loop: keep re-entering the vCPU as long as each
-	 * trap is the "continuation" kind — SYSCALL (needs the
-	 * trampoline's sysretq to run after handle_syscall) and
-	 * guest-side #PF (needs iretq to run after fault-in).
-	 * Exit the loop on a "clean ring-3 boundary" event (HLT,
-	 * INTR, MMIO fault, unrecoverable exit) so interrupt_end()
-	 * can drain resched + pending signals + resume work, then
-	 * return to userspace() which re-enters us on the next
-	 * iteration.
+	 * Per-trap shape (audit A1 finalized 2026-04-24 round-3):
+	 * each kvm_run_userspace call drives ONE KVM_RUN, ONE
+	 * dispatch, then interrupt_end() + return. Matches the
+	 * contract ptrace / seccomp already honor (trap_user.c
+	 * :254 + :157). An earlier revision kept a for (;;) inner
+	 * loop that batched SYSCALL + PF "continuation" traps
+	 * across multiple KVM_RUN iterations — correct for the
+	 * sysretq/iretq completion but silently delayed
+	 * interrupt_end() across syscall/fault bursts, up to the
+	 * next host timer interrupt (~10ms). The fix for SYSCALL
+	 * is kvm_decode_syscall stashing HOST_IP = HOST_CX (the
+	 * user's post-SYSCALL RIP); the next kvm_enter_guest's
+	 * bootstrap SYSRETQ dance resumes there. The fix for PF
+	 * extracts user RIP + RSP from the IDT-pushed iretq
+	 * frame on the IST stack and does the same re-entry
+	 * (see the PF case below).
 	 *
-	 * Keeping the inner loop is safe against scheduler drift
-	 * (audit finding A1) only because interrupt_end() runs
-	 * strictly *after* the loop exits, never inside it. A
-	 * schedule() inside interrupt_end() may land the task on
-	 * a vCPU whose SREGS / MSRs / CR3 were reprogrammed by
-	 * another mm's kvm_enter_guest; returning from the
-	 * scheduled-to task back into this code resumes after
-	 * the interrupt_end() call, not in the middle of the
-	 * for-loop, so the stale vCPU never runs under us.
+	 * No scheduler-drift concern: with per-trap exit,
+	 * interrupt_end() runs once per trap, scheduling can
+	 * happen inside it, and the next kvm_run_userspace
+	 * invocation rebuilds the vCPU from scratch — so a
+	 * task that scheduled away and comes back sees a fresh
+	 * kvm_enter_guest before the next KVM_RUN.
+	 *
+	 * Cost: ~5 extra ioctls per non-gadget syscall vs the
+	 * old inner-loop model (KVM_GET/SET_SREGS + KVM_SET_
+	 * REGS + KVM_SET_MSRS in each kvm_enter_guest).
+	 * Borne only by non-gadget paths; gadget-handled
+	 * syscalls never VMEXIT so they're unaffected.
 	 */
-	for (;;) {
+	{
 		struct kvm_sregs exit_sregs;
 		bool sregs_valid = false;
 
@@ -1563,15 +1573,19 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			if (run->io.port == UM_KVM_SYSCALL_PORT) {
 				kvm_decode_syscall(regs, &kregs, vcpu_fd);
 				/*
-				 * Stay in the for-loop: the trampoline's
-				 * post-`out` sysretq still needs to run on
-				 * the next KVM_RUN. `continue` makes the
-				 * for-loop-vs-switch distinction explicit
-				 * (prior `break;` worked in practice here,
-				 * but audit A1 flagged the ambiguity —
-				 * continue is self-documenting).
+				 * Audit A1 (2026-04-24 round-3):
+				 * exit to interrupt_end() per trap, not per
+				 * trap-burst. kvm_decode_syscall has already
+				 * stashed the user's continuation RIP into
+				 * regs->gp[HOST_IP] (= HOST_CX, the post-
+				 * SYSCALL user RIP). The next kvm_run_
+				 * userspace iteration rebuilds the vCPU from
+				 * regs via kvm_enter_guest's bootstrap
+				 * SYSRETQ dance, resuming ring-3 at that
+				 * RIP. Matches ptrace / seccomp's per-trap
+				 * interrupt_end contract.
 				 */
-				continue;
+				goto out_read_regs;
 			}
 			if (run->io.port == UM_KVM_SYSRETQ_PORT) {
 				/*
@@ -1658,29 +1672,63 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				}
 
 				/*
-				 * Advance RIP past `out` (2 bytes) so the
-				 * handler's `add $8, %rsp; iretq` executes
-				 * and retries the faulting ring-3 insn.
+				 * Audit A1 round-3: extract user
+				 * continuation regs from the IDT-pushed
+				 * iretq frame on the IST stack, stash
+				 * them in `regs`, and exit to
+				 * interrupt_end() per trap (matching
+				 * the SYSCALL path above and ptrace /
+				 * seccomp's contract). Prior revisions
+				 * advanced kregs.rip+2 + KVM_SET_REGS
+				 * and `continue`d the for-loop to let
+				 * the handler's `iretq` run — that
+				 * worked but silently batched PF
+				 * events across the inner loop, which
+				 * delayed resched + signal drain.
+				 *
+				 * IST frame layout at `out %al, $0xfb`
+				 * VMEXIT (kregs.rsp points at offset
+				 * 0):
+				 *   +0:  error_code
+				 *   +8:  RIP      (user's faulting VA)
+				 *   +16: CS
+				 *   +24: RFLAGS   (user's, at fault)
+				 *   +32: RSP      (user's stack ptr)
+				 *   +40: SS
+				 *
+				 * Read via the bootstrap page's kernel-
+				 * VA alias — the IST stack lives in
+				 * the bootstrap page (RX-mapped for the
+				 * guest, kernel-VA-directly-accessible
+				 * for the host). Next kvm_enter_guest's
+				 * bootstrap SYSRETQ dance resumes ring-3
+				 * at HOST_IP (= user RIP), with HOST_SP
+				 * restored to user RSP. User RFLAGS is
+				 * approximated by the hardcoded 0x3202
+				 * (IF=1, IOPL=3, reserved bit-1); a
+				 * faulting instruction almost never
+				 * depends on entry RFLAGS being bit-
+				 * exact, so the retry proceeds
+				 * correctly. Tracked as a v2 refinement
+				 * in memo 11 §"Known limitations".
 				 */
-				kregs.rip += 2;
-				if (os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
-						     (unsigned long)&kregs) < 0) {
-					/*
-					 * Audit A4: if we can't advance
-					 * RIP past the `out`, the next
-					 * KVM_RUN re-executes the port
-					 * IO and spins on the same
-					 * fault. Kill the task.
-					 */
-					pr_warn_ratelimited("um: kvm: PF handler KVM_SET_REGS failed; killing guest task\n");
-					fatal_sigsegv();
+				{
+					unsigned long off =
+						(unsigned long)(kregs.rsp -
+								kvm_bootstrap_va);
+					u8 *ist = (u8 *)kvm_bootstrap_page + off;
+					u64 user_rip, user_rsp;
+
+					if (off >= PAGE_SIZE) {
+						pr_warn_ratelimited("um: kvm: PF IST out of range\n");
+						fatal_sigsegv();
+					}
+					user_rip = *(u64 *)(ist + 8);
+					user_rsp = *(u64 *)(ist + 32);
+					regs->gp[HOST_IP] = user_rip;
+					regs->gp[HOST_SP] = user_rsp;
 				}
-				/*
-				 * Stay in the for-loop: the handler's
-				 * `add $8, %rsp; iretq` still needs to
-				 * execute. Same as SYSCALL above.
-				 */
-				continue;
+				goto out_read_regs;
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
 			      run->io.port);
