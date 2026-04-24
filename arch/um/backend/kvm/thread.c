@@ -1077,12 +1077,24 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	regs->is_user = 1;
 
 	/*
-	 * Advance RIP past the 2-byte `out %al, $0xf4` so the next
-	 * KVM_RUN executes SYSRETQ. Mirrored into both regs and
-	 * kregs — the subsequent KVM_SET_REGS picks up kregs.rip.
+	 * SYSCALL saves post-instruction RIP into RCX (and
+	 * RFLAGS into R11) before jumping to MSR_LSTAR. For the
+	 * break-out-and-re-enter pattern (audit A1), the next
+	 * call to kvm_enter_guest's bootstrap SYSRETQ dance
+	 * resumes ring-3 at whatever HOST_IP holds, so stash
+	 * the user's continuation RIP there.
+	 *
+	 * Historical note: before A1 an inner `for (;;)` loop
+	 * stayed in the same KVM_RUN and advanced kregs->rip
+	 * past the LSTAR's 2-byte `out` so the trampoline's
+	 * sysretq at +0x42 ran in ring-0 and returned to RCX in
+	 * ring-3. That worked because the vCPU state carried
+	 * through to the next KVM_RUN iteration. Under A1's
+	 * per-trap re-entry model, kvm_enter_guest rebuilds all
+	 * the vCPU state from `regs`, so HOST_IP must be the
+	 * user RIP, not the LSTAR-internal address.
 	 */
-	kregs->rip += 2;
-	regs->gp[HOST_IP] = kregs->rip;
+	regs->gp[HOST_IP] = regs->gp[HOST_CX];
 
 	/*
 	 * Memo 10 class-D short-circuit: syscalls that would be
@@ -1236,24 +1248,29 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		panic("um: kvm run_userspace: enter_guest failed (%d)", rc);
 
 	/*
-	 * Inner loop: drive the vCPU through as many KVM_RUNs as it
-	 * takes to reach a point where the caller's outer userspace()
-	 * loop should regain control — HLT (rescheduling) or
-	 * KVM_EXIT_INTR (host signal). Syscall exits dispatch
-	 * in-line and immediately re-enter KVM_RUN for the SYSRETQ
-	 * back to ring-3; this keeps the host-side trap-loop shape
-	 * gVisor-compatible (one call into run_userspace = one
-	 * logical "resume until something interesting happens").
+	 * Inner loop: keep re-entering the vCPU as long as each
+	 * trap is the "continuation" kind — SYSCALL (needs the
+	 * trampoline's sysretq to run after handle_syscall) and
+	 * guest-side #PF (needs iretq to run after fault-in).
+	 * Exit the loop on a "clean ring-3 boundary" event (HLT,
+	 * INTR, MMIO fault, unrecoverable exit) so interrupt_end()
+	 * can drain resched + pending signals + resume work, then
+	 * return to userspace() which re-enters us on the next
+	 * iteration.
+	 *
+	 * Keeping the inner loop is safe against scheduler drift
+	 * (audit finding A1) only because interrupt_end() runs
+	 * strictly *after* the loop exits, never inside it. A
+	 * schedule() inside interrupt_end() may land the task on
+	 * a vCPU whose SREGS / MSRs / CR3 were reprogrammed by
+	 * another mm's kvm_enter_guest; returning from the
+	 * scheduled-to task back into this code resumes after
+	 * the interrupt_end() call, not in the middle of the
+	 * for-loop, so the stale vCPU never runs under us.
 	 */
 	for (;;) {
 		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
 		if (rc < 0) {
-			/*
-			 * -EINTR is the kernel's normal "host signal
-			 * interrupted KVM_RUN" path; treat it the same
-			 * as KVM_EXIT_INTR — bubble out so the outer
-			 * loop's interrupt_end() runs.
-			 */
 			if (rc == -EINTR)
 				goto out_read_regs;
 			panic("um: kvm run_userspace: KVM_RUN failed (%d)", rc);
@@ -1270,11 +1287,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		case KVM_EXIT_IO:
 			if (run->io.port == UM_KVM_SYSCALL_PORT) {
 				kvm_decode_syscall(regs, &kregs, vcpu_fd);
-				/*
-				 * Next KVM_RUN consumes the trampoline's
-				 * SYSRETQ and resumes ring-3.
-				 */
-				continue;
+				break;
 			}
 			if (run->io.port == UM_KVM_SYSRETQ_PORT) {
 				/*
@@ -1352,7 +1365,12 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					(*sig_info[SIGSEGV])(SIGSEGV, NULL,
 							     regs, NULL);
 					regs->is_user = 1;
-					return;
+					/*
+					 * Drop out to interrupt_end so the
+					 * queued SIGSEGV drains before the
+					 * outer userspace() loop re-enters.
+					 */
+					goto out_read_regs;
 				}
 
 				/*
@@ -1363,19 +1381,21 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				kregs.rip += 2;
 				(void)os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
 						       (unsigned long)&kregs);
-				continue;
+				break;
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
 			      run->io.port);
 
 		case KVM_EXIT_HLT:
 			/*
-			 * Guest HLT. Return to the outer userspace()
-			 * loop so UML's scheduler can dispatch. is_user
-			 * stays 1; HOST_IP points past the HLT.
+			 * Guest HLT. Break out of the for-loop so
+			 * interrupt_end() drains pending resched +
+			 * signals before the next kvm_run_userspace call
+			 * re-enters the guest. is_user stays 1; HOST_IP
+			 * points past the HLT.
 			 */
 			regs->is_user = 1;
-			return;
+			break;
 
 		case KVM_EXIT_INTR:
 			goto out_read_regs;
@@ -1438,7 +1458,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			if (current->active_mm && current->active_mm->pgd)
 				(void)kvm_shadow_fill_from_uml_pgd(
 					current->active_mm->pgd);
-			continue;
+			break;
 		}
 
 		case KVM_EXIT_SHUTDOWN:
@@ -1614,10 +1634,10 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 
 out_read_regs:
 	/*
-	 * Host-side INTR / EINTR path: the outer userspace() loop
-	 * calls interrupt_end() on re-entry. regs already reflects
-	 * the last successful KVM_GET_REGS (or the pre-KVM_RUN
-	 * state on -EINTR, in which case kregs is stale — re-read).
+	 * Host-side INTR / EINTR path: kregs may be stale (KVM_RUN
+	 * returned before a clean KVM_GET_REGS ran). Pull fresh
+	 * guest state so interrupt_end() + the next kvm_enter_guest
+	 * operate on accurate regs.
 	 */
 	if (rc == -EINTR) {
 		rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
@@ -1626,6 +1646,16 @@ out_read_regs:
 			kvm_regs_to_uml_regs(regs, &kregs);
 	}
 	regs->is_user = 1;
+
+	/*
+	 * Drain resched + pending signals + resume work, matching
+	 * the contract seccomp/ptrace backends honor (audit A1 /
+	 * decisions-log D70). Each kvm_run_userspace call = one
+	 * trap + one interrupt_end, same shape as
+	 * seccomp_run_userspace line 157 +
+	 * ptrace_run_userspace line 254.
+	 */
+	interrupt_end();
 }
 
 #else /* !CONFIG_UM_BACKEND_KVM_INTEGRATED */

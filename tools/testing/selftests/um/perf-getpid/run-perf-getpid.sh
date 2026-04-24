@@ -52,6 +52,18 @@ fi
 measure_one() {
 	local backend=$1
 	local log
+	# Self-heal /dev/kvm ACL per-KVM-iteration. Some host
+	# configurations drop the facl between UML invocations
+	# (observed: ACL granted once, gone by the next run with
+	# no apparent trigger — likely udev settling or a per-
+	# session elogind action). Applying inside measure_one
+	# means each backend=kvm pass gets a fresh ACL without
+	# needing a separate one-shot setup step; harmless on
+	# hosts that don't need it. Requires NOPASSWD sudo for
+	# setfacl; falls through to SKIP if that isn't present.
+	if [ "$backend" = "kvm" ] && [ ! -r /dev/kvm ] && [ -e /dev/kvm ]; then
+		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+	fi
 	# Note: cmdline token is `backend=force=<kind>`, not
 	# `force=<kind>`. An earlier version of this runner used
 	# `force=<kind>` which silently parses as an unknown
