@@ -6459,4 +6459,111 @@ detection story.
 
 ---
 
+## D63 (2026-04-23) — LKML upstream submission order: bpf-hygiene → kmsan-arch → ftrace-notrace → backend-ops RFC → static-keys → C-series → KVM backend
+
+**Status:** Accepted (sequencing only; each series has
+its own cover-letter + patch files landing via normal
+commits).
+
+**Context.** Phase VI Lift #7 in the post-Q1 push plan
+asked for an ordered LKML submission queue for the
+upstream-bound patch series the UML redesign generated.
+Historically the fork accumulated upstream-worthy pieces
+without an explicit sequencing commitment; D45
+(fork-first policy) pushed adoption upstream to a later
+phase without saying *which order*. This entry fixes
+that.
+
+**The order (smallest-first, dependency-respecting).**
+
+1. `bpf-hygiene-v1/` (2 patches, BPF subsystem,
+   upstream-independent)
+2. `kmsan-arch-callback-rfc/` (1 RFC, mm/kmsan,
+   upstream-independent; unblocked from UML side by
+   D62)
+3. `ftrace-notrace-generic-v1/` (~3 patches, tracing,
+   generic kthread notrace annotations — to write)
+4. `backend-ops-abstraction-rfc/` (~12 patches, arch/um,
+   A-workstream — to write; depends on #3 landing
+   upstream for clean ftrace handling)
+5. `static-key-hot-paths-series/` (~6 patches, arch/um,
+   B-workstream — to write; depends on #4)
+6. `kprobes-ftrace-kfence-kcsan-profiles-series/` (~20
+   patches across 4 sub-series, C-workstream — to write;
+   depends on #4 + #5)
+7. `kvm-backend-series/` (~15 patches, arch/um + KVM,
+   D-workstream — to write; depends on #4 + task #162
+   real run_userspace integration)
+
+Full sequencing rationale + per-series maintainer routing
+live in
+`Documentation/virt/uml/redesign/upstream-patches/SUBMISSION-QUEUE.md`.
+
+**Decision basis — why this order.**
+
+1. **Upstream-independent series first.** #1 and #2 land
+   on their own merit, don't mention UML in the patch
+   bodies, and build author credibility with BPF and
+   mm/kmsan maintainers before bigger asks.
+2. **Generic before arch RFC.** #3's `notrace`
+   annotations are one-liners in `kernel/` that any arch
+   using `-fpatchable-function-entry` would benefit from.
+   Getting them upstream before #4 makes the A-workstream
+   RFC reviewers see a clean ftrace story.
+3. **Backend-ops RFC is the tentpole.** #4 is the
+   architectural change everything downstream cites.
+   Realistic wall-clock: 6-9 months of review cycles.
+   Landing this unblocks #5/#6/#7.
+4. **KVM last.** #7 needs both #4 (ops table) and task
+   #162 (real run_userspace trap loop). Realistic
+   timing: 12-18 months after #4.
+
+**Alternatives considered.**
+
+1. **Send #4 first, treat #1-#3 as drive-by cleanup.**
+   Rejected. #1-#3 are cheap individual wins; queuing
+   them behind #4 means reviewers only see UML-
+   flavoured work for a year and associate the author
+   with that context. Separating builds subsystem
+   credibility.
+2. **Bundle #6 into a single 20-patch series.** Rejected.
+   kprobes and ftrace and KFENCE and KCSAN have different
+   maintainer audiences; one giant series forces any
+   single maintainer to carry the others' review. Four
+   sub-series with shared cover-letter framing is the
+   practical split.
+3. **Send #7 with #4 to shortcut the D-workstream wait.**
+   Rejected. #7's real demonstration needs task #162's
+   sustained run_userspace integration measured against
+   seccomp; submitting before that numbers-baseline
+   exists invites "show me it actually works on real
+   workloads" pushback with nothing to point at.
+
+**Lifetime / revisit triggers.**
+
+- Revisit if any subsystem maintainer rejects a series
+  (common: "v2 with these changes" is normal; "rejected
+  on principle" means the sequencing may need to skip
+  the dependent downstream series).
+- Revisit when #4 lands — reordering #5/#6 at that
+  point depends on which sub-maintainers ack first.
+- Revisit if a security issue in the fork surfaces that
+  needs fast-track upstreaming (no current candidates;
+  the usual suspects — KASAN, KFENCE — are working
+  on-fork).
+
+**Cross-references.**
+
+- D45 (2026-04-21) — fork-first upstream policy this
+  memo operates within.
+- D62 (2026-04-23) — KMSAN redesign that unblocked
+  series #2 from UML's side.
+- `Documentation/virt/uml/redesign/upstream-patches/
+  SUBMISSION-QUEUE.md` — the full sequencing memo with
+  per-series maintainer routing + framing pitches.
+- `06-sequencing/post-q1-push.md` §"Phase VI Lift #7" —
+  parent-plan reference.
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -27,7 +27,14 @@ the patch bodies.
 | Series | Status | Motivating workstream | Decisions log |
 |---|---|---|---|
 | `bpf-hygiene-v1/` | prepared, not yet sent | C-06 (BPF JIT UML port) | D43 addendum |
-| `kmsan-arch-callback-rfc/` | staged (notes only; patch not written) — framing in D51 is the "no visible impact, just benefits" pitch: new weak `kmsan_arch_init_early_shadow()` hook + un-static `kmsan_record_future_shadow_range()`, byte-identical behavior for x86/s390 | C-07 (KMSAN UML port) | D44 resolution + D51 |
+| `kmsan-arch-callback-rfc/` | staged (notes only; patch not written) — framing in D51 is the "no visible impact, just benefits" pitch: new weak `kmsan_arch_init_early_shadow()` hook + un-static `kmsan_record_future_shadow_range()`, byte-identical behavior for x86/s390. Upstream-side UML consumer no longer blocks on it (D62 landed the VMALLOC-quarter-split redesign which works independently). | C-07 (KMSAN UML port) | D44 resolution + D51 + D62 |
+
+**Full submission queue + sequencing** lives in
+`SUBMISSION-QUEUE.md` in this directory (Phase VI Lift #7
+deliverable, 2026-04-23). That doc orders all seven
+upstream-bound series (the two above plus five "to write")
+and records the per-series maintainer routing + framing
+pitches. Decisions-log D63 summarizes the sequencing call.
 
 ## Conventions
 

@@ -1,9 +1,45 @@
 # C-08: Syzkaller `vm/uml` backend
 
-**Status:** planned — kernel side ready (2026-04-21); the
+**Status:** planned — kernel side ready as of 2026-04-21;
+interface fingerprint frozen 2026-04-23 (this file). The
 remaining work is a Go `pkg/vm/uml/` implementation in the
 `github.com/google/syzkaller` repository, which by our D45
 policy stays off-tree from linux.git.
+
+**In-tree spec surface (pinned; the Go driver binds to this).**
+Any change to the items below requires bumping
+`/sys/kernel/um/state_version` and adding a handling branch
+in the Go driver:
+
+1. `/sys/kernel/um/state_version` — currently `1`. Exposed
+   by `arch/um/kernel/snapshot.c` (C-09 commit 5, landed
+   2026-04-20 in `70feba656bf5`).
+2. C-09 forkserver wire protocol on fds 198 (ctl,
+   syz→kernel) and 199 (status, kernel→syz):
+   - Handshake: kernel writes `AFL\0` (4 bytes) to fd 199
+     on ready. Document surface in
+     `Documentation/virt/uml/snapshot.rst`.
+   - Per iteration: syz writes 4-byte testcase descriptor
+     to 198; kernel writes 4-byte worker pid + 4-byte
+     status to 199. **Status is hard-coded 0 in v1 per the
+     documented ceiling** (see
+     `Documentation/virt/uml/snapshot.rst` §"v1 ceiling:
+     exit-status semantics" and the Finding #1 forensic
+     memo at `Documentation/virt/uml/redesign/04-risks/
+     signal-reentry-in-fork-window.md`). A real-status
+     bridge is v2 scope.
+3. C-10 launcher `uml-launcher run --forkserver=<ctl>,<status>`
+   CLI (commits `91d4770...113f1b0...`). The Go driver invokes
+   this with dup2'd pipes; the launcher plumbs them to the
+   UML child's fds 198/199.
+4. The per-iteration zombie-drain contract: kernel-side
+   `wait4(-1, WNOHANG)` at the top of each iteration
+   (`257b8cf61b84`). Go driver does NOT reap workers.
+
+The `launcher-smoke` and `snapshot-smoke` selftests
+(`tools/testing/selftests/um/`) regression-test the full
+stack; a breakage here surfaces there before it reaches the
+off-tree Go side.
 **Effort:** 2–3 weeks (revised down from 4). The C-09 v1
 forkserver + C-10 v1 launcher close the expensive half of the
 original estimate; what remains is Go glue that mostly mirrors
