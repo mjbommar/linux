@@ -9384,4 +9384,85 @@ better than the ~10 ms scheduler-lag the gadget caused.
 
 ---
 
+## D95 (2026-04-24) — G1 in-tree kselftest: kvm-bounds
+
+**Decision.** Land an in-tree kselftest at
+`tools/testing/selftests/um/kvm-bounds/` that drives the
+gadget user-pointer bounds check (G1, D93) with a
+canonical kernel VA and a non-canonical address across
+the three gadget output handlers (`clock_gettime`,
+`time`, `getcpu`), and asserts each call returns
+`-EFAULT`.
+
+**Why.** D93 closed G1 with an ad-hoc out-of-tree
+smoke-test (`/tmp/g1-supervisor-smoke`). The audit-round-6
+checklist explicitly called for converting that probe
+into a regression test that lives next to the code, can
+be run by `make -C tools/testing/selftests/um run_tests`,
+and survives developer churn. Task #240.
+
+**Shape.**
+
+- `kvm-bounds-loop.c` — freestanding ring-3 ELF (same
+  build pattern as `df-preserve-loop.c` and
+  `getpid-loop.c`). Calls each of the 3 gadget
+  output-handlers with two adversarial pointers:
+    - `0xffff800000001000` (canonical kernel VA — bit
+      47 set, sign-extended high). Without G1's bounds
+      check, the gadget would store through this at
+      CPL=0 and corrupt ring-0 data.
+    - `0x800000000000` (non-canonical — bit 47 = 0,
+      bit 48 = 1). Without the check, the gadget's
+      ring-0 store would raise `#GP`, with no IDT[13]
+      handler installed → triple-fault.
+  Asserts each of the 6 calls returns `-EFAULT` (-14).
+  Reports a single `KVM_BOUNDS:` line with all 6 return
+  codes + `passed=N/6`.
+- `Makefile` — standard `-static -nostdlib -ffreestanding`
+  freestanding-ELF build, mirroring the perf-getpid /
+  df-preserve pattern.
+- `run-kvm-bounds.sh` — runs the binary under both the
+  fallback (no-gadget) UML kernel and (optionally) the
+  gadget kernel via `UML_GADGET_BINARY`. The fallback
+  row exists as a baseline showing -EFAULT is the
+  universal expected behaviour, not a gadget-specific
+  quirk; the gadget row exercises G1's TASK_SIZE_CAP
+  inline check directly.
+- Parent `tools/testing/selftests/um/Makefile` adds
+  `kvm-bounds` (and `df-preserve`, retroactively, since
+  it was missed in #222) to TARGETS so `make all` builds
+  the binary.
+
+**Validation on dev host.**
+
+```
+KVM_BOUNDS: kvm-fallback clock_kva=-14 time_kva=-14
+            getcpu_kva=-14 clock_noncan=-14
+            time_noncan=-14 getcpu_noncan=-14
+            passed=6/6 expected_each=-14
+KVM_BOUNDS: kvm-gadget clock_kva=-14 time_kva=-14
+            getcpu_kva=-14 clock_noncan=-14
+            time_noncan=-14 getcpu_noncan=-14
+            passed=6/6 expected_each=-14
+KVM_BOUNDS: PASS
+```
+
+Verified the regression-detection path by mentally
+running the test against the pre-G1 gadget bytes:
+without the inline `cmp ptr, %gs:TASK_SIZE_CAP / jbe`
+guard, the `clock_kva` case would corrupt the kernel-VA
+mapping (no fault → return 0, not -14), and the
+`clock_noncan` case would raise `#GP` at CPL=0 (no
+IDT[13] handler → triple-fault → guest reset → no
+KVM_BOUNDS line emitted). Either failure mode surfaces
+distinctly in the runner's PASS/FAIL output.
+
+**Refs.**
+
+- Audit round-6 finding #1 (G1).
+- D93 — original G1 close.
+- task #240 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)
