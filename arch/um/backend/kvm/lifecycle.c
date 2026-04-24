@@ -472,8 +472,8 @@ void kvm_gadget_state_refresh(void)
 	c = current_cred();
 	s->seq     = 0;			/* SMP v2 reserved */
 	s->cpu_id  = 0;			/* ncpus=1 only for v1 */
-	s->pid     = task_pid_vnr(current);
-	s->tgid    = task_tgid_vnr(current);
+	s->tgid    = task_tgid_vnr(current);	/* getpid(2) semantics */
+	s->tid     = task_pid_vnr(current);	/* gettid(2) semantics */
 	s->ppid    = task_ppid_nr(current);
 	s->uid     = from_kuid_munged(current_user_ns(), c->uid);
 	s->euid    = from_kuid_munged(current_user_ns(), c->euid);

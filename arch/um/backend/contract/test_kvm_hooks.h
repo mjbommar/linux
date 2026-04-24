@@ -51,8 +51,8 @@ u64 kvm_gadget_state_gpa(void);
 struct _test_kvm_gadget_state {
 	u32 seq;
 	u32 cpu_id;
-	u32 pid;
 	u32 tgid;
+	u32 tid;
 	u32 ppid;
 	u32 uid;
 	u32 euid;
@@ -60,7 +60,8 @@ struct _test_kvm_gadget_state {
 	u32 egid;
 	u32 _pad;
 };
-#define _TEST_KVM_GADGET_OFF_TGID	0x0c
+#define _TEST_KVM_GADGET_OFF_TGID	0x08
+#define _TEST_KVM_GADGET_OFF_TID	0x0c
 #define _TEST_KVM_GADGET_OFF_UID	0x14
 
 /*

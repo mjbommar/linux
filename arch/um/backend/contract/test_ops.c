@@ -717,6 +717,9 @@ static void kvm_gadget_state_abi_test(struct kunit *test)
 		(unsigned int)offsetof(struct _test_kvm_gadget_state, tgid),
 		(unsigned int)_TEST_KVM_GADGET_OFF_TGID);
 	KUNIT_EXPECT_EQ(test,
+		(unsigned int)offsetof(struct _test_kvm_gadget_state, tid),
+		(unsigned int)_TEST_KVM_GADGET_OFF_TID);
+	KUNIT_EXPECT_EQ(test,
 		(unsigned int)offsetof(struct _test_kvm_gadget_state, uid),
 		(unsigned int)_TEST_KVM_GADGET_OFF_UID);
 }
@@ -753,8 +756,14 @@ static void kvm_gadget_state_refresh_test(struct kunit *test)
 		struct _test_kvm_gadget_state *s =
 			(struct _test_kvm_gadget_state *)phys_to_virt(gpa);
 
-		/* pid must be non-zero — KUnit runs in a real task. */
-		KUNIT_EXPECT_NE(test, (unsigned int)s->pid, 0u);
+		/* tgid + tid must both be non-zero (KUnit runs in
+		 * a real task with a real tgid). On single-threaded
+		 * tasks they're equal; KUnit doesn't guarantee a
+		 * non-threaded context so we assert non-zero
+		 * individually, not equality.
+		 */
+		KUNIT_EXPECT_NE(test, (unsigned int)s->tgid, 0u);
+		KUNIT_EXPECT_NE(test, (unsigned int)s->tid,  0u);
 		/* seq is SMP v2 reserved, must be 0 in v1. */
 		KUNIT_EXPECT_EQ(test, (unsigned int)s->seq, 0u);
 		/* cpu_id is 0 under ncpus=1. */

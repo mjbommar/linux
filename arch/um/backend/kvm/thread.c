@@ -1468,7 +1468,16 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		case KVM_EXIT_IO:
 			if (run->io.port == UM_KVM_SYSCALL_PORT) {
 				kvm_decode_syscall(regs, &kregs, vcpu_fd);
-				break;
+				/*
+				 * Stay in the for-loop: the trampoline's
+				 * post-`out` sysretq still needs to run on
+				 * the next KVM_RUN. `continue` makes the
+				 * for-loop-vs-switch distinction explicit
+				 * (prior `break;` worked in practice here,
+				 * but audit A1 flagged the ambiguity —
+				 * continue is self-documenting).
+				 */
+				continue;
 			}
 			if (run->io.port == UM_KVM_SYSRETQ_PORT) {
 				/*
@@ -1572,21 +1581,31 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					pr_warn_ratelimited("um: kvm: PF handler KVM_SET_REGS failed; killing guest task\n");
 					fatal_sigsegv();
 				}
-				break;
+				/*
+				 * Stay in the for-loop: the handler's
+				 * `add $8, %rsp; iretq` still needs to
+				 * execute. Same as SYSCALL above.
+				 */
+				continue;
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
 			      run->io.port);
 
 		case KVM_EXIT_HLT:
 			/*
-			 * Guest HLT. Break out of the for-loop so
+			 * Guest HLT. Jump to out_read_regs so
 			 * interrupt_end() drains pending resched +
 			 * signals before the next kvm_run_userspace call
-			 * re-enters the guest. is_user was set above
-			 * from the observed CPL (audit A2); leave it.
-			 * HOST_IP points past the HLT.
+			 * re-enters the guest. A plain `break;` would
+			 * only exit the switch (not the for-loop) and
+			 * silently loop back into KVM_RUN, skipping
+			 * interrupt_end entirely — that was the A1
+			 * partial-fix defect flagged in the 2026-04-24
+			 * audit round. is_user was set from the observed
+			 * CPL above (A2); leave it. HOST_IP points past
+			 * the HLT.
 			 */
-			break;
+			goto out_read_regs;
 
 		case KVM_EXIT_INTR:
 			goto out_read_regs;
@@ -1618,10 +1637,31 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			 * handler hooked up.
 			 */
 			struct faultinfo *fi = UPT_FAULTINFO(regs);
+			bool is_user;
+
+			/*
+			 * Audit A2 follow-up: pick is_user for the
+			 * fault error code from the live CPL read at
+			 * the top of the loop when we have it
+			 * (sregs_valid), not from a stale `regs->
+			 * is_user` that a prior exit may have left
+			 * behind. A KVM_GET_SREGS failure (sregs_
+			 * valid = false, rare) falls back to the
+			 * pre-fault regs->is_user; harmless for
+			 * ring-3 userspace workloads because sregs
+			 * rarely fails, but the explicit branch
+			 * documents the intent and the fallback
+			 * matches every other backend's "always
+			 * user-mode" assumption on EPT faults.
+			 */
+			if (sregs_valid)
+				is_user = (exit_sregs.cs.selector & 3) != 0;
+			else
+				is_user = regs->is_user;
 
 			fi->trap_no    = 14;
 			fi->error_code = (run->mmio.is_write ? 2 : 0) |
-					 (regs->is_user ? 4 : 0);
+					 (is_user ? 4 : 0);
 			fi->cr2        = (unsigned long)run->mmio.phys_addr +
 					 uml_physmem;
 
@@ -1649,7 +1689,16 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			if (current->active_mm && current->active_mm->pgd)
 				(void)kvm_shadow_fill_from_uml_pgd(
 					current->active_mm->pgd);
-			break;
+			/*
+			 * MMIO is a clean ring-3 boundary: the SEGV
+			 * either got handled (page installed, guest
+			 * retries) or got signaled. Drop to
+			 * interrupt_end so resched + signals drain
+			 * before the outer loop re-enters. Same
+			 * for-loop-vs-switch trap as the HLT case;
+			 * goto, not break.
+			 */
+			goto out_read_regs;
 		}
 
 		case KVM_EXIT_SHUTDOWN:

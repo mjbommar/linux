@@ -136,8 +136,19 @@ enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);
 struct kvm_gadget_state {
 	u32 seq;			/* reserved for SMP v2; always 0 in v1 */
 	u32 cpu_id;			/* vCPU index; 0 under ncpus=1 */
-	u32 pid;			/* task_tgid_vnr(current) — the POSIX pid */
-	u32 tgid;			/* task_tgid_vnr(current) — same in v1 */
+	/*
+	 * Linux naming convention: "tgid" is what POSIX/libc
+	 * calls the process ID (returned by getpid(2)); "tid"
+	 * is the kernel's thread ID (returned by gettid(2)).
+	 * They match on single-threaded tasks; they diverge
+	 * on pthreads. Gadget handlers read from the field
+	 * matching the syscall they implement:
+	 *   - getpid  → tgid
+	 *   - gettid  → tid
+	 *   - getppid → ppid (parent's tgid)
+	 */
+	u32 tgid;			/* task_tgid_vnr(current) */
+	u32 tid;			/* task_pid_vnr(current) */
 	u32 ppid;			/* task_ppid_nr(current) */
 	u32 uid;
 	u32 euid;
@@ -149,8 +160,8 @@ struct kvm_gadget_state {
 /* Gadget asm will reference these as %gs:<offset>. */
 #define KVM_GADGET_OFF_SEQ	0x00
 #define KVM_GADGET_OFF_CPU_ID	0x04
-#define KVM_GADGET_OFF_PID	0x08
-#define KVM_GADGET_OFF_TGID	0x0c
+#define KVM_GADGET_OFF_TGID	0x08
+#define KVM_GADGET_OFF_TID	0x0c
 #define KVM_GADGET_OFF_PPID	0x10
 #define KVM_GADGET_OFF_UID	0x14
 #define KVM_GADGET_OFF_EUID	0x18
