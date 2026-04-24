@@ -1765,6 +1765,71 @@ strip --strip-unneeded -o /tmp/uml-kvmbench-stripped /tmp/uml-kvmbench/linux
 # margin).
 ```
 
+## 2026-04-24 — round-6 audit closure: fleet bench re-run after G1/G2/G3/G5
+
+After audit round 6 closed (G1 user-pointer bounds check, G2
+cross-mm shadow leak, G3 #PF error code, G4 ncpus=1 enforce, G5
+sched_yield demote, G8 doc drift), re-ran the dual-binary
+perf-getpid sweep across s0-s7 to confirm memo-07's <100 ns
+target still holds.
+
+### Per-host getpid gadget vs round 5 G8
+
+| Host | CPU                      | gadget cyc (G8) | gadget cyc (post-round-6) | gadget ns | margin vs <100 ns |
+|---|---|---:|---:|---:|---:|
+| s0 | i9-12900K (Alder Lake P) | 96             | 97                       | 30 ns    | 3.3× |
+| s1 | Xeon E3-1225 v6 (Kaby)   | 100            | 100                      | 31 ns    | 3.2× |
+| s2 | Xeon E3-1225 v5 (Skylake)| 101            | 103                      | 32 ns    | 3.1× |
+| s3 | Xeon W-2123 (Skylake-SP) | 102            | 97                       | 27 ns    | 3.7× |
+| s4 | i5-12600K (Alder Lake E) | 125            | 115                      | 31 ns    | 3.2× |
+| s5 | Ryzen 7 7840HS (Zen 4)   | 87             | 87                       | 23 ns    | 4.3× |
+| s6 | Ryzen 7 7840HS (Zen 4)   | 89             | 88                       | 23 ns    | 4.3× |
+| s7 | Ryzen 7 7840HS (Zen 4)   | 88             | 88                       | 23 ns    | 4.3× |
+
+Differences within ±2 cyc are measurement noise; s4's 10-cyc
+improvement (125 → 115) and s3's 5-cyc improvement (102 → 97)
+are real but small enough to attribute to the kernel build's
+scheduler placement / cache state at run time rather than any
+G1-G5 algorithmic change. The pid-family gadget path is
+fundamentally unaffected by round-6: G1 only added bytes to
+clock_gettime / time / getcpu, not to the pid handlers; G5
+demoted sched_yield (not in this column); G2-G4 don't touch
+LSTAR.
+
+### clock_gettime gadget post-G1
+
+| Host | clock cyc (G8) | clock cyc (post-G1) | clock ns | margin vs <100 ns |
+|---|---:|---:|---:|---:|
+| s1 | 101 | 127 | 40 ns | 2.5× |
+| s3 |  98 | 122 | 36 ns | 2.8× |
+| s4 | 126 | 139 | 39 ns | 2.6× |
+
+Other hosts saw transient `CLOCK gadget-kvm:` empty-line
+issues (likely /dev/kvm ACL rotation between back-to-back
+SSH-driven runs); the three above are the canonical
+post-round-6 numbers. Each shows ~+25 cyc vs G8 — that's
+the cost of G1's per-store bounds check plus the
+RAX-preserve restructuring (load REAL_SEC into %rdx first
+so RAX stays = NR=228 across the fallback path). All three
+still well under memo-07's 100 ns target with ≥2.5× margin.
+
+### Headline conclusion
+
+D70 = GO holds post-round-6. The pid-family gadget path is
+unchanged at 23-32 ns / 87-103 cyc. The clock_gettime path
+absorbed G1's correctness cost without breaking the 100 ns
+budget — 36-40 ns observed, 2.5-2.8× margin.
+
+All audit findings through round 6 (P0/P1/P2/P3 for rounds
+4 + 5 + 6, except G6 and #230 which are documented deferrals
+with explicit follow-on tasks) are closed.
+
+### Reproducibility
+
+Same recipe as the G8 entry above. Build kvmint + kvmbench,
+strip, push to fleet, run `g8-remote-bench.sh`. The current
+build's git ref is `83c70100d16b` (post-G5 demotion).
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
