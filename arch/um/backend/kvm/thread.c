@@ -174,9 +174,17 @@ static const char *kvm_exit_reason_str(u32 r)
 static DEFINE_SPINLOCK(kvm_bootstrap_lock);
 static void *kvm_bootstrap_page;	/* kernel VA of the bootstrap page */
 static u64   kvm_bootstrap_gpa;		/* __pa() of the page; 0 if unallocated */
+static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
+					 * the guest CR3 walk resolves to the
+					 * bootstrap page's gpa; used for
+					 * GDTR / LSTAR / RIP where the CPU
+					 * expects a linear, not physical,
+					 * address).
+					 */
 
 #define KVM_BOOTSTRAP_GDT_OFFSET	0x000
 #define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040
+#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x080
 
 /*
  * LSTAR trampoline: 5 bytes. Byte-identical to
@@ -192,6 +200,35 @@ static u64   kvm_bootstrap_gpa;		/* __pa() of the page; 0 if unallocated */
  */
 static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0xe6, 0xf4,		/* out %al, $0xf4 */
+	0x48, 0x0f, 0x07,	/* sysretq */
+};
+
+/*
+ * Ring-3 bootstrap trampoline (memo 08 sub-commit #5a): 3 bytes,
+ * just SYSRETQ. Placed at a dedicated offset so host-side
+ * kvm_enter_guest can point vCPU RIP here on first entry to
+ * transition the guest from CPL=0 (where kvm_setup_production_
+ * sregs leaves it after long-mode init) into CPL=3 at the
+ * caller's intended user RIP. Setup discipline:
+ *
+ *   - MSR_STAR[63:48] = 0x18 (bootstrap via #2a's kvm_enter_
+ *     guest_program_msrs): SYSRETQ loads CS=(0x18+16)|3=0x2b
+ *     (ring-3 code, GDT idx 5) and SS=(0x18+8)|3=0x23 (ring-3
+ *     data, GDT idx 4).
+ *   - RCX = user's intended RIP (KVM_SET_REGS).
+ *   - R11 = 0x3202 (RFLAGS with IF=1, bit-1 reserved-one,
+ *     IOPL=3); SYSRETQ loads RFLAGS from R11.
+ *   - RIP = bootstrap_va + KVM_BOOTSTRAP_SYSRET_OFFSET.
+ *
+ * The 3-byte sequence is byte-identical to the LSTAR
+ * trampoline's tail, but lives at a distinct offset so a fresh
+ * first entry doesn't accidentally trip the OUT-before-SYSRETQ.
+ * Session finding (commit 386c04a3219b diagnostic dump): this
+ * gadget is what moves the guest from running init in ring-0
+ * (the previously-observed CPL=0 triple-fault state) into
+ * correct ring-3 execution.
+ */
+static const u8 kvm_bootstrap_sysret_bytes[] = {
 	0x48, 0x0f, 0x07,	/* sysretq */
 };
 
@@ -242,7 +279,7 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 * Write the LSTAR trampoline bytes at the fixed offset
 	 * (memo 08 sub-commit #2). Byte-identical to the harness
 	 * wire form; the trampoline is live once MSR_LSTAR is
-	 * programmed to point at bootstrap_gpa +
+	 * programmed to point at bootstrap_va +
 	 * KVM_BOOTSTRAP_LSTAR_OFFSET.
 	 */
 	BUILD_BUG_ON(KVM_BOOTSTRAP_LSTAR_OFFSET +
@@ -250,13 +287,27 @@ static int kvm_enter_guest_init_bootstrap(void)
 	memcpy((char *)page + KVM_BOOTSTRAP_LSTAR_OFFSET,
 	       kvm_bootstrap_lstar_bytes, sizeof(kvm_bootstrap_lstar_bytes));
 
+	/*
+	 * Write the ring-3 bootstrap SYSRETQ gadget (sub-commit
+	 * #5a). kvm_enter_guest points first-entry RIP at this
+	 * location to transition the guest into CPL=3 at the
+	 * user's chosen RIP/RFLAGS.
+	 */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_SYSRET_OFFSET +
+		     sizeof(kvm_bootstrap_sysret_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_SYSRET_OFFSET,
+	       kvm_bootstrap_sysret_bytes, sizeof(kvm_bootstrap_sysret_bytes));
+
 	kvm_bootstrap_page = page;
 	kvm_bootstrap_gpa  = gpa;
+	kvm_bootstrap_va   = (u64)(unsigned long)page;
 	spin_unlock_irqrestore(&kvm_bootstrap_lock, flags);
 
-	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx lstar=+0x%x (%zu bytes)\n",
-		page, (unsigned long long)gpa, KVM_BOOTSTRAP_LSTAR_OFFSET,
-		sizeof(kvm_bootstrap_lstar_bytes));
+	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx lstar=+0x%x sysret=+0x%x (%zu + %zu bytes)\n",
+		page, (unsigned long long)gpa,
+		KVM_BOOTSTRAP_LSTAR_OFFSET, KVM_BOOTSTRAP_SYSRET_OFFSET,
+		sizeof(kvm_bootstrap_lstar_bytes),
+		sizeof(kvm_bootstrap_sysret_bytes));
 	return 0;
 }
 
@@ -527,35 +578,72 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 	}
 
-	kvm_setup_production_sregs(&sregs, cr3_gpa, kvm_bootstrap_gpa);
+	/*
+	 * sregs.gdt.base + LSTAR take LINEAR addresses (the CPU
+	 * walks the guest CR3 to resolve them), not physical.
+	 * Pass the bootstrap page's kernel VA; its walk through
+	 * current->active_mm->pgd resolves to bootstrap_gpa under
+	 * the Policy A identity memslot. Memo 08 sub-commit #5a
+	 * session finding: previously passing a gpa here worked
+	 * by accident under the harness's identity-paging setup
+	 * (KVM_HARNESS_GDT_OFFSET=0x3000 happens to be a valid
+	 * VA in the harness's own 2 MiB mapping); under the
+	 * production CR3 (current->active_mm->pgd), that
+	 * accidental identity doesn't hold.
+	 */
+	kvm_setup_production_sregs(&sregs, cr3_gpa, kvm_bootstrap_va);
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS, (unsigned long)&sregs);
 	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_SREGS(cr3=0x%llx gdt=0x%llx) failed (%d)\n",
+		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_SREGS(cr3=0x%llx gdt_va=0x%llx) failed (%d)\n",
 				    (unsigned long long)cr3_gpa,
-				    (unsigned long long)kvm_bootstrap_gpa, rc);
+				    (unsigned long long)kvm_bootstrap_va, rc);
 		return rc;
 	}
 
+	/*
+	 * Build vCPU regs from UML regs, then overlay the ring-3
+	 * bootstrap shape (sub-commit #5a):
+	 *
+	 *   RIP = bootstrap_va + SYSRET_OFFSET  — dedicated
+	 *                                          3-byte SYSRETQ
+	 *                                          gadget.
+	 *   RCX = user's intended RIP           — SYSRETQ loads RIP
+	 *                                          from RCX.
+	 *   R11 = 0x3202                        — SYSRETQ loads
+	 *                                          RFLAGS from R11.
+	 *                                          0x3202 = IF=1,
+	 *                                          bit-1 reserved,
+	 *                                          IOPL=3 so ring-3
+	 *                                          can OUT on
+	 *                                          debug ports.
+	 *
+	 * RAX / RSP / etc. pass through from UML regs — they're
+	 * the user process's GP state.
+	 */
 	kvm_uml_regs_to_kvm_regs(&kregs, regs);
+	kregs.rcx    = kregs.rip;			/* preserve user RIP */
+	kregs.r11    = 0x3202;				/* user RFLAGS */
+	kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_SYSRET_OFFSET;
+	kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
+
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS, (unsigned long)&kregs);
 	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_REGS(rip=0x%llx rsp=0x%llx) failed (%d)\n",
+		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_REGS(tramp_rip=0x%llx user_rip=0x%llx) failed (%d)\n",
 				    (unsigned long long)kregs.rip,
-				    (unsigned long long)kregs.rsp, rc);
+				    (unsigned long long)kregs.rcx, rc);
 		return rc;
 	}
 
 	/*
 	 * Arm the SYSCALL trap: MSR_LSTAR at the bootstrap page's
-	 * LSTAR trampoline, MSR_STAR with the ring-0 / ring-3
-	 * selectors. Safe to call every kvm_enter_guest — KVM
-	 * stores the MSRs on the vCPU, so a second SET_MSRS is
-	 * idempotent; follow-on sub-commits can make this smarter
-	 * (skip on unchanged bootstrap_gpa) when profiling shows
-	 * the SET_MSRS cost matters.
+	 * LSTAR trampoline (linear address, same rationale as
+	 * GDT). MSR_STAR carries the ring-0 / ring-3 selectors;
+	 * also used by the ring-3 bootstrap SYSRETQ above.
+	 * Idempotent on repeat entry — KVM stores the MSRs on
+	 * the vCPU.
 	 */
-	rc = kvm_enter_guest_program_msrs(kvm_bootstrap_gpa +
+	rc = kvm_enter_guest_program_msrs(kvm_bootstrap_va +
 					  KVM_BOOTSTRAP_LSTAR_OFFSET);
 	if (rc < 0)
 		return rc;
