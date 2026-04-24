@@ -6840,4 +6840,72 @@ canonical reference for the encoding mismatch.
 
 ---
 
+## D67 (2026-04-24) — KVM-backend syscall dispatch is 3 classes of ~20 entries, not per-syscall hand-engineering
+
+**Question.** The cr2=0x10 static loop that blocks `/bin/true`
+under the KVM backend (sub-commit #6 / task #192) is caused
+by `arch_prctl(ARCH_SET_FS)` not propagating FS_BASE into
+the vCPU. That raised the obvious follow-on: **how many
+*other* syscalls need per-syscall handling, and is this a
+350-entry treadmill or a small fixed-size table?**
+
+**Finding.** Small fixed table. Memo 10
+(`02-workstreams/D-kvm-backend/10-syscall-classification.md`)
+enumerates every x86_64 syscall into exactly five classes:
+
+- **Class A — passthrough.** 373 of 385. Default dispatch
+  (`sys_call_table[nr](args)`) is correct. Shadow-PT
+  invalidation + UML's existing `__user` accessors make
+  mm-mutating syscalls "just work" without per-syscall
+  logic.
+- **Class B — vCPU-state propagate.** 3 entries:
+  `arch_prctl` (MSR_FS_BASE/MSR_GS_BASE), `modify_ldt`
+  (LDTR), `set_thread_area` (32-bit TLS; dead on x86_64).
+- **Class C — signal-frame.** 1 entry: `rt_sigreturn`.
+- **Class D — deny.** 8 entries: `ptrace`, `reboot`,
+  `init_module` / `finit_module` / `delete_module`,
+  `kexec_load` / `kexec_file_load`, `bpf`. All either
+  semantically wrong for a bare-userspace guest or a
+  guest→host bypass vector.
+- **Class E — hypercall.** 0 entries. Our guest is bare
+  glibc, not Linux-as-guest.
+
+Total non-A entries: **12 out of 385** — exhaustive +
+enumerable. Grep recipe (from `arch/x86/kernel/*.c`
+source) regenerates the inventory deterministically.
+
+IDT / exception side is even smaller: `#PF` landed
+(memo 08 sub-commit #5b), `#UD` + `#GP` are ~50 LOC
+each, `#DB`/`#BP` are parking-lot post-v1. Exhaustive
+~5-vector decoder.
+
+**Implication for sequencing.** The unblock for task #192
+is *not* a 350-row dispatcher — it's a ~120 LOC
+`arch_prctl` + MSR propagation lift ("sub-commit #5c" in
+memo 08 terms). Memo 10 lays out the full six-step
+ladder (5c → class-D denylist → modify_ldt → sigreturn →
+exception decoders → coverage KUnit) totaling ~400 LOC
+of runtime + 200 LOC of tests. The inventory is the
+source-of-truth the static `class_map[NR_syscalls]`
+table will be generated from when the first code
+lands.
+
+**Artifacts.**
+
+- `02-workstreams/D-kvm-backend/10-syscall-classification.md`
+  — narrative memo with per-class rules + sub-commit
+  plan.
+- `02-workstreams/D-kvm-backend/syscall-inventory.tsv`
+  — generated per-NR table (385 rows; classes assigned).
+  Regenerate from `arch/x86/entry/syscalls/syscall_64.tbl`
+  via the awk recipe at the bottom of memo 10 when
+  upstream adds a syscall.
+
+**Cross-references.** Memo 08 §Cross-references now
+points to memo 10 as the sequencing parent for
+sub-commit #5c. Task #192 remains pending — unblock is
+`#5c` landing, not any entry in memo 10 directly.
+
+---
+
 ## (Future entries here, as decisions are made)

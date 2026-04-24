@@ -1,0 +1,297 @@
+# D-KVM memo 10 — syscall + IRQ classification for `run_userspace`
+
+**Status:** DESIGN + INVENTORY. Companion data file:
+`syscall-inventory.tsv` in this directory (generated from
+`arch/x86/entry/syscalls/syscall_64.tbl`; re-run the awk
+recipe at the bottom of this memo to refresh).
+
+**Precedes:** sub-commit #5c of memo 08 (`arch_prctl` +
+`MSR_FS_BASE`/`MSR_GS_BASE` round-trip) and the D-06
+getpid() perf bookend (task #192), both of which consume
+this classification.
+
+**Motivates:** the ongoing question — "do we need to
+special-case 350 syscalls + 32 IDT vectors, or is the real
+working set small?" Answer below.
+
+## Why this memo exists
+
+The KVM backend's `kvm_run_userspace` catches every
+`SYSCALL` from ring-3 via the LSTAR trampoline, decodes
+the syscall number + SysV-ABI args in the host, and
+dispatches. Current default dispatch is a single line:
+`sys_call_table[nr](args)`. That works for the vast
+majority of syscalls because UML's kernel logic is already
+the canonical implementation.
+
+Some syscalls mutate state that lives **in the vCPU, not
+in `task_struct`** — notably `arch_prctl(ARCH_SET_FS)`,
+which seccomp-backend UML handles by writing the host
+task's FSGSBASE MSR, but which under KVM has to be pushed
+into the vCPU via `KVM_SET_MSRS`. Without this propagation
+the guest's next FS-relative load traps at a static
+guest VA — the current `/bin/true` block in
+`kvm_run_userspace` (see sub-commit #6 / task #192).
+
+Enumerating those "needs CPU-state propagation" syscalls
+*systematically* — not ad hoc per boot failure — is the
+work this memo captures.
+
+## The five classes
+
+Each syscall goes in exactly one of five boxes:
+
+| Class | Post-dispatch delta | Count on x86_64 |
+|---|---|---|
+| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 373 of 385 |
+| **B — vCPU-state propagate** | dispatch, then push an MSR/SREG delta to the vCPU via `KVM_SET_MSRS` / `KVM_SET_SREGS` | 3 |
+| **C — signal-frame** | `KVM_GET_REGS` → rebuild frame in guest memory → `KVM_SET_REGS` | 1 |
+| **D — deny** | return `-ENOSYS` or deliver `SIGSYS` without dispatching | 8 |
+| **E — hypercall** | unused; our guest is bare glibc userspace, not Linux-as-guest | 0 |
+
+That's 12 non-A entries total — exhaustive. Every other
+syscall, including every syscall Linux will add next
+release, inherits A by default. No per-release maintenance
+treadmill on the KVM backend's dispatcher.
+
+## Class B — vCPU-state propagation (3 entries)
+
+The complete list. Source-of-truth grep:
+`SYSCALL_DEFINE.*(arch_prctl|modify_ldt|set_thread_area)`
+across `arch/x86/kernel/*.c`.
+
+| NR | Name | State touched | Propagation |
+|---|---|---|---|
+| 158 | `arch_prctl` | MSR_FS_BASE (option `ARCH_SET_FS` / `ARCH_GET_FS`), MSR_GS_BASE (`ARCH_SET_GS` / `ARCH_GET_GS`) | `KVM_SET_MSRS` after dispatch on the "set" path; for the "get" path, `KVM_GET_MSRS` + copy to `arg2` user-pointer |
+| 154 | `modify_ldt` | LDTR descriptor table | `KVM_SET_SREGS` refresh of `sregs.ldt.selector` + `sregs.ldt.base` + `sregs.ldt.limit` |
+| 205 | `set_thread_area` | 32-bit TLS segment | 32-bit compat only; unreachable from x86_64 glibc, so practically dead code — classify B for correctness, land last |
+
+`arch_prctl` alone covers ~90 % of real-world breakage —
+every glibc-linked binary calls `ARCH_SET_FS` from
+`_start` before `main()` runs. Landing just this one entry
+unblocks `/bin/true` and every static glibc binary.
+
+### MSR dance the B handler implements
+
+```
+  kvm_decode_syscall(vcpu, nr, args):
+      if nr == __NR_arch_prctl:
+          ret = sys_arch_prctl(args)     /* real dispatch */
+          switch (args[0]) {              /* args[0] = option */
+          case ARCH_SET_FS:
+              kvm->cached_msr.fs_base = args[1]
+              kvm->msr_dirty = true
+              break
+          case ARCH_SET_GS:
+              kvm->cached_msr.gs_base = args[1]
+              kvm->msr_dirty = true
+              break
+          }
+          return ret
+```
+
+Then at the next `KVM_RUN` entry:
+
+```
+  kvm_enter_guest():
+      if (kvm->msr_dirty) {
+          struct kvm_msrs msrs = { .nmsrs = 2, .entries = {
+              { .index = MSR_FS_BASE, .data = kvm->cached_msr.fs_base },
+              { .index = MSR_GS_BASE, .data = kvm->cached_msr.gs_base },
+          }}
+          ioctl(vcpu_fd, KVM_SET_MSRS, &msrs)
+          kvm->msr_dirty = false
+      }
+      ioctl(vcpu_fd, KVM_RUN, ...)
+```
+
+`kvm_setup_production_sregs` today clobbers FS/GS base to
+zero on every entry — that's the bug. The cached MSR
+state needs to be threaded through from the per-mm
+`struct kvm_um` so re-entries preserve whatever
+`arch_prctl` last set.
+
+## Class C — signal-frame (1 entry)
+
+| NR | Name | What the host has to do |
+|---|---|---|
+| 15 | `rt_sigreturn` | the guest is on a signal-delivery stack frame it built via `KVM_SET_REGS`; on return, `sys_rt_sigreturn` reads back the saved ucontext from guest memory and writes restored regs. Under KVM the restored regs have to land in the vCPU via `KVM_SET_REGS`, not just in `task_pt_regs(current)`. |
+
+Signal *delivery* into the guest (the outbound path) is
+not a class-C syscall — it's a host-initiated action from
+UML's own signal dispatch. But it uses the same
+frame-construction primitives. Budget the two paths
+together as one coherent body of work.
+
+## Class D — deny (8 entries)
+
+Not a security wall — UML's `sys_call_table` already
+enforces CAP_SYS_ADMIN and similar on the privileged
+ones, so most "denials" happen naturally as `-EPERM`
+without any special handling at the dispatcher layer. The
+short D list below captures the ones we additionally trap
+at dispatch time because their *successful* execution
+would be semantically wrong for a bare-userspace guest,
+regardless of capability state.
+
+| NR | Name | Why deny |
+|---|---|---|
+| 101 | `ptrace` | UML emulates ptrace at its own kernel layer; a guest-issued ptrace could target a sibling UML task in a way UML's ptrace model doesn't expect. Dispatcher-layer trap keeps the model honest. |
+| 169 | `reboot` | privileged in principle; in practice a successful reboot would attempt to reset the host vCPU, which UML's scheduler isn't structured to survive mid-flight |
+| 175 | `init_module` | module loading into UML's kernel from guest userspace is meaningless + a privilege-escalation vector |
+| 176 | `delete_module` | same |
+| 246 | `kexec_load` | meaningless: the "kernel" the guest would kexec into has no ring-0 path |
+| 313 | `finit_module` | same as `init_module` |
+| 320 | `kexec_file_load` | same as `kexec_load` |
+| 321 | `bpf` | BPF attach to host kernel structures via a guest syscall is the obvious bypass vector; UML's BPF JIT port (workstream C-06) runs at the UML-kernel layer, not the guest's |
+
+Denial shape: return `-ENOSYS` for the first pass so glibc
+fallbacks take over cleanly; a future tightening can
+surface SIGSYS via signal delivery (class C) for audit
+visibility.
+
+## Class A — everything else (373 entries)
+
+See `syscall-inventory.tsv` for the authoritative,
+per-NR list. The table starts at NR 0 (`read`) and runs
+through NR 471 (`rseq_slice_yield`) with holes for removed
+syscalls. Default dispatch:
+
+```
+  ret = sys_call_table[nr](args);
+```
+
+Pointer args in `RSI`/`RDX`/… point into **guest VA**,
+which under UML's identity-memory model *is* the kernel
+VA UML's `__user` accessors expect. The shadow-PT lazy
+fault-in (memo 09, step 3) guarantees those VAs are
+populated before the kernel touches them. No per-syscall
+extra wiring.
+
+Memory-map-mutating syscalls in class A (`mmap`,
+`munmap`, `mprotect`, `brk`, `mremap`, `execve`) trigger
+`mm_map` / `mm_unmap` ops which already call
+`kvm_shadow_invalidate_va_range` (landed in memo 08
+sub-commit #5b). So even this subset needs no
+syscall-specific handling at the dispatcher — the mm
+layer's existing hooks are the right place.
+
+## IDT / exception classification
+
+Much smaller table — 32 architectural exception vectors,
+but we only care about the ~5 that a userspace ring-3
+binary can actually trigger:
+
+| Vector | Name | Translate to | Status |
+|---|---|---|---|
+| 6 | `#UD` — invalid opcode | SIGILL via `handle_trap` | **pending** (~50 LOC) |
+| 13 | `#GP` — general protection | SIGSEGV (privileged-instruction faults) | **pending** (~50 LOC) |
+| 14 | `#PF` — page fault | UML fault path via `trap.c::segv()` | **LANDED** (memo 08 sub-commit #5b) |
+| 1 | `#DB` — debug trap | SIGTRAP; needed only for guest-side ptrace/kprobes | parking-lot (post-v1) |
+| 3 | `#BP` — breakpoint | SIGTRAP | parking-lot (post-v1) |
+
+All other vectors (`#DE`, `#NMI`, `#OF`, `#MF`, `#XM`,
+etc.) are either ring-0-only (never reached from guest
+ring-3) or architecturally impossible under KVM's EPT
+isolation.
+
+Exception decoder is a single switch in the
+`KVM_EXIT_EXCEPTION` arm of `kvm_run_userspace`, parallel
+to the `KVM_EXIT_IO` arm that dispatches syscalls.
+
+## Signals + IRQs
+
+Three distinct paths, all small:
+
+| Path | Direction | Status |
+|---|---|---|
+| **Host signal interrupts KVM_RUN** (SIGALRM / SIGIO / SIGCHLD arrive while blocked in `ioctl(KVM_RUN)`) | host → vCPU | **LANDED** (memo 08 sub-commit #5; surfaces as `KVM_EXIT_INTR`, UML's own signal handler runs, then re-enter KVM_RUN) |
+| **Guest-directed signal delivery** (UML wants to deliver a signal to guest userspace — e.g. SIGSEGV from a #PF the UML fault path couldn't resolve) | UML → guest | partial; uses `KVM_SET_REGS` + a manually-built `ucontext` on the guest stack. Frame construction shares code with class C `rt_sigreturn`. |
+| **Timer-interrupt injection** (UML timer subsystem wants to fire a tick into the guest) | UML → vCPU | uses `KVM_INTERRUPT` ioctl with vector 0x20+; already landed for a single vector in Phase III Lift #1e. More vectors are pluggable. |
+
+## How to maintain the inventory
+
+The TSV sidecar is **generated**, not hand-written. Any
+time a new x86_64 syscall appears in upstream's
+`syscall_64.tbl`, re-run:
+
+```bash
+awk '/^[0-9]+[[:space:]]+(common|64)[[:space:]]+/ {
+    nr = $1; name = $3
+    class = "A"
+    reason = "passthrough: sys_call_table[nr]"
+    if (name == "arch_prctl")       { class = "B"; reason = "MSR_FS_BASE / MSR_GS_BASE propagation to vCPU" }
+    else if (name == "modify_ldt")  { class = "B"; reason = "LDTR descriptor table; push via KVM_SET_SREGS" }
+    else if (name == "set_thread_area") { class = "B"; reason = "32-bit TLS segment (compat only)" }
+    else if (name == "rt_sigreturn"){ class = "C"; reason = "signal frame restore: KVM_GET_REGS -> rebuild -> KVM_SET_REGS" }
+    else if (name == "ptrace")      { class = "D"; reason = "trap: UML emulates ptrace at its own layer" }
+    else if (name == "kexec_load" || name == "kexec_file_load") { class = "D"; reason = "trap: meaningless for userspace guest" }
+    else if (name == "init_module" || name == "finit_module" || name == "delete_module") { class = "D"; reason = "trap: privileged + meaningless in guest userspace" }
+    else if (name == "reboot")      { class = "D"; reason = "trap: privileged + would reset the host vCPU" }
+    else if (name == "bpf")         { class = "D"; reason = "trap: BPF attach via guest syscall is a bypass vector" }
+    printf "%d\t%s\t%s\t%s\n", nr, name, class, reason
+}' arch/x86/entry/syscalls/syscall_64.tbl | sort -n
+```
+
+Any new syscall that doesn't match one of the overrides
+gets class A automatically. Promoting a new-arrival syscall
+to B/C/D is a deliberate one-line edit to the recipe.
+
+## Implementation sequencing
+
+The table above is the plan. Concrete sub-commit shape
+for the **code** that consumes the inventory:
+
+- **Step 1 (sub-commit #5c of memo 08).** Wire class B for
+  `arch_prctl(ARCH_SET_FS/GS)` only. Cache MSR state in
+  per-mm `struct kvm_um`. Refresh via `KVM_SET_MSRS`
+  before `KVM_RUN` when the dirty bit is set. Target:
+  `/bin/true` boots to clean exit, unblocking task #192.
+  ~80-120 LOC + KUnit round-trip test.
+
+- **Step 2.** Class D denylist of the 8 entries via a
+  static `class_map[NR_syscalls]` + dispatcher switch.
+  ~60 LOC + selftest.
+
+- **Step 3.** `modify_ldt` (class B) — small + low-risk
+  once the MSR infrastructure from step 1 exists, but
+  almost no real binary exercises it, so land behind a
+  KUnit-only coverage test.
+
+- **Step 4.** `rt_sigreturn` (class C) — only needed once
+  the first guest binary that raises a signal ships. v1
+  selftest surface (static glibc binaries) usually doesn't
+  need it; the class B/D work buys us most of the
+  coverage.
+
+- **Step 5.** `#UD` + `#GP` exception decoders.
+
+- **Step 6.** Static coverage KUnit: walk the
+  `sys_call_table` symbol, assert every populated slot
+  has a corresponding inventory row, error at build time
+  on a new upstream syscall with no classification.
+
+Budget: ~400 LOC of runtime + ~200 LOC of tests across
+all six steps, most of which is the static table itself.
+
+## Cross-references
+
+- `08-real-run-userspace.md` — the memo this one feeds;
+  `/bin/true` block at cr2=0x10 is the concrete failure
+  mode (sub-commit #6 blocker per task #192).
+- `09-shadow-pt.md` — memory-side companion; mm-state
+  propagation is solved there so this memo doesn't have
+  to worry about it.
+- `04-ring-transition.md` — where LSTAR trampoline +
+  SYSCALL decoding live; this memo is one layer up.
+- `05-nested-virt-fallback.md` — D-05 fallback; a nested
+  host that can't run KVM falls back to seccomp, where
+  class B is already implicit in the host MSRs.
+- `syscall-inventory.tsv` — the generated truth table.
+- `arch/x86/entry/syscalls/syscall_64.tbl` — upstream
+  source the inventory derives from.
+- `arch/um/kernel/skas/stub_exe.c` — seccomp backend's
+  stub-page filter (not the host-side dispatch, but a
+  useful cross-reference for "what absolutely must work"
+  at minimum: futex, recvmsg, close, mmap, munmap,
+  arch_prctl, rt_sigreturn).

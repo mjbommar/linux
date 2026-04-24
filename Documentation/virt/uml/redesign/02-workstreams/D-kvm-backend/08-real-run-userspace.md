@@ -550,6 +550,12 @@ Every sub-commit runs:
 - `06-conformance.md` — D-06 bookend; this lift unblocks it.
 - `07-systrap-gadget-feasibility.md` — post-v1 optimization
   via D61's GO decision.
+- `10-syscall-classification.md` — the dispatcher-side
+  classification this memo consumes. Sub-commit #5c
+  (`arch_prctl` MSR round-trip) is the concrete next step
+  that unblocks sub-commit #6 / D-06 / task #192.
+- `syscall-inventory.tsv` — generated per-NR truth table
+  naming the class of every x86_64 syscall.
 - `tools/testing/selftests/um/` — existing selftest harness
   model for new kvm-*-smoke tests.
 - decisions-log entries D49-D57 + D60-D61 — D-workstream
