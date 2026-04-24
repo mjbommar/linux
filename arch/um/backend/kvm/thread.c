@@ -178,15 +178,35 @@ static int kvm_touch_all_user_vmas(struct mm_struct *mm)
 	vma_iter_init(&vmi, mm, 0);
 	mmap_read_lock(mm);
 	for_each_vma(vmi, vma) {
-		bool writable = vma->vm_flags & VM_WRITE;
 		unsigned long addr;
 
+		/*
+		 * Audit round-5 F9: prior versions also did a one-
+		 * byte `copy_to_user` after the read to pre-trigger
+		 * CoW on writable pages. That had three unacceptable
+		 * side effects:
+		 *   1. dirtied every writable page (PTE.D set) on
+		 *      every kvm_enter_guest, causing avoidable
+		 *      writeback to file-backed MAP_SHARED mappings.
+		 *   2. forced CoW upfront on private mappings that
+		 *      the guest might never write, losing the
+		 *      fork-inherited-but-never-modified-parent-data
+		 *      memory-sharing optimization.
+		 *   3. could trip unexpected file-system side
+		 *      effects on mmap'd device / hugetlb / special
+		 *      mappings.
+		 *
+		 * The read probe alone is enough to force the page
+		 * fault that installs a PTE in UML's logical pgd; the
+		 * subsequent kvm_shadow_fill_from_uml_pgd picks it up
+		 * with the correct RW bit. CoW on writable pages is
+		 * then deferred to the actual guest write via the
+		 * shadow-PT #PF path (memo 08 sub-commit #5b) —
+		 * which is the semantically correct moment for CoW.
+		 */
 		for (addr = vma->vm_start; addr < vma->vm_end;
 		     addr += PAGE_SIZE) {
 			if (copy_from_user(&probe, (void __user *)addr, 1))
-				continue;
-			if (writable &&
-			    copy_to_user((void __user *)addr, &probe, 1))
 				continue;
 			touched++;
 		}

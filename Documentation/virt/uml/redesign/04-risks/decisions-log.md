@@ -8518,4 +8518,88 @@ Total non-A: 23 (unchanged from post-G6-followon).
 
 ---
 
+## D85 (2026-04-24) — F9: drop write-back in kvm_touch_all_user_vmas
+
+**Decision.** Remove the `copy_to_user` write-back in
+kvm_touch_all_user_vmas(). Keep the `copy_from_user`
+read probe — it alone is sufficient to force a page
+fault that installs a PTE in UML's logical pgd before
+kvm_shadow_fill_from_uml_pgd runs.
+
+**Finding.** Audit round-5 P2 #6 (F9) — "kvm_touch_
+all_user_vmas() is not semantically neutral. It reads
+every mapped page and writes back one byte to every
+writable VMA on entry and after syscalls, causing
+avoidable COW, dirtying, and possible side effects on
+shared/file mappings."
+
+Three concrete side effects of the write-back:
+
+1. **PTE.D dirtied on every writable page.** That
+   forces writeback to file-backed `MAP_SHARED`
+   mappings even when the guest never wrote anything
+   to them. File timestamps update. If the
+   underlying fs is journaling, extra journal
+   traffic.
+2. **CoW forced upfront.** Private mappings that
+   inherit CoW pages from a parent get their CoW
+   triggered by OUR write, not the guest's. Loses
+   the memory-sharing optimization for any
+   fork-inherited-but-never-modified data.
+3. **Unexpected side effects on special mappings.**
+   Device mmaps, hugetlb, DAX, and similar can
+   react non-trivially to a one-byte write the
+   guest never actually issued.
+
+**Why keep the read probe.** The only reason
+kvm_touch_all_user_vmas exists is to force UML's
+logical pgd to populate entries before the shadow-PT
+fill iterates over them. A read is enough — it
+triggers the same page fault path as a write for
+absent pages, and the fault handler installs the
+PTE. The subsequent `kvm_shadow_fill_from_uml_pgd`
+then copies that PTE (with whatever UML-native RW
+bits it has) into the shadow PT.
+
+**Why not drop the function entirely.** It's
+defensive-in-depth against the "UML logical pgd has
+entries but shadow PT doesn't" case. The shadow-PT
+#PF handler (memo 08 sub-commit #5b) covers lazy
+fault-in on guest access, but an eager pre-fill
+reduces the first-access latency for the initial
+workload. We could drop the whole function as a
+follow-on once we can prove the lazy path carries
+the first-boot latency without regressions. For now
+keeping the read probe is low-risk.
+
+**CoW semantics post-fix.** A writable-but-still-
+CoW'd page now stays CoW'd until the guest actually
+writes it. When the guest writes, the CPU triggers
+#PF (the shadow PT has the page with RW=0 because
+that's what UML's PTE says), our #PF handler does
+copy_from_user (triggering UML's page fault handler
+which performs the CoW), kvm_shadow_fill_from_uml_
+pgd refreshes with the new writable PTE, guest
+retries and succeeds. Correct by construction.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass.
+- perf-getpid: kvm cyc=97 (indistinguishable from
+  pre-F9 96-102 range — the write-back was cheap to
+  begin with, so removing it doesn't measurably
+  improve perf but DOES fix the semantic
+  correctness bug).
+- No regressions observed in clock, time, getcpu
+  smokes.
+
+**Refs.**
+
+- Audit round-5 finding #6 (F9).
+- arch/um/backend/kvm/thread.c — kvm_touch_all_
+  user_vmas loses the write.
+- task #228 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)
