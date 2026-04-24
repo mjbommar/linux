@@ -221,6 +221,45 @@ grep '"event":"stop"' "$HIST" | grep -q "\"run_id\":\"$RUN_ID\"" \
 # Bundle should have been cleaned up by `rm` (no --keep-logs).
 [ ! -d "$BUNDLE_DIR" ] || fail "bundle dir lingered after rm: $BUNDLE_DIR"
 
+# --- Part G: observability-spine events.jsonl + schema verb ---
+#
+# Spin up a second instance just to populate events.jsonl so
+# we can assert on the structured-event pipeline (O1.3). The
+# bundle we torched in Part E took its events.jsonl with it.
+N2="smoke-events"
+"$UMLCTL_BIN" $ARGS create "$N2" --kernel "$TMP/linux" --profile research \
+	>/dev/null || fail "events create failed"
+"$UMLCTL_BIN" $ARGS start "$N2" --ready-timeout 10 >/dev/null \
+	|| fail "events start failed"
+N2_RUN_ID=$(cat "$RUNTIME_DIR/$N2.run_id")
+"$UMLCTL_BIN" $ARGS stop "$N2" >/dev/null || fail "events stop failed"
+
+EV="$STATE_DIR/runs/$N2_RUN_ID/events.jsonl"
+[ -f "$EV" ] || fail "events.jsonl not written: $EV"
+
+# Both start + stop uml.lifecycle.v1 records present.
+grep -q '"schema":"uml.lifecycle.v1"' "$EV" \
+	|| fail "events.jsonl missing uml.lifecycle.v1 schema"
+grep -q '"event.action":"start"' "$EV" \
+	|| fail "events.jsonl missing start action"
+grep -q '"event.action":"stop"' "$EV" \
+	|| fail "events.jsonl missing stop action"
+grep -q "\"run_id\":\"$N2_RUN_ID\"" "$EV" \
+	|| fail "events.jsonl missing run_id"
+grep -q '"host_ts_ns":' "$EV" \
+	|| fail "events.jsonl missing host_ts_ns (boot-offset clock)"
+
+# umlctl schema lists declared schemas.
+SCHEMA_OUT=$("$UMLCTL_BIN" schema)
+echo "$SCHEMA_OUT" | grep -q uml.lifecycle.v1 \
+	|| fail "schema verb missing uml.lifecycle.v1"
+echo "$SCHEMA_OUT" | grep -q uml.panic.v1 \
+	|| fail "schema verb missing uml.panic.v1"
+echo "$SCHEMA_OUT" | grep -q uml.oom.v1 \
+	|| fail "schema verb missing uml.oom.v1"
+
+"$UMLCTL_BIN" $ARGS rm "$N2" >/dev/null
+
 # --- Part F: no orphans ---
 LEAK=$(pgrep -f "$TMP/linux" || true)
 [ -z "$LEAK" ] || fail "orphan processes left: $LEAK"

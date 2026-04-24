@@ -21,11 +21,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod events;
 mod history;
 mod manifest;
 mod paths;
 mod registry;
 mod run;
+mod schema;
 mod supervise;
 
 /// Top-level `umlctl` invocation.
@@ -78,6 +80,8 @@ enum Cmd {
     Ps(PsArgs),
     /// Tail the per-instance log.
     Logs(LogsArgs),
+    /// List declared observability-spine event schemas.
+    Schema(SchemaArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -216,6 +220,9 @@ struct LogsArgs {
     tail: usize,
 }
 
+#[derive(clap::Args, Debug)]
+struct SchemaArgs {}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("umlctl: {e:#}");
@@ -238,6 +245,16 @@ fn run() -> Result<()> {
         Cmd::Rm(args) => cmd_rm(&paths, args, cli.quiet),
         Cmd::Ps(args) => cmd_ps(&paths, args, cli.json, cli.quiet),
         Cmd::Logs(args) => cmd_logs(&paths, args),
+        Cmd::Schema(_) => cmd_schema(cli.json),
+    }
+}
+
+fn cmd_schema(json: bool) -> Result<()> {
+    if json {
+        schema::print_json()
+    } else {
+        schema::print_human();
+        Ok(())
     }
 }
 
@@ -303,6 +320,15 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
                     run_id: &outcome.run_id,
                 },
             )?;
+            events::emit_lifecycle(
+                paths,
+                &outcome.run_id,
+                &args.name,
+                "start",
+                Some(outcome.pid),
+                None,
+                None,
+            )?;
             Ok(())
         }
         Err(supervise::StartError::AlreadyRunning { pid }) => {
@@ -348,6 +374,15 @@ fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool) -> Result<()> {
                     exit_status: info.exit_status,
                     signal_sent: &info.signal_sent,
                 },
+            )?;
+            events::emit_lifecycle(
+                paths,
+                &info.run_id,
+                &args.name,
+                "stop",
+                Some(info.pid),
+                Some(&info.signal_sent),
+                info.exit_status,
             )?;
             Ok(())
         }

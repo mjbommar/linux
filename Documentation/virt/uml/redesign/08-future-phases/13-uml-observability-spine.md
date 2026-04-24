@@ -1,11 +1,12 @@
 # uml-observability-spine — the unifying telemetry architecture for UML tooling
 
 **Status:** PROPOSED — future phase. Parking lot (2026-04-23).
-Phase O1.1 (run_id + bundle dir + boot-offset clock) landed
-2026-04-23 as the umlctl follow-on; later O1 sub-lifts +
-O2-O6 remain parking-lot. Not in the A/B/C/D plan. This
-memo is an **architectural spine**, not a shippable tool —
-it specifies the shared schema + transport + bundle format
+Phase O1.1 (run_id + bundle dir + boot-offset clock) and
+O1.3 (schema registry + events.jsonl) landed 2026-04-23
+as the umlctl follow-on; remaining O1 sub-lifts + O2-O6
+remain parking-lot. Not in the A/B/C/D plan. This memo is
+an **architectural spine**, not a shippable tool — it
+specifies the shared schema + transport + bundle format
 that the seven already-proposed observability tools in this
 directory depend on but do not individually own.
 
@@ -418,11 +419,15 @@ status trails each line (**[LANDED]** / **[pending]**).
   `run.json` on stop. **[LANDED 2026-04-23]**
 - O1.2 — Split kernel console from init stdout in umlctl
   supervise.rs. `umlctl dmesg` verb. **[pending]**
-- O1.3 — Schema registry + event-emission library in
-  `tools/uml/uml-observe/`. Initial schemas:
-  `uml.lifecycle.v1`, `uml.panic.v1`, `uml.oom.v1`.
-  umlctl emits its own lifecycle into `events.jsonl`.
-  **[pending]**
+- O1.3 — Schema registry + event-emission library.
+  Initial schemas: `uml.lifecycle.v1` (emitted),
+  `uml.panic.v1` + `uml.oom.v1` (declared, producers land
+  with O1.2's dmesg parser). umlctl emits its own
+  lifecycle into `events.jsonl`. Lives inline in
+  `tools/uml/uml-launcher/src/bin/umlctl/{events,schema}.rs`
+  for now; extraction to a standalone
+  `tools/uml/uml-observe/` crate waits for a second
+  consumer. **[LANDED 2026-04-23]**
 - O1.4 — `umlctl export --bundle` → `.umlbundle.tar.zst`.
   **[pending]**
 - O1.5 — `umlctl events <name> --filter ...` verb.
