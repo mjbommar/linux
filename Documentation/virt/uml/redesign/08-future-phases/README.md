@@ -119,6 +119,21 @@ parking-lot designs for future prioritization.
   boot. Lowest-cost, highest-leverage of the nine
   (~1-2 days).
 
+### Observability architecture (2026-04-23)
+
+- [13-uml-observability-spine.md](13-uml-observability-spine.md) —
+  the unifying telemetry architecture the seven tools in
+  the 2026-04-22 batch implicitly depend on but none
+  individually own. Declares `run_id` + boot-offset-ns
+  clock, schema registry (`uml.*.v1` ECS-shaped events),
+  bundle directory format (`.umlbundle`), vhost-user-trace
+  transport + hostfs-socket fallback, OTLP/OpenMetrics
+  emission. Without the spine, every consumer memo
+  reinvents half of it and they never correlate; with it,
+  memos 04/05/06/09/10/11/12 become verbs on a common
+  substrate. Multi-quarter; phases O1-O6. Not a
+  commitment.
+
 Dependency graph for this batch (→ = "needs"):
 
 ```
@@ -142,3 +157,11 @@ Dependency graph for this batch (→ = "needs"):
 Natural sequencing, if and when the parking lot opens:
 12 first (cheapest, no deps), then 05, then everything that
 depends on 05. 06 and 10 are the longest-tail items.
+
+Memo 13 (observability spine) sits orthogonal to the above
+graph: its Phase O1 (format freeze + cheap wins) slots in
+alongside 05, and its later phases unblock the correlated-
+query stories that 04/09/10/11 all want but none
+individually deliver. If 13's O1 lands before 04/06/09/10/
+11, those memos pick up a run_id + schema registry for
+free instead of rolling their own.
