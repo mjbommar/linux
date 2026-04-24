@@ -8877,4 +8877,83 @@ new build hooks.
 
 ---
 
+## D89 (2026-04-24) — F6-followon (#231) closed by source-review: KVM_SET_SREGS already flushes on same-CR3
+
+**Decision.** Close task #231 (explicit TLB flush via CR3-
+toggle on `shadow_dirty`) as "verified unnecessary against
+current upstream KVM." No code change needed.
+
+**The concern that motivated #231.** D82 (F6 close)
+worried that KVM may "optimize out the flush when CR3 is
+unchanged." A CR3-toggle trick (set CR3 to a scratch
+value, then back to the real shadow_pgd_gpa) was filed
+as a follow-on in case observed stale-TLB regressions
+ever surfaced.
+
+**Source review of `kvm_set_cr3` in arch/x86/kvm/x86.c:**
+
+```c
+int kvm_set_cr3(struct kvm_vcpu *vcpu, unsigned long cr3)
+{
+    bool skip_tlb_flush = false;
+    ...
+    if (kvm_is_cr4_bit_set(vcpu, X86_CR4_PCIDE)) {
+        skip_tlb_flush = cr3 & X86_CR3_PCID_NOFLUSH;
+        ...
+    }
+
+    /* PDPTRs are always reloaded for PAE paging. */
+    if (cr3 == kvm_read_cr3(vcpu) && !is_pae_paging(vcpu))
+        goto handle_tlb_flush;
+    ...
+handle_tlb_flush:
+    ...
+    if (!skip_tlb_flush)
+        kvm_invalidate_pcid(vcpu, pcid);
+    return 0;
+}
+```
+
+The same-CR3 short-circuit (`goto handle_tlb_flush`) does
+NOT skip the flush. It skips the *PGD-walk* part (which
+matters for PAE paging only), but unconditionally falls
+into `kvm_invalidate_pcid()` afterwards. `skip_tlb_flush`
+is only set when `X86_CR3_PCID_NOFLUSH` (bit 63) is in
+the supplied cr3 value — which our `kvm_setup_production_
+sregs` never sets.
+
+So our existing per-entry `KVM_SET_SREGS` with cr3 =
+shadow_pgd_gpa DOES flush the guest TLB every time,
+regardless of CR3 change. F6's shadow-PT clear plus the
+per-entry SREGS reload gives the correct stale-TLB
+defence.
+
+**What about KVM versions where this changes.** None
+observed in the linux-kvm history that would skip the
+flush on same-CR3. If a future KVM optimizes it away,
+the symptom would be observable as a stale-TLB
+regression in mm-heavy workloads (e.g. fork-burst,
+mprotect-heavy benchmarks). At that point the CR3-
+toggle implementation can land as a 5-line fix —
+allocate a flush-pgd page on first dirty, KVM_SET_SREGS
+twice (toggle then restore) on entry. Filed as a
+contingent follow-on in this entry's "if needed" tail
+rather than tracker #231.
+
+**No measurable regression on dev host.** All session
+gates (KUnit 35/35, perf-getpid PASS, clock-loop real
+vvar, time/getcpu smoke, df-preserve all-backends PASS,
+G7 dual-binary gate PASS) hold under the F6-only
+implementation. No stale-TLB symptoms.
+
+**Refs.**
+
+- D82 (F6 close) — the parent decision that filed
+  #231 as belt-and-suspenders.
+- arch/x86/kvm/x86.c::kvm_set_cr3 — the source code
+  this verification consulted.
+- task #231 — closed by this entry.
+
+---
+
 ## (Future entries here, as decisions are made)
