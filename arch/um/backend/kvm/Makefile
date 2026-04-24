@@ -12,6 +12,7 @@ obj-y += kvm_backend.o
 obj-y += lifecycle.o
 obj-y += mm.o
 obj-y += sregs.o
+obj-y += syscall_class.o
 obj-y += thread.o
 obj-y += time.o
 obj-y += stubs.o

@@ -34,6 +34,20 @@ u64 kvm_shadow_pgd_gpa(void);
 int kvm_shadow_pgd_alloc(void);
 void kvm_shadow_pgd_free(void);
 
+/*
+ * Memo 10 syscall classification. Mirror of the enum in
+ * arch/um/backend/kvm/kvm_backend.h; duplicated here for the
+ * same reason as the kvm_enter_guest_probe prototype above
+ * (private header not on the contract TU's include path).
+ */
+enum kvm_syscall_class {
+	_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH = 0,
+	_TEST_KVM_SYSCALL_CLASS_VCPU_STATE,
+	_TEST_KVM_SYSCALL_CLASS_SIGFRAME,
+	_TEST_KVM_SYSCALL_CLASS_TRAP,
+};
+enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);
+
 #define _TEST_UM_KVM_SYSCALL_PORT	0xf4
 #define _TEST_UM_KVM_SYSRETQ_PORT	0xf5
 

@@ -73,6 +73,27 @@ int kvm_backend_vcpu0_fd(void);
 struct kvm_um *kvm_backend_ctx(void);
 
 /*
+ * Memo 10 syscall classification. Static truth table lives in
+ * arch/um/backend/kvm/syscall_class.c; consumed by
+ * kvm_decode_syscall to short-circuit class-D denies and (in
+ * future sub-commits) dispatch class-C sigreturn without
+ * passing through handle_syscall. Pure function of the syscall
+ * number; safe to call from any context.
+ *
+ * enum value 0 = CLASS_PASSTHROUGH so uninitialised slots in
+ * the static table default to the identity dispatcher, which
+ * is what we want for the ~370 passthrough syscalls.
+ */
+enum kvm_syscall_class {
+	KVM_SYSCALL_CLASS_PASSTHROUGH = 0,
+	KVM_SYSCALL_CLASS_VCPU_STATE,
+	KVM_SYSCALL_CLASS_SIGFRAME,
+	KVM_SYSCALL_CLASS_TRAP,
+};
+
+enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);
+
+/*
  * Lazy memslot registration (D-04a). Call once before entering
  * KVM_RUN; subsequent calls are idempotent no-ops. Returns 0 on
  * success, -errno on failure (caller decides to continue or

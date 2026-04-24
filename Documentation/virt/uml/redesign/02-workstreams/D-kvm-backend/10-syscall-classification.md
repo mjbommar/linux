@@ -145,10 +145,13 @@ regardless of capability state.
 | 320 | `kexec_file_load` | same as `kexec_load` |
 | 321 | `bpf` | BPF attach to host kernel structures via a guest syscall is the obvious bypass vector; UML's BPF JIT port (workstream C-06) runs at the UML-kernel layer, not the guest's |
 
-Denial shape: return `-ENOSYS` for the first pass so glibc
-fallbacks take over cleanly; a future tightening can
-surface SIGSYS via signal delivery (class C) for audit
-visibility.
+Denial shape: return `-EPERM`. That's the accepted "we
+saw the syscall and refuse it at this layer" convention
+in the kernel — `capable()` / `ns_capable()` failures
+return EPERM, and checkpatch specifically warns against
+using `-ENOSYS` for anything other than "unknown
+syscall NR." Future tightening can surface SIGSYS via
+signal delivery (class C) for audit visibility.
 
 ## Class A — everything else (373 entries)
 
@@ -247,11 +250,17 @@ for the **code** that consumes the inventory:
   per-mm `struct kvm_um`. Refresh via `KVM_SET_MSRS`
   before `KVM_RUN` when the dirty bit is set. Target:
   `/bin/true` boots to clean exit, unblocking task #192.
-  ~80-120 LOC + KUnit round-trip test.
+  **LANDED 2026-04-24** (commit `6d3c027a7741`). ~70 LOC
+  runtime + KUnit assertions in
+  `kvm_production_sregs_shape_test`.
 
 - **Step 2.** Class D denylist of the 8 entries via a
   static `class_map[NR_syscalls]` + dispatcher switch.
-  ~60 LOC + selftest.
+  **LANDED 2026-04-24**. New TU
+  `arch/um/backend/kvm/syscall_class.c` carries the
+  table; `kvm_decode_syscall` short-circuits
+  `CLASS_TRAP` with `-ENOSYS` before `handle_syscall`.
+  Bundled with step 6 (see below).
 
 - **Step 3.** `modify_ldt` (class B) — small + low-risk
   once the MSR infrastructure from step 1 exists, but
@@ -266,10 +275,18 @@ for the **code** that consumes the inventory:
 
 - **Step 5.** `#UD` + `#GP` exception decoders.
 
-- **Step 6.** Static coverage KUnit: walk the
-  `sys_call_table` symbol, assert every populated slot
-  has a corresponding inventory row, error at build time
-  on a new upstream syscall with no classification.
+- **Step 6.** Static coverage KUnit: walk the classifier
+  + assert the inventory invariants (12 non-A entries on
+  the x86_64 NR range, specific NRs map to the expected
+  class, out-of-range defaults to PASSTHROUGH). **LANDED
+  2026-04-24** as `kvm_syscall_classification_test` +
+  `kvm_syscall_class_count_test` in
+  `arch/um/backend/contract/test_ops.c`. 30/30 KUnit
+  green on the integrated build. A future tightening
+  that walks `sys_call_table` directly instead of the
+  static NR range would catch "new upstream syscall
+  added, inventory row missing"; deferred until the
+  first upstream syscall after 7.0 lands.
 
 Budget: ~400 LOC of runtime + ~200 LOC of tests across
 all six steps, most of which is the static table itself.

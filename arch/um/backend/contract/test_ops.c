@@ -29,6 +29,7 @@
 #include <linux/cpu.h>
 #include <linux/string.h>
 #include <asm/backend.h>
+#include <asm/unistd.h>		/* __NR_* for memo 10 class tests */
 
 #include "test_kvm_hooks.h"
 
@@ -684,6 +685,107 @@ static void kvm_shadow_pgd_alloc_test(struct kunit *test)
 				(unsigned long long)gpa_before);
 }
 
+/*
+ * Memo 10 class-map cross-check. The static table in
+ * arch/um/backend/kvm/syscall_class.c must classify exactly
+ * the 12 non-A entries from the inventory; every other NR
+ * defaults to PASSTHROUGH. Drift between the C table and the
+ * generated TSV surfaces here rather than in a boot failure.
+ */
+static void kvm_syscall_classification_test(struct kunit *test)
+{
+	/* Class B — vCPU-state propagate (memo 10 §B). */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_arch_prctl),
+			_TEST_KVM_SYSCALL_CLASS_VCPU_STATE);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_modify_ldt),
+			_TEST_KVM_SYSCALL_CLASS_VCPU_STATE);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_set_thread_area),
+			_TEST_KVM_SYSCALL_CLASS_VCPU_STATE);
+
+	/* Class C — signal-frame (memo 10 §C). */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_rt_sigreturn),
+			_TEST_KVM_SYSCALL_CLASS_SIGFRAME);
+
+	/* Class D — deny (memo 10 §D). */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_ptrace),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_reboot),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_init_module),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_finit_module),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_delete_module),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_kexec_load),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_kexec_file_load),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_bpf),
+			_TEST_KVM_SYSCALL_CLASS_TRAP);
+
+	/* Class A — passthrough. Spot-check the hot-path defaults. */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_read),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_write),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_mmap),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_brk),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_futex),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+
+	/* Out-of-range / sentinel → PASSTHROUGH so UML's own
+	 * sys_ni_syscall surfaces ENOSYS from the normal path.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(NR_syscalls),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(NR_syscalls + 100),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall((unsigned long)-1),
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
+}
+
+/*
+ * Inventory-size invariant. Memo 10 records "12 of 385 non-A"
+ * as the working set. Walk every NR and count non-passthrough
+ * classifications to catch drift (forgotten addition OR
+ * accidental promotion of a passthrough entry).
+ */
+static void kvm_syscall_class_count_test(struct kunit *test)
+{
+	unsigned long nr;
+	unsigned int non_a = 0;
+
+	for (nr = 0; nr < NR_syscalls; nr++) {
+		if (kvm_classify_syscall(nr) !=
+		    _TEST_KVM_SYSCALL_CLASS_PASSTHROUGH)
+			non_a++;
+	}
+	KUNIT_EXPECT_EQ(test, non_a, 12U);
+}
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 /* ---------------------------------------------------------------- */
@@ -730,6 +832,9 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_exit_probe_null_test),
 	/* KVM shadow PGD lifecycle (memo 09 step 1) */
 	KUNIT_CASE(kvm_shadow_pgd_alloc_test),
+	/* Memo 10 syscall classification (step 2 + step 6) */
+	KUNIT_CASE(kvm_syscall_classification_test),
+	KUNIT_CASE(kvm_syscall_class_count_test),
 #endif
 	{}
 };

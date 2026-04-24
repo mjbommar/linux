@@ -1085,6 +1085,27 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	regs->gp[HOST_IP] = kregs->rip;
 
 	/*
+	 * Memo 10 class-D short-circuit: syscalls that would be
+	 * semantically wrong for a bare-userspace guest (ptrace,
+	 * reboot, kexec_load / kexec_file_load, init/finit/
+	 * delete_module, bpf) are trapped at the dispatcher
+	 * before reaching handle_syscall. Returning -EPERM is the
+	 * accurate "we saw the syscall, and we refuse it at this
+	 * layer" answer — unlike -ENOSYS (which specifically
+	 * means "no such syscall NR in this kernel"), -EPERM is
+	 * the established convention for permission-style denials
+	 * (see capable() / ns_capable() failure paths throughout
+	 * the kernel). Future tightening can promote this to
+	 * SIGSYS via signal delivery for audit visibility.
+	 */
+	if (kvm_classify_syscall(syscall_nr) == KVM_SYSCALL_CLASS_TRAP) {
+		pr_info_ratelimited("um: kvm: trapping class-D syscall nr=%lu (memo 10)\n",
+				    syscall_nr);
+		regs->gp[HOST_AX] = -EPERM;
+		goto skip_dispatch;
+	}
+
+	/*
 	 * Common syscall dispatch path. Writes the return value
 	 * into regs->gp[HOST_AX]; the caller marshals that back
 	 * to vCPU state.
@@ -1111,6 +1132,7 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 		}
 	}
 
+skip_dispatch:
 	/*
 	 * Class-B post-dispatch propagation (memo 10 sub-commit #5c):
 	 * arch_prctl(ARCH_SET_FS/GS) updated gp[HOST_FS_BASE] /
