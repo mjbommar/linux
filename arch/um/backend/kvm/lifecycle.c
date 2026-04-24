@@ -201,6 +201,30 @@ int kvm_init(const struct um_backend_args *args)
 	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu (memslot deferred to first KVM_RUN)\n",
 		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
 		kvm_ctx.run_size);
+
+	/*
+	 * D-05 nested-virt detection (memo 08 sub-commit #7, minimal
+	 * form). CPUID leaf 1, ECX bit 31 = "hypervisor present"
+	 * (Intel SDM vol 2). When set, UML is running inside a
+	 * virtualisation layer itself; the KVM-within-KVM nested
+	 * path typically costs more per VMEXIT than seccomp's
+	 * SIGSYS/futex round-trip on the host it actually runs on.
+	 *
+	 * Operators who explicitly asked for KVM (force=kvm) get it
+	 * anyway — the warning here is advisory, not punitive.
+	 * Full measurement-based auto-fallback lives in
+	 * 05-nested-virt-fallback.md's follow-on work; this is the
+	 * "tell the user" baseline.
+	 */
+	{
+		unsigned int eax, ebx, ecx, edx;
+
+		asm volatile("cpuid"
+			     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+			     : "a"(1U), "c"(0U));
+		if (ecx & (1U << 31))
+			pr_warn("um: kvm init: host reports hypervisor-present (CPUID.1:ECX.bit31=1) — nested KVM typically slower than seccomp; consider backend=seccomp if this workload is perf-sensitive\n");
+	}
 	/*
 	 * Shadow_pgd alloc is deferred to first use (memo 09 step 1
 	 * lazy-init pattern, mirroring kvm_ensure_memslot). kvm_init
