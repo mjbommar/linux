@@ -388,6 +388,55 @@ is a fresh KVM_RUN.
 makes progress (100 iterations in <10 ms); verifies the
 scheduler regains control between KVM_RUNs.
 
+### #5c — `arch_prctl` + MSR_FS_BASE / MSR_GS_BASE roundtrip (class B per memo 10)
+
+**LANDED 2026-04-24.** First class-B syscall handler per
+`10-syscall-classification.md`. UML's `sys_arch_prctl`
+stashes FS/GS base into `current->thread.regs.regs.gp
+[HOST_FS_BASE]` / `[HOST_GS_BASE]`; the stub-based
+backends then write them into the host task on re-entry.
+The KVM backend instead has to push those values into
+the vCPU via `KVM_SET_MSRS` (MSR_FS_BASE = 0xc0000100,
+MSR_GS_BASE = 0xc0000101) — otherwise the guest's next
+FS-relative load faults at a static guest VA and the
+bootstrap #PF handler loops (the cr2=0x10 symptom
+blocking sub-commit #6 / task #192).
+
+Two propagation points:
+
+- **`kvm_enter_guest`** — seeds `sregs.fs.base` /
+  `sregs.gs.base` from the task's gp[] before
+  `KVM_SET_SREGS`. In long mode KVM keeps the segment
+  cache base and MSR_{FS,GS}_BASE in sync, so the
+  SREGS write is the MSR write. Covers the "task
+  rescheduled; resume in a different kvm_run_userspace
+  block" path.
+- **`kvm_decode_syscall`** — after `handle_syscall`
+  returns for `__NR_arch_prctl`, calls
+  `kvm_propagate_fs_gs_base(vcpu_fd, gp[HOST_FS_BASE],
+  gp[HOST_GS_BASE])` which issues `KVM_SET_MSRS` with
+  just FS_BASE + GS_BASE. Covers the within-KVM_RUN-loop
+  arch_prctl that glibc issues inside `_start`.
+
+**Test:** extended `kvm_production_sregs_shape_test`
+seeds `src.gp[HOST_FS_BASE]` / `[HOST_GS_BASE]` and
+asserts the values land in `sregs.fs.base` / `gs.base`
+through `kvm_enter_guest_probe`. 28/28 contract tests
+pass on the integrated build. Full KVM-side smoke
+requires `/dev/kvm` access which the current selftest
+user doesn't have; the KUnit test is the guaranteed
+regression floor.
+
+**Code moves:** ~70 LOC added in `arch/um/backend/kvm/
+thread.c` (`kvm_propagate_fs_gs_base` helper + the two
+call-sites + a cached `syscall_nr` local in
+`kvm_decode_syscall` so `handle_syscall`'s clobber of
+HOST_AX doesn't hide the number from the post-dispatch
+check). ~12 LOC added in `arch/um/backend/contract/
+test_ops.c`. Probe helper `kvm_enter_guest_probe` was
+updated to mirror the real path so drift between probe
+and production is KUnit-visible.
+
 ### #5 — `kvm_handle_intr` (KVM_EXIT_INTR → signal reinject)
 
 **Delta:** host-side SIGALRM / SIGIO / SIGCHLD delivered

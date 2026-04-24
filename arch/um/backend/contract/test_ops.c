@@ -412,6 +412,8 @@ static void kvm_production_sregs_shape_test(struct kunit *test)
 	src.gp[HOST_R15]     = 0x1010;
 	src.gp[HOST_IP]      = 0xdeadbeefUL;
 	src.gp[HOST_EFLAGS]  = 0x0;	/* bit 1 must be forced on */
+	src.gp[HOST_FS_BASE] = 0xcafef00dUL;	/* memo 10 #5c seed */
+	src.gp[HOST_GS_BASE] = 0xfeedface2UL;
 
 	rc = kvm_enter_guest_probe(&sregs, &kregs, &src, fake_cr3, fake_gdt);
 	KUNIT_EXPECT_EQ(test, rc, 0);
@@ -443,6 +445,16 @@ static void kvm_production_sregs_shape_test(struct kunit *test)
 	/* Ring-0 SS/DS: selector=0x10. */
 	KUNIT_EXPECT_EQ(test, (int)sregs.ss.selector, 0x10);
 	KUNIT_EXPECT_EQ(test, (int)sregs.ds.selector, 0x10);
+
+	/* Memo 10 sub-commit #5c: FS/GS base seeded from src gp[]
+	 * so KVM_SET_SREGS's first ring-3 entry has the right TLS
+	 * pointer without needing a separate KVM_SET_MSRS call.
+	 * In long mode fs.base / gs.base and MSR_{FS,GS}_BASE are
+	 * kept in sync by KVM; asserting against the segment cache
+	 * is equivalent to asserting against the MSR.
+	 */
+	KUNIT_EXPECT_EQ(test, (unsigned long)sregs.fs.base, 0xcafef00dUL);
+	KUNIT_EXPECT_EQ(test, (unsigned long)sregs.gs.base, 0xfeedface2UL);
 }
 
 /*

@@ -35,6 +35,8 @@
 
 #include <asm/page.h>
 #include <asm/processor.h>
+#include <asm/prctl.h>		/* ARCH_SET_FS / ARCH_SET_GS */
+#include <asm/unistd.h>		/* __NR_arch_prctl */
 #include <as-layout.h>
 #include <kern_util.h>
 #include <mem.h>		/* uml_physmem */
@@ -546,6 +548,62 @@ EXPORT_SYMBOL_GPL(kvm_bootstrap_copy_lstar);
  * code that races with interrupts — just `out`/`sysretq`.
  * Sub-commit #5 (KVM_EXIT_INTR) revisits.
  */
+/*
+ * Push MSR_FS_BASE / MSR_GS_BASE into the vCPU. Used by both
+ * the initial `kvm_enter_guest` path (seeding from UML's per-
+ * task gp[HOST_FS_BASE]) and the post-arch_prctl path in
+ * `kvm_decode_syscall` (class B per memo 10). Guest glibc's
+ * `_start` issues `arch_prctl(ARCH_SET_FS, tls_addr)` before
+ * its first FS-relative load; without this propagation,
+ * `fs:0x10` would fault at guest VA 0x10 and spin the
+ * bootstrap #PF handler (the cr2=0x10 loop blocking task
+ * #192). See Documentation/virt/uml/redesign/02-workstreams/
+ * D-kvm-backend/10-syscall-classification.md §"Class B".
+ *
+ * Idempotent: writing the same FS_BASE twice is a no-op in
+ * the vCPU. Called on every arch_prctl regardless of the
+ * option (GET_* reads already come from UML's gp[] and
+ * pushing them back is harmless).
+ */
+static int kvm_propagate_fs_gs_base(int vcpu_fd, u64 fs_base, u64 gs_base)
+{
+	struct {
+		struct kvm_msrs info;
+		struct kvm_msr_entry entries[2];
+	} msrs = {
+		.info = { .nmsrs = 2 },
+		.entries = {
+			{
+				.index = 0xc0000100,	/* MSR_FS_BASE */
+				.data  = fs_base,
+			},
+			{
+				.index = 0xc0000101,	/* MSR_GS_BASE */
+				.data  = gs_base,
+			},
+		},
+	};
+	int rc;
+
+	if (vcpu_fd < 0)
+		return -EIO;
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm: KVM_SET_MSRS(fs=0x%llx gs=0x%llx) failed (%d)\n",
+				    (unsigned long long)fs_base,
+				    (unsigned long long)gs_base, rc);
+		return rc;
+	}
+	/* Writing 2 MSRs; anything less is a silent reject. */
+	if (rc != 2) {
+		pr_warn_once("um: kvm: KVM_SET_MSRS(fs/gs) wrote %d/2 MSRs\n",
+			     rc);
+		return -EIO;
+	}
+	return 0;
+}
+
 static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 {
 	int vcpu_fd = kvm_backend_vcpu0_fd();
@@ -853,6 +911,21 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		.g        = 0,
 	};
 
+	/*
+	 * Seed FS/GS base from the task's stored values (memo 10
+	 * class B, sub-commit #5c). UML's sys_arch_prctl stashes
+	 * ARCH_SET_FS/GS into gp[HOST_FS_BASE] / gp[HOST_GS_BASE];
+	 * the outer userspace() loop may have entered kvm_run_
+	 * userspace after a reschedule where the previous
+	 * SET_MSRS state was lost. Seed via sregs.fs.base /
+	 * gs.base so the first KVM_RUN inherits the right TLS
+	 * pointer without a separate KVM_SET_MSRS call. In long
+	 * mode KVM keeps the segment cache base and
+	 * MSR_{FS,GS}_BASE in sync; writing one writes the other.
+	 */
+	sregs.fs.base = regs->gp[HOST_FS_BASE];
+	sregs.gs.base = regs->gp[HOST_GS_BASE];
+
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS, (unsigned long)&sregs);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_SREGS(cr3=0x%llx gdt_va=0x%llx) failed (%d)\n",
@@ -931,6 +1004,13 @@ int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
 	if (!sregs || !regs || !src)
 		return -EINVAL;
 	kvm_setup_production_sregs(sregs, cr3_gpa, gdt_gpa);
+	/*
+	 * Mirror the real kvm_enter_guest path's FS/GS base seeding
+	 * (memo 10 sub-commit #5c) so contract tests catch any drift
+	 * between probe and production.
+	 */
+	sregs->fs.base = src->gp[HOST_FS_BASE];
+	sregs->gs.base = src->gp[HOST_GS_BASE];
 	kvm_uml_regs_to_kvm_regs(regs, src);
 	return 0;
 }
@@ -987,8 +1067,13 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * → kvm_regs_to_uml_regs(). RAX holds the guest's original
 	 * syscall number (the LSTAR trampoline's `out` didn't
 	 * clobber it — the post-out RIP/RFLAGS live in RCX/R11).
+	 * Cache the number up front so handle_syscall clobbering
+	 * HOST_AX (with the return value) doesn't hide it from the
+	 * post-dispatch class-B propagation below.
 	 */
-	PT_SYSCALL_NR(regs->gp) = regs->gp[HOST_AX];
+	unsigned long syscall_nr = regs->gp[HOST_AX];
+
+	PT_SYSCALL_NR(regs->gp) = syscall_nr;
 	regs->is_user = 1;
 
 	/*
@@ -1024,6 +1109,23 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 			(void)kvm_touch_all_user_vmas(mm2);
 			(void)kvm_shadow_fill_from_uml_pgd(mm2->pgd);
 		}
+	}
+
+	/*
+	 * Class-B post-dispatch propagation (memo 10 sub-commit #5c):
+	 * arch_prctl(ARCH_SET_FS/GS) updated gp[HOST_FS_BASE] /
+	 * gp[HOST_GS_BASE] inside sys_arch_prctl — propagate those
+	 * values into the vCPU's MSR_FS_BASE / MSR_GS_BASE so the
+	 * next SYSRETQ-to-ring-3 sees the right TLS pointer. GET
+	 * options don't modify gp[] so a SET_MSRS here is harmless
+	 * (same values round-tripped). Non-arch_prctl syscalls skip
+	 * this path entirely; FS/GS are preserved by KVM across
+	 * VMEXITs so there's nothing to do for them.
+	 */
+	if (syscall_nr == __NR_arch_prctl) {
+		(void)kvm_propagate_fs_gs_base(vcpu_fd,
+					       regs->gp[HOST_FS_BASE],
+					       regs->gp[HOST_GS_BASE]);
 	}
 
 	/*
