@@ -21,6 +21,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod console_split;
 mod events;
 mod history;
 mod manifest;
@@ -80,6 +81,11 @@ enum Cmd {
     Ps(PsArgs),
     /// Tail the per-instance log.
     Logs(LogsArgs),
+    /// Show only the kernel-printk portion of the run console.
+    /// If the bundle has a derived `kernel.log` (written at
+    /// stop), prefers that; otherwise filters `init.log`
+    /// on the fly.
+    Dmesg(DmesgArgs),
     /// List declared observability-spine event schemas.
     Schema(SchemaArgs),
     /// Tail structured events.jsonl emitted by the spine.
@@ -232,6 +238,17 @@ struct LogsArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct DmesgArgs {
+    /// Instance name to resolve the latest run from, or a
+    /// literal 26-char ULID run_id.
+    name_or_run_id: String,
+
+    /// Show only the last N kernel-printk lines.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    tail: usize,
+}
+
+#[derive(clap::Args, Debug)]
 struct SchemaArgs {}
 
 #[derive(clap::Args, Debug)]
@@ -340,6 +357,7 @@ fn run() -> Result<()> {
         Cmd::Rm(args) => cmd_rm(&paths, args, cli.quiet),
         Cmd::Ps(args) => cmd_ps(&paths, args, cli.json, cli.quiet),
         Cmd::Logs(args) => cmd_logs(&paths, args),
+        Cmd::Dmesg(args) => cmd_dmesg(&paths, args),
         Cmd::Schema(_) => cmd_schema(cli.json),
         Cmd::Events(args) => cmd_events(&paths, args),
         Cmd::Assert(args) => cmd_assert(&paths, args, cli.quiet),
@@ -619,6 +637,46 @@ fn cmd_logs(paths: &paths::Paths, args: LogsArgs) -> Result<()> {
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_dmesg(paths: &paths::Paths, args: DmesgArgs) -> Result<()> {
+    let run_id = events::resolve_name_or_run_id(paths, &args.name_or_run_id);
+    let run_dir = paths.run_dir(&run_id);
+    let kernel_log = run_dir.join("kernel.log");
+    let init_log = run_dir.join("init.log");
+
+    // Prefer the materialized kernel.log if `umlctl stop`
+    // already derived it; fall back to an on-the-fly filter
+    // over init.log when the run is still live (stop hasn't
+    // happened) or for bundles predating the O1.2 lift.
+    let lines: Vec<String> = if kernel_log.exists() {
+        std::fs::read_to_string(&kernel_log)
+            .context("read kernel.log")?
+            .lines()
+            .map(String::from)
+            .collect()
+    } else if init_log.exists() {
+        let mut buf = Vec::new();
+        console_split::stream_kernel_lines(&init_log, &mut buf)
+            .context("filter init.log for kernel lines")?;
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .map(String::from)
+            .collect()
+    } else {
+        eprintln!("umlctl: no console log for run '{run_id}'");
+        std::process::exit(7);
+    };
+
+    let start = if args.tail > 0 && args.tail < lines.len() {
+        lines.len() - args.tail
+    } else {
+        0
+    };
+    for line in &lines[start..] {
+        println!("{line}");
     }
     Ok(())
 }

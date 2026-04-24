@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::console_split;
 use super::manifest::Manifest;
 use super::paths::Paths;
 use super::run;
@@ -84,8 +85,11 @@ pub fn start(
     let argv = build_kernel_argv(m);
 
     // v1 layout: stdout + stderr merged into init.log inside
-    // the bundle. Kernel console split to its own file lands
-    // in O1.2.
+    // the bundle. The O1.2 lift derives a `kernel.log` sidecar
+    // at stop time by filtering init.log for `[<ts>] …` and
+    // `<N>…` printk-shape lines; the merged file stays
+    // authoritative because UML's init process shares the same
+    // console fd that the kernel's printk subsystem writes to.
     let log_path = if args.no_log {
         None
     } else {
@@ -157,6 +161,7 @@ pub fn start(
         let status = child.wait().ok();
         let code = status.and_then(|s| s.code());
         run::finalize_run(paths, &run_id, run::boottime_ns(), "FOREGROUND_EXIT", code);
+        derive_kernel_log_best_effort(paths, &run_id);
         let _ = std::fs::remove_file(&pidfile);
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
         return Ok(StartOutcome { pid, run_id });
@@ -272,6 +277,7 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
     // handshakes.
     if !run_id.is_empty() {
         run::finalize_run(paths, &run_id, run::boottime_ns(), &signal_name, None);
+        derive_kernel_log_best_effort(paths, &run_id);
     }
 
     let _ = std::fs::remove_file(&pidfile);
@@ -381,6 +387,17 @@ fn log_indicates_ready(path: &Path) -> bool {
         || s.contains("Booting Linux")
         || s.contains("Run /sbin/init")
         || s.contains("Freeing unused kernel")
+}
+
+/// Derive `kernel.log` next to `init.log` in the run bundle.
+/// Best-effort: any I/O error is swallowed so a malformed log
+/// can't poison the stop path (the merged init.log stays
+/// authoritative either way).
+fn derive_kernel_log_best_effort(paths: &Paths, run_id: &str) {
+    let dir = paths.run_dir(run_id);
+    let init_log = dir.join("init.log");
+    let kernel_log = dir.join("kernel.log");
+    let _ = console_split::derive_kernel_log(&init_log, &kernel_log);
 }
 
 fn build_kernel_argv(m: &Manifest) -> Vec<String> {

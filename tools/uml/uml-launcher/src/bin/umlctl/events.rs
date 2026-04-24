@@ -564,7 +564,7 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-fn resolve_name_or_run_id(paths: &Paths, raw: &str) -> String {
+pub(super) fn resolve_name_or_run_id(paths: &Paths, raw: &str) -> String {
     let is_ulid = raw.len() == 26
         && raw
             .chars()

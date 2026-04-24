@@ -63,11 +63,20 @@ trap cleanup EXIT INT TERM
 
 # Fake kernel: print the ready marker so the detach-mode
 # ready-wait trips, then sleep long enough that `ps` + `stop`
-# land while it's alive.
+# land while it's alive. The mix of printk-shape lines
+# (`[    0.000000] …`, `<4>…`) and bare init-stdout lines
+# exercises the O1.2 console split. Lines are dual-written
+# to stderr for detach-mode only (where umlctl redirects
+# stderr into init.log too).
 cat > "$TMP/linux" <<'FAKE'
 #!/bin/sh
-echo "Linux version fake"
+echo "Checking that host ptys support output SIGIO..."
+echo "[    0.000000] Linux version fake"
+echo "[    0.123456] Booting Linux on physical CPU 0x0"
+echo "<4>random: crng init done"
+echo "Welcome to Linux"
 echo "Freeing unused kernel memory"
+echo "[   12.345678] Run /sbin/init as init process"
 exec sleep 120
 FAKE
 chmod +x "$TMP/linux"
@@ -163,6 +172,21 @@ LOG_OUT=$("$UMLCTL_BIN" $ARGS logs "$NAME")
 echo "$LOG_OUT" | grep -q "Linux version fake" \
 	|| fail "logs missing ready marker: $LOG_OUT"
 
+# umlctl dmesg before stop works via on-the-fly init.log
+# filter (kernel.log hasn't been materialized yet). Should
+# see kernel-shape lines and NOT userspace lines.
+DMESG_LIVE=$("$UMLCTL_BIN" $ARGS dmesg "$NAME")
+echo "$DMESG_LIVE" | grep -q 'Linux version fake' \
+	|| fail "live dmesg missing Linux version: $DMESG_LIVE"
+echo "$DMESG_LIVE" | grep -q 'crng init done' \
+	|| fail "live dmesg missing <4> priority line: $DMESG_LIVE"
+if echo "$DMESG_LIVE" | grep -q '^Welcome to Linux$'; then
+	fail "live dmesg should not include userspace: $DMESG_LIVE"
+fi
+if echo "$DMESG_LIVE" | grep -q '^Checking that host ptys'; then
+	fail "live dmesg should not include pre-printk: $DMESG_LIVE"
+fi
+
 # --- Part D: stop must actually kill the child ---
 STOP_OUT=$("$UMLCTL_BIN" $ARGS stop "$NAME") || fail "stop failed"
 echo "$STOP_OUT" | grep -q "run_id=$RUN_ID" \
@@ -188,6 +212,35 @@ grep -q '"host_ts_ns_at_exit"' "$BUNDLE_DIR/run.json" \
 	|| fail "run.json not finalized on stop (no host_ts_ns_at_exit)"
 grep -q '"signal_sent": "TERM"' "$BUNDLE_DIR/run.json" \
 	|| fail "run.json missing signal_sent=TERM after stop"
+
+# O1.2: stop should have materialized kernel.log next to
+# init.log, containing only the printk-shape lines from the
+# merged console.
+[ -f "$BUNDLE_DIR/kernel.log" ] || fail "kernel.log not derived on stop: $BUNDLE_DIR/kernel.log"
+grep -q 'Linux version fake' "$BUNDLE_DIR/kernel.log" \
+	|| fail "kernel.log missing printk timestamp line"
+grep -q 'crng init done' "$BUNDLE_DIR/kernel.log" \
+	|| fail "kernel.log missing <4> priority line"
+if grep -q '^Welcome to Linux$' "$BUNDLE_DIR/kernel.log"; then
+	fail "kernel.log leaked userspace stdout"
+fi
+if grep -q '^Checking that host ptys' "$BUNDLE_DIR/kernel.log"; then
+	fail "kernel.log leaked pre-printk UML init noise"
+fi
+
+# umlctl dmesg after stop reads the materialized kernel.log
+# directly — exercise --tail to verify the truncation path.
+DMESG_OUT=$("$UMLCTL_BIN" $ARGS dmesg "$NAME")
+echo "$DMESG_OUT" | grep -q 'Run /sbin/init as init process' \
+	|| fail "post-stop dmesg missing last printk line: $DMESG_OUT"
+DMESG_TAIL=$("$UMLCTL_BIN" $ARGS dmesg "$NAME" --tail 1)
+[ "$(echo "$DMESG_TAIL" | wc -l)" = "1" ] \
+	|| fail "dmesg --tail 1 should return exactly 1 line"
+
+# Resolve by run_id directly.
+DMESG_DIRECT=$("$UMLCTL_BIN" $ARGS dmesg "$RUN_ID")
+echo "$DMESG_DIRECT" | grep -q 'Linux version fake' \
+	|| fail "dmesg <run_id> should resolve directly"
 
 # stop of already-stopped instance → exit 6 (not running).
 "$UMLCTL_BIN" $ARGS stop "$NAME" 2>/dev/null
@@ -329,6 +382,9 @@ if tar --zstd --version >/dev/null 2>&1; then
 	[ -f "$UNPACK/$N2_RUN_ID/run.json" ] || fail "bundle missing run.json"
 	[ -f "$UNPACK/$N2_RUN_ID/events.jsonl" ] || fail "bundle missing events.jsonl"
 	[ -f "$UNPACK/$N2_RUN_ID/manifest.toml" ] || fail "bundle missing manifest snapshot"
+	# O1.2: exported bundle must include the derived kernel.log
+	# sidecar so post-mortem viewers can dmesg-split offline.
+	[ -f "$UNPACK/$N2_RUN_ID/kernel.log" ] || fail "bundle missing kernel.log"
 	grep -q "\"run_id\": \"$N2_RUN_ID\"" "$UNPACK/$N2_RUN_ID/run.json" \
 		|| fail "unpacked run.json missing run_id"
 else

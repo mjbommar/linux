@@ -1,11 +1,9 @@
 # uml-observability-spine — the unifying telemetry architecture for UML tooling
 
-**Status:** PROPOSED — future phase. Parking lot (2026-04-23).
-Phase O1 is ~83% landed as of 2026-04-23 (sub-lifts O1.1 +
-O1.3 + O1.4 + O1.5 + O1.6, five of six); only O1.2 (split
-kernel console + dmesg verb — needs real UML kernel
-cooperation for a meaningful end-to-end test) remains
-parking-lot inside O1. O2-O6 also remain parking-lot. Not in the A/B/C/D plan. This memo is
+**Status:** PROPOSED — future phase. Parking lot (2026-04-24).
+Phase O1 is **fully landed** as of 2026-04-24 (all six
+sub-lifts: O1.1 + O1.2 + O1.3 + O1.4 + O1.5 + O1.6). O2-O6
+remain parking-lot. Not in the A/B/C/D plan. This memo is
 an **architectural spine**, not a shippable tool — it
 specifies the shared schema + transport + bundle format
 that the seven already-proposed observability tools in this
@@ -419,7 +417,18 @@ status trails each line (**[LANDED]** / **[pending]**).
   `host_ts_ns_at_exec` (CLOCK_BOOTTIME), finalize
   `run.json` on stop. **[LANDED 2026-04-23]**
 - O1.2 — Split kernel console from init stdout in umlctl
-  supervise.rs. `umlctl dmesg` verb. **[pending]**
+  supervise.rs. `umlctl dmesg` verb. **[LANDED 2026-04-24]**
+  v1 is a post-hoc derivation: `umlctl stop` filters the
+  merged `init.log` for printk-shape lines (`[<ts>] …` +
+  `<N>…` priority bytes) and writes the result next to
+  `init.log` as `kernel.log`. The `dmesg` verb reads the
+  materialized sidecar when present, or filters `init.log`
+  on-the-fly for still-live runs. The split is a heuristic
+  — dedicated-fd kernel-console streaming is a post-v1
+  upgrade once UML's console driver grows a second channel.
+  Unit classifier tests + extended umlctl-smoke lock the
+  behavior. Implementation:
+  `tools/uml/uml-launcher/src/bin/umlctl/console_split.rs`.
 - O1.3 — Schema registry + event-emission library.
   Initial schemas: `uml.lifecycle.v1` (emitted),
   `uml.panic.v1` + `uml.oom.v1` (declared, producers land

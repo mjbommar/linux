@@ -111,7 +111,7 @@ docs/uml-redesign/
     ├── 11-uml-api-daemon.md          rootless REST API surface
     ├── 12-uml-perfetto-trace.md      tracefs → Perfetto converter
     └── 13-uml-observability-spine.md run_id + schema + bundle format
-                                      (O1 ~83% LANDED 2026-04-23)
+                                      (O1 fully LANDED 2026-04-24)
 ```
 
 ## Status of this plan
@@ -227,13 +227,16 @@ prod-fast still falls back to seccomp.
     `stop` / `rm` / `ps` / `logs` / `schema` / `events` /
     `assert` / `export`. Spec: `08-future-phases/05-umlctl.md`.
   - `08-future-phases/13-uml-observability-spine.md` — the
-    unifying telemetry architecture. Phase O1 is ~83% landed
-    (sub-lifts O1.1 + O1.3 + O1.4 + O1.5 + O1.6): run_id
-    (ULID) + bundle directory, schema registry + structured
+    unifying telemetry architecture. **Phase O1 is fully
+    landed as of 2026-04-24** (all six sub-lifts: run_id
+    (ULID) + bundle directory, kernel-console split +
+    `dmesg` verb, schema registry + structured
     `events.jsonl`, `.umlbundle.tar.zst` export, `events` tail
-    verb, `assert` CI-predicate verb. O1.2 (split kernel
-    console + `dmesg` verb) remains; needs real UML
-    cooperation testing. O2-O6 parking-lot.
+    verb, `assert` CI-predicate verb). O1.2 ships a
+    post-hoc derivation — `umlctl stop` filters the merged
+    `init.log` for printk-shape lines into a `kernel.log`
+    sidecar; the `dmesg` verb reads that (or filters live
+    init.log on the fly for running runs). O2-O6 parking-lot.
   - Selftest: `tools/testing/selftests/um/umlctl-smoke/`
     regression-locks the no-orphan guarantee (the motivation)
     plus the full lifecycle + spine event + assert + export
