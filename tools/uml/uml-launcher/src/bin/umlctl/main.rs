@@ -25,6 +25,7 @@ mod history;
 mod manifest;
 mod paths;
 mod registry;
+mod run;
 mod supervise;
 
 /// Top-level `umlctl` invocation.
@@ -287,15 +288,19 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
     })?;
 
     match supervise::start(paths, &m, &args) {
-        Ok(pid) => {
+        Ok(outcome) => {
             if !quiet {
-                println!("started {} pid={}", args.name, pid);
+                println!(
+                    "started {} pid={} run_id={}",
+                    args.name, outcome.pid, outcome.run_id
+                );
             }
             history::append(
                 paths,
                 history::Event::Start {
                     name: &args.name,
-                    pid,
+                    pid: outcome.pid,
+                    run_id: &outcome.run_id,
                 },
             )?;
             Ok(())
@@ -330,8 +335,8 @@ fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool) -> Result<()> {
         Ok(info) => {
             if !quiet {
                 println!(
-                    "stopped {} pid={} signal={} exit={:?}",
-                    args.name, info.pid, info.signal_sent, info.exit_status
+                    "stopped {} pid={} signal={} exit={:?} run_id={}",
+                    args.name, info.pid, info.signal_sent, info.exit_status, info.run_id
                 );
             }
             history::append(
@@ -339,6 +344,7 @@ fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool) -> Result<()> {
                 history::Event::Stop {
                     name: &args.name,
                     pid: info.pid,
+                    run_id: &info.run_id,
                     exit_status: info.exit_status,
                     signal_sent: &info.signal_sent,
                 },
@@ -384,25 +390,23 @@ fn cmd_rm(paths: &paths::Paths, args: RmArgs, quiet: bool) -> Result<()> {
     // Delete manifest.
     std::fs::remove_file(&manifest_path).context("remove manifest")?;
 
-    // Delete logs (unless --keep-logs).
+    // Delete per-run bundle directories (unless --keep-logs).
+    // Each bundle belongs to exactly one instance per
+    // run.json.instance, so we only touch this instance's
+    // runs; a shared runs/ root stays intact for other
+    // instances.
     if !args.keep_logs {
-        let prefix = format!("{}-", args.name);
-        let log_dir = paths.logs_dir();
-        if log_dir.exists() {
-            for entry in std::fs::read_dir(&log_dir).context("read logs dir")? {
-                let entry = entry?;
-                if let Some(n) = entry.file_name().to_str() {
-                    if n.starts_with(&prefix) && n.ends_with(".log") {
-                        std::fs::remove_file(entry.path()).ok();
-                    }
-                }
+        for run_id in run::runs_for(paths, &args.name) {
+            let dir = paths.run_dir(&run_id);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).ok();
             }
         }
     }
 
     // Delete any residual runtime files.
-    let pidfile = paths.pidfile_path(&args.name);
-    std::fs::remove_file(&pidfile).ok();
+    let _ = std::fs::remove_file(paths.pidfile_path(&args.name));
+    let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
 
     history::append(paths, history::Event::Rm { name: &args.name })?;
     if !quiet {
@@ -426,28 +430,23 @@ fn cmd_logs(paths: &paths::Paths, args: LogsArgs) -> Result<()> {
         eprintln!("umlctl: instance '{}' not found", args.name);
         std::process::exit(3);
     }
-    // v1: find the most recent log file for this instance.
-    let prefix = format!("{}-", args.name);
-    let log_dir = paths.logs_dir();
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if log_dir.exists() {
-        for entry in std::fs::read_dir(&log_dir).context("read logs dir")? {
-            let entry = entry?;
-            if let Some(n) = entry.file_name().to_str() {
-                if n.starts_with(&prefix) && n.ends_with(".log") {
-                    candidates.push(entry.path());
-                }
-            }
-        }
-    }
-    candidates.sort();
-    let log = match candidates.last() {
-        Some(p) => p.clone(),
+    // Resolve the most recent run bundle and pull init.log
+    // from it. Prefer the live run_id side-file (set while
+    // the instance is running); fall back to a scan of
+    // $STATE/runs/ by creation order.
+    let run_id = supervise::read_run_id_file(&paths.run_id_file_path(&args.name))
+        .or_else(|| run::latest_run_for(paths, &args.name));
+    let log = match run_id {
+        Some(id) => paths.run_dir(&id).join("init.log"),
         None => {
             eprintln!("umlctl: no log file for instance '{}'", args.name);
             std::process::exit(7);
         }
     };
+    if !log.exists() {
+        eprintln!("umlctl: no log file for instance '{}'", args.name);
+        std::process::exit(7);
+    }
     let content = std::fs::read_to_string(&log).context("read log file")?;
     let lines: Vec<&str> = content.lines().collect();
     let start = if args.tail > 0 && args.tail < lines.len() {

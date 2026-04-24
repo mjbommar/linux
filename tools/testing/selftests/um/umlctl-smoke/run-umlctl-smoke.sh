@@ -113,13 +113,30 @@ rc=$?
 [ $rc -eq 4 ] || fail "duplicate create exited $rc (want 4)"
 
 # --- Part C: start + ps + logs + stop ---
-"$UMLCTL_BIN" $ARGS start "$NAME" --ready-timeout 10 >/dev/null \
+START_OUT=$("$UMLCTL_BIN" $ARGS start "$NAME" --ready-timeout 10) \
 	|| fail "start failed"
+echo "$START_OUT" | grep -Eq 'run_id=[0-9A-HJKMNP-TV-Z]{26}' \
+	|| fail "start output missing ULID run_id: $START_OUT"
 
 PIDFILE="$RUNTIME_DIR/$NAME.pid"
+RUN_ID_FILE="$RUNTIME_DIR/$NAME.run_id"
 [ -f "$PIDFILE" ] || fail "pidfile not written"
+[ -f "$RUN_ID_FILE" ] || fail "run_id side-file not written"
 PID=$(cat "$PIDFILE")
+RUN_ID=$(cat "$RUN_ID_FILE")
 kill -0 "$PID" 2>/dev/null || fail "pid $PID not alive after start"
+
+# Bundle directory exists and contains the expected skeleton.
+BUNDLE_DIR="$STATE_DIR/runs/$RUN_ID"
+[ -d "$BUNDLE_DIR" ] || fail "bundle dir missing: $BUNDLE_DIR"
+[ -f "$BUNDLE_DIR/run.json" ] || fail "run.json missing: $BUNDLE_DIR/run.json"
+[ -f "$BUNDLE_DIR/init.log" ] || fail "init.log missing: $BUNDLE_DIR/init.log"
+grep -q "\"run_id\": \"$RUN_ID\"" "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing run_id: $(cat "$BUNDLE_DIR/run.json")"
+grep -q "\"instance\": \"$NAME\"" "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing instance"
+grep -q '"host_ts_ns_at_exec"' "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing host_ts_ns_at_exec"
 
 # ps lists the running instance.
 PS_OUT=$("$UMLCTL_BIN" $ARGS ps)
@@ -147,7 +164,9 @@ echo "$LOG_OUT" | grep -q "Linux version fake" \
 	|| fail "logs missing ready marker: $LOG_OUT"
 
 # --- Part D: stop must actually kill the child ---
-"$UMLCTL_BIN" $ARGS stop "$NAME" >/dev/null || fail "stop failed"
+STOP_OUT=$("$UMLCTL_BIN" $ARGS stop "$NAME") || fail "stop failed"
+echo "$STOP_OUT" | grep -q "run_id=$RUN_ID" \
+	|| fail "stop output missing run_id: $STOP_OUT"
 
 # Give the kernel a moment to reap.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -162,6 +181,13 @@ if kill -0 "$PID" 2>/dev/null; then
 fi
 
 [ ! -f "$PIDFILE" ] || fail "pidfile lingered after stop: $PIDFILE"
+[ ! -f "$RUN_ID_FILE" ] || fail "run_id side-file lingered after stop"
+
+# run.json should now be finalized with exit-side fields.
+grep -q '"host_ts_ns_at_exit"' "$BUNDLE_DIR/run.json" \
+	|| fail "run.json not finalized on stop (no host_ts_ns_at_exit)"
+grep -q '"signal_sent": "TERM"' "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing signal_sent=TERM after stop"
 
 # stop of already-stopped instance → exit 6 (not running).
 "$UMLCTL_BIN" $ARGS stop "$NAME" 2>/dev/null
@@ -184,6 +210,16 @@ for ev in create start stop rm; do
 	grep -q "\"event\":\"$ev\"" "$HIST" \
 		|| fail "history missing event '$ev'"
 done
+
+# start + stop history entries must include the run_id (added
+# by the observability-spine O1.1 lift).
+grep '"event":"start"' "$HIST" | grep -q "\"run_id\":\"$RUN_ID\"" \
+	|| fail "history start event missing run_id"
+grep '"event":"stop"' "$HIST" | grep -q "\"run_id\":\"$RUN_ID\"" \
+	|| fail "history stop event missing run_id"
+
+# Bundle should have been cleaned up by `rm` (no --keep-logs).
+[ ! -d "$BUNDLE_DIR" ] || fail "bundle dir lingered after rm: $BUNDLE_DIR"
 
 # --- Part F: no orphans ---
 LEAK=$(pgrep -f "$TMP/linux" || true)

@@ -23,10 +23,12 @@ pub enum Event<'a> {
     Start {
         name: &'a str,
         pid: u32,
+        run_id: &'a str,
     },
     Stop {
         name: &'a str,
         pid: u32,
+        run_id: &'a str,
         exit_status: Option<i32>,
         signal_sent: &'a str,
     },
@@ -40,6 +42,8 @@ struct Record<'a> {
     ts: String,
     event: &'static str,
     name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,14 +59,16 @@ pub fn append(paths: &Paths, event: Event<'_>) -> Result<()> {
             ts,
             event: "create",
             name,
+            run_id: None,
             pid: None,
             exit_status: None,
             signal_sent: None,
         },
-        Event::Start { name, pid } => Record {
+        Event::Start { name, pid, run_id } => Record {
             ts,
             event: "start",
             name,
+            run_id: Some(run_id),
             pid: Some(pid),
             exit_status: None,
             signal_sent: None,
@@ -70,12 +76,14 @@ pub fn append(paths: &Paths, event: Event<'_>) -> Result<()> {
         Event::Stop {
             name,
             pid,
+            run_id,
             exit_status,
             signal_sent,
         } => Record {
             ts,
             event: "stop",
             name,
+            run_id: Some(run_id),
             pid: Some(pid),
             exit_status,
             signal_sent: Some(signal_sent),
@@ -84,6 +92,7 @@ pub fn append(paths: &Paths, event: Event<'_>) -> Result<()> {
             ts,
             event: "rm",
             name,
+            run_id: None,
             pid: None,
             exit_status: None,
             signal_sent: None,

@@ -171,13 +171,6 @@ pub(super) fn now_rfc3339() -> String {
         .unwrap_or_else(|_| now.format(&Rfc3339).unwrap_or_default())
 }
 
-/// Filesystem-friendly timestamp for log file names. Colons in
-/// RFC3339 are legal on ext4 but hostile to some tooling, so we
-/// swap them for hyphens.
-pub(super) fn now_rfc3339_compact() -> String {
-    now_rfc3339().replace(':', "-")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -66,12 +66,19 @@ Follow XDG spec: split persistent state from runtime
 $XDG_STATE_HOME/uml/           # default ~/.local/state/uml
 ├── instances/
 │   └── <name>.toml           # manifest (persistent, survives reboot)
-├── logs/
-│   └── <name>-<iso8601>.log  # per-run console + kmsg capture
+├── runs/                     # per-run observability bundles (memo 13 O1.1)
+│   └── <run_id>/             # ULID, lexicographic = chronological
+│       ├── run.json          # run_id, instance, boot-offset clocks, exit status
+│       ├── init.log          # init + userspace stdout
+│       ├── kernel.log        # kernel console (O1.2; empty until split lands)
+│       ├── events.jsonl      # structured spine events (O1.3)
+│       ├── dmesg.jsonl       # /dev/kmsg tail (later phase)
+│       └── trace.perfetto    # ftrace capture (later phase)
 └── history.jsonl             # append-only audit log
 
 $XDG_RUNTIME_DIR/uml/          # tmpfs; cleared on reboot
 ├── <name>.pid                 # PID as ASCII (one line)
+├── <name>.run_id              # current run_id (side-file; removed on stop)
 └── <name>.sock                # reserved for v3 control socket
 ```
 

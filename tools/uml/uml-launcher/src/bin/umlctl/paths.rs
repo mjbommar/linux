@@ -31,8 +31,8 @@ impl Paths {
             .with_context(|| format!("create state_dir {}", state_dir.display()))?;
         std::fs::create_dir_all(state_dir.join("instances"))
             .context("create instances dir")?;
-        std::fs::create_dir_all(state_dir.join("logs"))
-            .context("create logs dir")?;
+        std::fs::create_dir_all(state_dir.join("runs"))
+            .context("create runs dir")?;
         std::fs::create_dir_all(&runtime_dir)
             .with_context(|| format!("create runtime_dir {}", runtime_dir.display()))?;
 
@@ -47,8 +47,17 @@ impl Paths {
         self.instances_dir().join(format!("{name}.toml"))
     }
 
-    pub fn logs_dir(&self) -> PathBuf {
-        self.state_dir.join("logs")
+    /// Root directory for per-run bundles — `$STATE/runs/`.
+    /// Each subdirectory is one `run_id` (ULID) with run.json,
+    /// init.log, kernel.log, events.jsonl, etc. per the
+    /// observability-spine memo (13).
+    pub fn runs_dir(&self) -> PathBuf {
+        self.state_dir.join("runs")
+    }
+
+    /// Bundle directory for a specific run: `$STATE/runs/<run_id>/`.
+    pub fn run_dir(&self, run_id: &str) -> PathBuf {
+        self.runs_dir().join(run_id)
     }
 
     pub fn history_path(&self) -> PathBuf {
@@ -57,6 +66,13 @@ impl Paths {
 
     pub fn pidfile_path(&self, name: &str) -> PathBuf {
         self.runtime_dir.join(format!("{name}.pid"))
+    }
+
+    /// Current run_id for a live instance, kept next to the
+    /// pidfile. Removed on stop. Lets `logs` / `dmesg` find the
+    /// right bundle directory without a manifest lookup.
+    pub fn run_id_file_path(&self, name: &str) -> PathBuf {
+        self.runtime_dir.join(format!("{name}.run_id"))
     }
 }
 
@@ -97,7 +113,12 @@ mod tests {
         };
         assert_eq!(p.manifest_path("foo"), PathBuf::from("/s/instances/foo.toml"));
         assert_eq!(p.pidfile_path("foo"), PathBuf::from("/r/foo.pid"));
-        assert_eq!(p.logs_dir(), PathBuf::from("/s/logs"));
+        assert_eq!(p.runs_dir(), PathBuf::from("/s/runs"));
+        assert_eq!(
+            p.run_dir("01HW5TSP9C7JMX3QZZZZZZZZZ"),
+            PathBuf::from("/s/runs/01HW5TSP9C7JMX3QZZZZZZZZZ")
+        );
+        assert_eq!(p.run_id_file_path("foo"), PathBuf::from("/r/foo.run_id"));
         assert_eq!(p.history_path(), PathBuf::from("/s/history.jsonl"));
     }
 }

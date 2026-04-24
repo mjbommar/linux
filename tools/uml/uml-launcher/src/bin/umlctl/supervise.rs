@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::manifest::{self, Manifest};
+use super::manifest::Manifest;
 use super::paths::Paths;
+use super::run;
 use super::{StartArgs, StopArgs};
 
 pub enum StartError {
@@ -37,13 +38,24 @@ pub struct StopInfo {
     pub pid: u32,
     pub signal_sent: String,
     pub exit_status: Option<i32>,
+    pub run_id: String,
+}
+
+/// Descriptor of a just-started run, threaded back to the
+/// command layer so umlctl can print `run_id` + record it in
+/// history.jsonl. Supersedes the earlier "just return a pid"
+/// signature now that the observability spine (memo 13) needs
+/// every start to produce a correlation id.
+pub struct StartOutcome {
+    pub pid: u32,
+    pub run_id: String,
 }
 
 pub fn start(
     paths: &Paths,
     m: &Manifest,
     args: &StartArgs,
-) -> std::result::Result<u32, StartError> {
+) -> std::result::Result<StartOutcome, StartError> {
     if !m.kernel.path.exists() {
         return Err(StartError::KernelMissing(m.kernel.path.clone()));
     }
@@ -57,26 +69,31 @@ pub fn start(
             return Err(StartError::AlreadyRunning { pid });
         }
         let _ = std::fs::remove_file(&pidfile);
+        let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
     }
+
+    // Mint a run_id up front — the bundle directory is
+    // created pre-spawn so the log file we're about to
+    // redirect into already has its permanent home.
+    let run_id = run::generate_run_id();
+    let run_dir = paths.run_dir(&run_id);
+    std::fs::create_dir_all(&run_dir)
+        .with_context(|| format!("create run dir {}", run_dir.display()))
+        .map_err(StartError::Other)?;
 
     let argv = build_kernel_argv(m);
 
+    // v1 layout: stdout + stderr merged into init.log inside
+    // the bundle. Kernel console split to its own file lands
+    // in O1.2.
     let log_path = if args.no_log {
         None
     } else {
-        Some(log_path_for(paths, &args.name))
+        Some(run_dir.join("init.log"))
     };
 
-    // Materialize stdout/stderr redirects. Log file is opened
-    // append-mode so reruns of the same instance accumulate
-    // history in a per-start file.
     let (stdout_cfg, stderr_cfg) = match &log_path {
         Some(p) => {
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create log dir {}", parent.display()))
-                    .map_err(StartError::Other)?;
-            }
             let f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -110,19 +127,39 @@ pub fn start(
         }
     }
 
+    // Capture CLOCK_BOOTTIME immediately before spawn so the
+    // recorded host_ts_ns_at_exec is as close as we can make it
+    // to the kernel's own view of the child's start time.
+    let host_ts_ns_at_exec = run::boottime_ns();
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", m.kernel.path.display()))
         .map_err(StartError::Other)?;
     let pid = child.id();
+
     write_pidfile(&pidfile, pid).map_err(StartError::Other)?;
+    write_run_id_file(&paths.run_id_file_path(&args.name), &run_id)
+        .map_err(StartError::Other)?;
+    run::create_run_bundle(
+        paths,
+        &run_id,
+        &args.name,
+        &m.kernel.sha256,
+        host_ts_ns_at_exec,
+        pid,
+    )
+    .map_err(StartError::Other)?;
 
     if args.foreground {
         // Block in-process. Once the child exits, remove the
-        // pidfile so ps doesn't show it as running.
-        let _ = child.wait();
+        // pidfile so ps doesn't show it as running and finalize
+        // the run bundle with whatever exit status we observed.
+        let status = child.wait().ok();
+        let code = status.and_then(|s| s.code());
+        run::finalize_run(paths, &run_id, run::boottime_ns(), "FOREGROUND_EXIT", code);
         let _ = std::fs::remove_file(&pidfile);
-        return Ok(pid);
+        let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
+        return Ok(StartOutcome { pid, run_id });
     }
 
     // Detach mode: poll the log file for a ready marker up to
@@ -132,10 +169,18 @@ pub fn start(
         let deadline = Instant::now() + Duration::from_secs(args.ready_timeout);
         while Instant::now() < deadline {
             if log_indicates_ready(lp) {
-                return Ok(pid);
+                return Ok(StartOutcome { pid, run_id });
             }
             if !process_alive(pid) {
+                run::finalize_run(
+                    paths,
+                    &run_id,
+                    run::boottime_ns(),
+                    "SPAWN_EXITED_EARLY",
+                    None,
+                );
                 let _ = std::fs::remove_file(&pidfile);
+                let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
                 return Err(StartError::Other(anyhow!(
                     "kernel exited before reaching ready marker (see {})",
                     lp.display()
@@ -149,11 +194,13 @@ pub fn start(
             nix::unistd::Pid::from_raw(pid as i32),
             nix::sys::signal::Signal::SIGKILL,
         );
+        run::finalize_run(paths, &run_id, run::boottime_ns(), "READY_TIMEOUT", None);
         let _ = std::fs::remove_file(&pidfile);
+        let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
         return Err(StartError::ReadyTimeout);
     }
 
-    Ok(pid)
+    Ok(StartOutcome { pid, run_id })
 }
 
 pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, StopError> {
@@ -168,10 +215,16 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
     };
     if !process_alive(pid) {
         // Stale pidfile; clear it so the next start/stop sees
-        // a clean slate.
+        // a clean slate. Also drop the run_id side-file.
         let _ = std::fs::remove_file(&pidfile);
+        let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
         return Err(StopError::NotRunning);
     }
+
+    // Run_id side-file is best-effort — a missing/corrupt
+    // one shouldn't block a stop. Fall back to the empty
+    // string so history still records the event.
+    let run_id = read_run_id_file(&paths.run_id_file_path(&args.name)).unwrap_or_default();
 
     let (sig, signal_name) = if args.force {
         (nix::sys::signal::Signal::SIGKILL, "KILL".to_string())
@@ -212,12 +265,23 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
     // common path — it's a safety net for future helpers.
     drain_zombies();
 
+    // Finalize the run bundle with our exit-side fields.
+    // exit_status stays None on the detach path because the
+    // UML isn't our child post-start; a later phase (control
+    // socket) can surface a real one via guest-agent shutdown
+    // handshakes.
+    if !run_id.is_empty() {
+        run::finalize_run(paths, &run_id, run::boottime_ns(), &signal_name, None);
+    }
+
     let _ = std::fs::remove_file(&pidfile);
+    let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
 
     Ok(StopInfo {
         pid,
         signal_sent: signal_name,
         exit_status: None,
+        run_id,
     })
 }
 
@@ -242,6 +306,26 @@ fn write_pidfile(path: &Path, pid: u32) -> Result<()> {
     std::fs::write(path, format!("{pid}\n"))
         .with_context(|| format!("write pidfile {}", path.display()))?;
     Ok(())
+}
+
+fn write_run_id_file(path: &Path, run_id: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create runtime dir {}", parent.display()))?;
+    }
+    std::fs::write(path, format!("{run_id}\n"))
+        .with_context(|| format!("write run_id file {}", path.display()))?;
+    Ok(())
+}
+
+pub(super) fn read_run_id_file(path: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 pub(super) fn process_alive(pid: u32) -> bool {
@@ -282,11 +366,6 @@ fn drain_zombies() {
             _ => continue,
         }
     }
-}
-
-fn log_path_for(paths: &Paths, name: &str) -> PathBuf {
-    let ts = manifest::now_rfc3339_compact();
-    paths.logs_dir().join(format!("{name}-{ts}.log"))
 }
 
 fn log_indicates_ready(path: &Path) -> bool {

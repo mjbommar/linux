@@ -1,11 +1,13 @@
 # uml-observability-spine — the unifying telemetry architecture for UML tooling
 
 **Status:** PROPOSED — future phase. Parking lot (2026-04-23).
-Not in the A/B/C/D plan. This memo is an **architectural
-spine**, not a shippable tool — it specifies the shared
-schema + transport + bundle format that the seven already-
-proposed observability tools in this directory depend on
-but do not individually own.
+Phase O1.1 (run_id + bundle dir + boot-offset clock) landed
+2026-04-23 as the umlctl follow-on; later O1 sub-lifts +
+O2-O6 remain parking-lot. Not in the A/B/C/D plan. This
+memo is an **architectural spine**, not a shippable tool —
+it specifies the shared schema + transport + bundle format
+that the seven already-proposed observability tools in this
+directory depend on but do not individually own.
 
 **Companions / consumers (existing memos that this spine
 feeds):**
@@ -406,15 +408,28 @@ landing sequence (each phase is independently useful):
 
 **Phase O1 — format freeze + cheap wins (1-2 weeks):**
 
-- Write the schema registry + event-emission library in
-  `tools/uml/uml-observe/`.
-- `run_id` + boot-offset-ns clock in umlctl (teach umlctl
-  start to record `host_ts_ns_at_exec`).
-- Split kernel console from init stdout in umlctl
-  supervise.rs. `umlctl dmesg` verb.
-- Bundle directory format + `umlctl export --bundle`.
-- Initial schemas: `uml.lifecycle.v1`, `uml.panic.v1`,
-  `uml.oom.v1`.
+Split into independently-landable sub-lifts; bracketed
+status trails each line (**[LANDED]** / **[pending]**).
+
+- O1.1 — run_id + bundle directory format + boot-offset-ns
+  clock in umlctl. Teach umlctl start to mint a ULID,
+  create `$STATE/runs/<run_id>/`, record
+  `host_ts_ns_at_exec` (CLOCK_BOOTTIME), finalize
+  `run.json` on stop. **[LANDED 2026-04-23]**
+- O1.2 — Split kernel console from init stdout in umlctl
+  supervise.rs. `umlctl dmesg` verb. **[pending]**
+- O1.3 — Schema registry + event-emission library in
+  `tools/uml/uml-observe/`. Initial schemas:
+  `uml.lifecycle.v1`, `uml.panic.v1`, `uml.oom.v1`.
+  umlctl emits its own lifecycle into `events.jsonl`.
+  **[pending]**
+- O1.4 — `umlctl export --bundle` → `.umlbundle.tar.zst`.
+  **[pending]**
+- O1.5 — `umlctl events <name> --filter ...` verb.
+  **[pending]**
+- O1.6 — `umlctl assert <name> --no-kasan ...` CI-style
+  predicates over events. Replaces dmesg-grep in
+  selftests. **[pending]**
 
 **Phase O2 — host-side observability (2-4 weeks):**
 
