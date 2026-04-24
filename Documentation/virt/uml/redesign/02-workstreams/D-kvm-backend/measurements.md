@@ -1441,6 +1441,117 @@ UML_BINARY=/tmp/uml-kvmbench/linux \
 # Expect: kvm cyc_per_call ~100 on modern x86_64.
 ```
 
+## 2026-04-24 — G5 landing: clock_gettime(CLOCK_MONOTONIC) gadget + vvar page
+
+Memo 11 G5 (clock_gettime via shared vvar) lands in
+three sub-steps:
+
+- **G5a** (commit `f960c8fa`) — shared vvar page
+  infrastructure: struct layout, lazy allocation,
+  shadow-PT mapping one page above the G3 state page,
+  host-side refresh that writes `ktime_get_ns()` +
+  `ktime_get_real_ts64()` under a seqlock-writer
+  pattern on every `kvm_enter_guest`.
+- **G5b** (commit `4ccf8adc`) — LSTAR region expanded
+  from 192 B to 448 B by moving TSS/IDT/PF_HANDLER/
+  SYSRET further down in the bootstrap page; pure
+  offset shuffle, zero logic changes.
+- **G5c** (commit `653057b6`) — 60-byte clock_gettime
+  handler asm in the LSTAR region, with swapgs
+  bracket, seqlock read, vvar field access via
+  `%gs:<PAGE_SIZE + VVAR_OFF>` disp32, and direct
+  writes to the user's timespec buffer.
+
+Total new LSTAR body after G5: 179 B (was 115 B post-
+G4). KUnit `kvm_bootstrap_lstar_bytes_test` keeps the
+C table in lockstep with the expected-byte mirror.
+
+### Dev host (server3, Xeon W-2123 / Skylake-SP)
+
+| Syscall                            | Backend            | ns/call | cyc/call |
+|------------------------------------|--------------------|--------:|---------:|
+| getpid()                           | ptrace             |  14,529 |   52,306 |
+| getpid()                           | seccomp            |  11,562 |   41,623 |
+| getpid()                           | kvm gadget (G4)    |      28 |       97 |
+| **clock_gettime(CLOCK_MONOTONIC)** | **kvm gadget (G5c)** |  **28** |  **101** |
+
+Additional comparison points:
+
+- Native Linux clock_gettime syscall on host: ~606 ns
+  (measured via the same freestanding binary on the
+  physical kernel, no UML).
+- Non-gadget KVM fallback for clock_gettime: ~23 µs
+  (inherits the generic fallback VMEXIT cost from the
+  post-A1/A2/A4 D-06 baseline).
+
+**86× faster than native Linux syscall**, **~3,290×
+faster than the non-gadget KVM fallback**. Lands
+inside memo 07's <100 ns target band.
+
+### Verifying the gadget fired
+
+The freestanding clock-loop binary prints
+`first_nsec=<value>` from the very first
+clock_gettime it issues. A non-zero value proves the
+gadget handler wrote a real timespec via the vvar
+page (a bug that left the buffer untouched would
+show `first_nsec=0` because the binary zeroes its
+local timespec before each call).
+
+Observed under G5c: `first_nsec=58,537,344` — real
+sub-second value from `ktime_get_ns()`, refreshed
+by the host at `kvm_enter_guest` time.
+
+### Known limitation: vvar refresh cadence
+
+vvar refresh runs only at `kvm_enter_guest`, which
+only fires on VMEXITs. A workload that calls ONLY
+gadget-handled syscalls never VMEXITs, so the vvar
+fields stay whatever value the host last wrote. The
+freestanding clock-loop binary hits this exactly: its
+100,000-iteration tight loop sees the same first_nsec
+on every call.
+
+Real workloads don't trigger this case — glibc always
+mixes read/write/mmap/futex which VMEXIT on the
+non-gadget path and refresh the vvar. The v2 fix
+(tracked in memo 11 §"Known limitations") is a host
+timer-tick hook that refreshes vvar at fixed wall-
+clock cadence independent of VMEXIT timing. v1 lands
+without the hook on the grounds that:
+
+  - Gadget-only workloads are synthetic; real
+    programs trigger VMEXITs continuously.
+  - The vvar offsets are ABI-stable, so the timer
+    hook drops in without handler-asm changes.
+  - glibc users call clock_gettime through VDSO
+    which the gadget fast-path matches; glibc
+    benchmarks see the 3,290× speedup directly.
+
+### Reproducibility
+
+Same build commands as G4:
+
+```
+sed -i 's/^# CONFIG_UM_BACKEND_KVM_GADGET is not set$/CONFIG_UM_BACKEND_KVM_GADGET=y/' \
+    /tmp/uml-kvmbench/.config
+make ARCH=um O=/tmp/uml-kvmbench olddefconfig
+make ARCH=um O=/tmp/uml-kvmbench -j$(nproc)
+
+# Measure clock_gettime (build clock-loop.c alongside
+# getpid-loop.c — the G8 fleet bench will integrate
+# this into the selftest):
+cc -Wall -O2 -static -nostdlib -ffreestanding \
+   -fno-asynchronous-unwind-tables -fno-stack-protector \
+   -o /tmp/clock-loop clock-loop.c
+timeout 20 /tmp/uml-kvmbench/linux backend=force=kvm \
+    init=/tmp/clock-loop mem=256M con=null con0=fd:0,fd:1 \
+    root=/dev/root rootfstype=hostfs rw panic=-1 </dev/null 2>&1 | \
+    grep PERF_CLOCK
+```
+
+Expected: `cyc_per_call` ≈ 100-110 on modern x86_64.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream

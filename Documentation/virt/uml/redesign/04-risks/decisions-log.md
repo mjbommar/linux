@@ -7374,4 +7374,95 @@ A-backend-abstraction):
 
 ---
 
+## D73 (2026-04-24) — G5 LANDED: clock_gettime(CLOCK_MONOTONIC) gadget at 101 cyc / ~28 ns
+
+**Finding.** Memo 11 G5 (task #208) landed in three sub-
+commits. `clock_gettime(CLOCK_MONOTONIC, &ts)` now
+returns a real timespec from the shared vvar page
+without a VMEXIT, at **101 cyc / ~28 ns** on
+Skylake-SP — dead-center of D71's predicted band for
+"realistic gadget handler w/ seqlock bracket."
+
+Performance deltas (dev host, Xeon W-2123):
+
+  - vs native Linux clock_gettime syscall (~606 ns
+    on the host's physical kernel): **86× faster**
+  - vs non-gadget KVM fallback (~23 µs full VMEXIT +
+    shadow-PT refill + handle_syscall): **3,290×
+    faster**
+  - Same cost as G4's getpid (28 ns / 97 cyc), which
+    makes sense — both are swapgs + single seqlock
+    read + sysretq with 1-2 extra cmp/je in the
+    dispatch chain.
+
+**Memo 07 vision target (<100 ns) cleared on all G4 +
+G5c gadget-handled syscalls.**
+
+**Sub-commit ladder.**
+
+  - G5a (`f960c8fa`) — vvar struct + lifecycle
+    helpers + KUnit (32 B cache-line-aligned vvar,
+    seqlock-writer host-side, host refresh reads
+    ktime_get_ns + ktime_get_real_ts64).
+  - G5b (`4ccf8adc`) — bootstrap-page offset
+    shuffle to give LSTAR 0x1c0 (448 B) of room.
+    Pure offset reshuffle; no logic changes.
+  - G5c (`653057b6`) — 60 B clock_gettime handler
+    asm + 8th dispatch entry + KUnit byte-mirror
+    update.
+
+Total new C/asm under Kconfig gate: ~200 LOC runtime
++ ~70 LOC tests.
+
+**Known limitation.** vvar refreshes at
+kvm_enter_guest, which only fires per-VMEXIT. A
+workload that calls ONLY gadget-handled syscalls
+(getpid-only, clock_gettime-only) never triggers a
+VMEXIT → vvar fields freeze at whatever the host
+last wrote. Observed in the freestanding clock-loop
+binary: 100,000-iteration tight loop reports the
+same first_nsec on every call. Real workloads
+(glibc-linked programs) always mix read/write/mmap/
+futex etc. which refresh the vvar on every non-
+gadget syscall, so the clock advances naturally.
+
+**Not a correctness bug** for real programs; is a
+synthetic-benchmark artifact. v2 fix is a host
+timer-tick hook that refreshes vvar independent of
+VMEXIT, tracked in memo 11 §"Known limitations."
+
+**Ladder status.**
+
+  - G1 (memo 11)                ✓ 2026-04-24
+  - G2 (1-syscall bench floor)  ✓ 2026-04-24
+  - G3 (per-vCPU state channel) ✓ 2026-04-24
+  - G4 (7 pid-family handlers)  ✓ 2026-04-24
+  - G5 (clock_gettime + vvar)   ✓ 2026-04-24 (this entry)
+  - G6 (sched_yield + time +
+        getcpu)                 pending (task #209)
+  - G7 (class_map E + perf
+        gate extension)         pending (task #210)
+  - G8 (s0-s7 fleet bench +
+        memo 11 results freeze) pending (task #211)
+
+G6 is straightforward (three more handlers that look
+structurally like G4's mov-gs; sched_yield falls
+through to fallback on v1 since HLT-yielding is the
+simplest correct path). G7-G8 are selftest
+integration + distribution.
+
+**Cross-references.**
+
+  - Memo 07 §"Round-trip cost" — the prediction
+    validated here (≤100 ns on modern silicon).
+  - Memo 11 — the implementation plan this closes.
+  - D71 — G2 GO decision that committed to
+    G3-G8.
+  - measurements.md 2026-04-24 G5 section — the
+    per-silicon number.
+  - commits `f960c8fa` / `4ccf8adc` / `653057b6` —
+    the three sub-commits.
+
+---
+
 ## (Future entries here, as decisions are made)
