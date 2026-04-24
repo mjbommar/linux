@@ -643,6 +643,35 @@ static void kvm_exit_probe_null_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, kvm_exit_guest_probe(&u,   NULL),   -EINVAL);
 }
 
+/*
+ * Memo 09 step 1: shadow PGD allocator lifecycle. Exercised in
+ * isolation so the assertion is valid regardless of whether
+ * kvm_init ran (which it doesn't on DYNAMIC builds where the
+ * seccomp backend wins arbitration).
+ *
+ * The function is idempotent — if kvm_init already ran it,
+ * subsequent alloc calls just return 0 with a pr_warn_once.
+ * Assert the resulting gpa is non-zero + page-aligned.
+ */
+static void kvm_shadow_pgd_alloc_test(struct kunit *test)
+{
+	u64 gpa_before = kvm_shadow_pgd_gpa();
+	u64 gpa_after;
+	int rc;
+
+	rc = kvm_shadow_pgd_alloc();
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	gpa_after = kvm_shadow_pgd_gpa();
+	KUNIT_EXPECT_NE(test, (unsigned long long)gpa_after, 0ULL);
+	KUNIT_EXPECT_EQ(test, (unsigned long long)(gpa_after & 0xfffULL), 0ULL);
+
+	/* If kvm_init already allocated, the gpa shouldn't change. */
+	if (gpa_before)
+		KUNIT_EXPECT_EQ(test, (unsigned long long)gpa_after,
+				(unsigned long long)gpa_before);
+}
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 /* ---------------------------------------------------------------- */
@@ -687,6 +716,8 @@ static struct kunit_case backend_test_cases[] = {
 	/* KVM GP-reg reverse marshal (memo 08 #2b prep) */
 	KUNIT_CASE(kvm_regs_roundtrip_test),
 	KUNIT_CASE(kvm_exit_probe_null_test),
+	/* KVM shadow PGD lifecycle (memo 09 step 1) */
+	KUNIT_CASE(kvm_shadow_pgd_alloc_test),
 #endif
 	{}
 };

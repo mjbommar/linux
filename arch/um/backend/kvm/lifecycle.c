@@ -38,9 +38,12 @@
  * REGION for mm_map/mm_unmap); D-04 creates vCPUs on top.
  */
 #include <linux/errno.h>
+#include <linux/gfp.h>
 #include <linux/kvm.h>
+#include <linux/mm.h>
 #include <linux/printk.h>
 
+#include <asm/page.h>
 #include <os.h>
 #include <mem.h>			/* uml_physmem */
 #include <as-layout.h>			/* physmem_size */
@@ -198,6 +201,16 @@ int kvm_init(const struct um_backend_args *args)
 	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu (memslot deferred to first KVM_RUN)\n",
 		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
 		kvm_ctx.run_size);
+	/*
+	 * Shadow_pgd alloc is deferred to first use (memo 09 step 1
+	 * lazy-init pattern, mirroring kvm_ensure_memslot). kvm_init
+	 * fires from init_backend() during linux_main(), which is
+	 * before mm_init() / buddy allocator bring-up — calling
+	 * alloc_page() here crashes with "UML: fatal signal" before
+	 * start_kernel even runs. First caller that actually needs
+	 * shadow_pgd (kvm_enter_guest under memo 09 step 2, or the
+	 * A-05 KUnit force-probe) invokes kvm_shadow_pgd_alloc().
+	 */
 
 	/*
 	 * Harness invocation relocated to a late_initcall in
@@ -215,11 +228,17 @@ int kvm_init(const struct um_backend_args *args)
 void kvm_shutdown(void)
 {
 	/*
-	 * Order: vCPU resources, then VM, then /dev/kvm. mmap of
-	 * kvm_run survives the vcpu_fd close (the mapping is
-	 * refcounted in the kernel), so we munmap first via
+	 * Order: shadow PT (if allocated) → vCPU resources → VM →
+	 * /dev/kvm. Shadow PT teardown first because its pages are
+	 * GFP-managed and independent of KVM fds; doing it before
+	 * closing fds keeps the dependency graph linear.
+	 * mmap of kvm_run survives the vcpu_fd close (the mapping
+	 * is refcounted in the kernel), so we munmap first via
 	 * os_unmap_memory() before closing the fd.
 	 */
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	kvm_shadow_pgd_free();
+#endif
 	if (kvm_ctx.run0) {
 		os_unmap_memory(kvm_ctx.run0, kvm_ctx.run_size);
 		kvm_ctx.run0 = NULL;
@@ -286,6 +305,68 @@ int kvm_ensure_memslot(void)
 		uml_physmem, physmem_size);
 	return 0;
 }
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+/*
+ * Shadow page table lifecycle (memo 09 step 1).
+ *
+ * Singleton per-UML-process PGD for the KVM_INTEGRATED build;
+ * future per-mm variants live on mm_id once step 2 lands the
+ * fault-in + context_switch wiring.
+ *
+ * Allocated from normal GFP_KERNEL pages — the shadow PT is a
+ * plain x86-hardware-walkable 4-level page table. PFN is the
+ * host physical page's PFN; under Policy A memslot (gpa =
+ * host_va - uml_physmem) that's what the guest CR3 should
+ * resolve. kvm_shadow_pgd_gpa() hands out `__pa(pgd)`, ready
+ * to load into kvm_regs.cr3.
+ *
+ * Empty zeroed PGD at allocation — step 2 fills in the fixed
+ * bootstrap mapping (GDT + LSTAR + SYSRET page), step 3 fills
+ * user-VA entries on fault.
+ */
+int kvm_shadow_pgd_alloc(void)
+{
+	struct page *page;
+
+	if (kvm_ctx.shadow_pgd) {
+		pr_warn_once("um: kvm shadow_pgd already allocated (va=%p gpa=0x%llx)\n",
+			     kvm_ctx.shadow_pgd,
+			     (unsigned long long)kvm_ctx.shadow_pgd_gpa);
+		return 0;
+	}
+
+	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!page) {
+		pr_err("um: kvm shadow_pgd: alloc_page failed\n");
+		return -ENOMEM;
+	}
+
+	kvm_ctx.shadow_pgd_page = page;
+	kvm_ctx.shadow_pgd      = page_address(page);
+	kvm_ctx.shadow_pgd_gpa  = (u64)__pa(kvm_ctx.shadow_pgd);
+
+	pr_info("um: kvm shadow_pgd: va=%p gpa=0x%llx (memo 09 step 1)\n",
+		kvm_ctx.shadow_pgd,
+		(unsigned long long)kvm_ctx.shadow_pgd_gpa);
+	return 0;
+}
+
+void kvm_shadow_pgd_free(void)
+{
+	if (!kvm_ctx.shadow_pgd_page)
+		return;
+	__free_page(kvm_ctx.shadow_pgd_page);
+	kvm_ctx.shadow_pgd_page = NULL;
+	kvm_ctx.shadow_pgd      = NULL;
+	kvm_ctx.shadow_pgd_gpa  = 0;
+}
+
+u64 kvm_shadow_pgd_gpa(void)
+{
+	return kvm_ctx.shadow_pgd_gpa;
+}
+#endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 int kvm_backend_fd(void)
 {

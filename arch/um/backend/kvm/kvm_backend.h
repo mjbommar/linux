@@ -37,6 +37,29 @@ struct kvm_um {
 	void		*run0;		/* mmap'd kvm_run for vcpu0 */
 	size_t		run_size;	/* KVM_GET_VCPU_MMAP_SIZE */
 	refcount_t	mm_refcount;	/* attached mm_ids */
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	/*
+	 * Shadow page table (memo 09 step 1). Allocated in kvm_init
+	 * for KVM_INTEGRATED builds; this is a singleton per-process
+	 * PGD (ncpus=1 friendly — one active mm at a time). A
+	 * future per-mm variant lives in struct mm_id's per-backend
+	 * bookkeeping once memo 09 step 2 needs it.
+	 *
+	 *   shadow_pgd_page — backing `struct page *` for teardown.
+	 *   shadow_pgd      — kernel VA of the 4 KiB top-level PGD.
+	 *   shadow_pgd_gpa  — __pa(shadow_pgd) for loading into CR3.
+	 *
+	 * Zero-initialised at allocation. Fill-in happens in memo 09
+	 * step 2 (eager bootstrap mapping) + step 3 (lazy fault-in
+	 * from KVM_EXIT_MMIO). Empty pgd at this stage is expected;
+	 * kvm_enter_guest still loads current->active_mm->pgd as CR3
+	 * until step 2 flips that wire.
+	 */
+	struct page	*shadow_pgd_page;
+	void		*shadow_pgd;
+	u64		shadow_pgd_gpa;
+#endif
 };
 
 /*
@@ -93,6 +116,22 @@ void kvm_setup_production_sregs(struct kvm_sregs *sregs,
  * separately.
  */
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+/*
+ * Shadow PT lifecycle (memo 09 step 1). Called by kvm_init /
+ * kvm_shutdown; returns 0 on success, -errno on failure.
+ * Callers panic on failure during init since an unallocatable
+ * shadow PT is a bring-up bug, not a runtime error.
+ */
+int kvm_shadow_pgd_alloc(void);
+void kvm_shadow_pgd_free(void);
+
+/*
+ * Test hook: returns the current singleton shadow_pgd_gpa (or 0
+ * if unallocated). KUnit assertion target; never used from the
+ * run_userspace path.
+ */
+u64 kvm_shadow_pgd_gpa(void);
+
 struct uml_pt_regs;
 int kvm_enter_guest(struct uml_pt_regs *regs);
 

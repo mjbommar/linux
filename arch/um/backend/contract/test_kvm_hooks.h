@@ -29,6 +29,11 @@ int kvm_exit_guest_probe(struct uml_pt_regs *dst, const struct kvm_regs *src);
 int kvm_bootstrap_copy_lstar(u8 *dst, size_t len);
 int kvm_bootstrap_force_init(void);
 
+/* Memo 09 step 1 lifecycle probes. */
+u64 kvm_shadow_pgd_gpa(void);
+int kvm_shadow_pgd_alloc(void);
+void kvm_shadow_pgd_free(void);
+
 #define _TEST_UM_KVM_SYSCALL_PORT	0xf4
 #define _TEST_UM_KVM_SYSRETQ_PORT	0xf5
 
