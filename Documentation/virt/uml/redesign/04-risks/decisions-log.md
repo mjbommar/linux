@@ -7567,4 +7567,101 @@ reach limit.
 
 ---
 
+## D75 (2026-04-24) — F2 fix: preserve user RFLAGS across recoverable #PF + SYSCALL round-trip
+
+**Decision.** Route the saved user RFLAGS through
+`regs->gp[HOST_EFLAGS]` on every VMEXIT and rebuild
+SYSRETQ-bound R11 via a shared helper
+(`kvm_build_sysret_r11`) that forces IF / IOPL /
+reserved-bit-1 on but passes all other RFLAGS bits
+through. Previously `kvm_enter_guest` hardcoded
+`kregs.r11 = 0x3202`, silently dropping the
+architectural state across every recoverable fault.
+
+**Audit finding (round 4, F2).** The IST frame layout
+explicitly records user RFLAGS at +24 in arch/um/
+backend/kvm/thread.c:1718, but the implementation
+restored only user RIP and RSP. The next guest entry
+then hardcoded R11 = 0x3202 in arch/um/backend/kvm/
+thread.c:1193. The marshalling layer already preserved
+HOST_R11 / HOST_EFLAGS, so it was avoidable state loss.
+Flag-sensitive code (rep movs/stos after std,
+carry-chain arithmetic, a trap-flag-single-step) could
+resume with the wrong flags.
+
+**Implementation shape.**
+
+- Added `kvm_build_sysret_r11(saved_rflags)` helper
+  next to the bootstrap-page offsets. It ORs in
+  `KVM_RFLAGS_REQ_ON = bit1 | IF | IOPL=3` so
+  correctness-critical bits can never be cleared by a
+  misbehaving guest. SYSRETQ's hardware mask
+  (`RFLAGS ← (R11 & 0x3C7FD7) | 2`) filters anything
+  else we might have accidentally let through (VM,
+  VIF, VIP).
+- `kvm_enter_guest` now calls
+  `kvm_build_sysret_r11(regs->gp[HOST_EFLAGS])`
+  instead of the 0x3202 constant.
+- `kvm_decode_syscall` overwrites
+  `regs->gp[HOST_EFLAGS] = regs->gp[HOST_R11]` after
+  `kvm_regs_to_uml_regs` runs, because on a SYSCALL
+  VMEXIT the post-marshal HOST_EFLAGS is the KERNEL
+  RFLAGS (we're mid-LSTAR-trampoline) while the user's
+  saved RFLAGS lives in R11 (SYSCALL semantics).
+- The `#PF` recovery path now reads `user_rflags` from
+  IST offset +24 (alongside RIP at +8 and RSP at +32)
+  and stores it into `regs->gp[HOST_EFLAGS]`. The
+  IST frame is the CPU-authoritative source.
+- HLT / MMIO / INTR paths were already correct: they
+  trap in ring-3, so `kregs.rflags` at VMEXIT time is
+  the user's, and `kvm_regs_to_uml_regs` already
+  populates HOST_EFLAGS from it.
+
+**Coverage.** Added `kvm_build_sysret_r11_test` to the
+contract KUnit suite. Exercises four cases:
+
+1. Zero input → output matches the legacy 0x3202
+   (first-entry / fresh-task regression check).
+2. DF=1 (bit 10) input → DF survives the helper,
+   with REQ_ON bits forced on. This is the rep-movs-
+   after-std case the finding explicitly flagged.
+3. All arithmetic flags (CF/PF/AF/ZF/SF/OF) set →
+   all pass through, REQ_ON forced on.
+4. IF=0 input → IF=1 in output (guest can't disable
+   host preemption by zeroing a saved RFLAGS).
+
+KUnit count rises from 34 → 35 with this landing.
+
+**Validation.**
+
+- KUnit: 35/35 pass including
+  `kvm_build_sysret_r11_test`.
+- perf-getpid regression gate: `cyc_per_call = 96`
+  (vs 93 post-G6, both within noise); gate PASS.
+- clock-loop microbench: `cyc_per_call = 95`;
+  `first_nsec = 85423872` confirms vvar seqlock
+  populated, proving the #PF + SYSCALL round-trip
+  still works after the helper swap.
+
+**What this doesn't fix.** The live integration test —
+a ring-3 gadget that sets DF=1 via `std`, faults
+(touches a lazily-mapped page), and asserts DF still
+equals 1 after the retry — is tracked as part of
+audit round-4 F3. The KUnit test above validates the
+pure-data helper; F3 extends to selftest that
+exercises the live fault-recovery path end-to-end.
+
+**Refs.**
+
+- Audit round-4 finding #2 (F2) — the flagged bug.
+- arch/um/backend/kvm/thread.c — helper +
+  `kvm_enter_guest` + `kvm_decode_syscall` + #PF
+  recovery path.
+- arch/um/backend/contract/test_ops.c — new KUnit
+  `kvm_build_sysret_r11_test`.
+- task #218 — this fix.
+- task #220 — F3 follow-on (live-path selftest).
+
+---
+
 ## (Future entries here, as decisions are made)

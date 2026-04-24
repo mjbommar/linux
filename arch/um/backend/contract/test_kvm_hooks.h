@@ -29,6 +29,14 @@ int kvm_exit_guest_probe(struct uml_pt_regs *dst, const struct kvm_regs *src);
 int kvm_bootstrap_copy_lstar(u8 *dst, size_t len);
 int kvm_bootstrap_force_init(void);
 
+/*
+ * Audit round-4 F2: pure-data helper that computes the R11 value
+ * fed to the bootstrap SYSRETQ gadget given a saved user RFLAGS.
+ * Exposed so the contract KUnit suite can cover the user-flag
+ * round-trip without needing /dev/kvm.
+ */
+u64 kvm_build_sysret_r11_probe(u64 saved_user_rflags);
+
 /* Memo 09 step 1 lifecycle probes. */
 u64 kvm_shadow_pgd_gpa(void);
 int kvm_shadow_pgd_alloc(void);

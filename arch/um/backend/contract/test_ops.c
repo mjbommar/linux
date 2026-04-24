@@ -737,6 +737,70 @@ static void kvm_exit_probe_null_test(struct kunit *test)
 }
 
 /*
+ * Audit round-4 F2 regression: kvm_build_sysret_r11 must
+ * preserve the user-visible RFLAGS bits (CF/PF/AF/ZF/SF/TF/
+ * DF/OF/NT/RF/AC/ID) so a faulting instruction's retry or a
+ * SYSCALL-return continuation resumes with the correct
+ * architectural state. It must also force the three
+ * correctness-critical bits on regardless of input:
+ *
+ *   bit  1 (reserved)  — required by the architectural spec
+ *   bit  9 (IF)         — don't let user-mode disable
+ *                          interrupts across a SYSRETQ
+ *   bits 12..13 (IOPL)  — keep at 3 so in-guest ring-3 can
+ *                          still OUT on the wire ports
+ *
+ * Before this fix kvm_enter_guest hardcoded R11 = 0x3202,
+ * which silently dropped every saved user RFLAGS across a
+ * recoverable #PF or SYSCALL round-trip. The test exercises
+ * three cases: the first-entry zero-input case (matches the
+ * old constant), a DF=1-set case (direction flag is easy to
+ * miss), and an all-arith-set case.
+ */
+static void kvm_build_sysret_r11_test(struct kunit *test)
+{
+	u64 r11;
+	const u64 req_on = (1UL << 1) | (1UL << 9) | (3UL << 12);
+
+	/* First-entry / fresh-task case: zero in, required-bits out. */
+	r11 = kvm_build_sysret_r11_probe(0);
+	KUNIT_EXPECT_EQ(test, (unsigned long long)r11, 0x3202ULL);
+
+	/*
+	 * DF=1 (bit 10): must survive. rep movs retries after #PF
+	 * depend on DF being correct.
+	 */
+	r11 = kvm_build_sysret_r11_probe(1UL << 10);
+	KUNIT_EXPECT_NE(test,
+			(unsigned long long)(r11 & (1UL << 10)), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			(unsigned long long)(r11 & req_on),
+			(unsigned long long)req_on);
+
+	/* All arith flags (CF/PF/AF/ZF/SF/OF) set: must pass through. */
+	{
+		u64 arith = (1UL << 0) | (1UL << 2) | (1UL << 4) |
+			    (1UL << 6) | (1UL << 7) | (1UL << 11);
+
+		r11 = kvm_build_sysret_r11_probe(arith);
+		KUNIT_EXPECT_EQ(test,
+				(unsigned long long)(r11 & arith),
+				(unsigned long long)arith);
+		KUNIT_EXPECT_EQ(test,
+				(unsigned long long)(r11 & req_on),
+				(unsigned long long)req_on);
+	}
+
+	/* IF=0 on input must still yield IF=1 in output (guest
+	 * can't disable host preemption by clearing IF in a
+	 * faulting instruction's saved RFLAGS).
+	 */
+	r11 = kvm_build_sysret_r11_probe(0);
+	KUNIT_EXPECT_NE(test,
+			(unsigned long long)(r11 & (1UL << 9)), 0ULL);
+}
+
+/*
  * Memo 09 step 1: shadow PGD allocator lifecycle. Exercised in
  * isolation so the assertion is valid regardless of whether
  * kvm_init ran (which it doesn't on DYNAMIC builds where the
@@ -1040,6 +1104,8 @@ static struct kunit_case backend_test_cases[] = {
 	/* KVM GP-reg reverse marshal (memo 08 #2b prep) */
 	KUNIT_CASE(kvm_regs_roundtrip_test),
 	KUNIT_CASE(kvm_exit_probe_null_test),
+	/* Audit round-4 F2: SYSRETQ R11 preserves user RFLAGS */
+	KUNIT_CASE(kvm_build_sysret_r11_test),
 	/* KVM shadow PGD lifecycle (memo 09 step 1) */
 	KUNIT_CASE(kvm_shadow_pgd_alloc_test),
 	/* Memo 10 syscall classification (step 2 + step 6) */

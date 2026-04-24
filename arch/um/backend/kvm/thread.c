@@ -236,6 +236,44 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 #define KVM_BOOTSTRAP_IDT_ENTRIES	33	/* covers #PF (vector 14) */
 
 /*
+ * Bits that MUST be set in the R11 value passed to the bootstrap
+ * SYSRETQ gadget so the guest resumes ring-3 correctly. SYSRETQ
+ * loads user RFLAGS from R11 after stripping a hardware-fixed
+ * mask (AMD64 SDM §6.1.1: RFLAGS ← (R11 & 0x3C7FD7) | 2), so the
+ * caller passes the full saved RFLAGS and lets hardware filter.
+ *
+ *   bit  1 (reserved)  — required 1 per the architectural spec
+ *   bit  9 (IF)         — keep interrupts enabled in ring-3; the
+ *                          guest cannot disable the host's
+ *                          preemption path
+ *   bits 12..13 (IOPL)  — hold at 3 so the in-guest ring-3
+ *                          protocol ports (0xf4 syscall trap,
+ *                          0xf5 halt, 0xfb PF-recovery, 0x80
+ *                          debug) remain usable without switching
+ *                          CPL
+ *
+ * All other user-visible bits (CF/PF/AF/ZF/SF/TF/DF/OF, NT, RF,
+ * AC, ID) inherit from the saved user RFLAGS so a faulting
+ * instruction's retry or a SYSCALL-return continuation sees the
+ * correct architectural state. Before audit round-4 F2 this
+ * value was hardcoded to 0x3202 which silently dropped the
+ * saved user RFLAGS across every recoverable #PF and every
+ * SYSCALL round-trip.
+ */
+#define KVM_RFLAGS_REQ_ON	((1UL << 1) | (1UL << 9) | (3UL << 12))
+
+/*
+ * Pure-data helper: compute the R11 value to hand to the
+ * bootstrap SYSRETQ gadget given a saved user RFLAGS. Exposed
+ * so the contract KUnit suite can cover the round-trip without
+ * touching /dev/kvm (audit round-4 F3).
+ */
+static inline u64 kvm_build_sysret_r11(u64 saved_user_rflags)
+{
+	return saved_user_rflags | KVM_RFLAGS_REQ_ON;
+}
+
+/*
  * LSTAR trampoline: 5 bytes. Byte-identical to
  * `kvm_harness_lstar` in harness.c (D-04c). On SYSCALL entry
  * the CPU jumps here with RCX = post-SYSCALL RIP and R11 =
@@ -729,6 +767,12 @@ int kvm_bootstrap_copy_lstar(u8 *dst, size_t len)
 	return sizeof(kvm_bootstrap_lstar_bytes);
 }
 EXPORT_SYMBOL_GPL(kvm_bootstrap_copy_lstar);
+
+u64 kvm_build_sysret_r11_probe(u64 saved_user_rflags)
+{
+	return kvm_build_sysret_r11(saved_user_rflags);
+}
+EXPORT_SYMBOL_GPL(kvm_build_sysret_r11_probe);
 
 /*
  * Program MSR_STAR / MSR_LSTAR / MSR_FMASK on vcpu0 so that a
@@ -1255,20 +1299,31 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 *                                          gadget.
 	 *   RCX = user's intended RIP           — SYSRETQ loads RIP
 	 *                                          from RCX.
-	 *   R11 = 0x3202                        — SYSRETQ loads
+	 *   R11 = saved user RFLAGS             — SYSRETQ loads
 	 *                                          RFLAGS from R11.
-	 *                                          0x3202 = IF=1,
-	 *                                          bit-1 reserved,
-	 *                                          IOPL=3 so ring-3
-	 *                                          can OUT on
-	 *                                          debug ports.
+	 *                                          Preserves user
+	 *                                          arithmetic +
+	 *                                          direction flags
+	 *                                          so a resumed
+	 *                                          faulting or
+	 *                                          SYSCALL-return
+	 *                                          instruction
+	 *                                          sees the correct
+	 *                                          architectural
+	 *                                          state (audit
+	 *                                          round-4 F2).
+	 *                                          REQ_ON bits
+	 *                                          enforce IF=1 +
+	 *                                          IOPL=3 +
+	 *                                          reserved-bit-1
+	 *                                          unconditionally.
 	 *
 	 * RAX / RSP / etc. pass through from UML regs — they're
 	 * the user process's GP state.
 	 */
 	kvm_uml_regs_to_kvm_regs(&kregs, regs);
 	kregs.rcx    = kregs.rip;			/* preserve user RIP */
-	kregs.r11    = 0x3202;				/* user RFLAGS */
+	kregs.r11    = kvm_build_sysret_r11(regs->gp[HOST_EFLAGS]);
 	kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_SYSRET_OFFSET;
 	kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
 
@@ -1406,7 +1461,20 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * break-out-and-re-enter pattern (audit A1), the next
 	 * call to kvm_enter_guest's bootstrap SYSRETQ dance
 	 * resumes ring-3 at whatever HOST_IP holds, so stash
-	 * the user's continuation RIP there.
+	 * the user's continuation RIP there and the user's
+	 * saved RFLAGS into HOST_EFLAGS.
+	 *
+	 * Audit round-4 F2: kvm_regs_to_uml_regs() above set
+	 * regs->gp[HOST_EFLAGS] from kregs.rflags, which at
+	 * SYSCALL-VMEXIT time is the KERNEL RFLAGS (we're
+	 * mid-LSTAR-trampoline, after the CPU masked through
+	 * FMASK on entry). The user's RFLAGS was instead saved
+	 * into R11 by SYSCALL itself — that's the authoritative
+	 * value for resuming the caller. Overwrite HOST_EFLAGS
+	 * from regs->gp[HOST_R11] (which kvm_regs_to_uml_regs
+	 * populated from kregs.r11) so kvm_enter_guest's
+	 * SYSRETQ gadget can restore the correct architectural
+	 * state via kvm_build_sysret_r11().
 	 *
 	 * Historical note: before A1 an inner `for (;;)` loop
 	 * stayed in the same KVM_RUN and advanced kregs->rip
@@ -1418,7 +1486,8 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * the vCPU state from `regs`, so HOST_IP must be the
 	 * user RIP, not the LSTAR-internal address.
 	 */
-	regs->gp[HOST_IP] = regs->gp[HOST_CX];
+	regs->gp[HOST_IP]     = regs->gp[HOST_CX];
+	regs->gp[HOST_EFLAGS] = regs->gp[HOST_R11];
 
 	/*
 	 * Memo 10 class-D short-circuit: syscalls that would be
@@ -1810,30 +1879,38 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * for the host). Next kvm_enter_guest's
 				 * bootstrap SYSRETQ dance resumes ring-3
 				 * at HOST_IP (= user RIP), with HOST_SP
-				 * restored to user RSP. User RFLAGS is
-				 * approximated by the hardcoded 0x3202
-				 * (IF=1, IOPL=3, reserved bit-1); a
-				 * faulting instruction almost never
-				 * depends on entry RFLAGS being bit-
-				 * exact, so the retry proceeds
-				 * correctly. Tracked as a v2 refinement
-				 * in memo 11 §"Known limitations".
+				 * restored to user RSP and HOST_EFLAGS
+				 * restored to user RFLAGS (audit round-4
+				 * F2). Previously user RFLAGS was
+				 * discarded and approximated by a
+				 * hardcoded 0x3202 at re-entry time,
+				 * which silently clobbered arithmetic /
+				 * direction / trap flags across a
+				 * recoverable fault — a flag-sensitive
+				 * retry (e.g. rep movs after std) could
+				 * then execute with the wrong DF. The
+				 * CPU-saved IST frame is the
+				 * authoritative source for all three
+				 * user-visible fields; we read all
+				 * three.
 				 */
 				{
 					unsigned long off =
 						(unsigned long)(kregs.rsp -
 								kvm_bootstrap_va);
 					u8 *ist = (u8 *)kvm_bootstrap_page + off;
-					u64 user_rip, user_rsp;
+					u64 user_rip, user_rsp, user_rflags;
 
 					if (off >= PAGE_SIZE) {
 						pr_warn_ratelimited("um: kvm: PF IST out of range\n");
 						fatal_sigsegv();
 					}
-					user_rip = *(u64 *)(ist + 8);
-					user_rsp = *(u64 *)(ist + 32);
-					regs->gp[HOST_IP] = user_rip;
-					regs->gp[HOST_SP] = user_rsp;
+					user_rip     = *(u64 *)(ist + 8);
+					user_rflags  = *(u64 *)(ist + 24);
+					user_rsp     = *(u64 *)(ist + 32);
+					regs->gp[HOST_IP]     = user_rip;
+					regs->gp[HOST_SP]     = user_rsp;
+					regs->gp[HOST_EFLAGS] = user_rflags;
 				}
 				goto out_read_regs;
 			}

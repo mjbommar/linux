@@ -366,6 +366,16 @@ int kvm_bootstrap_copy_lstar(u8 *dst, size_t len);
 int kvm_bootstrap_force_init(void);
 
 /*
+ * Audit round-4 F2: pure-data probe wrapper around
+ * kvm_build_sysret_r11. Exposed so the contract KUnit suite
+ * can assert that a saved user RFLAGS round-trips through the
+ * SYSRETQ R11 computation with arithmetic / direction / trap
+ * flags intact and correctness-critical bits (IF, IOPL,
+ * reserved-bit-1) forced on.
+ */
+u64 kvm_build_sysret_r11_probe(u64 saved_user_rflags);
+
+/*
  * UM KVM wire constants: port numbers the LSTAR trampoline uses
  * to signal exit reasons to the host. Matches the harness wire
  * format so sub-commit #3's decode can lift the harness paths
