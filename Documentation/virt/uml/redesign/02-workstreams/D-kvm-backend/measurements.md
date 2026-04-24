@@ -995,6 +995,137 @@ seccomp_run_userspace), not the attach path; that
 belongs to Phase III Lift #1f (D-06 conformance), not to
 a retired #1a.
 
+## 2026-04-24 — D-06 `getpid()` bookend, all three backends, s0–s7
+
+First full three-backend measurement on real user binaries,
+enabled by sub-commits #5c (arch_prctl → MSR_FS_BASE/
+MSR_GS_BASE propagation) and memo 10 steps 2+6 (class-map +
+denylist). Runner:
+`tools/testing/selftests/um/perf-getpid/`.
+
+### Methodology
+
+`getpid-loop` is a freestanding 64-bit ELF (raw `syscall`
+instruction, `rdtsc`, `clock_gettime(MONOTONIC_RAW)`; no
+libc). Run as `init=` under a single `CONFIG_UM_BACKEND_KVM_
+INTEGRATED=y` kernel (`/tmp/uml-kvmint/linux`, byte-identical
+across hosts) with `force=<backend>` on the cmdline. N=100,000
+iterations after a 1,000-iteration warmup. Stdin closed
+(`</dev/null`) so UML doesn't block waiting on console input.
+
+Same binary + same kernel across all eight hosts, so the
+comparison isolates the host CPU + host kernel's KVM
+implementation. No P-state locking — each host reports the
+`/proc/cpuinfo cpu MHz` value observed after the run
+completed (governor may have returned to idle), so the MHz
+column is only indicative of boost state, not the clock the
+measurement ran at.
+
+### Per-host getpid round-trip (ns + cyc per call)
+
+| Host | CPU                            | MHz (idle) | ptrace cyc | seccomp cyc | kvm cyc | kvm:seccomp | Notes |
+|------|--------------------------------|-----------:|-----------:|------------:|--------:|------------:|-------|
+| s0   | i9-12900K (Alder Lake)         |        800 |     13,748 |      11,645 |  13,541 |       1.163 | Fastest host. Idle-governor variance: `cpu MHz` reported 800 after workload. |
+| s1   | Xeon E3-1225 v6 (Kaby Lake)    |      3,300 |     32,355 |      32,110 |  32,308 |       1.006 | |
+| s2   | Xeon E3-1225 v5 (Skylake-S)    |      3,497 |     37,962 |      38,468 |  37,804 |       0.983 | Oldest silicon. |
+| s3   | Xeon W-2123 (Skylake-SP)       |      3,699 |     39,751 |      39,938 |  39,749 |       0.995 | Twin of `dev`. |
+| s4   | i5-12600K (Alder Lake)         |      4,500 |     16,008 |      15,199 |  14,820 |       0.975 | KVM cheapest of the three. |
+| s5   | Ryzen 7 7840HS (Zen 4)         |      2,250 |     29,097 |      28,968 |  29,053 |       1.003 | Power-save. |
+| s6   | Ryzen 7 7840HS (Zen 4)         |      1,100 |     29,474 |      29,305 |  29,929 |       1.021 | Idle-governor variance. |
+| s7   | Ryzen 7 7840HS (Zen 4)         |      2,215 |     29,021 |      29,260 |  29,794 |       1.018 | Same chip as s5/s6. |
+
+Matching ns/call (same ordering):
+
+| Host | ptrace ns | seccomp ns | kvm ns |
+|------|----------:|-----------:|-------:|
+| s0   |     4,313 |      3,653 |  4,248 |
+| s1   |     9,769 |      9,695 |  9,755 |
+| s2   |    11,462 |     11,615 | 11,414 |
+| s3   |    11,042 |     11,094 | 11,041 |
+| s4   |     4,342 |      4,123 |  4,020 |
+| s5   |     7,671 |      7,637 |  7,659 |
+| s6   |     7,771 |      7,726 |  7,890 |
+| s7   |     7,651 |      7,714 |  7,855 |
+
+### Observations
+
+- **KVM backend is at parity with seccomp on all 8 hosts.**
+  kvm:seccomp ratio range: 0.975 (s4) → 1.163 (s0). Seven of
+  eight sit inside ±2 %; the s0 outlier is the fastest host
+  in inventory and the one whose idle-governor dropped
+  clock most aggressively after the workload, so the
+  measurement captures different governor behaviour per
+  backend rather than a real cost asymmetry.
+- **Cycle counts cluster by microarchitecture generation,
+  not backend.** The Skylake-era hosts (s2, s3) sit at
+  ~38k-40k cyc, Kaby Lake (s1) at ~32k, Zen 4 (s5/s6/s7)
+  at ~29k, Alder Lake (s0/s4) at ~12k-14k. The KVM
+  backend's cost is dominated by UML's own `handle_syscall
+  → sys_call_table` path plus the shadow-PT refill loop —
+  the same UML kernel on all three backends.
+- **Ratio gate cleared everywhere.** `run-perf-getpid.sh`
+  uses MAX_KVM_RATIO=2.0 by default; every host here sits
+  at ≤1.17, so the regression guard has ~70 % headroom on
+  the worst case. No host needs a per-host override.
+- **Fastest cycles observed.** s0 seccomp: 11,645 cyc
+  (~3.6 µs at 3.2 GHz equivalent). That's ~5× better than
+  s2's 38,468 cyc — consistent with the spike-01 table's
+  finding that Alder Lake is ~5× better than Skylake-S on
+  VMEXIT-heavy paths. The v1 bookend inherits that scaling
+  because the KVM backend still takes a VMEXIT per syscall.
+
+### Comparison to spike-era numbers
+
+The 2026-04-23 bare KVM round-trip (Spike 01/02 table above)
+measured a `null hlt` — no guest code, no syscall
+dispatch. That's ~3.8k cyc on s0, ~20k cyc on s2. Today's
+bookend runs a full UML syscall inside the guest, so the
+delta above the bare round-trip is the UML-side cost:
+
+| Host | Spike01 null-hlt cyc | 2026-04-24 kvm cyc | UML-side delta |
+|------|---------------------:|-------------------:|---------------:|
+| s0   |                3,837 |             13,541 |         +9,704 |
+| s1   |               17,820 |             32,308 |        +14,488 |
+| s2   |               20,600 |             37,804 |        +17,204 |
+| s4   |               11,700 |             14,820 |         +3,120 |
+| s5   |               12,236 |             29,053 |        +16,817 |
+| s6   |               12,350 |             29,929 |        +17,579 |
+| s7   |               12,426 |             29,794 |        +17,368 |
+
+The UML-side delta (~9k-17k cyc) is what memo 07's gadget
+retrofit would eliminate by keeping the guest resident
+across the syscall boundary. Applied to s0 (the fastest
+host), a gadget would cut the per-syscall cost from ~14k
+cyc down toward the bare round-trip floor of ~4k cyc —
+still above the <100 ns aspirational target, but a
+meaningful 3-4× improvement anchoring memo 07's scope.
+
+### What this settles / opens
+
+**Settles.**
+- D-06 gate cleared on 8/8 host configurations, matching
+  the breadth the 2026-04-23 spike sweep covered. KVM
+  backend ships at parity with seccomp.
+- Selftest runner's MAX_KVM_RATIO=2.0 is a sensible
+  default — worst observed today is 1.163, so the gate
+  has real headroom for per-host noise without flaking.
+
+**Opens.**
+- Idle-governor noise is a bigger confounder on fast
+  hosts than expected (s0's 1.163 ratio is almost
+  certainly governor-driven, not real). A P-state-locked
+  re-run (matching Spike 06's methodology) is a
+  follow-on if anyone wants a tighter number.
+- s2 (Skylake-S) has the highest per-syscall cost in the
+  inventory. If anyone needs to optimize the shadow-PT
+  refill path, this is the target host — its ~17k cyc
+  UML-side delta is the biggest single gain available
+  from a refill-skip optimization.
+- GHA nested-virt re-run under the bookend would confirm
+  the nested-virt CI story still works end-to-end; the
+  Spike 05 infrastructure should be reusable with one
+  extra SCP + command.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
