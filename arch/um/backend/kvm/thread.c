@@ -247,10 +247,38 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
  * with the harness so sub-commit #3's decode can lift the
  * existing harness logic unchanged.
  */
+#ifdef CONFIG_UM_BACKEND_KVM_BENCH_GADGET_GETPID
+/*
+ * Memo 11 G2 bench variant: minimum-viable 1-syscall
+ * gadget. Intercepts __NR_getpid (0x27) in-guest, returns
+ * sentinel 0x1234 without a VMEXIT. Every other syscall
+ * takes the normal `out %al, $0xf4` VMEXIT path.
+ * Purpose: measure the SYSCALL+SYSRETQ floor predicted by
+ * memo 07 §"Round-trip cost". DO NOT enable outside the
+ * gadget-floor bench — userspace getpid returns garbage.
+ *
+ *   3d 27 00 00 00       cmp    $0x27, %eax
+ *   75 08                jne    fallback (offset 15)
+ *   b8 34 12 00 00       mov    $0x1234, %eax
+ *   48 0f 07             sysretq   (gadget return)
+ * fallback:
+ *   e6 f4                out    %al, $0xf4
+ *   48 0f 07             sysretq   (fallback return)
+ */
+static const u8 kvm_bootstrap_lstar_bytes[] = {
+	0x3d, 0x27, 0x00, 0x00, 0x00,	/* cmp   $0x27, %eax */
+	0x75, 0x08,			/* jne   +8 -> fallback (offset 15) */
+	0xb8, 0x34, 0x12, 0x00, 0x00,	/* mov   $0x1234, %eax */
+	0x48, 0x0f, 0x07,		/* sysretq (gadget return) */
+	0xe6, 0xf4,			/* out   %al, $0xf4 (fallback) */
+	0x48, 0x0f, 0x07,		/* sysretq (fallback return) */
+};
+#else
 static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0xe6, 0xf4,		/* out %al, $0xf4 */
 	0x48, 0x0f, 0x07,	/* sysretq */
 };
+#endif
 
 /*
  * Ring-3 bootstrap trampoline (memo 08 sub-commit #5a): 3 bytes,

@@ -7206,4 +7206,88 @@ with the A-series fixes.
 
 ---
 
+## D71 (2026-04-24) — G2 Lift #2b PASS: gadget floor validated at 76 cyc / 21 ns — GO for G3-G8
+
+**Finding.** Memo 11 G2 bench (Kconfig
+`UM_BACKEND_KVM_BENCH_GADGET_GETPID=y`, a 20-byte
+LSTAR trampoline with `cmp/jne/mov-sentinel/sysretq +
+fallback` that intercepts `__NR_getpid` in-guest)
+measured on dev host (Xeon W-2123 / Skylake-SP @
+~3.6 GHz):
+
+- **76 cyc / 21 ns per gadget-handled getpid()** —
+  validates memo 07's <100 ns floor prediction with 4×
+  margin.
+- sink = 101,000 × 0x1234 = 470,660,000 confirms the
+  gadget path fired on every call (fallback would
+  produce sink = 101,000 × 1 since init's pid=1).
+- 1,118× cycle reduction vs the non-gadget KVM
+  fallback path (85,016 cyc from the honest post-A1/
+  A2/A4 D-06 measurement).
+
+**Decision.** GO for G3-G8. Memo 07's aspirational
+~100 ns target is reachable on current silicon; the
+systrap gadget workstream is unblocked and should
+proceed to G3 (per-vCPU state channel).
+
+**Realistic-vs-bench adjustment.** G2's 76 cyc
+measures the pure SYSCALL+SYSRETQ + 4-instruction
+dispatch with a hardcoded return value. G4's real
+`getpid()` handler will add:
+
+- ~3 cyc for seqlock read + retry (G3 mechanism)
+- ~5 cyc for jump-table dispatch (once 11 handlers
+  live under a single trampoline)
+- ~2 cyc for the `current->tgid` load via
+  `%gs:<offset>`
+
+Expected real-gadget cost: **~90-120 cyc / ~25-35 ns**
+on this silicon. Still >500× faster than the 85k cyc
+fallback; still comfortably below memo 07's <100 ns
+target.
+
+**Status of the ladder.**
+
+- G1 (memo 11) ✓ 2026-04-24
+- **G2 (Lift #2b bench) ✓ 2026-04-24 (this entry)**
+- G3 (per-vCPU state channel) — now unblocked; the
+  critical-path item
+- G4 (7 pid-family handlers) — blocked on G3
+- G5 (clock_gettime + vvar) — blocked on G4
+- G6 (sched_yield + time + getcpu) — blocked on G5
+- G7 (class_map E + perf-getpid gate extension) —
+  blocked on G6
+- G8 (s0-s7 fleet bench + D70… wait, D70 was the
+  retraction, gadget results will become their own
+  entry) — blocked on G7. Rename "go/no-go" part to
+  "results summary + freeze memo 11 status."
+
+**Artifacts.**
+
+- Kconfig: `arch/um/Kconfig` `UM_BACKEND_KVM_BENCH_
+  GADGET_GETPID`.
+- LSTAR bytes: `arch/um/backend/kvm/thread.c`
+  (20-byte variant under the new Kconfig).
+- KUnit equivalence: `arch/um/backend/contract/
+  test_ops.c` `kvm_bootstrap_lstar_bytes_test` checks
+  the live bytes match the expected 20-byte pattern
+  when the Kconfig is on.
+- Measurements: `measurements.md` 2026-04-24 G2
+  section.
+
+**Cross-references.**
+
+- D68 (retracted) — the false-parity measurement that
+  originally made the gadget ladder look
+  optional. D71 is the correctly-measured successor.
+- D69 — gadget workstream commitment + 8-step ladder.
+- D70 — audit findings A1/A2/A4 that had to land
+  before G2 could honestly measure anything.
+- Memo 07 §"Round-trip cost" — the prediction this
+  entry validates.
+- Memo 11 §"Gadget G2" — the ladder parent this
+  entry closes.
+
+---
+
 ## (Future entries here, as decisions are made)

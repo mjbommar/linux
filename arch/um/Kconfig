@@ -496,6 +496,38 @@ config UM_BACKEND_KVM_INTEGRATED
 	  #2-#5. Users running the integrated path under a real guest
 	  workload should wait until the full series lands. Say N.
 
+config UM_BACKEND_KVM_BENCH_GADGET_GETPID
+	bool "KVM backend bench: 1-syscall getpid() gadget (memo 11 G2)"
+	depends on UM_BACKEND_KVM_INTEGRATED
+	default n
+	help
+	  Replace the LSTAR trampoline's 5-byte `out %al, $0xf4;
+	  sysretq` wire form with a minimum-viable 1-syscall gadget:
+
+	    cmp $__NR_getpid, %eax
+	    jne fallback
+	    mov $0x1234, %eax   # sentinel return
+	    sysretq              # gadget path: no VMEXIT
+	  fallback:
+	    out %al, $0xf4        # everything else: normal VMEXIT
+	    sysretq
+
+	  Purpose: validate memo 07's prediction that the pure
+	  SYSCALL+SYSRETQ floor is <100 ns per gadget-handled call.
+	  Memo 11 §"Gadget G2" is this deliverable. Once measured,
+	  G3-G8 build up to the full 11-syscall first-pass gadget.
+
+	  The sentinel return 0x1234 is intentionally WRONG — the
+	  bench cares about cycle counts, not correctness, and the
+	  wrong-pid surface lets the runner verify the gadget path
+	  actually fired (a valid pid back from `sink` means the
+	  fallback path ran instead).
+
+	  DO NOT enable for anything except the bench. The
+	  1-syscall gadget silently corrupts getpid() semantics for
+	  every caller; userspace that depends on getpid returning
+	  a real pid will malfunction. Say N.
+
 #
 # Fuzzer-oriented hooks (workstream C-09).
 #

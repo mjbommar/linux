@@ -555,10 +555,27 @@ static void kvm_production_probe_null_test(struct kunit *test)
  * kvm_enter_guest into the real dispatch, this test will
  * start observing the populated bytes automatically.
  */
+#ifdef CONFIG_UM_BACKEND_KVM_BENCH_GADGET_GETPID
+/*
+ * Memo 11 G2 bench variant: 20-byte 1-syscall gadget.
+ * Kept in lockstep with the live table in
+ * arch/um/backend/kvm/thread.c via this KUnit
+ * equivalence assertion.
+ */
+static const u8 kvm_expected_lstar_bytes[] = {
+	0x3d, 0x27, 0x00, 0x00, 0x00,	/* cmp   $0x27, %eax */
+	0x75, 0x08,			/* jne   +8 -> fallback */
+	0xb8, 0x34, 0x12, 0x00, 0x00,	/* mov   $0x1234, %eax */
+	0x48, 0x0f, 0x07,		/* sysretq */
+	0xe6, 0xf4,			/* out   %al, $0xf4 */
+	0x48, 0x0f, 0x07,		/* sysretq */
+};
+#else
 static const u8 kvm_expected_lstar_bytes[] = {
 	0xe6, 0xf4,		/* out %al, $0xf4 */
 	0x48, 0x0f, 0x07,	/* sysretq */
 };
+#endif
 
 static void kvm_bootstrap_lstar_bytes_test(struct kunit *test)
 {

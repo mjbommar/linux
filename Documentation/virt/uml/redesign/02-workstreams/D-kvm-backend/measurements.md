@@ -1231,6 +1231,95 @@ reduction vs the non-gadget number here.
   not yet re-scheduled since the single-host number
   is the gate for the gadget workstream's GO/NO-GO.
 
+## 2026-04-24 — G2 Lift #2b: pure SYSCALL+SYSRETQ floor via 1-syscall gadget (GO for G3-G8)
+
+Memo 07 §"Round-trip cost" predicted <100 ns per gadget-
+handled syscall on modern silicon. G2's minimum-viable
+1-syscall gadget (Kconfig
+`CONFIG_UM_BACKEND_KVM_BENCH_GADGET_GETPID=y`) replaces
+the 5-byte LSTAR trampoline with a 20-byte
+`cmp/jne/mov-sentinel/sysretq + fallback` that intercepts
+`__NR_getpid` in-guest and returns sentinel `0x1234`
+without a VMEXIT. Result on the dev host:
+
+| Backend          | ns/call | cyc/call | vs seccomp | sink signature |
+|------------------|--------:|---------:|-----------:|----------------|
+| ptrace           |  14,458 |   52,048 |     1.25×  | 101,000 (real pid)  |
+| seccomp          |  11,567 |   41,642 |     1.00×  | 101,000 (real pid)  |
+| **kvm (gadget)** |  **21** |   **76** | **0.002×** | 470,660,000 (= 101k × 0x1234) |
+
+The `sink` column is the load-bearing correctness
+check: under the gadget path, every call returned the
+sentinel `0x1234`, so `sink = 101,000 × 0x1234`. Under
+fallback, `sink = 101,000 × 1` (init's real pid). The
+bench run shows every getpid() took the gadget path
+(no VMEXIT for any iteration).
+
+**Interpretation vs memo 07.**
+
+Memo 07 predicted `~300 cyc / ~81 ns` on Skylake-SP class
+silicon (the server3 Xeon W-2123 @ 3.6 GHz). Actual
+number is **76 cyc / 21 ns** — 4× better than predicted.
+Reason: memo 07's model included a conservative
+allowance for per-vCPU state channel overhead (G3's
+seqlock, ~3 cyc) and a jump-table dispatch (~5 cyc for
+11 handlers). The 1-syscall bench has neither: it's a
+single `cmp/jne` + `mov` + `sysretq`, 4 instructions.
+Real G4-G8 handlers will add ~10 cyc each for the
+jump-table + seqlock reads, landing around the predicted
+~80-100 ns band.
+
+**Against the non-gadget KVM baseline:**
+
+| Path | cyc/call |
+|------|---------:|
+| KVM fallback (non-gadget, incl. full VMEXIT + shadow-PT refill + handle_syscall + sys_call_table + KVM_SET_REGS re-entry) | 85,016 |
+| KVM gadget (bench, 4-instruction path) | 76 |
+
+**1,118× cycle reduction** on the gadget path. Memo 07's
+aspirational ~100× target is beaten on the bench case by
+11×.
+
+**Caveat — this is the lower-bound floor, not a real-
+gadget number.**
+
+The G2 bench handler hardcodes `0x1234` as the return
+value. A real `getpid()` gadget (G4) must read
+`current->tgid` from a per-vCPU state page (G3's
+mechanism) with a seqlock retry. Expected real-gadget
+cost: `base (76 cyc) + 2 × memory load + seqlock check
+≈ 90-120 cyc ≈ 25-35 ns`, still vastly under the
+fallback's 85k cyc. So the G2 floor validates the
+mechanism; G4 materialises the correctness layer.
+
+**Decision: GO for G3-G8.**
+
+G2 clears memo 07's <100 ns prediction with 4× margin on
+the bench. Even with G3's seqlock overhead + G4's
+real-state reads, the realistic gadget-path cost lands
+well under 100 ns. This is recorded as decisions-log
+D71; G3 (per-vCPU state channel, task #206) is now the
+critical-path item.
+
+**Reproducibility.**
+
+```
+# Default UML build = integrated KVM + no bench variant
+make ARCH=um O=/tmp/uml-kvmint -j$(nproc)
+
+# Bench variant selects the 20-byte gadget LSTAR
+cp /tmp/uml-kvmint/.config /tmp/uml-kvmbench/.config
+sed -i 's/^# CONFIG_UM_BACKEND_KVM_BENCH_GADGET_GETPID is not set$/CONFIG_UM_BACKEND_KVM_BENCH_GADGET_GETPID=y/' \
+    /tmp/uml-kvmbench/.config
+make ARCH=um O=/tmp/uml-kvmbench olddefconfig
+make ARCH=um O=/tmp/uml-kvmbench -j$(nproc)
+
+# Run sweep; expect KVM-gadget <100 cyc on any
+# modern x86_64 host
+UML_BINARY=/tmp/uml-kvmbench/linux \
+    bash tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh
+```
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
