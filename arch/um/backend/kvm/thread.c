@@ -362,6 +362,46 @@ static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
  * /dev/kvm.
  */
 static void kvm_uml_regs_to_kvm_regs(struct kvm_regs *dst,
+				     const struct uml_pt_regs *src);
+
+/*
+ * Reverse marshal: `struct kvm_regs` → `uml_pt_regs`. Called
+ * from sub-commit #2b's KVM_RUN loop after KVM_EXIT_IO /
+ * KVM_EXIT_MMIO / KVM_EXIT_INTR so UML's common syscall
+ * dispatch (and any downstream fault / signal logic) sees
+ * the guest's current GP register state.
+ *
+ * Mirrors the forward marshal exactly. HOST_ORIG_AX is NOT
+ * set here — that's an UML-entry-path convention the caller
+ * of kvm_decode_syscall arranges once it knows the syscall
+ * bucket. Pure data-structure transform; no ioctl.
+ */
+static void kvm_regs_to_uml_regs(struct uml_pt_regs *dst,
+				 const struct kvm_regs *src)
+{
+	unsigned long *gp = dst->gp;
+
+	gp[HOST_AX]     = src->rax;
+	gp[HOST_BX]     = src->rbx;
+	gp[HOST_CX]     = src->rcx;
+	gp[HOST_DX]     = src->rdx;
+	gp[HOST_SI]     = src->rsi;
+	gp[HOST_DI]     = src->rdi;
+	gp[HOST_BP]     = src->rbp;
+	gp[HOST_SP]     = src->rsp;
+	gp[HOST_R8]     = src->r8;
+	gp[HOST_R9]     = src->r9;
+	gp[HOST_R10]    = src->r10;
+	gp[HOST_R11]    = src->r11;
+	gp[HOST_R12]    = src->r12;
+	gp[HOST_R13]    = src->r13;
+	gp[HOST_R14]    = src->r14;
+	gp[HOST_R15]    = src->r15;
+	gp[HOST_IP]     = src->rip;
+	gp[HOST_EFLAGS] = src->rflags;
+}
+
+static void kvm_uml_regs_to_kvm_regs(struct kvm_regs *dst,
 				     const struct uml_pt_regs *src)
 {
 	const unsigned long *gp = src->gp;
@@ -542,6 +582,21 @@ int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_enter_guest_probe);
+
+/*
+ * Reverse-direction probe: exercises the kvm_regs → uml_pt_regs
+ * marshal. Sub-commit #2b's KVM_RUN loop feeds KVM_GET_REGS
+ * output into this helper; for the contract test today it's a
+ * round-trip fidelity check.
+ */
+int kvm_exit_guest_probe(struct uml_pt_regs *dst, const struct kvm_regs *src)
+{
+	if (!dst || !src)
+		return -EINVAL;
+	kvm_regs_to_uml_regs(dst, src);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_exit_guest_probe);
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 

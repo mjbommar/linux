@@ -108,6 +108,7 @@ struct kvm_regs;
 int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
 			  const struct uml_pt_regs *src,
 			  u64 cr3_gpa, u64 gdt_gpa);
+int kvm_exit_guest_probe(struct uml_pt_regs *dst, const struct kvm_regs *src);
 
 /*
  * Copy the LSTAR-trampoline bytes as they're written into the

@@ -23,6 +23,7 @@
  *     every boot syscall.
  */
 #include <kunit/test.h>
+#include <linux/array_size.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/cpu.h>
@@ -583,6 +584,65 @@ static void kvm_wire_ports_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, _TEST_UM_KVM_SYSRETQ_PORT, 0xf5);
 }
 
+/*
+ * Round-trip fidelity: take a uml_pt_regs, forward-marshal to
+ * kvm_regs, reverse-marshal back. Every HOST_* gp[] slot must
+ * survive the round-trip with byte-identical data; the RFLAGS
+ * reserved-one bit is the one deliberate exception (forward
+ * marshal forces it on, reverse marshal preserves the result).
+ */
+static void kvm_regs_roundtrip_test(struct kunit *test)
+{
+	struct kvm_sregs sregs;
+	struct kvm_regs  kregs;
+	struct uml_pt_regs orig, out;
+	int i;
+	static const int gp_indices[] = {
+		HOST_AX, HOST_BX, HOST_CX, HOST_DX,
+		HOST_SI, HOST_DI, HOST_BP, HOST_SP,
+		HOST_R8, HOST_R9, HOST_R10, HOST_R11,
+		HOST_R12, HOST_R13, HOST_R14, HOST_R15,
+		HOST_IP,
+	};
+
+	memset(&sregs, 0, sizeof(sregs));
+	memset(&kregs, 0, sizeof(kregs));
+	memset(&orig,  0, sizeof(orig));
+	memset(&out,   0xa5, sizeof(out));	/* poison */
+
+	/* Distinct values per slot so a cross-wired reverse marshal
+	 * fails visibly in the memcmp below.
+	 */
+	for (i = 0; i < (int)ARRAY_SIZE(gp_indices); i++)
+		orig.gp[gp_indices[i]] = 0xbeef0000ULL + (unsigned long)i;
+	orig.gp[HOST_EFLAGS] = 0x0;	/* forward marshal forces bit 1 */
+
+	KUNIT_ASSERT_EQ(test,
+		kvm_enter_guest_probe(&sregs, &kregs, &orig, 0, 0), 0);
+	KUNIT_ASSERT_EQ(test,
+		kvm_exit_guest_probe(&out, &kregs), 0);
+
+	for (i = 0; i < (int)ARRAY_SIZE(gp_indices); i++) {
+		KUNIT_EXPECT_EQ(test,
+			(unsigned long long)out.gp[gp_indices[i]],
+			(unsigned long long)orig.gp[gp_indices[i]]);
+	}
+	/* RFLAGS bit 1 round-trips on (forced by forward marshal). */
+	KUNIT_EXPECT_NE(test,
+		(unsigned long long)(out.gp[HOST_EFLAGS] & (1UL << 1)),
+		0ULL);
+}
+
+static void kvm_exit_probe_null_test(struct kunit *test)
+{
+	struct kvm_regs kregs = { 0 };
+	struct uml_pt_regs u;
+
+	memset(&u, 0, sizeof(u));
+	KUNIT_EXPECT_EQ(test, kvm_exit_guest_probe(NULL, &kregs), -EINVAL);
+	KUNIT_EXPECT_EQ(test, kvm_exit_guest_probe(&u,   NULL),   -EINVAL);
+}
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 /* ---------------------------------------------------------------- */
@@ -621,9 +681,12 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_production_sregs_shape_test),
 	KUNIT_CASE(kvm_production_regs_marshal_test),
 	KUNIT_CASE(kvm_production_probe_null_test),
-	/* KVM LSTAR trampoline + wire ports (memo 08 #2) */
+	/* KVM LSTAR trampoline + wire ports (memo 08 #2a) */
 	KUNIT_CASE(kvm_bootstrap_lstar_bytes_test),
 	KUNIT_CASE(kvm_wire_ports_test),
+	/* KVM GP-reg reverse marshal (memo 08 #2b prep) */
+	KUNIT_CASE(kvm_regs_roundtrip_test),
+	KUNIT_CASE(kvm_exit_probe_null_test),
 #endif
 	{}
 };

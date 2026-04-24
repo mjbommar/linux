@@ -25,6 +25,7 @@
 int kvm_enter_guest_probe(struct kvm_sregs *sregs, struct kvm_regs *regs,
 			  const struct uml_pt_regs *src,
 			  u64 cr3_gpa, u64 gdt_gpa);
+int kvm_exit_guest_probe(struct uml_pt_regs *dst, const struct kvm_regs *src);
 int kvm_bootstrap_copy_lstar(u8 *dst, size_t len);
 int kvm_bootstrap_force_init(void);
 
