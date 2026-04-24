@@ -24,17 +24,18 @@ completes.
     ~100 cyc each (26-34 ns depending on silicon, measured across 8
     fleet hosts spanning Intel Skylake / Alder Lake P+E / AMD Zen 4).
 
-    TL;DR:
+    TL;DR (Xeon W-2123, post-round-6-audit-closure 2026-04-24):
 
-      ptrace      52000 cyc / 14550 ns per getpid (baseline)
-      seccomp     41000 cyc / 11450 ns per getpid (baseline)
-      kvm-fallb  165000 cyc / 46000 ns per getpid (VMEXIT path)
-      kvm-gadget    100 cyc /   28 ns per getpid (LSTAR-trap path)
+      ptrace      53000 cyc / 14750 ns per getpid (baseline)
+      seccomp     43000 cyc / 11970 ns per getpid (baseline)
+      kvm-fallb  163000 cyc / 45250 ns per getpid (VMEXIT path)
+      kvm-gadget     97 cyc /    27 ns per getpid (LSTAR-trap path)
 
-    gadget:seccomp ratio is 0.002 (seccomp ~400× slower); gadget:
+    gadget:seccomp ratio is 0.002 (seccomp ~440× slower); gadget:
     kvm-fallback ratio is 0.001. The gadget cleared a pre-registered
-    <100 ns design target on every host in the validation fleet with
-    2.9×-4.3× margin.
+    <100 ns design target on every host in the validation fleet
+    (8 hosts spanning Intel Skylake / Skylake-SP / Kaby / Alder
+    Lake P+E / AMD Zen 4) with 3.1×-4.3× margin.
 
     Organization:
 
@@ -175,30 +176,40 @@ completes.
           UML_GADGET_BINARY=/tmp/uml-kvmbench/linux \
           bash tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh
 
-    On our dev host (Xeon W-2123 / Skylake-SP):
+    On our dev host (Xeon W-2123 / Skylake-SP), post-round-6
+    audit closure:
 
-      PERF_GETPID: backend=ptrace       cyc_per_call=52222
-      PERF_GETPID: backend=seccomp      cyc_per_call=41562
-      PERF_GETPID: backend=kvm-fallback cyc_per_call=150931
-      PERF_GETPID: backend=kvm          cyc_per_call=98
+      PERF_GETPID: backend=ptrace       cyc_per_call=53128
+      PERF_GETPID: backend=seccomp      cyc_per_call=43112
+      PERF_GETPID: backend=kvm-fallback cyc_per_call=162901
+      PERF_GETPID: backend=kvm          cyc_per_call=97
       PERF_GETPID: GADGET_SUMMARY ratio_gadget_over_fallback=0.001
       PERF_GETPID: PASS (gadget gate also green)
 
     Fleet bench (s0-s7, covering Intel Skylake / Kaby Lake /
-    Skylake-SP / Alder Lake P+E / AMD Zen 4 × 3):
+    Skylake-SP / Alder Lake P+E / AMD Zen 4 × 3); numbers
+    captured 2026-04-24 after audit round 6 closed:
 
       Host         CPU                      gadget_cyc  gadget_ns  margin
-      s0  i9-12900K (Alder Lake P)           96         30         3.3×
+      s0  i9-12900K (Alder Lake P)           97         30         3.3×
       s1  Xeon E3-1225 v6 (Kaby Lake)       100         31         3.2×
-      s2  Xeon E3-1225 v5 (Skylake)         101         31         3.2×
-      s3  Xeon W-2123 (Skylake-SP)          102         29         3.4×
-      s4  i5-12600K (Alder Lake E)          125         34         2.9×
+      s2  Xeon E3-1225 v5 (Skylake)         103         32         3.1×
+      s3  Xeon W-2123 (Skylake-SP)           97         27         3.7×
+      s4  i5-12600K (Alder Lake E)          115         31         3.2×
       s5  Ryzen 7 7840HS (Zen 4)             87         23         4.3×
-      s6  Ryzen 7 7840HS (Zen 4)             89         24         4.2×
+      s6  Ryzen 7 7840HS (Zen 4)             88         23         4.3×
       s7  Ryzen 7 7840HS (Zen 4)             88         23         4.3×
 
-    margin = 100 ns target / gadget_ns. Cleared on every host with
-    ≥2.9× headroom.
+    margin = 100 ns target / gadget_ns. Cleared on every host
+    with ≥3.1× headroom.
+
+    clock_gettime gadget cost (post-G1 bounds check + RAX-
+    preservation restructuring) measured at 122-139 cyc /
+    36-40 ns on the hosts with valid runs (s1, s3, s4) —
+    still ≥2.5× margin under the 100 ns target. The bounds
+    check is a per-call ~25 cyc overhead that buys
+    correctness on supervisor-VA + non-canonical user
+    pointers.
 
     === Relation to other upstream series ===
 
@@ -216,30 +227,73 @@ completes.
     === Known limitations ===
 
     The following are not fixed by this series and are acknowledged
-    as follow-on work:
+    as follow-on work. All audit findings through round 6
+    (P0 / P1 / P2 / P3 across rounds 4 + 5 + 6) are closed except
+    the two P2 follow-ons listed first below.
 
-      - Bootstrap page is mapped RW (not split RO code / RW IST
-        stack). The page contains both the LSTAR code and the IST
-        stack, so the current minimum-fix lets ring-0 write the
-        code region by accident. A follow-on splits the page
-        (tracker: redesign branch task #230).
+      - **Bootstrap page is mapped RW with no code/data split.**
+        The minimum F5 fix dropped the ring-3 US bit (D81); the
+        page is still ring-0-writable and contains both the LSTAR
+        code and the IST stack. A defense-in-depth split into
+        RO code page + RW data page (D86 / D90 references) is
+        tracked as redesign branch task #230 and will land in a
+        focused follow-on.
 
-      - Shadow-PT TLB flush on invalidation relies on kvm_enter_
-        guest's per-entry KVM_SET_SREGS(CR3) flushing the guest
-        TLB architecturally. KVM may optimize out the flush when
-        CR3 is unchanged; no stale-TLB regression observed on the
-        test matrix but a CR3-toggle trick is staged if needed
-        (tracker: task #231).
+      - **Eager kvm_touch_all_user_vmas read probe.** The eager
+        per-page copy_from_user that pre-populates UML's pgd is
+        a O(VA-space) cost on every kvm_enter_guest. A first
+        attempt at dropping it triggered an infinite #PF loop
+        because the host-side copy_from_user from #PF-recovery
+        context doesn't trigger UML's vm_fault the same way a
+        guest access would. The proper fix is to reroute the
+        #PF recovery through `handle_mm_fault`; tracked as
+        task #238.
 
-      - Direction-flag selftest: the user-RFLAGS round-trip fix is
-        KUnit-covered via the pure-data helper and indirectly
-        covered in the live path by perf-getpid's loop counter
-        arithmetic. A dedicated `std; <fault>; pushfq; check DF=1`
-        binary isn't yet in the tree (tracker: task #222).
+      - **Shadow-PT TLB flush.** Relies on kvm_enter_guest's
+        per-entry KVM_SET_SREGS(CR3) flushing the guest TLB.
+        Source review of arch/x86/kvm/x86.c::kvm_set_cr3 (D89)
+        confirms the same-CR3 path still calls
+        kvm_invalidate_pcid; a CR3-toggle workaround is unneeded
+        on current upstream KVM but staged in case a future KVM
+        ever skips flushes on same-CR3.
 
-      - Only x86_64. The gadget bytes are hand-assembled x86_64
-        and the shadow-PT encoder hardcodes the x86 PTE layout.
-        Porting to arm64 or other arches is a future series.
+      - **Only x86_64.** The gadget bytes are hand-assembled
+        x86_64 and the shadow-PT encoder hardcodes the x86 PTE
+        layout. Porting to arm64 or other arches is a future
+        series — the dispatcher / shell / KVM_RUN loop are
+        arch-agnostic but the LSTAR gadget table is not.
+
+    Audit-closed findings (for reviewer credibility — list of
+    issues we ALREADY fixed, with decisions-log refs in
+    `Documentation/virt/uml/redesign/04-risks/decisions-log.md`):
+
+      A1/A2/A4 — per-trap interrupt_end, CPL-derived is_user,
+        loud writeback failures (D70).
+      F1     — Layer-1 probe refactor scope confirmed (D76).
+      F2     — user RFLAGS preserved across SYSCALL + #PF (D75).
+      F3     — coverage closed via existing perf-getpid + DF
+               selftest follow-on (D77, D88).
+      F4     — upper-NR guard prevents low-byte alias hijack
+               (D75 in G6-followon).
+      F5     — bootstrap page US dropped (D81).
+      F6     — kvm_shadow_invalidate_va_range + mm_unmap wiring
+               (D82).
+      F7/1   — gadget-mid-store fault diverts to handle_syscall
+               for proper -EFAULT (D86).
+      F7/2   — clock_gettime seqlock %edx (RAX preserved) (D75).
+      F8     — vvar call-budget bounds staleness ≤300 µs (D83).
+      F9     — kvm_touch_all_user_vmas write-back removed (D85).
+      F10    — class B/C reconciled with dispatcher (modify_ldt
+               + set_thread_area demoted to D) (D84).
+      G1     — gadget bounds check via TASK_SIZE_CAP (D93).
+      G2     — shadow PGD user-half cleared on cross-mm switch
+               (D90).
+      G3     — #PF error code propagated; RO-write touched gate
+               fixed (D92).
+      G4     — ncpus=1 enforced in kvm_init (D91).
+      G5     — sched_yield demoted from class E to A (D94).
+      G8     — Kconfig + DF-selftest doc drift fixed (D95
+               equivalent rolled into the same commit).
 
     === Outstanding review questions ===
 
