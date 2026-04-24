@@ -8801,4 +8801,80 @@ know they're tracked, not handwaved.
 
 ---
 
+## D88 (2026-04-24) — F3-followon: direction-flag preservation selftest
+
+**Decision.** Land
+`tools/testing/selftests/um/df-preserve/` — a freestanding
+ring-3 binary that sets DF=1, exercises both the SYSCALL
+fallback round-trip (via `__NR_getsid`, a class-A
+passthrough that goes through handle_syscall and forces
+kvm_build_sysret_r11 to be called on re-entry) and the
+recoverable #PF round-trip (via mmap-then-first-touch),
+then reads back RFLAGS and asserts DF survived. Closes
+the F3-followon task #222.
+
+**Why __NR_getsid and not __NR_getpid.** Earlier draft
+used getpid (NR 39), but getpid is in CLASS_GADGET — the
+gadget services it inside the LSTAR trampoline without a
+VMEXIT, and SYSRETQ at the gadget tail loads RFLAGS
+directly from R11 (which the gadget never touches).
+That path doesn't exercise `kvm_build_sysret_r11` at all.
+A class-A NR like getsid VMEXITs to handle_syscall, then
+the next kvm_enter_guest's bootstrap SYSRETQ rebuilds R11
+through the helper — which is the F2 fix point we want
+to validate.
+
+Verified by deliberately breaking `kvm_build_sysret_r11`
+to return only `KVM_RFLAGS_REQ_ON` (no saved-flags merge):
+
+  Before fix:  syscall=FAIL pf=FAIL
+  After fix:   syscall=PASS pf=PASS
+
+The selftest catches a complete regression of the helper
+on both paths, validating that it's a meaningful
+end-to-end check rather than an unconditional pass.
+
+**Coverage matrix.** The runner sweeps {ptrace, seccomp,
+kvm} and adds a kvm-gadget row when `UML_GADGET_BINARY`
+is set. ptrace + seccomp PASS at baseline (their RFLAGS
+discipline goes through host kernel signal-frame restore;
+DF preservation is upstream Linux, not this work). kvm
++ kvm-gadget PASS post-F2.
+
+**Where this fits the audit story.**
+
+- F2 fixed the underlying user-RFLAGS round-trip
+  (commit b0120f75beae, decisions-log D75).
+- F3 closed the audit's "no automated coverage" concern
+  via existing perf-getpid arithmetic-flag channel
+  (D77).
+- F3-followon (this) adds the targeted DF-preservation
+  binary the audit suggested as ideal coverage. With it
+  in tree, future regressions of kvm_build_sysret_r11
+  surface immediately on the kselftest run instead of
+  weeks later via a confused-flag-sensitive workload.
+
+**File layout.**
+
+```
+tools/testing/selftests/um/df-preserve/
+├── Makefile
+├── df-preserve-loop.c    (freestanding ring-3 binary)
+└── run-df-preserve.sh    (runner across {ptrace,
+                           seccomp, kvm, kvm-gadget})
+```
+
+Same shape as `perf-getpid/` and `cve-repro/` — slots
+into the existing kselftest infrastructure without
+new build hooks.
+
+**Refs.**
+
+- Audit round-4 finding #3 follow-on (F3-followon).
+- D75 — F2 fix (the thing this validates).
+- D77 — F3 close (the indirect coverage).
+- task #222 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)
