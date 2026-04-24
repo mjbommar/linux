@@ -23,7 +23,7 @@ cite the earlier ones for context.
 |---|--------|------|-----------|--------------|--------|
 | 1 | `bpf-hygiene-v1/` | 2 patches | BPF | none | **ready** — patches staged, cover letter written |
 | 2 | `kmsan-arch-callback-rfc/` | 1 RFC patch | mm/kmsan | none (upstream-independent; see below) | **ready** (unblocked 2026-04-23 by D62; see §"Post-D62 update") |
-| 3 | `ftrace-notrace-generic-v1/` | ~3 patches | tracing/ftrace | none (generic kthread notrace) | **to write** — C-04 commit 3a strip infrastructure, generalizable |
+| 3 | `ftrace-notrace-generic-v1/` | 1 patch | tracing/ftrace | none (generic kthread notrace) | **prepared 2026-04-24** (task #194) — cover letter + patch + SUBMISSION-NOTES in-tree, ready for `git send-email` |
 | 4 | `backend-ops-abstraction-rfc/` | ~12 patches | arch/um | series 3 landed (ftrace clean) | **to write** — A-workstream `struct um_backend_ops` RFC |
 | 5 | `static-key-hot-paths-series/` | ~6 patches | arch/um | series 4 landed | **to write** — B-workstream gates |
 | 6 | `kprobes-ftrace-kfence-kcsan-profiles-series/` | ~20 patches across 4 sub-series | arch/um | series 4 + 5 landed | **to write** — C-01..C-05 + C-02 + C-03 |

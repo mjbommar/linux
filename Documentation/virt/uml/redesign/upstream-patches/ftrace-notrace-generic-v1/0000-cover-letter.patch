@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Michael Bommarito <michael.bommarito@gmail.com>
+Date: Thu, 24 Apr 2026 00:00:00 +0000
+Subject: [PATCH 0/1] kernel: mark kthread() + smpboot_thread_fn() notrace
+
+The generic function_graph tracer pushes a shadow-stack entry
+at function entry, expecting a matching pop on return. Two
+kernel-wide wrappers — `kthread()` and `smpboot_thread_fn()`
+— never return normally; both end in do_exit(). The shadow-
+stack entry leaks.
+
+On architectures whose task teardown always unwinds through
+the frame pointer without touching current->ret_stack, the
+leaked entry is harmless: it never gets dereferenced. On
+architectures that resume tasks through setjmp/longjmp-style
+mechanisms (so the host-thread stack doesn't correspond to
+the pushed retp), a graphed function on the unwind path can
+pop the stale entry via return_to_handler() and jump through
+a corrupt return slot.
+
+The narrow fix is to skip graph tracing at these two entry
+points. User-written threadfns that kthread() dispatches to
+are still graph-traceable; only the wrapper functions
+themselves are excluded. Matches the discipline already
+applied to arch/x86/entry's ret_from_fork-adjacent assembly.
+
+No functional impact on architectures where the leak was
+already harmless — both functions exist as landing pads for
+a threadfn, not as subjects of trace analysis.
+
+This series is one patch. The two annotations could be split
+but are semantically identical (same invariant, same reason)
+and review benefits from seeing both in one context.
+
+Signed-off-by: Michael Bommarito <michael.bommarito@gmail.com>
+
+---
+
+Michael Bommarito (1):
+  kernel: mark kthread() and smpboot_thread_fn() notrace
+
+ kernel/kthread.c | 22 +++++++++++++++++++++-
+ kernel/smpboot.c | 11 ++++++++++-
+ 2 files changed, 31 insertions(+), 2 deletions(-)
+
+--
+2.49.0
