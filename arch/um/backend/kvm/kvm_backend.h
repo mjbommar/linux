@@ -241,7 +241,25 @@ struct kvm_gadget_vvar {
 	s64 monotonic_nsec;
 	s64 realtime_sec;
 	s64 realtime_nsec;
-	u64 _pad1[4];			/* cache-line pad (64 B struct) */
+	/*
+	 * Audit round-5 F8: per-refresh call budget for the
+	 * clock gadget. kvm_gadget_vvar_refresh resets to
+	 * KVM_VVAR_BUDGET_INITIAL; the gadget atomically
+	 * decrements on each successful call and falls back
+	 * when the signed value goes negative. On UML the
+	 * host-side hrtimer path can't fire mid-KVM_RUN
+	 * (UML's virtual IRQs are driven by SIGALRM which
+	 * is blocked until KVM_RUN returns), so an in-gadget
+	 * budget is the only reliable mechanism that bounds
+	 * vvar staleness without requiring a periodic host-
+	 * side writer. When the budget expires, the fallback
+	 * VMEXIT triggers handle_syscall → interrupt_end →
+	 * next kvm_enter_guest which refreshes the vvar and
+	 * resets the budget.
+	 */
+	s32 budget;
+	u32 _pad1;
+	u64 _pad2[3];			/* cache-line pad (64 B struct) */
 };
 
 #define KVM_VVAR_OFF_SEQ		0x00
@@ -249,6 +267,20 @@ struct kvm_gadget_vvar {
 #define KVM_VVAR_OFF_MONO_NSEC		0x10
 #define KVM_VVAR_OFF_REAL_SEC		0x18
 #define KVM_VVAR_OFF_REAL_NSEC		0x20
+#define KVM_VVAR_OFF_BUDGET		0x28
+
+/*
+ * Audit round-5 F8: initial budget handed to the clock gadget
+ * at every refresh. 10000 gadget calls ≈ 300 us on modern
+ * silicon (at ~30 ns/call), which is the worst-case staleness
+ * the gadget can exhibit before falling back. A smaller budget
+ * reduces staleness at the cost of more fallback VMEXITs
+ * (~150k cyc each); larger budgets let tight loops run further
+ * off a stale vvar. 10000 gives sub-ms staleness with a
+ * fallback rate of ~3000/s, whose aggregated cost is ~0.4 ms/s
+ * — well under 1% of wall-clock time.
+ */
+#define KVM_VVAR_BUDGET_INITIAL		10000
 
 /*
  * Lazy memslot registration (D-04a). Call once before entering

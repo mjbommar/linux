@@ -585,6 +585,18 @@ void kvm_gadget_vvar_refresh(void)
 	v->monotonic_nsec = (s64)(mono_ns % NSEC_PER_SEC);
 	v->realtime_sec   = real_ts.tv_sec;
 	v->realtime_nsec  = real_ts.tv_nsec;
+	/*
+	 * Audit round-5 F8: replenish the gadget call budget.
+	 * Every gadget clock_gettime decrements this; when it
+	 * goes negative the gadget falls back to the
+	 * handle_syscall path, which triggers the next
+	 * kvm_enter_guest and thus the next refresh — bounding
+	 * vvar staleness to at most KVM_VVAR_BUDGET_INITIAL
+	 * gadget calls without needing host-side timer
+	 * interruption during KVM_RUN (UML's SIGALRM-based
+	 * timer is blocked for the duration of the ioctl).
+	 */
+	v->budget = KVM_VVAR_BUDGET_INITIAL;
 
 	/* Publish: seq flips even → stable. */
 	smp_wmb();

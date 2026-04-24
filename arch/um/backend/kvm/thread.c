@@ -382,8 +382,8 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x3d, 0x35, 0x01, 0x00, 0x00,
 	/* +8  jne +5 (skip getcpu stub) */
 	0x75, 0x05,
-	/* +10 jmp rel32 getcpu_body (+282); rel32 = 282-15 = 267 */
-	0xe9, 0x0b, 0x01, 0x00, 0x00,
+	/* +10 jmp rel32 getcpu_body (+297); rel32 = 297-15 = 282 = 0x11a */
+	0xe9, 0x1a, 0x01, 0x00, 0x00,
 	/* +15 test $0xffffff00, %eax  (any high bits?) */
 	0xa9, 0x00, 0xff, 0xff, 0xff,
 	/* +20 jne +40 → fallback (+62) */
@@ -476,18 +476,18 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	/*
 	 * +176 clock stub: jmp rel32 clock_body (+186)
 	 *   rel32 = 186 - 181 = 5
-	 * +181 time  stub: jmp rel32 time_body  (+259)
-	 *   rel32 = 259 - 186 = 73 = 0x49
+	 * +181 time  stub: jmp rel32 time_body  (+274)
+	 *   rel32 = 274 - 186 = 88 = 0x58
 	 *
 	 * The stubs sit within rel8 reach of their dispatch
 	 * entries; the rel32 jmp then reaches the big bodies
 	 * past sched_yield.
 	 */
 	0xe9, 0x05, 0x00, 0x00, 0x00,
-	0xe9, 0x49, 0x00, 0x00, 0x00,
+	0xe9, 0x58, 0x00, 0x00, 0x00,
 
 	/*
-	 * +186 handler_clock_gettime (CLOCK_MONOTONIC only, 73 B)
+	 * +186 handler_clock_gettime (CLOCK_MONOTONIC only, 88 B)
 	 *
 	 * Audit round-5 F7 part 2: G6's body loaded the
 	 * seqlock value into %eax, clobbering NR=228 before
@@ -498,36 +498,54 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	 * throughout; a fallback hands the correct NR back
 	 * to handle_syscall.
 	 *
-	 * All three fallback jnes use rel32 — rel8 doesn't
-	 * reach fallback at +62 from this offset.
+	 * Audit round-5 F8: prepend a 15-byte call-budget
+	 * decrement so the gadget falls back periodically,
+	 * letting the host refresh the vvar. Without it, a
+	 * tight clock_gettime loop never VMEXITs and guest-
+	 * observed time freezes forever. Budget is reset to
+	 * KVM_VVAR_BUDGET_INITIAL in kvm_gadget_vvar_refresh.
+	 *
+	 * All fallback jnes use rel32 — rel8 doesn't reach
+	 * fallback at +62 from this offset.
 	 *
 	 * On entry: RDI = clockid, RSI = struct timespec *ts,
 	 *           RAX = 228 (NR), swapgs already done.
 	 */
-	0x83, 0xff, 0x01,			/* cmp $1, %edi */
-	/* jne rel32 fallback (+62); rel32 = 62 - 195 = -133 = 0xffffff7b */
-	0x0f, 0x85, 0x7b, 0xff, 0xff, 0xff,
-	/* mov %gs:0x1000, %edx (SEQ); 8 B */
+	/* +186 sub $1, %gs:0x1028 (BUDGET); 9 B */
+	0x65, 0x83, 0x2c, 0x25, 0x28, 0x10, 0x00, 0x00, 0x01,
+	/* +195 js rel32 fallback (+62); rel32 = 62-201 = -139 = 0xffffff75 */
+	0x0f, 0x88, 0x75, 0xff, 0xff, 0xff,
+	/* +201 cmp $1, %edi */
+	0x83, 0xff, 0x01,
+	/* +204 jne rel32 fallback (+62); rel32 = 62-210 = -148 = 0xffffff6c */
+	0x0f, 0x85, 0x6c, 0xff, 0xff, 0xff,
+	/* +210 mov %gs:0x1000, %edx (SEQ); 8 B */
 	0x65, 0x8b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
-	0xf6, 0xc2, 0x01,			/* test $1, %dl */
-	/* jne rel32 fallback (+62); rel32 = 62 - 212 = -150 = 0xffffff6a */
-	0x0f, 0x85, 0x6a, 0xff, 0xff, 0xff,
-	/* mov %gs:0x1008, %r10 (MONO_SEC); 9 B */
+	/* +218 test $1, %dl */
+	0xf6, 0xc2, 0x01,
+	/* +221 jne rel32 fallback (+62); rel32 = 62-227 = -165 = 0xffffff5b */
+	0x0f, 0x85, 0x5b, 0xff, 0xff, 0xff,
+	/* +227 mov %gs:0x1008, %r10 (MONO_SEC); 9 B */
 	0x65, 0x4c, 0x8b, 0x14, 0x25, 0x08, 0x10, 0x00, 0x00,
-	/* mov %gs:0x1010, %r8  (MONO_NSEC); 9 B */
+	/* +236 mov %gs:0x1010, %r8  (MONO_NSEC); 9 B */
 	0x65, 0x4c, 0x8b, 0x04, 0x25, 0x10, 0x10, 0x00, 0x00,
-	/* cmp %gs:0x1000, %edx (SEQ re-read); 8 B */
+	/* +245 cmp %gs:0x1000, %edx (SEQ re-read); 8 B */
 	0x65, 0x3b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
-	/* jne rel32 fallback (+62); rel32 = 62 - 244 = -182 = 0xffffff4a */
-	0x0f, 0x85, 0x4a, 0xff, 0xff, 0xff,
-	0x4c, 0x89, 0x16,			/* mov %r10, (%rsi) */
-	0x4c, 0x89, 0x46, 0x08,			/* mov %r8, 8(%rsi) */
-	0x31, 0xc0,				/* xor %eax, %eax */
-	0x0f, 0x01, 0xf8,			/* swapgs */
-	0x48, 0x0f, 0x07,			/* sysretq */
+	/* +253 jne rel32 fallback (+62); rel32 = 62-259 = -197 = 0xffffff3b */
+	0x0f, 0x85, 0x3b, 0xff, 0xff, 0xff,
+	/* +259 mov %r10, (%rsi) */
+	0x4c, 0x89, 0x16,
+	/* +262 mov %r8, 8(%rsi) */
+	0x4c, 0x89, 0x46, 0x08,
+	/* +266 xor %eax, %eax */
+	0x31, 0xc0,
+	/* +268 swapgs */
+	0x0f, 0x01, 0xf8,
+	/* +271 sysretq */
+	0x48, 0x0f, 0x07,
 
 	/*
-	 * +259 handler_time (23 B)
+	 * +274 handler_time (23 B)
 	 *
 	 *   time(2): time_t time(time_t *tloc);
 	 *
@@ -548,7 +566,7 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x48, 0x0f, 0x07,			/* sysretq */
 
 	/*
-	 * +282 handler_getcpu (30 B)
+	 * +297 handler_getcpu (30 B)
 	 *
 	 *   int getcpu(unsigned int *cpu, unsigned int *node);
 	 *
@@ -579,7 +597,7 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x0f, 0x01, 0xf8,			/* swapgs */
 	0x48, 0x0f, 0x07,			/* sysretq */
 
-	/* total body: 312 bytes (G6-follow-on; LSTAR region 448 B) */
+	/* total body: 327 bytes (G6-follow-on + F8; LSTAR region 448 B) */
 };
 #else
 static const u8 kvm_bootstrap_lstar_bytes[] = {
@@ -1260,9 +1278,16 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	{
 		u64 gstate_va = kvm_bootstrap_va + PAGE_SIZE;
 
+		/*
+		 * Audit round-5 F5/F8 alignment: drop US bit. Gadget
+		 * handlers access this page at CPL=0 (SYSCALL switches
+		 * to ring-0 before fetching LSTAR), so US=0 is
+		 * sufficient. Blocking ring-3 direct reads is a
+		 * defense-in-depth match for F5's bootstrap-page fix.
+		 */
 		rc = kvm_shadow_map_page(gstate_va,
 					 kvm_gadget_state_gpa(),
-					 KVM_X86_PTE_P | KVM_X86_PTE_US);
+					 KVM_X86_PTE_P);
 		if (rc < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(gadget_state) failed (%d)\n",
 					    rc);
@@ -1277,8 +1302,15 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 * immediately above the state page in guest VA so a
 	 * single MSR_KERNEL_GS_BASE (→ state page) covers both
 	 * structs via disp32 addressing in the G5c handler asm
-	 * (state at %gs:0x00+, vvar at %gs:0x1000+). Read-only
-	 * from ring-3 (P | US).
+	 * (state at %gs:0x00+, vvar at %gs:0x1000+).
+	 *
+	 * Audit round-5 F8: mapped RW (not just P) because the
+	 * clock gadget decrements the budget counter at
+	 * %gs:0x1028 via `sub $1, %gs:<disp>` — a ring-0 write
+	 * that faults if W=0 (CR0.WP is always set on our
+	 * guest, so ring-0 respects write-protect).
+	 * US dropped: ring-3 never accesses this page directly
+	 * (F5/F8 defense-in-depth).
 	 */
 	rc = kvm_gadget_vvar_alloc();
 	if (rc < 0) {
@@ -1291,7 +1323,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 
 		rc = kvm_shadow_map_page(vvar_va,
 					 kvm_gadget_vvar_gpa(),
-					 KVM_X86_PTE_P | KVM_X86_PTE_US);
+					 KVM_X86_PTE_P | KVM_X86_PTE_RW);
 		if (rc < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(gadget_vvar) failed (%d)\n",
 					    rc);

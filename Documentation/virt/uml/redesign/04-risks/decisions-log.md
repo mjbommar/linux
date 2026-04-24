@@ -8304,4 +8304,119 @@ intended.
 
 ---
 
+## D83 (2026-04-24) — F8: gadget call-budget bounds vvar staleness to ≤10000 calls
+
+**Decision.** Add an `s32 budget` counter to the vvar
+page, decremented in the LSTAR clock gadget on every
+call. When budget goes negative the gadget falls back
+to handle_syscall, triggering a VMEXIT that refreshes
+the vvar and resets the budget. This bounds
+guest-observed clock staleness to the cost of one
+budget's worth of gadget calls — about 300 µs at
+KVM_VVAR_BUDGET_INITIAL = 10000.
+
+**Finding.** Audit round-5 P1 #5 (F8) — "gadget
+clock_gettime can freeze time during the very
+workload it optimizes. The vvar page refreshes only
+before KVM entry; a no-VMEXIT clock loop keeps
+reading the same timestamp indefinitely." Confirmed
+empirically: a 20M-iter `clock_gettime(CLOCK_MONOTONIC)`
+loop measured `delta_ns=0 unique_nsec=1` — i.e. the
+gadget returned the same timestamp for every one of
+the 20,000,000 calls.
+
+**Why a host-side hrtimer doesn't work on UML.** We
+first tried an hrtimer-based approach (refresh vvar
+from a periodic soft-IRQ callback). On UML that's
+fundamentally broken: UML's entire "kernel" runs as a
+userspace process on the host, and its "hardware
+IRQs" are virtualized via SIGALRM delivery. While the
+UML thread is blocked inside the KVM_RUN ioctl, the
+UML kernel can't execute timer-tick code — SIGALRM
+delivery would interrupt the ioctl (returning -EINTR)
+but our clock-loop is inside a single KVM_RUN that's
+running guest code entirely, so no -EINTR ever
+happens. The hrtimer callback never fires. (Verified
+with a pr_info_ratelimited counter.)
+
+**The budget approach.** In-gadget decrement is
+reliable because it only depends on the gadget itself
+running. Every call does:
+
+```
+  sub $1, %gs:<BUDGET_OFF>   # 9 B
+  js  fallback               # 6 B
+```
+
+When budget crosses zero, `js` is taken and the
+gadget falls back via the regular `out $0xf4`
+trampoline. The fallback VMEXIT runs handle_syscall,
+then interrupt_end, then re-enters via kvm_enter_guest
+which refreshes the vvar (resetting budget to
+KVM_VVAR_BUDGET_INITIAL).
+
+Budget = 10000 gives worst-case staleness of ~300 µs
+(10000 × 30 ns/call) and a fallback rate of ~3333
+fallbacks/second in a tight loop. Each fallback costs
+~150k cyc ≈ 42 µs on our silicon. Aggregate fallback
+overhead: 3333 × 42 µs = 140 ms/s = 14% wall-clock
+overhead for a workload that literally does nothing
+but call clock_gettime. For realistic workloads the
+cost is much lower.
+
+**Shadow-PT permission update required.** The gadget's
+`sub $1, %gs:<BUDGET>` is a ring-0 write. The vvar
+page was previously mapped `P | US` (read-only). At
+CR0.WP=1 (UML default), ring-0 writes fault on W=0
+pages. Changed vvar mapping to `P | RW` (no US —
+ring-3 has never needed direct access, and F5's
+defense-in-depth theme says dropping US is free).
+State page also tightened from `P | US` to plain `P`
+for the same reason.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass including the now-327-byte
+  `kvm_bootstrap_lstar_bytes_test`.
+- perf-getpid single-binary: kvm cyc=102 (vs 100
+  pre-F8; +2 cyc noise), PASS.
+- perf-getpid dual-binary: gadget 97 cyc, fallback
+  165875 cyc, ratio 0.001, PASS.
+- clock-loop microbench (100k iters):
+  - Before F8: `delta_ns=0 unique_nsec=1` — frozen.
+  - After F8: `delta_ns=3728640 first_nsec=
+    165543168` — clock advances ~37 ns/call, sub-ms
+    staleness.
+- clock-advance long loop (20M iters):
+  - Before F8: `delta_ns=0 unique_nsec=1`.
+  - After F8: `delta_ns=705530624 unique_nsec=3999`
+    — 705 ms of real time captured across ~4000
+    distinct vvar snapshots.
+- time/getcpu smoke under both builds: identical
+  output — gadget handlers semantically equivalent
+  to fallback.
+
+**Cost.** Clock body grew 73 → 88 B (+15 B prologue).
+Clock cyc_per_call rose 98 → 122 on the microbench
+(includes fallback amortization). Still 300× faster
+than the non-gadget fallback. No impact on pid-family
+or sched_yield handlers.
+
+**Refs.**
+
+- Audit round-5 finding #5 (F8).
+- arch/um/backend/kvm/kvm_backend.h — struct
+  kvm_gadget_vvar gains `s32 budget`; offsets +0x28
+  + KVM_VVAR_BUDGET_INITIAL.
+- arch/um/backend/kvm/lifecycle.c — vvar_refresh
+  now resets budget.
+- arch/um/backend/kvm/thread.c — vvar mapped
+  P | RW; state mapped plain P; LSTAR clock body
+  gains the 15-byte budget prologue.
+- arch/um/backend/contract/test_ops.c — expected
+  lstar bytes grows to 327 B.
+- task #227 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)
