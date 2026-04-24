@@ -7083,4 +7083,127 @@ session cadence.
 
 ---
 
+## D70 (2026-04-24) — D-06 "KVM parity" bookend was measuring seccomp three times; D68 retracted; gadget ladder paused on A1/A2/A4 findings
+
+**Context + retraction.** D68 (2026-04-24) reported a 1.002×
+kvm:seccomp ratio across 8 hosts and claimed the KVM
+backend was at parity with seccomp on a real-guest
+getpid() bookend. **That measurement was invalid.** The
+runner script used `force=kvm` as the kernel cmdline
+token; the actual parser in `arch/um/kernel/backend.c`
+expects `backend=force=kvm`. `force=kvm` is silently
+treated as an unrecognized parameter and the default
+`backend=auto` path picks seccomp (post-D-46 default).
+The three "backends" in the 8-host table therefore all
+measured seccomp — the ratio was noise between runs of
+the same backend. The table headline (KVM at parity)
+was wrong.
+
+Discovery surfaced while running the G2 gadget floor
+bench — the bench gadget (minimum-viable 1-syscall
+gadget intercepting `__NR_getpid`) never fired. Trace
+showed `um: backend = seccomp` in the boot log despite
+the `force=kvm` cmdline. Re-running with `backend=
+force=kvm` exposed that the real KVM backend crashes
+UML with a fatal signal during early init (and later,
+with a panic inside `kvm_run_userspace` once `/dev/kvm`
+access is granted).
+
+**Findings from a companion 2026-04-24 code audit**
+(six items below; the top three are the gate items the
+gadget ladder must clear before G2 can be re-run).
+
+- **A1 (high): KVM backend skips `interrupt_end()`.**
+  `arch/um/backend/kvm/thread.c` lines 1247/1355/1593
+  return or loop without the `interrupt_end()` call that
+  `ptrace/trap_user.c:254` + `seccomp/trap_user.c:157`
+  both issue after each trap. `interrupt_end()` drains
+  resched + pending signals + resume work. Without it,
+  the KVM backend silently violates UML's scheduler +
+  signal contract and eventually panics.
+- **A2 (high): `regs->is_user` hardcoded to 1 on
+  several paths.** `kvm_regs_to_uml_regs` only copies
+  GP state; the classification bit is then forced true
+  at lines 1077/1332/1355/1606. But `arch/um/kernel/
+  trap.c:292/321` use `UPT_IS_USER(regs)` to choose
+  between panic (kernel fault) and user signal. A
+  kernel-mode #PF misclassified as user-mode signals a
+  phantom user task; a user-mode fault correctly
+  classified lets UML's fault path run. Hardcoding to 1
+  means kernel-mode faults are silently user-signaled
+  on the KVM backend.
+- **A3 (medium-high): Layer-1 arbiter not
+  authoritative.** `os_early_checks()` still runs
+  seccomp + ptrace probes; `init_backend()` calls them
+  as legacy. Backend lifecycle hooks in seccomp/
+  ptrace/lifecycle.c are stubs. DYNAMIC selection still
+  couples to bootstrap behaviour.
+- **A4 (medium): KVM_SET_REGS / KVM_SET_MSRS writeback
+  failures swallowed.** `thread.c:1125` drops
+  `kvm_propagate_fs_gs_base()` return; `thread.c:1150`
+  drops `KVM_SET_REGS` return. Sub-commit #5c
+  (commit `6d3c027a`) introduced one of these swallows.
+  Silent state corruption risk if either ioctl fails
+  after `handle_syscall()` already ran.
+- **A5 (medium): umlctl pidfile is PID-only; stale PID
+  reuse targets wrong process.** umlctl stop could
+  signal an unrelated reused PID. run.json missing
+  `/proc/<pid>/stat` starttime.
+- **A6 (medium): umlctl detached start polls PID
+  liveness instead of owning the `Child` handle.**
+  Child retained at `supervise.rs:139` but readiness
+  loop at `supervise.rs:175` uses `process_alive(pid)`.
+  A quickly-exited unreaped child still looks alive to
+  `kill(pid, 0)`, so early exit is misreported as
+  READY_TIMEOUT.
+
+**Implications for the gadget ladder.** Task #205 (G2
+Lift #2b bench) is moved back to pending and blocked
+on A1+A2+A4 (tasks #212/#213/#214). G3-G8 stay
+blocked via the existing chain. No gadget work lands
+until the real KVM backend clears a `/bin/true` boot
+and the parity number can be re-measured honestly.
+
+**Implications for D68.** The parity claim is
+retracted. The measurements.md 2026-04-24 "D-06
+getpid bookend" table stays in the tree with a
+retraction banner explaining what it actually measured.
+When A1/A2/A4 clear and the real KVM backend boots,
+the measurement is re-run and the table replaced with
+honest numbers + a pointer to this entry.
+
+**New tasks in priority order:**
+
+- #212 A1 — call interrupt_end() from KVM trap paths
+  (unblocks seccomp-contract-equivalent behavior)
+- #213 A2 — reliable is_user from actual CPL
+- #214 A4 — fail-loud on KVM_SET_REGS / KVM_SET_MSRS
+  errors (harden #5c specifically)
+- #215 A3 — Layer-1 probe refactor (lower priority;
+  force=kvm works without this once A1/A2 land)
+- #216 A5 — umlctl pidfile + birth marker
+- #217 A6 — umlctl Child handle usage
+
+**Discipline note.** Selftest breadth did not catch
+this. perf-getpid runs three backends but doesn't
+assert the boot log actually shows the expected
+backend. Add an assertion in `run-perf-getpid.sh` that
+`um: backend = <expected>` is present in dmesg for each
+pass — that's a cheap catch-fence that would have
+surfaced the parse-silent-fail immediately. Landing
+with the A-series fixes.
+
+**Cross-references.**
+
+- D68 (2026-04-24) — the measurement this retracts.
+- `perf-getpid/run-perf-getpid.sh` — runner that had
+  the silent-fallback bug.
+- `measurements.md` §"2026-04-24 — D-06 getpid
+  bookend" — table that stays as a tombstone with a
+  correction banner.
+- Tasks #212-#217 — the remediation ladder.
+- Memo 11 §"Gadget G2" — blocked on A1/A2/A4.
+
+---
+
 ## (Future entries here, as decisions are made)

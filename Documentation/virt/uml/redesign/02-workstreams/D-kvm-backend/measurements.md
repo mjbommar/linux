@@ -997,6 +997,24 @@ a retired #1a.
 
 ## 2026-04-24 — D-06 `getpid()` bookend, all three backends, s0–s7
 
+> **RETRACTED 2026-04-24 (see decisions-log D70).** This
+> measurement is INVALID. The runner used `force=kvm` as the
+> kernel cmdline token, but the actual parser in
+> `arch/um/kernel/backend.c` expects `backend=force=kvm`.
+> `force=kvm` silently parses as an unrecognized parameter
+> and the default `backend=auto` picks seccomp. All three
+> "backends" in the table below therefore measured seccomp
+> three times — the ~1.002× ratio captures run-to-run noise
+> between two seccomp runs, not KVM-vs-seccomp parity. Real
+> `backend=force=kvm` crashes with a fatal signal / panic in
+> `kvm_run_userspace` (audit findings A1/A2/A4 — see D70).
+>
+> Table retained as a tombstone + methodology reference; the
+> honest re-run lands once tasks #212/#213/#214 clear. The
+> cycles-per-backend ratio should read as "within-backend
+> noise on the shipped seccomp path" — a useful baseline for
+> the eventual real comparison, not the comparison itself.
+
 First full three-backend measurement on real user binaries,
 enabled by sub-commits #5c (arch_prctl → MSR_FS_BASE/
 MSR_GS_BASE propagation) and memo 10 steps 2+6 (class-map +

@@ -52,11 +52,27 @@ fi
 measure_one() {
 	local backend=$1
 	local log
-	log=$(timeout --kill-after=5 30 "$BINARY" force="$backend" \
+	# Note: cmdline token is `backend=force=<kind>`, not
+	# `force=<kind>`. An earlier version of this runner used
+	# `force=<kind>` which silently parses as an unknown
+	# kernel cmdline arg and falls back to the default
+	# backend — producing a seccomp-vs-seccomp-vs-seccomp
+	# table mislabelled as ptrace/seccomp/kvm. Decisions-log
+	# D70 retracts that result. The backend-selection line
+	# `um: backend = <kind>` is extracted + asserted below
+	# so this class of silent fallback can't recur.
+	log=$(timeout --kill-after=5 30 "$BINARY" \
+		backend="force=$backend" \
 		init="$LOOP" mem="$MEM" \
 		con=null con0=fd:0,fd:1 \
 		root=/dev/root rootfstype=hostfs rw \
-		panic=-1 2>&1 || true)
+		panic=-1 </dev/null 2>&1 || true)
+	local observed
+	observed=$(echo "$log" | sed -n 's/^um: backend = \([a-z]*\).*/\1/p' | head -1)
+	if [ "$observed" != "$backend" ]; then
+		echo "PERF_GETPID: backend=$backend FAIL (observed=$observed; check um: backend line)"
+		return
+	fi
 	echo "$log" | grep -E '^PERF_GETPID: ' | head -1
 }
 
