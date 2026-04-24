@@ -7290,4 +7290,88 @@ target.
 
 ---
 
+## D72 (2026-04-24) — A3 Layer-1 probe refactor: design locked, code deferred
+
+**Context.** 2026-04-24 audit round-2 flagged (finding #2,
+reiterated in round-3 finding #2) that `init_backend()` in
+`arch/um/kernel/backend.c:135` presents itself as the
+authoritative backend selector but `os_early_checks()` in
+`arch/um/os-Linux/start_up.c:557` still does the real
+seccomp probing, ptrace fallback, and ptrace-only fatal
+checks BEFORE init_backend runs. The backend lifecycle
+hooks in `arch/um/backend/{seccomp,ptrace}/lifecycle.c` are
+stubs that explicitly documented the deferral.
+
+**Not a correctness bug.** `backend=force=kvm` works today
+because the wasted seccomp probe in `os_early_checks`
+side-effects `using_seccomp = 1`, but `init_backend` sees
+`UM_BACKEND_KIND_KVM` in `backend_arg_requested` and picks
+the KVM ops table regardless. The audit finding is
+architectural purity — "the new backend arbiter isn't yet
+the single source of truth" — not a user-visible bug.
+
+**Decision.** Lock down the refactor plan in
+`02-workstreams/A-backend-abstraction/08-layer1-probe-
+refactor.md`, update the lifecycle.c TODO comments to
+reference that memo, defer the actual refactor to a
+dedicated session.
+
+**Why defer.**
+
+- The lifecycle.c comments already explicitly deferred
+  this as "future cleanup; early-boot sequence in arch/
+  um/os-Linux/ needs reorganization before the arbiter
+  can safely drive probe() itself." That documentation
+  is accurate.
+- Refactor touches 4 files across 3 subsystems (start_
+  up.c exports, seccomp + ptrace lifecycle.c probe
+  bodies, kernel/backend.c arbiter call chain) and
+  requires careful boot-ordering review. Better done as
+  one focused commit than piecemealed with other work.
+- Current session budget consumed on the higher-impact
+  items (A1/A2/A4 correctness + G3/G4 gadget lift +
+  A5/A6 umlctl hygiene). A3 is the right last item for
+  a "deferred with a concrete plan" disposition.
+
+**Scope of the deferred work** (from memo 08 in
+A-backend-abstraction):
+
+1. Split `os_early_checks` into `os_early_host_checks`
+   (coredump + tmpexec, host-only, stays at
+   `linux_main` pre-init_backend) + remove the backend
+   probing body.
+2. Expose `init_seccomp()` + `check_ptrace()` from
+   `start_up.c` (non-static).
+3. Implement the real probe logic in
+   `seccomp_lifecycle_probe` + `ptrace_lifecycle_probe`,
+   calling the exported helpers.
+4. Have `init_backend` drive `probe()` on each
+   compiled-in backend.
+
+**Regression matrix** for when the refactor lands:
+
+- 32/32 KUnit backend-contract tests.
+- userspace-smoke + launcher-smoke + umlctl-smoke +
+  ftrace-smoke + kprobes-stress under each single-
+  backend build (PTRACE_ONLY, SECCOMP_ONLY, KVM_ONLY)
+  AND DYNAMIC default.
+
+**Artifacts.**
+
+- `02-workstreams/A-backend-abstraction/08-layer1-
+  probe-refactor.md` — full refactor plan.
+- `arch/um/backend/seccomp/lifecycle.c` + `arch/um/
+  backend/ptrace/lifecycle.c` — TODO comments now
+  reference memo 08 + D72 by name.
+
+**Cross-references.**
+
+- 2026-04-24 audit round-3 finding #2 — the open A3
+  item this entry closes for the "design + plan"
+  phase.
+- Task #215 — remains pending, status "design
+  committed, implementation deferred."
+
+---
+
 ## (Future entries here, as decisions are made)
