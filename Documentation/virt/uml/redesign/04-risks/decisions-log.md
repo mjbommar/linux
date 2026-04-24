@@ -9112,4 +9112,72 @@ gate at that point.
 
 ---
 
+## D92 (2026-04-24) — G3: propagate real x86 #PF error code + handle RO-write touched correctly
+
+**Decision.** Read the CPU-pushed #PF error code from
+IST+0 in the host-side recovery, propagate it to UML's
+faultinfo (replacing the hardcoded `4 = user-mode`),
+and gate `touched = true` on the actual operation
+succeeding rather than just on copy_from_user
+returning ok. Specifically: if the fault was a write,
+require copy_to_user to also succeed; otherwise the
+RO-mapping case loops.
+
+**Finding.** Audit round-6 P1 #3 (G3) — "recoverable
+#PF handling ignores the real x86 error code and
+ignores copy_to_user() failure. A write to a read-only
+mapping can copy_from_user() successfully, fail the
+write, still mark touched = true, refill the same
+read-only PTE, and loop instead of delivering SIGSEGV."
+
+Both issues real:
+
+1. **error_code = 4 hardcoded.** UML's faultinfo
+   convention mirrors Linux x86 (bit 1 = write, bit 2
+   = user-mode, bit 4 = instruction fetch). Hardcoding
+   bit 2 alone meant SIGSEGV delivery to the guest task
+   couldn't distinguish read-from-RO vs write-to-RO vs
+   instruction-fetch — debugger output and stress-test
+   diagnostics couldn't reason about the fault.
+
+2. **touched = true on write-to-RO.** copy_from_user
+   succeeds (read OK), copy_to_user fails silently
+   (the `(void)` cast discarded the return), touched
+   set true → fall into the user-state restore + retry
+   path → guest writes again → faults again forever.
+
+**Implementation.**
+
+- `fault_error_code = *(u64 *)(ist + 0)` — captured
+  alongside fault_rip in the F7/1 prologue.
+- `fault_was_write = (fault_error_code >> 1) & 1` —
+  derived once, used twice (touched gate + faultinfo
+  passthrough).
+- copy_to_user: if fault_was_write, require its
+  return == 0 to set touched. Otherwise (read fault)
+  copy_from_user success alone is enough.
+- `fi->error_code = (u32)fault_error_code` replaces
+  the `4` hardcode.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass.
+- perf-getpid: kvm cyc=98, ratio 0.002, PASS.
+- DF-preserve all backends + kvm-gadget: PASS.
+- The RO-write loop scenario isn't directly
+  reproducible without a deliberate test
+  (mprotect(MAP_PRIVATE|MAP_READ_ONLY) + write); the
+  guard is correctness-by-construction. A dedicated
+  RO-write smoke could be added if regressions
+  surface but isn't blocking.
+
+**Refs.**
+
+- Audit round-6 finding #3 (G3).
+- D86 (F7/1) — the prologue this fix extends with the
+  error_code capture.
+- task #235 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

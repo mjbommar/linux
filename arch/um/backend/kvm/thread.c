@@ -2034,6 +2034,8 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				char probe;
 				bool touched = false;
 				u64 fault_rip;
+				u64 fault_error_code;
+				bool fault_was_write;
 				int gadget_nr;
 				unsigned long ist_off;
 				u8 *ist;
@@ -2069,11 +2071,28 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					fatal_sigsegv();
 				}
 				ist = (u8 *)kvm_bootstrap_page + ist_off;
+				/*
+				 * Audit round-6 G3: read the CPU-pushed
+				 * #PF error code from IST+0 instead of
+				 * hardcoding faultinfo->error_code = 4
+				 * later. Bits we care about (Intel SDM
+				 * vol 3 §6.15):
+				 *   bit 0  P  — 1 if protection violation
+				 *   bit 1  W  — 1 if write
+				 *   bit 2  U  — 1 if user-mode access
+				 *   bit 4  ID — 1 if instruction fetch
+				 * UML's faultinfo expects the same bits
+				 * (mirrors the Linux x86 error_code
+				 * convention).
+				 */
+				fault_error_code = *(u64 *)(ist + 0);
+				fault_was_write  = (fault_error_code >> 1) & 1;
 				fault_rip = *(u64 *)(ist + 8);
 
-				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx; fault-in + shadow refill\n",
+				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx ec=0x%llx; fault-in + shadow refill\n",
 						    cr2,
-						    (unsigned long long)fault_rip);
+						    (unsigned long long)fault_rip,
+						    (unsigned long long)fault_error_code);
 
 				gadget_nr = kvm_gadget_fault_nr(fault_rip);
 				if (gadget_nr >= 0) {
@@ -2130,11 +2149,34 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					struct mm_struct *m2 =
 						current->active_mm;
 
+					/*
+					 * Audit round-6 G3: don't blindly mark
+					 * touched on a successful read probe.
+					 * If the original fault was a WRITE
+					 * (error_code bit 1 set), we also need
+					 * the write probe to succeed; otherwise
+					 * cr2 maps to a read-only page and the
+					 * guest's retry will fault again
+					 * forever. The fix: gate touched=true
+					 * on the actual operation succeeding.
+					 *
+					 * For pure read faults, copy_from_user
+					 * succeeding is enough — the page is
+					 * present + readable, no write probe
+					 * needed.
+					 */
 					if (!copy_from_user(&probe,
 							    (void __user *)cr2, 1)) {
-						(void)copy_to_user((void __user *)cr2,
-								   &probe, 1);
-						touched = true;
+						if (fault_was_write) {
+							if (!copy_to_user((void __user *)cr2,
+									  &probe, 1))
+								touched = true;
+							/* else: RO mapping; touched stays
+							 * false → SIGSEGV path below.
+							 */
+						} else {
+							touched = true;
+						}
 					}
 					(void)kvm_shadow_fill_from_uml_pgd(m2->pgd);
 				}
@@ -2159,8 +2201,20 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					struct faultinfo *fi =
 						UPT_FAULTINFO(regs);
 
+					/*
+					 * Audit round-6 G3: propagate the
+					 * actual CPU-pushed error code (W /
+					 * U / I/D bits) instead of hardcoding
+					 * `4` (user-mode-only). Otherwise UML's
+					 * trap.c can't distinguish a
+					 * read-from-RO from a write-to-RO from
+					 * an instruction-fetch fault; SIGSEGV
+					 * delivery to the guest task lacks the
+					 * info debuggers / stress-testers need
+					 * to reason about the fault.
+					 */
 					fi->trap_no    = 14;
-					fi->error_code = 4; /* user-mode */
+					fi->error_code = (u32)fault_error_code;
 					fi->cr2        = cr2;
 					(*sig_info[SIGSEGV])(SIGSEGV, NULL,
 							     regs, NULL);
