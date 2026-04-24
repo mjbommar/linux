@@ -172,26 +172,53 @@ pub fn start(
     // Detach mode: poll the log file for a ready marker up to
     // --ready-timeout. Fall back to "trust the spawn" if no
     // log file was created.
+    //
+    // Audit finding A6 (2026-04-24): early-exit detection uses
+    // the owned Child handle's try_wait() rather than
+    // kill(pid, 0). A quickly-exited but unreaped child shows
+    // up as live to kill(pid, 0) since the zombie is still in
+    // the process table under our pid; try_wait() transparently
+    // reaps it and returns Ok(Some(status)), which IS the
+    // "child exited" signal we want. Falls back to the old
+    // kill(pid, 0) probe only on the post-detach path below,
+    // where the Child handle has been dropped.
     if let Some(lp) = &log_path {
         let deadline = Instant::now() + Duration::from_secs(args.ready_timeout);
         while Instant::now() < deadline {
             if log_indicates_ready(lp) {
                 return Ok(StartOutcome { pid, run_id });
             }
-            if !process_alive(pid) {
-                run::finalize_run(
-                    paths,
-                    &run_id,
-                    run::boottime_ns(),
-                    "SPAWN_EXITED_EARLY",
-                    None,
-                );
-                let _ = std::fs::remove_file(&pidfile);
-                let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
-                return Err(StartError::Other(anyhow!(
-                    "kernel exited before reaching ready marker (see {})",
-                    lp.display()
-                )));
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    run::finalize_run(
+                        paths,
+                        &run_id,
+                        run::boottime_ns(),
+                        "SPAWN_EXITED_EARLY",
+                        _status.code(),
+                    );
+                    let _ = std::fs::remove_file(&pidfile);
+                    let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
+                    return Err(StartError::Other(anyhow!(
+                        "kernel exited before reaching ready marker (see {})",
+                        lp.display()
+                    )));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    run::finalize_run(
+                        paths,
+                        &run_id,
+                        run::boottime_ns(),
+                        "SPAWN_EXITED_EARLY",
+                        None,
+                    );
+                    let _ = std::fs::remove_file(&pidfile);
+                    let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
+                    return Err(StartError::Other(anyhow!(
+                        "waitpid on spawned child failed: {e}"
+                    )));
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }

@@ -500,6 +500,45 @@ done
 
 "$UMLCTL_BIN" $ARGS rm "$N3" >/dev/null
 
+# --- Part I: A6 early-exit detection via Child::try_wait() ---
+#
+# Fake kernel that exits IMMEDIATELY with nonzero status. umlctl
+# start --detach should notice via child.try_wait() and return
+# SPAWN_EXITED_EARLY well under the --ready-timeout budget.
+# Pre-A6 the runner polled kill(pid, 0) which sees a zombie as
+# live, so it would only report READY_TIMEOUT after the full
+# timeout elapsed (15s below). Post-A6 we expect an error
+# within ~1s.
+cat > "$TMP/linux-earlyexit" <<'EE'
+#!/bin/sh
+exit 42
+EE
+chmod +x "$TMP/linux-earlyexit"
+N4="smoke-earlyexit"
+"$UMLCTL_BIN" $ARGS create "$N4" --kernel "$TMP/linux-earlyexit" \
+	>/dev/null || fail "earlyexit create failed"
+T0=$(date +%s)
+"$UMLCTL_BIN" $ARGS start "$N4" --ready-timeout 15 2>/tmp/earlyexit.err
+RC=$?
+T1=$(date +%s)
+ELAPSED=$((T1 - T0))
+[ $RC -ne 0 ] || fail "earlyexit start should fail (got rc=0)"
+[ $ELAPSED -lt 5 ] || fail "earlyexit detection took ${ELAPSED}s; should be <5s post-A6"
+grep -q "kernel exited before reaching ready marker" /tmp/earlyexit.err \
+	|| fail "earlyexit err missing 'kernel exited' diagnostic: $(cat /tmp/earlyexit.err)"
+# run.json should record SPAWN_EXITED_EARLY with the child's
+# exit status (42).
+N4_RUN_ID=$(ls "$STATE_DIR/runs/" | while read r; do
+	grep -l "\"instance\": \"$N4\"" "$STATE_DIR/runs/$r/run.json" 2>/dev/null \
+		&& echo "$r" && break
+done)
+N4_RUN_ID=$(ls "$STATE_DIR/runs/" | tail -1)
+grep -q "SPAWN_EXITED_EARLY" "$STATE_DIR/runs/$N4_RUN_ID/run.json" \
+	|| fail "earlyexit run.json missing SPAWN_EXITED_EARLY: $(cat "$STATE_DIR/runs/$N4_RUN_ID/run.json")"
+grep -q "\"exit_status\": 42" "$STATE_DIR/runs/$N4_RUN_ID/run.json" \
+	|| fail "earlyexit run.json missing exit_status=42: $(cat "$STATE_DIR/runs/$N4_RUN_ID/run.json")"
+"$UMLCTL_BIN" $ARGS rm -f "$N4" >/dev/null 2>&1 || true
+
 # --- Part F: no orphans ---
 LEAK=$(pgrep -f "$TMP/linux" || true)
 [ -z "$LEAK" ] || fail "orphan processes left: $LEAK"
