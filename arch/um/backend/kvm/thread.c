@@ -1157,9 +1157,24 @@ skip_dispatch:
 	 * VMEXITs so there's nothing to do for them.
 	 */
 	if (syscall_nr == __NR_arch_prctl) {
-		(void)kvm_propagate_fs_gs_base(vcpu_fd,
-					       regs->gp[HOST_FS_BASE],
-					       regs->gp[HOST_GS_BASE]);
+		int prc = kvm_propagate_fs_gs_base(vcpu_fd,
+						   regs->gp[HOST_FS_BASE],
+						   regs->gp[HOST_GS_BASE]);
+		if (prc < 0) {
+			/*
+			 * Audit finding A4: UML's sys_arch_prctl
+			 * already updated task_struct FS/GS state;
+			 * if we can't push that into the vCPU, the
+			 * guest's next fs:-relative load will fault
+			 * at the wrong address + spin in the #PF
+			 * handler. Kill the guest task rather than
+			 * continue with a mismatched
+			 * task_struct / vCPU view.
+			 */
+			pr_warn_ratelimited("um: kvm: arch_prctl FS/GS propagate failed (%d); killing guest task\n",
+					    prc);
+			fatal_sigsegv();
+		}
 	}
 
 	/*
@@ -1176,14 +1191,21 @@ skip_dispatch:
 		PT_SYSCALL_NR(regs->gp) = -1;
 
 	/*
-	 * Push the syscall return (now in regs->gp[HOST_AX]) plus
-	 * the advanced RIP back into the vCPU state so SYSRETQ
-	 * delivers the right RAX + resumes at the trampoline's
-	 * SYSRETQ.
+	 * Push the syscall return (now in regs->gp[HOST_AX])
+	 * back into the vCPU state so the next KVM_RUN (via
+	 * kvm_enter_guest's bootstrap SYSRETQ, which picks up
+	 * RAX from kregs) delivers the right return value to
+	 * ring-3. Failure here leaves handle_syscall's work
+	 * stranded — guest resumes with stale RAX, likely
+	 * triggering an infinite loop in the glibc error-
+	 * check path. Audit A4: fatal rather than silent.
 	 */
 	kvm_uml_regs_to_kvm_regs(kregs, regs);
-	(void)os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
-			       (unsigned long)kregs);
+	if (os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+			     (unsigned long)kregs) < 0) {
+		pr_warn_ratelimited("um: kvm: post-syscall KVM_SET_REGS failed; killing guest task\n");
+		fatal_sigsegv();
+	}
 }
 
 /*
@@ -1379,8 +1401,18 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * and retries the faulting ring-3 insn.
 				 */
 				kregs.rip += 2;
-				(void)os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
-						       (unsigned long)&kregs);
+				if (os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+						     (unsigned long)&kregs) < 0) {
+					/*
+					 * Audit A4: if we can't advance
+					 * RIP past the `out`, the next
+					 * KVM_RUN re-executes the port
+					 * IO and spins on the same
+					 * fault. Kill the task.
+					 */
+					pr_warn_ratelimited("um: kvm: PF handler KVM_SET_REGS failed; killing guest task\n");
+					fatal_sigsegv();
+				}
 				break;
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
