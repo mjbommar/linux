@@ -27,21 +27,28 @@ in-kernel harness, validated end-to-end:
   ring-3 SYSRETQ entry, LSTAR round-trip, `KVM_EXIT_MMIO`
   fault decode, and `KVM_INTERRUPT` + IDT injection.
 
-The one piece *not yet* landed is **real `run_userspace`
+The piece *not yet* landed is **real `run_userspace`
 integration** — replacing the one-shot harness with a
 sustained trap loop driving genuine UML guest processes.
-That's tracked as task #162; the design memo at
-`08-real-run-userspace.md` (2026-04-23) decomposes it into
-seven sub-commits, and decisions-log D65 records the scope
-decision. The harness already demonstrates every primitive
-the integrated path needs — the lift is a lift-out-of-
-harness-into-production refactor with exit-reason wiring.
+Tracked as task #162. Memo `08-real-run-userspace.md`
+(2026-04-23) decomposes it; **memo `09-shadow-pt.md`
+(2026-04-24) scopes the shadow-page-table prerequisite that
+D66 identified as the fundamental architectural blocker.**
+Sub-commits #1–#5a landed during the 2026-04-24 session —
+state materialization, LSTAR trampoline + MSRs, KVM_RUN loop
++ syscall decode, MMIO decode + fault routing, ring-3 entry
+SYSRETQ bootstrap. Memo 08's #4/#5b/#6/#7 and D-06's
+`getpid()` bookend are all blocked on the shadow PT (memo 09,
+task #186) because UML's pgd encoding is software-only and
+not hardware-walk-compatible.
 
 Decisions-log coverage: D49–D57 + D60–D61 walk through the
 shape choices; D63 sequences the upstream submission; D65
-scopes task #162. `04-ring-transition.md`, `04b*-*.md`,
-`07-systrap-gadget-feasibility.md`, and
-`08-real-run-userspace.md` carry the per-sub-task detail.
+scopes task #162; **D66 records the shadow-PT finding**.
+`04-ring-transition.md`, `04b*-*.md`,
+`07-systrap-gadget-feasibility.md`,
+`08-real-run-userspace.md`, and `09-shadow-pt.md` carry the
+per-sub-task detail.
 
 ## What this workstream produces
 
