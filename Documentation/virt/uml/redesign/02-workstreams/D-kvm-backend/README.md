@@ -6,6 +6,40 @@
 **Bookend:** `getpid()` round-trip through KVM backend in <100 ns
             measured on bare metal
 
+**Status (2026-04-23):** spikes + harness complete. Phase III
+of the post-Q1 push landed D-01 through D-06 as a working
+in-kernel harness, validated end-to-end:
+
+- D-01 / D-02: kernel-side KVM backend scaffold + /dev/kvm
+  probe (commits through `121`).
+- D-03b/c/d: per-mm `kvm_um` with `KVM_CREATE_VM`, one-giant-
+  memslot at init (Policy A per D20), `mm_map`/`mm_unmap`
+  host-side wiring.
+- D-04a/b/c: vCPU create + `KVM_RUN` loop, long-mode SREGS +
+  CR3/GDT/IDT/EFER, LSTAR-routed SYSCALL dispatch through the
+  real `sys_call_table`.
+- D-05a/b: real time ops (`read_clock_ns`,
+  `read_persistent_clock_ns`, `set_timer`), `ipi_send`
+  (SMP-only).
+- D-06: A-05 contract KUnit suite passes 20/20 under
+  `CONFIG_UM_BACKEND_KVM_ONLY` (Phase III Lift #1f).
+- Phase III Lifts #1b-#1e extended the harness to cover
+  ring-3 SYSRETQ entry, LSTAR round-trip, `KVM_EXIT_MMIO`
+  fault decode, and `KVM_INTERRUPT` + IDT injection.
+
+The one piece *not yet* landed is **real `run_userspace`
+integration** — replacing the one-shot harness with a
+sustained trap loop driving genuine UML guest processes.
+That's tracked as task #162 for a follow-on session; the
+harness already demonstrates every primitive the integrated
+path needs.
+
+Decisions-log coverage: D49–D57 + D60–D61 walk through the
+shape choices; D63 sequences the upstream submission.
+`04-ring-transition.md`, `04b*-*.md`, and
+`07-systrap-gadget-feasibility.md` carry the per-sub-task
+detail.
+
 ## What this workstream produces
 
 A third backend implementation: `um_backend_kvm`. Modeled on
