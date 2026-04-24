@@ -6705,4 +6705,139 @@ runs clean, memo 08 rolls up into
 
 ---
 
+## D66 (2026-04-24) — UML page-table encoding is software-only; KVM backend needs a shadow PT
+
+**Source.** Sub-commit #5a diagnostic walk of init's pgd under
+CR3 = `__pa(current->active_mm->pgd)` during an integrated-path
+boot on Zen 4. The walk output + a cross-check against
+`arch/um/include/asm/pgtable.h` revealed that UML's PTE bit
+encoding is software-only and NOT hardware-walk-compatible.
+
+**The observation.**
+
+Captured from `um: kvm` diagnostic dump on
+`KVM_EXIT_SHUTDOWN`:
+
+    CR0=0x80010023 CR4=0x20 EFER=0x501      (PE|PG|PAE|SCE|LME|LMA — all correct)
+    GDTR base=0x60ade000 limit=0x2f         (6-entry, correct)
+    RIP=0x60ade080 (bootstrap SYSRET gadget)
+    CR3=0xae9000
+    pgd[0] @ 0xae9000 = 0xaff1e1
+
+The x86 CPU refuses to walk past `pgd[0] = 0xaff1e1`
+because it misinterprets the software-only UML bits as
+hardware flags:
+
+    UML encoding               x86 hardware walk interpretation
+    ─────────────────────────  ──────────────────────────────────
+    bit 0  _PAGE_PRESENT       bit 0  P    ✓ same
+    bit 1  _PAGE_NEEDSYNC      bit 1  R/W  ✗ reused for host sync
+    bit 2  (unused)            bit 2  U/S  ✗
+    bit 5  _PAGE_RW            bit 5  A    ✗
+    bit 6  _PAGE_USER          bit 6  D    ✗ (reserved in PGD/PUD)
+    bit 7  _PAGE_ACCESSED      bit 7  PS   ✗ (illegal in PGD;
+                                           "huge page" hint)
+    bit 8  _PAGE_DIRTY         bit 8  G / reserved
+
+Entry `0xaff1e1` = `0b1010_1111_1111_0001_1110_0001` has bit 7
+set (= `_PAGE_ACCESSED` under UML encoding, `PS=1` under x86).
+The CPU reads `PS=1` in a PGD as malformed → #PF on the
+walk → no IDT → #DF → #TF → `KVM_EXIT_SHUTDOWN`. Exactly
+what the integrated-path boots have been hitting.
+
+**Root-cause statement.**
+
+UML's page tables are NOT walked by hardware in the normal
+ptrace / seccomp backends. They are a host-kernel-software
+data structure that UML's own code interprets, converting
+each logical mapping decision into a host-side `mmap` /
+`mprotect` (via `mm_map` / `mm_unmap` ops) that creates the
+actual memory mapping in the host process's address space.
+The host CPU walks the HOST process's page tables when the
+host kernel services user-space accesses; UML's own pgd is
+never examined by hardware.
+
+The KVM backend's original D-04a design assumed
+`CR3 = __pa(current->active_mm->pgd)` would give the guest
+vCPU a hardware-walkable view of the UML process's address
+space — mirroring how a normal kernel on bare metal hands
+its pgd to the CPU. That assumption is wrong for UML. No
+amount of boot-sequencing, ring-3-entry plumbing, or IDT
+installation changes that — the first fetch at any VA
+fails at the pgd-walk layer.
+
+**Implication for task #162.**
+
+The remaining KVM-backend integration work is architecturally
+larger than memo 08's original decomposition foresaw. Sub-
+commits #4 (HLT → scheduler), #5 (IDT install), #6 (perf
+bookend), and #7 (nested-virt fallback) all presume that
+the basic "guest executes code at user RIP" path works.
+That path cannot work without a shadow page table that:
+
+1. Is x86-hardware-walkable (standard PTE encoding).
+2. Mirrors the UML logical mapping for the current mm.
+3. Is updated on every UML `mm_map` / `mm_unmap`.
+4. Covers the KVM-backend-specific bootstrap page (GDT +
+   LSTAR trampoline + SYSRET gadget) at an address the
+   guest can reach.
+5. Is stored in a new per-mm structure + swapped on
+   context_switch.
+
+This is how gVisor does it (`pkg/sentry/platform/kvm/machine.go`
++ `address_space_amd64.go`): maintain a shadow PT alongside
+UML's own pgd, populate lazily on EPT faults by walking
+UML's logical pgd for each faulting guest-VA.
+
+**Decision.**
+
+1. Task #185's current scope ("bootstrap page pgd-coverage
+   follow-on") is withdrawn — the real fix isn't installing
+   one mapping, it's building the whole shadow PT layer.
+2. Memo 08 is amended (see next revision): a new
+   "sub-commit #M — shadow page table" lift is inserted
+   before #4/#5/#6. It's the single largest remaining lift
+   in task #162 and probably deserves its own D-sub-workstream
+   rather than being an in-memo bullet.
+3. Everything memo 08 landed this session (#1 through #5a)
+   stays — the state materialization, LSTAR trampoline,
+   marshalling, KVM_RUN loop, MMIO decode, and ring-3 entry
+   wire all remain correct building blocks. They're just
+   gated behind "shadow PT exists" rather than gated behind
+   each other.
+4. The ptrace + seccomp backends are entirely unaffected:
+   they don't use the UML pgd as a hardware page table;
+   they use `mm_map` / `mm_unmap` host-side, which already
+   produces hardware-walkable mappings in the HOST pgd.
+   Workstream D's "KVM failure is acceptable" invariant
+   (prod-fast falls back to seccomp) holds.
+
+**What's not in scope for D66.**
+
+Whether the shadow PT should piggyback on host KVM's own
+paging (EPT / SLAT is already maintained by the host
+hypervisor) versus building a new UML-side walker is a
+design question for the next memo. gVisor uses both
+approaches depending on host-CPU capabilities; same range
+applies here.
+
+**Validation.**
+
+Diagnostic dump output captured + reproducible by running
+`/tmp/uml-kvmint/linux backend=kvm force=kvm init=/bin/true`
+under sudo. The pgd-walk code itself (thread.c) is the
+canonical reference for the encoding mismatch.
+
+**Scope of the next productive KVM work.**
+
+1. Write the shadow-PT memo (sub-commit #M of memo 08, or
+   standalone).
+2. D-06 bookend (`getpid()` <100 ns) now blocked on #M, not
+   on #4/#5/#6.
+3. Consumer-facing work (ptrace/seccomp selftests, umlctl,
+   observability spine) continues in parallel without being
+   blocked.
+
+---
+
 ## (Future entries here, as decisions are made)

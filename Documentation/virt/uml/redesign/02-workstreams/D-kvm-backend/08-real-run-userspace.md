@@ -1,9 +1,13 @@
 # D-04/D-05 follow-on: real `kvm_run_userspace` integration
 
-**Status:** implementation in flight (2026-04-24) — sub-commit
-#1 landed (state materialization helpers + A-05 KUnit
-extension + KVM_INTEGRATED Kconfig gate, default n).
-Sub-commits #2-#7 pending.
+**Status:** implementation in flight (2026-04-24) — sub-commits
+#1, #2a, #2a-tail, #2b, #3, #5a LANDED + diagnostic aid LANDED;
+sub-commits #4, #5b, #6, #7 **blocked on a newly-discovered
+shadow-page-table prerequisite (D66)** — UML's pgd encoding is
+software-only and not hardware-walk-compatible, so the current
+`CR3 = __pa(current->active_mm->pgd)` approach triple-faults on
+the first guest instruction fetch. A new sub-commit #M
+(shadow PT) is inserted before #4/#5b/#6/#7 can land.
 **Effort:** 2-3 weeks (several sub-commits; no single commit
 is larger than a workstream-B lift).
 **Dependencies:** D-04c (landed, LSTAR trampoline), D-04b.2b.2
@@ -274,6 +278,65 @@ regresses to the D-04a scaffold.
 **Code moves:** `harness.c` lines ~1030-1050 (1b IO-exit
 decode) → `thread.c::kvm_decode_syscall` (as specified in
 the sub-commit plan).
+
+### #M — Shadow page table (NEW prerequisite, 2026-04-24, D66)
+
+**Why this exists.** Landed 2026-04-24 as a D66-logged
+finding: UML's own `mm_struct->pgd` is a software-only
+data structure using bit encodings incompatible with
+x86_64 hardware (e.g. UML `_PAGE_RW = 0x020` vs x86 R/W
+at bit 1; UML `_PAGE_ACCESSED = 0x080` vs x86 PS at
+bit 7). Using it as guest CR3 triple-faults on the
+first instruction fetch because the CPU misreads the
+bits. The ptrace + seccomp backends don't care —
+they use `mm_map`/`mm_unmap` to install host-side
+mmap mappings that the HOST CPU walks via the HOST
+pgd. The KVM backend needs the guest CPU to walk a
+hardware-compatible page table.
+
+**Scope.** A per-mm shadow page table, maintained
+alongside the UML logical pgd:
+
+- Fresh x86 4-level page table at allocate time (in
+  `kvm_mm_attach`).
+- Hardware-compatible PTE encoding throughout.
+- Lazy-populated on KVM_EXIT_MMIO: walk UML's logical
+  pgd for the faulting VA, allocate intermediate pages
+  as needed, install a hardware-walkable PTE mirroring
+  the logical mapping's permissions.
+- Bootstrap page (GDT + LSTAR trampoline + SYSRET
+  gadget) eagerly mapped at `kvm_mm_attach` time so
+  the SYSRETQ + GDT-load + LSTAR-entry sequence can
+  execute before any user code runs.
+- `kvm_enter_guest` uses `__pa(shadow_pgd)` for CR3
+  instead of `__pa(current->active_mm->pgd)`.
+- `mm_unmap` / `mm_map` callbacks invalidate the
+  shadow PT entries for the affected ranges + issue
+  KVM-level TLB flushes (`KVM_INVALID_TLB_GVA_RANGE`
+  or `KVM_INVALIDATE_TLB`, depending on host KVM
+  version).
+
+**What this unblocks.** Sub-commits #4, #5b, #6, #7 all
+become landable once #M exists. The bootstrap-page
+coverage follow-on that sub-commit #1's memo anticipated
+ALSO lives here — explicit bootstrap mapping becomes
+the first #M consumer.
+
+**Effort estimate.** 3-4 weeks as its own lift — larger
+than any previous sub-commit of memo 08 and
+architecturally distinct. Strong case for breaking this
+out as a new top-level D-kvm-backend memo (e.g.
+`D-kvm-backend/09-shadow-pt.md`) rather than folding
+into memo 08.
+
+**Reference.** gVisor's `pkg/sentry/platform/kvm/
+address_space_amd64.go` is the canonical working
+implementation. Mirror its invariants; adapt to UML's
+mm_map / mm_unmap callbacks.
+
+**Status.** NOT LANDED; scoping pending. Task #185's
+original scope (bootstrap-page pgd-coverage follow-on)
+withdrawn in favor of this broader lift per D66.
 
 ### #3 — `kvm_decode_mmio` (KVM_EXIT_MMIO → fault path) — **LANDED 2026-04-24**
 
