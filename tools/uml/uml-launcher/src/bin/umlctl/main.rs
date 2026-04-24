@@ -667,7 +667,7 @@ fn cmd_metrics(paths: &paths::Paths, args: MetricsArgs, json: bool) -> Result<()
     }
     let pidfile = paths.pidfile_path(&args.name);
     let pid = match supervise::read_pidfile(&pidfile) {
-        Some(p) if supervise::process_alive(p) => p,
+        Some(ident) if supervise::identity_alive(ident) => ident.pid,
         _ => {
             eprintln!("umlctl: instance '{}' not running", args.name);
             std::process::exit(6);

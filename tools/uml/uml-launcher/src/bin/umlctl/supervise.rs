@@ -65,10 +65,11 @@ pub fn start(
     let pidfile = paths.pidfile_path(&args.name);
 
     // If the pidfile already has a live pid, refuse. Stale
-    // pidfiles (process gone) are cleared and we proceed.
-    if let Some(pid) = read_pidfile(&pidfile) {
-        if process_alive(pid) {
-            return Err(StartError::AlreadyRunning { pid });
+    // pidfiles (process gone OR pid reused by an unrelated
+    // process) are cleared and we proceed.
+    if let Some(ident) = read_pidfile(&pidfile) {
+        if identity_alive(ident) {
+            return Err(StartError::AlreadyRunning { pid: ident.pid });
         }
         let _ = std::fs::remove_file(&pidfile);
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
@@ -243,13 +244,15 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
         return Err(StopError::ManifestMissing);
     }
     let pidfile = paths.pidfile_path(&args.name);
-    let pid = match read_pidfile(&pidfile) {
+    let ident = match read_pidfile(&pidfile) {
         Some(p) => p,
         None => return Err(StopError::NotRunning),
     };
-    if !process_alive(pid) {
-        // Stale pidfile; clear it so the next start/stop sees
-        // a clean slate. Also drop the run_id side-file.
+    let pid = ident.pid;
+    if !identity_alive(ident) {
+        // Stale or reused pidfile; clear it so the next
+        // start/stop sees a clean slate. Also drop the run_id
+        // side-file.
         let _ = std::fs::remove_file(&pidfile);
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
         return Err(StopError::NotRunning);
@@ -271,13 +274,13 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
 
     let deadline = Instant::now() + Duration::from_secs(args.timeout);
     while Instant::now() < deadline {
-        if !process_alive(pid) {
+        if !identity_alive(ident) {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    if process_alive(pid) && !args.force {
+    if identity_alive(ident) && !args.force {
         // Escalate. We already sent the requested signal; now
         // send SIGKILL and give it a short window to settle.
         let _ = nix::sys::signal::kill(
@@ -286,7 +289,7 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
         );
         let kill_deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < kill_deadline {
-            if !process_alive(pid) {
+            if !identity_alive(ident) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -324,14 +327,43 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
 pub fn is_running(paths: &Paths, name: &str) -> bool {
     let pidfile = paths.pidfile_path(name);
     match read_pidfile(&pidfile) {
-        Some(pid) => process_alive(pid),
+        Some(ident) => identity_alive(ident),
         None => false,
     }
 }
 
-pub(super) fn read_pidfile(path: &Path) -> Option<u32> {
+/// Pidfile identity after the A5 (2026-04-24) change: carries
+/// both the pid and /proc/<pid>/stat's starttime_ticks.
+/// `starttime = None` means the pidfile was written by a
+/// pre-A5 umlctl (legacy single-line `<pid>\n` format).
+#[derive(Copy, Clone)]
+pub(super) struct PidIdentity {
+    pub pid: u32,
+    pub starttime: Option<u64>,
+}
+
+/// Read /proc/<pid>/stat field 22 (starttime, clock ticks
+/// since boot). Returns None if /proc/<pid>/stat doesn't
+/// exist OR can't be parsed — caller treats None as "no
+/// starttime info available," which disables the A5 PID-
+/// reuse check for that call-site only.
+pub(super) fn read_starttime(pid: u32) -> Option<u64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rparen = s.rfind(')')?;
+    let rest = s.get(rparen + 1..)?.trim_start();
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    fields.get(19)?.parse().ok()
+}
+
+pub(super) fn read_pidfile(path: &Path) -> Option<PidIdentity> {
     let s = std::fs::read_to_string(path).ok()?;
-    s.trim().parse().ok()
+    // A5 pidfile format is "<pid> <starttime>\n"; legacy is
+    // "<pid>\n". Accept both for backward compat.
+    let trimmed = s.trim();
+    let mut it = trimmed.split_whitespace();
+    let pid: u32 = it.next()?.parse().ok()?;
+    let starttime = it.next().and_then(|t| t.parse::<u64>().ok());
+    Some(PidIdentity { pid, starttime })
 }
 
 fn write_pidfile(path: &Path, pid: u32) -> Result<()> {
@@ -339,7 +371,20 @@ fn write_pidfile(path: &Path, pid: u32) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create runtime dir {}", parent.display()))?;
     }
-    std::fs::write(path, format!("{pid}\n"))
+    // A5 format: "<pid> <starttime>\n". Starttime is read from
+    // /proc/<pid>/stat right after spawn; a missing value
+    // (child raced away before we could read stat) is fine —
+    // we fall back to the legacy "<pid>\n" format on that row
+    // and the corresponding read_pidfile returns
+    // starttime=None. Subsequent identity checks for that
+    // pidfile fall back to kill(pid, 0) semantics with a one-
+    // time warn, keeping backward compat with stale
+    // post-upgrade state.
+    let contents = match read_starttime(pid) {
+        Some(st) => format!("{pid} {st}\n"),
+        None => format!("{pid}\n"),
+    };
+    std::fs::write(path, contents)
         .with_context(|| format!("write pidfile {}", path.display()))?;
     Ok(())
 }
@@ -368,6 +413,13 @@ pub(super) fn process_alive(pid: u32) -> bool {
     // kill(pid, 0): 0 means live + we have perms. ESRCH means
     // dead for real. EPERM means live but not ours (still
     // alive — treat as running). Everything else counts as dead.
+    //
+    // NOTE: this helper is PID-only and therefore vulnerable to
+    // pid-reuse races. Prefer identity_alive() which also checks
+    // /proc/<pid>/stat starttime against a captured baseline.
+    // process_alive() is retained for pre-A5 pidfiles that never
+    // recorded a starttime; identity_alive() calls through to it
+    // as the fallback.
     unsafe {
         let r = libc::kill(pid as libc::pid_t, 0);
         if r == 0 {
@@ -375,6 +427,49 @@ pub(super) fn process_alive(pid: u32) -> bool {
         }
         let err = *libc::__errno_location();
         err == libc::EPERM
+    }
+}
+
+/// PID-reuse-safe liveness probe for A5 (audit finding 2026-04-
+/// 24). A raw kill(pid, 0) can't distinguish "the process we
+/// originally spawned is still running" from "that pid was
+/// recycled by the kernel for an unrelated process." We defend
+/// by comparing /proc/<pid>/stat starttime_ticks against the
+/// value we recorded at spawn; the starttime field is monotone
+/// per-pid (set at fork-time, never changed), so a mismatch
+/// means pid-reuse.
+///
+/// If `identity.starttime` is None (legacy pidfile), falls back
+/// to the PID-only check with a one-shot warn — this only fires
+/// for pidfiles written by pre-A5 umlctl and disappears after
+/// the next stop+start cycle.
+pub(super) fn identity_alive(identity: PidIdentity) -> bool {
+    if !process_alive(identity.pid) {
+        return false;
+    }
+    match identity.starttime {
+        Some(want) => match read_starttime(identity.pid) {
+            Some(got) => got == want,
+            None => {
+                /*
+                 * /proc/<pid>/stat disappeared between the
+                 * kill(pid, 0) probe and the starttime read
+                 * — unlikely but possible. Treat as "dead"
+                 * since we can't confirm identity.
+                 */
+                false
+            }
+        },
+        None => {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("umlctl: warning: pidfile predates A5 birth-marker; \
+                          pid-reuse race possible on this instance. \
+                          Restart the instance to upgrade.");
+            }
+            true
+        }
     }
 }
 

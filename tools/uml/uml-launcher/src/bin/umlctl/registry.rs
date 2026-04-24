@@ -54,9 +54,9 @@ pub fn list(paths: &Paths, args: &PsArgs) -> Result<Vec<Row>> {
         };
 
         let pidfile = paths.pidfile_path(&m.instance.name);
-        let pid = supervise::read_pidfile(&pidfile);
-        let alive = match pid {
-            Some(p) => supervise::process_alive(p),
+        let ident = supervise::read_pidfile(&pidfile);
+        let alive = match ident {
+            Some(i) => supervise::identity_alive(i),
             None => false,
         };
         let state: &'static str = if alive { "running" } else { "stopped" };
@@ -65,6 +65,7 @@ pub fn list(paths: &Paths, args: &PsArgs) -> Result<Vec<Row>> {
             continue;
         }
 
+        let pid = ident.map(|i| i.pid);
         let uptime_secs = if alive {
             pid.and_then(process_uptime)
         } else {

@@ -154,7 +154,12 @@ PIDFILE="$RUNTIME_DIR/$NAME.pid"
 RUN_ID_FILE="$RUNTIME_DIR/$NAME.run_id"
 [ -f "$PIDFILE" ] || fail "pidfile not written"
 [ -f "$RUN_ID_FILE" ] || fail "run_id side-file not written"
-PID=$(cat "$PIDFILE")
+PID=$(awk '{print $1}' "$PIDFILE")
+# A5 pidfile format: "<pid> <starttime>\n". Starttime is
+# read from /proc/<pid>/stat at spawn time so umlctl can
+# detect pid-reuse on subsequent identity checks.
+PID_STARTTIME=$(awk '{print $2}' "$PIDFILE")
+[ -n "$PID_STARTTIME" ] || fail "pidfile missing A5 starttime field: $(cat "$PIDFILE")"
 RUN_ID=$(cat "$RUN_ID_FILE")
 kill -0 "$PID" 2>/dev/null || fail "pid $PID not alive after start"
 
