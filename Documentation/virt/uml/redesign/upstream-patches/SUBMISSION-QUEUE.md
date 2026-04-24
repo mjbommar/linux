@@ -27,7 +27,7 @@ cite the earlier ones for context.
 | 4 | `backend-ops-abstraction-rfc/` | ~12 patches | arch/um | series 3 landed (ftrace clean) | **to write** — A-workstream `struct um_backend_ops` RFC |
 | 5 | `static-key-hot-paths-series/` | ~6 patches | arch/um | series 4 landed | **to write** — B-workstream gates |
 | 6 | `kprobes-ftrace-kfence-kcsan-profiles-series/` | ~20 patches across 4 sub-series | arch/um | series 4 + 5 landed | **to write** — C-01..C-05 + C-02 + C-03 |
-| 7 | `kvm-backend-series/` | ~15 patches | arch/um | series 4 + 5 landed; post-Phase III real run_userspace (task #162) shipped | **to write** — D workstream |
+| 7 | `kvm-backend-series/` | ~15 patches | arch/um | series 4 + 5 landed; post-Phase III real run_userspace (task #162) shipped | **scoped 2026-04-24 (post-G8 / D70 GO)** — SUBMISSION-NOTES + cover-letter draft in-tree; actual patch emission still waits on series 4 landing + squash pass. See `kvm-backend-series/SUBMISSION-NOTES.md` + `0000-cover-letter.patch.md`. |
 
 ## Submission-order rationale
 

@@ -8703,4 +8703,102 @@ RDI/RSI which the gadget preserves.
 
 ---
 
+## D87 (2026-04-24) — Series 7 (kvm-backend-series) scoped: SUBMISSION-NOTES + cover-letter draft post-G8 GO
+
+**Decision.** Stand up the
+`upstream-patches/kvm-backend-series/` directory with
+SUBMISSION-NOTES.md (planned 15-patch ordering, squash
+plan, hard prerequisites, framing pitch) and a
+cover-letter draft (`0000-cover-letter.patch.md`).
+The patches themselves are not yet emitted — that
+waits on Series 4 (`backend-ops-abstraction-rfc`)
+landing upstream and a focused squash pass against
+the 69-commit branch history. Document the scope now
+so the eventual emission has a concrete starting
+point and so the team can iterate on the framing
+pitch independently of the squash.
+
+**Why now.** D70 = GO (D79) confirmed the systrap
+gadget meets memo 07's pre-registered <100 ns target
+across the s0-s7 fleet with 2.9–4.3× margin. Audit
+rounds 4 and 5 are closed (D75 / D81 / D82 / D83 /
+D84 / D85 / D86), bringing the in-tree behaviour
+within review-readable distance of an upstream
+post. With the technical work stable, the bottleneck
+shifts to upstream sequencing / framing — exactly
+what this scoping deliverable addresses.
+
+**What's in the deliverable.**
+
+`SUBMISSION-NOTES.md` (kvm-backend-series/):
+
+- 15-patch ordering broken into five blocks
+  (foundation / shadow PT / bootstrap + entry /
+  dispatcher / gadget) with per-patch origin
+  commits cited from the redesign branch.
+- Hard prerequisites: Series 4 must land first;
+  squash pass needs its own topic branch off
+  master with checkpatch on every step;
+  measurements need to be reproducible on at
+  least P-core Intel + AMD Zen + server Xeon
+  (already satisfied by the s0-s7 fleet).
+- Routing: `linux-um@` + `kvm@` + UML
+  maintainers + KVM x86 maintainers (Bonzini /
+  Christopherson) + `linux-arch@`.
+- Outstanding review questions for reviewer
+  guidance (per-vCPU state-channel pattern,
+  TLB-flush mechanism choice, class-D vs
+  class-A passthrough for the deny list).
+
+`0000-cover-letter.patch.md` (draft body, not yet a
+real `.patch`):
+
+- TL;DR perf table covering ptrace / seccomp /
+  kvm-fallback / kvm-gadget across the four
+  measurement axes (cyc, ns, ratio, fleet
+  margin).
+- Rationale for a third backend (gadget value
+  proposition: 28 ns on glibc-hot syscalls vs
+  ~14 µs ptrace / ~11 µs seccomp).
+- What the gadget is (LSTAR table, state channel,
+  vvar clock, fallback semantics).
+- Security posture (page mapping bits, classifier
+  D-list, RFLAGS round-trip, upper-NR guard).
+- Reproducibility recipe (perf-getpid dual-binary
+  invocation).
+- Known limitations explicitly enumerated
+  (bootstrap page RO/RW split deferred,
+  TLB-flush mechanism, DF selftest, x86-only).
+- Three explicit reviewer questions to anchor the
+  RFC discussion.
+
+**Why include "known limitations" in the cover.**
+LKML maintainers prefer a known-limitations section
+because it (a) shows the author has thought about
+edge cases, (b) lets reviewers focus on the
+high-leverage feedback rather than rediscovering
+gaps the author already tracks, (c) makes the v2
+trajectory predictable. Each limitation in the
+draft is cross-referenced to a redesign-branch
+follow-on task (#222 / #230 / #231) so reviewers
+know they're tracked, not handwaved.
+
+**Refs.**
+
+- `upstream-patches/SUBMISSION-QUEUE.md` — Series 7
+  row updated to "scoped 2026-04-24" with pointers
+  to the new SUBMISSION-NOTES + cover-letter draft.
+- `upstream-patches/README.md` — current-series
+  table gains a kvm-backend-series row.
+- D70 / D79 — G8 GO, the prerequisite condition
+  this scoping deliverable was waiting for.
+- D75 / D81 / D82 / D83 / D84 / D85 / D86 — audit
+  closures that brought the in-tree behaviour to
+  review-ready.
+- task #232 — this scoping deliverable.
+- tasks #222 / #230 / #231 — known-limitations
+  cross-references in the cover-letter draft.
+
+---
+
 ## (Future entries here, as decisions are made)

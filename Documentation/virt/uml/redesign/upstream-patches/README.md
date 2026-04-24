@@ -29,6 +29,7 @@ the patch bodies.
 | `bpf-hygiene-v1/` | prepared, not yet sent | C-06 (BPF JIT UML port) | D43 addendum |
 | `kmsan-arch-callback-rfc/` | staged (notes only; patch not written) — framing in D51 is the "no visible impact, just benefits" pitch: new weak `kmsan_arch_init_early_shadow()` hook + un-static `kmsan_record_future_shadow_range()`, byte-identical behavior for x86/s390. Upstream-side UML consumer no longer blocks on it (D62 landed the VMALLOC-quarter-split redesign which works independently). | C-07 (KMSAN UML port) | D44 resolution + D51 + D62 |
 | `ftrace-notrace-generic-v1/` | prepared 2026-04-24, not yet sent — cover letter + 1 patch (`kthread()` + `smpboot_thread_fn()` notrace) + SUBMISSION-NOTES in-tree | C-04 (kprobes + function_graph strip infrastructure) | D34 three-leak-source analysis + D34 addendum-3 + D45 in-fork scope policy |
+| `kvm-backend-series/` | scoped 2026-04-24 post-G8/D70=GO — SUBMISSION-NOTES (planned 15-patch ordering, squash plan, prerequisites) + cover-letter draft (`0000-cover-letter.patch.md`) in-tree; actual patches await Series 4 landing | D workstream (entire KVM backend + systrap gadget) | D70 / D79 (G8 GO) + D66-D86 (per-step decisions) |
 
 **Full submission queue + sequencing** lives in
 `SUBMISSION-QUEUE.md` in this directory (Phase VI Lift #7
