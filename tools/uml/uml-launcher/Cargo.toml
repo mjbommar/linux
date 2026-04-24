@@ -14,6 +14,15 @@ categories = ["command-line-utilities", "virtualization"]
 name = "uml-launcher"
 path = "src/main.rs"
 
+# umlctl — multi-instance lifecycle CLI (parking-lot
+# 08-future-phases/05-umlctl.md v1). Shares the launcher
+# crate's deps (clap, figment, serde, shared_child,
+# signal-hook, tracing, anyhow, nix, libc) so there's no
+# dependency-tree bloat. See src/bin/umlctl.rs.
+[[bin]]
+name = "umlctl"
+path = "src/bin/umlctl/main.rs"
+
 [dependencies]
 # CLI parsing + env-var fallbacks + shell completions.
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
@@ -34,6 +43,18 @@ anyhow = "1"
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
 # Owned fds for passing raw host fds into the child.
 libc = "0.2"
+# umlctl manifest serialization: figment can read TOML but
+# not write it. Use the canonical `toml` crate for emission.
+toml = "0.8"
+# umlctl timestamps in manifests + history.jsonl. RFC3339
+# format; no tz plumbing beyond local offset.
+time = { version = "0.3", features = ["formatting", "parsing", "local-offset", "macros"] }
+# umlctl history.jsonl emission + `ps --json` output.
+serde_json = "1"
+# umlctl kernel binary hash for manifest.kernel.sha256.
+sha2 = "0.10"
+# umlctl hex-encode the sha256 digest for the manifest.
+hex = "0.4"
 
 # --- C-10 v2: vhost-user backend stack (rust-vmm) ----------------
 # vhost-user-backend 0.22 pins vm-memory = "=0.17.1" exactly; match
