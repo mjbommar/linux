@@ -822,10 +822,53 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		case KVM_EXIT_SHUTDOWN:
 		case KVM_EXIT_FAIL_ENTRY:
 		case KVM_EXIT_INTERNAL_ERROR:
-		case KVM_EXIT_EXCEPTION:
+		case KVM_EXIT_EXCEPTION: {
+			struct kvm_sregs dump_sregs;
+			int dump_rc;
+			u64 guest_cr3 = 0, guest_rip = 0;
+
+			/*
+			 * Best-effort state snapshot on the failing
+			 * vCPU. Helps diagnose bring-up issues
+			 * (triple-fault on first instruction,
+			 * unmapped CR3, etc.) from a single failing
+			 * boot rather than requiring a kgdb dance.
+			 * Unused by normal operation since the
+			 * calling path already panics.
+			 */
+			dump_rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+						   (unsigned long)&dump_sregs);
+			if (dump_rc >= 0)
+				guest_cr3 = dump_sregs.cr3;
+			guest_rip = kregs.rip;
+
+			pr_err("um: kvm run_userspace: unrecoverable exit %u (%s)\n",
+			       run->exit_reason,
+			       kvm_exit_reason_str(run->exit_reason));
+			pr_err("um: kvm: guest RIP=0x%llx CR3=0x%llx CS=0x%x CPL=%u is_user=%d\n",
+			       (unsigned long long)guest_rip,
+			       (unsigned long long)guest_cr3,
+			       dump_rc >= 0 ? dump_sregs.cs.selector : 0,
+			       dump_rc >= 0 ? dump_sregs.cs.dpl : 0,
+			       regs->is_user);
+			pr_err("um: kvm: bootstrap page gpa=0x%llx lstar=0x%llx uml_physmem=0x%lx\n",
+			       (unsigned long long)kvm_bootstrap_gpa,
+			       (unsigned long long)(kvm_bootstrap_gpa +
+						    KVM_BOOTSTRAP_LSTAR_OFFSET),
+			       uml_physmem);
+			if (run->exit_reason == KVM_EXIT_FAIL_ENTRY) {
+				u64 hw = run->fail_entry.hardware_entry_failure_reason;
+
+				pr_err("um: kvm: FAIL_ENTRY hw_reason=0x%llx\n",
+				       (unsigned long long)hw);
+			}
+			if (run->exit_reason == KVM_EXIT_INTERNAL_ERROR)
+				pr_err("um: kvm: INTERNAL_ERROR suberror=%u\n",
+				       run->internal.suberror);
 			panic("um: kvm run_userspace: unrecoverable exit %u (%s)",
 			      run->exit_reason,
 			      kvm_exit_reason_str(run->exit_reason));
+		}
 
 		default:
 			panic("um: kvm run_userspace: unknown exit reason %u (%s)",
