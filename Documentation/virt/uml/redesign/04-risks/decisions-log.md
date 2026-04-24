@@ -7664,4 +7664,55 @@ exercises the live fault-recovery path end-to-end.
 
 ---
 
+## D76 (2026-04-24) — F1 confirms A3 scope is correct; implementation still deferred
+
+**Decision.** Audit round-4 finding F1 is the same issue D72
+recorded for round-2 A3. No scope change to memo 08-layer1-
+probe-refactor.md. The code landing stays deferred to its
+own dedicated session; only the tracking is updated so task
+#219 (F1) and task #215 (A3) refer to the same single-commit
+work item rather than appearing as two independent items.
+
+**Why not fix F1 now.** The refactor touches 4 files across
+3 subsystems (um_arch.c, start_up.c, backend/seccomp/
+lifecycle.c, backend/ptrace/lifecycle.c) with careful
+ordering:
+
+- `check_tmpexec` runs before mm_init and must keep running
+  there; only the probe calls move.
+- `init_seccomp` and `check_ptrace` reference static-to-
+  start_up.c state (`exec_regs`, `host_fp_size`,
+  `seccomp_test_stub_data`); bodies stay in start_up.c,
+  only the prototypes get exported.
+- The arbiter's `pick_dynamic_backend` logic needs to run
+  AFTER probe() on each compiled-in backend, not before.
+
+Piecemealing any of these alongside gadget work (G6+G7+G8)
+would mix a low-risk architectural refactor with a higher-
+risk feature commit, making bisection harder if either
+regresses the boot matrix.
+
+**What F1 confirms.** Round-4 re-review found NO correctness
+regression from the A3 deferral — the finding is medium-
+HIGH for architectural purity, not for user-visible
+behavior. `backend=force=kvm` continues to boot correctly
+today because the wasted seccomp probe in `os_early_checks`
+just sets `using_seccomp=1` as a side effect;
+`init_backend` sees `UM_BACKEND_KIND_KVM` in
+`backend_arg_requested` and picks the KVM ops table
+regardless. F2 was the correctness bug in round 4, not F1.
+
+**Refs.**
+
+- Audit round-4 finding #1 (F1) — re-confirmation of
+  round-2 A3.
+- D72 — original A3 deferral decision.
+- memo 08-layer1-probe-refactor.md — the landing plan,
+  now cross-referenced to F1 in its preamble.
+- task #215 + task #219 — pointing at the same landing;
+  task #219 can be treated as duplicate-of #215 once the
+  landing happens.
+
+---
+
 ## (Future entries here, as decisions are made)

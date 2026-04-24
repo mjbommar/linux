@@ -14,6 +14,18 @@ checks BEFORE init_backend runs. The lifecycle hooks in
 `arch/um/backend/ptrace/lifecycle.c:64` are stubs that
 explicitly document the deferral.
 
+**Round-4 audit re-confirmation (F1).** The 2026-04-24 round-4
+review re-flagged this as still-outstanding, with the same
+file:line pointers: `os_early_checks` in
+`arch/um/os-Linux/start_up.c:557` + `:605`, stub lifecycle
+ops at `arch/um/backend/ptrace/lifecycle.c:32` and
+`arch/um/backend/seccomp/lifecycle.c:23`, and
+`backend.c:135`'s arbiter. F1 asks for exactly the same
+consolidation this memo scopes — no additional scope beyond
+the three-change plan below. Task #219 (F1) is therefore a
+renaming of task #215 (A3) from the round-2 audit; both are
+satisfied by the same single-commit landing.
+
 **Correctness-vs-architectural-purity:** A3 is architectural,
 not correctness-breaking. `backend=force=kvm` boots correctly
 today because the wasted seccomp probe in `os_early_checks`
