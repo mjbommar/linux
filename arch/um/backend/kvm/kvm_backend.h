@@ -259,7 +259,26 @@ struct kvm_gadget_vvar {
 	 */
 	s32 budget;
 	u32 _pad1;
-	u64 _pad2[3];			/* cache-line pad (64 B struct) */
+
+	/*
+	 * Audit round-6 G1: per-process TASK_SIZE cap used by
+	 * the output-storing gadgets (clock_gettime, time,
+	 * getcpu) to bound user pointers before storing
+	 * through them at CPL=0. Without this check, a guest
+	 * could pass an %rsi pointing into the kernel half
+	 * (canonical 0xffff...) or a non-canonical address;
+	 * the gadget runs in ring-0 and would either corrupt
+	 * our own ring-0 data structures (mapped supervisor
+	 * VA) or trigger #GP on a non-canonical store (no
+	 * IDT[13] handler currently). The cap is set once at
+	 * vvar_alloc time from UML's task_size global; gadgets
+	 * compare the user pointer against it and fall back
+	 * if the pointer is at-or-above the cap.
+	 *
+	 * Gadgets read this via %gs:KVM_VVAR_OFF_TASK_SIZE_CAP.
+	 */
+	u64 task_size_cap;
+	u64 _pad2[2];			/* cache-line pad (64 B struct) */
 };
 
 #define KVM_VVAR_OFF_SEQ		0x00
@@ -268,6 +287,7 @@ struct kvm_gadget_vvar {
 #define KVM_VVAR_OFF_REAL_SEC		0x18
 #define KVM_VVAR_OFF_REAL_NSEC		0x20
 #define KVM_VVAR_OFF_BUDGET		0x28
+#define KVM_VVAR_OFF_TASK_SIZE_CAP	0x30
 
 /*
  * Audit round-5 F8: initial budget handed to the clock gadget

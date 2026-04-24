@@ -535,9 +535,19 @@ int kvm_gadget_vvar_alloc(void)
 	kvm_ctx.gadget_vvar_gpa  = (u64)__pa(kvm_ctx.gadget_vvar);
 	kvm_ctx.gadget_vvar_va   = 0;	/* filled in by kvm_enter_guest map */
 
-	pr_info("um: kvm gadget_vvar: va=%p gpa=0x%llx (memo 11 G5)\n",
+	/*
+	 * Audit round-6 G1: seed task_size_cap once. UML's
+	 * task_size is a global set in arch_setup() before any
+	 * gadget runs, so a single write here covers every
+	 * subsequent gadget invocation. No refresh needed because
+	 * task_size doesn't change after boot.
+	 */
+	kvm_ctx.gadget_vvar->task_size_cap = task_size;
+
+	pr_info("um: kvm gadget_vvar: va=%p gpa=0x%llx task_size_cap=0x%lx (memo 11 G5 + G1)\n",
 		kvm_ctx.gadget_vvar,
-		(unsigned long long)kvm_ctx.gadget_vvar_gpa);
+		(unsigned long long)kvm_ctx.gadget_vvar_gpa,
+		task_size);
 	return 0;
 }
 

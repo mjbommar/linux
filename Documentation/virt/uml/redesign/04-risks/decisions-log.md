@@ -9180,4 +9180,127 @@ Both issues real:
 
 ---
 
+## D93 (2026-04-24) — G1: gadget user-pointer bounds check (TASK_SIZE_CAP)
+
+**Decision.** Add a per-process `task_size_cap` field at
+vvar offset 0x30, populated once at vvar_alloc from
+UML's `task_size` global. clock_gettime / time / getcpu
+each compare their user-pointer arg against this cap
+before storing through it; if pointer >= cap, the
+gadget falls back to handle_syscall which applies
+proper access_ok semantics (-EFAULT).
+
+**Finding.** Audit round-6 P0 #1 (G1) — "gadget output-
+pointer syscalls still dereference user-controlled
+pointers at CPL0. clock_gettime, time, and getcpu
+directly store through %rsi/%rdi in the LSTAR gadget
+without access_ok/TASK_SIZE bounds checks, so
+noncanonical pointers can #GP and mapped supervisor
+addresses can be written instead of returning -EFAULT.
+The IDT only installs #PF, not #GP."
+
+Two failure modes handled:
+
+1. **Mapped supervisor address.** A guest passes
+   %rsi = 0xffff800000001000 (canonical kernel VA).
+   Pre-G1, the gadget's `mov %r10, (%rsi)` runs at
+   CPL=0; if shadow PT has the page mapped (e.g. our
+   bootstrap data at kernel-VA-derived addresses),
+   the gadget silently corrupts it. Post-G1, cap
+   check rejects.
+
+2. **Non-canonical address.** Guest passes
+   %rsi = 0x800000000000 (bit 47=0, bit 48=1 — non-
+   canonical). CPU raises #GP on the access. IDT[13]
+   isn't installed → triple-fault → KVM abort. Post-
+   G1, cap check rejects before the access.
+
+Single comparison covers both vectors because
+task_size_cap (~128 TB on 64-bit UML) is below all
+non-canonical AND all canonical kernel-half
+addresses.
+
+**Implementation shape.**
+
+- `struct kvm_gadget_vvar` gains `u64 task_size_cap`
+  at offset 0x30. `KVM_VVAR_OFF_TASK_SIZE_CAP`
+  define mirrors the offset.
+- `kvm_gadget_vvar_alloc` initializes
+  `gadget_vvar->task_size_cap = task_size` (UML
+  global). One-time init; never refreshes (task_size
+  is static at boot).
+- LSTAR clock_gettime body inserts 15 B before the
+  rsi store: `cmp %rsi, %gs:0x1030; jbe rel32
+  fallback`. Body grows 88 → 103 B.
+- LSTAR time body restructured to load REAL_SEC into
+  %rdx (not %rax), bounds-check rdi, store via %rdx,
+  finalize return value `mov %rdx, %rax`. RAX stays
+  = NR=201 across the bounds check so a fallback
+  hands handle_syscall the correct NR. Body grows
+  23 → 41 B.
+- LSTAR getcpu body restructured to defer the
+  `xor %eax, %eax` until just before sysretq, and
+  use %r10d for the node-write zero. RAX stays =
+  NR=309 across both bounds checks. Two checks
+  inserted (one before each store). Body grows 30
+  → 64 B.
+- gadget_fault_nr ranges + getcpu jmp rel32 +
+  time stub rel32 all updated for the new offsets.
+- test_ops.c expected bytes mirror the new 394-B
+  layout.
+
+**The RAX-preservation trick.** The original G1 cut
+inserted bounds checks AFTER the value loads (mov
+%gs:..., %rax in time; xor %eax, %eax in getcpu).
+Both clobbered RAX — the SYSCALL NR — before the
+fallback could fire. When fallback DID fire (e.g.
+on a kernel-VA pointer), kvm_decode_syscall saw the
+post-clobber RAX as the NR: REAL_SEC for time
+(huge — out of range, sys_ni_syscall returns
+-ENOSYS) or 0 for getcpu (= sys_read with bad fd,
+returns -EBADF).
+
+Empirical: g1-supervisor-smoke initially printed
+`clock_kvm=-14 time_kvm=-38 getcpu_kvm=-9 clock_noncan=-14`.
+The -38 / -9 are the symptoms of the RAX-clobber
+bug; -14 is the correct EFAULT. Post-fix: all four
+return -14. This is the same F7/2 pattern (D75)
+applied to time + getcpu.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass with the new 394-B byte-match
+  table.
+- perf-getpid: kvm cyc=97, ratio 0.002, PASS (G1
+  bounds check adds ~1 cyc per call to the gadget
+  hot path; barely measurable).
+- /tmp/g1-supervisor-smoke: clock_kvm=-14
+  time_kvm=-14 getcpu_kvm=-14 clock_noncan=-14 (all
+  EFAULT, as expected). Validated both supervisor-VA
+  and non-canonical address rejection.
+- /tmp/efault-smoke (out-of-VMA pointers): all -14.
+- /tmp/time-getcpu-smoke (valid pointers): correct
+  return values.
+- /tmp/clock-loop: cyc_per_call=98 (was ~95 pre-G1;
+  +3 cyc for the bounds check, in line with the
+  estimate).
+
+**Complementary IDT[13] handler.** Not yet installed.
+With G1 in place, no gadget access can reach an
+address that would trigger #GP — all bad pointers
+fall back via the rel32 jbe before the access. So
+IDT[13] for #GP from the gadget body is currently
+unreachable. If a future LSTAR layout introduces
+gadget code paths that bypass G1's check, install a
+#GP handler at that point.
+
+**Refs.**
+
+- Audit round-6 finding #1 (G1).
+- D75 (F2) — the precedent for RAX-preservation across
+  fallback (clock_gettime's seqlock fix).
+- task #233 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

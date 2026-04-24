@@ -425,8 +425,8 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x3d, 0x35, 0x01, 0x00, 0x00,
 	/* +8  jne +5 (skip getcpu stub) */
 	0x75, 0x05,
-	/* +10 jmp rel32 getcpu_body (+297); rel32 = 297-15 = 282 = 0x11a */
-	0xe9, 0x1a, 0x01, 0x00, 0x00,
+	/* +10 jmp rel32 getcpu_body (+330 post-G1); rel32 = 330-15 = 315 = 0x13b */
+	0xe9, 0x3b, 0x01, 0x00, 0x00,
 	/* +15 test $0xffffff00, %eax  (any high bits?) */
 	0xa9, 0x00, 0xff, 0xff, 0xff,
 	/* +20 jne +40 → fallback (+62) */
@@ -519,15 +519,17 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	/*
 	 * +176 clock stub: jmp rel32 clock_body (+186)
 	 *   rel32 = 186 - 181 = 5
-	 * +181 time  stub: jmp rel32 time_body  (+274)
-	 *   rel32 = 274 - 186 = 88 = 0x58
+	 * +181 time  stub: jmp rel32 time_body  (+289 post-G1)
+	 *   rel32 = 289 - 186 = 103 = 0x67
 	 *
 	 * The stubs sit within rel8 reach of their dispatch
 	 * entries; the rel32 jmp then reaches the big bodies
-	 * past sched_yield.
+	 * past sched_yield. Time body offset shifted from +274
+	 * pre-G1 to +289 post-G1 because the clock body's
+	 * G1 bounds check added 15 bytes.
 	 */
 	0xe9, 0x05, 0x00, 0x00, 0x00,
-	0xe9, 0x58, 0x00, 0x00, 0x00,
+	0xe9, 0x67, 0x00, 0x00, 0x00,
 
 	/*
 	 * +186 handler_clock_gettime (CLOCK_MONOTONIC only, 88 B)
@@ -576,19 +578,28 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x65, 0x3b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
 	/* +253 jne rel32 fallback (+62); rel32 = 62-259 = -197 = 0xffffff3b */
 	0x0f, 0x85, 0x3b, 0xff, 0xff, 0xff,
-	/* +259 mov %r10, (%rsi) */
+	/*
+	 * +259 G1 bounds check: cmp %rsi, %gs:0x1030 (TASK_SIZE_CAP)
+	 * — flags reflect (cap - rsi); jbe taken when cap <= rsi
+	 * (rsi >= cap), routing to fallback so the SYSCALL path
+	 * applies access_ok / -EFAULT semantics. 9 B + 6 B.
+	 */
+	0x65, 0x48, 0x39, 0x34, 0x25, 0x30, 0x10, 0x00, 0x00,
+	/* +268 jbe rel32 fallback (+62); rel32 = 62-274 = -212 = 0xffffff2c */
+	0x0f, 0x86, 0x2c, 0xff, 0xff, 0xff,
+	/* +274 mov %r10, (%rsi) */
 	0x4c, 0x89, 0x16,
-	/* +262 mov %r8, 8(%rsi) */
+	/* +277 mov %r8, 8(%rsi) */
 	0x4c, 0x89, 0x46, 0x08,
-	/* +266 xor %eax, %eax */
+	/* +281 xor %eax, %eax */
 	0x31, 0xc0,
-	/* +268 swapgs */
+	/* +283 swapgs */
 	0x0f, 0x01, 0xf8,
-	/* +271 sysretq */
+	/* +286 sysretq */
 	0x48, 0x0f, 0x07,
 
 	/*
-	 * +274 handler_time (23 B)
+	 * +289 handler_time (41 B post-G1 + RAX-preserve fix)
 	 *
 	 *   time(2): time_t time(time_t *tloc);
 	 *
@@ -597,50 +608,104 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	 * 1-second resolution so a torn read is at worst off
 	 * by one second (the vDSO uses the same shortcut).
 	 *
+	 * Audit round-6 G1 (+ F7/2-style RAX preservation):
+	 * load REAL_SEC into %rdx (NOT %rax) so RAX stays =
+	 * NR=201 throughout the body. If the bounds check
+	 * triggers a fallback, handle_syscall sees the right
+	 * NR. Move %rdx → %rax just before sysretq so the
+	 * gadget's return value is REAL_SEC.
+	 *
+	 * NULL tloc skips both the bounds check and the store
+	 * but still returns REAL_SEC.
+	 *
 	 * On entry: RDI = tloc (may be NULL), RAX = 201 (NR),
 	 *           swapgs already done.
 	 */
-	/* mov %gs:0x1018, %rax (REAL_SEC); 9 B */
-	0x65, 0x48, 0x8b, 0x04, 0x25, 0x18, 0x10, 0x00, 0x00,
-	0x48, 0x85, 0xff,			/* test %rdi, %rdi */
-	0x74, 0x03,				/* je +3 (skip store) */
-	0x48, 0x89, 0x07,			/* mov %rax, (%rdi) */
-	0x0f, 0x01, 0xf8,			/* swapgs */
-	0x48, 0x0f, 0x07,			/* sysretq */
+	/* +289 mov %gs:0x1018, %rdx (REAL_SEC into RDX); 9 B */
+	0x65, 0x48, 0x8b, 0x14, 0x25, 0x18, 0x10, 0x00, 0x00,
+	/* +298 test %rdi, %rdi */
+	0x48, 0x85, 0xff,
+	/* +301 je +18 (skip bounds + store, land at mov rdx,rax) */
+	0x74, 0x12,
+	/* +303 cmp %rdi, %gs:0x1030 (TASK_SIZE_CAP); 9 B */
+	0x65, 0x48, 0x39, 0x3c, 0x25, 0x30, 0x10, 0x00, 0x00,
+	/* +312 jbe rel32 fallback (+62); rel32 = 62-318 = -256 = 0xffffff00
+	 * RAX still = 201 here, so handle_syscall dispatches sys_time.
+	 */
+	0x0f, 0x86, 0x00, 0xff, 0xff, 0xff,
+	/* +318 mov %rdx, (%rdi)  — store REAL_SEC into *tloc */
+	0x48, 0x89, 0x17,
+	/* +321 mov %rdx, %rax    — return value = REAL_SEC */
+	0x48, 0x89, 0xd0,
+	/* +324 swapgs */
+	0x0f, 0x01, 0xf8,
+	/* +327 sysretq */
+	0x48, 0x0f, 0x07,
 
 	/*
-	 * +297 handler_getcpu (30 B)
+	 * +330 handler_getcpu (64 B post-G1 + RAX-preserve fix)
 	 *
 	 *   int getcpu(unsigned int *cpu, unsigned int *node);
 	 *
 	 * Returns 0. Writes CPU_ID from the per-vCPU state
 	 * page to *cpu if non-NULL; writes 0 to *node if
 	 * non-NULL (UML has no NUMA — all tasks are node 0).
-	 * Neither store is retried; a bad pointer triggers
-	 * the ring-0 #PF path (tracked as F7 part 1 for
-	 * proper -EFAULT semantics).
 	 *
 	 * Uses %edx (not %ecx) for the CPU_ID load because
 	 * RCX still holds the user's return RIP — SYSRETQ
 	 * loads RIP from RCX, so clobbering RCX breaks the
 	 * sysretq tail.
 	 *
+	 * Audit round-6 G1: each non-NULL pointer gets a
+	 * TASK_SIZE bounds check before the store. NULL
+	 * pointers skip the check + store via je.
+	 *
+	 * Audit round-6 G1 (+ RAX preserve): defer the
+	 * `xor %eax, %eax` (return value = 0) until just
+	 * before sysretq, and use %r10d for the node-write
+	 * zero. This way RAX stays = NR=309 across both
+	 * bounds checks; if either fallback fires,
+	 * handle_syscall sees the right NR.
+	 *
 	 * On entry: RDI = cpu ptr, RSI = node ptr, RAX = 309
 	 *           (NR), swapgs already done.
 	 */
-	0x31, 0xc0,				/* xor %eax, %eax (return 0) */
-	0x48, 0x85, 0xff,			/* test %rdi, %rdi */
-	0x74, 0x0a,				/* je +10 (skip cpu store) */
-	/* mov %gs:0x04, %edx (CPU_ID); 8 B */
+	/* +330 test %rdi, %rdi */
+	0x48, 0x85, 0xff,
+	/* +333 je +25 (skip cpu bounds check + store) */
+	0x74, 0x19,
+	/* +335 cmp %rdi, %gs:0x1030 (TASK_SIZE_CAP); 9 B */
+	0x65, 0x48, 0x39, 0x3c, 0x25, 0x30, 0x10, 0x00, 0x00,
+	/* +344 jbe rel32 fallback (+62); rel32 = 62-350 = -288 = 0xfffffee0 */
+	0x0f, 0x86, 0xe0, 0xfe, 0xff, 0xff,
+	/* +350 mov %gs:0x04, %edx (CPU_ID); 8 B */
 	0x65, 0x8b, 0x14, 0x25, 0x04, 0x00, 0x00, 0x00,
-	0x89, 0x17,				/* mov %edx, (%rdi) */
-	0x48, 0x85, 0xf6,			/* test %rsi, %rsi */
-	0x74, 0x02,				/* je +2 (skip node store) */
-	0x89, 0x06,				/* mov %eax, (%rsi) — node=0 */
-	0x0f, 0x01, 0xf8,			/* swapgs */
-	0x48, 0x0f, 0x07,			/* sysretq */
+	/* +358 mov %edx, (%rdi) */
+	0x89, 0x17,
+	/* +360 test %rsi, %rsi */
+	0x48, 0x85, 0xf6,
+	/* +363 je +21 (skip node bounds check + store, land at xor eax) */
+	0x74, 0x15,
+	/* +365 cmp %rsi, %gs:0x1030 (TASK_SIZE_CAP); 9 B */
+	0x65, 0x48, 0x39, 0x34, 0x25, 0x30, 0x10, 0x00, 0x00,
+	/* +374 jbe rel32 fallback (+62); rel32 = 62-380 = -318 = 0xfffffec2 */
+	0x0f, 0x86, 0xc2, 0xfe, 0xff, 0xff,
+	/* +380 xor %r10d, %r10d (node value = 0; via r10 not rax) */
+	0x45, 0x31, 0xd2,
+	/* +383 mov %r10d, (%rsi) */
+	0x44, 0x89, 0x16,
+	/* +386 xor %eax, %eax (return 0) — deferred to here so RAX=NR
+	 *      survived all bounds checks above.
+	 */
+	0x31, 0xc0,
+	/* +388 swapgs */
+	0x0f, 0x01, 0xf8,
+	/* +391 sysretq */
+	0x48, 0x0f, 0x07,
 
-	/* total body: 327 bytes (G6-follow-on + F8; LSTAR region 448 B) */
+	/* total body: 394 bytes (G6-followon + F8 + G1 + RAX preserve;
+	 * LSTAR region 448 B).
+	 */
 };
 #else
 static const u8 kvm_bootstrap_lstar_bytes[] = {
@@ -967,11 +1032,16 @@ int kvm_gadget_fault_nr(u64 fault_rip)
 		return -1;
 	off = fault_rip - base;
 
-	if (off >= 186 && off < 274)
+	/*
+	 * Post-G1 (audit round-6) ranges. Bounds checks plus
+	 * RAX-preservation re-encoding pushed each handler
+	 * down: clock 186..289, time 289..330, getcpu 330..394.
+	 */
+	if (off >= 186 && off < 289)
 		return __NR_clock_gettime;
-	if (off >= 274 && off < 297)
+	if (off >= 289 && off < 330)
 		return __NR_time;
-	if (off >= 297 && off < 327)
+	if (off >= 330 && off < 394)
 		return __NR_getcpu;
 	return -1;
 }
