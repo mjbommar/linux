@@ -559,12 +559,23 @@ static void kvm_production_probe_null_test(struct kunit *test)
  */
 #ifdef CONFIG_UM_BACKEND_KVM_GADGET
 /*
- * Memo 11 G4 + G5c + G6: 221-byte real systrap gadget body.
- *   9-entry dispatch (7 pid-family + clock_gettime + sched_yield),
- *   7 × 14 B pid-family handlers (inlined swapgs+sysretq, no
- *   shared tail), 8 B sched_yield, 68 B clock_gettime (two of
- *   three fallback jnes use rel32 because rel8 would overflow
- *   after G6's layout shift).
+ * Memo 11 G4 + G5c + G6 + G6-follow-on: 312-byte real systrap
+ * gadget body. Layout:
+ *   +0    swapgs (3 B)
+ *   +3    upper-NR guard (17 B): cmp $0x135 / je getcpu stub
+ *         / test $0xffffff00 / jne fallback (F4 fix — low-byte
+ *         alias hijack)
+ *   +22   10-entry low-NR dispatch (40 B): 7 pid + sched_yield
+ *         + clock + time
+ *   +62   fallback (8 B)
+ *   +70   7 × 14 B pid-family handlers (inlined tail) = 98 B
+ *   +168  sched_yield (8 B)
+ *   +176  2 × 5 B near-stubs for clock + time
+ *   +186  clock_gettime (73 B, SEQ via %edx per F7 part 2)
+ *   +259  time (23 B, G6-follow-on)
+ *   +282  getcpu (30 B, G6-follow-on; uses %edx not %ecx so
+ *         RCX/user-RIP survives for sysretq)
+ *   total 312 B
  * Kept in lockstep with the live table in
  * arch/um/backend/kvm/thread.c via this KUnit equivalence
  * assertion.
@@ -573,23 +584,31 @@ static const u8 kvm_expected_lstar_bytes[] = {
 	/* +0 swapgs */
 	0x0f, 0x01, 0xf8,
 
-	/* +3..+38 dispatch (9 × 4 B) */
-	0x3c, 0x27, 0x74, 40,
-	0x3c, 0xba, 0x74, 50,
-	0x3c, 0x6e, 0x74, 60,
-	0x3c, 0x66, 0x74, 70,
-	0x3c, 0x6b, 0x74, 80,
-	0x3c, 0x68, 0x74, 90,
-	0x3c, 0x6c, 0x74, 100,
-	0x3c, 0xe4, 0x74, 118,
-	0x3c, 0x18, 0x74, 106,
+	/* +3 upper-NR guard (17 B): pre-check getcpu, then high-byte test */
+	0x3d, 0x35, 0x01, 0x00, 0x00,	/* cmp $0x135, %eax */
+	0x75, 0x05,			/* jne +5 */
+	0xe9, 0x0b, 0x01, 0x00, 0x00,	/* jmp rel32 getcpu_body (+282) */
+	0xa9, 0x00, 0xff, 0xff, 0xff,	/* test $0xffffff00, %eax */
+	0x75, 0x28,			/* jne +40 → fallback (+62) */
 
-	/* +39..+46 fallback (swapgs; out; sysretq) */
+	/* +22..+61 low-NR dispatch (10 × 4 B) */
+	0x3c, 0x27, 0x74, 44,
+	0x3c, 0xba, 0x74, 54,
+	0x3c, 0x6e, 0x74, 64,
+	0x3c, 0x66, 0x74, 74,
+	0x3c, 0x6b, 0x74, 84,
+	0x3c, 0x68, 0x74, 94,
+	0x3c, 0x6c, 0x74, 104,
+	0x3c, 0x18, 0x74, 114,
+	0x3c, 0xe4, 0x74, 118,
+	0x3c, 0xc9, 0x74, 119,
+
+	/* +62..+69 fallback */
 	0x0f, 0x01, 0xf8,
 	0xe6, 0xf4,
 	0x48, 0x0f, 0x07,
 
-	/* +47..+144 pid-family handlers (7 × 14 B, inlined tail) */
+	/* +70..+167 pid-family handlers (7 × 14 B, inlined tail) */
 	0x65, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
@@ -612,24 +631,48 @@ static const u8 kvm_expected_lstar_bytes[] = {
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +145..+152 handler_sched_yield (8 B) */
+	/* +168..+175 handler_sched_yield (8 B) */
 	0x31, 0xc0,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +153..+220 handler_clock_gettime (68 B) */
+	/* +176..+185 two near-stubs (5 B each): clock, time */
+	0xe9, 0x05, 0x00, 0x00, 0x00,
+	0xe9, 0x49, 0x00, 0x00, 0x00,
+
+	/* +186..+258 handler_clock_gettime (73 B, SEQ via %edx) */
 	0x83, 0xff, 0x01,
-	0x75, 0x89,
-	0x65, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00,
-	0xa8, 0x01,
-	0x0f, 0x85, 0x79, 0xff, 0xff, 0xff,
+	0x0f, 0x85, 0x7b, 0xff, 0xff, 0xff,
+	0x65, 0x8b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
+	0xf6, 0xc2, 0x01,
+	0x0f, 0x85, 0x6a, 0xff, 0xff, 0xff,
 	0x65, 0x4c, 0x8b, 0x14, 0x25, 0x08, 0x10, 0x00, 0x00,
-	0x65, 0x48, 0x8b, 0x14, 0x25, 0x10, 0x10, 0x00, 0x00,
-	0x65, 0x3b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00,
-	0x0f, 0x85, 0x59, 0xff, 0xff, 0xff,
+	0x65, 0x4c, 0x8b, 0x04, 0x25, 0x10, 0x10, 0x00, 0x00,
+	0x65, 0x3b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
+	0x0f, 0x85, 0x4a, 0xff, 0xff, 0xff,
 	0x4c, 0x89, 0x16,
-	0x48, 0x89, 0x56, 0x08,
+	0x4c, 0x89, 0x46, 0x08,
 	0x31, 0xc0,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
+
+	/* +259..+281 handler_time (23 B) */
+	0x65, 0x48, 0x8b, 0x04, 0x25, 0x18, 0x10, 0x00, 0x00,
+	0x48, 0x85, 0xff,
+	0x74, 0x03,
+	0x48, 0x89, 0x07,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
+
+	/* +282..+311 handler_getcpu (30 B) */
+	0x31, 0xc0,
+	0x48, 0x85, 0xff,
+	0x74, 0x0a,
+	0x65, 0x8b, 0x14, 0x25, 0x04, 0x00, 0x00, 0x00,
+	0x89, 0x17,
+	0x48, 0x85, 0xf6,
+	0x74, 0x02,
+	0x89, 0x06,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 };
@@ -1044,6 +1087,13 @@ static void kvm_syscall_classification_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_sched_yield),
 			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	/* G6-follow-on additions. */
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_time),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	KUNIT_EXPECT_EQ(test,
+			kvm_classify_syscall(__NR_getcpu),
+			_TEST_KVM_SYSCALL_CLASS_GADGET);
 
 	/* Class A — passthrough. Spot-check the hot-path defaults. */
 	KUNIT_EXPECT_EQ(test,
@@ -1079,10 +1129,11 @@ static void kvm_syscall_classification_test(struct kunit *test)
 /*
  * Inventory-size invariant. Memo 10 records "12 of 385 non-A"
  * as the classifier-dispatched set (B + C + D); memo 11 G7 adds
- * the class-E gadget-handled set, currently 9 entries. Walk
- * every NR and count non-passthrough classifications to catch
- * drift (forgotten addition OR accidental promotion of a
- * passthrough entry). Total expected: 12 + 9 = 21.
+ * the class-E gadget-handled set, 9 entries post-G7; G6-follow-
+ * on adds 2 more (time, getcpu). Walk every NR and count non-
+ * passthrough classifications to catch drift (forgotten
+ * addition OR accidental promotion of a passthrough entry).
+ * Total expected: 12 + 11 = 23.
  */
 static void kvm_syscall_class_count_test(struct kunit *test)
 {
@@ -1098,8 +1149,8 @@ static void kvm_syscall_class_count_test(struct kunit *test)
 		if (c == _TEST_KVM_SYSCALL_CLASS_GADGET)
 			gadget++;
 	}
-	KUNIT_EXPECT_EQ(test, non_a, 21U);
-	KUNIT_EXPECT_EQ(test, gadget, 9U);
+	KUNIT_EXPECT_EQ(test, non_a, 23U);
+	KUNIT_EXPECT_EQ(test, gadget, 11U);
 }
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */

@@ -255,6 +255,30 @@ testable. Dependency arrows enforce the order.
   tracked as G6-follow-on once we factor the LSTAR
   region into two pages or move the seqlock vvar into
   a dedicated reach-local sub-block.
+
+  **Status (2026-04-24): G6-follow-on LANDED.** time(2)
+  and getcpu(2) handlers landed as part of a 312-byte
+  LSTAR rewrite that also carries two audit round-5
+  fixes:
+  - **F4** (P0 correctness): upper-NR guard prologue
+    (cmp $0x135; test $0xffffff00) — without this,
+    utimensat (NR 280 = 0x118) would alias sched_yield
+    (NR 24 = 0x18) via the `cmp %al, imm8` dispatch.
+    Real hijack bug, not theoretical.
+  - **F7 part 2** (P1): clock_gettime seqlock now loads
+    SEQ into %edx instead of %eax so RAX stays = 228
+    across fallback paths (before this, any fallback
+    would hand RAX=seq-value to handle_syscall as the
+    NR — confusion bug).
+  Both handlers added: time (23 B, single-read from vvar
+  REAL_SEC, no seqlock retry — 1-sec resolution makes
+  a torn read harmless) and getcpu (30 B, returns 0 and
+  writes CPU_ID from gadget state page + node=0 since
+  UML has no NUMA). Uses %edx for CPU_ID load to avoid
+  clobbering RCX (user RIP for sysretq). Class-E count
+  rises 9 → 11. KUnit 35/35 still green. perf-getpid
+  dual-binary: gadget 98 cyc / 28 ns, fallback 150931
+  cyc; ratio 0.001 (G7 gate 0.20 — 200× margin).
 - **G7 — class_map E + perf-getpid gate extension.**
   Register gadget-handled syscalls as class E in memo
   10's inventory; perf runner picks up a second pass

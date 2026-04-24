@@ -43,13 +43,13 @@ Each syscall goes in exactly one of five boxes:
 
 | Class | Post-dispatch delta | Count on x86_64 |
 |---|---|---|
-| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 364 of 385 |
+| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 362 of 385 |
 | **B — vCPU-state propagate** | dispatch, then push an MSR/SREG delta to the vCPU via `KVM_SET_MSRS` / `KVM_SET_SREGS` | 3 |
 | **C — signal-frame** | `KVM_GET_REGS` → rebuild frame in guest memory → `KVM_SET_REGS` | 1 |
 | **D — deny** | return `-ENOSYS` or deliver `SIGSYS` without dispatching | 8 |
-| **E — gadget-handled** | in-guest LSTAR gadget fast path (no VMEXIT); fallback behaves like class A | 9 (memo 11 G7) |
+| **E — gadget-handled** | in-guest LSTAR gadget fast path (no VMEXIT); fallback behaves like class A | 11 (memo 11 G7 + G6-follow-on) |
 
-That's 21 non-A entries total — exhaustive. Every other
+That's 23 non-A entries total — exhaustive. Every other
 syscall, including every syscall Linux will add next
 release, inherits A by default. No per-release maintenance
 treadmill on the KVM backend's dispatcher.
@@ -181,7 +181,9 @@ and the classifier in `arch/um/backend/kvm/syscall_class.c`:
 | 108 | `getegid` | `%gs:EGID` | G4 |
 | 110 | `getppid` | `%gs:PPID` | G4 |
 | 186 | `gettid` | `%gs:TID` | G4 |
+| 201 | `time`         | vvar REAL_SEC (no seqlock retry — 1-sec resolution) | G6-follow-on (2026-04-24) |
 | 228 | `clock_gettime` (CLOCK_MONOTONIC) | seqlock vvar page | G5 (2026-04-24) |
+| 309 | `getcpu`       | `%gs:CPU_ID` via per-vCPU state page; node always 0 | G6-follow-on (2026-04-24) |
 
 ### Fallback semantics
 

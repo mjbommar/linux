@@ -342,146 +342,244 @@ static inline u64 kvm_build_sysret_r11(u64 saved_user_rflags)
  * (Linux thread id). See kvm_backend.h for the struct
  * field ↔ offset mapping.
  */
-#define KVM_GADGET_TAIL_OFF	109	/* offset of shared tail */
-#define KVM_GADGET_FALLBACK_OFF	31	/* offset of fallback `swapgs; out` */
+#define KVM_GADGET_FALLBACK_OFF	62	/* offset of fallback `swapgs; out` (G6-f-o) */
 
 static const u8 kvm_bootstrap_lstar_bytes[] = {
-	/* +0   entry */
+	/*
+	 * +0 entry: swapgs (user→kernel GS). After this %gs
+	 * points at the per-vCPU state page (memo 11 G3 +
+	 * MSR_KERNEL_GS_BASE programming in kvm_enter_guest).
+	 * Every fallback/handler end restores user GS before
+	 * sysretq.
+	 */
 	0x0f, 0x01, 0xf8,			/* swapgs */
 
 	/*
-	 * +3 dispatch. 9 × (cmp imm8 + je rel8) = 36 B. The
-	 * 9th entry added by G6 is __NR_sched_yield (0x18).
-	 * G6 also inlines swapgs+sysretq in each pid-family
-	 * handler (no shared tail) so clock_gettime can
-	 * grow to fit rel32 jnes back to fallback without
-	 * overflowing the pid handlers' reach to a shared
-	 * tail.
+	 * +3 upper-NR guard prologue (G6-follow-on, audit
+	 * round-5 F4 — "syscall dispatch aliases on low byte").
+	 * The main dispatch below uses `cmp $imm8, %al` which
+	 * only compares the low byte of RAX. Without this
+	 * guard, NRs sharing a low byte with a gadget-handled
+	 * NR get hijacked — utimensat (280 = 0x118, low=0x18)
+	 * aliases sched_yield; preadv (295 = 0x127) aliases
+	 * getpid; mount_setattr (442 = 0x1ba) aliases gettid.
+	 * Real correctness bug, not theoretical.
 	 *
-	 *   +3:  je getpid_h  (+47)
-	 *   +7:  je gettid_h  (+61)
-	 *   +11: je getppid_h (+75)
-	 *   +15: je getuid_h  (+89)
-	 *   +19: je geteuid_h (+103)
-	 *   +23: je getgid_h  (+117)
-	 *   +27: je getegid_h (+131)
-	 *   +31: je clock_h   (+153)
-	 *   +35: je sched_yield_h (+145)
+	 * Two-step guard:
+	 *   1. Pre-check the one gadget-handled NR that
+	 *      exceeds 0xff: getcpu = 0x135. If it matches,
+	 *      jmp rel32 to getcpu_body at +282.
+	 *   2. Upper-byte test: if any of bits 8..31 of %eax
+	 *      are set, the NR can't correspond to any
+	 *      cmp-$imm8-handled gadget entry — fallback.
+	 *   3. Otherwise low-byte dispatch below is safe.
+	 *
+	 * Hot-path cost: 2 cmps + 2 jnes before dispatch
+	 * (~5-8 cyc on Zen 4 / Alder Lake). Well within G8's
+	 * measured 23-34 ns envelope; memo 07 target is 100 ns.
 	 */
-	0x3c, 0x27, 0x74, 40,	/* cmp $0x27 (getpid),  je  */
-	0x3c, 0xba, 0x74, 50,	/* cmp $0xba (gettid),  je  */
-	0x3c, 0x6e, 0x74, 60,	/* cmp $0x6e (getppid), je  */
-	0x3c, 0x66, 0x74, 70,	/* cmp $0x66 (getuid),  je  */
-	0x3c, 0x6b, 0x74, 80,	/* cmp $0x6b (geteuid), je  */
-	0x3c, 0x68, 0x74, 90,	/* cmp $0x68 (getgid),  je  */
-	0x3c, 0x6c, 0x74, 100,	/* cmp $0x6c (getegid), je  */
-	0x3c, 0xe4, 0x74, 118,	/* cmp $0xe4 (clock_gettime), je */
-	0x3c, 0x18, 0x74, 106,	/* cmp $0x18 (sched_yield), je */
+	/* +3  cmp $0x135, %eax  (NR_getcpu pre-check) */
+	0x3d, 0x35, 0x01, 0x00, 0x00,
+	/* +8  jne +5 (skip getcpu stub) */
+	0x75, 0x05,
+	/* +10 jmp rel32 getcpu_body (+282); rel32 = 282-15 = 267 */
+	0xe9, 0x0b, 0x01, 0x00, 0x00,
+	/* +15 test $0xffffff00, %eax  (any high bits?) */
+	0xa9, 0x00, 0xff, 0xff, 0xff,
+	/* +20 jne +40 → fallback (+62) */
+	0x75, 0x28,
 
-	/* +39  fallback — unknown NR */
+	/*
+	 * +22 low-NR dispatch. 10 × (cmp imm8 + je rel8) = 40 B.
+	 * Order chosen to pack handlers in rel8 reach from
+	 * every dispatch je.
+	 *
+	 *   +22: je getpid_h      (+70)
+	 *   +26: je gettid_h      (+84)
+	 *   +30: je getppid_h     (+98)
+	 *   +34: je getuid_h      (+112)
+	 *   +38: je geteuid_h     (+126)
+	 *   +42: je getgid_h      (+140)
+	 *   +46: je getegid_h     (+154)
+	 *   +50: je sched_yield_h (+168)
+	 *   +54: je clock_stub    (+176)
+	 *   +58: je time_stub     (+181)
+	 *   +62: fall through to fallback
+	 */
+	0x3c, 0x27, 0x74, 44,	/* cmp $0x27 (getpid),  je  */
+	0x3c, 0xba, 0x74, 54,	/* cmp $0xba (gettid),  je  */
+	0x3c, 0x6e, 0x74, 64,	/* cmp $0x6e (getppid), je  */
+	0x3c, 0x66, 0x74, 74,	/* cmp $0x66 (getuid),  je  */
+	0x3c, 0x6b, 0x74, 84,	/* cmp $0x6b (geteuid), je  */
+	0x3c, 0x68, 0x74, 94,	/* cmp $0x68 (getgid),  je  */
+	0x3c, 0x6c, 0x74, 104,	/* cmp $0x6c (getegid), je  */
+	0x3c, 0x18, 0x74, 114,	/* cmp $0x18 (sched_yield), je */
+	0x3c, 0xe4, 0x74, 118,	/* cmp $0xe4 (clock_gettime), je → stub */
+	0x3c, 0xc9, 0x74, 119,	/* cmp $0xc9 (time), je → stub */
+
+	/* +62  fallback — unknown NR (doubles as target of
+	 * the +20 jne and of a falling-through no-match).
+	 */
 	0x0f, 0x01, 0xf8,			/* swapgs (restore user GS) */
 	0xe6, 0xf4,				/* out %al, $0xf4 */
 	0x48, 0x0f, 0x07,			/* sysretq */
 
-	/* +47  handler_getpid (inline, 14 B):
+	/* +70  handler_getpid (inline, 14 B):
 	 *   mov %gs:KVM_GADGET_OFF_TGID, %eax; swapgs; sysretq
 	 */
 	0x65, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +61  handler_gettid */
+	/* +84  handler_gettid */
 	0x65, 0x8b, 0x04, 0x25, 0x0c, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +75  handler_getppid */
+	/* +98  handler_getppid */
 	0x65, 0x8b, 0x04, 0x25, 0x10, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +89  handler_getuid */
+	/* +112 handler_getuid */
 	0x65, 0x8b, 0x04, 0x25, 0x14, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +103 handler_geteuid */
+	/* +126 handler_geteuid */
 	0x65, 0x8b, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +117 handler_getgid */
+	/* +140 handler_getgid */
 	0x65, 0x8b, 0x04, 0x25, 0x1c, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
-	/* +131 handler_getegid */
+	/* +154 handler_getegid */
 	0x65, 0x8b, 0x04, 0x25, 0x20, 0x00, 0x00, 0x00,
 	0x0f, 0x01, 0xf8,
 	0x48, 0x0f, 0x07,
 
 	/*
-	 * +145 handler_sched_yield (G6, 8 B):
-	 *   xor %eax, %eax  # return 0
-	 *   swapgs
-	 *   sysretq
+	 * +168 handler_sched_yield (G6, 8 B):
+	 *   xor %eax, %eax; swapgs; sysretq
 	 *
-	 * Returning 0 without any scheduling hint is valid —
-	 * Linux defines sched_yield as advisory. The UML
-	 * kernel's own scheduler runs on the outer
-	 * userspace() / run_userspace loop, so an in-gadget
-	 * sched_yield just short-circuits to the caller; the
-	 * next VMEXIT (timer tick, actual I/O syscall) lets
-	 * UML pick the next task anyway.
+	 * Returns 0 without a scheduling hint — sched_yield
+	 * is advisory per POSIX; the outer UML scheduler runs
+	 * on the next VMEXIT (timer tick, real I/O syscall).
 	 */
 	0x31, 0xc0,				/* xor %eax, %eax */
 	0x0f, 0x01, 0xf8,			/* swapgs */
 	0x48, 0x0f, 0x07,			/* sysretq */
 
 	/*
-	 * +153 handler_clock_gettime (CLOCK_MONOTONIC only, 68 B)
+	 * +176 clock stub: jmp rel32 clock_body (+186)
+	 *   rel32 = 186 - 181 = 5
+	 * +181 time  stub: jmp rel32 time_body  (+259)
+	 *   rel32 = 259 - 186 = 73 = 0x49
 	 *
-	 * Same shape as G5c but the 2nd + 3rd jne-to-fallback
-	 * now use rel32 instead of rel8 because the handler
-	 * sits further from fallback after G6's layout shift.
+	 * The stubs sit within rel8 reach of their dispatch
+	 * entries; the rel32 jmp then reaches the big bodies
+	 * past sched_yield.
+	 */
+	0xe9, 0x05, 0x00, 0x00, 0x00,
+	0xe9, 0x49, 0x00, 0x00, 0x00,
+
+	/*
+	 * +186 handler_clock_gettime (CLOCK_MONOTONIC only, 73 B)
+	 *
+	 * Audit round-5 F7 part 2: G6's body loaded the
+	 * seqlock value into %eax, clobbering NR=228 before
+	 * any fallback jne fired. If the host then serviced
+	 * fallback via the `out $0xf4` trap, it read RAX=
+	 * seq-value as the syscall number — confusion bug.
+	 * Fix: load SEQ into %edx so RAX stays NR=228
+	 * throughout; a fallback hands the correct NR back
+	 * to handle_syscall.
+	 *
+	 * All three fallback jnes use rel32 — rel8 doesn't
+	 * reach fallback at +62 from this offset.
 	 *
 	 * On entry: RDI = clockid, RSI = struct timespec *ts,
 	 *           RAX = 228 (NR), swapgs already done.
-	 *
-	 *   cmp $1, %edi                 # CLOCK_MONOTONIC only
-	 *   jne rel8 -119  → fallback    # rel8 still fits
-	 *   mov %gs:VVAR_SEQ, %eax       # seqlock snap
-	 *   test $1, %al                 # writer active?
-	 *   jne rel32 -135 → fallback    # rel8 would overflow
-	 *   mov %gs:VVAR_MONO_SEC, %r10  # load sec
-	 *   mov %gs:VVAR_MONO_NSEC, %rdx # load nsec
-	 *   cmp %gs:VVAR_SEQ, %eax       # seq unchanged?
-	 *   jne rel32 -167 → fallback    # rel8 would overflow
-	 *   mov %r10, (%rsi); mov %rdx, 8(%rsi)
-	 *   xor %eax, %eax; swapgs; sysretq
 	 */
 	0x83, 0xff, 0x01,			/* cmp $1, %edi */
-	0x75, 0x89,				/* jne -119 → fallback (rel8) */
-	/* mov %gs:0x1000, %eax (SEQ) */
-	0x65, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00,
-	0xa8, 0x01,				/* test $1, %al */
-	/* jne rel32 -135 → fallback */
-	0x0f, 0x85, 0x79, 0xff, 0xff, 0xff,
-	/* mov %gs:0x1008, %r10 (MONO_SEC) */
+	/* jne rel32 fallback (+62); rel32 = 62 - 195 = -133 = 0xffffff7b */
+	0x0f, 0x85, 0x7b, 0xff, 0xff, 0xff,
+	/* mov %gs:0x1000, %edx (SEQ); 8 B */
+	0x65, 0x8b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
+	0xf6, 0xc2, 0x01,			/* test $1, %dl */
+	/* jne rel32 fallback (+62); rel32 = 62 - 212 = -150 = 0xffffff6a */
+	0x0f, 0x85, 0x6a, 0xff, 0xff, 0xff,
+	/* mov %gs:0x1008, %r10 (MONO_SEC); 9 B */
 	0x65, 0x4c, 0x8b, 0x14, 0x25, 0x08, 0x10, 0x00, 0x00,
-	/* mov %gs:0x1010, %rdx (MONO_NSEC) */
-	0x65, 0x48, 0x8b, 0x14, 0x25, 0x10, 0x10, 0x00, 0x00,
-	/* cmp %gs:0x1000, %eax (SEQ re-read) */
-	0x65, 0x3b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00,
-	/* jne rel32 -167 → fallback */
-	0x0f, 0x85, 0x59, 0xff, 0xff, 0xff,
+	/* mov %gs:0x1010, %r8  (MONO_NSEC); 9 B */
+	0x65, 0x4c, 0x8b, 0x04, 0x25, 0x10, 0x10, 0x00, 0x00,
+	/* cmp %gs:0x1000, %edx (SEQ re-read); 8 B */
+	0x65, 0x3b, 0x14, 0x25, 0x00, 0x10, 0x00, 0x00,
+	/* jne rel32 fallback (+62); rel32 = 62 - 244 = -182 = 0xffffff4a */
+	0x0f, 0x85, 0x4a, 0xff, 0xff, 0xff,
 	0x4c, 0x89, 0x16,			/* mov %r10, (%rsi) */
-	0x48, 0x89, 0x56, 0x08,			/* mov %rdx, 8(%rsi) */
+	0x4c, 0x89, 0x46, 0x08,			/* mov %r8, 8(%rsi) */
 	0x31, 0xc0,				/* xor %eax, %eax */
 	0x0f, 0x01, 0xf8,			/* swapgs */
 	0x48, 0x0f, 0x07,			/* sysretq */
 
-	/* total body: 221 bytes (G4 + G5c + G6) */
+	/*
+	 * +259 handler_time (23 B)
+	 *
+	 *   time(2): time_t time(time_t *tloc);
+	 *
+	 * Returns REAL_SEC from the vvar page; optionally
+	 * writes it to *tloc. No seqlock retry — time(2) has
+	 * 1-second resolution so a torn read is at worst off
+	 * by one second (the vDSO uses the same shortcut).
+	 *
+	 * On entry: RDI = tloc (may be NULL), RAX = 201 (NR),
+	 *           swapgs already done.
+	 */
+	/* mov %gs:0x1018, %rax (REAL_SEC); 9 B */
+	0x65, 0x48, 0x8b, 0x04, 0x25, 0x18, 0x10, 0x00, 0x00,
+	0x48, 0x85, 0xff,			/* test %rdi, %rdi */
+	0x74, 0x03,				/* je +3 (skip store) */
+	0x48, 0x89, 0x07,			/* mov %rax, (%rdi) */
+	0x0f, 0x01, 0xf8,			/* swapgs */
+	0x48, 0x0f, 0x07,			/* sysretq */
+
+	/*
+	 * +282 handler_getcpu (30 B)
+	 *
+	 *   int getcpu(unsigned int *cpu, unsigned int *node);
+	 *
+	 * Returns 0. Writes CPU_ID from the per-vCPU state
+	 * page to *cpu if non-NULL; writes 0 to *node if
+	 * non-NULL (UML has no NUMA — all tasks are node 0).
+	 * Neither store is retried; a bad pointer triggers
+	 * the ring-0 #PF path (tracked as F7 part 1 for
+	 * proper -EFAULT semantics).
+	 *
+	 * Uses %edx (not %ecx) for the CPU_ID load because
+	 * RCX still holds the user's return RIP — SYSRETQ
+	 * loads RIP from RCX, so clobbering RCX breaks the
+	 * sysretq tail.
+	 *
+	 * On entry: RDI = cpu ptr, RSI = node ptr, RAX = 309
+	 *           (NR), swapgs already done.
+	 */
+	0x31, 0xc0,				/* xor %eax, %eax (return 0) */
+	0x48, 0x85, 0xff,			/* test %rdi, %rdi */
+	0x74, 0x0a,				/* je +10 (skip cpu store) */
+	/* mov %gs:0x04, %edx (CPU_ID); 8 B */
+	0x65, 0x8b, 0x14, 0x25, 0x04, 0x00, 0x00, 0x00,
+	0x89, 0x17,				/* mov %edx, (%rdi) */
+	0x48, 0x85, 0xf6,			/* test %rsi, %rsi */
+	0x74, 0x02,				/* je +2 (skip node store) */
+	0x89, 0x06,				/* mov %eax, (%rsi) — node=0 */
+	0x0f, 0x01, 0xf8,			/* swapgs */
+	0x48, 0x0f, 0x07,			/* sysretq */
+
+	/* total body: 312 bytes (G6-follow-on; LSTAR region 448 B) */
 };
 #else
 static const u8 kvm_bootstrap_lstar_bytes[] = {

@@ -66,6 +66,9 @@ static const enum kvm_syscall_class kvm_syscall_class_map[NR_syscalls] = {
 	[__NR_getegid]		= KVM_SYSCALL_CLASS_GADGET,
 	[__NR_clock_gettime]	= KVM_SYSCALL_CLASS_GADGET,
 	[__NR_sched_yield]	= KVM_SYSCALL_CLASS_GADGET,
+	/* G6-follow-on (memo 11 G6f): time + getcpu handlers. */
+	[__NR_time]		= KVM_SYSCALL_CLASS_GADGET,
+	[__NR_getcpu]		= KVM_SYSCALL_CLASS_GADGET,
 
 	/* Everything else defaults to 0 = CLASS_PASSTHROUGH. */
 };

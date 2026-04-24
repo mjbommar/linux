@@ -200,7 +200,7 @@ nr	name	class	rationale
 198	lremovexattr	A	passthrough: sys_call_table[nr]
 199	fremovexattr	A	passthrough: sys_call_table[nr]
 200	tkill	A	passthrough: sys_call_table[nr]
-201	time	A	passthrough: sys_call_table[nr]
+201	time	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 202	futex	A	passthrough: sys_call_table[nr]
 203	sched_setaffinity	A	passthrough: sys_call_table[nr]
 204	sched_getaffinity	A	passthrough: sys_call_table[nr]
@@ -308,7 +308,7 @@ nr	name	class	rationale
 306	syncfs	A	passthrough: sys_call_table[nr]
 307	sendmmsg	A	passthrough: sys_call_table[nr]
 308	setns	A	passthrough: sys_call_table[nr]
-309	getcpu	A	passthrough: sys_call_table[nr]
+309	getcpu	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
 310	process_vm_readv	A	passthrough: sys_call_table[nr]
 311	process_vm_writev	A	passthrough: sys_call_table[nr]
 312	kcmp	A	passthrough: sys_call_table[nr]

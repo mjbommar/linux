@@ -7999,4 +7999,120 @@ findings beyond the numbers:
 
 ---
 
+## D80 (2026-04-24) — G6-follow-on LANDED: time + getcpu handlers + F4 + F7-part2 fixes
+
+**Decision.** Ship time(2) + getcpu(2) gadget handlers
+plus two audit round-5 correctness fixes in one
+commit: F4 (upper-NR guard prologue — low-byte alias
+hijack) and F7 part 2 (seqlock %eax clobber in
+clock_gettime). Total LSTAR body grows 221 B (G6) →
+312 B (G6-follow-on). Class-E count 9 → 11.
+
+**Why these land together.** All three changes touch
+the same LSTAR byte array; splitting them means two
+back-to-back rewrites of the same file where the
+second pass invalidates the first pass's byte math.
+Fold them into one scoped commit so KUnit's byte-
+match assertion flips once and reviewers reason
+about the final layout in one pass.
+
+**F4 — low-byte alias hijack (P0 correctness).** The
+G6 dispatch used `cmp %al, $imm8` which only compares
+the low byte of RAX. NRs sharing a low byte with a
+gadget-handled NR would be hijacked:
+
+- utimensat (NR 280 = 0x118) aliased sched_yield
+  (NR 24 = 0x18) → returned 0 (sched_yield's return)
+  instead of hitting the kernel.
+- preadv (NR 295 = 0x127) aliased getpid (NR 39 =
+  0x27) → returned tgid instead of reading from a fd.
+- mount_setattr (NR 442 = 0x1ba) aliased gettid
+  (NR 186 = 0xba) → returned tid instead of mutating
+  a mount.
+
+Real bug. A glibc-linked guest doing utimensat would
+silently succeed with the wrong semantics.
+
+Fix: 17 B upper-NR guard prologue at +3..+21:
+
+```
+  cmp $0x135, %eax       # getcpu pre-check (NR > 255)
+  jne +5
+  jmp rel32 getcpu_body
+  test $0xffffff00, %eax # any high bits set?
+  jne fallback
+```
+
+If NR matches getcpu (309), jmp to its body. Otherwise
+if any upper bits are set, fall back to handle_syscall
+(the kernel validates NR properly there). Only NRs in
+0..255 reach the low-byte dispatch, so `cmp %al,imm8`
+is now safe. Hot-path cost: +2 cmps + 2 jnes ≈ 5-8
+cyc. getpid landed at 98 cyc / 28 ns (vs 93 pre-G6-f-o)
+— still well under memo 07's 100 ns target with 3.5×
+margin.
+
+**F7 part 2 — seqlock RAX clobber (P1 correctness).**
+G6's clock_gettime loaded VVAR_SEQ into %eax, but
+that's the register holding NR=228. If the seqlock
+retry-budget fired a fallback jne, the host's
+handle_syscall saw RAX=seq-value as the NR — garbage
+dispatch. Fix: load SEQ into %edx throughout the
+handler. RAX stays NR=228, so a fallback hands the
+correct syscall number to handle_syscall. Body grows
+73 B (was 68 B in G6; +5 B net because SEQ re-reads
+use the same %edx encoding length but the cmp %edx
+variant is 1 B longer than cmp %eax).
+
+**time(2) — 23 B handler.** Returns REAL_SEC from
+vvar; optionally writes to *tloc. No seqlock retry —
+time() has 1-second resolution, so a torn read is at
+worst off by 1 sec. glibc's vDSO does the same thing.
+
+**getcpu(2) — 30 B handler.** Returns 0. Writes
+CPU_ID from per-vCPU state page to *cpu; writes 0 to
+*node (UML has no NUMA). Uses %edx (not %ecx) for
+the CPU_ID load because RCX holds user's return RIP
+— SYSRETQ loads RIP from RCX, so clobbering breaks
+the sysretq tail.
+
+**What's deferred.** F7 part 1 (ring-0 user-pointer
+store should surface -EFAULT, not SIGSEGV) is
+tracked as task #226. The fix requires detecting
+"gadget mid-write fault" at IST frame level and
+restarting via fallback — substantial surgery,
+separate commit.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass including `kvm_bootstrap_lstar_
+  bytes_test` (byte-match of 312-byte expected),
+  `kvm_syscall_classification_test` (now includes
+  NR_time + NR_getcpu as CLASS_GADGET), and
+  `kvm_syscall_class_count_test` (expects 23 non-A,
+  11 CLASS_GADGET).
+- perf-getpid single-binary: kvm cyc=98, ratio
+  0.002, PASS.
+- perf-getpid dual-binary: fallback 150931 cyc,
+  gadget 98 cyc, ratio 0.001 (200× margin under the
+  0.20 gate).
+- time/getcpu smoke under both builds: identical
+  output (`time_ret=1777062700 time_tloc=1777062700
+  getcpu_ret=0 cpu=0 node=0 clock_real_sec=
+  1777062700`). time() returns correct epoch sec;
+  getcpu() returns 0 with cpu=0, node=0.
+
+**Refs.**
+
+- Memo 11 G6 entry — annotated with G6-follow-on
+  LANDED status.
+- Memo 10 §"Class E" — table now has 11 rows; §"The
+  five classes" totals updated to 23 non-A.
+- syscall-inventory.tsv — NR 201 + 309 promoted A→E.
+- task #221 — G6-follow-on close.
+- task #223 — F4 close.
+- task #226 — F7 part 2 close; F7 part 1 stays open.
+
+---
+
 ## (Future entries here, as decisions are made)
