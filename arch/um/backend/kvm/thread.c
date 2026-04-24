@@ -551,20 +551,41 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 
 	/*
-	 * current->active_mm is always non-NULL for any running
-	 * task (idle uses &init_mm); pgd pointer is the host VA
-	 * of the top-level page table. Translate to guest-phys
-	 * via Policy A: the identity-mapped memslot registered in
-	 * kvm_ensure_memslot() means __pa() yields exactly the
-	 * guest-phys address CR3 should carry.
+	 * Memo 09 step 2: shadow PT is the guest CR3. Allocate on
+	 * first use (kvm_shadow_pgd_alloc is idempotent; lazy per
+	 * memo 09 step 1's finding that kvm_init fires before
+	 * mm_init) + map the bootstrap page so the guest can fetch
+	 * the SYSRETQ gadget + GDT + LSTAR trampoline. Without this
+	 * step, D66's triple-fault fires; with it, the guest walks
+	 * shadow PT → reaches the bootstrap page → begins executing.
+	 *
+	 * current->active_mm is still used by kvm_decode_mmio
+	 * (memo 09 step 3) to locate the faulting process's
+	 * logical pgd for bit-translation; this block no longer
+	 * hands its pgd to the CPU as CR3.
 	 */
-	mm = current->active_mm;
-	if (!mm || !mm->pgd) {
-		pr_warn_once("um: kvm enter_guest: current->active_mm=%p has no pgd\n",
-			     mm);
-		return -EFAULT;
+	rc = kvm_shadow_pgd_alloc();
+	if (rc < 0)
+		return rc;
+
+	rc = kvm_shadow_map_page(kvm_bootstrap_va,
+				 (u64)__pa(kvm_bootstrap_page),
+				 KVM_X86_PTE_P | KVM_X86_PTE_RW |
+				 KVM_X86_PTE_US);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(bootstrap) failed (%d)\n",
+				    rc);
+		return rc;
 	}
-	cr3_gpa = (u64)__pa(mm->pgd);
+
+	cr3_gpa = kvm_shadow_pgd_gpa();
+	if (!cr3_gpa) {
+		pr_warn_once("um: kvm enter_guest: shadow_pgd_gpa is zero after alloc\n");
+		return -EIO;
+	}
+
+	mm = current->active_mm;
+	(void)mm;	/* reserved for memo 09 step 3's fault-in */
 
 	/*
 	 * Start from the current SREGS so APIC / TR / LDT bits

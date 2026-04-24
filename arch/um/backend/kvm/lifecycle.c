@@ -366,6 +366,68 @@ u64 kvm_shadow_pgd_gpa(void)
 {
 	return kvm_ctx.shadow_pgd_gpa;
 }
+
+/*
+ * Walk-or-allocate a sub-table inside the shadow PT. `parent`
+ * is the u64 entry at the current level; `*next_va` returns the
+ * kernel VA of the child table. If the parent is already
+ * present, follow it; if not, alloc + zero a fresh child page,
+ * fill in the parent entry with P|R/W|U/S|A (permissive — the
+ * leaf PTE is what really controls access permissions), and
+ * return the new child.
+ */
+static int kvm_shadow_table_step(u64 *parent, u64 **next_va)
+{
+	struct page *p;
+	u64 pa;
+	void *va;
+
+	if (*parent & KVM_X86_PTE_P) {
+		pa = *parent & ~0xfffULL & 0x000ffffffffff000ULL;
+		*next_va = (u64 *)__va(pa);
+		return 0;
+	}
+
+	p = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!p)
+		return -ENOMEM;
+	va = page_address(p);
+	pa = (u64)__pa(va);
+	*parent  = pa | KVM_X86_PTE_P | KVM_X86_PTE_RW |
+			KVM_X86_PTE_US | KVM_X86_PTE_A;
+	*next_va = va;
+	return 0;
+}
+
+int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
+{
+	u64 *pgd = kvm_ctx.shadow_pgd;
+	u64 *pud = NULL, *pmd = NULL, *pte = NULL;
+	unsigned int pgd_i, pud_i, pmd_i, pte_i;
+	int rc;
+
+	if (!pgd)
+		return -ENODEV;
+
+	pgd_i = (va >> 39) & 0x1ff;
+	pud_i = (va >> 30) & 0x1ff;
+	pmd_i = (va >> 21) & 0x1ff;
+	pte_i = (va >> 12) & 0x1ff;
+
+	rc = kvm_shadow_table_step(&pgd[pgd_i], &pud);
+	if (rc)
+		return rc;
+	rc = kvm_shadow_table_step(&pud[pud_i], &pmd);
+	if (rc)
+		return rc;
+	rc = kvm_shadow_table_step(&pmd[pmd_i], &pte);
+	if (rc)
+		return rc;
+
+	pte[pte_i] = (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) |
+		     (leaf_flags | KVM_X86_PTE_P | KVM_X86_PTE_A);
+	return 0;
+}
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 int kvm_backend_fd(void)

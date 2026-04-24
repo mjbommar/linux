@@ -132,6 +132,30 @@ void kvm_shadow_pgd_free(void);
  */
 u64 kvm_shadow_pgd_gpa(void);
 
+/*
+ * Install a single 4 KiB mapping in the shadow PT: guest VA →
+ * host-physical (as a gpa under the Policy A identity memslot).
+ * Allocates intermediate PUD/PMD/PTE tables as needed using
+ * alloc_page(GFP_KERNEL). `leaf_flags` is the x86-hardware-
+ * encoded PTE flags word (KVM_X86_PTE_* constants below);
+ * intermediate entries are always installed as
+ * P|R/W|U/S|A to keep the walk permissive regardless of leaf
+ * permissions. Memo 09 step 2.
+ *
+ * Returns 0 on success, -errno on failure. Caller holds
+ * whatever serialization the shadow_pgd needs (today: no
+ * concurrent callers; when SMP lands memo 09 revisits).
+ */
+int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags);
+
+/* Canonical x86_64 PTE bits for the shadow PT builder. */
+#define KVM_X86_PTE_P	(1ULL << 0)
+#define KVM_X86_PTE_RW	(1ULL << 1)
+#define KVM_X86_PTE_US	(1ULL << 2)
+#define KVM_X86_PTE_A	(1ULL << 5)
+#define KVM_X86_PTE_D	(1ULL << 6)
+#define KVM_X86_PTE_NX	(1ULL << 63)
+
 struct uml_pt_regs;
 int kvm_enter_guest(struct uml_pt_regs *regs);
 
