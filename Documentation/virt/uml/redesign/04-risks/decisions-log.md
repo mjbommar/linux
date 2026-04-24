@@ -7465,4 +7465,106 @@ integration + distribution.
 
 ---
 
+## D74 (2026-04-24) — G6 partial land: sched_yield + LSTAR layout refactor; time + getcpu deferred
+
+**Decision.** Ship G6 as `sched_yield(2)` plus the
+LSTAR layout refactor (inlined pid handlers + rel32
+fallback-jnes in clock_gettime). Defer `time(2)` and
+`getcpu(2)` to a G6-follow-on that either splits the
+LSTAR region across two pages or re-orders handlers
+to keep every branch in rel8 reach.
+
+**Context.** G6 was originally scoped as "sched_yield +
+time + getcpu" (three more memo-07 handlers). When
+implementing, the LSTAR region hit a classical
+rel8-encoding reach problem:
+
+- The dispatch table je rel8 to `clock_gettime` was
+  already at the max useful displacement.
+- clock_gettime's own 2nd + 3rd fallback-jnes had only
+  ~127-byte reach, which barely covered G5c and can't
+  fit one more late handler.
+- Adding three new handlers behind clock_gettime would
+  have pushed one of: (a) a dispatch je to a new
+  handler, (b) a pid handler's tail jmp, or (c)
+  clock_gettime's inner jnes — into rel8 overflow
+  territory, producing a silent miscompile (e.g. a je
+  landing on a mid-instruction byte).
+
+Rather than force a risky 3-handler + risky-layout
+commit, G6 ships two discrete changes whose correctness
+is separately testable:
+
+1. **sched_yield handler.** 8 B: `xor %eax,%eax;
+   swapgs; sysretq`. Returns 0 without a scheduling
+   hint (POSIX: advisory). The outer UML scheduler
+   runs on the next VMEXIT (timer tick, genuine I/O
+   syscall), so an in-gadget yield just short-
+   circuits to the caller without disturbing UML's
+   scheduling.
+2. **LSTAR layout refactor.** Pid-family handlers
+   now inline their own `swapgs; sysretq` tail
+   (14 B each, up from 10 B + shared tail). Shared
+   tail removed. clock_gettime's 2nd + 3rd fallback-
+   jnes promoted from rel8 to rel32 (6 B each vs 2
+   B; the 1st stays rel8 at -119). Total body grows
+   179 B → 221 B, but every branch is now either
+   already-committed-rel32 or has rel8 slack for one
+   or two more handlers.
+
+**Why not push all three handlers.** The reach fight
+would have required either (a) splitting the LSTAR
+region (significant surgery; new page-map plumbing),
+or (b) reordering handlers to put the long-reach ones
+first (breaks the dispatch-table ordering convention
+and makes the next reviewer do reach math to audit
+any diff). Deferring lets G6 ship its correctness
+property (one new handler + one layout change,
+separately reviewable) today and G6-follow-on ship
+the reach-engineering decision with its own
+justification.
+
+**Validation.**
+
+- KUnit: 34/34 pass, including
+  `kvm_bootstrap_lstar_bytes_test` which byte-matches
+  the new 221-B expected table.
+- perf-getpid: `cyc_per_call = 93` (vs 97 post-G4,
+  101 post-G5c); `ratio_kvm_over_seccomp = 0.002`;
+  PASS gate.
+- clock-loop microbench: `cyc_per_call = 98`
+  (comparable to G5c's ~101); `first_nsec = 165236224`
+  confirms the vvar seqlock is populated — the rel32
+  re-encoding preserved the fast path.
+
+**Blast radius.** Gated on
+`CONFIG_UM_BACKEND_KVM_GADGET` (off by default). Only
+enabled in research builds. A regression surfaces as
+either a KUnit byte-mismatch (caught at boot) or a
+`cyc_per_call` regression in perf-getpid (caught at
+CI). Both gates are pre-existing.
+
+**What G6-follow-on needs to decide.** Whether to
+(a) split LSTAR across two bootstrap pages (linear
+reach restored, but more plumbing), or (b) move vvar
+clock to its own reach-local sub-block with a
+dedicated dispatch branch (keeps single-page, costs
+one more rel32 je). Either unlocks time + getcpu +
+at least 3 more handlers before we hit the next
+reach limit.
+
+**Refs.**
+
+- Memo 11 §"Sub-commit ladder G6" — now annotated
+  with the 2026-04-24 status.
+- measurements.md 2026-04-24 G6 section — the per-
+  silicon numbers and reproducibility recipe.
+- D73 (G5 land) — established the single-page LSTAR
+  assumption this refactor stress-tests.
+- task #209 — the G6 implementation task.
+- task tree: G6-follow-on will be filed when
+  G7/G8 unblock.
+
+---
+
 ## (Future entries here, as decisions are made)

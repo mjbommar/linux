@@ -312,112 +312,138 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x0f, 0x01, 0xf8,			/* swapgs */
 
 	/*
-	 * +3 dispatch. Each line is cmp imm8 + je rel8. JE
-	 * rel8 is signed offset from "next instruction after
-	 * je," so JE[i] at offset (5+4i) has next-insn at
-	 * (7+4i); rel8 = handler_offset - (7+4i). Adding the
-	 * 8th entry for __NR_clock_gettime (0xe4 = 228)
-	 * shifted the existing fallback + pid handlers by 4
-	 * bytes each (rel8 recomputed below).
-	 *   +3:  je pid_h  (+43)
-	 *   +7:  je tid_h  (+53)
-	 *   +11: je ppid_h (+63)
-	 *   +15: je uid_h  (+73)
-	 *   +19: je euid_h (+83)
-	 *   +23: je gid_h  (+93)
-	 *   +27: je egid_h (+103)
-	 *   +31: je clock_gettime_h (+113)
+	 * +3 dispatch. 9 × (cmp imm8 + je rel8) = 36 B. The
+	 * 9th entry added by G6 is __NR_sched_yield (0x18).
+	 * G6 also inlines swapgs+sysretq in each pid-family
+	 * handler (no shared tail) so clock_gettime can
+	 * grow to fit rel32 jnes back to fallback without
+	 * overflowing the pid handlers' reach to a shared
+	 * tail.
+	 *
+	 *   +3:  je getpid_h  (+47)
+	 *   +7:  je gettid_h  (+61)
+	 *   +11: je getppid_h (+75)
+	 *   +15: je getuid_h  (+89)
+	 *   +19: je geteuid_h (+103)
+	 *   +23: je getgid_h  (+117)
+	 *   +27: je getegid_h (+131)
+	 *   +31: je clock_h   (+153)
+	 *   +35: je sched_yield_h (+145)
 	 */
-	0x3c, 0x27, 0x74, 36,	/* cmp $0x27 (getpid),  je pid_h  */
-	0x3c, 0xba, 0x74, 42,	/* cmp $0xba (gettid),  je tid_h  */
-	0x3c, 0x6e, 0x74, 48,	/* cmp $0x6e (getppid), je ppid_h */
-	0x3c, 0x66, 0x74, 54,	/* cmp $0x66 (getuid),  je uid_h  */
-	0x3c, 0x6b, 0x74, 60,	/* cmp $0x6b (geteuid), je euid_h */
-	0x3c, 0x68, 0x74, 66,	/* cmp $0x68 (getgid),  je gid_h  */
-	0x3c, 0x6c, 0x74, 72,	/* cmp $0x6c (getegid), je egid_h */
-	0x3c, 0xe4, 0x74, 78,	/* cmp $0xe4 (clock_gettime), je clock_h */
+	0x3c, 0x27, 0x74, 40,	/* cmp $0x27 (getpid),  je  */
+	0x3c, 0xba, 0x74, 50,	/* cmp $0xba (gettid),  je  */
+	0x3c, 0x6e, 0x74, 60,	/* cmp $0x6e (getppid), je  */
+	0x3c, 0x66, 0x74, 70,	/* cmp $0x66 (getuid),  je  */
+	0x3c, 0x6b, 0x74, 80,	/* cmp $0x6b (geteuid), je  */
+	0x3c, 0x68, 0x74, 90,	/* cmp $0x68 (getgid),  je  */
+	0x3c, 0x6c, 0x74, 100,	/* cmp $0x6c (getegid), je  */
+	0x3c, 0xe4, 0x74, 118,	/* cmp $0xe4 (clock_gettime), je */
+	0x3c, 0x18, 0x74, 106,	/* cmp $0x18 (sched_yield), je */
 
-	/* +35  fallback — unknown NR */
+	/* +39  fallback — unknown NR */
 	0x0f, 0x01, 0xf8,			/* swapgs (restore user GS) */
 	0xe6, 0xf4,				/* out %al, $0xf4 */
 	0x48, 0x0f, 0x07,			/* sysretq */
 
-	/* +43  handler_getpid: mov %gs:KVM_GADGET_OFF_TGID, %eax */
+	/* +47  handler_getpid (inline, 14 B):
+	 *   mov %gs:KVM_GADGET_OFF_TGID, %eax; swapgs; sysretq
+	 */
 	0x65, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00,
-	0xeb, 120,				/* jmp → tail (+173) */
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
-	/* +53  handler_gettid: mov %gs:KVM_GADGET_OFF_TID, %eax */
+	/* +61  handler_gettid */
 	0x65, 0x8b, 0x04, 0x25, 0x0c, 0x00, 0x00, 0x00,
-	0xeb, 110,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
-	/* +63  handler_getppid: mov %gs:KVM_GADGET_OFF_PPID, %eax */
+	/* +75  handler_getppid */
 	0x65, 0x8b, 0x04, 0x25, 0x10, 0x00, 0x00, 0x00,
-	0xeb, 100,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
-	/* +73  handler_getuid: mov %gs:KVM_GADGET_OFF_UID, %eax */
+	/* +89  handler_getuid */
 	0x65, 0x8b, 0x04, 0x25, 0x14, 0x00, 0x00, 0x00,
-	0xeb, 90,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
-	/* +83  handler_geteuid: mov %gs:KVM_GADGET_OFF_EUID, %eax */
+	/* +103 handler_geteuid */
 	0x65, 0x8b, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00,
-	0xeb, 80,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
-	/* +93  handler_getgid: mov %gs:KVM_GADGET_OFF_GID, %eax */
+	/* +117 handler_getgid */
 	0x65, 0x8b, 0x04, 0x25, 0x1c, 0x00, 0x00, 0x00,
-	0xeb, 70,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
-	/* +103 handler_getegid: mov %gs:KVM_GADGET_OFF_EGID, %eax */
+	/* +131 handler_getegid */
 	0x65, 0x8b, 0x04, 0x25, 0x20, 0x00, 0x00, 0x00,
-	0xeb, 60,
+	0x0f, 0x01, 0xf8,
+	0x48, 0x0f, 0x07,
 
 	/*
-	 * +113 handler_clock_gettime (CLOCK_MONOTONIC only)
+	 * +145 handler_sched_yield (G6, 8 B):
+	 *   xor %eax, %eax  # return 0
+	 *   swapgs
+	 *   sysretq
+	 *
+	 * Returning 0 without any scheduling hint is valid —
+	 * Linux defines sched_yield as advisory. The UML
+	 * kernel's own scheduler runs on the outer
+	 * userspace() / run_userspace loop, so an in-gadget
+	 * sched_yield just short-circuits to the caller; the
+	 * next VMEXIT (timer tick, actual I/O syscall) lets
+	 * UML pick the next task anyway.
+	 */
+	0x31, 0xc0,				/* xor %eax, %eax */
+	0x0f, 0x01, 0xf8,			/* swapgs */
+	0x48, 0x0f, 0x07,			/* sysretq */
+
+	/*
+	 * +153 handler_clock_gettime (CLOCK_MONOTONIC only, 68 B)
+	 *
+	 * Same shape as G5c but the 2nd + 3rd jne-to-fallback
+	 * now use rel32 instead of rel8 because the handler
+	 * sits further from fallback after G6's layout shift.
 	 *
 	 * On entry: RDI = clockid, RSI = struct timespec *ts,
 	 *           RAX = 228 (NR), swapgs already done.
 	 *
-	 *   cmp $1, %edi                 # only CLOCK_MONOTONIC
-	 *   jne fallback                 # other clockids → VMEXIT
+	 *   cmp $1, %edi                 # CLOCK_MONOTONIC only
+	 *   jne rel8 -119  → fallback    # rel8 still fits
 	 *   mov %gs:VVAR_SEQ, %eax       # seqlock snap
 	 *   test $1, %al                 # writer active?
-	 *   jne fallback                 # retry budget = 0, go to VMEXIT
-	 *   mov %gs:VVAR_MONO_SEC, %r10  # load sec (64b)
-	 *   mov %gs:VVAR_MONO_NSEC, %rdx # load nsec (64b)
+	 *   jne rel32 -135 → fallback    # rel8 would overflow
+	 *   mov %gs:VVAR_MONO_SEC, %r10  # load sec
+	 *   mov %gs:VVAR_MONO_NSEC, %rdx # load nsec
 	 *   cmp %gs:VVAR_SEQ, %eax       # seq unchanged?
-	 *   jne fallback                 # race detected → VMEXIT
-	 *   mov %r10, (%rsi)             # ts->tv_sec = sec
-	 *   mov %rdx, 8(%rsi)            # ts->tv_nsec = nsec
-	 *   xor %eax, %eax               # return 0
-	 *   swapgs
-	 *   sysretq
-	 *
-	 * vvar is mapped at %gs base + PAGE_SIZE (0x1000), so
-	 * disp32 = 0x1000 + KVM_VVAR_OFF_*. jne rel8 values are
-	 * backward to fallback at +35: -83, -95, -123 (all
-	 * within signed rel8 range).
+	 *   jne rel32 -167 → fallback    # rel8 would overflow
+	 *   mov %r10, (%rsi); mov %rdx, 8(%rsi)
+	 *   xor %eax, %eax; swapgs; sysretq
 	 */
 	0x83, 0xff, 0x01,			/* cmp $1, %edi */
-	0x75, 0xad,				/* jne -83 → fallback */
+	0x75, 0x89,				/* jne -119 → fallback (rel8) */
 	/* mov %gs:0x1000, %eax (SEQ) */
 	0x65, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00,
 	0xa8, 0x01,				/* test $1, %al */
-	0x75, 0xa1,				/* jne -95 → fallback */
+	/* jne rel32 -135 → fallback */
+	0x0f, 0x85, 0x79, 0xff, 0xff, 0xff,
 	/* mov %gs:0x1008, %r10 (MONO_SEC) */
 	0x65, 0x4c, 0x8b, 0x14, 0x25, 0x08, 0x10, 0x00, 0x00,
 	/* mov %gs:0x1010, %rdx (MONO_NSEC) */
 	0x65, 0x48, 0x8b, 0x14, 0x25, 0x10, 0x10, 0x00, 0x00,
 	/* cmp %gs:0x1000, %eax (SEQ re-read) */
 	0x65, 0x3b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00,
-	0x75, 0x85,				/* jne -123 → fallback */
+	/* jne rel32 -167 → fallback */
+	0x0f, 0x85, 0x59, 0xff, 0xff, 0xff,
 	0x4c, 0x89, 0x16,			/* mov %r10, (%rsi) */
 	0x48, 0x89, 0x56, 0x08,			/* mov %rdx, 8(%rsi) */
 	0x31, 0xc0,				/* xor %eax, %eax */
 	0x0f, 0x01, 0xf8,			/* swapgs */
 	0x48, 0x0f, 0x07,			/* sysretq */
 
-	/* +173 shared tail (pid-family handlers jump here) */
-	0x0f, 0x01, 0xf8,			/* swapgs (restore user GS) */
-	0x48, 0x0f, 0x07,			/* sysretq */
+	/* total body: 221 bytes (G4 + G5c + G6) */
 };
 #else
 static const u8 kvm_bootstrap_lstar_bytes[] = {

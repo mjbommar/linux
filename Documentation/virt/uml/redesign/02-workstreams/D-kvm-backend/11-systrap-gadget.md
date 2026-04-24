@@ -237,6 +237,24 @@ testable. Dependency arrows enforce the order.
   Blocked by G4.
 - **G6 — sched_yield + time + getcpu.** Round out memo
   07's first 11. Blocked by G5.
+
+  **Status (2026-04-24): sched_yield landed; time +
+  getcpu deferred to G6-follow-on.** The LSTAR region
+  hit a classical rel8-encoding reach problem when G6
+  tried to add all three handlers at once: the dispatch
+  table je rel8 to `clock_gettime` already sat at the
+  max useful displacement, and clock_gettime's own
+  fallback jnes needed rel32 to stay in reach. To keep
+  the commit scoped + reviewable, G6 shipped just
+  `sched_yield` (trivial 8-byte handler returning 0)
+  plus the layout refactor: pid-family handlers now
+  inline their own `swapgs; sysretq` tail (14 B each,
+  no shared tail) and clock_gettime's 2nd + 3rd
+  fallback jnes are now rel32. Total body grew from
+  179 B (G5c) to 221 B. `time(2)` and `getcpu(2)` are
+  tracked as G6-follow-on once we factor the LSTAR
+  region into two pages or move the seqlock vvar into
+  a dedicated reach-local sub-block.
 - **G7 — class_map E + perf-getpid gate extension.**
   Register gadget-handled syscalls as class E in memo
   10's inventory; perf runner picks up a second pass

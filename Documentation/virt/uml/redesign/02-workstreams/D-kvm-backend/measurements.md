@@ -1552,6 +1552,109 @@ timeout 20 /tmp/uml-kvmbench/linux backend=force=kvm \
 
 Expected: `cyc_per_call` ≈ 100-110 on modern x86_64.
 
+## 2026-04-24 — G6 landing: sched_yield handler + LSTAR
+## layout refactor (time + getcpu deferred)
+
+G6 was originally scoped as "sched_yield + time + getcpu"
+(three more memo-07 handlers). When implemented it ran into
+a rel8-encoding reach problem: the dispatch table's je rel8
+for `clock_gettime` was already at the edge, and clock_gettime
+internally needed more fallback-jnes that rel8 couldn't cover.
+Rather than push a 3-handler commit with a risky layout, G6
+shipped:
+
+1. `sched_yield(2)` as an 8-byte handler: `xor %eax,%eax;
+   swapgs; sysretq`. Returns 0 without a scheduling hint
+   (sched_yield is advisory per POSIX; the outer UML
+   scheduler gets to run on the next VMEXIT).
+2. Layout refactor so G6-follow-on can land time + getcpu
+   without the reach fight:
+   - Pid-family handlers now inline their own
+     `swapgs; sysretq` tail (14 B each; no shared tail).
+   - clock_gettime's 2nd + 3rd fallback jnes use rel32
+     (6 B each vs 2 B for rel8) since rel8 now overflows
+     after the layout shift.
+   - Total LSTAR body grew 179 B (G5c) → 221 B.
+
+### Dev host (server3, Xeon W-2123 / Skylake-SP, ~3.6 GHz)
+
+```
+# perf-getpid (reusing G4 + G5c runner):
+PERF_GETPID: backend=ptrace  n=100000 ... cyc_per_call=51258
+PERF_GETPID: backend=seccomp n=100000 ... cyc_per_call=41411
+PERF_GETPID: backend=kvm     n=100000 ... cyc_per_call=93
+PERF_GETPID: SUMMARY kvm_cyc=93 seccomp_cyc=41411
+    ratio_kvm_over_seccomp=0.002 max_allowed=2.5
+PERF_GETPID: PASS
+```
+
+- `cyc_per_call` for getpid: **93 cyc** under kvm +
+  gadget (vs 97 cyc post-G4, 101 cyc post-G5c). The
+  3-cyc drop is noise-level; the important datum is that
+  adding a 9th dispatch entry + rewriting pid handlers
+  didn't regress G4's floor.
+- `clock_gettime(CLOCK_MONOTONIC)` microbench
+  (`/tmp/clock-loop`, 100000 iterations):
+
+```
+PERF_CLOCK: n=100000 cycles=9867642 ... cyc_per_call=98
+    first_sec=0 first_nsec=165236224
+```
+
+- `cyc_per_call` for clock_gettime: **98 cyc** (vs ~101
+  in G5c landing). `first_sec`/`first_nsec` being non-zero
+  confirms the vvar seqlock was populated and the handler
+  returned a real monotonic timestamp — the rel32 re-
+  encoding of the two inner fallback-jnes did not break
+  the fast path.
+
+### KUnit regression
+
+34/34 contract tests pass including
+`kvm_bootstrap_lstar_bytes_test`, which byte-compares
+the populated LSTAR region against the expected 221-byte
+G6 table at `arch/um/backend/contract/test_ops.c`.
+
+### What G6 doesn't cover
+
+- `time(2)` and `getcpu(2)` — deferred to G6-follow-on
+  once the LSTAR layout is either (a) split across two
+  pages or (b) rearranged so the dispatch sits closer to
+  the late handlers.
+- `sched_yield` micro-cost (we didn't write a dedicated
+  sched_yield loop; the handler's cost is bounded by
+  the swapgs+sysretq + xor at ~same cost as getpid).
+  A G6-follow-on can add `/tmp/sched-yield-loop.c`.
+- Fleet coverage (s0-s7) — still tracked under G8.
+
+### Reproducibility
+
+```
+# Build kvmbench with gadget enabled (same defconfig
+# recipe as G4):
+make ARCH=um O=/tmp/uml-kvmbench olddefconfig
+make ARCH=um O=/tmp/uml-kvmbench -j$(nproc)
+
+# perf-getpid regression gate (uses backend=force=kvm
+# internally; asserts um: backend = kvm line):
+UML_BINARY=/tmp/uml-kvmbench/linux \
+    bash tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh
+
+# clock-loop smoke (validates G5 vvar handler survives
+# the rel32 re-encoding):
+cc -O2 -static -nostdlib -ffreestanding \
+   -fno-asynchronous-unwind-tables -fno-stack-protector \
+   -o /tmp/clock-loop /tmp/clock-loop.c
+timeout 30 /tmp/uml-kvmbench/linux backend=force=kvm \
+    init=/tmp/clock-loop mem=128M con=null con0=fd:0,fd:1 \
+    root=/dev/root rootfstype=hostfs rw panic=-1 </dev/null 2>&1 | \
+    grep PERF_CLOCK
+```
+
+Expected: getpid `cyc_per_call` ≤ 110; clock_gettime
+`cyc_per_call` ≤ 120; KUnit 34/34 with
+`kvm_bootstrap_lstar_bytes_test` green.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
