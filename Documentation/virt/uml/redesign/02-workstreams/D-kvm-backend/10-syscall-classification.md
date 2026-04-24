@@ -43,13 +43,13 @@ Each syscall goes in exactly one of five boxes:
 
 | Class | Post-dispatch delta | Count on x86_64 |
 |---|---|---|
-| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 362 of 385 |
+| **A — passthrough** | none; default dispatch of `sys_call_table[nr](args)` | 363 of 385 |
 | **B — vCPU-state propagate** | dispatch, then push an MSR/SREG delta to the vCPU via `KVM_SET_MSRS` / `KVM_SET_SREGS` | 1 (arch_prctl only, post-F10) |
 | **C — signal-frame** | `KVM_GET_REGS` → rebuild frame in guest memory → `KVM_SET_REGS` | 1 |
 | **D — deny** | return `-ENOSYS` or deliver `SIGSYS` without dispatching | 10 (includes modify_ldt + set_thread_area demoted under F10) |
-| **E — gadget-handled** | in-guest LSTAR gadget fast path (no VMEXIT); fallback behaves like class A | 11 (memo 11 G7 + G6-follow-on) |
+| **E — gadget-handled** | in-guest LSTAR gadget fast path (no VMEXIT); fallback behaves like class A | 10 (G7 + G6-follow-on, minus sched_yield demoted by G5) |
 
-That's 23 non-A entries total — exhaustive. Every other
+That's 22 non-A entries total — exhaustive. Every other
 syscall, including every syscall Linux will add next
 release, inherits A by default. No per-release maintenance
 treadmill on the KVM backend's dispatcher.
@@ -179,7 +179,7 @@ and the classifier in `arch/um/backend/kvm/syscall_class.c`:
 
 | NR | Name | Gadget source | Landed |
 |---|---|---|---|
-| 24 | `sched_yield` | `xor %eax,%eax; swapgs; sysretq` | G6 (2026-04-24) |
+| ~~24~~ | ~~`sched_yield`~~ | demoted to class A by G5 (audit round 6); see "Removed from class E" below | G6 → demoted G5 (2026-04-24) |
 | 39 | `getpid` | `%gs:TGID` via per-vCPU state page | G4 (2026-04-24) |
 | 102 | `getuid` | `%gs:UID` | G4 |
 | 104 | `getgid` | `%gs:GID` | G4 |
@@ -231,6 +231,20 @@ row from A to E. Every gadget handler has a KUnit
 cross-check asserting the classifier agrees with the
 live dispatch table (see `kvm_syscall_classification_test`
 in `arch/um/backend/contract/test_ops.c`).
+
+### Removed from class E (audit round-6 G5)
+
+`__NR_sched_yield` was originally landed as class E with a
+trivial 8-byte handler returning 0. POSIX says sched_yield
+is advisory but the gadget's bypass meant a guest sched_yield
+loop could starve other UML tasks for up to ~10 ms (one host
+timer tick) before SIGALRM-driven preemption fired. Demoted
+back to class A by G5 (decisions-log D94): the LSTAR dispatch
+entry now redirects to the fallback path so handle_syscall →
+sys_sched_yield → schedule() runs and UML's scheduler gets
+immediate notice. The original 8-byte handler bytes at LSTAR
+offset +168..+175 stay in place but are now unreachable; a
+future LSTAR compaction can remove them.
 
 ### Follow-on (G6 deferred)
 

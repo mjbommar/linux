@@ -9303,4 +9303,85 @@ gadget code paths that bypass G1's check, install a
 
 ---
 
+## D94 (2026-04-24) — G5: demote sched_yield from class E to A
+
+**Decision.** Redirect the LSTAR dispatch entry for
+`__NR_sched_yield` to the fallback path so every
+sched_yield call VMEXITs to handle_syscall →
+sys_sched_yield → schedule(). Demote the classifier
+mapping from CLASS_GADGET to default CLASS_PASSTHROUGH.
+The gadget body bytes at LSTAR +168..+175 stay in place
+(unreachable; kept to avoid disturbing the offsets of
+subsequent handlers).
+
+**Finding.** Audit round-6 P2 #5 (G5) — "sched_yield is
+treated as a pure register-return gadget. It returns 0
+without entering the scheduler or VMEXIT path, which is
+not Linux syscall semantics under guest scheduling
+pressure."
+
+POSIX says sched_yield is advisory, so the in-gadget
+short-circuit doesn't violate the standard's letter.
+But under guest scheduling pressure (e.g. a contended
+spinlock that yields on backoff), the gadget's bypass
+keeps the calling task running on the vCPU until the
+next host timer tick (~10 ms) when SIGALRM-driven
+preemption finally fires. UML's scheduler can't
+respond to the guest's hint sooner than the timer.
+
+**Why demote vs. patch the gadget.** A "yield from
+within the gadget" handler would have to give UML's
+scheduler a direct signal — but the only mechanism we
+have for that IS a VMEXIT. Once we VMEXIT, we may as
+well dispatch through handle_syscall, which is class
+A. The gadget's only value-add was avoiding the
+VMEXIT itself; for a syscall that semantically wants
+to surrender CPU to the scheduler, avoiding the
+VMEXIT defeats the syscall's purpose.
+
+Cost of demotion: ~13 µs VMEXIT cost per sched_yield
+(vs the ~30 ns gadget). sched_yield is rarely called
+in tight hot loops; for the workloads where it matters
+(spinlock backoff, cooperative round-robin), 13 µs is
+better than the ~10 ms scheduler-lag the gadget caused.
+
+**Implementation.**
+
+- LSTAR dispatch entry 8 (cmp $0x18, je rel8): rel8
+  changed from 114 (target sched_yield body at +168)
+  to 8 (target fallback at +62). One byte change.
+- syscall_class.c: `[__NR_sched_yield] = KVM_SYSCALL_
+  CLASS_GADGET` removed; sched_yield now defaults to
+  CLASS_PASSTHROUGH.
+- KUnit kvm_syscall_classification_test: assertion
+  flipped from CLASS_GADGET to CLASS_PASSTHROUGH for
+  __NR_sched_yield.
+- KUnit kvm_syscall_class_count_test: gadget count
+  drops 11 → 10; total non-A drops 23 → 22.
+- syscall-inventory.tsv: NR 24 row flipped from E to
+  A, rationale annotated.
+- Memo 10 §"Class E" table strikes through the
+  sched_yield row + adds a §"Removed from class E"
+  paragraph explaining the demotion.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass with the new 22-non-A / 10-gadget
+  count invariants.
+- perf-getpid: kvm cyc=97, ratio 0.002, PASS (the
+  pid-family path is unaffected).
+- /tmp/g1-supervisor-smoke: all -14 (G1 still
+  rejecting bad pointers; no regression from the
+  dispatch-entry edit).
+- byte-match KUnit confirms the dispatch entry's
+  rel8 changed from 0x72 (114) to 0x08 (8).
+
+**Refs.**
+
+- Audit round-6 finding #5 (G5).
+- D78 (G7) — original CLASS_GADGET landing.
+- task #237 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

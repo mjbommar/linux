@@ -23,7 +23,7 @@ nr	name	class	rationale
 21	access	A	passthrough: sys_call_table[nr]
 22	pipe	A	passthrough: sys_call_table[nr]
 23	select	A	passthrough: sys_call_table[nr]
-24	sched_yield	E	gadget fast path: in-guest LSTAR handler, fallback is passthrough
+24	sched_yield	A	passthrough: sys_call_table[nr] (G5 demoted from gadget — POSIX-advisory; route to scheduler via VMEXIT)
 25	mremap	A	passthrough: sys_call_table[nr]
 26	msync	A	passthrough: sys_call_table[nr]
 27	mincore	A	passthrough: sys_call_table[nr]

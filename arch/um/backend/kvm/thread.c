@@ -456,7 +456,28 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 	0x3c, 0x6b, 0x74, 84,	/* cmp $0x6b (geteuid), je  */
 	0x3c, 0x68, 0x74, 94,	/* cmp $0x68 (getgid),  je  */
 	0x3c, 0x6c, 0x74, 104,	/* cmp $0x6c (getegid), je  */
-	0x3c, 0x18, 0x74, 114,	/* cmp $0x18 (sched_yield), je */
+	/*
+	 * Audit round-6 G5: sched_yield demoted from class E to A.
+	 * In-gadget short-circuit returned 0 without consulting
+	 * UML's scheduler — POSIX says sched_yield is advisory but
+	 * the gadget's bypass meant a guest sched_yield loop could
+	 * starve other UML tasks for up to ~10 ms (one host timer
+	 * tick) before SIGALRM-driven preemption fired. Demoting
+	 * back to class A routes through handle_syscall →
+	 * sys_sched_yield → schedule(); UML's scheduler gets
+	 * immediate attention. Cost: ~13 µs VMEXIT cost per
+	 * sched_yield, vs the gadget's ~30 ns. sched_yield is
+	 * rarely called in tight loops; the latency hit is the
+	 * right tradeoff for correct semantics.
+	 *
+	 * Implementation is the minimum change: redirect the
+	 * dispatch entry's je rel8 to the fallback at +62
+	 * (rel8 = 62 - 54 = 8). The handler body bytes at
+	 * +168..+175 are now unreachable; kept in place to avoid
+	 * disturbing the pid-family / clock / time / getcpu
+	 * offsets. A future LSTAR compaction can remove them.
+	 */
+	0x3c, 0x18, 0x74, 8,	/* cmp $0x18 (sched_yield), je → fallback */
 	0x3c, 0xe4, 0x74, 118,	/* cmp $0xe4 (clock_gettime), je → stub */
 	0x3c, 0xc9, 0x74, 119,	/* cmp $0xc9 (time), je → stub */
 

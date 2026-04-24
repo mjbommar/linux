@@ -600,7 +600,7 @@ static const u8 kvm_expected_lstar_bytes[] = {
 	0x3c, 0x6b, 0x74, 84,
 	0x3c, 0x68, 0x74, 94,
 	0x3c, 0x6c, 0x74, 104,
-	0x3c, 0x18, 0x74, 114,
+	0x3c, 0x18, 0x74, 8,	/* G5 demotion: sched_yield → fallback */
 	0x3c, 0xe4, 0x74, 118,
 	0x3c, 0xc9, 0x74, 119,
 
@@ -1107,9 +1107,10 @@ static void kvm_syscall_classification_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_clock_gettime),
 			_TEST_KVM_SYSCALL_CLASS_GADGET);
+	/* G5 (audit round-6) demoted sched_yield to class A. */
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_sched_yield),
-			_TEST_KVM_SYSCALL_CLASS_GADGET);
+			_TEST_KVM_SYSCALL_CLASS_PASSTHROUGH);
 	/* G6-follow-on additions. */
 	KUNIT_EXPECT_EQ(test,
 			kvm_classify_syscall(__NR_time),
@@ -1150,13 +1151,14 @@ static void kvm_syscall_classification_test(struct kunit *test)
 }
 
 /*
- * Inventory-size invariant. Post-F10 breakdown:
+ * Inventory-size invariant. Post-G5 (audit round-6) breakdown:
  *   class B (VCPU_STATE)  = 1  (arch_prctl)
  *   class C (SIGFRAME)    = 1  (rt_sigreturn)
  *   class D (TRAP)        = 10 (+modify_ldt + set_thread_area
  *                                demoted from B per F10)
- *   class E (GADGET)      = 11 (G7 + G6-follow-on)
- * Total non-A: 23.
+ *   class E (GADGET)      = 10 (G7 + G6-follow-on, minus
+ *                                sched_yield demoted by G5)
+ * Total non-A: 22.
  */
 static void kvm_syscall_class_count_test(struct kunit *test)
 {
@@ -1181,8 +1183,8 @@ static void kvm_syscall_class_count_test(struct kunit *test)
 		if (c == _TEST_KVM_SYSCALL_CLASS_SIGFRAME)
 			sigframe++;
 	}
-	KUNIT_EXPECT_EQ(test, non_a, 23U);
-	KUNIT_EXPECT_EQ(test, gadget, 11U);
+	KUNIT_EXPECT_EQ(test, non_a, 22U);
+	KUNIT_EXPECT_EQ(test, gadget, 10U);
 	KUNIT_EXPECT_EQ(test, trap, 10U);
 	KUNIT_EXPECT_EQ(test, vcpu_state, 1U);
 	KUNIT_EXPECT_EQ(test, sigframe, 1U);

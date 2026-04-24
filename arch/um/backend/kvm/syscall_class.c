@@ -95,7 +95,14 @@ static const enum kvm_syscall_class kvm_syscall_class_map[NR_syscalls] = {
 	[__NR_getgid]		= KVM_SYSCALL_CLASS_GADGET,
 	[__NR_getegid]		= KVM_SYSCALL_CLASS_GADGET,
 	[__NR_clock_gettime]	= KVM_SYSCALL_CLASS_GADGET,
-	[__NR_sched_yield]	= KVM_SYSCALL_CLASS_GADGET,
+	/*
+	 * Audit round-6 G5: __NR_sched_yield demoted from
+	 * CLASS_GADGET back to CLASS_PASSTHROUGH (default class A).
+	 * In-gadget short-circuit returned 0 without consulting
+	 * UML's scheduler; demoting routes sched_yield through
+	 * handle_syscall → sys_sched_yield → schedule(). LSTAR
+	 * dispatch entry kept but redirected to fallback (D94).
+	 */
 	/* G6-follow-on (memo 11 G6f): time + getcpu handlers. */
 	[__NR_time]		= KVM_SYSCALL_CLASS_GADGET,
 	[__NR_getcpu]		= KVM_SYSCALL_CLASS_GADGET,
