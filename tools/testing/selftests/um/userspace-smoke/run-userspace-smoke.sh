@@ -32,7 +32,7 @@ if [ ! -x "$GUEST_SCRIPT" ]; then
 	exit 1
 fi
 
-OUT=$(timeout 60 "$BINARY" \
+OUT=$(timeout --kill-after=10 60 "$BINARY" \
 	init="$GUEST_SCRIPT" mem="$MEM" \
 	con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 

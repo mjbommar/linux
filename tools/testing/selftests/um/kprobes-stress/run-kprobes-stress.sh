@@ -67,7 +67,7 @@ if [ -n "${KPROBES_STRESS_ITERS:-}" ]; then
 	CMDLINE_ITERS_ARG="kretprobe_iters=$KPROBES_STRESS_ITERS"
 fi
 
-OUT=$(timeout 300 "$BINARY" \
+OUT=$(timeout --kill-after=10 300 "$BINARY" \
 	init="$GUEST_SCRIPT" mem="$MEM" \
 	$CMDLINE_MODULE_ARG \
 	$CMDLINE_ITERS_ARG \

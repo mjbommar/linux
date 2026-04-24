@@ -50,7 +50,7 @@ if ! grep -q "BUG: KMSAN:" "$BINARY" 2>/dev/null; then
 	exit 4
 fi
 
-OUT=$(timeout 90 "$BINARY" \
+OUT=$(timeout --kill-after=10 90 "$BINARY" \
 	init="$GUEST_SCRIPT" mem="$MEM" \
 	con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 

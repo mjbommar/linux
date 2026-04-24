@@ -28,7 +28,7 @@ if [ ! -x "$GUEST_SCRIPT" ]; then
 	exit 1
 fi
 
-OUT=$(timeout 20 "$BINARY" init="$GUEST_SCRIPT" mem="$MEM" \
+OUT=$(timeout --kill-after=10 20 "$BINARY" init="$GUEST_SCRIPT" mem="$MEM" \
 	con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 
 LINE=$(echo "$OUT" | grep '^HOOKS_FLIP:' | head -1)

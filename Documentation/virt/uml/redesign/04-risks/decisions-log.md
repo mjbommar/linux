@@ -6566,4 +6566,68 @@ live in
 
 ---
 
+## D64 (2026-04-23) — UM selftest harnesses grow `timeout --kill-after=10` guards
+
+**Source.** Task #148 "pre-existing ftrace-smoke selftest
+hang on research profile." Investigation triggered by the
+post-README-reconciliation pending-task sweep.
+
+**Root cause.** Every UM selftest harness (nine of them:
+ftrace-smoke, userspace-smoke, snapshot-smoke, launcher-
+smoke, kprobes-stress, cve-repro, hooks-flip, kmsan-smoke,
+profiles) wrapped its UML invocation in plain
+`timeout <SECONDS> "$BINARY" …`. GNU `timeout`'s default is
+`--signal=TERM --kill-after=0`, meaning it sends SIGTERM
+and never escalates. UML has its own signal plumbing and
+can legitimately fail to honor a SIGTERM — this is the
+same class of bug D59 Finding #1 documents in the
+snapshot/forkserver wait-loop (SIGALRM → `switch_threads` →
+stale `jmp_buf`), and the same motivation behind the
+umlctl-v1 stop-verb's explicit signal escalation.
+
+When a UML guest wedges (e.g. a bug fires in a path
+kselftest doesn't explicitly cover), the `timeout` SIGTERM
+bounces off, and the selftest harness hangs until the CI
+runner's outer watchdog fires. The hang is silent at the
+kselftest level, which makes it a "pre-existing" class of
+issue rather than a specific ftrace-smoke problem.
+
+**Fix.** Add `--kill-after=10` to every
+`timeout <SECONDS> "$BINARY"` call in
+`tools/testing/selftests/um/*/run-*.sh`. Semantics:
+
+    timeout --kill-after=10 <SECONDS> "$BINARY" …
+      └── send SIGTERM at SECONDS
+           └── if still alive 10 s later, send SIGKILL
+                └── `timeout` itself exits with 137
+
+10 s is enough grace for a clean `halt -f` / `poweroff -f`
+path to complete (the longest observed is <2 s on the
+research profile). If the guest is genuinely wedged, the
+harness now fails loudly at SECONDS + 10 rather than
+hanging for the outer watchdog.
+
+**Why not migrate to umlctl stop?** umlctl's stop path
+is a strictly better version of this (explicit pidfile +
+signal + poll + SIGKILL escalation + zombie drain), but
+migrating nine selftests changes every invocation signature
+and couples the selftest harness to the umlctl binary
+being built. `--kill-after=10` is a one-token fix that
+preserves the existing signature and costs nothing to roll
+out. A future migration to umlctl can happen when the
+tooling landing sequence permits.
+
+**Alternative considered — `timeout -s KILL`.** Rejected:
+sending SIGKILL as the first signal means the guest gets
+no chance to run its halt path, so we lose console flush
+and any final `FTRACE_SMOKE: PASS` line if it arrives mid-
+teardown. The `TERM → grace → KILL` ladder is strictly
+better.
+
+**Scope.** Nine files under
+`tools/testing/selftests/um/*/run-*.sh`. No code path
+changed; no new dependencies. Task #148 retired.
+
+---
+
 ## (Future entries here, as decisions are made)

@@ -57,7 +57,7 @@ probe_profile() {
 	# loglevel=8 forces pr_info/debug into the console output so
 	# the "Run /path/to/init as init process" line (KERN_INFO)
 	# is visible.
-	out=$(timeout 40 "$binary" init="$GUEST_SCRIPT" mem=512M \
+	out=$(timeout --kill-after=10 40 "$binary" init="$GUEST_SCRIPT" mem=512M \
 		ncpus=2 con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw \
 		panic=0 loglevel=8 2>&1)
 	rc=$?

@@ -35,7 +35,14 @@ if [ ! -x "$GUEST_SCRIPT" ]; then
 	exit 1
 fi
 
-OUT=$(timeout 60 "$BINARY" init="$GUEST_SCRIPT" mem="$MEM" \
+# --kill-after=10: UML has its own signal plumbing and can
+# ignore SIGTERM under some conditions (see D59 Finding #1
+# forensic memo). Without --kill-after, a wedged guest
+# hangs this harness silently for the full timeout plus
+# whatever the CI harness's outer watchdog allows. 10 s
+# grace is enough for a clean halt path; if the guest is
+# truly wedged, SIGKILL follows and we fail loudly.
+OUT=$(timeout --kill-after=10 60 "$BINARY" init="$GUEST_SCRIPT" mem="$MEM" \
 	con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 
 # The guest script emits several FTRACE_SMOKE: ... progress lines

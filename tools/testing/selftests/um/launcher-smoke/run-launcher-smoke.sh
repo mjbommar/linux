@@ -83,7 +83,7 @@ for required in "rootfstype=hostfs" "init=/bin/true" "mem=$MEM" "con=null"; do
 done
 
 # --- Part B: real spawn ---
-OUT_B=$(timeout 60 "$LAUNCHER" run --kernel "$BINARY" --init /bin/true \
+OUT_B=$(timeout --kill-after=10 60 "$LAUNCHER" run --kernel "$BINARY" --init /bin/true \
 	--mem "$MEM" --console null 2>&1)
 RC_B=$?
 
