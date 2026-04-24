@@ -55,6 +55,7 @@
 #include <as-layout.h>			/* physmem_size */
 #include <asm/backend.h>
 #include <asm/processor-generic.h>	/* task_size */
+#include <shared/smp.h>			/* uml_ncpus */
 
 #include "kvm_backend.h"
 
@@ -119,6 +120,27 @@ int kvm_init(const struct um_backend_args *args)
 		pr_warn("um: kvm init called twice (kvm_fd %d already open)\n",
 			kvm_ctx.kvm_fd);
 		return -EBUSY;
+	}
+
+	/*
+	 * Audit round-6 G4: enforce ncpus=1 for the KVM backend.
+	 * Same constraint ptrace announces in os-Linux/start_up.c:605
+	 * for its own probe. The KVM backend is single-vCPU by
+	 * design (vcpu0 is the only vCPU created below) and
+	 * run_userspace serializes around the single vcpu0_fd via
+	 * KVM_RUN — multi-CPU UML on this backend would have multiple
+	 * guest tasks contending for the same vCPU, producing
+	 * undefined ordering of guest state.
+	 *
+	 * If/when SMP support lands, this check moves to per-vCPU
+	 * creation in thread_start_idle and the vcpu0_fd singleton
+	 * becomes a per-cpu lookup. For now, fail loud at backend
+	 * init time with a clear diagnostic.
+	 */
+	if (uml_ncpus > 1) {
+		pr_err("um: kvm init: SMP not supported (ncpus=%d > 1); falling back\n",
+		       uml_ncpus);
+		return -EOPNOTSUPP;
 	}
 
 	kfd = os_open_file("/dev/kvm", of_rdwr(OPENFLAGS()), 0);

@@ -9060,4 +9060,56 @@ measurable.
 
 ---
 
+## D91 (2026-04-24) — G4: enforce ncpus=1 in kvm_init
+
+**Decision.** Add an explicit `if (uml_ncpus > 1)` early-
+exit to `kvm_init` returning `-EOPNOTSUPP`, matching the
+fatal in `arch/um/os-Linux/start_up.c:605` for the ptrace
+probe. The KVM backend creates a single vCPU (vcpu0) and
+all `run_userspace` calls funnel through it; multi-CPU
+UML on the KVM backend would have multiple guest tasks
+contending for the same vcpu0_fd via KVM_RUN, producing
+undefined ordering of guest state.
+
+**Finding.** Audit round-6 P1 #4 (G4) — "the KVM backend
+is architected as ncpus=1 but does not enforce that. It
+creates only vCPU0 and all run_userspace calls use that
+singleton, while only ptrace has an uml_ncpus > 1 fatal."
+
+**Why this is mostly dormant in current builds.** UML's
+default defconfig has `NR_CPUS=1`, and
+`arch/um/kernel/smp.c::uml_ncpus_setup` clamps the
+parsed value to `clamp(uml_ncpus, 1, NR_CPUS) = 1`. So
+even a `ncpus=2` cmdline yields uml_ncpus=1 — the check
+never fires today. The value is in landing it
+defensively for any future SMP-enabled UML build that
+might forget to also wire SMP support into the KVM
+backend's vCPU multiplexing.
+
+If/when SMP support lands for the KVM backend, this
+check moves to per-vCPU creation in thread_start_idle
+and the vcpu0_fd singleton becomes a per-cpu lookup —
+the early-exit rolls forward to a real configuration
+gate at that point.
+
+**Validation on dev host.**
+
+- Build clean (`#include <shared/smp.h>` resolves
+  `uml_ncpus`).
+- KUnit: 35/35 pass.
+- perf-getpid: kvm cyc=97, ratio 0.002, PASS.
+- Empirical: with NR_CPUS=1 the path through kvm_init
+  always sees uml_ncpus=1 → check no-ops correctly.
+
+**Refs.**
+
+- Audit round-6 finding #4 (G4).
+- arch/um/os-Linux/start_up.c:605 — the ptrace
+  precedent this matches.
+- arch/um/kernel/smp.c:231 — the clamp that masks the
+  cmdline value when CONFIG_NR_CPUS=1.
+- task #236 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)
