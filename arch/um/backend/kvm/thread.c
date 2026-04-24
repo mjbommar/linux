@@ -222,9 +222,15 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 					 * address).
 					 */
 
-#define KVM_BOOTSTRAP_GDT_OFFSET	0x000
-#define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040
-#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x080
+#define KVM_BOOTSTRAP_GDT_OFFSET	0x000	/* 8 entries × 8 B = 64 B */
+#define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5-byte trampoline */
+#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x080	/* 3-byte SYSRETQ */
+#define KVM_BOOTSTRAP_TSS_OFFSET	0x100	/* 104-byte TSS */
+#define KVM_BOOTSTRAP_IDT_OFFSET	0x180	/* 33 × 16 = 528 B */
+#define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x400	/* 11-byte #PF handler */
+#define KVM_BOOTSTRAP_STACK_TOP		0x1000	/* ring-0 IST stack top */
+#define KVM_BOOTSTRAP_TSS_SEL		0x30	/* GDT entry 6 (16-byte TSS desc) */
+#define KVM_BOOTSTRAP_IDT_ENTRIES	33	/* covers #PF (vector 14) */
 
 /*
  * LSTAR trampoline: 5 bytes. Byte-identical to
@@ -271,6 +277,33 @@ static const u8 kvm_bootstrap_lstar_bytes[] = {
 static const u8 kvm_bootstrap_sysret_bytes[] = {
 	0x48, 0x0f, 0x07,	/* sysretq */
 };
+
+/*
+ * #PF handler (memo 08 sub-commit #5b): 11 bytes. CPU delivers
+ * #PF via IDT[14] with IST=1 → RSP loaded from TSS.IST[1], SS
+ * set to null. Error code pushed on stack. Handler:
+ *
+ *   0f 20 d0          mov %cr2, %rax    ; read faulting VA
+ *   e6 fb             out %al, $0xfb    ; VMEXIT → host fault-fill
+ *   48 83 c4 08       add $8, %rsp      ; pop #PF error code
+ *   48 cf             iretq             ; return to ring-3 at faulting RIP
+ *
+ * The `out` triggers KVM_EXIT_IO on UM_KVM_PF_PORT (0xfb). The
+ * host reads CR2 via KVM_GET_SREGS, invokes UML's fault path
+ * to install the backing page, refreshes the shadow PT, then
+ * advances vCPU RIP past the `out` (2 bytes) so the guest
+ * continues at `add $8, %rsp; iretq`. IRETQ pops the pushed
+ * SS/RSP/RFLAGS/CS/RIP and restores the ring-3 context — the
+ * faulting instruction retries and now finds the mapping.
+ */
+static const u8 kvm_bootstrap_pf_handler_bytes[] = {
+	0x0f, 0x20, 0xd0,		/* mov %cr2, %rax  */
+	0xe6, 0xfb,			/* out %al, $0xfb  */
+	0x48, 0x83, 0xc4, 0x08,		/* add $8, %rsp    */
+	0x48, 0xcf,			/* iretq           */
+};
+
+#define UM_KVM_PF_PORT	0xfb	/* sub-commit #5b #PF-handler VMEXIT */
 
 static int kvm_enter_guest_init_bootstrap(void)
 {
@@ -337,6 +370,122 @@ static int kvm_enter_guest_init_bootstrap(void)
 		     sizeof(kvm_bootstrap_sysret_bytes) > PAGE_SIZE);
 	memcpy((char *)page + KVM_BOOTSTRAP_SYSRET_OFFSET,
 	       kvm_bootstrap_sysret_bytes, sizeof(kvm_bootstrap_sysret_bytes));
+
+	/*
+	 * Install the #PF handler bytes (sub-commit #5b). The
+	 * handler only runs if IDT + TSS are armed via SREGS in
+	 * kvm_enter_guest; until that wires up the bytes sit dormant
+	 * in the page and cost nothing.
+	 */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_PF_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_pf_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_PF_HANDLER_OFFSET,
+	       kvm_bootstrap_pf_handler_bytes,
+	       sizeof(kvm_bootstrap_pf_handler_bytes));
+
+	/*
+	 * Extend the GDT to 8 entries: entries 0-5 were populated
+	 * by kvm_setup_harness_gdt above (null, ring-0 code, ring-0
+	 * data, padding anchor, ring-3 data, ring-3 code).
+	 * Entries 6+7 together form the 16-byte TSS descriptor
+	 * selected by KVM_BOOTSTRAP_TSS_SEL (0x30) when SREGS loads
+	 * TR. AMD64 SDM vol 3 §4.8.3 describes the long-mode system
+	 * segment descriptor layout:
+	 *
+	 *   bits  0..15  limit[0:15]
+	 *   bits 16..31  base[0:15]
+	 *   bits 32..39  base[16:23]
+	 *   bits 40..47  type=9 | S=0 | DPL=0 | P=1  (0x89)
+	 *   bits 48..55  limit[16:19] | AVL | G
+	 *   bits 56..63  base[24:31]
+	 *   desc[1] bits 0..31   base[32:63]
+	 *   desc[1] bits 32..63  reserved (0)
+	 */
+	{
+		u64 tss_base = (u64)(unsigned long)page +
+				KVM_BOOTSTRAP_TSS_OFFSET;
+		u32 tss_limit = 104 - 1;	/* TSS is 104 bytes */
+		u64 *gdt = (u64 *)((char *)page + KVM_BOOTSTRAP_GDT_OFFSET);
+		u64 low;
+
+		low  = (u64)(tss_limit & 0xffff);
+		low |= ((u64)(tss_base & 0xffff)) << 16;
+		low |= ((u64)((tss_base >> 16) & 0xff)) << 32;
+		low |= ((u64)0x89) << 40;		/* type=9, P=1 */
+		low |= ((u64)((tss_limit >> 16) & 0xf)) << 48;
+		low |= ((u64)((tss_base >> 24) & 0xff)) << 56;
+
+		gdt[6] = low;
+		gdt[7] = (tss_base >> 32) & 0xffffffffULL;
+	}
+
+	/*
+	 * Zero the TSS + populate IST[1] only. RSP0/RSP1/RSP2 are
+	 * not used (all our cross-CPL transitions go through IDT
+	 * entries whose IST field points here). IST[1] top-of-
+	 * stack is at bootstrap_va + KVM_BOOTSTRAP_STACK_TOP; stack
+	 * grows down into 0xe00-0xfff (256 bytes — plenty for a
+	 * single interrupt frame + a handful of temporaries).
+	 *
+	 * TSS layout (AMD64 SDM vol 3 §10.8.2):
+	 *   bytes  0..3   reserved
+	 *   bytes  4..11  RSP0
+	 *   bytes 12..19  RSP1
+	 *   bytes 20..27  RSP2
+	 *   bytes 28..35  reserved
+	 *   bytes 36..43  IST1   ← populated
+	 *   bytes 44..51  IST2
+	 *   ...
+	 *   bytes 96..99  reserved
+	 *   bytes 100..103 I/O map base (set past limit → no I/O bitmap)
+	 */
+	{
+		char *tss = (char *)page + KVM_BOOTSTRAP_TSS_OFFSET;
+		u64 ist1 = (u64)(unsigned long)page +
+				KVM_BOOTSTRAP_STACK_TOP;
+
+		memset(tss, 0, 104);
+		*(u64 *)(tss + 36) = ist1;
+		*(u16 *)(tss + 102) = 104;	/* IOPB off-of-limit */
+	}
+
+	/*
+	 * Populate IDT[14] (#PF). Other vectors stay zero — a hit
+	 * is a contract-violation that should fail loudly. Long-
+	 * mode IDT entry format (Intel SDM vol 3 §6.14.1):
+	 *
+	 *   bytes  0..1   offset[0:15]
+	 *   bytes  2..3   segment selector (0x08 = ring-0 code)
+	 *   byte   4      IST (low 3 bits)
+	 *   byte   5      type_attr: P|DPL|0|type
+	 *                 0x8E = P=1, DPL=0, 0, type=0xE (interrupt
+	 *                        gate, 64-bit)
+	 *   bytes  6..7   offset[16:31]
+	 *   bytes  8..11  offset[32:63]
+	 *   bytes 12..15  reserved (0)
+	 */
+	{
+		u64 handler_va = (u64)(unsigned long)page +
+				  KVM_BOOTSTRAP_PF_HANDLER_OFFSET;
+		u8 *idt = (u8 *)page + KVM_BOOTSTRAP_IDT_OFFSET;
+		u8 *e;
+
+		memset(idt, 0, KVM_BOOTSTRAP_IDT_ENTRIES * 16);
+		e = idt + 14 * 16;
+		e[0]  = (u8)(handler_va & 0xff);
+		e[1]  = (u8)((handler_va >> 8) & 0xff);
+		e[2]  = 0x08;			/* ring-0 code selector */
+		e[3]  = 0x00;
+		e[4]  = 0x01;			/* IST=1 */
+		e[5]  = 0x8e;			/* P|DPL0|int-gate */
+		e[6]  = (u8)((handler_va >> 16) & 0xff);
+		e[7]  = (u8)((handler_va >> 24) & 0xff);
+		e[8]  = (u8)((handler_va >> 32) & 0xff);
+		e[9]  = (u8)((handler_va >> 40) & 0xff);
+		e[10] = (u8)((handler_va >> 48) & 0xff);
+		e[11] = (u8)((handler_va >> 56) & 0xff);
+		/* bytes 12-15 stay zero from memset. */
+	}
 
 	kvm_bootstrap_page = page;
 	kvm_bootstrap_gpa  = gpa;
@@ -679,6 +828,30 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	kvm_setup_production_sregs(&sregs, cr3_gpa, kvm_bootstrap_va);
 
+	/*
+	 * Sub-commit #5b: arm the IDT + TSS so guest-side #PF gets
+	 * routed to the bootstrap #PF handler instead of triple-
+	 * faulting. Both base fields are linear addresses (guest
+	 * CR3 resolves them through the shadow PT to the bootstrap
+	 * page). TR descriptor lives at GDT[6] (selector 0x30);
+	 * `type=11` (0xb) marks it as a busy 64-bit TSS after load
+	 * — KVM's KVM_SET_SREGS accepts the available-TSS form and
+	 * flips the busy bit on load. The kvm_segment structure
+	 * mirrors what the CPU caches after an LTR instruction.
+	 */
+	sregs.idt.base  = kvm_bootstrap_va + KVM_BOOTSTRAP_IDT_OFFSET;
+	sregs.idt.limit = KVM_BOOTSTRAP_IDT_ENTRIES * 16 - 1;
+	sregs.tr = (struct kvm_segment){
+		.base     = kvm_bootstrap_va + KVM_BOOTSTRAP_TSS_OFFSET,
+		.limit    = 104 - 1,
+		.selector = KVM_BOOTSTRAP_TSS_SEL,
+		.type     = 11,		/* 64-bit busy TSS */
+		.present  = 1,
+		.dpl      = 0,
+		.s        = 0,		/* system segment */
+		.g        = 0,
+	};
+
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS, (unsigned long)&sregs);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_SREGS(cr3=0x%llx gdt_va=0x%llx) failed (%d)\n",
@@ -942,6 +1115,85 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * silently consumed.
 				 */
 				panic("um: kvm run_userspace: unexpected ring-3 port 0xf5 exit\n");
+			}
+			if (run->io.port == UM_KVM_PF_PORT) {
+				/*
+				 * Sub-commit #5b: guest-side #PF handler
+				 * trapped in. Read CR2, touch the page to
+				 * force UML fault-in, refresh shadow PT.
+				 * If the touch fails (cr2 outside any vma,
+				 * NULL-deref, etc.) dispatch through
+				 * sig_info[SIGSEGV] — same SIGSEGV path the
+				 * MMIO decode uses. That either fixes-up
+				 * via on-demand vma expansion OR signals
+				 * the guest task so the loop doesn't spin
+				 * on a permanently-unresolvable fault.
+				 */
+				struct kvm_sregs dump_sregs;
+				unsigned long cr2;
+				char probe;
+				bool touched = false;
+
+				if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+						     (unsigned long)&dump_sregs) < 0) {
+					panic("um: kvm PF handler: KVM_GET_SREGS failed");
+				}
+				cr2 = dump_sregs.cr2;
+				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx; fault-in + shadow refill\n",
+						    cr2);
+
+				if (cr2 && current->active_mm &&
+				    current->active_mm->pgd) {
+					struct mm_struct *m2 =
+						current->active_mm;
+
+					if (!copy_from_user(&probe,
+							    (void __user *)cr2, 1)) {
+						(void)copy_to_user((void __user *)cr2,
+								   &probe, 1);
+						touched = true;
+					}
+					(void)kvm_shadow_fill_from_uml_pgd(m2->pgd);
+				}
+
+				/*
+				 * If the touch couldn't reach cr2 (NULL
+				 * deref, unmapped-beyond-vma, protection
+				 * violation), treat it as a real fault:
+				 * populate faultinfo + dispatch SIGSEGV.
+				 * Same code path KVM_EXIT_MMIO uses above.
+				 * After SIGSEGV dispatch we return to the
+				 * outer userspace() loop rather than re-
+				 * entering KVM_RUN — the faulting insn
+				 * would just fault again + spin us. UML's
+				 * signal-delivery + scheduler machinery in
+				 * the outer loop notices the queued SIGSEGV
+				 * and either terminates the task or handles
+				 * it; on the next run_userspace iteration
+				 * regs reflect the post-signal state.
+				 */
+				if (!touched) {
+					struct faultinfo *fi =
+						UPT_FAULTINFO(regs);
+
+					fi->trap_no    = 14;
+					fi->error_code = 4; /* user-mode */
+					fi->cr2        = cr2;
+					(*sig_info[SIGSEGV])(SIGSEGV, NULL,
+							     regs, NULL);
+					regs->is_user = 1;
+					return;
+				}
+
+				/*
+				 * Advance RIP past `out` (2 bytes) so the
+				 * handler's `add $8, %rsp; iretq` executes
+				 * and retries the faulting ring-3 insn.
+				 */
+				kregs.rip += 2;
+				(void)os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+						       (unsigned long)&kregs);
+				continue;
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
 			      run->io.port);

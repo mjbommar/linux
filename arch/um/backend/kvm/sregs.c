@@ -251,7 +251,13 @@ void kvm_setup_production_sregs(struct kvm_sregs *sregs,
 				u64 cr3_gpa, u64 gdt_gpa)
 {
 	kvm_fill_longmode_segments(sregs);
+	/*
+	 * GDT now carries 8 entries (was 6): entries 6+7 are the
+	 * TSS descriptor (16 bytes in long mode, selected by
+	 * TR=0x30). Limit = 8*8 - 1 = 63 = 0x3f. Populated by
+	 * kvm_enter_guest_init_bootstrap.
+	 */
 	sregs->gdt.base  = gdt_gpa;
-	sregs->gdt.limit = KVM_HARNESS_GDT_LIMIT;
+	sregs->gdt.limit = 8 * 8 - 1;
 	sregs->cr3	 = cr3_gpa;
 }
