@@ -91,7 +91,15 @@ enum kvm_replay_kind {
 
 struct kvm_replay_entry {
 	enum kvm_replay_kind kind;
-	u64	instruction_count;	/* TSC at point of capture */
+	u64	instruction_count;	/* ktime_get_ns() at capture
+					 * time. v1: monotonic ns
+					 * timestamp (per-entry ordering
+					 * + diagnostic). Memo 13 step 4
+					 * upgrades this to a PMU
+					 * INST_RETIRED.ANY count for
+					 * rr-style sub-instruction
+					 * interrupt boundary recording.
+					 */
 	u64	data[4];		/* kind-specific inline payload */
 
 	/*
@@ -454,7 +462,7 @@ void kvm_record_observe_syscall(unsigned long syscall_nr,
 				u64 arg0_data, u64 arg1_data)
 {
 	(void)um_kvm_record_append(KVM_REPLAY_SYSCALL,
-				   0,	/* instruction_count: TBD memo-13 step 4 */
+				   ktime_get_ns(),
 				   (u64)syscall_nr,
 				   (u64)ret_value,
 				   arg0_data, arg1_data,
@@ -496,7 +504,7 @@ void kvm_record_observe_syscall_buf(unsigned long syscall_nr,
 				    size_t payload_len)
 {
 	(void)um_kvm_record_append(KVM_REPLAY_SYSCALL,
-				   0,	/* instruction_count: TBD memo-13 step 4 */
+				   ktime_get_ns(),
 				   (u64)syscall_nr,
 				   (u64)ret_value,
 				   user_buf_va,
