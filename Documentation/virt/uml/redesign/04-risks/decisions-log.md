@@ -9595,4 +9595,99 @@ own stack frames.
 
 ---
 
+## D97 (2026-04-24) — #PF handler RAX-preservation: drop dead `mov %cr2, %rax`
+
+**Decision.** Remove the leading `mov %cr2, %rax`
+instruction from the bootstrap-page `#PF` handler bytes
+(`kvm_bootstrap_pf_handler_bytes[]` in
+`arch/um/backend/kvm/thread.c`). The handler shrinks
+from 11 bytes to 8 bytes; only `out %al, $0xfb`,
+`add $8, %rsp`, `iretq` remain.
+
+**Audit finding (P0 open #2 from external review).**
+The handler executed `mov %cr2, %rax` so the host could
+"read the faulting VA out of regs->rax". Two independent
+reasons that read was wrong:
+
+1. **Redundant.** The host already pulls CR2 directly
+   via `KVM_GET_SREGS` at the start of the `#PF`
+   recovery path (`thread.c:2174`, `cr2 = dump_sregs.cr2`).
+   The %rax-channel was never actually consumed; only
+   the OUT VMEXIT signal mattered.
+2. **Clobbers user RAX.** On the recoverable-#PF path
+   the host extracts user `IP/SP/RFLAGS` from the IST
+   iretq frame (D96 decode) and stuffs them into
+   `regs->gp[]`, but leaves `regs->gp[HOST_AX]` at
+   whatever `KVM_GET_REGS` captured — i.e. the value
+   the handler had just written there: the faulting VA
+   (= cr2). On re-entry the next `kvm_enter_guest`
+   marshals `kregs.rax = cr2_value` and SYSRETQ resumes
+   the user instruction with RAX silently changed from
+   the user's pre-fault value to the page address that
+   faulted. Any flag-sensitive sequence relying on RAX
+   semantics would observe corrupted state.
+
+**Why dropping the `mov` is safe.** The `out %al, $0xfb`
+instruction emits the byte in `%al` to port `0xfb`. The
+host's `KVM_EXIT_IO` handler dispatches on `port`
+alone — it does not read `run->io.data` for the
+`UM_KVM_PF_PORT` case. So `%al` carries garbage (whatever
+the user had before the fault) and that's fine — the
+host sees `port == 0xfb` and starts the recovery flow.
+User RAX is preserved end-to-end because no instruction
+in the handler writes to it.
+
+**Why the `add $8, %rsp; iretq` tail is still emitted.**
+On the live path the host bypasses the handler's tail
+(it extracts the IST frame and re-enters at user RIP via
+SYSRETQ in kvm_enter_guest), so `add/iretq` are
+unreachable in production. They're kept as a defensive
+"if anything ever forgets to bypass, the in-guest
+unwind would still re-enter user code at the right
+RIP". Removing them would shave 6 bytes off the page-2
+shadow-PT footprint but loses that fallback. Cost is
+negligible; keep.
+
+**Implementation.**
+
+- `kvm_bootstrap_pf_handler_bytes[]` shrinks 11 → 8 B.
+  Comment block rewritten to explain the
+  RAX-preservation rationale.
+- No other code path needs adjusting:
+  - The host's #PF dispatch dispatches on `run->io.port
+    == UM_KVM_PF_PORT`, not on `%al` content.
+  - The handler offset (`KVM_BOOTSTRAP_PF_HANDLER_OFFSET
+    = 0x4a0`) and the size budget (16 B available before
+    SYSRETQ at +0x4b0) both still hold.
+  - No KUnit byte-match test on the PF handler bytes
+    (only the LSTAR body is byte-matched at boot).
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass.
+- kvm-bounds: kvm-fallback + kvm-gadget both 6/6
+  -EFAULT. The bounds-check path (G1) doesn't trigger
+  recoverable #PF, so this test exercises the same
+  paths as before; it validates the build is clean.
+- df-preserve: ptrace=PASS, seccomp=PASS, kvm=PASS,
+  kvm-gadget=PASS for both syscall + pf rows. The pf
+  test triggers a real recoverable #PF (mmap +
+  first-touch anonymous page), so this directly
+  validates the new short handler.
+- perf-getpid: kvm cyc=98, ratio 0.002, PASS.
+
+**Refs.**
+
+- External audit feedback (P0 open #2).
+- D96 — F5-followon split + IST decode (the path that
+  surfaced this RAX-clobber: now that user IP/SP/RFLAGS
+  come from the IST frame, RAX visibly trails behind
+  with the cr2 value).
+- arch/um/backend/kvm/thread.c — handler bytes.
+- task #240 (kvm-bounds runner) — provides regression
+  coverage for the gadget bounds path that depends on
+  the RAX-preservation property indirectly.
+
+---
+
 ## (Future entries here, as decisions are made)

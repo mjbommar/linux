@@ -773,25 +773,37 @@ static const u8 kvm_bootstrap_sysret_bytes[] = {
 };
 
 /*
- * #PF handler (memo 08 sub-commit #5b): 11 bytes. CPU delivers
- * #PF via IDT[14] with IST=1 → RSP loaded from TSS.IST[1], SS
- * set to null. Error code pushed on stack. Handler:
+ * #PF handler (memo 08 sub-commit #5b, audit-followon
+ * RAX-preservation): 8 bytes. CPU delivers #PF via IDT[14]
+ * with IST=1 → RSP loaded from TSS.IST[1], SS set to null.
+ * Error code pushed on stack. Handler:
  *
- *   0f 20 d0          mov %cr2, %rax    ; read faulting VA
  *   e6 fb             out %al, $0xfb    ; VMEXIT → host fault-fill
  *   48 83 c4 08       add $8, %rsp      ; pop #PF error code
  *   48 cf             iretq             ; return to ring-3 at faulting RIP
  *
  * The `out` triggers KVM_EXIT_IO on UM_KVM_PF_PORT (0xfb). The
- * host reads CR2 via KVM_GET_SREGS, invokes UML's fault path
- * to install the backing page, refreshes the shadow PT, then
- * advances vCPU RIP past the `out` (2 bytes) so the guest
- * continues at `add $8, %rsp; iretq`. IRETQ pops the pushed
- * SS/RSP/RFLAGS/CS/RIP and restores the ring-3 context — the
- * faulting instruction retries and now finds the mapping.
+ * host reads CR2 via KVM_GET_SREGS (separately from this VMEXIT
+ * — the host doesn't consume %al), invokes UML's fault path to
+ * install the backing page, refreshes the shadow PT, then exits
+ * the inner KVM_RUN loop via interrupt_end and the outer
+ * userspace() loop re-enters at the user RIP extracted from the
+ * IST iretq frame.
+ *
+ * RAX preservation (audit followon): a prior version started
+ * with `mov %cr2, %rax` so the host could read the faulting VA
+ * out of regs->rax. That read was always redundant — the host
+ * pulls CR2 from KVM_GET_SREGS directly — and worse, it
+ * clobbered the user's RAX before KVM_GET_REGS captured the
+ * vCPU state. On the recoverable #PF path the host stuffs only
+ * IP/SP/RFLAGS from the IST frame into `regs`, leaving
+ * regs->gp[HOST_AX] whatever KVM_GET_REGS returned — i.e. the
+ * (clobbered) cr2 value rather than the user's pre-fault RAX.
+ * Dropping the `mov` keeps user RAX live across the fault. AL
+ * is whatever the user had (we don't care; the host doesn't
+ * consume the OUT byte).
  */
 static const u8 kvm_bootstrap_pf_handler_bytes[] = {
-	0x0f, 0x20, 0xd0,		/* mov %cr2, %rax  */
 	0xe6, 0xfb,			/* out %al, $0xfb  */
 	0x48, 0x83, 0xc4, 0x08,		/* add $8, %rsp    */
 	0x48, 0xcf,			/* iretq           */
