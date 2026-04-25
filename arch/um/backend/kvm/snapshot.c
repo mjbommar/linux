@@ -444,15 +444,19 @@ static ssize_t kvm_snapshot_bench_write(struct file *f,
 	}
 
 	/*
-	 * Use the regs-only capture path: at debugfs-write time we
-	 * may be on a guest task whose vmalloc area is small, and
-	 * the bench's purpose is to measure vCPU-state round-trip
-	 * cycles, not the memslot memcpy (which is bounded only by
-	 * memory bandwidth and trivially predictable).
+	 * Try full capture first; fall back to regs-only on
+	 * vmalloc-area exhaustion. Same shape as the cmdline
+	 * boot-time bench above.
 	 */
 	t0 = ktime_get_ns();
-	rc = kvm_snapshot_capture_regs_only(snap);
+	rc = kvm_snapshot_capture(snap);
 	t1 = ktime_get_ns();
+	if (rc == -ENOMEM) {
+		pr_info("kvm_snapshot_bench: full capture vmalloc failed; retrying regs-only\n");
+		t0 = ktime_get_ns();
+		rc = kvm_snapshot_capture_regs_only(snap);
+		t1 = ktime_get_ns();
+	}
 	if (rc < 0) {
 		pr_warn("kvm_snapshot_bench: capture failed (%d) — vCPU not yet KVM_RUN'd?\n",
 			rc);
@@ -479,7 +483,7 @@ static ssize_t kvm_snapshot_bench_write(struct file *f,
 		u64 minv = samples[0];
 		u64 maxv = samples[n - 1];
 
-		pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u (regs-only)\n",
+		pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u\n",
 			cap_cyc, med, p95, minv, maxv, n);
 	}
 	rc = (int)count;	/* signal write success */
@@ -569,9 +573,25 @@ static int __init kvm_snapshot_bench_late_init(void)
 		goto out_free_samples;
 	}
 
+	/*
+	 * Try the FULL capture first. If vmalloc(physmem_size)
+	 * succeeds, we're measuring the realistic forkserver-iteration
+	 * cost (vCPU regs + memslot memcpy) — the number that has to
+	 * stay under memo-12's <50 ms cold-start / <1 ms iteration
+	 * targets. If vmalloc fails (UML's vmalloc area is bounded
+	 * and tight at late_initcall_sync on bigger physmem configs),
+	 * fall back to regs-only so the bench still produces a
+	 * measurement.
+	 */
 	t0 = ktime_get_ns();
-	rc = kvm_snapshot_capture_regs_only(snap);
+	rc = kvm_snapshot_capture(snap);
 	t1 = ktime_get_ns();
+	if (rc == -ENOMEM) {
+		pr_info("kvm_snapshot_bench: full capture vmalloc failed; retrying regs-only\n");
+		t0 = ktime_get_ns();
+		rc = kvm_snapshot_capture_regs_only(snap);
+		t1 = ktime_get_ns();
+	}
 	if (rc < 0) {
 		pr_warn("kvm_snapshot_bench: capture failed (%d) — vCPU not yet KVM_RUN'd?\n",
 			rc);
@@ -592,7 +612,7 @@ static int __init kvm_snapshot_bench_late_init(void)
 	}
 
 	sort(samples, n, sizeof(u64), u64_cmp, NULL);
-	pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u (regs-only)\n",
+	pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u\n",
 		cap_cyc, samples[n / 2], samples[(n * 95) / 100],
 		samples[0], samples[n - 1], n);
 
