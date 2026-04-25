@@ -2026,6 +2026,62 @@ Realistic Phase 1 exit target: **kvm-fallback ≤ 50k cyc**
 in the runner defaults to 4.0 (loose) and will be tightened
 to 1.2 once Phase 1 lands.
 
+## 2026-04-25 — Phase 1 closure: ratio at 1.15× kvm/seccomp
+
+Sequenced reduction across the Phase 1 perf levers. Same
+host as the 2026-04-25 baseline above (run via the default
+kselftest runner; representative single-run numbers, not the
+N=11 wrapper from `kvm-fallback-stats.sh`).
+
+| Stage                                              | kvm cyc | seccomp cyc | ratio    |
+|----------------------------------------------------|---------|-------------|----------|
+| baseline (post-#3b)                                | 120,034 | 41,048      | 2.92×    |
+| #238 STEP-2 (drop `kvm_touch_all_user_vmas`)       |  91,064 | 40,675      | 2.24×    |
+| #242 (skip-fill when shadow PT ↔ pgd in sync)      |  70,513 | 41,821      | 1.69×    |
+| experiment #1 (drop unconditional post-syscall fill) |  47,550 | 41,229      | **1.15×** |
+| experiment #2 (KVM_SYNC_X86_SREGS for CR2 reads)   |  47,906 | 40,982      | 1.17× (noise) |
+
+**Phase 1 exit hit on the first experiment-#1 run.** The
+1.15× ratio is at the architectural floor imposed by VMX
+exit/entry cycles + KVM_RUN ioctl overhead + interrupt-window
+costs; further reduction requires *architectural* moves (more
+in-guest gadgets so common syscalls bypass VMEXIT entirely),
+not more shadow-PT shaving.
+
+Companion data point on the gadget hot path:
+
+| Stage                                              | kvm cyc | seccomp cyc | ratio |
+|----------------------------------------------------|---------|-------------|-------|
+| perf-getpid post-experiment-#1                     |  47,637 | 41,440      | 1.150 |
+| perf-fallback post-experiment-#1                   |  47,550 | 41,229      | 1.153 |
+
+Two paths converge at ~1.15× because the 2870-leaf shadow PT
+walk that used to dominate the VMEXIT fast path is gone on
+non-mm-mutating syscalls — so a gadget VMEXIT (timer tick,
+non-getpid syscall) and a fallback VMEXIT now cost the same.
+
+### Other Phase 1 / closure milestones (2026-04-25)
+
+- **dyn-loader kselftest** PASSES kvm row 5/5 (commits
+  `a698a665bb62..5be7800801bf`). Required #272 (IRETQ-based
+  bootstrap re-entry preserving user RCX/R11 across #PF
+  recovery) + #273 (KVM_GET_SUPPORTED_CPUID + KVM_SET_CPUID2
+  passthrough).
+- **Audit round 7** closed (#248). P1 finding (IRETQ
+  non-canonical RSP could triple-fault) addressed by the new
+  IDT[13] (#GP) handler at offset 0x4d8 / port 0xf9 (commit
+  `e38536e38703`). P2 mm-pointer-VA-reuse closed by adding
+  `shadow_pgd_synced_mm` to the cache key.
+
+### Phase 1 exit gate flipped
+
+`MAX_KVM_RATIO` ceiling in `run-perf-fallback.sh` was 4.0
+(loose) and is intentionally still 4.0 — Phase 2 audit may
+regress this 1.15× back toward 1.3× while Series 7 trims the
+LKML-bound code. The realistic-target ratio of ≤1.2× should
+be the trigger for tightening, once Series 7 lands and the
+dust settles.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream

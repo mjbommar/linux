@@ -204,12 +204,17 @@ level table. Summary:
     `umlctl` lifecycle CLI + observability-spine v1 — see
     "Tooling (umlctl + observability spine)" below.
 
-**Workstream D (KVM backend):** **production-shaped as of
-2026-04-24, audit-closed.** Phase III of the post-Q1 push
+**Workstream D (KVM backend):** **Phase 1 closed 2026-04-25
+at 1.15× kvm/seccomp.** Phase III of the post-Q1 push
 landed D-01 through D-06 as a working in-kernel harness; the
 2026-04-24 push extended that to a sustained per-trap
 dispatcher (audit A1) plus the systrap gadget ladder G1-G8
-plus full closure of audit rounds 4 / 5 / 6.
+plus full closure of audit rounds 4 / 5 / 6. The 2026-04-25
+session shipped Phase 1 closure: dyn-loader kselftest PASSES,
+audit round 7 closed, perf-fallback ratio 2.92× → 1.15× via
+the #238 / #242 / experiment-#1 / experiment-#2 ladder. See
+`02-workstreams/D-kvm-backend/measurements.md` "2026-04-25 —
+Phase 1 closure" entry for the per-stage table.
 
   - **Production dispatcher** (audit A1, D70): per-trap
     `interrupt_end()` contract matching ptrace + seccomp;
@@ -256,15 +261,37 @@ plus full closure of audit rounds 4 / 5 / 6.
     + a focused squash pass against the 80+ branch
     commits.
 
-  Two P2 follow-ons remain open (deferred for focused
-  sessions):
-  - **#230** F5-followon — split bootstrap into RO
-    code + RW data pages.
-  - **#238** G6 — drop `kvm_touch_all_user_vmas` once
-    the #PF recovery path uses `handle_mm_fault`
-    directly.
+  All P0/P1 audit findings through **round 7** are closed
+  (round 7 ran 2026-04-25; see "Phase 1 closure (2026-04-25)"
+  below).
 
-  All P0/P1 audit findings through round 6 are closed.
+  Phase-1 follow-ons that landed 2026-04-24/25:
+  - **#230** F5-followon — bootstrap split into RO
+    code+tables + RW NX IST stack pages.
+  - **#238** STEP-2 — `kvm_touch_all_user_vmas` removed;
+    lazy-fault recovery via direct `handle_page_fault`
+    call is now the only path.
+  - **#272** — IRETQ-based bootstrap re-entry replaces
+    SYSRETQ; preserves user RCX/R11 across recoverable
+    #PF (uncovered by ld-linux's RELR loop using RCX
+    as the relocation cursor).
+  - **#273** — `KVM_GET_SUPPORTED_CPUID` +
+    `KVM_SET_CPUID2` passthrough; guest sees host
+    x86-64-v3 features, modern dynamically-linked
+    binaries load cleanly.
+  - **#242** — skip `kvm_shadow_fill_from_uml_pgd`
+    when the shadow PT already mirrors `current->
+    active_mm->pgd` (cache key: synced flag + mm
+    pointer + pgd-VA).
+  - **Audit round 7 P1** — IDT[13] (#GP) handler at
+    bootstrap +0x4d8 / port 0xf9; non-canonical
+    iretq targets surface as SIGSEGV instead of
+    cascading to #DF.
+
+  Phase-1 follow-ons deferred (perf, non-blocking):
+  - **#243** per-mm cached shadow PGD (lever #6).
+  - **#244** huge-page (2 MiB) shadow PT (re-analysis
+    showed the lever doesn't apply as framed).
 
   D failure remains explicitly acceptable as a backend
   policy: prod-fast falls back to seccomp if the host
