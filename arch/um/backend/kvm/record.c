@@ -878,6 +878,98 @@ static const struct file_operations kvm_record_state_fops = {
 	.release = single_release,
 };
 
+static const char *kvm_replay_kind_name(enum kvm_replay_kind k)
+{
+	switch (k) {
+	case KVM_REPLAY_TIME:		return "TIME";
+	case KVM_REPLAY_RAND:		return "RAND";
+	case KVM_REPLAY_INTERRUPT:	return "INTERRUPT";
+	case KVM_REPLAY_SYSCALL:	return "SYSCALL";
+	case KVM_REPLAY_MMIO_READ:	return "MMIO_READ";
+	}
+	return "?";
+}
+
+/*
+ * `kvm_record_log` — readable dump of the active record's log
+ * entries. One line per entry with the `kind` tag, instruction
+ * count, inline data[], and a payload-presence indicator.
+ *
+ * Bounded output: caps at the first 256 entries to keep the seq
+ * buffer manageable; deeper logs need a programmatic API (future
+ * work — sysfs export, snapshot-to-disk, etc.). Today this is
+ * for human triage of short fuzz runs.
+ */
+#define KVM_RECORD_LOG_DUMP_MAX	256
+
+static int kvm_record_log_show(struct seq_file *m, void *unused)
+{
+	struct kvm_record *rec;
+	unsigned long flags;
+	size_t i, count, dump_n;
+	struct kvm_replay_entry *snap;
+
+	spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
+	rec = um_kvm_record_debugfs_rec;
+	if (!rec) {
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		seq_puts(m, "(no active record)\n");
+		return 0;
+	}
+	count = rec->log_count;
+	dump_n = min_t(size_t, count, KVM_RECORD_LOG_DUMP_MAX);
+	if (!dump_n) {
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		seq_printf(m, "(empty log; capacity=%zu)\n", rec->log_capacity);
+		return 0;
+	}
+	/*
+	 * Snapshot the bounded prefix while holding the lock so the
+	 * seq_printf below doesn't race a concurrent observe_syscall.
+	 * Bounded by KVM_RECORD_LOG_DUMP_MAX (256) so the alloc is
+	 * always small.
+	 */
+	snap = kmalloc_array(dump_n, sizeof(*snap), GFP_ATOMIC);
+	if (!snap) {
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		seq_puts(m, "(snapshot kmalloc failed)\n");
+		return 0;
+	}
+	memcpy(snap, rec->log, dump_n * sizeof(*snap));
+	spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+
+	seq_printf(m, "log_count=%zu (showing first %zu)\n", count, dump_n);
+	for (i = 0; i < dump_n; i++) {
+		seq_printf(m, "[%4zu] %-9s ic=%llu d0=%llx d1=%llx d2=%llx d3=%llx payload_len=%zu\n",
+			   i,
+			   kvm_replay_kind_name(snap[i].kind),
+			   (unsigned long long)snap[i].instruction_count,
+			   (unsigned long long)snap[i].data[0],
+			   (unsigned long long)snap[i].data[1],
+			   (unsigned long long)snap[i].data[2],
+			   (unsigned long long)snap[i].data[3],
+			   snap[i].payload_len);
+	}
+	if (count > dump_n)
+		seq_printf(m, "... (%zu more entries truncated)\n",
+			   count - dump_n);
+
+	kfree(snap);
+	return 0;
+}
+
+static int kvm_record_log_open(struct inode *ip, struct file *f)
+{
+	return single_open(f, kvm_record_log_show, NULL);
+}
+
+static const struct file_operations kvm_record_log_fops = {
+	.open    = kvm_record_log_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
 static int __init kvm_record_debugfs_init(void)
 {
 	struct dentry *d;
@@ -893,6 +985,8 @@ static int __init kvm_record_debugfs_init(void)
 			    &kvm_record_ctl_fops);
 	debugfs_create_file("kvm_record_state", 0444, d, NULL,
 			    &kvm_record_state_fops);
+	debugfs_create_file("kvm_record_log",   0444, d, NULL,
+			    &kvm_record_log_fops);
 	return 0;
 }
 late_initcall_sync(kvm_record_debugfs_init);
