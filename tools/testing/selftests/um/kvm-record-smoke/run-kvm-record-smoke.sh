@@ -77,9 +77,22 @@ if [ -z "$KU_LINE" ]; then
 	exit 1
 fi
 
+# Also gate the round-trip KUnit (commit 14414378fde9), which
+# exercises the FIFO order + cursor-exhaustion + side-buffer
+# round-trip + NR-mismatch divergence assertions. It skips on
+# early boot when kvm_record_start can't capture (vcpu / memslot
+# not yet up at KUnit time); we tolerate that but require the
+# `ok N` line either way.
+KU_LINE_RT=$(echo "$OUT" | grep -E '^[[:space:]]+ok [0-9]+ kvm_record_roundtrip_test' | head -1)
+if [ -z "$KU_LINE_RT" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no 'ok N kvm_record_roundtrip_test' KUnit line)"
+	exit 1
+fi
+
 KU_INFO=$(echo "$OUT" | grep -E 'kvm_record_start rc=' | head -1)
 
 echo "KVM_RECORD_SMOKE: PASS ${KU_LINE# *}"
+echo "KVM_RECORD_SMOKE: PASS ${KU_LINE_RT# *}"
 if [ -n "$KU_INFO" ]; then
 	echo "KVM_RECORD_SMOKE: info ${KU_INFO# *}"
 fi
