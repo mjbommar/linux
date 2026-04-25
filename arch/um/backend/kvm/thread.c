@@ -1225,6 +1225,13 @@ static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
 		return -EIO;
 	if (!gadget_state_va)
 		return 0;	/* unmapped; nothing to program */
+	/*
+	 * Perf lever #3: gadget_state_va is allocated once per vCPU
+	 * and never moves. After the first successful write, skip
+	 * the ioctl on every subsequent kvm_enter_guest.
+	 */
+	if (kvm_backend_ctx()->kernel_gs_base_primed)
+		return 0;
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
 	if (rc < 0) {
@@ -1237,6 +1244,7 @@ static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
 			     rc);
 		return -EIO;
 	}
+	kvm_backend_ctx()->kernel_gs_base_primed = true;
 	return 0;
 }
 
@@ -1268,6 +1276,15 @@ static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 
 	if (vcpu_fd < 0)
 		return -EIO;
+	/*
+	 * Perf lever #3: STAR/LSTAR/FMASK are compile-time constants
+	 * (LSTAR = bootstrap_va + 0x40; STAR = ring-0/ring-3 selector
+	 * pair; FMASK = 0). After the first successful write they
+	 * never change, so skip the ioctl on every subsequent
+	 * kvm_enter_guest.
+	 */
+	if (kvm_backend_ctx()->msrs_primed)
+		return 0;
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
 	if (rc < 0) {
@@ -1287,6 +1304,7 @@ static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 			     rc);
 		return -EIO;
 	}
+	kvm_backend_ctx()->msrs_primed = true;
 	return 0;
 }
 

@@ -44,6 +44,19 @@ struct kvm_um {
 					 * KVM_GET/SET_REGS ioctls (perf-lever
 					 * #2 — 2 ioctls per syscall saved).
 					 */
+	bool		msrs_primed;	/* MSR_STAR / MSR_LSTAR / MSR_FMASK
+					 * set at least once. These never
+					 * change after the first
+					 * kvm_enter_guest — prime-once then
+					 * skip the KVM_SET_MSRS ioctl on
+					 * subsequent entries (perf lever #3).
+					 */
+	bool		kernel_gs_base_primed;
+					/* MSR_KERNEL_GS_BASE set at least
+					 * once. Ditto — gadget_state_va is
+					 * allocated once per vCPU and never
+					 * moves.
+					 */
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
