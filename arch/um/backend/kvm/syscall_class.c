@@ -82,10 +82,12 @@ static const enum kvm_syscall_class kvm_syscall_class_map[NR_syscalls] = {
 	 * means the gadget chose the fallback, in which case the
 	 * dispatcher routes through CLASS_PASSTHROUGH semantics.
 	 * See enum kvm_syscall_class definition in kvm_backend.h.
-	 * The 9 entries below mirror the live LSTAR dispatch table
-	 * in arch/um/backend/kvm/thread.c; any drift is caught by
-	 * the KUnit cross-check in arch/um/backend/contract/
-	 * test_ops.c (kvm_class_e_inventory_test).
+	 * The 10 entries below mirror the live LSTAR dispatch
+	 * table in arch/um/backend/kvm/thread.c; any drift is
+	 * caught by the KUnit cross-check in arch/um/backend/
+	 * contract/test_ops.c (kvm_syscall_class_count_test).
+	 * Count = 7 pid-family + clock_gettime + time + getcpu;
+	 * sched_yield was demoted in audit round-6 G5 (D94).
 	 */
 	[__NR_getpid]		= KVM_SYSCALL_CLASS_GADGET,
 	[__NR_gettid]		= KVM_SYSCALL_CLASS_GADGET,

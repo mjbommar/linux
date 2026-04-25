@@ -508,7 +508,7 @@ config UM_BACKEND_KVM_GADGET
 	help
 	  Replace the LSTAR trampoline's 5-byte `out %al, $0xf4;
 	  sysretq` wire form with a real systrap gadget body that
-	  services 11 hot-path syscalls in-guest and returns
+	  services 10 hot-path syscalls in-guest and returns
 	  without a VMEXIT. Everything else falls through to the
 	  same `out %al, $0xf4` VMEXIT the default build uses.
 
@@ -534,14 +534,18 @@ config UM_BACKEND_KVM_GADGET
 
 	  Behaviour: __NR_getpid, __NR_gettid, __NR_getppid,
 	  __NR_getuid, __NR_geteuid, __NR_getgid, __NR_getegid,
-	  __NR_sched_yield, __NR_clock_gettime(CLOCK_MONOTONIC),
-	  __NR_time, and __NR_getcpu return real values via the
-	  state and vvar pages. Any syscall outside the gadget
-	  set, any clockid != CLOCK_MONOTONIC for clock_gettime,
-	  or any seqlock retry-budget exhaustion takes the usual
-	  VMEXIT path with identical semantics to the non-gadget
-	  build (audit F7/1: bad user pointers return -EFAULT
-	  per POSIX, not SIGSEGV).
+	  __NR_clock_gettime(CLOCK_MONOTONIC), __NR_time, and
+	  __NR_getcpu return real values via the state and vvar
+	  pages. Any syscall outside the gadget set, any clockid
+	  != CLOCK_MONOTONIC for clock_gettime, or any seqlock
+	  retry-budget exhaustion takes the usual VMEXIT path with
+	  identical semantics to the non-gadget build (audit F7/1:
+	  bad user pointers return -EFAULT per POSIX, not SIGSEGV).
+	  __NR_sched_yield was demoted from this set in audit
+	  round-6 G5 (D94) — yielding from the gadget would skip
+	  UML's scheduler instead of cooperating with it, so it
+	  now takes the VMEXIT + handle_syscall + sys_sched_yield
+	  path.
 
 	  Say Y for performance-conscious workloads; N for
 	  reviewability of the non-gadget integration.
