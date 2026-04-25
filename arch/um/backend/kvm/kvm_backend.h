@@ -654,6 +654,20 @@ int kvm_snapshot_restore_full(struct kvm_snapshot *snap);
 void kvm_snapshot_free(struct kvm_snapshot *snap);
 void kvm_snapshot_destroy(struct kvm_snapshot *snap);
 
+/*
+ * Task #253 / memo 13 record/replay primitives. Sits on top of
+ * kvm_snapshot — a kvm_record holds one snapshot (the checkpoint)
+ * plus a log of captured nondeterminism (TIME / RAND / INTERRUPT
+ * / SYSCALL / MMIO_READ entries). Today this is the API skeleton;
+ * dispatcher hooks land in follow-up commits per memo-13 ladder.
+ */
+struct kvm_record;
+struct kvm_record *kvm_record_alloc(void);
+int kvm_record_start(struct kvm_record *rec);
+void kvm_record_stop(struct kvm_record *rec);
+int kvm_record_replay(struct kvm_record *rec);
+void kvm_record_destroy(struct kvm_record *rec);
+
 #endif
 
 /*

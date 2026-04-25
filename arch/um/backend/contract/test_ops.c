@@ -1077,6 +1077,41 @@ static void kvm_snapshot_basic_test(struct kunit *test)
 }
 
 /*
+ * Task #253 / memo 13 record/replay basic-shape test.
+ *
+ * Same shape as kvm_snapshot_basic_test: alloc / start / stop /
+ * destroy lifecycle. start / replay can fail with -ENODEV at
+ * early-boot KUnit time when the memslot isn't yet registered;
+ * that's an acceptable shape for the contract test, same
+ * tolerance the snapshot test applies.
+ */
+static void kvm_record_basic_test(struct kunit *test)
+{
+	struct kvm_record *rec;
+	int rc;
+
+	rec = kvm_record_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_record_start(rec);
+	if (rc < 0) {
+		kunit_info(test, "kvm_record_start rc=%d (acceptable on early boot)\n",
+			   rc);
+	} else {
+		/*
+		 * Successful start: a stop should disarm without error,
+		 * a replay should restore against the captured snapshot.
+		 */
+		kvm_record_stop(rec);
+		rc = kvm_record_replay(rec);
+		KUNIT_EXPECT_EQ(test, rc, 0);
+		kvm_record_stop(rec);
+	}
+
+	kvm_record_destroy(rec);
+}
+
+/*
  * Memo 10 class-map cross-check. The static table in
  * arch/um/backend/kvm/syscall_class.c must classify exactly
  * the 12 non-A entries from the inventory; every other NR
@@ -1305,6 +1340,7 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_gadget_vvar_abi_test),
 	KUNIT_CASE(kvm_gadget_vvar_refresh_test),
 	KUNIT_CASE(kvm_snapshot_basic_test),
+	KUNIT_CASE(kvm_record_basic_test),
 #endif
 	{}
 };
