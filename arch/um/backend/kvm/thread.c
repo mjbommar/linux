@@ -261,6 +261,29 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 						 * triple-faults silently and we lose the
 						 * cause-of-cascade info.
 						 */
+#define KVM_BOOTSTRAP_IRETQ_OFFSET	0x4d0	/* 2-byte IRETQ (task #272 recovery
+						 * re-entry). SYSRETQ-based bootstrap
+						 * clobbers RCX (= user RIP load) and R11
+						 * (= user RFLAGS load), which is fine for
+						 * fresh-entry / SYSCALL-return paths
+						 * (RCX/R11 are already SYSCALL-ABI
+						 * caller-saved by then) but DESTROYS user
+						 * RCX/R11 across a recoverable #PF.
+						 *
+						 * IRETQ pops RIP/CS/RFLAGS/RSP/SS from
+						 * the current stack and preserves all
+						 * GPRs, so it's the correct re-entry for
+						 * exception recovery where user RCX/R11
+						 * must survive intact. Frame is built on
+						 * the IST stack page (RW|NX, mapped at
+						 * bootstrap_va + 0x3000) before entry.
+						 *
+						 * Surfaced by task #272 — ld-linux's RELR
+						 * loop uses RCX as the relocation cursor;
+						 * SYSRETQ-clobbered RCX terminated the
+						 * loop after one iteration, leaving 11/12
+						 * relative relocations un-applied.
+						 */
 /*
  * IST stack top — top of the dedicated stack page, post-F5-followon split.
  * Guest VA layout: bootstrap_va + 0x0000 = code+tables (RO), +0x1000 = state,
@@ -758,6 +781,35 @@ static const u8 kvm_bootstrap_sysret_bytes[] = {
 };
 
 /*
+ * Ring-0 → ring-3 IRETQ gadget (task #272). Used on bootstrap
+ * re-entry when the host needs ALL user GPRs preserved across the
+ * transition — specifically, the recoverable-#PF path. SYSRETQ-
+ * based re-entry overwrites RCX (user-RIP carrier) and R11 (user-
+ * RFLAGS carrier); IRETQ pops CS:RIP/RFLAGS/SS:RSP from the
+ * current stack and leaves every GPR intact.
+ *
+ * Discipline at the call site:
+ *   - kvm_bootstrap_page_stack[0..0x28] holds the iretq frame:
+ *       +0x00: user RIP
+ *       +0x08: ring-3 CS = 0x33 (selector 6 | RPL=3)
+ *       +0x10: user RFLAGS  (bit 1 set is required; IF set; IOPL=3)
+ *       +0x18: user RSP
+ *       +0x20: ring-3 SS = 0x2b (selector 5 | RPL=3)
+ *   - vCPU RIP = bootstrap_va + KVM_BOOTSTRAP_IRETQ_OFFSET
+ *   - vCPU RSP = bootstrap_va + 0x3000  (IST stack page base, where
+ *     the host wrote the iretq frame).
+ *   - vCPU RFLAGS = 0x002 (ring-0 reserved-one bit only).
+ *   - User GPRs (RAX..R15) pass through unchanged.
+ *
+ * The IDT IST1 pointer also lives at +0x4000 (one page above this
+ * frame), so a #PF mid-iretq pushes its frame to the IST top
+ * without colliding with the bootstrap frame at +0x000.
+ */
+static const u8 kvm_bootstrap_iretq_bytes[] = {
+	0x48, 0xcf,		/* iretq */
+};
+
+/*
  * #PF handler (memo 08 sub-commit #5b, audit-followon
  * RAX-preservation): 8 bytes. CPU delivers #PF via IDT[14]
  * with IST=1 → RSP loaded from TSS.IST[1], SS set to null.
@@ -930,6 +982,20 @@ static int kvm_enter_guest_init_bootstrap(void)
 	memcpy((char *)page + KVM_BOOTSTRAP_DF_HANDLER_OFFSET,
 	       kvm_bootstrap_df_handler_bytes,
 	       sizeof(kvm_bootstrap_df_handler_bytes));
+
+	/*
+	 * Install the IRETQ re-entry gadget bytes (task #272). Like
+	 * the SYSRETQ gadget but pops the cross-CPL state from a host-
+	 * built iretq frame on the IST stack page, preserving every
+	 * GPR (RCX/R11 specifically) across the ring-0→ring-3
+	 * transition. Used on recoverable-#PF re-entries to keep
+	 * user state intact through fault handling.
+	 */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_IRETQ_OFFSET +
+		     sizeof(kvm_bootstrap_iretq_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_IRETQ_OFFSET,
+	       kvm_bootstrap_iretq_bytes,
+	       sizeof(kvm_bootstrap_iretq_bytes));
 
 	/*
 	 * Extend the GDT to 8 entries: entries 0-5 were populated
@@ -1790,40 +1856,53 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 
 sregs_done:
 	/*
-	 * Build vCPU regs from UML regs, then overlay the ring-3
-	 * bootstrap shape (sub-commit #5a):
+	 * Build vCPU regs from UML regs, then overlay the ring-0 →
+	 * ring-3 IRETQ bootstrap shape (task #272).
 	 *
-	 *   RIP = bootstrap_va + SYSRET_OFFSET  — dedicated
-	 *                                          3-byte SYSRETQ
-	 *                                          gadget.
-	 *   RCX = user's intended RIP           — SYSRETQ loads RIP
-	 *                                          from RCX.
-	 *   R11 = saved user RFLAGS             — SYSRETQ loads
-	 *                                          RFLAGS from R11.
-	 *                                          Preserves user
-	 *                                          arithmetic +
-	 *                                          direction flags
-	 *                                          so a resumed
-	 *                                          faulting or
-	 *                                          SYSCALL-return
-	 *                                          instruction
-	 *                                          sees the correct
-	 *                                          architectural
-	 *                                          state (audit
-	 *                                          round-4 F2).
-	 *                                          REQ_ON bits
-	 *                                          enforce IF=1 +
-	 *                                          IOPL=3 +
-	 *                                          reserved-bit-1
-	 *                                          unconditionally.
+	 * Pre-#272 this used a 3-byte SYSRETQ gadget at SYSRET_OFFSET
+	 * with kregs.rcx ← user RIP and kregs.r11 ← user RFLAGS, since
+	 * SYSRETQ loads RIP from RCX and RFLAGS from R11 on its way to
+	 * ring-3. That works for fresh entries and SYSCALL returns
+	 * (where RCX/R11 are caller-saved by the SYSCALL ABI anyway)
+	 * but DESTROYS user RCX/R11 on a recoverable-#PF re-entry —
+	 * symptom: ld-linux's RELR loop uses RCX as the relocation
+	 * cursor; SYSRETQ-clobbered RCX terminated the loop after one
+	 * iteration, leaving 11/12 relative relocations un-applied
+	 * (task #272 wild jump to 0xc680).
 	 *
-	 * RAX / RSP / etc. pass through from UML regs — they're
-	 * the user process's GP state.
+	 * IRETQ pops CS:RIP / RFLAGS / SS:RSP from the current stack
+	 * and preserves every GPR. We build the iretq frame on the
+	 * IST stack page (host VA = kvm_bootstrap_page_stack, guest VA
+	 * = bootstrap_va + 0x3000) at offset 0..0x28, then point vCPU
+	 * RSP there and vCPU RIP at the IRETQ_OFFSET gadget. The IST
+	 * top (= bootstrap_va + 0x4000, used by IDT[14] when a #PF
+	 * fires later) is a full page above offset 0x28, so a mid-
+	 * iretq #PF doesn't clobber the bootstrap frame.
+	 *
+	 * Selectors (must match kvm_setup_harness_gdt's layout):
+	 *   ring-3 CS = 0x2b (GDT idx 5, base sel 0x28, RPL=3)
+	 *   ring-3 SS = 0x23 (GDT idx 4, base sel 0x20, RPL=3)
+	 * Same pair SYSRETQ derives from MSR_STAR[63:48] = 0x18; IRETQ
+	 * just requires explicit pushes since it has no STAR-based
+	 * shortcut.
+	 *
+	 * RFLAGS in the iretq frame: pre-OR the always-on bits
+	 * (reserved-1, IF, IOPL=3) using the same builder previously
+	 * used for SYSRETQ's R11 — same architectural bits, just
+	 * delivered through a different transport.
 	 */
 	kvm_uml_regs_to_kvm_regs(&kregs, regs);
-	kregs.rcx    = kregs.rip;			/* preserve user RIP */
-	kregs.r11    = kvm_build_sysret_r11(regs->gp[HOST_EFLAGS]);
-	kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_SYSRET_OFFSET;
+	{
+		u64 *frame = (u64 *)kvm_bootstrap_page_stack;
+
+		frame[0] = regs->gp[HOST_IP];
+		frame[1] = 0x2bULL;					/* ring-3 CS */
+		frame[2] = kvm_build_sysret_r11(regs->gp[HOST_EFLAGS]);	/* RFLAGS */
+		frame[3] = regs->gp[HOST_SP];
+		frame[4] = 0x23ULL;					/* ring-3 SS */
+	}
+	kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_IRETQ_OFFSET;
+	kregs.rsp    = kvm_bootstrap_va + 3 * PAGE_SIZE;	/* IST page base */
 	kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
 
 	/*
@@ -3026,6 +3105,8 @@ out_read_regs:
 	 */
 	if (rc == -EINTR) {
 		struct kvm_sregs sregs;
+		bool sregs_ok;
+		bool in_kernel = false;
 
 		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
 			kregs = run->s.regs.regs;
@@ -3034,22 +3115,45 @@ out_read_regs:
 			rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
 					      (unsigned long)&kregs);
 		}
-		if (rc >= 0)
-			kvm_regs_to_uml_regs(regs, &kregs);
 		/*
-		 * Audit A2: derive is_user from CPL here too, so
-		 * a host-signal interrupt mid-ring-0 (e.g. inside
-		 * the LSTAR trampoline) doesn't mask as a user-
-		 * mode exit. Best-effort — if KVM_GET_SREGS
-		 * fails, fall back to user-mode since host
-		 * signals during normal workload almost always
-		 * fire while the guest is in ring-3.
+		 * Audit A2: derive is_user from CPL, so a host-signal
+		 * interrupt mid-ring-0 (e.g. inside the LSTAR trampoline,
+		 * the bootstrap IRETQ gadget, or the #PF handler) doesn't
+		 * mask as a user-mode exit. Best-effort — if KVM_GET_SREGS
+		 * fails, fall back to user-mode since host signals during
+		 * normal workload almost always fire while the guest is
+		 * in ring-3.
 		 */
-		if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-				     (unsigned long)&sregs) >= 0)
+		sregs_ok = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+					    (unsigned long)&sregs) >= 0;
+		if (sregs_ok) {
 			regs->is_user = (sregs.cs.selector & 3) != 0;
-		else
+			in_kernel = !regs->is_user;
+		} else {
 			regs->is_user = 1;
+		}
+		/*
+		 * Task #272: when the EINTR fired with the guest at CPL=0,
+		 * we're mid-bootstrap-transition (IRETQ gadget popping the
+		 * iretq frame, LSTAR trampoline mid-`out`, or the #PF
+		 * handler returning). kregs.rip in that state is a kernel
+		 * VA inside the bootstrap page (e.g. 0x60ade4d0 = IRETQ
+		 * gadget), NOT the user's intended resume RIP. Folding it
+		 * into regs->gp[HOST_IP] would make the next kvm_enter_
+		 * guest re-enter with frame[0] = bootstrap kernel address
+		 * → ring-3 fetch fault on a US=0 page (ec=0x15).
+		 *
+		 * The user's actual continuation RIP is whatever
+		 * regs->gp[HOST_IP] held before kvm_enter_guest installed
+		 * the bootstrap shape — and the user's GPRs likewise
+		 * weren't touched mid-transition. Skip the marshal back.
+		 *
+		 * For CPL=3 EINTR (real mid-user signal), the kregs DO
+		 * reflect user state and we want to preserve them through
+		 * to the next entry; do the marshal.
+		 */
+		if (rc >= 0 && !in_kernel)
+			kvm_regs_to_uml_regs(regs, &kregs);
 	}
 
 	/*
