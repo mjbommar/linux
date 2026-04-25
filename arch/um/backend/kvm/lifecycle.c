@@ -947,10 +947,24 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 	/*
 	 * Task #242: mark the shadow PT as in-sync with this pgd-VA.
 	 * Subsequent kvm_enter_guest calls compare against the
-	 * cached VA + the synced flag and skip the full re-walk when
-	 * nothing has invalidated the mirror.
+	 * cached mm + VA + synced flag and skip the full re-walk
+	 * when nothing has invalidated the mirror. Audit round-7
+	 * P2: tracking BOTH mm pointer and pgd-VA closes the
+	 * VA-reuse hazard — execve-style mm replacement (where the
+	 * old mm's pgd page can be reused for the new mm's pgd) is
+	 * caught by the mm-pointer mismatch even if the pgd-VA
+	 * happens to coincide.
+	 *
+	 * `current` here is the task driving the kvm_enter_guest
+	 * call — its active_mm is the mm whose pgd we just mirrored.
+	 * For non-task callers (KUnit force-probe), current still
+	 * points at a task with a valid active_mm under
+	 * CONFIG_UM_BACKEND_KVM_INTEGRATED tests; if that ever
+	 * changes the cache key just pessimistically misses on the
+	 * next entry (filling again is cheap).
 	 */
 	kvm_ctx.shadow_pgd_synced = true;
+	kvm_ctx.shadow_pgd_synced_mm = current ? current->active_mm : NULL;
 	kvm_ctx.shadow_pgd_synced_va = (u64)pgd_va;
 	return installed;
 }

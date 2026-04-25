@@ -225,6 +225,19 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 						 * triple-faults silently and we lose the
 						 * cause-of-cascade info.
 						 */
+#define KVM_BOOTSTRAP_GP_HANDLER_OFFSET	0x4d8	/* 3-byte #GP handler (audit round-7
+						 * P1): out %al,$0xf9 ; hlt. Catches
+						 * a non-canonical user RIP / RSP
+						 * popped by the bootstrap IRETQ +
+						 * any #GP raised during user-level
+						 * execution (e.g. user task tried
+						 * a privileged insn). Routes the
+						 * fault to a dedicated host port
+						 * 0xf9 so the kvm_run_userspace
+						 * dispatcher can deliver SIGSEGV
+						 * to the user task instead of
+						 * cascading to #DF and panicking.
+						 */
 #define KVM_BOOTSTRAP_IRETQ_OFFSET	0x4d0	/* 2-byte IRETQ (task #272 recovery
 						 * re-entry). SYSRETQ-based bootstrap
 						 * clobbers RCX (= user RIP load) and R11
@@ -844,6 +857,36 @@ static const u8 kvm_bootstrap_df_handler_bytes[] = {
 
 #define UM_KVM_DF_PORT	0xfa	/* task #269 #DF-handler VMEXIT */
 
+/*
+ * #GP handler (audit round-7 P1 follow-on, task #272 IRETQ
+ * hardening). A bootstrap IRETQ from the host-built iretq frame
+ * raises #GP if any of:
+ *   - frame[0] (user RIP) is non-canonical
+ *   - frame[3] (user RSP) is non-canonical
+ *   - frame[1] (CS) selector points at a not-present descriptor
+ *   - frame[2] (RFLAGS) sets reserved bits in a way the CPU
+ *     refuses (e.g. VM bit while leaving long mode)
+ *
+ * Without an IDT[13] handler the #GP itself faults during delivery
+ * (no entry to dispatch to), cascading to #DF — and historically
+ * the #DF handler was added in task #269 to surface the cascade.
+ * But that conflates "non-canonical user RSP" (a fixable user-
+ * task contract violation) with "kernel bug cascade" (always
+ * fatal). Splitting them: a #GP gets its own port (0xf9) so the
+ * host can dispatch SIGSEGV at the user task while keeping #DF
+ * reserved for true kernel-side cascades.
+ *
+ * Same minimal shape as the #DF handler — the CPU pushes an
+ * error_code + iretq frame, the OUT signals the host, and HLT
+ * backstops in case the host fails to kill us.
+ */
+static const u8 kvm_bootstrap_gp_handler_bytes[] = {
+	0xe6, 0xf9,			/* out %al, $0xf9  */
+	0xf4,				/* hlt             */
+};
+
+#define UM_KVM_GP_PORT	0xf9	/* audit-round-7 P1 #GP-handler VMEXIT */
+
 static int kvm_enter_guest_init_bootstrap(void)
 {
 	void *page;
@@ -962,6 +1005,19 @@ static int kvm_enter_guest_init_bootstrap(void)
 	       sizeof(kvm_bootstrap_iretq_bytes));
 
 	/*
+	 * Install the #GP handler bytes (audit round-7 P1). Lives
+	 * dormant until kvm_enter_guest's IDT setup arms IDT[13] at
+	 * this offset. Catches non-canonical iretq targets + any
+	 * privileged-insn #GP from user code; routes to host port
+	 * 0xf9 for SIGSEGV dispatch.
+	 */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_GP_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_gp_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_GP_HANDLER_OFFSET,
+	       kvm_bootstrap_gp_handler_bytes,
+	       sizeof(kvm_bootstrap_gp_handler_bytes));
+
+	/*
 	 * Extend the GDT to 8 entries: entries 0-5 were populated
 	 * by kvm_setup_harness_gdt above (null, ring-0 code, ring-0
 	 * data, padding anchor, ring-3 data, ring-3 code).
@@ -1050,6 +1106,8 @@ static int kvm_enter_guest_init_bootstrap(void)
 				  KVM_BOOTSTRAP_PF_HANDLER_OFFSET;
 		u64 df_va = (u64)(unsigned long)page +
 				  KVM_BOOTSTRAP_DF_HANDLER_OFFSET;
+		u64 gp_va = (u64)(unsigned long)page +
+				  KVM_BOOTSTRAP_GP_HANDLER_OFFSET;
 		u8 *idt = (u8 *)page + KVM_BOOTSTRAP_IDT_OFFSET;
 		u8 *e;
 
@@ -1069,6 +1127,27 @@ static int kvm_enter_guest_init_bootstrap(void)
 		e[9]  = (u8)((df_va >> 40) & 0xff);
 		e[10] = (u8)((df_va >> 48) & 0xff);
 		e[11] = (u8)((df_va >> 56) & 0xff);
+
+		/*
+		 * IDT[13] — #GP (general protection fault), audit
+		 * round-7 P1. Catches non-canonical iretq targets +
+		 * any privileged-insn #GP from user code so we can
+		 * deliver SIGSEGV instead of cascading to #DF (which
+		 * is reserved for true kernel bugs and panics).
+		 */
+		e = idt + 13 * 16;
+		e[0]  = (u8)(gp_va & 0xff);
+		e[1]  = (u8)((gp_va >> 8) & 0xff);
+		e[2]  = 0x08;			/* ring-0 code selector */
+		e[3]  = 0x00;
+		e[4]  = 0x01;			/* IST=1 */
+		e[5]  = 0x8e;			/* P|DPL0|int-gate */
+		e[6]  = (u8)((gp_va >> 16) & 0xff);
+		e[7]  = (u8)((gp_va >> 24) & 0xff);
+		e[8]  = (u8)((gp_va >> 32) & 0xff);
+		e[9]  = (u8)((gp_va >> 40) & 0xff);
+		e[10] = (u8)((gp_va >> 48) & 0xff);
+		e[11] = (u8)((gp_va >> 56) & 0xff);
 
 		/* IDT[14] — #PF (page fault), sub-commit #5b. */
 		e = idt + 14 * 16;
@@ -1708,22 +1787,32 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 
 		/*
 		 * Task #242 (perf lever #4): if the shadow PT is
-		 * already in sync with this mm's pgd — same pgd-VA
-		 * AND no invalidation event since the last fill —
-		 * skip the full re-walk. Every path that mutates
-		 * UML's logical pgd flows through either kvm_shadow_
-		 * pgd_clear_user (cross-mm switch) or kvm_shadow_
-		 * invalidate_va_range (mm_map / mm_unmap), both of
-		 * which reset shadow_pgd_synced=false. Direct refills
-		 * from the syscall + #PF recovery paths invoke
-		 * kvm_shadow_fill_from_uml_pgd which sets synced=true,
-		 * keeping the invariant tight without a generation
-		 * counter.
+		 * already in sync with this mm's pgd — same mm
+		 * pointer AND same pgd-VA AND no invalidation event
+		 * since the last fill — skip the full re-walk. Every
+		 * path that mutates UML's logical pgd flows through
+		 * either kvm_shadow_pgd_clear_user (cross-mm switch)
+		 * or kvm_shadow_invalidate_va_range (mm_map /
+		 * mm_unmap), both of which reset shadow_pgd_synced=
+		 * false. Direct refills from the syscall + #PF recovery
+		 * paths invoke kvm_shadow_fill_from_uml_pgd which sets
+		 * synced=true, keeping the invariant tight without a
+		 * generation counter.
+		 *
+		 * Audit round-7 P2: comparing both the mm pointer AND
+		 * the pgd-VA closes the VA-reuse hazard (execve-style
+		 * mm replacement where the old mm's freed pgd page
+		 * could be reused for the new mm's pgd). The cross-mm
+		 * kvm_context_switch hook only fires on prev->active_mm
+		 * != next->active_mm; an execve on the same task does
+		 * NOT trip it, so an mm-pointer mismatch alone catches
+		 * that case.
 		 */
 		if (fctx->shadow_pgd_synced &&
+		    fctx->shadow_pgd_synced_mm == mm &&
 		    fctx->shadow_pgd_synced_va == (u64)mm->pgd) {
-			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (pgd=%p, skip fill)\n",
-					    mm->pgd);
+			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
+					    mm, mm->pgd);
 			goto fill_done;
 		}
 
@@ -2736,6 +2825,65 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					regs->gp[HOST_SP]     = user_rsp;
 					regs->gp[HOST_EFLAGS] = user_rflags;
 				}
+				goto out_read_regs;
+			}
+			if (run->io.port == UM_KVM_GP_PORT) {
+				/*
+				 * Audit round-7 P1 follow-on (task #272
+				 * IRETQ hardening): in-guest IDT[13] (#GP)
+				 * handler fired. Most likely cause: the
+				 * bootstrap IRETQ tried to pop a non-
+				 * canonical user RIP or user RSP from the
+				 * iretq frame, raising #GP during the
+				 * cross-CPL transition. Other possibilities
+				 * include the user task hitting a privileged
+				 * instruction (CLI/STI/HLT/etc) or a
+				 * reserved-RFLAGS-bit violation.
+				 *
+				 * Treat the user task as faulted: build a
+				 * faultinfo, dispatch SIGSEGV via the
+				 * standard sig_info path. The user task gets
+				 * killed cleanly; the host kernel doesn't
+				 * panic. is_user=1 because the offending
+				 * state is the user's RIP/RSP/RFLAGS, even
+				 * though the #GP fired during ring-0 IRETQ.
+				 *
+				 * IST frame layout for #GP: same as #PF
+				 * (CPU-pushed error_code at +0, RIP at +8,
+				 * CS +16, RFLAGS +24, RSP +32, SS +40). We
+				 * extract them for the diagnostic.
+				 */
+				struct faultinfo *fi = UPT_FAULTINFO(regs);
+				unsigned long ist_off;
+				u64 gp_user_rip = 0, gp_user_rsp = 0;
+				u64 gp_user_rflags = 0;
+				u64 gp_error_code = 0;
+
+				ist_off = (unsigned long)(kregs.rsp -
+							  (kvm_bootstrap_va +
+							   3 * PAGE_SIZE));
+				if (ist_off < PAGE_SIZE) {
+					u8 *ist = (u8 *)kvm_bootstrap_page_stack
+						+ ist_off;
+					gp_error_code  = *(u64 *)(ist + 0);
+					gp_user_rip    = *(u64 *)(ist + 8);
+					gp_user_rflags = *(u64 *)(ist + 24);
+					gp_user_rsp    = *(u64 *)(ist + 32);
+				}
+				pr_warn_ratelimited("um: kvm #GP: ec=0x%llx rip=0x%llx rsp=0x%llx rflags=0x%llx (delivering SIGSEGV)\n",
+						    (unsigned long long)gp_error_code,
+						    (unsigned long long)gp_user_rip,
+						    (unsigned long long)gp_user_rsp,
+						    (unsigned long long)gp_user_rflags);
+				fi->trap_no    = 13;
+				fi->error_code = (u32)gp_error_code;
+				fi->cr2        = 0;
+				regs->is_user = 1;
+				regs->gp[HOST_IP]     = gp_user_rip;
+				regs->gp[HOST_SP]     = gp_user_rsp;
+				regs->gp[HOST_EFLAGS] = gp_user_rflags;
+				(*sig_info[SIGSEGV])(SIGSEGV, NULL,
+						     regs, NULL);
 				goto out_read_regs;
 			}
 			if (run->io.port == UM_KVM_DF_PORT) {

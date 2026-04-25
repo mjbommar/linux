@@ -139,21 +139,27 @@ struct kvm_um {
 	/*
 	 * Task #242 (perf lever #4): track when the shadow PT mirrors
 	 * a known UML pgd. Set true at the end of each successful
-	 * kvm_shadow_fill_from_uml_pgd, with shadow_pgd_synced_va
-	 * recording which mm->pgd was the source. Set false (i.e.
-	 * "needs re-mirror") on any shadow-PT-invalidating event:
+	 * kvm_shadow_fill_from_uml_pgd, with shadow_pgd_synced_mm
+	 * + shadow_pgd_synced_va recording which mm + pgd-VA was the
+	 * source. Set false (i.e. "needs re-mirror") on any shadow-
+	 * PT-invalidating event:
 	 *   - kvm_shadow_pgd_clear_user (cross-mm switch)
 	 *   - kvm_shadow_invalidate_va_range (mm_map / mm_unmap)
 	 *
-	 * kvm_enter_guest's hot-path can then skip the fill when both
-	 * the cached pgd-VA matches and synced is true — every other
-	 * pgd-modifying path within UML's mm flows through one of the
-	 * two reset hooks, and direct callers of kvm_shadow_fill_from_
-	 * uml_pgd in the syscall + #PF recovery paths reset synced=true
-	 * inside the helper itself.
+	 * kvm_enter_guest's hot-path can then skip the fill when ALL
+	 * THREE match: synced flag, cached mm pointer, and cached
+	 * pgd-VA. Both the mm-pointer AND pgd-VA are tracked because
+	 * either alone is unstable: an mm_struct pointer can be
+	 * reused after kfree, and a pgd page VA can be reused if
+	 * the mm is freed and a fresh allocation reuses the page.
+	 * Requiring both to match closes the audit-round-7 P2 finding
+	 * (mm-pointer-VA-reuse on execve-style mm replacement, where
+	 * kvm_context_switch's prev==next short-circuits the cross-
+	 * mm reset).
 	 */
-	bool		shadow_pgd_synced;
-	u64		shadow_pgd_synced_va;
+	bool			shadow_pgd_synced;
+	struct mm_struct	*shadow_pgd_synced_mm;
+	u64			shadow_pgd_synced_va;
 
 	/*
 	 * Memo 11 G3 gadget state page. Allocated lazily on
