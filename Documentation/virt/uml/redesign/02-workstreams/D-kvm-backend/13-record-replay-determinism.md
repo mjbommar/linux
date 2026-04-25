@@ -205,9 +205,9 @@ correctness is best-effort.
 | `getrandom`     | yes         | n/a      | n/a   | **yes**             | rdi=buf, rsi=len; ret=bytes filled         |
 | `read`          | yes         | n/a      | n/a   | **yes**             | rdi=fd, rsi=buf, rdx=count                 |
 | `pread64`       | yes         | n/a      | n/a   | **yes**             | same shape as read; offset arg unused      |
-| `recvfrom`      | yes (data)  | **no**   | n/a   | partial             | data buf only; src_addr / addrlen lost     |
+| `recvfrom`      | yes         | **yes**  | n/a   | **yes**             | data + sockaddr metadata (META_SOCKADDR)   |
 | `recvmsg`       | not yet     | not yet  | not yet | no                | scatter-gather msghdr — ladder rung        |
-| `readv`         | not yet     | n/a      | not yet | no                | iovec walk — ladder rung                   |
+| `readv`         | yes         | n/a      | **yes** | **yes** (≤8 iovs) | iov array + concatenated data (META_IOV)   |
 | `ioctl`         | not yet     | n/a      | n/a   | no                  | per-driver knowledge — case by case        |
 | getpid family   | inline-only | n/a      | n/a   | yes (return only)   | gadget-handled; only fallback path records |
 | brk/mmap/munmap | inline-only | n/a      | n/a   | yes (return only)   | mm-mutating; no user-output-buffer payload |
@@ -215,18 +215,31 @@ correctness is best-effort.
 
 **Open questions on partial-record NRs:**
 
-- For `recvfrom` with src_addr capture: extending
-  `struct kvm_replay_entry` with a second side-buffer slot
-  ("metadata buffer" for sockaddr / addrlen / msg_control)
-  closes the gap. Lifecycle ownership matches the existing
-  payload field. Future ladder rung — bounded but worth its
-  own commit since it touches the entry layout.
-- For `recvmsg` / `readv`: the kernel's iovec walk is the
-  source of truth for which user buffers got filled and how
-  much. Recording would walk the iovec on the record side and
-  emit one side-buffer per iov entry (or a single packed
-  buffer with a small header). Same metadata-slot extension as
-  recvfrom would carry the iov-array snapshot.
+- For `recvfrom` with src_addr capture: **landed** in commit
+  73c2d1fdc993 (review-01 P2 #13). `struct kvm_replay_entry`
+  gained a second side-buffer slot ("metadata buffer") and a
+  kind tag (`KVM_REPLAY_META_NONE` / `_SOCKADDR` / `_IOV`).
+  The recvfrom dispatcher case captures `{u32 addrlen; u8 sa[]}`
+  into the metadata slot under tag `META_SOCKADDR`; the replay
+  dispatcher restores both the data buffer and the sockaddr +
+  addrlen out-pointers. Lifecycle ownership matches the data
+  payload (kvmalloc + free at destroy).
+- For `readv`: **landed** as a subsequent commit on the same
+  metadata-buffer extension. `kvm_record_observe_dispatch`
+  walks the user iovec, snapshots up to 8 entries (UIO_FASTIOV)
+  into the metadata slot under tag `META_IOV`, and stages a
+  single concatenated data buffer of the actually-written
+  bytes. Replay walks the recorded iov array and scatters the
+  payload back into the user iov targets, mirroring the kernel.
+  Iovcnt > 8 falls back to data-only capture (still replayable
+  for inline NR/return divergence detection, just doesn't
+  restore the user buffers).
+- For `recvmsg`: still a ladder rung — needs the same IOV
+  metadata wrapper but inside an `msghdr` whose `msg_control`
+  also carries scatter-gather data. Reuses the META_IOV slot;
+  msg_control may need a third tag (META_CMSG) if the
+  ancillary data turns out to be a routine source of replay
+  divergence.
 - For `ioctl`: per-driver. Most ioctls have either no output
   buffer (set-only commands) or a fixed-size out-arg the
   dispatcher can capture if it knows the cmd code. A
@@ -299,11 +312,16 @@ ladder (#250 v2 step 3+4, #252 syzkaller backend).
     back. Commit `918ccaf828cc`.
   - Step 5 (per-NR routing): `kvm_record_observe_dispatch()`
     per-NR router. Today covers `__NR_getrandom`, `__NR_read`,
-    `__NR_pread64`, `__NR_recvfrom` through the side-buffer
-    path so replay restores the user-buffer payload byte-
-    identically. Other NRs default to the inline-only path.
-    Commits `1992d6315f92` + `d669522cc964` + `915299f2a9d6`
-    (regs * extension + read/pread64 + recvfrom).
+    `__NR_pread64`, `__NR_recvfrom`, `__NR_readv` through the
+    side-buffer path so replay restores the user-buffer payload
+    byte-identically. recvfrom carries an additional metadata
+    slot (`META_SOCKADDR`) for the src_addr/addrlen out-pointers;
+    readv carries a `META_IOV` slot snapshotting the iov array
+    so replay can scatter the concatenated payload across the
+    same user buffers the kernel filled. Other NRs default to
+    the inline-only path. Commits `1992d6315f92` + `d669522cc964`
+    + `915299f2a9d6` + `73c2d1fdc993` (regs * extension +
+    read/pread64 + recvfrom + meta extension/recvfrom-sockaddr).
   - Round-trip KUnit (`kvm_record_roundtrip_test`): drives the
     record/replay log directly via the C API — observe three
     syscalls, replay, consume in FIFO order, verify cursor
@@ -327,12 +345,18 @@ ladder (#250 v2 step 3+4, #252 syzkaller backend).
 - Step 6 (MMIO recording) deferred — small but bounded; pattern
   matches step 2's record-side hook in the MMIO case of
   kvm_decode_mmio.
-- Additional NR special-cases for the per-NR dispatcher
-  (`__NR_recvmsg`, `__NR_readv`, `__NR_ioctl`) deferred —
-  each needs scatter-gather logic (recvmsg + readv) or
-  per-driver knowledge (ioctl) beyond the simple buffer-
-  capture pattern. Architecture supports them; just adding
-  switch cases gets one more NR each.
+- `__NR_readv` per-NR routing **landed** on top of the metadata
+  extension. Walks the user iovec (capped at UIO_FASTIOV=8 for
+  v1), snapshots {base, len} pairs into the META_IOV metadata
+  slot, and records a single concatenated payload of the
+  actually-written bytes. Replay walks the same iov array and
+  scatters the payload back. Iovcnts above the cap fall back
+  to data-only capture.
+- Additional NR special-cases (`__NR_recvmsg`, `__NR_ioctl`)
+  deferred — recvmsg adds an msghdr around the iov array (and
+  optional msg_control ancillary data); ioctl needs per-driver
+  output-size knowledge. Architecture supports them; pattern is
+  the same as readv (recvmsg) or recvfrom (ioctl-with-known-cmd).
 
   All hot-path ratios held in the 1.06-1.19× kvm/seccomp band
   post-hook — the static-key gate keeps the cost zero when off.

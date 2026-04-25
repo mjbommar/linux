@@ -150,5 +150,31 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 bool kvm_record_strict_replay(void);
 int kvm_record_set_strict_replay(bool strict);
 
+/*
+ * Memo 13 P2 #13 metadata-buffer extension. Mirrors the public
+ * kinds + prototypes from kvm_backend.h. Drift between the two is
+ * regression-guarded by the kvm_record_meta_iov_roundtrip_test KUnit
+ * case in test_ops.c.
+ */
+#define KVM_REPLAY_META_NONE		0
+#define KVM_REPLAY_META_SOCKADDR	1
+#define KVM_REPLAY_META_IOV		2
+void kvm_record_observe_syscall_buf_meta(unsigned long syscall_nr,
+					 long ret_value,
+					 u64 user_buf_va,
+					 const void *payload,
+					 size_t payload_len,
+					 const void *metadata,
+					 size_t metadata_len,
+					 u32 metadata_kind);
+int kvm_record_consume_syscall_meta(unsigned long syscall_nr,
+				    long *ret_out,
+				    u64 *user_buf_va_out,
+				    const void **payload_out,
+				    size_t *payload_len_out,
+				    const void **metadata_out,
+				    size_t *metadata_len_out,
+				    u32 *metadata_kind_out);
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 #endif /* __ARCH_UM_BACKEND_CONTRACT_TEST_KVM_HOOKS_H */

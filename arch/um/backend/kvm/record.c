@@ -907,6 +907,152 @@ void kvm_record_observe_dispatch(unsigned long syscall_nr,
 		}
 		return;
 	}
+	case __NR_readv: {
+		/*
+		 * readv(fd, iov, iovcnt): rdi=fd, rsi=iov, rdx=iovcnt.
+		 * On success ret_value == total bytes scattered across
+		 * iov[0..iovcnt-1] in order (kernel fills iov[0] fully
+		 * before iov[1], etc.).
+		 *
+		 * Metadata layout (KVM_REPLAY_META_IOV):
+		 *   u32 nr_iov;     // iovcnt as supplied by caller
+		 *   u32 _pad;
+		 *   struct { u64 base; u64 len; } iovs[nr_iov];
+		 *
+		 * Payload: a single concatenated buffer of ret_value
+		 * bytes — the data the kernel actually wrote. Replay-
+		 * side dispatcher walks the iovs and copies
+		 * min(remaining, iovs[i].len) bytes from payload to
+		 * iovs[i].base, just as the kernel did.
+		 *
+		 * Bound: cap iovcnt at UIO_FASTIOV (8) for v1 — that
+		 * covers all common readv shapes (zero-copy header/
+		 * payload split, scatter into N small ring buffers)
+		 * without unbounded metadata growth. Larger iovcnts
+		 * fall back to data-only capture; replay of those
+		 * specific calls won't restore the buffers but the
+		 * record cursor stays advanced and divergence detection
+		 * still works on inline (NR, ret_value).
+		 */
+		unsigned long iov_va = regs->gp[HOST_SI];
+		unsigned long iovcnt = regs->gp[HOST_DX];
+		struct kvm_iov_pair { u64 base; u64 len; };
+
+		if (ret_value <= 0 || !iov_va) {
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   regs->gp[HOST_DI],
+						   regs->gp[HOST_SI]);
+			return;
+		}
+		if (iovcnt == 0 || iovcnt > 8 /* UIO_FASTIOV */) {
+			/* Out of v1 envelope; data-only fallback. */
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   regs->gp[HOST_DI],
+						   regs->gp[HOST_SI]);
+			return;
+		}
+		{
+			/*
+			 * Pull the iovec array (16 B per entry on x86_64).
+			 * struct iovec { void *iov_base; size_t iov_len; }
+			 * is layout-compatible with kvm_iov_pair on UML/
+			 * x86_64 (both LP64). Capture by raw u64 pairs to
+			 * avoid pulling in linux/uio.h for a layout-fixed
+			 * use.
+			 */
+			struct kvm_iov_pair user_iovs[8];
+			struct kvm_iov_pair captured[8];
+			u8 meta[sizeof(u32) * 2 + sizeof(captured)];
+			size_t meta_len;
+			size_t i, total_capacity = 0;
+			size_t bytes_remaining;
+			void *data_staging, *cursor;
+			u32 nr_iov_u32 = (u32)iovcnt;
+			u32 zero_pad = 0;
+
+			if (copy_from_user(user_iovs,
+					   (const void __user *)iov_va,
+					   iovcnt * sizeof(user_iovs[0]))) {
+				kvm_record_observe_syscall(syscall_nr, ret_value,
+							   regs->gp[HOST_DI],
+							   regs->gp[HOST_SI]);
+				return;
+			}
+			/*
+			 * Sanity: total iov capacity must cover
+			 * ret_value, otherwise the kernel couldn't have
+			 * written that many bytes. Out-of-envelope →
+			 * data-only fallback.
+			 */
+			for (i = 0; i < iovcnt; i++)
+				total_capacity += user_iovs[i].len;
+			if ((size_t)ret_value > total_capacity) {
+				kvm_record_observe_syscall(syscall_nr, ret_value,
+							   regs->gp[HOST_DI],
+							   regs->gp[HOST_SI]);
+				return;
+			}
+			memcpy(captured, user_iovs, iovcnt * sizeof(captured[0]));
+			memcpy(meta, &nr_iov_u32, sizeof(nr_iov_u32));
+			memcpy(meta + sizeof(nr_iov_u32), &zero_pad,
+			       sizeof(zero_pad));
+			memcpy(meta + 2 * sizeof(u32), captured,
+			       iovcnt * sizeof(captured[0]));
+			meta_len = 2 * sizeof(u32) +
+				   iovcnt * sizeof(captured[0]);
+
+			data_staging = kvmalloc((size_t)ret_value, GFP_KERNEL);
+			if (!data_staging) {
+				kvm_record_observe_syscall(syscall_nr, ret_value,
+							   regs->gp[HOST_DI],
+							   regs->gp[HOST_SI]);
+				return;
+			}
+			/*
+			 * Walk iovs in order, copying min(remaining,
+			 * iovs[i].len) bytes from each iov_base into the
+			 * concatenated staging buffer. Mirrors what the
+			 * kernel did when filling them.
+			 */
+			bytes_remaining = (size_t)ret_value;
+			cursor = data_staging;
+			for (i = 0; i < iovcnt && bytes_remaining; i++) {
+				size_t this_chunk = user_iovs[i].len;
+
+				if (this_chunk > bytes_remaining)
+					this_chunk = bytes_remaining;
+				if (this_chunk &&
+				    copy_from_user(cursor,
+						   (const void __user *)
+						   user_iovs[i].base,
+						   this_chunk)) {
+					kvfree(data_staging);
+					kvm_record_observe_syscall(syscall_nr,
+								   ret_value,
+								   regs->gp[HOST_DI],
+								   regs->gp[HOST_SI]);
+					return;
+				}
+				cursor = (u8 *)cursor + this_chunk;
+				bytes_remaining -= this_chunk;
+			}
+			/*
+			 * user_buf_va is the iov array address (so replay
+			 * has a stable handle for the metadata). The
+			 * payload covers all iovs concatenated; the
+			 * metadata tells replay how to scatter it.
+			 */
+			kvm_record_observe_syscall_buf_meta(syscall_nr,
+							    ret_value,
+							    iov_va,
+							    data_staging,
+							    (size_t)ret_value,
+							    meta, meta_len,
+							    KVM_REPLAY_META_IOV);
+			kvfree(data_staging);
+		}
+		return;
+	}
 	default:
 		break;
 	}

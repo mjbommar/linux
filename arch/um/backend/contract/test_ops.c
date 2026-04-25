@@ -1416,6 +1416,93 @@ static void kvm_record_roundtrip_test(struct kunit *test)
 }
 
 /*
+ * Memo 13 P2 #13 IOV variant: assert observe_syscall_buf_meta +
+ * consume_syscall_meta round-trip the metadata bytes byte-identically.
+ * Mirrors the side-buffer round-trip but exercises the new metadata
+ * channel reserved for readv / recvmsg style scatter-gather replay.
+ */
+static void kvm_record_meta_iov_roundtrip_test(struct kunit *test)
+{
+	struct kvm_record *rec;
+	long ret_out;
+	u64 user_buf_out;
+	const void *payload_out = NULL;
+	size_t payload_len_out = 0;
+	const void *meta_out = NULL;
+	size_t meta_len_out = 0;
+	u32 meta_kind_out = ~0U;
+	int rc;
+
+	rec = kvm_record_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_record_start(rec);
+	if (rc < 0) {
+		kunit_info(test, "kvm_record_start rc=%d (skipping; expected on early boot)\n",
+			   rc);
+		kvm_record_destroy(rec);
+		return;
+	}
+
+	{
+		/* Two iovs covering 12 bytes — payload split 8 + 4. */
+		struct { u64 base; u64 len; } iovs[2] = {
+			{ 0x1000ULL, 8 },
+			{ 0x2000ULL, 4 },
+		};
+		u8 meta[2 * sizeof(u32) + sizeof(iovs)];
+		u32 nr_iov = 2;
+		u32 zero = 0;
+		const u8 fake_payload[12] = {
+			'r','e','a','d','v','-','t','e','s','t','!','!'
+		};
+
+		memcpy(meta, &nr_iov, sizeof(nr_iov));
+		memcpy(meta + sizeof(u32), &zero, sizeof(zero));
+		memcpy(meta + 2 * sizeof(u32), iovs, sizeof(iovs));
+
+		kvm_record_observe_syscall_buf_meta(__NR_readv, 12,
+						    0xfeedULL,
+						    fake_payload,
+						    sizeof(fake_payload),
+						    meta, sizeof(meta),
+						    KVM_REPLAY_META_IOV);
+
+		KUNIT_EXPECT_EQ(test, kvm_record_replay(rec), 0);
+
+		KUNIT_EXPECT_EQ(test,
+			kvm_record_consume_syscall_meta(__NR_readv,
+							&ret_out,
+							&user_buf_out,
+							&payload_out,
+							&payload_len_out,
+							&meta_out,
+							&meta_len_out,
+							&meta_kind_out), 1);
+		KUNIT_EXPECT_EQ(test, ret_out, (long)12);
+		KUNIT_EXPECT_EQ(test, (unsigned long long)user_buf_out,
+				(unsigned long long)0xfeedULL);
+		KUNIT_EXPECT_EQ(test,
+			(unsigned long long)payload_len_out,
+			(unsigned long long)sizeof(fake_payload));
+		KUNIT_EXPECT_EQ(test, meta_kind_out,
+				(u32)KVM_REPLAY_META_IOV);
+		KUNIT_EXPECT_EQ(test,
+			(unsigned long long)meta_len_out,
+			(unsigned long long)sizeof(meta));
+		KUNIT_ASSERT_NOT_NULL(test, payload_out);
+		KUNIT_ASSERT_NOT_NULL(test, meta_out);
+		KUNIT_EXPECT_EQ(test,
+			memcmp(payload_out, fake_payload,
+			       sizeof(fake_payload)), 0);
+		KUNIT_EXPECT_EQ(test,
+			memcmp(meta_out, meta, sizeof(meta)), 0);
+	}
+
+	kvm_record_destroy(rec);
+}
+
+/*
  * Memo 10 class-map cross-check. The static table in
  * arch/um/backend/kvm/syscall_class.c must classify exactly
  * the 12 non-A entries from the inventory; every other NR
@@ -1648,6 +1735,7 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_record_stop_replay_consume_test),
 	KUNIT_CASE(kvm_record_strict_replay_test),
 	KUNIT_CASE(kvm_record_roundtrip_test),
+	KUNIT_CASE(kvm_record_meta_iov_roundtrip_test),
 #endif
 	{}
 };

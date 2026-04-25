@@ -2334,6 +2334,80 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 						 sa, sa_len))
 					pr_warn_ratelimited("um: kvm record_replay: copy_to_user(sockaddr) failed\n");
 			}
+			/*
+			 * Memo 13 P2 #13 IOV variant: scatter the concatenated
+			 * payload into the iov array snapshotted in metadata.
+			 * Layout (matches record.c per-NR readv case):
+			 *   u32 nr_iov; u32 _pad;
+			 *   struct { u64 base; u64 len; } iovs[nr_iov];
+			 * Walk in order, copy_to_user
+			 * min(remaining_payload, iovs[i].len) bytes from the
+			 * payload cursor into iovs[i].base, just as the
+			 * kernel scattered them on record.
+			 *
+			 * We trust the recorded iov_base addresses rather
+			 * than re-reading current user memory: replay must
+			 * be deterministic, and re-reading would re-introduce
+			 * exactly the nondeterminism record/replay exists to
+			 * paper over (e.g. ASLR drift, mmap re-layout).
+			 *
+			 * If the live process's address space no longer
+			 * contains those VAs, copy_to_user fails and we log
+			 * + continue — the divergence is the point of the
+			 * strict-replay -EILSEQ surface, not silent corruption.
+			 */
+			if (replay_meta && replay_meta_len >= 2 * sizeof(u32) &&
+			    replay_meta_kind == KVM_REPLAY_META_IOV &&
+			    syscall_nr == __NR_readv &&
+			    replay_payload && replay_payload_len) {
+				struct kvm_iov_pair { u64 base; u64 len; };
+				u32 nr_iov;
+				const struct kvm_iov_pair *iovs;
+				size_t expected_len, remaining;
+				const u8 *cursor;
+				u32 i;
+
+				memcpy(&nr_iov, replay_meta, sizeof(nr_iov));
+				expected_len = 2 * sizeof(u32) +
+					       (size_t)nr_iov *
+					       sizeof(struct kvm_iov_pair);
+				if (nr_iov == 0 || nr_iov > 8 ||
+				    replay_meta_len != expected_len) {
+					pr_warn_ratelimited("um: kvm record_replay: malformed IOV meta nr_iov=%u meta_len=%zu\n",
+							    nr_iov, replay_meta_len);
+				} else {
+					iovs = (const struct kvm_iov_pair *)
+					       ((const u8 *)replay_meta +
+						2 * sizeof(u32));
+					remaining = replay_payload_len;
+					cursor = (const u8 *)replay_payload;
+					for (i = 0; i < nr_iov && remaining; i++) {
+						size_t chunk = iovs[i].len;
+
+						if (chunk > remaining)
+							chunk = remaining;
+						if (chunk &&
+						    copy_to_user((void __user *)
+								 (unsigned long)
+								 iovs[i].base,
+								 cursor, chunk))
+							pr_warn_ratelimited("um: kvm record_replay: copy_to_user(iov[%u]) failed\n",
+									    i);
+						cursor += chunk;
+						remaining -= chunk;
+					}
+				}
+				/*
+				 * IOV path already scattered the payload into
+				 * the iov targets; suppress the generic
+				 * payload→user_va copy below so we don't
+				 * also dump the concatenated bytes into the
+				 * iov-array address (which is not a data
+				 * buffer).
+				 */
+				replay_payload = NULL;
+				replay_payload_len = 0;
+			}
 			if (replay_payload && replay_payload_len) {
 				/*
 				 * copy_to_user can fault → recursive
