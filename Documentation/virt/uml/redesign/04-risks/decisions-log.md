@@ -10066,4 +10066,77 @@ selftest matrix.
 
 ---
 
+## D102 (2026-04-25) — Record/replay v1 round-trip API + per-NR dispatcher
+
+**Context.** D101 closed memo-13 steps 1+2 (skeleton +
+static-key gate + record-side observation hook). Step 3+
+focused-session work was queued. This entry records the further
+closure of memo-13 steps 3, 3.5, and 5 (partial) over the same
+session.
+
+**Steps shipped.**
+
+1. **Step 3** (commit `a085afc07448`) — variable-length side
+   buffer on `struct kvm_replay_entry` (`payload` +
+   `payload_len`). New API
+   `kvm_record_observe_syscall_buf(NR, ret, user_va, payload,
+   payload_len)` for syscalls whose output exceeds the inline
+   4×u64 capacity. Free per-entry payloads on destroy.
+2. **Step 3.5** (commit `918ccaf828cc`) — replay-side
+   dispatcher: `kvm_record_consume_syscall()` consumes the
+   next log entry instead of invoking handle_syscall when in
+   replay mode. Wires through kvm_decode_syscall via the same
+   static-key gate, with copy_to_user'ing the side payload back
+   to the user buffer. Divergence policy: warn-and-fall-through
+   (live handle_syscall) so a replay drift doesn't silently
+   corrupt; cursor-after-end falls through identically (extends
+   record beyond original).
+3. **Step 5(partial)** (commits `1992d6315f92` + `d669522cc964`)
+   — per-NR record dispatcher
+   `kvm_record_observe_dispatch(NR, ret, regs)` routes
+   `__NR_getrandom`, `__NR_read`, `__NR_pread64` through the
+   side-buffer path. Common
+   `um_kvm_record_capture_user_buf` helper handles staging +
+   copy_from_user + fall-back-to-inline-on-failure. Other NRs
+   default to the inline-only path. Future NRs (recvfrom /
+   recvmsg / ioctl / readv) are just additional switch cases.
+
+**Validation.**
+
+  - All eight kvm kselftests PASS post-each-commit.
+  - perf-getpid:    ratio_kvm/seccomp ≤ 1.19×.
+  - perf-fallback:  ratio_kvm/seccomp ≤ 1.18×.
+
+Static-key gate keeps the cost zero when off; the per-NR
+copy_from_user staging only fires for the special-cased NRs
+when recording is on.
+
+**What's left in memo 13.**
+
+- Step 4: PMU instruction-count overflow for interrupt-boundary
+  recording (rr-style). Architectural; needs perf-event API
+  plumbing.
+- Step 6: MMIO recording in kvm_decode_mmio's case. Pattern
+  matches step 2's record-side hook; bounded but separate
+  commit.
+- Additional NRs in the per-NR dispatcher (recvfrom, recvmsg,
+  ioctl, readv). Each is a small switch case; recvmsg + readv
+  need scatter-gather logic.
+
+**Round-trip kselftest.** A real record→syscall→replay→assert-
+identical kselftest needs an init script that mounts debugfs and
+pokes the kvm_record_ctl/state nodes — which today fights the
+host-TTY-job-control fragility we already side-step in the
+existing `kvm-record-smoke` runtime path. Deferred until the
+shell init-script boot path stabilizes; the KUnit basic-shape
+test + the build/boot kselftest already gate API drift.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/13-record-replay-determinism.md`
+  (memo status updated to "1+2+3+3.5+5(partial) LANDED").
+- Commits `a085afc07448..d669522cc964`.
+
+---
+
 ## (Future entries here, as decisions are made)
