@@ -180,42 +180,6 @@ static const char *kvm_exit_reason_str(u32 r)
  */
 
 /*
- * Task #238 — STEP 1: keep the eager touch-all alongside the
- * new handle_page_fault recovery path so we can validate the
- * refactor in isolation. Once verified non-regressing, the
- * follow-on commit drops touch-all and relies on the lazy
- * recovery alone.
- *
- * Forces every page in every VMA of `mm` paged-in by UML by
- * issuing copy_from_user reads — UML's fault handler installs
- * the PTE; subsequent kvm_shadow_fill_from_uml_pgd lifts it
- * to the shadow PT. Memo 09 step 3 MVP shape; cost is
- * O(mm-size) per kvm_enter_guest.
- */
-static int kvm_touch_all_user_vmas(struct mm_struct *mm)
-{
-	struct vma_iterator vmi;
-	struct vm_area_struct *vma;
-	char probe;
-	int touched = 0;
-
-	vma_iter_init(&vmi, mm, 0);
-	mmap_read_lock(mm);
-	for_each_vma(vmi, vma) {
-		unsigned long addr;
-
-		for (addr = vma->vm_start; addr < vma->vm_end;
-		     addr += PAGE_SIZE) {
-			if (copy_from_user(&probe, (void __user *)addr, 1))
-				continue;
-			touched++;
-		}
-	}
-	mmap_read_unlock(mm);
-	return touched;
-}
-
-/*
  * Bootstrap region: a single page inside UML's physmem hosts the
  * production GDT + LSTAR trampoline. Allocated once on first
  * entry and cached; freed only on backend shutdown (deferred to
@@ -1739,21 +1703,47 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	mm = current->active_mm;
 	if (mm && mm->pgd) {
-		int touched, filled;
+		int filled;
 
 		/*
-		 * Task #238 — STEP 1: keep eager touch + lazy
-		 * recovery side-by-side. STEP 2 removes touch-all.
+		 * Task #238 — STEP 2: drop kvm_touch_all_user_vmas. The
+		 * eager prefault was carrying every user vma's pages
+		 * into UML's logical pgd before each kvm_enter_guest so
+		 * the shadow fill below could see them, costing
+		 * O(mm-size) per syscall (~2870 vma walks for a
+		 * dynamically-linked workload).
+		 *
+		 * That cost was masking a real recovery-path hole: in
+		 * #PF recovery we used to invoke `copy_from_user(&probe,
+		 * cr2, 1)` as a side-effect to prod UML's fault path
+		 * into populating cr2's PTE. STEP 1 (commit 9e71295123a8)
+		 * replaced that with a direct handle_page_fault() call
+		 * matching arch/um/kernel/trap.c's SIGSEGV path, which
+		 * Just Worked for in-vma user faults regardless of
+		 * whether touch-all had pre-populated the leaf.
+		 *
+		 * With STEP 1 in place, dropping the eager touch makes
+		 * the fast-path syscall round-trip O(1) again. The
+		 * shadow fill still walks current->active_mm->pgd to
+		 * mirror its present leaves into the shadow PT — that's
+		 * proportional to actually-mapped pages, not vma extent,
+		 * and is still cheap (~50 leaves for /bin/true, scaling
+		 * with workload mapping density).
+		 *
+		 * Validation: dyn-loader (init=/bin/echo, hits ld-linux
+		 * + libc + multiple shared libs) PASSES under this
+		 * STEP-2 path with #272's IRETQ recovery + #273's CPUID
+		 * passthrough — all six-or-so lazy CoW recoveries
+		 * service correctly through the in-vma path.
 		 */
-		touched = kvm_touch_all_user_vmas(mm);
 		filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
 		if (filled < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow fill failed (%d)\n",
 					    filled);
 			return filled;
 		}
-		pr_info_ratelimited("um: kvm enter_guest: touched %d user pages, filled %d shadow PTEs\n",
-				    touched, filled);
+		pr_info_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
+				    filled);
 	}
 
 	/*
@@ -2121,16 +2111,20 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	handle_syscall(regs);
 
 	/*
-	 * Task #238 — STEP 1: keep eager touch + shadow_fill
-	 * here too. STEP 2 removes touch-all.
+	 * Task #238 — STEP 2: only refresh shadow PT, no eager touch.
+	 * handle_syscall may have changed UML's logical pgd (e.g. brk
+	 * extended the heap; mmap added a vma; munmap unmapped one).
+	 * Mirror the new state into the shadow PT so the post-syscall
+	 * resume sees consistent mappings. Eager touch was removed
+	 * with the rest of the touch-all walks (kvm_enter_guest STEP 2)
+	 * — lazy fault recovery covers anything that's not yet in the
+	 * logical pgd.
 	 */
 	{
 		struct mm_struct *mm2 = current->active_mm;
 
-		if (mm2 && mm2->pgd) {
-			(void)kvm_touch_all_user_vmas(mm2);
+		if (mm2 && mm2->pgd)
 			(void)kvm_shadow_fill_from_uml_pgd(mm2->pgd);
-		}
 	}
 
 skip_dispatch:
@@ -2404,7 +2398,6 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 */
 				struct kvm_sregs dump_sregs;
 				unsigned long cr2;
-				char probe;
 				bool touched = false;
 				u64 fault_rip;
 				u64 fault_error_code;
@@ -2582,7 +2575,6 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 								   &code_out);
 					if (hpf_rc == 0)
 						touched = true;
-					(void)probe;	/* unused post-#238 */
 					(void)kvm_shadow_fill_from_uml_pgd(m2->pgd);
 				}
 
