@@ -2204,10 +2204,10 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * SYSCALL saves post-instruction RIP into RCX (and
 	 * RFLAGS into R11) before jumping to MSR_LSTAR. For the
 	 * break-out-and-re-enter pattern (audit A1), the next
-	 * call to kvm_enter_guest's bootstrap SYSRETQ dance
-	 * resumes ring-3 at whatever HOST_IP holds, so stash
-	 * the user's continuation RIP there and the user's
-	 * saved RFLAGS into HOST_EFLAGS.
+	 * call to kvm_enter_guest's bootstrap IRETQ dance
+	 * (post-#272) resumes ring-3 at whatever HOST_IP holds,
+	 * so stash the user's continuation RIP there and the
+	 * user's saved RFLAGS into HOST_EFLAGS.
 	 *
 	 * Audit round-4 F2: kvm_regs_to_uml_regs() above set
 	 * regs->gp[HOST_EFLAGS] from kregs.rflags, which at
@@ -2468,7 +2468,7 @@ skip_dispatch:
 	/*
 	 * Push the syscall return (now in regs->gp[HOST_AX])
 	 * back into the vCPU state so the next KVM_RUN (via
-	 * kvm_enter_guest's bootstrap SYSRETQ, which picks up
+	 * kvm_enter_guest's bootstrap IRETQ, which picks up
 	 * RAX from kregs) delivers the right return value to
 	 * ring-3. Failure here leaves handle_syscall's work
 	 * stranded — guest resumes with stale RAX, likely
@@ -2567,7 +2567,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	 * next host timer interrupt (~10ms). The fix for SYSCALL
 	 * is kvm_decode_syscall stashing HOST_IP = HOST_CX (the
 	 * user's post-SYSCALL RIP); the next kvm_enter_guest's
-	 * bootstrap SYSRETQ dance resumes there. The fix for PF
+	 * bootstrap IRETQ dance resumes there. The fix for PF
 	 * extracts user RIP + RSP from the IDT-pushed iretq
 	 * frame on the IST stack and does the same re-entry
 	 * (see the PF case below).
@@ -2992,10 +2992,11 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * the bootstrap page (RX-mapped for the
 				 * guest, kernel-VA-directly-accessible
 				 * for the host). Next kvm_enter_guest's
-				 * bootstrap SYSRETQ dance resumes ring-3
-				 * at HOST_IP (= user RIP), with HOST_SP
-				 * restored to user RSP and HOST_EFLAGS
-				 * restored to user RFLAGS (audit round-4
+				 * bootstrap IRETQ dance (post-#272)
+				 * resumes ring-3 at HOST_IP (= user RIP),
+				 * with HOST_SP restored to user RSP and
+				 * HOST_EFLAGS restored to user RFLAGS
+				 * (audit round-4
 				 * F2). Previously user RFLAGS was
 				 * discarded and approximated by a
 				 * hardcoded 0x3202 at re-entry time,

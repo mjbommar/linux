@@ -1,40 +1,41 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KVM-backend record/replay skeleton (task #253 step 1, memo 13).
+ * KVM-backend record/replay (task #253, memo 13).
  *
- * This TU is the compile-clean entry point for the deterministic
- * record/replay path. Today it ships:
+ * This TU is the v1 record/replay path. It ships:
  *
- *   - struct kvm_record container + alloc/free.
+ *   - struct kvm_record container + alloc/start/stop/replay/destroy.
  *   - Record-side enum kvm_replay_kind + struct kvm_replay_entry.
- *   - kvm_record_start / _stop / _replay shells that operate on
- *     the container but DON'T yet hook into the kvm_run_userspace
- *     dispatcher. Step 2+ of the memo-13 ladder (time / random /
- *     interrupt / syscall recording) does that wiring; this
- *     commit just stakes out the API surface and validates it
- *     compiles cleanly under CONFIG_UM_BACKEND_KVM_INTEGRATED.
+ *   - DEFINE_STATIC_KEY_FALSE(um_kvm_record_enabled) hot-path gate
+ *     + active-record registry. The dispatcher in kvm_decode_syscall
+ *     consults the gate via static_branch_unlikely so non-record
+ *     runtime pays zero cost.
+ *   - Observation hooks: kvm_record_observe_syscall (inline-only),
+ *     kvm_record_observe_syscall_buf (with side-buffer payload),
+ *     kvm_record_observe_dispatch (per-NR router covering
+ *     getrandom / read / pread64 / recvfrom).
+ *   - Replay-side dispatcher: kvm_record_consume_syscall returns
+ *     the recorded (NR, ret, payload) for the next log entry.
+ *     Strict-replay mode (default) fail-stops on divergence /
+ *     end-of-log; loose mode falls through to live syscalls.
+ *   - Debugfs control surface: /sys/kernel/debug/um/kvm_record_
+ *     {ctl,state,log}.
  *
  * The container layers on top of the memo-12 snapshot primitives:
  * a kvm_record holds a kvm_snapshot (the checkpoint) plus a
  * variable-length kvm_replay_entry log. Capture and restore reuse
- * the snapshot.c primitives; the new code here is just the log +
- * the recording/replay state machine.
+ * snapshot.c primitives; this TU adds the log + state machine.
  *
  * Design memo: Documentation/virt/uml/redesign/02-workstreams/
  *              D-kvm-backend/13-record-replay-determinism.md
  *
- * NOT in this commit:
- *   - Hooks into kvm_run_userspace's dispatcher (memo 13 step 2-6).
- *   - Cycle / TSC freezing (step 2).
- *   - Syscall result interception (step 3).
- *   - PMU-driven interrupt boundary recording (step 4).
- *   - getrandom / drbg seeding (step 5).
- *   - MMIO recording (step 6).
- *
- * The recording / replaying flags live on the container but no
- * code path consults them yet. A future commit that adds the
- * dispatcher hooks will gate via static_branch_unlikely(&um_
- * record_enabled) so non-record builds pay zero cost.
+ * Deferred (memo 13 ladder):
+ *   - PMU-driven INST_RETIRED for sub-instruction interrupt
+ *     boundaries (step 4).
+ *   - MMIO recording (step 6) — UML doesn't have device emulation
+ *     in a shape that produces nondeterministic MMIO bytes today.
+ *   - Additional NRs needing scatter-gather (recvmsg / readv) or
+ *     per-driver knowledge (ioctl).
  */
 
 #include <linux/debugfs.h>
