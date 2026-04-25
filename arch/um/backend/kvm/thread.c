@@ -1621,6 +1621,28 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	}
 
 	/*
+	 * Perf lever #3b: skip SREGS reprogramming entirely when
+	 * every mutable field matches what we last wrote. Stable
+	 * fields (GDT/IDT/TR/CS/SS/CR0/CR4/EFER/APIC) never change
+	 * post-init; only CR3 (on mm-switch) and FS_BASE/GS_BASE
+	 * (on arch_prctl) drift. shadow_dirty forces a CR3 reload
+	 * even when cr3_gpa unchanged (TLB flush discipline from
+	 * F6-followon D83). First entry always programs.
+	 */
+	{
+		struct kvm_um *ctx = kvm_backend_ctx();
+		u64 cur_fs = regs->gp[HOST_FS_BASE];
+		u64 cur_gs = regs->gp[HOST_GS_BASE];
+
+		if (ctx->sregs_primed &&
+		    ctx->cached_cr3_gpa == cr3_gpa &&
+		    ctx->cached_fs_base == cur_fs &&
+		    ctx->cached_gs_base == cur_gs &&
+		    !ctx->shadow_dirty)
+			goto sregs_done;
+	}
+
+	/*
 	 * Start from the current SREGS so APIC / TR / LDT bits
 	 * KVM expects preserved stay intact (same discipline the
 	 * harness follows — see sregs.c preamble).
@@ -1693,7 +1715,18 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 				    (unsigned long long)kvm_bootstrap_va, rc);
 		return rc;
 	}
+	{
+		struct kvm_um *ctx = kvm_backend_ctx();
 
+		ctx->cached_cr3_gpa = cr3_gpa;
+		ctx->cached_fs_base = sregs.fs.base;
+		ctx->cached_gs_base = sregs.gs.base;
+		ctx->sregs_primed   = true;
+		/* shadow_dirty consumed by this CR3 reload. */
+		ctx->shadow_dirty   = false;
+	}
+
+sregs_done:
 	/*
 	 * Build vCPU regs from UML regs, then overlay the ring-3
 	 * bootstrap shape (sub-commit #5a):

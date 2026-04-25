@@ -57,6 +57,16 @@ struct kvm_um {
 					 * allocated once per vCPU and never
 					 * moves.
 					 */
+	bool		sregs_primed;	/* KVM_SET_SREGS called at least
+					 * once. Combined with the cached
+					 * CR3 / FS_BASE / GS_BASE below, we
+					 * skip the GET_SREGS + SET_SREGS
+					 * ioctls when the mutable fields
+					 * are unchanged (perf lever #3b).
+					 */
+	u64		cached_cr3_gpa;	/* Last SREGS.cr3 programmed. */
+	u64		cached_fs_base;	/* Last SREGS.fs.base programmed. */
+	u64		cached_gs_base;	/* Last SREGS.gs.base programmed. */
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
