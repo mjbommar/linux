@@ -246,22 +246,30 @@ ladder (#250 v2 step 3+4, #252 syzkaller backend).
     `handle_syscall` in kvm_decode_syscall when in replay mode —
     serves the recorded return + copy_to_user's the side buffer
     back. Commit `918ccaf828cc`.
-  - Step 5 (getrandom routing): `kvm_record_observe_dispatch()`
-    per-NR router; today routes `__NR_getrandom` through the
-    side-buffer path so replay restores the random bytes byte-
+  - Step 5 (per-NR routing): `kvm_record_observe_dispatch()`
+    per-NR router. Today covers `__NR_getrandom`, `__NR_read`,
+    `__NR_pread64`, `__NR_recvfrom` through the side-buffer
+    path so replay restores the user-buffer payload byte-
     identically. Other NRs default to the inline-only path.
-    Commit `1992d6315f92`.
+    Commits `1992d6315f92` + `d669522cc964` + `915299f2a9d6`
+    (regs * extension + read/pread64 + recvfrom).
+  - Round-trip KUnit (`kvm_record_roundtrip_test`): drives the
+    record/replay log directly via the C API — observe three
+    syscalls, replay, consume in FIFO order, verify cursor
+    exhaustion + NR-mismatch divergence returns -EILSEQ.
+    Skip-on-early-boot pattern matches the snapshot/record
+    basic-shape tests. Commit `915299f2a9d6`.
 - Step 4 (PMU interrupt boundary recording) deferred —
   architectural piece requiring perf-event API plumbing.
 - Step 6 (MMIO recording) deferred — small but bounded; pattern
   matches step 2's record-side hook in the MMIO case of
   kvm_decode_mmio.
 - Additional NR special-cases for the per-NR dispatcher
-  (`__NR_read`, `__NR_pread64`, `__NR_recvfrom`, `__NR_ioctl`,
-  ...) deferred — each is a small extension to the
-  `kvm_record_observe_dispatch` switch but needs the API to
-  pass the third syscall arg (count / size) which today's
-  hook doesn't surface.
+  (`__NR_recvmsg`, `__NR_readv`, `__NR_ioctl`) deferred —
+  each needs scatter-gather logic (recvmsg + readv) or
+  per-driver knowledge (ioctl) beyond the simple buffer-
+  capture pattern. Architecture supports them; just adding
+  switch cases gets one more NR each.
 
   All hot-path ratios held in the 1.06-1.19× kvm/seccomp band
   post-hook — the static-key gate keeps the cost zero when off.
