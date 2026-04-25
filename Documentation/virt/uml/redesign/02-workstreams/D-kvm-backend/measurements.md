@@ -1946,6 +1946,86 @@ for i in 1 2 3 4 5; do
 done
 ```
 
+## 2026-04-25 — perf-fallback baseline (post-#3b SREGS-skip)
+
+Establishes a non-gadget regression-and-progress gate. perf-
+getpid measures the gadget fast path (Class E); perf-fallback
+loops `__NR_getsid` (Class A passthrough — always VMEXITs
+regardless of CONFIG_UM_BACKEND_KVM_GADGET) so the
+measurement reflects the true cost of the
+`kvm_enter_guest + KVM_RUN + handle_syscall` round-trip.
+
+### Why a separate kselftest
+
+perf-getpid stays a *gadget regression gate*: any change that
+breaks the 100 ns Class E fast path shows up there. perf-
+fallback is the *fallback-lever progress gate*: each lever in
+the closing-the-gap series (#238 / #4 / #5 / #6 / #1 …)
+shows its delta on this benchmark. The two cover orthogonal
+paths in the kernel and need separate runners.
+
+### Setup
+
+- Host: dev host (Zen 4 class, TSC invariant).
+- Build: branch tip post lever #3b SREGS-skip
+  (commit `845e78b941cb`).
+- Binary: `tools/testing/selftests/um/perf-fallback/
+  fallback-loop`. 100k iterations, 1k warmup, raw rdtsc
+  bracket.
+- Run: `BACKENDS="ptrace seccomp kvm" UML_BINARY=/tmp/
+  uml-kvmint/linux UML_GADGET_BINARY=/tmp/uml-kvmbench/
+  linux ./tools/testing/selftests/um/perf-fallback/run-
+  perf-fallback.sh`.
+
+### Numbers
+
+| Backend | cyc/call | ns/call | vs seccomp |
+|---------|---------|---------|------------|
+| ptrace | 52,138 | 14,483 | 1.27× |
+| seccomp | 41,048 | 11,402 | 1.00× |
+| kvm-fallback (5-sample mean) | 120,034 | 33,343 | 2.92× |
+| kvm-gadget-fallback | 115,865 | 32,185 | 2.82× |
+
+Raw 5-sample series for kvm-fallback (cyc/call):
+112943, 121746, 119344, 122634, 123503.
+
+`kvm-gadget-fallback` runs the same getsid loop under the
+gadget kernel; getsid is Class A so it still VMEXITs. The
+~4 % gap vs kvm-fallback is the cost of the per-entry vvar
++ state-page refresh that the gadget kernel does and the
+fallback-only kernel skips. Both are within the same band;
+the gadget kernel doesn't penalize fallback syscalls.
+
+### Reproducibility
+
+```
+sudo -n setfacl -m u:$(id -un):rw /dev/kvm
+for i in 1 2 3 4 5; do
+    UML_BINARY=/tmp/uml-kvmint/linux \
+    UML_GADGET_BINARY=/tmp/uml-kvmbench/linux \
+    ./tools/testing/selftests/um/perf-fallback/run-perf-fallback.sh \
+        2>&1 | grep kvm-fallback | head -1 |
+        sed -E 's/.*cyc_per_call=([0-9]+).*/\1/'
+done
+```
+
+### Reading these numbers
+
+The 2.92× kvm-fallback / seccomp ratio is the gap that
+Phase 1 (closing the fallback gap) targets. The vision's
+"1-11 µs naive KVM" floor maps to 4-40k cyc on this silicon.
+The biggest single lever still untaken — task #238
+(`kvm_touch_all_user_vmas` → `handle_mm_fault` refactor) —
+should drop ~30-50 µs (~110-180k cyc on this silicon, but
+that's larger than the 78k headroom above seccomp because
+the eager VMA walk is a sub-component of the
+post-#3b residual cost).
+
+Realistic Phase 1 exit target: **kvm-fallback ≤ 50k cyc**
+(seccomp + ~20%) → ratio ≤ 1.2×. The MAX_KVM_RATIO ceiling
+in the runner defaults to 4.0 (loose) and will be tightened
+to 1.2 once Phase 1 lands.
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
