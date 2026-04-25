@@ -387,6 +387,43 @@ int kvm_ensure_cpuid_done(void)
 		goto out_free;
 	}
 
+	/*
+	 * Review-01 P1 #3: mask host RDRAND / RDSEED CPUID bits so
+	 * record/replay determinism doesn't have a hardware-RNG hole.
+	 * Guest software falls back to its own RNG (glibc has
+	 * software DRBG; getrandom(2) goes through the syscall
+	 * record/replay path). KVM_SET_CPUID2 must be called once
+	 * before the first KVM_RUN, so we mask up-front whether or
+	 * not record/replay is currently active — same choice qemu
+	 * makes when its `-cpu ...,-rdrand,-rdseed` option fires.
+	 *
+	 *   CPUID leaf 1, ECX bit 30 = RDRAND
+	 *   CPUID leaf 7 subleaf 0, EBX bit 18 = RDSEED
+	 *
+	 * Cost vs benefit: software DRBG is ~10× slower than RDRAND
+	 * on Sapphire Rapids etc., but that's a microbenchmark
+	 * concern; glibc's userspace RNG cache amortizes it. UML's
+	 * intended workloads (testing/fuzzing/observability) don't
+	 * have a measurable RDRAND throughput requirement.
+	 *
+	 * Done unconditionally because (a) it's safer-by-default
+	 * and (b) KVM_SET_CPUID2 isn't re-issuable post-RUN, so we
+	 * can't make it record-mode-only without restructuring the
+	 * init order.
+	 */
+	{
+		unsigned int i;
+
+		for (i = 0; i < cpuid->nent; i++) {
+			struct kvm_cpuid_entry2 *e = &cpuid->entries[i];
+
+			if (e->function == 1 && e->index == 0)
+				e->ecx &= ~(1U << 30);	/* RDRAND */
+			if (e->function == 7 && e->index == 0)
+				e->ebx &= ~(1U << 18);	/* RDSEED */
+		}
+	}
+
 	rc = os_ioctl_generic(kvm_ctx.vcpu0_fd, KVM_SET_CPUID2,
 			      (unsigned long)cpuid);
 	if (rc < 0) {
@@ -396,7 +433,7 @@ int kvm_ensure_cpuid_done(void)
 	}
 
 	kvm_ctx.cpuid_done = true;
-	pr_info("um: kvm: CPUID passthrough installed (%u entries; host x86 features visible to guest)\n",
+	pr_info("um: kvm: CPUID passthrough installed (%u entries; host x86 features visible to guest, RDRAND/RDSEED masked for record/replay determinism)\n",
 		cpuid->nent);
 
 out_free:

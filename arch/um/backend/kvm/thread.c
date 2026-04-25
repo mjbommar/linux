@@ -2639,9 +2639,22 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		 * from CPL=3). The sregs_valid flag tells the MMIO
 		 * case (the one that actually needs runtime CPL)
 		 * whether to trust the fresh read or fall back.
+		 *
+		 * Review-01 P1 #5: prefer the synced view via
+		 * KVM_SYNC_X86_SREGS when the cap is available — KVM
+		 * already populated run->s.regs.sregs on this exit
+		 * because we set kvm_valid_regs |= KVM_SYNC_X86_SREGS
+		 * before the entry. Saves one ioctl per VMEXIT on
+		 * gadget-fallback / syscall / #PF / MMIO paths. Only
+		 * fall back to the explicit ioctl when the cap isn't
+		 * exposed by this host KVM.
 		 */
-		if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-				     (unsigned long)&exit_sregs) >= 0) {
+		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
+			exit_sregs = run->s.regs.sregs;
+			sregs_valid = true;
+			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
+		} else if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+					    (unsigned long)&exit_sregs) >= 0) {
 			sregs_valid = true;
 			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
 		}
