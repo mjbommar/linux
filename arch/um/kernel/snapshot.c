@@ -51,6 +51,8 @@
 #include <asm/um-mmaps.h>
 #include <asm/um-snapshot.h>
 
+#include <shared/backend.h>
+
 #include <os.h>
 
 /* AFL forkserver protocol: caller opens host fds 198 (fuzzer→server)
@@ -159,6 +161,37 @@ static int um_snapshot_assert_ready(const char *named_point)
 	if (WARN_ONCE(um_get_signals() != 1,
 		      "%s(\"%s\"): UML signals_enabled is %d at ready-point entry; must be 1 per D41 signal-gating contract\n",
 		      __func__, named_point, um_get_signals()))
+		violations++;
+
+	/*
+	 * Task #250: refuse to enter the AFL forkserver path under
+	 * the KVM backend. The C-09 v1 forkserver uses raw
+	 * `__NR_fork` (os_snapshot_fork_worker), and a fork() under
+	 * KVM aliases the parent's /dev/kvm + per-vCPU mmap state
+	 * into the child. Two processes then race ioctls against
+	 * the same vCPU, the kvm_run mmap is shared (concurrent
+	 * KVM_RUN corrupts state), and KVM_USER_MEMORY_REGION host
+	 * VAs that were CoW-mapped to the parent's pages diverge in
+	 * the child once any write fires.
+	 *
+	 * The proper KVM-aware snapshot path saves vCPU state via
+	 * KVM_GET_REGS / SREGS / MSRS / FPU at checkpoint, snapshots
+	 * the memslot host VAs, and restores via KVM_SET_* on either
+	 * a fresh vCPU in the same VM or a new VM entirely. That's
+	 * deferred to a future commit (vision §"Snapshot/forkserver
+	 * <50 ms cold-start"). Until then, refuse loudly so a
+	 * misconfigured fuzz build doesn't silently corrupt KVM
+	 * state.
+	 *
+	 * Detection: um_backend->kind. The dynamic-backend selector
+	 * may resolve to KVM at boot even when CONFIG_UM_BACKEND_
+	 * KVM_ONLY=n, so the runtime check is more reliable than
+	 * any compile-time `depends on !UM_BACKEND_KVM_ONLY` clause.
+	 */
+	if (WARN_ONCE(um_backend &&
+		      um_backend->kind == UM_BACKEND_KIND_KVM,
+		      "%s(\"%s\"): C-09 v1 snapshot/forkserver is incompatible with the KVM backend — fork() under KVM corrupts /dev/kvm + vCPU state. KVM-aware snapshot path is a Phase 3 deliverable.\n",
+		      __func__, named_point))
 		violations++;
 
 	return violations ? -EBUSY : 0;
