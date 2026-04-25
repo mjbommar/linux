@@ -484,8 +484,9 @@ static ssize_t kvm_snapshot_bench_write(struct file *f,
 		u64 minv = samples[0];
 		u64 maxv = samples[n - 1];
 
-		pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u\n",
-			cap_cyc, med, p95, minv, maxv, n);
+		pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u mode=%s\n",
+			cap_cyc, med, p95, minv, maxv, n,
+			snap->mem_backing ? "full" : "regs-only");
 	}
 	rc = (int)count;	/* signal write success */
 
@@ -613,9 +614,10 @@ static int __init kvm_snapshot_bench_late_init(void)
 	}
 
 	sort(samples, n, sizeof(u64), u64_cmp, NULL);
-	pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u\n",
+	pr_info("kvm_snapshot_bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u mode=%s\n",
 		cap_cyc, samples[n / 2], samples[(n * 95) / 100],
-		samples[0], samples[n - 1], n);
+		samples[0], samples[n - 1], n,
+		snap->mem_backing ? "full" : "regs-only");
 
 out_free_snap:
 	kvm_snapshot_destroy(snap);
