@@ -257,8 +257,20 @@ ladder (#250 v2 step 3+4, #252 syzkaller backend).
     record/replay log directly via the C API — observe three
     syscalls, replay, consume in FIFO order, verify cursor
     exhaustion + NR-mismatch divergence returns -EILSEQ.
-    Skip-on-early-boot pattern matches the snapshot/record
-    basic-shape tests. Commit `915299f2a9d6`.
+    Side-buffer round-trip: observe a fake-getrandom entry
+    with deterministic 8-byte payload, consume + memcmp the
+    payload bytes back. Skip-on-early-boot pattern matches the
+    snapshot/record basic-shape tests. Commits `915299f2a9d6`
+    + `14414378fde9`.
+  - Debugfs log dump
+    (`/sys/kernel/debug/um/kvm_record_log`): bounded prefix of
+    captured entries with kind / instruction_count / inline
+    data + payload-presence indicator. Commit `9d62f71540e2`.
+  - Per-entry timestamp via `ktime_get_ns()` populates the
+    `instruction_count` field — true PMU-derived count is
+    memo-13 step 4 territory; the timestamp gives a useful
+    diagnostic + ordering signal until that lands. Commit
+    `e70bf0b6bbd5`.
 - Step 4 (PMU interrupt boundary recording) deferred —
   architectural piece requiring perf-event API plumbing.
 - Step 6 (MMIO recording) deferred — small but bounded; pattern

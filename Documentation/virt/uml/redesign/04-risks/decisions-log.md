@@ -10139,4 +10139,62 @@ test + the build/boot kselftest already gate API drift.
 
 ---
 
+## D103 (2026-04-25) — Phase 3 record/replay v1 polish + side-buffer KUnit
+
+**Context.** D102 captured memo-13 steps 1+2+3+3.5+5(partial) +
+the per-NR dispatcher refactor. This entry records the
+completing v1 polish work in the same session.
+
+**What landed.**
+
+1. `__NR_recvfrom` added to the per-NR dispatcher — same shape
+   as `__NR_read`, captures the data buffer (commit
+   `915299f2a9d6`). Brings the per-NR set to four NRs:
+   getrandom, read, pread64, recvfrom.
+2. `kvm_record_roundtrip_test` extended with a side-buffer
+   round-trip case — fake `__NR_getrandom`-shape observe →
+   replay → consume → memcmp(payload) — validating step-3
+   end-to-end (commit `14414378fde9`). The test directly
+   drives the C API, sidestepping the early-boot
+   `kvm_snapshot_capture` -ENODEV failure that blocks live
+   record/replay at KUnit time.
+3. `/sys/kernel/debug/um/kvm_record_log` debugfs node — bounded
+   prefix dump of captured entries (commit `9d62f71540e2`).
+   One line per entry with kind / IC / inline data /
+   payload-presence indicator. KMALLOC_ATOMIC snapshot under
+   the existing record spinlock to keep the lock-held window
+   short.
+4. `kvm-record-smoke` runner extended to gate the round-trip
+   KUnit case (commit `dc479ef4b54f`). Both `kvm_record_basic_
+   test` and `kvm_record_roundtrip_test` must report `ok N`
+   lines.
+5. `instruction_count` field populated with `ktime_get_ns()`
+   (commit `e70bf0b6bbd5`). Provides per-entry timestamps for
+   ordering verification + log readability until memo-13
+   step 4 (PMU-driven INST_RETIRED.ANY counter) lands.
+
+**Validation matrix.**
+
+  - All eight kvm kselftests PASS post-each-commit.
+  - perf ratios in 1.14-1.20× kvm/seccomp band.
+  - KUnit `ok 36 / 37 / 38` fire (snapshot_basic /
+    record_basic / record_roundtrip).
+
+**Memo-13 v1 surface complete.** Architectural pieces remaining:
+
+- Step 4 (PMU instruction-count): perf-event API plumbing.
+- Step 6 (MMIO recording): UML doesn't have device emulation
+  in a shape that matters here; revisit if a future workload
+  needs it.
+- Additional NRs (recvmsg + readv scatter-gather, ioctl per-
+  driver): bounded but each is its own switch case.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/13-record-replay-determinism.md`
+  (memo-13 status updated through this commit).
+- Commits `915299f2a9d6..e70bf0b6bbd5`.
+
+---
+
 ## (Future entries here, as decisions are made)
