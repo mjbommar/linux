@@ -52,6 +52,7 @@
 #include <linux/vmalloc.h>
 
 #include <asm/unistd.h>
+#include <sysdep/ptrace.h>		/* struct uml_pt_regs + HOST_* */
 
 #include "kvm_backend.h"
 
@@ -523,45 +524,101 @@ EXPORT_SYMBOL_GPL(kvm_record_observe_syscall_buf);
  * Keeping the special-case set narrow today minimizes the per-
  * syscall copy_from_user overhead on the recording hot path.
  */
-void kvm_record_observe_dispatch(unsigned long syscall_nr,
-				 long ret_value,
-				 unsigned long arg0_va,
-				 unsigned long arg1)
+/*
+ * Internal: copy `len` bytes from user `va` into a fresh
+ * kvmalloc staging buffer + emit an observe_syscall_buf entry.
+ * Falls back to inline-only on allocation / copy failure so
+ * recording stays partial-success rather than dropping entirely.
+ */
+static void um_kvm_record_capture_user_buf(unsigned long syscall_nr,
+					   long ret_value,
+					   unsigned long va,
+					   size_t len,
+					   unsigned long inline_arg1)
 {
 	void *staging;
 
-	if (syscall_nr == __NR_getrandom && ret_value > 0 &&
-	    arg0_va != 0) {
-		size_t len = (size_t)ret_value;
-
-		staging = kvmalloc(len, GFP_KERNEL);
-		if (!staging) {
-			/*
-			 * Allocation failure → fall back to inline-
-			 * only entry. Replay can't restore the user
-			 * buffer but the return value still
-			 * round-trips, so the recording is at least
-			 * partial.
-			 */
-			kvm_record_observe_syscall(syscall_nr, ret_value,
-						   arg0_va, arg1);
-			return;
-		}
-		if (copy_from_user(staging, (const void __user *)arg0_va,
-				   len)) {
-			kvfree(staging);
-			kvm_record_observe_syscall(syscall_nr, ret_value,
-						   arg0_va, arg1);
-			return;
-		}
-		kvm_record_observe_syscall_buf(syscall_nr, ret_value,
-					       arg0_va, staging, len);
+	if (!len) {
+		kvm_record_observe_syscall(syscall_nr, ret_value,
+					   va, inline_arg1);
+		return;
+	}
+	staging = kvmalloc(len, GFP_KERNEL);
+	if (!staging) {
+		kvm_record_observe_syscall(syscall_nr, ret_value,
+					   va, inline_arg1);
+		return;
+	}
+	if (copy_from_user(staging, (const void __user *)va, len)) {
 		kvfree(staging);
+		kvm_record_observe_syscall(syscall_nr, ret_value,
+					   va, inline_arg1);
+		return;
+	}
+	kvm_record_observe_syscall_buf(syscall_nr, ret_value, va,
+				       staging, len);
+	kvfree(staging);
+}
+
+void kvm_record_observe_dispatch(unsigned long syscall_nr,
+				 long ret_value,
+				 const struct uml_pt_regs *regs)
+{
+	if (!regs) {
+		kvm_record_observe_syscall(syscall_nr, ret_value, 0, 0);
 		return;
 	}
 
+	/*
+	 * Per-NR routing. Each special case extracts the user-buffer
+	 * VA + the captured-byte count from the appropriate regs->gp
+	 * slot. Default falls through to the inline-only path with
+	 * (HOST_DI, HOST_SI) as the inline payload — same shape the
+	 * pre-step-3 path used.
+	 */
+	switch (syscall_nr) {
+	case __NR_getrandom:
+		/*
+		 * getrandom(buf, len, flags): rdi=buf, rsi=len.
+		 * On success ret_value == bytes filled (≤ len).
+		 */
+		if (ret_value > 0)
+			um_kvm_record_capture_user_buf(syscall_nr,
+						       ret_value,
+						       regs->gp[HOST_DI],
+						       (size_t)ret_value,
+						       regs->gp[HOST_SI]);
+		else
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   regs->gp[HOST_DI],
+						   regs->gp[HOST_SI]);
+		return;
+	case __NR_read:
+	case __NR_pread64:
+		/*
+		 * read(fd, buf, count): rdi=fd, rsi=buf, rdx=count.
+		 * pread64 same shape with extra offset arg.
+		 * On success ret_value == bytes read (≤ count).
+		 */
+		if (ret_value > 0)
+			um_kvm_record_capture_user_buf(syscall_nr,
+						       ret_value,
+						       regs->gp[HOST_SI],
+						       (size_t)ret_value,
+						       regs->gp[HOST_DX]);
+		else
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   regs->gp[HOST_DI],
+						   regs->gp[HOST_SI]);
+		return;
+	default:
+		break;
+	}
+
 	/* Default: inline-only payload. */
-	kvm_record_observe_syscall(syscall_nr, ret_value, arg0_va, arg1);
+	kvm_record_observe_syscall(syscall_nr, ret_value,
+				   regs->gp[HOST_DI],
+				   regs->gp[HOST_SI]);
 }
 EXPORT_SYMBOL_GPL(kvm_record_observe_dispatch);
 
