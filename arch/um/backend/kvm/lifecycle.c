@@ -1040,6 +1040,17 @@ int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
 	 * For fresh installs the flag is conservatively dirty
 	 * too; KVM_SET_SREGS is cheap relative to a missed-flush
 	 * bug.
+	 *
+	 * Review-01 P1 #7 attempted an idempotent variant
+	 * (only dirty when the PTE actually changes) but it
+	 * regressed dyn-loader, suggesting the bootstrap-page
+	 * remap path has a subtle interaction with the SREGS-
+	 * skip cache. Reverted; the conservative
+	 * always-dirty behaviour is the correctness floor and
+	 * the perf-fallback ratio at 1.02× post-P1#5 is already
+	 * past the parity goal so the optimization isn't load-
+	 * bearing. Future work: instrument the failure mode
+	 * before re-attempting.
 	 */
 	pte[pte_i] = (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) |
 		     (leaf_flags | KVM_X86_PTE_P | KVM_X86_PTE_A);
