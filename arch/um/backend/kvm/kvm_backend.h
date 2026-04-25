@@ -636,6 +636,23 @@ void kvm_gadget_vvar_refresh(void);
 u64 kvm_gadget_vvar_va(void);
 u64 kvm_gadget_vvar_gpa(void);
 
+/*
+ * Task #250 v2 ladder, memo 12: snapshot/forkserver primitives
+ * for the KVM backend. Replaces the C-09 v1 fork()-based path
+ * which doesn't compose with KVM's per-vCPU fd state.
+ *
+ * Lifecycle: alloc → capture → restore_full*N → destroy.
+ * Today these provide the building blocks; integration into
+ * um_snapshot_ready() lands in a follow-up commit (memo 12
+ * step 3).
+ */
+struct kvm_snapshot;
+struct kvm_snapshot *kvm_snapshot_alloc(void);
+int kvm_snapshot_capture(struct kvm_snapshot *snap);
+int kvm_snapshot_restore_full(struct kvm_snapshot *snap);
+void kvm_snapshot_free(struct kvm_snapshot *snap);
+void kvm_snapshot_destroy(struct kvm_snapshot *snap);
+
 #endif
 
 /*
