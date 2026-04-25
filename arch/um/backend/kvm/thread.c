@@ -1713,12 +1713,27 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_SYSRET_OFFSET;
 	kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
 
-	rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS, (unsigned long)&kregs);
-	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_REGS(tramp_rip=0x%llx user_rip=0x%llx) failed (%d)\n",
-				    (unsigned long long)kregs.rip,
-				    (unsigned long long)kregs.rcx, rc);
-		return rc;
+	/*
+	 * Perf-lever #2: when KVM_CAP_SYNC_REGS is supported, hand
+	 * the prepared kregs to KVM through the mmap'd kvm_run
+	 * struct rather than a KVM_SET_REGS ioctl. Saves one ioctl
+	 * per kvm_enter_guest on the fallback syscall path.
+	 */
+	if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
+		struct kvm_run *run = kvm_backend_ctx()->run0;
+
+		run->s.regs.regs = kregs;
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+		run->kvm_valid_regs |= KVM_SYNC_X86_REGS;
+	} else {
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				      (unsigned long)&kregs);
+		if (rc < 0) {
+			pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_REGS(tramp_rip=0x%llx user_rip=0x%llx) failed (%d)\n",
+					    (unsigned long long)kregs.rip,
+					    (unsigned long long)kregs.rcx, rc);
+			return rc;
+		}
 	}
 
 	/*
@@ -1980,8 +1995,18 @@ skip_dispatch:
 	 * check path. Audit A4: fatal rather than silent.
 	 */
 	kvm_uml_regs_to_kvm_regs(kregs, regs);
-	if (os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
-			     (unsigned long)kregs) < 0) {
+	/*
+	 * Perf-lever #2: when KVM_SYNC_X86_REGS is live, hand the
+	 * post-syscall kregs back to KVM through the mmap'd run
+	 * struct rather than a KVM_SET_REGS ioctl.
+	 */
+	if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
+		struct kvm_run *run = kvm_backend_ctx()->run0;
+
+		run->s.regs.regs = *kregs;
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+	} else if (os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
+				    (unsigned long)kregs) < 0) {
 		pr_warn_ratelimited("um: kvm: post-syscall KVM_SET_REGS failed; killing guest task\n");
 		fatal_sigsegv();
 	}
@@ -2090,11 +2115,21 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			panic("um: kvm run_userspace: KVM_RUN failed (%d)", rc);
 		}
 
-		rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
-				      (unsigned long)&kregs);
-		if (rc < 0)
-			panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
-			      rc);
+		/*
+		 * Perf-lever #2: when KVM_SYNC_X86_REGS is live, KVM
+		 * already populated run->s.regs.regs on exit (we set
+		 * kvm_valid_regs before the last entry). Skip the
+		 * KVM_GET_REGS ioctl.
+		 */
+		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
+			kregs = run->s.regs.regs;
+		} else {
+			rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
+					      (unsigned long)&kregs);
+			if (rc < 0)
+				panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
+				      rc);
+		}
 		kvm_regs_to_uml_regs(regs, &kregs);
 
 		/*
@@ -2737,8 +2772,13 @@ out_read_regs:
 	if (rc == -EINTR) {
 		struct kvm_sregs sregs;
 
-		rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
-				      (unsigned long)&kregs);
+		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
+			kregs = run->s.regs.regs;
+			rc = 0;
+		} else {
+			rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
+					      (unsigned long)&kregs);
+		}
 		if (rc >= 0)
 			kvm_regs_to_uml_regs(regs, &kregs);
 		/*

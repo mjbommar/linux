@@ -37,6 +37,13 @@ struct kvm_um {
 	void		*run0;		/* mmap'd kvm_run for vcpu0 */
 	size_t		run_size;	/* KVM_GET_VCPU_MMAP_SIZE */
 	refcount_t	mm_refcount;	/* attached mm_ids */
+	u64		sync_regs_caps;	/* KVM_CAP_SYNC_REGS bitmap; 0 if
+					 * unsupported. When KVM_SYNC_X86_REGS
+					 * is set, GP regs travel through the
+					 * mmap'd kvm_run struct instead of
+					 * KVM_GET/SET_REGS ioctls (perf-lever
+					 * #2 — 2 ioctls per syscall saved).
+					 */
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*

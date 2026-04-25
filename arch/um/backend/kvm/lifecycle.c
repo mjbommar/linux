@@ -226,9 +226,27 @@ int kvm_init(const struct um_backend_args *args)
 	kvm_ctx.vm_fd  = vmfd;
 	refcount_set(&kvm_ctx.mm_refcount, 0);
 
-	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu (memslot deferred to first KVM_RUN)\n",
+	/*
+	 * Perf-lever #2: probe KVM_CAP_SYNC_REGS. When supported,
+	 * GP regs + RIP + RFLAGS travel through the mmap'd kvm_run
+	 * struct at run->s.regs.regs, eliminating KVM_GET_REGS +
+	 * KVM_SET_REGS ioctls on the per-syscall hot path. The cap
+	 * returns a bitmap of supported reg classes; on x86 that's
+	 * KVM_SYNC_X86_REGS (bit 0) / _SREGS (bit 1) / _EVENTS (bit
+	 * 2). A zero return means the feature is unsupported and
+	 * we fall back to the ioctl path unconditionally.
+	 */
+	{
+		int caps = os_ioctl_generic(kfd, KVM_CHECK_EXTENSION,
+					    KVM_CAP_SYNC_REGS);
+
+		kvm_ctx.sync_regs_caps = caps > 0 ? (u64)caps : 0;
+	}
+
+	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu sync_regs_caps=0x%llx (memslot deferred to first KVM_RUN)\n",
 		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
-		kvm_ctx.run_size);
+		kvm_ctx.run_size,
+		(unsigned long long)kvm_ctx.sync_regs_caps);
 
 	/*
 	 * D-05 nested-virt detection (memo 08 sub-commit #7, minimal
