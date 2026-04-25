@@ -1830,6 +1830,122 @@ Same recipe as the G8 entry above. Build kvmint + kvmbench,
 strip, push to fleet, run `g8-remote-bench.sh`. The current
 build's git ref is `83c70100d16b` (post-G5 demotion).
 
+## 2026-04-24 — fallback-lever series: perf-getpid under kvmint on dev host
+
+Drives down the non-gadget KVM syscall cost one lever at a
+time. The vision's "1-11 µs naive KVM" target vs. the
+observed pre-series 142k cyc (~40 µs) gap is attributable
+entirely to UML-side bookkeeping; KVM's own VMEXIT +
+VMRESUME is ~1-2 µs on modern silicon. This section logs
+the gains from each low / medium-difficulty lever.
+
+### Setup
+
+- Host: dev host (Zen 4 class, TSC invariant).
+- Build: UML kernel at branch tip post-each-lever.
+- Binary: `tools/testing/selftests/um/perf-getpid/
+  getpid-loop`. Measurement is the per-call cycle count
+  over 100k iterations after a 1k-iteration warmup.
+- Run: `BACKENDS="kvm" UML_BINARY=/tmp/uml-kvmint/linux
+  UML_GADGET_BINARY=/tmp/uml-kvmbench/linux ./tools/
+  testing/selftests/um/perf-getpid/run-perf-getpid.sh`.
+  Take 5 samples per tier, report the mean.
+- Reference: seccomp backend @ ~41,700 cyc /
+  ~11,600 ns per getpid round-trip.
+
+### Tier-by-tier tally
+
+| Tier | Lever | kvm-fallback cyc (mean n=5) | vs seccomp | delta vs prev | cumulative |
+|------|-------|-----------------------------|------------|---------------|------------|
+| 0 | Baseline (post-audit-round-6) | 142,005 | 3.40× | — | — |
+| 1 | #2 sync_regs — REG ioctls → mmap | 135,988 | 3.26× | -6,017 | -4.2 % |
+| 2 | #3a MSR prime-once (STAR/LSTAR/FMASK/KERNEL_GS_BASE) | 123,561 | 2.96× | -12,427 | -13.0 % |
+| 3 | #3b SREGS skip when CR3/FS_BASE/GS_BASE unchanged | 113,775 | 2.73× | -9,786 | -19.9 % |
+
+Raw samples (cyc/call) per tier:
+
+```
+Tier 1 (sync_regs):        138116, 135018, 135845, 137855, 133104
+Tier 2 (MSR prime):        122516, 116866, 123342, 130243, 124840
+Tier 3 (SREGS skip):       113400, 118430, 113225, 115316, 108502
+```
+
+### Correctness gate per tier
+
+At each tier: kvm-bounds 6/6 both rows, df-preserve PASS
+across ptrace / seccomp / kvm / kvm-gadget, KUnit 35/35.
+(One kvm-bounds gadget-row flake during tier-3 validation
+resolved on retry — /dev/kvm ACL race with another process;
+not a code regression.)
+
+### Deferred / blocked levers
+
+- **#1** (drop `kvm_touch_all_user_vmas`): biggest
+  remaining lever (estimated 30-50 µs). Blocked on the
+  proper `handle_mm_fault` refactor of the host `#PF`
+  recovery (task #238). Attempt #2 triple-faulted at first
+  user RIP because lazy-only can't service first-fetch
+  when UML pgd has no entry for the binary text.
+- **#4** (skip shadow_fill when UML pgd unchanged):
+  entangled with #1. Kernel-side demand-paging via
+  `copy_to_user` inside handle_syscall still mutates UML
+  pgd outside our hooks; can't reliably detect "no
+  change" until #1 routes recovery through
+  `handle_mm_fault`.
+- **#5** (huge-page shadow PT): helps guest TLB
+  pressure, not per-syscall walk cost. Irrelevant for
+  perf-getpid post-warmup (no page faults in the hot
+  loop). Worth benchmarking once #1 lands and per-syscall
+  shrinks further.
+- **#6** (per-mm cached shadow PGD): reduces
+  context-switch cost. perf-getpid is single-task; no
+  switches. Worth landing when we add a multi-task
+  benchmark.
+- **#7** (batch VMEXITs): `um_backend_dispatch` is a
+  compile-time macro (direct call) post-D63, so the
+  outer-loop unwind is already ~free. Real savings
+  would require skipping `kvm_enter_guest` between
+  iterations — possible but medium-high difficulty and
+  mostly redundant after #3b.
+- **#9** (skip trace hooks when unused):
+  `audit_syscall_entry`, `secure_computing`,
+  `syscall_trace_enter` are already fast-path
+  gated in mainline. No measurable savings in
+  perf-getpid.
+
+### Where to look next
+
+The 19.9 % cumulative reduction exhausts the ioctl-elision
+levers. The remaining 2.73× gap vs seccomp is concentrated
+in `kvm_enter_guest`'s non-ioctl work: `kvm_touch_all_
+user_vmas` (O(pages × vmas)) + `kvm_shadow_fill_from_uml_
+pgd` (O(present PTEs)) + `kvm_gadget_state_refresh` +
+`kvm_gadget_vvar_refresh` + `kvm_shadow_map_page`
+idempotent re-map calls. Landing #1 (touch-all → lazy
+via handle_mm_fault) is the single biggest remaining
+step and would likely drive fallback below seccomp
+parity on its own.
+
+### Reproducibility
+
+```
+# After each lever, rebuild both binaries:
+touch arch/um/backend/kvm/thread.c
+make -C <src> ARCH=um O=/tmp/uml-kvmbench -j4
+touch arch/um/backend/kvm/thread.c
+make -C <src> ARCH=um O=/tmp/uml-kvmint -j4
+
+# Measure the fallback row 5x:
+sudo -n setfacl -m u:$(id -un):rw /dev/kvm
+for i in 1 2 3 4 5; do
+    BACKENDS="kvm" \
+    UML_BINARY=/tmp/uml-kvmint/linux \
+    UML_GADGET_BINARY=/tmp/uml-kvmbench/linux \
+    ./tools/testing/selftests/um/perf-getpid/run-perf-getpid.sh \
+        2>&1 | grep kvm-fallback | sed -E 's/.*cyc_per_call=([0-9]+).*/\1/'
+done
+```
+
 ## Pending measurements (placeholders)
 
 These are the entries we expect to add as the D workstream
