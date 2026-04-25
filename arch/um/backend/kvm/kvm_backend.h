@@ -668,6 +668,17 @@ void kvm_record_stop(struct kvm_record *rec);
 int kvm_record_replay(struct kvm_record *rec);
 void kvm_record_destroy(struct kvm_record *rec);
 
+/*
+ * Dispatcher-side observation hook for class-A syscall returns.
+ * Gated by static_branch_unlikely(&um_kvm_record_enabled) so non-
+ * recording runtime pays zero cost. Called from kvm_decode_syscall
+ * after handle_syscall produces a return value.
+ */
+extern struct static_key_false um_kvm_record_enabled;
+void kvm_record_observe_syscall(unsigned long syscall_nr,
+				long ret_value,
+				u64 arg0_data, u64 arg1_data);
+
 #endif
 
 /*

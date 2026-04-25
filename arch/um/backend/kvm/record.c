@@ -274,6 +274,101 @@ void kvm_record_stop(struct kvm_record *rec)
 }
 EXPORT_SYMBOL_GPL(kvm_record_stop);
 
+/*
+ * Internal: append an entry to the active record's log, growing
+ * the array on demand. Called only under
+ * static_branch_unlikely(&um_kvm_record_enabled).
+ *
+ * Locking: the spinlock guards the active-record pointer + the
+ * log mutation. Under ncpus=1 the lock is uncontended; under SMP
+ * (post-Phase-3) the same lock serializes per-vCPU recording.
+ */
+static int um_kvm_record_append(enum kvm_replay_kind kind,
+				u64 instr_count,
+				u64 d0, u64 d1, u64 d2, u64 d3)
+{
+	unsigned long flags;
+	struct kvm_record *rec;
+	int rc = 0;
+
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	rec = um_kvm_active_record;
+	if (!rec || !rec->recording) {
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		return 0;
+	}
+
+	if (rec->log_count >= rec->log_capacity) {
+		size_t new_cap = rec->log_capacity * 2;
+		struct kvm_replay_entry *new_log;
+
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		new_log = kvmalloc_array(new_cap,
+					 sizeof(struct kvm_replay_entry),
+					 GFP_KERNEL);
+		if (!new_log)
+			return -ENOMEM;
+
+		spin_lock_irqsave(&um_kvm_record_lock, flags);
+		/*
+		 * Re-check rec under the lock — it could have stopped
+		 * between drop + re-acquire. If it did, drop the new
+		 * buffer and bail.
+		 */
+		if (um_kvm_active_record != rec || !rec->recording) {
+			spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+			kvfree(new_log);
+			return 0;
+		}
+		memcpy(new_log, rec->log,
+		       rec->log_count * sizeof(struct kvm_replay_entry));
+		kvfree(rec->log);
+		rec->log = new_log;
+		rec->log_capacity = new_cap;
+	}
+
+	rec->log[rec->log_count].kind = kind;
+	rec->log[rec->log_count].instruction_count = instr_count;
+	rec->log[rec->log_count].data[0] = d0;
+	rec->log[rec->log_count].data[1] = d1;
+	rec->log[rec->log_count].data[2] = d2;
+	rec->log[rec->log_count].data[3] = d3;
+	rec->log_count++;
+
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+	return rc;
+}
+
+/**
+ * kvm_record_observe_syscall - record a class-A syscall result.
+ * @syscall_nr: the NR (e.g. __NR_clock_gettime).
+ * @ret_value: the return value the syscall produced (regs[HOST_AX]).
+ * @arg0_data: optional output-buffer payload (e.g. seconds field
+ *             for clock_gettime).
+ * @arg1_data: optional second payload (e.g. nseconds field).
+ *
+ * Appends a SYSCALL entry to the active record's log when
+ * recording. Called from kvm_decode_syscall's tail under the
+ * static-key gate; if no record is active the call is a no-op
+ * (early return inside um_kvm_record_append).
+ *
+ * The data payload is small + fixed-shape today (just two u64s).
+ * Future syscalls with larger output buffers (read/write of
+ * arbitrary buffers) need a side-buffer allocation; that's
+ * memo-13-step-3 territory and out of scope here.
+ */
+void kvm_record_observe_syscall(unsigned long syscall_nr,
+				long ret_value,
+				u64 arg0_data, u64 arg1_data)
+{
+	(void)um_kvm_record_append(KVM_REPLAY_SYSCALL,
+				   0,	/* instruction_count: TBD memo-13 step 4 */
+				   (u64)syscall_nr,
+				   (u64)ret_value,
+				   arg0_data, arg1_data);
+}
+EXPORT_SYMBOL_GPL(kvm_record_observe_syscall);
+
 /**
  * kvm_record_replay - restore the checkpoint and arm replay mode.
  * @rec: container with a previously-captured checkpoint.

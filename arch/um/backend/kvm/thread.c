@@ -21,6 +21,7 @@
  */
 #include <linux/errno.h>
 #include <linux/gfp.h>
+#include <linux/jump_label.h>
 #include <linux/kvm.h>
 #include <linux/mm.h>
 #include <linux/printk.h>
@@ -2262,6 +2263,22 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	pr_info_ratelimited("um: kvm: dispatching handle_syscall nr=%lu (via LSTAR trampoline)\n",
 			    PT_SYSCALL_NR(regs->gp));
 	handle_syscall(regs);
+
+	/*
+	 * Memo 13 step 2: observe the syscall return for record/replay
+	 * if recording is active. static_branch_unlikely turns into a
+	 * NOP when the gate is off, so non-recording runtime pays
+	 * zero cost. The current payload is the syscall NR + return
+	 * value + the first two output u64s pulled from the
+	 * regs->gp[HOST_*] convention; full output-buffer capture for
+	 * read/write-style syscalls comes in a follow-up.
+	 */
+	if (static_branch_unlikely(&um_kvm_record_enabled)) {
+		kvm_record_observe_syscall(syscall_nr,
+					   (long)regs->gp[HOST_AX],
+					   regs->gp[HOST_DI],
+					   regs->gp[HOST_SI]);
+	}
 
 	/*
 	 * Experiment #1 (post-audit-round-7): skip the post-syscall
