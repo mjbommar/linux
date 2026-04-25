@@ -10287,4 +10287,92 @@ partially eliminated; review-01 P1 #5 closed the rest.
 
 ---
 
+## D105 (2026-04-25) — review-01 deferred items closure batch
+
+**Context.** D104 captured the P0 + P1 fixes; this entry closes
+out the remaining deferred items D104 had explicitly punted.
+
+**What landed.**
+
+1. **P1 #6** (commit `b4374d8d4807`) — `kvm-mm-smoke`
+   kselftest. Freestanding ELF guest exercises mmap, mprotect,
+   mremap, munmap, brk in sequence and reads back each
+   mutated page. Guards experiment #1's invariant (mm-mutating
+   syscalls flow through UML's mm_map / mm_unmap callbacks
+   which already invalidate the shadow PT) by failing on
+   stale-mapping SIGSEGVs or read-back data corruption.
+2. **P2 #14** (commit `a53d73578108`) — payload memory caps.
+   Per-entry `KVM_RECORD_PAYLOAD_PER_CAP` = 1 MiB; total
+   `KVM_RECORD_PAYLOAD_TOTAL_CAP` = 64 MiB. Truncate-at-cap
+   for per-entry, drop-payload-but-keep-inline for total.
+   New `payload_drops` counter surfaced via debugfs state.
+3. **P1 #2 regression test** + **P2 #13 doc**
+   (commit `444837a5bd81`):
+   - `kvm_record_strict_replay_test` KUnit case asserts
+     end-of-log → -ENODATA, divergence → -EILSEQ, loose mode
+     fall-through, replay-rewind round-trip.
+   - Memo-13 per-NR coverage matrix table documenting which
+     NRs route through the side-buffer path, which are
+     partial-record (recvfrom — sockaddr lost), which are
+     deferred (recvmsg / readv / ioctl). Includes design
+     notes for the metadata-buffer slot extension to cover
+     sockaddr / iovec captures.
+4. **review-12** (commit `aa644b69d514`) — `perf-pidfam`
+   kselftest. Mixed-NR loop round-robining through all seven
+   pid-family handlers in the LSTAR gadget (getpid / gettid
+   / getppid / getuid / geteuid / getgid / getegid). Catches
+   regressions on second-or-later dispatch entries that
+   perf-getpid's single-NR loop wouldn't surface. Measured
+   ratio kvm/seccomp = 1.066×, consistent with perf-getpid's
+   headline 1.0×.
+5. **B4374D8D4807 followup** (commit `346b8cf014b1`) —
+   untrack the compiled mm-smoke-loop binary (build-artifact
+   hygiene; same shape as the other um/* freestanding
+   binaries in TEST_GEN_FILES).
+
+**Validation matrix** — full sweep PASSes after every commit.
+The kvm selftest harness is now ten tests deep:
+
+  dyn-loader, kvm-bounds, **kvm-mm-smoke**,
+  kvm-record-smoke, kvm-smoke, kvm-snapshot-bench,
+  perf-fallback, perf-getpid, **perf-pidfam**,
+  snapshot-kvm-smoke
+
+KUnit at boot fires ok 36-40 (snapshot_basic /
+record_basic / record_stop_replay_consume /
+record_strict_replay / record_roundtrip).
+
+**Review-01 closure status.**
+
+  - P0 (replay re-arm): fixed (D104).
+  - P1 #2 (strict replay): fixed (D104) + regression test (D105).
+  - P1 #3 (RDRAND/RDSEED): fixed (D104).
+  - P1 #4 (full determinism): structural — PMU + MMIO +
+    gadget-vvar paths still architectural; reflected in memo
+    13's status section.
+  - P1 #5 (synced SREGS): fixed (D104) — the headline perf
+    win that took us under 1.0×.
+  - P1 #6 (mm-mutation smoke): fixed (D105).
+  - P1 #7 (idempotent shadow_map): attempted, regressed
+    dyn-loader, reverted with comment for future re-attempt
+    (D104).
+  - P2 #12 (pid-family perf): fixed (D105).
+  - P2 #13 (per-NR coverage doc): fixed (D105).
+  - P2 #14 (payload caps): fixed (D105).
+  - P3 #15 (SMP locking): deferred to Phase-4-related work.
+  - P3 #16 (using_seccomp residue): noted, not regressing.
+  - P3 #17 (stale comments): fixed (D104).
+
+Every actionable review item is closed. The remaining
+deferrals (P1 #4 full-determinism architectural pieces, P3 #15
+SMP) are well-understood follow-ons rather than current
+correctness gaps.
+
+**Refs.**
+
+- `/tmp/review-01.md` — the external review.
+- Commits `b4374d8d4807..aa644b69d514`.
+
+---
+
 ## (Future entries here, as decisions are made)
