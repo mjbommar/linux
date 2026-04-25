@@ -2826,75 +2826,123 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 						    KVM_BOOTSTRAP_SYSRET_OFFSET),
 			       uml_physmem);
 			/*
-			 * Walk the guest CR3 by hand for
-			 * kvm_bootstrap_va so we can see whether
-			 * init's pgd actually covers the bootstrap
-			 * page. Under Policy A memslot, gpa = hostva -
-			 * uml_physmem, so each pgd/pud/pmd/pte physical
-			 * address in the tables is a gpa we can
-			 * re-translate via __va() to a host VA we can
-			 * safely read. Print the entry values + the
-			 * resolved host VA at each level. A zero entry
-			 * on the path means the VA is unmapped in this
-			 * CR3 — the smoking gun for the CPL=0 triple-
-			 * fault. Safe to do here because we already
-			 * panic next; no re-entry concern.
+			 * Walk the guest CR3 for diagnostic VAs so we
+			 * can see exactly which mapping is missing on a
+			 * triple-fault / SHUTDOWN. Under Policy A
+			 * memslot, gpa = hostva - uml_physmem, so each
+			 * pgd/pud/pmd/pte physical address in the
+			 * tables is a gpa we re-translate via __va() to
+			 * a host VA we can safely read. Print the entry
+			 * values at each level; a zero entry on the
+			 * path means the VA is unmapped in this CR3.
+			 *
+			 * Audit Finding 5 (2026-04-25): walk THREE
+			 * addresses, not just kvm_bootstrap_va — the
+			 * actual failing RIP and the cr2 (faulting VA
+			 * from the last #PF) are the load-bearing
+			 * targets for diagnosing dyn-loader / lazy-fault
+			 * cascades.
 			 */
 			{
-				u64 va  = kvm_bootstrap_va;
 				u64 cr3 = guest_cr3 & ~0xfffULL;
-				u64 *pgd_va, *pud_va, *pmd_va, *pte_va;
-				u64 pgde = 0, pude = 0, pmde = 0, pte = 0;
-				unsigned int pgd_i, pud_i, pmd_i, pte_i;
+				int wi;
+				const struct {
+					const char *label;
+					u64 va;
+				} walk_targets[] = {
+					{ "bootstrap_va",
+					  kvm_bootstrap_va },
+					{ "guest_rip",
+					  guest_rip },
+					{ "cr2",
+					  dump_rc >= 0 ?
+					  dump_sregs.cr2 : 0 },
+				};
 
-				pgd_i = (va >> 39) & 0x1ff;
-				pud_i = (va >> 30) & 0x1ff;
-				pmd_i = (va >> 21) & 0x1ff;
-				pte_i = (va >> 12) & 0x1ff;
-
-				if (cr3 && cr3 < physmem_size) {
-					pgd_va = (u64 *)__va(cr3);
-					pgde = pgd_va[pgd_i];
-					pr_err("um: kvm: pgd[%u]@0x%llx = 0x%llx\n",
-					       pgd_i, (unsigned long long)cr3,
-					       (unsigned long long)pgde);
-				} else {
+				if (!(cr3 && cr3 < physmem_size)) {
 					pr_err("um: kvm: CR3=0x%llx out of physmem (size=0x%llx); cannot walk\n",
 					       (unsigned long long)cr3,
 					       (unsigned long long)physmem_size);
 				}
-				if ((pgde & 1) && !(pgde & (1ULL << 7))) {
-					u64 pud_pa = pgde & 0x000ffffffffff000ULL;
+				for (wi = 0; wi < 3 && cr3 && cr3 < physmem_size; wi++) {
+					u64 va  = walk_targets[wi].va;
+					const char *lbl = walk_targets[wi].label;
+					u64 *pgd_va, *pud_va, *pmd_va, *pte_va;
+					u64 pgde = 0, pude = 0, pmde = 0, pte = 0;
+					unsigned int pgd_i, pud_i, pmd_i, pte_i;
 
-					pud_va = (u64 *)__va(pud_pa);
-					pude = pud_va[pud_i];
-					pr_err("um: kvm: pud[%u]@0x%llx = 0x%llx\n",
-					       pud_i,
-					       (unsigned long long)pud_pa,
-					       (unsigned long long)pude);
+					if (!va)
+						continue;
+					pgd_i = (va >> 39) & 0x1ff;
+					pud_i = (va >> 30) & 0x1ff;
+					pmd_i = (va >> 21) & 0x1ff;
+					pte_i = (va >> 12) & 0x1ff;
+
+					pgd_va = (u64 *)__va(cr3);
+					pgde = pgd_va[pgd_i];
+					pr_err("um: kvm: walk %s va=0x%llx pgd[%u]=0x%llx\n",
+					       lbl,
+					       (unsigned long long)va,
+					       pgd_i,
+					       (unsigned long long)pgde);
+
+					if ((pgde & 1) && !(pgde & (1ULL << 7))) {
+						u64 pud_pa = pgde & 0x000ffffffffff000ULL;
+
+						pud_va = (u64 *)__va(pud_pa);
+						pude = pud_va[pud_i];
+						pr_err("um: kvm: walk %s pud[%u]@0x%llx = 0x%llx\n",
+						       lbl, pud_i,
+						       (unsigned long long)pud_pa,
+						       (unsigned long long)pude);
+					}
+					if ((pude & 1) && !(pude & (1ULL << 7))) {
+						u64 pmd_pa = pude & 0x000ffffffffff000ULL;
+
+						pmd_va = (u64 *)__va(pmd_pa);
+						pmde = pmd_va[pmd_i];
+						pr_err("um: kvm: walk %s pmd[%u]@0x%llx = 0x%llx\n",
+						       lbl, pmd_i,
+						       (unsigned long long)pmd_pa,
+						       (unsigned long long)pmde);
+					}
+					if ((pmde & 1) && !(pmde & (1ULL << 7))) {
+						u64 pte_pa = pmde & 0x000ffffffffff000ULL;
+
+						pte_va = (u64 *)__va(pte_pa);
+						pte = pte_va[pte_i];
+						pr_err("um: kvm: walk %s pte[%u]@0x%llx = 0x%llx%s\n",
+						       lbl, pte_i,
+						       (unsigned long long)pte_pa,
+						       (unsigned long long)pte,
+						       (pte & 1) ? "" : " (NOT PRESENT)");
+					} else if ((pmde & 1) && (pmde & (1ULL << 7))) {
+						pr_err("um: kvm: walk %s 2MB huge page at pmd level\n",
+						       lbl);
+					}
 				}
-				if ((pude & 1) && !(pude & (1ULL << 7))) {
-					u64 pmd_pa = pude & 0x000ffffffffff000ULL;
+			}
+			/*
+			 * Audit Finding 5 follow-on: dump KVM_GET_VCPU_
+			 * EVENTS — exposes pending exception state. Tells
+			 * us if a #PF / #DF was queued at the moment of
+			 * SHUTDOWN, which discriminates "guest faulted
+			 * and we never delivered" from "guest delivered
+			 * but cascaded".
+			 */
+			{
+				struct kvm_vcpu_events ev;
 
-					pmd_va = (u64 *)__va(pmd_pa);
-					pmde = pmd_va[pmd_i];
-					pr_err("um: kvm: pmd[%u]@0x%llx = 0x%llx\n",
-					       pmd_i,
-					       (unsigned long long)pmd_pa,
-					       (unsigned long long)pmde);
-				}
-				if ((pmde & 1) && !(pmde & (1ULL << 7))) {
-					u64 pte_pa = pmde & 0x000ffffffffff000ULL;
-
-					pte_va = (u64 *)__va(pte_pa);
-					pte = pte_va[pte_i];
-					pr_err("um: kvm: pte[%u]@0x%llx = 0x%llx%s\n",
-					       pte_i,
-					       (unsigned long long)pte_pa,
-					       (unsigned long long)pte,
-					       (pte & 1) ? "" : " (NOT PRESENT)");
-				} else if ((pmde & 1) && (pmde & (1ULL << 7))) {
-					pr_err("um: kvm: 2MB huge page at pmd level\n");
+				if (os_ioctl_generic(vcpu_fd,
+						     KVM_GET_VCPU_EVENTS,
+						     (unsigned long)&ev) >= 0) {
+					pr_err("um: kvm: vcpu_events exc.injected=%u nr=%u has_err=%u err=0x%x interrupt.injected=%u nr=0x%x\n",
+					       ev.exception.injected,
+					       ev.exception.nr,
+					       ev.exception.has_error_code,
+					       ev.exception.error_code,
+					       ev.interrupt.injected,
+					       ev.interrupt.nr);
 				}
 			}
 			if (run->exit_reason == KVM_EXIT_FAIL_ENTRY) {
