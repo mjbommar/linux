@@ -9796,4 +9796,90 @@ just bump the margin in this single line.
 
 ---
 
+## D99 (2026-04-24) — G6 attempt #2: lazy-only #PF path triple-faults at first user RIP; deferred again
+
+**Decision.** Keep `kvm_touch_all_user_vmas()` and its
+two call sites (kvm_enter_guest pre-KVM_RUN +
+post-syscall). Task #238 stays pending — the simple
+"drop the eager prefault and rely on lazy #PF recovery"
+patch is not sufficient.
+
+**Attempt.**
+
+```
+- touched = kvm_touch_all_user_vmas(mm);
+- filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
++ filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
+```
+
+at both call sites (and remove the `kvm_touch_all_
+user_vmas` static helper itself).
+
+**Empirical result on dev host.**
+
+- KUnit: 35/35 pass (host-only tests; no guest exec).
+- kvm-bounds: both kvm-fallback and kvm-gadget rows
+  FAIL with "no KVM_BOUNDS line emitted". The kernel
+  doesn't reach the test binary's stdout write.
+- Diagnostic dump shows:
+  - `um: kvm enter_guest: filled 1 shadow PTEs (lazy
+    #PF for the rest)` (only the user stack).
+  - `um: kvm run_userspace: unrecoverable exit 8
+    (SHUTDOWN)` on the very first KVM_RUN.
+  - `um: kvm: guest RIP=0x401340 ... CPL=3 is_user=1`
+    — vCPU RIP was at the user binary's `_start`, but
+    the CPU triple-faulted before any user instruction
+    successfully retired.
+
+**Why the lazy-only path triple-faulted (hypothesis,
+unverified).** The first user instruction fetch at
+`_start` (RIP 0x401340) hit a shadow-PT miss → `#PF`.
+The CPU pushed an iretq frame onto IST[1] (= bootstrap_
+va + 0x4000, post-D96), then jumped to IDT[14]'s
+handler at `bootstrap_va + 0x4a0`. Either (a) the IST
+stack-page push double-faulted because some
+intermediate page-table entry on the path to page 2
+got cleared/never-installed in the lazy regime, or (b)
+the host's `#PF` dispatch can't service `#PF` raised
+*on instruction fetch from a user page that's not yet
+in UML's logical pgd* the way it can service `#PF`
+raised by the gadget's `copy_to_user` ring-0 store.
+Both candidates need targeted instrumentation
+(`pr_info` at every step of the host `#PF` dispatch +
+a `KVM_GET_VCPU_EVENTS` / `KVM_GET_DEBUGREGS` snapshot
+right at SHUTDOWN) to disambiguate.
+
+The previously-deferred-attempt notes (G6 first cut)
+saw a similar shape: boot got to init, faulted at
+cr2=0x40200f / rip=0x401084, `kept refilling 4 PTEs
+but the address never installed`. Same symptom: lazy
+recovery can't bridge the first user-page-not-in-uml-
+pgd-yet gap. The eager touch has been doing
+double-duty: forcing UML's logical pgd to populate
+*before* shadow_fill, and providing initial coverage
+of every user VMA so the first KVM_RUN doesn't hit a
+miss on its first instruction.
+
+**Why this needs the proper handle_mm_fault refactor
+(scope of #238).** The clean fix is to have the host
+`#PF` recovery call into UML's full fault path
+(`handle_mm_fault` via `handle_page_fault`), not just
+the side-effect of `copy_from_user` triggering it.
+That covers user pages that are demand-paged from the
+binary file mapping but haven't been faulted yet —
+the very first instruction fetch case.
+
+For now, keep the eager touch. Audit P2 status
+unchanged.
+
+**Refs.**
+
+- External audit P2 open #4.
+- D85 (F9) — write-back removed; read probe kept.
+- task #238 — still pending; this row records the
+  negative result so the next attempt knows what
+  doesn't work.
+
+---
+
 ## (Future entries here, as decisions are made)
