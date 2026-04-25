@@ -10197,4 +10197,94 @@ completing v1 polish work in the same session.
 
 ---
 
+## D104 (2026-04-25) — review-01 driven fixes; kvm/seccomp now beats parity
+
+**Context.** External review (`/tmp/review-01.md`) read the tree
+at HEAD `dc479ef4b54f`, finding one P0 + several P1s on the
+record/replay path + a missed sync-regs opportunity in the
+generic CPL read.
+
+**Findings addressed.**
+
+1. **P0** — `kvm_record_replay()` didn't re-arm the active-record
+   slot or static-key gate after `kvm_record_stop()` cleared
+   them, so `start → stop → replay → consume` silently fell
+   through to live syscalls. Commit `785f8b0c905f`. Companion
+   regression test: new `kvm_record_stop_replay_consume_test`
+   KUnit case + runner gate.
+2. **P1 #2** — replay divergence (-EILSEQ) and end-of-log fell
+   through to live `handle_syscall`. Default replay shouldn't
+   silently extend recording past divergence. Commit
+   `785f8b0c905f` adds `strict_replay` (default true): strict
+   mode returns `-ENODATA` on end-of-log, `-EILSEQ` on
+   divergence, and the dispatcher fail-stops with `-EIO` to
+   the user task. Loose mode preserves the v1 fall-through.
+   Debugfs `kvm_record_ctl` gains `strict` / `loose` commands.
+3. **P1 #3** — host RDRAND/RDSEED CPUID bits passed through
+   unchanged, leaving a hardware-RNG hole outside the syscall
+   log. Commit `8046bd0a8058` masks both bits in
+   `kvm_ensure_cpuid_done` before `KVM_SET_CPUID2`. Glibc's
+   software DRBG fallback covers the common case; getrandom(2)
+   goes through the syscall record/replay path.
+4. **P1 #5** — every KVM_RUN exit issued an unconditional
+   `KVM_GET_SREGS` ioctl to derive CPL for is_user, even
+   though we'd already opted into `KVM_SYNC_X86_SREGS` for the
+   #PF CR2 read. Commit `8046bd0a8058` extends that to the
+   generic post-exit CPL read: `run->s.regs.sregs.cs.selector`
+   replaces the ioctl when the cap is set. **Major perf win:**
+   eliminated the per-VMEXIT ioctl took perf-fallback from
+   1.14× → **0.96-0.78×** kvm/seccomp — kvm now beats seccomp
+   on the headline benchmark.
+5. **P1 #7 (attempted)** — making `kvm_shadow_map_page` only
+   dirty on changed PTE regressed dyn-loader. Commit
+   `52cbf6bb0d20` reverts; comment records the negative result.
+   The post-P1#5 1.0× ratio makes this optimization non-load-
+   bearing for the perf goal anyway.
+6. **P3 #17** — stale SYSRETQ comments referring to the
+   bootstrap re-entry path (which is IRETQ post-#272). Commit
+   `1ea615dbb5f3` updates four comments + the `record.c` file
+   header to match today's implementation.
+
+**Bonus**: payload memory accounting (P2 #14). New
+`rec->payload_bytes` field tracks total kvmalloc'd side-buffer
+bytes; surfaced via `/sys/kernel/debug/um/kvm_record_state`.
+Per-entry / total cap enforcement deferred to a future
+Kconfig.
+
+**Validation matrix** (post-each-commit):
+
+  - All eight kvm kselftests PASS.
+  - perf-getpid:    ratio_kvm/seccomp = **0.97×** (was 1.15×)
+  - perf-fallback:  ratio_kvm/seccomp = **0.78-0.96×** (was 1.15×)
+  - KUnit ok 36 / 37 / 38 / 39 fire (snapshot_basic /
+    record_basic / record_stop_replay_consume /
+    record_roundtrip).
+
+**Outcome.** The vision target was kvm/seccomp ≤ 2× then ≤ 1.2×.
+We're now ≤ 1.0× — kvm beats seccomp. The hot-path floor was
+the per-VMEXIT GET_SREGS ioctl that experiment #2 had only
+partially eliminated; review-01 P1 #5 closed the rest.
+
+**Findings deferred (per review's recommendations).**
+
+- P1 #4: full deterministic replay needs PMU interrupt
+  boundaries + MMIO + RDRAND/RDSEED (now done) + gadget-vvar
+  paths. v1 = "syscall-log primitive", not yet "deterministic
+  replay". Memo 13 status reflects this.
+- P1 #6: focused mm-mutation kvm smoke (mmap/munmap/mprotect/
+  mremap/brk/execve) — post-syscall-refill removal invariant
+  test. Bounded but not yet shipped.
+- P2 #13: per-NR coverage matrix in docs.
+- P2 #14: payload memory caps (visibility shipped, caps
+  deferred).
+- P3 #15: SMP-shape tightening of the active-record slot's
+  locking.
+
+**Refs.**
+
+- `/tmp/review-01.md` — the external review.
+- Commits `785f8b0c905f..1ea615dbb5f3`.
+
+---
+
 ## (Future entries here, as decisions are made)
