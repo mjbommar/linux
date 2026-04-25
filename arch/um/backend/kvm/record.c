@@ -38,13 +38,35 @@
  */
 
 #include <linux/errno.h>
+#include <linux/export.h>
+#include <linux/jump_label.h>
 #include <linux/kvm.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
 
 #include "kvm_backend.h"
+
+/*
+ * Hot-path gate. Off in every shipped profile; flipped on by
+ * kvm_record_start when an active container is registered.
+ * Dispatcher hooks (memo 13 step 2-6) check
+ * static_branch_unlikely(&um_kvm_record_enabled) before doing
+ * any record-side work, so non-record builds + non-recording
+ * runtime pay zero per-syscall cost.
+ *
+ * The active record pointer is a global single-slot. ncpus=1
+ * UML guarantees at most one record container active at a time;
+ * the spinlock guards against debugfs racing kernel-side
+ * teardown but is uncontended in the steady state.
+ */
+DEFINE_STATIC_KEY_FALSE(um_kvm_record_enabled);
+EXPORT_SYMBOL_GPL(um_kvm_record_enabled);
+
+static DEFINE_SPINLOCK(um_kvm_record_lock);
+static struct kvm_record *um_kvm_active_record;
 
 /*
  * Source-of-nondeterminism tags. Each kvm_replay_entry is one
@@ -122,6 +144,12 @@ void kvm_record_destroy(struct kvm_record *rec)
 {
 	if (!rec)
 		return;
+	/*
+	 * Defensive: if the caller forgot to stop, drop the gate
+	 * before freeing so the dispatcher hook doesn't dereference
+	 * freed memory.
+	 */
+	kvm_record_stop(rec);
 	if (rec->checkpoint)
 		kvm_snapshot_destroy(rec->checkpoint);
 	kvfree(rec->log);
@@ -146,6 +174,7 @@ EXPORT_SYMBOL_GPL(kvm_record_destroy);
  */
 int kvm_record_start(struct kvm_record *rec)
 {
+	unsigned long flags;
 	int rc;
 
 	if (!rec)
@@ -154,6 +183,21 @@ int kvm_record_start(struct kvm_record *rec)
 		pr_warn("um: kvm record_start: container already armed\n");
 		return -EBUSY;
 	}
+
+	/*
+	 * Single-active-record discipline: the dispatcher hooks
+	 * consult one global pointer, so refuse a second start if
+	 * another container already holds the slot. Lock-protected
+	 * because debugfs / kselftest writers can race the
+	 * controlling process's teardown.
+	 */
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	if (um_kvm_active_record) {
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		pr_warn("um: kvm record_start: another record is already active\n");
+		return -EBUSY;
+	}
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 
 	rec->checkpoint = kvm_snapshot_alloc();
 	if (!rec->checkpoint)
@@ -170,6 +214,17 @@ int kvm_record_start(struct kvm_record *rec)
 	rec->replaying = false;
 	rec->log_count = 0;
 	rec->replay_cursor = 0;
+
+	/*
+	 * Register the container + flip the gate. The unlikely-key
+	 * branch makes non-record builds (and non-recording runtime)
+	 * pay zero per-syscall cost; only when at least one record
+	 * is active does the dispatcher consult um_kvm_active_record.
+	 */
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	um_kvm_active_record = rec;
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+	static_branch_enable(&um_kvm_record_enabled);
 
 	pr_info("um: kvm record_start: armed (checkpoint captured, log capacity=%zu)\n",
 		rec->log_capacity);
@@ -189,6 +244,9 @@ EXPORT_SYMBOL_GPL(kvm_record_start);
  */
 void kvm_record_stop(struct kvm_record *rec)
 {
+	unsigned long flags;
+	bool was_active;
+
 	if (!rec)
 		return;
 	if (!rec->recording && !rec->replaying)
@@ -196,6 +254,21 @@ void kvm_record_stop(struct kvm_record *rec)
 
 	rec->recording = false;
 	rec->replaying = false;
+
+	/*
+	 * Drop the gate + clear the active pointer if WE were the
+	 * registered container. Other rec instances (rare under
+	 * single-active discipline but defensible) leave the gate
+	 * alone — only the one currently registered turns it off.
+	 */
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	was_active = (um_kvm_active_record == rec);
+	if (was_active)
+		um_kvm_active_record = NULL;
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+	if (was_active)
+		static_branch_disable(&um_kvm_record_enabled);
+
 	pr_info("um: kvm record_stop: disarmed (%zu log entries captured)\n",
 		rec->log_count);
 }
