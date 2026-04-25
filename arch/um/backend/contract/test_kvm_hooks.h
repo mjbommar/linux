@@ -112,5 +112,18 @@ enum kvm_syscall_class kvm_classify_syscall(unsigned long nr);
 #define _TEST_UM_KVM_SYSCALL_PORT	0xf4
 #define _TEST_UM_KVM_SYSRETQ_PORT	0xf5
 
+/*
+ * Task #250 v2 / memo 12 snapshot primitives. Same private-header
+ * duplication discipline as the rest of this file. Forward declare
+ * the opaque struct so the test TU can hold pointers without
+ * needing the full layout.
+ */
+struct kvm_snapshot;
+struct kvm_snapshot *kvm_snapshot_alloc(void);
+int kvm_snapshot_capture(struct kvm_snapshot *snap);
+int kvm_snapshot_restore_full(struct kvm_snapshot *snap);
+void kvm_snapshot_free(struct kvm_snapshot *snap);
+void kvm_snapshot_destroy(struct kvm_snapshot *snap);
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 #endif /* __ARCH_UM_BACKEND_CONTRACT_TEST_KVM_HOOKS_H */
