@@ -227,6 +227,18 @@ int kvm_init(const struct um_backend_args *args)
 	refcount_set(&kvm_ctx.mm_refcount, 0);
 
 	/*
+	 * Task #273: CPUID passthrough is deferred to first KVM_RUN
+	 * via kvm_ensure_cpuid_done(). kvm_init() runs from init_
+	 * backend() during linux_main(), BEFORE mm_init() brings up
+	 * the buddy allocator (see the alloc_page() comment further
+	 * down for the same constraint). kzalloc with GFP_KERNEL
+	 * returns NULL here. The first caller that actually needs the
+	 * CPUID installed is kvm_enter_guest, which only runs after
+	 * full kernel bring-up; deferring keeps the code path simple
+	 * and matches the existing kvm_shadow_pgd lazy-init pattern.
+	 */
+
+	/*
 	 * Perf-lever #2: probe KVM_CAP_SYNC_REGS. When supported,
 	 * GP regs + RIP + RFLAGS travel through the mmap'd kvm_run
 	 * struct at run->s.regs.regs, eliminating KVM_GET_REGS +
@@ -317,6 +329,81 @@ int kvm_init(const struct um_backend_args *args)
 
 	return 0;
 }
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+/*
+ * Lazy one-shot host-CPUID passthrough (task #273). Idempotent: the
+ * first kvm_enter_guest call calls this; subsequent calls fast-path
+ * out via the cpuid_done flag. Deferred out of kvm_init() because
+ * the buddy allocator isn't up yet at init_backend() time (same
+ * reason the shadow_pgd alloc is lazy — see lifecycle.c:359 comment).
+ *
+ * Two-step KVM dance:
+ *   1. KVM_GET_SUPPORTED_CPUID (VM-fd ioctl) — KVM fills the
+ *      kvm_cpuid2 buffer with everything it can virtualize on this
+ *      host. nent on input is buffer capacity; on output it's the
+ *      count actually filled.
+ *   2. KVM_SET_CPUID2 (vCPU-fd ioctl) — install on vCPU. Must
+ *      happen before first KVM_RUN, which kvm_enter_guest also
+ *      gates.
+ *
+ * Buffer size: KVM_MAX_CPUID_ENTRIES (kvm_host.h) is 256 in
+ * upstream; we use the same conservative cap.
+ *
+ * Failure here is non-fatal — log and continue with KVM's default
+ * feature set, matching pre-#273 behaviour. Workloads that don't
+ * dynamically link against modern glibc (e.g. perf-getpid /
+ * df-preserve / kvm-bounds, all freestanding ELF) keep working
+ * regardless. Workloads that DO need x86-64-v3 features (any
+ * dynamically-linked binary on a recent Ubuntu / Fedora host) get
+ * the host's feature set on success.
+ */
+int kvm_ensure_cpuid_done(void)
+{
+	const u32 max_entries = 256;
+	size_t buf_sz;
+	struct kvm_cpuid2 *cpuid;
+	int rc;
+
+	if (kvm_ctx.cpuid_done)
+		return 0;
+	if (kvm_ctx.kvm_fd < 0 || kvm_ctx.vcpu0_fd < 0)
+		return -ENODEV;
+
+	buf_sz = sizeof(struct kvm_cpuid2) +
+		 max_entries * sizeof(struct kvm_cpuid_entry2);
+	cpuid = kzalloc(buf_sz, GFP_KERNEL);
+	if (!cpuid) {
+		pr_warn_once("um: kvm: cpuid kzalloc failed; vCPU CPUID stays at KVM default (host-libc may refuse to load if compiled for x86-64-v3+)\n");
+		return -ENOMEM;
+	}
+
+	cpuid->nent = max_entries;
+	rc = os_ioctl_generic(kvm_ctx.kvm_fd, KVM_GET_SUPPORTED_CPUID,
+			      (unsigned long)cpuid);
+	if (rc < 0) {
+		pr_warn_once("um: kvm: KVM_GET_SUPPORTED_CPUID failed (%d); using KVM-default CPUID\n",
+			     rc);
+		goto out_free;
+	}
+
+	rc = os_ioctl_generic(kvm_ctx.vcpu0_fd, KVM_SET_CPUID2,
+			      (unsigned long)cpuid);
+	if (rc < 0) {
+		pr_warn_once("um: kvm: KVM_SET_CPUID2 failed (%d); using KVM-default CPUID\n",
+			     rc);
+		goto out_free;
+	}
+
+	kvm_ctx.cpuid_done = true;
+	pr_info("um: kvm: CPUID passthrough installed (%u entries; host x86 features visible to guest)\n",
+		cpuid->nent);
+
+out_free:
+	kfree(cpuid);
+	return rc;
+}
+#endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 void kvm_shutdown(void)
 {

@@ -57,6 +57,18 @@ struct kvm_um {
 					 * allocated once per vCPU and never
 					 * moves.
 					 */
+	bool		cpuid_done;	/* KVM_SET_CPUID2 installed on
+					 * vcpu0 (task #273). One-shot: set
+					 * on first kvm_enter_guest, never
+					 * cleared. Deferred from kvm_init
+					 * because kzalloc isn't available
+					 * during init_backend() (slab not
+					 * up yet). Without the install,
+					 * KVM exposes a minimal CPUID and
+					 * modern glibc compiled for x86-64-
+					 * v3 refuses to load with `CPU ISA
+					 * level is lower than required`.
+					 */
 	bool		sregs_primed;	/* KVM_SET_SREGS called at least
 					 * once. Combined with the cached
 					 * CR3 / FS_BASE / GS_BASE below, we
@@ -356,6 +368,18 @@ struct kvm_gadget_vvar {
  * is set after init_backend()" rationale.
  */
 int kvm_ensure_memslot(void);
+
+/*
+ * Task #273: one-shot lazy CPUID passthrough. Called from
+ * kvm_enter_guest before the first KVM_RUN. Sets kvm_um.cpuid_done
+ * on success. Idempotent — subsequent calls fast-path out.
+ * No-op stub when CONFIG_UM_BACKEND_KVM_INTEGRATED=n.
+ */
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+int kvm_ensure_cpuid_done(void);
+#else
+static inline int kvm_ensure_cpuid_done(void) { return 0; }
+#endif
 
 /*
  * Long-mode SREGS setup helpers (D-04b.1a, arch/um/backend/kvm/

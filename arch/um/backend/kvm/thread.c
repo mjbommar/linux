@@ -1561,6 +1561,14 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	if (rc < 0)
 		return rc;
 
+	/*
+	 * Task #273: install host CPUID on the vCPU before its first
+	 * KVM_RUN so the guest sees real host x86 features (AVX2 /
+	 * x86-64-v3 etc). Idempotent fast-path after the first call;
+	 * non-fatal failure (logged once, kvm_enter_guest continues).
+	 */
+	(void)kvm_ensure_cpuid_done();
+
 	rc = kvm_enter_guest_init_bootstrap();
 	if (rc < 0)
 		return rc;
