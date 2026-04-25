@@ -188,6 +188,57 @@ reads go through `kvm_decode_mmio` in the integrated path. The
 record/replay hook is in the same place: capture the byte(s)
 returned by the host, replay from log on replay.
 
+## Per-NR record/replay coverage matrix
+
+The dispatcher in `kvm_record_observe_dispatch()` routes specific
+syscall numbers through the side-buffer path so replay restores
+their output bytes. The default for unspecial-cased NRs is
+inline-only (NR + return value, no payload). Strict replay (the
+default) refuses to dispatch on any NR with a partial-record
+contract — operators that need to record those NRs flip the
+record container to loose mode (`echo loose >
+/sys/kernel/debug/um/kvm_record_ctl`) and accept that replay
+correctness is best-effort.
+
+| NR              | side-buffer | sockaddr | iovec | strict-replay safe? | notes                                      |
+|-----------------|-------------|----------|-------|---------------------|--------------------------------------------|
+| `getrandom`     | yes         | n/a      | n/a   | **yes**             | rdi=buf, rsi=len; ret=bytes filled         |
+| `read`          | yes         | n/a      | n/a   | **yes**             | rdi=fd, rsi=buf, rdx=count                 |
+| `pread64`       | yes         | n/a      | n/a   | **yes**             | same shape as read; offset arg unused      |
+| `recvfrom`      | yes (data)  | **no**   | n/a   | partial             | data buf only; src_addr / addrlen lost     |
+| `recvmsg`       | not yet     | not yet  | not yet | no                | scatter-gather msghdr — ladder rung        |
+| `readv`         | not yet     | n/a      | not yet | no                | iovec walk — ladder rung                   |
+| `ioctl`         | not yet     | n/a      | n/a   | no                  | per-driver knowledge — case by case        |
+| getpid family   | inline-only | n/a      | n/a   | yes (return only)   | gadget-handled; only fallback path records |
+| brk/mmap/munmap | inline-only | n/a      | n/a   | yes (return only)   | mm-mutating; no user-output-buffer payload |
+| anything else   | inline-only | n/a      | n/a   | yes (return only)   | NR + return; replay restores ret           |
+
+**Open questions on partial-record NRs:**
+
+- For `recvfrom` with src_addr capture: extending
+  `struct kvm_replay_entry` with a second side-buffer slot
+  ("metadata buffer" for sockaddr / addrlen / msg_control)
+  closes the gap. Lifecycle ownership matches the existing
+  payload field. Future ladder rung — bounded but worth its
+  own commit since it touches the entry layout.
+- For `recvmsg` / `readv`: the kernel's iovec walk is the
+  source of truth for which user buffers got filled and how
+  much. Recording would walk the iovec on the record side and
+  emit one side-buffer per iov entry (or a single packed
+  buffer with a small header). Same metadata-slot extension as
+  recvfrom would carry the iov-array snapshot.
+- For `ioctl`: per-driver. Most ioctls have either no output
+  buffer (set-only commands) or a fixed-size out-arg the
+  dispatcher can capture if it knows the cmd code. A
+  whitelist mapping `cmd → output_size` is the pragmatic
+  approach; populated incrementally as driver-specific record/
+  replay needs emerge.
+
+Until those land, the operator's options are (a) avoid those
+NRs in record-mode workloads, (b) use loose-replay mode and
+accept best-effort correctness, or (c) extend the dispatcher
+with a per-driver case.
+
 ## Sequencing
 
 | Step | Effort | Output |

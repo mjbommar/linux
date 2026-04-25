@@ -147,6 +147,8 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 			       u64 *user_buf_va_out,
 			       const void **payload_out,
 			       size_t *payload_len_out);
+bool kvm_record_strict_replay(void);
+int kvm_record_set_strict_replay(bool strict);
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 #endif /* __ARCH_UM_BACKEND_CONTRACT_TEST_KVM_HOOKS_H */

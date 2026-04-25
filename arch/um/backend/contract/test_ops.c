@@ -1166,6 +1166,88 @@ static void kvm_record_stop_replay_consume_test(struct kunit *test)
 }
 
 /*
+ * Review-01 P1 #2 regression test: strict replay fail-stop.
+ *
+ * In strict mode (default), end-of-log returns -ENODATA from
+ * kvm_record_consume_syscall and divergence returns -EILSEQ.
+ * Loose mode returns 0 in both cases (caller falls through to
+ * live handle_syscall — the v1 behaviour).
+ *
+ * Test:
+ *   1. start → observe one entry → no stop (still recording)
+ *   2. flip to replay (we can do that without stop because
+ *      replay accepts the active container)
+ *   3. consume the one entry — must succeed
+ *   4. consume again with same NR — must return -ENODATA
+ *      (strict end-of-log) since cursor exhausted
+ *   5. flip to loose, consume again — must return 0 (loose
+ *      end-of-log)
+ *   6. flip back to strict, consume with WRONG NR after
+ *      replay-rewind — must return -EILSEQ
+ *
+ * Skips on early-boot when start can't capture.
+ */
+static void kvm_record_strict_replay_test(struct kunit *test)
+{
+	struct kvm_record *rec;
+	long ret_out;
+	int rc;
+
+	rec = kvm_record_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_record_start(rec);
+	if (rc < 0) {
+		kunit_info(test, "kvm_record_start rc=%d (skipping; expected on early boot)\n",
+			   rc);
+		kvm_record_destroy(rec);
+		return;
+	}
+
+	/* Default: strict_replay = true. */
+	KUNIT_EXPECT_EQ(test, kvm_record_strict_replay(), false);
+	/* Wait — strict_replay() returns true ONLY when replaying;
+	 * during recording it returns false. Verify that contract.
+	 */
+
+	kvm_record_observe_syscall(__NR_getpid, 9999, 0, 0);
+
+	rc = kvm_record_replay(rec);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, kvm_record_strict_replay(), true);
+
+	/* Step 3: cursor 0 → consume getpid → 1. */
+	rc = kvm_record_consume_syscall(__NR_getpid, &ret_out,
+					NULL, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, ret_out, (long)9999);
+
+	/* Step 4: cursor exhausted, strict → -ENODATA. */
+	rc = kvm_record_consume_syscall(__NR_getpid, &ret_out,
+					NULL, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, rc, -ENODATA);
+
+	/* Step 5: flip to loose, end-of-log returns 0. */
+	rc = kvm_record_set_strict_replay(false);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	rc = kvm_record_consume_syscall(__NR_getpid, &ret_out,
+					NULL, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+
+	/* Step 6: flip back to strict, replay (rewind), consume
+	 * with WRONG NR → -EILSEQ. */
+	rc = kvm_record_set_strict_replay(true);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	rc = kvm_record_replay(rec);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	rc = kvm_record_consume_syscall(__NR_clock_gettime, /* not getpid */
+					&ret_out, NULL, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, rc, -EILSEQ);
+
+	kvm_record_destroy(rec);
+}
+
+/*
  * Memo 13 round-trip: drive the record/replay log directly via
  * the C API without needing a userspace driver. The record-side
  * hook (kvm_record_observe_syscall) only fires under the static-
@@ -1564,6 +1646,7 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_snapshot_basic_test),
 	KUNIT_CASE(kvm_record_basic_test),
 	KUNIT_CASE(kvm_record_stop_replay_consume_test),
+	KUNIT_CASE(kvm_record_strict_replay_test),
 	KUNIT_CASE(kvm_record_roundtrip_test),
 #endif
 	{}
