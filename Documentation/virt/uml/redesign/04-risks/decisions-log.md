@@ -9690,4 +9690,110 @@ negligible; keep.
 
 ---
 
+## D98 (2026-04-24) — G1-range-followon: range-aware user-pointer bound via task_size_cap = task_size - 16
+
+**Decision.** Subtract a 16-byte margin from
+`task_size_cap` at vvar seed time
+(`kvm_gadget_vvar_alloc()`):
+
+    kvm_ctx.gadget_vvar->task_size_cap = task_size - 16;
+
+The gadget's inline `cmp ptr, %gs:0x1030; jbe fallback`
+sequence is unchanged — only the seed value shrinks.
+With a 16 B margin, a base-only compare effectively
+covers the whole write range of any current gadget
+handler.
+
+**Audit finding (P1 open #3 from external review).**
+The G1 inline check (D93) compares the user pointer
+against `task_size_cap` only — it does not factor in
+the size of the write. Per-handler write sizes:
+
+- `clock_gettime`: 16 bytes (struct __kernel_timespec —
+  two u64s).
+- `time`:           8 bytes (one u64).
+- `getcpu`:         8 bytes (two u32s, written to two
+                    distinct pointers — but each
+                    individual write is 4 bytes).
+
+So a pointer in `[task_size - 15, task_size - 1]` would
+pass the gadget's cmp (base < cap) yet write past
+`task_size`. UML's `access_ok()` correctly rejects this
+via the `addr + size < TASK_SIZE` check; the gadget did
+not.
+
+**Why margin-in-seed instead of asm rewrite.** The
+alternative is per-handler `cmp ptr, %gs:cap_clock /
+cap_time / cap_getcpu` with three cap slots in vvar.
+That works but requires:
+
+- 3 new vvar offsets + 3 separate seeds.
+- 3 separate cmps in the gadget asm — ~9 new bytes per
+  handler × 3 handlers = 27 LSTAR bytes, pushing into
+  the already-tight reach budget.
+- KUnit byte-match update for the new LSTAR layout.
+
+The single-cap-with-margin alternative is one line
+changed, no asm rewrite, no LSTAR-layout drift, and
+preserves every property the audit asked for.
+
+**Net user-visible effect.** Pointers with base in
+`[task_size - 16, task_size - 1]` now route to the
+SYSCALL fallback rather than the gadget. The fallback
+runs through `handle_syscall` → kernel `clock_gettime` /
+`time` / `getcpu` → standard `access_ok` + `copy_to_user`
+path, which either accepts or rejects per POSIX
+semantics (with the proper `ptr + size <= TASK_SIZE`
+check). User-visible behaviour for legal writes is
+unchanged; only the fast path narrows by 16 bytes at
+the very top of user space — a vanishingly rare case
+in real workloads.
+
+**Why not `task_size - 8` or `task_size - 4`.** Those
+also work, but only for the smaller-write handlers.
+Picking the worst case (16 B for `clock_gettime`)
+covers every current handler with a single seed and
+provides headroom for future handlers (e.g. a
+`gettimeofday` gadget would also write 16 bytes via
+`struct timeval`). If a future handler needs > 16 B,
+just bump the margin in this single line.
+
+**Implementation.**
+
+- `arch/um/backend/kvm/lifecycle.c::kvm_gadget_vvar_
+  alloc()` — change `task_size_cap = task_size` to
+  `task_size_cap = task_size - 16`.
+- `pr_info` boot line now shows both `task_size` and
+  the derived `task_size_cap` so the margin is
+  visible at boot.
+- No gadget asm change. No KUnit update.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass (no test asserts an exact
+  task_size_cap value).
+- kvm-bounds: kvm-fallback + kvm-gadget both 6/6
+  -EFAULT. The G1 selftest exercises pointers far
+  above task_size_cap (kernel VAs and non-canonical
+  values), so the 16 B margin doesn't change its
+  outcome.
+- df-preserve: ptrace=PASS, seccomp=PASS, kvm=PASS,
+  kvm-gadget=PASS for both syscall + pf rows. No
+  regression.
+- perf-getpid: kvm cyc=94, ratio 0.002, PASS. The
+  pid-family path is unaffected (no user-pointer
+  writes in those handlers).
+
+**Refs.**
+
+- External audit feedback (P1 open #3).
+- D93 — original G1 close (base-only cap).
+- D81 — F5 minimum (US drop), the parent close that
+  D93 + this followon refine.
+- task #240 (kvm-bounds runner) — provides regression
+  coverage; future fine-grained range tests would slot
+  into the same kselftest.
+
+---
+
 ## (Future entries here, as decisions are made)

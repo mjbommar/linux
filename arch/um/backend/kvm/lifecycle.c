@@ -536,17 +536,32 @@ int kvm_gadget_vvar_alloc(void)
 	kvm_ctx.gadget_vvar_va   = 0;	/* filled in by kvm_enter_guest map */
 
 	/*
-	 * Audit round-6 G1: seed task_size_cap once. UML's
-	 * task_size is a global set in arch_setup() before any
-	 * gadget runs, so a single write here covers every
-	 * subsequent gadget invocation. No refresh needed because
-	 * task_size doesn't change after boot.
+	 * Audit round-6 G1 + G1-range-followon: seed task_size_cap
+	 * once. UML's task_size is a global set in arch_setup()
+	 * before any gadget runs, so a single write here covers
+	 * every subsequent gadget invocation. No refresh needed
+	 * because task_size doesn't change after boot.
+	 *
+	 * Range-aware bound: the gadget's `cmp ptr, %gs:cap; jbe
+	 * fallback` is base-only — it checks `ptr` rather than
+	 * `ptr + size - 1`. The largest write any gadget handler
+	 * issues is 16 bytes (struct __kernel_timespec for
+	 * clock_gettime). Subtract that ceiling from task_size so
+	 * a base-only compare effectively covers the whole write
+	 * range. Pointers in the last 16 bytes of user space route
+	 * to the SYSCALL fallback (handle_syscall + the standard
+	 * access_ok path), where access_ok's nowrap + size check
+	 * either accepts or rejects per POSIX semantics. Net
+	 * user-visible behaviour is unchanged; the gadget just
+	 * doesn't service writes that span the very last 16 bytes
+	 * of user space — a vanishingly rare case in practice.
 	 */
-	kvm_ctx.gadget_vvar->task_size_cap = task_size;
+	kvm_ctx.gadget_vvar->task_size_cap = task_size - 16;
 
-	pr_info("um: kvm gadget_vvar: va=%p gpa=0x%llx task_size_cap=0x%lx (memo 11 G5 + G1)\n",
+	pr_info("um: kvm gadget_vvar: va=%p gpa=0x%llx task_size_cap=0x%llx (task_size=0x%lx, range-margin=16)\n",
 		kvm_ctx.gadget_vvar,
 		(unsigned long long)kvm_ctx.gadget_vvar_gpa,
+		(unsigned long long)kvm_ctx.gadget_vvar->task_size_cap,
 		task_size);
 	return 0;
 }
