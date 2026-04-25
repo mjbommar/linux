@@ -1080,10 +1080,10 @@ static void kvm_snapshot_basic_test(struct kunit *test)
  * Task #253 / memo 13 record/replay basic-shape test.
  *
  * Same shape as kvm_snapshot_basic_test: alloc / start / stop /
- * destroy lifecycle. start / replay can fail with -ENODEV at
- * early-boot KUnit time when the memslot isn't yet registered;
- * that's an acceptable shape for the contract test, same
- * tolerance the snapshot test applies.
+ * destroy lifecycle. After the log-only-on-capture-failure
+ * change, start always succeeds (modulo -EBUSY / -ENOMEM); replay
+ * works regardless of whether a checkpoint was captured (log-only
+ * mode just rewinds the cursor without restoring vCPU state).
  */
 static void kvm_record_basic_test(struct kunit *test)
 {
@@ -1094,19 +1094,12 @@ static void kvm_record_basic_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, rec);
 
 	rc = kvm_record_start(rec);
-	if (rc < 0) {
-		kunit_info(test, "kvm_record_start rc=%d (acceptable on early boot)\n",
-			   rc);
-	} else {
-		/*
-		 * Successful start: a stop should disarm without error,
-		 * a replay should restore against the captured snapshot.
-		 */
-		kvm_record_stop(rec);
-		rc = kvm_record_replay(rec);
-		KUNIT_EXPECT_EQ(test, rc, 0);
-		kvm_record_stop(rec);
-	}
+	KUNIT_EXPECT_EQ(test, rc, 0);
+
+	kvm_record_stop(rec);
+	rc = kvm_record_replay(rec);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	kvm_record_stop(rec);
 
 	kvm_record_destroy(rec);
 }
@@ -1137,12 +1130,7 @@ static void kvm_record_stop_replay_consume_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, rec);
 
 	rc = kvm_record_start(rec);
-	if (rc < 0) {
-		kunit_info(test, "kvm_record_start rc=%d (skipping; expected on early boot)\n",
-			   rc);
-		kvm_record_destroy(rec);
-		return;
-	}
+	KUNIT_ASSERT_EQ(test, rc, 0);
 
 	/*
 	 * One observation while armed. The gate is on after start,
@@ -1197,12 +1185,7 @@ static void kvm_record_strict_replay_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, rec);
 
 	rc = kvm_record_start(rec);
-	if (rc < 0) {
-		kunit_info(test, "kvm_record_start rc=%d (skipping; expected on early boot)\n",
-			   rc);
-		kvm_record_destroy(rec);
-		return;
-	}
+	KUNIT_ASSERT_EQ(test, rc, 0);
 
 	/* Default: strict_replay = true. */
 	KUNIT_EXPECT_EQ(test, kvm_record_strict_replay(), false);
@@ -1276,72 +1259,28 @@ static void kvm_record_roundtrip_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, rec);
 
 	/*
-	 * Force the active-record slot + recording state via the
-	 * existing C API. We can't use kvm_record_start (which calls
-	 * kvm_snapshot_capture and fails on early boot), so we
-	 * simulate "armed" by calling start; on -ENODEV the record
-	 * isn't really registered, the gate is off, and the
-	 * dispatcher hooks no-op. Skip the round-trip in that case.
+	 * After the log-only-on-capture-failure change, start succeeds
+	 * unconditionally (capture failure → log-only mode, log
+	 * machinery still functional). Round-trip assertions below
+	 * exercise the log path independently of vCPU state restore.
 	 */
 	{
 		int rc = kvm_record_start(rec);
 
-		if (rc < 0) {
-			kunit_info(test, "kvm_record_start rc=%d (skipping round-trip; expected on early boot)\n",
-				   rc);
-			kvm_record_destroy(rec);
-			return;
-		}
+		KUNIT_ASSERT_EQ(test, rc, 0);
 	}
 
 	/*
-	 * Three syscall observations with distinct NR/ret signatures
-	 * so the FIFO order is provable.
-	 */
-	kvm_record_observe_syscall(__NR_getpid,    1234,    0xdead, 0xbeef);
-	kvm_record_observe_syscall(__NR_clock_gettime, 0,   1000,   0);
-	kvm_record_observe_syscall(__NR_getuid,    0,       0,      0);
-
-	/*
-	 * Flip into replay mode (resets cursor to 0).
-	 * kvm_record_replay restores the snapshot; we don't care
-	 * about the restore for this test, just the cursor reset.
-	 */
-	{
-		int rc = kvm_record_replay(rec);
-
-		KUNIT_EXPECT_EQ(test, rc, 0);
-	}
-
-	/* Consume in order — must round-trip the three NRs. */
-	consumed = kvm_record_consume_syscall(__NR_getpid, &ret_out,
-					      &user_buf_out, &payload_out,
-					      &payload_len_out);
-	KUNIT_EXPECT_EQ(test, consumed, 1);
-	KUNIT_EXPECT_EQ(test, ret_out, (long)1234);
-	KUNIT_EXPECT_EQ(test, (unsigned long long)payload_len_out, 0ULL);
-
-	consumed = kvm_record_consume_syscall(__NR_clock_gettime, &ret_out,
-					      &user_buf_out, &payload_out,
-					      &payload_len_out);
-	KUNIT_EXPECT_EQ(test, consumed, 1);
-	KUNIT_EXPECT_EQ(test, ret_out, (long)0);
-
-	consumed = kvm_record_consume_syscall(__NR_getuid, &ret_out,
-					      &user_buf_out, &payload_out,
-					      &payload_len_out);
-	KUNIT_EXPECT_EQ(test, consumed, 1);
-
-	/*
-	 * Side-buffer round-trip: observe a fake getrandom-shape
-	 * entry with an 8-byte payload, then consume + verify the
-	 * payload pointer round-trips byte-identically.
+	 * Four observations while recording: three inline-only entries
+	 * (getpid / clock_gettime / getuid) + one side-buffer entry
+	 * (fake getrandom shape) so the round-trip below covers both
+	 * the inline path and the per-entry payload memcmp.
 	 *
-	 * Note this races with the cursor reset below; for cleanliness
-	 * we do this BEFORE the third consume above. But we already
-	 * consumed all three. Re-replay to rewind the cursor, observe
-	 * the buffer entry as a 4th log entry, then consume past the
-	 * first three to reach it.
+	 * Observe ordering matters: append() requires recording=true,
+	 * so all observes must land BEFORE the replay-mode flip
+	 * below. (An earlier shape attempted observing the buf entry
+	 * post-replay; that silently no-op'd because the gate flips
+	 * to replaying-only on kvm_record_replay.)
 	 */
 	{
 		const u8 fake_payload[8] = {
@@ -1352,27 +1291,37 @@ static void kvm_record_roundtrip_test(struct kunit *test)
 		const void *buf_payload_out = NULL;
 		size_t buf_payload_len_out = 0;
 
+		kvm_record_observe_syscall(__NR_getpid,    1234, 0xdead, 0xbeef);
+		kvm_record_observe_syscall(__NR_clock_gettime, 0, 1000,   0);
+		kvm_record_observe_syscall(__NR_getuid,    0,    0,       0);
 		kvm_record_observe_syscall_buf(__NR_getrandom, 8,
 					       0xdeadbeefULL,
 					       fake_payload,
 					       sizeof(fake_payload));
 
-		/* Rewind via replay. */
+		/* Flip to replay (cursor=0). */
 		KUNIT_EXPECT_EQ(test, kvm_record_replay(rec), 0);
 
-		/* Skip past the first three (getpid / clock_gettime /
-		 * getuid) to reach the side-buffer entry at slot 3. */
-		KUNIT_EXPECT_EQ(test,
-			kvm_record_consume_syscall(__NR_getpid, &buf_ret,
-						   NULL, NULL, NULL), 1);
-		KUNIT_EXPECT_EQ(test,
-			kvm_record_consume_syscall(__NR_clock_gettime, &buf_ret,
-						   NULL, NULL, NULL), 1);
-		KUNIT_EXPECT_EQ(test,
-			kvm_record_consume_syscall(__NR_getuid, &buf_ret,
-						   NULL, NULL, NULL), 1);
+		/* Consume in FIFO order — first three are inline-only. */
+		consumed = kvm_record_consume_syscall(__NR_getpid, &ret_out,
+						      &user_buf_out, &payload_out,
+						      &payload_len_out);
+		KUNIT_EXPECT_EQ(test, consumed, 1);
+		KUNIT_EXPECT_EQ(test, ret_out, (long)1234);
+		KUNIT_EXPECT_EQ(test, (unsigned long long)payload_len_out, 0ULL);
 
-		/* Now the side-buffer entry. */
+		consumed = kvm_record_consume_syscall(__NR_clock_gettime, &ret_out,
+						      &user_buf_out, &payload_out,
+						      &payload_len_out);
+		KUNIT_EXPECT_EQ(test, consumed, 1);
+		KUNIT_EXPECT_EQ(test, ret_out, (long)0);
+
+		consumed = kvm_record_consume_syscall(__NR_getuid, &ret_out,
+						      &user_buf_out, &payload_out,
+						      &payload_len_out);
+		KUNIT_EXPECT_EQ(test, consumed, 1);
+
+		/* Fourth entry: side-buffer round-trip. */
 		KUNIT_EXPECT_EQ(test,
 			kvm_record_consume_syscall(__NR_getrandom, &buf_ret,
 						   &buf_va_out,
@@ -1391,12 +1340,13 @@ static void kvm_record_roundtrip_test(struct kunit *test)
 	}
 
 	/*
-	 * Cursor exhausted — next consume returns 0 (no more
-	 * entries; caller falls through to live syscall).
+	 * Cursor exhausted — next consume returns -ENODATA in strict
+	 * mode (default). Loose mode would return 0 and let the caller
+	 * fall through to live syscall.
 	 */
 	consumed = kvm_record_consume_syscall(__NR_getpid, &ret_out,
 					      NULL, NULL, NULL);
-	KUNIT_EXPECT_EQ(test, consumed, 0);
+	KUNIT_EXPECT_EQ(test, consumed, -ENODATA);
 
 	/*
 	 * Divergence shape: rewind cursor by replaying again, then
@@ -1437,12 +1387,7 @@ static void kvm_record_meta_iov_roundtrip_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, rec);
 
 	rc = kvm_record_start(rec);
-	if (rc < 0) {
-		kunit_info(test, "kvm_record_start rc=%d (skipping; expected on early boot)\n",
-			   rc);
-		kvm_record_destroy(rec);
-		return;
-	}
+	KUNIT_ASSERT_EQ(test, rc, 0);
 
 	{
 		/* Two iovs covering 12 bytes — payload split 8 + 4. */

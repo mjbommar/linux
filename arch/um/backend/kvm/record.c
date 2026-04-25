@@ -278,19 +278,31 @@ void kvm_record_destroy(struct kvm_record *rec)
 EXPORT_SYMBOL_GPL(kvm_record_destroy);
 
 /**
- * kvm_record_start - capture a checkpoint and arm record mode.
+ * kvm_record_start - arm record mode; opportunistically checkpoint.
  * @rec: container previously kvm_record_alloc'd.
  *
- * Issues kvm_snapshot_capture against vcpu0 and stores it as the
- * record's checkpoint. Sets recording=true; replaying=false.
+ * Tries kvm_snapshot_capture against vcpu0 and stores it as the
+ * record's checkpoint. If the capture fails (e.g. early-boot when
+ * the memslot isn't yet registered, or low memory), the record
+ * still arms in *log-only* mode: the syscall log machinery is
+ * independent of the snapshot, so observe/consume hooks remain
+ * functional. Replay then skips the state restore step (no
+ * checkpoint to restore) and just rewinds the log cursor.
  *
- * Until the dispatcher hooks land (memo 13 step 2+), the
- * recording=true flag is observable but no log entries are
- * appended; the function is API surface only.
+ * Sets recording=true; replaying=false; rec->checkpoint is
+ * non-NULL only when capture succeeded.
  *
- * Returns 0 on success; -errno from kvm_snapshot_capture on
- * failure. On failure rec stays in a clean (no-checkpoint)
- * state; the caller can retry or destroy.
+ * Returns 0 always (modulo allocation failure for the kvm_record
+ * itself, which is -ENOMEM, or contract violations -EINVAL/-EBUSY).
+ * The caller can inspect rec->checkpoint after return to know
+ * whether replay will restore vCPU state or just drive the log.
+ *
+ * History: prior to this change, capture failure short-circuited
+ * start — that meant the KUnit suite skipped the round-trip
+ * assertions on early-boot (when capture reliably -ENODEV's
+ * because the memslot is registered lazily after init_backend).
+ * Decoupling lets the log-machinery tests run unconditionally
+ * and exposes log-only recording as a first-class mode.
  */
 int kvm_record_start(struct kvm_record *rec)
 {
@@ -320,14 +332,16 @@ int kvm_record_start(struct kvm_record *rec)
 	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 
 	rec->checkpoint = kvm_snapshot_alloc();
-	if (!rec->checkpoint)
-		return -ENOMEM;
-
-	rc = kvm_snapshot_capture(rec->checkpoint);
-	if (rc < 0) {
-		kvm_snapshot_destroy(rec->checkpoint);
-		rec->checkpoint = NULL;
-		return rc;
+	if (rec->checkpoint) {
+		rc = kvm_snapshot_capture(rec->checkpoint);
+		if (rc < 0) {
+			pr_info("um: kvm record_start: snapshot capture rc=%d — entering log-only mode (replay will not restore vCPU state)\n",
+				rc);
+			kvm_snapshot_destroy(rec->checkpoint);
+			rec->checkpoint = NULL;
+		}
+	} else {
+		pr_info("um: kvm record_start: snapshot alloc failed — entering log-only mode\n");
 	}
 
 	rec->recording = true;
@@ -346,7 +360,8 @@ int kvm_record_start(struct kvm_record *rec)
 	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 	static_branch_enable(&um_kvm_record_enabled);
 
-	pr_info("um: kvm record_start: armed (checkpoint captured, log capacity=%zu)\n",
+	pr_info("um: kvm record_start: armed (checkpoint=%s, log capacity=%zu)\n",
+		rec->checkpoint ? "captured" : "log-only",
 		rec->log_capacity);
 	return 0;
 }
@@ -1240,8 +1255,11 @@ EXPORT_SYMBOL_GPL(kvm_record_set_strict_replay);
  * will (once the dispatcher hooks land) consume log entries
  * from the front instead of consulting the host.
  *
- * Returns 0 on success; -EINVAL if no checkpoint exists; -errno
- * from kvm_snapshot_restore_full on ioctl failure.
+ * Returns 0 on success; -errno from kvm_snapshot_restore_full on
+ * ioctl failure when a checkpoint exists. If the record was started
+ * in log-only mode (no checkpoint captured), replay still rewinds
+ * the log cursor + arms replay flag — the caller drives consume_
+ * syscall against an existing log without state restore.
  */
 int kvm_record_replay(struct kvm_record *rec)
 {
@@ -1251,10 +1269,6 @@ int kvm_record_replay(struct kvm_record *rec)
 
 	if (!rec)
 		return -EINVAL;
-	if (!rec->checkpoint) {
-		pr_warn("um: kvm record_replay: no checkpoint (call record_start first)\n");
-		return -EINVAL;
-	}
 
 	/*
 	 * Review-01 P0: `start -> stop -> replay` must re-arm the
@@ -1277,9 +1291,11 @@ int kvm_record_replay(struct kvm_record *rec)
 	need_register = (um_kvm_active_record != rec);
 	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 
-	rc = kvm_snapshot_restore_full(rec->checkpoint);
-	if (rc < 0)
-		return rc;
+	if (rec->checkpoint) {
+		rc = kvm_snapshot_restore_full(rec->checkpoint);
+		if (rc < 0)
+			return rc;
+	}
 
 	rec->recording = false;
 	rec->replaying = true;
@@ -1292,7 +1308,8 @@ int kvm_record_replay(struct kvm_record *rec)
 		static_branch_enable(&um_kvm_record_enabled);
 	}
 
-	pr_info("um: kvm record_replay: armed (checkpoint restored, %zu log entries to replay)\n",
+	pr_info("um: kvm record_replay: armed (%s, %zu log entries to replay)\n",
+		rec->checkpoint ? "checkpoint restored" : "log-only",
 		rec->log_count);
 	return 0;
 }
