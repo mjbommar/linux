@@ -156,15 +156,36 @@ struct kvm_record {
 	bool				strict_replay;
 
 	/*
-	 * Review-01 P2: payload memory accounting. Sum of all
-	 * payload_len over the log; surfaced through kvm_record_state
-	 * so an operator / fuzzer driver can apply caps or simply
-	 * see how big a fuzz session has grown. No per-entry or
-	 * total-bytes cap enforced today; future Kconfig
-	 * (UM_KVM_RECORD_MAX_BYTES) can land that.
+	 * Review-01 P2 #14: payload memory accounting + caps. Sum
+	 * of all payload_len over the log; bounded by per-entry
+	 * and total-bytes caps to prevent unbounded growth on
+	 * record-mode workloads that perform large reads /
+	 * receives. Dropped-entry count surfaced via
+	 * kvm_record_state for operator visibility.
 	 */
 	size_t				payload_bytes;
+	size_t				payload_drops;
 };
+
+/*
+ * Per-entry side-buffer cap: 1 MiB. Real-world syscalls returning
+ * more than this in a single call (large read of a multi-MB file,
+ * large recvmsg of a jumbo-frame batch) get truncated to the cap
+ * with an entry that still records (NR, ret, user_va) but a
+ * partial payload. Replay correctness for such truncated entries
+ * is best-effort; the operator can raise the cap via the Kconfig
+ * if their workload demands it (future work).
+ */
+#define KVM_RECORD_PAYLOAD_PER_CAP	(1U << 20)
+
+/*
+ * Total log-payload cap: 64 MiB. Sum of payload_bytes across all
+ * entries. Once exceeded, further side-buffer requests get
+ * dropped to inline-only entries (entry still records the NR +
+ * ret, but no payload — replay can't restore the user buffer).
+ * Bounded so a runaway record session can't wedge the host.
+ */
+#define KVM_RECORD_PAYLOAD_TOTAL_CAP	(64U * (1U << 20))
 
 /**
  * kvm_record_alloc - allocate a fresh record container.
@@ -405,8 +426,36 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 	{
 		struct kvm_replay_entry *e = &rec->log[rec->log_count];
 		void *side = NULL;
+		size_t side_len = payload_len;
 
 		if (payload && payload_len) {
+			/*
+			 * Review-01 P2 #14: cap enforcement.
+			 *
+			 * Per-entry: cap at KVM_RECORD_PAYLOAD_PER_CAP.
+			 * The entry still records the NR + ret; the
+			 * partial payload preserves the head bytes (most
+			 * file/socket payloads start with the meaningful
+			 * header). A future "truncate-vs-drop" Kconfig can
+			 * change the policy.
+			 *
+			 * Total: if payload_bytes + side_len would
+			 * exceed KVM_RECORD_PAYLOAD_TOTAL_CAP, drop the
+			 * payload entirely (inline-only entry) and bump
+			 * payload_drops. Visible in kvm_record_state for
+			 * the operator to notice + raise the cap or stop
+			 * the session.
+			 */
+			if (side_len > KVM_RECORD_PAYLOAD_PER_CAP)
+				side_len = KVM_RECORD_PAYLOAD_PER_CAP;
+			if (rec->payload_bytes + side_len >
+			    KVM_RECORD_PAYLOAD_TOTAL_CAP) {
+				rec->payload_drops++;
+				side_len = 0;
+			}
+		}
+
+		if (payload && side_len) {
 			/*
 			 * Drop the lock to allocate (kvmalloc may sleep
 			 * under GFP_KERNEL), then re-validate rec under
@@ -416,10 +465,10 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 			 * IRQs-disabled-too-long lockup on big payloads.
 			 */
 			spin_unlock_irqrestore(&um_kvm_record_lock, flags);
-			side = kvmalloc(payload_len, GFP_KERNEL);
+			side = kvmalloc(side_len, GFP_KERNEL);
 			if (!side)
 				return -ENOMEM;
-			memcpy(side, payload, payload_len);
+			memcpy(side, payload, side_len);
 
 			spin_lock_irqsave(&um_kvm_record_lock, flags);
 			if (um_kvm_active_record != rec || !rec->recording) {
@@ -456,9 +505,9 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 		e->data[2] = d2;
 		e->data[3] = d3;
 		e->payload = side;
-		e->payload_len = side ? payload_len : 0;
+		e->payload_len = side ? side_len : 0;
 		if (side)
-			rec->payload_bytes += payload_len;
+			rec->payload_bytes += side_len;
 		rec->log_count++;
 	}
 
@@ -987,7 +1036,7 @@ static int kvm_record_state_show(struct seq_file *m, void *unused)
 	unsigned long flags;
 	bool recording = false, replaying = false, strict = false;
 	size_t log_count = 0, log_capacity = 0, payload_bytes = 0;
-	size_t replay_cursor = 0;
+	size_t replay_cursor = 0, payload_drops = 0;
 
 	spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
 	rec = um_kvm_record_debugfs_rec;
@@ -998,13 +1047,15 @@ static int kvm_record_state_show(struct seq_file *m, void *unused)
 		log_count = rec->log_count;
 		log_capacity = rec->log_capacity;
 		payload_bytes = rec->payload_bytes;
+		payload_drops = rec->payload_drops;
 		replay_cursor = rec->replay_cursor;
 	}
 	spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
 
-	seq_printf(m, "recording=%d replaying=%d strict_replay=%d log_count=%zu log_capacity=%zu replay_cursor=%zu payload_bytes=%zu\n",
+	seq_printf(m, "recording=%d replaying=%d strict_replay=%d log_count=%zu log_capacity=%zu replay_cursor=%zu payload_bytes=%zu payload_drops=%zu\n",
 		   recording, replaying, strict,
-		   log_count, log_capacity, replay_cursor, payload_bytes);
+		   log_count, log_capacity, replay_cursor,
+		   payload_bytes, payload_drops);
 	return 0;
 }
 
