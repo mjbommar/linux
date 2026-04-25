@@ -243,10 +243,33 @@ int kvm_init(const struct um_backend_args *args)
 		kvm_ctx.sync_regs_caps = caps > 0 ? (u64)caps : 0;
 	}
 
-	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu sync_regs_caps=0x%llx (memslot deferred to first KVM_RUN)\n",
+	/*
+	 * Vision §"Research mode" + task #255: probe + log vPMU
+	 * capability. KVM enables vPMU by default on x86 — the
+	 * guest can read MSR_IA32_PERFCTR0 etc. and rdpmc reaches
+	 * the host's actual PMU counters, not emulated values.
+	 * Logging the cap value at init means downstream perf
+	 * tools / research builds can confirm the channel is
+	 * live. This is a probe-only step today; tuning (event
+	 * filtering, KVM_SET_PMU_EVENT_FILTER) is a future
+	 * follow-on if research workloads need narrower windows.
+	 */
+	{
+		int pmu = os_ioctl_generic(kfd, KVM_CHECK_EXTENSION,
+					   KVM_CAP_PMU_CAPABILITY);
+		int filt = os_ioctl_generic(kfd, KVM_CHECK_EXTENSION,
+					    KVM_CAP_PMU_EVENT_FILTER);
+
+		kvm_ctx.pmu_caps = pmu > 0 ? (u32)pmu : 0;
+		kvm_ctx.pmu_event_filter_supported = filt > 0;
+	}
+
+	pr_info("um: kvm init: kvm=%d vm=%d vcpu0=%d run_size=%zu sync_regs_caps=0x%llx pmu_caps=0x%x pmu_filter=%s (memslot deferred to first KVM_RUN)\n",
 		kvm_ctx.kvm_fd, kvm_ctx.vm_fd, kvm_ctx.vcpu0_fd,
 		kvm_ctx.run_size,
-		(unsigned long long)kvm_ctx.sync_regs_caps);
+		(unsigned long long)kvm_ctx.sync_regs_caps,
+		kvm_ctx.pmu_caps,
+		kvm_ctx.pmu_event_filter_supported ? "yes" : "no");
 
 	/*
 	 * D-05 nested-virt detection (memo 08 sub-commit #7, minimal

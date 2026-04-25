@@ -67,6 +67,22 @@ struct kvm_um {
 	u64		cached_cr3_gpa;	/* Last SREGS.cr3 programmed. */
 	u64		cached_fs_base;	/* Last SREGS.fs.base programmed. */
 	u64		cached_gs_base;	/* Last SREGS.gs.base programmed. */
+	u32		pmu_caps;	/* KVM_CAP_PMU_CAPABILITY (task
+					 * #255). Non-zero means the host KVM
+					 * exposes a vPMU + tunable caps. We
+					 * don't tune today — vPMU is enabled
+					 * by default, which is what research
+					 * builds want; logging the cap value
+					 * lets perf tooling confirm the
+					 * channel is live.
+					 */
+	bool		pmu_event_filter_supported;
+					/* KVM_CAP_PMU_EVENT_FILTER (task
+					 * #255). Indicates KVM_SET_PMU_EVENT_
+					 * FILTER ioctls are accepted; future
+					 * follow-on if research workloads
+					 * need narrower event windows.
+					 */
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
