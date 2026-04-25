@@ -9465,4 +9465,134 @@ distinctly in the runner's PASS/FAIL output.
 
 ---
 
+## D96 (2026-04-24) — F5-followon: split bootstrap page into RO code+tables + RW NX IST stack
+
+**Decision.** Split the single 4 KiB bootstrap page that
+held both ring-0 code/tables (LSTAR trampoline, GDT, IDT,
+TSS, `#PF` handler, SYSRETQ helper) and the IST stack into
+two pages with distinct shadow-PT mappings:
+
+- **Page 1** (code + tables) at guest VA `bootstrap_va +
+  0x0000` — `KVM_X86_PTE_P` only. Read-only and
+  executable from CPL=0; not writable by anyone.
+- **Page 2** (IST stack) at guest VA `bootstrap_va +
+  0x3000` — `KVM_X86_PTE_P | KVM_X86_PTE_RW |
+  KVM_X86_PTE_NX`. Writable for the CPU's IDT iretq-frame
+  push and for `#PF` handler RSP work; non-executable so a
+  guest ring-0 escape can't return-to-stack into IST data.
+
+`KVM_BOOTSTRAP_STACK_TOP` moves from `0x1000` to `0x4000`
+(exclusive top of page 2 in the guest VA layout); first
+push lands at `+0x3ff8`. The host `kvm_enter_guest_init_
+bootstrap()` now allocates two zeroed pages, and the
+race-loser path frees both. A new `kvm_bootstrap_page_
+stack` global plus `kvm_bootstrap_stack_gpa` complete the
+state mirror.
+
+**Finding.** Audit round-5 F5 (D81) closed the P0 minimum
+by dropping the `US` bit from the bootstrap-page PTE so
+ring-3 can no longer read or write the trampoline. The
+follow-on (#230) called out that the page was still
+mapped `KVM_X86_PTE_P | KVM_X86_PTE_RW` from the guest's
+own ring-0 perspective — a guest ring-0 escape (or any
+future bug that lets the gadget body run with a
+user-controlled RSP) could rewrite LSTAR / IDT / GDT /
+TSS bytes in place. The split removes ring-0 write
+privilege from the code and tables; the IST stack is
+the one region that still needs RW, and it's now isolated
+to its own page with `NX` on top.
+
+**Why a 3-page gap to the stack page.** Existing GVA
+allocations between bootstrap and stack:
+
+- `bootstrap_va + 0x1000` — gadget state page (G3).
+- `bootstrap_va + 0x2000` — gadget vvar clock page (G5).
+
+Putting the stack at `+0x3000` keeps both existing
+mappings (and the gadget body's `%gs:disp32` references
+to them via `MSR_KERNEL_GS_BASE = state_va`) untouched.
+A more aggressive layout could shuffle state/vvar to
+make room at `+0x1000`, but that would change every
+LSTAR rel32 and the MSR programming for no defensive
+gain — the order is irrelevant once the stack page is
+isolated and `NX`.
+
+**Implementation shape.**
+
+- `kvm_bootstrap_page_stack`, `kvm_bootstrap_stack_gpa`
+  — second-page state, populated under
+  `kvm_bootstrap_lock` alongside the existing fields.
+- `kvm_enter_guest_init_bootstrap()` — second
+  `get_zeroed_page(GFP_KERNEL)` call; on failure, frees
+  page 1 and returns `-ENOMEM`. The race-loser path
+  frees both pages.
+- `kvm_enter_guest()` — first map call drops `RW` (page
+  1 is now `P` only); second map call lands page 2 at
+  `bootstrap_va + 3*PAGE_SIZE` with `P|RW|NX`.
+- `KVM_BOOTSTRAP_STACK_TOP` — `0x1000` → `0x4000`. TSS
+  IST[1] auto-follows since it's computed as
+  `bootstrap_va + KVM_BOOTSTRAP_STACK_TOP`.
+- `pr_info` boot line gains the second page's gpa.
+- **#PF decode-site fix** (both sites in
+  `kvm_run_userspace`): the old `ist_off = kregs.rsp -
+  kvm_bootstrap_va` with `< PAGE_SIZE` bound assumed
+  the IST stack lived in page 1. Post-split,
+  `kregs.rsp` lies in `[bootstrap_va + 0x3000,
+  bootstrap_va + 0x4000)` so the offset is computed
+  relative to the page-2 base (`bootstrap_va +
+  3*PAGE_SIZE`) and dereferenced through
+  `kvm_bootstrap_page_stack` (the kernel VA of page 2).
+  Without this, every recoverable `#PF` would have hit
+  `PF IST out of range` and `fatal_sigsegv()`. The
+  `kvm_touch_all_user_vmas` eager prefault hides the
+  bug from the smoke tests (which never trigger a
+  recoverable `#PF` because all user pages are
+  pre-faulted), but any code path that demand-faults
+  after touch-all (notably the F7/1 gadget-mid-store
+  fallback that we explicitly want to keep working)
+  would have surfaced it.
+
+**Validation on dev host.**
+
+- KUnit: 35/35 pass (no test depends on the bootstrap-
+  page stack location).
+- kvm-bounds (G1 selftest, #240): both kvm-fallback and
+  kvm-gadget rows return `-EFAULT` for all 6 cases. The
+  `clock_kva` and `clock_noncan` cases exercise the
+  gadget output path that writes through user pointers;
+  the `#PF` recovery + IST iretq-frame mechanics from
+  the new stack page work.
+- perf-getpid: kvm `cyc=97`, ratio `0.002`, PASS. No
+  regression from the split — the extra `kvm_shadow_
+  map_page` call is one-shot at first-vCPU enter, not
+  per-syscall.
+- df-preserve: ptrace=PASS, seccomp=PASS, kvm=PASS,
+  kvm-gadget=PASS. The user-RFLAGS round-trip across
+  recoverable `#PF` still works through the new IST
+  stack page (DF preserved).
+
+**Defence-in-depth posture, layered.**
+
+| Bit  | Page 1 (code+tables) | Page 2 (stack) |
+|------|----------------------|----------------|
+| P    | 1                    | 1              |
+| RW   | 0                    | 1              |
+| US   | 0                    | 0              |
+| NX   | 0 (executable)       | 1              |
+
+A guest ring-0 escape can no longer overwrite LSTAR.
+The stack page is writable but not executable — code
+has to live in page 1 (RO) and run from there. Combined
+with the F5 minimum's `US=0`, ring-3 has no path to the
+trampoline at all; ring-0 has only a write path to its
+own stack frames.
+
+**Refs.**
+
+- Audit round-5 finding #2 follow-on (#230).
+- D81 — F5 minimum (US dropped).
+- task #230 — this close.
+
+---
+
 ## (Future entries here, as decisions are made)

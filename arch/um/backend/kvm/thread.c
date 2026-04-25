@@ -258,8 +258,10 @@ static int kvm_touch_all_user_vmas(struct mm_struct *mm)
  * `__pa(bootstrap_va)`.
  */
 static DEFINE_SPINLOCK(kvm_bootstrap_lock);
-static void *kvm_bootstrap_page;	/* kernel VA of the bootstrap page */
-static u64   kvm_bootstrap_gpa;		/* __pa() of the page; 0 if unallocated */
+static void *kvm_bootstrap_page;	/* kernel VA of the code+tables page */
+static void *kvm_bootstrap_page_stack;	/* kernel VA of the IST stack page (F5-followon split) */
+static u64   kvm_bootstrap_gpa;		/* __pa() of the code+tables page; 0 if unallocated */
+static u64   kvm_bootstrap_stack_gpa;	/* __pa() of the IST stack page */
 static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 					 * the guest CR3 walk resolves to the
 					 * bootstrap page's gpa; used for
@@ -274,7 +276,13 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 #define KVM_BOOTSTRAP_IDT_OFFSET	0x280	/* 33 × 16 = 528 B */
 #define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x4a0	/* 11-byte #PF handler (moved from 0x400 in G5b) */
 #define KVM_BOOTSTRAP_SYSRET_OFFSET	0x4b0	/* 3-byte SYSRETQ (first-entry helper) */
-#define KVM_BOOTSTRAP_STACK_TOP		0x1000	/* ring-0 IST stack top */
+/*
+ * IST stack top — top of the dedicated stack page, post-F5-followon split.
+ * Guest VA layout: bootstrap_va + 0x0000 = code+tables (RO), +0x1000 = state,
+ * +0x2000 = vvar, +0x3000 = IST stack (RW NX). Stack TOP is exclusive — first
+ * push lands at 0x3ff8.
+ */
+#define KVM_BOOTSTRAP_STACK_TOP		0x4000
 #define KVM_BOOTSTRAP_TSS_SEL		0x30	/* GDT entry 6 (16-byte TSS desc) */
 #define KVM_BOOTSTRAP_IDT_ENTRIES	33	/* covers #PF (vector 14) */
 
@@ -794,7 +802,9 @@ static const u8 kvm_bootstrap_pf_handler_bytes[] = {
 static int kvm_enter_guest_init_bootstrap(void)
 {
 	void *page;
+	void *page_stack;
 	u64 gpa;
+	u64 stack_gpa;
 	unsigned long flags;
 
 	/* Fast path: already allocated. */
@@ -809,18 +819,30 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 * Allocate outside the lock — GFP_KERNEL can sleep. Second
 	 * check under the lock covers the race where two callers
 	 * both took the !page branch above; the loser frees its
-	 * allocation.
+	 * allocations.
+	 *
+	 * F5-followon: two pages now — page is the code+tables page
+	 * (RO X in guest), page_stack is the dedicated IST stack
+	 * (RW NX in guest). Splitting them lets us drop ring-0
+	 * write privilege on the LSTAR/IDT/GDT/TSS bytes.
 	 */
 	page = (void *)get_zeroed_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
+	page_stack = (void *)get_zeroed_page(GFP_KERNEL);
+	if (!page_stack) {
+		free_page((unsigned long)page);
+		return -ENOMEM;
+	}
 
 	gpa = (u64)__pa(page);
+	stack_gpa = (u64)__pa(page_stack);
 
 	spin_lock_irqsave(&kvm_bootstrap_lock, flags);
 	if (kvm_bootstrap_page) {
 		spin_unlock_irqrestore(&kvm_bootstrap_lock, flags);
 		free_page((unsigned long)page);
+		free_page((unsigned long)page_stack);
 		return 0;
 	}
 
@@ -909,9 +931,12 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 * Zero the TSS + populate IST[1] only. RSP0/RSP1/RSP2 are
 	 * not used (all our cross-CPL transitions go through IDT
 	 * entries whose IST field points here). IST[1] top-of-
-	 * stack is at bootstrap_va + KVM_BOOTSTRAP_STACK_TOP; stack
-	 * grows down into 0xe00-0xfff (256 bytes — plenty for a
-	 * single interrupt frame + a handful of temporaries).
+	 * stack is at bootstrap_va + KVM_BOOTSTRAP_STACK_TOP; post
+	 * F5-followon split, that's bootstrap_va + 0x4000 (the
+	 * exclusive top of the dedicated IST stack page mapped at
+	 * +0x3000), so the first push lands at +0x3ff8 inside a
+	 * P|RW|NX page that the host code+tables view (P only)
+	 * does not overlap.
 	 *
 	 * TSS layout (AMD64 SDM vol 3 §10.8.2):
 	 *   bytes  0..3   reserved
@@ -973,16 +998,19 @@ static int kvm_enter_guest_init_bootstrap(void)
 		/* bytes 12-15 stay zero from memset. */
 	}
 
-	kvm_bootstrap_page = page;
-	kvm_bootstrap_gpa  = gpa;
-	kvm_bootstrap_va   = (u64)(unsigned long)page;
+	kvm_bootstrap_page       = page;
+	kvm_bootstrap_page_stack = page_stack;
+	kvm_bootstrap_gpa        = gpa;
+	kvm_bootstrap_stack_gpa  = stack_gpa;
+	kvm_bootstrap_va         = (u64)(unsigned long)page;
 	spin_unlock_irqrestore(&kvm_bootstrap_lock, flags);
 
-	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx lstar=+0x%x sysret=+0x%x (%zu + %zu bytes)\n",
+	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx lstar=+0x%x sysret=+0x%x (%zu + %zu bytes); ist-stack page at gpa=0x%llx mapped at va+0x3000\n",
 		page, (unsigned long long)gpa,
 		KVM_BOOTSTRAP_LSTAR_OFFSET, KVM_BOOTSTRAP_SYSRET_OFFSET,
 		sizeof(kvm_bootstrap_lstar_bytes),
-		sizeof(kvm_bootstrap_sysret_bytes));
+		sizeof(kvm_bootstrap_sysret_bytes),
+		(unsigned long long)stack_gpa);
 	return 0;
 }
 
@@ -1413,32 +1441,43 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 
 	/*
-	 * Audit round-5 F5 (P0 security-adjacent): the bootstrap
-	 * page contains the LSTAR trampoline, GDT, IDT, TSS, and
-	 * IST stack — all ring-0 state. Previous versions mapped
-	 * it with KVM_X86_PTE_US set, which let ring-3 guest code
-	 * read (and with RW, write) the ring-0 syscall path. Drop
-	 * US so the shadow PT rejects ring-3 accesses at the CPU.
+	 * Audit round-5 F5 + F5-followon (#230): the bootstrap state
+	 * is split into two pages — code + tables (LSTAR, GDT, IDT,
+	 * TSS, #PF handler, SYSRETQ) and a dedicated IST stack page.
 	 *
-	 * Writability is still required because the CPU pushes the
-	 * IDT iretq frame onto the IST stack (at the bottom of the
-	 * bootstrap page) when #PF fires, and the host-side init
-	 * populates GDT / IDT / TSS / handler bytes during boot.
-	 * Both are ring-0 writes, which bypass the US check but
-	 * require RW=1.
+	 * Page 1 (code + tables, mapped at bootstrap_va + 0x0000) is
+	 * P only — readable + executable by the guest CPU at CPL=0
+	 * for instruction fetch (LSTAR, #PF handler, SYSRETQ) and
+	 * descriptor-table reads (GDTR / IDTR / TR consult the page
+	 * via the segment-cache walk), but not writable. Host-side
+	 * init populates GDT / IDT / TSS / handler bytes via the
+	 * kernel mapping outside the shadow PT, so dropping ring-0
+	 * write privilege on the guest view is harmless to setup
+	 * and prevents a guest ring-0 escape from rewriting the
+	 * trampoline. US is also off (F5 minimum) so ring-3 can't
+	 * read or write the page.
 	 *
-	 * Splitting the page into a RO (code + tables) region and a
-	 * RW (IST stack) region is a medium refactor — tracked as
-	 * a follow-on to this minimum fix. With US=0, ring-3 can't
-	 * read the LSTAR bytes either (defence in depth against a
-	 * guest scraping our trampoline for offsets or side
-	 * channels).
+	 * Page 2 (IST stack, mapped at bootstrap_va + 0x3000) is
+	 * P | RW | NX — the CPU pushes the IDT iretq frame on this
+	 * page when #PF fires and the #PF handler bytes pop it; NX
+	 * blocks any return-to-stack ROP since the handler can't
+	 * jump into IST data. STACK_TOP is bootstrap_va + 0x4000
+	 * (exclusive); first push lands at +0x3ff8.
 	 */
 	rc = kvm_shadow_map_page(kvm_bootstrap_va,
 				 (u64)__pa(kvm_bootstrap_page),
-				 KVM_X86_PTE_P | KVM_X86_PTE_RW);
+				 KVM_X86_PTE_P);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(bootstrap) failed (%d)\n",
+				    rc);
+		return rc;
+	}
+	rc = kvm_shadow_map_page(kvm_bootstrap_va + 3 * PAGE_SIZE,
+				 (u64)__pa(kvm_bootstrap_page_stack),
+				 KVM_X86_PTE_P | KVM_X86_PTE_RW |
+				 KVM_X86_PTE_NX);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(bootstrap_stack) failed (%d)\n",
 				    rc);
 		return rc;
 	}
@@ -2150,19 +2189,23 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * user-visible result is -EFAULT per POSIX
 				 * semantics rather than SIGSEGV.
 				 *
-				 * The IST stack lives in the bootstrap page
-				 * (kernel-VA-aliased for the host). Resolving
-				 * fault_rip requires dereferencing the frame
-				 * before the cr2 probe so we can short-
-				 * circuit the probe path for gadget faults.
+				 * Post F5-followon (#230) the IST stack is
+				 * its own page mapped at GVA bootstrap_va +
+				 * 3*PAGE_SIZE, backed by kvm_bootstrap_page_
+				 * stack on the host side. RSP at #PF entry
+				 * lies in [bootstrap_va + 3*PAGE_SIZE,
+				 * bootstrap_va + KVM_BOOTSTRAP_STACK_TOP);
+				 * subtract the page-2 base to get the host
+				 * offset.
 				 */
 				ist_off = (unsigned long)(kregs.rsp -
-							  kvm_bootstrap_va);
+							  (kvm_bootstrap_va +
+							   3 * PAGE_SIZE));
 				if (ist_off >= PAGE_SIZE) {
 					pr_warn_ratelimited("um: kvm: PF IST out of range\n");
 					fatal_sigsegv();
 				}
-				ist = (u8 *)kvm_bootstrap_page + ist_off;
+				ist = (u8 *)kvm_bootstrap_page_stack + ist_off;
 				/*
 				 * Audit round-6 G3: read the CPU-pushed
 				 * #PF error code from IST+0 instead of
@@ -2369,14 +2412,16 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				{
 					unsigned long off =
 						(unsigned long)(kregs.rsp -
-								kvm_bootstrap_va);
-					u8 *ist = (u8 *)kvm_bootstrap_page + off;
+								(kvm_bootstrap_va +
+								 3 * PAGE_SIZE));
+					u8 *ist;
 					u64 user_rip, user_rsp, user_rflags;
 
 					if (off >= PAGE_SIZE) {
 						pr_warn_ratelimited("um: kvm: PF IST out of range\n");
 						fatal_sigsegv();
 					}
+					ist = (u8 *)kvm_bootstrap_page_stack + off;
 					user_rip     = *(u64 *)(ist + 8);
 					user_rflags  = *(u64 *)(ist + 24);
 					user_rsp     = *(u64 *)(ist + 32);
