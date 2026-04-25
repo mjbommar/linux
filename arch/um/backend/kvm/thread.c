@@ -180,16 +180,17 @@ static const char *kvm_exit_reason_str(u32 r)
  */
 
 /*
- * Force every page in every vma of `mm` to be paged-in by the
- * UML kernel. For writable vmas, do a read-then-write so
- * UML's fault handler installs a read-write PTE; read-only
- * vmas just get a byte read. Called from kvm_enter_guest
- * (pre-KVM_RUN) and again after each syscall dispatch so
- * fresh mmap/brk/mremap regions become visible to the shadow
- * PT refill that follows. Memo 09 step 3 MVP approach; a
- * #5b IDT-based lazy fault-in is the follow-on.
+ * Task #238 — STEP 1: keep the eager touch-all alongside the
+ * new handle_page_fault recovery path so we can validate the
+ * refactor in isolation. Once verified non-regressing, the
+ * follow-on commit drops touch-all and relies on the lazy
+ * recovery alone.
  *
- * Returns the number of pages successfully touched.
+ * Forces every page in every VMA of `mm` paged-in by UML by
+ * issuing copy_from_user reads — UML's fault handler installs
+ * the PTE; subsequent kvm_shadow_fill_from_uml_pgd lifts it
+ * to the shadow PT. Memo 09 step 3 MVP shape; cost is
+ * O(mm-size) per kvm_enter_guest.
  */
 static int kvm_touch_all_user_vmas(struct mm_struct *mm)
 {
@@ -203,30 +204,6 @@ static int kvm_touch_all_user_vmas(struct mm_struct *mm)
 	for_each_vma(vmi, vma) {
 		unsigned long addr;
 
-		/*
-		 * Audit round-5 F9: prior versions also did a one-
-		 * byte `copy_to_user` after the read to pre-trigger
-		 * CoW on writable pages. That had three unacceptable
-		 * side effects:
-		 *   1. dirtied every writable page (PTE.D set) on
-		 *      every kvm_enter_guest, causing avoidable
-		 *      writeback to file-backed MAP_SHARED mappings.
-		 *   2. forced CoW upfront on private mappings that
-		 *      the guest might never write, losing the
-		 *      fork-inherited-but-never-modified-parent-data
-		 *      memory-sharing optimization.
-		 *   3. could trip unexpected file-system side
-		 *      effects on mmap'd device / hugetlb / special
-		 *      mappings.
-		 *
-		 * The read probe alone is enough to force the page
-		 * fault that installs a PTE in UML's logical pgd; the
-		 * subsequent kvm_shadow_fill_from_uml_pgd picks it up
-		 * with the correct RW bit. CoW on writable pages is
-		 * then deferred to the actual guest write via the
-		 * shadow-PT #PF path (memo 08 sub-commit #5b) —
-		 * which is the semantically correct moment for CoW.
-		 */
 		for (addr = vma->vm_start; addr < vma->vm_end;
 		     addr += PAGE_SIZE) {
 			if (copy_from_user(&probe, (void __user *)addr, 1))
@@ -1688,9 +1665,12 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	mm = current->active_mm;
 	if (mm && mm->pgd) {
-		int touched;
-		int filled;
+		int touched, filled;
 
+		/*
+		 * Task #238 — STEP 1: keep eager touch + lazy
+		 * recovery side-by-side. STEP 2 removes touch-all.
+		 */
 		touched = kvm_touch_all_user_vmas(mm);
 		filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
 		if (filled < 0) {
@@ -2054,13 +2034,8 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	handle_syscall(regs);
 
 	/*
-	 * mmap/brk/mremap/mprotect syscalls can extend the user
-	 * mm with new mappings that are still lazy (present in
-	 * vmas but not yet in the logical pgd). Before the next
-	 * KVM_RUN, walk vmas + touch each page to force fault-in,
-	 * then re-fill the shadow PT. Expensive but correct;
-	 * sub-commit #5b's IDT #PF handler replaces this with
-	 * targeted on-demand installation.
+	 * Task #238 — STEP 1: keep eager touch + shadow_fill
+	 * here too. STEP 2 removes touch-all.
 	 */
 	{
 		struct mm_struct *mm2 = current->active_mm;
@@ -2463,36 +2438,64 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				    current->active_mm->pgd) {
 					struct mm_struct *m2 =
 						current->active_mm;
+					int code_out = 0;
+					int hpf_rc;
 
 					/*
-					 * Audit round-6 G3: don't blindly mark
-					 * touched on a successful read probe.
-					 * If the original fault was a WRITE
-					 * (error_code bit 1 set), we also need
-					 * the write probe to succeed; otherwise
-					 * cr2 maps to a read-only page and the
-					 * guest's retry will fault again
-					 * forever. The fix: gate touched=true
-					 * on the actual operation succeeding.
+					 * Task #238 — direct handle_page_fault
+					 * call.
 					 *
-					 * For pure read faults, copy_from_user
-					 * succeeding is enough — the page is
-					 * present + readable, no write probe
-					 * needed.
+					 * Prior versions did `copy_from_user(&
+					 * probe, cr2, 1)` (and copy_to_user for
+					 * write faults) to indirectly trigger
+					 * UML's fault path. That worked when
+					 * cr2 was a user VA already in UML's
+					 * vmas, but had three problems:
+					 *
+					 *   1. It depended on copy_*_user's
+					 *      side-effect rather than calling
+					 *      the real fault path. Bypassed
+					 *      the proper VM_FAULT_RETRY
+					 *      machinery.
+					 *
+					 *   2. For first-time access to a page
+					 *      that's in UML's vma but not yet
+					 *      in the logical pgd (e.g. binary
+					 *      text on first instruction
+					 *      fetch), copy_from_user could
+					 *      fail because the kernel-mode
+					 *      copy stub also requires a
+					 *      mapping it can't always create.
+					 *
+					 *   3. It was paired with the eager
+					 *      kvm_touch_all_user_vmas walk
+					 *      that ran on every kvm_enter_
+					 *      guest just to mask case (2),
+					 *      costing O(mm-size) per syscall.
+					 *
+					 * Calling handle_page_fault directly
+					 * gives us the same semantics UML's
+					 * SIGSEGV trap path uses (arch/um/
+					 * kernel/trap.c:377): it locks the mm,
+					 * finds the vma, validates VM_WRITE /
+					 * VM_READ / VM_EXEC, calls handle_mm_
+					 * fault with the right flags, and
+					 * returns 0 on success or -EFAULT /
+					 * -EACCES / -ENOMEM on failure. The
+					 * is_user=1 + is_write=fault_was_write
+					 * pass-through makes the fault
+					 * accountable as a real user-mode
+					 * fault, which gates the retry +
+					 * killable handling correctly.
 					 */
-					if (!copy_from_user(&probe,
-							    (void __user *)cr2, 1)) {
-						if (fault_was_write) {
-							if (!copy_to_user((void __user *)cr2,
-									  &probe, 1))
-								touched = true;
-							/* else: RO mapping; touched stays
-							 * false → SIGSEGV path below.
-							 */
-						} else {
-							touched = true;
-						}
-					}
+					hpf_rc = handle_page_fault(cr2,
+								   fault_rip,
+								   fault_was_write,
+								   1,
+								   &code_out);
+					if (hpf_rc == 0)
+						touched = true;
+					(void)probe;	/* unused post-#238 */
 					(void)kvm_shadow_fill_from_uml_pgd(m2->pgd);
 				}
 
