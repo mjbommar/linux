@@ -2260,6 +2260,73 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * into regs->gp[HOST_AX]; the caller marshals that back
 	 * to vCPU state.
 	 */
+	/*
+	 * Memo 13 step 3.5: replay-side dispatch. When the active
+	 * record is in replay mode, consume the next log entry
+	 * instead of issuing handle_syscall — that's how we make
+	 * a syscall byte-deterministic across boots. Cursor advances
+	 * inside kvm_record_consume_syscall under the lock.
+	 *
+	 * Returns:
+	 *   1  ⇒ entry consumed; caller uses replay_ret as the
+	 *        syscall return value, optionally restores the
+	 *        user buffer from the side payload.
+	 *   0  ⇒ no entry available (record exhausted, or not in
+	 *        replay mode); fall through to handle_syscall.
+	 *   <0 ⇒ NR-mismatch divergence; reported via warn but
+	 *        falls through to live handle_syscall to keep
+	 *        forward progress (deviation from log is logged
+	 *        but doesn't terminate the run).
+	 *
+	 * Static-key gate keeps the cost zero when off; the
+	 * spinlock-protected kvm_record_consume_syscall is the only
+	 * cost when on.
+	 */
+	if (static_branch_unlikely(&um_kvm_record_enabled)) {
+		long replay_ret;
+		u64 replay_user_va;
+		const void *replay_payload = NULL;
+		size_t replay_payload_len = 0;
+		int consumed;
+
+		consumed = kvm_record_consume_syscall(syscall_nr,
+						      &replay_ret,
+						      &replay_user_va,
+						      &replay_payload,
+						      &replay_payload_len);
+		if (consumed > 0) {
+			/*
+			 * Replay path: skip handle_syscall, serve the
+			 * recorded return + restore the user buffer if
+			 * the entry carries one.
+			 */
+			regs->gp[HOST_AX] = (unsigned long)replay_ret;
+			if (replay_payload && replay_payload_len) {
+				/*
+				 * copy_to_user can fault → recursive
+				 * record-side hook firing. Suppress by
+				 * temporarily dropping replaying state?
+				 * No: we hold no record lock here, and
+				 * the gated record hook checks
+				 * recording, not replaying. The fault
+				 * itself goes through #PF recovery
+				 * which doesn't touch the record. Safe.
+				 */
+				if (copy_to_user((void __user *)
+						 (unsigned long)replay_user_va,
+						 replay_payload,
+						 replay_payload_len))
+					pr_warn_ratelimited("um: kvm record_replay: copy_to_user(%llu, %zu) failed at cursor restore\n",
+							    (unsigned long long)replay_user_va,
+							    replay_payload_len);
+			}
+			goto record_dispatch_done;
+		}
+		/* consumed == 0 (no entry) or < 0 (divergence) →
+		 * fall through to live handle_syscall + observe.
+		 */
+	}
+
 	pr_info_ratelimited("um: kvm: dispatching handle_syscall nr=%lu (via LSTAR trampoline)\n",
 			    PT_SYSCALL_NR(regs->gp));
 	handle_syscall(regs);
@@ -2279,6 +2346,8 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 					   regs->gp[HOST_DI],
 					   regs->gp[HOST_SI]);
 	}
+
+record_dispatch_done:
 
 	/*
 	 * Experiment #1 (post-audit-round-7): skip the post-syscall

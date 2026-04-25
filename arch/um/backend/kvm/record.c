@@ -502,6 +502,82 @@ void kvm_record_observe_syscall_buf(unsigned long syscall_nr,
 EXPORT_SYMBOL_GPL(kvm_record_observe_syscall_buf);
 
 /**
+ * kvm_record_consume_syscall - replay-side counterpart to
+ *                              kvm_record_observe_syscall.
+ * @syscall_nr: NR of the syscall the dispatcher is about to
+ *              dispatch. Used to validate the log cursor.
+ * @ret_out: receives the recorded return value on success.
+ *
+ * Returns 1 if a log entry was consumed (caller must use *ret_out
+ * as the syscall return + skip handle_syscall + restore the user
+ * buffer if entry->payload is non-NULL); 0 if no entry available
+ * (caller falls through to handle_syscall as if not replaying);
+ * negative on error.
+ *
+ * Design contract: the log was captured in dispatcher order, so
+ * replay consumption is also in order. A replay that hits
+ * end-of-log returns 0 and the caller dispatches normally —
+ * useful for "extend the record beyond the original session"
+ * shapes, though typical fuzzing replay terminates when the log
+ * is exhausted.
+ *
+ * NR mismatch (log[cursor].data[0] != syscall_nr) currently
+ * rejects with -EILSEQ. A stricter shape would terminate replay;
+ * a looser one would skip and resync. v1 is strict — divergence
+ * is a bug worth surfacing loudly.
+ */
+int kvm_record_consume_syscall(unsigned long syscall_nr,
+			       long *ret_out,
+			       u64 *user_buf_va_out,
+			       const void **payload_out,
+			       size_t *payload_len_out)
+{
+	unsigned long flags;
+	struct kvm_record *rec;
+	struct kvm_replay_entry *e;
+	int rc = 0;
+
+	if (!ret_out)
+		return -EINVAL;
+
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	rec = um_kvm_active_record;
+	if (!rec || !rec->replaying) {
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		return 0;
+	}
+	if (rec->replay_cursor >= rec->log_count) {
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		return 0;
+	}
+	e = &rec->log[rec->replay_cursor];
+	if (e->kind != KVM_REPLAY_SYSCALL ||
+	    e->data[0] != (u64)syscall_nr) {
+		pr_warn_ratelimited("um: kvm record_consume: divergence at cursor %zu (kind=%d expected_nr=%lu got_nr=%llu)\n",
+				    rec->replay_cursor, e->kind,
+				    syscall_nr,
+				    (unsigned long long)e->data[0]);
+		rc = -EILSEQ;
+		goto out;
+	}
+
+	*ret_out = (long)e->data[1];
+	if (user_buf_va_out)
+		*user_buf_va_out = e->data[2];
+	if (payload_out)
+		*payload_out = e->payload;
+	if (payload_len_out)
+		*payload_len_out = e->payload_len;
+	rec->replay_cursor++;
+	rc = 1;
+
+out:
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_record_consume_syscall);
+
+/**
  * kvm_record_replay - restore the checkpoint and arm replay mode.
  * @rec: container with a previously-captured checkpoint.
  *
