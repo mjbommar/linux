@@ -67,21 +67,36 @@ if [ ! -x "$LOOP" ]; then
 	exit 4
 fi
 
+ensure_kvm_readable() {
+	# Self-heal /dev/kvm ACL — udev / elogind sometimes drops
+	# the user ACL between successive UML invocations. Retry
+	# up to 3 times with a brief settle delay before giving
+	# up. Used both at runner entry and before every kvm-side
+	# spawn so an in-loop ACL drop doesn't surface as a
+	# spurious SKIP / FAIL (the prior pattern, fixed in task
+	# #267).
+	local i
+	for i in 1 2 3; do
+		if [ -r /dev/kvm ]; then
+			return 0
+		fi
+		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+		[ -r /dev/kvm ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
 measure_one() {
 	local backend=$1
 	local binary=${2:-$BINARY}
 	local log
-	# Self-heal /dev/kvm ACL per-KVM-iteration. Some host
-	# configurations drop the facl between UML invocations
-	# (observed: ACL granted once, gone by the next run with
-	# no apparent trigger — likely udev settling or a per-
-	# session elogind action). Applying inside measure_one
-	# means each backend=kvm pass gets a fresh ACL without
-	# needing a separate one-shot setup step; harmless on
-	# hosts that don't need it. Requires NOPASSWD sudo for
-	# setfacl; falls through to SKIP if that isn't present.
-	if [ "$backend" = "kvm" ] && [ ! -r /dev/kvm ] && [ -e /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+
+	if [ "$backend" = "kvm" ] && [ -e /dev/kvm ]; then
+		if ! ensure_kvm_readable; then
+			echo "PERF_GETPID: backend=$backend FAIL (lost /dev/kvm ACL)"
+			return
+		fi
 	fi
 	# Note: cmdline token is `backend=force=<kind>`, not
 	# `force=<kind>`. An earlier version of this runner used
@@ -111,7 +126,12 @@ declare -A NS_PER_CALL
 declare -A CYC_PER_CALL
 
 for B in $BACKENDS; do
-	if [ "$B" = "kvm" ] && [ ! -r /dev/kvm ]; then
+	if [ "$B" = "kvm" ] && [ -e /dev/kvm ] && \
+	   ! ensure_kvm_readable; then
+		echo "PERF_GETPID: backend=$B SKIP (no /dev/kvm)"
+		continue
+	fi
+	if [ "$B" = "kvm" ] && [ ! -e /dev/kvm ]; then
 		echo "PERF_GETPID: backend=$B SKIP (no /dev/kvm)"
 		continue
 	fi
@@ -144,15 +164,9 @@ done
 # backend=kvm. The primary ratio gate then evaluates the
 # gadget (not the fallback) against seccomp, and a secondary
 # gate checks that the gadget actually beat the fallback.
-# Self-heal /dev/kvm ACL here — the fallback pass above
-# typically consumes it (same host quirk documented in
-# measure_one).
+# measure_one calls ensure_kvm_readable for kvm-side spawns,
+# so the gadget pass below doesn't need its own self-heal.
 if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -e /dev/kvm ]; then
-	if [ ! -r /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
-	fi
-fi
-if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -r /dev/kvm ]; then
 	LINE=$(measure_one kvm "$GADGET_BINARY")
 	if [ -n "$LINE" ]; then
 		echo "PERF_GETPID: backend=kvm $LINE" | sed 's/PERF_GETPID: //2'

@@ -48,10 +48,27 @@ if [ ! -e /dev/kvm ]; then
 	echo "SKIP: /dev/kvm not present" >&2
 	exit 4
 fi
-if [ ! -r /dev/kvm ]; then
-	sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
-fi
-if [ ! -r /dev/kvm ]; then
+
+# Self-heal /dev/kvm ACL — udev / elogind sometimes drops the
+# user ACL between successive UML invocations. Retry up to 3
+# times with a brief settle delay before giving up. Used both
+# at runner entry and before every kvm-side spawn so an in-loop
+# ACL drop doesn't surface as a spurious "no KVM_BOUNDS line"
+# FAIL (the prior pattern, fixed in task #267).
+ensure_kvm_readable() {
+	local i
+	for i in 1 2 3; do
+		if [ -r /dev/kvm ]; then
+			return 0
+		fi
+		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+		[ -r /dev/kvm ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
+if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable" >&2
 	exit 4
 fi
@@ -60,6 +77,10 @@ run_one() {
 	local label=$1 binary=$2
 	local log
 
+	if ! ensure_kvm_readable; then
+		echo "KVM_BOUNDS: $label FAIL (lost /dev/kvm ACL mid-run)"
+		return 1
+	fi
 	log=$(timeout --kill-after=5 30 "$binary" \
 		backend=force=kvm \
 		init="$LOOP" mem="$MEM" \
@@ -88,9 +109,6 @@ if ! run_one "kvm-fallback" "$BINARY"; then
 fi
 
 if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ]; then
-	if [ ! -r /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
-	fi
 	if ! run_one "kvm-gadget" "$GADGET_BINARY"; then
 		FAIL=$((FAIL + 1))
 	fi

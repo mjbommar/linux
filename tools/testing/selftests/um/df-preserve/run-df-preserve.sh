@@ -44,12 +44,31 @@ if [ ! -x "$LOOP" ]; then
 	exit 4
 fi
 
+ensure_kvm_readable() {
+	# Self-heal /dev/kvm ACL — udev / elogind sometimes drops
+	# the user ACL between successive UML invocations. Retry
+	# up to 3 times with a brief settle delay (task #267).
+	local i
+	for i in 1 2 3; do
+		if [ -r /dev/kvm ]; then
+			return 0
+		fi
+		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+		[ -r /dev/kvm ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
 run_one() {
 	local backend=$1 binary=${2:-$BINARY}
 	local log
 
-	if [ "$backend" = "kvm" ] && [ ! -r /dev/kvm ] && [ -e /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+	if [ "$backend" = "kvm" ] && [ -e /dev/kvm ]; then
+		if ! ensure_kvm_readable; then
+			echo "FAIL (lost /dev/kvm ACL)"
+			return
+		fi
 	fi
 	log=$(timeout --kill-after=5 30 "$binary" \
 		backend="force=$backend" \
@@ -68,7 +87,12 @@ run_one() {
 
 FAIL=0
 for B in $BACKENDS; do
-	if [ "$B" = "kvm" ] && [ ! -r /dev/kvm ]; then
+	if [ "$B" = "kvm" ] && [ -e /dev/kvm ] && \
+	   ! ensure_kvm_readable; then
+		echo "DF_PRESERVE: backend=$B SKIP (no /dev/kvm)"
+		continue
+	fi
+	if [ "$B" = "kvm" ] && [ ! -e /dev/kvm ]; then
 		echo "DF_PRESERVE: backend=$B SKIP (no /dev/kvm)"
 		continue
 	fi
@@ -79,10 +103,7 @@ for B in $BACKENDS; do
 done
 
 if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -e /dev/kvm ]; then
-	if [ ! -r /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
-	fi
-	if [ -r /dev/kvm ]; then
+	if ensure_kvm_readable; then
 		LINE=$(run_one kvm "$GADGET_BINARY")
 		echo "DF_PRESERVE: backend=kvm-gadget $LINE"
 		if echo "$LINE" | grep -q "syscall=FAIL"; then FAIL=$((FAIL+1)); fi

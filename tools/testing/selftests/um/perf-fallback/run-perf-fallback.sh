@@ -54,13 +54,36 @@ if [ ! -x "$LOOP" ]; then
 	exit 4
 fi
 
+ensure_kvm_readable() {
+	# Self-heal /dev/kvm ACL — udev / elogind sometimes drops
+	# the user ACL between successive UML invocations. Retry
+	# up to 3 times with a brief settle delay before giving
+	# up. Used both at runner entry and before every kvm-side
+	# spawn so an in-loop ACL drop doesn't surface as a
+	# spurious SKIP / FAIL (task #267).
+	local i
+	for i in 1 2 3; do
+		if [ -r /dev/kvm ]; then
+			return 0
+		fi
+		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+		[ -r /dev/kvm ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
 measure_one() {
 	local backend=$1
 	local binary=${2:-$BINARY}
 	local log
 
-	if [ "$backend" = "kvm" ] && [ ! -r /dev/kvm ] && [ -e /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+	if [ "$backend" = "kvm" ] && [ -e /dev/kvm ]; then
+		if ! ensure_kvm_readable; then
+			printf 'PERF_FALLBACK: backend=%s FAIL (lost /dev/kvm ACL)\n' \
+				"$backend"
+			return
+		fi
 	fi
 	log=$(timeout --kill-after=5 30 "$binary" \
 		backend="force=$backend" \
@@ -82,7 +105,12 @@ declare -A NS_PER_CALL
 declare -A CYC_PER_CALL
 
 for B in $BACKENDS; do
-	if [ "$B" = "kvm" ] && [ ! -r /dev/kvm ]; then
+	if [ "$B" = "kvm" ] && [ -e /dev/kvm ] && \
+	   ! ensure_kvm_readable; then
+		echo "PERF_FALLBACK: backend=$B SKIP (no /dev/kvm)"
+		continue
+	fi
+	if [ "$B" = "kvm" ] && [ ! -e /dev/kvm ]; then
 		echo "PERF_FALLBACK: backend=$B SKIP (no /dev/kvm)"
 		continue
 	fi
@@ -111,12 +139,9 @@ done
 # same fallback path with whatever caching the gadget build
 # adds (vvar refresh, gadget_state_refresh, etc.). The number
 # should be very close to the no-gadget number.
+# measure_one calls ensure_kvm_readable for kvm-side spawns,
+# so the gadget pass below doesn't need its own self-heal.
 if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -e /dev/kvm ]; then
-	if [ ! -r /dev/kvm ]; then
-		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
-	fi
-fi
-if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -r /dev/kvm ]; then
 	LINE=$(measure_one kvm "$GADGET_BINARY")
 	if [ -n "$LINE" ]; then
 		echo "PERF_FALLBACK: backend=kvm-gadget-fallback $LINE" | sed 's/PERF_FALLBACK: //2'
