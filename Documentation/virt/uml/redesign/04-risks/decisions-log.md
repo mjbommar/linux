@@ -9882,4 +9882,112 @@ unchanged.
 
 ---
 
+## D100 (2026-04-25) — Phase 1 closure: dyn-loader green, ratio 1.15× via #272/#273/#238/#242/experiment-#1
+
+**Context.** Phase 1's perf goal was kvm/seccomp ≤ 1.2× with the
+dyn-loader workload (init=/bin/echo through ld-linux + libc + 5
+shared libs) PASSING deterministically on the kvm row. The
+2026-04-24 baseline was 2.92× and dyn-loader hard-faulted with a
+"wild jump to 0xc680" that gave us no diagnosable signal.
+
+**What we did, in commit order.**
+
+1. **task #270** — committed a deterministic repro
+   (`tools/testing/selftests/um/dyn-loader/`) that boots
+   /bin/echo under ptrace + seccomp + kvm and asserts each
+   backend prints "DYN_LOADER: ok". Without this we couldn't
+   iterate on #272.
+2. **task #272** — IRETQ-based bootstrap re-entry replaces
+   SYSRETQ. Root cause: SYSRETQ uses RCX as the user-RIP carrier
+   and R11 as the user-RFLAGS carrier; clobbering both is fine
+   for fresh entries and SYSCALL returns (where the SYSCALL ABI
+   already declared them caller-saved) but DESTROYS user RCX/R11
+   across recoverable-#PF re-entry. Surfaced because ld-linux's
+   RELR-relocation loop uses RCX as the relocation cursor;
+   SYSRETQ-clobbered RCX terminated the loop after a single
+   anchor, leaving 11/12 .relr.dyn slots un-relocated, including
+   the function pointer at `_rtld_global_ro+0x340` whose static
+   value is 0xc680 — the wild-jump target.
+3. **task #273** — KVM_GET_SUPPORTED_CPUID + KVM_SET_CPUID2
+   passthrough. Without this, the vCPU sees a minimal CPUID and
+   modern glibc compiled for x86-64-v3 refuses to load with `CPU
+   ISA level is lower than required`. Lazy-init pattern; alloc
+   happens on first kvm_enter_guest after slab is up.
+4. **task #238 STEP-2** — drop kvm_touch_all_user_vmas. The
+   eager prefault was unblocking #PF recovery for first-touch
+   user pages, but STEP-1 (commit 9e71295123a8) replaced the
+   copy_from_user side-effect with a direct handle_page_fault
+   call, making STEP-2 a pure subtraction. Ratio 2.92× → 2.24×.
+5. **task #242** — skip kvm_shadow_fill_from_uml_pgd when the
+   shadow PT already mirrors UML's pgd. Cache key: synced flag
+   + mm pointer + pgd-VA. Ratio 2.24× → 1.69×.
+6. **experiment #1** — drop the unconditional post-syscall fill.
+   Most syscalls (read/write/getpid/clock_gettime/...) can't
+   mutate UML's pgd, so the post-handle_syscall fill was pure
+   VMEXIT-tax. Mm-mutating syscalls (mmap/munmap/brk/mprotect)
+   go through mm_map/mm_unmap callbacks which already flag
+   shadow_pgd_synced=false; the next kvm_enter_guest's #242
+   skip-fill check then refills correctly. Ratio 1.69× → **1.15×**.
+7. **experiment #2** — KVM_SYNC_X86_SREGS for CR2 reads on the
+   #PF path. Saves an ioctl on actual fault recoveries. Test
+   ratio noise-bound; benefit is in fault-heavy real workloads.
+
+**Audit round 7 closure.**
+
+- **P1**: bootstrap IRETQ raises #GP if user_rsp / user_rip is
+  non-canonical. Without IDT[13], the #GP cascades to #DF and
+  panics. Fix: in-guest IDT[13] (#GP) handler at offset 0x4d8 /
+  port 0xf9, routing to SIGSEGV via faultinfo.
+- **P2**: shadow_pgd_synced_va alone unsafe across mm replacement
+  on the same task (execve doesn't trigger kvm_context_switch's
+  cross-mm reset; the kernel page allocator can reuse the freed
+  pgd page for a new mm with the same VA). Fix: add
+  shadow_pgd_synced_mm to the cache key; require BOTH the mm
+  pointer AND the pgd-VA to match before skipping the fill.
+
+**Validation.**
+
+- dyn-loader kselftest PASS deterministic 5/5 on kvm row.
+- kvm-bounds (G1 cap correctness) PASS 9/9.
+- kvm-smoke (D-04 bring-up) PASS markers=3/6.
+- perf-getpid + perf-fallback both PASS at ratio 1.15-1.17×.
+- snapshot-kvm-smoke (#251) PASS — exercises the new memo-12
+  snapshot primitives via KUnit.
+
+**Deferred (Phase-1 follow-on, non-blocking).**
+
+- #243 per-mm cached shadow PGD — small additional perf win;
+  blocks #250 v2 step 5+ (concurrent fuzz workers).
+- #244 huge-page shadow PT — re-analysis showed lever doesn't
+  apply as framed; demoted, won't ship.
+
+**Phase-3 status.**
+
+- #250 v1 ladder (memo 12, primitives + KUnit + selftest +
+  refusal guard) shipped.
+- #250 v2 ladder (steps 3+4: full forkserver under KVM via
+  capture/restore) deferred to a focused session.
+- #253 record/replay determinism memo 13 written; implementation
+  deferred.
+
+**Outcome.** Phase 1 vision (parity-or-near-parity perf with
+dynamically-linked binaries booting cleanly under kvm backend)
+**achieved.** The remaining 0.15× gap is the architectural floor
+imposed by VMX exit/entry cycles + KVM_RUN ioctl overhead +
+interrupt-window costs; further reduction requires expanding the
+in-guest gadget population to bypass VMEXIT entirely (not more
+shadow-PT shaving).
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/measurements.md` — "2026-04-25 —
+  Phase 1 closure" entry has the per-stage perf table.
+- `02-workstreams/D-kvm-backend/12-snapshot-forkserver-kvm.md` —
+  #250 v2 design memo.
+- `02-workstreams/D-kvm-backend/13-record-replay-determinism.md`
+  — #253 design memo.
+- Commits `a698a665bb62..fd3c501b1b95` carry the session.
+
+---
+
 ## (Future entries here, as decisions are made)
