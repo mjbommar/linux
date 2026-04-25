@@ -59,6 +59,18 @@
 #define KVM_EFER_SCE	(1UL << 0)	/* SYSCALL enable */
 #define KVM_EFER_LME	(1UL << 8)	/* long-mode enable */
 #define KVM_EFER_LMA	(1UL << 10)	/* long-mode active */
+#define KVM_EFER_NXE	(1UL << 11)	/* NX page-table bit enable.
+					 * Required before setting bit 63
+					 * on any leaf PTE — without it,
+					 * bit 63 is reserved-must-be-zero
+					 * and any access to such a page
+					 * triggers a reserved-bit-violation
+					 * #PF. Set unconditionally so any
+					 * call site that adds NX to a leaf
+					 * PTE later (e.g. F5-followon's IST
+					 * stack, #245's gadget state/vvar)
+					 * doesn't have to bring this with it.
+					 */
 
 /* PTE flags for the identity-paged 2 MiB harness region. */
 #define KVM_PTE_P	(1ULL << 0)
@@ -221,7 +233,8 @@ static void kvm_fill_longmode_segments(struct kvm_sregs *sregs)
 	sregs->cr4  = KVM_CR4_PAE | KVM_CR4_OSFXSR | KVM_CR4_OSXMMEXCPT;
 	sregs->cr0  = KVM_CR0_PE | KVM_CR0_MP | KVM_CR0_NE |
 		      KVM_CR0_WP | KVM_CR0_PG;
-	sregs->efer = KVM_EFER_SCE | KVM_EFER_LME | KVM_EFER_LMA;
+	sregs->efer = KVM_EFER_SCE | KVM_EFER_LME | KVM_EFER_LMA |
+		      KVM_EFER_NXE;
 }
 
 void kvm_setup_harness_sregs(struct kvm_sregs *sregs)

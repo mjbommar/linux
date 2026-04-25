@@ -1537,10 +1537,21 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * to ring-0 before fetching LSTAR), so US=0 is
 		 * sufficient. Blocking ring-3 direct reads is a
 		 * defense-in-depth match for F5's bootstrap-page fix.
+		 *
+		 * Phase 2 #245: set NX. The state page is data —
+		 * pid/uid struct fields read by gadget handlers via
+		 * %gs:disp32. No code lives here. NX prevents
+		 * return-to-state-page ROP if a future bug ever lets
+		 * the gadget body redirect ring-0 control flow into
+		 * this region. Mirrors NX on IST stack (D96) and
+		 * vvar page below. EFER.NXE is set unconditionally
+		 * by kvm_setup_production_sregs (D-XX pre-condition);
+		 * without NXE bit 63 is reserved-must-be-zero and
+		 * would trigger reserved-bit-violation #PF on read.
 		 */
 		rc = kvm_shadow_map_page(gstate_va,
 					 kvm_gadget_state_gpa(),
-					 KVM_X86_PTE_P);
+					 KVM_X86_PTE_P | KVM_X86_PTE_NX);
 		if (rc < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(gadget_state) failed (%d)\n",
 					    rc);
@@ -1576,7 +1587,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 
 		rc = kvm_shadow_map_page(vvar_va,
 					 kvm_gadget_vvar_gpa(),
-					 KVM_X86_PTE_P | KVM_X86_PTE_RW);
+					 KVM_X86_PTE_P | KVM_X86_PTE_RW |
+					 KVM_X86_PTE_NX);
 		if (rc < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(gadget_vvar) failed (%d)\n",
 					    rc);
