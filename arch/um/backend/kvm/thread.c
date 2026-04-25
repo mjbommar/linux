@@ -2040,6 +2040,32 @@ sregs_done:
 	}
 
 	/*
+	 * Experiment #2: opt-in to KVM_SYNC_X86_SREGS so the post-
+	 * VMEXIT CR2 read on the #PF handler path is a memory load
+	 * from run->s.regs.sregs.cr2 instead of a KVM_GET_SREGS
+	 * ioctl (~50-100ns saved per recoverable fault). KVM updates
+	 * the shadow sregs whenever the guest's view changes
+	 * (including page faults that store CR2), so the post-RUN
+	 * read sees the right value.
+	 *
+	 * Set valid_regs but NOT dirty_regs — we're not pushing
+	 * sregs into the vCPU here (that goes through KVM_SET_SREGS
+	 * above when SREGS-skip-cache misses). Just asking KVM to
+	 * publish them on the way out.
+	 *
+	 * Cap-gated: kvm_ctx.sync_regs_caps is the bitmap returned
+	 * by KVM_CHECK_EXTENSION(KVM_CAP_SYNC_REGS); KVM_SYNC_X86_
+	 * SREGS is bit 1 (KVM_SYNC_X86_REGS is bit 0). When SREGS
+	 * isn't in the cap bitmap we fall back to the unconditional
+	 * KVM_GET_SREGS ioctl in the #PF handler.
+	 */
+	if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
+		struct kvm_run *run = kvm_backend_ctx()->run0;
+
+		run->kvm_valid_regs |= KVM_SYNC_X86_SREGS;
+	}
+
+	/*
 	 * Arm the SYSCALL trap: MSR_LSTAR at the bootstrap page's
 	 * LSTAR trampoline (linear address, same rationale as
 	 * GDT). MSR_STAR carries the ring-0 / ring-3 selectors;
@@ -2541,11 +2567,23 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				unsigned long ist_off;
 				u8 *ist;
 
-				if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-						     (unsigned long)&dump_sregs) < 0) {
-					panic("um: kvm PF handler: KVM_GET_SREGS failed");
+				/*
+				 * Experiment #2: prefer the synced view if
+				 * KVM published it via KVM_CAP_SYNC_REGS.
+				 * Saves a KVM_GET_SREGS ioctl on the hot
+				 * fault path (~50-100ns).
+				 */
+				if (kvm_backend_ctx()->sync_regs_caps &
+				    KVM_SYNC_X86_SREGS) {
+					cr2 = run->s.regs.sregs.cr2;
+				} else {
+					if (os_ioctl_generic(vcpu_fd,
+							     KVM_GET_SREGS,
+							     (unsigned long)&dump_sregs) < 0) {
+						panic("um: kvm PF handler: KVM_GET_SREGS failed");
+					}
+					cr2 = dump_sregs.cr2;
 				}
-				cr2 = dump_sregs.cr2;
 
 				/*
 				 * Audit round-5 F7/1: classify the fault
