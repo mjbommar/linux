@@ -132,7 +132,7 @@ docs/uml-redesign/
       bpf-hygiene-v1 + kmsan-arch-callback-rfc ready for
       `git send-email`, remaining five series staged to write)
 
-## Landed in tree (as of 2026-04-23)
+## Landed in tree (as of 2026-04-25)
 
 This plan has outgrown "paper design" — much of it is now code
 on `uml-redesign-plan` branch, tracked in the per-workstream
@@ -353,10 +353,14 @@ phases landed 2026-04-23.
 **Selftests under `tools/testing/selftests/um/`:**
 ftrace-smoke, hooks-flip, kprobes-stress, launcher-smoke
 (Parts A/B/C), profiles, snapshot-smoke, userspace-smoke.
-Direct-invocation regression coverage for every landed
-sub-system. As of 2026-04-21 all seven pass against the
-current HEAD on the research profile; snapshot-smoke
-additionally passes on fuzz.
+Plus the post-Q1 / Phase-1 additions: cve-repro,
+df-preserve, **dyn-loader** (task #270 — ld-linux + libc
+end-to-end repro, deterministic kvm row), kvm-bounds,
+kvm-smoke, perf-fallback, perf-getpid, **snapshot-kvm-smoke**
+(task #251 — KUnit-shape gate against the v2 snapshot API
+surface), umlctl-smoke. Direct-invocation regression coverage
+for every landed sub-system. As of 2026-04-25 all current-
+profile selftests pass on the kvmint and seccomp configs.
 
 **Review-fix series (continuing D46 discipline):** a fourth
 external review on 2026-04-21 caught five items the prior
