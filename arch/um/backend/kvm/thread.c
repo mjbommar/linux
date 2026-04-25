@@ -1067,8 +1067,9 @@ int kvm_gadget_fault_nr(u64 fault_rip)
 	return -1;
 }
 #else
-static inline int kvm_gadget_fault_nr(u64 fault_rip)
+int kvm_gadget_fault_nr(u64 fault_rip)
 {
+	(void)fault_rip;
 	return -1;
 }
 #endif /* CONFIG_UM_BACKEND_KVM_GADGET */
