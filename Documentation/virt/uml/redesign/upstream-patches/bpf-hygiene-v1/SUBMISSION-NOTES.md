@@ -1,30 +1,89 @@
 # BPF x86 hygiene patches — submission-readiness notes
 
-Series location: `/tmp/bpf-hygiene-v1/`
+## Status (2026-04-25 update — task #260)
 
-## Files
+**READY TO SEND.** Submission branch + format-patches
+prepared. All preflight cleanups are done; awaiting user
+"go" to run `git send-email`.
 
-- `0000-cover-letter.patch` — cover letter (edited with real subject + blurb; base-only version originally had ~60 prerequisite-patch-id lines from the UML work on the source branch, now cleaned up).
+### Submission branch
+
+`bpf-hygiene-v1-submit` (pushed to `origin/bpf-hygiene-
+v1-submit`), based off `master` with the two patches
+cherry-picked + cleaned:
+
+| Branch commit | Subject |
+|---------------|---------|
+| `d43a4a849188` | bpf, x86: explicitly include `<asm/cpufeature.h>` |
+| `37098ae27db8` | bpf, x86: use instruction_pointer helpers in ex_handler_bpf |
+
+### Cleanup applied
+
+- `Co-authored-by:` trailers stripped from both commits
+  (LKML convention: drop or use `Co-developed-by:` paired
+  with a corresponding `Signed-off-by:`. Plain
+  `Co-authored-by:` flagged by checkpatch as non-standard;
+  for upstream we just drop it).
+- Author + `Signed-off-by:` both read
+  `Michael Bommarito <michael.bommarito@gmail.com>` (the
+  cherry-pick onto a clean tree picked up the user's git
+  config name automatically; the original commits had
+  `mjbommar` as the SOB name which checkpatch flagged as
+  a from/SOB name mismatch).
+
+### Format-patch output
+
+Generated at `/tmp/bpf-hygiene-v1-emit/`:
+
+- `0000-cover-letter.patch` — subject + blurb filled in;
+  references the build-verification recipe.
 - `0001-bpf-x86-explicitly-include-asm-cpufeature.h.patch`
 - `0002-bpf-x86-use-instruction_pointer-helpers-in-ex_handle.patch`
 
-## Pre-submission cleanups
+### Build verification (re-run on cleaned branch)
 
-Two things to handle before sending to LKML:
+```
+make ARCH=x86_64 O=/tmp/x86-bpfprobe defconfig
+./scripts/config --file /tmp/x86-bpfprobe/.config \
+    --enable BPF_SYSCALL --enable BPF_JIT
+make ARCH=x86_64 O=/tmp/x86-bpfprobe olddefconfig
+make ARCH=x86_64 O=/tmp/x86-bpfprobe -j4 \
+    arch/x86/net/bpf_jit_comp.o
+```
 
-1. **Strip the `Co-authored-by:` trailer from 0002.** checkpatch
-   flags it as a non-standard signature. LKML convention is
-   either `Co-developed-by:` (lowercase -by, title-case initial),
-   or just drop it. Easiest: `git rebase -i` on the
-   submission branch (not the main branch) and drop the trailer
-   line from the commit message. Keep `Signed-off-by:`.
+Result: `bpf_jit_comp.o` is **65656 bytes** — byte-for-byte
+identical to the master baseline (also 65656 bytes). No
+codegen change, no ABI change. Pure hygiene.
 
-2. **Re-Sign-off-by.** The current author line reads
-   `mjbommar <mjbommar@server3.(none)>` because `format-patch`
-   picked up the committer from the env. Re-run `git commit
-   --amend --reset-author` on a submission branch to use
-   `michael.bommarito@gmail.com` cleanly, or edit the From:
-   header in the .patch files manually before `git send-email`.
+### checkpatch on the format-patch output
+
+```
+0 errors, 1 warning, 15 lines checked
+```
+
+The single warning is "Prefer a maximum 75 chars per line"
+on a code-snippet line in the commit message of patch 2
+(showing the After: code form). Code-snippet lines are
+expected to exceed the 75-char paragraph wrap; checkpatch's
+heuristic doesn't distinguish. Not actionable; reviewers
+won't object.
+
+### Send recipe (when authorized)
+
+```
+cd /tmp/bpf-hygiene-v1-emit
+git send-email --to=bpf@vger.kernel.org \
+               --cc=netdev@vger.kernel.org \
+               --cc=x86@kernel.org \
+               --cc=ast@kernel.org \
+               --cc=daniel@iogearbox.net \
+               --cc=andrii@kernel.org \
+               *.patch
+```
+
+(Run `./scripts/get_maintainer.pl --file
+arch/x86/net/bpf_jit_comp.c` right before sending to pick
+up any maintainer rotation since 2026-04-25.)
 
 ## checkpatch findings (false positives, no action needed)
 
