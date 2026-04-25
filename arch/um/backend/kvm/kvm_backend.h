@@ -688,6 +688,8 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 			       u64 *user_buf_va_out,
 			       const void **payload_out,
 			       size_t *payload_len_out);
+bool kvm_record_strict_replay(void);
+int kvm_record_set_strict_replay(bool strict);
 struct uml_pt_regs;
 void kvm_record_observe_dispatch(unsigned long syscall_nr,
 				 long ret_value,

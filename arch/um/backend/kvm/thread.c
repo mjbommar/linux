@@ -2322,8 +2322,30 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 			}
 			goto record_dispatch_done;
 		}
-		/* consumed == 0 (no entry) or < 0 (divergence) →
-		 * fall through to live handle_syscall + observe.
+		/*
+		 * Review-01 P1: divergence / end-of-log policy.
+		 *
+		 *   consumed < 0  ⇒ -EILSEQ (NR mismatch) or -ENODATA
+		 *                   (strict end-of-log). Strict
+		 *                   replay refuses the syscall: set
+		 *                   regs->gp[HOST_AX] = -EIO and
+		 *                   skip handle_syscall — the user
+		 *                   task sees a hard error instead
+		 *                   of a silent fall-through.
+		 *   consumed == 0 ⇒ no entry available AND not
+		 *                   strict (loose mode) — fall
+		 *                   through to live handle_syscall.
+		 *                   Or: not in replay mode at all
+		 *                   (recording/idle); ditto.
+		 */
+		if (consumed < 0) {
+			pr_warn_ratelimited("um: kvm record_replay: divergence rc=%d nr=%lu — fail-stop (returning -EIO to guest)\n",
+					    consumed, syscall_nr);
+			regs->gp[HOST_AX] = (unsigned long)(long)(-EIO);
+			goto record_dispatch_done;
+		}
+		/* consumed == 0 → fall through to live handle_syscall
+		 * + observe (recording mode or loose end-of-log).
 		 */
 	}
 

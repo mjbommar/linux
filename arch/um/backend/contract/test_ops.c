@@ -1112,6 +1112,60 @@ static void kvm_record_basic_test(struct kunit *test)
 }
 
 /*
+ * Review-01 P0 regression test: start → observe → STOP → replay →
+ * consume. The buggy v1 of kvm_record_replay() didn't re-arm the
+ * active-record slot or the static-key gate after stop, so consume
+ * silently no-op'd and the dispatcher fell through to live syscalls.
+ *
+ * This test calls observe (which only fires under the gate) before
+ * the stop — so it directly verifies that:
+ *   1. start arms the gate and slot.
+ *   2. observe lands a log entry.
+ *   3. stop disarms.
+ *   4. replay re-arms the gate + slot.
+ *   5. consume returns 1 + the right NR.
+ *
+ * Skips on early-boot when start can't capture (memslot lazy-init).
+ */
+static void kvm_record_stop_replay_consume_test(struct kunit *test)
+{
+	struct kvm_record *rec;
+	long ret_out;
+	int rc;
+
+	rec = kvm_record_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_record_start(rec);
+	if (rc < 0) {
+		kunit_info(test, "kvm_record_start rc=%d (skipping; expected on early boot)\n",
+			   rc);
+		kvm_record_destroy(rec);
+		return;
+	}
+
+	/*
+	 * One observation while armed. The gate is on after start,
+	 * so the helper appends an entry.
+	 */
+	kvm_record_observe_syscall(__NR_getpid, 4242, 0, 0);
+
+	kvm_record_stop(rec);
+	/* After stop: slot cleared, gate disabled. Replay must
+	 * re-arm both. */
+	rc = kvm_record_replay(rec);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+
+	/* Consume must see the prior observation. */
+	rc = kvm_record_consume_syscall(__NR_getpid, &ret_out,
+					NULL, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, ret_out, (long)4242);
+
+	kvm_record_destroy(rec);
+}
+
+/*
  * Memo 13 round-trip: drive the record/replay log directly via
  * the C API without needing a userspace driver. The record-side
  * hook (kvm_record_observe_syscall) only fires under the static-
@@ -1509,6 +1563,7 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(kvm_gadget_vvar_refresh_test),
 	KUNIT_CASE(kvm_snapshot_basic_test),
 	KUNIT_CASE(kvm_record_basic_test),
+	KUNIT_CASE(kvm_record_stop_replay_consume_test),
 	KUNIT_CASE(kvm_record_roundtrip_test),
 #endif
 	{}

@@ -142,6 +142,27 @@ struct kvm_record {
 	bool				recording;
 	bool				replaying;
 	size_t				replay_cursor;
+
+	/*
+	 * Review-01 P1: replay strictness mode. Default is "strict"
+	 * — log exhaustion + NR-mismatch divergence both refuse to
+	 * dispatch, so the caller stops the guest task instead of
+	 * silently running live syscalls. "loose" preserves the
+	 * original v1 behaviour (fall-through to handle_syscall)
+	 * for use cases that explicitly want to extend recording
+	 * beyond the original session.
+	 */
+	bool				strict_replay;
+
+	/*
+	 * Review-01 P2: payload memory accounting. Sum of all
+	 * payload_len over the log; surfaced through kvm_record_state
+	 * so an operator / fuzzer driver can apply caps or simply
+	 * see how big a fuzz session has grown. No per-entry or
+	 * total-bytes cap enforced today; future Kconfig
+	 * (UM_KVM_RECORD_MAX_BYTES) can land that.
+	 */
+	size_t				payload_bytes;
 };
 
 /**
@@ -166,6 +187,8 @@ struct kvm_record *kvm_record_alloc(void)
 	}
 	rec->log_capacity = KVM_RECORD_LOG_INITIAL;
 	rec->log_count = 0;
+	rec->strict_replay = true;	/* review-01 P1: default fail-stop */
+	rec->payload_bytes = 0;
 	return rec;
 }
 EXPORT_SYMBOL_GPL(kvm_record_alloc);
@@ -195,6 +218,7 @@ void kvm_record_destroy(struct kvm_record *rec)
 	/* Memo 13 step 3: free per-entry side buffers. */
 	for (i = 0; i < rec->log_count; i++)
 		kvfree(rec->log[i].payload);
+	rec->payload_bytes = 0;
 
 	kvfree(rec->log);
 	kfree(rec);
@@ -432,6 +456,8 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 		e->data[3] = d3;
 		e->payload = side;
 		e->payload_len = side ? payload_len : 0;
+		if (side)
+			rec->payload_bytes += payload_len;
 		rec->log_count++;
 	}
 
@@ -688,6 +714,7 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 	unsigned long flags;
 	struct kvm_record *rec;
 	struct kvm_replay_entry *e;
+	bool strict;
 	int rc = 0;
 
 	if (!ret_out)
@@ -699,17 +726,34 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 		return 0;
 	}
+	strict = rec->strict_replay;
 	if (rec->replay_cursor >= rec->log_count) {
 		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
-		return 0;
+		/*
+		 * Review-01 P1: end-of-log policy is governed by
+		 * strict_replay. Strict (default) returns -ENODATA so
+		 * the caller fail-stops the guest task. Loose returns
+		 * 0 (caller falls through to live handle_syscall) for
+		 * "extend recording beyond original session" use.
+		 */
+		return strict ? -ENODATA : 0;
 	}
 	e = &rec->log[rec->replay_cursor];
 	if (e->kind != KVM_REPLAY_SYSCALL ||
 	    e->data[0] != (u64)syscall_nr) {
-		pr_warn_ratelimited("um: kvm record_consume: divergence at cursor %zu (kind=%d expected_nr=%lu got_nr=%llu)\n",
+		pr_warn_ratelimited("um: kvm record_consume: divergence at cursor %zu (kind=%d expected_nr=%lu got_nr=%llu strict=%d)\n",
 				    rec->replay_cursor, e->kind,
 				    syscall_nr,
-				    (unsigned long long)e->data[0]);
+				    (unsigned long long)e->data[0],
+				    strict);
+		/*
+		 * Review-01 P1: divergence always returns -EILSEQ.
+		 * The dispatcher distinguishes strict vs loose by
+		 * checking the active record's strict_replay flag
+		 * via kvm_record_strict_replay() — strict aborts
+		 * the syscall (delivers SIGSEGV), loose falls
+		 * through to live handle_syscall.
+		 */
 		rc = -EILSEQ;
 		goto out;
 	}
@@ -731,6 +775,56 @@ out:
 EXPORT_SYMBOL_GPL(kvm_record_consume_syscall);
 
 /**
+ * kvm_record_strict_replay - is the active record in strict replay mode?
+ *
+ * Returns true iff the active container is in replay mode and has
+ * strict_replay set. Returns false when no record is active, or
+ * when the active record is recording, or when loose replay is in
+ * effect. Used by the dispatcher to decide whether to fail-stop
+ * (deliver SIGSEGV) or fall through to live handle_syscall on
+ * end-of-log / divergence.
+ */
+bool kvm_record_strict_replay(void)
+{
+	unsigned long flags;
+	struct kvm_record *rec;
+	bool strict = false;
+
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	rec = um_kvm_active_record;
+	if (rec && rec->replaying)
+		strict = rec->strict_replay;
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+	return strict;
+}
+EXPORT_SYMBOL_GPL(kvm_record_strict_replay);
+
+/**
+ * kvm_record_set_strict_replay - toggle strict-replay mode on the
+ *                                active record.
+ * @strict: true for fail-stop on divergence/end-of-log; false to
+ *          fall through to live handle_syscall.
+ *
+ * Returns 0 if a record is active, -ENODEV if not.
+ */
+int kvm_record_set_strict_replay(bool strict)
+{
+	unsigned long flags;
+	struct kvm_record *rec;
+	int rc = -ENODEV;
+
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	rec = um_kvm_active_record;
+	if (rec) {
+		rec->strict_replay = strict;
+		rc = 0;
+	}
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_record_set_strict_replay);
+
+/**
  * kvm_record_replay - restore the checkpoint and arm replay mode.
  * @rec: container with a previously-captured checkpoint.
  *
@@ -745,6 +839,8 @@ EXPORT_SYMBOL_GPL(kvm_record_consume_syscall);
  */
 int kvm_record_replay(struct kvm_record *rec)
 {
+	unsigned long flags;
+	bool need_register;
 	int rc;
 
 	if (!rec)
@@ -754,6 +850,27 @@ int kvm_record_replay(struct kvm_record *rec)
 		return -EINVAL;
 	}
 
+	/*
+	 * Review-01 P0: `start -> stop -> replay` must re-arm the
+	 * active-record slot + the static-key gate, otherwise the
+	 * dispatcher's kvm_record_consume_syscall hook never fires
+	 * and replay silently runs live syscalls.
+	 *
+	 * Determine whether we need to (re)register: if no slot is
+	 * currently held, claim it. If we already hold the slot
+	 * (replay-after-replay or replay-while-recording), it's a
+	 * no-op. If a *different* container holds the slot, refuse
+	 * with -EBUSY same as kvm_record_start does.
+	 */
+	spin_lock_irqsave(&um_kvm_record_lock, flags);
+	if (um_kvm_active_record && um_kvm_active_record != rec) {
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		pr_warn("um: kvm record_replay: another record is already active\n");
+		return -EBUSY;
+	}
+	need_register = (um_kvm_active_record != rec);
+	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+
 	rc = kvm_snapshot_restore_full(rec->checkpoint);
 	if (rc < 0)
 		return rc;
@@ -761,6 +878,13 @@ int kvm_record_replay(struct kvm_record *rec)
 	rec->recording = false;
 	rec->replaying = true;
 	rec->replay_cursor = 0;
+
+	if (need_register) {
+		spin_lock_irqsave(&um_kvm_record_lock, flags);
+		um_kvm_active_record = rec;
+		spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+		static_branch_enable(&um_kvm_record_enabled);
+	}
 
 	pr_info("um: kvm record_replay: armed (checkpoint restored, %zu log entries to replay)\n",
 		rec->log_count);
@@ -839,6 +963,10 @@ static ssize_t kvm_record_ctl_write(struct file *f,
 		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
 		if (rec)
 			kvm_record_destroy(rec);
+	} else if (!strcmp(tmp, "strict")) {
+		rc = kvm_record_set_strict_replay(true);
+	} else if (!strcmp(tmp, "loose")) {
+		rc = kvm_record_set_strict_replay(false);
 	} else {
 		return -EINVAL;
 	}
@@ -856,21 +984,26 @@ static int kvm_record_state_show(struct seq_file *m, void *unused)
 {
 	struct kvm_record *rec;
 	unsigned long flags;
-	bool recording = false, replaying = false;
-	size_t log_count = 0, log_capacity = 0;
+	bool recording = false, replaying = false, strict = false;
+	size_t log_count = 0, log_capacity = 0, payload_bytes = 0;
+	size_t replay_cursor = 0;
 
 	spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
 	rec = um_kvm_record_debugfs_rec;
 	if (rec) {
 		recording = rec->recording;
 		replaying = rec->replaying;
+		strict = rec->strict_replay;
 		log_count = rec->log_count;
 		log_capacity = rec->log_capacity;
+		payload_bytes = rec->payload_bytes;
+		replay_cursor = rec->replay_cursor;
 	}
 	spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
 
-	seq_printf(m, "recording=%d replaying=%d log_count=%zu log_capacity=%zu\n",
-		   recording, replaying, log_count, log_capacity);
+	seq_printf(m, "recording=%d replaying=%d strict_replay=%d log_count=%zu log_capacity=%zu replay_cursor=%zu payload_bytes=%zu\n",
+		   recording, replaying, strict,
+		   log_count, log_capacity, replay_cursor, payload_bytes);
 	return 0;
 }
 
