@@ -172,22 +172,23 @@ static int kvm_snapshot_capture_internal(struct kvm_snapshot *snap,
 	/*
 	 * Memslot copy. Under Policy A there's exactly one memslot
 	 * covering [0, physmem_size) at host VA uml_physmem. Use
-	 * vmalloc for the backing buffer because physmem_size can
-	 * exceed kmalloc's MAX_ORDER-bounded ceiling on tiny-pages
-	 * configs; vmalloc handles up to vmalloc_total without
-	 * needing physical contiguity.
+	 * kvmalloc for the backing buffer: it tries kmalloc first
+	 * (cheap for small sizes, contiguous physical pages) and
+	 * falls back to vmalloc when the order exceeds MAX_ORDER.
+	 * That handles the typical 64-256 MiB physmem range better
+	 * than raw vmalloc, which is bounded tighter at late_
+	 * initcall_sync on UML.
 	 *
-	 * vmalloc(physmem_size) can fail on UML's bounded vmalloc
-	 * area at late_initcall_sync time when the area hasn't yet
-	 * grown to its full extent. Callers that don't strictly
-	 * need the memslot (kvm_snapshot_bench cycle measurement,
-	 * KUnit shape tests) can pass include_memslot=false to skip
-	 * this allocation and round-trip vCPU state only.
+	 * Even kvmalloc can fail on small builds where neither path
+	 * has enough headroom. Callers that don't strictly need the
+	 * memslot (kvm_snapshot_bench cycle measurement, KUnit
+	 * shape tests) can pass include_memslot=false to skip this
+	 * allocation and round-trip vCPU state only.
 	 */
 	snap->mem_size = physmem_size;
-	snap->mem_backing = vmalloc(snap->mem_size);
+	snap->mem_backing = kvmalloc(snap->mem_size, GFP_KERNEL);
 	if (!snap->mem_backing) {
-		pr_warn("um: kvm snapshot: vmalloc(%zu) failed\n",
+		pr_warn("um: kvm snapshot: kvmalloc(%zu) failed\n",
 			snap->mem_size);
 		return -ENOMEM;
 	}
@@ -337,7 +338,7 @@ void kvm_snapshot_free(struct kvm_snapshot *snap)
 	if (!snap)
 		return;
 	if (snap->mem_backing) {
-		vfree(snap->mem_backing);
+		kvfree(snap->mem_backing);
 		snap->mem_backing = NULL;
 	}
 	snap->mem_size = 0;
