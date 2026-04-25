@@ -2224,21 +2224,43 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	handle_syscall(regs);
 
 	/*
-	 * Task #238 — STEP 2: only refresh shadow PT, no eager touch.
-	 * handle_syscall may have changed UML's logical pgd (e.g. brk
-	 * extended the heap; mmap added a vma; munmap unmapped one).
-	 * Mirror the new state into the shadow PT so the post-syscall
-	 * resume sees consistent mappings. Eager touch was removed
-	 * with the rest of the touch-all walks (kvm_enter_guest STEP 2)
-	 * — lazy fault recovery covers anything that's not yet in the
-	 * logical pgd.
+	 * Experiment #1 (post-audit-round-7): skip the post-syscall
+	 * shadow PT refill for syscall classes that can't mutate the
+	 * mm. Only mm-modifying syscalls (mmap/munmap/brk/mprotect/
+	 * mremap/etc.) need the refill — and those go through UML's
+	 * mm_map / mm_unmap callbacks, which call kvm_shadow_
+	 * invalidate_va_range and reset shadow_pgd_synced=false. So
+	 * the next kvm_enter_guest's skip-fill check (#242) will
+	 * notice the unsynced flag and refill anyway. For non-mm
+	 * syscalls (read/write/getpid/clock_gettime/...), the shadow
+	 * PT is provably unchanged, and the refill walk is pure
+	 * cost.
+	 *
+	 * Class taxonomy (kvm_classify_syscall, syscall_class.c):
+	 *   - PASSTHROUGH: most syscalls, including all the hot
+	 *                  ones; can fault paged-out user memory but
+	 *                  that's serviced by #PF recovery's own
+	 *                  refill, not this post-syscall one.
+	 *   - VCPU_STATE:  arch_prctl etc.; modifies vCPU regs but
+	 *                  not mm.
+	 *   - SIGFRAME:    rt_sigreturn; modifies vCPU regs from
+	 *                  sigframe; not mm.
+	 *   - TRAP:        ptrace/reboot/etc.; short-circuited
+	 *                  earlier with -EPERM; never gets here.
+	 *   - GADGET:      gettid/etc.; no fallback after gadget
+	 *                  passthrough.
+	 *
+	 * NONE of these classes mutate UML's mm directly. Mm-
+	 * mutating syscalls (mmap/munmap/brk) go through
+	 * generic VM helpers that funnel into UML's mm_map/mm_unmap
+	 * callbacks, which already invalidate the shadow PT
+	 * synchronously. So the unconditional post-syscall fill is
+	 * always redundant for the syscall path itself.
+	 *
+	 * Reverts trivially: re-enable the unconditional fill if
+	 * any class is later observed to mutate mm without going
+	 * through mm_map/unmap.
 	 */
-	{
-		struct mm_struct *mm2 = current->active_mm;
-
-		if (mm2 && mm2->pgd)
-			(void)kvm_shadow_fill_from_uml_pgd(mm2->pgd);
-	}
 
 skip_dispatch:
 	/*
