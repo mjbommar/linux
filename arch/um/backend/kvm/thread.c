@@ -1703,7 +1703,29 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	mm = current->active_mm;
 	if (mm && mm->pgd) {
+		struct kvm_um *fctx = kvm_backend_ctx();
 		int filled;
+
+		/*
+		 * Task #242 (perf lever #4): if the shadow PT is
+		 * already in sync with this mm's pgd — same pgd-VA
+		 * AND no invalidation event since the last fill —
+		 * skip the full re-walk. Every path that mutates
+		 * UML's logical pgd flows through either kvm_shadow_
+		 * pgd_clear_user (cross-mm switch) or kvm_shadow_
+		 * invalidate_va_range (mm_map / mm_unmap), both of
+		 * which reset shadow_pgd_synced=false. Direct refills
+		 * from the syscall + #PF recovery paths invoke
+		 * kvm_shadow_fill_from_uml_pgd which sets synced=true,
+		 * keeping the invariant tight without a generation
+		 * counter.
+		 */
+		if (fctx->shadow_pgd_synced &&
+		    fctx->shadow_pgd_synced_va == (u64)mm->pgd) {
+			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (pgd=%p, skip fill)\n",
+					    mm->pgd);
+			goto fill_done;
+		}
 
 		/*
 		 * Task #238 — STEP 2: drop kvm_touch_all_user_vmas. The
@@ -1744,6 +1766,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		}
 		pr_info_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
 				    filled);
+fill_done:
+		;	/* perf-lever #4 skip-target — falls through */
 	}
 
 	/*

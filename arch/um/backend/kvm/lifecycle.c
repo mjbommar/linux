@@ -943,6 +943,15 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 
 	pr_info_ratelimited("um: kvm shadow fill: installed %d leaf PTEs from pgd=%p\n",
 			    installed, pgd_va);
+
+	/*
+	 * Task #242: mark the shadow PT as in-sync with this pgd-VA.
+	 * Subsequent kvm_enter_guest calls compare against the
+	 * cached VA + the synced flag and skip the full re-walk when
+	 * nothing has invalidated the mirror.
+	 */
+	kvm_ctx.shadow_pgd_synced = true;
+	kvm_ctx.shadow_pgd_synced_va = (u64)pgd_va;
 	return installed;
 }
 
@@ -1061,8 +1070,16 @@ void kvm_shadow_pgd_clear_user(void)
 		}
 	}
 
-	if (leaf_tables)
+	if (leaf_tables) {
 		kvm_ctx.shadow_dirty = true;
+		/*
+		 * Task #242: cross-mm clear invalidates the shadow PT
+		 * — next kvm_enter_guest must do a full fill against
+		 * the new mm's pgd. Reset the synced flag so the
+		 * fast-path skip-fill check fails.
+		 */
+		kvm_ctx.shadow_pgd_synced = false;
+	}
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_pgd_clear_user);
 
@@ -1102,8 +1119,17 @@ int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 		}
 	}
 
-	if (cleared)
+	if (cleared) {
 		kvm_ctx.shadow_dirty = true;
+		/*
+		 * Task #242: range-invalidate breaks the
+		 * shadow-mirrors-uml-pgd invariant — next kvm_enter_
+		 * guest must re-fill. The same shadow_pgd_synced
+		 * reset that kvm_shadow_pgd_clear_user does for the
+		 * cross-mm case applies here for in-mm mmap/munmap.
+		 */
+		kvm_ctx.shadow_pgd_synced = false;
+	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);
