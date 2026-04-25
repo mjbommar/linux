@@ -37,11 +37,14 @@
  * record_enabled) so non-record builds pay zero cost.
  */
 
+#include <linux/debugfs.h>
 #include <linux/errno.h>
 #include <linux/export.h>
+#include <linux/init.h>
 #include <linux/jump_label.h>
 #include <linux/kvm.h>
 #include <linux/printk.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -406,3 +409,142 @@ int kvm_record_replay(struct kvm_record *rec)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_record_replay);
+
+#ifdef CONFIG_DEBUG_FS
+
+/*
+ * Debugfs control surface for the record/replay container.
+ *
+ * One debugfs-managed kvm_record container backs the entire
+ * surface; userspace drives it via simple text commands.
+ *
+ *   echo start  > /sys/kernel/debug/um/kvm_record_ctl
+ *   echo stop   > /sys/kernel/debug/um/kvm_record_ctl
+ *   echo replay > /sys/kernel/debug/um/kvm_record_ctl
+ *   cat /sys/kernel/debug/um/kvm_record_state
+ *      → "recording=N replaying=N log_count=N log_capacity=N"
+ *
+ * This is the v1 control protocol; future kselftests + the
+ * eventual syzkaller integration consume these nodes. For
+ * programmatic record/replay outside the debugfs path, callers
+ * use the kvm_record_* C API directly.
+ */
+static struct kvm_record *um_kvm_record_debugfs_rec;
+static DEFINE_SPINLOCK(um_kvm_record_debugfs_lock);
+
+static ssize_t kvm_record_ctl_write(struct file *f,
+				    const char __user *buf,
+				    size_t count, loff_t *ppos)
+{
+	char tmp[16];
+	struct kvm_record *rec;
+	size_t copy_n;
+	unsigned long flags;
+	int rc = 0;
+
+	copy_n = min_t(size_t, count, sizeof(tmp) - 1);
+	if (copy_from_user(tmp, buf, copy_n))
+		return -EFAULT;
+	tmp[copy_n] = '\0';
+	if (copy_n > 0 && tmp[copy_n - 1] == '\n')
+		tmp[copy_n - 1] = '\0';
+
+	if (!strcmp(tmp, "start")) {
+		spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
+		if (!um_kvm_record_debugfs_rec) {
+			rec = kvm_record_alloc();
+			um_kvm_record_debugfs_rec = rec;
+		} else {
+			rec = um_kvm_record_debugfs_rec;
+		}
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		if (!rec)
+			return -ENOMEM;
+		rc = kvm_record_start(rec);
+	} else if (!strcmp(tmp, "stop")) {
+		spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
+		rec = um_kvm_record_debugfs_rec;
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		if (rec)
+			kvm_record_stop(rec);
+	} else if (!strcmp(tmp, "replay")) {
+		spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
+		rec = um_kvm_record_debugfs_rec;
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		if (!rec)
+			return -EINVAL;
+		rc = kvm_record_replay(rec);
+	} else if (!strcmp(tmp, "destroy")) {
+		spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
+		rec = um_kvm_record_debugfs_rec;
+		um_kvm_record_debugfs_rec = NULL;
+		spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+		if (rec)
+			kvm_record_destroy(rec);
+	} else {
+		return -EINVAL;
+	}
+
+	if (rc < 0)
+		return rc;
+	return count;
+}
+
+static const struct file_operations kvm_record_ctl_fops = {
+	.write = kvm_record_ctl_write,
+};
+
+static int kvm_record_state_show(struct seq_file *m, void *unused)
+{
+	struct kvm_record *rec;
+	unsigned long flags;
+	bool recording = false, replaying = false;
+	size_t log_count = 0, log_capacity = 0;
+
+	spin_lock_irqsave(&um_kvm_record_debugfs_lock, flags);
+	rec = um_kvm_record_debugfs_rec;
+	if (rec) {
+		recording = rec->recording;
+		replaying = rec->replaying;
+		log_count = rec->log_count;
+		log_capacity = rec->log_capacity;
+	}
+	spin_unlock_irqrestore(&um_kvm_record_debugfs_lock, flags);
+
+	seq_printf(m, "recording=%d replaying=%d log_count=%zu log_capacity=%zu\n",
+		   recording, replaying, log_count, log_capacity);
+	return 0;
+}
+
+static int kvm_record_state_open(struct inode *ip, struct file *f)
+{
+	return single_open(f, kvm_record_state_show, NULL);
+}
+
+static const struct file_operations kvm_record_state_fops = {
+	.open    = kvm_record_state_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
+static int __init kvm_record_debugfs_init(void)
+{
+	struct dentry *d;
+
+	d = debugfs_lookup("um", NULL);
+	if (!d) {
+		d = debugfs_create_dir("um", NULL);
+		if (IS_ERR(d))
+			return PTR_ERR(d);
+	}
+
+	debugfs_create_file("kvm_record_ctl",   0200, d, NULL,
+			    &kvm_record_ctl_fops);
+	debugfs_create_file("kvm_record_state", 0444, d, NULL,
+			    &kvm_record_state_fops);
+	return 0;
+}
+late_initcall_sync(kvm_record_debugfs_init);
+
+#endif /* CONFIG_DEBUG_FS */
