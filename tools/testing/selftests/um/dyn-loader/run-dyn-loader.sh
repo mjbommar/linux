@@ -155,21 +155,11 @@ if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -e /dev/kvm ]; then
 fi
 
 if [ "$FAIL" -gt 0 ]; then
-	# Known-fail downgrade: today the kvm + kvm-gadget rows
-	# fail with KVM_EXIT_SHUTDOWN because lazy-fault recovery
-	# can't service ld-linux's first-instruction-fetch on
-	# shared-library pages (task #238 STEP-2 open). Until
-	# STEP-2 lands, the in-tree gate downgrades those rows to
-	# SKIP so kselftest CI doesn't break. Set
-	# DYN_LOADER_STRICT=1 to get the real FAIL exit (used
-	# locally to verify a fix). When STEP-2 lands, drop the
-	# downgrade.
-	if [ "${DYN_LOADER_STRICT:-0}" != "1" ]; then
-		printf 'DYN_LOADER: FAIL (%d backend(s) failed) ' "$FAIL"
-		printf 'downgraded to SKIP per task #238 '
-		printf '(set DYN_LOADER_STRICT=1 to assert)\n'
-		exit 4
-	fi
+	# Tasks #272 (IRETQ-based bootstrap re-entry preserving RCX/R11)
+	# and #273 (KVM_SET_CPUID2 passthrough) closed the original
+	# blockers — kvm + kvm-gadget rows now pass deterministically.
+	# A failure here is a real regression and should fail the
+	# test outright.
 	echo "DYN_LOADER: FAIL ($FAIL backend(s) failed)"
 	exit 1
 fi
