@@ -216,7 +216,21 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 #define KVM_BOOTSTRAP_TSS_OFFSET	0x200	/* 104-byte TSS (moved from 0x100 in G5b) */
 #define KVM_BOOTSTRAP_IDT_OFFSET	0x280	/* 33 × 16 = 528 B */
 #define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x4a0	/* 11-byte #PF handler (moved from 0x400 in G5b) */
-#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x4b0	/* 3-byte SYSRETQ (first-entry helper) */
+#define KVM_BOOTSTRAP_SYSRET_OFFSET	0x4b0	/* 3-byte SYSRETQ. Pre-task-#272 was
+						 * the bootstrap re-entry gadget for
+						 * ring-0 → ring-3 transitions; #272
+						 * replaced it with IRETQ at offset
+						 * 0x4d0 to preserve user RCX/R11
+						 * across recoverable #PF. The bytes
+						 * stay installed for ABI stability
+						 * (downstream tooling that pokes at
+						 * the bootstrap page expects them at
+						 * this offset) and for the diagnostic
+						 * dump (the SHUTDOWN-path logger
+						 * prints the bootstrap layout
+						 * including this offset). No vCPU
+						 * code path executes them today.
+						 */
 #define KVM_BOOTSTRAP_DF_HANDLER_OFFSET	0x4c0	/* #DF handler (task #269): out %al,$0xfa to
 						 * surface a double-fault to the host with
 						 * a diagnostic dump. Real kernels always

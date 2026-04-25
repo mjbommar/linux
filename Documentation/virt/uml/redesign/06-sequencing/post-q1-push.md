@@ -398,6 +398,41 @@ unbroken, the snapshot v1 ceiling is characterized,
 three or more LKML series are in flight, and the
 research-profile CVE repro is a regression harness.
 
+### Post-plan addendum (2026-04-25, Phase 1 closure)
+
+The 2026-04-25 session closed the residual Phase 1 work that
+the post-Q1 plan had flagged as "deferred for focused sessions":
+
+- **dyn-loader green** on kvm row (task #270 + #272). The
+  ld-linux RELR loop's RCX clobber via SYSRETQ-based bootstrap
+  re-entry was the load-bearing latent bug; the IRETQ switch
+  plus the host-CPUID passthrough (#273) clear it.
+- **KVM/seccomp ratio at 1.15×** — closed at memo-12-vision
+  parity-target via #238 STEP-2 + #242 + experiment #1, far
+  below the original 1.2× exit goal. perf-fallback /
+  perf-getpid both at 1.15-1.17×, validated 5/5 deterministic.
+- **Audit round 7 closed** (task #248) — IDT[13] #GP handler
+  + mm-pointer cache key.
+- **Memo 12 / 13 / 14 written** — design specs for the Phase-3
+  v2 forkserver, record/replay determinism, and syzkaller
+  vm/uml backend respectively. Memo 12 has steps 1+2+bench
+  shipped (kvm_snapshot_capture / restore_full / KUnit /
+  selftest / cycle bench).
+
+Three Phase-1 levers remain explicitly deferred (low-priority
+since the perf goal is already met):
+
+- **#243** per-mm cached shadow PGD — would shave another
+  ~5% on multi-mm workloads; not blocking anything in tree.
+- **#244** huge-page shadow PT — re-analysis showed the
+  lever doesn't apply as framed; demoted, won't ship.
+- Phase-5 (LKML series posting) — explicitly parked per
+  user directive until "100% of all other tasks are
+  completed."
+
+See `04-risks/decisions-log.md` D100 for the full closure
+record + commit references.
+
 ## Not in this plan
 
 Explicitly deferred, logged here so they don't surface
