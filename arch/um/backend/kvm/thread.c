@@ -276,6 +276,14 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 #define KVM_BOOTSTRAP_IDT_OFFSET	0x280	/* 33 × 16 = 528 B */
 #define KVM_BOOTSTRAP_PF_HANDLER_OFFSET	0x4a0	/* 11-byte #PF handler (moved from 0x400 in G5b) */
 #define KVM_BOOTSTRAP_SYSRET_OFFSET	0x4b0	/* 3-byte SYSRETQ (first-entry helper) */
+#define KVM_BOOTSTRAP_DF_HANDLER_OFFSET	0x4c0	/* #DF handler (task #269): out %al,$0xfa to
+						 * surface a double-fault to the host with
+						 * a diagnostic dump. Real kernels always
+						 * populate IDT[8]; without this entry a
+						 * double-fault during #PF delivery
+						 * triple-faults silently and we lose the
+						 * cause-of-cascade info.
+						 */
 /*
  * IST stack top — top of the dedicated stack page, post-F5-followon split.
  * Guest VA layout: bootstrap_va + 0x0000 = code+tables (RO), +0x1000 = state,
@@ -811,6 +819,38 @@ static const u8 kvm_bootstrap_pf_handler_bytes[] = {
 
 #define UM_KVM_PF_PORT	0xfb	/* sub-commit #5b #PF-handler VMEXIT */
 
+/*
+ * #DF handler (task #269): a double-fault is unrecoverable —
+ * we got here because a #PF (or earlier exception) cascaded
+ * before the corresponding handler could complete. Real
+ * kernels treat #DF as fatal; ours likewise. We just need to
+ * surface the event to the host with the IST frame's saved
+ * RIP so the diagnostic can identify which instruction
+ * triggered the cascade.
+ *
+ * #DF is special: the CPU pushes an error_code (always 0) +
+ * the iretq frame, but the saved RIP is the RIP AT TIME OF
+ * the original fault delivery, not at the faulting handler
+ * — i.e. we get the original faulting RIP for free, no
+ * separate decode needed.
+ *
+ * Handler:
+ *   e6 fa             out %al, $0xfa    ; VMEXIT with #DF signal
+ *   f4                hlt                ; in case host doesn't kill us
+ *
+ * The host treats KVM_EXIT_IO(0xfa) as fatal — extracts cr2
+ * (via KVM_GET_SREGS) + the IST frame's saved RIP/RSP/
+ * RFLAGS for the diagnostic, then panics or fatal_sigsegvs
+ * the task. The hlt is a defensive backstop; we don't
+ * expect to reach it.
+ */
+static const u8 kvm_bootstrap_df_handler_bytes[] = {
+	0xe6, 0xfa,			/* out %al, $0xfa  */
+	0xf4,				/* hlt             */
+};
+
+#define UM_KVM_DF_PORT	0xfa	/* task #269 #DF-handler VMEXIT */
+
 static int kvm_enter_guest_init_bootstrap(void)
 {
 	void *page;
@@ -904,6 +944,17 @@ static int kvm_enter_guest_init_bootstrap(void)
 	       sizeof(kvm_bootstrap_pf_handler_bytes));
 
 	/*
+	 * Install the #DF handler bytes (task #269). Same pattern as
+	 * the #PF handler — bytes sit dormant in the page until
+	 * IDT[8] is armed in kvm_enter_guest's IDT setup below.
+	 */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_DF_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_df_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_DF_HANDLER_OFFSET,
+	       kvm_bootstrap_df_handler_bytes,
+	       sizeof(kvm_bootstrap_df_handler_bytes));
+
+	/*
 	 * Extend the GDT to 8 entries: entries 0-5 were populated
 	 * by kvm_setup_harness_gdt above (null, ring-0 code, ring-0
 	 * data, padding anchor, ring-3 data, ring-3 code).
@@ -988,25 +1039,44 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 *   bytes 12..15  reserved (0)
 	 */
 	{
-		u64 handler_va = (u64)(unsigned long)page +
+		u64 pf_va = (u64)(unsigned long)page +
 				  KVM_BOOTSTRAP_PF_HANDLER_OFFSET;
+		u64 df_va = (u64)(unsigned long)page +
+				  KVM_BOOTSTRAP_DF_HANDLER_OFFSET;
 		u8 *idt = (u8 *)page + KVM_BOOTSTRAP_IDT_OFFSET;
 		u8 *e;
 
 		memset(idt, 0, KVM_BOOTSTRAP_IDT_ENTRIES * 16);
-		e = idt + 14 * 16;
-		e[0]  = (u8)(handler_va & 0xff);
-		e[1]  = (u8)((handler_va >> 8) & 0xff);
+
+		/* IDT[8] — #DF (double fault), task #269. */
+		e = idt + 8 * 16;
+		e[0]  = (u8)(df_va & 0xff);
+		e[1]  = (u8)((df_va >> 8) & 0xff);
 		e[2]  = 0x08;			/* ring-0 code selector */
 		e[3]  = 0x00;
 		e[4]  = 0x01;			/* IST=1 */
 		e[5]  = 0x8e;			/* P|DPL0|int-gate */
-		e[6]  = (u8)((handler_va >> 16) & 0xff);
-		e[7]  = (u8)((handler_va >> 24) & 0xff);
-		e[8]  = (u8)((handler_va >> 32) & 0xff);
-		e[9]  = (u8)((handler_va >> 40) & 0xff);
-		e[10] = (u8)((handler_va >> 48) & 0xff);
-		e[11] = (u8)((handler_va >> 56) & 0xff);
+		e[6]  = (u8)((df_va >> 16) & 0xff);
+		e[7]  = (u8)((df_va >> 24) & 0xff);
+		e[8]  = (u8)((df_va >> 32) & 0xff);
+		e[9]  = (u8)((df_va >> 40) & 0xff);
+		e[10] = (u8)((df_va >> 48) & 0xff);
+		e[11] = (u8)((df_va >> 56) & 0xff);
+
+		/* IDT[14] — #PF (page fault), sub-commit #5b. */
+		e = idt + 14 * 16;
+		e[0]  = (u8)(pf_va & 0xff);
+		e[1]  = (u8)((pf_va >> 8) & 0xff);
+		e[2]  = 0x08;			/* ring-0 code selector */
+		e[3]  = 0x00;
+		e[4]  = 0x01;			/* IST=1 */
+		e[5]  = 0x8e;			/* P|DPL0|int-gate */
+		e[6]  = (u8)((pf_va >> 16) & 0xff);
+		e[7]  = (u8)((pf_va >> 24) & 0xff);
+		e[8]  = (u8)((pf_va >> 32) & 0xff);
+		e[9]  = (u8)((pf_va >> 40) & 0xff);
+		e[10] = (u8)((pf_va >> 48) & 0xff);
+		e[11] = (u8)((pf_va >> 56) & 0xff);
 		/* bytes 12-15 stay zero from memset. */
 	}
 
@@ -2540,6 +2610,56 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					regs->gp[HOST_EFLAGS] = user_rflags;
 				}
 				goto out_read_regs;
+			}
+			if (run->io.port == UM_KVM_DF_PORT) {
+				/*
+				 * Task #269: in-guest IDT[8] (#DF) handler
+				 * fired. The CPU pushed the iretq frame onto
+				 * IST[1] (the same stack as #PF), with the
+				 * RIP saved being the RIP of the original
+				 * fault delivery — i.e. the instruction that
+				 * was about to fault when its #PF handler
+				 * couldn't be reached.
+				 *
+				 * Read CR2 + the IST frame for diagnostics,
+				 * dump the cause-of-cascade info, then
+				 * panic the host UML kernel because #DF is
+				 * unrecoverable. Without this case, a #DF
+				 * during #PF delivery would have triple-
+				 * faulted and surfaced as the opaque
+				 * KVM_EXIT_SHUTDOWN with no useful info.
+				 *
+				 * Don't try to deliver SIGSEGV to the user
+				 * task: a #DF during #PF means the IDT
+				 * dispatch itself is broken, which is a
+				 * host-kernel bug, not a user fault.
+				 */
+				struct kvm_sregs df_sregs;
+				unsigned long df_cr2 = 0;
+				u64 df_user_rip = 0, df_user_rsp = 0;
+				u64 df_user_rflags = 0;
+				unsigned long ist_off;
+
+				if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+						     (unsigned long)&df_sregs) >= 0)
+					df_cr2 = df_sregs.cr2;
+
+				ist_off = (unsigned long)(kregs.rsp -
+							  (kvm_bootstrap_va +
+							   3 * PAGE_SIZE));
+				if (ist_off < PAGE_SIZE) {
+					u8 *ist = (u8 *)kvm_bootstrap_page_stack
+						+ ist_off;
+					df_user_rip    = *(u64 *)(ist + 8);
+					df_user_rflags = *(u64 *)(ist + 24);
+					df_user_rsp    = *(u64 *)(ist + 32);
+				}
+				panic("um: kvm #DF: cr2=0x%lx fault_rip=0x%llx fault_rsp=0x%llx fault_rflags=0x%llx kregs_rsp=0x%llx (double-fault: #PF handler unreachable; check shadow PT for IST stack + IDT page)\n",
+				      df_cr2,
+				      (unsigned long long)df_user_rip,
+				      (unsigned long long)df_user_rsp,
+				      (unsigned long long)df_user_rflags,
+				      (unsigned long long)kregs.rsp);
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
 			      run->io.port);
