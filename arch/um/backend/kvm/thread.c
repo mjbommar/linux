@@ -2287,13 +2287,19 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 		u64 replay_user_va;
 		const void *replay_payload = NULL;
 		size_t replay_payload_len = 0;
+		const void *replay_meta = NULL;
+		size_t replay_meta_len = 0;
+		u32 replay_meta_kind = KVM_REPLAY_META_NONE;
 		int consumed;
 
-		consumed = kvm_record_consume_syscall(syscall_nr,
-						      &replay_ret,
-						      &replay_user_va,
-						      &replay_payload,
-						      &replay_payload_len);
+		consumed = kvm_record_consume_syscall_meta(syscall_nr,
+							   &replay_ret,
+							   &replay_user_va,
+							   &replay_payload,
+							   &replay_payload_len,
+							   &replay_meta,
+							   &replay_meta_len,
+							   &replay_meta_kind);
 		if (consumed > 0) {
 			/*
 			 * Replay path: skip handle_syscall, serve the
@@ -2301,6 +2307,33 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 			 * the entry carries one.
 			 */
 			regs->gp[HOST_AX] = (unsigned long)replay_ret;
+			/*
+			 * Memo 13 P2 #13: if the entry carries metadata
+			 * (e.g. recvfrom sockaddr), restore the out-
+			 * pointers from the recorded snapshot. SOCKADDR
+			 * metadata layout: { u32 addrlen; u8 sa[] } —
+			 * write addrlen back to *addrlen_va (regs[r9])
+			 * and the sa bytes to src_addr_va (regs[r8]).
+			 */
+			if (replay_meta && replay_meta_len &&
+			    replay_meta_kind == KVM_REPLAY_META_SOCKADDR &&
+			    syscall_nr == __NR_recvfrom) {
+				u32 addrlen;
+				const u8 *sa = (const u8 *)replay_meta + 4;
+				size_t sa_len = replay_meta_len - 4;
+				unsigned long src_addr_va = regs->gp[HOST_R8];
+				unsigned long addrlen_va = regs->gp[HOST_R9];
+
+				memcpy(&addrlen, replay_meta, sizeof(addrlen));
+				if (addrlen_va &&
+				    copy_to_user((void __user *)addrlen_va,
+						 &addrlen, sizeof(addrlen)))
+					pr_warn_ratelimited("um: kvm record_replay: copy_to_user(addrlen) failed\n");
+				if (src_addr_va && sa_len &&
+				    copy_to_user((void __user *)src_addr_va,
+						 sa, sa_len))
+					pr_warn_ratelimited("um: kvm record_replay: copy_to_user(sockaddr) failed\n");
+			}
 			if (replay_payload && replay_payload_len) {
 				/*
 				 * copy_to_user can fault → recursive

@@ -124,7 +124,35 @@ struct kvm_replay_entry {
 	 */
 	void	*payload;
 	size_t	payload_len;
+
+	/*
+	 * Memo 13 P2 #13 metadata-buffer extension: second side
+	 * buffer for syscalls whose output is split between a data
+	 * buffer (above) and out-parameters (sockaddr / addrlen /
+	 * msg_control / iovec snapshot). NULL/0 when the entry
+	 * doesn't need one.
+	 *
+	 * The metadata interpretation is per-NR, encoded by
+	 * kvm_replay_meta_kind. recvfrom uses
+	 * KVM_REPLAY_META_SOCKADDR with metadata layout
+	 *   { u32 addrlen_returned; u8 sa_storage[]; }
+	 * recvmsg / readv use KVM_REPLAY_META_IOV with a packed
+	 * { iov_count; { iov_base, iov_len, iov_payload[] } * }
+	 * structure.
+	 *
+	 * Same lifecycle as payload: allocated in append, freed on
+	 * destroy. Bounded by KVM_RECORD_PAYLOAD_PER_CAP.
+	 */
+	void	*metadata;
+	size_t	metadata_len;
+	u32	metadata_kind;
 };
+
+/*
+ * KVM_REPLAY_META_* constants are exported from kvm_backend.h
+ * (and test_kvm_hooks.h for the contract test). Don't redeclare
+ * them here.
+ */
 
 /*
  * Initial log capacity in entries. Empirically, a typical
@@ -237,9 +265,11 @@ void kvm_record_destroy(struct kvm_record *rec)
 	if (rec->checkpoint)
 		kvm_snapshot_destroy(rec->checkpoint);
 
-	/* Memo 13 step 3: free per-entry side buffers. */
-	for (i = 0; i < rec->log_count; i++)
+	/* Memo 13 step 3: free per-entry side + metadata buffers. */
+	for (i = 0; i < rec->log_count; i++) {
 		kvfree(rec->log[i].payload);
+		kvfree(rec->log[i].metadata);
+	}
 	rec->payload_bytes = 0;
 
 	kvfree(rec->log);
@@ -381,7 +411,9 @@ EXPORT_SYMBOL_GPL(kvm_record_stop);
 static int um_kvm_record_append(enum kvm_replay_kind kind,
 				u64 instr_count,
 				u64 d0, u64 d1, u64 d2, u64 d3,
-				const void *payload, size_t payload_len)
+				const void *payload, size_t payload_len,
+				const void *metadata, size_t metadata_len,
+				u32 metadata_kind)
 {
 	unsigned long flags;
 	struct kvm_record *rec;
@@ -426,36 +458,41 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 	{
 		struct kvm_replay_entry *e = &rec->log[rec->log_count];
 		void *side = NULL;
+		void *meta = NULL;
 		size_t side_len = payload_len;
+		size_t meta_len = metadata_len;
 
 		if (payload && payload_len) {
 			/*
 			 * Review-01 P2 #14: cap enforcement.
 			 *
 			 * Per-entry: cap at KVM_RECORD_PAYLOAD_PER_CAP.
-			 * The entry still records the NR + ret; the
-			 * partial payload preserves the head bytes (most
-			 * file/socket payloads start with the meaningful
-			 * header). A future "truncate-vs-drop" Kconfig can
-			 * change the policy.
+			 * Metadata also bounded by the same cap (its
+			 * realistic size is always a few hundred bytes —
+			 * sockaddr_storage 128, msg_control truncated by
+			 * msg_controllen — so the cap rarely fires).
 			 *
-			 * Total: if payload_bytes + side_len would
-			 * exceed KVM_RECORD_PAYLOAD_TOTAL_CAP, drop the
-			 * payload entirely (inline-only entry) and bump
-			 * payload_drops. Visible in kvm_record_state for
-			 * the operator to notice + raise the cap or stop
-			 * the session.
+			 * Total: payload_bytes counts both payload + metadata.
+			 * If new total would exceed KVM_RECORD_PAYLOAD_
+			 * TOTAL_CAP, drop the payload (and metadata) for
+			 * this entry; bump payload_drops.
 			 */
 			if (side_len > KVM_RECORD_PAYLOAD_PER_CAP)
 				side_len = KVM_RECORD_PAYLOAD_PER_CAP;
-			if (rec->payload_bytes + side_len >
-			    KVM_RECORD_PAYLOAD_TOTAL_CAP) {
+		}
+		if (metadata && metadata_len) {
+			if (meta_len > KVM_RECORD_PAYLOAD_PER_CAP)
+				meta_len = KVM_RECORD_PAYLOAD_PER_CAP;
+		}
+		if (rec->payload_bytes + side_len + meta_len >
+		    KVM_RECORD_PAYLOAD_TOTAL_CAP) {
+			if (side_len || meta_len)
 				rec->payload_drops++;
-				side_len = 0;
-			}
+			side_len = 0;
+			meta_len = 0;
 		}
 
-		if (payload && side_len) {
+		if ((payload && side_len) || (metadata && meta_len)) {
 			/*
 			 * Drop the lock to allocate (kvmalloc may sleep
 			 * under GFP_KERNEL), then re-validate rec under
@@ -465,16 +502,27 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 			 * IRQs-disabled-too-long lockup on big payloads.
 			 */
 			spin_unlock_irqrestore(&um_kvm_record_lock, flags);
-			side = kvmalloc(side_len, GFP_KERNEL);
-			if (!side)
-				return -ENOMEM;
-			memcpy(side, payload, side_len);
+			if (payload && side_len) {
+				side = kvmalloc(side_len, GFP_KERNEL);
+				if (!side)
+					return -ENOMEM;
+				memcpy(side, payload, side_len);
+			}
+			if (metadata && meta_len) {
+				meta = kvmalloc(meta_len, GFP_KERNEL);
+				if (!meta) {
+					kvfree(side);
+					return -ENOMEM;
+				}
+				memcpy(meta, metadata, meta_len);
+			}
 
 			spin_lock_irqsave(&um_kvm_record_lock, flags);
 			if (um_kvm_active_record != rec || !rec->recording) {
 				spin_unlock_irqrestore(&um_kvm_record_lock,
 						       flags);
 				kvfree(side);
+				kvfree(meta);
 				return 0;
 			}
 			/*
@@ -488,11 +536,12 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 				/*
 				 * Capacity may have moved during our drop.
 				 * Bail; the caller can retry. Free the
-				 * partial side buffer.
+				 * partial buffers.
 				 */
 				spin_unlock_irqrestore(&um_kvm_record_lock,
 						       flags);
 				kvfree(side);
+				kvfree(meta);
 				return -EAGAIN;
 			}
 			e = &rec->log[rec->log_count];
@@ -506,8 +555,14 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 		e->data[3] = d3;
 		e->payload = side;
 		e->payload_len = side ? side_len : 0;
+		e->metadata = meta;
+		e->metadata_len = meta ? meta_len : 0;
+		e->metadata_kind = meta ? metadata_kind :
+			(u32)KVM_REPLAY_META_NONE;
 		if (side)
 			rec->payload_bytes += side_len;
+		if (meta)
+			rec->payload_bytes += meta_len;
 		rec->log_count++;
 	}
 
@@ -542,7 +597,8 @@ void kvm_record_observe_syscall(unsigned long syscall_nr,
 				   (u64)syscall_nr,
 				   (u64)ret_value,
 				   arg0_data, arg1_data,
-				   NULL, 0);
+				   NULL, 0,
+				   NULL, 0, KVM_REPLAY_META_NONE);
 }
 EXPORT_SYMBOL_GPL(kvm_record_observe_syscall);
 
@@ -585,9 +641,49 @@ void kvm_record_observe_syscall_buf(unsigned long syscall_nr,
 				   (u64)ret_value,
 				   user_buf_va,
 				   (u64)payload_len,
-				   payload, payload_len);
+				   payload, payload_len,
+				   NULL, 0, KVM_REPLAY_META_NONE);
 }
 EXPORT_SYMBOL_GPL(kvm_record_observe_syscall_buf);
+
+/**
+ * kvm_record_observe_syscall_buf_meta - record a class-A syscall
+ *                                       with both data buffer +
+ *                                       metadata side buffer.
+ * @syscall_nr / @ret_value / @user_buf_va / @payload / @payload_len:
+ *     same as kvm_record_observe_syscall_buf.
+ * @metadata: kernel-side pointer to the metadata payload (e.g. a
+ *            sockaddr_storage filled by recvfrom). Copied into
+ *            an entry-owned kvmalloc allocation; safe to free
+ *            post-call.
+ * @metadata_len: byte length of @metadata.
+ * @metadata_kind: enum kvm_replay_meta_kind tag describing how
+ *                 the replay-side dispatcher should restore
+ *                 the metadata. SOCKADDR for recvfrom; IOV for
+ *                 recvmsg / readv (future).
+ *
+ * Memo 13 P2 #13 metadata-buffer extension. Today serves only
+ * SOCKADDR (recvfrom); IOV cases come in follow-on commits.
+ */
+void kvm_record_observe_syscall_buf_meta(unsigned long syscall_nr,
+					 long ret_value,
+					 u64 user_buf_va,
+					 const void *payload,
+					 size_t payload_len,
+					 const void *metadata,
+					 size_t metadata_len,
+					 u32 metadata_kind)
+{
+	(void)um_kvm_record_append(KVM_REPLAY_SYSCALL,
+				   ktime_get_ns(),
+				   (u64)syscall_nr,
+				   (u64)ret_value,
+				   user_buf_va,
+				   (u64)payload_len,
+				   payload, payload_len,
+				   metadata, metadata_len, metadata_kind);
+}
+EXPORT_SYMBOL_GPL(kvm_record_observe_syscall_buf_meta);
 
 /*
  * Per-NR record routing. Called from the dispatcher's gated
@@ -695,30 +791,122 @@ void kvm_record_observe_dispatch(unsigned long syscall_nr,
 						   regs->gp[HOST_DI],
 						   regs->gp[HOST_SI]);
 		return;
-	case __NR_recvfrom:
+	case __NR_recvfrom: {
 		/*
 		 * recvfrom(sockfd, buf, len, flags, src_addr, addrlen):
 		 * rdi=sockfd, rsi=buf, rdx=len, r10=flags, r8=src_addr,
 		 * r9=addrlen. ret_value == bytes received.
 		 *
-		 * v1 captures only the data buffer at rsi. src_addr +
-		 * addrlen aren't recorded — replay of connected sockets
-		 * (the common case where src_addr is unused or NULL)
-		 * works; replay of unconnected datagram sockets that
-		 * consult src_addr will lose origin info. A v2 entry
-		 * shape with multi-buffer payload covers both.
+		 * v2 (memo 13 P2 #13 metadata extension): capture both
+		 * the data buffer at rsi AND the sockaddr at r8 (if
+		 * non-NULL). The metadata side buffer holds:
+		 *   { u32 addrlen_returned; u8 sa_storage[]; }
+		 * so replay can copy_to_user the addrlen + sa bytes
+		 * back. Replay-side dispatcher uses metadata_kind ==
+		 * KVM_REPLAY_META_SOCKADDR to interpret + restore.
+		 *
+		 * src_addr / addrlen pointers may be NULL (caller
+		 * doesn't care about origin); fall back to the no-
+		 * metadata path then.
 		 */
-		if (ret_value > 0)
+		unsigned long src_addr_va = regs->gp[HOST_R8];
+		unsigned long addrlen_va = regs->gp[HOST_R9];
+
+		if (ret_value <= 0) {
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   regs->gp[HOST_DI],
+						   regs->gp[HOST_SI]);
+			return;
+		}
+		if (!src_addr_va || !addrlen_va) {
+			/* Connected-socket case: data buffer only. */
 			um_kvm_record_capture_user_buf(syscall_nr,
 						       ret_value,
 						       regs->gp[HOST_SI],
 						       (size_t)ret_value,
 						       regs->gp[HOST_DX]);
-		else
-			kvm_record_observe_syscall(syscall_nr, ret_value,
-						   regs->gp[HOST_DI],
-						   regs->gp[HOST_SI]);
+			return;
+		}
+		{
+			/*
+			 * Pull addrlen first (kernel wrote-back the
+			 * actual returned length), then sockaddr_
+			 * storage of that length. Bound to
+			 * sizeof(struct sockaddr_storage) = 128 to
+			 * match POSIX and to bound the per-entry
+			 * memory.
+			 */
+			u32 addrlen = 0;
+			u8 sa_buf[128];
+			u8 meta[sizeof(u32) + sizeof(sa_buf)];
+			size_t sa_len, meta_len;
+			void *data_staging;
+
+			if (copy_from_user(&addrlen,
+					   (const void __user *)addrlen_va,
+					   sizeof(addrlen))) {
+				/* Fall back to data-only on metadata
+				 * fetch failure. */
+				um_kvm_record_capture_user_buf(syscall_nr,
+							       ret_value,
+							       regs->gp[HOST_SI],
+							       (size_t)ret_value,
+							       regs->gp[HOST_DX]);
+				return;
+			}
+			sa_len = addrlen;
+			if (sa_len > sizeof(sa_buf))
+				sa_len = sizeof(sa_buf);
+			if (sa_len &&
+			    copy_from_user(sa_buf,
+					   (const void __user *)src_addr_va,
+					   sa_len)) {
+				um_kvm_record_capture_user_buf(syscall_nr,
+							       ret_value,
+							       regs->gp[HOST_SI],
+							       (size_t)ret_value,
+							       regs->gp[HOST_DX]);
+				return;
+			}
+			memcpy(meta, &addrlen, sizeof(addrlen));
+			memcpy(meta + sizeof(addrlen), sa_buf, sa_len);
+			meta_len = sizeof(addrlen) + sa_len;
+
+			/*
+			 * Stage the data buffer too — observe_syscall_
+			 * buf_meta wants a kernel-side pointer for
+			 * both. Use kvmalloc so we don't blow the
+			 * kernel stack on multi-MB recvs.
+			 */
+			data_staging = kvmalloc((size_t)ret_value, GFP_KERNEL);
+			if (!data_staging) {
+				um_kvm_record_capture_user_buf(syscall_nr,
+							       ret_value,
+							       regs->gp[HOST_SI],
+							       (size_t)ret_value,
+							       regs->gp[HOST_DX]);
+				return;
+			}
+			if (copy_from_user(data_staging,
+					   (const void __user *)regs->gp[HOST_SI],
+					   (size_t)ret_value)) {
+				kvfree(data_staging);
+				kvm_record_observe_syscall(syscall_nr, ret_value,
+							   regs->gp[HOST_DI],
+							   regs->gp[HOST_SI]);
+				return;
+			}
+			kvm_record_observe_syscall_buf_meta(syscall_nr,
+							    ret_value,
+							    regs->gp[HOST_SI],
+							    data_staging,
+							    (size_t)ret_value,
+							    meta, meta_len,
+							    KVM_REPLAY_META_SOCKADDR);
+			kvfree(data_staging);
+		}
 		return;
+	}
 	default:
 		break;
 	}
@@ -760,6 +948,22 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 			       u64 *user_buf_va_out,
 			       const void **payload_out,
 			       size_t *payload_len_out)
+{
+	return kvm_record_consume_syscall_meta(syscall_nr, ret_out,
+					       user_buf_va_out,
+					       payload_out, payload_len_out,
+					       NULL, NULL, NULL);
+}
+EXPORT_SYMBOL_GPL(kvm_record_consume_syscall);
+
+int kvm_record_consume_syscall_meta(unsigned long syscall_nr,
+				    long *ret_out,
+				    u64 *user_buf_va_out,
+				    const void **payload_out,
+				    size_t *payload_len_out,
+				    const void **metadata_out,
+				    size_t *metadata_len_out,
+				    u32 *metadata_kind_out)
 {
 	unsigned long flags;
 	struct kvm_record *rec;
@@ -815,6 +1019,12 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 		*payload_out = e->payload;
 	if (payload_len_out)
 		*payload_len_out = e->payload_len;
+	if (metadata_out)
+		*metadata_out = e->metadata;
+	if (metadata_len_out)
+		*metadata_len_out = e->metadata_len;
+	if (metadata_kind_out)
+		*metadata_kind_out = e->metadata_kind;
 	rec->replay_cursor++;
 	rc = 1;
 
@@ -822,7 +1032,7 @@ out:
 	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(kvm_record_consume_syscall);
+EXPORT_SYMBOL_GPL(kvm_record_consume_syscall_meta);
 
 /**
  * kvm_record_strict_replay - is the active record in strict replay mode?
