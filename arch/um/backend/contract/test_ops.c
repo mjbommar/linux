@@ -1197,7 +1197,65 @@ static void kvm_record_roundtrip_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, consumed, 1);
 
 	/*
-	 * Cursor exhausted — fourth consume returns 0 (no more
+	 * Side-buffer round-trip: observe a fake getrandom-shape
+	 * entry with an 8-byte payload, then consume + verify the
+	 * payload pointer round-trips byte-identically.
+	 *
+	 * Note this races with the cursor reset below; for cleanliness
+	 * we do this BEFORE the third consume above. But we already
+	 * consumed all three. Re-replay to rewind the cursor, observe
+	 * the buffer entry as a 4th log entry, then consume past the
+	 * first three to reach it.
+	 */
+	{
+		const u8 fake_payload[8] = {
+			0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
+		};
+		long buf_ret;
+		u64  buf_va_out;
+		const void *buf_payload_out = NULL;
+		size_t buf_payload_len_out = 0;
+
+		kvm_record_observe_syscall_buf(__NR_getrandom, 8,
+					       0xdeadbeefULL,
+					       fake_payload,
+					       sizeof(fake_payload));
+
+		/* Rewind via replay. */
+		KUNIT_EXPECT_EQ(test, kvm_record_replay(rec), 0);
+
+		/* Skip past the first three (getpid / clock_gettime /
+		 * getuid) to reach the side-buffer entry at slot 3. */
+		KUNIT_EXPECT_EQ(test,
+			kvm_record_consume_syscall(__NR_getpid, &buf_ret,
+						   NULL, NULL, NULL), 1);
+		KUNIT_EXPECT_EQ(test,
+			kvm_record_consume_syscall(__NR_clock_gettime, &buf_ret,
+						   NULL, NULL, NULL), 1);
+		KUNIT_EXPECT_EQ(test,
+			kvm_record_consume_syscall(__NR_getuid, &buf_ret,
+						   NULL, NULL, NULL), 1);
+
+		/* Now the side-buffer entry. */
+		KUNIT_EXPECT_EQ(test,
+			kvm_record_consume_syscall(__NR_getrandom, &buf_ret,
+						   &buf_va_out,
+						   &buf_payload_out,
+						   &buf_payload_len_out), 1);
+		KUNIT_EXPECT_EQ(test, buf_ret, (long)8);
+		KUNIT_EXPECT_EQ(test, (unsigned long long)buf_va_out,
+				(unsigned long long)0xdeadbeefULL);
+		KUNIT_EXPECT_EQ(test,
+			(unsigned long long)buf_payload_len_out,
+			(unsigned long long)sizeof(fake_payload));
+		KUNIT_ASSERT_NOT_NULL(test, buf_payload_out);
+		KUNIT_EXPECT_EQ(test,
+			memcmp(buf_payload_out, fake_payload,
+			       sizeof(fake_payload)), 0);
+	}
+
+	/*
+	 * Cursor exhausted — next consume returns 0 (no more
 	 * entries; caller falls through to live syscall).
 	 */
 	consumed = kvm_record_consume_syscall(__NR_getpid, &ret_out,
