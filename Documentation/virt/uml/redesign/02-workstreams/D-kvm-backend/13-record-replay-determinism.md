@@ -227,20 +227,41 @@ ladder (#250 v2 step 3+4, #252 syzkaller backend).
 ## Status
 
 - 2026-04-25 (initial) — memo written.
-- 2026-04-25 (later) — **steps 1+2 LANDED.**
+- 2026-04-25 (later) — **steps 1+2+3+3.5+5(partial) LANDED.**
   - Step 1: `struct kvm_record` skeleton + alloc/start/stop/
     replay/destroy + KUnit basic-shape test + `kvm-record-smoke`
     kselftest. Commits `56274adfe16b` + `c2ead30c12e4`.
   - Step 2: `DEFINE_STATIC_KEY_FALSE(um_kvm_record_enabled)` +
-    active-record registry + dispatcher hook in
+    active-record registry + record-side hook in
     kvm_decode_syscall (gated, zero hot-path cost when off) +
     `/sys/kernel/debug/um/kvm_record_{ctl,state}` debugfs
     surface. Commits `33fd1fff3c1e` + `6b1357d96ad5` +
     `988e2e08afb0`.
-- Step 3 (full output-buffer capture for read/write-style
-  syscalls), step 4 (PMU interrupt boundary recording), step 5
-  (getrandom/drbg seeding), step 6 (MMIO recording) deferred to
-  focused sessions; the v1 dispatcher hook above already
-  validates the static-key + active-record-registry pattern
-  scales without perf regression (perf-fallback held at
-  ratio_kvm/seccomp ≈ 1.13× post-hook).
+  - Step 3: variable-length side buffer on `struct kvm_replay_
+    entry` (`payload` + `payload_len`) + `kvm_record_observe_
+    syscall_buf()` API. Free per-entry payloads on destroy.
+    Commit `a085afc07448`.
+  - Step 3.5 (replay-side dispatcher):
+    `kvm_record_consume_syscall()` consumed before
+    `handle_syscall` in kvm_decode_syscall when in replay mode —
+    serves the recorded return + copy_to_user's the side buffer
+    back. Commit `918ccaf828cc`.
+  - Step 5 (getrandom routing): `kvm_record_observe_dispatch()`
+    per-NR router; today routes `__NR_getrandom` through the
+    side-buffer path so replay restores the random bytes byte-
+    identically. Other NRs default to the inline-only path.
+    Commit `1992d6315f92`.
+- Step 4 (PMU interrupt boundary recording) deferred —
+  architectural piece requiring perf-event API plumbing.
+- Step 6 (MMIO recording) deferred — small but bounded; pattern
+  matches step 2's record-side hook in the MMIO case of
+  kvm_decode_mmio.
+- Additional NR special-cases for the per-NR dispatcher
+  (`__NR_read`, `__NR_pread64`, `__NR_recvfrom`, `__NR_ioctl`,
+  ...) deferred — each is a small extension to the
+  `kvm_record_observe_dispatch` switch but needs the API to
+  pass the third syscall arg (count / size) which today's
+  hook doesn't surface.
+
+  All hot-path ratios held in the 1.06-1.19× kvm/seccomp band
+  post-hook — the static-key gate keeps the cost zero when off.
