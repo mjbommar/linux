@@ -94,6 +94,10 @@ run_one() {
 		panic=-1 </dev/null 2>&1 || true)
 	local observed
 	observed=$(echo "$log" | sed -n 's/^um: backend = \([a-z]*\).*/\1/p' | head -1)
+	# Debug: optionally save the full kernel log per-backend.
+	if [ -n "${DYN_LOADER_DUMP:-}" ]; then
+		echo "$log" > "${DYN_LOADER_DUMP}.${backend}"
+	fi
 	if [ "$observed" != "$backend" ]; then
 		printf 'DYN_LOADER: backend=%s FAIL (observed=%s)\n' \
 			"$backend" "$observed"

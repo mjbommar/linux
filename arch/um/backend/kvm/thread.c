@@ -2534,9 +2534,30 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					fi->trap_no    = 14;
 					fi->error_code = (u32)fault_error_code;
 					fi->cr2        = cr2;
+					/*
+					 * is_user MUST be set BEFORE
+					 * sig_info[SIGSEGV] dispatches —
+					 * UML's segv_handler / segv() reads
+					 * UPT_IS_USER(regs) and panics with
+					 * "Kernel tried to access user
+					 * memory" if it sees is_user=0
+					 * with a user-range address.
+					 *
+					 * At KVM_EXIT_IO from the IDT[14]
+					 * #PF handler, our prior CPL-from-
+					 * SREGS read returns CPL=0 (we're
+					 * in the in-guest ring-0 handler
+					 * by then), so regs->is_user came
+					 * back 0. But the FAULTING access
+					 * was at CPL=3 — the handler is
+					 * just delivering on the user
+					 * fault's behalf. Tag the regs
+					 * accordingly before SIGSEGV
+					 * dispatch.
+					 */
+					regs->is_user = 1;
 					(*sig_info[SIGSEGV])(SIGSEGV, NULL,
 							     regs, NULL);
-					regs->is_user = 1;
 					/*
 					 * Drop out to interrupt_end so the
 					 * queued SIGSEGV drains before the
