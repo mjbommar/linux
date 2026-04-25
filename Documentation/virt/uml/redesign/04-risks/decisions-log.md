@@ -9990,4 +9990,80 @@ shadow-PT shaving).
 
 ---
 
+## D101 (2026-04-25) — Phase 3 record/replay primitive skeleton + gated dispatcher hook
+
+**Context.** D100 closed Phase 1 (kvm/seccomp ratio at 1.15×,
+dyn-loader green, audit round 7 done). The remaining Phase 3
+deliverables are #250 (snapshot/forkserver) — partial v1
+shipped via memo 12 — and #253 (record/replay determinism) —
+memo 13 only at session start.
+
+**What landed for #253.**
+
+1. **Skeleton** (commits `56274adfe16b` / `c2ead30c12e4`):
+   `struct kvm_record` container holding a `struct kvm_snapshot`
+   (the checkpoint) + a variable-length `struct kvm_replay_entry`
+   log + `recording`/`replaying` state flags. C API:
+
+       struct kvm_record *kvm_record_alloc(void);
+       int  kvm_record_start(struct kvm_record *rec);
+       void kvm_record_stop(struct kvm_record *rec);
+       int  kvm_record_replay(struct kvm_record *rec);
+       void kvm_record_destroy(struct kvm_record *rec);
+
+   KUnit basic-shape test (`kvm_record_basic_test`) +
+   `kvm-record-smoke` kselftest. Boot-time sanity gate.
+2. **Static-key gate + active-record registry** (commit
+   `33fd1fff3c1e`): `DEFINE_STATIC_KEY_FALSE(um_kvm_record_
+   enabled)`, single-slot global pointer, spinlock-guarded
+   start/stop. Single-active discipline rejects a second
+   start with -EBUSY. Defensive teardown in destroy.
+3. **Dispatcher hook** (commit `6b1357d96ad5`): class-A syscall
+   return observed via `kvm_record_observe_syscall(NR, ret,
+   arg0, arg1)` after `handle_syscall(regs)` in
+   `kvm_decode_syscall`. Gated by static_branch_unlikely so non-
+   record builds + non-recording runtime pay zero per-syscall
+   cost. perf-fallback held at 1.13× kvm/seccomp post-hook,
+   confirming the gate-when-off discipline.
+4. **Debugfs control surface** (commit `988e2e08afb0`):
+   `/sys/kernel/debug/um/kvm_record_ctl` (write-only, accepts
+   `start` / `stop` / `replay` / `destroy`) and
+   `/sys/kernel/debug/um/kvm_record_state` (read-only, prints
+   "recording=N replaying=N log_count=N log_capacity=N").
+   Drives userspace-facing kselftests + future syzkaller
+   integration.
+
+**Deferred per memo 13 step 3-6.**
+
+- Step 3: full output-buffer capture for read/write-style
+  syscalls (needs side-buffer alloc + struct kvm_replay_entry
+  variant).
+- Step 4: PMU instruction-count overflow for interrupt-boundary
+  recording (rr-style).
+- Step 5: getrandom / drbg seed capture.
+- Step 6: MMIO recording.
+
+Each is its own focused-session sub-commit; v1 today proves
+the architectural pattern (snapshot + log + gate) doesn't
+regress hot-path perf and doesn't break the existing
+selftest matrix.
+
+**Validation.**
+
+  - All eight kvm kselftests (dyn-loader / kvm-bounds /
+    kvm-smoke / perf-getpid / perf-fallback / snapshot-kvm-
+    smoke / kvm-snapshot-bench / kvm-record-smoke) PASS.
+  - perf-getpid:    ratio_kvm/seccomp = 1.123 (was 1.15× pre-
+                    hook).
+  - perf-fallback:  ratio_kvm/seccomp = 1.127.
+  - Static-key gate verified zero-cost when off.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/13-record-replay-determinism.md`
+  — memo 13 (status flipped to "steps 1+2 LANDED").
+- Commits `56274adfe16b..7cff075e72b0`.
+
+---
+
 ## (Future entries here, as decisions are made)
