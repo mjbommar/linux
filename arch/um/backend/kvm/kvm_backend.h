@@ -678,6 +678,11 @@ extern struct static_key_false um_kvm_record_enabled;
 void kvm_record_observe_syscall(unsigned long syscall_nr,
 				long ret_value,
 				u64 arg0_data, u64 arg1_data);
+void kvm_record_observe_syscall_buf(unsigned long syscall_nr,
+				    long ret_value,
+				    u64 user_buf_va,
+				    const void *payload,
+				    size_t payload_len);
 
 #endif
 

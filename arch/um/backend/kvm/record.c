@@ -88,7 +88,29 @@ enum kvm_replay_kind {
 struct kvm_replay_entry {
 	enum kvm_replay_kind kind;
 	u64	instruction_count;	/* TSC at point of capture */
-	u64	data[4];		/* kind-specific payload */
+	u64	data[4];		/* kind-specific inline payload */
+
+	/*
+	 * Memo 13 step 3: variable-length side buffer for syscalls
+	 * with output payloads larger than the inline `data[]`.
+	 * NULL/0 when the entry doesn't need one (TIME / RAND
+	 * fits in inline; SYSCALL with no output buffer doesn't
+	 * need it; INTERRUPT / MMIO_READ ditto).
+	 *
+	 * For SYSCALL entries with side buffers, data[] carries:
+	 *   data[0] = syscall NR
+	 *   data[1] = return value (signed long, cast to u64)
+	 *   data[2] = user buffer VA (so replay can re-write it)
+	 *   data[3] = side-buffer length (== payload_len; redundant
+	 *             but lets the replay path validate without
+	 *             chasing the entry).
+	 *
+	 * Lifecycle: allocated via kvmalloc inside um_kvm_record_
+	 * append_with_payload, freed in kvm_record_destroy when the
+	 * container is torn down.
+	 */
+	void	*payload;
+	size_t	payload_len;
 };
 
 /*
@@ -145,6 +167,8 @@ EXPORT_SYMBOL_GPL(kvm_record_alloc);
  */
 void kvm_record_destroy(struct kvm_record *rec)
 {
+	size_t i;
+
 	if (!rec)
 		return;
 	/*
@@ -155,6 +179,11 @@ void kvm_record_destroy(struct kvm_record *rec)
 	kvm_record_stop(rec);
 	if (rec->checkpoint)
 		kvm_snapshot_destroy(rec->checkpoint);
+
+	/* Memo 13 step 3: free per-entry side buffers. */
+	for (i = 0; i < rec->log_count; i++)
+		kvfree(rec->log[i].payload);
+
 	kvfree(rec->log);
 	kfree(rec);
 }
@@ -285,10 +314,16 @@ EXPORT_SYMBOL_GPL(kvm_record_stop);
  * Locking: the spinlock guards the active-record pointer + the
  * log mutation. Under ncpus=1 the lock is uncontended; under SMP
  * (post-Phase-3) the same lock serializes per-vCPU recording.
+ *
+ * @payload / @payload_len optional side-buffer (memo 13 step 3).
+ * When non-NULL, the buffer is COPIED into a kvmalloc allocation
+ * owned by the entry; the caller's buffer is unowned post-call.
+ * NULL / 0 omits the side buffer.
  */
 static int um_kvm_record_append(enum kvm_replay_kind kind,
 				u64 instr_count,
-				u64 d0, u64 d1, u64 d2, u64 d3)
+				u64 d0, u64 d1, u64 d2, u64 d3,
+				const void *payload, size_t payload_len)
 {
 	unsigned long flags;
 	struct kvm_record *rec;
@@ -330,13 +365,63 @@ static int um_kvm_record_append(enum kvm_replay_kind kind,
 		rec->log_capacity = new_cap;
 	}
 
-	rec->log[rec->log_count].kind = kind;
-	rec->log[rec->log_count].instruction_count = instr_count;
-	rec->log[rec->log_count].data[0] = d0;
-	rec->log[rec->log_count].data[1] = d1;
-	rec->log[rec->log_count].data[2] = d2;
-	rec->log[rec->log_count].data[3] = d3;
-	rec->log_count++;
+	{
+		struct kvm_replay_entry *e = &rec->log[rec->log_count];
+		void *side = NULL;
+
+		if (payload && payload_len) {
+			/*
+			 * Drop the lock to allocate (kvmalloc may sleep
+			 * under GFP_KERNEL), then re-validate rec under
+			 * the lock. The append is rare enough that
+			 * dropping/re-acquiring is cheap; doing the
+			 * allocation under the lock would risk an
+			 * IRQs-disabled-too-long lockup on big payloads.
+			 */
+			spin_unlock_irqrestore(&um_kvm_record_lock, flags);
+			side = kvmalloc(payload_len, GFP_KERNEL);
+			if (!side)
+				return -ENOMEM;
+			memcpy(side, payload, payload_len);
+
+			spin_lock_irqsave(&um_kvm_record_lock, flags);
+			if (um_kvm_active_record != rec || !rec->recording) {
+				spin_unlock_irqrestore(&um_kvm_record_lock,
+						       flags);
+				kvfree(side);
+				return 0;
+			}
+			/*
+			 * Re-confirm the slot is still ours. The log_count
+			 * could have advanced under another writer in
+			 * principle (single-active discipline says no, but
+			 * be defensive). Re-derive `e` from the current
+			 * cursor.
+			 */
+			if (rec->log_count >= rec->log_capacity) {
+				/*
+				 * Capacity may have moved during our drop.
+				 * Bail; the caller can retry. Free the
+				 * partial side buffer.
+				 */
+				spin_unlock_irqrestore(&um_kvm_record_lock,
+						       flags);
+				kvfree(side);
+				return -EAGAIN;
+			}
+			e = &rec->log[rec->log_count];
+		}
+
+		e->kind = kind;
+		e->instruction_count = instr_count;
+		e->data[0] = d0;
+		e->data[1] = d1;
+		e->data[2] = d2;
+		e->data[3] = d3;
+		e->payload = side;
+		e->payload_len = side ? payload_len : 0;
+		rec->log_count++;
+	}
 
 	spin_unlock_irqrestore(&um_kvm_record_lock, flags);
 	return rc;
@@ -368,9 +453,53 @@ void kvm_record_observe_syscall(unsigned long syscall_nr,
 				   0,	/* instruction_count: TBD memo-13 step 4 */
 				   (u64)syscall_nr,
 				   (u64)ret_value,
-				   arg0_data, arg1_data);
+				   arg0_data, arg1_data,
+				   NULL, 0);
 }
 EXPORT_SYMBOL_GPL(kvm_record_observe_syscall);
+
+/**
+ * kvm_record_observe_syscall_buf - record a class-A syscall whose
+ *                                  effect includes a user output
+ *                                  buffer.
+ * @syscall_nr: the NR (e.g. __NR_read, __NR_getrandom).
+ * @ret_value: the syscall's return value (regs[HOST_AX]).
+ * @user_buf_va: user VA where the syscall wrote its output. The
+ *               replay path uses this to know where to scatter
+ *               the recorded payload back.
+ * @payload: kernel-side pointer to the buffer contents (the
+ *           caller has typically just `copy_from_user`'d into
+ *           a temporary). Copied into the entry's owned side
+ *           buffer; safe to free post-call.
+ * @payload_len: byte length of @payload.
+ *
+ * For SYSCALL entries with side buffers the inline data[] now
+ * carries (NR, ret, user_buf_va, payload_len). When the
+ * eventual replay-side dispatcher consumes a SYSCALL entry with
+ * non-zero data[3], it copies entry->payload back to data[2]
+ * via copy_to_user instead of dispatching handle_syscall.
+ *
+ * memo-13 step 3 ladder rung. Callers in the kvm_decode_syscall
+ * dispatcher should special-case the read/write/getrandom/...
+ * NRs and call this variant with the just-written buffer; the
+ * vanilla kvm_record_observe_syscall above handles the no-buffer
+ * case for everything else.
+ */
+void kvm_record_observe_syscall_buf(unsigned long syscall_nr,
+				    long ret_value,
+				    u64 user_buf_va,
+				    const void *payload,
+				    size_t payload_len)
+{
+	(void)um_kvm_record_append(KVM_REPLAY_SYSCALL,
+				   0,	/* instruction_count: TBD memo-13 step 4 */
+				   (u64)syscall_nr,
+				   (u64)ret_value,
+				   user_buf_va,
+				   (u64)payload_len,
+				   payload, payload_len);
+}
+EXPORT_SYMBOL_GPL(kvm_record_observe_syscall_buf);
 
 /**
  * kvm_record_replay - restore the checkpoint and arm replay mode.
