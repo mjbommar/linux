@@ -611,6 +611,30 @@ void kvm_record_observe_dispatch(unsigned long syscall_nr,
 						   regs->gp[HOST_DI],
 						   regs->gp[HOST_SI]);
 		return;
+	case __NR_recvfrom:
+		/*
+		 * recvfrom(sockfd, buf, len, flags, src_addr, addrlen):
+		 * rdi=sockfd, rsi=buf, rdx=len, r10=flags, r8=src_addr,
+		 * r9=addrlen. ret_value == bytes received.
+		 *
+		 * v1 captures only the data buffer at rsi. src_addr +
+		 * addrlen aren't recorded — replay of connected sockets
+		 * (the common case where src_addr is unused or NULL)
+		 * works; replay of unconnected datagram sockets that
+		 * consult src_addr will lose origin info. A v2 entry
+		 * shape with multi-buffer payload covers both.
+		 */
+		if (ret_value > 0)
+			um_kvm_record_capture_user_buf(syscall_nr,
+						       ret_value,
+						       regs->gp[HOST_SI],
+						       (size_t)ret_value,
+						       regs->gp[HOST_DX]);
+		else
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   regs->gp[HOST_DI],
+						   regs->gp[HOST_SI]);
+		return;
 	default:
 		break;
 	}

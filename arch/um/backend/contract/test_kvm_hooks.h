@@ -133,5 +133,15 @@ void kvm_record_stop(struct kvm_record *rec);
 int kvm_record_replay(struct kvm_record *rec);
 void kvm_record_destroy(struct kvm_record *rec);
 
+/* Memo 13 step 2 / 3: observation + consumption helpers. */
+void kvm_record_observe_syscall(unsigned long syscall_nr,
+				long ret_value,
+				u64 arg0_data, u64 arg1_data);
+int kvm_record_consume_syscall(unsigned long syscall_nr,
+			       long *ret_out,
+			       u64 *user_buf_va_out,
+			       const void **payload_out,
+			       size_t *payload_len_out);
+
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 #endif /* __ARCH_UM_BACKEND_CONTRACT_TEST_KVM_HOOKS_H */
