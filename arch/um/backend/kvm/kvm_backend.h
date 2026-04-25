@@ -649,6 +649,7 @@ u64 kvm_gadget_vvar_gpa(void);
 struct kvm_snapshot;
 struct kvm_snapshot *kvm_snapshot_alloc(void);
 int kvm_snapshot_capture(struct kvm_snapshot *snap);
+int kvm_snapshot_capture_regs_only(struct kvm_snapshot *snap);
 int kvm_snapshot_restore_full(struct kvm_snapshot *snap);
 void kvm_snapshot_free(struct kvm_snapshot *snap);
 void kvm_snapshot_destroy(struct kvm_snapshot *snap);
