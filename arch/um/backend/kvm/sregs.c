@@ -101,12 +101,40 @@
  */
 void kvm_setup_harness_gdt(u64 *gdt)
 {
+	/*
+	 * Set the Accessed (A) bit (bit 40 of the descriptor =
+	 * low bit of the access byte) on every used segment
+	 * descriptor up front.
+	 *
+	 * Without A=1: when the CPU loads CS / SS / DS / ES from
+	 * a descriptor with A=0, hardware updates the descriptor
+	 * to set A=1 — i.e. it WRITES back to the GDT entry.
+	 * Our bootstrap page (where GDT lives) is mapped P-only
+	 * (no W) post-F5-followon (D96), so the A-bit-set fault
+	 * cascades during trap delivery and triple-faults the
+	 * guest. Static-non-PIE binaries didn't expose this
+	 * because they run all of user-space at CPL=3 with the
+	 * already-A=1 ring-3 descriptors loaded once via
+	 * SYSRETQ; dynamic-loader binaries (ld-linux + libc)
+	 * faulted on first instruction, triggering #PF →
+	 * IDT[14] → CS reload → A-bit write fault → triple.
+	 *
+	 * Pre-setting A=1 makes the descriptor immutable from
+	 * the CPU's perspective, so segment loads never need
+	 * to write back. Bootstrap page can stay P-only.
+	 *
+	 * Access-byte values (bit 40-47 of the descriptor):
+	 *   0x9a = P|DPL0|S|code/X/R     → 0x9b with A=1
+	 *   0x92 = P|DPL0|S|data/RW       → 0x93 with A=1
+	 *   0xfa = P|DPL3|S|code/X/R     → 0xfb with A=1
+	 *   0xf2 = P|DPL3|S|data/RW       → 0xf3 with A=1
+	 */
 	gdt[0] = 0x0000000000000000ULL;	/* null */
-	gdt[1] = 0x00af9a000000ffffULL;	/* ring-0 code, L=1 */
-	gdt[2] = 0x00cf92000000ffffULL;	/* ring-0 data */
+	gdt[1] = 0x00af9b000000ffffULL;	/* ring-0 code, L=1, A=1 */
+	gdt[2] = 0x00cf93000000ffffULL;	/* ring-0 data, A=1 */
 	gdt[3] = 0x0000000000000000ULL;	/* unused padding */
-	gdt[4] = 0x00cff2000000ffffULL;	/* ring-3 data, DPL=3 */
-	gdt[5] = 0x00affa000000ffffULL;	/* ring-3 code, L=1, DPL=3 */
+	gdt[4] = 0x00cff3000000ffffULL;	/* ring-3 data, DPL=3, A=1 */
+	gdt[5] = 0x00affb000000ffffULL;	/* ring-3 code, L=1, DPL=3, A=1 */
 }
 
 /*
