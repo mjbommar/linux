@@ -100,7 +100,7 @@ run_one() {
 		return 1
 	fi
 	echo "KVM_BOUNDS: $label $line" | sed 's/KVM_BOUNDS: //2'
-	echo "$line" | grep -q "passed=6/6"
+	echo "$line" | grep -q "passed=9/9"
 }
 
 FAIL=0

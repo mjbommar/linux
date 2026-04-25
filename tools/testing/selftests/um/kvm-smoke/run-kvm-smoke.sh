@@ -47,7 +47,24 @@ if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY; needs KVM_INTEGRATED=y)" >&2
 	exit 4
 fi
-if [ ! -r /dev/kvm ]; then
+
+# Self-heal /dev/kvm ACL — udev/elogind sometimes drops it
+# between successive UML invocations. Same retry pattern as
+# the perf/bounds/df runners (task #267).
+ensure_kvm_readable() {
+	local i
+	for i in 1 2 3; do
+		if [ -r /dev/kvm ]; then
+			return 0
+		fi
+		sudo -n setfacl -m u:"$(id -un)":rw /dev/kvm 2>/dev/null || true
+		[ -r /dev/kvm ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
+if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable by the selftest user" >&2
 	exit 4
 fi
@@ -56,8 +73,14 @@ fi
 # not yet landed). Capture output inside a short `timeout` so
 # a wedged guest doesn't stall CI. --kill-after=10 escalates
 # to SIGKILL if UML ignores SIGTERM (same rationale as D64).
+#
+# Cmdline syntax is `backend=force=<kind>` (audit P2 #7). The
+# earlier `backend=kvm force=kvm` form parsed `force=kvm` as an
+# unknown kernel arg + bare `backend=kvm`, which only worked by
+# accident on DYNAMIC builds where the bare form falls through
+# to the kvm probe.
 OUT=$(timeout --kill-after=10 20 "$BINARY" \
-	backend=kvm force=kvm \
+	backend=force=kvm \
 	init=/bin/true mem="$MEM" \
 	con=null con0=fd:0,fd:1 \
 	root=/dev/root rootfstype=hostfs rw \
