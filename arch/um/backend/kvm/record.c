@@ -48,7 +48,10 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+
+#include <asm/unistd.h>
 
 #include "kvm_backend.h"
 
@@ -500,6 +503,67 @@ void kvm_record_observe_syscall_buf(unsigned long syscall_nr,
 				   payload, payload_len);
 }
 EXPORT_SYMBOL_GPL(kvm_record_observe_syscall_buf);
+
+/*
+ * Per-NR record routing. Called from the dispatcher's gated
+ * post-handle_syscall branch (kvm_decode_syscall) when recording
+ * is active. Special-cases syscalls whose output buffer is a
+ * source of replay nondeterminism — getrandom and friends —
+ * routing them through the _buf variant; everything else uses
+ * the inline-only kvm_record_observe_syscall.
+ *
+ * Today's special-cased set:
+ *   __NR_getrandom: random bytes filled into user buffer.
+ *
+ * Future additions (memo 13 step 3 ladder):
+ *   __NR_read, __NR_pread64, __NR_readv: file/socket payloads.
+ *   __NR_recvfrom, __NR_recvmsg: network payloads.
+ *   __NR_ioctl: device output.
+ *
+ * Keeping the special-case set narrow today minimizes the per-
+ * syscall copy_from_user overhead on the recording hot path.
+ */
+void kvm_record_observe_dispatch(unsigned long syscall_nr,
+				 long ret_value,
+				 unsigned long arg0_va,
+				 unsigned long arg1)
+{
+	void *staging;
+
+	if (syscall_nr == __NR_getrandom && ret_value > 0 &&
+	    arg0_va != 0) {
+		size_t len = (size_t)ret_value;
+
+		staging = kvmalloc(len, GFP_KERNEL);
+		if (!staging) {
+			/*
+			 * Allocation failure → fall back to inline-
+			 * only entry. Replay can't restore the user
+			 * buffer but the return value still
+			 * round-trips, so the recording is at least
+			 * partial.
+			 */
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   arg0_va, arg1);
+			return;
+		}
+		if (copy_from_user(staging, (const void __user *)arg0_va,
+				   len)) {
+			kvfree(staging);
+			kvm_record_observe_syscall(syscall_nr, ret_value,
+						   arg0_va, arg1);
+			return;
+		}
+		kvm_record_observe_syscall_buf(syscall_nr, ret_value,
+					       arg0_va, staging, len);
+		kvfree(staging);
+		return;
+	}
+
+	/* Default: inline-only payload. */
+	kvm_record_observe_syscall(syscall_nr, ret_value, arg0_va, arg1);
+}
+EXPORT_SYMBOL_GPL(kvm_record_observe_dispatch);
 
 /**
  * kvm_record_consume_syscall - replay-side counterpart to

@@ -2341,10 +2341,17 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * read/write-style syscalls comes in a follow-up.
 	 */
 	if (static_branch_unlikely(&um_kvm_record_enabled)) {
-		kvm_record_observe_syscall(syscall_nr,
-					   (long)regs->gp[HOST_AX],
-					   regs->gp[HOST_DI],
-					   regs->gp[HOST_SI]);
+		/*
+		 * Memo 13 step 3: route through the per-NR dispatcher
+		 * so getrandom-style syscalls capture their output
+		 * buffer payload, not just the inline return value.
+		 * Other NRs fall through to the inline-only path
+		 * inside kvm_record_observe_dispatch.
+		 */
+		kvm_record_observe_dispatch(syscall_nr,
+					    (long)regs->gp[HOST_AX],
+					    regs->gp[HOST_DI],
+					    regs->gp[HOST_SI]);
 	}
 
 record_dispatch_done:

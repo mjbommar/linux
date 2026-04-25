@@ -688,6 +688,10 @@ int kvm_record_consume_syscall(unsigned long syscall_nr,
 			       u64 *user_buf_va_out,
 			       const void **payload_out,
 			       size_t *payload_len_out);
+void kvm_record_observe_dispatch(unsigned long syscall_nr,
+				 long ret_value,
+				 unsigned long arg0_va,
+				 unsigned long arg1);
 
 #endif
 
