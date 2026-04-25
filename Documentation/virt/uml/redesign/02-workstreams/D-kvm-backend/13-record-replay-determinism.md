@@ -226,5 +226,21 @@ ladder (#250 v2 step 3+4, #252 syzkaller backend).
 
 ## Status
 
-- 2026-04-25 — memo written. Implementation deferred to a
-  focused Phase 3 session.
+- 2026-04-25 (initial) — memo written.
+- 2026-04-25 (later) — **steps 1+2 LANDED.**
+  - Step 1: `struct kvm_record` skeleton + alloc/start/stop/
+    replay/destroy + KUnit basic-shape test + `kvm-record-smoke`
+    kselftest. Commits `56274adfe16b` + `c2ead30c12e4`.
+  - Step 2: `DEFINE_STATIC_KEY_FALSE(um_kvm_record_enabled)` +
+    active-record registry + dispatcher hook in
+    kvm_decode_syscall (gated, zero hot-path cost when off) +
+    `/sys/kernel/debug/um/kvm_record_{ctl,state}` debugfs
+    surface. Commits `33fd1fff3c1e` + `6b1357d96ad5` +
+    `988e2e08afb0`.
+- Step 3 (full output-buffer capture for read/write-style
+  syscalls), step 4 (PMU interrupt boundary recording), step 5
+  (getrandom/drbg seeding), step 6 (MMIO recording) deferred to
+  focused sessions; the v1 dispatcher hook above already
+  validates the static-key + active-record-registry pattern
+  scales without perf regression (perf-fallback held at
+  ratio_kvm/seccomp ≈ 1.13× post-hook).
