@@ -43,6 +43,7 @@
 #include <mem.h>		/* uml_physmem */
 #include <os.h>
 #include <registers.h>
+#include <skas.h>		/* current_mm_sync */
 #include <sysdep/faultinfo.h>
 #include <sysdep/ptrace.h>
 #include <sysdep/ptrace_user.h>
@@ -1649,6 +1650,27 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	if (rc < 0)
 		return rc;
 
+	mm = current->active_mm;
+	if (mm && mm->pgd) {
+		struct kvm_um *fctx = kvm_backend_ctx();
+
+		if ((fctx->shadow_pgd_synced_mm &&
+		     fctx->shadow_pgd_synced_mm != mm) ||
+		    (fctx->shadow_pgd_synced_va &&
+		     fctx->shadow_pgd_synced_va != (u64)mm->pgd)) {
+			/*
+			 * execve() replaces the current task's mm without a
+			 * context switch through kvm_context_switch(), so the
+			 * singleton shadow PGD can still contain executable
+			 * leaves from the pre-exec image.  A refill only
+			 * installs present leaves; it does not remove stale
+			 * ones.  Clear before installing bootstrap/gadget
+			 * mappings below so the clear cannot wipe them.
+			 */
+			kvm_shadow_pgd_clear_user();
+		}
+	}
+
 	/*
 	 * Audit round-5 F5 + F5-followon (#230): the bootstrap state
 	 * is split into two pages — code + tables (LSTAR, GDT, IDT,
@@ -2657,6 +2679,36 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	 * revisiting.
 	 */
 
+	/*
+	 * Task #274 root-cause fix: propagate UML's pending PTE
+	 * updates to the kvm backend's mm_map/mm_unmap hooks (which
+	 * in turn invalidate the shadow PT range). Both the seccomp
+	 * (trap_user.c:65) and ptrace (trap_user.c:126) backends
+	 * call this; the kvm backend was missing it, leaving COW
+	 * and other set_pte_at-driven PTE replacements invisible to
+	 * the shadow PT.
+	 *
+	 * Concrete failure mode: glibc's ld-linux processes a
+	 * MAP_PRIVATE writable file mapping by writing GOT/relocation
+	 * entries via the user PTE. UML's mm COWs the page (do_wp_
+	 * page allocates a fresh anonymous PFN, set_pte_at replaces
+	 * the file-backed PTE), flush_tlb_page(vma, va) marks the
+	 * range for sync, but um_tlb_sync(current->mm) was never
+	 * invoked — so kvm_mm_map / kvm_shadow_invalidate_va_range
+	 * never fired, and the shadow PT continued to map the guest
+	 * VA to the *original* file-backed page. Subsequent guest
+	 * reads got the unwritten bytes (zeros for fresh anonymous,
+	 * file content for COW source), breaking ld-linux's
+	 * link_map population of l_info[] and surfacing as a NULL
+	 * deref in elf_dynamic_do_Rela on the next dlopen.
+	 *
+	 * Symptom: `python3 -c "import hashlib"` segfaulted in
+	 * ld-linux+0x10ae1 reading link_map->l_info[DT_SYMTAB]
+	 * which appeared all-zero to the guest despite ld-linux
+	 * having populated it from the kernel side.
+	 */
+	current_mm_sync();
+
 	rc = kvm_enter_guest(regs);
 	if (rc < 0)
 		panic("um: kvm run_userspace: enter_guest failed (%d)", rc);
@@ -3110,73 +3162,11 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				}
 
 				/*
-				 * Audit A1 round-3: extract user
-				 * continuation regs from the IDT-pushed
-				 * iretq frame on the IST stack, stash
-				 * them in `regs`, and exit to
-				 * interrupt_end() per trap (matching
-				 * the SYSCALL path above and ptrace /
-				 * seccomp's contract). Prior revisions
-				 * advanced kregs.rip+2 + KVM_SET_REGS
-				 * and `continue`d the for-loop to let
-				 * the handler's `iretq` run — that
-				 * worked but silently batched PF
-				 * events across the inner loop, which
-				 * delayed resched + signal drain.
-				 *
-				 * IST frame layout at `out %al, $0xfb`
-				 * VMEXIT (kregs.rsp points at offset
-				 * 0):
-				 *   +0:  error_code
-				 *   +8:  RIP      (user's faulting VA)
-				 *   +16: CS
-				 *   +24: RFLAGS   (user's, at fault)
-				 *   +32: RSP      (user's stack ptr)
-				 *   +40: SS
-				 *
-				 * Read via the bootstrap page's kernel-
-				 * VA alias — the IST stack lives in
-				 * the bootstrap page (RX-mapped for the
-				 * guest, kernel-VA-directly-accessible
-				 * for the host). Next kvm_enter_guest's
-				 * bootstrap IRETQ dance (post-#272)
-				 * resumes ring-3 at HOST_IP (= user RIP),
-				 * with HOST_SP restored to user RSP and
-				 * HOST_EFLAGS restored to user RFLAGS
-				 * (audit round-4
-				 * F2). Previously user RFLAGS was
-				 * discarded and approximated by a
-				 * hardcoded 0x3202 at re-entry time,
-				 * which silently clobbered arithmetic /
-				 * direction / trap flags across a
-				 * recoverable fault — a flag-sensitive
-				 * retry (e.g. rep movs after std) could
-				 * then execute with the wrong DF. The
-				 * CPU-saved IST frame is the
-				 * authoritative source for all three
-				 * user-visible fields; we read all
-				 * three.
+				 * The PF-frame restore above already put
+				 * HOST_IP/HOST_SP/HOST_EFLAGS back to the
+				 * faulting user context. Exit per-trap so
+				 * interrupt_end() runs before the retry.
 				 */
-				{
-					unsigned long off =
-						(unsigned long)(kregs.rsp -
-								(kvm_bootstrap_va +
-								 3 * PAGE_SIZE));
-					u8 *ist;
-					u64 user_rip, user_rsp, user_rflags;
-
-					if (off >= PAGE_SIZE) {
-						pr_warn_ratelimited("um: kvm: PF IST out of range\n");
-						fatal_sigsegv();
-					}
-					ist = (u8 *)kvm_bootstrap_page_stack + off;
-					user_rip     = *(u64 *)(ist + 8);
-					user_rflags  = *(u64 *)(ist + 24);
-					user_rsp     = *(u64 *)(ist + 32);
-					regs->gp[HOST_IP]     = user_rip;
-					regs->gp[HOST_SP]     = user_rsp;
-					regs->gp[HOST_EFLAGS] = user_rflags;
-				}
 				goto out_read_regs;
 			}
 			if (run->io.port == UM_KVM_GP_PORT) {

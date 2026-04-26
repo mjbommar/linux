@@ -75,6 +75,20 @@ if [ $RC2 -ne 0 ]; then
 	exit 1
 fi
 
+# Call 3: import dlopen-backed C extensions. Plain Python startup can
+# pass while KVM fault recovery still corrupts the user stack across a
+# lazy page fault in the dynamic loader; hashlib/_datetime/_bisect hit
+# that path on typical distro Python builds.
+OUT3=$("$PY" -c 'import _bisect, _datetime, hashlib
+print("CEXT_OK=1 SHA=%s" % hashlib.sha256(b"uml").hexdigest()[:8])' 2>&1)
+RC3=$?
+echo "USERSPACE_SMOKE: call3 rc=$RC3 out=$OUT3"
+if [ $RC3 -ne 0 ]; then
+	echo "USERSPACE_SMOKE: FAIL call3 exit=$RC3"
+	halt -f 2>/dev/null
+	exit 1
+fi
+
 # Parse the PIDs + version out of the python output blobs.
 # POSIX parameter expansion rather than sed: stays portable
 # across host GNU sed / busybox sed / ash+dash variants (the
@@ -112,6 +126,6 @@ if [ "$PID1" = "$PID2" ]; then
 	exit 1
 fi
 
-echo "USERSPACE_SMOKE: PASS python=$PYVER pid_first=$PID1 pid_second=$PID2"
+echo "USERSPACE_SMOKE: PASS python=$PYVER pid_first=$PID1 pid_second=$PID2 cext=1"
 halt -f 2>/dev/null
 exit 0
