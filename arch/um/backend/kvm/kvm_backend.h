@@ -473,6 +473,20 @@ int kvm_shadow_invalidate_va_range(u64 va_start, u64 len);
 int kvm_shadow_audit_va(u64 va, void *uml_pgd_va, const char *tag);
 
 /*
+ * #274 phase-1 step 2 diagnostic: full-pgd lockstep audit. Walks
+ * every present leaf in the UML pgd, looks up the same VA in the
+ * shadow PT, and counts (leaves, matches, diverges). Logs the
+ * first up-to-`max_log` divergences in detail and a summary line.
+ *
+ * Used to test "shadow->synced cache is honest" on the cached-skip
+ * path of kvm_enter_guest. Returns the number of divergences (>= 0)
+ * on success, negative errno on missing inputs. Cost is O(pages-
+ * mapped); intentionally observational — does not mutate shadow.
+ */
+int kvm_shadow_audit_pgd(void *uml_pgd_va, const char *tag,
+			 unsigned int max_log);
+
+/*
  * Audit round-6 G2: clear all leaf PTEs in the user half of the
  * singleton shadow PGD (canonical low half, PGD slots 0..255).
  * Kernel-half mappings (bootstrap data + code, gadget state, vvar)

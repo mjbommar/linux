@@ -1423,6 +1423,123 @@ int kvm_shadow_audit_va(u64 va, void *uml_pgd_va, const char *tag)
 	return equal ? 0 : 1;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_audit_va);
+
+/*
+ * #274 phase-1 step 2 diagnostic: full-pgd lockstep audit.
+ *
+ * Walks every present leaf in the UML pgd and looks up the same VA
+ * in the shadow PT. Counts (leaves, matches, diverges) and logs the
+ * first up-to-`max_log` divergences in detail. Does NOT mutate the
+ * shadow tree — purely observational, intended to test the
+ * "shadow->synced cache is honest" hypothesis on the cached-skip
+ * path of kvm_enter_guest.
+ *
+ * If the cache is honest, every present UML leaf has a matching
+ * shadow leaf and the audit logs "div=0/N". If the cache is lying
+ * (pgd mutated without going through kvm_shadow_invalidate_va_range),
+ * the divergences identify the missed sync points.
+ *
+ * Equality semantics match kvm_shadow_audit_va: PFN, P, RW, US, NX
+ * must agree; A and D are masked out.
+ *
+ * Returns the number of divergences (>= 0) on success, negative
+ * errno on missing inputs. Cost: O(pages-mapped). Intended for
+ * diagnostic builds; production callers should gate with a runtime
+ * flag once the bug is found.
+ */
+int kvm_shadow_audit_pgd(void *uml_pgd_va, const char *tag,
+			 unsigned int max_log)
+{
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+	u64 *upgd = uml_pgd_va;
+	u64 *spgd;
+	unsigned int pgd_i, pud_i, pmd_i, pte_i;
+	unsigned int leaves = 0, matches = 0, diverges = 0;
+	const u64 mask = 0x000ffffffffff000ULL |
+			 KVM_X86_PTE_P | KVM_X86_PTE_RW |
+			 KVM_X86_PTE_US | (1ULL << 63);
+
+	if (!tag)
+		tag = "?";
+	if (!shadow || !shadow->pgd)
+		return -ENODEV;
+	if (!upgd)
+		return -EINVAL;
+	spgd = shadow->pgd;
+
+	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
+		u64 *upud, *spud_va = NULL;
+
+		if (!(upgd[pgd_i] & UM_PTE_PRESENT))
+			continue;
+		upud = (u64 *)__va(upgd[pgd_i] & 0x000ffffffffff000ULL);
+		if (spgd[pgd_i] & KVM_X86_PTE_P)
+			spud_va = (u64 *)__va(spgd[pgd_i] &
+					      0x000ffffffffff000ULL);
+
+		for (pud_i = 0; pud_i < 512; pud_i++) {
+			u64 *upmd, *spmd_va = NULL;
+
+			if (!(upud[pud_i] & UM_PTE_PRESENT))
+				continue;
+			upmd = (u64 *)__va(upud[pud_i] &
+					   0x000ffffffffff000ULL);
+			if (spud_va && (spud_va[pud_i] & KVM_X86_PTE_P))
+				spmd_va = (u64 *)__va(spud_va[pud_i] &
+						      0x000ffffffffff000ULL);
+
+			for (pmd_i = 0; pmd_i < 512; pmd_i++) {
+				u64 *upte, *spte_va = NULL;
+
+				if (!(upmd[pmd_i] & UM_PTE_PRESENT))
+					continue;
+				upte = (u64 *)__va(upmd[pmd_i] &
+						   0x000ffffffffff000ULL);
+				if (spmd_va &&
+				    (spmd_va[pmd_i] & KVM_X86_PTE_P))
+					spte_va = (u64 *)__va(spmd_va[pmd_i] &
+							      0x000ffffffffff000ULL);
+
+				for (pte_i = 0; pte_i < 512; pte_i++) {
+					u64 ume = upte[pte_i];
+					u64 expected, sval;
+					u64 va;
+
+					if (!(ume & UM_PTE_PRESENT))
+						continue;
+					leaves++;
+					expected = kvm_um_pte_to_x86(ume);
+					sval = spte_va ? spte_va[pte_i] : 0;
+
+					if ((expected & mask) ==
+					    (sval & mask)) {
+						matches++;
+						continue;
+					}
+					diverges++;
+					if (diverges <= max_log) {
+						va = ((u64)pgd_i << 39) |
+						     ((u64)pud_i << 30) |
+						     ((u64)pmd_i << 21) |
+						     ((u64)pte_i << 12);
+						pr_info("um: kvm audit_pgd[%s]: DIVERGE #%u va=0x%llx um=0x%llx expected=0x%llx shadow=0x%llx\n",
+							tag, diverges,
+							(unsigned long long)va,
+							(unsigned long long)ume,
+							(unsigned long long)expected,
+							(unsigned long long)sval);
+					}
+				}
+			}
+		}
+	}
+
+	pr_info("um: kvm audit_pgd[%s]: leaves=%u match=%u DIV=%u synced=%d pgd=%p\n",
+		tag, leaves, matches, diverges,
+		shadow->synced, uml_pgd_va);
+	return (int)diverges;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_audit_pgd);
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 int kvm_backend_fd(void)

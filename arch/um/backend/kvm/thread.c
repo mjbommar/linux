@@ -1849,6 +1849,15 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		    shadow->synced_pgd_va == (u64)mm->pgd) {
 			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
+			/*
+			 * #274 phase-1 step 2: verify the synced cache is
+			 * honest. Walk pgd vs shadow in lockstep on every
+			 * skip — if any present UML leaf disagrees with
+			 * the shadow, the cache is stale-true and that's
+			 * the bug. Diagnostic-only; the audit does not
+			 * mutate the shadow and the skip still proceeds.
+			 */
+			(void)kvm_shadow_audit_pgd(mm->pgd, "skip", 8);
 			goto fill_done;
 		}
 
