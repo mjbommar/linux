@@ -56,6 +56,63 @@ Diagnostics ruled out so far (commits `44abfd6e6657`,
   - Syscall round-trip clobbering callee-saved regs
     (CALLEE-SAVE-CLOBBER never fires across the boot)
 
+Real bugs fixed this session (each verified against hashlib smoke
++ merge gate; none individually moved parity from 0/21, but
+together they make hashlib reliably pass and the dl_main reproducer
+moved FAIL→PASS):
+
+  - `1e49886e` T1: `set_ptes()` PFN advancement bug. The mainline
+    UML implementation advances PTE PFN by `nr_remaining` pages
+    instead of one — under integrated KVM the wrong PFNs propagate
+    into the shadow PT. This is the bug that was causing the
+    deterministic dl_main rtld.c:1953 fault.
+  - `55345b11` T7: always mark `shadow->dirty=true` in
+    `kvm_shadow_invalidate_va_range`, not only when cleared > 0.
+    Stale-TLB risk when invalidate runs on a range that hadn't
+    been lazy-filled yet.
+  - `664df08f` T15: `update_pte_range` (and pmd/pud/p4d variants)
+    in `arch/um/kernel/tlb.c` marked PTEs uptodate even when the
+    backend `ops->mmap`/`ops->unmap` returned an error — leaving
+    the host VA / shadow permanently divergent from the pgd. Fixed
+    to gate `*_mkuptodate` on rc==0.
+  - `171330af` T13: `init_new_context`'s
+    `mm_unmap(new_id, 0, STUB_START)` call was passing
+    `len=0x7fffffffc000` (~128 TB) to `kvm_mm_unmap`, which
+    invalidated the parent's shadow over a huge range and
+    potentially destructively munmap'd host VA. Short-circuited
+    under KVM_INTEGRATED.
+  - `1ba17edf` T17: `kvm_ensure_cpuid_done` failure was silently
+    dropped via `(void)` cast.
+  - `aa3fedaa` T16: `kvm_shadow_invalidate_va_range` errors from
+    `kvm_mm_map`/`unmap` were silently dropped.
+  - `062c3f98` T8: freeing a `kvm_shadow_mm` whose `pgd_gpa`
+    matched `cached_cr3_gpa` left the SREGS-skip cache pointing
+    at freed memory.
+  - `05d17152` T20: FSGSBASE exposed in CPUID without CR4.FSGSBASE
+    set — guaranteed #UD on first `WRFSBASE`.
+  - `e326c75a` T5: `kvm_context_switch` synced `prev->mm` not
+    `prev->active_mm`, dropping kernel-thread-borrowed-mm pgd
+    mutations on the floor.
+
+What still remains (the real bug that keeps moving downstream
+and now manifests as `PyList_Append` or `_PyObject_MakeTpCall`
+faults with `self->ob_type == NULL` — i.e. ob_type field of a
+live PyObject zeroed at offset 0x8): some path is corrupting
+heap memory in early Python startup. Bisect by import:
+
+  - sys, os, collections, pickle, threading: SUCCEED
+  - subprocess, json, importlib, unittest: FAIL (different IPs
+    and crash sites each time, but always the same pattern of
+    NULL pointer dereference at small offset)
+
+Failure correlates with workload size — more memory ops, more
+chance to hit the corruption. Suggests a per-N-operations bug
+that the audits-on-cached-skip path can't catch. Remaining
+tasks worth investigating: full-pgd mm_id passthrough (T2);
+FPU/XSTATE save/restore around context switches (T3);
+bidirectional shadow audit (T6); fill_lock missing (T11);
+turnstile missing (T12).
+
 Important meta-finding from `b458b8605c8f`: the underlying race
 this bug is rooted in is **timing-sensitive enough that adding
 work on the hot path measurably changes its trigger rate**. The
