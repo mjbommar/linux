@@ -417,10 +417,99 @@ int kvm_ensure_cpuid_done(void)
 		for (i = 0; i < cpuid->nent; i++) {
 			struct kvm_cpuid_entry2 *e = &cpuid->entries[i];
 
-			if (e->function == 1 && e->index == 0)
-				e->ecx &= ~(1U << 30);	/* RDRAND */
-			if (e->function == 7 && e->index == 0)
-				e->ebx &= ~(1U << 18);	/* RDSEED */
+			if (e->function == 1 && e->index == 0) {
+				/* RDRAND — record/replay determinism. */
+				e->ecx &= ~(1U << 30);
+				/*
+				 * Task #274: mask XSAVE / OSXSAVE / AVX
+				 * family. The KVM backend's sregs setup
+				 * (sregs.c) programs CR4 with PAE | OSFXSR
+				 * | OSXMMEXCPT — it does NOT set
+				 * CR4.OSXSAVE, and we do not program XCR0
+				 * via KVM_SET_XCRS. So advertising XSAVE-
+				 * dependent features (AVX, AVX2, AVX512,
+				 * FMA, VAES, VPCLMULQDQ) sets the guest up
+				 * for #UD/#GP whenever userspace
+				 * (libcrypto's CPU-feature dispatcher,
+				 * Python's hashlib via OpenSSL,
+				 * NumPy via BLAS, …) executes one of those
+				 * instructions. Symptom: hard-to-trace
+				 * SIGSEGV inside libc / libcrypto on first
+				 * dlopen. Mask conservatively until proper
+				 * XSAVE/XCR0 setup + snapshot/restore land.
+				 *
+				 * Leaf 1 ECX:
+				 *   bit 12 = FMA (depends on AVX)
+				 *   bit 26 = XSAVE
+				 *   bit 27 = OSXSAVE
+				 *   bit 28 = AVX
+				 *   bit 29 = F16C (uses YMM, depends on AVX)
+				 */
+				e->ecx &= ~((1U << 12) | (1U << 26) |
+					    (1U << 27) | (1U << 28) |
+					    (1U << 29));
+			}
+			if (e->function == 7 && e->index == 0) {
+				/* RDSEED — record/replay determinism. */
+				e->ebx &= ~(1U << 18);
+				/*
+				 * Task #274 cont. — mask AVX2 + every
+				 * AVX512 family bit in EBX/ECX/EDX so
+				 * libcrypto/Python's CPU-dispatcher
+				 * doesn't take a XSAVE-dependent code
+				 * path. Bit map mirrors qemu's
+				 * `-avx2,-avx512*,-vaes` style cpu
+				 * tuning.
+				 *
+				 * Leaf 7.0 EBX:
+				 *   bit 5  = AVX2
+				 *   bit 16 = AVX512F
+				 *   bit 17 = AVX512DQ
+				 *   bit 21 = AVX512IFMA
+				 *   bit 26 = AVX512PF
+				 *   bit 27 = AVX512ER
+				 *   bit 28 = AVX512CD
+				 *   bit 30 = AVX512BW
+				 *   bit 31 = AVX512VL
+				 */
+				e->ebx &= ~((1U << 5)  | (1U << 16) |
+					    (1U << 17) | (1U << 21) |
+					    (1U << 26) | (1U << 27) |
+					    (1U << 28) | (1U << 30) |
+					    (1U << 31));
+				/*
+				 * Leaf 7.0 ECX:
+				 *   bit 1  = AVX512VBMI
+				 *   bit 6  = AVX512VBMI2
+				 *   bit 9  = VAES
+				 *   bit 10 = VPCLMULQDQ
+				 *   bit 11 = AVX512VNNI
+				 *   bit 12 = AVX512BITALG
+				 *   bit 14 = AVX512VPOPCNTDQ
+				 */
+				e->ecx &= ~((1U << 1)  | (1U << 6)  |
+					    (1U << 9)  | (1U << 10) |
+					    (1U << 11) | (1U << 12) |
+					    (1U << 14));
+				/*
+				 * Leaf 7.0 EDX:
+				 *   bit 2 = AVX512_4VNNIW
+				 *   bit 3 = AVX512_4FMAPS
+				 *   bit 8 = AVX512_VP2INTERSECT
+				 */
+				e->edx &= ~((1U << 2) | (1U << 3) |
+					    (1U << 8));
+			}
+			/*
+			 * Leaf 0xD describes XSAVE state components +
+			 * sizes. With OSXSAVE off, exposing this leaf
+			 * causes glibc's XSAVE-aware setjmp/longjmp +
+			 * libcrypto's cpuid_setup to derive sizes for
+			 * features we don't actually support. Zero the
+			 * leaf entirely — guest sees "no XSAVE state".
+			 */
+			if (e->function == 0xD)
+				e->eax = e->ebx = e->ecx = e->edx = 0;
 		}
 	}
 
@@ -433,7 +522,7 @@ int kvm_ensure_cpuid_done(void)
 	}
 
 	kvm_ctx.cpuid_done = true;
-	pr_info("um: kvm: CPUID passthrough installed (%u entries; host x86 features visible to guest, RDRAND/RDSEED masked for record/replay determinism)\n",
+	pr_info("um: kvm: CPUID passthrough installed (%u entries; RDRAND/RDSEED + XSAVE/AVX/AVX2/AVX512 family + F16C masked — guest CR4.OSXSAVE=0 + XCR0 unset would otherwise trip XSAVE-dependent code paths in libcrypto/glibc)\n",
 		cpuid->nent);
 
 out_free:
