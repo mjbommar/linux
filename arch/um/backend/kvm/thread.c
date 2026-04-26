@@ -128,23 +128,17 @@ int kvm_fpu_save_for_task(struct task_struct *t)
 
 	/*
 	 * Memo 17 G-EVENTS: capture pending exception/interrupt state.
-	 * If KVM has a pending injected #PF queued for this task at
-	 * the moment we're switching out (e.g., task A faulted, KVM
-	 * was about to inject the #PF when SIGALRM/EINTR fired and
-	 * we vmexit'd), saving it here preserves it for restore on
-	 * the next switch-in. Without this, the queued event would
-	 * be delivered to whatever task happens to be on the vCPU
-	 * next — manifesting as an apparent wild-pointer crash in
-	 * the wrong process.
+	 * Preserves any pending injected #PF queued for THIS task at
+	 * switch-out so the right exception is delivered on switch-in.
 	 */
 	rc = os_ioctl_generic(vcpu_fd, KVM_GET_VCPU_EVENTS,
 			      (unsigned long)&a->kvm.events);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm events_save: KVM_GET_VCPU_EVENTS(task=%p) failed (%d)\n",
 				    t, rc);
-		/* Leave events_valid=false; restore will be a no-op. */
+		WRITE_ONCE(a->kvm.events_valid, false);
 	} else {
-		a->kvm.events_valid = true;
+		WRITE_ONCE(a->kvm.events_valid, true);
 	}
 	return 0;
 }
@@ -159,34 +153,71 @@ int kvm_fpu_restore_for_task(struct task_struct *t)
 		return 0;
 	a = &t->thread.arch;
 
+	/*
+	 * Memo 17 Phase H finding 6: fresh tasks (fpu_valid=false from
+	 * arch_copy_thread / arch_flush_thread) must NOT inherit the
+	 * vCPU's current FPU state — that state belongs to whichever
+	 * task last ran. Write a clean architectural-init FPU on first
+	 * switch-in: zero everything except FCW=0x37f / MXCSR=0x1f80
+	 * (x87 / SSE init values per AMD64 SDM §11.5.1).
+	 */
 	if (a->kvm.fpu_valid) {
 		rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU,
 				      (unsigned long)&a->kvm.fpu);
 		if (rc < 0)
 			pr_warn_ratelimited("um: kvm fpu_restore: KVM_SET_FPU(task=%p) failed (%d)\n",
 					    t, rc);
+	} else {
+		struct kvm_fpu init_fpu;
+
+		memset(&init_fpu, 0, sizeof(init_fpu));
+		init_fpu.fcw   = 0x037f;	/* x87 control word reset value */
+		init_fpu.mxcsr = 0x1f80;	/* MXCSR reset value */
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU,
+				      (unsigned long)&init_fpu);
+		if (rc < 0)
+			pr_warn_ratelimited("um: kvm fpu_restore: initial KVM_SET_FPU(task=%p) failed (%d)\n",
+					    t, rc);
 	}
 
 	/*
-	 * Memo 17 G-EVENTS: ONLY restore if we have valid saved state.
-	 * For first-time-switched-in tasks (events_valid=false), leave
-	 * the vCPU's current event state alone — clearing it would
-	 * potentially drop an event that legitimately got queued by KVM
-	 * while a different task was running but is meant for a
-	 * just-now-scheduled task. The save side captures whatever was
-	 * pending at switch-out, so subsequent switches always restore
-	 * the right state.
+	 * Memo 17 Phase H findings 2 + 3: VCPU_EVENTS handling.
 	 *
-	 * flags=0 selects the standard semantics (no special-case
-	 * fields touched); KVM clears+applies the saved exception/
-	 * interrupt state.
+	 *  - Fresh task (events_valid=false): the vCPU may carry a
+	 *    pending injected exception left over from another task's
+	 *    last run (e.g., #PF whose injection was deferred when we
+	 *    vmexit'd on KVM_EXIT_INTR before delivery). Without an
+	 *    explicit reset, that exception fires on the fresh task's
+	 *    next entry — exactly the "wild SIGSEGV in dl_main on
+	 *    Python startup" pattern. Write a zeroed kvm_vcpu_events
+	 *    with all VALID flags set so KVM clears every extended
+	 *    field too (NMI_PENDING / SHADOW / SMM / PAYLOAD).
+	 *
+	 *  - Restored task (events_valid=true): preserve the saved
+	 *    `flags` field — it tells KVM which extended fields were
+	 *    valid at the prior GET. Forcing flags=0 (previous version
+	 *    of this code) discarded extended state KVM had set,
+	 *    leaving the vCPU with a partial restore.
 	 */
 	if (a->kvm.events_valid) {
-		a->kvm.events.flags = 0;
 		rc = os_ioctl_generic(vcpu_fd, KVM_SET_VCPU_EVENTS,
 				      (unsigned long)&a->kvm.events);
 		if (rc < 0)
 			pr_warn_ratelimited("um: kvm events_restore: KVM_SET_VCPU_EVENTS(task=%p) failed (%d)\n",
+					    t, rc);
+	} else {
+		struct kvm_vcpu_events fresh;
+
+		memset(&fresh, 0, sizeof(fresh));
+		fresh.flags = KVM_VCPUEVENT_VALID_NMI_PENDING |
+			      KVM_VCPUEVENT_VALID_SHADOW |
+			      KVM_VCPUEVENT_VALID_SMM |
+			      KVM_VCPUEVENT_VALID_PAYLOAD |
+			      KVM_VCPUEVENT_VALID_TRIPLE_FAULT;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_VCPU_EVENTS,
+				      (unsigned long)&fresh);
+		if (rc < 0)
+			pr_warn_ratelimited("um: kvm events_restore: initial KVM_SET_VCPU_EVENTS(task=%p) failed (%d)\n",
 					    t, rc);
 	}
 	return 0;
@@ -1927,6 +1958,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	struct mm_struct *mm;
 	u64 cr3_gpa;
 	int rc;
+	bool dirty_snapshot = false;	/* memo 17 Phase H finding 1 */
 
 	if (vcpu_fd < 0)
 		return -EIO;
@@ -2256,24 +2288,29 @@ fill_done:
 		 * VA→PFN entry from a prior mapping could survive across
 		 * munmap+remap and silently return wrong file content.
 		 * See the SREGS-program block below for the mechanism.
-		 */
-		/*
+		 *
 		 * Memo 17 Phase A (Race-I keystone consumer): use
 		 * smp_load_acquire on shadow->dirty so it pairs with
 		 * the smp_wmb in shadow_sync.c (direct sync) AND in
-		 * lifecycle.c (fill / map_page / invalidate). Without
-		 * acquire, an SIGALRM-driven re-entry can read
-		 * dirty=false after a producer leaf-write but before
-		 * the producer's dirty store retires, take the skip
-		 * here, and KVM_RUN with stale TLB. This is the same
-		 * race the keystone fix targeted in the direct-sync
-		 * path; lifecycle.c was missed.
+		 * lifecycle.c (fill / map_page / invalidate).
+		 *
+		 * Memo 17 Phase H finding 1: capture the snapshot we
+		 * read here so the post-SREGS clear can use cmpxchg
+		 * (true → false) — a producer that fires BETWEEN this
+		 * read and that clear must NOT have its dirty=true
+		 * clobbered to false. Otherwise a same-mm producer
+		 * (signal-driven sync_pte from another task sharing
+		 * the mm) loses its "shadow has new state" signal,
+		 * leading to stale TLB on the *next* entry's predicate.
+		 * dirty_snapshot is declared at function scope above so
+		 * the post-SREGS path can read it.
 		 */
+		dirty_snapshot = shadow ? smp_load_acquire(&shadow->dirty) : false;
 		if (ctx->sregs_primed &&
 		    ctx->cached_cr3_gpa == cr3_gpa &&
 		    ctx->cached_fs_base == cur_fs &&
 		    ctx->cached_gs_base == cur_gs &&
-		    shadow && !smp_load_acquire(&shadow->dirty))
+		    shadow && !dirty_snapshot)
 			goto sregs_done;
 	}
 
@@ -2416,9 +2453,22 @@ fill_done:
 		ctx->cached_fs_base = sregs.fs.base;
 		ctx->cached_gs_base = sregs.gs.base;
 		ctx->sregs_primed   = true;
-		/* shadow->dirty consumed by this CR3 reload. */
-		if (shadow)
-			shadow->dirty = false;
+		/*
+		 * Memo 17 Phase H finding 1: only consume the dirty flag
+		 * we observed at predicate time. cmpxchg(true → false)
+		 * preserves any concurrent producer's dirty=true that
+		 * fired AFTER our predicate read but BEFORE this clear —
+		 * those producers' shadow updates haven't been seen by
+		 * this SREGS reload's TLB flush, so the next entry must
+		 * still see dirty=true and re-flush.
+		 *
+		 * If dirty_snapshot was false, we took the slow SREGS
+		 * path for some other reason (sregs_primed=false /
+		 * cr3/fs/gs mismatch); the dirty flag was already false,
+		 * no clear needed. The cmpxchg is a no-op in that case.
+		 */
+		if (shadow && dirty_snapshot)
+			(void)cmpxchg(&shadow->dirty, true, false);
 	}
 
 sregs_done:
