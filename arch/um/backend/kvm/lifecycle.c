@@ -462,6 +462,7 @@ int kvm_ensure_cpuid_done(void)
 				 * tuning.
 				 *
 				 * Leaf 7.0 EBX:
+				 *   bit 0  = FSGSBASE
 				 *   bit 5  = AVX2
 				 *   bit 16 = AVX512F
 				 *   bit 17 = AVX512DQ
@@ -471,12 +472,23 @@ int kvm_ensure_cpuid_done(void)
 				 *   bit 28 = AVX512CD
 				 *   bit 30 = AVX512BW
 				 *   bit 31 = AVX512VL
+				 *
+				 * #274 / T20: also mask FSGSBASE. CR4.FSGSBASE
+				 * is NOT set by kvm_fill_longmode_segments
+				 * (sregs.c only programs PAE | OSFXSR |
+				 * OSXMMEXCPT), so RDFSBASE / RDGSBASE /
+				 * WRFSBASE / WRGSBASE all #UD when executed
+				 * by the guest. glibc 2.31+ uses these for
+				 * fast TLS access when the CPUID FSGSBASE
+				 * bit is set; advertising the feature without
+				 * the OS-side enable bit is a guaranteed
+				 * crash on the first TLS access.
 				 */
-				e->ebx &= ~((1U << 5)  | (1U << 16) |
-					    (1U << 17) | (1U << 21) |
-					    (1U << 26) | (1U << 27) |
-					    (1U << 28) | (1U << 30) |
-					    (1U << 31));
+				e->ebx &= ~((1U << 0)  | (1U << 5)  |
+					    (1U << 16) | (1U << 17) |
+					    (1U << 21) | (1U << 26) |
+					    (1U << 27) | (1U << 28) |
+					    (1U << 30) | (1U << 31));
 				/*
 				 * Leaf 7.0 ECX:
 				 *   bit 1  = AVX512VBMI
