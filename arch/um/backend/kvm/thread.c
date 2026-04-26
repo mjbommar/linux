@@ -132,8 +132,20 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 	 * pending updates committed into the shadow PT so the singleton
 	 * view stays consistent across mm switches.
 	 */
-	if (prev && prev->mm)
-		um_tlb_sync(prev->mm);
+	/*
+	 * #274 / T5: drain prev's pending PTE updates against
+	 * prev->active_mm — not prev->mm. For kernel threads
+	 * prev->mm is NULL but prev->active_mm holds the borrowed
+	 * user mm; pgd mutations made while running as that kernel
+	 * thread (e.g. handle_mm_fault triggered from copy_to_user
+	 * inside a kernel-thread-borrowed mm) would otherwise be
+	 * dropped on the floor at switch time, leaving the active
+	 * user mm with un-drained NEEDSYNC PTEs the next user task
+	 * to schedule reads through. For user tasks prev->mm ==
+	 * prev->active_mm so the change is a no-op.
+	 */
+	if (prev && prev->active_mm)
+		um_tlb_sync(prev->active_mm);
 	switch_threads(&prev->thread.switch_buf, &next->thread.switch_buf);
 }
 
