@@ -2491,7 +2491,46 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 
 	pr_info_ratelimited("um: kvm: dispatching handle_syscall nr=%lu (via LSTAR trampoline)\n",
 			    PT_SYSCALL_NR(regs->gp));
-	handle_syscall(regs);
+	{
+		/*
+		 * #274 phase-1 step 4 diagnostic: snapshot the
+		 * callee-saved GP regs around handle_syscall. The x86_64
+		 * SysV ABI guarantees rbx, rbp, r12-r15 survive a
+		 * syscall; if any of them differs after handle_syscall
+		 * returns (excluding execve / rt_sigreturn which
+		 * legitimately rewrite all regs), that is the bug.
+		 *
+		 * Saved at entry, compared at exit. Fires loudly only
+		 * on mismatch — quiet on the normal path so we don't
+		 * flood the log.
+		 */
+		unsigned long save_bx  = regs->gp[HOST_BX];
+		unsigned long save_bp  = regs->gp[HOST_BP];
+		unsigned long save_r12 = regs->gp[HOST_R12];
+		unsigned long save_r13 = regs->gp[HOST_R13];
+		unsigned long save_r14 = regs->gp[HOST_R14];
+		unsigned long save_r15 = regs->gp[HOST_R15];
+
+		handle_syscall(regs);
+
+		if (syscall_nr != __NR_execve &&
+		    syscall_nr != __NR_execveat &&
+		    syscall_nr != __NR_rt_sigreturn &&
+		    (regs->gp[HOST_BX]  != save_bx  ||
+		     regs->gp[HOST_BP]  != save_bp  ||
+		     regs->gp[HOST_R12] != save_r12 ||
+		     regs->gp[HOST_R13] != save_r13 ||
+		     regs->gp[HOST_R14] != save_r14 ||
+		     regs->gp[HOST_R15] != save_r15))
+			pr_info("um: kvm CALLEE-SAVE-CLOBBER nr=%lu: bx=0x%lx->0x%lx bp=0x%lx->0x%lx r12=0x%lx->0x%lx r13=0x%lx->0x%lx r14=0x%lx->0x%lx r15=0x%lx->0x%lx\n",
+				syscall_nr,
+				save_bx,  regs->gp[HOST_BX],
+				save_bp,  regs->gp[HOST_BP],
+				save_r12, regs->gp[HOST_R12],
+				save_r13, regs->gp[HOST_R13],
+				save_r14, regs->gp[HOST_R14],
+				save_r15, regs->gp[HOST_R15]);
+	}
 
 	/*
 	 * Memo 13 step 2: observe the syscall return for record/replay
@@ -3143,6 +3182,45 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 							(u64)cr2,
 							current->active_mm->pgd,
 							"pf_unrecoverable");
+
+					/*
+					 * #274 phase-1 step 3 diagnostic:
+					 * dump guest GP regs at fault. The
+					 * in-guest IDT[14] handler may have
+					 * clobbered RAX/RDX for the OUT
+					 * trampoline, but the rest of the
+					 * GP regs are the user's faulting
+					 * context. Pair with cr2 + fault_rip
+					 * to identify which register held
+					 * the corrupted pointer (the audit
+					 * told us cr2 is NULL+offset, so
+					 * one of these regs should be NULL
+					 * or near-NULL when it shouldn't be).
+					 */
+					pr_info("um: kvm pf_regs: rip=0x%llx rsp=0x%llx ec=0x%llx cr2=0x%lx\n",
+						(unsigned long long)fault_rip,
+						(unsigned long long)*(u64 *)(ist + 32),
+						(unsigned long long)fault_error_code,
+						cr2);
+					pr_info("um: kvm pf_regs: rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx\n",
+						(unsigned long long)kregs.rax,
+						(unsigned long long)kregs.rbx,
+						(unsigned long long)kregs.rcx,
+						(unsigned long long)kregs.rdx);
+					pr_info("um: kvm pf_regs: rsi=0x%llx rdi=0x%llx rbp=0x%llx r8=0x%llx\n",
+						(unsigned long long)kregs.rsi,
+						(unsigned long long)kregs.rdi,
+						(unsigned long long)kregs.rbp,
+						(unsigned long long)kregs.r8);
+					pr_info("um: kvm pf_regs: r9=0x%llx r10=0x%llx r11=0x%llx r12=0x%llx\n",
+						(unsigned long long)kregs.r9,
+						(unsigned long long)kregs.r10,
+						(unsigned long long)kregs.r11,
+						(unsigned long long)kregs.r12);
+					pr_info("um: kvm pf_regs: r13=0x%llx r14=0x%llx r15=0x%llx\n",
+						(unsigned long long)kregs.r13,
+						(unsigned long long)kregs.r14,
+						(unsigned long long)kregs.r15);
 
 					/*
 					 * Audit round-6 G3: propagate the
