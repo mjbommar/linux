@@ -2247,7 +2247,30 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * passthrough — all six-or-so lazy CoW recoveries
 		 * service correctly through the in-vma path.
 		 */
+		/*
+		 * Memo 17 Phase I (finding 5): hold mmap_read_lock(mm) so
+		 * a concurrent same-mm task (CLONE_VM sibling) cannot
+		 * mm_unmap and free intermediate PT pages while we walk
+		 * the source pgd. Otherwise the walk dereferences a freed
+		 * pud/pmd page → wild read of arbitrary kernel memory →
+		 * shadow leaf installed pointing to whatever was there.
+		 *
+		 * Lock ordering: mmap_read_lock here is taken BEFORE
+		 * fill_lock (acquired inside kvm_shadow_fill_from_uml_pgd).
+		 * Other shadow paths (kvm_shadow_invalidate_va_range
+		 * called from kvm_mm_unmap) acquire fill_lock without
+		 * mmap_lock — but kvm_mm_unmap runs under um_tlb_sync
+		 * which is itself called from contexts where mmap_lock
+		 * is typically held (set_pte_at flows from
+		 * handle_mm_fault), so the {mmap_lock, fill_lock} order
+		 * is consistent.
+		 *
+		 * mm_users pin: not needed — current's task pins
+		 * current->mm so mm cannot disappear under us.
+		 */
+		mmap_read_lock(mm);
 		filled = kvm_shadow_fill_from_uml_pgd(shadow, mm->pgd);
+		mmap_read_unlock(mm);
 		if (filled < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow fill failed (%d)\n",
 					    filled);
@@ -3645,12 +3668,22 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					 * F4: don't ignore fill failure. Stale
 					 * shadow + guest re-entry = corruption.
 					 * Panic with diagnostic.
+					 *
+					 * Memo 17 Phase I (finding 5): mmap_read_
+					 * lock(m2) so a concurrent CLONE_VM
+					 * sibling cannot free intermediate PT
+					 * pages mid-walk. handle_page_fault above
+					 * already released mmap_read_lock; reacquire
+					 * for the fill-walk window.
 					 */
 					{
-						int fill_rc =
-							kvm_shadow_fill_from_uml_pgd(
+						int fill_rc;
+
+						mmap_read_lock(m2);
+						fill_rc = kvm_shadow_fill_from_uml_pgd(
 								m2->context.id.kvm_shadow,
 								m2->pgd);
+						mmap_read_unlock(m2);
 						if (fill_rc < 0)
 							panic("um: kvm pf-recovery: shadow fill failed (%d)",
 							      fill_rc);
@@ -4072,12 +4105,22 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			 * targeted single-page invalidate is an
 			 * optimisation; for MVP the full refill works.
 			 */
-			/* F4: don't ignore fill failure. */
+			/*
+			 * F4: don't ignore fill failure.
+			 *
+			 * Memo 17 Phase I (finding 5): mmap_read_lock guards
+			 * the source-pgd walk against concurrent CLONE_VM
+			 * sibling mm_unmap freeing intermediate PT pages.
+			 */
 			if (current->active_mm && current->active_mm->pgd) {
-				int fill_rc =
-					kvm_shadow_fill_from_uml_pgd(
-						current->active_mm->context.id.kvm_shadow,
-						current->active_mm->pgd);
+				struct mm_struct *am = current->active_mm;
+				int fill_rc;
+
+				mmap_read_lock(am);
+				fill_rc = kvm_shadow_fill_from_uml_pgd(
+						am->context.id.kvm_shadow,
+						am->pgd);
+				mmap_read_unlock(am);
 				if (fill_rc < 0)
 					panic("um: kvm mmio-recovery: shadow fill failed (%d)",
 					      fill_rc);
