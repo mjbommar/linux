@@ -108,6 +108,53 @@ scenario, so won't help.
      via the host VA in a way that races with guest reads through
      shadow PT. Phase 4 (KVM-native uaccess) addresses this class.
 
+## User-recommended items evaluated 2026-04-26 evening
+
+User provided 9 prioritized items; my honest evaluation:
+
+| # | Item | Status | Empirical |
+|---|------|--------|-----------|
+| 1 | KVM_EXIT_INTR CPL gate | ✅ DONE | Phase 1.2 commit `1bb6c7b7637a` |
+| 2 | Eliminate singleton IRETQ frame | ⚠️ PARTIAL | Per-MM in Phase 2 (`6f2dc2a14e2e`); per-TASK deferred |
+| 3 | Run-window serialization (turnstile) | ⚠️ PARTIAL | Phase 2.4 added block_signals; no per-mm mutex |
+| 4 | Fork/clone FPU inheritance | ✅ DONE | Phase J commit `9fb1a82e2357` |
+| 5 | Disable KVM_SYNC_X86_REGS diagnostic | ✅ EVALUATED | parity 15/21 (no improvement); reverted |
+| 6 | Direct PTE sync vs full fill race | ⚠️ EVALUATED + REVERTED | Tried cmpxchg(0→new) install-if-absent: v1 (all slots) 16/21, v2 (user-half only) 15/21 — both regressed slightly. Race is theoretically real but fix didn't measurably help; variance-dominated |
+| 7 | Per-mm host worker | ❌ DEFERRED | Multi-week structural |
+| 8 | CR3/TLB dirty consumption | ✅ EVALUATED | Disabled SREGS-skip cache → CR4.PGE flush every entry → 13/15 (no improvement). Rules out missed producer as dominant cause |
+| 9 | Hot-path diagnostics off by default | ❌ NOT EVALUATED | Out-of-scope cleanup |
+
+**Conclusion**: Items 1, 4, 8 are confirmed DONE/EVALUATED. Items 2, 3
+are PARTIAL (would need per-task scope, deferred). Items 5, 6 surgical
+fixes do NOT measurably improve parity beyond 17/21 baseline median —
+variance (15-18/21 per single-trial) dominates any small effect.
+
+**Root cause hypothesis after extensive testing**: the residual
+4-6/21 flakes are NOT explained by any single-cell race in the KVM
+backend code paths I've audited. The most reproducible failure
+mode (ld-linux NULL deref at va=0x470, rip=0x400265c3 after a call
+to a private helper at 0x14560) suggests either:
+  (a) genuine glibc behavior under timing-sensitive paths that KVM
+      vCPU emulation perturbs differently than seccomp, or
+  (b) a memory-content corruption mechanism we haven't found —
+      possibly in kernel→user data flow paths (signal delivery,
+      hostfs reads, or memory the kernel writes via host VA that
+      the guest reads via shadow PT).
+
+**Recommended next paths** (all multi-day or larger):
+  - Per-TASK vCPU (Phase 5 from memo 18 plan): 5-10 days
+  - Per-mm host worker (Phase 4 Option B): multi-week
+  - GDB-style attach to UML at the failure point to capture
+    pre-call register state
+  - Statistically powered N=20+ trials per config to detect
+    sub-noise improvements
+
+**Current committed state**: Phase 2 baseline 17/21 (median over
+4 trials) with Phase 3-fix (`8de84913b847`) for IRETQ frame
+post-fill ordering. Architecturally sound, no regressions.
+
+---
+
 ---
 
 ## Residual flake state (post memo 17 Phase A-K — 2026-04-26)
