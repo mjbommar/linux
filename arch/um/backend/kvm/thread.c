@@ -144,8 +144,19 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 	 * to schedule reads through. For user tasks prev->mm ==
 	 * prev->active_mm so the change is a no-op.
 	 */
-	if (prev && prev->active_mm)
-		um_tlb_sync(prev->active_mm);
+	if (prev && prev->active_mm) {
+		int sync_rc = um_tlb_sync(prev->active_mm);
+
+		/*
+		 * F5: failed pre-switch sync poisons the next run with
+		 * a divergent shadow. Panic loudly rather than continue
+		 * silently — the alternative is hard-to-debug downstream
+		 * corruption.
+		 */
+		if (sync_rc < 0)
+			panic("um: kvm context_switch: um_tlb_sync(prev->active_mm) failed (%d)",
+			      sync_rc);
+	}
 	switch_threads(&prev->thread.switch_buf, &next->thread.switch_buf);
 }
 
@@ -3252,9 +3263,20 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 							panic("um: kvm pf-recovery: um_tlb_sync failed (%d)",
 							      sync_rc);
 					}
-					(void)kvm_shadow_fill_from_uml_pgd(
-						m2->context.id.kvm_shadow,
-						m2->pgd);
+					/*
+					 * F4: don't ignore fill failure. Stale
+					 * shadow + guest re-entry = corruption.
+					 * Panic with diagnostic.
+					 */
+					{
+						int fill_rc =
+							kvm_shadow_fill_from_uml_pgd(
+								m2->context.id.kvm_shadow,
+								m2->pgd);
+						if (fill_rc < 0)
+							panic("um: kvm pf-recovery: shadow fill failed (%d)",
+							      fill_rc);
+					}
 				}
 
 				/*
@@ -3617,10 +3639,16 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			 * targeted single-page invalidate is an
 			 * optimisation; for MVP the full refill works.
 			 */
-			if (current->active_mm && current->active_mm->pgd)
-				(void)kvm_shadow_fill_from_uml_pgd(
-					current->active_mm->context.id.kvm_shadow,
-					current->active_mm->pgd);
+			/* F4: don't ignore fill failure. */
+			if (current->active_mm && current->active_mm->pgd) {
+				int fill_rc =
+					kvm_shadow_fill_from_uml_pgd(
+						current->active_mm->context.id.kvm_shadow,
+						current->active_mm->pgd);
+				if (fill_rc < 0)
+					panic("um: kvm mmio-recovery: shadow fill failed (%d)",
+					      fill_rc);
+			}
 			/*
 			 * MMIO is a clean ring-3 boundary: the SEGV
 			 * either got handled (page installed, guest
