@@ -667,8 +667,27 @@ EXPORT_SYMBOL_GPL(kvm_shadow_mm_alloc);
 
 void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow)
 {
+	struct kvm_um *ctx = kvm_backend_ctx();
+
 	if (!shadow)
 		return;
+
+	/*
+	 * #274 / T8: invalidate the SREGS cache if this shadow's
+	 * pgd_gpa matches the cached CR3 we last programmed into the
+	 * vCPU. The kvm_enter_guest fast-path skips KVM_SET_SREGS
+	 * when (cached_cr3_gpa == new_cr3_gpa && !shadow->dirty); if
+	 * we free the underlying PGD page without invalidating that
+	 * cache, the next entry may reuse the freed pages as the
+	 * vCPU's CR3 source — KVM walks the (now-freed) shadow tree
+	 * during shadow-page-table maintenance and reads garbage.
+	 *
+	 * Setting cached_cr3_gpa = 0 forces the next entry to issue
+	 * KVM_SET_SREGS with the new mm's pgd_gpa.
+	 */
+	if (shadow->pgd_gpa != 0 && ctx->cached_cr3_gpa == shadow->pgd_gpa)
+		ctx->cached_cr3_gpa = 0;
+
 	/*
 	 * Free intermediate PUD/PMD/PTE pages by walking the PGD.
 	 * Each present non-leaf entry holds a kernel VA via __va(pa).
