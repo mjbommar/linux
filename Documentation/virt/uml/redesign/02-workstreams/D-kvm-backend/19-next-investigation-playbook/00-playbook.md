@@ -49,11 +49,73 @@ to raise an exception under KVM that doesn't fire under seccomp.
 | Cross-mm contamination | only 1 mm (single python3 PID 1) | n/a |
 | Cross-task contamination | only 1 user task | n/a |
 
+## Helper at ld-linux+0x14560 IDENTIFIED 2026-04-26
+
+Disassembly of /lib64/ld-linux-x86-64.so.2 at offset 0x14560:
+
+```
+14560: endbr64
+14564: testb $0x8, 0x354(%rdi)        ; flag check at link_map+0x354
+1456b: je 14570                       ; if zero, do work
+1456d: ret                            ; ELSE: early return (no-op)
+14570: push %rbp
+14571: mov %rsp, %rbp
+14574: push %rbx
+14575: mov %rdi, %rbx                 ; rbx = link_map
+1457c: call 0x107a0                   ; private helper
+14581: mov 0x4a8(%rbx), %rax          ; link_map field
+14588: test %rax, %rax
+1458b: je 145b2                       ; if zero, return
+... (compute relro region)
+145cb: call 0x299e0                   ; ← SYSCALL: mprotect (NR=10)
+145d0: test %eax, %eax
+145d2: jns 145b2                      ; if mprotect succeeded, return
+... (error path: load error info, would call _dl_signal_error /
+     _dl_fatal_printf which can longjmp)
+```
+
+`0x299e0` is `mov $0xa,%eax; syscall` — inline mprotect(2) syscall
+stub. So the helper at 0x14560 is `_dl_protect_relro` (or equivalent
+relro-protection helper). It:
+
+  1. Skips if relro already protected (flag bit 3 of link_map+0x354)
+  2. Computes the relro VA range from link_map fields
+  3. Calls mprotect() to make the range read-only
+  4. On mprotect failure, takes error path that can longjmp via
+     _dl_signal_error / _dl_fatal_printf
+
+**This means the dominant 62.5% failure mode is**: `mprotect(2)` is
+failing under KVM during ld-linux's relro setup. The error path
+longjmps back to a setjmp earlier in ld-linux startup (when
+r13/r14/r15 were 0 per ELF_PLAT_INIT). Code at 0x265c3 then
+NULL-derefs.
+
+**Why mprotect would fail under KVM but not seccomp**:
+
+  (a) The link_map fields used to compute the relro range read
+      WRONG values under KVM (memory-content corruption). mprotect
+      called with bad addr/len → -EFAULT or -EINVAL.
+
+  (b) The mprotect call itself behaves differently — UML's
+      syscall handler routes mprotect through do_mprotect → which
+      calls kvm_mm_unmap (under KVM). If kvm_mm_unmap has any
+      path that fails on relro semantics, mprotect could return
+      an error.
+
+Both (a) and (b) point to **memory-content / host-VA aliasing**
+class bugs — squarely in Phase 4 (KVM-native uaccess / per-mm
+host worker) territory. Per-task vCPU (Phase 5) does NOT address
+these.
+
 ## Open hypotheses (NOT yet investigated)
 
-1. **`_dl_catch_exception` body inspection**: disassemble what's at
-   ld-linux+0x14560 to confirm it's the catch-exception helper. If yes,
-   what conditions cause a longjmp here?
+1. **Capture mprotect args/return at the failure**: instrument
+   handle_syscall's mprotect path (or the do_mprotect entry) with
+   pr_info_ratelimited that logs (addr, len, prot, return_value).
+   Log EVERY mprotect call (low volume — Python startup makes ~50).
+   When the fault at 0x265c3 hits, the last mprotect call's
+   return value tells us if (a) mprotect failed or (b) it
+   succeeded but the LATER glibc validation found inconsistency.
 
 2. **Singleton MSR state**: LSTAR / FMASK / STAR / EFER / KERNEL_GS_BASE
    programmed once at bootstrap. Audit whether ANY code path can
