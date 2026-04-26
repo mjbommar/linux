@@ -300,7 +300,26 @@ static inline void um_tlb_mark_sync(struct mm_struct *mm, unsigned long start,
 static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 			    pte_t *ptep, pte_t pte, int nr)
 {
-	/* Basically the default implementation */
+	/*
+	 * Basically the default implementation.
+	 *
+	 * Bugfix vs the version in commit bcf3d957c63d ("um: refactor TLB
+	 * update handling"): the original advance formula was
+	 *   pte = __pte(pte_val(pte) + (nr << PFN_PTE_SHIFT));
+	 * but `nr` has just been decremented, so for nr_in >= 3 each
+	 * subsequent PTE picks up an extra (nr_remaining-1) pages of
+	 * PFN drift. For nr_in=3 the installed PFNs are P, P+2, P+3
+	 * instead of P, P+1, P+2; for nr_in=4 they are P, P+3, P+5,
+	 * P+6. Under seccomp the host process's contiguous os_map_memory
+	 * mapping masks the pgd error because user-mode reads go through
+	 * the host page tables, not UML's pgd. Under the integrated KVM
+	 * backend the wrong PFNs propagate into the shadow PT and the
+	 * guest reads from the wrong physical pages — silent
+	 * corruption that surfaced as the dl_main NULL-deref in #274.
+	 *
+	 * Fix matches include/linux/pgtable.h's generic set_ptes which
+	 * advances by exactly one page per iteration via pte_next_pfn().
+	 */
 	size_t length = nr * PAGE_SIZE;
 
 	for (;;) {
@@ -308,7 +327,7 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 		if (--nr == 0)
 			break;
 		ptep++;
-		pte = __pte(pte_val(pte) + (nr << PFN_PTE_SHIFT));
+		pte = __pte(pte_val(pte) + PAGE_SIZE);
 	}
 
 	um_tlb_mark_sync(mm, addr, addr + length);
