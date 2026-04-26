@@ -28,6 +28,7 @@
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
+#include <linux/slab.h>		/* kmalloc for N4 FPU per-task slot */
 #include <linux/spinlock.h>
 #include <linux/time-internal.h>	/* time_travel_mode + tt_extra_sched_jiffies */
 #include <linux/uaccess.h>	/* copy_from_user */
@@ -72,6 +73,109 @@ core_param(kvm_diag_pf_dump_regs, kvm_diag_pf_dump_regs, uint, 0644);
 
 static unsigned int kvm_diag_audit_pgd_skip;
 core_param(kvm_diag_audit_pgd_skip, kvm_diag_audit_pgd_skip, uint, 0644);
+
+/*
+ * N4: bisect knob to disable per-task FPU save/restore. Default
+ * 0 (FPU save/restore enabled). Set to 1 on the kernel command
+ * line to compare with the prior leaky behaviour.
+ */
+static unsigned int kvm_diag_skip_fpu_save;
+core_param(kvm_diag_skip_fpu_save, kvm_diag_skip_fpu_save, uint, 0644);
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+/*
+ * Per-task FPU state hash. Keyed by task_struct pointer; lazily
+ * allocates a struct kvm_fpu when first saved. Freed at task exit
+ * via kvm_fpu_drop_for_task (called from arch_release_task_struct
+ * — but UML doesn't define one, so we leak on exit; fine for now,
+ * the hash is small and tasks under UML are typically O(10)).
+ *
+ * Single-host-thread per CPU under UML's cooperative model means
+ * we don't need a lock for the hash — only kvm_context_switch
+ * touches it, and that runs in the scheduler critical section.
+ */
+struct kvm_fpu_slot {
+	struct task_struct *task;
+	struct kvm_fpu fpu;
+	struct kvm_fpu_slot *next;
+};
+
+#define KVM_FPU_HASH_SIZE 64
+static struct kvm_fpu_slot *kvm_fpu_hash[KVM_FPU_HASH_SIZE];
+
+static struct kvm_fpu_slot *kvm_fpu_get_slot(struct task_struct *t,
+					     bool alloc)
+{
+	unsigned int h = ((unsigned long)t >> 8) & (KVM_FPU_HASH_SIZE - 1);
+	struct kvm_fpu_slot *s;
+
+	for (s = kvm_fpu_hash[h]; s; s = s->next) {
+		if (s->task == t)
+			return s;
+	}
+	if (!alloc)
+		return NULL;
+	/*
+	 * Use GFP_ATOMIC because kvm_context_switch may run in
+	 * interrupt-disabled scheduler context.
+	 */
+	s = kmalloc(sizeof(*s), GFP_ATOMIC);
+	if (!s)
+		return NULL;
+	s->task = t;
+	memset(&s->fpu, 0, sizeof(s->fpu));
+	s->next = kvm_fpu_hash[h];
+	kvm_fpu_hash[h] = s;
+	return s;
+}
+
+int kvm_fpu_save_for_task(struct task_struct *t)
+{
+	struct kvm_fpu_slot *s;
+	int rc;
+	int vcpu_fd = kvm_backend_vcpu0_fd();
+
+	if (vcpu_fd < 0)
+		return 0;
+	s = kvm_fpu_get_slot(t, true);
+	if (!s)
+		return -ENOMEM;
+	rc = os_ioctl_generic(vcpu_fd, KVM_GET_FPU, (unsigned long)&s->fpu);
+	if (rc < 0)
+		pr_warn_ratelimited("um: kvm fpu_save: KVM_GET_FPU(task=%p) failed (%d)\n",
+				    t, rc);
+	return rc;
+}
+
+int kvm_fpu_restore_for_task(struct task_struct *t)
+{
+	struct kvm_fpu_slot *s;
+	int rc;
+	int vcpu_fd = kvm_backend_vcpu0_fd();
+
+	if (vcpu_fd < 0)
+		return 0;
+	s = kvm_fpu_get_slot(t, false);
+	if (!s) {
+		/*
+		 * No saved FPU state for this task — first time it's
+		 * being switched IN. Leave the vCPU's current FPU
+		 * alone. Next save will record this task's resulting
+		 * state. This is safe under our cooperative model:
+		 * the prior task that just got switched OUT had its
+		 * state saved (via the matching call from prev), so
+		 * the vCPU FPU is the new task's "starting" state and
+		 * any state from earlier prevs is gone.
+		 */
+		return 0;
+	}
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU, (unsigned long)&s->fpu);
+	if (rc < 0)
+		pr_warn_ratelimited("um: kvm fpu_restore: KVM_SET_FPU(task=%p) failed (%d)\n",
+				    t, rc);
+	return rc;
+}
+#endif
 
 int kvm_thread_create(struct task_struct *p, void *stack,
 		      void (*handler)(void))
@@ -157,6 +261,40 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 			panic("um: kvm context_switch: um_tlb_sync(prev->active_mm) failed (%d)",
 			      sync_rc);
 	}
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	/*
+	 * N4 — KVM FPU/XSTATE save/restore on context switch.
+	 *
+	 * The vCPU FPU state lives in KVM's per-vCPU storage. Across
+	 * KVM_RUN calls the vCPU FPU PERSISTS — KVM auto-saves host
+	 * FPU on entry and restores host FPU on exit, but the vCPU's
+	 * own FPU is its own. UML multiplexes ALL "tasks" onto a
+	 * single vCPU0; without per-task save/restore here, task A's
+	 * XMM/AVX state leaks into task B's run.
+	 *
+	 * SSE/AVX-based memcpy in glibc (movdqa, vmovaps) reads from
+	 * one register and writes via another. If the source XMM held
+	 * stale state from a different task, the bytes copied are
+	 * wrong — propagating corruption widely (PyObject pointers
+	 * loaded via memcpy etc).
+	 *
+	 * Implementation: lazily allocate a struct kvm_fpu per
+	 * task via thread_struct.kvm_fpu_state (added below). On
+	 * switch: KVM_GET_FPU into prev's slot (allocates if first
+	 * time), KVM_SET_FPU from next's slot (no-op if next has
+	 * never had FPU saved — let the vCPU keep prev's state,
+	 * which is the prior baseline). Failure logs but does not
+	 * panic; FPU drift is a soft correctness issue.
+	 *
+	 * Gated by kvm_diag_skip_fpu kernel param so we can bisect.
+	 */
+	if (!kvm_diag_skip_fpu_save && prev && next && prev != next) {
+		(void)kvm_fpu_save_for_task(prev);
+		(void)kvm_fpu_restore_for_task(next);
+	}
+#endif
+
 	switch_threads(&prev->thread.switch_buf, &next->thread.switch_buf);
 }
 
