@@ -141,7 +141,19 @@ int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 		return rc;
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
-	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
+	/*
+	 * #274 / T16: surface the invalidate failure to the caller.
+	 * The host VA mapping has already changed via os_map_memory;
+	 * if the shadow can't be invalidated (most plausibly -ENODEV
+	 * before the per-mm shadow has been attached), the next
+	 * guest read goes through stale shadow PTEs to the OLD
+	 * physical page. Better: report the error so um_tlb_sync's
+	 * update_pte_range leaves the PTE not-uptodate (after T15)
+	 * and a subsequent sync retries.
+	 */
+	rc = kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
+	if (rc < 0 && rc != -ENODEV)
+		return rc;
 #endif
 	return 0;
 }
@@ -188,7 +200,10 @@ int kvm_mm_unmap(struct mm_id *id, unsigned long virt, unsigned long len)
 		return rc;
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
-	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
+	/* #274 / T16: see kvm_mm_map's matching block. */
+	rc = kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
+	if (rc < 0 && rc != -ENODEV)
+		return rc;
 #endif
 	return 0;
 }
