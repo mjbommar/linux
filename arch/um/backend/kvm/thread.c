@@ -40,6 +40,7 @@
 #include <asm/unistd.h>		/* __NR_arch_prctl */
 #include <as-layout.h>
 #include <kern_util.h>
+#include <linux/moduleparam.h>	/* core_param for diagnostic knobs */
 #include <mem.h>		/* uml_physmem */
 #include <os.h>
 #include <registers.h>
@@ -51,6 +52,26 @@
 #include <asm/backend.h>
 
 #include "kvm_backend.h"
+
+/*
+ * #274 phase-1 diagnostic knobs. Default off because emitting the
+ * extra pr_info lines (and the binary-layout shift the dead code
+ * implies) measurably perturbs hashlib smoke reliability — the
+ * underlying race the diagnostics are trying to characterise is
+ * timing-sensitive enough that any added work in the hot path
+ * triggers it more often.
+ *
+ * Set on the kernel command line to enable for a debugging boot:
+ *   kvm_diag_pf_dump_regs=1       — dump GP regs at SIGSEGV-bound #PF
+ *   kvm_diag_audit_pgd_skip=1     — full pgd-vs-shadow lockstep audit
+ *                                   on every cached-skip in
+ *                                   kvm_enter_guest
+ */
+static unsigned int kvm_diag_pf_dump_regs;
+core_param(kvm_diag_pf_dump_regs, kvm_diag_pf_dump_regs, uint, 0644);
+
+static unsigned int kvm_diag_audit_pgd_skip;
+core_param(kvm_diag_audit_pgd_skip, kvm_diag_audit_pgd_skip, uint, 0644);
 
 int kvm_thread_create(struct task_struct *p, void *stack,
 		      void (*handler)(void))
@@ -1849,15 +1870,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		    shadow->synced_pgd_va == (u64)mm->pgd) {
 			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
-			/*
-			 * #274 phase-1 step 2: verify the synced cache is
-			 * honest. Walk pgd vs shadow in lockstep on every
-			 * skip — if any present UML leaf disagrees with
-			 * the shadow, the cache is stale-true and that's
-			 * the bug. Diagnostic-only; the audit does not
-			 * mutate the shadow and the skip still proceeds.
-			 */
-			(void)kvm_shadow_audit_pgd(mm->pgd, "skip", 8);
+			if (kvm_diag_audit_pgd_skip)
+				(void)kvm_shadow_audit_pgd(mm->pgd, "skip", 8);
 			goto fill_done;
 		}
 
@@ -3185,42 +3199,41 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 
 					/*
 					 * #274 phase-1 step 3 diagnostic:
-					 * dump guest GP regs at fault. The
-					 * in-guest IDT[14] handler may have
-					 * clobbered RAX/RDX for the OUT
-					 * trampoline, but the rest of the
-					 * GP regs are the user's faulting
-					 * context. Pair with cr2 + fault_rip
-					 * to identify which register held
-					 * the corrupted pointer (the audit
-					 * told us cr2 is NULL+offset, so
-					 * one of these regs should be NULL
-					 * or near-NULL when it shouldn't be).
+					 * dump guest GP regs at fault.
+					 * Off by default — gated on
+					 * kvm_diag_pf_dump_regs kernel param
+					 * because the binary-layout shift
+					 * from the dead code measurably
+					 * perturbs hashlib smoke. Enable on
+					 * a debugging boot via
+					 * `kvm_diag_pf_dump_regs=1`.
 					 */
-					pr_info("um: kvm pf_regs: rip=0x%llx rsp=0x%llx ec=0x%llx cr2=0x%lx\n",
-						(unsigned long long)fault_rip,
-						(unsigned long long)*(u64 *)(ist + 32),
-						(unsigned long long)fault_error_code,
-						cr2);
-					pr_info("um: kvm pf_regs: rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx\n",
-						(unsigned long long)kregs.rax,
-						(unsigned long long)kregs.rbx,
-						(unsigned long long)kregs.rcx,
-						(unsigned long long)kregs.rdx);
-					pr_info("um: kvm pf_regs: rsi=0x%llx rdi=0x%llx rbp=0x%llx r8=0x%llx\n",
-						(unsigned long long)kregs.rsi,
-						(unsigned long long)kregs.rdi,
-						(unsigned long long)kregs.rbp,
-						(unsigned long long)kregs.r8);
-					pr_info("um: kvm pf_regs: r9=0x%llx r10=0x%llx r11=0x%llx r12=0x%llx\n",
-						(unsigned long long)kregs.r9,
-						(unsigned long long)kregs.r10,
-						(unsigned long long)kregs.r11,
-						(unsigned long long)kregs.r12);
-					pr_info("um: kvm pf_regs: r13=0x%llx r14=0x%llx r15=0x%llx\n",
-						(unsigned long long)kregs.r13,
-						(unsigned long long)kregs.r14,
-						(unsigned long long)kregs.r15);
+					if (kvm_diag_pf_dump_regs) {
+						pr_info("um: kvm pf_regs: rip=0x%llx rsp=0x%llx ec=0x%llx cr2=0x%lx\n",
+							(unsigned long long)fault_rip,
+							(unsigned long long)*(u64 *)(ist + 32),
+							(unsigned long long)fault_error_code,
+							cr2);
+						pr_info("um: kvm pf_regs: rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx\n",
+							(unsigned long long)kregs.rax,
+							(unsigned long long)kregs.rbx,
+							(unsigned long long)kregs.rcx,
+							(unsigned long long)kregs.rdx);
+						pr_info("um: kvm pf_regs: rsi=0x%llx rdi=0x%llx rbp=0x%llx r8=0x%llx\n",
+							(unsigned long long)kregs.rsi,
+							(unsigned long long)kregs.rdi,
+							(unsigned long long)kregs.rbp,
+							(unsigned long long)kregs.r8);
+						pr_info("um: kvm pf_regs: r9=0x%llx r10=0x%llx r11=0x%llx r12=0x%llx\n",
+							(unsigned long long)kregs.r9,
+							(unsigned long long)kregs.r10,
+							(unsigned long long)kregs.r11,
+							(unsigned long long)kregs.r12);
+						pr_info("um: kvm pf_regs: r13=0x%llx r14=0x%llx r15=0x%llx\n",
+							(unsigned long long)kregs.r13,
+							(unsigned long long)kregs.r14,
+							(unsigned long long)kregs.r15);
+					}
 
 					/*
 					 * Audit round-6 G3: propagate the
