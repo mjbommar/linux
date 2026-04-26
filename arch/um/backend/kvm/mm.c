@@ -119,35 +119,27 @@ void kvm_mm_detach(struct mm_id *id)
 int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 	       int prot, int phys_fd, u64 offset)
 {
+	int rc;
+
 	(void)id;
-	(void)prot;
-	(void)phys_fd;
-	(void)offset;
 
 	/*
-	 * #276: under the integrated KVM backend, the guest CPU
-	 * translates user VAs through the per-mm shadow PT (CR3 →
-	 * memslot → uml_physmem linear mapping). It does NOT walk
-	 * the host process's VAs. The seccomp/ptrace pattern of
-	 * mmap'ing each user page into UML's host process VA space
-	 * (via os_map_memory) is not load-bearing here AND it
-	 * actively breaks fork/exec: every UML mm shares the single
-	 * host process VA space, so when a child execve's a fresh
-	 * binary its os_map_memory at user VAs clobbers the parent's
-	 * mapping at the same VAs. Parent then dereferences a stale
-	 * mapping and crashes.
-	 *
-	 * UML's own kernel-mode user-VA dereference path (copy_to/
-	 * from_user) goes through page_address(pte_page(pte)) which
-	 * uses the linear uml_physmem mapping that's set up at boot
-	 * — completely separate from the per-PTE host mmap. Init_mm
-	 * kernel mappings still flow through kern_map (init_mm only)
-	 * which retains os_map_memory for the kernel-half range.
-	 *
-	 * Skip os_map_memory; just invalidate the per-mm shadow PT
-	 * so the next kvm_enter_guest's pgd-walk picks up the new
-	 * leaves into THIS mm's shadow tree.
+	 * #276 reverted: hypothesis was that os_map_memory was
+	 * not load-bearing under integrated KVM. WRONG —
+	 * cumulative-imports under kvm crashes inside libc when
+	 * os_map_memory is skipped, even though guest CPU goes
+	 * through shadow PT for user VAs. Some path (probably
+	 * copy_to_user fallback or io_uring fixed-buffer setup)
+	 * relies on the host VA mapping being live. Restore
+	 * os_map_memory; the cross-mm collision case stays open
+	 * for a different fix.
 	 */
+	rc = os_map_memory((void *)virt, phys_fd, offset, len,
+			   prot & UM_PROT_READ, prot & UM_PROT_WRITE,
+			   prot & UM_PROT_EXEC);
+	if (rc)
+		return rc;
+
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
 #endif
@@ -156,11 +148,14 @@ int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 
 int kvm_mm_unmap(struct mm_id *id, unsigned long virt, unsigned long len)
 {
+	int rc;
+
 	(void)id;
 
-	/*
-	 * Symmetric with kvm_mm_map — no host munmap needed.
-	 */
+	rc = os_unmap_memory((void *)virt, len);
+	if (rc)
+		return rc;
+
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
 #endif
