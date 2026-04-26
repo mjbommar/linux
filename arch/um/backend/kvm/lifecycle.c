@@ -657,6 +657,7 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 {
 	struct kvm_shadow_mm *shadow;
 	struct page *page;
+	struct page *iretq_page;
 
 	shadow = kzalloc(sizeof(*shadow), GFP_KERNEL);
 	if (!shadow)
@@ -664,6 +665,22 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 
 	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 	if (!page) {
+		kfree(shadow);
+		return NULL;
+	}
+
+	/*
+	 * Memo 18 Phase 2: per-mm IRETQ-frame storage. Allocate a
+	 * dedicated page; we'll install it in the shadow PGD at a
+	 * unique kernel-half VA derived from the shadow pointer in
+	 * kvm_shadow_pgd_alloc / first kvm_enter_guest. The page is
+	 * zero-init via __GFP_ZERO so a half-built frame can't be
+	 * read by the guest before kvm_enter_guest writes the real
+	 * frame[0..4].
+	 */
+	iretq_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!iretq_page) {
+		__free_page(page);
 		kfree(shadow);
 		return NULL;
 	}
@@ -680,6 +697,19 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 	shadow->direct_sync_absent      = 0;
 	shadow->direct_sync_alloc_fail  = 0;
 	shadow->direct_sync_range_clear = 0;
+	shadow->iretq_frame_page = iretq_page;
+	shadow->iretq_frame_va   = page_address(iretq_page);
+	shadow->iretq_frame_gpa  = (u64)__pa(shadow->iretq_frame_va);
+	/*
+	 * Pick a unique guest VA per shadow_mm in the kernel-half
+	 * canonical range (bit 47 sign-extended via 0xffff_8000_*).
+	 * Use the shadow_mm pointer's low 24 bits as a unique
+	 * offset within a 16 MB carveout at 0xffffc00000000000 —
+	 * gives 4096 distinct slots before collision (way more than
+	 * UML's typical mm count). Page-aligned naturally.
+	 */
+	shadow->iretq_frame_va_guest = 0xffffc00000000000ULL |
+		(((u64)shadow >> 4) & 0xfffff000ULL);
 	mutex_init(&shadow->fill_lock);
 	return shadow;
 }
@@ -746,6 +776,8 @@ void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow)
 	}
 	if (shadow->pgd_page)
 		__free_page(shadow->pgd_page);
+	if (shadow->iretq_frame_page)
+		__free_page(shadow->iretq_frame_page);
 	kfree(shadow);
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_mm_free);

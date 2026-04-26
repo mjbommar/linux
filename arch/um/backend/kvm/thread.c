@@ -2068,6 +2068,40 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	}
 
 	/*
+	 * Memo 18 Phase 2: install the per-mm IRETQ-frame page at
+	 * shadow->iretq_frame_va_guest in the kernel-half range. Each
+	 * shadow_mm has its own page at its own unique guest VA — no
+	 * cross-mm sharing. Install once at first kvm_enter_guest for
+	 * this shadow (the alloc_page +
+	 * iretq_frame_va_guest computation happens at
+	 * kvm_shadow_mm_alloc, but the shadow PT install must happen
+	 * after the shadow PGD exists which is also lazy at first
+	 * entry — so map_page here, every entry; map_page is
+	 * idempotent for re-installs of identical mappings).
+	 *
+	 * RW + NX so the guest CPU can write the iretq frame on
+	 * recoverable-#PF (matches bootstrap_page_stack at +3 page)
+	 * but cannot execute from it.
+	 */
+	{
+		struct kvm_shadow_mm *cur_shadow = kvm_shadow_mm_current();
+
+		if (cur_shadow && cur_shadow->iretq_frame_gpa) {
+			rc = kvm_shadow_map_page(cur_shadow,
+				cur_shadow->iretq_frame_va_guest,
+				cur_shadow->iretq_frame_gpa,
+				KVM_X86_PTE_P | KVM_X86_PTE_RW |
+				KVM_X86_PTE_NX);
+			if (rc < 0) {
+				pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(per-mm iretq frame va=0x%llx) failed (%d)\n",
+						    (unsigned long long)cur_shadow->iretq_frame_va_guest,
+						    rc);
+				return rc;
+			}
+		}
+	}
+
+	/*
 	 * Memo 11 G3 — per-vCPU gadget state channel. Allocate
 	 * the page lazily (same shape as shadow_pgd_alloc), map
 	 * it one page above the bootstrap page (guest VA =
@@ -2554,17 +2588,46 @@ sregs_done:
 	 */
 	kvm_uml_regs_to_kvm_regs(&kregs, regs);
 	{
-		u64 *frame = (u64 *)kvm_bootstrap_page_stack;
+		/*
+		 * Memo 18 Phase 2: write the IRETQ frame into the per-mm
+		 * dedicated page (shadow->iretq_frame_va). Pre-Phase-2 used
+		 * the singleton kvm_bootstrap_page_stack — a SHARED buffer
+		 * across ALL mms on a SINGLE vCPU, racy across cross-mm
+		 * preemption windows.
+		 *
+		 * kregs.rsp points at the GUEST VA where the same page is
+		 * mapped via the per-mm shadow PT install in
+		 * kvm_enter_guest_init_bootstrap above
+		 * (shadow->iretq_frame_va_guest).
+		 *
+		 * Fallback to the singleton bootstrap_page_stack if the
+		 * shadow_mm is somehow unavailable (early init / kernel
+		 * threads with no mm). In that path the singleton is the
+		 * only option; preserves pre-Phase-2 behaviour for those
+		 * narrow cases.
+		 */
+		struct kvm_shadow_mm *cur_shadow = kvm_shadow_mm_current();
+		u64 *frame;
+		u64 frame_guest_va;
+
+		if (cur_shadow && cur_shadow->iretq_frame_va) {
+			frame = (u64 *)cur_shadow->iretq_frame_va;
+			frame_guest_va = cur_shadow->iretq_frame_va_guest;
+		} else {
+			frame = (u64 *)kvm_bootstrap_page_stack;
+			frame_guest_va = kvm_bootstrap_va + 3 * PAGE_SIZE;
+		}
 
 		frame[0] = regs->gp[HOST_IP];
 		frame[1] = 0x2bULL;					/* ring-3 CS */
 		frame[2] = kvm_build_sysret_r11(regs->gp[HOST_EFLAGS]);	/* RFLAGS */
 		frame[3] = regs->gp[HOST_SP];
 		frame[4] = 0x23ULL;					/* ring-3 SS */
+
+		kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_IRETQ_OFFSET;
+		kregs.rsp    = frame_guest_va;
+		kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
 	}
-	kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_IRETQ_OFFSET;
-	kregs.rsp    = kvm_bootstrap_va + 3 * PAGE_SIZE;	/* IST page base */
-	kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
 
 	/*
 	 * Perf-lever #2: when KVM_CAP_SYNC_REGS is supported, hand
@@ -3275,9 +3338,31 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			      sync_rc);
 	}
 
+	/*
+	 * Memo 18 Phase 2.4: signal-block from kvm_enter_guest's IRETQ-
+	 * frame setup through KVM_RUN entry. With per-mm IRETQ frame
+	 * (Phase 2.1-2.3) cross-mm contamination is structurally fixed,
+	 * but threads sharing an mm still share the per-mm IRETQ-frame
+	 * page. Signal-driven preemption of task A between its frame
+	 * write and KVM_RUN can let task B (same mm) overwrite the
+	 * frame; A then iretq's into B's user RIP/SP/RFLAGS.
+	 *
+	 * Closes the same-mm cross-task race within the per-mm scope.
+	 * (For full per-task isolation we'd need per-task IRETQ frames
+	 * mapped per-task in the shadow PT — Phase 5 / structural.)
+	 *
+	 * Phase F (memo 17, pre-Phase-2) attempted the same fix but
+	 * was atop the cross-mm contamination — the dominant residual
+	 * at that point — so showed no measurable improvement. With
+	 * cross-mm fixed, signal-blocking on same-mm should now move
+	 * the needle.
+	 */
+	block_signals();
 	rc = kvm_enter_guest(regs);
-	if (rc < 0)
+	if (rc < 0) {
+		unblock_signals();
 		panic("um: kvm run_userspace: enter_guest failed (%d)", rc);
+	}
 
 	/*
 	 * Per-trap shape (audit A1 finalized 2026-04-24 round-3):
@@ -3315,6 +3400,14 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		bool sregs_valid = false;
 
 		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+		/*
+		 * Memo 18 Phase 2.4: KVM_RUN returned. The IRETQ frame
+		 * has been consumed (on entry) or the in-flight guest
+		 * state is in vCPU registers; the per-mm IRETQ-frame
+		 * page no longer needs serialization protection. Allow
+		 * signal delivery again.
+		 */
+		unblock_signals();
 		if (rc < 0) {
 			if (rc == -EINTR)
 				goto out_read_regs;

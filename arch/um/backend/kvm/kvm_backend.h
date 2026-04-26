@@ -445,6 +445,27 @@ struct kvm_shadow_mm {
 	u64			synced_pgd_va;	/* mm->pgd at last fill */
 	struct mutex		fill_lock;	/* serializes pgd-walk fills */
 	/*
+	 * Memo 18 Phase 2: per-mm IRETQ-frame staging.
+	 *
+	 * The bootstrap IRETQ gadget pops {RIP, CS, RFLAGS, RSP, SS}
+	 * from kregs.rsp on every kvm_enter_guest. Pre-Phase-2 the
+	 * staging area was the singleton kvm_bootstrap_page_stack —
+	 * shared across ALL mms, racy across cross-mm preemption
+	 * windows. With per-mm storage each mm has its own frame
+	 * page, eliminating cross-mm contamination structurally.
+	 *
+	 * Mapped at iretq_frame_va_guest in this shadow's PGD
+	 * (kernel-half slot, never touched by user-half clear/fill
+	 * passes). The host-side iretq_frame_va is the kernel VA we
+	 * write the frame into; the guest CPU reads from
+	 * iretq_frame_va_guest which the shadow PT maps to the
+	 * matching GPA.
+	 */
+	struct page		*iretq_frame_page;	/* per-mm IRETQ frame page */
+	void			*iretq_frame_va;	/* host kernel VA — write target */
+	u64			iretq_frame_gpa;	/* GPA of frame page */
+	u64			iretq_frame_va_guest;	/* guest VA — kregs.rsp */
+	/*
 	 * Memo 15 direct-shadow-sync: set when a per-PTE direct
 	 * sync hit an allocation failure or other recoverable
 	 * error. kvm_enter_guest's verifier path runs a full fill
