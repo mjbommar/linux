@@ -430,6 +430,16 @@ struct kvm_shadow_mm {
 	 * before KVM_RUN to repair, then clears the flag.
 	 */
 	bool			needs_full_resync;
+	/*
+	 * Memo 15 #6 mutation observability counters. Bumped via
+	 * WRITE_ONCE from atomic-context shadow_sync_pte; readable
+	 * via /proc or panic-time dump.
+	 */
+	u64			direct_sync_install;
+	u64			direct_sync_clear;
+	u64			direct_sync_absent;
+	u64			direct_sync_alloc_fail;
+	u64			direct_sync_range_clear;
 };
 
 struct kvm_shadow_mm *kvm_shadow_mm_alloc(void);

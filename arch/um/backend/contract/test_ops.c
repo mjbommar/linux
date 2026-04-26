@@ -872,21 +872,22 @@ static void kvm_build_sysret_r11_test(struct kunit *test)
  */
 static void kvm_shadow_pgd_alloc_test(struct kunit *test)
 {
-	u64 gpa_before = kvm_shadow_pgd_gpa();
-	u64 gpa_after;
 	int rc;
 
+	/*
+	 * #275: the singleton kvm_shadow_pgd_alloc / kvm_shadow_pgd_gpa
+	 * API is now vestigial — each UML mm has its own shadow tree
+	 * allocated by kvm_mm_attach. The legacy alloc returns 0 and
+	 * the legacy gpa returns 0; tests that asserted the singleton
+	 * GPA was non-zero are no longer valid. Verify the stubs still
+	 * link and return success/zero per their post-#275 contract.
+	 */
 	rc = kvm_shadow_pgd_alloc();
-	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, rc, 0);
 
-	gpa_after = kvm_shadow_pgd_gpa();
-	KUNIT_EXPECT_NE(test, (unsigned long long)gpa_after, 0ULL);
-	KUNIT_EXPECT_EQ(test, (unsigned long long)(gpa_after & 0xfffULL), 0ULL);
-
-	/* If kvm_init already allocated, the gpa shouldn't change. */
-	if (gpa_before)
-		KUNIT_EXPECT_EQ(test, (unsigned long long)gpa_after,
-				(unsigned long long)gpa_before);
+	/* Vestigial: gpa is always 0 post-#275. */
+	KUNIT_EXPECT_EQ(test, (unsigned long long)kvm_shadow_pgd_gpa(),
+			0ULL);
 }
 
 /*

@@ -113,11 +113,19 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		 * (no path), nothing to do. Otherwise atomic-
 		 * write 0 — single u64 write on aligned address.
 		 */
-		if (!spte)
+		if (!spte) {
+			WRITE_ONCE(shadow->direct_sync_absent,
+				   READ_ONCE(shadow->direct_sync_absent) + 1);
 			return 0;
+		}
 		if (READ_ONCE(*spte) & 1ULL) {
 			WRITE_ONCE(*spte, 0);
 			WRITE_ONCE(shadow->dirty, true);
+			WRITE_ONCE(shadow->direct_sync_clear,
+				   READ_ONCE(shadow->direct_sync_clear) + 1);
+		} else {
+			WRITE_ONCE(shadow->direct_sync_absent,
+				   READ_ONCE(shadow->direct_sync_absent) + 1);
 		}
 		return 0;
 	}
@@ -131,11 +139,14 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		 * Translator says absent (PROT_NONE / !ACCESSED).
 		 * Treat like clear: drop existing leaf if any.
 		 */
-		if (!spte)
-			return 0;
-		if (READ_ONCE(*spte) & 1ULL) {
+		if (spte && (READ_ONCE(*spte) & 1ULL)) {
 			WRITE_ONCE(*spte, 0);
 			WRITE_ONCE(shadow->dirty, true);
+			WRITE_ONCE(shadow->direct_sync_clear,
+				   READ_ONCE(shadow->direct_sync_clear) + 1);
+		} else {
+			WRITE_ONCE(shadow->direct_sync_absent,
+				   READ_ONCE(shadow->direct_sync_absent) + 1);
 		}
 		return 0;
 	}
@@ -149,6 +160,8 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 	if (!spte) {
 		WRITE_ONCE(shadow->needs_full_resync, true);
 		WRITE_ONCE(shadow->dirty, true);
+		WRITE_ONCE(shadow->direct_sync_alloc_fail,
+			   READ_ONCE(shadow->direct_sync_alloc_fail) + 1);
 		return 0;
 	}
 
@@ -160,6 +173,8 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		   (x86e & 0x000ffffffffff000ULL) |
 		   (x86e & ~0x000ffffffffff000ULL));
 	WRITE_ONCE(shadow->dirty, true);
+	WRITE_ONCE(shadow->direct_sync_install,
+		   READ_ONCE(shadow->direct_sync_install) + 1);
 
 	/*
 	 * Do NOT set shadow->synced = false on success. Per memo 15
@@ -205,7 +220,10 @@ void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
 			any_cleared = true;
 		}
 	}
-	if (any_cleared)
+	if (any_cleared) {
 		WRITE_ONCE(shadow->dirty, true);
+		WRITE_ONCE(shadow->direct_sync_range_clear,
+			   READ_ONCE(shadow->direct_sync_range_clear) + 1);
+	}
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_clear_range_atomic);

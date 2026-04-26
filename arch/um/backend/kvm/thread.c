@@ -3297,6 +3297,27 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 							"pf_unrecoverable");
 
 					/*
+					 * Memo 15 #6: dump direct-sync
+					 * counters at fatal-fault time so
+					 * the crash log shows whether the
+					 * shadow was being maintained via
+					 * direct sync vs deferred chain.
+					 */
+					if (current->active_mm) {
+						struct kvm_shadow_mm *sh =
+							current->active_mm->context.id.kvm_shadow;
+
+						if (sh)
+							pr_info("um: kvm pf_counters: install=%llu clear=%llu absent=%llu alloc_fail=%llu range_clear=%llu needs_full_resync=%d\n",
+								(unsigned long long)READ_ONCE(sh->direct_sync_install),
+								(unsigned long long)READ_ONCE(sh->direct_sync_clear),
+								(unsigned long long)READ_ONCE(sh->direct_sync_absent),
+								(unsigned long long)READ_ONCE(sh->direct_sync_alloc_fail),
+								(unsigned long long)READ_ONCE(sh->direct_sync_range_clear),
+								READ_ONCE(sh->needs_full_resync));
+					}
+
+					/*
 					 * #274 phase-1 step 3 diagnostic:
 					 * dump guest GP regs at fault.
 					 * Off by default — gated on
