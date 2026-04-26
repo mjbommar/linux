@@ -1263,6 +1263,20 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 				    cleared);
 	}
 
+	/*
+	 * P0-2 (memo 16 review Agent 3): the install pass below walks
+	 * the UML pgd unconditionally and would overwrite the bootstrap
+	 * shadow leaves at [bootstrap_va, +4*PAGE_SIZE) if a user pgd
+	 * entry happens to collide with the kernel-half alias range.
+	 * Mirror the alias-range guard from the clear pass above.
+	 * kvm_bootstrap_va lives in PGD slot 0 (alloc_page in lowmem),
+	 * same half as user mappings — the clobber is reachable
+	 * whenever a user mapping lands in that VA range.
+	 */
+	{
+		u64 alias_lo_install = kvm_bootstrap_va_get();
+		u64 alias_hi_install = alias_lo_install + 4 * PAGE_SIZE;
+
 	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
 		u64 pgde = pgd[pgd_i];
 		u64 *pud;
@@ -1303,6 +1317,12 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 					     ((u64)pmd_i << 21) |
 					     ((u64)pte_i << 12);
 
+					/* P0-2: skip the bootstrap-alias range */
+					if (alias_lo_install &&
+					    va >= alias_lo_install &&
+					    va < alias_hi_install)
+						continue;
+
 					rc = kvm_shadow_map_page(shadow, va,
 								 x86e & 0x000ffffffffff000ULL,
 								 x86e & ~0x000ffffffffff000ULL);
@@ -1329,6 +1349,7 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 			}
 		}
 	}
+	}	/* P0-2 alias_lo_install scope close */
 
 	pr_info_ratelimited("um: kvm shadow fill: installed %d leaf PTEs from pgd=%p\n",
 			    installed, pgd_va);

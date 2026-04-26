@@ -195,6 +195,7 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 
 			if (old & 1ULL) {
 				WRITE_ONCE(*spte, 0);
+				smp_wmb();		/* P0-1 */
 				WRITE_ONCE(shadow->dirty, true);
 				WRITE_ONCE(shadow->direct_sync_clear,
 					   READ_ONCE(shadow->direct_sync_clear) + 1);
@@ -225,6 +226,7 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 			u64 old = READ_ONCE(*spte);
 
 			WRITE_ONCE(*spte, 0);
+			smp_wmb();		/* P0-1 */
 			WRITE_ONCE(shadow->dirty, true);
 			WRITE_ONCE(shadow->direct_sync_clear,
 				   READ_ONCE(shadow->direct_sync_clear) + 1);
@@ -257,6 +259,17 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 
 	/*
 	 * Path exists — install the leaf atomically.
+	 *
+	 * P0-1 (memo 16 review Agent 4 Race E): the leaf write must
+	 * happen-before the dirty flag write so kvm_enter_guest's
+	 * SREGS-skip predicate (which reads shadow->dirty) cannot
+	 * observe a stale dirty=false after the leaf changed. SIGALRM-
+	 * driven preemption between WRITE_ONCE(*spte) and
+	 * WRITE_ONCE(shadow->dirty, true) leaves a window where the
+	 * scheduler reads dirty as false → SREGS-skip skips
+	 * KVM_SET_SREGS → no CR3 reload → guest TLB caches stale
+	 * mapping. smp_wmb() pairs with the smp_rmb() (well, the
+	 * READ_ONCE-with-acquire) in the predicate.
 	 */
 	{
 		u64 old = READ_ONCE(*spte);
@@ -265,6 +278,7 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 
 		was_present = (old & 1ULL) != 0;
 		WRITE_ONCE(*spte, new);
+		smp_wmb();				/* P0-1 */
 		WRITE_ONCE(shadow->dirty, true);
 		WRITE_ONCE(shadow->direct_sync_install,
 			   READ_ONCE(shadow->direct_sync_install) + 1);
@@ -449,6 +463,7 @@ void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
 		}
 	}
 	if (any_cleared) {
+		smp_wmb();		/* P0-1: leaf writes happen-before dirty */
 		WRITE_ONCE(shadow->dirty, true);
 		WRITE_ONCE(shadow->direct_sync_range_clear,
 			   READ_ONCE(shadow->direct_sync_range_clear) + 1);

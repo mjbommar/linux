@@ -1673,13 +1673,15 @@ static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
 	if (!gadget_state_va)
 		return 0;	/* unmapped; nothing to program */
 	/*
-	 * Perf lever #3: gadget_state_va is allocated once per vCPU
-	 * and never moves. After the first successful write, skip
-	 * the ioctl on every subsequent kvm_enter_guest.
+	 * P0-3 (memo 16 review Agent 3): the kernel_gs_base_primed
+	 * one-shot was unsafe — KVM_SET_SREGS and arch_prctl(ARCH_SET_GS)
+	 * both modify MSR_KERNEL_GS_BASE underneath us. After drift,
+	 * gadget swapgs reads from the wrong base and %gs:0x08 returns
+	 * garbage that flows downstream as a fake pid/uid (the
+	 * wild-pointer pattern we observe). Re-program every entry
+	 * to keep the gadget state pointer authoritative; the cost of
+	 * one KVM_SET_MSRS per entry is acceptable.
 	 */
-	if (kvm_backend_ctx()->kernel_gs_base_primed)
-		return 0;
-
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_MSRS(kernel_gs_base=0x%llx) failed (%d)\n",
@@ -1691,7 +1693,6 @@ static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
 			     rc);
 		return -EIO;
 	}
-	kvm_backend_ctx()->kernel_gs_base_primed = true;
 	return 0;
 }
 
@@ -1715,7 +1716,32 @@ static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 			},
 			{
 				.index = 0xc0000084,	/* MSR_FMASK */
-				.data  = 0,
+				/*
+				 * Memo 16 review Agent 2 S2: was 0,
+				 * meaning SYSCALL didn't clear ANY user
+				 * RFLAGS bits before entering LSTAR. User
+				 * code with DF=1 (REP MOVSB backwards),
+				 * TF=1 (single-step), IF=1 (interrupts
+				 * enabled in kernel — race), or AC=1
+				 * (alignment-check faults on unaligned
+				 * kernel access) leaked into the LSTAR
+				 * trampoline and any kernel-mode code
+				 * reached via fallback handle_syscall.
+				 *
+				 * In particular DF=1 inherited into kernel
+				 * causes copy_to_user/copy_from_user via
+				 * memcpy/memmove to use STD (decrement)
+				 * instead of CLD (increment) — silently
+				 * corrupting whatever the kernel writes,
+				 * which then propagates into guest reads
+				 * as the wild-pointer pattern we see.
+				 *
+				 * Match Linux x86_64 native syscall_init's
+				 * mask: TF | IF | DF | IOPL | NT | AC =
+				 * 0x100 | 0x200 | 0x400 | 0x3000 |
+				 * 0x4000 | 0x40000 = 0x47700.
+				 */
+				.data  = 0x47700ULL,
 			},
 		},
 	};
@@ -2193,11 +2219,19 @@ fill_done:
 		u64 cur_fs = regs->gp[HOST_FS_BASE];
 		u64 cur_gs = regs->gp[HOST_GS_BASE];
 
+		/*
+		 * P0-1 (memo 16 review Agent 4 Race E): READ_ONCE on
+		 * shadow->dirty pairs with the WRITE_ONCE +
+		 * smp_wmb in shadow_sync.c. Without READ_ONCE the
+		 * compiler may re-order or fuse this read with later
+		 * accesses, observing a stale dirty=false after a
+		 * direct-sync writer published a leaf change.
+		 */
 		if (ctx->sregs_primed &&
 		    ctx->cached_cr3_gpa == cr3_gpa &&
 		    ctx->cached_fs_base == cur_fs &&
 		    ctx->cached_gs_base == cur_gs &&
-		    shadow && !shadow->dirty)
+		    shadow && !READ_ONCE(shadow->dirty))
 			goto sregs_done;
 	}
 
