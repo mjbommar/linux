@@ -26,6 +26,90 @@ catches up.
 | CPython parity gate (21 stdlib modules)     | kvm      | **16-18/21 PARITY** (run-to-run variance; was 0/21 pre-keystone) |
 | Same workloads under `backend=force=seccomp` | seccomp | yes (20/20 deterministic) |
 
+## Memo 18 follow-up (2026-04-26 evening session)
+
+Three commits landed on top of memo 17 Phase A-K:
+
+  - `1bb6c7b7637a` Phase 1.1+1.2 — CPL-aware marshal gate (don't clobber
+    user CPL=3 regs on CPL=0 vmexits, fixes the Phase K class without K's
+    breakage)
+  - `6f2dc2a14e2e` Phase 2 — per-mm IRETQ-frame storage + signal-block
+    window around KVM_RUN (eliminates cross-mm IRETQ frame collision)
+  - `8de84913b847` Phase 3-fix — install per-mm IRETQ frame AFTER
+    kvm_shadow_fill_from_uml_pgd's install pass (was: before; the
+    fill's install pass walks PGD slot 384 unguarded and could
+    overwrite the IRETQ frame's shadow leaf via the kernel direct-map
+    alias of the same physical page → wild-jump-into-ring-3)
+
+**Phase 3 PARTIAL ATTEMPT REVERTED**: tried only step 3.3 of the plan
+(per-mm SREGS-skip cache) without 3.1/3.2/3.4 (per-mm vCPU/run/bootstrap).
+Result REGRESSED parity from 17/21 to 14/21. Root cause: per-mm cache
++ singleton vCPU produces false hits — predicate matches "what THIS mm
+last programmed" but vCPU SREGS were clobbered by another mm. Cache
+must stay singleton until per-mm vCPU lands. Phase 3 must be done as
+a coordinated unit (vCPU+run+cache+bootstrap) — see memo 18.
+
+**Phase 3-fix empirical impact**: parity=17/21 (same as Phase 2 baseline
+median over 3 trials). Structurally cleaner — fill cannot clobber
+post-fill installs — but doesn't measurably move parity.
+
+**Empirically ruled out** (additional to memo 17 Phase A-K list):
+  - SREGS-skip cache as TLB-flush gate. Disabled the skip → CR4.PGE
+    flush every entry. Test_decimal import 13/15 reliability before,
+    13/15 after. The dirty-flag bool race exists in principle but is
+    NOT the dominant failure cause.
+  - Shadow-PT staleness from missed direct-sync writes. Forced full
+    PGD-walk every entry → 13/15. Same rate. The direct-sync recovery
+    via needs_full_resync IS catching missed leaves.
+  - Per-mm IRETQ frame leaf clobber by fill (Phase 3-fix). Moved
+    install AFTER fill → ~17/21 parity (within noise of 17-18/21
+    baseline). The IRETQ frame leaf is now structurally protected
+    but doesn't measurably reduce flake rate.
+
+**Failure modes characterized** (test_decimal import reproducer,
+init=python3 PID 1, single mm, single user task):
+  - Mode A (most reproducible across runs): NULL deref at va=0x470
+    in ld-linux-x86-64.so.2 offset 0x265c3, instruction
+    `cmpq $0x0,0x470(%r15)` immediately after a call to
+    `_dl_fatal_printf` inside `_dl_mcount`/`_dl_relocate_object`.
+    The call SHOULD NOT return (fatal_printf calls _exit), so
+    either it's returning incorrectly OR registers (r15 in particular)
+    are getting clobbered. Either path implicates KVM-side state
+    handling that doesn't manifest under SECCOMP.
+  - Mode B (rare): wild jump rip=cr2=small value (0x1, 0x361, 0x3d0,
+    0x80000000 etc.) with rdi=0xaaaaaaaaaaaaaaab. Pre-Phase-3-fix
+    likely caused by IRETQ frame clobber; post-fix this should be
+    closed but a low residual rate persists, suggesting another
+    register-corruption path.
+  - Mode C (rare): hang / timeout (gate reports k=?/?).
+
+**Residual gap to 21/21**: SECCOMP 100% reliable on every module;
+KVM consistent 17-18/21 with a rotating set of 3-4 flaky modules
+(test_struct, test_decimal, test_int, test_float, test_array,
+test_typing, test_list, test_math, test_hashlib, test_bytes,
+test_set, test_abc, test_itertools all have failed at least once
+across 4 trials). The bug appears to be a single-task single-mm
+register/memory corruption that is NOT TLB, NOT shadow-staleness,
+NOT cross-mm/cross-task IRETQ-frame, and NOT obvious singleton-state
+contamination. Per-mm vCPU (Phase 3 full structural) addresses
+cross-mm contamination, which doesn't exist in this single-mm
+scenario, so won't help.
+
+**Next investigation directions** (deferred to follow-up session):
+  1. Disassemble what's happening at ld-linux+0x265c3 with the
+     pre-call register state restored (need GDB-style attach to
+     UML — use the multiple-process bootstrap docs in 16-architecture-
+     review/scripts).
+  2. Audit ALL singleton state on `struct kvm_um` for race-on-write
+     (LSTAR? FMASK? STAR? EFER? KERNEL_GS_BASE?). Phase H caught
+     FPU + VCPU_EVENTS but not these MSRs.
+  3. Investigate whether the kernel's signal-delivery path
+     (`setup_signal_stack_si`, `do_signal`) writes to user memory
+     via the host VA in a way that races with guest reads through
+     shadow PT. Phase 4 (KVM-native uaccess) addresses this class.
+
+---
+
 ## Residual flake state (post memo 17 Phase A-K — 2026-04-26)
 
 11 commits landed this session moved the cpython parity gate from
