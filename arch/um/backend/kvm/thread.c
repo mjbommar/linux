@@ -125,7 +125,27 @@ int kvm_fpu_save_for_task(struct task_struct *t)
 		return rc;
 	}
 	a->kvm.fpu_valid = true;
-	(void)a->kvm.events;	/* events save/restore deferred — see below */
+
+	/*
+	 * Memo 17 G-EVENTS: capture pending exception/interrupt state.
+	 * If KVM has a pending injected #PF queued for this task at
+	 * the moment we're switching out (e.g., task A faulted, KVM
+	 * was about to inject the #PF when SIGALRM/EINTR fired and
+	 * we vmexit'd), saving it here preserves it for restore on
+	 * the next switch-in. Without this, the queued event would
+	 * be delivered to whatever task happens to be on the vCPU
+	 * next — manifesting as an apparent wild-pointer crash in
+	 * the wrong process.
+	 */
+	rc = os_ioctl_generic(vcpu_fd, KVM_GET_VCPU_EVENTS,
+			      (unsigned long)&a->kvm.events);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm events_save: KVM_GET_VCPU_EVENTS(task=%p) failed (%d)\n",
+				    t, rc);
+		/* Leave events_valid=false; restore will be a no-op. */
+	} else {
+		a->kvm.events_valid = true;
+	}
 	return 0;
 }
 
@@ -144,6 +164,29 @@ int kvm_fpu_restore_for_task(struct task_struct *t)
 				      (unsigned long)&a->kvm.fpu);
 		if (rc < 0)
 			pr_warn_ratelimited("um: kvm fpu_restore: KVM_SET_FPU(task=%p) failed (%d)\n",
+					    t, rc);
+	}
+
+	/*
+	 * Memo 17 G-EVENTS: ONLY restore if we have valid saved state.
+	 * For first-time-switched-in tasks (events_valid=false), leave
+	 * the vCPU's current event state alone — clearing it would
+	 * potentially drop an event that legitimately got queued by KVM
+	 * while a different task was running but is meant for a
+	 * just-now-scheduled task. The save side captures whatever was
+	 * pending at switch-out, so subsequent switches always restore
+	 * the right state.
+	 *
+	 * flags=0 selects the standard semantics (no special-case
+	 * fields touched); KVM clears+applies the saved exception/
+	 * interrupt state.
+	 */
+	if (a->kvm.events_valid) {
+		a->kvm.events.flags = 0;
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_VCPU_EVENTS,
+				      (unsigned long)&a->kvm.events);
+		if (rc < 0)
+			pr_warn_ratelimited("um: kvm events_restore: KVM_SET_VCPU_EVENTS(task=%p) failed (%d)\n",
 					    t, rc);
 	}
 	return 0;
