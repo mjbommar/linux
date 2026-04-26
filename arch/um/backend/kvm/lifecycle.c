@@ -1327,6 +1327,102 @@ int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);
+
+/*
+ * #274 phase-1 keystone diagnostic. Walks the UML logical pgd at
+ * `va` and the shadow PT at the same `va`, then logs both leaf
+ * encodings and whether the shadow agrees with the UML view.
+ *
+ * Translates the UML leaf PTE through kvm_um_pte_to_x86() so the
+ * "expected" and "shadow" values are directly comparable in the
+ * same x86 hardware encoding.
+ *
+ * Equality ignores the A and D status bits — the CPU sets those
+ * at runtime as a side effect of access, so they drift legitimately
+ * between a freshly-installed shadow entry and a subsequent walk
+ * of the UML pgd. PFN, P, RW, US, and NX must match.
+ *
+ * `tag` is a short identifier for the call site so multiple audit
+ * points in one boot are distinguishable.
+ *
+ * Returns 0 if shadow agrees with UML pgd, 1 if they diverge,
+ * negative errno on missing inputs.
+ */
+int kvm_shadow_audit_va(u64 va, void *uml_pgd_va, const char *tag)
+{
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+	u64 *upgd = uml_pgd_va;
+	u64 *spgd;
+	unsigned int pgd_i = (va >> 39) & 0x1ff;
+	unsigned int pud_i = (va >> 30) & 0x1ff;
+	unsigned int pmd_i = (va >> 21) & 0x1ff;
+	unsigned int pte_i = (va >> 12) & 0x1ff;
+	u64 um_pte = 0;
+	u64 expected_pte;
+	u64 shadow_pte = 0;
+	const u64 mask = 0x000ffffffffff000ULL |
+			 KVM_X86_PTE_P | KVM_X86_PTE_RW |
+			 KVM_X86_PTE_US | (1ULL << 63);
+	bool equal;
+
+	if (!tag)
+		tag = "?";
+	if (!shadow || !shadow->pgd) {
+		pr_info("um: kvm audit[%s]: va=0x%llx no shadow\n",
+			tag, (unsigned long long)va);
+		return -ENODEV;
+	}
+	if (!upgd) {
+		pr_info("um: kvm audit[%s]: va=0x%llx no uml pgd\n",
+			tag, (unsigned long long)va);
+		return -EINVAL;
+	}
+	spgd = shadow->pgd;
+
+	/* Walk UML pgd → leaf PTE; UM_PTE_PRESENT at every level. */
+	if (upgd[pgd_i] & UM_PTE_PRESENT) {
+		u64 *upud = (u64 *)__va(upgd[pgd_i] &
+					0x000ffffffffff000ULL);
+		if (upud[pud_i] & UM_PTE_PRESENT) {
+			u64 *upmd = (u64 *)__va(upud[pud_i] &
+						0x000ffffffffff000ULL);
+			if (upmd[pmd_i] & UM_PTE_PRESENT) {
+				u64 *upte = (u64 *)__va(upmd[pmd_i] &
+							0x000ffffffffff000ULL);
+				um_pte = upte[pte_i];
+			}
+		}
+	}
+	expected_pte = kvm_um_pte_to_x86(um_pte);
+
+	/* Walk shadow PT → leaf PTE; KVM_X86_PTE_P at every level. */
+	if (spgd[pgd_i] & KVM_X86_PTE_P) {
+		u64 *spud = (u64 *)__va(spgd[pgd_i] &
+					0x000ffffffffff000ULL);
+		if (spud[pud_i] & KVM_X86_PTE_P) {
+			u64 *spmd = (u64 *)__va(spud[pud_i] &
+						0x000ffffffffff000ULL);
+			if (spmd[pmd_i] & KVM_X86_PTE_P) {
+				u64 *spte = (u64 *)__va(spmd[pmd_i] &
+							0x000ffffffffff000ULL);
+				shadow_pte = spte[pte_i];
+			}
+		}
+	}
+
+	equal = ((expected_pte & mask) == (shadow_pte & mask));
+
+	pr_info("um: kvm audit[%s]: va=0x%llx um_pte=0x%llx expected=0x%llx shadow=0x%llx %s synced=%d\n",
+		tag,
+		(unsigned long long)va,
+		(unsigned long long)um_pte,
+		(unsigned long long)expected_pte,
+		(unsigned long long)shadow_pte,
+		equal ? "EQUAL" : "DIVERGE",
+		shadow->synced);
+	return equal ? 0 : 1;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_audit_va);
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 int kvm_backend_fd(void)

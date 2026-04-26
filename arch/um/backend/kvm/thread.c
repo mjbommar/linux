@@ -3117,6 +3117,25 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 						UPT_FAULTINFO(regs);
 
 					/*
+					 * #274 phase-1 keystone diagnostic:
+					 * before queuing SIGSEGV, dump (UML
+					 * pgd PTE, shadow PT PTE, equal?) for
+					 * cr2. If shadow != pgd the SIGSEGV
+					 * is a shadow-staleness bug — pgd
+					 * believes the page is mapped but
+					 * the shadow doesn't. If they agree
+					 * the SIGSEGV is genuine (or a
+					 * different bug class — the audit
+					 * narrows the search space).
+					 */
+					if (current->active_mm &&
+					    current->active_mm->pgd)
+						(void)kvm_shadow_audit_va(
+							(u64)cr2,
+							current->active_mm->pgd,
+							"pf_unrecoverable");
+
+					/*
 					 * Audit round-6 G3: propagate the
 					 * actual CPU-pushed error code (W /
 					 * U / I/D bits) instead of hardcoding

@@ -460,6 +460,19 @@ void kvm_shadow_pgd_free(void);
 int kvm_shadow_invalidate_va_range(u64 va_start, u64 len);
 
 /*
+ * #274 phase-1 keystone diagnostic. Walks the UML logical pgd at
+ * `va` and the shadow PT at the same `va`, then logs both leaf
+ * encodings and whether the shadow agrees with the UML view. `tag`
+ * distinguishes call sites in the boot log.
+ *
+ * Returns 0 if shadow agrees with UML pgd, 1 if they diverge,
+ * negative errno on missing inputs. Comparison ignores the A/D
+ * status bits the CPU sets at runtime; the audit triggers on PFN,
+ * P, RW, US, or NX drift, not on legitimate accessed/dirty churn.
+ */
+int kvm_shadow_audit_va(u64 va, void *uml_pgd_va, const char *tag);
+
+/*
  * Audit round-6 G2: clear all leaf PTEs in the user half of the
  * singleton shadow PGD (canonical low half, PGD slots 0..255).
  * Kernel-half mappings (bootstrap data + code, gadget state, vvar)
