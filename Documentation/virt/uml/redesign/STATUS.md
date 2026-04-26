@@ -48,13 +48,28 @@ in the KVM backend's interaction with dl_main's early
 initialization, not in glibc/python.
 
 Diagnostics ruled out so far (commits `44abfd6e6657`,
-`2fdfd77f7264`, `97c73735c47a`):
+`2fdfd77f7264`, `97c73735c47a`, `b458b8605c8f`):
   - Shadow PT divergence at the fault VA (audit at !touched: EQUAL
     on every run)
   - Stale-true cache on the cached-skip path (lockstep audit:
     DIV=0 even at 2253 leaves)
   - Syscall round-trip clobbering callee-saved regs
     (CALLEE-SAVE-CLOBBER never fires across the boot)
+
+Important meta-finding from `b458b8605c8f`: the underlying race
+this bug is rooted in is **timing-sensitive enough that adding
+work on the hot path measurably changes its trigger rate**. The
+audit_pgd lockstep walk on every cached-skip dropped hashlib
+smoke from ~95% to ~30%; even just adding the dead-code regs-dump
+bytes to the !touched branch dropped it to ~80%. Diagnostics that
+run in the steady-state path must be gated behind the
+`kvm_diag_*` kernel command-line knobs (default off) and only
+enabled for specific debugging boots — otherwise they will
+themselves trigger the bug they are trying to characterise. Knobs:
+
+  kvm_diag_pf_dump_regs=1       enable GP-reg dump on !touched #PF
+  kvm_diag_audit_pgd_skip=1     enable full pgd vs shadow lockstep
+                                audit on every cached-skip
 
 Remaining hypotheses to investigate:
   - Shadow PT has stale leaves the pgd doesn't (shadow→pgd
