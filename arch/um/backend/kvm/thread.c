@@ -3186,6 +3186,24 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 								   &code_out);
 					if (hpf_rc == 0)
 						touched = true;
+					/*
+					 * #274 issue #21: drain um_tlb_sync(m2)
+					 * BEFORE refilling the shadow. handle_page_fault
+					 * just added new PTEs via set_pte_at; those PTEs
+					 * carry _PAGE_NEEDSYNC and the host VA mapping
+					 * (os_map_memory) has not yet been updated for
+					 * them. If we fill the shadow now, we install
+					 * shadow leaves pointing at the new GPA — but
+					 * KVM resolves that GPA via the host page table
+					 * for that host VA, which is still mapped to the
+					 * OLD physical page. Guest reads stale data.
+					 *
+					 * um_tlb_sync drains the NEEDSYNC range through
+					 * ops->mmap → kvm_mm_map → os_map_memory + new-
+					 * style invalidate, after which fill walks a
+					 * clean (NEEDSYNC-cleared, host-VA-fresh) pgd.
+					 */
+					um_tlb_sync(m2);
 					(void)kvm_shadow_fill_from_uml_pgd(
 						m2->context.id.kvm_shadow,
 						m2->pgd);

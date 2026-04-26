@@ -205,7 +205,16 @@ int um_tlb_sync(struct mm_struct *mm)
 			if (pgd_needsync(*pgd)) {
 				ret = ops.unmap(ops.mm_idp, addr,
 						next - addr);
-				pgd_mkuptodate(*pgd);
+				/*
+				 * #274 issue #12: gate pgd_mkuptodate on
+				 * success, mirroring the per-PTE/PMD/PUD/P4D
+				 * fix. An -ENOMEM or backend invalidate
+				 * failure here would otherwise leave the
+				 * pgd entry marked synced even though the
+				 * unmap didn't actually happen.
+				 */
+				if (!ret)
+					pgd_mkuptodate(*pgd);
 			}
 		} else
 			ret = update_p4d_range(pgd, addr, next, &ops);
@@ -215,8 +224,28 @@ int um_tlb_sync(struct mm_struct *mm)
 	if (ret == -ENOMEM)
 		report_enomem();
 
-	mm->context.sync_tlb_range_from = 0;
-	mm->context.sync_tlb_range_to = 0;
+	/*
+	 * #274 issue #11: only clear the pending sync range on
+	 * SUCCESS. If a backend op failed mid-sweep, we left some
+	 * portion of the range un-drained — clearing the from/to
+	 * fields here would lose that pending work and the next
+	 * sync would think there's nothing to do, leaving the host
+	 * VA / shadow PT divergent from the pgd permanently.
+	 *
+	 * On failure, narrow the pending range to start at `addr`
+	 * (the first VA we did NOT successfully drain) so the next
+	 * sync resumes from there. The remaining un-drained range
+	 * is [addr, sync_tlb_range_to). On success addr equals
+	 * sync_tlb_range_to (the loop exited via the addr<end
+	 * condition with addr having advanced to end), so the
+	 * narrowing is a no-op-equivalent clear.
+	 */
+	if (ret == 0) {
+		mm->context.sync_tlb_range_from = 0;
+		mm->context.sync_tlb_range_to = 0;
+	} else {
+		mm->context.sync_tlb_range_from = addr;
+	}
 
 	return ret;
 }
