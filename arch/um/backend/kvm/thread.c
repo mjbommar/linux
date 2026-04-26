@@ -3336,34 +3336,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
 				      rc);
 		}
-
-		/*
-		 * Memo 17 Phase K (external review finding 1): KVM_EXIT_INTR
-		 * specifically can fire while the vCPU is mid-bootstrap
-		 * (LSTAR trampoline / IRETQ gadget / #PF handler — all CPL=0
-		 * with kregs.rip / kregs.rsp pointing at bootstrap-page
-		 * values). Marshaling those into uml_pt_regs would cause
-		 * the next kvm_enter_guest to build the IRETQ frame from a
-		 * kernel-half RIP → guest resumes into bootstrap memory
-		 * not present in user-VA shadow PT → "wild user pointer"
-		 * SIGSEGV in the next ring-3 instruction stream.
-		 *
-		 * The EINTR (rc<0) path at out_read_regs already protects
-		 * via an SREGS-based CPL check. KVM_EXIT_INTR with rc=0
-		 * (KVM caught the host signal during VMEXIT processing
-		 * rather than at ioctl boundary) lands HERE and originally
-		 * marshalled unconditionally. Skip the marshal for INTR;
-		 * its case body just goto's out_read_regs which then
-		 * re-reads vCPU state under proper CPL gating.
-		 *
-		 * Other exits (KVM_EXIT_IO PF/syscall, MMIO, HLT) overwrite
-		 * regs->gp[HOST_IP/SP/EFLAGS] from per-case sources (IST
-		 * iretq frame for PF, kvm_decode_syscall for SYSCALL,
-		 * etc.) — they don't depend on the bulk marshal being
-		 * correct, so the gate is INTR-specific.
-		 */
-		if (run->exit_reason != KVM_EXIT_INTR)
-			kvm_regs_to_uml_regs(regs, &kregs);
+		kvm_regs_to_uml_regs(regs, &kregs);
 
 		/*
 		 * Audit finding A2 (memo D70): derive is_user from
