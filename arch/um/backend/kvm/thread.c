@@ -1671,35 +1671,16 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 * logical pgd for bit-translation; this block no longer
 	 * hands its pgd to the CPU as CR3.
 	 */
-	rc = kvm_shadow_pgd_alloc();
-	if (rc < 0)
-		return rc;
-
+	/*
+	 * #275: per-mm shadow PGD allocated at kvm_mm_attach time.
+	 * No singleton owner-change tracking here — every mm has
+	 * its own shadow tree.
+	 */
 	mm = current->active_mm;
-	if (mm && mm->pgd) {
-		struct kvm_um *fctx = kvm_backend_ctx();
-
-		if ((fctx->shadow_pgd_synced_mm &&
-		     fctx->shadow_pgd_synced_mm != mm) ||
-		    (fctx->shadow_pgd_synced_va &&
-		     fctx->shadow_pgd_synced_va != (u64)mm->pgd)) {
-			pr_info("um: kvm shadow owner change: current=%s[%d] mm=%p active_mm=%p new_pgd=%p old_mm=%p old_pgd=0x%llx synced=%d\n",
-				current->comm, task_pid_nr(current),
-				current->mm, current->active_mm, mm->pgd,
-				fctx->shadow_pgd_synced_mm,
-				(unsigned long long)fctx->shadow_pgd_synced_va,
-				fctx->shadow_pgd_synced);
-			/*
-			 * execve() replaces the current task's mm without a
-			 * context switch through kvm_context_switch(), so the
-			 * singleton shadow PGD can still contain executable
-			 * leaves from the pre-exec image.  A refill only
-			 * installs present leaves; it does not remove stale
-			 * ones.  Clear before installing bootstrap/gadget
-			 * mappings below so the clear cannot wipe them.
-			 */
-			kvm_shadow_pgd_clear_user();
-		}
+	if (!mm || !mm->context.id.kvm_shadow) {
+		pr_warn_ratelimited("um: kvm enter_guest: no per-mm shadow (mm=%p kvm_shadow=%p)\n",
+				    mm, mm ? mm->context.id.kvm_shadow : NULL);
+		return -ENODEV;
 	}
 
 	/*
@@ -1830,10 +1811,14 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	}
 	kvm_gadget_vvar_refresh();
 
-	cr3_gpa = kvm_shadow_pgd_gpa();
-	if (!cr3_gpa) {
-		pr_warn_once("um: kvm enter_guest: shadow_pgd_gpa is zero after alloc\n");
-		return -EIO;
+	{
+		struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+
+		if (!shadow) {
+			pr_warn_once("um: kvm enter_guest: no per-mm shadow\n");
+			return -ENODEV;
+		}
+		cr3_gpa = shadow->pgd_gpa;
 	}
 
 	/*
@@ -1850,35 +1835,18 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 */
 	mm = current->active_mm;
 	if (mm && mm->pgd) {
-		struct kvm_um *fctx = kvm_backend_ctx();
+		struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 		int filled;
 
 		/*
-		 * Task #242 (perf lever #4): if the shadow PT is
-		 * already in sync with this mm's pgd — same mm
-		 * pointer AND same pgd-VA AND no invalidation event
-		 * since the last fill — skip the full re-walk. Every
-		 * path that mutates UML's logical pgd flows through
-		 * either kvm_shadow_pgd_clear_user (cross-mm switch)
-		 * or kvm_shadow_invalidate_va_range (mm_map /
-		 * mm_unmap), both of which reset shadow_pgd_synced=
-		 * false. Direct refills from the syscall + #PF recovery
-		 * paths invoke kvm_shadow_fill_from_uml_pgd which sets
-		 * synced=true, keeping the invariant tight without a
-		 * generation counter.
-		 *
-		 * Audit round-7 P2: comparing both the mm pointer AND
-		 * the pgd-VA closes the VA-reuse hazard (execve-style
-		 * mm replacement where the old mm's freed pgd page
-		 * could be reused for the new mm's pgd). The cross-mm
-		 * kvm_context_switch hook only fires on prev->active_mm
-		 * != next->active_mm; an execve on the same task does
-		 * NOT trip it, so an mm-pointer mismatch alone catches
-		 * that case.
+		 * #242/#275: per-mm shadow synced check. shadow->synced
+		 * gets reset by kvm_shadow_invalidate_va_range any time
+		 * UML's pgd changes; it's set true at the end of a
+		 * successful refill below. No mm-pointer comparison
+		 * needed because the shadow tree IS per-mm.
 		 */
-		if (fctx->shadow_pgd_synced &&
-		    fctx->shadow_pgd_synced_mm == mm &&
-		    fctx->shadow_pgd_synced_va == (u64)mm->pgd) {
+		if (shadow && shadow->synced &&
+		    shadow->synced_pgd_va == (u64)mm->pgd) {
 			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
 			goto fill_done;
@@ -1938,6 +1906,7 @@ fill_done:
 	 */
 	{
 		struct kvm_um *ctx = kvm_backend_ctx();
+		struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 		u64 cur_fs = regs->gp[HOST_FS_BASE];
 		u64 cur_gs = regs->gp[HOST_GS_BASE];
 
@@ -1945,7 +1914,7 @@ fill_done:
 		    ctx->cached_cr3_gpa == cr3_gpa &&
 		    ctx->cached_fs_base == cur_fs &&
 		    ctx->cached_gs_base == cur_gs &&
-		    !ctx->shadow_dirty)
+		    shadow && !shadow->dirty)
 			goto sregs_done;
 	}
 
@@ -2024,13 +1993,15 @@ fill_done:
 	}
 	{
 		struct kvm_um *ctx = kvm_backend_ctx();
+		struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 
 		ctx->cached_cr3_gpa = cr3_gpa;
 		ctx->cached_fs_base = sregs.fs.base;
 		ctx->cached_gs_base = sregs.gs.base;
 		ctx->sregs_primed   = true;
-		/* shadow_dirty consumed by this CR3 reload. */
-		ctx->shadow_dirty   = false;
+		/* shadow->dirty consumed by this CR3 reload. */
+		if (shadow)
+			shadow->dirty = false;
 	}
 
 sregs_done:

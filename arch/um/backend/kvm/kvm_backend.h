@@ -13,6 +13,7 @@
 #ifndef __ARCH_UM_BACKEND_KVM_H
 #define __ARCH_UM_BACKEND_KVM_H
 
+#include <linux/mutex.h>
 #include <linux/refcount.h>
 #include <backend.h>
 
@@ -98,68 +99,21 @@ struct kvm_um {
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
-	 * Shadow page table (memo 09 step 1). Allocated in kvm_init
-	 * for KVM_INTEGRATED builds; this is a singleton per-process
-	 * PGD (ncpus=1 friendly — one active mm at a time). A
-	 * future per-mm variant lives in struct mm_id's per-backend
-	 * bookkeeping once memo 09 step 2 needs it.
-	 *
-	 *   shadow_pgd_page — backing `struct page *` for teardown.
-	 *   shadow_pgd      — kernel VA of the 4 KiB top-level PGD.
-	 *   shadow_pgd_gpa  — __pa(shadow_pgd) for loading into CR3.
-	 *
-	 * Zero-initialised at allocation. Fill-in happens in memo 09
-	 * step 2 (eager bootstrap mapping) + step 3 (lazy fault-in
-	 * from KVM_EXIT_MMIO). Empty pgd at this stage is expected;
-	 * kvm_enter_guest still loads current->active_mm->pgd as CR3
-	 * until step 2 flips that wire.
+	 * Per-mm shadow PGD lives on struct mm_id (#275). The
+	 * singleton fields below are deprecated/unused; kvm_shadow_
+	 * map_page / kvm_shadow_invalidate_va_range / kvm_enter_
+	 * guest now route through the active mm's struct
+	 * kvm_shadow_mm. Kept here as a 0-initialised vestige until
+	 * the last reference is excised — see arch/um/backend/kvm/
+	 * mm.c::kvm_shadow_mm_for(current->active_mm).
 	 */
-	struct page	*shadow_pgd_page;
-	void		*shadow_pgd;
-	u64		shadow_pgd_gpa;
-
-	/*
-	 * Audit round-5 F6: shadow-PT invalidation state. Set
-	 * whenever a PTE in the shadow PGD is cleared or
-	 * overwritten from non-vCPU context (mm_unmap / mm_map
-	 * from UML's mm layer). Cleared by kvm_enter_guest after
-	 * issuing a CR3 reload via KVM_SET_SREGS, which forces
-	 * the vCPU to flush its TLB on the next KVM_RUN per the
-	 * AMD64 SDM's "writes to CR3 flush non-global TLB
-	 * entries" architectural guarantee.
-	 *
-	 * Without this flag, stale TLB entries could survive a
-	 * mm_unmap and the guest would observe the old mapping
-	 * until its next spontaneous TLB flush. The singleton
-	 * shadow PGD model means there's only one CR3 that
-	 * matters, so a single bool suffices.
-	 */
-	bool		shadow_dirty;
-
-	/*
-	 * Task #242 (perf lever #4): track when the shadow PT mirrors
-	 * a known UML pgd. Set true at the end of each successful
-	 * kvm_shadow_fill_from_uml_pgd, with shadow_pgd_synced_mm
-	 * + shadow_pgd_synced_va recording which mm + pgd-VA was the
-	 * source. Set false (i.e. "needs re-mirror") on any shadow-
-	 * PT-invalidating event:
-	 *   - kvm_shadow_pgd_clear_user (cross-mm switch)
-	 *   - kvm_shadow_invalidate_va_range (mm_map / mm_unmap)
-	 *
-	 * kvm_enter_guest's hot-path can then skip the fill when ALL
-	 * THREE match: synced flag, cached mm pointer, and cached
-	 * pgd-VA. Both the mm-pointer AND pgd-VA are tracked because
-	 * either alone is unstable: an mm_struct pointer can be
-	 * reused after kfree, and a pgd page VA can be reused if
-	 * the mm is freed and a fresh allocation reuses the page.
-	 * Requiring both to match closes the audit-round-7 P2 finding
-	 * (mm-pointer-VA-reuse on execve-style mm replacement, where
-	 * kvm_context_switch's prev==next short-circuits the cross-
-	 * mm reset).
-	 */
-	bool			shadow_pgd_synced;
-	struct mm_struct	*shadow_pgd_synced_mm;
-	u64			shadow_pgd_synced_va;
+	struct page	*shadow_pgd_page;	/* deprecated; per-mm */
+	void		*shadow_pgd;		/* deprecated; per-mm */
+	u64		shadow_pgd_gpa;		/* deprecated; per-mm */
+	bool		shadow_dirty;		/* deprecated; per-mm */
+	bool			shadow_pgd_synced;		/* deprecated */
+	struct mm_struct	*shadow_pgd_synced_mm;		/* deprecated */
+	u64			shadow_pgd_synced_va;		/* deprecated */
 
 	/*
 	 * Memo 11 G3 gadget state page. Allocated lazily on
@@ -441,11 +395,54 @@ void kvm_setup_production_sregs(struct kvm_sregs *sregs,
  * separately.
  */
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+
+struct mm_struct;
+struct mm_id;
+
 /*
- * Shadow PT lifecycle (memo 09 step 1). Called by kvm_init /
- * kvm_shutdown; returns 0 on success, -errno on failure.
- * Callers panic on failure during init since an unallocatable
- * shadow PT is a bring-up bug, not a runtime error.
+ * Per-mm shadow PGD container (#275). Replaces the singleton
+ * shadow_pgd that lived on `struct kvm_um`. Each UML mm gets its
+ * own shadow tree at mm_attach time; cross-mm switches just point
+ * the vCPU's CR3 at a different shadow tree, with no clear/refill
+ * dance and no risk of one mm's leaves leaking into another's view.
+ *
+ * Bootstrap kernel-half mappings (LSTAR trampoline page, IST
+ * stack, gadget state + vvar, IDT/GDT/TSS) are installed into each
+ * new shadow_mm at allocation time so every mm's CR3 is a complete
+ * walkable tree the moment kvm_enter_guest loads it.
+ *
+ * Lifecycle: kvm_mm_attach allocates + bootstraps; kvm_mm_detach
+ * frees. The mm_id holds an opaque void* so other backends don't
+ * need to pull in this header.
+ */
+struct kvm_shadow_mm {
+	struct page		*pgd_page;	/* backing page for teardown */
+	void			*pgd;		/* kernel VA of top-level PGD */
+	u64			pgd_gpa;	/* __pa(pgd) → CR3 load value */
+	bool			dirty;		/* needs CR3 reload (TLB flush) */
+	bool			synced;		/* shadow mirrors mm->pgd */
+	u64			synced_pgd_va;	/* mm->pgd at last fill */
+	struct mutex		fill_lock;	/* serializes pgd-walk fills */
+};
+
+struct kvm_shadow_mm *kvm_shadow_mm_alloc(void);
+void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow);
+
+/*
+ * Resolve the active mm's shadow tree. NULL when called outside a
+ * task with a valid active_mm (e.g. very early boot or a kernel
+ * thread that lost active_mm). Callers MUST handle NULL — the most
+ * common defensive shape is "fall back to no-op" for invalidate
+ * paths and "panic-style abort" for kvm_enter_guest's CR3 source.
+ */
+struct kvm_shadow_mm *kvm_shadow_mm_current(void);
+
+/*
+ * Shadow PT lifecycle (memo 09 step 1). Pre-#275 these operated on
+ * the singleton kvm_um.shadow_pgd. Post-#275 they're vestigial
+ * stubs that compile but do nothing (and pr_warn_once); the actual
+ * allocation runs out of kvm_mm_attach. Kept to avoid churning
+ * KUnit test prototypes that reference them.
  */
 int kvm_shadow_pgd_alloc(void);
 void kvm_shadow_pgd_free(void);

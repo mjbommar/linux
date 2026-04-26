@@ -18,6 +18,7 @@
 #include <linux/errno.h>
 #include <linux/printk.h>
 #include <linux/refcount.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <os.h>
@@ -30,12 +31,28 @@ int kvm_mm_attach(struct mm_id *id)
 {
 	struct kvm_um *ctx = kvm_backend_ctx();
 
-	(void)id;
-
 	if (ctx->vm_fd < 0) {
 		pr_err("um: kvm mm_attach before init — vm_fd unset\n");
 		return -EIO;
 	}
+
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	/*
+	 * #275: allocate the per-mm shadow PGD here. Each UML mm
+	 * gets its own shadow tree; cross-mm switches just point
+	 * the vCPU's CR3 at a different tree, no clear/refill
+	 * dance needed.
+	 */
+	if (!id->kvm_shadow) {
+		struct kvm_shadow_mm *shadow = kvm_shadow_mm_alloc();
+
+		if (!shadow) {
+			pr_err("um: kvm mm_attach: shadow alloc failed\n");
+			return -ENOMEM;
+		}
+		id->kvm_shadow = shadow;
+	}
+#endif
 
 	/*
 	 * First attach initializes the refcount (kvm_init leaves it
@@ -55,7 +72,12 @@ void kvm_mm_detach(struct mm_id *id)
 {
 	struct kvm_um *ctx = kvm_backend_ctx();
 
-	(void)id;
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	if (id->kvm_shadow) {
+		kvm_shadow_mm_free(id->kvm_shadow);
+		id->kvm_shadow = NULL;
+	}
+#endif
 
 	if (ctx->vm_fd < 0)
 		return;
@@ -97,24 +119,34 @@ void kvm_mm_detach(struct mm_id *id)
 int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 	       int prot, int phys_fd, u64 offset)
 {
-	int rc;
-
 	(void)id;
-
-	rc = os_map_memory((void *)virt, phys_fd, offset, len,
-			   prot & UM_PROT_READ, prot & UM_PROT_WRITE,
-			   prot & UM_PROT_EXEC);
-	if (rc)
-		return rc;
+	(void)prot;
+	(void)phys_fd;
+	(void)offset;
 
 	/*
-	 * Audit round-5 F6: if this mm_map replaces a previously-
-	 * present mapping (mmap-over-mmap, mprotect-then-populate),
-	 * the old physical page could still be TLB-cached at the
-	 * vCPU. Invalidate the shadow PT range so kvm_enter_guest
-	 * flushes CR3 before the next KVM_RUN. Harmless when the
-	 * range was previously unmapped — the invalidator skips
-	 * absent entries.
+	 * #276: under the integrated KVM backend, the guest CPU
+	 * translates user VAs through the per-mm shadow PT (CR3 →
+	 * memslot → uml_physmem linear mapping). It does NOT walk
+	 * the host process's VAs. The seccomp/ptrace pattern of
+	 * mmap'ing each user page into UML's host process VA space
+	 * (via os_map_memory) is not load-bearing here AND it
+	 * actively breaks fork/exec: every UML mm shares the single
+	 * host process VA space, so when a child execve's a fresh
+	 * binary its os_map_memory at user VAs clobbers the parent's
+	 * mapping at the same VAs. Parent then dereferences a stale
+	 * mapping and crashes.
+	 *
+	 * UML's own kernel-mode user-VA dereference path (copy_to/
+	 * from_user) goes through page_address(pte_page(pte)) which
+	 * uses the linear uml_physmem mapping that's set up at boot
+	 * — completely separate from the per-PTE host mmap. Init_mm
+	 * kernel mappings still flow through kern_map (init_mm only)
+	 * which retains os_map_memory for the kernel-half range.
+	 *
+	 * Skip os_map_memory; just invalidate the per-mm shadow PT
+	 * so the next kvm_enter_guest's pgd-walk picks up the new
+	 * leaves into THIS mm's shadow tree.
 	 */
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
@@ -124,19 +156,10 @@ int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 
 int kvm_mm_unmap(struct mm_id *id, unsigned long virt, unsigned long len)
 {
-	int rc;
-
 	(void)id;
 
-	rc = os_unmap_memory((void *)virt, len);
-	if (rc)
-		return rc;
-
 	/*
-	 * Audit round-5 F6: explicitly tear the shadow-PT entries
-	 * down and mark the PGD dirty. Previously mm_unmap relied
-	 * on nothing, so the vCPU could continue to see a page
-	 * that UML's own mm had already torn down.
+	 * Symmetric with kvm_mm_map — no host munmap needed.
 	 */
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	(void)kvm_shadow_invalidate_va_range((u64)virt, (u64)len);

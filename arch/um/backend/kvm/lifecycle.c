@@ -633,46 +633,117 @@ int kvm_ensure_memslot(void)
  * bootstrap mapping (GDT + LSTAR + SYSRET page), step 3 fills
  * user-VA entries on fault.
  */
-int kvm_shadow_pgd_alloc(void)
+/*
+ * Per-mm shadow PGD allocator (#275). Each UML mm gets its own
+ * shadow tree at kvm_mm_attach time. The returned struct lives
+ * until kvm_shadow_mm_free is called from kvm_mm_detach. Caller
+ * stores the pointer on mm_id->kvm_shadow.
+ */
+struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 {
+	struct kvm_shadow_mm *shadow;
 	struct page *page;
 
-	if (kvm_ctx.shadow_pgd) {
-		pr_warn_once("um: kvm shadow_pgd already allocated (va=%p gpa=0x%llx)\n",
-			     kvm_ctx.shadow_pgd,
-			     (unsigned long long)kvm_ctx.shadow_pgd_gpa);
-		return 0;
-	}
+	shadow = kzalloc(sizeof(*shadow), GFP_KERNEL);
+	if (!shadow)
+		return NULL;
 
 	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 	if (!page) {
-		pr_err("um: kvm shadow_pgd: alloc_page failed\n");
-		return -ENOMEM;
+		kfree(shadow);
+		return NULL;
 	}
 
-	kvm_ctx.shadow_pgd_page = page;
-	kvm_ctx.shadow_pgd      = page_address(page);
-	kvm_ctx.shadow_pgd_gpa  = (u64)__pa(kvm_ctx.shadow_pgd);
+	shadow->pgd_page = page;
+	shadow->pgd      = page_address(page);
+	shadow->pgd_gpa  = (u64)__pa(shadow->pgd);
+	shadow->dirty    = true;
+	shadow->synced   = false;
+	shadow->synced_pgd_va = 0;
+	mutex_init(&shadow->fill_lock);
+	return shadow;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_mm_alloc);
 
-	pr_info("um: kvm shadow_pgd: va=%p gpa=0x%llx (memo 09 step 1)\n",
-		kvm_ctx.shadow_pgd,
-		(unsigned long long)kvm_ctx.shadow_pgd_gpa);
+void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow)
+{
+	if (!shadow)
+		return;
+	/*
+	 * Free intermediate PUD/PMD/PTE pages by walking the PGD.
+	 * Each present non-leaf entry holds a kernel VA via __va(pa).
+	 */
+	if (shadow->pgd) {
+		u64 *pgd = shadow->pgd;
+		unsigned int gi;
+
+		for (gi = 0; gi < 512; gi++) {
+			u64 *pud;
+			unsigned int ui;
+
+			if (!(pgd[gi] & 1ULL))
+				continue;
+			pud = (u64 *)__va(pgd[gi] & 0x000ffffffffff000ULL);
+			for (ui = 0; ui < 512; ui++) {
+				u64 *pmd;
+				unsigned int mi;
+
+				if (!(pud[ui] & 1ULL))
+					continue;
+				pmd = (u64 *)__va(pud[ui] & 0x000ffffffffff000ULL);
+				for (mi = 0; mi < 512; mi++) {
+					struct page *pte_page;
+
+					if (!(pmd[mi] & 1ULL))
+						continue;
+					pte_page = virt_to_page(__va(pmd[mi] &
+								     0x000ffffffffff000ULL));
+					__free_page(pte_page);
+				}
+				__free_page(virt_to_page(pmd));
+			}
+			__free_page(virt_to_page(pud));
+		}
+	}
+	if (shadow->pgd_page)
+		__free_page(shadow->pgd_page);
+	kfree(shadow);
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_mm_free);
+
+struct kvm_shadow_mm *kvm_shadow_mm_current(void)
+{
+	struct mm_struct *mm;
+
+	if (!current)
+		return NULL;
+	mm = current->active_mm;
+	if (!mm)
+		return NULL;
+	return mm->context.id.kvm_shadow;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_mm_current);
+
+/*
+ * Vestigial singleton API. Pre-#275 each kvm_enter_guest's first
+ * call lazy-allocated kvm_ctx.shadow_pgd; post-#275 the per-mm
+ * shadow_pgd is allocated at kvm_mm_attach. These stubs no-op so
+ * callers (KUnit force-probes) still link.
+ */
+int kvm_shadow_pgd_alloc(void)
+{
 	return 0;
 }
 
 void kvm_shadow_pgd_free(void)
 {
-	if (!kvm_ctx.shadow_pgd_page)
-		return;
-	__free_page(kvm_ctx.shadow_pgd_page);
-	kvm_ctx.shadow_pgd_page = NULL;
-	kvm_ctx.shadow_pgd      = NULL;
-	kvm_ctx.shadow_pgd_gpa  = 0;
 }
 
 u64 kvm_shadow_pgd_gpa(void)
 {
-	return kvm_ctx.shadow_pgd_gpa;
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+
+	return shadow ? shadow->pgd_gpa : 0;
 }
 
 /*
@@ -992,6 +1063,7 @@ u64 kvm_um_pte_to_x86(u64 um_pte)
  */
 int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 {
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 	u64 *pgd = pgd_va;
 	unsigned int pgd_i, pud_i, pmd_i, pte_i;
 	int installed = 0;
@@ -999,6 +1071,8 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 
 	if (!pgd)
 		return -EINVAL;
+	if (!shadow)
+		return -ENODEV;
 
 	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
 		u64 pgde = pgd[pgd_i];
@@ -1089,21 +1163,22 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 	 * changes the cache key just pessimistically misses on the
 	 * next entry (filling again is cheap).
 	 */
-	kvm_ctx.shadow_pgd_synced = true;
-	kvm_ctx.shadow_pgd_synced_mm = current ? current->active_mm : NULL;
-	kvm_ctx.shadow_pgd_synced_va = (u64)pgd_va;
+	shadow->synced = true;
+	shadow->synced_pgd_va = (u64)pgd_va;
 	return installed;
 }
 
 int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
 {
-	u64 *pgd = kvm_ctx.shadow_pgd;
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+	u64 *pgd;
 	u64 *pud = NULL, *pmd = NULL, *pte = NULL;
 	unsigned int pgd_i, pud_i, pmd_i, pte_i;
 	int rc;
 
-	if (!pgd)
+	if (!shadow || !shadow->pgd)
 		return -ENODEV;
+	pgd = shadow->pgd;
 
 	pgd_i = (va >> 39) & 0x1ff;
 	pud_i = (va >> 30) & 0x1ff;
@@ -1143,7 +1218,7 @@ int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
 	 */
 	pte[pte_i] = (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) |
 		     (leaf_flags | KVM_X86_PTE_P | KVM_X86_PTE_A);
-	kvm_ctx.shadow_dirty = true;
+	shadow->dirty = true;
 	return 0;
 }
 
@@ -1184,66 +1259,34 @@ int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
  */
 void kvm_shadow_pgd_clear_user(void)
 {
-	u64 *pgd = kvm_ctx.shadow_pgd;
-	unsigned int pgd_i, pud_i, pmd_i;
-	unsigned int leaf_tables = 0;
+	/*
+	 * #275: each UML mm has its own shadow tree, so cross-mm
+	 * "switches" no longer need a clear pass — the new mm's
+	 * shadow IS a different tree, with no leaves from the old
+	 * mm to leak. Function kept for ABI compatibility with the
+	 * kvm_context_switch + KUnit force-probe call sites; just
+	 * mark the active mm's shadow dirty so the next CR3 reload
+	 * triggers a TLB flush.
+	 */
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 
-	if (!pgd)
-		return;
-
-	for (pgd_i = 0; pgd_i < 256; pgd_i++) {
-		u64 pgde = pgd[pgd_i];
-		u64 *pud;
-
-		if (!(pgde & KVM_X86_PTE_P))
-			continue;
-		pud = (u64 *)__va(pgde & 0x000ffffffffff000ULL);
-
-		for (pud_i = 0; pud_i < 512; pud_i++) {
-			u64 pude = pud[pud_i];
-			u64 *pmd;
-
-			if (!(pude & KVM_X86_PTE_P))
-				continue;
-			pmd = (u64 *)__va(pude & 0x000ffffffffff000ULL);
-
-			for (pmd_i = 0; pmd_i < 512; pmd_i++) {
-				u64 pmde = pmd[pmd_i];
-				u64 *pte;
-
-				if (!(pmde & KVM_X86_PTE_P))
-					continue;
-				pte = (u64 *)__va(pmde &
-						  0x000ffffffffff000ULL);
-				memset(pte, 0, PAGE_SIZE);
-				leaf_tables++;
-			}
-		}
-	}
-
-	if (leaf_tables) {
-		kvm_ctx.shadow_dirty = true;
-		/*
-		 * Task #242: cross-mm clear invalidates the shadow PT
-		 * — next kvm_enter_guest must do a full fill against
-		 * the new mm's pgd. Reset the synced flag so the
-		 * fast-path skip-fill check fails.
-		 */
-		kvm_ctx.shadow_pgd_synced = false;
-	}
+	if (shadow)
+		shadow->dirty = true;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_pgd_clear_user);
 
 int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 {
-	u64 *pgd = kvm_ctx.shadow_pgd;
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+	u64 *pgd;
 	u64 va, va_end;
 	unsigned int cleared = 0;
 
-	if (!pgd)
+	if (!shadow || !shadow->pgd)
 		return -ENODEV;
 	if (!len)
 		return -EINVAL;
+	pgd = shadow->pgd;
 
 	va_end = (va_start + len + 0xfffULL) & ~0xfffULL;
 	for (va = va_start & ~0xfffULL; va < va_end; va += PAGE_SIZE) {
@@ -1270,17 +1313,17 @@ int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 		}
 	}
 
-	if (cleared) {
-		kvm_ctx.shadow_dirty = true;
-		/*
-		 * Task #242: range-invalidate breaks the
-		 * shadow-mirrors-uml-pgd invariant — next kvm_enter_
-		 * guest must re-fill. The same shadow_pgd_synced
-		 * reset that kvm_shadow_pgd_clear_user does for the
-		 * cross-mm case applies here for in-mm mmap/munmap.
-		 */
-		kvm_ctx.shadow_pgd_synced = false;
-	}
+	if (cleared)
+		shadow->dirty = true;
+	/*
+	 * #274: ALWAYS reset synced regardless of cleared count.
+	 * The pgd has just been updated; shadow no longer mirrors
+	 * it even if the affected range had no present shadow leaf
+	 * to clear. Without this, the #242 cache check skips the
+	 * refill and the next user access faults to an empty shadow
+	 * entry, racing with the kernel's just-completed copy_to_user.
+	 */
+	shadow->synced = false;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);
