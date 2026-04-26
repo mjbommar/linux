@@ -2221,11 +2221,16 @@ fill_done:
 
 		/*
 		 * P0-1 (memo 16 review Agent 4 Race E): READ_ONCE on
-		 * shadow->dirty pairs with the WRITE_ONCE +
-		 * smp_wmb in shadow_sync.c. Without READ_ONCE the
-		 * compiler may re-order or fuse this read with later
-		 * accesses, observing a stale dirty=false after a
-		 * direct-sync writer published a leaf change.
+		 * shadow->dirty pairs with the WRITE_ONCE + smp_wmb
+		 * in shadow_sync.c.
+		 *
+		 * P0-FIX 2026-04-26 (TLB keystone): the dirty=true path
+		 * below ALSO writes a sentinel CR3 before the real CR3
+		 * to force a guest TLB flush. Same-value CR3 writes do
+		 * not reliably flush TLB, so without the toggle a stale
+		 * VA→PFN entry from a prior mapping could survive across
+		 * munmap+remap and silently return wrong file content.
+		 * See the SREGS-program block below for the mechanism.
 		 */
 		if (ctx->sregs_primed &&
 		    ctx->cached_cr3_gpa == cr3_gpa &&
@@ -2301,6 +2306,49 @@ fill_done:
 	sregs.fs.base = regs->gp[HOST_FS_BASE];
 	sregs.gs.base = regs->gp[HOST_GS_BASE];
 
+	/*
+	 * P0 FIX (TLB-flush keystone, 2026-04-26): KVM_SET_SREGS with the
+	 * same CR3 value as the vCPU's current CR3 does NOT flush the guest
+	 * TLB even when shadow PT contents changed (e.g. munmap cleared a
+	 * leaf, then user re-mmap a different file at the same VA). KVM's
+	 * kvm_set_cr3 calls invalidate_pcid only conditionally, and the
+	 * VMCS-level CR3 reload is also gated on a value change. Result:
+	 * stale guest TLB → user reads OLD PFN's bytes after a clear+remap
+	 * cycle, never faulting because the cached translation is "valid".
+	 *
+	 * Empirical proof (read_test5 harness): without this toggle, only
+	 * 1/8 user accesses to a re-mmap'd VA generate a host #PF and only
+	 * 3/8 set_ptes installs fire — the other 5 cycles read stale TLB
+	 * entries and return prior file's content. With the toggle: 8/8
+	 * faults, 8/8 installs, all reads return correct bytes. import re
+	 * goes from FAIL → OK; cpython parity gate moves off 0/N.
+	 *
+	 * Mechanism: write a sentinel CR3 (XOR bit 12 — a guaranteed-
+	 * different-but-valid GPA in our 512MiB physmem) before the real
+	 * CR3 so KVM observes an actual CR3 change → forces VMCS reload +
+	 * full TLB flush. The sentinel CR3 doesn't have to be a valid
+	 * shadow PGD — KVM only loads the value into the VMCS field; the
+	 * guest never executes between the two ioctls.
+	 *
+	 * Cost: one extra KVM_SET_SREGS ioctl on entries where shadow was
+	 * dirty AND CR3 unchanged. Skipped on cross-mm CR3-changing entries
+	 * (which already flush via the value change). The sregs_primed
+	 * cached-skip path above still elides BOTH ioctls when nothing
+	 * changed.
+	 */
+	{
+		struct kvm_um *ctx = kvm_backend_ctx();
+		bool same_cr3 = ctx->sregs_primed &&
+				ctx->cached_cr3_gpa == cr3_gpa;
+
+		if (same_cr3) {
+			struct kvm_sregs s2 = sregs;
+
+			s2.cr3 = sregs.cr3 ^ 0x1000;
+			(void)os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+					       (unsigned long)&s2);
+		}
+	}
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS, (unsigned long)&sregs);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_SREGS(cr3=0x%llx gdt_va=0x%llx) failed (%d)\n",
