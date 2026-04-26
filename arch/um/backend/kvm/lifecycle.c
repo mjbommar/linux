@@ -674,6 +674,7 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 	shadow->dirty    = true;
 	shadow->synced   = false;
 	shadow->synced_pgd_va = 0;
+	shadow->needs_full_resync = false;
 	mutex_init(&shadow->fill_lock);
 	return shadow;
 }

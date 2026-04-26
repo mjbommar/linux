@@ -1909,14 +1909,24 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * successful refill below. No mm-pointer comparison
 		 * needed because the shadow tree IS per-mm.
 		 */
+		/*
+		 * Memo 15: cached-skip path is only safe if direct sync
+		 * has been keeping the shadow current AND no per-PTE
+		 * sync has signaled needs_full_resync (allocation
+		 * failure, etc). If either is the case, fall through to
+		 * the full fill which repairs.
+		 */
 		if (shadow && shadow->synced &&
-		    shadow->synced_pgd_va == (u64)mm->pgd) {
+		    shadow->synced_pgd_va == (u64)mm->pgd &&
+		    !READ_ONCE(shadow->needs_full_resync)) {
 			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
 			if (kvm_diag_audit_pgd_skip)
 				(void)kvm_shadow_audit_pgd(mm->pgd, "skip", 8);
 			goto fill_done;
 		}
+		if (shadow && READ_ONCE(shadow->needs_full_resync))
+			pr_info_ratelimited("um: kvm enter_guest: needs_full_resync flagged — repairing via full fill\n");
 
 		/*
 		 * Task #238 — STEP 2: drop kvm_touch_all_user_vmas. The
@@ -1955,6 +1965,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 					    filled);
 			return filled;
 		}
+		/* Memo 15: full fill repairs the resync flag. */
+		WRITE_ONCE(shadow->needs_full_resync, false);
 		pr_info_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
 				    filled);
 fill_done:

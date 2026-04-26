@@ -10,6 +10,7 @@
 
 #include <asm/page.h>
 #include <linux/mm_types.h>
+#include <asm/kvm_mmu_sync.h>	/* memo 15 direct shadow sync */
 
 #define _PAGE_PRESENT	0x001
 #define _PAGE_NEEDSYNC	0x002
@@ -136,7 +137,19 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
  * get..
  */
 
-#define pte_clear(mm, addr, xp) pte_set_val(*(xp), (phys_t) 0, __pgprot(_PAGE_NEEDSYNC))
+/*
+ * Memo 15 direct-shadow-sync: convert pte_clear from macro to
+ * inline function so the integrated KVM backend can hook it. The
+ * pte_set_val side-effect is preserved exactly. The
+ * kvm_shadow_sync_pte hook is declared in <asm/kvm_mmu_sync.h>
+ * which we include at the top of this file.
+ */
+static inline void pte_clear(struct mm_struct *mm, unsigned long addr,
+			     pte_t *xp)
+{
+	pte_set_val(*(xp), (phys_t)0, __pgprot(_PAGE_NEEDSYNC));
+	(void)kvm_shadow_sync_pte(mm, addr, *xp);
+}
 
 #define pmd_none(x)	(!((unsigned long)pmd_val(x) & ~_PAGE_NEEDSYNC))
 #define	pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE)
@@ -310,17 +323,24 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 	 * subsequent PTE picks up an extra (nr_remaining-1) pages of
 	 * PFN drift. For nr_in=3 the installed PFNs are P, P+2, P+3
 	 * instead of P, P+1, P+2; for nr_in=4 they are P, P+3, P+5,
-	 * P+6. Under seccomp the host process's contiguous os_map_memory
-	 * mapping masks the pgd error because user-mode reads go through
-	 * the host page tables, not UML's pgd. Under the integrated KVM
-	 * backend the wrong PFNs propagate into the shadow PT and the
-	 * guest reads from the wrong physical pages — silent
-	 * corruption that surfaced as the dl_main NULL-deref in #274.
+	 * P+6. Fix matches include/linux/pgtable.h's generic set_ptes
+	 * which advances by exactly one page per iteration via
+	 * pte_next_pfn().
 	 *
-	 * Fix matches include/linux/pgtable.h's generic set_ptes which
-	 * advances by exactly one page per iteration via pte_next_pfn().
+	 * Memo 15 / direct shadow sync: in addition to the existing
+	 * NEEDSYNC + um_tlb_mark_sync deferred chain (which non-KVM
+	 * backends still depend on), call kvm_shadow_sync_pte for
+	 * each PTE. On builds without integrated KVM the call is an
+	 * inline no-op. On integrated-KVM builds the shadow leaf is
+	 * updated synchronously to match the new UML PTE — closing
+	 * the producer/consumer split that let the deferred chain
+	 * leave stale shadow leaves.
 	 */
 	size_t length = nr * PAGE_SIZE;
+	unsigned long sync_addr = addr;
+	pte_t sync_pte = pte;
+	pte_t *sync_ptep = ptep;
+	int sync_nr = nr;
 
 	for (;;) {
 		set_pte(ptep, pte);
@@ -331,6 +351,18 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 	}
 
 	um_tlb_mark_sync(mm, addr, addr + length);
+
+	/*
+	 * Direct shadow sync after set_pte loop. Doing this after
+	 * the loop (not interleaved) keeps the existing PTE-write
+	 * sequence atomic w.r.t. host-side observers; the shadow
+	 * sync runs on the now-final pgd state.
+	 */
+	for (; sync_nr > 0; sync_nr--, sync_ptep++,
+	     sync_addr += PAGE_SIZE,
+	     sync_pte = __pte(pte_val(sync_pte) + PAGE_SIZE)) {
+		(void)kvm_shadow_sync_pte(mm, sync_addr, *sync_ptep);
+	}
 }
 
 #define __HAVE_ARCH_PTE_SAME

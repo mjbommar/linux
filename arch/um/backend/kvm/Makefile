@@ -17,6 +17,7 @@ obj-y += thread.o
 obj-y += time.o
 obj-y += stubs.o
 
+obj-$(CONFIG_UM_BACKEND_KVM_INTEGRATED) += shadow_sync.o
 obj-$(CONFIG_UM_BACKEND_KVM_INTEGRATED) += snapshot.o
 obj-$(CONFIG_UM_BACKEND_KVM_INTEGRATED) += record.o
 

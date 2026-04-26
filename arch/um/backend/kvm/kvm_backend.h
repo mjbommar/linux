@@ -423,6 +423,13 @@ struct kvm_shadow_mm {
 	bool			synced;		/* shadow mirrors mm->pgd */
 	u64			synced_pgd_va;	/* mm->pgd at last fill */
 	struct mutex		fill_lock;	/* serializes pgd-walk fills */
+	/*
+	 * Memo 15 direct-shadow-sync: set when a per-PTE direct
+	 * sync hit an allocation failure or other recoverable
+	 * error. kvm_enter_guest's verifier path runs a full fill
+	 * before KVM_RUN to repair, then clears the flag.
+	 */
+	bool			needs_full_resync;
 };
 
 struct kvm_shadow_mm *kvm_shadow_mm_alloc(void);
