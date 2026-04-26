@@ -1062,6 +1062,15 @@ u64 kvm_um_pte_to_x86(u64 um_pte)
 		return 0;
 
 	/*
+	 * Mirror UML's tlb.c:73-77 fully: if the page hasn't been
+	 * accessed, withhold ALL access (return 0 = no shadow entry
+	 * installed). Guest reads/writes will fault, recovery sets
+	 * young, refill installs a real entry.
+	 */
+	if (!(um_pte & UM_PTE_ACCESSED))
+		return 0;
+
+	/*
 	 * Match UML's software-emulated A/D model from
 	 * arch/um/kernel/tlb.c:73-77 (update_pte_range), which
 	 * derives the host-VA prot as:
