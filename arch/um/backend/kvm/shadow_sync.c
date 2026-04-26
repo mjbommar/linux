@@ -190,10 +190,108 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 EXPORT_SYMBOL_GPL(kvm_shadow_sync_pte);
 
 /*
- * Range clear for parent-level clears (pmd_clear, pud_clear,
- * p4d_clear). Walks the shadow user-half over [start, end) and
- * clears any present leaf. Atomic: single-u64 writes only,
- * no allocation.
+ * Read the current UML PTE for `addr` from `mm` without taking
+ * mmap_lock. Used by sync-on-flush below — the caller holds
+ * either pte_lockptr or is in a flush-tlb path where the pgd
+ * walker pages are stable. Returns __pte(0) if any intermediate
+ * level is absent (caller will treat as "clear shadow").
+ */
+static pte_t kvm_um_pgd_read_pte(struct mm_struct *mm, unsigned long addr)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	if (!mm || !mm->pgd)
+		return __pte(0);
+	pgd = pgd_offset(mm, addr);
+	if (pgd_none(*pgd) || pgd_bad(*pgd))
+		return __pte(0);
+	p4d = p4d_offset(pgd, addr);
+	if (p4d_none(*p4d) || p4d_bad(*p4d))
+		return __pte(0);
+	pud = pud_offset(p4d, addr);
+	if (pud_none(*pud) || pud_bad(*pud))
+		return __pte(0);
+	pmd = pmd_offset(pud, addr);
+	if (pmd_none(*pmd) || pmd_bad(*pmd))
+		return __pte(0);
+	pte = pte_offset_kernel(pmd, addr);
+	return *pte;
+}
+
+/*
+ * #274 / F1: sync-on-flush. Replaces the earlier clear-on-flush
+ * which was overwriting good direct-sync work. ptep_set_access_flags
+ * calls set_pte_at (→ kvm_shadow_sync_pte installs new leaf), then
+ * flush_tlb_fix_spurious_fault → flush_tlb_page. The latter must
+ * NOT erase the just-installed leaf; instead, re-derive the leaf
+ * from the current UML PTE so any concurrent change is reflected
+ * but a recent direct-sync write is preserved.
+ *
+ * Range variant: same logic per page in [start, end).
+ *
+ * Both atomic — no allocation. Uses kvm_shadow_sync_pte which
+ * itself defers allocation via needs_full_resync.
+ */
+void kvm_shadow_sync_va_atomic(struct mm_struct *mm, unsigned long addr)
+{
+	pte_t pte;
+
+	if (!mm || !mm->context.id.kvm_shadow)
+		return;
+	pte = kvm_um_pgd_read_pte(mm, addr);
+	(void)kvm_shadow_sync_pte(mm, addr, pte);
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_sync_va_atomic);
+
+void kvm_shadow_sync_range_atomic(struct mm_struct *mm,
+				  unsigned long start, unsigned long end)
+{
+	unsigned long addr;
+	struct kvm_shadow_mm *shadow;
+	unsigned long count = 0;
+
+	if (!mm)
+		return;
+	shadow = mm->context.id.kvm_shadow;
+	if (!shadow || !shadow->pgd)
+		return;
+
+	/*
+	 * F9 threshold: very large ranges (>= 512 pages = 2 MiB)
+	 * become pathological page-by-page. Bail to needs_full_resync
+	 * — kvm_enter_guest's repair path will do the full pgd walk
+	 * once instead of N billion lookups.
+	 */
+	if ((end - start) >> PAGE_SHIFT >= 512) {
+		WRITE_ONCE(shadow->needs_full_resync, true);
+		WRITE_ONCE(shadow->dirty, true);
+		WRITE_ONCE(shadow->direct_sync_range_clear,
+			   READ_ONCE(shadow->direct_sync_range_clear) + 1);
+		return;
+	}
+
+	for (addr = start & ~0xfffUL;
+	     addr < ((end + 0xfffUL) & ~0xfffUL);
+	     addr += PAGE_SIZE) {
+		pte_t pte = kvm_um_pgd_read_pte(mm, addr);
+
+		(void)kvm_shadow_sync_pte(mm, addr, pte);
+		count++;
+	}
+	if (count)
+		WRITE_ONCE(shadow->direct_sync_range_clear,
+			   READ_ONCE(shadow->direct_sync_range_clear) + 1);
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_sync_range_atomic);
+
+/*
+ * Legacy clear-only API kept for ABI compat with existing callers
+ * that explicitly want to drop shadow leaves regardless of pgd.
+ * No current in-tree caller after F1; safe to remove later.
  */
 void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
 				   unsigned long start, unsigned long end)

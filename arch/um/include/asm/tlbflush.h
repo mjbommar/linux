@@ -49,15 +49,22 @@ static inline void flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long address)
 {
 	um_tlb_mark_sync(vma->vm_mm, address, address + PAGE_SIZE);
-	kvm_shadow_clear_range_atomic(vma->vm_mm, address,
-				      address + PAGE_SIZE);
+	/*
+	 * F1: sync-on-flush, NOT clear. ptep_set_access_flags →
+	 * set_pte_at (direct sync) → flush_tlb_fix_spurious_fault →
+	 * us. A blind clear here would erase the leaf direct sync
+	 * just installed. Re-derive from the current UML PTE so a
+	 * concurrent change is reflected but a recent install is
+	 * preserved.
+	 */
+	kvm_shadow_sync_va_atomic(vma->vm_mm, address);
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
 				   unsigned long start, unsigned long end)
 {
 	um_tlb_mark_sync(vma->vm_mm, start, end);
-	kvm_shadow_clear_range_atomic(vma->vm_mm, start, end);
+	kvm_shadow_sync_range_atomic(vma->vm_mm, start, end);
 }
 
 static inline void flush_tlb_kernel_range(unsigned long start,

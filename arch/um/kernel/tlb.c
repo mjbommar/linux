@@ -271,10 +271,11 @@ void flush_tlb_mm(struct mm_struct *mm)
 	for_each_vma(vmi, vma) {
 		um_tlb_mark_sync(mm, vma->vm_start, vma->vm_end);
 		/*
-		 * Memo 15 direct shadow sync: also clear shadow leaves
-		 * for this vma's range. Atomic — does not allocate.
+		 * F1: sync-on-flush, not clear. F9: large vmas
+		 * threshold to needs_full_resync inside
+		 * kvm_shadow_sync_range_atomic.
 		 */
-		kvm_shadow_clear_range_atomic(mm, vma->vm_start,
-					      vma->vm_end);
+		kvm_shadow_sync_range_atomic(mm, vma->vm_start,
+					     vma->vm_end);
 	}
 }
