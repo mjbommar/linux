@@ -21,11 +21,63 @@ catches up.
 | `python3 -c "import _bisect / _datetime / _ssl / _hashlib / _struct"` | kvm | yes (single C-extension import, no test framework) |
 | `subprocess.run(['/bin/echo', 'x'])`        | kvm      | ~8/10     |
 | `python3 -c "import re"`                    | kvm      | **YES** (post-2026-04-26 keystone fix `901213a8d2d1`) |
-| `python3 -c "import unittest"`              | kvm      | 8/10 (was 0/10 — keystone fix flipped this) |
+| `python3 -c "import unittest"`              | kvm      | 15-20/20 (variance; SECCOMP baseline 20/20) — see "Residual flake" below |
 | `read_test5` byte-integrity (8-file mmap harness) | kvm | 8/8 matches seccomp baseline (was 0/8) |
-| CPython parity gate (21 stdlib modules)     | kvm      | **17/21 PARITY** (run-to-run variance 16-17; was 0/21 before keystone) |
-| Multi-task / threading suites (subinterpreters, FreeThreadingTest, deep recursion) | kvm | **NO** — distinct follow-on bug class (task #77) |
-| Same workloads under `backend=force=seccomp` | seccomp | yes       |
+| CPython parity gate (21 stdlib modules)     | kvm      | **16-18/21 PARITY** (run-to-run variance; was 0/21 pre-keystone) |
+| Same workloads under `backend=force=seccomp` | seccomp | yes (20/20 deterministic) |
+
+## Residual flake state (post memo 17 Phase H — 2026-04-26)
+
+Six commits landed this session moved the cpython parity gate from
+**0/21** to **16-18/21** with run-to-run variance. The remaining
+3-5 DIVERGE entries each run are NOT deterministic test failures —
+they are SIGSEGV (`exitcode=0x0000000b`) flakes that appear at
+varying RIPs across runs. SECCOMP runs the IDENTICAL workload at
+20/20 deterministic, so the flakes are KVM-specific kernel bugs,
+NOT Python/glibc nondeterminism.
+
+The residual ~10-20% SIGSEGV-flake on Python startup (single
+process) is the dominant blocker for full 21/21 parity. Empirical
+signature pattern (memo 17 Agent 3 report):
+  - Bug A: heap-data 0xAA UAF (`rdi=0xaaaaaaaaaaaaaaab`)
+  - Bug B: TLS slot reads 0xff..ff (FS_BASE / TLS state leak)
+  - Bug C: NULL ob_type during PyObject deref
+  - Bug D/E: high-bit-corrupted pointer (`cr2=0x80000d18`,
+    `cr2=0xc000c680` — bit 31 set on what should be a 0x40000xxx
+    user VA)
+
+What's been ruled out:
+  - vCPU memory ordering on shadow->dirty (memo 17 Phase A)
+  - TLB-flush mechanism (memo 17 Phase B / keystone)
+  - FPU hash UAF (memo 17 Phase D — embedded in arch_thread)
+  - VCPU_EVENTS save/restore (memo 17 Phase E + H)
+  - Cross-task event leak on fresh switch-in (memo 17 Phase H)
+  - Cross-task FPU leak on fresh switch-in (memo 17 Phase H)
+  - dirty-flag race on consume (memo 17 Phase H finding 1)
+
+Suspected remaining bug classes (to investigate):
+  - Finding 5 (memo 17 Phase I): kvm_shadow_fill_from_uml_pgd walks
+    the source pgd without holding mmap_read_lock — concurrent same-
+    mm unmap could free PT pages mid-walk. Tracked separately.
+  - Parent-VA contamination (memo 17 finding 4 / Phase 4 Option B):
+    `kvm_mm_map` uses os_map_memory into the SINGLE UML host process
+    address space; cross-mm switches leave stale host-VA mappings
+    that copy_to_user/copy_from_user can hit. Architectural — needs
+    per-mm host worker process.
+  - Singleton IRETQ-frame buffer at `kvm_bootstrap_page_stack`: all
+    tasks share the same staging frame for the bootstrap IRETQ.
+    Signal-driven preemption between frame-write and KVM_RUN can
+    let task B clobber task A's frame. Tested signal-blocking fix
+    (Phase F) — no measurable improvement; bug must be elsewhere
+    OR the signal-blocking didn't actually block at this layer
+    (UML's signal infrastructure is complex). Per-task IRETQ-frame
+    storage would be the surgical fix.
+
+The session-end recommendation: Phase A-H is correct, lands solid
+keystone fixes, and pushes parity from 0 to ~17/21. Pursuing 21/21
+requires either the per-mm host worker (Phase 4 Option B,
+multi-week) or a deep dive into the IRETQ-frame / parent-VA
+race classes — both significant restructuring beyond this session.
 
 ## P0 keystone fix landed 2026-04-26 (`901213a8d2d1`)
 
