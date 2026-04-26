@@ -52,13 +52,23 @@ KVM is KVM-only SIGSEGV at varying RIPs, not Python nondeterminism).
                           fill walks (finding 5)
   Phase J `9fb1a82e2357`: needs_full_resync race fix +
                           fork FPU inheritance (findings 1b + 6)
-  Phase K `644ebea88419`: KVM_EXIT_INTR ring-0 leak — skip the
-                          unconditional uml_pt_regs marshal when the
-                          exit was on KVM_EXIT_INTR (could fire mid-
-                          bootstrap with kregs.rip in the kernel-VA
-                          bootstrap-alias range; marshaling left next
-                          kvm_enter_guest building IRETQ frame from
-                          a kernel-half RIP → wild SIGSEGV)
+  Phase K `0dc8b091b747`: REVERTED. The KVM_EXIT_INTR marshal-skip
+                          (commit 644ebea88419) was unsound — KVM_EXIT_
+                          INTR with rc=0 reaches the dispatcher and
+                          out_read_regs's marshal is gated only on
+                          rc==-EINTR, so skipping the bulk marshal
+                          dropped the user's CPL=3 RIP/RSP/RFLAGS
+                          updates between entries. A CPL-based gate
+                          (skip-on-CPL=0) breaks SYSCALL/PF/MMIO paths
+                          which legitimately exit at CPL=0 and need
+                          the marshalled regs (kvm_decode_syscall
+                          reads RAX/RCX/R11). An IST-based recovery
+                          (re-read user state from the iretq frame on
+                          CPL=0 INTR exit) tested at 25-26/30 — slight
+                          regression from Phase J's 27-29/30. Net:
+                          revert. The structural fix needs the per-
+                          task IRETQ-frame storage approach, deferred
+                          to memo Phase 4 Option B.
 
 ### What's been ruled out
 
