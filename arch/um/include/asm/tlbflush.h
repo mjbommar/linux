@@ -7,6 +7,7 @@
 #define __UM_TLBFLUSH_H
 
 #include <linux/mm.h>
+#include <asm/kvm_mmu_sync.h>	/* memo 15 direct shadow sync */
 
 /*
  * In UML, we need to sync the TLB over by using mmap/munmap syscalls from
@@ -22,6 +23,15 @@
  * be executed immediately as there is no good synchronization point in that
  * case. In contrast, in the set_ptes case we can wait for the next kernel
  * segfault before we do the synchornization.
+ *
+ * Memo 15 / direct shadow sync: flush_tlb_* are also the entry point for
+ * generic mm code that mutates page tables via direct writes (pmd_clear,
+ * pud_clear, p4d_clear, *ptep = ... in mm/madvise.c etc). They run after
+ * the pgd write to invalidate the old TLB entries. Hook them to clear
+ * the corresponding shadow leaves at the same point — keeps the shadow
+ * consistent with pgd at the moment the kernel signals "this VA has
+ * changed". The clear is atomic (single-u64 PTE writes only) and safe
+ * to call from any context flush_tlb_* is called from.
  *
  *  - flush_tlb_all() flushes all processes TLBs
  *  - flush_tlb_mm(mm) flushes the specified mm context TLB's
@@ -39,12 +49,15 @@ static inline void flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long address)
 {
 	um_tlb_mark_sync(vma->vm_mm, address, address + PAGE_SIZE);
+	kvm_shadow_clear_range_atomic(vma->vm_mm, address,
+				      address + PAGE_SIZE);
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
 				   unsigned long start, unsigned long end)
 {
 	um_tlb_mark_sync(vma->vm_mm, start, end);
+	kvm_shadow_clear_range_atomic(vma->vm_mm, start, end);
 }
 
 static inline void flush_tlb_kernel_range(unsigned long start,

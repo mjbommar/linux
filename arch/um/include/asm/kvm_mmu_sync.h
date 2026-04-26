@@ -47,6 +47,14 @@
 int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr,
 			pte_t pte);
 
+/*
+ * Range clear for parent-level zaps (pmd_clear, pud_clear,
+ * p4d_clear). Atomic: walks shadow user-half and zeros any
+ * present leaf in [start, end). Does not allocate.
+ */
+void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
+				   unsigned long start, unsigned long end);
+
 #else /* !CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 static inline int kvm_shadow_sync_pte(struct mm_struct *mm,
@@ -54,6 +62,12 @@ static inline int kvm_shadow_sync_pte(struct mm_struct *mm,
 				      pte_t pte)
 {
 	return 0;
+}
+
+static inline void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
+						 unsigned long start,
+						 unsigned long end)
+{
 }
 
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */

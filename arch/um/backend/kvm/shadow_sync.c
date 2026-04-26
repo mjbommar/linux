@@ -9,14 +9,35 @@
  * with a synchronous shadow update at the source of truth (the
  * PTE mutation). The deferred chain still runs because non-KVM
  * backends use it for host VA mapping; this just adds the
- * shadow update at the point of mutation, so the shadow is
- * never lagging the UML pgd from the moment set_ptes returns.
+ * shadow update at the point of mutation.
+ *
+ * IMPORTANT — atomic-context contract:
+ *
+ *   set_ptes(), pte_clear(), pmd_clear(), pud_clear(), p4d_clear()
+ *   are all called by generic mm code while holding page-table
+ *   spinlocks (pte_lockptr / pmd_lockptr). That means we CANNOT
+ *   sleep here — no mutex_lock(), no GFP_KERNEL allocation.
+ *
+ *   Strategy: do single-u64 atomic writes to existing shadow leaf
+ *   slots without taking the per-shadow_mm fill_lock. Reads of
+ *   intermediate PUD/PMD/PT pages are safe without locking because
+ *   those pages are only freed at mm teardown (after all PTE
+ *   mutators are gone). If installation requires allocating a
+ *   new intermediate page, we set shadow->needs_full_resync and
+ *   defer to kvm_enter_guest's repair path which DOES run in
+ *   sleepable context and CAN allocate.
+ *
+ *   The single-u64 PTE writes are safe without the fill_lock
+ *   because (a) UML normally runs in a cooperative single-host-
+ *   thread model and (b) the operations are read-modify-write of
+ *   an aligned u64, atomic on x86_64. Concurrent fill is the only
+ *   real race; fill takes fill_lock so it sees a consistent state
+ *   between its iterations.
  */
 
-#include <linux/cleanup.h>		/* guard(mutex) */
+#include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
-#include <linux/mutex.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
 
@@ -29,12 +50,43 @@
 /* UML PTE bit definitions (mirroring lifecycle.c). */
 #define UM_PTE_PRESENT	0x001
 
+/*
+ * Walk the shadow tree to the leaf-PTE slot for `addr`. Returns
+ * the slot pointer if all intermediate tables exist, or NULL if
+ * any level is missing (which means there is no current shadow
+ * leaf for this VA — for clear it's already absent; for install
+ * the caller must defer to repair).
+ *
+ * Read-only walk; no allocation, no lock. Safe in atomic context.
+ */
+static u64 *kvm_shadow_walk_leaf(struct kvm_shadow_mm *shadow, u64 addr)
+{
+	u64 *pgd = shadow->pgd;
+	unsigned int pgd_i = (addr >> 39) & 0x1ff;
+	unsigned int pud_i = (addr >> 30) & 0x1ff;
+	unsigned int pmd_i = (addr >> 21) & 0x1ff;
+	unsigned int pte_i = (addr >> 12) & 0x1ff;
+	u64 *pud, *pmd, *pte;
+
+	if (!(pgd[pgd_i] & 1ULL))
+		return NULL;
+	pud = (u64 *)__va(pgd[pgd_i] & 0x000ffffffffff000ULL);
+	if (!(pud[pud_i] & 1ULL))
+		return NULL;
+	pmd = (u64 *)__va(pud[pud_i] & 0x000ffffffffff000ULL);
+	if (!(pmd[pmd_i] & 1ULL))
+		return NULL;
+	pte = (u64 *)__va(pmd[pmd_i] & 0x000ffffffffff000ULL);
+	return &pte[pte_i];
+}
+
 int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 {
 	struct kvm_shadow_mm *shadow;
 	u64 ume = pte_val(pte);
 	u64 x86e;
-	int rc;
+	u64 *spte;
+	bool was_present;
 
 	/*
 	 * Resolve the target shadow. mm can be NULL during very
@@ -48,84 +100,112 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		return 0;
 
 	/*
-	 * Hold fill_lock for the ENTIRE clear+install transaction
-	 * so concurrent invalidate / fill / sync calls on the same
-	 * shadow can't interleave between our clear and our
-	 * install. The existing kvm_shadow_invalidate_va_range and
-	 * kvm_shadow_map_page take the lock individually, so we
-	 * use raw walkers here and inline the work under one
-	 * lock acquisition.
+	 * Walk to the leaf slot. If any intermediate level is
+	 * absent the leaf is by definition absent — no clear
+	 * needed. For install we'd need allocation; defer to
+	 * repair.
 	 */
-	guard(mutex)(&shadow->fill_lock);
+	spte = kvm_shadow_walk_leaf(shadow, addr);
 
-	{
-		u64 *pgd = shadow->pgd;
-		unsigned int pgd_i = (addr >> 39) & 0x1ff;
-		unsigned int pud_i = (addr >> 30) & 0x1ff;
-		unsigned int pmd_i = (addr >> 21) & 0x1ff;
-		unsigned int pte_i = (addr >> 12) & 0x1ff;
-		u64 *pud, *pmd, *spte;
-
-		/* Clear existing shadow leaf, if any. */
-		if (pgd[pgd_i] & 1ULL) {
-			pud = (u64 *)__va(pgd[pgd_i] &
-					  0x000ffffffffff000ULL);
-			if (pud[pud_i] & 1ULL) {
-				pmd = (u64 *)__va(pud[pud_i] &
-						  0x000ffffffffff000ULL);
-				if (pmd[pmd_i] & 1ULL) {
-					spte = (u64 *)__va(pmd[pmd_i] &
-							   0x000ffffffffff000ULL);
-					if (spte[pte_i] & 1ULL) {
-						spte[pte_i] = 0;
-						shadow->dirty = true;
-					}
-				}
-			}
-		}
-	}
-
-	/*
-	 * If the new PTE isn't present in UML's pgd at all, the
-	 * shadow leaf stays absent. Done.
-	 */
 	if (!(ume & UM_PTE_PRESENT)) {
-		shadow->synced = false;
+		/*
+		 * Clearing the leaf. If shadow already absent
+		 * (no path), nothing to do. Otherwise atomic-
+		 * write 0 — single u64 write on aligned address.
+		 */
+		if (!spte)
+			return 0;
+		if (READ_ONCE(*spte) & 1ULL) {
+			WRITE_ONCE(*spte, 0);
+			WRITE_ONCE(shadow->dirty, true);
+		}
 		return 0;
 	}
 
 	/*
-	 * Translate. kvm_um_pte_to_x86 returns 0 for PTEs that
-	 * shouldn't be installed in shadow:
-	 *   - !PRESENT (handled above)
-	 *   - !ACCESSED (UML emulates A in software; we want a
-	 *     #PF on first access so UML marks it young)
-	 *   - PROT_NONE
+	 * Installing. Translate first.
 	 */
 	x86e = kvm_um_pte_to_x86(ume);
 	if (!x86e) {
-		shadow->synced = false;
+		/*
+		 * Translator says absent (PROT_NONE / !ACCESSED).
+		 * Treat like clear: drop existing leaf if any.
+		 */
+		if (!spte)
+			return 0;
+		if (READ_ONCE(*spte) & 1ULL) {
+			WRITE_ONCE(*spte, 0);
+			WRITE_ONCE(shadow->dirty, true);
+		}
 		return 0;
 	}
 
 	/*
-	 * Install. kvm_shadow_map_page does NOT take fill_lock
-	 * itself — only fill and invalidate do — so calling it
-	 * from inside our locked region is safe and keeps the
-	 * clear+install transaction atomic w.r.t. other
-	 * shadow-mutating callers on this mm.
+	 * Need to install. If the path doesn't exist (intermediate
+	 * tables missing), we can't allocate from atomic context.
+	 * Set needs_full_resync; kvm_enter_guest's repair will
+	 * allocate + fill before KVM_RUN.
 	 */
-	rc = kvm_shadow_map_page(shadow, addr,
-				 x86e & 0x000ffffffffff000ULL,
-				 x86e & ~0x000ffffffffff000ULL);
-	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm shadow_sync_pte: map_page(va=0x%lx) failed (%d) — marking needs_full_resync\n",
-				    addr, rc);
+	if (!spte) {
 		WRITE_ONCE(shadow->needs_full_resync, true);
-		shadow->synced = false;
-		return rc;
+		WRITE_ONCE(shadow->dirty, true);
+		return 0;
 	}
-	shadow->synced = false;
+
+	/*
+	 * Path exists — install the leaf atomically.
+	 */
+	was_present = (READ_ONCE(*spte) & 1ULL) != 0;
+	WRITE_ONCE(*spte,
+		   (x86e & 0x000ffffffffff000ULL) |
+		   (x86e & ~0x000ffffffffff000ULL));
+	WRITE_ONCE(shadow->dirty, true);
+
+	/*
+	 * Do NOT set shadow->synced = false on success. Per memo 15
+	 * #2: a successful direct sync MAINTAINS the synced state —
+	 * the shadow now exactly mirrors the new PTE in pgd. Forcing
+	 * synced=false would trigger a redundant full fill on the
+	 * next entry. Only the failure paths above (deferred via
+	 * needs_full_resync) need the next entry to repair.
+	 */
+	(void)was_present;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_sync_pte);
+
+/*
+ * Range clear for parent-level clears (pmd_clear, pud_clear,
+ * p4d_clear). Walks the shadow user-half over [start, end) and
+ * clears any present leaf. Atomic: single-u64 writes only,
+ * no allocation.
+ */
+void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
+				   unsigned long start, unsigned long end)
+{
+	struct kvm_shadow_mm *shadow;
+	unsigned long addr;
+	bool any_cleared = false;
+
+	if (!mm)
+		return;
+	shadow = mm->context.id.kvm_shadow;
+	if (!shadow || !shadow->pgd)
+		return;
+
+	for (addr = start & ~0xfffUL;
+	     addr < ((end + 0xfffUL) & ~0xfffUL);
+	     addr += PAGE_SIZE) {
+		u64 *spte = kvm_shadow_walk_leaf(shadow, addr);
+
+		if (!spte)
+			continue;
+		if (READ_ONCE(*spte) & 1ULL) {
+			WRITE_ONCE(*spte, 0);
+			any_cleared = true;
+		}
+	}
+	if (any_cleared)
+		WRITE_ONCE(shadow->dirty, true);
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_clear_range_atomic);

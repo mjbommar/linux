@@ -10,6 +10,7 @@
 #include <asm/backend.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
+#include <asm/kvm_mmu_sync.h>	/* kvm_shadow_clear_range_atomic */
 #include <as-layout.h>
 #include <mem_user.h>
 #include <os.h>
@@ -267,6 +268,13 @@ void flush_tlb_mm(struct mm_struct *mm)
 	struct vm_area_struct *vma;
 	VMA_ITERATOR(vmi, mm, 0);
 
-	for_each_vma(vmi, vma)
+	for_each_vma(vmi, vma) {
 		um_tlb_mark_sync(mm, vma->vm_start, vma->vm_end);
+		/*
+		 * Memo 15 direct shadow sync: also clear shadow leaves
+		 * for this vma's range. Atomic — does not allocate.
+		 */
+		kvm_shadow_clear_range_atomic(mm, vma->vm_start,
+					      vma->vm_end);
+	}
 }
