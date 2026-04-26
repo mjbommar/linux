@@ -3336,43 +3336,25 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
 				      rc);
 		}
-		kvm_regs_to_uml_regs(regs, &kregs);
 
 		/*
-		 * Audit finding A2 (memo D70): derive is_user from
-		 * the observed CPL at VMEXIT instead of hardcoding
-		 * it per-case. CPL = cs.selector & 3 (lowest 2
-		 * bits of the ring-3 CS selector are the RPL, which
-		 * equals CPL for any user-mode selector). seccomp /
-		 * ptrace backends only trap from ring-3 so they
-		 * always set is_user = 1, but the KVM backend can
-		 * also VMEXIT mid-ring-0 (e.g. MMIO fault while
-		 * executing the bootstrap #PF handler or an
-		 * exception decoder). Misclassifying a ring-0 exit
-		 * as is_user = 1 sends the fault through
-		 * arch/um/kernel/trap.c's user-signal path at
-		 * trap.c:321 instead of the panic path at
-		 * trap.c:292 — guest kernel code that faults would
-		 * silently signal a phantom user task instead of
-		 * panicking the host kernel, making KVM crash
-		 * diagnostics untrustworthy.
+		 * Memo 18 Phase 1.1: read SREGS BEFORE the bulk regs
+		 * marshal so we can gate the marshal on guest CPL. Until
+		 * this reorder, the unconditional kvm_regs_to_uml_regs
+		 * below would corrupt user regs whenever the vCPU vmexit'd
+		 * at CPL=0 mid-bootstrap (LSTAR trampoline / IRETQ gadget /
+		 * #PF handler) — kregs.rip / kregs.rsp / kregs.rflags
+		 * point at bootstrap-page kernel-half values. The next
+		 * kvm_enter_guest then builds the IRETQ frame from those
+		 * corrupt values → guest resumes at a kernel-half RIP →
+		 * wild SIGSEGV in dl_main / Python init.
 		 *
-		 * Read SREGS best-effort: a failure here isn't
-		 * fatal because the per-case defaults below are
-		 * correct for their specific exit reasons (SYSCALL
-		 * is always CPL=3, the #PF handler entry is always
-		 * from CPL=3). The sregs_valid flag tells the MMIO
-		 * case (the one that actually needs runtime CPL)
-		 * whether to trust the fresh read or fall back.
+		 * Audit finding A2 (memo D70): derive is_user from
+		 * the observed CPL. CPL = cs.selector & 3.
 		 *
 		 * Review-01 P1 #5: prefer the synced view via
-		 * KVM_SYNC_X86_SREGS when the cap is available — KVM
-		 * already populated run->s.regs.sregs on this exit
-		 * because we set kvm_valid_regs |= KVM_SYNC_X86_SREGS
-		 * before the entry. Saves one ioctl per VMEXIT on
-		 * gadget-fallback / syscall / #PF / MMIO paths. Only
-		 * fall back to the explicit ioctl when the cap isn't
-		 * exposed by this host KVM.
+		 * KVM_SYNC_X86_SREGS when the cap is available — saves
+		 * one ioctl per VMEXIT.
 		 */
 		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
 			exit_sregs = run->s.regs.sregs;
@@ -3382,6 +3364,48 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					    (unsigned long)&exit_sregs) >= 0) {
 			sregs_valid = true;
 			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
+		}
+
+		/*
+		 * Memo 18 Phase 1.2: per-exit-reason CPL-aware marshal gate.
+		 *
+		 *   CPL=3 (any exit reason): marshal — captures user state
+		 *
+		 *   CPL=0 + KVM_EXIT_IO: marshal — kvm_decode_syscall reads
+		 *       RAX/RCX/R11; PF case rebuilds RIP/SP/EFLAGS from
+		 *       IST after; gadget-fallback case overwrites NR.
+		 *
+		 *   CPL=0 + KVM_EXIT_MMIO: marshal — MMIO case populates
+		 *       faultinfo and dispatches via segv_handler which
+		 *       expects regs to reflect VMEXIT state.
+		 *
+		 *   CPL=0 + KVM_EXIT_HLT: marshal — HLT handler reads
+		 *       kregs.rip and advances past the HLT.
+		 *
+		 *   CPL=0 + KVM_EXIT_INTR: DO NOT marshal — preserve user
+		 *       state from the entry path. The bootstrap sequence
+		 *       (LSTAR trampoline / IRETQ gadget) was interrupted
+		 *       mid-execution; kregs.rip/rsp/rflags are kernel-VA
+		 *       bootstrap-page values that we MUST NOT propagate
+		 *       into the user's uml_pt_regs. Next entry restarts
+		 *       the bootstrap from regs->gp[HOST_IP] (still the
+		 *       right user RIP from the previous interrupt_end /
+		 *       out_read_regs cycle).
+		 *
+		 * Fail-open: if SREGS read failed (sregs_valid=false),
+		 * marshal as before — the rare ioctl-failure case is
+		 * correct under the original behaviour.
+		 */
+		{
+			bool exit_at_user = !sregs_valid || regs->is_user;
+			bool exit_needs_marshal =
+				exit_at_user ||
+				run->exit_reason == KVM_EXIT_IO ||
+				run->exit_reason == KVM_EXIT_MMIO ||
+				run->exit_reason == KVM_EXIT_HLT;
+
+			if (exit_needs_marshal)
+				kvm_regs_to_uml_regs(regs, &kregs);
 		}
 
 		switch (run->exit_reason) {
