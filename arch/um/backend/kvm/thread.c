@@ -302,30 +302,66 @@ void kvm_init_thread_regs(unsigned long *gp, unsigned long *fp)
 {
 	get_safe_registers(gp, fp);
 
+	/*
+	 * P0-FS-LEAK [SMOKING GUN per memo 16 architecture review]:
+	 * exec_regs is populated either from PTRACE_GETREGS on a stub
+	 * child (arch/um/os-Linux/registers.c:24, ptrace path) or from
+	 * get_stub_state of the seccomp probe stub
+	 * (arch/um/os-Linux/start_up.c:345, seccomp path). Either way,
+	 * it captures HOST register state — including the host stub
+	 * child's FS_BASE / GS_BASE which point at the host glibc's
+	 * TLS area in the host process's VA space.
+	 *
+	 * For ptrace and seccomp backends this is fine because the
+	 * stub IS a real host process; FS_BASE pointing at host TLS
+	 * works correctly inside that process.
+	 *
+	 * For the KVM backend, kvm_enter_guest seeds sregs.fs.base /
+	 * gs.base from gp[HOST_FS_BASE] / gp[HOST_GS_BASE] and
+	 * KVM_SET_SREGS programs the vCPU. The guest then runs with
+	 * FS_BASE = host_stub_TLS_VA. The very first %fs:offset
+	 * access in user code (e.g. GCC stack-protector canary at
+	 * %fs:0x28, errno at %fs:variable, any TLS variable) reads
+	 * from (host_TLS) + offset under the GUEST'S CR3. The host
+	 * TLS VA is unmapped in the guest's pgd → SIGSEGV at small
+	 * offsets matching common TLS layout fields.
+	 *
+	 * The two empirically observed wild-pointer patterns map
+	 * exactly to the two exec_regs sources:
+	 *   - SECCOMP-built KVM:    exec_regs has host TLS (~47-bit
+	 *                           VA like 0x441f0f66e0ff). Wild
+	 *                           pointers in that range.
+	 *   - KVM_ONLY (no probe):  exec_regs is zero. FS_BASE=0,
+	 *                           %fs:0xab dereferences address
+	 *                           0xab — exactly the cr2=0xab
+	 *                           pattern we see at PyMethod_New
+	 *                           etc.
+	 *
+	 * Fix: zero gp[HOST_FS_BASE] and gp[HOST_GS_BASE] after
+	 * get_safe_registers so KVM tasks start with FS_BASE=0.
+	 * glibc's dl_main calls arch_prctl(ARCH_SET_FS, &tls) early
+	 * which propagates a valid FS_BASE via kvm_propagate_fs_gs_base
+	 * (kvm_decode_syscall path) — that's the correct FS_BASE for
+	 * subsequent execution. Any pre-arch_prctl %fs access faults
+	 * cleanly on the NULL page rather than dereferencing host TLS.
+	 *
+	 * Reference: Documentation/virt/uml/redesign/02-workstreams/
+	 * D-kvm-backend/16-architecture-review/02-vcpu-state.md
+	 */
+	gp[HOST_FS_BASE] = 0;
+	gp[HOST_GS_BASE] = 0;
+
 #ifdef CONFIG_UM_BACKEND_KVM_ONLY
 	/*
 	 * Under KVM_ONLY, os_early_checks short-circuits before
 	 * init_pid_registers (registers.c:20) runs — there's no
 	 * ptraced stub child to PTRACE_GETREGS against. That
 	 * leaves the exec_regs baseline zero-filled, so
-	 * get_safe_registers above returns all zeros. Two
-	 * consequences we have to paper over here:
-	 *
-	 *   - The A-05 contract KUnit test asserts at least one
-	 *     gp[] slot is non-zero (the "init writes *something*"
-	 *     invariant).
-	 *   - UML's scheduler uses the gp buffer as a thread's
-	 *     initial register state; zero-filled gp can pass NULL
-	 *     checks but leaves RIP == 0, which isn't useful.
-	 *
-	 * Seed RIP with a sentinel non-zero value. A real vCPU RIP
-	 * is set per-KVM_RUN via KVM_SET_REGS in run_userspace;
-	 * this sentinel is only ever observed by the scheduler's
-	 * bookkeeping + the contract test, not by the CPU. Use
-	 * STUB_START as the sentinel because it's a known-valid
-	 * guest VA under UML's existing stub conventions; future
-	 * real-run_userspace path will overwrite this before any
-	 * KVM_RUN.
+	 * get_safe_registers above returns all zeros. The
+	 * A-05 contract KUnit test asserts at least one gp[] slot
+	 * is non-zero. Seed HOST_IP with STUB_START as a sentinel —
+	 * a real vCPU RIP is set per-KVM_RUN via KVM_SET_REGS, so
+	 * this is only observed by scheduler bookkeeping.
 	 */
 	if (!gp[HOST_IP])
 		gp[HOST_IP] = STUB_START;
