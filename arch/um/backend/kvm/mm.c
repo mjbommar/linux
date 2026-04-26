@@ -150,6 +150,37 @@ int kvm_mm_unmap(struct mm_id *id, unsigned long virt, unsigned long len)
 {
 	int rc;
 
+#ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	/*
+	 * #274 / T13: short-circuit the init_new_context "clear
+	 * STUB area" call. arch/um/kernel/skas/mmu.c:86 calls
+	 *   um_backend_dispatch(mm_unmap, new_id, 0, STUB_START);
+	 * for every freshly-attached mm. STUB_START is host_task_size
+	 * - STUB_SIZE — typically ~128 TB on x86_64.
+	 *
+	 * Under seccomp this clears the new stub-child's address
+	 * space below the stub. Under integrated KVM there is no
+	 * stub-child; the call would (a) munmap a 128 TB chunk of
+	 * the UML host process — silently truncated to int, so
+	 * usually -EINVAL but technically destructive — and
+	 * (b) walk kvm_shadow_invalidate_va_range over 32 billion
+	 * pages of the WRONG shadow (kvm_shadow_mm_current returns
+	 * the parent's shadow, not new_id's).
+	 *
+	 * Heuristic: virt==0 AND len reaches into the kernel-half VA
+	 * region (>= TASK_SIZE/2 == 64 TB) is the init_new_context
+	 * signature; legitimate user munmap calls never span that
+	 * far. Skip the entire op for the new mm — its shadow tree
+	 * was just allocated by mm_attach and has no leaves to
+	 * clear.
+	 */
+	if (virt == 0 && len >= (1UL << 46)) {
+		pr_info_once("um: kvm mm_unmap: skipping init_new_context bulk-clear (virt=0, len=0x%lx)\n",
+			     len);
+		return 0;
+	}
+#endif
+
 	(void)id;
 
 	rc = os_unmap_memory((void *)virt, len);
