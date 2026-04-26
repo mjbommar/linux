@@ -1669,10 +1669,25 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	/*
 	 * Task #273: install host CPUID on the vCPU before its first
 	 * KVM_RUN so the guest sees real host x86 features (AVX2 /
-	 * x86-64-v3 etc). Idempotent fast-path after the first call;
-	 * non-fatal failure (logged once, kvm_enter_guest continues).
+	 * x86-64-v3 etc). Idempotent fast-path after the first call.
+	 *
+	 * #274 follow-on: failure here used to be silently dropped via
+	 * `(void)`. If KVM_SET_CPUID2 fails (e.g. host KVM rejects the
+	 * filter, host kernel disagrees on a feature flag), the vCPU
+	 * runs with the host KVM's default CPUID — which may expose
+	 * different features than UML's own boot-time probe. glibc /
+	 * dl_main probe CPUID and select code paths accordingly; a
+	 * mismatch between probe-time CPUID (used to pick which SSE
+	 * variant of memcpy / strlen / etc. the dynamic linker links)
+	 * and run-time CPUID can manifest as #UD or wrong-result
+	 * silent corruption. Fail loudly instead.
 	 */
-	(void)kvm_ensure_cpuid_done();
+	rc = kvm_ensure_cpuid_done();
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm enter_guest: cpuid install failed (%d)\n",
+				    rc);
+		return rc;
+	}
 
 	rc = kvm_enter_guest_init_bootstrap();
 	if (rc < 0)
