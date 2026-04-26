@@ -153,6 +153,55 @@ to a private helper at 0x14560) suggests either:
 4 trials) with Phase 3-fix (`8de84913b847`) for IRETQ frame
 post-fill ordering. Architecturally sound, no regressions.
 
+## Failure-mode dissection 2026-04-26 evening: ld-linux NULL deref is glibc exception handling
+
+N=50 baseline of `import test.test_decimal` reproducer: 43/50 = 86%
+reliability. Failure dissection (N=30 with full pf_mini_regs capture):
+
+- **5/8 failures (62.5%)**: IDENTICAL signature
+  ```
+  rip=0x400265c3 cr2=0x470 ec=0x4 rax=0x0 rbx=0x4003cac0 rcx=0x400299eb
+  rdx=0x1 rsi=0x4000 rdi=0x403d3000 r8=0x0 r12=<varies> r13=0x0 r14=0x0 r15=0x0
+  ```
+  Only r12 varies across trials (stack-allocated counter). r13/r14/r15
+  are CONSISTENTLY zero. Instruction at 0x265c3 is
+  `cmpq $0x0,0x470(%r15)` which faults at va=NULL+0x470.
+
+- **3/8 failures (37.5%)**: distinct rip/cr2 patterns (Python internals,
+  libc internals, etc.)
+
+**Root cause of the dominant 5/8 mode**: the r13/r14/r15 = 0 pattern
+matches `ELF_PLAT_INIT` (arch/x86/um/asm/elf.h:118-120) which zeroes
+ALL registers at execve. The code at 0x265c3 is reached via
+setjmp/longjmp exception unwinding — the helper at 0x14560 (called
+from 0x265be) is likely `_dl_catch_exception`. Under exception:
+
+  1. Earlier glibc/ld-linux state inconsistency triggers an exception
+  2. Helper at 0x14560 catches it (longjmp)
+  3. longjmp restores callee-save regs from the saved jmpbuf —
+     captured at process startup when r13/r14/r15 were 0 per ELF_PLAT_INIT
+  4. Resume at 0x265c3 with r15=0 (the "exception caught" path)
+  5. Optimized code assumes r15 is valid → NULL deref → SIGSEGV → exit
+
+The actual bug is NOT at 0x265c3. The bug is **whatever causes glibc
+to raise the exception in step 1** — a memory-content discrepancy
+or invariant violation triggered by KVM-specific behavior that
+seccomp doesn't reproduce.
+
+This shifts the investigation from "find the corrupted register" to
+"find the inconsistency glibc detects". Without deep runtime
+instrumentation (capturing the exception's reason field, or stepping
+through ld-linux at the moment exception is raised), this is hard
+to root-cause from this layer.
+
+**Bottom-line empirical state**: 86% per-import reliability under KVM,
+17/21 parity gate median. No surgical fix beyond Phase 1+2+3-fix has
+moved the needle. The remaining flake is tied to a glibc exception
+handler being invoked under KVM but not seccomp — root cause is
+upstream of the SIGSEGV symptom and needs runtime trace
+instrumentation or per-mm host worker (eliminating the host-VA
+aliasing class entirely).
+
 ---
 
 ---
