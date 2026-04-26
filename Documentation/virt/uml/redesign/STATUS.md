@@ -26,58 +26,77 @@ catches up.
 | CPython parity gate (21 stdlib modules)     | kvm      | **16-18/21 PARITY** (run-to-run variance; was 0/21 pre-keystone) |
 | Same workloads under `backend=force=seccomp` | seccomp | yes (20/20 deterministic) |
 
-## Residual flake state (post memo 17 Phase H — 2026-04-26)
+## Residual flake state (post memo 17 Phase A-K — 2026-04-26)
 
-Six commits landed this session moved the cpython parity gate from
-**0/21** to **16-18/21** with run-to-run variance. The remaining
-3-5 DIVERGE entries each run are NOT deterministic test failures —
-they are SIGSEGV (`exitcode=0x0000000b`) flakes that appear at
-varying RIPs across runs. SECCOMP runs the IDENTICAL workload at
-20/20 deterministic, so the flakes are KVM-specific kernel bugs,
-NOT Python/glibc nondeterminism.
+11 commits landed this session moved the cpython parity gate from
+**0/21** (deterministic FAIL) to **16-18/21** (run-to-run variance).
+import unittest under KVM moved from 0/10 to 27-29/30 (~93%
+deterministic; SECCOMP baseline 20/20 — the residual ~7% under
+KVM is KVM-only SIGSEGV at varying RIPs, not Python nondeterminism).
 
-The residual ~10-20% SIGSEGV-flake on Python startup (single
-process) is the dominant blocker for full 21/21 parity. Empirical
-signature pattern (memo 17 Agent 3 report):
-  - Bug A: heap-data 0xAA UAF (`rdi=0xaaaaaaaaaaaaaaab`)
-  - Bug B: TLS slot reads 0xff..ff (FS_BASE / TLS state leak)
-  - Bug C: NULL ob_type during PyObject deref
-  - Bug D/E: high-bit-corrupted pointer (`cr2=0x80000d18`,
-    `cr2=0xc000c680` — bit 31 set on what should be a 0x40000xxx
-    user VA)
+### What's been fixed (commits)
 
-What's been ruled out:
-  - vCPU memory ordering on shadow->dirty (memo 17 Phase A)
-  - TLB-flush mechanism (memo 17 Phase B / keystone)
-  - FPU hash UAF (memo 17 Phase D — embedded in arch_thread)
-  - VCPU_EVENTS save/restore (memo 17 Phase E + H)
-  - Cross-task event leak on fresh switch-in (memo 17 Phase H)
-  - Cross-task FPU leak on fresh switch-in (memo 17 Phase H)
-  - dirty-flag race on consume (memo 17 Phase H finding 1)
+  Phase A `dc58a7ed3ada`: 6 lifecycle.c sites missing the producer-
+                          side WRITE_ONCE+smp_wmb for shadow->dirty
+                          (Race-I keystone parallel)
+  Phase B `(in-Phase-A)`: CR4.PGE-toggle replaces CR3-XOR hack as
+                          the TLB-flush mechanism
+  Phase D `(in-Phase-A)`: FPU hash → embedded in arch_thread.kvm
+                          (eliminates B-FPU-HASH-UAF)
+  Phase E `4b908bd16e4f`: VCPU_EVENTS save/restore on context switch
+  Phase H `c512077454cd`: 4 task-isolation bugs from external
+                          review (dirty-flag cmpxchg, fresh-task
+                          VCPU_EVENTS reset, events.flags preserve,
+                          fresh-task FPU init)
+  Phase I `a71d44db0235`: mmap_read_lock around all 3 source-pgd
+                          fill walks (finding 5)
+  Phase J `9fb1a82e2357`: needs_full_resync race fix +
+                          fork FPU inheritance (findings 1b + 6)
+  Phase K `644ebea88419`: KVM_EXIT_INTR ring-0 leak — skip the
+                          unconditional uml_pt_regs marshal when the
+                          exit was on KVM_EXIT_INTR (could fire mid-
+                          bootstrap with kregs.rip in the kernel-VA
+                          bootstrap-alias range; marshaling left next
+                          kvm_enter_guest building IRETQ frame from
+                          a kernel-half RIP → wild SIGSEGV)
 
-Suspected remaining bug classes (to investigate):
-  - Finding 5 (memo 17 Phase I): kvm_shadow_fill_from_uml_pgd walks
-    the source pgd without holding mmap_read_lock — concurrent same-
-    mm unmap could free PT pages mid-walk. Tracked separately.
-  - Parent-VA contamination (memo 17 finding 4 / Phase 4 Option B):
-    `kvm_mm_map` uses os_map_memory into the SINGLE UML host process
-    address space; cross-mm switches leave stale host-VA mappings
-    that copy_to_user/copy_from_user can hit. Architectural — needs
-    per-mm host worker process.
-  - Singleton IRETQ-frame buffer at `kvm_bootstrap_page_stack`: all
-    tasks share the same staging frame for the bootstrap IRETQ.
-    Signal-driven preemption between frame-write and KVM_RUN can
-    let task B clobber task A's frame. Tested signal-blocking fix
-    (Phase F) — no measurable improvement; bug must be elsewhere
-    OR the signal-blocking didn't actually block at this layer
-    (UML's signal infrastructure is complex). Per-task IRETQ-frame
-    storage would be the surgical fix.
+### What's been ruled out
 
-The session-end recommendation: Phase A-H is correct, lands solid
-keystone fixes, and pushes parity from 0 to ~17/21. Pursuing 21/21
-requires either the per-mm host worker (Phase 4 Option B,
-multi-week) or a deep dive into the IRETQ-frame / parent-VA
-race classes — both significant restructuring beyond this session.
+  - vCPU memory ordering on shadow->dirty (Phase A)
+  - TLB-flush mechanism (Phase B / keystone)
+  - FPU hash UAF / cross-task FPU leak (Phase D / H)
+  - VCPU_EVENTS leak (Phase E + H)
+  - dirty-flag consume race (Phase H finding 1)
+  - needs_full_resync consume race (Phase J finding 1b)
+  - VCPU_EVENTS UAPI flag discard (Phase H finding 3)
+  - mmap_read_lock around source-pgd walks (Phase I finding 5)
+  - fork FPU inheritance (Phase J finding 6)
+  - KVM_EXIT_INTR ring-0 marshal leak (Phase K external finding 1)
+
+### What remains (deferred to architectural follow-up)
+
+  - **Finding 4 / external Finding 2 + 3** — singleton vCPU + singleton
+    IRETQ-frame buffer + no per-mm turnstile. Seccomp avoids these
+    entirely via the per-mm stub-child host process. Under KVM, the
+    bootstrap_page_stack is shared across all tasks; signal-driven
+    preemption between frame-write and KVM_RUN can let task B's
+    frame clobber task A's. Tested block_signals around the
+    critical section (Phase F) — no measurable improvement under
+    UML's signal infrastructure. The structural fix is per-mm host
+    worker (memo Phase 4 Option B) — multi-week refactor.
+  - **External Finding 5** — direct sync writes shadow leaves
+    without fill_lock; if a full-fill snapshot+install cycle is in
+    progress, the fill's stale snapshot can overwrite a fresh
+    sync_pte write. Mitigated by mmap_read_lock (Phase I) which
+    bounds the race window, but full lockless audit is deferred.
+
+The session-end equilibrium: Phase A-K is correct, lands solid
+keystone correctness, and pushes the cpython parity gate from
+0/21 to 16-18/21 with import unittest at 27-29/30 (was 0/10).
+Closing to 21/21 requires either the per-mm host worker (memo
+Phase 4 Option B, multi-week) or per-task IRETQ-frame storage
++ per-mm turnstile around the trap iteration — both meaningful
+restructuring beyond this session's scope.
 
 ## P0 keystone fix landed 2026-04-26 (`901213a8d2d1`)
 
