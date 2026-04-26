@@ -2083,23 +2083,11 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 * recoverable-#PF (matches bootstrap_page_stack at +3 page)
 	 * but cannot execute from it.
 	 */
-	{
-		struct kvm_shadow_mm *cur_shadow = kvm_shadow_mm_current();
-
-		if (cur_shadow && cur_shadow->iretq_frame_gpa) {
-			rc = kvm_shadow_map_page(cur_shadow,
-				cur_shadow->iretq_frame_va_guest,
-				cur_shadow->iretq_frame_gpa,
-				KVM_X86_PTE_P | KVM_X86_PTE_RW |
-				KVM_X86_PTE_NX);
-			if (rc < 0) {
-				pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(per-mm iretq frame va=0x%llx) failed (%d)\n",
-						    (unsigned long long)cur_shadow->iretq_frame_va_guest,
-						    rc);
-				return rc;
-			}
-		}
-	}
+	/*
+	 * Memo 18 Phase 3-fix 2026-04-26: per-mm IRETQ frame install
+	 * MOVED below the fill (after fill_done:) so the fill's
+	 * install pass cannot overwrite the leaf. Was here pre-fix.
+	 */
 
 	/*
 	 * Memo 11 G3 — per-vCPU gadget state channel. Allocate
@@ -2337,6 +2325,37 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 				    filled);
 fill_done:
 		;	/* perf-lever #4 skip-target — falls through */
+	}
+
+	/*
+	 * Memo 18 Phase 3-fix 2026-04-26: install the per-mm IRETQ
+	 * frame AFTER the fill completes so the fill's install pass
+	 * (which walks UML's pgd in PGD slot 384 and could otherwise
+	 * land on this VA via the kernel direct-map alias of the same
+	 * underlying page) cannot overwrite our leaf. Original
+	 * placement was BEFORE the fill (line ~2086 pre-fix); the
+	 * IRETQ frame's shadow leaf is now guaranteed to win.
+	 *
+	 * RW + NX so the guest CPU can write the iretq frame on
+	 * recoverable-#PF (matches bootstrap_page_stack at +3 page)
+	 * but cannot execute from it.
+	 */
+	{
+		struct kvm_shadow_mm *cur_shadow = kvm_shadow_mm_current();
+
+		if (cur_shadow && cur_shadow->iretq_frame_gpa) {
+			rc = kvm_shadow_map_page(cur_shadow,
+				cur_shadow->iretq_frame_va_guest,
+				cur_shadow->iretq_frame_gpa,
+				KVM_X86_PTE_P | KVM_X86_PTE_RW |
+				KVM_X86_PTE_NX);
+			if (rc < 0) {
+				pr_warn_ratelimited("um: kvm enter_guest: shadow_map_page(per-mm iretq frame va=0x%llx) failed (%d)\n",
+						    (unsigned long long)cur_shadow->iretq_frame_va_guest,
+						    rc);
+				return rc;
+			}
+		}
 	}
 
 	/*
