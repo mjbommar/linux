@@ -415,6 +415,27 @@ struct mm_id;
  * frees. The mm_id holds an opaque void* so other backends don't
  * need to pull in this header.
  */
+/*
+ * F12 mutation ring entry. One per shadow PTE event; circular
+ * buffer per shadow_mm so on a fatal fault we can locate the
+ * recent mutation history for cr2's VA.
+ */
+struct kvm_shadow_mut_entry {
+	u64	addr;		/* VA being mutated */
+	u64	ume;		/* new UML PTE value */
+	u64	old_spte;	/* shadow leaf BEFORE this mutation */
+	u64	new_spte;	/* shadow leaf AFTER this mutation */
+	u8	action;		/* see KVM_SHADOW_MUT_* below */
+	u8	pad[7];
+};
+
+#define KVM_SHADOW_MUT_INSTALL		1
+#define KVM_SHADOW_MUT_CLEAR		2
+#define KVM_SHADOW_MUT_ABSENT_PATH	3	/* no path to leaf, install deferred */
+#define KVM_SHADOW_MUT_NOOP_ABSENT	4	/* absent on both sides */
+
+#define KVM_SHADOW_MUT_RING_SIZE	256
+
 struct kvm_shadow_mm {
 	struct page		*pgd_page;	/* backing page for teardown */
 	void			*pgd;		/* kernel VA of top-level PGD */
@@ -440,6 +461,14 @@ struct kvm_shadow_mm {
 	u64			direct_sync_absent;
 	u64			direct_sync_alloc_fail;
 	u64			direct_sync_range_clear;
+	/*
+	 * F12 mutation ring. Circular buffer of the last N mutations.
+	 * head_seq is monotonically increasing; ring index =
+	 * head_seq % KVM_SHADOW_MUT_RING_SIZE. Single-writer per mm;
+	 * read concurrently for diagnostics.
+	 */
+	u64			mut_head_seq;
+	struct kvm_shadow_mut_entry mut_ring[KVM_SHADOW_MUT_RING_SIZE];
 };
 
 struct kvm_shadow_mm *kvm_shadow_mm_alloc(void);

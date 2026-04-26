@@ -74,6 +74,22 @@ void kvm_shadow_sync_range_atomic(struct mm_struct *mm,
 void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
 				   unsigned long start, unsigned long end);
 
+/*
+ * F12 mutation ring dump. Walks the per-shadow_mm circular ring
+ * for the most recent N mutations whose addr matches
+ * (target_addr & ~mask). Use mask=0xfff for exact-page;
+ * mask=0xffff_ffff for "any address with this low-32-bit
+ * pattern". Logs up to max_log matching entries.
+ *
+ * forward decl uses struct kvm_shadow_mm * (defined in
+ * arch/um/backend/kvm/kvm_backend.h); callers outside the KVM
+ * backend should pass current->active_mm->context.id.kvm_shadow.
+ */
+struct kvm_shadow_mm;
+void kvm_shadow_mut_dump_for(struct kvm_shadow_mm *shadow,
+			     u64 target_addr, u64 mask,
+			     unsigned int max_log);
+
 #else /* !CONFIG_UM_BACKEND_KVM_INTEGRATED */
 
 static inline int kvm_shadow_sync_pte(struct mm_struct *mm,
@@ -97,6 +113,13 @@ static inline void kvm_shadow_sync_range_atomic(struct mm_struct *mm,
 static inline void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
 						 unsigned long start,
 						 unsigned long end)
+{
+}
+
+struct kvm_shadow_mm;
+static inline void kvm_shadow_mut_dump_for(struct kvm_shadow_mm *shadow,
+					   u64 target_addr, u64 mask,
+					   unsigned int max_log)
 {
 }
 

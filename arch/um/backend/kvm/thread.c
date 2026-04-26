@@ -3325,11 +3325,34 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					 * shadow was being maintained via
 					 * direct sync vs deferred chain.
 					 */
+					/*
+					 * F12 always-on mini reg dump so we
+					 * can correlate cr2 with the source
+					 * register's content. The full dump
+					 * is still gated on
+					 * kvm_diag_pf_dump_regs.
+					 */
+					pr_info("um: kvm pf_mini_regs: rip=0x%llx cr2=0x%lx ec=0x%llx rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx rsi=0x%llx rdi=0x%llx r8=0x%llx r12=0x%llx r13=0x%llx r14=0x%llx r15=0x%llx\n",
+						(unsigned long long)fault_rip,
+						cr2,
+						(unsigned long long)fault_error_code,
+						(unsigned long long)kregs.rax,
+						(unsigned long long)kregs.rbx,
+						(unsigned long long)kregs.rcx,
+						(unsigned long long)kregs.rdx,
+						(unsigned long long)kregs.rsi,
+						(unsigned long long)kregs.rdi,
+						(unsigned long long)kregs.r8,
+						(unsigned long long)kregs.r12,
+						(unsigned long long)kregs.r13,
+						(unsigned long long)kregs.r14,
+						(unsigned long long)kregs.r15);
+
 					if (current->active_mm) {
 						struct kvm_shadow_mm *sh =
 							current->active_mm->context.id.kvm_shadow;
 
-						if (sh)
+						if (sh) {
 							pr_info("um: kvm pf_counters: install=%llu clear=%llu absent=%llu alloc_fail=%llu range_clear=%llu needs_full_resync=%d\n",
 								(unsigned long long)READ_ONCE(sh->direct_sync_install),
 								(unsigned long long)READ_ONCE(sh->direct_sync_clear),
@@ -3337,6 +3360,38 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 								(unsigned long long)READ_ONCE(sh->direct_sync_alloc_fail),
 								(unsigned long long)READ_ONCE(sh->direct_sync_range_clear),
 								READ_ONCE(sh->needs_full_resync));
+							/*
+							 * F12: dump mutation
+							 * ring entries near
+							 * cr2 — the corrupted
+							 * VA is what we read
+							 * to get rdi (which
+							 * had the wrong
+							 * pointer leading us
+							 * to cr2). So search
+							 * for entries near
+							 * the page-aligned cr2
+							 * AND the call's rdi
+							 * (which we don't have
+							 * here; cr2 is the
+							 * deref target).
+							 */
+							kvm_shadow_mut_dump_for(
+								sh,
+								(u64)cr2,
+								0xfffULL, 32);
+							/*
+							 * Wider scan in case
+							 * the original write
+							 * was on a different
+							 * page than the
+							 * dereference target.
+							 */
+							kvm_shadow_mut_dump_for(
+								sh,
+								(u64)cr2,
+								0xffffULL, 8);
+						}
 					}
 
 					/*

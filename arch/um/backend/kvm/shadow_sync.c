@@ -51,6 +51,76 @@
 #define UM_PTE_PRESENT	0x001
 
 /*
+ * F12 mutation ring: record one entry per shadow PTE event so a
+ * fatal-fault dump can reconstruct the recent history for cr2.
+ * Single-writer per mm (we're inside guard or the atomic
+ * single-host-thread invariant); head_seq is incremented after
+ * the entry is written. Reader scans the ring backwards from
+ * the most recent entry.
+ */
+static void kvm_shadow_record_mut(struct kvm_shadow_mm *shadow,
+				  u64 addr, u64 ume,
+				  u64 old_spte, u64 new_spte,
+				  u8 action)
+{
+	u64 seq = READ_ONCE(shadow->mut_head_seq);
+	struct kvm_shadow_mut_entry *e =
+		&shadow->mut_ring[seq % KVM_SHADOW_MUT_RING_SIZE];
+
+	e->addr     = addr;
+	e->ume      = ume;
+	e->old_spte = old_spte;
+	e->new_spte = new_spte;
+	e->action   = action;
+	smp_wmb();
+	WRITE_ONCE(shadow->mut_head_seq, seq + 1);
+}
+
+/*
+ * Dump the most recent ring entries that touch [target_addr & ~mask,
+ * target_addr | mask). Called from the fatal-fault path when we want
+ * to know what mutations led to the corrupted VA. mask=0xfff scans
+ * exact-page; larger masks widen the search.
+ */
+void kvm_shadow_mut_dump_for(struct kvm_shadow_mm *shadow,
+			     u64 target_addr, u64 mask, unsigned int max_log)
+{
+	u64 seq;
+	unsigned int found = 0;
+	u64 target = target_addr & ~mask;
+
+	if (!shadow)
+		return;
+	seq = READ_ONCE(shadow->mut_head_seq);
+	pr_info("um: kvm mut_dump: looking for entries near va=0x%llx (mask=0x%llx) in last %u mutations (head_seq=%llu)\n",
+		(unsigned long long)target,
+		(unsigned long long)mask, KVM_SHADOW_MUT_RING_SIZE,
+		(unsigned long long)seq);
+
+	for (u64 i = 1; i <= KVM_SHADOW_MUT_RING_SIZE && i <= seq; i++) {
+		u64 idx = (seq - i) % KVM_SHADOW_MUT_RING_SIZE;
+		struct kvm_shadow_mut_entry *e = &shadow->mut_ring[idx];
+		u64 ea = READ_ONCE(e->addr);
+
+		if ((ea & ~mask) != target)
+			continue;
+		pr_info("um: kvm mut_dump[#%llu]: va=0x%llx ume=0x%llx old_spte=0x%llx new_spte=0x%llx action=%u\n",
+			(unsigned long long)(seq - i),
+			(unsigned long long)ea,
+			(unsigned long long)e->ume,
+			(unsigned long long)e->old_spte,
+			(unsigned long long)e->new_spte,
+			e->action);
+		if (++found >= max_log)
+			break;
+	}
+	if (!found)
+		pr_info("um: kvm mut_dump: no recent mutations near va=0x%llx\n",
+			(unsigned long long)target);
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_mut_dump_for);
+
+/*
  * Walk the shadow tree to the leaf-PTE slot for `addr`. Returns
  * the slot pointer if all intermediate tables exist, or NULL if
  * any level is missing (which means there is no current shadow
@@ -116,16 +186,28 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		if (!spte) {
 			WRITE_ONCE(shadow->direct_sync_absent,
 				   READ_ONCE(shadow->direct_sync_absent) + 1);
+			kvm_shadow_record_mut(shadow, addr, ume, 0, 0,
+					      KVM_SHADOW_MUT_NOOP_ABSENT);
 			return 0;
 		}
-		if (READ_ONCE(*spte) & 1ULL) {
-			WRITE_ONCE(*spte, 0);
-			WRITE_ONCE(shadow->dirty, true);
-			WRITE_ONCE(shadow->direct_sync_clear,
-				   READ_ONCE(shadow->direct_sync_clear) + 1);
-		} else {
-			WRITE_ONCE(shadow->direct_sync_absent,
-				   READ_ONCE(shadow->direct_sync_absent) + 1);
+		{
+			u64 old = READ_ONCE(*spte);
+
+			if (old & 1ULL) {
+				WRITE_ONCE(*spte, 0);
+				WRITE_ONCE(shadow->dirty, true);
+				WRITE_ONCE(shadow->direct_sync_clear,
+					   READ_ONCE(shadow->direct_sync_clear) + 1);
+				kvm_shadow_record_mut(shadow, addr, ume,
+						      old, 0,
+						      KVM_SHADOW_MUT_CLEAR);
+			} else {
+				WRITE_ONCE(shadow->direct_sync_absent,
+					   READ_ONCE(shadow->direct_sync_absent) + 1);
+				kvm_shadow_record_mut(shadow, addr, ume,
+						      0, 0,
+						      KVM_SHADOW_MUT_NOOP_ABSENT);
+			}
 		}
 		return 0;
 	}
@@ -140,13 +222,19 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		 * Treat like clear: drop existing leaf if any.
 		 */
 		if (spte && (READ_ONCE(*spte) & 1ULL)) {
+			u64 old = READ_ONCE(*spte);
+
 			WRITE_ONCE(*spte, 0);
 			WRITE_ONCE(shadow->dirty, true);
 			WRITE_ONCE(shadow->direct_sync_clear,
 				   READ_ONCE(shadow->direct_sync_clear) + 1);
+			kvm_shadow_record_mut(shadow, addr, ume, old, 0,
+					      KVM_SHADOW_MUT_CLEAR);
 		} else {
 			WRITE_ONCE(shadow->direct_sync_absent,
 				   READ_ONCE(shadow->direct_sync_absent) + 1);
+			kvm_shadow_record_mut(shadow, addr, ume, 0, 0,
+					      KVM_SHADOW_MUT_NOOP_ABSENT);
 		}
 		return 0;
 	}
@@ -162,19 +250,27 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		WRITE_ONCE(shadow->dirty, true);
 		WRITE_ONCE(shadow->direct_sync_alloc_fail,
 			   READ_ONCE(shadow->direct_sync_alloc_fail) + 1);
+		kvm_shadow_record_mut(shadow, addr, ume, 0, 0,
+				      KVM_SHADOW_MUT_ABSENT_PATH);
 		return 0;
 	}
 
 	/*
 	 * Path exists — install the leaf atomically.
 	 */
-	was_present = (READ_ONCE(*spte) & 1ULL) != 0;
-	WRITE_ONCE(*spte,
-		   (x86e & 0x000ffffffffff000ULL) |
-		   (x86e & ~0x000ffffffffff000ULL));
-	WRITE_ONCE(shadow->dirty, true);
-	WRITE_ONCE(shadow->direct_sync_install,
-		   READ_ONCE(shadow->direct_sync_install) + 1);
+	{
+		u64 old = READ_ONCE(*spte);
+		u64 new = (x86e & 0x000ffffffffff000ULL) |
+			  (x86e & ~0x000ffffffffff000ULL);
+
+		was_present = (old & 1ULL) != 0;
+		WRITE_ONCE(*spte, new);
+		WRITE_ONCE(shadow->dirty, true);
+		WRITE_ONCE(shadow->direct_sync_install,
+			   READ_ONCE(shadow->direct_sync_install) + 1);
+		kvm_shadow_record_mut(shadow, addr, ume, old, new,
+				      KVM_SHADOW_MUT_INSTALL);
+	}
 
 	/*
 	 * Do NOT set shadow->synced = false on success. Per memo 15
