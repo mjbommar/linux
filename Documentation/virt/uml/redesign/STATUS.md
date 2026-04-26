@@ -20,9 +20,53 @@ catches up.
 | `python3 -c "import hashlib; sha256(...)"`  | kvm      | 5/5       |
 | `python3 -c "import _bisect / _datetime / _ssl / _hashlib / _struct"` | kvm | yes (single C-extension import, no test framework) |
 | `subprocess.run(['/bin/echo', 'x'])`        | kvm      | ~8/10     |
-| `python3 -c "import unittest; ..."`         | kvm      | **NO** (NULL-page deref inside python3.14, downstream of corrupted state) |
-| Any module from CPython's test suite        | kvm      | **NO** (fails because the harness needs `import unittest`) |
+| `python3 -c "import re"`                    | kvm      | **YES** (post-2026-04-26 keystone fix `901213a8d2d1`) |
+| `python3 -c "import unittest"`              | kvm      | 8/10 (was 0/10 — keystone fix flipped this) |
+| `read_test5` byte-integrity (8-file mmap harness) | kvm | 8/8 matches seccomp baseline (was 0/8) |
+| CPython parity gate (21 stdlib modules)     | kvm      | **17/21 PARITY** (run-to-run variance 16-17; was 0/21 before keystone) |
+| Multi-task / threading suites (subinterpreters, FreeThreadingTest, deep recursion) | kvm | **NO** — distinct follow-on bug class (task #77) |
 | Same workloads under `backend=force=seccomp` | seccomp | yes       |
+
+## P0 keystone fix landed 2026-04-26 (`901213a8d2d1`)
+
+**Root cause**: `KVM_SET_SREGS` with the same CR3 value as the vCPU's
+current CR3 does NOT flush the guest TLB even when shadow PT contents
+changed (e.g. munmap cleared a leaf, then user re-mmap a different
+file at the same VA). KVM's `kvm_set_cr3` calls `invalidate_pcid` only
+conditionally, and the VMCS-level CR3 reload is also gated on a value
+change. Result: stale guest TLB → user reads OLD PFN's bytes after a
+clear+remap cycle, never faulting because the cached translation is
+"valid".
+
+**Empirical proof** (`read_test5` C harness, 8 file mmaps at the same
+VA): without the fix, only 1/8 user accesses to a re-mmap'd VA generate
+a host #PF and only 3/8 set_ptes installs fire — the other 5 cycles
+silently read stale TLB entries, returning the prior file's content
+(the page at PFN 0x689 contained "glibc-ld..." from the dynamic
+linker's earlier ld.so.cache mapping; functools.pyc's actual page at
+PFN 0x10ac was correctly populated but never reached the user because
+the shadow leaf write didn't invalidate the cached TLB).
+
+**Fix**: in `kvm_enter_guest`, when CR3 is unchanged but shadow is
+dirty, write a sentinel CR3 (XOR bit 12 — guaranteed-different,
+guaranteed-valid GPA in our 512MiB physmem) before the real CR3 so
+KVM observes a real change → forces VMCS reload + full TLB flush.
+Cost: one extra `KVM_SET_SREGS` ioctl on dirty-shadow same-CR3
+entries; the cached-skip predicate above still elides BOTH ioctls
+when nothing changed.
+
+**Impact**: cpython parity gate `parity=0 → parity=17` (of 21 modules).
+
+**Open follow-on (task #77)**: 5 modules still diverge under KVM, all
+hanging at multi-task / threading / subinterpreter / deep-recursion
+paths. Distinct bug class — multi-mm shadow PT issue, not the same
+TLB keystone. Per-mm CR3 changes already flush TLB via the value
+change; the residual issue is likely in how clone(CLONE_VM) tasks
+share but each need their own TLS / per-task vCPU state.
+
+---
+
+## Pre-keystone notes (kept for historical context)
 
 **The headline fact (corrected 2026-04-26 by `kvm_shadow_audit_va`
 diagnostic, commit `44abfd6e6657`): under integrated KVM, a single
