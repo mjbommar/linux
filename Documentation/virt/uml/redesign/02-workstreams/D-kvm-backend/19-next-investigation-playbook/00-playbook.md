@@ -107,15 +107,69 @@ class bugs — squarely in Phase 4 (KVM-native uaccess / per-mm
 host worker) territory. Per-task vCPU (Phase 5) does NOT address
 these.
 
-## Open hypotheses (NOT yet investigated)
+## BREAKTHROUGH 2026-04-26: bug is TIMING-DEPENDENT
 
-1. **Capture mprotect args/return at the failure**: instrument
-   handle_syscall's mprotect path (or the do_mprotect entry) with
-   pr_info_ratelimited that logs (addr, len, prot, return_value).
-   Log EVERY mprotect call (low volume — Python startup makes ~50).
-   When the fault at 0x265c3 hits, the last mprotect call's
-   return value tells us if (a) mprotect failed or (b) it
-   succeeded but the LATER glibc validation found inconsistency.
+Empirical test sequence (each N=30 trials of the test_decimal
+import reproducer, classified by failure mode):
+
+| Variant | Total ok | ldlinux failures | other |
+|---------|----------|------------------|-------|
+| Baseline (no instrumentation)            | 43/50  | 4 | 3 |
+| `printk` for every mprotect call         | 30/30  | **0** | 0 |
+| Confirm `printk`                         | 28/30  | **0** | 2 |
+| `cpu_relax×100k` instead of printk       | 27/30  | **0** | 3 |
+| `mb()` instead of cpu_spin               | 26/30  | 3 | 1 |
+| `um_tlb_sync` instead of cpu_spin        | 27/30  | 3 | 0 |
+| `cpu_spin×100k` AFTER um_tlb_sync (every entry) | 28/30 | **0** | 2 |
+
+**The ld-linux NULL deref failure mode is purely TIMING-DEPENDENT.**
+A ~50-100 microsecond delay (from printk, cpu_relax×100k, or any
+similar latency) at *either* of these locations eliminates it:
+
+1. After `sys_mprotect` returns inside `handle_syscall`
+2. After `um_tlb_sync(current->mm)` and before `kvm_enter_guest` in
+   `kvm_run_userspace`
+
+**mb() and um_tlb_sync alone DO NOT close the race** — only true
+*latency* does. So it's NOT a memory ordering issue and NOT a TLB
+sync ordering issue. Something asynchronous needs ~50us of CPU
+time to complete.
+
+### Candidates for the asynchronous work
+
+- **Pending signal delivery**: SIGALRM driving UML's scheduler.
+  cpu_relax doesn't disable interrupts, so during the spin, queued
+  signals fire and are processed. Without the spin, we re-enter
+  guest immediately and signals are deferred.
+- **Host kernel workqueue**: some PTE-related cleanup is queued via
+  workqueue / softirq. The spin gives scheduler time to drain it.
+- **KVM internal state settling**: KVM's MMU notifier path has
+  callbacks that fire asynchronously. mprotect triggers
+  invalidate_range which may schedule MMU notifier work; without
+  the spin, the next KVM_RUN may enter before notifiers complete.
+
+### Highest-leverage next-session investigation
+
+1. Add tracing in `kvm_run_userspace` between um_tlb_sync and
+   kvm_enter_guest to count: pending signals, queued workqueue
+   items, KVM MMU notifier callbacks pending. Confirm WHICH
+   asynchronous work needs the 50us window.
+
+2. Once identified, add proper synchronization (e.g., explicit
+   wait-for-MMU-notifiers, or signal-pending check + block, or
+   workqueue flush) to eliminate the race without the spin.
+
+3. The fix is likely a MISSING synchronization point in
+   `kvm_run_userspace` — some "wait until all pending mm
+   mutations are visible to KVM" call.
+
+## Earlier hypothesis (now contradicted by data)
+
+~~mprotect failing under KVM~~ — the captured failure traces show
+all mprotect calls return 0 (success). The bug is NOT mprotect
+failing; it's something asynchronous that happens AFTER mprotect's
+syscall return and that needs time to settle before the next
+guest entry.
 
 2. **Singleton MSR state**: LSTAR / FMASK / STAR / EFER / KERNEL_GS_BASE
    programmed once at bootstrap. Audit whether ANY code path can
