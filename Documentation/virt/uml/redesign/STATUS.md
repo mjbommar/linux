@@ -26,23 +26,47 @@ catches up.
 
 **The headline fact (corrected 2026-04-26 by `kvm_shadow_audit_va`
 diagnostic, commit `44abfd6e6657`): under integrated KVM, a single
-Python `import unittest` faults inside `python3.14`'s text — NOT
+Python `import unittest` faults inside `python3.14`'s text or
+`ld-linux-x86-64.so.2`'s text — depending on ASLR layout — NOT
 inside ld-linux processing `_lzma.cpython-*.so` relocations as
-previously claimed.** Across 5 runs the faulting VA is in {0x0,
-0x48, 0xab, 0xc8, 0xab} (all within the NULL page) and the faulting
-IPs land in 4 distinct python3.14 text offsets across two distinct
-ASLR bases. The audit at the fault site reports `EQUAL synced=1` on
-every run — both UML's pgd and the shadow PT agree there is no
-mapping at the faulting VA. Same script under seccomp works.
+previously claimed.** With ASLR off (`randomize_va_space=0`) the
+crash is deterministic: `cr2=0x300`, `rip=0x4002625f` in
+`ld-linux-x86-64.so.2[2625f]`, which addr2line resolves to
+`dl_main` at `elf/rtld.c:1953`. The faulting instruction is
+`mov 0x300(%rbx),%edi`; the immediately-preceding instruction at
+`0x26236` is `mov -0x260(%rbp),%rbx`, so dl_main loads rbx from
+the stack slot `[rbp-0x260]` which is supposed to hold the main
+executable's `struct link_map *` (arg1 to the upcoming call to
+`_dl_map_object_deps`). The slot reads as 0. Several other
+callee-saved regs (r12/r13/r15) are also 0 — consistent with the
+initial register state at process start, suggesting dl_main's
+earlier code never wrote to them.
 
-The fault is therefore NOT a shadow-staleness miss at `va=cr2`; it
-is a downstream NULL-pointer dereference in python3 caused by
-corrupted state established earlier in execution. The corruption
-source is upstream of the fault — likely either (a) shadow PT
-divergence on a non-faulting VA letting python read the wrong
-physical page, or (b) a syscall path delivering corrupted data to
-userspace. The fault-site audit narrows the search but cannot
-identify the corruption point alone.
+Same script under `backend=force=seccomp randomize_va_space=0`
+succeeds (UT_PRE → UT_DONE → exit 0). So the bug is specifically
+in the KVM backend's interaction with dl_main's early
+initialization, not in glibc/python.
+
+Diagnostics ruled out so far (commits `44abfd6e6657`,
+`2fdfd77f7264`, `97c73735c47a`):
+  - Shadow PT divergence at the fault VA (audit at !touched: EQUAL
+    on every run)
+  - Stale-true cache on the cached-skip path (lockstep audit:
+    DIV=0 even at 2253 leaves)
+  - Syscall round-trip clobbering callee-saved regs
+    (CALLEE-SAVE-CLOBBER never fires across the boot)
+
+Remaining hypotheses to investigate:
+  - Shadow PT has stale leaves the pgd doesn't (shadow→pgd
+    direction not yet audited)
+  - Guest TLB caches stale mappings even though shadow PT is
+    correct (CR3 reload / TLB flush ordering)
+  - Non-syscall paths (signal injection, page fault recovery,
+    initial process setup via execve) corrupt user state
+  - dl_main takes a different code path under our backend due to
+    different return values from early syscalls (e.g. brk, mmap,
+    arch_prctl, set_tid_address) — would need per-syscall return-
+    value diff vs seccomp baseline
 
 That blocks the entire CPython test suite, which is the merge gate
 for closing #274 ("Python is table stakes; if UML can't run a normal
