@@ -61,14 +61,26 @@ static inline void arch_copy_thread(struct arch_thread *from,
 {
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
-	 * Per-task vCPU state is NOT inherited from the parent: a freshly-
-	 * forked child starts with an empty FPU and no pending vCPU
-	 * exceptions. Restore-on-first-switch will see fpu_valid=false and
-	 * leave the vCPU's current FPU alone (matches the pre-#mod-17
-	 * "no slot found → don't touch vCPU FPU" policy in
-	 * kvm_fpu_restore_for_task).
+	 * Memo 17 Phase J (finding 6): fork inherits parent's FPU
+	 * (POSIX semantics; matches arch/x86 native). dup_task_struct
+	 * already memcpy'd from->kvm.fpu into to->kvm.fpu — preserve
+	 * that by copying fpu_valid through. The parent's saved FPU
+	 * may be stale (from before its last switch-out) but is the
+	 * best snapshot available; the parent's switch-out path will
+	 * KVM_GET_FPU into to->kvm.fpu's matching slot anyway, so the
+	 * race window is bounded.
+	 *
+	 * Pending vCPU events are NOT inherited — fork() doesn't
+	 * propagate in-flight exceptions. events_valid stays at
+	 * whatever was memcpy'd from parent; explicitly invalidate
+	 * to force a known-clean state on first switch-in (the fresh-
+	 * task path in kvm_fpu_restore_for_task writes a zeroed
+	 * kvm_vcpu_events with all VALID flags set).
+	 *
+	 * For exec, arch_flush_thread is called separately and resets
+	 * fpu_valid=false → architectural-init FPU on first switch-in.
 	 */
-	to->kvm.fpu_valid = false;
+	(void)from;
 	to->kvm.events_valid = false;
 #endif
 }

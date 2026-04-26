@@ -1958,7 +1958,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	struct mm_struct *mm;
 	u64 cr3_gpa;
 	int rc;
-	bool dirty_snapshot = false;	/* memo 17 Phase H finding 1 */
+	bool dirty_snapshot = false;		/* memo 17 Phase H finding 1 */
+	bool needs_resync_snapshot = false;	/* memo 17 Phase J finding 1b */
 
 	if (vcpu_fd < 0)
 		return -EIO;
@@ -2204,16 +2205,27 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * synced/dirty stores retire — taking the skip-fill
 		 * path even though the shadow tree just changed.
 		 */
+		/*
+		 * Memo 17 Phase J (finding 1b — needs_full_resync race):
+		 * capture the resync snapshot at predicate time. After
+		 * fill completes, only clear via cmpxchg(true → false)
+		 * — a producer (sync_pte's alloc-fail path) that fired
+		 * AFTER fill walked past the affected leaf must NOT have
+		 * its needs_full_resync=true clobbered to false. Otherwise
+		 * the NEXT entry's predicate sees stale false → skips
+		 * fill → guest reads via stale shadow.
+		 */
+		needs_resync_snapshot = shadow ? READ_ONCE(shadow->needs_full_resync) : false;
 		if (shadow && smp_load_acquire(&shadow->synced) &&
 		    READ_ONCE(shadow->synced_pgd_va) == (u64)mm->pgd &&
-		    !READ_ONCE(shadow->needs_full_resync)) {
+		    !needs_resync_snapshot) {
 			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
 			if (kvm_diag_audit_pgd_skip)
 				(void)kvm_shadow_audit_pgd(mm->pgd, "skip", 8);
 			goto fill_done;
 		}
-		if (shadow && READ_ONCE(shadow->needs_full_resync))
+		if (shadow && needs_resync_snapshot)
 			pr_info_ratelimited("um: kvm enter_guest: needs_full_resync flagged — repairing via full fill\n");
 
 		/*
@@ -2276,8 +2288,17 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 					    filled);
 			return filled;
 		}
-		/* Memo 15: full fill repairs the resync flag. */
-		WRITE_ONCE(shadow->needs_full_resync, false);
+		/*
+		 * Memo 15 + Phase J: full fill repairs the resync flag,
+		 * but only consume the snapshot we observed at predicate
+		 * time. cmpxchg preserves any concurrent producer's
+		 * needs_full_resync=true that fired during the fill walk
+		 * — those signal that fill missed a sync_pte alloc-fail
+		 * for a leaf the walk had already passed. The next entry
+		 * will re-fill those.
+		 */
+		if (needs_resync_snapshot)
+			(void)cmpxchg(&shadow->needs_full_resync, true, false);
 		pr_info_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
 				    filled);
 fill_done:
