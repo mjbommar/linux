@@ -1062,13 +1062,42 @@ u64 kvm_um_pte_to_x86(u64 um_pte)
 		return 0;
 
 	/*
-	 * Permissive mapping: if a UML PTE is present we install
-	 * an x86 PTE with the same semantic permissions. UML's
-	 * _PAGE_RW / _PAGE_USER / _PAGE_ACCESSED / _PAGE_DIRTY
-	 * each translate to their hardware counterparts.
+	 * Match UML's software-emulated A/D model from
+	 * arch/um/kernel/tlb.c:73-77 (update_pte_range), which
+	 * derives the host-VA prot as:
+	 *   if (!pte_young(*pte))   { r = w = 0; }
+	 *   else if (!pte_dirty(*pte)) { w = 0; }
+	 * UML has no hardware-managed accessed/dirty bits — the
+	 * host process's pgd that mirrors UML's user pgd is
+	 * mapped RO for clean pages, so writes via the host VA
+	 * fault into UML's trap handler (arch/um/kernel/trap.c)
+	 * which sets _PAGE_DIRTY and marks the PTE writable.
+	 *
+	 * Before this fix, kvm_um_pte_to_x86 set KVM_X86_PTE_RW
+	 * solely on UM_PTE_RW, ignoring UM_PTE_DIRTY. The guest
+	 * could then write through the shadow without ever
+	 * faulting, so UML never observed the write — _PAGE_DIRTY
+	 * stayed clear, page reclaim treated the page as clean
+	 * and could evict it. On next access the page got
+	 * re-read from its source (anonymous ↦ zero, file ↦ disk
+	 * contents), losing the user's writes silently. That
+	 * exactly matches the import-unittest symptom of
+	 * PyObject ob_type fields reading as NULL after they
+	 * were initialised to a valid PyTypeObject pointer.
+	 *
+	 * Cost of the fix: each first-write-to-clean-page now
+	 * takes a guest #PF round-trip instead of a fast path.
+	 * UML's trap handler responds by marking dirty + RW; the
+	 * subsequent fill installs shadow with RW, future writes
+	 * are fast. This is the same access pattern the host VA
+	 * already pays under update_pte_range — we're now
+	 * mirroring the same dirty-emulation semantics in shadow.
+	 *
+	 * UM_PTE_USER, UM_PTE_ACCESSED, UM_PTE_DIRTY translate
+	 * 1-for-1 as before.
 	 */
 	out |= KVM_X86_PTE_P;
-	if (um_pte & UM_PTE_RW)
+	if ((um_pte & UM_PTE_RW) && (um_pte & UM_PTE_DIRTY))
 		out |= KVM_X86_PTE_RW;
 	if (um_pte & UM_PTE_USER)
 		out |= KVM_X86_PTE_US;
@@ -1097,8 +1126,10 @@ u64 kvm_um_pte_to_x86(u64 um_pte)
 int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 {
 	u64 *pgd = pgd_va;
+	u64 *spgd;
 	unsigned int pgd_i, pud_i, pmd_i, pte_i;
 	int installed = 0;
+	unsigned int cleared = 0;
 	int rc;
 
 	if (!pgd)
@@ -1118,6 +1149,104 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 	 * until now. guard() auto-unlocks on every return path.
 	 */
 	guard(mutex)(&shadow->fill_lock);
+
+	/*
+	 * #274 issue #8: TRANSACTIONAL fill. Walk the user half
+	 * (PGD slots 0..255 — the canonical low VA) of the shadow
+	 * first and clear every present leaf. Then re-install
+	 * leaves from the UML pgd. This guarantees that after fill
+	 * returns, the shadow exactly mirrors the UML pgd's user
+	 * mappings: no shadow-present-but-pgd-absent stale leaves.
+	 *
+	 * Kernel half (PGD slots 256..511) is left alone — it
+	 * holds the bootstrap / gadget / vvar aliases installed
+	 * by kvm_enter_guest before fill. (Per issue #7's audit:
+	 * UML's kernel-VA-region pages live at ~0x60000000 which
+	 * is in PGD slot 0, not slot 256+; but bootstrap_va lives
+	 * in slot 256+ via being placed by alloc_page in the
+	 * vmalloc range — verify with kvm_diag_audit_pgd_skip if
+	 * collisions are suspected.)
+	 *
+	 * Without this clear pass, a previous mapping VA X → PFN A
+	 * that's been unmap'd in pgd (entry now 0) would persist
+	 * as a shadow leaf VA X → PFN A. Guest reads via X return
+	 * the OLD physical page's contents — silent stale-data
+	 * corruption that grows monotonically over the boot. This
+	 * was the most plausible remaining cause of the import-
+	 * unittest PyObject->ob_type=NULL pattern: an old mapping
+	 * with zeros at offset 0x8 persisting after the page was
+	 * supposedly munmapped + remapped to a fresh page (whose
+	 * write of valid ob_type went to a different physical page
+	 * than the guest's stale-shadow read).
+	 *
+	 * Cost: one pass over the shadow user half on every fill.
+	 * In practice fill rarely runs (cached-skip path catches
+	 * most kvm_enter_guest calls), so the cost is acceptable.
+	 */
+	spgd = shadow->pgd;
+	{
+		/*
+		 * Compute the bootstrap-alias VA range to PRESERVE in the
+		 * clear pass. kvm_bootstrap_va spans 4 pages (bootstrap
+		 * code+tables, gadget state, vvar, IST stack — all
+		 * installed by kvm_enter_guest BEFORE fill). They live
+		 * at the alloc_page-returned kernel VA, which on UML
+		 * lands in PGD slot 0 (the user half by VA bit-39
+		 * extraction). Clearing them would destroy the LSTAR /
+		 * IDT / IST mappings the guest needs.
+		 */
+		u64 alias_lo = kvm_bootstrap_va_get();
+		u64 alias_hi = alias_lo + 4 * PAGE_SIZE;
+
+		for (pgd_i = 0; pgd_i < 256; pgd_i++) {
+			u64 *spud;
+
+			if (!(spgd[pgd_i] & KVM_X86_PTE_P))
+				continue;
+			spud = (u64 *)__va(spgd[pgd_i] &
+					   0x000ffffffffff000ULL);
+			for (pud_i = 0; pud_i < 512; pud_i++) {
+				u64 *spmd;
+
+				if (!(spud[pud_i] & KVM_X86_PTE_P))
+					continue;
+				spmd = (u64 *)__va(spud[pud_i] &
+						   0x000ffffffffff000ULL);
+				for (pmd_i = 0; pmd_i < 512; pmd_i++) {
+					u64 *spte;
+
+					if (!(spmd[pmd_i] & KVM_X86_PTE_P))
+						continue;
+					spte = (u64 *)__va(spmd[pmd_i] &
+							   0x000ffffffffff000ULL);
+					for (pte_i = 0; pte_i < 512;
+					     pte_i++) {
+						u64 va;
+
+						if (!(spte[pte_i] &
+						      KVM_X86_PTE_P))
+							continue;
+						va = ((u64)pgd_i << 39) |
+						     ((u64)pud_i << 30) |
+						     ((u64)pmd_i << 21) |
+						     ((u64)pte_i << 12);
+						/* preserve bootstrap aliases */
+						if (alias_lo &&
+						    va >= alias_lo &&
+						    va < alias_hi)
+							continue;
+						spte[pte_i] = 0;
+						cleared++;
+					}
+				}
+			}
+		}
+	}
+	if (cleared) {
+		shadow->dirty = true;
+		pr_info_ratelimited("um: kvm shadow fill: cleared %u stale user-half leaves before re-fill\n",
+				    cleared);
+	}
 
 	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
 		u64 pgde = pgd[pgd_i];

@@ -563,6 +563,12 @@ u64 kvm_um_pte_to_x86(u64 um_pte);
  */
 int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd);
 
+/*
+ * Accessor for the bootstrap-alias VA so kvm_shadow_fill_from_uml_pgd's
+ * transactional clear pass can preserve the bootstrap leaves.
+ */
+u64 kvm_bootstrap_va_get(void);
+
 struct uml_pt_regs;
 int kvm_enter_guest(struct uml_pt_regs *regs);
 

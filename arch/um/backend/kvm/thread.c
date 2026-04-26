@@ -271,6 +271,18 @@ static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
 					 * address).
 					 */
 
+/*
+ * Accessor for the bootstrap-alias VA so kvm_shadow_fill_from_uml_pgd's
+ * transactional clear pass can preserve the bootstrap leaves it would
+ * otherwise unmap. Returns 0 if the bootstrap hasn't been allocated yet
+ * (very early init); the caller treats 0 as "no aliases to preserve".
+ */
+u64 kvm_bootstrap_va_get(void)
+{
+	return kvm_bootstrap_va;
+}
+EXPORT_SYMBOL_GPL(kvm_bootstrap_va_get);
+
 #define KVM_BOOTSTRAP_GDT_OFFSET	0x000	/* 8 entries × 8 B = 64 B */
 #define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5..~448-byte gadget region */
 #define KVM_BOOTSTRAP_TSS_OFFSET	0x200	/* 104-byte TSS (moved from 0x100 in G5b) */
