@@ -20,14 +20,29 @@ catches up.
 | `python3 -c "import hashlib; sha256(...)"`  | kvm      | 5/5       |
 | `python3 -c "import _bisect / _datetime / _ssl / _hashlib / _struct"` | kvm | yes (single C-extension import, no test framework) |
 | `subprocess.run(['/bin/echo', 'x'])`        | kvm      | ~8/10     |
-| `python3 -c "import unittest; ..."`         | kvm      | **NO** (cumulative-imports crash in ld-linux relocation) |
+| `python3 -c "import unittest; ..."`         | kvm      | **NO** (NULL-page deref inside python3.14, downstream of corrupted state) |
 | Any module from CPython's test suite        | kvm      | **NO** (fails because the harness needs `import unittest`) |
 | Same workloads under `backend=force=seccomp` | seccomp | yes       |
 
-**The headline fact: under integrated KVM, a single Python
-`import unittest` segfaults inside ld-linux processing the
-relocations of `_lzma.cpython-*.so`.** Same script under seccomp
-works.
+**The headline fact (corrected 2026-04-26 by `kvm_shadow_audit_va`
+diagnostic, commit `44abfd6e6657`): under integrated KVM, a single
+Python `import unittest` faults inside `python3.14`'s text — NOT
+inside ld-linux processing `_lzma.cpython-*.so` relocations as
+previously claimed.** Across 5 runs the faulting VA is in {0x0,
+0x48, 0xab, 0xc8, 0xab} (all within the NULL page) and the faulting
+IPs land in 4 distinct python3.14 text offsets across two distinct
+ASLR bases. The audit at the fault site reports `EQUAL synced=1` on
+every run — both UML's pgd and the shadow PT agree there is no
+mapping at the faulting VA. Same script under seccomp works.
+
+The fault is therefore NOT a shadow-staleness miss at `va=cr2`; it
+is a downstream NULL-pointer dereference in python3 caused by
+corrupted state established earlier in execution. The corruption
+source is upstream of the fault — likely either (a) shadow PT
+divergence on a non-faulting VA letting python read the wrong
+physical page, or (b) a syscall path delivering corrupted data to
+userspace. The fault-site audit narrows the search but cannot
+identify the corruption point alone.
 
 That blocks the entire CPython test suite, which is the merge gate
 for closing #274 ("Python is table stakes; if UML can't run a normal
@@ -125,6 +140,14 @@ a guess. Add three diagnostics:
    `cr2`'s VA, walk the shadow PT for the same VA, log
    `(cr2, pgd_pte, shadow_pte, equal?)`. The first faulting access
    where shadow != pgd identifies the missed sync point.
+
+   **Status (2026-04-26):** First instance landed as
+   `kvm_shadow_audit_va` wired into the !touched branch of the
+   UM_KVM_PF_PORT handler (commit `44abfd6e6657`). Empirically the
+   SIGSEGV-bound fault is `EQUAL` on every run — the keystone
+   hypothesis ("first divergence is at cr2") is wrong for this bug
+   class. Search must shift to non-faulting VAs (item #2 below) and
+   to per-mutation tracing (item #3 below).
 
 2. **Divergence audit at every kvm_enter_guest.** Sample 20 random
    user VAs from `current->mm`'s vmas, walk both trees, count
