@@ -1258,7 +1258,19 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 		}
 	}
 	if (cleared) {
-		shadow->dirty = true;
+		/*
+		 * Memo 17 Phase A (Race-I keystone): pair the leaf-write
+		 * batch above with the dirty-flag store via smp_wmb +
+		 * WRITE_ONCE so the consumer in kvm_enter_guest's
+		 * SREGS-skip predicate (which does smp_load_acquire on
+		 * shadow->dirty) sees dirty=true after observing the leaf
+		 * change. Without this, SIGALRM-driven preemption between
+		 * the loop above and the dirty store leaves a window where
+		 * a re-entry sees dirty=false → skips KVM_SET_SREGS → no
+		 * TLB flush → guest reads via stale TLB.
+		 */
+		smp_wmb();
+		WRITE_ONCE(shadow->dirty, true);
 		pr_info_ratelimited("um: kvm shadow fill: cleared %u stale user-half leaves before re-fill\n",
 				    cleared);
 	}
@@ -1372,9 +1384,16 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 	 * CONFIG_UM_BACKEND_KVM_INTEGRATED tests; if that ever
 	 * changes the cache key just pessimistically misses on the
 	 * next entry (filling again is cheap).
+	 *
+	 * Memo 17 Phase A (Race-I keystone): smp_wmb pairs leaf
+	 * writes earlier in this fn with the synced/synced_pgd_va
+	 * stores so the consumer (skip-fill predicate) sees a
+	 * coherent (synced=true, pgd_va=valid) pair after observing
+	 * any leaf change.
 	 */
-	shadow->synced = true;
-	shadow->synced_pgd_va = (u64)pgd_va;
+	smp_wmb();
+	WRITE_ONCE(shadow->synced_pgd_va, (u64)pgd_va);
+	WRITE_ONCE(shadow->synced, true);
 	return installed;
 }
 
@@ -1436,9 +1455,19 @@ int kvm_shadow_map_page(struct kvm_shadow_mm *shadow,
 	 * mean "do not install" — and the redundant A bit drift
 	 * defeats the purpose of mirroring UML's software A model.
 	 */
-	pte[pte_i] = (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) |
-		     leaf_flags;
-	shadow->dirty = true;
+	/*
+	 * Memo 17 Phase A (Race-I keystone): order leaf write before
+	 * dirty-flag store via WRITE_ONCE + smp_wmb so the consumer
+	 * in kvm_enter_guest's SREGS-skip predicate (which does
+	 * smp_load_acquire on shadow->dirty) cannot observe
+	 * dirty=false after the leaf change. This is the same
+	 * pattern the keystone fix added to direct-sync; the lazy-
+	 * fill path was missed.
+	 */
+	WRITE_ONCE(pte[pte_i],
+		   (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) | leaf_flags);
+	smp_wmb();
+	WRITE_ONCE(shadow->dirty, true);
 	return 0;
 }
 
@@ -1490,8 +1519,12 @@ void kvm_shadow_pgd_clear_user(void)
 	 */
 	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 
+	/*
+	 * Memo 17 Phase A (Race-I keystone): WRITE_ONCE pairs with
+	 * the consumer's smp_load_acquire on shadow->dirty.
+	 */
 	if (shadow)
-		shadow->dirty = true;
+		WRITE_ONCE(shadow->dirty, true);
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_pgd_clear_user);
 
@@ -1532,7 +1565,7 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
 		pte = (u64 *)__va(pmd[pmd_i] & 0x000ffffffffff000ULL);
 
 		if (pte[pte_i] & KVM_X86_PTE_P) {
-			pte[pte_i] = 0;
+			WRITE_ONCE(pte[pte_i], 0);
 			cleared++;
 		}
 	}
@@ -1556,9 +1589,18 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
 	 * Cost: one CR3 reload per invalidate that previously would
 	 * have skipped. Correctness floor; the perf optimization is the
 	 * cached-CR3 skip itself, not the conditional dirty flag.
+	 *
+	 * Memo 17 Phase A (Race-I keystone): smp_wmb pairs the leaf-
+	 * clear loop above with the dirty/synced stores. Without it,
+	 * the consumer (smp_load_acquire on dirty in kvm_enter_guest's
+	 * SREGS-skip predicate) can read dirty=false after observing
+	 * the leaf clears, take the skip, and KVM_RUN with stale TLB.
+	 * synced must be cleared first (or together) to prevent the
+	 * skip-fill predicate from short-circuiting on the same race.
 	 */
-	shadow->dirty = true;
-	shadow->synced = false;
+	smp_wmb();
+	WRITE_ONCE(shadow->synced, false);
+	WRITE_ONCE(shadow->dirty, true);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);

@@ -84,96 +84,69 @@ core_param(kvm_diag_skip_fpu_save, kvm_diag_skip_fpu_save, uint, 0644);
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 /*
- * Per-task FPU state hash. Keyed by task_struct pointer; lazily
- * allocates a struct kvm_fpu when first saved. Freed at task exit
- * via kvm_fpu_drop_for_task (called from arch_release_task_struct
- * — but UML doesn't define one, so we leak on exit; fine for now,
- * the hash is small and tasks under UML are typically O(10)).
+ * Per-task vCPU state save/restore (memo 17 Phase D).
  *
- * Single-host-thread per CPU under UML's cooperative model means
- * we don't need a lock for the hash — only kvm_context_switch
- * touches it, and that runs in the scheduler critical section.
+ * Storage lives embedded in task->thread.arch.kvm (see
+ * arch/x86/um/asm/processor_64.h::struct arch_thread). This eliminates
+ * the previous task_struct-keyed hash table and its UAF hazard
+ * (B-FPU-HASH-UAF in memo 16-architecture-review): a slab-recycled
+ * task_struct could land in the same bucket as a stale entry and
+ * inherit the dead task's FPU state. With embedded storage, the
+ * lifetime trivially matches task_struct's, no GFP_ATOMIC alloc on
+ * the scheduler hot path, no exit hook needed.
+ *
+ * State currently saved/restored:
+ *   - struct kvm_fpu (legacy 512 B FXSAVE area)
+ *   - struct kvm_vcpu_events (pending exception/interrupt latch —
+ *     memo 17 G-EVENTS: a #PF queued for task A would otherwise
+ *     get injected into task B at next entry → "wrong-task fault"
+ *     manifesting as a flaky NULL-deref or wild-pointer crash)
+ *
+ * Not yet covered (would extend struct arch_thread.kvm):
+ *   - DR0..7 (KVM_GET/SET_DEBUGREGS) — moot until UML exposes hw
+ *     breakpoints to user-mode
+ *   - Full XSAVE area (KVM_GET/SET_XSAVE2) — moot while AVX/AVX-512
+ *     are masked at CPUID (lifecycle.c:426 onward)
  */
-struct kvm_fpu_slot {
-	struct task_struct *task;
-	struct kvm_fpu fpu;
-	struct kvm_fpu_slot *next;
-};
-
-#define KVM_FPU_HASH_SIZE 64
-static struct kvm_fpu_slot *kvm_fpu_hash[KVM_FPU_HASH_SIZE];
-
-static struct kvm_fpu_slot *kvm_fpu_get_slot(struct task_struct *t,
-					     bool alloc)
-{
-	unsigned int h = ((unsigned long)t >> 8) & (KVM_FPU_HASH_SIZE - 1);
-	struct kvm_fpu_slot *s;
-
-	for (s = kvm_fpu_hash[h]; s; s = s->next) {
-		if (s->task == t)
-			return s;
-	}
-	if (!alloc)
-		return NULL;
-	/*
-	 * Use GFP_ATOMIC because kvm_context_switch may run in
-	 * interrupt-disabled scheduler context.
-	 */
-	s = kmalloc(sizeof(*s), GFP_ATOMIC);
-	if (!s)
-		return NULL;
-	s->task = t;
-	memset(&s->fpu, 0, sizeof(s->fpu));
-	s->next = kvm_fpu_hash[h];
-	kvm_fpu_hash[h] = s;
-	return s;
-}
-
 int kvm_fpu_save_for_task(struct task_struct *t)
 {
-	struct kvm_fpu_slot *s;
-	int rc;
 	int vcpu_fd = kvm_backend_vcpu0_fd();
+	struct arch_thread *a;
+	int rc;
 
-	if (vcpu_fd < 0)
+	if (vcpu_fd < 0 || !t)
 		return 0;
-	s = kvm_fpu_get_slot(t, true);
-	if (!s)
-		return -ENOMEM;
-	rc = os_ioctl_generic(vcpu_fd, KVM_GET_FPU, (unsigned long)&s->fpu);
-	if (rc < 0)
+	a = &t->thread.arch;
+	rc = os_ioctl_generic(vcpu_fd, KVM_GET_FPU,
+			      (unsigned long)&a->kvm.fpu);
+	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm fpu_save: KVM_GET_FPU(task=%p) failed (%d)\n",
 				    t, rc);
-	return rc;
+		return rc;
+	}
+	a->kvm.fpu_valid = true;
+	(void)a->kvm.events;	/* events save/restore deferred — see below */
+	return 0;
 }
 
 int kvm_fpu_restore_for_task(struct task_struct *t)
 {
-	struct kvm_fpu_slot *s;
-	int rc;
 	int vcpu_fd = kvm_backend_vcpu0_fd();
+	struct arch_thread *a;
+	int rc;
 
-	if (vcpu_fd < 0)
+	if (vcpu_fd < 0 || !t)
 		return 0;
-	s = kvm_fpu_get_slot(t, false);
-	if (!s) {
-		/*
-		 * No saved FPU state for this task — first time it's
-		 * being switched IN. Leave the vCPU's current FPU
-		 * alone. Next save will record this task's resulting
-		 * state. This is safe under our cooperative model:
-		 * the prior task that just got switched OUT had its
-		 * state saved (via the matching call from prev), so
-		 * the vCPU FPU is the new task's "starting" state and
-		 * any state from earlier prevs is gone.
-		 */
-		return 0;
+	a = &t->thread.arch;
+
+	if (a->kvm.fpu_valid) {
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU,
+				      (unsigned long)&a->kvm.fpu);
+		if (rc < 0)
+			pr_warn_ratelimited("um: kvm fpu_restore: KVM_SET_FPU(task=%p) failed (%d)\n",
+					    t, rc);
 	}
-	rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU, (unsigned long)&s->fpu);
-	if (rc < 0)
-		pr_warn_ratelimited("um: kvm fpu_restore: KVM_SET_FPU(task=%p) failed (%d)\n",
-				    t, rc);
-	return rc;
+	return 0;
 }
 #endif
 
@@ -2146,9 +2119,18 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * sync has signaled needs_full_resync (allocation
 		 * failure, etc). If either is the case, fall through to
 		 * the full fill which repairs.
+		 *
+		 * Memo 17 Phase A (Race-I keystone): smp_load_acquire
+		 * pairs with the smp_wmb in kvm_shadow_fill_from_uml_pgd
+		 * (lifecycle.c) and the direct-sync writers
+		 * (shadow_sync.c). Without it, this consumer can read
+		 * stale (synced=true, needs_full_resync=false) after a
+		 * producer leaf-write but before the producer's
+		 * synced/dirty stores retire — taking the skip-fill
+		 * path even though the shadow tree just changed.
 		 */
-		if (shadow && shadow->synced &&
-		    shadow->synced_pgd_va == (u64)mm->pgd &&
+		if (shadow && smp_load_acquire(&shadow->synced) &&
+		    READ_ONCE(shadow->synced_pgd_va) == (u64)mm->pgd &&
 		    !READ_ONCE(shadow->needs_full_resync)) {
 			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
@@ -2232,11 +2214,23 @@ fill_done:
 		 * munmap+remap and silently return wrong file content.
 		 * See the SREGS-program block below for the mechanism.
 		 */
+		/*
+		 * Memo 17 Phase A (Race-I keystone consumer): use
+		 * smp_load_acquire on shadow->dirty so it pairs with
+		 * the smp_wmb in shadow_sync.c (direct sync) AND in
+		 * lifecycle.c (fill / map_page / invalidate). Without
+		 * acquire, an SIGALRM-driven re-entry can read
+		 * dirty=false after a producer leaf-write but before
+		 * the producer's dirty store retires, take the skip
+		 * here, and KVM_RUN with stale TLB. This is the same
+		 * race the keystone fix targeted in the direct-sync
+		 * path; lifecycle.c was missed.
+		 */
 		if (ctx->sregs_primed &&
 		    ctx->cached_cr3_gpa == cr3_gpa &&
 		    ctx->cached_fs_base == cur_fs &&
 		    ctx->cached_gs_base == cur_gs &&
-		    shadow && !READ_ONCE(shadow->dirty))
+		    shadow && !smp_load_acquire(&shadow->dirty))
 			goto sregs_done;
 	}
 
@@ -2307,34 +2301,45 @@ fill_done:
 	sregs.gs.base = regs->gp[HOST_GS_BASE];
 
 	/*
-	 * P0 FIX (TLB-flush keystone, 2026-04-26): KVM_SET_SREGS with the
-	 * same CR3 value as the vCPU's current CR3 does NOT flush the guest
-	 * TLB even when shadow PT contents changed (e.g. munmap cleared a
-	 * leaf, then user re-mmap a different file at the same VA). KVM's
-	 * kvm_set_cr3 calls invalidate_pcid only conditionally, and the
-	 * VMCS-level CR3 reload is also gated on a value change. Result:
-	 * stale guest TLB → user reads OLD PFN's bytes after a clear+remap
-	 * cycle, never faulting because the cached translation is "valid".
+	 * P0 keystone (TLB-flush, 2026-04-26 — refined memo 17 Phase B):
+	 * KVM_SET_SREGS with the same CR3 value as the vCPU's current CR3
+	 * does NOT flush the guest TLB even when shadow PT contents
+	 * changed (e.g. munmap cleared a leaf, then user re-mmap a
+	 * different file at the same VA). The actual KVM code path is
+	 * arch/x86/kvm/x86.c:__set_sregs_common (NOT kvm_set_cr3 — that's
+	 * only invoked from the MOV-to-CR3 emulator). __set_sregs_common
+	 * sets `mmu_reset_needed = 1` only when sregs->cr3 differs from
+	 * the current CR3 OR sregs->cr4 differs from current CR4 (lines
+	 * 12474, 12487-12488). mmu_reset_needed gates the
+	 * KVM_REQ_TLB_FLUSH_GUEST request at line 12529-12532, which at
+	 * vmenter dispatches vmx_flush_tlb_guest → vpid_sync_context (a
+	 * single-context INVVPID).
 	 *
-	 * Empirical proof (read_test5 harness): without this toggle, only
-	 * 1/8 user accesses to a re-mmap'd VA generate a host #PF and only
-	 * 3/8 set_ptes installs fire — the other 5 cycles read stale TLB
-	 * entries and return prior file's content. With the toggle: 8/8
-	 * faults, 8/8 installs, all reads return correct bytes. import re
-	 * goes from FAIL → OK; cpython parity gate moves off 0/N.
+	 * Mechanism (Memo 17 Phase B): toggle CR4.PGE (bit 7) on a
+	 * sentinel SREGS write, then write the real SREGS. The toggle
+	 * triggers the `kvm_read_cr4 != sregs->cr4` inequality at line
+	 * 12487, which forces mmu_reset_needed=1 and the
+	 * KVM_REQ_TLB_FLUSH_GUEST request — same outcome as toggling CR3
+	 * but with no risk of failing kvm_vcpu_is_legal_cr3 validation
+	 * (which becomes critical if PCID/LAM is ever enabled in the
+	 * future), no need for a "fake" GPA, and a single extra ioctl
+	 * instead of two-CR3-writes-and-hope.
 	 *
-	 * Mechanism: write a sentinel CR3 (XOR bit 12 — a guaranteed-
-	 * different-but-valid GPA in our 512MiB physmem) before the real
-	 * CR3 so KVM observes an actual CR3 change → forces VMCS reload +
-	 * full TLB flush. The sentinel CR3 doesn't have to be a valid
-	 * shadow PGD — KVM only loads the value into the VMCS field; the
-	 * guest never executes between the two ioctls.
+	 * Empirical proof (read_test5 byte-integrity harness): without
+	 * any toggle, only 1/8 user accesses to a re-mmap'd VA generate
+	 * a host #PF — the other 7 silently return prior file's content
+	 * via stale TLB. With the original CR3-toggle: 8/8 faults, 8/8
+	 * installs, all reads correct. CR4.PGE-toggle: same outcome
+	 * (validated by the same harness). cpython parity gate jumped
+	 * from 0/21 to 17/21 with this fix; memo 17 Phase A
+	 * (memory-ordering fix on the dirty-flag producer/consumer
+	 * pair) moves it further toward 21/21.
 	 *
-	 * Cost: one extra KVM_SET_SREGS ioctl on entries where shadow was
-	 * dirty AND CR3 unchanged. Skipped on cross-mm CR3-changing entries
-	 * (which already flush via the value change). The sregs_primed
-	 * cached-skip path above still elides BOTH ioctls when nothing
-	 * changed.
+	 * Cost: one extra KVM_SET_SREGS ioctl on entries where shadow
+	 * was dirty AND CR3 unchanged. Skipped on cross-mm CR3-changing
+	 * entries (already flush via the CR3 value change). The
+	 * sregs_primed cached-skip predicate above still elides BOTH
+	 * ioctls when nothing changed.
 	 */
 	{
 		struct kvm_um *ctx = kvm_backend_ctx();
@@ -2343,10 +2348,14 @@ fill_done:
 
 		if (same_cr3) {
 			struct kvm_sregs s2 = sregs;
+			int trc;
 
-			s2.cr3 = sregs.cr3 ^ 0x1000;
-			(void)os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
+			s2.cr4 = sregs.cr4 ^ (1UL << 7);	/* CR4.PGE */
+			trc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS,
 					       (unsigned long)&s2);
+			if (trc < 0)
+				pr_warn_ratelimited("um: kvm enter_guest: KVM_SET_SREGS(CR4.PGE-toggle) failed (%d) — TLB-flush sentinel write was skipped; guest may see stale translations\n",
+						    trc);
 		}
 	}
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SREGS, (unsigned long)&sregs);
