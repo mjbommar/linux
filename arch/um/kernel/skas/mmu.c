@@ -65,6 +65,13 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	 */
 	new_id->sock = -1;
 	new_id->pid = -1;
+	/*
+	 * #275: per-mm shadow PGD pointer. Must be NULL on a fresh mm
+	 * so kvm_mm_attach allocates one (the if (!id->kvm_shadow)
+	 * test in mm.c). mm_struct's slab cache doesn't zero this
+	 * field for us; explicit init is required.
+	 */
+	new_id->kvm_shadow = NULL;
 
 	scoped_guard(spinlock_irqsave, &mm_list_lock) {
 		/* Insert into list, used for lookups when the child dies */
