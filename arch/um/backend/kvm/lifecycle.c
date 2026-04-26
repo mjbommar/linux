@@ -1094,9 +1094,8 @@ u64 kvm_um_pte_to_x86(u64 um_pte)
  * pgd/pud/pmd slots are empty for a typical user process), so
  * cost is O(pages-mapped), not O(VA-space).
  */
-int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
+int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 {
-	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 	u64 *pgd = pgd_va;
 	unsigned int pgd_i, pud_i, pmd_i, pte_i;
 	int installed = 0;
@@ -1160,7 +1159,7 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 					     ((u64)pmd_i << 21) |
 					     ((u64)pte_i << 12);
 
-					rc = kvm_shadow_map_page(va,
+					rc = kvm_shadow_map_page(shadow, va,
 								 x86e & 0x000ffffffffff000ULL,
 								 x86e & ~0x000ffffffffff000ULL);
 					if (rc < 0) {
@@ -1214,9 +1213,9 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 	return installed;
 }
 
-int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags)
+int kvm_shadow_map_page(struct kvm_shadow_mm *shadow,
+			u64 va, u64 phys_gpa, u64 leaf_flags)
 {
-	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 	u64 *pgd;
 	u64 *pud = NULL, *pmd = NULL, *pte = NULL;
 	unsigned int pgd_i, pud_i, pmd_i, pte_i;
@@ -1321,9 +1320,9 @@ void kvm_shadow_pgd_clear_user(void)
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_pgd_clear_user);
 
-int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
+int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
+				   u64 va_start, u64 len)
 {
-	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 	u64 *pgd;
 	u64 va, va_end;
 	unsigned int cleared = 0;

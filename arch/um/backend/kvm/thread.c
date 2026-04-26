@@ -1755,7 +1755,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 * jump into IST data. STACK_TOP is bootstrap_va + 0x4000
 	 * (exclusive); first push lands at +0x3ff8.
 	 */
-	rc = kvm_shadow_map_page(kvm_bootstrap_va,
+	rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
+				 kvm_bootstrap_va,
 				 (u64)__pa(kvm_bootstrap_page),
 				 KVM_X86_PTE_P);
 	if (rc < 0) {
@@ -1763,7 +1764,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 				    rc);
 		return rc;
 	}
-	rc = kvm_shadow_map_page(kvm_bootstrap_va + 3 * PAGE_SIZE,
+	rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
+				 kvm_bootstrap_va + 3 * PAGE_SIZE,
 				 (u64)__pa(kvm_bootstrap_page_stack),
 				 KVM_X86_PTE_P | KVM_X86_PTE_RW |
 				 KVM_X86_PTE_NX);
@@ -1810,7 +1812,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * without NXE bit 63 is reserved-must-be-zero and
 		 * would trigger reserved-bit-violation #PF on read.
 		 */
-		rc = kvm_shadow_map_page(gstate_va,
+		rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
+					 gstate_va,
 					 kvm_gadget_state_gpa(),
 					 KVM_X86_PTE_P | KVM_X86_PTE_NX);
 		if (rc < 0) {
@@ -1846,7 +1849,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	{
 		u64 vvar_va = kvm_bootstrap_va + 2 * PAGE_SIZE;
 
-		rc = kvm_shadow_map_page(vvar_va,
+		rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
+					 vvar_va,
 					 kvm_gadget_vvar_gpa(),
 					 KVM_X86_PTE_P | KVM_X86_PTE_RW |
 					 KVM_X86_PTE_NX);
@@ -1933,7 +1937,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * passthrough — all six-or-so lazy CoW recoveries
 		 * service correctly through the in-vma path.
 		 */
-		filled = kvm_shadow_fill_from_uml_pgd(mm->pgd);
+		filled = kvm_shadow_fill_from_uml_pgd(shadow, mm->pgd);
 		if (filled < 0) {
 			pr_warn_ratelimited("um: kvm enter_guest: shadow fill failed (%d)\n",
 					    filled);
@@ -3182,7 +3186,9 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 								   &code_out);
 					if (hpf_rc == 0)
 						touched = true;
-					(void)kvm_shadow_fill_from_uml_pgd(m2->pgd);
+					(void)kvm_shadow_fill_from_uml_pgd(
+						m2->context.id.kvm_shadow,
+						m2->pgd);
 				}
 
 				/*
@@ -3526,6 +3532,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			 */
 			if (current->active_mm && current->active_mm->pgd)
 				(void)kvm_shadow_fill_from_uml_pgd(
+					current->active_mm->context.id.kvm_shadow,
 					current->active_mm->pgd);
 			/*
 			 * MMIO is a clean ring-3 boundary: the SEGV

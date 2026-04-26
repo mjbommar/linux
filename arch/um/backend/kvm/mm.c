@@ -121,8 +121,6 @@ int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 {
 	int rc;
 
-	(void)id;
-
 	/*
 	 * #276 reverted: hypothesis was that os_map_memory was
 	 * not load-bearing under integrated KVM. WRONG —
@@ -142,18 +140,42 @@ int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
-	 * #274 / T16: surface the invalidate failure to the caller.
-	 * The host VA mapping has already changed via os_map_memory;
-	 * if the shadow can't be invalidated (most plausibly -ENODEV
-	 * before the per-mm shadow has been attached), the next
-	 * guest read goes through stale shadow PTEs to the OLD
-	 * physical page. Better: report the error so um_tlb_sync's
-	 * update_pte_range leaves the PTE not-uptodate (after T15)
-	 * and a subsequent sync retries.
+	 * #274 keystone fix: invalidate the SHADOW belonging to the
+	 * mm_id we were called for — NOT current's shadow. The earlier
+	 * implementation discarded `id` and used kvm_shadow_mm_current()
+	 * which silently routed every invalidate to the active task's
+	 * shadow, even when um_tlb_sync was draining a different mm's
+	 * pending PTE updates (e.g. the kvm_context_switch pre-switch
+	 * sync of prev->active_mm runs AFTER set_current(to) in
+	 * arch/um/kernel/process.c — so current is already next, but the
+	 * sync target is prev, and prev's pgd writes were being dropped
+	 * into next's shadow tree).
+	 *
+	 * id->kvm_shadow is set by kvm_mm_attach (mm.c:46). If it's NULL
+	 * we treat that as the "shadow not attached yet" early-init case
+	 * and fall back to current — for genuinely-pre-attach calls this
+	 * happens at init when there's no shadow corruption to worry
+	 * about anyway.
 	 */
-	rc = kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
-	if (rc < 0 && rc != -ENODEV)
-		return rc;
+	{
+		struct kvm_shadow_mm *shadow = id->kvm_shadow;
+
+		if (!shadow)
+			shadow = kvm_shadow_mm_current();
+		rc = kvm_shadow_invalidate_va_range(shadow,
+						    (u64)virt, (u64)len);
+		/*
+		 * #274 / #13 audit: -ENODEV after mm_attach is a real
+		 * bug, not "still initialising". After id->kvm_shadow
+		 * is non-NULL the only way invalidate returns -ENODEV
+		 * is if shadow->pgd was freed underneath us. Surface
+		 * it; for the legitimate pre-attach early-init case the
+		 * id->kvm_shadow == NULL fallback above already gave us
+		 * current's shadow which is non-NULL during normal boot.
+		 */
+		if (rc < 0)
+			return rc;
+	}
 #endif
 	return 0;
 }
@@ -193,17 +215,22 @@ int kvm_mm_unmap(struct mm_id *id, unsigned long virt, unsigned long len)
 	}
 #endif
 
-	(void)id;
-
 	rc = os_unmap_memory((void *)virt, len);
 	if (rc)
 		return rc;
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
-	/* #274 / T16: see kvm_mm_map's matching block. */
-	rc = kvm_shadow_invalidate_va_range((u64)virt, (u64)len);
-	if (rc < 0 && rc != -ENODEV)
-		return rc;
+	/* #274 keystone fix: see kvm_mm_map's matching block. */
+	{
+		struct kvm_shadow_mm *shadow = id->kvm_shadow;
+
+		if (!shadow)
+			shadow = kvm_shadow_mm_current();
+		rc = kvm_shadow_invalidate_va_range(shadow,
+						    (u64)virt, (u64)len);
+		if (rc < 0)
+			return rc;
+	}
 #endif
 	return 0;
 }

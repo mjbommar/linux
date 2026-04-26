@@ -457,7 +457,8 @@ void kvm_shadow_pgd_free(void);
  * Returns 0 on success, -ENODEV if the shadow PGD hasn't been
  * allocated yet, -EINVAL on NULL/zero len.
  */
-int kvm_shadow_invalidate_va_range(u64 va_start, u64 len);
+int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
+				   u64 va_start, u64 len);
 
 /*
  * #274 phase-1 keystone diagnostic. Walks the UML logical pgd at
@@ -526,7 +527,8 @@ u64 kvm_shadow_pgd_gpa(void);
  * whatever serialization the shadow_pgd needs (today: no
  * concurrent callers; when SMP lands memo 09 revisits).
  */
-int kvm_shadow_map_page(u64 va, u64 phys_gpa, u64 leaf_flags);
+int kvm_shadow_map_page(struct kvm_shadow_mm *shadow,
+			u64 va, u64 phys_gpa, u64 leaf_flags);
 
 /* Canonical x86_64 PTE bits for the shadow PT builder. */
 #define KVM_X86_PTE_P	(1ULL << 0)
@@ -559,7 +561,7 @@ u64 kvm_um_pte_to_x86(u64 um_pte);
  * Caller is responsible for serialisation; today there's no
  * concurrent access (single-threaded kvm_enter_guest).
  */
-int kvm_shadow_fill_from_uml_pgd(void *pgd);
+int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd);
 
 struct uml_pt_regs;
 int kvm_enter_guest(struct uml_pt_regs *regs);
