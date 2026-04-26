@@ -2883,10 +2883,50 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				fault_was_write  = (fault_error_code >> 1) & 1;
 				fault_rip = *(u64 *)(ist + 8);
 
-				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx ec=0x%llx; fault-in + shadow refill\n",
+				/*
+				 * Task #274 root cause: the CPU pushes the
+				 * user state on the IST stack as the IRETQ
+				 * frame {error_code, rip, cs, rflags, rsp,
+				 * ss}. After a ring-3 #PF VMEXIT, kregs.rsp
+				 * reflects the IDT[14] handler's RSP (the
+				 * IST kernel stack), NOT the user RSP at
+				 * fault time. If we just leave regs->gp
+				 * [HOST_SP] equal to the kernel IST address,
+				 * the next IRETQ frame builder picks it up
+				 * and delivers user code with kernel-half
+				 * RSP — every push/pop then goes through
+				 * an unmapped or non-user-accessible kernel
+				 * VA, leading to a hard-to-trace SIGSEGV
+				 * cascade once user code does anything
+				 * stack-relative (function calls, sigframe
+				 * delivery, etc).
+				 *
+				 * The gadget-fault path below already does
+				 * this; lift it out so the general #PF path
+				 * gets the same treatment. Same applies to
+				 * RIP and RFLAGS — we restore them too so
+				 * a follow-on iretq lands at the user
+				 * fault site (or the SIGSEGV handler the
+				 * !touched path installs).
+				 *
+				 * Fault-frame layout on the IST stack:
+				 *   +0  error_code
+				 *   +8  rip
+				 *   +16 cs
+				 *   +24 rflags
+				 *   +32 rsp        ← user RSP
+				 *   +40 ss
+				 */
+				regs->gp[HOST_IP]     = fault_rip;
+				regs->gp[HOST_EFLAGS] = *(u64 *)(ist + 24);
+				regs->gp[HOST_SP]     = *(u64 *)(ist + 32);
+				regs->is_user = 1;
+
+				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx ec=0x%llx rsp=0x%lx; fault-in + shadow refill\n",
 						    cr2,
 						    (unsigned long long)fault_rip,
-						    (unsigned long long)fault_error_code);
+						    (unsigned long long)fault_error_code,
+						    regs->gp[HOST_SP]);
 
 				gadget_nr = kvm_gadget_fault_nr(fault_rip);
 				if (gadget_nr >= 0) {
