@@ -44,6 +44,7 @@
 #include <os.h>
 #include <registers.h>
 #include <skas.h>		/* current_mm_sync */
+#include <asm/tlbflush.h>	/* um_tlb_sync */
 #include <sysdep/faultinfo.h>
 #include <sysdep/ptrace.h>
 #include <sysdep/ptrace_user.h>
@@ -88,6 +89,30 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 	if (prev && next && prev->active_mm != next->active_mm)
 		kvm_shadow_pgd_clear_user();
 #endif
+	/*
+	 * Task #274 follow-on: drain prev's pending PTE updates BEFORE
+	 * we leave its mm context. um_tlb_mark_sync collects pte/flush
+	 * events into prev->mm->context.sync_tlb_range_*; without a
+	 * pre-switch sync those updates would only be applied if we
+	 * ever come back to prev. Since the kvm shadow PT is a
+	 * singleton (#242 + #243-pending), the next task's
+	 * kvm_enter_guest's pgd-mirror walk picks up prev's stale view
+	 * of next's pgd if we never sync prev. Worse, fork/exec where
+	 * prev is the parent and next is a fresh task whose mm is
+	 * newly constructed — the new mm's set_pte_at events drain
+	 * via current_mm_sync() in run_userspace, but the parent's
+	 * unfinished sync from before the switch never does.
+	 *
+	 * Mirrors what seccomp / ptrace get implicitly because their
+	 * "user run" path is the only thing that ever pushes mappings
+	 * into the host stub child via mm_map; if prev had pending
+	 * updates that were never flushed, they're effectively
+	 * dropped on the floor at switch time. For kvm we want the
+	 * pending updates committed into the shadow PT so the singleton
+	 * view stays consistent across mm switches.
+	 */
+	if (prev && prev->mm)
+		um_tlb_sync(prev->mm);
 	switch_threads(&prev->thread.switch_buf, &next->thread.switch_buf);
 }
 
@@ -1658,6 +1683,12 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		     fctx->shadow_pgd_synced_mm != mm) ||
 		    (fctx->shadow_pgd_synced_va &&
 		     fctx->shadow_pgd_synced_va != (u64)mm->pgd)) {
+			pr_info("um: kvm shadow owner change: current=%s[%d] mm=%p active_mm=%p new_pgd=%p old_mm=%p old_pgd=0x%llx synced=%d\n",
+				current->comm, task_pid_nr(current),
+				current->mm, current->active_mm, mm->pgd,
+				fctx->shadow_pgd_synced_mm,
+				(unsigned long long)fctx->shadow_pgd_synced_va,
+				fctx->shadow_pgd_synced);
 			/*
 			 * execve() replaces the current task's mm without a
 			 * context switch through kvm_context_switch(), so the
