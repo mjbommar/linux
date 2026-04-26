@@ -2814,7 +2814,21 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	 * which appeared all-zero to the guest despite ld-linux
 	 * having populated it from the kernel side.
 	 */
-	current_mm_sync();
+	/*
+	 * #274 issue #3: don't go through current_mm_sync (which
+	 * discards um_tlb_sync's return code). Call um_tlb_sync
+	 * directly so we can fail loudly on backend failure. If
+	 * sync fails, the shadow PT is divergent from the pgd and
+	 * any KVM_RUN entered now would silently see stale data —
+	 * better to panic than to silently corrupt user state.
+	 */
+	if (current->mm) {
+		int sync_rc = um_tlb_sync(current->mm);
+
+		if (sync_rc < 0)
+			panic("um: kvm run_userspace: um_tlb_sync(current->mm) failed (%d) — shadow likely divergent",
+			      sync_rc);
+	}
 
 	rc = kvm_enter_guest(regs);
 	if (rc < 0)
@@ -3199,7 +3213,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					if (hpf_rc == 0)
 						touched = true;
 					/*
-					 * #274 issue #21: drain um_tlb_sync(m2)
+					 * #274 issue #21 + #3: drain um_tlb_sync(m2)
 					 * BEFORE refilling the shadow. handle_page_fault
 					 * just added new PTEs via set_pte_at; those PTEs
 					 * carry _PAGE_NEEDSYNC and the host VA mapping
@@ -3214,8 +3228,18 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					 * ops->mmap → kvm_mm_map → os_map_memory + new-
 					 * style invalidate, after which fill walks a
 					 * clean (NEEDSYNC-cleared, host-VA-fresh) pgd.
+					 *
+					 * Fail loudly on sync failure (issue #3) — a
+					 * divergent shadow under guest re-entry would
+					 * silently corrupt user state.
 					 */
-					um_tlb_sync(m2);
+					{
+						int sync_rc = um_tlb_sync(m2);
+
+						if (sync_rc < 0)
+							panic("um: kvm pf-recovery: um_tlb_sync failed (%d)",
+							      sync_rc);
+					}
 					(void)kvm_shadow_fill_from_uml_pgd(
 						m2->context.id.kvm_shadow,
 						m2->pgd);

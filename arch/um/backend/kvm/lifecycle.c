@@ -1723,10 +1723,107 @@ int kvm_shadow_audit_pgd(void *uml_pgd_va, const char *tag,
 		}
 	}
 
-	pr_info("um: kvm audit_pgd[%s]: leaves=%u match=%u DIV=%u synced=%d pgd=%p\n",
-		tag, leaves, matches, diverges,
-		shadow->synced, uml_pgd_va);
-	return (int)diverges;
+	/*
+	 * #274 issue #6: REVERSE-direction scan. Walk the shadow
+	 * tree's user half (PGD slots 0..255) and look for present
+	 * leaves whose corresponding UML pgd entry is absent. These
+	 * are stale shadow leaves — they let the guest read the OLD
+	 * physical page after the UML pgd has unmapped the VA. With
+	 * the transactional fill (issue #8 fix) in place these
+	 * should be zero on every cached-skip; logging non-zero
+	 * here would reveal a remaining missed-invalidate path.
+	 *
+	 * Skip the bootstrap-alias VA range (preserved by fill).
+	 */
+	{
+		u64 *spgd = shadow->pgd;
+		u64 *upgd = uml_pgd_va;
+		u64 alias_lo = kvm_bootstrap_va_get();
+		u64 alias_hi = alias_lo + 4 * PAGE_SIZE;
+		unsigned int shadow_extra = 0;
+		unsigned int reverse_logged = 0;
+
+		for (pgd_i = 0; pgd_i < 256; pgd_i++) {
+			u64 *spud, *upud = NULL;
+			bool upgd_present;
+
+			if (!(spgd[pgd_i] & KVM_X86_PTE_P))
+				continue;
+			spud = (u64 *)__va(spgd[pgd_i] &
+					   0x000ffffffffff000ULL);
+			upgd_present = !!(upgd[pgd_i] & UM_PTE_PRESENT);
+			if (upgd_present)
+				upud = (u64 *)__va(upgd[pgd_i] &
+						   0x000ffffffffff000ULL);
+
+			for (pud_i = 0; pud_i < 512; pud_i++) {
+				u64 *spmd, *upmd = NULL;
+				bool upud_present;
+
+				if (!(spud[pud_i] & KVM_X86_PTE_P))
+					continue;
+				spmd = (u64 *)__va(spud[pud_i] &
+						   0x000ffffffffff000ULL);
+				upud_present = upud &&
+					(upud[pud_i] & UM_PTE_PRESENT);
+				if (upud_present)
+					upmd = (u64 *)__va(upud[pud_i] &
+							   0x000ffffffffff000ULL);
+
+				for (pmd_i = 0; pmd_i < 512; pmd_i++) {
+					u64 *spte, *upte = NULL;
+					bool upmd_present;
+
+					if (!(spmd[pmd_i] & KVM_X86_PTE_P))
+						continue;
+					spte = (u64 *)__va(spmd[pmd_i] &
+							   0x000ffffffffff000ULL);
+					upmd_present = upmd &&
+						(upmd[pmd_i] & UM_PTE_PRESENT);
+					if (upmd_present)
+						upte = (u64 *)__va(upmd[pmd_i] &
+								   0x000ffffffffff000ULL);
+
+					for (pte_i = 0; pte_i < 512;
+					     pte_i++) {
+						u64 va, sval, ume = 0;
+
+						if (!(spte[pte_i] &
+						      KVM_X86_PTE_P))
+							continue;
+						sval = spte[pte_i];
+						if (upte)
+							ume = upte[pte_i];
+						if (ume & UM_PTE_PRESENT)
+							continue;
+						va = ((u64)pgd_i << 39) |
+						     ((u64)pud_i << 30) |
+						     ((u64)pmd_i << 21) |
+						     ((u64)pte_i << 12);
+						if (alias_lo &&
+						    va >= alias_lo &&
+						    va < alias_hi)
+							continue;
+						shadow_extra++;
+						if (reverse_logged < max_log) {
+							reverse_logged++;
+							pr_info("um: kvm audit_pgd[%s]: SHADOW-EXTRA #%u va=0x%llx shadow=0x%llx (ume=0x%llx)\n",
+								tag,
+								shadow_extra,
+								(unsigned long long)va,
+								(unsigned long long)sval,
+								(unsigned long long)ume);
+						}
+					}
+				}
+			}
+		}
+
+		pr_info("um: kvm audit_pgd[%s]: leaves=%u match=%u DIV=%u SHADOW-EXTRA=%u synced=%d pgd=%p\n",
+			tag, leaves, matches, diverges, shadow_extra,
+			shadow->synced, uml_pgd_va);
+		return (int)(diverges + shadow_extra);
+	}
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_audit_pgd);
 #endif /* CONFIG_UM_BACKEND_KVM_INTEGRATED */
