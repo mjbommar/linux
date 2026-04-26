@@ -1399,8 +1399,18 @@ int kvm_shadow_map_page(struct kvm_shadow_mm *shadow,
 	 * bearing. Future work: instrument the failure mode
 	 * before re-attempting.
 	 */
+	/*
+	 * #274 issue: don't forcibly OR-in P|A. Pass leaf_flags
+	 * unmodified so callers control exactly what bits land. The
+	 * fill path's translator (kvm_um_pte_to_x86) already sets P
+	 * + A based on the UML PTE; the bootstrap callers explicitly
+	 * pass KVM_X86_PTE_P. Forcing P here would silently override
+	 * a future translator change that returns leaf_flags=0 to
+	 * mean "do not install" — and the redundant A bit drift
+	 * defeats the purpose of mirroring UML's software A model.
+	 */
 	pte[pte_i] = (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) |
-		     (leaf_flags | KVM_X86_PTE_P | KVM_X86_PTE_A);
+		     leaf_flags;
 	shadow->dirty = true;
 	return 0;
 }
