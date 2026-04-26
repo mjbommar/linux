@@ -287,10 +287,36 @@ EXPORT_SYMBOL_GPL(kvm_shadow_sync_pte);
 
 /*
  * Read the current UML PTE for `addr` from `mm` without taking
- * mmap_lock. Used by sync-on-flush below — the caller holds
- * either pte_lockptr or is in a flush-tlb path where the pgd
- * walker pages are stable. Returns __pte(0) if any intermediate
- * level is absent (caller will treat as "clear shadow").
+ * mmap_lock. Used by sync-on-flush below.
+ *
+ * N1 race-safety analysis:
+ *
+ *   The PGD page (mm->pgd) is stable for the lifetime of the mm —
+ *   only freed at mm teardown after all PTE mutators are gone. The
+ *   intermediate P4D/PUD/PMD pages are allocated once per
+ *   PGD/P4D/PUD slot and freed only at mm teardown (UML's free_pgd_
+ *   range). Reading an intermediate slot's value is safe even
+ *   without the per-PMD pte_lockptr because the slot itself can
+ *   only transition !present → present (allocation) under the
+ *   mmap_write_lock, never present → !present without mm teardown.
+ *
+ *   The leaf PTE value CAN race with concurrent set_pte from
+ *   another path on the same mm. We use READ_ONCE on every level
+ *   to prevent the compiler from re-reading or splitting the read.
+ *   The resulting pte is a valid snapshot — it's either the old
+ *   value (in which case the writer's own kvm_shadow_sync_pte will
+ *   run after us and converge) or the new value (in which case we
+ *   sync the right state directly). The clear-then-install flow in
+ *   kvm_shadow_sync_pte is idempotent.
+ *
+ *   On UML the default ncpus=1 cooperative model means concurrent
+ *   set_pte from another CPU is impossible in practice; the
+ *   READ_ONCE is correctness insurance for the SMP case + compiler
+ *   safety.
+ *
+ *   Returns __pte(0) if any intermediate level is absent. Caller
+ *   treats that as "clear shadow leaf" which is the correct
+ *   behaviour: if the path doesn't exist, the leaf can't exist.
  */
 static pte_t kvm_um_pgd_read_pte(struct mm_struct *mm, unsigned long addr)
 {
@@ -299,23 +325,31 @@ static pte_t kvm_um_pgd_read_pte(struct mm_struct *mm, unsigned long addr)
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
+	pgd_t pgde;
+	p4d_t p4de;
+	pud_t pude;
+	pmd_t pmde;
 
 	if (!mm || !mm->pgd)
 		return __pte(0);
 	pgd = pgd_offset(mm, addr);
-	if (pgd_none(*pgd) || pgd_bad(*pgd))
+	pgde = READ_ONCE(*pgd);
+	if (pgd_none(pgde) || pgd_bad(pgde))
 		return __pte(0);
-	p4d = p4d_offset(pgd, addr);
-	if (p4d_none(*p4d) || p4d_bad(*p4d))
+	p4d = p4d_offset(&pgde, addr);
+	p4de = READ_ONCE(*p4d);
+	if (p4d_none(p4de) || p4d_bad(p4de))
 		return __pte(0);
-	pud = pud_offset(p4d, addr);
-	if (pud_none(*pud) || pud_bad(*pud))
+	pud = pud_offset(&p4de, addr);
+	pude = READ_ONCE(*pud);
+	if (pud_none(pude) || pud_bad(pude))
 		return __pte(0);
-	pmd = pmd_offset(pud, addr);
-	if (pmd_none(*pmd) || pmd_bad(*pmd))
+	pmd = pmd_offset(&pude, addr);
+	pmde = READ_ONCE(*pmd);
+	if (pmd_none(pmde) || pmd_bad(pmde))
 		return __pte(0);
-	pte = pte_offset_kernel(pmd, addr);
-	return *pte;
+	pte = pte_offset_kernel(&pmde, addr);
+	return __pte(READ_ONCE(pte_val(*pte)));
 }
 
 /*
