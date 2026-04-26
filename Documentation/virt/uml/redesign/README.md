@@ -114,6 +114,13 @@ docs/uml-redesign/
                                       (O1 + O2.1 + O3.1 LANDED 2026-04-24)
 ```
 
+## Live status
+
+For the up-to-date "what works, what doesn't, what's blocked, and
+what's next" view, see [`STATUS.md`](STATUS.md). That file is the
+single source of truth — this README and the deeper memos may lag
+when priorities shift.
+
 ## Status of this plan
 
 - [x] Architecture layers committed (`01-architecture/`)
