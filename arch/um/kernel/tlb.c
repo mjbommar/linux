@@ -85,7 +85,15 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 		} else
 			ret = ops->unmap(ops->mm_idp, addr, PAGE_SIZE);
 
-		*pte = pte_mkuptodate(*pte);
+		/*
+		 * Only mark the PTE uptodate if the backend op succeeded.
+		 * Otherwise the next sync would skip this PTE thinking it
+		 * was already synced — leaving the host VA mapping (and,
+		 * under integrated KVM, the shadow PT) divergent from the
+		 * pgd permanently.
+		 */
+		if (!ret)
+			*pte = pte_mkuptodate(*pte);
 	} while (pte++, addr += PAGE_SIZE, ((addr < end) && !ret));
 	return ret;
 }
@@ -105,7 +113,8 @@ static inline int update_pmd_range(pud_t *pud, unsigned long addr,
 			if (pmd_needsync(*pmd)) {
 				ret = ops->unmap(ops->mm_idp, addr,
 						 next - addr);
-				pmd_mkuptodate(*pmd);
+				if (!ret)
+					pmd_mkuptodate(*pmd);
 			}
 		}
 		else ret = update_pte_range(pmd, addr, next, ops);
@@ -128,7 +137,8 @@ static inline int update_pud_range(p4d_t *p4d, unsigned long addr,
 			if (pud_needsync(*pud)) {
 				ret = ops->unmap(ops->mm_idp, addr,
 						 next - addr);
-				pud_mkuptodate(*pud);
+				if (!ret)
+					pud_mkuptodate(*pud);
 			}
 		}
 		else ret = update_pmd_range(pud, addr, next, ops);
@@ -151,7 +161,8 @@ static inline int update_p4d_range(pgd_t *pgd, unsigned long addr,
 			if (p4d_needsync(*p4d)) {
 				ret = ops->unmap(ops->mm_idp, addr,
 						 next - addr);
-				p4d_mkuptodate(*p4d);
+				if (!ret)
+					p4d_mkuptodate(*p4d);
 			}
 		} else
 			ret = update_pud_range(p4d, addr, next, ops);
