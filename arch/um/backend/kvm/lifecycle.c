@@ -37,11 +37,13 @@
  * Subsequent D-03c lands memslot plumbing (KVM_SET_USER_MEMORY_
  * REGION for mm_map/mm_unmap); D-04 creates vCPUs on top.
  */
+#include <linux/cleanup.h>		/* guard(mutex) for T11 fill_lock */
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
 #include <linux/kvm.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/pid.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
@@ -1105,6 +1107,19 @@ int kvm_shadow_fill_from_uml_pgd(void *pgd_va)
 	if (!shadow)
 		return -ENODEV;
 
+	/*
+	 * #274 / T11: serialize shadow tree mutation. fill walks the
+	 * pgd and inserts leaves; concurrent invalidate (from a
+	 * kvm_mm_map / unmap on the same shadow_mm) would race against
+	 * the walk and could leave the shadow tree in an inconsistent
+	 * intermediate state. UML's normal flow is single-threaded per
+	 * mm, but signal-driven preemption can interleave a fault
+	 * recovery's fill against an in-progress mm_unmap drain. The
+	 * mutex was initialized in kvm_shadow_mm_alloc but never used
+	 * until now. guard() auto-unlocks on every return path.
+	 */
+	guard(mutex)(&shadow->fill_lock);
+
 	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
 		u64 pgde = pgd[pgd_i];
 		u64 *pud;
@@ -1317,6 +1332,10 @@ int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 		return -ENODEV;
 	if (!len)
 		return -EINVAL;
+
+	/* #274 / T11: serialize against fill (see kvm_shadow_fill_from_uml_pgd). */
+	guard(mutex)(&shadow->fill_lock);
+
 	pgd = shadow->pgd;
 
 	va_end = (va_start + len + 0xfffULL) & ~0xfffULL;
