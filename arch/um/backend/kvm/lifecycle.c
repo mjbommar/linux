@@ -1313,16 +1313,27 @@ int kvm_shadow_invalidate_va_range(u64 va_start, u64 len)
 		}
 	}
 
-	if (cleared)
-		shadow->dirty = true;
 	/*
-	 * #274: ALWAYS reset synced regardless of cleared count.
-	 * The pgd has just been updated; shadow no longer mirrors
-	 * it even if the affected range had no present shadow leaf
-	 * to clear. Without this, the #242 cache check skips the
-	 * refill and the next user access faults to an empty shadow
-	 * entry, racing with the kernel's just-completed copy_to_user.
+	 * #274 follow-on: ALWAYS mark dirty AND reset synced — not
+	 * conditional on cleared > 0. The pgd has just been updated;
+	 * shadow no longer mirrors it even if the affected range had
+	 * no present shadow leaf to clear (e.g. lazy-fill state where
+	 * the new pgd entry hasn't been mirrored into the shadow yet).
+	 *
+	 * Without unconditional dirty: the next kvm_enter_guest's
+	 * SREGS-skip optimization (cached CR3/FS/GS match + !dirty)
+	 * skips KVM_SET_SREGS — so the guest TLB is NOT flushed even
+	 * though the shadow was just invalidated. Any guest TLB entry
+	 * caching the OLD mapping (e.g. RW shadow installed before the
+	 * kernel's mprotect-to-RO that triggered this invalidate) keeps
+	 * being honoured for the stale duration of the TLB entry,
+	 * letting the guest write to a now-RO page silently.
+	 *
+	 * Cost: one CR3 reload per invalidate that previously would
+	 * have skipped. Correctness floor; the perf optimization is the
+	 * cached-CR3 skip itself, not the conditional dirty flag.
 	 */
+	shadow->dirty = true;
 	shadow->synced = false;
 	return 0;
 }
