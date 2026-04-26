@@ -1408,6 +1408,26 @@ static int kvm_enter_guest_init_bootstrap(void)
 	kvm_bootstrap_va         = (u64)(unsigned long)page;
 	spin_unlock_irqrestore(&kvm_bootstrap_lock, flags);
 
+	/*
+	 * N7 invariant (documented): after this point kvm_bootstrap_va
+	 * never changes. The 4-page kernel-half alias range
+	 * [kvm_bootstrap_va, +4*PAGE_SIZE) maps the same physical
+	 * pages (kvm_bootstrap_page / kvm_gadget_state /
+	 * kvm_gadget_vvar / kvm_bootstrap_page_stack) for the lifetime
+	 * of the system. They are never freed, never remapped, never
+	 * resized.
+	 *
+	 * Consequence: flush_tlb_kernel_range only needs to invalidate
+	 * the init_mm's view (which it already does via
+	 * um_tlb_sync(&init_mm)); per-mm shadows hold these aliases
+	 * statically and don't need invalidation. No global walk of
+	 * shadow_mms is required.
+	 *
+	 * The transactional fill (kvm_shadow_fill_from_uml_pgd's clear
+	 * pass) explicitly preserves this VA range — see the
+	 * `va >= alias_lo && va < alias_hi` check in lifecycle.c.
+	 */
+
 	pr_info("um: kvm enter_guest: bootstrap page at va=%p gpa=0x%llx lstar=+0x%x sysret=+0x%x (%zu + %zu bytes); ist-stack page at gpa=0x%llx mapped at va+0x3000\n",
 		page, (unsigned long long)gpa,
 		KVM_BOOTSTRAP_LSTAR_OFFSET, KVM_BOOTSTRAP_SYSRET_OFFSET,
