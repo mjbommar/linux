@@ -3417,65 +3417,89 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	{
 		struct kvm_sregs exit_sregs;
 		bool sregs_valid = false;
+		/*
+		 * Memo 18 P0-2 fix 2026-04-26: SNAPSHOT everything we
+		 * need from the singleton kvm_run mmap and the singleton
+		 * IST stack BEFORE calling unblock_signals(). Otherwise
+		 * unblock_signals can synchronously deliver SIGALRM →
+		 * timer handler → schedule() → another UML task gets the
+		 * singleton vCPU/run/IST page, runs its own KVM_RUN, and
+		 * overwrites the exit state. When the original task
+		 * resumes here, run->exit_reason / run->s.regs.* / IST
+		 * frame all reflect the OTHER task's exit. Symptoms: the
+		 * intermittent ld-linux NULL deref where ld-linux's
+		 * relro-protect loop revisits the same link_map after a
+		 * 50-100us gap (the wrong-task-state decode looks like a
+		 * loop-state corruption to glibc).
+		 *
+		 * Snapshot order:
+		 *   exit_reason_snap, kregs, exit_sregs, io_*, mmio_*,
+		 *   ist_pf_error/rip (for #PF case)
+		 * THEN unblock_signals.
+		 */
+		u32 exit_reason_snap = 0;
+		u32 io_port_snap = 0;
+		u64 mmio_phys_addr_snap = 0;
+		u32 mmio_len_snap = 0;
+		u8 mmio_is_write_snap = 0;
+		u8 ist_snap[40] = {0};	/* CPU pushes 5 u64s for IRETQ +
+					 * #PF error code, plenty */
 
 		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
+
+		/* SNAPSHOT BEFORE unblock_signals — see comment above */
+		if (rc >= 0) {
+			exit_reason_snap = run->exit_reason;
+			io_port_snap = run->io.port;
+			mmio_phys_addr_snap = run->mmio.phys_addr;
+			mmio_len_snap = run->mmio.len;
+			mmio_is_write_snap = run->mmio.is_write;
+			if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
+				kregs = run->s.regs.regs;
+			} else {
+				int gr = os_ioctl_generic(vcpu_fd,
+						KVM_GET_REGS,
+						(unsigned long)&kregs);
+				if (gr < 0)
+					panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)", gr);
+			}
+			if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
+				exit_sregs = run->s.regs.sregs;
+				sregs_valid = true;
+			} else if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
+						    (unsigned long)&exit_sregs) >= 0) {
+				sregs_valid = true;
+			}
+			if (sregs_valid)
+				regs->is_user = (exit_sregs.cs.selector & 3) != 0;
+
+			/* Snapshot IST stack contents in case this is a
+			 * #PF exit. The IST stack is singleton — another
+			 * task's KVM_RUN can overwrite it post-unblock. */
+			{
+				unsigned long ist_off =
+					(unsigned long)(kregs.rsp -
+					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+				if (ist_off < PAGE_SIZE - sizeof(ist_snap)) {
+					u8 *src = (u8 *)kvm_bootstrap_page_stack
+						+ ist_off;
+					memcpy(ist_snap, src, sizeof(ist_snap));
+				}
+			}
+		}
+
 		/*
-		 * Memo 18 Phase 2.4: KVM_RUN returned. The IRETQ frame
-		 * has been consumed (on entry) or the in-flight guest
-		 * state is in vCPU registers; the per-mm IRETQ-frame
-		 * page no longer needs serialization protection. Allow
-		 * signal delivery again.
+		 * NOW it's safe to unblock signals — the exit state
+		 * (regs, sregs, exit_reason, io.port, IST snapshot) has
+		 * been copied into local variables that no other task
+		 * can touch.
 		 */
 		unblock_signals();
+
 		if (rc < 0) {
 			if (rc == -EINTR)
 				goto out_read_regs;
 			panic("um: kvm run_userspace: KVM_RUN failed (%d)", rc);
-		}
-
-		/*
-		 * Perf-lever #2: when KVM_SYNC_X86_REGS is live, KVM
-		 * already populated run->s.regs.regs on exit (we set
-		 * kvm_valid_regs before the last entry). Skip the
-		 * KVM_GET_REGS ioctl.
-		 */
-		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
-			kregs = run->s.regs.regs;
-		} else {
-			rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
-					      (unsigned long)&kregs);
-			if (rc < 0)
-				panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)",
-				      rc);
-		}
-
-		/*
-		 * Memo 18 Phase 1.1: read SREGS BEFORE the bulk regs
-		 * marshal so we can gate the marshal on guest CPL. Until
-		 * this reorder, the unconditional kvm_regs_to_uml_regs
-		 * below would corrupt user regs whenever the vCPU vmexit'd
-		 * at CPL=0 mid-bootstrap (LSTAR trampoline / IRETQ gadget /
-		 * #PF handler) — kregs.rip / kregs.rsp / kregs.rflags
-		 * point at bootstrap-page kernel-half values. The next
-		 * kvm_enter_guest then builds the IRETQ frame from those
-		 * corrupt values → guest resumes at a kernel-half RIP →
-		 * wild SIGSEGV in dl_main / Python init.
-		 *
-		 * Audit finding A2 (memo D70): derive is_user from
-		 * the observed CPL. CPL = cs.selector & 3.
-		 *
-		 * Review-01 P1 #5: prefer the synced view via
-		 * KVM_SYNC_X86_SREGS when the cap is available — saves
-		 * one ioctl per VMEXIT.
-		 */
-		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
-			exit_sregs = run->s.regs.sregs;
-			sregs_valid = true;
-			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
-		} else if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-					    (unsigned long)&exit_sregs) >= 0) {
-			sregs_valid = true;
-			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
 		}
 
 		/*
@@ -3512,17 +3536,17 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			bool exit_at_user = !sregs_valid || regs->is_user;
 			bool exit_needs_marshal =
 				exit_at_user ||
-				run->exit_reason == KVM_EXIT_IO ||
-				run->exit_reason == KVM_EXIT_MMIO ||
-				run->exit_reason == KVM_EXIT_HLT;
+				exit_reason_snap == KVM_EXIT_IO ||
+				exit_reason_snap == KVM_EXIT_MMIO ||
+				exit_reason_snap == KVM_EXIT_HLT;
 
 			if (exit_needs_marshal)
 				kvm_regs_to_uml_regs(regs, &kregs);
 		}
 
-		switch (run->exit_reason) {
+		switch (exit_reason_snap) {
 		case KVM_EXIT_IO:
-			if (run->io.port == UM_KVM_SYSCALL_PORT) {
+			if (io_port_snap == UM_KVM_SYSCALL_PORT) {
 				kvm_decode_syscall(regs, &kregs, vcpu_fd);
 				/*
 				 * Audit A1 (2026-04-24 round-3):
@@ -3539,7 +3563,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 */
 				goto out_read_regs;
 			}
-			if (run->io.port == UM_KVM_SYSRETQ_PORT) {
+			if (io_port_snap == UM_KVM_SYSRETQ_PORT) {
 				/*
 				 * Phase III Lift #1b-style ring-3 fallback
 				 * emit. Not a normal production flow;
@@ -3549,7 +3573,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 */
 				panic("um: kvm run_userspace: unexpected ring-3 port 0xf5 exit\n");
 			}
-			if (run->io.port == UM_KVM_PF_PORT) {
+			if (io_port_snap == UM_KVM_PF_PORT) {
 				/*
 				 * Sub-commit #5b: guest-side #PF handler
 				 * trapped in. Read CR2, touch the page to
@@ -3573,21 +3597,20 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				u8 *ist;
 
 				/*
-				 * Experiment #2: prefer the synced view if
-				 * KVM published it via KVM_CAP_SYNC_REGS.
-				 * Saves a KVM_GET_SREGS ioctl on the hot
-				 * fault path (~50-100ns).
+				 * P0-2 fix 2026-04-26: use exit_sregs
+				 * snapshot captured BEFORE unblock_signals.
+				 * Reading run->s.regs.sregs.cr2 here would
+				 * race with another task's KVM_RUN clobbering
+				 * the singleton sync_regs.
 				 */
-				if (kvm_backend_ctx()->sync_regs_caps &
-				    KVM_SYNC_X86_SREGS) {
-					cr2 = run->s.regs.sregs.cr2;
-				} else {
-					if (os_ioctl_generic(vcpu_fd,
-							     KVM_GET_SREGS,
-							     (unsigned long)&dump_sregs) < 0) {
-						panic("um: kvm PF handler: KVM_GET_SREGS failed");
-					}
+				if (sregs_valid) {
+					cr2 = exit_sregs.cr2;
+				} else if (os_ioctl_generic(vcpu_fd,
+						KVM_GET_SREGS,
+						(unsigned long)&dump_sregs) >= 0) {
 					cr2 = dump_sregs.cr2;
+				} else {
+					panic("um: kvm PF handler: KVM_GET_SREGS failed");
 				}
 
 				/*
@@ -3618,21 +3641,15 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					pr_warn_ratelimited("um: kvm: PF IST out of range\n");
 					fatal_sigsegv();
 				}
-				ist = (u8 *)kvm_bootstrap_page_stack + ist_off;
 				/*
-				 * Audit round-6 G3: read the CPU-pushed
-				 * #PF error code from IST+0 instead of
-				 * hardcoding faultinfo->error_code = 4
-				 * later. Bits we care about (Intel SDM
-				 * vol 3 §6.15):
-				 *   bit 0  P  — 1 if protection violation
-				 *   bit 1  W  — 1 if write
-				 *   bit 2  U  — 1 if user-mode access
-				 *   bit 4  ID — 1 if instruction fetch
-				 * UML's faultinfo expects the same bits
-				 * (mirrors the Linux x86 error_code
-				 * convention).
+				 * P0-2 fix 2026-04-26: use the IST snapshot
+				 * captured BEFORE unblock_signals (see top
+				 * of this block). The live kvm_bootstrap_
+				 * page_stack would be stale if another task
+				 * KVM_RUN'd in between.
 				 */
+				ist = ist_snap;
+				(void)kvm_bootstrap_page_stack;	/* unused now */
 				fault_error_code = *(u64 *)(ist + 0);
 				fault_was_write  = (fault_error_code >> 1) & 1;
 				fault_rip = *(u64 *)(ist + 8);
@@ -4055,7 +4072,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 */
 				goto out_read_regs;
 			}
-			if (run->io.port == UM_KVM_GP_PORT) {
+			if (io_port_snap == UM_KVM_GP_PORT) {
 				/*
 				 * Audit round-7 P1 follow-on (task #272
 				 * IRETQ hardening): in-guest IDT[13] (#GP)
@@ -4114,7 +4131,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 						     regs, NULL);
 				goto out_read_regs;
 			}
-			if (run->io.port == UM_KVM_DF_PORT) {
+			if (io_port_snap == UM_KVM_DF_PORT) {
 				/*
 				 * Task #269: in-guest IDT[8] (#DF) handler
 				 * fired. The CPU pushed the iretq frame onto
@@ -4165,7 +4182,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				      (unsigned long long)kregs.rsp);
 			}
 			panic("um: kvm run_userspace: KVM_EXIT_IO port=0x%x (unknown)",
-			      run->io.port);
+			      io_port_snap);
 
 		case KVM_EXIT_HLT:
 			/*
@@ -4236,14 +4253,14 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				is_user = regs->is_user;
 
 			fi->trap_no    = 14;
-			fi->error_code = (run->mmio.is_write ? 2 : 0) |
+			fi->error_code = (mmio_is_write_snap ? 2 : 0) |
 					 (is_user ? 4 : 0);
-			fi->cr2        = (unsigned long)run->mmio.phys_addr +
+			fi->cr2        = (unsigned long)mmio_phys_addr_snap +
 					 uml_physmem;
 
 			pr_info_ratelimited("um: kvm run_userspace: KVM_EXIT_MMIO gpa=0x%llx cr2=0x%lx len=%u write=%u\n",
-					    (unsigned long long)run->mmio.phys_addr,
-					    fi->cr2, run->mmio.len, run->mmio.is_write);
+					    (unsigned long long)mmio_phys_addr_snap,
+					    fi->cr2, mmio_len_snap, mmio_is_write_snap);
 
 			/*
 			 * Dispatch through the same sig_info[SIGSEGV]
@@ -4318,8 +4335,8 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			guest_rip = kregs.rip;
 
 			pr_err("um: kvm run_userspace: unrecoverable exit %u (%s)\n",
-			       run->exit_reason,
-			       kvm_exit_reason_str(run->exit_reason));
+			       exit_reason_snap,
+			       kvm_exit_reason_str(exit_reason_snap));
 			pr_err("um: kvm: guest RIP=0x%llx CR3=0x%llx CS=0x%x CPL=%u is_user=%d\n",
 			       (unsigned long long)guest_rip,
 			       (unsigned long long)guest_cr3,
@@ -4462,7 +4479,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					       ev.interrupt.nr);
 				}
 			}
-			if (run->exit_reason == KVM_EXIT_FAIL_ENTRY) {
+			if (exit_reason_snap == KVM_EXIT_FAIL_ENTRY) {
 				u64 hw = run->fail_entry.hardware_entry_failure_reason;
 
 				pr_err("um: kvm: FAIL_ENTRY hw_reason=0x%llx\n",
@@ -4498,18 +4515,18 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					       (unsigned long long)guest_rip, cr_rc);
 				}
 			}
-			if (run->exit_reason == KVM_EXIT_INTERNAL_ERROR)
+			if (exit_reason_snap == KVM_EXIT_INTERNAL_ERROR)
 				pr_err("um: kvm: INTERNAL_ERROR suberror=%u\n",
 				       run->internal.suberror);
 			panic("um: kvm run_userspace: unrecoverable exit %u (%s)",
-			      run->exit_reason,
-			      kvm_exit_reason_str(run->exit_reason));
+			      exit_reason_snap,
+			      kvm_exit_reason_str(exit_reason_snap));
 		}
 
 		default:
 			panic("um: kvm run_userspace: unknown exit reason %u (%s)",
-			      run->exit_reason,
-			      kvm_exit_reason_str(run->exit_reason));
+			      exit_reason_snap,
+			      kvm_exit_reason_str(exit_reason_snap));
 		}
 	}
 
