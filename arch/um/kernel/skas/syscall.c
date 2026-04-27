@@ -14,6 +14,7 @@
 #include <asm/um-hooks.h>
 #include <asm/unistd.h>
 #include <asm/delay.h>
+#include <linux/ktime.h>
 
 void handle_syscall(struct uml_pt_regs *r)
 {
@@ -47,6 +48,18 @@ void handle_syscall(struct uml_pt_regs *r)
 
 	if (syscall >= 0 && syscall < __NR_syscalls) {
 		unsigned long ret;
+		unsigned long mp_addr = 0, mp_len = 0, mp_prot = 0;
+		bool log_mm = (syscall == 9 /* mmap */ ||
+			       syscall == 10 /* mprotect */ ||
+			       syscall == 11 /* munmap */);
+		u64 t0 = 0;
+
+		if (log_mm) {
+			mp_addr = UPT_SYSCALL_ARG1(&regs->regs);
+			mp_len  = UPT_SYSCALL_ARG2(&regs->regs);
+			mp_prot = UPT_SYSCALL_ARG3(&regs->regs);
+			t0 = ktime_get_ns();
+		}
 
 		ret = (*sys_call_table[syscall])(UPT_SYSCALL_ARG1(&regs->regs),
 						 UPT_SYSCALL_ARG2(&regs->regs),
@@ -54,6 +67,17 @@ void handle_syscall(struct uml_pt_regs *r)
 						 UPT_SYSCALL_ARG4(&regs->regs),
 						 UPT_SYSCALL_ARG5(&regs->regs),
 						 UPT_SYSCALL_ARG6(&regs->regs));
+
+		if (log_mm) {
+			u64 t1 = ktime_get_ns();
+			extern void um_diag_record(int nr, unsigned long a,
+						   unsigned long l,
+						   unsigned long p, long r,
+						   u64 t);
+			um_diag_record(syscall, mp_addr, mp_len, mp_prot,
+				       (long)ret, t1);
+			(void)t0;
+		}
 
 		PT_REGS_SET_SYSCALL_RETURN(regs, ret);
 
