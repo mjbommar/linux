@@ -148,20 +148,63 @@ time to complete.
   invalidate_range which may schedule MMU notifier work; without
   the spin, the next KVM_RUN may enter before notifiers complete.
 
+### Threshold-finding empirical data (2026-04-26)
+
+| Delay | ldlinux failures (N=30) |
+|-------|------|
+| udelay(1)  | 2 |
+| udelay(10) | 2 |
+| udelay(25) | 2 |
+| udelay(50) | **0** |
+
+Threshold is between 25us and 50us. Below 50us, race window stays open.
+
+### Parity gate impact of udelay(50) (2 trials)
+
+- Trial 1: 18/21 (test_struct, test_dict, test_tuple DIVERGE)
+- Trial 2: 17/21 (test_math, test_bisect, test_bytes, test_int DIVERGE)
+
+**Average ~17.5/21 vs 17/21 baseline = within variance.** The fix
+reduces ld-linux NULL deref at the unit-test level (30/30 vs
+14% baseline) but other failure modes dominate the gate. Not
+committed because:
+  1. Marginal gate-level improvement (within noise)
+  2. ~5% perf cost (50us per kvm_run_userspace iteration)
+  3. Band-aid without root cause understanding
+
+The udelay(50) has been REVERTED. Diagnostic-only finding for
+next-session investigation.
+
 ### Highest-leverage next-session investigation
 
-1. Add tracing in `kvm_run_userspace` between um_tlb_sync and
+1. **Identify what the 50us is doing**: the diagnostic ruled out
+   memory ordering (mb), TLB sync (um_tlb_sync), scheduler
+   (cond_resched), workqueue (flush_workqueue), and RCU
+   (synchronize_rcu). Only pure latency works. Candidates that
+   need direct testing:
+     - HW write buffer drain (try `wbinvd`?)
+     - Cache line settling (try sequential reads/writes to a
+       cacheline?)
+     - KVM internal MMU state propagation (check if there's
+       a kvm_for_each_vcpu / vcpu_kick equivalent in our path)
+     - Pending signal that needs to deliver via udelay-driven
+       interrupt processing
+
+2. **Add tracing in `kvm_run_userspace`** between um_tlb_sync and
    kvm_enter_guest to count: pending signals, queued workqueue
    items, KVM MMU notifier callbacks pending. Confirm WHICH
    asynchronous work needs the 50us window.
 
-2. Once identified, add proper synchronization (e.g., explicit
-   wait-for-MMU-notifiers, or signal-pending check + block, or
-   workqueue flush) to eliminate the race without the spin.
+3. **Investigate the OTHER residual failure modes** (test_struct/
+   dict/tuple/math/bisect/bytes/int — the ~3-4 modules that fail
+   even with udelay(50)). These are likely a DIFFERENT bug class
+   than the ld-linux NULL deref. Capture their pf_mini_regs
+   patterns and classify.
 
-3. The fix is likely a MISSING synchronization point in
-   `kvm_run_userspace` — some "wait until all pending mm
-   mutations are visible to KVM" call.
+4. Once identified, add proper synchronization to eliminate the
+   race without the spin. The fix is likely a MISSING
+   synchronization point in `kvm_run_userspace` — some "wait
+   until all pending mm mutations are visible to KVM" call.
 
 ## Earlier hypothesis (now contradicted by data)
 
