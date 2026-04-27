@@ -233,7 +233,6 @@ int kvm_init(const struct um_backend_args *args)
 
 	kvm_ctx.kvm_fd = kfd;
 	kvm_ctx.vm_fd  = vmfd;
-	refcount_set(&kvm_ctx.mm_refcount, 0);
 
 	/*
 	 * Task #273: CPUID passthrough is deferred to first KVM_RUN

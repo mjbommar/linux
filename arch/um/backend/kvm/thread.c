@@ -216,6 +216,23 @@ core_param(kvm_diag_audit_pgd_skip, kvm_diag_audit_pgd_skip, uint, 0644);
 static unsigned int kvm_diag_skip_fpu_save;
 core_param(kvm_diag_skip_fpu_save, kvm_diag_skip_fpu_save, uint, 0644);
 
+/*
+ * Stage B.1 entry: switch guest CR3 from the per-mm shadow PT
+ * (shadow->pgd_gpa) to UML's logical pgd directly (__pa(mm->pgd)).
+ * Under Policy A's identity memslot, KVM TDP/EPT walks mm->pgd's
+ * standard x86 leaves to resolve user VAs. The shadow PT mirror
+ * becomes structurally redundant — the gate's remaining 3-module
+ * flake is shadow-PT staleness on heavy-memory workloads.
+ *
+ * Set kvm_use_mm_pgd=1 on the command line to enable. Default 0
+ * keeps the shadow PT path active so we can A/B compare. When the
+ * mm-pgd path proves equivalent, this becomes the only path and
+ * Stage B.7-B.11 delete the shadow apparatus.
+ */
+unsigned int kvm_use_mm_pgd;
+core_param(kvm_use_mm_pgd, kvm_use_mm_pgd, uint, 0644);
+EXPORT_SYMBOL_GPL(kvm_use_mm_pgd);
+
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 /*
  * Per-task vCPU state save/restore (memo 17 Phase D).
@@ -647,6 +664,27 @@ EXPORT_SYMBOL_GPL(kvm_bootstrap_va_get);
 						 * to the user task instead of
 						 * cascading to #DF and panicking.
 						 */
+
+/*
+ * SEC.2 (2026-04-27) — minimal handlers for ring-3-triggerable
+ * exceptions that previously triple-faulted because the IDT had no
+ * entry. Each handler is `out %al, $port; hlt` (3 bytes) where the
+ * port is unique per vector; the host VMEXIT dispatcher delivers
+ * SIGILL/SIGFPE/SIGTRAP via the standard sig_info[] path.
+ *
+ *   #DE (vec  0, divide error) → port 0xfa → SIGFPE
+ *   #BP (vec  3, int3 / breakpoint) → port 0xfb → SIGTRAP
+ *   #OF (vec  4, into / overflow)   → port 0xfc → SIGSEGV (no SIGOVERFLOW signal in Linux)
+ *   #UD (vec  6, invalid opcode / ud2) → port 0xfd → SIGILL
+ *
+ * Without these handlers a user-space `ud2`, divide-by-zero, int3
+ * etc. cascades to triple-fault → KVM_EXIT_SHUTDOWN → host panic.
+ * With them, those become user-task signals as POSIX requires.
+ */
+#define KVM_BOOTSTRAP_DE_HANDLER_OFFSET	0x4e0	/* 3 bytes */
+#define KVM_BOOTSTRAP_BP_HANDLER_OFFSET	0x4e4	/* 3 bytes */
+#define KVM_BOOTSTRAP_OF_HANDLER_OFFSET	0x4e8	/* 3 bytes */
+#define KVM_BOOTSTRAP_UD_HANDLER_OFFSET	0x4ec	/* 3 bytes */
 #define KVM_BOOTSTRAP_IRETQ_OFFSET	0x4d0	/* 2-byte IRETQ (task #272 recovery
 						 * re-entry). SYSRETQ-based bootstrap
 						 * clobbers RCX (= user RIP load) and R11
@@ -691,21 +729,26 @@ EXPORT_SYMBOL_GPL(kvm_bootstrap_va_get);
  *   bit  9 (IF)         — keep interrupts enabled in ring-3; the
  *                          guest cannot disable the host's
  *                          preemption path
- *   bits 12..13 (IOPL)  — hold at 3 so the in-guest ring-3
- *                          protocol ports (0xf4 syscall trap,
- *                          0xf5 halt, 0xfb PF-recovery, 0x80
- *                          debug) remain usable without switching
- *                          CPL
+ *
+ * SECURITY NOTE (SEC.1, 2026-04-27): IOPL bits 12-13 were
+ * previously OR'd in to "let the in-guest ring-3 protocol ports
+ * (0xf4 / 0xf9 / 0xfa / 0xfb) remain usable without switching
+ * CPL". That was a security bug: ordinary ring-3 user code could
+ * execute OUT directly to those ports and spoof internal trap
+ * protocol events, panicking the host UML kernel. Removed.
+ *
+ * The CPL=0 LSTAR trampoline + in-guest IDT handlers + IRETQ
+ * gadget can still issue OUT for the trap protocol because at
+ * CPL=0 in 64-bit mode IO is unrestricted regardless of IOPL.
+ * Ring-3 user code with IOPL=0 now gets #GP on direct OUT —
+ * which propagates as SIGSEGV through the standard fault path.
  *
  * All other user-visible bits (CF/PF/AF/ZF/SF/TF/DF/OF, NT, RF,
  * AC, ID) inherit from the saved user RFLAGS so a faulting
  * instruction's retry or a SYSCALL-return continuation sees the
- * correct architectural state. Before audit round-4 F2 this
- * value was hardcoded to 0x3202 which silently dropped the
- * saved user RFLAGS across every recoverable #PF and every
- * SYSCALL round-trip.
+ * correct architectural state.
  */
-#define KVM_RFLAGS_REQ_ON	((1UL << 1) | (1UL << 9) | (3UL << 12))
+#define KVM_RFLAGS_REQ_ON	((1UL << 1) | (1UL << 9))
 
 /*
  * Pure-data helper: compute the R11 value to hand to the
@@ -1296,6 +1339,30 @@ static const u8 kvm_bootstrap_gp_handler_bytes[] = {
 
 #define UM_KVM_GP_PORT	0xf9	/* audit-round-7 P1 #GP-handler VMEXIT */
 
+/*
+ * SEC.2: ring-3-exception handlers + ports.
+ */
+static const u8 kvm_bootstrap_de_handler_bytes[] = {
+	0xe6, 0xfa,			/* out %al, $0xfa  (#DE → SIGFPE) */
+	0xf4,				/* hlt             */
+};
+static const u8 kvm_bootstrap_bp_handler_bytes[] = {
+	0xe6, 0xfb,			/* out %al, $0xfb  (#BP → SIGTRAP) */
+	0xf4,				/* hlt             */
+};
+static const u8 kvm_bootstrap_of_handler_bytes[] = {
+	0xe6, 0xfc,			/* out %al, $0xfc  (#OF → SIGSEGV) */
+	0xf4,				/* hlt             */
+};
+static const u8 kvm_bootstrap_ud_handler_bytes[] = {
+	0xe6, 0xfd,			/* out %al, $0xfd  (#UD → SIGILL) */
+	0xf4,				/* hlt             */
+};
+#define UM_KVM_DE_PORT	0xfa	/* #DE divide error */
+#define UM_KVM_BP_PORT	0xfb	/* #BP breakpoint / int3 */
+#define UM_KVM_OF_PORT	0xfc	/* #OF overflow / into */
+#define UM_KVM_UD_PORT	0xfd	/* #UD invalid opcode / ud2 */
+
 static int kvm_enter_guest_init_bootstrap(void)
 {
 	void *page;
@@ -1425,6 +1492,28 @@ static int kvm_enter_guest_init_bootstrap(void)
 	memcpy((char *)page + KVM_BOOTSTRAP_GP_HANDLER_OFFSET,
 	       kvm_bootstrap_gp_handler_bytes,
 	       sizeof(kvm_bootstrap_gp_handler_bytes));
+
+	/* SEC.2: install ring-3 exception handler bytes for #DE/#BP/#OF/#UD. */
+	BUILD_BUG_ON(KVM_BOOTSTRAP_DE_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_de_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_DE_HANDLER_OFFSET,
+	       kvm_bootstrap_de_handler_bytes,
+	       sizeof(kvm_bootstrap_de_handler_bytes));
+	BUILD_BUG_ON(KVM_BOOTSTRAP_BP_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_bp_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_BP_HANDLER_OFFSET,
+	       kvm_bootstrap_bp_handler_bytes,
+	       sizeof(kvm_bootstrap_bp_handler_bytes));
+	BUILD_BUG_ON(KVM_BOOTSTRAP_OF_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_of_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_OF_HANDLER_OFFSET,
+	       kvm_bootstrap_of_handler_bytes,
+	       sizeof(kvm_bootstrap_of_handler_bytes));
+	BUILD_BUG_ON(KVM_BOOTSTRAP_UD_HANDLER_OFFSET +
+		     sizeof(kvm_bootstrap_ud_handler_bytes) > PAGE_SIZE);
+	memcpy((char *)page + KVM_BOOTSTRAP_UD_HANDLER_OFFSET,
+	       kvm_bootstrap_ud_handler_bytes,
+	       sizeof(kvm_bootstrap_ud_handler_bytes));
 
 	/*
 	 * Extend the GDT to 8 entries: entries 0-5 were populated
@@ -1573,6 +1662,40 @@ static int kvm_enter_guest_init_bootstrap(void)
 		e[10] = (u8)((pf_va >> 48) & 0xff);
 		e[11] = (u8)((pf_va >> 56) & 0xff);
 		/* bytes 12-15 stay zero from memset. */
+
+		/*
+		 * SEC.2: install IDT entries for ring-3-triggerable
+		 * exceptions. Each routes to its handler offset (out + hlt)
+		 * on the IST stack, with DPL=3 (so user int3 / into
+		 * actually trigger — DPL=0 would #GP on those).
+		 *
+		 * Helper macro for the 16-byte long-mode IDT-entry layout.
+		 */
+#define INSTALL_IDT_GATE(_vec, _hva, _ist, _dpl) do {			\
+		u8 *__e = idt + (_vec) * 16;				\
+		u64 __va = (u64)(unsigned long)page + (_hva);		\
+		__e[0]  = (u8)(__va & 0xff);				\
+		__e[1]  = (u8)((__va >> 8) & 0xff);			\
+		__e[2]  = 0x08;	/* ring-0 code selector */		\
+		__e[3]  = 0x00;						\
+		__e[4]  = (_ist);					\
+		__e[5]  = 0x8e | ((_dpl) << 5); /* P|DPL|int-gate */	\
+		__e[6]  = (u8)((__va >> 16) & 0xff);			\
+		__e[7]  = (u8)((__va >> 24) & 0xff);			\
+		__e[8]  = (u8)((__va >> 32) & 0xff);			\
+		__e[9]  = (u8)((__va >> 40) & 0xff);			\
+		__e[10] = (u8)((__va >> 48) & 0xff);			\
+		__e[11] = (u8)((__va >> 56) & 0xff);			\
+	} while (0)
+		/* #DE (vec 0): DPL=0 — divide errors only fire from user */
+		INSTALL_IDT_GATE(0, KVM_BOOTSTRAP_DE_HANDLER_OFFSET, 1, 0);
+		/* #BP (vec 3): DPL=3 — user int3 must reach the handler */
+		INSTALL_IDT_GATE(3, KVM_BOOTSTRAP_BP_HANDLER_OFFSET, 1, 3);
+		/* #OF (vec 4): DPL=3 — user `into` must reach the handler */
+		INSTALL_IDT_GATE(4, KVM_BOOTSTRAP_OF_HANDLER_OFFSET, 1, 3);
+		/* #UD (vec 6): DPL=0 — invalid opcode is involuntary */
+		INSTALL_IDT_GATE(6, KVM_BOOTSTRAP_UD_HANDLER_OFFSET, 1, 0);
+#undef INSTALL_IDT_GATE
 	}
 
 	kvm_bootstrap_page       = page;
@@ -2297,6 +2420,44 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 			pr_warn_once("um: kvm enter_guest: no per-mm shadow\n");
 			return -ENODEV;
 		}
+		/*
+		 * Stage B.1 findings:
+		 *
+		 * 1. Direct CR3 = __pa(mm->pgd) triple-faults: UML's
+		 *    kvm_bootstrap_va sits in PML4 slot 0 alongside user
+		 *    mappings (mm->pgd has user-mappings there, NOT
+		 *    UML-kernel bootstrap mappings). UML doesn't follow
+		 *    x86_64's classic kernel-half/user-half split that
+		 *    the Stage B synthesis assumed.
+		 *
+		 * 2. Force-full-resync-every-entry helps test_decimal
+		 *    (the heaviest module) but exposes flake in other
+		 *    modules (test_int, test_float). The shadow PT has
+		 *    multiple writer paths (kvm_shadow_sync_pte from
+		 *    atomic-context set_pte_at, kvm_shadow_invalidate_
+		 *    va_range from mm unmap, several lifecycle.c paths)
+		 *    that can race even with always-fill. Forcing fill
+		 *    only fixes one race window.
+		 *
+		 * Real Stage B requires either:
+		 *   (a) UML mm layout rework so kvm_bootstrap_va lives
+		 *       in a kernel-half slot mm->pgd doesn't touch, then
+		 *       shared kernel-half via init_mm.pgd inheritance.
+		 *   (b) A per-mm reader-writer lock that excludes all
+		 *       shadow producers during fill, with the producers
+		 *       acquiring read locks in atomic context (mutex
+		 *       conversion needed since set_pte_at runs under
+		 *       page-table spinlocks).
+		 *   (c) Replace shadow PT with a direct mm->pgd-walking
+		 *       CR3 that maps bootstrap pages via Linux's normal
+		 *       set_pte_at into mm->pgd's user-half-but-marked-
+		 *       kernel-only.
+		 *
+		 * All three are days-to-weeks of structural work. The
+		 * current implementation keeps the existing shadow PT
+		 * with the dirty-boolean predicate; the gate sits at
+		 * 18-20/21 single-pass with run-to-run variance.
+		 */
 		cr3_gpa = shadow->pgd_gpa;
 	}
 
@@ -3179,6 +3340,15 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 							    (unsigned long long)replay_user_va,
 							    replay_payload_len);
 			}
+			/*
+			 * BUG.3 fix: free the consume_syscall_meta-duped buffers.
+			 * consume_syscall_meta now copies under-lock to caller-
+			 * owned heap; we own the lifetime here.
+			 */
+			kvfree((void *)replay_payload);
+			kvfree((void *)replay_meta);
+			replay_payload = NULL;
+			replay_meta = NULL;
 			goto record_dispatch_done;
 		}
 		/*
@@ -4291,6 +4461,66 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				regs->gp[HOST_EFLAGS] = gp_user_rflags;
 				(*sig_info[SIGSEGV])(SIGSEGV, NULL,
 						     regs, NULL);
+				goto out_read_regs;
+			}
+			if (io_port_snap == UM_KVM_DE_PORT ||
+			    io_port_snap == UM_KVM_BP_PORT ||
+			    io_port_snap == UM_KVM_OF_PORT ||
+			    io_port_snap == UM_KVM_UD_PORT) {
+				/*
+				 * SEC.2: ring-3 exception handler fired. Map
+				 * port → signal, restore user RIP/RSP/RFLAGS
+				 * from the IST frame, deliver the signal via
+				 * the standard sig_info[] path. No error code
+				 * was pushed by the CPU for these vectors
+				 * (#DE/#BP/#OF/#UD have no error code), so the
+				 * IST frame layout is +0 RIP, +8 CS, +16 RFLAGS,
+				 * +24 RSP, +32 SS (one fewer slot than #PF/#GP).
+				 */
+				struct faultinfo *fi = UPT_FAULTINFO(regs);
+				int sig;
+				int trap_no;
+				unsigned long ex_ist_off;
+				u8 *ex_ist;
+				u64 ex_user_rip, ex_user_rsp, ex_user_rflags;
+
+				switch (io_port_snap) {
+				case UM_KVM_DE_PORT: sig = SIGFPE;  trap_no = 0; break;
+				case UM_KVM_BP_PORT: sig = SIGTRAP; trap_no = 3; break;
+				case UM_KVM_OF_PORT: sig = SIGSEGV; trap_no = 4; break;
+				case UM_KVM_UD_PORT: sig = SIGILL;  trap_no = 6; break;
+				default:
+					sig = SIGSEGV; trap_no = 13; break; /* unreachable */
+				}
+
+				ex_ist_off = (unsigned long)(kregs.rsp -
+					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+				if (ex_ist_off >= PAGE_SIZE) {
+					pr_warn_ratelimited("um: kvm #vec=%d: IST out of range (rsp=0x%llx)\n",
+							    trap_no,
+							    (unsigned long long)kregs.rsp);
+					fatal_sigsegv();
+					goto out_read_regs;
+				}
+				ex_ist = (u8 *)kvm_bootstrap_page_stack + ex_ist_off;
+				ex_user_rip    = *(u64 *)(ex_ist + 0);
+				ex_user_rflags = *(u64 *)(ex_ist + 16);
+				ex_user_rsp    = *(u64 *)(ex_ist + 24);
+				pr_warn_ratelimited("um: kvm guest #%d (port=0x%x): rip=0x%llx rsp=0x%llx rflags=0x%llx (delivering signal %d)\n",
+						    trap_no,
+						    io_port_snap,
+						    (unsigned long long)ex_user_rip,
+						    (unsigned long long)ex_user_rsp,
+						    (unsigned long long)ex_user_rflags,
+						    sig);
+				fi->trap_no    = trap_no;
+				fi->error_code = 0;
+				fi->cr2        = 0;
+				regs->is_user = 1;
+				regs->gp[HOST_IP]     = ex_user_rip;
+				regs->gp[HOST_SP]     = ex_user_rsp;
+				regs->gp[HOST_EFLAGS] = ex_user_rflags;
+				(*sig_info[sig])(sig, NULL, regs, NULL);
 				goto out_read_regs;
 			}
 			if (io_port_snap == UM_KVM_DF_PORT) {

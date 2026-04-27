@@ -1176,14 +1176,51 @@ int kvm_record_consume_syscall_meta(unsigned long syscall_nr,
 	*ret_out = (long)e->data[1];
 	if (user_buf_va_out)
 		*user_buf_va_out = e->data[2];
-	if (payload_out)
-		*payload_out = e->payload;
+	/*
+	 * BUG.3 fix (2026-04-27): copy payload + metadata bytes under
+	 * the lock into caller-owned heap allocations. Pre-fix, this
+	 * function returned raw pointers into rec->log[i].payload /
+	 * .metadata; the caller dereferenced them after dropping the
+	 * lock, racing with debugfs `echo destroy > kvm_record_ctl`
+	 * which calls kvm_record_destroy → kvfree(payload). UAF.
+	 *
+	 * Caller owns the duped buffers and must kvfree them when
+	 * done. *_len_out is set even when *_out is NULL so the
+	 * caller can still report the recorded size for diagnostics.
+	 */
 	if (payload_len_out)
 		*payload_len_out = e->payload_len;
-	if (metadata_out)
-		*metadata_out = e->metadata;
+	if (payload_out) {
+		*payload_out = NULL;
+		if (e->payload && e->payload_len) {
+			void *dup = kvmemdup(e->payload, e->payload_len,
+					     GFP_ATOMIC);
+			if (!dup) {
+				rc = -ENOMEM;
+				goto out;
+			}
+			*payload_out = dup;
+		}
+	}
 	if (metadata_len_out)
 		*metadata_len_out = e->metadata_len;
+	if (metadata_out) {
+		*metadata_out = NULL;
+		if (e->metadata && e->metadata_len) {
+			void *dup = kvmemdup(e->metadata, e->metadata_len,
+					     GFP_ATOMIC);
+			if (!dup) {
+				/* Free the payload we already duped to keep symmetry */
+				if (payload_out && *payload_out) {
+					kvfree((void *)*payload_out);
+					*payload_out = NULL;
+				}
+				rc = -ENOMEM;
+				goto out;
+			}
+			*metadata_out = dup;
+		}
+	}
 	if (metadata_kind_out)
 		*metadata_kind_out = e->metadata_kind;
 	rec->replay_cursor++;

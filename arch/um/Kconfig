@@ -382,8 +382,15 @@ config UM_BACKEND_KVM
 	  floor empirically ~1-11 µs depending on silicon (see
 	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
 	  measurements.md), 2-20× faster than seccomp. Requires /dev/kvm
-	  on the host. Scaffold only today; full path lands across
-	  D-02..D-06.
+	  on the host.
+
+	  Real run_userspace integration is gated by UM_BACKEND_KVM_INTEGRATED
+	  (default n). With INTEGRATED=y the KVM backend boots a real
+	  Python workload; the cpython-parity gate runs at 18-20/21
+	  single-pass post Stage A redesign (per-task vCPU, see
+	  Documentation/virt/uml/redesign/03-architecture-review-2026-04-27/).
+	  Without INTEGRATED, this Kconfig compiles only the !INTEGRATED
+	  harness scaffold + run_userspace panic stub.
 
 choice
 	prompt "UML backend dispatch mode"

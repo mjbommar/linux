@@ -20,16 +20,19 @@
 /*
  * Single per-UML-process KVM context (decisions-log D57):
  * one /dev/kvm handle, one KVM_CREATE_VM fd, shared across every
- * UML guest mm. mm_refcount counts outstanding kvm_mm_attach()s
- * so a late shutdown during teardown doesn't close the fds from
- * under a still-attached mm. Fields are populated by kvm_init()
- * and stay read-only thereafter; mm.c is the only consumer of
- * the refcount.
+ * UML guest mm. Fields are populated by kvm_init() and stay
+ * read-only thereafter.
  *
- * vcpu0_fd + run0 + run_size are the D-04a vCPU scaffold: one
- * vCPU sufficient for ncpus=1 UML (the default). SMP (ncpus>1)
- * wants one vCPU per UML CPU and moves creation to
- * thread_start_idle — tracked for D-05 in 04-ring-transition.md.
+ * vcpu0_fd + run0 + run_size are the !INTEGRATED harness scaffold;
+ * under CONFIG_UM_BACKEND_KVM_INTEGRATED each UML task allocates its
+ * own per-task struct kvm_vcpu_handle via kvm_vcpu_for_current() —
+ * the singleton vcpu0 was deleted by Stage A.7 for INTEGRATED.
+ *
+ * Shutdown semantics: kvm_shutdown() is best-effort. It closes vcpu/
+ * vm/kvm fds without checking attached mms. Callers must ensure no
+ * task is in kvm_run_userspace before invoking shutdown — UML
+ * cleanup ordering achieves this implicitly by tearing down user
+ * mms before backend shutdown.
  */
 struct kvm_um {
 	int		kvm_fd;		/* /dev/kvm */
@@ -42,7 +45,6 @@ struct kvm_um {
 					 * current->thread.arch.kvm.vcpu. */
 	void		*run0;		/* mmap'd kvm_run for vcpu0 */
 	size_t		run_size;	/* KVM_GET_VCPU_MMAP_SIZE */
-	refcount_t	mm_refcount;	/* attached mm_ids */
 	u64		sync_regs_caps;	/* KVM_CAP_SYNC_REGS bitmap; 0 if
 					 * unsupported. When KVM_SYNC_X86_REGS
 					 * is set, GP regs travel through the

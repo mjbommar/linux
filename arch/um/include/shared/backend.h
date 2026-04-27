@@ -269,14 +269,19 @@ int seccomp_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
 
 #ifdef CONFIG_UM_BACKEND_KVM
 /*
- * D-02 scaffold. Every op lives in arch/um/backend/kvm/. `probe` and
- * `init` are the only ones that do real work today: probe opens
- * /dev/kvm to confirm the host has KVM available, init stashes the
- * fd for the real runtime code that lands in D-03..D-06. Every other
- * op returns -EOPNOTSUPP for now; dispatch to them would panic per
- * the contract, so this backend is only selectable when the operator
- * has explicitly asked for it via Kconfig + boot arg and is ready
- * for "it doesn't boot yet" semantics.
+ * KVM backend ops, implemented in arch/um/backend/kvm/. With
+ * CONFIG_UM_BACKEND_KVM_INTEGRATED=y all production-path ops are
+ * implemented (probe / init / shutdown / mm_attach / mm_detach /
+ * mm_map / mm_unmap / run_userspace / context_switch / thread_*),
+ * matching the seccomp/ptrace shapes. Stage A redesign landed
+ * 2026-04-27 (per-task vCPU + KVM_SET_SIGNAL_MASK; see
+ * Documentation/virt/uml/redesign/03-architecture-review-2026-04-27/).
+ *
+ * Diagnostic ops (read_guest_regs / write_guest_regs) are still
+ * -EOPNOTSUPP stubs (BUG.5) — generic UML's ptrace/single-step
+ * paths assume they work; dispatching to those today returns
+ * -EOPNOTSUPP rather than crashing. Tracked for capability gating
+ * or implementation.
  */
 int kvm_probe(void);
 int kvm_init(const struct um_backend_args *args);

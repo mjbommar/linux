@@ -54,17 +54,6 @@ int kvm_mm_attach(struct mm_id *id)
 	}
 #endif
 
-	/*
-	 * First attach initializes the refcount (kvm_init leaves it
-	 * at 0 since no mm is attached yet); subsequent attaches
-	 * increment. refcount_inc() would WARN on 0→1, so split the
-	 * first-attach case explicitly.
-	 */
-	if (refcount_read(&ctx->mm_refcount) == 0)
-		refcount_set(&ctx->mm_refcount, 1);
-	else
-		refcount_inc(&ctx->mm_refcount);
-
 	return 0;
 }
 
@@ -79,26 +68,7 @@ void kvm_mm_detach(struct mm_id *id)
 	}
 #endif
 
-	if (ctx->vm_fd < 0)
-		return;
-
-	/*
-	 * refcount_dec() WARNs on 1→0; use refcount_dec_and_test()
-	 * so hitting zero is a valid bookkeeping transition rather
-	 * than a bug. Shutdown still closes vm_fd; this refcount is
-	 * for "don't close under an attached mm" not ownership
-	 * transfer.
-	 */
-	if (refcount_read(&ctx->mm_refcount) > 0) {
-		/*
-		 * refcount_dec_and_test returns true on 1→0; we don't
-		 * act on that here (shutdown still closes vm_fd
-		 * unconditionally) but the helper is
-		 * __must_check, so cast the return to void to silence
-		 * -Wunused-result.
-		 */
-		(void)refcount_dec_and_test(&ctx->mm_refcount);
-	}
+	(void)ctx;
 }
 
 /*
@@ -131,10 +101,63 @@ void kvm_mm_detach(struct mm_id *id)
  * is already an fd in UML's own process table, so no translation
  * is needed.
  */
+/*
+ * BUG.1 (2026-04-27 audit): kvm_mm_map writes to a SHARED host VA
+ * via os_map_memory((void *)virt, ...). Two UML processes mapping
+ * the same user VA in their own mms collide — last-writer-wins on
+ * host VA. Per-mm shadow CR3 (Stage A) gives correct GUEST execution,
+ * but kernel-side uaccess (raw_copy_*_user via memcpy on host VA),
+ * record/replay payload restore, and signal-frame setup still hit
+ * the shared host mapping.
+ *
+ * Interim observability: track which mm last mapped each (virt, len)
+ * key. On cross-mm collision, log a one-shot warning so production
+ * use surfaces the bug. The structural fix is Stage B's per-mm host
+ * worker / per-mm memslot model — not implementable as a small
+ * patch because UML's uaccess (raw_copy_to_user / raw_copy_from_user
+ * in arch/um/kernel/skas/uaccess.c) does direct memcpy on the host
+ * VA. Either every uaccess walks the shadow PT to find the right
+ * host PFN (expensive, per-uaccess), or each mm gets a separate
+ * host VA space (per-mm host worker pthread or stub-child process,
+ * matching seccomp's model). The latter is the synthesis's Stage B
+ * recommendation.
+ */
+static DEFINE_SPINLOCK(kvm_mm_collision_lock);
+static struct {
+	unsigned long virt;
+	struct mm_id *id;
+} kvm_mm_collision_last;	/* last writer per VA — sample, not exhaustive */
+static bool kvm_mm_collision_warned;
+
+static void kvm_mm_collision_check(struct mm_id *id, unsigned long virt)
+{
+	bool is_collision = false;
+	unsigned long flags;
+
+	if (READ_ONCE(kvm_mm_collision_warned))
+		return;
+
+	spin_lock_irqsave(&kvm_mm_collision_lock, flags);
+	if (kvm_mm_collision_last.virt == virt &&
+	    kvm_mm_collision_last.id != NULL &&
+	    kvm_mm_collision_last.id != id)
+		is_collision = true;
+	kvm_mm_collision_last.virt = virt;
+	kvm_mm_collision_last.id   = id;
+	spin_unlock_irqrestore(&kvm_mm_collision_lock, flags);
+
+	if (is_collision && !xchg(&kvm_mm_collision_warned, true)) {
+		pr_warn("um: kvm BUG.1: cross-mm host-VA collision at virt=0x%lx (mm_id changed across mappings); per-mm shadow CR3 keeps GUEST execution correct but kernel-side uaccess still uses shared host VA. Stage B (per-mm host worker / per-mm memslot) is the structural fix. This warning fires once.\n",
+			virt);
+	}
+}
+
 int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 	       int prot, int phys_fd, u64 offset)
 {
 	int rc;
+
+	kvm_mm_collision_check(id, virt);
 
 	/*
 	 * #276 reverted: hypothesis was that os_map_memory was
@@ -144,8 +167,8 @@ int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 	 * through shadow PT for user VAs. Some path (probably
 	 * copy_to_user fallback or io_uring fixed-buffer setup)
 	 * relies on the host VA mapping being live. Restore
-	 * os_map_memory; the cross-mm collision case stays open
-	 * for a different fix.
+	 * os_map_memory; the cross-mm collision case is detected
+	 * by kvm_mm_collision_check above (BUG.1 / Stage B).
 	 */
 	rc = os_map_memory((void *)virt, phys_fd, offset, len,
 			   prot & UM_PROT_READ, prot & UM_PROT_WRITE,
