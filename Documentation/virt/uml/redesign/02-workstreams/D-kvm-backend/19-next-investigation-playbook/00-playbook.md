@@ -376,3 +376,69 @@ Tooling notes:
   - Need a sub-microsecond, on-panic-dumpable trace mechanism for
     deeper investigation. Linux ftrace's `trace_printk` could work
     if accessible from UML — needs investigation.
+
+## RESOLVED 2026-04-26 evening: snapshot KVM exit state before unblock_signals
+
+User-identified race: `kvm_run_userspace` called `unblock_signals()`
+IMMEDIATELY after `KVM_RUN` returned, BEFORE reading `run->exit_reason`,
+`run->s.regs.*`, `run->io.port`, `run->mmio.*`, and the singleton IST
+stack contents. `unblock_signals()` can synchronously deliver SIGALRM
+→ timer handler → schedule() → another UML task gets the singleton
+vCPU/run mmap and runs its own KVM_RUN, overwriting the exit state.
+When the original task resumes, it decodes wrong state.
+
+**Fix landed**: commit `b516bee62eb2`. Snapshot exit_reason, kregs,
+exit_sregs, io.port, mmio.{phys_addr,len,is_write}, cr2 (via exit_sregs),
+and 40 bytes of IST stack BEFORE unblock_signals. All downstream code
+uses the snapshots.
+
+Empirical impact:
+  - test_decimal import unit-test: 5/100 ldlinux (5%) vs 4/50 baseline
+    (8%) — ~40% reduction
+  - cpython parity gate: 17/21 (same count as baseline, but failure
+    MIX changed: some k=?/? crashes converted to k=N/False assertion
+    failures — suite ran further before failing)
+
+The fix is structurally correct independent of empirical magnitude:
+all singleton-vCPU exit state must be captured before any code path
+that could yield to another task.
+
+## NEW OBSERVATION 2026-04-26: shadow-PT/TLB staleness during long computation
+
+After the snapshot fix, captured a NEW failure mode in test_int's
+suite (k=52/False instead of k=?/?). Verbose run shows ONE assertion
+failure: a 12-million-character integer-as-string output where the
+first ~2.4M characters MATCH the expected, then diverge with
+corrupted bytes:
+
+```
+Expected: "12345...01234567890123456789012345..."  (clean repeating)
+Got:      "12345...3456774763587453814521543465852917..."  (corrupted)
+```
+
+This is NOT a crash — Python's bignum arithmetic ran, produced output,
+but some byte range got the wrong content. Classic signature of
+**shadow PT or guest TLB staleness during long-running computation**.
+Distinct from the ld-linux NULL deref bug class (which is at startup
+and was timing-sensitive to ~50us).
+
+Candidates for this bug class:
+  1. Shadow PT entry has wrong PFN (set_pte_at didn't propagate)
+  2. Guest TLB caches old PFN, CR4.PGE toggle doesn't fire (dirty
+     flag race)
+  3. Same physical page mapped to two GPAs → guest writes to one,
+     reads from other (memslot/host-VA aliasing)
+  4. KVM's TDP MMU has a bug where its own EPT cache becomes stale
+     for a GPA whose backing host PT was changed (BUT host VAs in
+     our captures are outside the memslot, so this shouldn't apply
+     to user mprotect — only to UML's own physmem-region mprotects)
+
+Next-session priorities:
+  1. Reproduce the test_int wrong-answer pattern reliably (capture
+     which test method fails, what arguments it uses).
+  2. Add a CONTENT-LEVEL audit: at fault-or-divergence time, dump
+     the actual page contents at the diverging byte range to
+     compare guest view vs kernel view.
+  3. Investigate whether the shadow_dirty flag is being set for
+     ALL set_pte_at-driven shadow updates — particularly during
+     heavy malloc/free cycles in big-int arithmetic.
