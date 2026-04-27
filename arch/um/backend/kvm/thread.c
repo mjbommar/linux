@@ -2421,43 +2421,82 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 			return -ENODEV;
 		}
 		/*
-		 * Stage B.1 findings:
-		 *
-		 * 1. Direct CR3 = __pa(mm->pgd) triple-faults: UML's
-		 *    kvm_bootstrap_va sits in PML4 slot 0 alongside user
-		 *    mappings (mm->pgd has user-mappings there, NOT
-		 *    UML-kernel bootstrap mappings). UML doesn't follow
-		 *    x86_64's classic kernel-half/user-half split that
-		 *    the Stage B synthesis assumed.
-		 *
-		 * 2. Force-full-resync-every-entry helps test_decimal
-		 *    (the heaviest module) but exposes flake in other
-		 *    modules (test_int, test_float). The shadow PT has
-		 *    multiple writer paths (kvm_shadow_sync_pte from
-		 *    atomic-context set_pte_at, kvm_shadow_invalidate_
-		 *    va_range from mm unmap, several lifecycle.c paths)
-		 *    that can race even with always-fill. Forcing fill
-		 *    only fixes one race window.
-		 *
-		 * Real Stage B requires either:
-		 *   (a) UML mm layout rework so kvm_bootstrap_va lives
-		 *       in a kernel-half slot mm->pgd doesn't touch, then
-		 *       shared kernel-half via init_mm.pgd inheritance.
-		 *   (b) A per-mm reader-writer lock that excludes all
-		 *       shadow producers during fill, with the producers
-		 *       acquiring read locks in atomic context (mutex
-		 *       conversion needed since set_pte_at runs under
-		 *       page-table spinlocks).
-		 *   (c) Replace shadow PT with a direct mm->pgd-walking
-		 *       CR3 that maps bootstrap pages via Linux's normal
-		 *       set_pte_at into mm->pgd's user-half-but-marked-
-		 *       kernel-only.
-		 *
-		 * All three are days-to-weeks of structural work. The
-		 * current implementation keeps the existing shadow PT
-		 * with the dirty-boolean predicate; the gate sits at
-		 * 18-20/21 single-pass with run-to-run variance.
+		 * Stage B.1 walk-and-print: dump mm->pgd's chain for
+		 * kvm_bootstrap_va so we can see WHY the direct
+		 * CR3 = __pa(mm->pgd) experiment triple-faulted.
 		 */
+		if (kvm_use_mm_pgd && current->active_mm && current->active_mm->pgd) {
+			static bool walked;
+			u64 *pgd = (u64 *)current->active_mm->pgd;
+			u64 va = kvm_bootstrap_va;
+			unsigned int pgd_i = (va >> 39) & 0x1ff;
+			unsigned int pud_i = (va >> 30) & 0x1ff;
+			unsigned int pmd_i = (va >> 21) & 0x1ff;
+			unsigned int pte_i = (va >> 12) & 0x1ff;
+			u64 pgde, pude = 0, pmde = 0, ptee = 0;
+			u64 *pud, *pmd, *pte;
+
+			if (!walked) {
+				walked = true;
+				pgde = pgd[pgd_i];
+				pr_info("um: kvm B.1 WALK: bootstrap_va=0x%llx pgd[%u]=0x%llx (P=%llu RW=%llu US=%llu NX=%llu)\n",
+					(unsigned long long)va, pgd_i,
+					(unsigned long long)pgde,
+					pgde & 1, (pgde >> 1) & 1, (pgde >> 2) & 1, (pgde >> 63) & 1);
+				if (pgde & 1) {
+					pud = (u64 *)__va(pgde & 0x000ffffffffff000ULL);
+					pude = pud[pud_i];
+					pr_info("um: kvm B.1 WALK: pud[%u]=0x%llx (P=%llu RW=%llu US=%llu NX=%llu)\n",
+						pud_i, (unsigned long long)pude,
+						pude & 1, (pude >> 1) & 1, (pude >> 2) & 1, (pude >> 63) & 1);
+					if ((pude & 1) && !(pude & (1ULL << 7))) {
+						/* Not a 1G huge page — descend */
+						pmd = (u64 *)__va(pude & 0x000ffffffffff000ULL);
+						pmde = pmd[pmd_i];
+						pr_info("um: kvm B.1 WALK: pmd[%u]=0x%llx (P=%llu RW=%llu US=%llu NX=%llu PS=%llu)\n",
+							pmd_i, (unsigned long long)pmde,
+							pmde & 1, (pmde >> 1) & 1, (pmde >> 2) & 1, (pmde >> 63) & 1, (pmde >> 7) & 1);
+						if ((pmde & 1) && !(pmde & (1ULL << 7))) {
+							pte = (u64 *)__va(pmde & 0x000ffffffffff000ULL);
+							ptee = pte[pte_i];
+							pr_info("um: kvm B.1 WALK: pte[%u]=0x%llx (P=%llu RW=%llu US=%llu NX=%llu)\n",
+								pte_i, (unsigned long long)ptee,
+								ptee & 1, (ptee >> 1) & 1, (ptee >> 2) & 1, (ptee >> 63) & 1);
+						} else if (pmde & 1) {
+							pr_info("um: kvm B.1 WALK: 2M huge at PMD level — bootstrap_va is in a kernel-direct-map huge page (PFN base=0x%llx)\n",
+								(unsigned long long)(pmde & 0x000fffffffe00000ULL));
+						}
+					}
+				}
+			}
+		}
+
+		/*
+		 * Stage B.1 ROOT-CAUSE FINDING (2026-04-27): direct
+		 * CR3 = __pa(mm->pgd) is structurally blocked by UML's
+		 * mm layout. The walk above shows mm->pgd's PML4[0]
+		 * PUD[1] is a 1GB HUGE PAGE covering [0x40000000,
+		 * 0x80000000) with US=0 (ring-0 only). UML's user
+		 * processes live at 0x4xxxxxxx — same 1GB range. With
+		 * mm->pgd as guest CR3, user code at CPL=3 hits #PF on
+		 * its OWN code (US=0 → ring-3 access denied) →
+		 * unrecoverable → triple-fault → KVM_EXIT_SHUTDOWN.
+		 *
+		 * Why shadow PT works: it splits the same range into 4KB
+		 * pages with per-page flags — US=1 for actual user
+		 * mappings, US=0 for kernel/bootstrap mappings.
+		 *
+		 * Stage B's structural fix requires moving uml_physmem
+		 * to PML4[256+] (the canonical kernel-half range) so
+		 * user-VAs in PML4[0] don't share a 1GB huge page with
+		 * the kernel direct map. That's a UML-core memory-layout
+		 * rework — multi-week and beyond a per-task vCPU patch.
+		 *
+		 * For now: keep shadow PT as CR3. The kvm_use_mm_pgd knob
+		 * stays for the diagnostic walk above; activating it
+		 * would crash the kernel.
+		 */
+		(void)kvm_use_mm_pgd;
 		cr3_gpa = shadow->pgd_gpa;
 	}
 

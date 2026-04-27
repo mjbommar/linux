@@ -289,6 +289,61 @@ duplicating in software. The right shape is what production VMMs
 already do; UML can use it because UML already has the per-mm
 KVM context (kvm_um.vm_fd is per-process).
 
+## 9.5. Empirical blocker found 2026-04-27 (read this first)
+
+**The naive "swap CR3 from `shadow->pgd_gpa` to `__pa(mm->pgd)`"
+shortcut DOES NOT WORK and triple-faults the guest.** The reason
+is structural to UML's current memory layout, not a Stage A bug:
+
+- UML's `uml_physmem` lives at host VA `0x60000000`, size `0x20000000`
+  (512 MiB), in PML4 slot 0 PUD slot 1 (covers
+  `[0x40000000, 0x80000000)`).
+- UML's kernel direct map for that range uses a **1GB huge page**
+  in `init_mm.pgd` PUD[1] with the supervisor-only flag (US=0).
+  Standard arch/x86 `setup_arch` populates this for the kernel
+  direct map.
+- UML user processes also map their text/data/stack at user VAs
+  in the `0x4xxxxxxx` range — also covered by PML4[0] PUD[1].
+- The shadow PT splits the same range into 4 KiB pages with
+  per-page flags (US=1 for user mappings, US=0 for kernel/bootstrap).
+  This is what makes shadow PT correct.
+- Setting guest CR3 = `__pa(mm->pgd)` makes the guest CPU walk the
+  1GB huge page. CPL=3 user code reads its own VA → US=0 access
+  → #PF → triple-fault → KVM_EXIT_SHUTDOWN.
+
+**Two ways forward, both substantial UML-core work:**
+
+1. **Move `uml_physmem` out of PML4[0]** to a canonical kernel-
+   half slot (PML4[256+]). User-VAs stay in PML4[0]; kernel
+   direct map moves to PML4[256+]. After that, `mm->pgd`'s
+   user-half (PML4[0]) is safely walkable for user code, and
+   the bootstrap pages can be installed in PML4[256+] which
+   user mms inherit via fork. This is the right end-state but
+   requires changing the `uml_physmem` allocation in
+   `arch/um/kernel/mem.c` + every `__pa`/`__va` site that assumes
+   the current layout.
+
+2. **Break the 1GB huge page** in `init_mm.pgd` to 4 KiB pages
+   with per-VA flags matching what the shadow PT currently does.
+   Less invasive but requires walking + rewriting init_mm.pgd
+   at boot time, plus careful flag management. Defeats some of
+   the perf benefit of the huge page (TLB pressure, walk depth).
+
+(2) is the smaller change but still invasive. (1) is the right
+strategic shape and matches what other arches do.
+
+**A third option — the per-mm host worker process** (synthesis
+section 6 hybrid) — sidesteps this entirely by giving each mm
+its own host process with its own VA space, so the user-VA range
+is private to each mm and the kernel direct map doesn't conflict.
+That's the "stub-child host process" model the seccomp backend
+uses; pulling it into the KVM backend means routing KVM_RUN
+through a per-mm helper process. Different shape entirely.
+
+For now: shadow PT stays as guest CR3. The B.1 diagnostic knob
+(`kvm_use_mm_pgd`) is preserved for walk-and-print only;
+activating the CR3 swap WILL crash the host UML kernel.
+
 ## 10. Open questions
 
 - **PML4 sharing safety**: must verify that copying PML4[256..511]
