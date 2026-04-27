@@ -2422,8 +2422,11 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		}
 		/*
 		 * Stage B.1 walk-and-print: dump mm->pgd's chain for
-		 * kvm_bootstrap_va so we can see WHY the direct
-		 * CR3 = __pa(mm->pgd) experiment triple-faulted.
+		 * BOTH kvm_bootstrap_va AND a representative user VA
+		 * (regs->gp[HOST_IP] — the guest user RIP). Compare
+		 * flags; we need to see whether UML's set_pte_at split
+		 * the 1GB huge page at PUD[1] when it added the user
+		 * mapping, or whether the huge page is still in place.
 		 */
 		if (kvm_use_mm_pgd && current->active_mm && current->active_mm->pgd) {
 			static bool walked;
@@ -2435,6 +2438,11 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 			unsigned int pte_i = (va >> 12) & 0x1ff;
 			u64 pgde, pude = 0, pmde = 0, ptee = 0;
 			u64 *pud, *pmd, *pte;
+			u64 user_va = regs->gp[HOST_IP];
+			unsigned int u_pgd_i = (user_va >> 39) & 0x1ff;
+			unsigned int u_pud_i = (user_va >> 30) & 0x1ff;
+			unsigned int u_pmd_i = (user_va >> 21) & 0x1ff;
+			unsigned int u_pte_i = (user_va >> 12) & 0x1ff;
 
 			if (!walked) {
 				walked = true;
@@ -2466,6 +2474,27 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 							pr_info("um: kvm B.1 WALK: 2M huge at PMD level — bootstrap_va is in a kernel-direct-map huge page (PFN base=0x%llx)\n",
 								(unsigned long long)(pmde & 0x000fffffffe00000ULL));
 						}
+					}
+				}
+			}
+
+			/* Walk user_va too — same one-shot guard as bootstrap walk. */
+			if (walked) {
+				static bool user_walked;
+
+				if (!user_walked) {
+					user_walked = true;
+					pgde = pgd[u_pgd_i];
+					pr_info("um: kvm B.1 WALK USER: user_va=0x%llx pgd[%u]=0x%llx (P=%llu RW=%llu US=%llu)\n",
+						(unsigned long long)user_va, u_pgd_i,
+						(unsigned long long)pgde,
+						pgde & 1, (pgde >> 1) & 1, (pgde >> 2) & 1);
+					if (pgde & 1) {
+						pud = (u64 *)__va(pgde & 0x000ffffffffff000ULL);
+						pude = pud[u_pud_i];
+						pr_info("um: kvm B.1 WALK USER: pud[%u]=0x%llx (P=%llu RW=%llu US=%llu PS=%llu)\n",
+							u_pud_i, (unsigned long long)pude,
+							pude & 1, (pude >> 1) & 1, (pude >> 2) & 1, (pude >> 7) & 1);
 					}
 				}
 			}
@@ -2697,18 +2726,15 @@ fill_done:
 		u64 cur_gs = regs->gp[HOST_GS_BASE];
 
 		/*
-		 * Stage A.4d DEFERRED — using the original per-mm dirty
-		 * boolean as the skip-fast-path gate. The per-vCPU
-		 * tlb_gen/last_flushed_tlb_gen scaffolding is preserved on
-		 * the structs for future re-attempt, but consulted only as
-		 * an additional read here (not yet load-bearing). When the
-		 * Stage B redesign lands and the shadow PT is replaced by
-		 * TDP/EPT, this whole predicate disappears — the right
-		 * place to revisit per-vCPU TLB tracking is once we have
-		 * a CLONE_VM-shared-mm test that actually exposes the
-		 * defect (the cpython-parity gate runs each module in its
-		 * own process so cross-task-same-mm isn't on its
-		 * critical path).
+		 * Stage A.4d ACTIVATED: per-vCPU TLB-gen tracking. Consumer
+		 * skips when (sregs cached) AND (last_flushed == current
+		 * shadow gen). Producer atomically increments gen on every
+		 * leaf write (kvm_shadow_mark_dirty). Combined with the
+		 * post-SREGS update of vcpu->last_flushed_tlb_gen, this
+		 * makes per-vCPU TLB invalidation correct even when
+		 * sibling tasks share the mm.
+		 *
+		 * Keep the legacy dirty boolean read for telemetry.
 		 */
 		tlb_gen_snapshot = shadow ? atomic64_read(&shadow->tlb_gen) : 0;
 		dirty_snapshot = shadow ? smp_load_acquire(&shadow->dirty) : false;
@@ -2716,7 +2742,8 @@ fill_done:
 		    vcpu->cached_cr3_gpa == cr3_gpa &&
 		    vcpu->cached_fs_base == cur_fs &&
 		    vcpu->cached_gs_base == cur_gs &&
-		    shadow && !dirty_snapshot)
+		    shadow &&
+		    vcpu->last_flushed_tlb_gen == tlb_gen_snapshot)
 			goto sregs_done;
 	}
 
