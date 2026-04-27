@@ -6,6 +6,28 @@
 **Bookend:** `getpid()` round-trip through KVM backend in <100 ns
             measured on bare metal
 
+## Memo status (2026-04-27 post Stage A)
+
+The 03-architecture-review-2026-04-27/ identified the singleton
+vcpu0_fd as the architectural defect driving the cpython-parity
+gate flakiness. Stage A landed (commit `7f94922a356f`), retiring
+the singleton model. Several earlier memos that tracked iterative
+bug-hunts within the singleton model are now SUPERSEDED:
+
+| Memo                                | Status                                |
+|-------------------------------------|---------------------------------------|
+| 16-architecture-review/             | SUPERSEDED — the per-task vCPU + KVM_SET_SIGNAL_MASK answer landed in Stage A; agent-1 thru agent-4 in 03-architecture-review-2026-04-27 reach the same diagnosis with the structural plan |
+| 17-multi-task-investigation/        | SUPERSEDED — Phase A-K fixes (memory ordering / FPU UAF / VCPU_EVENTS leak / dirty-flag cmpxchg etc) made the singleton model "less wrong" but couldn't remove the contract violation. Stage A removes it structurally. |
+| 18-architectural-fix-plan/          | SUPERSEDED — Phase 1-3 partial-per-mm work was an incremental step toward what Stage A delivered as per-task. Per-mm IRETQ frame migration is moot; Stage B's kernel-half PGD provides per-vCPU IRETQ slots structurally. |
+| 19-next-investigation-playbook/     | SUPERSEDED — Race classes A and E are closed by Stage A (per-task vCPU + KVM_SET_SIGNAL_MASK). Race classes B/C/D are Stage B's domain (TDP/EPT + memslots-per-mm — see 20-stage-b-design.md). |
+| 09-shadow-pt.md                     | SUPERSEDED-PENDING — shadow PT design memo; the apparatus it describes will be deleted by Stage B (B.7-B.11). Kept for archaeology of the original D-04/D-05 design. |
+| 15-direct-shadow-sync.md            | SUPERSEDED-PENDING — direct shadow sync (set_pte_at hook) is the data-path producer of Stage B's deletion. |
+| 20-stage-b-design.md                | ACTIVE — current. The TDP/EPT + memslots-per-mm plan that follows Stage A. |
+
+Memos 01-08, 10-14 are still active design docs that describe the
+backend's mechanism (LSTAR trap / ring transition / etc.) and are
+not affected by the Stage A→B redesign.
+
 **Status (2026-04-23):** spikes + harness complete. Phase III
 of the post-Q1 push landed D-01 through D-06 as a working
 in-kernel harness, validated end-to-end:

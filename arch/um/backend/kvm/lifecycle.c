@@ -125,25 +125,20 @@ int kvm_init(const struct um_backend_args *args)
 	}
 
 	/*
-	 * Audit round-6 G4: enforce ncpus=1 for the KVM backend.
-	 * Same constraint ptrace announces in os-Linux/start_up.c:605
-	 * for its own probe. The KVM backend is single-vCPU by
-	 * design (vcpu0 is the only vCPU created below) and
-	 * run_userspace serializes around the single vcpu0_fd via
-	 * KVM_RUN — multi-CPU UML on this backend would have multiple
-	 * guest tasks contending for the same vCPU, producing
-	 * undefined ordering of guest state.
+	 * Stage A enabled SMP: per-task vCPU (kvm_vcpu_for_current
+	 * lazy-allocates one vcpu_fd per UML task) means each guest
+	 * CPU can run on its own host pthread with its own vcpu_fd.
+	 * The pre-Stage-A panic on uml_ncpus > 1 was defending the
+	 * singleton vcpu0_fd model; that model is gone.
 	 *
-	 * If/when SMP support lands, this check moves to per-vCPU
-	 * creation in thread_start_idle and the vcpu0_fd singleton
-	 * becomes a per-cpu lookup. For now, fail loud at backend
-	 * init time with a clear diagnostic.
+	 * Open follow-on (SMP.2/SMP.3): wire per-CPU host-thread
+	 * pinning + a SIGRTMIN+5 sender for cross-CPU vCPU eviction.
+	 * Until those land, ncpus>1 will work but UML's cooperative
+	 * scheduler still serializes per-host-thread.
 	 */
-	if (uml_ncpus > 1) {
-		pr_err("um: kvm init: SMP not supported (ncpus=%d > 1); falling back\n",
-		       uml_ncpus);
-		return -EOPNOTSUPP;
-	}
+	if (uml_ncpus > 1)
+		pr_info("um: kvm init: SMP enabled (ncpus=%d); per-task vCPU model from Stage A supports it\n",
+			uml_ncpus);
 
 	kfd = os_open_file("/dev/kvm", of_rdwr(OPENFLAGS()), 0);
 	if (kfd < 0) {

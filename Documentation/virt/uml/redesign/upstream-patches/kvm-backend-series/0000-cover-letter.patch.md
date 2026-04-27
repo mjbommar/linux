@@ -7,6 +7,48 @@ the branch. Final `.patch` generation happens after Series 4
 (backend-ops-abstraction-rfc) lands and the squash pass
 completes.
 
+## 2026-04-27 update — Stage A redesign landed
+
+Post-Stage-A architectural state (commit `7f94922a356f`) — to be
+folded into the cover letter when this series is squashed:
+
+- The pre-Stage-A KVM backend ran every UML task on a singleton
+  vcpu0_fd via cooperative `switch_threads`/longjmp on the same
+  host thread. This violated KVM's API contract ("1 host thread
+  = 1 vCPU for life", per-vCPU run mmap is single-writer,
+  vcpu ioctls host-thread-bound) and produced a 5-class race
+  playbook (memo 19) that ~75% per-trial gate flakiness sat on.
+- Stage A allocates a `struct kvm_vcpu_handle` per UML task,
+  pinned to `current->thread.arch.kvm.vcpu` for the task's
+  lifetime, freed by `exit_thread()`. KVM_SET_SIGNAL_MASK
+  installed at vCPU creation blocks every host signal except
+  SIGALRM (timer-driven preemption) and KVM_UM_KICK_SIGNAL
+  (SMP eviction primitive). Singleton vcpu0_fd deleted under
+  `CONFIG_UM_BACKEND_KVM_INTEGRATED`.
+- Architectural rationale: 4 independent agent reviews
+  (gVisor / production-VMMs / first-principles / radical-PKU)
+  all converged on "per-task vCPU + KVM_SET_SIGNAL_MASK" as
+  the minimal structural fix. See
+  `Documentation/virt/uml/redesign/03-architecture-review-2026-04-27/`
+  for the synthesis and individual analyses.
+- Stage A.4d (per-vCPU `last_flushed_tlb_gen` vs per-shadow
+  `tlb_gen`): scaffolding landed; consumer-side activation
+  deferred until a CLONE_VM-shared-mm stress test exposes the
+  cross-task TLB staleness deterministically. cpython-parity
+  gate runs each module in its own process (single-mm, single-
+  task) so doesn't exercise the cross-task TLB race.
+- Stage B (next): replace the multi-writer shadow PT with TDP/EPT
+  via per-mm memslots (`KVM_SET_USER_MEMORY_REGION`) + a shared
+  kernel-half PGD (PML4[256..511]). Design memo at
+  `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/20-stage-b-design.md`.
+  Closes Race classes B/C/D structurally; net delete of ~3-4k LOC.
+- Stage C (after B): cleanup, KUnit suite update, 24h soak.
+
+The Stage A→B→C plan supersedes the iterative bug-hunt approach
+of memos 16-19. For the upstream submission, Stage A is shippable
+on its own as a foundation; Stage B follows as a separate series
+once side-by-side TDP+shadow validation completes (B.6).
+
 ---
 
     Subject: [PATCH RFC 00/15] um: add KVM backend with in-guest systrap gadget

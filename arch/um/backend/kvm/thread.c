@@ -2354,14 +2354,14 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		if (shadow && smp_load_acquire(&shadow->synced) &&
 		    READ_ONCE(shadow->synced_pgd_va) == (u64)mm->pgd &&
 		    !needs_resync_snapshot) {
-			pr_info_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
+			pr_debug_ratelimited("um: kvm enter_guest: shadow PT already in sync (mm=%p pgd=%p, skip fill)\n",
 					    mm, mm->pgd);
 			if (kvm_diag_audit_pgd_skip)
 				(void)kvm_shadow_audit_pgd(mm->pgd, "skip", 8);
 			goto fill_done;
 		}
 		if (shadow && needs_resync_snapshot)
-			pr_info_ratelimited("um: kvm enter_guest: needs_full_resync flagged — repairing via full fill\n");
+			pr_debug_ratelimited("um: kvm enter_guest: needs_full_resync flagged — repairing via full fill\n");
 
 		/*
 		 * Task #238 — STEP 2: drop kvm_touch_all_user_vmas. The
@@ -2437,7 +2437,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 			/* Task #94 transition counter. */
 			WRITE_ONCE(shadow->needs_full_resync_clear_enter_guest,
 				   READ_ONCE(shadow->needs_full_resync_clear_enter_guest) + 1);
-		pr_info_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
+		pr_debug_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
 				    filled);
 fill_done:
 		;	/* perf-lever #4 skip-target — falls through */
@@ -3001,7 +3001,7 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 	 * SIGSYS via signal delivery for audit visibility.
 	 */
 	if (kvm_classify_syscall(syscall_nr) == KVM_SYSCALL_CLASS_TRAP) {
-		pr_info_ratelimited("um: kvm: trapping class-D syscall nr=%lu (memo 10)\n",
+		pr_debug_ratelimited("um: kvm: trapping class-D syscall nr=%lu (memo 10)\n",
 				    syscall_nr);
 		regs->gp[HOST_AX] = -EPERM;
 		goto skip_dispatch;
@@ -3208,7 +3208,7 @@ static void kvm_decode_syscall(struct uml_pt_regs *regs,
 		 */
 	}
 
-	pr_info_ratelimited("um: kvm: dispatching handle_syscall nr=%lu (via LSTAR trampoline)\n",
+	pr_debug_ratelimited("um: kvm: dispatching handle_syscall nr=%lu (via LSTAR trampoline)\n",
 			    PT_SYSCALL_NR(regs->gp));
 	{
 		/*
@@ -3831,7 +3831,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				regs->gp[HOST_SP]     = *(u64 *)(ist + 32);
 				regs->is_user = 1;
 
-				pr_info_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx ec=0x%llx rsp=0x%lx; fault-in + shadow refill\n",
+				pr_debug_ratelimited("um: kvm #PF: cr2=0x%lx rip=0x%llx ec=0x%llx rsp=0x%lx; fault-in + shadow refill\n",
 						    cr2,
 						    (unsigned long long)fault_rip,
 						    (unsigned long long)fault_error_code,
@@ -4426,7 +4426,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			fi->cr2        = (unsigned long)mmio_phys_addr_snap +
 					 uml_physmem;
 
-			pr_info_ratelimited("um: kvm run_userspace: KVM_EXIT_MMIO gpa=0x%llx cr2=0x%lx len=%u write=%u\n",
+			pr_debug_ratelimited("um: kvm run_userspace: KVM_EXIT_MMIO gpa=0x%llx cr2=0x%lx len=%u write=%u\n",
 					    (unsigned long long)mmio_phys_addr_snap,
 					    fi->cr2, mmio_len_snap, mmio_is_write_snap);
 
