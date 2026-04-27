@@ -52,12 +52,18 @@ playbook documented in memo-19 and the ~75% per-trial gate flakiness.
   cached_gs_base / kernel_gs_base_primed / shadow_pgd*`. All migrated
   to per-task `struct kvm_vcpu_handle` or per-mm `struct kvm_shadow_mm`.
 
-**Empirical state post-Stage A:** cpython-parity gate 12-15/20 trials
-pass single-pass = 60-75% per-trial — same as the documented pre-Stage-A
-baseline. The remaining flake is pre-existing latent shadow-PT
-staleness (`test_pylong_roundtrip_huge` is the most reliable repro,
-the heaviest-memory workload in the suite, ~10MB digit array).
-Stage B's TDP+memslots replacement is the structural cure.
+**Empirical state post-Stage A:** cpython-parity gate 18/21 single-pass
+(measured 2026-04-27 via the canonical `tools/testing/selftests/um/
+cpython-parity/cpython-parity.sh`). The 3 diverging modules (test_struct,
+test_math, test_decimal) all crash mid-test (k=?/?) — heaviest-memory /
+heaviest-compute modules where the latent shadow-PT staleness fires
+most reliably. Per-trial variance 60-75% across the 3-module subset
+trials. The remaining flake is pre-existing latent shadow-PT
+staleness (`test_pylong_roundtrip_huge` in test_int is the most
+deterministic repro, ~10 MB contiguous digit-array working set with
+per-byte verification on round-trip — see agent research summary in
+the Stage A commit message). Stage B's TDP+memslots replacement is
+the structural cure.
 
 **Stage B design memo:** `02-workstreams/D-kvm-backend/20-stage-b-design.md`.
 Per-mm memslots via `KVM_SET_USER_MEMORY_REGION`, kernel-half PGD shared
