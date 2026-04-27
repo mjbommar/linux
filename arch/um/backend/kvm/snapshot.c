@@ -27,6 +27,7 @@
 #include <linux/ktime.h>
 #include <linux/kvm.h>
 #include <linux/printk.h>
+#include <linux/sched.h>		/* current */
 #include <linux/slab.h>
 #include <linux/sort.h>
 #include <linux/string.h>
@@ -99,7 +100,17 @@ static const u32 kvm_snapshot_msr_indices[KVM_SNAPSHOT_MSR_COUNT] = {
 static int kvm_snapshot_capture_internal(struct kvm_snapshot *snap,
 					 bool include_memslot)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
+	/*
+	 * Stage A.6+A.7: snapshot the calling task's per-task vCPU.
+	 * Pre-Stage-A this captured vcpu0_fd state, which under
+	 * integrated KVM was a never-run stub vCPU — useless for
+	 * record/replay or KUnit diagnostics. Now: if no current vCPU
+	 * (early-boot KUnit before any task has run kvm_run_userspace,
+	 * or non-INTEGRATED harness builds), return -ENODEV.
+	 */
+	struct kvm_vcpu_handle *vcpu = current ?
+		current->thread.arch.kvm.vcpu : NULL;
+	int vcpu_fd = vcpu ? vcpu->fd : -1;
 	unsigned int i;
 	int rc;
 
@@ -249,7 +260,15 @@ EXPORT_SYMBOL_GPL(kvm_snapshot_capture_regs_only);
  */
 int kvm_snapshot_restore_full(struct kvm_snapshot *snap)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
+	/*
+	 * Stage A.6+A.7: restore against the calling task's per-task
+	 * vCPU. -ENODEV if no current vCPU (caller pre-conditions are
+	 * its responsibility — restore needs an active vCPU to write
+	 * state into).
+	 */
+	struct kvm_vcpu_handle *vcpu = current ?
+		current->thread.arch.kvm.vcpu : NULL;
+	int vcpu_fd = vcpu ? vcpu->fd : -1;
 	int rc;
 
 	if (!snap)

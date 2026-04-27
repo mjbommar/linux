@@ -196,7 +196,9 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 			if (old & 1ULL) {
 				WRITE_ONCE(*spte, 0);
 				smp_wmb();		/* P0-1 */
-				WRITE_ONCE(shadow->dirty, true);
+				kvm_shadow_mark_dirty(shadow);
+				WRITE_ONCE(shadow->dirty_set_direct_sync,
+					   READ_ONCE(shadow->dirty_set_direct_sync) + 1);
 				WRITE_ONCE(shadow->direct_sync_clear,
 					   READ_ONCE(shadow->direct_sync_clear) + 1);
 				kvm_shadow_record_mut(shadow, addr, ume,
@@ -227,7 +229,7 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 
 			WRITE_ONCE(*spte, 0);
 			smp_wmb();		/* P0-1 */
-			WRITE_ONCE(shadow->dirty, true);
+			kvm_shadow_mark_dirty(shadow);
 			WRITE_ONCE(shadow->direct_sync_clear,
 				   READ_ONCE(shadow->direct_sync_clear) + 1);
 			kvm_shadow_record_mut(shadow, addr, ume, old, 0,
@@ -249,7 +251,12 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 	 */
 	if (!spte) {
 		WRITE_ONCE(shadow->needs_full_resync, true);
-		WRITE_ONCE(shadow->dirty, true);
+		kvm_shadow_mark_dirty(shadow);
+		/* Task #94 transition counters. */
+		WRITE_ONCE(shadow->needs_full_resync_set_alloc_fail,
+			   READ_ONCE(shadow->needs_full_resync_set_alloc_fail) + 1);
+		WRITE_ONCE(shadow->dirty_set_direct_sync,
+			   READ_ONCE(shadow->dirty_set_direct_sync) + 1);
 		WRITE_ONCE(shadow->direct_sync_alloc_fail,
 			   READ_ONCE(shadow->direct_sync_alloc_fail) + 1);
 		kvm_shadow_record_mut(shadow, addr, ume, 0, 0,
@@ -279,7 +286,10 @@ int kvm_shadow_sync_pte(struct mm_struct *mm, unsigned long addr, pte_t pte)
 		was_present = (old & 1ULL) != 0;
 		WRITE_ONCE(*spte, new);
 		smp_wmb();				/* P0-1 */
-		WRITE_ONCE(shadow->dirty, true);
+		kvm_shadow_mark_dirty(shadow);
+		/* Task #94 transition counter. */
+		WRITE_ONCE(shadow->dirty_set_direct_sync,
+			   READ_ONCE(shadow->dirty_set_direct_sync) + 1);
 		WRITE_ONCE(shadow->direct_sync_install,
 			   READ_ONCE(shadow->direct_sync_install) + 1);
 		kvm_shadow_record_mut(shadow, addr, ume, old, new,
@@ -412,7 +422,12 @@ void kvm_shadow_sync_range_atomic(struct mm_struct *mm,
 	 */
 	if ((end - start) >> PAGE_SHIFT >= 512) {
 		WRITE_ONCE(shadow->needs_full_resync, true);
-		WRITE_ONCE(shadow->dirty, true);
+		kvm_shadow_mark_dirty(shadow);
+		/* Task #94 transition counters. */
+		WRITE_ONCE(shadow->needs_full_resync_set_range_too_large,
+			   READ_ONCE(shadow->needs_full_resync_set_range_too_large) + 1);
+		WRITE_ONCE(shadow->dirty_set_direct_sync,
+			   READ_ONCE(shadow->dirty_set_direct_sync) + 1);
 		WRITE_ONCE(shadow->direct_sync_range_clear,
 			   READ_ONCE(shadow->direct_sync_range_clear) + 1);
 		return;
@@ -464,7 +479,7 @@ void kvm_shadow_clear_range_atomic(struct mm_struct *mm,
 	}
 	if (any_cleared) {
 		smp_wmb();		/* P0-1: leaf writes happen-before dirty */
-		WRITE_ONCE(shadow->dirty, true);
+		kvm_shadow_mark_dirty(shadow);
 		WRITE_ONCE(shadow->direct_sync_range_clear,
 			   READ_ONCE(shadow->direct_sync_range_clear) + 1);
 	}

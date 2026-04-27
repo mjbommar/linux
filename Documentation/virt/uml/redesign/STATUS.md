@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-04-26
+Last updated: 2026-04-27
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -8,6 +8,61 @@ broken, what's next." Updated whenever priorities or blockers change.
 If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
+
+---
+
+## Stage A LANDED (2026-04-27): per-task vCPU foundation
+
+The architecture review at `03-architecture-review-2026-04-27/` identified
+the singleton `vcpu0_fd` shared across all UML tasks (via cooperative
+`switch_threads`/longjmp on the same host thread) as the root architectural
+defect — every UML task ran on one KVM vCPU, violating KVM's "1 host
+thread = 1 vCPU for life" contract. This drove the 5-class race
+playbook documented in memo-19 and the ~75% per-trial gate flakiness.
+
+**Stage A delivered the per-task vCPU foundation:**
+
+- `struct kvm_vcpu_handle` per task, allocated lazily on first
+  `kvm_run_userspace` via `kvm_vcpu_for_current()`, pinned to
+  `current->thread.arch.kvm.vcpu` for the task's lifetime, freed at
+  `exit_thread`.
+- `KVM_SET_SIGNAL_MASK` blocks every host signal except SIGALRM (UML's
+  scheduler tick — required for CPU-bound preemption) and
+  `KVM_UM_KICK_SIGNAL` (future SMP eviction). Without the mask, UML's
+  signal handler can longjmp into unrelated kernel code mid-`KVM_RUN`.
+- `vcpu0_fd` deleted under `CONFIG_UM_BACKEND_KVM_INTEGRATED`. Snapshot
+  / record / KUnit diagnostic paths migrated to `current->thread.arch.kvm
+  .vcpu` (return -ENODEV when no current vCPU on early-boot).
+- `kvm_run_userspace`'s "snapshot before unblock_signals" workaround
+  (commit `b516bee62eb2`) deleted — moot under per-task vCPU since
+  `vcpu->run` is single-writer.
+- FPU/events save/restore on context-switch turned into a no-op. Per-
+  task vCPU naturally retains FPU state across schedule-out. Fork:
+  `arch_copy_thread` calls `kvm_fpu_capture_for_fork` to KVM_GET_FPU
+  on the parent's vCPU into the child's `arch_thread.kvm.fpu`; the
+  child's first `kvm_run_userspace` restores via
+  `kvm_fpu_install_on_first_run`.
+- Per-mm `shadow->dirty` boolean kept (telemetry); `atomic64_t tlb_gen`
+  scaffolding added (per-shadow gen + per-vCPU `last_flushed_tlb_gen`)
+  for the future per-vCPU TLB-flush tracker. Consumer-side activation
+  deferred (task A.4d) until a CLONE_VM-shared-mm test exposes the
+  cross-task TLB staleness deterministically.
+- Vestigial singleton state in `struct kvm_um` deleted: `cpuid_done /
+  msrs_primed / sregs_primed / cached_cr3_gpa / cached_fs_base /
+  cached_gs_base / kernel_gs_base_primed / shadow_pgd*`. All migrated
+  to per-task `struct kvm_vcpu_handle` or per-mm `struct kvm_shadow_mm`.
+
+**Empirical state post-Stage A:** cpython-parity gate 12-15/20 trials
+pass single-pass = 60-75% per-trial — same as the documented pre-Stage-A
+baseline. The remaining flake is pre-existing latent shadow-PT
+staleness (`test_pylong_roundtrip_huge` is the most reliable repro,
+the heaviest-memory workload in the suite, ~10MB digit array).
+Stage B's TDP+memslots replacement is the structural cure.
+
+**Stage B design memo:** `02-workstreams/D-kvm-backend/20-stage-b-design.md`.
+Per-mm memslots via `KVM_SET_USER_MEMORY_REGION`, kernel-half PGD shared
+across mms, KVM TDP/EPT walks `mm->pgd` directly. ~3-4k LOC delete net.
+Implementation tracked at tasks B.1-B.13.
 
 ---
 

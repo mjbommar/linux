@@ -103,12 +103,27 @@ void kvm_mm_detach(struct mm_id *id)
 
 /*
  * Policy A (03b-memslot-policy.md): the KVM memslot registered in
- * kvm_init() covers the whole UML address space, so mm_map /
- * mm_unmap need no KVM ioctls. They reduce to host-side mmap /
- * munmap against UML's own process VA — exactly what `kern_map`
- * in arch/um/kernel/tlb.c already does for the init_mm path.
- * We just call through the same os_map_memory() /
- * os_unmap_memory() helpers for user mms too.
+ * kvm_init() covers the UML PHYSICAL backing memory (the physmem
+ * region [uml_physmem, uml_physmem + physmem_size)), NOT the whole
+ * UML address space. User VAs (e.g. 0x40xxxxxx) live OUTSIDE the
+ * memslot — KVM never sees them directly; the guest reaches user
+ * pages via the shadow PT walking GPAs that DO lie inside the
+ * memslot.
+ *
+ * Consequence for mm_map / mm_unmap: they need no KVM ioctls for
+ * the user-VA range itself (the memslot doesn't cover it). What
+ * they DO need is to update the shadow PT (kvm_shadow_invalidate_
+ * va_range) so the guest hardware-MMU walk sees the change, AND
+ * to update the host VA mapping (os_map_memory / os_unmap_memory)
+ * so UML kernel-side accesses (copy_*_user, sigframe setup) reach
+ * the correct backing pages. This is exactly what `kern_map` in
+ * arch/um/kernel/tlb.c does for init_mm — the user mms reuse the
+ * same os_map_memory() / os_unmap_memory() helpers.
+ *
+ * The "memslot covers whole address space" wording predated the
+ * memo 19 audit; it caused at least one bad debugging path that
+ * assumed mmu_notifier on user-VA mprotects fired through the
+ * memslot. (It does not — user VAs are outside the memslot range.)
  *
  * Note on phys_fd: ptrace / seccomp translate phys_fd into the
  * stub child's fd namespace via get_stub_fd() before queueing

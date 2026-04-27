@@ -34,7 +34,12 @@
 struct kvm_um {
 	int		kvm_fd;		/* /dev/kvm */
 	int		vm_fd;		/* KVM_CREATE_VM */
-	int		vcpu0_fd;	/* KVM_CREATE_VCPU, slot 0 */
+	int		vcpu0_fd;	/* KVM_CREATE_VCPU, slot 0 — kept ONLY
+					 * for snapshot.c/record.c/test_ops.c
+					 * diagnostic paths that haven't yet
+					 * been migrated to per-task vCPU.
+					 * Production hot path uses
+					 * current->thread.arch.kvm.vcpu. */
 	void		*run0;		/* mmap'd kvm_run for vcpu0 */
 	size_t		run_size;	/* KVM_GET_VCPU_MMAP_SIZE */
 	refcount_t	mm_refcount;	/* attached mm_ids */
@@ -45,41 +50,15 @@ struct kvm_um {
 					 * KVM_GET/SET_REGS ioctls (perf-lever
 					 * #2 — 2 ioctls per syscall saved).
 					 */
-	bool		msrs_primed;	/* MSR_STAR / MSR_LSTAR / MSR_FMASK
-					 * set at least once. These never
-					 * change after the first
-					 * kvm_enter_guest — prime-once then
-					 * skip the KVM_SET_MSRS ioctl on
-					 * subsequent entries (perf lever #3).
-					 */
-	bool		kernel_gs_base_primed;
-					/* MSR_KERNEL_GS_BASE set at least
-					 * once. Ditto — gadget_state_va is
-					 * allocated once per vCPU and never
-					 * moves.
-					 */
-	bool		cpuid_done;	/* KVM_SET_CPUID2 installed on
-					 * vcpu0 (task #273). One-shot: set
-					 * on first kvm_enter_guest, never
-					 * cleared. Deferred from kvm_init
-					 * because kzalloc isn't available
-					 * during init_backend() (slab not
-					 * up yet). Without the install,
-					 * KVM exposes a minimal CPUID and
-					 * modern glibc compiled for x86-64-
-					 * v3 refuses to load with `CPU ISA
-					 * level is lower than required`.
-					 */
-	bool		sregs_primed;	/* KVM_SET_SREGS called at least
-					 * once. Combined with the cached
-					 * CR3 / FS_BASE / GS_BASE below, we
-					 * skip the GET_SREGS + SET_SREGS
-					 * ioctls when the mutable fields
-					 * are unchanged (perf lever #3b).
-					 */
-	u64		cached_cr3_gpa;	/* Last SREGS.cr3 programmed. */
-	u64		cached_fs_base;	/* Last SREGS.fs.base programmed. */
-	u64		cached_gs_base;	/* Last SREGS.gs.base programmed. */
+	/*
+	 * Stage A.4c: deleted the per-vCPU caches that previously lived
+	 * here (msrs_primed / kernel_gs_base_primed / cpuid_done /
+	 * sregs_primed / cached_cr3_gpa / cached_fs_base / cached_gs_base).
+	 * They were singletons reflecting whichever task ran KVM_RUN last
+	 * — wrong under per-task vCPU. The fields now live on each task's
+	 * struct kvm_vcpu_handle (defined below), where they correctly
+	 * track per-vCPU last-programmed state.
+	 */
 	u32		pmu_caps;	/* KVM_CAP_PMU_CAPABILITY (task
 					 * #255). Non-zero means the host KVM
 					 * exposes a vPMU + tunable caps. We
@@ -99,21 +78,13 @@ struct kvm_um {
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
-	 * Per-mm shadow PGD lives on struct mm_id (#275). The
-	 * singleton fields below are deprecated/unused; kvm_shadow_
-	 * map_page / kvm_shadow_invalidate_va_range / kvm_enter_
-	 * guest now route through the active mm's struct
-	 * kvm_shadow_mm. Kept here as a 0-initialised vestige until
-	 * the last reference is excised — see arch/um/backend/kvm/
-	 * mm.c::kvm_shadow_mm_for(current->active_mm).
+	 * Stage A.4c: deleted the deprecated singleton shadow PGD
+	 * fields (shadow_pgd_page / shadow_pgd / shadow_pgd_gpa /
+	 * shadow_dirty / shadow_pgd_synced / shadow_pgd_synced_mm /
+	 * shadow_pgd_synced_va). All shadow PT state now lives on
+	 * struct kvm_shadow_mm, allocated per-mm and reachable via
+	 * mm->context.id.kvm_shadow / kvm_shadow_mm_for(mm).
 	 */
-	struct page	*shadow_pgd_page;	/* deprecated; per-mm */
-	void		*shadow_pgd;		/* deprecated; per-mm */
-	u64		shadow_pgd_gpa;		/* deprecated; per-mm */
-	bool		shadow_dirty;		/* deprecated; per-mm */
-	bool			shadow_pgd_synced;		/* deprecated */
-	struct mm_struct	*shadow_pgd_synced_mm;		/* deprecated */
-	u64			shadow_pgd_synced_va;		/* deprecated */
 
 	/*
 	 * Memo 11 G3 gadget state page. Allocated lazily on
@@ -153,11 +124,97 @@ struct kvm_um {
  * Accessors. All return the module-static kvm_ctx; kvm_fd / vm_fd
  * are -1 until init() runs. Callers ordered against init_backend()
  * can treat -1 as a contract violation.
+ *
+ * vcpu0_fd / run0 are kept ONLY for the harness/non-INTEGRATED fallback
+ * path (arch/um/backend/kvm/thread.c:#else branch). Under
+ * CONFIG_UM_BACKEND_KVM_INTEGRATED, every UML task owns a private
+ * struct kvm_vcpu_handle (see below) and MUST NOT touch vcpu0_fd /
+ * run0. The pre-redesign singleton model violated KVM's "1 host thread
+ * = 1 vCPU for life" contract and produced the documented per-trial
+ * flakiness on heavy long-running guest workloads.
  */
 int kvm_backend_fd(void);
 int kvm_backend_vm_fd(void);
 int kvm_backend_vcpu0_fd(void);
 struct kvm_um *kvm_backend_ctx(void);
+
+/*
+ * ============================================================
+ * struct kvm_vcpu_handle — per-task vCPU ownership (Stage A of
+ * the 03-architecture-review-2026-04-27 redesign).
+ *
+ * KVM's API contract: the per-vCPU struct kvm_run mmap is
+ * single-writer; vcpu ioctls should be issued from the same host
+ * thread that called KVM_CREATE_VCPU; KVM_SET_SIGNAL_MASK must
+ * cover the KVM_RUN window so signals route deterministically.
+ *
+ * The pre-redesign UML KVM backend had ONE vcpu0_fd shared across
+ * every UML task via cooperative-thread `switch_threads` (longjmp
+ * on the same host thread). That structurally violated all three
+ * contract clauses and produced the playbook race classes.
+ *
+ * Each UML task now allocates a kvm_vcpu_handle on first
+ * kvm_run_userspace and pins it for life. The handle owns:
+ *
+ *   - fd:         KVM_CREATE_VCPU result for this task's vCPU.
+ *   - run:        mmap of struct kvm_run for this fd. Single-writer.
+ *   - run_size:   KVM_GET_VCPU_MMAP_SIZE result.
+ *   - sigmask_installed: KVM_SET_SIGNAL_MASK has been programmed
+ *                 with everything blocked except KVM_UM_KICK_SIGNAL.
+ *
+ * Plus the per-vCPU caches that used to live on the singleton kvm_um
+ * struct (cached_cr3_gpa / cached_fs_base / cached_gs_base /
+ * sregs_primed / msrs_primed / cpuid_done / kernel_gs_base_primed) —
+ * these are intrinsically per-vCPU because they describe what was
+ * last programmed via KVM_SET_SREGS / KVM_SET_MSRS on a specific fd.
+ *
+ * Lifecycle:
+ *   - Allocated by kvm_vcpu_for_current() on first use.
+ *   - Freed by exit_thread() when the task is reaped.
+ *   - Pinned for the host kthread the UML task runs on for life
+ *     (UML's cooperative scheduler keeps each task on the same
+ *     host pthread; we don't migrate vCPU ownership).
+ */
+/*
+ * Kick signal for the per-task vCPU. Constraints:
+ *   - SIGRTMIN+0 (=32) is UML's SMP IPI (arch/um/os-Linux/smp.c).
+ *   - SIGRTMIN+1 (=33) is glibc's SIGSETXID — glibc's sigaction()
+ *     wrapper returns EINVAL via __is_internal_signal().
+ *   - SIGRTMIN+2 (=34) is glibc's SIGCANCEL/SIGTIMER reservation.
+ *   - SIGUSR1 is used by the PM wake signal (signal.c:208).
+ *
+ * Pick SIGRTMIN+5 (=37): clear of all glibc/UML reservations on
+ * x86_64 (kernel SIGRTMIN=32, glibc-exposed SIGRTMIN=35), and within
+ * the SIGRTMIN..SIGRTMAX range every libc accepts.
+ */
+#define KVM_UM_KICK_SIGNAL	(SIGRTMIN + 5)
+
+struct kvm_vcpu_handle {
+	int		fd;			/* KVM_CREATE_VCPU result */
+	void		*run;			/* mmap of struct kvm_run */
+	size_t		run_size;		/* KVM_GET_VCPU_MMAP_SIZE */
+	bool		cpuid_done;		/* KVM_SET_CPUID2 done */
+	bool		msrs_primed;		/* MSR_STAR/LSTAR/FMASK done */
+	bool		kernel_gs_base_primed;	/* MSR_KERNEL_GS_BASE done */
+	bool		sregs_primed;		/* KVM_SET_SREGS done at least once */
+	u64		cached_cr3_gpa;		/* last sregs.cr3 programmed */
+	u64		cached_fs_base;		/* last sregs.fs.base */
+	u64		cached_gs_base;		/* last sregs.gs.base */
+	/*
+	 * Stage A.4d: per-vCPU TLB-flush generation. Compared to
+	 * shadow_mm->tlb_gen on each kvm_enter_guest; mismatch triggers
+	 * the CR4.PGE-toggle SREGS write (forces VMCS reload + guest TLB
+	 * invalidation). Replaces the per-mm shadow->dirty boolean which
+	 * was unsound under per-task vCPU (one task's flush left
+	 * sibling-task vCPUs sharing the same mm with stale guest TLB).
+	 */
+	u64		last_flushed_tlb_gen;
+};
+
+struct task_struct;
+struct kvm_vcpu_handle *kvm_vcpu_handle_alloc(void);
+void kvm_vcpu_handle_destroy(struct kvm_vcpu_handle *h);
+struct kvm_vcpu_handle *kvm_vcpu_for_current(void);
 
 /*
  * Memo 10 syscall classification. Static truth table lives in
@@ -355,9 +412,13 @@ int kvm_ensure_memslot(void);
  * No-op stub when CONFIG_UM_BACKEND_KVM_INTEGRATED=n.
  */
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
-int kvm_ensure_cpuid_done(void);
+int kvm_ensure_cpuid_done(struct kvm_vcpu_handle *vcpu);
 #else
-static inline int kvm_ensure_cpuid_done(void) { return 0; }
+static inline int kvm_ensure_cpuid_done(struct kvm_vcpu_handle *vcpu)
+{
+	(void)vcpu;
+	return 0;
+}
 #endif
 
 /*
@@ -436,11 +497,130 @@ struct kvm_shadow_mut_entry {
 
 #define KVM_SHADOW_MUT_RING_SIZE	256
 
+/*
+ * ============================================================
+ * Shadow-mm dirty / synced / needs_full_resync state machine
+ * (task #94 — documented to make the otherwise-subtle invariants
+ *  visible at the structure definition).
+ *
+ * Two independent flags drive guest re-entry behaviour:
+ *
+ *   shadow->dirty
+ *     Meaning: "the shadow PT contents have been mutated since the
+ *     last guest-TLB flush, so the next KVM_RUN MUST run a CR3
+ *     reload / CR4.PGE toggle to flush the guest TLB before re-
+ *     entering ring-3."
+ *     Producers (must SET dirty after the leaf write, with smp_wmb
+ *     between the two so the consumer cannot observe dirty=false
+ *     after seeing the new leaf):
+ *       - lifecycle.c:kvm_shadow_map_page  (lazy fill leaf install)
+ *       - lifecycle.c:kvm_shadow_invalidate_va_range (mm_unmap range
+ *         clear; also resets synced=false)
+ *       - lifecycle.c:kvm_shadow_pgd_clear_user (cross-mm switch hook)
+ *       - lifecycle.c:kvm_shadow_fill_from_uml_pgd (clear pass with
+ *         cleared > 0; install pass via map_page)
+ *       - shadow_sync.c:kvm_shadow_sync_pte (direct sync from
+ *         set_pte_at / pte_clear hooks: install / clear / alloc_fail
+ *         paths)
+ *     Consumer:
+ *       - thread.c:kvm_enter_guest SREGS-skip predicate. Reads via
+ *         smp_load_acquire(&shadow->dirty); if true, fall through
+ *         to KVM_SET_SREGS with the CR4.PGE-toggle dance, then
+ *         cmpxchg(true → false) ONLY the producer-snapshot we
+ *         observed (preserves any writer that bumped it during the
+ *         predicate window).
+ *
+ *   shadow->synced
+ *     Meaning: "the shadow PT contains an exact mirror of mm->pgd
+ *     (modulo bootstrap aliases) as of the last successful
+ *     kvm_shadow_fill_from_uml_pgd, AND nothing has invalidated a
+ *     range since."
+ *     Producers (must SET synced=true ONLY at the end of a complete
+ *     fill, after smp_wmb):
+ *       - lifecycle.c:kvm_shadow_fill_from_uml_pgd (only on the
+ *         success path; the seqlock check leaves it false if a
+ *         direct-sync writer fired during the walk — task #90).
+ *     Producers (must CLEAR synced=false on any non-fill mutation):
+ *       - lifecycle.c:kvm_shadow_invalidate_va_range (range cleared)
+ *       - lifecycle.c:kvm_shadow_mm_alloc (initial state)
+ *     Consumer:
+ *       - thread.c:kvm_enter_guest fill-skip predicate. Reads via
+ *         smp_load_acquire(&shadow->synced); if true AND
+ *         synced_pgd_va matches mm->pgd AND !needs_full_resync,
+ *         skip the full pgd walk on this entry.
+ *
+ *   shadow->needs_full_resync
+ *     Meaning: "a direct-sync writer hit a recoverable failure
+ *     (intermediate-table allocation in atomic context) or the
+ *     fill-vs-direct-sync seqlock detected a race; the next
+ *     kvm_enter_guest MUST run a full fill to converge."
+ *     Producers (set true; do NOT clear synced — that would force a
+ *     fill on every entry from now on; the resync flag is a one-
+ *     shot signal):
+ *       - shadow_sync.c:kvm_shadow_sync_pte (alloc-fail path)
+ *       - shadow_sync.c:kvm_shadow_sync_range_atomic (range too
+ *         large for per-page sync)
+ *       - lifecycle.c:kvm_shadow_fill_from_uml_pgd (task #90 seqlock
+ *         miss — also clears synced=false so the next entry refills)
+ *     Consumer:
+ *       - thread.c:kvm_enter_guest. Reads via READ_ONCE; if true,
+ *         force fill regardless of synced; cmpxchg(true → false)
+ *         ONLY the producer-snapshot we observed at predicate time
+ *         (so a concurrent writer's true is preserved).
+ *
+ * Ordering invariants (smp_wmb pairs):
+ *
+ *   Writer side: <leaf write> ; smp_wmb() ; WRITE_ONCE(dirty, true)
+ *                <leaf write> ; smp_wmb() ; WRITE_ONCE(synced_pgd_va,
+ *                                                      ...) ;
+ *                                          WRITE_ONCE(synced, true)
+ *
+ *   Reader side: smp_load_acquire(&dirty)  pairs the wmb above so
+ *                a true dirty observed here implies the leaf write
+ *                is also visible.
+ *                smp_load_acquire(&synced) likewise.
+ *
+ * Decision matrix for kvm_enter_guest at predicate time:
+ *
+ *   dirty | synced | needs_resync | action
+ *   ------+--------+--------------+-----------------------------------
+ *   false | true   | false        | skip-SREGS + skip-fill (fast path)
+ *   true  | true   | false        | SREGS reload + skip-fill
+ *   *     | false  | *            | SREGS reload + full fill
+ *   *     | *      | true         | SREGS reload + full fill
+ *
+ * Consume-via-cmpxchg discipline: every clear of a flag MUST use
+ * cmpxchg(true → false) keyed to the snapshot read at predicate
+ * time. A bare WRITE_ONCE clear would race a concurrent producer
+ * that sets the flag during our SREGS reload / fill, dropping the
+ * signal.
+ *
+ * ============================================================
+ */
 struct kvm_shadow_mm {
 	struct page		*pgd_page;	/* backing page for teardown */
 	void			*pgd;		/* kernel VA of top-level PGD */
 	u64			pgd_gpa;	/* __pa(pgd) → CR3 load value */
-	bool			dirty;		/* needs CR3 reload (TLB flush) */
+	/*
+	 * Stage A.4d: per-shadow TLB-flush generation. Producers
+	 * (kvm_shadow_sync_pte / kvm_shadow_invalidate_va_range /
+	 * kvm_shadow_fill_from_uml_pgd / kvm_shadow_pgd_clear_user)
+	 * atomically increment AFTER writing leaves (release semantics).
+	 * Consumer (kvm_enter_guest) acquires it and compares to the
+	 * per-vCPU vcpu->last_flushed_tlb_gen — mismatch triggers a
+	 * CR4.PGE-toggle SREGS write to flush THIS vCPU's guest TLB.
+	 *
+	 * Replaces the per-mm "dirty" boolean which was unsound under
+	 * per-task vCPU: when task A flushed its TLB and cleared dirty,
+	 * task B sharing the mm still had a stale TLB and saw dirty=
+	 * false, never flushing. The boolean conflated "any vCPU needs
+	 * to flush" with "all vCPUs are flushed".
+	 *
+	 * Init to 1 so that fresh vCPUs (last_flushed_tlb_gen = 0)
+	 * always observe a mismatch on first entry and flush.
+	 */
+	atomic64_t		tlb_gen;
+	bool			dirty;		/* DEPRECATED — kept for telemetry counters; consult tlb_gen for correctness */
 	bool			synced;		/* shadow mirrors mm->pgd */
 	u64			synced_pgd_va;	/* mm->pgd at last fill */
 	struct mutex		fill_lock;	/* serializes pgd-walk fills */
@@ -483,6 +663,30 @@ struct kvm_shadow_mm {
 	u64			direct_sync_alloc_fail;
 	u64			direct_sync_range_clear;
 	/*
+	 * Task #94 transition counters. Bumped via WRITE_ONCE under
+	 * the producer's existing ordering (no extra barriers).
+	 * Readable via panic-time dump or ad-hoc /proc — exposes
+	 * which producer drove a given fill / TLB-flush event so we
+	 * can correlate gate failures with the dirty-state path that
+	 * triggered them.
+	 *
+	 * Naming: <producer>_<flag>_set / <consumer>_<flag>_clear.
+	 * Consumer is always kvm_enter_guest; producers are tagged.
+	 */
+	u64			dirty_set_fill_install;
+	u64			dirty_set_fill_clearpass;
+	u64			dirty_set_invalidate;
+	u64			dirty_set_pgd_clear_user;
+	u64			dirty_set_direct_sync;
+	u64			dirty_clear_enter_guest;
+	u64			synced_set_fill;
+	u64			synced_clear_invalidate;
+	u64			synced_clear_seqlock_miss;
+	u64			needs_full_resync_set_alloc_fail;
+	u64			needs_full_resync_set_range_too_large;
+	u64			needs_full_resync_set_seqlock_miss;
+	u64			needs_full_resync_clear_enter_guest;
+	/*
 	 * F12 mutation ring. Circular buffer of the last N mutations.
 	 * head_seq is monotonically increasing; ring index =
 	 * head_seq % KVM_SHADOW_MUT_RING_SIZE. Single-writer per mm;
@@ -494,6 +698,28 @@ struct kvm_shadow_mm {
 
 struct kvm_shadow_mm *kvm_shadow_mm_alloc(void);
 void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow);
+
+/*
+ * Stage A.4d: producer-side helper. Every shadow leaf mutation calls
+ * this AFTER writing the leaf bytes. WRITE_ONCE on the legacy dirty
+ * boolean keeps the dirty_set_* / dirty_clear_* telemetry counters
+ * accurate (they predate per-task vCPU and are still useful for
+ * /proc-style introspection). atomic64_inc on tlb_gen is the
+ * correctness primitive — paired with vcpu->last_flushed_tlb_gen in
+ * kvm_enter_guest to drive per-vCPU TLB invalidation.
+ *
+ * atomic64_inc on x86 is LOCK INC (full barrier); on weakly-ordered
+ * archs the kernel atomic_t API guarantees acquire+release semantics.
+ * Either way, prior leaf writes are visible to any consumer that
+ * subsequently reads tlb_gen via atomic64_read.
+ */
+static inline void kvm_shadow_mark_dirty(struct kvm_shadow_mm *shadow)
+{
+	if (!shadow)
+		return;
+	WRITE_ONCE(shadow->dirty, true);
+	atomic64_inc(&shadow->tlb_gen);
+}
 
 /*
  * Resolve the active mm's shadow tree. NULL when called outside a
@@ -539,6 +765,24 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
  * P, RW, US, or NX drift, not on legitimate accessed/dirty churn.
  */
 int kvm_shadow_audit_va(u64 va, void *uml_pgd_va, const char *tag);
+
+/*
+ * Task #91: three-way memory-content audit. Compares the bytes
+ * visible at `va` through three paths:
+ *   A — UML pgd → leaf PFN → __va  (UML kernel's own view)
+ *   B — shadow PT → leaf GPA → __va (KVM's view via memslot)
+ *   C — direct user-VA dereference  (raw host-PT view from os_map_memory)
+ *
+ * Reads `bytes` (capped to page boundary, max 64). Returns 0 if all
+ * available paths agree, 1 if A==B but C diverges (host-VA aliasing),
+ * 2 if A diverges from B (shadow GPA mismatch), -ENODEV if shadow or
+ * pgd is unavailable.
+ *
+ * Diagnostic-only; safe in any context where the UML pgd and shadow
+ * PT are stable. Does NOT take fill_lock.
+ */
+int kvm_shadow_audit_content_va(u64 va, void *uml_pgd_va, unsigned int bytes,
+				const char *tag);
 
 /*
  * #274 phase-1 step 2 diagnostic: full-pgd lockstep audit. Walks

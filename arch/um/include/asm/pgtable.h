@@ -155,6 +155,35 @@ static inline void pte_clear(struct mm_struct *mm, unsigned long addr,
 #define	pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE)
 
 #define pmd_present(x)	(pmd_val(x) & _PAGE_PRESENT)
+
+/*
+ * pmd_clear / pud_clear / p4d_clear notify the KVM shadow PT
+ * INDIRECTLY, via the flush_tlb_range hook in <asm/tlbflush.h>.
+ * Direct notification would require a VA we don't have here (the
+ * macro receives only the entry pointer, not the VA range it
+ * covers). The invariant relied on:
+ *
+ *   Every call site that does pmd_clear / pud_clear / p4d_clear
+ *   on a USER VA range MUST be followed by a flush_tlb_range over
+ *   the same VA range BEFORE the next KVM_RUN entry. Generic mm
+ *   code (mm/memory.c, mm/mremap.c, mm/madvise.c) follows this
+ *   discipline; flush_tlb_range's KVM-backend hook calls
+ *   kvm_shadow_sync_range_atomic, which clears or refreshes the
+ *   corresponding shadow leaves.
+ *
+ * For ranges >= 2 MiB (= 512 pages, the PMD coverage),
+ * kvm_shadow_sync_range_atomic short-circuits to
+ * needs_full_resync=true rather than walking page-by-page (memo
+ * 15 F9 threshold). pud_clear (1 GiB) and p4d_clear (512 GiB)
+ * always exceed this threshold, so they always trigger the full
+ * resync repair on the next kvm_enter_guest. Safe but heavy.
+ *
+ * Task #96: if a future patch adds a call site that does
+ * pmd_clear without a paired flush_tlb_range, the shadow leaves
+ * for that range will remain stale until the next mm_unmap or
+ * fill — and the guest can read deleted data through them.
+ * Instrument with kvm_shadow_audit_va before merging.
+ */
 #define pmd_clear(xp)	do { pmd_val(*(xp)) = _PAGE_NEEDSYNC; } while (0)
 
 #define pmd_needsync(x)   (pmd_val(x) & _PAGE_NEEDSYNC)

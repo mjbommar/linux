@@ -55,6 +55,140 @@
 #include "kvm_backend.h"
 
 /*
+ * Per-task vCPU accessor — lazily creates a struct kvm_vcpu_handle
+ * on first use by the calling task. Stage A redesign of the KVM
+ * backend (Documentation/virt/uml/redesign/03-architecture-review-
+ * 2026-04-27).
+ *
+ * Returns NULL if allocation fails (callers must defensively handle;
+ * the panic-fallback prevents the failed task from running guest
+ * code with a NULL handle dereference).
+ *
+ * Idempotent: subsequent calls return the same handle for the same
+ * task. Storage lives on current->thread.arch.kvm.vcpu and is freed
+ * by exit_thread() when the task is reaped.
+ *
+ * SIGNAL HANDLING NOTE — what KVM_SET_SIGNAL_MASK does and why.
+ *
+ * The host kernel can deliver signals to the host thread that's
+ * inside KVM_RUN. Two consequences in UML:
+ *
+ *   - The signal returns KVM_RUN with -EINTR. That's PREEMPTION
+ *     and we need it: a CPU-bound guest with no syscalls/faults
+ *     would otherwise spin forever, blocking UML's cooperative
+ *     scheduler from running other tasks.
+ *
+ *   - Before -EINTR returns, the host's signal handler runs. UML's
+ *     handlers (timer_alarm_handler, hard_handler) can longjmp into
+ *     the UML kernel via switch_threads, schedule(), and re-enter
+ *     unrelated UML code — all while we are still mid-KVM_RUN ioctl.
+ *     This is the "signal-driven entry" path that hasn't been
+ *     audited for KVM-context safety, and was the source of the
+ *     pre-Stage-A "another task overwrote my exit state" race.
+ *
+ * Solution: install KVM_SET_SIGNAL_MASK that blocks every signal
+ * EXCEPT SIGALRM (UML's timer tick → scheduler driver) and
+ * KVM_UM_KICK_SIGNAL (future SMP eviction primitive). SIGALRM gets
+ * through so preemption works. Everything else is queued at the
+ * host level and delivered after KVM_RUN returns — at which point
+ * unblock_signals() in kvm_run_userspace lets UML's handler do its
+ * deferred work safely.
+ *
+ * Pre-Stage-A defense ("snapshot before unblock_signals") is moot
+ * regardless because per-task vcpu->run is single-writer.
+ */
+static int kvm_vcpu_handle_install_sigmask(struct kvm_vcpu_handle *h)
+{
+	struct {
+		__u32 len;
+		__u8  sigset[sizeof(sigset_t)];
+	} __packed mask = {
+		.len = sizeof(sigset_t),
+	};
+	sigset_t set;
+	int rc;
+
+	sigfillset(&set);
+	sigdelset(&set, SIGALRM);              /* timer-driven preemption */
+	sigdelset(&set, KVM_UM_KICK_SIGNAL);   /* future SMP vCPU kick */
+	memcpy(mask.sigset, &set, sizeof(sigset_t));
+
+	rc = os_ioctl_generic(h->fd, KVM_SET_SIGNAL_MASK,
+			      (unsigned long)&mask);
+	if (rc < 0) {
+		pr_err("um: kvm vcpu_install_sigmask: KVM_SET_SIGNAL_MASK failed (%d) — guest signal isolation lost; aborting vCPU creation\n",
+		       rc);
+		return rc;
+	}
+	return 0;
+}
+static void kvm_fpu_install_on_first_run(struct kvm_vcpu_handle *vcpu,
+					 struct arch_thread *a);
+
+struct kvm_vcpu_handle *kvm_vcpu_for_current(void)
+{
+	struct kvm_vcpu_handle *h;
+	int rc;
+
+	if (!current)
+		return NULL;
+	h = current->thread.arch.kvm.vcpu;
+	if (likely(h))
+		return h;
+
+	h = kvm_vcpu_handle_alloc();
+	if (IS_ERR(h)) {
+		pr_warn_ratelimited("um: kvm vcpu_for_current: alloc failed (%ld) for pid=%d\n",
+				    PTR_ERR(h), current->pid);
+		return NULL;
+	}
+
+	/*
+	 * Install KVM_SET_SIGNAL_MASK on this vCPU. Failure is fatal:
+	 * without the mask, the host signal handler can longjmp into
+	 * unrelated UML kernel code mid-KVM_RUN (see SIGNAL HANDLING
+	 * NOTE above). Better to drop the handle and let the caller
+	 * panic than silently run with corrupted signal isolation.
+	 */
+	rc = kvm_vcpu_handle_install_sigmask(h);
+	if (rc < 0) {
+		kvm_vcpu_handle_destroy(h);
+		return NULL;
+	}
+
+	/*
+	 * Stage A.5: install fork-inherited FPU (or arch-default for
+	 * fresh/post-exec tasks) onto this fresh vCPU. After this, the
+	 * vCPU naturally retains FPU state across KVM_RUN calls — no
+	 * per-context-switch save/restore needed.
+	 */
+	kvm_fpu_install_on_first_run(h, &current->thread.arch);
+
+	current->thread.arch.kvm.vcpu = h;
+	return h;
+}
+
+/*
+ * exit_thread hook: free the per-task vCPU handle when a UML task
+ * is reaped. UML didn't define exit_thread before; the generic
+ * empty stub was used. Define it here so the per-task vCPU fd +
+ * mmap are released promptly rather than leaking until the UML
+ * host process exits.
+ */
+void exit_thread(struct task_struct *t)
+{
+	struct kvm_vcpu_handle *h;
+
+	if (!t)
+		return;
+	h = t->thread.arch.kvm.vcpu;
+	if (!h)
+		return;
+	t->thread.arch.kvm.vcpu = NULL;
+	kvm_vcpu_handle_destroy(h);
+}
+
+/*
  * #274 phase-1 diagnostic knobs. Default off because emitting the
  * extra pr_info lines (and the binary-layout shift the dead code
  * implies) measurably perturbs hashlib smoke reliability — the
@@ -108,119 +242,83 @@ core_param(kvm_diag_skip_fpu_save, kvm_diag_skip_fpu_save, uint, 0644);
  *   - Full XSAVE area (KVM_GET/SET_XSAVE2) — moot while AVX/AVX-512
  *     are masked at CPUID (lifecycle.c:426 onward)
  */
-int kvm_fpu_save_for_task(struct task_struct *t)
+/*
+ * Stage A.5: fork-time FPU capture. arch_copy_thread (in
+ * arch/x86/um/asm/processor_64.h) calls this from the parent's
+ * context — current is the parent — to snapshot the parent's REAL
+ * vCPU FPU state into the child's arch_thread.kvm.fpu before fork
+ * completes. The child then restores from that snapshot on its
+ * first kvm_run_userspace via kvm_vcpu_for_current.
+ *
+ * Pre-Stage-A this snapshot was via KVM_GET_FPU on the singleton
+ * vcpu0_fd (which never ran), giving the child KVM-default FPU
+ * state instead of the parent's. POSIX requires fork() to inherit
+ * FPU state.
+ */
+int kvm_fpu_capture_for_fork(struct arch_thread *from, struct arch_thread *to)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
-	struct arch_thread *a;
 	int rc;
 
-	if (vcpu_fd < 0 || !t)
+	if (!from || !to)
+		return -EINVAL;
+
+	to->kvm.events_valid = false;	/* fork doesn't inherit pending exceptions */
+	to->kvm.vcpu = NULL;		/* child gets a fresh vCPU on first run */
+
+	if (!from->kvm.vcpu || from->kvm.vcpu->fd < 0) {
+		/* Parent never ran a guest — child starts with arch-default FPU. */
+		to->kvm.fpu_valid = false;
 		return 0;
-	a = &t->thread.arch;
-	rc = os_ioctl_generic(vcpu_fd, KVM_GET_FPU,
-			      (unsigned long)&a->kvm.fpu);
+	}
+
+	rc = os_ioctl_generic(from->kvm.vcpu->fd, KVM_GET_FPU,
+			      (unsigned long)&to->kvm.fpu);
 	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm fpu_save: KVM_GET_FPU(task=%p) failed (%d)\n",
-				    t, rc);
+		pr_warn_ratelimited("um: kvm fpu_capture_for_fork: KVM_GET_FPU(parent_vcpu_fd=%d) failed (%d) — child gets arch-default FPU\n",
+				    from->kvm.vcpu->fd, rc);
+		to->kvm.fpu_valid = false;
 		return rc;
 	}
-	a->kvm.fpu_valid = true;
-
-	/*
-	 * Memo 17 G-EVENTS: capture pending exception/interrupt state.
-	 * Preserves any pending injected #PF queued for THIS task at
-	 * switch-out so the right exception is delivered on switch-in.
-	 */
-	rc = os_ioctl_generic(vcpu_fd, KVM_GET_VCPU_EVENTS,
-			      (unsigned long)&a->kvm.events);
-	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm events_save: KVM_GET_VCPU_EVENTS(task=%p) failed (%d)\n",
-				    t, rc);
-		WRITE_ONCE(a->kvm.events_valid, false);
-	} else {
-		WRITE_ONCE(a->kvm.events_valid, true);
-	}
+	to->kvm.fpu_valid = true;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(kvm_fpu_capture_for_fork);
 
-int kvm_fpu_restore_for_task(struct task_struct *t)
+/*
+ * Stage A.5: install the inherited FPU on a child's freshly-allocated
+ * vCPU. Called from kvm_vcpu_for_current after vcpu alloc + sigmask
+ * install. fpu_valid=true means kvm_fpu_capture_for_fork populated
+ * to->kvm.fpu at fork; restore that snapshot. fpu_valid=false (fresh
+ * task or post-execve via arch_flush_thread) installs the
+ * architectural reset values per AMD64 SDM §11.5.1.
+ */
+static void kvm_fpu_install_on_first_run(struct kvm_vcpu_handle *vcpu,
+					 struct arch_thread *a)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
-	struct arch_thread *a;
 	int rc;
 
-	if (vcpu_fd < 0 || !t)
-		return 0;
-	a = &t->thread.arch;
+	if (!vcpu || vcpu->fd < 0 || !a)
+		return;
 
-	/*
-	 * Memo 17 Phase H finding 6: fresh tasks (fpu_valid=false from
-	 * arch_copy_thread / arch_flush_thread) must NOT inherit the
-	 * vCPU's current FPU state — that state belongs to whichever
-	 * task last ran. Write a clean architectural-init FPU on first
-	 * switch-in: zero everything except FCW=0x37f / MXCSR=0x1f80
-	 * (x87 / SSE init values per AMD64 SDM §11.5.1).
-	 */
 	if (a->kvm.fpu_valid) {
-		rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU,
+		rc = os_ioctl_generic(vcpu->fd, KVM_SET_FPU,
 				      (unsigned long)&a->kvm.fpu);
 		if (rc < 0)
-			pr_warn_ratelimited("um: kvm fpu_restore: KVM_SET_FPU(task=%p) failed (%d)\n",
-					    t, rc);
+			pr_warn_ratelimited("um: kvm fpu_install: KVM_SET_FPU(task=%p) failed (%d)\n",
+					    current, rc);
+		a->kvm.fpu_valid = false;	/* one-shot; subsequent runs use vCPU's own state */
 	} else {
 		struct kvm_fpu init_fpu;
 
 		memset(&init_fpu, 0, sizeof(init_fpu));
-		init_fpu.fcw   = 0x037f;	/* x87 control word reset value */
-		init_fpu.mxcsr = 0x1f80;	/* MXCSR reset value */
-		rc = os_ioctl_generic(vcpu_fd, KVM_SET_FPU,
+		init_fpu.fcw   = 0x037f;	/* x87 control word reset */
+		init_fpu.mxcsr = 0x1f80;	/* MXCSR reset */
+		rc = os_ioctl_generic(vcpu->fd, KVM_SET_FPU,
 				      (unsigned long)&init_fpu);
 		if (rc < 0)
-			pr_warn_ratelimited("um: kvm fpu_restore: initial KVM_SET_FPU(task=%p) failed (%d)\n",
-					    t, rc);
+			pr_warn_ratelimited("um: kvm fpu_install: initial KVM_SET_FPU(task=%p) failed (%d)\n",
+					    current, rc);
 	}
-
-	/*
-	 * Memo 17 Phase H findings 2 + 3: VCPU_EVENTS handling.
-	 *
-	 *  - Fresh task (events_valid=false): the vCPU may carry a
-	 *    pending injected exception left over from another task's
-	 *    last run (e.g., #PF whose injection was deferred when we
-	 *    vmexit'd on KVM_EXIT_INTR before delivery). Without an
-	 *    explicit reset, that exception fires on the fresh task's
-	 *    next entry — exactly the "wild SIGSEGV in dl_main on
-	 *    Python startup" pattern. Write a zeroed kvm_vcpu_events
-	 *    with all VALID flags set so KVM clears every extended
-	 *    field too (NMI_PENDING / SHADOW / SMM / PAYLOAD).
-	 *
-	 *  - Restored task (events_valid=true): preserve the saved
-	 *    `flags` field — it tells KVM which extended fields were
-	 *    valid at the prior GET. Forcing flags=0 (previous version
-	 *    of this code) discarded extended state KVM had set,
-	 *    leaving the vCPU with a partial restore.
-	 */
-	if (a->kvm.events_valid) {
-		rc = os_ioctl_generic(vcpu_fd, KVM_SET_VCPU_EVENTS,
-				      (unsigned long)&a->kvm.events);
-		if (rc < 0)
-			pr_warn_ratelimited("um: kvm events_restore: KVM_SET_VCPU_EVENTS(task=%p) failed (%d)\n",
-					    t, rc);
-	} else {
-		struct kvm_vcpu_events fresh;
-
-		memset(&fresh, 0, sizeof(fresh));
-		fresh.flags = KVM_VCPUEVENT_VALID_NMI_PENDING |
-			      KVM_VCPUEVENT_VALID_SHADOW |
-			      KVM_VCPUEVENT_VALID_SMM |
-			      KVM_VCPUEVENT_VALID_PAYLOAD |
-			      KVM_VCPUEVENT_VALID_TRIPLE_FAULT;
-		rc = os_ioctl_generic(vcpu_fd, KVM_SET_VCPU_EVENTS,
-				      (unsigned long)&fresh);
-		if (rc < 0)
-			pr_warn_ratelimited("um: kvm events_restore: initial KVM_SET_VCPU_EVENTS(task=%p) failed (%d)\n",
-					    t, rc);
-	}
-	return 0;
 }
 #endif
 
@@ -240,23 +338,20 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 {
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
-	 * Audit round-6 G2: when the active mm changes, clear the
-	 * user half of the singleton shadow PGD so prev's mappings
-	 * don't leak into next's view. kvm_shadow_fill_from_uml_pgd
-	 * only INSTALLS present leaves — it never clears absent
-	 * ones — so a switch from a process with a populated VA to
-	 * one with the same VA unmapped would otherwise let the
-	 * second process read prev's data.
+	 * Audit round-6 G2 (post-#275 retained for compat): on active_mm
+	 * change, kvm_shadow_pgd_clear_user() runs.
 	 *
-	 * active_mm (not mm) is the right hook: kernel threads
-	 * borrow the previous user task's mm via active_mm, and the
-	 * shadow PT was filled against that. We only need to clear
-	 * when active_mm actually changes.
+	 * Since #275 each mm has its OWN shadow PGD (per-mm; not a
+	 * singleton). Switching active_mm therefore loads the new mm's
+	 * pre-existing shadow tree as CR3 — there is no cross-mm leak
+	 * to scrub. kvm_shadow_pgd_clear_user is now a stub that just
+	 * marks the destination shadow dirty so the next kvm_enter_
+	 * guest's SREGS reload toggles CR4.PGE and flushes the guest
+	 * TLB (preventing stale TLB entries from prev's CR3 from
+	 * persisting across the switch).
 	 *
-	 * The clear marks kvm_ctx.shadow_dirty; next kvm_enter_guest
-	 * KVM_SET_SREGS does the CR3 reload that flushes the guest
-	 * TLB (per D89: KVM's kvm_set_cr3 always falls through to
-	 * kvm_invalidate_pcid).
+	 * active_mm (not mm) is the right hook: kernel threads borrow
+	 * the previous user task's mm via active_mm.
 	 */
 	if (prev && next && prev->active_mm != next->active_mm)
 		kvm_shadow_pgd_clear_user();
@@ -266,22 +361,24 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 	 * we leave its mm context. um_tlb_mark_sync collects pte/flush
 	 * events into prev->mm->context.sync_tlb_range_*; without a
 	 * pre-switch sync those updates would only be applied if we
-	 * ever come back to prev. Since the kvm shadow PT is a
-	 * singleton (#242 + #243-pending), the next task's
-	 * kvm_enter_guest's pgd-mirror walk picks up prev's stale view
-	 * of next's pgd if we never sync prev. Worse, fork/exec where
-	 * prev is the parent and next is a fresh task whose mm is
-	 * newly constructed — the new mm's set_pte_at events drain
-	 * via current_mm_sync() in run_userspace, but the parent's
-	 * unfinished sync from before the switch never does.
+	 * ever come back to prev.
+	 *
+	 * Per-mm shadow PT (#275): each mm has its own shadow tree, so
+	 * prev's pending updates target prev's shadow specifically.
+	 * Without the pre-switch drain those updates remain queued on
+	 * prev->mm->context — if prev is later resumed, they apply then;
+	 * but for fork/exec (prev = parent, next = fresh child mm built
+	 * via dup_mm or clone), the child's set_pte_at events drain via
+	 * current_mm_sync() in run_userspace yet the parent's unfinished
+	 * sync from before the switch is stranded.
 	 *
 	 * Mirrors what seccomp / ptrace get implicitly because their
 	 * "user run" path is the only thing that ever pushes mappings
 	 * into the host stub child via mm_map; if prev had pending
 	 * updates that were never flushed, they're effectively
 	 * dropped on the floor at switch time. For kvm we want the
-	 * pending updates committed into the shadow PT so the singleton
-	 * view stays consistent across mm switches.
+	 * pending updates committed into prev's shadow PT so its view
+	 * is coherent if prev resumes later.
 	 */
 	/*
 	 * #274 / T5: drain prev's pending PTE updates against
@@ -311,35 +408,29 @@ void kvm_context_switch(struct task_struct *prev, struct task_struct *next)
 
 #ifdef CONFIG_UM_BACKEND_KVM_INTEGRATED
 	/*
-	 * N4 — KVM FPU/XSTATE save/restore on context switch.
+	 * Stage A.5: no per-context-switch FPU/events save/restore.
 	 *
-	 * The vCPU FPU state lives in KVM's per-vCPU storage. Across
-	 * KVM_RUN calls the vCPU FPU PERSISTS — KVM auto-saves host
-	 * FPU on entry and restores host FPU on exit, but the vCPU's
-	 * own FPU is its own. UML multiplexes ALL "tasks" onto a
-	 * single vCPU0; without per-task save/restore here, task A's
-	 * XMM/AVX state leaks into task B's run.
+	 * Each UML task has its OWN vCPU (per-task kvm_vcpu_handle).
+	 * When the task is scheduled out, KVM_RUN isn't called on
+	 * its vcpu — the FPU + VCPU_EVENTS state simply persists in
+	 * KVM's per-vCPU storage until the task resumes and KVM_RUN
+	 * fires again. There's no cross-task leak because there's no
+	 * cross-task vCPU sharing.
 	 *
-	 * SSE/AVX-based memcpy in glibc (movdqa, vmovaps) reads from
-	 * one register and writes via another. If the source XMM held
-	 * stale state from a different task, the bytes copied are
-	 * wrong — propagating corruption widely (PyObject pointers
-	 * loaded via memcpy etc).
+	 * Fork inheritance: kvm_fpu_capture_for_fork (called from
+	 * arch_copy_thread) snapshots the parent's vCPU FPU into the
+	 * child's arch_thread.kvm.fpu before fork completes. The
+	 * child's first kvm_run_userspace restores it via
+	 * kvm_fpu_install_on_first_run (called from
+	 * kvm_vcpu_for_current after vcpu alloc).
 	 *
-	 * Implementation: lazily allocate a struct kvm_fpu per
-	 * task via thread_struct.kvm_fpu_state (added below). On
-	 * switch: KVM_GET_FPU into prev's slot (allocates if first
-	 * time), KVM_SET_FPU from next's slot (no-op if next has
-	 * never had FPU saved — let the vCPU keep prev's state,
-	 * which is the prior baseline). Failure logs but does not
-	 * panic; FPU drift is a soft correctness issue.
-	 *
-	 * Gated by kvm_diag_skip_fpu kernel param so we can bisect.
+	 * Pre-Stage-A this block did KVM_GET_FPU/KVM_SET_FPU on the
+	 * singleton vcpu0_fd — defending against task-A-FPU leaking
+	 * into task-B-on-same-vCPU. With per-task vCPU that whole
+	 * defense is moot.
 	 */
-	if (!kvm_diag_skip_fpu_save && prev && next && prev != next) {
-		(void)kvm_fpu_save_for_task(prev);
-		(void)kvm_fpu_restore_for_task(next);
-	}
+	(void)prev;
+	(void)next;
 #endif
 
 	switch_threads(&prev->thread.switch_buf, &next->thread.switch_buf);
@@ -1698,9 +1789,10 @@ static int kvm_propagate_fs_gs_base(int vcpu_fd, u64 fs_base, u64 gs_base)
  * cost of two swapgs per gadget call is accounted for in
  * the D71 / memo 11 post-G2 cost model.
  */
-static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
+static int kvm_enter_guest_program_kernel_gs_base(struct kvm_vcpu_handle *vcpu,
+						  u64 gadget_state_va)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
+	int vcpu_fd;
 	struct {
 		struct kvm_msrs info;
 		struct kvm_msr_entry entries[1];
@@ -1715,10 +1807,11 @@ static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
 	};
 	int rc;
 
-	if (vcpu_fd < 0)
+	if (!vcpu || vcpu->fd < 0)
 		return -EIO;
 	if (!gadget_state_va)
 		return 0;	/* unmapped; nothing to program */
+	vcpu_fd = vcpu->fd;
 	/*
 	 * P0-3 (memo 16 review Agent 3): the kernel_gs_base_primed
 	 * one-shot was unsafe — KVM_SET_SREGS and arch_prctl(ARCH_SET_GS)
@@ -1743,9 +1836,10 @@ static int kvm_enter_guest_program_kernel_gs_base(u64 gadget_state_va)
 	return 0;
 }
 
-static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
+static int kvm_enter_guest_program_msrs(struct kvm_vcpu_handle *vcpu,
+					u64 lstar_gpa)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
+	int vcpu_fd;
 	struct {
 		struct kvm_msrs info;
 		struct kvm_msr_entry entries[3];
@@ -1794,16 +1888,23 @@ static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 	};
 	int rc;
 
-	if (vcpu_fd < 0)
+	if (!vcpu || vcpu->fd < 0)
 		return -EIO;
+	vcpu_fd = vcpu->fd;
 	/*
 	 * Perf lever #3: STAR/LSTAR/FMASK are compile-time constants
 	 * (LSTAR = bootstrap_va + 0x40; STAR = ring-0/ring-3 selector
 	 * pair; FMASK = 0). After the first successful write they
 	 * never change, so skip the ioctl on every subsequent
 	 * kvm_enter_guest.
+	 *
+	 * Stage A redesign: msrs_primed is per-vCPU (each task's vCPU
+	 * needs its OWN MSRs primed once). Pre-fix the flag was
+	 * singleton on kvm_um, meaning task A's KVM_SET_MSRS would
+	 * mark task B's vCPU as primed even though B never ran the
+	 * ioctl on its own fd.
 	 */
-	if (kvm_backend_ctx()->msrs_primed)
+	if (vcpu->msrs_primed)
 		return 0;
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&msrs);
@@ -1824,7 +1925,7 @@ static int kvm_enter_guest_program_msrs(u64 lstar_gpa)
 			     rc);
 		return -EIO;
 	}
-	kvm_backend_ctx()->msrs_primed = true;
+	vcpu->msrs_primed = true;
 	return 0;
 }
 
@@ -1952,19 +2053,31 @@ static void kvm_uml_regs_to_kvm_regs(struct kvm_regs *dst,
  */
 int kvm_enter_guest(struct uml_pt_regs *regs)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
+	/*
+	 * Stage A redesign: address the per-task vCPU + its caches.
+	 * The pre-fix path read kvm_backend_vcpu0_fd() (singleton) and
+	 * the per-vCPU caches (sregs_primed, msrs_primed, cached_cr3
+	 * et al.) lived on the singleton kvm_um struct — meaning the
+	 * cache reflected whichever task ran KVM_RUN last, not the
+	 * task that's about to enter. Per-task handle moves all those
+	 * caches onto storage that this task uniquely owns.
+	 */
+	struct kvm_vcpu_handle *vcpu = kvm_vcpu_for_current();
+	int vcpu_fd;
 	struct kvm_sregs sregs;
 	struct kvm_regs kregs;
 	struct mm_struct *mm;
 	u64 cr3_gpa;
 	int rc;
-	bool dirty_snapshot = false;		/* memo 17 Phase H finding 1 */
+	bool dirty_snapshot = false;		/* DEPRECATED — telemetry only */
 	bool needs_resync_snapshot = false;	/* memo 17 Phase J finding 1b */
+	u64  tlb_gen_snapshot = 0;		/* Stage A.4d: per-vCPU TLB tracking */
 
-	if (vcpu_fd < 0)
+	if (!vcpu || vcpu->fd < 0)
 		return -EIO;
 	if (!regs)
 		return -EINVAL;
+	vcpu_fd = vcpu->fd;
 
 	rc = kvm_ensure_memslot();
 	if (rc < 0)
@@ -1986,7 +2099,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 * and run-time CPUID can manifest as #UD or wrong-result
 	 * silent corruption. Fail loudly instead.
 	 */
-	rc = kvm_ensure_cpuid_done();
+	rc = kvm_ensure_cpuid_done(vcpu);
 	if (rc < 0) {
 		pr_warn_ratelimited("um: kvm enter_guest: cpuid install failed (%d)\n",
 				    rc);
@@ -2319,8 +2432,11 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * for a leaf the walk had already passed. The next entry
 		 * will re-fill those.
 		 */
-		if (needs_resync_snapshot)
-			(void)cmpxchg(&shadow->needs_full_resync, true, false);
+		if (needs_resync_snapshot &&
+		    cmpxchg(&shadow->needs_full_resync, true, false))
+			/* Task #94 transition counter. */
+			WRITE_ONCE(shadow->needs_full_resync_clear_enter_guest,
+				   READ_ONCE(shadow->needs_full_resync_clear_enter_guest) + 1);
 		pr_info_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
 				    filled);
 fill_done:
@@ -2368,45 +2484,38 @@ fill_done:
 	 * F6-followon D83). First entry always programs.
 	 */
 	{
-		struct kvm_um *ctx = kvm_backend_ctx();
+		/*
+		 * Stage A redesign: per-vCPU caches (sregs_primed,
+		 * cached_cr3_gpa, cached_fs_base, cached_gs_base) live on
+		 * the per-task vcpu handle, NOT the singleton kvm_um. The
+		 * skip-fast-path is correct only when the cache reflects
+		 * THIS vCPU's last KVM_SET_SREGS — pre-fix the singleton
+		 * cache reflected whichever task ran KVM_RUN last.
+		 */
 		struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 		u64 cur_fs = regs->gp[HOST_FS_BASE];
 		u64 cur_gs = regs->gp[HOST_GS_BASE];
 
 		/*
-		 * P0-1 (memo 16 review Agent 4 Race E): READ_ONCE on
-		 * shadow->dirty pairs with the WRITE_ONCE + smp_wmb
-		 * in shadow_sync.c.
-		 *
-		 * P0-FIX 2026-04-26 (TLB keystone): the dirty=true path
-		 * below ALSO writes a sentinel CR3 before the real CR3
-		 * to force a guest TLB flush. Same-value CR3 writes do
-		 * not reliably flush TLB, so without the toggle a stale
-		 * VA→PFN entry from a prior mapping could survive across
-		 * munmap+remap and silently return wrong file content.
-		 * See the SREGS-program block below for the mechanism.
-		 *
-		 * Memo 17 Phase A (Race-I keystone consumer): use
-		 * smp_load_acquire on shadow->dirty so it pairs with
-		 * the smp_wmb in shadow_sync.c (direct sync) AND in
-		 * lifecycle.c (fill / map_page / invalidate).
-		 *
-		 * Memo 17 Phase H finding 1: capture the snapshot we
-		 * read here so the post-SREGS clear can use cmpxchg
-		 * (true → false) — a producer that fires BETWEEN this
-		 * read and that clear must NOT have its dirty=true
-		 * clobbered to false. Otherwise a same-mm producer
-		 * (signal-driven sync_pte from another task sharing
-		 * the mm) loses its "shadow has new state" signal,
-		 * leading to stale TLB on the *next* entry's predicate.
-		 * dirty_snapshot is declared at function scope above so
-		 * the post-SREGS path can read it.
+		 * Stage A.4d DEFERRED — using the original per-mm dirty
+		 * boolean as the skip-fast-path gate. The per-vCPU
+		 * tlb_gen/last_flushed_tlb_gen scaffolding is preserved on
+		 * the structs for future re-attempt, but consulted only as
+		 * an additional read here (not yet load-bearing). When the
+		 * Stage B redesign lands and the shadow PT is replaced by
+		 * TDP/EPT, this whole predicate disappears — the right
+		 * place to revisit per-vCPU TLB tracking is once we have
+		 * a CLONE_VM-shared-mm test that actually exposes the
+		 * defect (the cpython-parity gate runs each module in its
+		 * own process so cross-task-same-mm isn't on its
+		 * critical path).
 		 */
+		tlb_gen_snapshot = shadow ? atomic64_read(&shadow->tlb_gen) : 0;
 		dirty_snapshot = shadow ? smp_load_acquire(&shadow->dirty) : false;
-		if (ctx->sregs_primed &&
-		    ctx->cached_cr3_gpa == cr3_gpa &&
-		    ctx->cached_fs_base == cur_fs &&
-		    ctx->cached_gs_base == cur_gs &&
+		if (vcpu->sregs_primed &&
+		    vcpu->cached_cr3_gpa == cr3_gpa &&
+		    vcpu->cached_fs_base == cur_fs &&
+		    vcpu->cached_gs_base == cur_gs &&
 		    shadow && !dirty_snapshot)
 			goto sregs_done;
 	}
@@ -2519,10 +2628,23 @@ fill_done:
 	 * ioctls when nothing changed.
 	 */
 	{
-		struct kvm_um *ctx = kvm_backend_ctx();
-		bool same_cr3 = ctx->sregs_primed &&
-				ctx->cached_cr3_gpa == cr3_gpa;
+		bool same_cr3 = vcpu->sregs_primed &&
+				vcpu->cached_cr3_gpa == cr3_gpa;
 
+		/*
+		 * Stage A.4d note: kept the always-toggle-on-same_cr3 policy
+		 * because narrowing it to (same_cr3 && tlb_stale) regresses
+		 * the gate (~70% pass rate vs 100%). The reason is subtle:
+		 * the consumer's predicate read of tlb_gen happened earlier
+		 * in this function (line ~2540); a producer firing between
+		 * that read and this point would not be observed by tlb_stale
+		 * here, but its leaves would already be installed. The old
+		 * "always toggle" was a coarse defense against that window.
+		 *
+		 * Future cleanup (Stage B): with shadow PT deleted, this
+		 * whole CR4.PGE-toggle disappears — TDP/EPT walks mm->pgd
+		 * directly, no separate "shadow staleness" concept exists.
+		 */
 		if (same_cr3) {
 			struct kvm_sregs s2 = sregs;
 			int trc;
@@ -2543,29 +2665,41 @@ fill_done:
 		return rc;
 	}
 	{
-		struct kvm_um *ctx = kvm_backend_ctx();
 		struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
 
-		ctx->cached_cr3_gpa = cr3_gpa;
-		ctx->cached_fs_base = sregs.fs.base;
-		ctx->cached_gs_base = sregs.gs.base;
-		ctx->sregs_primed   = true;
 		/*
-		 * Memo 17 Phase H finding 1: only consume the dirty flag
-		 * we observed at predicate time. cmpxchg(true → false)
-		 * preserves any concurrent producer's dirty=true that
-		 * fired AFTER our predicate read but BEFORE this clear —
-		 * those producers' shadow updates haven't been seen by
-		 * this SREGS reload's TLB flush, so the next entry must
-		 * still see dirty=true and re-flush.
-		 *
-		 * If dirty_snapshot was false, we took the slow SREGS
-		 * path for some other reason (sregs_primed=false /
-		 * cr3/fs/gs mismatch); the dirty flag was already false,
-		 * no clear needed. The cmpxchg is a no-op in that case.
+		 * Stage A redesign: per-vCPU caches. The pre-fix singleton
+		 * caches on kvm_um produced false hits when the cache
+		 * reflected another task's vCPU programming.
 		 */
-		if (shadow && dirty_snapshot)
-			(void)cmpxchg(&shadow->dirty, true, false);
+		vcpu->cached_cr3_gpa = cr3_gpa;
+		vcpu->cached_fs_base = sregs.fs.base;
+		vcpu->cached_gs_base = sregs.gs.base;
+		vcpu->sregs_primed   = true;
+		/*
+		 * Stage A.4d: this vCPU has just flushed (either via
+		 * CR4.PGE-toggle on same-CR3 entries, or KVM's natural
+		 * CR3-change flush on cross-mm entries). Record the gen
+		 * we observed at predicate time. A producer that fires
+		 * AFTER tlb_gen_snapshot was read has incremented
+		 * shadow->tlb_gen further; the next kvm_enter_guest will
+		 * see the new gen and flush again. No race: each producer
+		 * increments atomically, each consumer compares against
+		 * its own last_flushed_tlb_gen.
+		 */
+		vcpu->last_flushed_tlb_gen = tlb_gen_snapshot;
+
+		/*
+		 * Telemetry only: cmpxchg the legacy dirty boolean to
+		 * keep the dirty_clear_enter_guest counter accurate for
+		 * /proc readers. NOT load-bearing for correctness — the
+		 * tlb_gen tracker above is the authoritative TLB-state
+		 * record under per-task vCPU.
+		 */
+		if (shadow && dirty_snapshot &&
+		    cmpxchg(&shadow->dirty, true, false))
+			WRITE_ONCE(shadow->dirty_clear_enter_guest,
+				   READ_ONCE(shadow->dirty_clear_enter_guest) + 1);
 	}
 
 sregs_done:
@@ -2655,7 +2789,7 @@ sregs_done:
 	 * per kvm_enter_guest on the fallback syscall path.
 	 */
 	if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
-		struct kvm_run *run = kvm_backend_ctx()->run0;
+		struct kvm_run *run = vcpu->run;
 
 		run->s.regs.regs = kregs;
 		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
@@ -2692,7 +2826,7 @@ sregs_done:
 	 * KVM_GET_SREGS ioctl in the #PF handler.
 	 */
 	if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
-		struct kvm_run *run = kvm_backend_ctx()->run0;
+		struct kvm_run *run = vcpu->run;
 
 		run->kvm_valid_regs |= KVM_SYNC_X86_SREGS;
 	}
@@ -2705,7 +2839,8 @@ sregs_done:
 	 * Idempotent on repeat entry — KVM stores the MSRs on
 	 * the vCPU.
 	 */
-	rc = kvm_enter_guest_program_msrs(kvm_bootstrap_va +
+	rc = kvm_enter_guest_program_msrs(vcpu,
+					  kvm_bootstrap_va +
 					  KVM_BOOTSTRAP_LSTAR_OFFSET);
 	if (rc < 0)
 		return rc;
@@ -2718,7 +2853,7 @@ sregs_done:
 	 * base; user's MSR_GS_BASE stays whatever sub-commit
 	 * #5c set for them.
 	 */
-	rc = kvm_enter_guest_program_kernel_gs_base(kvm_gadget_state_va());
+	rc = kvm_enter_guest_program_kernel_gs_base(vcpu, kvm_gadget_state_va());
 	if (rc < 0)
 		return rc;
 
@@ -3229,31 +3364,26 @@ skip_dispatch:
 		PT_SYSCALL_NR(regs->gp) = -1;
 
 	/*
-	 * Push the syscall return (now in regs->gp[HOST_AX])
-	 * back into the vCPU state so the next KVM_RUN (via
-	 * kvm_enter_guest's bootstrap IRETQ, which picks up
-	 * RAX from kregs) delivers the right return value to
-	 * ring-3. Failure here leaves handle_syscall's work
-	 * stranded — guest resumes with stale RAX, likely
-	 * triggering an infinite loop in the glibc error-
-	 * check path. Audit A4: fatal rather than silent.
+	 * Task #93: DO NOT push regs back into the singleton vCPU
+	 * sync_regs / KVM_SET_REGS here.
+	 *
+	 * regs->gp[] (including HOST_AX = syscall return) is the
+	 * authoritative post-syscall state. The next kvm_enter_guest
+	 * call rebuilds the vCPU regs from regs->gp[] via
+	 * kvm_uml_regs_to_kvm_regs (line 2632) and writes them to the
+	 * sync_regs / KVM_SET_REGS THERE, inside the controlled
+	 * block_signals window.
+	 *
+	 * The pre-fix late write here ran AFTER unblock_signals (we
+	 * arrive here from the KVM_EXIT_IO syscall dispatch case in
+	 * kvm_run_userspace), so it touched the singleton vCPU mmap
+	 * with signals enabled — fragile and racy with any UML task
+	 * that grabs the singleton vCPU before this task's
+	 * interrupt_end / next entry. Removed; kregs argument kept
+	 * (unused) for ABI compat with the call sites.
 	 */
-	kvm_uml_regs_to_kvm_regs(kregs, regs);
-	/*
-	 * Perf-lever #2: when KVM_SYNC_X86_REGS is live, hand the
-	 * post-syscall kregs back to KVM through the mmap'd run
-	 * struct rather than a KVM_SET_REGS ioctl.
-	 */
-	if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
-		struct kvm_run *run = kvm_backend_ctx()->run0;
-
-		run->s.regs.regs = *kregs;
-		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
-	} else if (os_ioctl_generic(vcpu_fd, KVM_SET_REGS,
-				    (unsigned long)kregs) < 0) {
-		pr_warn_ratelimited("um: kvm: post-syscall KVM_SET_REGS failed; killing guest task\n");
-		fatal_sigsegv();
-	}
+	(void)kregs;
+	(void)vcpu_fd;
 }
 
 /*
@@ -3267,13 +3397,41 @@ extern unsigned int unscheduled_userspace_iterations;
 
 void kvm_run_userspace(struct uml_pt_regs *regs)
 {
-	int vcpu_fd = kvm_backend_vcpu0_fd();
-	struct kvm_run *run = kvm_backend_ctx()->run0;
+	/*
+	 * Stage A redesign: every UML task owns its own vCPU + kvm_run
+	 * mmap. kvm_vcpu_for_current() lazy-allocates on first use and
+	 * pins for the task's lifetime; the snapshot-before-unblock
+	 * race the singleton vcpu0_fd / run0 produced is structurally
+	 * impossible because no other task can write THIS task's vCPU.
+	 *
+	 * Per-task vcpu->run is single-writer; the pre-fix "snapshot
+	 * exit_reason / kregs / IST 40 bytes before unblock_signals"
+	 * workaround (commit b516bee62eb2 + task #89's extension) is
+	 * therefore obsolete. EINTR returns from KVM_RUN normally on
+	 * SIGALRM (UML's timer tick) and the next iteration re-enters
+	 * THIS task's vCPU after interrupt_end / sched.
+	 */
+	struct kvm_vcpu_handle *vcpu = kvm_vcpu_for_current();
+	int vcpu_fd;
+	struct kvm_run *run;
 	struct kvm_regs kregs;
 	int rc;
+	/*
+	 * exit_sregs / sregs_valid are function-scoped so the EINTR path
+	 * at out_read_regs can read them; cheaper than a fresh
+	 * KVM_GET_SREGS on the EINTR-and-then-fall-through path.
+	 */
+	struct kvm_sregs exit_sregs;
+	bool sregs_valid = false;
 
+	if (!vcpu) {
+		panic("um: kvm run_userspace: per-task vCPU alloc failed for pid=%d",
+		      current ? current->pid : -1);
+	}
+	vcpu_fd = vcpu->fd;
+	run = vcpu->run;
 	if (vcpu_fd < 0 || !run) {
-		panic("um: kvm run_userspace: vCPU not initialized (vcpu_fd=%d run=%p)",
+		panic("um: kvm run_userspace: per-task vCPU not initialised (vcpu_fd=%d run=%p)",
 		      vcpu_fd, run);
 	}
 
@@ -3358,23 +3516,23 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	}
 
 	/*
-	 * Memo 18 Phase 2.4: signal-block from kvm_enter_guest's IRETQ-
-	 * frame setup through KVM_RUN entry. With per-mm IRETQ frame
-	 * (Phase 2.1-2.3) cross-mm contamination is structurally fixed,
-	 * but threads sharing an mm still share the per-mm IRETQ-frame
-	 * page. Signal-driven preemption of task A between its frame
-	 * write and KVM_RUN can let task B (same mm) overwrite the
-	 * frame; A then iretq's into B's user RIP/SP/RFLAGS.
+	 * Two-layer signal model:
+	 *   1. Host sigmask: SIGALRM is left unblocked (we do NOT install
+	 *      KVM_SET_SIGNAL_MASK — see SIGNAL HANDLING NOTE above
+	 *      kvm_vcpu_for_current). SIGALRM during KVM_RUN returns
+	 *      -EINTR → guest preempted, scheduler runs after.
+	 *   2. UML software signal flag: block_signals()/unblock_signals()
+	 *      defers UML's handler work (e.g. signal delivery to the
+	 *      guest task, schedule()) until we have copied exit state
+	 *      into locals. Without this, the UML signal handler could
+	 *      fire mid-kvm_enter_guest's ioctl sequence and observe
+	 *      partially-programmed vCPU state.
 	 *
-	 * Closes the same-mm cross-task race within the per-mm scope.
-	 * (For full per-task isolation we'd need per-task IRETQ frames
-	 * mapped per-task in the shadow PT — Phase 5 / structural.)
-	 *
-	 * Phase F (memo 17, pre-Phase-2) attempted the same fix but
-	 * was atop the cross-mm contamination — the dominant residual
-	 * at that point — so showed no measurable improvement. With
-	 * cross-mm fixed, signal-blocking on same-mm should now move
-	 * the needle.
+	 * The pre-Stage-A motivation for this bracket was defending the
+	 * singleton vcpu0's run mmap from cross-task clobber. Per-task
+	 * vCPU makes that defense moot, but the local-state-consistency
+	 * defense remains valid — kvm_enter_guest is not idempotent under
+	 * mid-flight signal-handler work.
 	 */
 	block_signals();
 	rc = kvm_enter_guest(regs);
@@ -3415,52 +3573,50 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 	 * syscalls never VMEXIT so they're unaffected.
 	 */
 	{
-		struct kvm_sregs exit_sregs;
-		bool sregs_valid = false;
 		/*
-		 * Memo 18 P0-2 fix 2026-04-26: SNAPSHOT everything we
-		 * need from the singleton kvm_run mmap and the singleton
-		 * IST stack BEFORE calling unblock_signals(). Otherwise
-		 * unblock_signals can synchronously deliver SIGALRM →
-		 * timer handler → schedule() → another UML task gets the
-		 * singleton vCPU/run/IST page, runs its own KVM_RUN, and
-		 * overwrites the exit state. When the original task
-		 * resumes here, run->exit_reason / run->s.regs.* / IST
-		 * frame all reflect the OTHER task's exit. Symptoms: the
-		 * intermittent ld-linux NULL deref where ld-linux's
-		 * relro-protect loop revisits the same link_map after a
-		 * 50-100us gap (the wrong-task-state decode looks like a
-		 * loop-state corruption to glibc).
-		 *
-		 * Snapshot order:
-		 *   exit_reason_snap, kregs, exit_sregs, io_*, mmio_*,
-		 *   ist_pf_error/rip (for #PF case)
-		 * THEN unblock_signals.
+		 * Read exit state into locals once. Per-task vCPU means
+		 * vcpu->run is single-writer (only this task's KVM_RUN
+		 * writes it), so there is no race to defend against — the
+		 * locals are just cache-friendly local copies for the
+		 * dispatch switch below. The pre-Stage-A "snapshot before
+		 * unblock_signals" framing has been removed (commit
+		 * b516bee62eb2 + task #89's variant); per-task vCPU makes
+		 * those workarounds structurally moot.
 		 */
 		u32 exit_reason_snap = 0;
 		u32 io_port_snap = 0;
 		u64 mmio_phys_addr_snap = 0;
 		u32 mmio_len_snap = 0;
 		u8 mmio_is_write_snap = 0;
-		u8 ist_snap[40] = {0};	/* CPU pushes 5 u64s for IRETQ +
-					 * #PF error code, plenty */
+		u64 fail_entry_hw_reason_snap = 0;
+		u32 internal_suberror_snap = 0;
+
+		sregs_valid = false;
 
 		rc = os_ioctl_generic(vcpu_fd, KVM_RUN, 0);
 
-		/* SNAPSHOT BEFORE unblock_signals — see comment above */
-		if (rc >= 0) {
+		if (rc >= 0 || rc == -EINTR) {
 			exit_reason_snap = run->exit_reason;
 			io_port_snap = run->io.port;
 			mmio_phys_addr_snap = run->mmio.phys_addr;
 			mmio_len_snap = run->mmio.len;
 			mmio_is_write_snap = run->mmio.is_write;
+			fail_entry_hw_reason_snap =
+				run->fail_entry.hardware_entry_failure_reason;
+			internal_suberror_snap = run->internal.suberror;
 			if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
 				kregs = run->s.regs.regs;
 			} else {
 				int gr = os_ioctl_generic(vcpu_fd,
 						KVM_GET_REGS,
 						(unsigned long)&kregs);
-				if (gr < 0)
+				/*
+				 * On EINTR, KVM_GET_REGS may race the
+				 * teardown of the interrupted KVM_RUN; treat
+				 * failure as "kregs stale" rather than panic.
+				 * On rc>=0 the read must succeed.
+				 */
+				if (gr < 0 && rc >= 0)
 					panic("um: kvm run_userspace: KVM_GET_REGS failed (%d)", gr);
 			}
 			if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_SREGS) {
@@ -3472,27 +3628,12 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			}
 			if (sregs_valid)
 				regs->is_user = (exit_sregs.cs.selector & 3) != 0;
-
-			/* Snapshot IST stack contents in case this is a
-			 * #PF exit. The IST stack is singleton — another
-			 * task's KVM_RUN can overwrite it post-unblock. */
-			{
-				unsigned long ist_off =
-					(unsigned long)(kregs.rsp -
-					(kvm_bootstrap_va + 3 * PAGE_SIZE));
-				if (ist_off < PAGE_SIZE - sizeof(ist_snap)) {
-					u8 *src = (u8 *)kvm_bootstrap_page_stack
-						+ ist_off;
-					memcpy(ist_snap, src, sizeof(ist_snap));
-				}
-			}
 		}
 
 		/*
-		 * NOW it's safe to unblock signals — the exit state
-		 * (regs, sregs, exit_reason, io.port, IST snapshot) has
-		 * been copied into local variables that no other task
-		 * can touch.
+		 * Exit state copied to locals — safe to let UML's signal
+		 * handler run. unblock_signals() drains any deferred work
+		 * (signal delivery, schedule()) that fired during enter+RUN.
 		 */
 		unblock_signals();
 
@@ -3586,7 +3727,6 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * the guest task so the loop doesn't spin
 				 * on a permanently-unresolvable fault.
 				 */
-				struct kvm_sregs dump_sregs;
 				unsigned long cr2;
 				bool touched = false;
 				u64 fault_rip;
@@ -3597,20 +3737,18 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				u8 *ist;
 
 				/*
-				 * P0-2 fix 2026-04-26: use exit_sregs
-				 * snapshot captured BEFORE unblock_signals.
-				 * Reading run->s.regs.sregs.cr2 here would
-				 * race with another task's KVM_RUN clobbering
-				 * the singleton sync_regs.
+				 * Per-task vCPU: exit_sregs was read once into
+				 * a local from this task's vcpu->run mmap (or
+				 * KVM_GET_SREGS on this task's vcpu_fd) — no
+				 * cross-task race. sregs_valid=false means the
+				 * earlier ioctl returned an error; that's a hard
+				 * KVM failure worth panic-ing over since cr2 is
+				 * required for #PF dispatch.
 				 */
 				if (sregs_valid) {
 					cr2 = exit_sregs.cr2;
-				} else if (os_ioctl_generic(vcpu_fd,
-						KVM_GET_SREGS,
-						(unsigned long)&dump_sregs) >= 0) {
-					cr2 = dump_sregs.cr2;
 				} else {
-					panic("um: kvm PF handler: KVM_GET_SREGS failed");
+					panic("um: kvm PF handler: KVM_GET_SREGS failed; cr2 unavailable");
 				}
 
 				/*
@@ -3642,14 +3780,14 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					fatal_sigsegv();
 				}
 				/*
-				 * P0-2 fix 2026-04-26: use the IST snapshot
-				 * captured BEFORE unblock_signals (see top
-				 * of this block). The live kvm_bootstrap_
-				 * page_stack would be stale if another task
-				 * KVM_RUN'd in between.
+				 * Per-task vCPU: read IST stack page directly
+				 * from its host VA. No other task is mid-KVM_RUN
+				 * on this vCPU, so the IRETQ frame the CPU pushed
+				 * at #PF entry is still here. (When SMP UML lands,
+				 * IST stacks become per-vCPU via Stage B's
+				 * kernel-half PGD.)
 				 */
-				ist = ist_snap;
-				(void)kvm_bootstrap_page_stack;	/* unused now */
+				ist = (u8 *)kvm_bootstrap_page_stack + ist_off;
 				fault_error_code = *(u64 *)(ist + 0);
 				fault_was_write  = (fault_error_code >> 1) & 1;
 				fault_rip = *(u64 *)(ist + 8);
@@ -3897,11 +4035,29 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					 * narrows the search space).
 					 */
 					if (current->active_mm &&
-					    current->active_mm->pgd)
+					    current->active_mm->pgd) {
 						(void)kvm_shadow_audit_va(
 							(u64)cr2,
 							current->active_mm->pgd,
 							"pf_unrecoverable");
+						/*
+						 * Task #91: also dump
+						 * three-way content for cr2.
+						 * If A==B but C diverges, the
+						 * os_map_memory mapping for
+						 * this user VA is wrong (host-
+						 * VA aliasing). If A != B,
+						 * the shadow GPA points at a
+						 * different physical frame
+						 * than the UML PTE — distinct
+						 * bug class.
+						 */
+						(void)kvm_shadow_audit_content_va(
+							(u64)cr2,
+							current->active_mm->pgd,
+							16,
+							"pf_unrecoverable_content");
+					}
 
 					/*
 					 * Memo 15 #6: dump direct-sync
@@ -4095,26 +4251,32 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 *
 				 * IST frame layout for #GP: same as #PF
 				 * (CPU-pushed error_code at +0, RIP at +8,
-				 * CS +16, RFLAGS +24, RSP +32, SS +40). We
-				 * extract them for the diagnostic.
+				 * CS +16, RFLAGS +24, RSP +32, SS +40).
+				 *
+				 * Per-task vCPU: read IST stack page directly
+				 * from its host VA — no other task is mid-
+				 * KVM_RUN on this vCPU to overwrite it.
 				 */
 				struct faultinfo *fi = UPT_FAULTINFO(regs);
-				unsigned long ist_off;
 				u64 gp_user_rip = 0, gp_user_rsp = 0;
 				u64 gp_user_rflags = 0;
 				u64 gp_error_code = 0;
+				unsigned long gp_ist_off;
+				u8 *gp_ist;
 
-				ist_off = (unsigned long)(kregs.rsp -
-							  (kvm_bootstrap_va +
-							   3 * PAGE_SIZE));
-				if (ist_off < PAGE_SIZE) {
-					u8 *ist = (u8 *)kvm_bootstrap_page_stack
-						+ ist_off;
-					gp_error_code  = *(u64 *)(ist + 0);
-					gp_user_rip    = *(u64 *)(ist + 8);
-					gp_user_rflags = *(u64 *)(ist + 24);
-					gp_user_rsp    = *(u64 *)(ist + 32);
+				gp_ist_off = (unsigned long)(kregs.rsp -
+					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+				if (gp_ist_off >= PAGE_SIZE) {
+					pr_warn_ratelimited("um: kvm #GP: IST out of range (rsp=0x%llx)\n",
+							    (unsigned long long)kregs.rsp);
+					fatal_sigsegv();
+					goto out_read_regs;
 				}
+				gp_ist = (u8 *)kvm_bootstrap_page_stack + gp_ist_off;
+				gp_error_code  = *(u64 *)(gp_ist + 0);
+				gp_user_rip    = *(u64 *)(gp_ist + 8);
+				gp_user_rflags = *(u64 *)(gp_ist + 24);
+				gp_user_rsp    = *(u64 *)(gp_ist + 32);
 				pr_warn_ratelimited("um: kvm #GP: ec=0x%llx rip=0x%llx rsp=0x%llx rflags=0x%llx (delivering SIGSEGV)\n",
 						    (unsigned long long)gp_error_code,
 						    (unsigned long long)gp_user_rip,
@@ -4153,27 +4315,33 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * task: a #DF during #PF means the IDT
 				 * dispatch itself is broken, which is a
 				 * host-kernel bug, not a user fault.
+				 *
+				 * Per-task vCPU: CR2 comes from this task's
+				 * exit_sregs (read once from this task's
+				 * vcpu->run mmap or vcpu_fd); IST frame from
+				 * this task's bootstrap stack page (no cross-
+				 * task overwriter).
 				 */
-				struct kvm_sregs df_sregs;
 				unsigned long df_cr2 = 0;
 				u64 df_user_rip = 0, df_user_rsp = 0;
 				u64 df_user_rflags = 0;
-				unsigned long ist_off;
+				unsigned long df_ist_off;
+				u8 *df_ist;
 
-				if (os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-						     (unsigned long)&df_sregs) >= 0)
-					df_cr2 = df_sregs.cr2;
+				if (sregs_valid)
+					df_cr2 = exit_sregs.cr2;
 
-				ist_off = (unsigned long)(kregs.rsp -
-							  (kvm_bootstrap_va +
-							   3 * PAGE_SIZE));
-				if (ist_off < PAGE_SIZE) {
-					u8 *ist = (u8 *)kvm_bootstrap_page_stack
-						+ ist_off;
-					df_user_rip    = *(u64 *)(ist + 8);
-					df_user_rflags = *(u64 *)(ist + 24);
-					df_user_rsp    = *(u64 *)(ist + 32);
+				df_ist_off = (unsigned long)(kregs.rsp -
+					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+				if (df_ist_off >= PAGE_SIZE) {
+					panic("um: kvm #DF: IST out of range (rsp=0x%llx, cr2=0x%lx)",
+					      (unsigned long long)kregs.rsp,
+					      df_cr2);
 				}
+				df_ist = (u8 *)kvm_bootstrap_page_stack + df_ist_off;
+				df_user_rip    = *(u64 *)(df_ist + 8);
+				df_user_rflags = *(u64 *)(df_ist + 24);
+				df_user_rsp    = *(u64 *)(df_ist + 32);
 				panic("um: kvm #DF: cr2=0x%lx fault_rip=0x%llx fault_rsp=0x%llx fault_rflags=0x%llx kregs_rsp=0x%llx (double-fault: #PF handler unreachable; check shadow PT for IST stack + IDT page)\n",
 				      df_cr2,
 				      (unsigned long long)df_user_rip,
@@ -4315,23 +4483,22 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 		case KVM_EXIT_FAIL_ENTRY:
 		case KVM_EXIT_INTERNAL_ERROR:
 		case KVM_EXIT_EXCEPTION: {
-			struct kvm_sregs dump_sregs;
-			int dump_rc;
 			u64 guest_cr3 = 0, guest_rip = 0;
 
 			/*
-			 * Best-effort state snapshot on the failing
-			 * vCPU. Helps diagnose bring-up issues
-			 * (triple-fault on first instruction,
-			 * unmapped CR3, etc.) from a single failing
-			 * boot rather than requiring a kgdb dance.
-			 * Unused by normal operation since the
-			 * calling path already panics.
+			 * State snapshot on the failing vCPU for the
+			 * unrecoverable-exit panic. Task #89: source from
+			 * exit_sregs (captured pre-unblock) rather than a
+			 * fresh KVM_GET_SREGS — the live ioctl would race
+			 * any concurrent UML task that grabbed the singleton
+			 * vCPU. dump_rc tracks "do we have valid sregs to
+			 * print" so the format-string fallback for the cs /
+			 * cr0 / etc fields stays the same shape as before.
 			 */
-			dump_rc = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-						   (unsigned long)&dump_sregs);
-			if (dump_rc >= 0)
-				guest_cr3 = dump_sregs.cr3;
+			int dump_rc = sregs_valid ? 0 : -ENXIO;
+
+			if (sregs_valid)
+				guest_cr3 = exit_sregs.cr3;
 			guest_rip = kregs.rip;
 
 			pr_err("um: kvm run_userspace: unrecoverable exit %u (%s)\n",
@@ -4340,16 +4507,16 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			pr_err("um: kvm: guest RIP=0x%llx CR3=0x%llx CS=0x%x CPL=%u is_user=%d\n",
 			       (unsigned long long)guest_rip,
 			       (unsigned long long)guest_cr3,
-			       dump_rc >= 0 ? dump_sregs.cs.selector : 0,
-			       dump_rc >= 0 ? dump_sregs.cs.dpl : 0,
+			       dump_rc >= 0 ? exit_sregs.cs.selector : 0,
+			       dump_rc >= 0 ? exit_sregs.cs.dpl : 0,
 			       regs->is_user);
 			if (dump_rc >= 0) {
 				pr_err("um: kvm: CR0=0x%llx CR4=0x%llx EFER=0x%llx GDTR base=0x%llx limit=0x%x\n",
-				       (unsigned long long)dump_sregs.cr0,
-				       (unsigned long long)dump_sregs.cr4,
-				       (unsigned long long)dump_sregs.efer,
-				       (unsigned long long)dump_sregs.gdt.base,
-				       dump_sregs.gdt.limit);
+				       (unsigned long long)exit_sregs.cr0,
+				       (unsigned long long)exit_sregs.cr4,
+				       (unsigned long long)exit_sregs.efer,
+				       (unsigned long long)exit_sregs.gdt.base,
+				       exit_sregs.gdt.limit);
 			}
 			pr_err("um: kvm: bootstrap page va=0x%llx gpa=0x%llx lstar=0x%llx sysret=0x%llx uml_physmem=0x%lx\n",
 			       (unsigned long long)kvm_bootstrap_va,
@@ -4390,7 +4557,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					  guest_rip },
 					{ "cr2",
 					  dump_rc >= 0 ?
-					  dump_sregs.cr2 : 0 },
+					  exit_sregs.cr2 : 0 },
 				};
 
 				if (!(cr3 && cr3 < physmem_size)) {
@@ -4463,6 +4630,16 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			 * SHUTDOWN, which discriminates "guest faulted
 			 * and we never delivered" from "guest delivered
 			 * but cascaded".
+			 *
+			 * Task #89 caveat: this ioctl runs AFTER unblock_
+			 * signals and so is racy with concurrent UML tasks
+			 * grabbing the singleton vCPU. Tolerated as best-
+			 * effort: the snapshotted exit_reason_snap / kregs /
+			 * exit_sregs context above is the load-bearing
+			 * diagnostic; vcpu_events is a nice-to-have. Adding
+			 * KVM_GET_VCPU_EVENTS to the per-exit snapshot would
+			 * burn one ioctl per KVM_RUN on the hot path; not
+			 * worth it for a panic-only print.
 			 */
 			{
 				struct kvm_vcpu_events ev;
@@ -4480,10 +4657,15 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				}
 			}
 			if (exit_reason_snap == KVM_EXIT_FAIL_ENTRY) {
-				u64 hw = run->fail_entry.hardware_entry_failure_reason;
-
+				/*
+				 * Task #89: read from snapshot, not run->.
+				 * fail_entry shares the kvm_run union with io
+				 * and mmio, so a concurrent KVM_RUN on the
+				 * singleton vCPU could overwrite it after our
+				 * unblock_signals.
+				 */
 				pr_err("um: kvm: FAIL_ENTRY hw_reason=0x%llx\n",
-				       (unsigned long long)hw);
+				       (unsigned long long)fail_entry_hw_reason_snap);
 			}
 			/*
 			 * Dump 16 bytes of guest instruction bytes at the
@@ -4517,7 +4699,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 			}
 			if (exit_reason_snap == KVM_EXIT_INTERNAL_ERROR)
 				pr_err("um: kvm: INTERNAL_ERROR suberror=%u\n",
-				       run->internal.suberror);
+				       internal_suberror_snap);
 			panic("um: kvm run_userspace: unrecoverable exit %u (%s)",
 			      exit_reason_snap,
 			      kvm_exit_reason_str(exit_reason_snap));
@@ -4532,40 +4714,33 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 
 out_read_regs:
 	/*
-	 * Host-side INTR / EINTR path: kregs may be stale (KVM_RUN
-	 * returned before a clean KVM_GET_REGS ran). Pull fresh
-	 * guest state so interrupt_end() + the next kvm_enter_guest
-	 * operate on accurate regs.
+	 * EINTR path. Per-task vCPU: kregs / exit_sregs / sregs_valid
+	 * were filled directly from this task's vcpu->run mmap (or via
+	 * KVM_GET_REGS/SREGS on this task's vcpu_fd) — no cross-task
+	 * race. EINTR means a host signal (typically SIGALRM, UML's
+	 * timer-tick driver) interrupted KVM_RUN before producing an
+	 * exit_reason worth dispatching; the next iteration re-enters
+	 * THIS task's vCPU after interrupt_end() drains scheduler work.
 	 */
 	if (rc == -EINTR) {
-		struct kvm_sregs sregs;
-		bool sregs_ok;
 		bool in_kernel = false;
 
-		if (kvm_backend_ctx()->sync_regs_caps & KVM_SYNC_X86_REGS) {
-			kregs = run->s.regs.regs;
-			rc = 0;
-		} else {
-			rc = os_ioctl_generic(vcpu_fd, KVM_GET_REGS,
-					      (unsigned long)&kregs);
-		}
 		/*
-		 * Audit A2: derive is_user from CPL, so a host-signal
-		 * interrupt mid-ring-0 (e.g. inside the LSTAR trampoline,
-		 * the bootstrap IRETQ gadget, or the #PF handler) doesn't
-		 * mask as a user-mode exit. Best-effort — if KVM_GET_SREGS
-		 * fails, fall back to user-mode since host signals during
-		 * normal workload almost always fire while the guest is
-		 * in ring-3.
+		 * Audit A2: derive is_user from CPL via exit_sregs.cs.selector.
+		 * A host-signal interrupt mid-ring-0 (LSTAR trampoline,
+		 * bootstrap IRETQ gadget, #PF handler) must not mask as a
+		 * user-mode exit. If sregs_valid is false (KVM_GET_SREGS
+		 * earlier failed), fall back to user-mode since host signals
+		 * during normal workload almost always fire while the guest
+		 * is in ring-3.
 		 */
-		sregs_ok = os_ioctl_generic(vcpu_fd, KVM_GET_SREGS,
-					    (unsigned long)&sregs) >= 0;
-		if (sregs_ok) {
-			regs->is_user = (sregs.cs.selector & 3) != 0;
+		if (sregs_valid) {
+			regs->is_user = (exit_sregs.cs.selector & 3) != 0;
 			in_kernel = !regs->is_user;
 		} else {
 			regs->is_user = 1;
 		}
+		rc = 0;
 		/*
 		 * Task #272: when the EINTR fired with the guest at CPL=0,
 		 * we're mid-bootstrap-transition (IRETQ gadget popping the
@@ -4586,7 +4761,7 @@ out_read_regs:
 		 * reflect user state and we want to preserve them through
 		 * to the next entry; do the marshal.
 		 */
-		if (rc >= 0 && !in_kernel)
+		if (!in_kernel)
 			kvm_regs_to_uml_regs(regs, &kregs);
 	}
 

@@ -179,15 +179,37 @@ int kvm_init(const struct um_backend_args *args)
 	 */
 
 	/*
-	 * D-04a: create the first vCPU now. For ncpus=1 UML (the
-	 * default) this is the only vCPU; SMP moves creation to
-	 * thread_start_idle per 04-ring-transition.md. The run
-	 * structure is mmap'd from the vcpu_fd — KVM_GET_VCPU_MMAP_
-	 * SIZE reports the size first. On error, close everything
-	 * and fall back.
+	 * Stage A.7: vcpu0 is now created ONLY for the !INTEGRATED
+	 * harness/test path (arch/um/backend/kvm/harness.c). Under
+	 * INTEGRATED, every UML task allocates its own per-task vCPU
+	 * via kvm_vcpu_handle_alloc on first kvm_run_userspace; the
+	 * vcpu0 singleton is dead weight and was the source of the
+	 * "1 vCPU shared across tasks violates KVM's contract" bug
+	 * class that drove the 03-architecture-review-2026-04-27
+	 * redesign.
+	 *
+	 * Snapshot/record paths used to fall back to vcpu0_fd — Stage
+	 * A.6 migrated them to current->thread.arch.kvm.vcpu, returning
+	 * -ENODEV when no current vCPU exists (acceptable on early-boot
+	 * KUnit). KVM_GET_VCPU_MMAP_SIZE is still needed at init time
+	 * for kvm_vcpu_handle_alloc to know the mmap size.
 	 */
 	{
-		int vcpu_fd, mmap_size;
+		int mmap_size = os_ioctl_generic(kfd, KVM_GET_VCPU_MMAP_SIZE, 0);
+
+		if (mmap_size <= 0) {
+			pr_err("um: kvm init: KVM_GET_VCPU_MMAP_SIZE failed (%d)\n",
+			       mmap_size);
+			os_close_file(vmfd);
+			os_close_file(kfd);
+			return mmap_size ? mmap_size : -EIO;
+		}
+		kvm_ctx.run_size = mmap_size;
+	}
+
+#ifndef CONFIG_UM_BACKEND_KVM_INTEGRATED
+	{
+		int vcpu_fd;
 		void *run;
 
 		vcpu_fd = os_ioctl_generic(vmfd, KVM_CREATE_VCPU, 0);
@@ -199,20 +221,10 @@ int kvm_init(const struct um_backend_args *args)
 			return vcpu_fd;
 		}
 
-		mmap_size = os_ioctl_generic(kfd, KVM_GET_VCPU_MMAP_SIZE, 0);
-		if (mmap_size <= 0) {
-			pr_err("um: kvm init: KVM_GET_VCPU_MMAP_SIZE failed (%d)\n",
-			       mmap_size);
-			os_close_file(vcpu_fd);
-			os_close_file(vmfd);
-			os_close_file(kfd);
-			return mmap_size ? mmap_size : -EIO;
-		}
-
-		run = os_mmap_rw_shared(vcpu_fd, mmap_size);
+		run = os_mmap_rw_shared(vcpu_fd, kvm_ctx.run_size);
 		if (!run) {
-			pr_err("um: kvm init: mmap of kvm_run (size %d) failed\n",
-			       mmap_size);
+			pr_err("um: kvm init: mmap of kvm_run (size %zu) failed\n",
+			       kvm_ctx.run_size);
 			os_close_file(vcpu_fd);
 			os_close_file(vmfd);
 			os_close_file(kfd);
@@ -221,8 +233,8 @@ int kvm_init(const struct um_backend_args *args)
 
 		kvm_ctx.vcpu0_fd = vcpu_fd;
 		kvm_ctx.run0     = run;
-		kvm_ctx.run_size = mmap_size;
 	}
+#endif
 
 	kvm_ctx.kvm_fd = kfd;
 	kvm_ctx.vm_fd  = vmfd;
@@ -284,6 +296,17 @@ int kvm_init(const struct um_backend_args *args)
 		(unsigned long long)kvm_ctx.sync_regs_caps,
 		kvm_ctx.pmu_caps,
 		kvm_ctx.pmu_event_filter_supported ? "yes" : "no");
+
+	/*
+	 * Stage A: a no-op host handler for KVM_UM_KICK_SIGNAL is registered
+	 * lazily at first kvm_vcpu_handle_alloc (deferred from here because
+	 * sigaction during init_backend fights UML's signal-setup ordering).
+	 * The kick signal is unused today — KVM_SET_SIGNAL_MASK is NOT
+	 * installed (see SIGNAL HANDLING NOTE in thread.c) so SIGALRM
+	 * preempts KVM_RUN naturally — but the handler is in place for
+	 * future SMP UML where one host CPU will explicitly evict another
+	 * host CPU's vCPU via pthread_kill(KVM_UM_KICK_SIGNAL).
+	 */
 
 	/*
 	 * D-05 nested-virt detection (memo 08 sub-commit #7, minimal
@@ -360,16 +383,18 @@ int kvm_init(const struct um_backend_args *args)
  * dynamically-linked binary on a recent Ubuntu / Fedora host) get
  * the host's feature set on success.
  */
-int kvm_ensure_cpuid_done(void)
+int kvm_ensure_cpuid_done(struct kvm_vcpu_handle *vcpu)
 {
 	const u32 max_entries = 256;
 	size_t buf_sz;
 	struct kvm_cpuid2 *cpuid;
 	int rc;
 
-	if (kvm_ctx.cpuid_done)
+	if (!vcpu || vcpu->fd < 0)
+		return -ENODEV;
+	if (vcpu->cpuid_done)
 		return 0;
-	if (kvm_ctx.kvm_fd < 0 || kvm_ctx.vcpu0_fd < 0)
+	if (kvm_ctx.kvm_fd < 0)
 		return -ENODEV;
 
 	buf_sz = sizeof(struct kvm_cpuid2) +
@@ -527,7 +552,7 @@ int kvm_ensure_cpuid_done(void)
 		}
 	}
 
-	rc = os_ioctl_generic(kvm_ctx.vcpu0_fd, KVM_SET_CPUID2,
+	rc = os_ioctl_generic(vcpu->fd, KVM_SET_CPUID2,
 			      (unsigned long)cpuid);
 	if (rc < 0) {
 		pr_warn_once("um: kvm: KVM_SET_CPUID2 failed (%d); using KVM-default CPUID\n",
@@ -535,7 +560,7 @@ int kvm_ensure_cpuid_done(void)
 		goto out_free;
 	}
 
-	kvm_ctx.cpuid_done = true;
+	vcpu->cpuid_done = true;
 	pr_info("um: kvm: CPUID passthrough installed (%u entries; RDRAND/RDSEED + XSAVE/AVX/AVX2/AVX512 family + F16C masked — guest CR4.OSXSAVE=0 + XCR0 unset would otherwise trip XSAVE-dependent code paths in libcrypto/glibc)\n",
 		cpuid->nent);
 
@@ -688,6 +713,12 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 	shadow->pgd_page = page;
 	shadow->pgd      = page_address(page);
 	shadow->pgd_gpa  = (u64)__pa(shadow->pgd);
+	/*
+	 * Stage A.4d: tlb_gen starts at 1. Every fresh vCPU has
+	 * last_flushed_tlb_gen=0 from kzalloc, so 1 vs 0 always mismatches
+	 * and the first kvm_enter_guest flushes its TLB.
+	 */
+	atomic64_set(&shadow->tlb_gen, 1);
 	shadow->dirty    = true;
 	shadow->synced   = false;
 	shadow->synced_pgd_va = 0;
@@ -717,26 +748,18 @@ EXPORT_SYMBOL_GPL(kvm_shadow_mm_alloc);
 
 void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow)
 {
-	struct kvm_um *ctx = kvm_backend_ctx();
-
 	if (!shadow)
 		return;
 
 	/*
-	 * #274 / T8: invalidate the SREGS cache if this shadow's
-	 * pgd_gpa matches the cached CR3 we last programmed into the
-	 * vCPU. The kvm_enter_guest fast-path skips KVM_SET_SREGS
-	 * when (cached_cr3_gpa == new_cr3_gpa && !shadow->dirty); if
-	 * we free the underlying PGD page without invalidating that
-	 * cache, the next entry may reuse the freed pages as the
-	 * vCPU's CR3 source — KVM walks the (now-freed) shadow tree
-	 * during shadow-page-table maintenance and reads garbage.
-	 *
-	 * Setting cached_cr3_gpa = 0 forces the next entry to issue
-	 * KVM_SET_SREGS with the new mm's pgd_gpa.
+	 * Stage A.4c: removed the singleton ctx->cached_cr3_gpa
+	 * invalidation here. Per-task vCPU now keeps cached_cr3_gpa
+	 * on each task's struct kvm_vcpu_handle. By the time a
+	 * shadow_mm is freed (mm teardown), all tasks owning that mm
+	 * have exited via exit_thread() which destroys their per-task
+	 * vCPU handles — no live cache can point at the shadow being
+	 * freed. The pre-A.4c singleton cache invalidation is moot.
 	 */
-	if (shadow->pgd_gpa != 0 && ctx->cached_cr3_gpa == shadow->pgd_gpa)
-		ctx->cached_cr3_gpa = 0;
 
 	/*
 	 * Free intermediate PUD/PMD/PTE pages by walking the PGD.
@@ -1177,6 +1200,7 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 	unsigned int pgd_i, pud_i, pmd_i, pte_i;
 	int installed = 0;
 	unsigned int cleared = 0;
+	u64 mut_seq_at_start;
 	int rc;
 
 	if (!pgd)
@@ -1196,6 +1220,35 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 	 * until now. guard() auto-unlocks on every return path.
 	 */
 	guard(mutex)(&shadow->fill_lock);
+
+	/*
+	 * Task #90: seqlock-style snapshot of the mutation counter.
+	 * fill_lock serializes against OTHER fills, but direct-sync
+	 * (kvm_shadow_sync_pte called from set_pte_at via the pgtable
+	 * hook) does NOT take fill_lock — it must remain atomic-context
+	 * safe. So a leaf write from direct sync can race the fill walk:
+	 *
+	 *   1. fill clear pass clears slot S
+	 *   2. fill install pass reads UML PTE for slot S (value = X)
+	 *   3. concurrent set_pte_at writes UML PTE = Y, direct sync
+	 *      writes shadow slot S = translated(Y)
+	 *   4. fill install pass writes shadow slot S = translated(X)
+	 *   5. fill marks shadow synced — but shadow now has stale (X)
+	 *      while UML PTE has fresh (Y)
+	 *
+	 * Detect this by sampling shadow->mut_head_seq before the walk
+	 * and comparing after; any direct-sync writer between snap and
+	 * end means our fill view is potentially stale. We don't undo
+	 * the work — re-installing identical leaves is harmless — but
+	 * we leave needs_full_resync=true so the next kvm_enter_guest
+	 * re-fills before KVM_RUN, converging shadow to the latest UML
+	 * pgd state.
+	 *
+	 * smp_load_acquire pairs with the smp_wmb in kvm_shadow_record_
+	 * mut so any leaf write that bumped the counter is visible to
+	 * us before the snap completes.
+	 */
+	mut_seq_at_start = smp_load_acquire(&shadow->mut_head_seq);
 
 	/*
 	 * #274 issue #8: TRANSACTIONAL fill. Walk the user half
@@ -1302,7 +1355,7 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 		 * TLB flush → guest reads via stale TLB.
 		 */
 		smp_wmb();
-		WRITE_ONCE(shadow->dirty, true);
+		kvm_shadow_mark_dirty(shadow);
 		pr_info_ratelimited("um: kvm shadow fill: cleared %u stale user-half leaves before re-fill\n",
 				    cleared);
 	}
@@ -1316,12 +1369,23 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 	 * kvm_bootstrap_va lives in PGD slot 0 (alloc_page in lowmem),
 	 * same half as user mappings — the clobber is reachable
 	 * whenever a user mapping lands in that VA range.
+	 *
+	 * Task #92: install pass walks PGD slots 0..255 (user half) to
+	 * mirror the clear pass scope. Pre-fix, install walked 0..511
+	 * and would have re-installed any high-half user-pgd entries —
+	 * which clear had NOT cleared, leaving an asymmetric "install
+	 * but never clear" window. UML user processes never populate
+	 * pgd slots 256..511 (canonical-kernel range), so restricting
+	 * is safe and makes the invariant obvious in code: shadow user
+	 * half is fully reset on every fill; shadow kernel half is
+	 * managed by kvm_enter_guest's bootstrap/iretq/gadget installs
+	 * and never touched by fill.
 	 */
 	{
 		u64 alias_lo_install = kvm_bootstrap_va_get();
 		u64 alias_hi_install = alias_lo_install + 4 * PAGE_SIZE;
 
-	for (pgd_i = 0; pgd_i < 512; pgd_i++) {
+	for (pgd_i = 0; pgd_i < 256; pgd_i++) {
 		u64 pgde = pgd[pgd_i];
 		u64 *pud;
 
@@ -1425,7 +1489,41 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 	 */
 	smp_wmb();
 	WRITE_ONCE(shadow->synced_pgd_va, (u64)pgd_va);
+
+	/*
+	 * Task #90 seqlock check. Re-read mut_head_seq after the install
+	 * pass. If it advanced during our walk, a direct-sync writer
+	 * wrote a leaf based on a UML PTE value newer than what fill
+	 * observed — our install_pass write may have clobbered it with
+	 * a stale value. Mark needs_full_resync so the NEXT entry re-
+	 * fills (with a fresh seq snapshot); leave dirty=true to force
+	 * the TLB flush. Synced is left FALSE precisely so the next
+	 * entry's predicate doesn't skip the repair fill.
+	 *
+	 * smp_mb on the read side pairs with the smp_wmb in
+	 * kvm_shadow_record_mut: any leaf write that completed before
+	 * the counter bump must be visible here.
+	 */
+	smp_mb();
+	if (READ_ONCE(shadow->mut_head_seq) != mut_seq_at_start) {
+		WRITE_ONCE(shadow->needs_full_resync, true);
+		kvm_shadow_mark_dirty(shadow);
+		WRITE_ONCE(shadow->synced, false);
+		/* Task #94 counters. */
+		WRITE_ONCE(shadow->needs_full_resync_set_seqlock_miss,
+			   READ_ONCE(shadow->needs_full_resync_set_seqlock_miss) + 1);
+		WRITE_ONCE(shadow->synced_clear_seqlock_miss,
+			   READ_ONCE(shadow->synced_clear_seqlock_miss) + 1);
+		WRITE_ONCE(shadow->dirty_set_fill_install,
+			   READ_ONCE(shadow->dirty_set_fill_install) + 1);
+		pr_info_ratelimited("um: kvm shadow fill: mut_seq advanced during walk (start=%llu now=%llu) — needs_full_resync=true\n",
+				    (unsigned long long)mut_seq_at_start,
+				    (unsigned long long)READ_ONCE(shadow->mut_head_seq));
+		return installed;
+	}
 	WRITE_ONCE(shadow->synced, true);
+	WRITE_ONCE(shadow->synced_set_fill,
+		   READ_ONCE(shadow->synced_set_fill) + 1);
 	return installed;
 }
 
@@ -1499,7 +1597,10 @@ int kvm_shadow_map_page(struct kvm_shadow_mm *shadow,
 	WRITE_ONCE(pte[pte_i],
 		   (phys_gpa & ~0xfffULL & 0x000ffffffffff000ULL) | leaf_flags);
 	smp_wmb();
-	WRITE_ONCE(shadow->dirty, true);
+	kvm_shadow_mark_dirty(shadow);
+	/* Task #94 transition counter. */
+	WRITE_ONCE(shadow->dirty_set_fill_install,
+		   READ_ONCE(shadow->dirty_set_fill_install) + 1);
 	return 0;
 }
 
@@ -1521,22 +1622,27 @@ int kvm_shadow_map_page(struct kvm_shadow_mm *shadow,
  * that subrange — nothing to invalidate.
  */
 /*
- * Audit round-6 G2: clear all leaf PTEs in the user half of the
- * singleton shadow PGD. PGD entries 0..255 cover canonical user
- * VA (low 128 TB on x86_64); 256..511 cover the canonical kernel
- * half where bootstrap data/code, gadget state, and vvar live.
+ * Audit round-6 G2 (post-#275 stub).
  *
- * On every cross-mm context switch the user half must be cleared
- * — without it kvm_shadow_fill_from_uml_pgd would happily layer
- * the new mm's mappings on top of the previous mm's stale leaves,
- * leaking pages across processes.
+ * Pre-#275 the kvm shadow PT was a SINGLETON shared across all mms,
+ * so a cross-mm context switch had to clear the user half (PGD
+ * slots 0..255) to prevent prev's mappings from leaking into next's
+ * view through the same singleton tree.
  *
- * Intermediate PUD/PMD pages are kept attached to their PGD
- * entries so the next mm fill can reuse them without re-allocating
- * — a bounded memory footprint per shadow PGD's lifetime, in line
- * with the pre-existing kvm_shadow_pgd_free() shape that also
- * doesn't free sub-tables. (A full sub-table free + alloc on
- * every context switch is a separate optimization.)
+ * Post-#275 each mm has its OWN shadow PGD attached at
+ * mm_id->kvm_shadow. A cross-mm switch loads next's shadow PGD as
+ * CR3 — there is no shared tree to scrub. This function is now a
+ * one-liner stub kept for the existing call sites
+ * (kvm_context_switch + KUnit force-probe): it just marks the
+ * destination shadow dirty so the next kvm_enter_guest's SREGS
+ * reload toggles CR4.PGE and flushes the guest TLB (preventing
+ * stale TLB entries from prev's CR3 from being honoured under
+ * next's CR3).
+ *
+ * The actual user-half clear pass still exists, in
+ * kvm_shadow_fill_from_uml_pgd (under fill_lock). That clear pass
+ * runs against the per-mm shadow tree itself before each fill, to
+ * remove leaves that the UML pgd no longer maps.
  */
 void kvm_shadow_pgd_clear_user(void)
 {
@@ -1555,8 +1661,12 @@ void kvm_shadow_pgd_clear_user(void)
 	 * Memo 17 Phase A (Race-I keystone): WRITE_ONCE pairs with
 	 * the consumer's smp_load_acquire on shadow->dirty.
 	 */
-	if (shadow)
-		WRITE_ONCE(shadow->dirty, true);
+	if (shadow) {
+		kvm_shadow_mark_dirty(shadow);
+		/* Task #94 transition counter. */
+		WRITE_ONCE(shadow->dirty_set_pgd_clear_user,
+			   READ_ONCE(shadow->dirty_set_pgd_clear_user) + 1);
+	}
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_pgd_clear_user);
 
@@ -1632,7 +1742,12 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
 	 */
 	smp_wmb();
 	WRITE_ONCE(shadow->synced, false);
-	WRITE_ONCE(shadow->dirty, true);
+	kvm_shadow_mark_dirty(shadow);
+	/* Task #94 transition counters. */
+	WRITE_ONCE(shadow->synced_clear_invalidate,
+		   READ_ONCE(shadow->synced_clear_invalidate) + 1);
+	WRITE_ONCE(shadow->dirty_set_invalidate,
+		   READ_ONCE(shadow->dirty_set_invalidate) + 1);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);
@@ -1732,6 +1847,154 @@ int kvm_shadow_audit_va(u64 va, void *uml_pgd_va, const char *tag)
 	return equal ? 0 : 1;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_audit_va);
+
+/*
+ * Task #91: three-way content audit for a suspicious VA.
+ *
+ * kvm_shadow_audit_va proves PTE EQUALITY (shadow PFN == UML PFN).
+ * That is necessary but NOT sufficient: a wrong os_map_memory offset
+ * or a host-VA aliasing bug can leave matching PFNs whose underlying
+ * BYTES differ across the three access paths the system uses:
+ *
+ *   path A — UML PTE → page_address(pte_page) — kernel VA derived
+ *            from the per-mm pgd. This is the "UML kernel's own
+ *            view of the page".
+ *
+ *   path B — shadow PT GPA → uml_physmem + GPA — kernel VA derived
+ *            from the GPA the guest hardware-MMU walks via shadow PT
+ *            then EPT. This is "what KVM thinks the guest reads".
+ *
+ *   path C — user VA direct dereference (the host VA = user VA mapping
+ *            installed by os_map_memory). This is "the raw host-PT
+ *            view" used by copy_from_user, sigframe setup, etc.
+ *
+ * If shadow PFN == UML PFN, paths A and B point at the SAME physical
+ * frame and must yield identical bytes. If A,B,C all match, the page
+ * is coherent across views. If C diverges from A/B, the os_map_memory
+ * offset is wrong for this VA — that is the host-VA aliasing class
+ * memo 19's playbook flagged as Phase 4 territory.
+ *
+ * Reads `bytes` bytes (max 64) starting at `va`. pagefault_disable
+ * around the user-VA read so the audit doesn't recurse into the
+ * fault handler. Returns 0 if all three paths agree, 1 if A/B agree
+ * but C diverges (host-VA alias), 2 if A diverges from B (shadow GPA
+ * mismatch — should have been caught by kvm_shadow_audit_va), -ENODEV
+ * if any path is unreachable.
+ *
+ * Diagnostic-only; safe to call from any context where the UML pgd
+ * and shadow PT are stable.
+ */
+int kvm_shadow_audit_content_va(u64 va, void *uml_pgd_va, unsigned int bytes,
+				const char *tag)
+{
+	struct kvm_shadow_mm *shadow = kvm_shadow_mm_current();
+	u64 *upgd = uml_pgd_va;
+	u64 *spgd;
+	unsigned int pgd_i = (va >> 39) & 0x1ff;
+	unsigned int pud_i = (va >> 30) & 0x1ff;
+	unsigned int pmd_i = (va >> 21) & 0x1ff;
+	unsigned int pte_i = (va >> 12) & 0x1ff;
+	unsigned int page_off = va & 0xfff;
+	u64 um_pte = 0, shadow_pte = 0;
+	unsigned long um_pfn = 0, sh_pfn = 0;
+	u8 buf_a[64] = {0}, buf_b[64] = {0}, buf_c[64] = {0};
+	bool ab_equal, ac_equal, bc_equal;
+	int got_a = 0, got_b = 0, got_c = 0;
+
+	if (!tag)
+		tag = "?";
+	if (bytes == 0 || bytes > sizeof(buf_a))
+		bytes = 16;
+	if (page_off + bytes > PAGE_SIZE)
+		bytes = PAGE_SIZE - page_off;
+	if (!shadow || !shadow->pgd || !upgd) {
+		pr_info("um: kvm audit3[%s]: va=0x%llx unavailable shadow=%p upgd=%p\n",
+			tag, (unsigned long long)va, shadow, upgd);
+		return -ENODEV;
+	}
+	spgd = shadow->pgd;
+
+	/* Path A: walk UML pgd → leaf PFN → __va. */
+	if (upgd[pgd_i] & UM_PTE_PRESENT) {
+		u64 *upud = (u64 *)__va(upgd[pgd_i] & 0x000ffffffffff000ULL);
+
+		if (upud[pud_i] & UM_PTE_PRESENT) {
+			u64 *upmd = (u64 *)__va(upud[pud_i] & 0x000ffffffffff000ULL);
+
+			if (upmd[pmd_i] & UM_PTE_PRESENT) {
+				u64 *upte = (u64 *)__va(upmd[pmd_i] & 0x000ffffffffff000ULL);
+
+				um_pte = upte[pte_i];
+				if (um_pte & UM_PTE_PRESENT) {
+					um_pfn = (um_pte >> 12) & 0xffffffffULL;
+					memcpy(buf_a,
+					       (u8 *)__va((u64)um_pfn << 12) + page_off,
+					       bytes);
+					got_a = 1;
+				}
+			}
+		}
+	}
+
+	/* Path B: walk shadow PT → leaf GPA → __va. */
+	if (spgd[pgd_i] & KVM_X86_PTE_P) {
+		u64 *spud = (u64 *)__va(spgd[pgd_i] & 0x000ffffffffff000ULL);
+
+		if (spud[pud_i] & KVM_X86_PTE_P) {
+			u64 *spmd = (u64 *)__va(spud[pud_i] & 0x000ffffffffff000ULL);
+
+			if (spmd[pmd_i] & KVM_X86_PTE_P) {
+				u64 *spte = (u64 *)__va(spmd[pmd_i] & 0x000ffffffffff000ULL);
+
+				shadow_pte = spte[pte_i];
+				if (shadow_pte & KVM_X86_PTE_P) {
+					sh_pfn = (shadow_pte >> 12) & 0xffffffffULL;
+					memcpy(buf_b,
+					       (u8 *)__va((u64)sh_pfn << 12) + page_off,
+					       bytes);
+					got_b = 1;
+				}
+			}
+		}
+	}
+
+	/* Path C: user VA direct dereference (host-PT mapping). */
+	if (va < TASK_SIZE) {
+		pagefault_disable();
+		if (!copy_from_kernel_nofault(buf_c, (void *)va, bytes))
+			got_c = 1;
+		pagefault_enable();
+	}
+
+	ab_equal = got_a && got_b && !memcmp(buf_a, buf_b, bytes);
+	ac_equal = got_a && got_c && !memcmp(buf_a, buf_c, bytes);
+	bc_equal = got_b && got_c && !memcmp(buf_b, buf_c, bytes);
+
+	pr_info("um: kvm audit3[%s]: va=0x%llx bytes=%u got=A%d/B%d/C%d um_pfn=0x%lx sh_pfn=0x%lx A==B:%d A==C:%d B==C:%d\n",
+		tag, (unsigned long long)va, bytes, got_a, got_b, got_c,
+		um_pfn, sh_pfn, ab_equal, ac_equal, bc_equal);
+
+	if (got_a && got_b && !ab_equal) {
+		pr_info("um: kvm audit3[%s]: A_first8=%02x%02x%02x%02x%02x%02x%02x%02x B_first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+			tag,
+			buf_a[0], buf_a[1], buf_a[2], buf_a[3],
+			buf_a[4], buf_a[5], buf_a[6], buf_a[7],
+			buf_b[0], buf_b[1], buf_b[2], buf_b[3],
+			buf_b[4], buf_b[5], buf_b[6], buf_b[7]);
+		return 2;
+	}
+	if (got_c && (got_a ? !ac_equal : (got_b && !bc_equal))) {
+		pr_info("um: kvm audit3[%s]: HOST-VA ALIAS: kernel-view A_first8=%02x%02x%02x%02x%02x%02x%02x%02x user-view C_first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+			tag,
+			buf_a[0], buf_a[1], buf_a[2], buf_a[3],
+			buf_a[4], buf_a[5], buf_a[6], buf_a[7],
+			buf_c[0], buf_c[1], buf_c[2], buf_c[3],
+			buf_c[4], buf_c[5], buf_c[6], buf_c[7]);
+		return 1;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_shadow_audit_content_va);
 
 /*
  * #274 phase-1 step 2 diagnostic: full-pgd lockstep audit.
@@ -1966,4 +2229,119 @@ int kvm_backend_vcpu0_fd(void)
 struct kvm_um *kvm_backend_ctx(void)
 {
 	return &kvm_ctx;
+}
+
+/*
+ * Per-task vCPU handle allocator. Stage A redesign of the KVM backend
+ * (Documentation/virt/uml/redesign/03-architecture-review-2026-04-27).
+ *
+ * Each UML task that reaches kvm_run_userspace allocates one handle
+ * via this function on first use. The handle pins a KVM_CREATE_VCPU
+ * fd + the corresponding mmap of struct kvm_run for the task's
+ * lifetime.
+ *
+ * KVM contract honoured:
+ *   - vcpu fd is owned by exactly one task (no aliasing).
+ *   - struct kvm_run mmap is single-writer (no inter-task races on
+ *     run->exit_reason / run->s.regs / run->io / run->mmio).
+ *   - KVM_SET_SIGNAL_MASK installed by kvm_vcpu_handle_install_sigmask
+ *     blocks every host signal except SIGALRM (UML's timer-driven
+ *     scheduler tick — required for CPU-bound guest preemption) and
+ *     KVM_UM_KICK_SIGNAL (future SMP eviction). Other signals are
+ *     deferred to after KVM_RUN returns where unblock_signals()
+ *     drains UML's handler queue at a safe point.
+ *
+ * Returns the new handle on success or an ERR_PTR on failure. Caller
+ * (kvm_vcpu_for_current) stashes the pointer on
+ * current->thread.arch.kvm.vcpu and never publishes a partially-
+ * initialised handle.
+ */
+struct kvm_vcpu_handle *kvm_vcpu_handle_alloc(void)
+{
+	/*
+	 * vcpu_id allocation: under INTEGRATED, kvm_init() no longer
+	 * pre-creates vcpu0 (Stage A.7 deletion), so per-task vCPUs
+	 * start at id 0 and increment monotonically. KVM accepts vcpu_id
+	 * values up to KVM_MAX_VCPU_IDS (4096 on x86); UML processes
+	 * don't realistically approach that.
+	 *
+	 * Under !INTEGRATED (harness path), vcpu0 is still pre-created
+	 * for the harness's own use; INTEGRATED is the production path
+	 * and harness builds don't reach kvm_vcpu_handle_alloc anyway,
+	 * so the id=0 start is safe.
+	 */
+	static atomic_t next_vcpu_id = ATOMIC_INIT(0);
+	struct kvm_vcpu_handle *h;
+	int vcpu_fd, mmap_size, vcpu_id;
+	void *run;
+
+	if (kvm_ctx.vm_fd < 0)
+		return ERR_PTR(-EIO);
+
+	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	if (!h)
+		return ERR_PTR(-ENOMEM);
+
+	vcpu_id = atomic_fetch_inc(&next_vcpu_id);
+	vcpu_fd = os_ioctl_generic(kvm_ctx.vm_fd, KVM_CREATE_VCPU,
+				   (unsigned long)vcpu_id);
+	if (vcpu_fd < 0) {
+		pr_err("um: kvm vcpu_alloc: KVM_CREATE_VCPU(id=%d) failed (%d)\n",
+		       vcpu_id, vcpu_fd);
+		kfree(h);
+		return ERR_PTR(vcpu_fd);
+	}
+
+	mmap_size = os_ioctl_generic(kvm_ctx.kvm_fd,
+				     KVM_GET_VCPU_MMAP_SIZE, 0);
+	if (mmap_size <= 0) {
+		pr_err("um: kvm vcpu_alloc: KVM_GET_VCPU_MMAP_SIZE failed (%d)\n",
+		       mmap_size);
+		os_close_file(vcpu_fd);
+		kfree(h);
+		return ERR_PTR(mmap_size ? mmap_size : -EIO);
+	}
+
+	run = os_mmap_rw_shared(vcpu_fd, mmap_size);
+	if (!run) {
+		pr_err("um: kvm vcpu_alloc: mmap of kvm_run (size %d) failed\n",
+		       mmap_size);
+		os_close_file(vcpu_fd);
+		kfree(h);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	h->fd       = vcpu_fd;
+	h->run      = run;
+	h->run_size = mmap_size;
+	/* All cache flags start false; primed-once paths set them on first use. */
+
+	/*
+	 * Install the host no-op signal handler for the kick signal on
+	 * first vCPU alloc only. sigaction is process-wide so once is
+	 * enough — but we only want to do it lazily, after the host
+	 * signal infrastructure is fully up (post-init_backend boot).
+	 * A simple atomic guards the install.
+	 */
+	{
+		static atomic_t kick_signal_installed = ATOMIC_INIT(0);
+
+		if (atomic_xchg(&kick_signal_installed, 1) == 0)
+			register_kvm_kick_signal(KVM_UM_KICK_SIGNAL);
+	}
+
+	pr_info_ratelimited("um: kvm vcpu_alloc: pid=%d tid=%d vcpu_id=%d vcpu_fd=%d run=%p size=%d\n",
+			    current->tgid, current->pid, vcpu_id, vcpu_fd, run, mmap_size);
+	return h;
+}
+
+void kvm_vcpu_handle_destroy(struct kvm_vcpu_handle *h)
+{
+	if (!h)
+		return;
+	if (h->run && h->run_size)
+		os_unmap_memory(h->run, (int)h->run_size);
+	if (h->fd >= 0)
+		os_close_file(h->fd);
+	kfree(h);
 }
