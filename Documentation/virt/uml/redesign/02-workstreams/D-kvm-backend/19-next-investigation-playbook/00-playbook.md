@@ -2,6 +2,9 @@
 
 Status: 2026-04-26 evening, after memo 17 Phases A-K + memo 18 Phases 1+2+3-fix.
 
+Companion control/state model:
+[01-control-state-model.md](01-control-state-model.md).
+
 ## Empirical baseline (verified this session)
 
 - cpython parity gate: **17/21 median** across 4+ trials. Failed modules
@@ -297,3 +300,79 @@ These have been thoroughly tested; don't burn cycles re-testing:
 - Per-mm cache without per-mm vCPU (Phase 3 partial regressed)
 - Direct sync vs fill race via simple cmpxchg (Phase 4-fix v1/v2)
 - KVM_SYNC_X86_REGS as bug source (no improvement when disabled)
+
+## CRITICAL UPDATE 2026-04-26: KVM mmu_notifier path is NOT involved
+
+Verified empirically with diag ring + audit:
+
+1. **Memslot range** (`um: kvm memslot: guest_phys=0 host_va=60000000
+   size=20000000`): KVM memslot covers `[0x60000000, 0x80000000)` —
+   the UML physmem region only. ~512MB.
+
+2. **mprotect HVAs in failures** are at user VAs like `0x4003b000`,
+   `0x401c2000`, `0x403d3000`, `0xa86000`. **All BELOW 0x60000000.
+   None overlap the memslot.**
+
+3. **kvm_mmu_unmap_gfn_range with `flush_on_ret=true`** in
+   virt/kvm/kvm_main.c line 730 only fires `kvm_flush_remote_tlbs`
+   when `kvm_handle_hva_range` returns `r.found_memslot=true` (line
+   637 `if (range->flush_on_ret && r.ret) kvm_flush_remote_tlbs(kvm)`).
+   Since user-VA mprotects don't overlap our memslot, **found_memslot
+   is false → no KVM TLB flush request, no KVM internal work**.
+
+So the prior hypothesis "KVM async work needs ~50us to complete" is
+**WRONG**. The 50us delay is doing something UML-side, NOT KVM-side.
+
+## SMOKING-GUN trace evidence (diag ring, commit 76376bd0afa3)
+
+Captured FAIL vs PASS diff for `import test.test_decimal`:
+
+| Event | PASS | FAIL (2/2 captured) |
+|-------|------|---------------------|
+| DIAG[20] | mprotect 0x403d3000 len=0x4000 prot=R | mprotect 0x403d3000 len=0x4000 prot=R |
+| DIAG[21] | mprotect **0x401c2000** len=0x2000 prot=R | mprotect **0x403d3000** len=0x4000 prot=R |
+| Inter-mprotect gap | ~100us | ~57us |
+
+In FAIL: ld-linux's `_dl_protect_relro` loop iterator visits the
+SAME link_map TWICE in succession. In PASS: it correctly advances
+to the next library.
+
+**Audit at fault**: shadow PT for `0x403d3000` (rdi at fault) IS
+in sync with UML pgd:
+```
+um: kvm audit[pf_rdi]: va=0x403d3000 um_pte=0x7c01c1
+    expected=0x7c0065 shadow=0x7c0065 EQUAL synced=1
+```
+Both UML pgd and shadow PT map this VA to PFN 0x7c0. So the
+shadow-PT-staleness hypothesis at the link_map address is also
+WRONG.
+
+**The remaining hypothesis**: ld-linux's iterator is reading WRONG
+DATA from the link_map struct (l_next or array index), causing it to
+revisit the same DSO. Despite shadow PT being correct, the page
+content visible to the guest may differ from what ld-linux wrote.
+This could be:
+
+  (a) Cache coherency issue between kernel-side writes (via host VA
+      to user memory) and guest-side reads (via shadow PT → GPA → EPT).
+      Unlikely on x86 with coherent caches.
+
+  (b) ld-linux writes go to a DIFFERENT physical page than the guest
+      reads. Would happen if shadow PT entry's GPA doesn't match
+      os_map_memory's offset for the same VA. Audit shows PFN
+      matches, so unlikely here unless there's an intermediate
+      table mismatch.
+
+  (c) Some UML-side state machine (signals, scheduler, interrupt-
+      driven set_pte_at) is firing incorrectly under tight timing,
+      corrupting the guest's view of memory in a way that takes
+      ~50us to settle.
+
+Tooling notes:
+  - printk-per-syscall, gdb breakpoints, strace ALL suppress the bug
+    via overhead.
+  - Diag ring + on-panic dump preserves the bug enough to capture
+    the discriminator.
+  - Need a sub-microsecond, on-panic-dumpable trace mechanism for
+    deeper investigation. Linux ftrace's `trace_printk` could work
+    if accessible from UML — needs investigation.
