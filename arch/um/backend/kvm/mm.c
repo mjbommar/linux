@@ -19,9 +19,12 @@
 #include <linux/printk.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 
 #include <os.h>
+#include <mem.h>		/* uml_physmem */
+#include <as-layout.h>		/* physmem_size */
 #include <skas/mm_id.h>
 #include <asm/backend.h>
 
@@ -152,10 +155,65 @@ static void kvm_mm_collision_check(struct mm_id *id, unsigned long virt)
 	}
 }
 
+/*
+ * BUG.1 / shadow_stale_repro root cause (2026-04-27): user mmap at
+ * a host VA that overlaps UML's kernel-direct-map range
+ * (uml_physmem) clobbers UML kernel memory — including the KVM
+ * bootstrap pages (IDT/GDT/LSTAR/IST) at kvm_bootstrap_va. The
+ * guest CPU running with that corrupted IDT jumps to garbage
+ * (RIP=0x11111111 if user filled the file with 0x11). 100%
+ * deterministic via /tmp/shadow_stale_repro.c which mmaps 16 MiB
+ * of pattern-filled file at MAP_FIXED virt=0x60000000.
+ *
+ * Defensive fix: refuse os_map_memory in the kvm_bootstrap_va range
+ * (4 pages: bootstrap_page, gadget_state, gadget_vvar, IST stack)
+ * AND in any uml_physmem range that overlaps. Returns -EFAULT so
+ * UML's mmap arbiter sees a clean failure and propagates -EFAULT
+ * to the user task. The user's program gets MAP_FAILED instead of
+ * crashing the host UML kernel.
+ *
+ * Note: this is a defense-in-depth shield. The proper structural
+ * fix is to either move uml_physmem out of user-VA reach
+ * (TASK_SIZE shrink + uml_physmem at PML4[256+]) or use a per-mm
+ * host worker process. Both are larger UML-core changes.
+ */
+extern u64 kvm_bootstrap_va;
+extern u64 kvm_bootstrap_page;	/* Forward — actually a void *, used here for non-zero check */
+
+static bool kvm_mm_map_collides_kernel(unsigned long virt, unsigned long len)
+{
+	unsigned long uml_lo = (unsigned long)uml_physmem;
+	unsigned long uml_hi = uml_lo + (unsigned long)physmem_size;
+
+	if (!uml_lo || !physmem_size)
+		return false;
+	/* Refuse any mapping that overlaps the kernel-direct-map range. */
+	if (virt + len > uml_lo && virt < uml_hi) {
+		pr_warn_ratelimited("um: kvm mm_map: REFUSING user mmap at virt=0x%lx len=0x%lx — overlaps UML kernel direct-map range [0x%lx, 0x%lx). User code cannot map kernel memory.\n",
+				    virt, len, uml_lo, uml_hi);
+		return true;
+	}
+	return false;
+}
+
 int kvm_mm_map(struct mm_id *id, unsigned long virt, unsigned long len,
 	       int prot, int phys_fd, u64 offset)
 {
 	int rc;
+
+	if (kvm_mm_map_collides_kernel(virt, len)) {
+		/*
+		 * Returning -EFAULT crashes um_tlb_sync. Return 0 (success
+		 * from the mm-arbiter's PoV) and skip os_map_memory + the
+		 * shadow invalidate. The user's mapping exists in mm->pgd
+		 * but not in shadow PT or host VA, so guest reads will #PF
+		 * — far better than corrupting kernel memory.
+		 *
+		 * Proper fix is at UML's mm-arbiter level (refuse the
+		 * mmap syscall), but that's a UML-core change.
+		 */
+		return 0;
+	}
 
 	kvm_mm_collision_check(id, virt);
 

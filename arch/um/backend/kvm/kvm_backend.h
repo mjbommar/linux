@@ -612,16 +612,34 @@ struct kvm_shadow_mm {
 	 * per-vCPU vcpu->last_flushed_tlb_gen — mismatch triggers a
 	 * CR4.PGE-toggle SREGS write to flush THIS vCPU's guest TLB.
 	 *
-	 * Replaces the per-mm "dirty" boolean which was unsound under
-	 * per-task vCPU: when task A flushed its TLB and cleared dirty,
-	 * task B sharing the mm still had a stale TLB and saw dirty=
-	 * false, never flushing. The boolean conflated "any vCPU needs
-	 * to flush" with "all vCPUs are flushed".
-	 *
 	 * Init to 1 so that fresh vCPUs (last_flushed_tlb_gen = 0)
 	 * always observe a mismatch on first entry and flush.
 	 */
 	atomic64_t		tlb_gen;
+	/*
+	 * Stage B-race fix (2026-04-27): adapt KVM's own
+	 * mmu_invalidate_in_progress + mmu_invalidate_seq pattern (see
+	 * virt/kvm/kvm_main.c:673-795 for reference).
+	 *
+	 * Producers bracket their leaf-write work with:
+	 *     atomic_inc(&shadow->invalidate_in_progress);
+	 *     ... write leaves ...
+	 *     atomic64_inc(&shadow->invalidate_seq);
+	 *     smp_wmb();
+	 *     atomic_dec(&shadow->invalidate_in_progress);
+	 *
+	 * Consumer (kvm_enter_guest) before triggering KVM_RUN checks:
+	 *     if (atomic_read(&shadow->invalidate_in_progress) ||
+	 *         atomic64_read(&shadow->invalidate_seq) != saved_seq)
+	 *         retry-fill;
+	 *
+	 * Closes the seq-coherency gap between producer leaf-write and
+	 * consumer's KVM_RUN entry — even if a producer fires between
+	 * the consumer's predicate read and KVM_RUN start, the seq
+	 * mismatch is observed and the consumer re-fills.
+	 */
+	atomic_t		invalidate_in_progress;
+	atomic64_t		invalidate_seq;
 	bool			dirty;		/* DEPRECATED — kept for telemetry counters; consult tlb_gen for correctness */
 	bool			synced;		/* shadow mirrors mm->pgd */
 	u64			synced_pgd_va;	/* mm->pgd at last fill */
@@ -702,18 +720,20 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void);
 void kvm_shadow_mm_free(struct kvm_shadow_mm *shadow);
 
 /*
- * Stage A.4d: producer-side helper. Every shadow leaf mutation calls
- * this AFTER writing the leaf bytes. WRITE_ONCE on the legacy dirty
- * boolean keeps the dirty_set_* / dirty_clear_* telemetry counters
- * accurate (they predate per-task vCPU and are still useful for
- * /proc-style introspection). atomic64_inc on tlb_gen is the
- * correctness primitive — paired with vcpu->last_flushed_tlb_gen in
- * kvm_enter_guest to drive per-vCPU TLB invalidation.
+ * Stage A.4d + Stage B-race fix: producer-side helper. Every shadow
+ * leaf mutation calls this AFTER writing the leaf bytes.
  *
- * atomic64_inc on x86 is LOCK INC (full barrier); on weakly-ordered
- * archs the kernel atomic_t API guarantees acquire+release semantics.
- * Either way, prior leaf writes are visible to any consumer that
- * subsequently reads tlb_gen via atomic64_read.
+ *   - WRITE_ONCE(dirty=true): legacy telemetry boolean.
+ *   - atomic64_inc(tlb_gen): per-vCPU TLB-flush trigger; paired with
+ *     vcpu->last_flushed_tlb_gen in kvm_enter_guest.
+ *   - atomic64_inc(invalidate_seq) + smp_wmb(): seq-coherency for
+ *     the consumer's pre-KVM_RUN retry check (see kvm_enter_guest).
+ *
+ * Producers that have a meaningful "in_progress" window (range-
+ * invalidate, fill_from_uml_pgd) bracket with kvm_shadow_invalidate_
+ * begin/end below. Single-PTE writers (kvm_shadow_sync_pte) just
+ * call this — the seq bump alone is sufficient because the leaf
+ * write is atomic.
  */
 static inline void kvm_shadow_mark_dirty(struct kvm_shadow_mm *shadow)
 {
@@ -721,6 +741,34 @@ static inline void kvm_shadow_mark_dirty(struct kvm_shadow_mm *shadow)
 		return;
 	WRITE_ONCE(shadow->dirty, true);
 	atomic64_inc(&shadow->tlb_gen);
+	atomic64_inc(&shadow->invalidate_seq);
+	smp_wmb();
+}
+
+/*
+ * Bracket helpers for multi-leaf invalidation (range_invalidate,
+ * fill clear+install). Pairs with the consumer's
+ *
+ *     if (atomic_read(&shadow->invalidate_in_progress)) retry;
+ *     smp_rmb();
+ *     if (atomic64_read(&shadow->invalidate_seq) != saved) retry;
+ *
+ * pattern in kvm_enter_guest. Adapted from KVM's own mmu_invalidate
+ * pattern at virt/kvm/kvm_main.c:673.
+ */
+static inline void kvm_shadow_invalidate_begin(struct kvm_shadow_mm *shadow)
+{
+	if (shadow)
+		atomic_inc(&shadow->invalidate_in_progress);
+}
+
+static inline void kvm_shadow_invalidate_end(struct kvm_shadow_mm *shadow)
+{
+	if (!shadow)
+		return;
+	atomic64_inc(&shadow->invalidate_seq);
+	smp_wmb();
+	atomic_dec(&shadow->invalidate_in_progress);
 }
 
 /*

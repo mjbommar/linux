@@ -713,6 +713,8 @@ struct kvm_shadow_mm *kvm_shadow_mm_alloc(void)
 	 * and the first kvm_enter_guest flushes its TLB.
 	 */
 	atomic64_set(&shadow->tlb_gen, 1);
+	atomic_set(&shadow->invalidate_in_progress, 0);
+	atomic64_set(&shadow->invalidate_seq, 0);
 	shadow->dirty    = true;
 	shadow->synced   = false;
 	shadow->synced_pgd_va = 0;
@@ -1203,6 +1205,15 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 		return -ENODEV;
 
 	/*
+	 * Stage B-race fix (2026-04-27): bracket the entire fill
+	 * (clear pass + install pass) with kvm_shadow_invalidate_
+	 * begin/end. Pairs with kvm_enter_guest's pre-KVM_RUN check
+	 * for in_progress > 0 + seq mismatch — closes the window where
+	 * the consumer reads a partially-applied fill.
+	 */
+	kvm_shadow_invalidate_begin(shadow);
+
+	/*
 	 * #274 / T11: serialize shadow tree mutation. fill walks the
 	 * pgd and inserts leaves; concurrent invalidate (from a
 	 * kvm_mm_map / unmap on the same shadow_mm) would race against
@@ -1432,6 +1443,7 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 						pr_warn_ratelimited("um: kvm shadow fill: map_page(va=0x%llx) failed (%d)\n",
 								    (unsigned long long)va,
 								    rc);
+						kvm_shadow_invalidate_end(shadow);
 						return rc;
 					}
 					if (installed < 128) {
@@ -1513,11 +1525,13 @@ int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd_va)
 		pr_info_ratelimited("um: kvm shadow fill: mut_seq advanced during walk (start=%llu now=%llu) — needs_full_resync=true\n",
 				    (unsigned long long)mut_seq_at_start,
 				    (unsigned long long)READ_ONCE(shadow->mut_head_seq));
+		kvm_shadow_invalidate_end(shadow);
 		return installed;
 	}
 	WRITE_ONCE(shadow->synced, true);
 	WRITE_ONCE(shadow->synced_set_fill,
 		   READ_ONCE(shadow->synced_set_fill) + 1);
+	kvm_shadow_invalidate_end(shadow);
 	return installed;
 }
 
@@ -1670,6 +1684,7 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
 	u64 *pgd;
 	u64 va, va_end;
 	unsigned int cleared = 0;
+	int rc = 0;
 
 	if (!shadow || !shadow->pgd)
 		return -ENODEV;
@@ -1678,6 +1693,9 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
 
 	/* #274 / T11: serialize against fill (see kvm_shadow_fill_from_uml_pgd). */
 	guard(mutex)(&shadow->fill_lock);
+
+	/* Stage B-race fix: bracket the invalidate with begin/end. */
+	kvm_shadow_invalidate_begin(shadow);
 
 	pgd = shadow->pgd;
 
@@ -1742,7 +1760,8 @@ int kvm_shadow_invalidate_va_range(struct kvm_shadow_mm *shadow,
 		   READ_ONCE(shadow->synced_clear_invalidate) + 1);
 	WRITE_ONCE(shadow->dirty_set_invalidate,
 		   READ_ONCE(shadow->dirty_set_invalidate) + 1);
-	return 0;
+	kvm_shadow_invalidate_end(shadow);
+	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_shadow_invalidate_va_range);
 

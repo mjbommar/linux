@@ -2195,6 +2195,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	bool dirty_snapshot = false;		/* DEPRECATED — telemetry only */
 	bool needs_resync_snapshot = false;	/* memo 17 Phase J finding 1b */
 	u64  tlb_gen_snapshot = 0;		/* Stage A.4d: per-vCPU TLB tracking */
+	u64  invalidate_seq_snapshot = 0;	/* Stage B-race: KVM-style seq guard */
 
 	if (!vcpu || vcpu->fd < 0)
 		return -EIO;
@@ -2580,6 +2581,14 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		 * fill → guest reads via stale shadow.
 		 */
 		needs_resync_snapshot = shadow ? READ_ONCE(shadow->needs_full_resync) : false;
+		/*
+		 * Stage B-race fix: snapshot the per-shadow invalidate_seq
+		 * BEFORE we read mm->pgd. After fill completes, we'll
+		 * re-check seq + in_progress; if either changed, the fill
+		 * was racing a producer and we re-fill.
+		 */
+		invalidate_seq_snapshot = shadow ? atomic64_read(&shadow->invalidate_seq) : 0;
+		smp_rmb();
 		if (shadow && smp_load_acquire(&shadow->synced) &&
 		    READ_ONCE(shadow->synced_pgd_va) == (u64)mm->pgd &&
 		    !needs_resync_snapshot) {
@@ -2668,6 +2677,18 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 				   READ_ONCE(shadow->needs_full_resync_clear_enter_guest) + 1);
 		pr_debug_ratelimited("um: kvm enter_guest: filled %d shadow PTEs (lazy)\n",
 				    filled);
+
+		/*
+		 * Stage B-race fix DISABLED: empirically the post-fill seq
+		 * guard regressed the gate (16-19/21 vs 17-21/21 baseline).
+		 * The detection-and-mark-resync mechanism over-fires for
+		 * single-task scenarios and adds extra fills that hit other
+		 * race classes. Producer-side seq counters remain (cheap
+		 * overhead, useful for telemetry); consumer-side activation
+		 * deferred until a deterministic concurrent-producer test
+		 * exposes the race directly.
+		 */
+		(void)invalidate_seq_snapshot;
 fill_done:
 		;	/* perf-lever #4 skip-target — falls through */
 	}
