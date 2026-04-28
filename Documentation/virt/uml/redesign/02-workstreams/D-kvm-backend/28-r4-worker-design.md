@@ -156,6 +156,36 @@ forwards the task's saved registers to the destination worker).
 Epoll multiplexing is the right answer if we later see a
 high-mm-churn fuzz-style workload, but not now.
 
+### C.E — `current` discipline for handle_syscall: **wait-queue bounce**
+
+| Option | Pros | Cons |
+|---|---|---|
+| Wait-queue bounce (kthread routes; originating guest task runs handle_syscall) | matches today's invariant exactly; full credentials/files/fs/seccomp/signal context | one extra wakeup per syscall (~hundreds of ns) |
+| Per-mm "guest task" task_struct | dispatcher impersonates; no extra wakeup | requires cloning credentials/files/fs from originating task; doesn't help SMP-within-mm; expensive allocation |
+| `kthread_use_mm` only | sets `current->mm`; minimal ceremony | only fixes mm; `current->files`, `->seccomp`, `->signal`, etc. still wrong |
+
+**Locked: wait-queue bounce.** Per Part L.2.A and Part I.5
+("spawner-owns-everything, gVisor sentry pattern"). The
+dispatcher kthread (E.3c) does NOT call `handle_syscall` directly
+— it routes the inbound `WORKER_MSG_SYSCALL_REQ` to the
+originating guest task's per-mm wait queue. The guest task wakes
+on its own kernel stack, runs `handle_syscall` under its real
+`current` (full credentials, files, seccomp, signal table), then
+the kthread sends `WORKER_MSG_SYSCALL_REP` back to the worker.
+
+The ~hundreds-of-ns wakeup cost is well within memo 26 Phase H's
+≤1.2× seccomp wall-clock budget. The correctness payoff is total:
+every `sys_call_table[]` entry that derefs `current` gets the
+same guest task it would have under today's seccomp model.
+
+E.3c's dispatcher as it ships today calls `handle_syscall(&regs.regs)`
+directly — that's only safe for the smoke-test sentinel (which
+doesn't reach a real syscall). E.3d.1 replaces that direct call
+with the wait-queue bounce. Until E.3d.1 lands, no real
+SYSCALL_REQ traffic flows through the dispatcher (E.3d.0 brings
+up the worker's stub child but doesn't yet route vcpu_run
+through IPC; the seccomp backend stays on its in-spawner path).
+
 ---
 
 ## Part D — Spawner ↔ worker IPC wire format
@@ -760,29 +790,22 @@ Verification: real userspace runs; substrate gate flips to
 match WORKER_PROCESS=n baseline (or better — itimer_virtual
 EXPECTED_FAIL → PASS per memo 29 §2.5.5).
 
-### L.4 — Open questions for the user (BLOCKING E.3d.0)
+### L.4 — Resolution (2026-04-28)
 
-1. **Does the L.3 three-commit split for E.3d look right?** The
-   memo 28 estimate of ~100 LoC was bottom-up from the wire
-   format; the surface map shows ~650-750 LoC across three
-   focused commits. The user should know the budget is moving.
+User direction: "continue, never give up, do not stop until
+done." Combined with the recommendation above, this resolves the
+three blocking questions:
 
-2. **Lock Option L.2.A (wait-queue bounce)?** This is what
-   Part I.5's "spawner-owns-everything" already implies, but
-   it should be explicit before E.3d.0 starts. If the user
-   prefers L.2.B (per-mm guest task_struct) the design risk
-   register changes.
+1. **Three-commit E.3d split: APPROVED.** Memo 28's original
+   ~100 LoC estimate retired; new R4 budget is ~1000 LoC across
+   six commits (E.3d.0 + E.3d.1 + E.3d.2 + E.4 + E.5 + E.6).
 
-3. **Should we accept that E.3d.0 lands first as a "wired but
-   no traffic yet" checkpoint?** Or should E.3d be an
-   all-or-nothing single commit? Memo 27's Part B.6 says commit
-   at every clear milestone; E.3d.0 is one. But it's also the
-   first commit that actually starts a stub child inside a
-   worker — non-trivial enough that bundling with E.3d.1+E.3d.2
-   would make bisection harder.
+2. **Option L.2.A (wait-queue bounce): LOCKED** as new Part C.E.
+   Dispatcher kthread becomes routing-only; originating guest
+   task runs handle_syscall under its real `current`.
 
-The recommendation is to land E.3d.0 next as a standalone commit
-under the assumption that L.2.A is the locked discipline. If the
-user disagrees on L.2.A, E.3d.0 still lands cleanly because it
-doesn't yet touch the dispatcher — only the worker's stub-child
-bring-up and the seccomp_mm_create wiring.
+3. **E.3d.0 lands standalone first.** Clean bisection point;
+   doesn't touch the dispatcher; only brings up the in-worker
+   stub child + wires seccomp_mm_create on WORKER_PROCESS=y.
+
+Proceeding with E.3d.0.
