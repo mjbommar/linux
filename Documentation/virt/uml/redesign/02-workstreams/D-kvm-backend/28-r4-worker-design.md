@@ -429,16 +429,37 @@ to UML kernel) and in the cross-mm migration handler (E.5).
 
 ## Part J — Status (2026-04-28 end of session)
 
-Memo 28 (this document) lands as the design lock. E.1 (scaffolding,
-4eb34edab3f7) and E.2 (spawner skeleton, 9547b9c40c31) have
-landed; both compile clean under WORKER_PROCESS=n (today's path)
-and WORKER_PROCESS=y (worker model active but no workers spawned
-yet — banner emits, then seccomp's mm_create falls through to
-the existing stub-child path).
+Memo 28 (this document) is the design lock. Implementation
+status:
 
-E.3-E.6 are the substantive work and not yet started. Best
-executed as a focused multi-session effort with the design lock
-above as the spec.
+- E.1 scaffolding (`4eb34edab3f7`) — Kconfig + headers + struct
+  field. Done.
+- E.2 spawner skeleton (`9547b9c40c31`) — boot init, list +
+  lock, panic notifier. Done.
+- E.3a worker spawn/reap machinery (`23b4de4380a3`) — USER TU
+  arch/um/os-Linux/worker_user.c with clone-without-CLONE_VM,
+  socketpair, echo-only main loop. Wired into
+  spawner.c::spawn_worker_for_mm. Done; reachable but not yet
+  invoked from any production path.
+- **E.3b** (worker stub-child manager) — pending. Replaces the
+  worker's echo loop with: clone the per-mm seccomp stub child
+  (CLONE_VM | CLONE_VFORK from the worker), set up SIGSYS
+  handler, futex synchronization with the stub child. ~150 LoC.
+- **E.3c** (spawner-side per-worker dispatcher thread) — pending.
+  One kernel thread per worker that receives SYSCALL_REQ over
+  IPC, invokes handle_syscall in UML kernel context, sends
+  SYSCALL_REP. ~100 LoC.
+- **E.3d** (seccomp integration) — pending. seccomp_mm_create
+  takes spawn_worker_for_mm under WORKER_PROCESS=y;
+  seccomp_vcpu_run dispatches via per-mm worker IPC instead of
+  the in-spawner SIGSYS handler. ~100 LoC.
+- **E.4** (per-task pthread inside worker) — pending. ~150 LoC.
+- **E.5** (cross-mm migration via SIGUSR2) — pending. ~200 LoC.
+- **E.6** (defconfig flip) — pending. ~50 LoC.
+
+Total remaining: ~750 LoC across 6 commits. Best executed as a
+focused multi-session effort with the design lock above
+(especially Part I.5 on kernel-state ownership) as the spec.
 
 Next session opens this memo, starts with E.1 (scaffolding), and
 proceeds linearly through E.6. Verification gates after every

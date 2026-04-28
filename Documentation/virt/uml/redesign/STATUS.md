@@ -113,16 +113,30 @@ the mechanical restart:
   mm->context.worker NULL so seccomp's existing stub-child path
   still runs. Boot smoke (WORKER_PROCESS=y) emits "um: worker
   model: spawner ready" before the seccomp banner.
+- R4 E.3a — worker process spawn/reap USER-side machinery
+  (`23b4de4380a3`). New USER TU
+  `arch/um/os-Linux/worker_user.c` with `spawn_worker_process`
+  (socketpair + clone without CLONE_VM/VFORK/FILES) and
+  `reap_worker_process` (close socket → SIGTERM → waitpid).
+  Worker entry point installs SIGTERM handler and PR_SET_PDEATHSIG,
+  enters echo-only main loop (E.3b replaces with stub-child
+  manager). worker_ipc.h moved from
+  arch/um/backend/seccomp/ to arch/um/include/shared/ for USER
+  TU access. spawn_worker_for_mm wired to actually create
+  workers. Reachable code today but not invoked from any
+  production path; integration with seccomp_mm_create lands in
+  E.3d.
 
 **Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
-**Tip of `uml-redesign-plan`:** post-R4-E.2.
+**Tip of `uml-redesign-plan`:** post-R4-E.3a.
 
-**Next: R4 E.3-E.6 + memo 26.** R4's substantive work is the
-spawner-side IPC dispatcher + worker process trap loop +
-cross-mm migration via SIGUSR2. Memo 28 Part E lays out the four
-remaining commits (E.3 worker spawn/reap; E.4 per-task pthread
-inside worker; E.5 cross-mm migration; E.6 flip the toggle).
-Best executed as a focused multi-day session. After R4 lands,
+**Next: R4 E.3b-E.6 + memo 26.** R4's substantive remaining work
+is the worker stub-child manager (E.3b), spawner-side IPC
+dispatcher (E.3c), seccomp integration (E.3d), per-task pthread
+inside worker (E.4), cross-mm migration via SIGUSR2 (E.5), and
+the defconfig toggle flip (E.6). Memo 28's Part J has the LoC +
+risk breakdown per commit. Total remaining: ~750 LoC. Best
+executed as a focused multi-day session. After R4 E.6 lands,
 memo 26 Phase A (v2 init.c + per-VM context + vcpu0 placeholder)
 starts.
 
