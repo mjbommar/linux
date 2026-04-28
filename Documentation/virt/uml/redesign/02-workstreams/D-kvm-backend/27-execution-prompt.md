@@ -28,6 +28,54 @@ KVM-accelerated UML backend that hits all 7 success criteria from memo
 zero-flake, ≤1.2× seccomp wall-clock, Tier 1 pytest pass, <1500 LoC,
 ftrace observable, SMP working.
 
+### Update — 2026-04-28: project state at memo-27-prompt-time
+
+The original Part A below describes the pre-archive state from
+2026-04-28 morning. The actual current state is much further along:
+
+- **v1 KVM backend ARCHIVED** at `arch/um/backend/kvm-v1-archive/`
+  (commit `17a3e87bab75`). Tag `kvm-v1-archive-20260428`, branch
+  `kvm-v1-final`. Hooks stripped from ARCH=um core; depends on
+  BROKEN; not built.
+- **A.4i committed** as part of preserving the bug fix in history
+  before the archive (commit `cbc6d9fbffbd`).
+- **v2 stub directory** at `arch/um/backend/kvm-v2/` exists
+  (`046375fd50ed`); arch_initcall stub banner only; no ops table
+  registered yet.
+- **Memo 25 Part 1 (mechanical restart) DONE.** All 7 steps landed.
+- **Memo 25 Part 2 (12 refactors): 10 done; R4 partial; R6 absorbed.**
+  - R10 kill harness.c `928bbbfebcb8`
+  - R11 remove ptrace backend (Option B; gone entirely) `06c88545ae2c`
+  - R1 Kconfig-gated host-VA / kernel-VA abstraction `3086bf6d8bd8`
+  - R2 backend ops cleanup (vcpu_run; mm_create/destroy/region_*;
+    takes `struct mm_struct *`) `764eac6d79de`
+  - R3 TLB-sync decoupled (docs) `3aa0af5d04e6`
+  - R5 `struct um_memory_region` `d3b2035f4079`
+  - R7 `um_backend:*` ftrace tracepoint subsystem `1a5dc6d061fa`
+  - R8 um_tlb_sync as generic drainer (docs) `72a35bbe7b80`
+  - R9 syscall-class table deferred to v2 Phase D (docs)
+    `9dc0d005feb0`
+  - R12 documentation refresh `3e9ea2505b87`
+  - R4 (per-mm host worker process — the long pole): DESIGN LOCKED
+    in memo 28 (`654d8581fb56`, `c2cf8a99ec25`). E.1 scaffolding
+    `4eb34edab3f7`, E.2 spawner skeleton `9547b9c40c31`,
+    E.3a worker spawn/reap USER-side machinery `23b4de4380a3`.
+    E.3b–E.3d (~350 LoC), E.4 (~150 LoC), E.5 (~200 LoC), E.6
+    (~50 LoC) PENDING.
+  - R6 signal handling: per memo 28 Part I, mostly absorbed by
+    R4's CLONE_SIGHAND-inside-worker design; what remains is
+    contract documentation (comes with R4 E.6).
+- **Tip of `uml-redesign-plan`:** post-R4-E.3a (~26-commit session
+  arc).
+- **Seccomp gate held 21/21 across every refactor.**
+
+**Where to start a new session:** read memo 28 (R4 design lock)
+front-to-back, then jump to memo 28 Part E.3b. Memo 25 is the
+master list; memo 26 (v2 implementation phases A-J) starts AFTER
+R4 E.6 lands (defconfig flip).
+
+### Original Part A (preserved for historical context)
+
 You inherit the following project state:
 - **v1** of the KVM backend exists in `arch/um/backend/kvm/` (not yet
   archived). Reaches mean 19.4/21 with A.4i applied. Has a residual
@@ -47,22 +95,27 @@ You inherit the following project state:
 Before taking ANY action, read these files in order. They take ~30
 minutes total but save days of repeated mistakes:
 
-1. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/26-v2-implementation-plan.md`
-   — the v2 plan (where you'll spend most time).
-2. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/25-v2-restart-guide.md`
-   — the prerequisite refactors.
-3. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/24-eli5-and-clean-slate.md`
+1. **`Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/28-r4-worker-design.md`**
+   — R4 design lock (added 2026-04-28). Read FIRST: locks the
+   gVisor sentry pattern, IPC wire format, and 6-commit
+   implementation sequence.
+2. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/26-v2-implementation-plan.md`
+   — the v2 plan (where you'll spend most time after R4 E.6).
+3. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/25-v2-restart-guide.md`
+   — the prerequisite refactors. R1, R2, R3, R5, R7, R8, R9, R10,
+   R11, R12 already landed; R4 partial; R6 absorbed by R4.
+4. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/24-eli5-and-clean-slate.md`
    — strategic context (the 10 things a clean-slate would do).
-4. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/23-fix-plan.md`
-   — the v1 fix plan (Phase 1 — A.4i — is still relevant; Phase 2-3
-   are obsoleted by memo 25/26's restart).
-5. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/22-dlopen-repro.md`
+5. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/23-fix-plan.md`
+   — the v1 fix plan (Phase 1 — A.4i — landed; Phases 2-3
+   obsoleted by memos 25/26).
+6. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/22-dlopen-repro.md`
    — what bugs we found in v1 and why they happen.
-6. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/21-tlb-shootdown-gap.md`
+7. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/21-tlb-shootdown-gap.md`
    — what fixes have FAILED (so you don't repeat them).
-7. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/20-stage-b-design.md`
+8. `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/20-stage-b-design.md`
    — Stage B design (memo 26 Phase B reuses ideas).
-8. `Documentation/virt/uml/redesign/01-vision-and-goals.md`
+9. `Documentation/virt/uml/redesign/01-vision-and-goals.md`
    — what success looks like at the project level.
 
 After reading, you should be able to answer:
@@ -214,8 +267,11 @@ If mean ≤19.4, A.4i probably isn't applied yet.
 |---|---|
 | `arch/um/backend/kvm/` exists, A.4i not committed, gate mean 18.6 | Memo 23 Phase 1 (commit A.4i) |
 | A.4i committed, gate mean 19.4 | Memo 23 Phase 2 OR memo 25 Part 1 (depends on user direction) |
-| `arch/um/backend/kvm-v1-archive/` exists, no v2 work | Memo 25 Part 2 (refactors) |
-| Refactors 1-12 done, v2 stub still empty | Memo 26 Phase A (start v2) |
+| `arch/um/backend/kvm-v1-archive/` exists, no v2 work | Memo 25 Part 2 (refactors) — start with R10/R11 |
+| `arch/um/backend/kvm-v2/` stub + R10-R12 done, no `arch/um/kernel/spawner.c` | Memo 25 Part 2 R4 — start with E.1 (memo 28) |
+| `arch/um/kernel/spawner.c` exists, no `arch/um/os-Linux/worker_user.c` | Memo 28 E.2 done; start E.3a |
+| `arch/um/os-Linux/worker_user.c` exists, defconfig still WORKER_PROCESS=n | Memo 28 E.3a done; start E.3b (worker stub-child manager) |
+| defconfig has `CONFIG_UM_WORKER_PROCESS=y`, `arch/um/backend/kvm-v2/init.c` is still a stub | All R4 done; start memo 26 Phase A |
 | v2 init.c non-stub, vm_fd works | Memo 26 Phase B (memslots) |
 | Memslots work, no shadow PT | Memo 26 Phase C (per-CPU vCPU) |
 | ... | (continue per memo 26 phase summary) |
@@ -398,16 +454,23 @@ Week 11-12:  Refactor 12 (docs) + integration testing
 8. Update memo 25's "what's done" tracking.
 
 **Critical**: refactor 1 (uml_physmem) is THE prerequisite for v2's
-TDP path. Get it right; spend extra time on KUnit test for the new
-PML4 layout.
+TDP path. Per memo 25's "Resolution — 2026-04-28" update,
+implemented as a Kconfig-gated rename rather than a runtime
+relocation; runtime split happens when v2 builds with high-VA
+toggle.
 
-**Critical**: refactor 4 (per-mm worker) is the deepest change. Use
-a sub-agent to enumerate all current `userspace_tramp` / `clone()`
-call sites before starting; budget extra time.
+**Critical**: refactor 4 (per-mm worker) is the deepest change.
+**See memo 28 for the design lock and 6-commit E.1-E.6 sequence.**
+Memo 28 Part I.5 locks the kernel-state-ownership question
+(spawner-owns-everything, gVisor sentry pattern). The Explore
+subagent surface map in the 2026-04-28 session is summarized in
+memo 28 Part B.
 
 **Verification**: after each refactor, seccomp gate stays 21/21.
-After all 12 refactors, `arch/um/backend/kvm-v2/init.c` is still a
-stub but boots cleanly.
+After all 12 refactors (incl. R4 E.6), `arch/um/backend/kvm-v2/`
+is still a stub but boots cleanly with the new substrate
+(per-mm worker process, struct um_memory_region, um_backend
+tracepoints, post-R2 ops table).
 
 ---
 
