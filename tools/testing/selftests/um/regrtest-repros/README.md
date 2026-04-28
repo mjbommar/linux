@@ -82,5 +82,20 @@ UML_BINARY=/tmp/uml-clean/linux \
   bash tools/testing/selftests/um/regrtest-repros/run-regrtest-repros.sh
 ```
 
+## Companion: `regrtest-skip.list`
+
+`regrtest-skip.list` is the curated list of CPython regrtest modules
+to `-x` skip when running `python -m test` under seccomp UML. Each
+entry is annotated with the failure class and the reproducer that
+exercises the same surface. Use it like:
+
+```
+SKIPS=$(grep -v '^#' regrtest-skip.list | grep -v '^$')
+python -m test $(printf -- '-x %s ' $SKIPS)
+```
+
+When a substrate fix lands and a reproducer flips PASS, remove the
+corresponding entry.
+
 See memo 29 (`Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/29-regrtest-substrate.md`)
 for the full strategic argument.
