@@ -13,6 +13,7 @@
 #include <asm/pgalloc.h>
 #include <asm/sections.h>
 #include <asm/mmu_context.h>
+#include <asm/trace/um_backend.h>
 #include <as-layout.h>
 #include <os.h>
 #include <skas.h>
@@ -74,6 +75,7 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	ret = um_backend_dispatch(mm_create, mm);
 	if (ret < 0)
 		goto out_free;
+	trace_um_backend_mm_create(mm);
 
 	/* Ensure the new MM is clean and nothing unwanted is mapped */
 	um_backend_dispatch(mm_region_removed, mm, 0, STUB_START);
@@ -112,6 +114,7 @@ void destroy_context(struct mm_struct *mm)
 	 * child, per-mm socketpair). Don't repeat the seccomp socket
 	 * close here — see seccomp_mm_destroy().
 	 */
+	trace_um_backend_mm_destroy(mm);
 	um_backend_dispatch(mm_destroy, mm);
 
 	free_pages(mmu->id.stack, ilog2(STUB_DATA_PAGES));

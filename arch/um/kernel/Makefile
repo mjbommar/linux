@@ -16,7 +16,7 @@ always-$(KBUILD_BUILTIN) := vmlinux.lds
 
 obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 	physmem.o process.o ptrace.o reboot.o section_split.o sigio.o \
-	signal.o sysrq.o time.o tlb.o trap.o um_diag.o \
+	signal.o sysrq.o time.o tlb.o trace.o trap.o um_diag.o \
 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
 
 # x86_nops[] + link-time stubs for bpf_jit_comp.c's cpu_feature-

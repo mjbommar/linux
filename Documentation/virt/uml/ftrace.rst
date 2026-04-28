@@ -150,6 +150,50 @@ the tracer, halts. Reports ``FTRACE_SMOKE: PASS`` / ``FAIL``.
 Exits 4 (kselftest skip) if ``UML_BINARY`` is not set or does not
 exist.
 
+UML backend tracepoints
+=======================
+
+The ``um_backend:*`` ftrace event subsystem (memo 25 R7) emits a
+tracepoint at the boundary between UML's mm-arbiter / trap loop
+and the active backend. Today's events:
+
+- ``um_backend_mm_create`` — per-mm lifecycle start (fired in
+  ``init_new_context()`` after the backend's ``mm_create`` op
+  succeeds).
+- ``um_backend_mm_destroy`` — per-mm lifecycle end.
+- ``um_backend_mm_region_added`` — backend learned of a new VA
+  range mapping (``va``, ``len``, ``prot``, ``phys_fd``,
+  ``offset``). Fired per-page from ``um_tlb_sync()``'s drain loop.
+- ``um_backend_mm_region_removed`` — backend learned of an unmap.
+
+Each event compiles to a no-op when ``CONFIG_TRACING=n`` (so
+``prod-fast`` / ``sandbox`` profiles pay nothing). With
+``CONFIG_TRACING=y`` (selected via ``CONFIG_FUNCTION_TRACER`` or
+``CONFIG_FTRACE_SYSCALLS``) the events register under
+``/sys/kernel/tracing/events/um_backend/``.
+
+Enable and read with::
+
+  $ mount -t tracefs nodev /sys/kernel/tracing
+  $ echo 1 > /sys/kernel/tracing/events/um_backend/enable
+  $ cat /sys/kernel/tracing/trace
+  ...
+  true-23 [000] .....   um_backend_mm_create: mm=ffff...
+  true-23 [000] d....   um_backend_mm_region_added: mm=ffff... va=0x4003d000 len=0x1000 prot=0x7 fd=3 off=0xb31000
+  ...
+
+Or via ``trace-cmd``::
+
+  $ trace-cmd record -e 'um_backend:*' ./workload
+  $ trace-cmd report
+
+The ``vcpu_run_enter`` / ``vcpu_run_exit`` events memo 25 R7's
+wishlist mentions are deferred until the v2 KVM backend lands a
+kernel-side dispatcher around the trap loop —
+``arch/um/os-Linux/skas/process.c::userspace()`` is currently a
+USER TU (compiled with ``USER_CFLAGS``, no access to kernel-side
+tracepoint macros). Add them when the wrapper exists.
+
 See also
 ========
 

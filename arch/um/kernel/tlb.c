@@ -10,6 +10,7 @@
 #include <asm/backend.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
+#include <asm/trace/um_backend.h>
 #include <as-layout.h>
 #include <mem_user.h>
 #include <os.h>
@@ -87,10 +88,16 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 			       (w ? UM_PROT_WRITE : 0) |
 			       (x ? UM_PROT_EXEC : 0);
 
+			trace_um_backend_mm_region_added(ops->mm, addr,
+							 PAGE_SIZE, prot,
+							 fd, offset);
 			ret = ops->mmap(ops->mm, addr, PAGE_SIZE,
 					prot, fd, offset);
-		} else
+		} else {
+			trace_um_backend_mm_region_removed(ops->mm, addr,
+							   PAGE_SIZE);
 			ret = ops->unmap(ops->mm, addr, PAGE_SIZE);
+		}
 
 		/*
 		 * Only mark the PTE uptodate if the backend op succeeded.
