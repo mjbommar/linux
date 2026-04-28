@@ -122,9 +122,19 @@ const struct seq_operations cpuinfo_op = {
 	.show	= show_cpuinfo,
 };
 
-/* Set in linux_main */
+/*
+ * Memo 25 R1 abstraction. Today both anchors equal `__binary_start
+ * & PAGE_MASK` (low host VA in PML4[0]); the v2 KVM build will set
+ * uml_physmem to a high constant (PML4[256+]) so the guest pgd's
+ * kernel half no longer overlaps user mappings, while
+ * __binary_start_hva stays at the low host VA where UML's pages
+ * actually live. See arch/um/include/shared/mem.h for the
+ * conceptual split.
+ */
 unsigned long uml_physmem;
 EXPORT_SYMBOL(uml_physmem);
+unsigned long __binary_start_hva;
+EXPORT_SYMBOL(__binary_start_hva);
 
 unsigned long uml_reserved; /* Also modified in mem_init */
 unsigned long start_vm;
@@ -378,7 +388,8 @@ int __init linux_main(int argc, char **argv, char **envp)
 		physmem_size += diff;
 	}
 
-	uml_physmem = (unsigned long) __binary_start & PAGE_MASK;
+	__binary_start_hva = (unsigned long) __binary_start & PAGE_MASK;
+	uml_physmem = __binary_start_hva;	/* memo 25 R1: equal today; v2 splits them */
 
 	/* Reserve up to 4M after the current brk */
 	uml_reserved = ROUND_4M(brk_start) + (1 << 22);

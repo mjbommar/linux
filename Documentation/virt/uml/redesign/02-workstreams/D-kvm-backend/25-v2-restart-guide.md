@@ -317,9 +317,59 @@ risky audit (option C). Folding R1 into v2 Phase B keeps the
 refactor sequence honest about where the layout decoupling
 actually pays off.
 
-**Pending user direction.** R1 is paused in the task tracker. The
-remaining refactors (R3/R5/R7/R8/R9 unblocked by R2; R4 the long
-pole; R6 blocked on R4; R12 last) can proceed independently.
+#### Resolution — 2026-04-28: implement R1 as a Kconfig-gated abstraction
+
+User insight: "can't we refactor this so that the kconfig flags
+cleanly abstract this constraint between seccomp and kvm? it's
+just another virtual memory abstraction layer, right?"
+
+Yes — that's the correct framing. The "constraint" isn't
+fundamental; it's that today's UML conflates two distinct concepts
+under a single name. R1 introduces the conceptual split:
+
+- `uml_physmem` — kernel direct-map base in the *guest pgd* (used
+  by `__pa()` / `__va()` / `PAGE_OFFSET`). Today this is the host
+  VA where UML loaded; under v2 KVM this becomes a high constant.
+
+- `__binary_start_hva` — host VA where UML's pages physically live.
+  Today equals `uml_physmem`; under v2 it stays low while
+  `uml_physmem` moves high.
+
+This commit lands the rename + abstraction without flipping any
+Kconfig gate. Today's seccomp / dynamic builds see no behavioral
+change (both anchors equal `__binary_start & PAGE_MASK`). When v2
+KVM is built (memo 26 Phase B), the Kconfig gate flips and the
+runtime split takes effect. Sites that mean "host VA" use
+`__binary_start_hva`; sites that mean "kernel pgd VA" use
+`uml_physmem`. The 5 sites identified by the surface-mapping pass
+have been updated:
+
+  - arch/um/os-Linux/main.c:302 — kfree-vs-vfree range check
+    (host-VA semantics; uses `__binary_start_hva` lower bound)
+  - arch/um/drivers/virtio_uml.c:652 — vhost-user offset
+    (host-VA math; uses `__binary_start_hva`)
+  - arch/um/drivers/vfio_user.c:56 — VFIO DMA offset
+    (same; uses `__binary_start_hva`)
+  - arch/um/include/shared/mem.h — abstraction header
+  - arch/um/kernel/um_arch.c — both anchors initialized
+
+Build verified: defconfig (DYNAMIC=y, SECCOMP=y) LINK linux clean.
+Boot smoke under seccomp prints banner and runs Python.
+Seccomp gate post-R1: 21/21 (pass=21 fail=0).
+
+The `__binary_end_hva` companion (for upper-bound host-VA
+comparisons) is deferred until a site actually needs it; today
+high_physmem == __binary_start_hva + physmem_size and the existing
+high_physmem suffices. v2 Phase B will introduce __binary_end_hva
+when high_physmem and __binary_start_hva + physmem_size diverge.
+
+The Kconfig gate that flips the runtime split lives at
+arch/um/include/asm/page.h (currently a no-op `#define PAGE_OFFSET
+(uml_physmem)`); v2's Phase B work redefines it under
+`#ifdef CONFIG_UM_BACKEND_KVM_V2_HIGH_VA` (or similar) to point at
+the high constant. The 35 kernel-PT users of __pa/__va inherit the
+new value transparently; the 5 host-VA users above already use the
+correct symbol.
 
 ### Refactor 2: Backend ops abstraction cleanup
 

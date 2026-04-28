@@ -299,7 +299,14 @@ void __wrap_free(void *ptr)
 	 * there is a possibility for memory leaks.
 	 */
 
-	if ((addr >= uml_physmem) && (addr < high_physmem)) {
+	/*
+	 * Host-VA range check: was this pointer kmalloc'd from the physmem
+	 * region? Both bounds are host VAs. Today high_physmem ==
+	 * __binary_start_hva + physmem_size; under v2 that equality
+	 * breaks (high_physmem stays a kernel-pgd-VA concept) and this
+	 * upper bound will need a __binary_end_hva sibling. Memo 25 R1.
+	 */
+	if ((addr >= __binary_start_hva) && (addr < high_physmem)) {
 		if (kmalloc_ok)
 			kfree(ptr);
 	}
