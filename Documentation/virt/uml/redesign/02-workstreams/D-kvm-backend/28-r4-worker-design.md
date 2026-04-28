@@ -364,12 +364,81 @@ under.
 
 ---
 
+## Part I.5 — Kernel-state ownership clarification (added 2026-04-28 evening)
+
+R4's spawner-vs-worker split implies a question memo 25's R4 plan
+left implicit: **where does the UML kernel state live?**
+
+UML's "kernel" is the Linux kernel built for ARCH=um, running as
+a host process. mm_struct, task_struct, scheduler, page tables,
+syscall dispatch — all of it. Today (pre-R4) the answer is
+trivial: there's one host process; the kernel state is in it.
+After R4 with separate worker processes, this is no longer
+trivial.
+
+Three candidate models:
+
+1. **Spawner-owns-everything (gVisor sentry pattern).** Kernel
+   state lives in the spawner only. Workers are minimal trap
+   relays: SIGSYS → IPC to spawner → spawner runs handle_syscall
+   → reply. Worker has no `task_struct`, no `mm_struct`, no
+   scheduler. Cost: every syscall is a cross-process IPC
+   round-trip (~400 ns over a UNIX socket). Benefit: simple
+   ownership story; spawner is the single source of truth.
+
+2. **Worker-owns-everything (per-mm independent kernel).** Each
+   worker runs a copy of the UML kernel forked from the spawner;
+   diverges over time. Spawner is just a coordinator. Cost: kernel
+   state diverges; cross-mm fork/exec gets very complicated;
+   migrating tasks across mms means migrating their full kernel
+   context. Benefit: no syscall IPC.
+
+3. **Hybrid (shared kernel state via shared memory).** mm_struct
+   etc. in shared memory; spawner + worker both touch it under
+   locks. Cost: high — every kernel access is potentially a
+   cache-line bounce; locking discipline is fragile. Benefit:
+   in-process syscalls.
+
+**Locked: option 1 (spawner-owns-everything).** Matches gVisor;
+single source of truth; simplest ownership; the IPC cost is
+acceptable for v2's targets (memo 26 Phase H budgets ≤1.2×
+seccomp wall-clock and seccomp's own SIGSYS+futex round-trip is
+~300-500 ns; an extra socket round-trip per syscall puts v2 at
+~600-900 ns, which is still well under 1.2× of typical seccomp
+workloads).
+
+Concretely for E.3+:
+- Worker's "trap loop" is minimal: receive `MIGRATE_TO` from
+  spawner (with task registers), set up a stub child via clone,
+  resume user-mode, on SIGSYS post `SYSCALL_REQ` to spawner,
+  block on `SYSCALL_REP`, write the reply into the stub child's
+  registers, resume.
+- Worker has NO `task_struct`, NO `mm_struct`. Only the
+  spawner's UML kernel runs handle_syscall, schedule, etc.
+- The pthreads inside the worker are host pthreads (pthread_t),
+  not UML task_structs. They exist to give each guest task a
+  kernel stack to run on inside the worker process; they don't
+  participate in UML's scheduling.
+
+This makes E.3 conceptually simpler: the worker is a thin
+trampoline. The bulk of R4's complexity is in the spawner-side
+IPC dispatcher (one thread per worker, blocking recvmsg, dispatch
+to UML kernel) and in the cross-mm migration handler (E.5).
+
+---
+
 ## Part J — Status (2026-04-28 end of session)
 
-Memo 28 (this document) lands as the design lock. Implementation
-sequence E.1-E.6 has not started yet — R4 is properly scoped at
-~1000 LoC across the 6 commits and is best executed in a dedicated
-multi-day work session with a clean substrate.
+Memo 28 (this document) lands as the design lock. E.1 (scaffolding,
+4eb34edab3f7) and E.2 (spawner skeleton, 9547b9c40c31) have
+landed; both compile clean under WORKER_PROCESS=n (today's path)
+and WORKER_PROCESS=y (worker model active but no workers spawned
+yet — banner emits, then seccomp's mm_create falls through to
+the existing stub-child path).
+
+E.3-E.6 are the substantive work and not yet started. Best
+executed as a focused multi-session effort with the design lock
+above as the spec.
 
 Next session opens this memo, starts with E.1 (scaffolding), and
 proceeds linearly through E.6. Verification gates after every
