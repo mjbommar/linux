@@ -253,6 +253,74 @@ unknown.
 **Can land independently of:** everything (this is a pure UML core
 change, no backend impact other than future).
 
+#### Update — 2026-04-28: literal interpretation incompatible with seccomp
+
+A surface-mapping pass (Explore subagent, ~73 reference sites
+across arch/um/, arch/x86/um/, drivers) found that R1 as written —
+"allocate `uml_physmem` (and the entire kernel direct map) at
+PML4[256+]" — **cannot be implemented for seccomp mode**, and
+therefore cannot land as a pre-v2 refactor without breaking the
+seccomp gate.
+
+The constraint: UML runs as a Linux *user* process. The host
+kernel reserves PML4[256..511] (canonical kernel-half,
+`0xffff_8000_0000_0000+`) and rejects any user mmap into it. Today,
+`uml_physmem` is BOTH the kernel direct-map base AND the host VA
+where UML's mapped pages physically live (`uml_physmem =
+__binary_start & PAGE_MASK` in `arch/um/kernel/um_arch.c:381`).
+Generic kernel code dereferences `__va(phys)` results
+(`page_address(p)`, `memset((void *)__va(p), 0, PAGE_SIZE)`, etc.);
+moving uml_physmem to PML4[256+] makes those derefs target
+addresses the host kernel will not let UML access.
+
+The *structural* fix this refactor describes — kernel half at
+PML4[256+], user half at PML4[0], no overlap — is meaningful only
+when the guest's page table is **separate** from the host process's
+page table. That separation arrives with v2 + TDP + memslots (memo
+26 Phase B): KVM walks `mm->pgd` directly, with kernel pages
+mapped into PML4[256+] of the *guest* pgd, while the host process
+keeps its physical memory wherever the kernel allocated it (low
+host VA, untouched). For seccomp mode there is no guest pgd
+distinct from the host pgd; the structural fix is structurally
+absent.
+
+Three viable rescopings:
+
+A. **Soft / preparatory R1.** Define a constant
+   `UM_KERNEL_VA_BASE = 0xffff_888000_000000` (or chosen value) for
+   v2's eventual guest-pgd kernel-half. Add documentation comments
+   in `arch/um/include/asm/page.h` and `arch/um/include/shared/mem.h`
+   distinguishing host-VA usage from guest-pgd-VA usage. Add a KUnit
+   test that's skipped today and gates v2's pgd setup later. No
+   runtime change. ~half a day.
+
+B. **Defer R1 to memo 26 Phase B.** v2's TDP + memslot work
+   inherently sets up the guest pgd with kernel half at PML4[256+].
+   R1 becomes part of that phase rather than a standalone refactor.
+   Reorder the sequencing diagram so R2/R3/R4/R5/R7/R8/R9 land
+   first, then v2 Phase B does the layout work in context.
+
+C. **Strategy 2 anyway.** Bump uml_physmem to high VA, introduce
+   `__binary_start_hva` for the ~12 host-VA sites that must keep
+   working. Risky: depends on auditing every `__va()` deref site to
+   confirm none run on seccomp's hot path. The subagent's report
+   identified driver paths (`virtio_uml.c`, `vfio_user.c`) and
+   `os-Linux/main.c:302` that would need explicit splitting, plus
+   any generic-kernel `__va()` dereference. High likelihood of
+   subtle seccomp regressions.
+
+**Recommendation: option B.** The structural fix the memo wants is
+the v2 Phase B work; doing R1 separately just to do it pre-v2
+delivers cosmetic value (KUnit test that already needs v2 to
+pass) at the cost of either no runtime change (option A) or a
+risky audit (option C). Folding R1 into v2 Phase B keeps the
+refactor sequence honest about where the layout decoupling
+actually pays off.
+
+**Pending user direction.** R1 is paused in the task tracker. The
+remaining refactors (R3/R5/R7/R8/R9 unblocked by R2; R4 the long
+pole; R6 blocked on R4; R12 last) can proceed independently.
+
 ### Refactor 2: Backend ops abstraction cleanup
 
 **Why.** Item #5 from memo 24's strategic frame. Current
