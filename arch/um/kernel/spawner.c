@@ -26,16 +26,23 @@
  * E.3 makes spawn_worker_for_mm actually create a worker.
  */
 
+#include <linux/err.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
 #include <linux/list.h>
 #include <linux/mm_types.h>
 #include <linux/printk.h>
+#include <linux/ptrace.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 
 #include <os.h>
+#include <skas.h>
+#include <sysdep/ptrace.h>
+#include <sysdep/ptrace_user.h>
 #include <worker_api.h>
 #include <worker_ipc.h>
 #include <worker_user.h>
@@ -49,10 +56,10 @@ struct um_worker {
 	struct mm_struct	*mm;		/* back-ref to the guest mm we serve */
 	int			pid;		/* worker process pid; -1 until E.3 spawns */
 	int			ipc_sock;	/* spawner-side socket end; -1 in E.2 */
+	struct task_struct	*dispatcher;	/* per-worker IPC kthread (E.3c); NULL otherwise */
 
 	/*
-	 * Future fields (E.3+) go here:
-	 *   struct task_struct *dispatcher;  // per-worker IPC thread
+	 * Future fields (E.4+) go here:
 	 *   wait_queue_head_t   reply_wait;  // for syscall round-trip
 	 *   atomic_t            quiescing;   // QUIESCE_REQ flag
 	 *   ...
@@ -106,6 +113,105 @@ void spawner_shutdown(void)
 }
 
 /*
+ * Per-worker IPC dispatcher kthread (memo 28 E.3c / Part C.D / Part K.5).
+ *
+ * Why a kthread: handle_syscall takes a uml_pt_regs and operates only
+ * on its argument — no current/task_struct dereference for the syscall
+ * path itself (Part K.5). A kernel thread therefore has full access to
+ * UML's syscall dispatch surface without bouncing through the
+ * originating task. One thread per worker (Part C.D).
+ *
+ * Exit semantics:
+ *  (a) kthread_stop() bumps should_stop; reap_worker_for_mm calls it
+ *      before reap_worker_process closes the socket. We loop on
+ *      kthread_should_stop after every short / EINTR read so the stop
+ *      is observed even if a partial read happened.
+ *  (b) Socket close from the spawner side (reap path) gives os_read_file
+ *      a 0 return (EOF) once the worker drains and closes its end, or
+ *      -EBADF after our own close — either path falls through to the
+ *      same exit branch.
+ *  (c) Explicit WORKER_MSG_SHUTDOWN: not produced by E.3b/E.3c paths
+ *      yet but handled defensively so the dispatcher can be retired
+ *      out-of-band by future spawner-initiated tear-down.
+ */
+static int worker_dispatcher_fn(void *arg)
+{
+	struct um_worker *w = arg;
+	struct worker_msg msg;
+	int n;
+
+	while (!kthread_should_stop()) {
+		n = os_read_file(w->ipc_sock, &msg, sizeof(msg));
+		if (n == 0)
+			break;	/* EOF: worker closed or we did */
+		if (n == -EINTR)
+			continue;
+		if (n < 0)
+			break;	/* socket gone (e.g. -EBADF after our close) */
+		if (n != sizeof(msg)) {
+			pr_warn_ratelimited("um: worker disp: short read %d (sock=%d)\n",
+					    n, w->ipc_sock);
+			continue;
+		}
+
+		if (msg.magic != WORKER_IPC_MAGIC) {
+			pr_warn_ratelimited("um: worker disp: bad magic 0x%x type=%u\n",
+					    (unsigned)msg.magic, (unsigned)msg.type);
+			continue;
+		}
+
+		switch (msg.type) {
+		case WORKER_MSG_SYSCALL_REQ: {
+			/*
+			 * struct pt_regs wraps a single uml_pt_regs and is
+			 * what handle_syscall does container_of on. The fp[]
+			 * flex tail is unused by the syscall dispatch path
+			 * (Part K.5), so a stack-local pt_regs without FP is
+			 * safe for E.3c smoke purposes; E.3d will route real
+			 * traps which already carry properly-sized regs.
+			 */
+			struct pt_regs regs;
+			struct worker_msg rep;
+
+			memset(&regs, 0, sizeof(regs));
+			regs.regs.is_user = 1;
+			regs.regs.gp[HOST_ORIG_AX] = msg.u.syscall.nr;
+			regs.regs.gp[HOST_DI]      = msg.u.syscall.args[0];
+			regs.regs.gp[HOST_SI]      = msg.u.syscall.args[1];
+			regs.regs.gp[HOST_DX]      = msg.u.syscall.args[2];
+			regs.regs.gp[HOST_R10]     = msg.u.syscall.args[3];
+			regs.regs.gp[HOST_R8]      = msg.u.syscall.args[4];
+			regs.regs.gp[HOST_R9]      = msg.u.syscall.args[5];
+
+			handle_syscall(&regs.regs);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.magic = WORKER_IPC_MAGIC;
+			rep.type  = WORKER_MSG_SYSCALL_REP;
+			rep.task_handle = msg.task_handle;
+			rep.u.reply.retval = regs.regs.gp[HOST_AX];
+
+			n = os_write_file(w->ipc_sock, &rep, sizeof(rep));
+			if (n != sizeof(rep)) {
+				pr_warn_ratelimited("um: worker disp: SYSCALL_REP write failed %d\n",
+						    n);
+				if (n < 0 && n != -EINTR)
+					return 0;
+			}
+			break;
+		}
+		case WORKER_MSG_SHUTDOWN:
+			return 0;
+		default:
+			pr_warn_ratelimited("um: worker disp: unhandled msg type %u\n",
+					    (unsigned)msg.type);
+			break;
+		}
+	}
+	return 0;
+}
+
+/*
  * Per-mm worker lifecycle — stubs. E.3 replaces with real impls.
  *
  * Callers (today only seccomp_mm_create / seccomp_mm_destroy via
@@ -142,6 +248,16 @@ int spawn_worker_for_mm(struct mm_struct *mm)
 		return rc;
 	}
 
+	w->dispatcher = kthread_run(worker_dispatcher_fn, w,
+				    "um-worker-disp/%d", w->pid);
+	if (IS_ERR(w->dispatcher)) {
+		rc = PTR_ERR(w->dispatcher);
+		w->dispatcher = NULL;
+		reap_worker_process(w->pid, w->ipc_sock);
+		kfree(w);
+		return rc;
+	}
+
 	scoped_guard(spinlock, &workers_lock) {
 		list_add(&w->list, &workers);
 	}
@@ -168,10 +284,24 @@ void reap_worker_for_mm(struct mm_struct *mm)
 	pid  = w->pid;
 	sock = w->ipc_sock;
 
+	/*
+	 * Order: reap_worker_process closes our socket end first, which
+	 * unblocks the dispatcher's os_read_file with EOF/-EBADF; then
+	 * SIGTERM+waitpid finishes the worker. After that, kthread_stop
+	 * collects an already-exited kthread (kthread_stop on a returned
+	 * kthread is fine — it just returns the exit code). Reversing
+	 * (kthread_stop first) would deadlock since kthread_stop waits
+	 * for the kthread to exit, but the kthread is blocked in read.
+	 */
+	reap_worker_process(pid, sock);
+
+	if (w->dispatcher) {
+		kthread_stop(w->dispatcher);
+		w->dispatcher = NULL;
+	}
+
 	mm->context.worker = NULL;
 	kfree(w);
-
-	reap_worker_process(pid, sock);
 }
 
 /*
