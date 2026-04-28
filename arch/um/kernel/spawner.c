@@ -35,6 +35,7 @@
 #include <linux/spinlock.h>
 
 #include <worker_api.h>
+#include <worker_user.h>
 
 /*
  * Per-mm worker handle. Opaque to callers; only spawner.c (and
@@ -116,36 +117,58 @@ void spawner_shutdown(void)
  */
 int spawn_worker_for_mm(struct mm_struct *mm)
 {
+	struct um_worker *w;
+	int rc;
+
 	if (!spawner_initialized)
 		return -ENODEV;
 
 	WARN_ON_ONCE(mm->context.worker != NULL);
 
-	/*
-	 * E.2 does not spawn. mm->context.worker stays NULL; the
-	 * caller falls back to today's stub-child-in-spawner path.
-	 * Returning success keeps the call site contract simple.
-	 */
+	w = kzalloc(sizeof(*w), GFP_KERNEL);
+	if (!w)
+		return -ENOMEM;
+
+	w->mm       = mm;
+	w->pid      = -1;
+	w->ipc_sock = -1;
+
+	rc = spawn_worker_process(&w->pid, &w->ipc_sock);
+	if (rc < 0) {
+		kfree(w);
+		return rc;
+	}
+
+	scoped_guard(spinlock, &workers_lock) {
+		list_add(&w->list, &workers);
+	}
+
+	mm->context.worker = w;
+
+	pr_info("um: worker model: spawned worker pid=%d for mm=%p (ipc_sock=%d)\n",
+		w->pid, mm, w->ipc_sock);
 	return 0;
 }
 
 void reap_worker_for_mm(struct mm_struct *mm)
 {
 	struct um_worker *w = mm->context.worker;
+	int pid, sock;
 
 	if (!w)
-		return;	/* E.2 path: nothing to reap */
+		return;
 
 	scoped_guard(spinlock, &workers_lock) {
 		list_del(&w->list);
 	}
 
-	/*
-	 * E.3 will: kill(w->pid, SIGTERM); waitpid(w->pid, NULL, 0);
-	 * close(w->ipc_sock); kfree(w->dispatcher); etc.
-	 */
+	pid  = w->pid;
+	sock = w->ipc_sock;
+
 	mm->context.worker = NULL;
 	kfree(w);
+
+	reap_worker_process(pid, sock);
 }
 
 /*

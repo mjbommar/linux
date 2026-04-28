@@ -17,8 +17,8 @@
  * u64 / u16 / u8 from <linux/types.h> in kernel context and the
  * matching uintN_t from <stdint.h> in USER context.
  */
-#ifndef __UM_BACKEND_SECCOMP_WORKER_IPC_H
-#define __UM_BACKEND_SECCOMP_WORKER_IPC_H
+#ifndef __SHARED_UM_WORKER_IPC_H
+#define __SHARED_UM_WORKER_IPC_H
 
 #ifdef __UM_HOST__
 #include <stdint.h>
@@ -98,4 +98,4 @@ static inline void __worker_msg_size_check(void)
 }
 #endif
 
-#endif /* __UM_BACKEND_SECCOMP_WORKER_IPC_H */
+#endif /* __SHARED_UM_WORKER_IPC_H */
