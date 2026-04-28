@@ -38,6 +38,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/wait.h>
 
 #include <os.h>
 #include <skas.h>
@@ -60,14 +61,47 @@ struct um_worker {
 	struct task_struct	*dispatcher;	/* per-worker IPC kthread (E.3c); NULL otherwise */
 
 	/*
+	 * E.3d.1 wait-queue bounce (memo 28 Part C.E).
+	 *
+	 * `pending_reqs` is a FIFO of SYSCALL_REQs the dispatcher has
+	 * received but not yet executed; `pending_lock` protects the
+	 * list head. `reply_wait` wakes any task blocked in
+	 * worker_run_pending_syscalls when either a new request lands
+	 * or the dispatcher exits.
+	 *
+	 * Lock-ordering rule: pending_lock is INNERMOST. Never acquire
+	 * pending_lock while holding workers_lock. The dispatcher runs
+	 * outside workers_lock, and reap_worker_for_mm only touches
+	 * pending_reqs after the dispatcher has fully exited (kthread_stop
+	 * returned), so the two locks never nest in practice — this rule
+	 * is asserted by construction in the call sites below.
+	 */
+	wait_queue_head_t	reply_wait;
+	struct list_head	pending_reqs;
+	spinlock_t		pending_lock;
+
+	/*
 	 * Future fields (E.4+) go here:
-	 *   wait_queue_head_t   reply_wait;  // for syscall round-trip
 	 *   atomic_t            quiescing;   // QUIESCE_REQ flag
 	 *   ...
 	 *
 	 * Keep additions explicit so the wire format and lifecycle
 	 * stay reviewable.
 	 */
+};
+
+/*
+ * One pending SYSCALL_REQ entry. Lives on um_worker::pending_reqs.
+ *
+ * We allocate one per inbound SYSCALL_REQ (the dispatcher copies the
+ * full message into it so it can release its stack frame). The
+ * draining task in worker_run_pending_syscalls dequeues, runs
+ * handle_syscall, replies, then kfrees.
+ */
+struct worker_pending_req {
+	struct list_head		list;
+	u64				task_handle;
+	struct worker_msg_syscall	syscall;
 };
 
 static LIST_HEAD(workers);
@@ -114,13 +148,18 @@ void spawner_shutdown(void)
 }
 
 /*
- * Per-worker IPC dispatcher kthread (memo 28 E.3c / Part C.D / Part K.5).
+ * Per-worker IPC dispatcher kthread (memo 28 E.3c / Part C.D / Part K.5
+ * / E.3d.1 Part C.E).
  *
- * Why a kthread: handle_syscall takes a uml_pt_regs and operates only
- * on its argument — no current/task_struct dereference for the syscall
- * path itself (Part K.5). A kernel thread therefore has full access to
- * UML's syscall dispatch surface without bouncing through the
- * originating task. One thread per worker (Part C.D).
+ * Routing-only after E.3d.1. handle_syscall is NOT called here: its
+ * sys_call_table[] callees deref `current` heavily (credentials, files,
+ * fs, signals, ptrace, seccomp), and the dispatcher's task_struct is a
+ * kthread, not the originating guest task. Instead we copy each
+ * SYSCALL_REQ into a worker_pending_req, link it on the worker's
+ * pending_reqs FIFO, and wake the originating guest task that's
+ * blocked in worker_run_pending_syscalls — it runs handle_syscall on
+ * its own kernel stack under its own `current` and ships SYSCALL_REP
+ * back over the socket.
  *
  * Exit semantics:
  *  (a) kthread_stop() bumps should_stop; reap_worker_for_mm calls it
@@ -134,6 +173,10 @@ void spawner_shutdown(void)
  *  (c) Explicit WORKER_MSG_SHUTDOWN: not produced by E.3b/E.3c paths
  *      yet but handled defensively so the dispatcher can be retired
  *      out-of-band by future spawner-initiated tear-down.
+ *
+ * On exit we wake_up(&w->reply_wait) so any task blocked in
+ * worker_run_pending_syscalls observes the dispatcher-gone condition
+ * and returns -ENODEV.
  */
 static int worker_dispatcher_fn(void *arg)
 {
@@ -163,52 +206,50 @@ static int worker_dispatcher_fn(void *arg)
 
 		switch (msg.type) {
 		case WORKER_MSG_SYSCALL_REQ: {
+			struct worker_pending_req *req;
+
 			/*
-			 * struct pt_regs wraps a single uml_pt_regs and is
-			 * what handle_syscall does container_of on. The fp[]
-			 * flex tail is unused by the syscall dispatch path
-			 * (Part K.5), so a stack-local pt_regs without FP is
-			 * safe for E.3c smoke purposes; E.3d will route real
-			 * traps which already carry properly-sized regs.
+			 * GFP_KERNEL is fine: the dispatcher kthread has no
+			 * atomic-context constraints (no spinlocks held, no
+			 * IRQ context). Allocation failure drops the request
+			 * — the originating guest task will hang waiting for
+			 * a reply, which under E.3d.2 surfaces as a stalled
+			 * syscall. Better than silently producing a wrong
+			 * answer.
 			 */
-			struct pt_regs regs;
-			struct worker_msg rep;
-
-			memset(&regs, 0, sizeof(regs));
-			regs.regs.is_user = 1;
-			regs.regs.gp[HOST_ORIG_AX] = msg.u.syscall.nr;
-			regs.regs.gp[HOST_DI]      = msg.u.syscall.args[0];
-			regs.regs.gp[HOST_SI]      = msg.u.syscall.args[1];
-			regs.regs.gp[HOST_DX]      = msg.u.syscall.args[2];
-			regs.regs.gp[HOST_R10]     = msg.u.syscall.args[3];
-			regs.regs.gp[HOST_R8]      = msg.u.syscall.args[4];
-			regs.regs.gp[HOST_R9]      = msg.u.syscall.args[5];
-
-			handle_syscall(&regs.regs);
-
-			memset(&rep, 0, sizeof(rep));
-			rep.magic = WORKER_IPC_MAGIC;
-			rep.type  = WORKER_MSG_SYSCALL_REP;
-			rep.task_handle = msg.task_handle;
-			rep.u.reply.retval = regs.regs.gp[HOST_AX];
-
-			n = os_write_file(w->ipc_sock, &rep, sizeof(rep));
-			if (n != sizeof(rep)) {
-				pr_warn_ratelimited("um: worker disp: SYSCALL_REP write failed %d\n",
-						    n);
-				if (n < 0 && n != -EINTR)
-					return 0;
+			req = kmalloc(sizeof(*req), GFP_KERNEL);
+			if (!req) {
+				pr_warn_ratelimited("um: worker disp: OOM dropping SYSCALL_REQ task=%llu\n",
+						    (unsigned long long)msg.task_handle);
+				break;
 			}
+
+			req->task_handle = msg.task_handle;
+			req->syscall     = msg.u.syscall;
+
+			scoped_guard(spinlock, &w->pending_lock) {
+				list_add_tail(&req->list, &w->pending_reqs);
+			}
+			wake_up(&w->reply_wait);
 			break;
 		}
 		case WORKER_MSG_SHUTDOWN:
-			return 0;
+			goto out;
 		default:
 			pr_warn_ratelimited("um: worker disp: unhandled msg type %u\n",
 					    (unsigned)msg.type);
 			break;
 		}
 	}
+out:
+	/*
+	 * Wake any task blocked in worker_run_pending_syscalls so it can
+	 * observe the dispatcher-gone condition (we're about to return,
+	 * so kthread_should_stop is on the way to true OR we've hit EOF).
+	 * The waiter checks list_empty + dispatcher state under
+	 * pending_lock; the wake is the edge it observes.
+	 */
+	wake_up(&w->reply_wait);
 	return 0;
 }
 
@@ -270,6 +311,10 @@ static int __spawn_worker_for_mm(struct mm_struct *mm, bool defer_dispatcher)
 	w->pid      = -1;
 	w->ipc_sock = -1;
 
+	init_waitqueue_head(&w->reply_wait);
+	INIT_LIST_HEAD(&w->pending_reqs);
+	spin_lock_init(&w->pending_lock);
+
 	rc = spawn_worker_process(&w->pid, &w->ipc_sock);
 	if (rc < 0) {
 		kfree(w);
@@ -304,6 +349,7 @@ int spawn_worker_for_mm(struct mm_struct *mm)
 void reap_worker_for_mm(struct mm_struct *mm)
 {
 	struct um_worker *w = mm->context.worker;
+	struct worker_pending_req *req, *tmp;
 	int pid, sock;
 
 	if (!w)
@@ -331,6 +377,28 @@ void reap_worker_for_mm(struct mm_struct *mm)
 		kthread_stop(w->dispatcher);
 		w->dispatcher = NULL;
 	}
+
+	/*
+	 * Now that the dispatcher has fully exited (kthread_stop returned)
+	 * no one else is touching pending_reqs — drain whatever is left.
+	 * Wake any straggling waiter one more time (the dispatcher's exit
+	 * path already did this, but cheap and idempotent) so that a task
+	 * which raced into worker_run_pending_syscalls between the
+	 * list_del above and now observes -ENODEV via list_empty +
+	 * dispatcher == NULL.
+	 *
+	 * Lock ordering: we are NOT holding workers_lock here (the
+	 * scoped_guard above released it at the end of its block). Taking
+	 * pending_lock is therefore unconstrained — see the lock-ordering
+	 * note on struct um_worker.
+	 */
+	scoped_guard(spinlock, &w->pending_lock) {
+		list_for_each_entry_safe(req, tmp, &w->pending_reqs, list) {
+			list_del(&req->list);
+			kfree(req);
+		}
+	}
+	wake_up(&w->reply_wait);
 
 	mm->context.worker = NULL;
 	kfree(w);
@@ -479,6 +547,127 @@ int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg)
 	if (n != sizeof(*msg))
 		return n < 0 ? n : -EIO;
 	return 0;
+}
+
+/*
+ * Drain one worker_pending_req from `w` and execute the syscall under
+ * the calling task's `current` (memo 28 Part C.E "wait-queue bounce").
+ *
+ * Returns 0 if a request was consumed (caller should keep looping),
+ * -EAGAIN if the queue was empty AND the dispatcher is still alive
+ * (caller should re-block on reply_wait), or -ENODEV if the
+ * dispatcher has exited and the queue is drained (caller should
+ * return).
+ *
+ * Why pt_regs on the stack: handle_syscall does container_of on its
+ * uml_pt_regs argument. The fp[] flex tail is unused by the syscall
+ * dispatch path itself (Part K.5), so a stack-local pt_regs without
+ * FP storage is sufficient for routing. E.3d.2's vcpu_run path will
+ * pass the trapping task's actual pt_regs once that lands.
+ */
+static int worker_run_one_pending(struct um_worker *w)
+{
+	struct worker_pending_req *req;
+	struct pt_regs regs;
+	struct worker_msg rep;
+	int n;
+
+	scoped_guard(spinlock, &w->pending_lock) {
+		req = list_first_entry_or_null(&w->pending_reqs,
+					       struct worker_pending_req, list);
+		if (req)
+			list_del(&req->list);
+	}
+
+	if (!req) {
+		/*
+		 * Queue is empty. If the dispatcher has already returned,
+		 * the wake from the exit path means no more requests will
+		 * arrive — caller exits with -ENODEV. Otherwise caller
+		 * blocks again.
+		 *
+		 * READ_ONCE keeps the compiler from CSE'ing this against
+		 * an earlier load; the dispatcher field is set/cleared
+		 * with normal stores under workers_lock or kthread
+		 * lifecycle but for this read we only care about NULL vs
+		 * non-NULL atomicity, not full ordering.
+		 */
+		return READ_ONCE(w->dispatcher) ? -EAGAIN : -ENODEV;
+	}
+
+	memset(&regs, 0, sizeof(regs));
+	regs.regs.is_user = 1;
+	regs.regs.gp[HOST_ORIG_AX] = req->syscall.nr;
+	regs.regs.gp[HOST_DI]      = req->syscall.args[0];
+	regs.regs.gp[HOST_SI]      = req->syscall.args[1];
+	regs.regs.gp[HOST_DX]      = req->syscall.args[2];
+	regs.regs.gp[HOST_R10]     = req->syscall.args[3];
+	regs.regs.gp[HOST_R8]      = req->syscall.args[4];
+	regs.regs.gp[HOST_R9]      = req->syscall.args[5];
+
+	/*
+	 * THIS is the whole point of E.3d.1: handle_syscall runs under
+	 * the calling task's `current`. credentials, files, fs, signals,
+	 * seccomp, ptrace — all see the originating guest task, exactly
+	 * as today's stub-child-in-spawner path does.
+	 */
+	handle_syscall(&regs.regs);
+
+	memset(&rep, 0, sizeof(rep));
+	rep.magic       = WORKER_IPC_MAGIC;
+	rep.type        = WORKER_MSG_SYSCALL_REP;
+	rep.task_handle = req->task_handle;
+	rep.u.reply.retval = regs.regs.gp[HOST_AX];
+
+	n = os_write_file(w->ipc_sock, &rep, sizeof(rep));
+	if (n != sizeof(rep))
+		pr_warn_ratelimited("um: worker run: SYSCALL_REP write failed %d\n",
+				    n);
+
+	kfree(req);
+	return 0;
+}
+
+int worker_run_pending_syscalls(struct mm_struct *mm)
+{
+	struct um_worker *w = mm ? mm->context.worker : NULL;
+	int rc;
+
+	if (!w)
+		return -ENODEV;
+
+	/*
+	 * Lifetime contract (E.3d.2 callers must honour): the worker
+	 * pointer is stable for the duration of this call because
+	 * reap_worker_for_mm only fires from mm-destroy paths after all
+	 * guest tasks belonging to `mm` have stopped — i.e. no task
+	 * inside this loop. Until E.3d.2 plumbs that lifecycle through
+	 * vcpu_run we have no production caller, so the contract is
+	 * stated here and verified by audit when E.3d.2 lands.
+	 */
+	for (;;) {
+		rc = worker_run_one_pending(w);
+		if (rc == 0)
+			continue;
+		if (rc == -ENODEV)
+			return -ENODEV;
+
+		/*
+		 * Empty queue, dispatcher alive: block until either a
+		 * request lands or the dispatcher exits. Interruptible
+		 * so a fatal signal terminates the loop cleanly.
+		 *
+		 * We must re-check both conditions inside the wait
+		 * predicate to avoid losing a wake that fires between
+		 * worker_run_one_pending's check and the schedule().
+		 */
+		rc = wait_event_interruptible(
+			w->reply_wait,
+			!list_empty(&w->pending_reqs) ||
+				READ_ONCE(w->dispatcher) == NULL);
+		if (rc == -ERESTARTSYS)
+			return -EINTR;
+	}
 }
 
 /*
