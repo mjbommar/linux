@@ -66,8 +66,9 @@ on uml-redesign-plan):
     - E.3c spawner-side dispatcher kthread `2f0ecee96b0c` — DONE
     - E.3d.0 in-worker start_userspace + seccomp_mm_create wiring
       `0075c0820da9` — DONE
-    - E.3d.1 wait-queue bounce dispatcher rewrite — IN FLIGHT
-    - E.3d.2 vcpu_run rerouting through worker IPC — PENDING (~250 LoC)
+    - E.3d.1 wait-queue bounce dispatcher rewrite
+      `f56c208c374b` — DONE
+    - E.3d.2 vcpu_run rerouting through worker IPC — IN FLIGHT
     - E.4 per-task pthread inside worker — PENDING (~150 LoC)
     - E.5 cross-mm migration via SIGUSR2 — PENDING (~200 LoC)
     - E.6 defconfig flip — PENDING (~50 LoC)
@@ -97,8 +98,10 @@ on uml-redesign-plan):
   everything). E.3c's direct call to handle_syscall was wrong
   for real syscalls because callees deref `current` heavily;
   E.3d.1 replaces it with the bounce.
-- **Tip of `uml-redesign-plan`:** post-R4-E.3d.0; substrate gate
-  green at PASS=25.
+- **Tip of `uml-redesign-plan`:** post-R4-E.3d.1 (substrate gate
+  green at PASS=25). E.3d.2 in flight via Opus subagent — should
+  make `init=/usr/bin/python3` boot under WORKER_PROCESS=y and
+  may flip `itimer_virtual` EXPECTED_FAIL → PASS (memo 29 §2.5.5).
 
 **Where to start a new session:** read this Part A update. Then
 memo 28 (R4 design lock + Part L E.3d sequencing + Part C.E
