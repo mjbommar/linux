@@ -603,6 +603,29 @@ v1's `kvm_decode_syscall` short-circuited some classes. Generalize.
 
 **Depends on:** Refactor 2.
 
+#### Update — 2026-04-28: premise largely obsolete, class table deferred
+
+`arch/um/kernel/skas/syscall.c::handle_syscall` is ~100 lines and
+quite linear: ptrace trace_enter → seccomp_check → sys_call_table
+dispatch → trace_exit. The "monolithic" framing the memo uses
+referred to v1's `kvm_decode_syscall` short-circuit path, which is
+gone with the archive. Today there is no backend that overrides
+syscall handling, so the proposed class table + registration
+mechanism would add infrastructure with no consumer.
+
+The substantive R9 work — define
+`enum um_syscall_class { PASSTHROUGH, VCPU_STATE, SIGFRAME, TRAP,
+GADGET }`, the per-syscall class table, and the backend
+registration hook — naturally lands with v2 Phase D (memo 26)
+where the vmcall hypercall path needs class-specific handling for
+syscalls that need vCPU state, signal-frame manipulation, etc.
+Building the abstraction pre-v2 just adds dead infrastructure;
+landing it with v2's first consumer keeps the design honest.
+
+**Marked done as a no-op for the pre-v2 substrate.** v2's Phase D
+will introduce the class table at the same time as the first
+backend that uses it.
+
 ### Refactor 10: Kill `harness.c` and `!CONFIG_UM_BACKEND_KVM_INTEGRATED`
 
 **Why.** Already on the cleanup list (T.4). 1526 LoC of dead scaffold
