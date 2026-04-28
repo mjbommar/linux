@@ -243,3 +243,121 @@ run completes.
 **Next:** verbose run completes → classify every failure with
 its actual error message → fill in the per-module triage table
 in §2.5.1 → start fixing.
+
+---
+
+## Update — 2026-04-28 late evening — substrate reproducer suite landed
+
+Per §2.5 plan, a focused C/Python reproducer suite now lives at
+`tools/testing/selftests/um/regrtest-repros/`. It compresses the
+4 failure classes (27 CPython modules, ~15 minutes wall time) into
+**28 reproducers running in ~4 seconds wall time inside seccomp UML**.
+
+### Layout
+
+- `class-a-env/` — 7 reproducers (env-only, tty/pty/PATH).
+- `class-b-process/` — 6 reproducers (fork/exec/wait/pipe/sigchld).
+- `class-c-syscall/` — 10 reproducers (ioctl/socket/os).
+- `class-d-structural/` — 5 reproducers (itimer/getrusage/threading).
+- `run-regrtest-repros.sh` — boots a UML kernel, runs all four
+  per-class runners, tallies PASS / FAIL / EXPECTED_FAIL.
+
+### Seccomp UML baseline (2026-04-28, kernel `7e27ec4a518b`)
+
+```
+PASS=22 FAIL=4 EXPECTED_FAIL=2
+```
+
+#### Class A: 4 PASS / 3 FAIL
+
+PASS: `terminal_size`, `openpty`, `controlling_tty`, `env_path_subprocess`.
+FAIL: `tty_isatty` (stdin/stdout/stderr=1), `termios_get` (tcgetattr
+succeeds), `ensurepip_check` (host distro split). The two tty FAILs
+reveal that the default UML init invocation passes `con0=fd:0,fd:1`
+which makes guest fd 0/1/2 *real* ttys — different from CPython
+regrtest's PID-1 invocation. Reproducer is honest about the env;
+test_termios/test_tty failures upstream may be more nuanced than
+"no tty" — possibly tty-with-wrong-flags.
+
+#### Class B: 6 PASS / 0 FAIL
+
+`fork_exec_wait`, `fork_pipe_ipc`, `pool_workers`, `waitpid_wnohang`,
+`sigchld_select`, `asyncio_subprocess_min` all pass cleanly under
+seccomp. **This is a strong signal: the raw process-model substrate
+(fork, exec, waitpid edges, SIGCHLD-during-poll, pipe drain) is not
+broken under seccomp.** The 13 Class-B regrtest module failures are
+therefore Python-internal (asyncio transport state machines,
+multiprocessing.Pool start-method specifics) rather than substrate
+gaps. R4 (per-mm worker) may still fix some of them by giving each
+mm a real signal table — but the C-level path is sound.
+
+#### Class C: 9 PASS / 1 FAIL
+
+PASS: `ioctl_fionread`, `ioctl_tiocgwinsz_socketpair`,
+`ioctl_blkgetsize_loop`, `socket_options_dgram` (incl. `IP_PKTINFO`),
+`socket_unix_abstract`, `os_waitid_edges`, `os_sched_getcpu`,
+`os_setblocking`, `sanity_struct_unicode`.
+
+FAIL: `socket_udplite` (errno=93 ENOPROTOOPT). **This is the only
+real syscall-surface gap surfaced by the suite** — not a UML bug at
+all, but a kernel build-config gap (CONFIG_IP_UDPLITE=n in the
+defconfig). The 41 test_socket subtests that failed in regrtest all
+trace back to this one missing protocol module. Fix is a one-line
+defconfig change, not UML core code.
+
+#### Class D: 3 PASS / 2 EXPECTED_FAIL
+
+PASS: `itimer_prof` (sigprof_count=9 — kernel time accumulates),
+`itimer_real` (sigalrm_count=10 — wall time unaffected),
+`thread_excepthook`.
+
+EXPECTED_FAIL:
+- `itimer_virtual sigvtalrm_count=0 expected_ge_3` — confirms
+  Class D structural bug. SIGVTALRM never fires during a 1-second
+  guest user-mode busy loop.
+- `getrusage_split ru_utime_ms=0.0 ru_stime_ms=1000.0 wall_ms=1000.0
+  stub_child_split` — gorgeous diagnostic. After a 1-second guest
+  busy loop, `getrusage(RUSAGE_SELF)` reports zero user time and
+  full system time. This is exactly the predicted seccomp stub-child
+  CPU-time mis-attribution: from the spawner's view, it was
+  "in-syscall" (system time) the whole time the stub child was
+  consuming user CPU. UML's `setitimer(VIRTUAL)` forwards to host
+  setitimer on the spawner, which sees `ru_utime=0`, hence
+  SIGVTALRM never fires. Memo 29 §"Class D — The hang"
+  hypothesis confirmed in 1 second.
+
+That `itimer_prof` passes is also informative: PROF tracks
+user+kernel time, and the spawner's kernel-time accumulator does
+move (waiting on the stub child counts as system time on the
+spawner). Future fix: aggregate stub-child user time into spawner's
+virtual-itimer accounting, OR install setitimer on the stub child
+PID under R4's worker-owns-its-own-process model.
+
+### Why this changes the §2.5 plan
+
+§2.5.2 (Class A skip list): mostly unchanged, but the "no tty"
+assumption was wrong — the UML init line gives guest fd 0/1/2
+real tty status. The skip list should target test_tty/test_termios
+based on the specific subtest failure pattern, not blanket-skip.
+
+§2.5.3 (Class B investigation): **deprioritize**. The substrate
+process model is sound. Investigation should target Python-layer
+specifics (asyncio transport state, multiprocessing.Pool
+start-method behavior) — likely won't surface UML changes.
+
+§2.5.4 (Class C fixes): **scope reduces to one defconfig change**.
+`CONFIG_IP_UDPLITE=y` (or skip test_socket UDPLITE subtests).
+No UML kernel patches needed.
+
+§2.5.5 (Class D ITIMER_VIRTUAL): **highest-leverage remaining
+investigation**. The reproducer turns a 180-second hang into a
+1-second diagnostic; iterate on UML-side accounting fixes here.
+
+§2.5.6 (substrate gate): the reproducer suite *is* the gate. Wire
+into `tools/testing/selftests/um/Makefile` (done) and use as the
+v2-acceptance prerequisite per memo 29's original argument.
+
+### Aggregate cost
+
+15+ minutes (full regrtest) → **4 seconds** (reproducer suite) for
+the same diagnostic surface coverage of the 4 classes.

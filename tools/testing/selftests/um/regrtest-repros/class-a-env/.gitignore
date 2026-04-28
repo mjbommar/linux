@@ -1,0 +1,5 @@
+terminal_size
+openpty
+tty_isatty
+controlling_tty
+termios_get
