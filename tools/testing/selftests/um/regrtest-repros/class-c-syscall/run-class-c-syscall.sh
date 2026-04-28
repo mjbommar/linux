@@ -15,6 +15,8 @@ os_waitid_edges
 os_sched_getcpu
 os_setblocking
 sanity_struct_unicode
+cross_process_futex
+scm_rights_fdpass
 "
 
 for b in $BINS; do

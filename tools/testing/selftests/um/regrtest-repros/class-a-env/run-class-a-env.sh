@@ -4,7 +4,7 @@
 # Invoked from the top-level run-regrtest-repros.sh inside the UML guest.
 DIR="$(dirname "$0")"
 
-for b in terminal_size openpty tty_isatty controlling_tty termios_get; do
+for b in terminal_size openpty tty_isatty controlling_tty termios_get termios_mode_probe; do
 	if [ -x "$DIR/$b" ]; then
 		"$DIR/$b" 2>&1
 	else

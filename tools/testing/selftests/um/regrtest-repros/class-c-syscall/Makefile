@@ -10,7 +10,9 @@ BINS := \
 	os_waitid_edges \
 	os_sched_getcpu \
 	os_setblocking \
-	sanity_struct_unicode
+	sanity_struct_unicode \
+	cross_process_futex \
+	scm_rights_fdpass
 
 all: $(BINS)
 
