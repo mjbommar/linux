@@ -118,13 +118,13 @@ static void backend_all_ops_populated_test(struct kunit *test)
 	KUNIT_EXPECT_NOT_NULL(test, um_backend->probe);
 	KUNIT_EXPECT_NOT_NULL(test, um_backend->init);
 	KUNIT_EXPECT_NOT_NULL(test, um_backend->shutdown);
-	KUNIT_EXPECT_NOT_NULL(test, um_backend->run_userspace);
+	KUNIT_EXPECT_NOT_NULL(test, um_backend->vcpu_run);
 
-	/* Memory (4) */
-	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_attach);
-	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_detach);
-	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_map);
-	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_unmap);
+	/* Memory (4 mandatory; mm_region_protected is optional per memo 25 R2) */
+	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_create);
+	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_destroy);
+	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_region_added);
+	KUNIT_EXPECT_NOT_NULL(test, um_backend->mm_region_removed);
 
 	/* Scheduling (4) */
 	KUNIT_EXPECT_NOT_NULL(test, um_backend->thread_create);
@@ -171,33 +171,33 @@ static void backend_shutdown_wired_test(struct kunit *test)
 	ASSERT_OP_DISPATCH(test, shutdown);
 }
 
-static void backend_run_userspace_wired_test(struct kunit *test)
+static void backend_vcpu_run_wired_test(struct kunit *test)
 {
-	ASSERT_OP_DISPATCH(test, run_userspace);
+	ASSERT_OP_DISPATCH(test, vcpu_run);
 }
 
 /* ---------------------------------------------------------------- */
-/* Memory                                                           */
+/* Memory (memo 25 R2 ops)                                          */
 /* ---------------------------------------------------------------- */
 
-static void backend_mm_attach_wired_test(struct kunit *test)
+static void backend_mm_create_wired_test(struct kunit *test)
 {
-	ASSERT_OP_DISPATCH(test, mm_attach);
+	ASSERT_OP_DISPATCH(test, mm_create);
 }
 
-static void backend_mm_detach_wired_test(struct kunit *test)
+static void backend_mm_destroy_wired_test(struct kunit *test)
 {
-	ASSERT_OP_DISPATCH(test, mm_detach);
+	ASSERT_OP_DISPATCH(test, mm_destroy);
 }
 
-static void backend_mm_map_wired_test(struct kunit *test)
+static void backend_mm_region_added_wired_test(struct kunit *test)
 {
-	ASSERT_OP_DISPATCH(test, mm_map);
+	ASSERT_OP_DISPATCH(test, mm_region_added);
 }
 
-static void backend_mm_unmap_wired_test(struct kunit *test)
+static void backend_mm_region_removed_wired_test(struct kunit *test)
 {
-	ASSERT_OP_DISPATCH(test, mm_unmap);
+	ASSERT_OP_DISPATCH(test, mm_region_removed);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1633,12 +1633,12 @@ static struct kunit_case backend_test_cases[] = {
 	KUNIT_CASE(backend_probe_wired_test),
 	KUNIT_CASE(backend_init_wired_test),
 	KUNIT_CASE(backend_shutdown_wired_test),
-	KUNIT_CASE(backend_run_userspace_wired_test),
-	/* memory */
-	KUNIT_CASE(backend_mm_attach_wired_test),
-	KUNIT_CASE(backend_mm_detach_wired_test),
-	KUNIT_CASE(backend_mm_map_wired_test),
-	KUNIT_CASE(backend_mm_unmap_wired_test),
+	KUNIT_CASE(backend_vcpu_run_wired_test),
+	/* memory (memo 25 R2 ops) */
+	KUNIT_CASE(backend_mm_create_wired_test),
+	KUNIT_CASE(backend_mm_destroy_wired_test),
+	KUNIT_CASE(backend_mm_region_added_wired_test),
+	KUNIT_CASE(backend_mm_region_removed_wired_test),
 	/* scheduling */
 	KUNIT_CASE(backend_thread_create_wired_test),
 	KUNIT_CASE(backend_thread_start_idle_wired_test),

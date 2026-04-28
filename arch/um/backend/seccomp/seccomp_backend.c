@@ -30,13 +30,14 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	.probe			= seccomp_probe,
 	.init			= seccomp_init,
 	.shutdown		= seccomp_shutdown,
-	.run_userspace		= seccomp_run_userspace,	/* HOT */
+	.vcpu_run		= seccomp_vcpu_run,	/* HOT */
 
-	/* Memory (4) */
-	.mm_attach		= seccomp_mm_attach,
-	.mm_detach		= seccomp_mm_detach,
-	.mm_map			= seccomp_mm_map,	/* HOT */
-	.mm_unmap		= seccomp_mm_unmap,	/* HOT */
+	/* Memory (5) — memo 25 R2 ops cleanup */
+	.mm_create		= seccomp_mm_create,
+	.mm_destroy		= seccomp_mm_destroy,
+	.mm_region_added	= seccomp_mm_region_added,	/* HOT */
+	.mm_region_removed	= seccomp_mm_region_removed,	/* HOT */
+	.mm_region_protected	= NULL,	/* mm-arbiter falls back to remove+add */
 
 	/* Scheduling (4) */
 	.thread_create		= seccomp_thread_create,

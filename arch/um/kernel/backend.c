@@ -57,11 +57,11 @@ extern int backend_arg_force;
 
 static void validate_hot_ops(const struct um_backend_ops *ops)
 {
-	if (!ops->run_userspace || !ops->mm_map || !ops->mm_unmap ||
+	if (!ops->vcpu_run || !ops->mm_region_added || !ops->mm_region_removed ||
 	    !ops->context_switch || !ops->read_clock_ns)
-		panic("um: backend %s has NULL HOT op (run_userspace=%p mm_map=%p mm_unmap=%p context_switch=%p read_clock_ns=%p)",
+		panic("um: backend %s has NULL HOT op (vcpu_run=%p mm_region_added=%p mm_region_removed=%p context_switch=%p read_clock_ns=%p)",
 		      ops->name,
-		      ops->run_userspace, ops->mm_map, ops->mm_unmap,
+		      ops->vcpu_run, ops->mm_region_added, ops->mm_region_removed,
 		      ops->context_switch, ops->read_clock_ns);
 }
 

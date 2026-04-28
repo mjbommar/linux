@@ -38,6 +38,7 @@ struct uml_pt_regs;
 struct task_struct;
 struct thread_struct;
 struct pt_regs;
+struct mm_struct;
 struct mm_id;
 
 /*
@@ -95,8 +96,13 @@ enum um_timer_mode {
  *     (e.g. read/write_guest_regs awaiting KGDB integration).
  *   - HOT ops are inlined to direct calls in single-backend builds
  *     via the dispatch macro below.
- *   - Per-backend state is global (singletons). Per-mm state lives
- *     in `struct mm_id`; per-thread state lives in `task->thread`.
+ *   - Per-backend state is global (singletons). Per-mm and per-thread
+ *     state are looked up by the backend from the `struct mm_struct *`
+ *     and `struct task_struct *` arguments respectively. Memo 25 R2
+ *     replaced `struct mm_id *` ops parameters with `struct mm_struct *`
+ *     so backends can manage their own per-mm storage layout (seccomp
+ *     uses mm->context.id; v2's per-mm worker process model uses a
+ *     hash off the mm pointer).
  */
 struct um_backend_ops {
 	const char			*name;
@@ -167,16 +173,31 @@ struct um_backend_ops {
 	int  (*probe)(void);
 	int  (*init)(const struct um_backend_args *args);
 	void (*shutdown)(void);
-	void (*run_userspace)(struct uml_pt_regs *regs);	/* HOT */
+	void (*vcpu_run)(struct uml_pt_regs *regs);		/* HOT */
 
-	/* Memory (4) */
-	int  (*mm_attach)(struct mm_id *id);
-	void (*mm_detach)(struct mm_id *id);
-	int  (*mm_map)(struct mm_id *id,			/* HOT */
-		       unsigned long va, unsigned long len,
-		       int prot, int phys_fd, u64 offset);
-	int  (*mm_unmap)(struct mm_id *id,			/* HOT */
-			 unsigned long va, unsigned long len);
+	/*
+	 * Memory (5). Backend allocates whatever per-mm state it needs:
+	 *   seccomp:  fork stub-child host process, key on mm->context.id
+	 *   kvm-v2:   fork per-mm worker process + per-mm KVM context
+	 *
+	 * mm_region_protected is new in memo 25 R2; it lets the backend
+	 * receive notifications when an existing region's protection
+	 * changes (today's mprotect drives mm_region_removed +
+	 * mm_region_added through um_tlb_sync; v2's memslot-flag-update
+	 * path will use mm_region_protected directly). Backends may
+	 * leave it NULL; mm-arbiter falls back to the
+	 * remove+add sequence.
+	 */
+	int  (*mm_create)(struct mm_struct *mm);
+	void (*mm_destroy)(struct mm_struct *mm);
+	int  (*mm_region_added)(struct mm_struct *mm,		/* HOT */
+				unsigned long va, unsigned long len,
+				int prot, int phys_fd, u64 offset);
+	int  (*mm_region_removed)(struct mm_struct *mm,		/* HOT */
+				  unsigned long va, unsigned long len);
+	int  (*mm_region_protected)(struct mm_struct *mm,
+				    unsigned long va, unsigned long len,
+				    int new_prot);
 
 	/* Scheduling (4) */
 	int  (*thread_create)(struct task_struct *p,
@@ -213,47 +234,24 @@ extern const struct um_backend_ops *um_backend;
  * them by token-paste; the prototypes must be visible at every call
  * site, gated by CONFIG_UM_BACKEND_<kind>.
  */
-#ifdef CONFIG_UM_BACKEND_PTRACE
-/* A-02.6 */
-u64 ptrace_read_persistent_clock_ns(void);
-/* A-02.HOT-1 */
-void ptrace_run_userspace(struct uml_pt_regs *regs);
-/* A-02.HOT-2 */
-int ptrace_mm_map(struct mm_id *id, unsigned long va, unsigned long len,
-		  int prot, int phys_fd, u64 offset);
-int ptrace_mm_unmap(struct mm_id *id, unsigned long va, unsigned long len);
-/* A-02.HOT-3 */
-void ptrace_context_switch(struct task_struct *prev, struct task_struct *next);
-int ptrace_thread_create(struct task_struct *p, void *stack,
-			 void (*handler)(void));
-int ptrace_thread_start_idle(void *stack, struct thread_struct *t);
-/* A-02.COLD-1 */
-u64 ptrace_read_clock_ns(void);
-int ptrace_set_timer(int cpu, u64 deadline_ns, enum um_timer_mode mode);
-/* A-02.COLD-2 */
-int ptrace_ipi_send(int cpu, int vector);
-void ptrace_init_thread_regs(unsigned long *gp, unsigned long *fp);
-int ptrace_read_guest_regs(struct task_struct *t, struct pt_regs *regs);
-int ptrace_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
-/* A-02.COLD-3 */
-int ptrace_probe(void);
-int ptrace_init(const struct um_backend_args *args);
-void ptrace_shutdown(void);
-int ptrace_mm_attach(struct mm_id *id);
-void ptrace_mm_detach(struct mm_id *id);
-#endif
+/*
+ * v1 ptrace backend declarations removed with the backend itself
+ * (memo 25 R11; archived at the kvm-v1-archive-20260428 tag).
+ */
 
 #ifdef CONFIG_UM_BACKEND_SECCOMP
-/* A-03.S1 */
+/* A-03.S1 + memo 25 R2 ops cleanup */
 int seccomp_probe(void);
 int seccomp_init(const struct um_backend_args *args);
 void seccomp_shutdown(void);
-void seccomp_run_userspace(struct uml_pt_regs *regs);
-int seccomp_mm_attach(struct mm_id *id);
-void seccomp_mm_detach(struct mm_id *id);
-int seccomp_mm_map(struct mm_id *id, unsigned long va, unsigned long len,
-		   int prot, int phys_fd, u64 offset);
-int seccomp_mm_unmap(struct mm_id *id, unsigned long va, unsigned long len);
+void seccomp_vcpu_run(struct uml_pt_regs *regs);
+int seccomp_mm_create(struct mm_struct *mm);
+void seccomp_mm_destroy(struct mm_struct *mm);
+int seccomp_mm_region_added(struct mm_struct *mm,
+			    unsigned long va, unsigned long len,
+			    int prot, int phys_fd, u64 offset);
+int seccomp_mm_region_removed(struct mm_struct *mm,
+			      unsigned long va, unsigned long len);
 int seccomp_thread_create(struct task_struct *p, void *stack,
 			  void (*handler)(void));
 int seccomp_thread_start_idle(void *stack, struct thread_struct *t);
@@ -265,6 +263,11 @@ u64 seccomp_read_persistent_clock_ns(void);
 void seccomp_init_thread_regs(unsigned long *gp, unsigned long *fp);
 int seccomp_read_guest_regs(struct task_struct *t, struct pt_regs *regs);
 int seccomp_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
+/*
+ * mm_region_protected: seccomp leaves this NULL today; mprotect goes
+ * through um_tlb_sync's remove+add sequence already. v2 may implement
+ * a direct path for memslot-flag updates.
+ */
 #endif
 
 /*

@@ -2,45 +2,56 @@
 /*
  * seccomp backend: mm ops.
  *
- * Workstream A-03.S1. mm_map / mm_unmap delegate to the same
- * shared `um_stub_mm_*` helpers as the ptrace backend (the underlying
- * stub-syscall queueing handles both modes via using_seccomp checks
- * inside the helpers; eventually those checks go away once
- * per-backend FD-slot management is fully separated).
+ * Workstream A-03.S1 + memo 25 R2.
  *
- * mm_attach delegates to start_userspace() which currently dispatches
- * on `using_seccomp` to do the seccomp-specific socketpair + futex
- * setup. mm_detach kills the stub child and closes the per-mm
- * socketpair (the using_seccomp-gated `os_close_file(id->sock)` that
- * was previously in destroy_context() is folded in here).
+ * Ops take `struct mm_struct *mm` (memo 25 R2 cleanup) and look up the
+ * per-mm seccomp state via `&mm->context.id` internally. Other backends
+ * (kvm-v2's per-mm worker process) will key their per-mm state off the
+ * mm pointer differently — keeping mm_id seccomp-internal lets each
+ * backend pick its own storage.
+ *
+ * mm_create delegates to start_userspace() which dispatches on the
+ * stub_syscall_uses_futex capability to do the socketpair + futex
+ * setup. mm_destroy kills the stub child and closes the per-mm
+ * socketpair.
  */
+#include <linux/mm_types.h>
 #include <linux/types.h>
+#include <asm/mmu.h>
 #include <os.h>
 
 #include "seccomp_backend.h"
 
-int seccomp_mm_attach(struct mm_id *id)
+int seccomp_mm_create(struct mm_struct *mm)
 {
+	struct mm_id *id = &mm->context.id;
+
 	return start_userspace(id);
 }
 
-void seccomp_mm_detach(struct mm_id *id)
+void seccomp_mm_destroy(struct mm_struct *mm)
 {
+	struct mm_id *id = &mm->context.id;
+
 	if (id->pid > 0)
 		os_kill_ptraced_process(id->pid, 1);
 	if (id->sock)
 		os_close_file(id->sock);
 }
 
-int seccomp_mm_map(struct mm_id *mm_idp, unsigned long virt,
-		   unsigned long len, int prot, int phys_fd,
-		   unsigned long long offset)
+int seccomp_mm_region_added(struct mm_struct *mm, unsigned long virt,
+			    unsigned long len, int prot, int phys_fd,
+			    unsigned long long offset)
 {
-	return um_stub_mm_map(mm_idp, virt, len, prot, phys_fd, offset);
+	struct mm_id *id = &mm->context.id;
+
+	return um_stub_mm_map(id, virt, len, prot, phys_fd, offset);
 }
 
-int seccomp_mm_unmap(struct mm_id *mm_idp, unsigned long addr,
-		     unsigned long len)
+int seccomp_mm_region_removed(struct mm_struct *mm, unsigned long addr,
+			      unsigned long len)
 {
-	return um_stub_mm_unmap(mm_idp, addr, len);
+	struct mm_id *id = &mm->context.id;
+
+	return um_stub_mm_unmap(id, addr, len);
 }

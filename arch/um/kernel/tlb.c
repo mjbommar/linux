@@ -16,19 +16,26 @@
 #include <skas.h>
 #include <kern_util.h>
 
+/*
+ * Memo 25 R2: vm_ops carries `struct mm_struct *` (or NULL for the
+ * init_mm kernel direct-map path) so the backend ops it holds match
+ * the new um_backend_ops contract. The function-pointer types match
+ * `mm_region_added` / `mm_region_removed` exactly, so update_*_range
+ * helpers can store the two HOT ops verbatim.
+ */
 struct vm_ops {
-	struct mm_id *mm_idp;
+	struct mm_struct *mm;
 
-	int (*mmap)(struct mm_id *mm_idp,
+	int (*mmap)(struct mm_struct *mm,
 		    unsigned long virt, unsigned long len, int prot,
-		    int phys_fd, unsigned long long offset);
-	int (*unmap)(struct mm_id *mm_idp,
+		    int phys_fd, u64 offset);
+	int (*unmap)(struct mm_struct *mm,
 		     unsigned long virt, unsigned long len);
 };
 
-static int kern_map(struct mm_id *mm_idp,
+static int kern_map(struct mm_struct *mm,
 		    unsigned long virt, unsigned long len, int prot,
-		    int phys_fd, unsigned long long offset)
+		    int phys_fd, u64 offset)
 {
 	/* TODO: Why is executable needed to be always set in the kernel? */
 	return os_map_memory((void *)virt, phys_fd, offset, len,
@@ -36,7 +43,7 @@ static int kern_map(struct mm_id *mm_idp,
 			     1);
 }
 
-static int kern_unmap(struct mm_id *mm_idp,
+static int kern_unmap(struct mm_struct *mm,
 		      unsigned long virt, unsigned long len)
 {
 	return os_unmap_memory((void *)virt, len);
@@ -80,10 +87,10 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 			       (w ? UM_PROT_WRITE : 0) |
 			       (x ? UM_PROT_EXEC : 0);
 
-			ret = ops->mmap(ops->mm_idp, addr, PAGE_SIZE,
+			ret = ops->mmap(ops->mm, addr, PAGE_SIZE,
 					prot, fd, offset);
 		} else
-			ret = ops->unmap(ops->mm_idp, addr, PAGE_SIZE);
+			ret = ops->unmap(ops->mm, addr, PAGE_SIZE);
 
 		/*
 		 * Only mark the PTE uptodate if the backend op succeeded.
@@ -111,7 +118,7 @@ static inline int update_pmd_range(pud_t *pud, unsigned long addr,
 		next = pmd_addr_end(addr, end);
 		if (!pmd_present(*pmd)) {
 			if (pmd_needsync(*pmd)) {
-				ret = ops->unmap(ops->mm_idp, addr,
+				ret = ops->unmap(ops->mm, addr,
 						 next - addr);
 				if (!ret)
 					pmd_mkuptodate(*pmd);
@@ -135,7 +142,7 @@ static inline int update_pud_range(p4d_t *p4d, unsigned long addr,
 		next = pud_addr_end(addr, end);
 		if (!pud_present(*pud)) {
 			if (pud_needsync(*pud)) {
-				ret = ops->unmap(ops->mm_idp, addr,
+				ret = ops->unmap(ops->mm, addr,
 						 next - addr);
 				if (!ret)
 					pud_mkuptodate(*pud);
@@ -159,7 +166,7 @@ static inline int update_p4d_range(pgd_t *pgd, unsigned long addr,
 		next = p4d_addr_end(addr, end);
 		if (!p4d_present(*p4d)) {
 			if (p4d_needsync(*p4d)) {
-				ret = ops->unmap(ops->mm_idp, addr,
+				ret = ops->unmap(ops->mm, addr,
 						 next - addr);
 				if (!ret)
 					p4d_mkuptodate(*p4d);
@@ -182,7 +189,7 @@ int um_tlb_sync(struct mm_struct *mm)
 	if (mm->context.sync_tlb_range_to == 0)
 		return 0;
 
-	ops.mm_idp = &mm->context.id;
+	ops.mm = mm;
 	if (mm == &init_mm) {
 		ops.mmap = kern_map;
 		ops.unmap = kern_unmap;
@@ -192,9 +199,12 @@ int um_tlb_sync(struct mm_struct *mm)
 		 * function-pointer load is one-shot per um_tlb_sync()
 		 * call; the inner update_*_range() helpers continue to
 		 * indirect through ops.{mmap,unmap} as before.
+		 *
+		 * Memo 25 R2: the HOT memory ops are now mm_region_added /
+		 * mm_region_removed, taking struct mm_struct * directly.
 		 */
-		ops.mmap = um_backend->mm_map;
-		ops.unmap = um_backend->mm_unmap;
+		ops.mmap = um_backend->mm_region_added;
+		ops.unmap = um_backend->mm_region_removed;
 	}
 
 	addr = mm->context.sync_tlb_range_from;
@@ -203,7 +213,7 @@ int um_tlb_sync(struct mm_struct *mm)
 		next = pgd_addr_end(addr, mm->context.sync_tlb_range_to);
 		if (!pgd_present(*pgd)) {
 			if (pgd_needsync(*pgd)) {
-				ret = ops.unmap(ops.mm_idp, addr,
+				ret = ops.unmap(ops.mm, addr,
 						next - addr);
 				/*
 				 * #274 issue #12: gate pgd_mkuptodate on

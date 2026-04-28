@@ -460,7 +460,7 @@ void userspace(struct uml_pt_regs *regs)
 	interrupt_end();
 
 	while (1)
-		um_backend_dispatch(run_userspace, regs);
+		um_backend_dispatch(vcpu_run, regs);
 }
 
 void new_thread(void *stack, jmp_buf *buf, void (*handler)(void))

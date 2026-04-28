@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * seccomp backend: run_userspace (one trap-loop iteration).
+ * seccomp backend: vcpu_run (one trap-loop iteration).
  *
- * Workstream A-03.S1.3. Lifted from arch/um/os-Linux/skas/process.c::
- * seccomp_userspace_iter(). Mirrors the shape of
- * arch/um/backend/ptrace/trap_user.c::ptrace_run_userspace() but
- * uses Berg's SIGSYS+futex+stub-state mechanism rather than ptrace.
+ * Workstream A-03.S1.3 (renamed from seccomp_run_userspace by memo 25
+ * R2 ops cleanup). Lifted from arch/um/os-Linux/skas/process.c::
+ * seccomp_userspace_iter(). Uses Berg's SIGSYS+futex+stub-state
+ * mechanism (the ptrace backend that mirrored this shape was removed
+ * in memo 25 R11; archived at the kvm-v1-archive-20260428 tag).
  *
  * Per Documentation/virt/uml/backend-contract.rst, run_userspace is
  * one round-trip: resume the guest, wait for the next trap, fetch
@@ -39,7 +40,7 @@ extern unsigned long tt_extra_sched_jiffies;
  */
 extern unsigned int unscheduled_userspace_iterations;
 
-void seccomp_run_userspace(struct uml_pt_regs *regs)
+void seccomp_vcpu_run(struct uml_pt_regs *regs)
 {
 	struct mm_id *mm_id = current_mm_id();
 	struct stub_data *proc_data = (void *)mm_id->stack;

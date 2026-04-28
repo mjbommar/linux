@@ -71,12 +71,12 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 		list_add(&mm->context.list, &mm_list);
 	}
 
-	ret = um_backend_dispatch(mm_attach, new_id);
+	ret = um_backend_dispatch(mm_create, mm);
 	if (ret < 0)
 		goto out_free;
 
 	/* Ensure the new MM is clean and nothing unwanted is mapped */
-	um_backend_dispatch(mm_unmap, new_id, 0, STUB_START);
+	um_backend_dispatch(mm_region_removed, mm, 0, STUB_START);
 
 	return 0;
 
@@ -108,11 +108,11 @@ void destroy_context(struct mm_struct *mm)
 		list_del(&mm->context.list);
 
 	/*
-	 * mm_detach owns per-mm teardown of backend-private state (stub
+	 * mm_destroy owns per-mm teardown of backend-private state (stub
 	 * child, per-mm socketpair). Don't repeat the seccomp socket
-	 * close here — see seccomp_mm_detach().
+	 * close here — see seccomp_mm_destroy().
 	 */
-	um_backend_dispatch(mm_detach, &mmu->id);
+	um_backend_dispatch(mm_destroy, mm);
 
 	free_pages(mmu->id.stack, ilog2(STUB_DATA_PAGES));
 }

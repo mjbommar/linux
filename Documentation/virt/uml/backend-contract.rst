@@ -15,6 +15,19 @@ declared in ``arch/um/include/shared/backend.h``.
 The contract version covered by this document is
 ``UM_BACKEND_CONTRACT_VERSION = 1``.
 
+.. note::
+
+   **2026-04-28 — memo 25 refactor 2 ops cleanup landed.** Several op
+   names and signatures in the prose below are stale; see
+   ``arch/um/include/shared/backend.h`` for the authoritative shape.
+   The full rewrite is scheduled for memo 25 refactor 12 (docs). In
+   summary: ``run_userspace`` → ``vcpu_run``; ``mm_attach`` /
+   ``mm_detach`` → ``mm_create`` / ``mm_destroy`` (taking
+   ``struct mm_struct *`` instead of ``struct mm_id *``); ``mm_map``
+   / ``mm_unmap`` → ``mm_region_added`` / ``mm_region_removed`` (same
+   signature change); new optional ``mm_region_protected`` op for v2
+   memslot-flag updates.
+
 For end-user documentation (which backend to pick, the boot
 parameters, the trap-path diagrams), see
 :doc:`UML Backends <backends>`.
