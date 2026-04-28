@@ -386,6 +386,8 @@ config UM_BACKEND_KVM_V1_ARCHIVE
 	  selects it. The v2 reimplementation lives at
 	  arch/um/backend/kvm-v2/ (memo 26).
 
+source "arch/um/backend/kvm-v2/Kconfig"
+
 choice
 	prompt "UML backend dispatch mode"
 	default UM_BACKEND_DYNAMIC if HAVE_ARCH_SECCOMP_FILTER
