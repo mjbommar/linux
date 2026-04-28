@@ -764,20 +764,24 @@ Boot smoke under =y:
   but that VA now lives in the worker's address space; the
   spawner dereferences a wild pointer. E.3d.1 + E.3d.2 fix.
 
-#### E.3d.1 — `current` discipline lock + dispatcher rewrite (~150 LoC)
+#### E.3d.1 — `current` discipline lock + dispatcher rewrite (DONE — `f56c208c374b`)
 
-Implement L.2.A wait-queue bounce. Dispatcher kthread becomes
-routing-only; per-mm wait queue holds (SYSCALL_REQ, completion);
-originating guest task drains it and runs handle_syscall under
-its own `current`. Replaces E.3c's direct
-`handle_syscall(&regs.regs)` call site.
+Implements Part C.E wait-queue bounce. Dispatcher kthread is now
+routing-only: per-mm wait queue holds `worker_pending_req`
+entries; the originating guest task (any caller with a
+mm-bearing task_struct) drains via `worker_run_pending_syscalls`
+and runs handle_syscall under its own `current`.
 
-Risk: ABBA between mm_list lock and per-mm waitq; needs careful
-locking. Bench: dispatcher → guest task wakeup latency must stay
-under 1 µs to keep memo 26 Phase H's budget.
+`struct um_worker` grew `wait_queue_head_t reply_wait`,
+`struct list_head pending_reqs`, `spinlock_t pending_lock`. Lock-
+ordering rule documented at struct definition: `pending_lock` is
+INNERMOST, never nested under `workers_lock`. ABBA-clean by audit.
 
-Verification: smoke-test fakes a SYSCALL_REQ, real guest task
-fields it, returns the right answer; substrate gate stays green.
+No production caller exercises this code yet — E.3d.2 below is
+the first one. Verification gate for E.3d.1 was build clean both
+modes + WORKER_PROCESS=n substrate gate stays at PASS=25 FAIL=3
+EXPECTED_FAIL=3 + boot under =y init=/bin/true unaffected. All
+green.
 
 #### E.3d.2 — vcpu_run rerouting through worker IPC (~250 LoC)
 
