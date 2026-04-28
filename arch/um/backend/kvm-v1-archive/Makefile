@@ -21,6 +21,11 @@ obj-$(CONFIG_UM_BACKEND_KVM_INTEGRATED) += shadow_sync.o
 obj-$(CONFIG_UM_BACKEND_KVM_INTEGRATED) += snapshot.o
 obj-$(CONFIG_UM_BACKEND_KVM_INTEGRATED) += record.o
 
-obj-$(CONFIG_UM_BACKEND_KVM_HARNESS) += harness.o
+# harness.o was the D-04b.1b diagnostic scaffold (1526 LoC, never
+# ran outside bring-up). Deleted by memo 25 refactor 10. The other
+# obj-y / obj-$(CONFIG_*) entries above are dead too (the parent
+# Makefile no longer routes here and CONFIG_UM_BACKEND_KVM_* is
+# gone) but preserved verbatim so this directory remains a faithful
+# v1 reference snapshot for v2 implementers.
 
 include $(srctree)/arch/um/scripts/Makefile.rules

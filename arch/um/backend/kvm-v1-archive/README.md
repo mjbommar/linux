@@ -24,9 +24,13 @@ gate. The implementation totals ~6000 LoC across these files:
   `flush_tlb_*` hooks (memo 15)
 - `sregs.c` — long-mode segment / CR / EFER setup
 - `record.c`, `snapshot.c` — record-replay and snapshot scaffolding
-- `harness.c` — diagnostic harness (CONFIG_UM_BACKEND_KVM_HARNESS)
 - `kvm_backend.c` / `kvm_backend.h` — ops table singleton + internal
   header
+
+(`harness.c` — the D-04b.1b diagnostic scaffold — was deleted by
+memo 25 refactor 10; it was 1526 LoC of bring-up test code that
+never ran outside the early-2026 spike. Reachable via `git show
+kvm-v1-archive-20260428:arch/um/backend/kvm/harness.c` if needed.)
 - `syscall_class.c` — gadget syscall classification (memo 11)
 - `stubs.c`, `time.c` — backend-specific stubs and clocksource
 
