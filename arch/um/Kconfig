@@ -367,6 +367,31 @@ config UM_BACKEND_SECCOMP
 	  mechanism merged in 6.16 (Benjamin Berg). ~3-4× faster syscall
 	  round-trip than ptrace via SIGSYS + futex.
 
+config UM_WORKER_PROCESS
+	bool "Per-mm host worker process model (memo 25 R4)"
+	default n
+	help
+	  Spawn one host worker process per guest mm instead of cloning
+	  every guest task into the spawner's VA space. The seccomp
+	  stub child runs inside the worker; spawner ↔ worker IPC uses
+	  a per-worker UNIX socket pair (memo 28).
+
+	  This is the host-process / threading restructure the v2 KVM
+	  backend (memo 26) needs: each guest mm gets a separate host
+	  VA space, eliminating the cross-mm host-VA collision bug
+	  class (memo 22 BUG.1 family; memo 24 item #2). seccomp users
+	  also benefit (no more software-only mm separation), but the
+	  payoff is concentrated on the v2 path.
+
+	  Default n until memo 28's E.1-E.6 implementation sequence
+	  fully lands. Today (E.1, scaffolding only) the toggle compiles
+	  the headers + stubs but does not change runtime behaviour.
+	  Toggle on for development / testing of the worker model.
+
+	  Say N for production builds until memo 28 is fully done. See
+	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+	  28-r4-worker-design.md for the design.
+
 config UM_BACKEND_KVM_V1_ARCHIVE
 	bool
 	depends on BROKEN
