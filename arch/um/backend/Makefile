@@ -7,7 +7,6 @@
 # arch/um/{kernel,os-Linux}/skas/. See
 # Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/.
 
-obj-$(CONFIG_UM_BACKEND_PTRACE)  += ptrace/
 obj-$(CONFIG_UM_BACKEND_SECCOMP) += seccomp/
 # v1 KVM backend archived to arch/um/backend/kvm-v1-archive/ (memo 25
 # Part 1). Not built — UM_BACKEND_KVM_V1_ARCHIVE depends on BROKEN.

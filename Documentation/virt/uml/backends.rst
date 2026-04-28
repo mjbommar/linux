@@ -11,27 +11,31 @@ User-Mode Linux runs the upstream Linux kernel as a host process.
 intercept its guest's syscalls, page faults, and signals — the
 plumbing between the host kernel and the UML kernel.
 
-Two backends ship today; a KVM backend is being reimplemented:
+One backend ships today; a KVM backend is being reimplemented:
 
 ==========  =====================================  ============================
 Backend     Mechanism                              Per-syscall cost on bare metal
 ==========  =====================================  ============================
-ptrace      ``PTRACE_SYSEMU`` + ``waitpid``        ~1–5 µs (trap + dispatch)
 seccomp     ``SECCOMP_RET_TRAP`` + ``SIGSYS`` +    ~300–500 ns (seccomp filter
             futex round-trip                       hits, futex wakes UML kernel)
 kvm         ``KVM_RUN`` + per-mapping memslots +   target ~100 ns (workstream D
             TDP via host ``mm->pgd``               v2 — in development)
 ==========  =====================================  ============================
 
-ptrace is the historical UML mechanism (Jeff Dike, 1990s). seccomp
-landed in 6.16 (Benjamin Berg). kvm v1 reached integration but
-hit structural shadow-PT issues; the implementation is archived at
-``arch/um/backend/kvm-v1-archive/`` (not built;
-``CONFIG_UM_BACKEND_KVM_V1_ARCHIVE`` depends on ``BROKEN``) and
-the v2 reimplementation is being built at
-``arch/um/backend/kvm-v2/``. See
-``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/``
+seccomp landed in 6.16 (Benjamin Berg). kvm v1 reached integration
+but hit structural shadow-PT issues; the implementation is archived
+at ``arch/um/backend/kvm-v1-archive/`` (not built;
+``CONFIG_UM_BACKEND_KVM_V1_ARCHIVE`` depends on ``BROKEN``) and the
+v2 reimplementation is being built at ``arch/um/backend/kvm-v2/``.
+See ``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/``
 memos 24-26 for design and 27 for the execution prompt.
+
+The historical **ptrace** backend (``PTRACE_SYSEMU`` + ``waitpid``,
+Jeff Dike, 1990s) was removed in memo 25 refactor 11. The archived
+source is reachable via
+``git show kvm-v1-archive-20260428:arch/um/backend/ptrace/``.
+Hosts that genuinely lack ``CONFIG_SECCOMP_FILTER`` (mainline since
+3.5 / 2012) should pin to UML v6.16 or earlier.
 
 ******************
 Picking a backend

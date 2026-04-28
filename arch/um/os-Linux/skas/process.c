@@ -39,114 +39,6 @@ int is_skas_winch(int pid, int fd, void *data)
 	return pid == getpgrp();
 }
 
-static const char *ptrace_reg_name(int idx)
-{
-#define R(n) case HOST_##n: return #n
-
-	switch (idx) {
-#ifdef __x86_64__
-	R(BX);
-	R(CX);
-	R(DI);
-	R(SI);
-	R(DX);
-	R(BP);
-	R(AX);
-	R(R8);
-	R(R9);
-	R(R10);
-	R(R11);
-	R(R12);
-	R(R13);
-	R(R14);
-	R(R15);
-	R(ORIG_AX);
-	R(CS);
-	R(SS);
-	R(EFLAGS);
-#elif defined(__i386__)
-	R(IP);
-	R(SP);
-	R(EFLAGS);
-	R(AX);
-	R(BX);
-	R(CX);
-	R(DX);
-	R(SI);
-	R(DI);
-	R(BP);
-	R(CS);
-	R(SS);
-	R(DS);
-	R(FS);
-	R(ES);
-	R(GS);
-	R(ORIG_AX);
-#endif
-	}
-	return "";
-}
-
-static int ptrace_dump_regs(int pid)
-{
-	unsigned long regs[MAX_REG_NR];
-	int i;
-
-	if (ptrace(PTRACE_GETREGS, pid, 0, regs) < 0)
-		return -errno;
-
-	printk(UM_KERN_ERR "Stub registers -\n");
-	for (i = 0; i < ARRAY_SIZE(regs); i++) {
-		const char *regname = ptrace_reg_name(i);
-
-		printk(UM_KERN_ERR "\t%s\t(%2d): %lx\n", regname, i, regs[i]);
-	}
-
-	return 0;
-}
-
-/*
- * Signals that are OK to receive in the stub - we'll just continue it.
- * SIGWINCH will happen when UML is inside a detached screen.
- */
-#define STUB_SIG_MASK ((1 << SIGALRM) | (1 << SIGWINCH))
-
-/* Signals that the stub will finish with - anything else is an error */
-#define STUB_DONE_MASK (1 << SIGTRAP)
-
-void wait_stub_done(int pid)
-{
-	int n, status, err;
-
-	while (1) {
-		CATCH_EINTR(n = waitpid(pid, &status, WUNTRACED | __WALL));
-		if ((n < 0) || !WIFSTOPPED(status))
-			goto bad_wait;
-
-		if (((1 << WSTOPSIG(status)) & STUB_SIG_MASK) == 0)
-			break;
-
-		err = ptrace(PTRACE_CONT, pid, 0, 0);
-		if (err) {
-			printk(UM_KERN_ERR "%s : continue failed, errno = %d\n",
-			       __func__, errno);
-			fatal_sigsegv();
-		}
-	}
-
-	if (((1 << WSTOPSIG(status)) & STUB_DONE_MASK) != 0)
-		return;
-
-bad_wait:
-	err = ptrace_dump_regs(pid);
-	if (err)
-		printk(UM_KERN_ERR "Failed to get registers from stub, errno = %d\n",
-		       -err);
-	printk(UM_KERN_ERR "%s : failed to wait for SIGTRAP, pid = %d, n = %d, errno = %d, status = 0x%x\n",
-	       __func__, pid, n, errno, status);
-	fatal_sigsegv();
-}
-
 void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 {
 	struct stub_data *data = (void *)mm_idp->stack;
@@ -449,7 +341,7 @@ int start_userspace(struct mm_id *mm_id)
 	};
 	void *stack;
 	unsigned long sp;
-	int status, n, err;
+	int err;
 
 	/* setup a temporary stack page */
 	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
@@ -502,53 +394,12 @@ int start_userspace(struct mm_id *mm_id)
 	}
 
 	/*
-	 * Wait for the stub child to reach its initial ready
-	 * state. Seccomp uses the futex primitive
-	 * (wait_stub_done_seccomp); ptrace waits for the
-	 * SIGSTOP that userspace_tramp raises, allowing any
-	 * intervening SIGALRMs to pass, then sets
-	 * PTRACE_O_TRACESYSGOOD. KVM doesn't reach this code
-	 * path. Routed through um_backend->stub_syscall_uses_
-	 * futex per D59 Phase II Lift #4d.
-	 *
-	 * Finding #1 hazard check (04-risks/signal-reentry-in-
-	 * fork-window.md): the ptrace waitpid below is safe
-	 * today because start_userspace runs during early boot
-	 * when signals_enabled == 0 and no SIGALRM timer has
-	 * been armed yet. The `while (... SIGALRM)` loop was
-	 * defensive for future-timer delivery. DO NOT relocate
-	 * this wait to a post-boot call site without reading
-	 * the hazard memo first.
+	 * Wait for the stub child to reach its initial ready state via
+	 * the futex round-trip. KVM doesn't reach this code path.
+	 * (Pre-memo-25-R11 the else branch handled ptrace's SIGSTOP +
+	 * PTRACE_SETOPTIONS dance; ptrace was removed.)
 	 */
-	if (um_backend && um_backend->stub_syscall_uses_futex) {
-		wait_stub_done_seccomp(mm_id, 1, 1);
-	} else {
-		do {
-			CATCH_EINTR(n = waitpid(mm_id->pid, &status,
-						WUNTRACED | __WALL));
-			if (n < 0) {
-				err = -errno;
-				printk(UM_KERN_ERR "%s : wait failed, errno = %d\n",
-				       __func__, errno);
-				goto out_kill;
-			}
-		} while (WIFSTOPPED(status) && (WSTOPSIG(status) == SIGALRM));
-
-		if (!WIFSTOPPED(status) || (WSTOPSIG(status) != SIGSTOP)) {
-			err = -EINVAL;
-			printk(UM_KERN_ERR "%s : expected SIGSTOP, got status = %d\n",
-			       __func__, status);
-			goto out_kill;
-		}
-
-		if (ptrace(PTRACE_SETOPTIONS, mm_id->pid, NULL,
-			   (void *) PTRACE_O_TRACESYSGOOD) < 0) {
-			err = -errno;
-			printk(UM_KERN_ERR "%s : PTRACE_SETOPTIONS failed, errno = %d\n",
-			       __func__, errno);
-			goto out_kill;
-		}
-	}
+	wait_stub_done_seccomp(mm_id, 1, 1);
 
 	if (munmap(stack, UM_KERN_PAGE_SIZE) < 0) {
 		err = -errno;

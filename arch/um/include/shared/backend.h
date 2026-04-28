@@ -283,9 +283,7 @@ int seccomp_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
  *     um_backend_dispatch(read_clock_ns);
  *     um_backend_dispatch(mm_map, id, va, len, prot, fd, off);
  */
-#if defined(CONFIG_UM_BACKEND_PTRACE_ONLY)
-# define um_backend_dispatch(op, ...) ptrace_##op(__VA_ARGS__)
-#elif defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
+#if defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
 # define um_backend_dispatch(op, ...) seccomp_##op(__VA_ARGS__)
 #else
 # define um_backend_dispatch(op, ...) (um_backend->op(__VA_ARGS__))

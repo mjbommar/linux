@@ -78,62 +78,27 @@ static inline unsigned long *check_init_stack(struct mm_id * mm_idp,
 	return stack;
 }
 
-static unsigned long syscall_regs[MAX_REG_NR];
-
-static int __init init_syscall_regs(void)
-{
-	get_safe_registers(syscall_regs, NULL);
-
-	syscall_regs[REGS_IP_INDEX] = STUB_CODE +
-		((unsigned long) stub_syscall_handler -
-		 (unsigned long) __syscall_stub_start);
-	syscall_regs[REGS_SP_INDEX] = STUB_DATA +
-		offsetof(struct stub_data, sigstack) +
-		sizeof(((struct stub_data *) 0)->sigstack) -
-		sizeof(void *);
-
-	return 0;
-}
-
-__initcall(init_syscall_regs);
-
 static inline long do_syscall_stub(struct mm_id *mm_idp)
 {
 	struct stub_data *proc_data = (void *)mm_idp->stack;
-	int n, i;
-	int err, pid = mm_idp->pid;
+	int pid = mm_idp->pid;
 
 	/* Inform process how much we have filled in. */
 	proc_data->syscall_data_len = mm_idp->syscall_data_len;
 
 	/*
-	 * Dispatch mechanism — seccomp wakes the stub via futex
-	 * + wait_stub_done_seccomp round-trip; ptrace drives it
-	 * via PTRACE_SETREGS + PTRACE_CONT + wait_stub_done.
-	 * Routed through um_backend->stub_syscall_uses_futex per
-	 * D59 Phase II Lift #4c. Hot path: the capability deref
-	 * reads one byte of a const singleton — compiler folds
-	 * it into the branch predicate.
+	 * Dispatch via the futex + wait_stub_done_seccomp round-trip
+	 * (the only stub-child mechanism after memo 25 refactor 11
+	 * removed ptrace). The stub_syscall_uses_futex flag is still
+	 * checked so a future per-mm-worker-process backend (memo 25
+	 * R4 / memo 26) can opt out without further dispatch surgery.
 	 */
 	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		proc_data->restart_wait = 1;
 		wait_stub_done_seccomp(mm_idp, 0, 1);
 	} else {
-		n = ptrace_setregs(pid, syscall_regs);
-		if (n < 0) {
-			printk(UM_KERN_ERR "Registers -\n");
-			for (i = 0; i < MAX_REG_NR; i++)
-				printk(UM_KERN_ERR "\t%d\t0x%lx\n", i, syscall_regs[i]);
-			panic("%s : PTRACE_SETREGS failed, errno = %d\n",
-			      __func__, -n);
-		}
-
-		err = ptrace(PTRACE_CONT, pid, 0, 0);
-		if (err)
-			panic("Failed to continue stub, pid = %d, errno = %d\n",
-			      pid, errno);
-
-		wait_stub_done(pid);
+		panic("%s : no stub-child backend supports the legacy ptrace dispatch (memo 25 R11); pid = %d",
+		      __func__, pid);
 	}
 
 	/*

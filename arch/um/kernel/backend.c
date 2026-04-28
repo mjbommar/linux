@@ -2,18 +2,15 @@
 /*
  * UML backend arbiter.
  *
- * Single source of truth for which backend is active. Picks one of
- * the compiled-in backends (arch/um/backend/<kind>/) and exposes it
- * as the global `um_backend` pointer used by the dispatch macro in
+ * Single source of truth for which backend is active. Picks the
+ * compiled-in backend (arch/um/backend/<kind>/) and exposes it as
+ * the global `um_backend` pointer used by the dispatch macro in
  * arch/um/include/shared/backend.h.
  *
- * Resolution order:
- *   1. *_ONLY Kconfig pins the choice at compile time.
- *   2. CONFIG_UM_BACKEND_DYNAMIC: read using_seccomp (set by the
- *      seccomp probe in os_early_checks), choose accordingly.
- *      Honors `seccomp=on` (already enforced by os_early_checks
- *      panicking if the probe fails) and falls back to ptrace if
- *      using_seccomp == 0.
+ * Resolution:
+ *   1. SECCOMP_ONLY Kconfig pins seccomp at compile time.
+ *   2. DYNAMIC compiles seccomp; init_backend() picks it (v2 KVM
+ *      will join this branch when memo 26 Phase A.1 wires it in).
  *
  * After init_backend() returns, `using_seccomp` always matches
  * `um_backend->kind == UM_BACKEND_KIND_SECCOMP`. Both representations
@@ -24,6 +21,10 @@
  * read/write_guest_regs awaiting KGDB / C-11) but a NULL cold op
  * still crashes if dispatched in dynamic mode — the dispatch macro
  * does not synthesize -ENOSYS. See backend-contract.rst.
+ *
+ * The ptrace backend was removed in memo 25 refactor 11 (B); the
+ * archived implementation lives at the kvm-v1-archive-20260428 tag's
+ * arch/um/backend/ptrace/ for anyone who wants to revive it.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -34,9 +35,6 @@
 const struct um_backend_ops *um_backend;
 EXPORT_SYMBOL_GPL(um_backend);
 
-#ifdef CONFIG_UM_BACKEND_PTRACE
-extern const struct um_backend_ops um_backend_ptrace_ops;
-#endif
 #ifdef CONFIG_UM_BACKEND_SECCOMP
 extern const struct um_backend_ops um_backend_seccomp_ops;
 #endif
@@ -68,11 +66,14 @@ static void validate_hot_ops(const struct um_backend_ops *ops)
 }
 
 /*
- * Pick a backend in DYNAMIC mode. Resolution order:
- *   1. `backend=force=<kind>` boot param: requested kind or panic.
- *   2. `backend=<kind>` (non-force): preferred kind if compiled in,
- *      else fall through to using_seccomp.
- *   3. `backend=auto` (default) / no boot param: defer to using_seccomp.
+ * Pick a backend in DYNAMIC mode. Resolution:
+ *   `backend=force=<kind>` panics if kind is unbuilt.
+ *   `backend=<kind>` (non-force) is a preference; falls through to
+ *      seccomp if the requested kind isn't built.
+ *   `backend=auto` (default) selects seccomp.
+ *
+ * Today only seccomp is built. ptrace was removed in memo 25
+ * refactor 11; v2 KVM joins this resolver in memo 26 Phase A.1.
  */
 #ifdef CONFIG_UM_BACKEND_DYNAMIC
 static const struct um_backend_ops * __init pick_dynamic_backend(void)
@@ -81,34 +82,24 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 	bool force = backend_arg_force != 0;
 
 	if (want == UM_BACKEND_KIND_PTRACE) {
-		if (IS_ENABLED(CONFIG_UM_BACKEND_PTRACE)) {
-			using_seccomp = 0;
-			return &um_backend_ptrace_ops;
-		}
 		if (force)
-			panic("um: backend=force=ptrace but ptrace not compiled in");
+			panic("um: backend=force=ptrace but ptrace backend was removed in memo 25 refactor 11; pin to v6.16 or earlier UML if you need it");
+		pr_warn("um: backend=ptrace requested but ptrace backend was removed (memo 25 refactor 11); falling back to seccomp\n");
 	} else if (want == UM_BACKEND_KIND_SECCOMP) {
-		if (IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) && using_seccomp) {
+		if (IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) && using_seccomp)
 			return &um_backend_seccomp_ops;
-		}
 		if (force)
 			panic("um: backend=force=seccomp but seccomp not compiled in or probe failed");
-	}
-	else if (want == UM_BACKEND_KIND_KVM) {
-		/*
-		 * v1 KVM backend archived (memo 25 Part 1); v2 not yet
-		 * landed. backend=kvm requests fall through to the
-		 * seccomp/ptrace path. force=kvm panics until v2 lands.
-		 */
+	} else if (want == UM_BACKEND_KIND_KVM) {
 		if (force)
 			panic("um: backend=force=kvm requested but no KVM backend is built (v1 archived; v2 pending — memos 25-26)");
 		pr_warn("um: backend=kvm requested but no KVM backend is built (v1 archived; v2 pending); falling back\n");
 	}
 
-	/* auto / fall-through */
+	/* auto / fall-through: seccomp is the only resident backend today */
 	if (using_seccomp)
 		return &um_backend_seccomp_ops;
-	return &um_backend_ptrace_ops;
+	panic("um: dynamic backend resolution failed — seccomp probe did not succeed and no other backend is built");
 }
 #endif
 
@@ -118,14 +109,9 @@ enum um_backend_kind __init init_backend(const struct um_backend_args *args)
 
 #if defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
 	if (backend_arg_requested == UM_BACKEND_KIND_PTRACE && backend_arg_force)
-		panic("um: backend=force=ptrace but kernel built SECCOMP_ONLY");
+		panic("um: backend=force=ptrace but ptrace backend was removed in memo 25 refactor 11");
 	um_backend = &um_backend_seccomp_ops;
 	using_seccomp = 1;
-#elif defined(CONFIG_UM_BACKEND_PTRACE_ONLY)
-	if (backend_arg_requested == UM_BACKEND_KIND_SECCOMP && backend_arg_force)
-		panic("um: backend=force=seccomp but kernel built PTRACE_ONLY");
-	um_backend = &um_backend_ptrace_ops;
-	using_seccomp = 0;
 #elif defined(CONFIG_UM_BACKEND_DYNAMIC)
 	um_backend = pick_dynamic_backend();
 #else
