@@ -20,9 +20,12 @@
 #ifndef __SHARED_UM_WORKER_API_H
 #define __SHARED_UM_WORKER_API_H
 
+#include <linux/errno.h>
+
 struct mm_struct;
 struct um_worker;	/* opaque to spawner code; defined in
 			 * arch/um/os-Linux/spawner.c */
+struct worker_msg;
 
 #ifdef CONFIG_UM_WORKER_PROCESS
 
@@ -49,12 +52,34 @@ void spawner_shutdown(void);
 int  spawn_worker_for_mm(struct mm_struct *mm);
 void reap_worker_for_mm(struct mm_struct *mm);
 
+/*
+ * Send one worker_msg over the per-mm IPC socket. E.3d's seccomp
+ * integration is the production caller. Returns 0 on success or a
+ * negative errno (-ENODEV if the mm has no worker; -EIO on short
+ * write).
+ */
+int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg);
+
+/*
+ * E.3b smoke test entry point. Spawns a throwaway worker, drives the
+ * STUB_ALLOC_REQ → WRITE_REGS → RETURN_VALUE → WRITE_REGS_ACK
+ * round-trip, verifies the sentinel echoes, reaps. Not called from
+ * any production path; documented entry point for E.3c.
+ */
+int worker_smoke_test(void);
+
 #else /* !CONFIG_UM_WORKER_PROCESS */
 
 static inline int  spawner_init(void)              { return 0; }
 static inline void spawner_shutdown(void)          { }
 static inline int  spawn_worker_for_mm(struct mm_struct *mm) { return 0; }
 static inline void reap_worker_for_mm(struct mm_struct *mm)  { }
+static inline int  worker_send_msg_for_mm(struct mm_struct *mm,
+					  const struct worker_msg *msg)
+{
+	return -ENODEV;
+}
+static inline int  worker_smoke_test(void) { return -ENODEV; }
 
 #endif /* CONFIG_UM_WORKER_PROCESS */
 

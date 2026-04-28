@@ -33,8 +33,11 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/string.h>
 
+#include <os.h>
 #include <worker_api.h>
+#include <worker_ipc.h>
 #include <worker_user.h>
 
 /*
@@ -169,6 +172,117 @@ void reap_worker_for_mm(struct mm_struct *mm)
 	kfree(w);
 
 	reap_worker_process(pid, sock);
+}
+
+/*
+ * Synchronous send of a worker_msg over an mm's IPC socket.
+ *
+ * E.3d's seccomp integration is the production caller: it builds a
+ * SYSCALL_REQ and waits for SYSCALL_REP. For E.3b this is also the
+ * primitive driving worker_smoke_test(). Returns 0 on success or a
+ * negative errno; the caller is responsible for reading the reply
+ * separately if one is expected.
+ */
+int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg)
+{
+	struct um_worker *w = mm ? mm->context.worker : NULL;
+	int n;
+
+	if (!w || w->ipc_sock < 0)
+		return -ENODEV;
+
+	n = os_write_file(w->ipc_sock, msg, sizeof(*msg));
+	if (n != sizeof(*msg))
+		return n < 0 ? n : -EIO;
+	return 0;
+}
+
+/*
+ * worker_smoke_test — drive the E.3b round-trip end-to-end.
+ *
+ * Spawns a worker (no mm_struct involved; the test is for the IPC
+ * dispatcher itself), exchanges STUB_ALLOC_REQ + WRITE_REGS +
+ * RETURN_VALUE, and verifies WRITE_REGS_ACK echoes the sentinel back
+ * in slot 2 (HOST_AX). Reaps the worker before returning.
+ *
+ * Not auto-wired. E.3c will replace this with the dispatcher thread
+ * that drives real syscall round-trips.
+ */
+int worker_smoke_test(void)
+{
+	struct worker_msg msg;
+	int pid = -1, sock = -1, rc, n;
+	const u64 sentinel = 0x1234ULL;
+
+	if (!spawner_initialized)
+		return -ENODEV;
+
+	rc = spawn_worker_process(&pid, &sock);
+	if (rc < 0) {
+		pr_err("um: worker smoke: spawn failed: %d\n", rc);
+		return rc;
+	}
+
+	memset(&msg, 0, sizeof(msg));
+	msg.magic = WORKER_IPC_MAGIC;
+	msg.type  = WORKER_MSG_STUB_ALLOC_REQ;
+	msg.u.stub_alloc.pid              = (worker_u32)pid;
+	msg.u.stub_alloc.stack            = 0;
+	msg.u.stub_alloc.syscall_data_len = 0;
+	msg.u.stub_alloc.sock             = (worker_u32)-1;
+	msg.u.stub_alloc.syscall_fd_num   = 0;
+	n = os_write_file(sock, &msg, sizeof(msg));
+	if (n != sizeof(msg)) {
+		rc = n < 0 ? n : -EIO;
+		goto out;
+	}
+
+	memset(&msg, 0, sizeof(msg));
+	msg.magic = WORKER_IPC_MAGIC;
+	msg.type  = WORKER_MSG_WRITE_REGS;
+	msg.u.regs.slot[0] = 0xdeadULL;	/* rip */
+	msg.u.regs.slot[1] = 0xbeefULL;	/* rsp */
+	n = os_write_file(sock, &msg, sizeof(msg));
+	if (n != sizeof(msg)) {
+		rc = n < 0 ? n : -EIO;
+		goto out;
+	}
+
+	memset(&msg, 0, sizeof(msg));
+	msg.magic = WORKER_IPC_MAGIC;
+	msg.type  = WORKER_MSG_RETURN_VALUE;
+	msg.u.retval.sentinel = sentinel;
+	n = os_write_file(sock, &msg, sizeof(msg));
+	if (n != sizeof(msg)) {
+		rc = n < 0 ? n : -EIO;
+		goto out;
+	}
+
+	memset(&msg, 0, sizeof(msg));
+	n = os_read_file(sock, &msg, sizeof(msg));
+	if (n != sizeof(msg)) {
+		pr_err("um: worker smoke: short read (%d)\n", n);
+		rc = n < 0 ? n : -EIO;
+		goto out;
+	}
+
+	if (msg.magic != WORKER_IPC_MAGIC ||
+	    msg.type  != WORKER_MSG_WRITE_REGS_ACK ||
+	    msg.u.regs.slot[2] != sentinel) {
+		pr_err("um: worker smoke: ack mismatch magic=0x%x type=%u slot2=0x%llx\n",
+		       (unsigned)msg.magic, (unsigned)msg.type,
+		       (unsigned long long)msg.u.regs.slot[2]);
+		rc = -EPROTO;
+		goto out;
+	}
+
+	pr_info("um: worker smoke: round-trip OK (sentinel 0x%llx)\n",
+		(unsigned long long)sentinel);
+	rc = 0;
+
+out:
+	reap_worker_process(pid, sock);
+	return rc;
 }
 
 /*

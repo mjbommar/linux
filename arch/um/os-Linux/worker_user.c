@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * UML per-mm host worker process — USER-side helpers
- * (memo 25 R4 / memo 28 commit E.3a).
+ * (memo 25 R4 / memo 28 commits E.3a + E.3b).
  *
  * This TU runs in libc context (USER_CFLAGS). The spawner side
  * (arch/um/kernel/spawner.c, kernel TU) calls into here for the
@@ -9,11 +9,8 @@
  * inside the freshly-cloned worker process and pumps the IPC
  * loop.
  *
- * Today's E.3a scope: spawn a worker via clone-without-CLONE_VM,
- * set up a per-worker UNIX socketpair for spawner ↔ worker IPC,
- * give the worker a sleep-loop main that echoes any message
- * back to the spawner. No actual syscall routing yet — that lands
- * in E.3b along with the worker-side stub child.
+ * E.3a: spawn / reap the worker via clone-without-CLONE_VM.
+ * E.3b: tagged-message dispatcher in worker_main (this file).
  *
  * The worker is a sidecar today: even with WORKER_PROCESS=y it
  * does not replace today's seccomp_mm_create stub-child path.
@@ -24,6 +21,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +35,7 @@
 #include <unistd.h>
 
 #include <kern_util.h>
+#include <mm_id.h>
 #include <os.h>
 
 #include <worker_ipc.h>
@@ -58,17 +57,23 @@ struct worker_init {
 #define WORKER_STACK_SIZE	(64 * 1024)
 
 /*
- * Worker main loop (E.3a): echo-only. Reads worker_msg-shaped
- * frames from the IPC socket and writes them back unchanged.
- * SIGTERM exits cleanly with status 0.
+ * Worker main loop (E.3b): tagged-message dispatcher, minimum-viable
+ * cut per memo 28 Part K.6.
  *
- * The worker shares no memory with the spawner (clone without
- * CLONE_VM); communication is exclusively via the socket.
+ * Option A from the E.3b spec: handlers stash the inbound payload in
+ * worker-local state (mm_id snapshot + a 9-slot regs buffer) and ACK
+ * the round-trip via WORKER_MSG_WRITE_REGS_ACK. The actual
+ * start_userspace() / set_stub_state() / get_stub_state() integration
+ * is deferred to E.3c — start_userspace pulls in stub_data placement
+ * and current_mm_id() that we'd have to fabricate from worker context,
+ * which would expand E.3b past its proof-of-concept charter.
  *
- * E.3b will replace this loop with the trap relay (set stub
- * child regs, futex-wake stub, wait for SIGSYS, forward to
- * spawner via SYSCALL_REQ, recv SYSCALL_REP, futex-wake stub
- * with new regs).
+ * What this loop proves: mm_id IPC marshalling, regs ping-pong, the
+ * three new message types decode cleanly. What's deferred to E.3c:
+ * actual stub child clone inside the worker, real futex wake/wait,
+ * SIGSYS trap relay back to spawner.
+ *
+ * SIGTERM still exits cleanly with status 0 (E.3a behaviour).
  */
 static volatile sig_atomic_t worker_should_exit;
 
@@ -78,17 +83,46 @@ static void worker_sigterm_handler(int sig)
 	worker_should_exit = 1;
 }
 
+static void worker_load_mm_id(struct mm_id *dst,
+			      const struct worker_msg_stub_alloc *src)
+{
+	int i;
+
+	dst->pid              = (int)src->pid;
+	dst->stack            = (unsigned long)src->stack;
+	dst->syscall_data_len = (int)src->syscall_data_len;
+	dst->sock             = (int)src->sock;
+	dst->syscall_fd_num   = (int)src->syscall_fd_num;
+
+	for (i = 0; i < STUB_MAX_FDS; i++)
+		dst->syscall_fd_map[i] = (int)src->syscall_fd_map[i];
+}
+
+static int worker_send(int sock, const struct worker_msg *msg)
+{
+	ssize_t n = write(sock, msg, sizeof(*msg));
+
+	if (n != (ssize_t)sizeof(*msg))
+		return -1;
+	return 0;
+}
+
 static int worker_main(void *arg)
 {
 	struct worker_init *init = arg;
 	int sock = init->worker_socket_fd;
 	struct sigaction sa = { 0 };
 	struct worker_msg msg;
+	struct worker_msg ack;
+	struct mm_id local_mm_id = { .pid = -1 };
+	worker_u64 local_regs[WORKER_REGS_SLOTS] = { 0 };
 	ssize_t n;
+	unsigned int i;
 
 	/*
-	 * Per-worker sigchild handling — SIGCHLD from the (future)
-	 * stub child is the worker's responsibility, not the spawner's.
+	 * PDEATHSIG so an orphaned worker self-terminates if the spawner
+	 * crashes before SIGTERM reaches us. Inherited by the (future)
+	 * stub child clone.
 	 */
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
@@ -97,27 +131,70 @@ static int worker_main(void *arg)
 	sa.sa_flags = 0;
 	sigaction(SIGTERM, &sa, NULL);
 
-	/*
-	 * Echo loop. recvmsg-style would let us pass FDs via cmsg; for
-	 * E.3a we only need plain bytes.
-	 */
 	while (!worker_should_exit) {
 		n = read(sock, &msg, sizeof(msg));
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
-			break;	/* spawner went away */
+			break;
 		}
 		if (n == 0)
-			break;	/* spawner closed the socket cleanly */
+			break;
 		if (n != (ssize_t)sizeof(msg))
-			continue;	/* short read; ignore */
+			continue;
 
-		/* Echo. E.3b replaces this with the real dispatcher. */
-		if (write(sock, &msg, sizeof(msg)) != (ssize_t)sizeof(msg))
-			break;	/* spawner closed the socket */
+		if (msg.magic != WORKER_IPC_MAGIC) {
+			os_info("um: worker: bad ipc magic 0x%x, dropping\n",
+				(unsigned)msg.magic);
+			continue;
+		}
+
+		switch (msg.type) {
+		case WORKER_MSG_STUB_ALLOC_REQ:
+			worker_load_mm_id(&local_mm_id, &msg.u.stub_alloc);
+			break;
+
+		case WORKER_MSG_WRITE_REGS:
+			for (i = 0; i < WORKER_REGS_SLOTS; i++)
+				local_regs[i] = msg.u.regs.slot[i];
+			break;
+
+		case WORKER_MSG_RETURN_VALUE:
+			/*
+			 * Slot 2 mirrors HOST_AX in the regs frame; this is
+			 * the path set_stub_state() / get_stub_state() drive
+			 * in production. For E.3b we just write the sentinel
+			 * into the local regs buffer and ship them back so
+			 * the spawner can verify the round-trip.
+			 */
+			local_regs[2] = msg.u.retval.sentinel;
+
+			memset(&ack, 0, sizeof(ack));
+			ack.magic = WORKER_IPC_MAGIC;
+			ack.type  = WORKER_MSG_WRITE_REGS_ACK;
+			ack.task_handle = msg.task_handle;
+			for (i = 0; i < WORKER_REGS_SLOTS; i++)
+				ack.u.regs.slot[i] = local_regs[i];
+			if (worker_send(sock, &ack) < 0)
+				goto out;
+			break;
+
+		case WORKER_MSG_SHUTDOWN:
+			goto out;
+
+		default:
+			/*
+			 * Unknown / not-yet-implemented messages. E.3c will
+			 * grow SYSCALL_REQ/SYSCALL_REP plumbing.
+			 */
+			os_info("um: worker: unhandled msg type %u\n",
+				(unsigned)msg.type);
+			break;
+		}
 	}
 
+out:
+	(void)local_mm_id;	/* populated by STUB_ALLOC_REQ; consumed in E.3c */
 	close(sock);
 	exit(0);
 }

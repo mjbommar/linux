@@ -37,16 +37,28 @@ typedef u8  worker_u8;
 #define WORKER_IPC_MAGIC	0x554D5734u	/* "UMW4" */
 #define WORKER_MSG_SIZE		128u
 
+/*
+ * E.3b ABI: STUB_ALLOC_REQ / WRITE_REGS / RETURN_VALUE / WRITE_REGS_ACK
+ * are the minimum-viable cut from memo 28 Part K.6. They prove the
+ * spawner→worker→spawner round-trip without yet integrating real
+ * start_userspace() calls or SIGSYS handling — that's E.3c.
+ */
+#define WORKER_REGS_SLOTS	9u	/* rip,rsp,rax,rdi,rsi,rdx,r10,r8,r9 */
+
 enum worker_msg_type {
-	WORKER_MSG_NONE          = 0,
-	WORKER_MSG_SYSCALL_REQ   = 1,	/* worker → spawner: do this syscall */
-	WORKER_MSG_SYSCALL_REP   = 2,	/* spawner → worker: here's the return */
-	WORKER_MSG_SIGNAL        = 3,	/* spawner → worker: deliver signal */
-	WORKER_MSG_MIGRATE_TO    = 4,	/* spawner → worker: receive task */
-	WORKER_MSG_MIGRATE_ACK   = 5,	/* worker → spawner: migration done */
-	WORKER_MSG_QUIESCE_REQ   = 6,	/* spawner → worker: stop scheduling */
-	WORKER_MSG_QUIESCE_REP   = 7,	/* worker → spawner: quiesced */
-	WORKER_MSG_SHUTDOWN      = 8,	/* spawner → worker: clean exit */
+	WORKER_MSG_NONE             = 0,
+	WORKER_MSG_SYSCALL_REQ      = 1,	/* worker → spawner: do this syscall */
+	WORKER_MSG_SYSCALL_REP      = 2,	/* spawner → worker: here's the return */
+	WORKER_MSG_SIGNAL           = 3,	/* spawner → worker: deliver signal */
+	WORKER_MSG_MIGRATE_TO       = 4,	/* spawner → worker: receive task */
+	WORKER_MSG_MIGRATE_ACK      = 5,	/* worker → spawner: migration done */
+	WORKER_MSG_QUIESCE_REQ      = 6,	/* spawner → worker: stop scheduling */
+	WORKER_MSG_QUIESCE_REP      = 7,	/* worker → spawner: quiesced */
+	WORKER_MSG_SHUTDOWN         = 8,	/* spawner → worker: clean exit */
+	WORKER_MSG_STUB_ALLOC_REQ   = 9,	/* spawner → worker: mm_id snapshot, alloc local stub */
+	WORKER_MSG_WRITE_REGS       = 10,	/* spawner → worker: synthetic regs */
+	WORKER_MSG_RETURN_VALUE     = 11,	/* spawner → worker: sentinel for stub reply */
+	WORKER_MSG_WRITE_REGS_ACK   = 12,	/* worker → spawner: regs round-trip ACK */
 };
 
 struct worker_msg_syscall {
@@ -72,17 +84,53 @@ struct worker_msg_migrate {
 	worker_u64 reserved[6];
 };
 
+/*
+ * Snapshot of struct mm_id (arch/um/include/shared/skas/mm_id.h) sent
+ * from spawner to worker so the worker can populate a local mm_id and
+ * drive the seccomp futex round-trip itself. See memo 28 Part K.2
+ * (option γ: pass via IPC, no struct refactor).
+ */
+struct worker_msg_stub_alloc {
+	worker_u64 stack;		/* host VA of stub_data page */
+	worker_u32 pid;			/* echo-only in E.3b; worker overwrites post-spawn */
+	worker_u32 syscall_data_len;
+	worker_u32 sock;		/* parent-side sockpair fd */
+	worker_u32 syscall_fd_num;
+	worker_u32 syscall_fd_map[4];	/* matches STUB_MAX_FDS */
+	worker_u64 reserved[6];
+};
+
+/*
+ * Compact regs frame for E.3b's round-trip. Not the full uml_pt_regs
+ * (that's MAX_REG_NR * 8 bytes — too large for the 112-byte ceiling).
+ * E.3c will define a richer encoding once handle_syscall integration
+ * lands; for now WORKER_REGS_SLOTS holds the 9 slots set_stub_state
+ * needs to drive a simulated stub child reply.
+ */
+struct worker_msg_regs {
+	worker_u64 slot[9];		/* WORKER_REGS_SLOTS; slot[2] = rax/sentinel */
+	worker_u64 reserved[5];
+};
+
+struct worker_msg_retval {
+	worker_u64 sentinel;		/* worker writes this into local regs->ax */
+	worker_u64 reserved[13];
+};
+
 struct worker_msg {
 	worker_u32 magic;	/* WORKER_IPC_MAGIC */
 	worker_u16 type;	/* enum worker_msg_type */
 	worker_u16 flags;
 	worker_u64 task_handle;
 	union {
-		struct worker_msg_syscall syscall;
-		struct worker_msg_reply   reply;
-		struct worker_msg_signal  signal;
-		struct worker_msg_migrate migrate;
-		worker_u8                 pad[112];
+		struct worker_msg_syscall    syscall;
+		struct worker_msg_reply      reply;
+		struct worker_msg_signal     signal;
+		struct worker_msg_migrate    migrate;
+		struct worker_msg_stub_alloc stub_alloc;
+		struct worker_msg_regs       regs;
+		struct worker_msg_retval     retval;
+		worker_u8                    pad[112];
 	} u;
 };
 
