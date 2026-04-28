@@ -441,9 +441,15 @@ status:
   socketpair, echo-only main loop. Wired into
   spawner.c::spawn_worker_for_mm. Done; reachable but not yet
   invoked from any production path.
-- **E.3b** (worker stub-child manager) — pending; surface mapped
-  by Explore subagent 2026-04-28. ~150 LoC. See Part K below
-  for the implementation guide derived from that pass.
+- E.3b worker stub-child manager (`fcf4f00d3f3e`) — tagged-message
+  dispatcher in worker_main, 4 new IPC types (STUB_ALLOC_REQ,
+  WRITE_REGS, RETURN_VALUE, WRITE_REGS_ACK) per Part K.6 minimum-
+  viable cut, worker_smoke_test() entry point, worker_send_msg_for_mm
+  helper for E.3d. Option A chosen: handlers stash payloads in
+  worker-local state (mm_id snapshot + 9-slot regs buffer); actual
+  start_userspace integration deferred to E.3c. Done. Build clean
+  at WORKER_PROCESS=n and =y; substrate gate stable PASS=22 FAIL=3
+  EXPECTED_FAIL=3.
 - **E.3c** (spawner-side per-worker dispatcher thread) — pending.
   One kernel thread per worker that receives SYSCALL_REQ over
   IPC, invokes handle_syscall in UML kernel context, sends
