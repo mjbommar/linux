@@ -26,6 +26,7 @@ struct mm_struct;
 struct mm_id;
 struct um_worker;	/* opaque to spawner code; defined in
 			 * arch/um/os-Linux/spawner.c */
+struct uml_pt_regs;
 struct worker_msg;
 
 #ifdef CONFIG_UM_WORKER_PROCESS
@@ -99,6 +100,32 @@ int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg);
 int worker_run_pending_syscalls(struct mm_struct *mm);
 
 /*
+ * worker_drive_vcpu_run — ship one outer vcpu_run iteration to the
+ * worker and read its VCPU_DONE reply (memo 28 E.3d.2).
+ *
+ * The worker owns the futex round-trip with the stub child (the stub
+ * is the worker's CLONE_VM peer). The spawner still owns
+ * set_stub_state / get_stub_state (which operate on the shared
+ * stub_data page) and the SCM_RIGHTS sendmsg of any
+ * mm_id->syscall_fd_map[] entries (those fds live in the spawner's
+ * FD table) — both are run inline in this function and in
+ * trap_user.c::seccomp_vcpu_run respectively. Per-iteration shape
+ * matches today's WORKER_PROCESS=n trap loop (one trap per call); the
+ * post-trap signal dispatch (handle_syscall etc.) runs on the
+ * originating guest task's `current`, no extra wakeup.
+ *
+ * Looks up the worker via current->mm so USER TUs (e.g.,
+ * arch/um/backend/seccomp/trap_user.c) can call this without pulling
+ * in the kernel mm types. Returns -ENODEV if current has no mm or no
+ * worker (caller falls back to legacy in-spawner
+ * wait_stub_done_seccomp); 0 on clean trap; negative on IPC failure
+ * (-EIO / -EPROTO).
+ */
+int worker_drive_vcpu_run(struct uml_pt_regs *regs,
+			  int single_stepping,
+			  int syscall_data_len);
+
+/*
  * E.3b smoke test entry point. Spawns a throwaway worker, drives the
  * STUB_ALLOC_REQ → WRITE_REGS → RETURN_VALUE → WRITE_REGS_ACK
  * round-trip, verifies the sentinel echoes, reaps. Not called from
@@ -123,6 +150,12 @@ static inline int  worker_send_msg_for_mm(struct mm_struct *mm,
 	return -ENODEV;
 }
 static inline int  worker_run_pending_syscalls(struct mm_struct *mm)
+{
+	return -ENODEV;
+}
+static inline int  worker_drive_vcpu_run(struct uml_pt_regs *regs,
+					 int single_stepping,
+					 int syscall_data_len)
 {
 	return -ENODEV;
 }

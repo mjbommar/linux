@@ -81,13 +81,15 @@ struct um_worker {
 	spinlock_t		pending_lock;
 
 	/*
-	 * Future fields (E.4+) go here:
-	 *   atomic_t            quiescing;   // QUIESCE_REQ flag
-	 *   ...
-	 *
-	 * Keep additions explicit so the wire format and lifecycle
-	 * stay reviewable.
+	 * E.3d.2 vcpu_run completion. The dispatcher routes VCPU_DONE
+	 * out-of-band to a completion rather than into pending_reqs:
+	 * pending_reqs is a queue of equally-shaped SYSCALL_REQs that
+	 * any draining task can pick up, but VCPU_DONE is the
+	 * end-of-iteration edge for the one task currently in
+	 * worker_drive_vcpu_run.
 	 */
+	struct completion	vcpu_done;
+	int			vcpu_done_status;
 };
 
 /*
@@ -233,6 +235,18 @@ static int worker_dispatcher_fn(void *arg)
 			wake_up(&w->reply_wait);
 			break;
 		}
+		case WORKER_MSG_VCPU_DONE:
+			/*
+			 * E.3d.2 leaves the dispatcher idle while
+			 * worker_drive_vcpu_run owns the socket directly, so
+			 * VCPU_DONE should never reach this kthread. Keep a
+			 * defensive completion-signal in place for the
+			 * out-of-band case (e.g., a future async path injecting
+			 * a stub-loss notification while no vcpu_run is active).
+			 */
+			w->vcpu_done_status = (int)msg.u.vcpu_done.status;
+			complete(&w->vcpu_done);
+			break;
 		case WORKER_MSG_SHUTDOWN:
 			goto out;
 		default:
@@ -314,6 +328,7 @@ static int __spawn_worker_for_mm(struct mm_struct *mm, bool defer_dispatcher)
 	init_waitqueue_head(&w->reply_wait);
 	INIT_LIST_HEAD(&w->pending_reqs);
 	spin_lock_init(&w->pending_lock);
+	init_completion(&w->vcpu_done);
 
 	rc = spawn_worker_process(&w->pid, &w->ipc_sock);
 	if (rc < 0) {
@@ -503,13 +518,17 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 		id_out->syscall_fd_map[i] =
 			(int)rep.u.stub_alloc_rep.syscall_fd_map[i];
 
-	rc = worker_start_dispatcher(w);
-	if (rc < 0) {
-		pr_err("um: worker alloc: dispatcher kthread failed (%d)\n", rc);
-		os_close_file(sock_fd);
-		id_out->sock = 0;
-		goto out_reap;
-	}
+	/*
+	 * E.3d.2: vcpu_run directly reads/writes the IPC socket from
+	 * the originating guest task's context (single-consumer model;
+	 * E.4 generalizes when multiple tasks share one mm). The
+	 * dispatcher kthread that E.3d.1 introduced is therefore not
+	 * started here — leaving w->dispatcher == NULL keeps
+	 * reap_worker_for_mm's kthread_stop branch a no-op. E.3d.1's
+	 * smoke-test scaffold (worker_run_pending_syscalls) returns
+	 * -ENODEV against a NULL dispatcher, which is the correct
+	 * "no kthread routing today" answer.
+	 */
 
 	pr_info("um: worker model: stub alloc OK for mm=%p (worker_pid=%d stub_pid=%d sock=%d)\n",
 		mm, w->pid, id_out->pid, id_out->sock);
@@ -667,6 +686,92 @@ int worker_run_pending_syscalls(struct mm_struct *mm)
 				READ_ONCE(w->dispatcher) == NULL);
 		if (rc == -ERESTARTSYS)
 			return -EINTR;
+	}
+}
+
+/*
+ * worker_drive_vcpu_run — ship one outer vcpu_run iteration to the
+ * worker and read its VCPU_DONE reply.
+ *
+ * Synchronization:
+ *  - The worker's main loop is single-threaded; it owns the futex
+ *    round-trip with the stub child and replies VCPU_DONE when the
+ *    stub re-traps. There is exactly one consumer-on-each-side per
+ *    iteration, so a synchronous read on the spawner end is correct
+ *    (no dispatcher kthread is started for this worker — E.3d.2).
+ *  - SIGSYS dispatch happens in the spawner's seccomp_vcpu_run
+ *    continuation (handle_syscall is called there, on the originating
+ *    guest task's `current`). The next iteration's set_stub_state
+ *    propagates the syscall return value into the stub's mcontext.
+ *
+ * Lifetime: caller holds current->mm pinned; reap_worker_for_mm only
+ * fires after all guest tasks for the mm have stopped, so w stays
+ * valid across this call.
+ *
+ * Returns 0 on a clean trap completion; -ENODEV if the worker is gone
+ * (caller falls back to the legacy in-spawner wait_stub_done_seccomp);
+ * -EIO / -EPROTO on IPC failure (caller surfaces fatal_sigsegv).
+ */
+int worker_drive_vcpu_run(struct uml_pt_regs *regs,
+			  int single_stepping,
+			  int syscall_data_len)
+{
+	struct mm_struct *mm = current->mm;
+	struct um_worker *w = mm ? mm->context.worker : NULL;
+	struct mm_id *mm_id = mm ? &mm->context.id : NULL;
+	struct worker_msg msg;
+	int rc, n;
+
+	if (!w)
+		return -ENODEV;
+
+	/*
+	 * Ship any queued stub-syscall fds via SCM_RIGHTS now: those fds
+	 * live in the spawner's FD table, and the stub child will
+	 * recvmsg them after the worker's futex_wake. Mirrors the
+	 * sendmsg in wait_stub_done_seccomp's !running prelude (the
+	 * legacy WORKER_PROCESS=n path).
+	 */
+	if (mm_id && mm_id->syscall_fd_num)
+		send_stub_syscall_fds(mm_id);
+
+	memset(&msg, 0, sizeof(msg));
+	msg.magic = WORKER_IPC_MAGIC;
+	msg.type  = WORKER_MSG_VCPU_RUN;
+	msg.task_handle = (u64)(unsigned long)current;
+	msg.u.vcpu_run.regs_va         = (u64)(unsigned long)regs;
+	msg.u.vcpu_run.single_stepping = single_stepping ? 1 : 0;
+	msg.u.vcpu_run.syscall_data_len = (u32)syscall_data_len;
+
+	rc = worker_send_msg_for_mm(mm, &msg);
+	if (rc < 0)
+		return rc;
+
+	/*
+	 * Direct synchronous read of the IPC socket — bypass the
+	 * dispatcher kthread for the duration of this vcpu_run
+	 * iteration. The single-task-per-mm assumption (E.3d.2; E.4
+	 * generalizes it) means there is exactly one consumer at a
+	 * time. Worker emits exactly one VCPU_DONE per VCPU_RUN; the
+	 * post-trap signal dispatch (including handle_syscall for
+	 * SIGSYS) runs in the spawner's seccomp_vcpu_run continuation,
+	 * which is already on the originating guest task's `current`.
+	 */
+	for (;;) {
+		n = os_read_file(w->ipc_sock, &msg, sizeof(msg));
+		if (n == -EINTR)
+			continue;
+		if (n != sizeof(msg))
+			return n < 0 ? n : -EIO;
+
+		if (msg.magic != WORKER_IPC_MAGIC)
+			return -EPROTO;
+
+		if (msg.type == WORKER_MSG_VCPU_DONE)
+			return (int)msg.u.vcpu_done.status;
+
+		pr_warn_ratelimited("um: drv: unexpected msg type %u\n",
+				    (unsigned)msg.type);
 	}
 }
 

@@ -57,6 +57,7 @@ extern int using_seccomp;
  */
 void wait_stub_done(int pid);
 void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys);
+void send_stub_syscall_fds(struct mm_id *mm_idp);
 
 /*
  * smp.c

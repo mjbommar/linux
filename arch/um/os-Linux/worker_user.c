@@ -36,13 +36,19 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <linux/futex.h>
 
 #include <kern_util.h>
 #include <mm_id.h>
 #include <os.h>
+#include <stub-data.h>
+#include <sysdep/mcontext.h>
+#include <sysdep/ptrace.h>
 
 #include <worker_ipc.h>
 #include <worker_user.h>
+
+#include "internal.h"
 
 /*
  * Pre-clone payload handed to worker_main via clone()'s 4th arg.
@@ -141,6 +147,63 @@ static int worker_send_with_fd(int sock, const struct worker_msg *msg, int fd)
 	n = sendmsg(sock, &m, 0);
 	if (n != (ssize_t)sizeof(*msg))
 		return -1;
+	return 0;
+}
+
+/*
+ * Drive one futex round-trip with the worker's stub child (memo 28
+ * E.3d.2). The spawner has already done set_stub_state and (for
+ * batched stub-syscall cases) the sendmsg for syscall_fd_map[]; this
+ * function flips data->futex from FUTEX_IN_KERN to FUTEX_IN_CHILD,
+ * wakes the stub, and blocks until the stub re-traps. The spawner's
+ * seccomp_vcpu_run runs get_stub_state and the post-trap signal
+ * dispatch — same one-trap-per-call shape as today's WORKER_PROCESS=n
+ * path. The worker exists in the loop because the stub child is a
+ * CLONE_VM peer of the worker (not the spawner): SIGCHLD on stub
+ * crash and signal-mask ownership of the trap-reception path are
+ * worker-local concerns from R6 onward.
+ *
+ * Returns 0 if the stub trapped cleanly; -EAGAIN if the stub child
+ * pid went negative (spawner surfaces as fatal_sigsegv).
+ */
+static int worker_vcpu_trap_iter(struct mm_id *local_mm_id)
+{
+	struct stub_data *data = (void *)local_mm_id->stack;
+	int ret;
+
+	/*
+	 * Spawner has already done set_stub_state. We do the
+	 * data->signal / data->futex prelude + futex round-trip here
+	 * (the stub child is a CLONE_VM peer of this worker, so the
+	 * wake/wait cycle should run from the worker's address space).
+	 * Cross-process futex on the shared memfd page works either
+	 * way — locating it in the worker keeps R6 signal-mask hygiene
+	 * and lets E.4 add a per-task pthread without restructuring.
+	 */
+	data->signal = 0;
+	data->futex  = FUTEX_IN_CHILD;
+
+	syscall(__NR_futex, &data->futex, FUTEX_WAKE, 1, NULL, NULL, 0);
+
+	for (;;) {
+		if (UM_USER_READ_ONCE(local_mm_id->pid) < 0)
+			return -EAGAIN;
+
+		ret = syscall(__NR_futex, &data->futex,
+			      FUTEX_WAIT, FUTEX_IN_CHILD,
+			      NULL, NULL, 0);
+		if (ret < 0 && errno != EINTR && errno != EAGAIN)
+			return -EAGAIN;
+		if (data->futex != FUTEX_IN_CHILD)
+			break;
+	}
+
+	if (UM_USER_READ_ONCE(local_mm_id->pid) < 0)
+		return -EAGAIN;
+
+	if (data->mctx_offset > sizeof(data->sigstack) - sizeof(mcontext_t))
+		return -EAGAIN;
+
 	return 0;
 }
 
@@ -255,6 +318,29 @@ static int worker_main(void *arg)
 			for (i = 0; i < WORKER_REGS_SLOTS; i++)
 				local_regs[i] = msg.u.regs.slot[i];
 			break;
+
+		case WORKER_MSG_VCPU_RUN: {
+			int rc;
+
+			/*
+			 * The spawner has already done set_stub_state. We own
+			 * the data->signal/data->futex prelude + futex round
+			 * trip because the stub child is a CLONE_VM peer of
+			 * this worker, not the spawner. Once the stub re-traps
+			 * the spawner reads back proc_data and calls
+			 * get_stub_state + signal dispatch.
+			 */
+			rc = worker_vcpu_trap_iter(&local_mm_id);
+
+			memset(&ack, 0, sizeof(ack));
+			ack.magic = WORKER_IPC_MAGIC;
+			ack.type  = WORKER_MSG_VCPU_DONE;
+			ack.task_handle = msg.task_handle;
+			ack.u.vcpu_done.status = (worker_u32)rc;
+			if (worker_send(sock, &ack) < 0)
+				goto out;
+			break;
+		}
 
 		case WORKER_MSG_RETURN_VALUE:
 			/*

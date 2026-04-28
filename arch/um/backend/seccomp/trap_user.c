@@ -31,6 +31,7 @@
 #include <sysdep/stub.h>
 #include <timetravel.h>
 #include <backend.h>
+#include <worker_api.h>
 #include "../../os-Linux/internal.h"
 
 extern unsigned long tt_extra_sched_jiffies;
@@ -47,6 +48,7 @@ void seccomp_vcpu_run(struct uml_pt_regs *regs)
 	siginfo_t si_local;
 	siginfo_t *si;
 	int err, sig;
+	int worker_rc;
 
 	enter_turnstile(mm_id);
 
@@ -79,7 +81,38 @@ void seccomp_vcpu_run(struct uml_pt_regs *regs)
 	/* Mark pending syscalls for flushing */
 	proc_data->syscall_data_len = mm_id->syscall_data_len;
 
-	wait_stub_done_seccomp(mm_id, 0, 0);
+	/*
+	 * memo 28 E.3d.2: under WORKER_PROCESS=y the per-mm worker owns
+	 * the stub child (cloned CLONE_VM into the worker, not the
+	 * spawner). worker_drive_vcpu_run ships VCPU_RUN over the per-mm
+	 * IPC socket; the worker runs the futex round-trip against the
+	 * shared (memfd, MAP_SHARED) stub_data page and replies VCPU_DONE
+	 * once the stub re-traps. Inside that window the spawner-side
+	 * guest task answers any SYSCALL_REQ the stub trapped on,
+	 * running handle_syscall under its real `current` (matches Part
+	 * C.E "wait-queue bounce" without the kthread hop). The spawner
+	 * still owns set_stub_state / get_stub_state and any
+	 * sendmsg-with-SCM_RIGHTS prelude — see worker_drive_vcpu_run.
+	 *
+	 * Returns -ENODEV when current->mm has no worker; falls back to
+	 * the legacy in-spawner wait_stub_done_seccomp.
+	 */
+	worker_rc = worker_drive_vcpu_run(regs, singlestepping(),
+					  mm_id->syscall_data_len);
+	if (worker_rc == -ENODEV) {
+		wait_stub_done_seccomp(mm_id, 0, 0);
+	} else if (worker_rc < 0) {
+		printk(UM_KERN_ERR "%s - worker drive failed: %d",
+		       __func__, worker_rc);
+		fatal_sigsegv();
+	}
+
+	err = get_stub_state(regs, proc_data, NULL);
+	if (err) {
+		printk(UM_KERN_ERR "%s - failed to get regs: %d",
+		       __func__, err);
+		fatal_sigsegv();
+	}
 
 	sig = proc_data->signal;
 
@@ -93,13 +126,6 @@ void seccomp_vcpu_run(struct uml_pt_regs *regs)
 
 	mm_id->syscall_data_len = 0;
 	mm_id->syscall_fd_num = 0;
-
-	err = get_stub_state(regs, proc_data, NULL);
-	if (err) {
-		printk(UM_KERN_ERR "%s - failed to get regs: %d",
-		       __func__, err);
-		fatal_sigsegv();
-	}
 
 	if (proc_data->si_offset > sizeof(proc_data->sigstack) - sizeof(*si))
 		panic("%s - Invalid siginfo offset from child", __func__);

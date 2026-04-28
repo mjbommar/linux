@@ -39,6 +39,46 @@ int is_skas_winch(int pid, int fd, void *data)
 	return pid == getpgrp();
 }
 
+/*
+ * Ship the queued syscall_fd_map[] fds to the stub child via SCM_RIGHTS
+ * over mm_idp->sock. Extracted from wait_stub_done_seccomp's prelude so
+ * the WORKER_PROCESS=y path can run it from the spawner (those fds
+ * live in the spawner's FD table) before handing the futex round-trip
+ * off to the worker (memo 28 E.3d.2).
+ */
+void send_stub_syscall_fds(struct mm_id *mm_idp)
+{
+	const char byte = 0;
+	struct iovec iov = {
+		.iov_base = (void *)&byte,
+		.iov_len  = sizeof(byte),
+	};
+	union {
+		char data[CMSG_SPACE(sizeof(mm_idp->syscall_fd_map))];
+		struct cmsghdr align;
+	} ctrl;
+	struct msghdr msgh = {
+		.msg_iov    = &iov,
+		.msg_iovlen = 1,
+	};
+	unsigned int fds_size;
+	struct cmsghdr *cmsg;
+
+	if (!mm_idp->syscall_fd_num)
+		return;
+
+	fds_size = sizeof(int) * mm_idp->syscall_fd_num;
+	msgh.msg_control    = ctrl.data;
+	msgh.msg_controllen = CMSG_SPACE(fds_size);
+	cmsg = CMSG_FIRSTHDR(&msgh);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type  = SCM_RIGHTS;
+	cmsg->cmsg_len   = CMSG_LEN(fds_size);
+	memcpy(CMSG_DATA(cmsg), mm_idp->syscall_fd_map, fds_size);
+
+	CATCH_EINTR(syscall(__NR_sendmsg, mm_idp->sock, &msgh, 0));
+}
+
 void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 {
 	struct stub_data *data = (void *)mm_idp->stack;

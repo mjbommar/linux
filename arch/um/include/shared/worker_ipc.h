@@ -65,6 +65,8 @@ enum worker_msg_type {
 	WORKER_MSG_RETURN_VALUE     = 11,	/* spawner → worker: sentinel for stub reply */
 	WORKER_MSG_WRITE_REGS_ACK   = 12,	/* worker → spawner: regs round-trip ACK */
 	WORKER_MSG_STUB_ALLOC_REP   = 13,	/* worker → spawner: stub child up, here's mm_id + .sock fd */
+	WORKER_MSG_VCPU_RUN         = 14,	/* spawner → worker: drive one vcpu trap iteration */
+	WORKER_MSG_VCPU_DONE        = 15,	/* worker → spawner: stub trap completed (non-SIGSYS) */
 };
 
 struct worker_msg_syscall {
@@ -124,6 +126,34 @@ struct worker_msg_retval {
 };
 
 /*
+ * VCPU_RUN payload (E.3d.2). The stub_data page lives in physmem
+ * (MAP_SHARED file-backed) so set_stub_state / get_stub_state — both
+ * run on the spawner side — operate on memory the worker also sees,
+ * and the futex word the worker_user.c trap-iter wakes/waits on hashes
+ * to the same kernel object as the stub child's wait. No regs are
+ * marshalled on the wire; the regs_va field is informational
+ * (E.4 may use it to dispatch to a per-task pthread).
+ */
+struct worker_msg_vcpu_run {
+	worker_u64 regs_va;		/* spawner-side &uml_pt_regs (informational) */
+	worker_u32 single_stepping;
+	worker_u32 syscall_data_len;	/* mirrors mm_id->syscall_data_len */
+	worker_u64 reserved[12];
+};
+
+/*
+ * VCPU_DONE: the worker's trap iteration returned (stub trapped on
+ * any signal, or the stub's pid went negative). The spawner reads
+ * proc_data->signal/sigstack and regs->gp via get_stub_state on
+ * shared memory; this message is just the "you can resume now" edge.
+ */
+struct worker_msg_vcpu_done {
+	worker_u32 status;		/* 0 == stub still alive; <0 == lost */
+	worker_u32 reserved_pad;
+	worker_u64 reserved[13];
+};
+
+/*
  * Reply payload for STUB_ALLOC_REP (E.3d.0). status == 0 means the
  * worker's start_userspace() succeeded and the remaining fields mirror
  * the worker's local mm_id; the sock fd rides on the cmsg channel via
@@ -156,6 +186,8 @@ struct worker_msg {
 		struct worker_msg_stub_alloc_rep stub_alloc_rep;
 		struct worker_msg_regs           regs;
 		struct worker_msg_retval         retval;
+		struct worker_msg_vcpu_run       vcpu_run;
+		struct worker_msg_vcpu_done      vcpu_done;
 		worker_u8                        pad[112];
 	} u;
 };
