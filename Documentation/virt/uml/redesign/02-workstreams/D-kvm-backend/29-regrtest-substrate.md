@@ -355,9 +355,26 @@ start-method behavior) — likely won't surface UML changes.
 `CONFIG_IP_UDPLITE=y` (or skip test_socket UDPLITE subtests).
 No UML kernel patches needed.
 
-§2.5.5 (Class D ITIMER_VIRTUAL): **highest-leverage remaining
-investigation**. The reproducer turns a 180-second hang into a
-1-second diagnostic; iterate on UML-side accounting fixes here.
+§2.5.5 (Class D ITIMER_VIRTUAL): **deferred to post-R4 verification.**
+Investigation 2026-04-28: UML routes `setitimer(VIRTUAL)` through
+generic `kernel/time/itimer.c` → `posix-cpu-timers.c`, which
+expires when `task->utime` accumulates. Under seccomp, the spawner
+task's `utime` stays at 0 because guest user code runs in a
+separate stub-child process; the spawner is "in syscall" (system
+time) the whole time. Fixing this in seccomp requires either
+(a) UML aggregating stub-child rusage into the kernel-side
+task_struct utime accounting on every guest entry/exit, or
+(b) delivering a host-side periodic timer that polls stub-child
+rusage and synthesizes SIGVTALRM at the appropriate cadence.
+
+**Memo 28 Part I.5's R4 worker-owns-process design naturally fixes
+this**: each guest mm gets its own host worker process that
+*itself* runs guest user code in user mode, so `setitimer(VIRTUAL)`
+on the worker tracks the right user time. The reproducer
+(`itimer_virtual.c`) is now a 1-second diagnostic that will flip
+from EXPECTED_FAIL to PASS automatically once R4 lands and v2
+docks. No seccomp-side fix is worth the engineering cost given
+the structural fix is already on the path.
 
 §2.5.6 (substrate gate): the reproducer suite *is* the gate. Wire
 into `tools/testing/selftests/um/Makefile` (done) and use as the
