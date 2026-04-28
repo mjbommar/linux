@@ -603,25 +603,63 @@ static void *kvm_bootstrap_page;	/* kernel VA of the code+tables page */
 static void *kvm_bootstrap_page_stack;	/* kernel VA of the IST stack page (F5-followon split) */
 static u64   kvm_bootstrap_gpa;		/* __pa() of the code+tables page; 0 if unallocated */
 static u64   kvm_bootstrap_stack_gpa;	/* __pa() of the IST stack page */
-static u64   kvm_bootstrap_va;		/* kernel VA as a u64 (linear address
-					 * the guest CR3 walk resolves to the
-					 * bootstrap page's gpa; used for
-					 * GDTR / LSTAR / RIP where the CPU
-					 * expects a linear, not physical,
-					 * address).
+static u64   kvm_bootstrap_va;		/* HOST kernel VA: where we write the
+					 * bootstrap page bytes (IDT/GDT/TSS/
+					 * LSTAR trampoline). Used ONLY for
+					 * host-side scribbling and post-exit
+					 * IST-frame reads.
 					 */
 
 /*
- * Accessor for the bootstrap-alias VA so kvm_shadow_fill_from_uml_pgd's
- * transactional clear pass can preserve the bootstrap leaves it would
- * otherwise unmap. Returns 0 if the bootstrap hasn't been allocated yet
- * (very early init); the caller treats 0 as "no aliases to preserve".
+ * A.4i (memo 22): the GUEST VA where bootstrap pages are mapped via
+ * shadow PT. Sits in PML4[508] (kernel-half from x86 PoV — canonical-
+ * sign-extended past the user/kernel boundary). User CPL=3 walks of
+ * any user-half VA never reach this slot, so the bootstrap pages can
+ * carry US=0 flags safely without colliding with user code that
+ * happens to land in the host kernel-direct-map range.
+ *
+ * Pre-fix: the guest CPU walked CR3=__pa(shadow_pgd) at user CPL=3
+ * for VAs near kvm_bootstrap_va (which lives in host kernel direct
+ * map = PML4[0] = USER-HALF for x86) and hit the US=0 bootstrap leaf
+ * → US-violation #PF (memo 22 §"ROOT CAUSE FOUND"). Moving the guest-
+ * visible install VA into PML4[256+] eliminates the alias.
+ *
+ * The four bootstrap pages map at:
+ *   +0 KVM_BOOTSTRAP_GUEST_VA           code+tables (GDT/LSTAR/IDT/TSS)
+ *   +1 KVM_BOOTSTRAP_GUEST_VA + 0x1000  gadget state
+ *   +2 KVM_BOOTSTRAP_GUEST_VA + 0x2000  gadget vvar
+ *   +3 KVM_BOOTSTRAP_GUEST_VA + 0x3000  IST stack
+ *
+ * Constant; one global per VM (bootstrap is per-VM, not per-mm — each
+ * shadow_mm reuses the same install). Per-mm IRETQ frame already uses
+ * a different kernel-half range (lifecycle.c:738 0xffffc00000000000+).
+ */
+#define KVM_BOOTSTRAP_GUEST_VA		0xffffe00000000000ULL
+
+/*
+ * Accessor for the bootstrap host VA — used by lifecycle.c's
+ * pgd-walk fill code to preserve any user-half alias if one exists.
+ * Post-A.4i this returns 0 because the guest-visible install no longer
+ * lives in user-half; the preservation logic becomes a no-op (kept for
+ * compile-compat).
  */
 u64 kvm_bootstrap_va_get(void)
 {
-	return kvm_bootstrap_va;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_bootstrap_va_get);
+
+/*
+ * Accessor for the bootstrap GUEST VA. Returns the constant defined
+ * above. Wrapped as a function for symmetry with the host-VA accessor
+ * and so future changes (e.g., per-vCPU randomization) have a single
+ * choke point.
+ */
+u64 kvm_bootstrap_guest_va_get(void)
+{
+	return KVM_BOOTSTRAP_GUEST_VA;
+}
+EXPORT_SYMBOL_GPL(kvm_bootstrap_guest_va_get);
 
 #define KVM_BOOTSTRAP_GDT_OFFSET	0x000	/* 8 entries × 8 B = 64 B */
 #define KVM_BOOTSTRAP_LSTAR_OFFSET	0x040	/* 5..~448-byte gadget region */
@@ -1576,8 +1614,13 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 */
 	{
 		char *tss = (char *)page + KVM_BOOTSTRAP_TSS_OFFSET;
-		u64 ist1 = (u64)(unsigned long)page +
-				KVM_BOOTSTRAP_STACK_TOP;
+		/*
+		 * A.4i: IST1 stack top is a GUEST VA — the CPU pushes
+		 * the iretq frame there during exception delivery, and
+		 * the guest CPU walks shadow PT to reach the page. Use
+		 * GUEST_VA + STACK_TOP, not host VA.
+		 */
+		u64 ist1 = KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_STACK_TOP;
 
 		memset(tss, 0, 104);
 		*(u64 *)(tss + 36) = ist1;
@@ -1600,11 +1643,18 @@ static int kvm_enter_guest_init_bootstrap(void)
 	 *   bytes 12..15  reserved (0)
 	 */
 	{
-		u64 pf_va = (u64)(unsigned long)page +
+		/*
+		 * A.4i: handler addresses encoded into IDT must be the
+		 * GUEST VA (where the guest CPU finds the handler bytes
+		 * via shadow PT walk), not the host VA where we wrote
+		 * them. Shadow PT now installs at KVM_BOOTSTRAP_GUEST_VA
+		 * (PML4[508], kernel-half, US=0 safe).
+		 */
+		u64 pf_va = KVM_BOOTSTRAP_GUEST_VA +
 				  KVM_BOOTSTRAP_PF_HANDLER_OFFSET;
-		u64 df_va = (u64)(unsigned long)page +
+		u64 df_va = KVM_BOOTSTRAP_GUEST_VA +
 				  KVM_BOOTSTRAP_DF_HANDLER_OFFSET;
-		u64 gp_va = (u64)(unsigned long)page +
+		u64 gp_va = KVM_BOOTSTRAP_GUEST_VA +
 				  KVM_BOOTSTRAP_GP_HANDLER_OFFSET;
 		u8 *idt = (u8 *)page + KVM_BOOTSTRAP_IDT_OFFSET;
 		u8 *e;
@@ -1673,7 +1723,10 @@ static int kvm_enter_guest_init_bootstrap(void)
 		 */
 #define INSTALL_IDT_GATE(_vec, _hva, _ist, _dpl) do {			\
 		u8 *__e = idt + (_vec) * 16;				\
-		u64 __va = (u64)(unsigned long)page + (_hva);		\
+		/* A.4i: encode GUEST VA, not host VA (guest CPU walks   \
+		 * shadow PT to find the handler at GUEST_VA + offset).  \
+		 */							\
+		u64 __va = KVM_BOOTSTRAP_GUEST_VA + (_hva);		\
 		__e[0]  = (u8)(__va & 0xff);				\
 		__e[1]  = (u8)((__va >> 8) & 0xff);			\
 		__e[2]  = 0x08;	/* ring-0 code selector */		\
@@ -1794,7 +1847,12 @@ EXPORT_SYMBOL_GPL(kvm_build_sysret_r11_probe);
  */
 int kvm_gadget_fault_nr(u64 fault_rip)
 {
-	u64 base = kvm_bootstrap_va + KVM_BOOTSTRAP_LSTAR_OFFSET;
+	/*
+	 * A.4i: fault_rip is a GUEST RIP. The guest sees the LSTAR
+	 * trampoline at KVM_BOOTSTRAP_GUEST_VA + LSTAR_OFFSET (kernel-
+	 * half), not at the host-VA kvm_bootstrap_va.
+	 */
+	u64 base = KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_LSTAR_OFFSET;
 	u64 off;
 
 	if (fault_rip < base)
@@ -2284,8 +2342,15 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 	 * jump into IST data. STACK_TOP is bootstrap_va + 0x4000
 	 * (exclusive); first push lands at +0x3ff8.
 	 */
+	/*
+	 * A.4i (memo 22 root cause): install at GUEST_VA in PML4[508],
+	 * NOT at host-VA kvm_bootstrap_va. Pre-fix the install at user-
+	 * half host-VA caused user CPL=3 walks to hit US=0 leaves and
+	 * crash with pf_unrecoverable when ASLR/pointers landed in the
+	 * 0x60aca___ alias window.
+	 */
 	rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
-				 kvm_bootstrap_va,
+				 KVM_BOOTSTRAP_GUEST_VA,
 				 (u64)__pa(kvm_bootstrap_page),
 				 KVM_X86_PTE_P);
 	if (rc < 0) {
@@ -2294,7 +2359,7 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 	}
 	rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
-				 kvm_bootstrap_va + 3 * PAGE_SIZE,
+				 KVM_BOOTSTRAP_GUEST_VA + 3 * PAGE_SIZE,
 				 (u64)__pa(kvm_bootstrap_page_stack),
 				 KVM_X86_PTE_P | KVM_X86_PTE_RW |
 				 KVM_X86_PTE_NX);
@@ -2343,7 +2408,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 	}
 	{
-		u64 gstate_va = kvm_bootstrap_va + PAGE_SIZE;
+		/* A.4i: install at GUEST_VA, not host kvm_bootstrap_va. */
+		u64 gstate_va = KVM_BOOTSTRAP_GUEST_VA + PAGE_SIZE;
 
 		/*
 		 * Audit round-5 F5/F8 alignment: drop US bit. Gadget
@@ -2398,7 +2464,8 @@ int kvm_enter_guest(struct uml_pt_regs *regs)
 		return rc;
 	}
 	{
-		u64 vvar_va = kvm_bootstrap_va + 2 * PAGE_SIZE;
+		/* A.4i: install at GUEST_VA, not host kvm_bootstrap_va. */
+		u64 vvar_va = KVM_BOOTSTRAP_GUEST_VA + 2 * PAGE_SIZE;
 
 		rc = kvm_shadow_map_page(kvm_shadow_mm_current(),
 					 vvar_va,
@@ -2793,7 +2860,12 @@ fill_done:
 	 * production CR3 (current->active_mm->pgd), that
 	 * accidental identity doesn't hold.
 	 */
-	kvm_setup_production_sregs(&sregs, cr3_gpa, kvm_bootstrap_va);
+	/*
+	 * A.4i: pass GUEST_VA as the bootstrap-base for sregs setup
+	 * (GDTR base, etc.), not host VA. Pre-fix this leaked the
+	 * user-half VA into sregs, causing the per-trial flake.
+	 */
+	kvm_setup_production_sregs(&sregs, cr3_gpa, KVM_BOOTSTRAP_GUEST_VA);
 
 	/*
 	 * Sub-commit #5b: arm the IDT + TSS so guest-side #PF gets
@@ -2806,10 +2878,16 @@ fill_done:
 	 * flips the busy bit on load. The kvm_segment structure
 	 * mirrors what the CPU caches after an LTR instruction.
 	 */
-	sregs.idt.base  = kvm_bootstrap_va + KVM_BOOTSTRAP_IDT_OFFSET;
+	/*
+	 * A.4i: idt.base / tr.base are GUEST linear addresses (CPU
+	 * walks shadow PT). Use GUEST_VA. Pre-fix used host VA which
+	 * accidentally worked because shadow PT installed at the same
+	 * VA — the install was the bug.
+	 */
+	sregs.idt.base  = KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_IDT_OFFSET;
 	sregs.idt.limit = KVM_BOOTSTRAP_IDT_ENTRIES * 16 - 1;
 	sregs.tr = (struct kvm_segment){
-		.base     = kvm_bootstrap_va + KVM_BOOTSTRAP_TSS_OFFSET,
+		.base     = KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_TSS_OFFSET,
 		.limit    = 104 - 1,
 		.selector = KVM_BOOTSTRAP_TSS_SEL,
 		.type     = 11,		/* 64-bit busy TSS */
@@ -3015,8 +3093,9 @@ sregs_done:
 			frame = (u64 *)cur_shadow->iretq_frame_va;
 			frame_guest_va = cur_shadow->iretq_frame_va_guest;
 		} else {
+			/* A.4i: GUEST_VA, not host. */
 			frame = (u64 *)kvm_bootstrap_page_stack;
-			frame_guest_va = kvm_bootstrap_va + 3 * PAGE_SIZE;
+			frame_guest_va = KVM_BOOTSTRAP_GUEST_VA + 3 * PAGE_SIZE;
 		}
 
 		frame[0] = regs->gp[HOST_IP];
@@ -3025,7 +3104,8 @@ sregs_done:
 		frame[3] = regs->gp[HOST_SP];
 		frame[4] = 0x23ULL;					/* ring-3 SS */
 
-		kregs.rip    = kvm_bootstrap_va + KVM_BOOTSTRAP_IRETQ_OFFSET;
+		/* A.4i: kregs.rip is the GUEST RIP for the IRETQ gadget. */
+		kregs.rip    = KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_IRETQ_OFFSET;
 		kregs.rsp    = frame_guest_va;
 		kregs.rflags = (1UL << 1);			/* ring-0 RFLAGS */
 	}
@@ -3087,8 +3167,12 @@ sregs_done:
 	 * Idempotent on repeat entry — KVM stores the MSRs on
 	 * the vCPU.
 	 */
+	/*
+	 * A.4i: MSR_LSTAR is the GUEST RIP the CPU jumps to on
+	 * SYSCALL — must be the GUEST_VA where the trampoline lives.
+	 */
 	rc = kvm_enter_guest_program_msrs(vcpu,
-					  kvm_bootstrap_va +
+					  KVM_BOOTSTRAP_GUEST_VA +
 					  KVM_BOOTSTRAP_LSTAR_OFFSET);
 	if (rc < 0)
 		return rc;
@@ -4030,7 +4114,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				 * offset.
 				 */
 				ist_off = (unsigned long)(kregs.rsp -
-							  (kvm_bootstrap_va +
+							  (KVM_BOOTSTRAP_GUEST_VA +
 							   3 * PAGE_SIZE));
 				if (ist_off >= PAGE_SIZE) {
 					pr_warn_ratelimited("um: kvm: PF IST out of range\n");
@@ -4522,7 +4606,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				u8 *gp_ist;
 
 				gp_ist_off = (unsigned long)(kregs.rsp -
-					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+					(KVM_BOOTSTRAP_GUEST_VA + 3 * PAGE_SIZE));
 				if (gp_ist_off >= PAGE_SIZE) {
 					pr_warn_ratelimited("um: kvm #GP: IST out of range (rsp=0x%llx)\n",
 							    (unsigned long long)kregs.rsp);
@@ -4581,7 +4665,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 				}
 
 				ex_ist_off = (unsigned long)(kregs.rsp -
-					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+					(KVM_BOOTSTRAP_GUEST_VA + 3 * PAGE_SIZE));
 				if (ex_ist_off >= PAGE_SIZE) {
 					pr_warn_ratelimited("um: kvm #vec=%d: IST out of range (rsp=0x%llx)\n",
 							    trap_no,
@@ -4649,7 +4733,7 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					df_cr2 = exit_sregs.cr2;
 
 				df_ist_off = (unsigned long)(kregs.rsp -
-					(kvm_bootstrap_va + 3 * PAGE_SIZE));
+					(KVM_BOOTSTRAP_GUEST_VA + 3 * PAGE_SIZE));
 				if (df_ist_off >= PAGE_SIZE) {
 					panic("um: kvm #DF: IST out of range (rsp=0x%llx, cr2=0x%lx)",
 					      (unsigned long long)kregs.rsp,
@@ -4868,8 +4952,8 @@ void kvm_run_userspace(struct uml_pt_regs *regs)
 					const char *label;
 					u64 va;
 				} walk_targets[] = {
-					{ "bootstrap_va",
-					  kvm_bootstrap_va },
+					{ "bootstrap_guest_va",
+					  KVM_BOOTSTRAP_GUEST_VA },
 					{ "guest_rip",
 					  guest_rip },
 					{ "cr2",

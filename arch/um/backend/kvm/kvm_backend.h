@@ -925,10 +925,19 @@ u64 kvm_um_pte_to_x86(u64 um_pte);
 int kvm_shadow_fill_from_uml_pgd(struct kvm_shadow_mm *shadow, void *pgd);
 
 /*
- * Accessor for the bootstrap-alias VA so kvm_shadow_fill_from_uml_pgd's
- * transactional clear pass can preserve the bootstrap leaves.
+ * Accessor for the bootstrap host VA — used by kvm_shadow_fill_from_uml_pgd's
+ * transactional clear pass to preserve any user-half alias. Post-A.4i
+ * returns 0 since the guest-visible install lives in PML4[256+]; the
+ * preservation becomes a no-op.
  */
 u64 kvm_bootstrap_va_get(void);
+
+/*
+ * A.4i: GUEST VA where bootstrap pages are mapped via shadow PT.
+ * Sits in PML4[508] (kernel-half), so user CPL=3 walks of low VAs
+ * never reach it. Constant 0xffffe00000000000.
+ */
+u64 kvm_bootstrap_guest_va_get(void);
 
 struct uml_pt_regs;
 int kvm_enter_guest(struct uml_pt_regs *regs);
