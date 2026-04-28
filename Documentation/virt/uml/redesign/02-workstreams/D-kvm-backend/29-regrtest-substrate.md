@@ -298,12 +298,18 @@ PASS: `ioctl_fionread`, `ioctl_tiocgwinsz_socketpair`,
 `socket_unix_abstract`, `os_waitid_edges`, `os_sched_getcpu`,
 `os_setblocking`, `sanity_struct_unicode`.
 
-FAIL: `socket_udplite` (errno=93 ENOPROTOOPT). **This is the only
-real syscall-surface gap surfaced by the suite** — not a UML bug at
-all, but a kernel build-config gap (CONFIG_IP_UDPLITE=n in the
-defconfig). The 41 test_socket subtests that failed in regrtest all
-trace back to this one missing protocol module. Fix is a one-line
-defconfig change, not UML core code.
+FAIL: `socket_udplite` (errno=93 EPROTONOSUPPORT). **Investigation
+revealed UDP-Lite was retired upstream in commit `56520b398e5e`
+("ipv4: Retire UDP-Lite.")** — `net/ipv4/udplite.c` is gone, no
+longer exists as a Kconfig option. So this is not a UML bug at all
+and not a defconfig change either; it's the permanent
+post-retirement behavior of any kernel that includes that commit.
+The 41 test_socket subtests that failed in regrtest must be
+`-x`'d in the substrate skip list: `test_socket.UDPLiteServerTimeoutTest`
+and friends. CPython upstream will eventually need a skip on
+post-retirement kernels too. Reproducer updated to emit
+EXPECTED_FAIL with reason `retired_upstream`. Net effect on the
+substrate baseline: FAIL count drops from 4 to 3.
 
 #### Class D: 3 PASS / 2 EXPECTED_FAIL
 

@@ -1,6 +1,12 @@
-/* Class C syscall repro: AF_INET SOCK_DGRAM IPPROTO_UDPLITE must succeed.
- * test_socket UDPLITE failures all trace to ENOPROTOOPT here — UML kernel
- * lacks CONFIG_IP_UDPLITE / udplite module. */
+/* AF_INET SOCK_DGRAM IPPROTO_UDPLITE.
+ *
+ * UDP-Lite was retired from the kernel in commit 56520b398e5e
+ * ("ipv4: Retire UDP-Lite."). On post-retirement trees, socket()
+ * with IPPROTO_UDPLITE = 136 now fails with EPROTONOSUPPORT (errno 93).
+ * That's the permanent expected behavior, not a UML bug — emit
+ * EXPECTED_FAIL so the substrate gate stays clean. test_socket's
+ * 41 UDPLITE subtests need an upstream skip in the regrtest -x list.
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>
@@ -17,8 +23,12 @@ int main(void)
 	int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDPLITE);
 	int e = errno;
 	if (s < 0) {
-		printf("REPRO: socket_udplite FAIL errno=%d (Protocol_not_supported=%d)\n",
-			e, EPROTONOSUPPORT);
+		if (e == EPROTONOSUPPORT) {
+			printf("REPRO: socket_udplite EXPECTED_FAIL retired_upstream errno=%d\n",
+				e);
+			return 0;
+		}
+		printf("REPRO: socket_udplite FAIL unexpected_errno=%d\n", e);
 		return 0;
 	}
 	close(s);
