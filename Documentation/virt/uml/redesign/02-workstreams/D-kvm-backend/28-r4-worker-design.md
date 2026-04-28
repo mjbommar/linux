@@ -537,15 +537,38 @@ the worker just observes a futex wakeup and forwards via IPC.
 stub-child crash) and SIGTERM (for clean shutdown, already in
 worker_main).**
 
-### K.5 — `handle_syscall` is dispatcher-thread-safe
+### K.5 — `handle_syscall` body is regs-only; CALLEES are not (corrected 2026-04-28)
 
-`handle_syscall` (`arch/um/kernel/skas/syscall.c::19`) takes a
-`struct uml_pt_regs *r` and operates entirely on the passed-in
-regs. It does NOT dereference `current` or any task_struct field.
-**A spawner-side dispatcher thread (E.3c) can call handle_syscall
-directly with regs reconstructed from the worker's
-`SYSCALL_REQ`** — no bounce-back to the originating task is
-needed.
+**Original claim (kept here as a record of the misread):** the
+spawner-side dispatcher kthread (E.3c) can call handle_syscall
+directly with regs from `SYSCALL_REQ` because handle_syscall takes
+a `uml_pt_regs *` and never touches `current`.
+
+**Correction (E.3d surface map, 2026-04-28).** The literal body
+of `handle_syscall` (`arch/um/kernel/skas/syscall.c:19-102`) does
+not dereference `current`. But every meaningful callee does:
+
+- `secure_computing()` reads `current->seccomp.mode` and walks
+  the per-task filter list. On a kthread, mode is 0 → no filter
+  enforcement. Wrong policy.
+- `syscall_trace_enter` (`arch/um/kernel/ptrace.c:124-138`) reads
+  `current_thread_info()->flags` and `current->ptrace` — the
+  kthread's flags are not the guest task's.
+- Every `sys_call_table[]` entry derefs `current` for
+  credentials, files, fs, signals, pid namespaces. `sys_read`
+  uses `current->files`; `sys_open` uses `current->fs`;
+  `sys_clone` copies from `current`; `sys_kill` uses
+  `current->signal`.
+
+**Consequence for E.3c:** the dispatcher kthread as-shipped
+(`arch/um/kernel/spawner.c:137-212`) is a smoke-test scaffold
+only. It can drive WORKER_MSG_SYSCALL_REQ through the literal
+handle_syscall body — but the answer it produces will be
+wrong-vs-the-originating-guest-task for any real syscall.
+
+**E.3d must therefore choose a `current` discipline** before
+real SYSCALL_REQ traffic flows. See Part L for the three options
+on the table.
 
 ### K.6 — E.3b minimum viable cut
 
@@ -603,3 +626,163 @@ Code delta:
 
 The subagent's findings are sufficient to start E.3b in a future
 session; no further surface mapping needed before code.
+
+---
+
+## Part L — E.3d sequencing decision (added 2026-04-28 after E.3c)
+
+After E.3c landed, an Explore subagent surface-mapped E.3d. Two
+structural gaps surfaced that make the original ~100 LoC estimate
+non-viable:
+
+### L.1 — Two missing pieces between today and "real worker SYSCALL_REQ"
+
+1. **In-worker `start_userspace`.** Today's seccomp backend calls
+   `start_userspace(&mm->context.id)`
+   (`arch/um/backend/seccomp/mm.c:30`) which clones the stub child
+   *into the spawner's VA via CLONE_VM*
+   (`arch/um/os-Linux/skas/process.c:386-388`). For a per-mm
+   worker model, the worker must call its own
+   `start_userspace`-equivalent inside its own VA. E.3b's
+   STUB_ALLOC_REQ handler today only stashes the mm_id snapshot;
+   nothing actually clones a stub child inside the worker. Until
+   that lands, the worker has no way to generate real
+   SYSCALL_REQs.
+
+2. **`current` discipline (Part K.5 correction).** E.3c's
+   dispatcher kthread calling `handle_syscall(&regs.regs)` is
+   safe only for the smoke-test sentinel — sys_call_table[]
+   entries dereference `current` for credentials, files, fs,
+   signals, etc. Routing real syscalls through the dispatcher
+   kthread without an impersonation mechanism would silently
+   produce wrong answers (kthread's task_struct, not the guest
+   task's).
+
+### L.2 — Three options for the `current` discipline
+
+#### Option L.2.A — Wait-queue bounce (RECOMMENDED)
+
+Dispatcher kthread receives SYSCALL_REQ → routes (regs,
+completion) to the originating guest task's wait queue → the
+guest task itself wakes, runs `handle_syscall` on its own stack
+under its real `current`, signals completion → kthread sends
+SYSCALL_REP back to the worker.
+
+- **Correctness**: matches today's invariant exactly. handle_syscall
+  always runs in the originating task's context.
+- **Cost**: one extra wakeup per syscall (~hundreds of ns).
+  Acceptable under memo 26 Phase H's ≤1.2× seccomp wall-clock
+  budget.
+- **Compatibility**: matches Part I.5's "spawner-owns-everything,
+  gVisor sentry pattern" — the spawner-side guest task is the
+  source of truth.
+
+#### Option L.2.B — Per-mm guest-task task_struct
+
+Allocate one "guest task" task_struct per mm; dispatcher
+`set_current()` to it before calling handle_syscall.
+
+- **Correctness**: requires cloning credentials/files/fs from
+  the originating task at every dispatch — expensive and
+  error-prone.
+- **Cost**: heavyweight allocation per mm; still doesn't help
+  for SMP-within-mm.
+- **Verdict**: more code, less correct than L.2.A.
+
+#### Option L.2.C — `kthread_use_mm` only
+
+Set the dispatcher's `->mm` to the guest mm via
+`kthread_use_mm`.
+
+- **Correctness**: addresses `current->mm` only. Doesn't fix
+  `current->files`, `->seccomp`, `->signal`, etc.
+- **Verdict**: insufficient.
+
+### L.3 — Proposed E.3d split
+
+Given (L.1) and (L.2), E.3d as a single ~100 LoC commit is not
+viable. Proposed three-commit split:
+
+#### E.3d.0 — In-worker start_userspace (~250-350 LoC)
+
+Brings up a real stub child inside the worker process. Extends
+the STUB_ALLOC_REQ handler in `worker_user.c` to call
+`start_userspace(&local_mm_id)`, wires fd-passing back to the
+spawner via SCM_RIGHTS so the spawner-side mm_id has a usable
+`.sock`, gates `seccomp_mm_create` on WORKER_PROCESS=y to call
+`spawn_worker_for_mm` + STUB_ALLOC_REQ instead of local
+`start_userspace`. **vcpu_run unchanged.**
+
+This is a clean bisection point: "does the worker bring up a
+stub child?" independent of syscall-routing changes. If it
+fails, E.3d.0 is the suspect; if it succeeds, the dispatcher is
+poised but unused.
+
+Risks: socketpair/fd-map round-trip, futex address sharing
+across processes (futex inside `stub_data` is shared via
+memfd — already works cross-process; verify).
+
+Verification: `seccomp_mm_create` returns success under
+WORKER_PROCESS=y; stub child reaches FUTEX_IN_CHILD inside the
+worker; substrate gate boots to login.
+
+#### E.3d.1 — `current` discipline lock + dispatcher rewrite (~150 LoC)
+
+Implement L.2.A wait-queue bounce. Dispatcher kthread becomes
+routing-only; per-mm wait queue holds (SYSCALL_REQ, completion);
+originating guest task drains it and runs handle_syscall under
+its own `current`. Replaces E.3c's direct
+`handle_syscall(&regs.regs)` call site.
+
+Risk: ABBA between mm_list lock and per-mm waitq; needs careful
+locking. Bench: dispatcher → guest task wakeup latency must stay
+under 1 µs to keep memo 26 Phase H's budget.
+
+Verification: smoke-test fakes a SYSCALL_REQ, real guest task
+fields it, returns the right answer; substrate gate stays green.
+
+#### E.3d.2 — vcpu_run rerouting through worker IPC (~250 LoC)
+
+Replace `seccomp_vcpu_run`'s direct
+`set_stub_state`/`wait_stub_done_seccomp`/`get_stub_state`
+(`trap_user.c:68,82,97`) with: send WRITE_REGS to worker →
+worker does set_stub_state + wait_stub_done_seccomp +
+get_stub_state in-VA → worker sends SYSCALL_REQ → spawner-side
+guest task (per E.3d.1) runs handle_syscall, builds reply →
+worker resumes via SYSCALL_REP.
+
+Risk: turnstile semantics (`enter_turnstile`/`exit_turnstile` at
+`trap_user.c:51,121`) move into the worker; SCM_RIGHTS passing
+of syscall stub fds; SIGSEGV/SIGTRAP/SIGALRM/SIGIO branches all
+relay through the same channel.
+
+Verification: real userspace runs; substrate gate flips to
+match WORKER_PROCESS=n baseline (or better — itimer_virtual
+EXPECTED_FAIL → PASS per memo 29 §2.5.5).
+
+### L.4 — Open questions for the user (BLOCKING E.3d.0)
+
+1. **Does the L.3 three-commit split for E.3d look right?** The
+   memo 28 estimate of ~100 LoC was bottom-up from the wire
+   format; the surface map shows ~650-750 LoC across three
+   focused commits. The user should know the budget is moving.
+
+2. **Lock Option L.2.A (wait-queue bounce)?** This is what
+   Part I.5's "spawner-owns-everything" already implies, but
+   it should be explicit before E.3d.0 starts. If the user
+   prefers L.2.B (per-mm guest task_struct) the design risk
+   register changes.
+
+3. **Should we accept that E.3d.0 lands first as a "wired but
+   no traffic yet" checkpoint?** Or should E.3d be an
+   all-or-nothing single commit? Memo 27's Part B.6 says commit
+   at every clear milestone; E.3d.0 is one. But it's also the
+   first commit that actually starts a stub child inside a
+   worker — non-trivial enough that bundling with E.3d.1+E.3d.2
+   would make bisection harder.
+
+The recommendation is to land E.3d.0 next as a standalone commit
+under the assumption that L.2.A is the locked discipline. If the
+user disagrees on L.2.A, E.3d.0 still lands cleanly because it
+doesn't yet touch the dispatcher — only the worker's stub-child
+bring-up and the seccomp_mm_create wiring.
