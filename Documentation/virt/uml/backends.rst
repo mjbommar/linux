@@ -11,7 +11,7 @@ User-Mode Linux runs the upstream Linux kernel as a host process.
 intercept its guest's syscalls, page faults, and signals — the
 plumbing between the host kernel and the UML kernel.
 
-Two backends ship today; a third is in development:
+Two backends ship today; a KVM backend is being reimplemented:
 
 ==========  =====================================  ============================
 Backend     Mechanism                              Per-syscall cost on bare metal
@@ -19,12 +19,19 @@ Backend     Mechanism                              Per-syscall cost on bare meta
 ptrace      ``PTRACE_SYSEMU`` + ``waitpid``        ~1–5 µs (trap + dispatch)
 seccomp     ``SECCOMP_RET_TRAP`` + ``SIGSYS`` +    ~300–500 ns (seccomp filter
             futex round-trip                       hits, futex wakes UML kernel)
-kvm         ``KVM_RUN`` + ``MSR_LSTAR`` direct     ~100 ns target (gVisor-style;
-            ring-0 entry                           workstream D)
+kvm         ``KVM_RUN`` + per-mapping memslots +   target ~100 ns (workstream D
+            TDP via host ``mm->pgd``               v2 — in development)
 ==========  =====================================  ============================
 
 ptrace is the historical UML mechanism (Jeff Dike, 1990s). seccomp
-landed in 6.16 (Benjamin Berg). kvm is in design.
+landed in 6.16 (Benjamin Berg). kvm v1 reached integration but
+hit structural shadow-PT issues; the implementation is archived at
+``arch/um/backend/kvm-v1-archive/`` (not built;
+``CONFIG_UM_BACKEND_KVM_V1_ARCHIVE`` depends on ``BROKEN``) and
+the v2 reimplementation is being built at
+``arch/um/backend/kvm-v2/``. See
+``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/``
+memos 24-26 for design and 27 for the execution prompt.
 
 ******************
 Picking a backend
@@ -78,10 +85,13 @@ Boot parameters
     are *preferences* that still fall through to whichever backend
     the host actually supports. ``force=`` makes the choice
     mandatory and panics if the requested backend isn't compiled
-    in or fails its host probe. ``kvm`` is a workstream-D scaffold
-    today — selectable for diagnostic builds, not for production
-    use (the non-harness path still panics on missing hot-op
-    implementations).
+    in or fails its host probe. ``kvm`` currently has no
+    selectable backend — v1 archived to
+    ``arch/um/backend/kvm-v1-archive/`` (depends on ``BROKEN``);
+    v2 stub at ``arch/um/backend/kvm-v2/`` is not yet wired into
+    dispatch (memo 26 Phase A.1 plumbs it in). Today
+    ``backend=kvm`` falls back to seccomp/ptrace and
+    ``backend=force=kvm`` panics.
 
 ``seccomp=<on|auto|off>`` (legacy alias)
     Preserved for one transitional release. Maps to:

@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -8,6 +8,46 @@ broken, what's next." Updated whenever priorities or blockers change.
 If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
+
+---
+
+## v1 ARCHIVED (2026-04-28): KVM backend restart underway
+
+Per memos 24-27, the v1 KVM backend reached **mean 19.4/21** on the
+cpython-parity gate post-A.4i but Bug B (just-past-physmem stale RIP,
+memo 22 §"Update — Bug B is NOT a use-after-munmap") and the
+structural fragility of shadow PT (memo 24's 10 clean-slate items)
+made further incremental fixes unproductive. Memo 25 Part 1 lands
+the mechanical restart:
+
+- A.4i committed (`cbc6d9fbffbd`); 5 C reproducers committed
+  (`ed4158203fd2`); investigation memos 21-27 committed
+  (`8c2221d29711`).
+- v1 source moved to `arch/um/backend/kvm-v1-archive/`
+  (`17a3e87bab75`); kept in-tree as v2-implementer reference, not
+  built (`CONFIG_UM_BACKEND_KVM_V1_ARCHIVE depends on BROKEN`).
+- v1's hooks stripped from ARCH=um core (`b19444243944`):
+  pgtable.h's `kvm_shadow_sync_pte`, tlbflush.h's
+  `kvm_shadow_sync_va/range_atomic`, the `arch_thread.kvm` fpu/vcpu
+  fields, mm_id's `kvm_shadow` pointer, the kick-signal handler,
+  and the ops-table declarations all gone. Build verified
+  seccomp-only on x86_64 defconfig.
+- v2 stub directory at `arch/um/backend/kvm-v2/`
+  (`046375fd50ed`) — Kconfig + Makefile + README + arch_initcall
+  banner. Not yet plumbed into dispatch.
+
+**Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
+**Tip of `uml-redesign-plan`:** post-stub.
+
+**Next:** memo 25 Part 2 — 12 ARCH=um core refactors (refactor 1
+`uml_physmem` to PML4[256+] is the prerequisite for v2's TDP path;
+refactor 4 per-mm host worker process is the deepest). Then memo 26
+Phases A-J for the v2 build.
+
+The Stage A foundation work (per-task vCPU + KVM_SET_SIGNAL_MASK)
+informed the v2 design but does not directly survive: v2 uses a
+per-CPU vCPU pool (memo 26 Phase C) instead of v1's per-task model,
+because the per-CPU model is what KVM mmu_notifier and TDP expect.
 
 ---
 
