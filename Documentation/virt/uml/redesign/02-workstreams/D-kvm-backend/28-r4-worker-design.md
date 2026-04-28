@@ -441,10 +441,9 @@ status:
   socketpair, echo-only main loop. Wired into
   spawner.c::spawn_worker_for_mm. Done; reachable but not yet
   invoked from any production path.
-- **E.3b** (worker stub-child manager) — pending. Replaces the
-  worker's echo loop with: clone the per-mm seccomp stub child
-  (CLONE_VM | CLONE_VFORK from the worker), set up SIGSYS
-  handler, futex synchronization with the stub child. ~150 LoC.
+- **E.3b** (worker stub-child manager) — pending; surface mapped
+  by Explore subagent 2026-04-28. ~150 LoC. See Part K below
+  for the implementation guide derived from that pass.
 - **E.3c** (spawner-side per-worker dispatcher thread) — pending.
   One kernel thread per worker that receives SYSCALL_REQ over
   IPC, invokes handle_syscall in UML kernel context, sends
@@ -470,3 +469,131 @@ When R4 ships, R6 (signal handling) lands as a follow-up cleanup
 (per memo 25 R6, mostly already addressed by R4's
 CLONE_SIGHAND-inside-worker design — what remains is documenting
 the contract).
+
+---
+
+## Part K — E.3b implementation guide (Explore subagent 2026-04-28)
+
+A focused subagent surface-mapped E.3b before any code was
+written. Findings:
+
+### K.1 — `start_userspace` is ~95% process-agnostic
+
+The function (`arch/um/os-Linux/skas/process.c::336-436`) breaks
+down into three classes of step:
+
+| Step | Class |
+|---|---|
+| mmap stack, socketpair, init_data setup | A. process-agnostic |
+| `clone(userspace_tramp, ..., CLONE_VFORK | CLONE_VM | SIGCHLD)` | B. spawner-only assumption (the parent of the resulting stub child) |
+| `wait_stub_done_seccomp`, munmap stack, socketpair retain/close | A. process-agnostic |
+
+`userspace_tramp` itself reads `um_backend->stub_child_runs_seccomp`
+and uses globals (`stub_exe_fd`); these are inherited CoW into the
+worker, so from the worker's perspective they Just Work. The only
+hard "spawner-only" piece is the clone() call site itself —
+**make the worker call `clone(userspace_tramp, ...)` and the rest
+of the machinery follows.**
+
+### K.2 — `mm_id` ownership: Option γ (pass via IPC) is the minimum-churn path
+
+Three options were considered (memo 28 Part B.3 already mentions
+Options α/β/γ; the subagent re-examined and recommends γ):
+
+- **γ (pass over IPC)**: spawner allocates `struct mm_id` (already
+  done at `init_new_context()`). Spawner sends a new
+  `WORKER_MSG_STUB_ALLOC_REQ` over IPC carrying the mm_id fields
+  (stack VA, sock fd, etc.). Worker populates a local
+  `struct mm_id` from the message and passes it to a worker-side
+  `start_userspace(&worker_local_mm_id)`. **No struct refactor;
+  no API change.** Just a new IPC message type.
+
+`struct mm_id`'s post-R2 fields are already context-agnostic (no
+kernel pointers; just stack VA + a few FDs); marshalling them
+across IPC is straightforward.
+
+### K.3 — `wait_stub_done_seccomp` + futex round-trip are worker-compatible
+
+The futex-and-FD-passing primitives in
+`arch/um/os-Linux/skas/process.c::42-139` reference only
+`mm_idp->{stack,sock,syscall_fd_num,pid}` and use libc-level
+syscalls. **No `um_kernel_*` references; no kernel-side state.**
+Worker reuses verbatim once mm_id is populated.
+
+### K.4 — Signal routing is simpler than expected
+
+The stub child's SIGSYS is **handled inside the stub binary's
+own filter** (`stub_signal_interrupt` in `arch/um/kernel/skas/stub.c`),
+not by the parent. The handler writes regs to `stub_data` and
+`futex_wake`s the parent. After R4 the parent is the worker;
+the worker just observes a futex wakeup and forwards via IPC.
+**No SIGSYS handler in the worker itself — only SIGCHLD (for
+stub-child crash) and SIGTERM (for clean shutdown, already in
+worker_main).**
+
+### K.5 — `handle_syscall` is dispatcher-thread-safe
+
+`handle_syscall` (`arch/um/kernel/skas/syscall.c::19`) takes a
+`struct uml_pt_regs *r` and operates entirely on the passed-in
+regs. It does NOT dereference `current` or any task_struct field.
+**A spawner-side dispatcher thread (E.3c) can call handle_syscall
+directly with regs reconstructed from the worker's
+`SYSCALL_REQ`** — no bounce-back to the originating task is
+needed.
+
+### K.6 — E.3b minimum viable cut
+
+The smallest delta that proves the worker can drive a stub child
+end-to-end (without involving real syscall execution):
+
+```
+1. spawner.spawn_worker_for_mm() — already done (E.2/E.3a).
+2. spawner sends WORKER_MSG_STUB_ALLOC_REQ with mm_id snapshot.
+3. worker receives, populates local mm_id, calls start_userspace.
+   stub child cloned inside the worker; futex-ready.
+4. spawner sends WORKER_MSG_WRITE_REGS with a synthetic regs frame.
+   worker calls set_stub_state(...); futex-wakes stub child.
+5. stub child runs (no actual syscall yet — just resume).
+6. spawner sends WORKER_MSG_RETURN_VALUE with a known sentinel
+   (e.g. 0x1234). worker calls get_stub_state(...); regs->ax sentinel.
+7. worker echoes regs back via WORKER_MSG_WRITE_REGS_ACK.
+   spawner verifies round-trip.
+```
+
+This proves: mm_id IPC marshalling, futex round-trip, regs
+ping-pong, signal mask in worker. Skips: actual SIGSYS (E.3c),
+handle_syscall integration (E.3c), seccomp_mm_create rewiring
+(E.3d).
+
+Code delta:
+- `arch/um/include/shared/worker_ipc.h`: add three message types
+  (STUB_ALLOC_REQ, WRITE_REGS, RETURN_VALUE).
+- `arch/um/os-Linux/worker_user.c`: replace echo loop in
+  `worker_main` with a tagged-message dispatcher (~80 LoC).
+- `arch/um/kernel/spawner.c`: add a smoke-test path or wire from
+  seccomp_mm_create (gated by WORKER_PROCESS=y) (~50 LoC).
+
+### K.7 — Risk register for E.3b
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Signal mask drift (worker inherits mask from spawner at clone, then mask drifts) | Worker may miss SIGCHLD or block when not desired | Worker explicitly `sigprocmask` after clone to a known-good mask. |
+| Stale FDs in worker (CoW FD table inherits all spawner FDs) | Stub binary picks up unintended fds | `userspace_tramp`'s existing `close_range(0, ~0U, CLOSE_RANGE_CLOEXEC)` already handles this; worker reuses unchanged. |
+| Stub binary path lookup | Stub child can't find binary | `stub_exe_fd` is inherited via CoW; `execveat(stub_exe_fd, ...)` works without pathname lookup. |
+| PR_SET_PDEATHSIG ordering | Worker dies, stub child orphaned | Worker sets PDEATHSIG=SIGTERM before clone; stub child inherits and reaps cleanly on worker death. **Already done in E.3a.** |
+| Single-threaded worker stalls | Worker blocks IPC while stub child runs | Accept for E.3b (proof-of-concept). E.3c adds a per-worker dispatcher thread on the spawner side. |
+
+### K.8 — What this report does NOT answer (design decisions deferred)
+
+- E.3c's dispatcher thread management: thread-pool vs per-worker
+  thread. Memo 28 Part C.D locks "one thread per worker"; the
+  subagent agreed but didn't surface fresh detail.
+- Cross-mm migration timing (E.5): the subagent confirmed
+  SIGUSR2 won't collide with PM-wake (which uses SIGUSR1).
+  Migration design otherwise unchanged from memo 28 Part C.C.
+- E.4's per-task pthread inside the worker: how does
+  `seccomp_thread_create` interact with the stub-child setup?
+  **Needs design decision in E.4.**
+
+The subagent's findings are sufficient to start E.3b in a future
+session; no further surface mapping needed before code.
