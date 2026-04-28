@@ -733,7 +733,7 @@ Set the dispatcher's `->mm` to the guest mm via
 Given (L.1) and (L.2), E.3d as a single ~100 LoC commit is not
 viable. Proposed three-commit split:
 
-#### E.3d.0 — In-worker start_userspace (~250-350 LoC)
+#### E.3d.0 — In-worker start_userspace (DONE — `0075c0820da9`)
 
 Brings up a real stub child inside the worker process. Extends
 the STUB_ALLOC_REQ handler in `worker_user.c` to call
@@ -741,20 +741,28 @@ the STUB_ALLOC_REQ handler in `worker_user.c` to call
 spawner via SCM_RIGHTS so the spawner-side mm_id has a usable
 `.sock`, gates `seccomp_mm_create` on WORKER_PROCESS=y to call
 `spawn_worker_for_mm` + STUB_ALLOC_REQ instead of local
-`start_userspace`. **vcpu_run unchanged.**
+`start_userspace`. vcpu_run unchanged.
 
-This is a clean bisection point: "does the worker bring up a
-stub child?" independent of syscall-routing changes. If it
-fails, E.3d.0 is the suspect; if it succeeds, the dispatcher is
-poised but unused.
+Bug fix in passing: `spawn_worker_process` was passing the
+address of a spawner-stack-local `struct worker_init` to
+`clone()`. Under UML's task-stack reuse the worker observed
+`worker_socket_fd` zeroed by the time it dereferenced. Switched
+to placing the init payload at the bottom of the worker's own
+mmap'd stack page; the worker's `arg` then points into a page
+only the worker writes.
 
-Risks: socketpair/fd-map round-trip, futex address sharing
-across processes (futex inside `stub_data` is shared via
-memfd — already works cross-process; verify).
+Build clean both UM_WORKER_PROCESS=n and =y. Substrate gate
+holds at PASS=25 FAIL=3 EXPECTED_FAIL=3 under =n.
 
-Verification: `seccomp_mm_create` returns success under
-WORKER_PROCESS=y; stub child reaches FUTEX_IN_CHILD inside the
-worker; substrate gate boots to login.
+Boot smoke under =y:
+- init=/bin/true: 3/3 runs print "spawned worker pid=N",
+  "stub alloc OK for mm=M (worker_pid=N stub_pid=N+1)" then
+  panic on init-exit (panic=-1, expected).
+- init=/usr/bin/python3: 3/3 runs reach "stub alloc OK" then
+  hit "UML: fatal signal; exiting" mid-vcpu_run. STRUCTURAL,
+  expected: vcpu_run's set_stub_state writes through `id->stack`,
+  but that VA now lives in the worker's address space; the
+  spawner dereferences a wild pointer. E.3d.1 + E.3d.2 fix.
 
 #### E.3d.1 — `current` discipline lock + dispatcher rewrite (~150 LoC)
 
