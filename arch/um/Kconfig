@@ -384,8 +384,13 @@ config UM_WORKER_PROCESS
 	  payoff is concentrated on the v2 path.
 
 	  Default n until memo 28's E.1-E.6 implementation sequence
-	  fully lands. Today (E.1, scaffolding only) the toggle compiles
-	  the headers + stubs but does not change runtime behaviour.
+	  fully lands. As of E.3d.0, toggling on causes
+	  seccomp_mm_create to spawn a per-mm worker that brings up
+	  its own stub child via start_userspace. vcpu_run still uses
+	  the spawner-side path against the worker's stub child until
+	  E.3d.2 reroutes through worker IPC; expect non-trivial guest
+	  workloads (e.g. CPython) to crash with "fatal signal" until
+	  then. init=/bin/true and similar one-shot guests boot fine.
 	  Toggle on for development / testing of the worker model.
 
 	  Say N for production builds until memo 28 is fully done. See

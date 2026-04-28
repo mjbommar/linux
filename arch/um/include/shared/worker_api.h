@@ -23,6 +23,7 @@
 #include <linux/errno.h>
 
 struct mm_struct;
+struct mm_id;
 struct um_worker;	/* opaque to spawner code; defined in
 			 * arch/um/os-Linux/spawner.c */
 struct worker_msg;
@@ -53,6 +54,15 @@ int  spawn_worker_for_mm(struct mm_struct *mm);
 void reap_worker_for_mm(struct mm_struct *mm);
 
 /*
+ * Bring up the per-mm worker AND its stub child (memo 28 E.3d.0).
+ * On success populates `*id_out` (including id_out->sock from the
+ * worker's SCM_RIGHTS reply) and starts the dispatcher kthread.
+ * On failure returns a negative errno; mm->context.worker is NULL
+ * so the caller can fall back to the legacy in-spawner path.
+ */
+int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out);
+
+/*
  * Send one worker_msg over the per-mm IPC socket. E.3d's seccomp
  * integration is the production caller. Returns 0 on success or a
  * negative errno (-ENODEV if the mm has no worker; -EIO on short
@@ -74,6 +84,11 @@ static inline int  spawner_init(void)              { return 0; }
 static inline void spawner_shutdown(void)          { }
 static inline int  spawn_worker_for_mm(struct mm_struct *mm) { return 0; }
 static inline void reap_worker_for_mm(struct mm_struct *mm)  { }
+static inline int  worker_alloc_stub_for_mm(struct mm_struct *mm,
+					    struct mm_id *id_out)
+{
+	return -ENODEV;
+}
 static inline int  worker_send_msg_for_mm(struct mm_struct *mm,
 					  const struct worker_msg *msg)
 {

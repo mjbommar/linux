@@ -11,10 +11,12 @@
  *
  * E.3a: spawn / reap the worker via clone-without-CLONE_VM.
  * E.3b: tagged-message dispatcher in worker_main (this file).
- *
- * The worker is a sidecar today: even with WORKER_PROCESS=y it
- * does not replace today's seccomp_mm_create stub-child path.
- * E.3d wires the actual replacement.
+ * E.3d.0: STUB_ALLOC_REQ now drives start_userspace() inside the
+ * worker's own VA and ships the parent-side socketpair fd back via
+ * SCM_RIGHTS. The vcpu_run path still goes through the spawner-side
+ * stub child today (the seccomp backend still owns that loop until
+ * E.3d.2); WORKER_PROCESS=y bringing up the worker's stub child is
+ * the bisection point this commit lands.
  */
 
 #include <errno.h>
@@ -30,6 +32,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -57,21 +60,16 @@ struct worker_init {
 #define WORKER_STACK_SIZE	(64 * 1024)
 
 /*
- * Worker main loop (E.3b): tagged-message dispatcher, minimum-viable
- * cut per memo 28 Part K.6.
+ * Worker main loop: tagged-message dispatcher.
  *
- * Option A from the E.3b spec: handlers stash the inbound payload in
- * worker-local state (mm_id snapshot + a 9-slot regs buffer) and ACK
- * the round-trip via WORKER_MSG_WRITE_REGS_ACK. The actual
- * start_userspace() / set_stub_state() / get_stub_state() integration
- * is deferred to E.3c — start_userspace pulls in stub_data placement
- * and current_mm_id() that we'd have to fabricate from worker context,
- * which would expand E.3b past its proof-of-concept charter.
- *
- * What this loop proves: mm_id IPC marshalling, regs ping-pong, the
- * three new message types decode cleanly. What's deferred to E.3c:
- * actual stub child clone inside the worker, real futex wake/wait,
- * SIGSYS trap relay back to spawner.
+ * E.3b shipped this as a stash-and-ACK round-trip (no real stub
+ * child). E.3d.0 grows STUB_ALLOC_REQ into a real start_userspace()
+ * call inside the worker's own VA, with the resulting mm_id and
+ * parent-side socketpair fd shipped back to the spawner via a
+ * STUB_ALLOC_REP reply (SCM_RIGHTS for the fd). WRITE_REGS /
+ * RETURN_VALUE remain as E.3b's IPC-only echo — E.3d.2 will replace
+ * those with real set_stub_state / wait_stub_done_seccomp /
+ * get_stub_state driven from this loop.
  *
  * SIGTERM still exits cleanly with status 0 (E.3a behaviour).
  */
@@ -102,6 +100,45 @@ static int worker_send(int sock, const struct worker_msg *msg)
 {
 	ssize_t n = write(sock, msg, sizeof(*msg));
 
+	if (n != (ssize_t)sizeof(*msg))
+		return -1;
+	return 0;
+}
+
+/*
+ * Send `msg` over `sock` and (if fd >= 0) attach `fd` via SCM_RIGHTS
+ * on the cmsg channel. The receiver's recvmsg installs the fd in its
+ * own FD table; the sender retains ownership of its descriptor.
+ *
+ * Used by the STUB_ALLOC_REP path so the spawner can populate
+ * mm_id->sock with the worker-allocated parent-side socketpair fd.
+ */
+static int worker_send_with_fd(int sock, const struct worker_msg *msg, int fd)
+{
+	struct iovec iov = { .iov_base = (void *)msg, .iov_len = sizeof(*msg) };
+	union {
+		char buf[CMSG_SPACE(sizeof(int))];
+		struct cmsghdr align;
+	} cu = { 0 };
+	struct msghdr m = {
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+	};
+	ssize_t n;
+
+	if (fd >= 0) {
+		struct cmsghdr *c;
+
+		m.msg_control    = cu.buf;
+		m.msg_controllen = sizeof(cu.buf);
+		c = CMSG_FIRSTHDR(&m);
+		c->cmsg_level = SOL_SOCKET;
+		c->cmsg_type  = SCM_RIGHTS;
+		c->cmsg_len   = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(c), &fd, sizeof(int));
+	}
+
+	n = sendmsg(sock, &m, 0);
 	if (n != (ssize_t)sizeof(*msg))
 		return -1;
 	return 0;
@@ -150,9 +187,69 @@ static int worker_main(void *arg)
 		}
 
 		switch (msg.type) {
-		case WORKER_MSG_STUB_ALLOC_REQ:
+		case WORKER_MSG_STUB_ALLOC_REQ: {
+			/*
+			 * E.3d.0: bring up a real stub child inside the
+			 * worker's own VA. start_userspace clones the stub
+			 * child (CLONE_VM with the worker, NOT with the
+			 * spawner — the worker itself was cloned without
+			 * CLONE_VM in spawn_worker_process), runs the
+			 * userspace_tramp init, then waits for the
+			 * FUTEX_IN_CHILD handshake. On success local_mm_id
+			 * has a valid .sock (parent-side of the per-mm
+			 * socketpair); we hand that fd to the spawner via
+			 * SCM_RIGHTS so the spawner-side mm_id resolves to
+			 * the same kernel file as the worker's.
+			 *
+			 * Globals like stub_exe_fd and um_backend->* are
+			 * already CoW-inherited from the spawner, so
+			 * userspace_tramp Just Works inside the worker.
+			 *
+			 * stack==0 is the E.3b smoke-test path: skip the
+			 * actual start_userspace (it would NULL-deref) and
+			 * just stash the (zeroed) snapshot, mirroring the
+			 * pre-E.3d.0 echo-only behaviour. Production
+			 * STUB_ALLOC_REQ from worker_alloc_stub_for_mm
+			 * always passes a non-zero stack.
+			 */
 			worker_load_mm_id(&local_mm_id, &msg.u.stub_alloc);
+
+			if (local_mm_id.stack == 0)
+				break;
+
+			if (start_userspace(&local_mm_id) != 0) {
+				memset(&ack, 0, sizeof(ack));
+				ack.magic = WORKER_IPC_MAGIC;
+				ack.type  = WORKER_MSG_STUB_ALLOC_REP;
+				ack.task_handle = msg.task_handle;
+				ack.u.stub_alloc_rep.status = (worker_u32)-1;
+				if (worker_send(sock, &ack) < 0)
+					goto out;
+				break;
+			}
+
+			memset(&ack, 0, sizeof(ack));
+			ack.magic = WORKER_IPC_MAGIC;
+			ack.type  = WORKER_MSG_STUB_ALLOC_REP;
+			ack.task_handle = msg.task_handle;
+			ack.u.stub_alloc_rep.stack            =
+				(worker_u64)local_mm_id.stack;
+			ack.u.stub_alloc_rep.pid              =
+				(worker_u32)local_mm_id.pid;
+			ack.u.stub_alloc_rep.syscall_data_len =
+				(worker_u32)local_mm_id.syscall_data_len;
+			ack.u.stub_alloc_rep.syscall_fd_num   =
+				(worker_u32)local_mm_id.syscall_fd_num;
+			for (i = 0; i < STUB_MAX_FDS; i++)
+				ack.u.stub_alloc_rep.syscall_fd_map[i] =
+					(worker_u32)local_mm_id.syscall_fd_map[i];
+			ack.u.stub_alloc_rep.status = 0;
+
+			if (worker_send_with_fd(sock, &ack,
+						local_mm_id.sock) < 0)
+				goto out;
 			break;
+		}
 
 		case WORKER_MSG_WRITE_REGS:
 			for (i = 0; i < WORKER_REGS_SLOTS; i++)
@@ -194,7 +291,13 @@ static int worker_main(void *arg)
 	}
 
 out:
-	(void)local_mm_id;	/* populated by STUB_ALLOC_REQ; consumed in E.3c */
+	/*
+	 * local_mm_id holds the worker's stub-child handle from
+	 * start_userspace(); leave it allocated until exit. E.3d.1+
+	 * will drive set_stub_state/get_stub_state against it from the
+	 * dispatcher loop. Process exit reaps the stub child via the
+	 * inherited PR_SET_PDEATHSIG.
+	 */
 	close(sock);
 	exit(0);
 }
@@ -204,7 +307,7 @@ int spawn_worker_process(int *out_pid, int *out_sock)
 	int fds[2];
 	void *stack;
 	pid_t pid;
-	struct worker_init init;
+	struct worker_init *init;
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
 		return -errno;
@@ -221,7 +324,17 @@ int spawn_worker_process(int *out_pid, int *out_sock)
 		return err;
 	}
 
-	init.worker_socket_fd = fds[1];	/* worker-side */
+	/*
+	 * Place the init payload at the BOTTOM of the worker's own
+	 * stack — guaranteed to be in a page the worker can read
+	 * without depending on the spawner's stack-page CoW state
+	 * (the spawner's call stack lives in UML-kernel-task storage
+	 * that is unstable across the spawner's subsequent activity;
+	 * the worker observed init.worker_socket_fd zeroed out by
+	 * the time it dereferenced &init on the spawner stack).
+	 */
+	init = stack;
+	init->worker_socket_fd = fds[1];
 
 	/*
 	 * No CLONE_VM, no CLONE_VFORK, no CLONE_FILES — worker gets
@@ -234,7 +347,7 @@ int spawn_worker_process(int *out_pid, int *out_sock)
 	pid = clone(worker_main,
 		    (char *)stack + WORKER_STACK_SIZE,
 		    SIGCHLD,
-		    &init);
+		    init);
 	if (pid < 0) {
 		int err = -errno;
 

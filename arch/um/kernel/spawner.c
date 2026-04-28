@@ -41,6 +41,7 @@
 
 #include <os.h>
 #include <skas.h>
+#include <mm_id.h>
 #include <sysdep/ptrace.h>
 #include <sysdep/ptrace_user.h>
 #include <worker_api.h>
@@ -224,7 +225,34 @@ static int worker_dispatcher_fn(void *arg)
  * until E.3 actually spawns workers, and what lets the toggle ship
  * default-y in E.6 without breaking existing seccomp setups.
  */
-int spawn_worker_for_mm(struct mm_struct *mm)
+/*
+ * Start the per-worker dispatcher kthread. Split from
+ * spawn_worker_for_mm so the E.3d.0 stub-alloc round-trip can drain
+ * the IPC socket synchronously before the dispatcher takes ownership
+ * of read(). Returns 0 on success or a negative errno; the caller is
+ * responsible for tearing down the worker on failure.
+ */
+static int worker_start_dispatcher(struct um_worker *w)
+{
+	w->dispatcher = kthread_run(worker_dispatcher_fn, w,
+				    "um-worker-disp/%d", w->pid);
+	if (IS_ERR(w->dispatcher)) {
+		int rc = PTR_ERR(w->dispatcher);
+
+		w->dispatcher = NULL;
+		return rc;
+	}
+	return 0;
+}
+
+/*
+ * Allocate + spawn a worker for `mm`. When `defer_dispatcher` is
+ * false (the legacy callers) the dispatcher kthread starts before
+ * returning. When true (E.3d.0's seccomp_mm_create path), the caller
+ * is responsible for invoking worker_start_dispatcher after any
+ * dispatcher-incompatible synchronous IPC round-trip has completed.
+ */
+static int __spawn_worker_for_mm(struct mm_struct *mm, bool defer_dispatcher)
 {
 	struct um_worker *w;
 	int rc;
@@ -248,14 +276,13 @@ int spawn_worker_for_mm(struct mm_struct *mm)
 		return rc;
 	}
 
-	w->dispatcher = kthread_run(worker_dispatcher_fn, w,
-				    "um-worker-disp/%d", w->pid);
-	if (IS_ERR(w->dispatcher)) {
-		rc = PTR_ERR(w->dispatcher);
-		w->dispatcher = NULL;
-		reap_worker_process(w->pid, w->ipc_sock);
-		kfree(w);
-		return rc;
+	if (!defer_dispatcher) {
+		rc = worker_start_dispatcher(w);
+		if (rc < 0) {
+			reap_worker_process(w->pid, w->ipc_sock);
+			kfree(w);
+			return rc;
+		}
 	}
 
 	scoped_guard(spinlock, &workers_lock) {
@@ -264,9 +291,14 @@ int spawn_worker_for_mm(struct mm_struct *mm)
 
 	mm->context.worker = w;
 
-	pr_info("um: worker model: spawned worker pid=%d for mm=%p (ipc_sock=%d)\n",
-		w->pid, mm, w->ipc_sock);
+	pr_info("um: worker model: spawned worker pid=%d for mm=%p (ipc_sock=%d, dispatcher=%s)\n",
+		w->pid, mm, w->ipc_sock, defer_dispatcher ? "deferred" : "running");
 	return 0;
+}
+
+int spawn_worker_for_mm(struct mm_struct *mm)
+{
+	return __spawn_worker_for_mm(mm, false);
 }
 
 void reap_worker_for_mm(struct mm_struct *mm)
@@ -302,6 +334,128 @@ void reap_worker_for_mm(struct mm_struct *mm)
 
 	mm->context.worker = NULL;
 	kfree(w);
+}
+
+/*
+ * worker_alloc_stub_for_mm — bring up the per-mm worker AND its
+ * stub child (memo 28 E.3d.0).
+ *
+ * The worker is spawned with the dispatcher kthread DEFERRED so this
+ * function can synchronously drive the STUB_ALLOC_REQ → STUB_ALLOC_REP
+ * round-trip without racing the dispatcher on the IPC socket. On
+ * success the spawner-side `*id_out` is fully populated (including
+ * id_out->sock, which is a fresh fd installed in this process's FD
+ * table by recvmsg's SCM_RIGHTS handling) and the dispatcher kthread
+ * is running.
+ *
+ * Failure modes (any of which leave mm->context.worker == NULL so
+ * seccomp_mm_create's caller can fall back to the legacy in-spawner
+ * start_userspace path):
+ *   -ENODEV   spawner not initialized
+ *   -EIO      short read/write on IPC socket
+ *   -EPROTO   reply has wrong magic/type or no SCM_RIGHTS cmsg
+ *   <other>   propagated from spawn_worker_process / start_userspace
+ *             (status field of the reply, sign-extended)
+ */
+int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
+{
+	struct um_worker *w;
+	struct worker_msg req;
+	struct worker_msg rep;
+	int sock_fd = -1;
+	ssize_t n;
+	int rc, i;
+
+	rc = __spawn_worker_for_mm(mm, true /* defer_dispatcher */);
+	if (rc < 0)
+		return rc;
+
+	w = mm->context.worker;
+
+	memset(&req, 0, sizeof(req));
+	req.magic = WORKER_IPC_MAGIC;
+	req.type  = WORKER_MSG_STUB_ALLOC_REQ;
+	/*
+	 * Pass the spawner-allocated stub_data VA (init_new_context did
+	 * __get_free_pages from physmem) so the worker uses the SAME
+	 * shared page. The worker inherited the MAP_SHARED physmem
+	 * mapping CoW from the spawner; arithmetic on this VA in
+	 * start_userspace's userspace_tramp resolves through phys_mapping
+	 * the same way (uml_physmem is also CoW-inherited). The futex
+	 * stored at that VA is cross-process visible because the page is
+	 * memfd-backed and MAP_SHARED.
+	 */
+	req.u.stub_alloc.stack = (worker_u64)id_out->stack;
+	n = os_write_file(w->ipc_sock, &req, sizeof(req));
+	if (n != sizeof(req)) {
+		rc = n < 0 ? n : -EIO;
+		goto out_reap;
+	}
+
+	/*
+	 * recvmsg with cmsg buffer for the worker's SCM_RIGHTS reply.
+	 * os_rcv_fd_msg installs the inbound fd into the spawner's FD
+	 * table and returns the body length.
+	 */
+	n = os_rcv_fd_msg(w->ipc_sock, &sock_fd, 1, &rep, sizeof(rep));
+	if (n != sizeof(rep)) {
+		rc = n < 0 ? n : -EIO;
+		goto out_reap;
+	}
+
+	if (rep.magic != WORKER_IPC_MAGIC ||
+	    rep.type  != WORKER_MSG_STUB_ALLOC_REP) {
+		pr_err("um: worker alloc: bad reply magic=0x%x type=%u\n",
+		       (unsigned)rep.magic, (unsigned)rep.type);
+		rc = -EPROTO;
+		goto out_reap;
+	}
+
+	if (rep.u.stub_alloc_rep.status != 0) {
+		pr_err("um: worker alloc: start_userspace in worker failed (status=%d)\n",
+		       (int)rep.u.stub_alloc_rep.status);
+		rc = (int)rep.u.stub_alloc_rep.status;
+		if (rc >= 0)
+			rc = -EIO;
+		goto out_reap;
+	}
+
+	if (sock_fd < 0) {
+		pr_err("um: worker alloc: reply OK but no SCM_RIGHTS fd\n");
+		rc = -EPROTO;
+		goto out_reap;
+	}
+
+	id_out->stack            = (unsigned long)rep.u.stub_alloc_rep.stack;
+	id_out->pid              = (int)rep.u.stub_alloc_rep.pid;
+	id_out->syscall_data_len = (int)rep.u.stub_alloc_rep.syscall_data_len;
+	id_out->sock             = sock_fd;
+	id_out->syscall_fd_num   = (int)rep.u.stub_alloc_rep.syscall_fd_num;
+	for (i = 0; i < STUB_MAX_FDS; i++)
+		id_out->syscall_fd_map[i] =
+			(int)rep.u.stub_alloc_rep.syscall_fd_map[i];
+
+	rc = worker_start_dispatcher(w);
+	if (rc < 0) {
+		pr_err("um: worker alloc: dispatcher kthread failed (%d)\n", rc);
+		os_close_file(sock_fd);
+		id_out->sock = 0;
+		goto out_reap;
+	}
+
+	pr_info("um: worker model: stub alloc OK for mm=%p (worker_pid=%d stub_pid=%d sock=%d)\n",
+		mm, w->pid, id_out->pid, id_out->sock);
+	return 0;
+
+out_reap:
+	/*
+	 * Tear down the worker so seccomp_mm_create can fall back. The
+	 * dispatcher hasn't started yet (deferred), so reap_worker_for_mm
+	 * is safe — it'll skip the kthread_stop branch since
+	 * w->dispatcher is NULL.
+	 */
+	reap_worker_for_mm(mm);
+	return rc;
 }
 
 /*

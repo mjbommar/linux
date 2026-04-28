@@ -42,6 +42,11 @@ typedef u8  worker_u8;
  * are the minimum-viable cut from memo 28 Part K.6. They prove the
  * spawner→worker→spawner round-trip without yet integrating real
  * start_userspace() calls or SIGSYS handling — that's E.3c.
+ *
+ * E.3d.0 adds STUB_ALLOC_REP: the worker calls start_userspace() in
+ * its own VA, then ships the populated mm_id back along with the
+ * parent-side socketpair fd via SCM_RIGHTS so the spawner-side mm_id
+ * has a usable .sock.
  */
 #define WORKER_REGS_SLOTS	9u	/* rip,rsp,rax,rdi,rsi,rdx,r10,r8,r9 */
 
@@ -59,6 +64,7 @@ enum worker_msg_type {
 	WORKER_MSG_WRITE_REGS       = 10,	/* spawner → worker: synthetic regs */
 	WORKER_MSG_RETURN_VALUE     = 11,	/* spawner → worker: sentinel for stub reply */
 	WORKER_MSG_WRITE_REGS_ACK   = 12,	/* worker → spawner: regs round-trip ACK */
+	WORKER_MSG_STUB_ALLOC_REP   = 13,	/* worker → spawner: stub child up, here's mm_id + .sock fd */
 };
 
 struct worker_msg_syscall {
@@ -117,20 +123,40 @@ struct worker_msg_retval {
 	worker_u64 reserved[13];
 };
 
+/*
+ * Reply payload for STUB_ALLOC_REP (E.3d.0). status == 0 means the
+ * worker's start_userspace() succeeded and the remaining fields mirror
+ * the worker's local mm_id; the sock fd rides on the cmsg channel via
+ * SCM_RIGHTS (not in this struct). status < 0 means start_userspace
+ * failed (the worker writes -errno here); remaining fields are
+ * undefined.
+ */
+struct worker_msg_stub_alloc_rep {
+	worker_u64 stack;
+	worker_u32 pid;			/* stub child pid inside worker */
+	worker_u32 syscall_data_len;
+	worker_u32 syscall_fd_num;
+	worker_u32 syscall_fd_map[4];	/* matches STUB_MAX_FDS */
+	worker_u32 status;		/* 0 == OK; -errno otherwise */
+	worker_u32 reserved_pad;
+	worker_u64 reserved[6];
+};
+
 struct worker_msg {
 	worker_u32 magic;	/* WORKER_IPC_MAGIC */
 	worker_u16 type;	/* enum worker_msg_type */
 	worker_u16 flags;
 	worker_u64 task_handle;
 	union {
-		struct worker_msg_syscall    syscall;
-		struct worker_msg_reply      reply;
-		struct worker_msg_signal     signal;
-		struct worker_msg_migrate    migrate;
-		struct worker_msg_stub_alloc stub_alloc;
-		struct worker_msg_regs       regs;
-		struct worker_msg_retval     retval;
-		worker_u8                    pad[112];
+		struct worker_msg_syscall        syscall;
+		struct worker_msg_reply          reply;
+		struct worker_msg_signal         signal;
+		struct worker_msg_migrate        migrate;
+		struct worker_msg_stub_alloc     stub_alloc;
+		struct worker_msg_stub_alloc_rep stub_alloc_rep;
+		struct worker_msg_regs           regs;
+		struct worker_msg_retval         retval;
+		worker_u8                        pad[112];
 	} u;
 };
 
