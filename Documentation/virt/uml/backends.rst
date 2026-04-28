@@ -41,90 +41,70 @@ Hosts that genuinely lack ``CONFIG_SECCOMP_FILTER`` (mainline since
 Picking a backend
 ******************
 
-Default builds compile in both ptrace and seccomp; the active
-backend is chosen at boot. The defaults are sized so the typical
-user gets the right behavior without thinking about it:
+Default builds compile in seccomp; the v2 KVM backend is in
+development (memo 26). Today's defaults give the typical user the
+right behavior without thinking about it:
 
 ============================  ==============================================
 You want…                     Use
 ============================  ==============================================
 "It just works"               No flags needed. Default config compiles in
-                              both backends; ``backend=auto`` runs the
-                              seccomp probe at boot and picks seccomp
-                              when the host supports it, falling back
-                              to ptrace otherwise. Prior to 2026-04 the
-                              probe was gated on an explicit
-                              ``seccomp=`` / ``backend=seccomp`` request,
-                              so ``backend=auto`` silently preferred
-                              ptrace; that's been corrected.
-Maximum speed                 ``backend=seccomp`` (or just rely on
-                              ``backend=auto``). ~3–4× faster than
-                              ptrace on syscall-heavy workloads.
-                              Requires host seccomp filter support.
-Smallest binary / minimum     Build with ``CONFIG_UM_BACKEND_PTRACE_ONLY=y``
-TCB (sandbox profile)         or ``CONFIG_UM_BACKEND_SECCOMP_ONLY=y``. The
-                              unselected backend is excluded entirely;
-                              dispatch inlines to direct calls.
+                              seccomp; ``backend=auto`` selects it.
+Maximum speed                 ``backend=seccomp``. (KVM v2 will rejoin this
+                              spectrum once memo 26 Phase A wires it.)
+Smallest binary / minimum     Build with
+TCB (sandbox profile)         ``CONFIG_UM_BACKEND_SECCOMP_ONLY=y``. The
+                              dispatch macro inlines to direct calls.
 A binary that runs            ``CONFIG_UM_BACKEND_DYNAMIC=y`` (default
-anywhere                      when seccomp is available). Both backends
-                              compiled in; the active one is picked at
-                              boot via the host probe + ``backend=`` boot
-                              param.
-Force a specific backend      ``backend=force=ptrace`` or
-(panic if unavailable)        ``backend=force=seccomp``. The kernel
-                              panics during early init if the requested
-                              backend isn't compiled in or its host probe
-                              fails.
+anywhere                      when seccomp is available).
+Force a specific backend      ``backend=force=seccomp``. Panics during
+(panic if unavailable)        early init if seccomp probe fails.
 ============================  ==============================================
 
 ******************
 Boot parameters
 ******************
 
-``backend=<auto|ptrace|seccomp|kvm|force=ptrace|force=seccomp|force=kvm>``
+``backend=<auto|seccomp|kvm|force=seccomp|force=kvm>``
     Pick the trap mechanism. ``auto`` (default) runs the host
     seccomp probe at boot and picks seccomp when the host supports
-    it, falling back to ptrace otherwise — matches the table above.
-    Bare ``backend=seccomp`` / ``backend=ptrace`` / ``backend=kvm``
-    are *preferences* that still fall through to whichever backend
-    the host actually supports. ``force=`` makes the choice
-    mandatory and panics if the requested backend isn't compiled
-    in or fails its host probe. ``kvm`` currently has no
-    selectable backend — v1 archived to
+    it. ``force=`` makes the choice mandatory and panics if the
+    requested backend isn't compiled in or fails its host probe.
+    ``kvm`` currently has no selectable backend — v1 archived to
     ``arch/um/backend/kvm-v1-archive/`` (depends on ``BROKEN``);
     v2 stub at ``arch/um/backend/kvm-v2/`` is not yet wired into
     dispatch (memo 26 Phase A.1 plumbs it in). Today
-    ``backend=kvm`` falls back to seccomp/ptrace and
+    ``backend=kvm`` falls back to seccomp and
     ``backend=force=kvm`` panics.
+
+    ``backend=ptrace`` is parsed for compatibility but the ptrace
+    backend was removed (memo 25 R11; archived at the
+    ``kvm-v1-archive-20260428`` tag). Requests warn and fall
+    through to seccomp; ``backend=force=ptrace`` panics with a
+    pin-to-v6.16-or-earlier hint.
 
 ``seccomp=<on|auto|off>`` (legacy alias)
     Preserved for one transitional release. Maps to:
     ``seccomp=on`` → ``backend=force=seccomp``;
     ``seccomp=auto`` → ``backend=auto``;
-    ``seccomp=off`` → ``backend=ptrace``.
+    ``seccomp=off`` is now equivalent to ``backend=auto`` since
+    ptrace is no longer a fallback.
 
 ******************
 Trap path diagrams
 ******************
 
-ptrace
-======
+ptrace (archived)
+=================
 
-.. code-block::
+The ptrace backend was removed in memo 25 R11. Source is
+preserved at the ``kvm-v1-archive-20260428`` tag::
 
-    UML host process            stub child (per-mm)
-    ────────────────            ──────────────────────
-                                 1. Issues guest syscall
-    ─── PTRACE_SYSEMU ────────► 2. Hardware traps to host
-    ─── waitpid ──────────────► 3. Stub stops at SYSEMU pre-exec
-    ◄── kernel runs syscall   ─ 4. PTRACE_GETREGS reads syscall #
-                                 (handle_syscall in arch/um/kernel/
-                                 skas/syscall.c)
-    ─── PTRACE_SETREGS ───────► 5. Write return value
-    ─── PTRACE_CONT ──────────► 6. Resume stub past the syscall
+    git show kvm-v1-archive-20260428:arch/um/backend/ptrace/trap_user.c
 
-Round-trip cost: 4 host syscalls (SYSEMU + waitpid + GETREGS +
-SETREGS) plus signal-stack fault delivery for SIGSEGV. ~1–5 µs.
+The trap path was the classic ``PTRACE_SYSEMU`` + ``waitpid`` +
+``PTRACE_GETREGS`` + ``PTRACE_SETREGS`` + ``PTRACE_CONT`` round
+trip, ~1–5 µs per syscall.
 
 seccomp
 =======
@@ -183,16 +163,19 @@ The kernel-side selection arbiter is ``init_backend()`` in
 chosen backend's HOT ops are non-NULL, and sets the global
 ``um_backend`` pointer.
 
-Per-backend file layout (ptrace + seccomp follow the same shape):
+Per-backend file layout (current — seccomp; v2 KVM follows the
+same shape per memo 26):
 
 ==================================  ==============================
 File                                Op(s)
 ==================================  ==============================
-``backend.c``                       ``struct um_backend_ops``
-                                    singleton + 18 op fields
-``trap_user.c`` (USER TU)           ``run_userspace`` (the trap loop)
-``mm.c``                            ``mm_attach``, ``mm_detach``,
-                                    ``mm_map``, ``mm_unmap``
+``<kind>_backend.c``                ``struct um_backend_ops``
+                                    singleton + ops fields
+``trap_user.c`` (USER TU)           ``vcpu_run`` (the trap loop)
+``mm.c``                            ``mm_create``, ``mm_destroy``,
+                                    ``mm_region_added``,
+                                    ``mm_region_removed``,
+                                    ``mm_region_protected``
 ``thread.c``                        ``context_switch``,
                                     ``thread_create``,
                                     ``thread_start_idle``,
@@ -207,6 +190,13 @@ File                                Op(s)
                                     ``shutdown``
 ==================================  ==============================
 
+The HOT ops (``vcpu_run``, ``mm_region_added``,
+``mm_region_removed``, ``context_switch``, ``read_clock_ns``) are
+validated non-NULL at ``init_backend()`` time;
+``mm_region_protected`` is optional (mm-arbiter falls back to
+remove+add when NULL).
+==================================  ==============================
+
 ******************
 Compatibility
 ******************
@@ -214,14 +204,16 @@ Compatibility
 ==============  ==========================================================
 Backend         Host requirements
 ==============  ==========================================================
-ptrace          Any Linux host with PTRACE_SYSEMU support. Works on
-                kernels back to 3.x.
-seccomp         Host with ``CONFIG_SECCOMP_FILTER=y`` and seccomp filter
-                installation permitted (typically requires no special
-                privileges; some hardened/sandboxed environments may
-                forbid it). Linux 6.16+ for the in-tree UML stub layout.
+seccomp         Host with ``CONFIG_SECCOMP_FILTER=y`` (mainline since
+                3.5 / 2012) and seccomp filter installation permitted
+                (typically requires no special privileges; some
+                hardened/sandboxed environments may forbid it).
+                Linux 6.16+ for the in-tree UML stub layout.
 kvm             Host with ``/dev/kvm`` accessible to the running user.
-                Linux 5.x+. (Workstream D — not yet shipped.)
+                Linux 5.x+. (Workstream D — v1 archived, v2 in
+                development per memo 26.)
+ptrace          Removed (memo 25 R11). Pin to UML v6.16 or earlier
+                if you need it.
 ==============  ==========================================================
 
 ******************

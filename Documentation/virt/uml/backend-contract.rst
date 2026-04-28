@@ -17,16 +17,14 @@ The contract version covered by this document is
 
 .. note::
 
-   **2026-04-28 — memo 25 refactor 2 ops cleanup landed.** Several op
-   names and signatures in the prose below are stale; see
-   ``arch/um/include/shared/backend.h`` for the authoritative shape.
-   The full rewrite is scheduled for memo 25 refactor 12 (docs). In
-   summary: ``run_userspace`` → ``vcpu_run``; ``mm_attach`` /
-   ``mm_detach`` → ``mm_create`` / ``mm_destroy`` (taking
-   ``struct mm_struct *`` instead of ``struct mm_id *``); ``mm_map``
-   / ``mm_unmap`` → ``mm_region_added`` / ``mm_region_removed`` (same
-   signature change); new optional ``mm_region_protected`` op for v2
-   memslot-flag updates.
+   This document was rewritten for the post-memo-25-R2/R5 ops shape
+   on 2026-04-28. ``run_userspace`` is now ``vcpu_run``;
+   ``mm_attach`` / ``mm_detach`` are ``mm_create`` / ``mm_destroy``
+   (taking ``struct mm_struct *``); ``mm_map`` / ``mm_unmap`` are
+   ``mm_region_added`` / ``mm_region_removed`` (taking
+   ``struct mm_struct *`` plus ``const struct um_memory_region *``);
+   new ``mm_region_protected`` op for backends that want a direct
+   prot-update path. ``struct mm_id`` is now seccomp-internal.
 
 For end-user documentation (which backend to pick, the boot
 parameters, the trap-path diagrams), see
@@ -96,13 +94,14 @@ All three cold lifecycle ops dispatch through the ops table from
 ``probe()`` and ``init()`` in sequence right after HOT-ops
 validation, and ``uml_cleanup()`` on the reboot/halt path calls
 ``shutdown()``. Call sites panic on any non-zero return from
-probe/init; shutdown returns void. The in-tree ptrace and
-seccomp backends ship stub implementations that return 0 today —
-the real probe still runs in ``arch/um/os-Linux/start_up.c``
-pending the migration documented in each
-``arch/um/backend/<kind>/lifecycle.c`` — but the dispatch path
-itself is authoritative, so a future KVM backend's real
-``kvm_open()`` / vCPU-thread-spawn work has a wired call site.
+probe/init; shutdown returns void. The in-tree seccomp backend
+ships stub implementations that return 0 today — the real probe
+still runs in ``arch/um/os-Linux/start_up.c`` pending the
+migration documented in
+``arch/um/backend/seccomp/lifecycle.c`` — but the dispatch path
+itself is authoritative, so the v2 KVM backend's
+``kvm_open()`` / per-mm-worker spawn work (memo 26 Phase A) has
+a wired call site.
 
 ``probe(void)``
     Cold. Returns 0 if this backend can run on the current host
@@ -124,7 +123,7 @@ itself is authoritative, so a future KVM backend's real
     ``arch/um/kernel/reboot.c`` before any other teardown so the
     backend can free things while kmalloc is still usable.
 
-``run_userspace(struct uml_pt_regs *regs)``
+``vcpu_run(struct uml_pt_regs *regs)``
     **HOT.** The trap loop. Resumes guest userspace with the state
     in ``*regs``, runs until the next trap (syscall, page fault,
     signal, IRQ injection), then returns with ``regs`` updated and
@@ -132,36 +131,54 @@ itself is authoritative, so a future KVM backend's real
 
     The kernel-side trap handlers (``handle_syscall``, ``segv``,
     ``relay_signal``) are invoked **by** the backend from inside
-    ``run_userspace`` once the trap reason is known. Backends should
+    ``vcpu_run`` once the trap reason is known. Backends should
     not return to the caller without invoking the appropriate
     handler.
 
-Memory (4 ops)
+    (Renamed from ``run_userspace`` by memo 25 R2 ops cleanup.)
+
+Memory (5 ops)
 --------------
 
-``mm_attach(struct mm_id *id)``
-    Cold. Called once per ``init_new_context()`` after the kernel
-    has allocated ``mm->context.id``. Sets up per-mm backend state
-    (stub child for ptrace/seccomp; KVM memory slot + guest pgd for
-    KVM). The backend records its private fields in ``*id``; see
-    `mm_id field ownership`_ below.
+Per memo 25 R2 + R5, all per-mm and per-region ops take
+``struct mm_struct *`` and ``const struct um_memory_region *``;
+backends manage their own per-mm storage layout
+(seccomp uses ``mm->context.id``; v2's per-mm worker process model
+keys off the mm pointer differently).
 
-``mm_detach(struct mm_id *id)``
+``mm_create(struct mm_struct *mm)``
+    Cold. Called once per ``init_new_context()``. Sets up per-mm
+    backend state (stub child for seccomp; per-mm worker process
+    + KVM context for v2). Returns 0 or negative errno.
+
+``mm_destroy(struct mm_struct *mm)``
     Cold. Called from ``destroy_context()`` and the reboot path.
-    Tears down everything ``mm_attach`` created.
+    Tears down everything ``mm_create`` created.
 
-``mm_map(id, va, len, prot, phys_fd, offset)``
-    **HOT.** Map a contiguous host-backing region into the guest mm
-    at virtual address ``va``. ``phys_fd``/``offset`` identify the
-    host-side backing; ``prot`` is a ``PROT_*`` mask. Returns 0 or
-    negative errno.
+``mm_region_added(struct mm_struct *mm, const struct um_memory_region *region)``
+    **HOT.** Map a contiguous host-backing region into the guest
+    mm at ``region->va``. ``region->phys_fd`` / ``region->offset``
+    identify the host-side backing; ``region->prot`` is a
+    ``PROT_*`` mask. Returns 0 or negative errno.
 
-    Backends may queue and amortize multiple ``mm_map`` calls into
-    one stub round-trip; they must flush implicitly before the next
-    ``run_userspace()`` returns to the guest.
+    Backends may queue and amortize multiple ``mm_region_added``
+    calls into one stub round-trip; they must flush implicitly
+    before the next ``vcpu_run()`` returns to the guest.
 
-``mm_unmap(id, va, len)``
-    **HOT.** Symmetric. Same flush semantics as ``mm_map``.
+    Backends may stash per-region state in ``region->backend_data``
+    (e.g., v2 stores the memslot ID).
+
+``mm_region_removed(struct mm_struct *mm, const struct um_memory_region *region)``
+    **HOT.** Symmetric. Same flush semantics as ``mm_region_added``.
+
+``mm_region_protected(struct mm_struct *mm, const struct um_memory_region *region)``
+    Cold. Optional (backend may set NULL). Notification that an
+    existing region's ``prot`` changed. Today's mprotect path goes
+    through ``um_tlb_sync`` which emits a ``mm_region_removed`` +
+    ``mm_region_added`` pair; backends that want a direct path
+    (v2's memslot-flag-update) implement this op. mm-arbiter
+    consults the field and falls back to the remove+add sequence
+    when NULL.
 
 Scheduling (4 ops)
 ------------------
@@ -239,34 +256,40 @@ Backends hold state in three places:
 There is **no** ``void *backend_private`` slot. Allocator round-
 trips and ownership ambiguity outweigh the flexibility.
 
-mm_id field ownership
-=====================
+mm_id field ownership (legacy)
+==============================
 
-``struct mm_id`` (declared in ``arch/um/include/shared/skas/mm_id.h``)
-carries fields used by different backends. **All fields are present
-in every build**, including builds that don't compile in the backend
-that uses them (the cost is ≤24 bytes per mm).
+Pre-memo-25-R2, ``struct mm_id`` (declared in
+``arch/um/include/shared/skas/mm_id.h``) was the universal per-mm
+handle that backend ops took as their first argument. After R2,
+``struct mm_id`` is **seccomp-internal**: it lives in
+``mm->context.id`` and seccomp's ``mm_create`` /
+``mm_region_added`` impls look it up via ``&mm->context.id``.
+Other backends are free to ignore ``struct mm_id`` entirely and
+key their per-mm state off the ``struct mm_struct *`` pointer
+(v2's per-mm worker process model does this).
 
-==================== ============= ==================================
-Field                Owner         Use
-==================== ============= ==================================
-``stack``            all           per-mm scratch page (stub_data
-                                   for ptrace/seccomp; memslot base
-                                   for KVM)
-``pid``              ptrace, secc. host child PID (-1 for KVM)
+The fields seccomp uses internally:
+
+==================== =========== ==================================
+Field                Use
+==================== =========== ==================================
+``stack``            all backends  per-mm scratch page (stub_data
+                                   for seccomp; per-vCPU
+                                   payload for v2)
+``pid``              seccomp       host child PID
 ``syscall_data_len`` seccomp       length of pending stub syscalls
 ``sock``             seccomp       SCM_RIGHTS socket
 ``syscall_fd_num``   seccomp       FDs queued for next stub batch
 ``syscall_fd_map[]`` seccomp       FD slot table
-*(planned)*
-``kvm_pgd``          kvm           guest CR3 cookie
-``memslot_id``       kvm           KVM memory slot index
-==================== ============= ==================================
+==================== =========== ==================================
 
-The fields are not unioned because they are inspected at runtime
-from cross-backend code paths (``destroy_context`` checks
-``id.sock``, etc.) and a union would require ``um_backend->kind``
-checks at every access site. The byte cost is negligible.
+The ``kvm_shadow`` field on the legacy struct was removed by memo
+25 Step 3 (b19444243944) along with the v1 archive.
+
+For v2's per-region state (memslot ID, mmap'd buffer, mmu_notifier
+handle), use ``struct um_memory_region::backend_data`` instead of
+extending ``struct mm_id``.
 
 ***********************
 Versioning policy

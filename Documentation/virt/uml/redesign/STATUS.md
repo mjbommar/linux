@@ -47,15 +47,57 @@ the mechanical restart:
   LoC deletion. `embedded.config` redirected to SECCOMP_ONLY.
   Hosts genuinely without seccomp-filter pin to v6.16 or earlier.
 
-**Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
-**Tip of `uml-redesign-plan`:** post-R11.
+- Memo 25 R1 — host-VA / kernel-VA Kconfig-gated abstraction
+  (`3086bf6d8bd8`). Per user direction, R1 lands as a rename
+  rather than a runtime relocation. Today both anchors equal
+  `__binary_start & PAGE_MASK`; v2's Phase B Kconfig gate flips
+  `uml_physmem` to a high constant (PML4[256+]) for the guest pgd
+  while `__binary_start_hva` stays low. 5 host-VA-meaning sites
+  audited (main.c kfree-vs-vfree, virtio_uml/vfio_user offsets,
+  mem.h header).
+- Memo 25 R2 — backend ops abstraction cleanup (`764eac6d79de`).
+  `run_userspace` → `vcpu_run`; `mm_attach`/`mm_detach` →
+  `mm_create`/`mm_destroy` taking `struct mm_struct *`;
+  `mm_map`/`mm_unmap` → `mm_region_added`/`mm_region_removed`;
+  new optional `mm_region_protected`. Keystone — unblocks
+  R3/R5/R7/R8/R9.
+- Memo 25 R3 — TLB-sync decoupled from backends (`3aa0af5d04e6`).
+  Documentation-only: the substantive strip happened in Step 3 +
+  R2; this commit formalizes the contract in tlbflush.h.
+- Memo 25 R5 — generic `struct um_memory_region` (`d3b2035f4079`).
+  All region ops take `const struct um_memory_region *`; backends
+  may stash per-region state in `region->backend_data` (today
+  reserved for v2's memslot ID).
+- Memo 25 R7 — backend tracepoint subsystem (`1a5dc6d061fa`).
+  `um_backend:{mm_create,mm_destroy,mm_region_added,mm_region_removed}`
+  ftrace events, free under CONFIG_TRACING=n, full visibility under
+  CONFIG_FUNCTION_TRACER=y. New header
+  `arch/um/include/asm/trace/um_backend.h` + new TU
+  `arch/um/kernel/trace.c`.
+- Memo 25 R8 — um_tlb_sync as the post-R5 generic drainer
+  (`72a35bbe7b80`). Documentation: contract in tlb.c header
+  formalizes "no backend-specific knowledge in mm-arbiter; backends
+  see struct um_memory_region only".
+- Memo 25 R9 — syscall-class table deferred to v2 Phase D
+  (`9dc0d005feb0`). Premise was "handle_syscall is monolithic";
+  post-archive that's no longer true. The class infrastructure
+  lands with its first consumer (vmcall hypercall path) rather
+  than as dead pre-v2 scaffolding.
+- Memo 25 R12 — documentation refresh (this commit). backend-
+  contract.rst rewritten for the post-R2/R5 ops; backends.rst
+  ptrace section archived; ftrace.rst's "UML backend tracepoints"
+  section lives. MAINTAINERS already covers arch/um/ broadly.
 
-**Next:** memo 25 Part 2 weeks 3-4 — refactor 1 (`uml_physmem` to
-PML4[256+], the prerequisite for v2's TDP path) and refactor 2
-(backend ops abstraction cleanup, the keystone). Then R3/R7 in
-parallel (week 5), R4 (the long pole, 3-4 weeks), R5/R6/R8/R9 in
-parallel (week 10), R12 docs refresh (week 11-12). Then memo 26
-Phases A-J.
+**Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
+**Tip of `uml-redesign-plan`:** post-R12.
+
+**Next: R4 + memo 26.** Refactor 4 (per-mm host worker process —
+the long pole; spawner + per-mm worker, separate VA spaces,
+pthreads inside, IPC ring) is the only substrate refactor still
+pending. R6 (signal handling) is blocked on R4 by design. After
+R4 lands, memo 26 Phase A (v2 init.c + per-VM context + vcpu0
+placeholder) starts. R4 + R6 are roughly 4-5 weeks of focused
+work; best handled as a dedicated session.
 
 The Stage A foundation work (per-task vCPU + KVM_SET_SIGNAL_MASK)
 informed the v2 design but does not directly survive: v2 uses a
