@@ -35,14 +35,27 @@ the mechanical restart:
 - v2 stub directory at `arch/um/backend/kvm-v2/`
   (`046375fd50ed`) — Kconfig + Makefile + README + arch_initcall
   banner. Not yet plumbed into dispatch.
+- Memo 25 R10 — `arch/um/backend/kvm-v1-archive/harness.c`
+  deleted (`928bbbfebcb8`). 1526 LoC of D-04b.1b bring-up
+  diagnostic, dead since Step 3 stripped its Kconfig gate.
+- Memo 25 R11 — ptrace backend removed entirely
+  (`06c88545ae2c`, Option B). `arch/um/backend/ptrace/` gone
+  (~600 LoC); skas/process.c and skas/mem.c stripped of their
+  ptrace branches; `wait_stub_done`, `check_ptrace`,
+  `check_sysemu`, `start_ptraced_child`, `stop_ptraced_child`,
+  `ptrace_child` deleted from os-Linux/start_up.c. Net ~1000
+  LoC deletion. `embedded.config` redirected to SECCOMP_ONLY.
+  Hosts genuinely without seccomp-filter pin to v6.16 or earlier.
 
 **Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
-**Tip of `uml-redesign-plan`:** post-stub.
+**Tip of `uml-redesign-plan`:** post-R11.
 
-**Next:** memo 25 Part 2 — 12 ARCH=um core refactors (refactor 1
-`uml_physmem` to PML4[256+] is the prerequisite for v2's TDP path;
-refactor 4 per-mm host worker process is the deepest). Then memo 26
-Phases A-J for the v2 build.
+**Next:** memo 25 Part 2 weeks 3-4 — refactor 1 (`uml_physmem` to
+PML4[256+], the prerequisite for v2's TDP path) and refactor 2
+(backend ops abstraction cleanup, the keystone). Then R3/R7 in
+parallel (week 5), R4 (the long pole, 3-4 weeks), R5/R6/R8/R9 in
+parallel (week 10), R12 docs refresh (week 11-12). Then memo 26
+Phases A-J.
 
 The Stage A foundation work (per-task vCPU + KVM_SET_SIGNAL_MASK)
 informed the v2 design but does not directly survive: v2 uses a
