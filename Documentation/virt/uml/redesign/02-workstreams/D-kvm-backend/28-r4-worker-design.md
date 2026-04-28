@@ -480,26 +480,22 @@ status:
   start_userspace integration deferred to E.3c. Done. Build clean
   at WORKER_PROCESS=n and =y; substrate gate stable PASS=22 FAIL=3
   EXPECTED_FAIL=3.
-- **E.3c** (spawner-side per-worker dispatcher thread) — pending.
-  One kernel thread per worker that receives SYSCALL_REQ over
-  IPC, invokes handle_syscall in UML kernel context, sends
-  SYSCALL_REP. ~100 LoC.
-- **E.3d** (seccomp integration) — pending. seccomp_mm_create
-  takes spawn_worker_for_mm under WORKER_PROCESS=y;
-  seccomp_vcpu_run dispatches via per-mm worker IPC instead of
-  the in-spawner SIGSYS handler. ~100 LoC.
+- E.3c spawner-side per-worker dispatcher kthread
+  (`2f0ecee96b0c`) — DONE. Routes SYSCALL_REQ from worker IPC.
+  Originally specced to call handle_syscall directly; corrected
+  to wait-queue bounce in E.3d.1 (Part C.E lock).
+- E.3d split into three commits per Part L (added 2026-04-28):
+  - E.3d.0 in-worker start_userspace + seccomp_mm_create wiring
+    (`0075c0820da9`) — DONE.
+  - E.3d.1 wait-queue bounce dispatcher rewrite
+    (`f56c208c374b`) — DONE.
+  - E.3d.2 vcpu_run rerouting through worker IPC — IN FLIGHT.
 - **E.4** (per-task pthread inside worker) — pending. ~150 LoC.
 - **E.5** (cross-mm migration via SIGUSR2) — pending. ~200 LoC.
 - **E.6** (defconfig flip) — pending. ~50 LoC.
 
-Total remaining: ~750 LoC across 6 commits. Best executed as a
-focused multi-session effort with the design lock above
-(especially Part I.5 on kernel-state ownership) as the spec.
-
-Next session opens this memo, starts with E.1 (scaffolding), and
-proceeds linearly through E.6. Verification gates after every
-commit. Subagent escalation when stuck on the IPC protocol or the
-SIGUSR2 migration race (per memo 27 H.3 / Level 2).
+Remaining after E.3d.2 lands: ~400 LoC across E.4 / E.5 / E.6.
+After all R4 commits land, memo 26 Phase A (v2 init.c) opens.
 
 When R4 ships, R6 (signal handling) lands as a follow-up cleanup
 (per memo 25 R6, mostly already addressed by R4's
