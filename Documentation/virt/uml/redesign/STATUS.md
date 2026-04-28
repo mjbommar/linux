@@ -88,16 +88,43 @@ the mechanical restart:
   ptrace section archived; ftrace.rst's "UML backend tracepoints"
   section lives. MAINTAINERS already covers arch/um/ broadly.
 
-**Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
-**Tip of `uml-redesign-plan`:** post-R12.
+- Memo 28 — R4 design lock (`654d8581fb56`, `c2cf8a99ec25`).
+  Captures the surface-mapping subagent's findings, locks four
+  design decisions (UNIX socket IPC; SIGCHLD reaping; SIGUSR2
+  cross-mm migration; one-thread-per-worker dispatcher pool),
+  defines the 128-byte IPC wire format, and lays out the 6-commit
+  E.1-E.6 implementation sequence. Part I.5 added 2026-04-28
+  evening locks the kernel-state-ownership question:
+  spawner-owns-everything (gVisor sentry pattern), worker is a
+  thin trap relay with no task_struct / mm_struct of its own.
+- R4 E.1 — scaffolding (`4eb34edab3f7`). New
+  `arch/um/include/shared/worker_api.h` (spawner ↔ worker API)
+  and `arch/um/backend/seccomp/worker_ipc.h` (128-byte wire
+  format). New `CONFIG_UM_WORKER_PROCESS` Kconfig toggle (default
+  n). `struct um_worker *worker` field in mm_context (always
+  present; NULL today). Stub static-inlines for =n; runtime
+  no-op for =y until E.3 spawns workers.
+- R4 E.2 — spawner skeleton (`9547b9c40c31`). New TU
+  `arch/um/kernel/spawner.c` (gated on
+  CONFIG_UM_WORKER_PROCESS). struct um_worker definition (list
+  head, mm back-ref, pid, ipc_sock). spawner_init / shutdown
+  wired into arch_initcall + late_initcall panic notifier;
+  spawn_worker_for_mm / reap_worker_for_mm are stubs that keep
+  mm->context.worker NULL so seccomp's existing stub-child path
+  still runs. Boot smoke (WORKER_PROCESS=y) emits "um: worker
+  model: spawner ready" before the seccomp banner.
 
-**Next: R4 + memo 26.** Refactor 4 (per-mm host worker process —
-the long pole; spawner + per-mm worker, separate VA spaces,
-pthreads inside, IPC ring) is the only substrate refactor still
-pending. R6 (signal handling) is blocked on R4 by design. After
-R4 lands, memo 26 Phase A (v2 init.c + per-VM context + vcpu0
-placeholder) starts. R4 + R6 are roughly 4-5 weeks of focused
-work; best handled as a dedicated session.
+**Tag:** `kvm-v1-archive-20260428`. **Branch:** `kvm-v1-final`.
+**Tip of `uml-redesign-plan`:** post-R4-E.2.
+
+**Next: R4 E.3-E.6 + memo 26.** R4's substantive work is the
+spawner-side IPC dispatcher + worker process trap loop +
+cross-mm migration via SIGUSR2. Memo 28 Part E lays out the four
+remaining commits (E.3 worker spawn/reap; E.4 per-task pthread
+inside worker; E.5 cross-mm migration; E.6 flip the toggle).
+Best executed as a focused multi-day session. After R4 lands,
+memo 26 Phase A (v2 init.c + per-VM context + vcpu0 placeholder)
+starts.
 
 The Stage A foundation work (per-task vCPU + KVM_SET_SIGNAL_MASK)
 informed the v2 design but does not directly survive: v2 uses a
