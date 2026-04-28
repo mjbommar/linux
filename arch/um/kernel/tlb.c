@@ -1,6 +1,37 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+ *
+ * UML mm-arbiter: TLB-sync drain orchestration (memo 25 R8).
+ *
+ * Contract (post memo 25 R3 / R5 / R8):
+ *
+ * - This layer carries NO backend-specific knowledge. The drain
+ *   loop dispatches through um_backend->mm_region_added /
+ *   mm_region_removed for user mms (via the vm_ops table loaded
+ *   once at the top of um_tlb_sync), or kern_map / kern_unmap
+ *   for init_mm.
+ *
+ * - The "deferred sync queue" today is the compact (from, to)
+ *   range stashed in struct mm_context::sync_tlb_range_{from,to}
+ *   and updated by um_tlb_mark_sync() (called from set_pte,
+ *   set_ptes, flush_tlb_*, etc.). At drain time, um_tlb_sync()
+ *   walks the per-mm pgd over [from, to), inspects pte_needsync()
+ *   on each leaf, and emits a struct um_memory_region per
+ *   needsync PTE. Equivalent to "queue of regions" but stored as
+ *   bounds + on-demand pgd walk.
+ *
+ * - Backends see only struct um_memory_region values — never
+ *   struct mm_id (memo 25 R2 cleanup), never per-PTE callbacks
+ *   (memo 25 R3 + Step 3 strip), never v1's shadow_sync_pte
+ *   hook chain (gone since memo 25 Step 3, b19444243944).
+ *
+ * Future (memo 26 Phase B): when v2's per-mapping memslot path
+ * lands, a higher-level mmap-time notification at the vma layer
+ * may augment this drain loop so v2 sees one mm_region_added per
+ * user mmap (vs today's per-page emission). The drain orchestration
+ * itself stays — that path remains the synchronous "force backend
+ * to catch up before the next access" point.
  */
 
 #include <linux/mm.h>
@@ -19,11 +50,11 @@
 #include <kern_util.h>
 
 /*
- * Memo 25 R5: vm_ops carries `struct mm_struct *` (or NULL for the
- * init_mm kernel direct-map path) and the two HOT region ops as
- * function pointers. Each op takes a const struct um_memory_region *
- * — the inline drain helpers populate a stack-local descriptor and
- * pass it down. Backends consume the region inline.
+ * vm_ops: per-drain dispatch table. Carries the mm pointer (or
+ * NULL for init_mm) and the two HOT region ops as function
+ * pointers. Loaded once at um_tlb_sync entry; the inner
+ * update_*_range() helpers populate stack-local
+ * struct um_memory_region descriptors and pass them through.
  */
 struct vm_ops {
 	struct mm_struct *mm;
