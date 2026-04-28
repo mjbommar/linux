@@ -392,6 +392,26 @@ config UM_WORKER_PROCESS
 	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
 	  28-r4-worker-design.md for the design.
 
+config UM_WORKER_SMOKE_TEST_ON_BOOT
+	bool "Run worker IPC smoke test on boot"
+	depends on UM_WORKER_PROCESS
+	default n
+	help
+	  Trigger arch/um/kernel/spawner.c::worker_smoke_test() once
+	  during late_initcall. Spawns a throwaway worker process,
+	  drives the four-message E.3b round-trip
+	  (STUB_ALLOC_REQ → WRITE_REGS → RETURN_VALUE → WRITE_REGS_ACK),
+	  verifies the sentinel echoes back, and reaps. Boot logs
+	  "um: worker smoke: round-trip OK" on success or an error
+	  line on failure.
+
+	  Useful when developing R4 worker-process changes — gives a
+	  one-shot canary that the IPC dispatcher still works without
+	  needing to wire the seccomp backend through the worker first.
+
+	  Adds a few hundred milliseconds to boot. Say N for normal
+	  development; Y when iterating on worker IPC code.
+
 config UM_BACKEND_KVM_V1_ARCHIVE
 	bool
 	depends on BROKEN

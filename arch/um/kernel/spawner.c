@@ -457,3 +457,15 @@ static int __init spawner_register_notifiers(void)
 	return 0;
 }
 late_initcall(spawner_register_notifiers);
+
+#ifdef CONFIG_UM_WORKER_SMOKE_TEST_ON_BOOT
+static int __init spawner_run_smoke_test(void)
+{
+	int rc = worker_smoke_test();
+
+	if (rc < 0)
+		pr_err("um: worker smoke (boot): FAIL rc=%d\n", rc);
+	return 0;
+}
+late_initcall_sync(spawner_run_smoke_test);
+#endif
