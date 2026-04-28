@@ -205,46 +205,6 @@ static void sigusr1_handler(int sig, struct siginfo *unused_si, mcontext_t *mc)
 	uml_pm_wake();
 }
 
-/*
- * Stage A redesign of the KVM backend (per-task vCPU + KVM_SET_SIGNAL_
- * MASK): install a no-op handler for the kick signal so the host
- * kernel doesn't apply the default action (terminate) if the kick
- * arrives outside KVM_RUN.
- *
- * KVM's KVM_SET_SIGNAL_MASK ioctl swaps the mask atomically around
- * KVM_RUN. During KVM_RUN the kick signal is allowed to deliver →
- * KVM_RUN returns -EINTR. Outside KVM_RUN the host's normal sigmask
- * applies; we install a SA_RESTART no-op handler so a stray kick
- * harmlessly returns to the interrupted code.
- *
- * Defined here (USER context) because sigaction lives in libc.
- * Called from kvm_init_kick_signal() below.
- */
-static void kvm_kick_signal_noop(int sig)
-{
-	(void)sig;
-}
-
-void register_kvm_kick_signal(int sig)
-{
-	struct sigaction action;
-
-	memset(&action, 0, sizeof(action));
-	action.sa_handler = kvm_kick_signal_noop;
-	sigemptyset(&action.sa_mask);
-	/*
-	 * No SA_RESTART. KVM_RUN's -EINTR on signal is final (KVM does
-	 * not use ERESTARTSYS), so SA_RESTART would be a no-op for
-	 * us. For non-KVM_RUN syscalls that might catch the kick
-	 * signal, we want them to return -EINTR too — the kick is a
-	 * deliberate "wake up and re-evaluate" signal.
-	 */
-	action.sa_flags = 0;
-	if (sigaction(sig, &action, NULL) < 0)
-		panic("um: kvm: register_kvm_kick_signal(%d) failed errno=%d\n",
-		      sig, errno);
-}
-
 void register_pm_wake_signal(void)
 {
 	set_handler(SIGUSR1);

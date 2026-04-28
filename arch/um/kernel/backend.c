@@ -40,9 +40,10 @@ extern const struct um_backend_ops um_backend_ptrace_ops;
 #ifdef CONFIG_UM_BACKEND_SECCOMP
 extern const struct um_backend_ops um_backend_seccomp_ops;
 #endif
-#ifdef CONFIG_UM_BACKEND_KVM
-extern const struct um_backend_ops um_backend_kvm_ops;
-#endif
+/*
+ * v1 KVM backend archived (memo 25 Part 1). v2 ops table will be
+ * declared here with CONFIG_UM_BACKEND_KVM_V2 once the v2 stub lands.
+ */
 
 /* Set by arch/um/os-Linux/start_up.c::os_early_checks() based on
  * the host probe. init_backend reads it for DYNAMIC selection.
@@ -93,37 +94,16 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 		if (force)
 			panic("um: backend=force=seccomp but seccomp not compiled in or probe failed");
 	}
-#ifdef CONFIG_UM_BACKEND_KVM
 	else if (want == UM_BACKEND_KIND_KVM) {
 		/*
-		 * force=kvm is always honored (user-explicit; panic
-		 * on unavailable is the documented contract for
-		 * force=*). Bare backend=kvm auto-routes into the KVM
-		 * backend when either CONFIG_UM_BACKEND_KVM_HARNESS=y
-		 * (diagnostic harness, D-04b.1b) OR
-		 * CONFIG_UM_BACKEND_KVM_INTEGRATED=y (real
-		 * run_userspace path, memo 08). Non-harness non-
-		 * integrated builds still stub run_userspace and
-		 * will panic on user-mode entry (Finding #3); falling
-		 * through to using_seccomp keeps DYNAMIC users out of
-		 * that trap unless they asked for it.
+		 * v1 KVM backend archived (memo 25 Part 1); v2 not yet
+		 * landed. backend=kvm requests fall through to the
+		 * seccomp/ptrace path. force=kvm panics until v2 lands.
 		 */
-		if (force) {
-			using_seccomp = 0;
-			return &um_backend_kvm_ops;
-		}
-#if defined(CONFIG_UM_BACKEND_KVM_HARNESS) || \
-	defined(CONFIG_UM_BACKEND_KVM_INTEGRATED)
-		if (um_backend_kvm_ops.probe() == 0) {
-			using_seccomp = 0;
-			return &um_backend_kvm_ops;
-		}
-		pr_warn("um: backend=kvm requested but probe failed; falling back\n");
-#else
-		pr_warn("um: backend=kvm requires force=kvm, CONFIG_UM_BACKEND_KVM_HARNESS=y, or CONFIG_UM_BACKEND_KVM_INTEGRATED=y in DYNAMIC builds (non-harness non-integrated run_userspace panics on user-mode entry); falling back\n");
-#endif
+		if (force)
+			panic("um: backend=force=kvm requested but no KVM backend is built (v1 archived; v2 pending — memos 25-26)");
+		pr_warn("um: backend=kvm requested but no KVM backend is built (v1 archived; v2 pending); falling back\n");
 	}
-#endif
 
 	/* auto / fall-through */
 	if (using_seccomp)
@@ -145,15 +125,6 @@ enum um_backend_kind __init init_backend(const struct um_backend_args *args)
 	if (backend_arg_requested == UM_BACKEND_KIND_SECCOMP && backend_arg_force)
 		panic("um: backend=force=seccomp but kernel built PTRACE_ONLY");
 	um_backend = &um_backend_ptrace_ops;
-	using_seccomp = 0;
-#elif defined(CONFIG_UM_BACKEND_KVM_ONLY)
-	if ((backend_arg_requested == UM_BACKEND_KIND_PTRACE ||
-	     backend_arg_requested == UM_BACKEND_KIND_SECCOMP) &&
-	    backend_arg_force)
-		panic("um: backend=force=%s but kernel built KVM_ONLY",
-		      backend_arg_requested == UM_BACKEND_KIND_PTRACE ?
-		      "ptrace" : "seccomp");
-	um_backend = &um_backend_kvm_ops;
 	using_seccomp = 0;
 #elif defined(CONFIG_UM_BACKEND_DYNAMIC)
 	um_backend = pick_dynamic_backend();

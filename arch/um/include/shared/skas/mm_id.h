@@ -19,14 +19,6 @@ struct mm_id {
 	int sock;
 	int syscall_fd_num;
 	int syscall_fd_map[STUB_MAX_FDS];
-
-	/*
-	 * Per-mm shadow PGD for the integrated KVM backend (#275).
-	 * Allocated by kvm_mm_attach, freed by kvm_mm_detach. Other
-	 * backends ignore it; opaque pointer keeps internals out of
-	 * this header.
-	 */
-	void *kvm_shadow;
 };
 
 struct mutex *__get_turnstile(struct mm_id *mm_id);

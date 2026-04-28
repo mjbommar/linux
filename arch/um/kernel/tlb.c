@@ -10,7 +10,6 @@
 #include <asm/backend.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
-#include <asm/kvm_mmu_sync.h>	/* kvm_shadow_clear_range_atomic */
 #include <as-layout.h>
 #include <mem_user.h>
 #include <os.h>
@@ -268,14 +267,6 @@ void flush_tlb_mm(struct mm_struct *mm)
 	struct vm_area_struct *vma;
 	VMA_ITERATOR(vmi, mm, 0);
 
-	for_each_vma(vmi, vma) {
+	for_each_vma(vmi, vma)
 		um_tlb_mark_sync(mm, vma->vm_start, vma->vm_end);
-		/*
-		 * F1: sync-on-flush, not clear. F9: large vmas
-		 * threshold to needs_full_resync inside
-		 * kvm_shadow_sync_range_atomic.
-		 */
-		kvm_shadow_sync_range_atomic(mm, vma->vm_start,
-					     vma->vm_end);
-	}
 }

@@ -286,7 +286,6 @@ extern int um_set_signals(int enable);
 extern int um_set_signals_trace(int enable);
 extern void deliver_alarm(void);
 extern void register_pm_wake_signal(void);
-extern void register_kvm_kick_signal(int sig);
 extern void block_signals_hard(void);
 extern void unblock_signals_hard(void);
 extern void mark_sigio_pending(void);

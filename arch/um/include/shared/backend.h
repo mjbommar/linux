@@ -267,43 +267,11 @@ int seccomp_read_guest_regs(struct task_struct *t, struct pt_regs *regs);
 int seccomp_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
 #endif
 
-#ifdef CONFIG_UM_BACKEND_KVM
 /*
- * KVM backend ops, implemented in arch/um/backend/kvm/. With
- * CONFIG_UM_BACKEND_KVM_INTEGRATED=y all production-path ops are
- * implemented (probe / init / shutdown / mm_attach / mm_detach /
- * mm_map / mm_unmap / run_userspace / context_switch / thread_*),
- * matching the seccomp/ptrace shapes. Stage A redesign landed
- * 2026-04-27 (per-task vCPU + KVM_SET_SIGNAL_MASK; see
- * Documentation/virt/uml/redesign/03-architecture-review-2026-04-27/).
- *
- * Diagnostic ops (read_guest_regs / write_guest_regs) are still
- * -EOPNOTSUPP stubs (BUG.5) — generic UML's ptrace/single-step
- * paths assume they work; dispatching to those today returns
- * -EOPNOTSUPP rather than crashing. Tracked for capability gating
- * or implementation.
+ * v1 KVM backend ops are removed with the v1 archive (memo 25 Part 1).
+ * v2 will declare its own ops here once arch/um/backend/kvm-v2/ is
+ * past the stub stage (memo 26).
  */
-int kvm_probe(void);
-int kvm_init(const struct um_backend_args *args);
-void kvm_shutdown(void);
-void kvm_run_userspace(struct uml_pt_regs *regs);
-int kvm_mm_attach(struct mm_id *id);
-void kvm_mm_detach(struct mm_id *id);
-int kvm_mm_map(struct mm_id *id, unsigned long va, unsigned long len,
-	       int prot, int phys_fd, u64 offset);
-int kvm_mm_unmap(struct mm_id *id, unsigned long va, unsigned long len);
-int kvm_thread_create(struct task_struct *p, void *stack,
-		      void (*handler)(void));
-int kvm_thread_start_idle(void *stack, struct thread_struct *t);
-void kvm_context_switch(struct task_struct *prev, struct task_struct *next);
-int kvm_ipi_send(int cpu, int vector);
-u64 kvm_read_clock_ns(void);
-int kvm_set_timer(int cpu, u64 deadline_ns, enum um_timer_mode mode);
-u64 kvm_read_persistent_clock_ns(void);
-void kvm_init_thread_regs(unsigned long *gp, unsigned long *fp);
-int kvm_read_guest_regs(struct task_struct *t, struct pt_regs *regs);
-int kvm_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
-#endif
 
 /*
  * The dispatch macro. In single-backend-only builds, expands to the
@@ -319,8 +287,6 @@ int kvm_write_guest_regs(struct task_struct *t, const struct pt_regs *regs);
 # define um_backend_dispatch(op, ...) ptrace_##op(__VA_ARGS__)
 #elif defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
 # define um_backend_dispatch(op, ...) seccomp_##op(__VA_ARGS__)
-#elif defined(CONFIG_UM_BACKEND_KVM_ONLY)
-# define um_backend_dispatch(op, ...) kvm_##op(__VA_ARGS__)
 #else
 # define um_backend_dispatch(op, ...) (um_backend->op(__VA_ARGS__))
 #endif

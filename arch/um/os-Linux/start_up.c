@@ -478,10 +478,9 @@ __uml_setup("backend=", uml_backend_config,
 "    runtime probe. Bare names `ptrace'/`seccomp'/`kvm' are preferences\n"
 "    that fall through to whichever backend is actually available.\n"
 "    `force=' makes the choice mandatory and panics if the requested\n"
-"    backend isn't compiled in or fails its probe. `kvm' requires\n"
-"    UM_BACKEND_KVM_INTEGRATED=y for real boot; kernels built without\n"
-"    that Kconfig only have the diagnostic harness path and won't\n"
-"    boot past init.\n"
+"    backend isn't compiled in or fails its probe. `kvm' is currently\n"
+"    archived (v1) / pending (v2 — memos 25-26); requests fall back\n"
+"    to seccomp or ptrace.\n"
 "\n"
 "    Replaces the legacy `seccomp=on/auto/off' param (still accepted\n"
 "    for one release).\n\n"
@@ -539,21 +538,10 @@ void __init os_early_checks(void)
 	check_tmpexec();
 
 	/*
-	 * KVM_ONLY builds (CONFIG_UM_BACKEND_KVM_ONLY=y, with
-	 * PTRACE + SECCOMP both deselected) have nothing to probe
-	 * here — there is no stub-child backend to validate the
-	 * host supports. Short-circuit before the seccomp+ptrace
-	 * probe block so we don't fatal on "seccomp probe failed
-	 * and ptrace backend is not compiled in" in a configuration
-	 * where neither is even relevant. init_backend() (called
-	 * immediately after this function from linux_main()) picks
-	 * um_backend_kvm_ops directly via the KVM_ONLY branch in
-	 * arch/um/kernel/backend.c, leaving using_seccomp = 0.
-	 *
-	 * This short-circuit is the mirror of backend.c's KVM_ONLY
-	 * selection path: both sides of the early-boot pipeline
-	 * need to tolerate "no stub-child backend compiled in" for
-	 * KVM_ONLY images to reach multi-user.
+	 * If neither stub-child backend is compiled in, there's
+	 * nothing to probe. (Pre-archive: KVM_ONLY builds took this
+	 * path because they had no stub-child backend at all. v2's
+	 * eventual KVM_ONLY equivalent will reuse the same guard.)
 	 */
 	if (!IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
 	    !IS_ENABLED(CONFIG_UM_BACKEND_PTRACE))

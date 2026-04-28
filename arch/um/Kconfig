@@ -31,7 +31,10 @@ config UML
 	select HAVE_ARCH_KMSAN_VMALLOC if HAVE_ARCH_KMSAN
 	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ASM_MODVERSIONS
-	select HAVE_EXIT_THREAD if UM_BACKEND_KVM_INTEGRATED
+	# HAVE_EXIT_THREAD was selected by UM_BACKEND_KVM_INTEGRATED for
+	# v1's per-task vCPU teardown (kvm_vcpu_handle freed in
+	# exit_thread). v1 is archived (memo 25 Part 1); v2 will reselect
+	# this when its per-task vCPU lifecycle is implemented.
 	select HAVE_UID16
 	select HAVE_DEBUG_KMEMLEAK
 	select HAVE_DEBUG_BUGVERBOSE
@@ -371,26 +374,17 @@ config UM_BACKEND_SECCOMP
 	  mechanism merged in 6.16 (Benjamin Berg). ~3-4× faster syscall
 	  round-trip than ptrace via SIGSYS + futex.
 
-config UM_BACKEND_KVM
+config UM_BACKEND_KVM_V1_ARCHIVE
 	bool
-	depends on X86_64
+	depends on BROKEN
 	help
-	  Selected by the dispatch mode below. Don't toggle this directly.
-	  Compiles arch/um/backend/kvm/ — the KVM-platform-style backend
-	  (workstream D). Trap mechanism is a userspace-visible VMEXIT
-	  from a SYSCALL trampoline; handler runs host-side. Per-syscall
-	  floor empirically ~1-11 µs depending on silicon (see
-	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-	  measurements.md), 2-20× faster than seccomp. Requires /dev/kvm
-	  on the host.
-
-	  Real run_userspace integration is gated by UM_BACKEND_KVM_INTEGRATED
-	  (default n). With INTEGRATED=y the KVM backend boots a real
-	  Python workload; the cpython-parity gate runs at 18-20/21
-	  single-pass post Stage A redesign (per-task vCPU, see
-	  Documentation/virt/uml/redesign/03-architecture-review-2026-04-27/).
-	  Without INTEGRATED, this Kconfig compiles only the !INTEGRATED
-	  harness scaffold + run_userspace panic stub.
+	  Archived v1 KVM backend at arch/um/backend/kvm-v1-archive/.
+	  Reaches mean 19.4/21 on the cpython-parity gate post-A.4i but
+	  has known structural issues (memo 22 Bug B, memo 24 clean-slate
+	  items). Not built. Kept in-tree as a reference for v2
+	  implementers; depends on BROKEN so the build system never
+	  selects it. The v2 reimplementation lives at
+	  arch/um/backend/kvm-v2/ (memo 26).
 
 choice
 	prompt "UML backend dispatch mode"
@@ -428,28 +422,18 @@ config UM_BACKEND_SECCOMP_ONLY
 	  syscall path than ptrace via SIGSYS. Requires the host to
 	  support seccomp filter installation.
 
-config UM_BACKEND_KVM_ONLY
-	bool "KVM backend only (single-backend inline)"
-	depends on X86_64
-	select UM_BACKEND_KVM
-	help
-	  um_backend_dispatch() expands to direct kvm_<op>() calls.
-	  Smallest binary, zero indirect-dispatch cost. Per-syscall
-	  floor ~1-11 µs depending on silicon (see
-	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-	  measurements.md). Requires /dev/kvm on the host. Scaffold
-	  only today.
-
 config UM_BACKEND_DYNAMIC
-	bool "Dynamic backend selection (ptrace + seccomp [+ kvm])"
+	bool "Dynamic backend selection (ptrace + seccomp)"
 	depends on HAVE_ARCH_SECCOMP_FILTER
 	select UM_BACKEND_PTRACE
 	select UM_BACKEND_SECCOMP
-	select UM_BACKEND_KVM if X86_64
 	help
-	  ptrace + seccomp backends compiled in (+ KVM on X86_64);
-	  init_backend() picks one at boot based on host capability +
-	  the `backend=` kernel command line. Default for distros.
+	  ptrace + seccomp backends compiled in; init_backend() picks
+	  one at boot based on host capability + the `backend=` kernel
+	  command line. Default for distros.
+
+	  KVM backend selection lands with v2 (memo 26); v1 is archived
+	  (UM_BACKEND_KVM_V1_ARCHIVE, depends on BROKEN).
 
 endchoice
 
@@ -465,98 +449,14 @@ config UM_BACKEND_CONTRACT_TEST
 
 	  Say N for production builds; Y or M to validate a backend.
 
-config UM_BACKEND_KVM_HARNESS
-	bool "KVM backend long-mode harness (diagnostic, D-04b.1b)"
-	depends on UM_BACKEND_KVM
-	default n
-	help
-	  Run an in-init diagnostic that registers a hand-crafted 2 MiB
-	  KVM memslot with a minimal GDT, identity page tables, and an
-	  `out %al,$0xf4 ; hlt` code sled, then invokes KVM_RUN once
-	  and panics with the observed kvm_run->exit_reason. Ports the
-	  validated D-workstream spike 04 bring-up into the backend's
-	  binary form so we can verify the SREGS / CR0 / CR4 / EFER
-	  setup code path works BEFORE the full UML-CR3 integration
-	  lands with D-04b.2.
-
-	  Enabling this replaces normal UML boot behaviour with a one-
-	  shot harness; do NOT enable it outside bring-up work. Say N.
-
-	  See Documentation/virt/uml/redesign/02-workstreams/
-	  D-kvm-backend/04b-long-mode-sregs.md for the design note.
-
-config UM_BACKEND_KVM_INTEGRATED
-	bool "KVM backend integrated run_userspace (memo 08, task #162)"
-	depends on UM_BACKEND_KVM
-	default n
-	help
-	  Gate for the real kvm_run_userspace integration path
-	  described in Documentation/virt/uml/redesign/02-workstreams/
-	  D-kvm-backend/08-real-run-userspace.md (decisions-log D65).
-	  Sub-commits #1-#7 (memo 08) all landed during 2026-04. When
-	  n, run_userspace still uses the D-04a panic scaffold;
-	  harness remains independently selectable via
-	  UM_BACKEND_KVM_HARNESS.
-
-	  Enabled today, this compiles in: kvm_enter_guest +
-	  sregs/regs marshalling (sub-commit #1), bootstrap page +
-	  LSTAR trampoline + IDT/TSS + #PF handler + first-entry
-	  SYSRET gadget (sub-commits #2 + #5), shadow page-table
-	  allocator + lazy fault-in (memo 09 + sub-commit #5b),
-	  per-trap KVM_RUN dispatcher (sub-commit #6, audit A1).
-	  Real-workload boot validated on the s0-s7 fleet (D70 = GO,
-	  G8 measurements 2026-04-24). Audit rounds 4-5-6 closed.
-	  Say Y for /dev/kvm-equipped hosts; the seccomp/ptrace
-	  fallback path remains available under DYNAMIC.
-
-config UM_BACKEND_KVM_GADGET
-	bool "KVM backend systrap gadget (memo 11 G2-G8)"
-	depends on UM_BACKEND_KVM_INTEGRATED
-	default n
-	help
-	  Replace the LSTAR trampoline's 5-byte `out %al, $0xf4;
-	  sysretq` wire form with a real systrap gadget body that
-	  services 10 hot-path syscalls in-guest and returns
-	  without a VMEXIT. Everything else falls through to the
-	  same `out %al, $0xf4` VMEXIT the default build uses.
-
-	  Reads per-task state from a host-maintained shared
-	  page via %gs:<offset> after a SWAPGS bracket (memo 11
-	  G3 state channel). Returns real kernel values, not
-	  sentinels.
-
-	  Staging (all landed 2026-04):
-	    G2 (bench, 1 syscall + sentinel) — retired
-	    G3 (per-vCPU state channel)      — landed
-	    G4 (7 pid-family handlers)       — landed
-	    G5 (clock_gettime + vvar)        — landed
-	    G6 (sched_yield + LSTAR refactor) — landed
-	    G6-followon (time + getcpu + F4 + F7/2) — landed
-	    G7 (class E + dual-binary perf gate) — landed
-	    G8 (s0-s7 fleet bench, D70 = GO) — landed
-
-	  Performance: < 100 ns per gadget-handled syscall on
-	  modern silicon, validated across 8 fleet hosts (Intel
-	  Skylake / Skylake-SP / Kaby Lake / Alder Lake P+E,
-	  AMD Zen 4) with 2.9-4.3× margin (23-34 ns measured).
-
-	  Behaviour: __NR_getpid, __NR_gettid, __NR_getppid,
-	  __NR_getuid, __NR_geteuid, __NR_getgid, __NR_getegid,
-	  __NR_clock_gettime(CLOCK_MONOTONIC), __NR_time, and
-	  __NR_getcpu return real values via the state and vvar
-	  pages. Any syscall outside the gadget set, any clockid
-	  != CLOCK_MONOTONIC for clock_gettime, or any seqlock
-	  retry-budget exhaustion takes the usual VMEXIT path with
-	  identical semantics to the non-gadget build (audit F7/1:
-	  bad user pointers return -EFAULT per POSIX, not SIGSEGV).
-	  __NR_sched_yield was demoted from this set in audit
-	  round-6 G5 (D94) — yielding from the gadget would skip
-	  UML's scheduler instead of cooperating with it, so it
-	  now takes the VMEXIT + handle_syscall + sys_sched_yield
-	  path.
-
-	  Say Y for performance-conscious workloads; N for
-	  reviewability of the non-gadget integration.
+#
+# UM_BACKEND_KVM_HARNESS / UM_BACKEND_KVM_INTEGRATED / UM_BACKEND_KVM_GADGET
+# all gated v1's KVM backend behaviour and are removed with the v1 archive
+# (memo 25 Part 1). v2 lives under arch/um/backend/kvm-v2/ (memo 26) and
+# will introduce a single CONFIG_UM_BACKEND_KVM_V2; the v1 sub-knobs do
+# not survive into v2 because v2 has no harness/INTEGRATED split (one
+# real backend) and no gadget (vmcall-only syscall path).
+#
 
 #
 # Fuzzer-oriented hooks (workstream C-09).
