@@ -11,6 +11,7 @@
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
 #include <asm/trace/um_backend.h>
+#include <asm/um_memory.h>
 #include <as-layout.h>
 #include <mem_user.h>
 #include <os.h>
@@ -18,36 +19,36 @@
 #include <kern_util.h>
 
 /*
- * Memo 25 R2: vm_ops carries `struct mm_struct *` (or NULL for the
- * init_mm kernel direct-map path) so the backend ops it holds match
- * the new um_backend_ops contract. The function-pointer types match
- * `mm_region_added` / `mm_region_removed` exactly, so update_*_range
- * helpers can store the two HOT ops verbatim.
+ * Memo 25 R5: vm_ops carries `struct mm_struct *` (or NULL for the
+ * init_mm kernel direct-map path) and the two HOT region ops as
+ * function pointers. Each op takes a const struct um_memory_region *
+ * — the inline drain helpers populate a stack-local descriptor and
+ * pass it down. Backends consume the region inline.
  */
 struct vm_ops {
 	struct mm_struct *mm;
 
 	int (*mmap)(struct mm_struct *mm,
-		    unsigned long virt, unsigned long len, int prot,
-		    int phys_fd, u64 offset);
+		    const struct um_memory_region *region);
 	int (*unmap)(struct mm_struct *mm,
-		     unsigned long virt, unsigned long len);
+		     const struct um_memory_region *region);
 };
 
 static int kern_map(struct mm_struct *mm,
-		    unsigned long virt, unsigned long len, int prot,
-		    int phys_fd, u64 offset)
+		    const struct um_memory_region *region)
 {
 	/* TODO: Why is executable needed to be always set in the kernel? */
-	return os_map_memory((void *)virt, phys_fd, offset, len,
-			     prot & UM_PROT_READ, prot & UM_PROT_WRITE,
+	return os_map_memory((void *)region->va, region->phys_fd,
+			     region->offset, region->len,
+			     region->prot & UM_PROT_READ,
+			     region->prot & UM_PROT_WRITE,
 			     1);
 }
 
 static int kern_unmap(struct mm_struct *mm,
-		      unsigned long virt, unsigned long len)
+		      const struct um_memory_region *region)
 {
-	return os_unmap_memory((void *)virt, len);
+	return os_unmap_memory((void *)region->va, region->len);
 }
 
 void report_enomem(void)
@@ -74,6 +75,7 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 			unsigned long phys = pte_val(*pte) & PAGE_MASK;
 			int fd = phys_mapping(phys, &offset);
 			int r, w, x, prot;
+			struct um_memory_region region;
 
 			r = pte_read(*pte);
 			w = pte_write(*pte);
@@ -88,15 +90,26 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 			       (w ? UM_PROT_WRITE : 0) |
 			       (x ? UM_PROT_EXEC : 0);
 
+			region = (struct um_memory_region){
+				.va = addr,
+				.len = PAGE_SIZE,
+				.prot = prot,
+				.phys_fd = fd,
+				.offset = offset,
+			};
 			trace_um_backend_mm_region_added(ops->mm, addr,
 							 PAGE_SIZE, prot,
 							 fd, offset);
-			ret = ops->mmap(ops->mm, addr, PAGE_SIZE,
-					prot, fd, offset);
+			ret = ops->mmap(ops->mm, &region);
 		} else {
+			struct um_memory_region region = {
+				.va = addr,
+				.len = PAGE_SIZE,
+				.phys_fd = -1,
+			};
 			trace_um_backend_mm_region_removed(ops->mm, addr,
 							   PAGE_SIZE);
-			ret = ops->unmap(ops->mm, addr, PAGE_SIZE);
+			ret = ops->unmap(ops->mm, &region);
 		}
 
 		/*
@@ -125,8 +138,12 @@ static inline int update_pmd_range(pud_t *pud, unsigned long addr,
 		next = pmd_addr_end(addr, end);
 		if (!pmd_present(*pmd)) {
 			if (pmd_needsync(*pmd)) {
-				ret = ops->unmap(ops->mm, addr,
-						 next - addr);
+				struct um_memory_region region = {
+					.va = addr,
+					.len = next - addr,
+					.phys_fd = -1,
+				};
+				ret = ops->unmap(ops->mm, &region);
 				if (!ret)
 					pmd_mkuptodate(*pmd);
 			}
@@ -149,8 +166,12 @@ static inline int update_pud_range(p4d_t *p4d, unsigned long addr,
 		next = pud_addr_end(addr, end);
 		if (!pud_present(*pud)) {
 			if (pud_needsync(*pud)) {
-				ret = ops->unmap(ops->mm, addr,
-						 next - addr);
+				struct um_memory_region region = {
+					.va = addr,
+					.len = next - addr,
+					.phys_fd = -1,
+				};
+				ret = ops->unmap(ops->mm, &region);
 				if (!ret)
 					pud_mkuptodate(*pud);
 			}
@@ -173,8 +194,12 @@ static inline int update_p4d_range(pgd_t *pgd, unsigned long addr,
 		next = p4d_addr_end(addr, end);
 		if (!p4d_present(*p4d)) {
 			if (p4d_needsync(*p4d)) {
-				ret = ops->unmap(ops->mm, addr,
-						 next - addr);
+				struct um_memory_region region = {
+					.va = addr,
+					.len = next - addr,
+					.phys_fd = -1,
+				};
+				ret = ops->unmap(ops->mm, &region);
 				if (!ret)
 					p4d_mkuptodate(*p4d);
 			}
@@ -220,8 +245,12 @@ int um_tlb_sync(struct mm_struct *mm)
 		next = pgd_addr_end(addr, mm->context.sync_tlb_range_to);
 		if (!pgd_present(*pgd)) {
 			if (pgd_needsync(*pgd)) {
-				ret = ops.unmap(ops.mm, addr,
-						next - addr);
+				struct um_memory_region region = {
+					.va = addr,
+					.len = next - addr,
+					.phys_fd = -1,
+				};
+				ret = ops.unmap(ops.mm, &region);
 				/*
 				 * #274 issue #12: gate pgd_mkuptodate on
 				 * success, mirroring the per-PTE/PMD/PUD/P4D

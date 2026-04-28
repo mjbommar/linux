@@ -18,6 +18,7 @@
 #include <linux/mm_types.h>
 #include <linux/types.h>
 #include <asm/mmu.h>
+#include <asm/um_memory.h>
 #include <os.h>
 
 #include "seccomp_backend.h"
@@ -39,19 +40,19 @@ void seccomp_mm_destroy(struct mm_struct *mm)
 		os_close_file(id->sock);
 }
 
-int seccomp_mm_region_added(struct mm_struct *mm, unsigned long virt,
-			    unsigned long len, int prot, int phys_fd,
-			    unsigned long long offset)
+int seccomp_mm_region_added(struct mm_struct *mm,
+			    const struct um_memory_region *region)
 {
 	struct mm_id *id = &mm->context.id;
 
-	return um_stub_mm_map(id, virt, len, prot, phys_fd, offset);
+	return um_stub_mm_map(id, region->va, region->len, region->prot,
+			      region->phys_fd, region->offset);
 }
 
-int seccomp_mm_region_removed(struct mm_struct *mm, unsigned long addr,
-			      unsigned long len)
+int seccomp_mm_region_removed(struct mm_struct *mm,
+			      const struct um_memory_region *region)
 {
 	struct mm_id *id = &mm->context.id;
 
-	return um_stub_mm_unmap(id, addr, len);
+	return um_stub_mm_unmap(id, region->va, region->len);
 }

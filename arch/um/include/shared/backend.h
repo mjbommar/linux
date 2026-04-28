@@ -40,6 +40,7 @@ struct thread_struct;
 struct pt_regs;
 struct mm_struct;
 struct mm_id;
+struct um_memory_region;
 
 /*
  * Bumped on op signature changes (breaking). Adding new ops at the
@@ -180,24 +181,30 @@ struct um_backend_ops {
 	 *   seccomp:  fork stub-child host process, key on mm->context.id
 	 *   kvm-v2:   fork per-mm worker process + per-mm KVM context
 	 *
+	 * mm_region_added / mm_region_removed / mm_region_protected take
+	 * a `const struct um_memory_region *` (memo 25 R5). The struct
+	 * is owned by the mm-arbiter and short-lived (single drain pass);
+	 * backends consume it inline and may stash per-region state in
+	 * `region->backend_data` (set by mm_region_added; cleared by
+	 * mm_region_removed). Today the seccomp backend ignores
+	 * backend_data; v2 will use it as the memslot ID.
+	 *
 	 * mm_region_protected is new in memo 25 R2; it lets the backend
 	 * receive notifications when an existing region's protection
 	 * changes (today's mprotect drives mm_region_removed +
 	 * mm_region_added through um_tlb_sync; v2's memslot-flag-update
 	 * path will use mm_region_protected directly). Backends may
-	 * leave it NULL; mm-arbiter falls back to the
-	 * remove+add sequence.
+	 * leave it NULL; mm-arbiter falls back to the remove+add
+	 * sequence.
 	 */
 	int  (*mm_create)(struct mm_struct *mm);
 	void (*mm_destroy)(struct mm_struct *mm);
 	int  (*mm_region_added)(struct mm_struct *mm,		/* HOT */
-				unsigned long va, unsigned long len,
-				int prot, int phys_fd, u64 offset);
+				const struct um_memory_region *region);
 	int  (*mm_region_removed)(struct mm_struct *mm,		/* HOT */
-				  unsigned long va, unsigned long len);
+				  const struct um_memory_region *region);
 	int  (*mm_region_protected)(struct mm_struct *mm,
-				    unsigned long va, unsigned long len,
-				    int new_prot);
+				    const struct um_memory_region *region);
 
 	/* Scheduling (4) */
 	int  (*thread_create)(struct task_struct *p,
@@ -248,10 +255,9 @@ void seccomp_vcpu_run(struct uml_pt_regs *regs);
 int seccomp_mm_create(struct mm_struct *mm);
 void seccomp_mm_destroy(struct mm_struct *mm);
 int seccomp_mm_region_added(struct mm_struct *mm,
-			    unsigned long va, unsigned long len,
-			    int prot, int phys_fd, u64 offset);
+			    const struct um_memory_region *region);
 int seccomp_mm_region_removed(struct mm_struct *mm,
-			      unsigned long va, unsigned long len);
+			      const struct um_memory_region *region);
 int seccomp_thread_create(struct task_struct *p, void *stack,
 			  void (*handler)(void));
 int seccomp_thread_start_idle(void *stack, struct thread_struct *t);

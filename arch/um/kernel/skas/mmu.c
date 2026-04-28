@@ -14,6 +14,7 @@
 #include <asm/sections.h>
 #include <asm/mmu_context.h>
 #include <asm/trace/um_backend.h>
+#include <asm/um_memory.h>
 #include <as-layout.h>
 #include <os.h>
 #include <skas.h>
@@ -78,7 +79,14 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	trace_um_backend_mm_create(mm);
 
 	/* Ensure the new MM is clean and nothing unwanted is mapped */
-	um_backend_dispatch(mm_region_removed, mm, 0, STUB_START);
+	{
+		struct um_memory_region region = {
+			.va = 0,
+			.len = STUB_START,
+			.phys_fd = -1,
+		};
+		um_backend_dispatch(mm_region_removed, mm, &region);
+	}
 
 	return 0;
 
