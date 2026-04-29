@@ -1140,26 +1140,25 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		if (rc == -EINTR) {
 			/*
 			 * D.3 EINTR fall-through: SIGALRM (or other unmasked
-			 * host signals) interrupted KVM_RUN. The guest didn't
-			 * fault yet — the dispatcher caller (UML scheduler)
-			 * will re-enter on the next schedule slice. Phase F's
-			 * full signal handling adds restart-via-RAX-rewrite;
-			 * D.3's minimum is "don't panic." Without this guard
-			 * the gate would fail the moment the SIGALRM tick
-			 * fires under D.5's flipped .vcpu_run.
+			 * host signals) interrupted KVM_RUN. KVM sets
+			 * exit_reason = KVM_EXIT_INTR (10) and the sync_regs
+			 * view IS coherent on this path (KVM commits guest
+			 * state on signal exits per
+			 * arch/x86/kvm/x86.c::kvm_arch_vcpu_ioctl_run; it's
+			 * only mid-update on catastrophic FAIL_ENTRY paths).
+			 * v2 must marshal regs->gp[] BACK from sync_regs so
+			 * the next dispatch resumes at the post-EINTR RIP, not
+			 * the pre-EINTR one — without this the guest can never
+			 * advance because every re-entry re-writes the original
+			 * RIP via marshal_to_kvm_regs (D.5 diagnostic
+			 * confirmed RIP stuck at 0x40023340 forever).
 			 *
 			 * Reference: v1's EINTR path at
-			 * kvm-v1-archive/thread.c:5121-5127 (the equivalent
-			 * "rc == -EINTR → rc = 0; fall through to next
-			 * iteration" branch in v1's per-task vcpu_run).
-			 *
-			 * Skip the post-KVM_RUN GPR marshal-back below — on
-			 * EINTR kvm_run->s.regs.regs may be mid-update (KVM
-			 * doesn't guarantee the sync_regs view is coherent on
-			 * a signal-aborted entry). regs->gp[] retains the
-			 * pre-KVM_RUN state, which is the right "where is
-			 * user" snapshot for the next entry to re-marshal in.
+			 * kvm-v1-archive/thread.c:3939 + 5121-5127 — v1
+			 * handles EINTR identically to a normal exit for the
+			 * marshal-back; only the dispatch switch differs.
 			 */
+			kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
 			trace_um_backend_kvm_v2_vcpu_eintr(cpu);
 			preempt_enable();
 			return;

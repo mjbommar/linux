@@ -67,23 +67,45 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.init			= kvm_v2_init,
 	.shutdown		= kvm_v2_shutdown,
 	/*
-	 * D.5: flip the pointer. C.2-C.4 built kvm_v2_vcpu_run on the
-	 * side; D.0-D.4b populated CPUID, MSR_LSTAR/STAR/FMASK, EFER.SCE,
-	 * the trampoline page, the physmem memslot, the PML4[448]
-	 * kernel-half PT chain, and full long-mode SREGS (D.5-fix).
-	 * With this flip, every UML guest task's SYSCALL goes through
-	 * KVM_RUN → KVM_EXIT_IO → handle_syscall.
+	 * D.5 DEFERRED to Phase E activation: the .vcpu_run flip surfaced
+	 * a Phase E dependency that wasn't anticipated in memo 26's §D.5
+	 * spec.
 	 *
-	 * The capability flags above stay TRUE because the stub child is
-	 * still spawned by seccomp_mm_create / mm_attach (v2 only owns
-	 * .vcpu_run + memslot ops + context_switch right now). Even
-	 * under v2, the stub child still installs its seccomp filter;
-	 * its SIGSYS handler just never fires because no syscall traps
-	 * to it any more — they all go through KVM. A future phase that
-	 * REPLACES seccomp_mm_create / mm_attach / thread_create with
-	 * v2-native equivalents will flip those flags to false.
+	 * D.5-fix-1 (124cfefa342f) — long-mode SREGS install at vcpu_create
+	 * fixed KVM_RUN -EINVAL (kvm_is_valid_sregs rejected EFER.LMA=1 +
+	 * CR0.PG=0).
+	 *
+	 * D.5-fix-2 (5297fe2bd165) — KVM_SET_SIGNAL_MASK + unblock_signals
+	 * fixed the SIGALRM EINTR loop (every dispatch returned -EINTR
+	 * because signals were unmasked at thread level + UML's deferred-
+	 * signal queue never drained).
+	 *
+	 * Marshal-from-kvm_run on EINTR (this commit) keeps regs->gp[]
+	 * coherent across signal-aborted dispatches (without it RIP was
+	 * pinned to pre-RUN value forever).
+	 *
+	 * BUT: with all of the above, the guest still cannot advance a
+	 * single instruction. Diagnostic trace showed RIP stuck at the
+	 * init binary entry point under KVM_EXIT_INTR (10) across every
+	 * dispatch. Blocking ALL signals confirmed the guest is in a
+	 * fault loop — most likely #PF on first instruction fetch (or
+	 * #GP on segment access) — and KVM has no IDT to deliver the
+	 * fault to. KVM either spins re-injecting (signals masked) or
+	 * exits via SIGALRM-EINTR (signals unmasked) before a single
+	 * instruction retires.
+	 *
+	 * Phase E (memo 26 §E) installs the per-VM IDT + per-vCPU IST
+	 * stacks + #PF/#GP/#UD/#DE handlers. Until E.1+E.2+E.3 land,
+	 * .vcpu_run MUST stay routed to seccomp — flipping it makes
+	 * the system unbootable.
+	 *
+	 * The Phase D infrastructure is all in place: D.0-D.4b +
+	 * D.5-fix-1+2 give Phase E what it needs to land. Phase E ends
+	 * with this line flipping to kvm_v2_vcpu_run as the actual
+	 * activation moment, and the cpython gate becoming the real
+	 * test (memo 26 §D.5's headline gate moves to E's exit criteria).
 	 */
-	.vcpu_run		= kvm_v2_vcpu_run,	/* HOT — D.5 */
+	.vcpu_run		= seccomp_vcpu_run,	/* HOT — Phase E activates */
 
 	/* Memory (5) — A.2 + Phase B */
 	.mm_create		= seccomp_mm_create,
