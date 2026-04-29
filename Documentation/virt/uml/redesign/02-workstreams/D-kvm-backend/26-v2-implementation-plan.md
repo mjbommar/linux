@@ -1016,18 +1016,44 @@ fork-and-dispatch path:
 | glibc fork+wait (parent printf)   | PASS     | wait returns child status correctly |
 | glibc fork+wait (child printf %d) | RESIDUAL | child's *first* printf emits `%d` literally instead of substituting; subsequent calls work |
 
-**Residual** (followup task #90): under v2, fork's child has its
-*first* glibc printf-family call output format specifiers
-literally rather than substituting the value. Stack canary at
-`fs:0x28` is verified identical between parent and child, so
-FS_BASE inheritance is correct. Forcing arch-reset FPU on child
-first-run (bypassing `kvm_v2_fpu_capture_for_fork`) does NOT fix
-it, so FPU-state-inheritance is not the cause. Same test program
-under seccomp backend works fine — v2-specific. Background
-subagent investigating; remaining hypothesis space includes
-GOT/PLT lazy-resolution divergence, glibc atfork-handler state,
-CPUID-curated IFUNC dispatch, and stack alignment at child's
-first user-mode entry.
+**Residual resolved at `0e05de21dba0`**: the bug was in
+`kvm_v2_fpu_install_on_first_run` (vcpu.c:1600). Despite its name,
+the function is called on EVERY dispatch from `kvm_v2_vcpu_run`.
+Its else-branch (when fpu_valid=false) was unconditionally
+KVM_SET_FPU'ing architectural-reset values (zero XMM, fcw=0x037f,
+mxcsr=0x1f80) on every re-entry, destroying the in-flight task's
+XMM/x87 state any time KVM_RUN exits and re-enters mid-user-
+instruction (e.g. mid-COW #PF on a stack/glibc page during
+vfprintf's MOVAPS XMM save). Per System V x86_64 ABI §3.5.7
+variadic functions save XMM0..XMM7 to a stack-allocated SSE save
+area in the prologue via MOVAPS — if a #PF fired during that
+save (or any later XMM-touching op), the post-fault re-entry's
+else-branch zeroed XMM, vfprintf's varargs spec-decoder picked up
+zeros, and the format-substitution fast-path emitted format chars
+literally. Fix: turn the else-branch into a no-op. Per-vCPU FPU
+is correctly owned by KVM between explicit save/restore points
+(`kvm_v2_fpu_capture_for_switch_out` + `kvm_v2_fpu_capture_for_
+fork`); re-entry of the same task on the same vCPU should leave
+KVM's per-vCPU FPU untouched. v1 archive's
+`kvm_fpu_install_on_first_run` at thread.c:240-339 had the same
+contract.
+
+**Verified post-fix workload progression**:
+
+| Workload                              | Status | Notes                              |
+|---|---|---|
+| `init=/bin/true`                      | PASS   | exit_group(0)                      |
+| `init=/bin/echo`                      | PASS   |                                    |
+| `init=/bin/sh` (builtins)             | PASS   |                                    |
+| Static glibc no-fork                  | PASS   |                                    |
+| Pure-syscall fork+wait+exit           | PASS   |                                    |
+| glibc fork (no wait)                  | PASS   |                                    |
+| glibc fork+wait                       | PASS   | `CHILD pid=37` substitutes correctly |
+| glibc fork+exec (`execl /bin/echo`)   | PASS   |                                    |
+| Substrate class-a-env reproducers     | PARTIAL | 4 PASS + 2 FAIL under v2 — matches seccomp's failure pattern (tty_isatty/termios_get fail in both backends). Driver-side teardown after the run still has issues; substrate gate's full harness reports 0/0/0 because the outer init shell exits with status 127/255 mid-script. Tracking. |
+
+**Substrate gate** (seccomp baseline) stays green throughout
+v2 development: PASS=25/FAIL=3/EXPECTED_FAIL=3.
 
 ### Lesson for future memo work
 
