@@ -73,7 +73,21 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.mm_destroy		= seccomp_mm_destroy,
 	.mm_region_added	= kvm_v2_mm_region_added,	/* HOT */
 	.mm_region_removed	= kvm_v2_mm_region_removed,	/* HOT */
-	.mm_region_protected	= NULL,	/* mm-arbiter falls back to remove+add */
+	.mm_region_protected	= NULL,	/*
+						 * memo 26 §B.4: mm-arbiter falls
+						 * back to remove+add when this
+						 * is NULL. Under B.2+B.3 the
+						 * fallback already issues
+						 * KVM_SET_USER_MEMORY_REGION
+						 * delete then add (with new
+						 * flags) — exactly what §B.4
+						 * specs. A direct
+						 * mm_region_protected op would
+						 * collapse it to a single
+						 * KVM_SET_USER_MEMORY_REGION
+						 * with new flags but is a
+						 * Phase H optimisation.
+						 */
 
 	/* Scheduling (4) — Phase C */
 	.thread_create		= seccomp_thread_create,

@@ -158,7 +158,7 @@ the natural cross-mm isolation v1's shadow-PT model lacked.
 - Free the slot id, remove from list.
 - KVM's mmu_notifier auto-invalidates EPT.
 
-### B.4 — Backend op `mm_region_protected` → memslot flag update (1 day)
+### B.4 — Backend op `mm_region_protected` → memslot flag update (DONE — no code)
 
 - KVM memslot flags include `KVM_MEM_READONLY`. For prot transitions
   involving R/W toggle, delete + re-add with new flags.
