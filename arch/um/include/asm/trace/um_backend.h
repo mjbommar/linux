@@ -287,6 +287,32 @@ TRACE_EVENT(um_backend_kvm_v2_fpu_install,
 	TP_printk("cpu=%d was_valid=%d", __entry->cpu, __entry->was_valid)
 );
 
+/*
+ * kvm_v2_cpuid_install — fired when the lazy first-run CPUID install
+ * (memo 26 §D.0a) lands the curated KVM_SET_CPUID2 against a pool
+ * member. A.3's eager install ran at init_backend before the buddy
+ * allocator was up and silently degraded to KVM-default CPUID; D.0a
+ * defers the install to first KVM_RUN. Until D.5 flips .vcpu_run
+ * this event has no caller and stays silent.
+ *
+ * vcpu_fd identifies the pool member; nent is the number of
+ * kvm_cpuid_entry2 entries the curated mask was applied to (matches
+ * what KVM returned from KVM_GET_SUPPORTED_CPUID).
+ */
+TRACE_EVENT(um_backend_kvm_v2_cpuid_install,
+	TP_PROTO(int vcpu_fd, u32 nent),
+	TP_ARGS(vcpu_fd, nent),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+		__field(u32, nent)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd = vcpu_fd;
+		__entry->nent    = nent;
+	),
+	TP_printk("vcpu_fd=%d nent=%u", __entry->vcpu_fd, __entry->nent)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

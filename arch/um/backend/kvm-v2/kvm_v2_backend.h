@@ -114,12 +114,22 @@ struct kvm_v2_vm *kvm_v2_vm_get(void);
  * machinery is C.2 territory — at C.1 each vCPU is just a fd + the
  * mmap'd kvm_run; nothing runs them yet (ops.c still delegates
  * .vcpu_run to the seccomp backend).
+ *
+ * `cpuid_primed` (memo 26 §D.0a): sticky one-shot guard for the lazy
+ * KVM_SET_CPUID2 install. The eager install at vcpu_create_one ran
+ * during init_backend() before the buddy allocator is up — kzalloc
+ * returned NULL and the curated mask never landed (boot log:
+ * "cpuid kzalloc(10248) failed"). D.0a moves the install to first
+ * KVM_RUN and uses this flag as the per-vCPU "already installed"
+ * predicate. v1 archive deferred CPUID identically (kvm_ensure_
+ * cpuid_done at kvm-v1-archive/lifecycle.c:411-547).
  */
 struct kvm_v2_vcpu {
 	int   vcpu_fd;
 	void *kvm_run;
 	u32   kvm_run_size;
 	int   cpu;
+	bool  cpuid_primed;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);

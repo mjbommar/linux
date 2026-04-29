@@ -174,28 +174,37 @@ static void kvm_v2_curate_cpuid(struct kvm_cpuid2 *cpuid)
 }
 
 /*
- * Best-effort CPUID install. Failure is non-fatal because:
+ * Lazy first-run CPUID install (memo 26 §D.0a).
  *
- *   (a) kvm_v2_init runs from init_backend() during linux_main(), before
- *       mm_init() brings up the buddy allocator — kzalloc with GFP_KERNEL
- *       returns NULL at this point. context.c's file-scope comment + v1
- *       archive's kvm_ensure_cpuid_done() document the same constraint;
- *       v1 deferred CPUID install entirely to first KVM_RUN. v2's A.3
- *       wires the call site here per memo 26 §A.3 ("kzalloc + GET_SUPPORTED
- *       + mask + SET_CPUID2") but treats kzalloc failure as the same
- *       non-fatal pr_warn the v1 archive used (pr_warn_once "using
- *       KVM-default CPUID"). Phase C/D will revisit once the per-CPU
- *       pool's lazy-init pattern lets us defer CPUID to the first
- *       KVM_RUN as v1 did.
+ * History: A.3 wired this at vcpu_create time but kzalloc failed
+ * (buddy allocator not yet up at init_backend time) — boot log
+ * "cpuid kzalloc(%zu) failed; using KVM-default CPUID". The eager
+ * call was best-effort: every error path returned 0 so vcpu_create
+ * succeeded with KVM-default CPUID, leaving the curated mask
+ * un-applied. Phase C never wired SET_CPUID2 elsewhere, so every
+ * vCPU ran (would run, once D.5 flips .vcpu_run) without v2's
+ * curated suppression of XSAVE / AVX / AVX-512 / FSGSBASE / RDRAND
+ * / RDSEED. Phase D depends on the curated mask being live before
+ * any guest instruction executes — otherwise an unmasked AVX bit
+ * lets the guest issue a VEX encoding whose state we don't
+ * snapshot under Phase C.4's legacy 512 B KVM_GET/SET_FPU path.
  *
- *   (b) Without CPUID install the placeholder vCPU still exists and
- *       sits idle (no KVM_RUN happens until Phase C/D wires the
- *       dispatcher). The vcpu_fd + kvm_run mmap are what Phase B
- *       memslot wiring + Phase C's pool transition need; CPUID is
- *       additive and can land later without rearchitecting.
+ * D.0a fix: move the install to first KVM_RUN (vcpu_run dispatcher).
+ * By that point the buddy allocator is up; kzalloc succeeds; install
+ * goes through. Failure is now FATAL — the dispatcher panics on
+ * negative return because running guest code without the curated
+ * mask is a substrate-correctness violation, not a degradation.
  *
- * Returns 0 on success, 0 (not negative!) on best-effort failure so
- * vcpu_create still succeeds. The pr_warn announces the degradation.
+ * v1 archive's kvm_ensure_cpuid_done (kvm-v1-archive/lifecycle.c:
+ * 411-547) used the identical "lazy install at first KVM_RUN"
+ * pattern for the same buddy-allocator-not-up reason.
+ *
+ * The vm->cpuid stash survives the install — context.c's
+ * kvm_v2_vm_destroy still owns the kfree, and snapshot / introspection
+ * paths (Phase H) can re-read what's installed without re-issuing
+ * the GET_SUPPORTED + curate dance.
+ *
+ * Returns 0 on success or -errno on any failure (kzalloc, ioctl).
  */
 static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
 {
@@ -207,41 +216,46 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
 		 KVM_V2_CPUID_MAX_ENTRIES * sizeof(struct kvm_cpuid_entry2);
 	cpuid = kzalloc(buf_sz, GFP_KERNEL);
 	if (!cpuid) {
-		pr_warn("um: kvm-v2 vcpu_create: cpuid kzalloc(%zu) failed (buddy not up at init_backend time); using KVM-default CPUID — Phase C/D will defer install to first KVM_RUN\n",
-			buf_sz);
-		return 0;
+		pr_err("um: kvm-v2 cpuid_install: kzalloc(%zu) failed\n",
+		       buf_sz);
+		return -ENOMEM;
 	}
 
 	cpuid->nent = KVM_V2_CPUID_MAX_ENTRIES;
 	rc = os_ioctl_generic(vm->kvm_fd, KVM_GET_SUPPORTED_CPUID,
 			      (unsigned long)cpuid);
 	if (rc < 0) {
-		pr_warn("um: kvm-v2 vcpu_create: KVM_GET_SUPPORTED_CPUID failed (%d); using KVM-default CPUID\n",
-			rc);
+		pr_err("um: kvm-v2 cpuid_install: KVM_GET_SUPPORTED_CPUID failed (%d)\n",
+		       rc);
 		kfree(cpuid);
-		return 0;
+		return rc;
 	}
 
 	kvm_v2_curate_cpuid(cpuid);
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_CPUID2, (unsigned long)cpuid);
 	if (rc < 0) {
-		pr_warn("um: kvm-v2 vcpu_create: KVM_SET_CPUID2 failed (%d); using KVM-default CPUID\n",
-			rc);
+		pr_err("um: kvm-v2 cpuid_install: KVM_SET_CPUID2 failed (%d)\n",
+		       rc);
 		kfree(cpuid);
-		return 0;
+		return rc;
 	}
 
 	/*
 	 * Hand the buffer to the VM context — kvm_v2_vm_destroy() owns
-	 * the kfree (see context.c). Keeping it alive past install lets
-	 * later phases (e.g. KVM_GET_CPUID2 introspection, snapshot
-	 * paths) re-read what's installed without re-issuing the
-	 * GET_SUPPORTED + curate dance.
+	 * the kfree (see context.c). The stash is per-VM (not per-vCPU)
+	 * because the curated mask is identical across pool members; the
+	 * second + later vCPUs to lazy-install will overwrite vm->cpuid
+	 * with an identical pointer-and-contents pair. Leaking the prior
+	 * buffer on overwrite is acceptable because (a) it's bounded by
+	 * nr_cpu_ids and (b) D.5 lands the .vcpu_run pointer flip after
+	 * which the bound is total: each pool member's first KVM_RUN
+	 * overwrites once and the flag flips.
 	 */
 	vm->cpuid = cpuid;
-	pr_info("um: kvm-v2 vcpu_create: CPUID installed (%u entries; RDRAND/RDSEED/XSAVE/AVX/AVX2/AVX512/FSGSBASE/F16C masked — matches v1)\n",
+	pr_info("um: kvm-v2 cpuid_install: CPUID installed (%u entries; RDRAND/RDSEED/XSAVE/AVX/AVX2/AVX512/FSGSBASE/F16C masked — matches v1)\n",
 		cpuid->nent);
+	trace_um_backend_kvm_v2_cpuid_install(vcpu_fd, cpuid->nent);
 	return 0;
 }
 
@@ -275,20 +289,19 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	}
 
 	/*
-	 * KVM_SET_CPUID2 is per-vCPU — every pool member needs the
-	 * curated mask installed. The first call's GET_SUPPORTED_CPUID
-	 * also stashes the buffer on vm->cpuid; subsequent calls re-use
-	 * that cached buffer rather than re-querying. Failure remains
-	 * non-fatal (see install function header).
+	 * D.0a: CPUID install is deferred to first KVM_RUN (see
+	 * kvm_v2_install_cpuid header). At vcpu_create time the buddy
+	 * allocator is not up; the install would kzalloc-fail and ship
+	 * a vCPU running with KVM-default (not v2-curated) CPUID. The
+	 * dispatcher's lazy-install path runs from kvm_v2_vcpu_run()
+	 * once D.5 flips .vcpu_run — until then the flag stays false
+	 * and no install happens (no caller exercises the dispatcher).
 	 */
-	rc = kvm_v2_install_cpuid(vm, vcpu_fd);
-	if (rc)
-		goto err_unmap;
-
 	v->vcpu_fd      = vcpu_fd;
 	v->kvm_run      = kvm_run;
 	v->kvm_run_size = (u32)mmap_size;
 	v->cpu          = cpu;
+	v->cpuid_primed = false;
 
 	/*
 	 * Phase C.3: enable KVM_CAP_SYNC_REGS for this vCPU. With
@@ -308,8 +321,6 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	trace_um_backend_kvm_v2_vcpu_create(vcpu_fd, v->kvm_run_size);
 	return 0;
 
-err_unmap:
-	os_unmap_memory(kvm_run, mmap_size);
 err_close_vcpu:
 	os_close_file(vcpu_fd);
 	return rc;
@@ -646,6 +657,32 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	}
 
 	run = vcpu->kvm_run;
+
+	/*
+	 * D.0a: lazy first-run CPUID install. The eager install at
+	 * vcpu_create_one was removed (kzalloc fails at init_backend
+	 * time before the buddy allocator is up). By first KVM_RUN the
+	 * buddy allocator is up and the install goes through. Sticky:
+	 * one install per pool member for the lifetime of the VM.
+	 *
+	 * Failure here is fatal — the curated mask suppresses XSAVE /
+	 * AVX / AVX-512 / FSGSBASE; without it the guest can issue VEX
+	 * encodings whose state we don't snapshot under Phase C.4's
+	 * legacy 512 B KVM_GET/SET_FPU path. Running on with KVM-default
+	 * CPUID is a substrate-correctness violation, not a degradation.
+	 */
+	if (!vcpu->cpuid_primed) {
+		struct kvm_v2_vm *vm = kvm_v2_vm_get();
+
+		if (!vm)
+			panic("kvm-v2: cpuid lazy install (cpu=%d): VM not initialised",
+			      cpu);
+		rc = kvm_v2_install_cpuid(vm, vcpu->vcpu_fd);
+		if (rc < 0)
+			panic("kvm-v2: cpuid lazy install (cpu=%d) failed: %d",
+			      cpu, rc);
+		vcpu->cpuid_primed = true;
+	}
 
 	(void)kvm_v2_load_user_sregs(vcpu,
 				     __pa(current->active_mm->pgd),
