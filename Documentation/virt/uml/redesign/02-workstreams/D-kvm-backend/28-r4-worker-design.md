@@ -864,3 +864,108 @@ three blocking questions:
    stub child + wires seccomp_mm_create on WORKER_PROCESS=y.
 
 Proceeding with E.3d.0.
+
+---
+
+## Part M — E.4 design review + scope revision (added 2026-04-28 post-E.3d.2)
+
+After E.3d.2 landed (`f77e62d4e031`) an Explore subagent
+surface-mapped E.4's design space against the actual post-E.3d.2
+substrate. Findings prompted a scope revision.
+
+### M.1 — E.3d.2 changes the calculus
+
+Memo 28's original E.4 spec assumed worker-owns-everything: the
+worker would drive `set_stub_state` / `wait_stub_done_seccomp` /
+`get_stub_state` itself, run an in-worker SIGSYS handler, and
+emit SYSCALL_REQ to the spawner. Per-task pthreads would address
+the concurrent SIGSYS handling that design implied.
+
+E.3d.2 took a simpler path: spawner keeps `set_stub_state` /
+`get_stub_state` (memfd `MAP_SHARED` makes the cross-process
+read/write safe); worker is a futex+SIGCHLD coordinator only;
+`handle_syscall` runs in `seccomp_vcpu_run`'s continuation under
+the originating guest task's `current` directly. **The worker
+has no `current`, no scheduler, no syscall dispatch.** A pthread
+inside the worker would be a container with nothing to do.
+
+### M.2 — What memo 28's E.4 was actually buying
+
+Examined against the post-E.3d.2 architecture, the four
+candidate justifications for pthread-per-task evaporate:
+
+1. **Context switch hot path** — `seccomp_context_switch`
+   (`thread.c:17-20`) is `switch_threads` (jmp_buf longjmp) on
+   the spawner side. Unchanged by R4. Not a pthread problem.
+
+2. **FPU state** — per `task_struct->thread.fpu` on the spawner;
+   x86 generic save/restore in `__switch_to`. Stub child holds
+   user FPU regs between SIGSYS traps; nothing in WORKER_PROCESS=y
+   touches that path. Risk register entry over-conservative.
+
+3. **SMP-within-mm parallelism** — would require multiple stub
+   children per mm, which memo 28 nowhere commits to. The
+   `enter_turnstile` mutex in `seccomp_vcpu_run`
+   (`trap_user.c:53`) already serializes concurrent vcpu_run on
+   the same mm regardless of process model.
+
+4. **Per-task setitimer (memo 29 §2.5.5)** — pthread-per-task
+   doesn't fix this either; guest user code still runs in the
+   stub child (one per mm), so spawner-side `task->utime` stays
+   at 0. Real fix is rusage aggregation or stub-child-side
+   setitimer plumbing — orthogonal to E.4.
+
+### M.3 — Revised scope
+
+Replace memo 28 §E.4 with a **cleanup commit** that strips
+E.3d.1's vestigial machinery (`reply_wait`, `pending_reqs`,
+`pending_lock`, `worker_pending_req`, `worker_run_pending_syscalls`,
+`worker_run_one_pending`, the dispatcher SYSCALL_REQ branch).
+~150 LoC delete; production substrate gate provably no-op.
+
+Keep `vcpu_done` completion + the dispatcher kthread skeleton
+(smoke-test scaffold, ~20 lines). Update Part C.E correction to
+note that wait-queue bounce was specced under a stale architectural
+model and was retired by E.3d.2's actual design.
+
+E.5 (cross-mm migration via SIGUSR2) and E.6 (defconfig flip)
+proceed unchanged — neither depends on per-task pthreads.
+
+### M.4 — Memo 29 §2.5.5 correction
+
+Memo 29 §2.5.5 predicted `itimer_virtual` would flip
+`EXPECTED_FAIL → PASS` automatically once R4 lands (the
+"worker-owns-process model fixes naturally" claim). E.3d.2's
+substrate gate under WORKER_PROCESS=y showed this didn't happen,
+because the stub child still owns guest user-mode execution and
+spawner-side `task->utime` accounting is unchanged.
+
+Real fix paths for `itimer_virtual` (none of which is in R4's
+scope):
+
+- **(a) Stub-child rusage aggregation.** Periodic
+  `getrusage(RUSAGE_CHILDREN)` poll on the spawner; synthesize
+  utime updates into the originating guest task's `task->utime`.
+  Cheap; doesn't require R4.
+- **(b) Stub-child-side setitimer.** Forward the guest task's
+  `setitimer(VIRTUAL)` into the stub child via syscall_fd_map;
+  stub child SIGVTALRM relays back via existing SIGSYS/futex
+  path as a TIF_SIGPENDING.
+- **(c) Collapse stub child into a worker pthread.** Guest user
+  code runs in a pthread inside the worker; setitimer on the
+  worker tracks the right user time. Complete redesign — far
+  beyond R4's budget.
+
+§2.5.5 will be updated in a doc commit alongside the cleanup.
+
+### M.5 — Net R4 budget after revision
+
+| Phase | Status | LoC |
+|---|---|---|
+| E.1, E.2, E.3a, E.3b, E.3c, E.3d.0, E.3d.1, E.3d.2 | DONE | — |
+| E.4 (formerly per-task pthread; now vestigial cleanup) | PENDING | ~150 (delete) |
+| E.5 (cross-mm migration) | PENDING | ~200 |
+| E.6 (defconfig flip) | PENDING | ~50 |
+
+Total remaining: ~400 LoC, two of which are net-positive code
+and one is a delete. Architecturally cleaner endpoint.
