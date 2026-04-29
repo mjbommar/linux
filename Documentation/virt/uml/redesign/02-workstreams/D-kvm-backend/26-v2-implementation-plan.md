@@ -313,74 +313,318 @@ correctness depends on Phase D activation):
 
 ---
 
-## Phase D — VMCALL hypercall syscall path (2 weeks)
+## Phase D — IO-port syscall trap (2-3 weeks)
 
-**Goal**: guest syscalls trap via `vmcall` (KVM_EXIT_HYPERCALL), not
-via SYSCALL+OUT trampoline. Eliminates the entire LSTAR/bootstrap
-machinery.
+**Goal**: stand up v2's actual syscall path. Guest user code does
+`syscall` as normal; LSTAR points at a 5-byte kernel-half trampoline
+that emits `out %al,$0xf4` → `KVM_EXIT_IO`, then `sysretq`. The host
+dispatcher decodes RAX as the syscall NR, fixes
+`HOST_IP←HOST_CX` / `HOST_EFLAGS←HOST_R11` (post-SYSCALL semantics
+per `kvm-v1-archive/thread.c:3270-3319`), runs `handle_syscall`,
+marshals return state, and re-enters KVM_RUN — which advances RIP to
+the trampoline's `sysretq` and drops to CPL=3 with RIP=RCX,
+RFLAGS=R11. **Phase D is the moment v2 actually executes guest
+code** — Phase C built the dispatch shape on the side; D.5 flips
+`.vcpu_run` and the gate becomes the real test.
 
-### D.1 — Guest syscall ABI design (2 days)
+The original §D specced `vmcall` → `KVM_EXIT_HYPERCALL` with a custom
+`UM_KVM_HC_SYSCALL=1` nr. That is structurally impossible on stock
+KVM: `arch/x86/kvm/x86.c:10456` initialises `ret = -KVM_ENOSYS`,
+`x86.c:10520-10523`'s `default:` returns it to the guest, and only
+`KVM_HC_MAP_GPA_RANGE` (gated by `KVM_CAP_EXIT_HYPERCALL` whose
+valid mask `x86.c:4881-4882` is just `BIT(KVM_HC_MAP_GPA_RANGE)`)
+writes `exit_reason = KVM_EXIT_HYPERCALL`. We therefore revert to
+v1's IO-port mechanism — byte-identical to v1's non-gadget tail at
+`kvm-v1-archive/thread.c:1216-1218` (`#else` branch). The Phase D
+structural wins — per-CPU vCPU pool, TDP, no shadow PT,
+kernel-half-only trampoline, no per-task bootstrap install — hold
+independent of trap instruction. The mechanism reverts to v1's; the
+strategy doesn't.
 
-UML guest kernel's syscall entry currently uses standard x86_64
-SYSCALL. For v2, change to:
+D.0-D.4 land "on the side" like Phase C ("option α"): each commit
+adds helpers / state without touching `ops.c`. D.5 is the activation
+moment — one-line edit at `arch/um/backend/kvm-v2/ops.c:69`
+(`.vcpu_run = seccomp_vcpu_run` → `kvm_v2_vcpu_run`) plus the four
+seccomp-delegation flags (`uses_stub_reaper`,
+`has_syscall_stub_fd_map`, `stub_syscall_uses_futex`,
+`stub_child_runs_seccomp` at lines 60-63) flip to `false`. Bug B
+(memo 22's user-half / kernel-half PML4 alias on the bootstrap
+page) becomes structurally impossible: the trampoline lives only in
+PML4[508] (kernel-half canonical-sign-extended past the user/kernel
+boundary; v1's `KVM_BOOTSTRAP_GUEST_VA = 0xffffe00000000000` at
+`kvm-v1-archive/thread.c:637`), is never installed at any user-half
+VA, and is never present in user-task page tables as a US=1 leaf —
+the alias that made Bug B reachable cannot exist.
 
-- User code does `syscall` as normal.
-- UML kernel's LSTAR points at a hypercall trampoline (not the v1
-  bootstrap one).
-- Trampoline:
+**Note on §E and §G**: the `UM_KVM_HC_PF / _GP / _UD / _DE / _BP /
+_OF` references in Phase E (lines 365-373 of this memo) and the
+cross-vCPU IPI design in Phase G (lines 490-492) inherit the same
+vmcall correction. Each exception class becomes its own IO port
+(`0xf6 = #PF`, `0xf9 = #GP`, etc., paralleling v1's
+`UM_KVM_*_PORT` pattern from `kvm-v1-archive/kvm_backend.h`); IPIs
+become a real KVM mechanism (`KVM_REQ_TLB_FLUSH` + `kvm_make_all_
+cpus_request`) rather than a synthesised hypercall. Those updates
+land with §E / §G commits, not as part of §D.
+
+**Headline gate**: cpython-parity 21/21 × 10 trials with 0
+regressions + `single_dlopen × 100` with 0 flakes. Substrate gate
+must hold PASS=25/FAIL=3/EXPECTED_FAIL=3 bit-for-bit.
+
+### D.0 — Pre-flight prep (3 days)
+
+Two discrete fix-ups Phase A/B left dormant; bundled as one commit
+because each is small and they share verification (a `KVM_RUN` that
+does not immediately fail). The original surface map proposed a third
+prep item — per-vCPU GS state page (~80 LoC) — but the simplified
+trampoline (D.1) eliminates the need for it: with no in-trampoline
+stack switch, there is no `%gs:cpu_temp` / `%gs:kernel_rsp` storage
+to allocate.
+
+- **D.0a CPUID lazy first-run install** (~30 LoC). A.3 deferred
+  `kvm_v2_curate_cpuid` (XSAVE / AVX / AVX-512 suppression per
+  `arch/um/backend/kvm-v2/vcpu.c:118-174`) to "first KVM_RUN" but
+  Phase C never wired it. Add `bool cpuid_primed` to `struct
+  kvm_v2_vcpu`; install once at top of `kvm_v2_vcpu_run`, sticky per
+  pool entry. The curated mask must be live before any guest
+  instruction executes — otherwise an unmasked AVX feature bit lets
+  the guest issue VEX encodings whose state we don't snapshot under
+  Phase C's legacy 512 B `KVM_GET/SET_FPU` path.
+
+- **D.0b `KVM_SET_USER_MEMORY_REGION` userspace_addr fix-up** (~60
+  LoC). B.2 emits `-EINVAL` on user VAs (`0x550...0007000` and
+  `0x40265000` per the C.x boot logs) because the seccomp dual-wiring
+  at `arch/um/backend/kvm-v2/region.c:103-109` maps the region in the
+  stub child's mm but not the spawner's mm; KVM at
+  `virt/kvm/kvm_main.c:1107-1109` binds the VM to the creator's
+  `current->mm` and fault-in resolves the HVA in *that* mm
+  (`virt/kvm/kvm_main.c:2999-3027`). Critical subtlety per the
+  Phase D surface map's CLAIM 4 cross-check:
+  `KVM_SET_USER_MEMORY_REGION` validates with `access_ok()` only
+  (`virt/kvm/kvm_main.c:2014-2025`), not `find_vma()` / GUP — so
+  registration may succeed against a range with no VMA in the issuer
+  mm and only fail later at fault-in. Both paths must be fixed:
+  ensure `os_map_memory` runs in the spawner before the ioctl AND
+  validate the region is actually mapped before issuing
+  `KVM_SET_USER_MEMORY_REGION`.
+
+**Verification**: `KVM_RUN` returns without `KVM_EXIT_FAIL_ENTRY` /
+`-EINVAL`; substrate gate unchanged.
+
+### D.1 — IO-port trampoline + ABI (2 days)
+
+- **Bytes**: **5 bytes**. Byte-identical to v1's non-gadget tail at
+  `kvm-v1-archive/thread.c:1216-1218`:
+
   ```asm
-    swapgs                    ; standard x86_64 SYSCALL entry
-    mov %rsp, %gs:cpu_temp   ; save user RSP
-    mov %gs:kernel_rsp, %rsp ; switch to kernel stack
-    push %r11                ; save user flags
-    push %rcx                ; save user RIP
-    mov $UM_KVM_HC_SYSCALL, %rax  ; hypercall number
-    vmcall                    ; -> KVM_EXIT_HYPERCALL
-    ; return path:
-    pop %rcx                  ; restore user RIP
-    pop %r11                  ; restore user flags
-    mov %gs:cpu_temp, %rsp   ; restore user RSP
-    swapgs
-    sysretq
+  out %al, $0xf4   /* e6 f4 — KVM_EXIT_IO trap */
+  sysretq          /* 48 0f 07 — drops to CPL=3, RIP=RCX, RFLAGS=R11 */
   ```
 
-This is much shorter than v1's ~600-byte LSTAR trampoline (which had
-gadget paths, bootstrap GDT/IDT references, etc.). Estimated ~50
-bytes.
+  No `swapgs`. No stack switch. No `%gs:` scratch storage. v1's
+  swapgs+stack-switch was for the in-trampoline gadget paths
+  (`kvm-v1-archive/thread.c:814-1213`'s 7-syscall + vDSO
+  clock_gettime fast path) — Phase H optimisation, not in scope. For
+  the trap-only path, the trampoline runs at CPL=0 with interrupts
+  masked (FMASK clears IF), executes `out` (kernel-priv I/O, no
+  fault), traps to host. Host marshals via sync_regs, runs
+  `handle_syscall`, marshals return state. KVM_RUN re-entry advances
+  RIP to `sysretq`, which drops to CPL=3 with RIP=RCX, RFLAGS=R11.
+  All registers (including RAX = syscall NR on entry, RAX = return
+  value on exit) flow through `kvm_run->s.regs.regs` — never
+  clobbered by trampoline code.
 
-### D.2 — `hypercall.c`: KVM_EXIT_HYPERCALL dispatch (3 days)
+  Total trampoline budget: ~16 B including alignment padding for
+  the next-instruction landing site. `BUILD_BUG_ON(sizeof(bytes) >
+  PAGE_SIZE)` for safety.
 
-- `enum um_kvm_hc { UM_KVM_HC_SYSCALL = 1, UM_KVM_HC_PF = 2,
-  UM_KVM_HC_GP = 3, ... }`.
-- Hypercall handler reads `run->hypercall.nr` and dispatches.
-- For `UM_KVM_HC_SYSCALL`: marshal kregs → uml_pt_regs, call generic
-  `handle_syscall`, marshal result back, return to vmcall site.
+- **Storage / placement**: allocate one host page from `uml_physmem`
+  for the trampoline. Because `uml_physmem` is already covered by
+  Phase B's single identity memslot (gpa==host_va, the only memslot
+  shape B knows how to issue), the trampoline GPA is automatically
+  guest-reachable without a new memslot. **No second memslot is
+  needed.** The guest VA is `0xffffe00000000040` (matching v1's
+  `KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_LSTAR_OFFSET` from
+  `kvm-v1-archive/thread.c:637,665`); MSR_LSTAR is programmed to
+  this GVA in D.4, and the kernel-half PML4[508] entry (also D.4)
+  makes the GVA→GPA walk land on the trampoline page.
 
-### D.3 — Hypercall return semantics (2 days)
+- **ABI**: `enum um_kvm_iotrap { UM_KVM_TRAP_SYSCALL = 1,
+  UM_KVM_TRAP_PF = 2, UM_KVM_TRAP_GP = 3, ... }` in a new
+  `arch/um/backend/kvm-v2/syscall_trap.h`. The trap class is
+  encoded in the IO port number (0xf4 = SYSCALL, 0xf6 = PF, 0xf9 =
+  GP per v1's pattern at `kvm-v1-archive/kvm_backend.h`'s
+  `UM_KVM_*_PORT`), not in RAX (which stays = guest syscall NR for
+  D.2's decode path). The enum is the host-side tag for switch
+  dispatch.
 
-After the hypercall, vmcall returns to the guest at the next instruction.
-The trampoline pops user RIP/RSP/RFLAGS and `sysretq`'s back to user.
+### D.2 — `syscall_trap.c` dispatch handler (3 days)
 
-- For syscalls that don't return immediately (e.g., signal delivery),
-  the hypercall handler can modify the return state via
-  `run->s.regs.regs` (sync_regs) before re-entering KVM_RUN.
+- New file `arch/um/backend/kvm-v2/syscall_trap.c` (~180 LoC). One
+  exported helper `kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
+  struct kvm_run *run, int vcpu_fd)`.
+- Add `case KVM_EXIT_IO:` to `kvm_v2_vcpu_run`'s switch in
+  `vcpu.c` (currently panic-default at vcpu.c:691+). Read
+  `run->io.port`; on `0xf4` call into the helper, else `panic`
+  (other ports are Phase E's classes).
+- Helper body mirrors `kvm-v1-archive/thread.c:3270-3319,4030-4047`:
+  - GPRs already in `regs->gp[]` from C.3's sync-regs marshal at
+    `vcpu.c:689` (`kvm_v2_marshal_from_kvm_regs`). No KVM_GET_REGS.
+  - `unsigned long syscall_nr = regs->gp[HOST_AX];`
+  - `PT_SYSCALL_NR(regs->gp) = syscall_nr;`
+  - `regs->is_user = 1;`
+  - `regs->gp[HOST_IP] = regs->gp[HOST_CX];` (post-SYSCALL user
+    RIP — sysretq will read it back from RCX, and handle_syscall
+    needs HOST_IP to reflect the user's intended return RIP)
+  - `regs->gp[HOST_EFLAGS] = regs->gp[HOST_R11];` (FMASK-masked
+    kernel rflags must NOT leak — v1 archive lines 3296-3306)
+  - `handle_syscall(regs);` — direct call into
+    `arch/um/kernel/skas/syscall.c:19`, same shape as seccomp's
+    `arch/um/backend/seccomp/trap_user.c:159` SIGSYS branch.
+  - On return, `regs->gp[HOST_AX]` holds the return value; mirror
+    it back into the sync-regs mmap (D.3 wires the marshal-out).
+- Class-D / replay machinery from v1 archive lines 3320-3550 is
+  **not** ported — that's memo 10 / 13 territory, out of scope.
+- **Helper unreferenced by ops.c at this point** — `.vcpu_run`
+  still points at `seccomp_vcpu_run` until D.5.
 
-### D.4 — Replace LSTAR programming (2 days)
+### D.3 — Return semantics + EINTR + per-task FPU swap-out (2 days)
 
-- `KVM_SET_MSRS` for `MSR_LSTAR` points at the new trampoline (which
-  lives in a per-VM kernel-half memslot, not in user mm pgd).
-- `MSR_STAR` and `MSR_FMASK` programmed once at vCPU init.
+- **Sync-regs return marshal** (~30 LoC). After `handle_syscall`,
+  copy `regs->gp[HOST_AX..HOST_R11]` back into `run->s.regs.regs.*`
+  and OR `KVM_SYNC_X86_REGS` into `kvm_dirty_regs`. Critical:
+  before re-entry, set `run->s.regs.regs.rcx = regs->gp[HOST_IP]`
+  and `run->s.regs.regs.r11 = regs->gp[HOST_EFLAGS]` — sysretq
+  consumes RCX→RIP and R11→RFLAGS, so the user-resume RIP must
+  land in RCX and the user-resume RFLAGS in R11. For normal
+  syscall return that's the original user RIP/RFLAGS;
+  signal-delivery overwrites HOST_IP with the signal handler VA.
+- **Signal-delivery branch**: when `handle_syscall` returns with a
+  pending signal, `interrupt_end()` runs the standard delivery
+  path; `regs->gp[HOST_IP]` ends up at the signal-handler RIP and
+  the marshal above lifts it into RCX. UML's signal delivery path
+  is backend-agnostic; no special-case work beyond the marshal.
+- **EINTR / SIGALRM mid-KVM_RUN** (~10 LoC). Phase F nominally owns
+  signal handling but D.5 activates `.vcpu_run` and SIGALRM fires
+  every tick — the gate fails the moment the timer fires unless D
+  handles `rc == -EINTR` cleanly. **Critical location**: the panic
+  is at `arch/um/backend/kvm-v2/vcpu.c:675-682` (the `rc < 0` check
+  immediately after `KVM_RUN`), **before** the exit-reason switch
+  — so the EINTR path must guard the rc<0 check, not the default
+  in the switch. Change to `if (rc < 0 && rc != -EINTR) panic;`
+  and on EINTR fall through to `preempt_enable; return;` (treat as
+  "guest didn't fault yet; dispatcher caller re-enters next
+  schedule slice"). Restart-via-RAX-rewrite is Phase F's full
+  handling. Reference: v1's EINTR path at
+  `kvm-v1-archive/thread.c:3937-3984,5121-5127`.
+- **Per-task FPU on context_switch_out** (~50 LoC). C.4 only
+  captures at fork (`arch_copy_thread`). Tasks migrating between
+  host CPUs leave whichever FPU on the destination vCPU; cpython's
+  multi-thread tests will catch this even if `single_dlopen`
+  doesn't. Add `kvm_v2_fpu_capture_for_switch_out` paralleling
+  `kvm_v2_fpu_capture_for_fork` at `vcpu.c:733-768`: KVM_GET_FPU on
+  the outgoing per-CPU vCPU into `current->thread.arch.kvm_v2.fpu`,
+  set `fpu_valid=true`. Fork-capture remains the special "child
+  inherits parent" case; switch-out is "task migrates, takes its
+  FPU with it." Hook from
+  `arch/um/kernel/process.c::__switch_to`'s pre-switch path under
+  `CONFIG_UM_BACKEND_KVM_V2`.
 
-### D.5 — Validate against the gate (3 days)
+### D.4 — MSR programming + PML4[508] kernel-half install (3 days)
 
-- Run cpython-parity gate. Expect ≥ 21/21 since the syscall path is
-  now standard x86_64-style with no bootstrap aliases.
-- Run `single_dlopen × 100`. Expect 0 flakes (Bug B's mechanism — user
-  RIP loaded with corrupt pointer — should be impossible since the
-  user never sees the trampoline VA).
+- **MSR programming at vcpu_create** (~50 LoC). Mirror v1's
+  `kvm_enter_guest_program_msrs` at
+  `kvm-v1-archive/thread.c:2020-2111`, but issued **once** at pool
+  member create (C.1's `kvm_v2_vcpu_create_one`), not per-dispatch
+  — vCPUs are reused across tasks, MSRs are immutable across the
+  pool's lifetime:
+  - `MSR_LSTAR (0xc0000082)` ← trampoline GVA
+    (`0xffffe00000000040`).
+  - `MSR_STAR (0xc0000081)` ← `(0x0018 << 48) | (0x0008 << 32)`
+    (ring-0 kernel selectors for SYSCALL, ring-3 user selectors
+    for SYSRETQ; matches v1 line 2032).
+  - `MSR_FMASK (0xc0000084)` ← `0x47700` (TF | IF | DF | IOPL |
+    NT | AC, matching native syscall_init per v1 archive lines
+    2042-2065 — DF=1 leak comment is the lesson, mask the bits).
+  - **No `MSR_KERNEL_GS_BASE` programming** — D.1's simplified
+    trampoline doesn't use `%gs:` storage. Phase E may revisit if
+    IDT/IST stacks need per-vCPU GS; that's an E-side decision.
+- **EFER.SCE in SREGS** (~5 LoC). Add `KVM_EFER_SCE` to v2's
+  `kvm_v2_load_user_sregs` mask. v1 set this explicitly at
+  `kvm-v1-archive/sregs.c:264-265` (`KVM_EFER_SCE | KVM_EFER_LME |
+  KVM_EFER_LMA | KVM_EFER_NXE`); v2's current SREGS load only sets
+  CR3 / FS.base / GS.base via the C.3 sync path. Without SCE the
+  CPU raises #UD on SYSCALL; the gate fails on the first user-mode
+  instruction. One-time write at vcpu_create via
+  `kvm_run->s.regs.sregs.efer` + dirty bit.
+- **PML4[508] kernel-half install via swapper_pg_dir** (~80 LoC).
+  The trampoline GPA is reachable via the identity memslot (D.1),
+  but the guest CPU walks `CR3` (= `__pa(active_mm->pgd)`) for any
+  GVA — including the trampoline's `0xffffe00000000040`. Each UML
+  mm pgd needs PML4[508] pointing at a kernel-half PUD/PMD/PTE
+  chain that walks down to the trampoline GPA.
 
-**Exit criteria:** gate at 21/21 across 10 trials. `single_dlopen`
-0/100 flakes.
+  **Mechanism**: install the kernel-half mapping into UML's
+  `swapper_pg_dir` (the kernel reference pgd) ONCE at
+  `kvm_v2_init`. UML's existing mm-creation path at
+  `arch/um/kernel/mem.c:149-157` already copies kernel-half PGD
+  entries from `swapper_pg_dir` into every new mm's pgd — so
+  future `pgd_alloc()` calls pick up the trampoline mapping
+  automatically. No `arch_dup_mmap` hook needed; we lean on UML's
+  existing kernel-half propagation. For mms that exist at
+  `kvm_v2_init` time (kthreadd, init_mm), iterate the mmlist and
+  install the PML4[508] entry directly into each pgd.
+
+  - PUD/PMD/PTE pages allocated from `uml_physmem` so they sit in
+    the identity memslot (gpa==host_va, no new memslot needed).
+  - The chain is shared across all task pgds (the guest kernel-half
+    is identical for every task), so the per-VM cost is ~12 KB
+    total (one PUD page + one PMD page + one PTE page).
+  - This mirrors v1's `kvm_shadow_map_page` pattern from
+    `kvm-v1-archive/thread.c:2287-2365` but writes **real** page-
+    table entries instead of shadow entries — TDP walks them
+    natively, no shadow-PT machinery, no per-task install, no
+    aliasing window.
+
+**Verification**: build clean (=n, =y); boot smoke
+`backend=force=kvm-v2 init=/bin/true` still rc=134 (still seccomp
+fallback because `.vcpu_run` doesn't flip until D.5); no MSR-set
+errors in `dmesg`; substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3.
+
+### D.5 — Flip `.vcpu_run`; validate against gate (3 days)
+
+- **Single-line ops.c edit** at `arch/um/backend/kvm-v2/ops.c:69`:
+  `.vcpu_run = seccomp_vcpu_run` → `kvm_v2_vcpu_run`.
+- **Capability flag flips** at `ops.c:60-63`: `uses_stub_reaper`,
+  `has_syscall_stub_fd_map`, `stub_syscall_uses_futex`,
+  `stub_child_runs_seccomp` all → `false`. The stub child is no
+  longer in the loop — guest user code runs directly under KVM,
+  trapping via `out` to the in-spawner dispatcher (no per-mm
+  worker process, no SCM_RIGHTS round-trip, no futex on
+  `stub_data`).
+- **Gate validation**:
+  - cpython-parity 21/21 × 10 trials, 0 regressions.
+  - `single_dlopen × 100`, 0 flakes (Bug B structurally
+    impossible per the headline — trampoline never aliases
+    user-half).
+  - Substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3 must hold
+    bit-for-bit. The 3 expected-fails are stub-child-shape tests
+    that v2 deliberately doesn't honour; the 3 fails are
+    unrelated to D.
+
+**Phase D exit criteria**:
+
+- Build clean both modes (=n, =y).
+- Boot smoke `backend=force=kvm-v2 init=/bin/true` rc=0 (no longer
+  rc=134 — v2 is now the live syscall path).
+- cpython-parity 21/21 across 10 consecutive trials, 0
+  regressions.
+- `single_dlopen × 100` produces 0 flakes.
+- Substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3 unchanged.
+- Bug B repro from memo 22 (user RIP loaded with corrupt pointer
+  via shadow-PT alias) does not reproduce — verified by replaying
+  the original failing seed: trampoline VA never appears in any
+  user-half PTE walk because PML4[508] is the only install
+  point.
 
 ---
 
