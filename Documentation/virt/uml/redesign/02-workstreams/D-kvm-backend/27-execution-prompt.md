@@ -92,15 +92,27 @@ executing guest code via KVM_RUN. Tip: `9fa4a804d4e3`.
 
 **Where to start a new session:** read this Part A. Memo 28 +
 memo 26 are the design references. Memo 29 documents the
-substrate gate. Next phase is **memo 26 Phase D** (vmcall
-hypercall syscall path, ~2 weeks). This is the moment v2
-actually starts running guest code via KVM_RUN — flip
-`.vcpu_run = kvm_v2_vcpu_run`, port the LSTAR trampoline to a
-~50-byte vmcall stub, add KVM_EXIT_HYPERCALL handler that
-marshals into `handle_syscall`. Headline gate criterion: 21/21
-cpython-parity × 10 trials, plus `single_dlopen × 100` with 0
-flakes (Bug B's mechanism becomes structurally impossible —
-user RIP never sees the trampoline VA).
+substrate gate. Next phase is **memo 26 Phase D** (IO-port
+syscall trap, ~2-3 weeks). This is the moment v2 actually
+starts running guest code via KVM_RUN. The original §D specced
+`vmcall` → `KVM_EXIT_HYPERCALL`; surface-map audit + codex
+cross-check found that's structurally impossible on stock KVM
+(`arch/x86/kvm/x86.c:10456,10520-10523` returns -KVM_ENOSYS for
+unknown nr), so §D was rewritten at `d186d870e8eb` to use v1's
+`out %al,$0xf4` → `KVM_EXIT_IO` mechanism. Trampoline shrinks
+to **5 bytes** (byte-identical to v1's non-gadget tail at
+`kvm-v1-archive/thread.c:1216-1218`); no swapgs, no GS state
+page, no MSR_KERNEL_GS_BASE. PML4[508] kernel-half install via
+UML's existing `swapper_pg_dir` propagation (`mem.c:149-157`),
+not a custom `arch_dup_mmap` hook. Phase D commits: D.0 prep
+(CPUID lazy install + KVM_SET_USER_MEMORY_REGION userspace_addr
+fix), D.1 trampoline + ABI, D.2 `syscall_trap.c`, D.3 return
+semantics + EINTR + per-task FPU swap-out, D.4 MSR / EFER /
+PML4 install, D.5 flip `.vcpu_run` + gate. Headline gate
+criterion: 21/21 cpython-parity × 10 trials, plus
+`single_dlopen × 100` with 0 flakes (Bug B's mechanism becomes
+structurally impossible — trampoline lives only in PML4[508],
+never aliases user-half).
 
 ### Original Part A (preserved for historical context)
 
