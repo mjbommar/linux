@@ -79,7 +79,7 @@ the internal header. No "thread.c" mega-file — that pattern was v1's
 **Goal**: backend can be selected, opens `/dev/kvm`, creates a VM, and
 returns from `init` without doing anything else.
 
-### A.1 — `init.c`: backend probe + ops registration (2 days)
+### A.1 — `init.c`: backend probe + ops registration (DONE — `1a83522e3ea4`)
 
 - Replace the v2 stub with a real init.
 - Probe `/dev/kvm` via `os_open_file`. Fail gracefully if absent
