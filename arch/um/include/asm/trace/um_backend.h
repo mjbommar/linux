@@ -341,6 +341,52 @@ TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
 	TP_printk("gpa=%#llx gva=%#llx", __entry->gpa, __entry->gva)
 );
 
+/*
+ * kvm_v2_iotrap_syscall_enter / kvm_v2_iotrap_syscall_exit — bracket
+ * the KVM_EXIT_IO → handle_syscall path that Phase D.2 wires (memo 26
+ * §D.2). enter fires immediately before the handle_syscall() call,
+ * after the syscall NR has been extracted from regs->gp[HOST_AX] and
+ * the user RIP/RFLAGS have been propagated from RCX/R11; exit fires
+ * immediately after handle_syscall returns, with the syscall return
+ * value (still in regs->gp[HOST_AX] at this point — D.3 will marshal
+ * it back to kvm_run->s.regs.regs.rax). port is run->io.port (today
+ * UM_KVM_TRAP_SYSCALL = 0xf4); future Phase E.3 exception classes
+ * will push other ports through the same enter/exit pair so the
+ * tracer can distinguish them by port.
+ *
+ * Until D.5 flips ops.vcpu_run away from seccomp these events have no
+ * caller and stay silent — D.2's helper is unreferenced from any
+ * production .vcpu_run path. Per memo 27 §B.9 the observability lands
+ * with the helper, not after it earns a caller.
+ */
+TRACE_EVENT(um_backend_kvm_v2_iotrap_syscall_enter,
+	TP_PROTO(u16 port, unsigned long nr),
+	TP_ARGS(port, nr),
+	TP_STRUCT__entry(
+		__field(u16,           port)
+		__field(unsigned long, nr)
+	),
+	TP_fast_assign(
+		__entry->port = port;
+		__entry->nr   = nr;
+	),
+	TP_printk("port=%#x nr=%lu", __entry->port, __entry->nr)
+);
+
+TRACE_EVENT(um_backend_kvm_v2_iotrap_syscall_exit,
+	TP_PROTO(u16 port, unsigned long ret),
+	TP_ARGS(port, ret),
+	TP_STRUCT__entry(
+		__field(u16,           port)
+		__field(unsigned long, ret)
+	),
+	TP_fast_assign(
+		__entry->port = port;
+		__entry->ret  = ret;
+	),
+	TP_printk("port=%#x ret=%lu", __entry->port, __entry->ret)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

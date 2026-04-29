@@ -53,6 +53,7 @@
 #include <asm/trace/um_backend.h>
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"
 
 /*
  * The pool. Sized at compile time to NR_CPUS — bounded (UML's
@@ -620,12 +621,14 @@ static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu);
  *   6. Dispatch on kvm_run->exit_reason.
  *
  * At C.2 the helper has NO production caller — ops.c still routes
- * `.vcpu_run` to seccomp_vcpu_run; Phase D flips the pointer. The
- * panic placeholders for HLT / FAIL_ENTRY / INTERNAL_ERROR /
- * SHUTDOWN are EXPECTED — Phase D adds KVM_EXIT_HYPERCALL handling
- * and Phase E adds the IO / MMIO / exception classes; until those
- * land any return from KVM_RUN under v2 is by definition a bug we
- * want to surface loudly.
+ * `.vcpu_run` to seccomp_vcpu_run; Phase D flips the pointer (D.5).
+ * The panic placeholders for HLT / FAIL_ENTRY / INTERNAL_ERROR /
+ * SHUTDOWN remain EXPECTED — Phase E adds MMIO + exception classes;
+ * until those land any non-IO return from KVM_RUN under v2 is by
+ * definition a bug we want to surface loudly. D.2 added the
+ * KVM_EXIT_IO arm (kvm_v2_handle_io_trap → handle_syscall) so the
+ * SYSCALL trap path no longer panics; it's still unreachable today
+ * because nobody calls kvm_v2_vcpu_run.
  *
  * The pool_initialised fallback to seccomp_vcpu_run is defensive:
  * today init_backend always populates the pool before any caller
@@ -726,6 +729,24 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
 
 	switch (exit_reason) {
+	case KVM_EXIT_IO:
+		/*
+		 * D.2: IO-port exit. The LSTAR trampoline (D.1) issues
+		 * `out %al, $0xf4` from CPL=0, which traps here with
+		 * io.port = UM_KVM_TRAP_SYSCALL = 0xf4. The helper
+		 * extracts the syscall NR from RAX, propagates the
+		 * post-SYSCALL RIP/RFLAGS from RCX/R11, and dispatches
+		 * via handle_syscall. Other ports (Phase E.3 #PF/#GP/#UD
+		 * tags) will land as additional helper calls; today an
+		 * unknown port returns -ENOTSUPP and we panic, matching
+		 * the v1 archive's "fail loud on unknown trap class"
+		 * contract (kvm-v1-archive/thread.c:4030+ structure).
+		 */
+		rc = kvm_v2_handle_io_trap(regs, run, vcpu->vcpu_fd);
+		if (rc < 0)
+			panic("kvm-v2: io_trap (cpu=%d port=%#x) failed: %d",
+			      cpu, run->io.port, rc);
+		break;
 	case KVM_EXIT_HLT:
 	case KVM_EXIT_FAIL_ENTRY:
 	case KVM_EXIT_INTERNAL_ERROR:

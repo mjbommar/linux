@@ -27,7 +27,9 @@
 
 #include <linux/types.h>
 
+struct kvm_run;
 struct kvm_v2_vm;
+struct uml_pt_regs;
 
 /*
  * Host-side trap-class enum. The IO port number identifies the class
@@ -99,5 +101,25 @@ int  kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm);
  * kvm_v2_vm_destroy. Safe on a never-installed VM (NULL page → no-op).
  */
 void kvm_v2_trampoline_free(struct kvm_v2_vm *vm);
+
+/*
+ * D.2: KVM_EXIT_IO dispatch. Called from kvm_v2_vcpu_run's exit-reason
+ * switch when the guest trapped via the LSTAR trampoline's
+ * `out %al, $0xf4`. `regs` is already populated by C.3's sync-regs
+ * marshal (vcpu.c:kvm_v2_marshal_from_kvm_regs); `run` is the mmap'd
+ * shared struct kvm_run for the firing vCPU; `vcpu_fd` is reserved
+ * for D.3's marshal-out path (it currently goes unread inside the
+ * helper). Returns 0 on success, -ENOTSUPP on an unexpected port
+ * (caller should panic — other ports are Phase E's territory). Direct
+ * panics inside handle_syscall surface as themselves.
+ *
+ * The helper is unreferenced from any production .vcpu_run path
+ * today — ops.c still routes to seccomp_vcpu_run; D.5 flips the
+ * pointer. The case-arm in vcpu.c that calls this helper is wired,
+ * but kvm_v2_vcpu_run itself has no caller until D.5.
+ */
+int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
+			  struct kvm_run *run,
+			  int vcpu_fd);
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_SYSCALL_TRAP_H */

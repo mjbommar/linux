@@ -1,6 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase D.1: IO-port LSTAR trampoline.
+ * UML backend v2 (KVM) — Phase D.1+D.2: IO-port LSTAR trampoline +
+ * KVM_EXIT_IO syscall-trap dispatcher.
+ *
+ * Per memo 26 §D.1 (D.1 portion: storage + bytes) and §D.2 (D.2
+ * portion: KVM_EXIT_IO → handle_syscall handler at the bottom of
+ * this file). The trampoline (§D.1) puts an `out %al, $0xf4` byte at
+ * the LSTAR target so a guest SYSCALL deterministically traps to the
+ * host with kvm_run->exit_reason = KVM_EXIT_IO and io.port = 0xf4.
+ * The dispatcher (§D.2) reads that exit, extracts the syscall NR from
+ * the user's RAX, propagates the post-SYSCALL RIP/RFLAGS from RCX/R11
+ * back into HOST_IP/HOST_EFLAGS, and calls into UML's common
+ * handle_syscall path (arch/um/kernel/skas/syscall.c:19) — same shape
+ * the seccomp backend uses from its SIGSYS branch
+ * (arch/um/backend/seccomp/trap_user.c:159). Marshal-out of the
+ * return value into kvm_run->s.regs.regs.rax is D.3's job.
+ *
+ * Both phases live in one file because the trampoline bytes (§D.1)
+ * and the host-side decoder (§D.2) are two halves of the same ABI:
+ * the byte at offset 0x40 issues the IO trap; the helper at the
+ * bottom of this file consumes it. Splitting them across files made
+ * the v1 archive harder to follow (the bytes lived in thread.c near
+ * line 1215 and the dispatch lived 2000 lines later near line 4030);
+ * v2 keeps both halves co-located.
  *
  * Per memo 26 §D.1. Lands the storage + bytes for the 5-byte LSTAR
  * trampoline:
@@ -69,6 +91,7 @@
 #include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/kvm.h>		/* struct kvm_run, KVM_EXIT_IO */
 #include <linux/mm.h>
 #include <linux/printk.h>
 #include <linux/set_memory.h>
@@ -77,6 +100,10 @@
 
 #include <asm/page.h>
 #include <asm/trace/um_backend.h>
+
+#include <skas.h>		/* handle_syscall */
+#include <sysdep/ptrace.h>	/* uml_pt_regs, HOST_AX/CX/IP/EFLAGS/R11, UPT_SYSCALL_NR */
+#include <sysdep/ptrace_user.h>	/* PT_SYSCALL_NR */
 
 #include "kvm_v2_backend.h"
 #include "syscall_trap.h"
@@ -260,4 +287,149 @@ void kvm_v2_trampoline_free(struct kvm_v2_vm *vm)
 	free_page((unsigned long)vm->trampoline_page);
 	vm->trampoline_page = NULL;
 	vm->trampoline_gpa  = 0;
+}
+
+/*
+ * Phase D.2: KVM_EXIT_IO → handle_syscall dispatcher.
+ *
+ * Called from kvm_v2_vcpu_run's exit-reason switch when the guest
+ * trapped via the LSTAR trampoline's `out %al, $0xf4`. The trampoline
+ * lives at KVM_V2_LSTAR_GVA (D.1's bytes); the IO port (= 0xf4 =
+ * UM_KVM_TRAP_SYSCALL) is the wire-level tag identifying this trap as
+ * a syscall (Phase E.3 will add other ports for #PF / #GP / #UD).
+ *
+ * Marshal logic mirrors v1 archive's kvm_decode_syscall at
+ * kvm-v1-archive/thread.c:3270-3319 (and the case-arm at 4030-4047
+ * that called it). The shape is:
+ *
+ *   1. RAX holds the user's syscall NR (LSTAR's `out` did not clobber
+ *      it; the SYSCALL instruction itself stashed user RIP into RCX
+ *      and user RFLAGS into R11 before jumping to LSTAR).
+ *   2. Stash NR into PT_SYSCALL_NR(regs->gp) (= HOST_ORIG_AX) and
+ *      flag is_user=1 — handle_syscall reads PT_SYSCALL_NR at its top
+ *      (arch/um/kernel/skas/syscall.c:25) and dispatches via
+ *      __NR_syscalls.
+ *   3. Propagate RCX → HOST_IP and R11 → HOST_EFLAGS so the
+ *      downstream view of "where is user" reflects the user's
+ *      continuation point, not the LSTAR-internal kernel state. The
+ *      bug-fix block at kvm-v1-archive/thread.c:3296-3306 documents
+ *      what happens otherwise: kernel-mode RFLAGS (with FMASK applied
+ *      — IF/DF/TF/IOPL/NT/AC cleared by SYSCALL's mask) leaks to the
+ *      syscall handler and any signal-delivery path, breaking
+ *      single-step / direction-flag semantics that user code relies
+ *      on.
+ *   4. Defensive UPT_SYSCALL_NR(regs) = -1 mirrors seccomp's pattern
+ *      at arch/um/backend/seccomp/trap_user.c:149 — handle_syscall
+ *      itself overwrites it from PT_SYSCALL_NR at line 25 of
+ *      syscall.c, so the assignment below is shape-matching for
+ *      cross-backend symmetry rather than load-bearing.
+ *
+ * GPRs are already populated in regs->gp[] by C.3's
+ * kvm_v2_marshal_from_kvm_regs (vcpu.c:kvm_v2_vcpu_run runs the
+ * marshal BEFORE the exit-reason switch fires). No KVM_GET_REGS.
+ *
+ * On return from handle_syscall, regs->gp[HOST_AX] holds the syscall
+ * return value. D.3 will marshal it into kvm_run->s.regs.regs.rax
+ * and OR KVM_SYNC_X86_REGS into kvm_dirty_regs so the next KVM_RUN
+ * delivers the value to user via the trampoline's sysretq. D.2 stops
+ * one step short — the marshal-out comment block below is the seam.
+ *
+ * vcpu_fd is currently unread inside the helper; D.3 / D.4 may want
+ * it for explicit ioctls (e.g. KVM_SET_REGS for any field
+ * KVM_CAP_SYNC_REGS doesn't cover, or per-trap MSR queries). Reserved
+ * here so D.3 does not have to widen the signature.
+ *
+ * Returns 0 on success or -ENOTSUPP on an unexpected port (Phase E
+ * territory). Errors from handle_syscall are not propagated — that
+ * function panics rather than returning errno on the conditions
+ * relevant to the trap loop, matching the v1 archive's contract.
+ */
+int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
+			  struct kvm_run *run,
+			  int vcpu_fd)
+{
+	unsigned long syscall_nr;
+
+	(void)vcpu_fd;	/* reserved for D.3 (marshal-out path) */
+
+	/*
+	 * Only port we handle today is the SYSCALL trap. Other ports
+	 * are Phase E.3's exception classes (PF/GP/UD/...). The caller
+	 * (kvm_v2_vcpu_run's switch-arm) panics on unknown exit
+	 * reasons; this defensive double-check keeps the helper safe to
+	 * call from any future site that doesn't pre-screen the port.
+	 */
+	if (run->io.port != UM_KVM_TRAP_SYSCALL) {
+		pr_err("um: kvm-v2 io_trap: unexpected port %#x (direction=%u size=%u)\n",
+		       run->io.port, run->io.direction, run->io.size);
+		return -ENOTSUPP;
+	}
+
+	/*
+	 * C.3's marshal-from-kvm-regs already populated regs->gp[] from
+	 * kvm_run->s.regs.regs (sync_regs path) before this helper was
+	 * called — see vcpu.c:kvm_v2_vcpu_run (post-KVM_RUN marshal
+	 * runs before the exit-reason switch fires). RAX holds the
+	 * user's syscall NR.
+	 */
+	syscall_nr = regs->gp[HOST_AX];
+
+	/*
+	 * Stash NR into the SYSCALL_NR slot handle_syscall reads, and
+	 * flag user-mode entry. Mirrors v1 archive's kvm_decode_syscall
+	 * at kvm-v1-archive/thread.c:3284-3285.
+	 */
+	PT_SYSCALL_NR(regs->gp) = syscall_nr;
+	regs->is_user = 1;
+
+	/*
+	 * Post-SYSCALL semantics: user RIP arrives in RCX, user RFLAGS
+	 * in R11 (saved by the SYSCALL instruction itself before the
+	 * CPU jumped to MSR_LSTAR). For handle_syscall + downstream
+	 * signal-delivery to see the right "user is at" state, copy
+	 * CX→IP and R11→EFLAGS. The bug-fix comment block at
+	 * kvm-v1-archive/thread.c:3296-3306 explains the consequence of
+	 * skipping this: kernel-mode RFLAGS (with FMASK applied —
+	 * IF/DF/TF/IOPL/NT/AC cleared) leaks into the syscall handler's
+	 * view of user state, breaking direction-flag and single-step
+	 * semantics that user-mode relies on across the SYSCALL
+	 * boundary.
+	 */
+	regs->gp[HOST_IP]     = regs->gp[HOST_CX];
+	regs->gp[HOST_EFLAGS] = regs->gp[HOST_R11];
+
+	/*
+	 * Defensive default per seccomp's pattern at
+	 * arch/um/backend/seccomp/trap_user.c:149.  handle_syscall
+	 * re-reads PT_SYSCALL_NR into UPT_SYSCALL_NR at its top
+	 * (arch/um/kernel/skas/syscall.c:25), so this assignment is
+	 * overwritten immediately. We still set it for cross-backend
+	 * symmetry — anyone diffing seccomp vs kvm-v2 marshal paths
+	 * should see the same shape on both sides.
+	 */
+	UPT_SYSCALL_NR(regs) = -1;
+
+	trace_um_backend_kvm_v2_iotrap_syscall_enter(run->io.port,
+						     syscall_nr);
+
+	handle_syscall(regs);
+
+	trace_um_backend_kvm_v2_iotrap_syscall_exit(run->io.port,
+						    regs->gp[HOST_AX]);
+
+	/*
+	 * D.3 marshal-out seam: regs->gp[HOST_AX] now holds the syscall
+	 * return value. D.3 will copy it into
+	 * kvm_run->s.regs.regs.rax and OR KVM_SYNC_X86_REGS into
+	 * kvm_run->kvm_dirty_regs so the next KVM_RUN delivers the
+	 * value via the trampoline's sysretq (which loads RAX from the
+	 * vCPU state KVM holds, not from `regs`). D.2 leaves the marshal
+	 * a no-op — kvm_v2_vcpu_run's existing C.3 path marshals the
+	 * full GPR set out before the next KVM_RUN, but it reads from
+	 * `regs->gp[]` into the mmap and that path runs BEFORE this
+	 * helper is called (via D.5's pre-KVM_RUN marshal-in), not
+	 * after. D.3 closes the loop.
+	 */
+
+	return 0;
 }
