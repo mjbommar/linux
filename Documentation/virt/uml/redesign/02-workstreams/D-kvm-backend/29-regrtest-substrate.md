@@ -367,14 +367,45 @@ task_struct utime accounting on every guest entry/exit, or
 (b) delivering a host-side periodic timer that polls stub-child
 rusage and synthesizes SIGVTALRM at the appropriate cadence.
 
-**Memo 28 Part I.5's R4 worker-owns-process design naturally fixes
-this**: each guest mm gets its own host worker process that
-*itself* runs guest user code in user mode, so `setitimer(VIRTUAL)`
-on the worker tracks the right user time. The reproducer
-(`itimer_virtual.c`) is now a 1-second diagnostic that will flip
-from EXPECTED_FAIL to PASS automatically once R4 lands and v2
-docks. No seccomp-side fix is worth the engineering cost given
-the structural fix is already on the path.
+**Original (and incorrect) prediction**: Memo 28 Part I.5's R4
+worker-owns-process design will naturally fix this — each guest
+mm gets its own host worker process that itself runs guest user
+code in user mode, so `setitimer(VIRTUAL)` on the worker tracks
+the right user time. The reproducer (`itimer_virtual.c`) flips
+from EXPECTED_FAIL to PASS automatically once R4 lands.
+
+**Correction — 2026-04-28 (post-E.3d.2)**: this prediction is
+wrong, surfaced by running the substrate gate under
+WORKER_PROCESS=y after E.3d.2 (`f77e62d4e031`) landed.
+`itimer_virtual` remains EXPECTED_FAIL with `sigvtalrm_count=0`
+under WORKER_PROCESS=y, identical to the WORKER_PROCESS=n
+baseline. Reason: the original Part I.5 design assumed the
+worker would itself run guest user-mode code; E.3d.2's actual
+design keeps the stub child as the executor (one stub child per
+mm, inside the worker; spawner drives `set_stub_state` /
+`get_stub_state` cross-process via memfd-shared `stub_data`).
+Guest user-mode CPU time accumulates on the **stub child**, not
+the worker; spawner-side `task->utime` stays at 0. R4 doesn't
+shift this.
+
+**Real fix paths** (none in R4's scope; documented in memo 28
+Part M.4):
+
+- **(a) Stub-child rusage aggregation.** Periodic
+  `getrusage(RUSAGE_CHILDREN)` poll on the spawner; synthesize
+  utime updates into the originating guest task's `task->utime`.
+  Cheap, doesn't require R4.
+- **(b) Stub-child-side setitimer.** Forward the guest task's
+  `setitimer(VIRTUAL)` into the stub child via the existing
+  syscall_fd_map plumbing; SIGVTALRM raised on the stub child
+  relays back via the existing SIGSYS/futex path as a TIF_SIGPENDING.
+- **(c) Collapse stub child into a worker pthread.** Guest user
+  code runs in a pthread inside the worker; setitimer on the
+  worker tracks the right user time. Complete redesign — far
+  beyond R4's budget.
+
+The reproducer remains a 1-second diagnostic; we now know the
+EXPECTED_FAIL → PASS flip needs separate work, not R4.
 
 §2.5.6 (substrate gate): the reproducer suite *is* the gate. Wire
 into `tools/testing/selftests/um/Makefile` (done) and use as the
