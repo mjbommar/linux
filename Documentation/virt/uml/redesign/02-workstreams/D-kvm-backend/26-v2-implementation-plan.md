@@ -1156,36 +1156,52 @@ a focused test.
 
 ---
 
-## Phase F — Signal/preemption (1 week)
+## Phase F — Signal/preemption (1 week) — **EFFECTIVELY COMPLETE**
 
 **Goal**: SIGALRM (UML's timer-driven preemption) cleanly preempts
 KVM_RUN; no other host signal interferes with KVM_RUN.
 
-### F.1 — `signal.c`: per-vCPU sigmask (3 days)
+All three F.1/F.2/F.3 components landed during the Phase D rollout
+because the same KVM_RUN dispatch loop needed signal handling to
+function at all. Exit criterion validated empirically (2026-04-29):
+a 3-second CPU-bound static binary advances `CLOCK_MONOTONIC`
+through 3 seconds of wall-clock time, executing 5.8 billion
+iterations — only possible if SIGALRM-driven preemption is letting
+UML's timer subsystem run between dispatches.
 
-- At vCPU init, install `KVM_SET_SIGNAL_MASK` with everything blocked
-  except `SIGALRM`.
-- v1 also unblocked `KVM_UM_KICK_SIGNAL` (SIGRTMIN+5) for cross-vCPU
-  shootdown — **v2 doesn't need this** because TDP + mmu_notifier
-  handle cross-vCPU coherence.
-- Per-vCPU pthread sigmask set via `pthread_sigmask` at thread start.
+### F.1 — `signal.c`: per-vCPU sigmask — **DONE** (`5297fe2bd165`)
 
-### F.2 — Preemption-on-SIGALRM (2 days)
+`kvm_v2_install_signal_mask` at vcpu_create installs
+`KVM_SET_SIGNAL_MASK` with sigfillset minus SIGALRM, paired with
+`unblock_signals` after KVM_RUN to drain UML's deferred-signal
+queue. Originally landed as D.5-fix-2 (the .vcpu_run flip
+required this to make boot progress at all).
 
-- KVM_RUN exits with -EINTR when SIGALRM arrives.
-- Dispatch loop catches -EINTR, marshals current state, calls
-  `interrupt_end()` (which runs UML's scheduler), re-enters KVM_RUN.
-- Standard pattern, well-trodden in v1.
+v1 also unblocked `KVM_UM_KICK_SIGNAL` (SIGRTMIN+5) for cross-vCPU
+shootdown — **v2 doesn't need this** because TDP + mmu_notifier
+handle cross-vCPU coherence.
 
-### F.3 — No bootstrap-window special handling (2 days)
+### F.2 — Preemption-on-SIGALRM — **DONE** (`f0e4d1d95c2e`)
+
+`kvm_v2_vcpu_run` (vcpu.c:1217+) catches `-EINTR` from KVM_RUN,
+calls `kvm_v2_marshal_from_kvm_regs` to read the post-SIGALRM
+guest state from sync-regs (KVM commits state on
+KVM_EXIT_INTR per `arch/x86/kvm/x86.c::kvm_arch_vcpu_ioctl_run`),
+runs `unblock_signals` to drain UML's deferred-signal queue, and
+returns to userspace() which calls `interrupt_end()` and
+re-dispatches. v1's archive shape at thread.c:3939+5121-5127.
+
+### F.3 — No bootstrap-window special handling — **DONE** (architectural)
 
 v1 needed special handling for "EINTR fired mid-bootstrap-IRETQ"
-(memo 22 §"EINTR-bootstrap-RIP-preservation"). v2 has no bootstrap
-sequence (Phase D and E eliminated it), so no special case. EINTR
-just re-enters KVM_RUN with the same kregs.
+(memo 22 §"EINTR-bootstrap-RIP-preservation"). v2 has no
+bootstrap-IRETQ stub — task #87's bootstrap-IRETQ approach was
+replaced at 32a7603236b0 by direct CPL=3 SREGS install. EINTR
+just re-marshals via sync-regs and re-enters KVM_RUN with the
+post-SIGALRM RIP, no special case needed.
 
-**Exit criteria:** SIGALRM-driven preemption works; UML's scheduler
-runs other tasks; original task resumes correctly.
+**Exit criterion validated**: SIGALRM preemption works empirically;
+3-sec CPU-bound test runs cleanly with timer advancing.
 
 ---
 
