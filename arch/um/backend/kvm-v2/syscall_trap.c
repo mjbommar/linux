@@ -198,6 +198,25 @@ int kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm)
 	       kvm_v2_lstar_bytes, sizeof(kvm_v2_lstar_bytes));
 
 	/*
+	 * Boot-time self-check: read back the bytes we just wrote and
+	 * panic on any mismatch. The trampoline is on the hot path post-
+	 * D.5; a corrupt LSTAR is one of the worst possible failure
+	 * modes (guest jumps to garbage at CPL=0). One memcmp at boot
+	 * costs nothing and catches: byte-table corruption between
+	 * compile and load, accidental MD5-style optimizer mangling,
+	 * write-protected page silently dropping the memcpy, etc.
+	 */
+	if (memcmp((const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
+		   kvm_v2_lstar_bytes,
+		   sizeof(kvm_v2_lstar_bytes)) != 0) {
+		const u8 *got = (const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET;
+
+		panic("um: kvm-v2 trampoline_install: LSTAR readback MISMATCH at kva=%p+%#x — got %02x %02x %02x %02x %02x, want e6 f4 48 0f 07",
+		      kva, KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
+		      got[0], got[1], got[2], got[3], got[4]);
+	}
+
+	/*
 	 * Drop host-side write privilege. set_memory_ro is a no-op stub
 	 * on UML (CONFIG_ARCH_HAS_SET_MEMORY is not selected by
 	 * arch/um/Kconfig — see include/linux/set_memory.h:11), so this
