@@ -608,13 +608,20 @@ int kvm_v2_install_per_vcpu_ist_tss(struct kvm_v2_vm *vm,
 		return -EINVAL;
 	}
 
+	/*
+	 * E.3.5 root-cause fix: x86 hardware bits, not UML software bits.
+	 * P (0x1) | RW (0x2) | A (0x20) | D (0x40). UML _PAGE_DIRTY=0x100
+	 * is bit 8 (ignored on leaf) but UML _PAGE_ACCESSED=0x080 is bit 7
+	 * = PS-bit, which on a leaf marks 2MB page → silent map-corruption.
+	 */
+	#define V2_X86_P_LOCAL  (1ull << 0)
+	#define V2_X86_RW_LOCAL (1ull << 1)
+	#define V2_X86_A_LOCAL  (1ull << 5)
+	#define V2_X86_D_LOCAL  (1ull << 6)
+	#define V2_X86_LEAF_RW (V2_X86_P_LOCAL | V2_X86_RW_LOCAL | V2_X86_A_LOCAL | V2_X86_D_LOCAL)
 	pte_table = (u64 *)vm->trampoline_pte_kva;
-	pte_table[ist_pte_idx] = (u64)(ist_stack_gpa |
-				       _PAGE_PRESENT | _PAGE_RW |
-				       _PAGE_ACCESSED | _PAGE_DIRTY);
-	pte_table[tss_pte_idx] = (u64)(tss_gpa |
-				       _PAGE_PRESENT | _PAGE_RW |
-				       _PAGE_ACCESSED | _PAGE_DIRTY);
+	pte_table[ist_pte_idx] = (u64)(ist_stack_gpa | V2_X86_LEAF_RW);
+	pte_table[tss_pte_idx] = (u64)(tss_gpa       | V2_X86_LEAF_RW);
 
 	/*
 	 * Stash the kva/gpa/gva trio on the vcpu — the SREGS.tr install
@@ -771,10 +778,18 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 	 * so we don't route through set_pte (which adds NEEDSYNC tracking
 	 * the guest TDP walker doesn't understand).
 	 */
+	/*
+	 * E.3.5 root-cause fix (2026-04-29): write x86 hardware bits, not
+	 * UML's software-only bits — see syscall_trap.c::kvm_v2_kernel_
+	 * half_install for the full rationale. UML _PAGE_ACCESSED=0x080
+	 * = x86 PS-bit on a leaf would silently mark it as a 2MB page;
+	 * use x86 A-bit (0x20) here.
+	 */
+	#define V2_X86_LEAF_RO ((1ull << 0) | (1ull << 5))
 	pte_table = (u64 *)vm->trampoline_pte_kva;
-	pte_table[1] = (u64)(idt_gpa      | _PAGE_PRESENT | _PAGE_ACCESSED);
-	pte_table[2] = (u64)(handlers_gpa | _PAGE_PRESENT | _PAGE_ACCESSED);
-	pte_table[3] = (u64)(gdt_gpa      | _PAGE_PRESENT | _PAGE_ACCESSED);
+	pte_table[1] = (u64)(idt_gpa      | V2_X86_LEAF_RO);
+	pte_table[2] = (u64)(handlers_gpa | V2_X86_LEAF_RO);
+	pte_table[3] = (u64)(gdt_gpa      | V2_X86_LEAF_RO);
 
 	/*
 	 * Stash on the VM struct BEFORE the per-vCPU SREGS update —

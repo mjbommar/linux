@@ -420,30 +420,42 @@ int kvm_v2_kernel_half_install(struct kvm_v2_vm *vm)
 	pte_pa = __pa(pte_kva);
 
 	/*
-	 * Build the PUD page: entry [0] points at the PMD page with
-	 * _KERNPG_TABLE shape (kernel non-leaf: P|RW|A|D, US=0). Other 511
-	 * entries stay zero (not-present) from __GFP_ZERO. Direct u64
-	 * write — these aren't UML-managed pgtable structures so we don't
-	 * route through set_pud (which adds NEEDSYNC tracking that the
-	 * guest TDP walker doesn't understand and KVM doesn't honour).
+	 * E.3.5 root-cause fix (2026-04-29): UML's _KERNPG_TABLE writes
+	 * software-only bits at hardware-reserved positions (UML _PAGE_RW=
+	 * 0x020 = bit 5 collides with x86 A-bit; UML _PAGE_ACCESSED=0x080
+	 * = bit 7 collides with x86 PS-bit; UML _PAGE_DIRTY=0x100 = bit 8).
+	 * KVM's TDP MMU walks these tables as REAL x86 hardware page-table
+	 * entries, so writing UML bits triggers reserved-bit faults during
+	 * the page-table walk — surfaces as kvm_inj_exception #PF
+	 * (error_code = PFERR_RSVD), and at the user-half walk surfaces as
+	 * the EXIT_NPF storm + reinjected #PF that drove the EINTR-only
+	 * boot symptom (memo 26 §E.3.5).
+	 *
+	 * Use raw x86 hardware bits here: P (0x1) | RW (0x2) | A (0x20).
+	 * These pages are KVM-owned (not UML-managed pgtables): the
+	 * trampoline kernel-half PT chain is allocated by buddy and never
+	 * passes through UML's set_pte path, so writing x86 bits directly
+	 * is safe — UML's tlb.c will never read them.
+	 *
+	 * NOTE: this fixes the kernel-half walk only (PML4[448] subtree).
+	 * The user-half (PML4[0..255], walked from CR3 = __pa(active_mm->
+	 * pgd)) still has UML-bit entries because UML kernel code populates
+	 * the pgd via set_pte_at — every PT entry there has UML bits.
+	 * KVM's TDP walk of the user RIP will continue to fail until v2
+	 * grows a per-mm shadow PT (v1's approach) or UML's PTE bit layout
+	 * is migrated to x86-compatible bits. This commit verifies the bit-
+	 * encoding hypothesis on the kernel-half install; the user-half
+	 * fix is a Phase E.4+ scope.
 	 */
-	((u64 *)pud_kva)[0] = (u64)(pmd_pa | _KERNPG_TABLE);
+	#define V2_X86_P  (1ull << 0)
+	#define V2_X86_RW (1ull << 1)
+	#define V2_X86_A  (1ull << 5)
+	#define V2_X86_KERN_NONLEAF (V2_X86_P | V2_X86_RW | V2_X86_A)
+	#define V2_X86_KERN_LEAF_RO (V2_X86_P | V2_X86_A)
 
-	/* PMD page: entry [0] points at the PTE page, same kernel
-	 * non-leaf shape. */
-	((u64 *)pmd_kva)[0] = (u64)(pte_pa | _KERNPG_TABLE);
-
-	/*
-	 * PTE page: entry [0] points at the trampoline page with the leaf
-	 * flags. _PAGE_PRESENT is required for the walk to succeed.
-	 * _PAGE_ACCESSED is set up-front so the CPU doesn't need to
-	 * write-back an A-bit update on first access (which would fault if
-	 * the leaf were RO without the A bit pre-set on some CPU
-	 * generations). No _PAGE_RW (RO trampoline). No _PAGE_USER (US=0;
-	 * kernel-only). UML has no _PAGE_NX so executable is implicit.
-	 */
-	((u64 *)pte_kva)[0] = (u64)(vm->trampoline_gpa |
-				     _PAGE_PRESENT | _PAGE_ACCESSED);
+	((u64 *)pud_kva)[0] = (u64)(pmd_pa | V2_X86_KERN_NONLEAF);
+	((u64 *)pmd_kva)[0] = (u64)(pte_pa | V2_X86_KERN_NONLEAF);
+	((u64 *)pte_kva)[0] = (u64)(vm->trampoline_gpa | V2_X86_KERN_LEAF_RO);
 
 	/*
 	 * Seed swapper_pg_dir[448]. UML's pgd_alloc memcpy at
@@ -460,7 +472,16 @@ int kvm_v2_kernel_half_install(struct kvm_v2_vm *vm)
 	 * set_pgd either) and keep the value visible at the same address
 	 * UML's mm code reads.
 	 */
-	entry = (unsigned long)(pud_pa | _KERNPG_TABLE);
+	/*
+	 * The PML4[448] entry is also written with x86 bits — same reason
+	 * as the PUD/PMD/PTE writes above. swapper_pg_dir[448] propagates
+	 * to every future mm via pgd_alloc's memcpy, so every UML mm will
+	 * have the kernel-half pgd entry in x86-compatible form. UML kernel
+	 * code that reads pgd_val(swapper_pg_dir[448]) directly may see
+	 * unexpected bits — but the only consumer of that value is the
+	 * pgd_alloc memcpy itself, which doesn't interpret the bits.
+	 */
+	entry = (unsigned long)(pud_pa | V2_X86_KERN_NONLEAF);
 	swapper_pg_dir[448] = __pgd(entry);
 
 	/*
