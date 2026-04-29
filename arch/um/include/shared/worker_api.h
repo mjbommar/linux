@@ -72,34 +72,6 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out);
 int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg);
 
 /*
- * worker_run_pending_syscalls — drain SYSCALL_REQs queued by the
- * dispatcher and execute them under the calling task's `current`
- * (memo 28 Part C.E "wait-queue bounce" / E.3d.1).
- *
- * Why this exists: the per-worker dispatcher kthread (E.3c) cannot
- * call handle_syscall directly. handle_syscall's callees deref
- * `current` heavily — sys_call_table[] entries pull credentials,
- * files, fs, signals, ns, seccomp, ptrace from current — and the
- * dispatcher's task_struct is a kthread, not the originating guest
- * task. The dispatcher therefore enqueues each SYSCALL_REQ on the
- * worker's `pending_reqs` list and wakes `reply_wait`; the
- * originating guest task (E.3d.2: the vcpu_run-equivalent loop)
- * calls this function, which fields the request under its own real
- * `current`, runs handle_syscall, and ships SYSCALL_REP back over
- * the IPC socket via worker_send_msg_for_mm.
- *
- * Blocks in wait_event_interruptible until either a request is
- * queued or the worker's dispatcher exits. Loops forever; returns
- * only on:
- *   -EINTR    a signal arrived (caller can re-enter)
- *   -ENODEV   the mm has no worker, or the dispatcher has exited
- *
- * E.3d.1 lands this API but no production caller invokes it yet —
- * E.3d.2 reroutes vcpu_run through it.
- */
-int worker_run_pending_syscalls(struct mm_struct *mm);
-
-/*
  * worker_drive_vcpu_run — ship one outer vcpu_run iteration to the
  * worker and read its VCPU_DONE reply (memo 28 E.3d.2).
  *
@@ -146,10 +118,6 @@ static inline int  worker_alloc_stub_for_mm(struct mm_struct *mm,
 }
 static inline int  worker_send_msg_for_mm(struct mm_struct *mm,
 					  const struct worker_msg *msg)
-{
-	return -ENODEV;
-}
-static inline int  worker_run_pending_syscalls(struct mm_struct *mm)
 {
 	return -ENODEV;
 }
