@@ -6,3 +6,4 @@
 
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += init.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += ops.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += context.o

@@ -10,7 +10,31 @@
 #ifndef __ARCH_UM_BACKEND_KVM_V2_H
 #define __ARCH_UM_BACKEND_KVM_V2_H
 
+#include <linux/list.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
+
 #include <backend.h>
+
+struct kvm_cpuid2;
+
+/*
+ * Per-UML-kernel-invocation VM context (memo 26 §A.2). Single instance
+ * lives in context.c; init.c reaches it via kvm_v2_vm_get() once
+ * kvm_v2_vm_create() has succeeded. memslots is populated by Phase B
+ * (KVM_SET_USER_MEMORY_REGION); cpuid is the curated CPUID2 buffer
+ * that A.3 builds + installs on its placeholder vCPU (deferred out of
+ * A.2 because the buddy allocator isn't up at init_backend time —
+ * see context.c file-scope comment).
+ */
+struct kvm_v2_vm {
+	int			kvm_fd;
+	int			vm_fd;
+	u64			caps;
+	struct kvm_cpuid2	*cpuid;
+	struct list_head	memslots;
+	spinlock_t		lock;
+};
 
 /*
  * Per memo 26 §A.1: HOT ops (vcpu_run, mm_region_added, mm_region_removed,
@@ -29,5 +53,10 @@ extern const struct um_backend_ops um_backend_kvm_v2_ops;
 int  kvm_v2_probe(void);
 int  kvm_v2_init(const struct um_backend_args *args);
 void kvm_v2_shutdown(void);
+
+/* Per-VM context lifecycle — defined in context.c (memo 26 §A.2). */
+int  kvm_v2_vm_create(int kvm_fd, u64 caps);
+void kvm_v2_vm_destroy(void);
+struct kvm_v2_vm *kvm_v2_vm_get(void);
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

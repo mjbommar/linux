@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase A.1: probe + capability negotiation.
+ * UML backend v2 (KVM) — backend lifecycle (probe + cap negotiation
+ * here; per-VM state in context.c since memo 26 §A.2).
  *
- * Per memo 26 §A.1 + memo 27 Part D.5. Scope is intentionally narrow:
- * confirm the host can run KVM, learn which extensions are available,
- * and emit the observability tracepoint. No KVM_CREATE_VM, no vCPU,
- * no memslot allocator — those are A.2 / A.3 / B.x respectively.
+ * Per memo 26 §A.1-A.2 + memo 27 Part D.5. probe + cap negotiation
+ * confirm the host can run KVM and learn which extensions are
+ * available; init then hands the /dev/kvm fd to kvm_v2_vm_create
+ * which issues KVM_CREATE_VM and friends. No vCPU / memslot allocator
+ * yet — those are A.3 / Phase B respectively.
  *
  * Why probe + init are separate (mirrors the v1 archive's design,
  * memo 21 §D-03a): probe() is the arbiter's "is this backend usable
@@ -46,9 +48,15 @@
 #define KVM_V2_CAPS_REQUIRED \
 	(KVM_V2_CAP_SYNC_REGS | KVM_V2_CAP_SET_GUEST_DEBUG)
 
-static int kvm_v2_kvm_fd = -1;	/* /dev/kvm; closed in shutdown() */
+/*
+ * Memo 26 §A.2 closes out A.1's open question — the /dev/kvm fd no
+ * longer lives in a module-global; init.c opens it locally, hands it
+ * to kvm_v2_vm_create(), and from there it lives on struct kvm_v2_vm
+ * (accessed via kvm_v2_vm_get()). api_version stays here as a
+ * lifetime-of-backend fact about the host kernel; kvm_v2_caps moves
+ * to vm.caps inside kvm_v2_vm_create.
+ */
 static int kvm_v2_api_version;
-static u64 kvm_v2_caps;
 
 /*
  * Probe is the arbiter's go/no-go check. Open /dev/kvm, confirm the
@@ -121,9 +129,8 @@ int kvm_v2_init(const struct um_backend_args *args)
 
 	(void)args;
 
-	if (kvm_v2_kvm_fd >= 0) {
-		pr_warn("um: kvm-v2 init: called twice (kvm_fd=%d)\n",
-			kvm_v2_kvm_fd);
+	if (kvm_v2_vm_get()) {
+		pr_warn("um: kvm-v2 init: called twice (vm already created)\n");
 		return -EBUSY;
 	}
 
@@ -161,13 +168,22 @@ int kvm_v2_init(const struct um_backend_args *args)
 		goto err_close;
 	}
 
-	kvm_v2_kvm_fd = fd;
-	kvm_v2_caps   = caps;
-
 	trace_um_backend_kvm_v2_init(fd, kvm_v2_api_version, caps);
 
-	pr_info("um: kvm-v2 probed: kvm_fd=%d api=%d caps=%#llx (A.1 — vm/vcpu deferred)\n",
+	pr_info("um: kvm-v2 probed: kvm_fd=%d api=%d caps=%#llx (A.2 — creating VM)\n",
 		fd, kvm_v2_api_version, caps);
+
+	/*
+	 * Hand /dev/kvm to context.c. From here on the fd lives on
+	 * struct kvm_v2_vm and is closed by kvm_v2_vm_destroy alongside
+	 * the VM fd (see context.c for the close-order rationale).
+	 */
+	rc = kvm_v2_vm_create(fd, caps);
+	if (rc) {
+		pr_err("um: kvm-v2 init: kvm_v2_vm_create failed (%d)\n", rc);
+		goto err_close;
+	}
+
 	return 0;
 
 err_close:
@@ -177,8 +193,5 @@ err_close:
 
 void kvm_v2_shutdown(void)
 {
-	if (kvm_v2_kvm_fd >= 0) {
-		os_close_file(kvm_v2_kvm_fd);
-		kvm_v2_kvm_fd = -1;
-	}
+	kvm_v2_vm_destroy();
 }
