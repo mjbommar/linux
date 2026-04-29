@@ -499,8 +499,51 @@ void userspace(struct uml_pt_regs *regs)
 	/* Handle any immediate reschedules or signals */
 	interrupt_end();
 
-	while (1)
+	while (1) {
 		um_backend_dispatch(vcpu_run, regs);
+		/*
+		 * E.4-followup: drain pending signal/scheduler work AFTER
+		 * each backend dispatch (mirrors v1's pattern at
+		 * arch/um/backend/kvm-v1-archive/...).
+		 *
+		 * For seccomp: redundant — trap_user.c:184 already calls
+		 * interrupt_end before returning from vcpu_run. do_signal
+		 * is idempotent on already-drained state, so the second
+		 * call is a no-op.
+		 *
+		 * For kvm-v2: this is the architecturally-correct
+		 * placement vs an inline interrupt_end inside
+		 * kvm_v2_handle_io_trap's syscall arm. The inline placement
+		 * was tried at ad06c7f5164c and reverted at 8955ce7f878d
+		 * because do_signal's syscall-restart RIP rewind (regs->ip
+		 * -= 2) interacted destructively with v2's SYSRETQ-based
+		 * syscall return: marshal-back at syscall_trap.c:1418-1420
+		 * propagates the rewound RIP into kvm_run->s.regs.regs.rcx,
+		 * SYSRETQ pops RCX→RIP, lands at non-canonical or unexpected
+		 * RIP, guest faults SIGILL.
+		 *
+		 * Placing interrupt_end here (after marshal-back already
+		 * happened) means do_signal's RIP rewrites land in
+		 * pt_regs.gp[HOST_IP] for the NEXT dispatch's marshal-to
+		 * to consume — not into the syscall_trap.c:1418-1420 RCX
+		 * lift. Under v2 the next dispatch starts with marshal-to
+		 * (vcpu.c:1317) writing pt_regs to kvm_run.s.regs.regs.rip,
+		 * and KVM_RUN re-enters at the trampoline's post-OUT
+		 * SYSRETQ. SYSRETQ pops the (stale, post-syscall) RCX —
+		 * effectively losing the syscall restart but landing safely.
+		 * That's the same as the kernel's "-ERESTART* → -EINTR"
+		 * conversion for the no-handler case — a graceful
+		 * degradation rather than a crash.
+		 *
+		 * For the signal-handler-delivery case (do_signal sets up
+		 * sigframe and rewrites HOST_IP to a handler VA), the next
+		 * dispatch's marshal-to + KVM_RUN re-enters at the same
+		 * SYSRETQ and pops stale RCX. That handler's RIP doesn't
+		 * propagate either — a real Phase F.2 fix needs IRETQ-style
+		 * entry on signal-delivery paths. Tracked as #94.
+		 */
+		interrupt_end();
+	}
 }
 
 void new_thread(void *stack, jmp_buf *buf, void (*handler)(void))
