@@ -1179,8 +1179,8 @@ void kvm_v2_marshal_to_kvm_regs(struct kvm_regs *dst,
  * kvm_regs_to_uml_regs). C.3 replaces this with
  * KVM_CAP_SYNC_REGS reads from vcpu->kvm_run->s.regs.regs.
  */
-static void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
-					 const struct kvm_regs *src)
+void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
+				  const struct kvm_regs *src)
 {
 	unsigned long *gp = dst->gp;
 
@@ -1611,13 +1611,19 @@ static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu)
 		a->kvm_v2.fpu_valid = false;	/* one-shot */
 		was_valid = 1;
 	} else {
-		memset(&init_fpu, 0, sizeof(init_fpu));
-		init_fpu.fcw   = 0x037f;	/* x87 control word reset */
-		init_fpu.mxcsr = 0x1f80;	/* MXCSR reset */
-		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
-				      (unsigned long)&init_fpu);
-		if (rc < 0)
-			return rc;
+		/*
+		 * E.4 hypothesis test (2026-04-29): leave per-vCPU FPU
+		 * untouched on re-entry. Earlier shape unconditionally
+		 * KVM_SET_FPU'd architectural reset values on every dispatch
+		 * where fpu_valid=false — which destroyed XMM/x87 state
+		 * mid-instruction whenever a task re-entered after a #PF
+		 * (lazy COW etc). Glibc varargs save XMM0..XMM7 to stack via
+		 * MOVAPS in the prologue; if a #PF fires DURING the save (or
+		 * during any later XMM-touching op in the same call), the
+		 * post-fault re-entry zeroed XMM and the resumed instruction
+		 * read garbage.
+		 */
+		(void)init_fpu;
 		was_valid = 0;
 	}
 
