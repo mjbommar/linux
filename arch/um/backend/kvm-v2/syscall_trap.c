@@ -1358,6 +1358,35 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	handle_syscall(regs);
 
 	/*
+	 * Drain UML's pending signal/scheduler work AFTER the syscall
+	 * returns. seccomp's analogous path at
+	 * arch/um/backend/seccomp/trap_user.c:184 calls interrupt_end()
+	 * for the same reason: handle_syscall may set the syscall return
+	 * value to -ERESTARTSYS / -ERESTARTNOINTR / -ERESTARTNOHAND when
+	 * the syscall was interrupted by a signal. interrupt_end runs
+	 * resume_user_mode_work which fires do_signal — and do_signal's
+	 * handle_signal / restart_syscall path translates the kernel-
+	 * internal -ERESTART* codes into either:
+	 *   (a) syscall restart (rewind RIP to the syscall instruction,
+	 *       reset RAX to the syscall NR) if the pending signal has
+	 *       SA_RESTART, OR
+	 *   (b) -EINTR as the user-visible return value otherwise.
+	 *
+	 * Without this, -ERESTARTSYS (errno 512) leaks to userspace.
+	 * Caught under v2 boot smoke by class-b-process's fork_exec_wait
+	 * reproducer: 50× fork+execve(/bin/true)+waitpid loop reported
+	 * `bad_wait=1 errno=512` because one of the waitpid calls was
+	 * interrupted by SIGCHLD-from-already-dead-child and the
+	 * -ERESTARTSYS internal-only code reached the userspace caller.
+	 *
+	 * Place AFTER handle_syscall + BEFORE marshal-back so do_signal
+	 * can rewrite regs->gp[HOST_IP]/[HOST_AX] for the syscall-
+	 * restart case before we propagate the GPRs back to KVM via
+	 * marshal_to_kvm_regs.
+	 */
+	interrupt_end();
+
+	/*
 	 * D.3 marshal-out: copy regs->gp[] back into kvm_run->s.regs.regs
 	 * + OR KVM_SYNC_X86_REGS into kvm_dirty_regs. Critical for SYSRETQ:
 	 * the trampoline's `sysretq` reads RIP from RCX and RFLAGS from R11.
