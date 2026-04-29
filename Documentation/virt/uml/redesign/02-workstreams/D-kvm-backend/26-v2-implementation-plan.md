@@ -845,12 +845,74 @@ initialized on /dev/tty0" + same VFS panic as seccomp = identical
 kernel-side trajectory. Reserved-bit fault eliminated. Substrate
 gate green PASS=25/FAIL=3/EXPECTED_FAIL=3 (seccomp regression-free).
 
-**Residual (Phase E.5 in flight)**: orthogonal bug - worker mm's
-user RIP page has empty leaf PTE (`pte[35] = 0`). UML's normal
-`set_pte_at` chain isn't populating the user mm before first
-KVM_RUN. Likely a Phase B / R4 issue: tlb.c -> `mm_region_added` ->
+**Residual (Phase E.5 in flight, corrected 2026-04-29 evening after
+codex audit response)**: empty user-RIP leaf PTE (`pte[35] = 0`) at
+first KVM_RUN. Earlier hypothesis ("tlb.c -> `mm_region_added` ->
 `seccomp_mm_region_added` populates the STUB CHILD's mm but not the
-spawner mm's pgd. Phase E.5 investigates.
+spawner mm's pgd") was **wrong**. The codex audit
+(`/tmp/codex_e5_audit_response.md` archived at session boundary)
+established two facts that overturn that hypothesis:
+
+1. **There is no separate "stub child mm with separate pgd".** The
+   stub child is a host process whose address-space mappings are
+   mirrored from UML's mm->pgd via `os_map_memory`. UML's mm->pgd IS
+   the source of truth. (`arch/um/kernel/trap.c:146,183` — fault flow
+   uses `current->mm`; `arch/um/kernel/tlb.c:269-271` — drain dispatch
+   walks the same mm->pgd to emit `mm_region_added` events.)
+
+2. **TDP semantics: a non-present *guest* PT entry does NOT exit to
+   userspace.** Per Intel SDM Vol.3C §28 + KVM's
+   `arch/x86/kvm/mmu/paging_tmpl.h::FNAME(walk_addr_generic)`, the
+   hardware injects #PF into the guest IDT directly. EXIT_NPF only
+   fires for GPA→HPA failures. Confirmed independently by gVisor's
+   design (sentry pre-populates user-half via
+   `address_space.go::mapLocked` + sentry's own ring0 IDT) and
+   kvmtool (`x86/kvm-cpu.c::prot64_sregs` pre-builds boot PML4).
+
+So the architecture for v2 IS:
+
+  KVM walks UML's pgd → finds non-present user leaf →
+  hardware-injects #PF → guest IDT[14] stub (E.1) →
+  `out al, port_pf ; iretq` → KVM_EXIT_IO →
+  `kvm_v2_handle_io_pf` (`arch/um/backend/kvm-v2/syscall_trap.c:896`)
+  → `segv_handler` → `do_page_fault` → `handle_mm_fault` →
+  `set_pte_at` populates mm->pgd → re-enter KVM_RUN
+
+This chain is **already implemented** (syscall_trap.c:896-992,
+already routes faultinfo through segv_handler). The empirical
+"EXIT_NPF on `pte[35]=0`" observation is **inconsistent** with TDP
+semantics — there's a different bug upstream of the guest-IDT walk.
+
+Top candidates per the audit (in priority order):
+
+1. **CR3 sync-regs lazy-commit** — first KVM_RUN walker uses CR3=0
+   instead of `__pa(active_mm->pgd)` because the
+   `KVM_SYNC_X86_SREGS` dirty-bit write in
+   `kvm_v2_load_user_sregs` (vcpu.c:1059-1105) isn't being honored.
+   Fix: force-commit via `KVM_GET_SREGS`+`KVM_SET_SREGS` pair before
+   first dispatch (empirically verified by E.5 subagent).
+
+2. **Memslot conflict** — Phase B per-region memslots (gpa=region->va,
+   `arch/um/backend/kvm-v2/context.c:75-150`) compete with the
+   physmem identity slot 0 (gpa=0..physmem_size, D.4b-pre at
+   `8fff1742bfb4`). When KVM walks UML's pgd and dereferences a PT
+   page by GPA = `__pa(kva)` (offset into physmem), per-region
+   memslots may shadow those GPAs and KVM reads zeros from a
+   user-VA region instead of UML's actual PT. Codex CLAIM C
+   (deferred to Phase H) is to drop per-region in favor of physmem-
+   only. May need to be pulled forward to E.5.
+
+3. **Exception bitmap** — confirm bit 14 (#PF) is NOT in the
+   intercept bitmap. If it is (perhaps via KVM defaults under some
+   host config), KVM intercepts #PF and the guest IDT never runs.
+   `kvm_exit reason EXCEPTION nr=14` in tracepoints would confirm.
+
+E.5 next steps: land Bug 1 fix as a focused commit (verified),
+re-run boot smoke; if the exit reason becomes `KVM_EXIT_IO`
+(handle_io_pf engaging) the original architecture engages and
+the chain completes; if `KVM_EXIT_NPF` persists, investigate
+candidate 2 with a memslot dump comparing per-region vs physmem
+identity GPA ranges.
 
 ### Lesson for future memo work
 
