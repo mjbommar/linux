@@ -679,41 +679,116 @@ already shipped; D.4b-pre's physmem memslot is its prerequisite.
 fallback because `.vcpu_run` doesn't flip until D.5); no MSR-set
 errors in `dmesg`; substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3.
 
-### D.5 — Flip `.vcpu_run`; validate against gate (3 days)
+### D.5 — Flip `.vcpu_run` (DEFERRED to Phase E activation)
 
-- **Single-line ops.c edit** at `arch/um/backend/kvm-v2/ops.c:69`:
-  `.vcpu_run = seccomp_vcpu_run` → `kvm_v2_vcpu_run`.
-- **Capability flag flips** at `ops.c:60-63`: `uses_stub_reaper`,
-  `has_syscall_stub_fd_map`, `stub_syscall_uses_futex`,
-  `stub_child_runs_seccomp` all → `false`. The stub child is no
-  longer in the loop — guest user code runs directly under KVM,
-  trapping via `out` to the in-spawner dispatcher (no per-mm
-  worker process, no SCM_RIGHTS round-trip, no futex on
-  `stub_data`).
-- **Gate validation**:
-  - cpython-parity 21/21 × 10 trials, 0 regressions.
-  - `single_dlopen × 100`, 0 flakes (Bug B structurally
-    impossible per the headline — trampoline never aliases
-    user-half).
-  - Substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3 must hold
-    bit-for-bit. The 3 expected-fails are stub-child-shape tests
-    that v2 deliberately doesn't honour; the 3 fails are
-    unrelated to D.
+**Original spec**: flip `.vcpu_run = seccomp_vcpu_run` → `kvm_v2_vcpu_run`,
+flip the four stub-child capability flags to false, run the headline
+gate (cpython 21/21 × 10 + single_dlopen × 100).
 
-**Phase D exit criteria**:
+**What actually happened (2026-04-29 attempt)**: the flip surfaced
+TWO Phase E dependencies that this memo's §D.5 specification didn't
+anticipate. Both were diagnosed in flight; the corresponding
+infrastructure landed (D.5-fix-1 + D.5-fix-2) but the flip itself
+was reverted because the gate criteria are unreachable without
+Phase E machinery.
 
-- Build clean both modes (=n, =y).
-- Boot smoke `backend=force=kvm-v2 init=/bin/true` rc=0 (no longer
-  rc=134 — v2 is now the live syscall path).
-- cpython-parity 21/21 across 10 consecutive trials, 0
-  regressions.
-- `single_dlopen × 100` produces 0 flakes.
-- Substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3 unchanged.
-- Bug B repro from memo 22 (user RIP loaded with corrupt pointer
-  via shadow-PT alias) does not reproduce — verified by replaying
-  the original failing seed: trampoline VA never appears in any
-  user-half PTE walk because PML4[448] is the only install
-  point.
+**Dependencies surfaced**:
+
+1. **Long-mode SREGS install required at vcpu_create.** The first
+   `KVM_RUN` returns `-EINVAL` because `kvm_is_valid_sregs` at
+   `arch/x86/kvm/x86.c:12426-12449` rejects EFER.LMA=1 with
+   CR0.PG=0. v2's per-dispatch `kvm_v2_load_user_sregs` only writes
+   CR3 / FS_BASE / GS_BASE / EFER — the rest of `kvm_run->s.regs.
+   sregs` is mmap-zero on first dispatch (KVM only populates the
+   sync-regs view via `store_regs()` after a successful exit, per
+   `arch/x86/kvm/x86.c:12748-12761`). v1 archive at
+   `kvm-v1-archive/thread.c:2843-2913` had the GET → overlay → SET
+   pattern v2 was missing. **Landed at `124cfefa342f` as
+   `kvm_v2_install_production_sregs` called from
+   `kvm_v2_vcpu_create_one`** with full long-mode CS/DS/SS, CR0
+   (PE|MP|NE|WP|PG), CR4 (PAE|OSFXSR|OSXMMEXCPT), EFER (SCE|LME|
+   LMA|NX), and seeded sync-regs mmap so first dispatch's dirty bit
+   doesn't ship zero state back through `__set_sregs`.
+
+2. **`KVM_SET_SIGNAL_MASK` + `unblock_signals()` required.** With
+   the SREGS fix, `KVM_RUN` now succeeded but every dispatch
+   immediately returned `-EINTR` because (a) signals were unmasked
+   at the host-thread level, and (b) UML's deferred-signal queue
+   never drained between dispatches. v1 archive at
+   `kvm-v1-archive/thread.c:71-124,3979` had the full pattern: a
+   `sigfillset` minus SIGALRM mask installed at vcpu_create
+   (everything blocked except the timer-driven preemption signal),
+   plus `unblock_signals()` after every `KVM_RUN` to drain UML's
+   deferred handlers. **Landed at `5297fe2bd165` as
+   `kvm_v2_install_signal_mask` + the `unblock_signals()` call in
+   `kvm_v2_vcpu_run`**.
+
+3. **Marshal-from-kvm_run on EINTR required.** D.3's original EINTR
+   path skipped the post-RUN GPR marshal-back, on the (incorrect)
+   theory that sync_regs might be incoherent on signal exits.
+   Diagnostic confirmed the opposite: KVM commits guest state on
+   `KVM_EXIT_INTR` (10) — sync_regs IS coherent. Without the
+   marshal, `regs->gp[HOST_IP]` kept the pre-RUN value forever and
+   every re-dispatch wrote that same RIP back. **Fixed in
+   `f0e4d1d95c2e`**.
+
+**Why the gate is still unreachable**: with all of the above in
+place, the guest still cannot advance any instruction. Diagnostic
+trace showed RIP stuck at the init binary entry point across every
+dispatch under KVM_EXIT_INTR. Blocking ALL signals confirmed the
+guest is in a fault loop — most likely #PF on first instruction
+fetch (the user PT walk doesn't have an entry yet) or #GP on
+segment access — and KVM has no IDT to dispatch the fault to. KVM
+either spins re-injecting (signals masked) or exits via
+SIGALRM-EINTR (signals unmasked) before a single instruction
+retires.
+
+**Phase E (memo 26 §E) is a hard precondition for the flip.**
+Until E.1 (IDT in dedicated guest page) + E.2 (per-vCPU IST stacks)
++ E.3 (exception handler dispatch — at minimum #PF) land,
+`.vcpu_run` MUST stay routed to seccomp.
+
+**Capability flag flips also deferred.** The original §D.5 spec
+said to flip `uses_stub_reaper`, `has_syscall_stub_fd_map`,
+`stub_syscall_uses_futex`, `stub_child_runs_seccomp` to false at
+the same moment as the `.vcpu_run` flip. That was wrong even
+without the IDT issue: the stub child is still spawned by
+`seccomp_mm_create` / `mm_attach` (v2 only owns memslot ops +
+context_switch + .vcpu_run currently). With
+`stub_child_runs_seccomp = false`, `arch/um/os-Linux/skas/
+process.c:220` takes the PTRACE_TRACEME branch instead of
+installing the seccomp filter, and the stub child stalls forever
+(this is the original boot-deadlock A.1 followup `40a97b5f3b72`
+fixed). The flags should flip in a later phase that ALSO replaces
+`seccomp_mm_create` / `mm_attach` / `thread_create` with v2-native
+equivalents.
+
+### Phase D current exit criteria (post-deferral)
+
+- All Phase D infrastructure landed and verified at boot:
+  CPUID lazy install, 5-byte trampoline, KVM_EXIT_IO dispatcher,
+  return marshal + EINTR + per-task FPU swap-out, MSR_LSTAR/STAR/
+  FMASK + EFER, physmem identity-offset memslot, PML4[448]
+  kernel-half PT chain, full long-mode SREGS install, signal mask
+  + drain.
+- Boot smoke `backend=force=kvm-v2 init=/bin/true` rc=134 (still
+  routed through seccomp; flip is a one-line edit pending Phase E).
+- Substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3 (bit-for-bit
+  unchanged from pre-Phase-D baseline).
+- v2-vs-seccomp parity wrapper: bit-identical results across both
+  backends (expected — v2 still delegates `.vcpu_run` to seccomp).
+
+### Phase E adopts the original D.5 gate criteria
+
+The original §D.5 headline gate moves to Phase E's exit criteria:
+
+- cpython-parity 21/21 × 10 trials with 0 regressions.
+- `single_dlopen × 100` produces 0 flakes (Bug B structurally
+  impossible per memo 22 — trampoline lives only in PML4[448],
+  never aliases user-half).
+- Substrate gate holds PASS=25/FAIL=3/EXPECTED_FAIL=3.
+- Boot smoke `init=/bin/true` rc=0 (the moment v2 actually runs
+  guest code).
 
 ---
 
