@@ -111,7 +111,7 @@ implemented.
 **Exit criteria:** unit test creates a VM, destroys it, no resource
 leaks.
 
-### A.3 — vCPU placeholder (1 day)
+### A.3 — vCPU placeholder (DONE — `1066947fd4d3`)
 
 - Create one vCPU at init time as a placeholder (Phase C will replace
   with the per-CPU pool).
