@@ -164,27 +164,46 @@ high-mm-churn fuzz-style workload, but not now.
 | Per-mm "guest task" task_struct | dispatcher impersonates; no extra wakeup | requires cloning credentials/files/fs from originating task; doesn't help SMP-within-mm; expensive allocation |
 | `kthread_use_mm` only | sets `current->mm`; minimal ceremony | only fixes mm; `current->files`, `->seccomp`, `->signal`, etc. still wrong |
 
-**Locked: wait-queue bounce.** Per Part L.2.A and Part I.5
-("spawner-owns-everything, gVisor sentry pattern"). The
-dispatcher kthread (E.3c) does NOT call `handle_syscall` directly
-— it routes the inbound `WORKER_MSG_SYSCALL_REQ` to the
-originating guest task's per-mm wait queue. The guest task wakes
-on its own kernel stack, runs `handle_syscall` under its real
-`current` (full credentials, files, seccomp, signal table), then
-the kthread sends `WORKER_MSG_SYSCALL_REP` back to the worker.
+**Originally locked: wait-queue bounce.** Per the L.2.A
+recommendation and Part I.5's spawner-owns-everything pattern,
+E.3d.1 implemented a per-mm wait queue + dispatcher kthread that
+routes SYSCALL_REQ to the originating guest task. The guest task
+wakes on its own kernel stack, runs `handle_syscall` under its
+real `current`, then the kthread sends SYSCALL_REP.
 
-The ~hundreds-of-ns wakeup cost is well within memo 26 Phase H's
-≤1.2× seccomp wall-clock budget. The correctness payoff is total:
-every `sys_call_table[]` entry that derefs `current` gets the
-same guest task it would have under today's seccomp model.
+### Correction — 2026-04-28 (post-E.3d.2)
 
-E.3c's dispatcher as it ships today calls `handle_syscall(&regs.regs)`
-directly — that's only safe for the smoke-test sentinel (which
-doesn't reach a real syscall). E.3d.1 replaces that direct call
-with the wait-queue bounce. Until E.3d.1 lands, no real
-SYSCALL_REQ traffic flows through the dispatcher (E.3d.0 brings
-up the worker's stub child but doesn't yet route vcpu_run
-through IPC; the seccomp backend stays on its in-spawner path).
+E.3d.2 (`f77e62d4e031`) discovered the wait-queue bounce **isn't
+needed** because of an invariant the original analysis missed:
+`seccomp_vcpu_run` already runs on the originating guest task's
+kernel stack (it's called from `userspace()`/`vcpu_run` in the
+guest task's context). When E.3d.2's reroute keeps `set_stub_state`
+/ `get_stub_state` on the spawner side (made cross-process-safe
+because `stub_data` is `memfd MAP_SHARED`), `handle_syscall` runs
+in `seccomp_vcpu_run`'s continuation — already under the right
+`current`, no extra wakeup needed.
+
+The bounce was only required if the dispatcher kthread itself
+had to call `handle_syscall`. Since the spawner-side guest-task
+context handles SIGSYS continuation directly, the dispatcher
+becomes a simple futex/IPC coordinator, not a syscall router.
+
+**Net effect**: E.3d.1's `reply_wait` / `pending_reqs` /
+`pending_lock` / dispatcher-kthread machinery is vestigial after
+E.3d.2 in production paths. The dispatcher kthread is still
+launched for the smoke-test code path (which exercises the
+SYSCALL_REQ → handle_syscall round-trip via `worker_dispatcher_fn`
+calling handle_syscall directly — incorrect in general but
+acceptable in the smoke test which only sends a no-op syscall).
+Production workers (`worker_alloc_stub_for_mm`) skip the
+dispatcher launch.
+
+**Status of Part C.E lock**: superseded by E.3d.2's actual design.
+The wait-queue bounce remains a viable fallback if E.4's per-task
+pthread design ends up needing the dispatcher kthread to route
+SYSCALL_REQ from worker pthreads back to guest-task wait queues.
+Cleanup of the vestigial machinery is deferred to E.4 (which will
+either repurpose it or strip it).
 
 ---
 
@@ -779,24 +798,52 @@ modes + WORKER_PROCESS=n substrate gate stays at PASS=25 FAIL=3
 EXPECTED_FAIL=3 + boot under =y init=/bin/true unaffected. All
 green.
 
-#### E.3d.2 — vcpu_run rerouting through worker IPC (~250 LoC)
+#### E.3d.2 — vcpu_run rerouting through worker IPC (DONE — `f77e62d4e031`)
 
-Replace `seccomp_vcpu_run`'s direct
-`set_stub_state`/`wait_stub_done_seccomp`/`get_stub_state`
-(`trap_user.c:68,82,97`) with: send WRITE_REGS to worker →
-worker does set_stub_state + wait_stub_done_seccomp +
-get_stub_state in-VA → worker sends SYSCALL_REQ → spawner-side
-guest task (per E.3d.1) runs handle_syscall, builds reply →
-worker resumes via SYSCALL_REP.
+Reroutes `seccomp_vcpu_run` through worker IPC under
+WORKER_PROCESS=y via two new wire types:
+  WORKER_MSG_VCPU_RUN  = 14   spawner → worker
+  WORKER_MSG_VCPU_DONE = 15   worker → spawner
 
-Risk: turnstile semantics (`enter_turnstile`/`exit_turnstile` at
-`trap_user.c:51,121`) move into the worker; SCM_RIGHTS passing
-of syscall stub fds; SIGSEGV/SIGTRAP/SIGALRM/SIGIO branches all
-relay through the same channel.
+**Architectural deviation from spec (correction recorded in C.E):**
+the spec recommended worker drives set_stub_state /
+wait_stub_done_seccomp / get_stub_state with full SIGSYS handling
+in-worker. Implementation took a simpler path: spawner keeps
+set_stub_state / get_stub_state (memfd MAP_SHARED on stub_data
+makes this cross-process-safe), worker handles only futex_wake /
+futex_wait + SCM_RIGHTS-receives the syscall_fd_map per
+iteration. handle_syscall runs in seccomp_vcpu_run's continuation
+under the originating guest task's `current` directly — no
+wait-queue bounce needed. E.3d.1's machinery is therefore
+vestigial in production paths.
 
-Verification: real userspace runs; substrate gate flips to
-match WORKER_PROCESS=n baseline (or better — itimer_virtual
-EXPECTED_FAIL → PASS per memo 29 §2.5.5).
+VCPU_DONE is read synchronously by `worker_drive_vcpu_run` on
+the spawner side. An earlier dispatcher-kthread-routed design
+hung the host process because the kthread blocked in `read()`
+prevented the woken guest task from being scheduled.
+
+Build clean both UM_WORKER_PROCESS=n and =y.
+
+Substrate gate (regrtest-repros), both modes:
+- =n: PASS=25 FAIL=3 EXPECTED_FAIL=3 (unchanged baseline)
+- =y: PASS=25 FAIL=3 EXPECTED_FAIL=3 (matches =n bit-identically,
+  reproducer-by-reproducer)
+
+init=/usr/bin/python3 under =y: 3/3 SMOKE_OK, no fatal signal,
+clean init exit + panic.
+
+`itimer_virtual` remains EXPECTED_FAIL even under =y. Memo 29
+§2.5.5's prediction (worker-owns-process flips this to PASS)
+relies on E.4's per-task pthread inside the worker driving guest
+user time on its own setitimer. E.3d.2 still does syscall
+dispatch on the spawner side; the stub child still runs guest
+user code in its own process; setitimer on the spawner sees no
+user time. To flip this prediction, E.4 needs the pthread design
+PLUS some plumbing that places setitimer on the right process
+(stub child or worker, not spawner) — or rusage aggregation.
+
+Open questions for E.4 listed in the commit message
+(`f77e62d4e031`).
 
 ### L.4 — Resolution (2026-04-28)
 
