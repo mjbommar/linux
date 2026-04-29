@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase B.2: mm_region_added wiring onto
- * KVM_SET_USER_MEMORY_REGION.
+ * UML backend v2 (KVM) — Phase B.2/B.3: mm_region_added /
+ * mm_region_removed wiring onto KVM_SET_USER_MEMORY_REGION
+ * (add / delete).
  *
- * Per memo 26 §B.2. B.1 shipped the slot-id allocator + in-memory
- * memslot list; this TU is the first caller. mm_region_added now:
+ * Per memo 26 §B.2 + §B.3. B.1 shipped the slot-id allocator +
+ * in-memory memslot list; this TU is the first caller.
+ *
+ * mm_region_added (B.2):
  *   (a) calls seccomp_mm_region_added so the seccomp stub child
  *       (which still owns guest user-mode execution until Phase D
  *       wires KVM_RUN) keeps the mapping in its address space —
@@ -13,8 +16,20 @@
  *   (c) issues KVM_SET_USER_MEMORY_REGION add against the per-VM
  *       fd, populating the KVM memslot table for the eventual
  *       Phase D / TDP path.
- * On ioctl failure the list entry is unwound and the seccomp
- * mapping is left in place (memo 26 §B.3 will pair removal).
+ * On ioctl failure the list entry is unwound; the seccomp mapping
+ * stays in place (the corresponding remove will tear it down).
+ *
+ * mm_region_removed (B.3):
+ *   (a) looks up the slot via kvm_v2_memslot_lookup(gpa);
+ *   (b) issues KVM_SET_USER_MEMORY_REGION with memory_size=0
+ *       (KVM's "delete this slot" syntax). KVM's mmu_notifier
+ *       auto-invalidates EPT;
+ *   (c) frees the bitmap bit + list entry via kvm_v2_memslot_del;
+ *   (d) calls seccomp_mm_region_removed so the stub child unmaps
+ *       its own copy.
+ * If the lookup fails (ioctl-side add failed earlier; only the
+ * seccomp side was populated) we still call seccomp's remove so
+ * the stub child stays consistent.
  *
  * The dual-side population is the "v2 delegates to seccomp until
  * Phase D" reality of memo 26's incremental migration. As Phase D
@@ -127,4 +142,50 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 	}
 
 	return 0;
+}
+
+int kvm_v2_mm_region_removed(struct mm_struct *mm,
+			     const struct um_memory_region *region)
+{
+	struct kvm_v2_vm *vm = kvm_v2_vm_get();
+	struct kvm_v2_memslot *slot;
+	struct kvm_userspace_memory_region kr;
+	u32 slot_id;
+	int rc;
+
+	if (!vm) {
+		pr_warn_ratelimited("um: kvm-v2 region_removed: VM not initialised\n");
+		return -ENODEV;
+	}
+	if (!region || !region->len)
+		return -EINVAL;
+
+	/*
+	 * Look up our matching memslot by gpa (B.1's helper). On
+	 * miss the add either failed mid-way or never ran; either
+	 * way we still need to drop the seccomp side, but skip the
+	 * KVM-side teardown.
+	 */
+	slot = kvm_v2_memslot_lookup(vm, region->va);
+	if (slot) {
+		slot_id = slot->slot_id;
+
+		kr = (struct kvm_userspace_memory_region){
+			.slot		 = slot_id,
+			.flags		 = 0,
+			.guest_phys_addr = region->va,
+			.memory_size	 = 0,	/* KVM's delete syntax */
+			.userspace_addr	 = region->va,
+		};
+
+		rc = os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
+				      (unsigned long)&kr);
+		if (rc < 0)
+			pr_warn_ratelimited("um: kvm-v2 region_removed: KVM_SET_USER_MEMORY_REGION(slot=%u memory_size=0) failed (%d)\n",
+					    slot_id, rc);
+
+		kvm_v2_memslot_del(vm, slot_id);
+	}
+
+	return seccomp_mm_region_removed(mm, region);
 }

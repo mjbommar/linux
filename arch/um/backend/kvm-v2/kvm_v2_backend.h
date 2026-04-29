@@ -133,11 +133,16 @@ void kvm_v2_memslot_del(struct kvm_v2_vm *vm, u32 slot_id);
 struct kvm_v2_memslot *kvm_v2_memslot_lookup(struct kvm_v2_vm *vm, u64 gpa);
 
 /*
- * Phase B.2 (region.c): mm_region_added op — issues
- * KVM_SET_USER_MEMORY_REGION add for each VA range the mm-arbiter
- * surfaces. Replaces seccomp_mm_region_added in the v2 ops table.
+ * Phase B.2 + B.3 (region.c): mm_region_added / mm_region_removed
+ * ops — issue KVM_SET_USER_MEMORY_REGION add / delete for each VA
+ * range the mm-arbiter surfaces. Replace the corresponding seccomp_*
+ * pointers in the v2 ops table; both internally also call the
+ * seccomp_* version (dual-side wiring) until Phase D's KVM_RUN path
+ * stops needing the stub child.
  */
 int  kvm_v2_mm_region_added(struct mm_struct *mm,
 			    const struct um_memory_region *region);
+int  kvm_v2_mm_region_removed(struct mm_struct *mm,
+			      const struct um_memory_region *region);
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

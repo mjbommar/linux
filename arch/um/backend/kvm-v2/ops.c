@@ -72,7 +72,7 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.mm_create		= seccomp_mm_create,
 	.mm_destroy		= seccomp_mm_destroy,
 	.mm_region_added	= kvm_v2_mm_region_added,	/* HOT */
-	.mm_region_removed	= seccomp_mm_region_removed,	/* HOT */
+	.mm_region_removed	= kvm_v2_mm_region_removed,	/* HOT */
 	.mm_region_protected	= NULL,	/* mm-arbiter falls back to remove+add */
 
 	/* Scheduling (4) — Phase C */
