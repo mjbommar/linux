@@ -314,6 +314,29 @@ TRACE_EVENT(um_backend_kvm_v2_cpuid_install,
 );
 
 /*
+ * kvm_v2_msr_program — fired when D.4a's eager SYSCALL-MSR install
+ * (memo 26 §D.4) lands MSR_LSTAR / MSR_STAR / MSR_SYSCALL_MASK +
+ * readback against a pool member at vcpu_create_one. Fires once per
+ * pool member at backend init; readback mismatch panics inside the
+ * helper before this event would fire, so a successful trace event
+ * means the three SYSCALL MSRs round-tripped exactly. Until D.5 flips
+ * .vcpu_run away from seccomp the MSRs we programmed have no consumer
+ * — but the event is observable from D.4a as a "trampoline armed"
+ * signal. Per memo 27 §B.9: observability lands with the helper.
+ */
+TRACE_EVENT(um_backend_kvm_v2_msr_program,
+	TP_PROTO(int vcpu_fd),
+	TP_ARGS(vcpu_fd),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd = vcpu_fd;
+	),
+	TP_printk("vcpu_fd=%d", __entry->vcpu_fd)
+);
+
+/*
  * kvm_v2_trampoline_install — fired when the per-VM LSTAR trampoline
  * page (memo 26 §D.1) is allocated and the 5 SYSCALL-trap bytes
  * (out %al, $0xf4 / sysretq) are written. gpa is __pa(host page); gva

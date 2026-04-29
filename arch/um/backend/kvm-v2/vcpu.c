@@ -46,6 +46,8 @@
 #include <linux/threads.h>
 #include <linux/types.h>
 
+#include <asm/msr-index.h>	/* MSR_LSTAR / MSR_STAR / MSR_SYSCALL_MASK,
+				 * EFER_SCE / EFER_LME / EFER_LMA / EFER_NX */
 #include <asm/page.h>
 
 #include <os.h>
@@ -261,6 +263,128 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
 }
 
 /*
+ * D.4a: program MSR_LSTAR / MSR_STAR / MSR_SYSCALL_MASK once per pool
+ * member at vcpu_create_one. vCPUs are reused across tasks under v2's
+ * single-VM model, so the SYSCALL MSRs are immutable across the pool's
+ * lifetime — set once at create, never re-set per-dispatch (the
+ * latter would pay one ioctl-and-readback per KVM_RUN for no
+ * functional gain). v1 archive's kvm_enter_guest_program_msrs at
+ * kvm-v1-archive/thread.c:2020-2111 used a per-vCPU msrs_primed flag to
+ * gate a similar one-shot install; v2's per-host-CPU pool means the
+ * eager call here is structurally equivalent without needing the flag.
+ *
+ * MSR_LSTAR (0xc0000082): SYSCALL entry RIP. Programmed to
+ * KVM_V2_LSTAR_GVA (= 0xffffe00000000040 = trampoline GVA + 0x40),
+ * which the D.1 trampoline page exposes as the 5-byte
+ * `out %al,$0xf4 ; sysretq` body. The GVA is guest-walk-reachable via
+ * PML4[508] — but D.4b is the commit that installs PML4[508] into
+ * swapper_pg_dir (and existing mms). Until D.4b lands LSTAR points at
+ * an unreachable VA; that is *expected* and harmless — D.5 hasn't
+ * flipped .vcpu_run either, so no SYSCALL fires from any production
+ * path. The MSR is set in D.4a so D.4b's PML4 install + D.5's pointer
+ * flip both find it already armed.
+ *
+ * MSR_STAR (0xc0000081): high 16 bits = SYSCALL CS|SS base (kernel
+ * selectors); bits 63:48 = SYSRETQ user CS|SS base. Standard pair:
+ * kernel CS=0x08, user CS=0x33 (= 0x18+16|3, with the +16 and |3
+ * applied by the SYSRETQ microcode). v1 used the identical pair at
+ * kvm-v1-archive/thread.c:2032 — `(0x0018ULL << 48) | (0x0008ULL << 32)`.
+ *
+ * MSR_SYSCALL_MASK / MSR_FMASK (0xc0000084): RFLAGS bits cleared on
+ * SYSCALL entry. 0x47700 = TF | IF | DF | IOPL | NT | AC. Matches Linux
+ * native syscall_init's mask. Critical: DF=1 leak in masked rflags
+ * caused real corruption in v1 — see the post-mortem block at
+ * kvm-v1-archive/thread.c:2042-2065. Userland with DF=1 (REP MOVSB
+ * backwards) leaked into LSTAR; kernel-side memcpy/memmove ran with
+ * STD instead of CLD and silently corrupted whatever the kernel wrote.
+ * FMASK MUST clear DF or downstream string ops execute in the wrong
+ * direction.
+ *
+ * No MSR_KERNEL_GS_BASE — D.1's simplified trampoline doesn't use
+ * `%gs:` storage. Phase E may revisit if IDT/IST stacks need per-vCPU
+ * GS; that's an E-side decision per memo 26 §D.4.
+ *
+ * After KVM_SET_MSRS, immediately KVM_GET_MSRS and verify each value
+ * round-tripped exactly. Boot-time self-check, mirrors D.1's
+ * trampoline-bytes readback (commit 7e4da1dbe651). Panic on mismatch:
+ * a silent KVM_SET_MSRS regression would mean SYSCALL goes to a wrong
+ * RIP / wrong selectors / leaks bad RFLAGS — three of the worst
+ * possible failure modes once D.5 flips .vcpu_run. One readback at
+ * boot costs nothing and catches: KVM ABI shifts that silently drop a
+ * write, partial-success returns the loop didn't catch, etc.
+ */
+static int kvm_v2_vcpu_program_msrs(int vcpu_fd)
+{
+	struct {
+		struct kvm_msrs hdr;
+		struct kvm_msr_entry entries[3];
+	} req = {
+		.hdr = { .nmsrs = 3 },
+		.entries = {
+			{ .index = MSR_LSTAR, .data = KVM_V2_LSTAR_GVA },
+			{ .index = MSR_STAR,
+			  .data  = ((0x0018ULL) << 48) | ((0x0008ULL) << 32) },
+			{ .index = MSR_SYSCALL_MASK, .data = 0x47700ULL },
+		},
+	};
+	struct {
+		struct kvm_msrs hdr;
+		struct kvm_msr_entry entries[3];
+	} readback = {
+		.hdr = { .nmsrs = 3 },
+		.entries = {
+			{ .index = MSR_LSTAR },
+			{ .index = MSR_STAR },
+			{ .index = MSR_SYSCALL_MASK },
+		},
+	};
+	int rc;
+	int i;
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_MSRS, (unsigned long)&req);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 program_msrs: KVM_SET_MSRS(vcpu_fd=%d) failed (%d)\n",
+		       vcpu_fd, rc);
+		return rc;
+	}
+	if (rc != 3) {
+		/*
+		 * KVM_SET_MSRS returns the count of MSRs successfully
+		 * written; partial success means one of LSTAR/STAR/FMASK
+		 * was rejected and the trampoline / SYSRETQ / RFLAGS-mask
+		 * is not armed. Treat as fatal at the caller.
+		 */
+		pr_err("um: kvm-v2 program_msrs: KVM_SET_MSRS wrote %d/3 MSRs (vcpu_fd=%d)\n",
+		       rc, vcpu_fd);
+		return -EIO;
+	}
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_GET_MSRS, (unsigned long)&readback);
+	if (rc < 0 || rc != 3) {
+		pr_err("um: kvm-v2 program_msrs: KVM_GET_MSRS readback failed (%d) (vcpu_fd=%d)\n",
+		       rc, vcpu_fd);
+		return rc < 0 ? rc : -EIO;
+	}
+
+	for (i = 0; i < 3; i++) {
+		if (readback.entries[i].data != req.entries[i].data) {
+			panic("kvm-v2: MSR readback MISMATCH idx=%#x: wrote %#llx got %#llx",
+			      req.entries[i].index,
+			      (unsigned long long)req.entries[i].data,
+			      (unsigned long long)readback.entries[i].data);
+		}
+	}
+
+	pr_info("um: kvm-v2 program_msrs: vcpu_fd=%d LSTAR=%#llx STAR=%#llx FMASK=%#llx\n",
+		vcpu_fd,
+		(unsigned long long)req.entries[0].data,
+		(unsigned long long)req.entries[1].data,
+		(unsigned long long)req.entries[2].data);
+	trace_um_backend_kvm_v2_msr_program(vcpu_fd);
+	return 0;
+}
+
+/*
  * Build a single pool member. Returns 0 on success or a negative errno
  * on failure; the caller (kvm_v2_vcpu_create) tears down already-built
  * entries on partial failure. KVM_CREATE_VCPU's id argument is the
@@ -319,11 +443,37 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	((struct kvm_run *)kvm_run)->kvm_valid_regs =
 		KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS;
 
+	/*
+	 * D.4a: program SYSCALL MSRs once per pool member. Eager (not
+	 * lazy-at-first-KVM_RUN like CPUID) because KVM_SET_MSRS / GET_MSRS
+	 * don't allocate from the buddy allocator — the request and
+	 * readback structs live on this stack frame. Treat failure as
+	 * fatal: the helper itself panics on readback mismatch; SET_MSRS
+	 * partial-success or ioctl failure is returned here as -errno and
+	 * the caller (kvm_v2_vcpu_create) unwinds the partially-built pool.
+	 *
+	 * .vcpu_run is still routed through seccomp until D.5, so the MSRs
+	 * we just wrote have no consumer today. Programming them at create
+	 * time means D.4b's PML4[508] install + D.5's pointer flip both
+	 * find LSTAR/STAR/FMASK already armed — no flag dance, no first-
+	 * run install path to debug separately from the rest of the
+	 * dispatcher.
+	 */
+	rc = kvm_v2_vcpu_program_msrs(vcpu_fd);
+	if (rc < 0)
+		goto err_unmap_kvm_run;
+
 	trace_um_backend_kvm_v2_vcpu_create(vcpu_fd, v->kvm_run_size);
 	return 0;
 
+err_unmap_kvm_run:
+	os_unmap_memory(kvm_run, mmap_size);
+	v->kvm_run      = NULL;
+	v->kvm_run_size = 0;
 err_close_vcpu:
 	os_close_file(vcpu_fd);
+	v->vcpu_fd      = -1;
+	v->cpu          = -1;
 	return rc;
 }
 
@@ -524,6 +674,38 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	sregs->cr3     = (u64)pgd_pa;
 	sregs->fs.base = (u64)fs_base;
 	sregs->gs.base = (u64)gs_base;
+
+	/*
+	 * D.4a: ensure EFER.SCE is set so SYSCALL doesn't raise #UD. KVM
+	 * sets the long-mode bits (LME/LMA) automatically at VMX entry,
+	 * but SCE (System Call Extensions) must be explicitly enabled or
+	 * the user-mode `syscall` instruction is illegal — the gate would
+	 * fail on the first user-mode instruction once D.5 flips
+	 * .vcpu_run. v1 set this in SREGS at kvm-v1-archive/sregs.c:264-265
+	 * with mask `KVM_EFER_SCE | KVM_EFER_LME | KVM_EFER_LMA |
+	 * KVM_EFER_NXE`; v2 sets the same bits via the sync-regs mmap.
+	 *
+	 * Use `=` (full assignment) rather than `|=` for two reasons:
+	 *   1. On the first KVM_RUN before any guest exit has populated
+	 *      sregs, the mmap's efer field reflects KVM's defaults — not
+	 *      guaranteed to include LME/LMA/NXE. `|=` adding only SCE
+	 *      would leave the others potentially unset.
+	 *   2. EFER is fully owned by v2 under the single-VM model — there
+	 *      are no other bits we want set, so a clean overwrite matches
+	 *      v1's `sregs->efer = ...` at sregs.c:264-265 exactly.
+	 *
+	 * Idempotent: this fires on every dispatch (load_user_sregs is
+	 * per-task), but EFER doesn't change across tasks under v2's
+	 * single-VM model. Could be hoisted to vcpu_create as a one-time
+	 * write — opting for per-dispatch here for symmetry with the
+	 * cr3/fs.base/gs.base writes in this function. Phase H may
+	 * profile and hoist if it matters; the cost is one mmap'd-field
+	 * store + a dirty bit, no ioctl.
+	 *
+	 * EFER_NX is the kernel header's spelling of v1's KVM_EFER_NXE
+	 * (NX-enable bit 11 in EFER); the bit semantics are identical.
+	 */
+	sregs->efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 	return 0;
