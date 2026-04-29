@@ -37,12 +37,19 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/kvm.h>
+#include <linux/preempt.h>
 #include <linux/printk.h>
+#include <linux/ratelimit.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
 #include <linux/threads.h>
 #include <linux/types.h>
 
+#include <asm/page.h>
+
 #include <os.h>
+#include <sysdep/ptrace.h>
 #include <asm/trace/um_backend.h>
 
 #include "kvm_v2_backend.h"
@@ -452,4 +459,211 @@ int kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd)
 		return rc;
 
 	return 0;
+}
+
+/*
+ * Phase C.2 helper: combine the per-iteration SREGS update into a
+ * single GET_SREGS / SET_SREGS round-trip rather than calling
+ * kvm_v2_load_cr3 + a separate fs.base/gs.base update (which would
+ * pay 4 ioctls per dispatch instead of 2). B.5's load_cr3 stays as
+ * the standalone helper for callers that only need to swap CR3
+ * (e.g. context_switch when Phase D wires it). The duplication is
+ * intentional: B.5's contract is "swap cr3 only", C.2's contract is
+ * "establish full guest user context for one KVM_RUN", and merging
+ * them would force every cr3-only caller to also re-write
+ * fs.base/gs.base they don't own.
+ *
+ * Returns 0 on success or a negative errno on ioctl failure.
+ */
+static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
+				  unsigned long pgd_pa,
+				  unsigned long fs_base,
+				  unsigned long gs_base)
+{
+	struct kvm_sregs sregs;
+	int rc;
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0)
+		return rc;
+
+	sregs.cr3       = (u64)pgd_pa;
+	sregs.fs.base   = (u64)fs_base;
+	sregs.gs.base   = (u64)gs_base;
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0)
+		return rc;
+
+	return 0;
+}
+
+/*
+ * Marshal uml_pt_regs.gp[] → struct kvm_regs for KVM_SET_REGS.
+ * Mirrors the v1 archive's kvm_uml_regs_to_kvm_regs (thread.c
+ * around line 2164). RFLAGS bit 1 is reserved-must-be-1 per AMD64
+ * SDM §3.1.4 — OR it in defensively so a stale uml_pt_regs never
+ * trips #GP on KVM_SET_REGS. Pure data-shape transform; C.3 will
+ * replace this whole call site with KVM_CAP_SYNC_REGS writes
+ * directly into vcpu->kvm_run->s.regs.regs.
+ */
+static void kvm_v2_marshal_to_kvm_regs(struct kvm_regs *dst,
+				       const struct uml_pt_regs *src)
+{
+	const unsigned long *gp = src->gp;
+
+	dst->rax = gp[HOST_AX];
+	dst->rbx = gp[HOST_BX];
+	dst->rcx = gp[HOST_CX];
+	dst->rdx = gp[HOST_DX];
+	dst->rsi = gp[HOST_SI];
+	dst->rdi = gp[HOST_DI];
+	dst->rbp = gp[HOST_BP];
+	dst->rsp = gp[HOST_SP];
+	dst->r8  = gp[HOST_R8];
+	dst->r9  = gp[HOST_R9];
+	dst->r10 = gp[HOST_R10];
+	dst->r11 = gp[HOST_R11];
+	dst->r12 = gp[HOST_R12];
+	dst->r13 = gp[HOST_R13];
+	dst->r14 = gp[HOST_R14];
+	dst->r15 = gp[HOST_R15];
+	dst->rip = gp[HOST_IP];
+	dst->rflags = gp[HOST_EFLAGS] | (1UL << 1);
+}
+
+/*
+ * Reverse marshal: struct kvm_regs → uml_pt_regs.gp[]. Called after
+ * KVM_RUN returns so UML's syscall / fault / signal dispatch sees
+ * the guest's post-exit GPRs. HOST_ORIG_AX is intentionally NOT
+ * written here — that's an UML entry-path convention the syscall
+ * dispatcher arranges once it knows the bucket (matches v1's
+ * kvm_regs_to_uml_regs). C.3 replaces this with
+ * KVM_CAP_SYNC_REGS reads from vcpu->kvm_run->s.regs.regs.
+ */
+static void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
+					 const struct kvm_regs *src)
+{
+	unsigned long *gp = dst->gp;
+
+	gp[HOST_AX]     = src->rax;
+	gp[HOST_BX]     = src->rbx;
+	gp[HOST_CX]     = src->rcx;
+	gp[HOST_DX]     = src->rdx;
+	gp[HOST_SI]     = src->rsi;
+	gp[HOST_DI]     = src->rdi;
+	gp[HOST_BP]     = src->rbp;
+	gp[HOST_SP]     = src->rsp;
+	gp[HOST_R8]     = src->r8;
+	gp[HOST_R9]     = src->r9;
+	gp[HOST_R10]    = src->r10;
+	gp[HOST_R11]    = src->r11;
+	gp[HOST_R12]    = src->r12;
+	gp[HOST_R13]    = src->r13;
+	gp[HOST_R14]    = src->r14;
+	gp[HOST_R15]    = src->r15;
+	gp[HOST_IP]     = src->rip;
+	gp[HOST_EFLAGS] = src->rflags;
+}
+
+/*
+ * Phase C.2: KVM_RUN dispatcher — task→vCPU dispatch helper that
+ * mirrors seccomp_vcpu_run's "one round-trip" shape:
+ *
+ *   1. Pick the per-host-CPU vCPU (preempt_disable so the pick
+ *      stays valid across KVM_RUN; v1's archive enforced the same
+ *      invariant via kvm_vcpu_for_current).
+ *   2. Load the user-mode CPU state for `current`:
+ *      CR3 = __pa(active_mm->pgd), fs.base / gs.base from
+ *      regs->gp[HOST_FS_BASE / HOST_GS_BASE].
+ *   3. Marshal regs->gp[] → kvm_regs, KVM_SET_REGS.
+ *   4. KVM_RUN.
+ *   5. Marshal kvm_regs → regs->gp[].
+ *   6. Dispatch on kvm_run->exit_reason.
+ *
+ * At C.2 the helper has NO production caller — ops.c still routes
+ * `.vcpu_run` to seccomp_vcpu_run; Phase D flips the pointer. The
+ * panic placeholders for HLT / FAIL_ENTRY / INTERNAL_ERROR /
+ * SHUTDOWN are EXPECTED — Phase D adds KVM_EXIT_HYPERCALL handling
+ * and Phase E adds the IO / MMIO / exception classes; until those
+ * land any return from KVM_RUN under v2 is by definition a bug we
+ * want to surface loudly.
+ *
+ * The pool_initialised fallback to seccomp_vcpu_run is defensive:
+ * today init_backend always populates the pool before any caller
+ * could plumb to here, but Phase D's pointer-flip might race with
+ * shutdown teardown, and the seccomp fallback keeps the dispatch
+ * contract intact (.vcpu_run is HOT — never NULL).
+ */
+void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
+{
+	struct kvm_v2_vcpu *vcpu;
+	struct kvm_regs kregs;
+	int cpu, rc;
+	u32 exit_reason;
+
+	preempt_disable();
+
+	cpu = smp_processor_id();
+	vcpu = kvm_v2_vcpu_get(cpu);
+	if (!vcpu) {
+		/*
+		 * Pool not up — should not happen post init_backend, but
+		 * keep the dispatch contract intact. preempt_enable
+		 * before delegating because seccomp_vcpu_run does its
+		 * own scheduling-sensitive work (turnstile, futex).
+		 */
+		preempt_enable();
+		seccomp_vcpu_run(regs);
+		return;
+	}
+
+	rc = kvm_v2_load_user_sregs(vcpu,
+				    __pa(current->active_mm->pgd),
+				    regs->gp[HOST_FS_BASE],
+				    regs->gp[HOST_GS_BASE]);
+	if (rc < 0)
+		panic("kvm-v2: load_user_sregs(cpu=%d) failed: %d", cpu, rc);
+
+	memset(&kregs, 0, sizeof(kregs));
+	kvm_v2_marshal_to_kvm_regs(&kregs, regs);
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_REGS,
+			      (unsigned long)&kregs);
+	if (rc < 0)
+		panic("kvm-v2: KVM_SET_REGS(cpu=%d) failed: %d", cpu, rc);
+
+	trace_um_backend_kvm_v2_vcpu_enter(cpu, vcpu->kvm_run);
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+
+	exit_reason = ((struct kvm_run *)vcpu->kvm_run)->exit_reason;
+	trace_um_backend_kvm_v2_vcpu_exit(cpu, exit_reason);
+
+	if (rc < 0)
+		panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
+		      cpu, rc, exit_reason);
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
+			      (unsigned long)&kregs);
+	if (rc < 0)
+		panic("kvm-v2: KVM_GET_REGS(cpu=%d) failed: %d", cpu, rc);
+	kvm_v2_marshal_from_kvm_regs(regs, &kregs);
+
+	switch (exit_reason) {
+	case KVM_EXIT_HLT:
+	case KVM_EXIT_FAIL_ENTRY:
+	case KVM_EXIT_INTERNAL_ERROR:
+	case KVM_EXIT_SHUTDOWN:
+		panic("kvm-v2: unexpected exit %u from KVM_RUN; Phase D/E provides the dispatch",
+		      exit_reason);
+	default:
+		pr_warn_ratelimited("kvm-v2: unhandled exit_reason=%u (cpu=%d)\n",
+				    exit_reason, cpu);
+		panic("kvm-v2: unhandled exit %u from KVM_RUN; Phase D/E provides the dispatch",
+		      exit_reason);
+	}
+
+	preempt_enable();
 }

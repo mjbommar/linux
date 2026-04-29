@@ -20,6 +20,7 @@
 
 struct kvm_cpuid2;
 struct mm_struct;
+struct uml_pt_regs;
 struct um_memory_region;
 
 /*
@@ -141,6 +142,26 @@ struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu);
  * lands here for review.
  */
 int  kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd);
+
+/*
+ * Phase C.2: KVM_RUN dispatcher. Picks the per-host-CPU vCPU,
+ * loads CR3 + fs.base + gs.base + GPRs from `regs`, issues KVM_RUN,
+ * marshals the exit GPRs back, and dispatches by exit_reason. Phase
+ * C.2 lands the helper UNREFERENCED — ops.c still routes
+ * `.vcpu_run` through seccomp_vcpu_run; Phase D flips the pointer.
+ *
+ * The helper expects to run on a kernel stack (it calls
+ * preempt_disable / preempt_enable around the per-CPU vCPU pick).
+ * If the pool isn't initialised it falls back to seccomp_vcpu_run
+ * so callers tolerating the v2 path before init_backend completes
+ * still make progress.
+ *
+ * Exit-reason coverage at C.2 is intentionally minimal — only the
+ * fatal classes (HLT / FAIL_ENTRY / INTERNAL_ERROR / SHUTDOWN) and
+ * a default panic. HYPERCALL handling is Phase D; IO / MMIO /
+ * exception classes land in Phase E.
+ */
+void kvm_v2_vcpu_run(struct uml_pt_regs *regs);
 
 /*
  * Memslot allocator + lookup (memo 26 §B.1, defined in memslot.c).

@@ -17,14 +17,15 @@
  *  - um_backend_mm_region_removed     — backend learned of an
  *                                       unmap
  *
- * The vcpu_run_enter / vcpu_run_exit events are deferred until v2
- * lands a kernel-side dispatcher around the trap loop. Today's
- * userspace() loop in arch/um/os-Linux/skas/process.c is a USER
- * TU (compiled with USER_CFLAGS, no access to kernel-side
- * tracepoint macros); v2's per-mm worker process wrapper will
- * give us a kernel-side site to emit them. Memo 25 R7's longer
- * wishlist (mm_region_protected, syscall_dispatch, signal_received)
- * lands incrementally as each surface gets a kernel-side hook.
+ * The seccomp run loop has no kernel-side vcpu_run_enter / exit
+ * hook (it lives in a USER TU compiled with USER_CFLAGS, no access
+ * to kernel-side tracepoint macros). Phase C.2's
+ * kvm_v2_vcpu_run() runs in kernel context, so the
+ * um_backend_kvm_v2_vcpu_enter / _exit events below cover the v2
+ * dispatcher; seccomp-side coverage is left to the worker-process
+ * wrapper as memo 28 lands. Memo 25 R7's longer wishlist
+ * (mm_region_protected, syscall_dispatch, signal_received) lands
+ * incrementally as each surface gets a kernel-side hook.
  */
 
 #undef TRACE_SYSTEM
@@ -103,8 +104,9 @@ TRACE_EVENT(um_backend_mm_region_removed,
 );
 
 /*
- * vcpu_run_enter / vcpu_run_exit deferred — see header comment.
- * They will go here once v2's kernel-side dispatcher exists.
+ * v2 vcpu_enter / vcpu_exit live further down (Phase C.2). They
+ * are kvm-v2 specific because the seccomp loop has no kernel-side
+ * site to fire from.
  */
 
 /*
@@ -197,6 +199,48 @@ TRACE_EVENT(um_backend_kvm_v2_memslot_del,
 		__entry->slot_id = slot_id;
 	),
 	TP_printk("slot=%u", __entry->slot_id)
+);
+
+/*
+ * kvm_v2_vcpu_enter / kvm_v2_vcpu_exit — bracket each KVM_RUN ioctl
+ * issued by Phase C.2's dispatcher (kvm_v2_vcpu_run). enter fires
+ * after the per-iteration vCPU state load (CR3 / fs.base / gs.base /
+ * GPRs) and before the ioctl; exit fires immediately after the
+ * ioctl returns, before the exit-reason switch and the GET_REGS
+ * marshal-back. cpu is the host CPU id this vCPU is pinned to;
+ * kvm_run is the mmap'd shared page (lets a tracer correlate
+ * userspace and kernel views of the same vCPU). exit_reason matches
+ * KVM_EXIT_* in <uapi/linux/kvm.h>.
+ *
+ * Per memo 27 Part B.9: observability lands with the helper, not
+ * after it earns a caller.
+ */
+TRACE_EVENT(um_backend_kvm_v2_vcpu_enter,
+	TP_PROTO(int cpu, void *kvm_run),
+	TP_ARGS(cpu, kvm_run),
+	TP_STRUCT__entry(
+		__field(int,    cpu)
+		__field(void *, kvm_run)
+	),
+	TP_fast_assign(
+		__entry->cpu     = cpu;
+		__entry->kvm_run = kvm_run;
+	),
+	TP_printk("cpu=%d kvm_run=%p", __entry->cpu, __entry->kvm_run)
+);
+
+TRACE_EVENT(um_backend_kvm_v2_vcpu_exit,
+	TP_PROTO(int cpu, u32 exit_reason),
+	TP_ARGS(cpu, exit_reason),
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(u32, exit_reason)
+	),
+	TP_fast_assign(
+		__entry->cpu         = cpu;
+		__entry->exit_reason = exit_reason;
+	),
+	TP_printk("cpu=%d exit_reason=%u", __entry->cpu, __entry->exit_reason)
 );
 
 #endif /* _TRACE_UM_BACKEND_H */
