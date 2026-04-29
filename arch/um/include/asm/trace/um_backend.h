@@ -202,6 +202,40 @@ TRACE_EVENT(um_backend_kvm_v2_memslot_del,
 );
 
 /*
+ * kvm_v2_physmem_memslot_install — fired once when D.4b-pre's giant
+ * physmem identity-offset memslot lands (memo 26 §D.4 D.4b-pre). One
+ * slot at gpa=0 / hva=uml_physmem / size=physmem_size; mirrors v1's
+ * kvm_ensure_memslot at kvm-v1-archive/lifecycle.c:613-648. The slot
+ * makes KVM's TDP walk resolve __pa(pgd) and __pa(trampoline_kva) —
+ * both physmem-offset GPAs in [0, physmem_size) — to host pages.
+ *
+ * Fires from either the eager vm_create attempt or (more often, since
+ * uml_physmem isn't set at init_backend time) the
+ * subsys_initcall lazy retry in syscall_trap.c. Idempotent at the
+ * helper level so the event fires AT MOST once per VM lifetime.
+ *
+ * Until D.4b lands the PML4[448] PT chain and D.5 flips .vcpu_run, no
+ * guest CR3 walk hits this slot — but the install is observable from
+ * D.4b-pre. Per memo 27 §B.9: observability lands with the helper.
+ */
+TRACE_EVENT(um_backend_kvm_v2_physmem_memslot_install,
+	TP_PROTO(int slot_id, unsigned long hva, u64 size),
+	TP_ARGS(slot_id, hva, size),
+	TP_STRUCT__entry(
+		__field(int,           slot_id)
+		__field(unsigned long, hva)
+		__field(u64,           size)
+	),
+	TP_fast_assign(
+		__entry->slot_id = slot_id;
+		__entry->hva     = hva;
+		__entry->size    = size;
+	),
+	TP_printk("slot=%d gpa=0 hva=%#lx size=%#llx",
+		  __entry->slot_id, __entry->hva, __entry->size)
+);
+
+/*
  * kvm_v2_vcpu_enter / kvm_v2_vcpu_exit — bracket each KVM_RUN ioctl
  * issued by Phase C.2's dispatcher (kvm_v2_vcpu_run). enter fires
  * after the per-iteration vCPU state load (CR3 / fs.base / gs.base /

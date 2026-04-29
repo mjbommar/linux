@@ -287,6 +287,21 @@ static int __init kvm_v2_trampoline_late_install(void)
 	if (!vm)
 		return 0;	/* not v2 — silent skip */
 
+	/*
+	 * D.4b-pre: piggy-back the physmem-memslot lazy retry on this
+	 * initcall. vm_create's eager attempt may have returned -EAGAIN
+	 * because uml_physmem / physmem_size weren't yet set when
+	 * init_backend ran (arch/um/kernel/um_arch.c:372 init_backend vs
+	 * 392/399 globals); subsys_initcall fires after linux_main()
+	 * completes so the globals are stable here. Helper is idempotent
+	 * (physmem_memslot_id sentinel) so a successful eager install
+	 * short-circuits. Failure is logged inside the helper; the
+	 * trampoline retry below still runs so observability lines up
+	 * with the v1 ensure-memslot-then-bootstrap order at
+	 * kvm-v1-archive/lifecycle.c:613-648.
+	 */
+	(void)kvm_v2_physmem_memslot_install(vm);
+
 	if (vm->trampoline_page)
 		return 0;	/* already installed — silent skip */
 

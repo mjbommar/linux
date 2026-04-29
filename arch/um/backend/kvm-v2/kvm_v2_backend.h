@@ -79,6 +79,24 @@ struct kvm_v2_vm {
 	 */
 	void			*trampoline_page;
 	phys_addr_t		trampoline_gpa;
+	/*
+	 * Phase D.4b-pre: physmem identity-offset memslot id (memo 26
+	 * §D.4 D.4b-pre). One giant slot at gpa=0 / hva=uml_physmem /
+	 * size=physmem_size, mirroring v1's kvm_ensure_memslot at
+	 * kvm-v1-archive/lifecycle.c:613-648. Without this slot KVM TDP
+	 * has no memslot covering the pgd/PT-chain/trampoline GPAs (all
+	 * of which are __pa(kva) = kva - uml_physmem, in
+	 * [0, physmem_size)) — the per-region memslots from Phase B.2 sit
+	 * at host-VA-valued GPAs (in user-half VA space, far outside
+	 * [0, physmem_size)) and don't cover the physmem range. Sentinel
+	 * -1 means "not installed yet" (vm_create's eager attempt may
+	 * have deferred because uml_physmem / physmem_size aren't set
+	 * until later in linux_main; lazy retry from D.1's
+	 * trampoline_late_install initcall picks it up). Non-negative
+	 * value is the kvm_v2_memslot_add-allocated slot id; the existing
+	 * memslot list teardown in vm_destroy frees it.
+	 */
+	int			physmem_memslot_id;
 };
 
 /*
@@ -121,6 +139,25 @@ void kvm_v2_shutdown(void);
 int  kvm_v2_vm_create(int kvm_fd, u64 caps);
 void kvm_v2_vm_destroy(void);
 struct kvm_v2_vm *kvm_v2_vm_get(void);
+
+/*
+ * Phase D.4b-pre: physmem identity-offset memslot install (memo 26 §D.4).
+ * Idempotent — re-invocation after a successful install short-circuits.
+ * Returns 0 on success / already-installed, -EAGAIN if uml_physmem /
+ * physmem_size aren't set yet (caller treats like trampoline alloc's
+ * pre-buddy -ENOMEM: log + defer to the lazy retry path), or any other
+ * negative errno from KVM_SET_USER_MEMORY_REGION on a hard failure.
+ *
+ * vm_create's eager attempt may hit the -EAGAIN branch because
+ * init_backend() runs before linux_main() finishes populating
+ * uml_physmem / physmem_size (see arch/um/kernel/um_arch.c:372 — the
+ * init_backend call — vs lines 392/399 where the globals are set).
+ * The subsys_initcall lazy retry in syscall_trap.c picks the install up
+ * once the globals are stable.
+ *
+ * Defined in context.c.
+ */
+int  kvm_v2_physmem_memslot_install(struct kvm_v2_vm *vm);
 
 /*
  * Per-host-CPU vCPU pool member (memo 26 §C.1). One element per

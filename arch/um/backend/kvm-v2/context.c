@@ -39,7 +39,10 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
+#include <as-layout.h>		/* physmem_size, uml_physmem */
 #include <os.h>
+
+#include <asm/trace/um_backend.h>
 
 #include "kvm_v2_backend.h"
 #include "syscall_trap.h"
@@ -55,9 +58,114 @@
 #define KVM_V2_IDENTITY_ADDR	0xfffbc000UL
 
 static struct kvm_v2_vm vm = {
-	.kvm_fd = -1,
-	.vm_fd  = -1,
+	.kvm_fd              = -1,
+	.vm_fd               = -1,
+	.physmem_memslot_id  = -1,
 };
+
+/*
+ * D.4b-pre: install the giant physmem identity-offset memslot. Mirrors
+ * v1's kvm_ensure_memslot() at kvm-v1-archive/lifecycle.c:613-648 (the
+ * v1 implementation v2 inherited the design from but missed wiring up).
+ *
+ * Why this matters: kvm_v2_load_cr3 writes __pa(active_mm->pgd) to CR3.
+ * Under UML __pa(kva) = kva - uml_physmem, so the GPA is an offset
+ * inside physmem (in [0, physmem_size)), not a host VA. KVM's TDP walks
+ * the pgd at this GPA — and it needs a memslot covering this range.
+ * Phase B.2's per-region memslots use guest_phys_addr = host_va =
+ * region->va (in user-half VA space, far outside [0, physmem_size)),
+ * so they don't cover the pgd / PUD/PMD/PTE / trampoline pages — all of
+ * which live in physmem. One slot covers everything in physmem: PT
+ * chain pages allocated from buddy come from physmem; alloc_page →
+ * page_address → __pa = offset in [0, physmem_size); the memslot
+ * translates back to userspace_addr = uml_physmem + offset = the
+ * original kva. KVM fault-in resolves through current->mm (the
+ * spawner) which has uml_physmem mapped from the very early boot path.
+ *
+ * Guest pgd PTE values reference UML-physical addresses (offsets in
+ * physmem). KVM's GVA→GPA walk follows the guest pgd to those
+ * physmem-offset GPAs; the physmem memslot translates them to host
+ * pages.
+ *
+ * The per-region memslots from Phase B.2 stay (don't conflict with
+ * this slot — different GPA range). Whether they're redundant or
+ * needed for protection-bit enforcement is a separate Phase B audit
+ * deferred to Phase H. D.4b-pre is the minimum to make D.5 work.
+ *
+ * Idempotent: a successful prior install short-circuits via
+ * physmem_memslot_id >= 0 — necessary because the install is reachable
+ * from two sites (eager vm_create attempt + lazy retry from D.1's
+ * trampoline_late_install initcall). v1 used a file-static `registered`
+ * bool for the same purpose (lifecycle.c:615); v2 stores the slot id on
+ * struct kvm_v2_vm so the idempotence flag and the destroyer's view of
+ * the slot are the same field.
+ *
+ * Returns 0 on success / already-installed, -EAGAIN if uml_physmem /
+ * physmem_size aren't yet populated (vm_create runs from init_backend
+ * which fires before linux_main finishes setting those globals — see
+ * arch/um/kernel/um_arch.c:372 vs 392/399; v1 mirrored the same defer
+ * pattern via `if (!uml_physmem || !physmem_size) return -EAGAIN`),
+ * or a negative ioctl errno on hard failure.
+ */
+int kvm_v2_physmem_memslot_install(struct kvm_v2_vm *vmctx)
+{
+	struct kvm_userspace_memory_region kr;
+	int slot_id, rc;
+
+	if (!vmctx || vmctx->vm_fd < 0)
+		return -EINVAL;
+
+	if (vmctx->physmem_memslot_id >= 0) {
+		/* Already installed — idempotent short-circuit. */
+		return 0;
+	}
+
+	if (!uml_physmem || !physmem_size) {
+		/*
+		 * vm_create runs from init_backend() before linux_main
+		 * populates uml_physmem / physmem_size. Mirror v1's
+		 * lifecycle.c:623-627 defer: log once and let the lazy
+		 * retry path (subsys_initcall in syscall_trap.c) pick it
+		 * up once the globals are stable.
+		 */
+		pr_info("um: kvm-v2 physmem_memslot: deferred (uml_physmem=%#lx physmem_size=%#llx not yet populated; lazy retry will land it)\n",
+			uml_physmem, physmem_size);
+		return -EAGAIN;
+	}
+
+	slot_id = kvm_v2_memslot_add(vmctx, 0 /* gpa */,
+				     uml_physmem /* hva */,
+				     physmem_size, 0 /* flags */);
+	if (slot_id < 0) {
+		pr_err("um: kvm-v2 physmem_memslot: memslot_add failed (%d)\n",
+		       slot_id);
+		return slot_id;
+	}
+
+	kr = (struct kvm_userspace_memory_region){
+		.slot		 = (u32)slot_id,
+		.flags		 = 0,
+		.guest_phys_addr = 0,
+		.memory_size	 = physmem_size,
+		.userspace_addr	 = uml_physmem,
+	};
+
+	rc = os_ioctl_generic(vmctx->vm_fd, KVM_SET_USER_MEMORY_REGION,
+			      (unsigned long)&kr);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 physmem_memslot: KVM_SET_USER_MEMORY_REGION(slot=%d hva=%#lx size=%#llx) failed (%d)\n",
+		       slot_id, uml_physmem, physmem_size, rc);
+		kvm_v2_memslot_del(vmctx, (u32)slot_id);
+		return rc;
+	}
+
+	vmctx->physmem_memslot_id = slot_id;
+	pr_info("um: kvm-v2 physmem_memslot: slot=%d gpa=0 hva=%#lx size=%#llx\n",
+		slot_id, uml_physmem, physmem_size);
+	trace_um_backend_kvm_v2_physmem_memslot_install(slot_id, uml_physmem,
+							physmem_size);
+	return 0;
+}
 
 int kvm_v2_vm_create(int kvm_fd, u64 caps)
 {
@@ -124,6 +232,44 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 					 * buddy may not be up; lazy retry from
 					 * D.4/D.5 covers that case). */
 	vm.trampoline_gpa  = 0;
+	vm.physmem_memslot_id = -1;	/* D.4b-pre: install attempted just below;
+					 * lazy retry from trampoline_late_install
+					 * picks up an init_backend-time defer once
+					 * uml_physmem / physmem_size are set. */
+
+	/*
+	 * Phase D.4b-pre (memo 26 §D.4): install the giant physmem
+	 * identity-offset memslot BEFORE the D.1 trampoline alloc — once
+	 * D.5 flips .vcpu_run, KVM's TDP needs a memslot covering the
+	 * physmem range so `__pa(pgd)` and `__pa(trampoline_kva)` resolve.
+	 * Mirrors v1's kvm_ensure_memslot at kvm-v1-archive/lifecycle.c:
+	 * 613-648.
+	 *
+	 * Best-effort at vm_create time, exactly like the trampoline alloc
+	 * below: linux_main() runs init_backend() (this path) BEFORE it
+	 * sets uml_physmem / physmem_size (arch/um/kernel/um_arch.c:372
+	 * vs 392/399). The helper returns -EAGAIN in that window; the
+	 * subsys_initcall lazy retry in syscall_trap.c picks the install
+	 * up once the globals are populated. -EAGAIN is non-fatal here
+	 * for the same reason the trampoline's pre-buddy -ENOMEM is —
+	 * deferral is the expected boot-time path. Other negative errnos
+	 * (KVM_SET_USER_MEMORY_REGION rejection, allocator failure) are
+	 * fatal and unwind via err_close_vm.
+	 *
+	 * Order vs TSS_ADDR/IDENTITY_MAP_ADDR (above): KVM Intel rejects
+	 * those two ioctls once any memslot exists, so memslot install
+	 * MUST follow them. Order vs trampoline alloc (below): when D.4b
+	 * later wires the PML4[448] PT chain off this memslot, the
+	 * trampoline page must be in the slot before any guest walk —
+	 * keeping memslot first matches that future invariant and v1's
+	 * ensure-memslot-then-bootstrap order at lifecycle.c:613-648.
+	 */
+	rc = kvm_v2_physmem_memslot_install(&vm);
+	if (rc && rc != -EAGAIN) {
+		pr_err("um: kvm-v2 vm_create: physmem_memslot_install failed (%d)\n",
+		       rc);
+		goto err_close_vm;
+	}
 
 	/*
 	 * Phase D.1 (memo 26 §D.1): allocate the LSTAR trampoline page
@@ -143,9 +289,11 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 		goto err_close_vm;
 	}
 
-	pr_info("um: kvm-v2 vm_create: vm_fd=%d caps=%#llx tss=%#lx ident=%#lx trampoline=%s (memslots empty; A.3 attaches vCPU + installs CPUID)\n",
+	pr_info("um: kvm-v2 vm_create: vm_fd=%d caps=%#llx tss=%#lx ident=%#lx physmem_memslot=%s trampoline=%s (memslots %s; A.3 attaches vCPU + installs CPUID)\n",
 		vm.vm_fd, vm.caps, KVM_V2_TSS_ADDR, KVM_V2_IDENTITY_ADDR,
-		vm.trampoline_page ? "installed" : "deferred");
+		vm.physmem_memslot_id >= 0 ? "installed" : "deferred",
+		vm.trampoline_page ? "installed" : "deferred",
+		vm.physmem_memslot_id >= 0 ? "primed" : "empty");
 	return 0;
 
 err_close_vm:
@@ -161,13 +309,12 @@ void kvm_v2_vm_destroy(void)
 		return;
 
 	/*
-	 * Drain the memslot list. B.1 ships the allocator/list/lookup
-	 * but does not yet populate the list (B.2's mm_region_added
-	 * wiring is the first caller of kvm_v2_memslot_add). The drain
-	 * is the correct teardown order regardless: once B.2 lands,
-	 * vm_destroy must free every outstanding entry, and the loop
-	 * keeps that responsibility on this destroy path rather than
-	 * spreading it across B.2-B.6 each time a new caller is added.
+	 * Drain the memslot list. B.1 ships the allocator/list/lookup;
+	 * B.2's mm_region_added populates per-region entries; D.4b-pre's
+	 * kvm_v2_physmem_memslot_install adds the giant physmem slot.
+	 * All three categories sit on vm.memslots and tear down via the
+	 * same kvm_v2_memslot_del call — no per-category special-casing
+	 * needed.
 	 *
 	 * No KVM_SET_USER_MEMORY_REGION(size=0) here — that's B.3's
 	 * responsibility once mm_region_removed wires it. At
@@ -177,6 +324,10 @@ void kvm_v2_vm_destroy(void)
 	 */
 	list_for_each_entry_safe(m, tmp, &vm.memslots, list)
 		kvm_v2_memslot_del(&vm, m->slot_id);
+	vm.physmem_memslot_id = -1;	/* D.4b-pre: drained above; reset
+					 * sentinel so a future re-init's
+					 * idempotence check doesn't see a
+					 * stale slot id. */
 
 	/*
 	 * Phase D.1: free the LSTAR trampoline page. Safe on a
