@@ -28,8 +28,16 @@ From memo 24 + memo 25, the v2 backend is:
   picks tasks onto vCPUs like Linux schedules threads onto CPUs.
 - **Per-mm host worker process**: each guest mm is its own host process
   (memo 25 refactor 4). Cross-mm collisions structurally impossible.
-- **VMCALL hypercalls**: guest syscalls trap via `vmcall` →
-  `KVM_EXIT_HYPERCALL`. No OUT-to-port magic, no LSTAR trampoline.
+- **IO-port syscall trap**: guest syscalls trap via `out %al,$0xf4`
+  → `KVM_EXIT_IO` (5-byte LSTAR trampoline at PML4[508] kernel-half;
+  byte-identical to v1's non-gadget tail). The original speccing
+  `vmcall → KVM_EXIT_HYPERCALL` was mechanically impossible on
+  stock KVM (`arch/x86/kvm/x86.c:10456,10520-10523` returns
+  `-KVM_ENOSYS` in-kernel for unknown hypercall nrs); §D was
+  rewritten at `d186d870e8eb` to use v1's IO-port mechanism. The
+  Phase D structural wins (per-CPU vCPU pool, TDP, no shadow PT,
+  kernel-half-only trampoline, no per-task bootstrap install) hold
+  independent of trap instruction.
 - **Standard memory layout**: `uml_physmem` at PML4[256+] (memo 25
   refactor 1). User mms have empty kernel-half except for shared
   per-VM IDT/TSS pages.
@@ -58,7 +66,7 @@ arch/um/backend/kvm-v2/
 ├── memslot.c       (~250)    # per-region memslot + mmu_notifier
 ├── vcpu.c          (~200)    # per-CPU vCPU pool + KVM_CREATE_VCPU
 ├── sched.c         (~200)    # task → vCPU dispatch + CR3 swap
-├── hypercall.c     (~150)    # KVM_EXIT_HYPERCALL → syscall dispatch
+├── syscall_trap.c (~180)    # KVM_EXIT_IO → handle_syscall (renamed from hypercall.c per §D rewrite)
 ├── exception.c     (~200)    # IDT setup + #PF/#GP/#UD/#DE/#BP/#OF
 ├── signal.c        (~100)    # SIGALRM preemption + sigmask
 ├── smp.c           (~100)    # KVM_REQ_TLB_FLUSH cross-vCPU IPIs
@@ -653,22 +661,67 @@ mms.
 
 ### E.3 — Exception handler dispatch (5 days)
 
-For each exception we care about:
+**Mechanism correction (memo 26 §D rewrite, codex audit independent
+finding C):** the original prose specced
+`vmcall(UM_KVM_HC_*, ...)` for each exception class; that does not
+work on stock KVM (`arch/x86/kvm/x86.c:10456,10520-10523`'s
+`____kvm_emulate_hypercall` returns `-KVM_ENOSYS` in-kernel for
+unknown hypercall nrs — only `KVM_HC_MAP_GPA_RANGE` exits to
+userspace). E.3 must use one of the working mechanisms below; the
+detailed choice is an E.3-start decision, but every option is
+compatible with the IDT/IST infrastructure E.1/E.2 set up.
 
-- **#PF (vector 14):** handler does vmcall(UM_KVM_HC_PF, cr2, ec).
-  UML's #PF handler in `arch/um/kernel/trap.c` maps to either
-  `do_page_fault` (kernel #PF, panic) or `segv_handler` (user #PF,
-  deliver SIGSEGV).
-- **#GP (13):** vmcall(UM_KVM_HC_GP, ec). Deliver SIGSEGV to user
-  task.
-- **#UD (6):** vmcall(UM_KVM_HC_UD). Deliver SIGILL.
-- **#DE (0):** vmcall(UM_KVM_HC_DE). Deliver SIGFPE.
-- **#BP (3):** vmcall(UM_KVM_HC_BP). Deliver SIGTRAP.
-- **#OF (4):** vmcall(UM_KVM_HC_OF). Deliver SIGSEGV (rare).
+Two working options for the in-handler trap-out, in order of
+preference:
+
+1. **IO port per exception class** (paralleling §D.1's SYSCALL
+   trap on port 0xf4). Each IDT handler is ~10-15 bytes of asm:
+   move cr2/ecode/etc into argument registers, then `out %al,
+   $0xf6` (#PF), `out %al, $0xf9` (#GP), etc. Host reads
+   `run->io.port` to disambiguate, marshals registers via
+   sync_regs, dispatches to the existing `arch/um/kernel/trap.c`
+   path. Mirrors v1's port-based wire format
+   (`kvm-v1-archive/kvm_backend.h:1004` defines
+   `UM_KVM_SYSCALL_PORT = 0xf4` + `UM_KVM_SYSRETQ_PORT = 0xf5`;
+   v1 didn't ship per-exception ports because v1 used a different
+   exception-handling path, but the IO-port-per-class extension
+   is mechanically straightforward).
+2. **KVM exception bitmap interception**. KVM lets userspace
+   intercept specific exception vectors via the VMCS exception
+   bitmap (VMX) / SVM intercept_exceptions (SVM). When a guest
+   exception fires whose bit is set, KVM exits with
+   `exit_reason = KVM_EXIT_EXCEPTION` (or `KVM_EXIT_DEBUG` for
+   #BP) and the host handles it without the guest IDT firing at
+   all. Pros: no in-guest handler asm needed; KVM does the work.
+   Cons: requires the exception bitmap config to land at
+   vcpu_create (the bitmap is set via `KVM_SET_GUEST_DEBUG` for
+   #BP/#DB; other vectors use the VMCS field directly via
+   architecture-specific paths). E.3-start should evaluate which
+   approach is cleaner for which exception class — likely #BP
+   uses option 2 (KVM_GUESTDBG_*), all others use option 1
+   (in-guest IDT handler emits IO port).
+
+Per-vector mapping (handler delivers the listed signal via
+`arch/um/kernel/trap.c` paths after trap-out):
+
+- **#PF (vector 14):** `out` port 0xf6 with cr2 in RAX, ecode in
+  RBX (or via stack frame pushed by CPU). UML's #PF handler maps
+  to `do_page_fault` (kernel #PF, panic) or `segv_handler` (user
+  #PF, deliver SIGSEGV).
+- **#GP (13):** `out` port 0xf9 with ecode. Deliver SIGSEGV.
+- **#UD (6):** `out` port 0xfa. Deliver SIGILL.
+- **#DE (0):** `out` port 0xfb. Deliver SIGFPE.
+- **#BP (3):** `KVM_GUESTDBG_USE_SW_BP` → `KVM_EXIT_DEBUG`
+  (option 2; cleaner than IDT-handler-emits-IO-port for the
+  software-breakpoint case). Deliver SIGTRAP.
+- **#OF (4):** `out` port 0xfc. Deliver SIGSEGV (rare).
 - **#DF (8):** panic. Should never happen post-Phase-E.
 
-Each handler is small (~30 bytes of asm), all in the same dedicated
-guest page.
+Each in-guest handler (#PF / #GP / #UD / #DE / #OF) is ~10-15
+bytes of asm, all in the same dedicated kernel-half guest page
+that the trampoline sits in (PML4[508] + offset). Re-uses the
+per-VM PT chain D.4 already built — exception handlers slot in
+alongside the trampoline at fixed offsets.
 
 ### E.4 — Validate exception handling (4 days)
 
@@ -731,10 +784,38 @@ workloads inside the guest scale.
 
 ### G.2 — `smp.c`: cross-vCPU IPI (if needed) (2 days)
 
-For UML's intra-guest IPIs (e.g., `smp_call_function`), use a
-hypercall: `vmcall(UM_KVM_HC_IPI, target_cpu, action_nr)`. The
-backend dispatches to the target vCPU via signal or by setting a
-flag the vCPU checks on next entry.
+**Mechanism correction (memo 26 §D rewrite, codex audit independent
+finding C):** the original prose specced
+`vmcall(UM_KVM_HC_IPI, target_cpu, action_nr)`; that does not work
+on stock KVM (`arch/x86/kvm/x86.c:10456,10520-10523` returns
+`-KVM_ENOSYS` for unknown hypercall nrs). Replaced with KVM's
+existing request-and-kick mechanism, which is what G.1 already uses
+for cross-vCPU TLB shootdown.
+
+For UML's intra-guest IPIs (e.g., `smp_call_function`):
+
+- Define an in-kernel request bit (or reuse an existing
+  `KVM_REQ_*`); KVM exposes `kvm_make_request(vcpu, req)` plus
+  `kvm_make_all_cpus_request(kvm, req)` to mark request bits and
+  kick target vCPUs out of guest mode via the
+  `KVM_REQ_OUTSIDE_GUEST_MODE` check at the top of
+  `vcpu_enter_guest` (`arch/x86/kvm/x86.c`).
+- The kicked vCPU re-enters host code with `KVM_RUN` returning
+  -EINTR (or with `kvm_run->exit_reason` set per the request
+  semantics); the host dispatcher handles the action and re-
+  enters KVM_RUN.
+- For action_nr semantics that need richer state than a single bit,
+  pair the request with a per-vCPU mailbox structure (`struct
+  kvm_v2_vcpu` field: pending action queue under a spinlock). The
+  kicked vCPU drains the queue on host-side wakeup.
+- Cross-mm IPIs (target task is in another mm worker): route
+  through the per-mm worker dispatcher (memo 28 Part C); the kick
+  ends up as a SIGUSR2 to the destination worker, which consumes
+  the mailbox.
+
+**No custom hypercall, no IO-port trap, no synthesised exception.**
+This is the same primitive Linux native KVM uses for inter-vCPU
+coordination.
 
 ### G.3 — SMP validation (2 days)
 
