@@ -88,6 +88,7 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 			   const struct um_memory_region *region)
 {
 	struct kvm_v2_vm *vm = kvm_v2_vm_get();
+	struct kvm_v2_memslot *existing;
 	struct kvm_userspace_memory_region kr;
 	int slot_id, rc;
 	u32 flags;
@@ -111,16 +112,33 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 	flags = (region->prot & UM_PROT_WRITE) ? 0 : KVM_MEM_READONLY;
 
 	/*
-	 * Reserve list entry + slot id atomically (kvm_v2_memslot_add
-	 * does both under vm->lock). On ioctl failure we unwind via
-	 * kvm_v2_memslot_del so neither the bitmap nor the list leak.
+	 * tlb.c surfaces "add" for both new mappings AND in-place
+	 * updates of existing ones (prot toggle, partial-range
+	 * replace). seccomp's um_stub_mm_map handles either via
+	 * MAP_FIXED. KVM rejects a fresh slot id at an overlapping
+	 * gpa with -EEXIST; the right semantic is to reuse the slot
+	 * id so KVM_SET_USER_MEMORY_REGION becomes an update. Look
+	 * up the gpa first; if a slot already exists, reuse it.
 	 */
-	slot_id = kvm_v2_memslot_add(vm, region->va, region->va, region->len,
-				     flags);
-	if (slot_id < 0) {
-		pr_warn_ratelimited("um: kvm-v2 region_added: memslot_add failed (%d) va=%#lx len=%#lx\n",
-				    slot_id, region->va, region->len);
-		return slot_id;
+	existing = kvm_v2_memslot_lookup(vm, region->va);
+	if (existing) {
+		slot_id = (int)existing->slot_id;
+		existing->size = region->len;
+		existing->flags = flags;
+	} else {
+		/*
+		 * Reserve list entry + slot id atomically
+		 * (kvm_v2_memslot_add does both under vm->lock). On
+		 * ioctl failure we unwind via kvm_v2_memslot_del so
+		 * neither the bitmap nor the list leak.
+		 */
+		slot_id = kvm_v2_memslot_add(vm, region->va, region->va,
+					     region->len, flags);
+		if (slot_id < 0) {
+			pr_warn_ratelimited("um: kvm-v2 region_added: memslot_add failed (%d) va=%#lx len=%#lx\n",
+					    slot_id, region->va, region->len);
+			return slot_id;
+		}
 	}
 
 	kr = (struct kvm_userspace_memory_region){
@@ -137,7 +155,8 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 		pr_warn_ratelimited("um: kvm-v2 region_added: KVM_SET_USER_MEMORY_REGION(slot=%d va=%#lx len=%#lx flags=%#x) failed (%d)\n",
 				    slot_id, region->va, region->len, flags,
 				    rc);
-		kvm_v2_memslot_del(vm, (u32)slot_id);
+		if (!existing)
+			kvm_v2_memslot_del(vm, (u32)slot_id);
 		return rc;
 	}
 
