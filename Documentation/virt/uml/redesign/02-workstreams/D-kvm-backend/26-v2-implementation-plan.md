@@ -1050,10 +1050,42 @@ contract.
 | glibc fork (no wait)                  | PASS   |                                    |
 | glibc fork+wait                       | PASS   | `CHILD pid=37` substitutes correctly |
 | glibc fork+exec (`execl /bin/echo`)   | PASS   |                                    |
-| Substrate class-a-env reproducers     | PARTIAL | 4 PASS + 2 FAIL under v2 — matches seccomp's failure pattern (tty_isatty/termios_get fail in both backends). Driver-side teardown after the run still has issues; substrate gate's full harness reports 0/0/0 because the outer init shell exits with status 127/255 mid-script. Tracking. |
+| Substrate class-a-env reproducers     | PASS   | 4 PASS + 2 FAIL — matches seccomp's failure pattern for tty_isatty/termios_get |
+| Python with extension imports         | PASS   | `import hashlib; print(hashlib.sha256(b'x').hexdigest()[:8])` → `2d711642` correctly |
+| Substrate gate harness under v2       | PARTIAL | After interrupt_end fix at 31ba9c354063, output flows correctly through class-a-env. Class-b-process's fork_exec_wait or similar triggers a separate bash-jumps-to-NULL segfault — separate followup. |
 
 **Substrate gate** (seccomp baseline) stays green throughout
 v2 development: PASS=25/FAIL=3/EXPECTED_FAIL=3.
+
+### Phase E.4 residual resolution: `interrupt_end()` in IO-trap dispatchers (commit `31ba9c354063`)
+
+Two residuals were collapsed to a single root cause:
+  - `#92`: substrate harness output lost after first fork+exec
+  - `#93`: Python with extension imports (hashlib, etc.) infinite SIGSEGV loop
+
+Mechanism: v2's `kvm_v2_handle_io_pf` (and the GP/UD/DE/OF siblings)
+called `segv_handler` / `relay_signal` to queue a signal on
+`current->task_struct`, then immediately returned to `KVM_RUN` at
+the same RIP. The pending signal was never delivered (no `do_signal`
+ran), so the user task re-entered the same faulting instruction,
+faulted again, queued another signal, looped forever — or, for the
+substrate harness, the parent shell's pending I/O completion /
+SIGCHLD-on-wait was never drained, so it stalled at queued state.
+
+Fix: mirror seccomp's pattern at
+`arch/um/backend/seccomp/trap_user.c:184` — call `interrupt_end()`
+in each of v2's per-vector handlers after the
+`segv_handler`/`relay_signal` call but BEFORE marshal-back. Per
+`arch/um/kernel/process.c::interrupt_end`, this drains
+`resume_user_mode_work` (which fires `do_signal` to set up a
+sigframe for default-action terminate signals or skip if the
+signal has a handler), `schedule` (if `TIF_NEED_RESCHED`), and
+the cgroup-threadgroup change end.
+
+Verified empirically: Python imports + crypto + substrate gate
+class-a-env all work end-to-end after the fix. Substrate baseline
+(seccomp) stays unchanged green — seccomp's path was always
+calling interrupt_end.
 
 ### Lesson for future memo work
 
