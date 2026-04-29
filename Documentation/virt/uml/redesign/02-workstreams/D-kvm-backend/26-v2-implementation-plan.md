@@ -29,7 +29,7 @@ From memo 24 + memo 25, the v2 backend is:
 - **Per-mm host worker process**: each guest mm is its own host process
   (memo 25 refactor 4). Cross-mm collisions structurally impossible.
 - **IO-port syscall trap**: guest syscalls trap via `out %al,$0xf4`
-  → `KVM_EXIT_IO` (5-byte LSTAR trampoline at PML4[508] kernel-half;
+  → `KVM_EXIT_IO` (5-byte LSTAR trampoline at PML4[448] kernel-half;
   byte-identical to v1's non-gadget tail). The original speccing
   `vmcall → KVM_EXIT_HYPERCALL` was mechanically impossible on
   stock KVM (`arch/x86/kvm/x86.c:10456,10520-10523` returns
@@ -358,7 +358,7 @@ seccomp-delegation flags (`uses_stub_reaper`,
 `stub_child_runs_seccomp` at lines 60-63) flip to `false`. Bug B
 (memo 22's user-half / kernel-half PML4 alias on the bootstrap
 page) becomes structurally impossible: the trampoline lives only in
-PML4[508] (kernel-half canonical-sign-extended past the user/kernel
+PML4[448] (kernel-half canonical-sign-extended past the user/kernel
 boundary; v1's `KVM_BOOTSTRAP_GUEST_VA = 0xffffe00000000000` at
 `kvm-v1-archive/thread.c:637`), is never installed at any user-half
 VA, and is never present in user-task page tables as a US=1 leaf —
@@ -453,7 +453,7 @@ to allocate.
   needed.** The guest VA is `0xffffe00000000040` (matching v1's
   `KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_LSTAR_OFFSET` from
   `kvm-v1-archive/thread.c:637,665`); MSR_LSTAR is programmed to
-  this GVA in D.4, and the kernel-half PML4[508] entry (also D.4)
+  this GVA in D.4, and the kernel-half PML4[448] entry (also D.4)
   makes the GVA→GPA walk land on the trampoline page.
 
 - **ABI**: `enum um_kvm_iotrap { UM_KVM_TRAP_SYSCALL = 1,
@@ -537,10 +537,59 @@ to allocate.
   `arch/um/kernel/process.c::__switch_to`'s pre-switch path under
   `CONFIG_UM_BACKEND_KVM_V2`.
 
-### D.4 — MSR programming + PML4[508] kernel-half install (3 days)
+### D.4 — MSR programming + PML4[448] kernel-half install (3 days)
 
-- **MSR programming at vcpu_create** (~50 LoC). Mirror v1's
-  `kvm_enter_guest_program_msrs` at
+**Codex `--search` audit corrections (2026-04-29):** the original §D
+draft claimed PML4[508] for VA `0xffffe00000000040`. The math is
+wrong: `(0xffffe00000000040 >> 39) & 0x1ff = 0x1c0 = 448`. v1's
+archive used the same VA so v1 was at PML4[448]; the §D headline's
+"508" was a derivation error. PML4[508] would correspond to
+`0xfffffe0000000040`. **All references corrected to PML4[448]**;
+implementation must `BUG_ON(pgd_index(KVM_V2_TRAMPOLINE_GVA) != 448)`
+as a runtime assertion.
+
+The audit also caught a deeper issue: Phase B's per-region memslot
+convention is `guest_phys_addr = userspace_addr = region->va` (a
+host VA), but `kvm_v2_load_cr3` writes `__pa(pgd)` to CR3, which
+under UML is `kva - uml_physmem` (an offset within physmem, not a
+host VA). Phase B's memslots cover GPAs at user-half VA values; the
+guest pgd's PTE values reference physmem offsets. **No memslot
+covers physmem-offset GPAs today.** When D.5 flips `.vcpu_run`,
+KVM's TDP walks CR3 and finds no memslot for the pgd — KVM_RUN
+fails. v1 had a single big physmem memslot at slot 0 (gpa=0,
+hva=uml_physmem, size=physmem_size) per `kvm-v1-archive/lifecycle.
+c:613-648` that v2 inherited the design from but missed the
+implementation. Phase D.4b-pre adds this memslot before the PML4
+install can land usefully.
+
+Plus three smaller corrections folded in: (a) non-leaf PT entries
+use `_KERNPG_TABLE` (UML's `pud_bad` / `pmd_bad` expect that shape;
+`_PAGE_TABLE` has US=1 — wrong for kernel-half); (b) UML's mm_list
+is file-local in `arch/um/kernel/skas/mmu.c:71-74`, not exported —
+patch `swapper_pg_dir[448]` and `init_mm.pgd[448]` explicitly
+rather than iterating an mm_list backend code can't see; (c) PT
+chain pages (PUD/PMD/PTE) must be VM-lifetime — never freed while
+any mm carries the installed pgd entry, otherwise stale walks
+follow stale pointers.
+
+This expands D.4 from one commit to three:
+
+1. **D.4a — MSR programming + EFER.SCE + readback** (DONE —
+   `812e6725d48d`).
+2. **D.4b-pre — physmem identity memslot at vm_create**. Single
+   slot mirroring v1's `kvm_ensure_memslot()`; gpa=0, hva=
+   uml_physmem, size=physmem_size. ~40 LoC.
+3. **D.4b — PML4[448] kernel-half install via swapper_pg_dir**.
+   PT chain in physmem (covered by D.4b-pre's memslot), `_KERNPG_
+   TABLE` non-leaf flags, swapper + init_mm explicit patch, runtime
+   `pgd_index` assertion, VM-lifetime PT pages, free in vm_destroy.
+   ~120 LoC.
+
+The bullets below describe D.4b's PT install. D.4a (MSR programming)
+already shipped; D.4b-pre's physmem memslot is its prerequisite.
+
+- **MSR programming at vcpu_create** (~50 LoC; SHIPPED in D.4a as
+  `812e6725d48d`). Mirror v1's `kvm_enter_guest_program_msrs` at
   `kvm-v1-archive/thread.c:2020-2111`, but issued **once** at pool
   member create (C.1's `kvm_v2_vcpu_create_one`), not per-dispatch
   — vCPUs are reused across tasks, MSRs are immutable across the
@@ -564,12 +613,26 @@ to allocate.
   CPU raises #UD on SYSCALL; the gate fails on the first user-mode
   instruction. One-time write at vcpu_create via
   `kvm_run->s.regs.sregs.efer` + dirty bit.
-- **PML4[508] kernel-half install via swapper_pg_dir** (~80 LoC).
-  The trampoline GPA is reachable via the identity memslot (D.1),
-  but the guest CPU walks `CR3` (= `__pa(active_mm->pgd)`) for any
-  GVA — including the trampoline's `0xffffe00000000040`. Each UML
-  mm pgd needs PML4[508] pointing at a kernel-half PUD/PMD/PTE
-  chain that walks down to the trampoline GPA.
+- **D.4b-pre: physmem identity-offset memslot at vm_create** (~40
+  LoC). Add one big memslot at `vm_create` time:
+  `guest_phys_addr=0, userspace_addr=uml_physmem,
+  memory_size=physmem_size`. Mirrors v1's `kvm_ensure_memslot()`
+  at `kvm-v1-archive/lifecycle.c:613-648`. Without this, KVM TDP
+  walks `__pa(pgd)`-based GPAs (offsets in physmem) and finds no
+  memslot. The per-region memslots from B.2 don't conflict (their
+  GPAs are at user-half VA values outside `[0, physmem_size)`)
+  but are arguably also wrong; whether they're redundant or
+  needed for protection-bit enforcement is a separate Phase B
+  audit, deferred to Phase H. D.4b-pre is the minimum needed to
+  make D.5 work.
+
+- **D.4b: PML4[448] kernel-half install via swapper_pg_dir**
+  (~120 LoC). The trampoline GPA = `__pa(trampoline_kva)` is
+  reachable via D.4b-pre's physmem memslot. The guest CPU walks
+  `CR3` (= `__pa(active_mm->pgd)`) for any GVA — including the
+  trampoline's `0xffffe00000000040`. Each UML mm pgd needs
+  PML4[448] pointing at a kernel-half PUD/PMD/PTE chain that
+  walks down to the trampoline GPA.
 
   **Mechanism**: install the kernel-half mapping into UML's
   `swapper_pg_dir` (the kernel reference pgd) ONCE at
@@ -578,15 +641,33 @@ to allocate.
   entries from `swapper_pg_dir` into every new mm's pgd — so
   future `pgd_alloc()` calls pick up the trampoline mapping
   automatically. No `arch_dup_mmap` hook needed; we lean on UML's
-  existing kernel-half propagation. For mms that exist at
-  `kvm_v2_init` time (kthreadd, init_mm), iterate the mmlist and
-  install the PML4[508] entry directly into each pgd.
+  existing kernel-half propagation. For pre-existing mms patch
+  `init_mm.pgd[448]` explicitly. UML's `mm_list` is file-local in
+  `arch/um/kernel/skas/mmu.c:71-74` (not exported to backend
+  code) so the iterate-mmlist approach the surface map proposed
+  is wrong; init_mm + swapper_pg_dir is sufficient at subsys_initcall
+  time (no other mms exist that early).
 
   - PUD/PMD/PTE pages allocated from `uml_physmem` so they sit in
-    the identity memslot (gpa==host_va, no new memslot needed).
-  - The chain is shared across all task pgds (the guest kernel-half
-    is identical for every task), so the per-VM cost is ~12 KB
-    total (one PUD page + one PMD page + one PTE page).
+    D.4b-pre's physmem memslot. PTE chain pages are **VM-lifetime**
+    — never freed while any mm carries the installed pgd entry.
+    Free in `vm_destroy` after teardown.
+  - **Non-leaf PT flags use `_KERNPG_TABLE`** (= `_PAGE_PRESENT |
+    _PAGE_RW | _PAGE_ACCESSED | _PAGE_DIRTY`), NOT `_PAGE_TABLE`
+    (which has `_PAGE_USER` set — wrong for kernel-half). UML's
+    `pud_bad` / `pmd_bad` validators expect the `_KERNPG_TABLE`
+    shape.
+  - **Leaf PTE flags**: `_PAGE_PRESENT | _PAGE_ACCESSED` —
+    kernel-only (US=0), RO (no `_PAGE_RW`), executable (UML has no
+    `_PAGE_NX` so executable is implicit). Trampoline is RO+EXEC
+    code; never written from guest CPL=0 either.
+  - The chain is shared across all task pgds (the guest
+    kernel-half is identical for every task), so the per-VM cost
+    is ~12 KB total (one PUD page + one PMD page + one PTE page).
+  - **Runtime assertion** at install time:
+    `BUG_ON(pgd_index(KVM_V2_TRAMPOLINE_GVA) != 448)` — catches
+    any future VA change that would silently hit the wrong PML4
+    slot.
   - This mirrors v1's `kvm_shadow_map_page` pattern from
     `kvm-v1-archive/thread.c:2287-2365` but writes **real** page-
     table entries instead of shadow entries — TDP walks them
@@ -631,7 +712,7 @@ errors in `dmesg`; substrate gate PASS=25/FAIL=3/EXPECTED_FAIL=3.
 - Bug B repro from memo 22 (user RIP loaded with corrupt pointer
   via shadow-PT alias) does not reproduce — verified by replaying
   the original failing seed: trampoline VA never appears in any
-  user-half PTE walk because PML4[508] is the only install
+  user-half PTE walk because PML4[448] is the only install
   point.
 
 ---
@@ -719,7 +800,7 @@ Per-vector mapping (handler delivers the listed signal via
 
 Each in-guest handler (#PF / #GP / #UD / #DE / #OF) is ~10-15
 bytes of asm, all in the same dedicated kernel-half guest page
-that the trampoline sits in (PML4[508] + offset). Re-uses the
+that the trampoline sits in (PML4[448] + offset). Re-uses the
 per-VM PT chain D.4 already built — exception handlers slot in
 alongside the trampoline at fixed offsets.
 
