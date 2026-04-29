@@ -981,14 +981,49 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 	segv_handler(SIGSEGV, NULL, regs, NULL);
 
 	/*
-	 * After segv_handler, regs->gp[HOST_IP] either:
+	 * Drain UML's pending signal/scheduler work BEFORE marshaling
+	 * regs back to the IST frame. Without this, an unfixable
+	 * SIGSEGV (e.g., user accessed an unmapped VA with no VMA, or
+	 * write to RO page that copy-on-write can't satisfy) gets
+	 * QUEUED on current's task_struct but never delivered to user
+	 * mode — the user task re-enters at the same faulting RIP via
+	 * iretq, faults again, and we infinite-loop.
+	 *
+	 * seccomp's equivalent path at
+	 * arch/um/backend/seccomp/trap_user.c:184 calls interrupt_end()
+	 * after each signal-class dispatch for exactly this reason. Per
+	 * the kernel/process.c interrupt_end definition, this drains:
+	 *   - resume_user_mode_work (signal delivery, including
+	 *     do_signal which sets up sigframes for default-action
+	 *     terminate signals like SIGSEGV / SIGBUS)
+	 *   - schedule (if TIF_NEED_RESCHED is set)
+	 *   - cgroup-threadgroup change end
+	 *
+	 * The bug surfaced under v2 boot smoke when Python's dynamic
+	 * linker faulted in a not-present page that UML couldn't fix
+	 * (likely a glibc CoW corner case): the SIGSEGV-loop-on-same-RIP
+	 * pattern reproduced reliably with `python3 -c "import hashlib"`
+	 * but not with `python3 -c "print('hi')"`.
+	 *
+	 * After interrupt_end, regs->gp[HOST_IP] may have been rewritten
+	 * by do_signal to point at a signal-handler VA (case b in the
+	 * comment below); the IST frame write then propagates that to
+	 * the iretq pop-source.
+	 */
+	interrupt_end();
+
+	/*
+	 * After segv_handler + interrupt_end, regs->gp[HOST_IP] either:
 	 *   (a) stayed at frame.user_rip — fault fixed lazily; iretq
 	 *       resumes at the original faulting instruction, which
 	 *       now succeeds.
 	 *   (b) was rewritten to a signal handler VA — do_signal
-	 *       inside segv() set up a sigframe + return-to-handler
-	 *       address; iretq lands at the handler, which runs to
-	 *       completion and then sigreturns to (a)-style state.
+	 *       inside interrupt_end set up a sigframe + return-to-
+	 *       handler address; iretq lands at the handler, which
+	 *       runs to completion and then sigreturns to (a)-style
+	 *       state.
+	 *   (c) the task is being terminated (default-action SIGSEGV
+	 *       with no handler); on next KVM_RUN do_exit fires.
 	 * Either way, marshal regs back into the IST frame so the
 	 * in-guest iretq tail of the handler stub pops the right state.
 	 */
@@ -1045,6 +1080,9 @@ static int kvm_v2_handle_io_gp(struct uml_pt_regs *regs,
 	 * delivers SIGSEGV with si_code computed from the fault info.
 	 */
 	segv_handler(SIGSEGV, NULL, regs, NULL);
+
+	/* Drain pending signal/scheduler work — see #PF handler comment. */
+	interrupt_end();
 
 	kvm_v2_ist_frame_write(vcpu, regs, true /* has_error_code */);
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
@@ -1109,6 +1147,9 @@ static int kvm_v2_handle_io_ud(struct uml_pt_regs *regs,
 
 	kvm_v2_dispatch_relay(regs, SIGILL, ILL_ILLOPN);
 
+	/* Drain pending signal/scheduler work — see #PF handler comment. */
+	interrupt_end();
+
 	kvm_v2_ist_frame_write(vcpu, regs, false /* no error_code */);
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
 	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
@@ -1141,6 +1182,9 @@ static int kvm_v2_handle_io_de(struct uml_pt_regs *regs,
 	trace_um_backend_kvm_v2_iotrap_de(frame.user_rip);
 
 	kvm_v2_dispatch_relay(regs, SIGFPE, FPE_INTOVF);
+
+	/* Drain pending signal/scheduler work — see #PF handler comment. */
+	interrupt_end();
 
 	kvm_v2_ist_frame_write(vcpu, regs, false /* no error_code */);
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
@@ -1184,6 +1228,9 @@ static int kvm_v2_handle_io_of(struct uml_pt_regs *regs,
 	 * fault-fix detour.
 	 */
 	kvm_v2_dispatch_relay(regs, SIGSEGV, SEGV_MAPERR);
+
+	/* Drain pending signal/scheduler work — see #PF handler comment. */
+	interrupt_end();
 
 	kvm_v2_ist_frame_write(vcpu, regs, false /* no error_code */);
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
