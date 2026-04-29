@@ -286,3 +286,54 @@ void kvm_v2_vcpu_destroy(void)
 	vcpu.vcpu_fd      = -1;
 	vcpu.kvm_run_size = 0;
 }
+
+/*
+ * Phase B.5: load the guest CR3 with `__pa(pgd)`.
+ *
+ * The contract (memo 26 §B.5) is:
+ *   - PML4[0..255] of the guest pgd holds the user mappings (US=1).
+ *   - PML4[256..511] holds the kernel direct map + kernel text + per-VM
+ *     IDT/TSS page (US=0); user CPL=3 walks never reach these because
+ *     the canonical-sign-extended boundary at bit 47 makes them
+ *     non-canonical from user mode.
+ * Setting guest CR3 = __pa(mm->pgd) therefore lets KVM's TDP walk the
+ * user half cleanly without any shadow PT.
+ *
+ * This helper builds the SREGS update; Phase C's task->vCPU dispatch
+ * will call it when switching guest mms. Today there is no caller —
+ * the helper exists so the SREGS read/write plumbing is reviewable
+ * before Phase C is ready to use it. The single-vcpu placeholder from
+ * A.3 is the target.
+ *
+ * Caveat: the "PML4[256..511] is the kernel half" invariant requires
+ * R1's high-VA layout to be active — i.e. uml_physmem in PML4[256+]
+ * (vs the current default where uml_physmem == __binary_start_hva,
+ * both in PML4[0]). R1 introduced the abstraction
+ * (__binary_start_hva is separate from uml_physmem in
+ * arch/um/kernel/um_arch.c) but did not flip the layout. The flip is
+ * a separate substrate change tracked in memo 25 §R1's "v2 KVM"
+ * note; Phase C/D + B.6 (mmu_notifier validation) will surface the
+ * actual exit criterion when guest user mode runs via TDP.
+ */
+int kvm_v2_load_cr3(unsigned long pgd)
+{
+	struct kvm_sregs sregs;
+	int rc;
+
+	if (vcpu.vcpu_fd < 0)
+		return -ENODEV;
+
+	rc = os_ioctl_generic(vcpu.vcpu_fd, KVM_GET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0)
+		return rc;
+
+	sregs.cr3 = (u64)pgd;	/* caller passes __pa(mm->pgd) */
+
+	rc = os_ioctl_generic(vcpu.vcpu_fd, KVM_SET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0)
+		return rc;
+
+	return 0;
+}

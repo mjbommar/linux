@@ -119,6 +119,13 @@ int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
 void kvm_v2_vcpu_destroy(void);
 
 /*
+ * Phase B.5: load guest CR3. Caller passes __pa(mm->pgd). No
+ * production caller until Phase C wires task->vCPU dispatch; B.5
+ * lands the helper and the SREGS read/write plumbing for review.
+ */
+int  kvm_v2_load_cr3(unsigned long pgd);
+
+/*
  * Memslot allocator + lookup (memo 26 §B.1, defined in memslot.c).
  *
  * Phase B.1 only manages the in-memory list and the slot-id bitmap;
