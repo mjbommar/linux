@@ -1052,7 +1052,7 @@ contract.
 | glibc fork+exec (`execl /bin/echo`)   | PASS   |                                    |
 | Substrate class-a-env reproducers     | PASS   | 4 PASS + 2 FAIL — matches seccomp's failure pattern for tty_isatty/termios_get |
 | Python with extension imports         | PASS   | `import hashlib; print(hashlib.sha256(b'x').hexdigest()[:8])` → `2d711642` correctly |
-| Substrate gate harness under v2       | PARTIAL | After interrupt_end fix at 31ba9c354063, output flows correctly through class-a-env. Class-b-process's fork_exec_wait or similar triggers a separate bash-jumps-to-NULL segfault — separate followup. |
+| Substrate gate harness under v2       | PARTIAL | Class-a-env complete: 4 PASS + 4 FAIL under v2 (vs seccomp's 4 PASS + 3 FAIL — the extra FAIL is env_path_subprocess where Python subprocess.run output capture differs). Class-b-process gets SIGILL on first reproducer (fork_exec_wait) — exposed by the syscall-side interrupt_end fix at ad06c7f5164c. Tracking. |
 
 **Substrate gate** (seccomp baseline) stays green throughout
 v2 development: PASS=25/FAIL=3/EXPECTED_FAIL=3.
