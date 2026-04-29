@@ -11,18 +11,72 @@
 #include <asm/page.h>
 #include <linux/mm_types.h>
 
-#define _PAGE_PRESENT	0x001
-#define _PAGE_NEEDSYNC	0x002
-#define _PAGE_RW	0x020
-#define _PAGE_USER	0x040
-#define _PAGE_ACCESSED	0x080
-#define _PAGE_DIRTY	0x100
-/* If _PAGE_PRESENT is clear, we use these: */
-#define _PAGE_PROTNONE	0x010	/* if the user mapped it with PROT_NONE;
-				   pte_present gives true */
+/*
+ * UML PTE bit layout - aligned with x86 hardware paging (memo 26 Phase E.3.6).
+ *
+ * Before this change, UML's _PAGE_* assignments were software-only book-
+ * keeping: bits picked arbitrarily relative to x86 hardware. With the v2
+ * KVM backend (which hands UML's pgd directly to the CPU as the guest CR3)
+ * those positions collide with x86 paging semantics:
+ *
+ *   - UML _PAGE_RW=0x020 sat at x86 bit 5, which the CPU reads as A.
+ *   - UML _PAGE_USER=0x040 sat at x86 bit 6, which on a leaf is D and on
+ *     a non-leaf is ignored. The value never quite matched.
+ *   - UML _PAGE_ACCESSED=0x080 sat at x86 bit 7, which on a leaf is the
+ *     PS-bit (2MB/1GB large page). CPU walking a UML pgd would mistake
+ *     a young 4K leaf for a large page, causing silent map corruption.
+ *   - UML _PAGE_DIRTY=0x100 sat at x86 bit 8, the G-bit on leaves and
+ *     ignored on non-leaves; mostly benign but still a value mismatch.
+ *
+ * Bits 0..6 now match x86 architectural PTE positions. The software-only
+ * bits (NEEDSYNC, PROTNONE, SWP_EXCLUSIVE) move into the AVL window
+ * (bits 9..11) where x86 ignores them entirely on hardware walks.
+ *
+ *   bit  0  P    _PAGE_PRESENT       (matches x86)
+ *   bit  1  R/W  _PAGE_RW            (was 0x020)
+ *   bit  2  U/S  _PAGE_USER          (was 0x040)
+ *   bit  3  PWT  -                   (reserved for x86 cacheability)
+ *   bit  4  PCD  -                   (reserved for x86 cacheability)
+ *   bit  5  A    _PAGE_ACCESSED      (was 0x080)
+ *   bit  6  D    _PAGE_DIRTY         (was 0x100; leaf-only on x86)
+ *   bit  7  PS   -                   (large page; UML always 4K leaves)
+ *   bit  8  G    -                   (global; not used by UML)
+ *   bit  9  AVL  _PAGE_NEEDSYNC      (sw-only; was 0x002)
+ *   bit 10  AVL  _PAGE_PROTNONE      (sw-only; was 0x010, only if P=0)
+ *   bit 11  AVL  _PAGE_SWP_EXCLUSIVE (sw-only; was 0x400, swap PTEs only)
+ *
+ * Consequences:
+ *
+ * - kernel-core code (tlb.c, trap.c, mmu.c, mem.c, skas/uaccess.c) goes
+ *   through the named pte_/pmd_/p4d_ accessors and is bit-position-
+ *   agnostic; no source change required outside this file.
+ * - The seccomp backend never references _PAGE_ macros directly: it is
+ *   unaffected by this change.
+ * - The KVM v2 backend can now pass __pa(active_mm->pgd) to KVM as CR3
+ *   without any shadow-PT translation: UML's leaf entries are valid x86
+ *   PTEs by construction.
+ * - The swap-PTE encoding moves: type and offset fields can no longer
+ *   overlap _PAGE_NEEDSYNC at bit 9. See __swp_type / __swp_offset and
+ *   the format comment near the bottom of this file.
+ */
+#define _PAGE_PRESENT	0x001	/* x86 P   (bit 0) */
+#define _PAGE_RW	0x002	/* x86 R/W (bit 1) */
+#define _PAGE_USER	0x004	/* x86 U/S (bit 2) */
+#define _PAGE_ACCESSED	0x020	/* x86 A   (bit 5) */
+#define _PAGE_DIRTY	0x040	/* x86 D   (bit 6, leaf only) */
 
-/* We borrow bit 10 to store the exclusive marker in swap PTEs. */
-#define _PAGE_SWP_EXCLUSIVE	0x400
+/* Software-only bits in the x86 AVL window (bits 9..11). x86 hardware
+ * never inspects these on a walk, so KVM-v2 can hand UML's pgd straight
+ * to the CPU even with these set on present entries.
+ */
+#define _PAGE_NEEDSYNC		0x200	/* AVL bit 9; cleared at sync time */
+#define _PAGE_PROTNONE		0x400	/* AVL bit 10; only valid when P=0
+					 * (hw treats P=0 entries as not
+					 * present, sw uses PROTNONE to keep
+					 * pte_present() returning true).
+					 */
+/* Bit 11 (AVL) stores the exclusive marker on swap PTEs (which have P=0). */
+#define _PAGE_SWP_EXCLUSIVE	0x800
 
 #if CONFIG_PGTABLE_LEVELS == 4
 #include <asm/pgtable-4level.h>
@@ -367,20 +421,27 @@ extern pte_t *virt_to_pte(struct mm_struct *mm, unsigned long addr);
  * Encode/decode swap entries and swap PTEs. Swap PTEs are all PTEs that
  * are !pte_none() && !pte_present().
  *
- * Format of swap PTEs:
+ * Format of swap PTEs (post memo 26 Phase E.3.6 x86-aligned bit layout):
  *
- *   3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1
- *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
- *   <--------------- offset ----------------> E < type -> 0 0 0 1 0
+ *   6 6 5 5 5 5 5 5 5 5 5 5 4 4         1 1 1 1 1 1 1 1 1 1
+ *   3 2 1 0 9 8 7 6 5 4 3 2 1 0 ...     1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *   <----------------- offset ----------------> E S 0 0 0 0 0 < type > 0
  *
- *   E is the exclusive marker that is not stored in swap entries.
- *   _PAGE_NEEDSYNC (bit 1) is always set to 1 in set_pte().
+ *   bit  0     = _PAGE_PRESENT = 0  (this is a swap entry, not a present PTE)
+ *   bits 1..5  = swap type (5 bits → 32 types; matches the old encoding)
+ *   bits 6..8  = 0 (UML never sets D / PS / G on swap entries)
+ *   bit  9 (S) = _PAGE_NEEDSYNC = 1 (set by set_pte() so the next sync drains
+ *                                    the swap-out)
+ *   bit 10     = _PAGE_PROTNONE = 0 (swap entries must NOT look like
+ *                                    pte_present)
+ *   bit 11 (E) = _PAGE_SWP_EXCLUSIVE
+ *   bits 12+   = offset
  */
-#define __swp_type(x)			(((x).val >> 5) & 0x1f)
-#define __swp_offset(x)			((x).val >> 11)
+#define __swp_type(x)			(((x).val >> 1) & 0x1f)
+#define __swp_offset(x)			((x).val >> 12)
 
 #define __swp_entry(type, offset) \
-	((swp_entry_t) { (((type) & 0x1f) << 5) | ((offset) << 11) })
+	((swp_entry_t) { (((type) & 0x1f) << 1) | ((offset) << 12) })
 #define __pte_to_swp_entry(pte) \
 	((swp_entry_t) { pte_val(pte_mkuptodate(pte)) })
 #define __swp_entry_to_pte(x)		((pte_t) { (x).val })
