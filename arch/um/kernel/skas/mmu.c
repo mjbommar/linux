@@ -52,6 +52,22 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	mutex_init(&mm->context.turnstile);
 	spin_lock_init(&mm->context.sync_tlb_lock);
 
+	/*
+	 * Clear the per-mm worker pointer for a fresh mm. dup_mm() (during
+	 * fork's copy_mm path) bytewise-copies the parent mm_struct,
+	 * including mm->context.worker. Without this reset, the child mm
+	 * inherits the parent's `struct um_worker *` and the subsequent
+	 * seccomp_mm_create → worker_alloc_stub_for_mm → __spawn_worker_for_mm
+	 * call trips WARN_ON_ONCE(mm->context.worker != NULL) at
+	 * arch/um/kernel/spawner.c:225, then proceeds to spawn a new worker
+	 * which silently overwrites the inherited pointer (leaking the
+	 * parent's reference). Clearing here is the single source of truth
+	 * for "fresh mm has no worker yet"; spawn_worker_for_mm /
+	 * worker_alloc_stub_for_mm assign the pointer once they actually
+	 * create one.
+	 */
+	mm->context.worker = NULL;
+
 	stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO, ilog2(STUB_DATA_PAGES));
 	if (stack == 0)
 		goto out;
