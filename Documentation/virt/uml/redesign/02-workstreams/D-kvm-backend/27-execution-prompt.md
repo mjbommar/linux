@@ -28,12 +28,11 @@ KVM-accelerated UML backend that hits all 7 success criteria from memo
 zero-flake, ≤1.2× seccomp wall-clock, Tier 1 pytest pass, <1500 LoC,
 ftrace observable, SMP working.
 
-### Update — 2026-04-28 (latest): R4 SHIPPED + memo 26 Phase A done
+### Update — 2026-04-29 (latest): memo 26 Phase C closed (5 commits)
 
-R4 (the long-pole per-mm host worker process refactor) and memo
-26 Phase A (KVM v2 backend bring-up) BOTH landed in this session.
-Memo 26 Phase B (TDP + memslots) is the next chunk. Tip:
-`1066947fd4d3`.
+R4 + memo 26 Phases A, B, **C** all landed. Phase D (vmcall
+hypercall syscall path) is next — the moment v2 actually starts
+executing guest code via KVM_RUN. Tip: `9fa4a804d4e3`.
 
 **State summary**:
 
@@ -66,19 +65,42 @@ Memo 26 Phase B (TDP + memslots) is the next chunk. Tip:
   Part M.4).
 - **Memo 26 Phase A**: A.1 (`1a83522e3ea4` — backend probe +
   ops registration), A.2 (`427f1d88cc42` — per-VM context),
-  A.3 (`1066947fd4d3` — vCPU placeholder). v2 boots
-  `init=/bin/true` cleanly via `backend=force=kvm-v2`; vCPU and
-  VM are created, all HOT ops still delegate to seccomp until
-  Phase B replaces them.
+  A.3 (`1066947fd4d3` — vCPU placeholder). A.1 followup
+  (`40a97b5f3b72`) flipped capability flags to true so the
+  stub child runs the seccomp filter, not PTRACE_TRACEME.
+- **Memo 26 Phase B (TDP + memslots): COMPLETE.** B.1
+  (`a80a03c02743` — memslot allocator), B.2 (`fd9df1834e8a`
+  — KVM_SET_USER_MEMORY_REGION add, with seccomp-side
+  dual-wiring so the stub child also gets mappings) plus
+  followup (`be19bc8f2815` — gpa-keyed dedupe), B.3
+  (memslot delete), B.4 (no-op — mm-arbiter falls back to
+  remove+add), B.5 (`1a879e8cd9fe` — kvm_v2_load_cr3 helper),
+  B.6 (verification + Phase D gate).
+- **Memo 26 Phase C (per-CPU vCPU pool + dispatch shape):
+  COMPLETE.** C.1 (`0df41d13febf` — per-host-CPU pool;
+  `struct kvm_v2_vcpu` + `kvm_v2_vcpu_get`), C.2
+  (`7b29a64af5f3` — `kvm_v2_vcpu_run` dispatcher helper with
+  placeholder exit-reason switch), C.3 (`124db82a0ccb` —
+  KVM_CAP_SYNC_REGS wiring; eliminates 4 ioctls per
+  dispatch when D activates), C.4.0 (`734d9bbe54a8` —
+  arch_thread.kvm_v2 FPU substrate), C.4 (`9fa4a804d4e3`
+  — KVM_GET/SET_FPU helpers + dispatch hooks).
+  `.vcpu_run` in ops.c is **still seccomp_vcpu_run** —
+  Phase D activates it via a single pointer flip.
 - **CONFIG_UM_WORKER_PROCESS=y** is the default. CONFIG_UM_BACKEND_KVM_V2
   is `default n` (EXPERT-gated) until Phase J promotes.
 
 **Where to start a new session:** read this Part A. Memo 28 +
 memo 26 are the design references. Memo 29 documents the
-substrate gate. Next phase is **memo 26 Phase B** (TDP +
-memslots, ~2 weeks). The seccomp-delegating ops in
-`arch/um/backend/kvm-v2/ops.c` get replaced one-by-one as v2
-phases land.
+substrate gate. Next phase is **memo 26 Phase D** (vmcall
+hypercall syscall path, ~2 weeks). This is the moment v2
+actually starts running guest code via KVM_RUN — flip
+`.vcpu_run = kvm_v2_vcpu_run`, port the LSTAR trampoline to a
+~50-byte vmcall stub, add KVM_EXIT_HYPERCALL handler that
+marshals into `handle_syscall`. Headline gate criterion: 21/21
+cpython-parity × 10 trials, plus `single_dlopen × 100` with 0
+flakes (Bug B's mechanism becomes structurally impossible —
+user RIP never sees the trampoline VA).
 
 ### Original Part A (preserved for historical context)
 
@@ -289,6 +311,8 @@ If mean ≤19.4, A.4i probably isn't applied yet.
 | `arch/um/backend/kvm-v2/vcpu.c` exists, no `memslot.c` | Memo 26 A.3 done; start B.1 (memslot allocator) |
 | v2 init.c non-stub, vm_fd works | Memo 26 Phase B (memslots) |
 | Memslots work, no shadow PT | Memo 26 Phase C (per-CPU vCPU) |
+| `kvm_v2_vcpu_run` helper exists in vcpu.c, ops.c `.vcpu_run = seccomp_vcpu_run` | Memo 26 Phase C done; start Phase D (vmcall syscall path) |
+| `.vcpu_run = kvm_v2_vcpu_run`, KVM_EXIT_HYPERCALL handler dispatches to `handle_syscall` | Memo 26 Phase D done; start Phase E (IDT/TSS, exception dispatch) |
 | ... | (continue per memo 26 phase summary) |
 
 ### C.5 — If state is ambiguous

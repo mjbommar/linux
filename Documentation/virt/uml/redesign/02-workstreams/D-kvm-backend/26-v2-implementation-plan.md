@@ -213,54 +213,103 @@ runs to completion with no shadow PT, no DIVERGE warnings.
 
 ---
 
-## Phase C — Per-CPU vCPU pool + task dispatch (2 weeks)
+## Phase C — Per-CPU vCPU pool + task dispatch (2 weeks) — DONE
 
 **Goal**: replace v1's per-task vCPU model with N vCPUs (= host CPU
 count). UML scheduler picks tasks onto vCPUs.
 
-### C.1 — `vcpu.c`: per-CPU vCPU pool (3 days)
+Phase C landed as 5 commits (C.1 / C.2 / C.3 / C.4.0 / C.4) building
+the dispatch shape on the side without flipping `.vcpu_run` — Phase D
+activates it.
 
-- `struct kvm_v2_vcpu`: `int fd`, `void *run`, `int cpu`, `pthread_t
-  thread`, `atomic_t state`.
-- At `init`: create `nr_cpu_ids` vCPUs via `KVM_CREATE_VCPU`. mmap
-  each kvm_run.
-- Pin each vCPU's pthread to its host CPU via `sched_setaffinity`.
-- ftrace: `TRACE_EVENT(kvm_v2_vcpu_create)`.
+### C.1 — `vcpu.c`: per-CPU vCPU pool (DONE — `0df41d13febf`)
 
-### C.2 — `sched.c`: task → vCPU dispatch (4 days)
+- `struct kvm_v2_vcpu`: `int vcpu_fd`, `void *kvm_run`, `size_t
+  kvm_run_size`, `int cpu` (no pthread / state — v2 has no per-vCPU
+  thread; the dispatcher runs on the calling task's stack with
+  preempt_disable around the per-CPU pool pick).
+- At `init`: create `min(nr_cpu_ids, NR_CPUS)` vCPUs via
+  `KVM_CREATE_VCPU`. mmap each kvm_run.
+- Pool members initialised to `.vcpu_fd = -1` sentinel; `pool_initialised`
+  flag flips after the pool is fully built.
+- ftrace: `TRACE_EVENT(um_backend_kvm_v2_vcpu_create)`.
 
-- UML scheduler calls `backend->vcpu_run(regs)` from the cooperative
-  scheduler (or from the new pthread-based scheduler if memo 25
-  refactor 4 lands the standard threading model).
-- vcpu_run picks the current host CPU's vCPU.
-- Sets up vCPU state for this task:
-  - CR3 ← `__pa(current->active_mm->pgd)`
-  - kregs ← from `regs` (use sync_regs if available)
-  - sregs.fs.base ← `regs->gp[HOST_FS_BASE]` (TLS)
-  - sregs.gs.base ← `regs->gp[HOST_GS_BASE]`
-- `KVM_RUN`.
-- On exit: marshal vCPU state back into `regs`, dispatch by exit reason.
+### C.2 — task → vCPU dispatch helper (DONE — `7b29a64af5f3`)
 
-### C.3 — Sync regs fast path (2 days)
+- `kvm_v2_vcpu_run(struct uml_pt_regs *regs)` helper added to
+  `vcpu.c`; ops.c `.vcpu_run` is **still seccomp_vcpu_run** today.
+  Phase D flips the pointer. (Memo 28 Part C "option α": dispatch
+  shape lands ahead of activation.)
+- Helper picks vCPU via `kvm_v2_vcpu_get(smp_processor_id())` under
+  preempt_disable; NULL-or-sentinel guard falls back to seccomp.
+- Sets up vCPU state via:
+  - CR3 ← `kvm_v2_load_cr3` (B.5 helper).
+  - sregs.fs.base / gs.base ← `kvm_v2_load_user_sregs` (file-static
+    in vcpu.c; one GET_SREGS / SET_SREGS round-trip in C.2 — C.3
+    dissolves this against the SYNC_REGS mmap).
+- KVM_RUN; switch on exit_reason with placeholder panics for
+  KVM_EXIT_HLT / FAIL_ENTRY / INTERNAL_ERROR / SHUTDOWN ("Phase
+  D/E required"). Real handlers land in Phase D.2 (HYPERCALL) /
+  E.3 (FAIL_ENTRY / INTERNAL_ERROR).
+- ftrace: `um_backend_kvm_v2_vcpu_enter` / `_exit`.
 
-- Use `KVM_CAP_SYNC_REGS` to read/write GPRs/SREGS via the mmap'd
-  kvm_run struct rather than ioctls. Saves ~2 ioctls per syscall.
-- Set `run->kvm_valid_regs |= KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS`
-  at entry.
-- Read `run->s.regs.regs` / `run->s.regs.sregs` at exit.
+### C.3 — Sync regs fast path (DONE — `124db82a0ccb`)
 
-### C.4 — Per-vCPU FPU state (3 days)
+- `kvm_run->kvm_valid_regs = KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS`
+  set once at pool member create time (`kvm_v2_vcpu_create_one`),
+  not per-dispatch.
+- `kvm_v2_load_user_sregs`: drop GET_SREGS / SET_SREGS ioctls.
+  Modify `kvm_run->s.regs.sregs.{cr3, fs.base, gs.base}` in place
+  and OR `KVM_SYNC_X86_SREGS` into `kvm_dirty_regs`. KVM consumes
+  on next entry.
+- `kvm_v2_vcpu_run`: drop SET_REGS / GET_REGS ioctls. Marshal GPRs
+  into `kvm_run->s.regs.regs` + OR `KVM_SYNC_X86_REGS` into
+  `kvm_dirty_regs` on entry; read `kvm_run->s.regs.regs` on exit.
+- Net effect when Phase D activates: 4 ioctls per dispatch (GET/SET
+  SREGS + SET/GET REGS) → 1 KVM_RUN. State lives in the mmap.
+- Cap bit was already negotiated in A.1 (`caps & 0x1` from
+  KVM_CHECK_EXTENSION → required); C.3 just wired it.
 
-- KVM manages FPU state on the vCPU. UML's per-task FPU buffer (from
-  `arch_thread.fpu`) is loaded into the vCPU on dispatch.
-- `KVM_SET_XSAVE` + `KVM_GET_XSAVE` (or `KVM_SET_FPU` if XSAVE
-  unavailable).
-- Save back to `arch_thread.fpu` on dispatch-out.
-- This replaces v1's `kvm_fpu_capture_for_fork` / `kvm_fpu_install_on_first_run`.
+### C.4 — Per-vCPU FPU state (DONE — `734d9bbe54a8` substrate +
+`9fa4a804d4e3` helpers)
 
-**Exit criteria:** A guest binary that uses XMM/AVX (e.g.,
-`memset(buf, 0xa5, 4096)` which glibc compiles to `vmovaps`) produces
-correct results across context switches.
+- C.4.0 substrate (`734d9bbe54a8`): `arch_thread.kvm_v2 = { struct
+  kvm_fpu fpu; bool fpu_valid; }` under `CONFIG_UM_BACKEND_KVM_V2`
+  in `arch/x86/um/asm/processor_64.h`. INIT_ARCH_THREAD,
+  arch_flush_thread (clears fpu_valid), arch_copy_thread (calls
+  capture_for_fork) hooks. x86_64-only — V2 depends on EXPERT &&
+  X86_64, so processor_32.h needs no equivalent.
+- C.4 helpers (`9fa4a804d4e3`):
+  - `kvm_v2_fpu_capture_for_fork`: KVM_GET_FPU against the parent's
+    per-host-CPU vCPU at fork time (preempt_disable around
+    smp_processor_id() + kvm_v2_vcpu_get); ships bytes via
+    `arch_thread.kvm_v2.fpu`. NULL-or-sentinel guard → fpu_valid
+    stays false → child gets arch defaults. KVM_GET_FPU failure
+    is non-fatal (warn-ratelimited, mirrors v1's behaviour).
+  - `kvm_v2_fpu_install_on_first_run`: pre-KVM_RUN install in
+    `kvm_v2_vcpu_run` between SREGS load and KVM_SET_REGS. fpu_valid
+    → KVM_SET_FPU snapshot + clear flag (one-shot); !fpu_valid →
+    install AMD64 SDM §11.5.1 reset values (fcw=0x037f,
+    mxcsr=0x1f80) via stack-local kvm_fpu. Failure → panic
+    (running guest with arbitrary FPU state crashes downstream).
+  - Uses legacy 512 B `KVM_GET/SET_FPU` (not XSAVE) per Phase C
+    surface map: `kvm_v2_curate_cpuid` masks AVX/AVX-512, so XSAVE
+    is moot under our curated guest.
+- Capture is **live today** via arch_copy_thread; install is
+  **dormant** until Phase D's pointer flip activates `.vcpu_run`.
+- ftrace: `um_backend_kvm_v2_fpu_capture` / `_install`.
+
+**Phase C exit criteria** (C-internal — full XMM/AVX context-switch
+correctness depends on Phase D activation):
+
+- Build clean both modes (=n, =y): ✓
+- Boot smoke `backend=force=kvm-v2 init=/bin/true` rc=134: ✓
+- Substrate gate `PASS=25 FAIL=3 EXPECTED_FAIL=3`: ✓ unchanged.
+- Helper shapes reviewable; .vcpu_run flip lands in Phase D with
+  no further C-side work. Original "guest binary that uses XMM/AVX
+  produces correct results across context switches" criterion
+  defers to Phase D's gate (Phase D is the moment v2 actually runs
+  guest code).
 
 ---
 
