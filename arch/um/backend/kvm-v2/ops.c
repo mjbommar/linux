@@ -14,14 +14,24 @@
  * is one bullet on the memo 26 timeline; this file is the central
  * progress board.
  *
- * Capability flags follow v1's archived choices (memo 21 D-02): no
- * stub child, so all four host-side flags are false. This means
- * arch/um/os-Linux/skas code that branches on `um_backend->uses_*`
- * picks the KVM path even though most ops still delegate to seccomp.
- * That's a known A.1 wart — the seccomp ops we delegate to assume
- * the seccomp stub-child model. The wart resolves naturally as ops
- * migrate off seccomp; until then `force=kvm-v2` is for development
- * only (see the Kconfig help text and memo 26's exit criteria).
+ * Capability flags reflect the ACTUAL stub model v2 uses, not v1's
+ * archived "no stub child" semantics. R4 (per-mm host worker
+ * process) put a real seccomp stub child inside each per-mm worker
+ * process, so the four host-side flags must be TRUE — they describe
+ * the worker-internal stub-child machinery that handles_syscall
+ * delegation through seccomp_* ops actually exercises.
+ *
+ * The original A.1 commit set these to false (copied from v1
+ * archive). That deadlocked `backend=force=kvm-v2 init=/bin/true`:
+ * stub_child_runs_seccomp=false → stub binary did PTRACE_TRACEME +
+ * kill(SIGSTOP) instead of installing a seccomp filter; nobody
+ * attached as ptracer; spawner hung waiting on STUB_ALLOC_REP that
+ * never came. Fixed in the followup that ships with B.2.
+ *
+ * As Phase D's vmcall syscall path migrates ops off seccomp, the
+ * stub-child model fades; at that point these flags can flip back
+ * to false and the seccomp delegation in the table below shrinks
+ * to nothing.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -36,14 +46,21 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.contract_version	= UM_BACKEND_CONTRACT_VERSION,
 
 	/*
-	 * Capability flags — KVM has no host stub child, so all four
-	 * stub-related flags are false (matches v1 archive). See file
-	 * header comment for the A.1 wart this creates.
+	 * Capability flags — true for as long as v2 delegates to
+	 * seccomp_* ops. Each flag describes the worker-internal
+	 * stub-child machinery that those delegated ops drive:
+	 *   uses_stub_reaper       — worker SIGCHLD-reaps stub
+	 *   has_syscall_stub_fd_map — SCM_RIGHTS fd-passing per region
+	 *   stub_syscall_uses_futex — futex round-trip on stub_data
+	 *   stub_child_runs_seccomp — stub installs seccomp filter
+	 *                             (vs. PTRACE_TRACEME path)
+	 * Each flag flips to false as Phase D migrates the
+	 * corresponding op off the seccomp delegation.
 	 */
-	.uses_stub_reaper	= false,
-	.has_syscall_stub_fd_map = false,
-	.stub_syscall_uses_futex = false,
-	.stub_child_runs_seccomp = false,
+	.uses_stub_reaper	= true,
+	.has_syscall_stub_fd_map = true,
+	.stub_syscall_uses_futex = true,
+	.stub_child_runs_seccomp = true,
 
 	/* Lifecycle (4) — v2 owns these */
 	.probe			= kvm_v2_probe,
