@@ -537,6 +537,60 @@ TRACE_EVENT(um_backend_kvm_v2_iotrap_syscall_exit,
 	TP_printk("port=%#x ret=%lu", __entry->port, __entry->ret)
 );
 
+/*
+ * kvm_v2_exception_install — fired once per VM when E.1 lands the
+ * IDT + handler stubs + GDT pages and patches PTE[1..3] of the
+ * trampoline PT chain (memo 26 §E.1). The three GPAs are __pa() of
+ * the buddy-allocated pages (each in physmem, so they sit inside
+ * D.4b-pre's identity-offset memslot). Until E.3.5 flips .vcpu_run
+ * away from seccomp the IDT/GDT pages have no consumer; per memo 27
+ * §B.9 observability lands with the helper anyway.
+ */
+TRACE_EVENT(um_backend_kvm_v2_exception_install,
+	TP_PROTO(u64 idt_gpa, u64 handlers_gpa, u64 gdt_gpa),
+	TP_ARGS(idt_gpa, handlers_gpa, gdt_gpa),
+	TP_STRUCT__entry(
+		__field(u64, idt_gpa)
+		__field(u64, handlers_gpa)
+		__field(u64, gdt_gpa)
+	),
+	TP_fast_assign(
+		__entry->idt_gpa      = idt_gpa;
+		__entry->handlers_gpa = handlers_gpa;
+		__entry->gdt_gpa      = gdt_gpa;
+	),
+	TP_printk("idt_gpa=%#llx handlers_gpa=%#llx gdt_gpa=%#llx",
+		  __entry->idt_gpa, __entry->handlers_gpa, __entry->gdt_gpa)
+);
+
+/*
+ * kvm_v2_descriptors_sregs_install — fired once per pool member when
+ * E.1's exception_install iterates the pool and re-issues
+ * KVM_SET_SREGS to install the IDT/GDT bases. Codex --search audit
+ * finding #5: the eager kvm_v2_install_production_sregs at
+ * vcpu_create_one ran before E.1's pages existed, so its sregs.idt /
+ * sregs.gdt fields stayed at the KVM_GET_SREGS defaults. This event
+ * is the post-E.1 patch — observable per pool member separately from
+ * the original sregs_install event so a tracer can distinguish "vCPU
+ * created" from "descriptor tables installed".
+ */
+TRACE_EVENT(um_backend_kvm_v2_descriptors_sregs_install,
+	TP_PROTO(int vcpu_fd, u64 idt_base, u64 gdt_base),
+	TP_ARGS(vcpu_fd, idt_base, gdt_base),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+		__field(u64, idt_base)
+		__field(u64, gdt_base)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd  = vcpu_fd;
+		__entry->idt_base = idt_base;
+		__entry->gdt_base = gdt_base;
+	),
+	TP_printk("vcpu_fd=%d idt_base=%#llx gdt_base=%#llx",
+		  __entry->vcpu_fd, __entry->idt_base, __entry->gdt_base)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

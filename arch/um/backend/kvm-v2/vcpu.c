@@ -522,6 +522,119 @@ static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
 }
 
 /*
+ * Phase E.1 (memo 26 §E.1): install IDT/GDT bases in SREGS for one
+ * pool member.
+ *
+ * Why this is a separate helper from kvm_v2_install_production_sregs
+ * (which ran at vcpu_create_one): production_sregs ran BEFORE E.1's
+ * pages existed, so its sregs.idt / sregs.gdt fields stayed at the
+ * KVM_GET_SREGS defaults (zero base, zero limit). E.1's install
+ * helper iterates the pool and calls this updater after the pages
+ * land. Codex --search audit finding #5 from the §E.1 spec calls
+ * out this gap explicitly.
+ *
+ * Option B from the spec (one-helper-per-concern) — keeps
+ * kvm_v2_install_production_sregs untouched (it sets CS/DS/SS/CR0/CR4
+ * /EFER once at vcpu_create) and adds this descriptor-table updater
+ * as the late-install seam. Cleaner separation than gating idt/gdt
+ * writes inside production_sregs on a `vm->idt_kva != NULL` predicate
+ * (Option A would have required the install_production_sregs caller
+ * to know whether E.1 had run yet).
+ *
+ * SREGS round-trip via real ioctl (not sync-regs): the install needs
+ * to land in KVM's vcpu state authoritatively, which the sync-regs
+ * path doesn't guarantee until the next KVM_RUN exit-path store_regs
+ * runs. KVM_SET_SREGS commits the descriptor-table fields immediately
+ * to the vcpu's vmcs/vmcb. The mmap is then re-seeded so the next
+ * KVM_RUN's load_user_sregs's KVM_SYNC_X86_SREGS write doesn't ship
+ * stale (zero) idt/gdt back through __set_sregs.
+ *
+ * TR is intentionally left at GET_SREGS default. E.2 will issue a
+ * separate descriptor-sregs update with TR pointing at the per-vCPU
+ * TSS body once that lands. Keeping TR untouched here matches the
+ * spec's Option B note ("E.2 will issue another descriptor sregs
+ * update with TR").
+ */
+int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
+				     struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_sregs sregs;
+	int rc;
+
+	if (!vm || !vcpu || vcpu->vcpu_fd < 0 || !vcpu->kvm_run)
+		return -EINVAL;
+
+	if (!vm->idt_kva || !vm->gdt_kva) {
+		/*
+		 * Defensive: caller (kvm_v2_exception_install) only invokes
+		 * us after the pages are populated, so this branch is
+		 * never expected to fire. Surface it loudly so a future
+		 * out-of-order caller doesn't silently install zero
+		 * descriptor-table bases.
+		 */
+		pr_err("um: kvm-v2 install_descriptors_sregs: vm->idt_kva or gdt_kva NULL — exception_install must complete first\n");
+		return -EINVAL;
+	}
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 install_descriptors_sregs: KVM_GET_SREGS(vcpu_fd=%d) failed (%d)\n",
+		       vcpu->vcpu_fd, rc);
+		return rc;
+	}
+
+	/*
+	 * GVAs (not GPAs) — the IDT/GDT bases must be guest VAs because
+	 * KVM stores them as the VMCS GUEST_IDTR_BASE / GUEST_GDTR_BASE
+	 * fields, which are CPU-architectural values the guest CPU
+	 * dereferences via its current paging context. Memo 26 §E.1
+	 * specifies "KVM_SET_SREGS.idt.base = the guest VA" explicitly.
+	 *
+	 * Limit: 256 vectors × 16 bytes - 1 = 4095 (full IDT). 8 GDT
+	 * slots × 8 bytes - 1 = 63 (the 6 used + 2 TSS slots E.2 will
+	 * fill). Constants pulled from exception.c so a future per-VM
+	 * resize stays consistent.
+	 */
+	sregs.idt.base  = (u64)KVM_V2_IDT_GVA;
+	sregs.idt.limit = 256 * 16 - 1;
+	sregs.gdt.base  = (u64)KVM_V2_GDT_GVA;
+	sregs.gdt.limit = 8 * 8 - 1;
+	/*
+	 * sregs.tr stays as-returned by KVM_GET_SREGS — E.2 will issue
+	 * its own descriptor-sregs update with TR pointing at the per-
+	 * vCPU TSS body once that lands.
+	 */
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 install_descriptors_sregs: KVM_SET_SREGS(vcpu_fd=%d) failed (%d)\n",
+		       vcpu->vcpu_fd, rc);
+		return rc;
+	}
+
+	/*
+	 * Seed the sync-regs mmap with the post-update sregs so the
+	 * first dispatch's KVM_SYNC_X86_SREGS write doesn't ship stale
+	 * (zero) idt/gdt back. Same hand-seed pattern that
+	 * install_production_sregs uses (vcpu.c:511-512); see that
+	 * helper for the full rationale on why store_regs's exit-path
+	 * refresh isn't enough on the very first dispatch.
+	 */
+	((struct kvm_run *)vcpu->kvm_run)->s.regs.sregs = sregs;
+
+	pr_info("um: kvm-v2 install_descriptors_sregs: vcpu_fd=%d idt=%#llx (limit=%#x) gdt=%#llx (limit=%#x)\n",
+		vcpu->vcpu_fd,
+		(unsigned long long)sregs.idt.base, sregs.idt.limit,
+		(unsigned long long)sregs.gdt.base, sregs.gdt.limit);
+	trace_um_backend_kvm_v2_descriptors_sregs_install(vcpu->vcpu_fd,
+							  sregs.idt.base,
+							  sregs.gdt.base);
+	return 0;
+}
+
+/*
  * D.5-fix-2: install per-vCPU signal mask before first KVM_RUN.
  *
  * Symptom that drove this: under D.5-fix-1's tip, KVM_RUN succeeded

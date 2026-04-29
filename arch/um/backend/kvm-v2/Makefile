@@ -11,3 +11,4 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += vcpu.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += memslot.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += syscall_trap.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o

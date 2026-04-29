@@ -124,6 +124,47 @@ struct kvm_v2_vm {
 	void			*trampoline_pmd_kva;	/* PMD page; entry [0] = pte_pa */
 	void			*trampoline_pte_kva;	/* PTE page; entry [0] = trampoline_gpa */
 	phys_addr_t		trampoline_pud_gpa;	/* __pa(trampoline_pud_kva) — written to PML4[448] */
+	/*
+	 * Phase E.1: IDT + handler stubs + GDT pages (memo 26 §E.1,
+	 * codex --search audit finding #1 split the v1 single-page
+	 * layout into three because a 256-entry IDT fills an entire
+	 * 4KB page on its own).
+	 *
+	 * Layout (all under PML4[448]/PUD[0]/PMD[0], at PTE[1..3]):
+	 *   idt_*       — 256 × 16-byte gate descriptors. Vector 14
+	 *                 (#PF), 13 (#GP), 6 (#UD), 0 (#DE), 4 (#OF)
+	 *                 point at handler stubs in handlers_kva; vector
+	 *                 3 (#BP) gates with DPL=3 (codex audit #3) but
+	 *                 the in-guest dispatch path is via
+	 *                 KVM_GUESTDBG_USE_SW_BP per memo 26 §E.3.
+	 *                 Other vectors point at a panic stub (port
+	 *                 UM_KVM_TRAP_PANIC = 0xf8).
+	 *   handlers_*  — N × 16-byte slots, each a 4-byte
+	 *                 `out %al, $port ; iretq` stub. NO `mov %cr2,
+	 *                 %rax` (codex audit #4 — host reads CR2 via
+	 *                 sync-regs sregs.cr2; v1 archive at thread.c:
+	 *                 1297 explicitly removed the `mov` for the same
+	 *                 reason: it clobbers user RAX before the host
+	 *                 captures vCPU state).
+	 *   gdt_*       — 8 × 8-byte entries (slot [0] null, [1] kern
+	 *                 CS, [2] kern DS, [3] STAR-base padding, [4]
+	 *                 user DS @0x23 DPL=3, [5] user CS @0x2b DPL=3,
+	 *                 [6..7] TSS desc — body filled in E.2). v1
+	 *                 reference: kvm-v1-archive/sregs.c:102-138
+	 *                 (kvm_setup_harness_gdt verbatim) +
+	 *                 kvm-v1-archive/thread.c:1574-1590 (TSS desc
+	 *                 in slots 6-7).
+	 *
+	 * VM-lifetime; freed in vm_destroy via kvm_v2_exception_free
+	 * BEFORE kvm_v2_kernel_half_free (so PTE[1..3] dereferences
+	 * stay valid until the PT chain itself drops).
+	 */
+	void			*idt_kva;
+	phys_addr_t		idt_gpa;
+	void			*handlers_kva;
+	phys_addr_t		handlers_gpa;
+	void			*gdt_kva;
+	phys_addr_t		gdt_gpa;
 };
 
 /*
@@ -262,6 +303,28 @@ void kvm_v2_vcpu_destroy(void);
  * lands without further header churn; today it has no callers.
  */
 struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu);
+
+/*
+ * Phase E.1 (memo 26 §E.1): install IDT/GDT bases in SREGS for one
+ * pool member. Called from kvm_v2_exception_install (exception.c)
+ * after the IDT + handler-stubs + GDT pages are populated, iterating
+ * every existing pool entry to retroactively patch the descriptor-
+ * table bases that vcpu_create_one's eager install couldn't fill in.
+ *
+ * Codex --search audit finding #5: kvm_v2_install_production_sregs ran
+ * at vcpu_create before E.1's pages existed, so sregs.idt / sregs.gdt
+ * stayed at the KVM_GET_SREGS defaults (zero base, zero limit). E.1
+ * uses this helper as the late-patching seam — the alternative
+ * (gating idt/gdt writes inside install_production_sregs on
+ * vm->idt_kva != NULL) was rejected to keep one-helper-per-concern
+ * symmetry with the existing CPUID / MSR / SREGS / sigmask install
+ * helpers.
+ *
+ * Defined in vcpu.c alongside kvm_v2_install_production_sregs so both
+ * SREGS install paths share the same TU.
+ */
+int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
+				     struct kvm_v2_vcpu *vcpu);
 
 /*
  * Phase B.5: load guest CR3. Caller passes the target vCPU + __pa(pgd).

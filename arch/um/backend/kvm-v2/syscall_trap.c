@@ -615,6 +615,31 @@ static int __init kvm_v2_trampoline_late_install(void)
 		}
 	}
 
+	/*
+	 * Phase E.1 (memo 26 §E.1): install IDT + handler stubs + GDT in
+	 * PML4[448]/PUD[0]/PMD[0]/PTE[1..3] and re-issue KVM_SET_SREGS for
+	 * every existing pool member to point idt.base / gdt.base at the
+	 * new GVAs. Runs AFTER kernel_half_install above (E.1 plugs into
+	 * PTE[1..3] of the chain D.4b just built); idempotent — re-runs
+	 * short-circuit via vm->idt_kva.
+	 *
+	 * Failure is load-bearing for E.3.5's flip of .vcpu_run: without
+	 * the IDT/GDT in place, any guest exception (#PF on first
+	 * instruction fetch is the immediate one) cascades to triple
+	 * fault. Today (.vcpu_run still seccomp) the failure is observable
+	 * but non-fatal; the substrate gate's seccomp-delegating ops keep
+	 * boot moving until E.3.5 lands.
+	 */
+	{
+		int rc = kvm_v2_exception_install(vm);
+
+		if (rc) {
+			pr_err("um: kvm-v2 exception_install: failed (%d) — E.1 IDT+GDT not installed; E.3.5 dispatch will triple-fault until this is resolved\n",
+			       rc);
+			return rc;
+		}
+	}
+
 	return 0;
 }
 subsys_initcall(kvm_v2_trampoline_late_install);

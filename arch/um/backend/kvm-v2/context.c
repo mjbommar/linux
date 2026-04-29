@@ -246,6 +246,21 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 	vm.trampoline_pmd_kva = NULL;
 	vm.trampoline_pte_kva = NULL;
 	vm.trampoline_pud_gpa = 0;
+	/*
+	 * Phase E.1 (memo 26 §E.1): IDT + handler stubs + GDT pages —
+	 * installed by the subsys_initcall lazy retry once D.4b's PT
+	 * chain is up. No eager attempt at vm_create because (a) buddy
+	 * isn't up yet and (b) the chain's PTE table doesn't exist yet
+	 * (we plug into PTE[1..3] of trampoline_pte_kva). Sentinel NULL
+	 * means "not installed yet"; kvm_v2_exception_install short-
+	 * circuits on NULL idt_kva so the late retry is safe.
+	 */
+	vm.idt_kva       = NULL;
+	vm.idt_gpa       = 0;
+	vm.handlers_kva  = NULL;
+	vm.handlers_gpa  = 0;
+	vm.gdt_kva       = NULL;
+	vm.gdt_gpa       = 0;
 
 	/*
 	 * Phase D.4b-pre (memo 26 §D.4): install the giant physmem
@@ -338,6 +353,20 @@ void kvm_v2_vm_destroy(void)
 					 * sentinel so a future re-init's
 					 * idempotence check doesn't see a
 					 * stale slot id. */
+
+	/*
+	 * Phase E.1: free the IDT + handler stubs + GDT pages. Must run
+	 * BEFORE kvm_v2_kernel_half_free — the helper writes
+	 * trampoline_pte_kva[1..3] = 0 (clearing PTE entries that the
+	 * chain owns), so the chain pages must still be valid memory at
+	 * this point. Safe on a never-installed VM (NULL idt_kva → no-op).
+	 *
+	 * Order vs install: install was memslot → trampoline → chain → E.1
+	 * (writing PTE[1..3] of the chain). Free goes in reverse: E.1 →
+	 * chain → trampoline → memslot. Mirrors the "free in reverse-of-
+	 * install" pattern across this teardown.
+	 */
+	kvm_v2_exception_free(&vm);
 
 	/*
 	 * Phase D.4b: free the kernel-half PT chain (PUD/PMD/PTE pages)
