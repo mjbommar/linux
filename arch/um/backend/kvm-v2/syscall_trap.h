@@ -160,6 +160,72 @@ enum um_kvm_iotrap {
 #define KVM_V2_HANDLER_SLOT_PANIC	6	/* fallback for any other vector */
 
 /*
+ * Phase E.2: per-vCPU IST stack + TSS pages. Per memo 26 §E.2 each
+ * vCPU needs its own IST1 stack (the CPU pushes the iretq frame there
+ * during exception delivery, so a shared stack would collide if two
+ * vCPUs took an exception simultaneously) and its own TSS body (TSS
+ * holds the IST1 RSP pointer; only one IST1 can be loaded at a time
+ * via TR, so two vCPUs sharing a TSS would point both at the same
+ * stack top — same collision risk). The codex --search audit
+ * independent finding spelled this out: per-vCPU TSS is REQUIRED.
+ *
+ * Layout: PTE[4..3 + NR_CPUS*2] of the same trampoline_pte_kva chain
+ * that owns PTE[0..3] (trampoline + IDT/handlers/GDT). Per vCPU we
+ * consume two PTE slots:
+ *
+ *   PTE[4 + cpu*2]: IST stack page (RW, US=0 — handlers push iretq
+ *                   frame to it; CPU writes occur during exception
+ *                   delivery, so RW is required).
+ *   PTE[5 + cpu*2]: TSS page (RW, US=0 — CPU writes the busy bit
+ *                   on LTR, plus our TSS body sits at offset 0;
+ *                   only the first 104 bytes are TSS, the rest is
+ *                   zeroed padding from __GFP_ZERO).
+ *
+ * The KVM_V2_TRAMPOLINE_GVA + slot * 0x1000 arithmetic gives the
+ * guest VA each page lives at; per-vCPU GVAs are computed via
+ * KVM_V2_IST_GVA(cpu) / KVM_V2_TSS_GVA(cpu). NR_CPUS is bounded
+ * (≤16 typical for UML, NR_CPUS_RANGE_END=64 worst case), so the
+ * 4 + 2*NR_CPUS = 132 max PTEs fit comfortably in the 512-entry
+ * PTE table.
+ *
+ * codex --search audit CLAIM C (verified): KVM_SET_TSS_ADDR
+ * (gpa=0xfffbd000, set at vm_create) is unrestricted-guest
+ * scaffolding — vestigial under our paged-from-vcpu-create flow.
+ * SREGS.tr (set per-vCPU by E.2's extended descriptors_sregs
+ * helper) is the real TR cache. Don't conflate the two.
+ *
+ * codex --search audit CLAIM D (verified): 4KB IST stack is
+ * sufficient — guest handler stubs do `out` only, no C call chain
+ * runs in guest, so the iretq frame (5 × 8 = 40 bytes) plus any
+ * pushed error code (8 bytes) is the entire stack budget.
+ */
+#define KVM_V2_IST_BASE_SLOT		4
+#define KVM_V2_IST_GVA(cpu)		(KVM_V2_TRAMPOLINE_GVA + \
+					 (KVM_V2_IST_BASE_SLOT + (cpu) * 2) * 0x1000ULL)
+#define KVM_V2_TSS_GVA(cpu)		(KVM_V2_TRAMPOLINE_GVA + \
+					 (KVM_V2_IST_BASE_SLOT + (cpu) * 2 + 1) * 0x1000ULL)
+
+/*
+ * IST stack TOP — stacks grow down on x86_64, so the architectural
+ * RSP-style pointer the TSS IST1 field carries is GVA + PAGE_SIZE.
+ * The first push lands at GVA + PAGE_SIZE - 8 inside the same
+ * RW page. v1 archive mirror: kvm-v1-archive/thread.c:1623
+ * (`KVM_BOOTSTRAP_GUEST_VA + KVM_BOOTSTRAP_STACK_TOP`).
+ */
+#define KVM_V2_IST_STACK_TOP_GVA(cpu)	(KVM_V2_IST_GVA(cpu) + 0x1000ULL)
+
+/*
+ * TR selector + TSS limit, matching v1's KVM_BOOTSTRAP_TSS_SEL
+ * (kvm-v1-archive/thread.c — 0x30 = GDT slot 6 × 8). Long-mode TSS
+ * structure is 104 bytes (Intel SDM Vol.3 §7.7 / kernel's
+ * `struct x86_hw_tss` at arch/x86/include/asm/processor.h:313-332);
+ * limit = sizeof - 1 = 103.
+ */
+#define KVM_V2_TSS_SEL			0x30
+#define KVM_V2_TSS_BODY_SIZE		104
+#define KVM_V2_TSS_LIMIT		(KVM_V2_TSS_BODY_SIZE - 1)
+
+/*
  * Allocate the per-VM trampoline page, write the 5 LSTAR bytes at the
  * documented offset, and stash the kernel VA + GPA on `vm`. Idempotent:
  * a successful prior call short-circuits. Called from kvm_v2_vm_create

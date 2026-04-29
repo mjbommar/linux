@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase E.1: IDT + handler stubs + GDT install.
+ * UML backend v2 (KVM) — Phase E.1/E.2: IDT + handler stubs + GDT
+ * install (E.1) + per-vCPU IST stacks + TSS bodies (E.2).
  *
  * Per memo 26 §E.1. Lands the data structures the guest needs to
  * deliver any exception at all: a real IDT (so KVM has a vector table
@@ -70,6 +71,56 @@
  * activation). E.1 is observable via dmesg + the
  * um_backend_kvm_v2_exception_install tracepoint at boot but the
  * data structures sit unused until E.3.5 flips the dispatcher.
+ *
+ * Phase E.2 (memo 26 §E.2) — added in this commit:
+ *
+ *   Per-vCPU IST stacks + TSS bodies. E.1 set IST=1 on every
+ *   exception-delivery gate (kvm_v2_idt_set_gate's third arg) but
+ *   left the TSS body's IST1 field unset; without E.2's per-vCPU
+ *   TSS install, the first exception delivery would dereference a
+ *   zero IST1 RSP and triple-fault. E.2 lands:
+ *
+ *     - kvm_v2_install_per_vcpu_ist_tss: allocates per-vCPU IST
+ *       stack page (RW) + TSS page (RW) from buddy, builds the
+ *       104-byte long-mode TSS body with IST1 = stack-top GVA,
+ *       installs PTE entries at PTE[KVM_V2_IST_BASE_SLOT + cpu*2 ..
+ *       +1] of trampoline_pte_kva, stashes vcpu->{ist_stack_*,
+ *       tss_*}.
+ *     - kvm_v2_gdt_write_tss_desc: writes a 16-byte long-mode TSS
+ *       descriptor at GDT[6+7]. Pinned to vCPU 0's TSS body for
+ *       concreteness; SREGS.tr (per-vCPU) overrides per dispatch.
+ *     - kvm_v2_install_descriptors_sregs (extended): now also writes
+ *       sregs.tr.{base=tss_gva, limit=103, selector=0x30, type=0xb,
+ *       s=0, present=1, dpl=0, g=0, l=0, db=0} — per-vCPU TR cache
+ *       authoritative for IST1 RSP lookup during exception delivery.
+ *
+ *   Codex --search audit (independent finding) verified:
+ *
+ *     CLAIM C: KVM_SET_TSS_ADDR (gpa=0xfffbd000, set at vm_create)
+ *     is unrestricted-guest scaffolding — vestigial under our
+ *     paged-from-vcpu-create flow. SREGS.tr (set per-vCPU) is the
+ *     real TR cache; KVM_SET_TSS_ADDR is unrelated.
+ *
+ *     CLAIM D: 4KB IST stack is sufficient. Guest exception
+ *     handlers do `out %al, $port ; iretq` only — no C call chain
+ *     runs in guest. iretq frame (5 × 8 bytes) plus a possible
+ *     8-byte error code is the entire stack budget; ~4080 bytes of
+ *     headroom on a 4KB page.
+ *
+ *     Per-vCPU TSS REQUIRED (independent finding): IST1 differs per
+ *     vCPU; sharing a TSS would either collision-risk two vCPUs
+ *     pushing to the same physical stack or require dynamic IST1
+ *     rewrites every dispatch (race-prone). Per-vCPU is the clean
+ *     answer.
+ *
+ *   v1 archive references for E.2:
+ *     - TSS body layout: kvm-v1-archive/thread.c:1615-1628 (offsets
+ *       36 = IST1, 102 = io_bitmap_base).
+ *     - TSS_DESC byte assembly: kvm-v1-archive/thread.c:1574-1590
+ *       (16-byte long-mode descriptor spanning two GDT slots).
+ *     - SREGS.tr programming: kvm-v1-archive/thread.c:2889-2898
+ *       (sregs.tr = { base, limit=103, selector=0x30, type=11,
+ *       present=1, dpl=0, s=0, g=0 }).
  */
 
 #include <linux/bug.h>
@@ -85,7 +136,8 @@
 
 #include <asm/desc_defs.h>		/* gate_desc, GATE_INTERRUPT */
 #include <asm/page.h>
-#include <asm/pgtable.h>		/* _PAGE_PRESENT, _PAGE_ACCESSED */
+#include <asm/pgtable.h>		/* _PAGE_PRESENT, _PAGE_RW,
+					 * _PAGE_ACCESSED, _PAGE_DIRTY */
 #include <asm/trace/um_backend.h>
 
 #include <os.h>				/* os_ioctl_generic */
@@ -336,6 +388,299 @@ static void kvm_v2_populate_idt(void *idt_kva)
 		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_PF * 16, 0, 1);
 }
 
+/*
+ * Phase E.2 (memo 26 §E.2): write a 16-byte long-mode TSS descriptor
+ * at GDT[slot]/[slot+1]. Long-mode TSS descriptors span TWO 8-byte
+ * GDT entries (Intel SDM Vol.3 §7.2.3 / AMD64 Vol.2 §4.8.3) — slot
+ * is the LOW half (carrying limit_low/base_low/type/DPL/P/limit_high/G/
+ * base_mid), slot+1 is the HIGH half (carrying base_high in its low
+ * 32 bits, reserved zero in the upper 32). v1 archive lays out the
+ * same shape at kvm-v1-archive/thread.c:1574-1590; bytes verbatim
+ * from there.
+ *
+ * Why this exists despite SREGS.tr being authoritative per-vCPU:
+ *
+ *   GDT is per-VM (one page covers the whole pool — rebuild on add/
+ *   remove of vCPUs would race the live LTR cache anyway), so the
+ *   GDT's TSS_DESC at slots 6+7 can only point at ONE vCPU's TSS.
+ *   That's fine because SREGS.tr.{base,limit,selector,...} is the
+ *   per-vCPU TR cache KVM loads into vmcs.GUEST_TR_*, overriding
+ *   what the GDT entry would resolve to on a live LTR. So this GDT
+ *   slot is mostly defensive — it stops a future SREGS validation
+ *   change from rejecting selector=0x30 when GDT[0x30] is null.
+ *
+ *   We pin it to vCPU 0's TSS body for concreteness: vCPU 0 is
+ *   guaranteed to be in the pool (nr_cpu_ids ≥ 1), and the per-vCPU
+ *   SREGS.tr override will point each vCPU at its own TSS regardless.
+ *   Match v1's pattern at kvm-v1-archive/thread.c:1574-1590 (single
+ *   TSS_DESC even though v1 was effectively single-vCPU).
+ */
+static void kvm_v2_gdt_write_tss_desc(void *gdt_kva, unsigned int slot,
+				      u64 tss_gva, u32 tss_limit)
+{
+	u64 *gdt = gdt_kva;
+	u64 low;
+
+	/*
+	 * Low half (Intel SDM Vol.3 §7.2.3 / matches v1 at thread.c:
+	 * 1581-1586):
+	 *   bits 0-15  = limit[15:0]
+	 *   bits 16-31 = base[15:0]
+	 *   bits 32-39 = base[23:16]
+	 *   bits 40-47 = type+S+DPL+P  (0x89 = type=9 available 64-bit
+	 *                               TSS, S=0 system, DPL=0, P=1 —
+	 *                               KVM flips type from 9→11 on
+	 *                               LTR, but SREGS.tr.type=11 below
+	 *                               is the per-vCPU authoritative
+	 *                               value the cache holds anyway)
+	 *   bits 48-51 = limit[19:16]   (= 0 for our 103-byte limit)
+	 *   bits 52    = AVL = 0
+	 *   bits 53    = reserved = 0
+	 *   bits 54    = G = 0  (byte granularity — TSS limit is in
+	 *                       bytes, not pages)
+	 *   bits 55    = reserved = 0
+	 *   bits 56-63 = base[31:24]
+	 */
+	low  = (u64)(tss_limit & 0xffff);
+	low |= ((u64)(tss_gva & 0xffff)) << 16;
+	low |= ((u64)((tss_gva >> 16) & 0xff)) << 32;
+	low |= ((u64)0x89) << 40;
+	low |= ((u64)((tss_limit >> 16) & 0xf)) << 48;
+	low |= ((u64)((tss_gva >> 24) & 0xff)) << 56;
+
+	gdt[slot]     = low;
+	/*
+	 * High half: low 32 bits = base[63:32]; upper 32 bits reserved
+	 * (must be zero). v1 mirror at kvm-v1-archive/thread.c:1589.
+	 */
+	gdt[slot + 1] = (tss_gva >> 32) & 0xffffffffULL;
+}
+
+/*
+ * Phase E.2 (memo 26 §E.2): build the long-mode TSS body in `tss_kva`.
+ * Layout per Intel SDM Vol.3 §7.7 / kernel's `struct x86_hw_tss`
+ * (arch/x86/include/asm/processor.h:313-332). 104 bytes total. We
+ * hand-compute the offsets rather than declaring a struct here because
+ * UML's <asm/processor.h> doesn't include the x86 hw-tss definition
+ * (UML overrides arch/x86/um/asm/processor.h to its own layout); a
+ * private struct here would risk drifting from the architectural one.
+ *
+ * v1 archive mirror: kvm-v1-archive/thread.c:1615-1628 — same byte
+ * offsets, same "set ONLY ist[0] (= IST1) and io_bitmap_base" pattern.
+ *
+ * Offsets (see processor.h:313-332 — arch/x86 long-mode struct):
+ *   0x00  u32 reserved1
+ *   0x04  u64 sp0
+ *   0x0c  u64 sp1
+ *   0x14  u64 sp2
+ *   0x1c  u64 reserved2
+ *   0x24  u64 ist[0]   <-- IST1 (the one E.1's IDT entries reference)
+ *   0x2c  u64 ist[1..6]
+ *   0x5c  u32 reserved3
+ *   0x60  u32 reserved4
+ *   0x64  u16 reserved5
+ *   0x66  u16 io_bitmap_base
+ *
+ * RSP0/1/2 stay zero — under our SYSCALL-not-INT model nothing
+ * transitions through ring switches (CPL=3 user runs through SYSCALL
+ * → kernel CPL=0 dispatch via LSTAR trampoline, never via INT/IRET
+ * to ring 0; exception delivery uses IST stack). io_bitmap_base = 104
+ * (= sizeof(tss)) parks the IO permission bitmap past the TSS limit
+ * so any IO instruction at CPL > IOPL traps directly to #GP without
+ * the CPU dereferencing a phantom bitmap.
+ */
+static void kvm_v2_populate_tss_body(void *tss_kva, u64 ist1_top_gva)
+{
+	u8 *t = tss_kva;
+
+	memset(t, 0, KVM_V2_TSS_BODY_SIZE);
+	*(u64 *)(t + 0x24) = ist1_top_gva;	/* IST1 RSP top */
+	*(u16 *)(t + 0x66) = KVM_V2_TSS_BODY_SIZE;	/* IOPB off-of-limit */
+}
+
+int kvm_v2_install_per_vcpu_ist_tss(struct kvm_v2_vm *vm,
+				    struct kvm_v2_vcpu *vcpu, int cpu)
+{
+	void *ist_stack_kva = NULL, *tss_kva = NULL;
+	phys_addr_t ist_stack_gpa, tss_gpa;
+	u64 ist_stack_top_gva, tss_gva;
+	unsigned int ist_pte_idx, tss_pte_idx;
+	u64 *pte_table;
+
+	if (!vm || !vcpu || vcpu->vcpu_fd < 0)
+		return -EINVAL;
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return -EINVAL;
+	if (!vm->trampoline_pte_kva || !vm->gdt_kva)
+		return -EINVAL;
+
+	/*
+	 * Idempotent: re-running through the late-install path must not
+	 * re-allocate (codex audit's spec line). The first successful
+	 * install populates ist_stack_kva; further entries short-circuit.
+	 */
+	if (vcpu->ist_stack_kva)
+		return 0;
+
+	ist_stack_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	tss_kva       = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	if (!ist_stack_kva || !tss_kva) {
+		pr_err("um: kvm-v2 per_vcpu_ist_tss: __get_free_page returned NULL (cpu=%d)\n",
+		       cpu);
+		if (ist_stack_kva)
+			free_page((unsigned long)ist_stack_kva);
+		if (tss_kva)
+			free_page((unsigned long)tss_kva);
+		return -ENOMEM;
+	}
+
+	ist_stack_gpa = __pa(ist_stack_kva);
+	tss_gpa       = __pa(tss_kva);
+	/*
+	 * Per-vCPU GVAs match the layout documented at syscall_trap.h:
+	 *   IST_GVA(cpu) = TRAMPOLINE_GVA + (4 + cpu*2)     * 0x1000
+	 *   TSS_GVA(cpu) = TRAMPOLINE_GVA + (4 + cpu*2 + 1) * 0x1000
+	 * Top-of-stack = IST_GVA + PAGE_SIZE (stacks grow down — first
+	 * push lands at top - 8). v1 mirror: kvm-v1-archive/thread.c:1623.
+	 */
+	ist_stack_top_gva = KVM_V2_IST_STACK_TOP_GVA(cpu);
+	tss_gva           = KVM_V2_TSS_GVA(cpu);
+
+	/*
+	 * Build the TSS body BEFORE installing the PTE so KVM (and the
+	 * guest CPU on first LTR/exception delivery) never observes a
+	 * half-built TSS. IST1 = stack top GVA (exception delivery
+	 * pushes iretq frame there).
+	 */
+	kvm_v2_populate_tss_body(tss_kva, ist_stack_top_gva);
+
+	/*
+	 * Install PTE entries. PTE indices follow the layout documented
+	 * at syscall_trap.h: PTE[4 + cpu*2] = IST stack page,
+	 * PTE[5 + cpu*2] = TSS page.
+	 *
+	 * Flags (matches D.4b's _KERNPG_TABLE pattern at syscall_trap.c:
+	 * 427/431 — same UML-bit shape):
+	 *   _PAGE_PRESENT — required for the walk to land at the leaf.
+	 *   _PAGE_RW      — IST stack: CPU pushes iretq frame on
+	 *                   exception delivery. TSS: defensive (the
+	 *                   CPU writes the busy bit to the GDT
+	 *                   TSS_DESC entry, NOT the TSS body itself,
+	 *                   so the TSS page could be RO architecturally
+	 *                   — but matching the IST flags reduces the
+	 *                   number of distinct bit patterns in the chain
+	 *                   and matches v1's "stack page = P|RW|NX"
+	 *                   pattern at thread.c:1600).
+	 *   _PAGE_ACCESSED — pre-set so the CPU doesn't write-back an
+	 *                   A-bit update on first access.
+	 *   _PAGE_DIRTY    — pre-set on the IST stack so the first push
+	 *                   doesn't trigger a CPU write-back of the D
+	 *                   bit. Same defense-in-depth as _PAGE_ACCESSED.
+	 *
+	 * Kernel-only (no _PAGE_USER) — guest CPL=3 has no business
+	 * reading either page; it'll #PF if it tries.
+	 *
+	 * Note on the UML→x86 bit encoding: D66 in decisions-log.md
+	 * documents that UML's PTE bits are software-only and don't
+	 * match x86 architectural positions (UML _PAGE_RW=0x020 vs
+	 * x86 R/W=0x002). D.4b chose to write UML bits anyway because
+	 * the dispatch path is still seccomp (E.3.5 hasn't flipped
+	 * .vcpu_run yet) so KVM's TDP never actually walks these
+	 * PTEs — they sit dormant in the chain. E.2 mirrors that
+	 * choice for consistency. If E.3.5's flip surfaces a #PF
+	 * during exception delivery, an audit of PTE bit encodings
+	 * across the chain (D.4b PUD/PMD/PTE + E.1 PTE[1..3] + E.2
+	 * PTE[4 + cpu*2 .. +1]) is the first thing to check.
+	 *
+	 * Direct u64 stores match D.4b's PT chain pattern (syscall_trap.c:
+	 * 442-443) — the PT entries aren't UML-managed pgtable structures
+	 * so we don't route through set_pte.
+	 */
+	ist_pte_idx = KVM_V2_IST_BASE_SLOT + cpu * 2;
+	tss_pte_idx = ist_pte_idx + 1;
+	if (ist_pte_idx >= 512 || tss_pte_idx >= 512) {
+		/* Defensive — NR_CPUS=64 max gives tss_pte_idx=131; far
+		 * under 512. Catch a future bump that would overflow. */
+		pr_err("um: kvm-v2 per_vcpu_ist_tss: PTE index overflow (cpu=%d ist_pte_idx=%u)\n",
+		       cpu, ist_pte_idx);
+		free_page((unsigned long)ist_stack_kva);
+		free_page((unsigned long)tss_kva);
+		return -EINVAL;
+	}
+
+	pte_table = (u64 *)vm->trampoline_pte_kva;
+	pte_table[ist_pte_idx] = (u64)(ist_stack_gpa |
+				       _PAGE_PRESENT | _PAGE_RW |
+				       _PAGE_ACCESSED | _PAGE_DIRTY);
+	pte_table[tss_pte_idx] = (u64)(tss_gpa |
+				       _PAGE_PRESENT | _PAGE_RW |
+				       _PAGE_ACCESSED | _PAGE_DIRTY);
+
+	/*
+	 * Stash the kva/gpa/gva trio on the vcpu — the SREGS.tr install
+	 * (kvm_v2_install_descriptors_sregs, called next from the
+	 * exception_install loop) reads vcpu->tss_gva / ist_stack_top_gva
+	 * to populate the per-vCPU TR cache. vm-lifetime; freed in
+	 * kvm_v2_exception_free_per_vcpu before the IDT/handlers/GDT
+	 * pages drop.
+	 */
+	vcpu->ist_stack_kva     = ist_stack_kva;
+	vcpu->ist_stack_gpa     = ist_stack_gpa;
+	vcpu->ist_stack_top_gva = ist_stack_top_gva;
+	vcpu->tss_kva           = tss_kva;
+	vcpu->tss_gpa           = tss_gpa;
+	vcpu->tss_gva           = tss_gva;
+
+	pr_info("um: kvm-v2 per_vcpu_ist_tss: cpu=%d vcpu_fd=%d ist_gpa=%pa ist_top_gva=%#llx tss_gpa=%pa tss_gva=%#llx\n",
+		cpu, vcpu->vcpu_fd, &ist_stack_gpa,
+		(unsigned long long)ist_stack_top_gva,
+		&tss_gpa, (unsigned long long)tss_gva);
+	trace_um_backend_kvm_v2_per_vcpu_ist_tss_install(vcpu->vcpu_fd,
+							 ist_stack_top_gva,
+							 tss_gva);
+	return 0;
+}
+
+void kvm_v2_exception_free_per_vcpu(struct kvm_v2_vm *vm,
+				    struct kvm_v2_vcpu *vcpu, int cpu)
+{
+	unsigned int ist_pte_idx, tss_pte_idx;
+	u64 *pte_table;
+
+	if (!vm || !vcpu)
+		return;
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return;
+	if (!vcpu->ist_stack_kva)
+		return;
+
+	/*
+	 * Clear PTE entries BEFORE freeing the pages — same ordering
+	 * concern as kvm_v2_exception_free's PTE[1..3] clear (a
+	 * concurrent guest walk seeing zero == not present is fine; one
+	 * seeing a stale GPA pointing at released memory is not). The
+	 * trampoline_pte_kva chain is owned by D.4b and freed by
+	 * kvm_v2_kernel_half_free; this helper MUST run before that one.
+	 */
+	ist_pte_idx = KVM_V2_IST_BASE_SLOT + cpu * 2;
+	tss_pte_idx = ist_pte_idx + 1;
+	if (vm->trampoline_pte_kva && ist_pte_idx < 512 && tss_pte_idx < 512) {
+		pte_table = (u64 *)vm->trampoline_pte_kva;
+		pte_table[ist_pte_idx] = 0;
+		pte_table[tss_pte_idx] = 0;
+	}
+
+	free_page((unsigned long)vcpu->ist_stack_kva);
+	free_page((unsigned long)vcpu->tss_kva);
+
+	vcpu->ist_stack_kva     = NULL;
+	vcpu->ist_stack_gpa     = 0;
+	vcpu->ist_stack_top_gva = 0;
+	vcpu->tss_kva           = NULL;
+	vcpu->tss_gpa           = 0;
+	vcpu->tss_gva           = 0;
+}
+
 int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 {
 	void *idt_kva = NULL, *handlers_kva = NULL, *gdt_kva = NULL;
@@ -465,11 +810,57 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 		if (!v)
 			continue;
 
+		/*
+		 * E.2: per-vCPU IST stack + TSS pages must land BEFORE
+		 * install_descriptors_sregs — the latter writes
+		 * sregs.tr.{base,limit} from vcpu->tss_gva (Phase E.2
+		 * extension), which install_per_vcpu_ist_tss is what
+		 * populates. Order matters: TSS body → SREGS.tr cache.
+		 */
+		rc = kvm_v2_install_per_vcpu_ist_tss(vm, v, cpu);
+		if (rc < 0) {
+			pr_err("um: kvm-v2 exception_install: install_per_vcpu_ist_tss(cpu=%d) failed (%d)\n",
+			       cpu, rc);
+			goto err_unwind_per_vcpu;
+		}
+
 		rc = kvm_v2_install_descriptors_sregs(vm, v);
 		if (rc < 0) {
 			pr_err("um: kvm-v2 exception_install: install_descriptors_sregs(cpu=%d) failed (%d)\n",
 			       cpu, rc);
-			goto err_unwind_pt;
+			goto err_unwind_per_vcpu;
+		}
+	}
+
+	/*
+	 * E.2: write the TSS_DESC into GDT slots 6+7 AFTER per-vCPU
+	 * install so we can point at vCPU 0's TSS body (concrete base —
+	 * defensive in case a future SREGS validation tightens up and
+	 * rejects selector=0x30 when GDT[0x30] is null). SREGS.tr
+	 * (per-vCPU, set above by install_descriptors_sregs) is the
+	 * authoritative TR cache; the GDT slot is the lookup the CPU
+	 * would hit if SREGS.tr's cached values somehow expired and an
+	 * LTR re-fetch happened (KVM doesn't do this in practice, but
+	 * matching v1's archive shape at thread.c:1574-1590 keeps the
+	 * substrate symmetric with v1).
+	 *
+	 * Pin to vCPU 0's TSS — the per-vCPU SREGS.tr override means
+	 * each vCPU runs against its own TSS regardless. If vCPU 0
+	 * isn't in the pool (impossible at boot — nr_cpu_ids ≥ 1) we
+	 * leave slots 6+7 zero (the E.1 zero-init); SREGS validation
+	 * would still pass because the per-vCPU TR cache is the value
+	 * KVM checks, not the GDT walk.
+	 */
+	{
+		struct kvm_v2_vcpu *v0 = kvm_v2_vcpu_get(0);
+
+		if (v0 && v0->tss_gva) {
+			kvm_v2_gdt_write_tss_desc(gdt_kva, 6,
+						  v0->tss_gva,
+						  KVM_V2_TSS_LIMIT);
+			pr_info("um: kvm-v2 exception_install: GDT TSS_DESC slot=6 base=%#llx limit=%u (vCPU 0 TSS — per-vCPU SREGS.tr overrides)\n",
+				(unsigned long long)v0->tss_gva,
+				KVM_V2_TSS_LIMIT);
 		}
 	}
 
@@ -484,6 +875,26 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 						  (u64)gdt_gpa);
 	return 0;
 
+err_unwind_per_vcpu:
+	/*
+	 * E.2: a per-vCPU install (or the descriptor SREGS for a vcpu we
+	 * already installed IST/TSS for) failed mid-pool. Walk back over
+	 * every pool member that had its pages allocated and tear them
+	 * down — kvm_v2_exception_free_per_vcpu is a no-op on
+	 * never-installed entries, so we can iterate the whole pool
+	 * blindly without tracking which entries are partially live.
+	 */
+	{
+		int c;
+
+		for (c = 0; c < NR_CPUS; c++) {
+			struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(c);
+
+			if (v)
+				kvm_v2_exception_free_per_vcpu(vm, v, c);
+		}
+	}
+	/* fallthrough */
 err_unwind_pt:
 	/* Failed mid-pool — clear PT entries and free the pages. The
 	 * VM struct's idt_kva/etc. have been written; revert so any
@@ -510,8 +921,29 @@ err_free_pages:
 void kvm_v2_exception_free(struct kvm_v2_vm *vm)
 {
 	u64 *pte_table;
+	int cpu;
 
-	if (!vm || !vm->idt_kva)
+	if (!vm)
+		return;
+
+	/*
+	 * E.2: free per-vCPU IST stack + TSS pages BEFORE the IDT/handlers/
+	 * GDT pages drop. Each kvm_v2_exception_free_per_vcpu clears its
+	 * own PTE pair (PTE[KVM_V2_IST_BASE_SLOT + cpu*2 .. +1]) and frees
+	 * the page; safe on a never-installed vcpu (NULL ist_stack_kva
+	 * short-circuit). We iterate the pool unconditionally — even if
+	 * vm->idt_kva is NULL (E.1 never landed), some vCPU might still
+	 * have IST/TSS pages live (defensive — shouldn't happen given the
+	 * install order, but covers a future caller invoking out-of-order).
+	 */
+	for (cpu = 0; cpu < NR_CPUS; cpu++) {
+		struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(cpu);
+
+		if (v)
+			kvm_v2_exception_free_per_vcpu(vm, v, cpu);
+	}
+
+	if (!vm->idt_kva)
 		return;
 
 	/*

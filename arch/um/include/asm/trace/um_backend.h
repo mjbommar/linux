@@ -591,6 +591,37 @@ TRACE_EVENT(um_backend_kvm_v2_descriptors_sregs_install,
 		  __entry->vcpu_fd, __entry->idt_base, __entry->gdt_base)
 );
 
+/*
+ * kvm_v2_per_vcpu_ist_tss_install — fired once per pool member when
+ * E.2 lands the per-vCPU IST stack + TSS pages. The IST stack top is
+ * the GVA the TSS body's IST1 field points at (CPU pushes iretq
+ * frame here on exception delivery); the TSS GVA is what SREGS.tr.base
+ * cached on this vCPU points at.
+ *
+ * Per memo 26 §E.2 + the codex audit independent finding (per-vCPU
+ * TSS is REQUIRED — multiple vCPUs cannot share a TSS without IST1
+ * collision risk). Until E.3.5 flips .vcpu_run away from seccomp the
+ * IST stack + TSS pages have no consumer; per memo 27 §B.9
+ * observability lands with the helper anyway.
+ */
+TRACE_EVENT(um_backend_kvm_v2_per_vcpu_ist_tss_install,
+	TP_PROTO(int vcpu_fd, u64 ist_stack_top_gva, u64 tss_gva),
+	TP_ARGS(vcpu_fd, ist_stack_top_gva, tss_gva),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+		__field(u64, ist_stack_top_gva)
+		__field(u64, tss_gva)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd           = vcpu_fd;
+		__entry->ist_stack_top_gva = ist_stack_top_gva;
+		__entry->tss_gva           = tss_gva;
+	),
+	TP_printk("vcpu_fd=%d ist_stack_top_gva=%#llx tss_gva=%#llx",
+		  __entry->vcpu_fd, __entry->ist_stack_top_gva,
+		  __entry->tss_gva)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

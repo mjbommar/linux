@@ -554,6 +554,23 @@ static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
  * TSS body once that lands. Keeping TR untouched here matches the
  * spec's Option B note ("E.2 will issue another descriptor sregs
  * update with TR").
+ *
+ * Phase E.2 update (memo 26 §E.2): the helper now ALSO writes
+ * sregs.tr per vCPU — the per-vCPU TR cache holds the IST1 RSP
+ * pointer (via the TSS body the helper's caller installed at
+ * vcpu->tss_gva), which exception delivery dereferences to find
+ * the stack to push the iretq frame onto. Without TR set, the CPU
+ * uses the TR cache from KVM_GET_SREGS (typically zero / null
+ * descriptor) and exception delivery would #GP-during-delivery
+ * → cascade to triple fault.
+ *
+ * Caller responsibility: kvm_v2_install_per_vcpu_ist_tss must run
+ * BEFORE this helper (so vcpu->tss_gva / ist_stack_top_gva are
+ * populated). exception_install enforces that order — see the loop
+ * at exception.c. Defensive: if vcpu->tss_gva is zero we fall back
+ * to a null TR descriptor with a loud pr_err — KVM may reject the
+ * SREGS, surfacing the misorder rather than silently installing a
+ * broken TR.
  */
 int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
 				     struct kvm_v2_vcpu *vcpu)
@@ -576,6 +593,19 @@ int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
 		return -EINVAL;
 	}
 
+	if (!vcpu->tss_gva || !vcpu->ist_stack_top_gva) {
+		/*
+		 * E.2: per-vCPU IST/TSS install must precede this helper.
+		 * Surface loudly — the alternative is silently installing
+		 * sregs.tr.base = 0, which would cause exception delivery
+		 * to dereference NULL during the iretq frame push and
+		 * triple-fault when E.3.5 flips .vcpu_run.
+		 */
+		pr_err("um: kvm-v2 install_descriptors_sregs: vcpu_fd=%d tss_gva or ist_stack_top_gva is zero — kvm_v2_install_per_vcpu_ist_tss must run first\n",
+		       vcpu->vcpu_fd);
+		return -EINVAL;
+	}
+
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
 			      (unsigned long)&sregs);
 	if (rc < 0) {
@@ -592,19 +622,50 @@ int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
 	 * specifies "KVM_SET_SREGS.idt.base = the guest VA" explicitly.
 	 *
 	 * Limit: 256 vectors × 16 bytes - 1 = 4095 (full IDT). 8 GDT
-	 * slots × 8 bytes - 1 = 63 (the 6 used + 2 TSS slots E.2 will
-	 * fill). Constants pulled from exception.c so a future per-VM
-	 * resize stays consistent.
+	 * slots × 8 bytes - 1 = 63 (the 6 used + 2 TSS slots E.2 fills).
+	 * Constants pulled from exception.c so a future per-VM resize
+	 * stays consistent.
 	 */
 	sregs.idt.base  = (u64)KVM_V2_IDT_GVA;
 	sregs.idt.limit = 256 * 16 - 1;
 	sregs.gdt.base  = (u64)KVM_V2_GDT_GVA;
 	sregs.gdt.limit = 8 * 8 - 1;
+
 	/*
-	 * sregs.tr stays as-returned by KVM_GET_SREGS — E.2 will issue
-	 * its own descriptor-sregs update with TR pointing at the per-
-	 * vCPU TSS body once that lands.
+	 * Phase E.2: per-vCPU TR cache pointing at this vCPU's TSS body.
+	 * The TSS body (built by kvm_v2_install_per_vcpu_ist_tss) holds
+	 * IST1 = vcpu->ist_stack_top_gva at offset 36; exception delivery
+	 * walks GUEST_TR_BASE → TSS body → IST[0] = stack top → push
+	 * iretq frame. Bytes verbatim from v1 archive's pattern at
+	 * kvm-v1-archive/thread.c:2889-2898 (sregs.tr = { base, limit=103,
+	 * selector=0x30, type=11 = 64-bit busy TSS, present=1, dpl=0,
+	 * s=0=system segment, g=0=byte granularity }).
+	 *
+	 *   type=11 (= 0xb): 64-bit BUSY TSS. KVM accepts both 9
+	 *     (available) and 11 (busy) for KVM_SET_SREGS; v1 used 11
+	 *     because that's what the CPU caches AFTER LTR runs (the
+	 *     architectural behaviour: LTR loads the descriptor and
+	 *     flips its type from 9→11). Setting 11 directly skips the
+	 *     "we never run LTR in guest" gap — KVM treats the TR cache
+	 *     as already-loaded.
+	 *   s=0: system segment (TSS is one of the 16 system segment
+	 *     types per Intel SDM Vol.3 §3.5; not a code/data segment).
+	 *   l=0 / db=0: ignored for system segments.
+	 *   g=0: byte granularity. Limit is 103 bytes — way under 1MB,
+	 *     so byte-granular limits are correct.
 	 */
+	sregs.tr.base     = (u64)vcpu->tss_gva;
+	sregs.tr.limit    = KVM_V2_TSS_LIMIT;
+	sregs.tr.selector = KVM_V2_TSS_SEL;
+	sregs.tr.type     = 0xb;	/* 64-bit busy TSS */
+	sregs.tr.s        = 0;		/* system segment */
+	sregs.tr.dpl      = 0;
+	sregs.tr.present  = 1;
+	sregs.tr.l        = 0;		/* ignored for system segments */
+	sregs.tr.db       = 0;		/* ignored for system segments */
+	sregs.tr.g        = 0;		/* byte granularity */
+	sregs.tr.avl      = 0;
+	sregs.tr.unusable = 0;
 
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
 			      (unsigned long)&sregs);
@@ -617,17 +678,19 @@ int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
 	/*
 	 * Seed the sync-regs mmap with the post-update sregs so the
 	 * first dispatch's KVM_SYNC_X86_SREGS write doesn't ship stale
-	 * (zero) idt/gdt back. Same hand-seed pattern that
+	 * (zero) idt/gdt/tr back. Same hand-seed pattern that
 	 * install_production_sregs uses (vcpu.c:511-512); see that
 	 * helper for the full rationale on why store_regs's exit-path
 	 * refresh isn't enough on the very first dispatch.
 	 */
 	((struct kvm_run *)vcpu->kvm_run)->s.regs.sregs = sregs;
 
-	pr_info("um: kvm-v2 install_descriptors_sregs: vcpu_fd=%d idt=%#llx (limit=%#x) gdt=%#llx (limit=%#x)\n",
+	pr_info("um: kvm-v2 install_descriptors_sregs: vcpu_fd=%d idt=%#llx (limit=%#x) gdt=%#llx (limit=%#x) tr.base=%#llx tr.limit=%u tr.sel=%#x tr.type=%u\n",
 		vcpu->vcpu_fd,
 		(unsigned long long)sregs.idt.base, sregs.idt.limit,
-		(unsigned long long)sregs.gdt.base, sregs.gdt.limit);
+		(unsigned long long)sregs.gdt.base, sregs.gdt.limit,
+		(unsigned long long)sregs.tr.base, sregs.tr.limit,
+		sregs.tr.selector, sregs.tr.type);
 	trace_um_backend_kvm_v2_descriptors_sregs_install(vcpu->vcpu_fd,
 							  sregs.idt.base,
 							  sregs.gdt.base);

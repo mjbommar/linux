@@ -291,6 +291,42 @@ struct kvm_v2_vcpu {
 	u32   kvm_run_size;
 	int   cpu;
 	bool  cpuid_primed;
+	/*
+	 * Phase E.2 (memo 26 §E.2): per-vCPU IST stack + TSS for
+	 * exception delivery. IST1 is loaded on every #PF/#GP/#UD/
+	 * #DE/#BP/#OF gate per E.1's IDT entries (which set IST=1
+	 * unconditionally — see exception.c:kvm_v2_idt_set_gate
+	 * call sites). Without these the .vcpu_run flip in E.3.5
+	 * would deliver the first guest exception to a TSS whose
+	 * IST1 RSP is zero — which is non-canonical and causes
+	 * #GP-during-delivery → #DF → triple fault.
+	 *
+	 * Per-vCPU is REQUIRED (codex audit independent finding):
+	 * the TSS holds the IST1 RSP pointer, and only one TSS can
+	 * be active per vCPU at a time (via TR). Two vCPUs sharing
+	 * a TSS would either point both IST1s at the same physical
+	 * stack (collision risk if both took exceptions simultaneously)
+	 * or have to dynamically rewrite the TSS's IST1 on every
+	 * dispatch (race-prone). Per-vCPU TSS is the clean answer.
+	 *
+	 * Allocated from buddy via __get_free_page (one IST page +
+	 * one TSS page per pool member). Pages live in physmem so
+	 * their __pa() resolves through D.4b-pre's physmem identity-
+	 * offset memslot. VM-lifetime — freed in vm_destroy via
+	 * kvm_v2_exception_free_per_vcpu BEFORE kvm_v2_kernel_half_free
+	 * (the per-vCPU PTE writes go through trampoline_pte_kva which
+	 * the chain owns — once the chain frees, those PTE writes
+	 * dereference released memory).
+	 *
+	 * v1 archive mirror: kvm-v1-archive/thread.c:1574-1590 (TSS
+	 * slot setup) + kvm-v1-archive/sregs.c (TR programming).
+	 */
+	void	    *ist_stack_kva;
+	phys_addr_t  ist_stack_gpa;
+	u64	     ist_stack_top_gva;
+	void	    *tss_kva;
+	phys_addr_t  tss_gpa;
+	u64	     tss_gva;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
@@ -320,11 +356,53 @@ struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu);
  * symmetry with the existing CPUID / MSR / SREGS / sigmask install
  * helpers.
  *
+ * Phase E.2: extended to also write sregs.tr (per-vCPU TR cache
+ * pointing at the per-vCPU TSS body). Caller responsibility: invoke
+ * kvm_v2_install_per_vcpu_ist_tss FIRST so vcpu->tss_gva is non-zero
+ * by the time this helper runs. v1 archive mirror for the TR
+ * programming: kvm-v1-archive/thread.c:2889-2898 (sregs.tr =
+ * { base, limit=103, selector=KVM_BOOTSTRAP_TSS_SEL=0x30,
+ *   type=11 = 64-bit busy TSS, present=1, dpl=0, s=0, g=0 }).
+ *
  * Defined in vcpu.c alongside kvm_v2_install_production_sregs so both
  * SREGS install paths share the same TU.
  */
 int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
 				     struct kvm_v2_vcpu *vcpu);
+
+/*
+ * Phase E.2 (memo 26 §E.2): allocate + install the per-vCPU IST stack
+ * and TSS pages. Called from kvm_v2_exception_install for every pool
+ * member BEFORE kvm_v2_install_descriptors_sregs (so SREGS.tr's
+ * base/limit point at the freshly-installed TSS body).
+ *
+ * Allocates two pages from buddy (`__get_free_page(GFP_KERNEL |
+ * __GFP_ZERO)`), writes the TSS body's IST1 field at offset 36
+ * (matching v1's archive layout at kvm-v1-archive/thread.c:1623-1627),
+ * installs PTE entries at PTE[KVM_V2_IST_BASE_SLOT + cpu*2 .. +1] of
+ * trampoline_pte_kva, and stashes ist_stack_kva/gpa/top_gva and
+ * tss_kva/gpa/gva on the vcpu struct.
+ *
+ * Idempotent at the per-vCPU level — re-invocation when ist_stack_kva
+ * is already non-NULL short-circuits. The exception_install caller
+ * is itself idempotent on vm->idt_kva, so a re-run from the late-
+ * install path is safe end-to-end.
+ *
+ * Defined in exception.c alongside the IDT/GDT install for symmetric
+ * teardown.
+ */
+int kvm_v2_install_per_vcpu_ist_tss(struct kvm_v2_vm *vm,
+				    struct kvm_v2_vcpu *vcpu, int cpu);
+
+/*
+ * Symmetric per-vCPU teardown — clear PTE[KVM_V2_IST_BASE_SLOT + cpu*2
+ * .. +1], free the IST stack + TSS pages, NULL the vcpu fields. Called
+ * from kvm_v2_exception_free over every pool member BEFORE it clears
+ * PTE[1..3] and frees the IDT/handlers/GDT pages. Safe on a
+ * never-installed vCPU (NULL ist_stack_kva → no-op).
+ */
+void kvm_v2_exception_free_per_vcpu(struct kvm_v2_vm *vm,
+				    struct kvm_v2_vcpu *vcpu, int cpu);
 
 /*
  * Phase B.5: load guest CR3. Caller passes the target vCPU + __pa(pgd).
