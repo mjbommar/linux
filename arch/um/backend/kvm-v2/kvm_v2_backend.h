@@ -103,27 +103,44 @@ void kvm_v2_vm_destroy(void);
 struct kvm_v2_vm *kvm_v2_vm_get(void);
 
 /*
- * Placeholder vCPU + CPUID install (memo 26 §A.3). Single instance for
- * Phase A.3; Phase C replaces it with a per-host-CPU pool. The vCPU
- * isn't actually run by any op yet — it just satisfies the "vCPU
- * exists + CPUID is installed" precondition for Phase B's memslot
- * work and Phase C/D's KVM_RUN dispatcher.
+ * Per-host-CPU vCPU pool member (memo 26 §C.1). One element per
+ * possible host CPU (`nr_cpu_ids`); the array itself is a static
+ * NR_CPUS-sized slab so allocation lands cleanly during init_backend()
+ * before the buddy allocator is up (vcpu.c documents the constraint).
+ *
+ * `cpu` records the host CPU index this vCPU is pinned to so Phase
+ * C.2's task→vCPU dispatch can pick the right entry. Pthread + state
+ * machinery is C.2 territory — at C.1 each vCPU is just a fd + the
+ * mmap'd kvm_run; nothing runs them yet (ops.c still delegates
+ * .vcpu_run to the seccomp backend).
  */
 struct kvm_v2_vcpu {
 	int   vcpu_fd;
 	void *kvm_run;
 	u32   kvm_run_size;
+	int   cpu;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
 void kvm_v2_vcpu_destroy(void);
 
 /*
- * Phase B.5: load guest CR3. Caller passes __pa(mm->pgd). No
- * production caller until Phase C wires task->vCPU dispatch; B.5
- * lands the helper and the SREGS read/write plumbing for review.
+ * Per-CPU accessor for Phase C.2's dispatcher. Returns the vCPU pinned
+ * to host CPU `cpu` or NULL if `cpu` is out of range / the pool isn't
+ * initialised. Phase C.1 exports the accessor so C.2's vcpu_run helper
+ * lands without further header churn; today it has no callers.
  */
-int  kvm_v2_load_cr3(unsigned long pgd);
+struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu);
+
+/*
+ * Phase B.5: load guest CR3. Caller passes the target vCPU + __pa(pgd).
+ * The vcpu argument is plumbed for Phase C.2's per-CPU dispatch — C.1
+ * generalises the helper from the A.3 single-vcpu static so the
+ * dispatcher can pick the right pool entry. No production caller yet
+ * (ops.c still delegates .vcpu_run); the SREGS read/write plumbing
+ * lands here for review.
+ */
+int  kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd);
 
 /*
  * Memslot allocator + lookup (memo 26 §B.1, defined in memslot.c).

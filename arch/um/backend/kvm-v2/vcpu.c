@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase A.3: vCPU placeholder + CPUID install.
+ * UML backend v2 (KVM) — Phase C.1: per-host-CPU vCPU pool + CPUID install.
  *
- * Per memo 26 §A.3. One placeholder vCPU is created at init time so
- * later phases (B/C/D) have a stable target for KVM_SET_USER_MEMORY_REGION
- * + KVM_RUN wiring as they land. Phase C replaces this single vCPU with
- * a per-host-CPU pool; for now A.3 only needs the fd, the mmap'd kvm_run,
- * and a CPUID2 buffer that mirrors v1's curated mask so the eventual
- * guest sees the same feature surface v1 exposed.
+ * Per memo 26 §C.1. Creates `nr_cpu_ids` vCPUs at init time, each with
+ * its own kvm_run mmap and the curated v1 CPUID installed. C.2 will
+ * pin a pthread per vCPU and route task→vCPU dispatch by host CPU
+ * index; C.1 only lands the fds + mmaps + CPUID so the dispatcher has
+ * a stable per-CPU target to plug into. Until C.2 activates KVM_RUN,
+ * none of these vCPUs run — ops.c still delegates `.vcpu_run` to the
+ * seccomp backend and the worker-process loop drives guest execution
+ * via SIGSYS as it has since R4.
  *
  * Why CPUID is installed here (not in context.c's vm_create):
  *   KVM_SET_CPUID2 is a vCPU ioctl — it requires the fd from
@@ -15,27 +17,29 @@
  *   ioctl, needs a kzalloc buffer; kvm_v2_init runs from init_backend()
  *   during linux_main(), BEFORE mm_init() brings the buddy allocator
  *   up. v1 archive's lifecycle.c documented the same constraint and
- *   deferred CPUID install entirely; v2 piggybacks on A.3 because the
- *   placeholder vCPU is the first kzalloc-safe site that already needs
- *   to touch the vCPU fd.
+ *   deferred CPUID install entirely; v2 piggybacks on C.1 because each
+ *   pool member already needs to touch its vCPU fd, and re-issuing the
+ *   curated mask per vCPU is required (KVM_SET_CPUID2 is per-vCPU).
  *
  * Why the curated mask is verbatim from v1:
  *   v1 spent multiple iterations narrowing the feature surface
  *   (RDRAND/RDSEED for record-replay determinism; XSAVE/AVX/AVX2/AVX512
  *   family because v1's sregs setup never enabled CR4.OSXSAVE / set
  *   XCR0; FSGSBASE because CR4.FSGSBASE was off). v2's sregs setup is
- *   not yet written — it lives in Phase C. Until then matching v1's
- *   mask exactly avoids re-discovering the same #UD/#GP cliffs glibc
- *   and libcrypto fall off when those bits are advertised but not
- *   actually backed by host-side CR4/XCR0 setup. Phase C may revisit
- *   when proper XSAVE/XCR0 plumbing lands.
+ *   not yet written — it lives in Phase C.2/C.3. Until then matching
+ *   v1's mask exactly avoids re-discovering the same #UD/#GP cliffs
+ *   glibc and libcrypto fall off when those bits are advertised but
+ *   not actually backed by host-side CR4/XCR0 setup. Phase C may
+ *   revisit when proper XSAVE/XCR0 plumbing lands.
  */
 
+#include <linux/cpumask.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/kvm.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
+#include <linux/threads.h>
 #include <linux/types.h>
 
 #include <os.h>
@@ -44,15 +48,45 @@
 #include "kvm_v2_backend.h"
 
 /*
- * Single placeholder vCPU. Phase C replaces this with a per-host-CPU
- * pool keyed by `nr_cpu_ids`; the file-scope static keeps A.3's
- * lifecycle simple (init/shutdown only) while still letting later
- * phases reach the fd via kvm_v2_vcpu_get() if they need to before
- * the pool lands.
+ * The pool. Sized at compile time to NR_CPUS — bounded (UML's
+ * NR_CPUS_RANGE_END is 64, NR_CPUS_DEFAULT=1 without SMP) and bss-
+ * resident, which sidesteps the buddy-allocator-not-up constraint
+ * that init_backend() runs under (see kvm_v2_install_cpuid header
+ * comment for the same rationale applied to the CPUID buffer).
+ *
+ * Only the first `nr_cpu_ids` slots are populated; the trailing
+ * NR_CPUS - nr_cpu_ids slots stay at the .vcpu_fd = -1 sentinel below
+ * so kvm_v2_vcpu_get() returns NULL for out-of-range queries.
+ *
+ * The `pool_initialised` flag is the "has anyone populated this yet"
+ * predicate — we can't use vcpus[0].vcpu_fd == -1 as the predicate
+ * because the bss-zeroed default puts the array at vcpu_fd = 0
+ * (a valid fd), and rewriting bss every call would be wrong on
+ * re-entry. The flag flips once when kvm_v2_vcpu_create runs the
+ * first-time reset, and stays true even after destroy (destroy leaves
+ * the slots at vcpu_fd = -1, the proper sentinel).
+ *
+ * Phase C.2 will add per-vCPU pthread + atomic_t state fields here;
+ * C.1 deliberately stops at the fd + mmap + cpu-index trio because the
+ * vCPU isn't actually run yet (ops.c still routes `.vcpu_run` through
+ * seccomp) — adding pthread machinery before the dispatcher exists
+ * would be premature per memo 27 Part B.8.
  */
-static struct kvm_v2_vcpu vcpu = {
-	.vcpu_fd = -1,
-};
+static struct kvm_v2_vcpu vcpus[NR_CPUS];
+static bool pool_initialised;
+
+static void kvm_v2_vcpu_pool_reset(void)
+{
+	int i;
+
+	for (i = 0; i < NR_CPUS; i++) {
+		vcpus[i].vcpu_fd      = -1;
+		vcpus[i].kvm_run      = NULL;
+		vcpus[i].kvm_run_size = 0;
+		vcpus[i].cpu          = -1;
+	}
+	pool_initialised = true;
+}
 
 /*
  * Match v1 archive's lifecycle.c kvm_ensure_cpuid_done — KVM_MAX_CPUID_ENTRIES
@@ -204,59 +238,52 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
 	return 0;
 }
 
-int kvm_v2_vcpu_create(struct kvm_v2_vm *vm)
+/*
+ * Build a single pool member. Returns 0 on success or a negative errno
+ * on failure; the caller (kvm_v2_vcpu_create) tears down already-built
+ * entries on partial failure. KVM_CREATE_VCPU's id argument is the
+ * vCPU id within the VM (0..max-1) — we use the host CPU index as the
+ * id so KVM's internal numbering matches our pool keying.
+ */
+static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 {
-	int vcpu_fd, mmap_size, rc;
+	struct kvm_v2_vcpu *v = &vcpus[cpu];
+	int vcpu_fd, rc;
 	void *kvm_run;
 
-	if (!vm)
-		return -EINVAL;
-	if (vcpu.vcpu_fd >= 0) {
-		pr_warn("um: kvm-v2 vcpu_create: already created (vcpu_fd=%d)\n",
-			vcpu.vcpu_fd);
-		return -EBUSY;
-	}
-
-	/*
-	 * KVM_GET_VCPU_MMAP_SIZE is a /dev/kvm-fd ioctl — query it
-	 * once here. Phase C's per-CPU pool will reuse this size for
-	 * every vCPU it creates (KVM guarantees the size is constant
-	 * for the kernel's lifetime).
-	 */
-	mmap_size = os_ioctl_generic(vm->kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
-	if (mmap_size <= 0) {
-		pr_err("um: kvm-v2 vcpu_create: KVM_GET_VCPU_MMAP_SIZE failed (%d)\n",
-		       mmap_size);
-		return mmap_size ? mmap_size : -EIO;
-	}
-
-	vcpu_fd = os_ioctl_generic(vm->vm_fd, KVM_CREATE_VCPU, 0);
+	vcpu_fd = os_ioctl_generic(vm->vm_fd, KVM_CREATE_VCPU,
+				   (unsigned long)cpu);
 	if (vcpu_fd < 0) {
-		pr_err("um: kvm-v2 vcpu_create: KVM_CREATE_VCPU(id=0) failed (%d)\n",
-		       vcpu_fd);
+		pr_err("um: kvm-v2 vcpu_create: KVM_CREATE_VCPU(id=%d) failed (%d)\n",
+		       cpu, vcpu_fd);
 		return vcpu_fd;
 	}
 
 	kvm_run = os_mmap_rw_shared(vcpu_fd, mmap_size);
 	if (!kvm_run) {
-		pr_err("um: kvm-v2 vcpu_create: mmap of kvm_run (size %d) failed\n",
-		       mmap_size);
+		pr_err("um: kvm-v2 vcpu_create: mmap of kvm_run (cpu=%d size %d) failed\n",
+		       cpu, mmap_size);
 		rc = -ENOMEM;
 		goto err_close_vcpu;
 	}
 
+	/*
+	 * KVM_SET_CPUID2 is per-vCPU — every pool member needs the
+	 * curated mask installed. The first call's GET_SUPPORTED_CPUID
+	 * also stashes the buffer on vm->cpuid; subsequent calls re-use
+	 * that cached buffer rather than re-querying. Failure remains
+	 * non-fatal (see install function header).
+	 */
 	rc = kvm_v2_install_cpuid(vm, vcpu_fd);
 	if (rc)
 		goto err_unmap;
 
-	vcpu.vcpu_fd      = vcpu_fd;
-	vcpu.kvm_run      = kvm_run;
-	vcpu.kvm_run_size = (u32)mmap_size;
+	v->vcpu_fd      = vcpu_fd;
+	v->kvm_run      = kvm_run;
+	v->kvm_run_size = (u32)mmap_size;
+	v->cpu          = cpu;
 
-	trace_um_backend_kvm_v2_vcpu_create(vcpu_fd, vcpu.kvm_run_size);
-
-	pr_info("um: kvm-v2 vcpu_create: vcpu_fd=%d kvm_run_size=%u (placeholder; Phase C replaces with per-CPU pool)\n",
-		vcpu_fd, vcpu.kvm_run_size);
+	trace_um_backend_kvm_v2_vcpu_create(vcpu_fd, v->kvm_run_size);
 	return 0;
 
 err_unmap:
@@ -266,9 +293,9 @@ err_close_vcpu:
 	return rc;
 }
 
-void kvm_v2_vcpu_destroy(void)
+static void kvm_v2_vcpu_destroy_one(struct kvm_v2_vcpu *v)
 {
-	if (vcpu.vcpu_fd < 0)
+	if (v->vcpu_fd < 0)
 		return;
 
 	/*
@@ -276,19 +303,108 @@ void kvm_v2_vcpu_destroy(void)
 	 * refcounted in the kernel), so munmap first; the v1 archive's
 	 * shutdown path documents the same ordering.
 	 */
-	if (vcpu.kvm_run) {
-		os_unmap_memory(vcpu.kvm_run, (int)vcpu.kvm_run_size);
-		vcpu.kvm_run = NULL;
+	if (v->kvm_run) {
+		os_unmap_memory(v->kvm_run, (int)v->kvm_run_size);
+		v->kvm_run = NULL;
 	}
 
-	pr_info("um: kvm-v2 vcpu_destroy: closing vcpu_fd=%d\n", vcpu.vcpu_fd);
-	os_close_file(vcpu.vcpu_fd);
-	vcpu.vcpu_fd      = -1;
-	vcpu.kvm_run_size = 0;
+	os_close_file(v->vcpu_fd);
+	v->vcpu_fd      = -1;
+	v->kvm_run_size = 0;
+	v->cpu          = -1;
+}
+
+int kvm_v2_vcpu_create(struct kvm_v2_vm *vm)
+{
+	int mmap_size, cpu, rc;
+
+	if (!vm)
+		return -EINVAL;
+
+	/*
+	 * Initialise the array's sentinel state on first entry. The bss-
+	 * zeroed default puts every vcpu_fd at 0 (a valid fd), so we
+	 * can't use that as the "already created" check until the reset
+	 * has flipped it to -1. After this call the .vcpu_fd >= 0 test
+	 * below is meaningful.
+	 */
+	if (!pool_initialised)
+		kvm_v2_vcpu_pool_reset();
+
+	if (vcpus[0].vcpu_fd >= 0) {
+		pr_warn("um: kvm-v2 vcpu_create: pool already created (vcpu_fd=%d)\n",
+			vcpus[0].vcpu_fd);
+		return -EBUSY;
+	}
+
+	/*
+	 * KVM_GET_VCPU_MMAP_SIZE is a /dev/kvm-fd ioctl and the size
+	 * is constant for the host kernel's lifetime — query once and
+	 * reuse for every pool member.
+	 */
+	mmap_size = os_ioctl_generic(vm->kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
+	if (mmap_size <= 0) {
+		pr_err("um: kvm-v2 vcpu_create: KVM_GET_VCPU_MMAP_SIZE failed (%d)\n",
+		       mmap_size);
+		return mmap_size ? mmap_size : -EIO;
+	}
+
+	/*
+	 * Cap the pool at NR_CPUS to bound the static array; in practice
+	 * UML's NR_CPUS_RANGE_END is 64 and nr_cpu_ids tracks the
+	 * configured maximum, so the WARN below should never fire on a
+	 * sanely configured build. If it does, build a smaller pool
+	 * rather than overflowing the array.
+	 */
+	if (WARN_ON_ONCE(nr_cpu_ids > NR_CPUS)) {
+		pr_warn("um: kvm-v2 vcpu_create: nr_cpu_ids=%u > NR_CPUS=%d; capping pool at NR_CPUS\n",
+			nr_cpu_ids, NR_CPUS);
+	}
+
+	for (cpu = 0; cpu < min_t(int, nr_cpu_ids, NR_CPUS); cpu++) {
+		rc = kvm_v2_vcpu_create_one(vm, cpu, mmap_size);
+		if (rc)
+			goto err_unwind;
+	}
+
+	pr_info("um: kvm-v2 vcpu_create: pool of %d vCPU(s) up (kvm_run_size=%d)\n",
+		min_t(int, nr_cpu_ids, NR_CPUS), mmap_size);
+	return 0;
+
+err_unwind:
+	while (--cpu >= 0)
+		kvm_v2_vcpu_destroy_one(&vcpus[cpu]);
+	return rc;
+}
+
+void kvm_v2_vcpu_destroy(void)
+{
+	int cpu;
+
+	if (!pool_initialised)
+		return;
+
+	for (cpu = 0; cpu < NR_CPUS; cpu++) {
+		if (vcpus[cpu].vcpu_fd >= 0)
+			pr_info("um: kvm-v2 vcpu_destroy: closing cpu=%d vcpu_fd=%d\n",
+				cpu, vcpus[cpu].vcpu_fd);
+		kvm_v2_vcpu_destroy_one(&vcpus[cpu]);
+	}
+}
+
+struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu)
+{
+	if (!pool_initialised)
+		return NULL;
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return NULL;
+	if (vcpus[cpu].vcpu_fd < 0)
+		return NULL;
+	return &vcpus[cpu];
 }
 
 /*
- * Phase B.5: load the guest CR3 with `__pa(pgd)`.
+ * Phase B.5 / C.1: load guest CR3 on the supplied pool member.
  *
  * The contract (memo 26 §B.5) is:
  *   - PML4[0..255] of the guest pgd holds the user mappings (US=1).
@@ -299,11 +415,11 @@ void kvm_v2_vcpu_destroy(void)
  * Setting guest CR3 = __pa(mm->pgd) therefore lets KVM's TDP walk the
  * user half cleanly without any shadow PT.
  *
- * This helper builds the SREGS update; Phase C's task->vCPU dispatch
- * will call it when switching guest mms. Today there is no caller —
- * the helper exists so the SREGS read/write plumbing is reviewable
- * before Phase C is ready to use it. The single-vcpu placeholder from
- * A.3 is the target.
+ * Phase C.1 generalises the helper from A.3's file-scope-static target
+ * to an explicit `vcpu` parameter so C.2's task→vCPU dispatch can pick
+ * the right pool member. There is no in-tree caller yet (ops.c still
+ * delegates `.vcpu_run`); the SREGS read/write plumbing lands here for
+ * review.
  *
  * Caveat: the "PML4[256..511] is the kernel half" invariant requires
  * R1's high-VA layout to be active — i.e. uml_physmem in PML4[256+]
@@ -315,22 +431,22 @@ void kvm_v2_vcpu_destroy(void)
  * note; Phase C/D + B.6 (mmu_notifier validation) will surface the
  * actual exit criterion when guest user mode runs via TDP.
  */
-int kvm_v2_load_cr3(unsigned long pgd)
+int kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd)
 {
 	struct kvm_sregs sregs;
 	int rc;
 
-	if (vcpu.vcpu_fd < 0)
+	if (!vcpu || vcpu->vcpu_fd < 0)
 		return -ENODEV;
 
-	rc = os_ioctl_generic(vcpu.vcpu_fd, KVM_GET_SREGS,
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
 			      (unsigned long)&sregs);
 	if (rc < 0)
 		return rc;
 
 	sregs.cr3 = (u64)pgd;	/* caller passes __pa(mm->pgd) */
 
-	rc = os_ioctl_generic(vcpu.vcpu_fd, KVM_SET_SREGS,
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
 			      (unsigned long)&sregs);
 	if (rc < 0)
 		return rc;
