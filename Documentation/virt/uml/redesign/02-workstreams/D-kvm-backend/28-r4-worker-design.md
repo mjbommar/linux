@@ -975,11 +975,11 @@ scope):
 | E.1, E.2, E.3a, E.3b, E.3c, E.3d.0, E.3d.1, E.3d.2 | DONE | — |
 | E.4 (revised; vestigial cleanup) | DONE (`b5ac54f5b658`) | -283 |
 | E.5 (superseded by E.3d.2 — see Part N) | DONE (doc-only) | 0 |
-| E.6 (defconfig flip) | PENDING | ~50 |
+| E.6 (defconfig flip) | DONE | ~30 |
 
-Net R4 actual: 8 code commits (E.1–E.3d.2) + 1 cleanup (E.4) + 1
-defconfig flip (E.6). E.5 retired without code per Part N's
-analysis.
+R4 ships. Net: 8 code commits (E.1–E.3d.2) + 1 cleanup (E.4) +
+1 defconfig flip (E.6) + 2 doc-only (E.5 + the various Part L /
+M / N corrections). Memo 26 Phase A opens next.
 
 ---
 

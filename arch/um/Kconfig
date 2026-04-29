@@ -369,7 +369,7 @@ config UM_BACKEND_SECCOMP
 
 config UM_WORKER_PROCESS
 	bool "Per-mm host worker process model (memo 25 R4)"
-	default n
+	default y
 	help
 	  Spawn one host worker process per guest mm instead of cloning
 	  every guest task into the spawner's VA space. The seccomp
@@ -383,19 +383,16 @@ config UM_WORKER_PROCESS
 	  also benefit (no more software-only mm separation), but the
 	  payoff is concentrated on the v2 path.
 
-	  Default n until memo 28's E.1-E.6 implementation sequence
-	  fully lands. As of E.3d.0, toggling on causes
-	  seccomp_mm_create to spawn a per-mm worker that brings up
-	  its own stub child via start_userspace. vcpu_run still uses
-	  the spawner-side path against the worker's stub child until
-	  E.3d.2 reroutes through worker IPC; expect non-trivial guest
-	  workloads (e.g. CPython) to crash with "fatal signal" until
-	  then. init=/bin/true and similar one-shot guests boot fine.
-	  Toggle on for development / testing of the worker model.
+	  As of memo 28 E.6 (defconfig flip), default y. R4's E.1
+	  through E.5 sequence has fully landed: per-mm worker spawn,
+	  in-worker start_userspace, dispatcher kthread skeleton,
+	  vcpu_run rerouted through worker IPC (E.3d.2). init=python3
+	  boots cleanly under =y; substrate gate at PASS=25 FAIL=3
+	  EXPECTED_FAIL=3 matches WORKER_PROCESS=n bit-for-bit.
 
-	  Say N for production builds until memo 28 is fully done. See
-	  Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-	  28-r4-worker-design.md for the design.
+	  See Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+	  28-r4-worker-design.md for the design (especially Parts L,
+	  M, N for the architectural revisions vs. the original spec).
 
 config UM_WORKER_SMOKE_TEST_ON_BOOT
 	bool "Run worker IPC smoke test on boot"
