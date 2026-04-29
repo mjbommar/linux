@@ -38,10 +38,9 @@ EXPORT_SYMBOL_GPL(um_backend);
 #ifdef CONFIG_UM_BACKEND_SECCOMP
 extern const struct um_backend_ops um_backend_seccomp_ops;
 #endif
-/*
- * v1 KVM backend archived (memo 25 Part 1). v2 ops table will be
- * declared here with CONFIG_UM_BACKEND_KVM_V2 once the v2 stub lands.
- */
+#ifdef CONFIG_UM_BACKEND_KVM_V2
+extern const struct um_backend_ops um_backend_kvm_v2_ops;
+#endif
 
 /* Set by arch/um/os-Linux/start_up.c::os_early_checks() based on
  * the host probe. init_backend reads it for DYNAMIC selection.
@@ -91,9 +90,25 @@ static const struct um_backend_ops * __init pick_dynamic_backend(void)
 		if (force)
 			panic("um: backend=force=seccomp but seccomp not compiled in or probe failed");
 	} else if (want == UM_BACKEND_KIND_KVM) {
+#ifdef CONFIG_UM_BACKEND_KVM_V2
+		/*
+		 * v2 is the only KVM backend that can register today (v1
+		 * archived). Probe runs in init_backend() after this returns
+		 * and panics on failure regardless of force, so we only
+		 * return v2 when forced — a non-force "preference" should
+		 * still fall through to seccomp on a /dev/kvm-less host.
+		 * The Phase A.1 ops table delegates HOT/cold ops to seccomp,
+		 * so a successful force=kvm selection is functionally
+		 * equivalent to seccomp until A.2+ migrates ops over.
+		 */
 		if (force)
-			panic("um: backend=force=kvm requested but no KVM backend is built (v1 archived; v2 pending — memos 25-26)");
-		pr_warn("um: backend=kvm requested but no KVM backend is built (v1 archived; v2 pending); falling back\n");
+			return &um_backend_kvm_v2_ops;
+		pr_info("um: backend=kvm preference noted; v2 only auto-selects under force=kvm (Phase A.1); falling back to seccomp\n");
+#else
+		if (force)
+			panic("um: backend=force=kvm requested but UM_BACKEND_KVM_V2 not built (v1 archived; enable EXPERT + UM_BACKEND_KVM_V2)");
+		pr_warn("um: backend=kvm requested but UM_BACKEND_KVM_V2 not built; falling back\n");
+#endif
 	}
 
 	/* auto / fall-through: seccomp is the only resident backend today */

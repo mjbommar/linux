@@ -107,6 +107,34 @@ TRACE_EVENT(um_backend_mm_region_removed,
  * They will go here once v2's kernel-side dispatcher exists.
  */
 
+/*
+ * kvm_v2_init — fired once when the v2 backend's init op runs after a
+ * successful /dev/kvm probe + capability negotiation. The cap bitmap
+ * encodes which optional KVM_CHECK_EXTENSION queries returned >0; layout
+ * is private to arch/um/backend/kvm-v2/ (see KVM_V2_CAP_* in init.c).
+ *
+ * This event is the canonical Phase A.1 observability hook per memo 26
+ * §A.1 + memo 27 Part B.9 ("build observability before you need it");
+ * later phases extend the v2 tracepoint family rather than logging cap
+ * results ad-hoc.
+ */
+TRACE_EVENT(um_backend_kvm_v2_init,
+	TP_PROTO(int kvm_fd, int api_version, u64 caps),
+	TP_ARGS(kvm_fd, api_version, caps),
+	TP_STRUCT__entry(
+		__field(int, kvm_fd)
+		__field(int, api_version)
+		__field(u64, caps)
+	),
+	TP_fast_assign(
+		__entry->kvm_fd      = kvm_fd;
+		__entry->api_version = api_version;
+		__entry->caps        = caps;
+	),
+	TP_printk("kvm_fd=%d api=%d caps=%#llx",
+		  __entry->kvm_fd, __entry->api_version, __entry->caps)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

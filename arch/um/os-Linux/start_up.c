@@ -279,7 +279,14 @@ static int __init uml_backend_config(char *line, int *add)
 	} else if (strcmp(line, "seccomp") == 0) {
 		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
 		backend_arg_force = 0;
-	} else if (strcmp(line, "kvm") == 0) {
+	} else if (strcmp(line, "kvm") == 0 || strcmp(line, "kvm-v2") == 0) {
+		/*
+		 * "kvm-v2" is a synonym for "kvm" — there is only one KVM
+		 * backend in-tree (v1 archived; v2 pending memo 26 phases).
+		 * The synonym lets ops/test scripts spell out which v# they
+		 * mean without needing to know that selection collapses
+		 * inside init_backend.
+		 */
 		backend_arg_requested = UM_BACKEND_KIND_KVM;
 		backend_arg_force = 0;
 	} else if (strcmp(line, "force=ptrace") == 0) {
@@ -288,12 +295,13 @@ static int __init uml_backend_config(char *line, int *add)
 	} else if (strcmp(line, "force=seccomp") == 0) {
 		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
 		backend_arg_force = 1;
-	} else if (strcmp(line, "force=kvm") == 0) {
+	} else if (strcmp(line, "force=kvm") == 0 ||
+		   strcmp(line, "force=kvm-v2") == 0) {
 		backend_arg_requested = UM_BACKEND_KIND_KVM;
 		backend_arg_force = 1;
 	} else {
 		static const char valid[] =
-			"auto ptrace seccomp kvm force=ptrace force=seccomp force=kvm";
+			"auto ptrace seccomp kvm kvm-v2 force=ptrace force=seccomp force=kvm force=kvm-v2";
 
 		fatal("Invalid backend option '%s'; valid: %s\n", line, valid);
 	}

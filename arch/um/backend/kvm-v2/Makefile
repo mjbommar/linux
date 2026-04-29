@@ -5,3 +5,4 @@
 # 25-v2-restart-guide.md and 26-v2-implementation-plan.md.
 
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += init.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += ops.o
