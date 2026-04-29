@@ -97,6 +97,33 @@ struct kvm_v2_vm {
 	 * memslot list teardown in vm_destroy frees it.
 	 */
 	int			physmem_memslot_id;
+	/*
+	 * Phase D.4b: PT chain for the kernel-half PML4[448] install
+	 * (memo 26 §D.4 D.4b). The trampoline at GVA KVM_V2_LSTAR_GVA
+	 * (0xffffe00000000040) requires a guest PUD/PMD/PTE walk from
+	 * PML4[448] down to the trampoline page. These pages are
+	 * VM-lifetime; freed in vm_destroy after all mms have been torn
+	 * down. Living in physmem so they sit inside D.4b-pre's physmem
+	 * identity-offset memslot — alloc_page → page_address →
+	 * __pa(kva) is in [0, physmem_size), which the physmem memslot
+	 * translates back to the original kva via userspace_addr =
+	 * uml_physmem + offset. Mirrors v1's kvm_shadow_map_page pattern
+	 * at kvm-v1-archive/thread.c:2287-2365 but writes REAL page-table
+	 * entries — TDP walks them natively, no shadow-PT machinery.
+	 *
+	 * Storing only the PUD GPA in the struct is enough; the PMD/PTE
+	 * pages are kept by their KVAs for free-time. The PUD GPA is
+	 * what gets written to swapper_pg_dir[448] and init_mm.pgd[448]
+	 * to seed kernel-half propagation through pgd_alloc's memcpy at
+	 * arch/um/kernel/mem.c:149-157. NULL-valued KVAs mean "not
+	 * installed yet" (D.4b-pre + D.1 must complete first; lazy retry
+	 * from D.1's trampoline_late_install initcall lands the
+	 * kernel-half install once the trampoline GPA is known).
+	 */
+	void			*trampoline_pud_kva;	/* PUD page; entry [0] = pmd_pa */
+	void			*trampoline_pmd_kva;	/* PMD page; entry [0] = pte_pa */
+	void			*trampoline_pte_kva;	/* PTE page; entry [0] = trampoline_gpa */
+	phys_addr_t		trampoline_pud_gpa;	/* __pa(trampoline_pud_kva) — written to PML4[448] */
 };
 
 /*
@@ -158,6 +185,43 @@ struct kvm_v2_vm *kvm_v2_vm_get(void);
  * Defined in context.c.
  */
 int  kvm_v2_physmem_memslot_install(struct kvm_v2_vm *vm);
+
+/*
+ * Phase D.4b: install the per-VM kernel-half PT chain at PML4[448] so
+ * the LSTAR trampoline GVA (KVM_V2_LSTAR_GVA = 0xffffe00000000040) is
+ * reachable from any guest CR3 once D.5 flips .vcpu_run.
+ *
+ * Allocates 3 pages (PUD/PMD/PTE) from buddy, writes the chain with
+ * _KERNPG_TABLE non-leaf flags + (_PAGE_PRESENT | _PAGE_ACCESSED) leaf
+ * flags (RO + kernel-only), seeds swapper_pg_dir[448] AND
+ * init_mm.pgd[448] with pud_pa | _KERNPG_TABLE so UML's existing
+ * kernel-half copy in pgd_alloc (arch/um/kernel/mem.c:149-157)
+ * propagates the entry into every future mm. Idempotent — re-invocation
+ * after a successful install short-circuits via the trampoline_pud_kva
+ * sentinel.
+ *
+ * Prerequisites: vm->trampoline_gpa must be set (D.1's trampoline alloc
+ * must have completed), and the physmem memslot must cover
+ * [0, physmem_size) (D.4b-pre).
+ *
+ * Returns 0 on success / already-installed; -EINVAL on prerequisites
+ * unmet; -ENOMEM if alloc_page returns NULL (caller treats like the
+ * trampoline alloc's pre-buddy -ENOMEM: log + defer to the lazy retry
+ * path); other negative errno on hard failure.
+ *
+ * Defined in syscall_trap.c (alongside the trampoline install — both
+ * sides of the LSTAR install live in the same TU because the PT
+ * chain's leaf entry references the trampoline GPA).
+ */
+int  kvm_v2_kernel_half_install(struct kvm_v2_vm *vm);
+
+/*
+ * Phase D.4b symmetric teardown — free the PUD/PMD/PTE pages and clear
+ * swapper_pg_dir[448] + init_mm.pgd[448] so any concurrent mm operation
+ * sees zero rather than dangling. Called from kvm_v2_vm_destroy. Safe
+ * on a never-installed VM (NULL pud_kva → no-op).
+ */
+void kvm_v2_kernel_half_free(struct kvm_v2_vm *vm);
 
 /*
  * Per-host-CPU vCPU pool member (memo 26 §C.1). One element per

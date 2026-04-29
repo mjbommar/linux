@@ -399,6 +399,30 @@ TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
 );
 
 /*
+ * kvm_v2_pml4_install — fired once per VM when D.4b's kernel-half PT
+ * chain lands (memo 26 §D.4 D.4b). pud_gpa is __pa(pud_kva) — what gets
+ * written to swapper_pg_dir[448] and init_mm.pgd[448] (OR'd with
+ * _KERNPG_TABLE). gva is KVM_V2_LSTAR_GVA — the trampoline VA the chain
+ * walks down to. The chain is per-VM, VM-lifetime; freed only at
+ * vm_destroy. Until D.5 flips .vcpu_run no guest CR3 walk hits the
+ * chain — but the install is observable from D.4b. Per memo 27 §B.9
+ * observability lands with the helper.
+ */
+TRACE_EVENT(um_backend_kvm_v2_pml4_install,
+	TP_PROTO(u64 pud_gpa, u64 gva),
+	TP_ARGS(pud_gpa, gva),
+	TP_STRUCT__entry(
+		__field(u64, pud_gpa)
+		__field(u64, gva)
+	),
+	TP_fast_assign(
+		__entry->pud_gpa = pud_gpa;
+		__entry->gva     = gva;
+	),
+	TP_printk("pud_gpa=%#llx gva=%#llx", __entry->pud_gpa, __entry->gva)
+);
+
+/*
  * kvm_v2_iotrap_syscall_enter / kvm_v2_iotrap_syscall_exit — bracket
  * the KVM_EXIT_IO → handle_syscall path that Phase D.2 wires (memo 26
  * §D.2). enter fires immediately before the handle_syscall() call,

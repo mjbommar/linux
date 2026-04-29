@@ -92,18 +92,22 @@
  */
 
 #include <linux/build_bug.h>
+#include <linux/bug.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/kvm.h>		/* struct kvm_run, KVM_EXIT_IO */
 #include <linux/mm.h>
+#include <linux/mm_types.h>	/* init_mm */
+#include <linux/pgtable.h>	/* pgd_index, set_pgd */
 #include <linux/printk.h>
 #include <linux/set_memory.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
 #include <asm/page.h>
+#include <asm/pgtable.h>	/* _KERNPG_TABLE, _PAGE_PRESENT, _PAGE_ACCESSED, swapper_pg_dir */
 #include <asm/trace/um_backend.h>
 
 #include <skas.h>		/* handle_syscall */
@@ -258,6 +262,273 @@ int kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm)
 }
 
 /*
+ * Phase D.4b: install the per-VM kernel-half PT chain at PML4[448] so
+ * the LSTAR trampoline GVA (KVM_V2_LSTAR_GVA = 0xffffe00000000040) is
+ * reachable from any guest CR3 once D.5 flips .vcpu_run.
+ *
+ * VA decomposition for KVM_V2_LSTAR_GVA = 0xffffe00000000040:
+ *   PML4 index: (va >> 39) & 0x1ff = 0x1c0 = 448
+ *               (corrected per codex --search audit at 8eb06f04e3ad;
+ *                the original §D draft said "508" — derivation error.
+ *                PML4[508] would correspond to 0xfffffe0000000040.)
+ *   PUD  index: (va >> 30) & 0x1ff = 0
+ *   PMD  index: (va >> 21) & 0x1ff = 0
+ *   PTE  index: (va >> 12) & 0x1ff = 0
+ *   page offset (bits 11..0):       0x40 (the LSTAR body lives at
+ *                                         trampoline_kva + 0x40 — the
+ *                                         5 bytes D.1 wrote; the PTE
+ *                                         covers the whole page so the
+ *                                         offset is implicit in
+ *                                         post-translation guest VA).
+ *
+ * Mirrors v1's kvm_shadow_map_page pattern at
+ * kvm-v1-archive/lifecycle.c:1538-1613 (callers at thread.c:2287-2365)
+ * but writes REAL page-table entries — TDP walks them natively, no
+ * shadow-PT machinery.
+ *
+ * Allocation: 3 pages from buddy (PUD + PMD + PTE). Each lives at a
+ * host VA in [uml_physmem, uml_physmem+physmem_size) so its GPA =
+ * __pa(kva) is in [0, physmem_size) — covered by D.4b-pre's physmem
+ * memslot. KVM's TDP walk: CR3 = __pa(active_mm->pgd) → PML4[448] =
+ * pud_pa | _KERNPG_TABLE (we install) → PUD[0] = pmd_pa | _KERNPG_TABLE
+ * → PMD[0] = pte_pa | _KERNPG_TABLE → PTE[0] = trampoline_gpa |
+ * (_PAGE_PRESENT | _PAGE_ACCESSED). All four GPAs sit in physmem and
+ * resolve through D.4b-pre's memslot.
+ *
+ * Flags rationale:
+ *   non-leaf (PUD, PMD entries pointing to PMD/PTE pages): _KERNPG_TABLE
+ *     = _PAGE_PRESENT | _PAGE_RW | _PAGE_ACCESSED | _PAGE_DIRTY
+ *     UML's pud_bad / pmd_bad validators (arch/um/include/asm/pgtable-
+ *     4level.h:59 and pgtable.h:77) expect this exact shape:
+ *       (val & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE → bad.
+ *     _PAGE_TABLE has _PAGE_USER set — wrong for kernel-half walks
+ *     (would incorrectly allow CPL=3 reads of the entries themselves;
+ *     defense in depth even though the leaf clears US).
+ *   leaf (PTE entry pointing to the trampoline page):
+ *     _PAGE_PRESENT | _PAGE_ACCESSED
+ *     RO (no _PAGE_RW) — the trampoline is code, never written from
+ *     guest CPL=0 either. Kernel-only (no _PAGE_USER) — guest CPL=3
+ *     walking the same VA gets a page fault, not a successful access.
+ *     Executable (UML has no _PAGE_NX bit defined in pgtable.h, so
+ *     executable is implicit — every present page is executable from
+ *     the architecture's point of view).
+ *
+ * Propagation: write swapper_pg_dir[448] = pud_pa | _KERNPG_TABLE.
+ * UML's pgd_alloc (arch/um/kernel/mem.c:96-106) memcpy's entries
+ * [USER_PTRS_PER_PGD..PTRS_PER_PGD) from swapper into every new mm
+ * — automatic propagation. For pre-existing mms (init_mm primarily,
+ * since this runs at subsys_initcall before userspace exists), patch
+ * init_mm.pgd[448] directly. UML's mm_list is file-local in
+ * arch/um/kernel/skas/mmu.c:71-74 (not exported), so iterating all
+ * existing mms isn't available to backend code — but init_mm +
+ * swapper_pg_dir is sufficient at subsys_initcall time (no other mms
+ * exist that early; future mms inherit via pgd_alloc).
+ *
+ * Runtime assertion: BUG_ON(pgd_index(KVM_V2_LSTAR_GVA) != 448).
+ * Catches any future VA-constant change that would silently miss the
+ * install — codex --search audit at 8eb06f04e3ad specifically requested
+ * this guard because the original §D draft mis-derived the PML4 index.
+ *
+ * Idempotent — re-invocation after a successful install short-circuits
+ * via the trampoline_pud_kva sentinel. Necessary because the install
+ * is reachable both from kvm_v2_trampoline_late_install (the
+ * subsys_initcall lazy retry) and (defensively) from any future
+ * dispatcher hook that calls in to ensure the install is up.
+ *
+ * v1 lifecycle reference: v1's per-task kvm_shadow_pgd_alloc allocated
+ * a fresh shadow tree per mm and installed bootstrap pages on every
+ * KVM_RUN entry (kvm-v1-archive/thread.c:2352-2365). v2 takes the
+ * opposite approach: ONE PT chain for the whole VM, propagated via
+ * swapper_pg_dir. v1 free path: kvm_shadow_pgd_free at
+ * kvm-v1-archive/lifecycle.c:~1700 (per-task); v2 free path is
+ * kvm_v2_kernel_half_free, called from vm_destroy.
+ */
+int kvm_v2_kernel_half_install(struct kvm_v2_vm *vm)
+{
+	void *pud_kva = NULL, *pmd_kva = NULL, *pte_kva = NULL;
+	phys_addr_t pud_pa, pmd_pa, pte_pa;
+	unsigned long entry;
+
+	if (!vm)
+		return -EINVAL;
+
+	/*
+	 * Idempotent short-circuit: a successful prior install means all
+	 * three KVAs are non-NULL and swapper_pg_dir[448] / init_mm.pgd[448]
+	 * already carry the install. Re-running the helper would leak the
+	 * old PT pages and silently overwrite the PML4 entries with a new
+	 * (identical-shape but different-GPA) chain — pointless and bug-
+	 * inducing if any task pgd has already memcpy'd the kernel half.
+	 */
+	if (vm->trampoline_pud_kva)
+		return 0;
+
+	/*
+	 * Prerequisites: D.1's trampoline must be installed (we need the
+	 * GPA for the leaf PTE). The physmem memslot install (D.4b-pre)
+	 * isn't checked here because it's a logical prerequisite — without
+	 * it KVM's TDP walk fails at CR3 dereference, but that's a D.5-time
+	 * surface; this helper just builds the chain.
+	 */
+	if (!vm->trampoline_page || !vm->trampoline_gpa) {
+		pr_err("um: kvm-v2 kernel_half_install: trampoline not installed yet (page=%p gpa=%pa); D.1 must complete before D.4b\n",
+		       vm->trampoline_page, &vm->trampoline_gpa);
+		return -EINVAL;
+	}
+
+	/*
+	 * Runtime assertion (codex --search audit requirement). Catches a
+	 * future change to KVM_V2_TRAMPOLINE_GVA / KVM_V2_LSTAR_GVA that
+	 * would silently land the install at the wrong PML4 slot. The
+	 * BUG_ON fires before any allocation so a misconfigured constant
+	 * panics deterministically rather than half-installing into a slot
+	 * that the trampoline VA doesn't actually walk through.
+	 */
+	BUG_ON(pgd_index((unsigned long)KVM_V2_LSTAR_GVA) != 448);
+
+	/*
+	 * Allocate the three PT pages. GFP_KERNEL because subsys_initcall
+	 * runs in process context (not atomic). __GFP_ZERO is essential —
+	 * we only write [0] in each table; the other 511 entries MUST be
+	 * zero (= not-present) so unrelated VAs don't accidentally walk
+	 * into garbage. alloc_page returning NULL means the buddy
+	 * allocator isn't up yet (pre-mm_init, same surface as D.0a /
+	 * D.1's trampoline alloc); the caller treats it as a deferral
+	 * signal — but in practice we only call this from the
+	 * subsys_initcall lazy retry path AFTER mm_init, so this branch
+	 * is defensive rather than expected.
+	 */
+	pud_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	pmd_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	pte_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	if (!pud_kva || !pmd_kva || !pte_kva) {
+		pr_info("um: kvm-v2 kernel_half_install: __get_free_page returned NULL (buddy not up?); deferring\n");
+		if (pud_kva)
+			free_page((unsigned long)pud_kva);
+		if (pmd_kva)
+			free_page((unsigned long)pmd_kva);
+		if (pte_kva)
+			free_page((unsigned long)pte_kva);
+		return -ENOMEM;
+	}
+
+	pud_pa = __pa(pud_kva);
+	pmd_pa = __pa(pmd_kva);
+	pte_pa = __pa(pte_kva);
+
+	/*
+	 * Build the PUD page: entry [0] points at the PMD page with
+	 * _KERNPG_TABLE shape (kernel non-leaf: P|RW|A|D, US=0). Other 511
+	 * entries stay zero (not-present) from __GFP_ZERO. Direct u64
+	 * write — these aren't UML-managed pgtable structures so we don't
+	 * route through set_pud (which adds NEEDSYNC tracking that the
+	 * guest TDP walker doesn't understand and KVM doesn't honour).
+	 */
+	((u64 *)pud_kva)[0] = (u64)(pmd_pa | _KERNPG_TABLE);
+
+	/* PMD page: entry [0] points at the PTE page, same kernel
+	 * non-leaf shape. */
+	((u64 *)pmd_kva)[0] = (u64)(pte_pa | _KERNPG_TABLE);
+
+	/*
+	 * PTE page: entry [0] points at the trampoline page with the leaf
+	 * flags. _PAGE_PRESENT is required for the walk to succeed.
+	 * _PAGE_ACCESSED is set up-front so the CPU doesn't need to
+	 * write-back an A-bit update on first access (which would fault if
+	 * the leaf were RO without the A bit pre-set on some CPU
+	 * generations). No _PAGE_RW (RO trampoline). No _PAGE_USER (US=0;
+	 * kernel-only). UML has no _PAGE_NX so executable is implicit.
+	 */
+	((u64 *)pte_kva)[0] = (u64)(vm->trampoline_gpa |
+				     _PAGE_PRESENT | _PAGE_ACCESSED);
+
+	/*
+	 * Seed swapper_pg_dir[448]. UML's pgd_alloc memcpy at
+	 * arch/um/kernel/mem.c:101-103 picks this up for every future mm
+	 * (it copies entries [USER_PTRS_PER_PGD..PTRS_PER_PGD) from
+	 * swapper into the freshly-allocated pgd). The kernel-half
+	 * install therefore propagates automatically — no per-mm hook,
+	 * no arch_dup_mmap, no mm_list iteration.
+	 *
+	 * Direct assignment (= __pgd(...)) is correct here. set_pgd routes
+	 * through set_p4d which on UML's nop4d layout boils back down to
+	 * the same direct write, so set_pgd is also valid; we use direct
+	 * assignment to mirror v1's approach (lifecycle.c didn't go through
+	 * set_pgd either) and keep the value visible at the same address
+	 * UML's mm code reads.
+	 */
+	entry = (unsigned long)(pud_pa | _KERNPG_TABLE);
+	swapper_pg_dir[448] = __pgd(entry);
+
+	/*
+	 * Patch init_mm.pgd[448] explicitly. swapper_pg_dir[] is the
+	 * source pgd_alloc copies from for FUTURE mms; init_mm already
+	 * exists at this point (mm/init-mm.c:32 — set up before any
+	 * initcall runs) and its pgd was populated before we wrote
+	 * swapper, so it doesn't pick the entry up via the copy path.
+	 * v1's mm_list iteration would have visited init_mm; we patch it
+	 * directly because UML doesn't export mm_list (file-local in
+	 * arch/um/kernel/skas/mmu.c:71-74 per memo 26 §D.4 codex audit).
+	 */
+	if (init_mm.pgd)
+		init_mm.pgd[448] = __pgd(entry);
+	else
+		pr_warn("um: kvm-v2 kernel_half_install: init_mm.pgd is NULL (very early in boot?); only swapper_pg_dir[448] seeded\n");
+
+	/*
+	 * Stash the chain on the VM struct for free-time. PUD GPA goes on
+	 * the struct so a future audit / introspection caller can confirm
+	 * the entry value without re-walking swapper.
+	 */
+	vm->trampoline_pud_kva = pud_kva;
+	vm->trampoline_pmd_kva = pmd_kva;
+	vm->trampoline_pte_kva = pte_kva;
+	vm->trampoline_pud_gpa = pud_pa;
+
+	pr_info("um: kvm-v2 kernel_half_install: pud_gpa=%pa pmd_gpa=%pa pte_gpa=%pa leaf=trampoline_gpa=%pa gva=%#llx (swapper_pg_dir[448] + init_mm.pgd[448] = %#lx)\n",
+		&pud_pa, &pmd_pa, &pte_pa, &vm->trampoline_gpa,
+		(u64)KVM_V2_LSTAR_GVA, entry);
+	trace_um_backend_kvm_v2_pml4_install((u64)pud_pa,
+					     (u64)KVM_V2_LSTAR_GVA);
+	return 0;
+}
+
+void kvm_v2_kernel_half_free(struct kvm_v2_vm *vm)
+{
+	if (!vm || !vm->trampoline_pud_kva)
+		return;
+
+	/*
+	 * Clear swapper_pg_dir[448] and init_mm.pgd[448] BEFORE freeing
+	 * the pages so any concurrent mm operation sees zero (= not
+	 * present) rather than dangling. At vm_destroy time on shutdown,
+	 * no mms should be operating against these entries — but
+	 * defensive ordering matches v1's free path at
+	 * kvm-v1-archive/lifecycle.c (per-task shadow free).
+	 *
+	 * Note: pgd_alloc's memcpy at arch/um/kernel/mem.c:101-103 does
+	 * NOT see this clear for already-allocated mms — they retain the
+	 * old PUD GPA in their pgd[448], pointing at freed memory. This
+	 * is acceptable at vm_destroy because the VM fd is being torn
+	 * down and KVM_RUN will not be issued again; on shutdown all mms
+	 * are torn down too. If a future Phase J reinit flow lands, this
+	 * dangling-entry issue must be revisited (revoke from all live
+	 * mms before freeing the chain).
+	 */
+	swapper_pg_dir[448] = __pgd(0);
+	if (init_mm.pgd)
+		init_mm.pgd[448] = __pgd(0);
+
+	free_page((unsigned long)vm->trampoline_pte_kva);
+	free_page((unsigned long)vm->trampoline_pmd_kva);
+	free_page((unsigned long)vm->trampoline_pud_kva);
+	vm->trampoline_pte_kva = NULL;
+	vm->trampoline_pmd_kva = NULL;
+	vm->trampoline_pud_kva = NULL;
+	vm->trampoline_pud_gpa = 0;
+}
+
+/*
  * Lazy retry path. vm_create's best-effort install happens at
  * init_backend time before the buddy allocator is up; this initcall
  * runs after mm_init, picks up the deferral, and does the install.
@@ -302,10 +573,48 @@ static int __init kvm_v2_trampoline_late_install(void)
 	 */
 	(void)kvm_v2_physmem_memslot_install(vm);
 
-	if (vm->trampoline_page)
-		return 0;	/* already installed — silent skip */
+	if (!vm->trampoline_page) {
+		int rc = kvm_v2_trampoline_alloc_and_install(vm);
 
-	(void)kvm_v2_trampoline_alloc_and_install(vm);
+		if (rc) {
+			/*
+			 * The trampoline alloc failed — without it the
+			 * kernel-half install has no leaf GPA to point at.
+			 * Log the deferral and return; a future caller may
+			 * retry once the buddy is up. Don't propagate the
+			 * error from the initcall — the substrate gate's
+			 * seccomp-delegating ops still keep boot moving
+			 * (D.5 is what flips .vcpu_run; until then a
+			 * deferred install is observable but non-fatal).
+			 */
+			return 0;
+		}
+	}
+
+	/*
+	 * D.4b: install the kernel-half PT chain at PML4[448]. Runs AFTER
+	 * the trampoline alloc above (the leaf PTE references
+	 * vm->trampoline_gpa). Idempotent — the helper short-circuits if
+	 * it already ran.
+	 *
+	 * Failure is load-bearing for D.5 (without the chain installed
+	 * the trampoline VA is unreachable from any guest CR3 walk and
+	 * KVM_RUN's first dispatch will #PF in the guest's GVA→GPA path).
+	 * Log and return rc to surface in the initcall log; the boot
+	 * itself continues because .vcpu_run is still seccomp_vcpu_run
+	 * until D.5 lands. D.5's gate validation will catch a missing
+	 * install via cpython-parity / single_dlopen failures.
+	 */
+	{
+		int rc = kvm_v2_kernel_half_install(vm);
+
+		if (rc) {
+			pr_err("um: kvm-v2 kernel_half_install: failed (%d) — D.4b PT chain not installed; D.5 dispatch will fail until this is resolved\n",
+			       rc);
+			return rc;
+		}
+	}
+
 	return 0;
 }
 subsys_initcall(kvm_v2_trampoline_late_install);

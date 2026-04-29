@@ -236,6 +236,16 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 					 * lazy retry from trampoline_late_install
 					 * picks up an init_backend-time defer once
 					 * uml_physmem / physmem_size are set. */
+	vm.trampoline_pud_kva = NULL;	/* D.4b: kernel-half PT chain — installed
+					 * by the subsys_initcall lazy retry once
+					 * the trampoline alloc above lands; no
+					 * eager attempt at vm_create because the
+					 * chain's leaf PTE references the
+					 * trampoline GPA which itself defers
+					 * pre-buddy. */
+	vm.trampoline_pmd_kva = NULL;
+	vm.trampoline_pte_kva = NULL;
+	vm.trampoline_pud_gpa = 0;
 
 	/*
 	 * Phase D.4b-pre (memo 26 §D.4): install the giant physmem
@@ -328,6 +338,19 @@ void kvm_v2_vm_destroy(void)
 					 * sentinel so a future re-init's
 					 * idempotence check doesn't see a
 					 * stale slot id. */
+
+	/*
+	 * Phase D.4b: free the kernel-half PT chain (PUD/PMD/PTE pages)
+	 * + clear swapper_pg_dir[448] / init_mm.pgd[448]. Must run BEFORE
+	 * kvm_v2_trampoline_free below — the chain's leaf PTE references
+	 * the trampoline GPA, so freeing the chain first keeps "freeing
+	 * a referencing structure before the referent" symmetric with the
+	 * install order (memslot → trampoline → chain). Safe on a
+	 * never-installed VM (helper short-circuits on NULL pud_kva) —
+	 * covers the boot path where the late_install initcall hadn't run
+	 * yet at shutdown time.
+	 */
+	kvm_v2_kernel_half_free(&vm);
 
 	/*
 	 * Phase D.1: free the LSTAR trampoline page. Safe on a
