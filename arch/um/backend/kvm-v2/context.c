@@ -110,6 +110,13 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 	vm.caps   = caps;
 	vm.cpuid  = NULL;	/* A.3 owns CPUID query + install. */
 	INIT_LIST_HEAD(&vm.memslots);
+	/*
+	 * Memslot id bitmap (Phase B.1). Zero on create — even though
+	 * the static is zero-initialised at boot, explicit clear keeps
+	 * the create path correct if a future shutdown→re-init flow
+	 * lands without re-zeroing the static.
+	 */
+	bitmap_zero(vm.memslot_bitmap, KVM_V2_MAX_USER_MEM_SLOTS);
 	spin_lock_init(&vm.lock);
 
 	pr_info("um: kvm-v2 vm_create: vm_fd=%d caps=%#llx tss=%#lx ident=%#lx (memslots empty; A.3 attaches vCPU + installs CPUID)\n",
@@ -123,16 +130,28 @@ err_close_vm:
 
 void kvm_v2_vm_destroy(void)
 {
+	struct kvm_v2_memslot *m, *tmp;
+
 	if (vm.vm_fd < 0)
 		return;
 
 	/*
-	 * memslots is empty in A.2 (Phase B populates it). Once
-	 * KVM_SET_USER_MEMORY_REGION lands, this loop will free each
-	 * entry; for now the WARN_ON guards against a future bug where
-	 * a memslot escapes the destroy path.
+	 * Drain the memslot list. B.1 ships the allocator/list/lookup
+	 * but does not yet populate the list (B.2's mm_region_added
+	 * wiring is the first caller of kvm_v2_memslot_add). The drain
+	 * is the correct teardown order regardless: once B.2 lands,
+	 * vm_destroy must free every outstanding entry, and the loop
+	 * keeps that responsibility on this destroy path rather than
+	 * spreading it across B.2-B.6 each time a new caller is added.
+	 *
+	 * No KVM_SET_USER_MEMORY_REGION(size=0) here — that's B.3's
+	 * responsibility once mm_region_removed wires it. At
+	 * vm_destroy time the VM fd itself is about to close, which
+	 * tears down all slots in the kernel anyway, so a per-slot
+	 * delete ioctl would be redundant.
 	 */
-	WARN_ON_ONCE(!list_empty(&vm.memslots));
+	list_for_each_entry_safe(m, tmp, &vm.memslots, list)
+		kvm_v2_memslot_del(&vm, m->slot_id);
 
 	kfree(vm.cpuid);
 	vm.cpuid = NULL;

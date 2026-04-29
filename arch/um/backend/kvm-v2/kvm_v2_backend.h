@@ -10,6 +10,8 @@
 #ifndef __ARCH_UM_BACKEND_KVM_V2_H
 #define __ARCH_UM_BACKEND_KVM_V2_H
 
+#include <linux/bitmap.h>
+#include <linux/bitops.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -17,6 +19,18 @@
 #include <backend.h>
 
 struct kvm_cpuid2;
+
+/*
+ * Per-VM memslot id ceiling. The host-side KVM definition
+ * (linux/kvm_host.h: KVM_MEM_SLOTS_NUM = SHRT_MAX, KVM_USER_MEM_SLOTS =
+ * KVM_MEM_SLOTS_NUM - KVM_INTERNAL_MEM_SLOTS, with internal slots == 0
+ * on x86) is host-only and not exported through uapi/linux/kvm.h. Pin
+ * our copy to SHRT_MAX so the bitmap matches what KVM will actually
+ * accept from KVM_SET_USER_MEMORY_REGION; if a future host bumps the
+ * limit we just leave headroom unused. Memo 26 §B.1 phrases this as
+ * "typically 32768" — SHRT_MAX is 32767, which is the precise value.
+ */
+#define KVM_V2_MAX_USER_MEM_SLOTS	32767
 
 /*
  * Per-UML-kernel-invocation VM context (memo 26 §A.2). Single instance
@@ -33,7 +47,34 @@ struct kvm_v2_vm {
 	u64			caps;
 	struct kvm_cpuid2	*cpuid;
 	struct list_head	memslots;
+	/*
+	 * Per-VM bitmap of allocated memslot ids (Phase B.1). One bit per
+	 * KVM user memslot; cleared on free. The bitmap and the memslots
+	 * list are both protected by `lock`. Phase D's per-mm-worker model
+	 * may move both fields onto the worker context — for now per-VM is
+	 * the natural scope because there is one VM per UML invocation
+	 * (decisions-log D57 / context.c rationale).
+	 */
+	unsigned long		memslot_bitmap[BITS_TO_LONGS(KVM_V2_MAX_USER_MEM_SLOTS)];
 	spinlock_t		lock;
+};
+
+/*
+ * In-memory memslot record (Phase B.1). One per registered region;
+ * lives on `vm->memslots` until kvm_v2_memslot_del() removes it.
+ *
+ * Identity-map invariant: B.2's KVM_SET_USER_MEMORY_REGION will pass
+ * userspace_addr == guest_phys_addr (host VA == GPA), so host_va and
+ * gpa are stored separately to leave room for v2 to drop the identity
+ * map later without changing the in-memory shape.
+ */
+struct kvm_v2_memslot {
+	struct list_head	list;
+	u64			gpa;
+	u64			host_va;
+	u64			size;
+	u32			slot_id;
+	u32			flags;	/* KVM_MEM_READONLY etc. */
 };
 
 /*
@@ -74,5 +115,19 @@ struct kvm_v2_vcpu {
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
 void kvm_v2_vcpu_destroy(void);
+
+/*
+ * Memslot allocator + lookup (memo 26 §B.1, defined in memslot.c).
+ *
+ * Phase B.1 only manages the in-memory list and the slot-id bitmap;
+ * KVM_SET_USER_MEMORY_REGION is wired in B.2. The functions below all
+ * take `vm->lock` internally — callers must NOT hold it.
+ */
+int  kvm_v2_memslot_alloc_id(struct kvm_v2_vm *vm);
+void kvm_v2_memslot_free_id(struct kvm_v2_vm *vm, u32 slot_id);
+int  kvm_v2_memslot_add(struct kvm_v2_vm *vm, u64 gpa, u64 host_va,
+			u64 size, u32 flags);
+void kvm_v2_memslot_del(struct kvm_v2_vm *vm, u32 slot_id);
+struct kvm_v2_memslot *kvm_v2_memslot_lookup(struct kvm_v2_vm *vm, u64 gpa);
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

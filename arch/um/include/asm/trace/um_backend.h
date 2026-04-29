@@ -158,6 +158,47 @@ TRACE_EVENT(um_backend_kvm_v2_vcpu_create,
 		  __entry->vcpu_fd, __entry->kvm_run_size)
 );
 
+/*
+ * kvm_v2_memslot_add / _del — fired whenever B.1's allocator hands out
+ * or frees a memslot id. Phase B.1 lands the events alongside the
+ * allocator so B.2's KVM_SET_USER_MEMORY_REGION wiring is observable
+ * from the day it lights up (memo 27 Part B.9). Until B.2, no caller
+ * invokes kvm_v2_memslot_add() and the events are silent.
+ */
+TRACE_EVENT(um_backend_kvm_v2_memslot_add,
+	TP_PROTO(u32 slot_id, u64 gpa, u64 host_va, u64 size, u32 flags),
+	TP_ARGS(slot_id, gpa, host_va, size, flags),
+	TP_STRUCT__entry(
+		__field(u32, slot_id)
+		__field(u64, gpa)
+		__field(u64, host_va)
+		__field(u64, size)
+		__field(u32, flags)
+	),
+	TP_fast_assign(
+		__entry->slot_id = slot_id;
+		__entry->gpa     = gpa;
+		__entry->host_va = host_va;
+		__entry->size    = size;
+		__entry->flags   = flags;
+	),
+	TP_printk("slot=%u gpa=%#llx host_va=%#llx size=%#llx flags=%#x",
+		  __entry->slot_id, __entry->gpa, __entry->host_va,
+		  __entry->size, __entry->flags)
+);
+
+TRACE_EVENT(um_backend_kvm_v2_memslot_del,
+	TP_PROTO(u32 slot_id),
+	TP_ARGS(slot_id),
+	TP_STRUCT__entry(
+		__field(u32, slot_id)
+	),
+	TP_fast_assign(
+		__entry->slot_id = slot_id;
+	),
+	TP_printk("slot=%u", __entry->slot_id)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH
