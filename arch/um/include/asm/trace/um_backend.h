@@ -135,6 +135,29 @@ TRACE_EVENT(um_backend_kvm_v2_init,
 		  __entry->kvm_fd, __entry->api_version, __entry->caps)
 );
 
+/*
+ * kvm_v2_vcpu_create — fired when A.3's placeholder vCPU is built.
+ * Phase C will emit a separate event per pool member; until then this
+ * tracepoint marks the single placeholder's birth so a `trace-cmd
+ * record -e um_backend:um_backend_kvm_v2_vcpu_create` confirms the v2
+ * init path made it past KVM_CREATE_VCPU + kvm_run mmap. Per memo 27
+ * Part B.9 every new v2 surface is observable from the day it lands.
+ */
+TRACE_EVENT(um_backend_kvm_v2_vcpu_create,
+	TP_PROTO(int vcpu_fd, u32 kvm_run_size),
+	TP_ARGS(vcpu_fd, kvm_run_size),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+		__field(u32, kvm_run_size)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd      = vcpu_fd;
+		__entry->kvm_run_size = kvm_run_size;
+	),
+	TP_printk("vcpu_fd=%d kvm_run_size=%u",
+		  __entry->vcpu_fd, __entry->kvm_run_size)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

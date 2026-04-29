@@ -59,4 +59,20 @@ int  kvm_v2_vm_create(int kvm_fd, u64 caps);
 void kvm_v2_vm_destroy(void);
 struct kvm_v2_vm *kvm_v2_vm_get(void);
 
+/*
+ * Placeholder vCPU + CPUID install (memo 26 §A.3). Single instance for
+ * Phase A.3; Phase C replaces it with a per-host-CPU pool. The vCPU
+ * isn't actually run by any op yet — it just satisfies the "vCPU
+ * exists + CPUID is installed" precondition for Phase B's memslot
+ * work and Phase C/D's KVM_RUN dispatcher.
+ */
+struct kvm_v2_vcpu {
+	int   vcpu_fd;
+	void *kvm_run;
+	u32   kvm_run_size;
+};
+
+int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
+void kvm_v2_vcpu_destroy(void);
+
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

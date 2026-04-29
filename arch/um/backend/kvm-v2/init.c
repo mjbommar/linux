@@ -184,6 +184,18 @@ int kvm_v2_init(const struct um_backend_args *args)
 		goto err_close;
 	}
 
+	/*
+	 * A.3 placeholder vCPU. Failure tears the VM back down so init
+	 * either fully succeeds or leaves no v2 state behind — keeps
+	 * the arbiter's fallback-to-seccomp path clean.
+	 */
+	rc = kvm_v2_vcpu_create(kvm_v2_vm_get());
+	if (rc) {
+		pr_err("um: kvm-v2 init: kvm_v2_vcpu_create failed (%d)\n", rc);
+		kvm_v2_vm_destroy();
+		return rc;
+	}
+
 	return 0;
 
 err_close:
@@ -193,5 +205,6 @@ err_close:
 
 void kvm_v2_shutdown(void)
 {
+	kvm_v2_vcpu_destroy();
 	kvm_v2_vm_destroy();
 }
