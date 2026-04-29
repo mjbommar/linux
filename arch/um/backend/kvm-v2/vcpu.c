@@ -443,13 +443,42 @@ static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
 {
 	struct kvm_run *run;
 	struct kvm_sregs sregs;
+	/*
+	 * E.4 (post-E.5 fork+wait validation, 2026-04-29): boot at CPL=3
+	 * directly. Earlier shape used kernel CS/SS (selectors 0x08/0x10,
+	 * DPL=0) and relied on the first SYSCALL→sysretq round-trip to
+	 * drop the guest to CPL=3. That left a window where guest user
+	 * code runs at CPL=0 — fine for trivial init binaries that
+	 * SYSCALL immediately (/bin/true, /bin/echo) but catastrophic for
+	 * fork's child that runs glibc post-fork bookkeeping (locks,
+	 * atfork handlers, TLS reset) before any syscall: glibc's abort
+	 * path at `abort+0xa9` issues `hlt` (0xf4), and `hlt` at CPL=0
+	 * exits with KVM_EXIT_HLT instead of #GP'ing as it would at
+	 * CPL=3. Substrate gate broke the same way for /bin/sh-spawned
+	 * subprocesses.
+	 *
+	 * Fix: select user CS (sel 0x2b, DPL=3) and user SS (sel 0x23,
+	 * DPL=3) so the guest enters at CPL=3 from the very first
+	 * KVM_RUN. SYSCALL transitions to CPL=0 with CS=STAR[47:32]=0x08
+	 * (kernel) for the trampoline; sysretq transitions back to CPL=3
+	 * with CS=STAR[63:48]+0x10|3=0x2b. IDT-gate transitions to CPL=0
+	 * with CS=gate.selector=0x08 (kernel) for handler stubs; iretq
+	 * pops back to CPL=3. Existing transitions are unchanged — only
+	 * the *initial* CPL is corrected.
+	 *
+	 * v1 archive equivalent: kvm-v1-archive/sregs.c:140-160 set
+	 * user_cs/user_ss in its initial SREGS for exactly this reason.
+	 * Task #87 ("port v1 bootstrap IRETQ") was an alternative solution
+	 * via a guest-side IRETQ stub on first entry; this SREGS path is
+	 * the simpler equivalent.
+	 */
 	const struct kvm_segment code = {
 		.base    = 0,
 		.limit   = 0xffffffff,
-		.selector = 0x08,
+		.selector = 0x2b,	/* USER_CS, DPL=3 (matches GDT[5]) */
 		.type    = 0xb,		/* ER + A */
 		.present = 1,
-		.dpl     = 0,
+		.dpl     = 3,
 		.db      = 0,		/* L=1 supersedes db */
 		.s       = 1,		/* code/data */
 		.l       = 1,		/* 64-bit */
@@ -458,10 +487,10 @@ static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
 	const struct kvm_segment data = {
 		.base    = 0,
 		.limit   = 0xffffffff,
-		.selector = 0x10,
+		.selector = 0x23,	/* USER_DS, DPL=3 (matches GDT[4]) */
 		.type    = 0x3,		/* RW + A */
 		.present = 1,
-		.dpl     = 0,
+		.dpl     = 3,
 		.db      = 1,
 		.s       = 1,
 		.l       = 0,
