@@ -28,87 +28,57 @@ KVM-accelerated UML backend that hits all 7 success criteria from memo
 zero-flake, ≤1.2× seccomp wall-clock, Tier 1 pytest pass, <1500 LoC,
 ftrace observable, SMP working.
 
-### Update — 2026-04-28 late evening: project state at memo-27-refresh-time
+### Update — 2026-04-28 (latest): R4 SHIPPED + memo 26 Phase A done
 
-The original Part A below describes the pre-archive state from
-2026-04-28 morning. Current state (after a 41-commit session arc
-on uml-redesign-plan):
+R4 (the long-pole per-mm host worker process refactor) and memo
+26 Phase A (KVM v2 backend bring-up) BOTH landed in this session.
+Memo 26 Phase B (TDP + memslots) is the next chunk. Tip:
+`1066947fd4d3`.
+
+**State summary**:
 
 - **v1 KVM backend ARCHIVED** at `arch/um/backend/kvm-v1-archive/`
-  (commit `17a3e87bab75`). Tag `kvm-v1-archive-20260428`, branch
-  `kvm-v1-final`. Hooks stripped from ARCH=um core; depends on
-  BROKEN; not built.
-- **A.4i committed** as part of preserving the bug fix in history
-  before the archive (commit `cbc6d9fbffbd`).
-- **v2 stub directory** at `arch/um/backend/kvm-v2/` exists
-  (`046375fd50ed`); arch_initcall stub banner only; no ops table
-  registered yet.
-- **Memo 25 Part 1 (mechanical restart) DONE.** All 7 steps landed.
-- **Memo 25 Part 2 (12 refactors): 10 done; R4 advancing; R6 absorbed.**
-  - R10 kill harness.c `928bbbfebcb8`
-  - R11 remove ptrace backend (Option B; gone entirely) `06c88545ae2c`
-  - R1 Kconfig-gated host-VA / kernel-VA abstraction `3086bf6d8bd8`
-  - R2 backend ops cleanup (vcpu_run; mm_create/destroy/region_*;
-    takes `struct mm_struct *`) `764eac6d79de`
-  - R3 TLB-sync decoupled (docs) `3aa0af5d04e6`
-  - R5 `struct um_memory_region` `d3b2035f4079`
-  - R7 `um_backend:*` ftrace tracepoint subsystem `1a5dc6d061fa`
-  - R8 um_tlb_sync as generic drainer (docs) `72a35bbe7b80`
-  - R9 syscall-class table deferred to v2 Phase D (docs)
-    `9dc0d005feb0`
-  - R12 documentation refresh `3e9ea2505b87`
-  - R4 (per-mm host worker process — the long pole): DESIGN LOCKED
-    in memo 28 (`654d8581fb56`, `c2cf8a99ec25`). Sequence:
-    - E.1 scaffolding `4eb34edab3f7` — DONE
-    - E.2 spawner skeleton `9547b9c40c31` — DONE
-    - E.3a worker spawn/reap USER-side `23b4de4380a3` — DONE
-    - E.3b worker stub-child manager `fcf4f00d3f3e` — DONE
-    - E.3c spawner-side dispatcher kthread `2f0ecee96b0c` — DONE
-    - E.3d.0 in-worker start_userspace + seccomp_mm_create wiring
-      `0075c0820da9` — DONE
-    - E.3d.1 wait-queue bounce dispatcher rewrite
-      `f56c208c374b` — DONE
-    - E.3d.2 vcpu_run rerouting through worker IPC — IN FLIGHT
-    - E.4 per-task pthread inside worker — PENDING (~150 LoC)
-    - E.5 cross-mm migration via SIGUSR2 — PENDING (~200 LoC)
-    - E.6 defconfig flip — PENDING (~50 LoC)
-  - R6 signal handling: per memo 28 Part I, mostly absorbed by
-    R4's CLONE_SIGHAND-inside-worker design; what remains is
-    contract documentation (comes with R4 E.6).
-- **Substrate gate landed (memo 29 §2.5).** Full `python -m test`
-  under seccomp UML showed 27/491 modules failing (16/45,458
-  individual tests = 99.96% pass). The 4-class taxonomy (env /
-  process-model / syscall-gap / structural) is now compressed
-  into 31 focused C/Python reproducers at
-  `tools/testing/selftests/um/regrtest-repros/` that run in 4
-  seconds inside UML vs 15+ min for full regrtest.
-  **Baseline: PASS=25 FAIL=3 EXPECTED_FAIL=3** under seccomp.
-  - §2.5.4 retired (UDP-Lite gone upstream `56520b398e5e`).
-  - §2.5.3 deprioritized (Class B substrate is sound — fork/
-    exec/wait/pipe/sigchld all PASS; failures are Python-internal).
-  - §2.5.5 deferred to post-R4 (ITIMER_VIRTUAL fixes naturally
-    with worker-owns-process model per memo 28 Part I.5).
-  - `regrtest-skip.list` annotates the 27 regrtest module
-    failures with class + reproducer cross-reference.
-- **Memo 28 Part L: E.3d sequencing decision.** The original
-  ~100 LoC E.3d estimate was non-viable; split into E.3d.0,
-  E.3d.1, E.3d.2 (~750 LoC total).
-- **Memo 28 Part C.E lock: wait-queue bounce** as the `current`
-  discipline for handle_syscall (per Part I.5 spawner-owns-
-  everything). E.3c's direct call to handle_syscall was wrong
-  for real syscalls because callees deref `current` heavily;
-  E.3d.1 replaces it with the bounce.
-- **Tip of `uml-redesign-plan`:** post-R4-E.3d.1 (substrate gate
-  green at PASS=25). E.3d.2 in flight via Opus subagent — should
-  make `init=/usr/bin/python3` boot under WORKER_PROCESS=y and
-  may flip `itimer_virtual` EXPECTED_FAIL → PASS (memo 29 §2.5.5).
+  (commit `17a3e87bab75`). Tag `kvm-v1-archive-20260428`.
+- **Memo 25 Part 1 + Part 2 (12 of 12 refactors): COMPLETE.**
+  R4 sequence per memo 28: E.1 (`4eb34edab3f7`), E.2
+  (`9547b9c40c31`), E.3a (`23b4de4380a3`), E.3b
+  (`fcf4f00d3f3e`), E.3c (`2f0ecee96b0c`), E.3d.0
+  (`0075c0820da9`), E.3d.1 (`f56c208c374b`), E.3d.2
+  (`f77e62d4e031`), E.4 vestigial cleanup (`b5ac54f5b658`),
+  E.5 supersession (`8dd3625f4005` doc-only), E.6 defconfig
+  flip (`2054d49eb450`). R6 absorbed by R4's CLONE_SIGHAND
+  design.
+- **Memo 28 architectural revisions**: Parts L (E.3d split into
+  three commits), M (E.4 became vestigial cleanup, not
+  pthread-per-task), N (E.5 fully subsumed by E.3d.2's design).
+  Part C.E recorded with correction noting wait-queue bounce
+  was specced under a stale model and retired by E.3d.2's
+  actual design.
+- **Memo 29 §2.5 substrate gate landed**:
+  `tools/testing/selftests/um/regrtest-repros/` — 31 reproducers
+  in 4 classes (env / process-model / syscall-gap / structural).
+  Runs in 4 seconds vs 15+ min for full regrtest. Baseline:
+  **PASS=25 FAIL=3 EXPECTED_FAIL=3** under both
+  `WORKER_PROCESS=n` and `WORKER_PROCESS=y`, bit-identical.
+  §2.5.4 retired (UDPLITE gone upstream); §2.5.3 deprioritized
+  (Class B substrate sound); §2.5.5 corrected (itimer_virtual
+  needs separate work; not flipped by R4 alone — see memo 28
+  Part M.4).
+- **Memo 26 Phase A**: A.1 (`1a83522e3ea4` — backend probe +
+  ops registration), A.2 (`427f1d88cc42` — per-VM context),
+  A.3 (`1066947fd4d3` — vCPU placeholder). v2 boots
+  `init=/bin/true` cleanly via `backend=force=kvm-v2`; vCPU and
+  VM are created, all HOT ops still delegate to seccomp until
+  Phase B replaces them.
+- **CONFIG_UM_WORKER_PROCESS=y** is the default. CONFIG_UM_BACKEND_KVM_V2
+  is `default n` (EXPERT-gated) until Phase J promotes.
 
-**Where to start a new session:** read this Part A update. Then
-memo 28 (R4 design lock + Part L E.3d sequencing + Part C.E
-current-discipline lock). Memo 29 documents the substrate gate.
-Then jump to whichever R4 phase is in_progress per the task list.
-Memo 26 (v2 implementation phases A-J) starts AFTER R4 E.6 lands
-(defconfig flip).
+**Where to start a new session:** read this Part A. Memo 28 +
+memo 26 are the design references. Memo 29 documents the
+substrate gate. Next phase is **memo 26 Phase B** (TDP +
+memslots, ~2 weeks). The seccomp-delegating ops in
+`arch/um/backend/kvm-v2/ops.c` get replaced one-by-one as v2
+phases land.
 
 ### Original Part A (preserved for historical context)
 
@@ -311,8 +281,12 @@ If mean ≤19.4, A.4i probably isn't applied yet.
 | `struct um_worker::dispatcher` exists, no `worker_alloc_stub_for_mm` in spawner.c | Memo 28 E.3c done; start E.3d.0 |
 | `worker_alloc_stub_for_mm` exists, dispatcher kthread still calls `handle_syscall(&regs.regs)` directly | Memo 28 E.3d.0 done; start E.3d.1 (Part C.E wait-queue bounce) |
 | `wait_queue_head_t reply_wait` field on `um_worker`, `seccomp_vcpu_run` still calls `set_stub_state` directly | Memo 28 E.3d.1 done; start E.3d.2 (vcpu_run rerouting) |
-| `seccomp_vcpu_run` reroutes through `worker_send_msg_for_mm`, init=/usr/bin/python3 boots under WORKER_PROCESS=y | Memo 28 E.3d.2 done; start E.4 (per-task pthread inside worker) |
-| defconfig has `CONFIG_UM_WORKER_PROCESS=y`, `arch/um/backend/kvm-v2/init.c` is still a stub | All R4 done; start memo 26 Phase A |
+| `seccomp_vcpu_run` reroutes through `worker_send_msg_for_mm`, init=/usr/bin/python3 boots under WORKER_PROCESS=y | Memo 28 E.3d.2 done; revisit E.4 scope (Part M may dissolve it) |
+| `worker_run_pending_syscalls` removed, dispatcher kthread skeleton only | Memo 28 E.4 cleanup done; E.5 supersession check; then E.6 |
+| defconfig has `CONFIG_UM_WORKER_PROCESS=y`, `arch/um/backend/kvm-v2/init.c` is a stub | All R4 done; start memo 26 Phase A |
+| `arch/um/backend/kvm-v2/init.c` non-stub (probes /dev/kvm, registers ops), no `context.c` | Memo 26 A.1 done; start A.2 (per-VM context) |
+| `arch/um/backend/kvm-v2/context.c` exists with kvm_v2_vm_create, no `vcpu.c` | Memo 26 A.2 done; start A.3 (vCPU placeholder) |
+| `arch/um/backend/kvm-v2/vcpu.c` exists, no `memslot.c` | Memo 26 A.3 done; start B.1 (memslot allocator) |
 | v2 init.c non-stub, vm_fd works | Memo 26 Phase B (memslots) |
 | Memslots work, no shadow PT | Memo 26 Phase C (per-CPU vCPU) |
 | ... | (continue per memo 26 phase summary) |
