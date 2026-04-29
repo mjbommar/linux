@@ -127,7 +127,7 @@ leaks.
 via TDP walking `mm->pgd` directly, with `KVM_SET_USER_MEMORY_REGION`
 adding memslots per backing-file region.
 
-### B.1 — `memslot.c`: memslot allocator + lookup (3 days)
+### B.1 — `memslot.c`: memslot allocator + lookup (DONE — `a80a03c02743`)
 
 - `struct kvm_v2_memslot`: gpa, hpa-equivalent (host_va), size, slot_id.
 - Per-VM memslot list, indexed by gpa for lookup.
