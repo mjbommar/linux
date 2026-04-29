@@ -137,11 +137,21 @@ can land later if the mm_list scan shows up in profiles.
 | RT signal | queued, has parameter | requires rebooking; small additional complexity |
 | Schedule-time hook (no signal) | avoids signal complexity | requires interposing on every schedule() |
 
-**Locked: SIGUSR2.** SIGUSR1 is already taken by `register_pm_wake_signal`.
-SIGUSR2 is unclaimed in UML's signal map. Worker's signal handler
-checks if the current task has a pending mm-migration request; if
-yes, longjmps to the new mm's worker via the IPC ring (which then
-forwards the task's saved registers to the destination worker).
+**Originally locked: SIGUSR2** as the cross-mm task migration
+signal. SIGUSR1 is taken by `register_pm_wake_signal`; SIGUSR2 was
+unclaimed. Worker's signal handler would check for pending
+mm-migration requests and longjmp to the new mm's worker via IPC.
+
+**Superseded — 2026-04-28 (post-E.3d.2). See Part N.** E.3d.2's
+spawner-task-state design dissolved the cross-mm migration
+problem entirely: tasks have register state on the **spawner**,
+not in workers; per-iteration `current->mm->context.worker`
+lookup picks the right worker after any standard mm switch
+(fork+execve, vfork-shared-mm, etc.). SIGUSR2 / MIGRATE_TASK_TO
+are not needed. The wire format reservations
+(`WORKER_MSG_MIGRATE_TO` = 4, `WORKER_MSG_MIGRATE_ACK` = 5,
+`struct worker_msg_migrate`) remain in `worker_ipc.h` as
+harmless future-proofing.
 
 ### C.D — Spawner thread pool: **one thread per worker**
 
@@ -963,9 +973,99 @@ scope):
 | Phase | Status | LoC |
 |---|---|---|
 | E.1, E.2, E.3a, E.3b, E.3c, E.3d.0, E.3d.1, E.3d.2 | DONE | — |
-| E.4 (formerly per-task pthread; now vestigial cleanup) | PENDING | ~150 (delete) |
-| E.5 (cross-mm migration) | PENDING | ~200 |
+| E.4 (revised; vestigial cleanup) | DONE (`b5ac54f5b658`) | -283 |
+| E.5 (superseded by E.3d.2 — see Part N) | DONE (doc-only) | 0 |
 | E.6 (defconfig flip) | PENDING | ~50 |
 
-Total remaining: ~400 LoC, two of which are net-positive code
-and one is a delete. Architecturally cleaner endpoint.
+Net R4 actual: 8 code commits (E.1–E.3d.2) + 1 cleanup (E.4) + 1
+defconfig flip (E.6). E.5 retired without code per Part N's
+analysis.
+
+---
+
+## Part N — E.5 supersession (added 2026-04-28 post-E.3d.2 + E.4 cleanup)
+
+After E.3d.2 + E.4 cleanup landed, an Explore subagent
+surface-mapped E.5 against the actual substrate. Like Part M for
+E.4, E.5's original spec was written for a worker-owns-everything
+design that E.3d.2 superseded. **E.5 dissolves entirely under the
+E.3d.2 design — no code is needed.**
+
+### N.1 — Why cross-mm migration "just works" under E.3d.2
+
+The fork+execve flow already does everything E.5 was supposed to:
+
+1. New mm born → `init_new_context` (`arch/um/kernel/skas/mmu.c:46-97`)
+   → `um_backend_dispatch(mm_create, mm)` →
+   `seccomp_mm_create` → `worker_alloc_stub_for_mm`. A fresh
+   worker process is spawned for the new mm with its own stub
+   child; `mm->context.worker` is populated.
+
+2. `switch_mm` is a **no-op on UML**
+   (`arch/um/include/asm/mmu_context.h:16-19`). The "mm switch"
+   is the core kernel's `current->mm` swap; no backend hook
+   needed.
+
+3. `__switch_to` (`arch/um/kernel/process.c:75-85`) calls
+   `seccomp_context_switch` → `switch_threads` (jmp_buf
+   longjmp). Switches kernel-stack only; never touches mm or
+   worker.
+
+4. Next `seccomp_vcpu_run` reads `current->mm->context.id` /
+   `current->mm->context.worker` fresh
+   (`arch/um/backend/seccomp/trap_user.c:46`,
+   `arch/um/kernel/spawner.c:474-475`), so the very next vcpu
+   iteration after `exec_mmap` automatically targets the new
+   mm's worker.
+
+The `fork_exec_wait.c` reproducer (Class B) does exactly this 50×
+and PASSes under WORKER_PROCESS=y per the substrate gate baseline.
+
+### N.2 — Why memo 28's E.5 spec is no longer applicable
+
+The original spec assumed:
+- Tasks have register state inside workers (per-task pthread).
+- Migration moves that state from worker A to worker B.
+
+Under E.3d.2:
+- Tasks have `pt_regs` on the **spawner** (`task_struct->thread.regs`),
+  not in any worker.
+- Workers hold only the stub-child VA + futex coordination state,
+  both of which are **mm-scoped** (one stub child per mm), not
+  task-scoped.
+- A task switching mm just gets a different `current->mm->context.worker`
+  on its next vcpu_run iteration. No state transfer.
+
+SIGUSR2's design ("wakes whichever worker is currently running
+the task") presupposed workers having a `current` and a runqueue.
+Under E.3d.2 workers are stateless futex coordinators; nothing
+to wake.
+
+### N.3 — Verification (already passing)
+
+- `fork_exec_wait`: PASS under WORKER_PROCESS=y. Confirms one-shot
+  fork → new mm → new worker → execve → user code runs.
+- `fork_pipe_ipc`: PASS under WORKER_PROCESS=y. Confirms two
+  distinct workers co-exist with different mms; guest pipe IPC
+  between them works.
+- `pool_workers`: PASS under WORKER_PROCESS=y. Confirms 8
+  concurrent forked workers with distinct mms all reap cleanly.
+- `seccomp_mm_destroy` reaps the old worker via
+  `reap_worker_for_mm` on `exec_mmap`'s mm release; verified by
+  inspection.
+
+### N.4 — Wire format reservations stay
+
+`WORKER_MSG_MIGRATE_TO = 4` / `WORKER_MSG_MIGRATE_ACK = 5` /
+`struct worker_msg_migrate` remain in `arch/um/include/shared/worker_ipc.h`
+as harmless future-proofing. Removing them would be wire-breaking
+churn for no benefit. The dispatcher's `default:` warn-and-drop
+handler covers them if anything ever sends one.
+
+### N.5 — Recommendation realized
+
+**E.5 lands as this Part N + the existing Part C.C correction.**
+Zero net LoC of code change; verification gate is the existing
+substrate gate at PASS=25.
+
+R4 work proceeds directly to E.6 (defconfig flip).
