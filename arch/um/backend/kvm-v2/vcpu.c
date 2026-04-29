@@ -686,3 +686,27 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 	preempt_enable();
 }
+
+/*
+ * Phase C.4.0 stub. arch_copy_thread (processor_64.h / processor_32.h)
+ * calls this on every task fork once CONFIG_UM_BACKEND_KVM_V2=y. C.4
+ * replaces the body with a real KVM_GET_FPU against the parent's
+ * vCPU pool entry (the lookup needs the per-CPU dispatcher's
+ * "current parent vCPU" to be defined, which lives in the C.4 commit
+ * along with the install side, kvm_v2_fpu_install_on_first_run).
+ *
+ * Until then: clear the child's snapshot. fpu_valid stays false so
+ * a future first KVM_RUN starts from architectural defaults
+ * (kvm_v2_fpu_install_on_first_run will use a fresh FPU rather than
+ * the parent's saved state). This is observably correct under v2's
+ * incremental migration (.vcpu_run is still seccomp_vcpu_run; no
+ * task ever runs through KVM_RUN today).
+ */
+int kvm_v2_fpu_capture_for_fork(struct arch_thread *from,
+				struct arch_thread *to)
+{
+	(void)from;
+	to->kvm_v2.fpu_valid = false;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_fork);
