@@ -798,6 +798,67 @@ The original §D.5 headline gate moves to Phase E's exit criteria:
 via standard KVM mechanisms, with no per-mm pages installed in user
 mms.
 
+### Architectural correction (2026-04-29, retrospective)
+
+**Memo 26 §A vision item "Zero shadow PT machinery" was load-bearing
+but not empirically verified at design time.** UML's PTE bit layout
+in `arch/um/include/asm/pgtable.h` was software-only book-keeping
+with positions chosen arbitrarily relative to x86 hardware paging.
+With v2 handing UML's pgd directly to KVM via CR3, the bits collide:
+`_PAGE_RW=0x020` at x86's A-bit position; `_PAGE_ACCESSED=0x080` at
+x86's PS-bit position; etc. KVM's TDP MMU walks UML's pgd as a
+malformed x86 page table -> reserved-bit faults -> injected #PF ->
+IDT walk faults same way -> reinjection loop -> SIGALRM-EINTR is the
+only escape. KVM debugfs shows `EXIT_NPF info 20000000f` (bit 3 =
+PFERR_RSVD_MASK).
+
+24+ hours of session time investigated alternative hypothesis spaces
+(signal pacing, R4 worker, SREGS install, IDT gates, entry shape)
+before empirical debugging - minimum C reproducer + KVM tracepoints
++ gVisor source comparison - found the actual cause. v1 archive at
+`kvm-v1-archive/lifecycle.c:1114` had a `kvm_um_pte_to_x86`
+translator whose function name documented this incompatibility; v1
+maintained per-mm shadow PT trees with this translator on every PTE
+mutation. v1 wasn't naive to do this - v1 was correct.
+
+**Resolution at commit `912587c605d8`**: align UML's PTE bits with
+x86 hardware paging via header-only edit to
+`arch/um/include/asm/pgtable.h` (Option B over Option A
+shadow-PT-port; Option B is 23 LoC vs Option A's ~500-700 LoC and
+has zero seccomp-side blast radius because every UML PTE consumer
+goes through name-based accessors that route through
+`pte_get_bits` / `pte_set_bits`):
+
+| Macro | Old | New | x86 |
+|---|---|---|---|
+| _PAGE_PRESENT | 0x001 | 0x001 | bit 0 P |
+| _PAGE_RW | 0x020 | 0x002 | bit 1 R/W |
+| _PAGE_USER | 0x040 | 0x004 | bit 2 U/S |
+| _PAGE_ACCESSED | 0x080 | 0x020 | bit 5 A |
+| _PAGE_DIRTY | 0x100 | 0x040 | bit 6 D |
+| _PAGE_NEEDSYNC | 0x002 | 0x200 | bit 9 AVL |
+| _PAGE_PROTNONE | 0x010 | 0x400 | bit 10 AVL |
+| _PAGE_SWP_EXCLUSIVE | 0x400 | 0x800 | bit 11 AVL |
+
+Boot smoke under `.vcpu_run = kvm_v2_vcpu_run` reaches "Console
+initialized on /dev/tty0" + same VFS panic as seccomp = identical
+kernel-side trajectory. Reserved-bit fault eliminated. Substrate
+gate green PASS=25/FAIL=3/EXPECTED_FAIL=3 (seccomp regression-free).
+
+**Residual (Phase E.5 in flight)**: orthogonal bug - worker mm's
+user RIP page has empty leaf PTE (`pte[35] = 0`). UML's normal
+`set_pte_at` chain isn't populating the user mm before first
+KVM_RUN. Likely a Phase B / R4 issue: tlb.c -> `mm_region_added` ->
+`seccomp_mm_region_added` populates the STUB CHILD's mm but not the
+spawner mm's pgd. Phase E.5 investigates.
+
+### Lesson for future memo work
+
+Verify load-bearing design claims against source-level evidence
+before committing infrastructure. `grep _PAGE_ arch/um/include/asm/
+pgtable.h` is a 1-second sanity check; would have caught this before
+Phase A landed.
+
 ### E.1 — IDT in dedicated guest page (3 days)
 
 - Allocate a dedicated guest physical page at boot (e.g., gpa
