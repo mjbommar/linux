@@ -447,6 +447,19 @@ void kvm_v2_marshal_to_kvm_regs(struct kvm_regs *dst,
 				const struct uml_pt_regs *src);
 
 /*
+ * Reverse marshal: struct kvm_regs → uml_pt_regs.gp[]. Called after
+ * KVM_RUN returns so UML's syscall / fault / signal dispatch sees
+ * the guest's post-exit GPRs. HOST_ORIG_AX is intentionally NOT
+ * written here — that's an UML entry-path convention the syscall
+ * dispatcher arranges once it knows the bucket. Declared here so
+ * the D.2 marshal-shape KUnit suite (test_marshal.c) can call it
+ * directly; the production caller is kvm_v2_vcpu_run's marshal-out
+ * after KVM_RUN returns.
+ */
+void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
+				  const struct kvm_regs *src);
+
+/*
  * Phase D.3: per-task FPU capture on context-switch-out + the
  * .context_switch op wrapper that invokes it before delegating to
  * seccomp_context_switch. Defined in vcpu.c (alongside the C.4

@@ -25,3 +25,17 @@ config UM_BACKEND_KVM_V2
 
 	  Say N unless you are working on v2 implementation. Production
 	  users get correct behaviour with seccomp.
+
+config UM_BACKEND_KVM_V2_KUNIT
+	tristate "KVM v2 backend KUnit tests"
+	depends on UM_BACKEND_KVM_V2 && KUNIT
+	default n
+	help
+	  Build the v2 backend KUnit suites: marshal-shape (D.2 +
+	  task #74) and any future per-helper tests. These are pure
+	  data-transform tests — no host syscalls, no vCPU state.
+	  Catches off-by-one register slot mappings + RFLAGS-bit-1
+	  invariants in kvm_v2_marshal_to/from_kvm_regs.
+
+	  Say N for production builds; Y or M to validate marshal
+	  correctness during v2 development.

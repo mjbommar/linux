@@ -12,3 +12,8 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += memslot.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += syscall_trap.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
+
+# Marshal-shape KUnit suite (D.2 + task #74). Pure data-transform
+# tests; no kernel state assumed. Build only when explicitly
+# requested.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_marshal.o
