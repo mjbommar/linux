@@ -146,19 +146,25 @@
 #include "syscall_trap.h"
 
 /*
- * The handler stub byte sequence. Each stub is 4 bytes:
+ * Handler stub byte sequences. Two shapes — vectors that push an
+ * error code (#PF, #GP) need to pop it before iretq; vectors that
+ * don't (#DE, #BP, #OF, #UD) iretq directly.
  *
+ * Non-error-code shape (4 bytes):
  *   e6 XX           out %al, $XX     ; trap to host with port=XX
- *   48 cf           iretq            ; return to user RIP/RFLAGS popped
- *                                     ; from CPU's pushed iretq frame
+ *   48 cf           iretq            ; return to user, pop 5×8B frame
  *
- * Total stub length is 4 bytes; we lay them out at 16-byte intervals
- * within the handlers page so IDT-gate-offset arithmetic is
- * `KVM_V2_HANDLERS_GVA + (slot << 4)` with no per-handler size table.
- * The leftover 12 bytes of each slot are zero from __GFP_ZERO (the
- * x86 decoder treats `00 00` as `add %al, (%rax)` which would fault
- * on the iretq's RSP target — but the iretq always exits to user
- * before any zero bytes execute, so the padding is dead code).
+ * Error-code shape (8 bytes):
+ *   e6 XX           out %al, $XX     ; trap to host with port=XX
+ *   48 83 c4 08     add $8, %rsp     ; advance past CPU-pushed error
+ *                                     ; code (iretq pops 5×8B, NOT
+ *                                     ; the error code — SDM §6.14.5)
+ *   48 cf           iretq            ; return to user
+ *
+ * Stubs are laid out at 16-byte intervals within the handlers page
+ * (`KVM_V2_HANDLERS_GVA + (slot << 4)`); 8-byte stubs fit comfortably
+ * in the 16-byte slot. Trailing slot bytes are zero from __GFP_ZERO
+ * (dead code — iretq exits before they execute).
  *
  * Codex audit finding #4: NO `mov %cr2, %rax` here. v1's archive
  * removed that opcode at kvm-v1-archive/thread.c:1297-1308 because
@@ -167,20 +173,27 @@
  * the mmap on every exit when KVM_SYNC_X86_SREGS is set in
  * kvm_valid_regs at vcpu_create — vcpu.c:631-632).
  *
- * Wire-format bytes are byte-identical to the `out + iretq` shape
- * v1 used for its #PF handler at kvm-v1-archive/thread.c:1310-1314
- * (where v1 kept the trailing `iretq` after the `add $8, %rsp` to
- * pop the #PF error code). v2's stubs don't pop an error code:
- * non-error-code vectors (#DE/#BP/#OF/#UD) push only RIP/CS/RFLAGS
- * /RSP/SS, and error-code vectors (#PF/#GP) leave the error code on
- * stack — but Phase E.3's host-side dispatch reads error code from
- * sync-regs / KVM exit info, so the in-guest stub doesn't need to
- * pop it before iretq. (E.3 may revisit if iretq's frame shape
- * for the error-code case requires explicit `add $8, %rsp` in the
- * stub; deferring per spec.)
+ * E.5 fix: error-code stubs MUST `add $8, %rsp` before iretq.
+ * Earlier (E.1) shape "out + iretq" without the add corrupted iretq's
+ * pop sequence on #PF/#GP delivery: the CPU's pushed error_code
+ * remained at the bottom of the stack frame, so iretq popped it as
+ * RIP, popped the real RIP as CS, etc. Boot smoke under E.5 caught
+ * it as `segfault at 10 ip 0x10 sp 0x10002 error 10` in a
+ * single-RIP-stuck loop — RIP=0x10 is a #PF instruction-fetch error
+ * code, RSP=0x10002 has bit-16 RF set (RFLAGS during fault delivery).
+ * v1's archive at kvm-v1-archive/thread.c:1310-1314 had the explicit
+ * `add $8, %rsp ; iretq` for the same reason.
  */
-static const u8 kvm_v2_handler_stub_pf[]    = { 0xe6, UM_KVM_TRAP_PF,    0x48, 0xcf };
-static const u8 kvm_v2_handler_stub_gp[]    = { 0xe6, UM_KVM_TRAP_GP,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_pf[]    = {
+	0xe6, UM_KVM_TRAP_PF,			/* out %al, $port */
+	0x48, 0x83, 0xc4, 0x08,			/* add $8, %rsp */
+	0x48, 0xcf,				/* iretq */
+};
+static const u8 kvm_v2_handler_stub_gp[]    = {
+	0xe6, UM_KVM_TRAP_GP,			/* out %al, $port */
+	0x48, 0x83, 0xc4, 0x08,			/* add $8, %rsp */
+	0x48, 0xcf,				/* iretq */
+};
 static const u8 kvm_v2_handler_stub_ud[]    = { 0xe6, UM_KVM_TRAP_UD,    0x48, 0xcf };
 static const u8 kvm_v2_handler_stub_de[]    = { 0xe6, UM_KVM_TRAP_DE,    0x48, 0xcf };
 static const u8 kvm_v2_handler_stub_of[]    = { 0xe6, UM_KVM_TRAP_OF,    0x48, 0xcf };

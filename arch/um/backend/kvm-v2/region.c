@@ -119,10 +119,7 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 			   const struct um_memory_region *region)
 {
 	struct kvm_v2_vm *vm = kvm_v2_vm_get();
-	struct kvm_v2_memslot *existing;
-	struct kvm_userspace_memory_region kr;
-	int slot_id, rc;
-	u32 flags;
+	int rc;
 
 	if (!vm) {
 		pr_warn_ratelimited("um: kvm-v2 region_added: VM not initialised\n");
@@ -180,83 +177,45 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 	 * access_ok would be sugar that introduces false negatives.
 	 */
 
-	flags = (region->prot & UM_PROT_WRITE) ? 0 : KVM_MEM_READONLY;
-
 	/*
-	 * tlb.c surfaces "add" for both new mappings AND in-place
-	 * updates of existing ones (prot toggle, partial-range replace,
-	 * size grow / shrink). The seccomp stub-side helper handles
-	 * either via MAP_FIXED, but KVM's modify-existing-slot path is
-	 * strict: per virt/kvm/kvm_main.c:2079-2082, a same-slot-id
-	 * follow-up KVM_SET_USER_MEMORY_REGION rejects with -EINVAL if
-	 *   (a) userspace_addr changed,
-	 *   (b) npages changed (partial-range replace), or
-	 *   (c) the READONLY flag toggled (prot WRITE↔READ).
+	 * E.5 (Codex CLAIM C pull-forward, was deferred to Phase H):
+	 * skip per-region KVM_SET_USER_MEMORY_REGION. Slot 0 (gpa=0..
+	 * physmem_size, hva=uml_physmem) covers every UML physical page
+	 * — every UML PTE's PFN field is an offset into physmem_fd
+	 * (per phys_mapping at arch/um/kernel/physmem.c:146-156, fd =
+	 * physmem_fd, offset = phys for any phys < physmem_size, and
+	 * UML's buddy allocator hands out kvas inside the physmem
+	 * mmap so __pa(any kpage) < physmem_size by construction).
+	 * KVM TDP walks UML's pgd, gets the leaf's GPA from the PFN
+	 * field, resolves via slot 0 to HVA = uml_physmem + GPA = the
+	 * actual page. Per-region memslots at gpa=region->va add no
+	 * GPA→HVA coverage that slot 0 doesn't already provide.
 	 *
-	 * Both (b) and (c) fire under normal UML boot — boot smoke logs
-	 * showed -EINVAL on update paths from B.3-followup until D.0b.
+	 * Empirical motivation: the per-region DELETE+CREATE churn
+	 * (every user PTE change → tlb.c drain → here →
+	 * KVM_SET_USER_MEMORY_REGION) triggers KVM internal MMU
+	 * invalidate_zap that, while scoped per-slot in the TDP MMU
+	 * fast path, still racing-cohorts with the IDT-vectoring walk
+	 * leaves slot 0's PML4-page EPT entries un-refilled
+	 * (pf_taken=1, pf_fixed=0 in the loop). Dropping per-region
+	 * eliminates that source of EPT zap churn.
 	 *
-	 * Strategy: if a slot already exists for this gpa, treat the
-	 * incoming "add" as a delete-then-add. KVM's "memory_size = 0"
-	 * is the in-band delete syntax (line 2053-2061); after the
-	 * delete the same slot_id is reusable for a fresh CREATE with
-	 * the new len + flags. This sidesteps every modify-existing
-	 * invariant and matches what seccomp's MAP_FIXED already does
-	 * on its side. Symmetric on the spawner mm too: os_map_memory
-	 * with MAP_FIXED overlays cleanly.
+	 * The seccomp_mm_region_added call above stays (stub child may
+	 * still be used for spawning under R4); the os_map_memory
+	 * above stays (UML kernel still needs region->va mapped in its
+	 * own address space for copy_to_user / copy_from_user). Only
+	 * the KVM memslot side is dropped.
+	 *
+	 * READONLY: KVM_MEM_READONLY-via-per-region-slot is also
+	 * dropped, but UML's user PTE encodes R/W in its own bits
+	 * (post-912587c605d8 bit alignment with x86 hardware paging).
+	 * KVM's TDP walk reads those bits during the GVA→GPA
+	 * dimension and combines with slot 0's permissions; slot 0 is
+	 * RW (flags=0 at context.c:138), so the effective RW is
+	 * determined by UML's PTE bits — same protection as the
+	 * per-region path.
 	 */
-	existing = kvm_v2_memslot_lookup(vm, region->va);
-	if (existing) {
-		struct kvm_userspace_memory_region del = {
-			.slot		 = existing->slot_id,
-			.guest_phys_addr = region->va,
-			.memory_size	 = 0,	/* KVM's delete syntax */
-		};
-
-		rc = os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
-				      (unsigned long)&del);
-		if (rc < 0)
-			pr_warn_ratelimited("um: kvm-v2 region_added: pre-update DELETE(slot=%u va=%#lx) failed (%d)\n",
-					    existing->slot_id, region->va, rc);
-
-		slot_id = (int)existing->slot_id;
-		existing->size = region->len;
-		existing->flags = flags;
-	} else {
-		/*
-		 * Reserve list entry + slot id atomically
-		 * (kvm_v2_memslot_add does both under vm->lock). On
-		 * ioctl failure we unwind via kvm_v2_memslot_del so
-		 * neither the bitmap nor the list leak.
-		 */
-		slot_id = kvm_v2_memslot_add(vm, region->va, region->va,
-					     region->len, flags);
-		if (slot_id < 0) {
-			pr_warn_ratelimited("um: kvm-v2 region_added: memslot_add failed (%d) va=%#lx len=%#lx\n",
-					    slot_id, region->va, region->len);
-			return slot_id;
-		}
-	}
-
-	kr = (struct kvm_userspace_memory_region){
-		.slot		 = (u32)slot_id,
-		.flags		 = flags,
-		.guest_phys_addr = region->va,
-		.memory_size	 = region->len,
-		.userspace_addr	 = region->va,
-	};
-
-	rc = os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
-			      (unsigned long)&kr);
-	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm-v2 region_added: KVM_SET_USER_MEMORY_REGION(slot=%d va=%#lx len=%#lx flags=%#x) failed (%d)\n",
-				    slot_id, region->va, region->len, flags,
-				    rc);
-		if (!existing)
-			kvm_v2_memslot_del(vm, (u32)slot_id);
-		return rc;
-	}
-
+	(void)vm;
 	return 0;
 }
 
@@ -264,9 +223,6 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 			     const struct um_memory_region *region)
 {
 	struct kvm_v2_vm *vm = kvm_v2_vm_get();
-	struct kvm_v2_memslot *slot;
-	struct kvm_userspace_memory_region kr;
-	u32 slot_id;
 	int rc;
 
 	if (!vm) {
@@ -277,31 +233,18 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 		return -EINVAL;
 
 	/*
-	 * Look up our matching memslot by gpa (B.1's helper). On
-	 * miss the add either failed mid-way or never ran; either
-	 * way we still need to drop the spawner-side mapping + the
-	 * seccomp side, but skip the KVM-side teardown.
+	 * E.5 (Codex CLAIM C pull-forward): per-region memslot
+	 * teardown removed in lockstep with mm_region_added's drop.
+	 * Slot 0 (gpa=0..physmem_size) covers all UML physmem; no
+	 * per-region KVM memslot exists to remove. The os_unmap_memory
+	 * + seccomp_mm_region_removed steps below are still required:
+	 * UML kernel needs region->va dropped from its own address
+	 * space (no leak under map/unmap cycling), and the stub child
+	 * (still alive under R4 for spawning) needs to drop its copy
+	 * symmetrically.
 	 */
-	slot = kvm_v2_memslot_lookup(vm, region->va);
-	if (slot) {
-		slot_id = slot->slot_id;
 
-		kr = (struct kvm_userspace_memory_region){
-			.slot		 = slot_id,
-			.flags		 = 0,
-			.guest_phys_addr = region->va,
-			.memory_size	 = 0,	/* KVM's delete syntax */
-			.userspace_addr	 = region->va,
-		};
-
-		rc = os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
-				      (unsigned long)&kr);
-		if (rc < 0)
-			pr_warn_ratelimited("um: kvm-v2 region_removed: KVM_SET_USER_MEMORY_REGION(slot=%u memory_size=0) failed (%d)\n",
-					    slot_id, rc);
-
-		kvm_v2_memslot_del(vm, slot_id);
-	}
+	(void)vm;
 
 	/*
 	 * D.0b: drop the spawner-side mapping that mm_region_added

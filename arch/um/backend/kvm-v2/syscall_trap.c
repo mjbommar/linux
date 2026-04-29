@@ -826,26 +826,39 @@ static void kvm_v2_ist_frame_read(struct kvm_v2_vcpu *vcpu,
 				  bool has_error_code)
 {
 	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
-	int off = has_error_code ? 48 : 40;
 
+	/*
+	 * Per Intel SDM Vol.3 §6.14.5, the long-mode IDT-pushed frame
+	 * (with error code) lays out from bottom-of-frame upward:
+	 *   +0:  error_code (only present when the vector pushes one)
+	 *   +8:  RIP
+	 *   +16: CS  (sign-extended u16 + 6 padding bytes)
+	 *   +24: RFLAGS
+	 *   +32: RSP
+	 *   +40: SS  (sign-extended u16 + 6 padding bytes)
+	 * Without error code, RIP is at the bottom and the rest shifts
+	 * down by 8.
+	 *
+	 * E.5 fix: previous code used `off = has_error_code ? 48 : 40`
+	 * and read RIP at `(top - off) + 0`, which lands on the
+	 * error_code slot for has_error_code=true (every field shifted
+	 * by 8 — RIP picked up the error code, RSP picked up RFLAGS,
+	 * etc.). Boot smoke caught it: handle_io_pf saw RIP=0x10
+	 * (error code) and RSP=0x10002 (RFLAGS with bit-16 RF set
+	 * during #PF delivery). Use a fixed 40-byte "RIP-anchored"
+	 * frame and read the error code at -8 below it when present.
+	 */
 	f->has_error_code = has_error_code;
 	if (has_error_code)
 		f->error_code = *(u64 *)(top - 48);
 	else
 		f->error_code = 0;
 
-	/*
-	 * Frame field positions are computed from the BOTTOM of the
-	 * pushed frame (= top - off). With error code: bottom is at
-	 * top - 48, RIP at +0 from bottom, CS at +8, RFLAGS +16, RSP
-	 * +24, SS +32. Without error code: bottom is at top - 40,
-	 * same field offsets relative to bottom.
-	 */
-	f->user_rip    = *(u64 *)(top - off + 0);
-	f->user_cs     = *(u64 *)(top - off + 8);
-	f->user_rflags = *(u64 *)(top - off + 16);
-	f->user_rsp    = *(u64 *)(top - off + 24);
-	f->user_ss     = *(u64 *)(top - off + 32);
+	f->user_rip    = *(u64 *)(top - 40 +  0);
+	f->user_cs     = *(u64 *)(top - 40 +  8);
+	f->user_rflags = *(u64 *)(top - 40 + 16);
+	f->user_rsp    = *(u64 *)(top - 40 + 24);
+	f->user_ss     = *(u64 *)(top - 40 + 32);
 }
 
 /*
@@ -864,14 +877,21 @@ static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
 				   bool has_error_code)
 {
 	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
-	int off = has_error_code ? 48 : 40;
 
-	*(u64 *)(top - off + 0)  = regs->gp[HOST_IP];      /* RIP */
-	/* CS at top - off + 8 stays. */
-	*(u64 *)(top - off + 16) = regs->gp[HOST_EFLAGS];  /* RFLAGS */
-	*(u64 *)(top - off + 24) = regs->gp[HOST_SP];      /* RSP */
-	/* SS at top - off + 32 stays. */
-	/* error_code at top - 48 stays — popped+discarded by iretq. */
+	(void)has_error_code;
+
+	/*
+	 * Layout matches kvm_v2_ist_frame_read: RIP-anchored frame
+	 * starts at top - 40 regardless of whether the vector pushed
+	 * an error code. The error code (when present) lives at
+	 * top - 48 and is popped+discarded by the in-guest iretq;
+	 * we leave that slot alone.
+	 */
+	*(u64 *)(top - 40 +  0) = regs->gp[HOST_IP];      /* RIP */
+	/* CS at top - 40 +  8 stays. */
+	*(u64 *)(top - 40 + 16) = regs->gp[HOST_EFLAGS];  /* RFLAGS */
+	*(u64 *)(top - 40 + 24) = regs->gp[HOST_SP];      /* RSP */
+	/* SS at top - 40 + 32 stays. */
 }
 
 /*
