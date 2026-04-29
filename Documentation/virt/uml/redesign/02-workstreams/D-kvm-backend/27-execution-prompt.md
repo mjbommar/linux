@@ -707,14 +707,29 @@ Before EACH new work session:
 
 ### H.1 — Build commands
 
-```bash
-# Standard build
-make ARCH=um O=/tmp/uml-kvmint -j$(nproc)
+**Build dir convention (corrected 2026-04-29):** put kbuild output
+under `~/src/uml-builds/` (or any path on `/`), NOT `/tmp`. `/tmp` is
+tmpfs (typically 14GB, shared with the rest of the host); UML
+builds are ~700MB each and tmpfs filling up silently breaks the
+shell tooling stdout capture mid-session. The historical `/tmp/uml-*`
+paths in older memos are obsolete; treat them as legacy aliases.
 
-# Clean build (rare; use when refactors change config)
-rm -rf /tmp/uml-kvmint
-make ARCH=um O=/tmp/uml-kvmint defconfig
-make ARCH=um O=/tmp/uml-kvmint -j$(nproc)
+```bash
+# Standard build (default config: WORKER_PROCESS=y, V2=n)
+make ARCH=um O=$HOME/src/uml-builds/uml-clean -j$(nproc)
+
+# v2-enabled build
+mkdir -p $HOME/src/uml-builds/uml-kvmint
+make ARCH=um O=$HOME/src/uml-builds/uml-kvmint defconfig
+scripts/config --file $HOME/src/uml-builds/uml-kvmint/.config \
+  -e UM_BACKEND_KVM_V2 -e EXPERT
+make ARCH=um O=$HOME/src/uml-builds/uml-kvmint olddefconfig
+make ARCH=um O=$HOME/src/uml-builds/uml-kvmint -j$(nproc)
+
+# Clean rebuild (rare; use when refactors change Kconfig)
+rm -rf $HOME/src/uml-builds/uml-clean
+make ARCH=um O=$HOME/src/uml-builds/uml-clean defconfig
+make ARCH=um O=$HOME/src/uml-builds/uml-clean -j$(nproc)
 ```
 
 ### H.2 — Test commands

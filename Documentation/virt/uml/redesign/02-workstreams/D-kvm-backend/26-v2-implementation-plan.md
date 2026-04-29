@@ -135,7 +135,7 @@ adding memslots per backing-file region.
   (typically 32768).
 - ftrace: `TRACE_EVENT(kvm_v2_memslot_add/del)`.
 
-### B.2 — Backend op `mm_region_added` → `KVM_SET_USER_MEMORY_REGION add` (3 days)
+### B.2 — Backend op `mm_region_added` → `KVM_SET_USER_MEMORY_REGION add` (DONE — `fd9df1834e8a` + cap-flag followup `40a97b5f3b72`)
 
 - Allocate a slot id from the per-mm worker's bitmap (Phase D's worker
   process owns the bitmap; for now use per-VM until the worker model
