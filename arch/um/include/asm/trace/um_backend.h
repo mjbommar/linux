@@ -371,6 +371,25 @@ TRACE_EVENT(um_backend_kvm_v2_msr_program,
 );
 
 /*
+ * kvm_v2_sregs_install — fired when long-mode SREGS (CS/DS/SS/CR0/
+ * CR4/EFER) are programmed at vcpu_create_one. D.5-fix landed this
+ * after diagnosing that the sync-regs mmap is zero on first dispatch
+ * and KVM_RUN returns -EINVAL because kvm_is_valid_sregs rejects
+ * EFER.LMA=1 with CR0.PG=0. One event per pool member at create.
+ */
+TRACE_EVENT(um_backend_kvm_v2_sregs_install,
+	TP_PROTO(int vcpu_fd),
+	TP_ARGS(vcpu_fd),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd = vcpu_fd;
+	),
+	TP_printk("vcpu_fd=%d", __entry->vcpu_fd)
+);
+
+/*
  * kvm_v2_trampoline_install — fired when the per-VM LSTAR trampoline
  * page (memo 26 §D.1) is allocated and the 5 SYSCALL-trap bytes
  * (out %al, $0xf4 / sysretq) are written. gpa is __pa(host page); gva

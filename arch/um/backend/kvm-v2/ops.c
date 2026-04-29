@@ -66,7 +66,24 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.probe			= kvm_v2_probe,
 	.init			= kvm_v2_init,
 	.shutdown		= kvm_v2_shutdown,
-	.vcpu_run		= seccomp_vcpu_run,	/* HOT — A.3+B+C */
+	/*
+	 * D.5: flip the pointer. C.2-C.4 built kvm_v2_vcpu_run on the
+	 * side; D.0-D.4b populated CPUID, MSR_LSTAR/STAR/FMASK, EFER.SCE,
+	 * the trampoline page, the physmem memslot, the PML4[448]
+	 * kernel-half PT chain, and full long-mode SREGS (D.5-fix).
+	 * With this flip, every UML guest task's SYSCALL goes through
+	 * KVM_RUN → KVM_EXIT_IO → handle_syscall.
+	 *
+	 * The capability flags above stay TRUE because the stub child is
+	 * still spawned by seccomp_mm_create / mm_attach (v2 only owns
+	 * .vcpu_run + memslot ops + context_switch right now). Even
+	 * under v2, the stub child still installs its seccomp filter;
+	 * its SIGSYS handler just never fires because no syscall traps
+	 * to it any more — they all go through KVM. A future phase that
+	 * REPLACES seccomp_mm_create / mm_attach / thread_create with
+	 * v2-native equivalents will flip those flags to false.
+	 */
+	.vcpu_run		= kvm_v2_vcpu_run,	/* HOT — D.5 */
 
 	/* Memory (5) — A.2 + Phase B */
 	.mm_create		= seccomp_mm_create,

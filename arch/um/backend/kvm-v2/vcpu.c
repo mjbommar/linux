@@ -49,6 +49,8 @@
 #include <asm/msr-index.h>	/* MSR_LSTAR / MSR_STAR / MSR_SYSCALL_MASK,
 				 * EFER_SCE / EFER_LME / EFER_LMA / EFER_NX */
 #include <asm/page.h>
+#include <asm/processor-flags.h>	/* X86_CR0_*, X86_CR4_* (D.5-fix
+					 * install_production_sregs) */
 
 #include <os.h>
 #include <sysdep/ptrace.h>
@@ -385,6 +387,139 @@ static int kvm_v2_vcpu_program_msrs(int vcpu_fd)
 }
 
 /*
+ * D.5-fix: install full long-mode SREGS once per pool member.
+ *
+ * Diagnosed by opus subagent + codex --search audit (2026-04-29):
+ * the original D.5 flip caused KVM_RUN to return -EINVAL with
+ * exit_reason=0 because the sync-regs mmap (kvm_run->s.regs.sregs)
+ * is zero-initialised on first dispatch. KVM only populates that
+ * mmap via store_regs() AFTER an exit (`arch/x86/kvm/x86.c:12748-
+ * 12761`), so on first KVM_RUN no exit has happened yet and CS / DS
+ * / SS / TR / LDT / CR0 / CR4 all read as zero.
+ *
+ * load_user_sregs's KVM_SYNC_X86_SREGS dirty bit ships those zeros
+ * back through __set_sregs, and `kvm_is_valid_sregs` at
+ * `arch/x86/kvm/x86.c:12426-12449` rejects: with EFER.LMA=1 (we set
+ * it) and CR0.PG=0 (we never set it), the validator's "Not in
+ * 64-bit mode" branch fires and returns false — propagated as
+ * -EINVAL up through `sync_regs` → `kvm_arch_vcpu_ioctl_run`. Note
+ * `exit_reason` stays at its mmap-default 0 (KVM_EXIT_UNKNOWN)
+ * because guest entry never happened.
+ *
+ * Mirrors v1's KVM_GET_SREGS → overlay → KVM_SET_SREGS pattern at
+ * kvm-v1-archive/thread.c:2843-2913 and kvm-v1-archive/sregs.c:
+ * 219-304. GET first so KVM-default TR / LDT / APIC stay (they
+ * went through KVM's reset path which is valid for VMX entry under
+ * unrestricted-guest mode + KVM_SET_TSS_ADDR's already-set
+ * trampoline TSS); overlay long-mode CS (L=1, ring-0 selector
+ * 0x08, base=0, limit=0xffffffff, type=0xb=ER+A) + DS/SS/ES/FS/GS
+ * (32-bit data, ring-0 0x10, base=0, limit=0xffffffff, type=0x3=
+ * RW+A) + CR0 (PE|MP|NE|WP|PG) + CR4 (PAE|OSFXSR|OSXMMEXCPT) +
+ * EFER (SCE|LME|LMA|NX); SET back via real ioctl.
+ *
+ * Critical: also seed the sync-regs mmap with the same struct so
+ * the FIRST dispatch's KVM_SYNC_X86_SREGS write doesn't ship zero
+ * CR0/segments back through __set_sregs. KVM normally populates
+ * the mmap on exit via store_regs; we hand-seed it here to bridge
+ * the gap before the first exit happens. After the first exit,
+ * store_regs naturally refreshes the mmap, and the per-dispatch
+ * load_user_sregs sync-regs path becomes safe.
+ *
+ * Notes for future phases:
+ *  - GDT/IDT base remain zero. v2's trampoline (out %al,$0xf4 ;
+ *    sysretq) doesn't touch the GDT or fault into the IDT. Phase E
+ *    must install a real GDT + IDT before #PF/#GP/#UD vectoring
+ *    lands.
+ *  - TR/LDT inherit KVM-reset defaults via KVM_GET_SREGS. KVM_SET_
+ *    TSS_ADDR (already issued at vm_create) suppresses VMX's
+ *    null-TR rejection under unrestricted-guest mode.
+ *  - The per-dispatch EFER overwrite in kvm_v2_load_user_sregs
+ *    becomes redundant with the create-time install. Harmless;
+ *    Phase H can hoist it.
+ */
+static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
+{
+	struct kvm_run *run;
+	struct kvm_sregs sregs;
+	const struct kvm_segment code = {
+		.base    = 0,
+		.limit   = 0xffffffff,
+		.selector = 0x08,
+		.type    = 0xb,		/* ER + A */
+		.present = 1,
+		.dpl     = 0,
+		.db      = 0,		/* L=1 supersedes db */
+		.s       = 1,		/* code/data */
+		.l       = 1,		/* 64-bit */
+		.g       = 1,
+	};
+	const struct kvm_segment data = {
+		.base    = 0,
+		.limit   = 0xffffffff,
+		.selector = 0x10,
+		.type    = 0x3,		/* RW + A */
+		.present = 1,
+		.dpl     = 0,
+		.db      = 1,
+		.s       = 1,
+		.l       = 0,
+		.g       = 1,
+	};
+	int rc;
+
+	if (!v || v->vcpu_fd < 0 || !v->kvm_run)
+		return -EINVAL;
+
+	rc = os_ioctl_generic(v->vcpu_fd, KVM_GET_SREGS, (unsigned long)&sregs);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 install_sregs: KVM_GET_SREGS(vcpu_fd=%d) failed (%d)\n",
+		       v->vcpu_fd, rc);
+		return rc;
+	}
+
+	sregs.cs = code;
+	sregs.ds = sregs.es = sregs.fs = sregs.gs = sregs.ss = data;
+
+	sregs.cr0  = X86_CR0_PE | X86_CR0_MP | X86_CR0_NE |
+		     X86_CR0_WP | X86_CR0_PG;
+	sregs.cr4  = X86_CR4_PAE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT;
+	sregs.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
+	/*
+	 * CR3 is set per-dispatch via load_user_sregs's sync-regs
+	 * write. Leave whatever GET returned (typically 0 on a fresh
+	 * vCPU). The first dispatch's load_user_sregs writes the real
+	 * cr3 + dirties KVM_SYNC_X86_SREGS — validation passes because
+	 * by then CR0.PG is already 1 from this install.
+	 */
+
+	rc = os_ioctl_generic(v->vcpu_fd, KVM_SET_SREGS, (unsigned long)&sregs);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 install_sregs: KVM_SET_SREGS(vcpu_fd=%d) failed (%d)\n",
+		       v->vcpu_fd, rc);
+		return rc;
+	}
+
+	/*
+	 * Seed the sync-regs mmap so the first dispatch's
+	 * load_user_sregs's KVM_SYNC_X86_SREGS write doesn't ship zero
+	 * CR0/CR4/segments back to __set_sregs. KVM populates this on
+	 * exit via store_regs (`arch/x86/kvm/x86.c:12748-12761`); we
+	 * hand-seed before the first entry to bridge that gap.
+	 */
+	run = v->kvm_run;
+	run->s.regs.sregs = sregs;
+
+	pr_info("um: kvm-v2 install_sregs: vcpu_fd=%d cr0=%#llx cr4=%#llx efer=%#llx cs.l=%u\n",
+		v->vcpu_fd,
+		(unsigned long long)sregs.cr0,
+		(unsigned long long)sregs.cr4,
+		(unsigned long long)sregs.efer,
+		sregs.cs.l);
+	trace_um_backend_kvm_v2_sregs_install(v->vcpu_fd);
+	return 0;
+}
+
+/*
  * Build a single pool member. Returns 0 on success or a negative errno
  * on failure; the caller (kvm_v2_vcpu_create) tears down already-built
  * entries on partial failure. KVM_CREATE_VCPU's id argument is the
@@ -460,6 +595,19 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	 * dispatcher.
 	 */
 	rc = kvm_v2_vcpu_program_msrs(vcpu_fd);
+	if (rc < 0)
+		goto err_unmap_kvm_run;
+
+	/*
+	 * D.5-fix: install full long-mode SREGS (CS/DS/SS/CR0/CR4/EFER)
+	 * BEFORE first KVM_RUN. Without this the first dispatch returns
+	 * -EINVAL because kvm_is_valid_sregs (arch/x86/kvm/x86.c:
+	 * 12426-12449) rejects EFER.LMA=1 with CR0.PG=0 — the mmap is
+	 * zero-init except for the four fields load_user_sregs writes,
+	 * and store_regs only populates it after a successful exit.
+	 * See helper header for full diagnosis.
+	 */
+	rc = kvm_v2_install_production_sregs(v);
 	if (rc < 0)
 		goto err_unmap_kvm_run;
 
