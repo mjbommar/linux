@@ -290,6 +290,21 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	v->kvm_run_size = (u32)mmap_size;
 	v->cpu          = cpu;
 
+	/*
+	 * Phase C.3: enable KVM_CAP_SYNC_REGS for this vCPU. With
+	 * kvm_valid_regs set at create time, every subsequent KVM_RUN
+	 * populates kvm_run->s.regs.{regs,sregs} into the mmap'd struct
+	 * on exit; kvm_v2_marshal_from_kvm_regs / kvm_v2_load_user_sregs
+	 * reads/writes against that mmap directly, eliminating four
+	 * ioctls per dispatch (KVM_GET_REGS / KVM_SET_REGS / KVM_GET_SREGS
+	 * / KVM_SET_SREGS) in favor of `kvm_dirty_regs` flips.
+	 *
+	 * KVM_CAP_SYNC_REGS is required-cap in init.c (bit 0 of caps);
+	 * this assignment is structural rather than conditional.
+	 */
+	((struct kvm_run *)kvm_run)->kvm_valid_regs =
+		KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS;
+
 	trace_um_backend_kvm_v2_vcpu_create(vcpu_fd, v->kvm_run_size);
 	return 0;
 
@@ -475,28 +490,30 @@ int kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd)
  *
  * Returns 0 on success or a negative errno on ioctl failure.
  */
+/*
+ * C.3: with KVM_CAP_SYNC_REGS enabled at vcpu create, the mmap'd
+ * kvm_run->s.regs.sregs is authoritative on entry (KVM populated
+ * it on the prior exit). Modify cr3/fs.base/gs.base in place and
+ * mark KVM_SYNC_X86_SREGS in kvm_dirty_regs so KVM consumes the
+ * update on the next KVM_RUN. No ioctls.
+ *
+ * Returns 0 always today — kept as int for forward compat with a
+ * future per-CPU SYNC_REGS check should we ever want to support
+ * hosts where the cap is partial.
+ */
 static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 				  unsigned long pgd_pa,
 				  unsigned long fs_base,
 				  unsigned long gs_base)
 {
-	struct kvm_sregs sregs;
-	int rc;
+	struct kvm_run *run = vcpu->kvm_run;
+	struct kvm_sregs *sregs = &run->s.regs.sregs;
 
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
-			      (unsigned long)&sregs);
-	if (rc < 0)
-		return rc;
+	sregs->cr3     = (u64)pgd_pa;
+	sregs->fs.base = (u64)fs_base;
+	sregs->gs.base = (u64)gs_base;
 
-	sregs.cr3       = (u64)pgd_pa;
-	sregs.fs.base   = (u64)fs_base;
-	sregs.gs.base   = (u64)gs_base;
-
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
-			      (unsigned long)&sregs);
-	if (rc < 0)
-		return rc;
-
+	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 	return 0;
 }
 
@@ -600,7 +617,7 @@ static void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
 void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 {
 	struct kvm_v2_vcpu *vcpu;
-	struct kvm_regs kregs;
+	struct kvm_run *run;
 	int cpu, rc;
 	u32 exit_reason;
 
@@ -620,36 +637,38 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		return;
 	}
 
-	rc = kvm_v2_load_user_sregs(vcpu,
-				    __pa(current->active_mm->pgd),
-				    regs->gp[HOST_FS_BASE],
-				    regs->gp[HOST_GS_BASE]);
-	if (rc < 0)
-		panic("kvm-v2: load_user_sregs(cpu=%d) failed: %d", cpu, rc);
+	run = vcpu->kvm_run;
 
-	memset(&kregs, 0, sizeof(kregs));
-	kvm_v2_marshal_to_kvm_regs(&kregs, regs);
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_REGS,
-			      (unsigned long)&kregs);
-	if (rc < 0)
-		panic("kvm-v2: KVM_SET_REGS(cpu=%d) failed: %d", cpu, rc);
+	(void)kvm_v2_load_user_sregs(vcpu,
+				     __pa(current->active_mm->pgd),
+				     regs->gp[HOST_FS_BASE],
+				     regs->gp[HOST_GS_BASE]);
 
-	trace_um_backend_kvm_v2_vcpu_enter(cpu, vcpu->kvm_run);
+	/*
+	 * C.3: write GPRs into the mmap'd kvm_run->s.regs.regs and mark
+	 * KVM_SYNC_X86_REGS in kvm_dirty_regs. KVM consumes both
+	 * (kvm_dirty_regs and the dirty s.regs fields) on entry.
+	 */
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	trace_um_backend_kvm_v2_vcpu_enter(cpu, run);
 
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
 
-	exit_reason = ((struct kvm_run *)vcpu->kvm_run)->exit_reason;
+	exit_reason = run->exit_reason;
 	trace_um_backend_kvm_v2_vcpu_exit(cpu, exit_reason);
 
 	if (rc < 0)
 		panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
 		      cpu, rc, exit_reason);
 
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
-			      (unsigned long)&kregs);
-	if (rc < 0)
-		panic("kvm-v2: KVM_GET_REGS(cpu=%d) failed: %d", cpu, rc);
-	kvm_v2_marshal_from_kvm_regs(regs, &kregs);
+	/*
+	 * C.3: post-exit, KVM populated kvm_run->s.regs.{regs,sregs}
+	 * because kvm_valid_regs was set at vcpu_create. Marshal GPRs
+	 * back from the mmap'd struct.
+	 */
+	kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
 
 	switch (exit_reason) {
 	case KVM_EXIT_HLT:
