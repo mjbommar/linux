@@ -390,6 +390,29 @@ TRACE_EVENT(um_backend_kvm_v2_sregs_install,
 );
 
 /*
+ * kvm_v2_sigmask_install — fired when KVM_SET_SIGNAL_MASK
+ * (sigfillset minus SIGALRM) is programmed at vcpu_create_one.
+ * D.5-fix-2 landed this after the .vcpu_run flip + sregs install
+ * (D.5-fix-1) surfaced a SIGALRM EINTR loop: UML's HZ=100 timer
+ * fires before the guest can make progress, and without an installed
+ * sigmask + post-KVM_RUN unblock_signals() the deferred-signal queue
+ * stays armed and re-EINTRs on every dispatch. Mirrors v1's pattern
+ * at kvm-v1-archive/thread.c:71-124. One event per pool member at
+ * create. Per memo 27 §B.9: observability lands with the helper.
+ */
+TRACE_EVENT(um_backend_kvm_v2_sigmask_install,
+	TP_PROTO(int vcpu_fd),
+	TP_ARGS(vcpu_fd),
+	TP_STRUCT__entry(
+		__field(int, vcpu_fd)
+	),
+	TP_fast_assign(
+		__entry->vcpu_fd = vcpu_fd;
+	),
+	TP_printk("vcpu_fd=%d", __entry->vcpu_fd)
+);
+
+/*
  * kvm_v2_trampoline_install — fired when the per-VM LSTAR trampoline
  * page (memo 26 §D.1) is allocated and the 5 SYSCALL-trap bytes
  * (out %al, $0xf4 / sysretq) are written. gpa is __pa(host page); gva

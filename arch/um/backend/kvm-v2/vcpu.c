@@ -41,6 +41,8 @@
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
 #include <linux/sched.h>
+#include <linux/signal.h>	/* sigset_t / sigfillset / sigdelset / SIGALRM
+				 * (D.5-fix-2 install_signal_mask) */
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/threads.h>
@@ -520,6 +522,57 @@ static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
 }
 
 /*
+ * D.5-fix-2: install per-vCPU signal mask before first KVM_RUN.
+ *
+ * Symptom that drove this: under D.5-fix-1's tip, KVM_RUN succeeded
+ * (no -EINVAL — SREGS install fixed that) but every dispatch
+ * immediately returned -EINTR because UML's HZ=100 timer (SIGALRM
+ * SI_TIMER) fires before the guest can make any progress, and v2
+ * had not yet installed KVM_SET_SIGNAL_MASK to (a) keep SIGALRM
+ * unblocked so it CAN preempt KVM_RUN — that's the desired
+ * preemption — and (b) block every OTHER host signal so they don't
+ * longjmp UML kernel code mid-KVM_RUN ioctl. Without (b) the queue
+ * stays armed and we re-EINTR on every entry; with (b) only the
+ * timer interrupts and the guest gets a full tick slice.
+ *
+ * Body verbatim from v1's pattern at kvm-v1-archive/thread.c:71-124.
+ * v2 omits KVM_UM_KICK_SIGNAL — TDP + mmu_notifier handle cross-vCPU
+ * coherence, so the SMP eviction primitive v1 reserved isn't needed
+ * (memo 26 §F.1).
+ */
+static int kvm_v2_install_signal_mask(int vcpu_fd)
+{
+	struct {
+		__u32 len;
+		__u8  sigset[sizeof(sigset_t)];
+	} __packed mask = {
+		.len = sizeof(sigset_t),
+	};
+	sigset_t set;
+	int rc;
+
+	sigfillset(&set);
+	sigdelset(&set, SIGALRM);  /* timer-driven preemption — see v1 */
+	/*
+	 * v2 doesn't need KVM_UM_KICK_SIGNAL — TDP + mmu_notifier handle
+	 * cross-vCPU coherence. memo 26 §F.1.
+	 */
+	memcpy(mask.sigset, &set, sizeof(sigset_t));
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SIGNAL_MASK,
+			      (unsigned long)&mask);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 install_sigmask: KVM_SET_SIGNAL_MASK(vcpu_fd=%d) failed (%d)\n",
+		       vcpu_fd, rc);
+		return rc;
+	}
+	pr_info("um: kvm-v2 install_sigmask: vcpu_fd=%d (sigfillset minus SIGALRM)\n",
+		vcpu_fd);
+	trace_um_backend_kvm_v2_sigmask_install(vcpu_fd);
+	return 0;
+}
+
+/*
  * Build a single pool member. Returns 0 on success or a negative errno
  * on failure; the caller (kvm_v2_vcpu_create) tears down already-built
  * entries on partial failure. KVM_CREATE_VCPU's id argument is the
@@ -608,6 +661,22 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	 * See helper header for full diagnosis.
 	 */
 	rc = kvm_v2_install_production_sregs(v);
+	if (rc < 0)
+		goto err_unmap_kvm_run;
+
+	/*
+	 * D.5-fix-2: install per-vCPU signal mask. Block every host
+	 * signal except SIGALRM at KVM_RUN entry; v1 archive at
+	 * kvm-v1-archive/thread.c:71-124 documents the rationale (SIGALRM
+	 * MUST stay unblocked so the timer tick can preempt CPU-bound
+	 * guests; everything else MUST be blocked so unrelated host
+	 * signal handlers don't longjmp into UML kernel mid-ioctl).
+	 *
+	 * Without this, the .vcpu_run flip from D.5-fix-1 makes guest
+	 * progress impossible: every dispatch EINTRs because the deferred-
+	 * signal queue stays armed and re-fires on every entry.
+	 */
+	rc = kvm_v2_install_signal_mask(vcpu_fd);
 	if (rc < 0)
 		goto err_unmap_kvm_run;
 
@@ -1046,6 +1115,23 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	trace_um_backend_kvm_v2_vcpu_enter(cpu, run);
 
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+
+	/*
+	 * D.5-fix-2: drain UML's deferred-signal queue. v1 archive does
+	 * this at kvm-v1-archive/thread.c:3979 — without it, SIGALRM-
+	 * handler-deferred work (timer tick processing, scheduler yields,
+	 * etc.) stays queued and we re-EINTR on every dispatch.
+	 * unblock_signals lets UML's signal handler run productively
+	 * before we either panic, fall through to the EINTR return, or
+	 * dispatch the exit reason.
+	 *
+	 * Symmetric: signals are blocked at the host-thread level during
+	 * KVM_RUN via KVM_SET_SIGNAL_MASK (kvm_v2_install_signal_mask at
+	 * vcpu_create); SIGALRM is the one exception (timer preemption).
+	 * On EINTR-from-SIGALRM, the host signal handler queued work via
+	 * UML's irqflags machinery; unblock_signals here drains it.
+	 */
+	unblock_signals();
 
 	exit_reason = run->exit_reason;
 	trace_um_backend_kvm_v2_vcpu_exit(cpu, exit_reason);
