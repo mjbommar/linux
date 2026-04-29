@@ -28,6 +28,7 @@
 #include <linux/types.h>
 
 struct kvm_run;
+struct kvm_v2_vcpu;
 struct kvm_v2_vm;
 struct uml_pt_regs;
 
@@ -244,24 +245,38 @@ int  kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm);
 void kvm_v2_trampoline_free(struct kvm_v2_vm *vm);
 
 /*
- * D.2: KVM_EXIT_IO dispatch. Called from kvm_v2_vcpu_run's exit-reason
- * switch when the guest trapped via the LSTAR trampoline's
- * `out %al, $0xf4`. `regs` is already populated by C.3's sync-regs
- * marshal (vcpu.c:kvm_v2_marshal_from_kvm_regs); `run` is the mmap'd
- * shared struct kvm_run for the firing vCPU; `vcpu_fd` is reserved
- * for D.3's marshal-out path (it currently goes unread inside the
- * helper). Returns 0 on success, -ENOTSUPP on an unexpected port
- * (caller should panic — other ports are Phase E's territory). Direct
- * panics inside handle_syscall surface as themselves.
+ * D.2 + E.3: KVM_EXIT_IO dispatch. Called from kvm_v2_vcpu_run's
+ * exit-reason switch when the guest trapped on any I/O port.
+ * Today (post-E.3) the port set is:
  *
- * The helper is unreferenced from any production .vcpu_run path
- * today — ops.c still routes to seccomp_vcpu_run; D.5 flips the
- * pointer. The case-arm in vcpu.c that calls this helper is wired,
- * but kvm_v2_vcpu_run itself has no caller until D.5.
+ *   UM_KVM_TRAP_SYSCALL (0xf4) — D.2 handle_syscall path.
+ *   UM_KVM_TRAP_PF      (0xf6) — E.3 page-fault dispatcher.
+ *   UM_KVM_TRAP_GP      (0xf9) — E.3 general-protection dispatcher.
+ *   UM_KVM_TRAP_UD      (0xfa) — E.3 undefined-opcode dispatcher.
+ *   UM_KVM_TRAP_DE      (0xfb) — E.3 divide-error dispatcher.
+ *   UM_KVM_TRAP_OF      (0xfc) — E.3 overflow dispatcher.
+ *   UM_KVM_TRAP_PANIC   (0xf8) + any other — E.3 panic stub.
+ *
+ * `regs` is already populated by C.3's sync-regs marshal
+ * (vcpu.c:kvm_v2_marshal_from_kvm_regs); `run` is the mmap'd shared
+ * struct kvm_run for the firing vCPU. `vcpu` is the per-host-CPU
+ * pool member — E.3's exception dispatchers read vcpu->ist_stack_kva
+ * to extract the long-mode iretq frame the CPU pushed onto the IST
+ * stack. The signature was widened from `int vcpu_fd` to
+ * `struct kvm_v2_vcpu *vcpu` at E.3 because the IST stack KVA
+ * lives on the per-vCPU struct (E.2 added it).
+ *
+ * Returns 0 on success, -EINVAL if vcpu is NULL. Panic-on-unknown-
+ * port lives inside the panic dispatcher.
+ *
+ * The helper still has no production .vcpu_run caller — ops.c still
+ * routes to seccomp_vcpu_run; E.3.5 flips the pointer. The case-arm
+ * in vcpu.c that calls this helper is wired, but kvm_v2_vcpu_run
+ * itself has no caller until E.3.5.
  */
 int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 			  struct kvm_run *run,
-			  int vcpu_fd);
+			  struct kvm_v2_vcpu *vcpu);
 
 /*
  * Phase E.1 (memo 26 §E.1): install the IDT + handler stubs + GDT in

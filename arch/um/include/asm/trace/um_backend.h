@@ -622,6 +622,95 @@ TRACE_EVENT(um_backend_kvm_v2_per_vcpu_ist_tss_install,
 		  __entry->tss_gva)
 );
 
+/*
+ * Phase E.3 (memo 26 §E.3): per-class exception dispatch tracepoints.
+ *
+ * Fired once per KVM_EXIT_IO that lands on an exception-class port.
+ * Until E.3.5 flips ops.vcpu_run away from seccomp these events have
+ * no caller — kvm_v2_vcpu_run is unreferenced from production paths.
+ * Per memo 27 §B.9 observability lands with the helper, not after it
+ * earns a caller.
+ *
+ * Each event captures the user-state-at-fault from the IST iretq
+ * frame; #PF and #GP additionally carry the CPU-pushed error_code
+ * (and #PF carries CR2 from sync-regs sregs.cr2). The panic event
+ * carries the run->io.port so a tracer can correlate the unhandled
+ * vector at panic time.
+ */
+TRACE_EVENT(um_backend_kvm_v2_iotrap_pf,
+	TP_PROTO(u64 cr2, u64 error_code, u64 user_rip),
+	TP_ARGS(cr2, error_code, user_rip),
+	TP_STRUCT__entry(
+		__field(u64, cr2)
+		__field(u64, error_code)
+		__field(u64, user_rip)
+	),
+	TP_fast_assign(
+		__entry->cr2        = cr2;
+		__entry->error_code = error_code;
+		__entry->user_rip   = user_rip;
+	),
+	TP_printk("cr2=%#llx ec=%#llx user_rip=%#llx",
+		  __entry->cr2, __entry->error_code, __entry->user_rip)
+);
+
+TRACE_EVENT(um_backend_kvm_v2_iotrap_gp,
+	TP_PROTO(u64 error_code, u64 user_rip),
+	TP_ARGS(error_code, user_rip),
+	TP_STRUCT__entry(
+		__field(u64, error_code)
+		__field(u64, user_rip)
+	),
+	TP_fast_assign(
+		__entry->error_code = error_code;
+		__entry->user_rip   = user_rip;
+	),
+	TP_printk("ec=%#llx user_rip=%#llx",
+		  __entry->error_code, __entry->user_rip)
+);
+
+DECLARE_EVENT_CLASS(um_backend_kvm_v2_iotrap_no_ec,
+	TP_PROTO(u64 user_rip),
+	TP_ARGS(user_rip),
+	TP_STRUCT__entry(
+		__field(u64, user_rip)
+	),
+	TP_fast_assign(
+		__entry->user_rip = user_rip;
+	),
+	TP_printk("user_rip=%#llx", __entry->user_rip)
+);
+
+DEFINE_EVENT(um_backend_kvm_v2_iotrap_no_ec, um_backend_kvm_v2_iotrap_ud,
+	TP_PROTO(u64 user_rip),
+	TP_ARGS(user_rip)
+);
+
+DEFINE_EVENT(um_backend_kvm_v2_iotrap_no_ec, um_backend_kvm_v2_iotrap_de,
+	TP_PROTO(u64 user_rip),
+	TP_ARGS(user_rip)
+);
+
+DEFINE_EVENT(um_backend_kvm_v2_iotrap_no_ec, um_backend_kvm_v2_iotrap_of,
+	TP_PROTO(u64 user_rip),
+	TP_ARGS(user_rip)
+);
+
+TRACE_EVENT(um_backend_kvm_v2_iotrap_panic,
+	TP_PROTO(u16 port, u64 user_rip),
+	TP_ARGS(port, user_rip),
+	TP_STRUCT__entry(
+		__field(u16, port)
+		__field(u64, user_rip)
+	),
+	TP_fast_assign(
+		__entry->port     = port;
+		__entry->user_rip = user_rip;
+	),
+	TP_printk("port=%#x user_rip=%#llx",
+		  __entry->port, __entry->user_rip)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

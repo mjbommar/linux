@@ -1353,18 +1353,21 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	switch (exit_reason) {
 	case KVM_EXIT_IO:
 		/*
-		 * D.2: IO-port exit. The LSTAR trampoline (D.1) issues
-		 * `out %al, $0xf4` from CPL=0, which traps here with
-		 * io.port = UM_KVM_TRAP_SYSCALL = 0xf4. The helper
-		 * extracts the syscall NR from RAX, propagates the
-		 * post-SYSCALL RIP/RFLAGS from RCX/R11, and dispatches
-		 * via handle_syscall. Other ports (Phase E.3 #PF/#GP/#UD
-		 * tags) will land as additional helper calls; today an
-		 * unknown port returns -ENOTSUPP and we panic, matching
-		 * the v1 archive's "fail loud on unknown trap class"
-		 * contract (kvm-v1-archive/thread.c:4030+ structure).
+		 * D.2 + E.3: IO-port exit. The LSTAR trampoline (D.1)
+		 * issues `out %al, $0xf4` from CPL=0 for SYSCALL; E.1's
+		 * IDT handler stubs issue `out %al, $port` for each
+		 * exception class (port table at syscall_trap.h's
+		 * enum um_kvm_iotrap). Phase E.3 widened the helper to
+		 * dispatch by port: SYSCALL → handle_syscall;
+		 * #PF/#GP/#UD/#DE/#OF → segv_handler/relay_signal per
+		 * class; UM_KVM_TRAP_PANIC + any unknown port → panic.
+		 *
+		 * Pass the full vCPU struct (not just the fd) so the
+		 * exception dispatchers can read vcpu->ist_stack_kva
+		 * to extract the iretq frame the CPU pushed onto the
+		 * IST stack at exception delivery time.
 		 */
-		rc = kvm_v2_handle_io_trap(regs, run, vcpu->vcpu_fd);
+		rc = kvm_v2_handle_io_trap(regs, run, vcpu);
 		if (rc < 0)
 			panic("kvm-v2: io_trap (cpu=%d port=%#x) failed: %d",
 			      cpu, run->io.port, rc);

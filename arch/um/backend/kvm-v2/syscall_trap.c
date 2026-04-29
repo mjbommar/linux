@@ -103,13 +103,16 @@
 #include <linux/pgtable.h>	/* pgd_index, set_pgd */
 #include <linux/printk.h>
 #include <linux/set_memory.h>
+#include <linux/signal.h>	/* clear_siginfo, kernel_siginfo_t */
 #include <linux/string.h>
 #include <linux/types.h>
+#include <uapi/asm-generic/siginfo.h>	/* ILL_ILLOPN, FPE_INTOVF, SEGV_MAPERR */
 
 #include <asm/page.h>
 #include <asm/pgtable.h>	/* _KERNPG_TABLE, _PAGE_PRESENT, _PAGE_ACCESSED, swapper_pg_dir */
 #include <asm/trace/um_backend.h>
 
+#include <kern_util.h>		/* segv_handler, relay_signal */
 #include <skas.h>		/* handle_syscall */
 #include <sysdep/ptrace.h>	/* uml_pt_regs, HOST_AX/CX/IP/EFLAGS/R11, UPT_SYSCALL_NR */
 #include <sysdep/ptrace_user.h>	/* PT_SYSCALL_NR */
@@ -717,25 +720,504 @@ void kvm_v2_trampoline_free(struct kvm_v2_vm *vm)
  * function panics rather than returning errno on the conditions
  * relevant to the trap loop, matching the v1 archive's contract.
  */
+/*
+ * Phase E.3 (memo 26 §E.3): IST-frame parser + per-class dispatchers.
+ *
+ * Each in-guest IDT handler stub (E.1 wired the bytes; per-class slots
+ * documented at syscall_trap.h::KVM_V2_HANDLER_SLOT_*) issues
+ * `out %al, $port` after the CPU pushed the standard long-mode iretq
+ * frame onto the per-vCPU IST stack (E.2 allocated the page; the TSS's
+ * IST1 field points at ist_stack_top_gva). Layout per Intel SDM Vol.3
+ * §6.13 ("Error Code") and §6.14 ("Exception and Interrupt Handling
+ * in 64-bit Mode"):
+ *
+ *   ist_stack_top - 8:    user SS
+ *   ist_stack_top - 16:   user RSP
+ *   ist_stack_top - 24:   user RFLAGS
+ *   ist_stack_top - 32:   user CS
+ *   ist_stack_top - 40:   user RIP
+ *   ist_stack_top - 48:   error_code  (only for vectors that push one)
+ *
+ * Vectors WITH error code (SDM Vol.3 §6.13 "Error Code"):
+ *   #DF (8), #TS (10), #NP (11), #SS (12), #GP (13), #PF (14),
+ *   #AC (17), #SX (30).
+ * Vectors WITHOUT error code:
+ *   #DE (0), #DB (1), #BP (3), #OF (4), #BR (5), #UD (6), #NM (7),
+ *   #MF (16), #XM (19).
+ *
+ * #PF and #GP push error code; #UD, #DE, and #OF do not. The frame
+ * lives in HOST kernel virtual memory (vcpu->ist_stack_kva is the kva
+ * of the page we allocated in E.2; it's regular kernel memory — no
+ * KVM ioctl needed to read it). After the host dispatcher consumes
+ * the frame and runs UML's existing trap.c handler, we marshal the
+ * (possibly mutated) regs back into the IST frame so the in-guest
+ * iretq pops the post-handler RIP/RSP/RFLAGS — the marshal-back is
+ * how a signal-delivered RIP (do_signal stashed a handler VA into
+ * regs->gp[HOST_IP]) lands as the next user-mode instruction.
+ *
+ * v1 archive references (memo 27 §A.7 lift requirement):
+ *   - kvm-v1-archive/thread.c:4058-4173 — #PF dispatcher (cr2 read,
+ *     IST frame parse, regs marshal, fault-fix call). v1 read CR2 via
+ *     KVM_GET_SREGS; v2 reads from kvm_run->s.regs.sregs.cr2 (sync-
+ *     regs is enabled at vcpu_create per Phase C.3 — KVM populates
+ *     cr2 in the mmap on every exit, see arch/x86/kvm/x86.c:12122
+ *     and 12748 per the codex audit CLAIM E refutation).
+ *   - kvm-v1-archive/thread.c:4530-4555 — #PF dispatch into UML
+ *     SIGSEGV path (sig_info[SIGSEGV] → segv_handler).
+ *   - kvm-v1-archive/thread.c:4572-4636 — #GP dispatcher (same shape
+ *     as #PF, trap_no=13, dispatched as SIGSEGV — segv_handler's
+ *     SEGV_IS_FIXABLE check at trap.c:297 returns false for trap_no
+ *     != 14, so the kernel-fault path is bypassed and bad_segv runs).
+ *   - kvm-v1-archive/thread.c:4637-4695 — #DE/#BP/#OF/#UD dispatch
+ *     (no error code, smaller IST frame, signal mapping per port).
+ *
+ * Codex audit CLAIM E (CONTRADICTED): the original §E.3 prose specced
+ * each handler stub doing `mov %cr2, %rax` to expose CR2 to the host.
+ * That clobbers user RAX before the host captures vCPU state on
+ * KVM_EXIT_IO. The audit refutation lifted v1's pattern: handler
+ * stubs are pure `out %al, $port ; iretq` (4 bytes), and the host
+ * reads CR2 from sync-regs sregs.cr2. v1 archive at thread.c:1297
+ * documents the same removal.
+ */
+
+/*
+ * Read the IRETQ frame from the IST stack page. `top` is the host
+ * kernel VA of the byte one past the highest-numbered byte the CPU
+ * could push (i.e. ist_stack_kva + PAGE_SIZE — stacks grow down so
+ * the first push lands at top - 8). `has_error_code` selects the
+ * 48-byte (with EC) vs 40-byte (without EC) frame layout.
+ *
+ * No bounds check on the read range — the page is 4096 bytes and we
+ * read at most 48 bytes from the top, well within the allocation.
+ */
+struct kvm_v2_ist_frame {
+	u64  user_rip;
+	u64  user_cs;
+	u64  user_rflags;
+	u64  user_rsp;
+	u64  user_ss;
+	u64  error_code;	/* valid only when has_error_code */
+	bool has_error_code;
+};
+
+static void kvm_v2_ist_frame_read(struct kvm_v2_vcpu *vcpu,
+				  struct kvm_v2_ist_frame *f,
+				  bool has_error_code)
+{
+	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+	int off = has_error_code ? 48 : 40;
+
+	f->has_error_code = has_error_code;
+	if (has_error_code)
+		f->error_code = *(u64 *)(top - 48);
+	else
+		f->error_code = 0;
+
+	/*
+	 * Frame field positions are computed from the BOTTOM of the
+	 * pushed frame (= top - off). With error code: bottom is at
+	 * top - 48, RIP at +0 from bottom, CS at +8, RFLAGS +16, RSP
+	 * +24, SS +32. Without error code: bottom is at top - 40,
+	 * same field offsets relative to bottom.
+	 */
+	f->user_rip    = *(u64 *)(top - off + 0);
+	f->user_cs     = *(u64 *)(top - off + 8);
+	f->user_rflags = *(u64 *)(top - off + 16);
+	f->user_rsp    = *(u64 *)(top - off + 24);
+	f->user_ss     = *(u64 *)(top - off + 32);
+}
+
+/*
+ * Marshal (possibly mutated) regs back into the IST frame so the
+ * in-guest iretq at the tail of the handler stub pops the post-
+ * handler user state. We only rewrite RIP / RFLAGS / RSP — CS / SS
+ * / error_code are untouched because:
+ *   - CS / SS: signal delivery doesn't change the segment selector;
+ *              user code stays at the same CPL.
+ *   - error_code: iretq pops error_code BEFORE RIP per SDM Vol.3
+ *                 §6.14.5; the value we read into the frame is what
+ *                 will be popped + discarded. Rewriting it is a no-op.
+ */
+static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
+				   const struct uml_pt_regs *regs,
+				   bool has_error_code)
+{
+	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+	int off = has_error_code ? 48 : 40;
+
+	*(u64 *)(top - off + 0)  = regs->gp[HOST_IP];      /* RIP */
+	/* CS at top - off + 8 stays. */
+	*(u64 *)(top - off + 16) = regs->gp[HOST_EFLAGS];  /* RFLAGS */
+	*(u64 *)(top - off + 24) = regs->gp[HOST_SP];      /* RSP */
+	/* SS at top - off + 32 stays. */
+	/* error_code at top - 48 stays — popped+discarded by iretq. */
+}
+
+/*
+ * #PF (vector 14): page-fault dispatcher. CR2 from sync-regs sregs;
+ * error_code + user RIP/RSP/RFLAGS from the IST frame. Dispatches
+ * via UML's segv_handler (arch/um/kernel/trap.c:292) — same path the
+ * seccomp backend takes from its SIGSEGV branch
+ * (arch/um/backend/seccomp/trap_user.c:154). segv_handler walks
+ * SEGV_IS_FIXABLE (faultinfo.trap_no==14 → true), routes to segv()
+ * which calls handle_page_fault for fault-fix or signals a SIGSEGV
+ * via force_sig_fault on unfixable faults.
+ *
+ * regs->is_user = 1 BEFORE dispatch (codex audit independent
+ * finding, mirrored from v1 archive thread.c:4553): the IDT[14] gate
+ * fires on guest CPL=3 user faults; by the time the in-guest handler
+ * stub runs we're at CPL=0 in ring-0 IST context. UML's segv_handler
+ * reads UPT_IS_USER(regs) and panics with "Kernel tried to access
+ * user memory" if it sees is_user=0 with a user-range CR2. Tag it
+ * unconditionally — the FAULTING access was at CPL=3 even though
+ * the in-guest delivery handler runs at CPL=0.
+ */
+static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
+			       struct kvm_run *run,
+			       struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+	u64 cr2;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, true /* has_error_code */);
+
+	/*
+	 * KVM populates s.regs.sregs.cr2 on every KVM_EXIT_IO when
+	 * KVM_SYNC_X86_SREGS is in kvm_valid_regs (Phase C.3 set this
+	 * at vcpu_create). Codex audit CLAIM E refutation: the kernel
+	 * commits cr2 to the sync-regs mmap at arch/x86/kvm/x86.c:12122
+	 * + 12748 — no separate KVM_GET_SREGS ioctl needed.
+	 */
+	cr2 = run->s.regs.sregs.cr2;
+
+	/*
+	 * Marshal user state into regs. C.3's marshal_from_kvm_regs
+	 * already populated regs->gp[] from kvm_run->s.regs.regs at
+	 * the top of vcpu.c::kvm_v2_vcpu_run — but RIP/RSP/RFLAGS in
+	 * there reflect the IDT-handler-mid-execution state (RIP =
+	 * just-after-`out` in the handler stub; RSP = somewhere in the
+	 * IST page; RFLAGS = post-IDT-gate-fired). The IST frame holds
+	 * the USER state from the moment the fault fired — overwrite
+	 * the GP[] view so UML's downstream handlers see "where user
+	 * code was when it faulted" not "where the in-guest stub
+	 * happens to be".
+	 */
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	/*
+	 * faultinfo per arch/x86/um/shared/sysdep/faultinfo_64.h:
+	 *   error_code — CPU-pushed bits 0..4 (P, W/R, U/S, RSVD, I/D)
+	 *                per SDM Vol.3 §6.15. UML's FAULT_WRITE macro
+	 *                tests bit 1 (W); handle_page_fault inside
+	 *                segv() consumes is_write to gate VM_WRITE
+	 *                permission checks.
+	 *   cr2        — faulting linear address (the "FAULT_ADDRESS"
+	 *                segv() walks down).
+	 *   trap_no    — 14 (#PF). SEGV_IS_FIXABLE checks trap_no==14
+	 *                so segv_handler's user-fault branch fires.
+	 */
+	regs->faultinfo.error_code = (int)frame.error_code;
+	regs->faultinfo.cr2        = cr2;
+	regs->faultinfo.trap_no    = 14;
+
+	trace_um_backend_kvm_v2_iotrap_pf(cr2,
+					  frame.error_code,
+					  frame.user_rip);
+
+	/*
+	 * Dispatch into UML's existing handler. segv_handler ignores
+	 * its `unused_si` argument (signature comment at trap.c:282) so
+	 * NULL is correct here. Mirror v1 archive's call shape at
+	 * thread.c:4554: `(*sig_info[SIGSEGV])(SIGSEGV, NULL, regs,
+	 * NULL);`. We bypass sig_info[] and call segv_handler directly
+	 * because the routing table maps SIGSEGV→segv_handler anyway
+	 * (arch/um/os-Linux/signal.c:33) and a direct call lets the
+	 * compiler inline / static-resolve.
+	 */
+	segv_handler(SIGSEGV, NULL, regs, NULL);
+
+	/*
+	 * After segv_handler, regs->gp[HOST_IP] either:
+	 *   (a) stayed at frame.user_rip — fault fixed lazily; iretq
+	 *       resumes at the original faulting instruction, which
+	 *       now succeeds.
+	 *   (b) was rewritten to a signal handler VA — do_signal
+	 *       inside segv() set up a sigframe + return-to-handler
+	 *       address; iretq lands at the handler, which runs to
+	 *       completion and then sigreturns to (a)-style state.
+	 * Either way, marshal regs back into the IST frame so the
+	 * in-guest iretq tail of the handler stub pops the right state.
+	 */
+	kvm_v2_ist_frame_write(vcpu, regs, true /* has_error_code */);
+
+	/*
+	 * Marshal regs->gp[] back into kvm_run->s.regs.regs and OR
+	 * KVM_SYNC_X86_REGS into kvm_dirty_regs. Required because the
+	 * SYSCALL-style D.2 dispatcher does the same; KVM resumes the
+	 * vCPU with the dirty-bit'd state on the next KVM_RUN, and the
+	 * in-guest iretq reads its pop-source from RSP (which we already
+	 * patched in the IST frame above) — but downstream UML code may
+	 * have updated other GPRs (e.g. signal-delivery sets RDI/RSI to
+	 * sigaction args), and those need to land in the user-resume
+	 * register file.
+	 */
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
+ * #GP (vector 13): general-protection-fault dispatcher. Same shape
+ * as #PF (CPU pushes error code) except trap_no=13 and there's no
+ * cr2 to read. Dispatches as SIGSEGV via segv_handler;
+ * SEGV_IS_FIXABLE returns false (trap_no != 14) so segv_handler's
+ * user-fault path falls through to bad_segv → force_sig_fault
+ * (SIGSEGV). v1 archive mirror: thread.c:4572-4636.
+ */
+static int kvm_v2_handle_io_gp(struct uml_pt_regs *regs,
+			       struct kvm_run *run,
+			       struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, true /* has_error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	regs->faultinfo.error_code = (int)frame.error_code;
+	regs->faultinfo.cr2        = 0;
+	regs->faultinfo.trap_no    = 13;
+
+	trace_um_backend_kvm_v2_iotrap_gp(frame.error_code, frame.user_rip);
+
+	/*
+	 * SIGSEGV via segv_handler: same as #PF dispatch but
+	 * SEGV_IS_FIXABLE check (trap.c:297) returns false because
+	 * trap_no != 14, so the bad_segv path runs and force_sig_fault
+	 * delivers SIGSEGV with si_code computed from the fault info.
+	 */
+	segv_handler(SIGSEGV, NULL, regs, NULL);
+
+	kvm_v2_ist_frame_write(vcpu, regs, true /* has_error_code */);
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
+ * Common helper for #UD/#DE/#OF — vectors WITHOUT error code that
+ * dispatch through relay_signal (arch/um/kernel/trap.c:418).
+ * relay_signal dereferences `si->si_code` and `si->si_errno`, so we
+ * construct a stack-allocated kernel_siginfo with sensible si_code
+ * (which selects SIL_FAULT layout in siginfo_layout, routing to
+ * force_sig_fault with FAULT_ADDRESS(faultinfo) = cr2 = 0 — the
+ * trap_no field disambiguates the actual cause for downstream code
+ * that examines current->thread.arch.faultinfo).
+ *
+ * The si_codes chosen (ILL_ILLOPN / FPE_INTOVF / SEGV_MAPERR) are
+ * defensive defaults — UML's relay_signal forwards them verbatim
+ * via force_sig_fault, and userspace handlers reading siginfo see
+ * a plausible cause. v1 archive at thread.c:4694 passed NULL,
+ * which would NULL-deref relay_signal at trap.c:456; v2 fixes
+ * that latent bug by constructing a real siginfo.
+ */
+static void kvm_v2_dispatch_relay(struct uml_pt_regs *regs, int sig,
+				  int si_code)
+{
+	kernel_siginfo_t info;
+
+	clear_siginfo(&info);
+	info.si_signo = sig;
+	info.si_code  = si_code;
+	info.si_errno = 0;
+	relay_signal(sig, (struct siginfo *)&info, regs, NULL);
+}
+
+/*
+ * #UD (vector 6): undefined-opcode dispatcher. No error code.
+ * Delivers SIGILL via relay_signal. UML's userspace handler sees
+ * si_code = ILL_ILLOPN. v1 archive mirror: thread.c:4659-4694
+ * (port UM_KVM_UD_PORT case-arm).
+ */
+static int kvm_v2_handle_io_ud(struct uml_pt_regs *regs,
+			       struct kvm_run *run,
+			       struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* no error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	regs->faultinfo.error_code = 0;
+	regs->faultinfo.cr2        = 0;
+	regs->faultinfo.trap_no    = 6;
+
+	trace_um_backend_kvm_v2_iotrap_ud(frame.user_rip);
+
+	kvm_v2_dispatch_relay(regs, SIGILL, ILL_ILLOPN);
+
+	kvm_v2_ist_frame_write(vcpu, regs, false /* no error_code */);
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
+ * #DE (vector 0): divide-error dispatcher. No error code.
+ * Delivers SIGFPE via relay_signal with si_code=FPE_INTOVF.
+ * v1 archive mirror: thread.c:4659 (UM_KVM_DE_PORT case).
+ */
+static int kvm_v2_handle_io_de(struct uml_pt_regs *regs,
+			       struct kvm_run *run,
+			       struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* no error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	regs->faultinfo.error_code = 0;
+	regs->faultinfo.cr2        = 0;
+	regs->faultinfo.trap_no    = 0;
+
+	trace_um_backend_kvm_v2_iotrap_de(frame.user_rip);
+
+	kvm_v2_dispatch_relay(regs, SIGFPE, FPE_INTOVF);
+
+	kvm_v2_ist_frame_write(vcpu, regs, false /* no error_code */);
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
+ * #OF (vector 4): overflow dispatcher. No error code. Triggered by
+ * the `into` instruction (legacy; rare in modern x86_64 since
+ * `into` is invalid in long mode — the IDT gate is here for
+ * defense-in-depth only). Delivers SIGSEGV via relay_signal —
+ * matches v1 archive's mapping at thread.c:4661 (UM_KVM_OF_PORT
+ * case → SIGSEGV).
+ */
+static int kvm_v2_handle_io_of(struct uml_pt_regs *regs,
+			       struct kvm_run *run,
+			       struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* no error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	regs->faultinfo.error_code = 0;
+	regs->faultinfo.cr2        = 0;
+	regs->faultinfo.trap_no    = 4;
+
+	trace_um_backend_kvm_v2_iotrap_of(frame.user_rip);
+
+	/*
+	 * #OF maps to SIGSEGV per v1 archive (thread.c:4661). Use
+	 * relay_signal not segv_handler — the latter expects trap_no=14
+	 * for the SEGV_IS_FIXABLE branch, and #OF has trap_no=4. Going
+	 * through relay_signal lands the signal directly without the
+	 * fault-fix detour.
+	 */
+	kvm_v2_dispatch_relay(regs, SIGSEGV, SEGV_MAPERR);
+
+	kvm_v2_ist_frame_write(vcpu, regs, false /* no error_code */);
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
+ * Default-stub dispatcher: any vector E.1's IDT didn't wire to a
+ * specific handler points at the panic stub which fires
+ * UM_KVM_TRAP_PANIC = 0xf8. Best-effort: dump the frame contents and
+ * panic. We don't know whether the firing vector pushed an error
+ * code, so we read the no-error-code layout (smaller, safer if we
+ * read past the actual frame we'd just see zeroes from __GFP_ZERO).
+ *
+ * Phase E covers #DE/#BP/#OF/#UD/#GP/#PF; E.1 wires the panic stub
+ * for every other vector in the 0..255 range. Hitting this path
+ * means either:
+ *   (a) a vector E.1 didn't intend to deliver fired (#DF, #DB, #NM,
+ *       etc.) — usually a guest-state bug or a host-side bit-rot in
+ *       the trampoline / SREGS path.
+ *   (b) the panic stub itself was reached via an IDT misconfiguration
+ *       (gate-offset or selector wrong).
+ * Either way, panic with diagnostics.
+ */
+static int kvm_v2_handle_io_panic(struct uml_pt_regs *regs,
+				  struct kvm_run *run,
+				  struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	(void)regs;
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* unknown — best-effort */);
+
+	trace_um_backend_kvm_v2_iotrap_panic(run->io.port, frame.user_rip);
+
+	panic("kvm-v2: unhandled exception (port=%#x cpu=%d) user_rip=%#llx user_cs=%#llx user_rflags=%#llx user_rsp=%#llx",
+	      run->io.port, vcpu->cpu,
+	      frame.user_rip, frame.user_cs,
+	      frame.user_rflags, frame.user_rsp);
+}
+
 int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 			  struct kvm_run *run,
-			  int vcpu_fd)
+			  struct kvm_v2_vcpu *vcpu)
 {
 	unsigned long syscall_nr;
 
-	(void)vcpu_fd;	/* reserved for D.3 (marshal-out path) */
+	if (!vcpu)
+		return -EINVAL;
 
 	/*
-	 * Only port we handle today is the SYSCALL trap. Other ports
-	 * are Phase E.3's exception classes (PF/GP/UD/...). The caller
-	 * (kvm_v2_vcpu_run's switch-arm) panics on unknown exit
-	 * reasons; this defensive double-check keeps the helper safe to
-	 * call from any future site that doesn't pre-screen the port.
+	 * Phase E.3: extend the dispatch table to the per-class
+	 * exception ports E.1's IDT handler stubs emit on. The
+	 * SYSCALL arm is the D.2 path; PF/GP/UD/DE/OF land in
+	 * the helpers above; UM_KVM_TRAP_PANIC + any other
+	 * unrecognised port falls to the panic helper.
 	 */
-	if (run->io.port != UM_KVM_TRAP_SYSCALL) {
-		pr_err("um: kvm-v2 io_trap: unexpected port %#x (direction=%u size=%u)\n",
-		       run->io.port, run->io.direction, run->io.size);
-		return -ENOTSUPP;
+	switch (run->io.port) {
+	case UM_KVM_TRAP_SYSCALL:
+		break;	/* fall through to SYSCALL handler below */
+	case UM_KVM_TRAP_PF:
+		return kvm_v2_handle_io_pf(regs, run, vcpu);
+	case UM_KVM_TRAP_GP:
+		return kvm_v2_handle_io_gp(regs, run, vcpu);
+	case UM_KVM_TRAP_UD:
+		return kvm_v2_handle_io_ud(regs, run, vcpu);
+	case UM_KVM_TRAP_DE:
+		return kvm_v2_handle_io_de(regs, run, vcpu);
+	case UM_KVM_TRAP_OF:
+		return kvm_v2_handle_io_of(regs, run, vcpu);
+	case UM_KVM_TRAP_PANIC:
+	default:
+		return kvm_v2_handle_io_panic(regs, run, vcpu);
 	}
 
 	/*
