@@ -974,6 +974,29 @@ EPT, fix 3 only matters once fixes 1 + 2 land. Together they
 complete "first KVM_RUN under v2 produces a working user-mode
 dispatch."
 
+**Initial Phase E.4 validation (post-E.5)** — single-process
+workloads pass; fork+wait is the next blocker:
+
+| Workload                    | Status | Notes                              |
+|---|---|---|
+| `init=/bin/true`            | PASS   | exit_group(0) → init-kill panic    |
+| `init=/bin/echo`            | PASS   | stdout works; clean exit           |
+| `init=/bin/sh` (echo only)  | PASS   | shell builtins work                |
+| `init=/bin/sh` (fork+exec)  | FAIL   | child task never dispatches        |
+| C fork+waitpid as init      | FAIL   | parent blocks in wait4 forever     |
+
+The fork+wait failure mode: parent's `fork()` returns the
+expected child pid; child task IS created (worker spawn fires
+for child mm at `__spawn_worker_for_mm`); child's user code
+NEVER executes (no output reaches stdout); parent's `wait4`
+blocks forever. WARN_ON_ONCE at `arch/um/kernel/spawner.c:225`
+fires on the duplicate worker spawn for fork's COW mm. This
+is Phase E.4 work — instrumentation in `kvm_v2_vcpu_run` to
+determine whether the child task ever reaches the dispatch
+path is the next step. Single-vCPU pool + scheduler-driven
+dispatch under v2 has invariants that are about to be
+exercised for the first time at fork; expect surprises.
+
 ### Lesson for future memo work
 
 Verify load-bearing design claims against source-level evidence
