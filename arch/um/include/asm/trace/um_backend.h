@@ -243,6 +243,50 @@ TRACE_EVENT(um_backend_kvm_v2_vcpu_exit,
 	TP_printk("cpu=%d exit_reason=%u", __entry->cpu, __entry->exit_reason)
 );
 
+/*
+ * kvm_v2_fpu_capture / kvm_v2_fpu_install — bracket the fork-time
+ * KVM_GET_FPU snapshot (capture) and the per-KVM_RUN restore
+ * (install). Phase C.4 wires both. `valid` reports whether the
+ * helper produced (capture) / consumed (install) a parent snapshot;
+ * a `valid=0` install means the dispatcher fell back to the
+ * architectural reset values (fcw=0x037f, mxcsr=0x1f80) instead of
+ * inheriting parent FPU state. Useful for diagnosing fork→FPU
+ * inheritance regressions when Phase D's pointer flip activates the
+ * dispatcher end-to-end.
+ *
+ * Per memo 27 Part B.9: observability lands with the helper, not
+ * after it earns a caller (capture has a real caller via
+ * arch_copy_thread today; install fires only when Phase D wires
+ * .vcpu_run).
+ */
+TRACE_EVENT(um_backend_kvm_v2_fpu_capture,
+	TP_PROTO(int cpu, int valid),
+	TP_ARGS(cpu, valid),
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(int, valid)
+	),
+	TP_fast_assign(
+		__entry->cpu   = cpu;
+		__entry->valid = valid;
+	),
+	TP_printk("cpu=%d valid=%d", __entry->cpu, __entry->valid)
+);
+
+TRACE_EVENT(um_backend_kvm_v2_fpu_install,
+	TP_PROTO(int cpu, int was_valid),
+	TP_ARGS(cpu, was_valid),
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(int, was_valid)
+	),
+	TP_fast_assign(
+		__entry->cpu       = cpu;
+		__entry->was_valid = was_valid;
+	),
+	TP_printk("cpu=%d was_valid=%d", __entry->cpu, __entry->was_valid)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

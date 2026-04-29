@@ -586,6 +586,14 @@ static void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
 }
 
 /*
+ * C.4 forward decl: kvm_v2_fpu_install_on_first_run lives at the
+ * bottom of the file alongside kvm_v2_fpu_capture_for_fork (the two
+ * are a logical pair). The dispatcher below references it before its
+ * definition.
+ */
+static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu);
+
+/*
  * Phase C.2: KVM_RUN dispatcher — task→vCPU dispatch helper that
  * mirrors seccomp_vcpu_run's "one round-trip" shape:
  *
@@ -645,6 +653,16 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				     regs->gp[HOST_GS_BASE]);
 
 	/*
+	 * C.4: install per-task FPU snapshot (set at fork by
+	 * kvm_v2_fpu_capture_for_fork) or arch-reset values for a fresh
+	 * task. Failure is fatal: running the guest with arbitrary FPU
+	 * state is worse than aborting.
+	 */
+	rc = kvm_v2_fpu_install_on_first_run(vcpu);
+	if (rc < 0)
+		panic("kvm-v2: fpu install (cpu=%d) failed: %d", cpu, rc);
+
+	/*
 	 * C.3: write GPRs into the mmap'd kvm_run->s.regs.regs and mark
 	 * KVM_SYNC_X86_REGS in kvm_dirty_regs. KVM consumes both
 	 * (kvm_dirty_regs and the dirty s.regs fields) on entry.
@@ -688,25 +706,112 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 }
 
 /*
- * Phase C.4.0 stub. arch_copy_thread (processor_64.h / processor_32.h)
- * calls this on every task fork once CONFIG_UM_BACKEND_KVM_V2=y. C.4
- * replaces the body with a real KVM_GET_FPU against the parent's
- * vCPU pool entry (the lookup needs the per-CPU dispatcher's
- * "current parent vCPU" to be defined, which lives in the C.4 commit
- * along with the install side, kvm_v2_fpu_install_on_first_run).
+ * Phase C.4: fork-time FPU capture. arch_copy_thread (processor_64.h /
+ * processor_32.h) calls this on every task fork once
+ * CONFIG_UM_BACKEND_KVM_V2=y. Snapshots the parent's per-host-CPU vCPU
+ * FPU state into to->kvm_v2.fpu so the child's first KVM_RUN restores
+ * it via kvm_v2_fpu_install_on_first_run — POSIX fork() requires FPU
+ * inheritance.
  *
- * Until then: clear the child's snapshot. fpu_valid stays false so
- * a future first KVM_RUN starts from architectural defaults
- * (kvm_v2_fpu_install_on_first_run will use a fresh FPU rather than
- * the parent's saved state). This is observably correct under v2's
- * incremental migration (.vcpu_run is still seccomp_vcpu_run; no
- * task ever runs through KVM_RUN today).
+ * Reshape vs v1 archive (kvm_fpu_capture_for_fork in
+ * kvm-v1-archive/thread.c:275): v1 keyed on `from->kvm.vcpu->fd` (the
+ * parent task's per-task vcpu_fd, whose lifetime matched the task).
+ * v2's per-host-CPU pool means the parent's "current vCPU" is whichever
+ * pool entry was running when fork fires; we therefore preempt_disable
+ * around smp_processor_id() + kvm_v2_vcpu_get() so the pick stays
+ * coherent with the FD we issue KVM_GET_FPU against. arch_copy_thread
+ * runs from the fork path on the parent's kernel stack with preempt
+ * enabled, so the disable here is the helper's own — not nested.
+ *
+ * NULL guard: if the pool isn't up yet (pre-init_backend forks during
+ * kthreadd bring-up, or fallback after backend = seccomp), or the
+ * per-CPU slot is at the .vcpu_fd = -1 sentinel, leave fpu_valid=false
+ * and return 0. Failure is non-fatal — child will get the
+ * architectural reset values on first run, mirroring v1's behaviour
+ * (KVM_GET_FPU failure → "child gets KVM-default FPU" not panic).
  */
 int kvm_v2_fpu_capture_for_fork(struct arch_thread *from,
 				struct arch_thread *to)
 {
-	(void)from;
-	to->kvm_v2.fpu_valid = false;
+	struct kvm_v2_vcpu *vcpu;
+	int cpu, rc;
+
+	(void)from;	/* parent's snapshot lives on the per-CPU vCPU, not in `from` */
+
+	preempt_disable();
+	cpu  = smp_processor_id();
+	vcpu = kvm_v2_vcpu_get(cpu);
+	if (!vcpu || vcpu->vcpu_fd < 0) {
+		/* No parent vCPU to snapshot — child starts from arch defaults. */
+		to->kvm_v2.fpu_valid = false;
+		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
+		preempt_enable();
+		return 0;
+	}
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+			      (unsigned long)&to->kvm_v2.fpu);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_fork: KVM_GET_FPU(cpu=%d vcpu_fd=%d) failed (%d) — child gets arch-default FPU\n",
+				    cpu, vcpu->vcpu_fd, rc);
+		to->kvm_v2.fpu_valid = false;
+		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
+		preempt_enable();
+		return 0;
+	}
+
+	to->kvm_v2.fpu_valid = true;
+	trace_um_backend_kvm_v2_fpu_capture(cpu, 1);
+	preempt_enable();
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_fork);
+
+/*
+ * Phase C.4: pre-KVM_RUN FPU install. Called from kvm_v2_vcpu_run
+ * between SREGS load and the KVM_RUN ioctl. Two cases:
+ *
+ *   - fpu_valid=true: capture_for_fork populated current's snapshot at
+ *     fork. KVM_SET_FPU it into the per-CPU vCPU and clear fpu_valid
+ *     (one-shot — subsequent runs use the vCPU's own running FPU
+ *     state, no need to re-restore).
+ *
+ *   - fpu_valid=false: fresh task or post-execve via arch_flush_thread.
+ *     Install architectural reset values per AMD64 SDM §11.5.1
+ *     (fcw=0x037f, mxcsr=0x1f80; everything else zero). Built as a
+ *     dynamic stack init rather than a static const so the struct's
+ *     trailing FXSAVE area lands deterministically zeroed without
+ *     pulling a 512 B rodata blob into kernel text.
+ *
+ * Returns 0 on success, -errno on KVM_SET_FPU failure. Dispatcher
+ * panics on negative return: an FPU install failure means the guest
+ * would run with arbitrary FPU state, which crashes downstream in
+ * unpredictable ways — fail loudly here.
+ */
+static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu)
+{
+	struct arch_thread *a = &current->thread.arch;
+	struct kvm_fpu init_fpu;
+	int rc, was_valid;
+
+	if (a->kvm_v2.fpu_valid) {
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
+				      (unsigned long)&a->kvm_v2.fpu);
+		if (rc < 0)
+			return rc;
+		a->kvm_v2.fpu_valid = false;	/* one-shot */
+		was_valid = 1;
+	} else {
+		memset(&init_fpu, 0, sizeof(init_fpu));
+		init_fpu.fcw   = 0x037f;	/* x87 control word reset */
+		init_fpu.mxcsr = 0x1f80;	/* MXCSR reset */
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
+				      (unsigned long)&init_fpu);
+		if (rc < 0)
+			return rc;
+		was_valid = 0;
+	}
+
+	trace_um_backend_kvm_v2_fpu_install(vcpu->cpu, was_valid);
+	return 0;
+}
