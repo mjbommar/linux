@@ -19,6 +19,8 @@
 #include <backend.h>
 
 struct kvm_cpuid2;
+struct mm_struct;
+struct um_memory_region;
 
 /*
  * Per-VM memslot id ceiling. The host-side KVM definition
@@ -129,5 +131,13 @@ int  kvm_v2_memslot_add(struct kvm_v2_vm *vm, u64 gpa, u64 host_va,
 			u64 size, u32 flags);
 void kvm_v2_memslot_del(struct kvm_v2_vm *vm, u32 slot_id);
 struct kvm_v2_memslot *kvm_v2_memslot_lookup(struct kvm_v2_vm *vm, u64 gpa);
+
+/*
+ * Phase B.2 (region.c): mm_region_added op — issues
+ * KVM_SET_USER_MEMORY_REGION add for each VA range the mm-arbiter
+ * surfaces. Replaces seccomp_mm_region_added in the v2 ops table.
+ */
+int  kvm_v2_mm_region_added(struct mm_struct *mm,
+			    const struct um_memory_region *region);
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

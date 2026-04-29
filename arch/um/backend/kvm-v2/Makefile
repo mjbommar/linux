@@ -9,3 +9,4 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += ops.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += context.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += vcpu.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += memslot.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
