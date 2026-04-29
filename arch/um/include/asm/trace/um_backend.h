@@ -313,6 +313,34 @@ TRACE_EVENT(um_backend_kvm_v2_cpuid_install,
 	TP_printk("vcpu_fd=%d nent=%u", __entry->vcpu_fd, __entry->nent)
 );
 
+/*
+ * kvm_v2_trampoline_install — fired when the per-VM LSTAR trampoline
+ * page (memo 26 §D.1) is allocated and the 5 SYSCALL-trap bytes
+ * (out %al, $0xf4 / sysretq) are written. gpa is __pa(host page); gva
+ * is KVM_V2_LSTAR_GVA (= KVM_V2_TRAMPOLINE_GVA + 0x40 = the address
+ * D.4 will program into MSR_LSTAR). Fires at most once per VM
+ * lifetime; idempotent re-invocations from the lazy retry path
+ * short-circuit before reaching the trace site. Until D.4 / D.5 wire
+ * MSR_LSTAR + ops.vcpu_run, no guest code reaches the trampoline,
+ * but the bytes + storage are observable from this event.
+ *
+ * Per memo 27 §B.9: observability lands with the helper, not after
+ * it earns a caller.
+ */
+TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
+	TP_PROTO(u64 gpa, u64 gva),
+	TP_ARGS(gpa, gva),
+	TP_STRUCT__entry(
+		__field(u64, gpa)
+		__field(u64, gva)
+	),
+	TP_fast_assign(
+		__entry->gpa = gpa;
+		__entry->gva = gva;
+	),
+	TP_printk("gpa=%#llx gva=%#llx", __entry->gpa, __entry->gva)
+);
+
 #endif /* _TRACE_UM_BACKEND_H */
 
 #undef TRACE_INCLUDE_PATH

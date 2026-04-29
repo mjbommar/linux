@@ -42,6 +42,7 @@
 #include <os.h>
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"
 
 /*
  * KVM Intel unrestricted-guest plumbing addresses. Values mirror the
@@ -118,9 +119,33 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 	 */
 	bitmap_zero(vm.memslot_bitmap, KVM_V2_MAX_USER_MEM_SLOTS);
 	spin_lock_init(&vm.lock);
+	vm.trampoline_page = NULL;	/* D.1: kvm_v2_trampoline_alloc_and_install
+					 * fills these in below (best-effort —
+					 * buddy may not be up; lazy retry from
+					 * D.4/D.5 covers that case). */
+	vm.trampoline_gpa  = 0;
 
-	pr_info("um: kvm-v2 vm_create: vm_fd=%d caps=%#llx tss=%#lx ident=%#lx (memslots empty; A.3 attaches vCPU + installs CPUID)\n",
-		vm.vm_fd, vm.caps, KVM_V2_TSS_ADDR, KVM_V2_IDENTITY_ADDR);
+	/*
+	 * Phase D.1 (memo 26 §D.1): allocate the LSTAR trampoline page
+	 * and write the 5 trap+sysretq bytes. Best-effort at this point —
+	 * D.0a documented that the buddy allocator is not yet up at
+	 * init_backend time, so alloc_page returns NULL and the install
+	 * defers. The helper logs the deferral; D.4 (MSR_LSTAR
+	 * programming) will retry once the buddy is up. Keeping the call
+	 * here matches memo 26 §D.1's "Hook the alloc helper into
+	 * kvm_v2_vm_create" intent and gives the trace event the earliest
+	 * possible firing site.
+	 */
+	rc = kvm_v2_trampoline_alloc_and_install(&vm);
+	if (rc && rc != -ENOMEM) {
+		pr_err("um: kvm-v2 vm_create: trampoline_alloc_and_install failed (%d)\n",
+		       rc);
+		goto err_close_vm;
+	}
+
+	pr_info("um: kvm-v2 vm_create: vm_fd=%d caps=%#llx tss=%#lx ident=%#lx trampoline=%s (memslots empty; A.3 attaches vCPU + installs CPUID)\n",
+		vm.vm_fd, vm.caps, KVM_V2_TSS_ADDR, KVM_V2_IDENTITY_ADDR,
+		vm.trampoline_page ? "installed" : "deferred");
 	return 0;
 
 err_close_vm:
@@ -152,6 +177,14 @@ void kvm_v2_vm_destroy(void)
 	 */
 	list_for_each_entry_safe(m, tmp, &vm.memslots, list)
 		kvm_v2_memslot_del(&vm, m->slot_id);
+
+	/*
+	 * Phase D.1: free the LSTAR trampoline page. Safe on a
+	 * never-installed VM (helper short-circuits on NULL page) — covers
+	 * the boot path where vm_create deferred the install and no later
+	 * caller retried before shutdown.
+	 */
+	kvm_v2_trampoline_free(&vm);
 
 	kfree(vm.cpuid);
 	vm.cpuid = NULL;

@@ -60,6 +60,23 @@ struct kvm_v2_vm {
 	 */
 	unsigned long		memslot_bitmap[BITS_TO_LONGS(KVM_V2_MAX_USER_MEM_SLOTS)];
 	spinlock_t		lock;
+	/*
+	 * Phase D.1: LSTAR trampoline page (memo 26 §D.1, syscall_trap.c).
+	 * `trampoline_page` is the host kernel VA of a single page from
+	 * the buddy allocator; `trampoline_gpa` is __pa(trampoline_page),
+	 * which is the GPA the guest's PML4[508] entry (installed in D.4)
+	 * walks down to. The 5 LSTAR bytes (out + sysretq) live at
+	 * trampoline_page + KVM_V2_TRAMPOLINE_LSTAR_OFFSET (= 0x40); D.4
+	 * programs MSR_LSTAR to KVM_V2_LSTAR_GVA so guest SYSCALL lands
+	 * here. NULL until kvm_v2_trampoline_alloc_and_install succeeds —
+	 * vm_create attempts the install but the buddy allocator may not
+	 * be up at init_backend time (memo 26 §D.0a's lesson), so a lazy
+	 * retry path may be required before D.4 can program LSTAR. v1
+	 * mirror: kvm-v1-archive/thread.c:602-605 (kvm_bootstrap_page +
+	 * kvm_bootstrap_gpa file-scope statics).
+	 */
+	void			*trampoline_page;
+	phys_addr_t		trampoline_gpa;
 };
 
 /*
