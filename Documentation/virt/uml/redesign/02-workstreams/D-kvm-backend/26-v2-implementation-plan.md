@@ -907,12 +907,72 @@ Top candidates per the audit (in priority order):
    host config), KVM intercepts #PF and the guest IDT never runs.
    `kvm_exit reason EXCEPTION nr=14` in tracepoints would confirm.
 
-E.5 next steps: land Bug 1 fix as a focused commit (verified),
-re-run boot smoke; if the exit reason becomes `KVM_EXIT_IO`
-(handle_io_pf engaging) the original architecture engages and
-the chain completes; if `KVM_EXIT_NPF` persists, investigate
-candidate 2 with a memslot dump comparing per-region vs physmem
-identity GPA ranges.
+**E.5 resolution (2026-04-29 evening, commit `aba0b460a034`)**:
+boot smoke under v2 now reaches `Run /bin/true as init process`
+followed by the standard "Attempted to kill init! exitcode=
+0x00000000" panic — the panic any kernel produces when init
+exits cleanly, identical under seccomp. /bin/true executes user
+code → exit_group(0) → KVM_EXIT_IO → handle_syscall → do_exit.
+Substrate gate green: PASS=25/FAIL=3/EXPECTED_FAIL=3 (matches
+seccomp baseline; no regression).
+
+The empirical capture (KVM tracepoints during first 5 sec of
+boot under .vcpu_run = kvm_v2_vcpu_run) discriminated between
+the three audit candidates and overturned all three partially:
+
+- **Candidate 1 (CR3 sync-regs lazy-commit)** — REJECTED. The
+  faulting RIP was 0x40023340 (/bin/true's first user
+  instruction), not an early KVM_RUN with cr3=0. CR3 was being
+  committed across re-injections.
+
+- **Candidate 2 (memslot conflict)** — PARTIALLY RIGHT, was the
+  load-bearing fix. The mechanism wasn't "per-region memslots
+  shadow slot 0's GPAs" (those didn't overlap); it was
+  "per-region DELETE+CREATE churn → KVM internal MMU
+  invalidate_zap → slot 0's PML4-page EPT entries left
+  un-refilled (pf_taken=1, pf_fixed=0)". Dropping per-region
+  memslots eliminated the EPT zap source.
+
+- **Candidate 3 (exception bitmap)** — REJECTED. KVM was
+  injecting #PF (kvm_inj_exception trace), not intercepting it;
+  the architecture for hardware-injected #PF → guest IDT was
+  engaging correctly.
+
+After dropping per-region memslots, the EPT loop broke and
+boot reached a SECOND bug: `segfault at 10 ip 0x10 sp 0x10002
+error 10` looping. Two stacked errors in the IDT-vectoring path:
+
+- **IST frame off-by-8 with error code** (`syscall_trap.c
+  kvm_v2_ist_frame_read/write`): the read used
+  `off = has_error_code ? 48 : 40` and indexed RIP at
+  `(top - off) + 0`, which lands on the error-code slot for
+  with-error-code frames per SDM §6.14.5 layout (low→high:
+  error_code, RIP, CS, RFLAGS, RSP, SS). Every field shifted
+  by 8 — RIP picked up error_code (0x10), RSP picked up RFLAGS
+  (0x10002 with bit-16 RF set during fault delivery). Fix:
+  RIP-anchor at top-40 always; read error_code separately at
+  top-48 when present.
+
+- **PF/GP IDT stub iretq pops error_code as RIP** (`exception.c
+  kvm_v2_handler_stub_pf/_gp`): E.1's stub shape was 4 bytes
+  (`out %al, $port ; iretq`) for ALL vectors. Per SDM §6.14.5,
+  iretq pops 5×8B (RIP/CS/RFLAGS/RSP/SS) — it does NOT pop the
+  error code. The deferred decision in the E.1 comment block
+  ("E.3 may revisit if iretq's frame shape for the error-code
+  case requires explicit `add $8, %rsp` in the stub") was real
+  and required. Fix: extend pf/gp stubs to 8 bytes with explicit
+  `add $8, %rsp` (4 bytes: 48 83 c4 08) before iretq. v1's
+  archive at kvm-v1-archive/thread.c:1310-1314 had exactly this
+  shape for the same reason.
+
+The three fixes (drop per-region memslots, fix IST frame
+offsets, extend PF/GP stubs) committed atomically at
+`aba0b460a034` because none alone is sufficient: fix 1 unblocks
+the EPT loop but exposes fix 2's bug, fix 2 alone doesn't help
+because IDT-vectoring never reaches the host handler with empty
+EPT, fix 3 only matters once fixes 1 + 2 land. Together they
+complete "first KVM_RUN under v2 produces a working user-mode
+dispatch."
 
 ### Lesson for future memo work
 
