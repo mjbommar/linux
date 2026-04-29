@@ -96,7 +96,7 @@ returns from `init` without doing anything else.
 No actual guest execution yet — system uses fallback for ops not
 implemented.
 
-### A.2 — `context.c`: per-VM context lifecycle (3 days)
+### A.2 — `context.c`: per-VM context lifecycle (DONE — `427f1d88cc42`)
 
 - `struct kvm_v2_vm`: `int vm_fd`, `u64 caps`, `struct list_head
   memslots`, `spinlock_t lock`. One per UML kernel invocation.
