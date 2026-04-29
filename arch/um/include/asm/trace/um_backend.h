@@ -359,6 +359,33 @@ TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
  * production .vcpu_run path. Per memo 27 §B.9 the observability lands
  * with the helper, not after it earns a caller.
  */
+/*
+ * kvm_v2_vcpu_eintr — fired when KVM_RUN returned -EINTR (SIGALRM or
+ * other unmasked host signal interrupted the ioctl before the guest
+ * produced a meaningful exit_reason). D.3 replaces the historical panic
+ * on rc<0 with a fall-through that re-enables preempt and returns; the
+ * UML scheduler will re-enter the dispatcher on the next slice. Phase
+ * F's full signal handling adds restart-via-RAX-rewrite; D.3's minimum
+ * is "don't panic." Reference: v1 archive's EINTR path at
+ * kvm-v1-archive/thread.c:5121-5127.
+ *
+ * Until D.5 flips ops.vcpu_run away from seccomp this event has no
+ * caller and stays silent — the v2 dispatcher is unreferenced from any
+ * production .vcpu_run path. Per memo 27 §B.9 observability lands with
+ * the helper, not after it earns a caller.
+ */
+TRACE_EVENT(um_backend_kvm_v2_vcpu_eintr,
+	TP_PROTO(int cpu),
+	TP_ARGS(cpu),
+	TP_STRUCT__entry(
+		__field(int, cpu)
+	),
+	TP_fast_assign(
+		__entry->cpu = cpu;
+	),
+	TP_printk("cpu=%d", __entry->cpu)
+);
+
 TRACE_EVENT(um_backend_kvm_v2_iotrap_syscall_enter,
 	TP_PROTO(u16 port, unsigned long nr),
 	TP_ARGS(port, nr),

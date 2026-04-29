@@ -92,7 +92,7 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	/* Scheduling (4) — Phase C */
 	.thread_create		= seccomp_thread_create,
 	.thread_start_idle	= seccomp_thread_start_idle,
-	.context_switch		= seccomp_context_switch,	/* HOT */
+	.context_switch		= kvm_v2_context_switch,	/* HOT — D.3 */
 	.ipi_send		= seccomp_ipi_send,
 
 	/* Time (3) — Phase F */

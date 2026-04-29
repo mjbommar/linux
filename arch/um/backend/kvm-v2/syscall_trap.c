@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase D.1+D.2: IO-port LSTAR trampoline +
- * KVM_EXIT_IO syscall-trap dispatcher.
+ * UML backend v2 (KVM) — Phase D.1+D.2+D.3: IO-port LSTAR trampoline +
+ * KVM_EXIT_IO syscall-trap dispatcher + return-side marshal-out.
  *
  * Per memo 26 §D.1 (D.1 portion: storage + bytes) and §D.2 (D.2
  * portion: KVM_EXIT_IO → handle_syscall handler at the bottom of
@@ -13,8 +13,13 @@
  * back into HOST_IP/HOST_EFLAGS, and calls into UML's common
  * handle_syscall path (arch/um/kernel/skas/syscall.c:19) — same shape
  * the seccomp backend uses from its SIGSYS branch
- * (arch/um/backend/seccomp/trap_user.c:159). Marshal-out of the
- * return value into kvm_run->s.regs.regs.rax is D.3's job.
+ * (arch/um/backend/seccomp/trap_user.c:159). D.3 closes the loop with
+ * the post-handle_syscall marshal-out: regs->gp[] is copied back into
+ * kvm_run->s.regs.regs (sync_regs path; KVM_SYNC_X86_REGS dirty bit
+ * is OR'd in), and rcx/r11 are explicitly overwritten with the
+ * user-resume RIP/RFLAGS so SYSRETQ at the trampoline tail lands the
+ * guest at the right user RIP (or signal handler VA on do_signal
+ * delivery) with the right RFLAGS.
  *
  * Both phases live in one file because the trampoline bytes (§D.1)
  * and the host-side decoder (§D.2) are two halves of the same ABI:
@@ -433,22 +438,42 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 
 	handle_syscall(regs);
 
+	/*
+	 * D.3 marshal-out: copy regs->gp[] back into kvm_run->s.regs.regs
+	 * + OR KVM_SYNC_X86_REGS into kvm_dirty_regs. Critical for SYSRETQ:
+	 * the trampoline's `sysretq` reads RIP from RCX and RFLAGS from R11.
+	 * For normal syscall return that's the original user RIP/RFLAGS
+	 * (preserved from the SYSCALL entry above where we stashed
+	 * regs->gp[HOST_CX]/[HOST_R11] into HOST_IP/HOST_EFLAGS); signal-
+	 * delivery (do_signal called from interrupt_end during handle_syscall)
+	 * overwrites regs->gp[HOST_IP] with the signal handler VA, and the
+	 * explicit lift below puts it into RCX so sysretq lands at the
+	 * handler.
+	 *
+	 * RAX gets the return value handle_syscall stashed at gp[HOST_AX]
+	 * (already covered by the marshal — the helper copies gp[HOST_AX]
+	 * → dst->rax).
+	 *
+	 * Note: kvm_v2_marshal_to_kvm_regs at vcpu.c copies HOST_IP→rip,
+	 * HOST_CX→rcx, HOST_R11→r11 — which after the marshal would leave
+	 * rcx = original gp[HOST_CX] (now stale: handle_syscall did not
+	 * update HOST_CX, only HOST_IP/HOST_EFLAGS — and signal-delivery
+	 * may have rewritten HOST_IP). OVERWRITE rcx and r11 explicitly
+	 * after the marshal so SYSRETQ sees the right user-resume RIP/
+	 * RFLAGS regardless of which path handle_syscall took.
+	 *
+	 * v1 reference: kvm-v1-archive/thread.c documents the same RCX/R11
+	 * = user-resume-RIP/RFLAGS contract for SYSRETQ at the trampoline
+	 * tail (its "post-handle_syscall: marshal back to vcpu state"
+	 * region around the per-task vcpu_run cleanup).
+	 */
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->s.regs.regs.rcx = regs->gp[HOST_IP];
+	run->s.regs.regs.r11 = regs->gp[HOST_EFLAGS];
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
 	trace_um_backend_kvm_v2_iotrap_syscall_exit(run->io.port,
 						    regs->gp[HOST_AX]);
-
-	/*
-	 * D.3 marshal-out seam: regs->gp[HOST_AX] now holds the syscall
-	 * return value. D.3 will copy it into
-	 * kvm_run->s.regs.regs.rax and OR KVM_SYNC_X86_REGS into
-	 * kvm_run->kvm_dirty_regs so the next KVM_RUN delivers the
-	 * value via the trampoline's sysretq (which loads RAX from the
-	 * vCPU state KVM holds, not from `regs`). D.2 leaves the marshal
-	 * a no-op — kvm_v2_vcpu_run's existing C.3 path marshals the
-	 * full GPR set out before the next KVM_RUN, but it reads from
-	 * `regs->gp[]` into the mmap and that path runs BEFORE this
-	 * helper is called (via D.5's pre-KVM_RUN marshal-in), not
-	 * after. D.3 closes the loop.
-	 */
 
 	return 0;
 }

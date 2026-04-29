@@ -538,8 +538,11 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
  * replace this whole call site with KVM_CAP_SYNC_REGS writes
  * directly into vcpu->kvm_run->s.regs.regs.
  */
-static void kvm_v2_marshal_to_kvm_regs(struct kvm_regs *dst,
-				       const struct uml_pt_regs *src)
+/* Non-static so D.3's marshal-out path in syscall_trap.c can reuse it.
+ * Declared in kvm_v2_backend.h.
+ */
+void kvm_v2_marshal_to_kvm_regs(struct kvm_regs *dst,
+				const struct uml_pt_regs *src)
 {
 	const unsigned long *gp = src->gp;
 
@@ -717,9 +720,37 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	exit_reason = run->exit_reason;
 	trace_um_backend_kvm_v2_vcpu_exit(cpu, exit_reason);
 
-	if (rc < 0)
+	if (rc < 0) {
+		if (rc == -EINTR) {
+			/*
+			 * D.3 EINTR fall-through: SIGALRM (or other unmasked
+			 * host signals) interrupted KVM_RUN. The guest didn't
+			 * fault yet — the dispatcher caller (UML scheduler)
+			 * will re-enter on the next schedule slice. Phase F's
+			 * full signal handling adds restart-via-RAX-rewrite;
+			 * D.3's minimum is "don't panic." Without this guard
+			 * the gate would fail the moment the SIGALRM tick
+			 * fires under D.5's flipped .vcpu_run.
+			 *
+			 * Reference: v1's EINTR path at
+			 * kvm-v1-archive/thread.c:5121-5127 (the equivalent
+			 * "rc == -EINTR → rc = 0; fall through to next
+			 * iteration" branch in v1's per-task vcpu_run).
+			 *
+			 * Skip the post-KVM_RUN GPR marshal-back below — on
+			 * EINTR kvm_run->s.regs.regs may be mid-update (KVM
+			 * doesn't guarantee the sync_regs view is coherent on
+			 * a signal-aborted entry). regs->gp[] retains the
+			 * pre-KVM_RUN state, which is the right "where is
+			 * user" snapshot for the next entry to re-marshal in.
+			 */
+			trace_um_backend_kvm_v2_vcpu_eintr(cpu);
+			preempt_enable();
+			return;
+		}
 		panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
 		      cpu, rc, exit_reason);
+	}
 
 	/*
 	 * C.3: post-exit, KVM populated kvm_run->s.regs.{regs,sregs}
@@ -824,6 +855,103 @@ int kvm_v2_fpu_capture_for_fork(struct arch_thread *from,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_fork);
+
+/*
+ * Phase D.3: per-task FPU capture on context-switch-out. C.4 only
+ * captures at fork (arch_copy_thread). Tasks migrating between host
+ * CPUs via the UML scheduler need their FPU snapshot to follow them
+ * — otherwise the destination per-CPU vCPU has whichever FPU the last
+ * task on that vCPU left behind. Even on a UP build (NR_CPUS_DEFAULT=1)
+ * the capture is correct: it snapshots the outgoing task's per-CPU vCPU
+ * FPU into the task's arch_thread so the task's NEXT first-run installs
+ * the snapshot via kvm_v2_fpu_install_on_first_run (C.4); the intervening
+ * task on the same vCPU runs through its own first-run install path.
+ *
+ * Hooked from kvm_v2_context_switch (ops.c) BEFORE seccomp's
+ * context_switch runs. We snapshot FROM's per-CPU vCPU into
+ * from->thread.arch.kvm_v2.fpu so its first run on its next destination
+ * CPU restores the snapshot via kvm_v2_fpu_install_on_first_run (C.4).
+ *
+ * Mirrors kvm_v2_fpu_capture_for_fork's preempt_disable + per-CPU pool
+ * pick + NULL-or-sentinel guard. Failure is non-fatal: the warning
+ * lands in dmesg ratelimited; the task migrates without an FPU snapshot
+ * (its first run on the destination CPU will install architectural
+ * reset values via kvm_v2_fpu_install_on_first_run's else-branch).
+ *
+ * v1 archive's equivalent: kvm-v1-archive/thread.c:240-339 documents
+ * the per-task FPU-capture-and-install pair. v1 keyed off `from->kvm.
+ * vcpu->fd` (per-task vCPU model) — v2's per-host-CPU pool means we
+ * capture from whichever pool entry was running when context_switch
+ * fires, and the task carries its snapshot to whatever destination CPU
+ * it lands on next.
+ */
+void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
+{
+	struct kvm_v2_vcpu *vcpu;
+	int cpu, rc;
+
+	if (!from)
+		return;
+
+	preempt_disable();
+	cpu  = smp_processor_id();
+	vcpu = kvm_v2_vcpu_get(cpu);
+	if (!vcpu || vcpu->vcpu_fd < 0) {
+		/* Pool not up or sentinel — no snapshot. The task's next
+		 * first-run install will fall back to arch-default reset
+		 * values (kvm_v2_fpu_install_on_first_run's else-branch).
+		 */
+		from->thread.arch.kvm_v2.fpu_valid = false;
+		preempt_enable();
+		return;
+	}
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+			      (unsigned long)&from->thread.arch.kvm_v2.fpu);
+	if (rc < 0) {
+		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_switch_out: KVM_GET_FPU(cpu=%d vcpu_fd=%d) failed (%d) — task migrates without FPU snapshot (will use arch defaults on resume)\n",
+				    cpu, vcpu->vcpu_fd, rc);
+		from->thread.arch.kvm_v2.fpu_valid = false;
+		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
+		preempt_enable();
+		return;
+	}
+
+	from->thread.arch.kvm_v2.fpu_valid = true;
+	/* Reuse C.4's tracepoint — capture is capture, regardless of
+	 * whether the trigger was fork or context-switch-out. The
+	 * `valid=1` discriminator on the event tells consumers a
+	 * snapshot landed; the task->comm in the surrounding ftrace
+	 * record disambiguates fork vs switch-out for any consumer
+	 * that cares.
+	 */
+	trace_um_backend_kvm_v2_fpu_capture(cpu, 1);
+	preempt_enable();
+}
+EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_switch_out);
+
+/*
+ * Phase D.3: v2's context_switch op wraps seccomp's. Capture parent's
+ * FPU into arch_thread before delegating to seccomp (which does the
+ * stub-child swap and turnstile work via switch_threads on the
+ * per-process jmp_buf). After D.5's pointer flip, the child's first
+ * kvm_v2_vcpu_run installs the snapshot via
+ * kvm_v2_fpu_install_on_first_run (C.4 already wires this).
+ *
+ * Today (D.3) the FPU capture runs at every UML context switch under
+ * v2 backend selection, regardless of whether the child runs through
+ * KVM (.vcpu_run is still seccomp_vcpu_run until D.5). That is
+ * intentional per memo 26 §D.3: D.3 ships with a working observable
+ * behaviour — `trace-cmd -e um_backend:um_backend_kvm_v2_fpu_capture`
+ * shows events firing during normal scheduling. The seccomp delegation
+ * still drives actual guest progress.
+ */
+void kvm_v2_context_switch(struct task_struct *from, struct task_struct *to)
+{
+	kvm_v2_fpu_capture_for_switch_out(from);
+	seccomp_context_switch(from, to);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_context_switch);
 
 /*
  * Phase C.4: pre-KVM_RUN FPU install. Called from kvm_v2_vcpu_run
