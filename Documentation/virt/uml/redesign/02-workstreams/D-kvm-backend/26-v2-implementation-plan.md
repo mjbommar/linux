@@ -974,28 +974,60 @@ EPT, fix 3 only matters once fixes 1 + 2 land. Together they
 complete "first KVM_RUN under v2 produces a working user-mode
 dispatch."
 
-**Initial Phase E.4 validation (post-E.5)** — single-process
-workloads pass; fork+wait is the next blocker:
+**Phase E.4 validation matrix (refreshed at `31748fea602e`)** —
+multi-process workloads now run through end-to-end; one residual
+remains in glibc varargs format substitution for the child task.
+Post-E.5 instrumentation found and fixed three sub-bugs in the
+fork-and-dispatch path:
 
-| Workload                    | Status | Notes                              |
+  1. **CPL=0 from first entry** — `kvm_v2_install_production_sregs`
+     installed kernel CS/SS at vcpu_create, leaving the guest at
+     CPL=0 until its first SYSCALL→sysretq round-trip. /bin/true
+     and /bin/echo got away with it because their first instruction
+     after _start IS a syscall; glibc fork's child task ran
+     ~26 dispatches of post-fork bookkeeping at CPL=0 before the
+     first syscall and reached `abort+0xa9`'s `hlt` (0xf4) → at
+     CPL=0 hlt panics with KVM_EXIT_HLT instead of #GP'ing as it
+     would at CPL=3. Fix at `32a7603236b0`: select CS=0x2b/SS=0x23
+     (DPL=3) in install_production_sregs so the guest enters at
+     CPL=3 from first KVM_RUN. Existing SYSCALL/sysretq + IDT-gate
+     transitions internally manage CPL; only the *initial* value
+     needed correcting. v1 archive's `sregs.c` had this shape.
+
+  2. **Fork's child mm inherited parent's worker pointer** — UML's
+     fork→dup_mm path bytewise-copies the parent mm_struct,
+     including `mm->context.worker`. Without resetting in
+     init_new_context, `seccomp_mm_create → worker_alloc_stub_for_mm
+     → __spawn_worker_for_mm` tripped `WARN_ON_ONCE(mm->context.
+     worker != NULL)` at `arch/um/kernel/spawner.c:225` on every
+     fork, then silently overwrote the inherited pointer (leaking
+     the parent's reference). Fix at `31748fea602e`: clear
+     `mm->context.worker = NULL` at the top of init_new_context.
+     WARN gone; substrate gate stays green.
+
+| Workload                          | Status   | Notes                              |
 |---|---|---|
-| `init=/bin/true`            | PASS   | exit_group(0) → init-kill panic    |
-| `init=/bin/echo`            | PASS   | stdout works; clean exit           |
-| `init=/bin/sh` (echo only)  | PASS   | shell builtins work                |
-| `init=/bin/sh` (fork+exec)  | FAIL   | child task never dispatches        |
-| C fork+waitpid as init      | FAIL   | parent blocks in wait4 forever     |
+| `init=/bin/true`                  | PASS     | exit_group(0) → init-kill panic    |
+| `init=/bin/echo hello`            | PASS     | stdout works; clean exit           |
+| `init=/bin/sh` (builtins only)    | PASS     | shell builtins work                |
+| Static glibc no-fork              | PASS     | printf + fprintf both substitute   |
+| Pure-syscall fork+wait+exit       | PASS     | child runs, parent waits, both OK  |
+| glibc fork (no wait)              | PASS     | parent + child stdio both work     |
+| glibc fork+wait (parent printf)   | PASS     | wait returns child status correctly |
+| glibc fork+wait (child printf %d) | RESIDUAL | child's *first* printf emits `%d` literally instead of substituting; subsequent calls work |
 
-The fork+wait failure mode: parent's `fork()` returns the
-expected child pid; child task IS created (worker spawn fires
-for child mm at `__spawn_worker_for_mm`); child's user code
-NEVER executes (no output reaches stdout); parent's `wait4`
-blocks forever. WARN_ON_ONCE at `arch/um/kernel/spawner.c:225`
-fires on the duplicate worker spawn for fork's COW mm. This
-is Phase E.4 work — instrumentation in `kvm_v2_vcpu_run` to
-determine whether the child task ever reaches the dispatch
-path is the next step. Single-vCPU pool + scheduler-driven
-dispatch under v2 has invariants that are about to be
-exercised for the first time at fork; expect surprises.
+**Residual** (followup task #90): under v2, fork's child has its
+*first* glibc printf-family call output format specifiers
+literally rather than substituting the value. Stack canary at
+`fs:0x28` is verified identical between parent and child, so
+FS_BASE inheritance is correct. Forcing arch-reset FPU on child
+first-run (bypassing `kvm_v2_fpu_capture_for_fork`) does NOT fix
+it, so FPU-state-inheritance is not the cause. Same test program
+under seccomp backend works fine — v2-specific. Background
+subagent investigating; remaining hypothesis space includes
+GOT/PLT lazy-resolution divergence, glibc atfork-handler state,
+CPUID-curated IFUNC dispatch, and stack alignment at child's
+first user-mode entry.
 
 ### Lesson for future memo work
 
