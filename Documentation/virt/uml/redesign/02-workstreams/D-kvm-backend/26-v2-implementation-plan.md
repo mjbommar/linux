@@ -1760,6 +1760,34 @@ fork()s (see "Substrate gate v2 non-determinism (2026-04-30)" above).
 H.1b (full cpython gate measurement) remains blocked on root-causing
 that fork-loop bug — likely the same family as #95/#96.
 
+#### Re-re-baseline (2026-04-30 at tip `8b29ce0b5608`)
+
+After the syscall-side `interrupt_end()` re-introduction at
+`bd435856948e` (the substrate-parity fix), the wall-clock numbers
+re-bucket:
+
+| Backend | median | samples |
+|---------|--------|---------|
+| seccomp | 90 ms  | 0.090 0.090 0.100 0.090 0.090 0.090 0.090 |
+| kvm-v2  | 90 ms  | 0.090 0.090 0.090 0.090 0.090 0.090 0.090 |
+| **ratio kvm-v2 / seccomp** | **1.000×** | — |
+
+The 2.25× lead from `aaced3ce4924` (v2 = 40 ms, bucketed) narrowed
+to 1.0× (both = 90 ms, bucketed) once `interrupt_end()` runs after
+every syscall. That call invokes `do_signal` + reschedule check on
+every syscall return — exactly what's needed for `-ERESTARTSYS`
+translation but not free per dispatch. Phase H gate criterion is
+"≤ 1.2× seccomp wall-clock"; we still PASS the gate at 1.0×, but
+the slack is gone. Phase H.2 (hot-path optimization) is now the
+next perf lever; likely candidates: skip `interrupt_end` when no
+signal is pending, batch the `current_mm_sync` drain, narrow the
+CR4.PGE TLB toggle to mm-change events.
+
+The trade was correct: v2 substrate gate moved from PASS=6 to
+PASS=25 (full seccomp parity), closing #94 / #95 / #96 / #107 in
+exchange for a 2.25× → 1.0× perf regression. Phase H.2 can
+optimize back; correctness ships first.
+
 ### H.1b — Headline cpython gate measurement (2026-04-30 update)
 
 After the syscall-side interrupt_end fix at bd435856948e and the
