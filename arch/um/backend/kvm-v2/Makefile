@@ -17,3 +17,10 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
 # tests; no kernel state assumed. Build only when explicitly
 # requested.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_marshal.o
+
+# Byte-shape KUnit suite (memo 26 §I.2). Locks the SDM-prescribed
+# byte layouts for the IDT-pushed exception frame, GDT segment
+# descriptors, LSTAR trampoline, and IDT handler stubs. Pure data
+# tests; no kernel state assumed. Catches the off-by-8 IST-frame
+# read class of bugs that bit E.5 boot smoke + adjacent regressions.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_byteshape.o
