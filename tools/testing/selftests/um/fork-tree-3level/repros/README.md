@@ -14,6 +14,8 @@ follow-up to #95 / #96). All built statically with `-O0
 | `child_only_canary.c` | seccomp/v2  | PASS / FAIL 10/10 | Child calls `strlen(memset(buf, 0xaa, 64))` — heavy XMM/SSE workload. |
 | `child_no_write.c`    | seccomp/v2  | PASS / FAIL ~90% | Child does ZERO stack writes — straight asm to exit_group(0). Bug still fires; rules out CoW-on-first-stack-write hypothesis. |
 | `canary_v2.c`         | seccomp/v2  | PASS / FAIL ~20% | Reads `%fs:0x28` in parent + child + parent_post, logs to a file. **DECISIVE FINDING: when child's canary read succeeds, parent and child see IDENTICAL canary values.** So `fs.base` and the canary GLOBAL are correct. The bug is **stack memory corruption** somewhere — function-entry canary save vs function-epilogue canary check disagree because some path between them overwrites the saved canary on stack. |
+| `canary_locate.c`     | seccomp/v2  | (handler not caught) | Tries to install a SIGABRT handler that captures the RIP at __stack_chk_fail. Handler doesn't fire — glibc's abort path may not deliver SIGABRT here. |
+| `sigblock.c`          | seccomp/v2  | PASS / FAIL ~70% | Blocks ALL signals via `sigprocmask(SIG_BLOCK, &all)` before fork. Bug still fires at the same rate. **Eliminates signal-delivery / sigframe setup as the cause.** |
 
 Conclusion (2026-04-30, after canary_v2 narrowing): the bug is
 **stack memory corruption** somewhere in v2's user-mode round-trip
