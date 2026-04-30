@@ -1439,66 +1439,76 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
 
 	/*
-	 * D.5-fix-2: drain UML's deferred-signal queue. v1 archive does
-	 * this at kvm-v1-archive/thread.c:3979 — without it, SIGALRM-
-	 * handler-deferred work (timer tick processing, scheduler yields,
-	 * etc.) stays queued and we re-EINTR on every dispatch.
-	 * unblock_signals lets UML's signal handler run productively
-	 * before we either panic, fall through to the EINTR return, or
-	 * dispatch the exit reason.
+	 * SNAPSHOT the kvm_run mmap state IMMEDIATELY after KVM_RUN
+	 * returns, BEFORE unblock_signals(). Codex (gpt-5.5 xhigh)
+	 * audit (memo §E.4 followup, 2026-04-30) flagged this as the
+	 * residual fork-tree-3level / child_delay bug after the TLB-
+	 * flush fix at 11102c8176fb landed.
 	 *
-	 * Symmetric: signals are blocked at the host-thread level during
-	 * KVM_RUN via KVM_SET_SIGNAL_MASK (kvm_v2_install_signal_mask at
-	 * vcpu_create); SIGALRM is the one exception (timer preemption).
-	 * On EINTR-from-SIGALRM, the host signal handler queued work via
-	 * UML's irqflags machinery; unblock_signals here drains it.
+	 * Sequence v2 was using:
+	 *   KVM_RUN → unblock_signals → read run->{exit_reason,s.regs}
+	 *
+	 * The window between unblock_signals and the read can host:
+	 *   1. SIGALRM-driven timer tick (timer_real_alarm_handler at
+	 *      arch/um/os-Linux/signal.c:373 → timer IRQ at
+	 *      arch/um/kernel/time.c:770) which can wake other tasks
+	 *      and set TIF_NEED_RESCHED.
+	 *   2. preempt_schedule_irq on the way out of unblock_signals
+	 *      may switch `current` to a different UML task on the
+	 *      same per-host-CPU vCPU.
+	 *   3. Another KVM_RUN exit on the same vCPU mmap may occur
+	 *      via the new task's userspace() → vcpu_run, overwriting
+	 *      the mmap before we read it.
+	 *
+	 * v1 handled this by snapshotting kvm_regs / kvm_sregs into
+	 * locals before its own unblock_signals (kvm-v1-archive/
+	 * thread.c:3937-3979). Mirror the same shape here.
 	 */
-	unblock_signals();
+	{
+		struct kvm_regs eintr_regs = run->s.regs.regs;
+		struct kvm_sregs eintr_sregs = run->s.regs.sregs;
+		u32 exit_reason_snap = run->exit_reason;
 
-	exit_reason = run->exit_reason;
-	trace_um_backend_kvm_v2_vcpu_exit(cpu, exit_reason);
+		/*
+		 * D.5-fix-2: drain UML's deferred-signal queue. v1 archive
+		 * does this at kvm-v1-archive/thread.c:3979 — without it,
+		 * SIGALRM-handler-deferred work (timer tick processing,
+		 * scheduler yields, etc.) stays queued and we re-EINTR on
+		 * every dispatch.
+		 *
+		 * Symmetric: signals are blocked at the host-thread level
+		 * during KVM_RUN via KVM_SET_SIGNAL_MASK; SIGALRM is the
+		 * one exception (timer preemption). On EINTR-from-SIGALRM,
+		 * the host signal handler queued work via UML's irqflags
+		 * machinery; unblock_signals here drains it.
+		 */
+		unblock_signals();
 
-	if (rc < 0) {
-		if (rc == -EINTR) {
-			/*
-			 * D.3 EINTR fall-through: SIGALRM (or other unmasked
-			 * host signals) interrupted KVM_RUN. KVM sets
-			 * exit_reason = KVM_EXIT_INTR (10) and the sync_regs
-			 * view IS coherent on this path (KVM commits guest
-			 * state on signal exits per
-			 * arch/x86/kvm/x86.c::kvm_arch_vcpu_ioctl_run; it's
-			 * only mid-update on catastrophic FAIL_ENTRY paths).
-			 * v2 must marshal regs->gp[] BACK from sync_regs so
-			 * the next dispatch resumes at the post-EINTR RIP, not
-			 * the pre-EINTR one — without this the guest can never
-			 * advance because every re-entry re-writes the original
-			 * RIP via marshal_to_kvm_regs (D.5 diagnostic
-			 * confirmed RIP stuck at 0x40023340 forever).
-			 *
-			 * Reference: v1's EINTR path at
-			 * kvm-v1-archive/thread.c:3939 + 5121-5127 — v1
-			 * handles EINTR identically to a normal exit for the
-			 * marshal-back; only the dispatch switch differs.
-			 */
-			kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
-			kvm_v2_marshal_sregs_back(regs, &run->s.regs.sregs);
-			trace_um_backend_kvm_v2_vcpu_eintr(cpu);
-			preempt_enable();
-			return;
+		exit_reason = exit_reason_snap;
+		trace_um_backend_kvm_v2_vcpu_exit(cpu, exit_reason);
+
+		if (rc < 0) {
+			if (rc == -EINTR) {
+				kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
+				kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
+				trace_um_backend_kvm_v2_vcpu_eintr(cpu);
+				preempt_enable();
+				return;
+			}
+			panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
+			      cpu, rc, exit_reason);
 		}
-		panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
-		      cpu, rc, exit_reason);
-	}
 
-	/*
-	 * C.3: post-exit, KVM populated kvm_run->s.regs.{regs,sregs}
-	 * because kvm_valid_regs was set at vcpu_create. Marshal GPRs
-	 * back from the mmap'd struct, then also pull sregs.fs.base /
-	 * gs.base back into gp[HOST_FS_BASE/GS_BASE] — see the helper's
-	 * comment for why this read-back is load-bearing for libc TLS.
-	 */
-	kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
-	kvm_v2_marshal_sregs_back(regs, &run->s.regs.sregs);
+		/*
+		 * C.3: post-exit, KVM populated kvm_run->s.regs.{regs,
+		 * sregs} because kvm_valid_regs was set at vcpu_create.
+		 * Marshal GPRs back from the SNAPSHOT (which preceded
+		 * unblock_signals), not from the live mmap which may have
+		 * been overwritten by a context-switched task's KVM_RUN.
+		 */
+		kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
+		kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
+	}
 
 	switch (exit_reason) {
 	case KVM_EXIT_IO:
