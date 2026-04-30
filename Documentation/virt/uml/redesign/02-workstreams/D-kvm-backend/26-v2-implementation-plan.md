@@ -1052,7 +1052,7 @@ contract.
 | **Multi-import python** (json+base64+os) | PASS | FAIL    | UML kernel-side fatal signal during child python startup (#96) |
 | Direct `init=python3 -c "..."`        | PASS    | flaky  | PID 1 = python3 sometimes segfaults; shell-wrapped works |
 | Direct `init=fork_exec_wait` (50× fork+execve+waitpid loop) | PASS | FAIL (SIGILL #95) | Substrate harness path works (the fork is a shell child not init); direct init=fork_exec_wait still SIGILLs |
-| **Substrate gate**                    | **PASS=25 / FAIL=3 / XFAIL=3** | **PASS=4..9 / FAIL=2..4 / XFAIL=0** (non-deterministic, mode=4) | See "Substrate gate v2 non-determinism (2026-04-30)" below |
+| **Substrate gate**                    | **PASS=25 / FAIL=3 / XFAIL=3** | **PASS=5..9 / FAIL=3..4 / XFAIL=0** (post-fix at 11102c8176fb; mode=5, common 7 and 9) | See "Fork-tree-3level reproducer (2026-04-30)" below for the root cause + fix; the post-fix distribution shows the floor lifted from 4→5 and 9 is now common rather than rare |
 
 **v2 progress trajectory this session**:
   - Pre-CPL=3 SREGS:           v2 stuck at "infinite EPT-violation reinjection loop"
@@ -1232,6 +1232,55 @@ Concrete next moves (deferred to a focused kernel-side investigation):
        - sregs.cr2 cleared in load_user_sregs (commit
          24a7f0575e18). Stops parent's last #PF address leaking
          into child via the per-host-CPU vCPU's sregs mmap.
+
+     **ROOT CAUSE FOUND (codex-gpt5.5-xhigh audit, fix at 11102c8176fb):**
+
+     KVM kept stale guest-TLB entries that v2 never flushed. UML's
+     "guest" page tables live in physmem (every guest page is just
+     bytes in the physmem memslot). When UML's kernel updates a
+     guest PTE (post-CoW handle_mm_fault rewrites the spawner PTE
+     AND calls set_pte_at on the UML guest pgd), only the spawner
+     PTE write fires KVM's mmu_notifier. The UML guest-pgd write is
+     a plain memory write into the physmem memslot, which
+     mmu_notifier doesn't see. So KVM's guest-TLB cache (the
+     linear-address translation cache, NOT the slot-0 TDP) keeps
+     mapping GVA → old physmem PFN even after UML's PTE points to
+     the post-CoW page.
+
+     Fix has two pieces (both in `kvm_v2_load_user_sregs` at
+     vcpu.c):
+
+       1. **`current_mm_sync()` before KVM_RUN.** Drains UML's
+          deferred-flush queue so any pending mremap/mprotect/
+          munmap on the spawner mm gets applied via host syscalls,
+          firing mmu_notifier and invalidating KVM TDP for the
+          affected GPA ranges. seccomp does this at
+          `arch/um/backend/seccomp/trap_user.c:68`; v1 did at
+          `kvm-v1-archive/thread.c:3851`. v2 was missing it.
+
+       2. **`sregs->cr4 ^= X86_CR4_PGE` per dispatch.** Forces
+          KVM's `__set_sregs_common` to set `mmu_reset_needed=1`
+          and request `TLB_FLUSH_GUEST` on every entry, flushing
+          the guest TLB cache via `vpid_sync_context` (single-
+          context INVVPID). v1 did this at
+          `kvm-v1-archive/thread.c:2974-2984`, with a comment
+          documenting that narrowing the toggle to "tlb_stale &&
+          same_cr3" regressed v1's gate to "~70% pass rate vs
+          100%" — exactly the v2 fork-tree-3level rate observed
+          before this fix.
+
+     Empirical impact:
+       - `child_simple` reproducer: was 3-4/10 PASS, now 20/20.
+       - `regrtest-substrate` PASS distribution shifted from
+         {4×8, 6×1, 9×1} to {5×6, 7×3, 9×0..2 across runs}. Floor
+         5, ceiling 9; the PASS=4 outlier is gone.
+       - `fork_tree_3level` gate: 7/20 PASS (was 0-2/10).
+       - `child_delay` (with usleep): still 0/10 — different
+         residual; investigation continues.
+       - Perf unchanged: 0.444× ratio (2.25× faster than seccomp)
+         on perf-py-startup.
+
+     **Residual investigation:**
 
      **Eliminated this round** (no improvement on the
      child_simple gate at ~30-40% PASS):
