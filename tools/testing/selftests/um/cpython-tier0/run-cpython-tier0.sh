@@ -99,7 +99,7 @@ OUT=$(timeout --kill-after=15 600 "$BINARY" \
 	</dev/null 2>&1 || true)
 
 if [ -n "${CPYTHON_TIER0_BACKEND:-}" ]; then
-	OBSERVED=$(echo "$OUT" | sed -n 's/^um: backend = \([a-z]*\).*/\1/p' | head -1)
+	OBSERVED=$(echo "$OUT" | sed -n 's/^um: backend = \([a-z0-9-]*\).*/\1/p' | head -1)
 	if [ "$OBSERVED" != "${CPYTHON_TIER0_BACKEND}" ]; then
 		echo "SKIP: backend probed to '$OBSERVED' (asked for ${CPYTHON_TIER0_BACKEND})" >&2
 		exit 4
