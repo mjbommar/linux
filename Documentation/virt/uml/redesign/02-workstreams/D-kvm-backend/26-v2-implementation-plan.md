@@ -1760,16 +1760,88 @@ fork()s (see "Substrate gate v2 non-determinism (2026-04-30)" above).
 H.1b (full cpython gate measurement) remains blocked on root-causing
 that fork-loop bug — likely the same family as #95/#96.
 
-### H.1b — Headline cpython gate measurement (deferred)
+### H.1b — Headline cpython gate measurement (2026-04-30 update)
 
-Substrate gate under v2 currently runs class-a-env (4 PASS + 2 FAIL,
-matching seccomp's failure pattern for tty_isatty + termios_get).
-Class-b-process needs the syscall-side interrupt_end fix (#94)
-before fork+wait+exec sequences run cleanly. Once that lands,
-re-measure full gate wall-clock.
+After the syscall-side interrupt_end fix at bd435856948e and the
+substrate gate reaching full PASS=25 parity, the cpython-parity
+gate is now reachable. Three back-to-back trials at tip
+8b29ce0b5608:
 
-- Instrument syscall count, vmexit count, time-per-syscall, time-per-
-  vmexit.
+| Trial | parity | diverge |
+|-------|--------|---------|
+| 1     | 13     | 8       |
+| 2     | 15     | 6       |
+| 3     | 18     | 3       |
+
+Best run shows 18/21 modules at parity (vs seccomp 21/21 reference).
+The diverging modules vary across runs (test_struct, test_dict,
+test_int, test_itertools, test_typing all rotate through the
+DIVERGE bucket), which points at one underlying flaky pattern,
+not 5 independent regressions.
+
+**Residual root cause** (deferred, see #115):
+`InterpreterPoolExecutor` (5 worker threads each running its own
+PEP-684 subinterpreter, each importing `struct`) reproduces the
+flake in isolation at ~50%. The minimal repro is:
+
+```
+python3 -u -c "
+from concurrent.futures import InterpreterPoolExecutor
+with InterpreterPoolExecutor(max_workers=5) as ex:
+    list(ex.map(exec, ['import struct'] * 5))
+"
+```
+
+Symptoms: SIGSEGV at near-NULL+small-offset writes (PyFunction_
+NewWithQualName, PyList_New, libc.so allocator) or glibc malloc
+abort ("free(): corrupted unsorted chunks"). 100% PASS under
+seccomp.
+
+Things that PASS under v2:
+- Single-threaded Python with subinterpreters (10× create+run+
+  destroy)
+- ThreadPool with 5 threads each importing struct (no subinterp)
+- All 25 substrate-gate reproducers (covers fork+exec+wait,
+  ioctls, etc.)
+- cpython-tier0 (libcrypto+hashlib loading from C extension)
+- multi-import (json+base64+os in one process)
+- child_delay 10/10
+- single-process workloads in general
+
+Codex (gpt-5.5 xhigh) audit, 2026-04-30 (full report at
+/tmp/codex-response.txt):
+
+> "Most likely class: shared per-host-CPU vCPU ownership is being
+> held across paths that can run UML signal/scheduler work."
+
+The hypothesis is that `kvm_v2_vcpu_run`'s preempt_disable spans
+the entire dispatch including handle_syscall + interrupt_end, and
+sleepable work in there can let other UML tasks share the vCPU
+mmap. v1 used `block_signals()` before KVM entry and
+`unblock_signals()` only after exit-state copy, narrowing the
+window. v2 has the snapshot-before-unblock half but holds preempt
+across the whole dispatch.
+
+Tactical fixes attempted (none moved the failure rate):
+- Add `block_signals()` before `load_user_sregs` (still 5/10 PASS)
+- Drop the unconditional `marshal_sregs_back` (regressed substrate
+  gate by 1, no help on InterpreterPool)
+
+This is the original Bug B *family* from v1 — InterpreterPool was
+the canonical Bug B trigger. v2's no-shadow-PT design eliminates
+many bug classes (memo §"Risk classes that v2 STRUCTURALLY
+ELIMINATES"), but the shared-per-CPU-vCPU + held-preempt design
+introduced a new race that surfaces only on the multi-thread +
+multi-subinterpreter combo.
+
+**Defer to a focused deep-dive session** (#115) — the current
+substrate parity ships, and Phase I polish + Phase J validation
+work is independent of this residual.
+
+### H.1b legacy notes (pre-2026-04-30)
+
+- Instrument syscall count, vmexit count, time-per-syscall,
+  time-per-vmexit.
 - Run cpython gate, capture profiles.
 
 ### H.2 — Optimize hot paths (5-7 days)
