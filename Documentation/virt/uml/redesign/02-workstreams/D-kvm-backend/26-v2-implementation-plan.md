@@ -1233,25 +1233,40 @@ Concrete next moves (deferred to a focused kernel-side investigation):
          24a7f0575e18). Stops parent's last #PF address leaking
          into child via the per-host-CPU vCPU's sregs mmap.
 
-     **Remaining suspects** for the focused next-session
-     investigation:
-       a. Worker / stub-child mm setup. v2 spawns a worker host
-          process per UML mm. Audit (memo §E.4 sub-agent report,
-          2026-04-30) confirms KVM TDP walks via memslot 0 (not
-          stub-child mm), but timing of new-mm worker spawn vs
-          first KVM_RUN may matter.
-       b. Per-CPU vCPU state ownership. Each task migrates onto
-          whichever vCPU is current. v1 had per-task vCPUs; v2
-          uses per-host-CPU pool. Some hidden state may persist on
-          the vCPU between tasks (debug regs DR0-DR7 are not
-          touched at all per the audit; KVM_SYNC_X86_EVENTS is
-          not enabled).
-       c. EPT/TLB invalidation timing for the child's CR3. Even
-          though CR3 is set correctly on every dispatch, KVM may
-          carry stale TDP cache entries.
-       d. User-stack page mapping race. Child's CoW'd stack pages
-          may not be properly invalidated in the host process's mm
-          before child runs.
+     **Eliminated this round** (no improvement on the
+     child_simple gate at ~30-40% PASS):
+       - Worker / stub-child mm setup. Tested with
+         `CONFIG_UM_WORKER_PROCESS=n`; bug rate unchanged.
+       - Signal-delivery / sigframe setup. Tested with
+         `sigprocmask(SIG_BLOCK, sigfillset())` blocking ALL
+         signals before fork; bug rate unchanged.
+       - Real KVM_SET_SREGS ioctl every dispatch (vs SYNC_REGS
+         dirty-bit). No improvement.
+       - Stale segment registers / FPU state. Tested resets; no
+         improvement.
+       - SIGALRM/preemption-driven race. Tested with
+         `time-travel=infcpu` (disables real-time preemption);
+         only marginal improvement (40% vs 30% PASS).
+
+     Adding a `usleep(100ms)` to the child BEFORE its first stdio
+     call makes the bug 10/10 deterministic — adding time/syscalls
+     in the child reliably triggers the corruption.
+
+     **Remaining suspects** (very narrow now):
+       c. EPT/TLB invalidation timing. v2 may carry stale TDP
+          cache entries. The audit suggests adding per-CPU
+          last_task tracking + flushing on task change.
+       d. User-stack page mapping race. Maybe KVM_REQ_TLB_FLUSH
+          isn't being issued when child's mm CoW updates a PTE.
+
+     Reproducer suite at
+     `tools/testing/selftests/um/fork-tree-3level/repros/`
+     expanded to 9 variants for fast bisection.
+
+     Next: instrument KVM tracepoints (KVM_REQ_TLB_FLUSH,
+     mmu_invalidate, kvm_inj_exception) during a single
+     fork-tree-3level run and compare to seccomp's identical
+     syscall trace.
 
      **Reproducer suite** at
      `tools/testing/selftests/um/fork-tree-3level/repros/` makes
