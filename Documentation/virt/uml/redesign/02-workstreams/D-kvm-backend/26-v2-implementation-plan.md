@@ -1189,18 +1189,35 @@ uninitialised `signo` slot when the host process the worker is
 running on is reaped.
 
 Concrete next moves (deferred to a focused kernel-side investigation):
-  1. Audit how v2 propagates fs.base / gs.base back from KVM_RUN
-     exits. Compare against seccomp's per-task FS_BASE/GS_BASE
-     accounting in `arch/um/backend/seccomp/`. Suspected gap:
-     `marshal_from_kvm_regs` copies GPRs but not segment bases;
-     `load_user_sregs` writes fs.base from gp[HOST_FS_BASE] each
-     dispatch, so a user-mode `wrfsbase` is silently dropped on the
-     next vcpu_run.
-  2. Add an `arch_prctl(ARCH_GET_FS)` / `wrfsbase` test reproducer
-     that confirms the loss. Should round-trip a known-value FS_BASE
-     across one syscall under both backends.
-  3. ~~Bisect against 31ba9c354063 (interrupt_end placement).~~
-     Done; negative result. The bug is older than that commit.
+  1. ~~Audit fs.base / gs.base round-trip~~ Closed at 6e52574cca6c.
+     Defensive fix landed; doesn't resolve fork-tree-3level.
+  2. ~~Bisect against 31ba9c354063 (interrupt_end placement).~~
+     Closed; negative result.
+  3. **Locate child-process stack-corruption.** Bisection via
+     `tools/testing/selftests/um/fork-tree-3level/repros/` (landed
+     this session) narrowed the bug:
+       - `raw_fork.c` (no libc, raw asm syscalls): PASS on v2 ✓
+       - `libc_simple.c` (libc, no fork): PASS on v2 ✓
+       - `child_simple.c` (libc + fork; child does printf): FAIL on
+         v2 8/10 with `*** stack smashing detected ***` in the CHILD
+       - `child_only_canary.c` (child calls glibc's
+         strlen/memset internals): FAIL 10/10 in CHILD
+       - Parent always exits cleanly (RC=0). The stack-smashing-
+         detected output is from the CHILD's libc.
+     The bug is **v2's child-process state on first dispatch after
+     fork**. Likely candidates:
+       a. Stale FPU/XMM state from a previous task on the same
+          per-CPU vCPU. v2's `kvm_v2_fpu_install_on_first_run` may
+          not set arch-fresh values for a forked child (only for
+          freshly-spawned tasks).
+       b. CR3 or KVM memslot inconsistency for the child's mm —
+          first dispatch after fork may load stale TLB/EPT entries
+          mapping child VAs to parent's physical pages.
+       c. Child's gs.base stale from previous task on same vCPU
+          (FS_BASE round-trip is now correct; GS could still leak).
+     Next: instrument `kvm_v2_fpu_install_on_first_run` to dump
+     FPU state on first child dispatch; compare to parent's FPU at
+     fork time. If different, the FPU restore path is broken.
 
 These are kernel-internals work, not host-side tooling, so they
 belong on a fresh `uml-redesign-plan` checkout with codex-style
