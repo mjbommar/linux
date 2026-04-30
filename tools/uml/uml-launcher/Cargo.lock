@@ -711,6 +711,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+
+[[package]]
 name = "sigchld"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -986,6 +992,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shared_child",
+ "shellexpand",
  "signal-hook",
  "tempfile",
  "time",

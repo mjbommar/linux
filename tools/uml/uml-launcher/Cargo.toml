@@ -55,6 +55,9 @@ serde_json = "1"
 sha2 = "0.10"
 # umlctl hex-encode the sha256 digest for the manifest.
 hex = "0.4"
+# umlctl `up` Umlfile env-var expansion ($HOME, ${UML_KERNEL}).
+# default features only; no full-shell-syntax expansion.
+shellexpand = { version = "3", default-features = false, features = ["base-0"] }
 
 # --- C-10 v2: vhost-user backend stack (rust-vmm) ----------------
 # vhost-user-backend 0.22 pins vm-memory = "=0.17.1" exactly; match

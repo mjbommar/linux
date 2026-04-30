@@ -23,6 +23,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 
 mod console_split;
+mod deploy;
 mod dmesg_parse;
 mod events;
 mod history;
@@ -106,6 +107,14 @@ enum Cmd {
     /// run.json, init.log, events.jsonl, and a snapshot of
     /// the manifest.
     Export(ExportArgs),
+    /// Bring up a declarative deployment from an Umlfile (TOML).
+    /// Compiles the Umlfile to (host-side TAP+NAT setup, generated
+    /// init script, kernel cmdline, manifest), then create+start.
+    /// Inspired by docker-compose up.
+    Up(UpArgs),
+    /// Tear down a deployment: stop the instance, undo host-side
+    /// TAP/iptables setup, optionally remove the manifest.
+    Down(DownArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -341,6 +350,61 @@ pub struct AssertArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct UpArgs {
+    /// Path to the Umlfile (TOML). Defaults to `./Umlfile.toml`.
+    #[arg(short = 'f', long = "file", default_value = "Umlfile.toml", value_name = "PATH")]
+    file: std::path::PathBuf,
+
+    /// Don't actually start the kernel — print synthesized cmdline,
+    /// host-side setup steps, and the generated init script.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Skip host-side TAP / iptables setup. Useful when the host is
+    /// already configured (e.g. in CI with a pre-provisioned bridge).
+    #[arg(long)]
+    skip_network_setup: bool,
+
+    /// Wrap UML in `strace -f -s 256 -o <log_dir>/strace.log` to
+    /// capture every host syscall the launcher makes. Overrides
+    /// debug.strace in the Umlfile.
+    #[arg(long)]
+    strace: bool,
+
+    /// Run UML under `gdbserver :<port>` so a remote gdb can attach.
+    /// Overrides debug.gdb in the Umlfile.
+    #[arg(long)]
+    gdb: bool,
+
+    /// gdbserver listen port (only with --gdb).
+    #[arg(long, default_value_t = 0, value_name = "PORT")]
+    gdb_port: u16,
+
+    /// Stay in foreground and stream the kernel's console.
+    #[arg(long)]
+    foreground: bool,
+
+    /// Wait-for-ready budget before giving up.
+    #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+    ready_timeout: u64,
+}
+
+#[derive(clap::Args, Debug)]
+struct DownArgs {
+    /// Path to the Umlfile (TOML). Defaults to `./Umlfile.toml`.
+    #[arg(short = 'f', long = "file", default_value = "Umlfile.toml", value_name = "PATH")]
+    file: std::path::PathBuf,
+
+    /// Also `umlctl rm` the underlying manifest after stop+teardown.
+    #[arg(long)]
+    rm: bool,
+
+    /// Stop the instance even if it's already gone (idempotent).
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct ExportArgs {
     pub name_or_run_id: String,
 
@@ -377,7 +441,140 @@ fn run() -> Result<()> {
         Cmd::Events(args) => cmd_events(&paths, args),
         Cmd::Assert(args) => cmd_assert(&paths, args, cli.quiet),
         Cmd::Export(args) => cmd_export(&paths, args, cli.quiet),
+        Cmd::Up(args) => cmd_up(&paths, args, cli.quiet),
+        Cmd::Down(args) => cmd_down(&paths, args, cli.quiet),
     }
+}
+
+// -------------------------------------------------------------------
+// up / down
+// -------------------------------------------------------------------
+
+fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
+    let mut uml = deploy::Umlfile::from_path(&args.file)
+        .with_context(|| format!("load Umlfile {}", args.file.display()))?;
+
+    // CLI debug overrides win.
+    if args.strace { uml.debug.strace = true; }
+    if args.gdb { uml.debug.gdb = true; }
+    if args.gdb_port != 0 { uml.debug.gdb_port = args.gdb_port; }
+
+    let compiled = deploy::compile(&uml)
+        .context("compile Umlfile")?;
+
+    if args.dry_run {
+        println!("== generated init script ({}) ==", compiled.init_script.display());
+        println!("{}", std::fs::read_to_string(&compiled.init_script)?);
+        println!("== host setup steps ==");
+        for s in &compiled.setup_steps {
+            println!("  sudo sh -c {:?}", s);
+        }
+        println!("== kernel cmdline appends ==");
+        for a in &compiled.append {
+            println!("  {a}");
+        }
+        println!("== teardown steps ==");
+        for s in &compiled.teardown_steps {
+            println!("  sudo sh -c {:?}", s);
+        }
+        return Ok(());
+    }
+
+    if !args.skip_network_setup && !compiled.setup_steps.is_empty() {
+        deploy::run_sudo_steps(&compiled.setup_steps, true, quiet)
+            .context("host-side TAP/iptables setup")?;
+    }
+
+    // Build the inner cmdline + create the manifest, then start.
+    let mut cmdline_parts: Vec<String> = compiled.append.clone();
+    if !uml.kernel.append.is_empty() {
+        // already in compiled.append from compile()
+    }
+    let cmdline = cmdline_parts.join(" ");
+
+    // Create / overwrite manifest. We delete first to keep `up` idempotent.
+    let manifest_path = paths.manifest_path(&uml.instance.name);
+    if manifest_path.exists() {
+        let _ = std::fs::remove_file(&manifest_path);
+    }
+    let m = manifest::Manifest::from_create_args(
+        &uml.instance.name,
+        std::path::Path::new(&uml.kernel.path),
+        Some("umlctl-up"),
+        &uml.runtime.mem,
+        &uml.kernel.backend,
+        &cmdline,
+        "hostfs",
+        false,
+        uml.runtime.ncpus,
+        &uml.instance.labels.iter()
+            .map(|(k,v)| format!("{k}={v}")).collect::<Vec<_>>(),
+    ).context("build manifest from Umlfile")?;
+    std::fs::create_dir_all(manifest_path.parent().unwrap())
+        .context("create instances directory")?;
+    m.write_to(&manifest_path).context("write manifest")?;
+
+    // Now start. Map the Umlfile's `init.script` (compiled) into the
+    // start args' init field. Note: supervise::start consumes the
+    // manifest's cmdline + init separately; we cheat by stuffing
+    // init=PATH into cmdline. (TODO: cleaner manifest extension.)
+    let init_arg = format!("init={}", compiled.init_script.display());
+    let mut full_cmdline = cmdline.clone();
+    if !full_cmdline.is_empty() { full_cmdline.push(' '); }
+    full_cmdline.push_str(&init_arg);
+    // Rewrite manifest with the init= cmdline merged in.
+    let mut m2 = m.clone();
+    m2.runtime.cmdline = full_cmdline;
+    m2.write_to(&manifest_path)?;
+
+    if !quiet {
+        eprintln!("[umlctl] up: instance={} init={}",
+            uml.instance.name, compiled.init_script.display());
+    }
+    let start_args = StartArgs {
+        name: uml.instance.name.clone(),
+        detach: !args.foreground,
+        foreground: args.foreground,
+        ready_timeout: args.ready_timeout,
+        no_log: false,
+    };
+    cmd_start(paths, start_args, quiet)?;
+    Ok(())
+}
+
+fn cmd_down(paths: &paths::Paths, args: DownArgs, quiet: bool) -> Result<()> {
+    let uml = deploy::Umlfile::from_path(&args.file)
+        .with_context(|| format!("load Umlfile {}", args.file.display()))?;
+
+    // Stop the instance (best-effort if --force).
+    let stop_args = StopArgs {
+        name: uml.instance.name.clone(),
+        signal: "TERM".into(),
+        timeout: 10,
+        force: false,
+    };
+    if let Err(e) = cmd_stop(paths, stop_args, quiet) {
+        if !args.force { return Err(e); }
+        if !quiet { eprintln!("[umlctl] (stop failed: {e:#}; --force, continuing)"); }
+    }
+
+    // Compile to get teardown steps. Failures are non-fatal because
+    // setup may have been partial.
+    if let Ok(compiled) = deploy::compile(&uml) {
+        if !compiled.teardown_steps.is_empty() {
+            let _ = deploy::run_sudo_steps(&compiled.teardown_steps, false, quiet);
+        }
+    }
+
+    if args.rm {
+        let rm_args = RmArgs {
+            name: uml.instance.name.clone(),
+            force: true,
+            keep_logs: false,
+        };
+        cmd_rm(paths, rm_args, quiet)?;
+    }
+    Ok(())
 }
 
 fn cmd_events(paths: &paths::Paths, args: EventsArgs) -> Result<()> {
