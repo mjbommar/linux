@@ -1205,6 +1205,45 @@ void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
 }
 
 /*
+ * Reverse-marshal sregs.fs.base / gs.base back into the per-task
+ * gp[HOST_FS_BASE/GS_BASE] slots. UML's canonical FS/GS state lives
+ * in those gp[] slots — `arch/x86/um/syscalls_64.c:22` writes them
+ * synchronously when user-mode arch_prctl(ARCH_SET_FS,...) traps,
+ * and `kvm_v2_load_user_sregs` (above) reads them back into
+ * `sregs->fs.base`/`gs.base` on every dispatch. Without this
+ * symmetric read-back, intra-guest FS/GS updates from any path
+ * other than arch_prctl (e.g. a future direct-wrfsbase guest, or
+ * a sibling task's per-CPU sregs write landing on the same vCPU
+ * before the next task's load_user_sregs) are silently lost on the
+ * next dispatch — we re-install the stale gp[HOST_FS_BASE],
+ * clobbering live MSR_FS_BASE.
+ *
+ * Today this is largely defensive: empirically tracing with
+ * `pr_emerg("DIAG-FS: sregs_back ...")` against the fork-tree-3level
+ * gate at tip aaced3ce4924 shows fs.base = 0x0 throughout the run
+ * (static-glibc binaries don't issue arch_prctl(SET_FS) — the canary
+ * lives at a globally-mapped __stack_chk_guard, not a TLS slot). So
+ * this read-back is correct but does NOT resolve #95 / #96 / the
+ * fork-tree-3level FAIL signature; that bug is a different family
+ * (memo §E.4: stack-smashing-detected from glibc FORTIFY checks,
+ * not TLS canary).
+ *
+ * v1 reference: kvm-v1-archive/thread.c:1918 `kvm_propagate_fs_gs_
+ * base` did the equivalent via KVM_SET_MSRS on every arch_prctl;
+ * v2 lifts that into per-dispatch SYNC_REGS, so the read-back must
+ * also run per-dispatch. SYNC_REGS guarantees sregs is coherent on
+ * every KVM_RUN exit (including EINTR), so reading from the mmap'd
+ * page is zero-ioctl. This commit closes the v1→v2 regression in
+ * FS/GS round-trip; the fork-tree-3level investigation continues.
+ */
+void kvm_v2_marshal_sregs_back(struct uml_pt_regs *dst,
+			       const struct kvm_sregs *src)
+{
+	dst->gp[HOST_FS_BASE] = (unsigned long)src->fs.base;
+	dst->gp[HOST_GS_BASE] = (unsigned long)src->gs.base;
+}
+
+/*
  * C.4 forward decl: kvm_v2_fpu_install_on_first_run lives at the
  * bottom of the file alongside kvm_v2_fpu_capture_for_fork (the two
  * are a logical pair). The dispatcher below references it before its
@@ -1364,6 +1403,7 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 			 * marshal-back; only the dispatch switch differs.
 			 */
 			kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
+			kvm_v2_marshal_sregs_back(regs, &run->s.regs.sregs);
 			trace_um_backend_kvm_v2_vcpu_eintr(cpu);
 			preempt_enable();
 			return;
@@ -1375,9 +1415,12 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	/*
 	 * C.3: post-exit, KVM populated kvm_run->s.regs.{regs,sregs}
 	 * because kvm_valid_regs was set at vcpu_create. Marshal GPRs
-	 * back from the mmap'd struct.
+	 * back from the mmap'd struct, then also pull sregs.fs.base /
+	 * gs.base back into gp[HOST_FS_BASE/GS_BASE] — see the helper's
+	 * comment for why this read-back is load-bearing for libc TLS.
 	 */
 	kvm_v2_marshal_from_kvm_regs(regs, &run->s.regs.regs);
+	kvm_v2_marshal_sregs_back(regs, &run->s.regs.sregs);
 
 	switch (exit_reason) {
 	case KVM_EXIT_IO:

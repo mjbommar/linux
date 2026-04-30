@@ -460,6 +460,19 @@ void kvm_v2_marshal_from_kvm_regs(struct uml_pt_regs *dst,
 				  const struct kvm_regs *src);
 
 /*
+ * Symmetric read-back of sregs.fs.base / gs.base into
+ * gp[HOST_FS_BASE/GS_BASE]. Called after every KVM_RUN exit
+ * (including EINTR) alongside kvm_v2_marshal_from_kvm_regs. Closes
+ * a v1→v2 round-trip regression: v1 propagated FS/GS via
+ * KVM_SET_MSRS on every arch_prctl (kvm-v1-archive/thread.c:1918);
+ * v2 lifted that into per-dispatch SYNC_REGS but never wired the
+ * read-back side. See vcpu.c's helper comment for the full
+ * rationale.
+ */
+void kvm_v2_marshal_sregs_back(struct uml_pt_regs *dst,
+			       const struct kvm_sregs *src);
+
+/*
  * Phase D.3: per-task FPU capture on context-switch-out + the
  * .context_switch op wrapper that invokes it before delegating to
  * seccomp_context_switch. Defined in vcpu.c (alongside the C.4
