@@ -1038,21 +1038,30 @@ KVM's per-vCPU FPU untouched. v1 archive's
 `kvm_fpu_install_on_first_run` at thread.c:240-339 had the same
 contract.
 
-**Verified post-fix workload progression**:
+**Workload status at HEAD `a478952b8da0`** (post-PT_SYSCALL_NR clear):
 
-| Workload                              | Status | Notes                              |
-|---|---|---|
-| `init=/bin/true`                      | PASS   | exit_group(0)                      |
-| `init=/bin/echo`                      | PASS   |                                    |
-| `init=/bin/sh` (builtins)             | PASS   |                                    |
-| Static glibc no-fork                  | PASS   |                                    |
-| Pure-syscall fork+wait+exit           | PASS   |                                    |
-| glibc fork (no wait)                  | PASS   |                                    |
-| glibc fork+wait                       | PASS   | `CHILD pid=37` substitutes correctly |
-| glibc fork+exec (`execl /bin/echo`)   | PASS   |                                    |
-| Substrate class-a-env reproducers     | PASS   | 4 PASS + 2 FAIL — matches seccomp's failure pattern for tty_isatty/termios_get |
-| Python with extension imports         | PASS   | `import hashlib; print(hashlib.sha256(b'x').hexdigest()[:8])` → `2d711642` correctly |
-| Substrate gate harness under v2       | PARTIAL | Class-a-env complete: 4 PASS + 4 FAIL under v2 (vs seccomp's 4 PASS + 3 FAIL — the extra FAIL is env_path_subprocess where Python subprocess.run output capture differs). Class-b-process gets SIGILL on first reproducer (fork_exec_wait) — exposed by the syscall-side interrupt_end fix at ad06c7f5164c. Tracking. |
+| Workload                              | seccomp | v2     | Notes |
+|---|---|---|---|
+| `init=/bin/true`, `/bin/echo`         | PASS    | PASS   | exit_group(0) → init-kill panic |
+| `init=/bin/sh` (builtins)             | PASS    | PASS   | |
+| Static glibc (no fork)                | PASS    | PASS   | |
+| Pure-syscall fork+wait+exit           | PASS    | PASS   | |
+| glibc fork+wait (parent + child stdio)| PASS    | PASS   | `CHILD pid=37` substitutes correctly |
+| glibc fork+exec(/bin/echo)            | PASS    | PASS   | |
+| Single-import python (`hashlib`)      | PASS    | PASS   | `2d711642` (correct SHA256) |
+| **Multi-import python** (json+base64+os) | PASS | FAIL    | UML kernel-side fatal signal during child python startup (#96) |
+| Direct `init=python3 -c "..."`        | PASS    | flaky  | PID 1 = python3 sometimes segfaults; shell-wrapped works |
+| Direct `init=fork_exec_wait` (50× fork+execve+waitpid loop) | PASS | FAIL (SIGILL #95) | Substrate harness path works (the fork is a shell child not init); direct init=fork_exec_wait still SIGILLs |
+| **Substrate gate**                    | **PASS=25 / FAIL=3 / XFAIL=3** | **PASS=6 / FAIL=3 / XFAIL=0** | Up from PASS=4 / FAIL=4 pre-fix; class-a-env complete + class-c-syscall reproducers (ioctl_fionread, ioctl_tiocgwinsz_socketpair) running |
+
+**v2 progress trajectory this session**:
+  - Pre-CPL=3 SREGS:           v2 stuck at "infinite EPT-violation reinjection loop"
+  - Post-CPL=3 (32a7603236b0):  /bin/true reaches clean exit
+  - Post-FPU-fix (0e05de21dba0): glibc fork+wait works (child %d substitutes)
+  - Post-exception-IE (31ba9c354063): substrate class-a-env runs; Python imports work
+  - Post-PT_SYSCALL_NR clear (a478952b8da0): substrate PASS=6/FAIL=3, class-c-syscall reproducers join
+
+The remaining residuals (#95 fork_exec_wait direct, #96 multi-import python crashing UML) are real bugs but represent fewer workloads than what now passes. v2 has crossed from "experimental — barely boots" to "functional for shell-wrapped multi-process workloads + substrate class-a-env + class-c-syscall reproducers". Phase H baseline confirms v2 is **1.73× faster than seccomp** on Python startup, well below memo 25's ≤1.2× gate target.
 
 **Substrate gate** (seccomp baseline) stays green throughout
 v2 development: PASS=25/FAIL=3/EXPECTED_FAIL=3.
