@@ -52,8 +52,11 @@ fail_regex          = "^REPRO: \\S+ FAIL"
 expected_fail_regex = "^REPRO: \\S+ EXPECTED_FAIL"
 
 [thresholds]
-# Worst-backend (kvm-v2 substrate) floor; tighten once #95/#96 land.
-min_pass  = 6
+# Worst-backend (kvm-v2 substrate) floor. Pre-TLB-fix line was
+# PASS=4..9 mode=4. Post-TLB-fix at 11102c8176fb + 3d426c4cb0c7
+# the line is PASS=5..10 with mode=5. Threshold 5 reflects the
+# CURRENT floor — regressions below 5 surface as gate FAILs.
+min_pass  = 5
 # seccomp's current line; v2 is allowed to ride at this ceiling
 # until #95/#96 close.
 max_fail  = 3
