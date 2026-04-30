@@ -173,27 +173,22 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 	}
 
 	/*
-	 * D.0b: map region->va in the SPAWNER mm too. KVM binds the VM
-	 * to the creator's current->mm (virt/kvm/kvm_main.c:1107-1109)
-	 * and resolves userspace_addr against that mm at fault-in
-	 * (virt/kvm/kvm_main.c:2999-3027); the stub child's mm is
-	 * irrelevant to KVM's view. os_map_memory uses MAP_FIXED|
-	 * MAP_SHARED so overlaying an existing mapping is fine (the
-	 * tlb.c "add for in-place update" case relies on this — see
-	 * v1 archive's kvm_mm_map at kvm-v1-archive/mm.c:231-235 for
-	 * the same MAP_FIXED rationale).
+	 * H.1b residual A/B (2026-04-30): try DROPPING the os_map_memory
+	 * call. With slot 0 (gpa=0..physmem_size, hva=uml_physmem) KVM's
+	 * TDP walk resolves guest VA → guest PT (in physmem) → guest GPA
+	 * → user_addr=uml_physmem+GPA (slot 0) → spawner mm walk for
+	 * uml_physmem range. Per-region os_map_memory at user-half VAs
+	 * is needed only for "in-place update" compatibility with v1
+	 * (see comment block) but slot 0 alone should suffice for v2.
+	 *
+	 * If this fixes the multi-thread mt-mmap-stress race, the bug
+	 * was in the spawner-mm parallel mapping path racing somehow
+	 * with the per-mm slot-0 EPT walk.
+	 *
+	 * Original code (commented out for A/B):
+	 *   rc = os_map_memory(...region->va...phys_fd...offset...);
+	 *   if (rc < 0) { ...; return rc; }
 	 */
-	rc = os_map_memory((void *)region->va, region->phys_fd, region->offset,
-			   region->len,
-			   !!(region->prot & UM_PROT_READ),
-			   !!(region->prot & UM_PROT_WRITE),
-			   !!(region->prot & UM_PROT_EXEC));
-	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm-v2 region_added: os_map_memory(va=%#lx len=%#lx fd=%d off=%#llx prot=%#x) failed (%d)\n",
-				    region->va, region->len, region->phys_fd,
-				    region->offset, region->prot, rc);
-		return rc;
-	}
 
 	/*
 	 * D.0b note on the spec's defensive access_ok call: an explicit
@@ -316,14 +311,14 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 	 * legitimate user munmap) is the unambiguous init_new_context
 	 * signature.
 	 */
-	if (region->va == 0 && region->len >= (1UL << 46)) {
-		rc = 0;
-	} else {
-		rc = os_unmap_memory((void *)region->va, (int)region->len);
-		if (rc < 0)
-			pr_warn_ratelimited("um: kvm-v2 region_removed: os_unmap_memory(va=%#lx len=%#lx) failed (%d)\n",
-					    region->va, region->len, rc);
-	}
+	/*
+	 * H.1b residual A/B: drop the os_unmap_memory call too. If
+	 * mm_region_added no longer maps user-half VAs in the spawner
+	 * mm (slot 0 covers physmem), there's nothing to unmap on
+	 * region removal. The init_new_context bulk-clear sentinel
+	 * (va==0 && len >= 1<<46) is a no-op pair-wise.
+	 */
+	rc = 0;
 
 	rc = seccomp_mm_region_removed(mm, region);
 	exit_turnstile(mm_id);
