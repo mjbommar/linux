@@ -1927,6 +1927,81 @@ flake is a smaller residual race elsewhere — possibly in the
 lazy-PF serialization of guest PT updates or in some other
 v2-specific path. Future investigation tracks under #115.
 
+### H.1b residual ROOT-CAUSED (2026-04-30 cont 2): mmu_gather free-before-flush
+
+**Hypothesis (codex gpt-5.5 audit, 2026-04-30):** UML's deferred
+TLB-sync model violates `mmu_gather`'s free-after-flush contract.
+
+Standard kernel MM contract (mm/mmu_gather.c:421-425):
+```
+tlb_flush_mmu():
+    tlb_flush_mmu_tlbonly()  # actual TLB invalidation
+    tlb_flush_mmu_free()     # frees pages back to buddy
+```
+
+Under UML, `tlb_flush()` (asm-generic/tlb.h:443-447) calls
+`flush_tlb_range()` which on UML is just `um_tlb_mark_sync` —
+sets `sync_tlb_range_{from,to}` (arch/um/include/asm/tlbflush.h:53-57).
+The actual drain is deferred to `um_tlb_sync` at the next vcpu_run
+dispatch (kvm-v2/vcpu.c:1429-1434). Pages are freed back to buddy
+BEFORE the actual flush.
+
+Under v2, the only mechanism that flushes the GUEST CPU's TLB is
+the CR4.PGE toggle in load_user_sregs (vcpu.c:1148) at next
+dispatch entry. Slot-0 doesn't change so no mmu_notifier fires;
+region_added/removed are no-op (post f77a31d1fbe4 + c77a585330f3).
+
+**Diagnostic confirmation:** added a printk in
+`tlb_batch_pages_flush` that logs `(pid, comm, pfn, sync_tlb_range)`
+for every encoded_page freed (mm/mmu_gather.c:146 patch — reverted
+after capture). Captured failing run at iter 26 with PFN 0x1123:
+```
+FAIL T0 iter26 page6 p=0x41809000 got=22 expect=0
+  pfn_after_memset=0x1123 pfn_at_check=0x1123
+DIAG-MT-PFN free pid=23 comm=mt-diag pfn=1123 pending=[41803000,41813000)
+DIAG-MT-PFN free pid=23 comm=mt-diag pfn=1123 pending=[41803000,41813000)
+```
+
+The failing PFN was freed twice via mmu_gather while sync_tlb_range
+was non-empty (pending = the test's mmap range). Confirms hypothesis.
+
+The corrupting bytes (`16 00 00 00 ff ff ff ff 00 00 00 00 00 00 00 00`
+repeating every 16 bytes) is recognizable kernel-struct content
+(plausibly slab freelist metadata or sysctl table entries).
+
+**Why seccomp doesn't show this:** under seccomp, user accesses
+go through stub-child mm, which does its own real munmap on its
+host TLB during sync drain — the stub-child's host TLB is flushed
+by the host kernel's normal mmu shootdown. v2's slot-0 model
+puts user pages and kernel pages in the SAME physmem fd, and the
+guest CPU runs both — so kernel writes to a freed PFN become
+visible to a user-half stale TLB lookup.
+
+**Fix candidates (NOT YET shipped):**
+
+A. **Eager flush in flush_tlb_range:** make UML's flush_tlb_*
+   call um_backend_dispatch(force_tlb_flush) which under v2 issues
+   a CR4.PGE toggle ioctl + KVM_RUN no-op. High overhead per
+   munmap call but architecturally simplest.
+
+B. **Defer page-free until after drain:** keep the freed pages
+   in mm->context->pending_free list, free them at vcpu_run drain
+   time after CR4.PGE toggle. Requires plumbing the deferred-free
+   into mmu_gather + UML's mm_context.
+
+C. **mmu_notifier-aware slot-0:** invalidate KVM TDP for
+   freed-page GPAs via mmu_notifier callback. Requires hooking
+   slot-0's hva mapping or registering UML's pgd as an mmu_notifier
+   target. Heaviest plumbing but architecturally cleanest.
+
+Recommendation: **Option B** — minimal patch, no per-syscall
+overhead, correctness-equivalent to standard mm. Defer to a Phase H.2
+or Phase J task.
+
+Reproducer: tip c77a585330f3 + 30-line mmu_gather.c diag patch
+above. mt-mmap-stress 3T×50 iters: ~60% PASS / ~40% FAIL on v2,
+100% PASS on seccomp, 100% PASS with MAP_POPULATE.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
