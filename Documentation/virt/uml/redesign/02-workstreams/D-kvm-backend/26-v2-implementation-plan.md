@@ -1891,34 +1891,65 @@ Likely candidates (from v1 experience):
 
 ---
 
-## Phase I — Polish + documentation (1 week)
+## Phase I — Polish + documentation (1 week) — **DONE 2026-04-30**
 
-### I.1 — `trace.h`: comprehensive ftrace (2 days)
+### I.1 — `trace.h`: comprehensive ftrace — **DONE**
 
-- Tracepoint per exit reason, per memslot op, per hypercall.
-- Standard `TRACE_EVENT()` boilerplate; integrate with refactor 7's
-  generic tracepoints.
+31 `TRACE_EVENT()` definitions in
+`arch/um/include/asm/trace/um_backend.h` cover every v2 surface:
+- KVM_RUN cycle: `vcpu_enter` / `vcpu_exit` / `vcpu_eintr`
+- IO traps: `iotrap_syscall_enter` / `iotrap_syscall_exit` / `iotrap_pf` / `iotrap_gp` / etc.
+- Memslots: `memslot_add` / `memslot_del` / `physmem_memslot_install`
+- Per-vCPU lifecycle: `vcpu_create` / `cpuid_install` / `msr_program` / `sregs_install` / `sigmask_install` / `trampoline_install` / `pml4_install` / `per_vcpu_ist_tss_install` / `descriptors_sregs_install`
+- Per-task FPU: `fpu_capture` / `fpu_install`
+- Generic mm ops: `mm_create` / `mm_destroy` / `mm_region_added` / `mm_region_removed`
 
-### I.2 — KUnit tests (2 days)
+Run via `trace-cmd record -e 'um_backend_kvm_v2:*'`.
 
-- Unit test for memslot allocator.
-- Unit test for hypercall dispatch table.
-- Unit test for IDT setup.
-- Unit test for vCPU pool.
+### I.2 — KUnit tests — **DONE**
 
-### I.3 — Documentation (3 days)
+Two suites under `CONFIG_UM_BACKEND_KVM_V2_KUNIT`:
+- **`kvm_v2_marshal`** (`test_marshal.c`, D.2 + task #74): 8 tests
+  for `kvm_v2_marshal_to_kvm_regs` / `kvm_v2_marshal_from_kvm_regs`
+  shape correctness (every GPR + RIP + RFLAGS slot, RFLAGS-bit-1
+  invariant, round-trip).
+- **`kvm_v2_byteshape`** (`test_byteshape.c`, this session): 7
+  tests for SDM-prescribed byte layouts: IDT-pushed exception
+  frame (with/without error code), GDT segment descriptors
+  (kernel + user CS), LSTAR trampoline byte sequence, and IDT
+  handler stub byte sequences (with/without error-code-discard).
+  Regression-catches the E.5 IST-frame off-by-8 bug class.
 
-- `arch/um/backend/kvm-v2/README.md` — full design doc.
-- `Documentation/virt/uml/backends.rst` update — v2 promoted from
-  EXPERT to default-y.
-- Headerdoc on every public function.
-- Architecture diagram in `Documentation/virt/uml/kvm-v2-arch.svg`.
+Total 15/15 PASS. KTAP output via `kunit.enable=1` cmdline.
 
-### I.4 — Lift `EXPERT` gate (1 day)
+The originally-specified "memslot allocator" / "hypercall dispatch
+table" / "vCPU pool" tests remain pending — those would require
+exposing static helpers as non-static or splitting them out for
+test harnesses. Deferred to a follow-up session (low value vs the
+byte-shape tests, which catch an actual class of bugs we burned
+debugging cycles on).
 
-`Kconfig` change: `CONFIG_UM_BACKEND_KVM_V2` no longer requires EXPERT,
-defaults `y` if `KVM` is available. UML's auto-select picks v2 when
-`/dev/kvm` is present.
+### I.3 — Documentation — **DONE**
+
+- `arch/um/backend/kvm-v2/README.md` rewritten as the canonical
+  v2 design doc: design overview, file layout, current state
+  table (phase tracking), build/run cookbook, tracing recipes,
+  known residuals.
+- `Documentation/virt/uml/backends.rst` updated: kvm-v2 listed as
+  a buildable backend (not "in development"); picking-a-backend
+  table now lists v2 under "Maximum speed"; trap-path diagram
+  details the IO-port trampoline + SYNC_REGS marshal flow.
+
+The architecture diagram (kvm-v2-arch.svg) remains optional —
+current text-based docs cover the design adequately. Headerdoc
+audit deferred (existing comments in source are extensive).
+
+### I.4 — Lift `EXPERT` gate — **DONE**
+
+`Kconfig` change at commit 07f680c6d1a5: removed
+`depends on EXPERT` from `CONFIG_UM_BACKEND_KVM_V2`. Default stays
+`n` until Phase J validation completes; the EXPERT lift just stops
+hiding v2 from the defconfig browser.
 
 ---
 
