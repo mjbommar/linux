@@ -8,23 +8,39 @@ follow-up to #95 / #96). All built statically with `-O0
 |-----------------------|-------------|-------------|-------|
 | `raw_fork.c`          | seccomp/v2  | PASS / PASS | No libc; raw asm syscalls. v2's syscall path itself is correct. |
 | `libc_simple.c`       | seccomp/v2  | PASS / PASS | libc + printf; no fork. Excludes generic libc startup as the cause. |
-| `libc_fork_no_wait.c` | seccomp/v2  | PASS / FAIL ~80% | Parent forks, exits without waiting; child _exit(0). Stack-smashing fires in CHILD only — confirmed by RC=0 (parent ok) plus stack-smashing-detected lines. |
+| `libc_fork_no_wait.c` | seccomp/v2  | PASS / FAIL ~80% | Parent forks, exits without waiting; child _exit(0). Stack-smashing fires in CHILD only. |
 | `libc_no_clone.c`     | seccomp/v2  | PASS / FAIL ~50% | libc + raw `clone(SIGCHLD, ...)` syscall (no CLONE_CHILD_*TID flags). Bug still fires — CLONE_CHILD_* is not the trigger. |
-| `child_simple.c`      | seccomp/v2  | PASS / FAIL ~80% | Parent exits immediately; child does just `printf("CHILD_OK\\n")` and `_exit(0)`. Stack-smashing detected in child. Confirms bug is in v2's child-process setup, not parent. |
-| `child_only_canary.c` | seccomp/v2  | PASS / FAIL 10/10 | Child calls `strlen(memset(buf, 0xaa, 64))` — heavy XMM/SSE-accelerated glibc internals. Always fires. Suggests v2's FPU/XMM state for the child task is wrong. |
+| `child_simple.c`      | seccomp/v2  | PASS / FAIL ~70% | Parent exits immediately; child does just `printf("CHILD_OK\n")` and `_exit(0)`. |
+| `child_only_canary.c` | seccomp/v2  | PASS / FAIL 10/10 | Child calls `strlen(memset(buf, 0xaa, 64))` — heavy XMM/SSE workload. |
+| `child_no_write.c`    | seccomp/v2  | PASS / FAIL ~90% | Child does ZERO stack writes — straight asm to exit_group(0). Bug still fires; rules out CoW-on-first-stack-write hypothesis. |
+| `canary_v2.c`         | seccomp/v2  | PASS / FAIL ~20% | Reads `%fs:0x28` in parent + child + parent_post, logs to a file. **DECISIVE FINDING: when child's canary read succeeds, parent and child see IDENTICAL canary values.** So `fs.base` and the canary GLOBAL are correct. The bug is **stack memory corruption** somewhere — function-entry canary save vs function-epilogue canary check disagree because some path between them overwrites the saved canary on stack. |
 
-Conclusion (2026-04-30): the bug is the CHILD process's stack /
-register state being corrupted on first dispatch after fork. Most
-likely candidates:
-  - FPU/XMM state inherited from a different task on the same
-    per-CPU vCPU (v2's `kvm_v2_fpu_install_on_first_run` may not
-    handle the fresh-fork case)
-  - CR3 or memslot inconsistency for child's address space
-  - Child's gs.base / fs.base stale from previous task on same vCPU
+Conclusion (2026-04-30, after canary_v2 narrowing): the bug is
+**stack memory corruption** somewhere in v2's user-mode round-trip
+path for child processes. NOT a canary-value bug, NOT an fs.base
+bug, NOT a CoW-on-first-write bug.
 
-The FS_BASE round-trip fix (commit 6e52574cca6c) closes one
-related v1→v2 regression but does not resolve this bug — empirical
-trace shows fs.base = 0x0 throughout child execution.
+What the canary_v2 reproducer pinpoints: the saved canary on the
+child's stack at function-entry is overwritten by *something*
+before the function-epilogue check. Possible mechanisms:
+  - Signal frame setup writing to wrong offset (do_signal /
+    sigframe under v2 may smash adjacent stack)
+  - SYSRETQ / IRETQ return path corrupting user stack
+  - Some other v2-specific kernel-side write to user memory
+
+Eliminated this session via empirical test:
+  - FPU / XMM stale state (forced arch defaults; no improvement)
+  - Segment register cache leak (explicit re-set; no improvement)
+  - Real KVM_SET_SREGS ioctl vs SYNC_REGS dirty-bit (no diff)
+  - cr2 leak (defensive fix landed at 24a7f0575e18; minor effect)
+  - FS_BASE round-trip (defensive fix landed at 6e52574cca6c)
+  - interrupt_end placement (commit 31ba9c354063 bisected
+    negative)
+  - CLONE_CHILD_*TID flags
+  - glibc atexit/stdio cleanup
+  - CoW page allocation on first stack write
+  - TLS canary value mismatch (canary_v2 confirms parent==child
+    when measurable)
 
 To reproduce:
 ```
