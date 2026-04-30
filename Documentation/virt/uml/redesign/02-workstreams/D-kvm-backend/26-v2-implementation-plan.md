@@ -1977,30 +1977,55 @@ puts user pages and kernel pages in the SAME physmem fd, and the
 guest CPU runs both — so kernel writes to a freed PFN become
 visible to a user-half stale TLB lookup.
 
-**Fix candidates (NOT YET shipped):**
+**Fix candidates (Option B SHIPPED at e4d347ae48d8 + bd8f6fe1c511):**
 
-A. **Eager flush in flush_tlb_range:** make UML's flush_tlb_*
-   call um_backend_dispatch(force_tlb_flush) which under v2 issues
+A. **Eager flush in flush_tlb_range:** (NOT shipped) make UML's
+   flush_tlb_* call a force_tlb_flush hook which under v2 issues
    a CR4.PGE toggle ioctl + KVM_RUN no-op. High overhead per
    munmap call but architecturally simplest.
 
-B. **Defer page-free until after drain:** keep the freed pages
-   in mm->context->pending_free list, free them at vcpu_run drain
-   time after CR4.PGE toggle. Requires plumbing the deferred-free
-   into mmu_gather + UML's mm_context.
+B. **Defer page-free until after drain:** SHIPPED at
+   `e4d347ae48d8` + `bd8f6fe1c511`. mmu_gather hands the
+   encoded_page array to `um_mmu_gather_defer` (arch/um/kernel/
+   tlb.c) which queues entries on `mm->context.deferred_free_pages`.
+   Backend's vcpu_run calls `um_mmu_gather_drain` AFTER KVM_RUN
+   exits — by which point CR4.PGE flush has run, so deferred
+   pages can safely return to buddy.
 
-C. **mmu_notifier-aware slot-0:** invalidate KVM TDP for
-   freed-page GPAs via mmu_notifier callback. Requires hooking
-   slot-0's hva mapping or registering UML's pgd as an mmu_notifier
-   target. Heaviest plumbing but architecturally cleanest.
+C. **mmu_notifier-aware slot-0:** (NOT shipped) invalidate KVM
+   TDP for freed-page GPAs via mmu_notifier callback. Heaviest
+   plumbing.
 
-Recommendation: **Option B** — minimal patch, no per-syscall
-overhead, correctness-equivalent to standard mm. Defer to a Phase H.2
-or Phase J task.
+**Empirical result (post Option B):** mt-mmap-stress 50 trials
+went from 64% → 68% PASS — statistically within noise. Substrate
+gate stable PASS=25/FAIL=3/EXPECTED_FAIL=3, cpython-tier0 PASS
+(no regression). The defer/drain mechanism IS firing per
+diagnostic — `DIAG-DRAIN count=16` per 64KB unmap matches the
+test workload.
 
-Reproducer: tip c77a585330f3 + 30-line mmu_gather.c diag patch
-above. mt-mmap-stress 3T×50 iters: ~60% PASS / ~40% FAIL on v2,
-100% PASS on seccomp, 100% PASS with MAP_POPULATE.
+**Yet failures persist with the SAME corruption pattern**
+(`16 00 00 00 ff ff ff ff 00 00 00 00 00 00 00 00` repeating
+every 16 bytes). This means either:
+
+1. A free path bypasses `tlb_batch_pages_flush` (and our defer
+   hook), e.g. compaction's `migrate_pages` → `folio_put` direct
+   release, or reclaim's swap-out path.
+2. Page-table page freeing (via `tlb_table_flush` / `__tlb_remove_table`)
+   uses a separate path we don't cover; PT pages re-mapped to
+   user could appear with their old PTE-table contents.
+3. The corruption pattern is not from a freed-then-reused page
+   at all but from somewhere else entirely (e.g. clear_page
+   writing to wrong kernel-half VA due to a different TLB issue).
+
+The 16-byte-period kernel-struct pattern (4-byte 22, 4-byte
+0xFFFFFFFF, 8-byte 0) doesn't match IDT entries (segment field
+would be 0x08 not 0x00) or PT entries (PT would be 8-byte
+period). Possibly a kmalloc-16 slab object freelist. Codex
+follow-up audit needed; #117 cont.
+
+Reproducer: tip bd8f6fe1c511. mt-mmap-stress 3T×50 iters:
+~64-68% PASS on v2 post-fix, 100% PASS on seccomp, 100% PASS
+with MAP_POPULATE.
 
 ### H.1b legacy notes (pre-2026-04-30)
 
