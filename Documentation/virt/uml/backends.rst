@@ -11,22 +11,26 @@ User-Mode Linux runs the upstream Linux kernel as a host process.
 intercept its guest's syscalls, page faults, and signals — the
 plumbing between the host kernel and the UML kernel.
 
-One backend ships today; a KVM backend is being reimplemented:
+Two backends are buildable today; a third is archived:
 
 ==========  =====================================  ============================
 Backend     Mechanism                              Per-syscall cost on bare metal
 ==========  =====================================  ============================
 seccomp     ``SECCOMP_RET_TRAP`` + ``SIGSYS`` +    ~300–500 ns (seccomp filter
             futex round-trip                       hits, futex wakes UML kernel)
-kvm         ``KVM_RUN`` + per-mapping memslots +   target ~100 ns (workstream D
-            TDP via host ``mm->pgd``               v2 — in development)
+kvm-v2      ``KVM_RUN`` + IDT/IST exception        ~150 ns measured on minimal
+            delivery + IO-port syscall trap        Python startup (~2× faster
+                                                   than seccomp; memo 26 §H.1)
 ==========  =====================================  ============================
 
-seccomp landed in 6.16 (Benjamin Berg). kvm v1 reached integration
-but hit structural shadow-PT issues; the implementation is archived
-at ``arch/um/backend/kvm-v1-archive/`` (not built;
-``CONFIG_UM_BACKEND_KVM_V1_ARCHIVE`` depends on ``BROKEN``) and the
-v2 reimplementation is being built at ``arch/um/backend/kvm-v2/``.
+seccomp landed in 6.16 (Benjamin Berg). kvm v2 reached substrate
+parity with seccomp at the 2026-04-30 milestone (PASS=25 / FAIL=3 /
+EXPECTED_FAIL=3 on the ``regrtest-substrate`` gate, bit-for-bit
+match). v2 still defaults to ``n`` because Phase J validation (24h
+continuous, Tier 1/2/3 third-party libs, soak) is open; production
+runtimes can opt in via ``backend=force=kvm-v2``. The archived v1
+implementation lives at ``arch/um/backend/kvm-v1-archive/`` (not
+built; ``CONFIG_UM_BACKEND_KVM_V1_ARCHIVE`` depends on ``BROKEN``).
 See ``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/``
 memos 24-26 for design and 27 for the execution prompt.
 
@@ -50,32 +54,38 @@ You want…                     Use
 ============================  ==============================================
 "It just works"               No flags needed. Default config compiles in
                               seccomp; ``backend=auto`` selects it.
-Maximum speed                 ``backend=seccomp``. (KVM v2 will rejoin this
-                              spectrum once memo 26 Phase A wires it.)
+Maximum speed                 Build with ``CONFIG_UM_BACKEND_KVM_V2=y`` and
+                              boot ``backend=force=kvm-v2``. ~2× faster than
+                              seccomp on minimal Python startup; full
+                              substrate-gate parity at the 2026-04-30
+                              milestone. Phase J validation still pending —
+                              not yet the runtime default.
 Smallest binary / minimum     Build with
 TCB (sandbox profile)         ``CONFIG_UM_BACKEND_SECCOMP_ONLY=y``. The
                               dispatch macro inlines to direct calls.
 A binary that runs            ``CONFIG_UM_BACKEND_DYNAMIC=y`` (default
 anywhere                      when seccomp is available).
-Force a specific backend      ``backend=force=seccomp``. Panics during
-(panic if unavailable)        early init if seccomp probe fails.
+Force a specific backend      ``backend=force=seccomp`` /
+(panic if unavailable)        ``backend=force=kvm-v2``. Panics during
+                              early init if the chosen backend's host probe
+                              fails.
 ============================  ==============================================
 
 ******************
 Boot parameters
 ******************
 
-``backend=<auto|seccomp|kvm|force=seccomp|force=kvm>``
+``backend=<auto|seccomp|kvm-v2|force=seccomp|force=kvm-v2>``
     Pick the trap mechanism. ``auto`` (default) runs the host
     seccomp probe at boot and picks seccomp when the host supports
     it. ``force=`` makes the choice mandatory and panics if the
     requested backend isn't compiled in or fails its host probe.
-    ``kvm`` currently has no selectable backend — v1 archived to
-    ``arch/um/backend/kvm-v1-archive/`` (depends on ``BROKEN``);
-    v2 stub at ``arch/um/backend/kvm-v2/`` is not yet wired into
-    dispatch (memo 26 Phase A.1 plumbs it in). Today
-    ``backend=kvm`` falls back to seccomp and
-    ``backend=force=kvm`` panics.
+    ``kvm-v2`` is at substrate parity with seccomp (memo 26 §H.1b,
+    2026-04-30) and ~2× faster on minimal Python startup; opt in
+    via ``backend=force=kvm-v2`` until Phase J validation flips it
+    to default. The archived v1 implementation
+    (``arch/um/backend/kvm-v1-archive/``, depends on ``BROKEN``) is
+    not selectable.
 
     ``backend=ptrace`` is parsed for compatibility but the ptrace
     backend was removed (memo 25 R11; archived at the
@@ -129,27 +139,38 @@ seccomp
 Round-trip cost: 1 SIGSYS delivery + 1 futex wait/wake pair +
 shared-memory copy. ~300–500 ns.
 
-kvm (workstream D)
-==================
+kvm-v2 (workstream D)
+=====================
 
 .. code-block::
 
     UML host process               KVM guest
     ───────────────                ────────────────────────
-                                    1. Guest userspace runs
-                                    2. SYSCALL instruction →
-                                       MSR_LSTAR direct entry
-                                       to UML-kernel ring-0
-                                    3. UML kernel handles
-                                       syscall in-VM
-                                    4. SYSRET back to guest
-    [kernel only sees a VMEXIT
-     when guest does HLT or
-     VMCALL — typically only
-     for I/O or scheduling]
+                                    1. Guest userspace runs at CPL=3
+                                    2. SYSCALL instruction → MSR_LSTAR
+                                       trampoline (CPL=0, kernel CS) at
+                                       PML4[508] kernel-half VA
+                                    3. Trampoline: ``out %al,$0xf4``
+                                       → KVM_EXIT_IO
+    4. KVM_RUN returns to host;
+       handle_io_trap → handle_syscall
+       runs the syscall on the host
+       UML kernel; marshals result back
+       into kvm_run->s.regs via
+       SYNC_REGS dirty bits
+    5. KVM_RUN re-enters; trampoline
+       SYSRETQ drops back to CPL=3
+                                    6. Guest userspace continues
 
-Round-trip cost: hardware-fast LSTAR entry. No host VMEXIT for
-typical syscalls. Target: ~100 ns.
+Exception delivery follows the same pattern via the IDT in
+PML4[508] (``arch/um/backend/kvm-v2/exception.c``): #PF / #GP / #UD
+/ #DE / #OF dispatch through per-vector handler stubs that ``out``
+to the host then ``iretq`` back to the guest fault-resume
+instruction.
+
+Round-trip cost: ~150 ns measured, dominated by the KVM_EXIT_IO
+ioctl pair. ~2× faster than seccomp on minimal Python startup
+(memo 26 §H.1).
 
 ******************
 Implementation map
@@ -209,9 +230,11 @@ seccomp         Host with ``CONFIG_SECCOMP_FILTER=y`` (mainline since
                 (typically requires no special privileges; some
                 hardened/sandboxed environments may forbid it).
                 Linux 6.16+ for the in-tree UML stub layout.
-kvm             Host with ``/dev/kvm`` accessible to the running user.
-                Linux 5.x+. (Workstream D — v1 archived, v2 in
-                development per memo 26.)
+kvm-v2          Host with ``/dev/kvm`` accessible to the running user
+                (typically /dev/kvm group membership or
+                ``setfacl -m u:$(id -un):rw /dev/kvm``).  x86_64 host
+                CPU with VT-x or SVM. Linux 5.x+ for the KVM API
+                surface (KVM_CAP_SYNC_REGS, KVM_SET_USER_MEMORY_REGION).
 ptrace          Removed (memo 25 R11). Pin to UML v6.16 or earlier
                 if you need it.
 ==============  ==========================================================
