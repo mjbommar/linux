@@ -1096,6 +1096,16 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	sregs->cr3     = (u64)pgd_pa;
 	sregs->fs.base = (u64)fs_base;
 	sregs->gs.base = (u64)gs_base;
+	/*
+	 * Defensive: cr2 in the SYNC_REGS sregs mmap reflects the LAST
+	 * KVM_RUN exit's #PF address. v2 uses a per-host-CPU vCPU pool
+	 * (vcpu.c:1295), so when a different task enters on the same
+	 * vCPU, parent's cr2 would otherwise be re-shipped to vmcs via
+	 * the dirty-bit at line 1132 below. Clear it explicitly so the
+	 * dispatch starts with a clean cr2 — guest #PF handlers can't
+	 * see stale parent-task fault addresses.
+	 */
+	sregs->cr2 = 0;
 
 	/*
 	 * D.4a: ensure EFER.SCE is set so SYSCALL doesn't raise #UD. KVM
