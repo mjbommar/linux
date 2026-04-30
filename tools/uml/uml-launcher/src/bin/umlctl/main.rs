@@ -26,6 +26,7 @@ mod console_split;
 mod deploy;
 mod dmesg_parse;
 mod events;
+mod gate;
 mod history;
 mod manifest;
 mod metrics;
@@ -115,6 +116,82 @@ enum Cmd {
     /// Tear down a deployment: stop the instance, undo host-side
     /// TAP/iptables setup, optionally remove the manifest.
     Down(DownArgs),
+    /// Sealed-wrapper test gate: run a Gatefile against an existing
+    /// harness, parse PASS/FAIL/EXPECTED_FAIL counts from stdout,
+    /// append a scoreboard.jsonl row. The gate runner does NOT
+    /// define passing or failing — it reports what the harness
+    /// said. See memo 30-gate-discipline.md.
+    #[command(subcommand)]
+    Gate(GateCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum GateCmd {
+    /// Run a Gatefile and append one row to the scoreboard.
+    Run(GateRunArgs),
+    /// Show recent scoreboard rows as a table with PASS-delta
+    /// markers. Use this every commit to spot silent regressions.
+    Diff(GateDiffArgs),
+    /// List discovered Gatefiles under tools/testing/selftests/um/gates/.
+    List(GateListArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct GateRunArgs {
+    /// Path to the Gatefile (TOML).
+    #[arg(short = 'f', long = "file", value_name = "PATH")]
+    file: std::path::PathBuf,
+
+    /// UML kernel binary path. Substituted into Gatefile env values
+    /// as `{{kernel}}`. Falls back to $UML_KERNEL.
+    #[arg(long, value_name = "PATH")]
+    kernel: Option<std::path::PathBuf>,
+
+    /// Backend label. Substituted as `{{backend}}`. Default
+    /// "seccomp".
+    #[arg(long, default_value = "seccomp", value_name = "NAME")]
+    backend: String,
+
+    /// Override the scoreboard path. Default
+    /// tools/testing/selftests/um/scoreboard.jsonl under the source
+    /// root.
+    #[arg(long, value_name = "PATH")]
+    scoreboard: Option<std::path::PathBuf>,
+
+    /// Print the parsed Gatefile + resolved env without running.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Source root (where git rev-parse runs and the default
+    /// scoreboard lives). Defaults to the current working dir.
+    #[arg(long, value_name = "PATH")]
+    source_root: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct GateDiffArgs {
+    /// Filter to a single gate name.
+    #[arg(long, value_name = "NAME")]
+    gate: Option<String>,
+
+    /// How many recent rows to show.
+    #[arg(short = 'n', long, default_value_t = 20)]
+    limit: usize,
+
+    /// Override the scoreboard path.
+    #[arg(long, value_name = "PATH")]
+    scoreboard: Option<std::path::PathBuf>,
+
+    /// Source root (for default scoreboard discovery).
+    #[arg(long, value_name = "PATH")]
+    source_root: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct GateListArgs {
+    /// Source root (for default gates dir discovery).
+    #[arg(long, value_name = "PATH")]
+    source_root: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -443,7 +520,111 @@ fn run() -> Result<()> {
         Cmd::Export(args) => cmd_export(&paths, args, cli.quiet),
         Cmd::Up(args) => cmd_up(&paths, args, cli.quiet),
         Cmd::Down(args) => cmd_down(&paths, args, cli.quiet),
+        Cmd::Gate(sub) => match sub {
+            GateCmd::Run(args) => cmd_gate_run(args, cli.quiet),
+            GateCmd::Diff(args) => cmd_gate_diff(args),
+            GateCmd::List(args) => cmd_gate_list(args),
+        },
     }
+}
+
+// -------------------------------------------------------------------
+// gate
+// -------------------------------------------------------------------
+
+fn default_source_root(arg: &Option<std::path::PathBuf>) -> std::path::PathBuf {
+    arg.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
+fn default_scoreboard(arg: &Option<std::path::PathBuf>, root: &std::path::Path) -> std::path::PathBuf {
+    arg.clone().unwrap_or_else(|| root.join("tools/testing/selftests/um/scoreboard.jsonl"))
+}
+
+fn cmd_gate_run(args: GateRunArgs, quiet: bool) -> Result<()> {
+    let gatefile = gate::Gatefile::from_path(&args.file)
+        .with_context(|| format!("load Gatefile {}", args.file.display()))?;
+    let kernel = args.kernel
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| std::env::var("UML_KERNEL").ok())
+        .unwrap_or_default();
+    let source_root = default_source_root(&args.source_root);
+    let scoreboard = default_scoreboard(&args.scoreboard, &source_root);
+
+    if args.dry_run {
+        println!("== gate ==");
+        println!("  name      = {}", gatefile.gate.name);
+        println!("  backend   = {}", args.backend);
+        println!("  kernel    = {}", kernel);
+        println!("  scoreboard= {}", scoreboard.display());
+        println!("  cmd       = {}", gatefile.run.cmd);
+        println!("  budget_s  = {}", gatefile.run.budget_sec);
+        return Ok(());
+    }
+
+    if !quiet {
+        println!("[umlctl gate] {} backend={} kernel={}",
+            gatefile.gate.name, args.backend, kernel);
+    }
+    let row = gate::run(gate::RunInputs {
+        gate: &gatefile,
+        backend: &args.backend,
+        kernel: &kernel,
+        source_root: &source_root,
+    })?;
+    gate::append_scoreboard(&scoreboard, &row)
+        .with_context(|| format!("append {}", scoreboard.display()))?;
+    if !quiet {
+        println!(
+            "[umlctl gate] {} backend={} pass={} fail={} expected_fail={} exit={} dur={:.1}s status={}",
+            row.gate, row.backend, row.pass, row.fail, row.expected_fail,
+            row.exit_code, row.duration_sec,
+            if row.thresholds_met { "PASS" } else { "FAIL" },
+        );
+        for f in &row.failures {
+            println!("    └─ {}", f);
+        }
+    }
+    if !row.thresholds_met {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_gate_diff(args: GateDiffArgs) -> Result<()> {
+    let source_root = default_source_root(&args.source_root);
+    let path = default_scoreboard(&args.scoreboard, &source_root);
+    let rows = gate::read_scoreboard(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let s = gate::render_diff(&rows, args.gate.as_deref(), args.limit);
+    print!("{s}");
+    Ok(())
+}
+
+fn cmd_gate_list(args: GateListArgs) -> Result<()> {
+    let source_root = default_source_root(&args.source_root);
+    let dir = source_root.join("tools/testing/selftests/um/gates");
+    if !dir.is_dir() {
+        println!("(no gates dir at {})", dir.display());
+        return Ok(());
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let p = e.path();
+        match gate::Gatefile::from_path(&p) {
+            Ok(g) => println!(
+                "{name:30} {phase:6} {desc}",
+                name = g.gate.name,
+                phase = if g.gate.phase.is_empty() { "-" } else { &g.gate.phase },
+                desc = g.gate.description,
+            ),
+            Err(e) => println!("{}: ERROR ({})", p.display(), e),
+        }
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------------

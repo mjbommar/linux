@@ -1,0 +1,6 @@
+# Per-developer scoreboard for `umlctl gate run`. Every commit
+# appends one row per gate invocation; the file is local-only so
+# different machines / branches don't fight over it. Use
+# `umlctl gate diff` to view; the source of truth for thresholds is
+# tools/testing/selftests/um/gates/*.toml.
+scoreboard.jsonl

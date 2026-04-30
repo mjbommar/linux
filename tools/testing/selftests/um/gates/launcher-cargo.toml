@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# L0: launcher unit-test gate.
+#
+# `cargo test --bin umlctl` runs every test in the umlctl crate.
+# This is the cheapest gate (~5 sec on a warm cache) and catches
+# regressions in the host-side tooling — Umlfile parsing, gate
+# parsing itself, manifest serialization, supervise argv shape,
+# scoreboard roundtrip, port-forward parsing.
+#
+# Runs first in the L0..L7 ladder (memo 30-gate-discipline.md).
+
+schema_version = 1
+
+[gate]
+name = "launcher-cargo"
+description = "umlctl host-side unit tests (cargo test --bin umlctl)"
+phase = "L0"
+
+[run]
+cmd = "cargo test --manifest-path tools/uml/uml-launcher/Cargo.toml --bin umlctl"
+budget_sec = 120
+
+[parse]
+# `cargo test` returns 0 only if every test passes; that's a faithful
+# enough signal at this layer. We don't try to count individual tests
+# because cargo's output format isn't stable across versions.
+pass_on_exit_zero = true
+
+[thresholds]
+require_clean_exit = true
