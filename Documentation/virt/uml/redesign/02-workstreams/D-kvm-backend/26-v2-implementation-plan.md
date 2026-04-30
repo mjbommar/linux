@@ -1205,19 +1205,69 @@ Concrete next moves (deferred to a focused kernel-side investigation):
        - Parent always exits cleanly (RC=0). The stack-smashing-
          detected output is from the CHILD's libc.
      The bug is **v2's child-process state on first dispatch after
-     fork**. Likely candidates:
-       a. Stale FPU/XMM state from a previous task on the same
-          per-CPU vCPU. v2's `kvm_v2_fpu_install_on_first_run` may
-          not set arch-fresh values for a forked child (only for
-          freshly-spawned tasks).
-       b. CR3 or KVM memslot inconsistency for the child's mm —
-          first dispatch after fork may load stale TLB/EPT entries
-          mapping child VAs to parent's physical pages.
-       c. Child's gs.base stale from previous task on same vCPU
-          (FS_BASE round-trip is now correct; GS could still leak).
-     Next: instrument `kvm_v2_fpu_install_on_first_run` to dump
-     FPU state on first child dispatch; compare to parent's FPU at
-     fork time. If different, the FPU restore path is broken.
+     fork**. Investigation results (this session):
+
+     **Hypotheses ELIMINATED** (no improvement on
+     fork-tree-3level / child_simple gate; ~30-40% PASS unchanged):
+       - Stale FPU state. Forced arch-default FPU on every
+         dispatch; no improvement.
+       - Stale segment registers. Explicitly wrote CS=0x2b/DS=ES=
+         SS=0x23/CR0/CR4 on every dispatch; no improvement.
+       - Real KVM_SET_SREGS ioctl (vs SYNC_REGS dirty-bit). No
+         improvement.
+       - interrupt_end placement (commit 31ba9c354063); bisected
+         negative.
+       - CLONE_CHILD_*TID flags; tested with raw clone(SIGCHLD,
+         ...); same failure rate.
+       - glibc cleanup at exit (`_exit` vs `return 0`); same rate.
+       - TLS / FS_BASE; static-glibc binaries don't issue
+         arch_prctl(SET_FS) at all (verified DIAG; fs.base=0
+         throughout).
+
+     **Defensive fixes LANDED** (improve correctness but don't
+     resolve the gate):
+       - sregs.fs.base/gs.base round-trip from KVM_RUN exit
+         (commit 6e52574cca6c). Fixes a v1→v2 regression but isn't
+         exercised by static-glibc workloads.
+       - sregs.cr2 cleared in load_user_sregs (commit
+         24a7f0575e18). Stops parent's last #PF address leaking
+         into child via the per-host-CPU vCPU's sregs mmap.
+
+     **Remaining suspects** for the focused next-session
+     investigation:
+       a. Worker / stub-child mm setup. v2 spawns a worker host
+          process per UML mm. Audit (memo §E.4 sub-agent report,
+          2026-04-30) confirms KVM TDP walks via memslot 0 (not
+          stub-child mm), but timing of new-mm worker spawn vs
+          first KVM_RUN may matter.
+       b. Per-CPU vCPU state ownership. Each task migrates onto
+          whichever vCPU is current. v1 had per-task vCPUs; v2
+          uses per-host-CPU pool. Some hidden state may persist on
+          the vCPU between tasks (debug regs DR0-DR7 are not
+          touched at all per the audit; KVM_SYNC_X86_EVENTS is
+          not enabled).
+       c. EPT/TLB invalidation timing for the child's CR3. Even
+          though CR3 is set correctly on every dispatch, KVM may
+          carry stale TDP cache entries.
+       d. User-stack page mapping race. Child's CoW'd stack pages
+          may not be properly invalidated in the host process's mm
+          before child runs.
+
+     **Reproducer suite** at
+     `tools/testing/selftests/um/fork-tree-3level/repros/` makes
+     deterministic-ish bisection cheap:
+       - raw_fork.c: PASS (no libc baseline)
+       - libc_simple.c: PASS (libc no-fork baseline)
+       - child_simple.c: deterministic FAIL ~70% (parent _exit;
+         child does printf)
+       - child_only_canary.c: FAIL 10/10 (child's strlen/memset
+         force-XMM workload)
+
+     Next: instrument `kvm_v2_load_user_sregs` to dump (cpu, pid,
+     pgd_pa, gs.base, prev_pid_on_this_vcpu) on first child
+     dispatch. Cross-reference against host-side strace of the
+     stub-child process to look for unexpected memory operations
+     between parent's last exit and child's first entry.
 
 These are kernel-internals work, not host-side tooling, so they
 belong on a fresh `uml-redesign-plan` checkout with codex-style
