@@ -1380,6 +1380,26 @@ Tightening this gate to PASS on v2 IS the concrete deliverable for
 resolving #95, #96, and the substrate truncation. Phase H.1b
 (headline cpython gate) and Phase J Tier 1/2/3 are downstream.
 
+**UPDATE 2026-04-30 (post-six-fixes session):** Phase H.1b is now
+**UNBLOCKED**. After landing the six fixes (FS_BASE, cr2, TLB-flush
++ current_mm_sync, EINTR snapshot, EINTR interrupt_end, ctx-switch
+drain) plus the harness-regex fix at 987e62eb3799, the cpython-tier0
+gate PASSes deterministically on kvm-v2:
+
+  $ umlctl gate run -f tools/.../gates/cpython-tier0.toml \
+        --backend kvm-v2 --kernel ~/src/uml-builds/uml-clean/linux
+  pass=1 fail=0 status=PASS
+  hashlib_sha256_emptystring = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+
+The 2cf24dba... is the canonical SHA256 of the empty string —
+proves Python loaded libcrypto and called sha256() correctly under
+v2. That class of bug (single-process Python with shared library
+loading) is now closed.
+
+Substrate gate at this checkpoint: PASS=7..9 mode 7-9, floor 7.
+fork-tree-3level: 30-40% PASS (residual from sustained user-mode
+schedule activity — separate task #107).
+
 #### Substrate gate v2 non-determinism (2026-04-30)
 
 10× sequential runs of `run-regrtest-repros.sh` against the kernel
