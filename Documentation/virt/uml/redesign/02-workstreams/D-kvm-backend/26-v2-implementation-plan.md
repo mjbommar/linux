@@ -1269,15 +1269,27 @@ Concrete next moves (deferred to a focused kernel-side investigation):
           100%" — exactly the v2 fork-tree-3level rate observed
           before this fix.
 
-     Empirical impact:
+     Empirical impact (cumulative, post all fixes through
+     d5d5d15c4e5b):
        - `child_simple` reproducer: was 3-4/10 PASS, now 10/10.
-       - `regrtest-substrate` PASS distribution: post-TLB-fix line
-         is PASS=5..10 with mode 5 (was PASS=4..9 mode 4). Floor
-         lifted by 1, ceiling lifted by 1, the PASS=4 outlier is
-         gone.
+       - `regrtest-substrate` PASS distribution evolved across
+         the session:
+           Pre-fix:    {4×8, 6×1, 9×1} mode 4
+           Post-TLB:   {5,5,5,5,5,5,7,7,9,10} mode 5
+           Post-EINTR: {6,7,8,8,9,9,10,14} mode 8 (more variance up)
+           Latest x5:  {6,8,8,9,9} floor 6 ceiling 9
+         Net: floor lifted 4→6, ceiling lifted 9→14, mode 4→8.
        - `fork_tree_3level` gate: ~30-35% PASS (was 0-10%).
-       - Perf unchanged: 0.444× ratio (2× faster than seccomp)
+       - Perf unchanged: 0.500× ratio (2× faster than seccomp)
          on perf-py-startup.
+
+     Five fixes landed this session:
+       1. 6e52574cca6c: sregs.fs.base/gs.base round-trip
+       2. 24a7f0575e18: sregs.cr2 cleared in load_user_sregs
+       3. 11102c8176fb: current_mm_sync + CR4.PGE toggle (TLB flush)
+       4. 3d426c4cb0c7: snapshot kvm_run state before unblock_signals
+       5. a3f6238adcec: interrupt_end after EINTR marshal-back
+       6. d5d5d15c4e5b: drain prev->active_mm in context_switch
 
      **Snapshot fix (commit 3d426c4cb0c7):** Codex audit identified
      a residual race in v2's KVM_RUN return path where
