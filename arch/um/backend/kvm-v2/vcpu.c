@@ -54,6 +54,7 @@
 #include <asm/processor-flags.h>	/* X86_CR0_*, X86_CR4_* (D.5-fix
 					 * install_production_sregs) */
 
+#include <asm/tlbflush.h>	/* um_tlb_sync */
 #include <kern_util.h>		/* interrupt_end */
 #include <os.h>
 #include <skas.h>		/* current_mm_sync */
@@ -1716,6 +1717,29 @@ EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_switch_out);
 void kvm_v2_context_switch(struct task_struct *from, struct task_struct *to)
 {
 	kvm_v2_fpu_capture_for_switch_out(from);
+
+	/*
+	 * Drain `from->active_mm` BEFORE delegating to seccomp so any
+	 * deferred TLB syncs from `from`'s last user-mode session land
+	 * in the spawner mm now (visible to KVM's mmu_notifier) rather
+	 * than carrying over to `to`'s first dispatch on the same vCPU.
+	 *
+	 * v1 archive (kvm-v1-archive/thread.c:412-423) did the same
+	 * before its switch_threads. Without it, accumulated NEEDSYNC
+	 * PTEs on `from`'s mm leak into `to`'s view of physmem on the
+	 * shared per-host-CPU vCPU. After many context switches (e.g.
+	 * sched_yield-heavy workloads), the next exec()'d binary sees
+	 * stale guest pgd entries and ld.so segfaults during
+	 * relocation processing — see fork-tree-3level repros for
+	 * the canonical reproducer (codex audit, memo §E.4).
+	 */
+	if (from && from->active_mm) {
+		int sync_rc = um_tlb_sync(from->active_mm);
+		if (sync_rc < 0)
+			panic("um: kvm-v2 context_switch: um_tlb_sync(from=%p active_mm=%p) failed (%d)",
+			      from, from->active_mm, sync_rc);
+	}
+
 	seccomp_context_switch(from, to);
 }
 EXPORT_SYMBOL_GPL(kvm_v2_context_switch);
