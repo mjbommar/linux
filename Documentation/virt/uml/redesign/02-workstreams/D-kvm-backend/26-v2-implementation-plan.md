@@ -1121,6 +1121,60 @@ silently triggering SIGNAL_GROUP_EXIT on v2's PID 1 during the
 post-grandchild-reap window, we have a signal-delivery bug, not a
 register-marshaling bug.
 
+**Confirmed via instrumented kernel (2026-04-30, debug printk in
+do_exit):** Hypothesis (b) is correct. With `pr_emerg("...sig->gec=
+0x%x sig->flags=0x%x...")` added at the init-panic site, kvm-v2
+shows `code=0xff00 sig->gec=0xff00 sig->flags=0x4
+SIGNAL_GROUP_EXIT_set=1` — meaning `SIGNAL_GROUP_EXIT` was already
+set on shell's signal_struct *before* shell's exit_group(0) call,
+and `group_exit_code` was already 0xff00 (=255 << 8 wait-status
+shape), so do_group_exit's override fires and replaces user's 0
+with 0xff00. The propagation chain is: do_group_exit(0) sees
+flags & SIGNAL_GROUP_EXIT → exit_code := sig->group_exit_code (0xff00)
+→ do_exit(0xff00) → tsk->exit_code = 0xff00 → init panic prints
+0xff00.
+
+A wider trace (printk on every do_exit, not just init's) showed an
+even more interesting signal: in some runs the *child* fork_pid
+process (PID 23) hits do_exit with `code=0x2a00` for a `_exit(42)`
+call (= 42 shifted left by 8). The kernel ought to see code=42.
+That looks like **the same shift-left-by-8 corruption that produces
+the 0xff00 = 255 << 8 in shell's gec**. Whatever sets gec is
+storing wait-status-encoded values (`exit_value << 8`) instead of
+raw exit values or signal numbers.
+
+The bug is also **timing-sensitive**: with the debug printks
+slowing dispatch, the 0xff00 outcome only fires on a fraction of
+runs (vs ~10/10 deterministic without instrumentation). That
+fits the substrate-gate truncation pattern (mostly PASS=4, sometimes
+PASS=6/9 — it depends on whether the in-flight signal landed before
+the next syscall's marshal-out). Combined with the two
+`interrupt_end()` placement reverts (memo §E.4 revert pair), this
+points to a v2 signal-delivery path that uses a stale or
+uninitialised `signo` slot when the host process the worker is
+running on is reaped.
+
+Concrete next moves (deferred to a focused kernel-side investigation):
+  1. Trace `complete_signal()` calls during the v2 grandchild-reap
+     window. Capture which signal numbers route to PID 1's signal
+     queue, and the value of `sig` when `signal->group_exit_code = sig`
+     fires.
+  2. Audit `send_signal_pkill` / `__send_signal_locked` callers in
+     UML / arch/um for any path that passes a wait-status-encoded
+     value where signal_number is expected.
+  3. Bisect: revert v2's `interrupt_end` in the exception handlers
+     (`31ba9c354063`) just for this gate run — does fork-tree-3level
+     PASS without it? If yes, the fix is "interrupt_end leaks
+     wait-status as signo into complete_signal."
+
+These are kernel-internals work, not host-side tooling, so they
+belong on a fresh `uml-redesign-plan` checkout with codex-style
+careful reading of the signal-delivery path. The reproducer +
+gate now ship, so the next session can iterate against a green
+seccomp baseline and a red kvm-v2 baseline with one command per
+attempt: `umlctl gate run -f .../fork-tree-3level.toml --backend
+kvm-v2 --kernel ...`.
+
 The reproducer ships at:
   - `tools/testing/selftests/um/fork-tree-3level/fork_tree_3level.c`
   - `tools/testing/selftests/um/fork-tree-3level/run-fork-tree-3level.sh`
