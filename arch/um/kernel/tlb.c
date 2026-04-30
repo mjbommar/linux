@@ -37,6 +37,8 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/sched/signal.h>
+#include <linux/slab.h>
+#include <linux/swap.h>
 
 #include <asm/backend.h>
 #include <asm/tlbflush.h>
@@ -48,6 +50,166 @@
 #include <os.h>
 #include <skas.h>
 #include <kern_util.h>
+
+/*
+ * Memo §H.1b residual fix: deferred-free queue.
+ *
+ * UML's flush_tlb_range only marks (sync_tlb_range_*); the actual
+ * guest-TLB flush is the CR4.PGE toggle on the next vcpu_run
+ * dispatch (kvm-v2/vcpu.c:1148). mmu_gather's tlb_batch_pages_flush
+ * (mm/mmu_gather.c) frees pages back to buddy BEFORE that flush —
+ * which violates the standard mm contract and exposes a window
+ * where kernel slab can take a freed PFN and write data while the
+ * guest CPU's user-half TLB still has stale translations to it.
+ *
+ * Diagnostic confirmed (memo §H.1b ROOT-CAUSED, 2026-04-30): under
+ * mt-mmap-stress 3T×50 iters, the failing PFN appears in
+ * tlb_batch_pages_flush with sync_tlb_range_to non-empty.
+ *
+ * Fix shape: instead of letting mmu_gather call
+ * free_pages_and_swap_cache, we transfer the batch's encoded_page
+ * entries into per-mm deferred_free batches. We do NOT touch
+ * refcounts here — the encoded_page array's "ownership" of each
+ * page (the ref that mmu_gather holds during the unmap) is
+ * preserved by transferring the entries. At drain time (next
+ * vcpu_run, after KVM_RUN's CR4.PGE flush has executed), we call
+ * free_pages_and_swap_cache on the deferred batches — the same
+ * operation mmu_gather would have done, just deferred until the
+ * TLB has actually been flushed.
+ *
+ * Each um_defer_batch holds up to UM_DEFER_BATCH_NR encoded_page
+ * entries. Sized to fit comfortably in a kmalloc-1024 slab and
+ * cover a typical 64KB unmap (16 pages) in a single batch.
+ */
+#define UM_DEFER_BATCH_NR	120	/* 8*120 + 16 = 976 bytes */
+
+struct um_defer_batch {
+	struct list_head list;
+	unsigned int nr;
+	struct encoded_page *pages[UM_DEFER_BATCH_NR];
+};
+
+/*
+ * Append a single encoded_page entry to mm->context.deferred_free_pages.
+ * Caller holds context.deferred_free_lock.
+ *
+ * Returns 0 on success; on kmalloc failure returns -ENOMEM and the
+ * caller MUST fall back to the immediate-free path (otherwise we'd
+ * lose the page reference).
+ */
+static int __um_defer_append_locked(struct mm_context *ctx,
+				    struct encoded_page *enc)
+{
+	struct um_defer_batch *b;
+
+	if (!list_empty(&ctx->deferred_free_pages)) {
+		b = list_last_entry(&ctx->deferred_free_pages,
+				    struct um_defer_batch, list);
+		if (b->nr < UM_DEFER_BATCH_NR) {
+			b->pages[b->nr++] = enc;
+			ctx->deferred_free_count++;
+			return 0;
+		}
+	}
+
+	b = kmalloc(sizeof(*b), GFP_ATOMIC);
+	if (!b)
+		return -ENOMEM;
+
+	b->nr = 1;
+	b->pages[0] = enc;
+	list_add_tail(&b->list, &ctx->deferred_free_pages);
+	ctx->deferred_free_count++;
+	return 0;
+}
+
+/*
+ * Hand mmu_gather's encoded_page array off to the per-mm deferred
+ * queue. Returns the number of entries successfully deferred; the
+ * caller frees the rest immediately. Called from
+ * tlb_batch_pages_flush in mm/mmu_gather.c.
+ *
+ * On entry, batch->encoded_pages[0..batch->nr) holds the entries.
+ * On full success we set batch->nr = 0 (caller skips its own free).
+ * On partial success (kmalloc OOM mid-batch), we set batch->nr to
+ * the number of REMAINING entries shifted to the front of the
+ * array — caller resumes the standard free flow on those.
+ */
+unsigned int um_mmu_gather_defer(struct mm_struct *mm,
+				 struct encoded_page **encoded,
+				 unsigned int nr)
+{
+	struct mm_context *ctx;
+	unsigned long flags;
+	unsigned int deferred = 0;
+	unsigned int i;
+
+	if (!mm || !nr)
+		return 0;
+
+	/*
+	 * init_mm is special — it's the kernel's own mm and runs
+	 * outside of vcpu_run (kernel-half VAs). The deferred-free
+	 * mechanism only makes sense for user-half mappings draining
+	 * before guest TLB flush. Init_mm pages get freed normally.
+	 */
+	if (mm == &init_mm)
+		return 0;
+
+	ctx = &mm->context;
+
+	scoped_guard(spinlock_irqsave, &ctx->deferred_free_lock) {
+		for (i = 0; i < nr; i++) {
+			if (__um_defer_append_locked(ctx, encoded[i]) < 0) {
+				/* kmalloc OOM mid-batch: stop deferring,
+				 * shift remaining entries to front so caller
+				 * frees them inline. */
+				unsigned int rem = nr - i;
+				memmove(&encoded[0], &encoded[i],
+					rem * sizeof(encoded[0]));
+				return deferred;
+			}
+			deferred++;
+		}
+	}
+	return deferred;
+}
+
+/*
+ * Drain the per-mm deferred-free queue. Called from the active
+ * backend's vcpu_run AFTER KVM_RUN's CR4.PGE flush has executed
+ * (so the GUEST TLB no longer caches stale translations to these
+ * pages).
+ *
+ * Splices the queue under the lock so the drain itself runs
+ * without holding the lock — free_pages_and_swap_cache can be
+ * non-trivial work.
+ */
+void um_mmu_gather_drain(struct mm_struct *mm)
+{
+	struct mm_context *ctx;
+	struct um_defer_batch *b, *tmp;
+	LIST_HEAD(local);
+
+	if (!mm || mm == &init_mm)
+		return;
+
+	ctx = &mm->context;
+
+	scoped_guard(spinlock_irqsave, &ctx->deferred_free_lock) {
+		if (list_empty(&ctx->deferred_free_pages))
+			return;
+		list_splice_init(&ctx->deferred_free_pages, &local);
+		ctx->deferred_free_count = 0;
+	}
+
+	list_for_each_entry_safe(b, tmp, &local, list) {
+		list_del(&b->list);
+		free_pages_and_swap_cache((struct encoded_page **)b->pages,
+					  b->nr);
+		kfree(b);
+	}
+}
 
 /*
  * vm_ops: per-drain dispatch table. Carries the mm pointer (or

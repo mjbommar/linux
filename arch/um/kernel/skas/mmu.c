@@ -13,6 +13,7 @@
 #include <asm/pgalloc.h>
 #include <asm/sections.h>
 #include <asm/mmu_context.h>
+#include <asm/tlbflush.h>
 #include <asm/trace/um_backend.h>
 #include <asm/um_memory.h>
 #include <as-layout.h>
@@ -51,6 +52,17 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 
 	mutex_init(&mm->context.turnstile);
 	spin_lock_init(&mm->context.sync_tlb_lock);
+
+	/*
+	 * Memo §H.1b residual fix: deferred-free page list. dup_mm()
+	 * bytewise-copies the parent mm including these fields, so we
+	 * must reset for the new mm. See arch/um/include/asm/mmu.h
+	 * for the rationale (mmu_gather frees pages before UML's
+	 * deferred TLB flush completes, exposing a slab-write window).
+	 */
+	spin_lock_init(&mm->context.deferred_free_lock);
+	INIT_LIST_HEAD(&mm->context.deferred_free_pages);
+	mm->context.deferred_free_count = 0;
 
 	/*
 	 * Clear the per-mm worker pointer for a fresh mm. dup_mm() (during
@@ -132,6 +144,16 @@ void destroy_context(struct mm_struct *mm)
 
 	scoped_guard(spinlock_irqsave, &mm_list_lock)
 		list_del(&mm->context.list);
+
+	/*
+	 * Memo §H.1b residual fix: drain any remaining deferred-free
+	 * pages. Normally drained at vcpu_run; if the mm is being torn
+	 * down with pages still on the queue (e.g. exit_mmap raced with
+	 * a pending sync), free them here so they don't leak. By
+	 * destroy_context time the mm has no live mappings anywhere —
+	 * no TLB, no PTEs, no userspace — so it's safe regardless.
+	 */
+	um_mmu_gather_drain(mm);
 
 	/*
 	 * mm_destroy owns per-mm teardown of backend-private state (stub

@@ -1527,6 +1527,16 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
 				kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
 				trace_um_backend_kvm_v2_vcpu_eintr(cpu);
+				/*
+				 * Memo §H.1b: even on EINTR, KVM_RUN entry
+				 * executed the CR4.PGE flush. Pages deferred
+				 * during prior dispatches' exit handling are
+				 * safe to release. See comment on the post-
+				 * marshal drain below for the full timing
+				 * argument.
+				 */
+				if (current->mm)
+					um_mmu_gather_drain(current->mm);
 				preempt_enable();
 				/*
 				 * v1 archive (kvm-v1-archive/thread.c:5169-5177)
@@ -1556,6 +1566,23 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
 		kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
 	}
+
+	/*
+	 * Memo §H.1b residual fix: drain the per-mm deferred-free
+	 * queue. Pages added to this queue by mm/mmu_gather.c during
+	 * a previous dispatch's exit handling have, by now, seen at
+	 * least one CR4.PGE-toggled KVM_RUN entry — namely the one
+	 * that just exited above. So the guest CPU's TLB no longer
+	 * caches stale translations to those PFNs; safe to release
+	 * back to buddy.
+	 *
+	 * Pages added to the queue DURING this dispatch's exit
+	 * handling (the switch (exit_reason) block below) wait for
+	 * the NEXT dispatch's KVM_RUN to flush — they get drained at
+	 * THAT dispatch's drain call here.
+	 */
+	if (current->mm)
+		um_mmu_gather_drain(current->mm);
 
 	switch (exit_reason) {
 	case KVM_EXIT_IO:

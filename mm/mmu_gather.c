@@ -15,6 +15,12 @@
 
 #include <asm/tlb.h>
 
+#ifdef CONFIG_UML
+/* See arch/um/include/asm/tlbflush.h — defer page-free until next
+ * vcpu_run dispatch's CR4.PGE flush has executed (memo §H.1b). */
+#include <asm/tlbflush.h>
+#endif
+
 #ifndef CONFIG_MMU_GATHER_NO_GATHER
 
 static bool tlb_next_batch(struct mmu_gather *tlb)
@@ -146,6 +152,32 @@ static void __tlb_batch_free_encoded_pages(struct mmu_gather_batch *batch)
 static void tlb_batch_pages_flush(struct mmu_gather *tlb)
 {
 	struct mmu_gather_batch *batch;
+
+#ifdef CONFIG_UML
+	/*
+	 * Memo §H.1b residual fix: defer page-free until after the
+	 * guest TLB has actually been flushed. Standard mm assumes
+	 * tlb_flush_mmu_tlbonly() invalidated the TLB before this
+	 * point, so freeing pages back to buddy here is safe. UML's
+	 * flush is deferred to the next vcpu_run dispatch's CR4.PGE
+	 * toggle (kvm-v2/vcpu.c:1148) — freeing here exposes a window
+	 * where kernel slab can take a freed PFN and write data while
+	 * the guest CPU still has user-half TLB entries pointing at
+	 * it. Hand the encoded_page array to UML's per-mm deferred
+	 * queue; arch/um/kernel/tlb.c:um_mmu_gather_drain releases
+	 * them after the next KVM_RUN actually flushes the TLB.
+	 */
+	if (tlb->mm) {
+		for (batch = &tlb->local; batch && batch->nr; batch = batch->next) {
+			unsigned int deferred;
+
+			deferred = um_mmu_gather_defer(tlb->mm,
+						       batch->encoded_pages,
+						       batch->nr);
+			batch->nr -= deferred;
+		}
+	}
+#endif
 
 	for (batch = &tlb->local; batch && batch->nr; batch = batch->next)
 		__tlb_batch_free_encoded_pages(batch);

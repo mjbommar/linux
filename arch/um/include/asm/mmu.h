@@ -34,12 +34,40 @@ typedef struct mm_context {
 	 * when memo 28's E.6 commit flips the defconfig toggle.
 	 */
 	struct um_worker *worker;
+
+	/*
+	 * Memo §H.1b residual fix: mmu_gather free-after-flush gap.
+	 *
+	 * UML's deferred TLB-sync model violates mmu_gather's contract
+	 * that the TLB flush completes BEFORE the page is returned to
+	 * buddy. flush_tlb_range only marks (sync_tlb_range_*); the
+	 * actual flush is the CR4.PGE toggle at next vcpu_run dispatch
+	 * (kvm-v2/vcpu.c:1148). tlb_batch_pages_flush(mm/mmu_gather.c)
+	 * frees pages BEFORE that flush — kernel slab can take a freed
+	 * PFN and write data while the guest CPU's user-half TLB still
+	 * has a stale translation pointing at it.
+	 *
+	 * Fix: under UML, mmu_gather hands the encoded_page array to
+	 * us instead of calling free_pages_and_swap_cache. We hold an
+	 * extra ref on each (preventing buddy reuse), queue them on
+	 * deferred_free, and call put_page at the start of vcpu_run —
+	 * which is AFTER the previous dispatch's CR4.PGE flush has
+	 * already executed inside KVM_RUN.
+	 *
+	 * Confirmed via mm/mmu_gather.c:tlb_batch_pages_flush printk
+	 * (memo §H.1b ROOT-CAUSED entry, 2026-04-30).
+	 */
+	spinlock_t deferred_free_lock;
+	struct list_head deferred_free_pages;
+	unsigned int deferred_free_count;
 } mm_context_t;
 
 #define INIT_MM_CONTEXT(mm)						\
 	.context = {							\
 		.turnstile = __MUTEX_INITIALIZER(mm.context.turnstile),	\
 		.sync_tlb_lock = __SPIN_LOCK_INITIALIZER(mm.context.sync_tlb_lock), \
+		.deferred_free_lock = __SPIN_LOCK_INITIALIZER(mm.context.deferred_free_lock), \
+		.deferred_free_pages = LIST_HEAD_INIT(mm.context.deferred_free_pages), \
 	}
 
 #endif

@@ -44,6 +44,19 @@ extern int um_tlb_sync(struct mm_struct *mm);
 extern void flush_tlb_all(void);
 extern void flush_tlb_mm(struct mm_struct *mm);
 
+/*
+ * Memo §H.1b residual fix: deferred free for mmu_gather pages.
+ * mmu_gather's tlb_batch_pages_flush calls um_mmu_gather_defer
+ * to hand pages off to the per-mm deferred queue; the active
+ * backend's vcpu_run calls um_mmu_gather_drain after KVM_RUN's
+ * CR4.PGE flush has executed, freeing the deferred pages safely.
+ */
+struct encoded_page;
+unsigned int um_mmu_gather_defer(struct mm_struct *mm,
+				 struct encoded_page **encoded,
+				 unsigned int nr);
+void um_mmu_gather_drain(struct mm_struct *mm);
+
 static inline void flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long address)
 {
