@@ -54,6 +54,7 @@
 #include <asm/processor-flags.h>	/* X86_CR0_*, X86_CR4_* (D.5-fix
 					 * install_production_sregs) */
 
+#include <kern_util.h>		/* interrupt_end */
 #include <os.h>
 #include <skas.h>		/* current_mm_sync */
 #include <sysdep/ptrace.h>
@@ -1493,6 +1494,18 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
 				trace_um_backend_kvm_v2_vcpu_eintr(cpu);
 				preempt_enable();
+				/*
+				 * v1 archive (kvm-v1-archive/thread.c:5169-5177)
+				 * called interrupt_end() after the EINTR marshal-
+				 * back to drain pending scheduler/signal work.
+				 * Without it, accumulated SIGALRM-driven scheduler
+				 * ticks build up unfulfilled — after ~50
+				 * sched_yield-style EINTR cycles the test fails
+				 * with rc=255 even though the user-mode code
+				 * called exit_group(0). Codex (gpt-5.5 xhigh)
+				 * audit, memo §E.4 follow-up.
+				 */
+				interrupt_end();
 				return;
 			}
 			panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
