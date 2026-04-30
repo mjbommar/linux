@@ -55,6 +55,7 @@
 					 * install_production_sregs) */
 
 #include <os.h>
+#include <skas.h>		/* current_mm_sync */
 #include <sysdep/ptrace.h>
 #include <asm/trace/um_backend.h>
 
@@ -1108,6 +1109,43 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	sregs->cr2 = 0;
 
 	/*
+	 * Force a guest-TLB flush by toggling CR4.PGE on every dispatch.
+	 *
+	 * UML changes guest PTEs by writing them into physmem (the guest
+	 * pgd page lives in physmem, like every other guest page). Those
+	 * writes do NOT fire KVM's mmu_notifier — only host-mm operations
+	 * on the spawner do. So KVM's guest-TLB cache continues to map
+	 * GVA → old physmem PFN even after UML's PTE points to a fresh
+	 * page (e.g. the post-CoW page after a child #PF). Subsequent
+	 * guest accesses read the OLD physmem page (parent's data),
+	 * which manifests as user-stack memory corruption — see
+	 * `tools/testing/selftests/um/fork-tree-3level/repros/`.
+	 *
+	 * KVM only requests `TLB_FLUSH_GUEST` from `__set_sregs_common`
+	 * when CR3 OR CR4 differ from current (arch/x86/kvm/x86.c:12474+
+	 * 12487-12488 → 12529-12532). Same-CR3 dispatches (the common
+	 * case — the same task re-enters after a syscall) skip the
+	 * flush. v1 worked around this by toggling CR4.PGE on every
+	 * same-CR3 dispatch (kvm-v1-archive/thread.c:2974-2984); the
+	 * comment there documents that narrowing the toggle to
+	 * "tlb_stale && same_cr3" regressed v1's gate "to ~70% pass
+	 * rate vs 100%" — exactly the failure rate we observe on
+	 * fork-tree-3level under v2.
+	 *
+	 * Implementation: alternate the PGE bit on each dispatch. KVM
+	 * sees CR4 change → mmu_reset_needed → vmenter flushes guest
+	 * TLB via vpid_sync_context (single-context INVVPID). The
+	 * actual PGE semantic doesn't matter for UML guests — they
+	 * don't use global pages.
+	 *
+	 * Cost: zero extra ioctls (uses the existing SYNC_REGS dirty
+	 * bit). Each dispatch ships its sregs anyway; we just modify
+	 * one more field. Phase H may narrow this with a per-vcpu
+	 * "tlb-stale" predicate; for now correctness > performance.
+	 */
+	sregs->cr4 ^= X86_CR4_PGE;
+
+	/*
 	 * D.4a: ensure EFER.SCE is set so SYSCALL doesn't raise #UD. KVM
 	 * sets the long-mode bits (LME/LMA) automatically at VMX entry,
 	 * but SCE (System Call Extensions) must be explicitly enabled or
@@ -1342,6 +1380,36 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 			      cpu, rc);
 		vcpu->cpuid_primed = true;
 	}
+
+	/*
+	 * Drain any pending UML-side TLB invalidations into the
+	 * spawner mm BEFORE entering the guest. UML kernel updates to
+	 * guest PTEs (CoW resolution, mremap, mprotect, etc.) are just
+	 * writes into physmem from KVM's perspective — they do NOT
+	 * fire kvm_arch_mmu_notifier callbacks because no host-mm
+	 * mapping changed. So KVM's TDP cache will keep mapping the
+	 * guest VA → old physmem page even after UML's PTE points to
+	 * a fresh page.
+	 *
+	 * `current_mm_sync()` calls `um_tlb_sync(current->mm)` which
+	 * walks the deferred-flush queue and applies each pending
+	 * mremap/mprotect/munmap to the spawner mm via host syscalls.
+	 * Those host-syscall mm operations are visible to KVM's
+	 * mmu_notifier and force a TDP/EPT invalidation for the
+	 * affected GPA range.
+	 *
+	 * seccomp's userspace() loop calls this at
+	 * arch/um/backend/seccomp/trap_user.c:68 before set_stub_state.
+	 * v1 called it at kvm-v1-archive/thread.c:3851 before its
+	 * KVM_RUN. v2 was missing the equivalent — codex-gpt5.5-xhigh
+	 * audit (memo §E.4 follow-up, 2026-04-30) traced this to the
+	 * fork-tree-3level CHILD-side stack-corruption symptom: each
+	 * un-flushed CoW left KVM mapping the child's stack VA to the
+	 * pre-CoW (parent's) physmem page, so child's stack writes
+	 * landed on parent's stack page, eventually clobbering the
+	 * saved canary.
+	 */
+	current_mm_sync();
 
 	(void)kvm_v2_load_user_sregs(vcpu,
 				     __pa(current->active_mm->pgd),
