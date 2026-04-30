@@ -1052,19 +1052,59 @@ contract.
 | **Multi-import python** (json+base64+os) | PASS | FAIL    | UML kernel-side fatal signal during child python startup (#96) |
 | Direct `init=python3 -c "..."`        | PASS    | flaky  | PID 1 = python3 sometimes segfaults; shell-wrapped works |
 | Direct `init=fork_exec_wait` (50× fork+execve+waitpid loop) | PASS | FAIL (SIGILL #95) | Substrate harness path works (the fork is a shell child not init); direct init=fork_exec_wait still SIGILLs |
-| **Substrate gate**                    | **PASS=25 / FAIL=3 / XFAIL=3** | **PASS=6 / FAIL=3 / XFAIL=0** | Up from PASS=4 / FAIL=4 pre-fix; class-a-env complete + class-c-syscall reproducers (ioctl_fionread, ioctl_tiocgwinsz_socketpair) running |
+| **Substrate gate**                    | **PASS=25 / FAIL=3 / XFAIL=3** | **PASS=4..9 / FAIL=2..4 / XFAIL=0** (non-deterministic, mode=4) | See "Substrate gate v2 non-determinism (2026-04-30)" below |
 
 **v2 progress trajectory this session**:
   - Pre-CPL=3 SREGS:           v2 stuck at "infinite EPT-violation reinjection loop"
   - Post-CPL=3 (32a7603236b0):  /bin/true reaches clean exit
   - Post-FPU-fix (0e05de21dba0): glibc fork+wait works (child %d substitutes)
   - Post-exception-IE (31ba9c354063): substrate class-a-env runs; Python imports work
-  - Post-PT_SYSCALL_NR clear (a478952b8da0): substrate PASS=6/FAIL=3, class-c-syscall reproducers join
+  - Post-PT_SYSCALL_NR clear (a478952b8da0): substrate PASS=6/FAIL=3 *in best-of-N runs* (PASS=4 dominant), class-c-syscall reproducers join
 
-The remaining residuals (#95 fork_exec_wait direct, #96 multi-import python crashing UML) are real bugs but represent fewer workloads than what now passes. v2 has crossed from "experimental — barely boots" to "functional for shell-wrapped multi-process workloads + substrate class-a-env + class-c-syscall reproducers". Phase H baseline confirms v2 is **1.73× faster than seccomp** on Python startup, well below memo 25's ≤1.2× gate target.
+The remaining residuals (#95 fork_exec_wait direct, #96 multi-import python crashing UML) are real bugs but represent fewer workloads than what now passes. v2 has crossed from "experimental — barely boots" to "functional for shell-wrapped multi-process workloads + substrate class-a-env subset". Phase H baseline (c296bfbaa05d) reported v2 1.73× faster than seccomp on Python startup, **but that measurement is pre-revert and has not been re-baselined post-aaced3ce4924** — see Phase H.1 §"re-baseline pending".
+
+#### Substrate gate v2 non-determinism (2026-04-30)
+
+10× sequential runs of `run-regrtest-repros.sh` against the kernel
+binary built from `aaced3ce4924` (current tip):
+
+| backend | runs | mode | min PASS | max PASS | distribution         |
+|---------|------|------|----------|----------|----------------------|
+| seccomp | 10   | 25   | 25       | 25       | bit-identical PASS=25/FAIL=3/XFAIL=3 |
+| kvm-v2  | 10   |  4   |  4       |  9       | 8× PASS=4/FAIL=2; 1× PASS=6/FAIL=4; 1× PASS=9/FAIL=4 |
+
+Diagnosis: not flake — **truncation**. The harness exits via the
+host wrapper's "=== SUMMARY ===" trailer (host-side, after kernel
+exit), without the in-guest "=== REGRTEST_REPROS_END" marker
+appearing in any v2 run. That is, the kernel dies / init exits
+mid-class-a-env every time on v2; the variable PASS count comes
+from how many fork()s in `run-class-a-env.sh`'s for-loop completed
+before the kill.
+
+Concretely:
+  - In every v2 run, no `--- class-b-process ---` header appears,
+    so class-b/c/d are never reached.
+  - In the dominant PASS=4 case, the kernel dies after 6 of the 13
+    class-a-env reproducers complete; "lucky" runs reach further
+    along the class-a-env loop before dying.
+  - Seccomp finishes all four classes cleanly in every run.
+
+Most likely root cause: the same fork-state-leak family that
+underlies #95 and #96 (PT_SYSCALL_NR, FPU clobber, worker mm reset
+have all been fixed; at least one more piece of state crosses the
+fork boundary in v2 that doesn't in seccomp). The substrate gate
+flake should resolve when #95/#96 are root-caused.
+
+Implication for memo §E.4: the previously-claimed v2 line of
+"PASS=6/FAIL=3 stable" was a best-of-N sample, not a stable
+baseline. The real measurement is non-deterministic with PASS=4
+mode, PASS=9 max. The `regrtest-substrate.toml` gate descriptor
+keeps `min_pass=6` so that worst-case runs FAIL the gate
+(surfacing the regression rather than masking it).
 
 **Substrate gate** (seccomp baseline) stays green throughout
-v2 development: PASS=25/FAIL=3/EXPECTED_FAIL=3.
+v2 development: PASS=25/FAIL=3/EXPECTED_FAIL=3 (verified bit-
+identical across 10/10 runs at aaced3ce4924, 2026-04-30).
 
 ### Phase E.4 residual resolution: `interrupt_end()` in IO-trap dispatchers (commit `31ba9c354063`)
 
@@ -1311,25 +1351,44 @@ time. Identify and fix any pathological hot paths.
 
 ### H.1 — Baseline measurements (2 days) — **COMPLETE; v2 is FASTER than seccomp**
 
-Initial single-process Python-startup measurement (2026-04-29 at
-tip `8955ce7f878d`):
+#### Initial measurement (2026-04-29 at tip `8955ce7f878d`)
 
 | Workload                          | seccomp | v2     | v2/seccomp |
 |---|---|---|---|
 | `python3 -c "import math; print('done')"` minimal startup | 104.3 ms | 58.4 ms | **0.56×** |
 
-v2 is **1.79× FASTER** than seccomp on this workload — well below
-the ≤1.2× gate. The advantage comes from v2's KVM-direct syscall
-path (one KVM_EXIT_IO per syscall) versus seccomp's stub-child +
-ptrace round-trip overhead. Multi-process / fork-heavy workloads
-expected to show similar or larger gains as KVM's TDP avoids
-seccomp's per-mm SCM_RIGHTS fd-passing churn.
+#### Re-baseline (2026-04-30 at tip `aaced3ce4924`)
 
-Methodology: bash spawns python3 to read CLOCK_MONOTONIC timestamps
-before and after a minimal `python3 -c "import math"` invocation;
-delta is the wall-clock for the inner python startup. Run on
-identical kernel binary, only `backend=force=...` flag differs.
-Both backends boot the same hostfs init script.
+After two `interrupt_end()` reverts (`bad8d61d2592` →
+`79a50392d4e7`, `ad06c7f5164c` → `8955ce7f878d`) and the
+`PT_SYSCALL_NR` clear (`a478952b8da0`) landed, we re-ran the
+same shape. **The perf advantage is intact and slightly larger:**
+
+| Backend | median | min | max | samples |
+|---|---|---|---|---|
+| seccomp | 90 ms | 90 ms | 90 ms | 7/7 bit-identical |
+| kvm-v2  | 40 ms | 40 ms | 40 ms | 7/7 bit-identical |
+| **ratio kvm-v2 / seccomp** | **0.444× (2.25× faster)** | — | — | — |
+
+Methodology: in-kernel `printk.time=1` timestamps. Wall-clock from
+the "Run <init> as init process" message (kernel hands off to
+init) to the "Kernel panic - not syncing: Attempted to kill init!"
+message (init exits, panic=-1 fires). Captures init shell + python
+startup + sync, excludes pre-init kernel boot (which is identical
+across backends). Note printk's timer has 10 ms granularity — the
+40 ms / 90 ms numbers are bucketed, so the true ratio is somewhere
+in [0.30, 0.55]; the win is real but the precision floor is ±10 ms.
+Harness: `tools/testing/selftests/um/perf-py-startup/run-perf-py-startup.sh`.
+The advantage comes from v2's KVM-direct syscall path (one
+KVM_EXIT_IO per syscall) versus seccomp's stub-child + ptrace
+round-trip overhead.
+
+Important caveat: this measurement is single-process. Multi-process
+/ fork-heavy workloads cannot yet be perf-measured because the
+substrate gate kills v2 mid-stream after a variable number of
+fork()s (see "Substrate gate v2 non-determinism (2026-04-30)" above).
+H.1b (full cpython gate measurement) remains blocked on root-causing
+that fork-loop bug — likely the same family as #95/#96.
 
 ### H.1b — Headline cpython gate measurement (deferred)
 
