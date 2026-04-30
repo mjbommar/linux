@@ -1887,6 +1887,46 @@ multi-subinterpreter combo.
 substrate parity ships, and Phase I polish + Phase J validation
 work is independent of this residual.
 
+### H.1b breakthrough (2026-04-30 cont): drop os_map_memory
+
+After writing a 30-line C-only reproducer (`tools/testing/
+selftests/um/mt-mmap-stress/mt-mmap-stress.c` — 3 pthreads ×
+100 iters of mmap+memset+munmap), iteration-threshold sweep
+showed the failure rate scales with iteration count (1-20 iters
+PASS, 50 iters 80%, 100 iters 20%). MAP_POPULATE workaround
+gave 5/5 PASS, narrowing the bug to the LAZY page-fault path.
+
+Walking through arch/um/backend/kvm-v2/region.c revealed that
+mm_region_added was calling `os_map_memory(va, phys_fd, offset)`
+in the SPAWNER mm on every guest user mmap — installing a
+parallel mapping at user-half VAs that was REDUNDANT under v2's
+slot-0-only design.
+
+Slot 0 (gpa=0..physmem_size, hva=uml_physmem) is the canonical
+EPT coverage. KVM's TDP walk resolves guest VA → guest PT (in
+physmem) → guest GPA → user_addr=uml_physmem+GPA (slot 0) →
+spawner mm walk for the uml_physmem range. Per-region maps at
+user-half VAs were leftover from Phase B's per-region memslot
+design (dropped at E.5 / Codex Claim C).
+
+The redundant parallel mapping was racing under multi-thread
+workloads despite mmap_lock serialization, causing the
+post-memset readback corruption in mt-mmap-stress.
+
+**Fix at f77a31d1fbe4**: drop os_map_memory in region_added,
+drop os_unmap_memory in region_removed.
+
+| State                              | mt-mmap-stress | substrate gate     |
+|------------------------------------|----------------|--------------------|
+| Pre-region-turnstile (baseline)    | 0/10 PASS      | 25/3/3 (occasional 24/4/3) |
+| region-turnstile only (b4bad916ca93) | ~30%        | same |
+| **Drop os_map_memory (f77a31d1fbe4)** | **63%**     | **25/3/3 stable × 3 runs** |
+
+The remaining 37% mt-mmap-stress flake + ~50% InterpreterPool
+flake is a smaller residual race elsewhere — possibly in the
+lazy-PF serialization of guest PT updates or in some other
+v2-specific path. Future investigation tracks under #115.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
