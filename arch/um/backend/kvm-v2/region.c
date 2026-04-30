@@ -112,6 +112,7 @@
 #include <asm/um_memory.h>
 #include <backend.h>
 #include <os.h>
+#include <skas/mm_id.h>		/* enter_turnstile / exit_turnstile */
 
 #include "kvm_v2_backend.h"
 
@@ -119,6 +120,7 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 			   const struct um_memory_region *region)
 {
 	struct kvm_v2_vm *vm = kvm_v2_vm_get();
+	struct mm_id *mm_id;
 	int rc;
 
 	if (!vm) {
@@ -129,13 +131,46 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 		return -EINVAL;
 
 	/*
+	 * H.1b residual fix (2026-04-30): serialize per-mm to prevent
+	 * concurrent threads of the same mm racing on mm_id->syscall_data.
+	 *
+	 * seccomp_mm_region_added → um_stub_mm_map appends to
+	 * mm_id->syscall_data[] without internal locking — it relies on
+	 * the caller to ensure single-threaded access. Under v2, two
+	 * pthreads sharing one mm can both be in handle_syscall(mmap)
+	 * on different host CPUs simultaneously (preempt_disable in
+	 * vcpu_run only prevents per-CPU migration, not cross-CPU
+	 * concurrency on different UML kernel kthreads). Without this
+	 * lock, two threads' append+update operations interleave and
+	 * corrupt the queue, leading to mappings landing on wrong VAs
+	 * or shared physical backing.
+	 *
+	 * Caught by tools/testing/selftests/um/mt-mmap-stress (3
+	 * pthreads × 100 iters of mmap+memset+munmap) which detects
+	 * "memset corruption" — different threads' private pages
+	 * showing identical 16-byte sequences from another thread's
+	 * data. 100% PASS under seccomp, 100% FAIL under v2 pre-fix.
+	 *
+	 * seccomp serializes per-mm via the turnstile mutex acquired
+	 * around its entire vcpu_run cycle. v2 can't hold the
+	 * turnstile across vcpu_run (it includes handle_syscall which
+	 * may exec() and free the mm). Instead serialize at the
+	 * narrowest scope where the race exists: mm_region_added /
+	 * mm_region_removed.
+	 */
+	mm_id = &mm->context.id;
+	enter_turnstile(mm_id);
+
+	/*
 	 * Seccomp stub child still owns guest execution (Phase D.5
 	 * replaces it). Tell it about the region first; if that fails
 	 * we propagate without touching KVM state.
 	 */
 	rc = seccomp_mm_region_added(mm, region);
-	if (rc < 0)
+	if (rc < 0) {
+		exit_turnstile(mm_id);
 		return rc;
+	}
 
 	/*
 	 * D.0b: map region->va in the SPAWNER mm too. KVM binds the VM
@@ -216,6 +251,7 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 	 * per-region path.
 	 */
 	(void)vm;
+	exit_turnstile(mm_id);
 	return 0;
 }
 
@@ -223,6 +259,7 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 			     const struct um_memory_region *region)
 {
 	struct kvm_v2_vm *vm = kvm_v2_vm_get();
+	struct mm_id *mm_id;
 	int rc;
 
 	if (!vm) {
@@ -231,6 +268,14 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 	}
 	if (!region || !region->len)
 		return -EINVAL;
+
+	/*
+	 * H.1b residual fix: same per-mm serialization as
+	 * mm_region_added — un-mapping path also touches mm_id->
+	 * syscall_data via seccomp_mm_region_removed → um_stub_mm_unmap.
+	 */
+	mm_id = &mm->context.id;
+	enter_turnstile(mm_id);
 
 	/*
 	 * E.5 (Codex CLAIM C pull-forward): per-region memslot
@@ -280,5 +325,7 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 					    region->va, region->len, rc);
 	}
 
-	return seccomp_mm_region_removed(mm, region);
+	rc = seccomp_mm_region_removed(mm, region);
+	exit_turnstile(mm_id);
+	return rc;
 }
