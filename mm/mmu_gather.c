@@ -167,10 +167,17 @@ static void tlb_batch_pages_flush(struct mmu_gather *tlb)
 	 * queue; arch/um/kernel/tlb.c:um_mmu_gather_drain releases
 	 * them after the next KVM_RUN actually flushes the TLB.
 	 */
+	/*
+	 * Walk EVERY batch in the chain (not just while batch->nr),
+	 * because we mutate nr inside the loop — exiting early on the
+	 * first batch we fully defer would miss any subsequent ones.
+	 */
 	if (tlb->mm) {
-		for (batch = &tlb->local; batch && batch->nr; batch = batch->next) {
+		for (batch = &tlb->local; batch; batch = batch->next) {
 			unsigned int deferred;
 
+			if (!batch->nr)
+				continue;
 			deferred = um_mmu_gather_defer(tlb->mm,
 						       batch->encoded_pages,
 						       batch->nr);

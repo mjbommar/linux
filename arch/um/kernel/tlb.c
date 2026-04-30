@@ -93,9 +93,17 @@ struct um_defer_batch {
  * Append a single encoded_page entry to mm->context.deferred_free_pages.
  * Caller holds context.deferred_free_lock.
  *
+ * The encoded_page array's "ownership" of the page (the ref that
+ * mmu_gather held during the unmap) must be PRESERVED in the deferred
+ * list — we transfer that ref here without taking a new one. The
+ * caller then sets batch->nr to skip the matching entry in
+ * __tlb_batch_free_encoded_pages, so the standard release_pages
+ * decrement does NOT run on this entry. The deferred drain calls
+ * free_pages_and_swap_cache to do that decrement at the safe time.
+ *
  * Returns 0 on success; on kmalloc failure returns -ENOMEM and the
  * caller MUST fall back to the immediate-free path (otherwise we'd
- * lose the page reference).
+ * leak the ref).
  */
 static int __um_defer_append_locked(struct mm_context *ctx,
 				    struct encoded_page *enc)
