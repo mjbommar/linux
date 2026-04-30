@@ -473,6 +473,18 @@ void kvm_v2_marshal_sregs_back(struct uml_pt_regs *dst,
 			       const struct kvm_sregs *src);
 
 /*
+ * H.1b residual fix: per-task IST frame restore. Called from
+ * kvm_v2_vcpu_run just before KVM_RUN to re-write the per-vCPU IST
+ * stack from current task's snapshot — defends against cross-task
+ * IST stack clobber when multiple UML tasks share one per-host-CPU
+ * vCPU. No-op if current->thread.arch.kvm_v2.ist_pending is false
+ * (last exit was a SYSCALL or there's no pending exception frame).
+ *
+ * Defined in syscall_trap.c next to ist_frame_read/write.
+ */
+void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu);
+
+/*
  * Phase D.3: per-task FPU capture on context-switch-out + the
  * .context_switch op wrapper that invokes it before delegating to
  * seccomp_context_switch. Defined in vcpu.c (alongside the C.4

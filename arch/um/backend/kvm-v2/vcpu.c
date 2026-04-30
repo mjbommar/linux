@@ -1429,6 +1429,18 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		panic("kvm-v2: fpu install (cpu=%d) failed: %d", cpu, rc);
 
 	/*
+	 * H.1b residual fix: if last exit for THIS task was an exception
+	 * delivered via IDT IST (handle_io_pf etc. snapshotted the frame),
+	 * restore the IST stack from the per-task snapshot. Defends
+	 * against cross-task IST clobber when multiple UML tasks share
+	 * one per-host-CPU vCPU and each takes its own #PF — without
+	 * this, the trampoline's iretq pops whichever frame was last
+	 * pushed by ANY task on this vCPU, possibly jumping to the wrong
+	 * task's CS:RIP.
+	 */
+	kvm_v2_ist_frame_restore_pending(vcpu);
+
+	/*
 	 * C.3: write GPRs into the mmap'd kvm_run->s.regs.regs and mark
 	 * KVM_SYNC_X86_REGS in kvm_dirty_regs. KVM consumes both
 	 * (kvm_dirty_regs and the dirty s.regs fields) on entry.

@@ -877,6 +877,8 @@ static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
 				   bool has_error_code)
 {
 	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+	u64 cs, ss;
+	struct arch_thread *a = &current->thread.arch;
 
 	(void)has_error_code;
 
@@ -888,10 +890,58 @@ static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
 	 * we leave that slot alone.
 	 */
 	*(u64 *)(top - 40 +  0) = regs->gp[HOST_IP];      /* RIP */
-	/* CS at top - 40 +  8 stays. */
+	cs = *(u64 *)(top - 40 +  8);                     /* CS unchanged */
 	*(u64 *)(top - 40 + 16) = regs->gp[HOST_EFLAGS];  /* RFLAGS */
 	*(u64 *)(top - 40 + 24) = regs->gp[HOST_SP];      /* RSP */
-	/* SS at top - 40 + 32 stays. */
+	ss = *(u64 *)(top - 40 + 32);                     /* SS unchanged */
+
+	/*
+	 * H.1b residual fix: snapshot the IST frame into per-task
+	 * storage so the next time THIS task's vcpu_run runs KVM_RUN,
+	 * we can restore the IST stack to OUR frame — even if other
+	 * UML tasks ran on the same vCPU in between and clobbered the
+	 * shared IST stack with their own exception delivery frames.
+	 *
+	 * Without this, multi-thread workloads where two pthreads
+	 * sharing one mm both take #PFs alternately end up with one
+	 * task's iretq popping the OTHER task's CS/RIP, manifesting
+	 * as "user code running at CPL=0" or wrong-task RIP jumps —
+	 * the InterpreterPool repro signature (~50% flake on
+	 * test_struct's test_endian_table_init_subinterpreters).
+	 */
+	a->kvm_v2.ist_frame[0] = (has_error_code ? *(u64 *)(top - 48) : 0);
+	a->kvm_v2.ist_frame[1] = regs->gp[HOST_IP];
+	a->kvm_v2.ist_frame[2] = cs;
+	a->kvm_v2.ist_frame[3] = regs->gp[HOST_EFLAGS];
+	a->kvm_v2.ist_frame[4] = regs->gp[HOST_SP];
+	a->kvm_v2.ist_frame[5] = ss;
+	a->kvm_v2.ist_pending = true;
+}
+
+/*
+ * Restore per-task IST frame snapshot into the current vCPU's IST
+ * stack. Called from kvm_v2_vcpu_run BEFORE KVM_RUN re-entry for
+ * tasks that have a pending IST frame queued (i.e., last exit was
+ * an exception class delivered via IDT IST, not a SYSCALL trap).
+ *
+ * Defends against the cross-task IST clobber described above.
+ */
+void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu)
+{
+	struct arch_thread *a = &current->thread.arch;
+	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+
+	if (!a->kvm_v2.ist_pending)
+		return;
+
+	*(u64 *)(top - 48)      = a->kvm_v2.ist_frame[0]; /* error_code */
+	*(u64 *)(top - 40 +  0) = a->kvm_v2.ist_frame[1]; /* RIP */
+	*(u64 *)(top - 40 +  8) = a->kvm_v2.ist_frame[2]; /* CS */
+	*(u64 *)(top - 40 + 16) = a->kvm_v2.ist_frame[3]; /* RFLAGS */
+	*(u64 *)(top - 40 + 24) = a->kvm_v2.ist_frame[4]; /* RSP */
+	*(u64 *)(top - 40 + 32) = a->kvm_v2.ist_frame[5]; /* SS */
+
+	a->kvm_v2.ist_pending = false;
 }
 
 /*
