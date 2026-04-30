@@ -1309,6 +1309,39 @@ Concrete next moves (deferred to a focused kernel-side investigation):
      DIFFERENT family from the TLB-flush bug — investigation
      continues in next session.
 
+     **2026-04-30 RESOLUTION (commit bd435856948e):** The residual
+     was *not* a TLB/mm/FPU corruption — it was the same -ERESTARTSYS
+     leak class that ad06c7f5164c originally tried to fix. dash's
+     `echo BEFORE / fork+wait child / echo AFTER` script printed
+     BEFORE + child output but the AFTER line never reached the
+     console. DIAG-SYS-WRITE/DIAG-SYS-WRITE-RET instrumentation in
+     handle_io_trap caught the smoking gun:
+       DIAG-SYS-WRITE[7]: pid=1 fd=1 len=7 rip=0x400f46c6
+       DIAG-SYS-WRITE-RET[7]: pid=1 ret=-512
+     `-512` is `-ERESTARTSYS`: dash's waitpid completed via
+     SIGCHLD → handle_syscall returned -ERESTARTSYS in HOST_AX →
+     the next write(1, ...) call also returned -512 (the kernel
+     never converted it to -EINTR via do_signal because the syscall
+     arm had no interrupt_end()).
+
+     Re-introduced the post-handle_syscall interrupt_end() call.
+     The original revert reason — SYSRETQ-RCX-rewind — was
+     **already mitigated** by the explicit
+       run->s.regs.regs.rcx = regs->gp[HOST_IP];
+       run->s.regs.regs.r11 = regs->gp[HOST_EFLAGS];
+     overwrites in the marshal-out, which were added at D.3 long
+     before the ad06c7 attempt. With those overwrites in place,
+     SYSRETQ pops whatever HOST_IP do_signal left, regardless of
+     restart vs handler-entry vs unchanged path.
+
+     Substrate gate impact:
+       - Pre-fix (post-TLB-flush floor): PASS=6/FAIL=3/XFAIL=3
+       - Post-fix:                       PASS=25/FAIL=3/XFAIL=3
+                 (full parity with seccomp, stable across 3 runs)
+     Closes #95 (fork_exec_wait now PASSes), #96 (multi-import
+     Python prints multi_import_OK + exits cleanly), #107
+     (child_delay now 10/10 PASS).
+
      **Residual investigation:**
 
      **Eliminated this round** (no improvement on the
