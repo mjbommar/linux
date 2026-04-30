@@ -1358,6 +1358,46 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	handle_syscall(regs);
 
 	/*
+	 * Mirror seccomp's pattern at arch/um/backend/seccomp/trap_user.c:
+	 * 187-188: clear PT_SYSCALL_NR after handle_syscall returns, so
+	 * that a LATER exception-path interrupt_end() (in the PF/GP/UD/DE/
+	 * OF dispatchers, added at 31ba9c354063) doesn't misinterpret the
+	 * stale `orig_ax + -ERESTARTSYS in HOST_AX` as an in-progress
+	 * syscall needing RIP-rewind for restart.
+	 *
+	 * Background: bisection (memo §E.4 followup, agent
+	 * `ad5cf1c09ac7c3a73`) showed fork_exec_wait's SIGILL first
+	 * appears at 31ba9c354063 — the commit that added interrupt_end
+	 * to the exception handlers. Mechanism:
+	 *   1. SIGCHLD-interrupted waitpid sets gp[HOST_AX] = -ERESTARTSYS
+	 *      and leaves PT_SYSCALL_NR(gp) = __NR_wait4.
+	 *   2. Next user-mode iteration takes a fixable #PF (e.g., a CoW
+	 *      page fault during execve's user-stack write).
+	 *   3. v2's kvm_v2_handle_io_pf runs interrupt_end → do_signal.
+	 *   4. do_signal sees PT_SYSCALL_NR >= 0 + return = -ERESTARTSYS
+	 *      and runs PT_REGS_RESTART_SYSCALL, which rewinds RIP -= 2.
+	 *   5. But RIP is at the faulting #PF instruction — NOT at a
+	 *      SYSCALL boundary. IRETQ pops the rewound (mid-instruction)
+	 *      RIP → #UD → SIGILL.
+	 *
+	 * This is the surgical fix: don't add interrupt_end to the syscall
+	 * arm (avoiding the SYSRETQ-RCX-rewind regression of the reverted
+	 * ad06c7f5164c), don't modify userspace()'s loop (avoiding the
+	 * regression of the reverted bad8d61d2592). Just suppress the
+	 * cross-path orig_ax leakage by mirroring exactly what seccomp
+	 * does at trap_user.c:187-188.
+	 *
+	 * The PT_SYSCALL_NR_OFFSET vs PT_SYSCALL_RET_OFFSET guard exists
+	 * because on architectures where the syscall NR slot and return
+	 * slot are aliased (32-bit x86), clearing PT_SYSCALL_NR would also
+	 * clobber the user-visible return value. UML/x86_64 has them
+	 * separate, so the clear is unconditional in practice on this
+	 * arch — but the guard preserves cross-arch correctness.
+	 */
+	if (PT_SYSCALL_NR_OFFSET != PT_SYSCALL_RET_OFFSET)
+		PT_SYSCALL_NR(regs->gp) = -1;
+
+	/*
 	 * D.3 marshal-out: copy regs->gp[] back into kvm_run->s.regs.regs
 	 * + OR KVM_SYNC_X86_REGS into kvm_dirty_regs. Critical for SYSRETQ:
 	 * the trampoline's `sysretq` reads RIP from RCX and RFLAGS from R11.
