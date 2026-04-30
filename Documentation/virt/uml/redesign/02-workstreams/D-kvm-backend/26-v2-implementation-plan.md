@@ -1669,6 +1669,27 @@ workloads inside the guest scale.
 - KVM's mmu_notifier handles cross-vCPU TLB shootdown automatically
   via `kvm_make_all_cpus_request(KVM_REQ_TLB_FLUSH)`.
 
+#### G.1 prep findings (2026-04-30)
+
+A first-pass build with `CONFIG_SMP=y` + `NR_CPUS=4`:
+- Builds clean (no compile errors)
+- v2 substrate creates 4 vCPUs (vcpu_fd 5/6/7/8) at boot — Phase
+  C's per-host-CPU pool sizing already covers SMP
+- BUT: `rcu: RCU restricting CPUs from NR_CPUS=4 to nr_cpu_ids=1`
+  fires at boot — UML's runtime nr_cpu_ids is still 1 even with
+  CONFIG_SMP=y
+- `per_vcpu_ist_tss` only installs cpu=0 (the others stay zeroed)
+- Boot then panics in `kvm_v2_handle_io_trap` during init=/bin/true
+
+So G.1 isn't just "make existing vCPUs runnable" — it requires:
+1. UML-side: enable SMP runtime CPU bring-up (currently stubbed?)
+2. v2-side: install IDT/IST/TSS for ALL vCPUs (not just cpu=0)
+3. v2-side: kvm_v2_vcpu_run already handles the per-host-CPU
+   dispatch but maybe needs a stage to wait for vCPUs > 0 to be
+   "online" per UML's smp_init.
+
+Open task #68 carries this; not blocking Phase J.
+
 ### G.2 — `smp.c`: cross-vCPU IPI (if needed) (2 days)
 
 **Mechanism correction (memo 26 §D rewrite, codex audit independent
