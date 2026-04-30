@@ -1122,26 +1122,60 @@ post-grandchild-reap window, we have a signal-delivery bug, not a
 register-marshaling bug.
 
 **Confirmed via instrumented kernel (2026-04-30, debug printk in
-do_exit):** Hypothesis (b) is correct. With `pr_emerg("...sig->gec=
-0x%x sig->flags=0x%x...")` added at the init-panic site, kvm-v2
-shows `code=0xff00 sig->gec=0xff00 sig->flags=0x4
-SIGNAL_GROUP_EXIT_set=1` — meaning `SIGNAL_GROUP_EXIT` was already
-set on shell's signal_struct *before* shell's exit_group(0) call,
-and `group_exit_code` was already 0xff00 (=255 << 8 wait-status
-shape), so do_group_exit's override fires and replaces user's 0
-with 0xff00. The propagation chain is: do_group_exit(0) sees
+do_exit):** Hypothesis (b) was initially diagnosed but is wrong on
+deeper inspection. With `pr_emerg("...sig->gec=0x%x sig->flags=
+0x%x...")` added at the init-panic site, kvm-v2 shows `code=0xff00`,
+which we initially read as "gec was corrupted." A second printk at
+do_group_exit's entry resolved this: shell receives `arg=0xff00`,
+`flags=0x40` (= `SIGNAL_UNKILLABLE`, normal for PID 1), `prior_gec=0`
+— meaning **the shell genuinely calls `exit_group(255)`**, and
+`SYSCALL_DEFINE1(exit_group, error_code) { do_group_exit((error_code &
+0xff) << 8); }` does the canonical wait-status shift. There is no
+kernel-side group_exit_code corruption.
+
+So shell sees `$? = 255` because fork_pid (the immediate child) was
+reaped with wait_status = 0xff00 = WEXITSTATUS=255. And the next
+question is: **why did fork_pid produce a wait_status of 255?** The propagation chain is: do_group_exit(0) sees
 flags & SIGNAL_GROUP_EXIT → exit_code := sig->group_exit_code (0xff00)
 → do_exit(0xff00) → tsk->exit_code = 0xff00 → init panic prints
 0xff00.
 
-A wider trace (printk on every do_exit, not just init's) showed an
-even more interesting signal: in some runs the *child* fork_pid
-process (PID 23) hits do_exit with `code=0x2a00` for a `_exit(42)`
-call (= 42 shifted left by 8). The kernel ought to see code=42.
-That looks like **the same shift-left-by-8 corruption that produces
-the 0xff00 = 255 << 8 in shell's gec**. Whatever sets gec is
-storing wait-status-encoded values (`exit_value << 8`) instead of
-raw exit values or signal numbers.
+A wider trace caught this output:
+
+    *** stack smashing detected ***: terminated
+
+That's **glibc's stack-canary firing in user space**, called via
+`__stack_chk_fail` → `abort`. The 0xff00 wait-status the shell sees
+comes from glibc-fortify killing fork_pid via SIGABRT (or the libc-
+fortify `_exit(127)` fallback path, which then propagates as 127 in
+some contexts and 255 in others depending on the libc message
+delivery). Either way: **fork_pid is dying because user-space libc
+is detecting memory corruption in itself, not because the kernel's
+signal/exit-code path is buggy.**
+
+The bisect against `interrupt_end()` was a negative result: with
+all 5 calls disabled in `arch/um/backend/kvm-v2/syscall_trap.c`, the
+gate still FAILs the same way under v2. So `interrupt_end` placement
+is innocent.
+
+A raw-asm reproducer (`tools/.../v2-flake-investigation/raw_fork.c`,
+`gcc -static -nostdlib -O0 -fno-stack-protector`, only raw syscalls
+via inline assembly) **passes cleanly under both backends** (exit
+99 propagates correctly, no stack-smashing). That isolates the
+difference: v2's syscall path is fine for raw syscalls; the
+corruption only manifests when libc is involved.
+
+Likely culprit: **TLS / FS_BASE handling**. glibc's stack canary
+lives at `%fs:0x28`. v2's load-user-sregs path (vcpu.c:1297-1300)
+writes `sregs->fs.base` from `regs->gp[HOST_FS_BASE]` on every
+KVM_RUN, but `kvm_v2_marshal_from_kvm_regs` (vcpu.c:1182-1205) does
+NOT update `regs->gp[HOST_FS_BASE]` after a KVM_RUN exit — it only
+copies GPRs from `kvm_regs`, not segment bases from `kvm_sregs`.
+If a user-mode `wrfsbase` (or arch_prctl(ARCH_SET_FS)) updates
+fs.base inside the guest, v2 won't propagate it back to the
+parent's `gp[HOST_FS_BASE]`. On next dispatch the kernel reloads the
+stale fs.base, breaking glibc's TLS view, which corrupts the
+canary check.
 
 The bug is also **timing-sensitive**: with the debug printks
 slowing dispatch, the 0xff00 outcome only fires on a fraction of
@@ -1155,17 +1189,18 @@ uninitialised `signo` slot when the host process the worker is
 running on is reaped.
 
 Concrete next moves (deferred to a focused kernel-side investigation):
-  1. Trace `complete_signal()` calls during the v2 grandchild-reap
-     window. Capture which signal numbers route to PID 1's signal
-     queue, and the value of `sig` when `signal->group_exit_code = sig`
-     fires.
-  2. Audit `send_signal_pkill` / `__send_signal_locked` callers in
-     UML / arch/um for any path that passes a wait-status-encoded
-     value where signal_number is expected.
-  3. Bisect: revert v2's `interrupt_end` in the exception handlers
-     (`31ba9c354063`) just for this gate run — does fork-tree-3level
-     PASS without it? If yes, the fix is "interrupt_end leaks
-     wait-status as signo into complete_signal."
+  1. Audit how v2 propagates fs.base / gs.base back from KVM_RUN
+     exits. Compare against seccomp's per-task FS_BASE/GS_BASE
+     accounting in `arch/um/backend/seccomp/`. Suspected gap:
+     `marshal_from_kvm_regs` copies GPRs but not segment bases;
+     `load_user_sregs` writes fs.base from gp[HOST_FS_BASE] each
+     dispatch, so a user-mode `wrfsbase` is silently dropped on the
+     next vcpu_run.
+  2. Add an `arch_prctl(ARCH_GET_FS)` / `wrfsbase` test reproducer
+     that confirms the loss. Should round-trip a known-value FS_BASE
+     across one syscall under both backends.
+  3. ~~Bisect against 31ba9c354063 (interrupt_end placement).~~
+     Done; negative result. The bug is older than that commit.
 
 These are kernel-internals work, not host-side tooling, so they
 belong on a fresh `uml-redesign-plan` checkout with codex-style
