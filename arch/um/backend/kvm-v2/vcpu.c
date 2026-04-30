@@ -1411,7 +1411,28 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	 * landed on parent's stack page, eventually clobbering the
 	 * saved canary.
 	 */
-	current_mm_sync();
+	{
+		/*
+		 * H.1b residual hardening: panic on um_tlb_sync failure
+		 * mirrors v1 archive's pattern at kvm-v1-archive/
+		 * thread.c:3851-3856 ("if (rc < 0) panic"). Codex audit
+		 * flagged that current_mm_sync() (which v2 calls below)
+		 * discards the return value at arch/um/kernel/skas/
+		 * process.c:63-69 — a silent sync failure leaves stale
+		 * TLB queue entries that the next dispatch's CR4.PGE
+		 * toggle won't catch (it flushes guest TLB but doesn't
+		 * apply UML's pending PTE updates).
+		 *
+		 * Wire the explicit um_tlb_sync + panic-on-error here so
+		 * any silent sync regression surfaces loudly.
+		 */
+		if (current->mm) {
+			int sync_rc = um_tlb_sync(current->mm);
+			if (sync_rc < 0)
+				panic("um: kvm-v2 vcpu_run: um_tlb_sync(mm=%p) failed (%d)",
+				      current->mm, sync_rc);
+		}
+	}
 
 	(void)kvm_v2_load_user_sregs(vcpu,
 				     __pa(current->active_mm->pgd),
