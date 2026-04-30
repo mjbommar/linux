@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# L3.5 — minimal reproducer for the v2 "shell sees rc=255 after
+# fork-tree-3level child reap" bug. This is a smaller, more
+# specific gate than regrtest-substrate; it isolates the exact
+# shape that causes the substrate gate's truncation, #95
+# (fork_exec_wait), and #96 (multi-import Python) — all of which
+# include a 3-level fork tree with a wait at the middle layer.
+#
+# Per memo 30-gate-discipline.md, this gate's threshold reflects
+# the goal: it must PASS on both backends. Today seccomp PASSes,
+# kvm-v2 FAILs. Tightening this gate to PASS on kvm-v2 is the
+# concrete deliverable for resolving #95/#96 and unblocking
+# Phase H.1b / Phase J Tier 1/2/3.
+
+schema_version = 1
+
+[gate]
+name = "fork-tree-3level"
+description = "3-level fork tree with middle wait — minimal repro for v2 fork-state-leak family"
+phase = "E.4"
+
+[run]
+cmd = "bash tools/testing/selftests/um/fork-tree-3level/run-fork-tree-3level.sh"
+budget_sec = 60
+
+[run.env]
+UML_BINARY = "{{kernel}}"
+BACKEND    = "{{backend}}"
+
+[parse]
+pass_regex = "^FORK_TREE_3LEVEL: backend=\\S+ PASS"
+fail_regex = "^FORK_TREE_3LEVEL: backend=\\S+ FAIL"
+
+[thresholds]
+# Goal state: both backends pass (one PASS line per invocation).
+# Today seccomp PASSes; kvm-v2 FAILs. Once #95/#96 are root-caused
+# this must hit min_pass=1 max_fail=0 on both.
+min_pass  = 1
+max_fail  = 0
+require_clean_exit = true

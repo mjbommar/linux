@@ -1063,6 +1063,74 @@ contract.
 
 The remaining residuals (#95 fork_exec_wait direct, #96 multi-import python crashing UML) are real bugs but represent fewer workloads than what now passes. v2 has crossed from "experimental — barely boots" to "functional for shell-wrapped multi-process workloads + substrate class-a-env subset". Phase H baseline (c296bfbaa05d) reported v2 1.73× faster than seccomp on Python startup, **but that measurement is pre-revert and has not been re-baselined post-aaced3ce4924** — see Phase H.1 §"re-baseline pending".
 
+#### Fork-tree-3level reproducer (2026-04-30) — root cause of #95, #96, and the substrate truncation
+
+The substrate gate truncation, #95 (fork_exec_wait direct init
+SIGILL), and #96 (multi-import Python crashes UML) are very likely
+the same bug. We have a clean minimal reproducer:
+
+```c
+// tools/testing/selftests/um/fork-tree-3level/fork_tree_3level.c
+int main(void) {
+    pid_t p = fork();
+    if (p == 0) _exit(42);
+    int st;
+    waitpid(p, &st, 0);
+    return 0;
+}
+```
+
+Run via init shell script (so the test is PID 2, child is PID 3,
+shell init is PID 1). Under seccomp the test prints
+`FORK_TREE_3LEVEL: PASS child=N status=0x2a00` and shell sees rc=0.
+Under kvm-v2, **the test's main returns 0 but the shell sees rc=255**.
+
+What's verified:
+  - 2-level trees (shell + /bin/true × N): always PASS on both
+    backends.
+  - 3-level trees WITHOUT middle-process wait (parent forks, returns
+    without waitpid): always PASS on both.
+  - 3-level trees WITH middle-process wait+exit: **kvm-v2 reports
+    rc=255 every time, no exceptions in 10 runs** (deterministic).
+
+Kernel-side trace at the panic (init=script that runs the
+reproducer + `sync` + ends):
+
+```
+do_exit+0x208/0x978
+sys_exit_group+0x0/0x1a
+do_group_exit+0x0/0x9e
+handle_syscall+0x155/0x1e4
+kvm_v2_handle_io_trap+0x336/0x375
+kvm_v2_vcpu_run+0x334/0x3ea
+```
+
+The call stack itself is identical between seccomp and kvm-v2 — the
+difference is the value the kernel records as init's exit_code.
+PID 1 (the shell) calls `exit_group(0)` syscall, but on v2 the
+kernel records 0xff (255) instead of 0. Either:
+  a) `regs->gp[HOST_DI]` (the syscall arg) is set to 0xff somewhere
+     between marshal-from-kvm-regs and handle_syscall.
+  b) `signal->group_exit_code` is corrupted to 0xff before
+     do_group_exit reads it (do_group_exit:
+     `if (sig->flags & SIGNAL_GROUP_EXIT) exit_code = sig->group_exit_code;`).
+
+Hypothesis (b) is more interesting because group_exit_code is
+normally set only by signal-driven group death. If a signal is
+silently triggering SIGNAL_GROUP_EXIT on v2's PID 1 during the
+post-grandchild-reap window, we have a signal-delivery bug, not a
+register-marshaling bug.
+
+The reproducer ships at:
+  - `tools/testing/selftests/um/fork-tree-3level/fork_tree_3level.c`
+  - `tools/testing/selftests/um/fork-tree-3level/run-fork-tree-3level.sh`
+  - Gate: `tools/testing/selftests/um/gates/fork-tree-3level.toml`
+    (min_pass=1 max_fail=0; v2 FAILs today, seccomp PASSes).
+
+Tightening this gate to PASS on v2 IS the concrete deliverable for
+resolving #95, #96, and the substrate truncation. Phase H.1b
+(headline cpython gate) and Phase J Tier 1/2/3 are downstream.
+
 #### Substrate gate v2 non-determinism (2026-04-30)
 
 10× sequential runs of `run-regrtest-repros.sh` against the kernel
