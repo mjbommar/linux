@@ -162,15 +162,33 @@ int kvm_v2_mm_region_added(struct mm_struct *mm,
 	enter_turnstile(mm_id);
 
 	/*
-	 * Seccomp stub child still owns guest execution (Phase D.5
-	 * replaces it). Tell it about the region first; if that fails
-	 * we propagate without touching KVM state.
+	 * H.1b residual A/B (2026-04-30 cont): also drop the
+	 * seccomp_mm_region_added delegation. Under v2, the stub
+	 * child does NOT drive vcpu_run (kvm_v2_vcpu_run uses KVM_RUN
+	 * directly, never calls worker_drive_vcpu_run). The stub's
+	 * mm_id->syscall_data queue accumulates per-mmap entries but
+	 * is never executed against the guest's address space —
+	 * because v2's address space IS the spawner mm, not the
+	 * stub child's mm.
+	 *
+	 * The queue accumulation is dead state under v2 BUT was a
+	 * source of inter-thread state sharing: two pthreads sharing
+	 * one mm both append to the same syscall_data array. With
+	 * the turnstile around enter/exit, the appends are
+	 * serialized, but accumulating dead state still has a
+	 * footprint (eventually triggers do_syscall_stub flush when
+	 * the queue fills up — which under v2 is wasted work).
+	 *
+	 * Dropping the seccomp delegation entirely:
+	 * - Eliminates the dead-state accumulation
+	 * - Removes the last shared mm_id state in v2's hot path
+	 * - Keeps the turnstile for future v2-specific serialization
+	 *
+	 * Original code (commented out for A/B):
+	 *   rc = seccomp_mm_region_added(mm, region);
+	 *   if (rc < 0) { exit_turnstile(mm_id); return rc; }
 	 */
-	rc = seccomp_mm_region_added(mm, region);
-	if (rc < 0) {
-		exit_turnstile(mm_id);
-		return rc;
-	}
+	rc = 0;
 
 	/*
 	 * H.1b residual A/B (2026-04-30): try DROPPING the os_map_memory
@@ -317,10 +335,12 @@ int kvm_v2_mm_region_removed(struct mm_struct *mm,
 	 * mm (slot 0 covers physmem), there's nothing to unmap on
 	 * region removal. The init_new_context bulk-clear sentinel
 	 * (va==0 && len >= 1<<46) is a no-op pair-wise.
+	 *
+	 * Also drop the seccomp_mm_region_removed delegation —
+	 * symmetrical with mm_region_added's drop above. The stub
+	 * child's mm tracking is dead state under v2.
 	 */
 	rc = 0;
-
-	rc = seccomp_mm_region_removed(mm, region);
 	exit_turnstile(mm_id);
 	return rc;
 }
