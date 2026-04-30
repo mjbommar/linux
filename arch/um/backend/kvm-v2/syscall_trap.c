@@ -1358,6 +1358,46 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	handle_syscall(regs);
 
 	/*
+	 * Drain UML's pending signal/scheduler work AFTER the syscall
+	 * returns. seccomp's analogous path at
+	 * arch/um/backend/seccomp/trap_user.c:184 calls interrupt_end()
+	 * for the same reason: handle_syscall may set the syscall return
+	 * value to -ERESTARTSYS / -ERESTARTNOINTR / -ERESTARTNOHAND when
+	 * the syscall was interrupted by a signal. interrupt_end runs
+	 * resume_user_mode_work which fires do_signal — and do_signal's
+	 * handle_signal / restart_syscall path translates the kernel-
+	 * internal -ERESTART* codes into either:
+	 *   (a) syscall restart (rewind RIP to the SYSCALL instruction)
+	 *       if the pending signal has SA_RESTART or no handler is
+	 *       installed; OR
+	 *   (b) -EINTR as the user-visible return value otherwise.
+	 *
+	 * Without this, -ERESTARTSYS (errno 512) leaks to userspace.
+	 * Caught running `dash` builtin echo after a fork+wait under v2:
+	 * waitpid sets HOST_AX = -ERESTARTSYS via SIGCHLD; the next
+	 * write(1, ...) in dash also returns -512 because handle_syscall
+	 * preserved the sentinel through to the marshal-out path, with
+	 * the user seeing every subsequent shell write fail.
+	 *
+	 * The reverted commit ad06c7f5164c added this same call but at
+	 * that time the substrate gate showed a SYSRETQ-RIP regression.
+	 * The marshal-out below explicitly overwrites run->s.regs.regs.rcx
+	 * with regs->gp[HOST_IP] (and r11 with HOST_EFLAGS) so the
+	 * SYSRETQ-pop-RIP-from-RCX semantics align with whatever do_signal
+	 * left in HOST_IP — restart, signal-handler entry, or unchanged
+	 * post-syscall RIP. With that overwrite present, the interrupt_end
+	 * call is safe to re-introduce.
+	 *
+	 * Place BEFORE the PT_SYSCALL_NR clear below: do_signal's
+	 * restart-syscall logic only fires when PT_REGS_SYSCALL_NR(regs)
+	 * >= 0, which it is at this point (handle_syscall did not clear
+	 * it). After interrupt_end runs, clearing PT_SYSCALL_NR ensures
+	 * later exception-path interrupt_end() calls don't see a stale
+	 * syscall NR + leaked -ERESTART* residual (commit a478952b8da0).
+	 */
+	interrupt_end();
+
+	/*
 	 * Mirror seccomp's pattern at arch/um/backend/seccomp/trap_user.c:
 	 * 187-188: clear PT_SYSCALL_NR after handle_syscall returns, so
 	 * that a LATER exception-path interrupt_end() (in the PF/GP/UD/DE/
