@@ -325,13 +325,41 @@ static inline pte_t pte_mkneedsync(pte_t pte)
 
 static inline void set_pte(pte_t *pteptr, pte_t pteval)
 {
-	pte_copy(*pteptr, pteval);
-
-	/* If it's a swap entry, it needs to be marked _PAGE_NEEDSYNC so
-	 * update_pte_range knows to unmap it.
+	/*
+	 * Publish the final PTE value (with _PAGE_NEEDSYNC set) in a
+	 * SINGLE store. The previous shape did two stores —
+	 *   pte_copy(*pteptr, pteval);
+	 *   *pteptr = pte_mkneedsync(*pteptr);
+	 * — leaving a transient window where another reader of the PTE
+	 * (KVM TDP walker on a different host CPU during v2's mt-mmap-
+	 * stress workload, concurrent um_tlb_sync on a sibling thread
+	 * of the same mm, or hardware A/D-bit update) could observe
+	 * PRESENT-without-NEEDSYNC, and the second store's read-modify-
+	 * write could clobber any concurrent update.
+	 *
+	 * Also marks _PAGE_NEEDSYNC on swap entries so update_pte_range
+	 * knows to unmap them.
+	 *
+	 * Caught by tools/testing/selftests/um/mt-mmap-stress (3 pthreads
+	 * × 100 iters of mmap+memset+munmap) which fails ~100% under v2
+	 * with the previous two-store form — post-memset readback returns
+	 * bytes from a sibling thread or stale physmem because PTE
+	 * publication interleaved with KVM's TDP walks.
+	 *
+	 * Seccomp doesn't have a hardware page-table consumer (the stub
+	 * child uses host syscalls, not direct PT walks), so the two-
+	 * store window is harmless there. v2's KVM TDP walker reads
+	 * UML's pgd as part of every guest VA → host PA translation,
+	 * so the transient state escapes to KVM's caches.
+	 *
+	 * MAP_POPULATE workaround masks the bug by resolving anon faults
+	 * eagerly under mmap_write_lock — no concurrent lazy-PF
+	 * publication, no transient window.
+	 *
+	 * Single-store fix attributed to codex (gpt-5.5 xhigh) audit
+	 * 2026-04-30, memo §H.1b.
 	 */
-
-	*pteptr = pte_mkneedsync(*pteptr);
+	pte_copy(*pteptr, pte_mkneedsync(pteval));
 }
 
 #define PFN_PTE_SHIFT		PAGE_SHIFT
