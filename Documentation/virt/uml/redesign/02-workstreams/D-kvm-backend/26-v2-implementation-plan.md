@@ -1270,15 +1270,32 @@ Concrete next moves (deferred to a focused kernel-side investigation):
           before this fix.
 
      Empirical impact:
-       - `child_simple` reproducer: was 3-4/10 PASS, now 20/20.
-       - `regrtest-substrate` PASS distribution shifted from
-         {4×8, 6×1, 9×1} to {5×6, 7×3, 9×0..2 across runs}. Floor
-         5, ceiling 9; the PASS=4 outlier is gone.
-       - `fork_tree_3level` gate: 7/20 PASS (was 0-2/10).
-       - `child_delay` (with usleep): still 0/10 — different
-         residual; investigation continues.
-       - Perf unchanged: 0.444× ratio (2.25× faster than seccomp)
+       - `child_simple` reproducer: was 3-4/10 PASS, now 10/10.
+       - `regrtest-substrate` PASS distribution: post-TLB-fix line
+         is PASS=5..10 with mode 5 (was PASS=4..9 mode 4). Floor
+         lifted by 1, ceiling lifted by 1, the PASS=4 outlier is
+         gone.
+       - `fork_tree_3level` gate: ~30-35% PASS (was 0-10%).
+       - Perf unchanged: 0.444× ratio (2× faster than seccomp)
          on perf-py-startup.
+
+     **Snapshot fix (commit 3d426c4cb0c7):** Codex audit identified
+     a residual race in v2's KVM_RUN return path where
+     `unblock_signals()` could schedule a different task between
+     the ioctl returning and the marshal-back, causing the marshal
+     to read the new task's exit state into the original task's
+     pt_regs. Mirror v1's pattern (kvm-v1-archive/thread.c:3937-
+     3979) by snapshotting `kvm_run->s.regs` and `exit_reason`
+     into local vars BEFORE unblock_signals. Lifts substrate gate
+     ceiling to PASS=10 (was 9 max).
+
+     **Residual:** `child_delay` (parent forks, child does
+     `usleep(100ms)` then printf, then exits) still 0/10 PASS on
+     v2. Pure-syscall child (5000 getpid loop) PASSes 5/5;
+     usleep-based and busy-loop children fail. The bug accumulates
+     with elapsed CHILD time + scheduling activity. This is a
+     DIFFERENT family from the TLB-flush bug — investigation
+     continues in next session.
 
      **Residual investigation:**
 
