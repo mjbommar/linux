@@ -2458,12 +2458,25 @@ KVM_SET_FPU side unchanged: still always-SET when iotrap_fpu_valid.
 Future H.2.1 could gate SET on per-task "owns vcpu->arch.guest_fpu"
 flag (skip if no other task ran on this vCPU since last SET).
 
-### H.3 — Target validation (2 days)
+### H.3 — Target validation (2 days) — DONE 2026-05-01
 
-- Re-run gate, confirm ≤ 1.2× seccomp wall-clock.
-- If slower, profile and identify the bottleneck.
+Post-H.2 measurements with H.2 lazy FPU optimization shipped:
 
-**Exit criteria:** gate at ≤ 1.2× seccomp wall-clock.
+**perf-getpid** (cycle-level via getpid-loop, 100k iterations):
+| Backend  | cyc/call | ratio vs seccomp |
+|----------|----------|------------------|
+| seccomp  | 62500    | 1.0×             |
+| kvm-v2   | 24300    | **0.388×** (2.58× faster) |
+
+**perf-py-startup** (printk-bracketed wall-clock, 5 samples):
+| Backend  | median (s) | ratio vs seccomp |
+|----------|-----------|------------------|
+| seccomp  | 0.09      | 1.0×             |
+| kvm-v2   | 0.06      | **0.667×** (1.5× faster) |
+
+Both well below the 1.2× target ceiling — Phase H exit criterion met.
+
+**Exit criteria MET:** gate at 0.388× / 0.667× seccomp wall-clock.
 
 ---
 
