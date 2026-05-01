@@ -982,6 +982,41 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 	cr2 = run->s.regs.sregs.cr2;
 
 	/*
+	 * #121 instrumentation (2026-05-01): the PF stub captures CR2 to
+	 * IST page byte offset PAGE_SIZE - 64 BEFORE the `out` vmexit. Read
+	 * the captured value and prefer it over sregs.cr2 when sregs.cr2 is
+	 * zero (rare race observed in mt-byteset N>=2: KVM exits with
+	 * vcpu->arch.cr2=0 despite a real fault delivered with non-zero
+	 * fault address — see exception.c kvm_v2_handler_stub_pf comment).
+	 *
+	 * The captured slot lives at vcpu->ist_stack_kva + PAGE_SIZE - 64,
+	 * outside the iretq frame area (which occupies the top 48 bytes).
+	 * This is per-vCPU (single-vCPU today; SMP needs per-CPU IST so
+	 * still per-vCPU).
+	 *
+	 * If captured != sregs.cr2, log once-per-boot to localize the race.
+	 * If sregs.cr2 == 0 but captured != 0, use captured — that's the
+	 * rescue path that prevents the false NULL-deref signal.
+	 */
+	{
+		u64 captured_cr2 = *(u64 *)((u8 *)vcpu->ist_stack_kva +
+					    PAGE_SIZE - 64);
+		/*
+		 * If sregs.cr2 was lost between vmexit and store_regs (rare
+		 * race), the captured value from the stub is authoritative.
+		 * Empirically (#121 investigation 2026-05-01) both values
+		 * are 0 in the failing case — CR2 was already 0 by the time
+		 * the IDT[14] stub ran, suggesting the fault delivered to
+		 * IDT[14] was actually at address 0 (not at the user's mov
+		 * target). The fallback below is harmless when captured is
+		 * also 0; but covers a future case where KVM's post-exit sync
+		 * loses CR2 while the in-guest stub captured it correctly.
+		 */
+		if (cr2 == 0 && captured_cr2 != 0)
+			cr2 = captured_cr2;
+	}
+
+	/*
 	 * Marshal user state into regs. C.3's marshal_from_kvm_regs
 	 * already populated regs->gp[] from kvm_run->s.regs.regs at
 	 * the top of vcpu.c::kvm_v2_vcpu_run — but RIP/RSP/RFLAGS in

@@ -184,7 +184,37 @@
  * v1's archive at kvm-v1-archive/thread.c:1310-1314 had the explicit
  * `add $8, %rsp ; iretq` for the same reason.
  */
+/*
+ * #PF stub (#121 instrumentation, 2026-05-01): captures CR2 to a known
+ * IST stack slot BEFORE the `out` vmexit, so handle_io_pf can read the
+ * fault address from a non-volatile location instead of relying on
+ * sregs.cr2 (which empirically reads 0 in some race conditions where
+ * KVM/host activity between vmexit and store_regs clobbers
+ * vcpu->arch.cr2).
+ *
+ * On entry to the stub, the CPU has already pushed the iretq frame +
+ * error_code (5*8 + 8 = 48 bytes) to IST stack. RSP = ist_top - 48.
+ * We use [rsp - 16] as a safe scratch slot (well below the iretq
+ * frame, within the 4KB IST page).
+ *
+ * Bytes (18 bytes total — fits in the 32-byte slot we now use for #PF):
+ *
+ *   50               push %rax                  ; save user RAX (rsp-=8)
+ *   0f 20 d0         mov %cr2, %rax             ; read fault address
+ *   48 89 44 24 f8   mov %rax, -8(%rsp)         ; stash at ist_top - 64
+ *   58               pop %rax                   ; restore user RAX
+ *   e6 f6            out %al, $UM_KVM_TRAP_PF   ; vmexit
+ *   48 83 c4 08      add $8, %rsp               ; skip CPU-pushed err_code
+ *   48 cf            iretq                       ; resume user
+ *
+ * The captured CR2 lives at byte offset PAGE_SIZE - 64 of the IST page.
+ * handle_io_pf reads it via vcpu->ist_stack_kva + (PAGE_SIZE - 64).
+ */
 static const u8 kvm_v2_handler_stub_pf[]    = {
+	0x50,					/* push %rax */
+	0x0f, 0x20, 0xd0,			/* mov %cr2, %rax */
+	0x48, 0x89, 0x44, 0x24, 0xf8,		/* mov %rax, -8(%rsp) */
+	0x58,					/* pop %rax */
 	0xe6, UM_KVM_TRAP_PF,			/* out %al, $port */
 	0x48, 0x83, 0xc4, 0x08,			/* add $8, %rsp */
 	0x48, 0xcf,				/* iretq */
@@ -306,32 +336,32 @@ static void kvm_v2_idt_set_gate(void *idt_page, unsigned int vector,
 	gate->reserved      = 0;
 }
 
+/*
+ * Slot stride. Bumped from 16 to 32 bytes in #121 instrumentation so the
+ * #PF stub (now 18 bytes with CR2-capture prologue) fits cleanly. All
+ * other stubs are 4-8 bytes and waste the unused trailing slot bytes
+ * (zero from __GFP_ZERO — dead code, never executed because iretq
+ * exits before reaching them).
+ */
+#define KVM_V2_HANDLER_SLOT_STRIDE	32
+
 static void kvm_v2_populate_handlers(void *handlers_kva)
 {
 	u8 *base = handlers_kva;
 
-	/*
-	 * Each stub at slot * 16. memcpy length = sizeof(stub) = 4 bytes;
-	 * the page is zero-filled around them so the trailing 12 bytes
-	 * stay 0x00 (dead code — iretq exits before they execute).
-	 *
-	 * Stub-to-port-to-vector mapping documented at the static const u8
-	 * declarations above. Cross-reference: memo 26 §E.3 per-vector
-	 * mapping table.
-	 */
-	memcpy(base + KVM_V2_HANDLER_SLOT_DE    * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_DE    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_de,    sizeof(kvm_v2_handler_stub_de));
-	memcpy(base + KVM_V2_HANDLER_SLOT_BP    * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_BP    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_bp,    sizeof(kvm_v2_handler_stub_bp));
-	memcpy(base + KVM_V2_HANDLER_SLOT_OF    * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_OF    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_of,    sizeof(kvm_v2_handler_stub_of));
-	memcpy(base + KVM_V2_HANDLER_SLOT_UD    * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_UD    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_ud,    sizeof(kvm_v2_handler_stub_ud));
-	memcpy(base + KVM_V2_HANDLER_SLOT_GP    * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_GP    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_gp,    sizeof(kvm_v2_handler_stub_gp));
-	memcpy(base + KVM_V2_HANDLER_SLOT_PF    * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_PF    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_pf,    sizeof(kvm_v2_handler_stub_pf));
-	memcpy(base + KVM_V2_HANDLER_SLOT_PANIC * 16,
+	memcpy(base + KVM_V2_HANDLER_SLOT_PANIC * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_panic, sizeof(kvm_v2_handler_stub_panic));
 }
 
@@ -358,7 +388,7 @@ static void kvm_v2_populate_idt(void *idt_kva)
 {
 	unsigned int vec;
 	const u64 panic_va = KVM_V2_HANDLERS_GVA +
-				KVM_V2_HANDLER_SLOT_PANIC * 16;
+				KVM_V2_HANDLER_SLOT_PANIC * KVM_V2_HANDLER_SLOT_STRIDE;
 
 	/*
 	 * Default every vector to the panic stub (DPL=0, IST=1). E.1's
@@ -388,17 +418,17 @@ static void kvm_v2_populate_idt(void *idt_kva)
 	 * macro with explicit per-vector DPL.
 	 */
 	kvm_v2_idt_set_gate(idt_kva, 0,
-		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_DE * 16, 0, 1);
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_DE * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 	kvm_v2_idt_set_gate(idt_kva, 3,
-		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_BP * 16, 3, 1);
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_BP * KVM_V2_HANDLER_SLOT_STRIDE, 3, 1);
 	kvm_v2_idt_set_gate(idt_kva, 4,
-		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_OF * 16, 3, 1);
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_OF * KVM_V2_HANDLER_SLOT_STRIDE, 3, 1);
 	kvm_v2_idt_set_gate(idt_kva, 6,
-		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_UD * 16, 0, 1);
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_UD * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 	kvm_v2_idt_set_gate(idt_kva, 13,
-		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_GP * 16, 0, 1);
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_GP * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 	kvm_v2_idt_set_gate(idt_kva, 14,
-		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_PF * 16, 0, 1);
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_PF * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 }
 
 /*
