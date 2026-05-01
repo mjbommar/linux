@@ -2414,6 +2414,72 @@ The deeper root cause remains unexplained without host-side KVM
 instrumentation (which would require host kernel rebuild + reboot —
 not feasible in this session).
 
+### #121-D1 host-KVM tracepoint + bpftrace investigation (2026-05-01)
+
+**Critical correction:** host is AMD Ryzen 7 7840HS — KVM uses SVM
+(arch/x86/kvm/svm/), NOT Intel VMX. Earlier analysis of vmx.c was
+wrong-arch.
+
+**Findings via `kvm:*` tracepoints + bpftrace:**
+
+1. **560 `kvm_inj_exception` events per 80-trial soak**, all
+   `reinjected=1, vec=14, error_code=0x14` (user-mode instruction
+   fetch fault). All routed through `svm_complete_interrupts` →
+   `kvm_requeue_exception` after EXITINTINFO valid in VMCB.
+
+2. **`kvm_deliver_exception_payload` always called with
+   `has_payload=0`** for re-injections — function returns early,
+   does NOT modify `vcpu->arch.cr2`. So this is NOT the path
+   setting cr2 to 0.
+
+3. **`kvm_inject_emulated_page_fault` never called with addr=0** —
+   verified by bpftrace filter on `fault->address`.
+
+4. **`vcpu->arch.cr2` NEVER transitions non-zero → zero across
+   `svm_vcpu_run`** (verified by kprobe entry/exit pair). Once set
+   non-zero by hardware, it stays non-zero.
+
+5. **In failing case, `vcpu->arch.cr2 = 0` for the ENTIRE KVM_RUN
+   inner loop.** Set to 0 by UML's `load_user_sregs` at KVM_RUN
+   entry, stays 0 through every iteration.
+
+6. **`run->s.regs.regs.rip = 0xffffe00000002140` at exit** = PF
+   stub START address (slot 5 × 64-byte stride). Before any stub
+   instruction has executed.
+
+**What this means:** the `cr2 = 0` that UML reads is the value loaded
+by `load_user_sregs` — NOT a value that hardware set then KVM lost.
+The user's hardware-detected #PF either:
+
+- Never fired (the `out` exit was actually for some other reason),
+  with `run->io.port=0xf6` being stale from an earlier exit; OR
+- Did fire but on a path that doesn't update vmcb.save.cr2 (e.g.,
+  software-injected #PF via vmcb.event_inj).
+
+**Notable AMD-specific observation:** when a guest #PF is interrupted
+mid-delivery by a NPF (host nested page fault), KVM's
+`kvm_requeue_exception` re-queues the #PF with `has_payload=false`
+and `payload=0`. On re-injection via `vmcb.event_inj`, hardware
+delivers the #PF without updating vmcb.save.cr2 (per AMD APM Vol 2
+§15.20.4: "CR2 register is not implicitly updated when an event is
+injected"). KVM relies on `vcpu->arch.cr2` being the right value
+before `svm->vmcb->save.cr2 = vcpu->arch.cr2` at svm.c:4457.
+
+**Why mt-mmap-stress N>=2 specifically:** lazy-mmap'd pages cascade
+NPF + guest-#PF interactions. Multi-thread amplifies because each
+thread's mm activity creates fresh GPAs that need NPT population.
+The NPF-mid-delivery race window is wider with more threads.
+
+**The actionable path forward** (not pursued in this session):
+- D6: in-guest CR2 sanity-check at boot to confirm IDT path works
+  in isolation
+- D8: out-of-tree kvm-debug kernel module to instrument the exact
+  cr2-write moments without host kernel rebuild
+- D10: reproduce on Intel host to confirm AMD-specific
+- Possible upstream KVM patch: extend `kvm_requeue_exception` to
+  carry CR2 payload via `vcpu->arch.cr2` (preserve across
+  EXITINTINFO-cycles).
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
