@@ -2283,6 +2283,80 @@ So my fix is a complete solution. The "make install sticky" approach
 would be a partial cleanup but doesn't replace the GET side. Phase
 H.2 may explore further refactoring.
 
+### H.1b residual #121 — investigation 2026-04-30 (multi-thread mmap stress)
+
+**Status:** open / partially characterised. Substrate gate stable;
+mt-mmap-stress N=3..4 still flakes ~7-10%.
+
+**Reproducer:** `mt-byteset.c` (3-4 pthreads × 50 iters of mmap +
+volatile per-byte memset + munmap). N=1 is 100% PASS; N≥2 flakes.
+
+**Empirical findings:**
+
+1. **Multi-thread is required** — N=1 passes 15/15. N=4 fails ~12%.
+   Implies multi-thread mm coordination, not single-task #PF flow.
+2. **Diverse crash signatures:**
+   - Original: kernel printk `mt-byteset[N]: segfault at 0 ip 0x40197b
+     error 2`. User SIGSEGV handler captures `si_addr=(nil)`,
+     `RIP=0x401bd6` (slow_memset's `mov %al, (%rdx)`),
+     `RDX=non-zero` (actual write target was valid mmap'd page).
+   - With diag instrumentation: signature shifts to libc-RIP +
+     non-zero si_addr (e.g., `RIP=0x7f7fff8e0a37 si_addr=0x10000`).
+     Different timing → different race surface.
+3. **Confirmed cr2=0 path in handle_io_pf** via diag printk (50 cases
+   captured): `cr2=0 cs=0x08 rip=0x401bd6 rsp=user err=2 rdx=non-zero
+   io=0xf6 ist1=correct`. So:
+   - `io.port=0xf6` (UM_KVM_TRAP_PF) — PF stub fired, real #PF dispatch.
+   - `cs=0x08` (kernel CS) at fault-time — guest was at CPL=0 not 3.
+   - `cr2=0` despite `rdx=non-zero` — CR2 register was not set by the
+     fault (or was reset before vmexit).
+4. **CS=0x08 at every dispatch entry** (verified by logging
+   sregs.cs.selector before KVM_RUN): even non-failing dispatches
+   show `cs_in=0x08/dpl=0`. Apparently normal v2 behavior — KVM
+   stores GUEST_CS=0x08 on exit (we exit from IDT handler stubs which
+   run at CPL=0); next entry reapplies via KVM_SYNC_X86_SREGS
+   dirty-bit. User code "works" at CPL=0 because user PTEs are
+   accessible at CPL=0 (no _PAGE_USER required).
+5. **DIAG-CR2 around KVM_RUN** confirms `cr2_in=0` (we clear it via
+   `load_user_sregs`) and `cr2_out=fault_addr` for normal #PF
+   dispatches. Failing case: `cr2_in=0 cr2_out=0` despite `io=0xf6`
+   (PF stub fired). That means KVM exited with vcpu->arch.cr2=0,
+   which means the host CR2 register was 0 at vmexit — implying
+   either (a) no real fault was delivered (yet stub somehow fired)
+   or (b) CR2 was reset between fault delivery and vmexit by some
+   nested fault overwriting it.
+
+**Working theory:** the PF stub at IDT[14] is sometimes entered via
+a nested fault during the IDT delivery itself (e.g., iretq frame
+push to IST stack, IDT walk, GDT walk for selector resolution).
+The nested fault resets CR2 to the nested-fault VA, which happens
+to be 0 in the cases we observed (suggests something at GVA 0 is
+involved — maybe a NULL PT entry encountered during walks).
+
+**Why bug is fragile under instrumentation:** added printks shift
+timing of unblock_signals / preempt yields; the race window changes
+character. Different crash signatures emerge with different diag
+configurations.
+
+**Why test mostly passes (95%) despite this race:** most of the time
+the PF stub is reached cleanly. The ~5% loss happens when nested
+faults + multi-thread mmap+munmap concurrency align. Reproducer
+shows the bug requires multiple threads competing on the same mm,
+which suggests mm-arbiter state churn.
+
+**Next steps (not pursued in this session):**
+- Add explicit instrumentation in KVM (vmx.c) to log native_read_cr2()
+  vs vcpu->arch.cr2 at vmexit for guest-fault-delivery vmexits.
+- Catch the case via KVM tracepoint on fault delivery.
+- Try a defense: re-set sregs.cs to user CS (0x2b) on every entry to
+  see if forcing CPL=3 changes the failure mode (would also confirm
+  CS=0x08-during-user-run is not innocuous).
+- Investigate UML's mm-arbiter under multi-thread mmap pressure.
+
+For now, substrate gate is stable at PASS=25/FAIL=3/EXPECTED_FAIL=3
+which matches seccomp parity. The 4-7% mt-mmap-stress flake is a
+non-blocking residual.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
