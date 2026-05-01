@@ -114,7 +114,7 @@ measure_one() {
 		root=/dev/root rootfstype=hostfs rw \
 		panic=-1 </dev/null 2>&1 || true)
 	local observed
-	observed=$(echo "$log" | sed -n 's/^um: backend = \([a-z]*\).*/\1/p' | head -1)
+	observed=$(echo "$log" | sed -n 's/^um: backend = \([a-z0-9-]*\).*/\1/p' | head -1)
 	if [ "$observed" != "$backend" ]; then
 		echo "PERF_GETPID: backend=$backend FAIL (observed=$observed; check um: backend line)"
 		return
