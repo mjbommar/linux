@@ -2149,20 +2149,21 @@ shipped at this commit.
 
 **Test results post-fix (2026-04-30 confirmation runs):**
 
-| Test                              | Pre-fix    | Post-fix   |
-|-----------------------------------|------------|------------|
-| mt-mmap-stress (3T×50, 100 trials) | 60-68%    | **95%**    |
-| mt-xmmprobe (XMM preservation)    | 80%        | **100%**   |
-| mt-sse (SSE-only memset)          | 65%        | **90%**    |
-| mt-byteset (no SIMD)              | 100%       | 100%       |
-| mt-rep (REP STOSB)                | 93%        | n/m        |
-| mt-avx (AVX YMM)                  | 0%         | 0% (XSAVE) |
-| InterpreterPool (subinterp+thread) | 50%       | **90%**    |
-| fork-tree-3level (10 trials)      | flaky      | **100%**   |
-| cpython-parity (8 runs)           | 14-17/21   | 14-18/21   |
-| substrate gate (5 runs)           | 25/3/3     | 25/3/3 ✓   |
-| cpython-tier0 (3 runs)            | PASS       | PASS ✓     |
-| perf-py-startup ratio             | 0.667×     | 0.667× ✓   |
+| Test                                | Pre-fix    | Post-fix   |
+|-------------------------------------|------------|------------|
+| mt-mmap-stress (3T×50, 200 trials)  | 60-68%    | **96%**    |
+| mt-detail (3T×50, 50 trials)        | flaky      | **100%**   |
+| mt-xmmprobe (XMM preservation)      | 80%        | **100%**   |
+| mt-sse (SSE-only memset)            | 65%        | **90%**    |
+| mt-byteset (no SIMD)                | 100%       | 100%       |
+| mt-rep (REP STOSB)                  | 93%        | n/m        |
+| mt-avx (AVX YMM)                    | 0%         | 0% (XSAVE) |
+| InterpreterPool (subinterp+thread)  | 50%       | **90%**    |
+| fork-tree-3level (10 trials)        | flaky     | **100%**   |
+| cpython-parity (8 runs)             | 14-17/21  | 15-20/21   |
+| substrate gate (10 runs)            | 25/3/3    | 25/3/3 ✓   |
+| cpython-tier0 (3 runs)              | PASS      | PASS ✓     |
+| perf-py-startup ratio (3 runs)      | 0.667×    | 0.667× ✓   |
 
 The 5% mt-mmap-stress residual is likely AVX-related (glibc has
 fallback paths that may use AVX even with CPUID-masked, or there
