@@ -2216,21 +2216,36 @@ snapshot must follow T1 around (not stay in T2's vcpu state). Per-task
 storage keyed via `current->thread.arch` matches the IST frame pattern
 (memo §H.1b residual fix at 31748fea602e earlier).
 
-**Why this is needed despite KVM's auto-save:** KVM's
-`fpu_swap_kvm_fpstate` is supposed to save vcpu FPU on every exit and
-restore on entry. Empirically it doesn't on the fast-path KVM_EXIT_IO
-from the in-guest IDT-handler `out` instruction. The host-kernel code
-that runs the exit-handling (UML's handle_io_pf, segv_handler,
-handle_page_fault, etc.) uses FPU/XMM (e.g., kernel memcpy/memset
-helpers compile to SIMD on AVX-capable hosts). Those uses clobber
-the hardware FPU; KVM's restore on re-entry pulls the now-stale
-vcpu->arch.guest_fpu back into the guest.
+**Upstream attribution (NOT a KVM kernel bug):** verified via three
+standalone KVM userspace reproducers (no UML, no special framework):
 
-Earlier wrong attempt (FPU save/restore inside `handle_io_pf`) made
-things worse because by the time `handle_io_pf` ran, host-kernel code
-HAD ALREADY clobbered FPU. The save captured the corrupted state.
-Moving the save to IMMEDIATELY post-KVM_RUN captures the still-clean
-state.
+1. `kvm-fpu-repro.c` — basic XMM-load + IO-trap + readback: PASS
+2. `kvm-fpu-uml-pattern.c` — 200 iters with SYNC_REGS + CR4.PGE
+   toggle (UML's exact dispatch pattern): PASS, no FAILs
+3. `kvm-fpu-task-switch.c` — 200 iters across 3 simulated tasks
+   with explicit FPU save/load + host XMM clobber between RUNs:
+   PASS, 0 FAILs across 4 variants
+4. `kvm-fpu-sigalrm.c` — SIGALRM-driven KVM_RUN -EINTR + host
+   XMM clobber on every -EINTR: 100 iters × 3 runs, all PASS
+
+**KVM correctly preserves vcpu FPU across all tested scenarios.**
+
+The bug is therefore in UML's specific environment. The existing
+UML mechanism (kvm_v2_fpu_capture_for_switch_out + kvm_v2_fpu_
+install_on_first_run, vcpu.c:1828+) provides per-task FPU isolation
+via context_switch hook, but has an empirical gap: my per-dispatch
+iotrap_fpu fix gives the 60%→96% improvement, suggesting the
+context-switch-only granularity misses some path. Possibly:
+- A schedule path that doesn't go through `__switch_to`
+- A KVM_RUN cycle that runs after install_on_first_run cleared
+  `fpu_valid` but before context_switch fires for next task
+- Subtle interaction with the worker-process model
+
+For now, our per-dispatch iotrap_fpu mechanism (always saves on
+exit, always restores on next entry) is correct-by-construction
+regardless of where the gap is. It composes safely with the
+existing per-task install (iotrap_fpu always wins because it
+restores last, line 1473 vs 1448).
 
 ### H.1b legacy notes (pre-2026-04-30)
 
