@@ -2480,6 +2480,37 @@ The NPF-mid-delivery race window is wider with more threads.
   carry CR2 payload via `vcpu->arch.cr2` (preserve across
   EXITINTINFO-cycles).
 
+### #121-D10 cross-architecture reproduction (2026-05-01)
+
+**Bug reproduces on BOTH Intel (VMX) and AMD (SVM)** — architecture-
+independent. 200-trial N=4 soaks:
+
+| Host | CPU       | Backend   | PASS rate    | Fail % |
+|------|-----------|-----------|--------------|--------|
+| s0   | i9-12900K | v2 (VMX)  | 189/200      | 5.5%   |
+| s5   | 7840HS    | v2 (SVM)  | 185/200      | 7.5%   |
+| s5   | 7840HS    | seccomp   |  40/40       | 0%     |
+
+This invalidates the AMD-SVM-specific theory. Root cause must be in
+shared KVM code (arch/x86/kvm/x86.c) or in UML's v2 backend code.
+Hardware-architecture-specific paths (svm.c / vmx.c) cannot be the
+source — both show the same bug.
+
+The strongest remaining theory is: `kvm_requeue_exception` (called
+from svm_complete_interrupts/vmx_complete_interrupts after
+EXITINTINFO-valid vmexits) does not preserve CR2 across
+NPT/EPT-interrupted #PF delivery cycles. The function explicitly
+sets `payload=0; has_payload=false;` for re-injected exceptions.
+On the next inject, `kvm_deliver_exception_payload` sees has_payload=0
+and skips updating vcpu->arch.cr2. If the prior svm.c:4506 or
+vmx.c:7474 read happened to land on a vmexit that didn't yet reflect
+hardware-set CR2 (e.g., NPF/EPT vmexit that pre-empted the CR2-update
+microcode atom), the value gets stuck.
+
+Older Intel hosts (s1 Xeon E3-1225 v6, s2 v5, s3 W-2123) and s4
+(i5-12600K w/ host kernel 7.0.0-15) showed "UML: fatal signal" early
+in boot — separate compatibility issue, not the residual flake.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
