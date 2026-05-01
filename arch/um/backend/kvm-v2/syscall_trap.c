@@ -1105,6 +1105,33 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 				 (unsigned long long)frame.user_rip,
 				 current->pid);
 		}
+		/*
+		 * G.2-fix diag: catch low-addr (1..0xff) #PFs from mt- tasks.
+		 * These are the smoking-gun symptom for the T>=N stress
+		 * flake. Log full register state so we can correlate with
+		 * mt-mini-diag's user-side capture.
+		 */
+		{
+			static int diag_low_pf;
+			u64 effective_cr2 = (cr2 != 0) ? cr2 : captured_cr2;
+			if (effective_cr2 > 0 && effective_cr2 < 0x100 &&
+			    !memcmp(current->comm, "mt-", 3) &&
+			    diag_low_pf < 20) {
+				diag_low_pf++;
+				pr_emerg("um: kvm-v2 LOW-PF[%d] pid=%d cr2=%llx err=%llx user_rip=%llx user_rsp=%llx user_rbp_or_rdx=%lx gp[BP]=%lx gp[SP]=%lx gp[DX]=%lx gp[AX]=%lx gp[DI]=%lx\n",
+					 diag_low_pf, current->pid,
+					 (unsigned long long)effective_cr2,
+					 (unsigned long long)frame.error_code,
+					 (unsigned long long)frame.user_rip,
+					 (unsigned long long)frame.user_rsp,
+					 regs->gp[HOST_DX],
+					 regs->gp[HOST_BP],
+					 regs->gp[HOST_SP],
+					 regs->gp[HOST_DX],
+					 regs->gp[HOST_AX],
+					 regs->gp[HOST_DI]);
+			}
+		}
 		if (cr2 == 0 && captured_cr2 != 0)
 			cr2 = captured_cr2;
 		/*
