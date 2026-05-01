@@ -488,21 +488,36 @@ int um_tlb_sync(struct mm_struct *mm)
 	 * narrowing is a no-op-equivalent clear.
 	 */
 	/*
-	 * Phase G.2-cont activation deferred (2026-05-01). Even with
-	 * v2's cmpxchg dedup'd tlb_kick_others, calling from here
-	 * regressed mt-mini T=4/ncpus=4 from 199/200 → 46/60. Each
-	 * um_tlb_sync drain can fire under high mm-churn (mt-byteset
-	 * ~1k drains/sec/thread); even bounded to one in-flight kick
-	 * per vCPU, the resulting EINTR cycle interferes with forward
-	 * progress on T-loaded vCPUs.
+	 * Phase G.2-fix (2026-05-01): bump per-mm tlb_gen so each
+	 * vCPU's load_user_sregs can detect "drained-since-last-flush"
+	 * and update its last_seen_tlb_gen. KICK ACTIVATION DEFERRED:
+	 * even with v1-pattern narrowing (current_mm match + last_seen
+	 * gen check + cmpxchg dedup), calling tlb_kick_others from here
+	 * regressed mt-mini T=4/ncpus=4 60→42 and T=8 18→7. The IPI
+	 * itself disrupts forward progress under high mm-churn,
+	 * regardless of how aggressively it's targeted/dedup'd.
 	 *
-	 * Hooked here in commented form so the activation point is
-	 * clear when a smarter mechanism (e.g. per-mm throttle, or
-	 * mm_cpumask narrowing) is designed.
+	 * Conclusion: T>=N stress flake is NOT cross-vCPU guest-TLB
+	 * stale (since per-vCPU CR4.PGE on every dispatch already
+	 * flushes locally). The actual root cause is elsewhere —
+	 * needs deeper investigation.
 	 *
-	 * 	if (ret == 0 && mm != &init_mm && um_backend->tlb_kick_others)
-	 * 		um_backend->tlb_kick_others(mm);
+	 * The gen counter still gets bumped (cheap) so future code
+	 * can use it for diagnostics or a non-IPI mechanism (e.g.
+	 * shared-memory generation polling at vmexit boundaries).
+	 *
+	 * Skip init_mm: kernel-mm syncs go via kern_map/kern_unmap.
 	 */
+	if (ret == 0 && mm != &init_mm) {
+		atomic64_inc(&mm->context.tlb_gen);
+		/*
+		 * Activation point for backend->tlb_kick_others, kept
+		 * commented to mark the call site:
+		 *
+		 *	if (um_backend->tlb_kick_others)
+		 *		um_backend->tlb_kick_others(mm);
+		 */
+	}
 
 	if (ret == 0) {
 		mm->context.sync_tlb_range_from = 0;

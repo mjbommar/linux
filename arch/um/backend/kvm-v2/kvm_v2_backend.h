@@ -330,20 +330,30 @@ struct kvm_v2_vcpu {
 
 	/*
 	 * Phase G.2-cont (2026-05-01): cross-vCPU TLB-flush kick dedup.
-	 *
-	 * tlb_kick_others (called from um_tlb_sync) cmpxchg's this 0→1
-	 * before sending IPI; if it was already 1, the IPI is suppressed
-	 * (an earlier kick is still in flight to this vCPU). Reset to 0
-	 * by the kicked vCPU at load_user_sregs (i.e., at the moment the
-	 * vCPU does its CR4.PGE flush, ack'ing the kick). Net effect: at
-	 * most one IPI in flight per vCPU at a time, vs commit C's
-	 * "broadcast every drain" which IPI-stormed at high T/N.
-	 *
-	 * Inspired by v1-archive's tlb_gen pattern
-	 * (kvm-v1-archive/kvm_backend.h:618) but simplified — we don't
-	 * track per-mm generation counters, just dedup the kick itself.
+	 * cmpxchg'd 0→1 before IPI; reset 0 by the kicked vCPU at
+	 * load_user_sregs. At most one IPI in flight per vCPU.
 	 */
 	atomic_t kick_pending;
+
+	/*
+	 * Phase G.2-fix (2026-05-01): v1-archive tlb_gen pattern.
+	 *
+	 * last_seen_tlb_gen tracks the highest mm->context.tlb_gen
+	 * this vCPU has flushed against. Updated in load_user_sregs
+	 * after the CR4.PGE toggle. The kicker compares vs this to
+	 * skip vCPUs already up-to-date.
+	 *
+	 * current_mm is set in load_user_sregs to the mm being
+	 * dispatched on this vCPU. The kicker uses it to NARROW IPIs
+	 * to only vCPUs running THIS mm — every other vCPU isn't
+	 * affected by this mm's PTE changes.
+	 *
+	 * Set as plain pointer (not RCU); reads are advisory in the
+	 * kicker (a stale read just means we send an unneeded IPI,
+	 * which is bounded by kick_pending dedup).
+	 */
+	atomic64_t last_seen_tlb_gen;
+	struct mm_struct *current_mm;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);

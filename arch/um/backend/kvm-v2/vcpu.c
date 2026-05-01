@@ -821,8 +821,11 @@ void kvm_v2_tlb_kick_others(struct mm_struct *mm)
 {
 #if IS_ENABLED(CONFIG_SMP)
 	int my_cpu, cpu;
+	u64 cur_gen;
 
-	(void)mm;
+	if (!mm)
+		return;
+	cur_gen = atomic64_read(&mm->context.tlb_gen);
 	my_cpu = raw_smp_processor_id();
 	for_each_online_cpu(cpu) {
 		struct kvm_v2_vcpu *v;
@@ -833,12 +836,26 @@ void kvm_v2_tlb_kick_others(struct mm_struct *mm)
 		if (!v)
 			continue;
 		/*
-		 * G.2-cont dedup: if a kick is already in flight to vCPU
-		 * `cpu` (kick_pending == 1), suppress this one. The pending
-		 * kick will arrive, vCPU will EINTR, next dispatch's
-		 * load_user_sregs will toggle CR4.PGE and reset the flag.
-		 * Suppressing here avoids the IPI storm that regressed
-		 * commit C (T=4 dropped 98%→30%).
+		 * G.2-fix narrowing #1: only kick vCPUs running THIS mm.
+		 * vCPUs running other mms aren't affected by this mm's
+		 * PTE changes. current_mm is updated in load_user_sregs,
+		 * read here without lock — a stale read just means we
+		 * send an unneeded IPI (bounded by the gen check + cmpxchg
+		 * dedup below).
+		 */
+		if (READ_ONCE(v->current_mm) != mm)
+			continue;
+		/*
+		 * G.2-fix narrowing #2: skip vCPUs already up-to-date.
+		 * Their last_seen_tlb_gen >= cur_gen means they've already
+		 * flushed for this gen bump (or a later one). No need to
+		 * kick.
+		 */
+		if (atomic64_read(&v->last_seen_tlb_gen) >= cur_gen)
+			continue;
+		/*
+		 * G.2-cont dedup: at most one IPI in flight per vCPU.
+		 * Reset by the kicked vCPU at load_user_sregs.
 		 */
 		if (atomic_cmpxchg(&v->kick_pending, 0, 1) == 0)
 			(void)os_send_ipi(cpu, 0 /* UML_IPI_RES */);
@@ -1242,14 +1259,20 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	sregs->cr4 ^= X86_CR4_PGE;
 
 	/*
-	 * G.2-cont: ack any pending cross-vCPU TLB-flush kick. The
-	 * CR4.PGE toggle above IS the flush — once we re-enter KVM_RUN
-	 * with this dirty SREGS, KVM honors mmu_reset_needed and
-	 * vpid_sync_context's the local guest TLB. Resetting kick_pending
-	 * here lets the next remote um_tlb_sync re-arm a kick to this
-	 * vCPU if needed.
+	 * G.2-cont/G.2-fix (2026-05-01): ack pending kick + update
+	 * per-vCPU tlb_gen tracking. The CR4.PGE toggle above IS the
+	 * flush. Snapshot mm->context.tlb_gen into last_seen so the
+	 * remote kicker can skip this vCPU until the gen bumps again.
+	 *
+	 * Also stash current_mm so the kicker can target only vCPUs
+	 * running THIS mm.
 	 */
 	atomic_set(&vcpu->kick_pending, 0);
+	WRITE_ONCE(vcpu->current_mm, current->mm);
+	if (current->mm) {
+		atomic64_set(&vcpu->last_seen_tlb_gen,
+			     atomic64_read(&current->mm->context.tlb_gen));
+	}
 
 	/*
 	 * D.4a: ensure EFER.SCE is set so SYSCALL doesn't raise #UD. KVM

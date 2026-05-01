@@ -60,6 +60,24 @@ typedef struct mm_context {
 	spinlock_t deferred_free_lock;
 	struct list_head deferred_free_pages;
 	unsigned int deferred_free_count;
+
+	/*
+	 * Phase G.2-fix (2026-05-01): per-mm guest-TLB generation
+	 * counter, mirroring v1-archive's shadow_mm->tlb_gen pattern
+	 * (kvm-v1-archive/kvm_backend.h:618). Incremented by
+	 * um_tlb_sync after a successful PTE drain. Compared at each
+	 * vCPU's dispatch against the per-vCPU last_seen_tlb_gen; on
+	 * mismatch the vCPU does its CR4.PGE-toggle guest-TLB flush
+	 * and updates last_seen.
+	 *
+	 * Also used by kvm-v2's tlb_kick_others to TARGET cross-vCPU
+	 * IPIs: only kick vCPUs whose last_seen is stale relative to
+	 * THIS mm's tlb_gen (and whose current_mm is THIS mm). That
+	 * narrowing is what differentiates this attempt from commit C
+	 * (broadcast IPI storm) and 9f0ff6257e8b (cmpxchg-dedup'd
+	 * broadcast — still too eager under high mm-churn).
+	 */
+	atomic64_t tlb_gen;
 } mm_context_t;
 
 #define INIT_MM_CONTEXT(mm)						\
