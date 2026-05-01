@@ -2247,6 +2247,42 @@ regardless of where the gap is. It composes safely with the
 existing per-task install (iotrap_fpu always wins because it
 restores last, line 1473 vs 1448).
 
+**Update 2026-04-30 (post-attribution analysis):** instrumented
+`kvm_v2_vcpu_run` to log `(install_valid, iotrap_valid)` per
+dispatch. For mt-xmmprobe (3 pthreads, 50 iters), 50/50 dispatches
+showed `install_valid=0, iotrap_valid=1`. Meaning:
+
+- `kvm_v2_fpu_install_on_first_run` essentially NEVER fires for
+  mt-xmmprobe's threads — they're not flushed via context_switch
+  often enough.
+- `iotrap_fpu` fires every dispatch.
+
+But `install_on_first_run` DOES fire for OTHER tasks (init shell,
+mount, ksoftirqd, etc.) at their context_switch boundaries — each
+such install does `KVM_SET_FPU(other_task.fpu)` which OVERWRITES
+`vcpu->arch.guest_fpu` with that task's snapshot. When mt-xmmprobe
+next dispatches with `install_valid=0`, KVM's auto-load pulls the
+polluted `vcpu->arch.guest_fpu` into hardware — leaking the OTHER
+task's FPU into mt-xmmprobe's run.
+
+**This is the precise UML bug:** the existing per-context-switch
+install/capture pair pollutes `vcpu->arch.guest_fpu` across tasks
+sharing one vcpu. The per-dispatch iotrap_fpu mechanism corrects
+this by *always* re-loading the current task's snapshot before
+each KVM_RUN, overriding any cross-task pollution.
+
+A potential cleaner fix would be: make `install_on_first_run`
+idempotent (don't clear `fpu_valid` after install — leave it
+sticky so every dispatch installs current task's FPU). That would
+remove the cross-task pollution at the source. But the per-dispatch
+GET in my fix is also needed — without it, ANY UML kernel use of
+FPU between exit and next entry could poison `vcpu->arch.guest_fpu`
+via the same auto-load path.
+
+So my fix is a complete solution. The "make install sticky" approach
+would be a partial cleanup but doesn't replace the GET side. Phase
+H.2 may explore further refactoring.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
