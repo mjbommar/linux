@@ -2511,6 +2511,36 @@ Older Intel hosts (s1 Xeon E3-1225 v6, s2 v5, s3 W-2123) and s4
 (i5-12600K w/ host kernel 7.0.0-15) showed "UML: fatal signal" early
 in boot — separate compatibility issue, not the residual flake.
 
+### #121-D additional experiments (2026-05-01)
+
+**E1: Remove sregs->cr2=0 in load_user_sregs.** 200-trial soak with
+the line removed: 184/200 PASS = 92%. With the line: 185/200 = 92.5%.
+**Identical fail rate.** Difference: without zero, failing cases show
+STALE CR2 from previous tasks (cross-task leak); with zero they show
+CR2=0. The zero is NOT the bug source — it just makes the symptom
+uniform. Restored.
+
+**E2: Add KVM_SYNC_X86_EVENTS sync to clear pending exception state
+on every KVM_RUN entry.** Hypothesis: prevent cross-task re-injection
+leak (task A's pending #PF surviving to task B's KVM_RUN).
+Implemented via `memset(&run->s.regs.events, 0, sizeof)` +
+`KVM_SYNC_X86_EVENTS` dirty bit. Verified via tracepoint that
+kvm_inj_exception still fires 140 times / 20 trials with this fix —
+so re-injections are happening WITHIN one KVM_RUN ioctl, not
+crossing task boundaries. mt-byteset N=4 fail rate unchanged.
+**Cross-task injection leak is NOT the bug source.** Reverted.
+
+These two experiments rule out the most-likely UML-side fixes I
+hypothesized. The bug is intra-KVM_RUN: somewhere in the inner
+vcpu_run loop, a #PF stub fires with vmcb.save.cr2 = 0 (or stale)
+despite the dispatch starting from load_user_sregs's clean state.
+
+Without rebuilding the host kernel to instrument every CR2
+read/write site in arch/x86/kvm/{x86,svm/svm,vmx/vmx}.c, the deeper
+root cause cannot be pinpointed in this session. The defensive
+heuristic (RDX-fallback for cr2=0 + W=1 + plausible RDX) shipped at
+`f0487174741c` mitigates 95% of the impact at N=4.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
