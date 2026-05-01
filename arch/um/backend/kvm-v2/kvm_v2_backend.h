@@ -327,6 +327,23 @@ struct kvm_v2_vcpu {
 	void	    *tss_kva;
 	phys_addr_t  tss_gpa;
 	u64	     tss_gva;
+
+	/*
+	 * Phase G.2-cont (2026-05-01): cross-vCPU TLB-flush kick dedup.
+	 *
+	 * tlb_kick_others (called from um_tlb_sync) cmpxchg's this 0→1
+	 * before sending IPI; if it was already 1, the IPI is suppressed
+	 * (an earlier kick is still in flight to this vCPU). Reset to 0
+	 * by the kicked vCPU at load_user_sregs (i.e., at the moment the
+	 * vCPU does its CR4.PGE flush, ack'ing the kick). Net effect: at
+	 * most one IPI in flight per vCPU at a time, vs commit C's
+	 * "broadcast every drain" which IPI-stormed at high T/N.
+	 *
+	 * Inspired by v1-archive's tlb_gen pattern
+	 * (kvm-v1-archive/kvm_backend.h:618) but simplified — we don't
+	 * track per-mm generation counters, just dedup the kick itself.
+	 */
+	atomic_t kick_pending;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);

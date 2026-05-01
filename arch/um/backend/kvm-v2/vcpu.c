@@ -825,9 +825,23 @@ void kvm_v2_tlb_kick_others(struct mm_struct *mm)
 	(void)mm;
 	my_cpu = raw_smp_processor_id();
 	for_each_online_cpu(cpu) {
+		struct kvm_v2_vcpu *v;
+
 		if (cpu == my_cpu)
 			continue;
-		(void)os_send_ipi(cpu, 0 /* UML_IPI_RES */);
+		v = kvm_v2_vcpu_get(cpu);
+		if (!v)
+			continue;
+		/*
+		 * G.2-cont dedup: if a kick is already in flight to vCPU
+		 * `cpu` (kick_pending == 1), suppress this one. The pending
+		 * kick will arrive, vCPU will EINTR, next dispatch's
+		 * load_user_sregs will toggle CR4.PGE and reset the flag.
+		 * Suppressing here avoids the IPI storm that regressed
+		 * commit C (T=4 dropped 98%→30%).
+		 */
+		if (atomic_cmpxchg(&v->kick_pending, 0, 1) == 0)
+			(void)os_send_ipi(cpu, 0 /* UML_IPI_RES */);
 	}
 #else
 	(void)mm;
@@ -1226,6 +1240,16 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	 * "tlb-stale" predicate; for now correctness > performance.
 	 */
 	sregs->cr4 ^= X86_CR4_PGE;
+
+	/*
+	 * G.2-cont: ack any pending cross-vCPU TLB-flush kick. The
+	 * CR4.PGE toggle above IS the flush — once we re-enter KVM_RUN
+	 * with this dirty SREGS, KVM honors mmu_reset_needed and
+	 * vpid_sync_context's the local guest TLB. Resetting kick_pending
+	 * here lets the next remote um_tlb_sync re-arm a kick to this
+	 * vCPU if needed.
+	 */
+	atomic_set(&vcpu->kick_pending, 0);
 
 	/*
 	 * D.4a: ensure EFER.SCE is set so SYSCALL doesn't raise #UD. KVM

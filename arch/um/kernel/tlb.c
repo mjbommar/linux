@@ -487,6 +487,23 @@ int um_tlb_sync(struct mm_struct *mm)
 	 * condition with addr having advanced to end), so the
 	 * narrowing is a no-op-equivalent clear.
 	 */
+	/*
+	 * Phase G.2-cont activation deferred (2026-05-01). Even with
+	 * v2's cmpxchg dedup'd tlb_kick_others, calling from here
+	 * regressed mt-mini T=4/ncpus=4 from 199/200 → 46/60. Each
+	 * um_tlb_sync drain can fire under high mm-churn (mt-byteset
+	 * ~1k drains/sec/thread); even bounded to one in-flight kick
+	 * per vCPU, the resulting EINTR cycle interferes with forward
+	 * progress on T-loaded vCPUs.
+	 *
+	 * Hooked here in commented form so the activation point is
+	 * clear when a smarter mechanism (e.g. per-mm throttle, or
+	 * mm_cpumask narrowing) is designed.
+	 *
+	 * 	if (ret == 0 && mm != &init_mm && um_backend->tlb_kick_others)
+	 * 		um_backend->tlb_kick_others(mm);
+	 */
+
 	if (ret == 0) {
 		mm->context.sync_tlb_range_from = 0;
 		mm->context.sync_tlb_range_to = 0;
