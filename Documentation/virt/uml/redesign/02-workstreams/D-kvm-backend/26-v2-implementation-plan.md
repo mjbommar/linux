@@ -1728,15 +1728,50 @@ own smp_prepare_cpus does the wait, and v2's per-host-CPU pool
 dispatcher correctly picks up the right vCPU once a host-CPU
 pthread comes online.
 
-**Remaining 2% mt-byteset SMP flake** (likely a separate issue
-from the original #121): the residual failure under `ncpus=4`
-shows `mt-byteset[N]: segfault at 0x2 ip 0x40197b error 2` —
-slow_memset writing to address 0x2 (RDX corrupted). Under UP this
-is 0/200; under SMP it's ~2%. Hypothesis: cross-vCPU TLB stale
-(CR4.PGE toggle on dispatch flushes only the LOCAL vCPU's guest
-TLB; another vCPU's TLB stays stale until its own next dispatch).
-Investigation continues — but this is a STRESS-test edge case,
-not a substrate or gate-class regression.
+**Remaining mt-byteset SMP flake** (separate from the original #121):
+
+| Thread count | ncpus | PASS |
+|---|---|---|
+| T=2 | 4 | 60/60 = 100% |
+| T=4 | 4 | 196/200 = 98% |
+| T=8 | 4 | 12/30 = 40% (high stress, 2× threads/vCPU) |
+
+Symptom: `mt-byteset[N]: segfault at 0x{1,2,3} ip 0x40197b error 2`
+— slow_memset writing to a small address (RDX corrupted to 1-3).
+mt-byteset-diag (sigaction-instrumented variant) under T=8 captures:
+- `last_mmap_p=0x42014000` (TLS, this thread's most recent mmap)
+- but `[rbp-8]` (the vp local slot) = `0x44078000` (a DIFFERENT
+  thread's mmap-region address)
+- `RSP=0x420031e0` but `RBP=0x440371e0` (mismatched; RBP belongs
+  to a different thread's stack region)
+
+**Root cause: cross-vCPU guest TLB stale**. When UML's
+`um_tlb_sync` runs (on PTE-level mm changes), it toggles CR4.PGE
+on the CURRENT vCPU's next dispatch — flushing only that vCPU's
+guest TLB. Other vCPUs running tasks in the SAME mm continue to
+cache stale GVA→guest_PA mappings until their own next dispatch.
+When thread A's stack page is freed and the physical page is
+recycled to thread B's mmap region, thread A on vCPU 0 may still
+have a stale TLB entry [stack_VA → physpage_X], where physpage_X
+is now thread B's mmap region. Thread A's stack reads/writes
+alias with thread B's mmap data → register-state swap symptoms.
+
+**Fix path** (Phase G.2 — cross-vCPU IPI / TLB shootdown):
+- On every PTE-level mm change in UML, issue
+  `kvm_make_all_cpus_request(KVM_REQ_TLB_FLUSH)` (or per-vCPU
+  KVM_REQ_TLB_FLUSH ioctls) to force ALL vCPUs to flush their
+  guest TLBs at next entry.
+- Stock x86 KVM provides this primitive via the standard `request
+  + kick` mechanism (`vcpu_enter_guest` checks the request bit
+  and clears the TLB before VMENTER).
+- Workaround until G.2 lands: run substrate workloads on UP
+  builds (`CONFIG_SMP=n`), or with `ncpus` ≥ thread count.
+
+This is a STRESS-test edge case affecting only the multi-thread
+mmap-stress reproducer at high T/N. Substrate gate (PASS=25/FAIL=3/
+EXPECTED_FAIL=3) and cpython-parity gate (21/21 PARITY) are both
+clean under SMP — those don't exercise the same churn-driven mm
+race.
 
 ### G.2 — `smp.c`: cross-vCPU IPI (if needed) (2 days)
 
