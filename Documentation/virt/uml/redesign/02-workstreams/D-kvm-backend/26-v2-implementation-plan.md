@@ -2147,8 +2147,32 @@ shipped at this commit.
 
 ### H.1b CLOSED (2026-04-30): per-task FPU snapshot fix at 49b3e40a968c
 
-mt-mmap-stress: **60% → 98% PASS (49/50 trials)**. Substrate gate stable
-PASS=25/FAIL=3/EXPECTED_FAIL=3. cpython-tier0 PASS.
+**Test results post-fix (2026-04-30 confirmation runs):**
+
+| Test                              | Pre-fix    | Post-fix   |
+|-----------------------------------|------------|------------|
+| mt-mmap-stress (3T×50, 100 trials) | 60-68%    | **95%**    |
+| mt-xmmprobe (XMM preservation)    | 80%        | **100%**   |
+| mt-sse (SSE-only memset)          | 65%        | **90%**    |
+| mt-byteset (no SIMD)              | 100%       | 100%       |
+| mt-rep (REP STOSB)                | 93%        | n/m        |
+| mt-avx (AVX YMM)                  | 0%         | 0% (XSAVE) |
+| InterpreterPool (subinterp+thread) | 50%       | **90%**    |
+| fork-tree-3level (10 trials)      | flaky      | **100%**   |
+| cpython-parity (8 runs)           | 14-17/21   | 14-18/21   |
+| substrate gate (5 runs)           | 25/3/3     | 25/3/3 ✓   |
+| cpython-tier0 (3 runs)            | PASS       | PASS ✓     |
+| perf-py-startup ratio             | 0.667×     | 0.667× ✓   |
+
+The 5% mt-mmap-stress residual is likely AVX-related (glibc has
+fallback paths that may use AVX even with CPUID-masked, or there
+are other XMM-clobber windows we haven't covered).
+
+cpython-parity remaining flake (3-7 tests, mostly test_struct,
+test_bytes, test_dict, test_int, test_heapq, test_itertools)
+likely a separate issue — those tests' subprocess-spawning paths
+hit code we haven't fully covered. AVX-512 + XSAVE plumbing
+(Phase H or beyond) would close this.
 
 **Fix mechanism:** bypass KVM's broken IO-exit FPU auto-save by manually
 snapshotting + restoring around the host-kernel exit-handling window.
