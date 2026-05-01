@@ -1116,8 +1116,25 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	 * and our zero just makes the symptom uniform (cr2=0) rather than
 	 * leaky (stale values). Keep the zero for cross-task isolation
 	 * hygiene.
+	 *
+	 * #121-D15 fix (2026-05-01): if the previous EINTR exit caught the
+	 * vCPU mid-IDT-delivery (RIP set to a stub-start by hardware, but
+	 * the in-guest stub's first `push %rax` had NOT yet run), the
+	 * VMCB.save.cr2 still holds the real fault address from the IDT
+	 * delivery. The EINTR snapshot path saved that into per-task
+	 * arch.kvm_v2.saved_cr2_at_eintr — restore it here so the resumed
+	 * stub's `mov %cr2, %rax` reads the correct CR2. See
+	 * arch_thread.kvm_v2.saved_cr2_at_eintr comment for full mechanism.
 	 */
-	sregs->cr2 = 0;
+	{
+		struct arch_thread *a = &current->thread.arch;
+		if (a->kvm_v2.saved_cr2_valid) {
+			sregs->cr2 = a->kvm_v2.saved_cr2_at_eintr;
+			a->kvm_v2.saved_cr2_valid = false;
+		} else {
+			sregs->cr2 = 0;
+		}
+	}
 
 	/*
 	 * Force a guest-TLB flush by toggling CR4.PGE on every dispatch.
@@ -1599,6 +1616,35 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 			if (rc == -EINTR) {
 				kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
 				kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
+				/*
+				 * #121-D15 fix (2026-05-01): if EINTR caught us
+				 * with RIP pointing at an in-guest exception
+				 * handler stub (CPU IDT-delivered the fault and
+				 * set RIP=KVM_V2_HANDLERS_GVA+slot*64, but the
+				 * stub's first instruction hasn't run yet, OR
+				 * the stub is mid-execution), preserve sregs.cr2
+				 * — VMCB.save.cr2 holds the real fault address
+				 * from the IDT delivery and the next dispatch's
+				 * load_user_sregs would otherwise zero it, making
+				 * the stub's `mov %cr2, %rax` capture 0. See the
+				 * arch_thread.kvm_v2.saved_cr2_at_eintr comment
+				 * for the full mechanism.
+				 */
+				if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA &&
+				    eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x200) {
+					struct arch_thread *a = &current->thread.arch;
+					a->kvm_v2.saved_cr2_at_eintr = eintr_sregs.cr2;
+					a->kvm_v2.saved_cr2_valid = true;
+					/*
+					 * Snapshot the IDT frame from IST stack
+					 * so another task running on the same
+					 * vCPU can't clobber it. Sets
+					 * ist_pending=true so the next dispatch's
+					 * kvm_v2_ist_frame_restore_pending() puts
+					 * our frame back before VMRUN.
+					 */
+					kvm_v2_ist_frame_snapshot_raw(vcpu);
+				}
 				trace_um_backend_kvm_v2_vcpu_eintr(cpu);
 				/*
 				 * Memo §H.1b: even on EINTR, KVM_RUN entry

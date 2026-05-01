@@ -485,6 +485,27 @@ void kvm_v2_marshal_sregs_back(struct uml_pt_regs *dst,
 void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu);
 
 /*
+ * #121-D15 fix (2026-05-01): snapshot the raw IDT-pushed exception
+ * frame from the IST stack into current's per-task ist_frame[]
+ * storage AS-IS (no UML-handler-side rewriting). Used by the EINTR
+ * path in kvm_v2_vcpu_run when the EINTR caught the vCPU between
+ * hardware IDT-delivery (CPU pushed the frame and set RIP=stub
+ * start) and the in-guest stub's first instruction. Without this
+ * snapshot, another UML task running on the same per-host-CPU vCPU
+ * before this task resumes would push its own IDT frame to the
+ * shared IST stack, clobbering this task's pre-stub frame; on
+ * resume, the stub's iretq tail (which we ALSO bypass after
+ * handle_io_pf, but the next stub run on resume relies on the
+ * frame being intact for its correct user_rip/cs/rsp/rflags fields)
+ * pops the wrong task's state.
+ *
+ * Sets ist_pending=true so the next dispatch's
+ * kvm_v2_ist_frame_restore_pending() reinstates the IST-stack
+ * contents.
+ */
+void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu);
+
+/*
  * Phase D.3: per-task FPU capture on context-switch-out + the
  * .context_switch op wrapper that invokes it before delegating to
  * seccomp_context_switch. Defined in vcpu.c (alongside the C.4

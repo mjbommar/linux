@@ -75,6 +75,32 @@ struct arch_thread {
 		 */
 		struct kvm_fpu iotrap_fpu;
 		bool iotrap_fpu_valid;
+
+		/*
+		 * #121-D15 fix (2026-05-01): preserve sregs.cr2 across
+		 * an EINTR that caught the vCPU mid-IDT-delivery. When
+		 * SIGALRM interrupts KVM_RUN AFTER hardware pushed the
+		 * #PF IDT frame to the IST stack and set RIP=stub-start
+		 * (KVM_V2_HANDLERS_GVA + 0x140), but BEFORE the in-guest
+		 * stub's first `push %rax` ran, KVM exits with -EINTR
+		 * and VMCB.save.cr2 still holds the real fault address.
+		 * Without preservation, the next dispatch's
+		 * load_user_sregs() writes sregs.cr2 = 0 → vcpu->arch.cr2
+		 * = 0 → VMCB.save.cr2 = 0 on the next VMRUN entry. The
+		 * stub then resumes from 0x2140, executes `mov %cr2,
+		 * %rax` reading 0, captures 0 into the IST page slot,
+		 * `out %al, $0xf6` vmexits — and handle_io_pf sees
+		 * cr2=0 with no IDT frame freshly pushed (the captured
+		 * IST data is from the prior real fault), so the fault
+		 * address is lost. With this preservation, sregs.cr2 is
+		 * re-installed on the next dispatch so the stub reads
+		 * the correct CR2.
+		 *
+		 * Set true at EINTR-with-stub-RIP; cleared on consumption
+		 * by load_user_sregs.
+		 */
+		u64  saved_cr2_at_eintr;
+		bool saved_cr2_valid;
 	} kvm_v2;
 #endif
 };

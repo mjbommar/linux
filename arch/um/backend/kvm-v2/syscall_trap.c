@@ -945,6 +945,40 @@ void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu)
 }
 
 /*
+ * #121-D15 fix (2026-05-01): snapshot the IDT-pushed exception frame
+ * verbatim from the IST stack into per-task arch_thread storage. See
+ * kvm_v2_backend.h declaration for the full rationale. This is the
+ * raw counterpart to kvm_v2_ist_frame_write — the latter writes a
+ * UML-side-mutated RIP/RSP (post-segv_handler) for the iretq tail to
+ * pop; this one preserves the hardware-pushed frame as-is for the
+ * EINTR-mid-IDT-delivery case where handle_io_pf never ran and the
+ * stub's iretq tail (which will run on resume) needs the original
+ * IDT frame.
+ *
+ * Always assumes has_error_code=true (matches the #PF / #GP slots
+ * that are the only handler stubs reachable mid-delivery in current
+ * v2 — the no-error-code stubs at slots DE/BP/OF/UD/NM also pushed
+ * a frame but with one fewer qword; treating those as has_error_code
+ * for snapshot purposes leaves an extra qword in slot[0] that is
+ * unused on restore; restore writes top-48 = ist_frame[0] which lands
+ * at the same physical slot the CPU would have used for the next
+ * frame above the no-error-code frame, harmless for those vectors).
+ */
+void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu)
+{
+	struct arch_thread *a = &current->thread.arch;
+	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+
+	a->kvm_v2.ist_frame[0] = *(u64 *)(top - 48);          /* error_code */
+	a->kvm_v2.ist_frame[1] = *(u64 *)(top - 40 +  0);     /* RIP */
+	a->kvm_v2.ist_frame[2] = *(u64 *)(top - 40 +  8);     /* CS */
+	a->kvm_v2.ist_frame[3] = *(u64 *)(top - 40 + 16);     /* RFLAGS */
+	a->kvm_v2.ist_frame[4] = *(u64 *)(top - 40 + 24);     /* RSP */
+	a->kvm_v2.ist_frame[5] = *(u64 *)(top - 40 + 32);     /* SS */
+	a->kvm_v2.ist_pending = true;
+}
+
+/*
  * #PF (vector 14): page-fault dispatcher. CR2 from sync-regs sregs;
  * error_code + user RIP/RSP/RFLAGS from the IST frame. Dispatches
  * via UML's segv_handler (arch/um/kernel/trap.c:292) — same path the
