@@ -2027,6 +2027,70 @@ Reproducer: tip bd8f6fe1c511. mt-mmap-stress 3T×50 iters:
 ~64-68% PASS on v2 post-fix, 100% PASS on seccomp, 100% PASS
 with MAP_POPULATE.
 
+### H.1b residual cont 2 (2026-04-30): instruction-class isolation
+
+After Option B fix didn't statistically improve mt-mmap-stress,
+isolated the failure to specific instruction classes by writing
+4 variants of memset:
+
+| Test variant      | Instruction       | PASS rate (30 trials) |
+|-------------------|-------------------|------------------------|
+| byteset (volatile *p = v) | per-byte mov | **100%** PASS |
+| REP STOSB         | rep stosb (GPR)   | ~93% PASS |
+| glibc memset      | SSE `__memset_sse2` | ~64% PASS |
+| AVX YMM (vmovdqu) | _mm256_storeu_si256 | **0%** PASS |
+| SSE XMM (movdqu)  | _mm_storeu_si128  | ~65% PASS |
+
+Failure rate scales with FPU/SIMD width:
+- byteset (no SIMD)        100%
+- REP STOSB (GPR only)      93%
+- SSE/glibc (XMM 16-byte)   65%
+- AVX (YMM 32-byte)          0%
+
+**Conclusion:** the residual bug is FPU-related. XMM register
+state is corrupted across the #PF cycle. The fault-during-store
+re-execution writes garbage (likely zeros) instead of the
+splat'd byte value.
+
+KVM normally auto-saves/restores vcpu FPU on KVM_RUN entry/exit
+via `fpu_swap_kvm_fpstate`. v2's `kvm_v2_fpu_install_on_first_run`
+already opted out of explicit per-dispatch reset (vcpu.c:1828-1860)
+because the earlier shape "destroyed XMM/x87 state mid-instruction
+whenever a task re-entered after a #PF (lazy CoW etc)".
+
+So in theory KVM should preserve FPU. But empirically it isn't.
+A direct attempt to add `KVM_GET_FPU` at handle_io_pf entry +
+`KVM_SET_FPU` at exit MADE THINGS WORSE (40% vs 60% baseline) —
+suggesting the explicit save/restore interferes with KVM's
+auto-handling.
+
+**Next investigation directions (not yet pursued):**
+
+1. Audit per-vCPU pool member FPU initialization at vcpu_create —
+   does each vCPU have correct CR0.MP/NE, CR4.OSFXSR/OSXMMEXCPT
+   set? `kvm_v2_install_initial_sregs` (vcpu.c:519) sets these
+   on the boot vCPU but pool members may inherit incorrectly.
+
+2. Check whether KVM_RUN's userspace exit path (`KVM_EXIT_IO`
+   from `out`) skips the FPU save that direct VMEXIT (e.g.
+   triple fault, EPT violation) does. If the IO trap is "fast
+   path" without FPU save, vcpu FPU state lives in HW registers
+   and may be clobbered by host kernel-mode code between exit
+   and re-entry.
+
+3. AVX 0% PASS specifically: AVX is CPUID-masked off (vcpu.c:128-184)
+   and CR4.OSXSAVE off. Guests issuing YMM stores on this setup
+   may behave undefined. Confirm via #UD trap dispatch — if AVX
+   instructions are silently nopping rather than trapping, that's
+   a separate KVM/CPU configuration issue.
+
+The byteset (100% PASS) and REP STOSB (93% PASS) baselines are
+clean enough to ship if SIMD-correctness is acceptable to defer.
+v2 backend's main user is the substrate (which doesn't use SIMD
+via memset since the kernel's static binaries don't). User-mode
+binaries that use AVX heavily would expose this — Phase J validation
+should catch this in cpython-parity full-suite runs.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
