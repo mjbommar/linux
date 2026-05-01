@@ -2399,8 +2399,16 @@ x86 semantics. Possible explanations:
 **Defense shipped (commit f0487174741c):** when CR2 reads 0 with
 error_code.W=1 (write fault) AND user RDX is a plausible user-space
 pointer (>0x10000), use RDX as the fault address. Heuristic — only
-helps mov-to-(%rdx) style instructions. Improves mt-byteset N=4 PASS
-rate from ~88% to ~93% (100-trial soak). Substrate gate stable.
+helps mov-to-(%rdx) style instructions. Substrate gate stable.
+
+Validation matrix (post-defense):
+| Test                              | PASS rate          |
+|-----------------------------------|--------------------|
+| Substrate gate (3 runs)           | 25/3/3 ✓           |
+| mt-mmap-stress N=3 (50 trials)    | 50/50 = 100% ✓     |
+| mt-byteset N=4 (80 trials)        | 76/80 = 95%        |
+| mt-byteset N=4 (200-trial soak)   | 185/200 = 92.5%    |
+| seccomp baseline N=4 (40 trials)  | 40/40 = 100%       |
 
 The deeper root cause remains unexplained without host-side KVM
 instrumentation (which would require host kernel rebuild + reboot —
