@@ -2165,9 +2165,14 @@ shipped at this commit.
 | cpython-tier0 (3 runs)              | PASS      | PASS ✓     |
 | perf-py-startup ratio (3 runs)      | 0.667×    | 0.667× ✓   |
 
-The 5% mt-mmap-stress residual is likely AVX-related (glibc has
-fallback paths that may use AVX even with CPUID-masked, or there
-are other XMM-clobber windows we haven't covered).
+The 4% mt-mmap-stress residual is a SEPARATE bug class (not FPU):
+captured via mt-byteset.c (per-byte volatile mov, no SIMD), the
+residual fail rate is ~4% — same as mt-mmap-stress. Crash signature:
+`mt-byteset[N]: segfault at 0 ip 000000000040197b` (NULL deref on
+`mov %al, (%rdx)` inside slow_memset). Plain non-SIMD stack-or-
+pointer corruption, unrelated to XMM clobber. Likely race during
+pthread fork+execve or page-table state interaction. Tracked as
+separate Phase J validation finding; substrate gate is unaffected.
 
 cpython-parity remaining flake (3-7 tests, mostly test_struct,
 test_bytes, test_dict, test_int, test_heapq, test_itertools)
