@@ -761,10 +761,25 @@ static int kvm_v2_install_signal_mask(int vcpu_fd)
 
 	sigfillset(&set);
 	sigdelset(&set, SIGALRM);  /* timer-driven preemption — see v1 */
+#if IS_ENABLED(CONFIG_SMP)
 	/*
-	 * v2 doesn't need KVM_UM_KICK_SIGNAL — TDP + mmu_notifier handle
-	 * cross-vCPU coherence. memo 26 §F.1.
+	 * Phase G.2 cross-vCPU TLB shootdown (2026-05-01): also unblock
+	 * IPI_SIGNAL during KVM_RUN so a remote vCPU's um_tlb_sync can
+	 * kick this vCPU out of guest mode via os_send_ipi(cpu,
+	 * UML_IPI_RES). The next dispatch's CR4.PGE toggle in
+	 * load_user_sregs() does the actual local guest-TLB flush. The
+	 * EINTR caused by the IPI returns through the existing
+	 * SIGALRM-EINTR path at vcpu_run line ~1599; that path is
+	 * already EINTR-tolerant.
+	 *
+	 * Original v2 design comment ("TDP + mmu_notifier handle cross-
+	 * vCPU coherence") is correct for the TDP layer (host_PA →
+	 * guest_PA) but NOT for the guest TLB layer (GVA → guest_PA);
+	 * each vCPU's guest TLB caches independently, and our PTE
+	 * updates (direct writes into physmem) do not fire mmu_notifier.
 	 */
+	sigdelset(&set, os_ipi_signum());
+#endif
 	memcpy(mask.sigset, &set, sizeof(sigset_t));
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SIGNAL_MASK,
@@ -774,10 +789,49 @@ static int kvm_v2_install_signal_mask(int vcpu_fd)
 		       vcpu_fd, rc);
 		return rc;
 	}
-	pr_info("um: kvm-v2 install_sigmask: vcpu_fd=%d (sigfillset minus SIGALRM)\n",
-		vcpu_fd);
+	pr_info("um: kvm-v2 install_sigmask: vcpu_fd=%d (sigfillset minus SIGALRM%s)\n",
+		vcpu_fd,
+		IS_ENABLED(CONFIG_SMP) ? ", IPI_SIGNAL" : "");
 	trace_um_backend_kvm_v2_sigmask_install(vcpu_fd);
 	return 0;
+}
+
+/*
+ * Phase G.2 cross-vCPU guest-TLB kick (2026-05-01). Called from
+ * um_tlb_sync after a successful drain so all OTHER UML CPUs
+ * dispatch ASAP and toggle CR4.PGE on their next vcpu_run, flushing
+ * their guest TLBs.
+ *
+ * Mechanism: pthread_sigqueue(IPI_SIGNAL) via os_send_ipi to each
+ * remote cpu_thread. With IPI_SIGNAL unblocked in the KVM signal
+ * mask (kvm_v2_install_signal_mask above, SMP-only), the signal
+ * interrupts KVM_RUN with -EINTR; the EINTR returns through the
+ * existing path at kvm_v2_vcpu_run line ~1599 and the next
+ * dispatch's CR4.PGE toggle does the actual local flush.
+ *
+ * Vector UML_IPI_RES (= 0, "reschedule") is repurposed — the
+ * uml_ipi_handler's scheduler_ipi() is harmless when there's
+ * nothing to schedule; we only need the EINTR side-effect.
+ *
+ * mm parameter is currently unused (we kick all online CPUs); a
+ * future optimization could narrow to mm_cpumask once UML
+ * populates it.
+ */
+void kvm_v2_tlb_kick_others(struct mm_struct *mm)
+{
+#if IS_ENABLED(CONFIG_SMP)
+	int my_cpu, cpu;
+
+	(void)mm;
+	my_cpu = raw_smp_processor_id();
+	for_each_online_cpu(cpu) {
+		if (cpu == my_cpu)
+			continue;
+		(void)os_send_ipi(cpu, 0 /* UML_IPI_RES */);
+	}
+#else
+	(void)mm;
+#endif
 }
 
 /*

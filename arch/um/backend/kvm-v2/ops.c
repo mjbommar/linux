@@ -127,11 +127,12 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.context_switch		= kvm_v2_context_switch,	/* HOT — D.3 */
 	.ipi_send		= seccomp_ipi_send,
 	/*
-	 * Cross-vCPU TLB kick (Phase G.2). Wired in commit B; commit A
-	 * leaves NULL so the contract validator + um_tlb_sync paths
-	 * are exercised on the type-only change first.
+	 * Cross-vCPU TLB kick (Phase G.2): pthread_sigqueue IPI_SIGNAL
+	 * to all OTHER UML CPUs after um_tlb_sync so they exit KVM_RUN
+	 * with -EINTR and the next dispatch's CR4.PGE toggle flushes
+	 * their guest TLBs.
 	 */
-	.tlb_kick_others	= NULL,
+	.tlb_kick_others	= kvm_v2_tlb_kick_others,
 
 	/* Time (3) — Phase F */
 	.read_clock_ns		= seccomp_read_clock_ns,	/* HOT */

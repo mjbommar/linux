@@ -96,6 +96,11 @@ int os_send_ipi(int cpu, int vector)
 	return pthread_sigqueue(cpu_threads[cpu], IPI_SIGNAL, value);
 }
 
+int os_ipi_signum(void)
+{
+	return IPI_SIGNAL;
+}
+
 static void __local_ipi_set(int enable)
 {
 	sigset_t sigset;

@@ -388,6 +388,13 @@ void os_start_secondary(void *arg, jmp_buf *switch_buf);
 int os_send_ipi(int cpu, int vector);
 void os_local_ipi_enable(void);
 void os_local_ipi_disable(void);
+/*
+ * IPI signal number used by os_send_ipi (= SIGRTMIN, mirrored from
+ * arch/um/os-Linux/internal.h). Exposed in shared/ so kernel-side
+ * code (e.g. kvm-v2's KVM_SET_SIGNAL_MASK) can sigdelset() it
+ * without crossing the kernel/OS header boundary.
+ */
+int os_ipi_signum(void);
 #else /* !CONFIG_SMP */
 static inline void os_local_ipi_enable(void) { }
 static inline void os_local_ipi_disable(void) { }

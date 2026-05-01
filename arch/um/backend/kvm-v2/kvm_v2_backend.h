@@ -506,6 +506,16 @@ void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu);
 void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu);
 
 /*
+ * Phase G.2 cross-vCPU guest-TLB kick. Called from
+ * arch/um/kernel/tlb.c::um_tlb_sync after a successful drain.
+ * Iterates online CPUs (excluding self) and pthread_sigqueue's
+ * IPI_SIGNAL via os_send_ipi so each remote vCPU's KVM_RUN exits
+ * with -EINTR; the next dispatch's CR4.PGE toggle flushes the
+ * local guest TLB. SMP-only (no-op under CONFIG_SMP=n).
+ */
+void kvm_v2_tlb_kick_others(struct mm_struct *mm);
+
+/*
  * #121-D15 SMP follow-up (2026-05-01): handle a #PF inline during
  * the EINTR path when the EINTR caught the vCPU mid-IDT-delivery
  * (RIP=stub-start, IDT frame freshly pushed to current vCPU's IST
