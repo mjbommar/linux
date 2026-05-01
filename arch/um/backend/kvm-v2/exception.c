@@ -212,8 +212,14 @@
  */
 static const u8 kvm_v2_handler_stub_pf[]    = {
 	0x50,					/* push %rax */
+	/* DIAG #121 sentinel: write 0xffffffffffffffff to ist_top-80 first
+	 * so we can distinguish "stub never ran (slot is stale)" from
+	 * "stub ran and captured CR2=0". */
+	0x48, 0xc7, 0x44, 0x24, 0xe8, 0xff, 0xff, 0xff, 0xff,
+						/* movq $-1, -24(%rsp) ; sentinel -> ist_top-80 */
 	0x0f, 0x20, 0xd0,			/* mov %cr2, %rax */
-	0x48, 0x89, 0x44, 0x24, 0xf8,		/* mov %rax, -8(%rsp) */
+	0x48, 0x89, 0x44, 0x24, 0xf8,		/* mov %rax, -8(%rsp)   ; CR2 -> ist_top-64 */
+	0x48, 0x89, 0x54, 0x24, 0xf0,		/* mov %rdx, -16(%rsp)  ; RDX -> ist_top-72 (DIAG #121) */
 	0x58,					/* pop %rax */
 	0xe6, UM_KVM_TRAP_PF,			/* out %al, $port */
 	0x48, 0x83, 0xc4, 0x08,			/* add $8, %rsp */
@@ -343,7 +349,7 @@ static void kvm_v2_idt_set_gate(void *idt_page, unsigned int vector,
  * (zero from __GFP_ZERO — dead code, never executed because iretq
  * exits before reaching them).
  */
-#define KVM_V2_HANDLER_SLOT_STRIDE	32
+#define KVM_V2_HANDLER_SLOT_STRIDE	64
 
 static void kvm_v2_populate_handlers(void *handlers_kva)
 {

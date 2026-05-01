@@ -1001,19 +1001,45 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 	{
 		u64 captured_cr2 = *(u64 *)((u8 *)vcpu->ist_stack_kva +
 					    PAGE_SIZE - 64);
-		/*
-		 * If sregs.cr2 was lost between vmexit and store_regs (rare
-		 * race), the captured value from the stub is authoritative.
-		 * Empirically (#121 investigation 2026-05-01) both values
-		 * are 0 in the failing case — CR2 was already 0 by the time
-		 * the IDT[14] stub ran, suggesting the fault delivered to
-		 * IDT[14] was actually at address 0 (not at the user's mov
-		 * target). The fallback below is harmless when captured is
-		 * also 0; but covers a future case where KVM's post-exit sync
-		 * loses CR2 while the in-guest stub captured it correctly.
-		 */
+		u64 captured_rdx = *(u64 *)((u8 *)vcpu->ist_stack_kva +
+					    PAGE_SIZE - 72);
+		u64 sentinel = *(u64 *)((u8 *)vcpu->ist_stack_kva +
+					PAGE_SIZE - 80);
+		static int diag_seen;
+		if (cr2 == 0 && !memcmp(current->comm, "mt-", 3) &&
+		    diag_seen < 30) {
+			diag_seen++;
+			pr_emerg("um: kvm-v2 #PF[%d] cr2=0 captured=%llx stub_rdx=%llx regs_rdx=%lx sentinel=%llx err=%llx user_rip=%llx pid=%d\n",
+				 diag_seen,
+				 (unsigned long long)captured_cr2,
+				 (unsigned long long)captured_rdx,
+				 regs->gp[HOST_DX],
+				 (unsigned long long)sentinel,
+				 (unsigned long long)frame.error_code,
+				 (unsigned long long)frame.user_rip,
+				 current->pid);
+		}
 		if (cr2 == 0 && captured_cr2 != 0)
 			cr2 = captured_cr2;
+		/*
+		 * #121 defense (2026-05-01): when CR2 is genuinely 0 (sentinel
+		 * proved in-stub captured CR2 register reads as 0 — see
+		 * commit f74a05655b40), the fault address is lost. For data
+		 * write faults (err bit 1 = W) where the user's RDX register
+		 * holds a plausible user-space pointer, prefer RDX as the
+		 * fault address. Common case: slow_memset's mov %al, (%rdx)
+		 * where the CPU's CR2 update was somehow lost between fault
+		 * delivery and the in-guest stub running. Heuristic — only
+		 * applies when:
+		 *   - cr2 still 0 after captured fallback above
+		 *   - error_code bit 1 (W) is set (write fault)
+		 *   - captured_rdx points into typical user-space range
+		 *     (>0x10000 to skip null/low addresses)
+		 */
+		if (cr2 == 0 && (frame.error_code & 0x2) &&
+		    captured_rdx > 0x10000) {
+			cr2 = captured_rdx;
+		}
 	}
 
 	/*
