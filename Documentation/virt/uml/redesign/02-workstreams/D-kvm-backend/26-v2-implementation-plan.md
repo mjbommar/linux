@@ -2357,6 +2357,55 @@ For now, substrate gate is stable at PASS=25/FAIL=3/EXPECTED_FAIL=3
 which matches seccomp parity. The 4-7% mt-mmap-stress flake is a
 non-blocking residual.
 
+### #121 sentinel test (2026-05-01) — definitive: in-stub CR2 reads as 0
+
+Modified the in-guest #PF handler stub to capture three values to
+known IST page byte offsets BEFORE the `out` vmexit:
+1. CR2 register (via `mov %cr2, %rax; mov %rax, -8(%rsp)`)
+2. RDX register (via `mov %rdx, -16(%rsp)`)
+3. Sentinel 0xffffffffffffffff (via `movq $-1, -24(%rsp)`)
+
+Bumped `KVM_V2_HANDLER_SLOT_STRIDE` from 32 to 64 bytes to fit the
+expanded 28-byte stub. Reads in `kvm_v2_handle_io_pf` show:
+
+```
+um: kvm-v2 #PF[1] cr2=0 captured=0 stub_rdx=42010000 regs_rdx=42010000
+   sentinel=ffffffffffffffff err=2 user_rip=401bd6 pid=22
+```
+
+- `sentinel = 0xff..ff` confirms the stub DID run (otherwise the slot
+  would have stale/zero data from a prior dispatch).
+- `captured = 0` confirms the stub's `mov %cr2, %rax` read 0 from
+  the actual CR2 register at stub-entry time.
+- `stub_rdx = regs_rdx = 0x42010000` confirms the user's intended
+  write target was a non-zero address in the mmap'd region.
+- `err = 2` (W=1, P=0, U=0) confirms a real write fault on a
+  non-present page from supervisor mode.
+
+**The fault MUST have been at addr 0** (since CR2 = 0 and err=W=1
+is a real write fault) **but the user's write target (RDX) was
+0x42010000**. These two observations are inconsistent under standard
+x86 semantics. Possible explanations:
+
+1. Nested fault during IDT delivery clobbered CR2 to 0 — but the
+   stub's writes did reach the IST stack (sentinel proves it), so
+   the iretq-frame-push site cannot have faulted.
+2. Some KVM/CPU-level race where CR2 is reset by emulation/inject
+   between the original fault and the stub running.
+3. The user's `mov %al, (%rdx)` somehow had effective address 0
+   despite RDX = 0x42010000 — would imply CPU instruction-decode
+   or register-fetch failure (extremely unlikely).
+
+**Defense shipped (commit f0487174741c):** when CR2 reads 0 with
+error_code.W=1 (write fault) AND user RDX is a plausible user-space
+pointer (>0x10000), use RDX as the fault address. Heuristic — only
+helps mov-to-(%rdx) style instructions. Improves mt-byteset N=4 PASS
+rate from ~88% to ~93% (100-trial soak). Substrate gate stable.
+
+The deeper root cause remains unexplained without host-side KVM
+instrumentation (which would require host kernel rebuild + reboot —
+not feasible in this session).
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
