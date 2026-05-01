@@ -506,6 +506,27 @@ void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu);
 void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu);
 
 /*
+ * #121-D15 SMP follow-up (2026-05-01): handle a #PF inline during
+ * the EINTR path when the EINTR caught the vCPU mid-IDT-delivery
+ * (RIP=stub-start, IDT frame freshly pushed to current vCPU's IST
+ * stack). Instead of letting the stub re-run on next dispatch
+ * (which under SMP can land on a DIFFERENT vCPU with a different
+ * IST page, leaving the saved RSP pointing at the wrong page),
+ * process the PF directly: read the IDT frame from THIS vCPU's
+ * IST (it's still fresh — caller is preempt-disabled), set regs
+ * from frame + cr2, dispatch segv_handler + interrupt_end,
+ * snapshot the post-handler IST frame for next dispatch's iretq,
+ * marshal regs back so the next KVM_RUN starts at user_rip
+ * directly (skipping the stub).
+ *
+ * Returns 0 always; signature mirrors kvm_v2_handle_io_pf.
+ */
+int kvm_v2_handle_pf_eintr_inline(struct uml_pt_regs *regs,
+				  struct kvm_run *run,
+				  struct kvm_v2_vcpu *vcpu,
+				  u64 cr2);
+
+/*
  * Phase D.3: per-task FPU capture on context-switch-out + the
  * .context_switch op wrapper that invokes it before delegating to
  * seccomp_context_switch. Defined in vcpu.c (alongside the C.4

@@ -1630,19 +1630,47 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				 * arch_thread.kvm_v2.saved_cr2_at_eintr comment
 				 * for the full mechanism.
 				 */
-				if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA &&
-				    eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x200) {
+				/*
+				 * #121-D15 SMP fix (2026-05-01): if EINTR
+				 * caught us mid-IDT-delivery for a #PF (stub
+				 * is at slot 5 = HANDLERS_GVA + 0x140; stride
+				 * 64 bytes so the in-stub PC is in
+				 * [HANDLERS_GVA+0x140, +0x180)), process the
+				 * PF inline NOW — while we're guaranteed to be
+				 * preempt-disabled on the same vCPU whose IST
+				 * stack holds the freshly-pushed IDT frame and
+				 * whose VMCB.save.cr2 was just snapshotted into
+				 * eintr_sregs.cr2. Bypassing the stub avoids
+				 * the cross-vCPU RSP/IST headache that the
+				 * original snapshot-and-replay approach had
+				 * under SMP (the saved RSP pointed at the
+				 * vmexit-vCPU's IST page, but on the next
+				 * dispatch the task could land on a different
+				 * vCPU with a different IST page).
+				 *
+				 * For other handler stubs (DE/BP/OF/UD/GP/NM),
+				 * fall back to the snapshot/replay path — those
+				 * are uncommon in practice (mt-byteset only
+				 * trips PF) and the snapshot still gives
+				 * correct contents on the next dispatch's IST
+				 * stack; the RSP-points-at-old-vCPU concern is
+				 * theoretical until a workload demonstrates a
+				 * mid-stub EINTR on those vectors.
+				 */
+				if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA + 0x140 &&
+				    eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x180) {
+					/* Re-marshal regs from eintr snapshot
+					 * so the inline handler sees consistent
+					 * GP register state (gp[HOST_DX] etc.
+					 * for the segv_handler dispatch).
+					 */
+					(void)kvm_v2_handle_pf_eintr_inline(regs, run, vcpu,
+									    eintr_sregs.cr2);
+				} else if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA &&
+					   eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x200) {
 					struct arch_thread *a = &current->thread.arch;
 					a->kvm_v2.saved_cr2_at_eintr = eintr_sregs.cr2;
 					a->kvm_v2.saved_cr2_valid = true;
-					/*
-					 * Snapshot the IDT frame from IST stack
-					 * so another task running on the same
-					 * vCPU can't clobber it. Sets
-					 * ist_pending=true so the next dispatch's
-					 * kvm_v2_ist_frame_restore_pending() puts
-					 * our frame back before VMRUN.
-					 */
 					kvm_v2_ist_frame_snapshot_raw(vcpu);
 				}
 				trace_um_backend_kvm_v2_vcpu_eintr(cpu);

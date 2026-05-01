@@ -979,6 +979,58 @@ void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu)
 }
 
 /*
+ * #121-D15 SMP follow-up: PF dispatch from the EINTR path when
+ * EINTR caught us mid-IDT-delivery (CPU pushed the IDT frame and
+ * set RIP=stub_start, but the stub's first instruction never ran).
+ * Process the PF here directly so the stub never re-runs — the
+ * stub-replay path that the bare cr2-snapshot/IST-snapshot pair
+ * sets up is fragile under SMP because the saved RSP points at the
+ * vCPU we EINTR'd from, but on the next dispatch the task may
+ * resume on a DIFFERENT vCPU with a different IST page (each vCPU
+ * has its own IST GVA). Bypassing the stub avoids the cross-vCPU
+ * RSP fixup entirely.
+ *
+ * Caller MUST be preempt-disabled (and is — kvm_v2_vcpu_run
+ * preempt_disables before KVM_RUN, doesn't preempt_enable until
+ * after this returns) so the IDT frame on `vcpu->ist_stack_kva` is
+ * still ours. cr2 is passed in (read from eintr_sregs.cr2 by the
+ * caller; the run->s.regs.sregs.cr2 mmap may have been overwritten
+ * by another task between EINTR and our dispatch, so we can't read
+ * it here).
+ */
+int kvm_v2_handle_pf_eintr_inline(struct uml_pt_regs *regs,
+				  struct kvm_run *run,
+				  struct kvm_v2_vcpu *vcpu,
+				  u64 cr2)
+{
+	struct kvm_v2_ist_frame frame;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, true /* has_error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	regs->faultinfo.error_code = (int)frame.error_code;
+	regs->faultinfo.cr2        = cr2;
+	regs->faultinfo.trap_no    = 14;
+
+	trace_um_backend_kvm_v2_iotrap_pf(cr2,
+					  frame.error_code,
+					  frame.user_rip);
+
+	segv_handler(SIGSEGV, NULL, regs, NULL);
+	interrupt_end();
+
+	kvm_v2_ist_frame_write(vcpu, regs, true /* has_error_code */);
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
  * #PF (vector 14): page-fault dispatcher. CR2 from sync-regs sregs;
  * error_code + user RIP/RSP/RFLAGS from the IST frame. Dispatches
  * via UML's segv_handler (arch/um/kernel/trap.c:292) — same path the
