@@ -249,6 +249,27 @@ static const u8 kvm_v2_handler_stub_panic[] = { 0xe6, UM_KVM_TRAP_PANIC, 0x48, 0
 static const u8 kvm_v2_handler_stub_bp[]    = { 0xe6, UM_KVM_TRAP_PANIC, 0x48, 0xcf };
 
 /*
+ * Phase H.2: #NM (vec 7, "device not available") handler stub. Fired
+ * when guest executes an FP/SSE/AVX instruction with CR0.TS=1. Acts
+ * fully in-guest at CPL=0:
+ *
+ *   0f 06           clts        ; clear CR0.TS (privileged at CPL=0)
+ *   48 cf           iretq       ; resume user
+ *
+ * No host vmexit. Side effect: guest CR0.TS is now 0 (FPU usable).
+ *
+ * The host detects "FPU was used during this dispatch" by reading
+ * sregs.cr0.TS after the next vmexit: TS=0 means #NM fired, TS=1
+ * means no FPU instruction executed. See vcpu.c kvm_v2_vcpu_run for
+ * the optimization path that skips KVM_GET_FPU when TS stays set.
+ *
+ * v1 archive precedent: kvm-v1-archive lazy-FPU model used a similar
+ * CR0.TS / #NM trampoline (thread.c around the FPU save/restore comments).
+ * v2 simplifies via SYNC_REGS: no out-to-host on #NM, just clts+iretq.
+ */
+static const u8 kvm_v2_handler_stub_nm[]    = { 0x0f, 0x06, 0x48, 0xcf };
+
+/*
  * GDT entries (long-mode, 8 bytes each — except TSS which is 16 bytes
  * spanning slots 6+7). Bytes lifted verbatim from v1's
  * kvm_setup_harness_gdt at kvm-v1-archive/sregs.c:102-138; per-bit
@@ -369,6 +390,8 @@ static void kvm_v2_populate_handlers(void *handlers_kva)
 	       kvm_v2_handler_stub_pf,    sizeof(kvm_v2_handler_stub_pf));
 	memcpy(base + KVM_V2_HANDLER_SLOT_PANIC * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_panic, sizeof(kvm_v2_handler_stub_panic));
+	memcpy(base + KVM_V2_HANDLER_SLOT_NM    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_nm,    sizeof(kvm_v2_handler_stub_nm));
 }
 
 static void kvm_v2_populate_gdt(void *gdt_kva)
@@ -435,6 +458,13 @@ static void kvm_v2_populate_idt(void *idt_kva)
 		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_GP * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 	kvm_v2_idt_set_gate(idt_kva, 14,
 		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_PF * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	/*
+	 * Phase H.2: #NM (vec 7) — DPL=0 (involuntary). Stub does
+	 * `clts; iretq` fully in-guest; no host vmexit. CR0.TS=0 after
+	 * the stub allows the guest to retry the FP instruction.
+	 */
+	kvm_v2_idt_set_gate(idt_kva, 7,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_NM * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 }
 
 /*

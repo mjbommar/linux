@@ -159,6 +159,7 @@ enum um_kvm_iotrap {
 #define KVM_V2_HANDLER_SLOT_GP		4	/* #GP (vec 13) */
 #define KVM_V2_HANDLER_SLOT_PF		5	/* #PF (vec 14) */
 #define KVM_V2_HANDLER_SLOT_PANIC	6	/* fallback for any other vector */
+#define KVM_V2_HANDLER_SLOT_NM		7	/* #NM (vec 7) — Phase H.2 lazy FPU */
 
 /*
  * Phase E.2: per-vCPU IST stack + TSS pages. Per memo 26 §E.2 each
