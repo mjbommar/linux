@@ -44,6 +44,13 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	.thread_start_idle	= seccomp_thread_start_idle,
 	.context_switch		= seccomp_context_switch,	/* HOT */
 	.ipi_send		= seccomp_ipi_send,
+	/*
+	 * Cross-vCPU TLB kick: NULL for seccomp. The seccomp stub-child
+	 * model already cross-CPU-flushes via host mmu_notifier on the
+	 * real munmap that mm_region_removed issues — no extra kick
+	 * needed. um_tlb_sync NULL-checks before calling.
+	 */
+	.tlb_kick_others	= NULL,
 
 	/* Time (3) */
 	.read_clock_ns		= seccomp_read_clock_ns,	/* HOT */

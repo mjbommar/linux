@@ -52,7 +52,7 @@ struct um_memory_region;
  * validate_hot_ops() in arch/um/kernel/backend.c. See
  * Documentation/virt/uml/backend-contract.rst.
  */
-#define UM_BACKEND_CONTRACT_VERSION  1u
+#define UM_BACKEND_CONTRACT_VERSION  2u
 
 enum um_backend_kind {
 	UM_BACKEND_KIND_NONE = 0,
@@ -213,6 +213,16 @@ struct um_backend_ops {
 	void (*context_switch)(struct task_struct *prev,	/* HOT */
 			       struct task_struct *next);
 	int  (*ipi_send)(int cpu, int vector);
+
+	/*
+	 * Optional cross-vCPU TLB-flush kick. Called from um_tlb_sync
+	 * after a successful drain. Backends with per-vCPU guest TLBs
+	 * (kvm-v2) must wake all OTHER UML CPUs so they dispatch and
+	 * flush their guest TLBs. seccomp leaves this NULL — its host
+	 * mm operations already kick all CPUs via mmu_notifier. Marked
+	 * may-be-NULL; um_tlb_sync NULL-checks before calling.
+	 */
+	void (*tlb_kick_others)(struct mm_struct *mm);
 
 	/* Time (3) */
 	u64  (*read_clock_ns)(void);				/* HOT */

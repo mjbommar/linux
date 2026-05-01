@@ -126,6 +126,12 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.thread_start_idle	= seccomp_thread_start_idle,
 	.context_switch		= kvm_v2_context_switch,	/* HOT — D.3 */
 	.ipi_send		= seccomp_ipi_send,
+	/*
+	 * Cross-vCPU TLB kick (Phase G.2). Wired in commit B; commit A
+	 * leaves NULL so the contract validator + um_tlb_sync paths
+	 * are exercised on the type-only change first.
+	 */
+	.tlb_kick_others	= NULL,
 
 	/* Time (3) — Phase F */
 	.read_clock_ns		= seccomp_read_clock_ns,	/* HOT */
