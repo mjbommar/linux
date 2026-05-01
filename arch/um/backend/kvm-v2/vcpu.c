@@ -1462,6 +1462,21 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	kvm_v2_ist_frame_restore_pending(vcpu);
 
 	/*
+	 * Memo §H.1b SMOKING-GUN fix (2026-04-30): restore the FPU
+	 * snapshot taken IMMEDIATELY after the previous KVM_RUN exit.
+	 * Pairs with the KVM_GET_FPU below at line ~1474. Without this,
+	 * XMM/x87 state set by guest user code is clobbered with kernel-
+	 * struct data while host code runs between dispatches —
+	 * mt-xmmprobe.c captures `02020202...` → `16000000ffffffff
+	 * 0000000000000000` drift directly.
+	 */
+	if (current->thread.arch.kvm_v2.iotrap_fpu_valid) {
+		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
+				       (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+		current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
+	}
+
+	/*
 	 * C.3: write GPRs into the mmap'd kvm_run->s.regs.regs and mark
 	 * KVM_SYNC_X86_REGS in kvm_dirty_regs. KVM consumes both
 	 * (kvm_dirty_regs and the dirty s.regs fields) on entry.
@@ -1472,6 +1487,28 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	trace_um_backend_kvm_v2_vcpu_enter(cpu, run);
 
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+
+	/*
+	 * Memo §H.1b H.1b SMOKING-GUN fix (2026-04-30): KVM_GET_FPU
+	 * IMMEDIATELY after KVM_RUN exits, before any host-kernel code
+	 * could touch FPU/XMM and clobber the guest's state.
+	 *
+	 * mt-xmmprobe.c proved XMM0 is corrupted across the #PF cycle:
+	 * pattern in XMM0 changes from `02020202...02` to `16000000ffff
+	 * ffff0000000000000000` between fault and resume. The corruption
+	 * pattern matches kernel-struct slab data — host kernel running
+	 * KVM's exit-handling code is using FPU/XMM and KVM's auto-save
+	 * is missing on the fast-path KVM_EXIT_IO.
+	 *
+	 * Capture FPU here. Restore via KVM_SET_FPU just before the next
+	 * KVM_RUN entry (after exit handling completes). This bypasses
+	 * KVM's broken auto-save by doing it manually at the right time.
+	 */
+	{
+		int fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+					      (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+		current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
+	}
 
 	/*
 	 * SNAPSHOT the kvm_run mmap state IMMEDIATELY after KVM_RUN

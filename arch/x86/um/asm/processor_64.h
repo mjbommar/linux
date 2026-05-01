@@ -58,6 +58,23 @@ struct arch_thread {
 		 */
 		u64 ist_frame[6];
 		bool ist_pending;
+
+		/*
+		 * Memo §H.1b SMOKING-GUN fix (2026-04-30): per-task
+		 * snapshot of FPU state captured IMMEDIATELY after
+		 * KVM_RUN exits, restored IMMEDIATELY before next
+		 * KVM_RUN entry. Bypasses KVM's broken auto-save on
+		 * fast-path KVM_EXIT_IO that lets host kernel-mode
+		 * code clobber XMM/x87 between exit and re-entry.
+		 *
+		 * mt-xmmprobe.c proved: without this, XMM0 changes
+		 * from `02020202...02` (user's splat) to `16000000ff
+		 * ffffff0000000000000000` (kernel struct data) across
+		 * a #PF cycle — exact same pattern as the residual
+		 * mt-mmap-stress page corruption.
+		 */
+		struct kvm_fpu iotrap_fpu;
+		bool iotrap_fpu_valid;
 	} kvm_v2;
 #endif
 };
