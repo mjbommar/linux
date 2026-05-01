@@ -2541,6 +2541,84 @@ root cause cannot be pinpointed in this session. The defensive
 heuristic (RDX-fallback for cr2=0 + W=1 + plausible RDX) shipped at
 `f0487174741c` mitigates 95% of the impact at N=4.
 
+### #121-D15 ROOT CAUSE CONFIRMED + CLOSED (2026-05-01)
+
+**Smoking gun.** A bpftrace probe on `vcpu_enter_guest`, capturing
+`vcpu->arch.regs[VCPU_REGS_RIP]` in the buggy `cr2=0 port=0xf6`
+cases, reproducibly showed `entry_rip=0xffffe00000002140` — the
+PF stub start address. UML was entering KVM_RUN with RIP already
+pointing at the stub, NOT at user code. Then we added a UML-side
+printk after `kvm_v2_marshal_to_kvm_regs` to log when the marshaled
+RIP was in the HANDLERS region, and within 20 mt-byteset N=4 trials
+caught:
+
+```
+um: kvm-v2 D15 entry rip=ffffe00000002140 ... gp_ip=ffffe00000002140
+gp_sp=ffffe00000004fd0 gp_dx=42012000 gp_cx=2 is_user=1
+```
+
+`gp_sp = 0xffffe00000004fd0 = IST_top - 48` — exactly the RSP value
+the CPU leaves after pushing the 48-byte IDT frame. So the
+**eintr_regs snapshot was captured at the moment between hardware
+IDT delivery (CPU pushed user_rip/cs/rflags/rsp/ss/error_code, set
+RIP=stub_start) and the in-guest stub's first `push %rax`** — a
+narrow window when SIGALRM-driven EINTR vmexits the vCPU.
+
+**Mechanism** (compounded race, two independent failure modes
+inside the EINTR-mid-IDT-delivery window):
+
+1. **CR2 wipeout.** The next dispatch's `kvm_v2_load_user_sregs()`
+   writes `sregs->cr2 = 0` with `KVM_SYNC_X86_SREGS` dirty. KVM
+   propagates that to `vcpu->arch.cr2` → `VMCB.save.cr2 = 0` →
+   hardware CR2 register = 0 on next VMRUN. When the resumed stub
+   executes `mov %cr2, %rax`, RAX = 0. Stub captures 0 to the
+   IST page slot. `out %al, $0xf6` vmexits; `handle_io_pf` reads
+   `sregs.cr2 = 0` AND `captured_cr2 = 0`.
+2. **IST frame clobber.** The hardware-pushed IDT frame on the IST
+   stack sits unprotected. Another UML task running on the same
+   per-host-CPU vCPU before this task resumes can deliver its own
+   #PF, push its own IDT frame to the SAME IST stack — overwriting
+   the original task's `user_rip/cs/rflags/rsp` slot. On resume,
+   the stub captures CR2 (now 0) and OUTs; `handle_io_pf` reads
+   the IST frame which now belongs to the OTHER task. The original
+   task's `regs->gp[HOST_IP]` becomes the other task's `user_rip`,
+   and the user task resumes at the wrong code address — observed
+   as `mt-byteset[N]: segfault at 0x10000` (slow_memset hit
+   garbage RDX) or `segfault at 0x55000000a481` (instruction-fetch
+   to a stale CS:RIP).
+
+**Fix** (commit landed 2026-05-01):
+
+- New per-task fields in `arch/x86/um/asm/processor_64.h`'s
+  `arch_thread.kvm_v2`: `saved_cr2_at_eintr` + `saved_cr2_valid`.
+- In the `EINTR` path of `kvm_v2_vcpu_run` (vcpu.c), when
+  `eintr_regs.rip` is in `[KVM_V2_HANDLERS_GVA,
+  KVM_V2_HANDLERS_GVA + 0x200)`:
+  1. Save `eintr_sregs.cr2` to `saved_cr2_at_eintr`.
+  2. Call new helper `kvm_v2_ist_frame_snapshot_raw(vcpu)` (in
+     syscall_trap.c, declared in kvm_v2_backend.h) which copies the
+     6-qword IDT frame from the IST stack into per-task
+     `ist_frame[0..5]` and sets `ist_pending=true`.
+- In `kvm_v2_load_user_sregs()` (vcpu.c): if `saved_cr2_valid`,
+  restore `sregs->cr2 = saved_cr2_at_eintr` and clear the flag;
+  otherwise zero as before.
+- The existing `kvm_v2_ist_frame_restore_pending()` (already called
+  before `KVM_RUN` entry) handles the IST stack restore, so the
+  resumed stub finds the original task's IDT frame intact.
+
+**Result.** mt-byteset N=4: 200/200 PASS (previously 92-96%
+PASS, ~5-12% flake). Substrate gate stable PASS=25/FAIL=3/
+EXPECTED_FAIL=3 (matches seccomp). 23 D15-SAVE events captured in
+soak instrumentation confirm the bug-prone path fires at expected
+frequency and is now correctly recovered.
+
+The cross-task IST clobber was the LATENT bug already known from
+the H.1b InterpreterPool subinterp investigation that introduced
+`ist_pending` snapshot/restore in handle_io_pf at end-of-handler;
+D15 reveals there's a SECOND entry point into "frame on IST stack
+that needs preservation" (the EINTR-mid-IDT-delivery window) that
+the original snapshot point didn't cover.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
