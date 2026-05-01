@@ -2091,6 +2091,60 @@ via memset since the kernel's static binaries don't). User-mode
 binaries that use AVX heavily would expose this — Phase J validation
 should catch this in cpython-parity full-suite runs.
 
+### H.1b residual cont 3 (2026-04-30): DEFINITIVE proof of XMM corruption
+
+Wrote `tools/testing/selftests/um/mt-mmap-stress/mt-xmmprobe.c`
+which loads XMM0 with a known pattern, triggers 16 #PFs by writing
+across page boundaries via `movdqu xmm0`, then reads XMM0 back to
+memory and compares.
+
+Captured failures:
+```
+FAIL T2 iter18 XMM_DRIFT before=02020202020202020202020202020202
+                          after=16000000ffffffff0000000000000000
+
+FAIL T1 iter42 XMM_DRIFT before=01010101010101010101010101010101
+                          after=00000000000000000000000000000000
+```
+
+The "after" pattern in T2's case (`16 00 00 00 ff ff ff ff 00 00 00
+00 00 00 00 00`) is **THE EXACT SAME PATTERN** that appears in the
+corrupted user pages in mt-mmap-stress failures (`16 00 00 00 ff
+ff ff ff` repeating every 16 bytes). T1's case is all zeros.
+
+This proves: when the GUEST CPU re-executes `movdqu xmm0, [user_va]`
+after #PF, **XMM0 has been clobbered with kernel-struct data (or
+zeros) instead of preserving the splat'd byte value**. The user
+page receives whatever XMM0 has post-fault, which is kernel data —
+matching the corruption pattern observed in the original
+mt-mmap-stress C reproducer.
+
+The corruption is NOT in user memory — it's in the GUEST CPU's
+XMM register state. KVM is not properly preserving XMM/FPU across
+KVM_EXIT_IO → userspace processing → KVM_RUN re-entry under v2's
+dispatch flow.
+
+**Why direct KVM_GET_FPU/SET_FPU made things WORSE (40% PASS):**
+KVM's vcpu->arch.guest_fpu may be stale at the time of GET (KVM
+might not save FPU on the fast-path KVM_EXIT_IO from the in-guest
+`out` instruction). Saving stale state and restoring it overwrites
+the still-correct hardware FPU.
+
+**Likely fix path (NOT yet attempted):** force KVM to save FPU on
+exit and restore on entry. Possible mechanisms:
+- KVM_CAP_X86_USER_SPACE_FPU enablement (if exists)
+- Explicit `kernel_fpu_begin/end` around `os_ioctl_generic(KVM_RUN)`
+- Use VCPU events / KVM_GUESTDBG to force "deep" exit semantics
+- Manually save FPU into per-task arch_thread on every IO trap and
+  restore on next dispatch (heavy but local fix)
+
+Alternative: investigate whether v2's vcpu_create properly enables
+CR0.MP/NE and CR4.OSFXSR/OSXMMEXCPT for the per-host-CPU pool members
+(boot vCPU has these set at vcpu.c:519, but pool members may not).
+
+Reproducer: `tools/testing/selftests/um/mt-mmap-stress/mt-xmmprobe.c`
+shipped at this commit.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
