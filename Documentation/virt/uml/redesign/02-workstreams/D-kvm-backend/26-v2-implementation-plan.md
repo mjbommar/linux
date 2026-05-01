@@ -2430,6 +2430,34 @@ Likely candidates (from v1 experience):
   list walk on every fault.
 - Sync regs (Phase C.3 already did this).
 
+### H.2 — CR0.TS lazy FPU SHIPPED 2026-05-01 (ba9c83331f30)
+
+Arms CR0.TS=1 every dispatch; in-guest IDT[7] #NM stub does
+`clts; iretq` (4 bytes, no host vmexit). After vmexit, host reads
+sregs.cr0.TS:
+- TS=1 → guest didn't touch FPU → skip KVM_GET_FPU
+- TS=0 → guest used FPU → KVM_GET_FPU as before
+
+Skip rate measured on mt-byteset N=4 (4000 dispatches):
+- 1000 dispatches: 81% skipped
+- 2000 dispatches: 90% skipped
+- 3000 dispatches: 93% skipped
+- 4000 dispatches: 95% skipped
+
+Most syscalls (mmap/read/write/munmap) and #PF dispatches don't use
+FPU; only specific FP/SIMD code paths trigger #NM. The cost saving
+is ~1 ioctl per non-FPU dispatch (~95% of dispatches in syscall-heavy
+workloads).
+
+Validation:
+- Substrate gate: 25/3/3 (unchanged)
+- mt-xmmprobe N=3 (15 trials): 15/15 PASS — FPU correctness intact
+- mt-byteset N=4 (50 trials): 50/50 PASS — also stability win
+
+KVM_SET_FPU side unchanged: still always-SET when iotrap_fpu_valid.
+Future H.2.1 could gate SET on per-task "owns vcpu->arch.guest_fpu"
+flag (skip if no other task ran on this vCPU since last SET).
+
 ### H.3 — Target validation (2 days)
 
 - Re-run gate, confirm ≤ 1.2× seccomp wall-clock.
