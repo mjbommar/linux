@@ -1767,19 +1767,43 @@ v2 bump), v2 impl that pthread_sigqueue's IPI_SIGNAL via
 os_send_ipi to all other UML CPUs, and unblocks IPI_SIGNAL in v2's
 KVM_SET_SIGNAL_MASK so the IPI actually interrupts KVM_RUN.
 
-**Phase G.2 commit C DEFERRED**: empirical activation (calling
-tlb_kick_others from um_tlb_sync after a successful drain)
-regressed T=4/ncpus=4 from 196/200 (98%) → 18/60 (30%) on
-mt-byteset. Hypothesis: IPI storm — every um_tlb_sync sends 3
-IPIs (under ncpus=4); under high churn each vCPU receives many
-EINTRs in quick succession, interrupt_end → schedule churn
-prevents forward progress.
+**Phase G.2 commit C DEFERRED twice**: 
 
-Activation needs throttle/dedupe (per-vCPU `needs_flush_pending`
-atomic flag, or mm_cpumask targeting). Tracked as task #143.
-Deferred — the substrate gate and cpython-parity gate (the
-headline metrics) remain CLEAN under SMP without it; the only
-affected workload is the mt-byteset stress at T≥N.
+- 1st attempt (broadcast): regressed T=4/ncpus=4 from 196/200
+  (98%) → 18/60 (30%). IPI storm.
+- 2nd attempt 9f0ff6257e8b (cmpxchg dedup, at-most-one-in-flight
+  per vCPU): regressed T=4/ncpus=4 to 46/60 (77%). Even bounded,
+  the kicks under high mm-churn (mt-byteset ~1k drains/sec/thread)
+  disrupt forward progress.
+
+Conclusion: kick-from-um_tlb_sync is fundamentally too eager.
+A future attempt needs:
+- per-mm throttle (skip if mm was recently kicked)
+- mm_cpumask narrowing (only kick vCPUs running THIS mm)
+- OR fully-passive gen-counter (no IPI; rely on natural
+  dispatch boundaries + SIGALRM 100Hz preemption)
+
+Tracked as #143 (now closed; needs new task for next attempt).
+The cmpxchg dedup infrastructure shipped at 9f0ff6257e8b stays
+in place; activation deferred. The substrate gate and
+cpython-parity gate (headline metrics) remain CLEAN under SMP
+without activation.
+
+**Empirical T:N matrix** for mt-mini stress (the substrate
+isn't affected):
+
+| T | ncpus | Pass rate |
+|---|---|---|
+| 2 | 4 | 100% |
+| 4 | 4 | 100% (60/60) |
+| 4 | 8 | 100% (30/30) |
+| 8 | 4 | ~45% (13/30) |
+| 8 | 8 | ~47% (14/30) |
+| 8 | 4 + taskset 0-3 | ~53% (16/30) |
+
+Bug scales with **thread count in same mm**, NOT with T:N ratio
+or host-CPU pinning. T=4 is rock solid; T=8 is a stress edge case
+unrelated to vCPU pool sizing.
 
 Workaround until G.2-cont lands: run substrate workloads on UP
 builds (`CONFIG_SMP=n`), or with `ncpus` ≥ thread count.
