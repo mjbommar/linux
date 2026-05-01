@@ -1107,6 +1107,15 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	 * the dirty-bit at line 1132 below. Clear it explicitly so the
 	 * dispatch starts with a clean cr2 — guest #PF handlers can't
 	 * see stale parent-task fault addresses.
+	 *
+	 * #121-D experiment 2026-05-01: removing this line gives IDENTICAL
+	 * failure rate (184/200 vs 185/200), but failing cases then show
+	 * STALE cr2 values from previous tasks (cross-task leak) instead
+	 * of cr2=0. So the zero is NOT the source of the cr2-loss bug —
+	 * the bug is "cr2 doesn't get updated on this dispatch's fault",
+	 * and our zero just makes the symptom uniform (cr2=0) rather than
+	 * leaky (stale values). Keep the zero for cross-task isolation
+	 * hygiene.
 	 */
 	sregs->cr2 = 0;
 
