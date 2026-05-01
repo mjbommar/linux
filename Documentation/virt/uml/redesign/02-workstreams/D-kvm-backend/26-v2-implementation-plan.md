@@ -1690,6 +1690,54 @@ So G.1 isn't just "make existing vCPUs runnable" — it requires:
 
 Open task #68 carries this; not blocking Phase J.
 
+#### G.1 status update (2026-05-01)
+
+Re-test after the cumulative work landed since 2026-04-30 (in
+particular the FPU snapshot pair, mmu_gather drain ordering,
+sregs.fs.base/gs.base round-trip, and the #121 EINTR-mid-IDT-
+delivery cr2/IST fix). With the SAME `CONFIG_SMP=y NR_CPUS=4`
+build, the 2026-04-30 panic is GONE:
+
+- `ncpus=2` boot: clean, both `processor: 0` and `processor: 1`
+  in /proc/cpuinfo, both have non-zero counters in /proc/stat
+- `ncpus=4` boot: clean, all 4 processors visible
+- Substrate gate under SMP build (`ncpus` defaults to 1 unless
+  set): `PASS=25/FAIL=3/EXPECTED_FAIL=3` — same as UP, matches
+  seccomp baseline
+- cpython-parity gate under SMP build: `parity=21 diverge=0
+  skip=0` — full bit-identical parity
+- 8 parallel shell workers under `ncpus=4`: all complete cleanly,
+  init exits cleanly
+- mt-byteset N=4 under `ncpus=4`: 49/50 PASS = 98% (was 90%
+  before the #121 inline-handler SMP fix at e5977806fd14)
+
+Thread (1) "UML-side SMP bring-up" turns out to have been working
+all along — the panic was a victim of the cr2/IST race which
+also bites under SMP from #121 (only louder because cross-vCPU
+task migration widens the race window). With the inline handler
+shipped, single-threaded SMP boots are clean.
+
+Thread (2) "per-vCPU IDT/IST/TSS install for all vCPUs" was
+already done — `kvm_v2_install_per_vcpu_ist_tss` loops over all
+NR_CPUS in `exception_install` and the 2026-04-30 "only cpu=0
+installed" observation was apparently pre-Phase-E.2 / before the
+loop was added.
+
+Thread (3) "wait for vCPUs > 0 online" was unnecessary — UML's
+own smp_prepare_cpus does the wait, and v2's per-host-CPU pool
+dispatcher correctly picks up the right vCPU once a host-CPU
+pthread comes online.
+
+**Remaining 2% mt-byteset SMP flake** (likely a separate issue
+from the original #121): the residual failure under `ncpus=4`
+shows `mt-byteset[N]: segfault at 0x2 ip 0x40197b error 2` —
+slow_memset writing to address 0x2 (RDX corrupted). Under UP this
+is 0/200; under SMP it's ~2%. Hypothesis: cross-vCPU TLB stale
+(CR4.PGE toggle on dispatch flushes only the LOCAL vCPU's guest
+TLB; another vCPU's TLB stays stale until its own next dispatch).
+Investigation continues — but this is a STRESS-test edge case,
+not a substrate or gate-class regression.
+
 ### G.2 — `smp.c`: cross-vCPU IPI (if needed) (2 days)
 
 **Mechanism correction (memo 26 §D rewrite, codex audit independent
