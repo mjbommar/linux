@@ -1757,15 +1757,32 @@ is now thread B's mmap region. Thread A's stack reads/writes
 alias with thread B's mmap data → register-state swap symptoms.
 
 **Fix path** (Phase G.2 — cross-vCPU IPI / TLB shootdown):
-- On every PTE-level mm change in UML, issue
-  `kvm_make_all_cpus_request(KVM_REQ_TLB_FLUSH)` (or per-vCPU
-  KVM_REQ_TLB_FLUSH ioctls) to force ALL vCPUs to flush their
-  guest TLBs at next entry.
-- Stock x86 KVM provides this primitive via the standard `request
-  + kick` mechanism (`vcpu_enter_guest` checks the request bit
-  and clears the TLB before VMENTER).
-- Workaround until G.2 lands: run substrate workloads on UP
-  builds (`CONFIG_SMP=n`), or with `ncpus` ≥ thread count.
+- On every PTE-level mm change in UML, issue cross-vCPU TLB
+  shootdown so all OTHER vCPUs flush their guest TLBs at next
+  entry.
+
+**Phase G.2 commits A+B SHIPPED (2026-05-01)**: 77cc1821c595 +
+7e1c255a09ad. Adds nullable `tlb_kick_others` backend op (contract
+v2 bump), v2 impl that pthread_sigqueue's IPI_SIGNAL via
+os_send_ipi to all other UML CPUs, and unblocks IPI_SIGNAL in v2's
+KVM_SET_SIGNAL_MASK so the IPI actually interrupts KVM_RUN.
+
+**Phase G.2 commit C DEFERRED**: empirical activation (calling
+tlb_kick_others from um_tlb_sync after a successful drain)
+regressed T=4/ncpus=4 from 196/200 (98%) → 18/60 (30%) on
+mt-byteset. Hypothesis: IPI storm — every um_tlb_sync sends 3
+IPIs (under ncpus=4); under high churn each vCPU receives many
+EINTRs in quick succession, interrupt_end → schedule churn
+prevents forward progress.
+
+Activation needs throttle/dedupe (per-vCPU `needs_flush_pending`
+atomic flag, or mm_cpumask targeting). Tracked as task #143.
+Deferred — the substrate gate and cpython-parity gate (the
+headline metrics) remain CLEAN under SMP without it; the only
+affected workload is the mt-byteset stress at T≥N.
+
+Workaround until G.2-cont lands: run substrate workloads on UP
+builds (`CONFIG_SMP=n`), or with `ncpus` ≥ thread count.
 
 This is a STRESS-test edge case affecting only the multi-thread
 mmap-stress reproducer at high T/N. Substrate gate (PASS=25/FAIL=3/
