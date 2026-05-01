@@ -2145,6 +2145,63 @@ CR0.MP/NE and CR4.OSFXSR/OSXMMEXCPT for the per-host-CPU pool members
 Reproducer: `tools/testing/selftests/um/mt-mmap-stress/mt-xmmprobe.c`
 shipped at this commit.
 
+### H.1b CLOSED (2026-04-30): per-task FPU snapshot fix at 49b3e40a968c
+
+mt-mmap-stress: **60% → 98% PASS (49/50 trials)**. Substrate gate stable
+PASS=25/FAIL=3/EXPECTED_FAIL=3. cpython-tier0 PASS.
+
+**Fix mechanism:** bypass KVM's broken IO-exit FPU auto-save by manually
+snapshotting + restoring around the host-kernel exit-handling window.
+
+Specifically in `arch/um/backend/kvm-v2/vcpu.c::kvm_v2_vcpu_run`:
+
+```c
+rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+
+/* IMMEDIATELY snapshot — before any host-kernel code can clobber FPU. */
+{
+    int fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+        (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+    current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
+}
+```
+
+And before the NEXT KVM_RUN re-entry (after IST snapshot restore, before
+marshal_to_kvm_regs):
+
+```c
+if (current->thread.arch.kvm_v2.iotrap_fpu_valid) {
+    (void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
+        (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+    current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
+}
+```
+
+Per-task storage `iotrap_fpu` + `iotrap_fpu_valid` added to
+`arch_thread.kvm_v2` struct in `arch/x86/um/asm/processor_64.h`.
+
+**Why per-task and not per-vCPU:** under v2's per-host-CPU vCPU pool,
+multiple UML tasks share one vCPU. If T1 and T2 are interleaved, T1's
+snapshot must follow T1 around (not stay in T2's vcpu state). Per-task
+storage keyed via `current->thread.arch` matches the IST frame pattern
+(memo §H.1b residual fix at 31748fea602e earlier).
+
+**Why this is needed despite KVM's auto-save:** KVM's
+`fpu_swap_kvm_fpstate` is supposed to save vcpu FPU on every exit and
+restore on entry. Empirically it doesn't on the fast-path KVM_EXIT_IO
+from the in-guest IDT-handler `out` instruction. The host-kernel code
+that runs the exit-handling (UML's handle_io_pf, segv_handler,
+handle_page_fault, etc.) uses FPU/XMM (e.g., kernel memcpy/memset
+helpers compile to SIMD on AVX-capable hosts). Those uses clobber
+the hardware FPU; KVM's restore on re-entry pulls the now-stale
+vcpu->arch.guest_fpu back into the guest.
+
+Earlier wrong attempt (FPU save/restore inside `handle_io_pf`) made
+things worse because by the time `handle_io_pf` ran, host-kernel code
+HAD ALREADY clobbered FPU. The save captured the corrupted state.
+Moving the save to IMMEDIATELY post-KVM_RUN captures the still-clean
+state.
+
 ### H.1b legacy notes (pre-2026-04-30)
 
 - Instrument syscall count, vmexit count, time-per-syscall,
