@@ -56,7 +56,7 @@ SREGS_RE = re.compile(
 TASK_RE = re.compile(
     r'KVMV2T-T cpu=(\d+) seq=(\d+) '
     r'tmm=([0-9a-f]+) tamm=([0-9a-f]+) tscr2=([0-9a-f]+) '
-    r'hax=([0-9a-f]+) hip=([0-9a-f]+) hsp=([0-9a-f]+)'
+    r'hax=([0-9a-f]+) horax=([0-9a-f]+) hip=([0-9a-f]+) hsp=([0-9a-f]+)'
 )
 TFLAG_RE = re.compile(
     r'KVMV2T-F cpu=(\d+) seq=(\d+) '
@@ -89,7 +89,7 @@ class Snap:
     cr0: int = 0; cr2: int = 0; cr3: int = 0; cr4: int = 0
     fsb: int = 0; gsb: int = 0
     tmm: int = 0; tamm: int = 0; tscr2: int = 0
-    hax: int = 0; hip: int = 0; hsp: int = 0
+    hax: int = 0; horax: int = 0; hip: int = 0; hsp: int = 0
     tfpuh: int = 0; tscv: int = 0; tistp: int = 0
     tiofv: int = 0; tfpuv: int = 0
     tist: List[int] = field(default_factory=lambda: [0]*6)
@@ -151,8 +151,9 @@ def parse_log(path: str) -> List[Snap]:
                 cpu, seq = int(m.group(1)), int(m.group(2))
                 e = entries.setdefault((cpu, seq), Snap())
                 e.cpu, e.seq = cpu, seq
-                vals = [int(m.group(i), 16) for i in range(3, 9)]
-                e.tmm, e.tamm, e.tscr2, e.hax, e.hip, e.hsp = vals
+                vals = [int(m.group(i), 16) for i in range(3, 10)]
+                (e.tmm, e.tamm, e.tscr2, e.hax,
+                 e.horax, e.hip, e.hsp) = vals
                 e.sections_seen |= SECT_T
                 continue
             m = TFLAG_RE.search(line)
@@ -398,6 +399,51 @@ def cmd_invariants(args):
         print(f'    -> {msg}')
 
 
+def cmd_find_mmap_zero(args):
+    """Find HANDLE_SYSCALL_POST entries where horax=9 (mmap) and
+    hax=0 (returned NULL — the MMAP_NULL bug)."""
+    snaps = parse_log(args.log)
+    snaps.sort(key=sort_key)
+    found = []
+    for s in snaps:
+        if s.op == 'HANDLE_SYSCALL_POST' and s.horax == 9 and s.hax == 0:
+            found.append(s)
+    print(f'Found {len(found)} mmap-returned-zero events')
+    for s in found[:args.limit]:
+        print(f'  ts={s.ts} cpu={s.cpu} seq={s.seq} pid={s.pid} '
+              f'rip={s.rip:x} rsi(len)={s.rsi:x} rdx(prot)={s.rdx:x}')
+
+
+def cmd_pid_window(args):
+    """Show the N entries before and after the first MMAP_NULL event
+    for the failing pid."""
+    snaps = parse_log(args.log)
+    snaps.sort(key=sort_key)
+    # Find first mmap-zero
+    fail_idx = None
+    for i, s in enumerate(snaps):
+        if (s.op == 'HANDLE_SYSCALL_POST' and s.horax == 9 and s.hax == 0):
+            fail_idx = i
+            break
+    if fail_idx is None:
+        print('No MMAP-zero event found')
+        return
+    fail = snaps[fail_idx]
+    print(f'FAIL @ ts={fail.ts} cpu={fail.cpu} seq={fail.seq} pid={fail.pid}')
+    pid = fail.pid
+    pid_snaps = [s for s in snaps if s.pid == pid]
+    pid_snaps.sort(key=sort_key)
+    pid_idx = pid_snaps.index(fail)
+    lo = max(0, pid_idx - args.window)
+    hi = min(len(pid_snaps), pid_idx + args.window + 1)
+    print(f'\npid={pid} window [{lo}:{hi}] of {len(pid_snaps)} entries:')
+    for i, s in enumerate(pid_snaps[lo:hi]):
+        marker = ' <-- FAIL' if (lo + i == pid_idx) else ''
+        print(f'  ts={s.ts} cpu={s.cpu} seq={s.seq} op={s.op:22s} '
+              f'horax={s.horax:>3} hax={s.hax:9x} rip={s.rip:9x}'
+              + marker)
+
+
 def cmd_diff(args):
     a_snaps = parse_log(args.log_a)
     b_snaps = parse_log(args.log_b)
@@ -445,6 +491,14 @@ def main():
     s.add_argument('log_a')
     s.add_argument('log_b')
     s.set_defaults(func=cmd_diff)
+    s = sub.add_parser('mmap-zero')
+    s.add_argument('log')
+    s.add_argument('--limit', type=int, default=20)
+    s.set_defaults(func=cmd_find_mmap_zero)
+    s = sub.add_parser('pid-window')
+    s.add_argument('log')
+    s.add_argument('--window', type=int, default=20)
+    s.set_defaults(func=cmd_pid_window)
     args = ap.parse_args()
     args.func(args)
 

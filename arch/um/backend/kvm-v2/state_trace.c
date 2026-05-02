@@ -70,6 +70,16 @@
 
 DEFINE_STATIC_KEY_FALSE(kvm_v2_state_trace_key);
 
+/*
+ * Anomaly auto-freeze: when an anomaly fires (e.g., mmap returning 0)
+ * we set this to 1 so subsequent capture()s return early. The
+ * static_branch can't be disabled from inside capture() because that
+ * path can sleep; this gate is the cheap atomic alternative.
+ *
+ * Reset to 0 by debugfs 'clear'.
+ */
+static atomic_t trace_frozen = ATOMIC_INIT(0);
+
 #define KVMV2_TRACE_RING_BYTES_DEFAULT  (2UL * 1024 * 1024)
 #define KVMV2_TRACE_DUMP_BATCH          32
 
@@ -148,6 +158,8 @@ void kvm_v2_state_trace_clear(void)
 {
 	int cpu;
 
+	atomic_set(&trace_frozen, 0);
+
 	if (!READ_ONCE(rings_allocated))
 		return;
 
@@ -180,6 +192,8 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 	unsigned long flags;
 
 	if (!READ_ONCE(rings_allocated))
+		return;
+	if (atomic_read(&trace_frozen))
 		return;
 
 	local_irq_save(flags);
@@ -251,9 +265,10 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 	}
 
 	if (regs) {
-		e->task_host_ax = regs->gp[HOST_AX];
-		e->task_host_ip = regs->gp[HOST_IP];
-		e->task_host_sp = regs->gp[HOST_SP];
+		e->task_host_ax       = regs->gp[HOST_AX];
+		e->task_host_orig_ax  = regs->gp[HOST_ORIG_AX];
+		e->task_host_ip       = regs->gp[HOST_IP];
+		e->task_host_sp       = regs->gp[HOST_SP];
 	}
 
 	if (vcpu) {
@@ -276,6 +291,25 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 	}
 
 	local_irq_restore(flags);
+
+	/*
+	 * Anomaly auto-freeze: if a HANDLE_SYSCALL_POST records
+	 * orig_ax=__NR_mmap and ax=0, mmap returned NULL — that's the
+	 * mt-mini MMAP_NULL bug. Freeze the ring right now so
+	 * subsequent dispatches don't overwrite the failing context.
+	 * mt-mini's MMAP_NULL printf will trigger debugfs dump shortly
+	 * and we get the moment-of-failure history.
+	 *
+	 * One-shot via cmpxchg on trace_frozen — first hit wins.
+	 */
+	if (op == KVMV2_OP_HANDLE_SYSCALL_POST &&
+	    regs && regs->gp[HOST_ORIG_AX] == 9 /* __NR_mmap */ &&
+	    regs->gp[HOST_AX] == 0) {
+		if (atomic_cmpxchg(&trace_frozen, 0, 1) == 0)
+			pr_emerg("KVMV2T_ANOMALY mmap-returns-zero pid=%u cpu=%u "
+				 "ts=%llu seq=%u — froze trace ring\n",
+				 e->pid, e->cpu, e->ts, e->seq);
+	}
 }
 
 static const char *op_name(u8 op)
@@ -352,10 +386,11 @@ static void dump_one(const struct kvm_v2_state_snap *e)
 	pr_emerg("KVMV2T-S cpu=%u seq=%u cr0=%llx cr2=%llx cr3=%llx cr4=%llx fsb=%llx gsb=%llx\n",
 		 e->cpu, e->seq,
 		 e->cr0, e->cr2, e->cr3, e->cr4, e->fs_base, e->gs_base);
-	pr_emerg("KVMV2T-T cpu=%u seq=%u tmm=%llx tamm=%llx tscr2=%llx hax=%llx hip=%llx hsp=%llx\n",
+	pr_emerg("KVMV2T-T cpu=%u seq=%u tmm=%llx tamm=%llx tscr2=%llx hax=%llx horax=%llx hip=%llx hsp=%llx\n",
 		 e->cpu, e->seq,
 		 e->task_mm_ptr, e->task_active_mm_ptr, e->task_saved_cr2,
-		 e->task_host_ax, e->task_host_ip, e->task_host_sp);
+		 e->task_host_ax, e->task_host_orig_ax,
+		 e->task_host_ip, e->task_host_sp);
 	pr_emerg("KVMV2T-F cpu=%u seq=%u tfpuh=%x tscv=%u tistp=%u tiofv=%u tfpuv=%u tist=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
 		 e->cpu, e->seq,
 		 e->task_fpu_hash, e->task_saved_cr2_valid,

@@ -82,6 +82,7 @@ struct kvm_v2_state_snap {
 	u64 task_active_mm_ptr;
 	u64 task_saved_cr2;
 	u64 task_host_ax;
+	u64 task_host_orig_ax;	/* PT_SYSCALL_NR — syscall number in flight */
 	u64 task_host_ip;
 	u64 task_host_sp;
 	u32 task_fpu_hash;

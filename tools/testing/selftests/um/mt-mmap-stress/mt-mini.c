@@ -38,17 +38,25 @@
 #include <unistd.h>
 
 /*
- * SMP-T11 state-trace dump trigger. Writes "1" to the kvm-v2
- * state-trace debugfs dump file. No-op (silent) when the kernel
- * wasn't built with CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y or when
- * tracing isn't enabled at runtime.
+ * SMP-T11 state-trace dump trigger. Disables tracing first (so the
+ * dispatches we do to issue the dump don't overwrite the failing
+ * context in the per-CPU ring), then dumps. No-op (silent) when the
+ * kernel wasn't built with CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y or
+ * when tracing isn't enabled at runtime.
  *
  * Called from the FAIL paths so the per-CPU ring captures up to the
  * moment of detection — kernel dumps to dmesg (KVMV2T lines).
  */
 static void kvmv2_state_trace_dump(void)
 {
-	int fd = open("/sys/kernel/debug/um_kvm_v2_trace/dump", O_WRONLY);
+	int fd;
+
+	fd = open("/sys/kernel/debug/um_kvm_v2_trace/enabled", O_WRONLY);
+	if (fd >= 0) {
+		(void)!write(fd, "0\n", 2);
+		close(fd);
+	}
+	fd = open("/sys/kernel/debug/um_kvm_v2_trace/dump", O_WRONLY);
 	if (fd < 0)
 		return;
 	(void)!write(fd, "1\n", 2);
