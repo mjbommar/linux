@@ -88,9 +88,22 @@ void handle_syscall(struct uml_pt_regs *r)
 			 */
 			if (syscall == 9 && mp_addr == 0 && mp_len > 0) {
 				static atomic_t ump_hits = ATOMIC_INIT(0);
-				bool weird = (ret == 0) ||
-					     ((unsigned long)ret >= 0x80000000);
-				if (weird && atomic_inc_return(&ump_hits) <= 30)
+				bool errno_range =
+					((unsigned long)ret >= -4096UL);
+				bool zero = (ret == 0);
+
+				if (zero) {
+					/* CRITICAL: kernel returned 0 for a
+					 * NULL+len mmap. This is NEVER valid.
+					 * Always log, never rate-limit. */
+					pr_emerg("UM_MMAP_ZERO pid=%d cpu=%d "
+						 "addr=%#lx len=%#lx prot=%#lx ret=%#lx\n",
+						 current->pid,
+						 raw_smp_processor_id(),
+						 mp_addr, mp_len, mp_prot,
+						 (unsigned long)ret);
+				} else if (errno_range &&
+					   atomic_inc_return(&ump_hits) <= 30) {
 					pr_emerg("UM_MMAP_DIAG pid=%d cpu=%d "
 						 "addr=%#lx len=%#lx prot=%#lx "
 						 "ret=%#lx\n",
@@ -98,6 +111,7 @@ void handle_syscall(struct uml_pt_regs *r)
 						 raw_smp_processor_id(),
 						 mp_addr, mp_len, mp_prot,
 						 (unsigned long)ret);
+				}
 			}
 		}
 
