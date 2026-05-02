@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-02
+Last updated: 2026-05-02 (post SMP-T19/T20/T22)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,7 +9,8 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `ad18db7c3768` on `uml-redesign-plan`.
+**Tip:** `ddf3cfe5cf31` on `umlctl-deploy` (SMP-T22 — vmexit-on-#NM,
+eliminates Bug B class).
 
 ---
 
@@ -31,8 +32,11 @@ LKML upstream queue.
 | Substrate gate (regrtest substrate, 25+3+3)       | kvm-v2  | PASS=25   | PASS=25             |
 | cpython-parity gate (21 stdlib modules)           | kvm-v2  | 21/21     | 21/21               |
 | mt-mini × 30 (T=8, ncpus=4)                       | kvm-v2  | n/a       | 100%                |
+| mt-mini × 30 (T=4, ncpus=4)                       | kvm-v2  | n/a       | 30/30 (post T22)    |
 | mt-yieldonly × 15 (T=8, ncpus=4)                  | kvm-v2  | n/a       | 100%                |
 | mt-rawmmap × 20 (T=8, ncpus=4)                    | kvm-v2  | n/a       | 100%                |
+| mt-mmap-stress (T=8, ncpus=4)                     | kvm-v2  | n/a       | PASS (post T22)     |
+| threaded-subprocess-wait × 20 (T22)               | kvm-v2  | n/a       | 17-18/20 (NM_stub+2=0) |
 | `make -j4` inside guest (Phase G.3)               | kvm-v2  | n/a       | yes                 |
 | All workloads under `backend=force=seccomp`       | seccomp | yes       | yes (deterministic) |
 
@@ -60,6 +64,11 @@ on `/`, never tmpfs).
 | H.1b  | #121 cr2+IDT EINTR preservation        | DONE     | `ba7aa0aa0240` + `e5977806fd14` (inline PF handler) |
 | H.2   | CR0.TS lazy FPU                        | DONE     | task #120              |
 | H.3   | perf target met (v2 2.58× seccomp)     | DONE     | memo §H.3              |
+| SMP-T16 | Bug A — cr2-preserve across same-task re-entry | DONE | `2f0c87a47dcb`, memo state-audit/09 |
+| SMP-T17 | Bug B EINTR-mid-NM-stub variant       | DONE     | `85244f068ad3`, memo state-audit/10 |
+| SMP-T19 | IST sanity guards (snapshot/restore/write) | DONE | `d9ed9e14c7b6`         |
+| SMP-T20 | RCU-deferred mmu_gather page free      | DONE     | `d9ed9e14c7b6`         |
+| SMP-T22 | Bug B class — vmexit-on-#NM, eliminate iretq surface | DONE | `ddf3cfe5cf31`, memo state-audit/11 |
 | I.2   | KUnit suites (vCPU pool / memslot / IDT) | DONE   | task #113              |
 | I.3   | docs — backend README + backends.rst   | DONE     | task #114              |
 | I.4   | lift EXPERT gate from CONFIG_UM_BACKEND_KVM_V2 | DONE | task #112        |
