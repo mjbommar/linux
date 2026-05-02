@@ -152,6 +152,16 @@ void destroy_context(struct mm_struct *mm)
 	 * a pending sync), free them here so they don't leak. By
 	 * destroy_context time the mm has no live mappings anywhere —
 	 * no TLB, no PTEs, no userspace — so it's safe regardless.
+	 *
+	 * SMP-T20 (2026-05-02): drain now uses call_rcu. The callback
+	 * (um_defer_batch_rcu_free) does NOT dereference mm — it only
+	 * frees the encoded_page array (which is in the kmalloc'd batch
+	 * struct, owned independently of mm) and kfrees the batch. So
+	 * it's safe for the callback to outlive the mm. We deliberately
+	 * do NOT call rcu_barrier() here — it would block destroy_context
+	 * for one full grace period (~15ms+ under PREEMPT_VOLUNTARY with
+	 * busy vCPUs), and at high mm-churn workloads (subprocess.Popen
+	 * × 400) that serializes to multi-second slowdown.
 	 */
 	um_mmu_gather_drain(mm);
 

@@ -36,6 +36,7 @@
 
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/swap.h>
@@ -85,6 +86,7 @@
 
 struct um_defer_batch {
 	struct list_head list;
+	struct rcu_head rcu;	/* SMP-T20: RCU-deferred free (memo §SMP-T20) */
 	unsigned int nr;
 	struct encoded_page *pages[UM_DEFER_BATCH_NR];
 };
@@ -184,14 +186,51 @@ unsigned int um_mmu_gather_defer(struct mm_struct *mm,
 }
 
 /*
+ * RCU callback: free a deferred batch after a full RCU grace
+ * period has elapsed. By this point every CPU has passed through
+ * a quiescent state (= every vCPU has exited and re-entered
+ * KVM_RUN, which flushes guest TLB via CR4.PGE toggle), so any
+ * stale guest-TLB entries pointing at these pages are gone.
+ */
+static void um_defer_batch_rcu_free(struct rcu_head *rh)
+{
+	struct um_defer_batch *b = container_of(rh, struct um_defer_batch, rcu);
+
+	free_pages_and_swap_cache((struct encoded_page **)b->pages, b->nr);
+	kfree(b);
+}
+
+/*
  * Drain the per-mm deferred-free queue. Called from the active
  * backend's vcpu_run AFTER KVM_RUN's CR4.PGE flush has executed
  * (so the GUEST TLB no longer caches stale translations to these
  * pages).
  *
- * Splices the queue under the lock so the drain itself runs
- * without holding the lock — free_pages_and_swap_cache can be
- * non-trivial work.
+ * SMP-T20 (2026-05-02): switched from immediate kfree to call_rcu.
+ * Reason: the local-CR4.PGE flush at THIS dispatch's KVM_RUN
+ * entry only flushes THIS vCPU's guest TLB. Other vCPUs running
+ * tasks in the same mm may still cache stale GVA→guest-PA
+ * translations to these pages until their own next dispatch.
+ * Without a grace period, those stale TLB entries can alias the
+ * recycled physical page, yielding the high-cr2 user faults seen
+ * in fork-stress (Angle 2 / mt-mmap-stress flake class).
+ *
+ * call_rcu defers the actual free until every CPU has passed
+ * through a quiescent state. The migrate_disable() in vcpu_run is
+ * a preempt-disable section under PREEMPT=n, which is itself an
+ * RCU read-side critical section — so RCU's grace period waits
+ * for every running vCPU to exit KVM_RUN at least once before
+ * firing the callback. By that point every vCPU has executed the
+ * CR4.PGE toggle and flushed its guest TLB → safe to free.
+ *
+ * The local TLB-kick (tlb.c:um_tlb_sync) re-fired by SMP-T13 stays
+ * in place; its job changes from "ensure flush before free" to
+ * "ensure forward progress of the grace period under CPU-bound
+ * guest workloads" — without it a vCPU spinning in guest user
+ * code wouldn't reach a quiescent state until its next SIGALRM.
+ *
+ * Splices the queue under the lock so the registration runs
+ * without holding the lock.
  */
 void um_mmu_gather_drain(struct mm_struct *mm)
 {
@@ -213,9 +252,7 @@ void um_mmu_gather_drain(struct mm_struct *mm)
 
 	list_for_each_entry_safe(b, tmp, &local, list) {
 		list_del(&b->list);
-		free_pages_and_swap_cache((struct encoded_page **)b->pages,
-					  b->nr);
-		kfree(b);
+		call_rcu(&b->rcu, um_defer_batch_rcu_free);
 	}
 }
 

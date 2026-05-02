@@ -139,6 +139,34 @@ static inline void arch_copy_thread(struct arch_thread *from,
                                     struct arch_thread *to)
 {
 #ifdef CONFIG_UM_BACKEND_KVM_V2
+	/*
+	 * SMP-T19 (2026-05-02): the child task's arch_thread was just
+	 * memcpy'd from the parent by dup_task_struct(). For the kvm-v2
+	 * fields specifically, the parent may carry ist_pending=true with
+	 * an ist_frame[] holding a snapshot from the parent's last
+	 * mid-stub EINTR (or other code path that called ist_frame_write).
+	 * Without explicit reset here, the child's first KVM_RUN would call
+	 * kvm_v2_ist_frame_restore_pending and inject the parent's saved
+	 * frame into the new vCPU's IST top-40..top-8. If the parent's
+	 * ist_frame[1] was a kernel-half stub address (e.g., from a
+	 * stub-internal #GP whose IDT push left RIP=stub_addr in the IST
+	 * which got snapshotted before any user-mode hardware push could
+	 * overwrite it), the iretq off the next exception delivery for
+	 * the child would pop kernel-half RIP into user-mode CPL=3 →
+	 * Bug B-class fault: `segfault at 0 ip ffffe000000021c2 ...`.
+	 *
+	 * Mirror what arch_flush_thread (execve path) already does. fork
+	 * + execve is the dominant path used by subprocess.Popen, regrtest
+	 * worker spawning, etc., and the missing reset here is what made
+	 * the threaded-subprocess-wait reproducer fail at ~40% per boot.
+	 *
+	 * fpu_valid is updated by kvm_v2_fpu_capture_for_fork below
+	 * (KVM_GET_FPU into to->kvm_v2.fpu); leave that field alone.
+	 */
+	to->kvm_v2.iotrap_fpu_valid = false;
+	to->kvm_v2.ist_pending = false;
+	to->kvm_v2.saved_cr2_valid = false;
+	to->kvm_v2.saved_cr2_at_eintr = 0;
 	(void)kvm_v2_fpu_capture_for_fork(from, to);
 #endif
 }

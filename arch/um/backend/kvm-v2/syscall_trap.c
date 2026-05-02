@@ -888,6 +888,35 @@ static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
 		    (struct uml_pt_regs *)regs, NULL, vcpu);
 
 	/*
+	 * SMP-T19 sanity guard (2026-05-02): refuse to write a kernel-half
+	 * RIP to IST top-40. The IST iretq frame's RIP slot must hold a
+	 * legitimate USER RIP (where the iretq tail will land in CPL=3).
+	 * If regs->gp[HOST_IP] is in the kernel-half handlers range, then
+	 * the regs structure carries a stub-internal-fault address — likely
+	 * because some upstream path (segv_handler under unusual conditions,
+	 * or a stale regs view) didn't update HOST_IP from the frame's
+	 * real user_rip. Writing this would cause the next iretq to pop
+	 * the stub address as the user RIP, transition to CPL=3 with a
+	 * kernel-half RIP, and surface as the NM_stub+2 P=0 segfault.
+	 * Drop the write — leave IST contents intact (the previous valid
+	 * frame is still there) and emit a one-shot diagnostic so we can
+	 * triangulate the upstream caller.
+	 */
+	if (regs->gp[HOST_IP] >= KVM_V2_HANDLERS_GVA &&
+	    regs->gp[HOST_IP] < KVM_V2_HANDLERS_GVA + 0x1000) {
+		static int diag_seen;
+		if (diag_seen < 30) {
+			diag_seen++;
+			pr_emerg("um: kvm-v2 IST_FRAME_WRITE_KERNEL_RIP[%d] pid=%d comm=%s host_ip=%lx host_sp=%lx\n",
+				 diag_seen, current->pid, current->comm,
+				 regs->gp[HOST_IP], regs->gp[HOST_SP]);
+		}
+		KVMV2_TRACE(KVMV2_OP_IST_FRAME_WRITE_POST,
+			    (struct uml_pt_regs *)regs, NULL, vcpu);
+		return;
+	}
+
+	/*
 	 * Layout matches kvm_v2_ist_frame_read: RIP-anchored frame
 	 * starts at top - 40 regardless of whether the vector pushed
 	 * an error code. The error code (when present) lives at
@@ -942,6 +971,28 @@ void kvm_v2_ist_frame_restore_pending(struct kvm_v2_vcpu *vcpu)
 	if (!a->kvm_v2.ist_pending)
 		return;
 
+	/*
+	 * SMP-T19 sanity guard (2026-05-02): NEVER write a kernel-half RIP
+	 * or kernel-CPL CS into the IST iretq frame. Any such pending entry
+	 * is corruption — the snapshot must describe legitimate USER state
+	 * (CS RPL=3, RIP outside the kernel-half handlers page). Kernel-half
+	 * RIPs slip into ist_frame[1] via:
+	 *   - kvm_v2_ist_frame_write being called after a CPL=0 stub-internal
+	 *     fault left regs->gp[HOST_IP] pointing at a stub address
+	 *   - kvm_v2_ist_frame_snapshot_raw capturing IST top-40 before any
+	 *     legitimate user-mode hardware push overwrote previous CPL=0
+	 *     frame contents
+	 *   - dup_task_struct memcpy inheriting parent's poisoned snapshot
+	 *     across fork (the dominant vector — see arch_copy_thread)
+	 * Drop instead of replay.
+	 */
+	if ((a->kvm_v2.ist_frame[1] >= KVM_V2_HANDLERS_GVA &&
+	     a->kvm_v2.ist_frame[1] <  KVM_V2_HANDLERS_GVA + 0x1000) ||
+	    (a->kvm_v2.ist_frame[2] & 3) != 3) {
+		a->kvm_v2.ist_pending = false;
+		return;
+	}
+
 	*(u64 *)(top - 48)      = a->kvm_v2.ist_frame[0]; /* error_code */
 	*(u64 *)(top - 40 +  0) = a->kvm_v2.ist_frame[1]; /* RIP */
 	*(u64 *)(top - 40 +  8) = a->kvm_v2.ist_frame[2]; /* CS */
@@ -976,10 +1027,30 @@ void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu)
 {
 	struct arch_thread *a = &current->thread.arch;
 	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+	u64 rip = *(u64 *)(top - 40 +  0);
+	u64 cs  = *(u64 *)(top - 40 +  8);
+
+	/*
+	 * SMP-T19 sanity guard (2026-05-02): the IDT-pushed iretq frame must
+	 * describe USER state (CS.RPL=3, RIP outside kernel-half handlers
+	 * range). If we observe a CPL=0 frame here, the IST page contents
+	 * we'd capture are a stub-internal fault frame (e.g., from a faulty
+	 * iretq pop, or from snapshotting before any legitimate hardware
+	 * push happened). Capturing & later replaying that into the iretq
+	 * pop-source would inject kernel-half RIP into user mode CPL=3 →
+	 * Bug B-class fault. Refuse to capture; clear ist_pending so
+	 * restore_pending becomes a no-op for this task.
+	 */
+	if ((rip >= KVM_V2_HANDLERS_GVA &&
+	     rip <  KVM_V2_HANDLERS_GVA + 0x1000) ||
+	    (cs & 3) != 3) {
+		a->kvm_v2.ist_pending = false;
+		return;
+	}
 
 	a->kvm_v2.ist_frame[0] = *(u64 *)(top - 48);          /* error_code */
-	a->kvm_v2.ist_frame[1] = *(u64 *)(top - 40 +  0);     /* RIP */
-	a->kvm_v2.ist_frame[2] = *(u64 *)(top - 40 +  8);     /* CS */
+	a->kvm_v2.ist_frame[1] = rip;                         /* RIP */
+	a->kvm_v2.ist_frame[2] = cs;                          /* CS */
 	a->kvm_v2.ist_frame[3] = *(u64 *)(top - 40 + 16);     /* RFLAGS */
 	a->kvm_v2.ist_frame[4] = *(u64 *)(top - 40 + 24);     /* RSP */
 	a->kvm_v2.ist_frame[5] = *(u64 *)(top - 40 + 32);     /* SS */
