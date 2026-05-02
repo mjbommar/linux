@@ -236,18 +236,72 @@ v2 already does this MORE aggressively than v1 (toggles on every
 dispatch, not just same-CR3). So even the IPI-on-drain behavior is a
 v2 addition not derived from v1.
 
-### Updated hypothesis ranking (post-FPU-ablation)
+### Updated hypothesis ranking (post-FPU + post-CPUID audit)
 
-| Hypothesis | Pre | Post-G2-abl | Post-FPU-abl |
-|---|---|---|---|
-| H1 cross-vCPU TLB stale | 70% | **<5%** | <5% |
-| H2 execve mm-swap leak | 20% | ~50% | varies — see below |
-| H2a per-vCPU FPU/XMM leak (subagent #2 finding) | 0% | **~60%** | **<5%** (ablation negative — see Test) |
-| H3 mmu_gather drain timing | 10% | ~10% | ~10% |
-| H4 anonymous-page-not-zeroed on alloc | 0% | ~30% | **~40%** |
-| H5 backend-agnostic | small | small | small |
-| H6 KVM XSAVE/AVX state leak (FPU subset not covered by KVM_SET_FPU) | 0% | 0% | **~20%** (NEW) |
-| H7 v2-specific exec.c / start_thread setup race | 0% | 0% | **~25%** (NEW) |
+| Hypothesis | Pre | Post-G2-abl | Post-FPU-abl | Post-CPUID-audit |
+|---|---|---|---|---|
+| H1 cross-vCPU TLB stale | 70% | **<5%** | <5% | <5% |
+| H2 execve mm-swap leak | 20% | ~50% | varies | ~30% |
+| H2a per-vCPU FPU/XMM leak | 0% | ~60% | **<5%** (ablation neg) | <5% |
+| H3 mmu_gather drain timing | 10% | ~10% | ~10% | ~15% |
+| H4 anonymous-page-not-zeroed on alloc | 0% | ~30% | ~40% | **~40%** |
+| H5 backend-agnostic | small | small | small | small |
+| H6 KVM XSAVE/AVX state leak | 0% | 0% | ~20% | **~0%** (RULED OUT, see below) |
+| H7 v2-specific exec.c / start_thread setup race | 0% | 0% | ~25% | **~30%** |
+| H8 KVM internal host-side FPU leak (not guest-visible) | 0% | 0% | 0% | **~15%** (NEW) |
+
+### H6 RULED OUT via CPUID audit
+
+`kvm_v2_curate_cpuid` at `arch/um/backend/kvm-v2/vcpu.c:129-185` explicitly
+masks OFF the following from guest CPUID:
+- Leaf 1 ECX: bits 26 (XSAVE), 27 (OSXSAVE), 28 (AVX), 29 (F16C)
+- Leaf 7 EBX: bits 5 (AVX2), 16-31 (AVX512 family)
+- Leaf 7 ECX: AVX512 family
+- Leaf 7 EDX: AVX512 family
+- Leaf 0xD (XSAVE state-component descriptor): zeroed entirely
+
+**Therefore the guest CANNOT use AVX/AVX2/AVX512 — only legacy SSE/SSE2.**
+Modern glibc compiled with AVX2 support does runtime CPU-feature
+detection via cpuid; with AVX disabled in guest CPUID, glibc falls
+back to SSE2-only paths.
+
+KVM_SET_FPU covers the entire legacy fxsave area (XMM0..15, x87 FPR,
+MXCSR, FCW, FSW, FTW) — which is everything the guest can address.
+So H6 (KVM XSAVE/AVX state leak) is **structurally impossible** in
+this configuration. KVM_SET_XSAVE would not improve over KVM_SET_FPU
+for this guest.
+
+### Remaining hypotheses ordered by promise
+
+1. **H4 (~40%)**: anonymous-page-not-zeroed on alloc. Test by adding
+   page-poison-on-free in mmu_gather drain RCU callback; if user
+   SIGSEGV shows the poison pattern in heap metadata, confirmed.
+2. **H7 (~30%)**: v2-specific start_thread / binfmt_elf load race.
+   Test by tracing the binfmt path between fork and child's first
+   KVM_RUN, looking for race windows where the child's mm has PT
+   entries that don't match what the elf loader populated.
+3. **H8 (~15%)**: KVM internal host-side FPU leak NOT visible at the
+   guest XMM level — perhaps host-FPU-context restoration during
+   KVM_RUN entry briefly exposes parent-task FPU registers between
+   KVM's `fpu_sync_fpstate(vcpu, true)` (load guest FPU) and VMRUN
+   instruction. Would need bpftrace on KVM internal functions or an
+   independent reproducer using actual XMM probes (mt-xmmprobe
+   pattern from the H.1b investigation).
+4. **H3 (~15%)**: mmu_gather drain timing edge case at execve.
+
+### Status pause
+
+T25 holds clean across the test matrix:
+- mt-mini SMP T=8 × 5: 5/5 PASS
+- threaded-fork-exec C × 10: 10/10 PASS
+- cpython-tier0: PASS
+
+T26 residual is ~0.15% per-fork in C-malloc-stress, ~5% per-boot in
+Python repro. Two ablations done and ruled out (G.2, FPU). T26
+investigation paused pending one of:
+(a) implementation of H4 page-poison instrumentation, or
+(b) fresh subagent investigation focused on H7 / H8 with the new
+   evidence (CPUID-disabled-AVX, FPU-ablation-negative).
 
 ### FPU ablation experiment (NEW)
 
