@@ -379,6 +379,57 @@ This requires either:
 
 Both are non-trivial and should be the next iteration's focus.
 
+### UPDATE — Aggregate analysis across 26 captures + new ablations
+
+**ALL 26 captures share IDENTICAL register state at fault**:
+- `rsi=0x4ee9b0` (alloc size argument — same call site every time)
+- `rdx` ranges 0x4d9090..0x4e8390 (multiple PIDs hit the SAME
+  chunk address in different boots; e.g. rdx=0x4e3290 hit 4 times)
+- The chunk address range is in the BRK heap region (binary RW segment
+  ends at 0x4b9248; chunks are 0x4d9000..0x4e8000)
+- Chunk size 0xd221 = ~53KB IDENTICAL across all captures
+- Chunk content IDENTICAL: prev_size=0, size=0xd221, fd=0, bk=0, body=0
+
+**Strong implications:**
+- Bug is at a SPECIFIC step in `_int_malloc`'s large-bin walk
+- The corrupted chunk is somewhere consistent — possibly the heap
+  top chunk being incorrectly walked
+- Multiple PIDs in different boots hit the same chunk address →
+  the bug is reproducible at the VA level (not random)
+
+### NEW ablations (this iteration)
+
+| Test | Result | Implication |
+|---|---|---|
+| **Seccomp baseline** (same C repro, same diag binary) | **0 SIGSEGVs in 5 boots × 4000 forks = 20000 forks** | **Bug is v2-specific** (not glibc/host kernel) |
+| T20 RCU-defer ablation (replace `call_rcu` with sync free) | 6/6 fail × ~6 child SIGSEGVs each — IDENTICAL to baseline | T20 is NOT the cause |
+
+### Updated hypothesis ranking
+
+| Hypothesis | Status |
+|---|---|
+| H1 cross-vCPU TLB stale | RULED OUT (G.2 ablation) |
+| H2a per-vCPU FPU/XMM leak | RULED OUT (KVM_SET_FPU ablation) |
+| H6 XSAVE/AVX leak | STRUCTURALLY IMPOSSIBLE (CPUID disables AVX) |
+| **T20 RCU-defer** | RULED OUT (sync-free ablation) |
+| H4 anonymous-page-not-zeroed | UNTESTED (~25%) |
+| H7 v2-specific start_thread / load_binary race | UNTESTED (~25%) |
+| **NEW: H9 v2-specific BRK / mm_region_added race during heap growth** | **UNTESTED (~30%)** |
+| **NEW: H10 v2-specific PT propagation race after fork CoW** | **UNTESTED (~20%)** |
+
+### Concrete next steps for T26
+
+1. Spawn focused subagent on v2 BRK / mm_region_added paths — find a
+   v2-only code path that could leave a heap chunk's `fd`/`bk` zero
+   while the `size` field is set.
+2. Add kernel-side instrumentation to `kvm_v2_handle_io_pf` to log
+   the (PID, user VA, host PA) tuples for any fault in the
+   0x4d9000..0x4e8000 range. Run repro and look for unusual patterns.
+3. Bisect between e4d347ae48d8 (Option B page defer) and tip to find
+   when T26 starts reproducing.
+
+T26 investigation continues in next iteration.
+
 ### FPU ablation experiment (NEW)
 
 Hypothesis: per-host-CPU vCPU's XMM/x87/MXCSR state from previous task
