@@ -34,10 +34,18 @@ def worker(wid):
         try:
             p = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(0.001)"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            rc = p.wait(timeout=10)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = p.communicate(timeout=10)
+            rc = p.returncode
             if rc != 0:
-                fails.append((wid, i, "rc", rc))
+                # SMP-T23 diag: capture worker stdout/stderr so we can
+                # see WHY the subprocess died (the original DEVNULL form
+                # silently swallowed the cause). Limit to first 500 bytes
+                # to avoid log explosion.
+                tag = f"[w{wid} iter={i}] PYRC1: rc={rc}"
+                fails.append((wid, i, "rc", rc, err[:500]))
+                print(f"{tag} stdout={out[:200]!r} stderr={err[:500]!r}",
+                      flush=True)
         except BaseException as e:
             fails.append((wid, i, type(e).__name__, str(e)))
             print(f"[w{wid} iter={i}] FAIL: {type(e).__name__}: {e!r}",
