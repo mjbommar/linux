@@ -765,4 +765,101 @@ cmd = "echo hi"
         assert!(s.contains("ip addr add 10.7.0.2/24 dev vec0"));
         assert!(s.contains("__umlctl_phase 'hello' 'echo hi'"));
     }
+
+    /// Init script ALWAYS exports default env even with no [env] section.
+    /// Required for CPython's sys.executable, subprocess workers, etc.
+    /// Regression guard: if these get accidentally removed, `python -m test`
+    /// stops working.
+    #[test]
+    fn render_init_always_exports_default_env() {
+        let u: Umlfile = toml::from_str(r#"
+schema_version = 1
+[instance]
+name = "minimal"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+"#).unwrap();
+        let s = render_init_script(&u).unwrap();
+        // PATH default — required for CPython sys.executable resolution.
+        assert!(s.contains("export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\""),
+                "missing default PATH export");
+        // HOME, TERM, SHELL fallbacks.
+        assert!(s.contains("export HOME="), "missing HOME export");
+        assert!(s.contains("export TERM="), "missing TERM export");
+        assert!(s.contains("export SHELL="), "missing SHELL export");
+    }
+
+    /// Init script ALWAYS mounts standard pseudo-FS even in minimal config.
+    /// Regression guard: tests doing os.openpty(), bind to localhost, /proc
+    /// access, /dev/shm POSIX shm, etc. depend on these.
+    #[test]
+    fn render_init_always_mounts_pseudo_fs() {
+        let u: Umlfile = toml::from_str(r#"
+schema_version = 1
+[instance]
+name = "minimal"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+"#).unwrap();
+        let s = render_init_script(&u).unwrap();
+        assert!(s.contains("mount -t proc"),       "missing /proc mount");
+        assert!(s.contains("mount -t sysfs"),      "missing /sys mount");
+        assert!(s.contains("mount -t devpts"),     "missing /dev/pts mount");
+        assert!(s.contains("mount -t tmpfs tmpfs  /dev/shm"),
+                "missing /dev/shm mount");
+        assert!(s.contains("mount -t tmpfs tmpfs  /tmp"),
+                "missing /tmp mount");
+    }
+
+    /// Loopback brought up unconditionally regardless of network mode.
+    /// Tests binding to localhost (test_docxmlrpc, test_external_inspection,
+    /// test_asyncio, etc.) need this even when mode = "none".
+    #[test]
+    fn render_init_always_brings_lo_up() {
+        for mode in ["none", "tap"] {
+            let toml_str = format!(r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "{}"
+"#, mode);
+            let u: Umlfile = toml::from_str(&toml_str).unwrap();
+            let s = render_init_script(&u).unwrap();
+            assert!(s.contains("ip link set lo up"),
+                    "loopback not brought up for mode={}", mode);
+        }
+    }
+
+    /// Default env can be overridden by [env] section. Order matters:
+    /// defaults must come BEFORE user env so user values win.
+    #[test]
+    fn render_init_user_env_overrides_defaults() {
+        let u: Umlfile = toml::from_str(r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+[env]
+PATH = "/custom/bin"
+HOME = "/customhome"
+"#).unwrap();
+        let s = render_init_script(&u).unwrap();
+        // The default export is unconditional and uses ${PATH:-...} so
+        // it doesn't override an already-set PATH. The [env] section
+        // exports come later and use plain `export X=...` so they win.
+        let default_pos = s.find("export PATH=\"${PATH:-").expect("default PATH missing");
+        let user_pos = s.find("export PATH='/custom/bin'").expect("user PATH missing");
+        assert!(default_pos < user_pos,
+                "default PATH must come before user [env] PATH");
+    }
 }
