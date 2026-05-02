@@ -2031,14 +2031,18 @@ int kvm_v2_fpu_capture_for_fork(struct arch_thread *from,
 
 	(void)from;	/* parent's snapshot lives on the per-CPU vCPU, not in `from` */
 
-	preempt_disable();
+	/* SMP-T13 (2026-05-02): migrate_disable() — preempt_disable is
+	 * a no-op without CONFIG_PREEMPT_COUNT. See vcpu_run for full
+	 * background. The KVM_GET_FPU ioctl is short and unlikely to
+	 * yield, but use migrate_disable for symmetry + safety. */
+	migrate_disable();
 	cpu  = smp_processor_id();
 	vcpu = kvm_v2_vcpu_get(cpu);
 	if (!vcpu || vcpu->vcpu_fd < 0) {
 		/* No parent vCPU to snapshot — child starts from arch defaults. */
 		to->kvm_v2.fpu_valid = false;
 		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
-		preempt_enable();
+		migrate_enable();
 		return 0;
 	}
 
@@ -2049,13 +2053,13 @@ int kvm_v2_fpu_capture_for_fork(struct arch_thread *from,
 				    cpu, vcpu->vcpu_fd, rc);
 		to->kvm_v2.fpu_valid = false;
 		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
-		preempt_enable();
+		migrate_enable();
 		return 0;
 	}
 
 	to->kvm_v2.fpu_valid = true;
 	trace_um_backend_kvm_v2_fpu_capture(cpu, 1);
-	preempt_enable();
+	migrate_enable();
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_fork);
@@ -2097,7 +2101,8 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 	if (!from)
 		return;
 
-	preempt_disable();
+	/* SMP-T13 (2026-05-02): migrate_disable() — see vcpu_run. */
+	migrate_disable();
 	cpu  = smp_processor_id();
 	vcpu = kvm_v2_vcpu_get(cpu);
 	if (!vcpu || vcpu->vcpu_fd < 0) {
@@ -2106,7 +2111,7 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 		 * values (kvm_v2_fpu_install_on_first_run's else-branch).
 		 */
 		from->thread.arch.kvm_v2.fpu_valid = false;
-		preempt_enable();
+		migrate_enable();
 		return;
 	}
 
@@ -2117,7 +2122,7 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 				    cpu, vcpu->vcpu_fd, rc);
 		from->thread.arch.kvm_v2.fpu_valid = false;
 		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
-		preempt_enable();
+		migrate_enable();
 		return;
 	}
 
@@ -2130,7 +2135,7 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 	 * that cares.
 	 */
 	trace_um_backend_kvm_v2_fpu_capture(cpu, 1);
-	preempt_enable();
+	migrate_enable();
 }
 EXPORT_SYMBOL_GPL(kvm_v2_fpu_capture_for_switch_out);
 
