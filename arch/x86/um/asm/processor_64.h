@@ -128,6 +128,10 @@ static inline void arch_flush_thread(struct arch_thread *thread)
 {
 #ifdef CONFIG_UM_BACKEND_KVM_V2
 	thread->kvm_v2.fpu_valid = false;
+	thread->kvm_v2.iotrap_fpu_valid = false;
+	thread->kvm_v2.ist_pending = false;
+	thread->kvm_v2.saved_cr2_valid = false;
+	thread->kvm_v2.saved_cr2_at_eintr = 0;
 #endif
 }
 

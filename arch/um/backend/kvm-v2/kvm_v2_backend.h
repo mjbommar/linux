@@ -354,6 +354,28 @@ struct kvm_v2_vcpu {
 	 */
 	atomic64_t last_seen_tlb_gen;
 	struct mm_struct *current_mm;
+
+	/*
+	 * SMP-T16 fix (2026-05-02): Bug A — preserve hardware-architectural
+	 * CR2 across same-task re-entries. The previous unconditional
+	 * sregs->cr2 = 0 in load_user_sregs zeroed CR2 on every dispatch.
+	 * Combined with KVM_SYNC_X86_SREGS dirty (forced by CR4.PGE toggle),
+	 * this writes vcpu->arch.cr2 = 0 and svm->vmcb->save.cr2 = 0 on
+	 * every VMRUN. A SIGALRM-EINTR caught after hardware queued a #PF
+	 * for delivery but before the in-stub `mov %cr2, %rax` could capture
+	 * it loses the fault address. The next dispatch's load_user_sregs
+	 * zeroed cr2 → re-entry with cr2=0 → user-mode re-fault delivered
+	 * with hardware-set cr2=fault_va, BUT any internal NPF between
+	 * IDT delivery and the stub's read clobbers cr2 from the
+	 * just-set-zero vcpu->arch.cr2.
+	 *
+	 * Track the previous task that ran on this vCPU. Only zero cr2
+	 * on cross-task transitions (necessary for cross-task isolation —
+	 * a child task shouldn't see parent's residual cr2). Same-task
+	 * re-entry leaves cr2 alone, so KVM's mmap-cached real fault
+	 * address survives.
+	 */
+	struct task_struct *last_task;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);

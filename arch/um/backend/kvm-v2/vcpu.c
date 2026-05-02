@@ -1272,9 +1272,20 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 		if (a->kvm_v2.saved_cr2_valid) {
 			sregs->cr2 = a->kvm_v2.saved_cr2_at_eintr;
 			a->kvm_v2.saved_cr2_valid = false;
-		} else {
+		} else if (vcpu->last_task != current) {
+			/*
+			 * SMP-T16 fix (2026-05-02): only zero cr2 on cross-task
+			 * transitions. Same-task re-entry preserves whatever
+			 * KVM left in sregs.cr2 — typically the hardware-
+			 * architectural CR2 from the previous exit's fault. See
+			 * struct kvm_v2_vcpu.last_task comment for the full
+			 * mechanism (Bug A — first-KVM_RUN-of-new-exec NULL
+			 * deref at e_entry under SMP, captured 2026-05-02 via
+			 * state-trace ring).
+			 */
 			sregs->cr2 = 0;
 		}
+		vcpu->last_task = current;
 	}
 
 	/*
