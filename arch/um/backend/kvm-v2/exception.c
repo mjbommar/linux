@@ -249,25 +249,45 @@ static const u8 kvm_v2_handler_stub_panic[] = { 0xe6, UM_KVM_TRAP_PANIC, 0x48, 0
 static const u8 kvm_v2_handler_stub_bp[]    = { 0xe6, UM_KVM_TRAP_PANIC, 0x48, 0xcf };
 
 /*
- * Phase H.2: #NM (vec 7, "device not available") handler stub. Fired
- * when guest executes an FP/SSE/AVX instruction with CR0.TS=1. Acts
- * fully in-guest at CPL=0:
+ * SMP-T22 (2026-05-02) — #NM (vec 7) handler stub: vmexit-on-fault.
  *
- *   0f 06           clts        ; clear CR0.TS (privileged at CPL=0)
- *   48 cf           iretq       ; resume user
+ *   e6 fd           out %al, $0xfd  ; vmexit with port = UM_KVM_TRAP_NM
+ *   48 cf           iretq           ; UNREACHABLE — host marshals user
+ *                                     state via SYNC_REGS and resumes
+ *                                     at frame.user_rip directly
  *
- * No host vmexit. Side effect: guest CR0.TS is now 0 (FPU usable).
+ * History: prior to SMP-T22, the stub was `clts; iretq` — a fully
+ * in-guest path. Under SMP-T13's per-host-CPU vCPU pool, multiple
+ * UML tasks share each vCPU's IST page. The in-guest iretq pops
+ * 5 qwords from IST top-40, transitioning to CPL=3. If anything
+ * wrote a kernel-half RIP into IST top-40 between hardware push and
+ * iretq pop (live-IST race), iretq lands user mode at a kernel-half
+ * RIP — surfaces as the NM_stub+2 P=0 segfault (Bug B class).
  *
- * The host detects "FPU was used during this dispatch" by reading
- * sregs.cr0.TS after the next vmexit: TS=0 means #NM fired, TS=1
- * means no FPU instruction executed. See vcpu.c kvm_v2_vcpu_run for
- * the optimization path that skips KVM_GET_FPU when TS stays set.
+ * SMP-T17 closed the EINTR-mid-stub variant via inline #NM EINTR
+ * handler; SMP-T19 closed software-side IST writes via sanity
+ * guards. SMP-T22 closes the entire iretq-pops-bad-frame surface
+ * by eliminating the in-guest iretq: stub vmexits, host clears
+ * CR0.TS via sregs and resumes user at frame.user_rip directly via
+ * SYNC_REGS marshaling (same flow as #PF/#GP/#UD/#DE/#OF).
  *
- * v1 archive precedent: kvm-v1-archive lazy-FPU model used a similar
- * CR0.TS / #NM trampoline (thread.c around the FPU save/restore comments).
- * v2 simplifies via SYNC_REGS: no out-to-host on #NM, just clts+iretq.
+ * The iretq tail bytes (`48 cf`) are kept for stub-byte-length
+ * symmetry with peer stubs; unreachable under correct operation.
+ *
+ * v1 archive precedent: kvm-v1-archive lazy-FPU model also exited
+ * to host on #NM (thread.c around the FPU save/restore comments).
+ *
+ * Performance: ~5% of dispatches trip #NM per SMP-T13 empirics
+ * (vcpu.c: "fpu_taken ≈ 5%, fpu_skipped ≈ 95%"). Adding one
+ * vmexit per #NM is negligible; the cost is dwarfed by the
+ * subsequent FPU instruction itself.
+ *
+ * Lazy-FPU coexistence: paired with arch_thread.kvm_v2.nm_ts_bypass
+ * one-shot flag in load_user_sregs (vcpu.c). Without that flag, my
+ * host's TS clear in handle_io_nm is undone before user retries the
+ * FP instruction — infinite loop at boot.
  */
-static const u8 kvm_v2_handler_stub_nm[]    = { 0x0f, 0x06, 0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_nm[]    = { 0xe6, UM_KVM_TRAP_NM, 0x48, 0xcf };
 
 /*
  * GDT entries (long-mode, 8 bytes each — except TSS which is 16 bytes

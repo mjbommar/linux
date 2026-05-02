@@ -1121,6 +1121,13 @@ int kvm_v2_handle_nm_eintr_inline(struct uml_pt_regs *regs,
 	run->s.regs.sregs.cr0 &= ~X86_CR0_TS;
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 
+	/* SMP-T22: one-shot bypass — kvm_v2_load_user_sregs at the
+	 * next dispatch would otherwise unconditionally re-arm TS,
+	 * undoing the clear above. The flag tells it to skip the
+	 * arming + clear the existing TS bit. Pairs with the same
+	 * mechanism in kvm_v2_handle_io_nm (the non-EINTR variant). */
+	current->thread.arch.kvm_v2.nm_ts_bypass = true;
+
 	/* No ist_frame_write — we're not preparing a stub iretq tail.
 	 * The next dispatch's marshal_to_kvm_regs will write user_rip
 	 * directly into KVM's regs.
@@ -1619,6 +1626,57 @@ static int kvm_v2_handle_io_of(struct uml_pt_regs *regs,
 }
 
 /*
+ * SMP-T22 (2026-05-02) — #NM (vec 7) host-side handler.
+ *
+ * The in-guest stub `out %al, $UM_KVM_TRAP_NM ; iretq` traps to here
+ * via KVM_EXIT_IO. We:
+ *   1. Read the IDT-pushed iretq frame (no error_code) from IST.
+ *   2. Marshal user state into regs (HOST_IP/SP/EFLAGS).
+ *   3. Clear sregs.cr0.TS = host-side `clts` emulation.
+ *   4. Set arch_thread.kvm_v2.nm_ts_bypass = true so the next
+ *      kvm_v2_load_user_sregs SKIPS the unconditional TS arming
+ *      AND clears the existing TS bit. Without that, the user's
+ *      FP instruction would fault again on retry → infinite loop.
+ *   5. Drain pending signal/scheduler work (interrupt_end).
+ *   6. Marshal regs back into kvm_run->s.regs.regs.
+ *   7. Return; next KVM_RUN re-enters at frame.user_rip with TS=0.
+ *
+ * The in-guest iretq tail is UNREACHABLE — we marshal user state
+ * directly via SYNC_REGS, bypassing any iretq from IST. This
+ * eliminates the NM_stub+2 iretq-pops-kernel-half-RIP surface
+ * (Bug B class — memos 10, SMP-T17, SMP-T19).
+ */
+static int kvm_v2_handle_io_nm(struct uml_pt_regs *regs,
+			       struct kvm_run *run,
+			       struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* no error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	/* Host-side `clts` emulation. */
+	run->s.regs.sregs.cr0 &= ~X86_CR0_TS;
+	run->kvm_dirty_regs   |= KVM_SYNC_X86_SREGS;
+
+	/* One-shot bypass: load_user_sregs at the next dispatch will see
+	 * this flag, skip the TS re-arm, and clear the flag. */
+	current->thread.arch.kvm_v2.nm_ts_bypass = true;
+
+	/* Drain pending signal/scheduler work — same pattern as peers. */
+	interrupt_end();
+
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs   |= KVM_SYNC_X86_REGS;
+
+	return 0;
+}
+
+/*
  * Default-stub dispatcher: any vector E.1's IDT didn't wire to a
  * specific handler points at the panic stub which fires
  * UM_KVM_TRAP_PANIC = 0xf8. Best-effort: dump the frame contents and
@@ -1682,6 +1740,8 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 		return kvm_v2_handle_io_de(regs, run, vcpu);
 	case UM_KVM_TRAP_OF:
 		return kvm_v2_handle_io_of(regs, run, vcpu);
+	case UM_KVM_TRAP_NM:
+		return kvm_v2_handle_io_nm(regs, run, vcpu);
 	case UM_KVM_TRAP_PANIC:
 	default:
 		return kvm_v2_handle_io_panic(regs, run, vcpu);

@@ -69,6 +69,15 @@ enum um_kvm_iotrap {
 	UM_KVM_TRAP_UD      = 0xfa,	/* #UD (vector  6); memo 26 §E.3 */
 	UM_KVM_TRAP_DE      = 0xfb,	/* #DE (vector  0); memo 26 §E.3 */
 	UM_KVM_TRAP_OF      = 0xfc,	/* #OF (vector  4); memo 26 §E.3 */
+	UM_KVM_TRAP_NM      = 0xfd,	/* #NM (vector  7); SMP-T22
+					 * 2026-05-02: host-side TS clear
+					 * via vmexit, eliminates in-guest
+					 * iretq → eliminates the NM_stub+2
+					 * iretq-popped-kernel-half-RIP
+					 * Bug B race class. Paired with
+					 * arch_thread.kvm_v2.nm_ts_bypass
+					 * one-shot bypass in load_user_sregs
+					 * to coexist with lazy-FPU TS arming. */
 	/* #BP (vector 3) intentionally NOT in this enum — handled via
 	 * KVM_GUESTDBG_USE_SW_BP → KVM_EXIT_DEBUG. */
 	UM_KVM_TRAP_PANIC   = 0xf8,	/* unhandled-vector stub; host

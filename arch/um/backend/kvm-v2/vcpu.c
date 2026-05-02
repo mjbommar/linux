@@ -1406,8 +1406,25 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	 * Idempotent: every dispatch re-arms; the post-exit sregs.cr0 read
 	 * happens before this re-arm so no race. Existing CR0 bits (PE/MP/
 	 * NE/WP/PG) are preserved — we only set the TS bit.
+	 *
+	 * SMP-T22 (2026-05-02) one-shot bypass: if the host-side #NM handler
+	 * (kvm_v2_handle_io_nm or the EINTR variant) just cleared TS for
+	 * the user's FP-instruction retry, skip the re-arm AND clear the
+	 * existing TS bit so the next KVM_RUN re-enters at the user's FP
+	 * instruction with TS=0. Without this, my host's TS clear is undone
+	 * before the user gets a chance to retry, and the FP instruction
+	 * faults again → handler clears TS → arm re-sets → infinite loop.
+	 *
+	 * Lazy-FPU semantics preserved: nm_ts_bypass is one-shot. After the
+	 * user's FP burst completes (any non-#NM exit), the next dispatch
+	 * arms TS=1 normally, so the next FP burst still trips one #NM.
 	 */
-	sregs->cr0 |= X86_CR0_TS;
+	if (current->thread.arch.kvm_v2.nm_ts_bypass) {
+		sregs->cr0 &= ~X86_CR0_TS;
+		current->thread.arch.kvm_v2.nm_ts_bypass = false;
+	} else {
+		sregs->cr0 |= X86_CR0_TS;
+	}
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
 	return 0;

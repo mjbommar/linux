@@ -101,6 +101,31 @@ struct arch_thread {
 		 */
 		u64  saved_cr2_at_eintr;
 		bool saved_cr2_valid;
+
+		/*
+		 * SMP-T22 (2026-05-02): one-shot bypass of CR0.TS arming
+		 * in kvm_v2_load_user_sregs. Set true by the host-side
+		 * #NM handlers (kvm_v2_handle_io_nm and the EINTR variant
+		 * kvm_v2_handle_nm_eintr_inline) after they clear sregs.
+		 * cr0.TS for the user's FP-instruction retry. The next
+		 * dispatch's load_user_sregs reads this flag, skips the
+		 * unconditional `sregs->cr0 |= TS` and clears the flag,
+		 * so the user actually re-enters at user_rip with TS=0.
+		 *
+		 * Without this, my host-side TS clear is undone by the
+		 * very next dispatch's lazy-FPU TS-arming, the user FP
+		 * faults again, vmexit, handler clears TS, dispatch arms
+		 * TS, ad infinitum (boot hangs at first FP instruction).
+		 *
+		 * Lazy-FPU semantics preserved: after the user's FP burst
+		 * completes and the user vmexits via syscall (or any non-
+		 * #NM exit), the next dispatch's load_user_sregs sees
+		 * nm_ts_bypass=false and arms TS=1 normally — so the
+		 * NEXT FP burst still trips one #NM and the lazy-FPU
+		 * "FPU-not-used" detection still works for non-FP
+		 * dispatches.
+		 */
+		bool nm_ts_bypass;
 	} kvm_v2;
 #endif
 };
@@ -132,6 +157,7 @@ static inline void arch_flush_thread(struct arch_thread *thread)
 	thread->kvm_v2.ist_pending = false;
 	thread->kvm_v2.saved_cr2_valid = false;
 	thread->kvm_v2.saved_cr2_at_eintr = 0;
+	thread->kvm_v2.nm_ts_bypass = false;
 #endif
 }
 
@@ -167,6 +193,7 @@ static inline void arch_copy_thread(struct arch_thread *from,
 	to->kvm_v2.ist_pending = false;
 	to->kvm_v2.saved_cr2_valid = false;
 	to->kvm_v2.saved_cr2_at_eintr = 0;
+	to->kvm_v2.nm_ts_bypass = false;
 	(void)kvm_v2_fpu_capture_for_fork(from, to);
 #endif
 }
