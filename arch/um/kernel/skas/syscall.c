@@ -77,6 +77,28 @@ void handle_syscall(struct uml_pt_regs *r)
 			um_diag_record(syscall, mp_addr, mp_len, mp_prot,
 				       (long)ret, t1);
 			(void)t0;
+
+			/*
+			 * SMP-T12 diagnostic: bounded pr_emerg whenever a
+			 * mmap with MAP_PRIVATE|MAP_ANONYMOUS, addr=NULL,
+			 * len>0 returns either 0 or some non-userspace
+			 * address. Used to ground-truth the MMAP_NULL
+			 * symptom — kernel's view of mmap retval at the
+			 * exact moment of return.
+			 */
+			if (syscall == 9 && mp_addr == 0 && mp_len > 0) {
+				static atomic_t ump_hits = ATOMIC_INIT(0);
+				bool weird = (ret == 0) ||
+					     ((unsigned long)ret >= 0x80000000);
+				if (weird && atomic_inc_return(&ump_hits) <= 30)
+					pr_emerg("UM_MMAP_DIAG pid=%d cpu=%d "
+						 "addr=%#lx len=%#lx prot=%#lx "
+						 "ret=%#lx\n",
+						 current->pid,
+						 raw_smp_processor_id(),
+						 mp_addr, mp_len, mp_prot,
+						 (unsigned long)ret);
+			}
 		}
 
 		PT_REGS_SET_SYSCALL_RETURN(regs, ret);

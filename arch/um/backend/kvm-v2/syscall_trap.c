@@ -1705,6 +1705,28 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 * tail (its "post-handle_syscall: marshal back to vcpu state"
 	 * region around the per-task vcpu_run cleanup).
 	 */
+	/*
+	 * SMP-T12 diagnostic: log the syscall return value we're about
+	 * to ship to user. mmap (syscall_nr was 9 BEFORE we cleared
+	 * orig_ax) returning errno-range or zero is the MMAP_NULL bug
+	 * signature. Bounded to 30 hits.
+	 */
+	{
+		long ax_val = (long)regs->gp[HOST_AX];
+
+		if (syscall_nr == 9 &&
+		    ((unsigned long)ax_val >= -4096UL || ax_val == 0)) {
+			static atomic_t marshal_diag = ATOMIC_INIT(0);
+			if (atomic_inc_return(&marshal_diag) <= 30)
+				pr_emerg("UM_MARSHAL_DIAG pid=%d cpu=%d "
+					 "syscall_nr=%lu ship.rax=%#lx hax=%#lx\n",
+					 current->pid, raw_smp_processor_id(),
+					 syscall_nr,
+					 (unsigned long)run->s.regs.regs.rax,
+					 (unsigned long)regs->gp[HOST_AX]);
+		}
+	}
+
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
 	run->s.regs.regs.rcx = regs->gp[HOST_IP];
 	run->s.regs.regs.r11 = regs->gp[HOST_EFLAGS];
