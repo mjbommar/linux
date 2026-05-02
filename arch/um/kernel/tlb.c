@@ -511,12 +511,17 @@ int um_tlb_sync(struct mm_struct *mm)
 	if (ret == 0 && mm != &init_mm) {
 		atomic64_inc(&mm->context.tlb_gen);
 		/*
-		 * Activation point for backend->tlb_kick_others, kept
-		 * commented to mark the call site:
-		 *
-		 *	if (um_backend->tlb_kick_others)
-		 *		um_backend->tlb_kick_others(mm);
+		 * SMP-T13 followup (2026-05-02): activate the cross-vCPU
+		 * tlb kicker now that the migrate_disable fix has closed
+		 * the dominant SMP T>=N race. Earlier activation attempts
+		 * regressed T=4 from 60/60 to 18/60 because the IPI storm
+		 * piled on top of the migration race. With the migration
+		 * race gone, the kicker should help close the residual
+		 * "stale guest TLB on remote vCPU" window that produces
+		 * mt-mini's `got=0 expect=tid` symptoms.
 		 */
+		if (um_backend->tlb_kick_others)
+			um_backend->tlb_kick_others(mm);
 	}
 
 	if (ret == 0) {
