@@ -18,6 +18,7 @@
  * Build: gcc -static -O0 -pthread -o mt-rawmmap mt-rawmmap.c
  */
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdint.h>
@@ -27,6 +28,16 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+static void dump_trace(void)
+{
+	int fd = open("/sys/kernel/debug/um_kvm_v2_trace/enabled", O_WRONLY);
+	if (fd >= 0) { (void)!write(fd, "0\n", 2); close(fd); }
+	fd = open("/sys/kernel/debug/um_kvm_v2_trace/dump", O_WRONLY);
+	if (fd < 0) return;
+	(void)!write(fd, "1\n", 2);
+	close(fd);
+}
 
 #define ITERS    50
 #define ALLOC_SZ 0x10000
@@ -83,18 +94,21 @@ static void *worker(void *arg)
 
 		/* errno-range: rax >= 0xfffffffffffff001 (= -4095UL) */
 		if ((ret & 0xfffffffffffff000UL) == 0xfffffffffffff000UL) {
+			dump_trace();
 			fprintf(stderr,
 				"RAW_ERR tid=%ld iter=%d rax=%#lx errno=%ld\n",
 				tid, i, ret, -(long)ret);
 			return (void *)1;
 		}
 		if (ret == 0) {
+			dump_trace();
 			fprintf(stderr,
 				"RAW_NULL tid=%ld iter=%d (kernel returned 0)\n",
 				tid, i);
 			return (void *)4;
 		}
 		if (ret < 0x40000000UL || ret >= 0x800000000000UL) {
+			dump_trace();
 			fprintf(stderr,
 				"RAW_WEIRD tid=%ld iter=%d rax=%#lx\n",
 				tid, i, ret);
@@ -109,6 +123,7 @@ static void *worker(void *arg)
 			if (got != (unsigned char)tid) {
 				/* Re-read to confirm. */
 				unsigned char re_got = vp[j];
+				dump_trace();
 				fprintf(stderr,
 					"RAW_VERIFY tid=%ld iter=%d off=%#zx "
 					"got=%u re_got=%u expect=%u rax=%#lx\n",
