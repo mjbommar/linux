@@ -1902,6 +1902,32 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 						    regs, run, vcpu);
 					(void)kvm_v2_handle_pf_eintr_inline(regs, run, vcpu,
 									    eintr_sregs.cr2);
+				} else if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA + 0x1c0 &&
+					   eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x200) {
+					/*
+					 * SMP-T17 (2026-05-02) Bug B fix: slot 7 = #NM
+					 * stub (clts; iretq). EINTR caught us before the
+					 * stub's iretq pop. The stub-replay path is
+					 * structurally fragile: between snapshot and
+					 * resume, OTHER tasks on this vCPU push their
+					 * own iretq frames into IST top-40..top, and
+					 * restore_pending's writeback can land on a CR3
+					 * (new task's mm) where the IST GVA aliases a
+					 * different physical page than at snapshot time.
+					 * The stub's iretq then pops bytes that include
+					 * the kernel-half NM_stub address in the RIP
+					 * slot, transitions to CPL=3, and immediately
+					 * faults trying to fetch from US=0 (Bug B).
+					 *
+					 * Process #NM inline: clear CR0.TS in sregs
+					 * (= what `clts` would do) and restore user
+					 * regs from the IST frame (5 qwords, no error
+					 * code). The next KVM_RUN re-enters at the user
+					 * RIP — NOT at the stub.
+					 */
+					KVMV2_TRACE(KVMV2_OP_EINTR_INLINE_PF,
+						    regs, run, vcpu);
+					(void)kvm_v2_handle_nm_eintr_inline(regs, run, vcpu);
 				} else if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA &&
 					   eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x200) {
 					struct arch_thread *a = &current->thread.arch;

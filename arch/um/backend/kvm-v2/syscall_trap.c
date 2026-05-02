@@ -110,6 +110,7 @@
 
 #include <asm/page.h>
 #include <asm/pgtable.h>	/* _KERNPG_TABLE, _PAGE_PRESENT, _PAGE_ACCESSED, swapper_pg_dir */
+#include <asm/processor-flags.h>	/* X86_CR0_TS */
 #include <asm/trace/um_backend.h>
 
 #include <kern_util.h>		/* segv_handler, relay_signal */
@@ -1005,6 +1006,58 @@ void kvm_v2_ist_frame_snapshot_raw(struct kvm_v2_vcpu *vcpu)
  * by another task between EINTR and our dispatch, so we can't read
  * it here).
  */
+/*
+ * SMP-T17 (2026-05-02): inline #NM handler for the EINTR-mid-NM-stub
+ * case. Bug B mechanism: when SIGALRM EINTRs the guest with RIP at
+ * NM stub start (HANDLERS_GVA + 0x1c0), the snapshot/replay path saves
+ * a frame and re-enters at NM_stub on next dispatch. Re-entry means
+ * `clts; iretq` runs again, but the iretq pops from a stale IST top-40
+ * because the in-between dispatches of OTHER tasks on the same vCPU
+ * overwrite/corrupt those slots in ways the snapshot/restore_pending
+ * pair doesn't fully repair (especially the RIP pop slot when CR3
+ * differs between the saved-snapshot task and the IST-page-aliased
+ * physical page seen at iretq time on the new mm).
+ *
+ * The fix: NEVER replay the NM stub. Process the #NM inline:
+ *   1. Read the IDT-pushed iretq frame from IST (5 qwords; no err code)
+ *   2. Restore user state into regs->gp[] from that frame
+ *   3. Clear CR0.TS in sregs (= what `clts` would do)
+ *   4. Marshal regs back; the next KVM_RUN re-enters directly at user RIP
+ *      (NOT at the stub) — no iretq pop required.
+ *
+ * Mirrors the pattern of the inline #PF handler shipped at e5977806fd14.
+ * No segv_handler / interrupt_end calls — #NM has no UML-side
+ * processing (just FPU-on for the guest).
+ */
+int kvm_v2_handle_nm_eintr_inline(struct uml_pt_regs *regs,
+				  struct kvm_run *run,
+				  struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_ist_frame frame;
+
+	/* #NM has NO error code. */
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* no error_code */);
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	/* Emulate `clts`: clear CR0.TS so the next KVM_RUN re-enters
+	 * with TS=0. The user's faulting FP instruction will succeed
+	 * on retry (we resume at frame.user_rip = the FP instruction).
+	 */
+	run->s.regs.sregs.cr0 &= ~X86_CR0_TS;
+	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
+
+	/* No ist_frame_write — we're not preparing a stub iretq tail.
+	 * The next dispatch's marshal_to_kvm_regs will write user_rip
+	 * directly into KVM's regs.
+	 */
+
+	return 0;
+}
+
 int kvm_v2_handle_pf_eintr_inline(struct uml_pt_regs *regs,
 				  struct kvm_run *run,
 				  struct kvm_v2_vcpu *vcpu,
@@ -1161,6 +1214,26 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 		if (cr2 == 0 && (frame.error_code & 0x2) &&
 		    captured_rdx > 0x10000) {
 			cr2 = captured_rdx;
+		}
+
+		/*
+		 * Bug B trigger (2026-05-02): when user_rip falls in
+		 * KVM_V2_HANDLERS_GVA range (kernel-half handler stubs page),
+		 * the user task is trying to execute kernel code at CPL=3.
+		 * This means an iretq somewhere popped a kernel-half RIP into
+		 * a user-mode return frame. Auto-freeze state-trace so the
+		 * full sequence of events leading up to the fault is preserved
+		 * for post-mortem.
+		 */
+		if (frame.user_rip >= KVM_V2_HANDLERS_GVA &&
+		    frame.user_rip <  KVM_V2_HANDLERS_GVA + 0x1000) {
+			KVMV2_TRACE(KVMV2_OP_TRACE_TRIGGER, regs, run, vcpu);
+			kvm_v2_state_trace_dump("Bug B: user_rip in handlers range");
+			pr_emerg("um: kvm-v2 BUG_B user_rip=%llx err=%llx pid=%d comm=%s sp=%llx\n",
+				 (unsigned long long)frame.user_rip,
+				 (unsigned long long)frame.error_code,
+				 current->pid, current->comm,
+				 (unsigned long long)frame.user_rsp);
 		}
 	}
 

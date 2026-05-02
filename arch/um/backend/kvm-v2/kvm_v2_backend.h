@@ -586,6 +586,15 @@ int kvm_v2_handle_pf_eintr_inline(struct uml_pt_regs *regs,
 				  u64 cr2);
 
 /*
+ * SMP-T17 (2026-05-02): inline #NM handler for the EINTR-mid-NM-stub
+ * case. See syscall_trap.c::kvm_v2_handle_nm_eintr_inline for the
+ * full mechanism (Bug B — mt-mmap-stress wild kernel-half jump).
+ */
+int kvm_v2_handle_nm_eintr_inline(struct uml_pt_regs *regs,
+				  struct kvm_run *run,
+				  struct kvm_v2_vcpu *vcpu);
+
+/*
  * Phase D.3: per-task FPU capture on context-switch-out + the
  * .context_switch op wrapper that invokes it before delegating to
  * seccomp_context_switch. Defined in vcpu.c (alongside the C.4
