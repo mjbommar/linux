@@ -1185,6 +1185,53 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	sregs->cr3     = (u64)pgd_pa;
 	sregs->fs.base = (u64)fs_base;
 	sregs->gs.base = (u64)gs_base;
+
+	/*
+	 * SMP-T13 fix (2026-05-02): on every dispatch, reset CS/SS/DS/ES
+	 * to USER selectors.
+	 *
+	 * After a SYSCALL trap, vCPU.cs = kernel CS (=0x08, DPL=0)
+	 * because MSR_STAR's SYSCALL CS half is 0x08. KVM stores cs
+	 * into run->s.regs.sregs at exit. The previous load_user_sregs
+	 * only wrote cr3/fs/gs/cr2/cr4 — leaving cs at kernel CS. The
+	 * next KVM_RUN entered the guest at user_RIP but with CS=0x08
+	 * (CPL=0).
+	 *
+	 * Empirical proof (mt-stackcheck reproducer 2026-05-02): even
+	 * with NO mmap calls, T=8 ncpus=4 crashes with `segfault at 0
+	 * ip=<user_VA> error=2` — error=2 = write-to-not-present in
+	 * SUPERVISOR mode. CPL=3 user code can't generate a supervisor
+	 * fault. The CPU was at CPL=0 executing user code.
+	 *
+	 * v1 archive avoided this entirely via an IRETQ gadget
+	 * (kvm-v1-archive/thread.c:3088-3110); v2 chose the simpler
+	 * "set RIP directly" path but skipped CS. This fix restores
+	 * CS/SS/DS/ES to USER values on every dispatch — KVM's
+	 * __set_sregs applies via mmu_reset_needed and the next
+	 * vmenter has CS=0x2b + RIP=user_RIP with CPL=3.
+	 */
+	sregs->cs.selector = 0x2b;	/* USER_CS, DPL=3 */
+	sregs->cs.type     = 0xb;
+	sregs->cs.dpl      = 3;
+	sregs->cs.s        = 1;
+	sregs->cs.l        = 1;
+	sregs->cs.db       = 0;
+	sregs->cs.g        = 1;
+	sregs->cs.present  = 1;
+	sregs->cs.base     = 0;
+	sregs->cs.limit    = 0xffffffff;
+	sregs->ss.selector = 0x23;	/* USER_DS, DPL=3 */
+	sregs->ss.type     = 0x3;
+	sregs->ss.dpl      = 3;
+	sregs->ss.s        = 1;
+	sregs->ss.db       = 1;
+	sregs->ss.l        = 0;
+	sregs->ss.g        = 1;
+	sregs->ss.present  = 1;
+	sregs->ss.base     = 0;
+	sregs->ss.limit    = 0xffffffff;
+	sregs->ds = sregs->es = sregs->ss;
+
 	/*
 	 * Defensive: cr2 in the SYNC_REGS sregs mmap reflects the LAST
 	 * KVM_RUN exit's #PF address. v2 uses a per-host-CPU vCPU pool
