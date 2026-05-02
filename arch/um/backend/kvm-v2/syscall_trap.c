@@ -1313,6 +1313,59 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 				 current->pid, current->comm,
 				 (unsigned long long)frame.user_rsp);
 		}
+
+		/*
+		 * Bug class — RSV=1 (reserved-bit violation) trigger
+		 * (SMP-T23 follow-up, 2026-05-02): #PF error code bit 3
+		 * (RSV) means the page-table walk encountered a reserved
+		 * bit set in some level. Indicates page-table corruption.
+		 * Captured as a residual on threaded-subprocess-wait.py
+		 * post-T22 (e.g. `segfault at ffffe00000000040 ip
+		 * ffffe00000000040 error 15` — write to LSTAR with RSV=1).
+		 * One-shot trace dump per boot so we capture a fresh
+		 * smoking-gun without log-flooding.
+		 */
+		if (frame.error_code & 0x8 /* RSV bit */) {
+			static int diag_seen;
+			if (diag_seen < 5) {
+				diag_seen++;
+				KVMV2_TRACE(KVMV2_OP_TRACE_TRIGGER, regs, run, vcpu);
+				kvm_v2_state_trace_dump("Bug C: PF with RSV=1");
+				pr_emerg("um: kvm-v2 BUG_C[%d] PF-RSV cr2=%llx user_rip=%llx err=%llx pid=%d comm=%s\n",
+					 diag_seen,
+					 (unsigned long long)cr2,
+					 (unsigned long long)frame.user_rip,
+					 (unsigned long long)frame.error_code,
+					 current->pid, current->comm);
+			}
+		}
+
+		/*
+		 * Bug class — high-cr2 with non-trivial signature (page-
+		 * recycling-class trigger; SMP-T23 follow-up): user-half
+		 * cr2 above the typical TLS/heap region (>0x100000000 = 4GB)
+		 * with P=0 and U=1. Indicates user accessed a stale-TLB-
+		 * mapped freed-and-recycled physical page. Doesn't fire on
+		 * legitimate high-VA accesses (most workloads stay below
+		 * 0x10000000000 = 1TB). One-shot per boot.
+		 */
+		if (cr2 >= 0x100000000ULL &&
+		    cr2 <  0x800000000000ULL &&
+		    !(frame.error_code & 0x1) /* P=0 */ &&
+		    (frame.error_code & 0x4) /* U=1 */) {
+			static int diag_seen;
+			if (diag_seen < 5) {
+				diag_seen++;
+				KVMV2_TRACE(KVMV2_OP_TRACE_TRIGGER, regs, run, vcpu);
+				kvm_v2_state_trace_dump("Bug class: high-cr2 user fault");
+				pr_emerg("um: kvm-v2 BUG_PR[%d] high-cr2 cr2=%llx user_rip=%llx err=%llx pid=%d comm=%s\n",
+					 diag_seen,
+					 (unsigned long long)cr2,
+					 (unsigned long long)frame.user_rip,
+					 (unsigned long long)frame.error_code,
+					 current->pid, current->comm);
+			}
+		}
 	}
 
 	/*
