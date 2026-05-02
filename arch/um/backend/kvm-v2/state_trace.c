@@ -517,6 +517,40 @@ static int trace_clear_set(void *data, u64 val)
 }
 DEFINE_DEBUGFS_ATTRIBUTE(trace_clear_fops, NULL, trace_clear_set, "%llu\n");
 
+static bool trace_enable_at_boot;
+
+static int __init kvm_v2_state_trace_enable_at_boot(char *unused)
+{
+	trace_enable_at_boot = true;
+	return 0;
+}
+__setup("kvm_v2_trace_enable", kvm_v2_state_trace_enable_at_boot);
+
+/*
+ * Defer ring alloc + static-key enable to subsys_initcall — vmalloc and
+ * static_branch are available by then but late enough that we still
+ * capture the very first KVM_RUN of pid=1.
+ */
+static int __init kvm_v2_state_trace_boot_arm(void)
+{
+	int rc;
+
+	if (!trace_enable_at_boot)
+		return 0;
+	mutex_lock(&trace_alloc_mutex);
+	rc = trace_rings_alloc_locked();
+	mutex_unlock(&trace_alloc_mutex);
+	if (rc) {
+		pr_warn("um: kvm-v2 state-trace: boot enable failed alloc rc=%d\n", rc);
+		return 0;
+	}
+	if (!static_key_enabled(&kvm_v2_state_trace_key.key))
+		static_branch_enable(&kvm_v2_state_trace_key);
+	pr_info("um: kvm-v2 state-trace: ENABLED at boot via kvm_v2_trace_enable\n");
+	return 0;
+}
+subsys_initcall(kvm_v2_state_trace_boot_arm);
+
 static int __init kvm_v2_state_trace_init(void)
 {
 	trace_dir = debugfs_create_dir("um_kvm_v2_trace", NULL);
