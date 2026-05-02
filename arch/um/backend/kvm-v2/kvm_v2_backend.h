@@ -374,8 +374,18 @@ struct kvm_v2_vcpu {
 	 * a child task shouldn't see parent's residual cr2). Same-task
 	 * re-entry leaves cr2 alone, so KVM's mmap-cached real fault
 	 * address survives.
+	 *
+	 * SMP-T23 (2026-05-02): also track last_mm. The original T16
+	 * gate (`last_task != current`) is silent across execve — `current`
+	 * stays the same while `current->mm` is replaced — so the first
+	 * dispatch of a freshly exec'd mm preserves the prior mm's stale
+	 * sregs.cr2. Surface as residual `python3[N]: segfault at 0 ip
+	 * <legit user ip> error 0` (cr2 set to a stale prior fault address
+	 * that the new dispatch's stub then captures). Treat cross-mm
+	 * the same as cross-task: zero cr2.
 	 */
 	struct task_struct *last_task;
+	struct mm_struct   *last_mm;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);

@@ -1272,7 +1272,8 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 		if (a->kvm_v2.saved_cr2_valid) {
 			sregs->cr2 = a->kvm_v2.saved_cr2_at_eintr;
 			a->kvm_v2.saved_cr2_valid = false;
-		} else if (vcpu->last_task != current) {
+		} else if (vcpu->last_task != current ||
+			   vcpu->last_mm   != current->mm) {
 			/*
 			 * SMP-T16 fix (2026-05-02): only zero cr2 on cross-task
 			 * transitions. Same-task re-entry preserves whatever
@@ -1282,10 +1283,24 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 			 * mechanism (Bug A — first-KVM_RUN-of-new-exec NULL
 			 * deref at e_entry under SMP, captured 2026-05-02 via
 			 * state-trace ring).
+			 *
+			 * SMP-T23 (2026-05-02): also zero on cross-mm. After
+			 * execve, `current` is unchanged but `current->mm` is a
+			 * fresh mm — the original T16 gate (`last_task !=
+			 * current`) is silent for this transition, leaving the
+			 * pre-execve mm's stale sregs.cr2 to leak into the
+			 * fresh mm's first VMRUN. Manifests as the post-T22
+			 * residual on threaded-subprocess-wait.py (worker rc=-11
+			 * SIGSEGV at ld-linux relocation traversal, error code
+			 * patterns inconsistent with a real fault address —
+			 * captured 2026-05-02 via stderr-pipe diagnostic in
+			 * the reproducer + Opus subagent #2 audit). See
+			 * state-audit/05 §9 cross-reference.
 			 */
 			sregs->cr2 = 0;
 		}
 		vcpu->last_task = current;
+		vcpu->last_mm   = current->mm;
 	}
 
 	/*
