@@ -460,6 +460,33 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("export SHELL=\"${SHELL:-/bin/bash}\"\n");
     s.push_str("\n");
 
+    // Standard pseudo-filesystems and runtime mountpoints. The kernel
+    // doesn't auto-mount these for init; without them, common
+    // userspace bits silently break:
+    //   /proc       — /proc/self/exe, /proc/cpuinfo, etc.
+    //   /sys        — sysfs (cgroups, network info, etc.)
+    //   /dev/pts    — devpts, required for os.openpty() and TTY tests
+    //   /dev/shm    — POSIX shm_open / multiprocessing.shared_memory
+    //   /tmp        — tmpfs, ensures fresh writable scratch
+    //
+    // All "mount; true" so re-runs / hostfs-prepopulated mounts don't
+    // fail the script. Errors are silenced to avoid cluttering output.
+    s.push_str("# Standard pseudo-filesystems (each mount errors-OK on re-run).\n");
+    s.push_str("mount -t proc  proc   /proc    2>/dev/null || true\n");
+    s.push_str("mount -t sysfs sysfs  /sys     2>/dev/null || true\n");
+    s.push_str("mkdir -p /dev/pts /dev/shm     2>/dev/null || true\n");
+    s.push_str("mount -t devpts devpts /dev/pts 2>/dev/null || true\n");
+    s.push_str("mount -t tmpfs tmpfs  /dev/shm 2>/dev/null || true\n");
+    s.push_str("mount -t tmpfs tmpfs  /tmp     2>/dev/null || true\n");
+    s.push_str("\n");
+
+    // Loopback up. Even when network.mode != "tap", many tests +
+    // services need lo (binding to localhost, anything that uses 127/8
+    // or ::1 for unit-test fixtures). Bring lo up unconditionally; it
+    // costs nothing and unblocks ~all networking-touching tests.
+    s.push_str("ip link set lo up 2>/dev/null || true\n");
+    s.push_str("\n");
+
     // tmpfs /etc so we can write resolv.conf without touching the
     // host's /etc (under hostfs that file is the host's). The mount
     // is private to this UML instance and goes away on shutdown.
@@ -473,9 +500,8 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     }
     s.push_str("\n");
 
-    // Network up.
+    // Network up (tap-specific config — lo already up above).
     if uml.network.mode == "tap" {
-        s.push_str("ip link set lo up\n");
         s.push_str(&format!("ip addr add {} dev vec0\n", uml.network.guest_ip));
         s.push_str("ip link set vec0 up\n");
         s.push_str(&format!("ip route add default via {}\n", uml.network.gateway));
