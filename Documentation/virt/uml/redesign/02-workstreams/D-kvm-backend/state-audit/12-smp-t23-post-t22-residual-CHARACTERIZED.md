@@ -159,6 +159,76 @@ fires the fault.
    observability spine, per-bug-class memo cross-reference, and
    the multi-agent investigation playbook.
 
+## State-trace dump decode (single trace-on capture, run 29 of trace-on)
+
+The state-trace ring captured 167 dispatch entries leading to the
+TRACE_TRIGGER freeze. Key sequence at the tail:
+
+```
+seq 137: VCPU_RUN_EXIT exit=2 port=0xfd  (T22 #NM vmexit)
+         cr0=80010023 (TS=1)  mmgen=9
+         IST=[4, 4001bab6, 2b, 10206, 7f7fffeb5bc0, 23] (real user RIP)
+
+seq 144: POST_KVM_RUN exit=2 port=0xf6  (#PF after #NM completed)
+         cr0=80010023 (TS=0)  mmgen=9  cr2=4000dc40 (real address)
+         IST=[14, 4000dc40, 2b, 10246, 7f7fffeb5a08, 23]
+
+seq 156: POST_KVM_RUN exit=2 port=0xfd  (second #NM)
+         cr0=8001002b (TS=1)  mmgen=10  hax=40023340
+         IST=[14, 40024d52, ...]
+
+seq 164: POST_KVM_RUN exit=2 port=0xf6  ← BUG_PR-fault-bearing dispatch
+         cr0=80010023 (TS=0!) cr2=550000000040  mmgen=10
+         IST=[4, 40024da0, 2b, 10246, 7f7fffeb5a10, 23]
+
+seq 166: TRACE_TRIGGER (BUG_PR fires; ring frozen)
+         hax=550000000040 (= cr2 — captured by stub's `mov %cr2,%rax`)
+         hip=ffffe00000002158 (= HANDLERS_GVA + 0x158, mid-#PF stub)
+```
+
+**Decoded interpretation:**
+
+The fault at cr2=0x550000000040 is a **REAL user-mode fault**. Specifically:
+- user_rip=0x40024da0 = ld-linux .text (legit code)
+- user_cs=0x2b = USER_CS (CPL=3)
+- user_rflags=0x10246 (normal)
+- user_rsp=0x7f7fffeb5a10 (normal stack)
+- error=4 = (P=0, U=1, R=0) (legit user read of not-present page)
+
+This means **bash's PT genuinely does not have an entry for cr2**. The
+fault is NOT v2-side IST corruption, NOT page-recycling-class (which
+would be wrong-data not P=0), and NOT TDP MMU staleness (which would
+be detected by the CR4.PGE flush at next dispatch).
+
+The bug is at the kernel level: bash accesses a page in its own
+heap/.text, and the kernel hasn't established a PT entry for it.
+Causes:
+- Race in `dup_mmap` PT inheritance during fork (worker_thread races
+  with another worker_thread doing fork+exec).
+- Race in `exec_mmap` teardown vs another thread's first user
+  dispatch.
+- Race in mmap/munmap page-table updates with the v2 TLB flush
+  invalidating wrong entries.
+
+The fact that mmgen advances from 9→10 between seq 144 and seq 164
+shows that some PT change DID happen in this window — which is
+suspicious given the same task remains pid=1 init.sh on the same
+mm throughout.
+
+**Net hypothesis update post-decode:**
+
+H1 (CoW PT establishment race) is REINFORCED: the trace shows mmgen
+bumps without an mm change, indicating PT churn for the same mm
+that's experiencing the fault. Concurrent worker_thread activity in
+bash's mm is the most likely source of the bumps.
+
+H3 (TDP MMU asynchrony) is largely RULED OUT — the CR4.PGE toggle
+on every dispatch flushes guest TLB cleanly, and the fault path
+follows expected POST_KVM_RUN → HANDLE_IO_PF_PRE flow.
+
+H2 (page-recycling) is RULED OUT — error code is P=0, not the
+P=1+wrong-data signature of TLB staleness pointing at recycled pages.
+
 ## Path forward (deferred to SMP-T24+)
 
 The next investigation step is to RECORD the dispatch sequence
