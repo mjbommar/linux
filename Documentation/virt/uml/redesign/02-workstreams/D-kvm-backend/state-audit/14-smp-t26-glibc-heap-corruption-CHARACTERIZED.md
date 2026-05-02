@@ -303,6 +303,82 @@ investigation paused pending one of:
 (b) fresh subagent investigation focused on H7 / H8 with the new
    evidence (CPUID-disabled-AVX, FPU-ablation-negative).
 
+### UPDATE — User-side SIGSEGV diagnostic (malloc-stress-child-diag.c)
+
+Added a sigaction-based diagnostic version of malloc-stress-child
+that captures GPRs + 64 bytes around the chunk pointer + 128 bytes
+of arena state at SIGSEGV, then exits 177. Ran 4 boots × 8 workers ×
+500 iters = 16000 forks; 26 SIGSEGVs captured.
+
+**Every captured fault has the same structure:**
+```
+SMP-T26-DIAG SIGSEGV: cr2=0x10 ip=0x415f2d pid=NNNN
+  GPRs: rax=<varies>  rdx=<chunk ptr in user heap>  rdi=0  rsi=<size>
+        r11=<arena ptr>
+  chunk @rdx (victim):
+    +0x00: 00 00 00 00 00 00 00 00   (prev_size = 0)
+    +0x08: 21 d2 00 00 00 00 00 00   (size = 0xd221, P=1, M=0, A=0)
+    +0x10: 00 00 00 00 00 00 00 00   (fd = 0)
+    +0x18: 00 00 00 00 00 00 00 00   (bk = 0)  ← READ AS NULL
+    +0x20..+0x40: all zeros
+  arena @r11 (av):
+    +0x00..+0x10: 00 00 ... (mutex, flags — fresh)
+    +0x10..+0x70: real pointers (fastbins, top, bins)
+```
+
+**Decoded:** the chunk being walked has its `fd` (offset 0x10) and
+`bk` (offset 0x18) BOTH zero, but its `size` field at offset 0x08 is
+0xd221 = ~53KB (P bit set, valid chunk). The chunk header is
+inconsistent: size says "valid 53KB chunk in unsorted bin" but
+fd=bk=0 says "uninitialized memory."
+
+For glibc to enter this code path:
+- Some bin's `fd` pointed to this chunk (placed there by free() or
+  malloc_consolidate())
+- That placement should have set chunk->bk to point back to the bin
+  head, NOT zero
+
+The all-zeros-except-size pattern is consistent with:
+- (a) **Top chunk being incorrectly walked**: glibc's heap top chunk
+      has a size field but no fd/bk. If a consolidation bug let the
+      top chunk get added to a bin, the bin walk would read fd/bk
+      as zero.
+- (b) **A page that was zeroed AFTER glibc set up the chunk**: the
+      page got the size field written by glibc, then was unmapped
+      and re-mapped (zero-init from anonymous mmap), losing fd/bk
+      but keeping size. But this requires partial page state, which
+      anonymous mmap doesn't do (it's all-or-nothing).
+- (c) **Glibc's free() returned early before setting fd/bk**: a
+      race in user code OR an interrupt that left malloc state
+      inconsistent. Glibc malloc is not signal-safe; a SIGALRM or
+      similar mid-free could leave fd/bk unwritten.
+
+(c) is interesting given UML uses SIGALRM internally for timer
+delivery. But signal handling at the UML kernel level shouldn't
+interrupt user-mode glibc operations.
+
+### Diag tool committed for future investigation
+
+The malloc-stress-child-diag.c source is checked in alongside the
+non-diag version. Future investigators can swap it in (rename or
+override CHILD_PATH) and rerun to characterize specific failure modes.
+
+### Open: needs deeper kernel-side trace correlation
+
+To proceed, T26 needs to correlate the user-side SIGSEGV PID + chunk
+address with kernel-side state-trace events around that PID's
+dispatches. Specifically: did this PID see an EINTR mid-free()
+(syscall=__NR_munmap or __NR_brk)? Did the PT for the chunk's page
+get cleared and re-established? Was there a TLB shootdown event?
+
+This requires either:
+1. A kernel-side instrumentation point that prints PT state for a
+   specific user VA range when handle_io_pf fires for that PID.
+2. Bisecting between current tip and a pre-T20 (no RCU defer) tip
+   to see if T20 introduced the residual.
+
+Both are non-trivial and should be the next iteration's focus.
+
 ### FPU ablation experiment (NEW)
 
 Hypothesis: per-host-CPU vCPU's XMM/x87/MXCSR state from previous task
