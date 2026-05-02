@@ -2357,6 +2357,14 @@ static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu)
 		 * during any later XMM-touching op in the same call), the
 		 * post-fault re-entry zeroed XMM and the resumed instruction
 		 * read garbage.
+		 *
+		 * SMP-T26 (2026-05-02): tested adding architectural-FPU-reset
+		 * on cross-mm transitions to address a hypothesized per-vCPU
+		 * FPU leak (parent worker's XMM state inherited by freshly-
+		 * execve'd child). Did NOT change threaded-fork-malloc fail
+		 * rate (still 6/6 boots × ~6 child SIGSEGVs). Hypothesis is
+		 * therefore not the residual T26 mechanism. See state-audit
+		 * Layer 14 for ruled-out experiments and remaining hypotheses.
 		 */
 		(void)init_fpu;
 		was_valid = 0;

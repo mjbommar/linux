@@ -236,15 +236,47 @@ v2 already does this MORE aggressively than v1 (toggles on every
 dispatch, not just same-CR3). So even the IPI-on-drain behavior is a
 v2 addition not derived from v1.
 
-### Updated hypothesis ranking
+### Updated hypothesis ranking (post-FPU-ablation)
 
-| Hypothesis | Pre-investigation | Post-investigation |
-|---|---|---|
-| H1 cross-vCPU TLB stale | 70% | **<5%** (ablation negative) |
-| H2 execve mm-swap leak | 20% | **~50%** (consistent with deterministic-IP) |
-| H3 mmu_gather drain timing | 10% | ~10% (no test yet) |
-| **H4 anonymous-page-not-zeroed on alloc** (NEW) | n/a | **~30%** |
-| H5 backend-agnostic (seccomp also fails sometimes) | n/a | small (rate disparity) |
+| Hypothesis | Pre | Post-G2-abl | Post-FPU-abl |
+|---|---|---|---|
+| H1 cross-vCPU TLB stale | 70% | **<5%** | <5% |
+| H2 execve mm-swap leak | 20% | ~50% | varies — see below |
+| H2a per-vCPU FPU/XMM leak (subagent #2 finding) | 0% | **~60%** | **<5%** (ablation negative — see Test) |
+| H3 mmu_gather drain timing | 10% | ~10% | ~10% |
+| H4 anonymous-page-not-zeroed on alloc | 0% | ~30% | **~40%** |
+| H5 backend-agnostic | small | small | small |
+| H6 KVM XSAVE/AVX state leak (FPU subset not covered by KVM_SET_FPU) | 0% | 0% | **~20%** (NEW) |
+| H7 v2-specific exec.c / start_thread setup race | 0% | 0% | **~25%** (NEW) |
+
+### FPU ablation experiment (NEW)
+
+Hypothesis: per-host-CPU vCPU's XMM/x87/MXCSR state from previous task
+leaks into freshly-execve'd task; glibc's SSE2 strlen/pcmpeqb startup
+returns false-zero, corrupts heap arena, NULL bk → SIGSEGV at 0x4074ed.
+
+Test: added one-shot flag `arch_thread.kvm_v2.fpu_arch_reset_needed`,
+set true in arch_flush_thread (execve) and false in arch_copy_thread
+(fork; fork preserves parent FPU). On first KVM_RUN of a fresh task,
+KVM_SET_FPU with architectural-reset values: zeroed XMM/FPR, fcw=0x37f,
+mxcsr=0x1f80.
+
+Result: 6/6 boots fail, 42 child SIGSEGVs across 20000 forks (0.21%) —
+**identical-or-worse to baseline 0.15%**. Hypothesis ruled out:
+KVM_SET_FPU does not prevent the bug. Either:
+- (a) FPU isn't the carrier (different state leaks)
+- (b) The leak is in XSAVE state (AVX YMM/AVX-512 ZMM) which kvm_fpu
+      doesn't cover — would need KVM_SET_XSAVE
+- (c) Bug is downstream of FPU restore: e.g., a kernel-side write
+      between FPU install and KVM_RUN entry clobbers FPU
+
+(b) is plausible — modern glibc heavily uses AVX2 in startup paths.
+KVM_SET_FPU only writes the legacy fxsave area (XMM0..15 low 128b);
+YMM0..15 high halves and ZMM0..31 are XSAVE-only.
+
+Branch state: ablation reverted at b277b0b8c0cc..HEAD; tip is clean
+post-T25 again. Layer 14 memo retains the failed-fix attempt for
+reference.
 
 ### Next concrete steps
 
