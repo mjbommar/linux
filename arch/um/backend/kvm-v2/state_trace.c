@@ -310,6 +310,20 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 				 "ts=%llu seq=%u — froze trace ring\n",
 				 e->pid, e->cpu, e->ts, e->seq);
 	}
+
+	/*
+	 * SMP-T21 (2026-05-02): freeze the ring at TRACE_TRIGGER (= Bug B
+	 * detection — handle_io_pf saw user_rip in HANDLERS range). The
+	 * BUG_B printk + state_trace_dump in handle_io_pf will print the
+	 * ring next; freezing here prevents subsequent dispatches from
+	 * overwriting the moment-of-failure context. One-shot via cmpxchg.
+	 */
+	if (op == KVMV2_OP_TRACE_TRIGGER) {
+		if (atomic_cmpxchg(&trace_frozen, 0, 1) == 0)
+			pr_emerg("KVMV2T_ANOMALY trace-trigger pid=%u cpu=%u "
+				 "ts=%llu seq=%u — froze trace ring (Bug B)\n",
+				 e->pid, e->cpu, e->ts, e->seq);
+	}
 }
 
 static const char *op_name(u8 op)
