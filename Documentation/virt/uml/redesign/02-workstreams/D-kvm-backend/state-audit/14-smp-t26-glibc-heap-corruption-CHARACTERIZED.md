@@ -185,3 +185,76 @@ missing.
    State-trace ring overhead may be slowing dispatches enough to
    reduce TLB_LAG growth → masking the bug. Validate against
    trace-OFF baseline.
+
+## UPDATE 2026-05-02 (post-investigation, tip b7f70664752b)
+
+### C reproducer landed: tools/testing/selftests/um/fork-tree-3level/repros/threaded-fork-malloc.c
+
+Pure C two-binary repro (parent threaded-fork-malloc + child malloc-stress-child).
+At 8 workers × 500 iters = 4000 forks per boot under v2 SMP:
+
+- **6/6 boots fail** with avg ~6 child SIGSEGVs each
+- **Deterministic IP**: every failing child segfaults at user IP
+  `0x4074ed`, which is in glibc `_int_malloc`:
+  ```
+  4074e9: mov 0x18(%rdx),%rdi   ; rdi = victim->bk
+  4074ed: cmp %rdx,0x10(%rdi)   ; FAULT — rdi=NULL, deref [NULL+0x10]
+  ```
+  All faults: `cr2=0x10`, `error=4` (P=0, U=1, R=0 = user read of
+  not-present page). `victim->bk` is being read as NULL — the chunk's
+  back-pointer in some bin (likely unsorted bin) is zero, which is a
+  glibc-internal invariant violation.
+- **comm = "malloc-stress-c"** — every failing process is a fresh
+  execve that ran __libc_start_main → some early malloc → walked the
+  bin and tripped the NULL deref.
+
+### Hypothesis updates from ablation experiments
+
+| Test | Result | Implication |
+|---|---|---|
+| TLB_LAG correlation per failing PID | All failing PIDs had ZERO TLB_LAG entries | H1 weakened |
+| G.2 IPI kicker ablation (`if (0 && um_backend->tlb_kick_others)`) | 6/6 fail × ~5 child fails each — IDENTICAL to G.2-active baseline | **H1 RULED OUT** |
+| Seccomp baseline (same C repro) | 4/6 PASS, 2/6 fail with DIFFERENT signature (parent NULL deref + UML fatal) | Bug is mostly v2-specific but seccomp has its own residual; v2 rate is higher |
+
+### Discovery during investigation
+
+The opus subagent found that **G.2 IS already activated** (commit
+`ad18db7c3768` "activate cross-vCPU tlb_kick_others now that migrate
+fix is in"). Earlier task notes saying "G.2 deferred" were stale.
+The kicker calls `os_send_ipi(cpu)` from `tlb.c:560` after every
+successful drain on a non-init mm. The G.2-disabled ablation above
+patched it out and saw NO change in T26 fail rate.
+
+### Subagent's parallel finding
+
+v1 archive evidence (`kvm-v1-archive/thread.c`, `lifecycle.c`,
+`shadow_sync.c`) confirms: **v1 NEVER had cross-vCPU IPI**. The signal
+slot was reserved (`KVM_UM_KICK_SIGNAL` at `kvm_backend.h:192`) but
+no sender exists. v1 used purely passive entry-side check
+(per-mm gen counter + per-vCPU last_seen + CR4.PGE-toggle on dispatch).
+v2 already does this MORE aggressively than v1 (toggles on every
+dispatch, not just same-CR3). So even the IPI-on-drain behavior is a
+v2 addition not derived from v1.
+
+### Updated hypothesis ranking
+
+| Hypothesis | Pre-investigation | Post-investigation |
+|---|---|---|
+| H1 cross-vCPU TLB stale | 70% | **<5%** (ablation negative) |
+| H2 execve mm-swap leak | 20% | **~50%** (consistent with deterministic-IP) |
+| H3 mmu_gather drain timing | 10% | ~10% (no test yet) |
+| **H4 anonymous-page-not-zeroed on alloc** (NEW) | n/a | **~30%** |
+| H5 backend-agnostic (seccomp also fails sometimes) | n/a | small (rate disparity) |
+
+### Next concrete steps
+
+1. **Test H4**: add page-zero on alloc from buddy in UML's
+   physmem-page allocator path. If this fixes T26, the bug is
+   stale page contents leaking into newly-mapped user pages.
+2. **Test H2 narrowly**: instrument execve path to dump per-vCPU
+   state at the FIRST KVM_RUN of a freshly-execve'd task. Check if
+   any sregs / FPU / per-task arch_thread state is non-canonical.
+3. **codex/opus subagent**: hand the deterministic IP + child-
+   fresh-execve fact + ablation results to a fresh agent for an
+   independent root-cause hypothesis (suggest: arena_for_init —
+   does glibc's first arena read uninitialized memory?).

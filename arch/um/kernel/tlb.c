@@ -556,6 +556,13 @@ int um_tlb_sync(struct mm_struct *mm)
 		 * race gone, the kicker should help close the residual
 		 * "stale guest TLB on remote vCPU" window that produces
 		 * mt-mini's `got=0 expect=tid` symptoms.
+		 *
+		 * SMP-T26 ablation (2026-05-02): disabling this kicker
+		 * leaves the threaded-fork-malloc fail rate unchanged
+		 * (G.2-on: 6/6 boots × ~6 fails; G.2-off: 6/6 × ~5).
+		 * H1 (cross-vCPU TLB stale) is therefore NOT the SMP-T26
+		 * mechanism. Kicker stays active for defensive correctness;
+		 * see Layer 14 memo for next-step hypothesis ranking.
 		 */
 		if (um_backend->tlb_kick_others)
 			um_backend->tlb_kick_others(mm);
