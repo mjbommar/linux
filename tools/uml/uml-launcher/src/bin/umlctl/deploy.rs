@@ -441,6 +441,25 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("set +e\n");
     s.push_str("\n");
 
+    // Default environment. The Linux kernel passes a near-empty env
+    // to init (no PATH, no HOME, no TERM by default). Without these,
+    // tools that resolve themselves via argv[0] (notably CPython's
+    // sys.executable computation) end up empty, breaking subprocess
+    // spawning, `python -m test` worker processes, pip, pytest, etc.
+    //
+    // Export sensible defaults BEFORE user env exports so user-supplied
+    // values (Umlfile [env]) always win.
+    s.push_str("# Default environment (must come before user env so they\n");
+    s.push_str("# can override). Without PATH set, sh's PATH lookup means\n");
+    s.push_str("# argv[0]='python3' (no slash), and CPython's getpath cannot\n");
+    s.push_str("# resolve sys.executable — breaking subprocess.Popen,\n");
+    s.push_str("# multiprocessing, regrtest workers, pytest, etc.\n");
+    s.push_str("export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\"\n");
+    s.push_str("export HOME=\"${HOME:-/root}\"\n");
+    s.push_str("export TERM=\"${TERM:-linux}\"\n");
+    s.push_str("export SHELL=\"${SHELL:-/bin/bash}\"\n");
+    s.push_str("\n");
+
     // tmpfs /etc so we can write resolv.conf without touching the
     // host's /etc (under hostfs that file is the host's). The mount
     // is private to this UML instance and goes away on shutdown.
