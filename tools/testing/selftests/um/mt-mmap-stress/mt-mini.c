@@ -25,6 +25,7 @@
  * Build: gcc -static -O0 -pthread -o mt-mini mt-mini.c
  */
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -35,6 +36,24 @@
 #include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
+
+/*
+ * SMP-T11 state-trace dump trigger. Writes "1" to the kvm-v2
+ * state-trace debugfs dump file. No-op (silent) when the kernel
+ * wasn't built with CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y or when
+ * tracing isn't enabled at runtime.
+ *
+ * Called from the FAIL paths so the per-CPU ring captures up to the
+ * moment of detection — kernel dumps to dmesg (KVMV2T lines).
+ */
+static void kvmv2_state_trace_dump(void)
+{
+	int fd = open("/sys/kernel/debug/um_kvm_v2_trace/dump", O_WRONLY);
+	if (fd < 0)
+		return;
+	(void)!write(fd, "1\n", 2);
+	close(fd);
+}
 
 #define ITERS    50
 #define ALLOC_SZ 0x10000
@@ -50,6 +69,11 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ctx_)
 {
 	if (__sync_lock_test_and_set(&crash_dumped, 1))
 		_exit(3);
+
+	/* Trigger kvm-v2 state-trace dump as early as possible — before
+	 * fprintf/_exit run additional syscalls on this vCPU and possibly
+	 * push older entries out of the ring. */
+	kvmv2_state_trace_dump();
 	ucontext_t *uc = (ucontext_t *)ctx_;
 	greg_t *g = uc->uc_mcontext.gregs;
 	int now_cpu = sched_getcpu();
@@ -102,11 +126,13 @@ static void *worker(void *arg)
 			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		last_mmap_p = p;
 		if (p == MAP_FAILED) {
+			kvmv2_state_trace_dump();
 			fprintf(stderr, "MMAP_FAILED tid=%ld iter=%d\n",
 				tid, i);
 			return (void *)1;
 		}
 		if (p == NULL) {
+			kvmv2_state_trace_dump();
 			fprintf(stderr, "MMAP_NULL tid=%ld iter=%d\n",
 				tid, i);
 			return (void *)4;
@@ -115,6 +141,7 @@ static void *worker(void *arg)
 		slow_memset(p, (unsigned char)tid, ALLOC_SZ);
 		for (size_t j = 0; j < ALLOC_SZ; j += 4096) {
 			if (((unsigned char *)p)[j] != (unsigned char)tid) {
+				kvmv2_state_trace_dump();
 				fprintf(stderr,
 					"VERIFY_FAIL tid=%ld iter=%d off=%#zx got=%u expect=%u p=%p\n",
 					tid, i, j, ((unsigned char *)p)[j],

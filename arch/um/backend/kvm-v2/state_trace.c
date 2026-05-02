@@ -1,0 +1,495 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * KVM v2 state-snapshot trace ring buffer.
+ *
+ * The state-audit identified ~149 state items spanning per-task,
+ * per-vCPU, per-mm, and live KVM mmap state (Documentation/virt/uml/
+ * redesign/02-workstreams/D-kvm-backend/state-audit/01-state-inventory
+ * .md). Spot printk + ratelimit can't carry the volume or the
+ * cross-cutting fields needed to cross-correlate state evolution
+ * across (pid, op) tuples between PASS and FAIL boots — which is
+ * what we need to root-cause cross-task contamination under SMP T>=N
+ * stress.
+ *
+ * Implementation:
+ *
+ *   Ring        Per-CPU vmalloc; default 2 MB / CPU
+ *               (~5400 entries × ~384 B). Resized via debugfs
+ *               'ring_bytes' (read at next enable=1 transition).
+ *
+ *   Capture     One entry point — kvm_v2_state_trace_capture(). Reads
+ *               current task arch state, vCPU state, and the live
+ *               kvm_run mmap. Writes one entry to the local CPU's
+ *               ring with local IRQs off. Per-CPU sequence number;
+ *               wrap is allowed (newest N entries always retained).
+ *
+ *   Hook        KVMV2_TRACE() in state_trace.h. Compiles away when
+ *               CONFIG=n; gated by a static_branch when CONFIG=y so
+ *               disabled state is one 5-byte NOP.
+ *
+ *   Dump        Merge all per-CPU rings, sort ascending by ts, emit
+ *               one pr_emerg block per entry. Triggers:
+ *                 - debugfs:  echo 1 > .../dump
+ *                 - userland: write 1 to /sys/kernel/debug/
+ *                             um_kvm_v2_trace/dump from inside the
+ *                             UML guest (mt-mini does this on FAIL).
+ *                 - panic:    callable from panic context (NMI watchdog
+ *                             touched between batches).
+ *
+ * The fields captured come straight from state-audit Layer 1 buckets
+ * marked PRIMARY in the matrix (Layer 3). FPU is captured as a 4-byte
+ * FNV-1a hash of arch.kvm_v2.iotrap_fpu so cross-task FPU leakage is
+ * detectable without dumping 512 bytes.
+ */
+
+#include <linux/atomic.h>
+#include <linux/cpumask.h>
+#include <linux/debugfs.h>
+#include <linux/init.h>
+#include <linux/jump_label.h>
+#include <linux/kernel.h>
+#include <linux/kvm.h>
+#include <linux/mm.h>
+#include <linux/nmi.h>		/* touch_nmi_watchdog */
+#include <linux/percpu.h>
+#include <linux/preempt.h>
+#include <linux/printk.h>
+#include <linux/sched.h>
+#include <linux/sched/clock.h>
+#include <linux/slab.h>
+#include <linux/sort.h>
+#include <linux/string.h>
+#include <linux/types.h>
+#include <linux/vmalloc.h>
+
+#include <asm/page.h>
+#include <sysdep/ptrace.h>
+
+#include "kvm_v2_backend.h"
+#include "state_trace.h"
+
+DEFINE_STATIC_KEY_FALSE(kvm_v2_state_trace_key);
+
+#define KVMV2_TRACE_RING_BYTES_DEFAULT  (2UL * 1024 * 1024)
+#define KVMV2_TRACE_DUMP_BATCH          32
+
+struct kvm_v2_trace_ring {
+	struct kvm_v2_state_snap *entries;
+	unsigned int  capacity;       /* # of entries */
+	atomic_t      next;           /* sequence; entries[(next-1) % cap] */
+};
+
+static DEFINE_PER_CPU(struct kvm_v2_trace_ring, trace_rings);
+
+static unsigned long ring_bytes = KVMV2_TRACE_RING_BYTES_DEFAULT;
+static bool          rings_allocated;
+static DEFINE_MUTEX(trace_alloc_mutex);
+
+static struct dentry *trace_dir;
+
+/*
+ * FNV-1a 32-bit. Collision-resistant enough to detect "FPU contents
+ * changed across an op boundary" (we only need ~uniqueness, not
+ * cryptographic strength).
+ */
+static u32 fnv1a32(const void *data, size_t len)
+{
+	const u8 *p = data;
+	u32 h = 2166136261U;
+
+	while (len--) {
+		h ^= *p++;
+		h *= 16777619U;
+	}
+	return h;
+}
+
+/*
+ * Allocate per-CPU rings via vmalloc (size > kmalloc max). Idempotent
+ * — second call when already allocated returns 0.
+ */
+static int trace_rings_alloc_locked(void)
+{
+	int cpu;
+	unsigned int cap;
+
+	if (rings_allocated)
+		return 0;
+
+	cap = ring_bytes / sizeof(struct kvm_v2_state_snap);
+	if (cap < 64)
+		cap = 64;
+
+	for_each_possible_cpu(cpu) {
+		struct kvm_v2_trace_ring *r = &per_cpu(trace_rings, cpu);
+
+		r->entries = vzalloc_node(cap * sizeof(*r->entries),
+					  cpu_to_node(cpu));
+		if (!r->entries)
+			goto fail;
+		r->capacity = cap;
+		atomic_set(&r->next, 0);
+	}
+	WRITE_ONCE(rings_allocated, true);
+	return 0;
+
+fail:
+	for_each_possible_cpu(cpu) {
+		struct kvm_v2_trace_ring *r = &per_cpu(trace_rings, cpu);
+
+		vfree(r->entries);
+		r->entries = NULL;
+		r->capacity = 0;
+	}
+	return -ENOMEM;
+}
+
+void kvm_v2_state_trace_clear(void)
+{
+	int cpu;
+
+	if (!READ_ONCE(rings_allocated))
+		return;
+
+	for_each_possible_cpu(cpu) {
+		struct kvm_v2_trace_ring *r = &per_cpu(trace_rings, cpu);
+
+		atomic_set(&r->next, 0);
+		if (r->entries)
+			memset(r->entries, 0,
+			       r->capacity * sizeof(*r->entries));
+	}
+}
+
+/*
+ * Capture one snapshot. Writer-side fast path; called from inside
+ * preempt-disabled regions of vcpu_run, from handle_io_pf, etc.
+ *
+ * Local IRQ save ensures we can't be re-entered on the same CPU by
+ * a signal/IRQ handler that also calls KVMV2_TRACE.
+ */
+void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
+				struct uml_pt_regs *regs,
+				struct kvm_run *run,
+				struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_trace_ring *r;
+	struct kvm_v2_state_snap *e;
+	struct task_struct *t = current;
+	unsigned int slot, seq_after;
+	unsigned long flags;
+
+	if (!READ_ONCE(rings_allocated))
+		return;
+
+	local_irq_save(flags);
+	r = this_cpu_ptr(&trace_rings);
+	if (!r->entries) {
+		local_irq_restore(flags);
+		return;
+	}
+
+	seq_after = (unsigned int)atomic_inc_return(&r->next);
+	slot = (seq_after - 1) % r->capacity;
+	e = &r->entries[slot];
+
+	memset(e, 0, sizeof(*e));
+	e->ts          = sched_clock();
+	e->seq         = seq_after - 1;
+	e->pid         = t ? t->pid : 0;
+	e->cpu         = (u8)smp_processor_id();
+	e->op          = (u8)op;
+
+	if (run) {
+		e->exit_reason = (u8)run->exit_reason;
+		e->io_port     = (u16)run->io.port;
+		e->rax = run->s.regs.regs.rax;
+		e->rbx = run->s.regs.regs.rbx;
+		e->rcx = run->s.regs.regs.rcx;
+		e->rdx = run->s.regs.regs.rdx;
+		e->rsi = run->s.regs.regs.rsi;
+		e->rdi = run->s.regs.regs.rdi;
+		e->rbp = run->s.regs.regs.rbp;
+		e->rsp = run->s.regs.regs.rsp;
+		e->r8  = run->s.regs.regs.r8;
+		e->r9  = run->s.regs.regs.r9;
+		e->r10 = run->s.regs.regs.r10;
+		e->r11 = run->s.regs.regs.r11;
+		e->r12 = run->s.regs.regs.r12;
+		e->r13 = run->s.regs.regs.r13;
+		e->r14 = run->s.regs.regs.r14;
+		e->r15 = run->s.regs.regs.r15;
+		e->rip    = run->s.regs.regs.rip;
+		e->rflags = run->s.regs.regs.rflags;
+		e->cr0 = run->s.regs.sregs.cr0;
+		e->cr2 = run->s.regs.sregs.cr2;
+		e->cr3 = run->s.regs.sregs.cr3;
+		e->cr4 = run->s.regs.sregs.cr4;
+		e->fs_base = run->s.regs.sregs.fs.base;
+		e->gs_base = run->s.regs.sregs.gs.base;
+	}
+
+	if (t) {
+		struct arch_thread *a = &t->thread.arch;
+
+		e->task_mm_ptr            = (u64)(uintptr_t)t->mm;
+		e->task_active_mm_ptr     = (u64)(uintptr_t)t->active_mm;
+		e->task_saved_cr2         = a->kvm_v2.saved_cr2_at_eintr;
+		e->task_saved_cr2_valid   = a->kvm_v2.saved_cr2_valid;
+		e->task_ist_pending       = a->kvm_v2.ist_pending;
+		e->task_iotrap_fpu_valid  = a->kvm_v2.iotrap_fpu_valid;
+		e->task_fpu_valid         = a->kvm_v2.fpu_valid;
+		if (a->kvm_v2.iotrap_fpu_valid)
+			e->task_fpu_hash =
+				fnv1a32(&a->kvm_v2.iotrap_fpu,
+					sizeof(a->kvm_v2.iotrap_fpu));
+		memcpy(e->task_ist_frame, a->kvm_v2.ist_frame,
+		       sizeof(e->task_ist_frame));
+		if (t->mm)
+			e->mm_tlb_gen =
+				atomic64_read(&t->mm->context.tlb_gen);
+	}
+
+	if (regs) {
+		e->task_host_ax = regs->gp[HOST_AX];
+		e->task_host_ip = regs->gp[HOST_IP];
+		e->task_host_sp = regs->gp[HOST_SP];
+	}
+
+	if (vcpu) {
+		e->vcpu_last_seen_tlb_gen =
+			atomic64_read(&vcpu->last_seen_tlb_gen);
+		e->vcpu_current_mm =
+			(u64)(uintptr_t)READ_ONCE(vcpu->current_mm);
+		e->vcpu_kick_pending =
+			(u32)atomic_read(&vcpu->kick_pending);
+		if (vcpu->ist_stack_kva) {
+			u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+
+			e->ist_live[0] = *(u64 *)(top - 48);
+			e->ist_live[1] = *(u64 *)(top - 40 +  0);
+			e->ist_live[2] = *(u64 *)(top - 40 +  8);
+			e->ist_live[3] = *(u64 *)(top - 40 + 16);
+			e->ist_live[4] = *(u64 *)(top - 40 + 24);
+			e->ist_live[5] = *(u64 *)(top - 40 + 32);
+		}
+	}
+
+	local_irq_restore(flags);
+}
+
+static const char *op_name(u8 op)
+{
+	static const char * const names[KVMV2_OP_MAX] = {
+		[KVMV2_OP_VCPU_RUN_ENTRY]       = "VCPU_RUN_ENTRY",
+		[KVMV2_OP_POST_TLB_SYNC]        = "POST_TLB_SYNC",
+		[KVMV2_OP_POST_LOAD_SREGS]      = "POST_LOAD_SREGS",
+		[KVMV2_OP_POST_FPU_INSTALL]     = "POST_FPU_INSTALL",
+		[KVMV2_OP_POST_IST_RESTORE]     = "POST_IST_RESTORE",
+		[KVMV2_OP_PRE_KVM_RUN]          = "PRE_KVM_RUN",
+		[KVMV2_OP_POST_KVM_RUN]         = "POST_KVM_RUN",
+		[KVMV2_OP_EINTR_PATH]           = "EINTR_PATH",
+		[KVMV2_OP_EINTR_INLINE_PF]      = "EINTR_INLINE_PF",
+		[KVMV2_OP_EINTR_RAW_SNAPSHOT]   = "EINTR_RAW_SNAPSHOT",
+		[KVMV2_OP_HANDLE_SYSCALL_PRE]   = "HANDLE_SYSCALL_PRE",
+		[KVMV2_OP_HANDLE_SYSCALL_POST]  = "HANDLE_SYSCALL_POST",
+		[KVMV2_OP_HANDLE_IO_PF_PRE]     = "HANDLE_IO_PF_PRE",
+		[KVMV2_OP_HANDLE_IO_PF_POST]    = "HANDLE_IO_PF_POST",
+		[KVMV2_OP_IST_FRAME_WRITE_PRE]  = "IST_FRAME_WRITE_PRE",
+		[KVMV2_OP_IST_FRAME_WRITE_POST] = "IST_FRAME_WRITE_POST",
+		[KVMV2_OP_VCPU_RUN_EXIT]        = "VCPU_RUN_EXIT",
+		[KVMV2_OP_TRACE_TRIGGER]        = "TRACE_TRIGGER",
+	};
+
+	if (op < KVMV2_OP_MAX && names[op])
+		return names[op];
+	return "UNKNOWN";
+}
+
+static int snap_cmp(const void *a, const void *b)
+{
+	const struct kvm_v2_state_snap *p = a, *q = b;
+
+	/*
+	 * sched_clock() in UML has HZ-tick (10ms) resolution, so many
+	 * snapshots share a ts. Within a tick, fall back to (cpu, seq)
+	 * so each per-CPU stream is at least monotonic.
+	 */
+	if (p->ts < q->ts)
+		return -1;
+	if (p->ts > q->ts)
+		return  1;
+	if (p->cpu < q->cpu)
+		return -1;
+	if (p->cpu > q->cpu)
+		return  1;
+	if (p->seq < q->seq)
+		return -1;
+	if (p->seq > q->seq)
+		return  1;
+	return 0;
+}
+
+/*
+ * Print one record in a fixed multi-line block. Field names match the
+ * struct member names so downstream parsing scripts ride the symbol
+ * table. Lines are tagged 'KVMV2T' for grep-friendly extraction.
+ */
+static void dump_one(const struct kvm_v2_state_snap *e)
+{
+	pr_emerg("KVMV2T ts=%llu seq=%u cpu=%u pid=%u op=%s exit=%u port=%#x\n",
+		 e->ts, e->seq, e->cpu, e->pid, op_name(e->op),
+		 e->exit_reason, e->io_port);
+	pr_emerg("KVMV2T   rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx\n",
+		 e->rax, e->rbx, e->rcx, e->rdx, e->rsi, e->rdi);
+	pr_emerg("KVMV2T   rbp=%llx rsp=%llx r8=%llx r9=%llx r10=%llx r11=%llx\n",
+		 e->rbp, e->rsp, e->r8, e->r9, e->r10, e->r11);
+	pr_emerg("KVMV2T   r12=%llx r13=%llx r14=%llx r15=%llx rip=%llx rfl=%llx\n",
+		 e->r12, e->r13, e->r14, e->r15, e->rip, e->rflags);
+	pr_emerg("KVMV2T   cr0=%llx cr2=%llx cr3=%llx cr4=%llx fsb=%llx gsb=%llx\n",
+		 e->cr0, e->cr2, e->cr3, e->cr4, e->fs_base, e->gs_base);
+	pr_emerg("KVMV2T   tmm=%llx tamm=%llx tscr2=%llx hax=%llx hip=%llx hsp=%llx\n",
+		 e->task_mm_ptr, e->task_active_mm_ptr, e->task_saved_cr2,
+		 e->task_host_ax, e->task_host_ip, e->task_host_sp);
+	pr_emerg("KVMV2T   tfpuh=%x tscv=%u tistp=%u tiofv=%u tfpuv=%u\n",
+		 e->task_fpu_hash, e->task_saved_cr2_valid,
+		 e->task_ist_pending, e->task_iotrap_fpu_valid,
+		 e->task_fpu_valid);
+	pr_emerg("KVMV2T   tist=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
+		 e->task_ist_frame[0], e->task_ist_frame[1],
+		 e->task_ist_frame[2], e->task_ist_frame[3],
+		 e->task_ist_frame[4], e->task_ist_frame[5]);
+	pr_emerg("KVMV2T   mmgen=%llu vlast=%llu vmm=%llx vkick=%u\n",
+		 e->mm_tlb_gen, e->vcpu_last_seen_tlb_gen,
+		 e->vcpu_current_mm, e->vcpu_kick_pending);
+	pr_emerg("KVMV2T   list=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
+		 e->ist_live[0], e->ist_live[1], e->ist_live[2],
+		 e->ist_live[3], e->ist_live[4], e->ist_live[5]);
+}
+
+void kvm_v2_state_trace_dump(const char *reason)
+{
+	struct kvm_v2_state_snap *all = NULL;
+	size_t total = 0, written = 0, i;
+	int cpu;
+
+	if (!READ_ONCE(rings_allocated)) {
+		pr_emerg("KVMV2T_DUMP_BEGIN reason=%s rings=NULL\n", reason);
+		pr_emerg("KVMV2T_DUMP_END entries=0\n");
+		return;
+	}
+
+	for_each_possible_cpu(cpu) {
+		struct kvm_v2_trace_ring *r = &per_cpu(trace_rings, cpu);
+		unsigned int n = (unsigned int)atomic_read(&r->next);
+
+		if (n > r->capacity)
+			n = r->capacity;
+		total += n;
+	}
+	if (!total) {
+		pr_emerg("KVMV2T_DUMP_BEGIN reason=%s entries=0\n", reason);
+		pr_emerg("KVMV2T_DUMP_END entries=0\n");
+		return;
+	}
+
+	all = vmalloc(total * sizeof(*all));
+	if (!all) {
+		pr_emerg("KVMV2T_DUMP_BEGIN reason=%s vmalloc-OOM total=%zu\n",
+			 reason, total);
+		return;
+	}
+
+	for_each_possible_cpu(cpu) {
+		struct kvm_v2_trace_ring *r = &per_cpu(trace_rings, cpu);
+		unsigned int total_seq, n, start_seq, j;
+
+		total_seq = (unsigned int)atomic_read(&r->next);
+		n = total_seq;
+		if (n > r->capacity) {
+			start_seq = total_seq - r->capacity;
+			n = r->capacity;
+		} else {
+			start_seq = 0;
+		}
+		for (j = 0; j < n && written < total; j++) {
+			unsigned int slot = (start_seq + j) % r->capacity;
+
+			all[written++] = r->entries[slot];
+		}
+	}
+
+	sort(all, written, sizeof(*all), snap_cmp, NULL);
+
+	pr_emerg("KVMV2T_DUMP_BEGIN reason=%s entries=%zu\n", reason, written);
+	for (i = 0; i < written; i++) {
+		dump_one(&all[i]);
+		if ((i & (KVMV2_TRACE_DUMP_BATCH - 1)) == 0)
+			touch_nmi_watchdog();
+	}
+	pr_emerg("KVMV2T_DUMP_END entries=%zu\n", written);
+
+	vfree(all);
+}
+
+/* === debugfs control surface ========================================= */
+
+static int trace_enabled_get(void *data, u64 *val)
+{
+	*val = static_key_enabled(&kvm_v2_state_trace_key.key) ? 1 : 0;
+	return 0;
+}
+
+static int trace_enabled_set(void *data, u64 val)
+{
+	int rc;
+
+	if (val) {
+		mutex_lock(&trace_alloc_mutex);
+		rc = trace_rings_alloc_locked();
+		mutex_unlock(&trace_alloc_mutex);
+		if (rc)
+			return rc;
+		if (!static_key_enabled(&kvm_v2_state_trace_key.key))
+			static_branch_enable(&kvm_v2_state_trace_key);
+	} else {
+		if (static_key_enabled(&kvm_v2_state_trace_key.key))
+			static_branch_disable(&kvm_v2_state_trace_key);
+	}
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(trace_enabled_fops,
+			 trace_enabled_get, trace_enabled_set, "%llu\n");
+
+static int trace_dump_set(void *data, u64 val)
+{
+	kvm_v2_state_trace_dump(val ? "debugfs" : "debugfs0");
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(trace_dump_fops, NULL, trace_dump_set, "%llu\n");
+
+static int trace_clear_set(void *data, u64 val)
+{
+	kvm_v2_state_trace_clear();
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(trace_clear_fops, NULL, trace_clear_set, "%llu\n");
+
+static int __init kvm_v2_state_trace_init(void)
+{
+	trace_dir = debugfs_create_dir("um_kvm_v2_trace", NULL);
+	if (IS_ERR_OR_NULL(trace_dir)) {
+		trace_dir = NULL;
+		return 0; /* debugfs disabled — silent no-op */
+	}
+	debugfs_create_file_unsafe("enabled", 0600, trace_dir, NULL,
+				   &trace_enabled_fops);
+	debugfs_create_file_unsafe("dump",    0200, trace_dir, NULL,
+				   &trace_dump_fops);
+	debugfs_create_file_unsafe("clear",   0200, trace_dir, NULL,
+				   &trace_clear_fops);
+	debugfs_create_ulong("ring_bytes", 0644, trace_dir, &ring_bytes);
+	pr_info("um: kvm-v2 state-trace debugfs at /sys/kernel/debug/um_kvm_v2_trace/\n");
+	return 0;
+}
+late_initcall(kvm_v2_state_trace_init);

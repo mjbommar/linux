@@ -13,6 +13,11 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += syscall_trap.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
 
+# Per-CPU state-snapshot trace ring. Compiled out entirely when
+# CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=n; runtime gated via
+# static_branch when =y. See state_trace.h for the design.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE) += state_trace.o
+
 # Marshal-shape KUnit suite (D.2 + task #74). Pure data-transform
 # tests; no kernel state assumed. Build only when explicitly
 # requested.

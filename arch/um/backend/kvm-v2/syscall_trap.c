@@ -118,6 +118,7 @@
 #include <sysdep/ptrace_user.h>	/* PT_SYSCALL_NR */
 
 #include "kvm_v2_backend.h"
+#include "state_trace.h"
 #include "syscall_trap.h"
 
 /*
@@ -882,6 +883,9 @@ static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
 
 	(void)has_error_code;
 
+	KVMV2_TRACE(KVMV2_OP_IST_FRAME_WRITE_PRE,
+		    (struct uml_pt_regs *)regs, NULL, vcpu);
+
 	/*
 	 * Layout matches kvm_v2_ist_frame_read: RIP-anchored frame
 	 * starts at top - 40 regardless of whether the vector pushed
@@ -916,6 +920,9 @@ static void kvm_v2_ist_frame_write(struct kvm_v2_vcpu *vcpu,
 	a->kvm_v2.ist_frame[4] = regs->gp[HOST_SP];
 	a->kvm_v2.ist_frame[5] = ss;
 	a->kvm_v2.ist_pending = true;
+
+	KVMV2_TRACE(KVMV2_OP_IST_FRAME_WRITE_POST,
+		    (struct uml_pt_regs *)regs, NULL, vcpu);
 }
 
 /*
@@ -1055,6 +1062,8 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 {
 	struct kvm_v2_ist_frame frame;
 	u64 cr2;
+
+	KVMV2_TRACE(KVMV2_OP_HANDLE_IO_PF_PRE, regs, run, vcpu);
 
 	kvm_v2_ist_frame_read(vcpu, &frame, true /* has_error_code */);
 
@@ -1266,6 +1275,8 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 	 */
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
 	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	KVMV2_TRACE(KVMV2_OP_HANDLE_IO_PF_POST, regs, run, vcpu);
 
 	return 0;
 }
@@ -1579,7 +1590,11 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	trace_um_backend_kvm_v2_iotrap_syscall_enter(run->io.port,
 						     syscall_nr);
 
+	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_PRE, regs, run, vcpu);
+
 	handle_syscall(regs);
+
+	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_POST, regs, run, vcpu);
 
 	/*
 	 * Drain UML's pending signal/scheduler work AFTER the syscall

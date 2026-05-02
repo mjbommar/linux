@@ -62,6 +62,7 @@
 #include <asm/trace/um_backend.h>
 
 #include "kvm_v2_backend.h"
+#include "state_trace.h"
 #include "syscall_trap.h"
 
 /*
@@ -1270,8 +1271,30 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	atomic_set(&vcpu->kick_pending, 0);
 	WRITE_ONCE(vcpu->current_mm, current->mm);
 	if (current->mm) {
-		atomic64_set(&vcpu->last_seen_tlb_gen,
-			     atomic64_read(&current->mm->context.tlb_gen));
+		u64 cur_gen = atomic64_read(&current->mm->context.tlb_gen);
+		u64 last    = atomic64_read(&vcpu->last_seen_tlb_gen);
+
+		/*
+		 * SMP-T11 / Layer-6 A10 instrumentation (2026-05-01):
+		 * Detect cross-vCPU stale guest TLB. If this vCPU's
+		 * last_seen lags the per-mm tlb_gen by >=3, another vCPU
+		 * has bumped gen multiple times without us flushing. Note:
+		 * we DO toggle CR4.PGE every dispatch (vcpu.c:1259), so a
+		 * lag here means we missed N drains since our last
+		 * dispatch on this mm. Bound to 30 hits per boot.
+		 */
+		if (cur_gen >= last + 3) {
+			static atomic_t tlb_lag_hits = ATOMIC_INIT(0);
+			if (atomic_inc_return(&tlb_lag_hits) <= 30) {
+				pr_emerg("KVM_V2_TLB_LAG cpu=%d pid=%d mm=%px last=%llu cur=%llu lag=%llu\n",
+					 vcpu->cpu, current->pid, current->mm,
+					 (unsigned long long)last,
+					 (unsigned long long)cur_gen,
+					 (unsigned long long)(cur_gen - last));
+			}
+		}
+
+		atomic64_set(&vcpu->last_seen_tlb_gen, cur_gen);
 	}
 
 	/*
@@ -1480,6 +1503,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	int cpu, rc;
 	u32 exit_reason;
 
+	KVMV2_TRACE(KVMV2_OP_VCPU_RUN_ENTRY, regs, NULL, NULL);
+
 	preempt_disable();
 
 	cpu = smp_processor_id();
@@ -1575,10 +1600,14 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		}
 	}
 
+	KVMV2_TRACE(KVMV2_OP_POST_TLB_SYNC, regs, run, vcpu);
+
 	(void)kvm_v2_load_user_sregs(vcpu,
 				     __pa(current->active_mm->pgd),
 				     regs->gp[HOST_FS_BASE],
 				     regs->gp[HOST_GS_BASE]);
+
+	KVMV2_TRACE(KVMV2_OP_POST_LOAD_SREGS, regs, run, vcpu);
 
 	/*
 	 * C.4: install per-task FPU snapshot (set at fork by
@@ -1602,6 +1631,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	 */
 	kvm_v2_ist_frame_restore_pending(vcpu);
 
+	KVMV2_TRACE(KVMV2_OP_POST_IST_RESTORE, regs, run, vcpu);
+
 	/*
 	 * Memo §H.1b SMOKING-GUN fix (2026-04-30): restore the FPU
 	 * snapshot taken IMMEDIATELY after the previous KVM_RUN exit.
@@ -1617,6 +1648,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
 	}
 
+	KVMV2_TRACE(KVMV2_OP_POST_FPU_INSTALL, regs, run, vcpu);
+
 	/*
 	 * C.3: write GPRs into the mmap'd kvm_run->s.regs.regs and mark
 	 * KVM_SYNC_X86_REGS in kvm_dirty_regs. KVM consumes both
@@ -1627,7 +1660,11 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 	trace_um_backend_kvm_v2_vcpu_enter(cpu, run);
 
+	KVMV2_TRACE(KVMV2_OP_PRE_KVM_RUN, regs, run, vcpu);
+
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+
+	KVMV2_TRACE(KVMV2_OP_POST_KVM_RUN, regs, run, vcpu);
 
 	/*
 	 * Memo §H.1b H.1b SMOKING-GUN fix (2026-04-30): KVM_GET_FPU
@@ -1715,6 +1752,7 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 		if (rc < 0) {
 			if (rc == -EINTR) {
+				KVMV2_TRACE(KVMV2_OP_EINTR_PATH, regs, run, vcpu);
 				kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
 				kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
 				/*
@@ -1765,6 +1803,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 					 * GP register state (gp[HOST_DX] etc.
 					 * for the segv_handler dispatch).
 					 */
+					KVMV2_TRACE(KVMV2_OP_EINTR_INLINE_PF,
+						    regs, run, vcpu);
 					(void)kvm_v2_handle_pf_eintr_inline(regs, run, vcpu,
 									    eintr_sregs.cr2);
 				} else if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA &&
@@ -1773,6 +1813,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 					a->kvm_v2.saved_cr2_at_eintr = eintr_sregs.cr2;
 					a->kvm_v2.saved_cr2_valid = true;
 					kvm_v2_ist_frame_snapshot_raw(vcpu);
+					KVMV2_TRACE(KVMV2_OP_EINTR_RAW_SNAPSHOT,
+						    regs, run, vcpu);
 				}
 				trace_um_backend_kvm_v2_vcpu_eintr(cpu);
 				/*
@@ -1866,6 +1908,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		panic("kvm-v2: unhandled exit %u from KVM_RUN; Phase D/E provides the dispatch",
 		      exit_reason);
 	}
+
+	KVMV2_TRACE(KVMV2_OP_VCPU_RUN_EXIT, regs, run, vcpu);
 
 	preempt_enable();
 }
