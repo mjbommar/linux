@@ -1295,18 +1295,27 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 		}
 
 		/*
-		 * Bug B trigger (2026-05-02): when user_rip falls in
-		 * KVM_V2_HANDLERS_GVA range (kernel-half handler stubs page),
-		 * the user task is trying to execute kernel code at CPL=3.
-		 * This means an iretq somewhere popped a kernel-half RIP into
-		 * a user-mode return frame. Auto-freeze state-trace so the
-		 * full sequence of events leading up to the fault is preserved
-		 * for post-mortem.
+		 * Bug B trigger (2026-05-02): when user_rip falls in the
+		 * KERNEL-HALF VA range (user task running CPL=3 with RIP
+		 * pointing at kernel-only memory), the user is trying to
+		 * execute kernel code at CPL=3. This means SOMETHING
+		 * (iretq, sysret, kvm_run regs marshal) loaded a kernel-half
+		 * RIP into the user-mode return frame.
+		 *
+		 * Originally checked only HANDLERS_GVA (0xffffe00000002000).
+		 * SMP-T24 follow-up (2026-05-02): widened to the full
+		 * trampoline-PT chain (0xffffe00000000000 to +0x4000) to
+		 * catch the LSTAR variant — `python3[N]: segfault at
+		 * ffffe00000000040 ip ffffe00000000040 error 15` (= 0x15,
+		 * P=1+U=1+I/D=1, classic kernel-page-from-CPL=3 #PF).
+		 *
+		 * Auto-freeze state-trace so the full sequence of events
+		 * leading up to the fault is preserved for post-mortem.
 		 */
-		if (frame.user_rip >= KVM_V2_HANDLERS_GVA &&
-		    frame.user_rip <  KVM_V2_HANDLERS_GVA + 0x1000) {
+		if (frame.user_rip >= KVM_V2_TRAMPOLINE_GVA &&
+		    frame.user_rip <  KVM_V2_TRAMPOLINE_GVA + 0x4000) {
 			KVMV2_TRACE(KVMV2_OP_TRACE_TRIGGER, regs, run, vcpu);
-			kvm_v2_state_trace_dump("Bug B: user_rip in handlers range");
+			kvm_v2_state_trace_dump("Bug B: user_rip in kernel-half VA");
 			pr_emerg("um: kvm-v2 BUG_B user_rip=%llx err=%llx pid=%d comm=%s sp=%llx\n",
 				 (unsigned long long)frame.user_rip,
 				 (unsigned long long)frame.error_code,
