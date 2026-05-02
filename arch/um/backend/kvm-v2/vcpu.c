@@ -1923,7 +1923,64 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				 * theoretical until a workload demonstrates a
 				 * mid-stub EINTR on those vectors.
 				 */
-				if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA + 0x140 &&
+				if (eintr_regs.rip >= KVM_V2_LSTAR_GVA &&
+				    eintr_regs.rip <  KVM_V2_LSTAR_GVA + 2) {
+					/*
+					 * SMP-T25 (2026-05-02) Bug B residual fix:
+					 * EINTR caught the guest at the LSTAR
+					 * trampoline, between the SYSCALL
+					 * transition and the trampoline's
+					 * `out %al, $0xf4` vmexit. The 5-byte
+					 * trampoline is `out %al, $0xf4 ; sysretq`
+					 * (bytes e6 f4 48 0f 07): the OUT spans
+					 * LSTAR..LSTAR+1, the SYSRETQ spans
+					 * LSTAR+2..LSTAR+4. EINTR at LSTAR or
+					 * LSTAR+1 means the OUT had not yet
+					 * vmexited, so handle_io_trap never ran,
+					 * so HOST_IP was not redirected from
+					 * LSTAR to HOST_CX (post-SYSCALL user
+					 * RIP). The marshal_from_kvm_regs above
+					 * therefore left regs->gp[HOST_IP] =
+					 * LSTAR; on the next dispatch's
+					 * marshal_to_kvm_regs we'd write
+					 * kvm_run.rip = LSTAR with USER CS,
+					 * causing an instruction-fetch fault on
+					 * the kernel-only LSTAR page (BUG_B
+					 * class: err=0x15 P=1/U=1/ID=1).
+					 *
+					 * Fix: rewind HOST_IP to the user-space
+					 * SYSCALL instruction itself (HOST_CX -
+					 * 2; SYSCALL is 2 bytes, opcode 0F 05).
+					 * On the next dispatch the user re-
+					 * executes SYSCALL → CPU re-jumps to
+					 * LSTAR → trampoline OUT vmexits →
+					 * handle_io_trap dispatches the syscall
+					 * normally. No user-side state is
+					 * duplicated because we only re-
+					 * execute the 2-byte SYSCALL instruction
+					 * itself (which is idempotent: it just
+					 * traps to the kernel).
+					 *
+					 * SYSRETQ-region (LSTAR+2..LSTAR+4) is
+					 * NOT handled here because it is never
+					 * executed in v2 — handle_io_trap sets
+					 * HOST_IP = HOST_CX and the next entry
+					 * jumps directly to user RIP, skipping
+					 * the SYSRETQ entirely.
+					 */
+					KVMV2_TRACE(KVMV2_OP_EINTR_INLINE_LSTAR,
+						    regs, run, vcpu);
+					{
+						static atomic64_t lstar_eintr_count;
+						long n = atomic64_inc_return(&lstar_eintr_count);
+						if (n == 1 || (n & 0xff) == 0)
+							pr_info("um: kvm-v2 SMP-T25 LSTAR-EINTR rewind #%ld pid=%d comm=%s rip=%llx rcx=%llx\n",
+								n, current->pid, current->comm,
+								(unsigned long long)eintr_regs.rip,
+								(unsigned long long)eintr_regs.rcx);
+					}
+					regs->gp[HOST_IP] = regs->gp[HOST_CX] - 2;
+				} else if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA + 0x140 &&
 				    eintr_regs.rip <  KVM_V2_HANDLERS_GVA + 0x180) {
 					/* Re-marshal regs from eintr snapshot
 					 * so the inline handler sees consistent

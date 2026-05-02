@@ -347,6 +347,7 @@ static const char *op_name(u8 op)
 		[KVMV2_OP_IST_FRAME_WRITE_POST] = "IST_FRAME_WRITE_POST",
 		[KVMV2_OP_VCPU_RUN_EXIT]        = "VCPU_RUN_EXIT",
 		[KVMV2_OP_TRACE_TRIGGER]        = "TRACE_TRIGGER",
+		[KVMV2_OP_EINTR_INLINE_LSTAR]   = "EINTR_INLINE_LSTAR",
 	};
 
 	if (op < KVMV2_OP_MAX && names[op])

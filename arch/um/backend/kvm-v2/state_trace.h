@@ -49,6 +49,7 @@ enum kvm_v2_trace_op {
 	KVMV2_OP_IST_FRAME_WRITE_POST = 16, /* syscall_trap: ist_write out */
 	KVMV2_OP_VCPU_RUN_EXIT        = 17, /* vcpu.c: bottom of vcpu_run  */
 	KVMV2_OP_TRACE_TRIGGER        = 18, /* dump trigger marker         */
+	KVMV2_OP_EINTR_INLINE_LSTAR   = 19, /* vcpu.c: SMP-T25 LSTAR-EINTR */
 	KVMV2_OP_MAX
 };
 
