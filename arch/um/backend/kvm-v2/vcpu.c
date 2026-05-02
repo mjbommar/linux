@@ -1177,7 +1177,8 @@ int kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd)
 static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 				  unsigned long pgd_pa,
 				  unsigned long fs_base,
-				  unsigned long gs_base)
+				  unsigned long gs_base,
+				  unsigned long entry_rip)
 {
 	struct kvm_run *run = vcpu->kvm_run;
 	struct kvm_sregs *sregs = &run->s.regs.sregs;
@@ -1185,6 +1186,60 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	sregs->cr3     = (u64)pgd_pa;
 	sregs->fs.base = (u64)fs_base;
 	sregs->gs.base = (u64)gs_base;
+
+	/*
+	 * SMP-T13 fix (2026-05-02): on every dispatch where rip will
+	 * be a USER-half VA, reset CS/SS/DS/ES to USER selectors.
+	 *
+	 * Background: After a SYSCALL trap, vCPU.cs = kernel CS
+	 * (=0x08, DPL=0) per MSR_STAR's SYSCALL CS half. KVM stores
+	 * cs into run->s.regs.sregs at exit. The previous
+	 * load_user_sregs only wrote cr3/fs/gs/cr2/cr4 — leaving cs
+	 * at kernel CS. The next KVM_RUN entered the guest at user_RIP
+	 * (we marshal rip = HOST_IP) but with CS=0x08 → CPU runs user
+	 * code at CPL=0.
+	 *
+	 * Empirical proof (mt-yieldonly reproducer, 2026-05-02): T=8
+	 * ncpus=4 yield-only crashes 90%+ with `segfault at 0
+	 * ip=user_VA error=2`. error=2 = write-to-not-present in
+	 * SUPERVISOR mode. CPL=3 user code can't generate a supervisor
+	 * fault. The CPU was at CPL=0 executing user code.
+	 *
+	 * Conditional: only reset CS to USER when the rip we'll marshal
+	 * is in user-half (< canonical kernel-half boundary). For
+	 * trampoline-replay paths (EINTR-mid-trampoline, where rip is
+	 * still in kernel-half = trampoline VA), keep CS at whatever
+	 * KVM left it (kernel CS) so the trampoline can execute.
+	 *
+	 * v1 archive avoided this entirely via an IRETQ gadget that
+	 * pushes [user_RIP, 0x2b, RFLAGS, user_RSP, 0x23] and iretq's
+	 * atomically (kvm-v1-archive/thread.c:3088-3110). This
+	 * conditional reset is the simpler v2-compatible variant.
+	 */
+	if (entry_rip < KVM_V2_TRAMPOLINE_GVA) {
+		sregs->cs.selector = 0x2b;	/* USER_CS, DPL=3 */
+		sregs->cs.type     = 0xb;
+		sregs->cs.dpl      = 3;
+		sregs->cs.s        = 1;
+		sregs->cs.l        = 1;
+		sregs->cs.db       = 0;
+		sregs->cs.g        = 1;
+		sregs->cs.present  = 1;
+		sregs->cs.base     = 0;
+		sregs->cs.limit    = 0xffffffff;
+		sregs->ss.selector = 0x23;	/* USER_DS, DPL=3 */
+		sregs->ss.type     = 0x3;
+		sregs->ss.dpl      = 3;
+		sregs->ss.s        = 1;
+		sregs->ss.db       = 1;
+		sregs->ss.l        = 0;
+		sregs->ss.g        = 1;
+		sregs->ss.present  = 1;
+		sregs->ss.base     = 0;
+		sregs->ss.limit    = 0xffffffff;
+		sregs->ds = sregs->es = sregs->ss;
+	}
+
 	/*
 	 * Defensive: cr2 in the SYNC_REGS sregs mmap reflects the LAST
 	 * KVM_RUN exit's #PF address. v2 uses a per-host-CPU vCPU pool
@@ -1605,7 +1660,8 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	(void)kvm_v2_load_user_sregs(vcpu,
 				     __pa(current->active_mm->pgd),
 				     regs->gp[HOST_FS_BASE],
-				     regs->gp[HOST_GS_BASE]);
+				     regs->gp[HOST_GS_BASE],
+				     regs->gp[HOST_IP]);
 
 	KVMV2_TRACE(KVMV2_OP_POST_LOAD_SREGS, regs, run, vcpu);
 
