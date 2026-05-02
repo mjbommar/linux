@@ -1365,8 +1365,16 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 			static int diag_seen;
 			if (diag_seen < 5) {
 				diag_seen++;
-				KVMV2_TRACE(KVMV2_OP_TRACE_TRIGGER, regs, run, vcpu);
-				kvm_v2_state_trace_dump("Bug class: high-cr2 user fault");
+				/*
+				 * SMP-T24 (2026-05-02): do NOT auto-freeze
+				 * the state-trace ring on BUG_PR — the high-
+				 * cr2 user-fault trigger fires on legitimate
+				 * demand-paging events at init.sh boot
+				 * (cr2 in 0x55... = bash heap, P=0 + U=1 =
+				 * normal kernel-fault-in path). Freezing on
+				 * those misses the actual BUG_B / BUG_C
+				 * captures that come later. Print only.
+				 */
 				pr_emerg("um: kvm-v2 BUG_PR[%d] high-cr2 cr2=%llx user_rip=%llx err=%llx pid=%d comm=%s\n",
 					 diag_seen,
 					 (unsigned long long)cr2,
