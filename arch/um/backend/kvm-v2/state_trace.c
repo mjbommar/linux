@@ -331,38 +331,45 @@ static int snap_cmp(const void *a, const void *b)
 }
 
 /*
- * Print one record in a fixed multi-line block. Field names match the
- * struct member names so downstream parsing scripts ride the symbol
- * table. Lines are tagged 'KVMV2T' for grep-friendly extraction.
+ * Print one record across 8 tagged lines, each carrying cpu+seq so
+ * the parser can reassemble entries even when printk interleaves
+ * lines from different CPUs. Section letters: H=header, R=GPR,
+ * S=sregs, T=task, F=tflags+tist, M=mmvcpu, I=ist_live.
+ *
+ * Field names match the struct member names so downstream parsing
+ * scripts ride the symbol table.
  */
 static void dump_one(const struct kvm_v2_state_snap *e)
 {
-	pr_emerg("KVMV2T ts=%llu seq=%u cpu=%u pid=%u op=%s exit=%u port=%#x\n",
-		 e->ts, e->seq, e->cpu, e->pid, op_name(e->op),
+	pr_emerg("KVMV2T-H cpu=%u seq=%u ts=%llu pid=%u op=%s exit=%u port=%#x\n",
+		 e->cpu, e->seq, e->ts, e->pid, op_name(e->op),
 		 e->exit_reason, e->io_port);
-	pr_emerg("KVMV2T   rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx\n",
-		 e->rax, e->rbx, e->rcx, e->rdx, e->rsi, e->rdi);
-	pr_emerg("KVMV2T   rbp=%llx rsp=%llx r8=%llx r9=%llx r10=%llx r11=%llx\n",
-		 e->rbp, e->rsp, e->r8, e->r9, e->r10, e->r11);
-	pr_emerg("KVMV2T   r12=%llx r13=%llx r14=%llx r15=%llx rip=%llx rfl=%llx\n",
+	pr_emerg("KVMV2T-R cpu=%u seq=%u rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx rbp=%llx rsp=%llx r8=%llx r9=%llx r10=%llx r11=%llx r12=%llx r13=%llx r14=%llx r15=%llx rip=%llx rfl=%llx\n",
+		 e->cpu, e->seq,
+		 e->rax, e->rbx, e->rcx, e->rdx, e->rsi, e->rdi,
+		 e->rbp, e->rsp, e->r8, e->r9, e->r10, e->r11,
 		 e->r12, e->r13, e->r14, e->r15, e->rip, e->rflags);
-	pr_emerg("KVMV2T   cr0=%llx cr2=%llx cr3=%llx cr4=%llx fsb=%llx gsb=%llx\n",
+	pr_emerg("KVMV2T-S cpu=%u seq=%u cr0=%llx cr2=%llx cr3=%llx cr4=%llx fsb=%llx gsb=%llx\n",
+		 e->cpu, e->seq,
 		 e->cr0, e->cr2, e->cr3, e->cr4, e->fs_base, e->gs_base);
-	pr_emerg("KVMV2T   tmm=%llx tamm=%llx tscr2=%llx hax=%llx hip=%llx hsp=%llx\n",
+	pr_emerg("KVMV2T-T cpu=%u seq=%u tmm=%llx tamm=%llx tscr2=%llx hax=%llx hip=%llx hsp=%llx\n",
+		 e->cpu, e->seq,
 		 e->task_mm_ptr, e->task_active_mm_ptr, e->task_saved_cr2,
 		 e->task_host_ax, e->task_host_ip, e->task_host_sp);
-	pr_emerg("KVMV2T   tfpuh=%x tscv=%u tistp=%u tiofv=%u tfpuv=%u\n",
+	pr_emerg("KVMV2T-F cpu=%u seq=%u tfpuh=%x tscv=%u tistp=%u tiofv=%u tfpuv=%u tist=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
+		 e->cpu, e->seq,
 		 e->task_fpu_hash, e->task_saved_cr2_valid,
 		 e->task_ist_pending, e->task_iotrap_fpu_valid,
-		 e->task_fpu_valid);
-	pr_emerg("KVMV2T   tist=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
+		 e->task_fpu_valid,
 		 e->task_ist_frame[0], e->task_ist_frame[1],
 		 e->task_ist_frame[2], e->task_ist_frame[3],
 		 e->task_ist_frame[4], e->task_ist_frame[5]);
-	pr_emerg("KVMV2T   mmgen=%llu vlast=%llu vmm=%llx vkick=%u\n",
+	pr_emerg("KVMV2T-M cpu=%u seq=%u mmgen=%llu vlast=%llu vmm=%llx vkick=%u\n",
+		 e->cpu, e->seq,
 		 e->mm_tlb_gen, e->vcpu_last_seen_tlb_gen,
 		 e->vcpu_current_mm, e->vcpu_kick_pending);
-	pr_emerg("KVMV2T   list=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
+	pr_emerg("KVMV2T-I cpu=%u seq=%u list=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
+		 e->cpu, e->seq,
 		 e->ist_live[0], e->ist_live[1], e->ist_live[2],
 		 e->ist_live[3], e->ist_live[4], e->ist_live[5]);
 }
