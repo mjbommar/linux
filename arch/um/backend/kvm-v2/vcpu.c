@@ -1560,18 +1560,46 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 	KVMV2_TRACE(KVMV2_OP_VCPU_RUN_ENTRY, regs, NULL, NULL);
 
-	preempt_disable();
+	/*
+	 * SMP-T13 fix (2026-05-02): use migrate_disable() instead of
+	 * preempt_disable().
+	 *
+	 * Background: UML builds with CONFIG_PREEMPT_VOLUNTARY (no
+	 * CONFIG_PREEMPT_COUNT), which makes preempt_disable() a NO-OP
+	 * — it does NOT prevent the task from being migrated to another
+	 * host CPU when handle_syscall calls schedule()  (e.g. from
+	 * sched_yield's call chain).
+	 *
+	 * Empirical proof (UM_CPU_MIGRATED probe at syscall_trap.c
+	 * exit, 2026-05-02): mt-yieldonly T=8 ncpus=4 hits >30
+	 * cross-CPU migrations within handle_syscall(__NR_sched_yield)
+	 * — the migrated task then continues with a STALE `vcpu` ptr
+	 * pointing at the original host CPU's vCPU. marshal_to_kvm
+	 * writes to the wrong run mmap; KVM_RUN ioctl runs against
+	 * the wrong vCPU. Cross-task contamination follows.
+	 *
+	 * migrate_disable() pins the running task to the current host
+	 * CPU regardless of preempt-count semantics. Voluntary schedule
+	 * is still allowed, but when we resume we're on the SAME CPU,
+	 * so `cpu`, `vcpu`, and `run` remain valid.
+	 *
+	 * v1 archive used `kvm_vcpu_for_current()` which dereferenced
+	 * a per-current pointer — implicitly correct because the
+	 * current task struct moves with the task. v2's per-host-CPU
+	 * pool requires explicit CPU pinning instead.
+	 */
+	migrate_disable();
 
 	cpu = smp_processor_id();
 	vcpu = kvm_v2_vcpu_get(cpu);
 	if (!vcpu) {
 		/*
 		 * Pool not up — should not happen post init_backend, but
-		 * keep the dispatch contract intact. preempt_enable
+		 * keep the dispatch contract intact. migrate_enable
 		 * before delegating because seccomp_vcpu_run does its
 		 * own scheduling-sensitive work (turnstile, futex).
 		 */
-		preempt_enable();
+		migrate_enable();
 		seccomp_vcpu_run(regs);
 		return;
 	}
@@ -1883,7 +1911,7 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				 */
 				if (current->mm)
 					um_mmu_gather_drain(current->mm);
-				preempt_enable();
+				migrate_enable();
 				/*
 				 * v1 archive (kvm-v1-archive/thread.c:5169-5177)
 				 * called interrupt_end() after the EINTR marshal-
@@ -1967,7 +1995,7 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 	KVMV2_TRACE(KVMV2_OP_VCPU_RUN_EXIT, regs, run, vcpu);
 
-	preempt_enable();
+	migrate_enable();
 }
 
 /*
