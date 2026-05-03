@@ -996,3 +996,52 @@ T41 single-handedly closes:
 - T39's PT-page-recycle hypothesis
 - T40's hypothesis (correct — bug IS in #PF handler resume path,
   specifically the EINTR-mid-stub variant)
+
+## Entry 31 — T41 fix CONFIRMED via N=400 soak + substrate gate
+
+**N=400 mt-mini SMP T=8 ncpus=4 (gate-loop W=4 M=100, T41-fix kernel):**
+
+  PASS=397/400  (Wilson 95% CI [97.8%, 99.7%])
+  FAIL=0        (zero STRICT_MEMSET_FAIL events across 400 boots)
+  TIMEOUT=3     (different bug class — init.sh hangs in libc syscall
+                 during boot, not the byte[0]=0 corruption)
+
+vs T39 baseline N=100: PASS=88/100 (Wilson 95% CI [80%, 93%]).
+
+Wilson CIs do not overlap. The byte[0]=0 mt-mini SMP T=8 residual
+hunted across SMP-T31..T40 is now fully closed at the root cause.
+
+**Substrate gate regression check (kvm-v2 backend, T41-fix kernel):**
+
+  PASS=25 FAIL=3 EXPECTED_FAIL=3
+
+Bit-identical to seccomp baseline. T41 fix introduced no regression.
+
+**Residual to track separately (3/400 = 0.75%):** 3 boots timed out
+with pid=1 init.sh hung at libc syscall RIP=0x7ffff7cacae0, RAX=0x2f.
+Different bug class — not the byte[0]=0 corruption that T31..T41
+chased. Tracked as SMP-T54.
+
+**Investigation summary (T31 → T41):**
+
+T31  TDP coherence ablation       — wrong hypothesis (NPT not the cause)
+T32  handle_mm_fault race         — wrong hypothesis
+T33  prev_roots cache (3 commits) — partial fix (changed timing, +15pp)
+T34  mmu_notifier_invalidate     — wrong hypothesis
+T35  jitter sweep                 — confirmed not timing-dependent
+T36  mmu_gather batch-skip        — separate audit fix (kept)
+T37  host pthread pinning         — neutral
+T38  capture-at-failure diag      — gave us byte[0]=0 signature
+T39  PT-page recycle              — wrong hypothesis (disjoint zones)
+T40  prefault test (BREAKTHROUGH) — confirmed bug in #PF resume path
+T41  state-trace dump → ROOT CAUSE — recover user RAX in
+                                       handle_pf_eintr_inline
+
+**Takeaways for future hard bugs:**
+- The diagnostic-first approach (T41) found the bug in 1 day. The
+  fix-first approach (T31..T39) cost ~3 weeks across 9 wrong
+  hypotheses. Always RUN THE EXISTING DIAGNOSTIC TOOLING AT A REAL
+  FAILURE EVENT before designing a fix.
+- A statistically-conclusive "is it this thing" test (T40 prefault)
+  narrowed the suspect surface from "all of v2" to "3 functions"
+  in one experiment. Design that experiment first.
