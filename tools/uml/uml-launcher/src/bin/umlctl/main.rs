@@ -27,6 +27,7 @@ mod deploy;
 mod dmesg_parse;
 mod events;
 mod gate;
+mod gate_loop;
 mod history;
 mod manifest;
 mod metrics;
@@ -134,6 +135,11 @@ enum GateCmd {
     Diff(GateDiffArgs),
     /// List discovered Gatefiles under tools/testing/selftests/um/gates/.
     List(GateListArgs),
+    /// Run an Umlfile in a parallel up/wait/classify/stop/rm loop —
+    /// the canonical 20-boot flake-characterization pattern from
+    /// toolkit memo §8c, automated. Reports PASS/N + Wilson 95% CI.
+    /// Optional --sweep KEY=v1,v2,... for env-var sweeps.
+    Loop(GateLoopArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -192,6 +198,75 @@ struct GateListArgs {
     /// Source root (for default gates dir discovery).
     #[arg(long, value_name = "PATH")]
     source_root: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+struct GateLoopArgs {
+    /// Path to the Umlfile (TOML). The instance.name in the file
+    /// is treated as a stem; per-worker copies get suffixes like
+    /// `<stem>-w0`, `<stem>-w1`, ...
+    #[arg(short = 'f', long = "file", default_value = "Umlfile.toml", value_name = "PATH")]
+    file: std::path::PathBuf,
+
+    /// Number of parallel workers. Each worker has its own
+    /// instance name and runs `iters` boot/test/teardown cycles
+    /// sequentially. Cumulative N = workers * iters.
+    #[arg(short = 'W', long = "workers", default_value_t = 1, value_name = "W")]
+    workers: u32,
+
+    /// Iterations per worker.
+    #[arg(short = 'M', long = "iters", default_value_t = 10, value_name = "M")]
+    iters: u32,
+
+    /// POSIX ERE (passed to `grep -E`). A line matching this in the
+    /// per-iteration init.log marks the iteration as PASS — UNLESS
+    /// `--fail-marker` matches first/also (fail wins).
+    #[arg(long = "pass-marker",
+          default_value = "REPRO_DONE rc=0",
+          value_name = "REGEX")]
+    pass_marker: String,
+
+    /// POSIX ERE: any line matching marks the iteration as FAIL,
+    /// even if `--pass-marker` also matches. Default catches the
+    /// common KVM-v2 failure modes (mt-mini VERIFY_FAIL, kernel BUG,
+    /// kernel panic).
+    #[arg(long = "fail-marker",
+          default_value = "VERIFY_FAIL|kernel BUG|Kernel panic",
+          value_name = "REGEX")]
+    fail_marker: String,
+
+    /// Per-iteration timeout. Each `up` call gets this long to hit
+    /// either marker before being declared a TIMEOUT (counted as
+    /// FAIL). 120s default mirrors the canonical §8c loop budget.
+    #[arg(long, default_value_t = 120, value_name = "SECONDS")]
+    timeout: u64,
+
+    /// Output directory for per-iteration init.log copies and the
+    /// summary file. Default: `/tmp/umlctl-loop-<timestamp>`. The
+    /// per-iteration logs let you post-mortem failures even after
+    /// `umlctl rm` purged the bundle.
+    #[arg(long, value_name = "PATH")]
+    out: Option<std::path::PathBuf>,
+
+    /// Env-var sweep: KEY=v1,v2,v3. Repeatable. The full loop runs
+    /// once per value (cartesian product across multiple --sweep
+    /// flags). Each sweep value is injected into every worker's
+    /// Umlfile [env] before that loop starts. Useful for
+    /// "compare PASS rate at MT_JITTER_NS=0 vs 100 vs 1000".
+    #[arg(long = "sweep", value_name = "KEY=v1,v2,...")]
+    sweep: Vec<String>,
+
+    /// Emit one JSON object per sweep point (NDJSON) on stdout.
+    /// Otherwise prints a human table.
+    #[arg(long)]
+    json: bool,
+
+    /// UML kernel binary. Falls back to $UML_KERNEL. Set on the
+    /// command line so a sweep can compare two kernels via
+    /// `--sweep UML_KERNEL=/path/a,/path/b` without rewriting the
+    /// Umlfile.
+    #[arg(long, value_name = "PATH")]
+    kernel: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -328,6 +403,18 @@ struct LogsArgs {
     /// Show only the last N lines.
     #[arg(long, default_value_t = 0, value_name = "N")]
     tail: usize,
+
+    /// Refuse to fall back to the latest historical run bundle.
+    /// Without this flag, `umlctl logs <name>` after a fresh `up`
+    /// can return content from a PRIOR instance with the same name
+    /// if the new instance hasn't yet written a `run_id_file`.
+    /// That bit a real flake-hunting test loop in the v2 SMP
+    /// investigation: greping for REPRO_DONE returned matches from
+    /// the previous iteration's bundle while the current kernel
+    /// was still booting (or already crashed). Use --require-current
+    /// in scripts; it exits 7 if no live run is bound.
+    #[arg(long)]
+    require_current: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -464,6 +551,20 @@ struct UpArgs {
     /// Wait-for-ready budget before giving up.
     #[arg(long, default_value_t = 60, value_name = "SECONDS")]
     ready_timeout: u64,
+
+    /// After spawn, block until a line matching this POSIX ERE
+    /// regex appears in the run's init.log. Pairs with --wait-timeout.
+    /// Exit 0 on match, 124 on timeout (matches coreutils `timeout`).
+    /// Use this when scripting tests so you don't have to poll
+    /// `umlctl logs` manually — and to avoid the stale-log pitfall
+    /// where reading logs across an `rm`+`up` cycle returns content
+    /// from a prior instance.
+    #[arg(long, value_name = "REGEX")]
+    wait_for: Option<String>,
+
+    /// Max seconds to wait for `--wait-for`. Default 120.
+    #[arg(long, default_value_t = 120, value_name = "SECONDS")]
+    wait_timeout: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -524,6 +625,7 @@ fn run() -> Result<()> {
             GateCmd::Run(args) => cmd_gate_run(args, cli.quiet),
             GateCmd::Diff(args) => cmd_gate_diff(args),
             GateCmd::List(args) => cmd_gate_list(args),
+            GateCmd::Loop(args) => gate_loop::run(&paths, args, cli.quiet),
         },
     }
 }
@@ -720,7 +822,69 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         no_log: false,
     };
     cmd_start(paths, start_args, quiet)?;
+
+    if let Some(pat) = &args.wait_for {
+        // Block until the spawn's init.log has a line matching `pat`.
+        // Resolves the stale-log race: the run_id_file is written by
+        // cmd_start above, so we can pick out THIS instance's bundle
+        // unambiguously rather than racing `umlctl logs <name>` which
+        // can return content from a previous rm'd-and-respawned
+        // instance with the same name. Exits 124 on timeout.
+        wait_for_marker(paths, &uml.instance.name, pat, args.wait_timeout, quiet);
+    }
     Ok(())
+}
+
+/// Poll the named instance's CURRENT run bundle's init.log for a line
+/// matching `pattern` (POSIX ERE — same semantics as `umlctl gate`).
+/// Exits the process on timeout (code 124, matches coreutils
+/// `timeout`); returns normally on match.
+///
+/// Intentionally only consults the live `run_id_file` — never falls
+/// back to the latest historical bundle. That fallback is the source
+/// of the stale-log pitfall this verb is designed to avoid.
+fn wait_for_marker(
+    paths: &paths::Paths,
+    name: &str,
+    pattern: &str,
+    timeout_secs: u64,
+    quiet: bool,
+) {
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(timeout_secs);
+    let run_id_path = paths.run_id_file_path(name);
+    loop {
+        if let Some(run_id) = supervise::read_run_id_file(&run_id_path) {
+            let init_log = paths.run_dir(&run_id).join("init.log");
+            if init_log.exists() && grep_file_matches(pattern, &init_log) {
+                if !quiet {
+                    eprintln!("[umlctl] wait-for matched /{pattern}/ in {}",
+                              init_log.display());
+                }
+                return;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "umlctl: wait-for timeout ({timeout_secs}s) waiting for /{pattern}/ in instance '{name}'"
+            );
+            std::process::exit(124);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Run `grep -E -q <pattern> <file>`. Returns true on match. Mirrors
+/// the existing `count_lines_matching` helper in gate.rs (same regex
+/// dialect, no extra Rust dep).
+fn grep_file_matches(pattern: &str, file: &std::path::Path) -> bool {
+    use std::process::Command;
+    let Some(file_s) = file.to_str() else { return false };
+    Command::new("grep")
+        .args(["-E", "-q", pattern, file_s])
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
 }
 
 fn cmd_down(paths: &paths::Paths, args: DownArgs, quiet: bool) -> Result<()> {
@@ -989,9 +1153,22 @@ fn cmd_logs(paths: &paths::Paths, args: LogsArgs) -> Result<()> {
     // Resolve the most recent run bundle and pull init.log
     // from it. Prefer the live run_id side-file (set while
     // the instance is running); fall back to a scan of
-    // $STATE/runs/ by creation order.
-    let run_id = supervise::read_run_id_file(&paths.run_id_file_path(&args.name))
-        .or_else(|| run::latest_run_for(paths, &args.name));
+    // $STATE/runs/ by creation order — UNLESS --require-current
+    // forbids the fallback (avoids the stale-log pitfall in
+    // test loops that grep across rm/up cycles).
+    let live_run = supervise::read_run_id_file(&paths.run_id_file_path(&args.name));
+    let run_id = if args.require_current {
+        if live_run.is_none() {
+            eprintln!(
+                "umlctl: instance '{}' has no live run (--require-current): no run_id_file present",
+                args.name
+            );
+            std::process::exit(7);
+        }
+        live_run
+    } else {
+        live_run.or_else(|| run::latest_run_for(paths, &args.name))
+    };
     let log = match run_id {
         Some(id) => paths.run_dir(&id).join("init.log"),
         None => {

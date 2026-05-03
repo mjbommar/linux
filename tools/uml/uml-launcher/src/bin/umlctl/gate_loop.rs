@@ -1,0 +1,539 @@
+// SPDX-License-Identifier: GPL-2.0
+//
+// `umlctl gate loop` — parallel up/wait/classify/stop/rm test loop.
+//
+// Replaces the canonical 20-boot bash loop pattern from toolkit memo
+// §8c (Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+// state-audit/05-toolkit.md). That pattern was hand-rolled in shell
+// for every flake-characterization session; this implementation
+// builds it in so:
+//
+//   1. Parallelism is one flag (`-W`) instead of `for w in ... &; wait`.
+//   2. Per-iteration init.log capture happens BEFORE `umlctl rm` so
+//      failure post-mortems aren't lost.
+//   3. Classification uses the same regex grammar as `gate run`
+//      (POSIX ERE via `grep -E`) — no Rust regex dep.
+//   4. Wilson 95% CI is computed in-binary so you don't have to
+//      eyeball "is 195/200 statistically the same as 957/1000?".
+//   5. Sweeps (`--sweep KEY=v1,v2,...`) take the cartesian product
+//      and run the loop per point — replaces the bash for-loop that
+//      generated per-jitter-value TOMLs in the SMP-T35 jitter sweep.
+//
+// Per-worker isolation is by instance-name suffix: a Umlfile with
+// `instance.name = "mt-mini"` and `--workers 4` becomes 4 instances
+// `mt-mini-w0` .. `mt-mini-w3`, each running its own up/stop/rm
+// cycle in a dedicated thread.
+
+use anyhow::{bail, Context, Result};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::deploy;
+use crate::paths;
+use crate::supervise;
+
+#[derive(Debug, Clone)]
+struct LoopArgs {
+    file: PathBuf,
+    workers: u32,
+    iters: u32,
+    pass_marker: String,
+    fail_marker: String,
+    timeout_secs: u64,
+    out_dir: PathBuf,
+    sweep_axes: Vec<SweepAxis>,
+    json: bool,
+    kernel_override: Option<PathBuf>,
+}
+
+/// One `--sweep KEY=v1,v2,v3` axis.
+#[derive(Debug, Clone)]
+struct SweepAxis {
+    key: String,
+    values: Vec<String>,
+}
+
+/// One assignment from one cartesian-product point: KEY=value pairs
+/// applied to every worker's Umlfile in this loop iteration.
+#[derive(Debug, Clone)]
+struct SweepPoint(Vec<(String, String)>);
+
+impl SweepPoint {
+    fn label(&self) -> String {
+        if self.0.is_empty() {
+            "default".to_string()
+        } else {
+            self.0
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PointResult {
+    label: String,
+    pass: u32,
+    fail: u32,
+    timeout: u32,
+    elapsed_secs: u64,
+}
+
+impl PointResult {
+    fn total(&self) -> u32 {
+        self.pass + self.fail + self.timeout
+    }
+
+    fn rate_pct(&self) -> f64 {
+        let n = self.total();
+        if n == 0 {
+            return 0.0;
+        }
+        100.0 * (self.pass as f64) / (n as f64)
+    }
+
+    /// Wilson 95% CI for the PASS rate (z=1.96).
+    /// Returns (low_pct, high_pct).
+    fn wilson_ci_95(&self) -> (f64, f64) {
+        let n = self.total() as f64;
+        if n == 0.0 {
+            return (0.0, 0.0);
+        }
+        let p = (self.pass as f64) / n;
+        let z = 1.96_f64;
+        let z2 = z * z;
+        let denom = 1.0 + z2 / n;
+        let centre = (p + z2 / (2.0 * n)) / denom;
+        let half = z * ((p * (1.0 - p) / n) + z2 / (4.0 * n * n)).sqrt() / denom;
+        (
+            (100.0 * (centre - half)).max(0.0),
+            (100.0 * (centre + half)).min(100.0),
+        )
+    }
+}
+
+pub(super) fn run(
+    paths: &paths::Paths,
+    args: super::GateLoopArgs,
+    quiet: bool,
+) -> Result<()> {
+    let lo = parse_args(args)?;
+    fs::create_dir_all(&lo.out_dir)
+        .with_context(|| format!("mkdir {}", lo.out_dir.display()))?;
+
+    if lo.workers == 0 || lo.iters == 0 {
+        bail!("workers and iters must both be > 0");
+    }
+
+    // Sanity-load the Umlfile so an obvious typo fails before we
+    // spawn anything (mirrors `gate run` dry-run sanity).
+    let _base = deploy::Umlfile::from_path(&lo.file)
+        .with_context(|| format!("load Umlfile {}", lo.file.display()))?;
+
+    let points = expand_sweep_matrix(&lo.sweep_axes);
+    if !lo.json && !quiet {
+        let total_per_point = lo.workers * lo.iters;
+        eprintln!(
+            "[umlctl gate loop] file={} W={} M={} N/point={} sweep_points={} timeout={}s out={}",
+            lo.file.display(),
+            lo.workers,
+            lo.iters,
+            total_per_point,
+            points.len(),
+            lo.timeout_secs,
+            lo.out_dir.display(),
+        );
+    }
+
+    let mut results = Vec::with_capacity(points.len());
+    for (idx, point) in points.iter().enumerate() {
+        let result = run_one_point(paths, &lo, point, idx, quiet)
+            .with_context(|| format!("sweep point {}: {}", idx, point.label()))?;
+        emit_result(&result, &lo, quiet);
+        results.push(result);
+    }
+
+    // Final return code: nonzero if ANY sweep point had a fail or
+    // timeout. Same convention as `gate run`'s exit-on-violation
+    // behavior — makes this drop-in for CI.
+    let any_failed = results.iter().any(|r| r.fail + r.timeout > 0);
+    if any_failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
+    let out_dir = args.out.unwrap_or_else(|| {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        PathBuf::from(format!("/tmp/umlctl-loop-{now}"))
+    });
+
+    let mut sweep_axes = Vec::with_capacity(args.sweep.len());
+    for raw in &args.sweep {
+        let (k, v) = raw
+            .split_once('=')
+            .with_context(|| format!("--sweep '{raw}': expected KEY=v1,v2,...; missing '='"))?;
+        if k.is_empty() {
+            bail!("--sweep '{raw}': empty key");
+        }
+        let values: Vec<String> = v
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if values.is_empty() {
+            bail!("--sweep '{raw}': no values");
+        }
+        sweep_axes.push(SweepAxis {
+            key: k.to_string(),
+            values,
+        });
+    }
+
+    Ok(LoopArgs {
+        file: args.file,
+        workers: args.workers,
+        iters: args.iters,
+        pass_marker: args.pass_marker,
+        fail_marker: args.fail_marker,
+        timeout_secs: args.timeout,
+        out_dir,
+        sweep_axes,
+        json: args.json,
+        kernel_override: args.kernel,
+    })
+}
+
+/// Expand axes into the cartesian product. An empty axis list yields
+/// one default-flavor point so the loop runs at least once with no
+/// env modifications.
+fn expand_sweep_matrix(axes: &[SweepAxis]) -> Vec<SweepPoint> {
+    let mut acc: Vec<SweepPoint> = vec![SweepPoint(Vec::new())];
+    for axis in axes {
+        let mut next = Vec::with_capacity(acc.len() * axis.values.len());
+        for prev in &acc {
+            for val in &axis.values {
+                let mut combined = prev.0.clone();
+                combined.push((axis.key.clone(), val.clone()));
+                next.push(SweepPoint(combined));
+            }
+        }
+        acc = next;
+    }
+    acc
+}
+
+fn run_one_point(
+    paths: &paths::Paths,
+    lo: &LoopArgs,
+    point: &SweepPoint,
+    point_idx: usize,
+    quiet: bool,
+) -> Result<PointResult> {
+    let label = point.label();
+    let point_subdir = lo.out_dir.join(format!("p{point_idx}_{}", sanitize(&label)));
+    fs::create_dir_all(&point_subdir)?;
+
+    let umlctl = std::env::current_exe().context("locate own exe")?;
+
+    // Generate per-worker Umlfiles into the point subdir.
+    let base = deploy::Umlfile::from_path(&lo.file)
+        .with_context(|| format!("re-load Umlfile {}", lo.file.display()))?;
+    let stem = base.instance.name.clone();
+
+    let mut worker_files: Vec<PathBuf> = Vec::with_capacity(lo.workers as usize);
+    for w in 0..lo.workers {
+        let mut u = base.clone();
+        u.instance.name = format!("{stem}-w{w}");
+        // base.debug.log_dir was already filled by Umlfile::from_path
+        // with the ORIGINAL stem, so renaming instance.name without
+        // also resetting log_dir would leave all workers writing the
+        // SAME init.sh path concurrently — they race and bricks the
+        // boot. Reset to match the new name.
+        u.debug.log_dir = format!("logs/{}", u.instance.name);
+        // Apply sweep KEY=value pairs into [env].
+        for (k, v) in &point.0 {
+            u.env.insert(k.clone(), v.clone());
+        }
+        // Optional kernel override (CLI > Umlfile).
+        if let Some(k) = &lo.kernel_override {
+            u.kernel.path = k.display().to_string();
+        }
+        let toml_path = point_subdir.join(format!("{stem}-w{w}.toml"));
+        let serialized = toml::to_string_pretty(&u)
+            .context("serialize generated Umlfile")?;
+        fs::write(&toml_path, serialized)
+            .with_context(|| format!("write {}", toml_path.display()))?;
+        worker_files.push(toml_path);
+    }
+
+    let pass = Arc::new(AtomicU32::new(0));
+    let fail = Arc::new(AtomicU32::new(0));
+    let timeout = Arc::new(AtomicU32::new(0));
+
+    let started = Instant::now();
+    let mut handles = Vec::with_capacity(lo.workers as usize);
+    for (w, toml_path) in worker_files.iter().enumerate() {
+        let umlctl = umlctl.clone();
+        let toml_path = toml_path.clone();
+        let pass = Arc::clone(&pass);
+        let fail = Arc::clone(&fail);
+        let timeout = Arc::clone(&timeout);
+        let inst_name = format!("{stem}-w{w}");
+        let runs_dir = paths.runs_dir().to_path_buf();
+        let run_id_path = paths.run_id_file_path(&inst_name);
+        let pass_marker = lo.pass_marker.clone();
+        let fail_marker = lo.fail_marker.clone();
+        let timeout_secs = lo.timeout_secs;
+        let iters = lo.iters;
+        let log_dir = point_subdir.join(format!("w{w}"));
+        fs::create_dir_all(&log_dir)?;
+        let quiet = quiet || lo.json;
+
+        handles.push(thread::spawn(move || {
+            for i in 1..=iters {
+                let status = run_one_iter(
+                    &umlctl,
+                    &toml_path,
+                    &inst_name,
+                    &runs_dir,
+                    &run_id_path,
+                    &pass_marker,
+                    &fail_marker,
+                    timeout_secs,
+                    &log_dir,
+                    i,
+                );
+                match status {
+                    IterStatus::Pass => { pass.fetch_add(1, Ordering::Relaxed); },
+                    IterStatus::Fail => { fail.fetch_add(1, Ordering::Relaxed); },
+                    IterStatus::Timeout => { timeout.fetch_add(1, Ordering::Relaxed); },
+                }
+                if !quiet {
+                    eprintln!("[umlctl gate loop] w{w} iter{i}: {status:?}");
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    let elapsed_secs = started.elapsed().as_secs();
+
+    Ok(PointResult {
+        label,
+        pass: pass.load(Ordering::Relaxed),
+        fail: fail.load(Ordering::Relaxed),
+        timeout: timeout.load(Ordering::Relaxed),
+        elapsed_secs,
+    })
+}
+
+#[derive(Debug)]
+enum IterStatus { Pass, Fail, Timeout }
+
+#[allow(clippy::too_many_arguments)]
+fn run_one_iter(
+    umlctl: &Path,
+    toml_path: &Path,
+    inst_name: &str,
+    runs_dir: &Path,
+    run_id_path: &Path,
+    pass_marker: &str,
+    fail_marker: &str,
+    timeout_secs: u64,
+    log_dir: &Path,
+    iter: u32,
+) -> IterStatus {
+    // Make sure no leftover instance with this name exists. Both
+    // calls are idempotent — silent failure is fine.
+    let _ = run_umlctl(umlctl, &["stop", inst_name]);
+    let _ = run_umlctl(umlctl, &["rm", inst_name]);
+
+    // Spawn. We DON'T pass --wait-for here; we want full control
+    // over the polling loop so that on timeout we can capture the
+    // init.log before `stop` writes the kernel-shutdown banner.
+    let up_log = log_dir.join(format!("up-{iter}.log"));
+    let up_out = run_umlctl(
+        umlctl,
+        &["up", "-f", toml_path.to_str().unwrap()],
+    );
+    let _ = fs::write(&up_log, &up_out);
+
+    if !up_out.contains("started ") {
+        // up failed before binding a run_id — record what happened.
+        copy_or_create(&up_log, &log_dir.join(format!("run-{iter}.log")));
+        return IterStatus::Fail;
+    }
+
+    // Poll the live run_id_file → init.log for either marker.
+    //
+    // PASS-wins classification: a successful run typically ends with
+    // pass_marker followed by `Kernel panic - Attempted to kill init`
+    // (UML's normal shutdown — init exiting causes the kernel to
+    // panic). If we made fail_marker win we'd misclassify every clean
+    // success as a failure. Real failures (mt-mini VERIFY_FAIL,
+    // kernel BUG before test completion) won't have written the
+    // pass_marker, so they fall through to the fail_marker check.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let classified: IterStatus = loop {
+        if let Some(run_id) = supervise::read_run_id_file(run_id_path) {
+            let init_log = runs_dir.join(&run_id).join("init.log");
+            if init_log.exists() {
+                if grep_matches(pass_marker, &init_log) {
+                    break IterStatus::Pass;
+                }
+                if grep_matches(fail_marker, &init_log) {
+                    break IterStatus::Fail;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            break IterStatus::Timeout;
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+
+    // Capture the init.log INTO log_dir BEFORE stop+rm so a failure
+    // post-mortem isn't lost when the bundle gets purged. This was
+    // a real pain in the bash version of this loop — fixing it in
+    // the binary so it can't be skipped.
+    if let Some(run_id) = supervise::read_run_id_file(run_id_path) {
+        let init_log = runs_dir.join(&run_id).join("init.log");
+        let saved = log_dir.join(format!("run-{iter}.log"));
+        copy_or_create(&init_log, &saved);
+    }
+
+    let _ = run_umlctl(umlctl, &["stop", inst_name]);
+    let _ = run_umlctl(umlctl, &["rm", inst_name]);
+
+    classified
+}
+
+fn run_umlctl(umlctl: &Path, args: &[&str]) -> String {
+    Command::new(umlctl)
+        .args(args)
+        .output()
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s
+        })
+        .unwrap_or_default()
+}
+
+fn grep_matches(pattern: &str, file: &Path) -> bool {
+    let Some(file_s) = file.to_str() else { return false };
+    Command::new("grep")
+        .args(["-E", "-q", pattern, file_s])
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
+}
+
+fn copy_or_create(src: &Path, dst: &Path) {
+    if src.exists() {
+        let _ = fs::copy(src, dst);
+    } else {
+        let _ = fs::write(dst, "(no init.log)\n");
+    }
+}
+
+/// Scrub a sweep label down to filesystem-safe characters.
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect()
+}
+
+fn emit_result(r: &PointResult, lo: &LoopArgs, quiet: bool) {
+    if lo.json {
+        let (lo_pct, hi_pct) = r.wilson_ci_95();
+        let mut sweep = serde_json::Map::new();
+        if r.label != "default" {
+            for kv in r.label.split(',') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    sweep.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                }
+            }
+        }
+        let row = serde_json::json!({
+            "schema": "umlctl.gate.loop.v1",
+            "sweep": sweep,
+            "pass": r.pass,
+            "fail": r.fail,
+            "timeout": r.timeout,
+            "n": r.total(),
+            "rate_pct": r.rate_pct(),
+            "ci95_lo_pct": lo_pct,
+            "ci95_hi_pct": hi_pct,
+            "elapsed_secs": r.elapsed_secs,
+        });
+        // NDJSON: one row per line on stdout.
+        let _ = writeln!(std::io::stdout(), "{row}");
+    } else if !quiet {
+        let (lo_pct, hi_pct) = r.wilson_ci_95();
+        println!(
+            "==> {} PASS={}/{} FAIL={} TIMEOUT={} rate={:.1}% (Wilson 95% CI [{:.1}%, {:.1}%]) elapsed={}s",
+            r.label,
+            r.pass,
+            r.total(),
+            r.fail,
+            r.timeout,
+            r.rate_pct(),
+            lo_pct,
+            hi_pct,
+            r.elapsed_secs,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wilson_ci_95_known_values() {
+        // PASS=957 FAIL=43, n=1000: from the SMP-T33 N=1000 run,
+        // rate=95.7%, Wilson CI roughly 94.2%..96.9%.
+        let r = PointResult {
+            label: "x".into(),
+            pass: 957,
+            fail: 43,
+            timeout: 0,
+            elapsed_secs: 0,
+        };
+        let (lo, hi) = r.wilson_ci_95();
+        assert!((lo - 94.1).abs() < 0.5, "lo={lo}");
+        assert!((hi - 96.9).abs() < 0.5, "hi={hi}");
+    }
+
+    #[test]
+    fn sweep_matrix_cartesian() {
+        let axes = vec![
+            SweepAxis { key: "A".into(), values: vec!["1".into(), "2".into()] },
+            SweepAxis { key: "B".into(), values: vec!["x".into(), "y".into()] },
+        ];
+        let pts = expand_sweep_matrix(&axes);
+        assert_eq!(pts.len(), 4);
+        let labels: Vec<String> = pts.iter().map(|p| p.label()).collect();
+        assert!(labels.contains(&"A=1,B=x".to_string()));
+        assert!(labels.contains(&"A=2,B=y".to_string()));
+    }
+
+    #[test]
+    fn sweep_matrix_empty_yields_default() {
+        let pts = expand_sweep_matrix(&[]);
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].label(), "default");
+    }
+}
