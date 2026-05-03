@@ -80,6 +80,33 @@ static void segv_handler(int sig, siginfo_t *si, void *ucv)
 		(unsigned long long)regs[REG_R14],
 		(unsigned long long)regs[REG_R15]);
 
+	/* SMP-T26 / T27: dump XMM register state to test FPU leak hypothesis.
+	 * If the bug is that glibc's MOVUPS write of fd+bk lost the high
+	 * half (bk = 0), then xmm0 at fault time may show the corruption.
+	 * Note: by the time SIGSEGV handler runs, the user code may have
+	 * advanced past the MOVUPS — but XMM0..XMM15 should still have
+	 * the values from the failed write context. */
+	{
+		struct _libc_fpstate *fp = (struct _libc_fpstate *)uc->uc_mcontext.fpregs;
+		if (fp) {
+			int i;
+			fprintf(stderr,
+				"  FPU: cwd=%x swd=%x ftw=%x fop=%x mxcsr=%x mxcsr_mask=%x\n",
+				fp->cwd, fp->swd, fp->ftw, fp->fop, fp->mxcsr, fp->mxcr_mask);
+			for (i = 0; i < 8; i++) {
+				fprintf(stderr,
+					"  XMM%d: %08x %08x %08x %08x\n",
+					i,
+					fp->_xmm[i].element[0],
+					fp->_xmm[i].element[1],
+					fp->_xmm[i].element[2],
+					fp->_xmm[i].element[3]);
+			}
+		} else {
+			fprintf(stderr, "  FPU: ucontext->fpregs == NULL!\n");
+		}
+	}
+
 	/* The chunk that we were walking. rdx is `victim` per the
 	 * disassembly. Dump 64 bytes from rdx so we see the chunk
 	 * header (size, prev_size) and the bk/fd pointers. */
