@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-03 (post SMP-T29 — fork-snapshot clobber CLOSED, true 0% on threaded-fork-malloc)
+Last updated: 2026-05-03 (SMP-T31 closed as NEGATIVE-RESULT — TDP coherence ruled out as mt-mini residual mechanism)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -127,6 +127,23 @@ Plugs a CPL=0 leak when the EINTR-mid-IDT path leaves CS=kernel
 with RIP=user. Now strictly secondary to the migrate_disable fix.
 
 ---
+
+## mt-mini SMP T=8 residual — TDP coherence RULED OUT (SMP-T31)
+
+Three-way comparison establishes the bug as v2-specific:
+
+| Configuration | mt-mini SMP T=8 × 30 | flake |
+|---|---|---|
+| Bare host | 30 / 30 | 0% |
+| UML + seccomp | 30 / 30 | 0% |
+| UML + kvm-v2 (production) | 22 / 30 | 27% |
+| UML + kvm-v2 + T31a (madvise per-PFN in tlb_sync) | **17 / 30** | **43% (WORSE)** |
+
+T31a (per-PFN `madvise(MADV_DONTNEED)` in `um_tlb_sync` to fire KVM's mmu_notifier) was implemented per `02-workstreams/D-kvm-backend/31-smp-t31-tdp-coherence-fix-plan.md` (Option α) and **regressed mt-mini by 16 pp**. Combined with two prior null results (G.2 IPI-kicker ablation in tlb.c:561-565 and SMP-T26 H_E in syscall_trap.c:1471-1484), three independent experiments targeting "force TDP/EPT coherence" all failed to help — and the most aggressive (T31a) actively amplified the bug.
+
+**Conclusion:** the mt-mini `got=0 expect=N` failure is NOT in KVM TDP/EPT coherence. Full post-mortem at `02-workstreams/D-kvm-backend/state-audit/18-smp-t31-tdp-coherence-RULED-OUT.md`. Code reverted to pre-T31 state.
+
+Next direction (SMP-T32, task #204): instrument `handle_mm_fault` under v2 to look for per-PFN allocation races between sibling pthreads on the same mm.
 
 ## Residual flake state
 
