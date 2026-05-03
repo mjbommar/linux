@@ -1669,25 +1669,4 @@ struct kvm_pre_fault_memory {
 	__u64 padding[5];
 };
 
-/*
- * SMP-T34 (UML KVM v2 backend): explicit SPTE zap for a guest-physical
- * range. Implemented in this tree's host KVM as an out-of-tree patch
- * (calls kvm_zap_gfn_range internally). UML calls this from
- * kvm_v2_tlb_kick_others to evict stale SPTEs cached against old
- * GVA->GPA mappings after um_tlb_sync drains a guest pgd range.
- *
- * If the host kernel doesn't carry the matching patch, the ioctl
- * returns -ENOTTY and UML falls back to the T33b cross-task
- * SET_SREGS gate (97.5% rate ceiling).
- */
-struct kvm_invalidate_gfn_range {
-	__u64 gfn_start;
-	__u64 nr_pages;
-	__u32 flags;
-	__u32 reserved;
-};
-
-#define KVM_INVALIDATE_GFN_RANGE \
-	_IOW(KVMIO, 0xfe, struct kvm_invalidate_gfn_range)
-
 #endif /* __LINUX_KVM_H */
