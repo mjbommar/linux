@@ -1812,20 +1812,43 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	 * the GET is wasted work — this skip recovers that cost.
 	 */
 	{
-		bool fpu_touched = !(run->s.regs.sregs.cr0 & X86_CR0_TS);
-		if (fpu_touched) {
-			int fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
-						      (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
-			current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
-		}
-		/* If !fpu_touched, leave iotrap_fpu / iotrap_fpu_valid as-is —
-		 * they reflect the last actual guest FPU state for this task,
-		 * which equals the current state since FPU wasn't used.
+		/*
+		 * SMP-T26 fix (2026-05-02): always KVM_GET_FPU after KVM_RUN.
 		 *
-		 * Empirically (mt-byteset 4-thread workload, 4000 dispatches):
-		 * fpu_taken ≈ 5%, fpu_skipped ≈ 95%. For typical syscall-heavy
-		 * UML workloads (mmap/read/write/munmap dominate), the skip
-		 * rate is high and saves one ioctl per non-FPU dispatch. */
+		 * The original Phase H.2 optimization at this site SKIPPED the
+		 * KVM_GET_FPU when guest CR0.TS=1 (FPU not touched), preserving
+		 * the per-task `iotrap_fpu`/`iotrap_fpu_valid` from the prior
+		 * dispatch. This is correct in a SINGLE-task vCPU model — but
+		 * v2 uses a per-host-CPU vCPU pool, where multiple UML tasks
+		 * share one vCPU.
+		 *
+		 * Bug captured by SMP-T26 trace (run-with-bug-t26.log):
+		 *   1. Task X enters KVM_RUN, install at line 1772 consumes
+		 *      iotrap_fpu_valid (set to false).
+		 *   2. KVM_RUN exits with TS=1 (no FPU) → KVM_GET_FPU SKIPPED
+		 *      → iotrap_fpu_valid stays false.
+		 *   3. Task Y context-switches in, runs FPU-touching code,
+		 *      modifies the per-host-CPU vCPU's FPU state.
+		 *   4. Task X re-dispatches: install_on_first_run finds both
+		 *      fpu_valid=false AND iotrap_fpu_valid=false → no-op.
+		 *      vCPU FPU now has Task Y's data.
+		 *   5. Task X executes XMM op via #NM → handler clears TS
+		 *      (kvm_v2_handle_io_nm) but does NOT restore FPU.
+		 *   6. Task X re-executes XMM op with Task Y's leftover XMM —
+		 *      e.g., glibc's MOVUPS at _int_malloc 0x41646a writes
+		 *      partial-stale data to chunk fd+bk → bk=0 →
+		 *      deterministic SIGSEGV at _int_malloc bin walk.
+		 *
+		 * Fix: always capture FPU after every KVM_RUN exit. The cost
+		 * is one ioctl per dispatch (~1µs); the benefit is preventing
+		 * cross-task XMM corruption that drives the 0.15%/fork
+		 * threaded-fork-malloc residual. Pair with kvm_v2_handle_io_nm
+		 * also restoring per-task FPU when iotrap_fpu_valid is true
+		 * (separate fix in syscall_trap.c).
+		 */
+		int fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+					      (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+		current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
 	}
 
 	/*
