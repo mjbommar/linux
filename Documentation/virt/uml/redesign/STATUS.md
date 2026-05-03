@@ -39,7 +39,9 @@ LKML upstream queue.
 | mt-mmap-stress (T=8, ncpus=4)                     | kvm-v2  | n/a       | PASS (post T22)     |
 | threaded-subprocess-wait × 20 (T22)               | kvm-v2  | n/a       | 17-18/20 (NM_stub+2=0) |
 | **threaded-subprocess-wait × 10 (post T26/T27)**  | kvm-v2  | n/a       | **10/10 (100%)**       |
-| **threaded-fork-malloc × 30 (post T26/T27)**      | kvm-v2  | n/a       | **0/24000 fails (100%)** |
+| **threaded-fork-malloc × 6 (post T26/T27)**       | kvm-v2  | n/a       | **0/24000 fails (100%)** |
+| **substrate gate (post T26/T27)**                 | kvm-v2  | n/a       | **PASS=25/FAIL=3/XFAIL=3 (matches seccomp)** |
+| **cpython-parity gate (post T26/T27, 21 modules)**| kvm-v2  | n/a       | **21/21 PARITY** |
 | `make -j4` inside guest (Phase G.3)               | kvm-v2  | n/a       | yes                 |
 | All workloads under `backend=force=seccomp`       | seccomp | yes       | yes (deterministic) |
 
