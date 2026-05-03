@@ -892,3 +892,107 @@ known-good Linux pattern used by databases, hugetlb consumers, etc.
 state at every transition (entry, segv_handler call, marshal, exit)
 across both PASS and FAIL runs to localize whether RIP advances
 unexpectedly or whether the page-install isn't visible on resume.
+
+## Entry 30 — SMP-T41 ROOT CAUSE FOUND + FIXED: EINTR-mid-PF-stub clobbers user RAX with CR2
+
+After T40 isolated the bug to the #PF handler resume path, T41+T42
+collapsed into one experiment: enable `kvm_v2_trace_enable` boot
+arg, run mt-mini SMP T=8 in gate-loop, on STRICT_MEMSET_FAIL the
+existing `kvmv2_state_trace_dump()` call in the test fires the
+debugfs dump.
+
+**Discriminator result (N=100, 6 STRICT_MEMSET_FAIL events):**
+
+5/5 inspected fails show the same pattern. The LAST PF event for
+the failing cr2 before the failure was detected is consistently
+`EINTR_INLINE_PF` (vcpu.c:2071-2080 dispatch), not the normal
+`HANDLE_IO_PF` vmexit-out path.
+
+**State-trace analysis of run-6.log fail (cr2=0x4403d000):**
+
+```
+seq=158  POST_KVM_RUN exit=10 (-EINTR)  rax=4403d000 rip=ffffe0000000214d
+seq=159  EINTR_PATH                     rax=4403d000 rip=ffffe0000000214d
+seq=160  EINTR_INLINE_PF                rax=4403d000 rip=ffffe0000000214d
+seq=164  POST_TLB_SYNC (next dispatch)  rax=4403d000 rip=401d4b
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+                                         RAX still = CR2, NOT user RAX
+```
+
+RIP at EINTR = `0xffffe0000000214d` = `KVM_V2_HANDLERS_GVA + 0x14d`
+= PF stub at offset 0xd. The PF stub bytes (exception.c:213):
+
+```
+offset 0x00:  push %rax            ; user RAX → IST top-56
+offset 0x01:  movq $-1, -24(%rsp)  ; sentinel
+offset 0x0a:  mov %cr2, %rax       ; RAX = CR2
+offset 0x0d:  mov %rax, -8(%rsp)   ; ← EINTR caught HERE (RAX = CR2)
+offset 0x12:  mov %rdx, -16(%rsp)
+offset 0x17:  pop %rax             ; user RAX restored
+offset 0x18:  out %al, $0xf6
+```
+
+EINTR caught the guest after `mov %cr2, %rax` had executed but
+before `pop %rax` could restore user RAX. eintr_regs.rax = CR2.
+
+**The bug:** `kvm_v2_handle_pf_eintr_inline` (syscall_trap.c:1140)
+overwrote regs->gp[HOST_IP/SP/EFLAGS] from the IST frame but did
+NOT recover user RAX from IST top-56. `marshal_to_kvm_regs` then
+wrote ALL 16 GPRs — including the stub's intermediate RAX (= CR2)
+— to kvm_run.s.regs.regs. KVM_SYNC_X86_REGS dirty bit caused the
+next KVM_RUN to apply RAX=CR2 to vcpu->arch.regs.
+
+**Why STRICT_MEMSET_FAIL with byte[0]=0:** The user instruction at
+frame.user_rip = 0x401d4b is `mov %al, (%rdx)` — strict_memset's
+write-byte. AL is the low byte of RAX. CR2 is page-aligned (low
+12 bits = 0), so AL = 0. The user's first store on the just-
+installed page lands as 0x00 instead of `tid`. strict_memset's
+read-back returns 0, surfacing as STRICT_MEMSET_FAIL with the
+characteristic byte[0]=0 / page-aligned-offset signature.
+
+**Fix:** in `kvm_v2_handle_pf_eintr_inline`, capture the stub RIP
+at entry (before overwriting gp[HOST_IP] from frame.user_rip);
+if RIP > stub_start (push %rax has executed), recover user RAX
+from IST top-56:
+
+```c
+u64 stub_rip_at_eintr = regs->gp[HOST_IP];
+u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+...
+if (stub_rip_at_eintr > KVM_V2_HANDLERS_GVA + 0x140)
+    regs->gp[HOST_AX] = *(u64 *)(top - 56);
+```
+
+The push %rax write at top-56 is preserved across all subsequent
+stub instructions (sentinel goes to top-80, captured-CR2 goes to
+top-64, captured-RDX goes to top-72 — none touch top-56).
+
+**Validation (N=100 W=4 M=25, T41-fix kernel):**
+
+| Run | PASS | STRICT_MEMSET_FAIL | Wilson 95% CI |
+|---|---|---|---|
+| T39 baseline (no trace) | 88/100 | 11 | [80%, 93%] |
+| T41 discriminator (trace ON, no fix) | 93/100 | 6 | [86.3%, 96.6%] |
+| **T41 fix (this commit)** | **99/100** | **0** | [94.6%, 99.8%] |
+
+The 1 fail in T41-fix is an init.sh timeout (different bug class:
+boot didn't reach REPRO_DONE; pid 1 hung in libc syscall).
+
+**This is the byte[0]=0 mt-mini SMP T=8 residual ROOT CAUSE.**
+
+T41 single-handedly closes:
+- T31's TDP coherence hypothesis (correct that NPT cache wasn't
+  the cause)
+- T32's handle_mm_fault page allocation race hypothesis
+- T33's prev_roots cache hypothesis (the +15pp gain there was
+  real but partial — coincidentally reduced cross-task EINTR-mid-
+  stub frequency by changing dispatch timing)
+- T34's mmu_notifier_invalidate hypothesis
+- T35's jitter hypothesis
+- T36's mmu_gather hypothesis (also a real fix but not THIS bug)
+- T37's host pthread pinning hypothesis
+- T38's capture-at-failure (told us byte[0]=0 was the signature,
+  enabling T40)
+- T39's PT-page-recycle hypothesis
+- T40's hypothesis (correct — bug IS in #PF handler resume path,
+  specifically the EINTR-mid-stub variant)

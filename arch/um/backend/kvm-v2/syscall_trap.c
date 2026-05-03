@@ -1143,6 +1143,8 @@ int kvm_v2_handle_pf_eintr_inline(struct uml_pt_regs *regs,
 				  u64 cr2)
 {
 	struct kvm_v2_ist_frame frame;
+	u64 stub_rip_at_eintr = regs->gp[HOST_IP];
+	u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
 
 	kvm_v2_ist_frame_read(vcpu, &frame, true /* has_error_code */);
 
@@ -1150,6 +1152,50 @@ int kvm_v2_handle_pf_eintr_inline(struct uml_pt_regs *regs,
 	regs->gp[HOST_SP]     = frame.user_rsp;
 	regs->gp[HOST_EFLAGS] = frame.user_rflags;
 	regs->is_user         = 1;
+
+	/*
+	 * SMP-T41 fix (2026-05-03): recover user RAX from the IST stack.
+	 *
+	 * The PF stub (exception.c kvm_v2_handler_stub_pf) starts with
+	 * `push %rax` (1-byte opcode 0x50 at stub_start+0). That push
+	 * stores user RAX at IST top-56 (the IDT iretq frame occupies
+	 * top-48..top-8 with the error code at top-48; push %rax
+	 * decrements RSP by 8 and writes user RAX one slot below the
+	 * iretq frame).
+	 *
+	 * After the push, the stub executes `mov %cr2, %rax` (3 bytes,
+	 * opcode `0f 20 d0` at stub_start+0xa) which OVERWRITES RAX with
+	 * CR2. If EINTR catches the guest with RIP in [stub_start+0xd,
+	 * stub_start+0x18) — i.e., between the cr2-into-RAX move and the
+	 * pop %rax that restores it — current RAX in eintr_regs is
+	 * actually CR2, not user's RAX.
+	 *
+	 * marshal_to_kvm_regs below writes ALL GPRs into kvm_run.s.regs,
+	 * so without recovery the next KVM_RUN resumes at frame.user_rip
+	 * with RAX = CR2. For mt-mini's `mov %al, (%rdx)` write
+	 * instruction, AL is the low byte of RAX; CR2 is page-aligned, so
+	 * AL = 0; the user's first store on the freshly-installed page
+	 * lands as 0 instead of the intended val. strict_memset's
+	 * read-back returns 0, surfacing as STRICT_MEMSET_FAIL with
+	 * page-aligned offset (the byte[0]=0 signature isolated by T40).
+	 *
+	 * Recovery: if EINTR caught us PAST the push (stub_rip > stub
+	 * start), user RAX is at IST top-56. Read it back into
+	 * regs->gp[HOST_AX] before marshal. Subsequent stub instructions
+	 * (`movq sentinel`, `mov %cr2, %rax`, `mov %rax, -8(%rsp)`,
+	 * `mov %rdx, -16(%rsp)`) write to top-80 / top-64 / top-72 — none
+	 * of them touch top-56 — so the original push value is intact for
+	 * the entire EINTR-able window.
+	 *
+	 * For RIP == stub_start+0 (push hasn't executed yet), eintr_regs
+	 * already carries user RAX; do nothing.
+	 *
+	 * Confirmed via state-trace dump on STRICT_MEMSET_FAIL: failing
+	 * cr2's last PF event is consistently EINTR_INLINE_PF, with RAX
+	 * at EINTR == cr2 (page-aligned), i.e., low byte 0.
+	 */
+	if (stub_rip_at_eintr > KVM_V2_HANDLERS_GVA + 0x140)
+		regs->gp[HOST_AX] = *(u64 *)(top - 56);
 
 	regs->faultinfo.error_code = (int)frame.error_code;
 	regs->faultinfo.cr2        = cr2;
