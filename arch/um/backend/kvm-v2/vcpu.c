@@ -1182,6 +1182,14 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 {
 	struct kvm_run *run = vcpu->kvm_run;
 	struct kvm_sregs *sregs = &run->s.regs.sregs;
+	/*
+	 * SMP-T33 (2026-05-03): capture cross-task predicate BEFORE any
+	 * field of vcpu->last_task / vcpu->last_mm is updated below in the
+	 * cr2 block. Used at end of function to gate the full KVM_SET_SREGS
+	 * ioctl that drops KVM's per-vCPU TDP MMU prev_roots cache.
+	 */
+	bool cross_task = (vcpu->last_task != current) ||
+			  (vcpu->last_mm   != current->mm);
 
 	sregs->cr3     = (u64)pgd_pa;
 	sregs->fs.base = (u64)fs_base;
@@ -1439,6 +1447,57 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 		current->thread.arch.kvm_v2.nm_ts_bypass = false;
 	} else {
 		sregs->cr0 |= X86_CR0_TS;
+	}
+
+	/*
+	 * SMP-T33 (2026-05-03) — KVM TDP MMU prev_roots cache invalidation
+	 * on cross-task / cross-mm dispatch (state-audit memo 20).
+	 *
+	 * Background: KVM keeps a small LRU of recently-used TDP roots per
+	 * vCPU (`vcpu->arch.mmu->prev_roots`). When v2 ships a new CR3 via
+	 * the KVM_SYNC_X86_SREGS dirty-bit, KVM's `kvm_mmu_new_pgd(cr3)`
+	 * fast-switches to a cached root if one exists keyed by `cr3 | pcid`,
+	 * WITHOUT revalidating that the cached root's leaf SPTEs reflect
+	 * current physmem PTE bytes.
+	 *
+	 * Under v2's per-host-CPU vCPU pool, multiple UML tasks (different
+	 * mms / CR3s) share one vCPU. Their TDP roots cycle through this
+	 * vCPU's prev_roots cache. mmu_notifier-triggered remote-TLB-flushes
+	 * targeting one mm's *active* root on another vCPU may not fully
+	 * invalidate the entry sitting in this vCPU's prev_roots[]. When
+	 * this task re-dispatches, KVM fast-switches to that stale cached
+	 * root → user-side reads/writes go through stale guest-VA→host-PA
+	 * mappings → mt-mini's `got=0 expect=N` symptom.
+	 *
+	 * Why ncpus=1 PASSes 60/60: with one vCPU, prev_roots cycles only
+	 * through the few mms actually running, the active root is always
+	 * the most recent one, mmu_notifier flushes hit the right place.
+	 * Why ncpus=4 baselines at 83%: with 4 vCPUs, an mm's root falls
+	 * into prev_roots[] on the vCPUs not currently running it, then
+	 * gets fast-switched-back-to without revalidation.
+	 *
+	 * Fix: on cross-task or cross-mm transitions, issue full KVM_SET_SREGS
+	 * ioctl. The full ioctl takes the heavy `__set_sregs2 →
+	 * kvm_mmu_reset_context` path which drops `prev_roots[]` and forces
+	 * the next vmentry to walk fresh. Same-task same-mm re-entries (the
+	 * common syscall-trap case) skip this — KVM_SYNC_X86_SREGS dirty-bit
+	 * is sufficient for unchanged CR3.
+	 *
+	 * Empirical (state-audit/20 entry 14, 60-boot loop):
+	 *   ncpus=4 baseline (no fix): 50/60 = 83%
+	 *   ncpus=4 with always-fix:   59/60 = 98% (this branch's intent;
+	 *                                          narrow form tested next)
+	 *   ncpus=2 (control):         58/60 = 97%
+	 *   ncpus=1 (control):         60/60 = 100%
+	 *
+	 * Cross-task gate uses the same `last_task != current || last_mm !=
+	 * current->mm` predicate established by SMP-T16 (cr2 zero) and
+	 * SMP-T23 (extended for cross-mm execve transitions).
+	 */
+	if (cross_task) {
+		struct kvm_sregs full = *sregs;
+		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
+				       (unsigned long)&full);
 	}
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
