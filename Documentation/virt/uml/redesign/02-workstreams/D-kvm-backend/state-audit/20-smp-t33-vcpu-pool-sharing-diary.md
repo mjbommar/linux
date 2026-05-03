@@ -490,3 +490,72 @@ updates + the T33c-revert comment block. Next move requires user input to
 choose: ship-current (97.5%) vs implement R1 (small, low-risk attempt)
 vs implement R3 (more invasive but architecturally correct).
 
+
+## Entry 22 — N=1000 tightening + v1 architecture confirmation
+
+**T33b N=1000 (W=4 M=250 parallel):**
+```
+==> TAG=t33b-N1000 PASS=957/1000 FAIL=43/1000 (elapsed: 1170s)
+```
+Residual = **4.3%**, ±1.3% binomial CI. Earlier n=200 estimate of 97.5%
+was within statistical noise of this; 95.7% is the more reliable
+characterization under sustained parallel pressure (4 concurrent UMLs
+each ncpus=4 stressing host at 16-vCPU saturation).
+
+**v1 archive code dive confirms the architectural answer:**
+
+`arch/um/backend/kvm-v1-archive/lifecycle.c` and `thread.c` show v1
+used a **per-task vCPU model**:
+```c
+/* per-task vCPU accessor — lazily creates a struct kvm_vcpu_handle
+ * on first use by the calling task. Storage lives on
+ * current->thread.arch.kvm.vcpu and is freed at task-exit.
+ */
+struct kvm_vcpu_handle *kvm_vcpu_for_current(void) {
+    struct kvm_vcpu_handle *h;
+    if (!current) return NULL;
+    h = current->thread.arch.kvm.vcpu;
+    if (likely(h)) return h;
+    h = kvm_vcpu_handle_alloc();
+    ...
+}
+```
+
+Each UML task gets its own KVM vCPU (one KVM_CREATE_VCPU per task).
+**No cross-task vCPU sharing → no cross-task SPTE aliasing → 100% pass.**
+
+v2's per-host-CPU vCPU pool was a deliberate scalability/perf design
+choice (1 task : N vCPUs would consume ~1MB KVM state per task →
+unacceptable for hundred-thread workloads like CPython). The cost is
+the 4.3% mt-mini stress residual from cross-task SPTE aliasing.
+
+## Entry 23 — Path-to-100% options
+
+R3 as opus described it (call mmu_notifier_invalidate_range from UML
+PTE update path) DOESN'T WORK in this configuration: UML the kernel
+runs as a *host userspace process*. UML's own `mmu_notifier_invalidate_range`
+is statically linked into UML and operates on UML's empty subscriber
+list — it never reaches the host kernel's mmu_notifier (where KVM is
+registered). Verified: UML's .config doesn't enable MMU_NOTIFIER, but
+even if it did, that'd be UML's notifier infrastructure, not the host's.
+
+Realistic paths to 100%:
+
+| Option | Approach | Effort | Risk | Tradeoff |
+|---|---|---|---|---|
+| **A** | Stay at v2 pool, ship at 95.7% with carve-out | Doc only | None | No 100% gate |
+| **B** | Switch v2 to per-task vCPU (v1's model) | Multi-day | High | Loses pool's scalability |
+| **C** | Hybrid: per-mm vCPU (threads in same mm share, different mm get separate vCPU) | Multi-day | High | Complex transitions on execve |
+| **D** | Memslot DEL+ADD on cross-task dispatch (R3-via-ioctl) | 2-4 hr code | Severe perf risk; potential lock contention/deadlock under mt-mini's hot churn — KVM holds slots_lock and may block other vCPUs during memslot rewrite | Slow but possibly correct |
+| **E** | Patch host KVM to add `KVM_INVALIDATE_GFN_RANGE` ioctl | Upstream effort | Low (clean API) | Requires recent host kernel; out-of-tree patch otherwise |
+
+Default path under autonomous-loop standing orders ("100% pass, never
+give up") would be **C (per-mm vCPU)** — preserves most of v2's
+scalability win while eliminating the cross-task race for the dominant
+workloads (single-mm SMP stress like mt-mini, CPython multithreading).
+But it's a major refactor and I'm not shipping it without explicit user
+approval given the T33c regression.
+
+**Holding pattern: tip is f8e38d57dd1f (T33b at HEAD). Awaiting
+user steer.**
+
