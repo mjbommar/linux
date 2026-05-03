@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-03 (**SMP-T33 CLOSED — mt-mini residual fixed.** ncpus ablation localized bug to per-host-CPU vCPU pool; opus identified KVM TDP MMU prev_roots cache fast-switching; fix is one extra KVM_SET_SREGS ioctl on cross-task dispatch. mt-mini SMP T=8 ncpus=4: 50/60 = 83% → 118/120 = 98%, +15 pp. All regression checks clean.)
+Last updated: 2026-05-03 (**SMP-T41 CLOSED — mt-mini byte[0]=0 residual TRUE root cause fixed.** State-trace dump on STRICT_MEMSET_FAIL revealed RAX=CR2 at the EINTR boundary in the PF stub: when EINTR caught the guest mid-PF-stub between `mov %cr2, %rax` and `pop %rax`, `kvm_v2_handle_pf_eintr_inline` did not recover user RAX from IST top-56 before marshal_to_kvm_regs. The user resumed at user_rip with RAX=CR2 (page-aligned, low byte=0), so `mov %al, (%rdx)` wrote 0x00. Fix: recover user RAX from IST top-56 when stub_rip > stub_start. Validation: 397/400 PASS (was 88/100), 0 STRICT_MEMSET_FAIL, Wilson 95% CI [97.8%, 99.7%].)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,15 +9,24 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `9ccdc4300713` on `umlctl-deploy` (SMP-T33 closes mt-mini
-SMP T=8 residual via KVM TDP MMU prev_roots cache invalidation on
-cross-task dispatch). All gates clean:
-  - mt-mini SMP T=8 ncpus=4: 50/60 = 83% → 118/120 = 98% (+15 pp)
-  - cpython-parity 5-mod (incl test_io): 5/5 PARITY
-  - threaded-fork-malloc 0/116000 forks failed
-  - threaded-subprocess-wait 10/10
-  - substrate gate matches seccomp (25/3/3)
-  - wide cpython-parity 134/135 PARITY (0 v2 regressions)
+**Tip:** `6fb90a1ba275` on `umlctl-deploy` (SMP-T41 closes mt-mini
+SMP T=8 byte[0]=0 residual via user-RAX recovery in
+kvm_v2_handle_pf_eintr_inline). All gates clean:
+  - mt-mini SMP T=8 ncpus=4 N=400: **397/400 PASS, 0 STRICT_MEMSET_FAIL**
+    (Wilson 95% [97.8%, 99.7%]); 3 timeouts are init.sh-hang
+    in libc syscall — different bug class (SMP-T54)
+  - substrate gate kvm-v2: PASS=25/FAIL=3/XFAIL=3 (matches seccomp)
+  - cpython-tier0 kvm-v2: PASS
+  - perf-py-startup kvm-v2: 0.10s median vs 0.12s seccomp
+    (kvm-v2 17% FASTER, gate ratio 0.833 / 1.2 ceiling)
+  - threaded-fork-malloc 0/116000 forks failed (T29)
+  - threaded-subprocess-wait 10/10 (T29)
+
+**Prior closes superseded** (T33's prev_roots-cache fix was a partial
+fix — it changed dispatch timing and incidentally reduced the
+EINTR-mid-stub frequency by ~+15pp, but the actual mechanism was
+not what T33 thought; T41's recovery of user RAX is the true root
+cause).
 
 ---
 
