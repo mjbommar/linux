@@ -509,6 +509,96 @@ Implement candidate #1 (minimal madvise hook) and test:
   madvise hook as the fix.
 - If T26 fail rate unchanged: hypothesis WRONG, look at #2/#3.
 
+### UPDATE — H_E test result + state-trace capture
+
+H_E madvise(MADV_DONTNEED) test on the freshly-faulted page after
+handle_io_pf success: NO change in fail rate (50/24000 = 0.21%, vs
+baseline 36/24000 = 0.15%). Hypothesis E as implemented does not fix
+T26. Reverted.
+
+**However, the state-trace ring capture (BUG_T26 trigger commit
+97a6841bdad3) provides the smoking-gun evidence:**
+
+In a captured failure (pid=2357, cpu=0, seq=4212296, frozen ring
+6852 entries), the sequence is:
+```
+seq=4212287  pid=2357 VCPU_RUN_EXIT  exit=2 port=0xf4
+              rip=0x416b6c  rdx=0x4e3290  rsi=0x4b2f38  rdi=0x4e2a80
+              rcx=0xb720  rax=0x4b27c8
+              cr2=0x4e83a0  cr3=0x304f000
+              vmm=619d8000 (PREVIOUS task's mm)
+              tmm=619d8a00 (THIS task's mm — DIFFERENT)
+              vlast=80 mmgen=75 — cross-mm transition
+
+seq=4212288-4212293: dispatch setup (TLB sync, CR4.PGE toggle,
+                     IST restore, FPU install, PRE_KVM_RUN)
+              load_user_sregs zeros cr2 (T23 cross-mm guard)
+              cr3 changes 0x304f000 -> 0x2d4b000 (?)
+
+seq=4212294  pid=2357 POST_KVM_RUN  exit=2 port=0xf6 (#PF)
+              rip=0xffffe00000002158 (PF stub)
+              cr2=0x10 (NULL+0x10)
+              error_code=4 (P=0, U=1, R=0 = user read of not-present)
+              IST frame: [4, 0x415f2d, 0x2b, 0x10246, 0x7f7ffff087f0, 0x23]
+              user_rip at fault = 0x415f2d (glibc _int_malloc+0xed)
+              register state: rdx=0x4e3290 rdi=0 rsi=0x4ee9b0
+              -> user faulted reading victim->bk where bk=0
+```
+
+**Critical finding from cross-PID analysis** (multiple PIDs across
+multiple CPUs hit the SAME chunk address 0x4e3290 with the SAME
+glibc register state):
+
+PID 67 on cpu=3 at seq=1590 ALSO faulted on the same chunk page —
+but with DIFFERENT signature: cr2=0x4e32a0, error_code=6 (P=0, W=1,
+U=1) = user WRITE to not-present page. And user_rip=0x416b6c (the
+SYSCALL-return point in _int_malloc, not the bin-walk address). So
+this is a WRITE fault on the chunk's fd field address (0x4e32a0
+= 0x4e3290 + 0x10).
+
+So the chunk page at 0x4e3000 was NOT mapped at the moment glibc
+first wrote to it. Kernel handles, maps fresh anonymous page (which
+is zero-init by POSIX). Glibc re-executes the write, now succeeds.
+But then the bin-walk loop reads back fields from the page, and
+sees zeros (because the page was just mapped fresh and writes
+weren't fully consistent across the page state).
+
+Or more subtly: under v2, the demand-paging path may have a
+different content-stability invariant than seccomp. Anonymous
+pages SHOULD be zero on first fault, but subsequent writes by the
+user code SHOULD persist. If subsequent writes go to a stale TDP
+entry pointing at a different physical page (still zero-init), the
+writes silently disappear from the user's view.
+
+**Summary of trace-captured smoking gun:**
+- Multi-PID, deterministic pattern: same chunk address 0x4e3290,
+  same arena address 0x4b27c0, same alloc context (rsi=0x4ee9b0)
+- Cross-CPU pattern: hits cpu=0 AND cpu=3 with same register state
+- Failure point: glibc _int_malloc bin walk (0x415f2d) reads
+  chunk->bk = 0
+- Pre-failure: chunk's fd field (0x4e32a0) has been WRITTEN to
+  via #PF handler path (different PID, on a different mm with
+  the same VA layout)
+
+This is consistent with H_E mechanism but the implemented madvise
+fix targets the wrong page. The actual issue may be:
+- The VA range that glibc writes to spans MULTIPLE pages
+- handle_page_fault only maps the SPECIFIC faulting page; subsequent
+  writes to ADJACENT pages still take faults
+- Each fresh page mapped = zero content; writes from glibc go to
+  the right pages BUT may be invisible to subsequent reads if KVM's
+  TDP cache is pointing at a stale page
+
+Need to write a kernel-side fix that ensures ALL pages glibc has
+in its cached chunk-pointer view are mapped consistently. Or fix the
+TDP-cache invalidation to cover the whole faulting region.
+
+For next iteration: spawn a deeper subagent investigation focused on
+v2-side madvise / mmu_notifier / TDP path with this trace evidence.
+The core question: when handle_page_fault returns successfully, is the
+PT entry visible to KVM's TDP layer immediately, or is there a window
+where KVM sees stale GPA→HPA mapping?
+
 ### FPU ablation experiment (NEW)
 
 Hypothesis: per-host-CPU vCPU's XMM/x87/MXCSR state from previous task
