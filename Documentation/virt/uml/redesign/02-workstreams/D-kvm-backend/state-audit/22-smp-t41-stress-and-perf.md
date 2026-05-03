@@ -32,7 +32,7 @@ runs mt-mini with 8 pthread workers each doing 50 iterations of
 | T41 discriminator (state-trace ON, no fix) | 100 | 93 | 6 | [86.3%, 96.6%] |
 | T41 fix | 100 | 99 | 0 | [94.6%, 99.8%] |
 | **T41 fix (extended soak)** | **400** | **397** | **0** | **[97.8%, 99.7%]** |
-| **T41 fix (long soak)** | **1000** | **(in progress)** | **(in progress)** | |
+| **T41 fix (long soak)** | **1000** | **992** | **0** | **[98.4%, 99.6%]** |
 
 `STRICT_MEMSET_FAIL` count is the bug-class signal. The 3 fails in
 T41-fix N=400 are init.sh-hangs in libc syscall during boot —
@@ -95,26 +95,70 @@ This code runs ONLY in the `kvm_v2_handle_pf_eintr_inline` path
 EINTR; PF handled via `handle_io_pf` vmexit-out path), zero added
 work.
 
-Empirical comparison on Python startup:
+Empirical comparison on Python startup (10 samples each, in-kernel
+printk-timestamp resolution):
 
-| Kernel | Median | Notes |
-|---|---|---|
-| T39 baseline | (TODO — measuring) | |
-| T41 fix | 0.1000 s | |
+| Kernel | seccomp median | kvm-v2 median | Ratio |
+|---|---|---|---|
+| T39 baseline (no T41 fix) | 0.1200 s | 0.1000 s | 0.833 |
+| T41 fix                   | 0.1200 s | 0.1000 s | 0.833 |
 
-(Will populate from the T39 measurement currently running.)
+**Identical to printk-timestamp granularity (10 ms).** The T41 fix
+introduces zero measurable wall-clock overhead.
 
-The conclusion is the obvious one: a single conditional read on a
-slow path that fires <0.1% of dispatches has no measurable effect
-on whole-program wall-clock.
+This confirms what the code change implies: a single conditional
+read of `*(u64 *)(top - 56)` on the EINTR-mid-PF-stub slow path
+(which fires <0.1% of dispatches) has no impact on whole-program
+performance.
 
 ## Headline numbers
 
 - **Bug class**: byte[0]=0 STRICT_MEMSET_FAIL — closed at root
-  cause. Zero events across N=400 boots (and counting in N=1000
-  soak).
+  cause. **Zero events across N=1000 boots.** Wilson 95% CI for
+  PASS rate: [98.4%, 99.6%].
 - **Substrate parity**: kvm-v2 = seccomp = 25/3/3.
-- **Python startup**: kvm-v2 is 17% faster than seccomp (median
-  0.10s vs 0.12s).
-- **Fix overhead**: one conditional read on the EINTR-mid-PF-stub
-  slow path. No measurable hot-path impact.
+- **Python startup (T41-fix kernel)**: kvm-v2 is 17% faster than
+  seccomp on the SMP build (median 0.10s vs 0.12s).
+- **Fix overhead**: identical wall-clock to T39 baseline. No
+  measurable hot-path impact.
+
+## Known perf regression vs 2026-04-30 baseline (separate from T41)
+
+Three-way comparison from scoreboard.jsonl + on-host re-runs today:
+
+| Build | Commit | seccomp_med | kvm_v2_med | Ratio | Era |
+|---|---|---|---|---|---|
+| 04-30 baseline (UP) | `f1e3130a69af` | 0.090 s | **0.040 s** | **0.444** | pre-H.2 (peak v2 perf) |
+| 05-02 UP build (uml-clean, re-run today) | `ad18db7c3768` | 0.090 s | 0.060 s | 0.667 | post-tlb-kick-activate, pre-T26/T27 |
+| 05-03 SMP build (uml-smp-t41fix) | `cf98c8d21e99` + T41 | 0.120 s | 0.100 s | 0.833 | post-T26/T27/T33 + SMP flavor |
+
+The regression decomposes into two distinct hops:
+
+1. **UP→UP, 04-30→05-02 build (kvm-v2 0.04→0.06, +50%)** — same
+   build flavor; same seccomp wall-clock. Likely culprits in the
+   ~99 commits between: cross-vCPU TLB kick infrastructure
+   (commits A+B at `7e1c255a09ad` / `9f0ff6257e8b`), migrate_disable
+   in vcpu_run (`95b3a85bd309`), the EINTR-mid-stub PF inline path
+   (`e5977806fd14`). These all add code on the dispatch hot path.
+
+2. **UP→SMP + 05-02→05-03 (kvm-v2 0.06→0.10, +67%)** — both build
+   flavor (CONFIG_SMP=y, NR_CPUS=4 → +33% on seccomp too) and
+   SMP-T26/T27 (`76b1d98b2006`) which REVERTED the H.2 lazy-FPU
+   optimization (`ba9c83331f30`) by forcing `KVM_GET_FPU` after
+   EVERY `KVM_RUN` to plug the cross-task XMM leak. H.2 was
+   advertised as skipping ~95% of `GET_FPU` calls; T26/T27 traded
+   that throughput back for correctness.
+
+This regression is **not caused by T41** (the T39-vs-T41-fix table
+above shows identical wall-clock to 10 ms granularity). It is a
+**deferred perf-restoration follow-up** tracked as **SMP-T55**:
+
+- Identify the worst single-commit regression in the 04-30→05-02
+  UP-build window via bisect.
+- Investigate whether T26/T27's always-GET_FPU can be made cheaper
+  while remaining correct (e.g., per-vCPU FPU-dirty flag from KVM,
+  conditional GET only when guest actually executed FPU
+  instructions since last GET).
+- Compare SMP-build overhead on seccomp vs UP-build to quantify the
+  CONFIG_SMP=y cost.
+- Restore Python startup ratio to <0.5 if possible.
