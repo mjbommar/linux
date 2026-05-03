@@ -128,6 +128,23 @@ static void segv_handler(int sig, siginfo_t *si, void *ucv)
 	_exit(177);  /* distinct exit code so parent can detect */
 }
 
+/*
+ * SIGABRT handler: fires when glibc's heap-integrity check kills the
+ * process via abort(). Captures the same register/XMM state as
+ * segv_handler so we can diagnose the rare residual T26/T27 class
+ * (~1/120000 fork rate) where heap corruption manifests as abort
+ * instead of segfault.
+ */
+static void abrt_handler(int sig, siginfo_t *si, void *ucv)
+{
+	fprintf(stderr,
+		"SMP-T26-DIAG SIGABRT (likely glibc heap-integrity check) pid=%d\n",
+		getpid());
+	/* Reuse the same state-dumper as segv_handler — same register
+	 * layout, same registers of interest. */
+	segv_handler(sig, si, ucv);
+}
+
 int main(void)
 {
 	struct sigaction sa = {0};
@@ -145,6 +162,10 @@ int main(void)
 	sa.sa_flags = SA_SIGINFO;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGSEGV, &sa, NULL);
+
+	/* SIGABRT for the glibc heap-integrity check residual case. */
+	sa.sa_sigaction = abrt_handler;
+	sigaction(SIGABRT, &sa, NULL);
 
 	for (i = 0; i < N; i++) {
 		size_t sz = sizes[i % nsizes];
