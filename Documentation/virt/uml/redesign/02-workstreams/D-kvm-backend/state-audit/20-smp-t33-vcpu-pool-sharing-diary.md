@@ -671,3 +671,96 @@ These options remain open for next steer. All host KVM modules are
 patched + loaded; reverting to stock requires `sudo modprobe -r kvm_amd
 kvm; sudo modprobe kvm_amd` (Ubuntu's modprobe.d will reload stock).
 
+
+## Entry 26 — umlctl gate-loop tool ships; rate is worse than we thought
+
+Built `umlctl gate loop` (commit f3ed390c7afc, 719 LOC) replacing the
+bash test runner that was rewritten 4x during this investigation.
+Validation against T37 kernel at n=200:
+
+| Harness | PASS | FAIL | TIMEOUT | rate | CI95 |
+|---|---|---|---|---|---|
+| bash runner (T37 earlier) | 189 | 11 | n/a | 94.5% | [90.4%, 96.9%] |
+| umlctl gate loop (T37 now) | 173 | 24 | 3 | **86.5%** | [81.1%, 90.6%] |
+
+The Wilson 95% CIs **don't overlap** — this is a real difference, not
+noise. Possible explanations:
+
+- The bash runner had an explicit `sleep 1` between iterations,
+  giving the host CPU some recovery time. gate-loop has no such
+  sleep, so iterations cycle as fast as the spawn/teardown allows.
+  Tighter pacing → more contention → more cross-vCPU race exposure.
+- gate-loop's per-worker tomls correctly set `debug.log_dir` to
+  match the renamed `instance.name`. The bash runner's manually-
+  written tomls used a single shared log_dir for all workers; that
+  may have caused some workers to read stale init.log files and
+  miscount as PASS.
+- gate-loop classifies TIMEOUT separately from FAIL (3 cases here);
+  bash runner had a 120s polling budget but no explicit TIMEOUT
+  category — slow boots might have been silently re-classified.
+
+Per-iteration log sweep confirms gate-loop's count is right: ALL 24
+"FAIL" iterations have a `VERIFY_FAIL` line and zero have a
+`REPRO_DONE rc=0`, so no misclassifications.
+
+**Implication:** the T37 kernel's true rate is **86.5% under
+sustained parallel pressure**, not 94.5%. T33b's 95.7% N=1000 was
+also probably undercounted by the bash runner. Will re-measure T33b
+with gate-loop next session for a clean ground truth.
+
+## Entry 27 — Opus mechanism analysis on the byte[0]=0 signature
+
+Spawned an opus subagent to hunt UML kernel code paths that could
+write a single zero byte at the first byte of a 4KB page (the exact
+symptom from the SMP-T38 strict_memset diagnostic). Findings:
+
+- **No direct single-byte PTE writes in arch/um/.** Every UML PTE
+  primitive (`pte_set_val`, `pte_clear_bits`, `pte_copy`,
+  `pmd_clear`, `pud_clear`, `p4d_clear`) emits an 8-byte store, and
+  `_PAGE_NEEDSYNC` lives at bit 9 (byte 1, not byte 0).
+- The signature `00:V:V:V:V:V:V:V` (V≠0x02) rules out a full
+  pte_clear-style 8-byte store of `_PAGE_NEEDSYNC` — that would
+  produce `00:02:00:00:00:00:00:00`.
+
+Opus's ranked candidates (none directly explain the 1-byte signature
+but architecturally plausible):
+
+1. **PT-page recycle without guest-TLB drain.** UML's mmu_gather
+   defers DATA pages (`um_mmu_gather_defer`, arch/um/kernel/tlb.c:148)
+   but PT pages flow through standard `tlb_remove_table` → RCU defer
+   → `__free_pages`. RCU grace covers software walkers but NOT
+   guest TLBs (which only flush at next CR4.PGE toggle in vcpu_run).
+   Window: PT page freed-and-reallocated-as-data while a sibling vCPU
+   still has guest-TLB caching the old GVA→PA mapping. Sibling's
+   write of a clear-PTE-style value lands at offset 0 of the now-data
+   page. Doesn't quite match the 1-byte signature though (PTE writes
+   are 8-byte) — would need to be a partial write of some kind.
+
+2. **`update_pte_range`'s `*pte = pte_mkuptodate(*pte)` racing with
+   hardware A/D-bit cmpxchg from KVM** (arch/um/kernel/tlb.c:361).
+   UML hands its pgd directly to KVM as guest CR3; the host CPU
+   updates A/D bits as the guest CPU walks. Lost-update could
+   produce subtle corruption.
+
+3. **Cross-task FPU/XMM leak.** Opus thinks vectorized memset
+   could land XMM bytes on user data. But mt-mini is built `-O0`
+   and uses `volatile unsigned char *` — gcc shouldn't vectorize.
+   Verifying via objdump: `slow_memset` IS plain byte-by-byte stores,
+   no MOVUPS. So this candidate is unlikely.
+
+Net: the byte[0]=0 mechanism is still not pinpointed. Best lead is
+#1 (PT-page recycle race), which would need the FREEING side to
+write through a stale guest TLB. That requires either:
+- Cross-vCPU guest TLB staleness (which T33b's CR4.PGE flush
+  should kill on each dispatch), or
+- A code path that writes to user memory without going through
+  the guest TLB at all (some kernel-half access).
+
+Open. Next-step candidates:
+- Add diagnostic in UML's mmu_gather PT-page free path to log the
+  gfn just before free; correlate with mt-mini's failing GVAs.
+- Try `slub_debug=PFZ` on the host to detect freed-page reuse.
+- Compare against per-mm vCPU model (architectural fix, larger lift).
+
+Holding pattern. Tip: f3ed390c7afc.
+
