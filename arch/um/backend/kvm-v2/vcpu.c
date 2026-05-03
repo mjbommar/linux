@@ -2374,20 +2374,14 @@ static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu)
 		 * untouched on re-entry. Earlier shape unconditionally
 		 * KVM_SET_FPU'd architectural reset values on every dispatch
 		 * where fpu_valid=false — which destroyed XMM/x87 state
-		 * mid-instruction whenever a task re-entered after a #PF
-		 * (lazy COW etc). Glibc varargs save XMM0..XMM7 to stack via
-		 * MOVAPS in the prologue; if a #PF fires DURING the save (or
-		 * during any later XMM-touching op in the same call), the
-		 * post-fault re-entry zeroed XMM and the resumed instruction
-		 * read garbage.
+		 * mid-instruction whenever a task re-entered after a #PF.
 		 *
-		 * SMP-T26 (2026-05-02): tested adding architectural-FPU-reset
-		 * on cross-mm transitions to address a hypothesized per-vCPU
-		 * FPU leak (parent worker's XMM state inherited by freshly-
-		 * execve'd child). Did NOT change threaded-fork-malloc fail
-		 * rate (still 6/6 boots × ~6 child SIGSEGVs). Hypothesis is
-		 * therefore not the residual T26 mechanism. See state-audit
-		 * Layer 14 for ruled-out experiments and remaining hypotheses.
+		 * SMP-T28 (2026-05-02) tested adding a one-shot
+		 * fpu_arch_reset_needed flag (set by arch_flush_thread) to
+		 * install architectural FPU on the very first dispatch of
+		 * freshly-execve'd tasks. Result: rate REGRESSED from
+		 * ~0.003%/fork to 0.046%/fork. Hypothesis was wrong; the
+		 * residual after T26/T27 is something else. Reverted.
 		 */
 		(void)init_fpu;
 		was_valid = 0;
