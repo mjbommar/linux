@@ -352,6 +352,27 @@ int os_drop_memory(void *addr, int length)
 	return err;
 }
 
+/*
+ * SMP-T26 experiment (2026-05-02): madvise(MADV_DONTNEED) drops host
+ * kernel PT entries for the range without disturbing file content
+ * (safe on MAP_SHARED tmpfs/physmem). Crucially, this fires
+ * mmu_notifier in the host kernel, which causes KVM to invalidate
+ * any cached EPT/TDP entries pointing to the dropped HPAs.
+ *
+ * Used by kvm-v2's handle_io_pf to force TDP invalidation after a
+ * fresh anon page is allocated for a faulting GVA, preventing the
+ * "fd/bk writes go to stale TDP" bug captured in T26.
+ */
+int os_drop_caching(void *addr, int length)
+{
+	int err;
+
+	err = madvise(addr, length, MADV_DONTNEED);
+	if (err < 0)
+		err = -errno;
+	return err;
+}
+
 int __init can_drop_memory(void)
 {
 	void *addr;

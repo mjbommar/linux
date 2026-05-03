@@ -247,6 +247,7 @@ extern int os_protect_memory(void *addr, unsigned long len,
 			     int r, int w, int x);
 extern int os_unmap_memory(void *addr, int len);
 extern int os_drop_memory(void *addr, int length);
+extern int os_drop_caching(void *addr, int length);	/* SMP-T26: madvise(DONTNEED) */
 extern int can_drop_memory(void);
 
 void os_set_pdeathsig(void);

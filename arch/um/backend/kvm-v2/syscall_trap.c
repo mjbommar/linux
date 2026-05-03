@@ -114,6 +114,7 @@
 #include <asm/trace/um_backend.h>
 
 #include <kern_util.h>		/* segv_handler, relay_signal */
+#include <os.h>			/* SMP-T26: os_drop_caching */
 #include <skas.h>		/* handle_syscall */
 #include <sysdep/ptrace.h>	/* uml_pt_regs, HOST_AX/CX/IP/EFLAGS/R11, UPT_SYSCALL_NR */
 #include <sysdep/ptrace_user.h>	/* PT_SYSCALL_NR */
@@ -1383,6 +1384,39 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 					 current->pid, current->comm);
 			}
 		}
+
+		/*
+		 * SMP-T26 trigger (2026-05-02): NULL-class user fault from
+		 * malloc-stress-c (or threaded-fork-malloc child). Captures
+		 * the deterministic glibc heap-corruption signature
+		 * (cr2=0x10, ip=user-text, error=4 = read of not-present)
+		 * for state-trace post-mortem.
+		 *
+		 * Filter:
+		 *   - cr2 < 0x1000 (small offset from NULL)
+		 *   - error 4 (P=0, U=1, R=0)
+		 *   - comm prefix "malloc-stress" (the diag-binary's name,
+		 *     which gets truncated to "malloc-stress-c" by 16-char
+		 *     TASK_COMM_LEN)
+		 * One-shot per boot; freezes the trace ring so we capture
+		 * the FULL ~5000-entry dispatch history of this child.
+		 */
+		if (cr2 < 0x1000 &&
+		    frame.error_code == 0x4 &&
+		    !memcmp(current->comm, "malloc-stress", 13)) {
+			static int diag_t26;
+			if (diag_t26 == 0) {
+				diag_t26 = 1;
+				KVMV2_TRACE(KVMV2_OP_TRACE_TRIGGER, regs, run, vcpu);
+				kvm_v2_state_trace_dump("BUG_T26: NULL-class user fault in malloc-stress");
+				pr_emerg("um: kvm-v2 BUG_T26 cr2=%llx user_rip=%llx err=%llx pid=%d comm=%s sp=%llx\n",
+					 (unsigned long long)cr2,
+					 (unsigned long long)frame.user_rip,
+					 (unsigned long long)frame.error_code,
+					 current->pid, current->comm,
+					 (unsigned long long)frame.user_rsp);
+			}
+		}
 	}
 
 	/*
@@ -1433,6 +1467,21 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 	 * compiler inline / static-resolve.
 	 */
 	segv_handler(SIGSEGV, NULL, regs, NULL);
+
+	/*
+	 * SMP-T26 H_E experiment was tested here (2026-05-02): forced
+	 * TDP/EPT cache invalidation via madvise(MADV_DONTNEED) on the
+	 * spawner mm range corresponding to the freshly-mapped guest PA
+	 * after segv_handler. Did NOT change the threaded-fork-malloc
+	 * fail rate (6/6 boots × ~8 child SIGSEGVs each, identical or
+	 * slightly worse than the 0.15%/fork baseline). Hypothesis E
+	 * (TDP cache aliasing for the faulted page) is wrong as
+	 * implemented — the corruption may be on an ADJACENT page that
+	 * wasn't faulted, or the mechanism isn't TDP-cache at all.
+	 *
+	 * See state-audit Layer 14 for hypothesis status. Code reverted
+	 * (only this comment remains as a marker).
+	 */
 
 	/*
 	 * Drain UML's pending signal/scheduler work BEFORE marshaling

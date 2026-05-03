@@ -430,6 +430,85 @@ Both are non-trivial and should be the next iteration's focus.
 
 T26 investigation continues in next iteration.
 
+### LEADING HYPOTHESIS — H_E (TDP / EPT cache aliasing) — agent #2 finding
+
+Subagent identified the v2-specific mechanism (corroborated by code at
+`arch/um/backend/kvm-v2/region.c`, `arch/um/backend/kvm-v2/vcpu.c:1311`,
+`arch/um/backend/kvm-v2/vcpu.c:780`):
+
+**Mechanism:**
+1. Under v2, `mm_region_added` is essentially a no-op (H.1b A/B test
+   stripped both `os_map_memory` and `seccomp_mm_region_added`
+   delegation). The only KVM memslot is **slot 0**, covering all of
+   `physmem` via spawner-mm `MAP_SHARED|MAP_FIXED` mapping.
+2. UML manages guest PTs by writing PTE bytes directly into
+   `physmem` (it's just memory inside slot 0). These writes are
+   **invisible to KVM's mmu_notifier** because mmu_notifier only
+   fires for HOST mm operations on the spawner mm — UML's PT writes
+   bypass that entirely.
+3. KVM's TDP/EPT cache (the GPA→HPA layer) is therefore NOT
+   invalidated when UML changes guest PTEs.
+4. CR4.PGE toggle on every dispatch flushes the **guest TLB**
+   (GVA→GPA layer), but does NOT flush EPT (GPA→HPA layer).
+5. **The aliasing**: when child A's GVA-X mapped to GPA-Pa, then
+   child A exits and its mm gets reaped, child B (same vCPU) then
+   accesses GVA-X mapped to GPA-Pb (different GPA, fresh mm), KVM
+   may still have a cached TDP entry for GPA-Pa→old-HPA. Subsequent
+   writes near the fault site land on the cached old-HPA, not the
+   correct new-HPA.
+
+**Smoking-gun pattern explained:**
+- glibc's first write to a chunk faults; `handle_io_pf` →
+  `handle_page_fault` → `handle_mm_fault` allocates a fresh page,
+  writes new PTE in physmem (via UML's mm machinery), then re-tries
+  the user write. This write succeeds **via the fault path** which
+  goes through the spawner mm's HVA, firing mmu_notifier and updating
+  TDP. Result: `size` field correctly written.
+- The next 1-2 instructions (writing `fd` and `bk` at adjacent
+  offsets in the same chunk) hit the SAME page that just got faulted
+  in — but those writes go through the **already-cached TDP entry**
+  (no fault, no spawner-mm operation, no mmu_notifier fire). If the
+  TDP cache had a stale entry for this GPA from a PRIOR mm's
+  ownership, the writes land on the wrong physical page.
+- Result: chunk has `size=0xd221` (correctly written via fault path)
+  but `fd=0`/`bk=0` (writes lost to stale TDP), exactly the captured
+  pattern.
+
+**Workload scaling supports the hypothesis:**
+- 1 worker × 4000 iters = **0/12000 forks** fail (no concurrent
+  mm-create churn → TDP entries naturally evict before reuse)
+- 8 workers × 500 iters = **0.150%** fail rate
+- 16 workers × 250 iters = **0.092%** fail rate (capped by 4 vCPUs)
+- Bug strictly requires multi-worker concurrent mm-create activity
+
+**Why seccomp doesn't have this**: seccomp's stub child IS the
+user-mode executor and owns host PTs directly. No second-level
+EPT/TDP cache to invalidate.
+
+### Proposed fix candidates (graded by complexity)
+
+1. **MINIMAL**: After `kvm_v2_handle_io_pf` returns success, walk
+   UML's pgd to compute the freshly-mapped physical address; call
+   `madvise(uml_physmem + phys, PAGE_SIZE, MADV_DONTNEED)` on the
+   spawner mm. madvise fires mmu_notifier → KVM invalidates the TDP
+   entry → next access re-walks PT and re-populates with correct
+   HPA. Cheap, surgical.
+2. **MEDIUM**: Add a backend hook in `arch/um/kernel/trap.c`
+   `handle_page_fault` (after success) so any backend can invalidate
+   its own translation cache. seccomp's hook is a no-op; v2's hook
+   does the madvise above.
+3. **HEAVY**: Re-enable per-region memslots (revert region.c H.1b
+   A/B). Each `mm_region_added` becomes a real
+   KVM_SET_USER_MEMORY_REGION call, firing mmu_notifier for every
+   PT change. Slowest but most architecturally correct.
+
+### Next iteration
+
+Implement candidate #1 (minimal madvise hook) and test:
+- If T26 fail rate drops to ≈0/24000: hypothesis CONFIRMED, ship the
+  madvise hook as the fix.
+- If T26 fail rate unchanged: hypothesis WRONG, look at #2/#3.
+
 ### FPU ablation experiment (NEW)
 
 Hypothesis: per-host-CPU vCPU's XMM/x87/MXCSR state from previous task
