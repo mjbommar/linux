@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-03 (SMP-T31 closed as NEGATIVE-RESULT — TDP coherence ruled out as mt-mini residual mechanism)
+Last updated: 2026-05-03 (SMP-T32 closed as NEGATIVE-RESULT — 7 experiments triangulated; mt-mini residual is NOT in TDP coherence, mmu_gather defer, or page-recycling. Bug remains open at ~17% per-boot)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -143,7 +143,9 @@ T31a (per-PFN `madvise(MADV_DONTNEED)` in `um_tlb_sync` to fire KVM's mmu_notifi
 
 **Conclusion:** the mt-mini `got=0 expect=N` failure is NOT in KVM TDP/EPT coherence. Full post-mortem at `02-workstreams/D-kvm-backend/state-audit/18-smp-t31-tdp-coherence-RULED-OUT.md`. Code reverted to pre-T31 state.
 
-Next direction (SMP-T32, task #204): instrument `handle_mm_fault` under v2 to look for per-PFN allocation races between sibling pthreads on the same mm.
+**SMP-T32 update (overnight session 2026-05-03):** four additional experiments — T32a (drain disabled), T32b (revert RCU defer / immediate-free), T30 H2-narrow (os_map_memory restored), T32c-prep (KVM `KVM_INVALIDATE_GFN_RANGE` ioctl, untestable without host KVM rebuild) — all negative or noise-bound at n=30-60. Total of 7 experiments now triangulating the bug class. Updated baseline at n=60 = 50/60 = 83% pass (variance was bigger than n=30 suggested, +/- 10pp). NONE of (TDP coherence | mmu_gather defer | page-recycling | spawner-mm parallel mapping) is the bug. Comprehensive memo at `02-workstreams/D-kvm-backend/state-audit/19-smp-t32-mt-mini-residual-investigation-COMPREHENSIVE.md` documents what's ruled out and what remains untestable in-session (specifically Option 3 — host KVM patch).
+
+Next direction (when prioritized): set_pte memory-ordering audit, or pte_needsync race analysis, or cross-host (Intel) validation. None require new in-session experiments — all need fresh investigation with different tooling.
 
 ## Residual flake state
 
