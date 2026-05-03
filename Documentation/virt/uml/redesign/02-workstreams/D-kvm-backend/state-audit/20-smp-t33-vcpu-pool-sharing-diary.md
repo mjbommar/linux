@@ -764,3 +764,66 @@ Open. Next-step candidates:
 
 Holding pattern. Tip: f3ed390c7afc.
 
+
+## Entry 28 — SMP-T39: PT-page recycle hypothesis CONCLUSIVELY RULED OUT
+
+Per user direction, instrumented `__tlb_remove_table_free` in
+`mm/mmu_gather.c` (CONFIG_UML-gated) to log PFN of every PT page
+freed via the RCU-deferred mmu_gather path. Output format:
+`UMPTFREE pfn=<hex> count=<dec>` to dmesg, ratelimited (first 32
+always, then every 100th).
+
+Paired diagnostic in mt-mini: at VERIFY_FAIL, read
+`/proc/self/pagemap` for the failing GVA and emit the host PFN as
+`pfn=<hex>` in the DIAG_T38 line.
+
+Built T39 kernel + mt-mini, ran W=4 M=25 = 100 boots via gate-loop.
+
+Result: PASS=88/100, FAIL=11, TIMEOUT=1 = 88.0%.
+
+Cross-reference of all 11 fails:
+
+```
+NO_MATCH: w0/run-22.log failing pfn=219e not in PT-free list
+NO_MATCH: w0/run-23.log failing pfn=2059 not in PT-free list
+NO_MATCH: w1/run-13.log failing pfn=1c70 not in PT-free list
+NO_MATCH: w1/run-6.log  failing pfn=29f5 not in PT-free list
+NO_MATCH: w2/run-20.log failing pfn=2804 not in PT-free list
+NO_MATCH: w2/run-22.log failing pfn=2852 not in PT-free list
+NO_MATCH: w3/run-14.log failing pfn=238f not in PT-free list
+NO_MATCH: w3/run-16.log failing pfn=2262 not in PT-free list
+NO_MATCH: w3/run-20.log failing pfn=21e0 not in PT-free list
+NO_MATCH: w3/run-22.log failing pfn=1e63 not in PT-free list
+NO_MATCH: w3/run-24.log failing pfn=2832 not in PT-free list
+TOTAL: matches=0 nomatches=11
+```
+
+Furthermore, the failing PFNs cluster in the 0x1c00..0x2900 range
+while PT-frees in this run clustered in 0x0a77..0x0a88 and
+0x1184..0x123c — **completely disjoint memory regions**. mt-mini's
+data pages are allocated from a different buddy zone than where PT
+pages are freed. The recycle scenario opus suggested can't occur.
+
+**Net: PT-page recycle is fully ruled out as the residual mechanism.**
+
+Revised hypothesis space (post-T39):
+- ~~TDP MMU prev_roots staleness~~ (T34 ruled out)
+- ~~Timing-dependent races~~ (jitter sweep flat)
+- ~~mmu_gather batch-skip~~ (T36 didn't help)
+- ~~Host pthread pinning~~ (T37 neutral)
+- ~~Cross-task FPU vectorization~~ (mt-mini -O0 + volatile, no MOVUPS)
+- ~~PT-page recycle~~ (T39 cross-ref 11/11 no-match)
+- **Open**: cross-vCPU SPTE aliasing where a sibling vCPU's stale
+  SPTE for its KERNEL-half VA maps to a user-half data page on the
+  current task. Sibling's legitimate kernel write (e.g., set_pte to
+  some unrelated guest PT) lands on user data via the stale mapping.
+  Would require the sibling's KERNEL-half SPTE to be stale, which
+  shouldn't happen since kernel mappings are physmem-identity and
+  stable. But T33b only drops prev_roots on cross-TASK; same-task
+  cross-vCPU is not flushed.
+- **Open**: per-task or per-mm vCPU model (architectural fix).
+
+Diagnostic infrastructure to keep: the UMPTFREE printk, the
+pagemap_pfn helper in mt-mini. Both compile cleanly under any
+config. Useful for future investigations.
+
