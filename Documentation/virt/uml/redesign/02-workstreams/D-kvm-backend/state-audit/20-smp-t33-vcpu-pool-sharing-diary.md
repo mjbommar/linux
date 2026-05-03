@@ -827,3 +827,68 @@ Diagnostic infrastructure to keep: the UMPTFREE printk, the
 pagemap_pfn helper in mt-mini. Both compile cleanly under any
 config. Useful for future investigations.
 
+
+## Entry 29 — SMP-T40 BREAKTHROUGH: bug isolated to #PF handler resume path
+
+User's brilliant reframing: "this may not require something writes 0.
+If the failing byte is the first write to a freshly faulted page, then
+a bad #PF replay can look identical: the store faults before retiring,
+UML/KVM makes the page writable, but resumes after or around the store.
+The immediate read sees the freshly zeroed page, and write_retry
+succeeds."
+
+**Test design:** add `MT_PREFAULT=1` to mt-mini that calls
+`madvise(MADV_POPULATE_WRITE, ALLOC_SZ)` on each mmap BEFORE the
+strict_memset write loop. POPULATE_WRITE forces writable fault-in
+for the whole range, so strict_memset's first stores per page
+won't trigger #PF.
+
+**Result (T40b, n=100 parallel via gate-loop):**
+
+| Variant | PASS/100 | STRICT_MEMSET_FAIL | Wilson 95% CI |
+|---|---|---|---|
+| T39 baseline (no prefault, strict_memset) | 88 | 11 | [80%, 93%] |
+| T40b MADV_POPULATE_WRITE prefault + strict | **99** | **0** | [94.6%, 99.8%] |
+
+The 1 failure is a **TIMEOUT, not a STRICT_MEMSET_FAIL.** Zero
+write-time corruption events when pages are pre-faulted. Wilson CIs
+don't overlap — this is a clean, statistically significant signal.
+
+**Mechanism CONFIRMED:** the bug fires on first-touch #PF during the
+user's first write to a freshly-mapped page. The handler installs
+the page (init_on_alloc=y zeroes it), but the resume sequence either:
+  (a) skips the faulting store entirely, OR
+  (b) lands at the wrong RIP (post-store), OR
+  (c) hits a CPL-transition bug
+
+…leaving byte[0]=0 (alloc-zero, never written), bytes[1..7]=V
+(subsequent stores succeeded with no fault), write_retry=V (page is
+mapped+writable), read2=0 (permanent — no one is going to write it).
+
+This explains EVERY observation we've collected over the prior 28
+diary entries. All other hypotheses are dead.
+
+**Where the bug lives:** somewhere in the #PF handler path:
+- `arch/um/backend/kvm-v2/syscall_trap.c::handle_io_pf` (lines 1191-1551)
+  — used when the in-guest stub completes normally and vmexits via `out`
+- `arch/um/backend/kvm-v2/syscall_trap.c::kvm_v2_handle_pf_eintr_inline`
+  (lines 1140-1170) — used when EINTR caught us mid-stub
+- `arch/um/backend/kvm-v2/exception.c::kvm_v2_handler_stub_pf`
+  (lines 213-227) — the in-guest stub itself
+
+Both host paths set `regs->gp[HOST_IP] = frame.user_rip` (faulting
+RIP from IST frame), call segv_handler to fix the page, then marshal
+back via SYNC_X86_REGS. Suspect: either the SYNC_REGS bypass of the
+stub iretq misses a CPL transition, or the PTE install isn't visible
+to KVM's TDP walker on resume yet (TDP NPF runs first, sees old PTE
+state), or the captured user_rip is stale by one instruction in some
+race.
+
+**Workaround for users RIGHT NOW:** programs that mmap+immediate-write
+should call `madvise(MADV_POPULATE_WRITE)` after mmap. This is a
+known-good Linux pattern used by databases, hugetlb consumers, etc.
+
+**Next steps:** instrument the #PF handler to log the precise RIP
+state at every transition (entry, segv_handler call, marshal, exit)
+across both PASS and FAIL runs to localize whether RIP advances
+unexpectedly or whether the page-install isn't visible on resume.

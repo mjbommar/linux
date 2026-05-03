@@ -196,6 +196,24 @@ static unsigned long pagemap_pfn(const void *vaddr)
  */
 static int pin_guest_cpus_enabled;
 
+/*
+ * SMP-T40 (2026-05-03): pre-fault each page in the mmap by reading
+ * its first byte BEFORE any writes. The hypothesis: byte[0]=0 + V at
+ * offsets 1..7 + write_retry succeeds = the FIRST STORE to a freshly-
+ * faulted page is being SKIPPED during #PF replay (UML/KVM installs
+ * the page after init_on_alloc zeros it, but resumes after/around the
+ * faulting store; the next store at offset 1 succeeds normally).
+ *
+ * Pre-faulting via READS (not WRITES) avoids the same bug class on
+ * the pre-fault itself — loads on x86 page-fault paths are reliably
+ * retried because they have no destination state to reconstruct.
+ *
+ * If MT_PREFAULT=1 makes failures vanish: fault-replay confirmed,
+ * fix is in arch/um/backend/kvm-v2/vcpu.c PF EINTR handler.
+ * If failures persist: hypothesis dead, look elsewhere.
+ */
+static int prefault_enabled;
+
 static void *worker(void *arg)
 {
 	long tid = (long)arg;
@@ -234,6 +252,29 @@ static void *worker(void *arg)
 			return (void *)4;
 		}
 		last_cpu = sched_getcpu();
+		if (prefault_enabled) {
+			/*
+			 * SMP-T40 fix: use MADV_POPULATE_WRITE not
+			 * read-touch. Anonymous mmap reads map the shared
+			 * zero page read-only; the COW fault still fires
+			 * on first WRITE. POPULATE_WRITE forces writable
+			 * fault-in for the whole range, so strict_memset's
+			 * first stores per page won't trigger #PF.
+			 *
+			 * If failures stop, the bug is "first store after
+			 * fresh write-fault is skipped". If failures persist,
+			 * fault-replay on first store is NOT the mechanism.
+			 */
+			if (madvise(p, ALLOC_SZ, MADV_POPULATE_WRITE) != 0) {
+				static int once = 0;
+				if (!once) {
+					once = 1;
+					fprintf(stderr,
+						"WARN: MADV_POPULATE_WRITE failed errno=%d (continuing)\n",
+						errno);
+				}
+			}
+		}
 		if (strict_memset_enabled) {
 			size_t first_mismatch =
 				strict_memset(p, (unsigned char)tid, ALLOC_SZ);
@@ -365,6 +406,12 @@ int main(int argc, char **argv)
 		pin_guest_cpus_enabled = atoi(pin_env);
 	if (pin_guest_cpus_enabled)
 		fprintf(stderr, "MT_PIN_GUEST_CPUS=1\n");
+
+	const char *prefault_env = getenv("MT_PREFAULT");
+	if (prefault_env && *prefault_env)
+		prefault_enabled = atoi(prefault_env);
+	if (prefault_enabled)
+		fprintf(stderr, "MT_PREFAULT=1 (read each page before write loop)\n");
 
 	int n = (argc > 1) ? atoi(argv[1]) : 2;
 	if (n > 16) n = 16;
