@@ -9,12 +9,14 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `44d21b5a14ab` on `umlctl-deploy` (SMP-T29 — gate
-capture_for_switch_out on `vcpu->last_task`, closes the
-cascade-failure residual that survived T26/T27. Stack:
-T25 LSTAR-EINTR rewind + T26/T27 always-GET-FPU + T29 snapshot-preserve
-together bring threaded-fork-malloc to 0/116000 forks failed across
-30-boot soak — true 0% on the dominant fork+exec workload).
+**Tip:** `c8eaaca8687d` on `umlctl-deploy` (SMP-T29 docs landed +
+wider 135-module parity validation: 134 PARITY / 0 REGRESSION / 1
+KVM_BETTER / 5 BOTH_FAIL. T29 stack — T25 LSTAR-EINTR rewind +
+T26/T27 always-GET-FPU + T29 snapshot-preserve — brings
+threaded-fork-malloc to 0/116000 forks failed across 30-boot soak,
+keeps cpython-parity 21/21 stable across 10 boots, and matches
+seccomp on every backend-relevant module across the 135-module
+curated set).
 
 ---
 
@@ -46,6 +48,7 @@ LKML upstream queue.
 | **threaded-fork-malloc × 30 LONG SOAK (post T29)**| kvm-v2  | n/a       | **29/30 boots, 0/116000 forks (TRUE 0%)** (1 RCU-stall outlier, no CHILD_FAIL) |
 | **substrate gate (post T29)**                     | kvm-v2  | n/a       | **PASS=25/FAIL=3/XFAIL=3 (matches seccomp)** |
 | **cpython-parity gate (post T29, 21 modules × 10)**| kvm-v2 | n/a       | **210/210 PARITY across 10 boots** |
+| **wide cpython-parity (post T29, 135 curated modules)** | kvm-v2 | n/a   | **134 PARITY / 0 REGRESSION / 1 KVM_BETTER / 5 BOTH_FAIL** ([log](02-workstreams/D-kvm-backend/wide-parity/2026-05-03-wide-parity-135-modules.log)) |
 | `make -j4` inside guest (Phase G.3)               | kvm-v2  | n/a       | yes                 |
 | All workloads under `backend=force=seccomp`       | seccomp | yes       | yes (deterministic) |
 
