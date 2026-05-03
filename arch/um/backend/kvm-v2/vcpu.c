@@ -55,6 +55,7 @@
 					 * install_production_sregs) */
 
 #include <asm/tlbflush.h>	/* um_tlb_sync */
+#include <as-layout.h>		/* physmem_size (SMP-T34 KVM_INVALIDATE_GFN_RANGE) */
 #include <kern_util.h>		/* interrupt_end */
 #include <os.h>
 #include <skas.h>		/* current_mm_sync */
@@ -823,9 +824,11 @@ void kvm_v2_tlb_kick_others(struct mm_struct *mm)
 #if IS_ENABLED(CONFIG_SMP)
 	int my_cpu, cpu;
 	u64 cur_gen;
+	bool any_stale = false;
 
 	if (!mm)
 		return;
+
 	cur_gen = atomic64_read(&mm->context.tlb_gen);
 	my_cpu = raw_smp_processor_id();
 	for_each_online_cpu(cpu) {
@@ -858,9 +861,56 @@ void kvm_v2_tlb_kick_others(struct mm_struct *mm)
 		 * G.2-cont dedup: at most one IPI in flight per vCPU.
 		 * Reset by the kicked vCPU at load_user_sregs.
 		 */
-		if (atomic_cmpxchg(&v->kick_pending, 0, 1) == 0)
+		if (atomic_cmpxchg(&v->kick_pending, 0, 1) == 0) {
 			(void)os_send_ipi(cpu, 0 /* UML_IPI_RES */);
+			any_stale = true;
+		}
 	}
+
+	/*
+	 * SMP-T34 (2026-05-03): KVM_INVALIDATE_GFN_RANGE call DISABLED.
+	 *
+	 * Three call patterns tested, all NEGATIVE:
+	 *   T34a — zap full physmem on every kick: SIGSEGVs mt-mini
+	 *          immediately (0/4 sanity), kernel panics
+	 *   T34b — gated on (mm != init_mm && online_cpus > 1): same
+	 *          0/4, same SIGSEGV class
+	 *   T34c — gated on any_stale (at least one sibling vCPU was
+	 *          actually behind): 191/200 = 95.5%, statistically
+	 *          IDENTICAL to T33b's 95.7%. Now 7/9 fails are kernel
+	 *          panics (mt-mini SIGSEGV → init exit), 2/9 are the
+	 *          original VERIFY_FAIL got=0. So T34c trades the
+	 *          ORIGINAL residual for an EQUAL rate of panics
+	 *          without closing the bug.
+	 *
+	 * Conclusion: SPTE-zap is not the right mechanism for this
+	 * residual, OR the zap call site can't be made narrow enough
+	 * without missing the real bug window. The host KVM patch
+	 * infrastructure works (ioctl loaded, UAPI clean) but the
+	 * theory of operation was wrong.
+	 *
+	 * Code kept disabled for reference; UAPI kept in include/uapi/
+	 * linux/kvm.h since the patched host KVM module exposes the
+	 * ioctl regardless. See diary entry 25 in
+	 * Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+	 * state-audit/20-smp-t33-vcpu-pool-sharing-diary.md.
+	 */
+	if (0 && any_stale) {
+		struct kvm_v2_vm *vmctx = kvm_v2_vm_get();
+
+		if (vmctx && vmctx->vm_fd >= 0 && physmem_size) {
+			struct kvm_invalidate_gfn_range range = {
+				.gfn_start = 0,
+				.nr_pages  = physmem_size >> PAGE_SHIFT,
+				.flags     = 0,
+				.reserved  = 0,
+			};
+			(void)os_ioctl_generic(vmctx->vm_fd,
+					       KVM_INVALIDATE_GFN_RANGE,
+					       (unsigned long)&range);
+		}
+	}
+	(void)any_stale;
 #else
 	(void)mm;
 #endif

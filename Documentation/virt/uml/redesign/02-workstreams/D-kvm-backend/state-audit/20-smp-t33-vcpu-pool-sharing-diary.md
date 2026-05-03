@@ -602,3 +602,72 @@ task that's better done with the user present.
 
 Holding at f8e38d57dd1f → 7e8044474c10 (T33b shipped, 95.7% rate confirmed).
 
+
+## Entry 25 — Option E (host KVM patch + UAPI ioctl) — INFRASTRUCTURE WORKS, MECHANISM WRONG
+
+After reboot to 7.0.0-15-generic (matching `linux-source-7.0.0` pkg
+version 7.0.0-15.15), the build infrastructure for option E went through:
+
+1. Extracted source, copied running kernel's `.config`, `Module.symvers`,
+   and `include/generated/*` directly (skip `make olddefconfig` to avoid
+   it modifying CONFIG bits based on local toolchain). Built unmodified
+   `kvm.ko` + `kvm-amd.ko` clean.
+2. modprobe-loaded fresh modules (after `modprobe irqbypass; modprobe ccp`
+   for deps). UML smoke 4/4 PASS under custom-built KVM.
+3. Patched host KVM with new VM ioctl `KVM_INVALIDATE_GFN_RANGE`
+   = `_IOW(KVMIO, 0xfe, struct kvm_invalidate_gfn_range)` →
+   internally calls `kvm_zap_gfn_range(kvm, gfn_start, gfn_start +
+   nr_pages)`. arch/x86/kvm/x86.c + include/uapi/linux/kvm.h.
+4. Mirrored UAPI definition to UML's
+   `include/uapi/linux/kvm.h` (UML and host both need to know the
+   ioctl number/struct).
+5. Wired UML's `kvm_v2_tlb_kick_others` to issue the new ioctl.
+
+**Three call patterns tested, ALL NEGATIVE:**
+
+| Variant | Gate | Range | Result |
+|---|---|---|---|
+| **T34a** | unconditional in tlb_kick_others | full physmem (131072 gfns) | 0/4 SIGSEGV; mt-mini rc=139 → init exit → kernel panic |
+| **T34b** | mm != init_mm AND online_cpus > 1 | full physmem | 0/4 same SIGSEGV |
+| **T34c** | gated on `any_stale` (≥ 1 sibling vCPU was actually behind tlb_gen, won kick_pending cmpxchg) | full physmem | **191/200 = 95.5%** parallel n=200 — statistically IDENTICAL to T33b's 95.7%. 7/9 fails are kernel panics (mt-mini SIGSEGV → init exit), 2/9 are the original VERIFY_FAIL got=0. T34c trades ORIGINAL residual for EQUAL rate of panics without closing the bug. |
+
+**Why T34a/T34b SIGSEGV mt-mini:** under hot mt-mini stress (8 threads
+fast mmap/munmap), `kvm_v2_tlb_kick_others` fires constantly. Each call
+zaps the WHOLE physmem memslot (~131k gfns), evicting SPTEs that
+concurrent vCPUs are actively walking — including the SPTEs that map
+guest pgd pages themselves. `kvm_zap_gfn_range` takes mmu_lock for
+write; with 4 concurrent vCPUs in KVM_RUN, this serializes severely.
+Net effect: vmentry progress breaks badly enough that mt-mini crashes
+(hits a fault that doesn't recover correctly).
+
+**Why T34c doesn't help:** gating on actual cross-vCPU staleness
+reduces call rate dramatically. Sanity (W=2 M=2) clean (4/4). At scale
+(W=4 M=200), the rate matches T33b (within statistical noise) — meaning
+the SPTE zap doesn't actually close the bug window. Combined with
+occasional panics from the residual-call-frequency over-aggressiveness,
+T34c is net neutral-to-negative.
+
+**Conclusion:** option E's underlying theory ("explicit SPTE
+invalidation closes the cross-vCPU SPTE-aliasing race") is WRONG, or
+the call timing/scope can't be made narrow enough without missing the
+real bug window. The host KVM patch infrastructure works (ioctl
+loaded, UAPI clean, build pipeline reusable), but this particular
+hypothesis didn't pan out.
+
+**Code state:** UML T34c call site is gated `if (0 && any_stale)` —
+disabled at compile time but visible in source for reference. UAPI
+def kept in include/uapi/linux/kvm.h since the patched host KVM
+module exposes the ioctl regardless. Tip remains effectively T33b
+behavior at 95.7%.
+
+**Implication for the residual:** the dominant mechanism is
+likely NOT TDP root SPTE staleness. Refocuses search on:
+- Page-recycle race + init_on_alloc=y (host PFN freed and re-zeroed
+  while UML guest still has a stale GPA→PFN mapping in its own pgd)
+- Pending IPI/EINTR coalescing race that misses CR4.PGE flush
+- Architectural answer: per-task or per-mm vCPU model (not pool)
+
+These options remain open for next steer. All host KVM modules are
+patched + loaded; reverting to stock requires `sudo modprobe -r kvm_amd
+kvm; sudo modprobe kvm_amd` (Ubuntu's modprobe.d will reload stock).
+
