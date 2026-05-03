@@ -1184,9 +1184,15 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	struct kvm_sregs *sregs = &run->s.regs.sregs;
 	/*
 	 * SMP-T33 (2026-05-03): capture cross-task predicate BEFORE any
-	 * field of vcpu->last_task / vcpu->last_mm is updated below in the
-	 * cr2 block. Used at end of function to gate the full KVM_SET_SREGS
-	 * ioctl that drops KVM's per-vCPU TDP MMU prev_roots cache.
+	 * field of vcpu->last_task / vcpu->last_mm is updated below. Used at
+	 * end of function to gate the full KVM_SET_SREGS ioctl that drops
+	 * KVM's per-vCPU TDP MMU prev_roots cache.
+	 *
+	 * SMP-T33c (NEGATIVE): tried also firing on tlb_gen advancement to
+	 * close T33b's residual. Apples-to-apples 200-boot parallel comparison
+	 * REGRESSED 97.5% → 93.0%. Hypothesis was wrong — extra
+	 * __set_sregs2 side effects introduce a new problem rather than
+	 * closing the residual. Stick with cross_task-only gate.
 	 */
 	bool cross_task = (vcpu->last_task != current) ||
 			  (vcpu->last_mm   != current->mm);

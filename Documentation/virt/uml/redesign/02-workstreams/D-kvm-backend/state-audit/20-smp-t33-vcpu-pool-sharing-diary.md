@@ -322,3 +322,171 @@ Build to `~/src/uml-builds/uml-smp-t33b/`. mt-mini SMP T=8 ncpus=4 × 60:
 Single residual at 1/60 (1.7%, ≈ noise floor at this n). To characterize: need n≥120 to know if it's a real secondary mechanism (opus's #2 — pending exception leak after EINTR) or just statistical noise. Will run T33b × 120 next, plus regression checks.
 
 (Continued.)
+
+## Entry 18 — T33c gen_lagged extension: NEGATIVE RESULT
+
+After T33b shipped at 98.3%, ran extended n=300 with the original sequential
+loop and saw 290/300 = 96.7% (residual ~3.3%). Hypothesized that T33b's
+`cross_task` predicate misses the "same task re-dispatches after another
+vCPU drained PTEs for shared mm" case, where `last_task == current` so the
+gate doesn't fire but `prev_roots[]` is still stale.
+
+**T33c attempt:** extended the predicate to also fire on tlb_gen advancement:
+
+```c
+bool gen_lagged = false;
+if (current->mm) {
+    u64 cur  = atomic64_read(&current->mm->context.tlb_gen);
+    u64 last = atomic64_read(&vcpu->last_seen_tlb_gen);
+    gen_lagged = (cur > last);
+}
+bool needs_mmu_reset = cross_task || gen_lagged;
+...
+if (needs_mmu_reset) { /* full KVM_SET_SREGS */ }
+```
+
+Build to `~/src/uml-builds/uml-smp-t33c/`.
+
+**First validation (broken sequential loop):** showed 91.7% — but the loop
+itself was broken (polling `umlctl logs` returned stale content from prior
+instances, killing some kernels mid-boot and matching prior PASS markers).
+Discarded.
+
+**Built parallel test runner** (W=4 M=50 = 200 boots in ~210s wall):
+```bash
+worker() {
+  for i in 1..M; do
+    umlctl up -f mt-mini-w$w.toml
+    poll init.log of the *specific* run_id (parsed from up output)
+       for REPRO_DONE | VERIFY_FAIL | panic | kernel BUG
+    umlctl stop $INST; classify; umlctl rm $INST
+  done
+}
+for w in 0..W-1; do worker $w & done; wait
+```
+
+Apples-to-apples both kernels through the same fixed parallel loop, n=200:
+
+| Variant | PASS/200 | FAIL/200 | rate |
+|---|---|---|---|
+| **T33b** (cross_task only) | 195 | 5 | **97.5%** |
+| **T33c** (+ gen_lagged) | 186 | 14 | **93.0%** |
+
+T33c is a STATISTICAL REGRESSION (~p=0.03 binomial). All FAILs are the
+same `VERIFY_FAIL got=0 expect=N` mt-mini class. The hypothesis was wrong:
+extending the gate didn't close the residual — it introduced something
+else. Probable mechanism: `__set_sregs2` resets considerable additional
+vCPU state beyond `prev_roots` (segments, control regs round-trip,
+exception state), and firing it more often hits more race windows.
+
+**Action: T33c reverted.** Source restored to T33b's cross_task-only gate.
+Diary kept for the negative result.
+
+**Conclusion on T33b:**
+- T33b's true rate is **~97.5% at n=200** (parallel) or **96.7% at n=300**
+  (sequential old-loop). The 98.3% at n=60 was within statistical noise
+  of these tighter measurements.
+- **The cross_task SET_SREGS approach has a true ceiling around 97-98%.**
+- The residual ~2-3% is a different mechanism that will not yield to broader
+  cross-task gating. Likely candidates:
+  1. Active-root staleness (not just `prev_roots[]`) — needs explicit
+     SPTE invalidation, not just root drop.
+  2. AMD/SVM-specific concurrent NPT walker race.
+  3. Memslot-grow race vs in-flight vmentry.
+  4. Pending exception state leaked after EINTR (opus's #2 candidate).
+
+**Next-step options (require user choice):**
+- A. **Accept 97.5% as v2 SMP ceiling.** Move to Phase J with explicit
+     carve-out for mt-mini SMP residual. v2 substrate gate stays clean,
+     SMP load tests acknowledge known 2-3% mt-mini stress flake.
+- B. **Investigate residual mechanism.** Discriminating tests: run on Intel
+     host (rule out AMD-specific), `kvm.tdp_mmu=0` ablation (rule out TDP
+     MMU), bisect host kernel KVM commits. Days-to-weeks of work.
+- C. **Architectural fix:** explicit `KVM_INVALIDATE_GFN_RANGE` on every
+     UML PTE update. Requires either patching host KVM or requiring a
+     recent enough host kernel that exposes the ioctl. Originally T33's
+     "Option 3", deferred for that reason.
+
+Default: option A unless user steers otherwise.
+
+## Entry 19 — TDP MMU ablation: residual is NOT TDP-MMU-specific
+
+After T33c revert, ran a discriminating test to localize the residual mechanism: reload host KVM with `tdp_mmu=N` (legacy shadow paging) and rerun T33b parallel n=200.
+
+```
+sudo modprobe -r kvm_amd; sudo modprobe -r kvm
+sudo modprobe kvm tdp_mmu=N
+sudo modprobe kvm_amd
+cat /sys/module/kvm/parameters/tdp_mmu  # → N
+```
+
+**Result:**
+
+| Variant | TDP MMU | PASS/200 | rate |
+|---|---|---|---|
+| T33b | Y (default) | 195 | **97.5%** |
+| T33b | **N** | **193** | **96.5%** |
+
+**Same magnitude residual.** The bug exists with both TDP MMU AND legacy shadow paging.
+
+**Implication: ACTIVE TDP ROOT STALENESS IS NOT THE DOMINANT MECHANISM.** Opus's mechanism #1 ranking (active TDP root SPTE staleness due to AMD/SVM `svm_flush_tlb_current` being ASID-only) was wrong — if it were dominant, disabling TDP MMU would have shifted the rate substantially. It didn't.
+
+This refocuses the residual search on:
+- **#2 page-recycle race + `init_on_alloc=y`** (Ubuntu default; pages zeroed on alloc, explaining `got=0` signature when stale SPTE serves a recycled-and-zeroed PFN)
+- **#3 kick_pending / gen_snapshot ordering race** in vcpu.c:1366-1392 (sibling vCPU bumps tlb_gen between our snapshot and our `last_seen` set; we miss a flush)
+- **#4 (new)** something we haven't named yet — equal under both MMU implementations
+
+`tdp_mmu` restored to default Y after ablation.
+
+## Entry 20 — Multi-agent root-cause analysis (opus subagent)
+
+Spawned an independent opus subagent in parallel to do a deep analysis of:
+- Why T33c regressed (gen_lagged extension)
+- True mechanism of T33b's 2.5% residual
+- Cleanest implementable fix without host kernel patches
+
+Key conclusions from the agent's report (memo summarized; full transcript in
+session JSONL):
+
+**Why T33c regressed:** `__set_sregs_common` does FAR more than drop
+prev_roots — APIC base, IDT, GDT, all 8 segments, EFER, CR0/3/4. The CR4.PGE
+toggle at vcpu.c:1355 means `mmu_reset_needed` fires on every gate hit, so we
+get `kvm_mmu_reset_context` + `KVM_REQ_TLB_FLUSH_GUEST` + segment loads on
+every dispatch. Wider blast radius = more concurrent-state race exposure.
+Additionally, the `gen_lagged` predicate read `last_seen_tlb_gen` *before*
+the existing line 1392 update — under mt-mini's hot tlb_gen-bumping it
+becomes ~always-true, effectively turning into "always SET_SREGS." But
+unlike T33a's "always" (which had 98%), T33c collides with the existing
+CR4.PGE toggle's CR4 write path and may flip PGE twice in some windows,
+causing missed guest-TLB flush.
+
+**Recommended fix R3 (architectural):** Call
+`mmu_notifier_invalidate_range(spawner_mm, host_va_start, host_va_end)`
+from UML's PTE update path. This is `EXPORT_SYMBOL_GPL`, callable from
+arch/um. KVM's existing mmu_notifier hooks (kvm_main.c
+`kvm_mmu_notifier_invalidate_range_*`) zap the corresponding SPTEs. No host
+patch needed.
+
+**Recommended fix R1 (minimal):** Tighten `last_seen_tlb_gen` ordering in
+`kvm_v2_load_user_sregs`:
+1. Move `atomic_set(&kick_pending, 0)` to AFTER `KVM_RUN` returns (not
+   before vmentry). Then a sibling kick during dispatch is captured.
+2. Use cmpxchg semantics on `last_seen_tlb_gen` so it advances only
+   atomically with a verified flush.
+
+R3 is more thorough; R1 is smaller and safer to attempt first.
+
+## Entry 21 — Status this turn
+
+Three concrete results from this session turn:
+1. **T33c shipped + tested + rejected** (apples-to-apples parallel n=200:
+   97.5% T33b vs 93.0% T33c, ~p=0.03 regression).
+2. **TDP MMU ablation rules out active-root staleness** as primary.
+3. **R3/R1 fix candidates identified** by opus agent; safer R1 path queued
+   pending user steer.
+
+Tip remains at `ceca1fb8982f` (T33b shipped). Working tree has only diary
+updates + the T33c-revert comment block. Next move requires user input to
+choose: ship-current (97.5%) vs implement R1 (small, low-risk attempt)
+vs implement R3 (more invasive but architecturally correct).
+
