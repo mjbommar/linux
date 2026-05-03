@@ -599,6 +599,94 @@ The core question: when handle_page_fault returns successfully, is the
 PT entry visible to KVM's TDP layer immediately, or is there a window
 where KVM sees stale GPA→HPA mapping?
 
+### UPDATE — XMM dump + #NM handler audit
+
+**XMM dump from extended diag binary** (commit d486e68e1a7b) at fault time
+shows interesting state — XMM0=0, but XMM1-XMM4 contain glibc internal
+string data ("PRIVATE\0__libc_e..." in XMM2):
+```
+XMM0: 00000000 00000000 00000000 00000000  (zeros)
+XMM1: f7e13523 00007fff f7e13523 00007fff  (stack-region addr ×2)
+XMM2: 56495250 00455441 696c5f5f 655f6362  ("PRIVATE\0__libc_e")
+XMM3..7: mix of zeros + small values
+```
+
+XMM2's content confirms glibc actively uses XMM for SSE-string ops
+during startup. XMM0=0 at fault is consistent with: the failing
+instruction `mov 0x18(%rdx),%rdi` (read of bk) doesn't touch XMM,
+and an earlier `pxor %xmm0,%xmm0` at 0x41647f explicitly clears it.
+
+**Critical mechanism finding** — `kvm_v2_handle_io_nm` at
+`arch/um/backend/kvm-v2/syscall_trap.c:1768-1796`:
+```c
+static int kvm_v2_handle_io_nm(struct uml_pt_regs *regs,
+                               struct kvm_run *run,
+                               struct kvm_v2_vcpu *vcpu)
+{
+    struct kvm_v2_ist_frame frame;
+    kvm_v2_ist_frame_read(vcpu, &frame, false);
+    regs->gp[HOST_IP]     = frame.user_rip;
+    regs->gp[HOST_SP]     = frame.user_rsp;
+    regs->gp[HOST_EFLAGS] = frame.user_rflags;
+    regs->is_user         = 1;
+    /* Host-side `clts` emulation. */
+    run->s.regs.sregs.cr0 &= ~X86_CR0_TS;   /* CLEARS TS */
+    run->kvm_dirty_regs   |= KVM_SYNC_X86_SREGS;
+    /* One-shot bypass: */
+    current->thread.arch.kvm_v2.nm_ts_bypass = true;
+    interrupt_end();
+    kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+    run->kvm_dirty_regs   |= KVM_SYNC_X86_REGS;
+    return 0;
+}
+```
+
+**The handler DOES NOT restore the new task's per-task FPU state**.
+It only clears CR0.TS so the user can re-execute the trapping FPU
+instruction. The XMM/x87 state in the per-host-CPU vCPU at that moment
+is **whatever the previous task on this vCPU left**.
+
+For a freshly-execve'd task on its first FPU use:
+- Pre-#NM: per-host-CPU vCPU has previous task's FPU state
+- User executes XMM op → #NM (because TS=1)
+- v2 handler clears TS, returns
+- User re-executes XMM op → succeeds with **previous task's XMM data
+  in the registers it didn't explicitly write**
+
+This is consistent with the bug observation that v2 fails on
+fork+execve workloads (where many fresh tasks share vCPUs) but
+seccomp doesn't (each task has its own host-side FPU context).
+
+The H2a ablation (one-shot KVM_SET_FPU(arch_reset_zero) on fresh
+execve) didn't help because: glibc's MOVUPS sequence at 0x416458-
+0x41646a explicitly sets xmm0 = (r9<<64) | rax via movq+punpcklqdq.
+After my arch-reset, xmm0 starts at 0; user runs movq+punpcklqdq
+which sets xmm0 properly to (r9<<64)|rax. Then MOVUPS writes valid
+data. So bk should NOT be 0.
+
+But bk IS 0. So either:
+(a) The MOVUPS write IS losing the high half (bk specifically), even
+    when xmm0 is properly set.
+(b) Glibc reaches a code path that doesn't go through 0x41646a, and
+    the chunk's bk was never written.
+
+Need a DIFFERENT diagnostic: in `kvm_v2_handle_io_pf`, when BUG_T26
+fires, do KVM_GET_FPU and dump XMM0. This is the GUEST's XMM at the
+moment the user took the page fault — not after glibc has reset xmm0.
+This tells us what xmm0 contained when the WRITE was attempted (one
+fault back from the read).
+
+Possibly the right fix: in `kvm_v2_handle_io_nm`, the v1 archive's
+`kvm_handle_nm` (at `kvm-v1-archive/thread.c:5089-5142`) calls
+`kvm_set_fpu_for_task` which restores the per-task FPU state from
+`current->thread.arch.kvm.kvm_fpu`. v2 does NOT do this — that's
+the architectural difference.
+
+For next iteration: implement v1-style FPU restore in v2's #NM handler
+(KVM_SET_FPU from arch_thread.kvm_v2.iotrap_fpu when iotrap_fpu_valid),
+or initialize iotrap_fpu to architectural defaults at fork/execve and
+KVM_SET_FPU from there in #NM handler.
+
 ### FPU ablation experiment (NEW)
 
 Hypothesis: per-host-CPU vCPU's XMM/x87/MXCSR state from previous task
