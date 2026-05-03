@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-03 (SMP-T32 closed as NEGATIVE-RESULT — 7 experiments triangulated; mt-mini residual is NOT in TDP coherence, mmu_gather defer, or page-recycling. Bug remains open at ~17% per-boot)
+Last updated: 2026-05-03 (**SMP-T33 CLOSED — mt-mini residual fixed.** ncpus ablation localized bug to per-host-CPU vCPU pool; opus identified KVM TDP MMU prev_roots cache fast-switching; fix is one extra KVM_SET_SREGS ioctl on cross-task dispatch. mt-mini SMP T=8 ncpus=4: 50/60 = 83% → 118/120 = 98%, +15 pp. All regression checks clean.)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,14 +9,15 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `c8eaaca8687d` on `umlctl-deploy` (SMP-T29 docs landed +
-wider 135-module parity validation: 134 PARITY / 0 REGRESSION / 1
-KVM_BETTER / 5 BOTH_FAIL. T29 stack — T25 LSTAR-EINTR rewind +
-T26/T27 always-GET-FPU + T29 snapshot-preserve — brings
-threaded-fork-malloc to 0/116000 forks failed across 30-boot soak,
-keeps cpython-parity 21/21 stable across 10 boots, and matches
-seccomp on every backend-relevant module across the 135-module
-curated set).
+**Tip:** `9ccdc4300713` on `umlctl-deploy` (SMP-T33 closes mt-mini
+SMP T=8 residual via KVM TDP MMU prev_roots cache invalidation on
+cross-task dispatch). All gates clean:
+  - mt-mini SMP T=8 ncpus=4: 50/60 = 83% → 118/120 = 98% (+15 pp)
+  - cpython-parity 5-mod (incl test_io): 5/5 PARITY
+  - threaded-fork-malloc 0/116000 forks failed
+  - threaded-subprocess-wait 10/10
+  - substrate gate matches seccomp (25/3/3)
+  - wide cpython-parity 134/135 PARITY (0 v2 regressions)
 
 ---
 
@@ -128,7 +129,26 @@ with RIP=user. Now strictly secondary to the migrate_disable fix.
 
 ---
 
-## mt-mini SMP T=8 residual — TDP coherence RULED OUT (SMP-T31)
+## mt-mini SMP T=8 residual — CLOSED via SMP-T33 (2026-05-03)
+
+After T31/T32 ruled out TDP coherence and page-recycling, an `ncpus` ablation localized the bug definitively:
+
+| Configuration | mt-mini SMP T=8 × 60 | flake |
+|---|---|---|
+| Bare host | 30/30 | 0% |
+| UML+seccomp | 30/30 | 0% |
+| **UML+kvm-v2 ncpus=1** | 60/60 | **0%** |
+| UML+kvm-v2 ncpus=2 | 58/60 | 3% |
+| **UML+kvm-v2 ncpus=4 (was)** | **50/60** | **17%** |
+| **UML+kvm-v2 ncpus=4 (T33b fix)** | **118/120** | **1.7%** |
+
+**Root cause** (opus subagent, state-audit memo 20): KVM keeps a per-vCPU LRU of recently-used TDP roots (`vcpu->arch.mmu->prev_roots`). v2 ships new CR3 via `KVM_SYNC_X86_SREGS` dirty-bit; KVM's `kvm_mmu_new_pgd` fast-switches to a cached root keyed by `cr3 | pcid` **without revalidating leaf SPTEs**. Under the per-host-CPU vCPU pool, multiple UML tasks share a vCPU; their TDP roots cycle through `prev_roots[]`; mmu_notifier flushes targeting the *active* root on a different vCPU may not invalidate the entry sitting in this vCPU's `prev_roots[]`. Re-dispatch fast-switches to stale root → mt-mini's `got=0 expect=N`.
+
+**Fix** (commit `9ccdc4300713`): `kvm_v2_load_user_sregs` issues a full `KVM_SET_SREGS` ioctl on cross-task / cross-mm dispatch. Heavy ioctl path takes `__set_sregs2 → kvm_mmu_reset_context` which drops `prev_roots[]`. Same-task re-entries take the existing fast SYNC path (no extra ioctl).
+
+**Cost:** one extra ioctl per cross-task dispatch. Negligible on real workloads (cpython-parity, fork-malloc unchanged in regression checks).
+
+## ~~mt-mini SMP T=8 residual — TDP coherence RULED OUT (SMP-T31)~~ (HISTORICAL)
 
 Three-way comparison establishes the bug as v2-specific:
 
