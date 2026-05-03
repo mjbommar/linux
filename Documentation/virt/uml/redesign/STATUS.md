@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-02 (post SMP-T25/T26/T27 — Bug B + FPU leak BOTH closed)
+Last updated: 2026-05-03 (post SMP-T29 — fork-snapshot clobber CLOSED, true 0% on threaded-fork-malloc)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,9 +9,12 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `2d77c1d63230` on `umlctl-deploy` (SMP-T26/T27 — always-GET-FPU
-fix, closes cross-task FPU leak that drove the threaded-fork-malloc
-residual; previously T25 closed Bug B class via LSTAR-EINTR rewind).
+**Tip:** `44d21b5a14ab` on `umlctl-deploy` (SMP-T29 — gate
+capture_for_switch_out on `vcpu->last_task`, closes the
+cascade-failure residual that survived T26/T27. Stack:
+T25 LSTAR-EINTR rewind + T26/T27 always-GET-FPU + T29 snapshot-preserve
+together bring threaded-fork-malloc to 0/116000 forks failed across
+30-boot soak — true 0% on the dominant fork+exec workload).
 
 ---
 
@@ -38,11 +41,11 @@ LKML upstream queue.
 | mt-rawmmap × 20 (T=8, ncpus=4)                    | kvm-v2  | n/a       | 100%                |
 | mt-mmap-stress (T=8, ncpus=4)                     | kvm-v2  | n/a       | PASS (post T22)     |
 | threaded-subprocess-wait × 20 (T22)               | kvm-v2  | n/a       | 17-18/20 (NM_stub+2=0) |
-| **threaded-subprocess-wait × 10 (post T26/T27)**  | kvm-v2  | n/a       | **10/10 (100%)**       |
+| **threaded-subprocess-wait × 10 (post T29)**      | kvm-v2  | n/a       | **10/10, 0/4000 fails (100%)** |
 | **threaded-fork-malloc × 6 (post T26/T27)**       | kvm-v2  | n/a       | **0/24000 fails (100%)** |
-| **threaded-fork-malloc × 30 LONG SOAK**           | kvm-v2  | n/a       | **29/30 boots, 1/120000 forks (0.00083% — 180× better than 0.15% pre-fix)** |
-| **substrate gate (post T26/T27)**                 | kvm-v2  | n/a       | **PASS=25/FAIL=3/XFAIL=3 (matches seccomp)** |
-| **cpython-parity gate (post T26/T27, 21 modules)**| kvm-v2  | n/a       | **21/21 PARITY** |
+| **threaded-fork-malloc × 30 LONG SOAK (post T29)**| kvm-v2  | n/a       | **29/30 boots, 0/116000 forks (TRUE 0%)** (1 RCU-stall outlier, no CHILD_FAIL) |
+| **substrate gate (post T29)**                     | kvm-v2  | n/a       | **PASS=25/FAIL=3/XFAIL=3 (matches seccomp)** |
+| **cpython-parity gate (post T29, 21 modules × 10)**| kvm-v2 | n/a       | **210/210 PARITY across 10 boots** |
 | `make -j4` inside guest (Phase G.3)               | kvm-v2  | n/a       | yes                 |
 | All workloads under `backend=force=seccomp`       | seccomp | yes       | yes (deterministic) |
 
@@ -78,6 +81,7 @@ on `/`, never tmpfs).
 | SMP-T23 | cross-mm cr2-zero (last_mm gate) | DONE | `a0be14e66013`, memo state-audit/12 |
 | SMP-T25 | Bug B residual — LSTAR-EINTR HOST_IP rewind | DONE | `b1421d7583e9`, memo state-audit/13 |
 | SMP-T26/T27 | FPU cross-task leak — always KVM_GET_FPU after KVM_RUN | DONE | `76b1d98b2006`, memo state-audit/15 |
+| SMP-T29 | fork-snapshot clobber — gate capture_for_switch_out on `vcpu->last_task` | DONE | `44d21b5a14ab`, memo state-audit/16 |
 | I.2   | KUnit suites (vCPU pool / memslot / IDT) | DONE   | task #113              |
 | I.3   | docs — backend README + backends.rst   | DONE     | task #114              |
 | I.4   | lift EXPERT gate from CONFIG_UM_BACKEND_KVM_V2 | DONE | task #112        |
