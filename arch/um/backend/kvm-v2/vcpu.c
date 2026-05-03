@@ -2255,11 +2255,54 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 	cpu  = smp_processor_id();
 	vcpu = kvm_v2_vcpu_get(cpu);
 	if (!vcpu || vcpu->vcpu_fd < 0) {
-		/* Pool not up or sentinel — no snapshot. The task's next
-		 * first-run install will fall back to arch-default reset
-		 * values (kvm_v2_fpu_install_on_first_run's else-branch).
+		/*
+		 * SMP-T29 (2026-05-03): do NOT clear from->fpu_valid here.
+		 * If pool isn't up, leave any prior snapshot intact (e.g.
+		 * from kvm_v2_fpu_capture_for_fork on a freshly-fork'd task
+		 * whose snapshot is still authoritative).
+		 *
+		 * Original code cleared fpu_valid=false here, which would
+		 * have been correct under the assumption that from has run
+		 * since fork. For a never-yet-dispatched freshly-fork'd
+		 * task, that assumption is wrong and the parent-snapshot
+		 * is the right state to install on first run.
 		 */
-		from->thread.arch.kvm_v2.fpu_valid = false;
+		migrate_enable();
+		return;
+	}
+
+	/*
+	 * SMP-T29 (2026-05-03) ROOT-CAUSE FIX: only capture when the
+	 * per-host-CPU vCPU's FPU state actually belongs to `from`.
+	 *
+	 * Bug captured by 30-boot soak: a freshly-fork'd task carrying
+	 * `kvm_v2_fpu_capture_for_fork`'s parent-snapshot
+	 * (fpu_valid=true) can be context-switched OUT before its very
+	 * first KVM_RUN dispatch (e.g., SIGALRM preempt while inside
+	 * fork_handler). Without this gate, the unconditional KVM_GET_FPU
+	 * below would overwrite the pristine parent-snapshot with
+	 * whatever the per-CPU vCPU's FPU happens to hold (= some other
+	 * task's state). On the eventual first dispatch,
+	 * kvm_v2_fpu_install_on_first_run would then restore that
+	 * garbage as if it were the parent's FPU. The freshly-fork'd
+	 * task runs with corrupted XMM, glibc's __libc_fork
+	 * post-fork-cleanup MOVAPS writes the wrong stack values, and
+	 * the next iteration of glibc's _dl_stack_used walk faults at
+	 * `__fork+0x11c (mov 0x3d8(%r15),%rax)` with cr2=0x3d8 (r15
+	 * dereferenced as NULL+0x3d8). Once the first child cascades,
+	 * the parent's worker pthread's own _dl_stack_used walks corrupt
+	 * the same way → 2675 sequential CHILD_FAIL events in one boot.
+	 *
+	 * Gate: vcpu->last_task is set in load_user_sregs at every
+	 * dispatch entry. "last_task == from" ⇔ "the most recent KVM_RUN
+	 * on this per-host-CPU vCPU was from's, and KVM_GET_FPU here
+	 * reads from's actual FPU." If false, leave any existing
+	 * snapshot intact.
+	 */
+	if (vcpu->last_task != from) {
+		/* Per-CPU vCPU's FPU does NOT reflect `from`. Preserve
+		 * any existing fpu_valid=true (set by capture_for_fork or
+		 * an earlier valid capture). */
 		migrate_enable();
 		return;
 	}
@@ -2267,22 +2310,16 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
 			      (unsigned long)&from->thread.arch.kvm_v2.fpu);
 	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_switch_out: KVM_GET_FPU(cpu=%d vcpu_fd=%d) failed (%d) — task migrates without FPU snapshot (will use arch defaults on resume)\n",
+		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_switch_out: KVM_GET_FPU(cpu=%d vcpu_fd=%d) failed (%d) — preserving prior snapshot if any\n",
 				    cpu, vcpu->vcpu_fd, rc);
-		from->thread.arch.kvm_v2.fpu_valid = false;
+		/* SMP-T29: do NOT clear fpu_valid here either — preserve
+		 * any prior valid snapshot. */
 		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
 		migrate_enable();
 		return;
 	}
 
 	from->thread.arch.kvm_v2.fpu_valid = true;
-	/* Reuse C.4's tracepoint — capture is capture, regardless of
-	 * whether the trigger was fork or context-switch-out. The
-	 * `valid=1` discriminator on the event tells consumers a
-	 * snapshot landed; the task->comm in the surrounding ftrace
-	 * record disambiguates fork vs switch-out for any consumer
-	 * that cares.
-	 */
 	trace_um_backend_kvm_v2_fpu_capture(cpu, 1);
 	migrate_enable();
 }
