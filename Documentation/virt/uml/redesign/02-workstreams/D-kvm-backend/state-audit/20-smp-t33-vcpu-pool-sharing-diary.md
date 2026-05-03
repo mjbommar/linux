@@ -559,3 +559,46 @@ approval given the T33c regression.
 **Holding pattern: tip is f8e38d57dd1f (T33b at HEAD). Awaiting
 user steer.**
 
+
+## Entry 24 — Option E (host KVM patch) hit infrastructure wall
+
+User correctly noted E ("patch host KVM with new SPTE-zap ioctl") could be
+the least-effort path on paper. Attempted infrastructure setup:
+
+1. Extracted `/usr/src/linux-source-7.0.0.tar.bz2` to `~/src/host-kvm/`.
+   Source pkg is **7.0.0-15.15** (vanilla 7.0.0, no Ubuntu patches).
+2. Running kernel is **7.0.0-13-generic** = 7.0.0-13.13 with Ubuntu patches.
+3. Built unmodified `kvm.ko` against running kernel's `.config` +
+   `Module.symvers` from `/lib/modules/$(uname -r)/build/`. **vermagic
+   initially mismatched** (7.0.0 vs 7.0.0-13-generic); fixed by copying
+   running kernel's `include/generated/utsrelease.h`.
+4. `insmod arch/x86/kvm/kvm.ko` → **`Invalid module format`**.
+   `dmesg`: `module: x86/modules: Invalid relocation target, existing value
+   is nonzero for sec 96, idx 1, type 1, loc ffffffffc102f210, val
+   ffffffffc0ea42c0`. Vanilla 7.0.0 source builds modules whose
+   relocations don't match the Ubuntu-patched binary kernel's section
+   layout. Vermagic match is necessary but not sufficient.
+5. `apt source linux-image-unsigned-7.0.0-13-generic` would give the
+   exact source but: deb-src not enabled by default; enabled it; `apt
+   update` returned `BADSIG 871920D1991BC93C` from
+   `resolute-updates`. Fetched source directly via apt: `apt source
+   --allow-unauthenticated linux` got the package-name notice but no
+   actual source download (Ubuntu now points to git for the linux pkg).
+
+**Cleanup:** removed `~/src/host-kvm/` (1.7GB), reverted
+`/etc/apt/sources.list.d/ubuntu.sources` to deb-only.
+
+**E remains the right architectural fix; it just needs one of:**
+- Manual download of `linux-source-7.0.0-13.13` from snapshot.ubuntu.com
+  or git.launchpad.net/~ubuntu-kernel/+git/linux
+- A reboot to `7.0.0-15-generic` (already installed) which matches the
+  available source pkg
+- A full kernel rebuild from `~/projects/personal/linux/` for x86_64
+  + reboot to it
+
+**Next step requires user steer** — I don't initiate reboots
+autonomously, and the manual source download is a multi-step infrastructure
+task that's better done with the user present.
+
+Holding at f8e38d57dd1f → 7e8044474c10 (T33b shipped, 95.7% rate confirmed).
+
