@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-02 (post SMP-T19/T20/T22)
+Last updated: 2026-05-02 (post SMP-T25/T26/T27 — Bug B + FPU leak BOTH closed)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,8 +9,9 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `ddf3cfe5cf31` on `umlctl-deploy` (SMP-T22 — vmexit-on-#NM,
-eliminates Bug B class).
+**Tip:** `2d77c1d63230` on `umlctl-deploy` (SMP-T26/T27 — always-GET-FPU
+fix, closes cross-task FPU leak that drove the threaded-fork-malloc
+residual; previously T25 closed Bug B class via LSTAR-EINTR rewind).
 
 ---
 
@@ -37,6 +38,8 @@ LKML upstream queue.
 | mt-rawmmap × 20 (T=8, ncpus=4)                    | kvm-v2  | n/a       | 100%                |
 | mt-mmap-stress (T=8, ncpus=4)                     | kvm-v2  | n/a       | PASS (post T22)     |
 | threaded-subprocess-wait × 20 (T22)               | kvm-v2  | n/a       | 17-18/20 (NM_stub+2=0) |
+| **threaded-subprocess-wait × 10 (post T26/T27)**  | kvm-v2  | n/a       | **10/10 (100%)**       |
+| **threaded-fork-malloc × 30 (post T26/T27)**      | kvm-v2  | n/a       | **0/24000 fails (100%)** |
 | `make -j4` inside guest (Phase G.3)               | kvm-v2  | n/a       | yes                 |
 | All workloads under `backend=force=seccomp`       | seccomp | yes       | yes (deterministic) |
 
@@ -69,6 +72,9 @@ on `/`, never tmpfs).
 | SMP-T19 | IST sanity guards (snapshot/restore/write) | DONE | `d9ed9e14c7b6`         |
 | SMP-T20 | RCU-deferred mmu_gather page free      | DONE     | `d9ed9e14c7b6`         |
 | SMP-T22 | Bug B class — vmexit-on-#NM, eliminate iretq surface | DONE | `ddf3cfe5cf31`, memo state-audit/11 |
+| SMP-T23 | cross-mm cr2-zero (last_mm gate) | DONE | `a0be14e66013`, memo state-audit/12 |
+| SMP-T25 | Bug B residual — LSTAR-EINTR HOST_IP rewind | DONE | `b1421d7583e9`, memo state-audit/13 |
+| SMP-T26/T27 | FPU cross-task leak — always KVM_GET_FPU after KVM_RUN | DONE | `76b1d98b2006`, memo state-audit/15 |
 | I.2   | KUnit suites (vCPU pool / memslot / IDT) | DONE   | task #113              |
 | I.3   | docs — backend README + backends.rst   | DONE     | task #114              |
 | I.4   | lift EXPERT gate from CONFIG_UM_BACKEND_KVM_V2 | DONE | task #112        |
