@@ -184,10 +184,28 @@ static void tlb_batch_pages_flush(struct mmu_gather *tlb)
 			batch->nr -= deferred;
 		}
 	}
-#endif
+
+	/*
+	 * SMP-T36 (2026-05-03): the standard free loop below
+	 * (`while batch && batch->nr`) terminates at the first batch with
+	 * nr==0. For non-UML kernels that's correct because batches fill
+	 * in order: a non-full batch is always the last one. But UML's
+	 * deferral loop above can leave a fully-deferred batch (nr=0)
+	 * EARLIER in the chain than a partially-deferred one (nr>0,
+	 * happens when kmalloc OOM hit __um_defer_append_locked
+	 * mid-batch). Stopping at the first empty batch then leaks the
+	 * surviving entries of later batches AND keeps the encoded_page
+	 * array referencing pages that never get freed. Walk every batch
+	 * and skip empties.
+	 */
+	for (batch = &tlb->local; batch; batch = batch->next)
+		if (batch->nr)
+			__tlb_batch_free_encoded_pages(batch);
+#else
 
 	for (batch = &tlb->local; batch && batch->nr; batch = batch->next)
 		__tlb_batch_free_encoded_pages(batch);
+#endif
 	tlb->active = &tlb->local;
 }
 
