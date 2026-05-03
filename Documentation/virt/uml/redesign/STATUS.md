@@ -40,6 +40,7 @@ LKML upstream queue.
 | threaded-subprocess-wait × 20 (T22)               | kvm-v2  | n/a       | 17-18/20 (NM_stub+2=0) |
 | **threaded-subprocess-wait × 10 (post T26/T27)**  | kvm-v2  | n/a       | **10/10 (100%)**       |
 | **threaded-fork-malloc × 6 (post T26/T27)**       | kvm-v2  | n/a       | **0/24000 fails (100%)** |
+| **threaded-fork-malloc × 30 LONG SOAK**           | kvm-v2  | n/a       | **29/30 boots, 1/120000 forks (0.00083% — 180× better than 0.15% pre-fix)** |
 | **substrate gate (post T26/T27)**                 | kvm-v2  | n/a       | **PASS=25/FAIL=3/XFAIL=3 (matches seccomp)** |
 | **cpython-parity gate (post T26/T27, 21 modules)**| kvm-v2  | n/a       | **21/21 PARITY** |
 | `make -j4` inside guest (Phase G.3)               | kvm-v2  | n/a       | yes                 |
