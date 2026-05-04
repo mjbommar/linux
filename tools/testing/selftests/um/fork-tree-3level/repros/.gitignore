@@ -1,0 +1,8 @@
+# Built reproducer binaries (Makefile builds these from the .c sources).
+malloc-stress-child
+malloc-stress-child-diag
+malloc-stress-child-diag-xmm
+threaded-fork-exec
+threaded-fork-malloc
+# Per-run captures (umlctl logs + diag dumps).
+logs/

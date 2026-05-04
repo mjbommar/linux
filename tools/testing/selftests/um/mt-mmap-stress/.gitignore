@@ -8,3 +8,8 @@ mt-rep
 mt-sse
 mt-avx
 mt-xmmprobe
+mt-mini
+mt-rawmmap
+mt-stackcheck
+mt-yieldonly
+logs/

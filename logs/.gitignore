@@ -1,0 +1,3 @@
+# umlctl writes per-run init.log + state-trace dumps here. Local-only.
+*
+!.gitignore
