@@ -1518,8 +1518,24 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	 */
 	if (cross_task) {
 		struct kvm_sregs full = *sregs;
-		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
-				       (unsigned long)&full);
+		int rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
+					  (unsigned long)&full);
+
+		/*
+		 * SMP-T47 (mainstream-readiness audit P2 #6): if this
+		 * cross-task ioctl ever fails, the heavy
+		 * `__set_sregs2 → kvm_mmu_reset_context` path didn't run
+		 * and the vCPU keeps stale prev_roots[] entries — exactly
+		 * the SMP-T33 bug class. Silent (void)-cast made that
+		 * regression invisible. Now: WARN_ON_ONCE marks the kernel
+		 * tainted on first occurrence so post-mortem catches it,
+		 * and a ratelimited pr_warn gives the per-vCPU context for
+		 * follow-up. No perf cost on the success path (rc >= 0
+		 * skips both branches).
+		 */
+		if (WARN_ON_ONCE(rc < 0))
+			pr_warn_ratelimited("um: kvm-v2 cross-task KVM_SET_SREGS failed (rc=%d) on vcpu=%d — stale prev_roots[] possible; SMP-T33 bug class returns\n",
+					    rc, vcpu->cpu);
 	}
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
