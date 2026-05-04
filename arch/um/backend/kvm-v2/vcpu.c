@@ -66,6 +66,16 @@
 #include "syscall_trap.h"
 
 /*
+ * SMP-T56 (2026-05-04): the LSTAR-EINTR carve-out in
+ * kvm_v2_vcpu_run sizes its RIP-range check against the assembled
+ * gadget body — same extern symbols syscall_trap.c uses to memcpy
+ * the body into the trampoline page. Source of truth:
+ * arch/um/backend/kvm-v2/lstar_gadget.S.
+ */
+extern const u8 kvm_v2_lstar_gadget_start[];
+extern const u8 kvm_v2_lstar_gadget_end[];
+
+/*
  * The pool. Sized at compile time to NR_CPUS — bounded (UML's
  * NR_CPUS_RANGE_END is 64, NR_CPUS_DEFAULT=1 without SMP) and bss-
  * resident, which sidesteps the buddy-allocator-not-up constraint
@@ -2171,60 +2181,88 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				 * mid-stub EINTR on those vectors.
 				 */
 				if (eintr_regs.rip >= KVM_V2_LSTAR_GVA &&
-				    eintr_regs.rip <  KVM_V2_LSTAR_GVA + 2) {
+				    eintr_regs.rip <  KVM_V2_LSTAR_GVA +
+				                      (kvm_v2_lstar_gadget_end -
+				                       kvm_v2_lstar_gadget_start)) {
 					/*
-					 * SMP-T25 (2026-05-02) Bug B residual fix:
-					 * EINTR caught the guest at the LSTAR
-					 * trampoline, between the SYSCALL
-					 * transition and the trampoline's
-					 * `out %al, $0xf4` vmexit. The 5-byte
-					 * trampoline is `out %al, $0xf4 ; sysretq`
-					 * (bytes e6 f4 48 0f 07): the OUT spans
-					 * LSTAR..LSTAR+1, the SYSRETQ spans
-					 * LSTAR+2..LSTAR+4. EINTR at LSTAR or
-					 * LSTAR+1 means the OUT had not yet
-					 * vmexited, so handle_io_trap never ran,
-					 * so HOST_IP was not redirected from
-					 * LSTAR to HOST_CX (post-SYSCALL user
-					 * RIP). The marshal_from_kvm_regs above
-					 * therefore left regs->gp[HOST_IP] =
-					 * LSTAR; on the next dispatch's
-					 * marshal_to_kvm_regs we'd write
-					 * kvm_run.rip = LSTAR with USER CS,
-					 * causing an instruction-fetch fault on
-					 * the kernel-only LSTAR page (BUG_B
-					 * class: err=0x15 P=1/U=1/ID=1).
+					 * SMP-T25 (2026-05-02) + SMP-T56
+					 * (2026-05-04) Bug B residual fix:
+					 * EINTR caught the guest somewhere in
+					 * the LSTAR body. There are two regimes:
 					 *
-					 * Fix: rewind HOST_IP to the user-space
-					 * SYSCALL instruction itself (HOST_CX -
-					 * 2; SYSCALL is 2 bytes, opcode 0F 05).
-					 * On the next dispatch the user re-
-					 * executes SYSCALL → CPU re-jumps to
-					 * LSTAR → trampoline OUT vmexits →
-					 * handle_io_trap dispatches the syscall
-					 * normally. No user-side state is
-					 * duplicated because we only re-
-					 * execute the 2-byte SYSCALL instruction
-					 * itself (which is idempotent: it just
-					 * traps to the kernel).
+					 * (a) RIP in [LSTAR, LSTAR+3): pre-entry
+					 *     -swapgs. Same shape as the original
+					 *     SMP-T25 fix for the 5-byte fallback
+					 *     (`out + sysretq`) — HOST_IP was not
+					 *     redirected, so on the next dispatch
+					 *     marshal_to_kvm_regs would write
+					 *     kvm_run.rip = LSTAR with USER CS,
+					 *     causing an instruction-fetch fault
+					 *     on the kernel-only LSTAR page
+					 *     (BUG_B err=0x15 class). Rewind
+					 *     HOST_IP to user SYSCALL retry
+					 *     (HOST_CX - 2; SYSCALL is 2 bytes,
+					 *     opcode 0F 05). MSR_KERNEL_GS_BASE
+					 *     is unchanged here (entry-swapgs
+					 *     hasn't run).
 					 *
-					 * SYSRETQ-region (LSTAR+2..LSTAR+4) is
-					 * NOT handled here because it is never
-					 * executed in v2 — handle_io_trap sets
-					 * HOST_IP = HOST_CX and the next entry
-					 * jumps directly to user RIP, skipping
-					 * the SYSRETQ entirely.
+					 * (b) RIP >= LSTAR+3: post-entry-swapgs.
+					 *     The CPU has hardware-swapped
+					 *     GS_BASE ↔ MSR_KERNEL_GS_BASE: now
+					 *     GS_BASE = STATE_GVA(cpu) and
+					 *     MSR_KERNEL_GS_BASE = user_gs (≈0
+					 *     for typical x86_64 userspace).
+					 *     Without recovery, the *next* task
+					 *     to dispatch on this vCPU enters
+					 *     SYSCALL with KERNEL_GS_BASE=0; its
+					 *     swapgs lands GS_BASE=0; the
+					 *     gadget's `mov %rdx, %gs:0x50` then
+					 *     faults at virtual address 0x50
+					 *     with err=2 (P=0/W=1/U=0). That is
+					 *     the BUG_B regression observed
+					 *     post-gadget-revival (mt-mini SMP
+					 *     N=400: 10/400 SIGSEGV-via-bad-GS).
+					 *     Recovery: KVM_SET_MSRS to restore
+					 *     MSR_KERNEL_GS_BASE = STATE_GVA(cpu)
+					 *     so the vCPU is left in a clean
+					 *     state regardless of which task
+					 *     dispatches next, then rewind RIP
+					 *     to user SYSCALL retry.
+					 *
+					 * In both regimes we rewind to user
+					 * SYSCALL retry — the gadget body is
+					 * idempotent (rerunning is fine), and
+					 * the MSR fix paired with the rewind
+					 * means the retry restarts in a known
+					 * good state on whichever vCPU/task
+					 * runs next.
 					 */
 					KVMV2_TRACE(KVMV2_OP_EINTR_INLINE_LSTAR,
 						    regs, run, vcpu);
+					if (eintr_regs.rip >= KVM_V2_LSTAR_GVA + 3) {
+						struct {
+							struct kvm_msrs hdr;
+							struct kvm_msr_entry e[1];
+						} req = {
+							.hdr = { .nmsrs = 1 },
+							.e = {{
+								.index = MSR_KERNEL_GS_BASE,
+								.data = KVM_V2_GADGET_STATE_GVA(vcpu->cpu),
+							}},
+						};
+						(void)os_ioctl_generic(vcpu->vcpu_fd,
+								       KVM_SET_MSRS,
+								       (unsigned long)&req);
+					}
 					{
 						static atomic64_t lstar_eintr_count;
 						long n = atomic64_inc_return(&lstar_eintr_count);
 						if (n == 1 || (n & 0xff) == 0)
-							pr_info("um: kvm-v2 SMP-T25 LSTAR-EINTR rewind #%ld pid=%d comm=%s rip=%llx rcx=%llx\n",
+							pr_info("um: kvm-v2 SMP-T25/T56 LSTAR-EINTR rewind #%ld pid=%d comm=%s rip=%llx rcx=%llx (%s-swapgs)\n",
 								n, current->pid, current->comm,
 								(unsigned long long)eintr_regs.rip,
-								(unsigned long long)eintr_regs.rcx);
+								(unsigned long long)eintr_regs.rcx,
+								eintr_regs.rip >= KVM_V2_LSTAR_GVA + 3 ? "post" : "pre");
 					}
 					regs->gp[HOST_IP] = regs->gp[HOST_CX] - 2;
 				} else if (eintr_regs.rip >= KVM_V2_HANDLERS_GVA + 0x140 &&
