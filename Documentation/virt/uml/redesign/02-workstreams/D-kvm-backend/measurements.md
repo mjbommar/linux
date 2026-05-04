@@ -1,5 +1,18 @@
 # D-workstream — measurement log
 
+> **2026-05-03 — POST-T41 UPDATE.** v1 KVM backend was archived
+> (memo 25 R10) and the ptrace backend was removed (memo 25 R11),
+> so the `ptrace`, `kvm-fallback`, and `kvm-gadget` columns in the
+> tables below are **historical reference only** — the active
+> backend is now `kvm-v2`. A refreshed cross-backend cyc/getpid
+> table covering today's tree (and the post-T41 fix stack) lives
+> at [`measurements-2026-05-post-T41.md`](./measurements-2026-05-post-T41.md).
+> A per-host JSON baseline for `server7` (Ryzen 7 7840HS) lives at
+> [`../A-backend-abstraction/perf-baseline-ryzen-7-7840hs.json`](../A-backend-abstraction/perf-baseline-ryzen-7-7840hs.json).
+> Headline: kvm-v2 is **2.0× faster than seccomp** (SMP build) and
+> **2.5× faster** (UP build) on per-getpid round-trip; 3.4× faster
+> than v1's fallback path on the same Zen 4 host.
+
 Timing data from every spike + real-implementation benchmark
 run for the D (KVM backend) workstream. Append new measurements
 at the **bottom** under new `## <date> — <what>` sections so
