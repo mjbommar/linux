@@ -1,4 +1,11 @@
-# Cross-host benchmark — kvm-v2 vs seccomp on the home lab (2026-05-04)
+# Cross-host benchmark — kvm-v2 vs seccomp on the home lab (2026-05-04, pre-gadget)
+
+> **Superseded for current numbers** by
+> `bench-cross-host-2026-05-04-postgadget.md` (commit
+> `7ebcd8aac347`, gadget revived). This page is the reference
+> baseline at commit `81665d4c2343`, where every syscall took the
+> KVM_EXIT_IO slow path (~36 800 cyc/getpid). Keep both for the
+> pre/post comparison.
 
 Captured 2026-05-04 against the kvm-v2 SMP T41-fix kernel
 (`81665d4c2343` + the bench/ suite) using the
