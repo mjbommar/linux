@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-03 (**SMP-T41 CLOSED — mt-mini byte[0]=0 residual TRUE root cause fixed.** State-trace dump on STRICT_MEMSET_FAIL revealed RAX=CR2 at the EINTR boundary in the PF stub: when EINTR caught the guest mid-PF-stub between `mov %cr2, %rax` and `pop %rax`, `kvm_v2_handle_pf_eintr_inline` did not recover user RAX from IST top-56 before marshal_to_kvm_regs. The user resumed at user_rip with RAX=CR2 (page-aligned, low byte=0), so `mov %al, (%rdx)` wrote 0x00. Fix: recover user RAX from IST top-56 when stub_rip > stub_start. Validation: 397/400 PASS (was 88/100), 0 STRICT_MEMSET_FAIL, Wilson 95% CI [97.8%, 99.7%].)
+Last updated: 2026-05-04 (**Phase H gadget revived + mainstream-readiness items #1-5 closed.** Commit `7ebcd8aac347` reinstates the v1 in-LSTAR stay-in-guest gadget for ten trivial syscalls (getpid/gettid/getppid/getuid/geteuid/getgid/getegid/getcpu/time/clock_gettime CLOCK_MONOTONIC), now structured for upstream review: assembled stub (`arch/um/backend/kvm-v2/lstar_gadget.S`), full Linux x86_64 syscall ABI compliance (RDX/R8/R10 saved/restored at every gadget exit), CONFIG_UM_BACKEND_KVM_V2_GADGET Kconfig knob, KUnit byte-shape tests + boot LSTAR memcmp self-check. Cross-host bench refresh on 8 lab hosts (s0-s7, Skylake/Kaby/Alder Lake/Zen 4) — see `02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md`: micro tier **193-908×** speedup over seccomp (was 1.34-2.22× pre-gadget), py tier **2.99-4.06×** (was 1.03-1.64×), stress tier 3.71-8.72× (mmap-heavy, comparable). Zero data-corruption events across all hosts. Prior SMP-T41 close (2026-05-03) still holds.)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -17,8 +17,8 @@ kvm_v2_handle_pf_eintr_inline). All gates clean:
     in libc syscall — different bug class (SMP-T54)
   - substrate gate kvm-v2: PASS=25/FAIL=3/XFAIL=3 (matches seccomp)
   - cpython-tier0 kvm-v2: PASS
-  - perf-py-startup kvm-v2: 0.10s median vs 0.12s seccomp
-    (kvm-v2 17% FASTER, gate ratio 0.833 / 1.2 ceiling)
+  - perf-py-startup kvm-v2 (post-gadget, 8 hosts): **2.99-4.06× faster than seccomp** across Skylake/Kaby/Alder Lake/Zen 4
+  - bench-micro getpid (post-gadget, 8 hosts): **193-908×** speedup (gadget collapses ~36 800 cyc roundtrip to ~90 cyc in-guest)
   - threaded-fork-malloc 0/116000 forks failed (T29)
   - threaded-subprocess-wait 10/10 (T29)
 

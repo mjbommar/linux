@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-05-04T19:36:00Z",
+  "tree_head": "7ebcd8aac347",
+  "kernel_under_test": {
+    "build_dir": "~/src/uml-builds/uml-smp-t41fix",
+    "build_flavor": "SMP",
+    "smp_max_cpus": 4,
+    "build_commit": "7ebcd8aac347",
+    "gadget": "enabled (CONFIG_UM_BACKEND_KVM_V2_GADGET=y)",
+    "includes_fix_stack": "T25 + T26/T27 + T29 + T33 + T36 + T37 + T41 + Phase H gadget revival + Mainstream-readiness #1-5"
+  },
+  "supersedes": "bench-cross-host-2026-05-04.json (commit 81665d4c2343, pre-gadget)",
+  "methodology": {
+    "harness": "tools/testing/selftests/um/bench/run-bench.sh",
+    "tiers": {
+      "bench-micro": "100k iter rdtsc-bracketed SYS_getpid loop, ncpus=1, unit=cyc_per_call",
+      "bench-py": "5 samples + 1 warmup of canned Python (hash + fs + getpid + socket), ncpus=1, unit=elapsed_ms",
+      "bench-stress": "3 samples + 1 warmup of mt-mini SMP T=8 strict_memset, ncpus=4, unit=elapsed_ms_per_iter"
+    },
+    "governor_required": "performance",
+    "all_hosts_governor_at_run": "performance",
+    "kernel_propagation": "scp ~/bench-bundle/kernel/linux to s0..s7 in parallel; ssh sN 'bash ~/bench-bundle/run-on-host.sh'"
+  },
+  "headlines": {
+    "micro_speedup_min": "193x (s4 i5-12600K, Alder Lake heterogeneous)",
+    "micro_speedup_max": "908x (s6 Ryzen 7 7840HS, Zen 4)",
+    "py_speedup_min": "2.99x (s2/s4)",
+    "py_speedup_max": "4.06x (s6 Zen 4)",
+    "stress_speedup_min": "3.71x (s1 Kaby Lake)",
+    "stress_speedup_max": "8.72x (s4 i5-12600K)",
+    "data_corruption_events": "0 across 24 mt-mini stress runs (8 hosts x 3 samples)"
+  },
+  "results": {
+    "s0": {
+      "cpu": "12th Gen Intel(R) Core(TM) i9-12900K",
+      "uarch": "Alder Lake P",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 101,
+          "seccomp_p50": 28682,
+          "ratio_v2_over_seccomp": 0.0035,
+          "speedup_seccomp_over_v2": 283.98,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 63.75,
+          "seccomp_p50": 237.64,
+          "ratio_v2_over_seccomp": 0.2683,
+          "speedup_seccomp_over_v2": 3.73,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 205,
+          "seccomp_p50": 1488,
+          "ratio_v2_over_seccomp": 0.1378,
+          "speedup_seccomp_over_v2": 7.26,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s1": {
+      "cpu": "Intel(R) Xeon(R) CPU E3-1225 v6 @ 3.30GHz",
+      "uarch": "Kaby Lake",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 100,
+          "seccomp_p50": 74341,
+          "ratio_v2_over_seccomp": 0.0013,
+          "speedup_seccomp_over_v2": 743.41,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 211.4,
+          "seccomp_p50": 644.51,
+          "ratio_v2_over_seccomp": 0.328,
+          "speedup_seccomp_over_v2": 3.05,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 558,
+          "seccomp_p50": 2071,
+          "ratio_v2_over_seccomp": 0.2694,
+          "speedup_seccomp_over_v2": 3.71,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s2": {
+      "cpu": "Intel(R) Xeon(R) CPU E3-1225 v5 @ 3.30GHz",
+      "uarch": "Skylake-S",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 96,
+          "seccomp_p50": 78026,
+          "ratio_v2_over_seccomp": 0.0012,
+          "speedup_seccomp_over_v2": 812.77,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 222.11,
+          "seccomp_p50": 665.14,
+          "ratio_v2_over_seccomp": 0.3339,
+          "speedup_seccomp_over_v2": 2.99,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 631,
+          "seccomp_p50": 2483,
+          "ratio_v2_over_seccomp": 0.2541,
+          "speedup_seccomp_over_v2": 3.94,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s3": {
+      "cpu": "Intel(R) Xeon(R) W-2123 CPU @ 3.60GHz",
+      "uarch": "Skylake-SP",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 98,
+          "seccomp_p50": 69288,
+          "ratio_v2_over_seccomp": 0.0014,
+          "speedup_seccomp_over_v2": 707.02,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 172.23,
+          "seccomp_p50": 541.49,
+          "ratio_v2_over_seccomp": 0.3181,
+          "speedup_seccomp_over_v2": 3.14,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 481,
+          "seccomp_p50": 2003,
+          "ratio_v2_over_seccomp": 0.2401,
+          "speedup_seccomp_over_v2": 4.16,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s4": {
+      "cpu": "12th Gen Intel(R) Core(TM) i5-12600K",
+      "uarch": "Alder Lake",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 153,
+          "seccomp_p50": 29528,
+          "ratio_v2_over_seccomp": 0.0052,
+          "speedup_seccomp_over_v2": 192.99,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 68.15,
+          "seccomp_p50": 204.07,
+          "ratio_v2_over_seccomp": 0.334,
+          "speedup_seccomp_over_v2": 2.99,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 197,
+          "seccomp_p50": 1717,
+          "ratio_v2_over_seccomp": 0.1147,
+          "speedup_seccomp_over_v2": 8.72,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s5": {
+      "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+      "uarch": "Zen 4",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 87,
+          "seccomp_p50": 74940,
+          "ratio_v2_over_seccomp": 0.0012,
+          "speedup_seccomp_over_v2": 861.38,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 120.75,
+          "seccomp_p50": 467.88,
+          "ratio_v2_over_seccomp": 0.2581,
+          "speedup_seccomp_over_v2": 3.87,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 347,
+          "seccomp_p50": 1491,
+          "ratio_v2_over_seccomp": 0.2327,
+          "speedup_seccomp_over_v2": 4.3,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s6": {
+      "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+      "uarch": "Zen 4",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 88,
+          "seccomp_p50": 79874,
+          "ratio_v2_over_seccomp": 0.0011,
+          "speedup_seccomp_over_v2": 907.66,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 121.88,
+          "seccomp_p50": 495.35,
+          "ratio_v2_over_seccomp": 0.246,
+          "speedup_seccomp_over_v2": 4.06,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 319,
+          "seccomp_p50": 1377,
+          "ratio_v2_over_seccomp": 0.2317,
+          "speedup_seccomp_over_v2": 4.32,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    },
+    "s7": {
+      "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+      "uarch": "Zen 4",
+      "tiers": {
+        "micro": {
+          "kvm_v2_p50": 90,
+          "seccomp_p50": 81387,
+          "ratio_v2_over_seccomp": 0.0011,
+          "speedup_seccomp_over_v2": 904.3,
+          "unit": "cyc_per_call"
+        },
+        "py": {
+          "kvm_v2_p50": 127.48,
+          "seccomp_p50": 498.28,
+          "ratio_v2_over_seccomp": 0.2558,
+          "speedup_seccomp_over_v2": 3.91,
+          "unit": "elapsed_ms"
+        },
+        "stress": {
+          "kvm_v2_p50": 327,
+          "seccomp_p50": 1600,
+          "ratio_v2_over_seccomp": 0.2044,
+          "speedup_seccomp_over_v2": 4.89,
+          "unit": "elapsed_ms_per_iter"
+        }
+      }
+    }
+  }
+}

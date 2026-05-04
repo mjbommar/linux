@@ -81,9 +81,13 @@ Boot parameters
     it. ``force=`` makes the choice mandatory and panics if the
     requested backend isn't compiled in or fails its host probe.
     ``kvm-v2`` is at substrate parity with seccomp (memo 26 §H.1b,
-    2026-04-30) and ~2× faster on minimal Python startup; opt in
-    via ``backend=force=kvm-v2`` until Phase J validation flips it
-    to default. The archived v1 implementation
+    2026-04-30) and **3-4× faster on Python startup, 193-908×
+    faster on per-syscall round-trip** with the Phase H LSTAR
+    gadget enabled (default; see ``CONFIG_UM_BACKEND_KVM_V2_GADGET``
+    and the cross-host bench at
+    ``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md``).
+    Opt in via ``backend=force=kvm-v2`` until Phase J validation
+    flips it to default. The archived v1 implementation
     (``arch/um/backend/kvm-v1-archive/``, depends on ``BROKEN``) is
     not selectable.
 
@@ -168,9 +172,20 @@ PML4[508] (``arch/um/backend/kvm-v2/exception.c``): #PF / #GP / #UD
 to the host then ``iretq`` back to the guest fault-resume
 instruction.
 
-Round-trip cost: ~150 ns measured, dominated by the KVM_EXIT_IO
-ioctl pair. ~2× faster than seccomp on minimal Python startup
-(memo 26 §H.1).
+Round-trip cost on the slow KVM_EXIT_IO path: ~150 ns measured,
+dominated by the KVM_EXIT_IO ioctl pair.
+
+Phase H gadget (default, ``CONFIG_UM_BACKEND_KVM_V2_GADGET=y``):
+ten trivial syscalls (getpid/gettid/getppid/getuid/geteuid/getgid/
+getegid/getcpu/time/clock_gettime CLOCK_MONOTONIC) handle entirely
+in-guest via an in-LSTAR dispatch tree. The body reads per-task
+state from a per-vCPU page (mapped at MSR_KERNEL_GS_BASE,
+populated in ``load_user_sregs``) and returns via SYSRETQ — no
+vmexit. Per-syscall round-trip drops from ~36 800 cyc to ~90 cyc
+(see ``arch/um/backend/kvm-v2/lstar_gadget.S`` for the assembled
+trampoline body and the cross-host bench at
+``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md``
+for measurements).
 
 ******************
 Implementation map
