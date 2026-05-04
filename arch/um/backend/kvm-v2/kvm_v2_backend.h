@@ -386,6 +386,37 @@ struct kvm_v2_vcpu {
 	 */
 	struct task_struct *last_task;
 	struct mm_struct   *last_mm;
+
+	/*
+	 * Phase H gadget per-vCPU state page (2026-05-04, Phase 2).
+	 *
+	 * 4KB page mapped at KVM_V2_GADGET_STATE_GVA(cpu) via
+	 * PTE[KVM_V2_GADGET_BASE_SLOT + cpu] of the trampoline_pte_kva
+	 * chain. MSR_KERNEL_GS_BASE for this vCPU is programmed to that
+	 * GVA so the LSTAR getpid gadget's `swapgs ; mov %gs:OFFSET, %eax`
+	 * reads from this vCPU's page exclusively. load_user_sregs
+	 * refreshes task_tgid_vnr(current) at offset KVM_V2_GADGET_OFF_TGID
+	 * before each KVM_RUN.
+	 *
+	 * Why per-vCPU (vs per-VM Phase-1 design): different tasks running
+	 * on different vCPUs simultaneously would race on a single shared
+	 * state page. Per-vCPU isolates writes to the host CPU pthread
+	 * that owns this vCPU; the gadget runs on the same vCPU (1:1
+	 * binding), so writer and reader are exclusive in time without
+	 * a lock.
+	 *
+	 * VM-lifetime; freed in kvm_v2_exception_free_per_vcpu_gadget_state
+	 * BEFORE kvm_v2_kernel_half_free (the PTE write goes through
+	 * trampoline_pte_kva which the kernel-half chain owns).
+	 *
+	 * v1 archive mirror: kvm-v1-archive/lifecycle.c:846-883
+	 * (kvm_gadget_state_alloc / _free / _refresh) — v1 had a single
+	 * shared page (ncpus=1 only); v2 Phase 2 makes it per-vCPU so
+	 * ncpus>1 works.
+	 */
+	void	    *gadget_state_kva;
+	phys_addr_t  gadget_state_gpa;
+	u64	     gadget_state_gva;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
@@ -462,6 +493,37 @@ int kvm_v2_install_per_vcpu_ist_tss(struct kvm_v2_vm *vm,
  */
 void kvm_v2_exception_free_per_vcpu(struct kvm_v2_vm *vm,
 				    struct kvm_v2_vcpu *vcpu, int cpu);
+
+/*
+ * Phase H gadget Phase 2 (2026-05-04): allocate the per-vCPU gadget
+ * state page + install the PTE entry at PTE[KVM_V2_GADGET_BASE_SLOT +
+ * cpu] of the trampoline_pte_kva chain. Called from
+ * kvm_v2_exception_install's per-vCPU loop alongside
+ * kvm_v2_install_per_vcpu_ist_tss. Stores
+ * vcpu->{gadget_state_kva, _gpa, _gva} for the load_user_sregs
+ * refresh path.
+ *
+ * Idempotent at the per-vCPU level — re-invocation when
+ * gadget_state_kva is already non-NULL short-circuits.
+ *
+ * Returns 0 on success / already-installed; -EINVAL on prerequisites
+ * unmet (vm->trampoline_pte_kva NULL); -ENOMEM if __get_free_page
+ * returns NULL.
+ *
+ * Defined in exception.c.
+ */
+int kvm_v2_install_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
+					 struct kvm_v2_vcpu *vcpu, int cpu);
+
+/*
+ * Symmetric teardown — clear PTE[KVM_V2_GADGET_BASE_SLOT + cpu], free
+ * the page, NULL the vcpu fields. Called from kvm_v2_exception_free
+ * over every pool member alongside kvm_v2_exception_free_per_vcpu.
+ * Safe on a never-installed vCPU (NULL gadget_state_kva → no-op).
+ */
+void kvm_v2_exception_free_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
+						 struct kvm_v2_vcpu *vcpu,
+						 int cpu);
 
 /*
  * Phase B.5: load guest CR3. Caller passes the target vCPU + __pa(pgd).

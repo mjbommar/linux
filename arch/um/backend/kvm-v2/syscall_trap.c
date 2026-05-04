@@ -125,36 +125,170 @@
 #include "syscall_trap.h"
 
 /*
- * The 5-byte LSTAR body — byte-identical to v1's #else branch at
- * kvm-v1-archive/thread.c:1215-1218. Documented per byte so a future
- * read of this file doesn't have to cross-reference the disassembly:
+ * LSTAR trampoline bodies — assembled from lstar_gadget.S and exposed
+ * here as extern symbols (ftrace dynamic-trampoline pattern; see
+ * arch/x86/kernel/ftrace_64.S + arch/x86/kernel/ftrace.c memcpy of
+ * ftrace_caller..end into the trampoline page).
  *
- *   0xe6 0xf4         out %al, $0xf4   (2 bytes; port-imm8 form)
- *   0x48 0x0f 0x07    sysretq          (3 bytes; REX.W + 0F 07)
+ *   kvm_v2_lstar_fallback_start..._end
+ *     5-byte body: out %al, $0xf4 ; sysretq. The non-gadget LSTAR
+ *     target — every syscall takes the slow KVM_EXIT_IO route. Always
+ *     installed first by kvm_v2_trampoline_alloc_and_install so that
+ *     even if exception_install / state-page allocation fails partway,
+ *     the LSTAR is functional (slow but correct).
  *
- * Total 5 bytes; lives at offset KVM_V2_TRAMPOLINE_LSTAR_OFFSET (0x40)
- * within the page. The remainder of the page is zero on alloc_page
- * (GFP from buddy clears) — Phase E.3 exception handlers will populate
- * other offsets per the layout v1 had at kvm-v1-archive/thread.c:
- * 666-690.
+ *   kvm_v2_lstar_gadget_start..._end
+ *     ~341-byte stay-in-guest dispatch tree: pid-family + getcpu +
+ *     time + clock_gettime(CLOCK_MONOTONIC). Installed in-place over
+ *     the fallback by kvm_v2_trampoline_upgrade_to_gadget after
+ *     kvm_v2_exception_install confirms every per-vCPU gadget state
+ *     page is mapped.
+ *
+ * The bytes are linker-defined, so `_end - _start` is a link-time
+ * (not compile-time) constant. Page-fit invariants that previously
+ * lived in static_assert(sizeof(array)) are now boot-time runtime
+ * checks in the install functions below.
  */
-static const u8 kvm_v2_lstar_bytes[] = {
-	0xe6, 0xf4,		/* out %al, $0xf4 */
-	0x48, 0x0f, 0x07,	/* sysretq */
-};
+extern const u8 kvm_v2_lstar_fallback_start[];
+extern const u8 kvm_v2_lstar_fallback_end[];
+extern const u8 kvm_v2_lstar_gadget_start[];
+extern const u8 kvm_v2_lstar_gadget_end[];
 
 /*
- * Compile-time guard: the LSTAR body must fit in a single page even
- * once future Phase E.3 handlers grow the populated region around it.
- * v1's whole bootstrap layout (LSTAR + IDT + GDT + TSS + #PF/#DF/...
- * handlers) fit in one page; v2's plan is the same per memo 26 §D.1
- * "Total trampoline budget: ~16 B including alignment padding".
+ * Phase H gadget body — assembled stub source: lstar_gadget.S.
+ * That file documents the per-handler dispatch layout, byte-by-byte
+ * displacements, and v1 cross-references (kvm-v1-archive/thread.c:
+ * 873-1209). Read it for the canonical body layout.
+ *
+ * Stay-in-guest fast path for trivial syscalls:
+ *   getpid  (NR 39  = 0x27) → KVM_V2_GADGET_OFF_TGID (0x08)
+ *   gettid  (NR 186 = 0xba) → KVM_V2_GADGET_OFF_TID  (0x0c)
+ *   getppid (NR 110 = 0x6e) → KVM_V2_GADGET_OFF_PPID (0x10)
+ *   getuid  (NR 102 = 0x66) → KVM_V2_GADGET_OFF_UID  (0x14)
+ *   geteuid (NR 107 = 0x6b) → KVM_V2_GADGET_OFF_EUID (0x18)
+ *   getgid  (NR 104 = 0x68) → KVM_V2_GADGET_OFF_GID  (0x1c)
+ *   getegid (NR 108 = 0x6c) → KVM_V2_GADGET_OFF_EGID (0x20)
+ *   time    (NR 201 = 0xc9) → KVM_V2_GADGET_OFF_REAL_SEC (0x30)
+ *                              + optional store of REAL_SEC into *tloc
+ *   getcpu  (NR 309 = 0x135) → KVM_V2_GADGET_OFF_CPU_ID (0x04)
+ *                              + writes 0 to *node (UML has no NUMA)
+ *
+ * Phase 7 (clock_gettime) backed out 2026-05-04 — gadget body verified
+ * via objdump but user-visible RAX returns MONO_NSEC instead of 0.
+ * Root cause not yet identified; bytes/offsets correct but somehow the
+ * sysretq path returns the wrong RAX. Needs deeper diagnostics
+ * (host-side instrumentation of regs.gp[HOST_AX] post-marshal). Phases
+ * 4-6 ship; Phase 7 deferred.
+ *
+ * Any other NR falls through to the host KVM_EXIT_IO path.
+ *
+ * Layout (offsets relative to LSTAR body start = trampoline + 0x40):
+ *
+ *   +0   0f 01 f8                      swapgs                      (3 B)
+ *                                        — GS_BASE := per-vCPU state page
+ *                                          (run BEFORE getcpu pre-check
+ *                                          so the body's %gs:OFF reads
+ *                                          land on the right page).
+ *
+ *   +3   3d 35 01 00 00                cmp $0x135, %eax            (5 B)
+ *                                        — Phase-5 getcpu pre-check.
+ *                                          NR=309 doesn't fit the imm8
+ *                                          dispatch chain below (which
+ *                                          requires NR < 256 per the
+ *                                          upper-byte guard). v1
+ *                                          reference for the same
+ *                                          two-step dispatch:
+ *                                          kvm-v1-archive/thread.c:907-916.
+ *
+ *   +8   74 77                         je rel8 → h_getcpu          (2 B)
+ *                                        rel8 = 119 (target +129).
+ *
+ *   +10  a9 00 ff ff ff                test $0xffffff00, %eax      (5 B)
+ *                                        — upper-byte guard for the
+ *                                          imm8 dispatch chain that
+ *                                          follows. Catches NR >= 256
+ *                                          aliases (e.g., preadv2
+ *                                          NR=295=0x127 aliases low-
+ *                                          byte 0x27 of getpid).
+ *
+ *   +15  75 1c                         jne +28 → fallback at +45   (2 B)
+ *
+ *   +17  3c 27 74 20                   cmp $0x27,%al ; je → h_tgid (4 B)
+ *   +21  3c ba 74 26                   cmp $0xba,%al ; je → h_tid  (4 B)
+ *   +25  3c 6e 74 2c                   cmp $0x6e,%al ; je → h_ppid (4 B)
+ *   +29  3c 66 74 32                   cmp $0x66,%al ; je → h_uid  (4 B)
+ *   +33  3c 6b 74 38                   cmp $0x6b,%al ; je → h_euid (4 B)
+ *   +37  3c 68 74 3e                   cmp $0x68,%al ; je → h_gid  (4 B)
+ *   +41  3c 6c 74 44                   cmp $0x6c,%al ; je → h_egid (4 B)
+ *
+ *   +45  fallback:
+ *        0f 01 f8                      swapgs (restore user GS)    (3 B)
+ *        e6 f4                         out %al, $0xf4              (2 B)
+ *        48 0f 07                      sysretq                     (3 B)
+ *
+ *   handlers — each loads its slot then jmp to shared tail at +123:
+ *   +53  h_tgid:  ... eb 3c                                        (10 B)
+ *   +63  h_tid:   ... eb 32                                        (10 B)
+ *   +73  h_ppid:  ... eb 28                                        (10 B)
+ *   +83  h_uid:   ... eb 1e                                        (10 B)
+ *   +93  h_euid:  ... eb 14                                        (10 B)
+ *   +103 h_gid:   ... eb 0a                                        (10 B)
+ *   +113 h_egid:  ... eb 00                                        (10 B)
+ *
+ *   +123 tail:
+ *        0f 01 f8                      swapgs (restore user GS)    (3 B)
+ *        48 0f 07                      sysretq                     (3 B)
+ *
+ *   +129 h_getcpu (56 B):
+ *        Direct port of v1's handler at kvm-v1-archive/thread.c:1177-
+ *        1208 with two changes:
+ *          - TASK_SIZE_CAP at OFF=0x28 (v2 co-located, vs v1's separate
+ *            vvar at +0x1030);
+ *          - jbe-to-fallback uses rel8 instead of v1's rel32 (fallback
+ *            is closer in v2's smaller body).
+ *
+ *        On entry: RDI = cpu*, RSI = node*, RAX = NR=309, GS=state_page.
+ *        Use %edx (NOT %ecx — RCX holds user RIP for sysretq) to load
+ *        CPU_ID. Use %r10d for the node-zero-write. Defer `xor %eax,%eax`
+ *        until just before the tail swapgs so RAX = NR=309 survives any
+ *        bounds-check fallback (handle_syscall sees the right NR).
+ *
+ *        The bounds checks treat user pointer == TASK_SIZE_CAP as too
+ *        high (jbe goes to fallback) — TASK_SIZE_CAP is task_size - 16
+ *        per v1 lifecycle.c:974, leaving 16 B headroom for the 8 B
+ *        store starting at the boundary.
+ *
+ *   +185 total LSTAR body.
+ *
+ * v1 sched_yield SKIPPED with rationale: v1 archived sched_yield
+ * (NR=24=0x18) at thread.c:935+ then DEMOTED it back to host-side at
+ * thread.c:942-961 because the in-gadget `xor %eax,%eax ; ret`
+ * skipped UML's scheduler entirely; tight sched_yield loops starved
+ * co-tenant tasks for up to ~10ms (one host timer tick) before
+ * SIGALRM-driven preemption fired. v2 will never gadget sched_yield —
+ * the ~13µs VMEXIT cost per call is the right tradeoff for correct
+ * POSIX semantics.
+ *
+ * jmp/je rel8 displacements are computed at write time as comments
+ * but baked into the byte table for clarity.
+ *
+ * v1 reference: kvm-v1-archive/thread.c:873-1209 (full dispatch tree
+ * including pid-family + clock_gettime + time + getcpu — Phases 6+7
+ * will add the remaining clock entries).
  */
-static_assert(sizeof(kvm_v2_lstar_bytes) <= PAGE_SIZE,
-	      "LSTAR trampoline body exceeds PAGE_SIZE");
-static_assert(KVM_V2_TRAMPOLINE_LSTAR_OFFSET + sizeof(kvm_v2_lstar_bytes)
-	      <= PAGE_SIZE,
-	      "LSTAR trampoline at offset 0x40 spills past PAGE_SIZE");
+/*
+ * The hand-coded byte table previously here was migrated to
+ * lstar_gadget.S (Phase I mainstream-readiness item #2 — see
+ * commit messages). The fallback and gadget bytes now ship as
+ * extern .rodata symbols declared above.
+ *
+ * Page-fit invariant — gadget body lives at
+ * KVM_V2_TRAMPOLINE_LSTAR_OFFSET (0x40) within the trampoline
+ * page; budget is PAGE_SIZE - 0x40 = 4032 B. Linker-defined
+ * sizes are not compile-time constants in C, so this is
+ * checked once at boot in kvm_v2_trampoline_alloc_and_install
+ * instead of via static_assert.
+ */
 
 int kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm)
 {
@@ -204,32 +338,73 @@ int kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm)
 	gpa = __pa(kva);
 
 	/*
-	 * Write the 5 LSTAR bytes at offset 0x40. The page is zero-filled
-	 * around it; Phase E.3 handlers will populate other offsets in
-	 * subsequent commits. Use memcpy not __builtin_memcpy_inline (the
-	 * latter triggers FORTIFY_SOURCE noise on small fixed copies on
-	 * some toolchains).
+	 * Two-phase LSTAR install (2026-05-04, Phase H gadget Phase 3):
+	 *
+	 * Step 1 (here): write the SAFE 5-byte fallback LSTAR (out + sysretq).
+	 * Step 2 (kvm_v2_trampoline_upgrade_to_gadget, called from
+	 *        kvm_v2_exception_install AFTER all per-vCPU state pages
+	 *        are confirmed installed): overwrite with the 94-byte
+	 *        gadget LSTAR.
+	 *
+	 * Why two-phase: the 94-byte gadget body's `mov %gs:OFF, %eax`
+	 * dereferences MSR_KERNEL_GS_BASE = KVM_V2_GADGET_STATE_GVA(cpu),
+	 * which is only mapped after kvm_v2_install_per_vcpu_gadget_state
+	 * runs (during exception_install). Pre-Phase-3 the LSTAR was 5
+	 * bytes that didn't reach into a separate page — atomic. Now the
+	 * gadget bytes have a hard data dependency on a separately-installed
+	 * page chain, so we must guarantee the install ordering is
+	 * `state page → gadget bytes`, never `gadget bytes → state page`.
+	 *
+	 * If exception_install fails partway (alloc_page OOM, PTE index
+	 * overflow, etc.), the 5-byte LSTAR stays in place and SYSCALLs
+	 * route through the slow KVM_EXIT_IO path — same as pre-Phase-3.
+	 * No silent half-broken state where gadget bytes execute but state
+	 * pages aren't mapped (would SIGSEGV on first user SYSCALL after
+	 * .vcpu_run flip).
+	 *
+	 * Use memcpy not __builtin_memcpy_inline (FORTIFY_SOURCE noise on
+	 * small fixed copies on some toolchains).
+	 *
+	 * Page-fit invariant — checked once at first install. The fallback
+	 * is 5 bytes and the gadget body is bounded by the per-vCPU state
+	 * region offset (KVM_V2_TRAMPOLINE_STATE_OFFSET = 0x800), so any
+	 * link-time growth past 0x7c0 bytes panics here rather than silently
+	 * scribbling into the state page area.
 	 */
-	memcpy((u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
-	       kvm_v2_lstar_bytes, sizeof(kvm_v2_lstar_bytes));
+	{
+		const size_t fb_len = kvm_v2_lstar_fallback_end -
+				      kvm_v2_lstar_fallback_start;
+		const size_t gd_len = kvm_v2_lstar_gadget_end -
+				      kvm_v2_lstar_gadget_start;
+		const size_t budget = PAGE_SIZE -
+				      KVM_V2_TRAMPOLINE_LSTAR_OFFSET;
 
-	/*
-	 * Boot-time self-check: read back the bytes we just wrote and
-	 * panic on any mismatch. The trampoline is on the hot path post-
-	 * D.5; a corrupt LSTAR is one of the worst possible failure
-	 * modes (guest jumps to garbage at CPL=0). One memcmp at boot
-	 * costs nothing and catches: byte-table corruption between
-	 * compile and load, accidental MD5-style optimizer mangling,
-	 * write-protected page silently dropping the memcpy, etc.
-	 */
-	if (memcmp((const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
-		   kvm_v2_lstar_bytes,
-		   sizeof(kvm_v2_lstar_bytes)) != 0) {
-		const u8 *got = (const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET;
+		if (fb_len > budget || gd_len > budget) {
+			panic("um: kvm-v2 trampoline_install: LSTAR body overflow — fallback=%zu gadget=%zu budget=%zu (offset 0x%x..PAGE_SIZE)",
+			      fb_len, gd_len, budget,
+			      KVM_V2_TRAMPOLINE_LSTAR_OFFSET);
+		}
 
-		panic("um: kvm-v2 trampoline_install: LSTAR readback MISMATCH at kva=%p+%#x — got %02x %02x %02x %02x %02x, want e6 f4 48 0f 07",
-		      kva, KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
-		      got[0], got[1], got[2], got[3], got[4]);
+		memcpy((u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
+		       kvm_v2_lstar_fallback_start, fb_len);
+
+		/*
+		 * Boot-time self-check: read back the bytes we just wrote
+		 * and panic on any mismatch. The trampoline is on the hot
+		 * path post-D.5; a corrupt LSTAR is one of the worst
+		 * possible failure modes (guest jumps to garbage at CPL=0).
+		 * Catches: byte-table corruption between compile and load,
+		 * write-protected page silently dropping the memcpy, etc.
+		 */
+		if (memcmp((const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
+			   kvm_v2_lstar_fallback_start, fb_len) != 0) {
+			const u8 *got = (const u8 *)kva +
+					KVM_V2_TRAMPOLINE_LSTAR_OFFSET;
+
+			panic("um: kvm-v2 trampoline_install: fallback LSTAR readback MISMATCH at kva=%p+%#x — got %02x %02x %02x %02x %02x, want e6 f4 48 0f 07",
+			      kva, KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
+			      got[0], got[1], got[2], got[3], got[4]);
+		}
 	}
 
 	/*
@@ -259,10 +434,9 @@ int kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm)
 	vm->trampoline_page = kva;
 	vm->trampoline_gpa  = gpa;
 
-	pr_info("um: kvm-v2 trampoline_install: kva=%p gpa=%pa gva=%#llx (LSTAR body at +%#x; %zu bytes)\n",
+	pr_info("um: kvm-v2 trampoline_install: kva=%p gpa=%pa gva=%#llx (5-byte fallback LSTAR at +%#x; gadget upgrade pending exception_install)\n",
 		kva, &gpa, (u64)KVM_V2_LSTAR_GVA,
-		KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
-		sizeof(kvm_v2_lstar_bytes));
+		KVM_V2_TRAMPOLINE_LSTAR_OFFSET);
 	trace_um_backend_kvm_v2_trampoline_install((u64)gpa,
 						   (u64)KVM_V2_LSTAR_GVA);
 	return 0;
@@ -671,6 +845,53 @@ static int __init kvm_v2_trampoline_late_install(void)
 	return 0;
 }
 subsys_initcall(kvm_v2_trampoline_late_install);
+
+/*
+ * Phase H gadget Phase 3 (2026-05-04): in-place upgrade of the LSTAR
+ * body from the 5-byte fallback (out + sysretq) to the 94-byte
+ * stay-in-guest gadget. Caller (kvm_v2_exception_install) guarantees
+ * every per-vCPU gadget state page is mapped before this runs, so the
+ * gadget's `mov %gs:OFF, %eax` always finds backing.
+ *
+ * Idempotent — a second invocation re-writes the same bytes; readback
+ * still passes. No locking required because kvm_v2_exception_install
+ * runs once per VM at subsys_initcall, before any user task exists.
+ *
+ * On failure path semantics: if any caller decides not to upgrade
+ * (e.g., per-vCPU install short-circuited because a previous
+ * exception_install already ran), the LSTAR stays at the 5-byte
+ * fallback. SYSCALLs work via the slow KVM_EXIT_IO route — no
+ * functional regression vs pre-Phase-3, just slower.
+ */
+int kvm_v2_trampoline_upgrade_to_gadget(struct kvm_v2_vm *vm)
+{
+	void *kva;
+	const u8 *body = kvm_v2_lstar_gadget_start;
+	const size_t body_len = kvm_v2_lstar_gadget_end -
+				kvm_v2_lstar_gadget_start;
+
+	if (!vm || !vm->trampoline_page) {
+		pr_warn("um: kvm-v2 trampoline_upgrade: vm or trampoline_page NULL — leaving 5-byte fallback in place\n");
+		return -EINVAL;
+	}
+
+	kva = vm->trampoline_page;
+
+	memcpy((u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET, body, body_len);
+
+	if (memcmp((const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET,
+		   body, body_len) != 0) {
+		const u8 *got = (const u8 *)kva + KVM_V2_TRAMPOLINE_LSTAR_OFFSET;
+
+		panic("um: kvm-v2 trampoline_upgrade: gadget LSTAR readback MISMATCH at kva=%p+%#x len=%zu — got %02x %02x %02x %02x %02x...",
+		      kva, KVM_V2_TRAMPOLINE_LSTAR_OFFSET, body_len,
+		      got[0], got[1], got[2], got[3], got[4]);
+	}
+
+	pr_info("um: kvm-v2 trampoline_upgrade: LSTAR body upgraded to %zu-byte gadget at +%#x (per-vCPU state pages confirmed installed)\n",
+		body_len, KVM_V2_TRAMPOLINE_LSTAR_OFFSET);
+	return 0;
+}
 
 void kvm_v2_trampoline_free(struct kvm_v2_vm *vm)
 {

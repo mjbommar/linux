@@ -13,6 +13,15 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += syscall_trap.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
 
+# Phase H gadget LSTAR trampoline body — assembled blob, position-
+# independent x86_64 stub copied at runtime into the per-VM
+# trampoline page. Pattern: arch/x86/kernel/ftrace_64.S +
+# arch/x86/kernel/ftrace.c (memcpy of ftrace_caller..end). Lives
+# in .rodata so objtool treats the bytes as DATA from the host's
+# POV — only the guest executes them after the install path
+# memcpy's them into the trampoline page at GVA 0xffffe000_00000040.
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += lstar_gadget.o
+
 # Per-CPU state-snapshot trace ring. Compiled out entirely when
 # CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=n; runtime gated via
 # static_branch when =y. See state_trace.h for the design.

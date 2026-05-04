@@ -308,9 +308,20 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
  * FMASK MUST clear DF or downstream string ops execute in the wrong
  * direction.
  *
- * No MSR_KERNEL_GS_BASE — D.1's simplified trampoline doesn't use
- * `%gs:` storage. Phase E may revisit if IDT/IST stacks need per-vCPU
- * GS; that's an E-side decision per memo 26 §D.4.
+ * MSR_KERNEL_GS_BASE (0xc0000102): Phase H gadget Phase 2 (2026-05-04).
+ * Programmed per-vCPU to KVM_V2_GADGET_STATE_GVA(vcpu->cpu) — the GVA
+ * each vCPU's gadget state page is mapped at via PTE[
+ * KVM_V2_GADGET_BASE_SLOT + cpu]. The page itself is allocated +
+ * mapped later by kvm_v2_install_per_vcpu_gadget_state() at the
+ * subsys_initcall lazy-install path; vcpu_create_one runs first and
+ * programs the MSR with the deterministic GVA so by the time the
+ * first SYSCALL fires (after subsys_initcall completes) the page IS
+ * mapped behind that GVA.
+ *
+ * Per-vCPU isolation eliminates the writer race that forced Phase 1
+ * to be UP-only: each vCPU's gadget reads from its own state page,
+ * and load_user_sregs writes only to the running vCPU's page (the
+ * vCPU pool's host CPU pthread is the sole writer).
  *
  * After KVM_SET_MSRS, immediately KVM_GET_MSRS and verify each value
  * round-tripped exactly. Boot-time self-check, mirrors D.1's
@@ -321,29 +332,32 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
  * boot costs nothing and catches: KVM ABI shifts that silently drop a
  * write, partial-success returns the loop didn't catch, etc.
  */
-static int kvm_v2_vcpu_program_msrs(int vcpu_fd)
+static int kvm_v2_vcpu_program_msrs(int vcpu_fd, int cpu)
 {
 	struct {
 		struct kvm_msrs hdr;
-		struct kvm_msr_entry entries[3];
+		struct kvm_msr_entry entries[4];
 	} req = {
-		.hdr = { .nmsrs = 3 },
+		.hdr = { .nmsrs = 4 },
 		.entries = {
 			{ .index = MSR_LSTAR, .data = KVM_V2_LSTAR_GVA },
 			{ .index = MSR_STAR,
 			  .data  = ((0x0018ULL) << 48) | ((0x0008ULL) << 32) },
 			{ .index = MSR_SYSCALL_MASK, .data = 0x47700ULL },
+			{ .index = MSR_KERNEL_GS_BASE,
+			  .data  = KVM_V2_GADGET_STATE_GVA(cpu) },
 		},
 	};
 	struct {
 		struct kvm_msrs hdr;
-		struct kvm_msr_entry entries[3];
+		struct kvm_msr_entry entries[4];
 	} readback = {
-		.hdr = { .nmsrs = 3 },
+		.hdr = { .nmsrs = 4 },
 		.entries = {
 			{ .index = MSR_LSTAR },
 			{ .index = MSR_STAR },
 			{ .index = MSR_SYSCALL_MASK },
+			{ .index = MSR_KERNEL_GS_BASE },
 		},
 	};
 	int rc;
@@ -355,26 +369,27 @@ static int kvm_v2_vcpu_program_msrs(int vcpu_fd)
 		       vcpu_fd, rc);
 		return rc;
 	}
-	if (rc != 3) {
+	if (rc != 4) {
 		/*
 		 * KVM_SET_MSRS returns the count of MSRs successfully
-		 * written; partial success means one of LSTAR/STAR/FMASK
-		 * was rejected and the trampoline / SYSRETQ / RFLAGS-mask
-		 * is not armed. Treat as fatal at the caller.
+		 * written; partial success means one of LSTAR/STAR/FMASK/
+		 * KERNEL_GS_BASE was rejected and the corresponding
+		 * trampoline / SYSRETQ / RFLAGS-mask / gadget GS_BASE is
+		 * not armed. Treat as fatal at the caller.
 		 */
-		pr_err("um: kvm-v2 program_msrs: KVM_SET_MSRS wrote %d/3 MSRs (vcpu_fd=%d)\n",
+		pr_err("um: kvm-v2 program_msrs: KVM_SET_MSRS wrote %d/4 MSRs (vcpu_fd=%d)\n",
 		       rc, vcpu_fd);
 		return -EIO;
 	}
 
 	rc = os_ioctl_generic(vcpu_fd, KVM_GET_MSRS, (unsigned long)&readback);
-	if (rc < 0 || rc != 3) {
+	if (rc < 0 || rc != 4) {
 		pr_err("um: kvm-v2 program_msrs: KVM_GET_MSRS readback failed (%d) (vcpu_fd=%d)\n",
 		       rc, vcpu_fd);
 		return rc < 0 ? rc : -EIO;
 	}
 
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < 4; i++) {
 		if (readback.entries[i].data != req.entries[i].data) {
 			panic("kvm-v2: MSR readback MISMATCH idx=%#x: wrote %#llx got %#llx",
 			      req.entries[i].index,
@@ -383,11 +398,12 @@ static int kvm_v2_vcpu_program_msrs(int vcpu_fd)
 		}
 	}
 
-	pr_info("um: kvm-v2 program_msrs: vcpu_fd=%d LSTAR=%#llx STAR=%#llx FMASK=%#llx\n",
-		vcpu_fd,
+	pr_info("um: kvm-v2 program_msrs: vcpu_fd=%d cpu=%d LSTAR=%#llx STAR=%#llx FMASK=%#llx KERNEL_GS_BASE=%#llx\n",
+		vcpu_fd, cpu,
 		(unsigned long long)req.entries[0].data,
 		(unsigned long long)req.entries[1].data,
-		(unsigned long long)req.entries[2].data);
+		(unsigned long long)req.entries[2].data,
+		(unsigned long long)req.entries[3].data);
 	trace_um_backend_kvm_v2_msr_program(vcpu_fd);
 	return 0;
 }
@@ -941,7 +957,7 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	 * run install path to debug separately from the rest of the
 	 * dispatcher.
 	 */
-	rc = kvm_v2_vcpu_program_msrs(vcpu_fd);
+	rc = kvm_v2_vcpu_program_msrs(vcpu_fd, cpu);
 	if (rc < 0)
 		goto err_unmap_kvm_run;
 
@@ -1507,6 +1523,133 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	}
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
+
+	/*
+	 * Phase H gadget Phase 3 (2026-05-04): refresh THIS vCPU's gadget
+	 * state page so the LSTAR dispatch tree returns correct values for
+	 * all five pid-family syscalls (getpid/gettid/getuid/geteuid/getgid).
+	 * Each handler reads `%gs:KVM_V2_GADGET_OFF_<field>` from this
+	 * vCPU's state page; we refresh all five fields here before every
+	 * KVM_RUN.
+	 *
+	 * Per-vCPU isolation: each vCPU's MSR_KERNEL_GS_BASE points at its
+	 * own state page (vcpu->gadget_state_kva), so the writer here (this
+	 * host-CPU pthread for this vCPU) and the gadget reader (the same
+	 * vCPU running guest code) are mutually exclusive in time without
+	 * a lock. On SMP, sibling vCPUs each have their own page and
+	 * refresh independently — no shared writer race.
+	 *
+	 * EINTR-mid-gadget robustness (audited 2026-05-04, design/stability
+	 * cycle): the LSTAR gadget body is now 94 bytes and contains 3
+	 * swapgs instructions; SIGALRM-driven KVM_RUN -EINTR can land
+	 * anywhere in that range, including post-entry-swapgs (GS_BASE
+	 * = STATE_GVA, KERNEL_GS_BASE = user_gs from the swap). Naively
+	 * resuming with sregs.gs.base set to user_gs (this function's
+	 * normal write) would corrupt the gadget read. The empirically-
+	 * validated robustness mechanism (125M+ gadget calls clean):
+	 *
+	 *   1. KVM captures VMCB.save.gs.base (= STATE_GVA mid-gadget)
+	 *      into eintr_sregs.gs.base on the EINTR exit.
+	 *   2. kvm_v2_marshal_sregs_back (vcpu.c:1690-1691) writes
+	 *      regs->gp[HOST_GS_BASE] = eintr_sregs.gs.base = STATE_GVA.
+	 *      The per-task `regs` now holds the swapped value.
+	 *   3. Next dispatch on this task: the caller passes
+	 *      regs->gp[HOST_GS_BASE] = STATE_GVA into us as `gs_base`.
+	 *      We write sregs->gs.base = STATE_GVA (above), so KVM_RUN
+	 *      re-enters the gadget mid-flight with GS_BASE in the right
+	 *      state. The gadget completes; tail swapgs swaps back
+	 *      cleanly; KERNEL_GS_BASE returns to STATE_GVA.
+	 *   4. Next vmexit captures the fully-restored gs.base and
+	 *      kvm_v2_marshal_sregs_back updates HOST_GS_BASE to the
+	 *      true user value.
+	 *
+	 * The same mechanism handles cross-vCPU resume (task A EINTRs on
+	 * vCPU 0, scheduled back on vCPU 1): vCPU 1 has its own state
+	 * page at STATE_GVA(1), which load_user_sregs's tgid refresh
+	 * just populated for task A → mid-handler resume on vCPU 1 reads
+	 * the right values from STATE_GVA(1).
+	 *
+	 * gadget_state_kva is allocated lazily by
+	 * kvm_v2_install_per_vcpu_gadget_state (run from
+	 * kvm_v2_exception_install at subsys_initcall), so before that
+	 * runs (early boot, before the first SYSCALL hits the gadget) the
+	 * pointer may still be NULL. The NULL check below makes the
+	 * refresh a no-op in that window. The trampoline two-phase
+	 * upgrade in kvm_v2_trampoline_upgrade_to_gadget guarantees the
+	 * 94-byte gadget LSTAR is only installed AFTER all per-vCPU
+	 * state pages exist, so by the time the gadget body executes,
+	 * gadget_state_kva is non-NULL on every vCPU (refresh was a
+	 * no-op only during the small startup window before the upgrade,
+	 * and during that window the LSTAR was the safe 5-byte fallback
+	 * that doesn't read the state page).
+	 *
+	 * Cost: 5 namespace lookups + 5 × 4-byte stores. No ioctl, no
+	 * lock. Trivial vs the rest of load_user_sregs.
+	 *
+	 * Field semantics (POSIX):
+	 *   getpid  → tgid via task_tgid_vnr (process ID)
+	 *   gettid  → pid  via task_pid_vnr  (thread ID — Linux extension)
+	 *   getuid  → real uid (current_cred->uid, ns-mapped)
+	 *   geteuid → effective uid (current_cred->euid, ns-mapped)
+	 *   getgid  → real gid (current_cred->gid, ns-mapped)
+	 * v1 reference: kvm-v1-archive/lifecycle.c:904-922's
+	 * kvm_gadget_state_refresh — same field set + same accessor
+	 * choices.
+	 */
+	if (vcpu->gadget_state_kva) {
+		u8 *p = (u8 *)vcpu->gadget_state_kva;
+		const struct cred *c = current_cred();
+		struct timespec64 real_ts;
+
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_CPU_ID),
+			   (u32)vcpu->cpu);
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_TGID),
+			   task_tgid_vnr(current));
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_TID),
+			   task_pid_vnr(current));
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_PPID),
+			   task_ppid_nr(current));
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_UID),
+			   from_kuid_munged(current_user_ns(), c->uid));
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_EUID),
+			   from_kuid_munged(current_user_ns(), c->euid));
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_GID),
+			   from_kgid_munged(current_user_ns(), c->gid));
+		WRITE_ONCE(*(u32 *)(p + KVM_V2_GADGET_OFF_EGID),
+			   from_kgid_munged(current_user_ns(), c->egid));
+
+		/*
+		 * Phase 6: refresh REAL_SEC for the time(2) gadget. NO
+		 * seqlock needed — 1-second resolution makes a torn read
+		 * at-worst off-by-one (matches v1 archive thread.c:1110-
+		 * 1115 and the native vDSO's behavior).
+		 */
+		ktime_get_real_ts64(&real_ts);
+		WRITE_ONCE(*(s64 *)(p + KVM_V2_GADGET_OFF_REAL_SEC),
+			   real_ts.tv_sec);
+
+		/*
+		 * Phase 7: seqlock-protected MONO_SEC/MONO_NSEC + BUDGET reset
+		 * for clock_gettime(CLOCK_MONOTONIC). v1 reference:
+		 * kvm-v1-archive/lifecycle.c:1030-1066.
+		 */
+		{
+			u32 *seq = (u32 *)(p + KVM_V2_GADGET_OFF_SEQ);
+			u64 mono_ns = ktime_get_ns();
+
+			WRITE_ONCE(*seq, *seq + 1);	/* even → odd */
+			smp_wmb();
+			WRITE_ONCE(*(s64 *)(p + KVM_V2_GADGET_OFF_MONO_SEC),
+				   (s64)(mono_ns / NSEC_PER_SEC));
+			WRITE_ONCE(*(s64 *)(p + KVM_V2_GADGET_OFF_MONO_NSEC),
+				   (s64)(mono_ns % NSEC_PER_SEC));
+			WRITE_ONCE(*(s32 *)(p + KVM_V2_GADGET_OFF_BUDGET),
+				   KVM_V2_VVAR_BUDGET_INITIAL);
+			smp_wmb();
+			WRITE_ONCE(*seq, *seq + 1);	/* odd → even */
+		}
+	}
+
 	return 0;
 }
 

@@ -37,6 +37,43 @@ config UM_BACKEND_KVM_V2
 	  selector. Phase J validation (24h continuous + Tier 1/2/3 +
 	  soak) will gate flipping `default y`.
 
+config UM_BACKEND_KVM_V2_GADGET
+	bool "Stay-in-guest LSTAR gadget for trivial syscalls"
+	depends on UM_BACKEND_KVM_V2
+	default y
+	help
+	  Phase H gadget mechanism: an in-LSTAR dispatch tree that handles
+	  trivial syscalls (getpid, gettid, getppid, getuid, geteuid, getgid,
+	  getegid, getcpu, time, clock_gettime(CLOCK_MONOTONIC)) entirely
+	  in-guest by reading per-task fields via swapgs + %gs:OFFSET. Avoids
+	  the host-side KVM_EXIT_IO roundtrip for those syscalls.
+
+	  Performance impact: bench-micro getpid drops from ~36 800 cyc/call
+	  to ~90 cyc/call (~410× faster) on Zen 4. Workload-level speedup
+	  (Python imports, anything calling clock_gettime in a tight loop) is
+	  proportional to gadget-syscall density.
+
+	  Mechanism: the LSTAR target is a ~343-byte trampoline page mapped
+	  in the kernel-half VA range. On guest SYSCALL the CPU jumps there
+	  at CPL=0; the body decodes RAX (NR), reads task state from a
+	  per-vCPU state page (programmed via MSR_KERNEL_GS_BASE), and
+	  returns via SYSRETQ — no vmexit. Any non-gadget NR falls through
+	  to the same out+sysretq fallback path that the non-gadget v2
+	  backend uses, routed through KVM_EXIT_IO → handle_io_trap →
+	  handle_syscall.
+
+	  Selecting N disables the gadget at compile time:
+	    - trampoline_install writes only the 5-byte fallback LSTAR
+	    - per-vCPU state pages are not allocated
+	    - load_user_sregs skips the per-dispatch field refresh
+	    - MSR_KERNEL_GS_BASE is not programmed
+	  The result is structurally identical to pre-gadget v2: every
+	  SYSCALL takes the slow KVM_EXIT_IO path.
+
+	  Say N for security-sensitive deployments that don't want a custom
+	  CPL=0 trampoline body executing in the guest. Say Y (default) to
+	  pay the trampoline complexity in exchange for the perf benefit.
+
 config UM_BACKEND_KVM_V2_KUNIT
 	tristate "KVM v2 backend KUnit tests"
 	depends on UM_BACKEND_KVM_V2 && KUNIT

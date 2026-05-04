@@ -121,6 +121,159 @@ enum um_kvm_iotrap {
 					 KVM_V2_TRAMPOLINE_LSTAR_OFFSET)
 
 /*
+ * Phase H gadget — per-vCPU state pages (2026-05-04, Phase 2).
+ *
+ * Each vCPU owns a dedicated 4KB "gadget state page" containing the
+ * fields the LSTAR fast-path reads via `swapgs ; mov %gs:OFFSET, %eax`.
+ * Per-vCPU isolation is required because v2's per-host-CPU vCPU pool
+ * runs different tasks on different vCPUs simultaneously — a single
+ * shared state page (Phase 1) was UP-only because a writer race on
+ * SMP would hand the gadget stale values.
+ *
+ * Layout (parallel to E.2's per-vCPU IST/TSS PTE region — same chain
+ * trampoline_pte_kva owns):
+ *   PTE[0]                              trampoline (per-VM, +0x000)
+ *   PTE[1]                              IDT       (per-VM, +0x1000)
+ *   PTE[2]                              handlers  (per-VM, +0x2000)
+ *   PTE[3]                              GDT       (per-VM, +0x3000)
+ *   PTE[KVM_V2_IST_BASE_SLOT + 2*cpu]   IST stack (per-vCPU)
+ *   PTE[KVM_V2_IST_BASE_SLOT + 2*cpu+1] TSS body  (per-vCPU)
+ *   PTE[KVM_V2_GADGET_BASE_SLOT + cpu]  gadget state page (per-vCPU,
+ *                                                          this region)
+ *
+ * Per-vCPU MSR_KERNEL_GS_BASE = KVM_V2_GADGET_STATE_GVA(cpu) so each
+ * vCPU's swapgs lands on its own state page. Refreshed in
+ * load_user_sregs from the running task (task_tgid_vnr(current) etc).
+ *
+ * Why a separate page (vs a slot in the existing per-vCPU TSS or IST
+ * page): the gadget reads via %gs:disp32 against KERNEL_GS_BASE; that
+ * MSR is one register, so it must point at exactly one base GVA. The
+ * IST stack page is RW with kernel-only and pushed-to during
+ * exception delivery — co-locating gadget state with IST risks an
+ * exception during gadget execution corrupting the gadget's data.
+ * The TSS page is similarly load-bearing for TR. Cleanest is its own
+ * dedicated 4KB page.
+ *
+ * Field offsets within the state page match v1's KVM_GADGET_OFF_*
+ * scheme (kvm-v1-archive/kvm_backend.h:305-313) so Phase 3's expansion
+ * to 5+ gadgets reuses the v1 dispatch tree's offsets verbatim:
+ *   +0x00 SEQ        (reserved for SMP seqlock if ever needed)
+ *   +0x04 CPU_ID     (reserved for getcpu — Phase 3+)
+ *   +0x08 TGID       (getpid — Phase 1+2)
+ *   +0x0c TID        (gettid — Phase 3)
+ *   +0x14 UID        (getuid — Phase 3)
+ *   +0x18 EUID       (geteuid — Phase 3)
+ *   +0x1c GID        (getgid — Phase 3)
+ *
+ * Phase 2 still ONLY uses TGID. Other slots are zero-filled by
+ * __GFP_ZERO and never read by the LSTAR bytes installed today.
+ *
+ * Slot arithmetic: GADGET_BASE_SLOT = IST_BASE_SLOT (4) + 2*NR_CPUS.
+ * For NR_CPUS=64 worst case, GADGET_BASE_SLOT = 132 and the last
+ * gadget slot is 132 + 63 = 195 — comfortably under the 512-PTE
+ * table limit. Same defensive overflow guard as IST/TSS install.
+ */
+#define KVM_V2_GADGET_BASE_SLOT		(KVM_V2_IST_BASE_SLOT + 2 * NR_CPUS)
+#define KVM_V2_GADGET_STATE_GVA(cpu)	(KVM_V2_TRAMPOLINE_GVA + \
+					 (KVM_V2_GADGET_BASE_SLOT + (cpu)) * 0x1000ULL)
+
+#define KVM_V2_GADGET_OFF_SEQ		0x00	/* reserved (Phase 7+ seqlock) */
+#define KVM_V2_GADGET_OFF_CPU_ID	0x04	/* Phase 5: getcpu */
+#define KVM_V2_GADGET_OFF_TGID		0x08	/* Phase 1+2: getpid */
+#define KVM_V2_GADGET_OFF_TID		0x0c	/* Phase 3: gettid */
+#define KVM_V2_GADGET_OFF_PPID		0x10	/* Phase 4: getppid */
+#define KVM_V2_GADGET_OFF_UID		0x14	/* Phase 3: getuid */
+#define KVM_V2_GADGET_OFF_EUID		0x18	/* Phase 3: geteuid */
+#define KVM_V2_GADGET_OFF_GID		0x1c	/* Phase 3: getgid */
+#define KVM_V2_GADGET_OFF_EGID		0x20	/* Phase 4: getegid */
+/* +0x24 is a 4-byte gap (alignment for the 8B TASK_SIZE_CAP below). */
+#define KVM_V2_GADGET_OFF_TASK_SIZE_CAP	0x28	/* Phase 5: u64, set once at install
+						 * (task_size - 16, 16B safety margin
+						 * matches v1's lifecycle.c:974). Used
+						 * by getcpu's user-pointer bounds
+						 * check before storing cpu/node ids. */
+#define KVM_V2_GADGET_OFF_REAL_SEC	0x30	/* Phase 6: s64 CLOCK_REALTIME seconds.
+						 * Refreshed in load_user_sregs via
+						 * ktime_get_real_ts64(). NO seqlock —
+						 * 1-second resolution makes a torn read
+						 * at-worst off-by-one, identical to
+						 * native vDSO behavior. v1 reference:
+						 * kvm-v1-archive/thread.c:1110-1115. */
+#define KVM_V2_GADGET_OFF_MONO_SEC	0x38	/* Phase 7: s64 CLOCK_MONOTONIC seconds */
+#define KVM_V2_GADGET_OFF_MONO_NSEC	0x40	/* Phase 7: s64 CLOCK_MONOTONIC ns-within-sec */
+#define KVM_V2_GADGET_OFF_BUDGET	0x48	/* Phase 7: s32 gadget call budget. Decrement
+						 * + js → fallback when negative. Reset to
+						 * KVM_V2_VVAR_BUDGET_INITIAL on every host
+						 * refresh. Bounds vvar staleness to at most
+						 * BUDGET_INITIAL gadget calls between host
+						 * refreshes, since SIGALRM is masked during
+						 * KVM_RUN and a tight clock_gettime loop
+						 * would otherwise freeze guest time forever.
+						 * v1 reference: kvm-v1-archive/lifecycle.c:
+						 * 1051-1066. */
+/* +0x4c is a 4-byte gap (alignment for the 8B SAVE_* slots below). */
+#define KVM_V2_GADGET_OFF_SAVE_RDX	0x50	/* Mainstream #1+#4: user RDX
+						 * saved at gadget entry,
+						 * restored at every gadget exit.
+						 * Linux x86_64 syscall ABI
+						 * preserves all GPRs except
+						 * RAX/RCX/R11; the gadget's
+						 * h_time/h_getcpu/h_clock_gettime
+						 * paths use RDX as scratch and
+						 * MUST restore it before SYSRETQ
+						 * to comply. */
+#define KVM_V2_GADGET_OFF_SAVE_R8	0x58	/* Mainstream #1+#4: user R8
+						 * — clobbered by
+						 * h_clock_gettime (MONO_NSEC
+						 * staging). */
+#define KVM_V2_GADGET_OFF_SAVE_R10	0x60	/* Mainstream #1+#4: user R10
+						 * — clobbered by
+						 * h_clock_gettime (MONO_SEC
+						 * staging) and h_getcpu (zero
+						 * for *node). */
+#define KVM_V2_VVAR_BUDGET_INITIAL	10000	/* Phase 7: ~30µs of clock_gettime work
+						 * before falling back to host refresh.
+						 * v1 used the same value at lifecycle.c
+						 * KVM_VVAR_BUDGET_INITIAL definition. */
+
+/*
+ * Mainstream-readiness item #3 — compile-time invariants on the
+ * gadget state-page layout. These catch:
+ *   - SAVE_RDX/R8/R10 slot misalignment (must be 8B-aligned for
+ *     a clean qword move with no #AC trap risk under SMAP/SMEP).
+ *   - Slot collisions if a future field is squeezed between
+ *     existing offsets without bumping subsequent ones.
+ *   - State-page overflow against PAGE_SIZE.
+ *
+ * These are static_assert (compile-time), guarded by __KERNEL__ so
+ * the same header can later be #include'd from an asm-safe sub-
+ * header without breaking GAS (which doesn't grok _Static_assert).
+ */
+#ifdef __KERNEL__
+#include <linux/build_bug.h>
+
+static_assert(KVM_V2_GADGET_OFF_SAVE_RDX % 8 == 0,
+	      "SAVE_RDX must be 8-byte aligned for movq %gs:disp32 stores");
+static_assert(KVM_V2_GADGET_OFF_SAVE_R8  % 8 == 0,
+	      "SAVE_R8 must be 8-byte aligned");
+static_assert(KVM_V2_GADGET_OFF_SAVE_R10 % 8 == 0,
+	      "SAVE_R10 must be 8-byte aligned");
+
+static_assert(KVM_V2_GADGET_OFF_SAVE_RDX + 8 <= KVM_V2_GADGET_OFF_SAVE_R8,
+	      "SAVE_RDX overlaps SAVE_R8");
+static_assert(KVM_V2_GADGET_OFF_SAVE_R8 + 8 <= KVM_V2_GADGET_OFF_SAVE_R10,
+	      "SAVE_R8 overlaps SAVE_R10");
+static_assert(KVM_V2_GADGET_OFF_SAVE_R10 + 8 <= 4096,
+	      "SAVE_R10 spills past state-page PAGE_SIZE");
+
+/* Pre-existing fields must not collide with the SAVE block. */
+static_assert(KVM_V2_GADGET_OFF_BUDGET + 4 <= KVM_V2_GADGET_OFF_SAVE_RDX,
+	      "BUDGET overlaps SAVE_RDX");
+static_assert(KVM_V2_GADGET_OFF_MONO_NSEC + 8 <= KVM_V2_GADGET_OFF_BUDGET,
+	      "MONO_NSEC overlaps BUDGET");
+#endif /* __KERNEL__ */
+
+/*
  * Phase E.1: IDT + handler stubs + GDT pages live in the same PML4[448]
  * subtree as the trampoline (D.4b). PTE[0] is the trampoline (offset
  * 0x000); E.1 uses PTE[1..3] for IDT, handler stubs, and GDT
@@ -253,6 +406,27 @@ int  kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm);
  * kvm_v2_vm_destroy. Safe on a never-installed VM (NULL page → no-op).
  */
 void kvm_v2_trampoline_free(struct kvm_v2_vm *vm);
+
+/*
+ * Phase H gadget Phase 3 (2026-05-04): upgrade the LSTAR body from the
+ * SAFE 5-byte fallback (out + sysretq) installed by
+ * kvm_v2_trampoline_alloc_and_install to the 94-byte stay-in-guest
+ * gadget. Must be called ONLY after all per-vCPU gadget state pages
+ * have been installed (kvm_v2_install_per_vcpu_gadget_state for every
+ * pool member), because the gadget body's `mov %gs:OFF, %eax` reads
+ * from KVM_V2_GADGET_STATE_GVA(cpu) and would SIGSEGV if those pages
+ * aren't mapped behind that GVA.
+ *
+ * Called from kvm_v2_exception_install at the end of its per-vCPU
+ * loop, gated on every loop iteration succeeding. Idempotent — a
+ * second invocation re-writes the same bytes (no-op on the readback
+ * check). Safe to call on a never-installed VM (NULL trampoline_page
+ * short-circuits with a warning).
+ *
+ * Returns 0 on success / already-upgraded; -EINVAL if trampoline_page
+ * is NULL (caller should have ensured trampoline_install ran first).
+ */
+int kvm_v2_trampoline_upgrade_to_gadget(struct kvm_v2_vm *vm);
 
 /*
  * D.2 + E.3: KVM_EXIT_IO dispatch. Called from kvm_v2_vcpu_run's

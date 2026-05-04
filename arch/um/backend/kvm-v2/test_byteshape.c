@@ -29,6 +29,14 @@
 #include <linux/string.h>
 #include <linux/types.h>
 
+#include "syscall_trap.h"
+
+/* Assembled blobs from lstar_gadget.S — see also syscall_trap.c. */
+extern const u8 kvm_v2_lstar_fallback_start[];
+extern const u8 kvm_v2_lstar_fallback_end[];
+extern const u8 kvm_v2_lstar_gadget_start[];
+extern const u8 kvm_v2_lstar_gadget_end[];
+
 /* ---------------------------------------------------------------- */
 /* IDT-pushed long-mode exception frame                             */
 /* SDM Vol.3 §6.14.5 — for an IST stack `top` (one past highest    */
@@ -176,23 +184,107 @@ static void test_gdt_user_cs_encoding(struct kunit *test)
 
 static void test_lstar_trampoline_bytes(struct kunit *test)
 {
-	/* As declared in syscall_trap.c:138-139 (kvm_v2_lstar_trampoline) */
-	const u8 trampoline[] = {
-		0xe6, 0xf4,		/* out %al, $0xf4 */
-		0x48, 0x0f, 0x07,	/* sysretq */
-	};
+	/*
+	 * Assembled fallback blob from lstar_gadget.S — must equal
+	 * the canonical 5-byte body byte-for-byte. v1 reference:
+	 * kvm-v1-archive/thread.c:1215-1218.
+	 */
+	const size_t len = kvm_v2_lstar_fallback_end -
+			   kvm_v2_lstar_fallback_start;
 
-	KUNIT_EXPECT_EQ(test, (size_t)sizeof(trampoline), (size_t)5);
+	KUNIT_EXPECT_EQ(test, (size_t)len, (size_t)5);
 
-	/* `out` opcode 0xe6 = OUT imm8 -- byte to port (port from imm) */
-	KUNIT_EXPECT_EQ(test, (u8)trampoline[0], (u8)0xe6);
+	/* `out` opcode 0xe6 = OUT imm8 — byte to port (port from imm) */
+	KUNIT_EXPECT_EQ(test, (u8)kvm_v2_lstar_fallback_start[0], (u8)0xe6);
 	/* port literal 0xf4 = UM_KVM_TRAP_SYSCALL */
-	KUNIT_EXPECT_EQ(test, (u8)trampoline[1], (u8)0xf4);
-
+	KUNIT_EXPECT_EQ(test, (u8)kvm_v2_lstar_fallback_start[1], (u8)0xf4);
 	/* SYSRETQ: REX.W (0x48) + 0F 07 */
-	KUNIT_EXPECT_EQ(test, (u8)trampoline[2], (u8)0x48);
-	KUNIT_EXPECT_EQ(test, (u8)trampoline[3], (u8)0x0f);
-	KUNIT_EXPECT_EQ(test, (u8)trampoline[4], (u8)0x07);
+	KUNIT_EXPECT_EQ(test, (u8)kvm_v2_lstar_fallback_start[2], (u8)0x48);
+	KUNIT_EXPECT_EQ(test, (u8)kvm_v2_lstar_fallback_start[3], (u8)0x0f);
+	KUNIT_EXPECT_EQ(test, (u8)kvm_v2_lstar_fallback_start[4], (u8)0x07);
+}
+
+/* ---------------------------------------------------------------- */
+/* Gadget body — entry sequence + key opcodes                       */
+/* ---------------------------------------------------------------- */
+
+static void test_lstar_gadget_entry_sequence(struct kunit *test)
+{
+	/*
+	 * Mainstream-readiness item #3: lock the gadget entry preamble.
+	 * The body MUST start with:
+	 *   swapgs                            ; 0f 01 f8         (3 B)
+	 *   movq %rdx, %gs:KVM_V2_GADGET_OFF_SAVE_RDX   (9 B)
+	 *   movq %r8,  %gs:KVM_V2_GADGET_OFF_SAVE_R8    (9 B)
+	 *   movq %r10, %gs:KVM_V2_GADGET_OFF_SAVE_R10   (9 B)
+	 *
+	 * The save sequence implements Linux x86_64 syscall ABI
+	 * preservation of RDX/R8/R10. Any change to it (regs reordered,
+	 * slots renamed, save dropped) trips this test BEFORE boot —
+	 * faster feedback than the post-boot integration ABI check.
+	 */
+	const u8 *p = kvm_v2_lstar_gadget_start;
+	const size_t len = kvm_v2_lstar_gadget_end - kvm_v2_lstar_gadget_start;
+
+	KUNIT_ASSERT_GE(test, (size_t)len, (size_t)30);
+
+	/* swapgs */
+	KUNIT_EXPECT_EQ(test, (u8)p[0], (u8)0x0f);
+	KUNIT_EXPECT_EQ(test, (u8)p[1], (u8)0x01);
+	KUNIT_EXPECT_EQ(test, (u8)p[2], (u8)0xf8);
+
+	/*
+	 * movq %rdx, %gs:OFF_SAVE_RDX
+	 *   65 (gs prefix) 48 (REX.W) 89 14 25 <disp32_le>
+	 */
+	KUNIT_EXPECT_EQ(test, (u8)p[3], (u8)0x65);
+	KUNIT_EXPECT_EQ(test, (u8)p[4], (u8)0x48);
+	KUNIT_EXPECT_EQ(test, (u8)p[5], (u8)0x89);
+	KUNIT_EXPECT_EQ(test, (u8)p[6], (u8)0x14);
+	KUNIT_EXPECT_EQ(test, (u8)p[7], (u8)0x25);
+	KUNIT_EXPECT_EQ(test, (u32)*(u32 *)&p[8],
+			(u32)KVM_V2_GADGET_OFF_SAVE_RDX);
+
+	/* movq %r8, %gs:OFF_SAVE_R8 — REX.W+R = 0x4c, ModRM 0x04 */
+	KUNIT_EXPECT_EQ(test, (u8)p[12], (u8)0x65);
+	KUNIT_EXPECT_EQ(test, (u8)p[13], (u8)0x4c);
+	KUNIT_EXPECT_EQ(test, (u8)p[14], (u8)0x89);
+	KUNIT_EXPECT_EQ(test, (u8)p[15], (u8)0x04);
+	KUNIT_EXPECT_EQ(test, (u8)p[16], (u8)0x25);
+	KUNIT_EXPECT_EQ(test, (u32)*(u32 *)&p[17],
+			(u32)KVM_V2_GADGET_OFF_SAVE_R8);
+
+	/* movq %r10, %gs:OFF_SAVE_R10 — REX.W+R = 0x4c, ModRM 0x14 */
+	KUNIT_EXPECT_EQ(test, (u8)p[21], (u8)0x65);
+	KUNIT_EXPECT_EQ(test, (u8)p[22], (u8)0x4c);
+	KUNIT_EXPECT_EQ(test, (u8)p[23], (u8)0x89);
+	KUNIT_EXPECT_EQ(test, (u8)p[24], (u8)0x14);
+	KUNIT_EXPECT_EQ(test, (u8)p[25], (u8)0x25);
+	KUNIT_EXPECT_EQ(test, (u32)*(u32 *)&p[26],
+			(u32)KVM_V2_GADGET_OFF_SAVE_R10);
+}
+
+static void test_lstar_gadget_size_bounded(struct kunit *test)
+{
+	/*
+	 * The gadget body lives at KVM_V2_TRAMPOLINE_LSTAR_OFFSET
+	 * (0x40) within the trampoline page. Total length must fit
+	 * within PAGE_SIZE - 0x40 = 4032 B; the runtime check in
+	 * kvm_v2_trampoline_alloc_and_install panics on overflow,
+	 * but tripping this KUnit case at compile/run time is a
+	 * cheaper feedback signal.
+	 */
+	const size_t len = kvm_v2_lstar_gadget_end - kvm_v2_lstar_gadget_start;
+	const size_t budget = 4096 - KVM_V2_TRAMPOLINE_LSTAR_OFFSET;
+
+	KUNIT_EXPECT_LE(test, (size_t)len, (size_t)budget);
+
+	/*
+	 * Lower bound — entry preamble (3+9+9+9 = 30 B) plus dispatch
+	 * tree (~70 B) plus at least one handler. A blob shorter than
+	 * 60 B is almost certainly truncated.
+	 */
+	KUNIT_EXPECT_GT(test, (size_t)len, (size_t)60);
 }
 
 /* ---------------------------------------------------------------- */
@@ -249,6 +341,8 @@ static struct kunit_case kvm_v2_byteshape_test_cases[] = {
 	KUNIT_CASE(test_gdt_kernel_cs_encoding),
 	KUNIT_CASE(test_gdt_user_cs_encoding),
 	KUNIT_CASE(test_lstar_trampoline_bytes),
+	KUNIT_CASE(test_lstar_gadget_entry_sequence),
+	KUNIT_CASE(test_lstar_gadget_size_bounded),
 	KUNIT_CASE(test_idt_pf_stub_bytes),
 	KUNIT_CASE(test_idt_simple_stub_bytes),
 	{}

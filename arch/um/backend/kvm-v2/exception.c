@@ -136,6 +136,7 @@
 
 #include <asm/desc_defs.h>		/* gate_desc, GATE_INTERRUPT */
 #include <asm/page.h>
+#include <asm/processor.h>		/* task_size — Phase 5 gadget bounds check */
 #include <asm/pgtable.h>		/* _PAGE_PRESENT, _PAGE_RW,
 					 * _PAGE_ACCESSED, _PAGE_DIRTY */
 #include <asm/trace/um_backend.h>
@@ -747,6 +748,142 @@ int kvm_v2_install_per_vcpu_ist_tss(struct kvm_v2_vm *vm,
 	return 0;
 }
 
+/*
+ * Phase H gadget Phase 2 (2026-05-04): per-vCPU gadget state page
+ * install. Mirrors kvm_v2_install_per_vcpu_ist_tss above — same
+ * trampoline_pte_kva chain, slot KVM_V2_GADGET_BASE_SLOT + cpu,
+ * same x86 leaf bit pattern (P|RW|A|D, kernel-only).
+ *
+ * The page is RW because the host CPU pthread writes the gadget
+ * fields (tgid etc.) on every dispatch in load_user_sregs. The
+ * guest-side gadget reads via `mov %gs:OFFSET, %eax` (no writes
+ * from CPL=0 trampoline code; the gadget never stores to %gs:).
+ *
+ * Per-vCPU isolation is the whole point of Phase 2 — see syscall_trap.h
+ * KVM_V2_GADGET_STATE_GVA documentation for the design rationale.
+ */
+int kvm_v2_install_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
+					 struct kvm_v2_vcpu *vcpu, int cpu)
+{
+	void *kva;
+	phys_addr_t gpa;
+	u64 gva;
+	unsigned int pte_idx;
+	u64 *pte_table;
+
+	if (!vm || !vcpu || vcpu->vcpu_fd < 0)
+		return -EINVAL;
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return -EINVAL;
+	if (!vm->trampoline_pte_kva)
+		return -EINVAL;
+
+	if (vcpu->gadget_state_kva)
+		return 0;	/* idempotent */
+
+	/*
+	 * CONFIG_UM_BACKEND_KVM_V2_GADGET=n: skip per-vCPU state page
+	 * allocation entirely. With gadget_state_kva left NULL, the
+	 * refresh hook in kvm_v2_load_user_sregs naturally short-
+	 * circuits, and the LSTAR stays at the 5-byte fallback
+	 * (kvm_v2_trampoline_upgrade_to_gadget is also skipped at the
+	 * caller site for the =n case). SYSCALLs route through the
+	 * standard KVM_EXIT_IO → handle_io_trap → handle_syscall path.
+	 */
+	if (!IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_GADGET))
+		return 0;
+
+	kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
+	if (!kva) {
+		pr_err("um: kvm-v2 per_vcpu_gadget_state: __get_free_page returned NULL (cpu=%d)\n",
+		       cpu);
+		return -ENOMEM;
+	}
+	gpa = __pa(kva);
+	gva = KVM_V2_GADGET_STATE_GVA(cpu);
+
+	pte_idx = KVM_V2_GADGET_BASE_SLOT + cpu;
+	if (pte_idx >= 512) {
+		/* Defensive — NR_CPUS=64 worst case gives last index 195;
+		 * far under 512. Catch a future NR_CPUS bump. */
+		pr_err("um: kvm-v2 per_vcpu_gadget_state: PTE index overflow (cpu=%d pte_idx=%u)\n",
+		       cpu, pte_idx);
+		free_page((unsigned long)kva);
+		return -EINVAL;
+	}
+
+	/*
+	 * Same x86 hardware bit pattern as IST/TSS PTEs above:
+	 *   P (1<<0) | RW (1<<1) | A (1<<5) | D (1<<6).
+	 * The leaf bits are deliberately the same shape as IST/TSS so
+	 * a future audit of the chain only has to verify one pattern.
+	 * NOT _PAGE_USER — the gadget runs at CPL=0 (in the LSTAR
+	 * trampoline body); CPL=3 user code has no business reading
+	 * its own task's tgid via this side channel.
+	 */
+	pte_table = (u64 *)vm->trampoline_pte_kva;
+	pte_table[pte_idx] = (u64)(gpa |
+				   (1ULL << 0) | (1ULL << 1) |
+				   (1ULL << 5) | (1ULL << 6));
+
+	vcpu->gadget_state_kva = kva;
+	vcpu->gadget_state_gpa = gpa;
+	vcpu->gadget_state_gva = gva;
+
+	/*
+	 * Phase H gadget Phase 5 (2026-05-04): seed TASK_SIZE_CAP once at
+	 * install. v1 reference: kvm-v1-archive/lifecycle.c:954-980 — same
+	 * "task_size doesn't change after boot, so set once" rationale, same
+	 * 16-byte safety margin (so an 8-byte store at task_size_cap-N
+	 * stays in user-half even if N rounds down). Used by the getcpu
+	 * gadget body's `cmp %rdi, %gs:OFF_TASK_SIZE_CAP ; jbe → fallback`
+	 * pre-store bounds check on the user-supplied cpu and node pointers.
+	 *
+	 * task_size is set in arch/um/kernel/um_arch.c::linux_main_after_args
+	 * before init_backend completes; by exception_install (subsys_initcall)
+	 * it's stable. Read directly without locking.
+	 *
+	 * The page is __GFP_ZERO'd above so all other gadget fields stay 0
+	 * until kvm_v2_load_user_sregs's per-dispatch refresh writes them.
+	 * TASK_SIZE_CAP is the only "set once at install" field — everything
+	 * else (TGID, TID, PPID, UID, EUID, GID, EGID, CPU_ID) is per-task
+	 * or per-vCPU and refreshed before every KVM_RUN.
+	 */
+	WRITE_ONCE(*(u64 *)((u8 *)kva + KVM_V2_GADGET_OFF_TASK_SIZE_CAP),
+		   (u64)task_size - 16);
+
+	pr_info("um: kvm-v2 per_vcpu_gadget_state: cpu=%d vcpu_fd=%d gpa=%pa gva=%#llx (pte_idx=%u, task_size_cap=%#llx)\n",
+		cpu, vcpu->vcpu_fd, &gpa, (unsigned long long)gva, pte_idx,
+		(unsigned long long)((u64)task_size - 16));
+	return 0;
+}
+
+void kvm_v2_exception_free_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
+						 struct kvm_v2_vcpu *vcpu,
+						 int cpu)
+{
+	unsigned int pte_idx;
+	u64 *pte_table;
+
+	if (!vm || !vcpu)
+		return;
+	if (cpu < 0 || cpu >= NR_CPUS)
+		return;
+	if (!vcpu->gadget_state_kva)
+		return;
+
+	pte_idx = KVM_V2_GADGET_BASE_SLOT + cpu;
+	if (vm->trampoline_pte_kva && pte_idx < 512) {
+		pte_table = (u64 *)vm->trampoline_pte_kva;
+		pte_table[pte_idx] = 0;
+	}
+
+	free_page((unsigned long)vcpu->gadget_state_kva);
+	vcpu->gadget_state_kva = NULL;
+	vcpu->gadget_state_gpa = 0;
+	vcpu->gadget_state_gva = 0;
+}
+
 void kvm_v2_exception_free_per_vcpu(struct kvm_v2_vm *vm,
 				    struct kvm_v2_vcpu *vcpu, int cpu)
 {
@@ -938,6 +1075,27 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 			goto err_unwind_per_vcpu;
 		}
 
+		/*
+		 * Phase H gadget Phase 2 (2026-05-04): per-vCPU gadget
+		 * state page. Slot KVM_V2_GADGET_BASE_SLOT + cpu in the
+		 * same trampoline_pte_kva chain as IST/TSS. Independent
+		 * of descriptor SREGS — installs unconditionally so the
+		 * LSTAR getpid gadget always has a backing page (the LSTAR
+		 * bytes themselves are written by trampoline_install
+		 * unconditionally as of Phase 2).
+		 *
+		 * Failure here unwinds via err_unwind_per_vcpu, which
+		 * iterates the pool calling exception_free_per_vcpu —
+		 * extended to also call the gadget-state free helper so
+		 * any partially-installed state pages are reclaimed.
+		 */
+		rc = kvm_v2_install_per_vcpu_gadget_state(vm, v, cpu);
+		if (rc < 0) {
+			pr_err("um: kvm-v2 exception_install: install_per_vcpu_gadget_state(cpu=%d) failed (%d)\n",
+			       cpu, rc);
+			goto err_unwind_per_vcpu;
+		}
+
 		rc = kvm_v2_install_descriptors_sregs(vm, v);
 		if (rc < 0) {
 			pr_err("um: kvm-v2 exception_install: install_descriptors_sregs(cpu=%d) failed (%d)\n",
@@ -987,6 +1145,28 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 	trace_um_backend_kvm_v2_exception_install((u64)idt_gpa,
 						  (u64)handlers_gpa,
 						  (u64)gdt_gpa);
+
+	/*
+	 * Phase H gadget Phase 3 (2026-05-04): atomic two-phase LSTAR
+	 * install. Every per-vCPU gadget state page is now mapped (we
+	 * just succeeded the loop above without taking err_unwind_per_vcpu),
+	 * so it's safe to upgrade the LSTAR body from the 5-byte fallback
+	 * to the 94-byte stay-in-guest gadget. Failure here is treated as
+	 * an upgrade-skip (LSTAR stays at the safe fallback) rather than
+	 * a hard error: gadget unavailability is a perf regression, not a
+	 * correctness break — every SYSCALL still works via the slow
+	 * KVM_EXIT_IO path.
+	 */
+	if (IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_GADGET)) {
+		int upg_rc = kvm_v2_trampoline_upgrade_to_gadget(vm);
+
+		if (upg_rc < 0)
+			pr_warn("um: kvm-v2 exception_install: trampoline_upgrade_to_gadget failed (%d) — LSTAR stays at 5-byte fallback (slow path); per-vCPU state pages installed but gadget body not enabled\n",
+				upg_rc);
+	} else {
+		pr_info("um: kvm-v2 exception_install: CONFIG_UM_BACKEND_KVM_V2_GADGET=n — gadget disabled, LSTAR stays at 5-byte fallback (KVM_EXIT_IO slow path)\n");
+	}
+
 	return 0;
 
 err_unwind_per_vcpu:
@@ -994,9 +1174,10 @@ err_unwind_per_vcpu:
 	 * E.2: a per-vCPU install (or the descriptor SREGS for a vcpu we
 	 * already installed IST/TSS for) failed mid-pool. Walk back over
 	 * every pool member that had its pages allocated and tear them
-	 * down — kvm_v2_exception_free_per_vcpu is a no-op on
-	 * never-installed entries, so we can iterate the whole pool
-	 * blindly without tracking which entries are partially live.
+	 * down — kvm_v2_exception_free_per_vcpu and the Phase-2 gadget-
+	 * state free helper are no-ops on never-installed entries, so we
+	 * can iterate the whole pool blindly without tracking which
+	 * entries are partially live.
 	 */
 	{
 		int c;
@@ -1004,8 +1185,10 @@ err_unwind_per_vcpu:
 		for (c = 0; c < NR_CPUS; c++) {
 			struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(c);
 
-			if (v)
+			if (v) {
+				kvm_v2_exception_free_per_vcpu_gadget_state(vm, v, c);
 				kvm_v2_exception_free_per_vcpu(vm, v, c);
+			}
 		}
 	}
 	/* fallthrough */
@@ -1053,8 +1236,10 @@ void kvm_v2_exception_free(struct kvm_v2_vm *vm)
 	for (cpu = 0; cpu < NR_CPUS; cpu++) {
 		struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(cpu);
 
-		if (v)
+		if (v) {
+			kvm_v2_exception_free_per_vcpu_gadget_state(vm, v, cpu);
 			kvm_v2_exception_free_per_vcpu(vm, v, cpu);
+		}
 	}
 
 	if (!vm->idt_kva)
