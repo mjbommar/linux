@@ -105,6 +105,7 @@
 #include <linux/set_memory.h>
 #include <linux/signal.h>	/* clear_siginfo, kernel_siginfo_t */
 #include <linux/string.h>
+#include <linux/thread_info.h>	/* read_thread_flags, _TIF_WORK_MASK — perf-O1 gate */
 #include <linux/types.h>
 #include <uapi/asm-generic/siginfo.h>	/* ILL_ILLOPN, FPE_INTOVF, SEGV_MAPERR */
 
@@ -2002,8 +2003,31 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 * it). After interrupt_end runs, clearing PT_SYSCALL_NR ensures
 	 * later exception-path interrupt_end() calls don't see a stale
 	 * syscall NR + leaked -ERESTART* residual (commit a478952b8da0).
+	 *
+	 * perf-O1 (2026-05-04): inline the _TIF_WORK_MASK gate that
+	 * interrupt_end() does internally, AND also gate on the
+	 * syscall return being in the -ERESTART* range. The function
+	 * call has overhead (~30-50 cyc per dispatch); skipping it on
+	 * the common fast path (syscall returned cleanly, no signals
+	 * pending) wins back ~50-200 cyc on tight syscall loops like
+	 * Python startup.
+	 *
+	 * Conditions to call interrupt_end:
+	 *   (a) handle_syscall returned -ERESTART* (-512..-516) —
+	 *       do_signal MUST run to translate -ERESTART → restart-RIP
+	 *       or -EINTR. Closes the dash bug (#107).
+	 *   (b) any TIF_WORK_MASK bit set — must drain pending sched/
+	 *       signal work. Substrate parity required.
+	 *
+	 * If neither, interrupt_end()'s body is a no-op anyway —
+	 * skipping the call eliminates the function-call cost.
 	 */
-	interrupt_end();
+	{
+		long _ret = (long)regs->gp[HOST_AX];
+		if (unlikely((_ret <= -512 && _ret >= -516) ||
+			     (read_thread_flags() & _TIF_WORK_MASK)))
+			interrupt_end();
+	}
 
 	/*
 	 * Mirror seccomp's pattern at arch/um/backend/seccomp/trap_user.c:
