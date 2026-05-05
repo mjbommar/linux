@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-04 (**Phase H gadget revived + mainstream-readiness items #1-5 closed.** Commit `7ebcd8aac347` reinstates the v1 in-LSTAR stay-in-guest gadget for ten trivial syscalls (getpid/gettid/getppid/getuid/geteuid/getgid/getegid/getcpu/time/clock_gettime CLOCK_MONOTONIC), now structured for upstream review: assembled stub (`arch/um/backend/kvm-v2/lstar_gadget.S`), full Linux x86_64 syscall ABI compliance (RDX/R8/R10 saved/restored at every gadget exit), CONFIG_UM_BACKEND_KVM_V2_GADGET Kconfig knob, KUnit byte-shape tests + boot LSTAR memcmp self-check. Cross-host bench refresh on 8 lab hosts (s0-s7, Skylake/Kaby/Alder Lake/Zen 4) — see `02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md`: micro tier **193-908×** speedup over seccomp (was 1.34-2.22× pre-gadget), py tier **2.99-4.06×** (was 1.03-1.64×), stress tier 3.71-8.72× (mmap-heavy, comparable). Zero data-corruption events across all hosts. Prior SMP-T41 close (2026-05-03) still holds.)
+Last updated: 2026-05-05 (**Phase J pilot soak rig landed — 240/240 = 100.0% across 3 realistic workloads × 2 backends.** Commit `95c95267202e` adds `tools/testing/selftests/um/soak/`: memcheck (anon-mmap pattern verifier, memtester replacement), iocheck (write/fsync/read/verify on tmpfs, fio replacement), stress-ng (IPC stressors with --verify), cpython-soak (regrtest curated subset), kbuild-tiny (in-guest tinyconfig UML build). Pilot result (W=2 × M=20 × 3 short workloads × 2 backends, ~12 min wall, max temp 86°C with k10temp throttle): **memcheck 40/40 + 40/40, iocheck 40/40 + 40/40, stress-ng 40/40 + 40/40, total 240/240 (Wilson 95% [98.5%, 100.0%])**. Two harness bugs caught + fixed (pipefail-loss class — `cmd | tail; echo rc=$?` masks failure; stress-ng cwd-RO under hostfs). One real soak finding deferred to SMP-T57 (#243): stress-ng `--vm --verify` trips on kvm-v2 only; vm-method bisect needed. Prior closes (SMP-T41 byte[0]=0, SMP-T54 fd-leak, SMP-T56 EINTR-mid-gadget, gadget revival + items #1-5) all hold. Design + first-pilot memo at `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`.)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,18 +9,22 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `6fb90a1ba275` on `umlctl-deploy` (SMP-T41 closes mt-mini
-SMP T=8 byte[0]=0 residual via user-RAX recovery in
-kvm_v2_handle_pf_eintr_inline). All gates clean:
-  - mt-mini SMP T=8 ncpus=4 N=400: **397/400 PASS, 0 STRICT_MEMSET_FAIL**
-    (Wilson 95% [97.8%, 99.7%]); 3 timeouts are init.sh-hang
-    in libc syscall — different bug class (SMP-T54)
+**Tip:** `95c95267202e` on `umlctl-deploy` (Phase J pilot soak rig).
+All gates clean post-gadget + post-T54/T56/T57-disabled:
+  - **mt-mini SMP T=8 ncpus=4 N=400: 400/400 = 100.0% PASS** (post-T54
+    SOCK_CLOEXEC fix + post-T56 EINTR-mid-gadget fix; Wilson 95%
+    [99.0%, 100.0%]). The init.sh-hang class (SMP-T54) is closed.
+  - **Phase J pilot soak (3 short workloads × 2 backends × N=40 each):
+    240/240 = 100.0%** (memcheck/iocheck/stress-ng — see Last updated
+    line above for breakdown).
   - substrate gate kvm-v2: PASS=25/FAIL=3/XFAIL=3 (matches seccomp)
   - cpython-tier0 kvm-v2: PASS
   - perf-py-startup kvm-v2 (post-gadget, 8 hosts): **2.99-4.06× faster than seccomp** across Skylake/Kaby/Alder Lake/Zen 4
   - bench-micro getpid (post-gadget, 8 hosts): **193-908×** speedup (gadget collapses ~36 800 cyc roundtrip to ~90 cyc in-guest)
   - threaded-fork-malloc 0/116000 forks failed (T29)
   - threaded-subprocess-wait 10/10 (T29)
+  - userspace ABI test (RDX/R8/R10 across 11 gadget syscalls): 11/11
+    preserved (post-gadget item #1+#4 fix, commit `7ebcd8aac347`)
 
 **Prior closes superseded** (T33's prev_roots-cache fix was a partial
 fix — it changed dispatch timing and incidentally reduced the
@@ -98,7 +102,9 @@ on `/`, never tmpfs).
 | I.2   | KUnit suites (vCPU pool / memslot / IDT) | DONE   | task #113              |
 | I.3   | docs — backend README + backends.rst   | DONE     | task #114              |
 | I.4   | lift EXPERT gate from CONFIG_UM_BACKEND_KVM_V2 | DONE | task #112        |
-| J     | validation — 24h soak + Tier 1/2/3     | **PENDING** | task #167           |
+| J-pilot | realistic-workload soak rig (memcheck/iocheck/stress-ng + cpython-soak/kbuild-tiny templates) — first pilot 240/240 = 100% on short set | DONE | `95c95267202e`, memo `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` |
+| J     | validation — 24h continuous + Tier 1/2/3 + LTP | **PENDING** | task #167 (pilot rig in place; needs daemon-mode wrapper, CI tier integration, LTP curation) |
+| SMP-T57 | stress-ng `--vm --verify` "not readable" on kvm-v2 only — vm-method bisect | OPEN | task #243 (deferred from J-pilot; disabled in IPC-only template) |
 
 **Closed umbrella P0:** #274 (KVM SIGSEGVs on Python C-extension
 import — "table stakes") closed functionally with cpython-parity
