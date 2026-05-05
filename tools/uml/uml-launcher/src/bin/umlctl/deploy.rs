@@ -573,6 +573,52 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("    return $rc\n");
     s.push_str("}\n\n");
 
+    // Deterministic shutdown via sysrq-trigger.
+    //
+    // BUG (SMP-T54, 2026-05-04): /sbin/halt on most distros today is a
+    // symlink to /bin/systemctl. systemctl-as-halt opens a unix DBus
+    // socket to systemd and recvmsg-blocks waiting for a reply. Inside
+    // a UML guest where pid=1 is bash (not systemd), the reply never
+    // comes — `halt -f` then hangs in recvmsg(NR=47), the kernel RCU
+    // stall fires after ~21 jiffies, and the gate-loop counts the run
+    // as TIMEOUT instead of PASS. Observed at ~0.5-0.75% per N=400
+    // mt-mini SMP soak; the recvmsg-RCU-stall signature was the
+    // long-running "init.sh-hang in libc syscall" residual misfiled as
+    // a v2 kernel bug.
+    //
+    // Fix: drop the userspace halt path entirely. `echo b > /proc/sysrq
+    // -trigger` invokes the kernel's sysrq_handle_reboot path, which
+    // calls machine_restart() immediately — no userspace cooperation
+    // and no reliance on pid=1 handling SIGINT (sysrq-`o` would call
+    // kill_cad_pid(SIGINT) which only works if init catches SIGINT;
+    // bash does not, so sysrq-`o` is unreliable in our setup).
+    //
+    // Pre-step `echo 1 > /proc/sys/kernel/sysrq` enables all sysrq
+    // functions in case the kernel was built with a restrictive mask.
+    //
+    // No userspace fallback. Adding a fallback like `python3 -c ...
+    // reboot()` reintroduces the recvmsg hang via NSS lookups during
+    // python3 startup, defeating the purpose. If sysrq isn't compiled
+    // in, falling through to `exit 0` triggers the kernel's
+    // "Attempted to kill init" panic which still terminates the run
+    // deterministically (the gate-loop's exit-on-marker logic is
+    // marker-based, not exit-code-based, so a panic-after-REPRO_DONE
+    // counts as PASS).
+    //
+    // Side benefit: user Umlfiles no longer need a trailing `halt -f`
+    // phase. Existing ones still work in the success path; in the
+    // failure path their halt hangs and the gate-loop times out — to
+    // avoid that, drop the halt phase from your Umlfile and let
+    // umlctl handle shutdown.
+    s.push_str("__umlctl_halt() {\n");
+    s.push_str("    sync 2>/dev/null || true\n");
+    s.push_str("    echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true\n");
+    s.push_str("    echo b > /proc/sysrq-trigger 2>/dev/null || true\n");
+    s.push_str("    # If sysrq is missing, exit and let the kernel panic on\n");
+    s.push_str("    # init-exit. Both terminate the run deterministically.\n");
+    s.push_str("    exit 0\n");
+    s.push_str("}\n\n");
+
     if uml.init.phases.is_empty() {
         // No phases declared — drop into a shell so the user can poke around.
         s.push_str("echo '[umlctl] no phases declared; dropping into /bin/sh'\n");
@@ -580,13 +626,14 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     } else {
         for phase in &uml.init.phases {
             s.push_str(&format!(
-                "__umlctl_phase {} {} || {{ echo \"[umlctl] phase {} failed; aborting\"; exit 1; }}\n",
+                "__umlctl_phase {} {} || {{ echo \"[umlctl] phase {} failed; aborting\"; __umlctl_halt; exit 1; }}\n",
                 shell_quote(&phase.name),
                 shell_quote(&phase.cmd),
                 shell_quote(&phase.name),
             ));
         }
         s.push_str("echo '[umlctl] all phases done'\n");
+        s.push_str("__umlctl_halt\n");
     }
     Ok(s)
 }

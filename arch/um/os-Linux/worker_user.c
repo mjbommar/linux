@@ -395,7 +395,34 @@ int spawn_worker_process(int *out_pid, int *out_sock)
 	pid_t pid;
 	struct worker_init *init;
 
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
+	/*
+	 * SMP-T54 (2026-05-04): SOCK_CLOEXEC on both ends of the
+	 * socketpair. Without it, every spawner-side fds[0] (kept
+	 * open for the lifetime of the worker) is inherited via the
+	 * CoW fd-table by every SUBSEQUENT clone in this function,
+	 * then carried through start_userspace's stub-child clone,
+	 * and finally lands in the user process's fd table at
+	 * execve. Bash / mt-mini / any guest code that happens to
+	 * recvmsg on one of those leaked fd numbers (e.g. fd 28
+	 * matching a previous worker's spawner-end socket) blocks
+	 * forever waiting for an IPC message that the kernel-side
+	 * dispatcher kthread is supposed to receive.
+	 *
+	 * Symptom: ~0.5-0.75% rate of pid=1 init.sh hung in
+	 * recvmsg(NR=47, fd=N) where N matches the most recently
+	 * logged "spawned worker ... ipc_sock=N", followed by an
+	 * RCU stall after ~21 jiffies. Mistaken for a v2 KVM bug
+	 * (SMP-T54 was filed under that umbrella) until the worker-
+	 * model fd-leak hypothesis was confirmed.
+	 *
+	 * Fix: SOCK_CLOEXEC closes both ends at the next execve in
+	 * any descendant. The worker_main() loop never execs (it's
+	 * a clone child running umlctl logic in a read() loop), so
+	 * the CLOEXEC bit is harmless to it. start_userspace's
+	 * stub-child execve closes the leaked fds before user code
+	 * sees them.
+	 */
+	if (socketpair(AF_UNIX, SOCK_STREAM, SOCK_CLOEXEC, fds) < 0)
 		return -errno;
 
 	stack = mmap(NULL, WORKER_STACK_SIZE,
