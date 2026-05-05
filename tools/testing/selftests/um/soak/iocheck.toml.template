@@ -1,0 +1,40 @@
+schema_version = 1
+volumes = []
+
+[instance]
+name = "soak-iocheck-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "512M"
+ncpus = 4
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 0
+
+# 64MB file × 4 iters = 256MB total write+fsync+read+verify on
+# tmpfs. Stresses pagecache + write/read coherence + fsync ordering.
+# block-size 4096 = standard pagesize.
+[[init.phases]]
+name = "iocheck"
+cmd = "/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/soak/iocheck /tmp/iocheck-$$ 64 4 4096"
+expect = ""
+timeout_secs = 60
+
+[[init.phases]]
+name = "report"
+cmd = "echo REPRO_DONE rc=$?"
+expect = ""
+timeout_secs = 0

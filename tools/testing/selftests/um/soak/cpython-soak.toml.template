@@ -1,0 +1,46 @@
+schema_version = 1
+volumes = []
+
+[instance]
+name = "soak-cpython-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "512M"
+ncpus = 4
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 0
+
+# Curated subset focused on syscall hot paths kvm-v2 must handle
+# correctly. Tight set picked to complete in ~60-90s wall-clock under
+# UML overhead. Skips heavyweights (test_subprocess /
+# test_concurrent_futures / test_threading would each take >60s under
+# UML). Phase succeeds iff regrtest returns 0; explicit `|| (echo
+# PYTEST_FAIL; exit 1)` ensures the phase wrapper sees non-zero on
+# any failure (avoids the pipefail-loss bug from `cmd | tail; echo
+# rc=$?` where echo's 0 masks pipeline failure).
+[[init.phases]]
+name = "pytest"
+cmd = "python3 -m test --timeout 60 -j 2 test_signal test_io test_mmap test_fcntl test_os test_select test_threadsignals test_posix test_fork1 test_random test_hashlib && echo PYTEST_OK || (echo PYTEST_FAIL; exit 1)"
+expect = ""
+timeout_secs = 240
+
+[[init.phases]]
+name = "report"
+cmd = "echo REPRO_DONE rc=$?"
+expect = ""
+timeout_secs = 0
