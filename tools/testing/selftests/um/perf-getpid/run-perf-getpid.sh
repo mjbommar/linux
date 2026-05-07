@@ -28,9 +28,10 @@
 #                (memo 11 G7). Default unset.
 #   UML_MEM      mem= argument. Default 256M.
 #   BACKENDS     space-separated backend list to measure.
-#                Default "ptrace seccomp kvm". The runner
-#                skips any backend the host can't support
-#                (e.g. kvm if /dev/kvm isn't readable).
+#                Default "seccomp kvm" (ptrace was removed in
+#                memo 25 refactor 11). The runner skips any
+#                backend the host can't support (e.g. kvm if
+#                /dev/kvm isn't readable).
 #   MAX_KVM_RATIO  KVM:seccomp cyc_per_call ratio ceiling for
 #                  the PASS gate. Default 2.5.
 #   MAX_GADGET_RATIO  gadget:fallback cyc_per_call ratio
@@ -54,7 +55,7 @@ BINARY=${UML_BINARY:-/tmp/uml-kvmint/linux}
 GADGET_BINARY=${UML_GADGET_BINARY:-}
 MEM=${UML_MEM:-256M}
 LOOP=${PERF_GETPID_LOOP:-$DIR/getpid-loop}
-BACKENDS=${BACKENDS:-ptrace seccomp kvm}
+BACKENDS=${BACKENDS:-seccomp kvm}
 MAX_KVM_RATIO=${MAX_KVM_RATIO:-2.5}
 MAX_GADGET_RATIO=${MAX_GADGET_RATIO:-0.20}
 
@@ -115,7 +116,15 @@ measure_one() {
 		panic=-1 </dev/null 2>&1 || true)
 	local observed
 	observed=$(echo "$log" | sed -n 's/^um: backend = \([a-z0-9-]*\).*/\1/p' | head -1)
-	if [ "$observed" != "$backend" ]; then
+	# Kernel registers the KVM backend as "kvm-v2" (arch/um/backend/kvm-v2/ops.c)
+	# and accepts "kvm" as a cmdline synonym (arch/um/os-Linux/start_up.c). Treat
+	# them as equal here so a mismatch only triggers on a real fallback, and so
+	# users can pass either label in BACKENDS.
+	local canonical_observed=$observed
+	local canonical_backend=$backend
+	[ "$canonical_observed" = "kvm-v2" ] && canonical_observed=kvm
+	[ "$canonical_backend" = "kvm-v2" ] && canonical_backend=kvm
+	if [ "$canonical_observed" != "$canonical_backend" ]; then
 		echo "PERF_GETPID: backend=$backend FAIL (observed=$observed; check um: backend line)"
 		return
 	fi
@@ -153,8 +162,12 @@ for B in $BACKENDS; do
 	echo "PERF_GETPID: backend=$label $LINE" | sed 's/PERF_GETPID: //2'
 	NS=$(echo "$LINE" | sed -n 's/.*ns_per_call=\([0-9]*\).*/\1/p')
 	CYC=$(echo "$LINE" | sed -n 's/.*cyc_per_call=\([0-9]*\).*/\1/p')
-	NS_PER_CALL[$label]=${NS:-0}
-	CYC_PER_CALL[$label]=${CYC:-0}
+	# Canonicalize array key: SUMMARY + gate downstream key off [kvm], so a
+	# user passing BACKENDS="kvm-v2" still ends up in the same slot.
+	storage_label=$label
+	[ "$storage_label" = "kvm-v2" ] && storage_label=kvm
+	NS_PER_CALL[$storage_label]=${NS:-0}
+	CYC_PER_CALL[$storage_label]=${CYC:-0}
 done
 
 # Memo 11 G7: optional gadget measurement. When the caller
