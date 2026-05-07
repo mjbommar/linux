@@ -1,6 +1,6 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-05 (**Phase J pilot soak rig landed — 240/240 = 100.0% across 3 realistic workloads × 2 backends.** Commit `95c95267202e` adds `tools/testing/selftests/um/soak/`: memcheck (anon-mmap pattern verifier, memtester replacement), iocheck (write/fsync/read/verify on tmpfs, fio replacement), stress-ng (IPC stressors with --verify), cpython-soak (regrtest curated subset), kbuild-tiny (in-guest tinyconfig UML build). Pilot result (W=2 × M=20 × 3 short workloads × 2 backends, ~12 min wall, max temp 86°C with k10temp throttle): **memcheck 40/40 + 40/40, iocheck 40/40 + 40/40, stress-ng 40/40 + 40/40, total 240/240 (Wilson 95% [98.5%, 100.0%])**. Two harness bugs caught + fixed (pipefail-loss class — `cmd | tail; echo rc=$?` masks failure; stress-ng cwd-RO under hostfs). One real soak finding deferred to SMP-T57 (#243): stress-ng `--vm --verify` trips on kvm-v2 only; vm-method bisect needed. Prior closes (SMP-T41 byte[0]=0, SMP-T54 fd-leak, SMP-T56 EINTR-mid-gadget, gadget revival + items #1-5) all hold. Design + first-pilot memo at `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`.)
+Last updated: 2026-05-07 (**STATUS drift cleanup + experimental verification pass.** Verified on AMD Ryzen 7 7840HS (Zen 4) against post-T54/T56/gadget kernel rebuilt to current HEAD: substrate gate kvm-v2 **PASS=25/FAIL=3/XFAIL=3** (seccomp identical), cpython-parity **21/21 PARITY**, mt-mini SMP T=8 ncpus=4 N=30 **30/30 = 100%**, bench-py **kvm-v2 4.00× faster than seccomp** (matches 2026-05-04 cross-host baseline), bench-micro getpid **kvm-v2 ~1050× faster** (89-105 cyc / 109k cyc seccomp), T57 stress-ng `--vm --verify` reproduces SIGILL on kvm-v2 only. **One unmasked finding: `perf-py-startup` gate FAILS** (ratio_v2_over_seccomp = 1.250 vs max=1.2 on Python startup workload) — surfaced as **SMP-T55** in this update; root cause is T26/T27 always-`KVM_GET_FPU` reverting H.2 lazy-FPU. Hot-path workloads unaffected. Drift fixes: T33-as-mt-mini-closer marked HISTORICAL (T41 was true closure); migrate_disable site count corrected (3 not 5); phase ledger extended with T33/T36/T37/T41/T47/T54/T56 + gadget revival + perf-O1 rows. Prior `2026-05-05` Phase J pilot context preserved at `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`; SMP-T55 fix plan at memo state-audit/23.)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,22 +9,27 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `95c95267202e` on `umlctl-deploy` (Phase J pilot soak rig).
-All gates clean post-gadget + post-T54/T56/T57-disabled:
+**Tip:** `umlctl-deploy` HEAD (Phase J pilot soak rig + perf-getpid
+parser fix). Functional gates clean post-gadget + post-T54/T56/T57-
+disabled; one perf gate now failing (SMP-T55, see below):
+
   - **mt-mini SMP T=8 ncpus=4 N=400: 400/400 = 100.0% PASS** (post-T54
     SOCK_CLOEXEC fix + post-T56 EINTR-mid-gadget fix; Wilson 95%
     [99.0%, 100.0%]). The init.sh-hang class (SMP-T54) is closed.
+    Re-verified post-J-pilot at N=30 → 30/30.
   - **Phase J pilot soak (3 short workloads × 2 backends × N=40 each):
     240/240 = 100.0%** (memcheck/iocheck/stress-ng — see Last updated
     line above for breakdown).
   - substrate gate kvm-v2: PASS=25/FAIL=3/XFAIL=3 (matches seccomp)
   - cpython-tier0 kvm-v2: PASS
-  - perf-py-startup kvm-v2 (post-gadget, 8 hosts): **2.99-4.06× faster than seccomp** across Skylake/Kaby/Alder Lake/Zen 4
-  - bench-micro getpid (post-gadget, 8 hosts): **193-908×** speedup (gadget collapses ~36 800 cyc roundtrip to ~90 cyc in-guest)
+  - cpython-parity 21/21 PARITY (UP and SMP)
+  - **bench-py kvm-v2 (cross-host, post-gadget, 8 hosts): 2.99–4.06× faster than seccomp** across Skylake/Kaby/Alder Lake/Zen 4. Verified on Zen 4 7840HS today: 4.00× (kvm-v2 125.13 ms / seccomp 501.20 ms), absolute ms unchanged from 2026-05-04 baseline.
+  - bench-micro getpid (post-gadget, 8 hosts): **193–908×** speedup (gadget collapses ~36 800 cyc roundtrip to ~90 cyc in-guest). Verified today: kvm-v2 89–105 cyc / seccomp 109 532 cyc → ~1050× (Zen 4 7840HS).
   - threaded-fork-malloc 0/116000 forks failed (T29)
   - threaded-subprocess-wait 10/10 (T29)
   - userspace ABI test (RDX/R8/R10 across 11 gadget syscalls): 11/11
     preserved (post-gadget item #1+#4 fix, commit `7ebcd8aac347`)
+  - **`perf-py-startup` gate: FAIL** (ratio_v2_over_seccomp = 1.250 vs max=1.2; kvm-v2 0.10s / seccomp 0.08s on Zen 4 7840HS). Bare `python3 -c "import math"` startup is mmap/exec/FPU-heavy — different workload from bench-py. Tracked as **SMP-T55** (memo state-audit/22): T26/T27's always-`KVM_GET_FPU` reverted H.2 lazy-FPU; ratio walked 0.444 (04-30 baseline) → 0.667 (05-02 UP) → 0.833 (05-03 SMP) → 1.250 (today). Hot-path/gadget workloads unaffected. Fix plan in memo state-audit/23.
 
 **Prior closes superseded** (T33's prev_roots-cache fix was a partial
 fix — it changed dispatch timing and incidentally reduced the
@@ -80,7 +85,7 @@ on `/`, never tmpfs).
 | A     | init.c + per-VM context + vcpu0        | DONE     | memo 26 §A             |
 | B     | host-VA / kernel-VA Kconfig split      | DONE     | memo 25 R1             |
 | C     | per-CPU vCPU pool                      | DONE     | memo 26 §C             |
-| D.0–D.5 | trampoline, dispatch, return, MSRs, PML4[508] | DONE | memo 26 §D, tasks #59–#65, #72–#88 |
+| D.0–D.5 | trampoline, dispatch, return, MSRs, PML4[448] | DONE | memo 26 §D, tasks #59–#65, #72–#88 |
 | E     | exception handling (IDT/TSS/IST)       | DONE     | memo 26 §E, tasks #81–#96 |
 | F     | signal/preemption                      | DONE     | memo 26 §F, task #67   |
 | G.1   | SMP — per-CPU IDT/IST/TSS install      | DONE     | memo §G.1, task #140   |
@@ -99,12 +104,22 @@ on `/`, never tmpfs).
 | SMP-T25 | Bug B residual — LSTAR-EINTR HOST_IP rewind | DONE | `b1421d7583e9`, memo state-audit/13 |
 | SMP-T26/T27 | FPU cross-task leak — always KVM_GET_FPU after KVM_RUN | DONE | `76b1d98b2006`, memo state-audit/15 |
 | SMP-T29 | fork-snapshot clobber — gate capture_for_switch_out on `vcpu->last_task` | DONE | `44d21b5a14ab`, memo state-audit/16 |
+| SMP-T33 | mt-mini residual — KVM TDP `prev_roots` cross-task drop (partial, superseded by T41) | DONE (superseded) | `9ccdc4300713`, memo state-audit/20 |
+| SMP-T36 | mm/mmu_gather batch-free skip after partial deferral | DONE | `bedd73af5033` |
+| SMP-T37 | per-CPU UML host pthread CPU pinning (defense-in-depth) | DONE | `1b1febc1ffba` |
+| SMP-T41 | mt-mini byte[0]=0 — recover user RAX in EINTR-mid-PF-stub (true mt-mini residual closure) | DONE | `af659ad4297d`, memo state-audit/21 + 22 |
+| SMP-T47 | WARN_ON_ONCE on cross-task `KVM_SET_SREGS` failure (mainstream-readiness #6) | DONE | `602e9a27625c` |
+| SMP-T54 | worker socketpair fd leak — SOCK_CLOEXEC + umlctl sysrq halt | DONE | `467aa7d142c0` |
+| SMP-T56 | LSTAR-EINTR carve-out extended to cover gadget body (post-revival) | DONE | `db9170b5a7b3` |
+| Gadget revival | Phases 1-7 + mainstream-readiness items #1-5 (`lstar_gadget.S`, RDX/R8/R10 ABI preservation, KUnit byteshape, `CONFIG_UM_BACKEND_KVM_V2_GADGET` Kconfig) | DONE | `7ebcd8aac347` |
+| perf-O1 | Gate post-syscall `interrupt_end()` on `-ERESTART` / `_TIF_WORK` (~120 cyc/syscall save) | DONE | `24557e95c4b1` |
 | I.2   | KUnit suites (vCPU pool / memslot / IDT) | DONE   | task #113              |
 | I.3   | docs — backend README + backends.rst   | DONE     | task #114              |
 | I.4   | lift EXPERT gate from CONFIG_UM_BACKEND_KVM_V2 | DONE | task #112        |
 | J-pilot | realistic-workload soak rig (memcheck/iocheck/stress-ng + cpython-soak/kbuild-tiny templates) — first pilot 240/240 = 100% on short set | DONE | `95c95267202e`, memo `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` |
 | J     | validation — 24h continuous + Tier 1/2/3 + LTP | **PENDING** | task #167 (pilot rig in place; needs daemon-mode wrapper, CI tier integration, LTP curation) |
-| SMP-T57 | stress-ng `--vm --verify` "not readable" on kvm-v2 only — vm-method bisect | OPEN | task #243 (deferred from J-pilot; disabled in IPC-only template) |
+| SMP-T55 | perf-py-startup regression — kvm-v2/seccomp ratio >1.0 on Python startup (gate FAIL); always-`KVM_GET_FPU` reverted H.2 lazy-FPU. Hot-path workloads unaffected (gadget still 193–908× / bench-py 4× faster). | OPEN | memo state-audit/22 + 23 (planned fix) |
+| SMP-T57 | stress-ng `--vm --verify` "not readable" on kvm-v2 only — vm-method bisect | OPEN | task #243; memo state-audit/24 (vm-method bisect, planned). Workload disabled in IPC-only template. |
 
 **Closed umbrella P0:** #274 (KVM SIGSEGVs on Python C-extension
 import — "table stakes") closed functionally with cpython-parity
@@ -126,10 +141,11 @@ on resumption it continues with stale `vcpu`/`run` ptrs. The
 subsequent `KVM_RUN` ioctl operates on the wrong vCPU, racing with
 the task that legitimately owns that CPU's vCPU.
 
-**Fix:** `migrate_disable()` / `migrate_enable()` at 5 sites in
-`arch/um/backend/kvm-v2/vcpu.c` (3 in `vcpu_run`, plus
+**Fix:** `migrate_disable()` / `migrate_enable()` at 3 sites in
+`arch/um/backend/kvm-v2/vcpu.c`: one in `kvm_v2_vcpu_run` (the
+canonical migrate-pin around the dispatch loop), plus
 `kvm_v2_fpu_capture_for_fork` and `kvm_v2_fpu_capture_for_switch_out`
-for symmetry).
+for symmetry.
 
 **Layer 8 of the state-audit framework** — see
 `02-workstreams/D-kvm-backend/state-audit/08-smp-t13-FIXED.md` for the
@@ -144,7 +160,19 @@ with RIP=user. Now strictly secondary to the migrate_disable fix.
 
 ---
 
-## mt-mini SMP T=8 residual — CLOSED via SMP-T33 (2026-05-03)
+## ~~mt-mini SMP T=8 residual — CLOSED via SMP-T33 (2026-05-03)~~ (HISTORICAL — superseded by SMP-T41 2026-05-03)
+
+T33's `KVM_SET_SREGS` ioctl on cross-task dispatch (`9ccdc4300713`)
+*reduced* the mt-mini residual but was a partial fix on the wrong
+mechanism. The actual cause was the EINTR-mid-PF-stub path failing
+to recover user RAX (memo state-audit/21, commit `af659ad4297d` —
+SMP-T41). T33 changed dispatch timing in a way that incidentally
+made the EINTR window narrower, so it appeared closer to a fix
+than it was.
+
+The ablation table below is preserved for the historical record;
+all "T33 fix" entries now read with the qualifier "partial; T41 is
+the true root-cause closure."
 
 After T31/T32 ruled out TDP coherence and page-recycling, an `ncpus` ablation localized the bug definitively:
 
