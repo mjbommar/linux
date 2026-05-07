@@ -10375,4 +10375,578 @@ correctness gaps.
 
 ---
 
+## D106 (2026-05-02) — SMP-T26/T27: always KVM_GET_FPU; revert H.2
+
+**Context.** v1's H.2 lazy-FPU optimization at `vcpu.c:1814-1828`
+SKIPPED `KVM_GET_FPU` when guest CR0.TS=1 (FPU not touched). The
+reasoning was correct in a single-task vCPU model but BROKEN under
+v2's per-host-CPU vCPU pool where multiple UML tasks share one
+vCPU. A different task could modify the vCPU's FPU between
+dispatches; on re-entry the original task's `iotrap_fpu_valid` was
+still false, no SET ran, and user XMM ops (e.g. glibc
+`_int_malloc` MOVUPS at `0x41646a` writing fd+bk in one 16-byte
+SSE store) executed on stale leftover data. Rare bits would zero
+chunk->bk → next bin walk SIGSEGV at `_int_malloc+0xed`.
+
+**What landed.**
+
+- Commit `76b1d98b2006` removes the H.2 TS-skip predicate and
+  always issues `KVM_GET_FPU` after every `KVM_RUN` exit. The
+  pre-run SET side at `vcpu.c:1772` keeps its "only install if
+  valid" gate (which is now always true after this fix).
+
+**Trade-off (deliberate).** Chose correctness (close cross-task
+XMM leak) over the H.2 perf optimization. Cost is one ioctl
+(~1 µs) per dispatch on the otherwise-cold-FPU path. This becomes
+the perf-debt that surfaces later as SMP-T55 (D118): the right
+shape is a per-vCPU FPU-dirty epoch flag, not a per-task TS
+predicate. Filing as a known-debt, not a regression to chase.
+
+**Validation.**
+
+  - threaded-fork-malloc 8w × 500i × 6 boots: 36/24000 → **0/24000**
+  - mt-mini SMP T=8 × 5: 5/5 PASS
+  - threaded-subprocess-wait Python × 10: 19/20 → **10/10**
+  - cpython-tier0: PASS
+
+Multi-agent confirmation (opus + codex 5.5 xhigh) tracing the
+`iotrap_fpu_valid` lifecycle in the captured state-trace ring.
+Closes SMP-T26 + SMP-T27.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/15-smp-t26-t27-fpu-cross-task-leak-FIXED.md`
+- Commit `76b1d98b2006`.
+
+---
+
+## D107 (2026-05-02) — SMP-T29: gate switch_out FPU capture on last_task
+
+**Context.** A rare cascade-failure residual survived T26/T27
+(1/30 boots, ~2675 sequential CHILD_FAIL events when it hit).
+`kvm_v2_fpu_capture_for_switch_out` at `vcpu.c:2245` was
+unconditionally `KVM_GET_FPU`'ing the per-host-CPU vCPU's FPU and
+overwriting `from->thread.arch.kvm_v2.fpu` — including for tasks
+that had never dispatched on that vCPU. This destroyed the
+parent-FPU snapshot that `kvm_v2_fpu_capture_for_fork` placed for
+a freshly-fork'd child if the child got context-switched OUT
+before its first `KVM_RUN`. Manifested as cascading
+`__fork+0x11c cr2=0x3d8` faults from glibc's `_dl_stack_used`
+walk on corrupted shared parent state.
+
+**What landed.**
+
+- Commit `44d21b5a14ab` gates the destructive `KVM_GET_FPU` on
+  `vcpu->last_task == from`. `last_task` is set in
+  `load_user_sregs` at every dispatch entry; equality means "the
+  per-CPU vCPU's FPU actually belongs to from". Otherwise we leave
+  any existing `fpu_valid=true` snapshot intact. Also stops
+  clearing `fpu_valid=false` in the "pool not up" path for the
+  same reason.
+
+**Trade-off.** Subtractive vs additive. Differs from the regressed
+T28 attempt (which added a NEW unconditional `SET_FPU(zero)` on
+first dispatch after execve and actively introduced wrong state).
+T29 only PRESERVES correct state by gating a destructive capture
+path.
+
+**Validation.** 30-boot threaded-fork-malloc soak: 29/30 with
+0 fails / 116000 forks; 1 RCU-stall outlier different bug class.
+Pre-T29: cascade hit at 1/120000. Closes SMP-T29.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/16-smp-t29-fork-snapshot-clobber-FIXED.md`
+- Commit `44d21b5a14ab`.
+
+---
+
+## D108 (2026-05-03) — SMP-T33: KVM_SET_SREGS on cross-task dispatch (later superseded)
+
+**Context.** mt-mini SMP T=8 ncpus=4 stress had a stubborn ~17%
+flake (`got=0 expect=N` from the verify path). An ncpus ablation
+that should have happened months ago immediately localized to the
+per-host-CPU vCPU pool: ncpus=1 (no vCPU sharing) was 60/60 PASS;
+ncpus=4 (sharing) was 50/60. The opus subagent then identified
+KVM's TDP MMU `prev_roots[]` LRU as the fast-switch path that
+could keep stale cached roots when remote-TLB-flushes targeted a
+sibling-vCPU's active root.
+
+**What landed.**
+
+- Commit `9ccdc4300713` adds a cross_task predicate in
+  `kvm_v2_load_user_sregs`, captured before the cr2 block updates
+  `vcpu->last_task`. On cross-task dispatch the function ends with
+  a full `KVM_SET_SREGS` ioctl, taking the heavy
+  `__set_sregs2 → kvm_mmu_reset_context` path that drops
+  `prev_roots[]` and forces the next vmentry to walk fresh. Same-
+  task re-entries keep the `KVM_SYNC_X86_SREGS` dirty-bit fast
+  path.
+
+**Outcome.** mt-mini SMP T=8 N=120: 50/60 baseline → **118/120
+(98%)**, +15 percentage points. cpython-parity 5-mod parity, no
+substrate regression. Five prior experiments (G.2 IPI ablation,
+H_E per-page madvise, T31a/T32a/T32b drain variants) had all
+targeted the wrong layer; the ncpus=1 control was the unlock.
+
+**Superseded by T41 (D111).** This was a partial fix on the
+WRONG mechanism — it changed timing and pulled the rate from ~30%
+to ~12%, but the residual byte[0]=0 STRICT_MEMSET_FAIL remained.
+T41 found the actual cause (EINTR-mid-PF-stub user-RAX not
+recovered from IST top-56). The cross-task `KVM_SET_SREGS` here
+is left in place as defensive hygiene plus the WARN_ON_ONCE added
+in D112.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/20-smp-t33-vcpu-pool-sharing-diary.md`
+- Commit `9ccdc4300713`.
+
+---
+
+## D109 (2026-05-03) — SMP-T36: mmu_gather batch-free skip after partial deferral
+
+**Context.** External audit caught that
+`tlb_batch_pages_flush()` stops the inline free loop at the
+first batch with `nr==0`. The non-UML path is correct: batches
+fill in order, so the first empty batch implies all subsequent
+are empty. Under UML's deferral path
+(`arch/um/kernel/tlb.c:171-186` setting `nr=0` for fully-deferred
+batches) intermediate batches in the chain can have `nr==0`
+while later ones still hold survivors of a partial-OOM defer —
+which then leak forever.
+
+**What landed.**
+
+- Commit `bedd73af5033` walks every batch under `CONFIG_UML` and
+  skips empties instead of breaking on the first one. Non-UML
+  path unchanged.
+
+**Outcome.** Correctness/robustness fix, not a residual cure —
+the bug only triggers under kmalloc-OOM in
+`__um_defer_append_locked`, rare under normal workload. Parallel
+n=200 = 186/200 = 93.0%, statistically identical to T33b's
+95.7% (±3.5% binomial CI).
+
+**Refs.**
+
+- Commit `bedd73af5033`.
+
+---
+
+## D110 (2026-05-03) — SMP-T37: pin per-CPU UML host pthreads
+
+**Context.** Defense-in-depth on cross-vCPU aliasing: under v2's
+per-host-CPU vCPU pool a guest CPU should always use the same
+vCPU FD, which the host scheduler can violate by migrating the
+per-CPU UML host pthread mid-flight to a different host CPU.
+
+**What landed.**
+
+- Commit `1b1febc1ffba` calls `pthread_setaffinity_np` on each
+  per-CPU UML host pthread spawn (plus the boot pthread in
+  `os_init_smp`).
+
+**Outcome.** Honest result on the residual: parallel n=200 =
+189/200 = 94.5%, statistically identical to T33b's 95.7%. The
+dominant aliasing is *guest task migration across guest vCPUs*
+(guest scheduler bouncing mt-mini threads), which pinning host
+pthreads doesn't prevent. Worth landing for cache locality and
+to remove a real-but-minor noise source.
+
+**Refs.**
+
+- Commit `1b1febc1ffba`.
+
+---
+
+## D111 (2026-05-03) — SMP-T41: recover user RAX from IST top-56 (TRUE closure)
+
+**Context.** The mt-mini SMP T=8 STRICT_MEMSET_FAIL byte[0]=0
+residual survived three weeks of hypotheses across
+SMP-T31..T40 (TDP coherence, mm-fault race, prev_roots,
+mmu_notifier, jitter sweep, mmu_gather, host pthread pinning,
+PT-page recycle). T40's prefault test was the breakthrough:
+proved the bug was on the #PF resume path. T41 then read the
+PF stub byte-by-byte against the EINTR carve-out range check.
+
+**Mechanism.** The PF stub at `exception.c:213` opens with
+`push %rax` (1 byte 0x50), then mid-stub does
+`mov %cr2, %rax` at offset 0x0a and `pop %rax` at offset 0x17.
+If EINTR caught the guest with RIP in `[stub+0x0d, stub+0x18)`,
+`eintr_regs.rax = CR2`, not user RAX. The previous
+`kvm_v2_handle_pf_eintr_inline` overwrote `gp[HOST_IP/SP/EFLAGS]`
+from the IST iretq frame but left `gp[HOST_AX]` = CR2.
+`marshal_to_kvm_regs` shipped that into `kvm_run.s.regs.regs`; the
+`KVM_SYNC_X86_REGS` dirty bit applied it on the next `KVM_RUN`.
+The user resumed at `frame.user_rip` with `RAX = CR2`. For
+mt-mini's `mov %al, (%rdx)` write at `0x401d4b`, AL is the low
+byte of RAX; CR2 is page-aligned so AL = 0 → the first store on
+the just-installed page wrote `0x00` instead of `tid` →
+STRICT_MEMSET_FAIL byte[0]=0 with the page-aligned-offset
+signature.
+
+**What landed.**
+
+- Commit `af659ad4297d` captures `stub_rip_at_eintr` at handler
+  entry BEFORE overwriting `gp[HOST_IP]`. If RIP > stub_start
+  (the `push %rax` has executed), recover user RAX from
+  `*(u64 *)(top - 56)`. None of the stub's writes after the push
+  touch top-56 (sentinel/CR2/RDX writes go to top-80/64/72), so
+  the original push value is intact for the entire EINTR-able
+  window. RIP == stub_start case keeps `eintr_regs.rax`.
+
+**Supersedes T33's mechanism.** T33 (D108) was a partial fix on
+the wrong layer — cross-task `KVM_SET_SREGS` changed timing
+enough to halve the failure rate but the residual byte[0]=0
+remained. T41 is the canonical closure: per memo 23 the actual
+cause was always in the EINTR-mid-stub register-recovery path,
+not in TDP / `prev_roots` coherence. T33's `KVM_SET_SREGS` site
+stays for defensive hygiene + the WARN_ON_ONCE added in D112.
+
+**Validation.**
+
+| Run | PASS | STRICT_MEMSET_FAIL | Wilson 95% CI |
+|---|---|---|---|
+| T39 baseline N=100 | 88/100 | 11 | [80%, 93%] |
+| T41 fix N=400 | 397/400 | 0 | [97.8%, 99.7%] |
+| T41 fix N=1000 | 992/1000 | 0 | [98.4%, 99.6%] |
+
+Substrate gate kvm-v2: PASS=25 FAIL=3 EXPECTED_FAIL=3 — bit-
+identical to seccomp baseline. The 3 residual fails in N=400 are
+init.sh-hangs in libc syscall (different bug class — became
+SMP-T54, closed in D115).
+
+Diagnostic tooling that made T41 possible: state-trace ring
+(KVMV2T per-CPU 2 MB) with `HANDLE_IO_PF` /
+`EINTR_INLINE_PF` / `EINTR_RAW_SNAPSHOT` op-codes; mt-mini's
+`kvmv2_state_trace_dump()` trigger on STRICT_MEMSET_FAIL;
+DIAG_T38 capture (read2/write_retry/probe/page_scan + PFN);
+gate-loop `--fail-marker` per-iter capture; the prefault test
+that proved the bug was on the #PF path.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/21-smp-t41-pf-stub-rax-recovery-FIXED.md`
+- `02-workstreams/D-kvm-backend/state-audit/22-smp-t41-stress-and-perf.md`
+- Commit `af659ad4297d`.
+
+---
+
+## D112 (2026-05-04) — SMP-T47: WARN_ON_ONCE cross-task KVM_SET_SREGS failure
+
+**Context.** Mainstream-readiness audit P2 #6. The cross-task
+SREGS-install ioctl at `vcpu.c:1521` (added by T33 to drop KVM's
+`prev_roots[]` on cross-task transitions) was a silent
+`(void)`-cast: if it failed, the vCPU would continue running with
+stale TDP roots — the SMP-T33 bug class returning unannounced.
+
+**What landed.**
+
+- Commit `602e9a27625c` adds `WARN_ON_ONCE` (taints kernel +
+  emits stack on first occurrence) plus a ratelimited `pr_warn`
+  with per-vCPU context (rc, cpu). No perf cost on the success
+  path.
+
+**Validation.** N=400 mt-mini SMP soak with the WARN active fired
+zero times across all 400 boots — `KVM_SET_SREGS` is healthy in
+production; the WARN is pure safety net.
+
+**Refs.**
+
+- Commit `602e9a27625c`.
+
+---
+
+## D113 (2026-05-04) — gadget revival: Phases 1-7 + items #1-5
+
+**Context.** v1 had a stay-in-guest LSTAR gadget for trivial
+syscalls (getpid family, getcpu, time, clock_gettime
+CLOCK_MONOTONIC). v2 had stripped it for simplicity, paying a
+full vmexit-out for every syscall. With the SMP-correctness work
+landed (T26..T41), the perf budget exists to bring the gadget
+back — but this time structured for mainstream upstream review.
+
+**What landed (commit `7ebcd8aac347`).**
+
+1. **Phases 1-7** — per-vCPU state pages, swapgs-toggled
+   `%gs:disp32` field reads, getcpu NR>0xff pre-check, time(2)
+   inline body, clock_gettime seqlock + budget. Two-phase
+   install: 5-byte fallback LSTAR at `vm_create`, gadget upgrade
+   after `exception_install` confirms state pages mapped. Per-
+   task field refresh in `load_user_sregs` (TGID/TID/PPID/UID/
+   EUID/GID/EGID + CPU_ID); writer-side seqlock for MONO_*.
+2. **Items #1+#4 — full x86_64 syscall ABI compliance.** Gadget
+   entry saves user RDX/R8/R10 into per-vCPU SAVE_* slots; every
+   exit (tail / fallback) restores before SYSRETQ. Pid-family
+   handlers don't actually clobber these regs but pay the
+   restore for uniformity.
+3. **Item #2 — assembled stub.** Hand-coded byte tables → new
+   `arch/um/backend/kvm-v2/lstar_gadget.S` exposing
+   `kvm_v2_lstar_{fallback,gadget}_{start,end}` extern symbols;
+   `syscall_trap.c` memcpy's them into the trampoline page using
+   `(_end - _start)` for length. Pattern: `ftrace_64.S` +
+   `ftrace.c`.
+4. **Item #3 — KUnit byteshape suite.** Locks the assembled
+   gadget entry preamble (swapgs + 3× `movq %reg,%gs:SAVE_*` with
+   expected disp32 values) and a page-fit upper bound; new
+   `static_assert`s in `syscall_trap.h` for gadget-state-page
+   slot alignment + non-overlap; boot-time memcmp panic on LSTAR
+   install/upgrade.
+5. **Item #5 — `CONFIG_UM_BACKEND_KVM_V2_GADGET` Kconfig knob**
+   (default y). `=n` skips state-page allocation and gadget
+   upgrade — every syscall takes the slow `KVM_EXIT_IO` path,
+   structurally identical to pre-gadget v2.
+
+**Validation.**
+
+  - Userspace ABI test: 11/11 paths preserve RDX/R8/R10 (incl.
+    fallback via clock_gettime CLOCK_REALTIME).
+  - KUnit `kvm_v2_marshal`: 8/8.
+  - KUnit `kvm_v2_byteshape`: 9/9 (incl. 2 new gadget cases).
+  - Substrate gate: PASS=25 FAIL=3 EF=3 (matches v2 line).
+  - mt-mini SMP stress (4w × 25i): 100/100, 0 FAIL/TIMEOUT.
+  - bench-micro getpid: 91 cyc/call (vs ~90 baseline) on Zen 4
+    s7 — ~6 cyc save/restore overhead absorbed in noise.
+
+**Refs.**
+
+- `arch/um/backend/kvm-v2/README.md` (operator docs).
+- Commit `7ebcd8aac347`.
+
+---
+
+## D114 (2026-05-04) — SMP-T56: extend LSTAR-EINTR carve-out for gadget body
+
+**Context.** Regression fix for the gadget revival. The pre-
+revival LSTAR was a 5-byte fallback (`out` + `sysretq`) and the
+SMP-T25 EINTR carve-out at `vcpu.c` only covered RIP in
+`[LSTAR, LSTAR+2)`. After the revival, LSTAR is a 449-byte gadget
+whose first instruction is `swapgs` (3 bytes). EINTR caught at
+RIP ≥ LSTAR+3 (post-entry-swapgs, anywhere in the gadget body)
+fell through unhandled, leaving the vCPU's `MSR_KERNEL_GS_BASE`
+= user_gs (≈0) instead of `STATE_GVA(cpu)`. A subsequent task's
+SYSCALL on the same vCPU would `swapgs` to GS_BASE=0 and the
+gadget's `mov %rdx, %gs:0x50` faulted at VA `0x50`.
+
+Symptom: mt-mini SMP T=8 N=400 went from 397/400 (T41 baseline)
+to 388/400, with 10 SIGSEGV panics matching
+`user_rip=0xffffe000_00000043 err=2`.
+
+**What landed.**
+
+- Commit `db9170b5a7b3` extends the carve-out to
+  `[LSTAR, LSTAR + gadget_size)`. On RIP ≥ LSTAR+3,
+  `KVM_SET_MSRS` restores `MSR_KERNEL_GS_BASE = STATE_GVA(cpu)`;
+  rewind `HOST_IP` to user SYSCALL retry (`HOST_CX-2`). Pre-
+  swapgs case (RIP in `[LSTAR, LSTAR+3)`) takes only the rewind,
+  same as the original SMP-T25 fix.
+
+**Validation.** N=400 mt-mini SMP soak: 0/400 BUG_B fires (was
+10/400 pre-fix); 396/400 PASS = 99.0%, Wilson 95% [97.4%,
+99.6%]. The LSTAR-EINTR rewind log fires on ~31% of runs in
+this stress soak — the EINTR-mid-gadget event is common, and
+the recovery is now correct.
+
+**Refs.**
+
+- Commit `db9170b5a7b3`.
+
+---
+
+## D115 (2026-05-04) — SMP-T54: SOCK_CLOEXEC on worker socketpair + umlctl sysrq halt
+
+**Context.** Long-standing fd leak predating kvm-v2.
+`spawn_worker_process` in `arch/um/os-Linux/worker_user.c`
+created a `socketpair` with flags=0 (no `SOCK_CLOEXEC`); the
+spawner side `fds[0]` is kept open for each worker's lifetime.
+Each next worker spawn CoW-inherited the spawner's full fd
+table — including every prior worker's `fds[0]`. `start_userspace`
+then cloned the stub-child from the worker, also CoW-inheriting;
+guest userspace eventually saw the leaked fds. When init.sh /
+mt-mini happened to `recvmsg(fd)` on a leaked fd number, it
+blocked forever waiting for an IPC the kernel-side dispatcher
+kthread was supposed to consume → RCU stall → gate-loop timeout
+→ FAIL. ~0.5-0.75% hit rate on N=400 mt-mini SMP soaks,
+stochastic on host fd-allocation order. Misfiled as a kvm-v2 SMP
+race until worker-model fd-table inspection caught the leak.
+
+**What landed (commit `467aa7d142c0`).**
+
+1. `SOCK_CLOEXEC` on the worker socketpair. `worker_main` is a
+   clone child in a `read()` loop, never `execve`'s, so the
+   CLOEXEC bit is harmless to it; `start_userspace`'s stub-child
+   `execve` drops the leaked fds before guest userspace.
+2. `umlctl sysrq halt` verb. `tools/uml/uml-launcher/src/bin/
+   umlctl/deploy.rs` appends `__umlctl_halt` (sysrq-b shutdown)
+   after every user phase. Removes the dependency on `/sbin/halt`
+   which on most modern distros is a symlink to
+   `/bin/systemctl` that `recvmsg`-blocks on a DBus socket
+   waiting for a non-existent systemd.
+
+**Validation.** mt-mini SMP T=8 ncpus=4 N=400 (60 s gate-loop):
+
+  - pre-fix (`24557e95c4b1`):                   394/400 = 98.5%
+  - pre-fix (`db9170b5a7b3`, post gadget+T56):  395/400 = 98.8%
+  - **post-fix (this commit):                   400/400 = 100.0%**
+    Wilson 95% [99.0%, 100.0%], elapsed 204 s (down from
+    1207 s — the bug was eating wall-clock via dispatcher
+    `recvmsg` contention too).
+
+Closes SMP-T54.
+
+**Refs.**
+
+- Commit `467aa7d142c0`.
+
+---
+
+## D116 (2026-05-03) — perf-O1: gate post-syscall interrupt_end()
+
+**Context.** `interrupt_end()` is the post-syscall sched/signal
+drain. Its body is internally gated on `_TIF_WORK_MASK`, so on
+the common fast path (no signals pending, no `-ERESTART`) the
+function call itself is dead weight — ~30-50 cyc of call overhead
+per syscall.
+
+**What landed.**
+
+- Commit `24557e95c4b1` inlines the gate. Skip
+  `interrupt_end()` unless either (a) `handle_syscall` returned
+  in the `-ERESTART*` range (`-512..-516`) — `do_signal` MUST run
+  to translate `-ERESTART` → restart-RIP or `-EINTR`, closes the
+  dash bug (#107) — or (b) any `_TIF_WORK_MASK` bit is set.
+
+**Validation.** bench-micro on server7 (Zen 4 boost, performance
+gov): baseline median 36 879 cyc → post-O1 median 36 759 cyc
+(5 runs each), delta -120 cyc / -0.32%. Substrate gate kvm-v2:
+PASS=25 FAIL=3 EF=3 (bit-identical to seccomp baseline).
+
+**perf-O2 attempted, reverted.** Skipping the per-dispatch
+CR4.PGE TLB-flush toggle on same-task no-tlb-bump dispatches
+crashed init even with the `tlb_gen+kick_pending` guard.
+Confirms the 2026-05-01 in-tree warning that v1 also tried
+"tlb_stale && same_cr3" and regressed pass rate. Right
+predicate likely also requires caching `fs.base`/`gs.base`/`cr3`
+to know when to actually re-ship sregs. Left as future work.
+
+**Refs.**
+
+- Commit `24557e95c4b1`.
+
+---
+
+## D117 (2026-05-05) — Phase J pilot soak rig — realistic workloads
+
+**Context.** SMP-T54's close brought mt-mini SMP T=8 N=400 to
+400/400 = 100.0%. With a clean baseline the obvious next
+question is what other realistic workloads expose flake at the
+1% rate the mt-mini gate now forecloses. Phase J in the original
+24-month plan is "validation: 24 h continuous + Tier 1/2/3 +
+soak"; the pilot rig is the diverse-workload precursor.
+
+**What landed.**
+
+1. Commit `95c95267202e` — `tools/testing/selftests/um/soak/`
+   multi-workload rig with five Umlfile templates + drivers:
+   - `memcheck` (50 LoC C, memtester replacement) — anon-mmap
+     CoW + addressing wiring at GB-scale, walking-bit + 7 const
+     fills.
+   - `iocheck` (80 LoC C, fio-style replacement) —
+     write/fsync/read/verify on tmpfs with block-id-keyed
+     pattern.
+   - `stress-ng` — IPC stressors (futex+pipe+switch) with
+     `--verify`. `--vm` deferred (SMP-T57 follow-up).
+   - `cpython-soak` — Python regrtest curated subset
+     (test_signal / test_io / test_mmap / test_fork1 / etc).
+   - `kbuild-tiny` — tinyconfig in-guest UML build (fork-storm
+     + pipe + file I/O).
+   - `run-pilot.sh` drives parallel `umlctl gate-loop` per
+     workload × backend (kvm-v2, seccomp), with thermal throttle
+     (max of `k10temp`/`coretemp`/`zenpower`, pause ≥ 88 °C,
+     resume ≤ 75 °C — `acpitz` was unreliable on AMD), cooldown
+     between workloads, CSV summary at exit.
+2. Commit `82df9571eb25` — operator README, design memo, and
+   STATUS refresh for J-pilot vs J (full).
+
+**First-pilot result (W=2 × M=20 × 3 short workloads × 2 backends
+= 240 boots).**
+
+  - memcheck   kvm-v2: 40/40   seccomp: 40/40
+  - iocheck    kvm-v2: 40/40   seccomp: 40/40
+  - stress-ng  kvm-v2: 40/40   seccomp: 40/40
+  - **Total: 240/240 = 100.0%**, Wilson 95% [98.5%, 100%]
+
+Two harness bugs fixed during smoke (kept as future-protected
+patterns in templates): `cmd | tail; echo rc=$?` masks pipeline
+failure (use `cmd && echo OK || (echo FAIL; exit 1)`); stress-ng
+cwd `/` is RO under hostfs (`cd /tmp` first).
+
+One real soak finding deferred: **SMP-T57** — `stress-ng --vm
+--verify` trips on kvm-v2 only with "vm-method 0x.. not
+readable". Needs vm-method bisect.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`
+- `tools/testing/selftests/um/soak/README.md`
+- Commits `95c95267202e`, `82df9571eb25`.
+
+---
+
+## D118 (2026-05-07) — SMP-T55 surfaced; do not loosen the perf gate
+
+**Context.** A verification pass against current `umlctl-deploy`
+HEAD on Zen 4 7840HS surfaced one finding STATUS hadn't
+captured: the `perf-py-startup` kselftest gate FAILS — kvm-v2
+0.10 s vs seccomp 0.08 s, ratio_v2_over_seccomp = **1.250**, vs
+the ceiling max=1.2. Three months ago the same gate read 0.444
+(kvm-v2 2.25× FASTER than seccomp). The regression decomposes:
+
+  - **+50% UP→UP**, 04-30 → 05-02 build window: a clutch of
+    SMP-correctness commits (TLB-kick infra `7e1c255a09ad` /
+    `9f0ff6257e8b`, `migrate_disable` `95b3a85bd309`,
+    EINTR-mid-PF inline `e5977806fd14`).
+  - **+67% UP→SMP**, 05-02 → 05-03 build flavor change (CONFIG_
+    SMP=y, NR_CPUS=4, ~+33% on seccomp baseline too) plus
+    SMP-T26/T27's `76b1d98b2006` always-`KVM_GET_FPU` revert of
+    H.2 lazy-FPU (D106).
+
+Hot-path / gadget-driven workloads are unaffected (verified same
+day: bench-py 4.00× faster than seccomp, bench-micro getpid
+~1050× faster). `perf-py-startup` is the workload that maximises
+non-FPU dispatches (heavy syscall churn, mmap, exec) and
+minimises any benefit from elided FPU — exactly where T26/T27's
+correctness/perf trade pinches hardest.
+
+**Decision (policy).** Leave the gate failing. Do NOT loosen the
+1.20× ceiling to silence the gate. The right shape is a real
+fix, per the plan memo: per-vCPU FPU-dirty epoch flag that gates
+the post-vmexit `KVM_GET_FPU` (option (a) in memo 23), with the
+cross-task case captured by an explicit `last_task != current`
+hook in `load_user_sregs` rather than by accidental ordering.
+This restores ~95% of dispatches to the "skip GET" fast path
+while making the cross-task XMM leak impossible by construction.
+Estimated ~30 lines of `vcpu.c` plus one bool field; the work is
+in the gating-predicate audit, not the implementation.
+
+**What landed.** No code commit yet. STATUS update is
+`c4a7cabb9742` — Phase ledger gains an SMP-T55 row, Tip line
+mentions the open gate, and `state-audit/23-smp-t55-perf-
+regression-plan.md` (~830 lines) enumerates three options ((a)
+per-vCPU dirty epoch, (b) cross-task `last_task` gate, (c) lazy
+capture at switch_out only) with state-machine deltas, the
+T26/T27 correctness arguments, the recommended path
+(option (a)), gotchas (handle_io_nm CR0.TS clear; first-dispatch
+of fork'd task; cross-vCPU migration), and an experimental gate
+plan.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/22-smp-t41-stress-and-perf.md`
+- `02-workstreams/D-kvm-backend/state-audit/23-smp-t55-perf-regression-plan.md`
+- STATUS update commit `c4a7cabb9742`.
+
+---
+
 ## (Future entries here, as decisions are made)
