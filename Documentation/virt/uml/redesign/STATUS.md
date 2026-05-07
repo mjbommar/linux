@@ -119,7 +119,7 @@ on `/`, never tmpfs).
 | J-pilot | realistic-workload soak rig (memcheck/iocheck/stress-ng + cpython-soak/kbuild-tiny templates) — first pilot 240/240 = 100% on short set | DONE | `95c95267202e`, memo `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` |
 | J     | validation — 24h continuous + Tier 1/2/3 + LTP | **PENDING** | task #167 (pilot rig in place; needs daemon-mode wrapper, CI tier integration, LTP curation) |
 | SMP-T55 | perf-py-startup regression — kvm-v2/seccomp ratio >1.0 on Python startup (gate FAIL); always-`KVM_GET_FPU` reverted H.2 lazy-FPU. Hot-path workloads unaffected (gadget still 193–908× / bench-py 4× faster). | OPEN | memo state-audit/22 + 23 (planned fix) |
-| SMP-T57 | stress-ng `--vm --verify` "not readable" on kvm-v2 only — vm-method bisect | OPEN | task #243; memo state-audit/24 (vm-method bisect, planned). Workload disabled in IPC-only template. |
+| SMP-T57 | stress-ng `--vm --verify` SIGILL on kvm-v2 — characterised as iretq/sigreturn RIP-off-by-5 control-flow corruption (sibling to T56). 22/38 vm-methods FAIL, 16/38 PASS. `si_addr=0` is a kvm-v2 #UD-handler artefact (`syscall_trap.c:1916` hard-codes cr2=0); real RIP is mid-instruction. | OPEN (characterised) | task #243; memo state-audit/24. Workload disabled in IPC-only template. Next step: pin stressor to one vCPU + `pr_emerg` in `kvm_v2_ist_frame_write` to catch first HOST_IP mutation. |
 
 **Closed umbrella P0:** #274 (KVM SIGSEGVs on Python C-extension
 import — "table stakes") closed functionally with cpython-parity
