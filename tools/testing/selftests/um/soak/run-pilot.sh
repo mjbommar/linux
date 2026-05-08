@@ -86,6 +86,7 @@ run_one() {
 
     local toml="/tmp/soak-${workload}-${backend}.toml"
     sed -e "s|{{KERNEL}}|$KERNEL|g" -e "s|{{BACKEND}}|$backend|g" \
+        -e "s|{{SOAK_DIR}}|$SOAK_DIR|g" \
         "$tmpl" > "$toml"
 
     local out_dir="$OUT_BASE/${workload}-${backend}"

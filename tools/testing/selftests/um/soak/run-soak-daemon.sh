@@ -407,6 +407,7 @@ run_one_phase() {
 	local timeout_sec="${TIMEOUT_FOR[$workload]:-$DEFAULT_TIMEOUT}"
 	local toml="$OUT/_${workload}-${backend}.toml"
 	sed -e "s|{{KERNEL}}|$UML_KERNEL|g" -e "s|{{BACKEND}}|$backend|g" \
+		-e "s|{{SOAK_DIR}}|$SOAK_DIR|g" \
 		"$SOAK_DIR/${workload}.toml.template" > "$toml"
 	local out_dir="$OUT/_loop/${workload}-${backend}-r${rotation}"
 	mkdir -p "$out_dir"
