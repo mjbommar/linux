@@ -472,11 +472,232 @@ Adding (1) + (2) to `flip-repro.c` is the next bisect step within the
 reproducer ladder. Tracked separately (low priority); state-trace
 already gives us enough to drive the kernel-side fix.
 
-## 7. Status
+## 7. Probe results (2026-05-07)
+
+Executed §6.1 (single-vCPU pin) + §6.2 (`pr_emerg` probe in
+`kvm_v2_ist_frame_write`) on `~/src/uml-builds/uml-smp-t41fix/linux`.
+
+### 7.1 §6.1 single-vCPU pin — FAIL (matches multi-vCPU)
+
+`stress-ng --vm 1 --vm-bytes 16M --vm-method=mscan --verify --timeout 5s`
+booted with `ncpus=1`:
+
+```
+stress-ng: debug: [33] caught SIGILL, address 0x0000000000000000 (ILL_ILLOPN)
+stress-ng: error: [31] vm: [32] terminated with an error, exit status=2
+vm                 4096      0.62      0.00      0.63   <bogo metrics>
+STRESS_NG_RC=2
+```
+
+Same SIGILL signature, same 4096 bogo ops (= 16 MiB / 4 KiB) before
+trip, same `si_addr=0` artefact. **§5.2 (per-vCPU IST stale-frame
+contention) is ruled out** — the bug reproduces with one vCPU, no
+inter-vCPU IST sharing. By elimination, §5.1 (RIP-fixup path) is the
+remaining hypothesis; §6.2 was needed to localise the offending
+caller.
+
+### 7.2 §6.2 `pr_emerg` probe — kvm_v2_ist_frame_write is NOT the mutator
+
+Probe instrumentation (reverted before commit; never landed in tree):
+
+```c
+pr_emerg("kvm_v2_ist_frame_write: caller_pc=%pS regs_in=%lx "
+         "frame_rip=%llx regs_sp=%lx frame_rsp=%llx err=%llx "
+         "sigpend=%d delta=%lld\n",
+         __builtin_return_address(0), regs->gp[HOST_IP], frame_rip,
+         regs->gp[HOST_SP], frame_rsp, frame_err,
+         task_sigpending(current),
+         (s64)(regs->gp[HOST_IP] - frame_rip));
+```
+
+(`frame_rip` / `frame_rsp` / `frame_err` are read **at the start of
+`_ist_frame_write`**, before the rewrite, from the IST stack at
+`top - 40 + N`. `delta = regs_in - frame_rip` flags any mismatch
+between the upstream-mutated `regs->gp[HOST_IP]` and the current
+IST-resident RIP that the iretq tail would otherwise pop.)
+
+**Run produced 5791 `_ist_frame_write` events to first SIGILL.**
+
+| caller_pc                          | events | meaning |
+|------------------------------------|-------:|---------|
+| `kvm_v2_handle_io_trap+0x750`      |  5789  | inlined `kvm_v2_handle_io_pf` tail |
+| `kvm_v2_handle_io_trap+0x83e`      |     1  | inlined #GP/#UD/#DE/#OF/#NM tail-merged |
+
+(The two distinct return PCs map onto the two `call *%rax` sites that
+GCC emitted for `kvm_v2_ist_frame_write`. `+0x750` is the #PF arm —
+the 4096-COW-fault loop dominates the trace. `+0x83e` is the
+tail-merged exit shared by `_ud / _de / _of / _nm` and `_gp` after
+their `relay_signal/segv_handler → interrupt_end → ist_frame_write`
+sequence; verified from the disassembly at `0x60055240: xor %edx,%edx;
+jmp 0x600550ae` collapsing the no-error-code arm into the same call
+slot the #GP arm uses.)
+
+### 7.3 The single non-zero `delta` is the legitimate SIGILL delivery
+
+```
+seq 5417  caller_pc=kvm_v2_handle_io_trap+0x83e
+          regs_in=5500000dde70  frame_rip=550000e9d71e
+          regs_sp=7f7fffea5528  frame_rsp=7f7fffea6100
+          err=0  sigpend=0  delta=-14416046
+
+seq 5418  caller_pc=kvm_v2_handle_io_trap+0x750
+          regs_in=5500000ddcd2  frame_rip=5500000ddcd2  delta=0
+```
+
+`regs_in=0x5500000dde70` is **stress-ng's SIGILL handler entry point**
+(`stress_signal_catch_sigill_handler`, resolved via libc into the
+0x55xxxx mapping range). `frame_rip=0x550000e9d71e` is the user RIP
+that took the `#UD`. The kernel correctly mutated `regs->gp[HOST_IP]`
+to the handler entry as part of `relay_signal` → `do_signal` →
+`handle_signal` → `setup_rt_frame`. This is the **expected** signal
+delivery — not a bug. The very next event (`5418`) is a `#PF` at
+`0x5500000ddcd2` — i.e., the SIGILL handler's first instruction
+faulting on its first not-present page, which is normal.
+
+**All 5790 other `_ist_frame_write` events have `delta=0`**, including
+all 4096 mscan-page-stride `#PF` events at `frame_rip=0x550000e9d6af`.
+Therefore `kvm_v2_ist_frame_write` is **innocent**: no upstream caller
+on this run mutated `regs->gp[HOST_IP]` between `_ist_frame_read` and
+`_ist_frame_write` in any unexpected way. §5.1 as originally framed
+(`rt_sigreturn` / iretq RIP fixup writing `+= 5`) is **not the
+mechanism** — at least, not via any path that flows through
+`_ist_frame_write` on the 8-second mscan window.
+
+### 7.4 What the probe DID localise
+
+The trace shows the `#UD` user RIP is **`0x550000e9d71e`**, exactly
+**`0x6f` bytes past** the long-running mscan write-loop instruction
+at `0x550000e9d6af` (which fired all 4096 mscan-stride `#PF`s with
+identical `regs_in == frame_rip` — i.e., the kernel correctly
+preserved RIP across each PF). After 4096 page-stride iterations the
+loop would cleanly exit; control then advances 0x6f bytes to a `#UD`
+at `0x550000e9d71e`.
+
+The 0x55xxxx address range is **not** stress-ng's working buffer (the
+buffer is at `0x42210000` per `DIAG[241] nr=9 addr=0x0 len=0x1000000
+ret=1109483520=0x42210000`); it is a **dynamic-linker-mapped library
+text region** — i.e., `0x550000e9d6af` is the write instruction inside
+a libc routine (most likely an AVX/SSE memset or per-byte store
+helper that mscan dispatches to via TARGET_CLONES IFUNC resolution).
+The `0x6f`-byte forward jump from the write instruction to the `#UD`
+site is consistent with a **function epilogue → `ret` → corrupted
+return address** landing at mid-instruction in a different libc
+function, OR with the function having a multi-block tail that, on
+exit from the write loop, lands at a basic-block whose first byte is
+not a valid opcode boundary.
+
+### 7.5 Revised hypothesis ranking
+
+The data **moves the suspect class away from `kvm_v2_ist_frame_write`
+and towards a non-IST-frame path**:
+
+1. **SYSRETQ-RCX corruption (P=0.45, NEW)**. The syscall return
+   path in `kvm_v2_handle_io_trap` (lines 2367-2369) writes
+   `run->s.regs.regs.rcx = regs->gp[HOST_IP]` after a possible
+   `interrupt_end()`/`do_signal()` rewrite — but if `do_signal`
+   advanced HOST_IP for restart-syscall semantics (`-= 2`), or set
+   it to a signal-handler entry, **and** the host SVM / KVM_RUN
+   then SYSRETQ pops RCX as user RIP, a 5-byte mismatch could
+   land mid-instruction. This path does **not** call
+   `_ist_frame_write` (it's the SYSCALL arm, marshal-out only),
+   so the §6.2 probe missed it by construction. Confirms §5.1's
+   "syscall fast path" intuition but moves the locus.
+
+2. **User-mode stack canary / saved-RBP corruption from
+   `signalfd` SA setup (P=0.30, NEW)**. The 17-line same-RIP
+   COW pause immediately preceding the `0x83e` SIGILL-delivery
+   event, plus the 0x6f-byte forward jump, fits a libc routine
+   whose tail `ret` reads a corrupted saved RIP — likely because
+   the user's `%fs.base` (TLS canary base) was wrong on entry,
+   so the canary load `%fs:0x28` aliased to a different page,
+   and the function's `cmp %fs:0x28,%rbx; jne __stack_chk_fail`
+   either falsely matched or the saved-RBP/RIP at `RSP+0x1b8`
+   was clobbered by the in-loop write. The 0x55xxxx region is
+   read-only library text, so the **target** of mscan's writes
+   is the 0x42210000 buffer, but if `%fs.base` was stale on
+   guest re-entry the canary load can corrupt-via-mismatch the
+   stack frame's check semantics.
+
+3. **`do_signal` setup_rt_frame copying handler RIP onto user
+   stack with off-by-instruction (P=0.15)**. The legitimate
+   `+0x83e` event with `regs_in=0x5500000dde70` shows the kernel
+   does write a handler RIP. If `setup_rt_frame` also pushed a
+   wrong "return-from-handler" sigreturn address onto the user
+   stack (the trampoline RIP that the handler's `ret` will pop),
+   that would explain the 0x6f-byte forward jump — but only if
+   the handler ran to completion, which it did not (stress-ng's
+   handler `_exit`s).
+
+4. **Original §5.1 `rt_sigreturn`-via-IST P=0.55 → revised P=0.05**.
+   No `_ist_frame_write` event in the trace had a non-zero
+   `delta` other than the legitimate SIGILL handler entry.
+   `rt_sigreturn` doesn't flow through `_ist_frame_write` on
+   resumption (it returns via the syscall marshal-out path), so
+   the probe was *blind to* this path, but the absence of
+   precursor `_ist_frame_write` anomalies before the SIGILL
+   makes the IST-frame mutation theory weaker.
+
+### 7.6 Proposed next probe — narrow on SYSRETQ marshal-out
+
+Because the §6.2 probe ruled out `_ist_frame_write` as the mutator,
+the next bisect step is to instrument the **SYSCALL arm's marshal-out**:
+
+```c
+/* in kvm_v2_handle_io_trap(), just before line 2369 */
+if (current->thread.arch.kvm_v2.diag_count++ < 100 ||
+    syscall_nr == __NR_rt_sigreturn ||
+    syscall_nr == __NR_rt_sigaction) {
+    pr_emerg("kvm_v2_marshal_out: syscall_nr=%lu host_ip=%lx "
+             "host_cx=%lx host_r11=%lx host_sp=%lx ret=%ld\n",
+             syscall_nr, regs->gp[HOST_IP], regs->gp[HOST_CX],
+             regs->gp[HOST_R11], regs->gp[HOST_SP],
+             (long)regs->gp[HOST_AX]);
+}
+```
+
+Expected signal: a `rt_sigaction` or `rt_sigreturn` (or `signalfd`)
+syscall completes with `host_ip = N`, but the KVM_RUN that follows
+re-enters at `N + 5` (or `N - 2` for an erroneously-rewound
+restart-syscall), causing the user's next instruction-fetch to land
+mid-opcode. If found, the fix is in the `interrupt_end()` →
+`do_signal()` → `PT_REGS_RESTART_SYSCALL` rewind logic, OR in the
+explicit `run->s.regs.regs.rcx = regs->gp[HOST_IP]` overwrite at
+line 2367 (which may need to be conditional on whether do_signal
+already wrote a signal-handler RIP that wants `rcx = original_user_rip`
+not the handler entry).
+
+### 7.7 Open questions
+
+- Is the `0x550000e9d71e` `#UD` reached by **legitimate user-mode
+  control flow with corrupted operand state** (stack canary /
+  saved-RBP scenario) or by **kernel-injected wrong RIP** (SYSRETQ
+  / signal-handler-entry scenario)? The state-trace ring schema
+  doesn't capture KVM_RUN entry RIP/RCX, only exit; we'd need a
+  KVM_GET_REGS dump immediately after the last #PF and before the
+  #UD-firing KVM_RUN to know which side broke.
+
+- The dense-vs-sparse correlation in §3 is still unexplained. If
+  the bug is SYSRETQ-marshal-out, `signalfd` and `rt_sigaction`
+  (called once per stressor child) should fire on every method —
+  not 22 / 38. Possibly the dense methods stay in user-mode long
+  enough between syscalls for an SIGALRM to land during a
+  non-SYSCALL boundary, while sparse methods drain SIGALRMs at
+  syscall entry/exit boundaries cleanly. Confirmed only by
+  re-running with `--no-itimer` or equivalent.
+
+- The `+0x83e` tail-merge in the disassembly conflates `_ud / _de
+  / _of / _nm / _gp` ist_frame_write call sites. To disambiguate
+  the trap class on a future probe run, log `regs->faultinfo.trap_no`
+  at `_ist_frame_write` entry alongside `caller_pc`.
+
+## 8. Status
 
 - T57 is **characterised, not fixed**.
+- §6.1 + §6.2 (this section) **ruled out** kvm_v2_ist_frame_write
+  as the RIP mutator and re-cast the suspect class as a SYSRETQ /
+  signal-marshal-out path issue.
 - Phase J pilot (`phase-J-pilot-2026-05-05.md`) can keep stress-ng
-  excluded from its IPC-only profile until 6.1 / 6.2 land.
+  excluded from its IPC-only profile until §7.6 lands.
 - The 16 PASS-on-v2 methods (notably `gray`, `walk-1d`, `read64`,
   `write64`) are safe to add to a future Phase J Tier-2 stress profile
   if we want stress-ng coverage now without waiting for the fix.
@@ -487,4 +708,8 @@ already gives us enough to drive the kernel-side fix.
 checklist: state-trace ring read directly from disassembly + IST
 schema; fault RIP confirmed mid-instruction; control-flow corruption
 (not opcode corruption) proved by raw-byte vs. function-prologue
-disassembly diff; 4 failing methods cross-checked.*
+disassembly diff; 4 failing methods cross-checked. §7 update
+(2026-05-07): single-vCPU pin reproduced fault → §5.2 ruled out;
+`_ist_frame_write` probe (5791 events, only 1 non-zero delta = legit
+SIGILL delivery) → §5.1 weakened, §7.6 SYSRETQ-marshal-out hypothesis
+proposed. Debug instrumentation reverted before findings written.*
