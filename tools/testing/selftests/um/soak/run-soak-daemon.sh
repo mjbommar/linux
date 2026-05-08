@@ -1,0 +1,485 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# Phase J #167 daemon-mode soak driver. Sibling to run-pilot.sh.
+#
+# Long-running, signal-driven, append-only. Cycles through the J-pilot
+# workload templates within a wall-clock budget, writing per-iteration
+# rows to scoreboard.jsonl + a rolling Wilson-CI summary table to
+# summary.md, until budget elapses, an operator sends SIGTERM/SIGINT,
+# or a per-(workload, backend) failure-rate threshold trips.
+#
+# Spec: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+#       phase-J-design-2026-05-07.md §2.
+#
+# Usage:
+#   UML_KERNEL=$HOME/src/uml-builds/uml-smp-t41fix/linux \
+#     bash tools/testing/selftests/um/soak/run-soak-daemon.sh \
+#          --budget-sec 86400 --workers 2 --iters-per-rotation 10
+#
+# Smoke (60s, 1 workload):
+#   UML_KERNEL=... ./run-soak-daemon.sh --budget-sec 60 \
+#       --workloads memcheck --iters-per-rotation 2
+#
+# Stop with SIGTERM/SIGINT — daemon finishes the in-flight workload
+# phase before exiting (does NOT kill umlctl mid-iteration).
+# Force a summary refresh: kill -USR1 $pid.
+
+set -u
+
+# ----------------------------------------------------------------------
+# Defaults (CLI flag may override; env var read as middle-priority).
+# ----------------------------------------------------------------------
+BUDGET_SEC="${SOAK_BUDGET_SEC:-86400}"
+WORKERS="${SOAK_WORKERS:-2}"
+ITERS="${SOAK_ITERS:-10}"
+WORKLOADS_CSV="${SOAK_WORKLOADS:-memcheck,iocheck,stress-ng,cpython-soak,kbuild-tiny}"
+OUT="${SOAK_OUT:-}"
+FAIL_THRESH_PCT="${SOAK_FAIL_THRESH_PCT:-5}"
+FAIL_THRESH_WIN="${SOAK_FAIL_THRESH_WIN:-50}"
+CONTINUE_ON_THRESH="${SOAK_CONTINUE_ON_THRESH:-}"
+DRY_RUN=
+COOLDOWN="${COOLDOWN:-30}"
+THERMAL_PAUSE_C="${THERMAL_PAUSE_C:-88}"
+THERMAL_RESUME_C="${THERMAL_RESUME_C:-75}"
+UML_KERNEL="${UML_KERNEL:-}"
+UMLCTL="${UMLCTL:-/home/mjbommar/bench-bundle/bin/umlctl}"
+
+# ----------------------------------------------------------------------
+# CLI parsing.
+# ----------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--budget-sec)              BUDGET_SEC=$2; shift 2 ;;
+		--workloads)               WORKLOADS_CSV=$2; shift 2 ;;
+		--workers)                 WORKERS=$2; shift 2 ;;
+		--iters-per-rotation)      ITERS=$2; shift 2 ;;
+		--out)                     OUT=$2; shift 2 ;;
+		--fail-threshold-pct)      FAIL_THRESH_PCT=$2; shift 2 ;;
+		--fail-threshold-window)   FAIL_THRESH_WIN=$2; shift 2 ;;
+		--continue-on-fail-threshold) CONTINUE_ON_THRESH=1; shift ;;
+		--dry-run)                 DRY_RUN=1; shift ;;
+		--help|-h)
+			sed -n '4,30p' "$0" | sed 's/^# *//'
+			exit 0
+			;;
+		*) echo "unknown flag: $1" >&2; exit 2 ;;
+	esac
+done
+
+# ----------------------------------------------------------------------
+# Validate inputs.
+# ----------------------------------------------------------------------
+if [ -z "$UML_KERNEL" ]; then
+	echo "ERR: UML_KERNEL must be set (no fallback path)" >&2
+	exit 2
+fi
+if [ ! -x "$UML_KERNEL" ]; then
+	echo "ERR: UML_KERNEL=$UML_KERNEL not executable" >&2
+	exit 2
+fi
+if [ ! -x "$UMLCTL" ] && [ -z "$DRY_RUN" ]; then
+	echo "ERR: UMLCTL=$UMLCTL not executable" >&2
+	exit 2
+fi
+if ! command -v python3 >/dev/null; then
+	echo "ERR: python3 required for Wilson CI computation" >&2
+	exit 2
+fi
+
+# Default OUT — phase-J-soak-<ISO> under $PWD if unset.
+if [ -z "$OUT" ]; then
+	OUT="$PWD/phase-J-soak-$(date -u +%Y-%m-%dT%H%M%SZ)"
+fi
+mkdir -p "$OUT/logs" "$OUT/logs/panics" || exit 2
+
+# Resolve workloads CSV → array; validate each template.
+IFS=',' read -ra WORKLOADS <<< "$WORKLOADS_CSV"
+SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
+for w in "${WORKLOADS[@]}"; do
+	if [ ! -f "$SOAK_DIR/${w}.toml.template" ]; then
+		echo "ERR: missing template $SOAK_DIR/${w}.toml.template" >&2
+		exit 2
+	fi
+done
+
+# Per-workload per-iter timeout. Mirrors run-pilot.sh's TIMEOUTS array.
+declare -A TIMEOUT_FOR=(
+	[memcheck]=90 [iocheck]=90 [stress-ng]=120
+	[cpython-soak]=360 [kbuild-tiny]=600
+)
+DEFAULT_TIMEOUT=120
+
+# ----------------------------------------------------------------------
+# Run-state metadata.
+# ----------------------------------------------------------------------
+START_TS=$(date +%s)
+SOAK_RUN_ID=$(basename "$OUT")
+HOSTNAME_S=$(hostname)
+GIT_DIR=$(cd "$SOAK_DIR" && git rev-parse --show-toplevel 2>/dev/null || echo "")
+COMMIT=$(cd "$SOAK_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
+BRANCH=$(cd "$SOAK_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+
+STOP_REQUESTED=0
+THROTTLE_PAUSED_TOTAL=0
+THROTTLE_EVENTS=0
+
+# Per-(workload|backend) counters: total iters, total passes.
+declare -A WL_N WL_PASS
+
+# Per-(workload|backend) rolling-window arrays (last N verdicts: 1=PASS, 0=FAIL).
+# Stored as space-separated string in WL_WINDOW[$key] for portability.
+declare -A WL_WINDOW
+
+# ----------------------------------------------------------------------
+# Signal handlers.
+# ----------------------------------------------------------------------
+on_term() {
+	echo "[$(date -uIs)] received SIGTERM/SIGINT — will stop after current workload phase"
+	STOP_REQUESTED=1
+}
+trap on_term TERM INT
+
+on_usr1() {
+	echo "[$(date -uIs)] received SIGUSR1 — refreshing summary"
+	write_summary || true
+}
+trap on_usr1 USR1
+
+# ----------------------------------------------------------------------
+# Helpers (thermal lift from run-pilot.sh; same semantics).
+# ----------------------------------------------------------------------
+read_max_temp_c() {
+	local maxv=0
+	for nf in /sys/class/hwmon/hwmon*/name; do
+		[ -r "$nf" ] || continue
+		local n
+		n=$(cat "$nf" 2>/dev/null)
+		case "$n" in
+			k10temp|coretemp|zenpower|cpu_thermal) ;;
+			*) continue ;;
+		esac
+		local d
+		d=$(dirname "$nf")
+		for t in "$d"/temp*_input; do
+			[ -r "$t" ] || continue
+			local v
+			v=$(cat "$t" 2>/dev/null || echo 0)
+			v=$((v / 1000))
+			[ "$v" -gt "$maxv" ] && maxv=$v
+		done
+	done
+	if [ "$maxv" -eq 0 ]; then
+		for f in /sys/class/thermal/thermal_zone*/temp; do
+			[ -r "$f" ] || continue
+			local v
+			v=$(cat "$f" 2>/dev/null || echo 0)
+			v=$((v / 1000))
+			[ "$v" -gt "$maxv" ] && maxv=$v
+		done
+	fi
+	echo "$maxv"
+}
+
+thermal_check() {
+	local t
+	t=$(read_max_temp_c)
+	if [ "$t" -ge "$THERMAL_PAUSE_C" ]; then
+		local pause_start
+		pause_start=$(date +%s)
+		echo "[$(date -uIs)] [thermal] $t C >= ${THERMAL_PAUSE_C}C — pausing"
+		# Append a thermal scoreboard row.
+		emit_scoreboard_row \
+			"$SOAK_RUN_ID" "thermal" "thermal" "" 0 0 \
+			"PAUSE" "" "false" "false" "false" "$t" "$t" 0 ""
+		while [ "$(read_max_temp_c)" -gt "$THERMAL_RESUME_C" ]; do
+			sleep 5
+		done
+		local pause_end
+		pause_end=$(date +%s)
+		local paused=$((pause_end - pause_start))
+		THROTTLE_PAUSED_TOTAL=$((THROTTLE_PAUSED_TOTAL + paused))
+		THROTTLE_EVENTS=$((THROTTLE_EVENTS + 1))
+		echo "[$(date -uIs)] [thermal] resumed at $(read_max_temp_c)C (paused ${paused}s)"
+	fi
+}
+
+# Wilson 95% CI — closed-form, no external dep beyond python3 stdlib.
+# Echoes "rate_pct lower_pct upper_pct" (3 floats, 2-decimal).
+wilson_ci() {
+	local n=$1 k=$2
+	python3 - "$n" "$k" <<-'PY'
+		import math, sys
+		n = int(sys.argv[1]); k = int(sys.argv[2])
+		if n == 0:
+		    print("0.00 0.00 0.00"); sys.exit(0)
+		z = 1.959964
+		p = k / n
+		denom = 1 + z*z/n
+		center = (p + z*z/(2*n)) / denom
+		half = (z/denom) * math.sqrt(p*(1-p)/n + z*z/(4*n*n))
+		print(f"{p*100:.2f} {max(0.0,(center-half)*100):.2f} {min(100.0,(center+half)*100):.2f}")
+	PY
+}
+
+# JSON-escape a string (minimal — assumes 7-bit input from filenames/paths).
+json_esc() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
+
+# Append a row to scoreboard.jsonl. Field order matches §2.6 schema.
+emit_scoreboard_row() {
+	local soak_run_id=$1 gate=$2 workload=$3 backend=$4
+	local rotation=$5 iter_within=$6 verdict=$7 init_log=$8
+	local panic_b=$9 timeout_b=${10} host_error=${11}
+	local t_pre=${12} t_post=${13} dur_ms=${14} extra=${15}
+	local ts
+	ts=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+	local rc=0
+	[ "$verdict" = "PASS" ] || rc=1
+	local sig=null
+	local row
+	row=$(printf '{"ts":"%s","gate":"%s","backend":%s,"commit":"%s","branch":"%s","kernel":%s,"host":"%s","soak_run_id":"%s","rotation_idx":%d,"iter_idx_within_workload":%d,"workload":"%s","workers":%d,"verdict":"%s","rc":%d,"signal":%s,"panic":%s,"timeout":%s,"host_error":%s,"max_temp_c_pre":%d,"max_temp_c_post":%d,"duration_ms":%d,"init_log_relpath":%s%s}' \
+		"$ts" "$gate" \
+		"$([ -n "$backend" ] && echo "\"$backend\"" || echo null)" \
+		"$COMMIT" "$BRANCH" "$(json_esc "$UML_KERNEL")" "$HOSTNAME_S" \
+		"$soak_run_id" "$rotation" "$iter_within" "$workload" "$WORKERS" \
+		"$verdict" "$rc" "$sig" "$panic_b" "$timeout_b" "$host_error" \
+		"$t_pre" "$t_post" "$dur_ms" \
+		"$([ -n "$init_log" ] && json_esc "$init_log" || echo null)" \
+		"$extra")
+	echo "$row" >> "$OUT/scoreboard.jsonl"
+}
+
+# Update WL_WINDOW (rolling FAIL_THRESH_WIN verdicts) and check threshold.
+# Returns 0 if under threshold, 1 if tripped.
+update_window_and_check() {
+	local key=$1 verdict=$2
+	local v
+	[ "$verdict" = "PASS" ] && v=1 || v=0
+	local cur="${WL_WINDOW[$key]:-}"
+	# shellcheck disable=SC2086
+	set -- $cur $v
+	# Trim to last FAIL_THRESH_WIN
+	local n_keep=$FAIL_THRESH_WIN
+	while [ $# -gt "$n_keep" ]; do shift; done
+	WL_WINDOW[$key]="$*"
+	# Compute fail rate over the window.
+	local n_in=$# n_pass=0
+	local x
+	for x in "$@"; do
+		[ "$x" = 1 ] && n_pass=$((n_pass + 1))
+	done
+	if [ "$n_in" -lt "$FAIL_THRESH_WIN" ]; then
+		return 0  # window not full yet
+	fi
+	local n_fail=$((n_in - n_pass))
+	local fail_x10000=$((n_fail * 10000 / n_in))
+	local thresh_x10000=$((FAIL_THRESH_PCT * 100))
+	if [ "$fail_x10000" -gt "$thresh_x10000" ]; then
+		return 1
+	fi
+	return 0
+}
+
+write_summary() {
+	local summary="$OUT/summary.md"
+	local now elapsed pct_consumed
+	now=$(date +%s)
+	elapsed=$((now - START_TS))
+	pct_consumed=$(awk -v e="$elapsed" -v b="$BUDGET_SEC" \
+		'BEGIN { printf "%.1f", (e * 100.0) / b }')
+	{
+		echo "# Phase J soak summary — $SOAK_RUN_ID"
+		echo
+		echo "Start:    $(date -u -d "@$START_TS" +%Y-%m-%dT%H:%M:%SZ)"
+		echo "Now:      $(date -u +%Y-%m-%dT%H:%M:%SZ)   (${elapsed}s elapsed)"
+		echo "Budget:   ${BUDGET_SEC}s (${pct_consumed}% consumed)"
+		echo "Stop:     $([ "$STOP_REQUESTED" = 1 ] && echo "requested" || echo "running")"
+		echo "Kernel:   $UML_KERNEL"
+		echo "Commit:   $COMMIT ($BRANCH)"
+		echo
+		echo "| workload | backend | n | pass | fail | rate | Wilson 95% CI |"
+		echo "|----------|---------|---|------|------|------|---------------|"
+		local key wl be
+		for key in "${!WL_N[@]}"; do
+			wl="${key%%|*}"; be="${key##*|}"
+			local n="${WL_N[$key]}" k="${WL_PASS[$key]}"
+			local fail=$((n - k))
+			local ci_line
+			ci_line=$(wilson_ci "$n" "$k")
+			# shellcheck disable=SC2086
+			set -- $ci_line
+			printf "| %s | %s | %d | %d | %d | %s%% | [%s%%, %s%%] |\n" \
+				"$wl" "$be" "$n" "$k" "$fail" "$1" "$2" "$3"
+		done | sort
+		echo
+		echo "Throttle pauses: $THROTTLE_EVENTS events, ${THROTTLE_PAUSED_TOTAL}s total"
+	} > "$summary.tmp" && mv "$summary.tmp" "$summary"
+}
+
+# Walk a workload-phase output dir; for each per-iter run-*.log, classify
+# verdict, append scoreboard row, update counters + window.
+process_phase_results() {
+	local workload=$1 backend=$2 rotation=$3 phase_dir=$4 t_pre=$5 t_post=$6
+	local key="${workload}|${backend}"
+	local n="${WL_N[$key]:-0}"
+	local k="${WL_PASS[$key]:-0}"
+	local f log_rel verdict panic_b timeout_b host_error rc dur_ms iter_within
+	for f in "$phase_dir"/p0_default/*/run-*.log; do
+		[ -f "$f" ] || continue
+		log_rel="${f#"$OUT/"}"
+		iter_within=$((n + 1))
+		verdict=FAIL; panic_b=false; timeout_b=false; host_error=false
+		if grep -q "REPRO_DONE rc=0" "$f"; then
+			verdict=PASS
+		elif grep -q "Kernel panic" "$f"; then
+			verdict=PANIC; panic_b=true
+		elif grep -q -E "TIMEOUT|deadline exceeded" "$f"; then
+			verdict=TIMEOUT; timeout_b=true
+		fi
+		dur_ms=0  # umlctl gate loop's per-iter timing isn't easily extractable; leave 0 for now
+		emit_scoreboard_row "$SOAK_RUN_ID" "phase-J-soak-$workload" \
+			"$workload" "$backend" "$rotation" "$iter_within" \
+			"$verdict" "$log_rel" \
+			"$panic_b" "$timeout_b" "$host_error" \
+			"$t_pre" "$t_post" "$dur_ms" ""
+		n=$((n + 1))
+		[ "$verdict" = "PASS" ] && k=$((k + 1))
+		# Update rolling window + check threshold.
+		if ! update_window_and_check "$key" "$verdict"; then
+			if [ -z "$CONTINUE_ON_THRESH" ]; then
+				echo "[$(date -uIs)] THRESHOLD TRIPPED: $key (>$FAIL_THRESH_PCT% over rolling $FAIL_THRESH_WIN)" >&2
+				touch "$OUT/THRESHOLD_TRIPPED"
+				STOP_REQUESTED=1
+			else
+				echo "[$(date -uIs)] threshold tripped on $key; --continue-on-fail-threshold set, soaking on" >&2
+			fi
+		fi
+		# Copy panic logs into logs/panics/ for post-mortem ease.
+		if [ "$verdict" = "PANIC" ]; then
+			local pdir="$OUT/logs/panics/r${rotation}-${workload}-${backend}"
+			mkdir -p "$pdir"
+			cp "$f" "$pdir/" 2>/dev/null || true
+		fi
+	done
+	WL_N[$key]=$n
+	WL_PASS[$key]=$k
+}
+
+# ----------------------------------------------------------------------
+# Snapshot config.json at start.
+# ----------------------------------------------------------------------
+write_config() {
+	local stress_ng_ver
+	stress_ng_ver=$(stress-ng --version 2>/dev/null | head -1 | sed 's/.*version //; s/ .*//' || echo unknown)
+	python3 - <<-PY > "$OUT/config.json"
+	import json
+	cfg = {
+	  "soak_run_id": "$SOAK_RUN_ID",
+	  "start_ts": "$(date -u -d "@$START_TS" +%Y-%m-%dT%H:%M:%SZ)",
+	  "host": "$HOSTNAME_S",
+	  "kernel": "$UML_KERNEL",
+	  "commit": "$COMMIT",
+	  "branch": "$BRANCH",
+	  "umlctl": "$UMLCTL",
+	  "stress_ng_version": "$stress_ng_ver",
+	  "args": {
+	    "budget_sec": $BUDGET_SEC,
+	    "workers": $WORKERS,
+	    "iters_per_rotation": $ITERS,
+	    "workloads": $(python3 -c 'import json,sys; print(json.dumps("'$WORKLOADS_CSV'".split(",")))'),
+	    "fail_threshold_pct": $FAIL_THRESH_PCT,
+	    "fail_threshold_window": $FAIL_THRESH_WIN,
+	    "continue_on_fail_threshold": $([ -n "$CONTINUE_ON_THRESH" ] && echo True || echo False),
+	    "out": "$OUT"
+	  },
+	  "env": {
+	    "THERMAL_PAUSE_C": $THERMAL_PAUSE_C,
+	    "THERMAL_RESUME_C": $THERMAL_RESUME_C,
+	    "COOLDOWN": $COOLDOWN
+	  }
+	}
+	print(json.dumps(cfg, indent=2))
+	PY
+}
+
+run_one_phase() {
+	local workload=$1 backend=$2 rotation=$3
+	local timeout_sec="${TIMEOUT_FOR[$workload]:-$DEFAULT_TIMEOUT}"
+	local toml="$OUT/_${workload}-${backend}.toml"
+	sed -e "s|{{KERNEL}}|$UML_KERNEL|g" -e "s|{{BACKEND}}|$backend|g" \
+		"$SOAK_DIR/${workload}.toml.template" > "$toml"
+	local out_dir="$OUT/_loop/${workload}-${backend}-r${rotation}"
+	mkdir -p "$out_dir"
+
+	thermal_check
+	local t_pre t_post
+	t_pre=$(read_max_temp_c)
+
+	local phase_t0 phase_t1
+	phase_t0=$(date +%s)
+
+	echo "[$(date -uIs)] phase: workload=$workload backend=$backend r=$rotation W=$WORKERS M=$ITERS timeout=${timeout_sec}s temp=${t_pre}C"
+
+	if [ -n "$DRY_RUN" ]; then
+		echo "  [dry-run] would run: $UMLCTL gate loop -f $toml -W $WORKERS -M $ITERS --timeout $timeout_sec --out $out_dir"
+		# Synthesize a fake all-pass result for testing.
+		mkdir -p "$out_dir/p0_default/w0"
+		echo "REPRO_DONE rc=0" > "$out_dir/p0_default/w0/run-0.log"
+	else
+		"$UMLCTL" gate loop -f "$toml" -W "$WORKERS" -M "$ITERS" \
+			--timeout "$timeout_sec" --out "$out_dir" \
+			>"$out_dir/_loop.log" 2>&1 || true
+	fi
+
+	phase_t1=$(date +%s)
+	t_post=$(read_max_temp_c)
+	echo "  phase elapsed=$((phase_t1 - phase_t0))s temp_post=${t_post}C"
+
+	process_phase_results "$workload" "$backend" "$rotation" "$out_dir" "$t_pre" "$t_post"
+	sleep "$COOLDOWN"
+}
+
+# ----------------------------------------------------------------------
+# Main loop.
+# ----------------------------------------------------------------------
+write_config
+echo "[$(date -uIs)] phase-J-soak START run_id=$SOAK_RUN_ID budget=${BUDGET_SEC}s workloads=${WORKLOADS_CSV} workers=$WORKERS iters=$ITERS"
+echo "[$(date -uIs)] out_dir=$OUT"
+
+ROTATION=0
+LAST_SUMMARY_TS=$(date +%s)
+SUMMARY_INTERVAL=3600  # rewrite summary every hour or every rotation, whichever first
+
+while [ "$STOP_REQUESTED" = 0 ]; do
+	NOW=$(date +%s)
+	ELAPSED=$((NOW - START_TS))
+	if [ "$ELAPSED" -ge "$BUDGET_SEC" ]; then
+		echo "[$(date -uIs)] budget elapsed (${ELAPSED}s >= ${BUDGET_SEC}s); stopping"
+		break
+	fi
+
+	for workload in "${WORKLOADS[@]}"; do
+		[ "$STOP_REQUESTED" = 0 ] || break
+		for backend in kvm-v2 seccomp; do
+			[ "$STOP_REQUESTED" = 0 ] || break
+			run_one_phase "$workload" "$backend" "$ROTATION"
+		done
+	done
+
+	# Rotation summary write.
+	write_summary || true
+	NOW2=$(date +%s)
+	if [ $((NOW2 - LAST_SUMMARY_TS)) -ge "$SUMMARY_INTERVAL" ]; then
+		LAST_SUMMARY_TS=$NOW2
+	fi
+	ROTATION=$((ROTATION + 1))
+done
+
+# ----------------------------------------------------------------------
+# Final summary + clean exit.
+# ----------------------------------------------------------------------
+write_summary
+echo "[$(date -uIs)] phase-J-soak STOP run_id=$SOAK_RUN_ID rotations=$ROTATION elapsed=$((($(date +%s)) - START_TS))s"
+echo "[$(date -uIs)] artefacts at $OUT"
+[ -f "$OUT/THRESHOLD_TRIPPED" ] && echo "[$(date -uIs)] *** failure-rate threshold tripped — see $OUT/scoreboard.jsonl ***" >&2
+exit 0
