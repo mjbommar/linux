@@ -1322,6 +1322,182 @@ kernel rebuilt clean. `git status` shows only the pre-existing
 untracked Phase J pilot files; the working tree's tracked files
 match HEAD.
 
+## §7.6-H probe results (2026-05-07)
+
+Executed §7.6-H: cheap direct test of the text-page TDP / SPTE
+mis-mapping hypothesis surfaced by §7.6-F (the new P=0.30 candidate).
+At UD-arm entry (just after `kvm_v2_ist_frame_read`, before
+`dispatch_relay`), read 16 bytes of user instruction memory spanning
+`HOST_IP - 8 .. HOST_IP + 8` via `copy_from_user`. If TDP has
+mis-mapped the user `.text` page, the kernel-read bytes will differ
+from `objdump -d /usr/bin/stress-ng` at the same VA.
+
+### Instrumentation
+
+Added to the UD arm of `kvm_v2_handle_io_io_ud` in
+`arch/um/backend/kvm-v2/syscall_trap.c`. Filter:
+`current->comm == "stress-ng-vm"` (memcmp of the leading 12 chars).
+Always logs on every UD event for that comm.
+
+```c
+if (!memcmp(current->comm, "stress-ng-vm", 12)) {
+    u64 instr_at_ip[2] = {0, 0};
+    unsigned long uip = regs->gp[HOST_IP];
+    int rc = copy_from_user(instr_at_ip,
+                            (void __user *)(uip - 8),
+                            sizeof(instr_at_ip));
+    pr_emerg("KVMV2-T76H: kvm_v2_ud_textbytes pid=%d comm=%s "
+             "ip=%lx rc=%d bytes_at_ip-8=%016llx %016llx\n",
+             current->pid, current->comm, uip, rc,
+             (unsigned long long)instr_at_ip[0],
+             (unsigned long long)instr_at_ip[1]);
+}
+```
+
+Reproducer (same as §7.6-F): `stress-ng --vm 1 --vm-bytes 16M
+--vm-method=mscan --verify --timeout 5s` under `ncpus=1`, `mem=512M`.
+Captured in `/tmp/t57-7-6-h-probe.log`. Run repeated 3× for
+reproducibility under `umlctl gate loop -W 1 -M 3`.
+
+### Trace — kernel-read bytes match host objdump byte-for-byte
+
+```
+KVMV2-T76H: kvm_v2_ud_textbytes pid=42 comm=stress-ng-vm ip=550000e9d71e rc=0 bytes_at_ip-8=00000826860f3ef9 0008bd41f6efc9c5
+KVMV2-T76H: kvm_v2_ud_textbytes pid=42 comm=stress-ng-vm ip=550000e9d71e rc=0 bytes_at_ip-8=00000826860f3ef9 0008bd41f6efc9c5
+KVMV2-T76H: kvm_v2_ud_textbytes pid=42 comm=stress-ng-vm ip=550000e9d71e rc=0 bytes_at_ip-8=00000826860f3ef9 0008bd41f6efc9c5
+```
+
+(One UD event per boot, three boots — bit-identical across all of them.)
+
+Host objdump of `/usr/bin/stress-ng` at the same VA:
+
+```
+e9d714: 48 83 f9 3e          cmp    $0x3e,%rcx
+e9d718: 0f 86 26 08 00 00    jbe    e9df44 <__stack_chk_fail@@Base+0xdb9b64>
+e9d71e: c5 c9 ef f6          vpxor  %xmm6,%xmm6,%xmm6
+e9d722: 41 bd 08 00 00 00    mov    $0x8,%r13d
+e9d728: 49 89 dc             mov    %rbx,%r12
+```
+
+The 16 bytes covering `0x550000e9d716..0x550000e9d725` (= `HOST_IP - 8
+.. HOST_IP + 8`) are:
+
+```
+offset:  716 717 718 719 71a 71b 71c 71d  71e 71f 720 721 722 723 724 725
+bytes:    f9  3e  0f  86  26  08  00  00   c5  c9  ef  f6  41  bd  08  00
+u64 LE:  ───────── 00000826860f3ef9 ─────  ───────── 0008bd41f6efc9c5 ───
+```
+
+Kernel-read u64[0] = `0x00000826860f3ef9` — **MATCH**.
+Kernel-read u64[1] = `0x0008bd41f6efc9c5` — **MATCH**.
+`rc=0` — `copy_from_user` succeeded; the page is mapped + readable
+from the kernel's view of `current->mm`.
+
+### Verdict — text-page TDP coherence: **RULED OUT**
+
+The kernel-read instruction bytes around the UD site are bit-identical
+to the on-disk binary at the same VA, across three independent boots.
+There is no SPTE mis-mapping pointing the user text page at a wrong
+PFN, no torn / partial page mapping, no stale text content. The bytes
+the CPU was decoding when it raised #UD are exactly what `objdump -d
+/usr/bin/stress-ng` says they should be:
+
+```
+0x550000e9d71e:  c5 c9 ef f6   vpxor %xmm6,%xmm6,%xmm6
+```
+
+This is a **VEX-encoded AVX instruction** (the `c5 c9` prefix is a
+2-byte VEX). On any CPU with AVX support and `XCR0.YMM` enabled, this
+instruction executes silently. The fact that it raises #UD instead is
+strong evidence that **the AVX state is not architecturally enabled**
+at the moment of execution — i.e., either:
+
+  (a) `CR4.OSXSAVE` is clear in the guest's view, OR
+  (b) `XCR0.YMM` is clear (XSAVE-enabled features mask doesn't include
+       YMM), OR
+  (c) The guest entered a state where AVX is disabled mid-task (e.g.,
+       a stale `XSAVE` header from a prior task that didn't have YMM
+       enabled, leaked through `KVM_SET_XSAVE` / sync-regs).
+
+All three of these failure modes are **hypothesis 2** territory —
+FPU/XSAVE state corruption (probe §7.6-E). The §7.6-H probe upgrades
+hypothesis 2 from "primary suspect" to **near-certain**: the bytes
+the CPU is decoding are correct, the GPRs/stack are clean, the
+control flow is correct (linear forward fall-through from the loop
+end into the next instruction), so the only architectural state
+that can plausibly cause a VEX-encoded AVX instruction to #UD is
+the FPU/XSAVE register file — specifically the XCR0/CR4.OSXSAVE
+configuration bits or the XSAVE header.
+
+### What this means for the remaining hypotheses
+
+§7.6-F left four candidates standing. §7.6-H now reshuffles:
+
+1. ~~**Stack/heap memory corruption**~~ — RULED OUT by §7.6-F.
+
+2. **XSAVE / FPU residue + AVX-disable** (was P~=0.55) → now
+   **PRIMARY (P~=0.85)**. The §7.6-H byte match plus the fact that
+   the faulting instruction is *specifically* a VEX-encoded AVX op
+   (`vpxor %xmm6,%xmm6,%xmm6`) is direct evidence that AVX
+   architectural enablement is broken at UD time. The TARGET_CLONES
+   IFUNC angle from §7.6-D's hypothesis-2 framing is no longer
+   needed — the CPU isn't taking a "wrong dispatch into AVX-only
+   helper", it's taking the *intended* AVX path and that path
+   raises #UD because AVX isn't enabled. Same root cause class
+   (FPU/XSAVE leakage), simpler proximate failure mode.
+
+3. ~~**Post-loop instruction-stream corruption**~~ (was P=0.30, NEW
+   in §7.6-F) → **RULED OUT (this update).** The bytes match
+   objdump. `copy_from_user` succeeds. No text-page TDP mis-mapping.
+
+4. **Sub-field of `KVM_CAP_SYNC_REGS` not synced** (P~=0.15) →
+   unchanged. Still possible — if the SYNC_REGS field that's *not*
+   being marshalled is `cr4` or `xcr0`-equivalent (the guest's
+   xstate enable vector), this would explain hypothesis 2 directly.
+   In that sense hypotheses 2 and 4 may be the same bug viewed from
+   different angles. §7.6-G ablation (turn off SYNC_REGS, fall
+   back to ioctl-driven `KVM_GET/SET_*REGS`) would discriminate:
+   if the bug disappears with SYNC_REGS off, the un-synced field
+   is the smoking gun.
+
+### Concrete next probes (in order of cost)
+
+**§7.6-E (NOW MANDATORY): instrument `KVM_GET_FPU` / `KVM_SET_FPU`.**
+Specifically log:
+- `XCR0` (via `KVM_GET_XCRS` / `s.regs.sregs2.xcr0` — or whatever
+  field is exposed by SYNC_REGS).
+- `CR4.OSXSAVE` bit (= bit 18 of `s.regs.sregs.cr4`).
+- The XSAVE header at `KVM_GET_XSAVE` offset 512..575 (xstate_bv
+  + xcomp_bv).
+- MXCSR.
+
+Snapshot at vCPU-create, at every dispatch entry/exit, and at the
+UD point. If XCR0.YMM (bit 2) or CR4.OSXSAVE (bit 18) clears
+between the loop's last #PF and the UD, hypothesis 2 is confirmed
+and the fix-class is "ensure those bits are set on every
+KVM_RUN re-entry from kernel context." The likely culprit is the
+NM_TS_BYPASS path (memo §SMP-T22 / SMP-T55) or the v1→v2 marshal
+of `current->thread.fpu`'s XSAVE area into `kvm_run->s.regs`.
+
+**§7.6-G: turn off `KVM_CAP_SYNC_REGS`.** Cheap ablation. If the
+hang/UD goes away, the un-synced SREGS sub-field that breaks AVX
+enablement is the bug. Carry forward as confirmation/refutation
+of hypothesis 4.
+
+**§7.4 root-cause work** (Phase J Tier-1 stress-ng): blocked on
+§7.6-E producing a positive XCR0 / CR4 / XSAVE-header drift
+signature. Once that's in hand, the fix is mechanical (re-arm
+the missing bits at the appropriate marshal boundary).
+
+### Probe code reverted
+
+Per the §7.6-H "investigation only" budget, the instrumentation in
+`arch/um/backend/kvm-v2/syscall_trap.c` was reverted via
+`git checkout -- arch/um/backend/kvm-v2/syscall_trap.c` and the
+kernel rebuilt clean. `git status` shows only the pre-existing
+untracked Phase J pilot files; the working tree's tracked files
+match HEAD.
+
 ## 8. Status
 
 - T57 is **characterised, not fixed**.
@@ -1338,19 +1514,31 @@ match HEAD.
   surfaced: TDP/page-table coherence corrupting the user buffer
   (P=0.45), and TARGET_CLONES IFUNC mis-resolution from FPU residue
   (P=0.35).
-- §7.6-F (this update) **ruled out** the user-stack TDP/page-table
+- §7.6-F **ruled out** the user-stack TDP/page-table
   coherence sub-hypothesis. The user-stack saved RIP/RBP at
   `*RSP` is bit-stable across 100 #PF dispatches and the post-loop
   UD. The §7.6-D-inferred 3032-byte stack descent was an artefact
   of post-`do_signal` SP rewrite (the signal frame), NOT a real
   user-mode descent through call frames — at UD-frame-read time
   user_rsp is identical to the loop body's RSP, and R9 shows
-  exact 16 MiB loop completion. Remaining candidates: FPU/XSAVE
-  residue (now P~=0.55, primary; probe §7.6-E), instruction-stream
-  TDP mis-mapping (P~=0.30, NEW, probe §7.6-H), KVM_CAP_SYNC_REGS
-  sub-field aliasing (P~=0.15; probe §7.6-G).
+  exact 16 MiB loop completion.
+- §7.6-H (this update) **ruled out** the text-page TDP mis-mapping
+  sub-hypothesis. The 16 instruction bytes around `0x550000e9d71e`
+  read from kernel context via `copy_from_user` match `objdump -d
+  /usr/bin/stress-ng` byte-for-byte (`bytes_at_ip-8 =
+  00000826860f3ef9 0008bd41f6efc9c5`) across three independent
+  boots; `rc=0` confirms the page is mapped + readable. The
+  faulting instruction is exactly what the disassembly says it is:
+  `c5 c9 ef f6` = `vpxor %xmm6,%xmm6,%xmm6`, a VEX-encoded AVX
+  instruction. That a valid AVX op raises #UD points
+  near-deterministically at FPU/XSAVE state corruption — XCR0.YMM
+  cleared, CR4.OSXSAVE cleared, or XSAVE-header `xstate_bv`
+  missing YMM. Remaining candidates: FPU/XSAVE residue / AVX-disable
+  (P~=0.85, PRIMARY, probe §7.6-E), KVM_CAP_SYNC_REGS sub-field
+  aliasing (P~=0.15; probe §7.6-G — possibly same root cause as the
+  FPU/XSAVE residue if the un-synced field IS XCR0 / CR4.OSXSAVE).
 - Phase J pilot (`phase-J-pilot-2026-05-05.md`) can keep stress-ng
-  excluded from its IPC-only profile until §7.6-E / §7.6-H land.
+  excluded from its IPC-only profile until §7.6-E lands.
 - The 16 PASS-on-v2 methods (notably `gray`, `walk-1d`, `read64`,
   `write64`) are safe to add to a future Phase J Tier-2 stress profile
   if we want stress-ng coverage now without waiting for the fix.
