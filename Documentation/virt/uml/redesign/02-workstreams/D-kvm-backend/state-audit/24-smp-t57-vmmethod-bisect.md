@@ -690,14 +690,220 @@ not the handler entry).
   the trap class on a future probe run, log `regs->faultinfo.trap_no`
   at `_ist_frame_write` entry alongside `caller_pc`.
 
+## §7.6 follow-up probe results (2026-05-07)
+
+Executed §7.6 (SYSCALL marshal-out instrumentation) on
+`~/src/uml-builds/uml-smp-t41fix/linux`. Probe extended to **all** IO-trap
+arms (PF/GP/UD/DE/OF/NM/SYS) so the whole pre-SIGILL flow is visible,
+not only the SYSCALL fast path.
+
+### §7.6-A Instrumentation
+
+A static helper `kvm_v2_diag_marshal_log` was inserted just before
+`kvm_v2_handle_io_pf` and called once at the tail of every arm,
+immediately after each `kvm_v2_marshal_to_kvm_regs` (and, for the
+SYSCALL arm, after the explicit RCX/R11 overwrite at line 2354-2355):
+
+```c
+static void kvm_v2_diag_marshal_log(const char *arm,
+                                    struct uml_pt_regs *regs,
+                                    long syscall_nr)
+{
+        static atomic_t diag_count = ATOMIC_INIT(0);
+        unsigned long ip = regs->gp[HOST_IP];
+        bool in_window;
+        int n;
+
+        in_window = (ip >= 0x550000e9d6afUL - 0x100 &&
+                     ip <= 0x550000e9d71eUL + 0x100);
+
+        n = atomic_inc_return(&diag_count);
+        if (n > 50000 && !in_window)
+                return;
+
+        pr_emerg("kvm_v2_marshal_out: arm=%s syscall_nr=%ld host_ip=%lx host_cx=%lx host_r11=%lx host_sp=%lx host_ax=%ld pid=%d\n",
+                 arm, syscall_nr, ip, regs->gp[HOST_CX],
+                 regs->gp[HOST_R11], regs->gp[HOST_SP],
+                 (long)regs->gp[HOST_AX], current->pid);
+}
+```
+
+Call sites: `_pf` after line 1814, `_gp` after 1861, `_ud` after 1927,
+`_de` after 1963, `_of` after 2009, `_nm` after 2069, `_sys` after the
+RCX/R11 overwrite at 2354-2355. Probe reverted before findings written;
+`git status` clean for `arch/um/backend/`.
+
+(First run with a 1000-event bound suppressed too many post-loop
+events — the mscan loop hits `0x550000e9d6af` on every PF (in_window),
+but the UD-arm marshal-out lands at the **handler entry**
+`0x5500000dde70` which is OUT of window, so the 1000-bound dropped it.
+Re-run with 50000-event bound captured the UD event.)
+
+### §7.6-B Reproducer trace — the SIGILL never traverses the SYSCALL arm
+
+`stress-ng --vm 1 --vm-bytes 16M --vm-method=mscan --verify --timeout 5s`,
+ncpus=1, kvm-v2 backend, log `/tmp/t57-7-6-probe2.log`, **16604 lines,
+16334 marshal-out events**. Distribution:
+
+| arm | count |
+|-----|------:|
+| pf  | 5790  |
+| sys | 7013  |
+| nm  | 3254  |
+| ud  | **1** |
+| gp/de/of | 0 |
+
+For the failing stressor child **pid=33**:
+
+- 4094 events total, **0 SYSCALL events**, **0 GP/DE/OF events**.
+- 4093 of 4094 events are page-faults at the mscan write loop instruction
+  `host_ip=0x550000e9d6af`, with **constant** `host_sp=0x7f7ffffa1100`,
+  `host_cx=0xffffffffffffefff`, `host_r11=0x1000000` for every iteration.
+- `host_ax` (= mscan's working buffer address) advances exactly 4096
+  bytes per PF, from `0x42210000` → `0x432115c0` (16 MiB span — full
+  mscan loop).
+- The very next event after the last PF is **the UD**, at marshal-out
+  time showing `host_ip=0x5500000dde70` (= the SIGILL handler entry,
+  per memo §7.3 disassembly of stress-ng), with
+  `host_sp=0x7f7ffffa0528` (3032 bytes lower than the loop RSP — i.e.,
+  the user fell through several call frames between the loop exit and
+  the UD site).
+
+Quoted verbatim, last PF + UD:
+
+```
+kvm_v2_marshal_out: arm=pf  syscall_nr=-1 host_ip=550000e9d6af host_cx=ffffffffffffefff host_r11=1000000 host_sp=7f7ffffa1100 host_ax=1126256640 pid=33
+kvm_v2_marshal_out: arm=ud  syscall_nr=-1 host_ip=5500000dde70 host_cx=ffffff           host_r11=1000000 host_sp=7f7ffffa0528 host_ax=0          pid=33
+kvm_v2_marshal_out: arm=pf  syscall_nr=-1 host_ip=5500000ddcd2 host_cx=55000101065a     host_r11=1000000 host_sp=7f7ffffa0500 host_ax=0          pid=33
+```
+
+`host_cx=0xffffff` on the UD frame is the user's RCX at UD time =
+`16777215 = 16 MiB - 1` — i.e., **mscan's loop counter at the very
+last iteration**, preserved across the trap. It is *not* a kernel-
+written value: this is the user's GPR, captured by the IST frame at
+fault delivery.
+
+The first `arm=sys` event for pid=33 appears **AFTER** the
+`stress-ng: debug: [33] caught SIGILL` line (it's the handler running
+`_exit`/`write` to print the diagnostic). Pre-SIGILL, **pid=33 never
+executed a syscall under kvm-v2**.
+
+### §7.6-C Hypothesis disposition
+
+**§7.5 hypothesis 1 (SYSRETQ-RCX corruption, P=0.45) is RULED OUT**
+for this reproducer. The proposed mechanism required the SYSCALL
+arm's marshal-out at lines 2354-2355 to be reached at least once
+between mscan loop exit and UD; the trace shows zero such events.
+`run->s.regs.regs.rcx = regs->gp[HOST_IP]` cannot be the mutator
+because the failing path never executed it.
+
+**§7.5 hypothesis 4 (rt_sigreturn-via-IST) is independently RULED
+OUT** by the same evidence: no syscall, hence no rt_sigreturn.
+
+**§7.5 hypothesis 2 (user-mode stack canary / saved-RBP corruption,
+P=0.30) is now the leading candidate**, P→0.70. The 4093 #PF burst
+exclusively hit the mscan write loop at one RIP with one RSP, so any
+kernel-induced state corruption would have to occur via the PF
+arm's marshal-out path (`segv_handler` → `interrupt_end` →
+`kvm_v2_ist_frame_write` → `kvm_v2_marshal_to_kvm_regs`). The
+previous probe (§7.2) showed `_ist_frame_write` did NOT mutate
+`regs->gp[HOST_IP]` on these PFs (delta=0 on all 5789 PF events).
+But the PF marshal-out does NOT explicitly preserve user RCX/R11/RSP/
+RBP/FS.base/GS.base/XSAVE-area state across the trap — those flow
+through `kvm_v2_ist_frame_read` + `kvm_v2_marshal_to_kvm_regs` only
+for HOST_IP/HOST_SP/HOST_EFLAGS, plus whatever `kvm_v2_marshal_to_kvm_regs`
+copies. **A leak of one of those on the PF path would corrupt user
+state silently** until the loop exit's `ret` or `cmp %fs:0x28,%rax`
+saw the wrong value and either jumped wrong or fell through to a
+mid-instruction in libc.
+
+**Hypothesis 3 (do_signal setup_rt_frame off-by-instruction) is
+also implausible** for the same reason — no signal was delivered
+during the loop (only SIGSEGV-fix-via-PF, which doesn't queue any
+user-visible signal).
+
+### §7.6-D Where the bug is now suspected (next probe)
+
+The state leak is along the **#PF marshal-in / marshal-out** path,
+specifically in one of:
+
+1. `kvm_v2_marshal_from_kvm_regs` (vcpu.c) at PF arm entry — does it
+   correctly propagate ALL GPRs, or does it skip e.g. RBP / R12-R15
+   that the stack-canary-cmp sequence at the loop epilogue depends
+   on?
+2. `kvm_v2_marshal_to_kvm_regs` at PF arm exit (line 1814) — same
+   question.
+3. The IST stack write (`kvm_v2_ist_frame_write`) handles RIP/CS/
+   RFLAGS/RSP/SS only. The user's other GPRs are restored from
+   `run->s.regs.regs.*` via the SVM/KVM_RUN sync_regs path. If the
+   sync_regs round-trip drops any GPR on the floor (e.g., a 32-bit
+   truncation, a missing union member), 4093 PFs in a tight loop
+   would re-corrupt the same register every iteration until the
+   accumulated drift broke the stack canary check.
+4. **#NM (lazy-FPU) cross-PF interaction**. The trace shows 297 #NM
+   events for pid=1 (init) and 3254 #NM globally. None for pid=33
+   in the mscan loop, but `nm_ts_bypass` is per-task and the FPU
+   state machine could be in an unexpected residue state at the
+   moment mscan's TARGET_CLONES IFUNC-resolved write helper executes
+   AVX/SSE code post-loop. The UD's mid-instruction landing (per
+   memo §7.4: 0x6f bytes past the write loop, in libc text) is
+   consistent with an AVX/SSE function epilogue executing one
+   wrong-XSAVE-state instruction.
+
+**Concrete next probe**: instrument `kvm_v2_marshal_from_kvm_regs`
+and `kvm_v2_marshal_to_kvm_regs` in vcpu.c to log every GPR
+(RAX..R15, RBP, RSP, RIP, RFLAGS, FS_BASE, GS_BASE) on entry and
+exit of the PF arm for pid=33. Walk the log for any GPR that drifts
+across two consecutive PFs at `host_ip=0x550000e9d6af` with the same
+`host_ax` step. Any non-monotonic GPR (other than HOST_AX, the
+mscan buffer pointer) is the leak.
+
+Alternative cheap probe: rebuild stress-ng with `-mno-avx -mno-avx2
+-mno-sse4.2 -mno-fma` (per §5.3 test). If the SIGILL stops, the bug
+is XSAVE/FPU-state-residue-across-PF (a sibling of T26/T27, but on
+the PF arm not the cross-task switch path); if it persists, it's a
+GPR sync_regs path leak.
+
+### §7.6-E Open questions
+
+- Memo §7.4 stated the UD landed at `0x550000e9d71e`. The §7.6 trace
+  shows the UD-arm marshal-out at `0x5500000dde70` (handler entry)
+  because `do_signal` rewrote HOST_IP between `_ist_frame_read` and
+  the marshal-out logging point. The original UD `frame.user_rip`
+  is not captured by this probe — would need to log `frame.user_rip`
+  in `kvm_v2_handle_io_ud` before `dispatch_relay`. Cross-checking
+  against §7.3's IST-frame schema dump confirms the UD site is
+  `0x550000e9d71e` (within the window, 0x6f bytes past the loop).
+
+- The PF-arm tail-merge at `+0x83e` from the §7.2 probe was
+  attributed to `_gp/_de/_of/_nm/_ud` (5 arms sharing a call site).
+  The §7.6 arm distribution (UD=1, GP/DE/OF=0, NM=3254) shows the
+  `+0x83e` events are dominated by NM, not by the rare UD/GP/DE/OF.
+  This rewrites the §7.2 attribution: the 5790 NM/UD events are
+  almost entirely #NM (lazy-FPU re-arms), making the "tail-merged
+  exception" framing in §7.2 an artefact of the disassembly's
+  call-site folding rather than evidence of frequent SIGILL-class
+  trips.
+
+- Why does this fail only on dense vm-methods? Same answer as §7.5:
+  dense methods generate the long PF burst that gives the leak time
+  to accumulate. Sparse methods complete each iteration before any
+  GPR/XSAVE drift becomes load-bearing for a function epilogue.
+
 ## 8. Status
 
 - T57 is **characterised, not fixed**.
-- §6.1 + §6.2 (this section) **ruled out** kvm_v2_ist_frame_write
-  as the RIP mutator and re-cast the suspect class as a SYSRETQ /
+- §6.1 + §6.2 **ruled out** kvm_v2_ist_frame_write as the RIP
+  mutator and re-cast the suspect class as a SYSRETQ /
   signal-marshal-out path issue.
+- §7.6 (this section) **further ruled out** the SYSCALL marshal-out
+  hypothesis: the failing path never traverses the SYSCALL arm at
+  all. The remaining suspect class is **GPR / XSAVE state leak on
+  the #PF marshal-in/marshal-out round-trip** (vcpu.c
+  `kvm_v2_marshal_*_kvm_regs`, or sync_regs sub-field handling).
+  Next probe is §7.6-D.
 - Phase J pilot (`phase-J-pilot-2026-05-05.md`) can keep stress-ng
-  excluded from its IPC-only profile until §7.6 lands.
+  excluded from its IPC-only profile until §7.6-D lands.
 - The 16 PASS-on-v2 methods (notably `gray`, `walk-1d`, `read64`,
   `write64`) are safe to add to a future Phase J Tier-2 stress profile
   if we want stress-ng coverage now without waiting for the fix.
