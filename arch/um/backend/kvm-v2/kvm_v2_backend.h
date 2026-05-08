@@ -388,6 +388,41 @@ struct kvm_v2_vcpu {
 	struct mm_struct   *last_mm;
 
 	/*
+	 * SMP-T55 fix (2026-05-07): per-vCPU FPU-dirty epoch flag.
+	 *
+	 * Predicates the post-vmexit `KVM_GET_FPU` so we can skip it when
+	 * the vCPU's guest FPU is bit-identical to the per-task
+	 * `iotrap_fpu` snapshot. Restores Phase H.2's lazy-FPU win that
+	 * SMP-T26/T27 (commit `76b1d98b2006`) reverted to plug the
+	 * cross-task XMM leak — but using the correct semantic
+	 * (per-vCPU dirty epoch, not per-dispatch CR0.TS).
+	 *
+	 * `fpu_dirty=true` => vCPU's guest_fpu may have diverged from
+	 * `fpu_owner_task`'s `iotrap_fpu`. Set on:
+	 *   - vcpu_create_one (initial — force the first GET).
+	 *   - cross-task arrival (`fpu_owner_task != current` in
+	 *     load_user_sregs) — a different task may have run.
+	 *   - post-vmexit `sregs.cr0 & X86_CR0_TS == 0` — guest used FPU.
+	 *   - kvm_v2_handle_io_nm clearing CR0.TS (next dispatch will
+	 *     execute the user FPU instruction the handler is unblocking).
+	 *   - kvm_v2_fpu_install_on_first_run after a fresh KVM_SET_FPU
+	 *     from `fpu_valid` (per memo state-audit/23 §5 gotcha #2 —
+	 *     re-capture the installed snapshot back into iotrap_fpu so
+	 *     the per-task slot stays authoritative).
+	 *
+	 * `fpu_owner_task` records which task `fpu_dirty=false` is
+	 * relative to. Belt-and-suspenders against any path we missed
+	 * marking dirty: skip the GET only when both `fpu_dirty=false`
+	 * AND `fpu_owner_task == current`. Updated after every successful
+	 * `KVM_SET_FPU` (pre-run install of iotrap_fpu) and `KVM_GET_FPU`
+	 * (post-vmexit capture).
+	 *
+	 * Memo: state-audit/23-smp-t55-perf-regression-plan.md option (a).
+	 */
+	bool		    fpu_dirty;
+	struct task_struct *fpu_owner_task;
+
+	/*
 	 * Phase H gadget per-vCPU state page (2026-05-04, Phase 2).
 	 *
 	 * 4KB page mapped at KVM_V2_GADGET_STATE_GVA(cpu) via

@@ -937,6 +937,14 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	v->cpuid_primed = false;
 
 	/*
+	 * SMP-T55: at vcpu create the vCPU's guest FPU is whatever
+	 * KVM defaulted; not yet matched to any task's snapshot.
+	 * Force the first post-vmexit GET by starting dirty.
+	 */
+	v->fpu_dirty       = true;
+	v->fpu_owner_task  = NULL;
+
+	/*
 	 * Phase C.3: enable KVM_CAP_SYNC_REGS for this vCPU. With
 	 * kvm_valid_regs set at create time, every subsequent KVM_RUN
 	 * populates kvm_run->s.regs.{regs,sregs} into the mmap'd struct
@@ -1342,6 +1350,17 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 		vcpu->last_task = current;
 		vcpu->last_mm   = current->mm;
 	}
+
+	/*
+	 * SMP-T55: cross-task arrival on this vCPU means the vCPU's
+	 * guest FPU is whatever the previous task left. Mark dirty so
+	 * the post-vmexit GET captures into the new task's iotrap_fpu
+	 * slot (or the SET below installs the new task's snapshot if
+	 * its iotrap_fpu_valid is set, which then matches and we go
+	 * fpu_dirty=false again at the SET site).
+	 */
+	if (vcpu->fpu_owner_task != current)
+		vcpu->fpu_dirty = true;
 
 	/*
 	 * Force a guest-TLB flush by toggling CR4.PGE on every dispatch.
@@ -2007,6 +2026,13 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
 				       (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
 		current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
+		/*
+		 * SMP-T55: vCPU's guest FPU now bit-identical to current's
+		 * iotrap_fpu. Mark clean and record ownership; the post-
+		 * vmexit GET below can skip if the guest didn't touch FPU.
+		 */
+		vcpu->fpu_dirty       = false;
+		vcpu->fpu_owner_task  = current;
 	}
 
 	KVMV2_TRACE(KVMV2_OP_POST_FPU_INSTALL, regs, run, vcpu);
@@ -2080,9 +2106,46 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		 * also restoring per-task FPU when iotrap_fpu_valid is true
 		 * (separate fix in syscall_trap.c).
 		 */
-		int fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
-					      (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
-		current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
+		/*
+		 * SMP-T55 (2026-05-07): gate the GET on the per-vCPU
+		 * dirty epoch. Skip only when (a) the vCPU's FPU has
+		 * not been written since our last SET/GET (fpu_dirty=false)
+		 * AND (b) the slot we'd write into still belongs to current
+		 * (fpu_owner_task==current). Both arms must hold; the
+		 * owner_task check is belt-and-suspenders against any
+		 * path that mutates guest_fpu without setting fpu_dirty.
+		 *
+		 * Mark dirty before deciding: if KVM_RUN exited with
+		 * CR0.TS=0 the guest issued an FP/SSE/AVX instruction;
+		 * the GET must run to capture the resulting state.
+		 */
+		bool fpu_was_used = !(run->s.regs.sregs.cr0 & X86_CR0_TS);
+
+		if (fpu_was_used)
+			vcpu->fpu_dirty = true;
+
+		if (vcpu->fpu_dirty || vcpu->fpu_owner_task != current) {
+			struct kvm_fpu *iotrap = &current->thread.arch.kvm_v2.iotrap_fpu;
+			int fpu_rc;
+
+			fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+						  (unsigned long)iotrap);
+			current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
+			if (fpu_rc == 0) {
+				vcpu->fpu_dirty       = false;
+				vcpu->fpu_owner_task  = current;
+			}
+		}
+		/*
+		 * else: skip — the vCPU's guest FPU is still bit-identical
+		 * to current->thread.arch.kvm_v2.iotrap_fpu (set by the
+		 * pre-run KVM_SET_FPU above, or by the previous dispatch's
+		 * post-vmexit GET, or — if the very first dispatch — never
+		 * because we start fpu_dirty=true and force the first GET).
+		 * iotrap_fpu_valid carries over from the last successful GET,
+		 * so the next dispatch's pre-run SET still finds it true and
+		 * re-installs.
+		 */
 	}
 
 	/*
@@ -2667,6 +2730,17 @@ static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu)
 			return rc;
 		a->kvm_v2.fpu_valid = false;	/* one-shot */
 		was_valid = 1;
+		/*
+		 * SMP-T55: we just installed a fresh fork/switch-in FPU
+		 * snapshot. The vCPU's guest FPU now matches `a->kvm_v2.fpu`,
+		 * but the per-task `iotrap_fpu` slot does NOT yet — the post-
+		 * vmexit GET must run this dispatch to populate iotrap_fpu so
+		 * the next pre-run SET (and any cross-task arrival on this
+		 * vCPU) finds an authoritative per-task slot. Force dirty;
+		 * also record ownership so cross-task arrival logic is happy.
+		 */
+		vcpu->fpu_dirty       = true;
+		vcpu->fpu_owner_task  = current;
 	} else {
 		/*
 		 * E.4 hypothesis test (2026-04-29): leave per-vCPU FPU

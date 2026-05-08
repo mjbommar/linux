@@ -2054,6 +2054,15 @@ static int kvm_v2_handle_io_nm(struct uml_pt_regs *regs,
 	 * this flag, skip the TS re-arm, and clear the flag. */
 	current->thread.arch.kvm_v2.nm_ts_bypass = true;
 
+	/*
+	 * SMP-T55: the next KVM_RUN will execute the user FPU instruction
+	 * the #NM handler is unblocking (we cleared TS above). That touches
+	 * the vCPU's guest FPU. Force the post-vmexit GET regardless of
+	 * the post-run TS readback so iotrap_fpu captures the resulting
+	 * state.
+	 */
+	vcpu->fpu_dirty = true;
+
 	/* Drain pending signal/scheduler work — same pattern as peers. */
 	interrupt_end();
 
