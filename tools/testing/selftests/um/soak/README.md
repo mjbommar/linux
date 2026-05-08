@@ -3,8 +3,20 @@
 Multi-workload realistic stress for the UML kvm-v2 backend, run side-by-side
 against seccomp for parity. Built on top of `umlctl gate-loop`.
 
-Companion of:
-- `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` — design + first-pilot results
+Two drivers ship here:
+
+- **`run-pilot.sh`** — interactive one-shot smoke: pick a workload (or "all"),
+  sweep both backends, dump a CSV summary. The "smoke a workload and report"
+  audience.
+- **`run-soak-daemon.sh`** — long-running daemon: signal-driven, append-only
+  scoreboard.jsonl + rolling Wilson-CI summary.md, configurable wall-clock
+  budget, restart-on-fail, threshold-trip stop. The "run for 24h continuous"
+  audience. Spec at
+  `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/phase-J-design-2026-05-07.md` §2.
+
+Companion docs:
+- `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` — pilot design + first-pilot results
+- `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/phase-J-design-2026-05-07.md` — daemon-mode + Tier 1/2/3 + LTP design
 - `Documentation/virt/uml/redesign/06-sequencing/milestones.md` — M11 (kvm-v2 100ns) is closed; this rig works toward M12 (full Phase J)
 
 ## What's in here
@@ -13,8 +25,10 @@ Companion of:
 |------|------|
 | `memcheck.c` | anon-mmap pattern verifier (memtester replacement). Walking-bit + 7 constant-fill patterns, miscompare counter, exit code = total bad qwords. |
 | `iocheck.c` | write/fsync/read/verify loop on tmpfs (fio replacement). Per-block deterministic key; catches pagecache / writeback / fsync ordering bugs. |
-| `*.toml.template` | one Umlfile per workload; `{{KERNEL}}` and `{{BACKEND}}` substituted by `run-pilot.sh`. |
-| `run-pilot.sh` | driver: parallel `umlctl gate loop`, per-backend sweep, k10temp throttle, cooldown between workloads. |
+| `tier1-smoketest.py` | Tier 1 host-installed Python C-extension smoke (requests + cryptography; numpy deferred — see "Known issues" below). 0.16 s on host, 2-5 s in UML. |
+| `*.toml.template` | one Umlfile per workload; `{{KERNEL}}`, `{{BACKEND}}`, and `{{SOAK_DIR}}` substituted by both drivers. |
+| `run-pilot.sh` | one-shot driver: parallel `umlctl gate loop`, per-backend sweep, k10temp throttle, cooldown between workloads. |
+| `run-soak-daemon.sh` | daemon driver: same spawn pattern as run-pilot, plus wall-clock budget, scoreboard.jsonl, summary.md, restart-on-fail, signal handlers (SIGTERM/SIGINT clean stop, SIGUSR1 force summary refresh). |
 
 The two C tools are intentionally tiny (~50 / ~80 LoC) so they build static
 without external deps when an offline / restrictive host can't `apt install
@@ -31,6 +45,7 @@ load knobs.
 | `stress-ng` | futex/pipe/switch IPC + `--verify` | ~10 s | `--vm` disabled — see SMP-T57 |
 | `cpython-soak` | Python regrtest curated subset (signal/io/mmap/fork/threadsignals/etc.) | ~60-120 s | Tight set picked to fit ~60 s under UML overhead |
 | `kbuild-tiny` | tinyconfig UML kernel build (fork-storm / pipe / file I/O) | ~3-5 min | `KBUILD_OUTPUT=/tmp/build` to avoid hostfs write fan-out |
+| `tier1-pylibs` | host-installed Python C-extension exercise (requests URL+JSON+headers, cryptography AES-256-CBC roundtrip on 4 KiB block) | ~5-10 s | numpy deferred — see "Known issues" |
 
 ## Running
 
@@ -53,6 +68,39 @@ THERMAL_PAUSE_C=85 THERMAL_RESUME_C=70 COOLDOWN=60 \
 
 Output goes to `/tmp/soak-pilot-<unix-ts>/<workload>-<backend>/p0_default/wN/`
 plus a CSV summary at `/tmp/soak-pilot-<unix-ts>/_summary.csv`.
+
+## Running — daemon mode (long soak)
+
+```sh
+# 24 h continuous against all default workloads:
+UML_KERNEL=/path/to/uml/linux \
+  ./tools/testing/selftests/um/soak/run-soak-daemon.sh \
+       --budget-sec 86400 --workers 2 --iters-per-rotation 10
+
+# 1 h focused soak on Tier 1 only, custom output dir:
+UML_KERNEL=... ./run-soak-daemon.sh \
+       --budget-sec 3600 --workloads tier1-pylibs \
+       --workers 1 --iters-per-rotation 5 \
+       --out /var/tmp/phase-J-tier1-1h
+
+# Stop early: kill -TERM <pid>; the daemon finishes the in-flight workload
+# phase, writes a final summary, exits cleanly.
+# Force a summary refresh without stopping: kill -USR1 <pid>.
+```
+
+The daemon writes `phase-J-soak-<ISO>/{config.json,scoreboard.jsonl,
+summary.md,logs/}`. `summary.md` carries a rolling Wilson-95 % CI table
+per (workload, backend); `scoreboard.jsonl` is one JSON object per
+iteration with the same shape as `umlctl gate run`'s rows + soak-specific
+fields (`soak_run_id`, `rotation_idx`, `iter_idx_within_workload`,
+`max_temp_c_pre/post`).
+
+Threshold-trip stop: if a (workload, backend) tuple's rolling-window
+failure rate exceeds `--fail-threshold-pct` over the last
+`--fail-threshold-window` iters, the daemon writes a `THRESHOLD_TRIPPED`
+sentinel into the output dir and exits. CI integrations can watch for
+that file. Override with `--continue-on-fail-threshold` for
+known-flaky-but-soak-anyway scenarios.
 
 ## Thermal protection
 
@@ -115,3 +163,42 @@ One follow-up: SMP-T57 — `stress-ng --vm --verify` trips on kvm-v2 only
 (seccomp passes). Disabled in the IPC-only stress-ng template; the failure
 mode (`stress-ng: info: 0x... not readable` + exit=2) survives a vm-method
 bisect that hasn't been driven yet.
+
+## Tier 1 results (2026-05-07, commit 86f6910dcb3f)
+
+`tier1-pylibs.toml.template` exercises requests + cryptography in two
+sequential Python processes (~5 s/iter on Zen 4, both backends).
+Verified end-to-end via `run-soak-daemon.sh`:
+
+```
+60 s budget, W=1, M=2, both backends
+-> 5 rotations × 2 backends × 2 iters = 20 PASS rows
+-> Wilson 95 % CI [62.34 %, 100.00 %] at n=10 per (workload, backend)
+```
+
+## Known issues / deferred work
+
+- **SMP-T57** — `stress-ng --vm --verify` SIGILL on kvm-v2 only. Five
+  probe cycles narrowed the suspect: ruled out IST-write,
+  SYSRETQ-RCX, GPR drift, and user-stack TDP coherence. Current
+  primary hypothesis: FPU/XSAVE residue (P=0.55). New cheap candidate:
+  user-text-page TDP mis-mapping (P=0.30). Workload disabled in the
+  IPC-only `stress-ng.toml.template`. Track at
+  `Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/state-audit/24-smp-t57-vmmethod-bisect.md`.
+
+- **`tier1-pylibs` numpy deferred** — `import cryptography` followed
+  later by `import numpy` reproducibly fails inside UML on BOTH
+  backends with a misleading "Error importing numpy: you should not
+  try to import numpy from its source directory" (the actual cause is
+  `from numpy.__config__ import show_config` raising ImportError on
+  the second Python invocation). NOT a v2 regression — UML-environment
+  / hostfs / Python C-extension chain interaction. Current Tier 1
+  rotation runs requests + cryptography only. The `tier1-smoketest.py`
+  ships the numpy test for ad-hoc debugging via
+  `python3 tier1-smoketest.py numpy`.
+
+- **Tier 2 / Tier 3 / LTP runner** — designed at
+  `phase-J-design-2026-05-07.md` §3.2 / §3.3 / §4 but not yet
+  implemented. Tier 2 needs a host-side `pip download` bootstrap step;
+  Tier 3 needs a `CONFIG_UML_NET_VECTOR=y` rebuild + tap setup; LTP
+  needs the curated KEEP/SKIP list.
