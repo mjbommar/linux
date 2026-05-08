@@ -10949,4 +10949,59 @@ plan.
 
 ---
 
+## D119 (2026-05-07) — SMP-T55 closed: per-vCPU FPU-dirty epoch flag
+
+**Context.** D118 surfaced SMP-T55 as a `perf-py-startup` gate
+failure (ratio 1.250 vs 1.20 ceiling on Zen 4) and committed to
+fixing rather than loosening the gate. Memo `state-audit/23-smp-t55-
+perf-regression-plan.md` enumerated three options; option (a)
+per-vCPU FPU-dirty epoch flag was recommended.
+
+**What landed.**
+
+- Commit `fd2f9639b0ce` adds two fields to `struct kvm_v2_vcpu`:
+  - `fpu_dirty` (bool): true when vCPU's `guest_fpu` may have
+    diverged from the per-task `iotrap_fpu` snapshot.
+  - `fpu_owner_task` (`struct task_struct *`): which task
+    `fpu_dirty=false` is relative to. Belt-and-suspenders against
+    any path that mutates `guest_fpu` without setting `fpu_dirty`:
+    skip the post-vmexit GET only when both `fpu_dirty=false` AND
+    `fpu_owner_task == current`.
+- Mark dirty on: vcpu_create_one (force first GET); cross-task
+  arrival in `load_user_sregs`; post-vmexit `cr0 & X86_CR0_TS == 0`
+  (guest used FPU); `kvm_v2_handle_io_nm` clearing TS;
+  `kvm_v2_fpu_install_on_first_run` after a fresh KVM_SET_FPU from
+  `fpu_valid` (per memo §5 gotcha #2 — re-capture into iotrap_fpu).
+- Mark clean on: successful pre-run `KVM_SET_FPU` from current's
+  `iotrap_fpu`; successful post-vmexit `KVM_GET_FPU`.
+
+**Trade-off (deliberate).** The ratio improved 1.250 → 1.10 — gate
+passes the 1.20 ceiling but does not hit memo §6.2's stretch target
+of ≤ 0.55. The +50% UP-hop in the 04-30 → 05-02 SMP-correctness
+commit window is a separate regression class (TLB-kick infra +
+migrate_disable + EINTR-mid-PF inline), not addressed by this fix.
+Bisecting it is deferred — no current gate failure justifies a
+focused investigation.
+
+**Validation.**
+
+- Substrate gate kvm-v2: PASS=25/FAIL=3/XFAIL=3 (unchanged).
+- Substrate gate seccomp: PASS=25/FAIL=3/XFAIL=3 (unchanged).
+- cpython-parity 21 modules: 21/21 PARITY.
+- mt-mini SMP T=8 ncpus=4 N=30: 30/30 PASS.
+- **threaded-fork-malloc 8 workers × 500 iters × 6 boots = 24 000
+  forks: 0 CHILD_FAIL events.** T26/T27 cross-task FPU leak
+  guarantee preserved (Wilson 95% upper bound 0.015%/fork — same
+  as post-T26/T27 baseline).
+- perf-py-startup ratio (3-run median): 1.10. Gate passes.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/23-smp-t55-perf-regression-plan.md`
+- Commit `fd2f9639b0ce`.
+- D106 (T26/T27 — the trade-off this fix partially restores).
+- D118 (T55 surfaced + policy decision not to loosen the gate).
+
+---
+
 ## (Future entries here, as decisions are made)

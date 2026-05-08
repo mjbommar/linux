@@ -29,7 +29,7 @@ disabled; one perf gate now failing (SMP-T55, see below):
   - threaded-subprocess-wait 10/10 (T29)
   - userspace ABI test (RDX/R8/R10 across 11 gadget syscalls): 11/11
     preserved (post-gadget item #1+#4 fix, commit `7ebcd8aac347`)
-  - **`perf-py-startup` gate: FAIL** (ratio_v2_over_seccomp = 1.250 vs max=1.2; kvm-v2 0.10s / seccomp 0.08s on Zen 4 7840HS). Bare `python3 -c "import math"` startup is mmap/exec/FPU-heavy — different workload from bench-py. Tracked as **SMP-T55** (memo state-audit/22): T26/T27's always-`KVM_GET_FPU` reverted H.2 lazy-FPU; ratio walked 0.444 (04-30 baseline) → 0.667 (05-02 UP) → 0.833 (05-03 SMP) → 1.250 (today). Hot-path/gadget workloads unaffected. Fix plan in memo state-audit/23.
+  - **`perf-py-startup` gate: PASS** (ratio_v2_over_seccomp = 1.10 vs max=1.2 on Zen 4 7840HS post-`fd2f9639b0ce`). Was 1.250 FAIL pre-fix. SMP-T55 closed at gate-ceiling level via per-vCPU FPU-dirty epoch flag (memo state-audit/23 option a) — restores Phase H.2 lazy-FPU win while preserving T26/T27 cross-task XMM guarantee (24 000 forks across 6 boots, 0 CHILD_FAIL). Stretch target (ratio ≤ 0.55) deferred to a follow-up bisect of the +50% UP-hop in 04-30→05-02 SMP-correctness commits.
 
 **Prior closes superseded** (T33's prev_roots-cache fix was a partial
 fix — it changed dispatch timing and incidentally reduced the
@@ -118,7 +118,7 @@ on `/`, never tmpfs).
 | I.4   | lift EXPERT gate from CONFIG_UM_BACKEND_KVM_V2 | DONE | task #112        |
 | J-pilot | realistic-workload soak rig (memcheck/iocheck/stress-ng + cpython-soak/kbuild-tiny templates) — first pilot 240/240 = 100% on short set | DONE | `95c95267202e`, memo `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` |
 | J     | validation — 24h continuous + Tier 1/2/3 + LTP | **PENDING** | task #167 (pilot rig in place; needs daemon-mode wrapper, CI tier integration, LTP curation) |
-| SMP-T55 | perf-py-startup regression — kvm-v2/seccomp ratio >1.0 on Python startup (gate FAIL); always-`KVM_GET_FPU` reverted H.2 lazy-FPU. Hot-path workloads unaffected (gadget still 193–908× / bench-py 4× faster). | OPEN | memo state-audit/22 + 23 (planned fix) |
+| SMP-T55 | perf-py-startup gate restored — per-vCPU FPU-dirty epoch flag (memo 23 option a). Ratio 1.250 → 1.10 (gate ceiling 1.20). T26/T27 cross-task FPU guarantee preserved (24 000 forks, 0 CHILD_FAIL). +50% UP-hop bisect deferred. | DONE (gate passes; UP-hop bisect deferred) | `fd2f9639b0ce`, memo state-audit/22 + 23 |
 | SMP-T57 | stress-ng `--vm --verify` SIGILL on kvm-v2 — characterised as iretq/sigreturn RIP-off-by-5 control-flow corruption (sibling to T56). 22/38 vm-methods FAIL, 16/38 PASS. `si_addr=0` is a kvm-v2 #UD-handler artefact (`syscall_trap.c:1916` hard-codes cr2=0); real RIP is mid-instruction. | OPEN (characterised) | task #243; memo state-audit/24. Workload disabled in IPC-only template. Next step: pin stressor to one vCPU + `pr_emerg` in `kvm_v2_ist_frame_write` to catch first HOST_IP mutation. |
 
 **Closed umbrella P0:** #274 (KVM SIGSEGVs on Python C-extension
