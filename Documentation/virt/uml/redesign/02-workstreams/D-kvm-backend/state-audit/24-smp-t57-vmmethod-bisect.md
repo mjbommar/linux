@@ -1140,6 +1140,188 @@ disappears, hypothesis 3 (sync-regs sub-field aliasing) confirmed.
   with no drift but doesn't strictly rule out drift on the very
   last iteration.
 
+## §7.6-F probe results (2026-05-07)
+
+Executed §7.6-F: cheap direct test of the TDP / page-table coherence
+hypothesis surfaced by §7.6-D (P=0.45 lead). At #PF arm entry and at
+#UD/#GP/#DE/#OF arm entry (just after `kvm_v2_ist_frame_read`,
+before `dispatch_relay`), read the user's top-of-stack — `*(u64
+__user *)frame.user_rsp` (= the saved RIP that `ret` would pop) and
+`*(u64 __user *)(frame.user_rsp + 8)` (= the saved RBP). If
+TDP/page-table coherence corruption is silently re-mapping the user
+stack page across PFs, the saved RIP at the same SP will mutate
+between consecutive PFs at the same user IP.
+
+### Instrumentation
+
+Static helper added to `arch/um/backend/kvm-v2/syscall_trap.c`,
+called from `kvm_v2_handle_io_pf` (PF arm), `kvm_v2_handle_io_gp`
+(GP arm), `kvm_v2_handle_io_ud` (UD arm), `kvm_v2_handle_io_de`
+(DE arm), `kvm_v2_handle_io_of` (OF arm). Filter:
+`current->comm == "stress-ng-vm"` AND
+`(user_rip in [0x550000e9d5af, 0x550000e9d7af])` OR `arm in {UD,GP,DE,OF}`.
+Per-pid 100-event budget for PF arm; signal arms always log.
+Reads via `copy_from_user(&saved_rip, (u64 __user *)user_rsp,
+sizeof(u64))` — UML's mm-walking copy_from_user (skas/uaccess.c)
+correctly walks the current task's page tables, so a user-VA read
+that succeeds mirrors what the user task would see.
+
+```c
+static void kvm_v2_t76f_user_stack_probe(struct uml_pt_regs *regs,
+                                         const char *arm,
+                                         unsigned long user_rip,
+                                         unsigned long user_rsp,
+                                         unsigned long error_code)
+{
+    /* per-pid budget, comm filter, IP-window filter */
+    rc1 = copy_from_user(&saved_rip, (u64 __user *)user_rsp, 8);
+    rc2 = copy_from_user(&saved_rbp, (u64 __user *)(user_rsp+8), 8);
+    pr_emerg("KVMV2-T76F: arm=%s pid=%d n=%d ip=%lx sp=%lx err=%lx "
+             "saved_rip=%llx saved_rbp=%llx rc1=%lu rc2=%lu "
+             "ax=%lx r9=%lx\n", ...);
+}
+```
+
+Reproducer: `stress-ng --vm 1 --vm-bytes 16M --vm-method=mscan --verify
+--timeout 5s` under `ncpus=1`, `mem=512M`. Log
+`/tmp/t57-7-6-f-probe.log` captures 100 PF events + 1 UD event for
+pid=33 (stress-ng-vm worker). RC=2 confirms SIGILL still reproduces.
+
+### Trace — user-stack saved RIP/RBP are CLEAN across the PF loop
+
+```
+KVMV2-T76F: arm=PF pid=33 n=1   ip=550000e9d680 sp=7f7ffff14188 err=14 saved_rip=550000d81ec2 saved_rbp=7f7ffff14240 rc1=0 rc2=0 ax=0        r9=0
+KVMV2-T76F: arm=PF pid=33 n=2   ip=550000e9d6af sp=7f7ffff14100 err=6  saved_rip=7f7ffff14140 saved_rbp=5500000dd618 rc1=0 rc2=0 ax=42216000 r9=0
+KVMV2-T76F: arm=PF pid=33 n=3   ip=550000e9d6af sp=7f7ffff14100 err=6  saved_rip=7f7ffff14140 saved_rbp=5500000dd618 rc1=0 rc2=0 ax=42217000 r9=1000
+...
+KVMV2-T76F: arm=PF pid=33 n=99  ip=550000e9d6af sp=7f7ffff14100 err=6  saved_rip=7f7ffff14140 saved_rbp=5500000dd618 rc1=0 rc2=0 ax=42277000 r9=61000
+KVMV2-T76F: arm=PF pid=33 n=100 ip=550000e9d6af sp=7f7ffff14100 err=6  saved_rip=7f7ffff14140 saved_rbp=5500000dd618 rc1=0 rc2=0 ax=42278000 r9=62000
+KVMV2-T76F: arm=UD pid=33 n=101 ip=550000e9d71e sp=7f7ffff14100 err=0  saved_rip=7f7ffff14140 saved_rbp=5500000dd618 rc1=0 rc2=0 ax=43216000 r9=1000000
+```
+
+Only TWO unique `(saved_rip, saved_rbp)` pairs across all 101 events:
+
+- `(0x550000d81ec2, 0x7f7ffff14240)` — observed at the lone `n=1`
+  event with `ip=0x550000e9d680`, `sp=0x7f7ffff14188`. This is the
+  function's PROLOGUE state (SP not yet pushed down to the loop's
+  working level). `0x550000d81ec2` is a libc code address — the
+  caller's return PC.
+- `(0x7f7ffff14140, 0x5500000dd618)` — observed at every PF inside
+  the inner loop (`ip=0x550000e9d6af`) AND at the UD site
+  (`ip=0x550000e9d71e`). Both bytes-stable (rc1=rc2=0 throughout).
+  `saved_rip=0x7f7ffff14140` is a STACK address (not a code pointer)
+  — *RSP holds a stack-local that the function stashed at TOS, not
+  a return address. The function's stack frame is still active; the
+  matching epilogue/`ret` has NOT executed yet at the UD site.
+
+### The UD's user state is much closer to the loop than §7.6-D suggested
+
+§7.6-D's marshal-out trace logged `sp=0x7f7fffe1e528` at MOUT time
+and inferred a 3032-byte stack descent through several call frames.
+The §7.6-F probe — reading `frame.user_rsp` BEFORE any kernel
+mutation — shows the actual UD's user_rsp is **`0x7f7ffff14100`,
+identical to the loop body's RSP.**
+
+Reconciliation: between IST-frame-read (where RSP is the user's
+true value) and §7.6-D's MOUT log point, the kernel ran
+`relay_signal → ... → do_signal → setup_rt_frame`, which **pushes
+the signal frame onto the user stack** and rewrites `regs->gp[HOST_SP]`
+to the new (lowered) value. The 3032-byte "descent" §7.6-D observed
+was the SIGILL signal frame (siginfo + ucontext + xstate, plus
+alignment), NOT a chain of `call` frames the user fell through.
+
+That means §7.6-D's hypothesis-1 framing — "user fell through ~3032
+bytes of call frames into legitimate user code" — was wrong on the
+mechanism but right on the conclusion (the user reached
+`0x550000e9d71e` in a single forward step from the loop body, NOT
+via a chain of returns). The UD is at `0x550000e9d71e` =
+`0x550000e9d6af + 0x6f` while the function's stack frame is still
+active. RSP, RBP, R9 (loop counter at exact 16 MiB), and the saved
+RIP at *RSP all match what should be expected if the loop completed
+naturally and execution continued straight into the next instruction.
+
+### Verdict — TDP / page-table coherence hypothesis: **RULED OUT**
+
+The user-stack page covering `0x7f7ffff14100..0x7f7ffff14148` is
+bit-stable across 100 #PF dispatches and the post-loop UD. There is
+no TDP/page-table aliasing that's swapping the user's stack out from
+under the running task. `copy_from_user` from the kernel agreed with
+the user's view (rc=0 throughout) every time. The fault address
+`0x42216000..0x43216000` is the mscan write buffer — also no
+evidence that those stores landed on a page other than the intended
+one (RAX advances 0x1000/PF in lockstep with R9, the byte counter,
+and the test would crash much earlier with a panic if the buffer
+mapping aliased the stack page).
+
+### What this means for the remaining hypotheses
+
+§7.6-D ranked three candidates after the GPR ruling. §7.6-F now
+reshuffles them:
+
+1. ~~**Stack/heap memory corruption**~~ (was P=0.45) → **RULED OUT**
+   for the user-stack portion. A future probe could read more user
+   addresses (e.g., the mscan buffer's expected post-loop pattern at
+   `0x42216000..0x43216000`) to fully exclude the heap-corruption
+   sub-case, but the smoking gun §7.6-D pointed at — a corrupted
+   return address — is gone.
+
+2. **XSAVE / FPU residue + TARGET_CLONES IFUNC mis-resolution**
+   (was P=0.35) → now PRIMARY (P~=0.55). The §7.6-F trace shows the
+   user reached `0x550000e9d71e` with intact GPRs, intact stack,
+   intact RBP, and the loop counter at exact loop completion. The
+   only state that was *not* sampled across PFs is the FPU/XSAVE
+   register file. If a stale XMM/YMM register from a prior task's
+   FPU state caused a vectorised libc helper to mis-compute (e.g.,
+   the post-loop fall-through into `__memset_avx2_unaligned_erms`
+   or similar where `0x550000e9d71e` is mid-instruction), this would
+   produce exactly the observed pattern: GPRs/stack clean, UD lands
+   at a mid-instruction VA past the loop, only on dense vm-methods
+   (which trigger enough PFs / cross-task switches for FPU-state
+   contamination to occur).
+
+3. **Sub-field of `KVM_CAP_SYNC_REGS` not synced** (was P=0.15) →
+   unchanged. Still possible, still requires the §7.6-G probe (turn
+   off SYNC_REGS) to confirm/refute.
+
+4. **NEW: post-loop instruction-stream corruption** (P~=0.30). Since
+   the GPRs and stack are clean, the only remaining state that could
+   make `0x550000e9d71e` UD is the *instruction memory* itself.
+   If an SPTE fault on the libc text page (the page covering
+   `0x550000e9d6af..0x550000e9d71e` and beyond) gets mapped to a
+   wrong PFN, the byte at `0x550000e9d71e` could be a non-decodable
+   sequence even though the loop body executed correctly. The
+   observed UD is "raised" by a CPU decoding non-canonical bytes
+   — this is consistent with a wrong text-page mapping. SMP-T33's
+   TDP MMU prev_roots cache drop (commit 9ccdc4300713) addressed
+   the cross-task variant; if there's a residual single-task variant
+   triggered by the high #PF rate within mscan's tight loop, this
+   would explain it.
+
+### Concrete next probes (in order of cost)
+
+**§7.6-H: read the user instruction bytes at `0x550000e9d71e ± 16`
+from kernel context at UD time.** Same pattern as §7.6-F but read
+INSTRUCTION memory, not stack. If the bytes don't match what
+`objdump -d /usr/bin/stress-ng` shows at that VA, hypothesis 4
+confirmed (text-page TDP mis-mapping). Cheap: extends the §7.6-F
+probe by 16 bytes per UD event.
+
+**§7.6-E (carry forward): instrument `KVM_GET_FPU` / `KVM_SET_FPU`.**
+Now PRIMARY, since hypothesis 1 is ruled out. Log MXCSR + XMM0/YMM0
+across PF dispatches and at UD. Drift confirms hypothesis 2.
+
+**§7.6-G (carry forward): turn off `KVM_CAP_SYNC_REGS`.** Cheap
+ablation. Still relevant.
+
+### Probe code reverted
+
+Per §7.6-F's "investigation only" budget, the instrumentation in
+`arch/um/backend/kvm-v2/syscall_trap.c` was reverted via
+`git checkout -- arch/um/backend/kvm-v2/syscall_trap.c` and the
+kernel rebuilt clean. `git status` shows only the pre-existing
+untracked Phase J pilot files; the working tree's tracked files
+match HEAD.
+
 ## 8. Status
 
 - T57 is **characterised, not fixed**.
@@ -1148,7 +1330,7 @@ disappears, hypothesis 3 (sync-regs sub-field aliasing) confirmed.
   signal-marshal-out path issue.
 - §7.6 **further ruled out** the SYSCALL marshal-out hypothesis: the
   failing path never traverses the SYSCALL arm at all.
-- §7.6-D (this update) **ruled out** the GPR portion of the
+- §7.6-D **ruled out** the GPR portion of the
   marshal-in/marshal-out leak hypothesis — every GPR is preserved
   bit-exactly across all 4096 #PF dispatches, FS_BASE / GS_BASE
   invariant. The XSAVE / FPU portion remains uninstrumented and
@@ -1156,8 +1338,19 @@ disappears, hypothesis 3 (sync-regs sub-field aliasing) confirmed.
   surfaced: TDP/page-table coherence corrupting the user buffer
   (P=0.45), and TARGET_CLONES IFUNC mis-resolution from FPU residue
   (P=0.35).
+- §7.6-F (this update) **ruled out** the user-stack TDP/page-table
+  coherence sub-hypothesis. The user-stack saved RIP/RBP at
+  `*RSP` is bit-stable across 100 #PF dispatches and the post-loop
+  UD. The §7.6-D-inferred 3032-byte stack descent was an artefact
+  of post-`do_signal` SP rewrite (the signal frame), NOT a real
+  user-mode descent through call frames — at UD-frame-read time
+  user_rsp is identical to the loop body's RSP, and R9 shows
+  exact 16 MiB loop completion. Remaining candidates: FPU/XSAVE
+  residue (now P~=0.55, primary; probe §7.6-E), instruction-stream
+  TDP mis-mapping (P~=0.30, NEW, probe §7.6-H), KVM_CAP_SYNC_REGS
+  sub-field aliasing (P~=0.15; probe §7.6-G).
 - Phase J pilot (`phase-J-pilot-2026-05-05.md`) can keep stress-ng
-  excluded from its IPC-only profile until §7.6-E / §7.6-F land.
+  excluded from its IPC-only profile until §7.6-E / §7.6-H land.
 - The 16 PASS-on-v2 methods (notably `gray`, `walk-1d`, `read64`,
   `write64`) are safe to add to a future Phase J Tier-2 stress profile
   if we want stress-ng coverage now without waiting for the fix.
