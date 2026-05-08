@@ -890,6 +890,41 @@ GPR sync_regs path leak.
   to accumulate. Sparse methods complete each iteration before any
   GPR/XSAVE drift becomes load-bearing for a function epilogue.
 
+## §7.7 Cheap orthogonal probe (rebuild without AVX/SSE4) — INCONCLUSIVE
+
+Memo §7.6-D suggested rebuilding stress-ng with `-mno-avx -mno-avx2
+-mno-sse4.2 -mno-fma` to disambiguate XSAVE/FPU residue from a
+generic GPR leak. Attempted on 2026-05-07.
+
+Procedure:
+- `git clone --branch V0.20.01 https://github.com/ColinIanKing/stress-ng /tmp/stress-ng-noavx`.
+- `CFLAGS="-O2 -mno-avx -mno-avx2 -mno-sse4.2 -mno-sse4.1 -mno-fma -mno-bmi -mno-bmi2 -static" make stress-ng`.
+- Verified static binary: `file` reports "statically linked"; `--version` works on host.
+- Ran in UML with `cd /run/sng-cwd; stress-ng --vm 1 --vm-bytes 16M --vm-method=mscan --verify --timeout 5s`.
+
+Result: **stress-ng RC=2 on BOTH backends** (seccomp and kvm-v2),
+which breaks the experimental control. The rebuilt binary appears to
+abort early (no metric lines emitted) regardless of backend. Most
+likely the `-mno-bmi/-mno-bmi2/-mno-fma/-static` combination broke
+something internal to stress-ng's CPU-feature dispatch (TARGET_CLONES
+IFUNC resolution depends on cpuid; static-link warnings about
+`getpwent`/`setpwent` requiring shared libraries at runtime suggest
+the binary's runtime environment isn't matched).
+
+**Disposition: orthogonal probe abandoned.** The next investigation
+step remains §7.6-D's primary plan: instrument
+`kvm_v2_marshal_from_kvm_regs` / `kvm_v2_marshal_to_kvm_regs` to
+log every GPR (RAX..R15, RBP, FS_BASE, GS_BASE) on entry/exit of
+the #PF arm, walk the log for any non-mscan-pointer GPR drift between
+consecutive #PFs at the same user RIP. That probe is direct evidence
+rather than a process-of-elimination test, so its yield is higher than
+the orthogonal probe would have been even if the rebuild had worked.
+
+A less aggressive rebuild (just `-mno-avx -mno-avx2 -mno-sse4.2`,
+no static, no `-mno-bmi*/-fma`) might still serve as a corroborating
+probe later, but only after §7.6-D has produced a positive
+identification of which GPR is drifting.
+
 ## 8. Status
 
 - T57 is **characterised, not fixed**.
