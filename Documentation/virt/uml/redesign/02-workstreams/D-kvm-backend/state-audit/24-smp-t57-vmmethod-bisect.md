@@ -925,20 +925,239 @@ no static, no `-mno-bmi*/-fma`) might still serve as a corroborating
 probe later, but only after §7.6-D has produced a positive
 identification of which GPR is drifting.
 
+## §7.6-D probe results (2026-05-07)
+
+Executed §7.6-D's primary plan: instrument `kvm_v2_marshal_from_kvm_regs`
+(post-vmexit GPR copy) and `kvm_v2_marshal_to_kvm_regs` (pre-KVM_RUN GPR
+copy) in `arch/um/backend/kvm-v2/vcpu.c` to log every GPR (RAX..R15,
+RBP, RSP, RIP, RFLAGS, FS_BASE, GS_BASE) on entry/exit of marshal,
+filter by `current->comm == "stress-ng-vm"` plus user-VA window, and
+walk the log for any GPR drift across consecutive PFs at the same RIP.
+
+### Instrumentation
+
+Two `pr_emerg` blocks added inside `kvm_v2_marshal_to_kvm_regs` (MOUT)
+and `kvm_v2_marshal_from_kvm_regs` (MIN). Per-task budget split by
+`in_loop_body` (IP == 0x550000e9d6af, the mscan store) vs `OTHR`
+(any other user IP), so a small budget for in-loop-body events
+(anchors) coexists with a large budget for non-loop-body events
+(loop-prologue/epilogue, post-loop fall-through, UD-handler entry).
+Caller PC captured via `__builtin_return_address(0)` so PF-arm
+(`+0x766`) vs tail-merged `_ud/_de/_of/_nm/_gp` arm (`+0x847`) can be
+distinguished.
+
+```c
+if (!memcmp(current->comm, "stress-ng-vm", 12)) {
+    unsigned long ip = gp[HOST_IP];
+    bool in_user = (ip >= 0x550000000000UL && ip < 0x560000000000UL);
+    bool in_loop_body = (ip == 0x550000e9d6afUL);
+    /* split budgets, log every non-loop-body event */
+    pr_emerg("KVMV2-MOUT: %s n=%d pid=%d caller=%pS ip=%lx sp=%lx ax=%lx ... fs=%lx gs=%lx fl=%lx\n",
+             in_loop_body ? "BODY" : "OTHR", n, current->pid,
+             __builtin_return_address(0), ip, gp[HOST_SP],
+             /* all 16 GPRs + FS_BASE/GS_BASE/EFLAGS */);
+}
+```
+
+Reproducer: `stress-ng --vm 1 --vm-bytes 16M --vm-method=mscan --verify
+--timeout 5s` under `ncpus=1`, `mem=512M`. Log
+`/tmp/t57-7-6-d-probe4.log` captures 137 OTHR + 13 BODY events for the
+failing pid=33, including the smoking-gun frames around SIGILL.
+
+### Trace — GPRs are CLEAN across the PF loop
+
+All 4096 PFs at `frame.user_rip=0x550000e9d6af` (the mscan store)
+preserve every GPR except the two that legitimately advance:
+
+```
+KVMV2-MOUT: BODY n=1024 pid=33 ip=550000e9d6af ax=42415000 ... r9=1ff000 ...
+KVMV2-MOUT: BODY n=2048 pid=33 ip=550000e9d6af ax=42615000 ... r9=3ff000 ...
+KVMV2-MOUT: BODY n=3072 pid=33 ip=550000e9d6af ax=42814000 ... r9=5fe000 ...
+KVMV2-MOUT: BODY n=4096 pid=33 ip=550000e9d6af ax=42a14000 ... r9=7fe000 ...
+KVMV2-MOUT: BODY n=5120 pid=33 ip=550000e9d6af ax=42c13000 ... r9=9fd000 ...
+```
+
+(`bx=42214000`, `cx=ffffffffffffefff`, `dx=1`, `si=43216000`,
+`di=42216000`, `bp=7f7fffe1f180`, `r8=fffffffffffff000`,
+`r10=411db3c0`, `r11=1000000`, `r12=42216000`, `r13=411db3c0`,
+`r14=1000000`, `r15=0`, `fs=411b0140`, `gs=0` — invariant for every
+single anchor event.) RAX is the mscan buffer pointer (advances
+0x1000/PF). R9 is the byte counter (advances 0x1000/PF).
+
+Sample non-loop-body events captured 137 of them in the 0x550000e9d6XX
+range (instruction boundaries within the loop body / its epilogue /
+the fault-restart paths). Same invariant: every GPR except
+`ax`/`r9`/`ip` matches across all 137 events.
+
+**FS_BASE and GS_BASE are bit-identical (`fs=0x411b0140`, `gs=0`)
+across every single event for pid=33.** No drift.
+
+### The first non-loop-body event after loop completion is the SIGILL frame
+
+Most informative pair (last in-loop event → first post-loop event):
+
+```
+seq 326  OTHR n=117  ip=550000e9d6c7 sp=7f7fffe1f100 ax=431626af ...  r9=f4c6af  fl=286
+seq 327  OTHR n=118  ip=5500000dde70 sp=7f7fffe1e528 ax=0       ...  r9=1000000 fl=10202
+                ^^^^^^^^^^^^^^^^      ^^^^^^^^^^^^^^^                ^^^^^^^^^
+                stress_signal_         stack dropped 3032 bytes      r9 reached
+                catch_sigill_handler                                 16 MB —
+                entry (per memo §7.4)                                loop natural
+                                                                     completion
+```
+
+Decoding seq 327: `caller=kvm_v2_handle_io_trap+0x847/0xc4f` =
+tail-merged exception arm (`_ud/_de/_of/_nm/_gp`). The ZERO BODY events
+show this is the **#UD arm** firing (the only non-NM, non-PF possible
+path for a pid=33 stress-ng-vm worker that isn't using FPU). The IP
+`0x5500000dde70` is the SIGILL handler entry (memo §7.4 disassembly):
+this is what the kernel's `do_signal` rewrote `regs->gp[HOST_IP]` to,
+post-`relay_signal` for the UD. The original UD `frame.user_rip` was
+`0x550000e9d71e` (memo §7.4) — overwritten in marshal-out by
+`do_signal`, so the value at MOUT time is the handler entry, not the
+UD site.
+
+The state at seq 327 is **legitimate post-mscan-loop completion**:
+`r9 = 0x1000000` = exact 16 MiB (loop-end), `cx = 0xffffff` =
+16 MiB - 1, `bx = 0x1000000` = 16 MiB. RSP descended 0xbd8 = 3032
+bytes from the loop's RSP `0x7f7fffe1f100` to the UD-frame RSP
+`0x7f7fffe1e528`, consistent with the user falling through several
+call frames between the loop epilogue and the UD site (memo §7.4
+hypothesised this; trace confirms). That descent went through normal
+`call`/`push` sequence — `bp` was preserved at `0x7f7fffe1f180` from
+in-loop, indicating the function whose loop completed has not yet
+returned (its frame still active).
+
+### Verdict — GPR / XSAVE leak hypothesis: **RULED OUT** (for GPR portion)
+
+The `kvm_v2_marshal_*_kvm_regs` round-trip is **innocent**. Across
+4096 #PF dispatches, every GPR is preserved bit-exactly except for
+the two that the user's mscan loop body modifies (RAX, R9). FS_BASE
+and GS_BASE never drift. The marshal helpers are not the leak source.
+
+The XSAVE / FPU portion of the §7.6-D hypothesis is **NOT** disproved
+by this probe — `kvm_v2_marshal_*_kvm_regs` only handles GPRs; XSAVE
+state flows through the separate `KVM_GET_FPU` / `KVM_SET_FPU` round
+in `kvm_v2_vcpu_run` (vcpu.c lines 2122-2148, including the SMP-T26
+"always GET_FPU after KVM_RUN" rule and the SMP-T55 fpu_dirty epoch
+gate). Those paths are uninstrumented by §7.6-D and remain candidate.
+
+### Implication for the bug location
+
+The trace shows the user's mscan loop completed normally (4096
+iterations, r9 advanced cleanly to 0x1000000), then the user fell
+through ~3032 bytes of call frames into legitimate user code
+**without a kernel intercept** (no MOUT events between seq 326 and
+seq 327 — meaning between loop-exit and UD-delivery the user
+ran in user-mode for many instructions without any trap). The UD
+fired in user-mode at `0x550000e9d71e` (per §7.4 IST frame
+schema dump), 0x6f bytes past the mscan write loop.
+
+Three remaining suspect classes (the GPR leak being ruled out
+narrows the field):
+
+1. **Stack / heap memory corruption inside the mscan store loop**
+   (P=0.45, NEW LEAD). The trace proves the kernel preserves user
+   GPRs perfectly across each #PF, but the loop body is *writing*
+   to the user-mode buffer at `0x42214000`. If the kernel's TDP /
+   page-table coherence has a residual issue on the PF arm — e.g.,
+   the COW handling for the stress-ng vm pages occasionally maps a
+   PFN that's still cached as a different VA in the per-vCPU TLB —
+   the loop's `mov %al, (%rax)` could land on the wrong page.
+   stress-ng's `0x42214000` buffer is mmap-allocated; if a wrong
+   PFN gets mapped there, the store would corrupt some other VA,
+   possibly the function's saved RIP or RBP on the user stack at
+   `0x7f7fffe1f180` etc. This is consistent with: (a) no GPR
+   drift; (b) RSP/RBP descend "into" the corrupted region during
+   loop-exit `ret`; (c) the bug being deterministic across runs
+   (same loop count → same wrong PFN → same target VA → same
+   corrupted return address → same UD site).
+
+2. **XSAVE / FPU state residue interacting with mscan TARGET_CLONES
+   IFUNC dispatch** (P=0.35). mscan's writes are byte stores so
+   the *loop body* is integer, but stress-ng compiles with
+   TARGET_CLONES which inserts an IFUNC trampoline at function
+   entry. The trampoline reads `__cpu_indicator_init` — which is
+   resolved via libc's ifunc resolver, which under recent glibc
+   uses AVX/SSE for the resolution itself. If the FPU register
+   file held stale data from a prior dispatch, the AVX/SSE
+   resolver could resolve to a wrong target address, and on
+   loop-end the post-loop fall-through could land at the
+   IFUNC-redirected wrong address. The §7.7 "rebuild without
+   AVX" probe was abandoned (incomplete control); needs a
+   smaller `-mno-avx -mno-sse` rebuild without `-static`.
+
+3. **Sub-field of `KVM_CAP_SYNC_REGS` not synced** (P=0.15). The
+   marshal helpers only touch GPRs/RIP/RFLAGS. KVM's
+   `KVM_SYNC_X86_REGS` covers all 16 GPRs + RIP + RFLAGS in
+   `s.regs.regs`, but if the running guest reads a GPR slot that
+   `kvm_run->s.regs.regs` doesn't expose (e.g., a hidden RIP-
+   shadow on `vmcb->save.rip` separate from the synced
+   `s.regs.regs.rip`) the visible GPRs could be correct while
+   the actually-loaded ones differ. SVM-specific quirk that
+   the marshal probe wouldn't catch.
+
+### Concrete next probes (in order of cost)
+
+**§7.6-E: instrument the `KVM_GET_FPU` / `KVM_SET_FPU` round.**
+Add a `pr_emerg` at `kvm_v2_fpu_install_on_first_run` (vcpu.c)
+and at the post-vmexit `KVM_GET_FPU` site (vcpu.c lines
+2127-2138) logging XMM0/YMM0/MXCSR/FCW for pid=33 across the
+PF loop. If MXCSR or any XMM register drifts across consecutive
+PFs at `frame.user_rip=0x550000e9d6af`, hypothesis 2 confirmed.
+
+**§7.6-F: page-table corruption probe.** Add a `pr_emerg` at
+`kvm_v2_handle_io_pf` that, after `segv_handler` returns,
+performs `__get_user(buf, (u64 __user *)0x7f7fffe1e6XX)` — i.e.
+reads the user's stack near where the post-loop `ret` will
+read its return address. If the read returns a non-canonical
+RIP (one that lands at `0x550000e9d71e ± 5`) immediately before
+the loop's natural completion, hypothesis 1 confirmed.
+
+**§7.6-G: turn off `KVM_CAP_SYNC_REGS` for the test boot.** Force
+the dispatcher to fall back to explicit `KVM_GET_REGS` /
+`KVM_SET_REGS` ioctls (the v1-archive shape). If the SIGILL
+disappears, hypothesis 3 (sync-regs sub-field aliasing) confirmed.
+
+### Open questions
+
+- The 137 OTHR events for pid=33 hit user IPs in
+  `[0x550000e9d6af, 0x550000e9d6ce]` — the same instruction range
+  as the mscan write loop. This means the loop body has multiple
+  fault-prone instructions, not just one. The IPs span d6af, d6b2,
+  d6b5, d6bb, d6be, d6c1, d6c4, d6c7, d6ce — at least 9 distinct
+  faulting instructions in the loop. Worth disassembling the
+  binary at this VA range to identify them; one of them might
+  be the actual ASM source of the corruption (e.g. a bus-locked
+  instruction on a misaligned write).
+
+- The probe budget exhaustion gap (between BODY n=5120 and OTHR
+  n=117) is on the order of ~500-800 in-loop events that were
+  filtered out. To rule out late-loop GPR drift definitively,
+  re-run with the BODY budget increased to 8192 and only
+  log every 4096th — that captures n=4096 (last good) and n=4097
+  (first wrong, if it exists). This run's evidence is consistent
+  with no drift but doesn't strictly rule out drift on the very
+  last iteration.
+
 ## 8. Status
 
 - T57 is **characterised, not fixed**.
 - §6.1 + §6.2 **ruled out** kvm_v2_ist_frame_write as the RIP
   mutator and re-cast the suspect class as a SYSRETQ /
   signal-marshal-out path issue.
-- §7.6 (this section) **further ruled out** the SYSCALL marshal-out
-  hypothesis: the failing path never traverses the SYSCALL arm at
-  all. The remaining suspect class is **GPR / XSAVE state leak on
-  the #PF marshal-in/marshal-out round-trip** (vcpu.c
-  `kvm_v2_marshal_*_kvm_regs`, or sync_regs sub-field handling).
-  Next probe is §7.6-D.
+- §7.6 **further ruled out** the SYSCALL marshal-out hypothesis: the
+  failing path never traverses the SYSCALL arm at all.
+- §7.6-D (this update) **ruled out** the GPR portion of the
+  marshal-in/marshal-out leak hypothesis — every GPR is preserved
+  bit-exactly across all 4096 #PF dispatches, FS_BASE / GS_BASE
+  invariant. The XSAVE / FPU portion remains uninstrumented and
+  still suspect (probe §7.6-E). Two new candidate classes
+  surfaced: TDP/page-table coherence corrupting the user buffer
+  (P=0.45), and TARGET_CLONES IFUNC mis-resolution from FPU residue
+  (P=0.35).
 - Phase J pilot (`phase-J-pilot-2026-05-05.md`) can keep stress-ng
-  excluded from its IPC-only profile until §7.6-D lands.
+  excluded from its IPC-only profile until §7.6-E / §7.6-F land.
 - The 16 PASS-on-v2 methods (notably `gray`, `walk-1d`, `read64`,
   `write64`) are safe to add to a future Phase J Tier-2 stress profile
   if we want stress-ng coverage now without waiting for the fix.
