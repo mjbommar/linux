@@ -11004,4 +11004,79 @@ focused investigation.
 
 ---
 
+## D120 (2026-05-07) — Phase J #167 daemon-mode driver landed
+
+**Context.** D117 added the J-pilot rig (`run-pilot.sh` + 5 workload
+templates). Phase J full validation (STATUS row J) needs three more
+things: 24h continuous operation, Tier 1/2/3 third-party workloads,
+and LTP curation. The Phase J design memo
+(`phase-J-design-2026-05-07.md`) specifies all three.
+
+**What landed.**
+
+- Commit `4977e0357ce5` adds
+  `tools/testing/selftests/um/soak/run-soak-daemon.sh` (485 LoC bash
+  + python3 stdlib for arithmetic only). Sibling to `run-pilot.sh`,
+  not a `--daemon` flag on it (design memo §2.1: separate audiences
+  → separate drivers). Implements §2.2-2.10:
+  - CLI: `--budget-sec`, `--workloads`, `--workers`,
+    `--iters-per-rotation`, `--out`, `--fail-threshold-pct`,
+    `--fail-threshold-window`, `--continue-on-fail-threshold`,
+    `--dry-run`. Also via `SOAK_*` env vars.
+  - `UML_KERNEL` is REQUIRED — no fallback to a hardcoded path
+    (fixes the inconsistency the design memo flagged).
+  - SIGTERM/SIGINT → finish-in-flight-phase clean stop. SIGUSR1
+    → force summary refresh.
+  - Per-iteration `scoreboard.jsonl` row using `phase-J-soak-
+    <workload>` gate label so the soak rows don't conflate with
+    regular gate rows under `umlctl gate diff`.
+  - Wilson 95% CI in summary.md, recomputed every rotation.
+  - Stop conditions: budget elapsed; SIGTERM; rolling-window
+    failure-rate threshold trip → write THRESHOLD_TRIPPED sentinel.
+  - Thermal helpers lifted verbatim from `run-pilot.sh`
+    (`read_max_temp_c` / `thermal_check`).
+
+**Trade-off.** Memo §2.6 "alternative A": daemon synthesises the
+scoreboard row itself rather than calling `umlctl gate run` per
+iteration. Picked because (a) `umlctl gate loop`'s artefact tree
+already has the per-iter logs the daemon needs and (b) wrapping each
+iter in its own `gate run` would be redundant umlctl create/start
+cycles. The cost is that the daemon's row format must stay in sync
+with `umlctl`'s by hand — flagged for a future refactor if the
+formats drift. Per-iteration timing is left as `duration_ms=0` for
+now; populating it would require parsing `umlctl gate loop`'s `_loop.log`
+or extending umlctl to emit per-iter timestamps.
+
+**Validation.**
+
+- Dry-run smoke (memcheck,iocheck × 2 backends × 1 rotation):
+  config.json valid JSON, 4 scoreboard rows, summary.md renders
+  Wilson CI table.
+- Real-run smoke (`--budget-sec 100`, memcheck only, W=1 M=2):
+  5 rotations × 4 phases × 2 iters = 20 PASS rows. Wilson CI
+  [72.25%, 100.00%] at n=10. Clean exit on budget elapsed.
+
+**Deferred to follow-up tasks.**
+
+- Tier 1 / 2 / 3 workload templates (memo §3) — pytest on host
+  libs, pip+pytest with sandboxed network, Django/FastAPI loopback.
+- LTP runner template (memo §4) — KEEP/SKIP/TRIAGE-LATER curation +
+  marker-bridge to `gate loop` PASS/FAIL convention.
+- Restart-resume from partial soak.
+- Per-iteration `duration_ms` plumbing.
+
+STATUS row J flips PENDING → IN PROGRESS.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/phase-J-design-2026-05-07.md` §2.
+- `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md` (the
+  pilot driver this is sibling to).
+- `tools/testing/selftests/um/soak/run-pilot.sh` (thermal helpers
+  reused verbatim).
+- D117 (J-pilot rig landing).
+- Commit `4977e0357ce5`.
+
+---
+
 ## (Future entries here, as decisions are made)
