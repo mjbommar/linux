@@ -148,9 +148,16 @@ static void kvm_v2_curate_cpuid(struct kvm_cpuid2 *cpuid)
 			 * Leaf 1 ECX:
 			 *   bit 12 = FMA, 26 = XSAVE, 27 = OSXSAVE,
 			 *   28 = AVX, 29 = F16C, 30 = RDRAND.
+			 *
+			 * SMP-T57 (memo state-audit/25 §3.1 A.3): un-mask
+			 * FMA/XSAVE/OSXSAVE/AVX/F16C — needed so glibc's
+			 * IFUNC dispatch / __builtin_cpu_supports see AVX
+			 * as available (it actually IS, since CR4.OSXSAVE
+			 * is now set and XCR0 has YMM enabled). Keep
+			 * RDRAND (bit 30) masked for record-replay
+			 * determinism.
 			 */
-			e->ecx &= ~((1U << 12) | (1U << 26) | (1U << 27) |
-				    (1U << 28) | (1U << 29) | (1U << 30));
+			e->ecx &= ~(1U << 30);
 		}
 		if (e->function == 7 && e->index == 0) {
 			/*
@@ -161,8 +168,16 @@ static void kvm_v2_curate_cpuid(struct kvm_cpuid2 *cpuid)
 			 *   bit 26 = AVX512PF, 27 = AVX512ER,
 			 *   bit 28 = AVX512CD, 29 = SHA,
 			 *   bit 30 = AVX512BW, 31 = AVX512VL.
+			 *
+			 * SMP-T57 (memo state-audit/25 §3.1 A.3): un-mask
+			 * AVX2 (bit 5) — same rationale as Leaf 1 ECX
+			 * AVX. Keep FSGSBASE (0) — separate workstream
+			 * (CR4.FSGSBASE not yet enabled). Keep RDSEED (18)
+			 * — replay determinism. Keep AVX-512 family
+			 * (16/17/21/26-31) — Phase B candidate, gated on
+			 * higher XCR0 bits.
 			 */
-			e->ebx &= ~((1U << 0)  | (1U << 5)  | (1U << 16) |
+			e->ebx &= ~((1U << 0)  | (1U << 16) |
 				    (1U << 17) | (1U << 18) | (1U << 21) |
 				    (1U << 26) | (1U << 27) | (1U << 28) |
 				    (1U << 29) | (1U << 30) | (1U << 31));
@@ -172,6 +187,9 @@ static void kvm_v2_curate_cpuid(struct kvm_cpuid2 *cpuid)
 			 *   bit 8  = GFNI,       9  = VAES,
 			 *   bit 10 = VPCLMULQDQ, 11 = AVX512VNNI,
 			 *   bit 12 = AVX512BITALG, 14 = AVX512VPOPCNTDQ.
+			 *
+			 * All AVX-512 + GFNI/VAES/VPCLMULQDQ stay masked
+			 * (Phase B candidates).
 			 */
 			e->ecx &= ~((1U << 1)  | (1U << 6)  | (1U << 8)  |
 				    (1U << 9)  | (1U << 10) | (1U << 11) |
@@ -184,13 +202,27 @@ static void kvm_v2_curate_cpuid(struct kvm_cpuid2 *cpuid)
 			e->edx &= ~((1U << 2) | (1U << 3) | (1U << 8));
 		}
 		/*
-		 * Leaf 0xD is the XSAVE state-component descriptor. With
-		 * OSXSAVE off, exposing this leaf would let glibc /
-		 * libcrypto derive sizes for state we don't actually
-		 * support. Zero the leaf entirely.
+		 * Leaf 0xD is the XSAVE state-component descriptor.
+		 *
+		 * SMP-T57 (memo state-audit/25 §3.1 A.3, take 3):
+		 * KVM_SET_XCRS validates the requested XCR0 against
+		 * `vcpu->arch.guest_supported_xcr0`, which is computed
+		 * from leaf 0xD sub-leaf 0 EAX (XCR0-supported mask) AND
+		 * the OSXSAVE/AVX bits in leaf 1 ECX. Zeroing leaf 0xD
+		 * makes that supported mask 0 → SET_XCRS rejects bits
+		 * 0/1/2 with -EINVAL.
+		 *
+		 * Letting KVM-supplied leaf 0xD pass through means KVM's
+		 * GET_SUPPORTED_CPUID returns the host's full XSAVE
+		 * advertisement (AVX-512, AMX, etc.). The Phase A only-
+		 * un-mask (leaf 1 ECX 26/27/28; leaf 7.0 EBX 5) keeps the
+		 * higher tiers OFF in the feature-bit ABI even though
+		 * leaf 0xD reports their state-component sizes — KVM's
+		 * `guest_supported_xcr0` AND'd with the leaf 1 ECX bits
+		 * gives the active mask. Phase B (full AVX-512/AMX) will
+		 * un-mask those leaf-1/leaf-7 bits and bump XCR0
+		 * accordingly.
 		 */
-		if (e->function == 0xD)
-			e->eax = e->ebx = e->ecx = e->edx = 0;
 	}
 }
 
@@ -274,7 +306,7 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
 	 * overwrites once and the flag flips.
 	 */
 	vm->cpuid = cpuid;
-	pr_info("um: kvm-v2 cpuid_install: CPUID installed (%u entries; RDRAND/RDSEED/XSAVE/AVX/AVX2/AVX512/FSGSBASE/F16C masked — matches v1)\n",
+	pr_info("um: kvm-v2 cpuid_install: CPUID installed (%u entries; RDRAND/RDSEED/AVX-512/FSGSBASE masked; SMP-T57 un-masked XSAVE/OSXSAVE/AVX/AVX2/FMA/F16C)\n",
 		cpuid->nent);
 	trace_um_backend_kvm_v2_cpuid_install(vcpu_fd, cpuid->nent);
 	return 0;
@@ -543,6 +575,22 @@ static int kvm_v2_install_production_sregs(struct kvm_v2_vcpu *v)
 
 	sregs.cr0  = X86_CR0_PE | X86_CR0_MP | X86_CR0_NE |
 		     X86_CR0_WP | X86_CR0_PG;
+	/*
+	 * SMP-T57 (memo state-audit/25 §3.1 A.1): enable CR4.OSXSAVE so
+	 * the guest can use VEX/AVX-encoded instructions (memo
+	 * state-audit/24 §7.6-H found vpxor #UD-ing on Zen 4 with this
+	 * bit unset). Pairs with KVM_SET_XCRS at vcpu_create_one and the
+	 * AVX/XSAVE/OSXSAVE un-mask in kvm_v2_curate_cpuid.
+	 */
+	/*
+	 * NOTE: OSXSAVE is NOT set here — KVM rejects CR4.OSXSAVE before
+	 * CPUID is installed (cr4_guest_rsvd_bits treats it as reserved).
+	 * The first-dispatch lazy CPUID install in vcpu_run adds OSXSAVE
+	 * via SYNC_REGS once the curated CPUID is live, paired with
+	 * kvm_v2_install_xcrs there. See SMP-T57 memo state-audit/25
+	 * §3.1 A.1+A.2 "deferred to first KVM_RUN" and the cpuid_primed
+	 * block in vcpu_run.
+	 */
 	sregs.cr4  = X86_CR4_PAE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT;
 	sregs.efer = EFER_SCE | EFER_LME | EFER_LMA | EFER_NX;
 	/*
@@ -753,6 +801,62 @@ int kvm_v2_install_descriptors_sregs(struct kvm_v2_vm *vm,
 	trace_um_backend_kvm_v2_descriptors_sregs_install(vcpu->vcpu_fd,
 							  sregs.idt.base,
 							  sregs.gdt.base);
+	return 0;
+}
+
+/*
+ * SMP-T57 (memo state-audit/25 §3.1 A.2): install XCR0 to enable
+ * X87/SSE/YMM state-save. Pairs with CR4.OSXSAVE (set in
+ * kvm_v2_install_production_sregs) and the AVX/XSAVE/OSXSAVE
+ * un-mask in kvm_v2_curate_cpuid.
+ *
+ * Without XCR0 set, VEX-encoded AVX instructions raise #UD even
+ * when CR4.OSXSAVE=1 and CPUID advertises AVX — XCR0 is the
+ * architectural enable for the extended state-save area. Memo
+ * state-audit/24 §7.6-H caught this empirically: stress-ng's
+ * mscan IFUNC variant lands on `vpxor %xmm6,%xmm6,%xmm6` which
+ * #UDs with XCR0=0 on Zen 4.
+ *
+ * Bits set:
+ *   bit 0 (X87)  : always required
+ *   bit 1 (SSE)  : XMM0..XMM15 (already implicit via OSFXSR but
+ *                  the XCR0 ABI requires bit 1 set whenever bit 2
+ *                  is set)
+ *   bit 2 (YMM)  : upper 128 bits of YMM0..YMM15 (AVX/AVX2)
+ *
+ * Higher tiers (AVX-512 = bits 5/6/7, AMX = 17/18) stay clear
+ * pending a follow-up that also un-masks the corresponding CPUID
+ * bits and audits the marshal struct size.
+ */
+static int kvm_v2_install_xcrs(int vcpu_fd)
+{
+	struct kvm_xcrs xcrs = {
+		.nr_xcrs = 1,
+		.xcrs[0] = { .xcr = 0, .value = 0x7 },
+	};
+	int rc;
+
+	rc = os_ioctl_generic(vcpu_fd, KVM_SET_XCRS, (unsigned long)&xcrs);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 install_xcrs: KVM_SET_XCRS(vcpu_fd=%d) failed (%d)\n",
+		       vcpu_fd, rc);
+		return rc;
+	}
+	/*
+	 * Read it back so we can confirm what KVM actually accepted —
+	 * KVM may clamp the value against guest_supported_xcr0 (the
+	 * AND of leaf 0xD sub-leaf 0 EAX with the leaf-1/leaf-7 ABI
+	 * feature bits). A silent clamp to 0x3 (FP|SSE only) would
+	 * leave VEX/AVX still faulting.
+	 */
+	{
+		struct kvm_xcrs got = {0};
+		int grc = os_ioctl_generic(vcpu_fd, KVM_GET_XCRS,
+					   (unsigned long)&got);
+		pr_info("um: kvm-v2 install_xcrs: vcpu_fd=%d set=0x7 get_rc=%d nr=%u xcr0=%#llx\n",
+			vcpu_fd, grc, got.nr_xcrs,
+			(unsigned long long)got.xcrs[0].value);
+	}
 	return 0;
 }
 
@@ -991,6 +1095,17 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	rc = kvm_v2_install_production_sregs(v);
 	if (rc < 0)
 		goto err_unmap_kvm_run;
+	/*
+	 * SMP-T57 (memo state-audit/25 §3.1 A.2 + A.3): the OSXSAVE bit
+	 * in sregs.cr4 above + the KVM_SET_XCRS ioctl are BOTH gated on
+	 * the curated CPUID being installed first. CPUID is lazy-installed
+	 * at first KVM_RUN (kzalloc(GFP_KERNEL) fails at vcpu_create time
+	 * — pre-mm_init in this codepath). We therefore defer the OSXSAVE
+	 * arming and the SET_XCRS to right after the CPUID install in
+	 * vcpu_run — see the `if (!vcpu->cpuid_primed)` block. The
+	 * sregs.cr4 above leaves OSXSAVE clear for now; the first dispatch
+	 * adds it via SYNC_REGS once CPUID is live.
+	 */
 
 	/*
 	 * D.5-fix-2: install per-vCPU signal mask. Block every host
@@ -1924,6 +2039,42 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		rc = kvm_v2_install_cpuid(vm, vcpu->vcpu_fd);
 		if (rc < 0)
 			panic("kvm-v2: cpuid lazy install (cpu=%d) failed: %d",
+			      cpu, rc);
+		/*
+		 * SMP-T57 (memo state-audit/25 §3.1): with the curated
+		 * CPUID now advertising XSAVE/OSXSAVE/AVX, arm CR4.OSXSAVE
+		 * via a full GET+SET_SREGS pair (must be SYNCHRONOUS so
+		 * KVM's vcpu->arch.cr4 has OSXSAVE live before the
+		 * subsequent KVM_SET_XCRS validates against it — the
+		 * SYNC_REGS path is deferred to next KVM_RUN, too late).
+		 * Then install XCR0=FP|SSE|YMM. Do both inside the
+		 * cpuid_primed=false window so the cost is paid once per
+		 * vCPU.
+		 */
+		{
+			struct kvm_sregs sregs2;
+
+			rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
+					      (unsigned long)&sregs2);
+			if (rc < 0)
+				panic("kvm-v2: SMP-T57 GET_SREGS pre-OSXSAVE (cpu=%d) failed: %d",
+				      cpu, rc);
+			sregs2.cr4 |= X86_CR4_OSXSAVE;
+			rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
+					      (unsigned long)&sregs2);
+			if (rc < 0)
+				panic("kvm-v2: SMP-T57 SET_SREGS+OSXSAVE (cpu=%d) failed: %d",
+				      cpu, rc);
+			/*
+			 * Mirror the live cr4 into the SYNC_REGS mmap so the
+			 * next dispatch's load_user_sregs's PGE-toggle XOR
+			 * starts from the correct base.
+			 */
+			run->s.regs.sregs.cr4 = sregs2.cr4;
+		}
+		rc = kvm_v2_install_xcrs(vcpu->vcpu_fd);
+		if (rc < 0)
+			panic("kvm-v2: install_xcrs lazy (cpu=%d) failed: %d",
 			      cpu, rc);
 		vcpu->cpuid_primed = true;
 	}
