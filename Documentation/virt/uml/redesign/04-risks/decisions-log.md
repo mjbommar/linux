@@ -11079,4 +11079,103 @@ STATUS row J flips PENDING → IN PROGRESS.
 
 ---
 
+## D121 (2026-05-07) — SMP-T57 Phase A: AVX/XSAVE enabled in kvm-v2
+
+**Context.** D118 surfaced SMP-T57 (stress-ng `--vm --verify` SIGILL
+on kvm-v2 only). Six probe cycles in memo `state-audit/24` ruled out
+IST-write, SYSRETQ-RCX, GPR drift, user-stack TDP, text-page TDP; the
+§7.6-H probe (commit `b91d49857892`) found the SIGILL fires on
+`vpxor %xmm6,%xmm6,%xmm6` (VEX/AVX). User-instruction bytes match the
+binary byte-for-byte → CPU-feature-disable. The fix plan
+(`state-audit/25`, commit `c7e0f37910e6`) split the work into Phase A
+(enable AVX) and Phase B (enable AVX-512 — deferred).
+
+**What landed.**
+
+- Commit `ab68bf077de3` (4 sites in `arch/um/backend/kvm-v2/vcpu.c`):
+  1. New `kvm_v2_install_xcrs()` helper — `KVM_SET_XCRS` with
+     xcrs[0].value=0x7 (FP|SSE|YMM).
+  2. `kvm_v2_curate_cpuid` un-masks Leaf 1 ECX bits 12/26/27/28/29
+     (FMA/XSAVE/OSXSAVE/AVX/F16C) and Leaf 7.0 EBX bit 5 (AVX2);
+     drops the zero-everything pass on Leaf 0xD (KVM needs it to
+     compute `guest_supported_xcr0` for SET_XCRS validation).
+  3. Lazy first-dispatch arming in `vcpu_run`'s existing
+     `cpuid_primed=false` block: install CPUID → synchronous
+     GET+SET_SREGS adding `X86_CR4_OSXSAVE` → `install_xcrs`.
+     Two chicken-and-egg KVM validations resolved by ordering:
+     KVM rejects CR4.OSXSAVE before CPUID's OSXSAVE bit lands;
+     KVM rejects SET_XCRS before CR4.OSXSAVE is live in
+     `vcpu->arch.cr4` (synchronous, not SYNC_REGS-deferred).
+  4. `install_production_sregs`'s seed kept WITHOUT OSXSAVE — the
+     bit is added at first-dispatch arming time. Documented at
+     the seed site to prevent a future reader re-adding it.
+
+- Commit `<this-update>` — STATUS row T57 flips
+  "OPEN (root-cause level)" → "DONE (Phase A; Phase B optional
+  follow-up for AVX-512)".
+
+**Trade-off (deliberate).**
+
+Phase A enables AVX-128 (XMM) and AVX-256 (YMM) but leaves
+AVX-512 (ZMM/OPMASK/Hi16) masked. Empirically stress-ng's
+`mscan` and `prime-incdec` vm-methods emit `vmovdqa64 %zmm6,%zmm7`
+in their tail-merge verification routine — those two methods
+still SIGILL on kvm-v2 post-Phase-A. The other 12 of the 14
+sampled vm-methods (flip, checkerboard, walk-0/1, zero, ones,
+move, grayflip, stripe, galpat-0/1, ...) now PASS. Phase B
+(un-mask leaf-7 AVX-512 EBX/ECX/EDX bits + bump XCR0 to include
+bits 5/6/7) is a small follow-up that closes mscan/prime-incdec
+when prioritised. Not gating on Phase B because:
+  - The 12-of-14 ratio is a substantial improvement over 0-of-14.
+  - AVX-512 enable carries a marshal-struct-size question
+    (`struct kvm_fpu` is FXSAVE-shaped at 512 B — switching to
+    `struct kvm_xsave` for ZMM_Hi256/Hi16_ZMM is the Phase B
+    structural change; memo `state-audit/25` §3.2 §5.1 catalogs
+    the risk).
+  - mscan and prime-incdec are the only-AVX-512 stress-ng methods
+    on this host; everything else in the Phase J pilot matrix
+    works.
+
+**Validation.**
+
+  - substrate gate kvm-v2: PASS=25/FAIL=3/EXPECTED_FAIL=3
+    (= seccomp parity, unchanged).
+  - cpython-parity 21 modules: 21/21 PARITY.
+  - mt-mini SMP T=8 ncpus=4 N=30: 30/30 (T41 holds).
+  - perf-py-startup 3 runs × 10 samples: ratio 1.167 PASS
+    (T55 ceiling 1.20; T57 fix did NOT slow Python startup).
+  - threaded-fork-malloc 8w × 500i × 6 boots = 24 000 forks:
+    0 CHILD_FAIL (T26/T27 cross-task XMM guarantee holds).
+  - `stress-ng --vm --vm-method=<X> --verify` matrix sample:
+    12/14 PASS post-fix (was 0/14 pre-fix).
+  - In-guest `__asm__("vpxor %xmm6,%xmm6,%xmm6")` and
+    `__asm__("vpxor %ymm0,%ymm0,%ymm0")` both succeed under
+    kvm-v2 (manual AVX_TEST repro, CPUID reports avx_bit=1
+    xsave_bit=1 osxsave_bit=1, xgetbv returns 0x7).
+
+**Deferred to follow-up.**
+
+- Phase B (AVX-512 enable). Closes mscan + prime-incdec; needs
+  marshal-struct audit + cross-task ZMM probe.
+- Cross-task YMM upper-128 hygiene probe (memo `state-audit/25`
+  §4.3). `threaded-fork-malloc` verified 24 000 cross-task
+  transitions XMM-clean, but a `_mm256_extracti128_si256`-based
+  YMM probe would catch a narrow class the existing probe is
+  blind to.
+- `state-audit/24-smp-t57-vmmethod-bisect.md` §8 status refresh
+  pointing at this fix (the memo's history-of-investigation is
+  preserved; only the trailing status line needs the pointer).
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/state-audit/24-smp-t57-vmmethod-bisect.md` (root-cause arc).
+- `02-workstreams/D-kvm-backend/state-audit/25-smp-t57-xsave-enable-plan.md` (this fix's plan).
+- Commits `b91d49857892` (root-cause), `c7e0f37910e6` (plan),
+  `ab68bf077de3` (Phase A code).
+- D118 (T57 surfaced), D119 (T55 — adjacent FPU territory).
+- v1 archive vcpu.c header comment lines 26-33 (deferred-work item
+  this fix closes).
+
+---
+
 ## (Future entries here, as decisions are made)

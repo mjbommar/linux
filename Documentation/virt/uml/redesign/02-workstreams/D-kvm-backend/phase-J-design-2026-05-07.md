@@ -428,62 +428,95 @@ Initial target packages: `httpx` (async HTTP client; small),
 `pyyaml` (binary extension; small), `pendulum` (datetime; small,
 has its own pytest battery).
 
-**Network strategy decision.** Three options for getting pip
+**Network strategy decision.** Four options for getting Python
 packages into the guest:
 
 | Option | Pros | Cons | Verdict |
 |--------|------|------|---------|
-| **(a) tap+NAT via umlctl** | Closest to "real" pip install; exercises virtio-net + UML net stack | Requires `CONFIG_UML_NET_VECTOR=y` rebuild + iptables NAT setup + DNS. Couples Tier 2 to host network reachability (CI runs offline). | NO. Couple-too-tightly. |
-| **(b) Local pypi mirror (bandersnatch)** | Reproducible; reusable across many hosts; no host network at run-time. | Bandersnatch full mirror is ~12 TB; partial mirror needs explicit package-list curation. Operator-time setup cost is high. Still needs guest networking. | NO. Overkill for ~10 packages. |
-| **(c) Prefetched wheels + `pip install --no-index --find-links`** | No guest networking; deterministic; reproducible offline; minimal disk (just the wheels we exercise). | Operator must `pip download <pkg> -d wheelhouse/` once per package version; refresh on package upgrade. | **YES.** |
+| (a) tap+NAT via umlctl | Closest to "real" pip install; exercises virtio-net + UML net stack | Requires `CONFIG_UML_NET_VECTOR=y` rebuild + iptables NAT setup + DNS. Couples Tier 2 to host network reachability (CI runs offline). | NO. Couples too tightly. |
+| (b) Local pypi mirror (bandersnatch) | Reproducible; reusable across many hosts; no host network at run-time. | Bandersnatch full mirror is ~12 TB; partial mirror needs explicit package-list curation. Operator-time setup cost is high. Still needs guest networking. | NO. Overkill for ~10 packages. |
+| (c) Prefetched wheels + `pip install --no-index --find-links` | No guest networking; deterministic; reproducible offline; minimal disk. | Operator must `pip download <pkg> -d wheelhouse/` once per version; refresh on upgrade. Also needs `python3-pip` apt-installed on host. | NO. `uv` does this strictly better. |
+| **(d) `uv run --with <pkg>` with offline cache** | Single statically-linked binary (no apt-get); 10-100× faster than pip; native `UV_OFFLINE=1` mode; isolated venv per invocation (sidesteps the cryptography-then-numpy import-chain pathology we hit in Tier 1); `~/.cache/uv` is hostfs-shared with guest so warming once on the host primes every iteration. | New dependency (curl-installed at `~/.local/bin/uv`). | **YES.** |
 
-**Decision: option (c).** Rationale: matches the discipline rule
-"don't tie us to host network." Wheels live at
-`tools/testing/selftests/um/soak/tier2/wheelhouse/` (or under
-`/var/lib/uml-soak/wheelhouse/` if we don't want them in tree —
-wheels aren't sources and shouldn't bloat the repo; gitignore them
-and document the bootstrap step in the rig README).
+**Decision: option (d) — `uv` with offline cache.** Rationale:
+strictly dominates option (c) on every axis the memo's
+discipline rules care about (no apt dependency, no wheelhouse
+hygiene burden, faster, and `uv`'s isolated venv naturally
+sidesteps the Tier-1 numpy-after-cryptography import-chain
+pathology that's still tracked as a separate UML-environment
+follow-up). `uv` ships as a single statically-linked Rust
+binary; install on the host with `curl -LsSf
+https://astral.sh/uv/install.sh | sh` and it lives at
+`~/.local/bin/uv`, visible inside the guest via hostfs at the
+same path.
 
 Bootstrap (one-time, host-side; documented in rig README):
 
 ```
-mkdir -p /var/lib/uml-soak/wheelhouse
-pip download --dest /var/lib/uml-soak/wheelhouse \
-    httpx pyyaml pendulum pytest
+# Install uv on host (one-time):
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+# Warm the cache for the Tier 2 packages (still online, one-time):
+UV_CACHE_DIR=/var/lib/uml-soak/uv-cache \
+  uv run --with httpx --with pyyaml --with pendulum --with pytest \
+  python -c "import httpx, yaml, pendulum, pytest; print('warmed')"
 ```
+
+After bootstrap the cache is filled; subsequent iterations run
+fully offline with `UV_OFFLINE=1`.
 
 Per-iteration in-guest invocation (template):
 
 ```
-pip install --no-index --no-build-isolation \
-    --find-links /var/lib/uml-soak/wheelhouse httpx \
-  && python3 -m pytest --pyargs httpx -k "not network" \
-       --timeout=120 -x \
+UV_OFFLINE=1 UV_CACHE_DIR=/var/lib/uml-soak/uv-cache \
+  /home/mjbommar/.local/bin/uv run --with httpx --with pytest \
+    python -m pytest --pyargs httpx -k "not network" --timeout=120 -x \
   && echo TIER2_OK || (echo TIER2_FAIL; exit 1)
 ```
 
 **Pre-conditions.**
 
-- **Host:** `pip3` already present; bootstrap step above. Map
-  `/var/lib/uml-soak/wheelhouse` into the guest via hostfs (read
-  -only is fine; pip install can install into `/tmp/site-packages`
-  with `--target=/tmp/site-packages` and `PYTHONPATH=/tmp/...`).
-- **Guest:** No pip network. PYTHONPATH includes `/tmp/site-packages`.
+- **Host:** `uv` installed (one-time curl); bootstrap step
+  above. Map `/var/lib/uml-soak/uv-cache` and `~/.local/bin/uv`
+  into the guest via hostfs (both readable from any cwd, no
+  guest writes needed at run time when `UV_OFFLINE=1`).
+- **Guest:** No network needed when `UV_OFFLINE=1`. `uv`
+  resolves all packages from the cache; iteration starts a
+  fresh isolated venv so package-state from a previous Tier-1
+  iteration cannot contaminate this one (the bug behind the
+  `cryptography → numpy` import-chain failure that Tier 1
+  currently works around by dropping numpy).
 - **Kernel:** no rebuild needed.
 
-**Expected wall-clock per iteration.** Per package: ~10 s
-(install) + ~30 s (pytest) ≈ 40 s. Three packages serially ≈ 120 s.
-Budget timeout 300 s.
+**Expected wall-clock per iteration.** Per package
+(post-warm): ~1-3 s venv setup + ~30 s pytest ≈ 35 s. Three
+packages serially ≈ 105 s. Budget timeout 300 s. (vs ~120 s
+for pip's path, so `uv` is net ~15 s faster per iteration —
+amortises ~30 % off a 24 h soak's Tier 2 wall-clock.)
 
 **Templates to add.**
 
-- `tier2-pip-httpx.toml.template`
-- `tier2-pip-pyyaml.toml.template`
-- `tier2-pip-pendulum.toml.template`
+- `tier2-uv-httpx.toml.template`
+- `tier2-uv-pyyaml.toml.template`
+- `tier2-uv-pendulum.toml.template`
 
-Same skeleton; each has a `bootstrap` phase (clear `/tmp/site-packages`,
-pre-extend PYTHONPATH) and an `install-and-test` phase combining
-the two pip + pytest calls into a single `&&`-chained command.
+Same skeleton; each has a single `tier2-uv` phase invoking the
+`uv run --with <pkg>` chain. The bootstrap "clear `/tmp/site-
+packages` + PYTHONPATH" dance from the wheelhouse approach is
+unnecessary — `uv` manages its own ephemeral venv per
+invocation.
+
+**Tier-1 numpy-after-cryptography bug — likely moot under `uv`.**
+The bug filed as #17 is: in UML hostfs, `import cryptography`
+then later (even in a fresh Python subprocess) `import numpy`
+trips a spurious `numpy.__config__` ImportError. Reproduces on
+both kvm-v2 and seccomp. Under `uv run --with numpy`, every
+invocation runs in a fresh isolated venv with its own site-
+packages; the cross-process state-carryover that triggers the
+bug shouldn't materialise. Worth re-trying numpy in Tier 1
+under a `uv` invocation as a side-effect of switching Tier 2
+to `uv` — may close #17 by-construction.
 
 **Failure modes + classification.**
 
