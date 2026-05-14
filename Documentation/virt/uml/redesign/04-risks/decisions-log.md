@@ -11178,4 +11178,80 @@ when prioritised. Not gating on Phase B because:
 
 ---
 
+## D122 (2026-05-14) — first post-T57-Phase-A 2h soak: 200/200 on kvm-v2
+
+**Context.** D121 closed SMP-T57 Phase A (AVX/XSAVE enable). D120
+landed the Phase J daemon-mode driver. This entry records the first
+production-scale soak that exercises both: a 2 h `run-soak-daemon.sh`
+sweep across memcheck/iocheck/stress-ng/tier1-pylibs on the
+post-Phase-A kernel.
+
+**What ran.**
+
+- `run_id` `phase-J-2h-2026-05-14T020423Z`.
+- Kernel `~/src/uml-builds/uml-smp-t41fix/linux` (HEAD
+  `bcd791f5a369`, post-T57 Phase A).
+- Host: AMD Ryzen 7 7840HS (Zen 4).
+- Budget 7200 s; daemon early-stopped at 2095 s (29.1 % consumed)
+  via the `--fail-threshold-pct 5 --fail-threshold-window 50`
+  trip on the iocheck/seccomp tuple (3 fails over rolling 50 iters).
+
+**Result.**
+
+- 400 scoreboard rows.
+- **kvm-v2: 200/200 = 100.00 % PASS** across all 4 workloads.
+- seccomp: 197/200 = 98.50 % (3 iocheck timeouts; root-cause
+  analysis below).
+- 0 panics, 0 throttle pauses, 0 kernel corruption.
+- All three failing iters reported `bad=0` for every completed
+  iteration before timing out. NOT corruption — per-iter timeout
+  class under W=2 contention.
+
+**Findings.**
+
+- **First sustained validation of the T57 Phase A fix.** 200 kvm-v2
+  iters across mmap-heavy (memcheck), file-IO (iocheck), IPC
+  stress (stress-ng futex/pipe/switch), and C-extension exercise
+  (tier1-pylibs requests + cryptography) — all clean.
+- **T55 + T26/T27 invariants hold under load.** No FPU corruption
+  events across ~50 000 dispatches.
+- **iocheck/seccomp timeout class** — `iocheck.toml.template`'s
+  60 s per-iter timeout occasionally too tight when two seccomp
+  workers run concurrent 64 MB tmpfs write/fsync/read passes.
+  kvm-v2 unaffected. Follow-up filed as task #23 (bump to 120 s).
+- **Daemon driver works end-to-end.** Rotation sweep,
+  threshold-trip clean-stop, scoreboard.jsonl + Wilson-CI
+  summary.md all behaved as designed. First production-scale run
+  of commit `4977e0357ce5`.
+
+**Decision (operational).**
+
+The threshold-trip stop fired correctly and shouldn't be loosened
+to "soak through the iocheck flake." Instead:
+
+  1. Fix iocheck's per-iter timeout (task #23) so the flake is
+     no longer a flake.
+  2. Re-run with `--fail-threshold-window 100` next time for a
+     smoother rolling average — the rolling-50 window felt tight
+     enough to over-trigger on a low-rate timeout class. The
+     spec at memo `phase-J-design-2026-05-07.md` §2.8 left the
+     window adjustable for exactly this reason.
+
+Do NOT relax the 5 % threshold itself. The whole point of the
+daemon's early stop is to catch a real ~5 % failure-rate
+regression before it accumulates into the scoreboard noise.
+
+**Refs.**
+
+- `02-workstreams/D-kvm-backend/phase-J-soak-2h-2026-05-14.md`
+  (full soak diary — per-tuple table, log inspection, follow-up).
+- `02-workstreams/D-kvm-backend/phase-J-design-2026-05-07.md`
+  §2.8 (threshold-trip stop spec).
+- D117 (J-pilot 240/240 baseline), D119 (T55 fix), D120 (daemon
+  driver), D121 (T57 Phase A).
+- Task #23 (iocheck timeout follow-up).
+- Artefacts: `/var/tmp/uml-soak/phase-J-2h-2026-05-14T020423Z/`.
+
+---
+
 ## (Future entries here, as decisions are made)
