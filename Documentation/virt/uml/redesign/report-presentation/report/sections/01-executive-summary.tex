@@ -2,12 +2,13 @@
 
 \subsection{Goal and Current Position}
 
-The redesign aims to make User Mode Linux a first-class kernel
-research, fuzzing, and deterministic execution target again. The
-target is not another virtual machine monitor, not a container
-runtime, and not a Linux reimplementation. The target is the upstream
-kernel, built as \UML{}, with swappable execution backends, runtime
-instrumentation gates, and profile-driven builds from one source tree.
+This branch proposes a profile-driven direction for \UML{} while
+preserving the existing contract: the upstream Linux kernel built as
+\texttt{arch/um} and executed as a host process. The target is not
+another virtual machine monitor, not a container runtime, and not a
+Linux reimplementation. The branch-local work is the combination of
+swappable execution backends, runtime instrumentation gates,
+profile-driven builds, and validation artifacts from one source tree.
 
 \begin{figure}[h]
 \centering
@@ -17,7 +18,7 @@ instrumentation gates, and profile-driven builds from one source tree.
   title/.style={font=\bfseries\large,text=UMLInk},
   key/.style={font=\bfseries,text=UMLBlue},
 ]
-\node[box] (vision) {\textbf{Vision.} One kernel tree produces fast production \UML{}, sanitizer-heavy research \UML{}, fuzzing \UML{}, sandbox \UML{}, library-mode \UML{}, and time-travel \UML{}.};
+\node[box] (vision) {\textbf{Branch claim.} One kernel tree can produce fast production \UML{}, sanitizer-heavy research \UML{}, fuzzing \UML{}, sandbox \UML{}, library-mode \UML{}, and time-travel \UML{}.};
 \node[box,below=of vision] (arch) {\textbf{Architecture.} Layer 1 abstracts the trap mechanism with \texttt{struct um\_backend\_ops}; Layer 2 places static-key gates on hot paths; Layer 3 composes compile-time sanitizers and profile features.};
 \node[box,below=of arch] (state) {\textbf{Current state at \ReportDate.} Backend abstraction, static-key infrastructure, profile work, \texttt{umlctl}, selftests, and \KVMvTwo{} are in-tree. \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, and post-gadget performance; sustained validation is in progress.};
 \node[box,below=of state] (evidence) {\textbf{Evidence.} \KVMvTwo{} matches seccomp on the substrate gate, reaches cpython-parity 21/21 under UP and SMP, passes 200/200 \KVMvTwo{} iterations in the first post-T57 two-hour soak, and is faster than seccomp on all eight benchmark hosts.};
@@ -25,48 +26,49 @@ instrumentation gates, and profile-driven builds from one source tree.
 \caption{The report in four claims. Each claim maps back to a tracked source document or measured artefact.}
 \end{figure}
 
-\subsection{Original UML Promise and Redesign Questions}
+\subsection{Existing UML Contract and Branch Questions}
 
-Original \UML{} made Linux itself run as a userspace process:
-debuggable, rootless, and able to host many isolated Linux
-instances without emulating a machine \cite{dike-als2000,uml-howto,
-uml-homepage}. The redesign keeps that promise but answers the two
-criticisms that made \UML{} feel stale for modern kernel work:
-userspace trap cost and incomplete multiprocessor realism.
+The branch assumes the existing \UML{} contract: Linux itself runs as a
+userspace process, remains debuggable and rootless, and can host
+isolated Linux instances without emulating a full machine
+\cite{dike-als2000,uml-howto,uml-homepage}. The proposed changes keep
+that contract and concentrate on branch-local pressure points:
+userspace trap cost, multiprocessor state ownership, profile
+composition, and validation breadth.
 
 \begin{table}[h]
 \centering
-\caption{External UML premise mapped to the redesign response.}
+\caption{Existing UML contract mapped to the branch-local response.}
 \small
 \begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}Y Y@{}}
 \toprule
-Original premise & Why it still matters & Redesign response \\
+Existing property & Constraint carried forward & Branch-local response \\
 \midrule
-Kernel as a normal host process & Rootless kernel development, CI, and reproducible debugging remain valuable where nested virtualization is unavailable. & Keep stock-host execution through ptrace/seccomp, but add KVM as a fast backend when available. \\
-Isolated Linux instances & Sandboxes, network labs, and testbeds need cheap Linux environments without new hardware or privileged host setup. & Make sandbox a profile, not the whole architecture; choose minimal code, seccomp-only defaults, and explicit validation. \\
-Faithful upstream kernel & Security research needs Linux behavior, not a userspace reimplementation with semantic drift. & Build the upstream kernel as \UML{}; profiles change defaults and instrumentation, not kernel semantics. \\
-Debuggable experimentation & Original \UML{} made kernel debugging easier than bare metal; modern research also needs tracing, coverage, and replay. & Layer 2 static keys make observability a runtime decision; Layer 3 composes sanitizers by profile. \\
-Known historic weaknesses & High trap cost and lack of realistic SMP limited \UML{} as workloads and fuzzers became more demanding. & \KVMvTwo{} and sustained validation directly target syscall cost, SMP state ownership, parity, and long-run reliability. \\
+Kernel as a normal host process & Preserve rootless development, CI usability, and reproducible debugging where nested virtualization is unavailable. & Keep stock-host execution through ptrace/seccomp, but add KVM as a fast backend when available. \\
+Isolated Linux instances & Preserve cheap Linux environments without new hardware or privileged host setup. & Make sandbox a profile, not the whole architecture; choose minimal code, seccomp-only defaults, and explicit validation. \\
+Faithful upstream kernel & Preserve Linux behavior rather than introducing a userspace reimplementation with semantic drift. & Build the upstream kernel as \UML{}; profiles change defaults and instrumentation, not kernel semantics. \\
+Debuggable experimentation & Preserve normal \UML{} debugging value while adding tracing, coverage, and replay hooks as explicit features. & Layer 2 static keys make observability a runtime decision; Layer 3 composes sanitizers by profile. \\
+Known hard problems & Treat trap cost and SMP state ownership as implementation and validation problems, not as presentation claims. & \KVMvTwo{} and sustained validation directly target syscall cost, SMP state ownership, parity, and long-run reliability. \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 \begin{table}[h]
 \centering
-\caption{The questions this report and deck must answer.}
+\caption{Questions the report uses to bound the branch claims.}
 \small
 \begin{tabularx}{\linewidth}{@{}L{0.04\linewidth}Y Y@{}}
 \toprule
 \# & Question & Where answered \\
 \midrule
-1 & What is the revived \UML{} value proposition, beyond nostalgia? & Vision, non-goals, original-premise table, and profile matrix. \\
-2 & Why is this not QEMU, Firecracker, gVisor, LKL, or a container runtime? & Non-goals, design boundary, and adjacent-work comparisons. \\
+1 & What branch-local value proposition is being proposed? & Branch claim, non-goals, existing-contract table, and profile matrix. \\
+2 & What is the boundary relative to QEMU, Firecracker, gVisor, LKL, and containers? & Non-goals, design boundary, and adjacent-work comparisons. \\
 3 & What single architecture lets fast production, research, fuzzing, sandbox, library, and time-travel coexist? & Three-layer architecture and profile sections. \\
 4 & What has actually landed, and what is still only planned? & Current-state tables, source map, and upstream queue. \\
 5 & Does \KVMvTwo{} preserve Linux-visible state across SMP, signals, FPU/XSAVE, faults, and task switches? & KVM design, state-audit method, recent-fix table, and validation ladder. \\
 6 & Does the performance win survive beyond a microbenchmark? & Micro, Python, and stress-tier benchmark sections. \\
 7 & What validation bar remains before upstreaming? & Sustained validation, Tier 2/3/LTP, and next-work sections. \\
-8 & What should reviewers challenge next? & Open-state list, remaining risks, and upstream-path sections. \\
+8 & What should maintainer review put pressure on next? & Open-state list, remaining risks, and upstream-path sections. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -117,16 +119,15 @@ D & KVM backend & \progresspill & \KVMvTwo{} is functional and performant; 24-ho
 
 \subsection{First Three-Page Takeaway}
 
-The redesign is best understood as a transition from ``\UML{} as a
-single slow compatibility target'' to ``\UML{} as a profile matrix.''
-The common lower layer is a backend contract; production can choose
-\KVM{}, CI can choose \Seccomp{}, legacy hosts can choose ptrace, and
-each profile can decide whether it wants no hooks, runtime hooks, or
-heavy compile-time instrumentation.
+The branch is best understood as a transition from one default
+execution story to an explicit profile matrix. The common lower layer
+is a backend contract; production can choose \KVM{}, CI can choose
+\Seccomp{}, legacy hosts can choose ptrace, and each profile can decide
+whether it wants no hooks, runtime hooks, or heavy compile-time
+instrumentation.
 
-The current fork has already proved the highest-risk implementation
-path: \KVMvTwo{} can run real guest userspace, handle SMP, preserve
+The current branch has crossed the highest-risk implementation path:
+\KVMvTwo{} can run real guest userspace, handle SMP, preserve
 cross-task state, and beat \Seccomp{} on measured workloads. The
-remaining question is no longer whether the architecture is plausible;
-it is whether sustained validation can demonstrate enough reliability
-and breadth for upstream submission.
+remaining gate is sustained validation: reliability, breadth, and
+upstreamable series boundaries.

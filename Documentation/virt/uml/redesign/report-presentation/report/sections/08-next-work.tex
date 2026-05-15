@@ -92,10 +92,9 @@ subsystem patches go first. The backend abstraction is the tentpole.
 Static-key hot paths and profile work follow. The \KVM{} backend is
 last because it is the largest technical and review burden.
 
-\subsection{Main Message for Reviewers}
+\subsection{Main Message for Maintainers}
 
-The report should not ask reviewers to accept the whole future at
-once. It should make three narrower claims:
+The upstream path makes three narrower claims:
 \begin{enumerate}
   \item \UML{} already has multiple backend mechanisms; making the
         backend contract explicit is a cleanup and an enabling move.

@@ -57,39 +57,16 @@
 
 \section{Goal and State}
 
-\begin{frame}{Reader Contract}
-\begin{columns}[T,onlytextwidth]
-\column{0.48\textwidth}
-\begin{block}{Assumed reader}
-\begin{itemize}
-  \item knows Linux review culture
-  \item may know classic \UML{}
-  \item does not know this diary
-  \item does not know our phase names
-\end{itemize}
-\end{block}
-\column{0.48\textwidth}
-\begin{block}{What this deck must do}
-\begin{itemize}
-  \item state the value proposition
-  \item separate inherited work from branch work
-  \item explain \KVMvTwo{} without VMM confusion
-  \item show evidence and remaining review risk
-\end{itemize}
-\end{block}
-\end{columns}
-\end{frame}
-
 \begin{frame}{Thesis}
 \begin{columns}[T,onlytextwidth]
 \column{0.53\textwidth}
 \Large
-\textbf{\UML{} can become a profile-driven kernel research substrate again.}
+\textbf{This branch makes the \UML{} execution contract profile-driven.}
 
 \vspace{0.7em}
 \normalsize
-The redesign turns one source tree into fast production, observable
-research, fuzzing, sandbox, library, and time-travel artifacts.
+The proposal keeps \UML{} as Linux built for a host process, then makes
+backend choice, instrumentation, and validation explicit review surfaces.
 
 \column{0.43\textwidth}
 \begin{tikzpicture}[
@@ -103,36 +80,36 @@ research, fuzzing, sandbox, library, and time-travel artifacts.
 \end{columns}
 \end{frame}
 
-\begin{frame}{Original UML, Updated}
+\begin{frame}{Preserved Contract and Branch Delta}
 \begin{columns}[T,onlytextwidth]
 \column{0.48\textwidth}
-\begin{block}{Original promise}
+\begin{block}{Preserved \UML{} contract}
 \begin{itemize}
-  \item Linux kernel as a userspace process
-  \item rootless development and debugging
-  \item isolated Linux instances
-  \item no machine emulation requirement
+  \item upstream Linux built as \texttt{arch/um}
+  \item host-process execution model
+  \item rootless/debuggable operation
+  \item no full machine model in scope
 \end{itemize}
 \end{block}
 \column{0.48\textwidth}
-\begin{block}{Modern blockers}
+\begin{block}{Branch-local deltas}
 \begin{itemize}
-  \item userspace trap cost
-  \item SMP and state ownership
-  \item fuzzing throughput
-  \item stale profile and tooling story
+  \item explicit backend-ops contract
+  \item \KVMvTwo{} trap backend
+  \item static-key instrumentation gates
+  \item profile defconfigs and validation gates
 \end{itemize}
 \end{block}
 \end{columns}
 \vspace{0.45em}
 \centering
-\pill{UMLBlue}{RESPONSE}\quad backend abstraction + runtime gates + profile matrix + \KVMvTwo{}
+\pill{UMLBlue}{CLAIM}\quad change mechanism and policy surfaces, not \UML{} semantics
 \end{frame}
 
-\begin{frame}{Goal}
+\begin{frame}{Branch Goal}
 \begin{columns}[T,onlytextwidth]
 \column{0.50\textwidth}
-\begin{block}{Build from one tree}
+\begin{block}{Profiles from one tree}
 \begin{itemize}
   \item near-native \texttt{prod-fast}
   \item sanitizer-heavy \texttt{research}
@@ -143,7 +120,7 @@ research, fuzzing, sandbox, library, and time-travel artifacts.
 \end{itemize}
 \end{block}
 \column{0.46\textwidth}
-\begin{block}{Do not build}
+\begin{block}{Out of scope}
 \begin{itemize}
   \item a Linux reimplementation
   \item a QEMU/Firecracker replacement
@@ -154,22 +131,22 @@ research, fuzzing, sandbox, library, and time-travel artifacts.
 \end{columns}
 \end{frame}
 
-\begin{frame}{Why Not Existing Tools?}
+\begin{frame}{Adjacent Tool Boundary}
 \scriptsize
 \begin{tabularx}{\textwidth}{@{}p{0.19\textwidth}p{0.36\textwidth}X@{}}
 \toprule
-Option & What it is good at & Why \UML{} still matters \\
+Tool & Useful comparison & Boundary for this branch \\
 \midrule
 QEMU/KVM & General virtual machines, device models, booting real images. &
-\UML{} is a kernel built as a host process; it is cheaper to instrument
-and easier to bind into source-level kernel tests. \\
+This branch keeps the \UML{} host-process kernel model; it is not adding
+a full machine/device model. \\
 Firecracker & Minimal production microVMs. & It optimizes a different
-surface: cloud isolation and boot footprint, not sanitizer-heavy kernel
-research inside \texttt{arch/um}. \\
+surface: cloud isolation and boot footprint, not \texttt{arch/um}
+profile composition. \\
 gVisor & Userspace kernel sandboxing. & It proves useful backend patterns,
 but it is not the Linux kernel under test. \\
 LKL & Direct-call Linux library harnesses. & It is fast, but loses the
-normal user/kernel ring split that matters for syscall and exploit research. \\
+normal user/kernel ring split that several \UML{} profiles preserve. \\
 Containers & Process isolation and deployment. & They share the host
 kernel; they cannot test another Linux kernel as the target. \\
 \bottomrule
@@ -198,7 +175,7 @@ Benchmark & Faster than seccomp on all eight hosts and all three tiers \\
 \end{center}
 \end{frame}
 
-\begin{frame}{Original Versus This Branch}
+\begin{frame}{Inherited UML Versus This Branch}
 \scriptsize
 \begin{tabularx}{\textwidth}{@{}p{0.25\textwidth}X@{}}
 \toprule
@@ -246,21 +223,21 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{Eight Answers: Why This Work Exists}
+\begin{frame}{Eight Answers: Branch Claims}
 \small
 \begin{tabularx}{\textwidth}{@{}p{0.05\textwidth}p{0.28\textwidth}X@{}}
 \toprule
 \# & Question & Short answer \\
 \midrule
-1 & Revived value proposition & One upstream Linux tree can produce fast, research, fuzz, sandbox, library, and deterministic profiles. \\
-2 & Why not existing tools & They solve adjacent problems; none gives Linux-as-a-process with this instrumentation and syscall fidelity mix. \\
+1 & Branch value proposition & One upstream Linux tree can produce fast, research, fuzz, sandbox, library, and deterministic profiles. \\
+2 & Adjacent-tool boundary & QEMU, Firecracker, gVisor, LKL, and containers solve different problems; none is the branch target. \\
 3 & Shared architecture & Backend ops, static-key gates, and profile defconfigs keep variation explicit. \\
 4 & Landed vs planned & Core architecture, \KVMvTwo{}, tooling, and gates exist; 24h validation, LTP, syzkaller, and replay remain. \\
 \bottomrule
 \end{tabularx}
 \end{frame}
 
-\begin{frame}{Eight Answers: What Reviewers Should Test}
+\begin{frame}{Eight Answers: Review Pressure Points}
 \small
 \begin{tabularx}{\textwidth}{@{}p{0.05\textwidth}p{0.28\textwidth}X@{}}
 \toprule
@@ -269,14 +246,14 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 5 & SMP and state & v2 now has an explicit state-home contract and audit trail for per-task, per-vCPU, and per-mm state. \\
 6 & Speed beyond micro & Python and stress tiers win on every benchmark host, not only \texttt{getpid}. \\
 7 & Upstream bar & Finish sustained validation and split small subsystem series before the large \texttt{arch/um} series. \\
-8 & Reviewer challenges & Challenge the data model, validation breadth, upstream slicing, and replay/snapshot claims. \\
+8 & Review pressure & Put pressure on the data model, validation breadth, upstream slicing, and replay/snapshot claims. \\
 \bottomrule
 \end{tabularx}
 \end{frame}
 
 \section{Architecture}
 
-\begin{frame}{Milestone Map, Plain English}
+\begin{frame}{Milestone Map}
 \centering
 \begin{tikzpicture}[
   phase/.style={draw=UMLGrid,rounded corners=2pt,minimum width=1.72cm,minimum height=0.82cm,align=center,font=\scriptsize},
@@ -295,8 +272,8 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 \vspace{1em}
 
 \begin{itemize}
-  \item Internal phase labels exist in the diary, but reviewers should read the work as milestones.
-  \item The current frontier is not a new design idea; it is sustained workload breadth before upstreaming.
+  \item Internal diary phase labels map to the milestone sequence above.
+  \item The remaining frontier is sustained workload breadth before upstreaming.
 \end{itemize}
 \end{frame}
 
@@ -649,7 +626,7 @@ event log, replay consumer, and workflow. \\
 \end{tabularx}
 \end{frame}
 
-\begin{frame}{What Reviewers Should Challenge}
+\begin{frame}{Maintainer Review Questions}
 \small
 \begin{columns}[T,onlytextwidth]
 \column{0.48\textwidth}
@@ -675,14 +652,14 @@ event log, replay consumer, and workflow. \\
 
 \begin{frame}{Closing Summary}
 \Large
-\textbf{The redesign is now an implementation with a validation frontier.}
+\textbf{The branch is now an implementation with a validation frontier.}
 
 \vspace{0.8em}
 \normalsize
 \begin{itemize}
   \item The architectural shape is coherent: backends, gates, profiles.
   \item \KVMvTwo{} has crossed the hardest feasibility line: real workloads, SMP, and speed.
-  \item The next credible milestone is not another design memo; it is sustained validation and an upstreamable series plan.
+  \item The next credible milestone is sustained validation and an upstreamable series plan.
 \end{itemize}
 \end{frame}
 

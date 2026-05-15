@@ -2,15 +2,14 @@
 
 \subsection{Problem Statement}
 
-Classic \UML{} remains valuable because it is Linux itself compiled
-to run as a userspace program. That gives researchers a real kernel,
-real system call semantics, and a deployable target in environments
-where full hardware virtualization is not available. The problem is
-that the historical execution model does not provide the performance,
-feature composition, or operational discipline expected by modern
-kernel fuzzing and observability workflows.
+The branch starts from the existing \UML{} contract: Linux itself is
+compiled to run as a userspace program, with real kernel semantics and
+a deployable target in environments where full hardware virtualization
+is not available. The branch-local problem is to add a reviewable
+structure for performance, feature composition, and operational
+validation without changing what \UML{} means.
 
-The redesign sets a higher bar:
+The proposed bar for this branch is:
 \begin{itemize}
   \item production \UML{} should approach native syscall cost when
         the host exposes \KVM{};
@@ -28,19 +27,18 @@ The redesign sets a higher bar:
 
 \subsection{Non-Goals}
 
-The design deliberately avoids three tempting but wrong shapes.
-First, it does not reimplement Linux in another language. gVisor is
-important prior art for backend structure and \KVM{} execution, but
-\UML{} keeps Linux semantics by building Linux itself
-\cite{gvisor-platforms}. Second, it is not a microVM competitor to
-Firecracker \cite{firecracker}; the problem is kernel research and
-fuzzing fidelity, not cloud cold-start packaging. Third, it is not a
-unikernel-only library effort, although the library profile borrows
-from LKL where that model is useful \cite{lkl}.
+The design boundary is explicit. It does not reimplement Linux in
+another language. gVisor is useful prior art for backend structure and
+\KVM{} execution, but \UML{} keeps Linux semantics by building Linux
+itself \cite{gvisor-platforms}. It is not a microVM competitor to
+Firecracker \cite{firecracker}; the problem here is kernel research
+and fuzzing fidelity, not cloud cold-start packaging. It is not a
+unikernel-only library effort either, although the library profile
+borrows from LKL where that model is useful \cite{lkl}.
 
 \subsection{Success Criteria}
 
-The project succeeds when a developer can select a profile, build it
+The branch succeeds when a developer can select a profile, build it
 from the same tree, and get an artifact whose performance and
 instrumentation properties match its intended use:
 
@@ -64,11 +62,10 @@ Profile & Intended outcome \\
 
 \subsection{Why Now}
 
-The timing is favorable because recent \UML{} work removed old
-prerequisite blockers: seccomp mode exists, SMP support exists, and
-modern kernel instrumentation is mature enough to compose around
-static keys and profile-specific Kconfig. The surrounding ecosystem
-also supplies useful models: gVisor for backend/platform design,
-crosvm for host process decomposition \cite{crosvm}, syzkaller for
-fuzzing expectations \cite{syzkaller}, and upstream kernel policy for
+The timing is tied to concrete prerequisites: seccomp mode exists, SMP
+support exists, and kernel instrumentation is mature enough to compose
+around static keys and profile-specific Kconfig. Adjacent projects
+also supply useful models: gVisor for backend/platform design, crosvm
+for host process decomposition \cite{crosvm}, syzkaller for fuzzing
+expectations \cite{syzkaller}, and upstream kernel policy for
 AI-assisted development disclosure \cite{coding-assistants}.

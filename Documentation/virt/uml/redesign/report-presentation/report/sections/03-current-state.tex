@@ -1,9 +1,9 @@
 \section{Current State}
 
-\subsection{Top-Down Source Reading}
+\subsection{Source Basis}
 
-This report intentionally reads the project in the same order a new
-reviewer should read it: goal, plan, code, diary, current state, then
+The report is grounded in the branch's source material: goal and plan
+documents, landed code, the bug diary, current status, and measured
 evidence. The main source classes are:
 
 \begin{table}[h]
@@ -23,20 +23,19 @@ Evidence & \path{tools/testing/selftests/um/}, benchmark and soak memos & Suppli
 \end{tabularx}
 \end{table}
 
-\subsection{Original \UML{} Versus This Branch}
+\subsection{Inherited \UML{} Versus This Branch}
 
-A reviewer should be able to separate inherited \UML{} from the work
-this branch redesigned or implemented. I checked that boundary by
-diffing \texttt{origin/master...HEAD} across \texttt{arch/um},
+The attribution boundary matters. I checked it by diffing
+\texttt{origin/master...HEAD} across \texttt{arch/um},
 \texttt{tools/uml}, \texttt{tools/testing/selftests/um}, and
 \texttt{Documentation/virt/uml}. That diff spans 688 UML-related
 files, with 154,501 insertions and 823 deletions. The number is a
-scope check, not an authorship claim: the original \UML{} idea, the
-Linux kernel, and generic KVM facilities remain inherited foundations.
+scope check, not an authorship claim: the existing \UML{} model, the
+Linux kernel, and generic \KVM{} facilities remain inherited foundations.
 
 \begin{table}[h]
 \centering
-\caption{Attribution reading for the current branch.}
+\caption{Attribution boundary for the current branch.}
 \small
 \begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}Y@{}}
 \toprule
@@ -66,8 +65,7 @@ the large upstream \texttt{arch/um} series remain future work. \\
 
 \subsection{Landed Versus Open}
 
-The current state is not a green-field plan. The fork contains
-substantial code and test infrastructure:
+The branch contains substantial code and test infrastructure:
 
 \begin{itemize}
   \item \texttt{arch/um/include/shared/backend.h} defines the backend
