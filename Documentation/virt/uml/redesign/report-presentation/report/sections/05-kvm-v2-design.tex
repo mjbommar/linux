@@ -13,15 +13,16 @@ to keep the common syscall path in guest context.
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}[
-  region/.style={draw=UMLGrid,rounded corners=3pt,align=center,inner sep=8pt},
+  region/.style={draw=UMLGrid,rounded corners=3pt,align=center,inner sep=7pt},
   arr/.style={-{Latex[length=2mm]},thick,UMLMuted},
+  note/.style={font=\footnotesize,text=UMLMuted,align=center},
 ]
-\node[region,fill=UMLGreen!10,minimum width=3.8cm,minimum height=1.25cm] (user) {guest userspace\\ring 3};
-\node[region,fill=UMLBlue!10,minimum width=3.8cm,minimum height=1.25cm,right=1.1cm of user] (kernel) {\UML{} kernel\\ring 0};
-\node[region,fill=UMLPanel,minimum width=8.7cm,minimum height=1.0cm,below=0.7cm of $(user)!0.5!(kernel)$] (host) {host process, KVM ioctls, signals, files, timers};
-\draw[arr] (user) -- node[above,font=\footnotesize]{\texttt{syscall}/LSTAR} (kernel);
-\draw[arr] (kernel) -- node[right,font=\footnotesize]{VMCALL, HLT, MMIO, host work} (host);
-\draw[arr] (host) -| node[pos=0.25,below,font=\footnotesize]{resume} (user);
+\node[region,fill=UMLGreen!10,minimum width=3.75cm,minimum height=1.2cm] (user) {guest userspace\\ring 3};
+\node[region,fill=UMLBlue!10,minimum width=3.75cm,minimum height=1.2cm,right=2.25cm of user] (kernel) {\UML{} kernel\\ring 0};
+\node[region,fill=UMLPanel,minimum width=9.3cm,minimum height=1.05cm,below=1.45cm of $(user)!0.5!(kernel)$] (host) {host process boundary\\KVM ioctls, signals, files, timers};
+\draw[arr] (user.east) -- node[above,note]{\texttt{syscall} / LSTAR} (kernel.west);
+\draw[arr] (kernel.south) -- node[right,note]{host assist\\VMCALL, HLT, MMIO} ($(kernel.south)+(0,-0.72)$) -- ($(host.north)+(2.35,0)$);
+\draw[arr] ($(host.north)+(-2.35,0)$) -- ($(user.south)+(0,-0.72)$) -- node[left,note]{resume} (user.south);
 \end{tikzpicture}
 \caption{\KVMvTwo{} execution model. It is not a QEMU-style machine; it is a trap mechanism for \UML{} itself.}
 \end{figure}

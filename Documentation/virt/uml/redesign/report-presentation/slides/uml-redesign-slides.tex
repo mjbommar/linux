@@ -32,6 +32,8 @@
 \newcommand{\pill}[2]{\colorbox{#1!14}{\textcolor{#1}{\footnotesize\textbf{#2}}}}
 \newcommand{\done}{\pill{UMLGreen}{DONE}}
 \newcommand{\progress}{\pill{UMLAmber}{IN PROGRESS}}
+\newcommand{\planned}{\pill{UMLBlue}{PLANNED}}
+\newcommand{\limit}{\pill{UMLRed}{LIMIT}}
 \newcommand{\blocked}{\pill{UMLRed}{BLOCKED}}
 
 \title{\ProjectTitle}
@@ -149,6 +151,32 @@ Benchmark & Faster than seccomp on all eight hosts and all three tiers \\
 \hspace{1em}
 \blocked\quad large upstream series until validation
 \end{center}
+\end{frame}
+
+\begin{frame}{Original Versus This Branch}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.25\textwidth}X@{}}
+\toprule
+Category & Reading \\
+\midrule
+Inherited \UML{} and Linux & Linux-as-a-host-process, legacy ptrace,
+generic kernel subsystems, existing KVM APIs, and the broad idea of
+time travel are foundations, not branch-local inventions. \\
+Upstream prerequisites & Seccomp-mode \UML{} and upstream SMP are
+enabling context that the redesign builds on. \\
+Redesigned here & Backend ops, static-key gates, profile matrix,
+\KVMvTwo{} state ownership, validation ladder, and upstream sequencing. \\
+Implemented here & \texttt{arch/um/backend/kvm-v2/}, profile docs and
+configs, snapshot/forkserver v1, \texttt{umlctl}, launcher, gates,
+soak, benchmark, and parity selftests. \\
+Planned or paused & KVM-aware snapshot readiness, full record/replay,
+time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
+\texttt{arch/um} series packaging. \\
+\bottomrule
+\end{tabularx}
+\vspace{0.55em}
+\pill{UMLBlue}{DIFF CHECK}\quad
+\texttt{origin/master...HEAD} over UML paths: 688 files, 154{,}501 insertions, 823 deletions.
 \end{frame}
 
 \begin{frame}{Evidence Dashboard}
@@ -282,15 +310,16 @@ time-travel & seccomp & deterministic time & replayable execution \\
 \begin{frame}{KVM v2 Model}
 \centering
 \begin{tikzpicture}[
-  region/.style={draw=UMLGrid,rounded corners=3pt,align=center,inner sep=8pt,minimum height=1.1cm},
+  region/.style={draw=UMLGrid,rounded corners=3pt,align=center,inner sep=7pt,minimum height=1.0cm},
   arr/.style={-{Latex[length=2mm]},thick,UMLMuted},
+  note/.style={font=\scriptsize,text=UMLMuted,align=center},
 ]
 \node[region,fill=UMLGreen!10,minimum width=3.2cm] (user) {guest userspace\\ring 3};
-\node[region,fill=UMLBlue!10,minimum width=3.2cm,right=1.1cm of user] (kernel) {\UML{} kernel\\ring 0};
-\node[region,fill=UMLPanel,minimum width=7.7cm,below=0.75cm of $(user)!0.5!(kernel)$] (host) {host process + KVM ioctls};
-\draw[arr] (user) -- node[above,font=\footnotesize]{LSTAR} (kernel);
-\draw[arr] (kernel) -- node[right,font=\footnotesize]{host work} (host);
-\draw[arr] (host) -| node[pos=0.25,below,font=\footnotesize]{resume} (user);
+\node[region,fill=UMLBlue!10,minimum width=3.2cm,right=1.85cm of user] (kernel) {\UML{} kernel\\ring 0};
+\node[region,fill=UMLPanel,minimum width=8.2cm,below=1.1cm of $(user)!0.5!(kernel)$] (host) {host process boundary\\KVM ioctls, signals, files, timers};
+\draw[arr] (user.east) -- node[above,note]{syscall / LSTAR} (kernel.west);
+\draw[arr] (kernel.south) -- node[right,note]{host assist} ($(kernel.south)+(0,-0.52)$) -- ($(host.north)+(2.0,0)$);
+\draw[arr] ($(host.north)+(-2.0,0)$) -- ($(user.south)+(0,-0.52)$) -- node[left,note]{resume} (user.south);
 \end{tikzpicture}
 \vspace{0.8em}
 
@@ -389,6 +418,26 @@ seccomp aggregate & 200 & 197 & 3 & 98.50\% \\
 \end{tikzpicture}
 \end{frame}
 
+\begin{frame}{Native Baseline Context}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}p{0.26\textwidth}X@{}}
+\toprule
+Path & Relative to normal & Reading \\
+\midrule
+Normal Linux \texttt{getpid} & 1.0x, 50 ns & Baseline used by the profile cost model. \\
+\KVMvTwo{} \texttt{prod-fast} & 1.6x, 80 ns & Same order as native for gadget-covered calls. \\
+\Seccomp{} profiles & 10--24x, 505--1200 ns & Expected for research, fuzz, sandbox, and time-travel. \\
+ptrace fallback & 40x, 2{,}000 ns & Compatibility path, not the speed target. \\
+direct library & 0.12x, 6 ns & Fast because it removes the ring split. \\
+\bottomrule
+\end{tabularx}
+\vspace{0.7em}
+
+\scriptsize
+The cross-host benchmark still reports same-host speedup over
+\Seccomp{}; this table provides user-facing native-system context.
+\end{frame}
+
 \begin{frame}{Python and Stress Tiers}
 \centering
 \begin{tikzpicture}
@@ -414,6 +463,27 @@ seccomp aggregate & 200 & 197 & 3 & 98.50\% \\
 \end{frame}
 
 \section{Roadmap}
+
+\begin{frame}{Snapshot, Replay, Time Travel}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}p{0.18\textwidth}X@{}}
+\toprule
+Surface & State & Reading \\
+\midrule
+Snapshot/forkserver v1 & \done & \texttt{um\_snapshot\_ready()},
+fds 198/199, \texttt{state\_version}, launcher plumbing, and
+\texttt{snapshot-smoke} are present. \\
+v1 ceiling & \limit & status is hard-coded zero; no on-disk snapshot;
+short non-blocking payloads only; no SMP. \\
+KVM-aware readiness & \planned & Issue \#168 is unblocked but sits
+behind Phase J. \\
+Time-travel profile & \progress & UP/seccomp profile exists; runtime
+hook gate exists; slow path is still a counter stub. \\
+Record/replay/time machine & \planned & Issue \#169 covers the real
+event log, replay consumer, and workflow. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
 
 \begin{frame}{What Remains}
 \begin{columns}[T,onlytextwidth]

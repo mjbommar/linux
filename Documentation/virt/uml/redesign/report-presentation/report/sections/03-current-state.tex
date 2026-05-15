@@ -23,6 +23,47 @@ Evidence & \path{tools/testing/selftests/um/}, benchmark and soak memos & Suppli
 \end{tabularx}
 \end{table}
 
+\subsection{Original \UML{} Versus This Branch}
+
+A reviewer should be able to separate inherited \UML{} from the work
+this branch redesigned or implemented. I checked that boundary by
+diffing \texttt{origin/master...HEAD} across \texttt{arch/um},
+\texttt{tools/uml}, \texttt{tools/testing/selftests/um}, and
+\texttt{Documentation/virt/uml}. That diff spans 688 UML-related
+files, with 154,501 insertions and 823 deletions. The number is a
+scope check, not an authorship claim: the original \UML{} idea, the
+Linux kernel, and generic KVM facilities remain inherited foundations.
+
+\begin{table}[h]
+\centering
+\caption{Attribution reading for the current branch.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}Y@{}}
+\toprule
+Category & What the report means \\
+\midrule
+Inherited \UML{} and Linux & Linux-as-a-host-process, the upstream
+\UML{} port, legacy ptrace execution, existing kernel subsystems,
+the host KVM API, and the general idea of deterministic time-travel
+are not claimed as new work here. \\
+Recent upstream prerequisites & Seccomp-mode \UML{} and upstream
+SMP work are treated as enabling context. The redesign builds on
+them; it does not present them as branch-local inventions. \\
+Redesigned in this project & The explicit backend-ops contract,
+static-key hook model, profile matrix, validation ladder, staged
+upstream queue, and \KVMvTwo{} state-ownership method are the project
+architecture. \\
+Implemented in this branch & \path{arch/um/backend/kvm-v2/},
+backend contract code, profile configs and docs, snapshot/forkserver
+v1, the Rust launcher and \texttt{umlctl}, KVM/soak/benchmark
+selftests, and the report/deck workspace are branch-local artefacts. \\
+Planned or paused & KVM-aware snapshot readiness, full record/replay,
+time-machine workflow, syzkaller \texttt{vm/uml}, LTP curation, and
+the large upstream \texttt{arch/um} series remain future work. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 \subsection{Landed Versus Open}
 
 The current state is not a green-field plan. The fork contains

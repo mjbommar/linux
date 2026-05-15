@@ -13,6 +13,31 @@ same three tiers across eight lab hosts:
         verification.
 \end{itemize}
 
+\subsection{Native Baseline Context}
+
+The cross-host charts below use same-host speedup over \Seccomp{}
+because that ratio cancels most CPU-frequency and microarchitecture
+noise. For intuition, the profile cost model also carries a normal
+Linux \texttt{getpid} reference of 50 ns, shown here as 1.0x.
+
+\begin{table}[h]
+\centering
+\caption{\texttt{getpid} context relative to a normal host syscall baseline.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}L{0.16\linewidth}L{0.19\linewidth}Y@{}}
+\toprule
+Path & Model cost & Relative to normal & Reading \\
+\midrule
+Normal Linux host syscall & 50 ns & 1.0x & Human-scale baseline for a trivial syscall on the host. \\
+\KVMvTwo{} \texttt{prod-fast} & 80 ns & 1.6x & Same cost class as the host baseline for gadget-covered calls. \\
+\KVMvTwo{} cross-host gadget & 87--153 cycles & mechanism tier & Raw cycles vary by host; the robust claim is same-host speedup over \Seccomp{}. \\
+\Seccomp{} profiles & 505--1,200 ns & 10--24x & Expected for research, fuzz, sandbox, and time-travel profiles where instrumentation or isolation dominates. \\
+ptrace fallback & 2,000 ns & 40x & Old-host fallback, useful for compatibility rather than speed. \\
+direct library call & 6 ns & 0.12x & LKL-style mode removes the syscall boundary; it is not a faithful ring-split kernel target. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 \subsection{Micro Tier}
 
 \begin{figure}[h]

@@ -34,7 +34,7 @@ Profile & Backend default & Hooks & Sanitizers & Purpose \\
   log basis y=10,
   ymin=4,
   ylabel={estimated getpid cost (ns, log scale)},
-  symbolic x coords={prod-fast,prod-hooks,research,fuzz,fuzz-deep,sandbox,library,embedded,time-travel},
+  symbolic x coords={native,prod-fast,prod-hooks,research,fuzz,fuzz-deep,sandbox,library,embedded,time-travel},
   xtick=data,
   xticklabel style={rotate=35,anchor=east,font=\footnotesize},
   bar width=8pt,
@@ -46,13 +46,13 @@ Profile & Backend default & Hooks & Sanitizers & Purpose \\
   major grid style={draw=UMLGrid},
 ]
 \addplot coordinates {
-  (prod-fast,80) (prod-hooks,85) (research,715) (fuzz,550)
+  (native,50) (prod-fast,80) (prod-hooks,85) (research,715) (fuzz,550)
   (fuzz-deep,1200) (sandbox,505) (library,6) (embedded,2000)
   (time-travel,1200)
 };
 \end{axis}
 \end{tikzpicture}
-\caption{Profile cost model from the redesign docs. The value of profiles is the ability to span direct-call library mode through heavily instrumented research and time-travel builds without forking the tree.}
+\caption{Profile cost model from the redesign docs, anchored to a 50 ns normal Linux \texttt{getpid} baseline. The value of profiles is the ability to span direct-call library mode through heavily instrumented research and time-travel builds without forking the tree.}
 \end{figure}
 
 \subsection{Validation Ladder}

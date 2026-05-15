@@ -12,9 +12,47 @@ Item & State & Notes \\
 Phase J 24h continuous & \progresspill & Daemon exists and passed a two-hour short run; formal 24-hour run remains. \\
 Tier 2 / Tier 3 & \progresspill & Designs exist; templates and bootstrap flow still need implementation. \\
 LTP curation & \plannedpill & Needs KEEP/SKIP list and a \UML{}-appropriate runner. \\
-Snapshot readiness & \plannedpill & Unblocked after Python parity closure; should resume after Phase J. \\
-Record/replay & \plannedpill & Same dependency as snapshot: architecture is planned, active work paused. \\
+KVM-aware snapshot readiness & \plannedpill & Unblocked after Python parity closure; resumes after Phase J. \\
+Record/replay/time machine & \plannedpill & Time-travel profile exists; full replay workflow remains paused. \\
 AVX-512 Phase B & \plannedpill & Optional follow-up for the remaining T57 vm-method failures. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Snapshot, Replay, and Time-Travel Status}
+
+The ``time machine'' story should be presented as a staged roadmap,
+not as a finished product. The branch has real snapshot/forkserver
+plumbing and an explicit time-travel profile, but full record/replay
+is still future work.
+
+\begin{table}[h]
+\centering
+\caption{Snapshot, replay, and time-travel state.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}L{0.18\linewidth}Y@{}}
+\toprule
+Surface & State & Reading \\
+\midrule
+Snapshot/forkserver v1 & \donepill & C-09 landed a cooperative
+\texttt{um\_snapshot\_ready()} point, AFL-compatible fds 198/199,
+\texttt{/sys/kernel/um/state\_version}, launcher fd plumbing, and
+\texttt{snapshot-smoke} coverage. \\
+v1 ceiling & known limit & Status is reported as zero, payloads must
+be short and non-blocking, there is no on-disk snapshot, and v1 is
+not SMP-capable. These are documented limits, not hidden claims. \\
+KVM-aware readiness & \plannedpill & Issue \#168 is unblocked by
+Python parity closure but intentionally sits behind Phase J. \\
+Time-travel profile & profile exists & \texttt{uml/time-travel}
+selects seccomp-only, UP, \texttt{CONFIG\_UML\_TIME\_TRAVEL\_SUPPORT},
+and debug surfaces. The runtime hook gate exists; today its slow path
+is still a counter stub. \\
+Record/replay/time machine & \plannedpill & Issue \#169 covers the
+first-class deterministic replay extension. The event log, replay
+consumer, and user workflow are not implemented yet. \\
+Syzkaller binding & planned external & The in-tree forkserver surface
+is pinned; the remaining \texttt{pkg/vm/uml} Go driver belongs in the
+syzkaller repository. \\
 \bottomrule
 \end{tabularx}
 \end{table}
