@@ -1,0 +1,9 @@
+workload;backend;n;pass;fail;rate;ci_low;ci_high
+memcheck;kvm-v2;60;60;0;100.00;93.98;100.00
+memcheck;seccomp;60;60;0;100.00;93.98;100.00
+iocheck;kvm-v2;60;60;0;100.00;93.98;100.00
+iocheck;seccomp;60;57;3;95.00;86.30;98.29
+stress-ng;kvm-v2;40;40;0;100.00;91.24;100.00
+stress-ng;seccomp;40;40;0;100.00;91.24;100.00
+tier1-pylibs;kvm-v2;40;40;0;100.00;91.24;100.00
+tier1-pylibs;seccomp;40;40;0;100.00;91.24;100.00

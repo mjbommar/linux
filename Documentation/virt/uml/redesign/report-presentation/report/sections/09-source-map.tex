@@ -1,0 +1,47 @@
+\appendix
+\section{Source Map}
+
+\begin{longtable}{@{}L{0.36\linewidth}L{0.56\linewidth}@{}}
+\caption{Primary source material used for this report.}\\
+\toprule
+Path & Role in the report \\
+\midrule
+\endfirsthead
+\toprule
+Path & Role in the report \\
+\midrule
+\endhead
+\path{00-vision.md} & Vision, non-goals, success criteria, stakeholder framing. \\
+\path{README.md} & Top-level project layout and high-level architecture summary. \\
+\path{STATUS.md} & Current state, phase ledger, workstream status, open items. \\
+\path{01-architecture/three-layers.md} & Backend/gate/wrap architecture. \\
+\path{01-architecture/data-flow.md} & Per-profile syscall cost model and profile comparison. \\
+\path{02-workstreams/README.md} & Workstream decomposition and critical path. \\
+\path{02-workstreams/D-kvm-backend/README.md} & \KVM{} backend motivation and design framing. \\
+\path{02-workstreams/D-kvm-backend/state-audit/} & State ownership audit, bug chronology, and recent fixes. \\
+\path{02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md} & Cross-host benchmark data and methodology. \\
+\path{02-workstreams/D-kvm-backend/phase-J-soak-2h-2026-05-14.md} & Latest soak result and interpretation. \\
+\path{03-profiles/README.md} & Profile matrix and estimated per-profile cost model. \\
+\path{05-validation/} & Validation tiers, benchmarks, conformance, CI, and quality strategy. \\
+\path{upstream-patches/SUBMISSION-QUEUE.md} & Sequenced LKML/upstream queue. \\
+\path{tools/testing/selftests/um/} & Concrete gate, parity, soak, benchmark, and reproducer harnesses. \\
+\path{tools/uml/uml-launcher/} & Host-side launcher and \texttt{umlctl} machinery. \\
+\bottomrule
+\end{longtable}
+
+\section{Reporting Data Files}
+
+The report and deck share normalized data under
+\path{Documentation/virt/uml/redesign/report-presentation/data/}.
+At this cutoff the important files are:
+
+\begin{itemize}
+  \item \texttt{bench\_speedups.csv} and \texttt{bench\_ratios.csv}
+        for the eight-host post-gadget benchmark.
+  \item \texttt{soak\_summary.csv} for the 2026-05-14 two-hour Phase J
+        soak.
+  \item \texttt{profile\_getpid.csv} for profile cost visualization.
+  \item \texttt{workstreams.csv}, \texttt{validation\_ladder.csv},
+        \texttt{upstream\_queue.csv}, and \texttt{status\_kpis.csv}
+        for status tables.
+\end{itemize}

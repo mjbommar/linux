@@ -1,0 +1,11 @@
+metric;value
+Reporting date;2026-05-14
+Cutoff commit;485eff5c96be
+Branch;umlctl-deploy
+Redesign docs;253 files
+KVM v2 phase state;Phases A-H plus G.1/G.2/I done; Phase J in progress
+Functional parity;cpython-parity 21/21 under UP and SMP
+Substrate gate;kvm-v2 PASS=25 FAIL=3 XFAIL=3 matching seccomp
+2h Phase J soak;kvm-v2 200/200 PASS; total 397/400 PASS
+Cross-host benchmark;micro 193x-908x; Python 2.99x-4.06x; stress 3.71x-8.72x faster than seccomp
+Open formal gate;24h Phase J plus Tier 2/Tier 3/LTP

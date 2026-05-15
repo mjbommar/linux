@@ -1,0 +1,108 @@
+\section{Profiles and Validation}
+
+\subsection{Profile Matrix}
+
+\begin{table}[h]
+\centering
+\caption{Shipped profile intent.}
+\small
+\begin{tabularx}{\linewidth}{@{}p{0.17\linewidth}p{0.18\linewidth}p{0.22\linewidth}p{0.17\linewidth}X@{}}
+\toprule
+Profile & Backend default & Hooks & Sanitizers & Purpose \\
+\midrule
+\texttt{prod-fast} & KVM $>$ seccomp & none & none & Minimum overhead production target. \\
+\texttt{prod-with-hooks} & KVM $>$ seccomp & compiled, off & none & Production artifact with post-failure observability. \\
+\texttt{research} & seccomp & trace, kprobes & KASAN, UBSAN & Debug and exploit-reproduction profile. \\
+\texttt{fuzz} & seccomp & KCOV, snapshot & KASAN & syzkaller and harness fuzzing. \\
+\texttt{fuzz-deep} & seccomp & KCOV, snapshot, replay & KASAN, KCSAN & deeper race/replay investigations. \\
+\texttt{sandbox} & seccomp-only & none compiled & none & Minimized TCB and debug surface. \\
+\texttt{library} & direct call & n/a & optional KASAN & LKL-style harness integration. \\
+\texttt{embedded} & ptrace & none & none & Old-host fallback. \\
+\texttt{time-travel} & seccomp & trace, time-travel & KASAN & deterministic clock and replay. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.92\linewidth,
+  height=6.0cm,
+  ybar,
+  ymode=log,
+  log basis y=10,
+  ymin=4,
+  ylabel={estimated getpid cost (ns, log scale)},
+  symbolic x coords={prod-fast,prod-hooks,research,fuzz,fuzz-deep,sandbox,library,embedded,time-travel},
+  xtick=data,
+  xticklabel style={rotate=35,anchor=east,font=\footnotesize},
+  bar width=8pt,
+  fill=UMLBlue!70,
+  draw=UMLBlue,
+  nodes near coords,
+  nodes near coords style={font=\tiny,rotate=90,anchor=west},
+  grid=major,
+  major grid style={draw=UMLGrid},
+]
+\addplot coordinates {
+  (prod-fast,80) (prod-hooks,85) (research,715) (fuzz,550)
+  (fuzz-deep,1200) (sandbox,505) (library,6) (embedded,2000)
+  (time-travel,1200)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Profile cost model from the redesign docs. The value of profiles is the ability to span direct-call library mode through heavily instrumented research and time-travel builds without forking the tree.}
+\end{figure}
+
+\subsection{Validation Ladder}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  rung/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,minimum width=0.82\linewidth,minimum height=0.58cm,align=left,inner xsep=8pt,font=\small},
+  live/.style={draw=UMLGreen,fill=UMLGreen!10},
+  prog/.style={draw=UMLAmber,fill=UMLAmber!12},
+]
+\node[rung,live] (l0) {\textbf{L0} launcher-cargo: host tooling};
+\node[rung,live,below=0.08cm of l0] (l1) {\textbf{L1} kernel-build: compile/link};
+\node[rung,live,below=0.08cm of l1] (l2) {\textbf{L2} KUnit/marshal: backend internals};
+\node[rung,live,below=0.08cm of l2] (l3) {\textbf{L3} regrtest-substrate: PASS=25/FAIL=3/XFAIL=3};
+\node[rung,live,below=0.08cm of l3] (l4) {\textbf{L4} process/syscall classes};
+\node[rung,live,below=0.08cm of l4] (l5) {\textbf{L5} perf ratio gates};
+\node[rung,live,below=0.08cm of l5] (l6) {\textbf{L6} real workload boot};
+\node[rung,prog,below=0.08cm of l6] (l7) {\textbf{L7} 24-hour Phase J soak: in progress};
+\end{tikzpicture}
+\caption{Validation ladder. Short gates protect the inner loop; L7 is reserved for milestone candidates.}
+\end{figure}
+
+\subsection{Phase J Soak}
+
+\begin{table}[h]
+\centering
+\caption{First post-T57 Phase A sustained soak, 2026-05-14.}
+\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Workload & Backend & n & pass & fail & pass rate \\
+\midrule
+memcheck & \KVMvTwo{} & 60 & 60 & 0 & 100.00\% \\
+memcheck & seccomp & 60 & 60 & 0 & 100.00\% \\
+iocheck & \KVMvTwo{} & 60 & 60 & 0 & 100.00\% \\
+iocheck & seccomp & 60 & 57 & 3 & 95.00\% \\
+stress-ng & \KVMvTwo{} & 40 & 40 & 0 & 100.00\% \\
+stress-ng & seccomp & 40 & 40 & 0 & 100.00\% \\
+tier1-pylibs & \KVMvTwo{} & 40 & 40 & 0 & 100.00\% \\
+tier1-pylibs & seccomp & 40 & 40 & 0 & 100.00\% \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{\KVMvTwo{} aggregate}} & 200 & 200 & 0 & \textbf{100.00\%} \\
+\multicolumn{2}{@{}l}{\textbf{Overall aggregate}} & 400 & 397 & 3 & \textbf{99.25\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The three failures were isolated to iocheck/seccomp timeout behavior
+under two-worker contention. They were not data miscompares and not a
+\KVMvTwo{} regression. The meaningful reading is that daemon mode,
+threshold-trip behavior, Wilson summary generation, and sustained
+\KVMvTwo{} workload rotation all worked.

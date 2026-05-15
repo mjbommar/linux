@@ -1,0 +1,149 @@
+\section{KVM v2 Design}
+
+\subsection{Model}
+
+\KVMvTwo{} follows the gVisor KVM-platform idea, adapted to \UML{}:
+guest userspace runs at ring 3 inside a KVM guest, the \UML{} kernel
+runs at ring 0 inside the same KVM guest, and ordinary syscalls enter
+the \UML{} kernel through MSR\_LSTAR instead of trapping to a host
+monitor \cite{gvisor-platforms,kvm-api}. Host exits are still used for
+operations that truly require host participation, but the target is
+to keep the common syscall path in guest context.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  region/.style={draw=UMLGrid,rounded corners=3pt,align=center,inner sep=8pt},
+  arr/.style={-{Latex[length=2mm]},thick,UMLMuted},
+]
+\node[region,fill=UMLGreen!10,minimum width=3.8cm,minimum height=1.25cm] (user) {guest userspace\\ring 3};
+\node[region,fill=UMLBlue!10,minimum width=3.8cm,minimum height=1.25cm,right=1.1cm of user] (kernel) {\UML{} kernel\\ring 0};
+\node[region,fill=UMLPanel,minimum width=8.7cm,minimum height=1.0cm,below=0.7cm of $(user)!0.5!(kernel)$] (host) {host process, KVM ioctls, signals, files, timers};
+\draw[arr] (user) -- node[above,font=\footnotesize]{\texttt{syscall}/LSTAR} (kernel);
+\draw[arr] (kernel) -- node[right,font=\footnotesize]{VMCALL, HLT, MMIO, host work} (host);
+\draw[arr] (host) -| node[pos=0.25,below,font=\footnotesize]{resume} (user);
+\end{tikzpicture}
+\caption{\KVMvTwo{} execution model. It is not a QEMU-style machine; it is a trap mechanism for \UML{} itself.}
+\end{figure}
+
+\subsection{Implementation Themes}
+
+The current \KVMvTwo{} design is organized around five hard problems:
+
+\begin{enumerate}
+  \item \textbf{Guest entry and return.} The backend must enter guest
+        ring 3, handle SYSCALL/SYSRET transitions, and recover when
+        host signals interrupt critical regions.
+  \item \textbf{Per-vCPU and per-task state.} General registers,
+        CR2, segment bases, FPU/XSAVE, pending events, IST frames,
+        and KVM run state cannot leak across tasks or host CPUs.
+  \item \textbf{Memory and TLB state.} \UML{} page-table changes must
+        be reflected into KVM-visible mappings and cross-vCPU TLB
+        state without stale translations.
+  \item \textbf{SMP correctness.} Host scheduling, guest scheduling,
+        signal delivery, and KVM vCPU ownership must compose without
+        assuming that \texttt{preempt\_disable()} pins a host thread.
+  \item \textbf{Performance.} The backend must preserve the win from
+        in-guest dispatch while avoiding correctness regressions from
+        lazy state handling.
+\end{enumerate}
+
+\subsection{Design Detail: Main Control Surfaces}
+
+\begin{table}[h]
+\centering
+\caption{\KVMvTwo{} implementation surfaces to understand before reviewing patches.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.21\linewidth}L{0.29\linewidth}Y@{}}
+\toprule
+Surface & Representative code & Design role \\
+\midrule
+Initialization and capabilities & \path{init.c}, \path{ops.c}, \path{Kconfig} & Probe host KVM support, wire backend ops, expose configuration choices. \\
+vCPU execution & \path{vcpu.c} & Owns KVM\_RUN, register marshaling, migration pinning, FPU capture, dispatch, and per-vCPU state. \\
+Syscall path & \path{syscall_trap.c}, \path{lstar_gadget.S} & Handles LSTAR entry, in-guest fast syscalls, slow-path exits, and return-state repair. \\
+Memory and regions & \path{memslot.c}, \path{region.c}, backend memory ops & Maps \UML{} memory changes into KVM-visible regions and memslot policy. \\
+Exceptions & \path{exception.c} & Installs and handles IDT/TSS/IST paths, page faults, and special recovery paths. \\
+State tracing & \path{state_trace.[ch]} & Gives low-overhead, static-key-controlled visibility into state ownership bugs. \\
+Tests & \path{test_marshal.c}, \path{test_byteshape.c} & Protect register ABI, gadget byte shape, and internal assumptions. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Design Detail: Fast Path Versus Slow Path}
+
+The backend now has two different syscall cost classes. Trivial
+syscalls covered by the LSTAR gadget stay inside the KVM guest and
+return directly to guest userspace. Syscalls outside the gadget set,
+or paths requiring host assistance, still exit to the host and run the
+full backend machinery. The project should keep these paths described
+separately:
+
+\begin{itemize}
+  \item \textbf{Fast path:} getpid-family and clock-like calls that
+        can be answered from guest-visible state with preserved ABI
+        registers and no host-side work.
+  \item \textbf{Slow path:} mmap, munmap, brk, I/O, scheduling,
+        signal, and fault paths that need backend state or host
+        services.
+  \item \textbf{Recovery path:} interrupted LSTAR, page-fault stub,
+        \#NM, and signal delivery edges where the backend must rebuild
+        user-visible architectural state exactly.
+\end{itemize}
+
+\subsection{State-Audit Method}
+
+The state-audit directory is part of the design, not just project
+diary. It converted a vague SMP corruption class into a finite audit:
+149 state items, 50+ operations, an ownership matrix, suspect
+register audits, runtime tracing, and ranked findings.
+
+\begin{table}[h]
+\centering
+\caption{State-audit layers.}
+\begin{tabularx}{\linewidth}{@{}p{0.09\linewidth}p{0.29\linewidth}X@{}}
+\toprule
+Layer & Artefact & Contribution \\
+\midrule
+1 & State inventory & Enumerates register, control, segment, MSR, FPU, event, descriptor, per-task, per-vCPU, and per-mm state. \\
+2 & Operations inventory & Lists hardware, KVM, backend, scheduler, and signal operations that read or write state. \\
+3 & Ownership matrix & States who owns each state item at each transition. \\
+4 & Suspect register audits & Tracks RBP, RAX, RDX, FS\_BASE and similar corruption signatures. \\
+5 & Toolkit & cscope, ripgrep, ast-grep, bpftrace, ftrace, and parser recipes. \\
+6--8 & Findings and fixes & Converts candidates into patches and regression matrices. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The most important fix from this arc was the SMP-T13
+\texttt{migrate\_disable()} finding. \UML{} was using
+\texttt{preempt\_disable()} to pin access to per-host-CPU vCPU state,
+but the build did not have preemption count semantics, so the call did
+not actually prevent migration. Replacing that assumption with
+\texttt{migrate\_disable()} removed a structural cross-vCPU ownership
+violation.
+
+\subsection{Recent Fixes}
+
+\begin{table}[h]
+\centering
+\caption{Selected recent \KVMvTwo{} correctness and performance closures.}
+\begin{tabularx}{\linewidth}{@{}p{0.17\linewidth}p{0.25\linewidth}X@{}}
+\toprule
+Item & Closure & Why it matters \\
+\midrule
+SMP-T41 & Recover user RAX in EINTR-mid-PF-stub & Closed the true mt-mini byte-zero residual. \\
+SMP-T54 & SOCK\_CLOEXEC and \texttt{umlctl} sysrq halt & Removed worker fd leak and init shutdown hang class. \\
+SMP-T55 & Per-vCPU FPU-dirty epoch & Restored perf-py-startup gate while preserving cross-task FPU guarantees. \\
+SMP-T57 Phase A & CR4.OSXSAVE, XCR0=0x7, CPUID AVX/XSAVE unmask & Turned stress-ng AVX \#UD from a fragile mask problem into supported guest architectural state. \\
+Gadget revival & LSTAR in-guest fast path & Collapsed trivial syscall cost from host-exit scale to roughly 90 cycles on measured hosts. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Design Boundary}
+
+The current backend should be presented upstream as a backend for
+\UML{}, not as a general VMM. The VMM-like machinery exists only to
+make \UML{} execution fast and faithful. That framing matters: it
+keeps device emulation, boot firmware, hardware discovery, and cloud
+microVM expectations out of scope.

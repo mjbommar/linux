@@ -1,0 +1,5 @@
+id;name;effort_em;state;headline
+A;Backend abstraction;6;complete;um_backend_ops plus ptrace/seccomp contract landed
+B;Static-key hot paths;4;complete;runtime gates and debugfs controls landed
+C;Profiles and feature gaps;8;mostly landed;defconfigs plus KFENCE/KCSAN/kprobes/ftrace/KMSAN work mostly in tree
+D;KVM backend;6;validation;KVM v2 functional; Phase J validation in progress
