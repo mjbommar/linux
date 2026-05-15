@@ -64,23 +64,23 @@ Profile & Backend default & Hooks & Sanitizers & Purpose \\
   live/.style={draw=UMLGreen,fill=UMLGreen!10},
   prog/.style={draw=UMLAmber,fill=UMLAmber!12},
 ]
-\node[rung,live] (l0) {\textbf{L0} launcher-cargo: host tooling};
-\node[rung,live,below=0.08cm of l0] (l1) {\textbf{L1} kernel-build: compile/link};
-\node[rung,live,below=0.08cm of l1] (l2) {\textbf{L2} KUnit/marshal: backend internals};
-\node[rung,live,below=0.08cm of l2] (l3) {\textbf{L3} regrtest-substrate: PASS=25/FAIL=3/XFAIL=3};
-\node[rung,live,below=0.08cm of l3] (l4) {\textbf{L4} process/syscall classes};
-\node[rung,live,below=0.08cm of l4] (l5) {\textbf{L5} perf ratio gates};
-\node[rung,live,below=0.08cm of l5] (l6) {\textbf{L6} real workload boot};
-\node[rung,prog,below=0.08cm of l6] (l7) {\textbf{L7} 24-hour Phase J soak: in progress};
+\node[rung,live] (l0) {\textbf{tooling builds:} launcher and \texttt{umlctl}};
+\node[rung,live,below=0.08cm of l0] (l1) {\textbf{kernel builds:} selected profile compiles and links};
+\node[rung,live,below=0.08cm of l1] (l2) {\textbf{internal contracts:} KUnit, marshal, byte-shape checks};
+\node[rung,live,below=0.08cm of l2] (l3) {\textbf{substrate parity:} PASS=25/FAIL=3/XFAIL=3, matching seccomp};
+\node[rung,live,below=0.08cm of l3] (l4) {\textbf{process/syscall classes:} fork, exec, mmap, signals};
+\node[rung,live,below=0.08cm of l4] (l5) {\textbf{performance gates:} prevent fast-path regression};
+\node[rung,live,below=0.08cm of l5] (l6) {\textbf{real workload boot:} Python and stress workloads};
+\node[rung,prog,below=0.08cm of l6] (l7) {\textbf{sustained validation:} 24-hour run plus Tier 2/3 and LTP curation};
 \end{tikzpicture}
-\caption{Validation ladder. Short gates protect the inner loop; L7 is reserved for milestone candidates.}
+\caption{Validation ladder. Short gates protect the inner loop; sustained validation is reserved for milestone candidates.}
 \end{figure}
 
-\subsection{Phase J Soak}
+\subsection{Sustained Validation Pilot}
 
 \begin{table}[h]
 \centering
-\caption{First post-T57 Phase A sustained soak, 2026-05-14.}
+\caption{First post-T57 sustained-validation pilot, 2026-05-14.}
 \small
 \begin{tabular}{@{}llrrrr@{}}
 \toprule

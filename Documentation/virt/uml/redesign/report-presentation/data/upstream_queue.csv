@@ -5,4 +5,4 @@ series;name;patches;subsystem;status
 4;backend-ops-abstraction-rfc;12;arch/um;to write
 5;static-key-hot-paths;6;arch/um;to write
 6;per-profile C-series;20;arch/um plus subsystems;blocked by series 7
-7;kvm-backend-series;15;arch/um plus kvm;blocked by Phase J
+7;kvm-backend-series;15;arch/um plus kvm;blocked by sustained validation

@@ -57,6 +57,29 @@
 
 \section{Goal and State}
 
+\begin{frame}{Reader Contract}
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{Assumed reader}
+\begin{itemize}
+  \item knows Linux review culture
+  \item may know classic \UML{}
+  \item does not know this diary
+  \item does not know our phase names
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{What this deck must do}
+\begin{itemize}
+  \item state the value proposition
+  \item separate inherited work from branch work
+  \item explain \KVMvTwo{} without VMM confusion
+  \item show evidence and remaining review risk
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
 \begin{frame}{Thesis}
 \begin{columns}[T,onlytextwidth]
 \column{0.53\textwidth}
@@ -75,7 +98,7 @@ research, fuzzing, sandbox, library, and time-travel artifacts.
 \node[box,fill=UMLGreen!10] (a) {backend abstraction};
 \node[box,fill=UMLBlue!10,below=0.15cm of a] (b) {static-key hot paths};
 \node[box,fill=UMLAmber!12,below=0.15cm of b] (c) {profile composition};
-\node[box,fill=UMLPanel,below=0.15cm of c] (d) {Phase J validation};
+\node[box,fill=UMLPanel,below=0.15cm of c] (d) {sustained validation};
 \end{tikzpicture}
 \end{columns}
 \end{frame}
@@ -131,12 +154,34 @@ research, fuzzing, sandbox, library, and time-travel artifacts.
 \end{columns}
 \end{frame}
 
+\begin{frame}{Why Not Existing Tools?}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.19\textwidth}p{0.36\textwidth}X@{}}
+\toprule
+Option & What it is good at & Why \UML{} still matters \\
+\midrule
+QEMU/KVM & General virtual machines, device models, booting real images. &
+\UML{} is a kernel built as a host process; it is cheaper to instrument
+and easier to bind into source-level kernel tests. \\
+Firecracker & Minimal production microVMs. & It optimizes a different
+surface: cloud isolation and boot footprint, not sanitizer-heavy kernel
+research inside \texttt{arch/um}. \\
+gVisor & Userspace kernel sandboxing. & It proves useful backend patterns,
+but it is not the Linux kernel under test. \\
+LKL & Direct-call Linux library harnesses. & It is fast, but loses the
+normal user/kernel ring split that matters for syscall and exploit research. \\
+Containers & Process isolation and deployment. & They share the host
+kernel; they cannot test another Linux kernel as the target. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
 \begin{frame}{Current State at \ReportDate}
 \small
 \begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}X@{}}
 \toprule
 Cutoff & \texttt{\CutoffCommit} on \texttt{\BranchName} \\
-Functional headline & \KVMvTwo{} cleared Phases A--H, G.1/G.2, and I; Phase J is active \\
+Functional headline & \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, and post-gadget performance \\
 Parity & cpython-parity 21/21 under UP and SMP \\
 Substrate gate & PASS=25/FAIL=3/XFAIL=3, matching seccomp \\
 2h soak & \KVMvTwo{} 200/200 PASS; aggregate 397/400 PASS \\
@@ -147,7 +192,7 @@ Benchmark & Faster than seccomp on all eight hosts and all three tiers \\
 \begin{center}
 \done\quad backend/gates/profile foundation
 \hspace{1em}
-\progress\quad Phase J validation
+\progress\quad sustained validation
 \hspace{1em}
 \blocked\quad large upstream series until validation
 \end{center}
@@ -191,7 +236,7 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 \node[label,yshift=-0.36cm] at (a.center) {cpython parity\\UP and SMP};
 \node[card,fill=UMLGreen!10,right=0.45cm of a] (b) {};
 \node[metric,text=UMLGreen,yshift=0.28cm] at (b.center) {200/200};
-\node[label,yshift=-0.36cm] at (b.center) {\KVMvTwo{} Phase J\\two-hour soak};
+\node[label,yshift=-0.36cm] at (b.center) {\KVMvTwo{} two-hour\\validation pilot};
 \node[card,fill=UMLAmber!12,below=0.35cm of a] (c) {};
 \node[metric,text=UMLAmber,yshift=0.28cm] at (c.center) {193--908x};
 \node[label,yshift=-0.36cm] at (c.center) {micro speedup\\over seccomp};
@@ -201,51 +246,57 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{Questions to Answer}
+\begin{frame}{Eight Answers: Why This Work Exists}
 \small
-\begin{columns}[T,onlytextwidth]
-\column{0.49\textwidth}
-\begin{itemize}
-  \item What is the revived \UML{} value proposition?
-  \item Why not QEMU, Firecracker, gVisor, LKL, or containers?
-  \item What architecture lets all profiles share one tree?
-  \item What has landed versus what remains planned?
-\end{itemize}
-\column{0.49\textwidth}
-\begin{itemize}
-  \item Does \KVMvTwo{} preserve SMP and architectural state?
-  \item Does speed survive beyond microbenchmarks?
-  \item What validation bar remains before upstream?
-  \item What should reviewers challenge next?
-\end{itemize}
-\end{columns}
+\begin{tabularx}{\textwidth}{@{}p{0.05\textwidth}p{0.28\textwidth}X@{}}
+\toprule
+\# & Question & Short answer \\
+\midrule
+1 & Revived value proposition & One upstream Linux tree can produce fast, research, fuzz, sandbox, library, and deterministic profiles. \\
+2 & Why not existing tools & They solve adjacent problems; none gives Linux-as-a-process with this instrumentation and syscall fidelity mix. \\
+3 & Shared architecture & Backend ops, static-key gates, and profile defconfigs keep variation explicit. \\
+4 & Landed vs planned & Core architecture, \KVMvTwo{}, tooling, and gates exist; 24h validation, LTP, syzkaller, and replay remain. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{Eight Answers: What Reviewers Should Test}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.05\textwidth}p{0.28\textwidth}X@{}}
+\toprule
+\# & Question & Short answer \\
+\midrule
+5 & SMP and state & v2 now has an explicit state-home contract and audit trail for per-task, per-vCPU, and per-mm state. \\
+6 & Speed beyond micro & Python and stress tiers win on every benchmark host, not only \texttt{getpid}. \\
+7 & Upstream bar & Finish sustained validation and split small subsystem series before the large \texttt{arch/um} series. \\
+8 & Reviewer challenges & Challenge the data model, validation breadth, upstream slicing, and replay/snapshot claims. \\
+\bottomrule
+\end{tabularx}
 \end{frame}
 
 \section{Architecture}
 
-\begin{frame}{Phase Map}
+\begin{frame}{Milestone Map, Plain English}
 \centering
 \begin{tikzpicture}[
-  phase/.style={draw=UMLGrid,rounded corners=2pt,minimum width=1.32cm,minimum height=0.85cm,align=center,font=\footnotesize},
+  phase/.style={draw=UMLGrid,rounded corners=2pt,minimum width=1.72cm,minimum height=0.82cm,align=center,font=\scriptsize},
   donep/.style={draw=UMLGreen,fill=UMLGreen!12},
   progp/.style={draw=UMLAmber,fill=UMLAmber!15},
 ]
-\node[phase,donep] (a) {A\\init};
-\node[phase,donep,right=0.08cm of a] (b) {B\\VA split};
-\node[phase,donep,right=0.08cm of b] (c) {C\\vCPU pool};
-\node[phase,donep,right=0.08cm of c] (d) {D\\dispatch};
-\node[phase,donep,right=0.08cm of d] (e) {E\\exceptions};
-\node[phase,donep,right=0.08cm of e] (f) {F\\signals};
-\node[phase,donep,right=0.08cm of f] (g) {G\\SMP};
-\node[phase,donep,right=0.08cm of g] (h) {H/I\\perf+lift};
-\node[phase,progp,right=0.08cm of h] (j) {J\\soak};
+\node[phase,donep] (a) {backend\\contract};
+\node[phase,donep,right=0.08cm of a] (b) {profile\\matrix};
+\node[phase,donep,right=0.08cm of b] (c) {KVM v1\\lesson};
+\node[phase,donep,right=0.08cm of c] (d) {KVM v2\\core};
+\node[phase,donep,right=0.08cm of d] (e) {SMP state\\audit};
+\node[phase,donep,right=0.08cm of e] (f) {gadget +\\perf};
+\node[phase,progp,right=0.08cm of f] (j) {24h\\validation};
 \draw[-{Latex[length=2mm]},thick,UMLMuted] ($(a.south)+(0,-0.35)$) -- ($(j.south)+(0,-0.35)$);
 \end{tikzpicture}
 \vspace{1em}
 
 \begin{itemize}
-  \item Old umbrella P0, Python C-extension import crashes, is functionally closed.
-  \item Phase J formalizes that closure with sustained workload breadth.
+  \item Internal phase labels exist in the diary, but reviewers should read the work as milestones.
+  \item The current frontier is not a new design idea; it is sustained workload breadth before upstreaming.
 \end{itemize}
 \end{frame}
 
@@ -327,6 +378,49 @@ time-travel & seccomp & deterministic time & replayable execution \\
 This is a trap mechanism for \UML{}, not a general-purpose VMM.
 \end{frame}
 
+\begin{frame}{What KVM v1 Taught Us}
+\small
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{v1 design pressure}
+\begin{itemize}
+  \item treat KVM as a faster trap loop
+  \item share too much vCPU/run state
+  \item repair state after exits
+  \item maintain shadow page-table state
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{lesson}
+\begin{itemize}
+  \item SMP turns repair workarounds into races
+  \item \texttt{kvm\_run} must have one active owner
+  \item host signals need KVM-visible masking
+  \item every state item needs an authoritative home
+\end{itemize}
+\end{block}
+\end{columns}
+\vspace{0.35em}
+\centering
+\pill{UMLBlue}{DESIGN SHIFT}\quad from ``fix the next trap'' to an explicit state-ownership contract
+\end{frame}
+
+\begin{frame}{Changed Data Model}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.25\textwidth}p{0.25\textwidth}X@{}}
+\toprule
+State class & Authoritative home & Contract in v2 \\
+\midrule
+\texttt{kvm\_run} and vCPU registers & per-host-CPU vCPU & Pick while migration is disabled; no other CPU owns that run page during dispatch. \\
+Guest GPRs and syscall ABI & task registers plus sync-regs mmap & Marshal into KVM before entry and back to \UML{} after exit at explicit boundaries. \\
+FPU/XSAVE & per-task snapshots plus vCPU dirty epoch & Install on first use, capture when ownership changes, avoid cross-task XMM leakage. \\
+IST and exception frames & per-task frame snapshots over per-vCPU pages & Restore before dispatch; snapshot interrupted stubs instead of reading another task's frame. \\
+TLB state & per-mm generation plus per-vCPU last-seen state & Memory changes become generation changes; vCPUs refresh or get kicked. \\
+Host signal delivery & \texttt{KVM\_SET\_SIGNAL\_MASK} & \texttt{SIGALRM} cannot arbitrarily break the KVM window; a dedicated kick signal can. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
 \begin{frame}{The Hard Part Was State Ownership}
 \begin{columns}[T,onlytextwidth]
 \column{0.48\textwidth}
@@ -357,22 +451,22 @@ This is a trap mechanism for \UML{}, not a general-purpose VMM.
 \begin{frame}{Validation Ladder}
 \centering
 \begin{tikzpicture}[
-  rung/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,minimum width=0.78\textwidth,minimum height=0.45cm,align=left,inner xsep=6pt,font=\scriptsize},
+  rung/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,minimum width=0.82\textwidth,minimum height=0.45cm,align=left,inner xsep=6pt,font=\scriptsize},
   live/.style={draw=UMLGreen,fill=UMLGreen!10},
   prog/.style={draw=UMLAmber,fill=UMLAmber!12},
 ]
-\node[rung,live] (l0) {\textbf{L0} launcher-cargo};
-\node[rung,live,below=0.05cm of l0] (l1) {\textbf{L1} kernel-build};
-\node[rung,live,below=0.05cm of l1] (l2) {\textbf{L2} KUnit/marshal};
-\node[rung,live,below=0.05cm of l2] (l3) {\textbf{L3} substrate: PASS=25/FAIL=3/XFAIL=3};
-\node[rung,live,below=0.05cm of l3] (l4) {\textbf{L4} process/syscall classes};
-\node[rung,live,below=0.05cm of l4] (l5) {\textbf{L5} perf ratio gates};
-\node[rung,live,below=0.05cm of l5] (l6) {\textbf{L6} real workload boot};
-\node[rung,prog,below=0.05cm of l6] (l7) {\textbf{L7} 24h Phase J soak};
+\node[rung,live] (l0) {\textbf{tooling builds} -- launcher and \texttt{umlctl}};
+\node[rung,live,below=0.05cm of l0] (l1) {\textbf{kernel builds} -- selected profile compiles and links};
+\node[rung,live,below=0.05cm of l1] (l2) {\textbf{internal contracts} -- KUnit, marshal, byte-shape checks};
+\node[rung,live,below=0.05cm of l2] (l3) {\textbf{substrate parity} -- PASS=25/FAIL=3/XFAIL=3, matching seccomp};
+\node[rung,live,below=0.05cm of l3] (l4) {\textbf{process/syscall classes} -- fork, exec, mmap, signals};
+\node[rung,live,below=0.05cm of l4] (l5) {\textbf{performance gates} -- prevent fast-path regression};
+\node[rung,live,below=0.05cm of l5] (l6) {\textbf{real workload boot} -- Python and stress workloads};
+\node[rung,prog,below=0.05cm of l6] (l7) {\textbf{sustained validation} -- 24h soak plus Tier 2/3 and LTP curation};
 \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{Phase J: First Sustained Run}
+\begin{frame}{Sustained Validation: First Pilot}
 \small
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
@@ -386,6 +480,7 @@ seccomp aggregate & 200 & 197 & 3 & 98.50\% \\
 
 \vspace{1em}
 \begin{itemize}
+  \item This is a pilot for the 24-hour validation bar, not the final upstream gate.
   \item 35 minutes wall before threshold-trip clean stop.
   \item Three failures were iocheck/seccomp timeout shape, not data corruption.
   \item \KVMvTwo{} passed every iteration across memcheck, iocheck, stress-ng, and tier1-pylibs.
@@ -393,6 +488,25 @@ seccomp aggregate & 200 & 197 & 3 & 98.50\% \\
 \end{frame}
 
 \section{Performance}
+
+\begin{frame}{How To Read the Benchmarks}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.22\textwidth}p{0.32\textwidth}X@{}}
+\toprule
+Tier & What it measures & Why it matters \\
+\midrule
+Micro & RDTSC-bracketed \texttt{getpid}-style loop. & Isolates the trap mechanism and LSTAR gadget cost. \\
+Native context & Profile cost model relative to normal Linux \texttt{getpid}. & Prevents a speedup-over-seccomp chart from hiding absolute scale. \\
+Python & Startup and mixed-syscall userland workload. & Checks whether the micro win survives real imports and dynamic linking. \\
+Stress & SMP memory and page-fault-heavy workload. & Checks whether performance survives correctness pressure. \\
+\bottomrule
+\end{tabularx}
+\vspace{0.7em}
+\scriptsize
+Charts use same-host speedup over seccomp because raw cycles are not
+portable across CPU generations. The native baseline table gives the
+human-scale reference point.
+\end{frame}
 
 \begin{frame}{Micro Benchmark: The Gadget Changed the Cost Class}
 \centering
@@ -416,6 +530,11 @@ seccomp aggregate & 200 & 197 & 3 & 98.50\% \\
 \addplot table[col sep=semicolon,x=host,y=micro]{../data/bench_speedups.csv};
 \end{axis}
 \end{tikzpicture}
+\vspace{0.3em}
+
+\scriptsize
+This chart answers only the narrow mechanism question: a gadget-covered
+trivial syscall no longer pays the seccomp signal/stub round trip.
 \end{frame}
 
 \begin{frame}{Native Baseline Context}
@@ -460,6 +579,11 @@ The cross-host benchmark still reports same-host speedup over
 \legend{Python,stress}
 \end{axis}
 \end{tikzpicture}
+\vspace{0.3em}
+
+\scriptsize
+Python checks userland startup and dynamic-linking behavior; stress
+checks SMP/page-fault pressure. Both are same-host speedups over seccomp.
 \end{frame}
 
 \section{Roadmap}
@@ -476,7 +600,7 @@ fds 198/199, \texttt{state\_version}, launcher plumbing, and
 v1 ceiling & \limit & status is hard-coded zero; no on-disk snapshot;
 short non-blocking payloads only; no SMP. \\
 KVM-aware readiness & \planned & Issue \#168 is unblocked but sits
-behind Phase J. \\
+behind sustained validation. \\
 Time-travel profile & \progress & UP/seccomp profile exists; runtime
 hook gate exists; slow path is still a counter stub. \\
 Record/replay/time machine & \planned & Issue \#169 covers the real
@@ -490,7 +614,7 @@ event log, replay consumer, and workflow. \\
 \column{0.49\textwidth}
 \begin{block}{Validation}
 \begin{itemize}
-  \item formal 24h Phase J
+  \item formal 24h sustained run
   \item Tier 2/Tier 3 templates
   \item LTP curation
   \item wider CI matrix
@@ -502,7 +626,7 @@ event log, replay consumer, and workflow. \\
   \item KVM-aware snapshot readiness
   \item record/replay extensions
   \item syzkaller \texttt{vm/uml}
-  \item optional AVX-512 Phase B
+  \item optional AVX-512 follow-up
 \end{itemize}
 \end{block}
 \end{columns}
@@ -520,9 +644,33 @@ event log, replay consumer, and workflow. \\
 4 & backend ops abstraction RFC & arch/um & to write \\
 5 & static-key hot paths & arch/um & to write \\
 6 & per-profile C-series & arch/um + subsystems & blocked \\
-7 & KVM backend & arch/um + KVM & blocked by Phase J \\
+7 & KVM backend & arch/um + KVM & blocked by sustained validation \\
 \bottomrule
 \end{tabularx}
+\end{frame}
+
+\begin{frame}{What Reviewers Should Challenge}
+\small
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{Architecture}
+\begin{itemize}
+  \item Is the backend contract minimal?
+  \item Are state homes explicit enough?
+  \item Does \KVMvTwo{} leak VMM assumptions into \UML{} core?
+  \item Are profile defaults defensible upstream?
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{Evidence}
+\begin{itemize}
+  \item Is the validation ladder broad enough?
+  \item Are seccomp comparisons the right control?
+  \item Which LTP failures should be KEEP vs SKIP?
+  \item Are snapshot/replay claims scoped tightly?
+\end{itemize}
+\end{block}
+\end{columns}
 \end{frame}
 
 \begin{frame}{Closing Summary}
@@ -534,7 +682,7 @@ event log, replay consumer, and workflow. \\
 \begin{itemize}
   \item The architectural shape is coherent: backends, gates, profiles.
   \item \KVMvTwo{} has crossed the hardest feasibility line: real workloads, SMP, and speed.
-  \item The next credible milestone is not another design memo; it is Phase J completion and an upstreamable series plan.
+  \item The next credible milestone is not another design memo; it is sustained validation and an upstreamable series plan.
 \end{itemize}
 \end{frame}
 
@@ -564,7 +712,8 @@ s7 & Ryzen 7 7840HS & 904x & 3.91x & 4.89x \\
   \item \texttt{00-vision.md}: goals, non-goals, stakeholders.
   \item \texttt{STATUS.md}: live state, phase ledger, blockers.
   \item \texttt{01-architecture/}: three layers, invariants, data flow.
-  \item \texttt{02-workstreams/D-kvm-backend/}: KVM design, state audit, benchmarks, Phase J.
+  \item \texttt{02-workstreams/D-kvm-backend/}: KVM design, v1-to-v2 restart memos, state audit, benchmarks, sustained validation.
+  \item \texttt{03-architecture-review-2026-04-27/}: root-cause synthesis for the v1 contract mismatch.
   \item \texttt{03-profiles/}: profile matrix and cost model.
   \item \texttt{tools/testing/selftests/um/}: gates, benchmarks, soak, parity.
   \item \texttt{tools/uml/uml-launcher/}: launcher and \texttt{umlctl}.

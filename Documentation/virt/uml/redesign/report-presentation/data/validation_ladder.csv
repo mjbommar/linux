@@ -6,4 +6,4 @@ L3;regrtest-substrate;90 s;substrate correctness;active PASS=25/FAIL=3/XFAIL=3
 L4;regrtest-class-b/c;3 min;process and syscall integration;active
 L5;perf-getpid ratio;30 s;hot-path performance regression;active
 L6;umlctl up workload;30 s;real workload end-to-end;active
-L7;24h soak;24 h;drift leaks intermittent failures;Phase J in progress
+L7;24h sustained validation;24 h;drift leaks intermittent failures;sustained validation in progress

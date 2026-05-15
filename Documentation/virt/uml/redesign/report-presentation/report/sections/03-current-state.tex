@@ -17,7 +17,7 @@ Source class & Representative paths & Use in the report \\
 Plan and vision & \path{00-vision.md}, \path{README.md}, \path{report-presentation/PLAN.md} & Defines the goal, non-goals, architecture narrative, and publishing shape. \\
 Architecture & \path{01-architecture/}, \path{02-workstreams/} & Defines layers, workstreams, dependencies, profiles, and sequencing. \\
 Code & \path{arch/um/include/shared/backend.h}, \path{arch/um/backend/kvm-v2/}, \path{tools/uml/uml-launcher/} & Confirms that the report is describing landed implementation, not only design. \\
-Diary and state & \path{STATUS.md}, \path{state-audit/}, Phase J memos & Provides current truth, bug chronology, closure criteria, and remaining work. \\
+Diary and state & \path{STATUS.md}, \path{state-audit/}, sustained-validation memos & Provides current truth, bug chronology, closure criteria, and remaining work. \\
 Evidence & \path{tools/testing/selftests/um/}, benchmark and soak memos & Supplies measured performance, parity, soak, and gate data. \\
 \bottomrule
 \end{tabularx}
@@ -93,16 +93,16 @@ substantial code and test infrastructure:
   prog/.style={draw=UMLAmber,fill=UMLAmber!14},
   label/.style={font=\footnotesize\bfseries},
 ]
-\node[lane,done,minimum width=1.6cm] (a) {A\\backend};
-\node[lane,done,minimum width=1.6cm,right=0.12cm of a] (b) {B\\gates};
-\node[lane,done,minimum width=1.6cm,right=0.12cm of b] (c) {C\\profiles};
-\node[lane,done,minimum width=1.6cm,right=0.12cm of c] (d) {D A--H\\KVM core};
-\node[lane,done,minimum width=1.6cm,right=0.12cm of d] (g) {G/I\\SMP+lift};
-\node[lane,prog,minimum width=1.6cm,right=0.12cm of g] (j) {J\\validation};
+\node[lane,done,minimum width=1.75cm] (a) {backend\\contract};
+\node[lane,done,minimum width=1.75cm,right=0.12cm of a] (b) {runtime\\gates};
+\node[lane,done,minimum width=1.75cm,right=0.12cm of b] (c) {profile\\matrix};
+\node[lane,done,minimum width=1.75cm,right=0.12cm of c] (d) {KVM v2\\core};
+\node[lane,done,minimum width=1.75cm,right=0.12cm of d] (g) {SMP\\state audit};
+\node[lane,prog,minimum width=1.75cm,right=0.12cm of g] (j) {sustained\\validation};
 \draw[-{Latex[length=2mm]},thick,UMLMuted] (a.south) ++(0,-0.35) -- ($(j.south)+(0,-0.35)$);
 \node[label,below=0.62cm of c] {fork state at reporting cutoff};
 \end{tikzpicture}
-\caption{High-level phase state. Most architectural and implementation work has landed; Phase J is the active formal validation gate.}
+\caption{High-level milestone state. Most architectural and implementation work has landed; sustained validation is the active formal gate.}
 \end{figure}
 
 \subsection{Current Functional Reading}
@@ -129,12 +129,12 @@ wide cpython-parity & 134 parity, 0 regression & Larger curated module sweep fou
 
 The important open items are bounded:
 \begin{itemize}
-  \item Phase J must still deliver a formal 24-hour continuous run,
+  \item Sustained validation must still deliver a formal 24-hour continuous run,
         Tier 2/Tier 3 workload templates, and LTP curation.
   \item Snapshot and record/replay work is unblocked but paused behind
-        Phase J.
-  \item The T57 Phase A AVX/XSAVE fix is landed; AVX-512 exposure is
-        deferred to a Phase B if needed.
+        sustained validation.
+  \item The T57 AVX/XSAVE fix is landed; AVX-512 exposure is
+        deferred to a follow-up if needed.
   \item The LKML queue is sequenced, but the large \texttt{arch/um}
         series are gated on validation and upstream review strategy.
 \end{itemize}

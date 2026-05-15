@@ -27,6 +27,55 @@ to keep the common syscall path in guest context.
 \caption{\KVMvTwo{} execution model. It is not a QEMU-style machine; it is a trap mechanism for \UML{} itself.}
 \end{figure}
 
+\subsection{Lessons from the v1 KVM Backend}
+
+The \KVMvTwo{} design is not just a cleaned-up version of the first
+KVM implementation. The v1 implementation was valuable because it
+proved the fast trap path was possible, but it also showed that the
+initial data model would not survive sustained SMP execution. The
+diary around the April 27 architecture review and the v1 restart guide
+converged on the same lesson: treating a KVM vCPU as a passive trap
+resource shared by \UML{} scheduler machinery creates state ownership
+bugs that cannot be made impossible by adding more repair code.
+
+\begin{table}[h]
+\centering
+\caption{Design lessons carried from KVM v1 into \KVMvTwo{}.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.25\linewidth}L{0.31\linewidth}Y@{}}
+\toprule
+v1 pressure & Failure mode learned & \KVMvTwo{} response \\
+\midrule
+KVM as a faster trap loop & The per-vCPU \texttt{kvm\_run} mmap and
+architectural state have active ownership rules; they are not just a
+scratch buffer behind a syscall trap. & Make ownership explicit:
+per-vCPU state, per-task saved state, per-mm state, and synchronization
+rules are documented and audited. \\
+Repair on next entry & Snapshotting exit state and repairing later
+does not compose with \texttt{-EINTR}, host signals, and SMP
+scheduling. & Use explicit entry/exit boundaries, KVM-visible signal
+masking, and state trace instead of relying on opportunistic repair. \\
+Shadow page-table machinery & Multiple producers had to keep a shadow
+view coherent while KVM consumed it; every new fix added another
+ordering rule. & Keep the v2 memory contract smaller and make TLB
+generation, memslot policy, and per-vCPU refresh rules visible. \\
+Implicit scheduler assumptions & \texttt{preempt\_disable()} did not
+mean ``this task cannot move to another host CPU'' for the KVM state
+being touched. & Use \texttt{migrate\_disable()} at the dispatch and
+capture sites that depend on a selected per-host-CPU vCPU. \\
+Ad hoc bug hunting & Individual hypotheses produced regressions or
+negative results because the state space was not enumerated. & The
+state-audit method enumerates state items, operations, owners,
+save/restore rules, and suspect registers before accepting a fix. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+This is the changed contract reviewers should keep in mind: v2's
+core claim is not only that KVM can run \UML{} faster, but that each
+architectural state item has a declared home and a declared transition
+rule.
+
 \subsection{Implementation Themes}
 
 The current \KVMvTwo{} design is organized around five hard problems:
@@ -135,7 +184,7 @@ Item & Closure & Why it matters \\
 SMP-T41 & Recover user RAX in EINTR-mid-PF-stub & Closed the true mt-mini byte-zero residual. \\
 SMP-T54 & SOCK\_CLOEXEC and \texttt{umlctl} sysrq halt & Removed worker fd leak and init shutdown hang class. \\
 SMP-T55 & Per-vCPU FPU-dirty epoch & Restored perf-py-startup gate while preserving cross-task FPU guarantees. \\
-SMP-T57 Phase A & CR4.OSXSAVE, XCR0=0x7, CPUID AVX/XSAVE unmask & Turned stress-ng AVX \#UD from a fragile mask problem into supported guest architectural state. \\
+SMP-T57 AVX/XSAVE & CR4.OSXSAVE, XCR0=0x7, CPUID AVX/XSAVE unmask & Turned stress-ng AVX \#UD from a fragile mask problem into supported guest architectural state. \\
 Gadget revival & LSTAR in-guest fast path & Collapsed trivial syscall cost from host-exit scale to roughly 90 cycles on measured hosts. \\
 \bottomrule
 \end{tabularx}
