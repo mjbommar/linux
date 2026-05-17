@@ -50,6 +50,7 @@ struct LoopArgs {
     sweep_axes: Vec<SweepAxis>,
     json: bool,
     kernel_override: Option<PathBuf>,
+    network_driver_override: Option<String>,
 }
 
 /// One `--sweep KEY=v1,v2,v3` axis.
@@ -120,14 +121,9 @@ impl PointResult {
     }
 }
 
-pub(super) fn run(
-    paths: &paths::Paths,
-    args: super::GateLoopArgs,
-    quiet: bool,
-) -> Result<()> {
+pub(super) fn run(paths: &paths::Paths, args: super::GateLoopArgs, quiet: bool) -> Result<()> {
     let lo = parse_args(args)?;
-    fs::create_dir_all(&lo.out_dir)
-        .with_context(|| format!("mkdir {}", lo.out_dir.display()))?;
+    fs::create_dir_all(&lo.out_dir).with_context(|| format!("mkdir {}", lo.out_dir.display()))?;
 
     if lo.workers == 0 || lo.iters == 0 {
         bail!("workers and iters must both be > 0");
@@ -173,7 +169,10 @@ pub(super) fn run(
 
 fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
     let out_dir = args.out.unwrap_or_else(|| {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         PathBuf::from(format!("/tmp/umlctl-loop-{now}"))
     });
 
@@ -198,6 +197,13 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
             values,
         });
     }
+    if let Some(driver) = args.network_driver.as_deref() {
+        deploy::validate_network_driver(driver)
+            .with_context(|| format!("validate --network-driver {driver}"))?;
+        if sweep_axes.iter().any(|axis| axis.key == "network.driver") {
+            bail!("use either --network-driver or --sweep network.driver=..., not both");
+        }
+    }
 
     Ok(LoopArgs {
         file: args.file,
@@ -210,6 +216,7 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
         sweep_axes,
         json: args.json,
         kernel_override: args.kernel,
+        network_driver_override: args.network_driver,
     })
 }
 
@@ -240,14 +247,20 @@ fn run_one_point(
     quiet: bool,
 ) -> Result<PointResult> {
     let label = point.label();
-    let point_subdir = lo.out_dir.join(format!("p{point_idx}_{}", sanitize(&label)));
+    let point_subdir = lo
+        .out_dir
+        .join(format!("p{point_idx}_{}", sanitize(&label)));
     fs::create_dir_all(&point_subdir)?;
 
     let umlctl = std::env::current_exe().context("locate own exe")?;
 
     // Generate per-worker Umlfiles into the point subdir.
-    let base = deploy::Umlfile::from_path(&lo.file)
+    let mut base = deploy::Umlfile::from_path(&lo.file)
         .with_context(|| format!("re-load Umlfile {}", lo.file.display()))?;
+    if let Some(driver) = lo.network_driver_override.as_deref() {
+        deploy::set_network_driver(&mut base, driver)
+            .with_context(|| format!("apply --network-driver {driver}"))?;
+    }
     let stem = base.instance.name.clone();
 
     let mut worker_files: Vec<PathBuf> = Vec::with_capacity(lo.workers as usize);
@@ -260,17 +273,13 @@ fn run_one_point(
         // SAME init.sh path concurrently — they race and bricks the
         // boot. Reset to match the new name.
         u.debug.log_dir = format!("logs/{}", u.instance.name);
-        // Apply sweep KEY=value pairs into [env].
-        for (k, v) in &point.0 {
-            u.env.insert(k.clone(), v.clone());
-        }
+        apply_sweep_point(&mut u, point)?;
         // Optional kernel override (CLI > Umlfile).
         if let Some(k) = &lo.kernel_override {
             u.kernel.path = k.display().to_string();
         }
         let toml_path = point_subdir.join(format!("{stem}-w{w}.toml"));
-        let serialized = toml::to_string_pretty(&u)
-            .context("serialize generated Umlfile")?;
+        let serialized = toml::to_string_pretty(&u).context("serialize generated Umlfile")?;
         fs::write(&toml_path, serialized)
             .with_context(|| format!("write {}", toml_path.display()))?;
         worker_files.push(toml_path);
@@ -314,9 +323,15 @@ fn run_one_point(
                     i,
                 );
                 match status {
-                    IterStatus::Pass => { pass.fetch_add(1, Ordering::Relaxed); },
-                    IterStatus::Fail => { fail.fetch_add(1, Ordering::Relaxed); },
-                    IterStatus::Timeout => { timeout.fetch_add(1, Ordering::Relaxed); },
+                    IterStatus::Pass => {
+                        pass.fetch_add(1, Ordering::Relaxed);
+                    }
+                    IterStatus::Fail => {
+                        fail.fetch_add(1, Ordering::Relaxed);
+                    }
+                    IterStatus::Timeout => {
+                        timeout.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 if !quiet {
                     eprintln!("[umlctl gate loop] w{w} iter{i}: {status:?}");
@@ -338,8 +353,27 @@ fn run_one_point(
     })
 }
 
+fn apply_sweep_point(u: &mut deploy::Umlfile, point: &SweepPoint) -> Result<()> {
+    // Most sweep keys are env vars; dotted config keys are reserved
+    // for umlctl-owned convenience switches.
+    for (k, v) in &point.0 {
+        match k.as_str() {
+            "network.driver" => deploy::set_network_driver(u, v)
+                .with_context(|| format!("apply --sweep network.driver={v}"))?,
+            _ => {
+                u.env.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
-enum IterStatus { Pass, Fail, Timeout }
+enum IterStatus {
+    Pass,
+    Fail,
+    Timeout,
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_one_iter(
@@ -354,24 +388,22 @@ fn run_one_iter(
     log_dir: &Path,
     iter: u32,
 ) -> IterStatus {
-    // Make sure no leftover instance with this name exists. Both
-    // calls are idempotent — silent failure is fine.
-    let _ = run_umlctl(umlctl, &["stop", inst_name]);
-    let _ = run_umlctl(umlctl, &["rm", inst_name]);
+    // Make sure no leftover instance or host resources with this name
+    // exist. `down` is important for TAP-backed Umlfiles because a
+    // plain stop+rm skips host-side teardown.
+    cleanup_umlfile_iter(umlctl, toml_path, inst_name);
 
     // Spawn. We DON'T pass --wait-for here; we want full control
     // over the polling loop so that on timeout we can capture the
     // init.log before `stop` writes the kernel-shutdown banner.
     let up_log = log_dir.join(format!("up-{iter}.log"));
-    let up_out = run_umlctl(
-        umlctl,
-        &["up", "-f", toml_path.to_str().unwrap()],
-    );
+    let up_out = run_umlctl(umlctl, &["up", "-f", toml_path.to_str().unwrap()]);
     let _ = fs::write(&up_log, &up_out);
 
     if !up_out.contains("started ") {
         // up failed before binding a run_id — record what happened.
         copy_or_create(&up_log, &log_dir.join(format!("run-{iter}.log")));
+        cleanup_umlfile_iter(umlctl, toml_path, inst_name);
         return IterStatus::Fail;
     }
 
@@ -413,10 +445,18 @@ fn run_one_iter(
         copy_or_create(&init_log, &saved);
     }
 
-    let _ = run_umlctl(umlctl, &["stop", inst_name]);
-    let _ = run_umlctl(umlctl, &["rm", inst_name]);
+    cleanup_umlfile_iter(umlctl, toml_path, inst_name);
 
     classified
+}
+
+fn cleanup_umlfile_iter(umlctl: &Path, toml_path: &Path, inst_name: &str) {
+    if let Some(toml) = toml_path.to_str() {
+        let _ = run_umlctl(umlctl, &["down", "-f", toml, "--force", "--rm"]);
+    } else {
+        let _ = run_umlctl(umlctl, &["stop", inst_name]);
+        let _ = run_umlctl(umlctl, &["rm", inst_name]);
+    }
 }
 
 fn run_umlctl(umlctl: &Path, args: &[&str]) -> String {
@@ -432,7 +472,9 @@ fn run_umlctl(umlctl: &Path, args: &[&str]) -> String {
 }
 
 fn grep_matches(pattern: &str, file: &Path) -> bool {
-    let Some(file_s) = file.to_str() else { return false };
+    let Some(file_s) = file.to_str() else {
+        return false;
+    };
     Command::new("grep")
         .args(["-E", "-q", pattern, file_s])
         .status()
@@ -451,7 +493,13 @@ fn copy_or_create(src: &Path, dst: &Path) {
 /// Scrub a sweep label down to filesystem-safe characters.
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -520,8 +568,14 @@ mod tests {
     #[test]
     fn sweep_matrix_cartesian() {
         let axes = vec![
-            SweepAxis { key: "A".into(), values: vec!["1".into(), "2".into()] },
-            SweepAxis { key: "B".into(), values: vec!["x".into(), "y".into()] },
+            SweepAxis {
+                key: "A".into(),
+                values: vec!["1".into(), "2".into()],
+            },
+            SweepAxis {
+                key: "B".into(),
+                values: vec!["x".into(), "y".into()],
+            },
         ];
         let pts = expand_sweep_matrix(&axes);
         assert_eq!(pts.len(), 4);
@@ -535,5 +589,31 @@ mod tests {
         let pts = expand_sweep_matrix(&[]);
         assert_eq!(pts.len(), 1);
         assert_eq!(pts[0].label(), "default");
+    }
+
+    #[test]
+    fn network_driver_sweep_updates_config_not_env() {
+        let mut u: deploy::Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+"#,
+        )
+        .unwrap();
+        let point = SweepPoint(vec![
+            ("network.driver".into(), "vector2".into()),
+            ("MT_JITTER_NS".into(), "100".into()),
+        ]);
+
+        apply_sweep_point(&mut u, &point).unwrap();
+
+        assert_eq!(u.network.driver, "vector2");
+        assert_eq!(u.env.get("MT_JITTER_NS").map(String::as_str), Some("100"));
+        assert!(!u.env.contains_key("network.driver"));
     }
 }

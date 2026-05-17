@@ -184,6 +184,13 @@ parking-lot designs for future prioritization.
   ring policy, coalesce policy reporting, TAP write-IRQ wakeups,
   repeated trusted TAP up/ping/down evidence, sandbox rejection
   evidence, and KUnit coverage. Not a commitment.
+- [23-uml-vector-driver-v2-r7-umlctl-tier3-integration.md](23-uml-vector-driver-v2-r7-umlctl-tier3-integration.md) —
+  R7 implementation note for `umlctl` and Tier 3 integration:
+  `network.driver = "vector2"`, `--network-driver`,
+  `--sweep network.driver=...`, dry-run network plans, soak v2
+  aliases, v2 metadata, teardown hardening, seccomp smoke evidence,
+  KUnit evidence, and the remaining kvm-v2 readiness gap. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

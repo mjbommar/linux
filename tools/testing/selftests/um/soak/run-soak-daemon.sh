@@ -67,6 +67,46 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# Tier 3 v2 aliases reuse the base Django/FastAPI templates with a
+# different `network.driver` substitution.
+tier3_template_workload() {
+	case "$1" in
+		tier3-django-v2)  echo "tier3-django" ;;
+		tier3-fastapi-v2) echo "tier3-fastapi" ;;
+		*)                echo "$1" ;;
+	esac
+}
+
+tier3_network_driver() {
+	case "$1" in
+		*-v2) echo "vector2" ;;
+		*)   echo "vector" ;;
+	esac
+}
+
+tier3_netdev_name() {
+	case "$(tier3_network_driver "$1")" in
+		vector2) echo "vec2.0" ;;
+		*)       echo "vec0" ;;
+	esac
+}
+
+tier3_host_mode() {
+	case "$(tier3_network_driver "$1")" in
+		vector2) echo "inproc" ;;
+		*)       echo "legacy-inproc" ;;
+	esac
+}
+
+tier3_metadata_extra() {
+	local workload=$1 backend=$2 driver netdev host_mode
+	driver=$(tier3_network_driver "$workload")
+	netdev=$(tier3_netdev_name "$workload")
+	host_mode=$(tier3_host_mode "$workload")
+	printf ',"uml_network_driver":"%s","uml_netdev_name":"%s","uml_vmm_backend":"%s","uml_transport":"tap","uml_queue_count":1,"uml_host_mode":"%s"' \
+		"$driver" "$netdev" "$backend" "$host_mode"
+}
+
 # ----------------------------------------------------------------------
 # Validate inputs.
 # ----------------------------------------------------------------------
@@ -97,8 +137,9 @@ mkdir -p "$OUT/logs" "$OUT/logs/panics" || exit 2
 IFS=',' read -ra WORKLOADS <<< "$WORKLOADS_CSV"
 SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
 for w in "${WORKLOADS[@]}"; do
-	if [ ! -f "$SOAK_DIR/${w}.toml.template" ]; then
-		echo "ERR: missing template $SOAK_DIR/${w}.toml.template" >&2
+	tmpl_w=$(tier3_template_workload "$w")
+	if [ ! -f "$SOAK_DIR/${tmpl_w}.toml.template" ]; then
+		echo "ERR: missing template $SOAK_DIR/${tmpl_w}.toml.template" >&2
 		exit 2
 	fi
 done
@@ -109,6 +150,7 @@ declare -A TIMEOUT_FOR=(
 	[cpython-soak]=360 [kbuild-tiny]=600
 	[tier1-pylibs]=90 [tier2-uv-pylibs]=120
 	[tier3-django]=180 [tier3-fastapi]=180
+	[tier3-django-v2]=180 [tier3-fastapi-v2]=180
 	[ltp-runner]=3600
 )
 DEFAULT_TIMEOUT=120
@@ -417,13 +459,13 @@ is_tier3_workload() {
 }
 
 # Expand placeholders into a per-worker TOML. Args:
-#   template_path worker_idx backend output_path
+#   template_path worker_idx backend output_path network_driver
 # Placeholders set: {{KERNEL}}, {{BACKEND}}, {{WORKER_IDX}},
 # {{HOST_IP}} (CIDR), {{GUEST_IP}} (CIDR),
 # {{HOST_IP_PLAIN}} (no mask), {{GUEST_IP_PLAIN}} (no mask),
-# {{TAP_NAME}}, {{SOAK_DIR}}.
+# {{TAP_NAME}}, {{NETWORK_DRIVER}}, {{SOAK_DIR}}.
 emit_tier3_worker_toml() {
-	local tmpl=$1 widx=$2 backend=$3 out=$4
+	local tmpl=$1 widx=$2 backend=$3 out=$4 network_driver=$5
 	local hip="192.168.42.$((4 * widx + 1))"
 	local gip="192.168.42.$((4 * widx + 2))"
 	local tap="soak-tap${widx}"
@@ -435,6 +477,7 @@ emit_tier3_worker_toml() {
 	    -e "s|{{HOST_IP}}|${hip}/30|g"             \
 	    -e "s|{{GUEST_IP}}|${gip}/30|g"            \
 	    -e "s|{{TAP_NAME}}|${tap}|g"               \
+	    -e "s|{{NETWORK_DRIVER}}|${network_driver}|g" \
 	    -e "s|{{SOAK_DIR}}|$SOAK_DIR|g"            \
 	    "$tmpl" > "$out"
 }
@@ -447,7 +490,8 @@ process_tier3_phase_results() {
 	local key="${workload}|${backend}"
 	local n="${WL_N[$key]:-0}"
 	local k="${WL_PASS[$key]:-0}"
-	local wdir f log_rel verdict panic_b timeout_b host_error dur_ms iter_within
+	local wdir f log_rel verdict panic_b timeout_b host_error dur_ms iter_within extra
+	extra=$(tier3_metadata_extra "$workload" "$backend")
 	for wdir in "$phase_dir"/w*; do
 		[ -d "$wdir" ] || continue
 		for f in "$wdir"/p0_default/*/run-*.log; do
@@ -467,7 +511,7 @@ process_tier3_phase_results() {
 				"$workload" "$backend" "$rotation" "$iter_within" \
 				"$verdict" "$log_rel" \
 				"$panic_b" "$timeout_b" "$host_error" \
-				"$t_pre" "$t_post" "$dur_ms" ""
+				"$t_pre" "$t_post" "$dur_ms" "$extra"
 			n=$((n + 1))
 			[ "$verdict" = "PASS" ] && k=$((k + 1))
 			if ! update_window_and_check "$key" "$verdict"; then
@@ -483,6 +527,7 @@ process_tier3_phase_results() {
 				local pdir="$OUT/logs/panics/r${rotation}-${workload}-${backend}"
 				mkdir -p "$pdir"
 				cp "$f" "$pdir/" 2>/dev/null || true
+				printf '{%s}\n' "${extra#,}" > "$pdir/metadata.json"
 			fi
 		done
 	done
@@ -529,16 +574,18 @@ run_one_tier3_phase() {
 
 	echo "[$(date -uIs)] phase: workload=$workload backend=$backend r=$rotation W=$WORKERS (tier3 per-worker fanout) M=$ITERS timeout=${timeout_sec}s temp=${t_pre}C"
 
-	local pids=() w toml w_out
+	local pids=() w toml w_out template_workload network_driver
+	template_workload=$(tier3_template_workload "$workload")
+	network_driver=$(tier3_network_driver "$workload")
 	for w in $(seq 0 $((WORKERS - 1))); do
 		toml="$OUT/_${workload}-${backend}-w${w}.toml"
 		emit_tier3_worker_toml \
-			"$SOAK_DIR/${workload}.toml.template" \
-			"$w" "$backend" "$toml"
+			"$SOAK_DIR/${template_workload}.toml.template" \
+			"$w" "$backend" "$toml" "$network_driver"
 		w_out="$out_dir/w${w}"
 		mkdir -p "$w_out"
 		if [ -n "$DRY_RUN" ]; then
-			echo "  [dry-run] worker $w: $UMLCTL gate loop -f $toml -W 1 -M $ITERS --timeout $timeout_sec --out $w_out (host=192.168.42.$((4*w+1)) guest=192.168.42.$((4*w+2)) tap=soak-tap${w})"
+			echo "  [dry-run] worker $w: $UMLCTL gate loop -f $toml -W 1 -M $ITERS --timeout $timeout_sec --out $w_out (host=192.168.42.$((4*w+1)) guest=192.168.42.$((4*w+2)) tap=soak-tap${w} driver=${network_driver})"
 			mkdir -p "$w_out/p0_default/w0"
 			echo "REPRO_DONE rc=0" > "$w_out/p0_default/w0/run-0.log"
 		else

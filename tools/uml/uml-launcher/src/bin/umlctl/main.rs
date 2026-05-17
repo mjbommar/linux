@@ -18,7 +18,7 @@
 // `umlctl start`/`stop` with a pidfile + blocking waitpid +
 // WNOHANG zombie-reap drain closes that gap.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::Write;
 
@@ -205,7 +205,12 @@ struct GateLoopArgs {
     /// Path to the Umlfile (TOML). The instance.name in the file
     /// is treated as a stem; per-worker copies get suffixes like
     /// `<stem>-w0`, `<stem>-w1`, ...
-    #[arg(short = 'f', long = "file", default_value = "Umlfile.toml", value_name = "PATH")]
+    #[arg(
+        short = 'f',
+        long = "file",
+        default_value = "Umlfile.toml",
+        value_name = "PATH"
+    )]
     file: std::path::PathBuf,
 
     /// Number of parallel workers. Each worker has its own
@@ -221,18 +226,22 @@ struct GateLoopArgs {
     /// POSIX ERE (passed to `grep -E`). A line matching this in the
     /// per-iteration init.log marks the iteration as PASS — UNLESS
     /// `--fail-marker` matches first/also (fail wins).
-    #[arg(long = "pass-marker",
-          default_value = "REPRO_DONE rc=0",
-          value_name = "REGEX")]
+    #[arg(
+        long = "pass-marker",
+        default_value = "REPRO_DONE rc=0",
+        value_name = "REGEX"
+    )]
     pass_marker: String,
 
     /// POSIX ERE: any line matching marks the iteration as FAIL,
     /// even if `--pass-marker` also matches. Default catches the
     /// common KVM-v2 failure modes (mt-mini VERIFY_FAIL, kernel BUG,
     /// kernel panic).
-    #[arg(long = "fail-marker",
-          default_value = "VERIFY_FAIL|kernel BUG|Kernel panic",
-          value_name = "REGEX")]
+    #[arg(
+        long = "fail-marker",
+        default_value = "VERIFY_FAIL|kernel BUG|Kernel panic",
+        value_name = "REGEX"
+    )]
     fail_marker: String,
 
     /// Per-iteration timeout. Each `up` call gets this long to hit
@@ -267,6 +276,12 @@ struct GateLoopArgs {
     /// Umlfile.
     #[arg(long, value_name = "PATH")]
     kernel: Option<std::path::PathBuf>,
+
+    /// Override `[network].driver` for every generated worker
+    /// Umlfile. Use `vector` for legacy vec0 or `vector2` for
+    /// experimental vec2.0.
+    #[arg(long = "network-driver", value_name = "vector|vector2")]
+    network_driver: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -516,7 +531,12 @@ pub struct AssertArgs {
 #[derive(clap::Args, Debug)]
 struct UpArgs {
     /// Path to the Umlfile (TOML). Defaults to `./Umlfile.toml`.
-    #[arg(short = 'f', long = "file", default_value = "Umlfile.toml", value_name = "PATH")]
+    #[arg(
+        short = 'f',
+        long = "file",
+        default_value = "Umlfile.toml",
+        value_name = "PATH"
+    )]
     file: std::path::PathBuf,
 
     /// Don't actually start the kernel — print synthesized cmdline,
@@ -528,6 +548,11 @@ struct UpArgs {
     /// already configured (e.g. in CI with a pre-provisioned bridge).
     #[arg(long)]
     skip_network_setup: bool,
+
+    /// Override `[network].driver` without editing the Umlfile. Use
+    /// `vector` for legacy vec0 or `vector2` for experimental vec2.0.
+    #[arg(long = "network-driver", value_name = "vector|vector2")]
+    network_driver: Option<String>,
 
     /// Wrap UML in `strace -f -s 256 -o <log_dir>/strace.log` to
     /// capture every host syscall the launcher makes. Overrides
@@ -570,7 +595,12 @@ struct UpArgs {
 #[derive(clap::Args, Debug)]
 struct DownArgs {
     /// Path to the Umlfile (TOML). Defaults to `./Umlfile.toml`.
-    #[arg(short = 'f', long = "file", default_value = "Umlfile.toml", value_name = "PATH")]
+    #[arg(
+        short = 'f',
+        long = "file",
+        default_value = "Umlfile.toml",
+        value_name = "PATH"
+    )]
     file: std::path::PathBuf,
 
     /// Also `umlctl rm` the underlying manifest after stop+teardown.
@@ -635,17 +665,23 @@ fn run() -> Result<()> {
 // -------------------------------------------------------------------
 
 fn default_source_root(arg: &Option<std::path::PathBuf>) -> std::path::PathBuf {
-    arg.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    arg.clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
 
-fn default_scoreboard(arg: &Option<std::path::PathBuf>, root: &std::path::Path) -> std::path::PathBuf {
-    arg.clone().unwrap_or_else(|| root.join("tools/testing/selftests/um/scoreboard.jsonl"))
+fn default_scoreboard(
+    arg: &Option<std::path::PathBuf>,
+    root: &std::path::Path,
+) -> std::path::PathBuf {
+    arg.clone()
+        .unwrap_or_else(|| root.join("tools/testing/selftests/um/scoreboard.jsonl"))
 }
 
 fn cmd_gate_run(args: GateRunArgs, quiet: bool) -> Result<()> {
     let gatefile = gate::Gatefile::from_path(&args.file)
         .with_context(|| format!("load Gatefile {}", args.file.display()))?;
-    let kernel = args.kernel
+    let kernel = args
+        .kernel
         .map(|p| p.to_string_lossy().into_owned())
         .or_else(|| std::env::var("UML_KERNEL").ok())
         .unwrap_or_default();
@@ -664,8 +700,10 @@ fn cmd_gate_run(args: GateRunArgs, quiet: bool) -> Result<()> {
     }
 
     if !quiet {
-        println!("[umlctl gate] {} backend={} kernel={}",
-            gatefile.gate.name, args.backend, kernel);
+        println!(
+            "[umlctl gate] {} backend={} kernel={}",
+            gatefile.gate.name, args.backend, kernel
+        );
     }
     let row = gate::run(gate::RunInputs {
         gate: &gatefile,
@@ -695,8 +733,7 @@ fn cmd_gate_run(args: GateRunArgs, quiet: bool) -> Result<()> {
 fn cmd_gate_diff(args: GateDiffArgs) -> Result<()> {
     let source_root = default_source_root(&args.source_root);
     let path = default_scoreboard(&args.scoreboard, &source_root);
-    let rows = gate::read_scoreboard(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let rows = gate::read_scoreboard(&path).with_context(|| format!("read {}", path.display()))?;
     let s = gate::render_diff(&rows, args.gate.as_deref(), args.limit);
     print!("{s}");
     Ok(())
@@ -720,7 +757,11 @@ fn cmd_gate_list(args: GateListArgs) -> Result<()> {
             Ok(g) => println!(
                 "{name:30} {phase:6} {desc}",
                 name = g.gate.name,
-                phase = if g.gate.phase.is_empty() { "-" } else { &g.gate.phase },
+                phase = if g.gate.phase.is_empty() {
+                    "-"
+                } else {
+                    &g.gate.phase
+                },
                 desc = g.gate.description,
             ),
             Err(e) => println!("{}: ERROR ({})", p.display(), e),
@@ -738,16 +779,29 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         .with_context(|| format!("load Umlfile {}", args.file.display()))?;
 
     // CLI debug overrides win.
-    if args.strace { uml.debug.strace = true; }
-    if args.gdb { uml.debug.gdb = true; }
-    if args.gdb_port != 0 { uml.debug.gdb_port = args.gdb_port; }
+    if args.strace {
+        uml.debug.strace = true;
+    }
+    if args.gdb {
+        uml.debug.gdb = true;
+    }
+    if args.gdb_port != 0 {
+        uml.debug.gdb_port = args.gdb_port;
+    }
+    if let Some(driver) = args.network_driver.as_deref() {
+        deploy::set_network_driver(&mut uml, driver)
+            .with_context(|| format!("apply --network-driver {driver}"))?;
+    }
 
-    let compiled = deploy::compile(&uml)
-        .context("compile Umlfile")?;
+    let compiled = deploy::compile(&uml).context("compile Umlfile")?;
 
     if args.dry_run {
-        println!("== generated init script ({}) ==", compiled.init_script.display());
+        println!(
+            "== generated init script ({}) ==",
+            compiled.init_script.display()
+        );
         println!("{}", std::fs::read_to_string(&compiled.init_script)?);
+        print_network_plan(&compiled);
         println!("== host setup steps ==");
         for s in &compiled.setup_steps {
             println!("  sudo sh -c {:?}", s);
@@ -769,7 +823,7 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
     }
 
     // Build the inner cmdline + create the manifest, then start.
-    let mut cmdline_parts: Vec<String> = compiled.append.clone();
+    let cmdline_parts: Vec<String> = compiled.append.clone();
     if !uml.kernel.append.is_empty() {
         // already in compiled.append from compile()
     }
@@ -790,9 +844,13 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         "hostfs",
         false,
         uml.runtime.ncpus,
-        &uml.instance.labels.iter()
-            .map(|(k,v)| format!("{k}={v}")).collect::<Vec<_>>(),
-    ).context("build manifest from Umlfile")?;
+        &uml.instance
+            .labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>(),
+    )
+    .context("build manifest from Umlfile")?;
     std::fs::create_dir_all(manifest_path.parent().unwrap())
         .context("create instances directory")?;
     m.write_to(&manifest_path).context("write manifest")?;
@@ -803,7 +861,9 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
     // init=PATH into cmdline. (TODO: cleaner manifest extension.)
     let init_arg = format!("init={}", compiled.init_script.display());
     let mut full_cmdline = cmdline.clone();
-    if !full_cmdline.is_empty() { full_cmdline.push(' '); }
+    if !full_cmdline.is_empty() {
+        full_cmdline.push(' ');
+    }
     full_cmdline.push_str(&init_arg);
     // Rewrite manifest with the init= cmdline merged in.
     let mut m2 = m.clone();
@@ -811,8 +871,22 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
     m2.write_to(&manifest_path)?;
 
     if !quiet {
-        eprintln!("[umlctl] up: instance={} init={}",
-            uml.instance.name, compiled.init_script.display());
+        eprintln!(
+            "[umlctl] up: instance={} init={}",
+            uml.instance.name,
+            compiled.init_script.display()
+        );
+        if let Some(plan) = &compiled.network_plan {
+            eprintln!(
+                "[umlctl] network: driver={} guest_dev={} tap={} transport={} host_mode={} queues={}",
+                plan.driver,
+                plan.guest_dev,
+                plan.tap_name,
+                plan.transport,
+                plan.host_mode,
+                plan.queue_count,
+            );
+        }
     }
     let start_args = StartArgs {
         name: uml.instance.name.clone(),
@@ -835,6 +909,24 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_network_plan(compiled: &deploy::Compiled) {
+    println!("== network plan ==");
+    if let Some(plan) = &compiled.network_plan {
+        println!(
+            "  mode=tap driver={} guest_dev={} host_tap={} transport={} host_mode={} queues={}",
+            plan.driver,
+            plan.guest_dev,
+            plan.tap_name,
+            plan.transport,
+            plan.host_mode,
+            plan.queue_count,
+        );
+        println!("  kernel_arg={}", plan.kernel_arg);
+    } else {
+        println!("  mode=none");
+    }
+}
+
 /// Poll the named instance's CURRENT run bundle's init.log for a line
 /// matching `pattern` (POSIX ERE — same semantics as `umlctl gate`).
 /// Exits the process on timeout (code 124, matches coreutils
@@ -850,16 +942,17 @@ fn wait_for_marker(
     timeout_secs: u64,
     quiet: bool,
 ) {
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(timeout_secs);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let run_id_path = paths.run_id_file_path(name);
     loop {
         if let Some(run_id) = supervise::read_run_id_file(&run_id_path) {
             let init_log = paths.run_dir(&run_id).join("init.log");
             if init_log.exists() && grep_file_matches(pattern, &init_log) {
                 if !quiet {
-                    eprintln!("[umlctl] wait-for matched /{pattern}/ in {}",
-                              init_log.display());
+                    eprintln!(
+                        "[umlctl] wait-for matched /{pattern}/ in {}",
+                        init_log.display()
+                    );
                 }
                 return;
             }
@@ -879,7 +972,9 @@ fn wait_for_marker(
 /// dialect, no extra Rust dep).
 fn grep_file_matches(pattern: &str, file: &std::path::Path) -> bool {
     use std::process::Command;
-    let Some(file_s) = file.to_str() else { return false };
+    let Some(file_s) = file.to_str() else {
+        return false;
+    };
     Command::new("grep")
         .args(["-E", "-q", pattern, file_s])
         .status()
@@ -891,16 +986,65 @@ fn cmd_down(paths: &paths::Paths, args: DownArgs, quiet: bool) -> Result<()> {
     let uml = deploy::Umlfile::from_path(&args.file)
         .with_context(|| format!("load Umlfile {}", args.file.display()))?;
 
-    // Stop the instance (best-effort if --force).
+    // Stop the instance (best-effort if --force). Call the supervisor
+    // directly instead of `cmd_stop`: the command wrapper exits the
+    // process on "not running", but `down --force` still needs to run
+    // host-side teardown for partially-started TAP instances.
     let stop_args = StopArgs {
         name: uml.instance.name.clone(),
         signal: "TERM".into(),
         timeout: 10,
-        force: false,
+        force: args.force,
     };
-    if let Err(e) = cmd_stop(paths, stop_args, quiet) {
-        if !args.force { return Err(e); }
-        if !quiet { eprintln!("[umlctl] (stop failed: {e:#}; --force, continuing)"); }
+    match supervise::stop(paths, &stop_args) {
+        Ok(info) => {
+            if !quiet {
+                println!(
+                    "stopped {} pid={} signal={} exit={:?} run_id={}",
+                    uml.instance.name, info.pid, info.signal_sent, info.exit_status, info.run_id
+                );
+            }
+            history::append(
+                paths,
+                history::Event::Stop {
+                    name: &uml.instance.name,
+                    pid: info.pid,
+                    run_id: &info.run_id,
+                    exit_status: info.exit_status,
+                    signal_sent: &info.signal_sent,
+                },
+            )?;
+            events::emit_lifecycle(
+                paths,
+                &info.run_id,
+                &uml.instance.name,
+                "stop",
+                Some(info.pid),
+                Some(&info.signal_sent),
+                info.exit_status,
+            )?;
+        }
+        Err(supervise::StopError::ManifestMissing | supervise::StopError::NotRunning)
+            if args.force =>
+        {
+            if !quiet {
+                eprintln!("[umlctl] (instance not running; --force, continuing)");
+            }
+        }
+        Err(supervise::StopError::ManifestMissing) => {
+            bail!("instance '{}' not found", uml.instance.name);
+        }
+        Err(supervise::StopError::NotRunning) => {
+            bail!("instance '{}' not running", uml.instance.name);
+        }
+        Err(supervise::StopError::Other(e)) => {
+            if !args.force {
+                return Err(e);
+            }
+            if !quiet {
+                eprintln!("[umlctl] (stop failed: {e:#}; --force, continuing)");
+            }
+        }
     }
 
     // Compile to get teardown steps. Failures are non-fatal because
@@ -912,12 +1056,16 @@ fn cmd_down(paths: &paths::Paths, args: DownArgs, quiet: bool) -> Result<()> {
     }
 
     if args.rm {
-        let rm_args = RmArgs {
-            name: uml.instance.name.clone(),
-            force: true,
-            keep_logs: false,
-        };
-        cmd_rm(paths, rm_args, quiet)?;
+        if paths.manifest_path(&uml.instance.name).exists() {
+            let rm_args = RmArgs {
+                name: uml.instance.name.clone(),
+                force: true,
+                keep_logs: false,
+            };
+            cmd_rm(paths, rm_args, quiet)?;
+        } else if !quiet {
+            eprintln!("[umlctl] (manifest already absent; --rm, continuing)");
+        }
     }
     Ok(())
 }
@@ -1024,10 +1172,7 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
             std::process::exit(4);
         }
         Err(supervise::StartError::KernelMissing(p)) => {
-            eprintln!(
-                "umlctl: kernel '{}' missing or not executable",
-                p.display()
-            );
+            eprintln!("umlctl: kernel '{}' missing or not executable", p.display());
             std::process::exit(5);
         }
         Err(supervise::StartError::ReadyTimeout) => {

@@ -49,5 +49,14 @@ CLI flags > TOML > env vars > defaults.
 
 The Umlfile configs are not magic either: they're TOML that drives
 `tools/uml/uml-launcher/src/bin/umlctl/deploy.rs::render_init_script`
-to produce a single bash init script. `umlctl up --print-init` shows
-the exact script that will run.
+to produce a single bash init script. `umlctl up --dry-run` shows the
+exact script, host setup, teardown, kernel arguments, and selected
+network plan.
+
+For vector-networking comparisons, keep the TOML stable and switch the
+driver from the command line:
+
+```sh
+umlctl up -f tools/uml/uml-launcher/examples/fastapi.toml --network-driver vector2 --dry-run
+umlctl gate loop -f tools/uml/uml-launcher/examples/fastapi.toml --sweep network.driver=vector,vector2
+```

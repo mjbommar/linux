@@ -39,6 +39,7 @@ ncpus = 2
 
 [network]
 mode = "tap"
+driver = "{{NETWORK_DRIVER}}"
 tap_name = "{{TAP_NAME}}"
 guest_ip = "{{GUEST_IP}}"
 host_ip = "{{HOST_IP}}"
@@ -79,11 +80,24 @@ http.server.HTTPServer(('0.0.0.0', 8080), H).serve_forever()
 PY
 python3 /tmp/tier3-fastapi-app.py >/tmp/fastapi.log 2>&1 &
 echo $! > /tmp/fastapi.pid
+port_ready() {
+python3 - <<'PY'
+import socket, sys
+s = socket.socket()
+s.settimeout(0.2)
+try:
+    s.connect(("127.0.0.1", 8080))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
 for i in $(seq 1 60); do
-    nc -z 127.0.0.1 8080 && break
+    port_ready && break
     sleep 0.5
 done
-nc -z 127.0.0.1 8080 || { echo SERVER_FAIL; exit 1; }
+port_ready || { echo SERVER_FAIL; exit 1; }
 echo SERVER_READY
 """
 expect = "SERVER_READY"

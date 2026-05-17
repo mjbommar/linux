@@ -215,12 +215,19 @@ exercises a loopback HTTP server inside the guest with the
 host-side daemon hitting it via a TAP interface. Pre-flight:
 
 ```sh
-# 1. Rebuild the kernel with CONFIG_UML_NET_VECTOR=y:
+# 1. Rebuild the kernel with legacy vector support:
 cd ~/src/uml-builds/uml-smp-t41fix
 ./scripts/config --enable CONFIG_UML_NET_VECTOR
 make ARCH=um O=$(pwd) olddefconfig -j
 make ARCH=um O=$(pwd) -j
 # Verify: grep CONFIG_UML_NET_VECTOR=y .config
+
+# For the experimental vector v2 Tier 3 aliases, also enable:
+./scripts/config --enable CONFIG_UML_NET_VECTOR_V2
+./scripts/config --enable CONFIG_UML_NET_VECTOR_V2_INPROC
+make ARCH=um O=$(pwd) olddefconfig -j
+make ARCH=um O=$(pwd) -j
+# Verify: grep -E 'CONFIG_UML_NET_VECTOR_V2(=|_INPROC=)y' .config
 
 # 2. (Optional) Install real Django/FastAPI for richer testing.
 #    The templates ship with a Python stdlib `http.server` shim that
@@ -235,7 +242,28 @@ apt-get install python3-django python3-fastapi python3-uvicorn
 IP allocation: the daemon assigns per-worker /30s from
 192.168.42.0/24 (worker N → host `.4N+1`, guest `.4N+2`, tap
 `soak-tap<N>`). Tier 3 templates use `{{HOST_IP}}` / `{{GUEST_IP}}`
-/ `{{TAP_NAME}}` placeholders the daemon substitutes per worker.
+/ `{{TAP_NAME}}` / `{{NETWORK_DRIVER}}` placeholders the daemon
+substitutes per worker.
+
+By default, `tier3-django` and `tier3-fastapi` use the legacy vector
+driver (`network.driver = "vector"`, guest device `vec0`, kernel arg
+`vec0:transport=tap,...`). The experimental v2 workload aliases
+`tier3-django-v2` and `tier3-fastapi-v2` reuse the same templates but
+substitute `network.driver = "vector2"`, guest device `vec2.0`, and
+kernel arg `vec2.0:transport=tap,mode=inproc,...`. The v2 aliases are
+for replacement-gate evidence only; the production path remains
+legacy `vec0`.
+
+For direct `umlctl` comparisons without editing TOML, use:
+
+```sh
+umlctl up -f tier3-django.toml --network-driver vector2 --dry-run
+umlctl gate loop -f tier3-django.toml --sweep network.driver=vector,vector2 -W 1 -M 30
+```
+
+`umlctl up --dry-run` prints a network plan with the selected guest
+device and exact kernel command-line argument, so operator logs show
+whether a run used legacy `vec0` or experimental `vec2.0`.
 
 Design: `phase-J-tier3-design-2026-05-14.md`. The per-worker IP
 allocation carve-out in `run-soak-daemon.sh` landed in commit

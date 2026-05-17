@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::manifest;
-use crate::paths::Paths;
 
 /// Schema version of the Umlfile format. Bumped when wire-format
 /// breaks. Today only v1.
@@ -78,7 +77,9 @@ pub struct KernelSection {
     pub append: Vec<String>,
 }
 
-fn default_backend() -> String { "seccomp".into() }
+fn default_backend() -> String {
+    "seccomp".into()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields, default)]
@@ -89,7 +90,10 @@ pub struct RuntimeSection {
 
 impl Default for RuntimeSection {
     fn default() -> Self {
-        Self { mem: "512M".into(), ncpus: 1 }
+        Self {
+            mem: "512M".into(),
+            ncpus: 1,
+        }
     }
 }
 
@@ -98,6 +102,8 @@ impl Default for RuntimeSection {
 pub struct NetworkSection {
     /// "none" (default) or "tap".
     pub mode: String,
+    /// "vector" (legacy vec0) or "vector2" (experimental vec2.0).
+    pub driver: String,
     pub tap_name: String,
     pub guest_ip: String,
     pub host_ip: String,
@@ -110,10 +116,22 @@ pub struct NetworkSection {
     pub ports: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkPlan {
+    pub driver: String,
+    pub guest_dev: String,
+    pub tap_name: String,
+    pub transport: String,
+    pub host_mode: String,
+    pub queue_count: u32,
+    pub kernel_arg: String,
+}
+
 impl Default for NetworkSection {
     fn default() -> Self {
         Self {
             mode: "none".into(),
+            driver: "vector".into(),
             tap_name: "uml-tap0".into(),
             guest_ip: "10.7.0.2/24".into(),
             host_ip: "10.7.0.1/24".into(),
@@ -135,7 +153,9 @@ pub struct VolumeSection {
     pub mode: String,
 }
 
-fn default_volume_mode() -> String { "ro".into() }
+fn default_volume_mode() -> String {
+    "ro".into()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields, default)]
@@ -188,15 +208,17 @@ impl Umlfile {
     /// like fields (kernel.path, volume.src/dst). Future: support
     /// `~/...` expansion explicitly via shellexpand.
     pub fn from_path(path: &Path) -> Result<Self> {
-        let s = fs::read_to_string(path)
-            .with_context(|| format!("read Umlfile {}", path.display()))?;
-        let mut u: Umlfile = toml::from_str(&s)
-            .with_context(|| format!("parse Umlfile {}", path.display()))?;
+        let s =
+            fs::read_to_string(path).with_context(|| format!("read Umlfile {}", path.display()))?;
+        let mut u: Umlfile =
+            toml::from_str(&s).with_context(|| format!("parse Umlfile {}", path.display()))?;
 
         if u.schema_version != UMLFILE_SCHEMA_VERSION {
             bail!(
                 "Umlfile {} has schema_version {} (this umlctl handles v{})",
-                path.display(), u.schema_version, UMLFILE_SCHEMA_VERSION,
+                path.display(),
+                u.schema_version,
+                UMLFILE_SCHEMA_VERSION,
             );
         }
 
@@ -212,16 +234,17 @@ impl Umlfile {
             v.src = expand_env(&v.src);
             v.dst = expand_env(&v.dst);
             if v.mode != "ro" && v.mode != "rw" {
-                bail!("volume {} → {}: mode must be 'ro' or 'rw' (got {:?})",
-                      v.src, v.dst, v.mode);
+                bail!(
+                    "volume {} → {}: mode must be 'ro' or 'rw' (got {:?})",
+                    v.src,
+                    v.dst,
+                    v.mode
+                );
             }
         }
-        if !["none", "tap"].contains(&u.network.mode.as_str()) {
-            bail!("network.mode must be 'none' or 'tap' (got {:?})", u.network.mode);
-        }
+        validate_network_section(&u.network)?;
         for p in &u.network.ports {
-            parse_port_forward(p)
-                .with_context(|| format!("parse network.ports[{}]", p))?;
+            parse_port_forward(p).with_context(|| format!("parse network.ports[{}]", p))?;
         }
         if u.debug.gdb_port == 0 {
             u.debug.gdb_port = 5678;
@@ -231,6 +254,36 @@ impl Umlfile {
         }
         Ok(u)
     }
+}
+
+pub fn validate_network_driver(driver: &str) -> Result<()> {
+    if !["vector", "vector2"].contains(&driver) {
+        bail!(
+            "network.driver must be 'vector' or 'vector2' (got {:?})",
+            driver,
+        );
+    }
+    Ok(())
+}
+
+pub fn set_network_driver(uml: &mut Umlfile, driver: &str) -> Result<()> {
+    validate_network_driver(driver)?;
+    if uml.network.mode != "tap" && driver != "vector" {
+        bail!("network.driver is only meaningful when network.mode = 'tap'");
+    }
+    uml.network.driver = driver.to_string();
+    Ok(())
+}
+
+fn validate_network_section(net: &NetworkSection) -> Result<()> {
+    if !["none", "tap"].contains(&net.mode.as_str()) {
+        bail!("network.mode must be 'none' or 'tap' (got {:?})", net.mode);
+    }
+    validate_network_driver(&net.driver)?;
+    if net.mode != "tap" && net.driver != "vector" {
+        bail!("network.driver is only meaningful when network.mode = 'tap'");
+    }
+    Ok(())
 }
 
 /// Expand $VAR / ${VAR} / $HOME from process env. Unknown vars
@@ -255,11 +308,42 @@ pub fn parse_port_forward(s: &str) -> Result<(u16, u16, String)> {
     let (h, g) = mapping
         .split_once(':')
         .ok_or_else(|| anyhow!("port forward must be HOST:GUEST[/proto], got {:?}", s))?;
-    let host: u16 = h.parse()
+    let host: u16 = h
+        .parse()
         .with_context(|| format!("port forward host port {:?}", h))?;
-    let guest: u16 = g.parse()
+    let guest: u16 = g
+        .parse()
         .with_context(|| format!("port forward guest port {:?}", g))?;
     Ok((host, guest, proto))
+}
+
+fn tap_network_plan(net: &NetworkSection) -> NetworkPlan {
+    match net.driver.as_str() {
+        "vector2" => NetworkPlan {
+            driver: "vector2".into(),
+            guest_dev: "vec2.0".into(),
+            tap_name: net.tap_name.clone(),
+            transport: "tap".into(),
+            host_mode: "inproc".into(),
+            queue_count: 1,
+            kernel_arg: format!(
+                "vec2.0:transport=tap,mode=inproc,ifname={tap},depth=128",
+                tap = net.tap_name,
+            ),
+        },
+        _ => NetworkPlan {
+            driver: "vector".into(),
+            guest_dev: "vec0".into(),
+            tap_name: net.tap_name.clone(),
+            transport: "tap".into(),
+            host_mode: "legacy-inproc".into(),
+            queue_count: 1,
+            kernel_arg: format!(
+                "vec0:transport=tap,ifname={tap},depth=128",
+                tap = net.tap_name,
+            ),
+        },
+    }
 }
 
 // -------------------------------------------------------------------
@@ -280,25 +364,26 @@ pub struct Compiled {
     pub setup_steps: Vec<String>,
     /// Host-side teardown steps (the inverses of setup_steps), best-effort.
     pub teardown_steps: Vec<String>,
-    /// Effective log directory (absolute).
-    pub log_dir: PathBuf,
+    /// Effective TAP network plan, when `[network].mode = "tap"`.
+    pub network_plan: Option<NetworkPlan>,
 }
 
 pub fn compile(uml: &Umlfile) -> Result<Compiled> {
     let log_dir = std::env::current_dir()
         .context("getcwd")?
         .join(&uml.debug.log_dir);
-    fs::create_dir_all(&log_dir)
-        .with_context(|| format!("mkdir -p {}", log_dir.display()))?;
+    fs::create_dir_all(&log_dir).with_context(|| format!("mkdir -p {}", log_dir.display()))?;
 
     let mut append = uml.kernel.append.clone();
     append.push(format!("backend=force={}", uml.kernel.backend));
 
     let mut setup_steps = Vec::new();
     let mut teardown_steps = Vec::new();
+    let mut network_plan = None;
 
     if uml.network.mode == "tap" {
         let net = &uml.network;
+        let plan = tap_network_plan(net);
         let masq_iface = if net.masquerade_via == "auto" {
             detect_default_iface().unwrap_or_else(|_| "eth0".into())
         } else {
@@ -309,18 +394,21 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
         let user = std::env::var("USER").unwrap_or_else(|_| "uml".into());
         setup_steps.push(format!(
             "ip tuntap add dev {tap} mode tap user {user}",
-            tap = net.tap_name, user = user,
+            tap = net.tap_name,
+            user = user,
         ));
         setup_steps.push(format!(
             "ip addr add {host_ip} dev {tap}",
-            host_ip = net.host_ip, tap = net.tap_name,
+            host_ip = net.host_ip,
+            tap = net.tap_name,
         ));
         setup_steps.push(format!("ip link set {tap} up", tap = net.tap_name));
         setup_steps.push("sysctl -w net.ipv4.ip_forward=1".into());
         let cidr = guest_cidr(&net.guest_ip)?;
         setup_steps.push(format!(
             "iptables -t nat -A POSTROUTING -s {cidr} -o {iface} -j MASQUERADE",
-            cidr = cidr, iface = masq_iface,
+            cidr = cidr,
+            iface = masq_iface,
         ));
         setup_steps.push(format!(
             "iptables -A FORWARD -i {tap} -j ACCEPT",
@@ -393,23 +481,19 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
         ));
         teardown_steps.push(format!(
             "iptables -t nat -D POSTROUTING -s {cidr} -o {iface} -j MASQUERADE",
-            cidr = cidr, iface = masq_iface,
+            cidr = cidr,
+            iface = masq_iface,
         ));
-        teardown_steps.push(format!(
-            "ip link set {tap} down",
-            tap = net.tap_name,
-        ));
+        teardown_steps.push(format!("ip link set {tap} down", tap = net.tap_name,));
         teardown_steps.push(format!(
             "ip tuntap del dev {tap} mode tap",
             tap = net.tap_name,
         ));
 
-        // vec0 cmdline arg (one big quoted token; the kernel sees it
+        // Vector cmdline arg (one big quoted token; the kernel sees it
         // because UML's __setup parser walks cmdline tokens).
-        append.push(format!(
-            "vec0:transport=tap,ifname={tap},depth=128",
-            tap = net.tap_name,
-        ));
+        append.push(plan.kernel_arg.clone());
+        network_plan = Some(plan);
     }
 
     // Generate init script.
@@ -426,7 +510,7 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
         append,
         setup_steps,
         teardown_steps,
-        log_dir,
+        network_plan,
     })
 }
 
@@ -454,7 +538,9 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("# argv[0]='python3' (no slash), and CPython's getpath cannot\n");
     s.push_str("# resolve sys.executable — breaking subprocess.Popen,\n");
     s.push_str("# multiprocessing, regrtest workers, pytest, etc.\n");
-    s.push_str("export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\"\n");
+    s.push_str(
+        "export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\"\n",
+    );
     s.push_str("export HOME=\"${HOME:-/root}\"\n");
     s.push_str("export TERM=\"${TERM:-linux}\"\n");
     s.push_str("export SHELL=\"${SHELL:-/bin/bash}\"\n");
@@ -502,9 +588,14 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
 
     // Network up (tap-specific config — lo already up above).
     if uml.network.mode == "tap" {
-        s.push_str(&format!("ip addr add {} dev vec0\n", uml.network.guest_ip));
-        s.push_str("ip link set vec0 up\n");
-        s.push_str(&format!("ip route add default via {}\n", uml.network.gateway));
+        let dev = tap_network_plan(&uml.network).guest_dev;
+
+        s.push_str(&format!("ip addr add {} dev {dev}\n", uml.network.guest_ip));
+        s.push_str(&format!("ip link set {dev} up\n"));
+        s.push_str(&format!(
+            "ip route add default via {}\n",
+            uml.network.gateway
+        ));
         s.push_str("# Give the link a moment to come up before phases run.\n");
         s.push_str("sleep 0.3\n");
         s.push_str("\n");
@@ -543,11 +634,16 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
                 ));
             }
             s.push_str(&format!("mkdir -p {} 2>/dev/null\n", shell_quote(&v.dst)));
-            s.push_str(&format!("mount --bind {} {}\n",
-                shell_quote(&v.src), shell_quote(&v.dst)));
+            s.push_str(&format!(
+                "mount --bind {} {}\n",
+                shell_quote(&v.src),
+                shell_quote(&v.dst)
+            ));
             if v.mode == "ro" {
-                s.push_str(&format!("mount -o remount,bind,ro {}\n",
-                    shell_quote(&v.dst)));
+                s.push_str(&format!(
+                    "mount -o remount,bind,ro {}\n",
+                    shell_quote(&v.dst)
+                ));
             }
         }
         s.push_str("\n");
@@ -658,34 +754,47 @@ fn guest_cidr(guest_ip: &str) -> Result<String> {
     let (ip, prefix) = guest_ip
         .split_once('/')
         .ok_or_else(|| anyhow!("guest_ip must be A.B.C.D/N (got {:?})", guest_ip))?;
-    let prefix: u8 = prefix.parse()
+    let prefix: u8 = prefix
+        .parse()
         .with_context(|| format!("guest_ip prefix {:?}", prefix))?;
     if prefix > 32 {
         bail!("guest_ip prefix must be 0..=32 (got {})", prefix);
     }
-    let octets: Vec<u8> = ip.split('.')
+    let octets: Vec<u8> = ip
+        .split('.')
         .map(|o| o.parse::<u8>().context("bad ipv4 octet"))
         .collect::<Result<_>>()?;
     if octets.len() != 4 {
         bail!("guest_ip must be IPv4 (got {:?})", guest_ip);
     }
     let host_bits = 32u32.saturating_sub(prefix as u32);
-    let mask: u32 = if host_bits == 32 { 0 } else { !0u32 << host_bits };
+    let mask: u32 = if host_bits == 32 {
+        0
+    } else {
+        !0u32 << host_bits
+    };
     let v = ((octets[0] as u32) << 24)
         | ((octets[1] as u32) << 16)
         | ((octets[2] as u32) << 8)
         | (octets[3] as u32);
     let net = v & mask;
-    Ok(format!("{}.{}.{}.{}/{}",
-        (net >> 24) & 0xff, (net >> 16) & 0xff,
-        (net >> 8) & 0xff, net & 0xff,
-        prefix))
+    Ok(format!(
+        "{}.{}.{}.{}/{}",
+        (net >> 24) & 0xff,
+        (net >> 16) & 0xff,
+        (net >> 8) & 0xff,
+        net & 0xff,
+        prefix
+    ))
 }
 
 /// Strip the prefix from "10.7.0.2/24" → "10.7.0.2".
 fn guest_ip_addr(guest_ip: &str) -> Result<String> {
-    Ok(guest_ip.split('/').next()
-        .ok_or_else(|| anyhow!("empty guest_ip"))?.to_string())
+    Ok(guest_ip
+        .split('/')
+        .next()
+        .ok_or_else(|| anyhow!("empty guest_ip"))?
+        .to_string())
 }
 
 /// Detect the host's default-route iface (`ip -o route show default`).
@@ -695,7 +804,10 @@ fn detect_default_iface() -> Result<String> {
         .output()
         .context("run `ip -o route show default`")?;
     if !out.status.success() {
-        bail!("`ip route` failed: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "`ip route` failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let s = String::from_utf8_lossy(&out.stdout);
     // Parse "default via 192.168.1.1 dev enp3s0 proto dhcp src ..."
@@ -706,7 +818,10 @@ fn detect_default_iface() -> Result<String> {
             }
         }
     }
-    bail!("could not parse default-route iface from `ip route` output: {:?}", s);
+    bail!(
+        "could not parse default-route iface from `ip route` output: {:?}",
+        s
+    );
 }
 
 /// Run a list of `sh -c` steps via sudo, stopping on first failure.
@@ -749,6 +864,7 @@ path = "/tmp/uml-clean/linux"
         assert_eq!(u.kernel.backend, "seccomp");
         assert_eq!(u.runtime.mem, "512M");
         assert_eq!(u.network.mode, "none");
+        assert_eq!(u.network.driver, "vector");
     }
 
     #[test]
@@ -767,12 +883,18 @@ path = "/x"
 
     #[test]
     fn port_forward_parses() {
-        assert_eq!(parse_port_forward("8765:8765/tcp").unwrap(),
-                   (8765, 8765, "tcp".into()));
-        assert_eq!(parse_port_forward("80:8080").unwrap(),
-                   (80, 8080, "tcp".into()));
-        assert_eq!(parse_port_forward("53:53/udp").unwrap(),
-                   (53, 53, "udp".into()));
+        assert_eq!(
+            parse_port_forward("8765:8765/tcp").unwrap(),
+            (8765, 8765, "tcp".into())
+        );
+        assert_eq!(
+            parse_port_forward("80:8080").unwrap(),
+            (80, 8080, "tcp".into())
+        );
+        assert_eq!(
+            parse_port_forward("53:53/udp").unwrap(),
+            (53, 53, "udp".into())
+        );
         assert!(parse_port_forward("oops").is_err());
         assert!(parse_port_forward("80:8080/sctp").is_err());
     }
@@ -795,7 +917,8 @@ path = "/x"
 
     #[test]
     fn render_init_includes_phases() {
-        let u: Umlfile = toml::from_str(r#"
+        let u: Umlfile = toml::from_str(
+            r#"
 schema_version = 1
 [instance]
 name = "demo"
@@ -806,11 +929,97 @@ mode = "tap"
 [[init.phases]]
 name = "hello"
 cmd = "echo hi"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = render_init_script(&u).unwrap();
         assert!(s.contains("nameserver 8.8.8.8"));
         assert!(s.contains("ip addr add 10.7.0.2/24 dev vec0"));
+        assert!(tap_network_plan(&u.network).kernel_arg.starts_with("vec0:"));
         assert!(s.contains("__umlctl_phase 'hello' 'echo hi'"));
+    }
+
+    #[test]
+    fn vector2_network_driver_renders_vec2_device() {
+        let u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+driver = "vector2"
+tap_name = "soak-tap0"
+"#,
+        )
+        .unwrap();
+
+        let s = render_init_script(&u).unwrap();
+
+        assert!(s.contains("ip addr add 10.7.0.2/24 dev vec2.0"));
+        assert!(s.contains("ip link set vec2.0 up"));
+        let plan = tap_network_plan(&u.network);
+        assert_eq!(plan.driver, "vector2");
+        assert_eq!(plan.guest_dev, "vec2.0");
+        assert_eq!(plan.host_mode, "inproc");
+        assert_eq!(plan.queue_count, 1);
+        assert_eq!(
+            plan.kernel_arg,
+            "vec2.0:transport=tap,mode=inproc,ifname=soak-tap0,depth=128",
+        );
+    }
+
+    #[test]
+    fn set_network_driver_validates_mode() {
+        let mut u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+"#,
+        )
+        .unwrap();
+
+        set_network_driver(&mut u, "vector2").unwrap();
+        assert_eq!(u.network.driver, "vector2");
+
+        u.network.mode = "none".into();
+        assert!(set_network_driver(&mut u, "vector2").is_err());
+        assert!(set_network_driver(&mut u, "bogus").is_err());
+    }
+
+    #[test]
+    fn network_driver_rejects_unknown_value() {
+        let r: Result<Umlfile, _> = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+driver = "bogus"
+"#,
+        );
+        assert!(r.is_ok());
+
+        let mut u = r.unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
+        assert!(Umlfile::from_path(&path).is_err());
+
+        u.network.driver = "vector2".into();
+        u.network.mode = "none".into();
+        std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
+        assert!(Umlfile::from_path(&path).is_err());
     }
 
     /// Init script ALWAYS exports default env even with no [env] section.
@@ -819,7 +1028,8 @@ cmd = "echo hi"
     /// stops working.
     #[test]
     fn render_init_always_exports_default_env() {
-        let u: Umlfile = toml::from_str(r#"
+        let u: Umlfile = toml::from_str(
+            r#"
 schema_version = 1
 [instance]
 name = "minimal"
@@ -827,7 +1037,9 @@ name = "minimal"
 path = "/x"
 [network]
 mode = "none"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = render_init_script(&u).unwrap();
         // PATH default — required for CPython sys.executable resolution.
         assert!(s.contains("export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\""),
@@ -843,7 +1055,8 @@ mode = "none"
     /// access, /dev/shm POSIX shm, etc. depend on these.
     #[test]
     fn render_init_always_mounts_pseudo_fs() {
-        let u: Umlfile = toml::from_str(r#"
+        let u: Umlfile = toml::from_str(
+            r#"
 schema_version = 1
 [instance]
 name = "minimal"
@@ -851,15 +1064,21 @@ name = "minimal"
 path = "/x"
 [network]
 mode = "none"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = render_init_script(&u).unwrap();
-        assert!(s.contains("mount -t proc"),       "missing /proc mount");
-        assert!(s.contains("mount -t sysfs"),      "missing /sys mount");
-        assert!(s.contains("mount -t devpts"),     "missing /dev/pts mount");
-        assert!(s.contains("mount -t tmpfs tmpfs  /dev/shm"),
-                "missing /dev/shm mount");
-        assert!(s.contains("mount -t tmpfs tmpfs  /tmp"),
-                "missing /tmp mount");
+        assert!(s.contains("mount -t proc"), "missing /proc mount");
+        assert!(s.contains("mount -t sysfs"), "missing /sys mount");
+        assert!(s.contains("mount -t devpts"), "missing /dev/pts mount");
+        assert!(
+            s.contains("mount -t tmpfs tmpfs  /dev/shm"),
+            "missing /dev/shm mount"
+        );
+        assert!(
+            s.contains("mount -t tmpfs tmpfs  /tmp"),
+            "missing /tmp mount"
+        );
     }
 
     /// Loopback brought up unconditionally regardless of network mode.
@@ -868,7 +1087,8 @@ mode = "none"
     #[test]
     fn render_init_always_brings_lo_up() {
         for mode in ["none", "tap"] {
-            let toml_str = format!(r#"
+            let toml_str = format!(
+                r#"
 schema_version = 1
 [instance]
 name = "demo"
@@ -876,11 +1096,16 @@ name = "demo"
 path = "/x"
 [network]
 mode = "{}"
-"#, mode);
+"#,
+                mode
+            );
             let u: Umlfile = toml::from_str(&toml_str).unwrap();
             let s = render_init_script(&u).unwrap();
-            assert!(s.contains("ip link set lo up"),
-                    "loopback not brought up for mode={}", mode);
+            assert!(
+                s.contains("ip link set lo up"),
+                "loopback not brought up for mode={}",
+                mode
+            );
         }
     }
 
@@ -888,7 +1113,8 @@ mode = "{}"
     /// defaults must come BEFORE user env so user values win.
     #[test]
     fn render_init_user_env_overrides_defaults() {
-        let u: Umlfile = toml::from_str(r#"
+        let u: Umlfile = toml::from_str(
+            r#"
 schema_version = 1
 [instance]
 name = "demo"
@@ -899,14 +1125,22 @@ mode = "none"
 [env]
 PATH = "/custom/bin"
 HOME = "/customhome"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let s = render_init_script(&u).unwrap();
         // The default export is unconditional and uses ${PATH:-...} so
         // it doesn't override an already-set PATH. The [env] section
         // exports come later and use plain `export X=...` so they win.
-        let default_pos = s.find("export PATH=\"${PATH:-").expect("default PATH missing");
-        let user_pos = s.find("export PATH='/custom/bin'").expect("user PATH missing");
-        assert!(default_pos < user_pos,
-                "default PATH must come before user [env] PATH");
+        let default_pos = s
+            .find("export PATH=\"${PATH:-")
+            .expect("default PATH missing");
+        let user_pos = s
+            .find("export PATH='/custom/bin'")
+            .expect("user PATH missing");
+        assert!(
+            default_pos < user_pos,
+            "default PATH must come before user [env] PATH"
+        );
     }
 }

@@ -144,8 +144,7 @@ pub fn start(
     let pid = child.id();
 
     write_pidfile(&pidfile, pid).map_err(StartError::Other)?;
-    write_run_id_file(&paths.run_id_file_path(&args.name), &run_id)
-        .map_err(StartError::Other)?;
+    write_run_id_file(&paths.run_id_file_path(&args.name), &run_id).map_err(StartError::Other)?;
     run::create_run_bundle(
         paths,
         &run_id,
@@ -229,7 +228,9 @@ pub fn start(
             nix::unistd::Pid::from_raw(pid as i32),
             nix::sys::signal::Signal::SIGKILL,
         );
-        run::finalize_run(paths, &run_id, run::boottime_ns(), "READY_TIMEOUT", None);
+        let status = child.wait().ok();
+        let code = status.and_then(|s| s.code());
+        run::finalize_run(paths, &run_id, run::boottime_ns(), "READY_TIMEOUT", code);
         let _ = std::fs::remove_file(&pidfile);
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
         return Err(StartError::ReadyTimeout);
@@ -384,8 +385,7 @@ fn write_pidfile(path: &Path, pid: u32) -> Result<()> {
         Some(st) => format!("{pid} {st}\n"),
         None => format!("{pid}\n"),
     };
-    std::fs::write(path, contents)
-        .with_context(|| format!("write pidfile {}", path.display()))?;
+    std::fs::write(path, contents).with_context(|| format!("write pidfile {}", path.display()))?;
     Ok(())
 }
 
@@ -464,9 +464,11 @@ pub(super) fn identity_alive(identity: PidIdentity) -> bool {
             use std::sync::atomic::{AtomicBool, Ordering};
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!("umlctl: warning: pidfile predates A5 birth-marker; \
+                eprintln!(
+                    "umlctl: warning: pidfile predates A5 birth-marker; \
                           pid-reuse race possible on this instance. \
-                          Restart the instance to upgrade.");
+                          Restart the instance to upgrade."
+                );
             }
             true
         }

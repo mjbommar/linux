@@ -57,7 +57,11 @@ surface:
 - write-IRQ wakeup for TAP TX backpressure;
 - ethtool stats, ring reporting, stopped-only ring resizing, and
   coalesce policy reporting;
-- trusted TAP ping smoke with repeated up/ping/down loops.
+- trusted TAP ping smoke with repeated up/ping/down loops;
+- `umlctl` and soak-daemon selection for experimental v2 TAP through
+  `network.driver = "vector2"`;
+- live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
+- TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
 They still do not provide replacement-ready networking.
@@ -68,7 +72,8 @@ Missing runtime pieces:
 - no launcher-manifest fd path for sandbox mode;
 - no real timer-driven coalescing;
 - no feature negotiation;
-- no Tier 3 workload or repeated long soak loop;
+- no 30/30 Tier 3 workload proof on both seccomp and kvm-v2;
+- no repeated long soak loop;
 - no multiqueue runtime path;
 - no compatibility switch from old `vecN:` to v2.
 
@@ -454,6 +459,34 @@ Exit gate:
 - v2 can be used as an experimental Tier 3 path, but legacy is still
   the production `vecN:` path.
 
+R7 implementation note:
+
+- `23-uml-vector-driver-v2-r7-umlctl-tier3-integration.md` records
+  the first operator-facing integration checkpoint.
+- Implemented:
+  - `[network] driver = "vector2"` in Umlfiles;
+  - `umlctl up --network-driver vector2`;
+  - `umlctl up --dry-run` network-plan output;
+  - `umlctl gate loop --network-driver vector2`;
+  - `umlctl gate loop --sweep network.driver=vector,vector2`;
+  - soak aliases `tier3-django-v2` and `tier3-fastapi-v2`;
+  - v2 metadata in soak scoreboard rows;
+  - `gate loop` cleanup through `down --force --rm`;
+  - `down --force` host teardown after not-running or missing runtime
+    state;
+  - ready-timeout child reaping in `supervise::start()`.
+- Evidence collected:
+  - `cargo test` for `uml-launcher`;
+  - `kunit.py parse` over `um_vector2_*`: 64/64 passed;
+  - seccomp v2 Tier 3 stdlib smoke: 1/1 pass through
+    `--sweep network.driver=vector2`;
+  - seccomp repeated cleanup smoke: 2/2 pass, TAP absent after loop;
+  - kvm-v2 Tier 3 smoke still fails readiness, but TAP is absent after
+    failure cleanup.
+- Therefore R7 is partially satisfied.  Selection, observability, and
+  teardown safety landed; the full 30/30 seccomp+kvm-v2 and long-soak
+  eligibility gates remain open.
+
 ### V2-R8 - Multiqueue
 
 Goal: scale without changing ownership semantics.
@@ -644,12 +677,13 @@ The next concrete work should be:
    coalesce policy reporting, and TAP write-side wakeups before trying
    Tier 3 workloads.
 
-Those first six series have now taken v2 from parked scaffolding to an
+Those first seven series have now taken v2 from parked scaffolding to an
 experimental inspectable netdev with trusted fd open/close, a working
 single-queue trusted TAP packet path, ethtool observability, and TAP
-write-side wakeups.  The next work is Tier 3 workload eligibility,
-host-to-guest TCP validation, sandbox helper plumbing, and then
-multiqueue.
+write-side wakeups, plus an operator-facing `umlctl` selection path for
+Tier 3 experiments.  The next work is KVM-v2 Tier 3 readiness,
+host-to-guest TCP validation, long-soak proof, sandbox helper plumbing,
+and then multiqueue.
 
 ## Workstream Exit Summary
 
