@@ -1443,3 +1443,67 @@ work."  It is:
 That is the right long-term shape because it lets us use the existing
 foundation work without converting a test scaffold into production code
 by accident.
+
+## Audit follow-up (2026-05-17)
+
+`46-uml-vector-driver-v2-code-audit-2026-05-17.md` flagged 5 bugs +
+6 risks + 10 recommendations.  Closed in-tree the same day:
+
+  - **B1 HIGH** — multi-queue FD open-unwind UAF
+    (commit `66c7d5a7b8e7`, new
+    `vector2_fd_multiqueue_partial_open_unwind_test`).
+  - **R1 HIGH-if-exploitable** — `vdev->netdev` published after
+    `register_netdevice` (commit `c9bc5ab8db0b`, TAP defense-in-depth
+    NULL guard).
+  - **B2 MEDIUM** — TAP RX silently swallowed -EPROTO (commit
+    `dc71024eb517`, new
+    `vector2_tap_rx_batch_short_frame_returns_eproto_test`).
+  - **R2 MEDIUM** — runtime MTU change not reflected in backend
+    frame_len (commit `3577e690d6fb`, `dev->max_mtu` capped at
+    parse-time MTU).
+  - **P1.2 MEDIUM** — `gro` / `gso` / `csum` parser flags weren't
+    wired into `dev->features` (commit `539f499a6389`).
+  - **P2 batch** (commit `a36ea83d1241`) — B5 (`ndo_stop` idempotent),
+    B3 (dead `VDE_MODE` enum), B4 (TAP channel-attach unwind),
+    P2.4 (`ndo_tx_timeout` parity), P2.5 (`ndo_set_rx_mode` stub),
+    P2.6 (`ndo_poll_controller` for netconsole).
+  - **P4.2** — parser/dispatch coherence (commit `6f2236ca9ed7`).
+    Parser still accepts the seven non-implemented transports
+    (for cookie/session/key KUnit coverage); dispatch logs a
+    specific error naming the transport.
+  - **R3 + R4 + P3.3** — documented in
+    `47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md`
+    (commit `d0de2a424f9b`): `start_xmit` unlocked lifecycle check is
+    safe by netdev framework invariant; `napi_schedule` under
+    `vdev->lock` is safe (softirq context, no AB-BA); backend-dead
+    is a terminal state, recovery via `ip link set vec2.X down && up`.
+
+Pending audit follow-up:
+
+  - **P3.1 / P3.2** — KUnit gaps in NAPI poll path + ethtool-stats
+    contention (in-flight under sub-agent at the time of this
+    update).
+  - **P4.1** — legacy `vecN:` cmdline aliases for migration.
+  - **P4.3 / P4.4 / P4.5** — perf parity acceptance, full
+    7200-second long-soak proof, broader KCSAN matrix.
+  - **P5.1** — wire `umlctl gate loop --audit-vector-sandbox`
+    into CI preflight.
+
+KUnit verdict at audit-follow-up landing (`um-vector-r1-kunit`
+build, full vector2 suite):
+
+```
+um_vector2_config       12/12 PASS
+um_vector2_queue         8/8  PASS
+um_vector2_transport     8/8  PASS
+um_vector2_fake_host     8/8  PASS
+um_vector2_model         7/7  PASS
+um_vector2_cmdline       5/5  PASS
+um_vector2_netdev        6/6  PASS
+um_vector2_ethtool       4/4  PASS
+um_vector2_host_fd      13/13 PASS  (+1 new: partial_open_unwind)
+um_vector2_host_tap      7/7  PASS  (+1 new: short_frame_returns_eproto)
+```
+
+Total: 78/78 PASS, +2 regression-coverage cases vs the pre-audit
+baseline (76/76).
