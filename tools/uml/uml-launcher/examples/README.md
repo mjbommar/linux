@@ -49,6 +49,7 @@ CLI flags > TOML > env vars > defaults.
 | [`vector2-fd-multiqueue.toml`](vector2-fd-multiqueue.toml) | Vector2 TAP smoke using launcher-owned inherited fd multiqueue |
 | [`vector2-auto-queues.toml`](vector2-auto-queues.toml) | Vector2 TAP smoke using `queues = "auto"` to match runtime.ncpus |
 | [`vector2-fastapi-smoke.toml`](vector2-fastapi-smoke.toml) | Vector2 FastAPI/uvicorn smoke using fd handoff and automatic queue sizing |
+| [`vector2-lifecycle-stress.toml`](vector2-lifecycle-stress.toml) | Vector2 live `ip link up/down` lifecycle stress with ethtool counter checks |
 | [`cpython-test.toml`](cpython-test.toml) | CPython standard test suite — canonical "is the env real?" check |
 
 The Umlfile configs are not magic either: they're TOML that drives
@@ -78,6 +79,14 @@ UML_KERNEL=/path/to/uml/linux \
 UML_KERNEL=/path/to/uml/linux \
   umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fastapi-smoke.toml \
     -W 1 -M 1 --timeout 240 --pass-marker VECTOR2_FASTAPI_OK
+UML_KERNEL=/path/to/uml/linux \
+  umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-lifecycle-stress.toml \
+    -W 1 -M 1 --timeout 1800 --pass-marker VECTOR2_LIFECYCLE_STRESS_OK
+UML_KERNEL=/path/to/uml/linux \
+  umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-lifecycle-stress.toml \
+    -W 1 -M 1 --timeout 180 \
+    --sweep UML_VECTOR2_LIFECYCLE_CYCLES=25 \
+    --pass-marker VECTOR2_LIFECYCLE_STRESS_OK
 ```
 
 For a quick legacy-vs-vector2 guest-to-host TCP baseline through the

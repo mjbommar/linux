@@ -107,6 +107,10 @@ shape, and inspectable ethtool surfaces:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - `umlctl gate loop` cleanup audit for TAP-backed Umlfiles, so a
   leaked host TAP turns the iteration into a failure;
+- live vector2 lifecycle stress harness through `umlctl gate loop`:
+  the guest repeatedly drives `vec2.0` through `ip link down/up`,
+  verifies `open_attempts` and `closes` ethtool counter deltas, and a
+  25-cycle smoke passed with clean TAP/process teardown;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
@@ -160,7 +164,8 @@ Missing runtime pieces:
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
 - no live 10,000-cycle `ip link up/down` failure-injection proof; the
-  fd path has bounded KUnit stress, but not runtime repetition evidence;
+  fd path has bounded KUnit stress and a 25-cycle runtime smoke, but
+  not full runtime repetition evidence;
 - no full multiqueue validation story: heavier KCSAN traffic, long SMP
   traffic, and broader fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
@@ -810,6 +815,29 @@ Fd failure-stress follow-up:
 - Therefore the unit-level fd failure-injection story is stronger, but
   the replacement gate still needs a live 10,000-cycle `ip link up/down`
   failure-injection run with leak checks.
+
+Lifecycle stress gate follow-up:
+
+- `39-uml-vector-driver-v2-lifecycle-stress-gate.md` records the first
+  reusable runtime lifecycle harness.
+- Implemented:
+  - `tools/uml/uml-launcher/examples/vector2-lifecycle-stress.toml`;
+  - default 10,000-cycle live `ip link down/up` loop over vector2 fd
+    handoff;
+  - `umlctl gate loop --sweep UML_VECTOR2_LIFECYCLE_CYCLES=N` support
+    through the existing env sweep path for short smoke runs;
+  - ethtool `open_attempts` and `closes` delta checks before printing
+    `VECTOR2_LIFECYCLE_STRESS_OK`.
+- Evidence collected:
+  - TOML syntax parse passed;
+  - `umlctl up --dry-run` rendered vector2 fd handoff over fd 200;
+  - 25-cycle live smoke passed:
+    `PASS=1/1 FAIL=0 TIMEOUT=0`,
+    `open_delta=25 close_delta=25`,
+    `VECTOR2_LIFECYCLE_STRESS_OK`, no lingering `v2life0`, and no UML
+    process leak.
+- Therefore the lifecycle gate now has a reusable runtime harness and
+  smoke evidence.  The full 10,000-cycle run remains open.
 
 ### V2-R9 - Transport Parity
 
