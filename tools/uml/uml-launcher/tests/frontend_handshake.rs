@@ -173,9 +173,7 @@ fn frontend_completes_feature_negotiation() {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!(
-                        "backend subprocess did not exit within 5s of frontend disconnect"
-                    );
+                    panic!("backend subprocess did not exit within 5s of frontend disconnect");
                 }
                 thread::sleep(Duration::from_millis(20));
             }

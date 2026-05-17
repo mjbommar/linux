@@ -57,14 +57,13 @@ impl Run {
     pub fn write_to(&self, dir: &Path) -> Result<()> {
         let s = serde_json::to_string_pretty(self).context("serialize run.json")?;
         let path = dir.join("run.json");
-        std::fs::write(&path, s)
-            .with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))?;
         Ok(())
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        let s = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let s =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let r: Run = serde_json::from_str(&s)
             .with_context(|| format!("parse run.json {}", path.display()))?;
         Ok(r)
@@ -76,12 +75,17 @@ impl Run {
 /// unlike CLOCK_MONOTONIC it advances while the system is
 /// suspended, which matters for long-running UML instances.
 pub fn boottime_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
     if rc != 0 {
         // Fallback: REALTIME. Shouldn't happen on Linux, but a
         // bad read is better than a panic at startup.
-        let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let d = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         return d.as_nanos() as u64;
     }
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
@@ -160,8 +164,7 @@ pub fn create_run_bundle(
     pid: u32,
 ) -> Result<()> {
     let dir = paths.run_dir(run_id);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create run dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create run dir {}", dir.display()))?;
     let r = Run {
         schema_version: 1,
         run_id: run_id.to_string(),
@@ -214,7 +217,9 @@ pub fn latest_run_for(paths: &Paths, instance: &str) -> Option<String> {
             continue;
         };
         let run_json = entry.path().join("run.json");
-        let Ok(r) = Run::read(&run_json) else { continue };
+        let Ok(r) = Run::read(&run_json) else {
+            continue;
+        };
         if r.instance != instance {
             continue;
         }

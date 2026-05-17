@@ -29,9 +29,7 @@ fn refpolicy_devel_available() -> bool {
 #[test]
 fn module_compiles_cleanly() {
     if !refpolicy_devel_available() {
-        eprintln!(
-            "selinux-policy-dev not installed; skipping SELinux module compile test"
-        );
+        eprintln!("selinux-policy-dev not installed; skipping SELinux module compile test");
         return;
     }
 
@@ -47,11 +45,7 @@ fn module_compiles_cleanly() {
     // then clean up the generated files.
     let output = Command::new("make")
         .current_dir(&dir)
-        .args([
-            "-f",
-            "/usr/share/selinux/devel/Makefile",
-            "uml_launcher.pp",
-        ])
+        .args(["-f", "/usr/share/selinux/devel/Makefile", "uml_launcher.pp"])
         .output()
         .expect("run make");
 
@@ -64,7 +58,11 @@ fn module_compiles_cleanly() {
     );
 
     let pp = dir.join("uml_launcher.pp");
-    assert!(pp.exists(), "uml_launcher.pp not produced at {}", pp.display());
+    assert!(
+        pp.exists(),
+        "uml_launcher.pp not produced at {}",
+        pp.display()
+    );
     let size = std::fs::metadata(&pp).map(|m| m.len()).unwrap_or(0);
     assert!(
         size > 1024,
@@ -91,27 +89,18 @@ fn policy_declares_expected_types() {
     let te = std::fs::read_to_string(dir.join("uml_launcher.te"))
         .unwrap_or_else(|e| panic!("read uml_launcher.te: {e}"));
     for needle in ["type uml_launcher_t", "type uml_launcher_exec_t"] {
-        assert!(
-            te.contains(needle),
-            ".te should contain '{needle}'"
-        );
+        assert!(te.contains(needle), ".te should contain '{needle}'");
     }
 
     let fc = std::fs::read_to_string(dir.join("uml_launcher.fc"))
         .unwrap_or_else(|e| panic!("read uml_launcher.fc: {e}"));
     for path in ["/usr/bin/uml-launcher", "/usr/local/bin/uml-launcher"] {
-        assert!(
-            fc.contains(path),
-            ".fc should label {path}"
-        );
+        assert!(fc.contains(path), ".fc should label {path}");
     }
 
     let interface = std::fs::read_to_string(dir.join("uml_launcher.if"))
         .unwrap_or_else(|e| panic!("read uml_launcher.if: {e}"));
     for iface in ["uml_launcher_domtrans", "uml_launcher_run"] {
-        assert!(
-            interface.contains(iface),
-            ".if should expose {iface}"
-        );
+        assert!(interface.contains(iface), ".if should expose {iface}");
     }
 }

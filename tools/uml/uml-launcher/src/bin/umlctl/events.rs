@@ -93,8 +93,7 @@ pub fn emit(paths: &Paths, run_id: &str, event: Event<'_>) -> Result<()> {
     }
 
     let dir = paths.run_dir(run_id);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create run dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create run dir {}", dir.display()))?;
 
     let header = Header {
         timestamp: manifest::now_rfc3339(),
@@ -110,8 +109,7 @@ pub fn emit(paths: &Paths, run_id: &str, event: Event<'_>) -> Result<()> {
     // Serialize header + extras into a single flat JSON object.
     let mut header_value = serde_json::to_value(&header).context("serialize event header")?;
     if let Some(extra) = event.extra {
-        if let (Some(base_obj), Some(extra_obj)) =
-            (header_value.as_object_mut(), extra.as_object())
+        if let (Some(base_obj), Some(extra_obj)) = (header_value.as_object_mut(), extra.as_object())
         {
             for (k, v) in extra_obj {
                 base_obj.insert(k.clone(), v.clone());
@@ -566,9 +564,10 @@ fn human_bytes(n: u64) -> String {
 
 pub(super) fn resolve_name_or_run_id(paths: &Paths, raw: &str) -> String {
     let is_ulid = raw.len() == 26
-        && raw
-            .chars()
-            .all(|c| c.is_ascii_digit() || (c.is_ascii_uppercase() && c != 'I' && c != 'L' && c != 'O' && c != 'U'));
+        && raw.chars().all(|c| {
+            c.is_ascii_digit()
+                || (c.is_ascii_uppercase() && c != 'I' && c != 'L' && c != 'O' && c != 'U')
+        });
     if is_ulid {
         return raw.to_string();
     }

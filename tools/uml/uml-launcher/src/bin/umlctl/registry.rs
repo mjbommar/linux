@@ -81,7 +81,11 @@ pub fn list(paths: &Paths, args: &PsArgs) -> Result<Vec<Row>> {
         let row = Row {
             name: m.instance.name.clone(),
             pid: if alive { pid } else { None },
-            backend: if alive { Some(m.kernel.backend.clone()) } else { None },
+            backend: if alive {
+                Some(m.kernel.backend.clone())
+            } else {
+                None
+            },
             profile: m.kernel.profile.clone(),
             mem: m.runtime.mem.clone(),
             uptime_secs,
@@ -163,10 +167,7 @@ pub fn print_table(rows: &[Row], args: &PsArgs) -> Result<()> {
     }
 
     for r in rows {
-        let pid_s = r
-            .pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".into());
+        let pid_s = r.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         let backend_s = r.backend.clone().unwrap_or_else(|| "-".into());
         let uptime_s = r
             .uptime_secs

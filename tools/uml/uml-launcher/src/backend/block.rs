@@ -50,7 +50,9 @@ use virtio_bindings::virtio_blk::{
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap, Le32, Le64};
 use vmm_sys_util::epoll::EventSet;
-use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
+use vmm_sys_util::event::{
+    new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
+};
 
 use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendBlockArgs;
@@ -100,18 +102,18 @@ unsafe impl ByteValued for VirtioBlkReqHeader {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct VirtioBlkConfig {
-    capacity: Le64,           // in 512-byte sectors
-    size_max: Le32,           // VIRTIO_BLK_F_SIZE_MAX
-    seg_max: Le32,            // VIRTIO_BLK_F_SEG_MAX
+    capacity: Le64,              // in 512-byte sectors
+    size_max: Le32,              // VIRTIO_BLK_F_SIZE_MAX
+    seg_max: Le32,               // VIRTIO_BLK_F_SEG_MAX
     geometry_cylinders: [u8; 2], // unused (no GEOMETRY feature)
     geometry_heads: u8,
     geometry_sectors: u8,
-    blk_size: Le32,           // VIRTIO_BLK_F_BLK_SIZE
-    // Trailing fields (topology, writeback, num_queues, discard,
-    // write_zeroes) are all behind feature bits we don't set;
-    // leave them out so the config blob is exactly the size of
-    // the features we DO advertise. The spec allows a shorter
-    // blob when trailing features are unset.
+    blk_size: Le32, // VIRTIO_BLK_F_BLK_SIZE
+                    // Trailing fields (topology, writeback, num_queues, discard,
+                    // write_zeroes) are all behind feature bits we don't set;
+                    // leave them out so the config blob is exactly the size of
+                    // the features we DO advertise. The spec allows a shorter
+                    // blob when trailing features are unset.
 }
 // SAFETY: #[repr(C)] + all fields are POD. Layout matches
 // struct virtio_blk_config truncated at blk_size.
@@ -240,7 +242,10 @@ impl BlockBackend {
     }
 
     fn capacity_sectors(&self) -> u64 {
-        self.backing.as_ref().map(|b| b.capacity_sectors).unwrap_or(0)
+        self.backing
+            .as_ref()
+            .map(|b| b.capacity_sectors)
+            .unwrap_or(0)
     }
 
     fn config(&self) -> VirtioBlkConfig {
@@ -384,15 +389,13 @@ impl BlockBackend {
                     }
                 }
             }
-            VIRTIO_BLK_T_GET_ID => {
-                match writer.write_all(&backing.device_id) {
-                    Ok(()) => (VIRTIO_BLK_S_OK as u8, VIRTIO_BLK_ID_BYTES as u32),
-                    Err(e) => {
-                        log::warn!("block: GET_ID write failed: {e}");
-                        (VIRTIO_BLK_S_IOERR as u8, 0)
-                    }
+            VIRTIO_BLK_T_GET_ID => match writer.write_all(&backing.device_id) {
+                Ok(()) => (VIRTIO_BLK_S_OK as u8, VIRTIO_BLK_ID_BYTES as u32),
+                Err(e) => {
+                    log::warn!("block: GET_ID write failed: {e}");
+                    (VIRTIO_BLK_S_IOERR as u8, 0)
                 }
-            }
+            },
             other => {
                 log::debug!("block: unsupported request type {other}");
                 (VIRTIO_BLK_S_UNSUPP as u8, 0)
@@ -529,10 +532,7 @@ impl VhostUserBackendMut for BlockBackend {
         Ok(())
     }
 
-    fn exit_event(
-        &self,
-        _thread_index: usize,
-    ) -> Option<(EventConsumer, EventNotifier)> {
+    fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
         let (c, n) = &self.exit_event;
         Some((
             c.try_clone().expect("clone exit consumer"),
@@ -560,8 +560,7 @@ pub fn run(args: BackendBlockArgs) -> Result<i32> {
     // doesn't allow `open` / `openat` in the event-loop
     // baseline).
     let backend = Arc::new(RwLock::new(
-        BlockBackend::new(args.image, args.read_only)
-            .context("constructing block backend")?,
+        BlockBackend::new(args.image, args.read_only).context("constructing block backend")?,
     ));
 
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
@@ -832,8 +831,8 @@ mod tests {
         // Construct with an image path that exists.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.as_file().set_len(4096).unwrap();
-        let b = BlockBackend::new(Some(tmp.path().to_path_buf()), true)
-            .expect("construct with image");
+        let b =
+            BlockBackend::new(Some(tmp.path().to_path_buf()), true).expect("construct with image");
         assert!(b.backing.is_some());
         assert!(b.read_only);
         assert_eq!(b.capacity_sectors(), 8);

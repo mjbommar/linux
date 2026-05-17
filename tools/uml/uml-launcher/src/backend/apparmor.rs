@@ -86,9 +86,8 @@ fn load() -> &'static Option<AppArmorLib> {
             let cname = CString::new(name).expect("static str to CString");
             // SAFETY: dlopen with a NUL-terminated name and
             // RTLD_LAZY | RTLD_LOCAL. Returns NULL on failure.
-            let handle = unsafe {
-                libc::dlopen(cname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL)
-            };
+            let handle =
+                unsafe { libc::dlopen(cname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
             if handle.is_null() {
                 continue;
             }
@@ -97,18 +96,8 @@ fn load() -> &'static Option<AppArmorLib> {
             // if the symbol is absent, in which case we treat
             // the whole library as unusable (can't be
             // libapparmor without both symbols).
-            let is_enabled = unsafe {
-                libc::dlsym(
-                    handle,
-                    c"aa_is_enabled".as_ptr(),
-                )
-            };
-            let change_profile = unsafe {
-                libc::dlsym(
-                    handle,
-                    c"aa_change_profile".as_ptr(),
-                )
-            };
+            let is_enabled = unsafe { libc::dlsym(handle, c"aa_is_enabled".as_ptr()) };
+            let change_profile = unsafe { libc::dlsym(handle, c"aa_change_profile".as_ptr()) };
             if is_enabled.is_null() || change_profile.is_null() {
                 // SAFETY: handle was non-null from dlopen.
                 unsafe { libc::dlclose(handle) };
@@ -122,10 +111,9 @@ fn load() -> &'static Option<AppArmorLib> {
             return Some(AppArmorLib {
                 _handle: handle,
                 is_enabled: unsafe {
-                    std::mem::transmute::<
-                        *mut libc::c_void,
-                        unsafe extern "C" fn() -> c_int,
-                    >(is_enabled)
+                    std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn() -> c_int>(
+                        is_enabled,
+                    )
                 },
                 change_profile: unsafe {
                     std::mem::transmute::<
@@ -168,9 +156,8 @@ pub fn change_profile(profile: &str) -> io::Result<ChangeResult> {
     // of whether AppArmor is available on this host. Moving
     // this below the load()-is-Some check would hide input
     // errors on dev boxes without the LSM.
-    let cprofile = CString::new(profile).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidInput, e)
-    })?;
+    let cprofile =
+        CString::new(profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let lib = match load() {
         Some(l) => l,
         None => return Ok(ChangeResult::Skipped),

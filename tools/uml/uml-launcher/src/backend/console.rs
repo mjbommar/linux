@@ -33,20 +33,20 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
+use std::os::fd::AsRawFd;
 use vhost::vhost_user::message::{VhostUserProtocolFeatures, VhostUserVirtioFeatures};
 use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT};
-use virtio_bindings::bindings::virtio_config::{
-    VIRTIO_F_NOTIFY_ON_EMPTY, VIRTIO_F_VERSION_1,
-};
+use virtio_bindings::bindings::virtio_config::{VIRTIO_F_NOTIFY_ON_EMPTY, VIRTIO_F_VERSION_1};
 use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
-use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
+use vmm_sys_util::event::{
+    new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
+};
 use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
-use std::os::fd::AsRawFd;
 
 use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendConsoleArgs;
@@ -254,9 +254,7 @@ impl ConsoleBackend {
             let queue = guard.get_queue_mut();
             queue
                 .iter(atomic_mem.memory())
-                .map_err(|e| {
-                    std::io::Error::other(format!("iter RX queue: {e:?}"))
-                })?
+                .map_err(|e| std::io::Error::other(format!("iter RX queue: {e:?}")))?
                 .collect::<Vec<_>>()
         };
 
@@ -275,9 +273,9 @@ impl ConsoleBackend {
 
             let cap = writer.available_bytes();
             if cap == 0 {
-                vring.add_used(head, 0).map_err(|e| {
-                    std::io::Error::other(format!("add_used (empty): {e:?}"))
-                })?;
+                vring
+                    .add_used(head, 0)
+                    .map_err(|e| std::io::Error::other(format!("add_used (empty): {e:?}")))?;
                 any_used = true;
                 continue;
             }
@@ -367,9 +365,7 @@ impl ConsoleBackend {
             let queue = guard.get_queue_mut();
             queue
                 .iter(atomic_mem.memory())
-                .map_err(|e| {
-                    std::io::Error::other(format!("iter TX queue: {e:?}"))
-                })?
+                .map_err(|e| std::io::Error::other(format!("iter TX queue: {e:?}")))?
                 .collect::<Vec<_>>()
         };
 
@@ -390,9 +386,9 @@ impl ConsoleBackend {
             if available == 0 {
                 // Zero-length chain — mark used for the guest's
                 // bookkeeping and move on.
-                vring.add_used(head, 0).map_err(|e| {
-                    std::io::Error::other(format!("add_used (empty): {e:?}"))
-                })?;
+                vring
+                    .add_used(head, 0)
+                    .map_err(|e| std::io::Error::other(format!("add_used (empty): {e:?}")))?;
                 any_used = true;
                 continue;
             }
@@ -406,9 +402,9 @@ impl ConsoleBackend {
             let mut remaining = available;
             while remaining > 0 {
                 let take = remaining.min(buf.len());
-                reader.read_exact(&mut buf[..take]).map_err(|e| {
-                    std::io::Error::other(format!("read TX bytes: {e:?}"))
-                })?;
+                reader
+                    .read_exact(&mut buf[..take])
+                    .map_err(|e| std::io::Error::other(format!("read TX bytes: {e:?}")))?;
                 self.sink
                     .lock()
                     .map_err(|_| std::io::Error::other("sink mutex poisoned"))?
@@ -560,10 +556,7 @@ impl VhostUserBackendMut for ConsoleBackend {
     /// the default `None` leaves the worker thread blocked in
     /// `epoll_wait` forever on frontend disconnect, which in
     /// turn hangs the subprocess at shutdown.
-    fn exit_event(
-        &self,
-        _thread_index: usize,
-    ) -> Option<(EventConsumer, EventNotifier)> {
+    fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
         let (c, n) = &self.exit_event;
         Some((
             c.try_clone().expect("clone exit consumer"),
@@ -580,11 +573,7 @@ impl VhostUserBackendMut for ConsoleBackend {
 ///
 /// Generic over `Read` so tests can feed a pipe or `Cursor`
 /// instead of stdin. Production path wraps `std::io::stdin()`.
-fn run_reader_loop<R: Read>(
-    mut source: R,
-    fifo: Arc<Mutex<VecDeque<u8>>>,
-    wake: Arc<EventFd>,
-) {
+fn run_reader_loop<R: Read>(mut source: R, fifo: Arc<Mutex<VecDeque<u8>>>, wake: Arc<EventFd>) {
     let mut buf = [0u8; 4096];
     loop {
         match source.read(&mut buf) {
@@ -676,12 +665,8 @@ pub fn run(args: BackendConsoleArgs) -> Result<i32> {
         guard.rx_eventfd_handle()
     };
     if let Some(h) = handlers.first() {
-        h.register_listener(
-            rx_event_handle.as_raw_fd(),
-            EventSet::IN,
-            RX_EFD_ID as u64,
-        )
-        .map_err(|e| anyhow::anyhow!("register RX eventfd: {e:?}"))?;
+        h.register_listener(rx_event_handle.as_raw_fd(), EventSet::IN, RX_EFD_ID as u64)
+            .map_err(|e| anyhow::anyhow!("register RX eventfd: {e:?}"))?;
     } else {
         return Err(anyhow::anyhow!(
             "VhostUserDaemon returned no epoll handlers"
@@ -809,14 +794,13 @@ mod tx_path_tests {
     ///   - 0x0000..0x1000 : descriptor table (16 entries × 16 B)
     ///   - 0x1000..0x1800 : avail ring + used ring
     ///   - 0x2000..       : data buffers the TX descriptors point at
-    fn setup_vring(
-        mem: &GuestMemoryAtomic<GuestMemoryMmap<()>>,
-        size: u16,
-    ) -> VringRwLock {
+    fn setup_vring(mem: &GuestMemoryAtomic<GuestMemoryMmap<()>>, size: u16) -> VringRwLock {
         let vring = VringRwLock::new(mem.clone(), size).expect("new vring");
         // Enable + configure. The addresses match the layout
         // above.
-        vring.set_queue_info(0x0, 0x1000, 0x1800).expect("queue info");
+        vring
+            .set_queue_info(0x0, 0x1000, 0x1800)
+            .expect("queue info");
         vring.set_queue_ready(true);
         vring.set_queue_size(size);
         vring
@@ -837,19 +821,15 @@ mod tx_path_tests {
         let desc = desc_table + (desc_idx as u64) * 16;
         mem.write_obj::<u64>(addr, GuestAddress(desc)).unwrap();
         mem.write_obj::<u32>(len, GuestAddress(desc + 8)).unwrap();
-        mem.write_obj::<u16>(flags, GuestAddress(desc + 12)).unwrap();
+        mem.write_obj::<u16>(flags, GuestAddress(desc + 12))
+            .unwrap();
         mem.write_obj::<u16>(next, GuestAddress(desc + 14)).unwrap();
     }
 
     /// Publish descriptor @desc_idx into the avail ring at
     /// ring slot @avail_idx, and bump the avail-ring `idx`
     /// field. Layout per virtio 1.x spec § 2.7.6.
-    fn publish_avail(
-        mem: &GuestMemoryMmap<()>,
-        avail_ring: u64,
-        avail_idx: u16,
-        desc_idx: u16,
-    ) {
+    fn publish_avail(mem: &GuestMemoryMmap<()>, avail_ring: u64, avail_idx: u16, desc_idx: u16) {
         use vm_memory::Bytes;
         // avail.ring[avail_idx]
         mem.write_obj::<u16>(
@@ -1009,12 +989,8 @@ mod tx_path_tests {
         {
             let g = mem.memory();
             write_desc(
-                &g,
-                /* desc_table */ 0x0000,
-                /* desc_idx   */ 0,
-                /* addr       */ 0x3000,
-                /* len        */ 64,
-                /* flags      */ 0x2,
+                &g, /* desc_table */ 0x0000, /* desc_idx   */ 0,
+                /* addr       */ 0x3000, /* len        */ 64, /* flags      */ 0x2,
                 /* next       */ 0,
             );
             publish_avail(&g, /* avail_ring */ 0x1000, /* avail_idx */ 0, 0);
@@ -1063,7 +1039,9 @@ mod tx_path_tests {
         // the avail-ring entry. (We don't assert the avail entry
         // remains — virtio-queue's cursor semantics vary; the
         // important property is "no panic, no spurious write".)
-        backend.process_rx_queue(&vring).expect("process rx no-data");
+        backend
+            .process_rx_queue(&vring)
+            .expect("process rx no-data");
     }
 
     #[test]
@@ -1194,5 +1172,4 @@ mod tx_path_tests {
         backend.process_tx_queue(&vring).expect("no-op");
         assert!(sunk.lock().unwrap().is_empty());
     }
-
 }

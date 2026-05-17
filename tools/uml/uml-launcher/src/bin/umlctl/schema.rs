@@ -38,8 +38,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "info",
         source: "umlctl",
         status: "emitted",
-        description:
-            "umlctl lifecycle verb fired: create / start / stop / rm. Carries pid + \
+        description: "umlctl lifecycle verb fired: create / start / stop / rm. Carries pid + \
              signal + exit_status where applicable.",
     },
     SchemaDecl {
@@ -48,8 +47,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "error",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description:
-            "panic() called in the guest. Payload carries the panic message; \
+        description: "panic() called in the guest. Payload carries the panic message; \
              produced by the O3.1 dmesg parser at stop time.",
     },
     SchemaDecl {
@@ -58,8 +56,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "warning",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description:
-            "OOM killer invoked in the guest. Produced by the O3.1 dmesg parser \
+        description: "OOM killer invoked in the guest. Produced by the O3.1 dmesg parser \
              at stop time.",
     },
     SchemaDecl {
@@ -116,8 +113,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "warning",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description:
-            "Lockdep reported a recursive / circular / inconsistent lock-state \
+        description: "Lockdep reported a recursive / circular / inconsistent lock-state \
              hazard. O3.1 dmesg parser.",
     },
     SchemaDecl {
@@ -126,8 +122,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "warning",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description:
-            "Soft/hard lockup watchdog fired. O3.1 dmesg parser.",
+        description: "Soft/hard lockup watchdog fired. O3.1 dmesg parser.",
     },
 ];
 

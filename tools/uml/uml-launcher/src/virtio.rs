@@ -132,8 +132,7 @@ pub fn parse_virtio_spec(raw: &str) -> Result<VirtioSpec> {
             VirtioClass::Net { tap }
         }
         "block" => {
-            let rest = rest
-                .ok_or_else(|| anyhow!("virtio block class requires :<image>[,ro]"))?;
+            let rest = rest.ok_or_else(|| anyhow!("virtio block class requires :<image>[,ro]"))?;
             // Split on ',' once — the leading segment is the
             // image path, the (optional) trailing segment is
             // a comma-separated flag list. Today only `ro` is
@@ -216,9 +215,7 @@ impl Drop for BackendProcess {
             // will eventually reap on our exit.
             let pid = child.id();
             // SAFETY: kill(2) with a live pid + SIGTERM.
-            let _ = unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM)
-            };
+            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
             // Short join; don't block shutdown on a
             // malfunctioning backend.
             let deadline = Instant::now() + Duration::from_millis(500);
@@ -261,9 +258,7 @@ pub struct OrchestrateArgs {
 /// Errors mid-orchestrate: any previously-spawned backends
 /// are torn down via BackendProcess's Drop on the Err path.
 /// The caller sees a clean "no half-up state" failure.
-pub fn orchestrate(
-    args: OrchestrateArgs,
-) -> Result<(Vec<BackendProcess>, Vec<String>)> {
+pub fn orchestrate(args: OrchestrateArgs) -> Result<(Vec<BackendProcess>, Vec<String>)> {
     // Detect duplicate classes up front; the virtio-id
     // allocator is a stable per-class constant today and
     // doesn't yet multiplex. Surface the limitation
@@ -366,7 +361,11 @@ fn wait_for_socket(path: &Path) -> Result<()> {
         }
         sleep(SOCKET_POLL_INTERVAL);
     }
-    Err(anyhow!("socket {} did not appear within {:?}", path.display(), SOCKET_POLL_TIMEOUT))
+    Err(anyhow!(
+        "socket {} did not appear within {:?}",
+        path.display(),
+        SOCKET_POLL_TIMEOUT
+    ))
 }
 
 /// Silence `dead_code` on AsRawFd which we import for
@@ -425,7 +424,10 @@ mod tests {
         let s = parse_virtio_spec("block:/tmp/x.img,ro").unwrap();
         assert!(matches!(
             s.class,
-            VirtioClass::Block { read_only: true, .. }
+            VirtioClass::Block {
+                read_only: true,
+                ..
+            }
         ));
     }
 

@@ -122,10 +122,8 @@ fn strip_printk_prefix(line: &str) -> &str {
             let inner = &stripped[..end];
             let trimmed = inner.trim_start();
             if let Some((secs, usecs)) = trimmed.split_once('.') {
-                let seconds_ok = !secs.is_empty()
-                    && secs.chars().all(|c| c.is_ascii_digit());
-                let usecs_ok = !usecs.is_empty()
-                    && usecs.chars().all(|c| c.is_ascii_digit());
+                let seconds_ok = !secs.is_empty() && secs.chars().all(|c| c.is_ascii_digit());
+                let usecs_ok = !usecs.is_empty() && usecs.chars().all(|c| c.is_ascii_digit());
                 if seconds_ok && usecs_ok {
                     rest = stripped[end + 1..].trim_start();
                 }
@@ -161,9 +159,7 @@ pub fn classify_line(payload: &str) -> Option<SplatKind> {
     }
     // `Kernel panic - not syncing: ...` is the canonical
     // panic() entry. `Panic:` alone is too permissive.
-    if payload.starts_with("Kernel panic - not syncing:")
-        || payload.starts_with("Kernel panic:")
-    {
+    if payload.starts_with("Kernel panic - not syncing:") || payload.starts_with("Kernel panic:") {
         return Some(SplatKind::Panic);
     }
     // OOM has two entry shapes depending on whether the killer
@@ -207,10 +203,7 @@ pub fn classify_line(payload: &str) -> Option<SplatKind> {
 /// kernel.log.
 fn extract_message(kind: SplatKind, payload: &str) -> String {
     let body = match kind {
-        SplatKind::Kasan
-        | SplatKind::Kfence
-        | SplatKind::Kcsan
-        | SplatKind::Kmsan => {
+        SplatKind::Kasan | SplatKind::Kfence | SplatKind::Kcsan | SplatKind::Kmsan => {
             // "BUG: KASAN: use-after-free in …" → "use-after-free in …"
             payload
                 .splitn(3, ':')
@@ -218,7 +211,10 @@ fn extract_message(kind: SplatKind, payload: &str) -> String {
                 .map(|s| s.trim_start())
                 .unwrap_or(payload)
         }
-        SplatKind::Ubsan => payload.strip_prefix("UBSAN:").unwrap_or(payload).trim_start(),
+        SplatKind::Ubsan => payload
+            .strip_prefix("UBSAN:")
+            .unwrap_or(payload)
+            .trim_start(),
         SplatKind::Panic => payload
             .strip_prefix("Kernel panic - not syncing:")
             .or_else(|| payload.strip_prefix("Kernel panic:"))
@@ -283,28 +279,19 @@ mod tests {
 
     #[test]
     fn strip_timestamp_prefix() {
-        assert_eq!(
-            strip_printk_prefix("[    0.123456] Hello"),
-            "Hello"
-        );
+        assert_eq!(strip_printk_prefix("[    0.123456] Hello"), "Hello");
         assert_eq!(strip_printk_prefix("[1.0] X"), "X");
     }
 
     #[test]
     fn strip_priority_and_timestamp() {
-        assert_eq!(
-            strip_printk_prefix("<4>[    0.123] hello"),
-            "hello"
-        );
+        assert_eq!(strip_printk_prefix("<4>[    0.123] hello"), "hello");
         assert_eq!(strip_printk_prefix("<3>oops"), "oops");
     }
 
     #[test]
     fn strip_leaves_non_printk_alone() {
-        assert_eq!(
-            strip_printk_prefix("$ echo hi"),
-            "$ echo hi"
-        );
+        assert_eq!(strip_printk_prefix("$ echo hi"), "$ echo hi");
         assert_eq!(strip_printk_prefix("[info] userland"), "[info] userland");
     }
 
@@ -417,8 +404,7 @@ mod tests {
         // schema registry. This catches the
         // "new splat kind, forgot to declare it" failure mode.
         use super::super::schema::REGISTRY;
-        let declared: std::collections::HashSet<&str> =
-            REGISTRY.iter().map(|s| s.name).collect();
+        let declared: std::collections::HashSet<&str> = REGISTRY.iter().map(|s| s.name).collect();
         for k in [
             SplatKind::Kasan,
             SplatKind::Kfence,

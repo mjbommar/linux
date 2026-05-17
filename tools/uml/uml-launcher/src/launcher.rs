@@ -110,10 +110,8 @@ pub fn run(cfg: Config) -> Result<i32> {
                 }
                 // Clear FD_CLOEXEC on both so they survive the
                 // UML binary's internal dup/close dance.
-                fcntl(198, FcntlArg::F_SETFD(FdFlag::empty()))
-                    .map_err(std::io::Error::from)?;
-                fcntl(199, FcntlArg::F_SETFD(FdFlag::empty()))
-                    .map_err(std::io::Error::from)?;
+                fcntl(198, FcntlArg::F_SETFD(FdFlag::empty())).map_err(std::io::Error::from)?;
+                fcntl(199, FcntlArg::F_SETFD(FdFlag::empty())).map_err(std::io::Error::from)?;
                 Ok(())
             });
         }
@@ -125,12 +123,10 @@ pub fn run(cfg: Config) -> Result<i32> {
     let pid = child.id();
     tracing::info!(pid, "UML child spawned");
 
-    let sig_handle = signal::install_forwarder(Arc::clone(&child))
-        .context("installing signal forwarder")?;
+    let sig_handle =
+        signal::install_forwarder(Arc::clone(&child)).context("installing signal forwarder")?;
 
-    let status = child
-        .wait()
-        .context("waiting for UML child")?;
+    let status = child.wait().context("waiting for UML child")?;
 
     sig_handle.close();
 

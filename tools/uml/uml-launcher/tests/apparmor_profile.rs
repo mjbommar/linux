@@ -32,9 +32,7 @@ fn apparmor_parser_available() -> bool {
 #[test]
 fn profile_preprocesses_cleanly() {
     if !apparmor_parser_available() {
-        eprintln!(
-            "apparmor_parser not found on PATH; skipping profile preprocess test"
-        );
+        eprintln!("apparmor_parser not found on PATH; skipping profile preprocess test");
         return;
     }
 
@@ -73,9 +71,7 @@ fn profile_compiles_without_loading() {
     // Every future profile edit flows through here as a
     // precondition for shipping.
     if !apparmor_parser_available() {
-        eprintln!(
-            "apparmor_parser not found on PATH; skipping profile compile test"
-        );
+        eprintln!("apparmor_parser not found on PATH; skipping profile compile test");
         return;
     }
 
@@ -104,8 +100,8 @@ fn profile_names_expected_subprofiles() {
     // renames / removals that a pure-syntax parser would
     // accept.
     let path = profile_path();
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
 
     for sub in ["backend_console", "backend_net", "backend_block"] {
         let needle = format!("profile {sub} {{");

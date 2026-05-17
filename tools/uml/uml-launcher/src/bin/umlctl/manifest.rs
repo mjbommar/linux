@@ -60,11 +60,7 @@ pub fn validate_name(name: &str) -> Result<()> {
         bail!("instance name must start with [a-z0-9] (got {first:?})");
     }
     for c in chars {
-        let ok = c.is_ascii_lowercase()
-            || c.is_ascii_digit()
-            || c == '_'
-            || c == '.'
-            || c == '-';
+        let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.' || c == '-';
         if !ok {
             bail!("instance name has invalid character {c:?} (allowed: [a-z0-9_.-])");
         }
@@ -118,10 +114,10 @@ impl Manifest {
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        let s = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let m: Manifest = toml::from_str(&s)
-            .with_context(|| format!("parse manifest {}", path.display()))?;
+        let s =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let m: Manifest =
+            toml::from_str(&s).with_context(|| format!("parse manifest {}", path.display()))?;
         if m.schema_version != 1 {
             bail!(
                 "manifest {} has schema_version {} (this umlctl only handles v1)",
@@ -134,8 +130,7 @@ impl Manifest {
 
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let s = toml::to_string_pretty(self).context("serialize manifest")?;
-        std::fs::write(path, s)
-            .with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(path, s).with_context(|| format!("write {}", path.display()))?;
         Ok(())
     }
 }

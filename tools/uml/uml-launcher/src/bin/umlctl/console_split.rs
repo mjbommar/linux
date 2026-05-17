@@ -48,10 +48,8 @@ pub fn is_kernel_line(line: &str) -> bool {
             // right-aligned seconds (`[    0.123456]`).
             let trimmed = inner.trim_start();
             if let Some((secs, usecs)) = trimmed.split_once('.') {
-                let seconds_ok = !secs.is_empty()
-                    && secs.chars().all(|c| c.is_ascii_digit());
-                let usecs_ok = !usecs.is_empty()
-                    && usecs.chars().all(|c| c.is_ascii_digit());
+                let seconds_ok = !secs.is_empty() && secs.chars().all(|c| c.is_ascii_digit());
+                let usecs_ok = !usecs.is_empty() && usecs.chars().all(|c| c.is_ascii_digit());
                 if seconds_ok && usecs_ok {
                     return true;
                 }
@@ -131,7 +129,9 @@ mod tests {
     #[test]
     fn classifies_printk_timestamp() {
         assert!(is_kernel_line("[    0.000000] Linux version 7.0.0"));
-        assert!(is_kernel_line("[   12.345678] Booting Linux on physical CPU 0x0"));
+        assert!(is_kernel_line(
+            "[   12.345678] Booting Linux on physical CPU 0x0"
+        ));
         assert!(is_kernel_line("[0.1] tight form"));
     }
 
@@ -147,7 +147,9 @@ mod tests {
         assert!(!is_kernel_line("Welcome to Linux"));
         assert!(!is_kernel_line("$ ls /etc"));
         assert!(!is_kernel_line(""));
-        assert!(!is_kernel_line("Checking that host ptys support output SIGIO..."));
+        assert!(!is_kernel_line(
+            "Checking that host ptys support output SIGIO..."
+        ));
     }
 
     #[test]

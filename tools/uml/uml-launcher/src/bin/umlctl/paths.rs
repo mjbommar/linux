@@ -18,10 +18,7 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn resolve(
-        state_dir: Option<PathBuf>,
-        runtime_dir: Option<PathBuf>,
-    ) -> Result<Self> {
+    pub fn resolve(state_dir: Option<PathBuf>, runtime_dir: Option<PathBuf>) -> Result<Self> {
         let state_dir = state_dir.unwrap_or_else(default_state_dir);
         let runtime_dir = runtime_dir.unwrap_or_else(default_runtime_dir);
 
@@ -29,14 +26,15 @@ impl Paths {
         // becomes "broken install" noise we'd rather avoid.
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state_dir {}", state_dir.display()))?;
-        std::fs::create_dir_all(state_dir.join("instances"))
-            .context("create instances dir")?;
-        std::fs::create_dir_all(state_dir.join("runs"))
-            .context("create runs dir")?;
+        std::fs::create_dir_all(state_dir.join("instances")).context("create instances dir")?;
+        std::fs::create_dir_all(state_dir.join("runs")).context("create runs dir")?;
         std::fs::create_dir_all(&runtime_dir)
             .with_context(|| format!("create runtime_dir {}", runtime_dir.display()))?;
 
-        Ok(Self { state_dir, runtime_dir })
+        Ok(Self {
+            state_dir,
+            runtime_dir,
+        })
     }
 
     pub fn instances_dir(&self) -> PathBuf {
@@ -111,7 +109,10 @@ mod tests {
             state_dir: PathBuf::from("/s"),
             runtime_dir: PathBuf::from("/r"),
         };
-        assert_eq!(p.manifest_path("foo"), PathBuf::from("/s/instances/foo.toml"));
+        assert_eq!(
+            p.manifest_path("foo"),
+            PathBuf::from("/s/instances/foo.toml")
+        );
         assert_eq!(p.pidfile_path("foo"), PathBuf::from("/r/foo.pid"));
         assert_eq!(p.runs_dir(), PathBuf::from("/s/runs"));
         assert_eq!(

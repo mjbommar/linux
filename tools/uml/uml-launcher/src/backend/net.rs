@@ -63,7 +63,9 @@ use virtio_bindings::bindings::virtio_config::VIRTIO_F_VERSION_1;
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
-use vmm_sys_util::event::{new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier};
+use vmm_sys_util::event::{
+    new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
+};
 
 use crate::backend::seccomp::FilterBuilder;
 use crate::cli::BackendNetArgs;
@@ -111,8 +113,7 @@ struct IfReq {
 }
 
 fn device_features() -> u64 {
-    (1u64 << VIRTIO_F_VERSION_1)
-        | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+    (1u64 << VIRTIO_F_VERSION_1) | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
 }
 
 fn protocol_features() -> VhostUserProtocolFeatures {
@@ -132,8 +133,7 @@ fn open_tap(ifname: &str) -> io::Result<OwnedFd> {
     // Open /dev/net/tun. O_NONBLOCK so we drain frames without
     // blocking the daemon thread; O_CLOEXEC so we don't leak
     // the fd across any future fork().
-    let path = std::ffi::CString::new("/dev/net/tun")
-        .expect("/dev/net/tun is a static ascii path");
+    let path = std::ffi::CString::new("/dev/net/tun").expect("/dev/net/tun is a static ascii path");
     // SAFETY: FFI call with a valid NUL-terminated C string
     // and constant integer flags. Returns -1 on error.
     let fd = unsafe {
@@ -195,8 +195,7 @@ impl NetBackend {
     pub fn new(tap_name: Option<String>) -> Result<Self> {
         let tap = match tap_name.as_deref() {
             Some(name) => {
-                let fd = open_tap(name)
-                    .with_context(|| format!("opening TAP interface {name}"))?;
+                let fd = open_tap(name).with_context(|| format!("opening TAP interface {name}"))?;
                 Some(Arc::new(fd))
             }
             None => None,
@@ -287,9 +286,7 @@ impl NetBackend {
             // frame and let the guest retransmit (TCP/UDP
             // both handle loss).
             // SAFETY: FFI, pointer valid for `take` bytes.
-            let n = unsafe {
-                libc::write(tap_fd, frame.as_ptr() as *const _, take)
-            };
+            let n = unsafe { libc::write(tap_fd, frame.as_ptr() as *const _, take) };
             if n < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::EAGAIN) {
@@ -354,13 +351,7 @@ impl NetBackend {
         loop {
             // SAFETY: FFI, pointer valid for MAX_FRAME_LEN
             // bytes, non-blocking read.
-            let n = unsafe {
-                libc::read(
-                    tap_fd,
-                    frame.as_mut_ptr() as *mut _,
-                    frame.len(),
-                )
-            };
+            let n = unsafe { libc::read(tap_fd, frame.as_mut_ptr() as *mut _, frame.len()) };
             if n < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EAGAIN) {
@@ -389,9 +380,7 @@ impl NetBackend {
             let chain = match chain {
                 Some(c) => c,
                 None => {
-                    log::debug!(
-                        "net: dropping RX frame {len}B — no guest-posted buffer"
-                    );
+                    log::debug!("net: dropping RX frame {len}B — no guest-posted buffer");
                     break;
                 }
             };
@@ -489,10 +478,7 @@ impl VhostUserBackendMut for NetBackend {
         Ok(())
     }
 
-    fn exit_event(
-        &self,
-        _thread_index: usize,
-    ) -> Option<(EventConsumer, EventNotifier)> {
+    fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
         let (c, n) = &self.exit_event;
         Some((
             c.try_clone().expect("clone exit consumer"),
@@ -523,12 +509,9 @@ pub fn run(args: BackendNetArgs) -> Result<i32> {
 
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
-    let mut daemon = VhostUserDaemon::new(
-        "uml-launcher-backend-net".to_string(),
-        backend.clone(),
-        mem,
-    )
-    .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
+    let mut daemon =
+        VhostUserDaemon::new("uml-launcher-backend-net".to_string(), backend.clone(), mem)
+            .map_err(|e| anyhow::anyhow!("constructing VhostUserDaemon: {e:?}"))?;
 
     // Register the TAP fd with the daemon's epoll so a
     // readable-TAP event routes to handle_event(TAP_FD_ID).
@@ -615,8 +598,7 @@ mod tests {
 
     #[test]
     fn open_tap_rejects_oversized_name() {
-        let err =
-            open_tap("this_name_is_way_too_long_for_ifnamsiz").unwrap_err();
+        let err = open_tap("this_name_is_way_too_long_for_ifnamsiz").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 

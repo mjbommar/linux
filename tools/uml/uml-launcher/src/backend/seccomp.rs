@@ -179,10 +179,7 @@ impl FilterBuilder {
         // rule. Args-level filtering (e.g. restricting ioctl by
         // cmd number) is a follow-on refinement; the v2 commit 3
         // scope is "allow-list by syscall, deny everything else".
-        let rules: std::collections::BTreeMap<
-            libc::c_long,
-            Vec<SeccompRule>,
-        > = allow
+        let rules: std::collections::BTreeMap<libc::c_long, Vec<SeccompRule>> = allow
             .into_iter()
             .map(|syscall| (syscall, Vec::new()))
             .collect();
@@ -316,12 +313,8 @@ mod sigsys_tests {
                 unsafe { libc::_exit(0) };
             }
             ForkResult::Parent { child } => match waitpid(child, None).expect("waitpid") {
-                WaitStatus::Exited(_, code) => {
-                    std::process::ExitStatus::from_raw(code << 8)
-                }
-                WaitStatus::Signaled(_, sig, _) => {
-                    std::process::ExitStatus::from_raw(sig as i32)
-                }
+                WaitStatus::Exited(_, code) => std::process::ExitStatus::from_raw(code << 8),
+                WaitStatus::Signaled(_, sig, _) => std::process::ExitStatus::from_raw(sig as i32),
                 other => panic!("unexpected wait status: {other:?}"),
             },
         }
