@@ -57,6 +57,7 @@ TASK_RE = re.compile(
     r'KVMV2T-T cpu=(\d+) seq=(\d+) '
     r'tmm=([0-9a-f]+) tamm=([0-9a-f]+) tscr2=([0-9a-f]+) '
     r'hax=([0-9a-f]+) horax=([0-9a-f]+) hip=([0-9a-f]+) hsp=([0-9a-f]+)'
+    r'(?: rmatch=(\d+) rptr=([0-9a-f]+) crptr=([0-9a-f]+))?'
 )
 TFLAG_RE = re.compile(
     r'KVMV2T-F cpu=(\d+) seq=(\d+) '
@@ -90,6 +91,7 @@ class Snap:
     fsb: int = 0; gsb: int = 0
     tmm: int = 0; tamm: int = 0; tscr2: int = 0
     hax: int = 0; horax: int = 0; hip: int = 0; hsp: int = 0
+    rmatch: int = 0; rptr: int = 0; crptr: int = 0
     tfpuh: int = 0; tscv: int = 0; tistp: int = 0
     tiofv: int = 0; tfpuv: int = 0
     tist: List[int] = field(default_factory=lambda: [0]*6)
@@ -154,6 +156,10 @@ def parse_log(path: str) -> List[Snap]:
                 vals = [int(m.group(i), 16) for i in range(3, 10)]
                 (e.tmm, e.tamm, e.tscr2, e.hax,
                  e.horax, e.hip, e.hsp) = vals
+                if m.group(10) is not None:
+                    e.rmatch = int(m.group(10))
+                    e.rptr = int(m.group(11), 16)
+                    e.crptr = int(m.group(12), 16)
                 e.sections_seen |= SECT_T
                 continue
             m = TFLAG_RE.search(line)

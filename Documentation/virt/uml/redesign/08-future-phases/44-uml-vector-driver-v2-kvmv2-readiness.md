@@ -550,6 +550,68 @@ removed, but the Python abort persists.  The remaining KVM-v2 audit must
 move to the broader task/mm ownership transition and guest memory/TLB
 model; vector2 KVM-v2 Tier 3 readiness remains open.
 
+### Regs-Owner Trace Check
+
+The next diagnostic checkpoint added trace-only ownership fields to the
+`KVMV2T-T` line:
+
+```
+rmatch=<0|1> rptr=<sampled uml_pt_regs *> crptr=<current->thread.regs.regs>
+```
+
+This distinguishes a real stale-`regs` sample from the older invariant
+checker's single-current-task model.  The parser remains backward
+compatible with older logs, and the soak summary helper now reports
+`regs_owner_mismatches` when those fields are present.
+
+Validation:
+
+```
+python3 -m py_compile \
+  tools/testing/selftests/um/soak/kvmv2-trace-summary.py \
+  tools/testing/selftests/um/state-trace/parse-trace.py
+git diff --check -- arch/um/backend/kvm-v2/state_trace.c \
+  arch/um/backend/kvm-v2/state_trace.h \
+  tools/testing/selftests/um/state-trace/parse-trace.py \
+  tools/testing/selftests/um/soak/kvmv2-trace-summary.py
+make ARCH=um O=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace \
+  -j$(nproc) linux
+```
+
+The rebuilt trace runtime passed a one-shot Django/vector2 KVM-v2
+smoke:
+
+```
+PASS=1/1 FAIL=0 TIMEOUT=0
+```
+
+A new 30-run sample still reproduced the Python abort:
+
+```
+PASS=29/30 FAIL=1 TIMEOUT=0
+```
+
+The failed iteration 22 dumped a complete new-format trace:
+
+```
+entries: parsed=4854 complete=4854
+markers: fatal_python=1 python_abort=1 server_fail=1 trace_dump_begin=1 trace_dump_end=1
+tlb_lag: count=30 max=1131
+dispatch_switches: count=2
+syscall_switches: count=1
+mm_backsteps: count=3
+regs_owner_mismatches: count=0
+```
+
+The fatal Python context moved slightly earlier in import startup
+(`ipaddress.py` through `urllib.parse` and `email.utils`), but the error
+class remained `_PyEval_EvalFrameDefault: Executing a cache.`  The
+`regs_owner_mismatches: count=0` result rules out the simplest
+interpretation that the pid/tmm invariant hits are stale `regs` pointer
+use in the trace or dispatcher.  The remaining KVM-v2 bug is still a
+guest userspace corruption issue, but it is no longer explained by the
+post-syscall `kvm_run` mismatch or stale `uml_pt_regs` ownership.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -593,9 +655,11 @@ for backend analysis.
 2. Audit the remaining task/mm transition cases after `execve`,
    `exit_group`, and sleeping syscalls now that the direct post-syscall
    `kvm_run` reuse has been removed.
-3. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
+3. Treat stale `regs` ownership as ruled out unless a future trace shows
+   `regs_owner_mismatches > 0`.
+4. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
-4. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
+5. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
    only then update the completion audit from partial to done.
 
 ## Diagnostic Follow-Up
@@ -636,3 +700,8 @@ Validation for the diagnostic change:
   post-syscall run/task mismatches but still had two syscall task/mm
   switches and three mm-generation backsteps, so the remaining blocker is
   broader than that one stale-run path.
+- after the `regs` owner trace extension, another rebuilt trace runtime
+  passed a one-shot smoke and reproduced the failure at
+  `PASS=29/30 FAIL=1 TIMEOUT=0`; the failed trace reported
+  `regs_owner_mismatches: count=0`, ruling out stale `uml_pt_regs`
+  ownership as the direct explanation for the pid/tmm invariant hits.

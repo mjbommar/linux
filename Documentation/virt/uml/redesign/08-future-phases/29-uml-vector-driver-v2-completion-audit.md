@@ -250,6 +250,14 @@ Validation evidence recorded in the checkpoint docs includes:
   two syscall task/mm switches, three mm-generation backsteps, no
   post-syscall mismatches, and the same no-mmap-zero result.  This is
   progress on the ownership model, not a KVM-v2 Tier 3 closeout;
+- KVM-v2 `regs` owner trace follow-up: the state trace now records
+  whether the sampled `uml_pt_regs` pointer belongs to `current`, and
+  the summary helper reports `regs_owner_mismatches`; the rebuilt trace
+  runtime passed a one-shot Django/vector2 KVM-v2 smoke, then reproduced
+  the failure at `PASS=29/30 FAIL=1 TIMEOUT=0` with a complete trace
+  reporting `regs_owner_mismatches: count=0`, which rules out stale
+  `uml_pt_regs` ownership as the direct reason for the pid/tmm invariant
+  hits;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -264,9 +272,9 @@ list is:
   `PASS=57/60 FAIL=2 TIMEOUT=1`, `PASS=59/60 FAIL=1 TIMEOUT=0`, and
   post-hardened `PASS=29/30 FAIL=1 TIMEOUT=0` with guest Python
   failures and one startup timeout; the direct post-syscall stale
-  `kvm_run` consumption path has been removed, so the next backend audit
-  must resolve the remaining syscall task/mm switches, mm-generation
-  backsteps, and guest memory/TLB model;
+  `kvm_run` consumption path has been removed and stale `uml_pt_regs`
+  ownership has been ruled out, so the next backend audit must resolve
+  guest memory/TLB state or another KVM-v2 userspace-corruption path;
 - repeat vector2 Tier 3 Django on kvm-v2 after the backend
   investigation until the flake rate is acceptably bounded;
 - decide whether the FastAPI/uvicorn 30/30 repetition is sufficient for

@@ -253,6 +253,8 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 		e->task_ist_pending       = a->kvm_v2.ist_pending;
 		e->task_iotrap_fpu_valid  = a->kvm_v2.iotrap_fpu_valid;
 		e->task_fpu_valid         = a->kvm_v2.fpu_valid;
+		e->current_regs_ptr       =
+			(u64)(uintptr_t)&t->thread.regs.regs;
 		if (a->kvm_v2.iotrap_fpu_valid)
 			e->task_fpu_hash =
 				fnv1a32(&a->kvm_v2.iotrap_fpu,
@@ -269,6 +271,9 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 		e->task_host_orig_ax  = regs->gp[HOST_ORIG_AX];
 		e->task_host_ip       = regs->gp[HOST_IP];
 		e->task_host_sp       = regs->gp[HOST_SP];
+		e->regs_ptr           = (u64)(uintptr_t)regs;
+		e->regs_current_match =
+			(t && regs == &t->thread.regs.regs) ? 1 : 0;
 	}
 
 	if (vcpu) {
@@ -401,11 +406,12 @@ static void dump_one(const struct kvm_v2_state_snap *e)
 	pr_emerg("KVMV2T-S cpu=%u seq=%u cr0=%llx cr2=%llx cr3=%llx cr4=%llx fsb=%llx gsb=%llx\n",
 		 e->cpu, e->seq,
 		 e->cr0, e->cr2, e->cr3, e->cr4, e->fs_base, e->gs_base);
-	pr_emerg("KVMV2T-T cpu=%u seq=%u tmm=%llx tamm=%llx tscr2=%llx hax=%llx horax=%llx hip=%llx hsp=%llx\n",
+	pr_emerg("KVMV2T-T cpu=%u seq=%u tmm=%llx tamm=%llx tscr2=%llx hax=%llx horax=%llx hip=%llx hsp=%llx rmatch=%u rptr=%llx crptr=%llx\n",
 		 e->cpu, e->seq,
 		 e->task_mm_ptr, e->task_active_mm_ptr, e->task_saved_cr2,
 		 e->task_host_ax, e->task_host_orig_ax,
-		 e->task_host_ip, e->task_host_sp);
+		 e->task_host_ip, e->task_host_sp, e->regs_current_match,
+		 e->regs_ptr, e->current_regs_ptr);
 	pr_emerg("KVMV2T-F cpu=%u seq=%u tfpuh=%x tscv=%u tistp=%u tiofv=%u tfpuv=%u tist=[%llx,%llx,%llx,%llx,%llx,%llx]\n",
 		 e->cpu, e->seq,
 		 e->task_fpu_hash, e->task_saved_cr2_valid,

@@ -188,6 +188,8 @@ def parse_file(path: Path) -> dict[str, Any]:
     syscall_switches = summarize_syscall_switches(flattened)
     post_syscall_mismatches = summarize_post_syscall_mismatches(flattened)
     mm_backsteps = summarize_mm_backsteps(flattened)
+    regs_owner_mismatches = summarize_regs_owner_mismatches(flattened)
+    has_regs_owner = any("task.rmatch" in row for row in flattened)
 
     return {
         "path": str(path),
@@ -212,6 +214,8 @@ def parse_file(path: Path) -> dict[str, Any]:
         "syscall_switches": syscall_switches,
         "post_syscall_mismatches": post_syscall_mismatches,
         "mm_backsteps": mm_backsteps,
+        "has_regs_owner": has_regs_owner,
+        "regs_owner_mismatches": regs_owner_mismatches,
         "last_entries": flattened[-12:],
     }
 
@@ -378,6 +382,32 @@ def summarize_mm_backsteps(flattened: list[dict[str, Any]]) -> list[dict[str, An
     return backsteps
 
 
+def summarize_regs_owner_mismatches(
+    flattened: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    mismatches: list[dict[str, Any]] = []
+
+    for row in flattened:
+        rmatch = numeric_value(row.get("task.rmatch"))
+        rptr = numeric_value(row.get("task.rptr"))
+        if rmatch is None or rmatch != 0 or not rptr:
+            continue
+
+        mismatches.append(
+            {
+                "cpu": row["cpu"],
+                "seq": row["seq"],
+                "pid": row.get("header.pid"),
+                "op": row.get("header.op"),
+                "task_tmm": row.get("task.tmm"),
+                "rptr": row.get("task.rptr"),
+                "crptr": row.get("task.crptr"),
+            }
+        )
+
+    return mismatches
+
+
 def format_counter_key(title: str, key: Any) -> str:
     if isinstance(key, int) and title == "ports":
         return hex(key)
@@ -465,6 +495,15 @@ def print_text(summary: dict[str, Any], limit: int) -> None:
                 f"cpu={item['cpu']} seq={item['seq']} pid={item['pid']} "
                 f"op={item['op']} mmgen={item['mmgen']} vlast={item['vlast']} "
                 f"task_tmm={item['task_tmm']} vcpu_mm={item['vcpu_mm']}"
+            )
+    if summary["has_regs_owner"]:
+        print(f"regs_owner_mismatches: count={len(summary['regs_owner_mismatches'])}")
+        for item in summary["regs_owner_mismatches"][:limit]:
+            print(
+                "  "
+                f"cpu={item['cpu']} seq={item['seq']} pid={item['pid']} "
+                f"op={item['op']} task_tmm={item['task_tmm']} "
+                f"rptr={item['rptr']} crptr={item['crptr']}"
             )
     if summary["incomplete_entries"]:
         print("incomplete_entries:")

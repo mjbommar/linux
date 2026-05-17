@@ -1106,6 +1106,12 @@ KVM-v2 readiness follow-up:
     abort and a complete trace dump showing no post-syscall mismatches;
     the same dump still has two syscall task/mm switches and three
     mm-generation backsteps, so KVM-v2 Tier 3 readiness remains open;
+  - a trace-only `regs` owner extension adds `rmatch`, `rptr`, and
+    `crptr` fields to the `KVMV2T-T` line; the rebuilt runtime passed a
+    one-shot smoke, then a 30-run reproduced the Python abort at
+    `PASS=29/30 FAIL=1 TIMEOUT=0` with
+    `regs_owner_mismatches: count=0`, ruling out stale `uml_pt_regs`
+    ownership as the direct explanation for the pid/tmm invariant hits;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
@@ -1133,10 +1139,10 @@ KVM-v2 readiness follow-up:
   trace-enabled path now captures and parses a failing state-ring dump,
   but the longer samples still fail from KVM-v2 guest userspace
   execution instability.  The direct post-syscall stale-`kvm_run`
-  consumption path has been removed and did not close the flake; the
-  next backend audit must focus on the remaining task/mm ownership
-  transitions and guest memory/TLB model.  KVM-v2 Tier 3 readiness
-  remains open.
+  consumption path has been removed and stale `uml_pt_regs` ownership is
+  now ruled out by trace evidence; the next backend audit must focus on
+  guest memory/TLB state and other KVM-v2 userspace-corruption paths.
+  KVM-v2 Tier 3 readiness remains open.
 
 ### V2-R9 - Transport Parity
 
