@@ -129,7 +129,9 @@ shape, and inspectable ethtool surfaces:
   to two queues: one-shot gateway ping, `SERVER_READY`,
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
   `REPRO_DONE rc=0`, clean TAP teardown, and a short
-  `PASS=10/10 FAIL=0 TIMEOUT=0` repetition;
+  `PASS=10/10 FAIL=0 TIMEOUT=0` repetition, followed by a longer
+  `PASS=30/30 FAIL=0 TIMEOUT=0` repetition with all 30 runs reaching
+  the expected FastAPI markers and clean teardown;
 - both-drivers kernel compatibility for `vec2.*`: the legacy `vec`
   setup path now leaves `vec2.` and `vec2=` command-line specs for
   vector2 while preserving legacy `vec2:` as old-driver unit 2;
@@ -841,6 +843,28 @@ KCSAN concurrent traffic follow-up:
   closed for one clean vector2 fd multiqueue pass.  Repetition, longer
   SMP runtime, varied queue/flow counts, kvm-v2 reruns, and broader
   performance/fairness analysis remain open.
+
+FastAPI 30-pass follow-up:
+
+- `42-uml-vector-driver-v2-fastapi-30.md` records the longer
+  FastAPI/uvicorn vector2 fd-handoff repetition.
+- Evidence collected:
+  - v2-only runtime UML kernel
+    `/home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux`;
+  - `vector2-fastapi-smoke.toml` with `queues = "auto"` resolving to
+    two inherited TAP fds, 200..201;
+  - `PASS=30/30 FAIL=0 TIMEOUT=0`, elapsed 298 seconds;
+  - all 30 copied run logs contained `SERVER_READY`,
+    `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`, and
+    `REPRO_DONE rc=0`;
+  - no `VECTOR2_FASTAPI_FAIL`, `SERVER_FAIL`, `VERIFY_FAIL`,
+    warning, BUG, panic, KCSAN, data-race, `not ok`, or `FAILED`
+    signatures in the copied per-run logs;
+  - no lingering `v2fastapi0` and no running UML instance.
+- Therefore the old "repeat the FastAPI/uvicorn vector2 seccomp smoke
+  beyond the short repetition" gap is closed at 30/30.  Hours-long
+  workload soaks, CI/preflight repetition, cross-host repetition, and
+  kvm-v2 reruns remain open.
 
 Performance baseline follow-up:
 

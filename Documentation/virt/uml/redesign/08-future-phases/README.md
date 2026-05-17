@@ -294,6 +294,11 @@ parking-lot designs for future prioritization.
   TCP byte counts and UDP packet counts, verifies all four TX and RX
   queues moved, and captures clean teardown with no
   warning/BUG/KCSAN/data-race signatures. Not a commitment.
+- [42-uml-vector-driver-v2-fastapi-30.md](42-uml-vector-driver-v2-fastapi-30.md) —
+  Longer FastAPI + uvicorn vector2 fd-handoff repetition:
+  `PASS=30/30 FAIL=0 TIMEOUT=0`, all 30 runs reached `SERVER_READY`,
+  `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`, clean teardown,
+  and no warning/BUG/panic/failure signatures. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
