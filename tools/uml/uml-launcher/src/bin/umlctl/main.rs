@@ -244,9 +244,10 @@ struct GateLoopArgs {
     )]
     fail_marker: String,
 
-    /// Per-iteration timeout. Each `up` call gets this long to hit
-    /// either marker before being declared a TIMEOUT (counted as
-    /// FAIL). 120s default mirrors the canonical §8c loop budget.
+    /// Per-iteration timeout. Each `up` call gets this as its
+    /// readiness budget, and each live run gets this long to hit either
+    /// marker before being declared a TIMEOUT (counted as FAIL). 120s
+    /// default mirrors the canonical §8c loop budget.
     #[arg(long, default_value_t = 120, value_name = "SECONDS")]
     timeout: u64,
 

@@ -472,6 +472,8 @@ R7 implementation note:
   - soak aliases `tier3-django-v2` and `tier3-fastapi-v2`;
   - v2 metadata in soak scoreboard rows;
   - `gate loop` cleanup through `down --force --rm`;
+  - `gate loop --timeout` propagation to inner
+    `umlctl up --ready-timeout`;
   - `down --force` host teardown after not-running or missing runtime
     state;
   - ready-timeout child reaping in `supervise::start()`.
@@ -481,8 +483,8 @@ R7 implementation note:
   - seccomp v2 Tier 3 stdlib smoke: 1/1 pass through
     `--sweep network.driver=vector2`;
   - seccomp repeated cleanup smoke: 2/2 pass, TAP absent after loop;
-  - kvm-v2 Tier 3 smoke still fails readiness, but TAP is absent after
-    failure cleanup.
+  - kvm-v2 Tier 3 smoke still fails `umlctl up` readiness after the
+    full 180-second budget, but TAP is absent after failure cleanup.
 - Therefore R7 is partially satisfied.  Selection, observability, and
   teardown safety landed; the full 30/30 seccomp+kvm-v2 and long-soak
   eligibility gates remain open.

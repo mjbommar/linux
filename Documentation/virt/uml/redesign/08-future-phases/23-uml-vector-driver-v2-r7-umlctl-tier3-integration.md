@@ -72,6 +72,9 @@ R7 changes the loop and down paths:
 - `gate loop` now uses `umlctl down -f <worker.toml> --force --rm`
   before an iteration, after early `up` failure, and after saved log
   capture;
+- `gate loop --timeout <seconds>` is also passed to inner
+  `umlctl up --ready-timeout <seconds>`, so slow backends are not
+  accidentally clipped by the default 60-second `up` readiness budget;
 - `down --force` calls the supervisor directly, treats missing/not
   running instances as non-fatal, and still runs TAP/iptables teardown;
 - `supervise::start()` waits for the child after sending SIGKILL on
@@ -207,11 +210,12 @@ PASS=2/2 FAIL=0 TIMEOUT=0
 TAP_ABSENT
 ```
 
-KVM-v2 cleanup smoke:
+KVM-v2 cleanup smoke after propagating the 180-second gate-loop timeout
+to `umlctl up --ready-timeout`:
 
 ```text
 PASS=0/1 FAIL=1 TIMEOUT=0
-umlctl: instance 'soak-tier3-django-kvm-v2-w0-w0' did not become ready within 60s
+umlctl: instance 'soak-tier3-django-kvm-v2-w0-w0' did not become ready within 180s
 TAP_ABSENT
 ```
 

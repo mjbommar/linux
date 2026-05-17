@@ -397,7 +397,17 @@ fn run_one_iter(
     // over the polling loop so that on timeout we can capture the
     // init.log before `stop` writes the kernel-shutdown banner.
     let up_log = log_dir.join(format!("up-{iter}.log"));
-    let up_out = run_umlctl(umlctl, &["up", "-f", toml_path.to_str().unwrap()]);
+    let ready_timeout = timeout_secs.to_string();
+    let up_out = run_umlctl(
+        umlctl,
+        &[
+            "up",
+            "-f",
+            toml_path.to_str().unwrap(),
+            "--ready-timeout",
+            &ready_timeout,
+        ],
+    );
     let _ = fs::write(&up_log, &up_out);
 
     if !up_out.contains("started ") {
