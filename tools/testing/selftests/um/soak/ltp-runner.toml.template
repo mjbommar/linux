@@ -14,10 +14,14 @@ volumes = []
 #   3. Confirm /opt/ltp and /opt/kirk are hostfs-visible from the
 #      guest (default hostfs root makes them visible at the same
 #      path).
-#   4. Copy the curated skip-list from phase-J-ltp-curation-
-#      2026-05-14.md §3 into /opt/uml-soak/ltp-skip.txt (operator
-#      decision: in-tree under tools/testing/selftests/um/soak/ OR
-#      out-of-tree under /opt/uml-soak/).
+#   4. (Done in-tree.) The curated 112-entry skip-list is at
+#      tools/testing/selftests/um/soak/ltp-skip.txt; the
+#      `--skip-file {{SOAK_DIR}}/ltp-skip.txt` reference below
+#      resolves to it once the daemon expands {{SOAK_DIR}}. If
+#      the soak directory isn't hostfs-visible from the guest
+#      at the same path, the operator must arrange a bind-mount
+#      OR copy ltp-skip.txt to /opt/uml-soak/ltp-skip.txt and
+#      edit the path below.
 #
 # Daemon scheduling (per Phase J design §4.3): runs every 8
 # daemon rotations rather than every rotation, due to the
