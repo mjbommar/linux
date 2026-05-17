@@ -105,8 +105,11 @@ done
 
 # Per-workload per-iter timeout. Mirrors run-pilot.sh's TIMEOUTS array.
 declare -A TIMEOUT_FOR=(
-	[memcheck]=90 [iocheck]=90 [stress-ng]=120
+	[memcheck]=90 [iocheck]=120 [stress-ng]=120
 	[cpython-soak]=360 [kbuild-tiny]=600
+	[tier1-pylibs]=90 [tier2-uv-pylibs]=120
+	[tier3-django]=180 [tier3-fastapi]=180
+	[ltp-runner]=3600
 )
 DEFAULT_TIMEOUT=120
 
@@ -402,8 +405,155 @@ write_config() {
 	PY
 }
 
+# Tier 3 workloads require per-worker IP carve-out from 192.168.42.0/24
+# rather than the single shared TAP that `umlctl gate loop --workers N`
+# produces — see Documentation/virt/uml/redesign/02-workstreams/
+# D-kvm-backend/phase-J-tier3-design-2026-05-14.md §4-§6.
+is_tier3_workload() {
+	case "$1" in
+		tier3-*) return 0 ;;
+		*)       return 1 ;;
+	esac
+}
+
+# Expand placeholders into a per-worker TOML. Args:
+#   template_path worker_idx backend output_path
+# Placeholders set: {{KERNEL}}, {{BACKEND}}, {{WORKER_IDX}},
+# {{HOST_IP}} (CIDR), {{GUEST_IP}} (CIDR),
+# {{HOST_IP_PLAIN}} (no mask), {{GUEST_IP_PLAIN}} (no mask),
+# {{TAP_NAME}}, {{SOAK_DIR}}.
+emit_tier3_worker_toml() {
+	local tmpl=$1 widx=$2 backend=$3 out=$4
+	local hip="192.168.42.$((4 * widx + 1))"
+	local gip="192.168.42.$((4 * widx + 2))"
+	local tap="soak-tap${widx}"
+	sed -e "s|{{KERNEL}}|$UML_KERNEL|g"           \
+	    -e "s|{{BACKEND}}|$backend|g"              \
+	    -e "s|{{WORKER_IDX}}|$widx|g"              \
+	    -e "s|{{HOST_IP_PLAIN}}|${hip}|g"          \
+	    -e "s|{{GUEST_IP_PLAIN}}|${gip}|g"         \
+	    -e "s|{{HOST_IP}}|${hip}/30|g"             \
+	    -e "s|{{GUEST_IP}}|${gip}/30|g"            \
+	    -e "s|{{TAP_NAME}}|${tap}|g"               \
+	    -e "s|{{SOAK_DIR}}|$SOAK_DIR|g"            \
+	    "$tmpl" > "$out"
+}
+
+# Walk a tier3 phase output dir (which has $phase_dir/w<N>/p0_default/...
+# per-worker subdirs rather than a single p0_default/) and emit per-iter
+# scoreboard rows for every worker.
+process_tier3_phase_results() {
+	local workload=$1 backend=$2 rotation=$3 phase_dir=$4 t_pre=$5 t_post=$6
+	local key="${workload}|${backend}"
+	local n="${WL_N[$key]:-0}"
+	local k="${WL_PASS[$key]:-0}"
+	local wdir f log_rel verdict panic_b timeout_b host_error dur_ms iter_within
+	for wdir in "$phase_dir"/w*; do
+		[ -d "$wdir" ] || continue
+		for f in "$wdir"/p0_default/*/run-*.log; do
+			[ -f "$f" ] || continue
+			log_rel="${f#"$OUT/"}"
+			iter_within=$((n + 1))
+			verdict=FAIL; panic_b=false; timeout_b=false; host_error=false
+			if grep -q "REPRO_DONE rc=0" "$f"; then
+				verdict=PASS
+			elif grep -q "Kernel panic" "$f"; then
+				verdict=PANIC; panic_b=true
+			elif grep -q -E "TIMEOUT|deadline exceeded" "$f"; then
+				verdict=TIMEOUT; timeout_b=true
+			fi
+			dur_ms=0
+			emit_scoreboard_row "$SOAK_RUN_ID" "phase-J-soak-$workload" \
+				"$workload" "$backend" "$rotation" "$iter_within" \
+				"$verdict" "$log_rel" \
+				"$panic_b" "$timeout_b" "$host_error" \
+				"$t_pre" "$t_post" "$dur_ms" ""
+			n=$((n + 1))
+			[ "$verdict" = "PASS" ] && k=$((k + 1))
+			if ! update_window_and_check "$key" "$verdict"; then
+				if [ -z "$CONTINUE_ON_THRESH" ]; then
+					echo "[$(date -uIs)] THRESHOLD TRIPPED: $key (>$FAIL_THRESH_PCT% over rolling $FAIL_THRESH_WIN)" >&2
+					touch "$OUT/THRESHOLD_TRIPPED"
+					STOP_REQUESTED=1
+				else
+					echo "[$(date -uIs)] threshold tripped on $key; --continue-on-fail-threshold set, soaking on" >&2
+				fi
+			fi
+			if [ "$verdict" = "PANIC" ]; then
+				local pdir="$OUT/logs/panics/r${rotation}-${workload}-${backend}"
+				mkdir -p "$pdir"
+				cp "$f" "$pdir/" 2>/dev/null || true
+			fi
+		done
+	done
+	WL_N[$key]=$n
+	WL_PASS[$key]=$k
+}
+
+# Tier 3 phase runner. Spawns $WORKERS parallel single-worker
+# `umlctl gate loop --workers 1` invocations, each with a per-worker
+# /30 carve-out from 192.168.42.0/24. Each worker has a unique TAP
+# (soak-tap0..soak-tap{N-1}) and a unique host_ip/guest_ip pair.
+run_one_tier3_phase() {
+	local workload=$1 backend=$2 rotation=$3
+	local timeout_sec="${TIMEOUT_FOR[$workload]:-$DEFAULT_TIMEOUT}"
+	local out_dir="$OUT/_loop/${workload}-${backend}-r${rotation}"
+	mkdir -p "$out_dir"
+
+	thermal_check
+	local t_pre t_post
+	t_pre=$(read_max_temp_c)
+
+	local phase_t0 phase_t1
+	phase_t0=$(date +%s)
+
+	echo "[$(date -uIs)] phase: workload=$workload backend=$backend r=$rotation W=$WORKERS (tier3 per-worker fanout) M=$ITERS timeout=${timeout_sec}s temp=${t_pre}C"
+
+	local pids=() w toml w_out
+	for w in $(seq 0 $((WORKERS - 1))); do
+		toml="$OUT/_${workload}-${backend}-w${w}.toml"
+		emit_tier3_worker_toml \
+			"$SOAK_DIR/${workload}.toml.template" \
+			"$w" "$backend" "$toml"
+		w_out="$out_dir/w${w}"
+		mkdir -p "$w_out"
+		if [ -n "$DRY_RUN" ]; then
+			echo "  [dry-run] worker $w: $UMLCTL gate loop -f $toml -W 1 -M $ITERS --timeout $timeout_sec --out $w_out (host=192.168.42.$((4*w+1)) guest=192.168.42.$((4*w+2)) tap=soak-tap${w})"
+			mkdir -p "$w_out/p0_default/w0"
+			echo "REPRO_DONE rc=0" > "$w_out/p0_default/w0/run-0.log"
+		else
+			"$UMLCTL" gate loop -f "$toml" -W 1 -M "$ITERS" \
+				--timeout "$timeout_sec" --out "$w_out" \
+				>"$w_out/_loop.log" 2>&1 &
+			pids+=($!)
+		fi
+	done
+
+	# Wait for all per-worker invocations. We do not propagate
+	# child exit codes — verdicts come from per-iter log scraping.
+	local pid
+	for pid in "${pids[@]}"; do
+		wait "$pid" 2>/dev/null || true
+	done
+
+	phase_t1=$(date +%s)
+	t_post=$(read_max_temp_c)
+	echo "  phase elapsed=$((phase_t1 - phase_t0))s temp_post=${t_post}C"
+
+	process_tier3_phase_results \
+		"$workload" "$backend" "$rotation" \
+		"$out_dir" "$t_pre" "$t_post"
+	sleep "$COOLDOWN"
+}
+
 run_one_phase() {
 	local workload=$1 backend=$2 rotation=$3
+
+	if is_tier3_workload "$workload"; then
+		run_one_tier3_phase "$workload" "$backend" "$rotation"
+		return
+	fi
+
 	local timeout_sec="${TIMEOUT_FOR[$workload]:-$DEFAULT_TIMEOUT}"
 	local toml="$OUT/_${workload}-${backend}.toml"
 	sed -e "s|{{KERNEL}}|$UML_KERNEL|g" -e "s|{{BACKEND}}|$backend|g" \
