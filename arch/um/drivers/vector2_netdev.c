@@ -110,6 +110,18 @@ static int um_vec2_open_backend(struct um_vec2_dev *vdev)
 	case UM_VEC2_TRANSPORT_FD:
 		return um_vec2_fd_open(vdev);
 	default:
+		/*
+		 * The cmdline parser accepts seven additional transports
+		 * (raw/gre/l2tpv3/hybrid/bess/vde/proxy) for forward
+		 * compatibility + KUnit coverage of transport-specific
+		 * keys, but only TAP and FD have runtime backends today.
+		 * Surface that explicitly here rather than the bare
+		 * -EOPNOTSUPP that downstream ip-link sees as "operation
+		 * not supported".  See audit P4.2.
+		 */
+		pr_err("vec2.%u transport=%s is parsed but not implemented; use transport=tap or transport=fd\n",
+		       vdev->unit,
+		       um_vec2_transport_name(vdev->cfg.transport));
 		return -EOPNOTSUPP;
 	}
 }
