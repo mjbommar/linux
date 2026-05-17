@@ -30,6 +30,9 @@ static const struct net_device_ops um_vec2_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
+static void um_vec2_stop_datapath(struct net_device *dev,
+				  struct um_vec2_dev *vdev);
+
 static int um_vec2_open_backend(struct um_vec2_dev *vdev)
 {
 	switch (vdev->cfg.transport) {
@@ -56,11 +59,25 @@ static void um_vec2_close_backend(struct um_vec2_dev *vdev)
 	}
 }
 
-static struct um_vec2_channel *um_vec2_first_channel(struct um_vec2_dev *vdev)
+unsigned int um_vec2_netdev_queue_count(const struct um_vec2_dev *vdev)
+{
+	if (!vdev->cfg.queues)
+		return 1;
+	return vdev->cfg.queues;
+}
+
+static struct um_vec2_channel *
+um_vec2_channel_for_mapping(struct um_vec2_dev *vdev, unsigned int mapping)
 {
 	if (!vdev->channels || !vdev->num_channels)
 		return NULL;
-	return &vdev->channels[0];
+	return &vdev->channels[mapping % vdev->num_channels];
+}
+
+static struct um_vec2_channel *
+um_vec2_channel_for_skb(struct um_vec2_dev *vdev, const struct sk_buff *skb)
+{
+	return um_vec2_channel_for_mapping(vdev, skb_get_queue_mapping(skb));
 }
 
 static void um_vec2_tx_complete_skb(void *owner, unsigned int len,
@@ -140,7 +157,7 @@ static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
 						       um_vec2_tx_complete_skb,
 						       dev);
 		if (tx_done > 0) {
-			netif_wake_queue(dev);
+			netif_wake_subqueue(dev, channel->index);
 			netif_trans_update(dev);
 		}
 		tx_more = !um_vec2_tx_ring_empty(&queue->tx);
@@ -194,7 +211,7 @@ complete:
 	return rx_done;
 
 backend_dead:
-	netif_stop_queue(dev);
+	netif_tx_stop_all_queues(dev);
 	netif_carrier_off(dev);
 	if (rx_done < 0)
 		rx_done = 0;
@@ -205,11 +222,15 @@ backend_dead:
 
 static irqreturn_t um_vec2_rx_interrupt(int irq, void *dev_id)
 {
-	struct net_device *dev = dev_id;
-	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
-	struct um_vec2_channel *channel = um_vec2_first_channel(vdev);
+	struct um_vec2_channel *channel = dev_id;
+	struct um_vec2_dev *vdev;
+	struct net_device *dev;
 
-	if (!channel || !channel->napi_enabled || !netif_running(dev))
+	if (!channel)
+		return IRQ_NONE;
+	vdev = channel->vdev;
+	dev = vdev->netdev;
+	if (!dev || !channel->napi_enabled || !netif_running(dev))
 		return IRQ_NONE;
 	um_vec2_stat_inc(vdev, UM_VEC2_STAT_RX_IRQS);
 	napi_schedule(&channel->napi);
@@ -218,11 +239,15 @@ static irqreturn_t um_vec2_rx_interrupt(int irq, void *dev_id)
 
 static irqreturn_t um_vec2_tx_interrupt(int irq, void *dev_id)
 {
-	struct net_device *dev = dev_id;
-	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
-	struct um_vec2_channel *channel = um_vec2_first_channel(vdev);
+	struct um_vec2_channel *channel = dev_id;
+	struct um_vec2_dev *vdev;
+	struct net_device *dev;
 
-	if (!channel || !channel->napi_enabled || !netif_running(dev))
+	if (!channel)
+		return IRQ_NONE;
+	vdev = channel->vdev;
+	dev = vdev->netdev;
+	if (!dev || !channel->napi_enabled || !netif_running(dev))
 		return IRQ_NONE;
 	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_IRQS);
 	napi_schedule(&channel->napi);
@@ -232,101 +257,108 @@ static irqreturn_t um_vec2_tx_interrupt(int irq, void *dev_id)
 static int um_vec2_start_datapath(struct net_device *dev,
 				  struct um_vec2_dev *vdev)
 {
-	struct um_vec2_channel *channel = um_vec2_first_channel(vdev);
-	int fd;
+	struct um_vec2_channel *channel;
+	unsigned int i;
 	int ret;
 
 	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
 		return 0;
-	if (!channel || !channel->host || !channel->queue)
+	if (!vdev->channels || !vdev->num_channels)
 		return -EINVAL;
 
-	netif_napi_add_weight(dev, &channel->napi, um_vec2_netdev_poll,
-			      um_vec2_napi_weight(vdev));
-	channel->napi_added = true;
+	for (i = 0; i < vdev->num_channels; i++) {
+		int fd;
 
-	fd = um_vec2_tap_fd(channel);
-	if (fd < 0) {
-		ret = fd;
-		goto out_del_napi;
+		channel = &vdev->channels[i];
+		if (!channel->host || !channel->queue) {
+			ret = -EINVAL;
+			goto out_stop_started;
+		}
+
+		netif_napi_add_weight(dev, &channel->napi,
+				      um_vec2_netdev_poll,
+				      um_vec2_napi_weight(vdev));
+		channel->napi_added = true;
+
+		fd = um_vec2_tap_fd(channel);
+		if (fd < 0) {
+			ret = fd;
+			goto out_stop_started;
+		}
+
+		ret = um_request_irq(UM_IRQ_ALLOC, fd, IRQ_READ,
+				     um_vec2_rx_interrupt, IRQF_SHARED,
+				     dev->name, channel);
+		if (ret < 0)
+			goto out_stop_started;
+
+		channel->rx_irq = ret;
+		if (!i)
+			dev->irq = ret;
+
+		ret = um_request_irq(UM_IRQ_ALLOC, fd, IRQ_WRITE,
+				     um_vec2_tx_interrupt, IRQF_SHARED,
+				     dev->name, channel);
+		if (ret < 0)
+			goto out_stop_started;
+
+		channel->tx_irq = ret;
+
+		ret = um_vec2_chan_transition(&channel->life,
+					      UM_VEC2_CHAN_IRQ_ATTACHED);
+		if (ret)
+			goto out_stop_started;
+
+		napi_enable(&channel->napi);
+		channel->napi_enabled = true;
+
+		ret = um_vec2_chan_transition(&channel->life,
+					      UM_VEC2_CHAN_NAPI_ENABLED);
+		if (ret)
+			goto out_stop_started;
+
+		ret = um_vec2_chan_transition(&channel->life,
+					      UM_VEC2_CHAN_ACTIVE);
+		if (ret)
+			goto out_stop_started;
 	}
-
-	ret = um_request_irq(UM_IRQ_ALLOC, fd,
-			     IRQ_READ, um_vec2_rx_interrupt, IRQF_SHARED,
-			     dev->name, dev);
-	if (ret < 0)
-		goto out_del_napi;
-
-	channel->rx_irq = ret;
-	dev->irq = ret;
-
-	ret = um_request_irq(UM_IRQ_ALLOC, fd,
-			     IRQ_WRITE, um_vec2_tx_interrupt, IRQF_SHARED,
-			     dev->name, dev);
-	if (ret < 0)
-		goto out_free_rx_irq;
-
-	channel->tx_irq = ret;
-
-	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_IRQ_ATTACHED);
-	if (ret)
-		goto out_free_tx_irq;
-
-	napi_enable(&channel->napi);
-	channel->napi_enabled = true;
-
-	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_NAPI_ENABLED);
-	if (ret)
-		goto out_disable_napi;
-
-	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ACTIVE);
-	if (ret)
-		goto out_disable_napi;
 
 	return 0;
 
-out_disable_napi:
-	if (channel->napi_enabled) {
-		napi_disable(&channel->napi);
-		channel->napi_enabled = false;
-	}
-out_free_tx_irq:
-	um_free_irq(channel->tx_irq, dev);
-	channel->tx_irq = UM_VEC2_NO_IRQ;
-out_free_rx_irq:
-	um_free_irq(channel->rx_irq, dev);
-	channel->rx_irq = UM_VEC2_NO_IRQ;
-	dev->irq = 0;
-out_del_napi:
-	netif_napi_del(&channel->napi);
-	channel->napi_added = false;
+out_stop_started:
+	um_vec2_stop_datapath(dev, vdev);
 	return ret;
 }
 
 static void um_vec2_stop_datapath(struct net_device *dev,
 				  struct um_vec2_dev *vdev)
 {
-	struct um_vec2_channel *channel = um_vec2_first_channel(vdev);
+	unsigned int i;
 
-	if (!channel)
+	if (!vdev->channels || !vdev->num_channels)
 		return;
 
-	if (channel->napi_enabled) {
-		napi_disable(&channel->napi);
-		channel->napi_enabled = false;
-	}
-	if (channel->rx_irq != UM_VEC2_NO_IRQ) {
-		um_free_irq(channel->rx_irq, dev);
-		channel->rx_irq = UM_VEC2_NO_IRQ;
-		dev->irq = 0;
-	}
-	if (channel->tx_irq != UM_VEC2_NO_IRQ) {
-		um_free_irq(channel->tx_irq, dev);
-		channel->tx_irq = UM_VEC2_NO_IRQ;
-	}
-	if (channel->napi_added) {
-		netif_napi_del(&channel->napi);
-		channel->napi_added = false;
+	for (i = 0; i < vdev->num_channels; i++) {
+		struct um_vec2_channel *channel = &vdev->channels[i];
+
+		if (channel->napi_enabled) {
+			napi_disable(&channel->napi);
+			channel->napi_enabled = false;
+		}
+		if (channel->rx_irq != UM_VEC2_NO_IRQ) {
+			um_free_irq(channel->rx_irq, channel);
+			channel->rx_irq = UM_VEC2_NO_IRQ;
+			if (!i)
+				dev->irq = 0;
+		}
+		if (channel->tx_irq != UM_VEC2_NO_IRQ) {
+			um_free_irq(channel->tx_irq, channel);
+			channel->tx_irq = UM_VEC2_NO_IRQ;
+		}
+		if (channel->napi_added) {
+			netif_napi_del(&channel->napi);
+			channel->napi_added = false;
+		}
 	}
 }
 
@@ -360,7 +392,7 @@ int um_vec2_netdev_open(struct net_device *dev)
 		goto out;
 
 	netif_carrier_off(dev);
-	netif_stop_queue(dev);
+	netif_tx_stop_all_queues(dev);
 
 	ret = um_vec2_open_backend(vdev);
 	if (ret) {
@@ -388,9 +420,13 @@ int um_vec2_netdev_open(struct net_device *dev)
 	}
 
 	if (vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP) {
+		unsigned int i;
+
 		netif_carrier_on(dev);
-		netif_start_queue(dev);
-		napi_schedule(&um_vec2_first_channel(vdev)->napi);
+		netif_tx_start_all_queues(dev);
+		for (i = 0; i < vdev->num_channels; i++)
+			napi_schedule(&vdev->channels[i].napi);
+		ret = 0;
 	}
 
 out:
@@ -406,7 +442,7 @@ int um_vec2_netdev_stop(struct net_device *dev)
 	int ret = 0;
 
 	mutex_lock(&vdev->lock);
-	netif_stop_queue(dev);
+	netif_tx_stop_all_queues(dev);
 	netif_carrier_off(dev);
 
 	switch (vdev->life.state) {
@@ -451,7 +487,7 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 		return NETDEV_TX_OK;
 	}
 
-	channel = um_vec2_first_channel(vdev);
+	channel = um_vec2_channel_for_skb(vdev, skb);
 	if (!channel || !channel->host || !channel->queue) {
 		dev->stats.tx_dropped++;
 		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
@@ -462,7 +498,7 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 	queue = channel->queue;
 	spin_lock(&queue->tx_lock);
 	if (um_vec2_tx_ring_full(&queue->tx)) {
-		netif_stop_queue(dev);
+		netif_stop_subqueue(dev, channel->index);
 		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_BUSY);
 		spin_unlock(&queue->tx_lock);
 		return NETDEV_TX_BUSY;
@@ -477,7 +513,7 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 		return NETDEV_TX_OK;
 	}
 	if (um_vec2_tx_ring_full(&queue->tx))
-		netif_stop_queue(dev);
+		netif_stop_subqueue(dev, channel->index);
 	spin_unlock(&queue->tx_lock);
 
 	napi_schedule(&channel->napi);
@@ -511,16 +547,25 @@ void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
 int um_vec2_netdev_register(struct um_vec2_dev *vdev)
 {
 	struct net_device *dev;
+	unsigned int queues;
 	int ret;
 
 	if (vdev->life.state != UM_VEC2_DEV_CONFIGURED)
 		return -EINVAL;
 
-	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), 1, 1);
+	queues = um_vec2_netdev_queue_count(vdev);
+	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), queues,
+				 queues);
 	if (!dev)
 		return -ENOMEM;
 
 	um_vec2_netdev_init(vdev, dev);
+	ret = netif_set_real_num_tx_queues(dev, queues);
+	if (ret)
+		goto out_free_netdev;
+	ret = netif_set_real_num_rx_queues(dev, queues);
+	if (ret)
+		goto out_free_netdev;
 
 	rtnl_lock();
 	ret = register_netdevice(dev);
@@ -533,7 +578,7 @@ int um_vec2_netdev_register(struct um_vec2_dev *vdev)
 		goto out_unregister_netdev;
 
 	vdev->netdev = dev;
-	vdev->num_channels = 1;
+	vdev->registered_queues = queues;
 	pr_info("registered netdev %s for vec2.%u\n", dev->name, vdev->unit);
 	return 0;
 
@@ -552,6 +597,7 @@ void um_vec2_netdev_unregister(struct um_vec2_dev *vdev)
 		return;
 
 	vdev->netdev = NULL;
+	vdev->registered_queues = 0;
 	unregister_netdev(dev);
 	free_netdev(dev);
 }

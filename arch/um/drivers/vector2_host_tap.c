@@ -287,7 +287,7 @@ static int um_vec2_tap_read_skb(struct um_vec2_tap_host *taphost,
 	return skb->len;
 }
 
-static int um_vec2_tap_create_fd(const char *ifname)
+static int um_vec2_tap_create_fd(const char *ifname, bool multi_queue)
 {
 	struct ifreq ifr = {};
 	int offload = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
@@ -300,6 +300,8 @@ static int um_vec2_tap_create_fd(const char *ifname)
 		return fd;
 
 	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR;
+	if (multi_queue)
+		ifr.ifr_flags |= IFF_MULTI_QUEUE;
 	strscpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 
 	ret = os_ioctl_generic(fd, TUNSETIFF, (unsigned long)&ifr);
@@ -321,38 +323,21 @@ out_close:
 	return ret;
 }
 
-/*
- * Attach an already-open TAP-like fd to @vdev.  The fd is consumed only after
- * this helper returns 0; callers remain responsible for closing it on failure.
- */
-int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
+static int um_vec2_tap_channel_attach_fd(struct um_vec2_dev *vdev,
+					 struct um_vec2_channel *channel,
+					 unsigned int index, int fd)
 {
 	struct um_vec2_tap_host *taphost;
-	struct um_vec2_channel *channel;
 	struct net_device *dev = vdev->netdev;
 	int ret;
 
-	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
-		return -EINVAL;
-	if (fd < 0)
-		return -EBADF;
-	if (!dev)
-		return -ENODEV;
-	if (vdev->channels)
-		return -EBUSY;
-
-	channel = kzalloc_obj(*channel);
-	if (!channel)
-		return -ENOMEM;
-
 	taphost = kzalloc_obj(*taphost);
-	if (!taphost) {
-		ret = -ENOMEM;
-		goto out_free_channel;
-	}
+	if (!taphost)
+		return -ENOMEM;
 
 	um_vec2_chan_lifecycle_init(&channel->life);
 	channel->vdev = vdev;
+	channel->index = index;
 	channel->rx_irq = UM_VEC2_NO_IRQ;
 	channel->tx_irq = UM_VEC2_NO_IRQ;
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
@@ -371,15 +356,69 @@ int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
 
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_FD_ATTACHED);
 	if (ret)
-		goto out_free_host;
+		goto out_free_queue;
+
+	return 0;
+
+out_free_queue:
+	channel->host = NULL;
+	um_vec2_tap_queue_free(channel, dev);
+out_free_host:
+	kfree(taphost);
+	return ret;
+}
+
+static void um_vec2_tap_channel_close(struct um_vec2_channel *channel,
+				      struct net_device *dev)
+{
+	struct um_vec2_tap_host *taphost;
+
+	if (!channel)
+		return;
+
+	taphost = channel->host ? um_vec2_host_to_tap(channel->host) : NULL;
+	if (um_vec2_chan_can_transition(channel->life.state,
+					UM_VEC2_CHAN_QUIESCING))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
+	um_vec2_tap_host_close(taphost);
+	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
+
+	um_vec2_tap_queue_free(channel, dev);
+	kfree(taphost);
+}
+
+/*
+ * Attach an already-open TAP-like fd to @vdev.  The fd is consumed only after
+ * this helper returns 0; callers remain responsible for closing it on failure.
+ */
+int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
+{
+	struct um_vec2_channel *channel;
+	struct net_device *dev = vdev->netdev;
+	int ret;
+
+	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
+		return -EINVAL;
+	if (fd < 0)
+		return -EBADF;
+	if (!dev)
+		return -ENODEV;
+	if (vdev->channels)
+		return -EBUSY;
+
+	channel = kzalloc_obj(*channel);
+	if (!channel)
+		return -ENOMEM;
+
+	ret = um_vec2_tap_channel_attach_fd(vdev, channel, 0, fd);
+	if (ret)
+		goto out_free_channel;
 
 	vdev->channels = channel;
 	vdev->num_channels = 1;
 	return 0;
 
-out_free_host:
-	um_vec2_tap_queue_free(channel, dev);
-	kfree(taphost);
 out_free_channel:
 	kfree(channel);
 	return ret;
@@ -387,7 +426,9 @@ out_free_channel:
 
 int um_vec2_tap_open(struct um_vec2_dev *vdev)
 {
-	int fd;
+	struct um_vec2_channel *channels;
+	unsigned int queues;
+	unsigned int i;
 	int ret;
 
 	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
@@ -399,14 +440,38 @@ int um_vec2_tap_open(struct um_vec2_dev *vdev)
 		return -EOPNOTSUPP;
 	if (!vdev->cfg.ifname[0])
 		return -EINVAL;
+	if (vdev->channels)
+		return -EBUSY;
 
-	fd = um_vec2_tap_create_fd(vdev->cfg.ifname);
-	if (fd < 0)
-		return fd;
+	queues = um_vec2_netdev_queue_count(vdev);
+	channels = kcalloc(queues, sizeof(*channels), GFP_KERNEL);
+	if (!channels)
+		return -ENOMEM;
 
-	ret = um_vec2_tap_attach_fd(vdev, fd);
-	if (ret)
-		os_close_file(fd);
+	for (i = 0; i < queues; i++) {
+		int fd;
+
+		fd = um_vec2_tap_create_fd(vdev->cfg.ifname, queues > 1);
+		if (fd < 0) {
+			ret = fd;
+			goto out_close_channels;
+		}
+
+		ret = um_vec2_tap_channel_attach_fd(vdev, &channels[i], i, fd);
+		if (ret) {
+			os_close_file(fd);
+			goto out_close_channels;
+		}
+	}
+
+	vdev->channels = channels;
+	vdev->num_channels = queues;
+	return 0;
+
+out_close_channels:
+	while (i--)
+		um_vec2_tap_channel_close(&channels[i], vdev->netdev);
+	kfree(channels);
 	return ret;
 }
 
@@ -423,23 +488,15 @@ int um_vec2_tap_fd(struct um_vec2_channel *channel)
 
 void um_vec2_tap_close(struct um_vec2_dev *vdev)
 {
-	struct um_vec2_channel *channel = vdev->channels;
-	struct um_vec2_tap_host *taphost;
+	struct um_vec2_channel *channels = vdev->channels;
+	unsigned int i;
 
-	if (!channel)
+	if (!channels)
 		return;
 
-	taphost = channel->host ? um_vec2_host_to_tap(channel->host) : NULL;
-	if (um_vec2_chan_can_transition(channel->life.state,
-					UM_VEC2_CHAN_QUIESCING))
-		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
-	um_vec2_tap_host_close(taphost);
-	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
-		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
-
-	um_vec2_tap_queue_free(channel, vdev->netdev);
-	kfree(taphost);
-	kfree(channel);
+	for (i = 0; i < vdev->num_channels; i++)
+		um_vec2_tap_channel_close(&channels[i], vdev->netdev);
+	kfree(channels);
 	vdev->channels = NULL;
 	vdev->num_channels = 0;
 }

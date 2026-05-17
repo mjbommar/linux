@@ -17,6 +17,7 @@ The stable selection surface is:
 [network]
 mode = "tap"
 driver = "vector2"
+queues = 1
 ```
 
 For one-off comparison runs, the CLI override is preferred:
@@ -24,6 +25,14 @@ For one-off comparison runs, the CLI override is preferred:
 ```sh
 umlctl up -f tier3-django.toml --network-driver vector2 --dry-run
 umlctl gate loop -f tier3-django.toml --sweep network.driver=vector,vector2 -W 1 -M 30
+```
+
+For multiqueue TAP experiments:
+
+```sh
+umlctl up -f tier3-django.toml --network-driver vector2 --network-queues 2 --dry-run
+umlctl gate loop -f tier3-django.toml --network-driver vector2 --network-queues 2 -W 1 -M 1
+umlctl gate loop -f tier3-django.toml --network-driver vector2 --sweep network.queues=1,2 -W 1 -M 10
 ```
 
 The override and sweep write into the generated Umlfile's `[network]`

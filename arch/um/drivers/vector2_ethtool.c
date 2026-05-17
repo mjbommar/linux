@@ -267,34 +267,40 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 	data[UM_VEC2_ETHTOOL_STAT_BACKEND_DEAD] =
 		um_vec2_stat_read(vdev, UM_VEC2_STAT_BACKEND_DEAD);
 
-	channel = vdev->channels;
-	queue = channel ? channel->queue : NULL;
-	if (!queue)
-		goto out;
+	for (channel = vdev->channels;
+	     channel && channel < vdev->channels + vdev->num_channels;
+	     channel++) {
+		queue = channel->queue;
+		if (!queue)
+			continue;
 
-	spin_lock(&queue->tx_lock);
-	data[UM_VEC2_ETHTOOL_STAT_TX_RING_DEPTH] = queue->tx.depth;
-	data[UM_VEC2_ETHTOOL_STAT_TX_RING_USED] = queue->tx.count;
-	data[UM_VEC2_ETHTOOL_STAT_TX_RING_MAX_USED] = queue->tx.max_count;
-	data[UM_VEC2_ETHTOOL_STAT_TX_RING_ENQUEUED] = queue->tx.enqueued;
-	data[UM_VEC2_ETHTOOL_STAT_TX_RING_COMPLETED] = queue->tx.completed;
-	data[UM_VEC2_ETHTOOL_STAT_TX_RING_RELEASED] = queue->tx.released;
-	spin_unlock(&queue->tx_lock);
+		spin_lock(&queue->tx_lock);
+		data[UM_VEC2_ETHTOOL_STAT_TX_RING_DEPTH] += queue->tx.depth;
+		data[UM_VEC2_ETHTOOL_STAT_TX_RING_USED] += queue->tx.count;
+		data[UM_VEC2_ETHTOOL_STAT_TX_RING_MAX_USED] +=
+			queue->tx.max_count;
+		data[UM_VEC2_ETHTOOL_STAT_TX_RING_ENQUEUED] +=
+			queue->tx.enqueued;
+		data[UM_VEC2_ETHTOOL_STAT_TX_RING_COMPLETED] +=
+			queue->tx.completed;
+		data[UM_VEC2_ETHTOOL_STAT_TX_RING_RELEASED] +=
+			queue->tx.released;
+		spin_unlock(&queue->tx_lock);
 
-	spin_lock(&queue->rx_lock);
-	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_DEPTH] = queue->rx.depth;
-	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_FILLED] = queue->rx.filled;
-	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_PREPARED_TOTAL] =
-		queue->rx.prepared_total;
-	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RECEIVED_TOTAL] =
-		queue->rx.received_total;
-	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_CONSUMED_TOTAL] =
-		queue->rx.consumed_total;
-	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RELEASED_TOTAL] =
-		queue->rx.released_total;
-	spin_unlock(&queue->rx_lock);
+		spin_lock(&queue->rx_lock);
+		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_DEPTH] += queue->rx.depth;
+		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_FILLED] += queue->rx.filled;
+		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_PREPARED_TOTAL] +=
+			queue->rx.prepared_total;
+		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RECEIVED_TOTAL] +=
+			queue->rx.received_total;
+		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_CONSUMED_TOTAL] +=
+			queue->rx.consumed_total;
+		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RELEASED_TOTAL] +=
+			queue->rx.released_total;
+		spin_unlock(&queue->rx_lock);
+	}
 
-out:
 	mutex_unlock(&vdev->lock);
 }
 

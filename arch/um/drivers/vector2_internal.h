@@ -75,6 +75,7 @@ struct um_vec2_channel {
 	struct um_vec2_host *host;
 	struct um_vec2_queue_pair *queue;
 	struct napi_struct napi;
+	unsigned int index;
 	int rx_irq;
 	int tx_irq;
 	bool napi_added;
@@ -91,6 +92,7 @@ struct um_vec2_dev {
 	struct net_device *netdev;
 	struct um_vec2_channel *channels;
 	unsigned int num_channels;
+	unsigned int registered_queues;
 };
 
 struct um_vec2_netdev_priv {
@@ -137,6 +139,7 @@ int um_vec2_netdev_stop(struct net_device *dev);
 netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 				      struct net_device *dev);
 void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev);
+unsigned int um_vec2_netdev_queue_count(const struct um_vec2_dev *vdev);
 int um_vec2_netdev_register(struct um_vec2_dev *vdev);
 void um_vec2_netdev_unregister(struct um_vec2_dev *vdev);
 

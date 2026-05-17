@@ -119,7 +119,7 @@ static int __init um_vec2_configure_one(const struct um_vec2_cmdline_spec *spec,
 	pr_info("vec2.%u configured transport=%s mode=%s requested_queues=%u runtime_queues=%u depth=%u\n",
 		vdev->unit, um_vec2_transport_name(vdev->cfg.transport),
 		um_vec2_host_mode_name(vdev->cfg.mode), vdev->cfg.queues,
-		vdev->num_channels, vdev->cfg.depth);
+		vdev->registered_queues, vdev->cfg.depth);
 	return 0;
 }
 

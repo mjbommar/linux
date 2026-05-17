@@ -39,7 +39,7 @@ surface:
 - late-init typed config validation;
 - internal runtime device/channel/queue ownership structs;
 - v2 `struct net_device_ops`;
-- forced single-queue `alloc_etherdev_mqs()`;
+- netdev queue count driven by parsed `queues=N` for v2 TAP;
 - `register_netdevice()` for inspectable `vec2.<unit>` netdevs;
 - read-only `ethtool -i`;
 - `ndo_open()` failure unwind to `REGISTERED` with `-EOPNOTSUPP`;
@@ -60,7 +60,11 @@ surface:
 - trusted TAP ping smoke with repeated up/ping/down loops;
 - `umlctl` and soak-daemon selection for experimental v2 TAP through
   `network.driver = "vector2"`;
+- `umlctl` selection of experimental v2 TAP queue count through
+  `[network] queues` and `--network-queues`;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
+- live Tier 3 Django stdlib-shim success on seccomp through v2
+  `queues=2` TAP;
 - TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
@@ -74,7 +78,8 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on both seccomp and kvm-v2;
 - no repeated long soak loop;
-- no multiqueue runtime path;
+- no full multiqueue validation story: fd multiqueue, queue-to-CPU
+  policy, KCSAN, and queue distribution remain open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.
@@ -524,6 +529,36 @@ Validation:
 Exit gate:
 
 - v2 has the SMP shape required for the long-term replacement.
+
+R8a implementation note:
+
+- `25-uml-vector-driver-v2-r8a-tap-multiqueue.md` records the first
+  trusted TAP multiqueue checkpoint.
+- Implemented:
+  - v2 netdev registration uses parsed `queues=N`;
+  - trusted TAP opens one channel, queue pair, TAP fd, NAPI instance,
+    read IRQ, and write IRQ per configured queue;
+  - TAP fds use `IFF_MULTI_QUEUE` when `queues > 1`;
+  - TX maps `skb_get_queue_mapping()` to a v2 channel and uses subqueue
+    stop/wake for backpressure;
+  - ethtool queue counters aggregate across open channels;
+  - `umlctl` exposes `[network] queues`, `--network-queues`, and
+    `--sweep network.queues=...`;
+  - `umlctl` host setup and teardown use matching `multi_queue` TAP
+    flags for vector2 multiqueue.
+- Evidence collected:
+  - targeted vector2 object build;
+  - rebuilt runtime and KUnit UML kernels;
+  - `um_vector2_*` KUnit: 66/66 passed;
+  - `cargo test` for `uml-launcher`;
+  - direct `queues=2` TAP ping smoke: 3/3 ping, qdisc `mq`,
+    `MQ_OK`, `PASS=1/1`;
+  - `umlctl --network-queues 2` Tier 3 Django seccomp smoke:
+    `SERVER_READY`, `TIER3_OK`, `REPRO_DONE rc=0`,
+    `PASS=1/1`, TAP absent after teardown.
+- Therefore R8 is partially satisfied.  TAP has the first real
+  multiqueue runtime shape; fd multiqueue, queue distribution proof,
+  KCSAN, queue-to-CPU policy, and kvm-v2 evidence remain open.
 
 ### V2-R9 - Transport Parity
 

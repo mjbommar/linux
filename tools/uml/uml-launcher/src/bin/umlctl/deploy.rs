@@ -104,6 +104,8 @@ pub struct NetworkSection {
     pub mode: String,
     /// "vector" (legacy vec0) or "vector2" (experimental vec2.0).
     pub driver: String,
+    /// Number of guest/host queues. Values above 1 require vector2.
+    pub queues: u32,
     pub tap_name: String,
     pub guest_ip: String,
     pub host_ip: String,
@@ -132,6 +134,7 @@ impl Default for NetworkSection {
         Self {
             mode: "none".into(),
             driver: "vector".into(),
+            queues: 1,
             tap_name: "uml-tap0".into(),
             guest_ip: "10.7.0.2/24".into(),
             host_ip: "10.7.0.1/24".into(),
@@ -271,7 +274,27 @@ pub fn set_network_driver(uml: &mut Umlfile, driver: &str) -> Result<()> {
     if uml.network.mode != "tap" && driver != "vector" {
         bail!("network.driver is only meaningful when network.mode = 'tap'");
     }
+    if driver != "vector2" && uml.network.queues != 1 {
+        bail!("network.queues > 1 requires network.driver = 'vector2'");
+    }
     uml.network.driver = driver.to_string();
+    Ok(())
+}
+
+pub fn set_network_queues(uml: &mut Umlfile, queues: u32) -> Result<()> {
+    if queues == 0 {
+        bail!("network.queues must be >= 1");
+    }
+    if queues > 1024 {
+        bail!("network.queues must be <= 1024");
+    }
+    if uml.network.mode != "tap" && queues != 1 {
+        bail!("network.queues is only meaningful when network.mode = 'tap'");
+    }
+    if uml.network.driver != "vector2" && queues != 1 {
+        bail!("network.queues > 1 requires network.driver = 'vector2'");
+    }
+    uml.network.queues = queues;
     Ok(())
 }
 
@@ -282,6 +305,18 @@ fn validate_network_section(net: &NetworkSection) -> Result<()> {
     validate_network_driver(&net.driver)?;
     if net.mode != "tap" && net.driver != "vector" {
         bail!("network.driver is only meaningful when network.mode = 'tap'");
+    }
+    if net.queues == 0 {
+        bail!("network.queues must be >= 1");
+    }
+    if net.queues > 1024 {
+        bail!("network.queues must be <= 1024");
+    }
+    if net.mode != "tap" && net.queues != 1 {
+        bail!("network.queues is only meaningful when network.mode = 'tap'");
+    }
+    if net.driver != "vector2" && net.queues != 1 {
+        bail!("network.queues > 1 requires network.driver = 'vector2'");
     }
     Ok(())
 }
@@ -319,18 +354,26 @@ pub fn parse_port_forward(s: &str) -> Result<(u16, u16, String)> {
 
 fn tap_network_plan(net: &NetworkSection) -> NetworkPlan {
     match net.driver.as_str() {
-        "vector2" => NetworkPlan {
-            driver: "vector2".into(),
-            guest_dev: "vec2.0".into(),
-            tap_name: net.tap_name.clone(),
-            transport: "tap".into(),
-            host_mode: "inproc".into(),
-            queue_count: 1,
-            kernel_arg: format!(
-                "vec2.0:transport=tap,mode=inproc,ifname={tap},depth=128",
-                tap = net.tap_name,
-            ),
-        },
+        "vector2" => {
+            let queue_arg = if net.queues > 1 {
+                format!(",queues={}", net.queues)
+            } else {
+                String::new()
+            };
+            NetworkPlan {
+                driver: "vector2".into(),
+                guest_dev: "vec2.0".into(),
+                tap_name: net.tap_name.clone(),
+                transport: "tap".into(),
+                host_mode: "inproc".into(),
+                queue_count: net.queues,
+                kernel_arg: format!(
+                    "vec2.0:transport=tap,mode=inproc,ifname={tap},depth=128{queue_arg}",
+                    tap = net.tap_name,
+                    queue_arg = queue_arg,
+                ),
+            }
+        }
         _ => NetworkPlan {
             driver: "vector".into(),
             guest_dev: "vec0".into(),
@@ -392,10 +435,16 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
 
         // Setup: ip tuntap add → addr → up → forwarding → MASQUERADE → port-forwards
         let user = std::env::var("USER").unwrap_or_else(|_| "uml".into());
+        let multi_queue = if plan.driver == "vector2" && plan.queue_count > 1 {
+            " multi_queue"
+        } else {
+            ""
+        };
         setup_steps.push(format!(
-            "ip tuntap add dev {tap} mode tap user {user}",
+            "ip tuntap add dev {tap} mode tap user {user}{multi_queue}",
             tap = net.tap_name,
             user = user,
+            multi_queue = multi_queue,
         ));
         setup_steps.push(format!(
             "ip addr add {host_ip} dev {tap}",
@@ -486,8 +535,9 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
         ));
         teardown_steps.push(format!("ip link set {tap} down", tap = net.tap_name,));
         teardown_steps.push(format!(
-            "ip tuntap del dev {tap} mode tap",
+            "ip tuntap del dev {tap} mode tap{multi_queue}",
             tap = net.tap_name,
+            multi_queue = multi_queue,
         ));
 
         // Vector cmdline arg (one big quoted token; the kernel sees it
@@ -904,6 +954,7 @@ path = "/tmp/uml-clean/linux"
         assert_eq!(u.runtime.mem, "512M");
         assert_eq!(u.network.mode, "none");
         assert_eq!(u.network.driver, "vector");
+        assert_eq!(u.network.queues, 1);
     }
 
     #[test]
@@ -1018,6 +1069,45 @@ tap_name = "soak-tap0"
     }
 
     #[test]
+    fn vector2_network_queues_render_multiqueue_plan() {
+        let mut u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+driver = "vector2"
+tap_name = "mq-tap0"
+queues = 4
+"#,
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        u.debug.log_dir = tmp.path().join("logs").display().to_string();
+
+        let s = render_init_script(&u).unwrap();
+        let compiled = compile(&u).unwrap();
+        let plan = tap_network_plan(&u.network);
+
+        assert!(s.contains("export UMLCTL_NETWORK_QUEUES='4'"));
+        assert!(compiled.setup_steps.iter().any(|step| step
+            .starts_with("ip tuntap add dev mq-tap0 mode tap user ")
+            && step.ends_with(" multi_queue")));
+        assert!(compiled
+            .teardown_steps
+            .iter()
+            .any(|step| step == "ip tuntap del dev mq-tap0 mode tap multi_queue"));
+        assert_eq!(plan.queue_count, 4);
+        assert_eq!(
+            plan.kernel_arg,
+            "vec2.0:transport=tap,mode=inproc,ifname=mq-tap0,depth=128,queues=4",
+        );
+    }
+
+    #[test]
     fn set_network_driver_validates_mode() {
         let mut u: Umlfile = toml::from_str(
             r#"
@@ -1038,6 +1128,32 @@ mode = "tap"
         u.network.mode = "none".into();
         assert!(set_network_driver(&mut u, "vector2").is_err());
         assert!(set_network_driver(&mut u, "bogus").is_err());
+    }
+
+    #[test]
+    fn set_network_queues_requires_vector2_tap() {
+        let mut u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+"#,
+        )
+        .unwrap();
+
+        assert!(set_network_queues(&mut u, 0).is_err());
+        assert!(set_network_queues(&mut u, 2).is_err());
+        set_network_driver(&mut u, "vector2").unwrap();
+        set_network_queues(&mut u, 2).unwrap();
+        assert_eq!(u.network.queues, 2);
+        assert!(set_network_driver(&mut u, "vector").is_err());
+
+        u.network.mode = "none".into();
+        assert!(set_network_queues(&mut u, 2).is_err());
     }
 
     #[test]

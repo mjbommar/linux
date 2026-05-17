@@ -37,8 +37,10 @@ static struct net_device *
 vector2_netdev_test_alloc(struct kunit *test, struct um_vec2_dev *vdev)
 {
 	struct net_device *dev;
+	unsigned int queues = um_vec2_netdev_queue_count(vdev);
 
-	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), 1, 1);
+	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), queues,
+				 queues);
 	KUNIT_ASSERT_NOT_NULL(test, dev);
 
 	um_vec2_netdev_init(vdev, dev);
@@ -121,11 +123,30 @@ static void vector2_netdev_xmit_drops_when_not_running_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_netdev_uses_configured_queue_count_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev;
+	struct net_device *dev;
+
+	vdev = vector2_netdev_test_alloc_vdev(test, 3);
+	vdev->cfg.queues = 4;
+	dev = vector2_netdev_test_alloc(test, vdev);
+
+	KUNIT_EXPECT_EQ(test, um_vec2_netdev_queue_count(vdev), 4U);
+	KUNIT_EXPECT_EQ(test, dev->num_tx_queues, 4U);
+	KUNIT_EXPECT_EQ(test, dev->real_num_tx_queues, 4U);
+	KUNIT_EXPECT_EQ(test, dev->num_rx_queues, 4U);
+	KUNIT_EXPECT_EQ(test, dev->real_num_rx_queues, 4U);
+
+	free_netdev(dev);
+}
+
 static struct kunit_case vector2_netdev_test_cases[] = {
 	KUNIT_CASE(vector2_netdev_name_and_mac_test),
 	KUNIT_CASE(vector2_netdev_open_unwinds_missing_backend_test),
 	KUNIT_CASE(vector2_netdev_stop_registered_is_safe_test),
 	KUNIT_CASE(vector2_netdev_xmit_drops_when_not_running_test),
+	KUNIT_CASE(vector2_netdev_uses_configured_queue_count_test),
 	{}
 };
 

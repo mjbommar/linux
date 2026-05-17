@@ -147,6 +147,7 @@ static void vector2_tap_attach_close_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, vdev->channels);
 	KUNIT_ASSERT_NOT_NULL(test, vdev->channels[0].host);
 	KUNIT_EXPECT_STREQ(test, vdev->channels[0].host->ops->name, "tap");
+	KUNIT_EXPECT_EQ(test, vdev->channels[0].index, 0U);
 	KUNIT_EXPECT_EQ(test, vdev->channels[0].life.state,
 			UM_VEC2_CHAN_FD_ATTACHED);
 	KUNIT_EXPECT_EQ(test, vdev->num_channels, 1U);

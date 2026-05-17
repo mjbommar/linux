@@ -283,6 +283,11 @@ struct GateLoopArgs {
     /// experimental vec2.0.
     #[arg(long = "network-driver", value_name = "vector|vector2")]
     network_driver: Option<String>,
+
+    /// Override `[network].queues` for every generated worker
+    /// Umlfile. Values above 1 require vector2.
+    #[arg(long = "network-queues", value_name = "N")]
+    network_queues: Option<u32>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -555,6 +560,11 @@ struct UpArgs {
     #[arg(long = "network-driver", value_name = "vector|vector2")]
     network_driver: Option<String>,
 
+    /// Override `[network].queues` without editing the Umlfile. Values
+    /// above 1 require vector2.
+    #[arg(long = "network-queues", value_name = "N")]
+    network_queues: Option<u32>,
+
     /// Wrap UML in `strace -f -s 256 -o <log_dir>/strace.log` to
     /// capture every host syscall the launcher makes. Overrides
     /// debug.strace in the Umlfile.
@@ -792,6 +802,10 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
     if let Some(driver) = args.network_driver.as_deref() {
         deploy::set_network_driver(&mut uml, driver)
             .with_context(|| format!("apply --network-driver {driver}"))?;
+    }
+    if let Some(queues) = args.network_queues {
+        deploy::set_network_queues(&mut uml, queues)
+            .with_context(|| format!("apply --network-queues {queues}"))?;
     }
 
     let compiled = deploy::compile(&uml).context("compile Umlfile")?;

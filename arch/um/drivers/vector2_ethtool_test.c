@@ -196,10 +196,67 @@ static void vector2_ethtool_xmit_drop_stats_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_ethtool_test_alloc_vdev(test, 3);
+	struct net_device *dev = vector2_ethtool_test_alloc_netdev(test, vdev);
+	struct um_vec2_channel *channels;
+	struct um_vec2_queue_pair *queues;
+	struct um_vec2_tx_desc *tx_desc;
+	struct um_vec2_rx_slot *rx_slot;
+	unsigned int count;
+	int tx_depth;
+	int rx_depth;
+	u64 *data;
+	unsigned int i;
+
+	channels = kunit_kcalloc(test, 2, sizeof(*channels), GFP_KERNEL);
+	queues = kunit_kcalloc(test, 2, sizeof(*queues), GFP_KERNEL);
+	tx_desc = kunit_kcalloc(test, 4, sizeof(*tx_desc), GFP_KERNEL);
+	rx_slot = kunit_kcalloc(test, 4, sizeof(*rx_slot), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, channels);
+	KUNIT_ASSERT_NOT_NULL(test, queues);
+	KUNIT_ASSERT_NOT_NULL(test, tx_desc);
+	KUNIT_ASSERT_NOT_NULL(test, rx_slot);
+
+	for (i = 0; i < 2; i++) {
+		channels[i].vdev = vdev;
+		channels[i].index = i;
+		channels[i].queue = &queues[i];
+		spin_lock_init(&queues[i].tx_lock);
+		spin_lock_init(&queues[i].rx_lock);
+		KUNIT_ASSERT_EQ(test,
+				um_vec2_tx_ring_init(&queues[i].tx,
+						     &tx_desc[i * 2], 2), 0);
+		KUNIT_ASSERT_EQ(test,
+				um_vec2_rx_batch_init(&queues[i].rx,
+						      &rx_slot[i * 2], 2), 0);
+	}
+	vdev->channels = channels;
+	vdev->num_channels = 2;
+
+	data = vector2_ethtool_test_stats(test, dev, &count);
+	tx_depth = vector2_ethtool_find_stat(test, dev, "tx_ring_depth");
+	rx_depth = vector2_ethtool_find_stat(test, dev, "rx_batch_depth");
+
+	KUNIT_ASSERT_GE(test, tx_depth, 0);
+	KUNIT_ASSERT_GE(test, rx_depth, 0);
+	KUNIT_ASSERT_LT(test, tx_depth, (int)count);
+	KUNIT_ASSERT_LT(test, rx_depth, (int)count);
+	KUNIT_EXPECT_EQ(test, data[tx_depth], 4ULL);
+	KUNIT_EXPECT_EQ(test, data[rx_depth], 4ULL);
+
+	vdev->channels = NULL;
+	vdev->num_channels = 0;
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 static struct kunit_case vector2_ethtool_test_cases[] = {
 	KUNIT_CASE(vector2_ethtool_stats_stopped_test),
 	KUNIT_CASE(vector2_ethtool_ring_policy_test),
 	KUNIT_CASE(vector2_ethtool_xmit_drop_stats_test),
+	KUNIT_CASE(vector2_ethtool_multiqueue_stats_aggregate_test),
 	{}
 };
 

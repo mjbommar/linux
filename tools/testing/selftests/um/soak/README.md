@@ -259,6 +259,7 @@ For direct `umlctl` comparisons without editing TOML, use:
 ```sh
 umlctl up -f tier3-django.toml --network-driver vector2 --dry-run
 umlctl gate loop -f tier3-django.toml --sweep network.driver=vector,vector2 -W 1 -M 30
+umlctl gate loop -f tier3-django.toml --network-driver vector2 --sweep network.queues=1,2 -W 1 -M 10
 ```
 
 `umlctl up --dry-run` prints a network plan with the selected guest
@@ -268,6 +269,9 @@ whether a run used legacy `vec0` or experimental `vec2.0`.
 Generated guest init scripts also export `UMLCTL_NETWORK_DRIVER` and
 `UMLCTL_NETDEV`, so workload phases can inspect the selected link
 without hard-coding legacy or v2 device names.
+For vector2 multiqueue experiments, `[network] queues = N` or
+`--network-queues N` adds `queues=N` to the v2 kernel argument and uses
+matching host `multi_queue` TAP setup/teardown.
 
 Design: `phase-J-tier3-design-2026-05-14.md`. The per-worker IP
 allocation carve-out in `run-soak-daemon.sh` landed in commit

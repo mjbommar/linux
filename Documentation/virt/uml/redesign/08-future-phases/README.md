@@ -197,6 +197,12 @@ parking-lot designs for future prioritization.
   phases, ready-timeout `run_id`/`init_log` correlation, gate-loop
   failed-start log preservation, and practical comparison commands.
   Not a commitment.
+- [25-uml-vector-driver-v2-r8a-tap-multiqueue.md](25-uml-vector-driver-v2-r8a-tap-multiqueue.md) —
+  R8 partial implementation note for trusted TAP multiqueue: parsed
+  `queues=N` reaches netdev registration, TAP opens one channel/fd/NAPI
+  pair per queue, TX maps by skb queue, `umlctl` exposes
+  `[network] queues` / `--network-queues`, and seccomp multiqueue smoke
+  evidence is recorded. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
