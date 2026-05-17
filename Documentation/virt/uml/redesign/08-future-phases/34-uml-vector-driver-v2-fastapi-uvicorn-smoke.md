@@ -130,11 +130,64 @@ UMLCTL_NETWORK_QUEUES=2
 No `SERVER_FAIL`, `VECTOR2_FASTAPI_FAIL`, Python traceback, kernel
 panic, or `BUG:` line was found in the 10 run logs.
 
+## Sandbox Audit
+
+Command:
+
+```sh
+rm -rf /tmp/um-vector-fastapi-audit
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux \
+  timeout 900s cargo run --manifest-path tools/uml/uml-launcher/Cargo.toml \
+    --bin umlctl -- gate loop \
+    -f tools/uml/uml-launcher/examples/vector2-fastapi-smoke.toml \
+    -W 1 -M 1 --timeout 240 \
+    --pass-marker VECTOR2_FASTAPI_OK \
+    --out /tmp/um-vector-fastapi-audit/loop \
+    --audit-vector-sandbox
+test ! -e /sys/class/net/v2fastapi0
+```
+
+Result:
+
+```text
+PASS=1/1 FAIL=0 TIMEOUT=0
+TAP_ABSENT
+UML_PROCESS_ABSENT
+```
+
+The saved run log again showed:
+
+```text
+requested_queues=2 runtime_queues=2
+UMLCTL_NETWORK_QUEUE_SPEC=auto
+UMLCTL_NETWORK_QUEUES=2
+3 packets transmitted, 3 received, 0% packet loss
+SERVER_READY
+FASTAPI_HTTP ok=51 fail=0
+VECTOR2_FASTAPI_OK
+REPRO_DONE rc=0
+```
+
+The gate preserved:
+
+```text
+/tmp/um-vector-fastapi-audit/loop/p0_default/w0/run-1.log
+/tmp/um-vector-fastapi-audit/loop/p0_default/w0/strace-1.log
+/tmp/um-vector-fastapi-audit/loop/p0_default/w0/strace-audit-1.log
+```
+
+The `strace-1.log` file contained 2068786 lines.  The audit log
+reported:
+
+```text
+vector sandbox strace audit passed: no host TAP open, TUNSETIFF, AF_PACKET, bpf(), or UML network-helper exec
+```
+
 ## Remaining Gate
 
 This closes only the "dependencies are available, run a real
 FastAPI/uvicorn vector2 seccomp smoke" item and adds short repetition
-evidence.  Remaining FastAPI work:
+evidence plus one audited sandbox run.  Remaining FastAPI work:
 
 - repeat the FastAPI smoke for a larger/longer soak count;
 - run the same workload after the kvm-v2 baseline readiness blocker is

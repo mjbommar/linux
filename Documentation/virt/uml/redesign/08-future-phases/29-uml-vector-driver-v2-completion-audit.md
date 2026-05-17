@@ -94,6 +94,12 @@ Validation evidence recorded in the checkpoint docs includes:
   gateway ping over `vec2.0`, `SERVER_READY`,
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
   `REPRO_DONE rc=0`, and no lingering `v2fastapi0`;
+- vector2 fd seccomp FastAPI + uvicorn with sandbox audit:
+  `PASS=1/1 FAIL=0 TIMEOUT=0`, `SERVER_READY`,
+  `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
+  `REPRO_DONE rc=0`, no lingering `v2fastapi0`, no UML/strace process
+  leak, and a 2068786-line strace with no host TAP open, `TUNSETIFF`,
+  `AF_PACKET`, `bpf()`, or UML network-helper exec;
 - both-drivers kernel compatibility for explicit vector2 syntax:
   legacy vector leaves `vec2.` and `vec2=` for vector2 while preserving
   legacy `vec2:` as old-driver unit 2; the short perf baseline showed
@@ -135,8 +141,8 @@ list is:
 - expand legacy-vs-v2 performance baselines and explain or accept the
   measured guest-to-host regression and mixed bidirectional results;
 - wire the vector sandbox audit gate into CI/preflight, run it on longer
-  workloads, and decide the guest userspace raw/netlink socket policy
-  for secure profiles;
+  workload repetitions, cover Django, and decide the guest userspace
+  raw/netlink socket policy for secure profiles;
 - run a repeated long soak with vector2 workloads;
 - decide and implement the legacy `vecN:` transition.
 

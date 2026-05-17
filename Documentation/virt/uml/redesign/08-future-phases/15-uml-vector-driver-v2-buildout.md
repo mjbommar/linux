@@ -136,6 +136,10 @@ shape, and inspectable ethtool surfaces:
   network-helper exec; the live auto-queue fd smoke passed
   `PASS=1/1 FAIL=0 TIMEOUT=0` through this gate with no TAP or UML
   process leak;
+- the real FastAPI + uvicorn vector2 fd smoke also passed the same
+  audit gate once: `PASS=1/1 FAIL=0 TIMEOUT=0`, `FASTAPI_HTTP ok=51
+  fail=0`, `VECTOR2_FASTAPI_OK`, no TAP or UML process leak, and a
+  2068786-line strace with no forbidden vector host operation;
 - TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
@@ -152,7 +156,8 @@ Missing runtime pieces:
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
   policy for guest userspace raw/netlink sockets visible in UML host
   traces; a local `umlctl gate loop --audit-vector-sandbox` gate exists
-  for the vector host path, but longer workload coverage remains open;
+  for the vector host path, including one FastAPI run, but longer
+  workload coverage remains open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.

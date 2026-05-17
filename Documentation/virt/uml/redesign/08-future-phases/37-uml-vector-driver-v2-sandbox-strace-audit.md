@@ -216,14 +216,46 @@ The saved audit log reported:
 vector sandbox strace audit passed: no host TAP open, TUNSETIFF, AF_PACKET, bpf(), or UML network-helper exec
 ```
 
+## FastAPI Audit Evidence
+
+The same gate was run against the real FastAPI + uvicorn vector2 smoke:
+
+```sh
+rm -rf /tmp/um-vector-fastapi-audit
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux \
+  timeout 900s cargo run --manifest-path tools/uml/uml-launcher/Cargo.toml \
+    --bin umlctl -- gate loop \
+    -f tools/uml/uml-launcher/examples/vector2-fastapi-smoke.toml \
+    -W 1 -M 1 --timeout 240 \
+    --pass-marker VECTOR2_FASTAPI_OK \
+    --out /tmp/um-vector-fastapi-audit/loop \
+    --audit-vector-sandbox
+```
+
+Result:
+
+```text
+[umlctl gate loop] w0 iter1: Pass
+==> default PASS=1/1 FAIL=0 TIMEOUT=0 rate=100.0% ... elapsed=37s
+TAP_ABSENT
+UML_PROCESS_ABSENT
+```
+
+The run log included `SERVER_READY`, `FASTAPI_HTTP ok=51 fail=0`,
+`VECTOR2_FASTAPI_OK`, `REPRO_DONE rc=0`, and
+`requested_queues=2 runtime_queues=2`.  The saved strace contained
+2068786 lines, and the audit log reported no host TAP open,
+`TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec.
+
 ## Remaining Gate
 
 The full sandbox replacement gate remains open until at least:
 
 - the strace scan is wired into CI or a standard preflight target;
-- audits cover longer runs and failure paths, not just a successful boot;
-- audits cover vector2 FastAPI/Django workloads and kvm-v2 once the
-  kvm-v2 readiness blocker is fixed;
+- audits cover longer runs and failure paths, not just successful
+  one-shot boots;
+- audits cover Django workloads and kvm-v2 once the kvm-v2 readiness
+  blocker is fixed;
 - guest userspace raw/netlink socket policy is stated explicitly for
   secure-execution profiles;
 - the old trusted in-process TAP path remains impossible in sandbox
