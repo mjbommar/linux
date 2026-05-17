@@ -24,6 +24,7 @@
 
 #define UM_VEC2_DRIVER_NAME	"uml-vector-v2"
 #define UM_VEC2_NAME_PREFIX	"vec2"
+#define UM_VEC2_NO_FD		(-1)
 #define UM_VEC2_NO_IRQ		(-1)
 
 enum um_vec2_stat_counter {
@@ -76,6 +77,8 @@ struct um_vec2_channel {
 	struct um_vec2_queue_pair *queue;
 	struct napi_struct napi;
 	unsigned int index;
+	int rx_fd;
+	int tx_fd;
 	int rx_irq;
 	int tx_irq;
 	bool napi_added;
@@ -127,11 +130,17 @@ int um_vec2_cmdline_for_each(int (*fn)(const struct um_vec2_cmdline_spec *spec,
 
 void um_vec2_ethtool_attach(struct net_device *dev);
 
+unsigned int um_vec2_runtime_frame_len(const struct net_device *dev,
+				       bool vnet_hdr);
+int um_vec2_queue_pair_alloc(struct um_vec2_channel *channel,
+			     unsigned int depth);
+void um_vec2_queue_pair_free(struct um_vec2_channel *channel,
+			     struct net_device *dev);
+
 int um_vec2_fd_open(struct um_vec2_dev *vdev);
 void um_vec2_fd_close(struct um_vec2_dev *vdev);
 int um_vec2_tap_open(struct um_vec2_dev *vdev);
 int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd);
-int um_vec2_tap_fd(struct um_vec2_channel *channel);
 void um_vec2_tap_close(struct um_vec2_dev *vdev);
 
 int um_vec2_netdev_open(struct net_device *dev);

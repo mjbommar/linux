@@ -4,11 +4,14 @@
 **Date:** 2026-05-17.
 
 This memo records the third runtime buildout checkpoint for vector
-networking v2.  R3 adds a trusted direct-fd host backend and lets
+networking v2.  R3 added a trusted direct-fd host backend and lets
 `ip link set vec2.0 up/down` succeed for `transport=fd,fd=<n>`.
 
-R3 still does not move packets.  The netdev remains `NO-CARRIER` after
-open and the queue remains stopped until the later datapath phase.
+The original R3 checkpoint did not move packets.  The later fd datapath
+follow-up in `27-uml-vector-driver-v2-fd-datapath.md` adds
+single-queue raw Ethernet TX/RX over an inherited fd.  Launcher-owned
+fd manifests, sandbox-safe fd authority, fd multiqueue, and fd
+performance profiles remain future work.
 
 The old `CONFIG_UML_NET_VECTOR` driver remains the production vector
 networking path.
@@ -104,15 +107,16 @@ R3_DOWN_RC=0
 R3_SHOW_AFTER_DOWN_RC=0
 ```
 
-After `ip link set vec2.0 up`, the device reports:
+In the original R3 open/close checkpoint, after
+`ip link set vec2.0 up`, the device reported:
 
 ```text
 <NO-CARRIER,BROADCAST,MULTICAST,UP>
 ```
 
-That is expected in R3 because fd attach succeeds but packet movement,
-carrier policy, NAPI, IRQ registration, and BQL are still future
-phases.
+That was expected in R3 because fd attach succeeded but packet
+movement, carrier policy, NAPI, IRQ registration, and BQL were still
+future phases.
 
 No R3 manual boot reported:
 
@@ -147,7 +151,10 @@ ok 7 um_vector2_netdev       pass:4  fail:0 skip:0 total:4
 ok 8 um_vector2_host_fd      pass:3  fail:0 skip:0 total:3
 ```
 
-Total: 55 passed, 0 failed.
+Total for the original R3 checkpoint: 55 passed, 0 failed.
+
+The fd datapath follow-up extends this suite to 68 total vector2 tests,
+including fd TX and RX packet movement over UNIX datagram fds.
 
 ## Build Matrix
 

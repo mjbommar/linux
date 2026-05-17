@@ -13,7 +13,6 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
-#include <linux/virtio_net.h>
 
 #include <irq_kern.h>
 #include <irq_user.h>
@@ -176,8 +175,9 @@ static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
 
 	rx_ctx.napi = napi;
 	rx_ctx.dev = dev;
-	rx_ctx.frame_len = dev->mtu + ETH_HLEN + VLAN_HLEN +
-			   sizeof(struct virtio_net_hdr);
+	rx_ctx.frame_len = um_vec2_runtime_frame_len(dev,
+						     vdev->cfg.transport ==
+						     UM_VEC2_TRANSPORT_TAP);
 
 	spin_lock(&queue->rx_lock);
 	rx_done = channel->host->ops->rx_batch(channel->host, &queue->rx,
@@ -261,14 +261,13 @@ static int um_vec2_start_datapath(struct net_device *dev,
 	unsigned int i;
 	int ret;
 
-	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
+	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP &&
+	    vdev->cfg.transport != UM_VEC2_TRANSPORT_FD)
 		return 0;
 	if (!vdev->channels || !vdev->num_channels)
 		return -EINVAL;
 
 	for (i = 0; i < vdev->num_channels; i++) {
-		int fd;
-
 		channel = &vdev->channels[i];
 		if (!channel->host || !channel->queue) {
 			ret = -EINVAL;
@@ -280,13 +279,13 @@ static int um_vec2_start_datapath(struct net_device *dev,
 				      um_vec2_napi_weight(vdev));
 		channel->napi_added = true;
 
-		fd = um_vec2_tap_fd(channel);
-		if (fd < 0) {
-			ret = fd;
+		if (channel->rx_fd == UM_VEC2_NO_FD ||
+		    channel->tx_fd == UM_VEC2_NO_FD) {
+			ret = -EBADF;
 			goto out_stop_started;
 		}
 
-		ret = um_request_irq(UM_IRQ_ALLOC, fd, IRQ_READ,
+		ret = um_request_irq(UM_IRQ_ALLOC, channel->rx_fd, IRQ_READ,
 				     um_vec2_rx_interrupt, IRQF_SHARED,
 				     dev->name, channel);
 		if (ret < 0)
@@ -296,7 +295,7 @@ static int um_vec2_start_datapath(struct net_device *dev,
 		if (!i)
 			dev->irq = ret;
 
-		ret = um_request_irq(UM_IRQ_ALLOC, fd, IRQ_WRITE,
+		ret = um_request_irq(UM_IRQ_ALLOC, channel->tx_fd, IRQ_WRITE,
 				     um_vec2_tx_interrupt, IRQF_SHARED,
 				     dev->name, channel);
 		if (ret < 0)
@@ -419,7 +418,8 @@ int um_vec2_netdev_open(struct net_device *dev)
 		goto out;
 	}
 
-	if (vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP) {
+	if (vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP ||
+	    vdev->cfg.transport == UM_VEC2_TRANSPORT_FD) {
 		unsigned int i;
 
 		netif_carrier_on(dev);

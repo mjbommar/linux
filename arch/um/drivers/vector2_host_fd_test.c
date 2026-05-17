@@ -5,7 +5,10 @@
 
 #include <kunit/test.h>
 #include <linux/etherdevice.h>
+#include <linux/if_ether.h>
 #include <linux/netdevice.h>
+#include <linux/skbuff.h>
+#include <linux/string.h>
 
 #include <os.h>
 
@@ -43,6 +46,7 @@ vector2_fd_test_alloc_netdev(struct kunit *test, struct um_vec2_dev *vdev)
 	KUNIT_ASSERT_NOT_NULL(test, dev);
 
 	um_vec2_netdev_init(vdev, dev);
+	vdev->netdev = dev;
 	return dev;
 }
 
@@ -59,6 +63,7 @@ static void vector2_fd_test_close_pipe(int *fds)
 static void vector2_fd_open_close_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 0);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
 	int fds[2] = { -1, -1 };
 
 	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
@@ -68,6 +73,7 @@ static void vector2_fd_open_close_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, um_vec2_fd_open(vdev), 0);
 	KUNIT_ASSERT_NOT_NULL(test, vdev->channels);
 	KUNIT_ASSERT_NOT_NULL(test, vdev->channels[0].host);
+	KUNIT_ASSERT_NOT_NULL(test, vdev->channels[0].queue);
 	KUNIT_EXPECT_STREQ(test, vdev->channels[0].host->ops->name, "fd");
 	KUNIT_EXPECT_EQ(test, vdev->channels[0].life.state,
 			UM_VEC2_CHAN_FD_ATTACHED);
@@ -78,11 +84,14 @@ static void vector2_fd_open_close_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
 
 	vector2_fd_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
 }
 
 static void vector2_fd_bad_fd_fails_closed_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 1);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
 
 	vdev->cfg.fd = INT_MAX;
 	vdev->cfg.has_fd = true;
@@ -90,6 +99,9 @@ static void vector2_fd_bad_fd_fails_closed_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, um_vec2_fd_open(vdev), -EBADF);
 	KUNIT_EXPECT_NULL(test, vdev->channels);
 	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+
+	vdev->netdev = NULL;
+	free_netdev(dev);
 }
 
 static void vector2_fd_netdev_open_stop_test(struct kunit *test)
@@ -106,20 +118,185 @@ static void vector2_fd_netdev_open_stop_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, um_vec2_netdev_open(dev), 0);
 	KUNIT_EXPECT_EQ(test, vdev->life.state, UM_VEC2_DEV_RUNNING);
 	KUNIT_EXPECT_NOT_NULL(test, vdev->channels);
-	KUNIT_EXPECT_FALSE(test, netif_carrier_ok(dev));
+	KUNIT_EXPECT_TRUE(test, netif_carrier_ok(dev));
 
 	KUNIT_EXPECT_EQ(test, um_vec2_netdev_stop(dev), 0);
 	KUNIT_EXPECT_EQ(test, vdev->life.state, UM_VEC2_DEV_REGISTERED);
 	KUNIT_EXPECT_NULL(test, vdev->channels);
 
+	vdev->netdev = NULL;
 	free_netdev(dev);
 	vector2_fd_test_close_pipe(fds);
+}
+
+struct vector2_fd_tx_trace {
+	unsigned int packets;
+	unsigned int bytes;
+};
+
+static void vector2_fd_tx_complete(void *owner, unsigned int len, void *cookie)
+{
+	struct vector2_fd_tx_trace *trace = cookie;
+	struct sk_buff *skb = owner;
+
+	trace->packets++;
+	trace->bytes += len;
+	dev_consume_skb_any(skb);
+}
+
+static struct sk_buff *vector2_fd_test_skb(struct kunit *test,
+					   struct net_device *dev,
+					   const u8 *payload,
+					   unsigned int len)
+{
+	struct sk_buff *skb;
+
+	skb = alloc_skb(len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+
+	skb_put_data(skb, payload, len);
+	skb->dev = dev;
+	skb->ip_summed = CHECKSUM_NONE;
+	return skb;
+}
+
+static void *vector2_fd_rx_alloc(unsigned int slot, void *cookie)
+{
+	struct net_device *dev = cookie;
+	struct sk_buff *skb;
+
+	skb = alloc_skb(dev->mtu + ETH_HLEN, GFP_KERNEL);
+	if (!skb)
+		return NULL;
+	skb->dev = dev;
+	return skb;
+}
+
+static void vector2_fd_rx_release(void *owner, unsigned int len, void *cookie)
+{
+	struct sk_buff *skb = owner;
+
+	dev_kfree_skb_any(skb);
+}
+
+struct vector2_fd_rx_trace {
+	struct kunit *test;
+	unsigned int packets;
+	unsigned int bytes;
+	u8 first_payload_byte;
+};
+
+static void vector2_fd_rx_consume(void *owner, unsigned int len, void *cookie)
+{
+	struct vector2_fd_rx_trace *trace = cookie;
+	struct sk_buff *skb = owner;
+
+	trace->packets++;
+	trace->bytes += len;
+	KUNIT_EXPECT_EQ(trace->test, skb->len, len);
+	KUNIT_EXPECT_EQ(trace->test, skb->data[ETH_HLEN],
+			trace->first_payload_byte);
+	dev_kfree_skb_any(skb);
+}
+
+static void vector2_fd_tx_batch_writes_frame_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 3);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
+	struct um_vec2_channel *channel;
+	struct vector2_fd_tx_trace trace = {};
+	u8 payload[ETH_HLEN + 8] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x00, 0x45, 0x00, 0x00, 0x08,
+		0x00, 0x00,
+	};
+	unsigned char frame[sizeof(payload)];
+	struct sk_buff *skb;
+	int fds[2] = { -1, -1 };
+	int ret;
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 0, 1), 0);
+	vdev->cfg.fd = fds[1];
+	vdev->cfg.has_fd = true;
+	KUNIT_ASSERT_EQ(test, um_vec2_fd_open(vdev), 0);
+	channel = &vdev->channels[0];
+
+	skb = vector2_fd_test_skb(test, dev, payload, sizeof(payload));
+	KUNIT_ASSERT_EQ(test,
+			um_vec2_tx_ring_enqueue(&channel->queue->tx, skb,
+						skb->len), 0);
+
+	ret = channel->host->ops->tx_batch(channel->host, &channel->queue->tx,
+					   1, vector2_fd_tx_complete,
+					   &trace);
+	KUNIT_EXPECT_EQ(test, ret, 1);
+	KUNIT_EXPECT_TRUE(test, um_vec2_tx_ring_empty(&channel->queue->tx));
+	KUNIT_EXPECT_EQ(test, trace.packets, 1U);
+	KUNIT_EXPECT_EQ(test, trace.bytes, (unsigned int)sizeof(payload));
+
+	ret = os_read_file(fds[0], frame, sizeof(frame));
+	KUNIT_EXPECT_EQ(test, ret, (int)sizeof(frame));
+	KUNIT_EXPECT_MEMEQ(test, frame, payload, sizeof(payload));
+
+	um_vec2_fd_close(vdev);
+	vector2_fd_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
+static void vector2_fd_rx_batch_reads_frame_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 4);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
+	struct um_vec2_channel *channel;
+	struct vector2_fd_rx_trace trace = {
+		.test = test,
+		.first_payload_byte = 0x45,
+	};
+	unsigned char frame[ETH_HLEN + 8] = {};
+	int fds[2] = { -1, -1 };
+	int ret;
+
+	memset(frame, 0xff, ETH_ALEN);
+	frame[ETH_ALEN] = 0x02;
+	frame[2 * ETH_ALEN] = 0x08;
+	frame[2 * ETH_ALEN + 1] = 0x00;
+	frame[ETH_HLEN] = 0x45;
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 0, 1), 0);
+	vdev->cfg.fd = fds[0];
+	vdev->cfg.has_fd = true;
+	KUNIT_ASSERT_EQ(test, um_vec2_fd_open(vdev), 0);
+	channel = &vdev->channels[0];
+
+	KUNIT_ASSERT_EQ(test, os_write_file(fds[1], frame, sizeof(frame)),
+			(int)sizeof(frame));
+
+	ret = channel->host->ops->rx_batch(channel->host, &channel->queue->rx,
+					   1, vector2_fd_rx_alloc,
+					   vector2_fd_rx_release, dev);
+	KUNIT_EXPECT_EQ(test, ret, 1);
+	KUNIT_EXPECT_EQ(test, channel->queue->rx.filled, 1U);
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_rx_batch_consume(&channel->queue->rx, 1,
+						 vector2_fd_rx_consume,
+						 &trace), 0);
+	KUNIT_EXPECT_EQ(test, trace.packets, 1U);
+	KUNIT_EXPECT_EQ(test, trace.bytes, (unsigned int)sizeof(frame));
+
+	um_vec2_fd_close(vdev);
+	vector2_fd_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
 }
 
 static struct kunit_case vector2_fd_test_cases[] = {
 	KUNIT_CASE(vector2_fd_open_close_test),
 	KUNIT_CASE(vector2_fd_bad_fd_fails_closed_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_test),
+	KUNIT_CASE(vector2_fd_tx_batch_writes_frame_test),
+	KUNIT_CASE(vector2_fd_rx_batch_reads_frame_test),
 	{}
 };
 

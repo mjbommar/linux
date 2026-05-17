@@ -47,6 +47,8 @@ surface:
 - `ip link set vec2.0 up/down` success for
   `CONFIG_UML_NET_VECTOR_V2_INPROC=y` plus
   `vec2.0:transport=fd,fd=<n>`;
+- single-queue trusted direct-fd packet movement over raw Ethernet
+  frames on an inherited datagram fd;
 - trusted TAP open through `/dev/net/tun`, `TUNSETIFF`, and explicit
   close unwind;
 - `ip link set vec2.0 up/down` success for
@@ -74,7 +76,6 @@ They still do not provide replacement-ready networking.
 
 Missing runtime pieces:
 
-- no fd packet movement;
 - no launcher-manifest fd path for sandbox mode;
 - no real timer-driven coalescing;
 - no feature negotiation;
@@ -407,6 +408,34 @@ R5 implementation note:
 - R5 is still single-queue trusted TAP only.  It does not satisfy fd
   datapath, sandbox helper/proxy, multiqueue, ethtool, performance, or
   Tier 3 replacement gates.
+
+R5 fd follow-up note:
+
+- `27-uml-vector-driver-v2-fd-datapath.md` records the first trusted
+  direct-fd packet path.
+- Implemented:
+  - shared runtime queue-pair allocation/free helpers used by TAP and
+    fd;
+  - per-channel `rx_fd` / `tx_fd` ownership so netdev datapath startup
+    is backend-neutral;
+  - single-queue fd TX over raw Ethernet frames from the v2 TX ring;
+  - single-queue fd RX into the v2 RX batch;
+  - nonblocking duplicate-fd handling;
+  - NAPI/read-IRQ/write-IRQ startup for fd channels;
+  - KUnit coverage for fd TX and RX packet movement.
+- Evidence collected:
+  - targeted object build for `vector2_runtime.o`,
+    `vector2_host_fd.o`, `vector2_host_tap.o`,
+    `vector2_netdev.o`, and fd/TAP host tests;
+  - rebuilt runtime and KUnit UML kernels;
+  - `um_vector2_*` KUnit: 68/68 passed;
+  - no-root manual fd datapath smoke using an inherited UNIX datagram
+    fd, a host ARP/ICMP responder, `ping -c 3`, and ethtool queue
+    counters showing both TX and RX movement.
+- Therefore direct-fd packet movement exists for the trusted
+  single-queue development path.  Launcher-owned fd manifests,
+  sandbox-safe fd authority, fd multiqueue, fd performance profiles,
+  and kvm-v2 fd evidence remain open.
 
 ### V2-R6 - ethtool, Stats, And Feature Policy
 
@@ -754,12 +783,12 @@ The next concrete work should be:
    Tier 3 workloads.
 
 Those first seven series have now taken v2 from parked scaffolding to an
-experimental inspectable netdev with trusted fd open/close, a working
-single-queue trusted TAP packet path, ethtool observability, and TAP
-write-side wakeups, plus an operator-facing `umlctl` selection path for
-Tier 3 experiments.  The next work is KVM-v2 Tier 3 readiness,
-host-to-guest TCP validation, long-soak proof, sandbox helper plumbing,
-and then multiqueue.
+experimental inspectable netdev with trusted fd and TAP packet paths,
+ethtool observability, and TAP write-side wakeups, plus an
+operator-facing `umlctl` selection path for Tier 3 experiments.  The
+next work is KVM-v2 Tier 3 readiness, host-to-guest TCP validation,
+long-soak proof, launcher-owned fd manifests, sandbox helper plumbing,
+and deeper multiqueue validation.
 
 ## Workstream Exit Summary
 

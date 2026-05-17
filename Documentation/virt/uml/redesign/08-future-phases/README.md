@@ -209,6 +209,11 @@ parking-lot designs for future prioritization.
   shape, KUnit coverage, live seccomp `queues=2` ethtool evidence, and
   a small parallel traffic smoke where both TAP queues move.
   Not a commitment.
+- [27-uml-vector-driver-v2-fd-datapath.md](27-uml-vector-driver-v2-fd-datapath.md) —
+  R5 follow-up implementation note for trusted single-queue direct-fd
+  packet movement: shared runtime queue helpers, raw Ethernet TX/RX
+  over an inherited fd, fd NAPI/IRQ startup, KUnit coverage, and a
+  no-root manual ARP/ICMP ping smoke. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

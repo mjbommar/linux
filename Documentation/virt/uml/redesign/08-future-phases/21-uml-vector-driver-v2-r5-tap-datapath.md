@@ -139,9 +139,8 @@ The new R5 TAP tests cover:
 
 ## Known Limits
 
-R5 deliberately does not claim:
+R5 deliberately did not claim:
 
-- fd datapath support;
 - sandbox-safe TAP datapath;
 - multiqueue;
 - batching with `sendmmsg()` or `recvmmsg()`;
@@ -152,6 +151,12 @@ R5 deliberately does not claim:
 - Tier 3 Django/FastAPI soak readiness.
 
 These are replacement blockers, not optional cleanup.
+
+The later fd datapath follow-up in
+`27-uml-vector-driver-v2-fd-datapath.md` adds trusted single-queue
+direct-fd packet movement.  Launcher-owned fd manifests,
+sandbox-safe fd authority, fd multiqueue, batching, and fd performance
+work remain replacement blockers.
 
 ## Next Required Phase
 

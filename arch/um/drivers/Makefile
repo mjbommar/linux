@@ -31,7 +31,7 @@ obj-$(CONFIG_UML_NET_VECTOR) += vector.o
 obj-$(CONFIG_UML_NET_VECTOR_V2) += vector2_cmdline.o vector2_core.o \
 				   vector2_ethtool.o vector2_host_fd.o \
 				   vector2_host_tap.o \
-				   vector2_netdev.o
+				   vector2_netdev.o vector2_runtime.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_CONFIG) += vector2_config.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_KUNIT) += vector2_config_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_QUEUE) += vector2_queue.o

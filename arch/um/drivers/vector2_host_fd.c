@@ -6,7 +6,12 @@
 #define pr_fmt(fmt) "uml-vector2-fd: " fmt
 
 #include <linux/container_of.h>
+#include <linux/etherdevice.h>
 #include <linux/errno.h>
+#include <linux/if_ether.h>
+#include <linux/kernel.h>
+#include <linux/netdevice.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
 
 #include <os.h>
@@ -15,6 +20,8 @@
 
 struct um_vec2_fd_host {
 	struct um_vec2_host host;
+	struct net_device *dev;
+	unsigned int frame_len;
 	int rx_fd;
 	int tx_fd;
 };
@@ -30,7 +37,38 @@ static int um_vec2_fd_tx_batch(struct um_vec2_host *host,
 			       um_vec2_queue_release_fn complete,
 			       void *cookie)
 {
-	return -EOPNOTSUPP;
+	struct um_vec2_fd_host *fdhost = um_vec2_host_to_fd(host);
+	unsigned int sent = 0;
+	int ret = 0;
+
+	while (sent < budget && !um_vec2_tx_ring_empty(ring)) {
+		const struct um_vec2_tx_desc *desc;
+		struct sk_buff *skb;
+
+		desc = um_vec2_tx_ring_peek(ring, 0);
+		if (!desc)
+			break;
+
+		skb = desc->owner;
+		ret = skb_linearize(skb);
+		if (ret)
+			return sent ? (int)sent : ret;
+
+		ret = os_write_file(fdhost->tx_fd, skb->data, skb->len);
+		if (ret == -EAGAIN || ret == -ENOBUFS)
+			break;
+		if (ret < 0)
+			return sent ? (int)sent : ret;
+		if (ret != skb->len)
+			return sent ? (int)sent : -EIO;
+
+		ret = um_vec2_tx_ring_complete(ring, 1, complete, cookie);
+		if (ret)
+			return sent ? (int)sent : ret;
+		sent++;
+	}
+
+	return sent;
 }
 
 static int um_vec2_fd_rx_batch(struct um_vec2_host *host,
@@ -38,7 +76,51 @@ static int um_vec2_fd_rx_batch(struct um_vec2_host *host,
 			       unsigned int budget, um_vec2_rx_alloc_fn alloc,
 			       um_vec2_queue_release_fn release, void *cookie)
 {
-	return -EOPNOTSUPP;
+	struct um_vec2_fd_host *fdhost = um_vec2_host_to_fd(host);
+	unsigned int lens[64];
+	unsigned int received = 0;
+	unsigned int i;
+	int ret;
+
+	if (!budget)
+		return 0;
+	if (budget > batch->depth)
+		return -EINVAL;
+	if (budget > ARRAY_SIZE(lens))
+		budget = ARRAY_SIZE(lens);
+
+	ret = um_vec2_rx_batch_prepare(batch, budget, alloc, release, cookie);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < budget; i++) {
+		struct sk_buff *skb = batch->slot[i].owner;
+		unsigned char *data;
+
+		data = skb_put(skb, fdhost->frame_len);
+		ret = os_read_file(fdhost->rx_fd, data, fdhost->frame_len);
+		if (ret == -EAGAIN)
+			break;
+		if (ret < 0)
+			goto complete;
+		if (ret < ETH_HLEN) {
+			ret = -EPROTO;
+			goto complete;
+		}
+
+		skb_trim(skb, ret);
+		skb->dev = fdhost->dev;
+		lens[received++] = skb->len;
+	}
+
+	ret = 0;
+
+complete:
+	if (um_vec2_rx_batch_complete(batch, received, lens, release, cookie))
+		return -EIO;
+	if (received)
+		return received;
+	return ret == -EAGAIN ? 0 : ret;
 }
 
 static const struct um_vec2_host_ops um_vec2_fd_host_ops = {
@@ -65,11 +147,16 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 {
 	struct um_vec2_fd_host *fdhost;
 	struct um_vec2_channel *channel;
+	struct net_device *dev = vdev->netdev;
 	int fd;
 	int ret;
 
 	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_FD || !vdev->cfg.has_fd)
 		return -EINVAL;
+	if (!dev)
+		return -ENODEV;
+	if (um_vec2_netdev_queue_count(vdev) != 1)
+		return -EOPNOTSUPP;
 	if (vdev->channels)
 		return -EBUSY;
 
@@ -82,25 +169,43 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 		ret = -ENOMEM;
 		goto out_free_channel;
 	}
+	fdhost->rx_fd = UM_VEC2_NO_FD;
+	fdhost->tx_fd = UM_VEC2_NO_FD;
 
 	um_vec2_chan_lifecycle_init(&channel->life);
 	channel->vdev = vdev;
+	channel->rx_fd = UM_VEC2_NO_FD;
+	channel->tx_fd = UM_VEC2_NO_FD;
 	channel->rx_irq = UM_VEC2_NO_IRQ;
 	channel->tx_irq = UM_VEC2_NO_IRQ;
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
 	if (ret)
 		goto out_free_host;
 
+	ret = um_vec2_queue_pair_alloc(channel, vdev->cfg.depth);
+	if (ret)
+		goto out_free_host;
+
 	fd = os_dup_file(vdev->cfg.fd);
 	if (fd < 0) {
 		ret = fd;
-		goto out_close_channel;
+		goto out_free_queue;
+	}
+
+	ret = os_set_fd_block(fd, 0);
+	if (ret) {
+		os_close_file(fd);
+		goto out_free_queue;
 	}
 
 	fdhost->host.ops = &um_vec2_fd_host_ops;
+	fdhost->dev = dev;
+	fdhost->frame_len = um_vec2_runtime_frame_len(dev, false);
 	fdhost->rx_fd = fd;
 	fdhost->tx_fd = fd;
 	channel->host = &fdhost->host;
+	channel->rx_fd = fd;
+	channel->tx_fd = fd;
 
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_FD_ATTACHED);
 	if (ret)
@@ -112,7 +217,11 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 
 out_close_fd:
 	um_vec2_fd_host_close(fdhost);
-out_close_channel:
+	channel->host = NULL;
+	channel->rx_fd = UM_VEC2_NO_FD;
+	channel->tx_fd = UM_VEC2_NO_FD;
+out_free_queue:
+	um_vec2_queue_pair_free(channel, dev);
 	if (um_vec2_chan_can_transition(channel->life.state,
 					UM_VEC2_CHAN_QUIESCING))
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
@@ -141,6 +250,10 @@ void um_vec2_fd_close(struct um_vec2_dev *vdev)
 	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
 
+	um_vec2_queue_pair_free(channel, vdev->netdev);
+	channel->host = NULL;
+	channel->rx_fd = UM_VEC2_NO_FD;
+	channel->tx_fd = UM_VEC2_NO_FD;
 	kfree(fdhost);
 	kfree(channel);
 	vdev->channels = NULL;
