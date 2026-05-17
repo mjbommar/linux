@@ -23,11 +23,11 @@ cite the earlier ones for context.
 |---|--------|------|-----------|--------------|--------|
 | 1 | `bpf-hygiene-v1/` | 2 patches | BPF | none | **ready** — patches staged, cover letter written |
 | 2 | `kmsan-arch-callback-rfc/` | 1 RFC patch | mm/kmsan | none (upstream-independent; see below) | **ready** (unblocked 2026-04-23 by D62; see §"Post-D62 update") |
-| 3 | `ftrace-notrace-generic-v1/` | 1 patch | tracing/ftrace | none (generic kthread notrace) | **prepared 2026-04-24** (task #194) — cover letter + patch + SUBMISSION-NOTES in-tree, ready for `git send-email` |
+| 3 | `ftrace-notrace-generic-v1/` | 1 patch | tracing/ftrace | none (generic kthread notrace) | **READY (regenerated 2026-05-14, commit `cdea7ace1893`)** — patch regen'd with `--unified=3` after the 2026-04-24 staged version tripped `git am --3way` "corrupt patch at line 63"; `git apply --check` and `git am --3way` both clean against `origin/master`. Operator action: `git send-email`. |
 | 4 | `backend-ops-abstraction-rfc/` | ~12 patches | arch/um | series 3 landed (ftrace clean) | **DRAFTED 2026-05-14** — cover letter + SUBMISSION-NOTES in-tree; awaiting on-branch series rebase before patches emit. |
 | 5 | `static-key-hot-paths-series/` | ~6 patches | arch/um | series 4 landed | **to write** — B-workstream gates |
 | 6 | `kprobes-ftrace-kfence-kcsan-profiles-series/` | ~20 patches across 4 sub-series | arch/um | series 4 + 5 landed | **to write** — C-01..C-05 + C-02 + C-03 |
-| 7 | `kvm-backend-series/` | ~15 patches | arch/um | series 4 + 5 landed; post-Phase III real run_userspace (task #162) shipped | **scoped 2026-04-24 (post-G8 / D70 GO)** — SUBMISSION-NOTES + cover-letter draft in-tree; actual patch emission still waits on series 4 landing + squash pass. See `kvm-backend-series/SUBMISSION-NOTES.md` + `0000-cover-letter.patch.md`. |
+| 7 | `kvm-backend-series/` | ~19 patches | arch/um | series 4 + 5 landed; Phase J DONE certificate | **COVER-LETTER REWRITTEN 2026-05-14 (commit `aaaa3ce70027`)** — `0000-cover-letter.patch.md` rebuilt end-to-end for v2 redesign (414 → 900 lines: per-CPU vCPU pool, KVM TDP, LSTAR gadget, in-guest systrap, 17-op backend-ops contract). SUBMISSION-NOTES + risk register refreshed (315 → 722 lines). Actual patch emission still BLOCKED by Phase J DONE certificate (24h soak ≥99.5% per workload). See `kvm-backend-series/SUBMISSION-NOTES.md` §"Pre-submission cleanups" + `0000-cover-letter.patch.md`. |
 
 ## Submission-order rationale
 
