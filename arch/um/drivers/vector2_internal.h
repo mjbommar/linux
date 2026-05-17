@@ -115,6 +115,12 @@ static inline void um_vec2_stat_inc(struct um_vec2_dev *vdev,
 	atomic64_inc(&vdev->stats.counter[counter]);
 }
 
+static inline u64 um_vec2_stat_inc_return(struct um_vec2_dev *vdev,
+					  enum um_vec2_stat_counter counter)
+{
+	return atomic64_inc_return(&vdev->stats.counter[counter]);
+}
+
 static inline u64 um_vec2_stat_read(const struct um_vec2_dev *vdev,
 				    enum um_vec2_stat_counter counter)
 {

@@ -82,6 +82,7 @@ struct um_vec2_config {
 	unsigned int mtu;
 	unsigned int queues;
 	unsigned int coalesce_usecs;
+	unsigned int fail_open_after;
 
 	bool batching;
 	bool gro;

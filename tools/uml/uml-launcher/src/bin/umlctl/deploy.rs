@@ -49,6 +49,7 @@ pub const LABEL_NETWORK_QUEUES: &str = "umlctl.network.queues";
 pub const LABEL_NETWORK_QUEUE_SPEC: &str = "umlctl.network.queue_spec";
 pub const LABEL_NETWORK_FD: &str = "umlctl.network.fd";
 pub const LABEL_NETWORK_FD_COUNT: &str = "umlctl.network.fd_count";
+pub const LABEL_NETWORK_FAIL_OPEN_AFTER: &str = "umlctl.network.fail_open_after";
 
 /// Top-level Umlfile. Fields with a `default` annotation are
 /// optional; the rest must be set or a parse error fires at
@@ -124,6 +125,9 @@ pub struct NetworkSection {
     /// Number of guest/host queues. `auto` resolves to runtime.ncpus.
     /// Values above 1, and `auto`, require vector2.
     pub queues: NetworkQueueSpec,
+    /// Optional vector2 fault-injection threshold for live open-unwind
+    /// validation. `N` fails the Nth and later netdev opens.
+    pub fail_open_after: Option<u32>,
     pub tap_name: String,
     pub guest_ip: String,
     pub host_ip: String,
@@ -145,6 +149,7 @@ pub struct NetworkPlan {
     pub host_mode: String,
     pub queue_spec: String,
     pub queue_count: u32,
+    pub fail_open_after: Option<u32>,
     pub kernel_arg: String,
     pub inherited_fd: Option<i32>,
     pub inherited_fd_count: u32,
@@ -242,6 +247,7 @@ impl Default for NetworkSection {
             driver: "vector".into(),
             host_mode: "auto".into(),
             queues: NetworkQueueSpec::default(),
+            fail_open_after: None,
             tap_name: "uml-tap0".into(),
             guest_ip: "10.7.0.2/24".into(),
             host_ip: "10.7.0.1/24".into(),
@@ -435,6 +441,9 @@ pub fn network_plan_labels(plan: &NetworkPlan) -> Vec<String> {
         format!("{LABEL_NETWORK_QUEUES}={}", plan.queue_count),
         format!("{LABEL_NETWORK_QUEUE_SPEC}={}", plan.queue_spec),
     ];
+    if let Some(fail_open_after) = plan.fail_open_after {
+        labels.push(format!("{LABEL_NETWORK_FAIL_OPEN_AFTER}={fail_open_after}"));
+    }
     if let Some(fd) = plan.inherited_fd {
         labels.push(format!("{LABEL_NETWORK_FD}={fd}"));
         labels.push(format!(
@@ -484,6 +493,14 @@ fn validate_network_section(net: &NetworkSection, runtime: &RuntimeSection) -> R
     if net.driver != "vector2" && net.host_mode == "fd" {
         bail!("network.host_mode = 'fd' requires network.driver = 'vector2'");
     }
+    if let Some(fail_open_after) = net.fail_open_after {
+        if fail_open_after == 0 {
+            bail!("network.fail_open_after must be >= 1");
+        }
+        if net.driver != "vector2" {
+            bail!("network.fail_open_after requires network.driver = 'vector2'");
+        }
+    }
     Ok(())
 }
 
@@ -531,6 +548,10 @@ pub fn parse_port_forward(s: &str) -> Result<(u16, u16, String)> {
 fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<NetworkPlan> {
     let queue_count = resolve_network_queues(net, runtime)?;
     let queue_spec = net.queues.label();
+    let fail_open_arg = net
+        .fail_open_after
+        .map(|attempt| format!(",fail_open_after={attempt}"))
+        .unwrap_or_default();
     match net.driver.as_str() {
         "vector2" => {
             let host_mode = match net.host_mode.as_str() {
@@ -552,10 +573,12 @@ fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<Ne
                     host_mode: "fd".into(),
                     queue_spec,
                     queue_count,
+                    fail_open_after: net.fail_open_after,
                     kernel_arg: format!(
-                        "vec2.0:transport=fd,mode=fd,fd={fd},depth=128{queue_arg}",
+                        "vec2.0:transport=fd,mode=fd,fd={fd},depth=128{queue_arg}{fail_open_arg}",
                         fd = VECTOR2_TAP_FD,
                         queue_arg = queue_arg,
+                        fail_open_arg = fail_open_arg,
                     ),
                     inherited_fd: Some(VECTOR2_TAP_FD),
                     inherited_fd_count: queue_count,
@@ -574,10 +597,12 @@ fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<Ne
                     host_mode: "inproc".into(),
                     queue_spec,
                     queue_count,
+                    fail_open_after: net.fail_open_after,
                     kernel_arg: format!(
-                        "vec2.0:transport=tap,mode=inproc,ifname={tap},depth=128{queue_arg}",
+                        "vec2.0:transport=tap,mode=inproc,ifname={tap},depth=128{queue_arg}{fail_open_arg}",
                         tap = net.tap_name,
                         queue_arg = queue_arg,
+                        fail_open_arg = fail_open_arg,
                     ),
                     inherited_fd: None,
                     inherited_fd_count: 0,
@@ -592,6 +617,7 @@ fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<Ne
             host_mode: "legacy-inproc".into(),
             queue_spec,
             queue_count: 1,
+            fail_open_after: None,
             kernel_arg: format!(
                 "vec0:transport=tap,ifname={tap},depth=128",
                 tap = net.tap_name,
@@ -1014,6 +1040,7 @@ fn render_network_metadata_exports(s: &mut String, uml: &Umlfile) -> Result<()> 
         ("UMLCTL_NETWORK_QUEUES", "0".to_string()),
         ("UMLCTL_NETWORK_FD", String::new()),
         ("UMLCTL_NETWORK_FD_COUNT", "0".to_string()),
+        ("UMLCTL_NETWORK_FAIL_OPEN_AFTER", String::new()),
     ];
 
     if uml.network.mode == "tap" {
@@ -1027,6 +1054,10 @@ fn render_network_metadata_exports(s: &mut String, uml: &Umlfile) -> Result<()> 
         } else {
             "0".to_string()
         };
+        let fail_open_after = plan
+            .fail_open_after
+            .map(|attempt| attempt.to_string())
+            .unwrap_or_default();
         rows = vec![
             ("UMLCTL_NETWORK_MODE", uml.network.mode.clone()),
             ("UMLCTL_NETWORK_DRIVER", plan.driver),
@@ -1041,6 +1072,7 @@ fn render_network_metadata_exports(s: &mut String, uml: &Umlfile) -> Result<()> 
             ("UMLCTL_NETWORK_QUEUES", plan.queue_count.to_string()),
             ("UMLCTL_NETWORK_FD", inherited_fd),
             ("UMLCTL_NETWORK_FD_COUNT", inherited_fd_count),
+            ("UMLCTL_NETWORK_FAIL_OPEN_AFTER", fail_open_after),
         ];
     }
 
@@ -1185,6 +1217,7 @@ path = "/tmp/uml-clean/linux"
         assert_eq!(u.network.driver, "vector");
         assert_eq!(u.network.host_mode, "auto");
         assert_eq!(u.network.queues, NetworkQueueSpec::Fixed(1));
+        assert_eq!(u.network.fail_open_after, None);
     }
 
     #[test]
@@ -1294,6 +1327,7 @@ tap_name = "soak-tap0"
         assert!(s.contains("export UMLCTL_NETWORK_QUEUES='1'"));
         assert!(s.contains("export UMLCTL_NETWORK_FD='200'"));
         assert!(s.contains("export UMLCTL_NETWORK_FD_COUNT='1'"));
+        assert!(s.contains("export UMLCTL_NETWORK_FAIL_OPEN_AFTER=''"));
         let plan = tap_network_plan(&u.network, &u.runtime).unwrap();
         assert_eq!(plan.driver, "vector2");
         assert_eq!(plan.guest_dev, "vec2.0");
@@ -1301,6 +1335,7 @@ tap_name = "soak-tap0"
         assert_eq!(plan.host_mode, "fd");
         assert_eq!(plan.queue_spec, "1");
         assert_eq!(plan.queue_count, 1);
+        assert_eq!(plan.fail_open_after, None);
         assert_eq!(plan.inherited_fd, Some(VECTOR2_TAP_FD));
         assert_eq!(plan.inherited_fd_count, 1);
         assert_eq!(
@@ -1311,6 +1346,37 @@ tap_name = "soak-tap0"
         assert!(labels.contains(&"umlctl.network.fd=200".to_string()));
         assert!(labels.contains(&"umlctl.network.fd_count=1".to_string()));
         assert!(labels.contains(&"umlctl.network.queue_spec=1".to_string()));
+    }
+
+    #[test]
+    fn vector2_network_fail_open_after_renders_kernel_arg_and_metadata() {
+        let u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+driver = "vector2"
+tap_name = "fail-open-tap0"
+fail_open_after = 2
+"#,
+        )
+        .unwrap();
+
+        let s = render_init_script(&u).unwrap();
+        let plan = tap_network_plan(&u.network, &u.runtime).unwrap();
+
+        assert_eq!(plan.fail_open_after, Some(2));
+        assert_eq!(
+            plan.kernel_arg,
+            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,fail_open_after=2",
+        );
+        assert!(s.contains("export UMLCTL_NETWORK_FAIL_OPEN_AFTER='2'"));
+        let labels = network_plan_labels(&plan);
+        assert!(labels.contains(&"umlctl.network.fail_open_after=2".to_string()));
     }
 
     #[test]
@@ -1542,6 +1608,31 @@ mode = "tap"
     }
 
     #[test]
+    fn network_fail_open_after_requires_vector2_and_positive_value() {
+        let mut u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "tap"
+"#,
+        )
+        .unwrap();
+
+        u.network.fail_open_after = Some(1);
+        assert!(validate_network_section(&u.network, &u.runtime).is_err());
+
+        u.network.driver = "vector2".into();
+        assert!(validate_network_section(&u.network, &u.runtime).is_ok());
+
+        u.network.fail_open_after = Some(0);
+        assert!(validate_network_section(&u.network, &u.runtime).is_err());
+    }
+
+    #[test]
     fn network_driver_rejects_unknown_value() {
         let r: Result<Umlfile, _> = toml::from_str(
             r#"
@@ -1592,6 +1683,7 @@ mode = "none"
         assert!(s.contains("export UMLCTL_NETWORK_QUEUES='0'"));
         assert!(s.contains("export UMLCTL_NETWORK_FD=''"));
         assert!(s.contains("export UMLCTL_NETWORK_FD_COUNT='0'"));
+        assert!(s.contains("export UMLCTL_NETWORK_FAIL_OPEN_AFTER=''"));
     }
 
     /// Init script ALWAYS exports default env even with no [env] section.

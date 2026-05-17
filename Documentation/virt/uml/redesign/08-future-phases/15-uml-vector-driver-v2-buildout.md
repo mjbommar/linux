@@ -121,6 +121,11 @@ shape, and inspectable ethtool surfaces:
   the guest repeatedly drives `vec2.0` through `ip link down/up`,
   verifies `open_attempts` and `closes` ethtool counter deltas, and the
   default 10,000-cycle run passed with clean TAP/process teardown;
+- live vector2 failed-open injection through `fail_open_after=N` and
+  `umlctl` `[network].fail_open_after`: the initial fd-handoff open
+  succeeds, the second `ip link set up` fails through the real
+  `ndo_open()` path, and the gate verifies expected open/failure/close
+  ethtool deltas plus registered closed state;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
@@ -179,9 +184,6 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
-- no live failed-open injection proof; the fd path has bounded KUnit
-  failure stress and successful 10,000-cycle runtime repetition, but no
-  runtime knob to intentionally fail selected opens;
 - no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
   now has an initial clean bidirectional pass plus three repeats with
   queue distribution, but
@@ -918,12 +920,12 @@ Fd failure-stress follow-up:
 - Evidence collected:
   - targeted object build for `vector2_host_fd_test.o`;
   - rebuilt KUnit UML kernel;
-  - `um_vector2_*` KUnit: 75/75 passed;
+  - `um_vector2_*` KUnit: 75/75 passed at that checkpoint;
   - no `not ok`, `FAILED`, `panic`, `BUG`, `WARNING`, `KCSAN`,
     `data-race`, or lockdep signatures in the captured KUnit log.
-- Therefore the unit-level fd failure-injection story is stronger, but
-  the replacement gate still needs live failed-open injection if
-  maintainers require runtime failure proof beyond KUnit.
+- Therefore the unit-level fd failure-injection story became stronger.
+  The later live failed-open checkpoint below supersedes the old runtime
+  proof gap and raises the vector2 KUnit total to 76/76.
 
 Lifecycle stress gate follow-up:
 
@@ -954,7 +956,35 @@ Lifecycle stress gate follow-up:
     leak.
 - Therefore the lifecycle gate now has a reusable runtime harness,
   smoke evidence, and one successful 10,000-cycle live repetition.
-  Runtime failed-open injection remains open.
+
+Live failed-open injection follow-up:
+
+- `43-uml-vector-driver-v2-failed-open-injection.md` records the runtime
+  failed-open proof.
+- Implemented:
+  - vector2 config parser support for `fail_open_after=N`;
+  - `um_vec2_netdev_open()` injection before the `OPENING` transition,
+    with existing `open_failures` accounting;
+  - `umlctl` `[network].fail_open_after` validation, vector2 kernel-arg
+    rendering, manifest label, and guest metadata export;
+  - `tools/uml/uml-launcher/examples/vector2-failed-open.toml`.
+- Evidence collected:
+  - targeted C object build for config, fd-host test, and netdev files;
+  - rebuilt KUnit UML kernel;
+  - `um_vector2_*` KUnit: 76/76 passed;
+  - `cargo test --manifest-path tools/uml/uml-launcher/Cargo.toml
+    deploy::tests`: 22 deploy tests passed;
+  - dry-run rendered
+    `vec2.0:transport=fd,mode=fd,fd=200,depth=128,fail_open_after=2`
+    and `UMLCTL_NETWORK_FAIL_OPEN_AFTER='2'`;
+  - live gate passed `PASS=1/1 FAIL=0 TIMEOUT=0`, with
+    `open_delta=1 fail_delta=1 close_delta=1`, state `RUNNING` to
+    `REGISTERED`, `VECTOR2_FAILED_OPEN_OK`, no warning/BUG/KCSAN
+    signatures in the runtime log, no lingering `v2failopen0`, and no
+    UML process leak.
+- Therefore the runtime failed-open proof is closed for the vector2 fd
+  handoff open path.  Broader repeated soaks, kvm-v2 reruns, and
+  performance/fairness disposition remain open.
 
 ### V2-R9 - Transport Parity
 

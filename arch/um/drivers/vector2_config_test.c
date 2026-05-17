@@ -66,6 +66,10 @@ static void vector2_config_trusted_tap_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, result.cfg->queues, 4U);
 	KUNIT_EXPECT_EQ(test, result.cfg->mtu, 9000U);
 
+	result = parse_cfg(test, "transport=proxy,fail_open_after=2", 0);
+	KUNIT_ASSERT_EQ(test, result.ret, 0);
+	KUNIT_EXPECT_EQ(test, result.cfg->fail_open_after, 2U);
+
 	result = parse_cfg(test, "transport=proxy,gro=1,gso=1,csum=1", 0);
 	KUNIT_ASSERT_EQ(test, result.ret, 0);
 	KUNIT_EXPECT_TRUE(test, result.cfg->gro);

@@ -304,9 +304,36 @@ static void vector2_fd_netdev_bad_fd_unwinds_closed_test(struct kunit *test)
 	free_netdev(dev);
 }
 
-static void vector2_fd_missing_config_repeats_closed_test(struct kunit *test)
+static void vector2_fd_injected_open_failure_stays_closed_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 10);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
+	int ret;
+
+	vdev->cfg.fail_open_after = 1;
+
+	ret = um_vec2_netdev_open(dev);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+	KUNIT_EXPECT_EQ(test, vdev->life.state, UM_VEC2_DEV_REGISTERED);
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+	KUNIT_EXPECT_FALSE(test, netif_carrier_ok(dev));
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS),
+			1ULL);
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_FAILURES),
+			1ULL);
+	KUNIT_EXPECT_EQ(test, um_vec2_stat_read(vdev, UM_VEC2_STAT_CLOSES),
+			0ULL);
+
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
+static void vector2_fd_missing_config_repeats_closed_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 11);
 	unsigned int i;
 
 	vdev->cfg.has_fd = false;
@@ -502,6 +529,7 @@ static struct kunit_case vector2_fd_test_cases[] = {
 	KUNIT_CASE(vector2_fd_netdev_open_stop_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_repeats_test),
 	KUNIT_CASE(vector2_fd_netdev_bad_fd_unwinds_closed_test),
+	KUNIT_CASE(vector2_fd_injected_open_failure_stays_closed_test),
 	KUNIT_CASE(vector2_fd_missing_config_repeats_closed_test),
 	KUNIT_CASE(vector2_fd_tx_batch_writes_frame_test),
 	KUNIT_CASE(vector2_fd_rx_batch_reads_frame_test),

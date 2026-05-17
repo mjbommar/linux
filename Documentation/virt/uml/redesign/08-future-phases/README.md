@@ -281,7 +281,8 @@ parking-lot designs for future prioritization.
   reusable `umlctl gate loop` Umlfile that repeats live
   `ip link down/up`, verifies ethtool open/close deltas, records a
   25-cycle smoke plus a 10,000-cycle pass with clean TAP/process
-  teardown, and leaves failed-open injection open. Not a commitment.
+  teardown, with failed-open injection closed later by checkpoint 43.
+  Not a commitment.
 - [40-uml-vector-driver-v2-kcsan-fastapi.md](40-uml-vector-driver-v2-kcsan-fastapi.md) —
   KCSAN workload evidence for vector2 fd handoff: runs the real
   FastAPI + uvicorn smoke under the KCSAN UML kernel, records
@@ -300,6 +301,14 @@ parking-lot designs for future prioritization.
   `PASS=30/30 FAIL=0 TIMEOUT=0`, all 30 runs reached `SERVER_READY`,
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`, clean teardown,
   and no warning/BUG/panic/failure signatures. Not a commitment.
+- [43-uml-vector-driver-v2-failed-open-injection.md](43-uml-vector-driver-v2-failed-open-injection.md) —
+  Live failed-open injection proof for vector2 fd handoff: adds the
+  explicit `fail_open_after` config and `umlctl` key, verifies
+  `um_vector2_*` KUnit 76/76, and records a live gate where the second
+  `ip link set up` fails through `ndo_open()` with expected
+  open/failure/close counters, registered state, clean TAP/process
+  teardown, and no warning/BUG/KCSAN/data-race signatures. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

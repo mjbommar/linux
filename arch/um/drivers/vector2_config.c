@@ -58,6 +58,7 @@ enum um_vec2_key_id {
 	UM_VEC2_KEY_PORT,
 	UM_VEC2_KEY_VDE_MODE,
 	UM_VEC2_KEY_GROUP,
+	UM_VEC2_KEY_FAIL_OPEN_AFTER,
 	UM_VEC2_KEY_UNKNOWN,
 };
 
@@ -205,6 +206,8 @@ static enum um_vec2_key_id um_vec2_key_id(const char *key)
 		return UM_VEC2_KEY_PORT;
 	if (!strcmp(key, "group"))
 		return UM_VEC2_KEY_GROUP;
+	if (!strcmp(key, "fail_open_after"))
+		return UM_VEC2_KEY_FAIL_OPEN_AFTER;
 	return UM_VEC2_KEY_UNKNOWN;
 }
 
@@ -502,6 +505,9 @@ static int um_vec2_parse_value(enum um_vec2_key_id id, const char *key,
 	case UM_VEC2_KEY_GROUP:
 		return um_vec2_copy_value(cfg->group, sizeof(cfg->group),
 					  key, value, err);
+	case UM_VEC2_KEY_FAIL_OPEN_AFTER:
+		return um_vec2_parse_uint_range(key, value, 0, UINT_MAX,
+						&cfg->fail_open_after, err);
 	default:
 		um_vec2_set_err(err, key, "unknown key");
 		return -EINVAL;

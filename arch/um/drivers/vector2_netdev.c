@@ -449,12 +449,23 @@ static int um_vec2_unwind_open(struct um_vec2_dev *vdev)
 int um_vec2_netdev_open(struct net_device *dev)
 {
 	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+	u64 attempt;
 	int ret;
 
 	mutex_lock(&vdev->lock);
-	um_vec2_stat_inc(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS);
+	attempt = um_vec2_stat_inc_return(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS);
 	if (!um_vec2_dev_can_open(&vdev->life)) {
 		ret = -EINVAL;
+		goto out;
+	}
+
+	if (vdev->cfg.fail_open_after &&
+	    attempt >= vdev->cfg.fail_open_after) {
+		netdev_info(dev,
+			    "vector v2 injected open failure at attempt %llu threshold %u\n",
+			    (unsigned long long)attempt,
+			    vdev->cfg.fail_open_after);
+		ret = -EIO;
 		goto out;
 	}
 
