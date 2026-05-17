@@ -1130,6 +1130,15 @@ KVM-v2 readiness follow-up:
     including one fatal Python `Executing a cache` abort in the
     readiness-probe helper, one abort of the background HTTP server
     before readiness, and one timeout during `django-up`;
+  - after that control was changed to dump all `KVMV2T` dmesg lines, a
+    rendered-template smoke still passed `PASS=1/1 FAIL=0 TIMEOUT=0`
+    and a delayed-classification 30-run reproduced the flake at
+    `PASS=27/30 FAIL=3 TIMEOUT=0`; one failure reached
+    `KVM_V2_TRACE_DUMP_BEGIN` and produced a partial state dump with
+    2956 parsed / 2955 complete entries out of 4854 declared entries,
+    one dispatch switch, one syscall switch, three mm-generation
+    backsteps, `regs_owner_mismatches: count=0`, and one critical
+    `tmm changed mid-dispatch` invariant hit;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics

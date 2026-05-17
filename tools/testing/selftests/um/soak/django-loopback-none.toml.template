@@ -65,7 +65,7 @@ dump_kvm_v2_trace() {
     if [ -w /sys/kernel/debug/um_kvm_v2_trace/dump ]; then
         echo KVM_V2_TRACE_DUMP_BEGIN
         echo 1 > /sys/kernel/debug/um_kvm_v2_trace/dump 2>/dev/null || true
-        dmesg | grep 'KVMV2T' | tail -n 400 2>/dev/null || true
+        dmesg | grep 'KVMV2T' 2>/dev/null || true
         echo KVM_V2_TRACE_DUMP_END
     fi
 }

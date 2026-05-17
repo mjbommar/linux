@@ -291,6 +291,15 @@ Validation evidence recorded in the checkpoint docs includes:
   abort of the background stdlib HTTP server before readiness, and a
   timeout during `django-up`.  This makes the KVM-v2 backend the blocker
   for vector2 KVM-v2 Tier 3 acceptance;
+- KVM-v2 no-network Django-loopback delayed trace capture:
+  after the reusable control was changed to dump all `KVMV2T` dmesg
+  lines, a rendered-template smoke passed `PASS=1/1 FAIL=0 TIMEOUT=0`
+  and a delayed-classification 30-run reproduced the flake at
+  `PASS=27/30 FAIL=3 TIMEOUT=0`; one failure produced a partial
+  state-trace dump with 2956 parsed / 2955 complete entries out of 4854
+  declared entries, one dispatch switch, one syscall switch, three
+  mm-generation backsteps, `regs_owner_mismatches: count=0`, and one
+  critical `tmm changed mid-dispatch` invariant hit;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -314,6 +323,9 @@ list is:
   userspace-corruption path;
 - repeat vector2 Tier 3 Django on kvm-v2 after the backend
   investigation until the flake rate is acceptably bounded;
+- capture a complete no-network Django-loopback state trace; the latest
+  delayed capture recovered useful task/mm evidence but missed the dump
+  end marker and did not include all declared entries;
 - decide whether the FastAPI/uvicorn 30/30 repetition is sufficient for
   the seccomp workload gate or extend it into hours-long/CI soaks;
 - validate queue-to-CPU policy under longer SMP traffic;

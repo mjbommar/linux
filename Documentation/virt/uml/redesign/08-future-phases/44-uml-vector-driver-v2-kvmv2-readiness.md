@@ -731,10 +731,52 @@ This is the strongest isolation result so far: vector2 fd/TAP setup is
 not required to reproduce the Django-shaped KVM-v2 failure.  The
 remaining vector2 KVM-v2 gate is blocked by the backend's
 userspace/process/socket workload stability, not by demonstrated
-vector2 queue or fd-handoff behavior.  A follow-up trace run should
-avoid fail-fast matching on `Fatal Python error` / `Aborted` so the
-guest shell can dump the state ring before `umlctl` tears the instance
-down.
+vector2 queue or fd-handoff behavior.
+
+The reusable template was then changed to copy all `KVMV2T` dmesg lines
+instead of only `tail -n 400`, and a smoke from the rendered template
+still passed `PASS=1/1 FAIL=0 TIMEOUT=0`.
+
+A delayed-classification rerun with fail-fast matching removed for
+`Fatal Python error` / `Aborted` reproduced the flake again:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/django-loopback-none-template-rendered-fulltrace.toml \
+    -W 1 -M 30 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --fail-marker 'SERVER_FAIL|TIER3_FAIL|kernel BUG|Kernel panic' \
+    --out /tmp/um-kvmv2-django-loopback-none-fulltrace-delayed-30
+
+PASS=27/30 FAIL=3 TIMEOUT=0
+```
+
+Iteration 9 reached the trace dump path.  The dump was still truncated
+before `KVM_V2_TRACE_DUMP_END`, but it captured substantially more state
+than the earlier `tail -n 400` control:
+
+```
+entries: parsed=2956 complete=2955
+dump_begin: reason=debugfs declared_entries=4854
+tlb_lag: count=30 max=993
+dispatch_switches: count=1
+syscall_switches: count=1
+mm_backsteps: count=3
+regs_owner_mismatches: count=0
+```
+
+The older invariant checker reported one critical pid/tmm violation:
+
+```
+INV10: tmm changed mid-dispatch: entry=6114e200 exit=6114e640
+```
+
+The two other failures in that rerun had empty copied run logs, so they
+were not useful for state analysis.  The partial trace nevertheless
+matches the earlier vector2 failure class: KVM-v2 task/mm ownership
+changes are visible, stale `uml_pt_regs` ownership is still ruled out,
+and vector2 is absent from the reproduction.
 
 ### Seccomp Control
 
@@ -778,9 +820,9 @@ simple Python import startup by itself.
 
 ## Next Work
 
-1. Capture a full KVM-v2 state trace from the no-network
-   Django-loopback control by letting the guest failure path dump the
-   ring before `umlctl` classifies the run as failed.
+1. Capture a complete KVM-v2 state trace from the no-network
+   Django-loopback control.  The latest delayed run captured 2956 parsed
+   entries out of a declared 4854, but still missed the dump end marker.
 2. Use the parsed iteration 21 `KVMV2T` dump to inspect the pid 161/1
    transition history, final syscall/page-fault sequence, and the large
    `mmgen - vlast` gap around `HANDLE_SYSCALL_POST`.
