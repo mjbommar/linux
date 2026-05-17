@@ -45,3 +45,10 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_marshal.o
 # tests; no kernel state assumed. Catches the off-by-8 IST-frame
 # read class of bugs that bit E.5 boot smoke + adjacent regressions.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_byteshape.o
+
+# Snapshot KUnit suite (memo 26-snapshot §Phase 2). Exercises the
+# Phase 1 capture/restore primitives against a live pool vCPU; the
+# suite_init fixture drives the lazy first-dispatch arming sequence
+# (CPUID + CR4.OSXSAVE + XCR0) on vcpus[0] so the snapshot ioctls
+# accept at KUnit run-time, before any user task has dispatched.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_snapshot.o

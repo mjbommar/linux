@@ -1247,6 +1247,90 @@ struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu)
 	return &vcpus[cpu];
 }
 
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
+/**
+ * kvm_v2_vcpu_prime_for_kunit - drive a pool vCPU through the lazy first-
+ *                               dispatch arming sequence without entering
+ *                               the guest.
+ * @v: pool entry to prime (typically &vcpus[0]).
+ *
+ * Snapshot Phase 2 (memo 26-snapshot §Phase 2) needs a vCPU on which
+ * KVM_GET_REGS / KVM_GET_SREGS / KVM_GET_XSAVE / KVM_GET_XCRS /
+ * KVM_GET_VCPU_EVENTS / KVM_GET_MSRS all succeed at KUnit run-time
+ * (do_basic_setup boundary). The KVM ioctls that constrain that
+ * timing are CR4.OSXSAVE (rejected before KVM_SET_CPUID2 installs
+ * the curated OSXSAVE bit) and KVM_SET_XCRS (rejected unless
+ * guest_supported_xcr0 advertises the bits). vcpu_run handles
+ * both via the lazy `if (!cpuid_primed)` block — we cannot reach
+ * that block at KUnit time because no user task has dispatched yet.
+ *
+ * This helper extracts the same priming sequence (KVM_SET_CPUID2 +
+ * GET_SREGS / SET_SREGS(cr4 |= OSXSAVE) + KVM_SET_XCRS) so the
+ * KUnit fixture can drive it explicitly. After a successful return
+ * the vCPU's `cpuid_primed = true`, and the snapshot capture +
+ * restore paths work end-to-end.
+ *
+ * Build-gated on CONFIG_UM_BACKEND_KVM_V2_KUNIT so it costs zero
+ * text in production builds.
+ *
+ * Returns 0 on success, -EINVAL if @v is unusable, -ENODEV if the VM
+ * isn't initialised, -errno on the first ioctl failure.
+ */
+int kvm_v2_vcpu_prime_for_kunit(struct kvm_v2_vcpu *v)
+{
+	struct kvm_v2_vm *vm;
+	struct kvm_sregs sregs2;
+	struct kvm_run *run;
+	int rc;
+
+	if (!v || v->vcpu_fd < 0 || !v->kvm_run)
+		return -EINVAL;
+	if (v->cpuid_primed)
+		return 0;
+	vm = kvm_v2_vm_get();
+	if (!vm)
+		return -ENODEV;
+
+	rc = kvm_v2_install_cpuid(vm, v->vcpu_fd);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 kunit prime: install_cpuid (cpu=%d) failed: %d\n",
+		       v->cpu, rc);
+		return rc;
+	}
+
+	rc = os_ioctl_generic(v->vcpu_fd, KVM_GET_SREGS,
+			      (unsigned long)&sregs2);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 kunit prime: GET_SREGS pre-OSXSAVE (cpu=%d) failed: %d\n",
+		       v->cpu, rc);
+		return rc;
+	}
+	sregs2.cr4 |= X86_CR4_OSXSAVE;
+	rc = os_ioctl_generic(v->vcpu_fd, KVM_SET_SREGS,
+			      (unsigned long)&sregs2);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 kunit prime: SET_SREGS+OSXSAVE (cpu=%d) failed: %d\n",
+		       v->cpu, rc);
+		return rc;
+	}
+	run = v->kvm_run;
+	run->s.regs.sregs.cr4 = sregs2.cr4;
+
+	rc = kvm_v2_install_xcrs(v->vcpu_fd);
+	if (rc < 0) {
+		pr_err("um: kvm-v2 kunit prime: install_xcrs (cpu=%d) failed: %d\n",
+		       v->cpu, rc);
+		return rc;
+	}
+
+	v->cpuid_primed = true;
+	pr_info("um: kvm-v2 kunit prime: vcpu_fd=%d primed (CPUID+OSXSAVE+XCR0)\n",
+		v->vcpu_fd);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_vcpu_prime_for_kunit);
+#endif /* CONFIG_UM_BACKEND_KVM_V2_KUNIT */
+
 /*
  * Phase B.5 / C.1: load guest CR3 on the supplied pool member.
  *

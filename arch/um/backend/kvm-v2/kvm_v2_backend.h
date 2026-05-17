@@ -822,4 +822,21 @@ int   kvm_v2_snapshot_capture(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_restore_full(struct kvm_v2_snapshot *snap);
 
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
+/*
+ * Snapshot Phase 2 (memo 26-snapshot §Phase 2): KUnit fixture hook
+ * that drives the lazy first-dispatch arming sequence (CPUID +
+ * CR4.OSXSAVE + XCR0=FP|SSE|YMM) on a pool entry, so snapshot tests
+ * have a vCPU whose KVM_GET_* / KVM_SET_* ioctls all accept at
+ * do_basic_setup time — before any user task has dispatched. After
+ * a successful return @v->cpuid_primed == true. Build-gated on
+ * CONFIG_UM_BACKEND_KVM_V2_KUNIT (zero text in production builds).
+ *
+ * Defined in vcpu.c so the priming logic stays co-located with the
+ * static helpers (kvm_v2_install_cpuid / kvm_v2_install_xcrs) it
+ * dispatches to.
+ */
+int kvm_v2_vcpu_prime_for_kunit(struct kvm_v2_vcpu *v);
+#endif /* CONFIG_UM_BACKEND_KVM_V2_KUNIT */
+
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */
