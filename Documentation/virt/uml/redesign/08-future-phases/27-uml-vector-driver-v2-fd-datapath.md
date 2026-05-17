@@ -118,12 +118,27 @@ fd_sandbox_marker=True
 fd_sandbox_rejected=False
 ```
 
+Launcher-owned TAP fd smoke:
+
+```text
+umlctl up ... --wait-for FD_HANDOFF_OK
+[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fd0 transport=fd host_mode=fd queues=1
+[umlctl] network-fd: open tap=v2fd0 and inherit as fd=200
+Kernel command line: ... vec2.0:transport=fd,mode=fd,fd=200,depth=128 ...
+uml-vector2: registered netdev vec2.0 for vec2.0
+uml-vector2: vec2.0 configured transport=fd mode=fd requested_queues=1 runtime_queues=1 depth=128
+3 packets transmitted, 3 received, 0% packet loss
+queue0_rx_batch_received_total: 24
+FD_HANDOFF_OK
+Device "v2fd0" does not exist.
+```
+
 ## Remaining Work
 
 This checkpoint does not close the fd replacement gates.  Remaining fd
 work includes:
 
-- live `umlctl up` smoke coverage for launcher-owned TAP fd handoff;
+- repeated live `umlctl up` fd-handoff coverage under gate loop;
 - stronger sandbox fd diagnostics when the referenced fd is missing or
   has the wrong type;
 - fd multiqueue;

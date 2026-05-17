@@ -225,8 +225,8 @@ parking-lot designs for future prioritization.
 - [30-uml-vector-driver-v2-umlctl-fd-handoff.md](30-uml-vector-driver-v2-umlctl-fd-handoff.md) —
   R7/R5 follow-up note for launcher-owned vector2 fd handoff:
   `network.host_mode`, default single-queue fd selection, manifest
-  labels, dry-run shape, sandbox boundary, validation, and current fd
-  multiqueue limitation. Not a commitment.
+  labels, dry-run shape, sandbox boundary, live `umlctl up` smoke
+  evidence, and current fd multiqueue limitation. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

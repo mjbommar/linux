@@ -71,6 +71,9 @@ shape, and inspectable ethtool surfaces:
 - `umlctl` `network.host_mode` / `--network-host-mode` selection;
 - launcher-owned vector2 single-queue TAP fd handoff through manifest
   labels and inherited fd 200;
+- live `umlctl up` single-queue vector2 fd-handoff smoke with
+  launcher-owned TAP inherited as fd 200, successful gateway ping,
+  ethtool queue counters, and clean TAP teardown;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
@@ -803,7 +806,7 @@ experimental inspectable netdev with trusted fd and TAP packet paths,
 ethtool observability, and TAP write-side wakeups, plus an
 operator-facing `umlctl` selection path for Tier 3 experiments.  The
 next work is KVM-v2 Tier 3 readiness, host-to-guest TCP validation,
-long-soak proof, live launcher-owned fd smokes, sandbox helper
+long-soak proof, repeated launcher-owned fd gates, sandbox helper
 plumbing, and deeper multiqueue validation.
 
 ## Workstream Exit Summary

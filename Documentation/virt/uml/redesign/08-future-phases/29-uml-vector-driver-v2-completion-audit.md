@@ -24,7 +24,7 @@ experimental netdev exists.
 | Register stable v2 netdev names | `vec2.<unit>` registration through `register_netdevice()`; runtime logs show `registered netdev vec2.0` | Done for v2 syntax |
 | `ip link set up/down` reaches modeled lifecycle | KUnit lifecycle tests; fd/TAP netdev open/stop tests; manual TAP/fd smokes | Partial: not 10,000-cycle failure-injection proof |
 | Single-queue trusted TAP packet path | R5 TAP datapath doc; ping smokes; Tier 3 seccomp 30/30 | Done for trusted TAP/seccomp |
-| Single-queue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` now records manifest labels and passes vector2 TAP as inherited fd 200 | Partial: needs live `umlctl up` fd-handoff smoke |
+| Single-queue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP as inherited fd 200; live `umlctl up` fd-handoff smoke passed | Done for single-queue fd |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
 | Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and FastAPI remain open |
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind | `um_vector2_*` KUnit passes 68/68 | Partial: coverage exists, but more failure injection remains |
@@ -57,6 +57,8 @@ Validation evidence recorded in the checkpoint docs includes:
 - `um_vector2_*` KUnit: 68/68 passed;
 - no-root fd ping over inherited UNIX datagram fd;
 - sandbox-only fd ping over inherited UNIX datagram fd;
+- live `umlctl up` vector2 fd handoff over TAP fd 200, with
+  `FD_HANDOFF_OK` and clean TAP teardown;
 - vector2 TAP seccomp Tier 3 Django stdlib shim: 30/30 passed;
 - vector2 TAP `queues=2` seccomp smoke and queue distribution evidence;
 - TAP teardown checks showing no lingering `soak-tap0`.
@@ -69,7 +71,6 @@ list is:
 - fix the separate kvm-v2 baseline readiness blocker;
 - rerun vector2 Tier 3 Django 30/30 on kvm-v2 after that fix;
 - run FastAPI/uvicorn variant if dependencies are available;
-- run live `umlctl up` coverage for launcher-owned TAP fd handoff;
 - add fd multiqueue;
 - define queue-to-CPU policy and validate under SMP;
 - run KCSAN on multiqueue traffic;

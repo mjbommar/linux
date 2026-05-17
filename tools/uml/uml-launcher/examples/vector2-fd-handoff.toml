@@ -1,0 +1,76 @@
+# umlctl Umlfile - minimal vector2 fd-handoff smoke.
+#
+# This is the shortest useful vector2 networking example:
+# umlctl creates the host TAP, opens it in the launcher, and passes
+# the TAP as inherited fd 200 to the UML vector2 driver.
+#
+# Usage:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml \
+#       --wait-for VECTOR2_FD_HANDOFF_OK
+#
+# Inspect first:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml --dry-run
+#
+# Tear down:
+#   umlctl down -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml --rm
+
+schema_version = 1
+
+[instance]
+name = "vector2-fd-handoff"
+labels = { service = "network-smoke", driver = "vector2", transport = "fd" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "256M"
+ncpus = 1
+
+[network]
+mode = "tap"
+driver = "vector2"
+host_mode = "auto"
+queues = 1
+tap_name = "v2fd0"
+guest_ip = "10.88.0.2/24"
+host_ip = "10.88.0.1/24"
+gateway = "10.88.0.1"
+nameservers = ["8.8.8.8", "1.1.1.1"]
+masquerade_via = "auto"
+ports = []
+
+[env]
+PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
+
+[[init.phases]]
+name = "network-metadata"
+cmd = "env | grep '^UMLCTL_NETWORK_' | sort; echo UMLCTL_NETDEV=$UMLCTL_NETDEV"
+
+[[init.phases]]
+name = "link"
+cmd = "ip -d link show \"$UMLCTL_NETDEV\"; ip addr show \"$UMLCTL_NETDEV\""
+
+[[init.phases]]
+name = "gateway"
+cmd = "ping -c 3 \"$UMLCTL_GATEWAY\""
+timeout_secs = 20
+
+[[init.phases]]
+name = "stats"
+cmd = "command -v ethtool >/dev/null 2>&1 && ethtool -S \"$UMLCTL_NETDEV\" || true"
+
+[[init.phases]]
+name = "ready"
+cmd = "echo VECTOR2_FD_HANDOFF_OK"
+
+[debug]
+strace = false
+gdb = false
+gdb_port = 5678
+log_dir = ""
+keep_running_on_failure = false

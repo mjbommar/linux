@@ -176,9 +176,59 @@ is rejected with:
 network.host_mode = 'fd' currently requires network.queues = 1
 ```
 
+Live `umlctl up` fd-handoff smoke:
+
+```text
+kernel: /home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux
+config: CONFIG_UML_NET_VECTOR_V2=y
+config: # CONFIG_UML_NET_VECTOR_V2_INPROC is not set
+config: CONFIG_UML_NET_VECTOR_V2_SANDBOX=y
+tap: v2fd0
+```
+
+The dry-run network plan for that Umlfile was:
+
+```text
+== network plan ==
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2fd0 transport=fd host_mode=fd queues=1
+  kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128
+  inherited_fd=tap:v2fd0 -> fd:200
+```
+
+The live run reached the guest marker:
+
+```text
+[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fd0 transport=fd host_mode=fd queues=1
+[umlctl] network-fd: open tap=v2fd0 and inherit as fd=200
+started v2fdhandoff pid=3485995 run_id=01KRTWVEZH98GMK0YSCCB43T3H
+wait-for matched /FD_HANDOFF_OK/
+```
+
+Guest evidence from the preserved `init.log`:
+
+```text
+Kernel command line: ... vec2.0:transport=fd,mode=fd,fd=200,depth=128 ...
+uml-vector2: registered netdev vec2.0 for vec2.0
+uml-vector2: vec2.0 configured transport=fd mode=fd requested_queues=1 runtime_queues=1 depth=128
+vec2.0: <BROADCAST,MULTICAST,UP,LOWER_UP> ... numtxqueues 1
+3 packets transmitted, 3 received, 0% packet loss
+queue0_rx_batch_prepared_total: 2816
+queue0_rx_batch_received_total: 24
+queue0_rx_batch_consumed_total: 24
+queue0_rx_batch_released_total: 2792
+FD_HANDOFF_OK
+```
+
+Teardown evidence:
+
+```text
+fd_handoff_down2_rc=0
+tap_after2_rc=1
+Device "v2fd0" does not exist.
+```
+
 ## Remaining Work
 
-- live `umlctl up` TAP fd handoff smoke on a host with sudo TAP setup;
 - fd multiqueue;
 - fd-specific teardown/audit assertions in gate output;
 - kvm-v2 validation after the separate kvm-v2 readiness blocker is

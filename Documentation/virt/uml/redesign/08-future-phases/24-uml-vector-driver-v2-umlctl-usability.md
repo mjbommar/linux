@@ -38,6 +38,14 @@ umlctl up -f tier3-django.toml --network-driver vector2 --dry-run
 umlctl gate loop -f tier3-django.toml --sweep network.driver=vector,vector2 -W 1 -M 30
 ```
 
+For a focused fd-handoff smoke without a larger workload, use:
+
+```sh
+UML_KERNEL=/path/to/uml/linux \
+  umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml \
+    --wait-for VECTOR2_FD_HANDOFF_OK
+```
+
 For multiqueue TAP experiments:
 
 ```sh
@@ -163,6 +171,8 @@ This follow-up was checked with:
   `UMLCTL_NETWORK_DRIVER=vector2`, `UMLCTL_NETDEV=vec2.0`, the v2
   network plan, and the
   `vec2.0:transport=fd,mode=fd,fd=200,depth=128` kernel argument;
+- `tools/uml/uml-launcher/examples/vector2-fd-handoff.toml` dry-run
+  coverage for the dedicated fd-handoff smoke path;
 - a synthetic sleeping-kernel ready-timeout, confirming `umlctl up`
   prints `pid`, `run_id`, and `init_log`;
 - a synthetic `umlctl gate loop` ready-timeout, confirming `run-1.log`
