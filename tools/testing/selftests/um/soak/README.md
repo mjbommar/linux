@@ -26,6 +26,7 @@ Companion docs:
 | `memcheck.c` | anon-mmap pattern verifier (memtester replacement). Walking-bit + 7 constant-fill patterns, miscompare counter, exit code = total bad qwords. |
 | `iocheck.c` | write/fsync/read/verify loop on tmpfs (fio replacement). Per-block deterministic key; catches pagecache / writeback / fsync ordering bugs. |
 | `tier1-smoketest.py` | Tier 1 host-installed Python C-extension smoke (requests + cryptography; numpy deferred — see "Known issues" below). 0.16 s on host, 2-5 s in UML. |
+| `tier2-uv-smoketest.py` | Tier 2 deterministic smoke (httpx + pyyaml + pendulum + numpy). Run from a `uv`-built persistent venv (see "Tier 2 bootstrap" below). |
 | `*.toml.template` | one Umlfile per workload; `{{KERNEL}}`, `{{BACKEND}}`, and `{{SOAK_DIR}}` substituted by both drivers. |
 | `run-pilot.sh` | one-shot driver: parallel `umlctl gate loop`, per-backend sweep, k10temp throttle, cooldown between workloads. |
 | `run-soak-daemon.sh` | daemon driver: same spawn pattern as run-pilot, plus wall-clock budget, scoreboard.jsonl, summary.md, restart-on-fail, signal handlers (SIGTERM/SIGINT clean stop, SIGUSR1 force summary refresh). |
@@ -46,6 +47,7 @@ load knobs.
 | `cpython-soak` | Python regrtest curated subset (signal/io/mmap/fork/threadsignals/etc.) | ~60-120 s | Tight set picked to fit ~60 s under UML overhead |
 | `kbuild-tiny` | tinyconfig UML kernel build (fork-storm / pipe / file I/O) | ~3-5 min | `KBUILD_OUTPUT=/tmp/build` to avoid hostfs write fan-out |
 | `tier1-pylibs` | host-installed Python C-extension exercise (requests URL+JSON+headers, cryptography AES-256-CBC roundtrip on 4 KiB block) | ~5-10 s | numpy deferred — see "Known issues" |
+| `tier2-uv-pylibs` | pre-built-venv pip C-extension exercise (httpx URL+JSON, pyyaml round-trip, pendulum tz math, numpy linalg+FFT) | ~2-5 s | needs Tier 2 bootstrap below; uv-managed |
 
 ## Running
 
@@ -175,6 +177,33 @@ Verified end-to-end via `run-soak-daemon.sh`:
 -> 5 rotations × 2 backends × 2 iters = 20 PASS rows
 -> Wilson 95 % CI [62.34 %, 100.00 %] at n=10 per (workload, backend)
 ```
+
+## Tier 2 bootstrap
+
+Tier 2 (`tier2-uv-pylibs.toml.template`) exercises pip-installed
+Python C-extensions (httpx, pyyaml, pendulum, numpy) without
+network access at run time. Bootstrap once on the host:
+
+```sh
+# Install uv (single statically-linked Rust binary):
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Build the persistent venv at the hostfs-shared path the
+# template hardcodes (~/.cache/uml-soak-tier2-venv):
+uv venv ~/.cache/uml-soak-tier2-venv
+uv pip install --python ~/.cache/uml-soak-tier2-venv/bin/python \
+    httpx pyyaml pendulum numpy
+```
+
+Total disk: ~70 MB. The venv is hostfs-readable from inside the
+guest at the same path; no network is needed at soak time. Refresh
+the venv (re-run `uv pip install`) when bumping package versions.
+
+Why a venv instead of `uv run --with <pkg>`? `uv`'s offline
+resolver was unreliable inside UML — the simple-index version
+walk-back didn't always find cached wheels, even with
+`UV_OFFLINE=1`. A pre-built venv skips the resolver at run time
+entirely. See `phase-J-design-2026-05-07.md` §3.2 commentary.
 
 ## Known issues / deferred work
 
