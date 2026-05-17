@@ -218,6 +218,10 @@ parking-lot designs for future prioritization.
   R7 partial validation note for vector2 TAP under seccomp:
   Tier 3 Django stdlib-shim `PASS=30/30`, teardown evidence, and the
   remaining kvm-v2 readiness limitation. Not a commitment.
+- [29-uml-vector-driver-v2-completion-audit.md](29-uml-vector-driver-v2-completion-audit.md) —
+  Current completion audit mapping the buildout definition of done to
+  concrete artifacts, validation evidence, and remaining replacement
+  blockers. Not complete.
 
 Dependency graph for this batch (→ = "needs"):
 
