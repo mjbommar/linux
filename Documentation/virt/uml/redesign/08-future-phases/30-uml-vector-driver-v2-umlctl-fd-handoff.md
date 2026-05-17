@@ -127,7 +127,7 @@ Result:
 
 ```text
 uml-launcher unit tests: 68 passed
-umlctl unit tests: 72 passed
+umlctl unit tests: 74 passed
 apparmor_profile: 3 passed
 frontend_handshake: 1 passed
 selinux_module: 2 passed
@@ -245,10 +245,15 @@ fd_diag_gate_tap_after_rc=1
 Device "v2fd0" does not exist.
 ```
 
+`umlctl gate loop` now also audits cleanup for TAP-backed Umlfiles:
+after each `down --force --rm`, the loop checks `/sys/class/net` for
+the generated TAP name.  A leaked TAP marks that iteration as FAIL and
+writes `cleanup-<phase>-<iter>.log` into the worker output directory.
+The focused fd-handoff loop above produced no cleanup failure logs.
+
 ## Remaining Work
 
 - fd multiqueue;
-- fd-specific teardown/audit assertions in gate output;
 - kvm-v2 validation after the separate kvm-v2 readiness blocker is
   fixed;
 - performance comparison between legacy vector, vector2 fd, and

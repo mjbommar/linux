@@ -78,6 +78,8 @@ shape, and inspectable ethtool surfaces:
   fds, with closed-state unwind covered by KUnit;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
+- `umlctl gate loop` cleanup audit for TAP-backed Umlfiles, so a
+  leaked host TAP turns the iteration into a failure;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2

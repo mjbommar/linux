@@ -62,6 +62,8 @@ Validation evidence recorded in the checkpoint docs includes:
   `FD_HANDOFF_OK` and clean TAP teardown;
 - short `umlctl gate loop` vector2 fd handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0` and no lingering `v2fd0`;
+- `umlctl gate loop` TAP cleanup audit marks an iteration failed if
+  the declared TAP remains under `/sys/class/net` after teardown;
 - vector2 TAP seccomp Tier 3 Django stdlib shim: 30/30 passed;
 - vector2 TAP `queues=2` seccomp smoke and queue distribution evidence;
 - TAP teardown checks showing no lingering `soak-tap0`.

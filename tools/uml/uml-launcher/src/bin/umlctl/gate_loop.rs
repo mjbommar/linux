@@ -441,7 +441,9 @@ fn run_one_iter(
     // Make sure no leftover instance or host resources with this name
     // exist. `down` is important for TAP-backed Umlfiles because a
     // plain stop+rm skips host-side teardown.
-    cleanup_umlfile_iter(umlctl, toml_path, inst_name);
+    if !cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "pre") {
+        return IterStatus::Fail;
+    }
 
     // Spawn. We DON'T pass --wait-for here; we want full control
     // over the polling loop so that on timeout we can capture the
@@ -465,7 +467,7 @@ fn run_one_iter(
         // the up output and, when umlctl surfaced one, the run bundle's
         // init.log before cleanup removes the failed instance.
         save_failed_up_diagnostics(&up_out, runs_dir, &log_dir.join(format!("run-{iter}.log")));
-        cleanup_umlfile_iter(umlctl, toml_path, inst_name);
+        cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "failed-up");
         return IterStatus::Fail;
     }
 
@@ -507,18 +509,64 @@ fn run_one_iter(
         copy_or_create(&init_log, &saved);
     }
 
-    cleanup_umlfile_iter(umlctl, toml_path, inst_name);
+    if !cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "post") {
+        return IterStatus::Fail;
+    }
 
     classified
 }
 
-fn cleanup_umlfile_iter(umlctl: &Path, toml_path: &Path, inst_name: &str) {
+fn cleanup_umlfile_iter(
+    umlctl: &Path,
+    toml_path: &Path,
+    inst_name: &str,
+    log_dir: &Path,
+    iter: u32,
+    phase: &str,
+) -> bool {
+    let tap_name = cleanup_tap_name(toml_path);
+
     if let Some(toml) = toml_path.to_str() {
         let _ = run_umlctl(umlctl, &["down", "-f", toml, "--force", "--rm"]);
     } else {
         let _ = run_umlctl(umlctl, &["stop", inst_name]);
         let _ = run_umlctl(umlctl, &["rm", inst_name]);
     }
+
+    audit_tap_absent(
+        tap_name.as_deref(),
+        Path::new("/sys/class/net"),
+        &log_dir.join(format!("cleanup-{phase}-{iter}.log")),
+    )
+}
+
+fn cleanup_tap_name(toml_path: &Path) -> Option<String> {
+    let uml = deploy::Umlfile::from_path(toml_path).ok()?;
+
+    (uml.network.mode == "tap").then_some(uml.network.tap_name)
+}
+
+fn audit_tap_absent(tap_name: Option<&str>, sys_class_net: &Path, dst: &Path) -> bool {
+    let Some(tap) = tap_name else {
+        return true;
+    };
+
+    if !tap_present_in(tap, sys_class_net) {
+        return true;
+    }
+
+    let _ = fs::write(
+        dst,
+        format!(
+            "cleanup audit failed: TAP device {tap} still exists under {}\n",
+            sys_class_net.display()
+        ),
+    );
+    false
+}
+
+fn tap_present_in(tap_name: &str, sys_class_net: &Path) -> bool {
+    sys_class_net.join(tap_name).exists()
 }
 
 fn run_umlctl(umlctl: &Path, args: &[&str]) -> String {
@@ -729,6 +777,27 @@ mode = "tap"
         assert!(!u.env.contains_key("network.driver"));
         assert!(!u.env.contains_key("network.queues"));
         assert!(!u.env.contains_key("network.host_mode"));
+    }
+
+    #[test]
+    fn tap_cleanup_audit_passes_when_tap_absent() {
+        let sys = tempfile::tempdir().unwrap();
+        let out = sys.path().join("cleanup.log");
+
+        assert!(audit_tap_absent(Some("v2fd0"), sys.path(), &out));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn tap_cleanup_audit_fails_when_tap_remains() {
+        let sys = tempfile::tempdir().unwrap();
+        let out = sys.path().join("cleanup.log");
+        fs::create_dir(sys.path().join("v2fd0")).unwrap();
+
+        assert!(!audit_tap_absent(Some("v2fd0"), sys.path(), &out));
+        let log = fs::read_to_string(out).unwrap();
+        assert!(log.contains("cleanup audit failed"));
+        assert!(log.contains("v2fd0"));
     }
 
     #[test]

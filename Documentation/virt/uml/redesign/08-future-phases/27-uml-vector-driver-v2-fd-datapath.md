@@ -170,6 +170,10 @@ fd_diag_gate_tap_after_rc=1
 Device "v2fd0" does not exist.
 ```
 
+The repeated loop ran with the `umlctl` TAP cleanup audit enabled.
+For TAP-backed Umlfiles, each iteration now fails if the declared TAP
+still exists under `/sys/class/net` after `down --force --rm`.
+
 ## Remaining Work
 
 This checkpoint does not close the fd replacement gates.  Remaining fd
