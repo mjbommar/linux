@@ -767,6 +767,19 @@ Validation:
   errors;
 - malformed inputs cannot produce partially initialized devices.
 
+Implementation checkpoint:
+
+- `arch/um/drivers/vector2_config.{c,h}` adds the first typed parser
+  under the `um_vec2_*` prefix.
+- `CONFIG_UML_NET_VECTOR_V2_KUNIT=y` builds
+  `arch/um/drivers/vector2_config_test.c`, a KUnit suite covering
+  defaults, exact transport names, duplicate and unknown keys, numeric
+  bounds, legacy `vec=0`, strict-vs-compat boolean handling, sandbox
+  rejection of trusted host options, fd transport requirements, and
+  paired GRE/L2TPv3 keys.
+- This checkpoint intentionally does not change the runtime
+  `CONFIG_UML_NET_VECTOR` data path.
+
 ### Phase V2 - Ops Boundaries
 
 Deliverables:

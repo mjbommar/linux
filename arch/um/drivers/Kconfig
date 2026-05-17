@@ -137,6 +137,24 @@ config UML_NET_VECTOR
 	  and sample configurations, see
 	  <file:Documentation/virt/uml/user_mode_linux_howto_v2.rst>.
 
+config UML_NET_VECTOR_V2_CONFIG
+	bool
+
+config UML_NET_VECTOR_V2_KUNIT
+	bool "Vector networking v2 config parser KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_CONFIG
+	default n
+	help
+	  Build KUnit tests for the typed configuration parser used by
+	  the proposed UML vector networking v2 rewrite. These tests do
+	  not replace the existing vector network driver; they validate
+	  the isolated parser and policy checks before the runtime data
+	  path is migrated.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
 endmenu
 
 config VIRTIO_UML
