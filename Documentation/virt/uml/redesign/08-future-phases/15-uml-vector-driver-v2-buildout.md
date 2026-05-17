@@ -124,6 +124,12 @@ shape, and inspectable ethtool surfaces:
   fd multiqueue measured 456 MiB/s on the same host, making
   performance a measured open blocker rather than an unmeasured
   unknown;
+- `umlctl up --strace` wiring for audited vector2 fd-handoff runs:
+  the supervisor records the UML tracee PID rather than the strace
+  wrapper PID, `down --force --rm` removes the traced auto-queue run
+  cleanly, and a narrowed strace scan of the vector2 fd boot found no
+  actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML
+  network-helper exec from the traced vector host path;
 - TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
@@ -137,6 +143,9 @@ Missing runtime pieces:
 - no repeated long soak loop;
 - no full multiqueue validation story: heavier KCSAN traffic, long SMP
   traffic, and broader fairness/performance profiles remain open;
+- no repeated or CI-enforced sandbox syscall audit gate, and no final
+  policy for guest userspace raw/netlink sockets visible in UML host
+  traces;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.

@@ -261,6 +261,13 @@ parking-lot designs for future prioritization.
   leaves `vec2.` / `vec2=` for vector2 in both-drivers kernels, records
   short 32 MiB guest-to-host and host-to-guest comparisons, and keeps
   the full performance gate open. Not a commitment.
+- [37-uml-vector-driver-v2-sandbox-strace-audit.md](37-uml-vector-driver-v2-sandbox-strace-audit.md) —
+  Focused vector2 fd-handoff sandbox audit: wires `umlctl up --strace`
+  into supervised starts, records the UML tracee PID for clean
+  teardown, captures a vector2 auto-queue fd boot, and documents a
+  narrowed syscall scan with no actual host TAP open, `TUNSETIFF`,
+  `AF_PACKET`, BPF, or UML helper exec from the vector host path. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
