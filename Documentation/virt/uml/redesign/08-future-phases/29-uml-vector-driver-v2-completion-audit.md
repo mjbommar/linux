@@ -24,13 +24,13 @@ experimental netdev exists.
 | Register stable v2 netdev names | `vec2.<unit>` registration through `register_netdevice()`; runtime logs show `registered netdev vec2.0` | Done for v2 syntax |
 | `ip link set up/down` reaches modeled lifecycle | KUnit lifecycle tests; fd/TAP netdev open/stop tests; manual TAP/fd smokes | Partial: not 10,000-cycle failure-injection proof |
 | Single-queue trusted TAP packet path | R5 TAP datapath doc; ping smokes; Tier 3 seccomp 30/30 | Done for trusted TAP/seccomp |
-| Single-queue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP as inherited fd 200; live `umlctl up` fd-handoff smoke passed | Done for single-queue fd |
+| Single-queue and multiqueue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP fds as inherited fd ranges starting at 200; live single-queue and 4-queue `umlctl up` fd-handoff smokes passed | Done for launch path; deeper SMP/perf still open |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
 | Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and FastAPI remain open |
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind | `um_vector2_*` KUnit passes 71/71 after fd wrong-type and fd multiqueue unwind coverage | Partial: coverage exists, but more failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher | Partial: needs strace/audit gate |
-| Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; launcher fd multiqueue and KCSAN absent | Partial |
+| Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; KCSAN and broader fairness profiles absent | Partial |
 | Performance parity or accepted regression | No current v2 vs legacy perf baseline in this checkpoint set | Open |
 | Legacy `vecN:` compatibility transition | Legacy remains production path; no v2 compatibility switch | Open |
 | Reviewable, bisectable patch series | Work is split across pushed commits and checkpoint docs | Ongoing |
@@ -62,8 +62,15 @@ Validation evidence recorded in the checkpoint docs includes:
   missing-later-fd unwind;
 - live `umlctl up` vector2 fd handoff over TAP fd 200, with
   `FD_HANDOFF_OK` and clean TAP teardown;
+- live `umlctl up` vector2 fd multiqueue handoff over TAP fds
+  200..203, with `requested_queues=4 runtime_queues=4`,
+  `numtxqueues 4`, 3/3 ping, per-queue ethtool counters, and clean
+  TAP teardown;
 - short `umlctl gate loop` vector2 fd handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0` and no lingering `v2fd0`;
+- short `umlctl gate loop` vector2 fd multiqueue repetition:
+  `PASS=3/3 FAIL=0 TIMEOUT=0`, no lingering `v2fdmq0`, and no
+  cleanup failure logs;
 - `umlctl gate loop` TAP cleanup audit marks an iteration failed if
   the declared TAP remains under `/sys/class/net` after teardown;
 - vector2 TAP seccomp Tier 3 Django stdlib shim: 30/30 passed;
@@ -78,8 +85,6 @@ list is:
 - fix the separate kvm-v2 baseline readiness blocker;
 - rerun vector2 Tier 3 Django 30/30 on kvm-v2 after that fix;
 - run FastAPI/uvicorn variant if dependencies are available;
-- wire `umlctl` launcher-owned fd multiqueue handoff and validate it
-  live;
 - define queue-to-CPU policy and validate under SMP;
 - run KCSAN on multiqueue traffic;
 - collect legacy-vs-v2 performance baselines;

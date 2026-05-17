@@ -21,15 +21,22 @@ queues = 1
 # host_mode defaults to "auto"
 ```
 
-For vector2 single-queue TAP, `host_mode = "auto"` selects the
-launcher-owned fd path:
+For vector2 TAP, `host_mode = "auto"` selects the launcher-owned fd
+path.  Single queue produces:
 
 ```text
 vec2.0:transport=fd,mode=fd,fd=200,depth=128
 ```
 
-`umlctl` opens the host TAP after setup and inherits it into the UML
-process.  The sandboxed guest receives only the delegated fd number.
+Multiqueue produces a contiguous inherited fd range:
+
+```text
+vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4
+```
+
+`umlctl` opens the host TAP after setup and inherits one fd per queue
+into the UML process.  The sandboxed guest receives only delegated fd
+numbers.
 
 For one-off comparison runs, the CLI override is preferred:
 
@@ -44,6 +51,9 @@ For a focused fd-handoff smoke without a larger workload, use:
 UML_KERNEL=/path/to/uml/linux \
   umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml \
     --wait-for VECTOR2_FD_HANDOFF_OK
+UML_KERNEL=/path/to/uml/linux \
+  umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-multiqueue.toml \
+    --wait-for VECTOR2_FD_MULTIQUEUE_OK
 ```
 
 For multiqueue TAP experiments:
@@ -54,9 +64,9 @@ umlctl gate loop -f tier3-django.toml --network-driver vector2 --network-queues 
 umlctl gate loop -f tier3-django.toml --network-driver vector2 --sweep network.queues=1,2 -W 1 -M 10
 ```
 
-Current vector2 multiqueue uses the trusted in-process TAP path because
-fd multiqueue is still open.  Force that path explicitly when comparing
-single-queue behavior:
+Current vector2 multiqueue uses the launcher-owned fd path by default.
+Force the trusted in-process path explicitly only when comparing host
+backend behavior:
 
 ```sh
 umlctl up -f tier3-django.toml --network-driver vector2 --network-host-mode inproc --dry-run
@@ -82,6 +92,8 @@ UMLCTL_GATEWAY
 UMLCTL_NETWORK_TRANSPORT
 UMLCTL_NETWORK_HOST_MODE
 UMLCTL_NETWORK_QUEUES
+UMLCTL_NETWORK_FD
+UMLCTL_NETWORK_FD_COUNT
 ```
 
 For legacy TAP this reports `UMLCTL_NETWORK_DRIVER=vector` and
@@ -116,7 +128,7 @@ prints:
 - host mode;
 - queue count;
 - exact UML kernel command-line argument;
-- inherited fd mapping when vector2 fd handoff is selected.
+- inherited fd or fd-range mapping when vector2 fd handoff is selected.
 
 That output is the quickest way to verify that a run is actually using
 v2 before spending time on a soak.

@@ -25,6 +25,9 @@ ethtool surfaces as the trusted TAP path.
 - fd multiqueue core now treats `fd=N,queues=Q` as a contiguous
   inherited-fd range `N..N+Q-1`, validates the whole range before
   duplicating any fd, and unwinds already-opened channels on failure.
+- `umlctl` fd handoff now opens one TAP fd per configured queue and
+  maps the contiguous inherited range starting at fd 200 into the UML
+  process.
 - sandbox builds accept inherited `fd=` specs while still rejecting
   host resource creation options such as TAP `ifname=`.
 
@@ -189,12 +192,38 @@ The repeated loop ran with the `umlctl` TAP cleanup audit enabled.
 For TAP-backed Umlfiles, each iteration now fails if the declared TAP
 still exists under `/sys/class/net` after `down --force --rm`.
 
+Launcher-owned TAP fd multiqueue smoke:
+
+```text
+umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-multiqueue.toml \
+  --wait-for VECTOR2_FD_MULTIQUEUE_OK
+[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fdmq0 transport=fd host_mode=fd queues=4
+[umlctl] network-fd: open tap=v2fdmq0 and inherit fds=200..203
+Kernel command line: ... vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4 ...
+uml-vector2: vec2.0 configured transport=fd mode=fd requested_queues=4 runtime_queues=4 depth=128
+numtxqueues 4
+3 packets transmitted, 3 received, 0% packet loss
+VECTOR2_FD_MULTIQUEUE_OK
+```
+
+Repeated fd multiqueue gate-loop smoke:
+
+```text
+umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fd-multiqueue.toml \
+  -W 1 -M 3 --timeout 180 --pass-marker VECTOR2_FD_MULTIQUEUE_OK
+==> default PASS=3/3 FAIL=0 TIMEOUT=0 rate=100.0%
+TAP_ABSENT
+```
+
+No cleanup failure logs were produced by that loop.
+
 ## Remaining Work
 
 This checkpoint does not close the fd replacement gates.  Remaining fd
 work includes:
 
-- launcher-owned fd multiqueue handoff and live TAP validation;
+- KCSAN and longer SMP traffic validation for launcher-owned fd
+  multiqueue;
 - fd batching with `sendmmsg()` / `recvmmsg()` or an accepted simpler
   replacement;
 - scatter-gather TX without forced linearization;

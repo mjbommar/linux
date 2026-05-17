@@ -210,10 +210,10 @@ parking-lot designs for future prioritization.
   a small parallel traffic smoke where both TAP queues move.
   Not a commitment.
 - [27-uml-vector-driver-v2-fd-datapath.md](27-uml-vector-driver-v2-fd-datapath.md) —
-  R5 follow-up implementation note for trusted single-queue direct-fd
-  packet movement: shared runtime queue helpers, raw Ethernet TX/RX
-  over an inherited fd, fd NAPI/IRQ startup, KUnit coverage, and a
-  no-root manual ARP/ICMP ping smoke. Not a commitment.
+  R5 follow-up implementation note for direct-fd packet movement:
+  shared runtime queue helpers, raw Ethernet TX/RX over inherited fds,
+  fd NAPI/IRQ startup, KUnit coverage, no-root manual ARP/ICMP ping,
+  and launcher-owned fd multiqueue smoke evidence. Not a commitment.
 - [28-uml-vector-driver-v2-r7-seccomp-30of30.md](28-uml-vector-driver-v2-r7-seccomp-30of30.md) —
   R7 partial validation note for vector2 TAP under seccomp:
   Tier 3 Django stdlib-shim `PASS=30/30`, teardown evidence, and the
@@ -224,9 +224,10 @@ parking-lot designs for future prioritization.
   blockers. Not complete.
 - [30-uml-vector-driver-v2-umlctl-fd-handoff.md](30-uml-vector-driver-v2-umlctl-fd-handoff.md) —
   R7/R5 follow-up note for launcher-owned vector2 fd handoff:
-  `network.host_mode`, default single-queue fd selection, manifest
-  labels, dry-run shape, sandbox boundary, live `umlctl up` smoke
-  evidence, and current fd multiqueue limitation. Not a commitment.
+  `network.host_mode`, default fd selection, fd range manifest labels,
+  dry-run shape, sandbox boundary, live single-queue and multiqueue
+  `umlctl up` smoke evidence, and remaining SMP/perf gaps. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

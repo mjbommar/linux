@@ -12,6 +12,7 @@ use std::io;
 use std::os::fd::{FromRawFd, OwnedFd};
 
 const IFF_TAP: libc::c_int = 0x0002;
+const IFF_MULTI_QUEUE: libc::c_int = 0x0100;
 const IFF_NO_PI: libc::c_int = 0x1000;
 const TUNSETIFF: libc::c_ulong = 0x400454ca;
 const IFNAMSIZ: usize = 16;
@@ -24,7 +25,7 @@ struct IfReq {
     _pad: [u8; 22],
 }
 
-pub fn open_tap(ifname: &str) -> io::Result<OwnedFd> {
+pub fn open_tap(ifname: &str, multi_queue: bool) -> io::Result<OwnedFd> {
     if ifname.len() >= IFNAMSIZ {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -44,16 +45,16 @@ pub fn open_tap(ifname: &str) -> io::Result<OwnedFd> {
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    attach_tap(&owned, ifname)?;
+    attach_tap(&owned, ifname, multi_queue)?;
     Ok(owned)
 }
 
-fn attach_tap(fd: &OwnedFd, ifname: &str) -> io::Result<()> {
+fn attach_tap(fd: &OwnedFd, ifname: &str, multi_queue: bool) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
     let mut req = IfReq {
         ifr_name: [0u8; IFNAMSIZ],
-        ifr_flags: (IFF_TAP | IFF_NO_PI) as libc::c_short,
+        ifr_flags: tap_flags(multi_queue) as libc::c_short,
         _pad: [0u8; 22],
     };
     req.ifr_name[..ifname.len()].copy_from_slice(ifname.as_bytes());
@@ -71,13 +72,27 @@ fn attach_tap(fd: &OwnedFd, ifname: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn tap_flags(multi_queue: bool) -> libc::c_int {
+    let mut flags = IFF_TAP | IFF_NO_PI;
+    if multi_queue {
+        flags |= IFF_MULTI_QUEUE;
+    }
+    flags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn rejects_oversized_name_before_open() {
-        let err = open_tap("this_name_is_way_too_long_for_ifnamsiz").unwrap_err();
+        let err = open_tap("this_name_is_way_too_long_for_ifnamsiz", false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn multiqueue_flag_is_opt_in() {
+        assert_eq!(tap_flags(false), IFF_TAP | IFF_NO_PI);
+        assert_eq!(tap_flags(true), IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE);
     }
 }

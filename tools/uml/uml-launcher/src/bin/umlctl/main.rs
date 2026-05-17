@@ -20,8 +20,8 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use std::io::Write;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 mod console_split;
 mod deploy;
@@ -292,8 +292,8 @@ struct GateLoopArgs {
     network_queues: Option<u32>,
 
     /// Override `[network].host_mode` for every generated worker
-    /// Umlfile. `auto` picks fd for vector2 single-queue TAP and
-    /// inproc for current vector2 multiqueue TAP.
+    /// Umlfile. `auto` picks launcher-owned inherited fd TAP for
+    /// vector2, including multiqueue.
     #[arg(long = "network-host-mode", value_name = "auto|fd|inproc")]
     network_host_mode: Option<String>,
 }
@@ -574,7 +574,7 @@ struct UpArgs {
     network_queues: Option<u32>,
 
     /// Override `[network].host_mode` without editing the Umlfile.
-    /// `fd` makes umlctl open the TAP and pass vector2 an inherited fd.
+    /// `fd` makes umlctl open TAP queue fds and pass them to vector2.
     #[arg(long = "network-host-mode", value_name = "auto|fd|inproc")]
     network_host_mode: Option<String>,
 
@@ -926,8 +926,9 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
             );
             if let Some(fd) = plan.inherited_fd {
                 eprintln!(
-                    "[umlctl] network-fd: open tap={} and inherit as fd={fd}",
+                    "[umlctl] network-fd: open tap={} and inherit {}",
                     plan.tap_name,
+                    format_inherited_fd_range(fd, plan.inherited_fd_count),
                 );
             }
         }
@@ -967,10 +968,76 @@ fn print_network_plan(compiled: &deploy::Compiled) {
         );
         println!("  kernel_arg={}", plan.kernel_arg);
         if let Some(fd) = plan.inherited_fd {
-            println!("  inherited_fd=tap:{} -> fd:{}", plan.tap_name, fd);
+            println!(
+                "  inherited_fds=tap:{} -> {}",
+                plan.tap_name,
+                format_inherited_fd_range(fd, plan.inherited_fd_count)
+            );
         }
     } else {
         println!("  mode=none");
+    }
+}
+
+fn format_inherited_fd_range(first_fd: i32, count: u32) -> String {
+    if count <= 1 {
+        format!("fd={first_fd}")
+    } else {
+        let last_fd = first_fd + count as i32 - 1;
+        format!("fds={first_fd}..{last_fd}")
+    }
+}
+
+fn fd_in_inherited_range(fd: i32, first_fd: i32, count: i32) -> bool {
+    count > 0 && fd >= first_fd && fd < first_fd + count
+}
+
+fn move_fd_out_of_inherited_range(fd: OwnedFd, first_fd: i32, count: i32) -> io::Result<OwnedFd> {
+    if !fd_in_inherited_range(fd.as_raw_fd(), first_fd, count) {
+        return Ok(fd);
+    }
+
+    let min_fd = first_fd
+        .checked_add(count)
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let new_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, min_fd) };
+    if new_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
+}
+
+#[cfg(test)]
+mod inherited_fd_tests {
+    use super::*;
+    use std::fs::File;
+
+    #[test]
+    fn inherited_fd_range_checks_half_open_interval() {
+        assert!(!fd_in_inherited_range(199, 200, 4));
+        assert!(fd_in_inherited_range(200, 200, 4));
+        assert!(fd_in_inherited_range(203, 200, 4));
+        assert!(!fd_in_inherited_range(204, 200, 4));
+        assert!(!fd_in_inherited_range(200, 200, 0));
+    }
+
+    #[test]
+    fn source_fd_is_moved_out_of_target_range_when_needed() {
+        let f = File::open("/dev/null").unwrap();
+        let first_fd = 200;
+        let count = 4;
+        let raw = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_DUPFD_CLOEXEC, first_fd) };
+        assert!(raw >= 0);
+
+        let original_in_range = fd_in_inherited_range(raw, first_fd, count);
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let moved = move_fd_out_of_inherited_range(fd, first_fd, count).unwrap();
+
+        assert!(!fd_in_inherited_range(moved.as_raw_fd(), first_fd, count));
+        if original_in_range {
+            assert!(moved.as_raw_fd() >= first_fd + count);
+        }
     }
 }
 
@@ -1292,17 +1359,51 @@ fn prepare_inherited_fds(m: &manifest::Manifest) -> Result<PreparedInheritedFds>
             .context("manifest is missing vector2 inherited fd label")?
             .parse::<i32>()
             .context("parse vector2 inherited fd label")?;
-        let fd = tapfd::open_tap(tap).with_context(|| {
-            format!(
-                "open TAP {tap} for vector2 inherited fd handoff; \
-                 check that `umlctl up` created it for this user"
-            )
-        })?;
-        mappings.push(supervise::InheritedFd {
-            source_fd: fd.as_raw_fd(),
-            target_fd,
-        });
-        holders.push(fd);
+        let fd_count = m
+            .labels
+            .get(deploy::LABEL_NETWORK_FD_COUNT)
+            .or_else(|| m.labels.get(deploy::LABEL_NETWORK_QUEUES))
+            .map(|s| {
+                s.parse::<u32>()
+                    .context("parse vector2 inherited fd count label")
+            })
+            .transpose()?
+            .unwrap_or(1);
+        if fd_count == 0 {
+            bail!("vector2 inherited fd count must be >= 1");
+        }
+        if fd_count > 1024 {
+            bail!("vector2 inherited fd count must be <= 1024");
+        }
+        if target_fd < 0 {
+            bail!("vector2 inherited fd target must be non-negative");
+        }
+        let fd_count_i32 =
+            i32::try_from(fd_count).context("vector2 inherited fd count exceeds i32")?;
+        let last_fd = target_fd
+            .checked_add(fd_count_i32 - 1)
+            .context("vector2 inherited fd range overflows i32")?;
+        let multi_queue = fd_count > 1;
+
+        for offset in 0..fd_count {
+            let current_target_fd = target_fd + offset as i32;
+            let fd = tapfd::open_tap(tap, multi_queue).with_context(|| {
+                format!(
+                    "open TAP {tap} queue {queue}/{fd_count} for vector2 inherited fd handoff \
+                     ({range}); check that `umlctl up` created it for this user",
+                    queue = offset + 1,
+                    range = format_inherited_fd_range(target_fd, fd_count),
+                )
+            })?;
+            let fd = move_fd_out_of_inherited_range(fd, target_fd, fd_count_i32)
+                .context("move vector2 TAP source fd out of inherited target range")?;
+            mappings.push(supervise::InheritedFd {
+                source_fd: fd.as_raw_fd(),
+                target_fd: current_target_fd,
+            });
+            holders.push(fd);
+        }
+        debug_assert_eq!(last_fd, target_fd + fd_count_i32 - 1);
     }
 
     Ok(PreparedInheritedFds {

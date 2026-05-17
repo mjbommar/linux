@@ -78,7 +78,12 @@ shape, and inspectable ethtool surfaces:
   fds, with closed-state unwind covered by KUnit;
 - fd multiqueue core for contiguous inherited fd ranges, with KUnit
   coverage for two-queue open/close and missing-later-fd unwind;
+- launcher-owned vector2 fd multiqueue handoff through `umlctl`:
+  `queues=N` maps to a contiguous inherited fd range starting at fd
+  200, with live 4-queue gateway ping and clean TAP teardown;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
+  `PASS=3/3 FAIL=0 TIMEOUT=0`;
+- short `umlctl gate loop` vector2 fd-multiqueue repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - `umlctl gate loop` cleanup audit for TAP-backed Umlfiles, so a
   leaked host TAP turns the iteration into a failure;
@@ -97,9 +102,9 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
-- no full multiqueue validation story: launcher-owned fd multiqueue,
-  queue-to-CPU policy, KCSAN, and broader fairness/performance
-  profiles remain open;
+- no full multiqueue validation story: queue-to-CPU policy, KCSAN,
+  long SMP traffic, and broader fairness/performance profiles remain
+  open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.
@@ -423,9 +428,9 @@ R5 implementation note:
   host ops, vnet-header normalization, KUnit TX/RX pipe-backed tests,
   and a guest-to-host ping smoke with 3/3 replies.
 - R5 was single-queue trusted TAP only.  Later checkpoints add fd
-  datapath, ethtool, `umlctl`, and TAP multiqueue pieces.  Sandbox
-  helper/proxy, fd multiqueue, performance, KCSAN, kvm-v2, and full
-  Tier 3 replacement gates remain open.
+  datapath, ethtool, `umlctl`, TAP multiqueue, and launcher-owned fd
+  multiqueue pieces.  Sandbox helper/proxy, performance, KCSAN,
+  kvm-v2, and full Tier 3 replacement gates remain open.
 
 R5 fd follow-up note:
 
@@ -454,10 +459,13 @@ R5 fd follow-up note:
     `# CONFIG_UML_NET_VECTOR_V2_INPROC is not set`, inherited
     `transport=fd,fd=<n>`, 3/3 ping success, queue0 TX/RX counters,
     and no config rejection.
+  - fd multiqueue KUnit and live `umlctl` fd multiqueue smoke:
+    `fd=200,queues=4`, runtime queues 4, `numtxqueues 4`, 3/3 ping,
+    per-queue ethtool counters, and clean TAP teardown.
 - Therefore direct-fd packet movement exists for the trusted
-  single-queue development path and for inherited-fd sandbox builds.
-  Launcher-owned fd manifests, fd multiqueue, fd performance profiles,
-  and kvm-v2 fd evidence remain open.
+  single-queue development path, inherited-fd sandbox builds, and the
+  launcher-owned fd multiqueue path.  fd performance profiles, KCSAN,
+  queue-to-CPU policy, and kvm-v2 fd evidence remain open.
 
 ### V2-R6 - ethtool, Stats, And Feature Policy
 
@@ -615,8 +623,9 @@ R8a implementation note:
     `SERVER_READY`, `TIER3_OK`, `REPRO_DONE rc=0`,
     `PASS=1/1`, TAP absent after teardown.
 - Therefore R8 is partially satisfied.  TAP has the first real
-  multiqueue runtime shape; fd multiqueue, KCSAN, queue-to-CPU
-  policy, and kvm-v2 evidence remain open.
+  multiqueue runtime shape, and fd multiqueue now has core KUnit plus
+  live `umlctl` launch evidence; KCSAN, queue-to-CPU policy, and
+  kvm-v2 evidence remain open.
 
 R8b implementation note:
 
@@ -640,8 +649,8 @@ R8b implementation note:
     `PASS=1/1`, and TAP absent after teardown.
 - Therefore the R8 observability surface is usable for distribution
   experiments and has first TAP distribution evidence, but KCSAN,
-  fairness/performance profiles, fd multiqueue, queue-to-CPU policy,
-  and kvm-v2 evidence remain open.
+  fairness/performance profiles, queue-to-CPU policy, and kvm-v2
+  evidence remain open.
 
 ### V2-R9 - Transport Parity
 

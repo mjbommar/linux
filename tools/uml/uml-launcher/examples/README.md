@@ -46,6 +46,7 @@ CLI flags > TOML > env vars > defaults.
 |---|---|
 | [`fastapi.toml`](fastapi.toml) | FastAPI server hosted inside UML, with TAP networking + port-forward |
 | [`vector2-fd-handoff.toml`](vector2-fd-handoff.toml) | Minimal vector2 TAP smoke using launcher-owned inherited fd handoff |
+| [`vector2-fd-multiqueue.toml`](vector2-fd-multiqueue.toml) | Vector2 TAP smoke using launcher-owned inherited fd multiqueue |
 | [`cpython-test.toml`](cpython-test.toml) | CPython standard test suite — canonical "is the env real?" check |
 
 The Umlfile configs are not magic either: they're TOML that drives
@@ -67,4 +68,6 @@ For the direct vector2 fd-handoff path, start with the focused smoke:
 ```sh
 UML_KERNEL=/path/to/uml/linux \
   umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml --dry-run
+UML_KERNEL=/path/to/uml/linux \
+  umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-multiqueue.toml --dry-run
 ```
