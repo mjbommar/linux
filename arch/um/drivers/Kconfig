@@ -278,13 +278,16 @@ config UML_NET_VECTOR_V2_NETDEV_KUNIT
 	bool "Vector networking v2 netdev skeleton KUnit tests"
 	depends on KUNIT
 	select UML_NET_VECTOR_V2
+	select UML_NET_VECTOR_V2_FAKE_HOST
 	default n
 	help
 	  Build KUnit tests for the experimental vector v2 netdev skeleton.
 	  These tests validate stable device naming, lifecycle unwind for
 	  backend-missing open, stopped-state stop handling, xmit safety,
-	  configured queue counts, and the deterministic queue-to-CPU policy
-	  used for XPS setup.
+	  configured queue counts, the deterministic queue-to-CPU policy
+	  used for XPS setup, and the NAPI poll path branches (healthy
+	  round, backend-dead, tx-more rescheduling, rx alloc error,
+	  rx protocol drop) driven via the deterministic fake host.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
@@ -293,11 +296,14 @@ config UML_NET_VECTOR_V2_ETHTOOL_KUNIT
 	bool "Vector networking v2 ethtool KUnit tests"
 	depends on KUNIT
 	select UML_NET_VECTOR_V2
+	select UML_NET_VECTOR_V2_FAKE_HOST
 	default n
 	help
 	  Build KUnit tests for the experimental vector v2 ethtool surface.
-	  These tests validate stopped-state stats, ring depth policy, and
-	  counter export before the driver is considered replacement-ready.
+	  These tests validate stopped-state stats, ring depth policy,
+	  counter export, and ethtool stats-read while traffic is in
+	  flight (spin_lock_bh contention against the fake host backend)
+	  before the driver is considered replacement-ready.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
