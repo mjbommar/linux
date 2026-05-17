@@ -223,6 +223,13 @@ The KVM-v2 failure remains a readiness issue to debug.  R7 only claims
 that the v2 selection and teardown paths are now operator-safe enough
 to keep iterating.
 
+Follow-up note
+`24-uml-vector-driver-v2-umlctl-usability.md` tightens the
+operator-facing contract: generated guests expose `UMLCTL_NETWORK_*`
+metadata so workloads can avoid hard-coded `vec0` / `vec2.0`, and
+ready-timeout failures now surface `pid`, `run_id`, and `init_log` so
+gate-loop can preserve failed-start diagnostics before cleanup.
+
 ## Remaining Replacement Blockers
 
 R7 does not claim:

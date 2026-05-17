@@ -191,6 +191,12 @@ parking-lot designs for future prioritization.
   aliases, v2 metadata, teardown hardening, seccomp smoke evidence,
   KUnit evidence, and the remaining kvm-v2 readiness gap. Not a
   commitment.
+- [24-uml-vector-driver-v2-umlctl-usability.md](24-uml-vector-driver-v2-umlctl-usability.md) —
+  R7 follow-up note for the operator-facing `umlctl`/vector v2
+  contract: guest `UMLCTL_NETWORK_*` metadata, driver-neutral workload
+  phases, ready-timeout `run_id`/`init_log` correlation, gate-loop
+  failed-start log preservation, and practical comparison commands.
+  Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

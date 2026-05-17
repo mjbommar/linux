@@ -477,6 +477,14 @@ R7 implementation note:
   - `down --force` host teardown after not-running or missing runtime
     state;
   - ready-timeout child reaping in `supervise::start()`.
+- R7 follow-up usability:
+  - generated init scripts export reserved `UMLCTL_NETWORK_*`
+    metadata, including the selected driver and guest netdev;
+  - workload phases can use `$UMLCTL_NETDEV` instead of hard-coding
+    `vec0` or `vec2.0`;
+  - ready-timeout errors print `pid`, `run_id`, and `init_log`;
+  - `gate loop` failed-start logs include the `umlctl up` output and
+    the failed bundle's `init.log` when available.
 - Evidence collected:
   - `cargo test` for `uml-launcher`;
   - `kunit.py parse` over `um_vector2_*`: 64/64 passed;

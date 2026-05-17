@@ -24,9 +24,15 @@ use super::run;
 use super::{StartArgs, StopArgs};
 
 pub enum StartError {
-    AlreadyRunning { pid: u32 },
+    AlreadyRunning {
+        pid: u32,
+    },
     KernelMissing(PathBuf),
-    ReadyTimeout,
+    ReadyTimeout {
+        pid: u32,
+        run_id: String,
+        log_path: Option<PathBuf>,
+    },
     Other(anyhow::Error),
 }
 
@@ -233,7 +239,11 @@ pub fn start(
         run::finalize_run(paths, &run_id, run::boottime_ns(), "READY_TIMEOUT", code);
         let _ = std::fs::remove_file(&pidfile);
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
-        return Err(StartError::ReadyTimeout);
+        return Err(StartError::ReadyTimeout {
+            pid,
+            run_id,
+            log_path: Some(lp.clone()),
+        });
     }
 
     Ok(StartOutcome { pid, run_id })

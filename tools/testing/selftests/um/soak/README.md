@@ -265,6 +265,10 @@ umlctl gate loop -f tier3-django.toml --sweep network.driver=vector,vector2 -W 1
 device and exact kernel command-line argument, so operator logs show
 whether a run used legacy `vec0` or experimental `vec2.0`.
 
+Generated guest init scripts also export `UMLCTL_NETWORK_DRIVER` and
+`UMLCTL_NETDEV`, so workload phases can inspect the selected link
+without hard-coding legacy or v2 device names.
+
 Design: `phase-J-tier3-design-2026-05-14.md`. The per-worker IP
 allocation carve-out in `run-soak-daemon.sh` landed in commit
 `ba63d93515a5` (task #25, bash-side scope closed): the daemon

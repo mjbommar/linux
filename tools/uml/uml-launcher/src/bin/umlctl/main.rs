@@ -1176,10 +1176,18 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
             eprintln!("umlctl: kernel '{}' missing or not executable", p.display());
             std::process::exit(5);
         }
-        Err(supervise::StartError::ReadyTimeout) => {
+        Err(supervise::StartError::ReadyTimeout {
+            pid,
+            run_id,
+            log_path,
+        }) => {
+            let log = log_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".to_string());
             eprintln!(
-                "umlctl: instance '{}' did not become ready within {}s",
-                args.name, args.ready_timeout
+                "umlctl: instance '{}' did not become ready within {}s pid={} run_id={} init_log={}",
+                args.name, args.ready_timeout, pid, run_id, log
             );
             std::process::exit(124);
         }

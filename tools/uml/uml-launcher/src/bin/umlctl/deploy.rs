@@ -515,8 +515,8 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
 }
 
 /// Render the in-guest init script. Stdlib bash, no fancy deps.
-/// Sequence: tmpfs /etc → resolv.conf → vec0 up → env exports →
-/// volume bind-mounts → init phases.
+/// Sequence: tmpfs /etc → resolv.conf → selected netdev up →
+/// volume bind-mounts → env exports → init phases.
 fn render_init_script(uml: &Umlfile) -> Result<String> {
     let mut s = String::new();
     s.push_str("#!/bin/bash\n");
@@ -658,6 +658,8 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
         s.push_str("\n");
     }
 
+    render_network_metadata_exports(&mut s, uml);
+
     // Phases. Each runs sequentially. The phase command goes through
     // bash's `eval` so users can write pipelines, redirections, &c.
     s.push_str("__umlctl_phase() {\n");
@@ -732,6 +734,43 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
         s.push_str("__umlctl_halt\n");
     }
     Ok(s)
+}
+
+fn render_network_metadata_exports(s: &mut String, uml: &Umlfile) {
+    let mut rows = vec![
+        ("UMLCTL_NETWORK_MODE", uml.network.mode.clone()),
+        ("UMLCTL_NETWORK_DRIVER", "none".to_string()),
+        ("UMLCTL_NETDEV", String::new()),
+        ("UMLCTL_TAP_NAME", String::new()),
+        ("UMLCTL_HOST_IP", String::new()),
+        ("UMLCTL_GUEST_IP", String::new()),
+        ("UMLCTL_GATEWAY", String::new()),
+        ("UMLCTL_NETWORK_TRANSPORT", String::new()),
+        ("UMLCTL_NETWORK_HOST_MODE", String::new()),
+        ("UMLCTL_NETWORK_QUEUES", "0".to_string()),
+    ];
+
+    if uml.network.mode == "tap" {
+        let plan = tap_network_plan(&uml.network);
+        rows = vec![
+            ("UMLCTL_NETWORK_MODE", uml.network.mode.clone()),
+            ("UMLCTL_NETWORK_DRIVER", plan.driver),
+            ("UMLCTL_NETDEV", plan.guest_dev),
+            ("UMLCTL_TAP_NAME", plan.tap_name),
+            ("UMLCTL_HOST_IP", uml.network.host_ip.clone()),
+            ("UMLCTL_GUEST_IP", uml.network.guest_ip.clone()),
+            ("UMLCTL_GATEWAY", uml.network.gateway.clone()),
+            ("UMLCTL_NETWORK_TRANSPORT", plan.transport),
+            ("UMLCTL_NETWORK_HOST_MODE", plan.host_mode),
+            ("UMLCTL_NETWORK_QUEUES", plan.queue_count.to_string()),
+        ];
+    }
+
+    s.push_str("# umlctl runtime metadata (reserved; describes the generated plan).\n");
+    for (key, value) in rows {
+        s.push_str(&format!("export {key}={}\n", shell_quote(&value)));
+    }
+    s.push_str("\n");
 }
 
 /// Single-quote-and-escape a string for safe inclusion in bash.
@@ -935,6 +974,8 @@ cmd = "echo hi"
         let s = render_init_script(&u).unwrap();
         assert!(s.contains("nameserver 8.8.8.8"));
         assert!(s.contains("ip addr add 10.7.0.2/24 dev vec0"));
+        assert!(s.contains("export UMLCTL_NETWORK_DRIVER='vector'"));
+        assert!(s.contains("export UMLCTL_NETDEV='vec0'"));
         assert!(tap_network_plan(&u.network).kernel_arg.starts_with("vec0:"));
         assert!(s.contains("__umlctl_phase 'hello' 'echo hi'"));
     }
@@ -960,6 +1001,11 @@ tap_name = "soak-tap0"
 
         assert!(s.contains("ip addr add 10.7.0.2/24 dev vec2.0"));
         assert!(s.contains("ip link set vec2.0 up"));
+        assert!(s.contains("export UMLCTL_NETWORK_DRIVER='vector2'"));
+        assert!(s.contains("export UMLCTL_NETDEV='vec2.0'"));
+        assert!(s.contains("export UMLCTL_TAP_NAME='soak-tap0'"));
+        assert!(s.contains("export UMLCTL_NETWORK_HOST_MODE='inproc'"));
+        assert!(s.contains("export UMLCTL_NETWORK_QUEUES='1'"));
         let plan = tap_network_plan(&u.network);
         assert_eq!(plan.driver, "vector2");
         assert_eq!(plan.guest_dev, "vec2.0");
@@ -1020,6 +1066,28 @@ driver = "bogus"
         u.network.mode = "none".into();
         std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
         assert!(Umlfile::from_path(&path).is_err());
+    }
+
+    #[test]
+    fn render_init_exports_none_network_metadata() {
+        let u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "minimal"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+"#,
+        )
+        .unwrap();
+        let s = render_init_script(&u).unwrap();
+
+        assert!(s.contains("export UMLCTL_NETWORK_MODE='none'"));
+        assert!(s.contains("export UMLCTL_NETWORK_DRIVER='none'"));
+        assert!(s.contains("export UMLCTL_NETDEV=''"));
+        assert!(s.contains("export UMLCTL_NETWORK_QUEUES='0'"));
     }
 
     /// Init script ALWAYS exports default env even with no [env] section.

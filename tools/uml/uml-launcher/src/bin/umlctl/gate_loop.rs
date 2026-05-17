@@ -411,8 +411,10 @@ fn run_one_iter(
     let _ = fs::write(&up_log, &up_out);
 
     if !up_out.contains("started ") {
-        // up failed before binding a run_id — record what happened.
-        copy_or_create(&up_log, &log_dir.join(format!("run-{iter}.log")));
+        // up failed before reaching the normal "started" line. Keep
+        // the up output and, when umlctl surfaced one, the run bundle's
+        // init.log before cleanup removes the failed instance.
+        save_failed_up_diagnostics(&up_out, runs_dir, &log_dir.join(format!("run-{iter}.log")));
         cleanup_umlfile_iter(umlctl, toml_path, inst_name);
         return IterStatus::Fail;
     }
@@ -498,6 +500,52 @@ fn copy_or_create(src: &Path, dst: &Path) {
     } else {
         let _ = fs::write(dst, "(no init.log)\n");
     }
+}
+
+fn save_failed_up_diagnostics(up_out: &str, runs_dir: &Path, dst: &Path) {
+    let mut out = String::from("== umlctl up output ==\n");
+    out.push_str(up_out);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+
+    if let Some(init_log) = failed_up_init_log_path(up_out, runs_dir) {
+        out.push_str(&format!(
+            "\n== captured init.log ({}) ==\n",
+            init_log.display()
+        ));
+        match fs::read_to_string(&init_log) {
+            Ok(contents) => {
+                out.push_str(&contents);
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Err(e) => {
+                out.push_str(&format!("(could not read init.log: {e})\n"));
+            }
+        }
+    } else {
+        out.push_str("\n(no run_id/init_log in umlctl up output)\n");
+    }
+
+    let _ = fs::write(dst, out);
+}
+
+fn failed_up_init_log_path(up_out: &str, runs_dir: &Path) -> Option<PathBuf> {
+    if let Some(path) = output_field(up_out, "init_log") {
+        return Some(PathBuf::from(path));
+    }
+    output_field(up_out, "run_id").map(|run_id| runs_dir.join(run_id).join("init.log"))
+}
+
+fn output_field(output: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}=");
+    output
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix(&prefix))
+        .map(|value| value.trim_matches(|c| c == ',' || c == ';').to_string())
+        .filter(|value| !value.is_empty() && value != "-")
 }
 
 /// Scrub a sweep label down to filesystem-safe characters.
@@ -625,5 +673,27 @@ mode = "tap"
         assert_eq!(u.network.driver, "vector2");
         assert_eq!(u.env.get("MT_JITTER_NS").map(String::as_str), Some("100"));
         assert!(!u.env.contains_key("network.driver"));
+    }
+
+    #[test]
+    fn failed_up_diagnostics_prefers_init_log_field() {
+        let runs = Path::new("/state/runs");
+        let out = "umlctl: instance 'x' did not become ready within 180s pid=42 run_id=01ABC init_log=/tmp/run/init.log\n";
+
+        assert_eq!(
+            failed_up_init_log_path(out, runs).unwrap(),
+            PathBuf::from("/tmp/run/init.log")
+        );
+    }
+
+    #[test]
+    fn failed_up_diagnostics_falls_back_to_run_id() {
+        let runs = Path::new("/state/runs");
+        let out = "umlctl: instance 'x' did not become ready within 180s pid=42 run_id=01ABC init_log=-\n";
+
+        assert_eq!(
+            failed_up_init_log_path(out, runs).unwrap(),
+            PathBuf::from("/state/runs/01ABC/init.log")
+        );
     }
 }
