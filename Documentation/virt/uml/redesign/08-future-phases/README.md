@@ -152,6 +152,11 @@ parking-lot designs for future prioritization.
   R0 note for the legacy TAP NULL dereference found during Tier 3
   Django smoke testing: reproducer, root cause, queue-optional fix,
   and validation commands. Not a commitment.
+- [17-uml-vector-driver-v2-r1-runtime-skeleton.md](17-uml-vector-driver-v2-r1-runtime-skeleton.md) —
+  R1 implementation note for the experimental vector v2 runtime
+  skeleton: Kconfig, v2-only command-line collection, late-init typed
+  config validation, sandbox policy, build matrix, manual boots, and
+  KUnit evidence. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

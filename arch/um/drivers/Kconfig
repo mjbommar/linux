@@ -137,6 +137,40 @@ config UML_NET_VECTOR
 	  and sample configurations, see
 	  <file:Documentation/virt/uml/user_mode_linux_howto_v2.rst>.
 
+config UML_NET_VECTOR_V2
+	bool "Vector networking v2 experimental runtime skeleton"
+	select UML_NET_VECTOR_V2_CONFIG
+	select UML_NET_VECTOR_V2_MODEL
+	select UML_NET_VECTOR_V2_QUEUE
+	default n
+	help
+	  Build the experimental UML vector networking v2 runtime skeleton.
+	  This is not a replacement for CONFIG_UML_NET_VECTOR yet: it only
+	  collects v2 command-line specs, parses them through the typed v2
+	  configuration parser, and creates internal v2 runtime objects for
+	  later netdev registration work.
+
+	  Say N for production builds. Say Y only while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_INPROC
+	bool "Permit vector networking v2 trusted in-process host operations"
+	depends on UML_NET_VECTOR_V2
+	default n
+	help
+	  Permit vector v2 runtime parsing to accept options that require the
+	  UML process to directly consume host networking authority, such as
+	  TAP interface names, helper scripts, direct host fd numbers, and BPF
+	  file paths. This mode is for trusted development and compatibility
+	  bring-up only.
+
+	  Say N for sandboxed UML v2 execution.
+
+config UML_NET_VECTOR_V2_SANDBOX
+	bool
+	depends on UML_NET_VECTOR_V2
+	default y if !UML_NET_VECTOR_V2_INPROC
+
 config UML_NET_VECTOR_V2_CONFIG
 	bool
 
@@ -223,6 +257,19 @@ config UML_NET_VECTOR_V2_MODEL_KUNIT
 	  state machines used by the proposed UML vector networking v2
 	  rewrite. These tests validate legal transitions and failure
 	  unwind paths before runtime open/close code uses the model.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_CMDLINE_KUNIT
+	bool "Vector networking v2 command-line KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 runtime command-line
+	  splitter. These tests validate the distinct vec2 syntax before the
+	  runtime driver grows netdev registration or packet movement.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.

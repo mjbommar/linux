@@ -114,8 +114,10 @@ docs/uml-redesign/
     ├── 14-uml-vector-driver-v2.md    safe high-performance vector net rewrite
     ├── 15-uml-vector-driver-v2-buildout.md
                                         concrete runtime-driver buildout plan
-    └── 16-uml-vector-legacy-tap-crash-r0.md
+    ├── 16-uml-vector-legacy-tap-crash-r0.md
                                         legacy TAP crash R0 fix note
+    └── 17-uml-vector-driver-v2-r1-runtime-skeleton.md
+                                        vector v2 R1 skeleton evidence
 ```
 
 ## Live status

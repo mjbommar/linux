@@ -211,6 +211,16 @@ Exit gate:
 - `grep -R "net_device_ops" arch/um/drivers/vector2_*` finds the v2
   table once R2 lands, not before.
 
+R1 implementation note:
+
+- `17-uml-vector-driver-v2-r1-runtime-skeleton.md` records the
+  runtime Kconfig, v2-only command-line collection, late-init typed
+  config validation, internal runtime ownership structs, manual boot
+  checks, build matrix, and 48-test KUnit result.
+- R1 is intentionally not a netdev driver.  It has no
+  `net_device_ops`, no `register_netdevice()` path, no `ndo_open()`,
+  and no packet movement.
+
 ### V2-R2 - Netdev Registration With Stub Data Path
 
 Goal: register a v2 netdev that can be inspected but does not yet move
