@@ -315,8 +315,9 @@ parking-lot designs for future prioritization.
   seccomp and KVM-v2 readiness passes, vector2 fd handoff on KVM-v2,
   and Django stdlib-shim smoke. One 30-run Django gate failed at
   `PASS=29/30 FAIL=1` with a guest `python3` abort, while a diagnostic
-  rerun passed `PASS=30/30 FAIL=0`; high `KVM_V2_TLB_LAG` diagnostics
-  remain, so this is evidence, not final readiness. Not a commitment.
+  rerun passed `PASS=30/30 FAIL=0`; a longer sample then reached only
+  `PASS=57/60 FAIL=2 TIMEOUT=1` from guest Python failures before
+  `SERVER_READY` plus one startup timeout. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

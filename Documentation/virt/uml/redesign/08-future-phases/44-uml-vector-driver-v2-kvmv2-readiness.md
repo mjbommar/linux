@@ -200,6 +200,55 @@ does not fully close the KVM-v2 workload item because the immediately
 preceding 29/30 failure is still unexplained and the high TLB-lag
 diagnostics persist.
 
+### Tier 3 Django 60-Run Flake Sample
+
+A longer diagnostic sample used the same KVM-v2 vector2 Django shape
+with tap `v2djkv2`:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux \
+  umlctl gate loop -f /tmp/tier3-django-v2-kvmv2-diag-60.toml \
+    -W 1 -M 60 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --out /tmp/um-tier3-django-v2-kvmv2-diag-60
+
+PASS=57/60 FAIL=2 TIMEOUT=1
+```
+
+The 57 passing runs reached all expected markers:
+
+```
+SERVER_READY=57
+GUEST_CURL ok=100 fail=0: 57
+TIER3_OK=57
+SERVER_FAIL=2
+```
+
+Failure details:
+
+- iteration 16 timed out during `django-up`; the copied log reached
+  `[umlctl phase] django-up START` but never printed `SERVER_READY` or
+  `SERVER_FAIL`;
+- iteration 18 printed `Segmentation fault` for the guest `python3`
+  server process, then dumped an empty `DJANGO_LOG_BEGIN` /
+  `DJANGO_LOG_END` block before `SERVER_FAIL`;
+- iteration 43 printed `Aborted` for the guest `python3` server process;
+  the dumped server log contained
+  `Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.`
+  while importing `http` / `enum.py`.
+
+The TAP `v2djkv2` was absent after teardown, and no UML instance
+remained.  `uml-vector2: registered netdev vec2.0 for vec2.0` appeared
+in the failing logs before the guest Python failure, so this sample
+continues to point at KVM-v2 userspace execution rather than vector2
+registration or fd handoff.
+
+`KVM_V2_TLB_LAG` remains noisy but not a precise failure predicate in
+this sample: 57/60 logs had max lag above 1000, with max observed lag
+2172.  The three non-passing iterations had lower max lag values
+(`675`, `732`, and `741`), so TLB lag remains a workload risk signal but
+not the direct per-iteration classifier.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -226,11 +275,12 @@ properly configured runtime kernel, KVM-v2 boots, vector2 registers,
 vector2 fd handoff works, and a single Django stdlib-shim run can pass.
 
 The remaining blocker is narrower than the original readiness failure:
-KVM-v2 can boot and can produce a clean vector2 Django 30/30 run, but it
-also produced a 29/30 run with a guest Python abort under the same
-workload shape.  The vector2 driver should not claim final KVM-v2 Tier 3
-readiness until this backend abort/TLB-lag class is fixed or otherwise
-explained with repeatable clean evidence.
+KVM-v2 can boot and can produce a clean vector2 Django 30/30 run, but a
+longer 60-run sample still produced guest Python segfault/abort failures
+and one startup timeout under the same workload shape.  The vector2
+driver should not claim final KVM-v2 Tier 3 readiness until this backend
+userspace-execution flake class is fixed or otherwise explained with
+repeatable clean evidence.
 
 ## Next Work
 
