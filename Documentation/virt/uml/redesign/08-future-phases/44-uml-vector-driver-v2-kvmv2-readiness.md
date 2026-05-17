@@ -452,6 +452,95 @@ audit must decide whether this is only a trace/invariant-model artifact
 or whether any post-syscall path still consumes stale shared-vCPU state
 after a sleeping syscall.
 
+### Post-Syscall Shared-Run Hardening
+
+The first backend follow-up made one narrow ownership rule explicit:
+`kvm_v2_handle_io_trap()` no longer reads from or writes to the shared
+`kvm_run` mmap after `handle_syscall()` returns.  The syscall return
+value remains in the task's `uml_pt_regs`; the next outer
+`kvm_v2_vcpu_run()` iteration marshals those per-task regs into the
+selected per-host-CPU vCPU immediately before `KVM_RUN`.  The
+`HANDLE_SYSCALL_POST` trace point now intentionally records only
+per-task state, with no live `kvm_run` payload.
+
+This removes the specific stale-run pattern shown by the first captured
+failure, where an `exit_group` syscall from the Python task slept or
+exited and the post-syscall trace was emitted under pid 1 while the live
+`kvm_run` fields still described pid 161.  The trace summary helper now
+only reports post-syscall run/task mismatches for old-style
+`HANDLE_SYSCALL_POST` records that still carry the syscall IO port
+`0xf4`; fixed-kernel traces with `port=0x0` are skipped for that check.
+
+Validation for this hardening:
+
+```
+python3 -m py_compile tools/testing/selftests/um/soak/kvmv2-trace-summary.py
+tools/testing/selftests/um/soak/kvmv2-trace-summary.py \
+  /tmp/um-tier3-django-v2-kvmv2-trace-60/p0_default/w0/run-21.log \
+  --limit 4
+git diff --check -- arch/um/backend/kvm-v2/syscall_trap.c \
+  arch/um/backend/kvm-v2/kvm_v2_backend.h \
+  tools/testing/selftests/um/soak/kvmv2-trace-summary.py
+git diff -- arch/um/backend/kvm-v2/syscall_trap.c \
+  arch/um/backend/kvm-v2/kvm_v2_backend.h \
+  tools/testing/selftests/um/soak/kvmv2-trace-summary.py |
+  scripts/checkpatch.pl --strict --no-tree -
+make ARCH=um O=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace \
+  -j$(nproc) linux
+cargo build --release --bin umlctl
+```
+
+The old failing trace still reports the original two post-syscall
+mismatches, proving the helper continues to identify unfixed logs.  The
+rebuilt trace-enabled kernel then passed a one-shot Django/vector2
+KVM-v2 smoke:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/tier3-django-v2-kvmv2-trace-smoke.toml \
+    -W 1 -M 1 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --out /tmp/um-tier3-django-v2-kvmv2-trace-postfix-smoke
+
+PASS=1/1 FAIL=0 TIMEOUT=0
+```
+
+However, the same rebuilt runtime did **not** close the Tier 3 flake:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/tier3-django-v2-kvmv2-trace-60.toml \
+    -W 1 -M 30 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --out /tmp/um-tier3-django-v2-kvmv2-trace-postfix-30
+
+PASS=29/30 FAIL=1 TIMEOUT=0
+```
+
+Iteration 18 again aborted guest `python3` before `SERVER_READY` with
+`Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.` and
+dumped a complete trace ring:
+
+```
+entries: parsed=5140 complete=5140
+markers: fatal_python=1 python_abort=1 server_fail=1 trace_dump_begin=1 trace_dump_end=1
+tlb_lag: count=30 max=1050
+dispatch_switches: count=2
+  entry_seq=2470317 entry_pid=161 entry_tmm=61156200 exit_seq=2470326 exit_pid=161 exit_tmm=61156640
+  entry_seq=2473423 entry_pid=161 entry_tmm=61156640 exit_seq=2473432 exit_pid=1 exit_tmm=61156ec0
+post_syscall_mismatches: none
+```
+
+The older invariant checker still reports the same four critical
+pid/tmm stability violations on the new failed trace, while `mmap-zero`
+still reports no mmap-returned-zero event.  The important change is that
+the proven post-`handle_syscall()` stale-run consumption path is now
+removed, but the Python abort persists.  The remaining KVM-v2 audit must
+move to the broader task/mm ownership transition and guest memory/TLB
+model; vector2 KVM-v2 Tier 3 readiness remains open.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -492,9 +581,9 @@ for backend analysis.
 1. Use the parsed iteration 21 `KVMV2T` dump to inspect the pid 161/1
    transition history, final syscall/page-fault sequence, and the large
    `mmgen - vlast` gap around `HANDLE_SYSCALL_POST`.
-2. Audit the shared-vCPU syscall return path after sleeping syscalls:
-   prove that post-syscall code never consumes stale `kvm_run` state
-   after another task reuses the per-host-CPU vCPU, or fix that path.
+2. Audit the remaining task/mm transition cases after `execve`,
+   `exit_group`, and sleeping syscalls now that the direct post-syscall
+   `kvm_run` reuse has been removed.
 3. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
 4. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
@@ -531,3 +620,8 @@ Validation for the diagnostic change:
 - `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
   reported 4 critical pid/tmm stability violations around the pid 161/1
   transition and `mmap-zero` reported no mmap-returned-zero event.
+- after the post-syscall shared-run hardening, the rebuilt trace runtime
+  passed a Django vector2 KVM-v2 smoke but still failed a 30-run sample
+  at `PASS=29/30 FAIL=1 TIMEOUT=0`; the new failing trace had no
+  post-syscall run/task mismatches, so the remaining blocker is broader
+  than that one stale-run path.

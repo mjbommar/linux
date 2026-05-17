@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase D.1+D.2+D.3: IO-port LSTAR trampoline +
- * KVM_EXIT_IO syscall-trap dispatcher + return-side marshal-out.
+ * UML backend v2 (KVM) — Phase D.1+D.2: IO-port LSTAR trampoline +
+ * KVM_EXIT_IO syscall-trap dispatcher.
  *
  * Per memo 26 §D.1 (D.1 portion: storage + bytes) and §D.2 (D.2
  * portion: KVM_EXIT_IO → handle_syscall handler at the bottom of
@@ -13,13 +13,12 @@
  * back into HOST_IP/HOST_EFLAGS, and calls into UML's common
  * handle_syscall path (arch/um/kernel/skas/syscall.c:19) — same shape
  * the seccomp backend uses from its SIGSYS branch
- * (arch/um/backend/seccomp/trap_user.c:159). D.3 closes the loop with
- * the post-handle_syscall marshal-out: regs->gp[] is copied back into
- * kvm_run->s.regs.regs (sync_regs path; KVM_SYNC_X86_REGS dirty bit
- * is OR'd in), and rcx/r11 are explicitly overwritten with the
- * user-resume RIP/RFLAGS so SYSRETQ at the trampoline tail lands the
- * guest at the right user RIP (or signal handler VA on do_signal
- * delivery) with the right RFLAGS.
+ * (arch/um/backend/seccomp/trap_user.c:159).  The syscall return state
+ * stays in the per-task regs; the next outer vcpu_run iteration copies
+ * those regs into whichever per-host-CPU vCPU is selected for the task.
+ * Do not use the shared kvm_run mmap after handle_syscall() returns:
+ * blocking syscalls can schedule and another task may have reused that
+ * per-CPU vCPU before the sleeping syscall resumes.
  *
  * Both phases live in one file because the trampoline bytes (§D.1)
  * and the host-side decoder (§D.2) are two halves of the same ABI:
@@ -54,13 +53,10 @@
  *   - D.2's KVM_EXIT_IO dispatch reads the port, marshals
  *     kvm_run->s.regs.regs into uml_pt_regs (sync-regs, no
  *     KVM_GET_REGS), calls into arch/um/kernel/skas/syscall.c's
- *     handle_syscall, marshals the return value back.
- *   - KVM_RUN re-entry advances RIP past the trapping `out` (KVM does
- *     this internally for IO exits) and lands on the next instruction —
- *     `sysretq` — which drops back to CPL=3 with RIP=RCX, RFLAGS=R11.
- *   - The user-resume RIP/RFLAGS were placed in RCX/R11 by D.3's
- *     marshal-out — sysretq's architectural semantics pop them
- *     correctly without per-syscall plumbing on the trampoline side.
+ *     handle_syscall, then returns to the outer per-trap loop.
+ *   - The next KVM_RUN entry rebuilds the vCPU state from per-task
+ *     regs. For normal syscall returns that means RIP is the user
+ *     continuation from RCX and RFLAGS is the user flags from R11.
  *
  * Today (D.1) this trampoline is unreferenced from any KVM_RUN path:
  *   - MSR_LSTAR isn't programmed yet — that's D.4 (CPUID install +
@@ -953,15 +949,15 @@ void kvm_v2_trampoline_free(struct kvm_v2_vm *vm)
  * marshal BEFORE the exit-reason switch fires). No KVM_GET_REGS.
  *
  * On return from handle_syscall, regs->gp[HOST_AX] holds the syscall
- * return value. D.3 will marshal it into kvm_run->s.regs.regs.rax
- * and OR KVM_SYNC_X86_REGS into kvm_dirty_regs so the next KVM_RUN
- * delivers the value to user via the trampoline's sysretq. D.2 stops
- * one step short — the marshal-out comment block below is the seam.
+ * return value.  This helper must not write it back through @run after
+ * handle_syscall returns: blocking syscalls can schedule, and another
+ * UML task may reuse the same per-host-CPU vCPU before this task
+ * resumes.  The next outer kvm_v2_vcpu_run() iteration marshals the
+ * per-task regs into the selected vCPU immediately before KVM_RUN.
  *
- * vcpu_fd is currently unread inside the helper; D.3 / D.4 may want
+ * vcpu_fd is currently unread inside the helper; later phases may want
  * it for explicit ioctls (e.g. KVM_SET_REGS for any field
- * KVM_CAP_SYNC_REGS doesn't cover, or per-trap MSR queries). Reserved
- * here so D.3 does not have to widen the signature.
+ * KVM_CAP_SYNC_REGS doesn't cover, or per-trap MSR queries).
  *
  * Returns 0 on success or -ENOTSUPP on an unexpected port (Phase E
  * territory). Errors from handle_syscall are not propagated — that
@@ -2114,6 +2110,7 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 			  struct kvm_v2_vcpu *vcpu)
 {
 	unsigned long syscall_nr;
+	u16 io_port;
 
 	if (!vcpu)
 		return -EINVAL;
@@ -2189,8 +2186,9 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 */
 	UPT_SYSCALL_NR(regs) = -1;
 
-	trace_um_backend_kvm_v2_iotrap_syscall_enter(run->io.port,
-						     syscall_nr);
+	io_port = run->io.port;
+
+	trace_um_backend_kvm_v2_iotrap_syscall_enter(io_port, syscall_nr);
 
 	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_PRE, regs, run, vcpu);
 
@@ -2204,7 +2202,8 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 * block walks the next entry, validates kind == SYSCALL +
 	 * NR equality, and on a match writes the recorded retval into
 	 * regs->gp[HOST_AX] then jumps past handle_syscall to the
-	 * marshal-out path. The live syscall is NOT issued — replay's
+	 * common syscall-return cleanup. The live syscall is NOT issued —
+	 * replay's
 	 * whole contract is "reproduce the recorded side effects without
 	 * re-issuing them against the host."
 	 *
@@ -2214,7 +2213,7 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 *             PT_SYSCALL_NR (defensive — the Phase 2 hook below
 	 *             expects the syscall_nr-already-cleared shape we'd
 	 *             normally hit AFTER handle_syscall), and goto past
-	 *             handle_syscall to the post-call marshal-out.
+	 *             handle_syscall to the post-call cleanup.
 	 *
 	 *   rc == 0:  not REPLAYING (or rec NULL race against _stop).
 	 *             Fall through to live handle_syscall.
@@ -2231,14 +2230,14 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 * same signal) and matches the operator mental model: divergence
 	 * == corrupt-program == segfault. The force_sig delivery uses
 	 * the existing #include <linux/sched/signal.h> machinery; we
-	 * still goto past handle_syscall so the marshal-out path runs
+	 * still goto past handle_syscall so the common cleanup runs
 	 * normally — the kernel will deliver the queued signal on the
 	 * task's next return-to-userspace check.
 	 *
 	 * Zero hot-path cost when off: the static-key gate compiles to
 	 * a 5-byte NOP patched out at boot; the new hook block adds zero
 	 * cycles to non-record runtime (same shape as the Phase 2 site
-	 * above the marshal-out).
+	 * above the return cleanup).
 	 */
 	if (static_branch_unlikely(&um_kvm_v2_record_enabled)) {
 		struct kvm_v2_record *rec = kvm_v2_record_active();
@@ -2270,7 +2269,13 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 
 	handle_syscall(regs);
 
-	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_POST, regs, run, vcpu);
+	/*
+	 * Do not pass @run or @vcpu after handle_syscall().  A blocking
+	 * syscall can sleep, and v2's per-host-CPU vCPU pool lets another
+	 * UML task reuse this vCPU before the sleeping syscall resumes.
+	 * At this point the only authoritative state is per-task regs.
+	 */
+	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_POST, regs, NULL, NULL);
 
 	/*
 	 * Drain UML's pending signal/scheduler work AFTER the syscall
@@ -2291,17 +2296,15 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 * Caught running `dash` builtin echo after a fork+wait under v2:
 	 * waitpid sets HOST_AX = -ERESTARTSYS via SIGCHLD; the next
 	 * write(1, ...) in dash also returns -512 because handle_syscall
-	 * preserved the sentinel through to the marshal-out path, with
+	 * preserved the sentinel through to the syscall-return path, with
 	 * the user seeing every subsequent shell write fail.
 	 *
 	 * The reverted commit ad06c7f5164c added this same call but at
 	 * that time the substrate gate showed a SYSRETQ-RIP regression.
-	 * The marshal-out below explicitly overwrites run->s.regs.regs.rcx
-	 * with regs->gp[HOST_IP] (and r11 with HOST_EFLAGS) so the
-	 * SYSRETQ-pop-RIP-from-RCX semantics align with whatever do_signal
-	 * left in HOST_IP — restart, signal-handler entry, or unchanged
-	 * post-syscall RIP. With that overwrite present, the interrupt_end
-	 * call is safe to re-introduce.
+	 * v2 no longer marshals back into @run after handle_syscall();
+	 * the next outer vcpu_run iteration rebuilds the vCPU from
+	 * per-task regs, so HOST_IP/HOST_EFLAGS still carry the restart,
+	 * signal-handler entry, or unchanged post-syscall RIP/RFLAGS.
 	 *
 	 * Place BEFORE the PT_SYSCALL_NR clear below: do_signal's
 	 * restart-syscall logic only fires when PT_REGS_SYSCALL_NR(regs)
@@ -2355,16 +2358,17 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 *     keeps the hook's view of regs in a "syscall NR slot still
 	 *     populated" state — minimizes surprise for the inevitable
 	 *     Phase 5/6 hooks that may want to read PT_SYSCALL_NR.
-	 *   - BEFORE the marshal-out: regs->gp[HOST_DI/SI/DX/R10/R8/R9]
-	 *     still hold the original syscall arg values that
+	 *   - BEFORE returning to the outer vcpu_run loop:
+	 *     regs->gp[HOST_DI/SI/DX/R10/R8/R9] still hold the original
+	 *     syscall arg values that
 	 *     C.3's marshal-from-kvm-regs populated at entry —
 	 *     handle_syscall is supposed to read but not mutate these.
 	 *     If a future regression made handle_syscall clobber args,
 	 *     the observe entry would capture the post-clobber value;
 	 *     Phase 2 accepts that risk (no in-tree path clobbers args
-	 *     today) since fixing it would require stashing args on
-	 *     the stack at entry — Phase 2 cost-benefit doesn't justify
-	 *     the extra copy.
+	 *     today) since fixing it would require stashing args on the
+	 *     stack at entry — Phase 2 cost-benefit doesn't justify the
+	 *     extra copy.
 	 *
 	 * Zero hot-path cost when off: the static-key gate compiles to
 	 * a 5-byte NOP that the kernel patches out at boot;
@@ -2389,10 +2393,10 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 * Phase 3 (memo 27 §3.2) replay-served path rejoins here: skip
 	 * the live handle_syscall + the interrupt_end -ERESTART* block +
 	 * the Phase 2 observe hook (we just emitted the recorded retval
-	 * into HOST_AX from the log). The PT_SYSCALL_NR clear below + the
-	 * marshal-out still run so SYSRETQ pops the right RIP/RFLAGS and
-	 * the cross-path orig_ax-leakage protection (commit a478952b8da0)
-	 * stays armed for any subsequent exception dispatcher hits.
+	 * into HOST_AX from the log). The PT_SYSCALL_NR clear below still
+	 * runs so the cross-path orig_ax-leakage protection
+	 * (commit a478952b8da0) stays armed for any subsequent exception
+	 * dispatcher hits.
 	 */
 skip_handle_syscall:
 	/*
@@ -2436,33 +2440,12 @@ skip_handle_syscall:
 		PT_SYSCALL_NR(regs->gp) = -1;
 
 	/*
-	 * D.3 marshal-out: copy regs->gp[] back into kvm_run->s.regs.regs
-	 * + OR KVM_SYNC_X86_REGS into kvm_dirty_regs. Critical for SYSRETQ:
-	 * the trampoline's `sysretq` reads RIP from RCX and RFLAGS from R11.
-	 * For normal syscall return that's the original user RIP/RFLAGS
-	 * (preserved from the SYSCALL entry above where we stashed
-	 * regs->gp[HOST_CX]/[HOST_R11] into HOST_IP/HOST_EFLAGS); signal-
-	 * delivery (do_signal called from interrupt_end during handle_syscall)
-	 * overwrites regs->gp[HOST_IP] with the signal handler VA, and the
-	 * explicit lift below puts it into RCX so sysretq lands at the
-	 * handler.
-	 *
-	 * RAX gets the return value handle_syscall stashed at gp[HOST_AX]
-	 * (already covered by the marshal — the helper copies gp[HOST_AX]
-	 * → dst->rax).
-	 *
-	 * Note: kvm_v2_marshal_to_kvm_regs at vcpu.c copies HOST_IP→rip,
-	 * HOST_CX→rcx, HOST_R11→r11 — which after the marshal would leave
-	 * rcx = original gp[HOST_CX] (now stale: handle_syscall did not
-	 * update HOST_CX, only HOST_IP/HOST_EFLAGS — and signal-delivery
-	 * may have rewritten HOST_IP). OVERWRITE rcx and r11 explicitly
-	 * after the marshal so SYSRETQ sees the right user-resume RIP/
-	 * RFLAGS regardless of which path handle_syscall took.
-	 *
-	 * v1 reference: kvm-v1-archive/thread.c documents the same RCX/R11
-	 * = user-resume-RIP/RFLAGS contract for SYSRETQ at the trampoline
-	 * tail (its "post-handle_syscall: marshal back to vcpu state"
-	 * region around the per-task vcpu_run cleanup).
+	 * There is deliberately no post-syscall marshal into @run here.
+	 * The next kvm_v2_vcpu_run() iteration copies regs->gp[] into the
+	 * selected vCPU immediately before KVM_RUN.  Avoiding @run here is
+	 * required for sleeping syscalls: while this task sleeps, another
+	 * task can reuse the same per-host-CPU vCPU and overwrite the
+	 * shared kvm_run mmap.
 	 */
 	/*
 	 * SMP-T12 diagnostic: log the syscall return value we're about
@@ -2481,18 +2464,12 @@ skip_handle_syscall:
 					 "syscall_nr=%lu ship.rax=%#lx hax=%#lx\n",
 					 current->pid, raw_smp_processor_id(),
 					 syscall_nr,
-					 (unsigned long)run->s.regs.regs.rax,
+					 (unsigned long)regs->gp[HOST_AX],
 					 (unsigned long)regs->gp[HOST_AX]);
 		}
 	}
 
-	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
-	run->s.regs.regs.rcx = regs->gp[HOST_IP];
-	run->s.regs.regs.r11 = regs->gp[HOST_EFLAGS];
-	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
-
-	trace_um_backend_kvm_v2_iotrap_syscall_exit(run->io.port,
-						    regs->gp[HOST_AX]);
+	trace_um_backend_kvm_v2_iotrap_syscall_exit(io_port, regs->gp[HOST_AX]);
 
 	return 0;
 }

@@ -1097,6 +1097,14 @@ KVM-v2 readiness follow-up:
     event; this is now a focused backend state-ownership question because
     the current `migrate_disable()` design permits sleeping syscalls to
     schedule and reuse the per-host-CPU vCPU;
+  - a narrow post-syscall hardening now prevents
+    `kvm_v2_handle_io_trap()` from consuming the shared `kvm_run` mmap
+    after `handle_syscall()` returns; the trace helper still reports the
+    two old mismatches in the first failing log, the rebuilt trace
+    runtime passed a one-shot Django/vector2 KVM-v2 smoke, but a 30-run
+    retry still failed `PASS=29/30 FAIL=1 TIMEOUT=0` with guest Python
+    abort and a complete trace dump showing no post-syscall mismatches,
+    so KVM-v2 Tier 3 readiness remains open;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
@@ -1122,10 +1130,12 @@ KVM-v2 readiness follow-up:
   narrowed to a KVM-v2 application-workload stability question.  Vector2
   fd handoff works on KVM-v2, one Django 30/30 run is clean, and the
   trace-enabled path now captures and parses a failing state-ring dump,
-  but the longer 60-run samples still fail from KVM-v2 guest userspace
-  execution instability.  The next backend audit is whether post-syscall
-  handling can ever consume stale shared-vCPU state after a sleeping
-  syscall schedules away.  KVM-v2 Tier 3 readiness remains open.
+  but the longer samples still fail from KVM-v2 guest userspace
+  execution instability.  The direct post-syscall stale-`kvm_run`
+  consumption path has been removed and did not close the flake; the
+  next backend audit must focus on the remaining task/mm ownership
+  transitions and guest memory/TLB model.  KVM-v2 Tier 3 readiness
+  remains open.
 
 ### V2-R9 - Transport Parity
 

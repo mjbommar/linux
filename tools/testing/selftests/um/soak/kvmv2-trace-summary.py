@@ -279,6 +279,14 @@ def summarize_post_syscall_mismatches(
         if row.get("header.op") != "HANDLE_SYSCALL_POST":
             continue
 
+        # Fixed kernels intentionally trace HANDLE_SYSCALL_POST without
+        # the shared kvm_run payload after handle_syscall() returns.  Only
+        # old-style rows with the syscall IO port still attached can prove
+        # a stale run-vs-task mismatch.
+        port = numeric_value(row.get("header.port"))
+        if port != 0xF4:
+            continue
+
         run_rax = numeric_value(row.get("regs.rax"))
         task_horax = numeric_value(row.get("task.horax"))
         if run_rax is None or task_horax is None or run_rax == task_horax:

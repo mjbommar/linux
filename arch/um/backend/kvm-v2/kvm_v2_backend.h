@@ -596,11 +596,13 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs);
 /*
  * Phase C.3 marshal helper (vcpu.c). Copy uml_pt_regs.gp[] into a
  * struct kvm_regs (the on-mmap kvm_run->s.regs.regs target). Used by
- * vcpu.c's pre-KVM_RUN marshal-in AND by syscall_trap.c's D.3
- * marshal-out (after handle_syscall returns, regs->gp[HOST_AX] holds
- * the syscall return value; the marshal copies it back into the mmap
- * so the next KVM_RUN delivers it to user via the trampoline's
- * sysretq). RFLAGS.bit1 (reserved-must-be-1) is OR'd in defensively.
+ * vcpu.c's pre-KVM_RUN marshal-in.  The syscall path deliberately does
+ * not call this helper after handle_syscall(): a blocking syscall can
+ * schedule away and another UML task can reuse the shared per-host-CPU
+ * kvm_run mmap before the sleeping syscall resumes.  Syscall return
+ * state stays in per-task regs until the next outer vcpu_run iteration
+ * marshals it into the selected vCPU. RFLAGS.bit1 (reserved-must-be-1)
+ * is OR'd in defensively.
  */
 void kvm_v2_marshal_to_kvm_regs(struct kvm_regs *dst,
 				const struct uml_pt_regs *src);
