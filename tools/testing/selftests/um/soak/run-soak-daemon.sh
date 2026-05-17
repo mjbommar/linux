@@ -21,6 +21,10 @@
 #   UML_KERNEL=... ./run-soak-daemon.sh --budget-sec 60 \
 #       --workloads memcheck --iters-per-rotation 2
 #
+# Backend-isolated run:
+#   UML_KERNEL=... ./run-soak-daemon.sh --backends seccomp \
+#       --workloads tier3-django-v2,tier3-fastapi-v2
+#
 # Stop with SIGTERM/SIGINT — daemon finishes the in-flight workload
 # phase before exiting (does NOT kill umlctl mid-iteration).
 # Force a summary refresh: kill -USR1 $pid.
@@ -34,6 +38,7 @@ BUDGET_SEC="${SOAK_BUDGET_SEC:-86400}"
 WORKERS="${SOAK_WORKERS:-2}"
 ITERS="${SOAK_ITERS:-10}"
 WORKLOADS_CSV="${SOAK_WORKLOADS:-memcheck,iocheck,stress-ng,cpython-soak,kbuild-tiny}"
+BACKENDS_CSV="${SOAK_BACKENDS:-kvm-v2,seccomp}"
 OUT="${SOAK_OUT:-}"
 FAIL_THRESH_PCT="${SOAK_FAIL_THRESH_PCT:-5}"
 FAIL_THRESH_WIN="${SOAK_FAIL_THRESH_WIN:-50}"
@@ -52,6 +57,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--budget-sec)              BUDGET_SEC=$2; shift 2 ;;
 		--workloads)               WORKLOADS_CSV=$2; shift 2 ;;
+		--backends)                BACKENDS_CSV=$2; shift 2 ;;
 		--workers)                 WORKERS=$2; shift 2 ;;
 		--iters-per-rotation)      ITERS=$2; shift 2 ;;
 		--out)                     OUT=$2; shift 2 ;;
@@ -135,6 +141,7 @@ mkdir -p "$OUT/logs" "$OUT/logs/panics" || exit 2
 
 # Resolve workloads CSV → array; validate each template.
 IFS=',' read -ra WORKLOADS <<< "$WORKLOADS_CSV"
+IFS=',' read -ra BACKENDS <<< "$BACKENDS_CSV"
 SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
 for w in "${WORKLOADS[@]}"; do
 	tmpl_w=$(tier3_template_workload "$w")
@@ -142,6 +149,15 @@ for w in "${WORKLOADS[@]}"; do
 		echo "ERR: missing template $SOAK_DIR/${tmpl_w}.toml.template" >&2
 		exit 2
 	fi
+done
+for backend in "${BACKENDS[@]}"; do
+	case "$backend" in
+		kvm-v2|seccomp) ;;
+		*)
+			echo "ERR: unsupported backend '$backend' (expected kvm-v2 or seccomp)" >&2
+			exit 2
+			;;
+	esac
 done
 
 # Per-workload per-iter timeout. Mirrors run-pilot.sh's TIMEOUTS array.
@@ -433,6 +449,7 @@ write_config() {
 	    "workers": $WORKERS,
 	    "iters_per_rotation": $ITERS,
 	    "workloads": $(python3 -c 'import json,sys; print(json.dumps("'$WORKLOADS_CSV'".split(",")))'),
+	    "backends": "$BACKENDS_CSV".split(","),
 	    "fail_threshold_pct": $FAIL_THRESH_PCT,
 	    "fail_threshold_window": $FAIL_THRESH_WIN,
 	    "continue_on_fail_threshold": $([ -n "$CONTINUE_ON_THRESH" ] && echo True || echo False),
@@ -662,7 +679,9 @@ run_one_phase() {
 # Main loop.
 # ----------------------------------------------------------------------
 write_config
-echo "[$(date -uIs)] phase-J-soak START run_id=$SOAK_RUN_ID budget=${BUDGET_SEC}s workloads=${WORKLOADS_CSV} workers=$WORKERS iters=$ITERS"
+echo "[$(date -uIs)] phase-J-soak START run_id=$SOAK_RUN_ID budget=${BUDGET_SEC}s"
+echo "[$(date -uIs)] workloads=${WORKLOADS_CSV} backends=${BACKENDS_CSV}"
+echo "[$(date -uIs)] workers=$WORKERS iters=$ITERS"
 echo "[$(date -uIs)] out_dir=$OUT"
 
 ROTATION=0
@@ -679,7 +698,7 @@ while [ "$STOP_REQUESTED" = 0 ]; do
 
 	for workload in "${WORKLOADS[@]}"; do
 		[ "$STOP_REQUESTED" = 0 ] || break
-		for backend in kvm-v2 seccomp; do
+		for backend in "${BACKENDS[@]}"; do
 			[ "$STOP_REQUESTED" = 0 ] || break
 			run_one_phase "$workload" "$backend" "$ROTATION"
 		done

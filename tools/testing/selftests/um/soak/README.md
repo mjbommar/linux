@@ -90,6 +90,15 @@ UML_KERNEL=... ./run-soak-daemon.sh \
        --workers 1 --iters-per-rotation 5 \
        --out /var/tmp/phase-J-tier1-1h
 
+# Backend-isolated vector2 seccomp soak.  This is useful when KVM-v2
+# is being debugged separately and the goal is replacement-gate evidence
+# for the vector2 network path:
+UML_KERNEL=... UMLCTL=... ./run-soak-daemon.sh \
+       --budget-sec 7200 --backends seccomp \
+       --workloads tier3-django-v2,tier3-fastapi-v2 \
+       --workers 1 --iters-per-rotation 10 \
+       --out /var/tmp/vector2-seccomp-tier3-2h
+
 # Stop early: kill -TERM <pid>; the daemon finishes the in-flight workload
 # phase, writes a final summary, exits cleanly.
 # Force a summary refresh without stopping: kill -USR1 <pid>.
@@ -101,6 +110,10 @@ per (workload, backend); `scoreboard.jsonl` is one JSON object per
 iteration with the same shape as `umlctl gate run`'s rows + soak-specific
 fields (`soak_run_id`, `rotation_idx`, `iter_idx_within_workload`,
 `max_temp_c_pre/post`).
+
+By default daemon mode sweeps both `kvm-v2` and `seccomp`.  Use
+`--backends seccomp`, `--backends kvm-v2`, or
+`--backends kvm-v2,seccomp` to narrow or restore the backend matrix.
 
 Threshold-trip stop: if a (workload, backend) tuple's rolling-window
 failure rate exceeds `--fail-threshold-pct` over the last
