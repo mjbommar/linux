@@ -1,11 +1,11 @@
 metric;value
-Reporting date;2026-05-14
-Cutoff commit;485eff5c96be
+Reporting date;2026-05-17
+Cutoff commit;3452635f7668
 Branch;umlctl-deploy
-Redesign docs;253 files
-KVM v2 implementation state;guest entry, syscall dispatch, exceptions, signals, SMP repair, and post-gadget performance landed; sustained validation in progress
+Redesign docs;274 files
+KVM v2 implementation state;guest entry, syscall dispatch, exceptions, signals, SMP repair, and post-gadget performance landed; sustained validation in progress; vector2 KVM-v2 Tier 3 blocked by separate Django/server/socket workload flake
 Functional parity;cpython-parity 21/21 under UP and SMP
 Substrate gate;kvm-v2 PASS=25 FAIL=3 XFAIL=3 matching seccomp
-2h validation pilot;kvm-v2 200/200 PASS; total 397/400 PASS
+Vector2 seccomp Tier 3;requested-stop 6142/7200s; 970/970 PASS; Django-v2 490/490; FastAPI-v2 480/480
 Cross-host benchmark;micro 193x-908x; Python 2.99x-4.06x; stress 3.71x-8.72x faster than seccomp
-Open formal gate;24h sustained validation plus Tier 2/Tier 3/LTP
+Open formal gate;24h sustained validation plus Tier 2/Tier 3/LTP; vector2 naturally completed 7200s seccomp soak and KVM-v2 Tier 3 rerun after backend fix

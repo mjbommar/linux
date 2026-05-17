@@ -322,6 +322,15 @@ parking-lot designs for future prioritization.
   `PASS=59/60 FAIL=1 TIMEOUT=0` and captured
   `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140` for the Python abort.
   Not a commitment.
+- [45-uml-vector-driver-v2-seccomp-soak-status.md](45-uml-vector-driver-v2-seccomp-soak-status.md) —
+  End-of-day vector2 seccomp Tier 3 soak status: a requested-stop run
+  reached 6142/7200 seconds, 970/970 passes, Django-v2 490/490,
+  FastAPI-v2 480/480, all rows using vector2 `vec2.0` TAP/inproc with
+  one queue, all per-run logs reaching `SERVER_READY`,
+  `GUEST_CURL ok=100 fail=0`, and `TIER3_OK`, no hidden fatal/BUG/KCSAN
+  signatures, and clean TAP/process teardown. Strong long-run evidence,
+  but not the final accepted 2-hour gate because the run stopped at
+  85.3% of the budget. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

@@ -1,6 +1,16 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-14 (**PLAN-2026-05-14 execution session — Phase J Track A scaffolding round + Track B time-machine ports + Track D upstream queue prep.** Daily deliverables added since 2026-05-07: SMP-T57 Phase A AVX/XSAVE enable (kvm-v2 80/80 first post-Phase-A soak), Phase J Tier 2 pre-built uv venv (80/80 PASS), Phase J Tier 3 design + templates (per-worker IP /30 carve-out from `192.168.42.0/24`), LTP runner template (kirk-driven), tier3 daemon-side per-worker fanout in `run-soak-daemon.sh`, Series 3 (ftrace-notrace-generic-v1) regenerated to READY, Series 7 cover letter rewritten for v2 redesign (414 → 900 lines), snapshot v2 port Phase 1 + Phase 2 (KUnit suite 3/3 passes), record/replay v2 port design memo (#169, 1012 lines + 7-phase sub-sequence). Three sub-agents in flight: #168 Phase 3 (full capture), Series 4 backend-ops-abstraction-rfc draft, SMP-T55 +50% UP-hop bisect. Decisions-log catch-up through D130. Prior 2026-05-07 STATUS context preserved below.) (**Prior context — STATUS drift cleanup + experimental verification pass 2026-05-07.** Verified on AMD Ryzen 7 7840HS (Zen 4) against post-T54/T56/gadget kernel rebuilt to current HEAD: substrate gate kvm-v2 **PASS=25/FAIL=3/XFAIL=3** (seccomp identical), cpython-parity **21/21 PARITY**, mt-mini SMP T=8 ncpus=4 N=30 **30/30 = 100%**, bench-py **kvm-v2 4.00× faster than seccomp** (matches 2026-05-04 cross-host baseline), bench-micro getpid **kvm-v2 ~1050× faster** (89-105 cyc / 109k cyc seccomp), T57 stress-ng `--vm --verify` reproduces SIGILL on kvm-v2 only. **One unmasked finding: `perf-py-startup` gate FAILS** (ratio_v2_over_seccomp = 1.250 vs max=1.2 on Python startup workload) — surfaced as **SMP-T55** in this update; root cause is T26/T27 always-`KVM_GET_FPU` reverting H.2 lazy-FPU. Hot-path workloads unaffected. Drift fixes: T33-as-mt-mini-closer marked HISTORICAL (T41 was true closure); migrate_disable site count corrected (3 not 5); phase ledger extended with T33/T36/T37/T41/T47/T54/T56 + gadget revival + perf-O1 rows. Prior `2026-05-05` Phase J pilot context preserved at `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`; SMP-T55 fix plan at memo state-audit/23.)
+Last updated: 2026-05-17 (**vector2 networking status journal**).
+Vector2 is no longer scaffolding-only: it has live netdev registration,
+trusted TAP/fd datapaths, `umlctl` selection, fd multiqueue,
+queue-to-CPU policy, KUnit coverage, KCSAN workload evidence, sandbox
+audit evidence, and substantial seccomp Tier 3 workload evidence.  It is
+still not replacement-ready because KVM-v2 Tier 3 remains blocked by a
+separate Django/server/socket workload instability, the 7200-second
+seccomp soak has not completed naturally, SMP fairness/performance work
+remains open, and CI/preflight rollout is not finished.
+
+Previous update: 2026-05-14 (**PLAN-2026-05-14 execution session — Phase J Track A scaffolding round + Track B time-machine ports + Track D upstream queue prep.** Daily deliverables added since 2026-05-07: SMP-T57 Phase A AVX/XSAVE enable (kvm-v2 80/80 first post-Phase-A soak), Phase J Tier 2 pre-built uv venv (80/80 PASS), Phase J Tier 3 design + templates (per-worker IP /30 carve-out from `192.168.42.0/24`), LTP runner template (kirk-driven), tier3 daemon-side per-worker fanout in `run-soak-daemon.sh`, Series 3 (ftrace-notrace-generic-v1) regenerated to READY, Series 7 cover letter rewritten for v2 redesign (414 → 900 lines), snapshot v2 port Phase 1 + Phase 2 (KUnit suite 3/3 passes), record/replay v2 port design memo (#169, 1012 lines + 7-phase sub-sequence). Three sub-agents in flight: #168 Phase 3 (full capture), Series 4 backend-ops-abstraction-rfc draft, SMP-T55 +50% UP-hop bisect. Decisions-log catch-up through D130. Prior 2026-05-07 STATUS context preserved below.) (**Prior context — STATUS drift cleanup + experimental verification pass 2026-05-07.** Verified on AMD Ryzen 7 7840HS (Zen 4) against post-T54/T56/gadget kernel rebuilt to current HEAD: substrate gate kvm-v2 **PASS=25/FAIL=3/XFAIL=3** (seccomp identical), cpython-parity **21/21 PARITY**, mt-mini SMP T=8 ncpus=4 N=30 **30/30 = 100%**, bench-py **kvm-v2 4.00× faster than seccomp** (matches 2026-05-04 cross-host baseline), bench-micro getpid **kvm-v2 ~1050× faster** (89-105 cyc / 109k cyc seccomp), T57 stress-ng `--vm --verify` reproduces SIGILL on kvm-v2 only. **One unmasked finding: `perf-py-startup` gate FAILS** (ratio_v2_over_seccomp = 1.250 vs max=1.2 on Python startup workload) — surfaced as **SMP-T55** in this update; root cause is T26/T27 always-`KVM_GET_FPU` reverting H.2 lazy-FPU. Hot-path workloads unaffected. Drift fixes: T33-as-mt-mini-closer marked HISTORICAL (T41 was true closure); migrate_disable site count corrected (3 not 5); phase ledger extended with T33/T36/T37/T41/T47/T54/T56 + gadget revival + perf-O1 rows. Prior `2026-05-05` Phase J pilot context preserved at `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`; SMP-T55 fix plan at memo state-audit/23.)
 
 This document is the single source of truth for "where are we, what's
 broken, what's next." Updated whenever priorities or blockers change.
@@ -9,9 +19,53 @@ If something contradicts a memo in `02-workstreams/` or
 `04-risks/decisions-log.md`, this file wins until the underlying memo
 catches up.
 
-**Tip:** `umlctl-deploy` HEAD (Phase J pilot soak rig + perf-getpid
-parser fix). Functional gates clean post-gadget + post-T54/T56/T57-
-disabled; one perf gate now failing (SMP-T55, see below):
+## Current Vector2 Networking Status (2026-05-17)
+
+Primary journal:
+`08-future-phases/45-uml-vector-driver-v2-seccomp-soak-status.md`.
+Current audit:
+`08-future-phases/29-uml-vector-driver-v2-completion-audit.md`.
+
+End-of-day vector2 seccomp Tier 3 soak status:
+
+- requested-stop run, not failure-stop;
+- elapsed 6142 seconds of a planned 7200-second window;
+- 970/970 total passes, 0 failures, 0 timeouts;
+- Django-v2/seccomp/vector2: 490/490 passes;
+- FastAPI-v2/seccomp/vector2: 480/480 passes;
+- every scoreboard row recorded vector2 `vec2.0`, TAP,
+  `host_mode=inproc`, and `queue_count=1`;
+- all 970 per-run logs reached `SERVER_READY`,
+  `GUEST_CURL ok=100 fail=0`, and `TIER3_OK`;
+- no hidden fatal Python, abort, panic, BUG, warning, KCSAN,
+  data-race, `not ok`, or `FAILED` signatures were found;
+- teardown left no `soak-tap0` and no matching soak/UML process.
+
+Short remaining vector2 list:
+
+- KVM-v2 baseline readiness is narrowed but still open: no-network
+  readiness/import controls pass, while no-network Django-loopback
+  reproduces the userspace flake without vector2;
+- KVM-v2 + vector2 Tier 3 30/30 is not accepted until the backend flake
+  is fixed or bounded with repeat evidence;
+- FastAPI variant, fd multiqueue, and queue-to-CPU policy are done for
+  current seccomp/launcher-owned paths;
+- KCSAN on multiqueue has meaningful coverage, but longer fairness
+  matrices, more host/kernel coverage, and KVM-v2 reruns remain open;
+- legacy-vs-vector2 performance baseline is measured but not accepted:
+  vector2 is slower guest-to-host and much faster host-to-guest on this
+  host, with UDP/syscall/CPU analysis still missing;
+- long-soak proof is materially advanced by the 6142-second stopped-clean
+  run, but the accepted 7200-second/CI window still needs to finish
+  naturally;
+- sandbox strace/audit gate is done locally, with CI/preflight rollout
+  and longer workload coverage still open.
+
+**Tip:** `umlctl-deploy` HEAD contains the vector2 status updates above
+plus the earlier Phase J pilot soak rig and perf-getpid parser fix.
+Functional gates are clean post-gadget and post-T54/T56/T57-disabled;
+SMP-T55's gate-ceiling regression is restored, with the +50% UP-hop
+bisect deferred:
 
   - **mt-mini SMP T=8 ncpus=4 N=400: 400/400 = 100.0% PASS** (post-T54
     SOCK_CLOEXEC fix + post-T56 EINTR-mid-gadget fix; Wilson 95%

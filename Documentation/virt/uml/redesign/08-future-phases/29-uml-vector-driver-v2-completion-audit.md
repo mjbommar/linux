@@ -59,6 +59,8 @@ Recent pushed checkpoints:
   workload instability.
 - post-audit follow-up - backend-filtered vector2 seccomp Tier 3
   soak pilot for Django and FastAPI.
+- post-audit follow-up - requested-stop vector2 seccomp Tier 3
+  long-soak evidence.
 
 Current status update against the short remaining list:
 
@@ -71,7 +73,7 @@ Current status update against the short remaining list:
 | queue-to-CPU policy | Done for implementation and unit coverage | vector2 has explicit `ndo_select_queue`, XPS setup, and KUnit coverage. Longer SMP fairness validation remains part of the broader performance/KCSAN work. |
 | KCSAN on multiqueue | Partial / materially progressed | No longer a plain open item: auto-queue fd multiqueue passed `PASS=10/10`, FastAPI passed once under KCSAN, concurrent TCP/UDP traffic passed with all four TX/RX queues moving, and varied KCSAN profiles include two-queue/six-flow and paced eight-flow/four-queue evidence. Longer fairness matrices, additional host/kernel coverage, and kvm-v2 reruns remain open. |
 | legacy-vs-v2 perf baseline | Partial / measured, not accepted | Repeated TCP sweeps now cover both directions, 1 MiB/8 MiB/32 MiB, and two repeats per cell. Results are mixed: vector2 is slower guest-to-host and much faster host-to-guest on this host. UDP, syscall, CPU, and acceptance analysis remain open. |
-| long-soak proof | Partial / seccomp pilot passed | A backend-filtered vector2 seccomp Tier 3 pilot ran for 1266 seconds with Django-v2 and FastAPI-v2, 10 rotations, 200/200 passes, all rows using vector2 `vec2.0` TAP/inproc with one queue, no hidden fatal/BUG/KCSAN signatures, and clean TAP/process teardown. This improves soak evidence but does not close the hours-long acceptance gate. |
+| long-soak proof | Partial / stopped-clean seccomp run | Backend-filtered vector2 seccomp Tier 3 evidence now includes the 1266-second 200/200 pilot and a requested-stop 6142-second run with 970/970 passes: Django-v2 490/490, FastAPI-v2 480/480, all rows using vector2 `vec2.0` TAP/inproc with one queue, all per-run logs reaching `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, and `TIER3_OK`, no hidden fatal/BUG/KCSAN signatures, and clean TAP/process teardown. This is strong long-run evidence, but it does not close the accepted 7200-second gate because the run stopped at 85.3% of budget. |
 | sandbox strace/audit gate | Done locally / broader rollout open | `umlctl gate loop --audit-vector-sandbox` preserves per-iteration strace/audit logs and fails on forbidden vector host operations; one audited vector2 auto-queue fd boot passed. CI/preflight wiring, longer workload coverage, and guest raw/netlink policy remain open. |
 
 Validation evidence recorded in the checkpoint docs includes:
@@ -186,6 +188,17 @@ Validation evidence recorded in the checkpoint docs includes:
   `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, and `TIER3_OK`; the
   captured logs had no hidden fatal/BUG/KCSAN signatures and teardown
   left no `soak-tap0` or UML soak process;
+- vector2 TAP seccomp Tier 3 requested-stop long run:
+  `45-uml-vector-driver-v2-seccomp-soak-status.md` records a
+  6142-second run against a 7200-second budget, stopped on request at
+  85.3% consumed; it completed 970/970 passes, with Django-v2 at
+  490/490 and FastAPI-v2 at 480/480; all rows recorded vector2
+  `vec2.0`, TAP, `host_mode=inproc`, and `queue_count=1`; all 97
+  loop logs reported `PASS=10/10 FAIL=0 TIMEOUT=0`; all 970 run logs
+  contained `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, and
+  `TIER3_OK`; the captured logs had no hidden fatal/BUG/KCSAN
+  signatures and teardown left no `soak-tap0` or matching soak/UML
+  process;
 - both-drivers kernel compatibility for explicit vector2 syntax:
   legacy vector leaves `vec2.` and `vec2=` for vector2 while preserving
   legacy `vec2:` as old-driver unit 2; the short perf baseline showed
@@ -337,8 +350,9 @@ list is:
 - capture a complete no-network Django-loopback state trace; the latest
   delayed capture recovered useful task/mm evidence but missed the dump
   end marker and did not include all declared entries;
-- extend the successful 1266-second vector2 seccomp Tier 3 pilot into
-  the accepted hours-long/CI soak window;
+- let the vector2 seccomp Tier 3 soak finish the accepted
+  7200-second/CI window naturally; the latest stopped-clean run reached
+  6142 seconds and 970/970 passes, but ended by operator request;
 - validate queue-to-CPU policy under longer SMP traffic;
 - extend KCSAN concurrency/fairness profiles under longer SMP traffic,
   broader queue/flow matrices, and kvm-v2 after its baseline is fixed;

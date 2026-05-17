@@ -163,6 +163,13 @@ shape, and inspectable ethtool surfaces:
   `tier3-django-v2` and `tier3-fastapi-v2` ran for 1266 seconds,
   10 rotations, and 200/200 passes, with all rows using vector2
   `vec2.0`, TAP, `host_mode=inproc`, and `queue_count=1`;
+- stopped-clean vector2 TAP seccomp Tier 3 long run:
+  `45-uml-vector-driver-v2-seccomp-soak-status.md` records a
+  requested-stop 6142-second run against a 7200-second budget,
+  970/970 passes, Django-v2 490/490, FastAPI-v2 480/480, all rows
+  using vector2 `vec2.0`, TAP, `host_mode=inproc`, and
+  `queue_count=1`, no hidden fatal/BUG/KCSAN signatures, and clean
+  TAP/process teardown;
 - both-drivers kernel compatibility for `vec2.*`: the legacy `vec`
   setup path now leaves `vec2.` and `vec2=` command-line specs for
   vector2 while preserving legacy `vec2:` as old-driver unit 2;
@@ -954,6 +961,37 @@ Seccomp Tier 3 soak pilot:
   hours-long/CI window, broader queue profiles, and KVM-v2 reruns after
   the backend blocker is fixed.
 
+Seccomp Tier 3 stopped-clean long run:
+
+- `45-uml-vector-driver-v2-seccomp-soak-status.md` records the
+  end-of-day long-run status for the same backend-filtered vector2
+  seccomp Tier 3 workload set.
+- Evidence collected:
+  - kernel
+    `/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux`;
+  - commit `3452635f7668`;
+  - workload set `tier3-django-v2,tier3-fastapi-v2`;
+  - backend set `seccomp`, one worker, 10 iterations per rotation;
+  - requested stop after 6142 seconds against a 7200-second budget
+    (85.3% consumed);
+  - 97 clean loop logs and 970/970 total passes;
+  - `tier3-django-v2`: 490/490 passes;
+  - `tier3-fastapi-v2`: 480/480 passes;
+  - every scoreboard row recorded vector2 `vec2.0`, TAP,
+    `host_mode=inproc`, and `queue_count=1`;
+  - every per-run log contained `SERVER_READY`,
+    `GUEST_CURL ok=100 fail=0`, and `TIER3_OK`;
+  - no hidden fatal Python, abort, panic, BUG, warning, KCSAN,
+    data-race, `not ok`, or `FAILED` signatures were found in the
+    captured run logs;
+  - teardown left no `soak-tap0` and no matching
+    `run-soak-daemon`, `umlctl gate loop`, or UML Tier 3 process.
+- Therefore vector2 has materially stronger seccomp Tier 3 long-run
+  evidence than the first pilot.  The replacement gate remains open
+  because the run was operator-stopped before the full 7200-second
+  budget completed, and because KVM-v2 Tier 3 is blocked by the
+  separate backend workload instability.
+
 Performance baseline follow-up:
 
 - `36-uml-vector-driver-v2-perf-baseline.md` records the first
@@ -1384,7 +1422,8 @@ experimental inspectable netdev with trusted fd and TAP packet paths,
 ethtool observability, and TAP write-side wakeups, plus an
 operator-facing `umlctl` selection path for Tier 3 experiments.  The
 next work is KVM-v2 Tier 3 readiness, host-to-guest TCP validation,
-long-soak proof, repeated launcher-owned fd gates, sandbox helper
+the naturally completed 7200-second long-soak proof, repeated
+launcher-owned fd gates, sandbox helper
 plumbing, and deeper multiqueue validation.
 
 ## Workstream Exit Summary
