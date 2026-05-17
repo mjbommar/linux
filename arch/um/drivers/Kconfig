@@ -288,6 +288,19 @@ config UML_NET_VECTOR_V2_NETDEV_KUNIT
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
 
+config UML_NET_VECTOR_V2_ETHTOOL_KUNIT
+	bool "Vector networking v2 ethtool KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 ethtool surface.
+	  These tests validate stopped-state stats, ring depth policy, and
+	  counter export before the driver is considered replacement-ready.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
 config UML_NET_VECTOR_V2_HOST_FD_KUNIT
 	bool "Vector networking v2 fd host KUnit tests"
 	depends on KUNIT

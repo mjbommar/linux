@@ -44,6 +44,7 @@ obj-$(CONFIG_UML_NET_VECTOR_V2_MODEL) += vector2_model.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_MODEL_KUNIT) += vector2_model_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_CMDLINE_KUNIT) += vector2_cmdline_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_NETDEV_KUNIT) += vector2_netdev_test.o
+obj-$(CONFIG_UML_NET_VECTOR_V2_ETHTOOL_KUNIT) += vector2_ethtool_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_HOST_FD_KUNIT) += vector2_host_fd_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_HOST_TAP_KUNIT) += vector2_host_tap_test.o
 obj-$(CONFIG_MCONSOLE) += mconsole.o

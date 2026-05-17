@@ -179,6 +179,11 @@ parking-lot designs for future prioritization.
   queue ownership, NAPI/read-IRQ channel ownership, TAP TX/RX host ops,
   vnet-header normalization, guest-to-host ping evidence, known
   replacement blockers, and KUnit coverage. Not a commitment.
+- [22-uml-vector-driver-v2-r6-ethtool-hardening.md](22-uml-vector-driver-v2-r6-ethtool-hardening.md) —
+  R6 implementation note for ethtool hardening: stopped-safe stats,
+  ring policy, coalesce policy reporting, TAP write-IRQ wakeups,
+  repeated trusted TAP up/ping/down evidence, sandbox rejection
+  evidence, and KUnit coverage. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

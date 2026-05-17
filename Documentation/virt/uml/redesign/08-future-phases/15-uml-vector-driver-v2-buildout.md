@@ -30,8 +30,9 @@ The following v2 foundations exist:
 Those pieces prove parser policy, queue ownership, transport header
 bounds checks, fake-host behavior, and lifecycle transitions.
 
-R1 through R5 have now added the first runtime attachments and the
-first trusted TAP packet path:
+R1 through R6 have now added the first runtime attachments, the first
+trusted TAP packet path, and the first inspectable ethtool hardening
+surface:
 
 - `CONFIG_UML_NET_VECTOR_V2`, default `n`;
 - v2-only command-line collection through `vec2.<n>:` and `vec2=`;
@@ -53,7 +54,10 @@ first trusted TAP packet path:
   `vec2.0:transport=tap,ifname=<tap>`;
 - single-queue trusted TAP TX/RX through v2 queue ownership;
 - NAPI/read-IRQ integration for trusted TAP;
-- trusted TAP ping smoke with `3 packets transmitted, 3 received`.
+- write-IRQ wakeup for TAP TX backpressure;
+- ethtool stats, ring reporting, stopped-only ring resizing, and
+  coalesce policy reporting;
+- trusted TAP ping smoke with repeated up/ping/down loops.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
 They still do not provide replacement-ready networking.
@@ -62,9 +66,9 @@ Missing runtime pieces:
 
 - no fd packet movement;
 - no launcher-manifest fd path for sandbox mode;
-- no v2 ethtool stats, rings, coalescing, or feature controls;
+- no real timer-driven coalescing;
 - no feature negotiation;
-- no repeated single-queue soak loop;
+- no Tier 3 workload or repeated long soak loop;
 - no multiqueue runtime path;
 - no compatibility switch from old `vecN:` to v2.
 
@@ -415,6 +419,18 @@ Exit gate:
 
 - v2 is operational enough for routine debugging.
 
+R6 implementation note:
+
+- `22-uml-vector-driver-v2-r6-ethtool-hardening.md` records the first
+  ethtool hardening checkpoint: explicit v2 runtime counters,
+  stopped-safe stats sampling, queue-counter locking, ring reporting,
+  stopped-only ring resizing, coalesce policy reporting, TAP write IRQ
+  wakeup, KUnit ethtool coverage, repeated trusted TAP up/ping/down
+  evidence, and sandbox rejection evidence.
+- R6 is still single-queue trusted TAP only.  It does not satisfy fd
+  datapath, sandbox helper/proxy, host-to-guest TCP, Tier 3 soak,
+  multiqueue, real coalescing, or performance gates.
+
 ### V2-R7 - Tier 3 And Soak Eligibility
 
 Goal: prove the single-queue TAP/fd implementation under the workload
@@ -623,10 +639,17 @@ The next concrete work should be:
    prove guest-to-host ping before claiming any soak or replacement
    readiness.
 
-Those first five series have now taken v2 from parked scaffolding to an
-experimental inspectable netdev with trusted fd open/close and a
-working single-queue trusted TAP packet path.  The next work is
-hardening, observability, repeated soak, and then multiqueue.
+6. **Ethtool and backpressure hardening.**
+   Add stopped-safe stats, ring reporting, stopped-only ring resizing,
+   coalesce policy reporting, and TAP write-side wakeups before trying
+   Tier 3 workloads.
+
+Those first six series have now taken v2 from parked scaffolding to an
+experimental inspectable netdev with trusted fd open/close, a working
+single-queue trusted TAP packet path, ethtool observability, and TAP
+write-side wakeups.  The next work is Tier 3 workload eligibility,
+host-to-guest TCP validation, sandbox helper plumbing, and then
+multiqueue.
 
 ## Workstream Exit Summary
 

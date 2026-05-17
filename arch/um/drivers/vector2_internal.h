@@ -9,6 +9,7 @@
 #ifndef __UM_VECTOR2_INTERNAL_H
 #define __UM_VECTOR2_INTERNAL_H
 
+#include <linux/atomic.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
@@ -24,6 +25,25 @@
 #define UM_VEC2_DRIVER_NAME	"uml-vector-v2"
 #define UM_VEC2_NAME_PREFIX	"vec2"
 #define UM_VEC2_NO_IRQ		(-1)
+
+enum um_vec2_stat_counter {
+	UM_VEC2_STAT_OPEN_ATTEMPTS,
+	UM_VEC2_STAT_OPEN_FAILURES,
+	UM_VEC2_STAT_CLOSES,
+	UM_VEC2_STAT_NAPI_POLLS,
+	UM_VEC2_STAT_RX_IRQS,
+	UM_VEC2_STAT_TX_IRQS,
+	UM_VEC2_STAT_TX_XMIT_CALLS,
+	UM_VEC2_STAT_TX_BUSY,
+	UM_VEC2_STAT_TX_DROPPED,
+	UM_VEC2_STAT_TX_TRANSIENT_ERRORS,
+	UM_VEC2_STAT_TX_FATAL_ERRORS,
+	UM_VEC2_STAT_RX_ALLOC_ERRORS,
+	UM_VEC2_STAT_RX_PROTO_DROPS,
+	UM_VEC2_STAT_RX_FATAL_ERRORS,
+	UM_VEC2_STAT_BACKEND_DEAD,
+	UM_VEC2_STAT_MAX,
+};
 
 enum um_vec2_cmdline_form {
 	UM_VEC2_CMDLINE_DOT,
@@ -45,6 +65,10 @@ struct um_vec2_queue_pair {
 	struct um_vec2_rx_slot *rx_slot;
 };
 
+struct um_vec2_stats {
+	atomic64_t counter[UM_VEC2_STAT_MAX];
+};
+
 struct um_vec2_channel {
 	struct um_vec2_chan_lifecycle life;
 	struct um_vec2_dev *vdev;
@@ -63,6 +87,7 @@ struct um_vec2_dev {
 	unsigned int unit;
 	struct um_vec2_config cfg;
 	struct um_vec2_dev_lifecycle life;
+	struct um_vec2_stats stats;
 	struct net_device *netdev;
 	struct um_vec2_channel *channels;
 	unsigned int num_channels;
@@ -71,6 +96,25 @@ struct um_vec2_dev {
 struct um_vec2_netdev_priv {
 	struct um_vec2_dev *vdev;
 };
+
+static inline struct um_vec2_dev *um_vec2_dev_from_netdev(struct net_device *dev)
+{
+	struct um_vec2_netdev_priv *priv = netdev_priv(dev);
+
+	return priv->vdev;
+}
+
+static inline void um_vec2_stat_inc(struct um_vec2_dev *vdev,
+				    enum um_vec2_stat_counter counter)
+{
+	atomic64_inc(&vdev->stats.counter[counter]);
+}
+
+static inline u64 um_vec2_stat_read(const struct um_vec2_dev *vdev,
+				    enum um_vec2_stat_counter counter)
+{
+	return atomic64_read(&vdev->stats.counter[counter]);
+}
 
 int um_vec2_cmdline_parse_spec(const char *arg,
 			       enum um_vec2_cmdline_form form,

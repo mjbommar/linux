@@ -2,7 +2,7 @@
 /*
  * Trusted TAP host backend for UML vector networking v2.
  *
- * This R4 backend only owns TAP fd open/close and channel lifecycle wiring.
+ * Trusted TAP backend for the experimental vector v2 runtime.
  * Packet movement, interrupts, NAPI, and carrier enablement are left to the
  * later datapath phases.
  */
