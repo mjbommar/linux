@@ -1,14 +1,17 @@
 # UML vector driver v2 lifecycle stress gate
 
-**Status:** partial runtime lifecycle evidence - harness and smoke.
+**Status:** runtime lifecycle evidence - 10,000-cycle pass.
 **Date:** 2026-05-17.
 
 This note records a reusable `umlctl gate loop` workload for live
 vector2 `ip link up/down` lifecycle testing.  It is the runtime
 counterpart to the fd backend KUnit failure-stress tests.
 
-The full replacement gate remains open until the same harness passes a
-10,000-cycle live run with leak checks.
+This closes the successful live `ip link up/down` repetition gap for
+the vector2 fd-handoff path.  It does not close failed-open injection:
+the current runtime path can repeat successful open/stop, but cannot
+intentionally make selected opens fail without changing the driver
+configuration.
 
 ## Harness
 
@@ -126,21 +129,68 @@ TAP_ABSENT
 UML_PROCESS_ABSENT
 ```
 
+## 10,000-Cycle Evidence
+
+Command:
+
+```sh
+rm -rf /tmp/um-vector-lifecycle-10k
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux \
+  timeout 2100s tools/uml/uml-launcher/target/debug/umlctl gate loop \
+    -f tools/uml/uml-launcher/examples/vector2-lifecycle-stress.toml \
+    -W 1 -M 1 --timeout 1800 \
+    --pass-marker VECTOR2_LIFECYCLE_STRESS_OK \
+    --fail-marker 'VECTOR2_LIFECYCLE_.*(FAIL|BAD|MISSING|MISMATCH|NO_ETHTOOL)|VERIFY_FAIL|kernel BUG|Kernel panic' \
+    --out /tmp/um-vector-lifecycle-10k
+```
+
+Result:
+
+```text
+==> default PASS=1/1 FAIL=0 TIMEOUT=0
+elapsed=189s
+```
+
+The saved run log included progress at every 1,000 cycles and the
+final counter check:
+
+```text
+VECTOR2_LIFECYCLE_PROGRESS cycles=10000
+VECTOR2_LIFECYCLE_COUNTERS cycles=10000 open_delta=10000 close_delta=10000 before_open=1 after_open=10001 before_close=0 after_close=10000
+open_attempts: 10001
+closes: 10000
+VECTOR2_LIFECYCLE_STRESS_OK
+```
+
+The post-loop gateway check passed:
+
+```text
+3 packets transmitted, 3 received, 0% packet loss
+```
+
+The copied run log had no `VECTOR2_LIFECYCLE_*` failure marker and no
+`WARNING`, `kernel BUG`, `BUG:`, `Kernel panic`, `KCSAN`, `data-race`,
+`lockdep`, `not ok`, or `FAILED` signature.
+
+Host cleanup checks after the run:
+
+```text
+TAP_ABSENT
+UML_PROCESS_ABSENT
+```
+
 ## What This Closes
 
-This checkpoint closes the missing harness gap for live vector2
-lifecycle repetition.  Developers now have a checked `umlctl` workload
-that exercises the real netdev open/stop path and verifies runtime
-ethtool counters.
+This checkpoint closes the missing successful-live-cycle evidence for
+vector2 fd lifecycle repetition.  Developers now have a checked
+`umlctl` workload that exercises the real netdev open/stop path,
+verifies runtime ethtool counters, preserves run logs, and proves one
+10,000-cycle run without TAP or process leaks.
 
 ## What Remains Open
 
-This checkpoint does not close the replacement lifecycle gate.  The
-remaining work is:
-
-- run the default 10,000-cycle workload to completion;
-- preserve the run log and cleanup evidence;
-- decide whether to add a fault-injection knob for live failed opens,
-  since the current runtime path can repeat open/stop but cannot
-  intentionally make selected opens fail without changing the driver
-  configuration.
+This checkpoint does not close failed-open injection.  The remaining
+work is to decide whether to add a runtime fault-injection knob for
+selected open failures, since the current runtime path can repeat
+open/stop but cannot intentionally make selected opens fail without
+changing the driver configuration.

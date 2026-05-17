@@ -22,7 +22,7 @@ experimental netdev exists.
 | --- | --- | --- |
 | Build live netdev driver under `CONFIG_UML_NET_VECTOR_V2=y` | `vector2_cmdline.c`, `vector2_core.c`, `vector2_netdev.c`, `vector2_host_fd.c`, `vector2_host_tap.c`, `vector2_runtime.c`; runtime UML builds passed for trusted and sandbox configs | Partial: experimental only |
 | Register stable v2 netdev names | `vec2.<unit>` registration through `register_netdevice()`; runtime logs show `registered netdev vec2.0` | Done for v2 syntax |
-| `ip link set up/down` reaches modeled lifecycle | KUnit lifecycle tests; fd/TAP netdev open/stop tests; fd KUnit repeats netdev open/stop 1000 times; manual TAP/fd smokes; live vector2 lifecycle gate repeats `ip link down/up` 25 times and verifies ethtool open/close deltas | Partial: not live 10,000-cycle proof |
+| `ip link set up/down` reaches modeled lifecycle | KUnit lifecycle tests; fd/TAP netdev open/stop tests; fd KUnit repeats netdev open/stop 1000 times; manual TAP/fd smokes; live vector2 lifecycle gate repeats `ip link down/up` 10,000 times and verifies ethtool open/close deltas | Partial: successful live 10,000-cycle proof done; failed-open injection remains |
 | Single-queue trusted TAP packet path | R5 TAP datapath doc; ping smokes; Tier 3 seccomp 30/30 | Done for trusted TAP/seccomp |
 | Single-queue and multiqueue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP fds as inherited fd ranges starting at 200; live single-queue and 4-queue `umlctl up` fd-handoff smokes passed; `queues = "auto"` / `--network-queues auto` resolve to numeric vector2 fd ranges from `[runtime].ncpus` | Done for launch path; deeper SMP/perf still open |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
@@ -68,10 +68,11 @@ Validation evidence recorded in the checkpoint docs includes:
   warning/error signatures;
 - vector2 lifecycle stress harness:
   `tools/uml/uml-launcher/examples/vector2-lifecycle-stress.toml`
-  renders vector2 fd handoff over fd 200 and a 25-cycle live smoke
-  passed with `open_delta=25 close_delta=25`,
-  `VECTOR2_LIFECYCLE_STRESS_OK`, no lingering `v2life0`, and no UML
-  process leak;
+  renders vector2 fd handoff over fd 200; a 25-cycle live smoke passed,
+  then the default 10,000-cycle run passed with
+  `open_delta=10000 close_delta=10000`, post-loop gateway ping 3/3,
+  `VECTOR2_LIFECYCLE_STRESS_OK`, no warning/BUG/KCSAN signatures in the
+  copied run log, no lingering `v2life0`, and no UML process leak;
 - fd multiqueue core KUnit for contiguous inherited fd ranges and
   missing-later-fd unwind;
 - live `umlctl up` vector2 fd handoff over TAP fd 200, with
@@ -152,8 +153,8 @@ list is:
 - rerun vector2 Tier 3 Django 30/30 on kvm-v2 after that fix;
 - repeat the FastAPI/uvicorn vector2 seccomp smoke as a longer soak;
 - validate queue-to-CPU policy under longer SMP traffic;
-- run live 10,000-cycle vector2 `ip link up/down` failure injection with
-  leak checks;
+- decide and implement a live failed-open injection knob if replacement
+  approval requires runtime failed-open proof beyond KUnit;
 - run heavier KCSAN on multiqueue traffic;
 - expand legacy-vs-v2 performance baselines and explain or accept the
   measured guest-to-host regression and mixed bidirectional results;

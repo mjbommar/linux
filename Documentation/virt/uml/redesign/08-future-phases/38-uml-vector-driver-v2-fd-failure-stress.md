@@ -121,9 +121,12 @@ expected closed-state invariants are now executable tests.
 This checkpoint does not prove replacement readiness.  The remaining
 fd lifecycle gate still needs:
 
-- live `ip link set vec2.0 up/down` repetition, not only KUnit calls;
-- at least 10,000 live cycles under controlled failure injection;
-- TAP/fd leak checks after the live failure-injection run;
+- live failed-open injection, not only KUnit failure calls;
+- a runtime way to make selected opens fail without changing the driver
+  configuration;
 - KCSAN or lockdep coverage while multiqueue traffic is active;
 - integration into the same `umlctl gate loop` evidence path used by
   the sandbox and workload smokes.
+
+The successful live 10,000-cycle `ip link down/up` repetition was
+covered later by `39-uml-vector-driver-v2-lifecycle-stress-gate.md`.

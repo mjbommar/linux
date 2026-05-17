@@ -273,14 +273,14 @@ parking-lot designs for future prioritization.
   Focused fd backend KUnit stress: repeats vector2 netdev open/stop
   1000 times, checks bad-fd `ndo_open()` unwind, repeats missing-fd
   backend failure 10,000 times, records `um_vector2_*` KUnit 75/75, and
-  keeps the live 10,000-cycle `ip link up/down` failure-injection gate
-  open. Not a commitment.
+  defers runtime lifecycle repetition to the follow-up live gate. Not a
+  commitment.
 - [39-uml-vector-driver-v2-lifecycle-stress-gate.md](39-uml-vector-driver-v2-lifecycle-stress-gate.md) —
   Runtime lifecycle stress harness for vector2 fd handoff: adds a
   reusable `umlctl gate loop` Umlfile that repeats live
   `ip link down/up`, verifies ethtool open/close deltas, records a
-  25-cycle smoke with clean TAP/process teardown, and leaves the full
-  10,000-cycle replacement gate open. Not a commitment.
+  25-cycle smoke plus a 10,000-cycle pass with clean TAP/process
+  teardown, and leaves failed-open injection open. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

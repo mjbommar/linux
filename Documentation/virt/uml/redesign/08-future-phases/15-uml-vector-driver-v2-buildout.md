@@ -109,8 +109,8 @@ shape, and inspectable ethtool surfaces:
   leaked host TAP turns the iteration into a failure;
 - live vector2 lifecycle stress harness through `umlctl gate loop`:
   the guest repeatedly drives `vec2.0` through `ip link down/up`,
-  verifies `open_attempts` and `closes` ethtool counter deltas, and a
-  25-cycle smoke passed with clean TAP/process teardown;
+  verifies `open_attempts` and `closes` ethtool counter deltas, and the
+  default 10,000-cycle run passed with clean TAP/process teardown;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
@@ -163,9 +163,9 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
-- no live 10,000-cycle `ip link up/down` failure-injection proof; the
-  fd path has bounded KUnit stress and a 25-cycle runtime smoke, but
-  not full runtime repetition evidence;
+- no live failed-open injection proof; the fd path has bounded KUnit
+  failure stress and successful 10,000-cycle runtime repetition, but no
+  runtime knob to intentionally fail selected opens;
 - no full multiqueue validation story: heavier KCSAN traffic, long SMP
   traffic, and broader fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
@@ -813,8 +813,8 @@ Fd failure-stress follow-up:
   - no `not ok`, `FAILED`, `panic`, `BUG`, `WARNING`, `KCSAN`,
     `data-race`, or lockdep signatures in the captured KUnit log.
 - Therefore the unit-level fd failure-injection story is stronger, but
-  the replacement gate still needs a live 10,000-cycle `ip link up/down`
-  failure-injection run with leak checks.
+  the replacement gate still needs live failed-open injection if
+  maintainers require runtime failure proof beyond KUnit.
 
 Lifecycle stress gate follow-up:
 
@@ -836,8 +836,16 @@ Lifecycle stress gate follow-up:
     `open_delta=25 close_delta=25`,
     `VECTOR2_LIFECYCLE_STRESS_OK`, no lingering `v2life0`, and no UML
     process leak.
-- Therefore the lifecycle gate now has a reusable runtime harness and
-  smoke evidence.  The full 10,000-cycle run remains open.
+  - default 10,000-cycle live run passed:
+    `PASS=1/1 FAIL=0 TIMEOUT=0`,
+    `open_delta=10000 close_delta=10000`,
+    post-loop gateway ping 3/3,
+    `VECTOR2_LIFECYCLE_STRESS_OK`, no warning/BUG/KCSAN signatures in
+    the copied run log, no lingering `v2life0`, and no UML process
+    leak.
+- Therefore the lifecycle gate now has a reusable runtime harness,
+  smoke evidence, and one successful 10,000-cycle live repetition.
+  Runtime failed-open injection remains open.
 
 ### V2-R9 - Transport Parity
 
