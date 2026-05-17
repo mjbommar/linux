@@ -1,46 +1,45 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From a2e01ee58c53abdf73c3f1043f39fd43b32bb80d Mon Sep 17 00:00:00 2001
 From: Michael Bommarito <michael.bommarito@gmail.com>
 Date: Tue, 21 Apr 2026 11:34:05 -0400
 Subject: [PATCH] kernel: mark kthread() and smpboot_thread_fn() notrace
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
-Both functions end in do_exit() rather than a normal return.
-The generic function_graph tracer pushes a shadow-stack entry
-at their entry expecting a matching pop on return; that pop
-never fires, leaving a stale entry on current->ret_stack.
+Both functions end in do_exit() rather than a normal return. The
+generic function_graph tracer pushes a shadow-stack entry at
+their entry expecting a matching pop on return; that pop never
+fires, leaving a stale entry on current->ret_stack.
 
-On architectures whose task-switch mechanism always unwinds
-through the frame pointer (including x86_64 with CONFIG_HAVE_
-FUNCTION_GRAPH_RETVAL=y in the stock configuration), the stale
-entry is harmless: the ret_stack walk never dereferences the
-leaked retp because real task teardown goes through do_exit()
-→ do_task_dead() → schedule() without touching ret_stack.
-
-On architectures whose task resume uses setjmp/longjmp-style
-mechanisms (so a graphed function's ret pops a shadow entry
-that may not correspond to the host stack the task was
-resumed into), the stale pointer can be followed as a return
-address. Observed: SEGV in schedule+0x4a with RAX=0 and
-return_to_handler present twice in the stack trace, the second
-occurrence coming from a ret that consumed the leaked entry.
+On native x86 the leaked entry is harmless — the ret_stack walk
+doesn't dereference stale entries because frame unwinding never
+takes that path. On User-Mode Linux (UML) the walker DOES
+dereference the leaked retp: UML resumes tasks via
+kernel_longjmp into host-thread contexts whose stack addresses
+don't match the pushed retp, so when a graphed function on the
+unwind path returns, return_to_handler pops a stale entry and
+jumps through its corrupt return slot. Observed crash: SEGV in
+schedule+0x4a with RAX=0 and return_to_handler on the stack
+twice — the stale pointer got dereferenced and followed.
 
 The narrow fix is to skip graph tracing at these two specific
 generic-kernel entry points. User-written threadfns that
-kthread() eventually calls are still graph-traceable; only the
-wrappers themselves are excluded. Matches the discipline
-already applied to ret_from_fork()-adjacent assembly stubs in
-arch/x86/entry.
+kthread() calls are still graph-traceable; only the wrappers
+themselves are excluded. Matches the analysis in
+Documentation/virt/uml/redesign/04-risks/decisions-log.md D34
+§Alternatives considered (1), now in scope under D45's in-fork
+scope policy.
 
-No functional impact on architectures where the leak was
-already harmless — notrace here only suppresses push/pop at
-these two call sites, which already don't need the graph event
-for trace analysis (the functions exist to be the landing pad
-for a threadfn, not to be themselves the subject of trace
-analysis).
+No functional impact on native architectures — notrace here
+only suppresses push/pop at these two call sites, which already
+don't need the graph event on any architecture (the functions
+exist to be the landing pad for a threadfn, not to be
+themselves the subject of trace analysis).
 
-Signed-off-by: Michael Bommarito <michael.bommarito@gmail.com>
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ---
- kernel/kthread.c  | 22 +++++++++++++++++++++-
- kernel/smpboot.c  | 11 ++++++++++-
+ kernel/kthread.c | 22 +++++++++++++++++++++-
+ kernel/smpboot.c | 11 ++++++++++-
  2 files changed, 31 insertions(+), 2 deletions(-)
 
 diff --git a/kernel/kthread.c b/kernel/kthread.c
@@ -56,21 +55,21 @@ index 791210daf8b4..0243c371dbe3 100644
 + * notrace: the generic function_graph tracer pushes a shadow-
 + * stack entry at kthread() entry, expecting a matching pop on
 + * return. kthread() does not return — it ends in do_exit().
-+ * On architectures whose task resume always goes through the
-+ * frame pointer, the leaked entry is harmless (the ret_stack
-+ * walk tolerates stale entries because real task teardown
-+ * doesn't touch ret_stack). On architectures whose task
-+ * resume uses setjmp/longjmp-style mechanisms the leaked
-+ * pointer can be followed as a return address when a graphed
-+ * function on the unwind path pops through the shadow stack.
++ * On native x86 the leaked entry is harmless (the ret_stack
++ * walk tolerates stale entries because frame unwinding doesn't
++ * dereference the leaked retp). On UML the walker DOES
++ * dereference, because UML resumes tasks via kernel_longjmp
++ * into a different host-thread context whose stack addresses
++ * don't match the leaked retp — the stale pointer then gets
++ * popped via a graphed function's ret and jumped through.
++ * Observed crash: SEGV in schedule+0x4a (RAX=0) with
++ * return_to_handler on the stack twice. See UML redesign
++ * decisions-log D34 for the full three-leak-source analysis.
 + *
-+ * The narrow fix is to skip graph tracing at this specific
-+ * entry. Any user-written kthread threadfn is still
-+ * graph-traced; only the generic kthread()-the-wrapper is
-+ * skipped.
-+ *
-+ * Same rationale applies to smpboot_thread_fn(); see
-+ * kernel/smpboot.c.
++ * The narrow fix (matching the D34 2026-04-21 addendum under
++ * D45) is to skip graph tracing at this specific entry. Any
++ * user-written kthread threadfn is still graph-traced; only
++ * the generic kthread()-the-wrapper is skipped.
 + */
 +static notrace int kthread(void *_create)
  {
@@ -87,17 +86,17 @@ index 4503b60ce9bd..1b85a27103c8 100644
 -static int smpboot_thread_fn(void *data)
 +/*
 + * notrace: reached via kthread_create_on_cpu() and entered from
-+ * kthread() as the threadfn. Both entry points end in
-+ * do_exit() rather than a normal return. The generic
-+ * function_graph tracer's shadow-stack push at this entry is
-+ * never matched by a pop on return; on architectures whose
-+ * task resume doesn't always unwind through the frame pointer
-+ * the leaked entry can be followed. See kernel/kthread.c for
-+ * the full rationale; same shape applies here.
++ * the generic kthread() wrapper; ends in do_exit() rather than a
++ * return. See kernel/kthread.c::kthread for the full rationale
++ * on why the unterminated graph-shadow-stack push is observable
++ * as a crash specifically on UML (kernel_longjmp-based task
++ * resume walks a ret_stack whose leaked retp doesn't match the
++ * actual stack). Same fix pattern; UML redesign D34 addendum.
 + */
 +static notrace int smpboot_thread_fn(void *data)
  {
- 	struct task_struct *td = current;
-
+ 	struct smpboot_thread_data *td = data;
+ 	struct smp_hotplug_thread *ht = td->ht;
 --
-2.49.0
+2.53.0
+
