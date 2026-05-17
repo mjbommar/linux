@@ -143,6 +143,10 @@ config UML_NET_VECTOR_V2_CONFIG
 config UML_NET_VECTOR_V2_QUEUE
 	bool
 
+config UML_NET_VECTOR_V2_FAKE_HOST
+	bool
+	select UML_NET_VECTOR_V2_QUEUE
+
 config UML_NET_VECTOR_V2_MODEL
 	bool
 
@@ -172,6 +176,21 @@ config UML_NET_VECTOR_V2_QUEUE_KUNIT
 	  These tests validate wraparound, partial completion, RX prepare
 	  and consume ordering, and failure unwind without changing the
 	  existing vector network data path.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_FAKE_HOST_KUNIT
+	bool "Vector networking v2 fake host KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_FAKE_HOST
+	default n
+	help
+	  Build KUnit tests for the host-ops boundary and deterministic fake
+	  host used by the proposed UML vector networking v2 rewrite. These
+	  tests exercise partial TX completion, transient host errors, empty
+	  RX, RX allocation unwind, and fd death without using host network
+	  resources.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.

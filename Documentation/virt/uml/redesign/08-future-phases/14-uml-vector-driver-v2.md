@@ -793,6 +793,24 @@ Validation:
 - behavior unchanged for single-queue TAP/raw;
 - fake-host tests cover open, close, partial TX, empty RX, and fd death.
 
+Implementation checkpoint:
+
+- `arch/um/drivers/vector2_host.h` defines a minimal host data-plane ops
+  boundary for TX and RX batch operations.  The contract states that
+  transient host errors preserve queue ownership, while fd death is
+  reported as `-ENODEV` for lifecycle cleanup.
+- `arch/um/drivers/vector2_fake_host.{c,h}` adds a deterministic fake
+  backend that is backed by the v2 TX ring and RX batch helpers rather
+  than by host sockets.  It can limit TX completion, inject TX/RX
+  errors, queue synthetic RX packet lengths, and model fd death.
+- `CONFIG_UML_NET_VECTOR_V2_FAKE_HOST_KUNIT=y` builds
+  `arch/um/drivers/vector2_fake_host_test.c`, a KUnit suite covering
+  full and partial TX completion, transient TX error preservation, TX
+  fd death, RX packets, empty RX, RX allocation failure unwind, and RX
+  fd death.
+- This checkpoint intentionally does not wrap the legacy TAP/raw host
+  syscalls yet; it establishes the testable boundary first.
+
 ### Phase V3 - Queue Rewrite
 
 Deliverables:
