@@ -135,7 +135,23 @@ pub fn start_with_fds(
         None => (Stdio::null(), Stdio::null()),
     };
 
-    let mut cmd = Command::new(&m.kernel.path);
+    let mut cmd = if let Some(strace_log) = &args.strace_log {
+        if let Some(parent) = strace_log.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create strace log dir {}", parent.display()))
+                .map_err(StartError::Other)?;
+        }
+        let mut cmd = Command::new("strace");
+        cmd.arg("-f")
+            .arg("-s")
+            .arg("256")
+            .arg("-o")
+            .arg(strace_log)
+            .arg(&m.kernel.path);
+        cmd
+    } else {
+        Command::new(&m.kernel.path)
+    };
     cmd.args(&argv).stdout(stdout_cfg).stderr(stderr_cfg);
 
     if args.foreground {
@@ -155,7 +171,11 @@ pub fn start_with_fds(
         .spawn()
         .with_context(|| format!("spawn {}", m.kernel.path.display()))
         .map_err(StartError::Other)?;
-    let pid = child.id();
+    let pid = match &args.strace_log {
+        Some(strace_log) => wait_for_strace_tracee_pid(strace_log, Duration::from_secs(5))
+            .unwrap_or_else(|| child.id()),
+        None => child.id(),
+    };
 
     write_pidfile(&pidfile, pid).map_err(StartError::Other)?;
     write_run_id_file(&paths.run_id_file_path(&args.name), &run_id).map_err(StartError::Other)?;
@@ -566,6 +586,33 @@ fn log_indicates_ready(path: &Path) -> bool {
         || s.contains("Freeing unused kernel")
 }
 
+fn read_first_strace_pid(path: &Path) -> Option<u32> {
+    let s = std::fs::read_to_string(path).ok()?;
+    for line in s.lines() {
+        let end = line
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(line.len());
+        if end == 0 {
+            continue;
+        }
+        if let Ok(pid) = line[..end].parse::<u32>() {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn wait_for_strace_tracee_pid(path: &Path, timeout: Duration) -> Option<u32> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(pid) = read_first_strace_pid(path) {
+            return Some(pid);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    read_first_strace_pid(path)
+}
+
 /// Derive `kernel.log` next to `init.log` in the run bundle.
 /// Best-effort: any I/O error is swallowed so a malformed log
 /// can't poison the stop path (the merged init.log stays
@@ -683,5 +730,41 @@ mod tests {
             nix::sys::signal::Signal::SIGKILL
         ));
         assert!(parse_signal("HUP").is_err());
+    }
+
+    #[test]
+    fn strace_pid_parser_uses_first_tracee_pid() {
+        let path = std::env::temp_dir().join(format!(
+            "umlctl-strace-pid-parser-{}-{}.log",
+            std::process::id(),
+            run::generate_run_id()
+        ));
+        std::fs::write(
+            &path,
+            "\n3797038 execve(\"/tmp/linux\", [\"linux\"], 0x7fff) = 0\n3797039 brk(NULL) = 0x1\n",
+        )
+        .unwrap();
+
+        assert_eq!(read_first_strace_pid(&path), Some(3797038));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn strace_pid_parser_ignores_non_pid_prefixes() {
+        let path = std::env::temp_dir().join(format!(
+            "umlctl-strace-pid-parser-junk-{}-{}.log",
+            std::process::id(),
+            run::generate_run_id()
+        ));
+        std::fs::write(
+            &path,
+            "strace: Process 42 attached\n4242 mmap(NULL, 4096, PROT_READ) = 0\n",
+        )
+        .unwrap();
+
+        assert_eq!(read_first_strace_pid(&path), Some(4242));
+
+        let _ = std::fs::remove_file(path);
     }
 }

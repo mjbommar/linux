@@ -366,6 +366,10 @@ struct StartArgs {
     /// Skip creating the per-instance log file.
     #[arg(long)]
     no_log: bool,
+
+    /// Wrap UML in strace and write the host syscall trace here.
+    #[arg(long, value_name = "PATH")]
+    strace_log: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -941,6 +945,16 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         foreground: args.foreground,
         ready_timeout: args.ready_timeout,
         no_log: false,
+        strace_log: if uml.debug.strace {
+            Some(
+                std::env::current_dir()
+                    .context("getcwd")?
+                    .join(&uml.debug.log_dir)
+                    .join("strace.log"),
+            )
+        } else {
+            None
+        },
     };
     cmd_start(paths, start_args, quiet)?;
 
