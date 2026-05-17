@@ -111,6 +111,14 @@ shape, and inspectable ethtool surfaces:
   exact byte/packet counts, records all four TX and RX queues moving,
   and tears down with no warning/BUG/KCSAN/data-race signatures across
   the initial pass plus three repeat runs;
+- varied KCSAN concurrent traffic profiles: the same helper now accepts
+  `UML_VECTOR2_KCSAN_NCPUS` and `UML_VECTOR2_KCSAN_QUEUES=N|auto`; a
+  fixed two-vCPU/two-queue/six-flow profile and a paced
+  four-vCPU/auto-queue/eight-flow larger-volume profile both pass with
+  exact bidirectional TCP/UDP accounting, queue movement, clean
+  teardown, and no warning/BUG/KCSAN/data-race signatures; an unpaced
+  eight-flow/4096-UDP-packet attempt fails only on guest UDP receive
+  accounting, documenting the KCSAN workload pacing bound;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -200,9 +208,9 @@ Missing runtime pieces:
   guest Python failures and one startup timeout;
 - no repeated long soak loop;
 - no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
-  now has an initial clean bidirectional pass plus three repeats with
-  queue distribution, but
-  longer SMP traffic, varied queue/flow counts, and broader
+  now has an initial clean bidirectional pass, three repeats, fixed
+  two-queue/six-flow evidence, and a paced eight-flow larger-volume
+  pass, but longer SMP traffic, broader queue/flow matrices, and
   fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
   policy for guest userspace raw/netlink sockets visible in UML host
@@ -830,6 +838,9 @@ KCSAN concurrent traffic follow-up:
   - host-side TCP and UDP sinks for guest-to-host traffic;
   - generated Umlfile using vector2 fd handoff, `queues = "auto"`,
     four vCPUs, and launcher-owned inherited TAP fds;
+  - environment controls for generated `runtime.ncpus` and
+    `network.queues`, so the same harness can run fixed queue counts
+    and non-default vCPU counts;
   - guest-side TCP and UDP sinks for host-to-guest traffic;
   - UDP pacing and larger receive buffers so KCSAN-era receiver
     scheduling does not turn the gate into a userspace UDP burst-loss
@@ -859,10 +870,28 @@ KCSAN concurrent traffic follow-up:
   - three additional default repeat runs passed with all four TX/RX
     queues non-zero and no warning/BUG/KCSAN/data-race/panic/failure
     signatures.
+  - fixed two-vCPU/two-queue/six-flow profile:
+    TCP 3,145,728 bytes each direction, UDP 768 packets / 393,216
+    bytes each direction, TX queues `1792,1530`, RX queues
+    `3170,1562`, `VECTOR2_KCSAN_TRAFFIC_OK`, no lingering TAP/UML
+    process, and no warning/BUG/KCSAN/data-race/panic/failure
+    signatures.
+  - paced four-vCPU/auto-queue/eight-flow larger profile:
+    TCP 16,777,216 bytes each direction, UDP 2048 packets / 1,048,576
+    bytes each direction, TX queues `5798,3303,2893,3867`, RX queues
+    `8149,3720,6256,4169`, `VECTOR2_KCSAN_TRAFFIC_OK`, no lingering
+    TAP/UML process, and no warning/BUG/KCSAN/data-race/panic/failure
+    signatures.
+  - unpaced eight-flow/4096-host-to-guest-UDP-packet profile:
+    TCP completed exactly in both directions and guest-to-host UDP
+    completed exactly, but guest host-to-guest UDP received 3247/4096
+    packets before `VECTOR2_KCSAN_H2G_GUEST_FAIL`; the logs had no
+    warning/BUG/KCSAN/data-race/panic signatures, so this is treated as
+    a KCSAN workload pacing bound rather than pass evidence.
 - Therefore the previous "no concurrent TCP/UDP KCSAN traffic" gap is
-  closed for vector2 fd multiqueue with repeat evidence.  Longer SMP
-  runtime, varied queue/flow counts, kvm-v2 reruns, and broader
-  performance/fairness analysis remain open.
+  closed for vector2 fd multiqueue with repeat and initial varied
+  profile evidence.  Longer SMP runtime, broader queue/flow matrices,
+  kvm-v2 reruns, and broader performance/fairness analysis remain open.
 
 FastAPI 30-pass follow-up:
 

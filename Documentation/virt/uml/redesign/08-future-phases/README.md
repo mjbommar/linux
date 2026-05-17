@@ -293,9 +293,10 @@ parking-lot designs for future prioritization.
   KCSAN concurrent traffic evidence for vector2 fd multiqueue: adds a
   reusable host/guest TCP+UDP harness, records exact bidirectional
   TCP byte counts and UDP packet counts, verifies all four TX and RX
-  queues moved across the initial pass plus three repeats, and captures
-  clean teardown with no
-  warning/BUG/KCSAN/data-race signatures. Not a commitment.
+  queues moved across the initial pass plus three repeats, adds fixed
+  two-queue/six-flow and paced eight-flow larger-volume profiles, and
+  captures clean teardown with no warning/BUG/KCSAN/data-race
+  signatures. Not a commitment.
 - [42-uml-vector-driver-v2-fastapi-30.md](42-uml-vector-driver-v2-fastapi-30.md) —
   Longer FastAPI + uvicorn vector2 fd-handoff repetition:
   `PASS=30/30 FAIL=0 TIMEOUT=0`, all 30 runs reached `SERVER_READY`,

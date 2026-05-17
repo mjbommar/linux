@@ -5,7 +5,7 @@
 #
 # The harness is intentionally small and evidence-oriented:
 # - starts host-side TCP and UDP sinks for guest-to-host traffic;
-# - boots vector2 through umlctl launcher-owned fd handoff with queues=auto;
+# - boots vector2 through umlctl launcher-owned fd handoff;
 # - runs concurrent guest TCP and UDP senders pinned across vCPUs;
 # - waits for guest TCP and UDP sinks, then sends host-to-guest traffic;
 # - captures ethtool per-queue stats and requires TX/RX movement on at
@@ -21,6 +21,8 @@ Environment overrides:
   UML_KERNEL                         UML kernel path when --kernel is omitted
   UMLCTL_BIN                         umlctl binary path; default: existing target/debug/umlctl or cargo run
   UML_VECTOR2_KCSAN_OUT              output directory, default: /tmp/um-vector2-kcsan-traffic
+  UML_VECTOR2_KCSAN_NCPUS            UML vCPU count, default: 4
+  UML_VECTOR2_KCSAN_QUEUES           network queue spec N|auto, default: auto
   UML_VECTOR2_KCSAN_FLOWS            TCP/UDP flows per direction, default: 4
   UML_VECTOR2_KCSAN_TCP_BYTES        TCP bytes per flow, default: 1048576
   UML_VECTOR2_KCSAN_UDP_PACKETS      UDP packets per flow, default: 256
@@ -36,6 +38,8 @@ EOF
 repo_root="$(git rev-parse --show-toplevel)"
 kernel="${UML_KERNEL:-}"
 out="${UML_VECTOR2_KCSAN_OUT:-/tmp/um-vector2-kcsan-traffic}"
+ncpus="${UML_VECTOR2_KCSAN_NCPUS:-4}"
+queue_spec="${UML_VECTOR2_KCSAN_QUEUES:-auto}"
 flows="${UML_VECTOR2_KCSAN_FLOWS:-4}"
 tcp_bytes="${UML_VECTOR2_KCSAN_TCP_BYTES:-1048576}"
 udp_packets="${UML_VECTOR2_KCSAN_UDP_PACKETS:-256}"
@@ -81,7 +85,7 @@ if [[ ! -x "$kernel" ]]; then
 	echo "UML kernel is not executable: $kernel" >&2
 	exit 2
 fi
-for n in "$flows" "$tcp_bytes" "$udp_packets" "$udp_payload" "$udp_delay_us" "$ready_hold_secs" \
+for n in "$ncpus" "$flows" "$tcp_bytes" "$udp_packets" "$udp_payload" "$udp_delay_us" "$ready_hold_secs" \
 	 "$timeout_secs" "$wait_timeout" "$g2h_tcp_port" "$g2h_udp_port" \
 	 "$h2g_tcp_port" "$h2g_udp_port"; do
 	if [[ "$n" == '' || "$n" == *[!0-9]* ]]; then
@@ -89,7 +93,7 @@ for n in "$flows" "$tcp_bytes" "$udp_packets" "$udp_payload" "$udp_delay_us" "$r
 		exit 2
 	fi
 done
-for n in "$flows" "$tcp_bytes" "$udp_packets" "$udp_payload" \
+for n in "$ncpus" "$flows" "$tcp_bytes" "$udp_packets" "$udp_payload" \
 	 "$ready_hold_secs" "$timeout_secs" "$wait_timeout" "$g2h_tcp_port" "$g2h_udp_port" \
 	 "$h2g_tcp_port" "$h2g_udp_port"; do
 	if [[ "$n" -lt 1 ]]; then
@@ -97,6 +101,19 @@ for n in "$flows" "$tcp_bytes" "$udp_packets" "$udp_payload" \
 		exit 2
 	fi
 done
+if [[ "$queue_spec" == "auto" ]]; then
+	queue_toml_value='"auto"'
+else
+	if [[ "$queue_spec" == '' || "$queue_spec" == *[!0-9]* ]]; then
+		echo "UML_VECTOR2_KCSAN_QUEUES must be a positive integer or auto (got $queue_spec)" >&2
+		exit 2
+	fi
+	if [[ "$queue_spec" -lt 1 ]]; then
+		echo "UML_VECTOR2_KCSAN_QUEUES must be >= 1 (got $queue_spec)" >&2
+		exit 2
+	fi
+	queue_toml_value="$queue_spec"
+fi
 if ! command -v python3 >/dev/null 2>&1; then
 	echo "python3 is required on host and guest hostfs" >&2
 	exit 2
@@ -367,7 +384,7 @@ schema_version = 1
 
 [instance]
 name = "$name"
-labels = { service = "network-concurrency", driver = "vector2", transport = "fd", queues = "auto", sanitizer = "kcsan" }
+labels = { service = "network-concurrency", driver = "vector2", transport = "fd", queues = "$queue_spec", sanitizer = "kcsan" }
 
 [kernel]
 path = "$kernel"
@@ -376,13 +393,13 @@ append = []
 
 [runtime]
 mem = "1024M"
-ncpus = 4
+ncpus = $ncpus
 
 [network]
 mode = "tap"
 driver = "vector2"
 host_mode = "auto"
-queues = "auto"
+queues = $queue_toml_value
 tap_name = "$tap"
 guest_ip = "$guest_cidr"
 host_ip = "$host_cidr"
@@ -393,6 +410,8 @@ ports = []
 
 [env]
 PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
+UML_VECTOR2_KCSAN_NCPUS = "$ncpus"
+UML_VECTOR2_KCSAN_QUEUES = "$queue_spec"
 UML_VECTOR2_KCSAN_FLOWS = "$flows"
 UML_VECTOR2_KCSAN_TCP_BYTES = "$tcp_bytes"
 UML_VECTOR2_KCSAN_UDP_PACKETS = "$udp_packets"
@@ -696,6 +715,8 @@ fi
 	echo "VECTOR2_KCSAN_CONCURRENT_TRAFFIC_SUMMARY"
 	echo "kernel=$kernel"
 	echo "backend=$backend"
+	echo "ncpus=$ncpus"
+	echo "queue_spec=$queue_spec"
 	echo "flows=$flows"
 	echo "tcp_bytes_per_flow=$tcp_bytes"
 	echo "udp_packets_per_flow=$udp_packets"
