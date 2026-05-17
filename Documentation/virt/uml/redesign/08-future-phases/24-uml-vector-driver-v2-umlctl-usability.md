@@ -18,7 +18,18 @@ The stable selection surface is:
 mode = "tap"
 driver = "vector2"
 queues = 1
+# host_mode defaults to "auto"
 ```
+
+For vector2 single-queue TAP, `host_mode = "auto"` selects the
+launcher-owned fd path:
+
+```text
+vec2.0:transport=fd,mode=fd,fd=200,depth=128
+```
+
+`umlctl` opens the host TAP after setup and inherits it into the UML
+process.  The sandboxed guest receives only the delegated fd number.
 
 For one-off comparison runs, the CLI override is preferred:
 
@@ -33,6 +44,14 @@ For multiqueue TAP experiments:
 umlctl up -f tier3-django.toml --network-driver vector2 --network-queues 2 --dry-run
 umlctl gate loop -f tier3-django.toml --network-driver vector2 --network-queues 2 -W 1 -M 1
 umlctl gate loop -f tier3-django.toml --network-driver vector2 --sweep network.queues=1,2 -W 1 -M 10
+```
+
+Current vector2 multiqueue uses the trusted in-process TAP path because
+fd multiqueue is still open.  Force that path explicitly when comparing
+single-queue behavior:
+
+```sh
+umlctl up -f tier3-django.toml --network-driver vector2 --network-host-mode inproc --dry-run
 ```
 
 The override and sweep write into the generated Umlfile's `[network]`
@@ -88,7 +107,8 @@ prints:
 - transport;
 - host mode;
 - queue count;
-- exact UML kernel command-line argument.
+- exact UML kernel command-line argument;
+- inherited fd mapping when vector2 fd handoff is selected.
 
 That output is the quickest way to verify that a run is actually using
 v2 before spending time on a soak.
@@ -141,8 +161,8 @@ This follow-up was checked with:
 - `cargo test` in `tools/uml/uml-launcher`;
 - `umlctl up --dry-run --network-driver vector2`, confirming
   `UMLCTL_NETWORK_DRIVER=vector2`, `UMLCTL_NETDEV=vec2.0`, the v2
-  network plan, and the `vec2.0:transport=tap,mode=inproc,...` kernel
-  argument;
+  network plan, and the
+  `vec2.0:transport=fd,mode=fd,fd=200,depth=128` kernel argument;
 - a synthetic sleeping-kernel ready-timeout, confirming `umlctl up`
   prints `pid`, `run_id`, and `init_log`;
 - a synthetic `umlctl gate loop` ready-timeout, confirming `run-1.log`

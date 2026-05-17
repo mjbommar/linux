@@ -68,6 +68,9 @@ shape, and inspectable ethtool surfaces:
   `network.driver = "vector2"`;
 - `umlctl` selection of experimental v2 TAP queue count through
   `[network] queues` and `--network-queues`;
+- `umlctl` `network.host_mode` / `--network-host-mode` selection;
+- launcher-owned vector2 single-queue TAP fd handoff through manifest
+  labels and inherited fd 200;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
@@ -79,7 +82,6 @@ They still do not provide replacement-ready networking.
 
 Missing runtime pieces:
 
-- no launcher-manifest fd path for convenient sandbox fd ownership;
 - no real timer-driven coalescing;
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
@@ -801,8 +803,8 @@ experimental inspectable netdev with trusted fd and TAP packet paths,
 ethtool observability, and TAP write-side wakeups, plus an
 operator-facing `umlctl` selection path for Tier 3 experiments.  The
 next work is KVM-v2 Tier 3 readiness, host-to-guest TCP validation,
-long-soak proof, launcher-owned fd manifests, sandbox helper plumbing,
-and deeper multiqueue validation.
+long-soak proof, live launcher-owned fd smokes, sandbox helper
+plumbing, and deeper multiqueue validation.
 
 ## Workstream Exit Summary
 

@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0
+//
+// Host TAP fd opener for umlctl-owned vector2 fd handoff.
+//
+// umlctl creates and configures the host TAP device with sudo before the
+// UML kernel starts. Once the TAP is owned by the invoking user, umlctl can
+// open /dev/net/tun itself, attach to the named TAP, and pass that fd into
+// the UML process. The vector2 guest then sees only an inherited fd number,
+// not authority to open host networking resources from inside the sandbox.
+
+use std::io;
+use std::os::fd::{FromRawFd, OwnedFd};
+
+const IFF_TAP: libc::c_int = 0x0002;
+const IFF_NO_PI: libc::c_int = 0x1000;
+const TUNSETIFF: libc::c_ulong = 0x400454ca;
+const IFNAMSIZ: usize = 16;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IfReq {
+    ifr_name: [u8; IFNAMSIZ],
+    ifr_flags: libc::c_short,
+    _pad: [u8; 22],
+}
+
+pub fn open_tap(ifname: &str) -> io::Result<OwnedFd> {
+    if ifname.len() >= IFNAMSIZ {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TAP interface name too long: {ifname}"),
+        ));
+    }
+
+    let path = std::ffi::CString::new("/dev/net/tun").expect("/dev/net/tun is static ascii");
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    attach_tap(&owned, ifname)?;
+    Ok(owned)
+}
+
+fn attach_tap(fd: &OwnedFd, ifname: &str) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut req = IfReq {
+        ifr_name: [0u8; IFNAMSIZ],
+        ifr_flags: (IFF_TAP | IFF_NO_PI) as libc::c_short,
+        _pad: [0u8; 22],
+    };
+    req.ifr_name[..ifname.len()].copy_from_slice(ifname.as_bytes());
+
+    let rc = unsafe {
+        libc::ioctl(
+            fd.as_raw_fd(),
+            TUNSETIFF,
+            &mut req as *mut _ as *mut libc::c_void,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_oversized_name_before_open() {
+        let err = open_tap("this_name_is_way_too_long_for_ifnamsiz").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+}

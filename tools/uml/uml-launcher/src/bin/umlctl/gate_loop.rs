@@ -52,6 +52,7 @@ struct LoopArgs {
     kernel_override: Option<PathBuf>,
     network_driver_override: Option<String>,
     network_queues_override: Option<u32>,
+    network_host_mode_override: Option<String>,
 }
 
 /// One `--sweep KEY=v1,v2,v3` axis.
@@ -213,6 +214,16 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
             bail!("use either --network-queues or --sweep network.queues=..., not both");
         }
     }
+    if let Some(host_mode) = args.network_host_mode.as_deref() {
+        if sweep_axes
+            .iter()
+            .any(|axis| axis.key == "network.host_mode")
+        {
+            bail!("use either --network-host-mode or --sweep network.host_mode=..., not both");
+        }
+        deploy::validate_network_host_mode(host_mode)
+            .with_context(|| format!("validate --network-host-mode {host_mode}"))?;
+    }
 
     Ok(LoopArgs {
         file: args.file,
@@ -227,6 +238,7 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
         kernel_override: args.kernel,
         network_driver_override: args.network_driver,
         network_queues_override: args.network_queues,
+        network_host_mode_override: args.network_host_mode,
     })
 }
 
@@ -274,6 +286,10 @@ fn run_one_point(
     if let Some(queues) = lo.network_queues_override {
         deploy::set_network_queues(&mut base, queues)
             .with_context(|| format!("apply --network-queues {queues}"))?;
+    }
+    if let Some(host_mode) = lo.network_host_mode_override.as_deref() {
+        deploy::set_network_host_mode(&mut base, host_mode)
+            .with_context(|| format!("apply --network-host-mode {host_mode}"))?;
     }
     let stem = base.instance.name.clone();
 
@@ -386,8 +402,14 @@ fn apply_sweep_point(u: &mut deploy::Umlfile, point: &SweepPoint) -> Result<()> 
         }
     }
     for (k, v) in &point.0 {
+        if k == "network.host_mode" {
+            deploy::set_network_host_mode(u, v)
+                .with_context(|| format!("apply --sweep network.host_mode={v}"))?;
+        }
+    }
+    for (k, v) in &point.0 {
         match k.as_str() {
-            "network.driver" | "network.queues" => {}
+            "network.driver" | "network.queues" | "network.host_mode" => {}
             _ => {
                 u.env.insert(k.clone(), v.clone());
             }
@@ -694,6 +716,7 @@ mode = "tap"
         let point = SweepPoint(vec![
             ("network.queues".into(), "2".into()),
             ("network.driver".into(), "vector2".into()),
+            ("network.host_mode".into(), "inproc".into()),
             ("MT_JITTER_NS".into(), "100".into()),
         ]);
 
@@ -701,9 +724,11 @@ mode = "tap"
 
         assert_eq!(u.network.driver, "vector2");
         assert_eq!(u.network.queues, 2);
+        assert_eq!(u.network.host_mode, "inproc");
         assert_eq!(u.env.get("MT_JITTER_NS").map(String::as_str), Some("100"));
         assert!(!u.env.contains_key("network.driver"));
         assert!(!u.env.contains_key("network.queues"));
+        assert!(!u.env.contains_key("network.host_mode"));
     }
 
     #[test]

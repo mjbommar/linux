@@ -11,6 +11,7 @@
 // `timeout ./linux …` shortcuts.
 
 use anyhow::{anyhow, bail, Context, Result};
+use std::os::fd::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -59,10 +60,26 @@ pub struct StartOutcome {
     pub run_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct InheritedFd {
+    pub source_fd: RawFd,
+    pub target_fd: RawFd,
+}
+
+#[allow(dead_code)]
 pub fn start(
     paths: &Paths,
     m: &Manifest,
     args: &StartArgs,
+) -> std::result::Result<StartOutcome, StartError> {
+    start_with_fds(paths, m, args, &[])
+}
+
+pub fn start_with_fds(
+    paths: &Paths,
+    m: &Manifest,
+    args: &StartArgs,
+    inherited_fds: &[InheritedFd],
 ) -> std::result::Result<StartOutcome, StartError> {
     if !m.kernel.path.exists() {
         return Err(StartError::KernelMissing(m.kernel.path.clone()));
@@ -127,17 +144,8 @@ pub fn start(
         cmd.stdin(Stdio::inherit());
     } else {
         cmd.stdin(Stdio::null());
-        // Detach via setsid so SIGHUP on the shell's tty
-        // doesn't drag the UML down when umlctl exits.
-        // Safety: pre_exec runs post-fork / pre-exec; setsid
-        // is async-signal-safe.
-        unsafe {
-            cmd.pre_exec(|| match nix::unistd::setsid() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
-            });
-        }
     }
+    install_pre_exec(&mut cmd, !args.foreground, inherited_fds);
 
     // Capture CLOCK_BOOTTIME immediately before spawn so the
     // recorded host_ts_ns_at_exec is as close as we can make it
@@ -247,6 +255,38 @@ pub fn start(
     }
 
     Ok(StartOutcome { pid, run_id })
+}
+
+fn install_pre_exec(cmd: &mut Command, detach: bool, inherited_fds: &[InheritedFd]) {
+    let inherited_fds = inherited_fds.to_vec();
+
+    // Safety: pre_exec runs post-fork / pre-exec. The closure only uses
+    // async-signal-safe syscalls: setsid, dup2, and fcntl.
+    unsafe {
+        cmd.pre_exec(move || {
+            if detach && libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            for fd in &inherited_fds {
+                if fd.source_fd < 0 || fd.target_fd < 0 {
+                    return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+                }
+                if fd.source_fd != fd.target_fd && libc::dup2(fd.source_fd, fd.target_fd) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(fd.target_fd, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(fd.target_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+
+            Ok(())
+        });
+    }
 }
 
 pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, StopError> {

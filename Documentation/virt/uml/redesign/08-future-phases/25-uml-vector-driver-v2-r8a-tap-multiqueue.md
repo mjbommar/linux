@@ -30,6 +30,11 @@ counts.
   - host TAP setup with `multi_queue` for vector2 queues above one;
   - host TAP teardown with matching `multi_queue` deletion.
 
+Later fd-handoff work changes the default single-queue vector2
+`host_mode=auto` plan to `transport=fd`.  Multiqueue vector2 still uses
+`transport=tap,mode=inproc`; force `--network-host-mode inproc` if a
+single-queue vs multiqueue comparison must keep host mode constant.
+
 ## User Surface
 
 Umlfile:

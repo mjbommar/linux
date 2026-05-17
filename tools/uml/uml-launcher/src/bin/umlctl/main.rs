@@ -21,6 +21,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::Write;
+use std::os::fd::{AsRawFd, OwnedFd};
 
 mod console_split;
 mod deploy;
@@ -36,6 +37,7 @@ mod registry;
 mod run;
 mod schema;
 mod supervise;
+mod tapfd;
 
 /// Top-level `umlctl` invocation.
 #[derive(Parser, Debug)]
@@ -288,6 +290,12 @@ struct GateLoopArgs {
     /// Umlfile. Values above 1 require vector2.
     #[arg(long = "network-queues", value_name = "N")]
     network_queues: Option<u32>,
+
+    /// Override `[network].host_mode` for every generated worker
+    /// Umlfile. `auto` picks fd for vector2 single-queue TAP and
+    /// inproc for current vector2 multiqueue TAP.
+    #[arg(long = "network-host-mode", value_name = "auto|fd|inproc")]
+    network_host_mode: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -565,6 +573,11 @@ struct UpArgs {
     #[arg(long = "network-queues", value_name = "N")]
     network_queues: Option<u32>,
 
+    /// Override `[network].host_mode` without editing the Umlfile.
+    /// `fd` makes umlctl open the TAP and pass vector2 an inherited fd.
+    #[arg(long = "network-host-mode", value_name = "auto|fd|inproc")]
+    network_host_mode: Option<String>,
+
     /// Wrap UML in `strace -f -s 256 -o <log_dir>/strace.log` to
     /// capture every host syscall the launcher makes. Overrides
     /// debug.strace in the Umlfile.
@@ -807,6 +820,10 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         deploy::set_network_queues(&mut uml, queues)
             .with_context(|| format!("apply --network-queues {queues}"))?;
     }
+    if let Some(host_mode) = args.network_host_mode.as_deref() {
+        deploy::set_network_host_mode(&mut uml, host_mode)
+            .with_context(|| format!("apply --network-host-mode {host_mode}"))?;
+    }
 
     let compiled = deploy::compile(&uml).context("compile Umlfile")?;
 
@@ -849,6 +866,16 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
     if manifest_path.exists() {
         let _ = std::fs::remove_file(&manifest_path);
     }
+    let mut labels = uml
+        .instance
+        .labels
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>();
+    if let Some(plan) = &compiled.network_plan {
+        labels.extend(deploy::network_plan_labels(plan));
+    }
+
     let m = manifest::Manifest::from_create_args(
         &uml.instance.name,
         std::path::Path::new(&uml.kernel.path),
@@ -859,11 +886,7 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         "hostfs",
         false,
         uml.runtime.ncpus,
-        &uml.instance
-            .labels
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>(),
+        &labels,
     )
     .context("build manifest from Umlfile")?;
     std::fs::create_dir_all(manifest_path.parent().unwrap())
@@ -901,6 +924,12 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
                 plan.host_mode,
                 plan.queue_count,
             );
+            if let Some(fd) = plan.inherited_fd {
+                eprintln!(
+                    "[umlctl] network-fd: open tap={} and inherit as fd={fd}",
+                    plan.tap_name,
+                );
+            }
         }
     }
     let start_args = StartArgs {
@@ -937,6 +966,9 @@ fn print_network_plan(compiled: &deploy::Compiled) {
             plan.queue_count,
         );
         println!("  kernel_arg={}", plan.kernel_arg);
+        if let Some(fd) = plan.inherited_fd {
+            println!("  inherited_fd=tap:{} -> fd:{}", plan.tap_name, fd);
+        }
     } else {
         println!("  mode=none");
     }
@@ -1152,7 +1184,26 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
         e
     })?;
 
-    match supervise::start(paths, &m, &args) {
+    if let Some(ident) = supervise::read_pidfile(&paths.pidfile_path(&args.name)) {
+        if supervise::identity_alive(ident) {
+            eprintln!(
+                "umlctl: instance '{}' already running (pid {})",
+                args.name, ident.pid
+            );
+            std::process::exit(4);
+        }
+    }
+    if !m.kernel.path.exists() {
+        eprintln!(
+            "umlctl: kernel '{}' missing or not executable",
+            m.kernel.path.display()
+        );
+        std::process::exit(5);
+    }
+
+    let inherited_fds = prepare_inherited_fds(&m)?;
+
+    match supervise::start_with_fds(paths, &m, &args, &inherited_fds.mappings) {
         Ok(outcome) => {
             if !quiet {
                 println!(
@@ -1207,6 +1258,57 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
         }
         Err(supervise::StartError::Other(e)) => Err(e),
     }
+}
+
+struct PreparedInheritedFds {
+    _holders: Vec<OwnedFd>,
+    mappings: Vec<supervise::InheritedFd>,
+}
+
+fn prepare_inherited_fds(m: &manifest::Manifest) -> Result<PreparedInheritedFds> {
+    let mut holders = Vec::new();
+    let mut mappings = Vec::new();
+
+    if m.labels
+        .get(deploy::LABEL_NETWORK_DRIVER)
+        .map(String::as_str)
+        == Some("vector2")
+        && m.labels
+            .get(deploy::LABEL_NETWORK_TRANSPORT)
+            .map(String::as_str)
+            == Some("fd")
+        && m.labels
+            .get(deploy::LABEL_NETWORK_HOST_MODE)
+            .map(String::as_str)
+            == Some("fd")
+    {
+        let tap = m
+            .labels
+            .get(deploy::LABEL_NETWORK_TAP_NAME)
+            .context("manifest is missing vector2 fd tap label")?;
+        let target_fd = m
+            .labels
+            .get(deploy::LABEL_NETWORK_FD)
+            .context("manifest is missing vector2 inherited fd label")?
+            .parse::<i32>()
+            .context("parse vector2 inherited fd label")?;
+        let fd = tapfd::open_tap(tap).with_context(|| {
+            format!(
+                "open TAP {tap} for vector2 inherited fd handoff; \
+                 check that `umlctl up` created it for this user"
+            )
+        })?;
+        mappings.push(supervise::InheritedFd {
+            source_fd: fd.as_raw_fd(),
+            target_fd,
+        });
+        holders.push(fd);
+    }
+
+    Ok(PreparedInheritedFds {
+        _holders: holders,
+        mappings,
+    })
 }
 
 fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool) -> Result<()> {

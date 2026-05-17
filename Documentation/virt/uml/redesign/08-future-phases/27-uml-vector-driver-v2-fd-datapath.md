@@ -123,8 +123,7 @@ fd_sandbox_rejected=False
 This checkpoint does not close the fd replacement gates.  Remaining fd
 work includes:
 
-- launcher-owned fd manifest support for fd naming, leak resistance,
-  and auditability;
+- live `umlctl up` smoke coverage for launcher-owned TAP fd handoff;
 - stronger sandbox fd diagnostics when the referenced fd is missing or
   has the wrong type;
 - fd multiqueue;
