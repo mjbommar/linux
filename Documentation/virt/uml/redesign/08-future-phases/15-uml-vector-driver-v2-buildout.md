@@ -159,6 +159,10 @@ shape, and inspectable ethtool surfaces:
   `PASS=10/10 FAIL=0 TIMEOUT=0` repetition, followed by a longer
   `PASS=30/30 FAIL=0 TIMEOUT=0` repetition with all 30 runs reaching
   the expected FastAPI markers and clean teardown;
+- backend-filtered vector2 TAP seccomp Tier 3 soak pilot:
+  `tier3-django-v2` and `tier3-fastapi-v2` ran for 1266 seconds,
+  10 rotations, and 200/200 passes, with all rows using vector2
+  `vec2.0`, TAP, `host_mode=inproc`, and `queue_count=1`;
 - both-drivers kernel compatibility for `vec2.*`: the legacy `vec`
   setup path now leaves `vec2.` and `vec2=` command-line specs for
   vector2 while preserving legacy `vec2:` as old-driver unit 2;
@@ -919,6 +923,36 @@ FastAPI 30-pass follow-up:
   beyond the short repetition" gap is closed at 30/30.  Hours-long
   workload soaks, CI/preflight repetition, cross-host repetition, and
   kvm-v2 reruns remain open.
+
+Seccomp Tier 3 soak pilot:
+
+- `run-soak-daemon.sh --backends seccomp` now supports
+  backend-filtered UML soak runs, which lets vector2 seccomp workload
+  evidence advance without conflating it with the still-open KVM-v2
+  backend blocker.
+- Evidence collected:
+  - kernel
+    `/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux`;
+  - commit `96365502cf84`;
+  - workload set `tier3-django-v2,tier3-fastapi-v2`;
+  - backend set `seccomp`, one worker, 10 iterations per rotation;
+  - elapsed 1266 seconds against a 1200-second budget;
+  - 10 rotations, 20 clean loop logs, and 200/200 total passes;
+  - `tier3-django-v2`: 100/100 passes;
+  - `tier3-fastapi-v2`: 100/100 passes;
+  - every scoreboard row recorded vector2 `vec2.0`, TAP,
+    `host_mode=inproc`, and `queue_count=1`;
+  - every per-run log contained `SERVER_READY`,
+    `GUEST_CURL ok=100 fail=0`, and `TIER3_OK`;
+  - no hidden fatal Python, abort, panic, BUG, warning, KCSAN,
+    data-race, `not ok`, or `FAILED` signatures were found in the
+    captured run logs;
+  - teardown left no `soak-tap0` and no matching UML soak process.
+- Therefore vector2 now has a clean backend-filtered seccomp Tier 3
+  soak pilot covering both Django and FastAPI.  This does not close the
+  long-soak gate by itself: the accepted gate still needs the agreed
+  hours-long/CI window, broader queue profiles, and KVM-v2 reruns after
+  the backend blocker is fixed.
 
 Performance baseline follow-up:
 
