@@ -612,9 +612,20 @@ void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
 	snprintf(dev->name, sizeof(dev->name), "%s.%u",
 		 UM_VEC2_NAME_PREFIX, vdev->unit);
 
+	/*
+	 * Cap dev->max_mtu at the parse-time configured MTU.  The host
+	 * backends compute their per-channel frame buffer at channel
+	 * attach time (taphost->frame_len / fdhost->frame_len = mtu +
+	 * ETH_HLEN + VLAN_HLEN [+ virtio_net_hdr]).  A runtime "ip link
+	 * set vec2.X mtu N" that raises the MTU above cfg.mtu would
+	 * leave the backend buffer too small and produce truncated
+	 * frames.  Lowering the MTU at runtime is safe because the
+	 * backend's larger buffer still holds any frame the netdev
+	 * framework now accepts.  See audit R2.
+	 */
 	dev->mtu = vdev->cfg.mtu;
 	dev->min_mtu = UM_VEC2_MIN_MTU;
-	dev->max_mtu = UM_VEC2_MAX_MTU;
+	dev->max_mtu = vdev->cfg.mtu;
 	dev->netdev_ops = &um_vec2_netdev_ops;
 	dev->watchdog_timeo = HZ;
 	dev->irq = 0;
