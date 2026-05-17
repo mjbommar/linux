@@ -31,7 +31,7 @@ experimental netdev exists.
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher; a traced vector2 auto-queue fd boot found no actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec in the vector host path; `umlctl gate loop --audit-vector-sandbox` now preserves per-iteration strace/audit logs and fails on those forbidden vector host operations | Partial: local gate exists and one audited boot passed, but CI/long workload coverage and guest userspace raw/netlink socket policy remain open |
 | Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; heavier KCSAN traffic and fairness profiles absent | Partial |
-| Performance parity or accepted regression | Initial `umlctl` bidirectional TCP baseline exists: guest-to-host legacy vector TAP 32 MiB at 662 MiB/s guest-side versus vector2 fd multiqueue 32 MiB at 220 MiB/s; host-to-guest legacy vector TAP 32 MiB at 3.2 MiB/s versus vector2 fd multiqueue 32 MiB at 456 MiB/s on the same host; the perf helper now supports byte-count lists and repeat counts, with a vector2-only 1 MiB/2 MiB both-direction smoke passing cleanly; UDP, syscall, CPU, and repeated legacy-vs-vector2 profiles remain absent | Partial: mixed results measured, not accepted |
+| Performance parity or accepted regression | Initial `umlctl` bidirectional TCP baseline exists; repeated legacy-vs-vector2 TCP sweep now covers both directions, 1 MiB/8 MiB/32 MiB, two repeats per cell; vector2 remains slower guest-to-host and much faster host-to-guest on this host; UDP, syscall, CPU, and broader host/kernel profiles remain absent | Partial: mixed results measured, not accepted |
 | Legacy `vecN:` compatibility transition | Legacy remains production path; no v2 compatibility switch | Open |
 | Reviewable, bisectable patch series | Work is split across pushed commits and checkpoint docs | Ongoing |
 
@@ -128,6 +128,11 @@ Validation evidence recorded in the checkpoint docs includes:
 - repeated-size perf helper smoke: vector2-only, both directions,
   1 MiB and 2 MiB, one repeat each, `summary.tsv` with `repeat` column,
   no lingering `vperf-v2-g2h` or `vperf-v2-h2g`;
+- repeated legacy-vs-vector2 performance sweep: both directions,
+  1 MiB/8 MiB/32 MiB, two repeats per cell; vector2 averaged
+  45/159/224 MiB/s guest-to-host versus legacy vector 70/358/625 MiB/s,
+  and vector2 averaged 231/357/453 MiB/s host-to-guest versus legacy
+  vector 0.5/2.2/2.4 MiB/s; no lingering perf TAPs or UML processes;
 - vector2 TAP `queues=2` seccomp smoke and queue distribution evidence;
 - vector2 `ndo_select_queue` and XPS queue-to-CPU policy KUnit
   evidence;
@@ -156,8 +161,9 @@ list is:
 - decide and implement a live failed-open injection knob if replacement
   approval requires runtime failed-open proof beyond KUnit;
 - run heavier KCSAN on multiqueue traffic;
-- expand legacy-vs-v2 performance baselines and explain or accept the
-  measured guest-to-host regression and mixed bidirectional results;
+- expand performance profiling beyond TCP throughput and explain or
+  accept the measured guest-to-host regression and mixed bidirectional
+  results;
 - wire the vector sandbox audit gate into CI/preflight, run it on longer
   workload repetitions, cover Django, and decide the guest userspace
   raw/netlink socket policy for secure profiles;

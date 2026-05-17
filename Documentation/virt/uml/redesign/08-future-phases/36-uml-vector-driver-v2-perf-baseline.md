@@ -230,13 +230,77 @@ multiple transfer sizes.  It is not a replacement decision because it
 does not compare legacy vector across those sizes and uses only one
 repeat per size.
 
+## Repeated Legacy-vs-Vector2 Sweep
+
+The next run used the same helper for both drivers, both directions,
+three transfer sizes, and two repeats per cell.
+
+Command:
+
+```sh
+rm -rf /tmp/um-vector-perf-both-repeat
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_BYTES_LIST=1048576,8388608,33554432 \
+UML_VECTOR_PERF_REPEAT=2 \
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-both-repeat \
+  timeout 1800s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel /home/mjbommar/projects/personal/.build/um-vector-r2-both/linux
+```
+
+Result:
+
+```text
+summary: /tmp/um-vector-perf-both-repeat/summary.tsv
+```
+
+Average guest-side throughput:
+
+```text
+driver   direction      bytes     repeats  avg_guest_mib_s
+vector   guest-to-host  1048576   2        70.626
+vector2  guest-to-host  1048576   2        45.532
+vector   guest-to-host  8388608   2        357.916
+vector2  guest-to-host  8388608   2        159.387
+vector   guest-to-host  33554432  2        624.725
+vector2  guest-to-host  33554432  2        224.369
+vector   host-to-guest  1048576   2        0.498
+vector2  host-to-guest  1048576   2        230.654
+vector   host-to-guest  8388608   2        2.246
+vector2  host-to-guest  8388608   2        357.231
+vector   host-to-guest  33554432  2        2.373
+vector2  host-to-guest  33554432  2        452.553
+```
+
+Cleanup checks after the run:
+
+```text
+TAP_ABSENT:vperf-vec-g2h
+TAP_ABSENT:vperf-vec-h2g
+TAP_ABSENT:vperf-v2-g2h
+TAP_ABSENT:vperf-v2-h2g
+UML_PROCESS_ABSENT
+```
+
+Interpretation:
+
+- the guest-to-host vector2 fd multiqueue regression persisted across
+  all measured sizes;
+- the host-to-guest vector2 fd multiqueue path remained much faster
+  than legacy vector TAP across all measured sizes;
+- legacy host-to-guest results were especially weak and variable on
+  this host;
+- this is still a lightweight TCP smoke, not an accepted performance
+  replacement decision.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
 guest-to-host run, vector2 fd multiqueue is slower than legacy vector
 TAP.  On the host-to-guest run, vector2 fd multiqueue is much faster
-than legacy vector TAP on this host.  Both findings need repeated runs
-and profiling before they can support a replacement decision.
+than legacy vector TAP on this host.  The repeated-size sweep confirms
+that both findings are reproducible enough to treat as measured
+blockers, not one-off noise.
 
 The immediate value is that future vector2 changes now have a simple
 side-by-side `umlctl` command to catch large regressions and to track
@@ -247,8 +311,8 @@ whether fd multiqueue batching work improves throughput.
 The full replacement performance gate still needs:
 
 - UDP packet rate;
-- larger repeated transfer-size comparisons across legacy vector and
-  vector2;
+- larger repeat counts and more host/kernel samples for the TCP size
+  sweep;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
 - CPU cycles per packet if practical;

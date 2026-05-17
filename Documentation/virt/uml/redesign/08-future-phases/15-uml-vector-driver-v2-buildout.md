@@ -136,6 +136,10 @@ shape, and inspectable ethtool surfaces:
   directories plus a `repeat` summary column, and a vector2-only smoke
   passed guest-to-host and host-to-guest 1 MiB/2 MiB transfers with no
   lingering TAP;
+- repeated legacy-vs-vector2 perf sweep: both drivers, both directions,
+  1 MiB/8 MiB/32 MiB, two repeats per cell, confirming vector2 fd
+  multiqueue is still slower guest-to-host and much faster
+  host-to-guest on this host;
 - `umlctl up --strace` wiring for audited vector2 fd-handoff runs:
   the supervisor records the UML tracee PID rather than the strace
   wrapper PID, `down --force --rm` removes the traced auto-queue run
@@ -790,11 +794,16 @@ Performance baseline follow-up:
   - direction `both` vector2 smoke with 1 MiB each way;
   - repeated-size vector2-only smoke for 1 MiB and 2 MiB in both
     directions;
+  - repeated legacy-vs-vector2 bidirectional sweep for 1 MiB, 8 MiB,
+    and 32 MiB with two repeats per cell: vector2 averaged
+    45/159/224 MiB/s guest-to-host versus legacy vector
+    70/358/625 MiB/s, and vector2 averaged 231/357/453 MiB/s
+    host-to-guest versus legacy vector 0.5/2.2/2.4 MiB/s;
   - no lingering baseline TAP device.
 - Therefore the performance gate now has an initial comparison harness
-  and an explicit vector2 guest-to-host regression to investigate.
-  UDP packet rate, syscall profiles, repeated legacy-vs-vector2 transfer
-  sizes, and CPU profiles remain open.
+  and a repeated vector2 guest-to-host regression to investigate.
+  UDP packet rate, syscall profiles, broader host/kernel samples, and
+  CPU profiles remain open.
 
 Fd failure-stress follow-up:
 
