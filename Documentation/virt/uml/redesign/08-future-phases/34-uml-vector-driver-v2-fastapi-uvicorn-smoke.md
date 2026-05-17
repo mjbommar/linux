@@ -1,6 +1,6 @@
 # UML vector driver v2 FastAPI uvicorn smoke
 
-**Status:** R7/R8 validation follow-up - one-shot seccomp FastAPI.
+**Status:** R7/R8 validation follow-up - short seccomp FastAPI.
 **Date:** 2026-05-17.
 
 This note records the first real FastAPI + uvicorn workload smoke for
@@ -9,9 +9,8 @@ stdlib HTTP shim until operator dependencies were available.  The local
 `/home/mjbommar/uml-venv` now has FastAPI and uvicorn installed, so the
 workload can exercise the real framework stack.
 
-This is still not a replacement gate closure.  It is a one-shot
-seccomp validation point; kvm-v2 and longer FastAPI repetitions remain
-open.
+This is still not a replacement gate closure.  It is a short seccomp
+validation point; kvm-v2 and long FastAPI soak repetitions remain open.
 
 ## Workload
 
@@ -47,7 +46,7 @@ fastapi 0.136.1
 uvicorn 0.46.0
 ```
 
-## Command
+## One-Shot Command
 
 ```sh
 rm -rf /tmp/um-vector-fastapi-smoke
@@ -87,12 +86,57 @@ REPRO_DONE rc=0
 No `SERVER_FAIL`, `VECTOR2_FASTAPI_FAIL`, Python traceback, kernel
 panic, or TAP leak was observed in the captured output.
 
+## Short Repetition
+
+Command:
+
+```sh
+rm -rf /tmp/um-vector-fastapi-10
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux \
+  timeout 1800s cargo run --manifest-path tools/uml/uml-launcher/Cargo.toml \
+    --bin umlctl -- gate loop \
+    -f tools/uml/uml-launcher/examples/vector2-fastapi-smoke.toml \
+    -W 1 -M 10 --timeout 240 \
+    --pass-marker VECTOR2_FASTAPI_OK \
+    --out /tmp/um-vector-fastapi-10/loop
+test ! -e /sys/class/net/v2fastapi0
+```
+
+Result:
+
+```text
+PASS=10/10 FAIL=0 TIMEOUT=0
+TAP_ABSENT
+```
+
+The 10 captured `run-*.log` files all contained:
+
+```text
+FASTAPI_HTTP ok=51 fail=0
+VECTOR2_FASTAPI_OK
+REPRO_DONE rc=0
+```
+
+The first and last run logs also showed the expected vector2 auto-queue
+fd contract:
+
+```text
+requested_queues=2 runtime_queues=2
+UMLCTL_NETWORK_QUEUE_SPEC=auto
+UMLCTL_NETWORK_QUEUES=2
+3 packets transmitted, 3 received, 0% packet loss
+```
+
+No `SERVER_FAIL`, `VECTOR2_FASTAPI_FAIL`, Python traceback, kernel
+panic, or `BUG:` line was found in the 10 run logs.
+
 ## Remaining Gate
 
 This closes only the "dependencies are available, run a real
-FastAPI/uvicorn vector2 seccomp smoke" item.  Remaining FastAPI work:
+FastAPI/uvicorn vector2 seccomp smoke" item and adds short repetition
+evidence.  Remaining FastAPI work:
 
-- repeat the FastAPI smoke for a larger count;
+- repeat the FastAPI smoke for a larger/longer soak count;
 - run the same workload after the kvm-v2 baseline readiness blocker is
   fixed;
 - add host-to-guest curl battery evidence if the Tier 3 soak harness

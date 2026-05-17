@@ -26,7 +26,7 @@ experimental netdev exists.
 | Single-queue trusted TAP packet path | R5 TAP datapath doc; ping smokes; Tier 3 seccomp 30/30 | Done for trusted TAP/seccomp |
 | Single-queue and multiqueue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP fds as inherited fd ranges starting at 200; live single-queue and 4-queue `umlctl up` fd-handoff smokes passed; `queues = "auto"` / `--network-queues auto` resolve to numeric vector2 fd ranges from `[runtime].ncpus` | Done for launch path; deeper SMP/perf still open |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
-| Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; real FastAPI + uvicorn vector2 fd smoke passes seccomp 1/1 with `FASTAPI_HTTP ok=51 fail=0`; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and longer FastAPI repetition remain open |
+| Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; real FastAPI + uvicorn vector2 fd smoke passes seccomp 10/10 with `FASTAPI_HTTP ok=51 fail=0` each run; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and long FastAPI soak remain open |
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 72/72 after fd wrong-type, fd multiqueue unwind, and queue-to-CPU policy coverage | Partial: coverage exists, but more failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher | Partial: needs strace/audit gate |
@@ -84,7 +84,8 @@ Validation evidence recorded in the checkpoint docs includes:
 - `umlctl gate loop` TAP cleanup audit marks an iteration failed if
   the declared TAP remains under `/sys/class/net` after teardown;
 - vector2 TAP seccomp Tier 3 Django stdlib shim: 30/30 passed;
-- vector2 fd seccomp FastAPI + uvicorn one-shot: `PASS=1/1`,
+- vector2 fd seccomp FastAPI + uvicorn: one-shot `PASS=1/1` and
+  short repetition `PASS=10/10 FAIL=0 TIMEOUT=0`; every run had
   gateway ping over `vec2.0`, `SERVER_READY`,
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
   `REPRO_DONE rc=0`, and no lingering `v2fastapi0`;
@@ -100,7 +101,7 @@ list is:
 
 - fix the separate kvm-v2 baseline readiness blocker;
 - rerun vector2 Tier 3 Django 30/30 on kvm-v2 after that fix;
-- repeat the FastAPI/uvicorn vector2 seccomp smoke for a larger count;
+- repeat the FastAPI/uvicorn vector2 seccomp smoke as a longer soak;
 - validate queue-to-CPU policy under longer SMP traffic;
 - run longer KCSAN on multiqueue traffic;
 - collect legacy-vs-v2 performance baselines;
