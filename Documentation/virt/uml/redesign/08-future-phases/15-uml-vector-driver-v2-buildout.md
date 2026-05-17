@@ -1087,6 +1087,7 @@ KVM-v2 readiness follow-up:
     reassembles the split `KVMV2T-*` sections by `(cpu, seq)`; it parsed
     the failing iteration into 5140 parsed / 5140 complete entries,
     reported pids `161=4004` and `1=1136`, max mm-generation lag 4822,
+    two dispatch pid/tmm switches, two post-syscall run/task mismatches,
     and neighboring pass logs with higher TLB-lag maxima but no failure
     dump;
   - the older

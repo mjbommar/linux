@@ -231,8 +231,9 @@ Validation evidence recorded in the checkpoint docs includes:
   and 59/60 logs had max lag above 1000; the
   `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` helper
   reassembled the failure dump into 5140 parsed / 5140 complete entries,
-  reported the pid 161/1 trace distribution, and showed neighboring pass
-  logs had higher TLB-lag maxima without a trace dump; the older
+  reported the pid 161/1 trace distribution, two dispatch pid/tmm
+  switches, two post-syscall run/task mismatches, and showed neighboring
+  pass logs had higher TLB-lag maxima without a trace dump; the older
   `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
   pass reported 4 critical pid/tmm stability violations around the
   pid 161/1 transition, while `mmap-zero` reported no mmap-returned-zero

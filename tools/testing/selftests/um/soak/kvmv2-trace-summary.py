@@ -184,6 +184,8 @@ def parse_file(path: Path) -> dict[str, Any]:
 
     max_tlb_lag = max((item["lag"] for item in tlb_lags), default=0)
     tlb_by_pid = collections.Counter(item["pid"] for item in tlb_lags)
+    dispatch_switches = summarize_dispatch_switches(flattened)
+    post_syscall_mismatches = summarize_post_syscall_mismatches(flattened)
 
     return {
         "path": str(path),
@@ -204,6 +206,8 @@ def parse_file(path: Path) -> dict[str, Any]:
         "tlb_lag_count": len(tlb_lags),
         "tlb_lag_max": max_tlb_lag,
         "tlb_lag_by_pid": dict(tlb_by_pid),
+        "dispatch_switches": dispatch_switches,
+        "post_syscall_mismatches": post_syscall_mismatches,
         "last_entries": flattened[-12:],
     }
 
@@ -212,6 +216,89 @@ def fmt_hex(value: Any) -> str:
     if isinstance(value, int):
         return hex(value)
     return str(value)
+
+
+def numeric_value(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value, 0)
+    except ValueError:
+        try:
+            return int(value, 16)
+        except ValueError:
+            return None
+
+
+def summarize_dispatch_switches(flattened: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active: dict[int, dict[str, Any]] = {}
+    switches: list[dict[str, Any]] = []
+
+    for row in flattened:
+        op = row.get("header.op")
+        cpu = row["cpu"]
+        if op == "VCPU_RUN_ENTRY":
+            active[cpu] = row
+            continue
+        if op != "VCPU_RUN_EXIT":
+            continue
+
+        entry = active.pop(cpu, None)
+        if entry is None:
+            continue
+
+        entry_pid = entry.get("header.pid")
+        exit_pid = row.get("header.pid")
+        entry_tmm = entry.get("task.tmm")
+        exit_tmm = row.get("task.tmm")
+        if entry_pid != exit_pid or entry_tmm != exit_tmm:
+            switches.append(
+                {
+                    "cpu": cpu,
+                    "entry_seq": entry["seq"],
+                    "exit_seq": row["seq"],
+                    "entry_pid": entry_pid,
+                    "exit_pid": exit_pid,
+                    "entry_tmm": entry_tmm,
+                    "exit_tmm": exit_tmm,
+                    "exit_op": op,
+                }
+            )
+
+    return switches
+
+
+def summarize_post_syscall_mismatches(
+    flattened: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    mismatches: list[dict[str, Any]] = []
+
+    for row in flattened:
+        if row.get("header.op") != "HANDLE_SYSCALL_POST":
+            continue
+
+        run_rax = numeric_value(row.get("regs.rax"))
+        task_horax = numeric_value(row.get("task.horax"))
+        if run_rax is None or task_horax is None or run_rax == task_horax:
+            continue
+
+        mismatches.append(
+            {
+                "cpu": row["cpu"],
+                "seq": row["seq"],
+                "pid": row.get("header.pid"),
+                "port": row.get("header.port"),
+                "run_rax": row.get("regs.rax"),
+                "task_horax": row.get("task.horax"),
+                "task_hax": row.get("task.hax"),
+                "task_tmm": row.get("task.tmm"),
+                "vcpu_mm": row.get("mmvcpu.vmm"),
+            }
+        )
+
+    return mismatches
 
 
 def format_counter_key(title: str, key: Any) -> str:
@@ -256,6 +343,31 @@ def print_text(summary: dict[str, Any], limit: int) -> None:
             f"lag={lag['lag']} cpu={lag['cpu']} seq={lag['seq']} "
             f"pid={lag['pid']} op={lag['op']} mmgen={lag['mmgen']} vlast={lag['vlast']}"
         )
+    if summary["dispatch_switches"]:
+        print(f"dispatch_switches: count={len(summary['dispatch_switches'])}")
+        for item in summary["dispatch_switches"][:limit]:
+            print(
+                "  "
+                f"cpu={item['cpu']} entry_seq={item['entry_seq']} "
+                f"entry_pid={item['entry_pid']} entry_tmm={item['entry_tmm']} "
+                f"exit_seq={item['exit_seq']} exit_pid={item['exit_pid']} "
+                f"exit_tmm={item['exit_tmm']}"
+            )
+    if summary["post_syscall_mismatches"]:
+        print(
+            "post_syscall_mismatches: "
+            f"count={len(summary['post_syscall_mismatches'])}"
+        )
+        for item in summary["post_syscall_mismatches"][:limit]:
+            print(
+                "  "
+                f"cpu={item['cpu']} seq={item['seq']} pid={item['pid']} "
+                f"port={fmt_hex(item['port'])} run_rax={item['run_rax']} "
+                f"task_horax={item['task_horax']} "
+                f"task_hax={item['task_hax']} "
+                f"task_tmm={item['task_tmm']} "
+                f"vcpu_mm={item['vcpu_mm']}"
+            )
     if summary["incomplete_entries"]:
         print("incomplete_entries:")
         for row in summary["incomplete_entries"]:

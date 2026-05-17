@@ -385,6 +385,12 @@ ports: 0xf6=1832 0xf4=1269 0xfd=1127 0x0=912
 exit_reasons: 2=4228 0=912
 pids: 161=4004 1=1136
 max_mm_lag: lag=4822 cpu=0 seq=2473317 pid=1 op=HANDLE_SYSCALL_POST mmgen=4947 vlast=125
+dispatch_switches: count=2
+  entry_seq=2470203 entry_pid=161 entry_tmm=61156a80 exit_seq=2470212 exit_pid=161 exit_tmm=61156200
+  entry_seq=2473309 entry_pid=161 entry_tmm=61156200 exit_seq=2473318 exit_pid=1 exit_tmm=61156ec0
+post_syscall_mismatches: count=2
+  seq=2470211 pid=161 run_rax=3b task_horax=0 task_tmm=61156200 vcpu_mm=61156a80
+  seq=2473317 pid=1 run_rax=e7 task_horax=3d task_tmm=61156ec0 vcpu_mm=61156200
 last_entry: seq=2473880 pid=1 op=HANDLE_SYSCALL_PRE port=0xf4 rip=ffffe000000000f5 cr2=0x800e90be0e
 ```
 
@@ -519,8 +525,9 @@ Validation for the diagnostic change:
 - a Django vector2 KVM-v2 trace 60-run captured a failing iteration with
   `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`;
 - `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` reassembled
-  that dump into 5140 parsed / 5140 complete entries and validated JSON
-  output for follow-on tooling.
+  that dump into 5140 parsed / 5140 complete entries, reported two
+  dispatch pid/tmm switches plus two post-syscall run/task mismatches,
+  and validated JSON output for follow-on tooling.
 - `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
   reported 4 critical pid/tmm stability violations around the pid 161/1
   transition and `mmap-zero` reported no mmap-returned-zero event.
