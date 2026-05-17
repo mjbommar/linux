@@ -247,7 +247,8 @@ Validation evidence recorded in the checkpoint docs includes:
   passed a one-shot Django/vector2 KVM-v2 smoke, but the follow-up
   30-run still failed `PASS=29/30 FAIL=1 TIMEOUT=0` with a guest Python
   abort, a complete 5140-entry trace dump, two dispatch pid/tmm switches,
-  no post-syscall mismatches, and the same no-mmap-zero result.  This is
+  two syscall task/mm switches, three mm-generation backsteps, no
+  post-syscall mismatches, and the same no-mmap-zero result.  This is
   progress on the ownership model, not a KVM-v2 Tier 3 closeout;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
@@ -264,8 +265,8 @@ list is:
   post-hardened `PASS=29/30 FAIL=1 TIMEOUT=0` with guest Python
   failures and one startup timeout; the direct post-syscall stale
   `kvm_run` consumption path has been removed, so the next backend audit
-  must resolve the remaining task/mm ownership transitions and guest
-  memory/TLB model;
+  must resolve the remaining syscall task/mm switches, mm-generation
+  backsteps, and guest memory/TLB model;
 - repeat vector2 Tier 3 Django on kvm-v2 after the backend
   investigation until the flake rate is acceptably bounded;
 - decide whether the FastAPI/uvicorn 30/30 repetition is sufficient for

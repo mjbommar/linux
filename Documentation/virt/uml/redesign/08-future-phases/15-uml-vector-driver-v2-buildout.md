@@ -1103,8 +1103,9 @@ KVM-v2 readiness follow-up:
     two old mismatches in the first failing log, the rebuilt trace
     runtime passed a one-shot Django/vector2 KVM-v2 smoke, but a 30-run
     retry still failed `PASS=29/30 FAIL=1 TIMEOUT=0` with guest Python
-    abort and a complete trace dump showing no post-syscall mismatches,
-    so KVM-v2 Tier 3 readiness remains open;
+    abort and a complete trace dump showing no post-syscall mismatches;
+    the same dump still has two syscall task/mm switches and three
+    mm-generation backsteps, so KVM-v2 Tier 3 readiness remains open;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics

@@ -185,7 +185,9 @@ def parse_file(path: Path) -> dict[str, Any]:
     max_tlb_lag = max((item["lag"] for item in tlb_lags), default=0)
     tlb_by_pid = collections.Counter(item["pid"] for item in tlb_lags)
     dispatch_switches = summarize_dispatch_switches(flattened)
+    syscall_switches = summarize_syscall_switches(flattened)
     post_syscall_mismatches = summarize_post_syscall_mismatches(flattened)
+    mm_backsteps = summarize_mm_backsteps(flattened)
 
     return {
         "path": str(path),
@@ -207,7 +209,9 @@ def parse_file(path: Path) -> dict[str, Any]:
         "tlb_lag_max": max_tlb_lag,
         "tlb_lag_by_pid": dict(tlb_by_pid),
         "dispatch_switches": dispatch_switches,
+        "syscall_switches": syscall_switches,
         "post_syscall_mismatches": post_syscall_mismatches,
+        "mm_backsteps": mm_backsteps,
         "last_entries": flattened[-12:],
     }
 
@@ -309,6 +313,71 @@ def summarize_post_syscall_mismatches(
     return mismatches
 
 
+def summarize_syscall_switches(flattened: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active: dict[int, dict[str, Any]] = {}
+    switches: list[dict[str, Any]] = []
+
+    for row in flattened:
+        op = row.get("header.op")
+        cpu = row["cpu"]
+        if op == "HANDLE_SYSCALL_PRE":
+            active[cpu] = row
+            continue
+        if op != "HANDLE_SYSCALL_POST":
+            continue
+
+        entry = active.pop(cpu, None)
+        if entry is None:
+            continue
+
+        entry_pid = entry.get("header.pid")
+        post_pid = row.get("header.pid")
+        entry_tmm = entry.get("task.tmm")
+        post_tmm = row.get("task.tmm")
+        if entry_pid != post_pid or entry_tmm != post_tmm:
+            switches.append(
+                {
+                    "cpu": cpu,
+                    "entry_seq": entry["seq"],
+                    "post_seq": row["seq"],
+                    "entry_pid": entry_pid,
+                    "post_pid": post_pid,
+                    "entry_tmm": entry_tmm,
+                    "post_tmm": post_tmm,
+                    "entry_syscall": entry.get("regs.rax"),
+                    "post_horax": row.get("task.horax"),
+                    "post_hax": row.get("task.hax"),
+                }
+            )
+
+    return switches
+
+
+def summarize_mm_backsteps(flattened: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    backsteps: list[dict[str, Any]] = []
+
+    for row in flattened:
+        mmgen = numeric_value(row.get("mmvcpu.mmgen"))
+        vlast = numeric_value(row.get("mmvcpu.vlast"))
+        if mmgen is None or vlast is None or vlast <= 0 or mmgen >= vlast:
+            continue
+
+        backsteps.append(
+            {
+                "cpu": row["cpu"],
+                "seq": row["seq"],
+                "pid": row.get("header.pid"),
+                "op": row.get("header.op"),
+                "mmgen": mmgen,
+                "vlast": vlast,
+                "task_tmm": row.get("task.tmm"),
+                "vcpu_mm": row.get("mmvcpu.vmm"),
+            }
+        )
+
+    return backsteps
+
+
 def format_counter_key(title: str, key: Any) -> str:
     if isinstance(key, int) and title == "ports":
         return hex(key)
@@ -361,6 +430,18 @@ def print_text(summary: dict[str, Any], limit: int) -> None:
                 f"exit_seq={item['exit_seq']} exit_pid={item['exit_pid']} "
                 f"exit_tmm={item['exit_tmm']}"
             )
+    if summary["syscall_switches"]:
+        print(f"syscall_switches: count={len(summary['syscall_switches'])}")
+        for item in summary["syscall_switches"][:limit]:
+            print(
+                "  "
+                f"cpu={item['cpu']} entry_seq={item['entry_seq']} "
+                f"entry_pid={item['entry_pid']} entry_tmm={item['entry_tmm']} "
+                f"entry_syscall={item['entry_syscall']} "
+                f"post_seq={item['post_seq']} post_pid={item['post_pid']} "
+                f"post_tmm={item['post_tmm']} post_horax={item['post_horax']} "
+                f"post_hax={item['post_hax']}"
+            )
     if summary["post_syscall_mismatches"]:
         print(
             "post_syscall_mismatches: "
@@ -375,6 +456,15 @@ def print_text(summary: dict[str, Any], limit: int) -> None:
                 f"task_hax={item['task_hax']} "
                 f"task_tmm={item['task_tmm']} "
                 f"vcpu_mm={item['vcpu_mm']}"
+            )
+    if summary["mm_backsteps"]:
+        print(f"mm_backsteps: count={len(summary['mm_backsteps'])}")
+        for item in summary["mm_backsteps"][:limit]:
+            print(
+                "  "
+                f"cpu={item['cpu']} seq={item['seq']} pid={item['pid']} "
+                f"op={item['op']} mmgen={item['mmgen']} vlast={item['vlast']} "
+                f"task_tmm={item['task_tmm']} vcpu_mm={item['vcpu_mm']}"
             )
     if summary["incomplete_entries"]:
         print("incomplete_entries:")

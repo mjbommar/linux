@@ -521,7 +521,9 @@ PASS=29/30 FAIL=1 TIMEOUT=0
 
 Iteration 18 again aborted guest `python3` before `SERVER_READY` with
 `Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.` and
-dumped a complete trace ring:
+dumped a complete trace ring.  The summary helper now reports both the
+old post-syscall mismatch class and the remaining task/mm transition
+class:
 
 ```
 entries: parsed=5140 complete=5140
@@ -530,7 +532,14 @@ tlb_lag: count=30 max=1050
 dispatch_switches: count=2
   entry_seq=2470317 entry_pid=161 entry_tmm=61156200 exit_seq=2470326 exit_pid=161 exit_tmm=61156640
   entry_seq=2473423 entry_pid=161 entry_tmm=61156640 exit_seq=2473432 exit_pid=1 exit_tmm=61156ec0
+syscall_switches: count=2
+  entry_seq=2470324 entry_pid=161 entry_tmm=61156200 entry_syscall=3b post_seq=2470325 post_pid=161 post_tmm=61156640
+  entry_seq=2473430 entry_pid=161 entry_tmm=61156640 entry_syscall=e7 post_seq=2473431 post_pid=1 post_tmm=61156ec0
 post_syscall_mismatches: none
+mm_backsteps: count=3
+  seq=2469440 pid=161 op=POST_TLB_SYNC mmgen=4815 vlast=4834 task_tmm=61156200 vcpu_mm=61156ec0
+  seq=2470326 pid=161 op=VCPU_RUN_EXIT mmgen=0 vlast=4862 task_tmm=61156640 vcpu_mm=61156200
+  seq=2470328 pid=161 op=POST_TLB_SYNC mmgen=1 vlast=4862 task_tmm=61156640 vcpu_mm=61156200
 ```
 
 The older invariant checker still reports the same four critical
@@ -615,13 +624,15 @@ Validation for the diagnostic change:
   `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`;
 - `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` reassembled
   that dump into 5140 parsed / 5140 complete entries, reported two
-  dispatch pid/tmm switches plus two post-syscall run/task mismatches,
-  and validated JSON output for follow-on tooling.
+  dispatch pid/tmm switches, two syscall task/mm switches, mm-generation
+  backsteps, plus two post-syscall run/task mismatches, and validated
+  JSON output for follow-on tooling.
 - `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
   reported 4 critical pid/tmm stability violations around the pid 161/1
   transition and `mmap-zero` reported no mmap-returned-zero event.
 - after the post-syscall shared-run hardening, the rebuilt trace runtime
   passed a Django vector2 KVM-v2 smoke but still failed a 30-run sample
   at `PASS=29/30 FAIL=1 TIMEOUT=0`; the new failing trace had no
-  post-syscall run/task mismatches, so the remaining blocker is broader
-  than that one stale-run path.
+  post-syscall run/task mismatches but still had two syscall task/mm
+  switches and three mm-generation backsteps, so the remaining blocker is
+  broader than that one stale-run path.
