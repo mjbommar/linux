@@ -228,6 +228,10 @@ parking-lot designs for future prioritization.
   dry-run shape, sandbox boundary, live single-queue and multiqueue
   `umlctl up` smoke evidence, and remaining SMP/perf gaps. Not a
   commitment.
+- [31-uml-vector-driver-v2-r8c-queue-cpu-policy.md](31-uml-vector-driver-v2-r8c-queue-cpu-policy.md) —
+  R8 follow-up note for explicit vector2 queue-to-CPU policy:
+  `ndo_select_queue`, XPS setup, modulo CPU/queue mapping rules, KUnit
+  coverage, and remaining KCSAN/perf gaps. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

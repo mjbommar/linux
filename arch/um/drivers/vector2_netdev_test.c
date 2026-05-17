@@ -141,12 +141,47 @@ static void vector2_netdev_uses_configured_queue_count_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_netdev_queue_cpu_policy_test(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(0, 0, 2, 4));
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(0, 2, 2, 4));
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(1, 1, 2, 4));
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(1, 3, 2, 4));
+	KUNIT_EXPECT_FALSE(test,
+			   um_vec2_tx_queue_uses_cpu_ordinal(1, 0, 2, 4));
+
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(0, 0, 4, 2));
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(2, 0, 4, 2));
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(1, 1, 4, 2));
+	KUNIT_EXPECT_TRUE(test,
+			  um_vec2_tx_queue_uses_cpu_ordinal(3, 1, 4, 2));
+	KUNIT_EXPECT_FALSE(test,
+			   um_vec2_tx_queue_uses_cpu_ordinal(3, 0, 4, 2));
+
+	KUNIT_EXPECT_FALSE(test,
+			   um_vec2_tx_queue_uses_cpu_ordinal(0, 0, 0, 2));
+	KUNIT_EXPECT_FALSE(test,
+			   um_vec2_tx_queue_uses_cpu_ordinal(0, 0, 2, 0));
+	KUNIT_EXPECT_FALSE(test,
+			   um_vec2_tx_queue_uses_cpu_ordinal(2, 0, 2, 4));
+	KUNIT_EXPECT_FALSE(test,
+			   um_vec2_tx_queue_uses_cpu_ordinal(0, 4, 2, 4));
+}
+
 static struct kunit_case vector2_netdev_test_cases[] = {
 	KUNIT_CASE(vector2_netdev_name_and_mac_test),
 	KUNIT_CASE(vector2_netdev_open_unwinds_missing_backend_test),
 	KUNIT_CASE(vector2_netdev_stop_registered_is_safe_test),
 	KUNIT_CASE(vector2_netdev_xmit_drops_when_not_running_test),
 	KUNIT_CASE(vector2_netdev_uses_configured_queue_count_test),
+	KUNIT_CASE(vector2_netdev_queue_cpu_policy_test),
 	{}
 };
 

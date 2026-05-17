@@ -81,6 +81,9 @@ shape, and inspectable ethtool surfaces:
 - launcher-owned vector2 fd multiqueue handoff through `umlctl`:
   `queues=N` maps to a contiguous inherited fd range starting at fd
   200, with live 4-queue gateway ping and clean TAP teardown;
+- explicit vector2 queue-to-CPU policy through `ndo_select_queue` and
+  XPS setup, with KUnit coverage for the deterministic CPU/queue
+  modulo rules;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -102,9 +105,8 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
-- no full multiqueue validation story: queue-to-CPU policy, KCSAN,
-  long SMP traffic, and broader fairness/performance profiles remain
-  open;
+- no full multiqueue validation story: KCSAN, long SMP traffic, and
+  broader fairness/performance profiles remain open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.
@@ -465,7 +467,7 @@ R5 fd follow-up note:
 - Therefore direct-fd packet movement exists for the trusted
   single-queue development path, inherited-fd sandbox builds, and the
   launcher-owned fd multiqueue path.  fd performance profiles, KCSAN,
-  queue-to-CPU policy, and kvm-v2 fd evidence remain open.
+  and kvm-v2 fd evidence remain open.
 
 ### V2-R6 - ethtool, Stats, And Feature Policy
 
@@ -623,9 +625,9 @@ R8a implementation note:
     `SERVER_READY`, `TIER3_OK`, `REPRO_DONE rc=0`,
     `PASS=1/1`, TAP absent after teardown.
 - Therefore R8 is partially satisfied.  TAP has the first real
-  multiqueue runtime shape, and fd multiqueue now has core KUnit plus
-  live `umlctl` launch evidence; KCSAN, queue-to-CPU policy, and
-  kvm-v2 evidence remain open.
+  multiqueue runtime shape, fd multiqueue now has core KUnit plus live
+  `umlctl` launch evidence, and queue-to-CPU policy now has explicit
+  XPS setup plus KUnit coverage; KCSAN and kvm-v2 evidence remain open.
 
 R8b implementation note:
 
@@ -649,8 +651,29 @@ R8b implementation note:
     `PASS=1/1`, and TAP absent after teardown.
 - Therefore the R8 observability surface is usable for distribution
   experiments and has first TAP distribution evidence, but KCSAN,
-  fairness/performance profiles, queue-to-CPU policy, and kvm-v2
-  evidence remain open.
+  fairness/performance profiles, and kvm-v2 evidence remain open.
+
+R8c implementation note:
+
+- `31-uml-vector-driver-v2-r8c-queue-cpu-policy.md` records the
+  explicit queue-to-CPU checkpoint.
+- Implemented:
+  - vector2 owns `.ndo_select_queue` and caps the selected queue with
+    `netdev_cap_txqueue()`;
+  - vector2 configures XPS at open for multiqueue devices;
+  - the pure policy is defined over online CPU ordinals: CPUs spread
+    across queues by modulo when CPUs are plentiful, and queues share
+    CPUs by modulo when queue count exceeds online CPU count;
+  - netdev KUnit covers both sides of the modulo policy and invalid
+    bounds.
+- Evidence collected:
+  - targeted object build for `vector2_netdev.o` and
+    `vector2_netdev_test.o`;
+  - rebuilt KUnit UML kernel;
+  - `um_vector2_*` KUnit: 72/72 passed.
+- Therefore the queue-to-CPU policy item has an implementation and
+  unit-level model coverage.  KCSAN, long SMP traffic, performance
+  profiles, and kvm-v2 evidence remain open.
 
 ### V2-R9 - Transport Parity
 

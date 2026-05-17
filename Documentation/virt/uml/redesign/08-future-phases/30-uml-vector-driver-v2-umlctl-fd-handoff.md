@@ -337,6 +337,7 @@ Testing complete. Ran 71 tests: passed: 71
 - kvm-v2 validation after the separate kvm-v2 readiness blocker is
   fixed;
 - KCSAN and longer SMP traffic runs on fd multiqueue;
-- queue-to-CPU policy and fairness profiling;
+- queue-to-CPU policy validation under longer SMP traffic and fairness
+  profiling;
 - performance comparison between legacy vector, vector2 fd, and
   vector2 in-process TAP.

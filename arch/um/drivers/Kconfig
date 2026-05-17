@@ -282,8 +282,9 @@ config UML_NET_VECTOR_V2_NETDEV_KUNIT
 	help
 	  Build KUnit tests for the experimental vector v2 netdev skeleton.
 	  These tests validate stable device naming, lifecycle unwind for
-	  backend-missing open, stopped-state stop handling, and xmit safety
-	  before any real fd or TAP packet path exists.
+	  backend-missing open, stopped-state stop handling, xmit safety,
+	  configured queue counts, and the deterministic queue-to-CPU policy
+	  used for XPS setup.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.

@@ -5,6 +5,7 @@
 
 #define pr_fmt(fmt) "uml-vector2: " fmt
 
+#include <linux/cpumask.h>
 #include <linux/etherdevice.h>
 #include <linux/errno.h>
 #include <linux/if_ether.h>
@@ -25,6 +26,7 @@ static const struct net_device_ops um_vec2_netdev_ops = {
 	.ndo_open		= um_vec2_netdev_open,
 	.ndo_stop		= um_vec2_netdev_stop,
 	.ndo_start_xmit		= um_vec2_netdev_start_xmit,
+	.ndo_select_queue	= um_vec2_netdev_select_queue,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -77,6 +79,76 @@ static struct um_vec2_channel *
 um_vec2_channel_for_skb(struct um_vec2_dev *vdev, const struct sk_buff *skb)
 {
 	return um_vec2_channel_for_mapping(vdev, skb_get_queue_mapping(skb));
+}
+
+bool um_vec2_tx_queue_uses_cpu_ordinal(unsigned int queue,
+				       unsigned int cpu_ordinal,
+				       unsigned int queues,
+				       unsigned int cpu_count)
+{
+	if (!queues || !cpu_count || queue >= queues ||
+	    cpu_ordinal >= cpu_count)
+		return false;
+
+	if (queues <= cpu_count)
+		return cpu_ordinal % queues == queue;
+
+	return queue % cpu_count == cpu_ordinal;
+}
+
+u16 um_vec2_netdev_select_queue(struct net_device *dev, struct sk_buff *skb,
+				struct net_device *sb_dev)
+{
+	u16 queue;
+
+	if (dev->real_num_tx_queues <= 1)
+		return 0;
+
+	queue = netdev_pick_tx(dev, skb, sb_dev);
+	return netdev_cap_txqueue(dev, queue);
+}
+
+static void um_vec2_netdev_configure_xps(struct net_device *dev,
+					 unsigned int queues)
+{
+	cpumask_var_t mask;
+	unsigned int cpu;
+	unsigned int cpu_count;
+	unsigned int ordinal;
+	unsigned int queue;
+	int ret;
+
+	if (queues <= 1)
+		return;
+
+	cpu_count = num_online_cpus();
+	if (!cpu_count)
+		return;
+
+	if (!zalloc_cpumask_var(&mask, GFP_KERNEL)) {
+		netdev_warn(dev, "vector v2 XPS setup skipped: no memory\n");
+		return;
+	}
+
+	for (queue = 0; queue < queues; queue++) {
+		cpumask_clear(mask);
+		ordinal = 0;
+		for_each_online_cpu(cpu) {
+			if (um_vec2_tx_queue_uses_cpu_ordinal(queue, ordinal,
+							      queues,
+							      cpu_count))
+				cpumask_set_cpu(cpu, mask);
+			ordinal++;
+		}
+
+		ret = netif_set_xps_queue(dev, mask, queue);
+		if (ret)
+			netdev_warn(dev,
+				    "vector v2 XPS setup failed for queue %u: %d\n",
+				    queue, ret);
+	}
+
+	free_cpumask_var(mask);
 }
 
 static void um_vec2_tx_complete_skb(void *owner, unsigned int len,
@@ -422,6 +494,7 @@ int um_vec2_netdev_open(struct net_device *dev)
 	    vdev->cfg.transport == UM_VEC2_TRANSPORT_FD) {
 		unsigned int i;
 
+		um_vec2_netdev_configure_xps(dev, dev->real_num_tx_queues);
 		netif_carrier_on(dev);
 		netif_tx_start_all_queues(dev);
 		for (i = 0; i < vdev->num_channels; i++)

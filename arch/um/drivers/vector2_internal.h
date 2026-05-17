@@ -147,6 +147,12 @@ int um_vec2_netdev_open(struct net_device *dev);
 int um_vec2_netdev_stop(struct net_device *dev);
 netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 				      struct net_device *dev);
+u16 um_vec2_netdev_select_queue(struct net_device *dev, struct sk_buff *skb,
+				struct net_device *sb_dev);
+bool um_vec2_tx_queue_uses_cpu_ordinal(unsigned int queue,
+				       unsigned int cpu_ordinal,
+				       unsigned int queues,
+				       unsigned int cpu_count);
 void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev);
 unsigned int um_vec2_netdev_queue_count(const struct um_vec2_dev *vdev);
 int um_vec2_netdev_register(struct um_vec2_dev *vdev);
