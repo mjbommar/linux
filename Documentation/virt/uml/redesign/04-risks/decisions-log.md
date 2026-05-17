@@ -11385,4 +11385,320 @@ landed code.
 
 ---
 
+## D124 (2026-05-14) — Phase J Tier 2 (uv venv) landed; pivot from pip-wheelhouse
+
+**Track:** A (Phase J).
+
+**Decision.** Tier 2 (Python heavyweights — httpx, pyyaml,
+pendulum, numpy) ships via a pre-built persistent `uv` venv
+rather than a per-invocation `uv run --with <pkg>` resolve.
+
+**Why.** Initial attempt used `uv run --with httpx pyyaml
+pendulum numpy` per UML start. The offline resolver walked back
+through historical versions trying to find cached wheels and
+failed. Pre-building the venv once (`uv venv
+~/.cache/uml-soak-tier2-venv && uv pip install httpx pyyaml
+pendulum numpy`) leaves the venv as a stable hostfs-visible
+dependency the template invokes directly:
+
+  - Template: `cmd = ".../.cache/uml-soak-tier2-venv/bin/python
+    {{SOAK_DIR}}/tier2-uv-smoketest.py"`
+  - Env: `HOME = "/home/mjbommar"` (uv needs HOME to find its
+    cache directory; UML's default `/` is read-only).
+
+**Verification.** Smoke under daemon: 80/80 PASS (20 iters × 2
+backends × 2 workers, kvm-v2 + seccomp, T57 Phase A on).
+
+**Refs.**
+  - `tools/testing/selftests/um/soak/tier2-uv-pylibs.toml.template`
+  - `tools/testing/selftests/um/soak/tier2-uv-smoketest.py`
+  - Diary `plan-2026-05-14-execution/01-tier2-uv-landed.md`.
+
+---
+
+## D125 (2026-05-14) — Phase J Tier 3 chose per-worker IP option (b)
+
+**Track:** A (Phase J).
+
+**Decision.** Tier 3 (Django + FastAPI loopback) uses a fixed
+per-worker IP carve-out from `192.168.42.0/24` rather than
+threading the guest IP back through `umlctl ps --json` (option
+(a)).
+
+**Why.**
+  1. Option (a) is the "right surface in the abstract" but
+     requires a `manifest.rs:8` schema-v2 bump + 40-120 LoC
+     across 3-4 Rust files. The manifest is documented as
+     "immutable after create — mutations are rm + create."
+     Bumping for a derivable-from-policy value is the wrong
+     reason to touch that contract during the Phase J window.
+  2. Option (b) closes Phase J §5.4 ("Tier 3 wired and one
+     full rotation pass per framework") with ~150 LoC of bash
+     and zero Rust changes. The `umlctl ps --json` improvement
+     is filed as a non-blocking follow-up.
+  3. Concurrent-soak correctness: option (a) needs a separate
+     `gate_loop.rs:253-277` per-worker-fanout fix anyway;
+     option (b) gets it for free because each worker has a
+     non-colliding /30 by construction.
+
+**Allocation scheme.** worker N → `host_ip =
+192.168.42.{4N+1}/30`, `guest_ip = 192.168.42.{4N+2}/30`,
+`tap_name = soak-tap{N}`. Capped at $WORKERS <= 63 by /24
+capacity.
+
+**Trade-off the operator inherits.** `umlctl ps` does NOT
+show the guest IP for Tier 3 workers; postmortem
+reconstruction is `worker_idx → host_ip/guest_ip` via the
+documented `4N+1 / 4N+2` formula. Acceptable for a soak-
+specific convention; filed `umlctl ps --json` extension as a
+non-blocking follow-up.
+
+**Refs.**
+  - `02-workstreams/D-kvm-backend/phase-J-tier3-design-2026-05-14.md` §5.
+  - `tools/testing/selftests/um/soak/tier3-{django,fastapi}.toml.template`.
+  - `tools/testing/selftests/um/soak/run-soak-daemon.sh` (helpers
+    `is_tier3_workload`, `emit_tier3_worker_toml`,
+    `process_tier3_phase_results`, `run_one_tier3_phase`).
+
+---
+
+## D126 (2026-05-14) — Series 3 (ftrace-notrace-generic-v1) READY
+
+**Track:** D (Upstream).
+
+**Decision.** Regenerated Series 3's `0001-*.patch` from
+on-branch commit `a2e01ee58c53` with `--unified=3`. Stripped
+trailing whitespace on the `--<sp>` signature separator.
+Verified `git apply --check` and `git am --3way` both clean
+against `origin/master`. Flipped
+`upstream-patches/ftrace-notrace-generic-v1/SUBMISSION-NOTES.md`
+status to **READY**.
+
+**Why this needed a regen.** The 2026-04-24 staged patch had
+`smpboot.c` hunks generated with `--unified=2` (only 2 trailing
+context lines). `git am --3way` rejected with `corrupt patch
+at line 63` because git's default-3 fuzzy match couldn't
+realign with the upstream-master context window.
+
+**Sequencing implication.** Track D Series 1 + 2 + 3 are now
+all in READY state — operator may `git send-email` all three
+in parallel (none has dependencies on the others). Series 4
+(`backend-ops-abstraction-rfc`) is blocked behind Series 3
+*landing* per the Phase 5 upstream queue ordering, not behind
+Series 3 *sending*.
+
+**Refs.**
+  - `Documentation/virt/uml/redesign/upstream-patches/
+    ftrace-notrace-generic-v1/SUBMISSION-NOTES.md` (Status
+    "READY (regenerated 2026-05-14, commit `cdea7ace1893`)").
+
+---
+
+## D127 (2026-05-14) — Snapshot v2 port Phase 2: KUnit boot-time fixture
+
+**Track:** B (Time-machine).
+
+**Decision.** Phase 2 of #168 lands a boot-time KUnit fixture
+that primes a vCPU at suite_init time so the snapshot test
+suite can actually run (Phase 1 was build-only with
+`kunit_skip`).
+
+**Approach.** KUnit `suite_init` hook calls a new helper
+`kvm_v2_vcpu_prime_for_kunit()` exposed behind
+`#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)`. The helper
+is an extracted version of the `if (!vcpu->cpuid_primed)` block
+from `kvm_v2_vcpu_run()` — idempotent on `cpuid_primed`
+(KVM_SET_CPUID2 is one-shot per vCPU; KVM rejects after first
+KVM_RUN).
+
+**Surprises that Phase 1's design memo didn't enumerate.**
+
+  1. `KVM_GET_REGS` / `KVM_GET_SREGS` work pre-`cpuid_primed`
+     — only `KVM_GET_XSAVE` / `KVM_SET_XCRS` are gated on
+     OSXSAVE + curated CPUID.
+  2. `KVM_SET_CPUID2` is one-shot per vCPU (locked at first
+     `KVM_RUN`); the fixture has to short-circuit on
+     `cpuid_primed` so KUnit re-trigger doesn't re-enter the
+     install path.
+  3. "pick_vcpu by `last_task`" path falls through to the
+     `smp_processor_id()` fallback at suite_init time (no UML
+     task has dispatched yet); on `ncpus=1` boot this is
+     `vcpus[0]`, which is what the fixture primed. On
+     `ncpus>1` the fixture would need to prime whichever vCPU
+     `smp_processor_id()` returns at test-case time.
+
+**Verification.** KUnit boot under `backend=force=kvm-v2
+mem=256M ncpus=1`:
+
+  ```
+      # Subtest: kvm_v2_snapshot
+      ok 1 test_kvm_v2_snapshot_basic
+  ok 3 kvm_v2_snapshot
+  ```
+
+All three KUnit suites (`kvm_v2_marshal` 8/8, `kvm_v2_byteshape`
+9/9, `kvm_v2_snapshot` 1/1) pass.
+
+**LoC.** +450 / -59 across 6 files.
+
+**Refs.**
+  - `arch/um/backend/kvm-v2/test_snapshot.c` (NEW, 163 LoC).
+  - `arch/um/backend/kvm-v2/vcpu.c::kvm_v2_vcpu_prime_for_kunit`.
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/
+    06b-snapshot-port-phase2.md` (diary).
+  - D123 (Phase 1).
+
+---
+
+## D128 (2026-05-14) — Tier 3 daemon-side per-worker fanout in run-soak-daemon.sh
+
+**Track:** A (Phase J).
+
+**Decision.** `run-soak-daemon.sh` now branches on workload
+name: `tier3-*` workloads spawn `$WORKERS` parallel `umlctl
+gate loop --workers 1` invocations with the per-worker
+placeholders substituted; everything else keeps the original
+`umlctl gate loop --workers $WORKERS` shape.
+
+**Why a branch rather than a unified path.** The non-tier3
+workloads don't need per-worker IPs (memcheck, iocheck,
+stress-ng, kbuild-tiny all run with `[network] mode = "none"`).
+The tier3 fanout adds bookkeeping (per-worker TOML, per-worker
+output subdir, per-worker scoreboard walk) that's pure overhead
+for non-tier3 workloads. The branch is one `case` statement at
+the top of `run_one_phase`.
+
+**Verification.** Dry-run smoke with `--workloads
+tier3-django,iocheck --workers 3 --iters-per-rotation 2`:
+
+  - Tier3 phase: 3 worker lines, each with distinct
+    `host=192.168.42.{1,5,9}` / `guest=192.168.42.{2,6,10}` /
+    `tap=soak-tap{0,1,2}`.
+  - Non-tier3 (iocheck) phase: single `umlctl gate loop -W 3`
+    invocation, unchanged.
+  - Backend rotation (`kvm-v2` → `seccomp`) reuses tap names
+    within a phase but serial-only — taps torn down between
+    phases by umlctl.
+  - Per-worker TOMLs: no stray `{{...}}` placeholders.
+
+**What's not yet verified.** Live smoke under a `CONFIG_UML_NET_VECTOR=y`
+kernel — that's operator pre-flight (~3 min kernel rebuild +
+~30 s `apt-get install python3-django python3-fastapi
+python3-uvicorn`).
+
+**Refs.**
+  - `tools/testing/selftests/um/soak/run-soak-daemon.sh`
+    (commit `ba63d93515a5`).
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/
+    06-daemon-tier3-fanout.md` (diary).
+  - D125 (option (b) decision for the per-worker scheme).
+
+---
+
+## D129 (2026-05-14) — Series 7 (kvm-backend-series) cover letter rewritten for v2
+
+**Track:** D (Upstream).
+
+**Decision.** Series 7's cover letter
+(`0000-cover-letter.patch.md`) is rewritten end-to-end to
+reflect the v2 redesign rather than the v1-era pitch it
+inherited from the post-G8 / D70 GO milestone. New length:
+414 → 900 lines (+486).
+
+**Why a full rewrite.** Series 7's old draft used v1
+vocabulary (per-task vCPU, shadow page tables, no XSAVE
+context, no per-vCPU pool) and pointed at memos that have
+since been deprecated. A 30%-rewrite would have been more
+work than a from-scratch refresh because every section's
+load-bearing claim changed.
+
+**Three anticipated review questions flagged in the cover.**
+
+  1. Per-CPU vCPU pool vs. per-task vCPU. Counter is memo 26
+     §C + the empirical v1 → v2 transition. Risk register
+     includes a fallback `CONFIG_UM_BACKEND_KVM_V2_VCPU_MODEL
+     = pool|per_task` Kconfig switch with `per_task` gated on
+     BROKEN if pushback is hard.
+  2. Class-D classifier (10-NR trap list, short-circuit to
+     -EPERM). Memo 10 + D84 are the pointers.
+  3. Per-mm host worker model deferral. R4 refactor (each
+     guest mm = its own host process) was deferred during
+     Phase A→I. Cover lets reviewers weigh "ship single-VM
+     with per-mm worker as v3 follow-up" vs. "include per-mm
+     in initial drop".
+
+**Status flow.** Series 7 still BLOCKED by Phase J DONE
+certificate (memo 26 §6.3); the cover-letter rewrite was the
+"start packaging the cover letter NOW even while Phase J
+finishes" recommendation from PLAN-2026-05-14 §6.3.
+
+**Refs.**
+  - `upstream-patches/kvm-backend-series/0000-cover-letter.patch.md`
+    (commit `aaaa3ce70027`).
+  - `upstream-patches/kvm-backend-series/SUBMISSION-NOTES.md`.
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/
+    06-series7-cover-letter-refresh.md` (diary).
+
+---
+
+## D130 (2026-05-14) — Record/replay v2 port design memo (#169)
+
+**Track:** B (Time-machine).
+
+**Decision.** #169 (record/replay) gets its design memo
+(`02-workstreams/D-kvm-backend/27-record-replay-v2-port.md`,
+1012 lines) as the sibling to #168's port memo. No code; pure
+sequencing. The memo identifies seven phases mirroring the
+snapshot port's structure and an entry point for Phase 1
+(`record.c` skeleton, ~350 LoC, state-machine only).
+
+**Why a separate memo from #168.** The two ports share design
+DNA (both lift from `kvm-v1-archive/` against v2's per-pool
+vCPU + XSAVE + gadget LSTAR architecture) but the *semantic
+deltas* are independent. #168 captures state; #169 captures
+*every output of host-side nondeterminism* and replays it.
+Separating the memos lets reviewers (and future-me) read each
+on its own terms.
+
+**Three hardest open questions flagged.**
+
+  1. **KVM API for RDTSC exit configuration.** No clean per-
+     vCPU explicit exit toggle in upstream KVM. Options: TSC-
+     offset model (`KVM_TSC_CONTROL` + per-vCPU
+     `MSR_IA32_TSC` virtualization), `KVM_CAP_X86_DISABLE_EXITS`
+     (wrong direction). Needs a one-day spike before Phase 5.
+  2. **Cross-kernel-version replay with per-pool vCPU layout
+     drift.** Memo 13 promised "deterministic across kernel
+     versions" but the v2 vCPU pool has gained fields commit-
+     to-commit (SMP-T16 `last_task`, SMP-T55 `fpu_dirty`,
+     SMP-T57 XSAVE/XCRS). Mitigation candidates: kernel-rev
+     pinning vs. interface-version contract vs. CRIU-style
+     field-presence flags. No clear winner.
+  3. **SIGALRM precision (PMU vs. syscall-count).** PMU-driven
+     instruction-retired counter is the rr-canonical approach
+     but Zen 4 KVM PMU passthrough is shakier than Intel and
+     v2 dev runs on AMD. Memo opts for syscall-count for
+     Phase 6 with a documented ±100 syscall precision; if a
+     workload reveals (b) inadequate, Phase 6.5 has to add
+     PMU-driven (a).
+
+**Recommended Phase 1 entry.** `arch/um/backend/kvm-v2/record.c`
+(~350 LoC) — `struct kvm_v2_record`, enums, static_key, alloc/
+destroy/free/start/stop/replay/strict_replay state machine
+only (observe/consume are no-op stubs). KUnit
+`test_kvm_v2_record_basic` asserts state-machine transitions
+without a live vCPU dependency, so #168 Phase 3 is not a
+blocker for #169 Phase 1.
+
+**Refs.**
+  - `02-workstreams/D-kvm-backend/27-record-replay-v2-port.md`
+    (commit `95c9cb2094a3`).
+  - `02-workstreams/D-kvm-backend/13-record-replay-determinism.md`
+    (the strategic memo from 2025).
+  - `arch/um/backend/kvm-v1-archive/record.c` (1597 LoC, lift
+    target).
+  - D123 (snapshot Phase 1) + D127 (snapshot Phase 2 KUnit env).
+
+---
+
 ## (Future entries here, as decisions are made)
