@@ -3,7 +3,15 @@
 **Series:** `0000-cover-letter.patch` + `0001-kernel-mark-
 kthread-and-smpboot_thread_fn-notrace.patch` (1 patch + cover).
 
-**Status:** prepared, not yet sent.
+**Status:** READY (regenerated 2026-05-14, commit `cdea7ace1893`).
+Was "prepared, not yet sent" but the 2026-04-24-staged patch
+had a context-arithmetic edge case that caused
+`git am --3way` to reject with "corrupt patch at line 63".
+Regenerated from the on-branch commit `a2e01ee58c53` with
+default `--unified=3`, trailing whitespace on the `--<sp>`
+signature separator stripped. Verified: `git apply --check`
+and `git am --3way` both clean against `origin/master`;
+checkpatch 0/0.
 
 **Queue position:** 3rd in
 `upstream-patches/SUBMISSION-QUEUE.md` (D63), after
