@@ -807,6 +807,27 @@ Validation:
 - KASAN/KMSAN clean under failure injection;
 - no BQL accounting leaks under drops and partial sends.
 
+Implementation checkpoint:
+
+- `arch/um/drivers/vector2_queue.{c,h}` adds pure TX ring and RX batch
+  ownership helpers under the `um_vec2_*` prefix.  The helpers use
+  caller-provided descriptor storage so the state can be tested without
+  a netdev, syscall vector, or host fd.
+- TX descriptors move through explicit free and driver-owned states.
+  Partial completion preserves unsent descriptor order, including ring
+  wraparound.
+- RX slots move through explicit free, prepared, and filled states.
+  Unreceived prepared buffers are released during receive completion,
+  while filled buffers must be consumed or reset before another prepare
+  cycle.
+- `CONFIG_UML_NET_VECTOR_V2_QUEUE_KUNIT=y` builds
+  `arch/um/drivers/vector2_queue_test.c`, a KUnit suite covering TX
+  wraparound, partial completion, invalid completion rejection, reset
+  release, RX prepare/receive/consume, allocation-failure unwind,
+  busy/invalid receive rejection, and filled-buffer reset.
+- This checkpoint intentionally remains model-only; the live vector
+  transmit and receive paths still use the existing queue implementation.
+
 ### Phase V4 - Lifecycle Rewrite
 
 Deliverables:
