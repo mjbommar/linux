@@ -9,9 +9,11 @@ networking v2.  R3 added a trusted direct-fd host backend and lets
 
 The original R3 checkpoint did not move packets.  The later fd datapath
 follow-up in `27-uml-vector-driver-v2-fd-datapath.md` adds
-single-queue raw Ethernet TX/RX over an inherited fd.  Launcher-owned
-fd manifests, sandbox-safe fd authority, fd multiqueue, and fd
-performance profiles remain future work.
+single-queue raw Ethernet TX/RX over an inherited fd.  A later sandbox
+follow-up allows inherited `fd=` in sandbox builds because it consumes
+already-delegated launcher authority instead of creating host network
+resources inside UML.  Launcher-owned fd manifests, fd multiqueue, and
+fd performance profiles remain future work.
 
 The old `CONFIG_UML_NET_VECTOR` driver remains the production vector
 networking path.
@@ -47,8 +49,10 @@ duplicate, not the original fd named on the command line.
 
 ## Sandbox Boundary
 
-Direct numeric `fd=` is still a trusted host option.  It is rejected in
-the default sandbox configuration:
+Direct numeric `fd=` started as a trusted host option in R3.  After the
+fd datapath follow-up it is allowed in the default sandbox
+configuration because the UML process can only use fds that the
+launcher already deliberately left open:
 
 ```text
 CONFIG_UML_NET_VECTOR_V2=y
@@ -56,17 +60,19 @@ CONFIG_UML_NET_VECTOR_V2=y
 CONFIG_UML_NET_VECTOR_V2_SANDBOX=y
 ```
 
-Sandbox rejection result:
+Sandbox TAP rejection still fails closed:
 
 ```text
-uml-vector2: vec2.0 config rejected: key='fd' msg='trusted host option not permitted' ret=-13
+uml-vector2: vec2.0 config rejected: key='ifname' msg='trusted host option not permitted' ret=-13
 uml-vector2: 1 vec2 command-line spec(s) rejected; no v2 devices configured
 R3_SANDBOX_INIT=1
 ```
 
-The future sandbox-safe fd path must come from a launcher-owned fd
-manifest or equivalent policy object, not from raw guest command-line
-numeric fd authority.
+The future launcher-owned fd manifest is still required for usability,
+fd naming, leak resistance, and auditability.  The kernel-side
+sandbox boundary is narrower: inherited fds are permitted; host TAP,
+raw socket, helper, BPF, VDE, and similar host-resource creation
+options remain rejected unless trusted in-process mode is enabled.
 
 ## Manual Runtime Check
 

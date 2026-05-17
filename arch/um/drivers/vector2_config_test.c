@@ -85,6 +85,11 @@ static void vector2_config_sandbox_rejects_host_option_test(struct kunit *test)
 	result = parse_cfg(test, "transport=tap,ifname=tap0", 0);
 	KUNIT_EXPECT_EQ(test, result.ret, -EACCES);
 	KUNIT_EXPECT_STREQ(test, result.err->key, "ifname");
+
+	result = parse_cfg(test, "transport=fd,fd=5", 0);
+	KUNIT_EXPECT_EQ(test, result.ret, 0);
+	KUNIT_EXPECT_TRUE(test, result.cfg->has_fd);
+	KUNIT_EXPECT_EQ(test, result.cfg->fd, 5U);
 }
 
 static void vector2_config_exact_transport_test(struct kunit *test)

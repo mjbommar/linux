@@ -49,6 +49,8 @@ surface:
   `vec2.0:transport=fd,fd=<n>`;
 - single-queue trusted direct-fd packet movement over raw Ethernet
   frames on an inherited datagram fd;
+- sandbox builds accept inherited `transport=fd,fd=<n>` without
+  enabling trusted in-process host operations;
 - trusted TAP open through `/dev/net/tun`, `TUNSETIFF`, and explicit
   close unwind;
 - `ip link set vec2.0 up/down` success for
@@ -76,7 +78,7 @@ They still do not provide replacement-ready networking.
 
 Missing runtime pieces:
 
-- no launcher-manifest fd path for sandbox mode;
+- no launcher-manifest fd path for convenient sandbox fd ownership;
 - no real timer-driven coalescing;
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on both seccomp and kvm-v2;
@@ -432,9 +434,13 @@ R5 fd follow-up note:
   - no-root manual fd datapath smoke using an inherited UNIX datagram
     fd, a host ARP/ICMP responder, `ping -c 3`, and ethtool queue
     counters showing both TX and RX movement.
+  - sandbox-only fd datapath smoke with
+    `# CONFIG_UML_NET_VECTOR_V2_INPROC is not set`, inherited
+    `transport=fd,fd=<n>`, 3/3 ping success, queue0 TX/RX counters,
+    and no config rejection.
 - Therefore direct-fd packet movement exists for the trusted
-  single-queue development path.  Launcher-owned fd manifests,
-  sandbox-safe fd authority, fd multiqueue, fd performance profiles,
+  single-queue development path and for inherited-fd sandbox builds.
+  Launcher-owned fd manifests, fd multiqueue, fd performance profiles,
   and kvm-v2 fd evidence remain open.
 
 ### V2-R6 - ethtool, Stats, And Feature Policy

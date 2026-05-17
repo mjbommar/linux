@@ -218,7 +218,6 @@ static bool um_vec2_key_trusted_host_only(enum um_vec2_key_id key)
 	case UM_VEC2_KEY_DSTPORT:
 	case UM_VEC2_KEY_IFUP:
 	case UM_VEC2_KEY_BPFFILE:
-	case UM_VEC2_KEY_FD:
 	case UM_VEC2_KEY_VNL:
 	case UM_VEC2_KEY_DESCR:
 	case UM_VEC2_KEY_PORT:

@@ -61,7 +61,9 @@ enum um_vec2_parse_flags {
 	/*
 	 * Permit options that make the UML process directly consume host
 	 * networking authority: host interface names, raw addresses, helper
-	 * scripts, BPF files, and direct fd numbers.
+	 * scripts, and BPF files.  Inherited fd numbers are intentionally
+	 * outside this flag: they consume authority already delegated by the
+	 * launcher and do not create host networking resources inside UML.
 	 */
 	UM_VEC2_PARSE_TRUSTED_HOST	= BIT(1),
 };
