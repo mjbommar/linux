@@ -11701,4 +11701,107 @@ blocker for #169 Phase 1.
 
 ---
 
+## D131 (2026-05-16) — record/replay v2 port Phase 1: state machine + static-key gate
+
+**Track:** B (Time-machine).
+
+**Decision.** #169 (record/replay) Phase 1 lifts v1's
+`kvm-v1-archive/record.c` lifecycle surface (~280 lines, lines
+41-410 of the archive) onto v2's symbol prefix + Phase-1 fixed-
+buffer shape. State machine: `INIT → RECORDING → STOPPED →
+REPLAYING` plus invalid-edge `-EINVAL`. The
+`DEFINE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled)` hot-path
+gate is in tree from day 1 so Phase 2's hook in
+`syscall_trap.c::kvm_v2_handle_io_trap` lands as a pure
+addition. KUnit `kvm_v2_record` suite is 2 cases (basic-path +
+invalid-transitions) — passes 2/2 alongside the existing
+marshal 8/8, byteshape 9/9, snapshot 2/2.
+
+**Two surface decisions Phase 1 had to take.**
+
+  1. **Fixed-size buffer vs. v1's growable log array.** v1
+     starts with a 256-entry array and doubles on demand
+     (`kvm-v1-archive/record.c:444-471`). Phase 1 takes a
+     `size_t buffer_size` arg to `_alloc` and kvmalloc's a
+     fixed-size scratch buffer once. Rationale: Phase 1's
+     observe/consume are no-op stubs (the buffer is never
+     written to), so the doubling machinery is pure complexity
+     debt. Phase 2 may revisit when the append helper lands —
+     either keep the fixed buffer (simpler) or port v1's
+     doubling logic (matches v1 more closely). Default size
+     is 64 KiB, cap is 64 MiB (matches v1's
+     `KVM_RECORD_PAYLOAD_TOTAL_CAP`).
+
+  2. **Stricter error policy than v1 on stop/replay.** v1's
+     `kvm_record_stop` is idempotent (calling stop on an
+     unarmed container is a no-op). Memo 27 §Phase 1
+     explicitly calls out "assert invalid transitions return
+     error" — so the v2 port returns `-EINVAL` on
+     stop-without-start, stop-after-stop, replay-from-INIT,
+     replay-while-recording, replay-after-replay,
+     start-after-start, and start-from-REPLAYING. This is the
+     intended Phase 1 surface; Phase 7's debugfs operator
+     plumb may need to swallow `-EINVAL` to preserve v1's
+     idempotent-from-shell shape (decision deferred).
+
+**Three deferrals confirmed.**
+
+  - **Snapshot integration.** Phase 1's container has no
+    `*checkpoint` field; Phase 3 of #169 reintroduces against
+    `kvm_v2_snapshot_capture_full` (memo 27 §3.9: log-only
+    mode is fine for Phase 1-2; the KUnit doesn't need a
+    snapshot since observe/consume are stubs).
+  - **`um_kvm_v2_active_record` accessor.** The single-active-
+    record global is file-scope in record.c at Phase 1. Phase 2
+    needs an accessor to plug into the syscall_trap.c hook;
+    introducing `kvm_v2_record_active(void)` (returns the
+    locked pointer under the spinlock) is cleaner than
+    exporting the global. Decision deferred to Phase 2's
+    implementation phase.
+  - **Debugfs surface.** v1 had
+    `/sys/kernel/debug/um/kvm_record_{ctl,state,log}`
+    (`kvm-v1-archive/record.c:1374-1576`). Phase 1 ships
+    none of it; Phase 7's kselftest re-plumb adds the v2
+    analogs. No new symbols needed for Phase 2-6 to land.
+
+**KUnit verification.** Boot under
+`backend=force=kvm-v2 mem=512M ncpus=1 init=/bin/echo`. All 4
+suites pass: `kvm_v2_marshal` 8/8, `kvm_v2_byteshape` 9/9,
+`kvm_v2_snapshot` 2/2, `kvm_v2_record` 2/2. The state-machine
+pr_info lines from the test execution document every
+transition in dmesg (start → stop → replay → stop, plus the
+7 invalid edges with their corresponding `pr_warn` diagnostics).
+
+**LoC delta.** ~1013 lines added across:
+
+  - `arch/um/backend/kvm-v2/record.c` +547 (new file).
+  - `arch/um/backend/kvm-v2/test_record.c` +224 (new file).
+  - `arch/um/backend/kvm-v2/kvm_v2_backend.h` +228 (struct,
+    enums, prototypes, 2 includes).
+  - `arch/um/backend/kvm-v2/Makefile` +14.
+
+**checkpatch.** 0 errors, 1 known-false-positive warning
+("EXPORT_SYMBOL should immediately follow") on the
+`DEFINE_STATIC_KEY_FALSE` macro — same false positive as v1's
+`kvm-v1-archive/record.c:73-74`. Matches baseline.
+
+**Recommended Phase 2 entry point.** The Phase 2 commit hooks
+`arch/um/backend/kvm-v2/syscall_trap.c::kvm_v2_handle_io_trap`
+between line 2195 (`handle_syscall(regs)`) and line 2353
+(marshal-out), gated by
+`static_branch_unlikely(&um_kvm_v2_record_enabled)`. The hook
+calls `kvm_v2_record_observe_syscall(rec, nr, ret, regs)` —
+which Phase 2 reimplements to actually append. No surface
+change to record.c's public API.
+
+**Refs.**
+  - `02-workstreams/D-kvm-backend/27-record-replay-v2-port.md`
+    §Phase 1 + §4 entry-point recommendation.
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/08-record-port-phase1.md`
+    (the diary for this landing).
+  - D130 (memo design contract; predecessor).
+  - D123 (snapshot Phase 1, the architectural sibling).
+
+---
+
 ## (Future entries here, as decisions are made)

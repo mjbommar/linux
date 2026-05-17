@@ -20,6 +20,15 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
 # 26-snapshot-v2-port.md for the design memo + Phase sub-sequencing.
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += snapshot.o
 
+# Record/replay primitives (Time-machine #169 Phase 1).
+# Port of arch/um/backend/kvm-v1-archive/record.c onto v2's vCPU-pool
+# + LSTAR-gadget + signal-queue topology. Phase 1 lands the state
+# machine + static-key gate only; Phase 2-6 add the observe/consume
+# hooks + per-NR routing + RDTSC/vvar/SIGALRM determinism. See
+# Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+# 27-record-replay-v2-port.md for the design memo.
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += record.o
+
 # Phase H gadget LSTAR trampoline body — assembled blob, position-
 # independent x86_64 stub copied at runtime into the per-VM
 # trampoline page. Pattern: arch/x86/kernel/ftrace_64.S +
@@ -52,3 +61,9 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_byteshape.o
 # (CPUID + CR4.OSXSAVE + XCR0) on vcpus[0] so the snapshot ioctls
 # accept at KUnit run-time, before any user task has dispatched.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_snapshot.o
+
+# Record/replay KUnit suite (memo 27 §Phase 1). Pure C state-machine
+# tests against the alloc/start/stop/replay/destroy surface; no live
+# vCPU dependency at Phase 1. Phase 2-3 will extend with observe/
+# consume + round-trip cases once the syscall_trap.c hook lands.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_record.o

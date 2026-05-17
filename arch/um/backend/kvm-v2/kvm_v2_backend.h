@@ -12,8 +12,10 @@
 
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
+#include <linux/jump_label.h>
 #include <linux/kvm.h>
 #include <linux/list.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
@@ -905,6 +907,228 @@ int kvm_v2_snapshot_capture_full(struct kvm_v2_snapshot *snap,
 				 struct kvm_v2_vcpu *vcpu);
 int kvm_v2_snapshot_restore_full_vcpu(const struct kvm_v2_snapshot *snap,
 				      struct kvm_v2_vcpu *vcpu);
+
+/*
+ * Record/replay v2 port (memo 27, #169). Phase 1: state machine +
+ * static-key gate only; observation/consume hooks land in Phase 2-3.
+ *
+ * The container shape is intentionally narrower than v1's growable-log
+ * design (kvm-v1-archive/record.c:166-196). Phase 1 keeps a fixed-size
+ * scratch buffer + a monotonic sequence counter + statistics counters;
+ * the variable-length log + side-buffer machinery is deferred to
+ * Phase 2.5 once the per-NR routing surface is in place. The state
+ * machine + static-key gate land now so the Phase 2 hook in
+ * syscall_trap.c can be added as a pure addition without touching the
+ * data structures.
+ *
+ * Design memo:
+ *   Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+ *   27-record-replay-v2-port.md §Phase 1.
+ */
+
+/**
+ * enum kvm_v2_record_state - state machine for the record container.
+ *
+ * @KVM_V2_RECORD_INIT:	     freshly allocated; observe/consume are
+ *			     no-ops; the static-key gate is off (unless
+ *			     another container holds it).
+ * @KVM_V2_RECORD_RECORDING: armed via kvm_v2_record_start(); observe
+ *			     hooks append to the buffer. Static-key gate
+ *			     is enabled for the duration.
+ * @KVM_V2_RECORD_STOPPED:   captured a record session; observation
+ *			     hooks are no-ops again. Container retains
+ *			     its buffer + counters for diagnostics.
+ *			     kvm_v2_record_replay() advances to REPLAYING.
+ * @KVM_V2_RECORD_REPLAYING: replay arm; consume hooks (Phase 3) walk
+ *			     the captured entries in FIFO order. Static-
+ *			     key gate is re-enabled so the consume hook
+ *			     in handle_io_trap fires.
+ *
+ * State graph (Phase 1):
+ *     INIT ─start→ RECORDING ─stop→ STOPPED ─replay→ REPLAYING
+ *                                        ↑               │
+ *                                        └────stop───────┘
+ * Invalid transitions return -EINVAL. start-after-start, replay-
+ * without-stop, stop-without-start are all rejected.
+ */
+enum kvm_v2_record_state {
+	KVM_V2_RECORD_INIT = 0,
+	KVM_V2_RECORD_RECORDING,
+	KVM_V2_RECORD_STOPPED,
+	KVM_V2_RECORD_REPLAYING,
+};
+
+/**
+ * enum kvm_v2_replay_kind - source-of-nondeterminism tag.
+ *
+ * Phase 1 declares the full enum so the Phase 2-6 observation hooks
+ * can land as pure additions. Phase 1's observe/consume are no-op
+ * stubs; the enum values are otherwise unused at this phase.
+ *
+ * Numerically aligned with v1's enum kvm_replay_kind
+ * (kvm-v1-archive/record.c:85-91) but with a leading sentinel so a
+ * future on-disk replay format can use 0 as "invalid".
+ */
+enum kvm_v2_replay_kind {
+	KVM_V2_REPLAY_NONE = 0,
+	KVM_V2_REPLAY_SYSCALL,	/* class-A passthrough syscall return */
+	KVM_V2_REPLAY_SIGALRM,	/* SIGALRM injection point (Phase 6) */
+	KVM_V2_REPLAY_RDTSC,	/* RDTSC / RDTSCP exit (Phase 5) */
+	KVM_V2_REPLAY_VVAR_READ,/* vvar refresh capture (Phase 5) */
+	KVM_V2_REPLAY_INTERRUPT,/* preemption injection point */
+	KVM_V2_REPLAY_MMIO_READ,/* device read (future) */
+};
+
+/**
+ * enum kvm_v2_replay_meta_kind - per-entry metadata-payload tag.
+ *
+ * Phase 1 declares the enum so the Phase 2.5 side-buffer routing can
+ * land additively. Today only NONE is used; recvfrom/readv tags come
+ * with Phase 2.5.
+ *
+ * Mirror of v1's enum kvm_replay_meta_kind (kvm-v1-archive/
+ * kvm_backend.h surface).
+ */
+enum kvm_v2_replay_meta_kind {
+	KVM_V2_REPLAY_META_NONE = 0,
+	KVM_V2_REPLAY_META_SOCKADDR,
+	KVM_V2_REPLAY_META_IOV,
+};
+
+/**
+ * struct kvm_v2_replay_entry - one captured side-effect.
+ *
+ * Phase 1 declares the on-buffer wire shape so Phase 2 can append
+ * without touching the data structures. Entries are TLV-style: a
+ * fixed 16-byte header followed by @size bytes of kind-specific
+ * payload. The buffer in struct kvm_v2_record is a packed stream of
+ * these entries; Phase 3's consume walks the stream forward from
+ * cursor 0.
+ *
+ * @kind:     enum kvm_v2_replay_kind discriminator.
+ * @size:     payload size in bytes following the header. Zero for
+ *	      pure inline entries (Phase 2 inline-only path).
+ * @sequence: monotonic counter assigned at append time. Phase 6's
+ *	      SIGALRM-determinism plumbing uses this as the "syscall
+ *	      count at signal" anchor.
+ *
+ * Wire shape is intentionally minimal — Phase 2 may grow it (e.g.
+ * inline u64 payload[4] for inline-only entries) without breaking
+ * Phase 1 callers because the only Phase 1 caller is the KUnit
+ * suite which never reads entries.
+ */
+struct kvm_v2_replay_entry {
+	u32	kind;
+	u32	size;
+	u64	sequence;
+	/* payload follows; varies by @kind. */
+};
+
+/**
+ * struct kvm_v2_record - record/replay container (Phase 1 shape).
+ *
+ * @state:	  state machine cursor (enum kvm_v2_record_state).
+ * @strict_replay: true to fail-stop on replay divergence / end-of-log
+ *		  (v1's default and the Phase 3 default). False to fall
+ *		  through to live handle_syscall (loose mode).
+ * @buffer:	  kvmalloc'd entry stream (Phase 2 appends here).
+ *		  NULL only on allocation failure inside _alloc; once a
+ *		  container is returned to the caller the buffer is
+ *		  guaranteed non-NULL until _destroy/_free.
+ * @buffer_size:  total bytes allocated for @buffer.
+ * @buffer_used:  bytes consumed by appended entries; Phase 2 grows
+ *		  this. Phase 1 keeps it at zero.
+ * @sequence:	  monotonic counter handed out to each appended entry.
+ *		  Phase 6's SIGALRM-on-syscall-count plumbing uses this.
+ * @entries_recorded: count of entries appended (= the number of
+ *		      observe-hook calls that produced an entry). Stat
+ *		      counter for diagnostic visibility.
+ * @entries_replayed: count of entries consumed on replay. Mirror.
+ * @lock:	  serialises state-machine transitions + future buffer
+ *		  appends. Phase 1's KUnit exercises the state machine
+ *		  under a single thread; the lock is uncontended at
+ *		  Phase 1 but in place for Phase 2's hook to slot into
+ *		  without revisiting the data structure.
+ *
+ * Lifecycle:
+ *   1. kvm_v2_record_alloc(buffer_size)  → state=INIT
+ *   2. kvm_v2_record_start(rec)          → state=RECORDING; static
+ *					     key armed.
+ *   3. kvm_v2_record_stop(rec)           → state=STOPPED; static key
+ *					     disarmed.
+ *   4. kvm_v2_record_replay(rec)         → state=REPLAYING; static
+ *					     key re-armed.
+ *   5. kvm_v2_record_destroy(rec)        → free + drop static key if
+ *					     still held.
+ *
+ * Concurrency: in Phase 1, only one container is "active" at a time
+ * (single-active discipline mirrors v1, kvm-v1-archive/record.c:77).
+ * The static-key gate is global; the active-container pointer lives
+ * inside record.c. The mutex serialises field updates.
+ */
+struct kvm_v2_record {
+	enum kvm_v2_record_state	state;
+	bool				strict_replay;
+	void				*buffer;
+	size_t				buffer_size;
+	size_t				buffer_used;
+	u64				sequence;
+	u64				entries_recorded;
+	u64				entries_replayed;
+	struct mutex			lock;
+};
+
+/*
+ * Hot-path gate. Off by default; flipped on by kvm_v2_record_start.
+ *
+ * The Phase 2 observe hook in syscall_trap.c wraps its call in
+ *
+ *   if (static_branch_unlikely(&um_kvm_v2_record_enabled))
+ *	kvm_v2_record_observe_syscall(...);
+ *
+ * so non-record runtime pays zero per-syscall cost — the branch
+ * compiles to a 5-byte NOP that the kernel patches out at boot, and
+ * `static_branch_enable()` flips it to a `jmp` when record arms.
+ *
+ * Mirrors v1's DEFINE_STATIC_KEY_FALSE(um_kvm_record_enabled)
+ * (kvm-v1-archive/record.c:73).
+ */
+DECLARE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled);
+
+/*
+ * Public surface — Phase 1: alloc/destroy/start/stop/replay + the
+ * strict-replay toggle. Phase 2 adds the observe/consume entry
+ * points; Phase 3+ adds the per-NR routing helpers.
+ */
+struct kvm_v2_record *kvm_v2_record_alloc(size_t buffer_size);
+void kvm_v2_record_destroy(struct kvm_v2_record *rec);
+void kvm_v2_record_free(struct kvm_v2_record *rec);
+int  kvm_v2_record_start(struct kvm_v2_record *rec);
+int  kvm_v2_record_stop(struct kvm_v2_record *rec);
+int  kvm_v2_record_replay(struct kvm_v2_record *rec);
+int  kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);
+bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec);
+
+/*
+ * Phase 2 stub — observe hook called from syscall_trap.c. Phase 1
+ * provides a no-op definition so the static-key gate can be
+ * exercised end-to-end without the syscall_trap.c integration. The
+ * Phase 2 commit re-implements this function to actually append to
+ * the buffer; Phase 1 callers (none in tree today) just see a NOP.
+ */
+void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
+				   unsigned long syscall_nr,
+				   long ret_value,
+				   const struct uml_pt_regs *regs);
+
+/*
+ * Phase 3 stub — replay-side consume hook. Returns 0 in Phase 1
+ * ("no entry served"). Phase 3 fills in the FIFO walk + -EILSEQ /
+ * -ENODATA semantics.
+ */
+int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
+				  unsigned long syscall_nr,
+				  long *ret_value);
 
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
 /*
