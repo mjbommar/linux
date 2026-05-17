@@ -145,6 +145,16 @@ void um_vec2_queue_pair_free(struct um_vec2_channel *channel,
 
 int um_vec2_fd_open(struct um_vec2_dev *vdev);
 void um_vec2_fd_close(struct um_vec2_dev *vdev);
+
+#if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2_HOST_FD_KUNIT)
+/*
+ * KUnit-only fault injector: when set to a non-negative value, the next
+ * call to um_vec2_fd_channel_open() whose channel index matches will
+ * return -EIO before allocating any host resources.  Used to exercise
+ * the partial-open unwind path that B1 fixed.  Set to -1 to disarm.
+ */
+extern int um_vec2_fd_fault_index;
+#endif
 int um_vec2_tap_open(struct um_vec2_dev *vdev);
 int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd);
 void um_vec2_tap_close(struct um_vec2_dev *vdev);

@@ -188,6 +188,53 @@ static void vector2_fd_multiqueue_missing_second_fd_unwinds_test(struct kunit *t
 	free_netdev(dev);
 }
 
+/*
+ * B1 regression: partial-open unwind must leave vdev->channels = NULL.
+ *
+ * Validation passes for both fds in the multi-queue range, then the
+ * fault injector trips um_vec2_fd_channel_open() at index 1.  The
+ * unwind path closes channel 0 + frees the channels array.  Before
+ * the fix, vdev->channels still pointed at the freed array because
+ * um_vec2_fd_channel_open() published it per-iteration.  Calling
+ * um_vec2_fd_close() after that would walk freed memory.  After the
+ * fix the publish happens only on success in um_vec2_fd_open(), and
+ * the unwind explicitly resets vdev->channels = NULL.
+ */
+static void vector2_fd_multiqueue_partial_open_unwind_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 16);
+	struct net_device *dev;
+	int fds[2] = { -1, -1 };
+
+	vdev->cfg.queues = 2;
+	dev = vector2_fd_test_alloc_netdev(test, vdev);
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, fds[1], fds[0] + 1);
+	vdev->cfg.fd = fds[0];
+	vdev->cfg.has_fd = true;
+
+	um_vec2_fd_fault_index = 1;
+	KUNIT_EXPECT_EQ(test, um_vec2_fd_open(vdev), -EIO);
+	um_vec2_fd_fault_index = -1;
+
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+
+	/*
+	 * Belt-and-suspenders: a follow-up um_vec2_fd_close() on a freshly
+	 * unwound vdev must be a no-op rather than walking freed memory.
+	 * Pre-fix this would UAF.
+	 */
+	um_vec2_fd_close(vdev);
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+
+	vector2_fd_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 static void vector2_fd_netdev_open_stop_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 2);
@@ -526,6 +573,7 @@ static struct kunit_case vector2_fd_test_cases[] = {
 	KUNIT_CASE(vector2_fd_wrong_type_fails_closed_test),
 	KUNIT_CASE(vector2_fd_multiqueue_open_close_test),
 	KUNIT_CASE(vector2_fd_multiqueue_missing_second_fd_unwinds_test),
+	KUNIT_CASE(vector2_fd_multiqueue_partial_open_unwind_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_repeats_test),
 	KUNIT_CASE(vector2_fd_netdev_bad_fd_unwinds_closed_test),

@@ -19,6 +19,11 @@
 
 #include "vector2_internal.h"
 
+#if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2_HOST_FD_KUNIT)
+int um_vec2_fd_fault_index = -1;
+EXPORT_SYMBOL_GPL(um_vec2_fd_fault_index);
+#endif
+
 struct um_vec2_fd_host {
 	struct um_vec2_host host;
 	struct net_device *dev;
@@ -200,6 +205,12 @@ static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
 	int fd;
 	int ret;
 
+#if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2_HOST_FD_KUNIT)
+	if (um_vec2_fd_fault_index >= 0 &&
+	    (unsigned int)um_vec2_fd_fault_index == index)
+		return -EIO;
+#endif
+
 	fdhost = kzalloc_obj(*fdhost);
 	if (!fdhost)
 		return -ENOMEM;
@@ -246,8 +257,6 @@ static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
 	if (ret)
 		goto out_close_fd;
 
-	vdev->channels = channel;
-	vdev->num_channels = 1;
 	return 0;
 
 out_close_fd:
@@ -341,6 +350,13 @@ out_close_channels:
 	while (i--)
 		um_vec2_fd_channel_close(&channels[i], vdev->netdev);
 	kfree(channels);
+	/*
+	 * Defensive: ensure vdev->channels stays NULL after a partial-open
+	 * unwind so a subsequent um_vec2_fd_close() cannot walk freed
+	 * channel memory.  See the regression that B1 fixed.
+	 */
+	vdev->channels = NULL;
+	vdev->num_channels = 0;
 	return ret;
 }
 
