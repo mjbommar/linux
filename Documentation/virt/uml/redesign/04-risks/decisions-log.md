@@ -11804,4 +11804,149 @@ change to record.c's public API.
 
 ---
 
+## D132 (2026-05-16) — record/replay v2 port Phase 2: observe hook + XSAVE-on-every-vmexit
+
+**Track:** B (Time-machine).
+
+**Decision.** #169 (record/replay) Phase 2 fills in the Phase 1
+stub bodies and wires the `observe_syscall` hook in
+`syscall_trap.c::kvm_v2_handle_io_trap`. Phase 1 (D131) landed
+the state-machine skeleton + the `DEFINE_STATIC_KEY_FALSE
+(um_kvm_v2_record_enabled)` gate so this commit is a pure
+addition — no surface broke, no existing call site moved.
+
+**Three surface decisions Phase 2 took.**
+
+  1. **Accessor (`kvm_v2_record_active()`) vs. exporting the
+     `um_kvm_v2_active_record` global.** D131 deferred this to
+     Phase 2's implementation. The accessor wins:
+     - It encapsulates the spinlock acquisition — callers don't
+       need to know about `um_kvm_v2_record_lock`'s existence.
+     - It returns NULL safely when `_stop` clears the slot
+       between the static_branch read and the accessor call,
+       so the hook site doesn't need its own NULL handling
+       beyond the simple `if (rec)` test.
+     - It keeps `record.c`'s globals file-scope so the only
+       export surface is the function name. Phase 7's debugfs
+       plumb consumes the same accessor.
+
+  2. **`struct kvm_v2_replay_entry` inline payload shape.**
+     Phase 1's header was bare 16 bytes; Phase 2 grows it to
+     80 bytes total by inlining the SYSCALL payload
+     (`{nr, _pad, retval, args[6]}`). Alternative: keep the
+     header bare and follow each header with a kind-specific
+     payload struct. The inline shape was picked for:
+     - **Simpler walker.** The Phase 3 consume hook reads
+       `entry->size` from the header and advances by that
+       amount; no second pointer chase per entry.
+     - **Mixed-kind logs.** Phase 5-6 introduce RDTSC/SIGALRM
+       kinds with different payload shapes. The `@size` field
+       discipline (`size == sizeof(header) + sizeof(payload)`)
+       composes naturally with a union: the SYSCALL payload
+       member lands inline; future kinds add sibling members
+       under a union once their payloads land. The Phase 1
+       comment "Phase 2 may grow it" was the explicit
+       authorization to do this.
+     - **Cost.** 80 bytes/entry vs. v1's variable-stride log
+       array. A 64 KiB default buffer holds ~819 entries; a
+       64 MiB max holds ~838 K. Comparable to v1's 256-entry
+       initial × ~256-byte stride for the same buffer
+       footprint, with the bound enforced at compile time
+       per kind.
+
+  3. **Buffer-full policy.** Phase 2 drops quietly when the
+     buffer can't fit the next entry. Alternative considered:
+     return `-ENOSPC` and let the hook site call `_stop` on
+     the container. Quiet drop wins for Phase 2 because:
+     - The hook site (`kvm_v2_handle_io_trap`) has no error-
+       handling contract — there's nowhere to surface
+       `-ENOSPC` to. Crashing the kernel on log overflow is
+       wrong; pr_emerg-ing every overflow would flood the log
+       harder than the original cause.
+     - Phase 7's overflow handler (memo 27 §Phase 7) is the
+       right place for the explicit `_stop`-on-cap policy.
+       Phase 2's quiet drop is benign in the interim: replay
+       in strict mode will SIGSEGV at the divergence point
+       (the entry that fell off the cap), surfacing the
+       overflow as the same fail-stop signal the operator
+       wants.
+
+**SMP-T55 lazy-FPU interaction (memo 27 §3.8(i)).** Phase 2's
+hot-path change to `vcpu.c` adds one new arm to the SMP-T55 skip
+condition: when `um_kvm_v2_record_enabled` is on, the
+`KVM_GET_FPU` always runs (regardless of `fpu_dirty` /
+`fpu_owner_task`). Rationale per memo 27 §3.8(i): replay needs
+bit-identical post-vmexit XSAVE; the SMP-T55 dirty-epoch
+optimization preserves the vCPU's FPU across dispatches in a way
+that doesn't compose with replay's restore-then-execute contract
+(SMP-T55's design assumed no replay). Zero-cost when off (the
+new arm is the same `static_branch_unlikely` predicate the
+observe-hook site uses); ~1µs per dispatch when on.
+
+Three options had been documented (i) force-GET-every-vmexit;
+(ii) record only deltas at observation points (requires touched-
+FPU detection — XSAVE-INUSE bitmap walk); (iii) only record
+dispatches that change the dirty epoch (cleanest if SMP-T55
+exposes the epoch-advance event). Memo 27 picked (i) for Phase
+2 as the simplest path; (ii)/(iii) are optimizations to revisit
+if record-mode workloads need them. D132 confirms (i) is in
+tree.
+
+**KUnit verification.** Boot under `backend=force=kvm-v2 mem=512M
+ncpus=1 init=/bin/echo`. All 4 suites pass:
+
+  - `kvm_v2_marshal`: 8/8 (unchanged).
+  - `kvm_v2_byteshape`: 9/9 (unchanged).
+  - `kvm_v2_snapshot`: 2/2 (unchanged).
+  - `kvm_v2_record`: 3/3 (was 2/2 at Phase 1; new case
+    `test_kvm_v2_record_observe` exercises the append path
+    directly with synthetic `uml_pt_regs` args).
+
+Beyond KUnit: `/bin/echo` boots to exit-0 with the same boot
+arguments. The new hot-path block in `kvm_v2_handle_io_trap`
+compiles to a 5-byte NOP when record is off (jump_label_init at
+boot patches the `static_branch_unlikely` to its no-record
+direction); the SMP-T55 skip site's new arm is similarly patched
+out. Phase 2 is zero-cost when off.
+
+**LoC delta.** ~450 lines added across:
+
+  - `arch/um/backend/kvm-v2/record.c` +~150 (accessor + body).
+  - `arch/um/backend/kvm-v2/syscall_trap.c` +~50 (hook block).
+  - `arch/um/backend/kvm-v2/vcpu.c` +~5 + comment (SMP-T55
+    record-armed arm).
+  - `arch/um/backend/kvm-v2/kvm_v2_backend.h` +~30 (struct
+    extension + prototype).
+  - `arch/um/backend/kvm-v2/test_record.c` +~170 (new case +
+    new includes).
+
+5 existing files modified (record.c, syscall_trap.c, vcpu.c,
+kvm_v2_backend.h, test_record.c); 0 files added; 0 files removed.
+
+**checkpatch.** 0 errors, 0 warnings on the diff. Clean.
+
+**Recommended Phase 3 entry point.** Phase 3's consume hook
+slots into the SAME `kvm_v2_handle_io_trap` function as Phase
+2's observe hook, but BEFORE `handle_syscall(regs)` (the
+existing line ~2195). The shape is symmetric to Phase 2's
+observe site: gated by `static_branch_unlikely(&um_kvm_v2_
+record_enabled)`, consults `kvm_v2_record_active()`, calls
+`kvm_v2_record_consume_syscall(rec, syscall_nr, &served_ret)`
+when state == REPLAYING. On `rc > 0` (entry served), `goto`
+past `handle_syscall` to the post-call marshal-out; on `rc < 0`
+(divergence), strict mode delivers `force_sig(SIGSEGV)`. The
+diary (`11-record-port-phase2.md` §Recommended Phase 3 entry
+point) carries the full sketch.
+
+**Refs.**
+  - `02-workstreams/D-kvm-backend/27-record-replay-v2-port.md`
+    §Phase 2 + §3.1 + §3.8(i).
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/11-record-port-phase2.md`
+    (the diary for this landing).
+  - D131 (record/replay Phase 1; predecessor).
+  - D130 (memo 27 design contract).
+  - Commit `358c4d3c83ab` (Phase 1 landing).
+
+---
+
 ## (Future entries here, as decisions are made)

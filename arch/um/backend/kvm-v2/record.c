@@ -8,23 +8,32 @@
  * ports the public surface onto v2's vCPU-pool + LSTAR-gadget +
  * signal-queue topology, starting from the smallest landable slice.
  *
- * Phase 1 (this revision):
+ * Phase 1 landed:
  *   - struct kvm_v2_record + alloc/destroy/free.
  *   - State machine: INIT → RECORDING → STOPPED → REPLAYING.
  *   - DEFINE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled) hot-path gate
  *     + single-active-record discipline.
- *   - observe_syscall / consume_syscall are no-op stubs marked with
- *     a `Phase N` comment so the Phase 2-3 hooks can land additively.
+ *   - observe_syscall / consume_syscall were no-op stubs marked with
+ *     a `Phase N` comment so the Phase 2-3 hooks could land additively.
  *   - strict_replay toggle (defaults to true, mirrors v1).
  *
- * Out of Phase 1 (per memo 27 §Phase 1 + §4):
- *   - Live syscall_trap.c observe hook (Phase 2).
+ * Phase 2 (this revision):
+ *   - kvm_v2_record_active() accessor for the single-active-record
+ *     slot — the syscall_trap.c hook consults this under the
+ *     static-key gate instead of poking record.c's globals directly.
+ *   - kvm_v2_record_observe_syscall() body fills in: append a
+ *     KVM_V2_REPLAY_SYSCALL entry (header + nr/retval/args[6]) to
+ *     rec->buffer when rec->state == KVM_V2_RECORD_RECORDING. The
+ *     buffer-full case is a quiet drop in Phase 2 (Phase 7's
+ *     overflow handler will _stop the container).
+ *
+ * Out of Phase 2 (per memo 27 §Phase 2 + §4):
  *   - RDTSC / vvar / SIGALRM capture (Phases 5-6).
  *   - Gadget disable on record-enable (Phase 4).
  *   - Replay primitive — consume from buffer (Phase 3).
  *   - Per-NR side-buffer routing (Phase 2.5).
  *   - Snapshot integration (the container holds a kvm_v2_snapshot in
- *     Phase 3+ but Phase 1 runs in "log-only" mode per memo 27 §3.9).
+ *     Phase 3+ but Phase 1-2 run in "log-only" mode per memo 27 §3.9).
  *
  * The static-key gate is in place from day 1 so Phase 2's hook in
  * syscall_trap.c lands as a pure addition. The state-machine
@@ -173,6 +182,45 @@ static bool kvm_v2_record_disarm_gate(struct kvm_v2_record *rec)
 		static_branch_disable(&um_kvm_v2_record_enabled);
 	return was_active;
 }
+
+/**
+ * kvm_v2_record_active - return the currently registered container.
+ *
+ * Reads the single-active-record slot under the record_lock spinlock
+ * and returns its current value (may be NULL).
+ *
+ * The Phase 2 syscall_trap.c hook calls this from inside the
+ * static_branch_unlikely(&um_kvm_v2_record_enabled) gate. The gate
+ * is flipped on by _start/_replay AFTER the slot has been populated,
+ * and off by _stop/_destroy AFTER the slot has been cleared, so:
+ *
+ *   - When the gate is on and the slot was populated atomically with
+ *     _start, this returns the registered container.
+ *   - When the gate is being flipped off by _stop on another CPU, a
+ *     racing reader may observe NULL — the caller treats that as a
+ *     no-op (the same outcome it would have got if the gate had
+ *     already patched out).
+ *
+ * The spinlock cost is one atomic on the hot path when record is
+ * armed; record-armed runtime is the slow path anyway (Phase 7's
+ * benchmark documents this).
+ *
+ * Phase 1 kept this slot's storage file-scope; Phase 2 promotes the
+ * read to a callable accessor so syscall_trap.c doesn't need direct
+ * visibility into record.c's globals (D131 deferred this; Phase 2
+ * picks the accessor path per the rationale in D132).
+ */
+struct kvm_v2_record *kvm_v2_record_active(void)
+{
+	struct kvm_v2_record *rec;
+	unsigned long flags;
+
+	spin_lock_irqsave(&um_kvm_v2_record_lock, flags);
+	rec = um_kvm_v2_active_record;
+	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
+	return rec;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_active);
 
 /**
  * kvm_v2_record_destroy - release a record container.
@@ -490,35 +538,120 @@ bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec)
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_strict_replay);
 
-/*
- * Phase 2 stub — observation hook.
+/**
+ * kvm_v2_record_observe_syscall - append a class-A syscall entry.
+ * @rec:        active container; caller has already verified it via
+ *              kvm_v2_record_active(). NULL is tolerated (no-op).
+ * @syscall_nr: NR (regs->gp[HOST_ORIG_AX] or the cached syscall_nr
+ *              the dispatcher captured before clearing PT_SYSCALL_NR).
+ * @ret_value:  return value the syscall produced (regs->gp[HOST_AX]
+ *              after handle_syscall returns).
+ * @regs:       full register frame at observe time. NULL means the
+ *              caller didn't have one (unusual on the Phase 2 hook
+ *              path; defensive — the args are zeroed in that case).
  *
- * The Phase 2 syscall_trap.c integration calls this from the
- * post-handle_syscall arm of kvm_v2_handle_io_trap, gated by
- * static_branch_unlikely(&um_kvm_v2_record_enabled). The hook reads
- * @rec's state under @rec->lock and either appends an entry to the
- * buffer (when RECORDING) or no-ops (any other state — the active-
- * record slot may have advanced past RECORDING while a vmexit was
- * in flight).
+ * Appends a KVM_V2_REPLAY_SYSCALL entry to @rec->buffer when @rec is
+ * in the RECORDING state. The entry layout matches the struct shape
+ * declared in kvm_v2_backend.h:
  *
- * Phase 1 ships the function so the static-key gate can be flipped
- * end-to-end (the gate's hot path is in syscall_trap.c, but the
- * symbol resolution + the linkage have to be live by Phase 1).
+ *   header: kind, size, sequence (16 bytes)
+ *   inline: nr, _pad, retval, args[6] (64 bytes)
+ *
+ * 80 bytes per entry total. A 64 KiB default buffer (the _alloc
+ * default) holds ~819 entries; a 64 MiB max buffer holds ~838 K
+ * entries. v1's 256-entry initial array (`kvm-v1-archive/record.c:
+ * 444`) was the precedent; the Phase 2 fixed-buffer shape per D131
+ * trades v1's doubling-on-demand for the simpler bounded surface.
+ *
+ * Buffer-full path: Phase 2 quietly drops the entry (returns without
+ * appending). This is deliberately not -ENOSPC at the caller — the
+ * syscall_trap.c hook has no error-handling contract; what we'd
+ * surface there is at most a printk. The Phase 7 overflow handler
+ * (memo 27 §Phase 7) will _stop the container the first time we hit
+ * the cap, surfacing the overflow via the debugfs state file. Until
+ * then the drop is benign: replay will see end-of-log earlier than
+ * expected and (in strict mode) SIGSEGV the divergent task — the
+ * same fail-stop signal the operator wants.
+ *
+ * Args slot mapping: regs->gp[HOST_DI]/SI/DX/R10/R8/R9 = arg1..6.
+ * Mirrors the v1 dispatcher's per-NR routing
+ * (`kvm-v1-archive/record.c:758-1080`), which extracts the same
+ * slots; Phase 2.5 introduces the side-buffer routing for the
+ * read/getrandom/recvfrom NRs.
+ *
+ * Locking: takes @rec->lock to serialise against a racing _stop /
+ * _replay that mutates @rec->state + @rec->buffer_used. The lock is
+ * uncontended in the Phase 1-2 single-vCPU KUnit path; multi-vCPU
+ * record (Phase 7+) makes the contention measurable, at which point
+ * a per-CPU staging buffer + lockless append per memo 13 step 4 is
+ * the optimization target.
+ *
+ * Mirror of v1's kvm_record_observe_syscall (`kvm-v1-archive/
+ * record.c:606-618`) adapted to v2's per-record buffer (vs v1's
+ * global active-record + log array indexed by log_count). The v1
+ * append helper handles arg0/arg1 inline; the v2 port stores all 6
+ * args because Phase 3's consume hook needs the full set to restore
+ * pre-syscall register state when an entry's NR is replayed.
  */
 void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 				   unsigned long syscall_nr,
 				   long ret_value,
 				   const struct uml_pt_regs *regs)
 {
-	/* Phase 2 — fill in: append a KVM_V2_REPLAY_SYSCALL entry to
-	 * @rec->buffer when rec->state == KVM_V2_RECORD_RECORDING.
-	 * For now suppress unused-arg warnings without emitting any
-	 * code (the gate above means this is unreachable until Phase 2).
-	 */
-	(void)rec;
-	(void)syscall_nr;
-	(void)ret_value;
-	(void)regs;
+	struct kvm_v2_replay_entry *e;
+	const size_t need = sizeof(*e);
+
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_RECORDING) {
+		/*
+		 * The active-record slot may have advanced past RECORDING
+		 * while a vmexit was in flight (record_stop on another
+		 * thread or the controlling task itself). Quiet no-op —
+		 * the entry would have been a phantom anyway.
+		 */
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	if (rec->buffer_used + need > rec->buffer_size) {
+		/*
+		 * Buffer full. Phase 2's policy is "drop quietly + keep
+		 * recording" so the container still tracks the entries
+		 * that DID fit; the Phase 7 overflow handler will _stop
+		 * the first time we hit the cap. Bump a counter so the
+		 * KUnit / debugfs can detect the drop later — but in
+		 * Phase 2 we just bail.
+		 */
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + rec->buffer_used);
+	e->kind		= KVM_V2_REPLAY_SYSCALL;
+	e->size		= (u32)need;
+	e->sequence	= ++rec->sequence;
+	e->syscall.nr	= (s32)syscall_nr;
+	e->syscall._pad	= 0;
+	e->syscall.retval = (u64)ret_value;
+	if (regs) {
+		e->syscall.args[0] = regs->gp[HOST_DI];
+		e->syscall.args[1] = regs->gp[HOST_SI];
+		e->syscall.args[2] = regs->gp[HOST_DX];
+		e->syscall.args[3] = regs->gp[HOST_R10];
+		e->syscall.args[4] = regs->gp[HOST_R8];
+		e->syscall.args[5] = regs->gp[HOST_R9];
+	} else {
+		memset(e->syscall.args, 0, sizeof(e->syscall.args));
+	}
+
+	rec->buffer_used += need;
+	rec->entries_recorded++;
+
+	mutex_unlock(&rec->lock);
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_observe_syscall);
 

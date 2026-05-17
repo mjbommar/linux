@@ -97,6 +97,7 @@
 #include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/jump_label.h>	/* static_branch_unlikely — record/replay gate */
 #include <linux/kvm.h>		/* struct kvm_run, KVM_EXIT_IO */
 #include <linux/mm.h>
 #include <linux/mm_types.h>	/* init_mm */
@@ -2257,6 +2258,56 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 		if (unlikely((_ret <= -512 && _ret >= -516) ||
 			     (read_thread_flags() & _TIF_WORK_MASK)))
 			interrupt_end();
+	}
+
+	/*
+	 * Record/replay v2 — observation hook (memo 27 §Phase 2, §3.1).
+	 *
+	 * Slot: between interrupt_end() (above) and the PT_SYSCALL_NR
+	 * clear (below). Order matters:
+	 *
+	 *   - AFTER handle_syscall: regs->gp[HOST_AX] holds the return
+	 *     value the syscall produced; this is what replay has to
+	 *     reproduce.
+	 *   - AFTER interrupt_end: do_signal may rewrite regs->gp[HOST_IP]
+	 *     when a signal is delivered. The observe entry doesn't
+	 *     capture HOST_IP, so the relative ordering is moot, BUT
+	 *     placing the hook AFTER interrupt_end means signal-delivery
+	 *     side effects (e.g. -ERESTARTSYS → -EINTR translation) are
+	 *     already settled in HOST_AX before we capture retval.
+	 *   - BEFORE the PT_SYSCALL_NR clear: not strictly required (we
+	 *     pass the cached @syscall_nr from line 2153 directly), but
+	 *     keeps the hook's view of regs in a "syscall NR slot still
+	 *     populated" state — minimizes surprise for the inevitable
+	 *     Phase 5/6 hooks that may want to read PT_SYSCALL_NR.
+	 *   - BEFORE the marshal-out: regs->gp[HOST_DI/SI/DX/R10/R8/R9]
+	 *     still hold the original syscall arg values that
+	 *     C.3's marshal-from-kvm-regs populated at entry —
+	 *     handle_syscall is supposed to read but not mutate these.
+	 *     If a future regression made handle_syscall clobber args,
+	 *     the observe entry would capture the post-clobber value;
+	 *     Phase 2 accepts that risk (no in-tree path clobbers args
+	 *     today) since fixing it would require stashing args on
+	 *     the stack at entry — Phase 2 cost-benefit doesn't justify
+	 *     the extra copy.
+	 *
+	 * Zero hot-path cost when off: the static-key gate compiles to
+	 * a 5-byte NOP that the kernel patches out at boot;
+	 * static_branch_enable() flips it to a `jmp` only when
+	 * kvm_v2_record_start arms a container. Non-record runtime
+	 * (every shipped UML profile) pays one skipped jne per vmexit.
+	 *
+	 * v1 reference: kvm-v1-archive/syscall_class.c (the per-NR
+	 * dispatcher had the same gate at the tail of each arm). v2
+	 * lifts the gate up to the unified dispatcher per memo 27 §3.1.
+	 */
+	if (static_branch_unlikely(&um_kvm_v2_record_enabled)) {
+		struct kvm_v2_record *rec = kvm_v2_record_active();
+
+		if (rec)
+			kvm_v2_record_observe_syscall(rec, syscall_nr,
+						      (long)regs->gp[HOST_AX],
+						      regs);
 	}
 
 	/*

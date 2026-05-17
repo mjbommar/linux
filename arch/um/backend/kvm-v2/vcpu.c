@@ -35,6 +35,7 @@
 
 #include <linux/cpumask.h>
 #include <linux/errno.h>
+#include <linux/jump_label.h>	/* static_branch_unlikely — record/replay gate */
 #include <linux/kernel.h>
 #include <linux/kvm.h>
 #include <linux/preempt.h>
@@ -2353,13 +2354,28 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		 * Mark dirty before deciding: if KVM_RUN exited with
 		 * CR0.TS=0 the guest issued an FP/SSE/AVX instruction;
 		 * the GET must run to capture the resulting state.
+		 *
+		 * Phase 2 record/replay extension (memo 27 §3.8(i)): when
+		 * `um_kvm_v2_record_enabled` is on, force the GET on every
+		 * vmexit regardless of the dirty epoch. Rationale: replay
+		 * needs the post-vmexit XSAVE to be bit-identical to record;
+		 * the SMP-T55 skip optimization preserves the vCPU's FPU
+		 * across dispatches in a way the replay machine doesn't
+		 * model (the per-task iotrap_fpu lifecycle interacts with
+		 * the snapshot/replay state machine in ways SMP-T55 didn't
+		 * contemplate — see memo 27 §3.8). The static_branch gate
+		 * makes this zero-cost when record is off (the common case);
+		 * when on, every vmexit pays the ~1µs KVM_GET_FPU. Phase 2-3
+		 * round-trip acceptance requires this; Phases 2.5/5/6 may
+		 * revisit if the cost becomes prohibitive at scale.
 		 */
 		bool fpu_was_used = !(run->s.regs.sregs.cr0 & X86_CR0_TS);
 
 		if (fpu_was_used)
 			vcpu->fpu_dirty = true;
 
-		if (vcpu->fpu_dirty || vcpu->fpu_owner_task != current) {
+		if (vcpu->fpu_dirty || vcpu->fpu_owner_task != current ||
+		    static_branch_unlikely(&um_kvm_v2_record_enabled)) {
 			struct kvm_fpu *iotrap = &current->thread.arch.kvm_v2.iotrap_fpu;
 			int fpu_rc;
 

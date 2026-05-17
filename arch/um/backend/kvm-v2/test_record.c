@@ -34,7 +34,10 @@
 #include <kunit/test.h>
 #include <linux/errno.h>
 #include <linux/jump_label.h>
+#include <linux/string.h>
 #include <linux/types.h>
+
+#include <sysdep/ptrace.h>	/* struct uml_pt_regs + HOST_* slot offsets */
 
 #include "kvm_v2_backend.h"
 
@@ -207,9 +210,187 @@ static void test_kvm_v2_record_state_transitions(struct kunit *test)
 			   static_branch_unlikely(&um_kvm_v2_record_enabled));
 }
 
+/**
+ * test_kvm_v2_record_observe - exercise the Phase 2 observe hook.
+ *
+ * Drives kvm_v2_record_observe_syscall directly with synthetic args
+ * and asserts that the resulting entry in @rec->buffer carries the
+ * right kind / nr / retval / args. Bypasses the syscall_trap.c hook
+ * site so the suite stays a pure unit test (no live vCPU dependency
+ * required to exercise the append path — same shape as the basic /
+ * state-transitions cases).
+ *
+ * Sequence:
+ *   1. alloc + start → state RECORDING, buffer_used 0.
+ *   2. Build a synthetic uml_pt_regs with HOST_DI..HOST_R9 carrying
+ *      a recognisable per-slot sentinel.
+ *   3. Call observe_syscall with NR=__NR_read sentinel, retval=42.
+ *   4. Walk the buffer head as a struct kvm_v2_replay_entry:
+ *      - kind == KVM_V2_REPLAY_SYSCALL.
+ *      - size == sizeof(entry).
+ *      - sequence == 1 (first append).
+ *      - syscall.nr matches the NR we passed.
+ *      - syscall.retval matches.
+ *      - syscall.args[0..5] match the per-slot sentinels.
+ *   5. Assert rec->buffer_used == entry size and
+ *      rec->entries_recorded == 1.
+ *   6. Second append with NR=__NR_write sentinel; assert
+ *      buffer_used == 2 * entry size, entries_recorded == 2,
+ *      sequence == 2 on the second entry.
+ *
+ * Also exercises the STOPPED-state quiet-no-op: after stop(), a
+ * follow-on observe_syscall call must not mutate the buffer.
+ *
+ * Doesn't (yet) exercise the buffer-full path — that's a follow-up
+ * case once Phase 7's overflow handler lands the explicit drop
+ * counter.
+ */
+static void test_kvm_v2_record_observe(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs synth_regs;
+	struct kvm_v2_replay_entry *entry;
+	size_t prev_used;
+	u64 prev_recorded;
+
+	/*
+	 * Per-slot sentinels: high byte distinguishes the slot, low bytes
+	 * are pattern-fillable so a mis-routed slot is loud in the
+	 * assertion message.
+	 */
+	const unsigned long arg_di  = 0xa1a1a1a100000001ULL;
+	const unsigned long arg_si  = 0xa2a2a2a200000002ULL;
+	const unsigned long arg_dx  = 0xa3a3a3a300000003ULL;
+	const unsigned long arg_r10 = 0xa4a4a4a400000004ULL;
+	const unsigned long arg_r8  = 0xa5a5a5a500000005ULL;
+	const unsigned long arg_r9  = 0xa6a6a6a600000006ULL;
+	const unsigned long syscall_nr_read  = 0;	/* __NR_read on x86_64 */
+	const unsigned long syscall_nr_write = 1;	/* __NR_write on x86_64 */
+	const long retval_read  = 42;
+	const long retval_write = -4;			/* -EINTR */
+
+	rec = kvm_v2_record_alloc(0);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_ASSERT_EQ(test, rec->state, KVM_V2_RECORD_RECORDING);
+	KUNIT_ASSERT_EQ(test, rec->buffer_used, (size_t)0);
+
+	/* kvm_v2_record_active should now return rec under the gate. */
+	KUNIT_EXPECT_PTR_EQ(test, kvm_v2_record_active(), rec);
+	KUNIT_EXPECT_TRUE(test,
+			  static_branch_unlikely(&um_kvm_v2_record_enabled));
+
+	/* Build a synthetic register frame. Zero-init then set arg slots. */
+	memset(&synth_regs, 0, sizeof(synth_regs));
+	synth_regs.gp[HOST_DI]  = arg_di;
+	synth_regs.gp[HOST_SI]  = arg_si;
+	synth_regs.gp[HOST_DX]  = arg_dx;
+	synth_regs.gp[HOST_R10] = arg_r10;
+	synth_regs.gp[HOST_R8]  = arg_r8;
+	synth_regs.gp[HOST_R9]  = arg_r9;
+
+	/* First append. */
+	kvm_v2_record_observe_syscall(rec, syscall_nr_read,
+				      retval_read, &synth_regs);
+
+	KUNIT_EXPECT_EQ(test, rec->buffer_used,
+			sizeof(struct kvm_v2_replay_entry));
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, (u64)1);
+	KUNIT_EXPECT_EQ(test, rec->sequence, (u64)1);
+
+	entry = (struct kvm_v2_replay_entry *)rec->buffer;
+	KUNIT_EXPECT_EQ(test, entry->kind, (u32)KVM_V2_REPLAY_SYSCALL);
+	KUNIT_EXPECT_EQ(test, entry->size,
+			(u32)sizeof(struct kvm_v2_replay_entry));
+	KUNIT_EXPECT_EQ(test, entry->sequence, (u64)1);
+	KUNIT_EXPECT_EQ(test, entry->syscall.nr, (s32)syscall_nr_read);
+	KUNIT_EXPECT_EQ(test, entry->syscall._pad, (s32)0);
+	KUNIT_EXPECT_EQ(test, entry->syscall.retval, (u64)retval_read);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[0], (u64)arg_di);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[1], (u64)arg_si);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[2], (u64)arg_dx);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[3], (u64)arg_r10);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[4], (u64)arg_r8);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[5], (u64)arg_r9);
+
+	/*
+	 * Second append: tweak the arg slots so we see distinct values
+	 * in the second entry, change NR + retval.
+	 */
+	prev_used = rec->buffer_used;
+	prev_recorded = rec->entries_recorded;
+
+	synth_regs.gp[HOST_DI] = 0xbeef000000000007ULL;
+	kvm_v2_record_observe_syscall(rec, syscall_nr_write,
+				      retval_write, &synth_regs);
+
+	KUNIT_EXPECT_EQ(test, rec->buffer_used,
+			prev_used + sizeof(struct kvm_v2_replay_entry));
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, prev_recorded + 1);
+	KUNIT_EXPECT_EQ(test, rec->sequence, (u64)2);
+
+	entry = (struct kvm_v2_replay_entry *)
+		((u8 *)rec->buffer + prev_used);
+	KUNIT_EXPECT_EQ(test, entry->kind, (u32)KVM_V2_REPLAY_SYSCALL);
+	KUNIT_EXPECT_EQ(test, entry->sequence, (u64)2);
+	KUNIT_EXPECT_EQ(test, entry->syscall.nr, (s32)syscall_nr_write);
+	KUNIT_EXPECT_EQ(test, entry->syscall.retval, (u64)retval_write);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[0],
+			(u64)0xbeef000000000007ULL);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[1], (u64)arg_si);
+
+	/*
+	 * NULL @regs path: the function must fall back to memset(0) on
+	 * the args[] and keep nr/retval correct.
+	 */
+	prev_used = rec->buffer_used;
+	prev_recorded = rec->entries_recorded;
+
+	kvm_v2_record_observe_syscall(rec, 9 /* __NR_mmap */,
+				      0x1234, NULL);
+
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, prev_recorded + 1);
+	entry = (struct kvm_v2_replay_entry *)
+		((u8 *)rec->buffer + prev_used);
+	KUNIT_EXPECT_EQ(test, entry->syscall.nr, (s32)9);
+	KUNIT_EXPECT_EQ(test, entry->syscall.retval, (u64)0x1234);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[0], (u64)0);
+	KUNIT_EXPECT_EQ(test, entry->syscall.args[5], (u64)0);
+
+	/*
+	 * Stop the container; observe_syscall must become a no-op once
+	 * the state machine leaves RECORDING. Buffer + counters frozen
+	 * at the values they had at stop time.
+	 */
+	prev_used = rec->buffer_used;
+	prev_recorded = rec->entries_recorded;
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, rec->state, KVM_V2_RECORD_STOPPED);
+
+	kvm_v2_record_observe_syscall(rec, syscall_nr_read,
+				      retval_read, &synth_regs);
+
+	KUNIT_EXPECT_EQ(test, rec->buffer_used, prev_used);
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, prev_recorded);
+
+	/* NULL @rec — also a quiet no-op. */
+	kvm_v2_record_observe_syscall(NULL, 0, 0, NULL);
+
+	/* Active slot must be NULL after _stop disarms the gate. */
+	KUNIT_EXPECT_PTR_EQ(test, kvm_v2_record_active(),
+			    (struct kvm_v2_record *)NULL);
+
+	kvm_v2_record_destroy(rec);
+
+	KUNIT_EXPECT_FALSE(test,
+			   static_branch_unlikely(&um_kvm_v2_record_enabled));
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_basic),
 	KUNIT_CASE(test_kvm_v2_record_state_transitions),
+	KUNIT_CASE(test_kvm_v2_record_observe),
 	{}
 };
 

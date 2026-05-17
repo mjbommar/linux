@@ -1006,22 +1006,38 @@ enum kvm_v2_replay_meta_kind {
  * cursor 0.
  *
  * @kind:     enum kvm_v2_replay_kind discriminator.
- * @size:     payload size in bytes following the header. Zero for
- *	      pure inline entries (Phase 2 inline-only path).
+ * @size:     total entry size in bytes (header + payload). The Phase 3
+ *	      consume walker uses this to advance the buffer cursor.
  * @sequence: monotonic counter assigned at append time. Phase 6's
  *	      SIGALRM-determinism plumbing uses this as the "syscall
  *	      count at signal" anchor.
+ * @syscall:  inline payload for KVM_V2_REPLAY_SYSCALL entries (Phase 2):
+ *		- @nr      syscall number (regs->gp[HOST_ORIG_AX]).
+ *		- @_pad    explicit 4-byte hole for 8-byte alignment of @retval.
+ *		- @retval  syscall return value (regs->gp[HOST_AX] post-
+ *			   handle_syscall).
+ *		- @args[6] RDI/RSI/RDX/R10/R8/R9 — captured at observe time,
+ *			   replayed at consume time (Phase 3). Side-buffer
+ *			   routing (Phase 2.5) replaces the inline path for
+ *			   the read/recvfrom/getrandom NRs.
  *
- * Wire shape is intentionally minimal — Phase 2 may grow it (e.g.
- * inline u64 payload[4] for inline-only entries) without breaking
- * Phase 1 callers because the only Phase 1 caller is the KUnit
- * suite which never reads entries.
+ * Phase 2 grows this from Phase 1's bare header by adding the
+ * `syscall` payload inline. Phase 2.5 / Phase 5-6 will add sibling
+ * payload members under a union once the per-kind dispatcher lands;
+ * the @size field allows mixed-payload entries to coexist in one
+ * buffer without callers having to know every kind's payload size
+ * at compile time.
  */
 struct kvm_v2_replay_entry {
 	u32	kind;
 	u32	size;
 	u64	sequence;
-	/* payload follows; varies by @kind. */
+	struct {
+		s32	nr;
+		s32	_pad;
+		u64	retval;
+		u64	args[6];
+	} syscall;
 };
 
 /**
@@ -1108,6 +1124,26 @@ int  kvm_v2_record_stop(struct kvm_v2_record *rec);
 int  kvm_v2_record_replay(struct kvm_v2_record *rec);
 int  kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);
 bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec);
+
+/*
+ * Accessor for the single-active-record slot. Returns the container
+ * currently registered with kvm_v2_record_start / _replay, or NULL.
+ *
+ * The Phase 2 hook in syscall_trap.c::kvm_v2_handle_io_trap calls this
+ * INSIDE the static_branch_unlikely(&um_kvm_v2_record_enabled) gate,
+ * so the slot pointer is read only when the static key was flipped on
+ * by _start/_replay — which means the registered container was non-NULL
+ * at the time of the flip. The accessor still re-checks under the
+ * record_lock spinlock because _stop / _destroy can race the hot path
+ * (they call static_branch_disable AFTER clearing the slot).
+ *
+ * Returning NULL is a quiet no-op for the hook — the gate may have
+ * been flipped off between the static_branch_unlikely read and this
+ * accessor call. Phase 1 / 2 never see this in single-CPU KUnit; SMP
+ * matters more under Phase 3+ when the gate flips around live record
+ * sessions.
+ */
+struct kvm_v2_record *kvm_v2_record_active(void);
 
 /*
  * Phase 2 stub — observe hook called from syscall_trap.c. Phase 1
