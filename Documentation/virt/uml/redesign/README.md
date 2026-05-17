@@ -116,8 +116,10 @@ docs/uml-redesign/
                                         concrete runtime-driver buildout plan
     ├── 16-uml-vector-legacy-tap-crash-r0.md
                                         legacy TAP crash R0 fix note
-    └── 17-uml-vector-driver-v2-r1-runtime-skeleton.md
+    ├── 17-uml-vector-driver-v2-r1-runtime-skeleton.md
                                         vector v2 R1 skeleton evidence
+    └── 18-uml-vector-driver-v2-r2-netdev-skeleton.md
+                                        vector v2 R2 netdev evidence
 ```
 
 ## Live status

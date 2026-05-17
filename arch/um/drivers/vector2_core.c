@@ -85,6 +85,7 @@ static int __init um_vec2_configure_one(const struct um_vec2_cmdline_spec *spec,
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&vdev->list);
+	mutex_init(&vdev->lock);
 	vdev->unit = spec->unit;
 	um_vec2_dev_lifecycle_init(&vdev->life);
 
@@ -103,15 +104,22 @@ static int __init um_vec2_configure_one(const struct um_vec2_cmdline_spec *spec,
 		return ret;
 	}
 
+	ret = um_vec2_netdev_register(vdev);
+	if (ret) {
+		um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_DEAD);
+		kfree(vdev);
+		return ret;
+	}
+
 	mutex_lock(&um_vec2_devices_lock);
 	list_add_tail(&vdev->list, &um_vec2_devices);
 	mutex_unlock(&um_vec2_devices_lock);
 
 	ctx->configured++;
-	pr_info("vec2.%u configured transport=%s mode=%s queues=%u depth=%u\n",
+	pr_info("vec2.%u configured transport=%s mode=%s requested_queues=%u runtime_queues=%u depth=%u\n",
 		vdev->unit, um_vec2_transport_name(vdev->cfg.transport),
 		um_vec2_host_mode_name(vdev->cfg.mode), vdev->cfg.queues,
-		vdev->cfg.depth);
+		vdev->num_channels, vdev->cfg.depth);
 	return 0;
 }
 

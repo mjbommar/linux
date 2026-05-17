@@ -13,6 +13,7 @@
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
 #include <linux/spinlock.h>
+#include <linux/skbuff.h>
 #include <linux/types.h>
 
 #include "vector2_config.h"
@@ -53,6 +54,7 @@ struct um_vec2_channel {
 
 struct um_vec2_dev {
 	struct list_head list;
+	struct mutex lock;		/* Serializes lifecycle transitions. */
 	unsigned int unit;
 	struct um_vec2_config cfg;
 	struct um_vec2_dev_lifecycle life;
@@ -61,11 +63,25 @@ struct um_vec2_dev {
 	unsigned int num_channels;
 };
 
+struct um_vec2_netdev_priv {
+	struct um_vec2_dev *vdev;
+};
+
 int um_vec2_cmdline_parse_spec(const char *arg,
 			       enum um_vec2_cmdline_form form,
 			       unsigned int *unit, const char **spec);
 int um_vec2_cmdline_for_each(int (*fn)(const struct um_vec2_cmdline_spec *spec,
 				       void *data),
 			     void *data);
+
+void um_vec2_ethtool_attach(struct net_device *dev);
+
+int um_vec2_netdev_open(struct net_device *dev);
+int um_vec2_netdev_stop(struct net_device *dev);
+netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
+				      struct net_device *dev);
+void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev);
+int um_vec2_netdev_register(struct um_vec2_dev *vdev);
+void um_vec2_netdev_unregister(struct um_vec2_dev *vdev);
 
 #endif /* __UM_VECTOR2_INTERNAL_H */

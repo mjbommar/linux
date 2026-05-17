@@ -274,6 +274,20 @@ config UML_NET_VECTOR_V2_CMDLINE_KUNIT
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
 
+config UML_NET_VECTOR_V2_NETDEV_KUNIT
+	bool "Vector networking v2 netdev skeleton KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 netdev skeleton.
+	  These tests validate stable device naming, lifecycle unwind for
+	  backend-missing open, stopped-state stop handling, and xmit safety
+	  before any real fd or TAP packet path exists.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
 endmenu
 
 config VIRTIO_UML

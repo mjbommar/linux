@@ -28,21 +28,30 @@ The following v2 foundations exist:
   architecture memo.
 
 Those pieces prove parser policy, queue ownership, transport header
-bounds checks, fake-host behavior, and lifecycle transitions.  They do
-not attach to the Linux networking stack.
+bounds checks, fake-host behavior, and lifecycle transitions.
+
+R1 and R2 have now added the first runtime attachments:
+
+- `CONFIG_UML_NET_VECTOR_V2`, default `n`;
+- v2-only command-line collection through `vec2.<n>:` and `vec2=`;
+- late-init typed config validation;
+- internal runtime device/channel/queue ownership structs;
+- v2 `struct net_device_ops`;
+- forced single-queue `alloc_etherdev_mqs()`;
+- `register_netdevice()` for inspectable `vec2.<unit>` netdevs;
+- read-only `ethtool -i`;
+- `ndo_open()` failure unwind to `REGISTERED` with `-EOPNOTSUPP`.
+
+Those pieces attach v2 to the Linux networking stack for inspection.
+They still do not provide a live host backend or packet movement.
 
 Missing runtime pieces:
 
-- no v2 `struct net_device_ops`;
-- no v2 `register_netdevice()` / `register_netdev()` path;
-- no v2 command-line device registration path;
-- no v2 platform-driver or late-init registration path;
-- no `vector2_net_open()` / `vector2_net_stop()`;
 - no live `ndo_start_xmit()`;
 - no live NAPI poll function;
 - no live IRQ registration;
 - no TAP or fd host backend wired to real host fds;
-- no v2 ethtool operations;
+- no v2 ethtool stats, rings, coalescing, or feature controls;
 - no feature negotiation;
 - no live single-queue smoke test;
 - no multiqueue runtime path;
@@ -247,6 +256,17 @@ Exit gate:
 
 - no v2 packet movement yet, but all netdev lifetime objects are owned
   and freed by v2 code.
+
+R2 implementation note:
+
+- `18-uml-vector-driver-v2-r2-netdev-skeleton.md` records the v2
+  `net_device_ops`, forced single-queue `alloc_etherdev_mqs()`,
+  `register_netdevice()` path, read-only ethtool driver info, open
+  failure unwind, manual runtime check, build matrix, and 52-test
+  KUnit result.
+- R2 is intentionally inspectable only.  `ip link set vec2.0 up`
+  reaches the v2 `ndo_open()` method and fails cleanly with
+  `-EOPNOTSUPP` because no fd or TAP backend exists yet.
 
 ### V2-R3 - fd Host Backend First
 
@@ -540,6 +560,7 @@ The next concrete work should be:
    Add `CONFIG_UML_NET_VECTOR_V2`, `vector2_internal.h`,
    `vector2_cmdline.c`, and `vector2_core.c`.  Register an inspectable
    netdev under a v2-only command-line syntax.  No packets yet.
+   R1 and R2 have implemented this in two bisectable steps.
 
 3. **fd backend plus open/close.**
    Wire `vector2_host_fd.c` to real fds, implement `ndo_open` and

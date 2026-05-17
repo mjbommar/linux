@@ -157,6 +157,12 @@ parking-lot designs for future prioritization.
   skeleton: Kconfig, v2-only command-line collection, late-init typed
   config validation, sandbox policy, build matrix, manual boots, and
   KUnit evidence. Not a commitment.
+- [18-uml-vector-driver-v2-r2-netdev-skeleton.md](18-uml-vector-driver-v2-r2-netdev-skeleton.md) —
+  R2 implementation note for the inspectable vector v2 netdev
+  skeleton: `net_device_ops`, forced single-queue registration,
+  read-only ethtool driver info, clean `-EOPNOTSUPP` open unwind,
+  manual runtime evidence, build matrix, and KUnit coverage. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
