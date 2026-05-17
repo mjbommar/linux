@@ -115,5 +115,5 @@ R8 is still open.  This checkpoint does not yet provide:
   no-network readiness before vector2 can be meaningfully validated.
 
 R8b adds the per-queue ethtool stat names needed for distribution
-instrumentation.  A later R8 checkpoint still needs a small parallel
-traffic smoke that proves packets reach more than one queue under SMP.
+instrumentation and records a small parallel traffic smoke where both
+queue0 and queue1 counters move under `umlctl --network-queues 2`.

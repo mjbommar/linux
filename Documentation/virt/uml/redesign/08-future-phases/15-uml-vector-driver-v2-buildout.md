@@ -559,8 +559,8 @@ R8a implementation note:
     `SERVER_READY`, `TIER3_OK`, `REPRO_DONE rc=0`,
     `PASS=1/1`, TAP absent after teardown.
 - Therefore R8 is partially satisfied.  TAP has the first real
-  multiqueue runtime shape; fd multiqueue, queue distribution proof,
-  KCSAN, queue-to-CPU policy, and kvm-v2 evidence remain open.
+  multiqueue runtime shape; fd multiqueue, KCSAN, queue-to-CPU
+  policy, and kvm-v2 evidence remain open.
 
 R8b implementation note:
 
@@ -579,9 +579,13 @@ R8b implementation note:
   - live `queues=2` seccomp smoke with `ethtool -S vec2.0`
     showing `queue0_*` and `queue1_*` stats, 3/3 ping success,
     `QUEUE_STATS_OK`, `PASS=1/1`, and TAP absent after teardown.
+  - live parallel traffic smoke with `queues=2` where both queue0 and
+    queue1 TX/RX counters were non-zero, `DISTRIBUTION_DONE`,
+    `PASS=1/1`, and TAP absent after teardown.
 - Therefore the R8 observability surface is usable for distribution
-  experiments, but distribution proof, KCSAN, fd multiqueue, and
-  kvm-v2 evidence remain open.
+  experiments and has first TAP distribution evidence, but KCSAN,
+  fairness/performance profiles, fd multiqueue, queue-to-CPU policy,
+  and kvm-v2 evidence remain open.
 
 ### V2-R9 - Transport Parity
 

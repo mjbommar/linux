@@ -57,14 +57,32 @@ PASS=1/1 FAIL=0 TIMEOUT=0
 TAP_ABSENT
 ```
 
+Parallel traffic distribution smoke:
+
+```text
+uml-vector2: vec2.0 configured transport=tap mode=inproc requested_queues=2 runtime_queues=2 depth=128
+queue0_tx_ring_enqueued: 1
+queue0_tx_ring_completed: 1
+queue0_rx_batch_received_total: 2
+queue1_tx_ring_enqueued: 40
+queue1_tx_ring_completed: 40
+queue1_rx_batch_received_total: 43
+DISTRIBUTION_DONE
+PASS=1/1 FAIL=0 TIMEOUT=0
+```
+
+This is intentionally small.  It proves that `umlctl` can request two
+trusted TAP queues, the v2 runtime opens two queues, normal guest
+traffic reaches both queues, and the per-queue stats expose that fact
+to operators.  It is not a performance or fairness result.
+
 ## Remaining R8 Work
 
-Per-queue stats make distribution measurable, but they do not by
-themselves prove balanced distribution under load.  R8 still needs:
+Per-queue stats and the first parallel traffic smoke make trusted TAP
+distribution observable.  R8 still needs:
 
 - fd multiqueue;
 - queue-to-CPU mapping policy;
 - KCSAN evidence;
-- parallel traffic that drives more than one queue and records
-  non-zero per-queue counters;
+- broader traffic shapes and fairness/performance profiles;
 - kvm-v2 multiqueue evidence once kvm-v2 baseline readiness is fixed.
