@@ -130,6 +130,12 @@ shape, and inspectable ethtool surfaces:
   cleanly, and a narrowed strace scan of the vector2 fd boot found no
   actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML
   network-helper exec from the traced vector host path;
+- `umlctl gate loop --audit-vector-sandbox`, which implies `--strace`,
+  preserves per-iteration strace/audit logs, and fails the iteration on
+  actual vector host TAP open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML
+  network-helper exec; the live auto-queue fd smoke passed
+  `PASS=1/1 FAIL=0 TIMEOUT=0` through this gate with no TAP or UML
+  process leak;
 - TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
@@ -145,7 +151,8 @@ Missing runtime pieces:
   traffic, and broader fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
   policy for guest userspace raw/netlink sockets visible in UML host
-  traces;
+  traces; a local `umlctl gate loop --audit-vector-sandbox` gate exists
+  for the vector host path, but longer workload coverage remains open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.
@@ -805,8 +812,11 @@ Deliverables:
 
 Validation:
 
-- `strace` of the UML process in sandbox mode shows no `/dev/net/tun`,
-  raw socket, helper execution, or BPF file load;
+- `umlctl gate loop --audit-vector-sandbox` shows no vector host
+  `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, helper execution, or
+  `bpf()` syscall in sandbox mode;
+- guest userspace raw/netlink socket policy is explicitly documented
+  separately from vector host attach behavior;
 - helper or launcher owns privileged fds;
 - policy rejection messages name the option and profile.
 

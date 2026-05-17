@@ -31,7 +31,7 @@ log and records that tracee PID in the pidfile, run bundle, and start
 output.  If no trace line appears, it falls back to the wrapper PID so
 early failure diagnostics still work.
 
-Unit coverage:
+Unit coverage after the initial strace PID fix:
 
 ```sh
 cargo test --manifest-path tools/uml/uml-launcher/Cargo.toml --bin umlctl
@@ -41,6 +41,19 @@ Result:
 
 ```text
 82 passed; 0 failed
+```
+
+The follow-up `umlctl gate loop` integration adds two operator flags:
+
+- `--strace` preserves `strace-N.log` for each gate-loop iteration;
+- `--audit-vector-sandbox` implies `--strace` and fails the iteration
+  when the trace shows an actual vector host TAP open, `TUNSETIFF`,
+  `AF_PACKET`, `bpf()`, or UML network-helper exec.
+
+Unit coverage after that follow-up:
+
+```text
+84 passed; 0 failed
 ```
 
 ## Live Audit Command
@@ -158,12 +171,56 @@ This checkpoint closes a practical auditability gap:
   `v2autoq0`;
 - the vector2 fd path showed no direct host TAP creation, helper exec,
   `AF_PACKET`, or BPF load in the audited boot.
+- `umlctl gate loop --audit-vector-sandbox` now turns that scan into a
+  first-class local gate and preserves the per-iteration strace/audit
+  artifacts beside `run-N.log`.
+
+## Gate-Loop Audit Evidence
+
+Command:
+
+```sh
+rm -rf /tmp/umlctl-vector2-sandbox-audit
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux \
+  timeout 300s cargo run --manifest-path tools/uml/uml-launcher/Cargo.toml \
+    --bin umlctl -- gate loop \
+    -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml \
+    --workers 1 --iters 1 \
+    --pass-marker VECTOR2_AUTO_QUEUES_OK \
+    --fail-marker 'VERIFY_FAIL|kernel BUG|Kernel panic' \
+    --timeout 180 \
+    --out /tmp/umlctl-vector2-sandbox-audit \
+    --audit-vector-sandbox
+```
+
+Result:
+
+```text
+[umlctl gate loop] w0 iter1: Pass
+==> default PASS=1/1 FAIL=0 TIMEOUT=0 rate=100.0% ... elapsed=7s
+TAP_ABSENT
+UML_PROCESS_ABSENT
+```
+
+Artifacts:
+
+```text
+/tmp/umlctl-vector2-sandbox-audit/p0_default/w0/run-1.log
+/tmp/umlctl-vector2-sandbox-audit/p0_default/w0/strace-1.log
+/tmp/umlctl-vector2-sandbox-audit/p0_default/w0/strace-audit-1.log
+```
+
+The saved audit log reported:
+
+```text
+vector sandbox strace audit passed: no host TAP open, TUNSETIFF, AF_PACKET, bpf(), or UML network-helper exec
+```
 
 ## Remaining Gate
 
 The full sandbox replacement gate remains open until at least:
 
-- the strace scan becomes a repeatable `umlctl gate` or CI check;
+- the strace scan is wired into CI or a standard preflight target;
 - audits cover longer runs and failure paths, not just a successful boot;
 - audits cover vector2 FastAPI/Django workloads and kvm-v2 once the
   kvm-v2 readiness blocker is fixed;

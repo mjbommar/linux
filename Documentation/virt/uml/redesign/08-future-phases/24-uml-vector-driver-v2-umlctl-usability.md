@@ -75,6 +75,24 @@ umlctl gate loop -f tier3-django.toml --network-driver vector2 --network-queues 
 umlctl gate loop -f tier3-django.toml --network-driver vector2 --sweep network.queues=1,2 -W 1 -M 10
 ```
 
+For sandbox audits, use the built-in strace path instead of hand-running
+strace and regexes:
+
+```sh
+umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml \
+  --network-driver vector2 --network-queues auto \
+  --pass-marker VECTOR2_AUTO_QUEUES_OK \
+  --audit-vector-sandbox \
+  -W 1 -M 1 --timeout 180
+```
+
+`--audit-vector-sandbox` implies `--strace`.  Each iteration preserves
+`strace-N.log` and `strace-audit-N.log` next to the copied `run-N.log`.
+The audit fails the iteration if the vector host trace contains an
+actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML
+network-helper exec.  It intentionally ignores ELF string-buffer hits
+and guest `AF_NETLINK` activity.
+
 Current vector2 multiqueue uses the launcher-owned fd path by default.
 Force the trusted in-process path explicitly only when comparing host
 backend behavior:
@@ -181,6 +199,7 @@ If the one-shot gate fails, inspect the worker directory first:
 ```sh
 sed -n '1,220p' /tmp/umlctl-loop-*/p0_default/w0/up-1.log
 sed -n '1,260p' /tmp/umlctl-loop-*/p0_default/w0/run-1.log
+sed -n '1,120p' /tmp/umlctl-loop-*/p0_default/w0/strace-audit-1.log
 ```
 
 Only move to a longer soak after the dry-run plan and the one-shot
@@ -209,6 +228,10 @@ This follow-up was checked with:
   `network.driver=vector2 PASS=1/1 FAIL=0 TIMEOUT=0`, with
   `uml-vector2: registered netdev vec2.0`, `SERVER_READY`, `TIER3_OK`,
   `REPRO_DONE rc=0`, and no lingering `soak-tap0`.
+- a live vector2 auto-queue sandbox audit gate:
+  `PASS=1/1 FAIL=0 TIMEOUT=0`, with `strace-1.log`,
+  `strace-audit-1.log`, no lingering `v2autoq0`, and no traced vector
+  host TAP open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML helper exec.
 
 ## Replacement Boundary
 

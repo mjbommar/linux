@@ -29,7 +29,7 @@ experimental netdev exists.
 | Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; real FastAPI + uvicorn vector2 fd smoke passes seccomp 10/10 with `FASTAPI_HTTP ok=51 fail=0` each run; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and long FastAPI soak remain open |
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 72/72 after fd wrong-type, fd multiqueue unwind, and queue-to-CPU policy coverage | Partial: coverage exists, but more failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
-| Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher; a traced vector2 auto-queue fd boot found no actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec in the vector host path | Partial: one audited boot passed, but repeatable CI/gate coverage and guest userspace raw/netlink socket policy remain open |
+| Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher; a traced vector2 auto-queue fd boot found no actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec in the vector host path; `umlctl gate loop --audit-vector-sandbox` now preserves per-iteration strace/audit logs and fails on those forbidden vector host operations | Partial: local gate exists and one audited boot passed, but CI/long workload coverage and guest userspace raw/netlink socket policy remain open |
 | Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; heavier KCSAN traffic and fairness profiles absent | Partial |
 | Performance parity or accepted regression | Initial `umlctl` bidirectional TCP baseline exists: guest-to-host legacy vector TAP 32 MiB at 662 MiB/s guest-side versus vector2 fd multiqueue 32 MiB at 220 MiB/s; host-to-guest legacy vector TAP 32 MiB at 3.2 MiB/s versus vector2 fd multiqueue 32 MiB at 456 MiB/s on the same host; UDP, syscall, CPU, and repeated-size profiles remain absent | Partial: mixed results measured, not accepted |
 | Legacy `vecN:` compatibility transition | Legacy remains production path; no v2 compatibility switch | Open |
@@ -115,6 +115,11 @@ Validation evidence recorded in the checkpoint docs includes:
   narrowed syscall scan with no actual `/dev/net/tun` open,
   `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec; broad
   raw-socket hits were traced to guest `ip` and `ping` userspace;
+- `umlctl gate loop --audit-vector-sandbox` vector2 auto-queue fd
+  smoke: `PASS=1/1 FAIL=0 TIMEOUT=0`, saved `strace-1.log`,
+  `strace-audit-1.log`, `TAP_ABSENT`, `UML_PROCESS_ABSENT`, and audit
+  pass text reporting no host TAP open, `TUNSETIFF`, `AF_PACKET`,
+  `bpf()`, or UML network-helper exec;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -129,8 +134,9 @@ list is:
 - run heavier KCSAN on multiqueue traffic;
 - expand legacy-vs-v2 performance baselines and explain or accept the
   measured guest-to-host regression and mixed bidirectional results;
-- promote the strace sandbox scan into a repeatable gate and decide the
-  guest userspace raw/netlink socket policy for secure profiles;
+- wire the vector sandbox audit gate into CI/preflight, run it on longer
+  workloads, and decide the guest userspace raw/netlink socket policy
+  for secure profiles;
 - run a repeated long soak with vector2 workloads;
 - decide and implement the legacy `vecN:` transition.
 
