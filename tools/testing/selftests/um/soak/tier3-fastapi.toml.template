@@ -29,7 +29,12 @@ path = "{{KERNEL}}"
 backend = "{{BACKEND}}"
 
 [runtime]
-mem = "768M"
+# 1024M headroom — first live smoke of the sibling Django
+# template at mem=768M tripped a swapper page allocation
+# failure (order:0) during guest boot under the deferred-
+# physmem-memslot v2 path. FastAPI/uvicorn has a smaller
+# import set than Django but the headroom is the same.
+mem = "1024M"
 ncpus = 2
 
 [network]

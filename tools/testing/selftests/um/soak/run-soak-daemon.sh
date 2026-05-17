@@ -490,6 +490,22 @@ process_tier3_phase_results() {
 	WL_PASS[$key]=$k
 }
 
+# Stale-tap cleanup. When a previous tier3 phase panicked the
+# guest mid-run, umlctl's tear-down may not have completed and
+# `soak-tap{N}` lingers. A subsequent phase's `ip tuntap add dev
+# soak-tapN` then trips with `Device or resource busy`. This
+# helper sweeps `soak-tap0..soak-tap{$WORKERS-1}` before each
+# tier3 phase. Idempotent: deleting a non-existent tap is a no-op.
+tier3_cleanup_stale_taps() {
+	local w
+	for w in $(seq 0 $((WORKERS - 1))); do
+		if ip link show "soak-tap${w}" >/dev/null 2>&1; then
+			echo "[$(date -uIs)] cleanup: removing stale soak-tap${w}"
+			sudo -n ip link delete "soak-tap${w}" 2>/dev/null || true
+		fi
+	done
+}
+
 # Tier 3 phase runner. Spawns $WORKERS parallel single-worker
 # `umlctl gate loop --workers 1` invocations, each with a per-worker
 # /30 carve-out from 192.168.42.0/24. Each worker has a unique TAP
@@ -499,6 +515,10 @@ run_one_tier3_phase() {
 	local timeout_sec="${TIMEOUT_FOR[$workload]:-$DEFAULT_TIMEOUT}"
 	local out_dir="$OUT/_loop/${workload}-${backend}-r${rotation}"
 	mkdir -p "$out_dir"
+
+	# Sweep any stale soak-tap{N} left behind by a prior phase
+	# that crashed before umlctl's tear-down completed.
+	tier3_cleanup_stale_taps
 
 	thermal_check
 	local t_pre t_post

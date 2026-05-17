@@ -31,7 +31,12 @@ path = "{{KERNEL}}"
 backend = "{{BACKEND}}"
 
 [runtime]
-mem = "768M"   # Django + cryptography import set; tighter than tier2
+# 1024M headroom — first live smoke at mem=768M tripped a
+# swapper page allocation failure (order:0) during guest boot
+# under the deferred-physmem-memslot v2 path. Bumping to 1024M
+# leaves room for the Django + cryptography import set plus the
+# kvm-v2 vCPU pool's pinned overhead.
+mem = "1024M"
 ncpus = 2
 
 [network]
