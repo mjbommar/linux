@@ -27,6 +27,9 @@ Companion docs:
 | `iocheck.c` | write/fsync/read/verify loop on tmpfs (fio replacement). Per-block deterministic key; catches pagecache / writeback / fsync ordering bugs. |
 | `tier1-smoketest.py` | Tier 1 host-installed Python C-extension smoke (requests + cryptography; numpy deferred — see "Known issues" below). 0.16 s on host, 2-5 s in UML. |
 | `tier2-uv-smoketest.py` | Tier 2 deterministic smoke (httpx + pyyaml + pendulum + numpy). Run from a `uv`-built persistent venv (see "Tier 2 bootstrap" below). |
+| `tier3-django.toml.template` | Tier 3 Django-shaped loopback HTTP server. Requires `CONFIG_UML_NET_VECTOR=y` kernel rebuild (see "Tier 3 bootstrap" below). |
+| `tier3-fastapi.toml.template` | Tier 3 FastAPI-shaped loopback. Same pre-flight as `tier3-django`. |
+| `ltp-runner.toml.template` | LTP test runner driven by `kirk` (LTP's new Python runner). Requires LTP + kirk installed under `/opt/` (see "LTP bootstrap" below). |
 | `*.toml.template` | one Umlfile per workload; `{{KERNEL}}`, `{{BACKEND}}`, and `{{SOAK_DIR}}` substituted by both drivers. |
 | `run-pilot.sh` | one-shot driver: parallel `umlctl gate loop`, per-backend sweep, k10temp throttle, cooldown between workloads. |
 | `run-soak-daemon.sh` | daemon driver: same spawn pattern as run-pilot, plus wall-clock budget, scoreboard.jsonl, summary.md, restart-on-fail, signal handlers (SIGTERM/SIGINT clean stop, SIGUSR1 force summary refresh). |
@@ -204,6 +207,67 @@ resolver was unreliable inside UML — the simple-index version
 walk-back didn't always find cached wheels, even with
 `UV_OFFLINE=1`. A pre-built venv skips the resolver at run time
 entirely. See `phase-J-design-2026-05-07.md` §3.2 commentary.
+
+## Tier 3 bootstrap
+
+Tier 3 (`tier3-django.toml.template`, `tier3-fastapi.toml.template`)
+exercises a loopback HTTP server inside the guest with the
+host-side daemon hitting it via a TAP interface. Pre-flight:
+
+```sh
+# 1. Rebuild the kernel with CONFIG_UML_NET_VECTOR=y:
+cd ~/src/uml-builds/uml-smp-t41fix
+./scripts/config --enable CONFIG_UML_NET_VECTOR
+make ARCH=um O=$(pwd) olddefconfig -j
+make ARCH=um O=$(pwd) -j
+# Verify: grep CONFIG_UML_NET_VECTOR=y .config
+
+# 2. (Optional) Install real Django/FastAPI for richer testing.
+#    The templates ship with a Python stdlib `http.server` shim that
+#    exercises the same UML virtio-net path; swap to Django/uvicorn
+#    once these are installed:
+apt-get install python3-django python3-fastapi python3-uvicorn
+# Then edit the relevant template's phase 2 cmd to invoke
+# `python3 -m django runserver 0.0.0.0:8080` or `python3 -m uvicorn
+# app:app --host 0.0.0.0 --port 8080` instead of the stdlib shim.
+```
+
+IP allocation: the daemon assigns per-worker /30s from
+192.168.42.0/24 (worker N → host `.4N+1`, guest `.4N+2`, tap
+`soak-tap<N>`). Tier 3 templates use `{{HOST_IP}}` / `{{GUEST_IP}}`
+/ `{{TAP_NAME}}` placeholders the daemon substitutes per worker.
+
+Design: `phase-J-tier3-design-2026-05-14.md`. The per-worker IP
+allocation carve-out in `run-soak-daemon.sh` is task #25 — still
+pending until VECTOR rebuild lets us smoke-test the daemon change.
+
+## LTP bootstrap
+
+The `ltp-runner.toml.template` invokes `kirk` (LTP's upstream
+Python runner; `runltp` was deprecated and removed in 2026).
+LTP is not apt-installable on Ubuntu Resolute; clone from
+upstream:
+
+```sh
+git clone --depth 1 https://github.com/linux-test-project/ltp /opt/ltp-src
+cd /opt/ltp-src
+make autotools
+./configure
+make -j$(nproc)
+sudo make install        # → /opt/ltp (default prefix)
+
+git clone --depth 1 https://github.com/linux-test-project/kirk /opt/kirk
+# kirk is Python — runs with system python3, no compile.
+
+# Skip-list seed (112 entries from the curation memo §3):
+# operator decides whether it lives in-tree or at
+# /opt/uml-soak/ltp-skip.txt. The template references
+# {{SOAK_DIR}}/ltp-skip.txt by default.
+```
+
+Curation: `phase-J-ltp-curation-2026-05-14.md`. Per-cycle wall:
+45 min target, 60 min hard kill. Scheduled every 8 daemon
+rotations (4-6 LTP cycles per backend per 24 h soak).
 
 ## Known issues / deferred work
 
