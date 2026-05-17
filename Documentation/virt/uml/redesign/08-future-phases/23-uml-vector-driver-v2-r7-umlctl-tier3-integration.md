@@ -230,11 +230,55 @@ metadata so workloads can avoid hard-coded `vec0` / `vec2.0`, and
 ready-timeout failures now surface `pid`, `run_id`, and `init_log` so
 gate-loop can preserve failed-start diagnostics before cleanup.
 
+## KVM-v2 Readiness Isolation
+
+Follow-up isolation used the same vector-v2-capable kernel with
+`network.mode = "none"` so no legacy `vec0` or experimental `vec2.0`
+command-line argument was present.
+
+Seccomp no-network baseline:
+
+```text
+seccomp_up_rc=0
+started vector-r10-no-network-seccomp pid=3324119 run_id=01KRTS5JWEZJE2500MMHKV2NV9
+stopped vector-r10-no-network-seccomp pid=3324119 signal=KILL exit=None run_id=01KRTS5JWEZJE2500MMHKV2NV9
+removed vector-r10-no-network-seccomp
+```
+
+KVM-v2 no-network baseline:
+
+```text
+kvm_v2_up_rc=124
+umlctl: instance 'vector-r10-no-network-kvm-v2' did not become ready within 60s pid=3324500 run_id=01KRTS606MPP76M7KNJ1JMX2AQ init_log=/home/mjbommar/.local/state/uml/runs/01KRTS606MPP76M7KNJ1JMX2AQ/init.log
+```
+
+The failed kvm-v2 bundle's `init.log` stopped before the normal Linux
+boot banner:
+
+```text
+Core dump limits :
+	soft - 0
+	hard - NONE
+Checking environment variables for a tempdir...none found
+Checking if /dev/shm is on tmpfs...OK
+Checking PROT_EXEC mmap in /dev/shm...OK
+Checking that seccomp filters can be installed...OK
+```
+
+No `kernel.log` sidecar existed for that failed no-network run.  The
+working conclusion for vector v2 is therefore narrow: the observed
+kvm-v2 Tier 3 failure is not currently attributable to vector2
+registration or packet movement.  It reproduces without networking
+enabled at all.  The vector2 replacement gate still requires kvm-v2
+evidence, but the next blocking fix belongs to kvm-v2 backend readiness
+before vector2-specific kvm-v2 datapath validation can be meaningful.
+
 ## Remaining Replacement Blockers
 
 R7 does not claim:
 
 - 30/30 Tier 3 Django success on both seccomp and kvm-v2;
+- kvm-v2 baseline readiness for no-network workloads on this kernel;
 - FastAPI/uvicorn live validation;
 - 2h or 24h soak success;
 - host-to-guest TCP battery outside the in-guest HTTP curl loop;

@@ -492,10 +492,14 @@ R7 implementation note:
     `--sweep network.driver=vector2`;
   - seccomp repeated cleanup smoke: 2/2 pass, TAP absent after loop;
   - kvm-v2 Tier 3 smoke still fails `umlctl up` readiness after the
-    full 180-second budget, but TAP is absent after failure cleanup.
+    full 180-second budget, but TAP is absent after failure cleanup;
+  - kvm-v2 no-network isolation also fails readiness before the Linux
+    boot banner while the same kernel boots under seccomp, so the
+    current kvm-v2 R7 blocker is not vector2-specific.
 - Therefore R7 is partially satisfied.  Selection, observability, and
   teardown safety landed; the full 30/30 seccomp+kvm-v2 and long-soak
-  eligibility gates remain open.
+  eligibility gates remain open, and kvm-v2 baseline readiness must be
+  fixed before vector2-specific kvm-v2 datapath claims are meaningful.
 
 ### V2-R8 - Multiqueue
 
