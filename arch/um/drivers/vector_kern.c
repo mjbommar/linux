@@ -1726,6 +1726,14 @@ static int __init vector_setup(char *str)
 	int n, err;
 	struct vector_cmd_line_arg *new;
 
+	/*
+	 * The legacy "vec" setup prefix also matches the v2 prefixes.
+	 * Leave "vec2." and "vec2=" for vector2; keep legacy "vec2:" as
+	 * unit 2.
+	 */
+	if (str[0] == '2' && (str[1] == '.' || str[1] == '='))
+		return 0;
+
 	err = vector_parse(str, &n, &str, &error);
 	if (err) {
 		pr_err("Couldn't parse '%s': %s\n", str, error);

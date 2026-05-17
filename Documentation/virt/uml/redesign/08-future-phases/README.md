@@ -255,6 +255,12 @@ parking-lot designs for future prioritization.
   vector2 KUnit passes 72/72, and the auto-queue fd multiqueue KCSAN
   gate passes `PASS=10/10` with no warning, panic, KCSAN, data-race,
   or TAP leak. Not a commitment.
+- [36-uml-vector-driver-v2-perf-baseline.md](36-uml-vector-driver-v2-perf-baseline.md) —
+  Initial legacy-vs-vector2 `umlctl` performance baseline: adds a
+  guest-to-host TCP helper script, fixes the legacy `vec` parser so it
+  leaves `vec2.` / `vec2=` for vector2 in both-drivers kernels, records
+  a short 32 MiB comparison, and keeps the full performance gate open.
+  Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

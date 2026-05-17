@@ -114,6 +114,14 @@ shape, and inspectable ethtool surfaces:
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
   `REPRO_DONE rc=0`, clean TAP teardown, and a short
   `PASS=10/10 FAIL=0 TIMEOUT=0` repetition;
+- both-drivers kernel compatibility for `vec2.*`: the legacy `vec`
+  setup path now leaves `vec2.` and `vec2=` command-line specs for
+  vector2 while preserving legacy `vec2:` as old-driver unit 2;
+- initial `umlctl` legacy-vs-vector2 guest-to-host TCP baseline helper
+  and evidence: 32 MiB legacy vector TAP measured 662 MiB/s
+  guest-side, while vector2 fd multiqueue measured 220 MiB/s
+  guest-side on the same host, making performance a measured open
+  blocker rather than an unmeasured unknown;
 - TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
@@ -720,6 +728,28 @@ R8d/R8e implementation notes:
 - Therefore the specific queue-lock lockdep bug found by repeated
   KCSAN smoke is closed.  Heavier KCSAN traffic, fairness/performance
   profiles, and kvm-v2 evidence remain open.
+
+Performance baseline follow-up:
+
+- `36-uml-vector-driver-v2-perf-baseline.md` records the first
+  repeatable `umlctl` legacy-vs-vector2 performance baseline.
+- Implemented:
+  - `tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh`;
+  - both-drivers command-line coexistence fix so the legacy `vec`
+    setup path does not consume `vec2.` or `vec2=`;
+  - temporary per-driver Umlfile generation with a host Python TCP
+    sink and guest Python sender.
+- Evidence collected:
+  - rebuilt both-drivers runtime UML kernel;
+  - legacy vector `vec0` guest-to-host TCP over TAP: 32 MiB at
+    662 MiB/s guest-side;
+  - vector2 `vec2.0` guest-to-host TCP over launcher-owned fd
+    multiqueue: 32 MiB at 220 MiB/s guest-side;
+  - no lingering `vperf-vector0` or `vperf-vector20` TAP device.
+- Therefore the performance gate now has an initial comparison harness
+  and an explicit vector2 regression to investigate.  Host-to-guest
+  TCP, UDP packet rate, syscall profiles, repeated transfer sizes, and
+  CPU profiles remain open.
 
 ### V2-R9 - Transport Parity
 

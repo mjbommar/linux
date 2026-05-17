@@ -79,3 +79,11 @@ UML_KERNEL=/path/to/uml/linux \
   umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fastapi-smoke.toml \
     -W 1 -M 1 --timeout 240 --pass-marker VECTOR2_FASTAPI_OK
 ```
+
+For a quick legacy-vs-vector2 guest-to-host TCP baseline through the
+same `umlctl` path, use the helper script:
+
+```sh
+tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+  --kernel /path/to/uml/linux
+```
