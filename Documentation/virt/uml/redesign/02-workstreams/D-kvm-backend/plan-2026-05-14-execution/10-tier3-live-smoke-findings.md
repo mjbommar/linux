@@ -149,6 +149,78 @@ investigation is the guest's `python3 -m http.server`
 availability (UML's rootfs may need a busybox-with-python
 binary that this snapshot lacks).
 
+## Update — retry under `mem=1024M` + tap-cleanup (2026-05-14)
+
+A second smoke iteration ran post-commit `18232b2b347b` with
+both fixes applied. The 768M page-allocation failure no
+longer fires (`physmem_memslot: slot=0 gpa=0 hva=0x60000000
+size=0x40000000` lands cleanly at 1024M), the daemon's tap
+cleanup helper sweeps before the phase, and umlctl's
+host-side iptables/sysctl setup all completes.
+
+BUT a DEEPER substrate issue surfaced: kernel-mode NULL
+deref in `vector_net_open+0x3a3` during the `ip link set
+soak-tap0 up` step:
+
+```text
+um: kvm-v2 physmem_memslot: slot=0 gpa=0 hva=0x60000000 size=0x40000000
+uml-vector uml-vector.0 vec0: tap: using vnet headers for tso and tx/rx checksum
+Kernel panic - not syncing: Kernel mode fault at addr 0x18, ip 0x600aefb8
+CPU: 0 UID: 0 PID: 84 Comm: ip
+Call Trace:
+ [<6045bdfa>] ? _raw_spin_lock+0x14/0x16
+ [<6003ea6d>] vector_net_open+0x3a3/0x49b
+ [<60365895>] __dev_open+0x13a/0x1a5
+ [<60365c58>] __dev_change_flags+0x12e/0x1d6
+ [<60365d2c>] netif_change_flags+0x2c/0x6d
+ [<60377726>] do_setlink.isra.0+0x3d0/0xf96
+```
+
+This is a UML vector network driver crash, NOT a kvm-v2
+backend issue (the call site is `arch/um/drivers/vector_net.c`
+which is backend-agnostic). The reproducer is: configure
+the guest with `vec0:transport=tap,ifname=soak-tap0,depth=128`
+on the kernel cmdline, then have the guest's init run
+`ip link set <iface> up`.
+
+**Filing as a new operator-time investigation item.** The
+crash is reproducible and small — a single-step run with
+KGDB or `ftrace` enabled on `vector_net_open` would surface
+the NULL deref's struct identity. This is NOT a Tier 3
+blocker per se; it's a UML/vector substrate issue that
+Tier 3 happens to be the first workload to exercise. Other
+non-tier3 phases (memcheck, iocheck, stress-ng) use
+`[network] mode = "none"` and don't hit the path.
+
+**Implication for Phase J DONE timeline.** The 24h soak's
+`--workloads` list should EITHER exclude tier3-django +
+tier3-fastapi until the vector_net_open bug is fixed, OR
+fix the bug first. The 6-other-workload subset is still
+substantially valuable (Tier 1 + Tier 2 + the 5 pilot
+workloads + LTP); operator can run a 24h soak with that
+subset while the vector_net_open issue is investigated in
+parallel.
+
+**Recommended next step for operator:**
+
+  1. Reproduce the panic against the latest kernel build (not
+     the snapshot binary) under `CONFIG_UML_NET_VECTOR=y` to
+     confirm the bug is current, not stale-snapshot-only.
+  2. If reproducible: file as a separate UML bug, attach
+     this stack trace + the `vec0:transport=tap,...` kernel
+     cmdline. The fix likely belongs in `arch/um/drivers/`
+     so it's substrate work, not D-kvm-backend.
+  3. While bug is being investigated, run the 24h soak with
+     `--workloads memcheck,iocheck,stress-ng,cpython-soak,
+     kbuild-tiny,tier1-pylibs,tier2-uv-pylibs,ltp-runner`
+     (8 workloads instead of 10). That's still strong
+     Phase J DONE evidence even without Tier 3.
+
+The Tier 3 design + scaffolding is sound (the daemon's per-
+worker IP fanout works; iptables + sysctl + kvm-v2 backend
+probe all complete). The blocker is upstream of the
+template: it's in the UML kernel's network driver layer.
+
 ## Process notes
 
 The smoke ran against the LOCKED snapshot binary at

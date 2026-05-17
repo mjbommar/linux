@@ -88,20 +88,36 @@ If any FAIL, the diary entry to consult depends on the workload:
 
 ### 5. 24h continuous soak
 
+**IMPORTANT — Tier 3 vector_net_open panic (added 2026-05-14
+post-live-smoke):** the first Tier 3 live smoke surfaced a
+kernel-mode NULL deref in `vector_net_open+0x3a3` during the
+guest's `ip link set <iface> up` step (see
+`02-workstreams/D-kvm-backend/plan-2026-05-14-execution/
+10-tier3-live-smoke-findings.md` §"Update — retry under
+mem=1024M + tap-cleanup"). Until that's fixed, EXCLUDE
+`tier3-django,tier3-fastapi` from the 24h `--workloads` list.
+
 ```sh
 UML_KERNEL=~/src/uml-builds/uml-smp-t41fix/linux \
   bash tools/testing/selftests/um/soak/run-soak-daemon.sh \
     --budget-sec 86400 \
-    --workloads memcheck,iocheck,stress-ng,cpython-soak,kbuild-tiny,tier1-pylibs,tier2-uv-pylibs,tier3-django,tier3-fastapi,ltp-runner \
+    --workloads memcheck,iocheck,stress-ng,cpython-soak,kbuild-tiny,tier1-pylibs,tier2-uv-pylibs,ltp-runner \
     --workers 2 --iters-per-rotation 10 \
     --fail-threshold-window 100
 ```
+
+(Note: tier3-django + tier3-fastapi REMOVED pending the
+vector_net_open fix.)
 
 **Acceptance:** ≥99.5% PASS per (workload, backend) tuple; no
 `THRESHOLD_TRIPPED` early-stop; 0 panics.
 
 **This unblocks:** Phase J DONE certificate (the gate for Series 7
-in Track D).
+in Track D). Note: PLAN-2026-05-14 §3.5 explicitly lists Tier
+3 as part of the "DONE definition" — operator should decide
+whether to fix vector_net_open first (gating Phase J DONE) or
+accept an 8-workload soak as sufficient evidence (re-scoping
+PLAN §3.5 with a follow-up).
 
 **Wall-clock:** 24h. Operator-time. Check in at the 12h and 24h
 marks.
