@@ -86,4 +86,8 @@ same `umlctl` path, use the helper script:
 ```sh
 tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
   --kernel /path/to/uml/linux
+
+UML_VECTOR_PERF_DIRECTION=both \
+  tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel /path/to/uml/linux
 ```

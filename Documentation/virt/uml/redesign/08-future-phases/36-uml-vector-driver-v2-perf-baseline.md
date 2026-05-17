@@ -1,13 +1,13 @@
 # UML vector driver v2 initial performance baseline
 
-**Status:** partial performance evidence - guest-to-host TCP only.
+**Status:** partial performance evidence - bidirectional TCP smoke.
 **Date:** 2026-05-17.
 
 This note records the first repeatable legacy-vs-vector2 performance
-baseline harness for `umlctl`.  It is intentionally small: one
-guest-to-host TCP stream, one transfer size, and one host.  It is useful
-as a regression tripwire and as a convenient operator workflow, but it
-does not close the replacement performance gate.
+baseline harness for `umlctl`.  It is intentionally small: one TCP
+stream per direction, one transfer size, and one host.  It is useful as
+a regression tripwire and as a convenient operator workflow, but it does
+not close the replacement performance gate.
 
 ## Harness
 
@@ -20,9 +20,11 @@ tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh
 The helper:
 
 - generates a temporary Umlfile per driver;
-- starts a host Python TCP sink on `0.0.0.0:${UML_VECTOR_PERF_PORT}`;
+- supports `guest-to-host`, `host-to-guest`, or `both`;
+- starts a host Python TCP sink for guest-to-host runs;
+- starts a guest Python TCP sink for host-to-guest runs;
 - boots the UML guest through `umlctl up`;
-- has the guest send a fixed byte count to `$UMLCTL_GATEWAY`;
+- sends a fixed byte count across the selected direction;
 - records guest-side and host-side MiB/s;
 - writes a TSV summary and per-run logs;
 - tears the instance down with `umlctl down --force --rm`.
@@ -31,6 +33,7 @@ Defaults:
 
 ```text
 drivers: vector,vector2
+direction: guest-to-host
 bytes:   33554432
 port:    19091
 backend: seccomp
@@ -42,6 +45,11 @@ Example:
 
 ```sh
 UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-baseline \
+  tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+  --kernel /home/mjbommar/projects/personal/.build/um-vector-r2-both/linux
+
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g \
   tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
   --kernel /home/mjbommar/projects/personal/.build/um-vector-r2-both/linux
 ```
@@ -83,7 +91,7 @@ CONFIG_UML_NET_VECTOR_V2=y
 CONFIG_UML_NET_VECTOR_V2_SANDBOX=y
 ```
 
-## Result
+## Guest-To-Host Result
 
 Command:
 
@@ -107,9 +115,9 @@ summary: /tmp/um-vector-perf-baseline/summary.tsv
 Summary:
 
 ```text
-driver   bytes     guest_mib_s   host_mib_s
-vector   33554432  662.031       958.685
-vector2  33554432  219.751       244.509
+driver   direction      bytes     guest_mib_s   host_mib_s
+vector   guest-to-host  33554432  662.031       958.685
+vector2  guest-to-host  33554432  219.751       244.509
 ```
 
 The logs showed:
@@ -120,13 +128,50 @@ The logs showed:
 - no `uml-vector: Couldn't parse '2.0'` line remained;
 - no lingering `vperf-vector0` or `vperf-vector20` TAP device remained.
 
+## Host-To-Guest Result
+
+Command:
+
+```sh
+rm -rf /tmp/um-vector-perf-h2g
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g \
+  tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+  --kernel /home/mjbommar/projects/personal/.build/um-vector-r2-both/linux
+```
+
+Output:
+
+```text
+VECTOR_NET_PERF direction=host-to-guest driver=vector transport=tap queues=1 bytes=33554432 seconds=10.021694 mib_s=3.193 addr=('10.93.0.1', 48692)
+HOST_SEND bytes=33554432 seconds=10.001529 mib_s=3.200
+VECTOR_NET_PERF direction=host-to-guest driver=vector2 transport=fd queues=4 bytes=33554432 seconds=0.070231 mib_s=455.642 addr=('10.93.0.1', 44128)
+HOST_SEND bytes=33554432 seconds=0.072685 mib_s=440.253
+summary: /tmp/um-vector-perf-h2g/summary.tsv
+```
+
+Summary:
+
+```text
+driver   direction      bytes     guest_mib_s   host_mib_s
+vector   host-to-guest  33554432  3.193         3.200
+vector2  host-to-guest  33554432  455.642       440.253
+```
+
+The logs showed vector2 registering successfully in the same
+both-drivers kernel, no parser collision, and no lingering
+`vperf-vec-h2g` or `vperf-v2-h2g` TAP device.
+
+A final script smoke also verified `UML_VECTOR_PERF_DIRECTION=both`
+with vector2 and a 1 MiB transfer in both directions.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
 guest-to-host run, vector2 fd multiqueue is slower than legacy vector
-TAP.  That is expected to remain a replacement blocker until the cause
-is understood or the regression is explicitly accepted with the legacy
-driver retained for a transition period.
+TAP.  On the host-to-guest run, vector2 fd multiqueue is much faster
+than legacy vector TAP on this host.  Both findings need repeated runs
+and profiling before they can support a replacement decision.
 
 The immediate value is that future vector2 changes now have a simple
 side-by-side `umlctl` command to catch large regressions and to track
@@ -136,7 +181,6 @@ whether fd multiqueue batching work improves throughput.
 
 The full replacement performance gate still needs:
 
-- host-to-guest TCP;
 - UDP packet rate;
 - larger and repeated transfer sizes;
 - single-queue vector2 fd and TAP comparisons;

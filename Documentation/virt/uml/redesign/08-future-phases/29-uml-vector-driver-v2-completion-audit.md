@@ -31,7 +31,7 @@ experimental netdev exists.
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher | Partial: needs strace/audit gate |
 | Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; heavier KCSAN traffic and fairness profiles absent | Partial |
-| Performance parity or accepted regression | Initial `umlctl` guest-to-host TCP baseline exists: legacy vector TAP 32 MiB at 662 MiB/s guest-side, vector2 fd multiqueue 32 MiB at 220 MiB/s guest-side on the same host; host-to-guest, UDP, syscall, CPU, and repeated-size profiles remain absent | Partial: regression measured, not accepted |
+| Performance parity or accepted regression | Initial `umlctl` bidirectional TCP baseline exists: guest-to-host legacy vector TAP 32 MiB at 662 MiB/s guest-side versus vector2 fd multiqueue 32 MiB at 220 MiB/s; host-to-guest legacy vector TAP 32 MiB at 3.2 MiB/s versus vector2 fd multiqueue 32 MiB at 456 MiB/s on the same host; UDP, syscall, CPU, and repeated-size profiles remain absent | Partial: mixed results measured, not accepted |
 | Legacy `vecN:` compatibility transition | Legacy remains production path; no v2 compatibility switch | Open |
 | Reviewable, bisectable patch series | Work is split across pushed commits and checkpoint docs | Ongoing |
 
@@ -100,9 +100,12 @@ Validation evidence recorded in the checkpoint docs includes:
   `vec2.0` registering successfully in a both-drivers kernel;
 - initial legacy-vs-vector2 performance baseline helper:
   `tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh`,
-  producing `/tmp/um-vector-perf-baseline/summary.tsv` with legacy
-  vector TAP at 662 MiB/s guest-side and vector2 fd multiqueue at
-  220 MiB/s guest-side for a 32 MiB guest-to-host transfer;
+  producing `/tmp/um-vector-perf-baseline/summary.tsv` with
+  guest-to-host legacy vector TAP at 662 MiB/s guest-side and vector2
+  fd multiqueue at 220 MiB/s guest-side for 32 MiB, plus
+  `/tmp/um-vector-perf-h2g/summary.tsv` with host-to-guest legacy
+  vector TAP at 3.2 MiB/s guest-side and vector2 fd multiqueue at
+  456 MiB/s guest-side for 32 MiB;
 - vector2 TAP `queues=2` seccomp smoke and queue distribution evidence;
 - vector2 `ndo_select_queue` and XPS queue-to-CPU policy KUnit
   evidence;
@@ -119,7 +122,7 @@ list is:
 - validate queue-to-CPU policy under longer SMP traffic;
 - run heavier KCSAN on multiqueue traffic;
 - expand legacy-vs-v2 performance baselines and explain or accept the
-  measured guest-to-host regression;
+  measured guest-to-host regression and mixed bidirectional results;
 - run a repeated long soak with vector2 workloads;
 - decide and implement the legacy `vecN:` transition.
 

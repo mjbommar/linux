@@ -259,8 +259,8 @@ parking-lot designs for future prioritization.
   Initial legacy-vs-vector2 `umlctl` performance baseline: adds a
   guest-to-host TCP helper script, fixes the legacy `vec` parser so it
   leaves `vec2.` / `vec2=` for vector2 in both-drivers kernels, records
-  a short 32 MiB comparison, and keeps the full performance gate open.
-  Not a commitment.
+  short 32 MiB guest-to-host and host-to-guest comparisons, and keeps
+  the full performance gate open. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
