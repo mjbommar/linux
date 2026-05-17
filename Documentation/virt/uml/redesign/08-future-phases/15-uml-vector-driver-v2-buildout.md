@@ -1083,6 +1083,12 @@ KVM-v2 readiness follow-up:
     `Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.`
     while importing `re` / `email.utils` / `http.server`, then dumped
     `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`;
+  - `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` now
+    reassembles the split `KVMV2T-*` sections by `(cpu, seq)`; it parsed
+    the failing iteration into 5140 parsed / 5140 complete entries,
+    reported pids `161=4004` and `1=1136`, max mm-generation lag 4822,
+    and neighboring pass logs with higher TLB-lag maxima but no failure
+    dump;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
@@ -1100,7 +1106,10 @@ KVM-v2 readiness follow-up:
     `SERVER_FAIL` when `/sys/kernel/debug/um_kvm_v2_trace/dump` exists;
   - generated Django and FastAPI dry-runs confirmed the new markers and
     vector2 fd-handoff kernel args;
-  - a Django vector2 seccomp live check passed `PASS=1/1`.
+  - a Django vector2 seccomp live check passed `PASS=1/1`;
+  - the trace summary helper compiled with `python3 -m py_compile` and
+    its `--json` mode emitted machine-readable summaries for follow-on
+    backend tooling.
 - Therefore the old "KVM-v2 cannot even boot before vector2" blocker is
   narrowed to a KVM-v2 application-workload stability question.  Vector2
   fd handoff works on KVM-v2, one Django 30/30 run is clean, and the

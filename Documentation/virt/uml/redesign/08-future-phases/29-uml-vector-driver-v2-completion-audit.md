@@ -228,7 +228,11 @@ Validation evidence recorded in the checkpoint docs includes:
   while importing `re` / `email.utils` / `http.server`, and then
   emitting `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`; the failed
   iteration max `KVM_V2_TLB_LAG` was 943, while the run max was 2410
-  and 59/60 logs had max lag above 1000;
+  and 59/60 logs had max lag above 1000; the
+  `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` helper
+  reassembled the failure dump into 5140 parsed / 5140 complete entries,
+  reported the pid 161/1 trace distribution, and showed neighboring pass
+  logs had higher TLB-lag maxima without a trace dump;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -238,7 +242,7 @@ list is:
 
 - fix or explain the remaining KVM-v2 Django workload instability: the
   correctly configured KVM-v2 runtime now boots, runs vector2 fd smoke,
-  has one clean Django `PASS=30/30` rerun, and now captures a
+  has one clean Django `PASS=30/30` rerun, and now captures and parses a
   trace-ring dump on failure, but longer samples still fail at
   `PASS=57/60 FAIL=2 TIMEOUT=1` and `PASS=59/60 FAIL=1 TIMEOUT=0`
   with guest Python failures and one startup timeout;

@@ -355,6 +355,55 @@ max lag above 1000.  As with the earlier flake sample, TLB lag is not a
 per-iteration classifier; the new value is that the Python abort is now
 paired with a captured KVM-v2 state-ring dump.
 
+### Trace Summary Helper
+
+The copied `KVMV2T-*` trace lines are intentionally split into tagged
+sections so printk interleaving cannot corrupt a complete record.  The
+helper below reassembles those sections by `(cpu, seq)` and summarizes
+the failure markers, TLB-lag lines, operation counts, port counts, exit
+reasons, pids, maximum observed mm-generation lag, fatal Python context,
+and final trace entries:
+
+```
+tools/testing/selftests/um/soak/kvmv2-trace-summary.py \
+  /tmp/um-tier3-django-v2-kvmv2-trace-60/p0_default/w0/run-21.log \
+  --limit 8
+```
+
+The first summary of the failing iteration produced:
+
+```
+entries: parsed=5140 complete=5140
+seq_range: 2468741..2473880
+dump_begin: reason=debugfs declared_entries=5140
+dump_end_entries: 5140,5140
+markers: fatal_python=1 python_abort=1 server_fail=1 trace_dump_begin=1 trace_dump_end=1
+tlb_lag: count=30 max=943
+tlb_lag_by_pid: 1=28 35=2
+ops top: POST_FPU_INSTALL=506 POST_IST_RESTORE=506 POST_KVM_RUN=506 POST_LOAD_SREGS=506 POST_TLB_SYNC=506 PRE_KVM_RUN=506 VCPU_RUN_ENTRY=506 VCPU_RUN_EXIT=504
+ports: 0xf6=1832 0xf4=1269 0xfd=1127 0x0=912
+exit_reasons: 2=4228 0=912
+pids: 161=4004 1=1136
+max_mm_lag: lag=4822 cpu=0 seq=2473317 pid=1 op=HANDLE_SYSCALL_POST mmgen=4947 vlast=125
+last_entry: seq=2473880 pid=1 op=HANDLE_SYSCALL_PRE port=0xf4 rip=ffffe000000000f5 cr2=0x800e90be0e
+```
+
+Neighboring passing logs do not contain trace dumps because the template
+only dumps the ring on `SERVER_FAIL`, but the helper still captures their
+markers and TLB-lag lines:
+
+```
+run-20.log: entries=0 server_ready=1 tier3_ok=1 tlb_lag_count=30 tlb_lag_max=1745
+run-22.log: entries=0 server_ready=1 tier3_ok=1 tlb_lag_count=30 tlb_lag_max=1754
+```
+
+This does not prove root cause.  It does prove that the captured failure
+dump is structurally complete and analyzable, that high `KVM_V2_TLB_LAG`
+is still not a direct pass/fail classifier, and that the next backend
+debugging pass can focus on the pid 161/1 transition history and the
+final syscall/page-fault sequence rather than vector2 registration or fd
+handoff.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -387,13 +436,14 @@ and one startup timeout under the same workload shape.  The vector2
 driver should not claim final KVM-v2 Tier 3 readiness until this backend
 userspace-execution flake class is fixed or otherwise explained with
 repeatable clean evidence.  The trace-enabled rerun confirms the same
-Python abort class and now preserves a KVM-v2 state-ring dump for
-backend analysis.
+Python abort class and now preserves a complete KVM-v2 state-ring dump
+for backend analysis.
 
 ## Next Work
 
-1. Analyze the iteration 21 `KVMV2T` dump from the trace-enabled
-   59/60 run against neighboring pass logs.
+1. Use the parsed iteration 21 `KVMV2T` dump to inspect the pid 161/1
+   transition history, final syscall/page-fault sequence, and the large
+   `mmgen - vlast` gap around `HANDLE_SYSCALL_POST`.
 2. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
 3. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
@@ -422,4 +472,7 @@ Validation for the diagnostic change:
 - a Django vector2 KVM-v2 trace smoke passed `PASS=1/1 FAIL=0
   TIMEOUT=0` with the state trace enabled at boot;
 - a Django vector2 KVM-v2 trace 60-run captured a failing iteration with
-  `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`.
+  `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`;
+- `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` reassembled
+  that dump into 5140 parsed / 5140 complete entries and validated JSON
+  output for follow-on tooling.
