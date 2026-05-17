@@ -302,6 +302,20 @@ config UML_NET_VECTOR_V2_HOST_FD_KUNIT
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
 
+config UML_NET_VECTOR_V2_HOST_TAP_KUNIT
+	bool "Vector networking v2 TAP host KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 trusted TAP host
+	  backend. These tests validate fd ownership, close unwind, and
+	  sandbox fail-closed behavior without requiring a real host TAP
+	  device in KUnit.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
 endmenu
 
 config VIRTIO_UML

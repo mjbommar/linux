@@ -78,6 +78,9 @@ void um_vec2_ethtool_attach(struct net_device *dev);
 
 int um_vec2_fd_open(struct um_vec2_dev *vdev);
 void um_vec2_fd_close(struct um_vec2_dev *vdev);
+int um_vec2_tap_open(struct um_vec2_dev *vdev);
+int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd);
+void um_vec2_tap_close(struct um_vec2_dev *vdev);
 
 int um_vec2_netdev_open(struct net_device *dev);
 int um_vec2_netdev_stop(struct net_device *dev);

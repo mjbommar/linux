@@ -30,8 +30,8 @@ The following v2 foundations exist:
 Those pieces prove parser policy, queue ownership, transport header
 bounds checks, fake-host behavior, and lifecycle transitions.
 
-R1 through R3 have now added the first runtime attachments and the
-first trusted host-open skeleton:
+R1 through R4 have now added the first runtime attachments and the
+first trusted host-open skeletons:
 
 - `CONFIG_UML_NET_VECTOR_V2`, default `n`;
 - v2-only command-line collection through `vec2.<n>:` and `vec2=`;
@@ -45,7 +45,12 @@ first trusted host-open skeleton:
 - trusted direct-fd duplication and close unwind;
 - `ip link set vec2.0 up/down` success for
   `CONFIG_UML_NET_VECTOR_V2_INPROC=y` plus
-  `vec2.0:transport=fd,fd=<n>`.
+  `vec2.0:transport=fd,fd=<n>`;
+- trusted TAP open through `/dev/net/tun`, `TUNSETIFF`, and explicit
+  close unwind;
+- `ip link set vec2.0 up/down` success for
+  `CONFIG_UML_NET_VECTOR_V2_INPROC=y` plus
+  `vec2.0:transport=tap,ifname=<tap>`.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
 They still do not provide packet movement.
@@ -57,7 +62,7 @@ Missing runtime pieces:
 - no live IRQ registration;
 - no fd packet movement;
 - no launcher-manifest fd path for sandbox mode;
-- no trusted TAP host backend;
+- no TAP packet movement;
 - no v2 ethtool stats, rings, coalescing, or feature controls;
 - no feature negotiation;
 - no live single-queue smoke test;
@@ -312,13 +317,15 @@ R3 implementation note:
 
 ### V2-R4 - Trusted TAP Backend
 
-Goal: provide the first useful TAP runtime path.
+Goal: provide the trusted TAP open/close runtime path.
 
 Deliverables:
 
 - `vector2_host_tap.c` opens or attaches to a TAP device only when
   trusted in-process mode is enabled.
-- vnet header negotiation is explicit and reflected in feature flags.
+- TAP open requests `IFF_TAP | IFF_NO_PI | IFF_VNET_HDR` and applies
+  best-effort checksum/TSO offload setup.  Full feature reporting is
+  deferred to R6.
 - TAP fd close/unwind follows channel state.
 - TAP host options (`ifname`, helper commands, BPF file) are policy
   gated.
@@ -334,6 +341,17 @@ Exit gate:
 
 - `ip link set vec2 up` reaches `RUNNING` on TAP without packet
   movement.
+
+R4 implementation note:
+
+- `20-uml-vector-driver-v2-r4-tap-backend.md` records the trusted TAP
+  open/close backend, TAP fd ownership rule, backend-specific close
+  routing, `ndo_open()` success for TAP mode, sandbox rejection of
+  direct `ifname=`, `strace` evidence that sandbox mode does not open
+  `/dev/net/tun`, manual runtime checks, build evidence, and 59-test
+  KUnit result.
+- R4 still has no packet movement.  The TAP-backed netdev opens with
+  `NO-CARRIER` and stopped queues until the datapath phase.
 
 ### V2-R5 - Single-Queue RX/TX Data Path
 
@@ -565,7 +583,7 @@ the accepted replacement scope.  A regression can be accepted only if
 the safety/security benefit is documented and the old driver remains
 available for one transition cycle.
 
-## First Three Patch Series
+## First Runtime Patch Series
 
 The next concrete work should be:
 
@@ -584,7 +602,14 @@ The next concrete work should be:
    `ndo_stop` through the lifecycle model, and pass repeated open/close
    failure injection.
 
-Only after those three series should trusted TAP packet movement start.
+4. **TAP backend plus open/close.**
+   Wire `vector2_host_tap.c` to trusted TAP fd creation, keep sandbox
+   builds fail-closed before `/dev/net/tun`, and validate repeated
+   `ip link set vec2.0 up/down` without packet movement.
+
+Those first four series have now taken v2 from parked scaffolding to an
+experimental inspectable netdev with trusted fd and TAP open/close
+paths.  Trusted TAP packet movement starts in R5, not in R4.
 
 ## Workstream Exit Summary
 

@@ -30,6 +30,7 @@ obj-$(CONFIG_STDERR_CONSOLE) += stderr_console.o
 obj-$(CONFIG_UML_NET_VECTOR) += vector.o
 obj-$(CONFIG_UML_NET_VECTOR_V2) += vector2_cmdline.o vector2_core.o \
 				   vector2_ethtool.o vector2_host_fd.o \
+				   vector2_host_tap.o \
 				   vector2_netdev.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_CONFIG) += vector2_config.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_KUNIT) += vector2_config_test.o
@@ -44,6 +45,7 @@ obj-$(CONFIG_UML_NET_VECTOR_V2_MODEL_KUNIT) += vector2_model_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_CMDLINE_KUNIT) += vector2_cmdline_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_NETDEV_KUNIT) += vector2_netdev_test.o
 obj-$(CONFIG_UML_NET_VECTOR_V2_HOST_FD_KUNIT) += vector2_host_fd_test.o
+obj-$(CONFIG_UML_NET_VECTOR_V2_HOST_TAP_KUNIT) += vector2_host_tap_test.o
 obj-$(CONFIG_MCONSOLE) += mconsole.o
 obj-$(CONFIG_BLK_DEV_UBD) += ubd.o 
 obj-$(CONFIG_UML_SOUND) += hostaudio.o

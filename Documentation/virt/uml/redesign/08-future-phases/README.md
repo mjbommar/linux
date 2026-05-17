@@ -168,6 +168,12 @@ parking-lot designs for future prioritization.
   duplication ownership, channel lifecycle attach/close, fd-mode
   `ip link up/down`, sandbox rejection of raw `fd=`, build matrix,
   manual runtime evidence, and KUnit coverage. Not a commitment.
+- [20-uml-vector-driver-v2-r4-tap-backend.md](20-uml-vector-driver-v2-r4-tap-backend.md) —
+  R4 implementation note for the trusted TAP backend: `/dev/net/tun`
+  open through the v2 host boundary, TAP fd ownership, channel lifecycle
+  attach/close, TAP-mode `ip link up/down`, sandbox rejection of
+  direct `ifname=`, `strace` sandbox evidence, build evidence, and
+  KUnit coverage. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

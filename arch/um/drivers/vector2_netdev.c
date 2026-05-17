@@ -31,6 +31,8 @@ static struct um_vec2_dev *um_vec2_from_netdev(struct net_device *dev)
 static int um_vec2_open_backend(struct um_vec2_dev *vdev)
 {
 	switch (vdev->cfg.transport) {
+	case UM_VEC2_TRANSPORT_TAP:
+		return um_vec2_tap_open(vdev);
 	case UM_VEC2_TRANSPORT_FD:
 		return um_vec2_fd_open(vdev);
 	default:
@@ -38,11 +40,25 @@ static int um_vec2_open_backend(struct um_vec2_dev *vdev)
 	}
 }
 
+static void um_vec2_close_backend(struct um_vec2_dev *vdev)
+{
+	switch (vdev->cfg.transport) {
+	case UM_VEC2_TRANSPORT_TAP:
+		um_vec2_tap_close(vdev);
+		break;
+	case UM_VEC2_TRANSPORT_FD:
+		um_vec2_fd_close(vdev);
+		break;
+	default:
+		break;
+	}
+}
+
 static int um_vec2_unwind_open(struct um_vec2_dev *vdev)
 {
 	int ret;
 
-	um_vec2_fd_close(vdev);
+	um_vec2_close_backend(vdev);
 
 	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_QUIESCING);
 	if (ret)
@@ -80,7 +96,6 @@ int um_vec2_netdev_open(struct net_device *dev)
 
 	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_RUNNING);
 	if (ret) {
-		um_vec2_fd_close(vdev);
 		if (um_vec2_unwind_open(vdev))
 			netdev_err(dev, "vector v2 open unwind failed\n");
 		goto out;
@@ -109,7 +124,7 @@ int um_vec2_netdev_stop(struct net_device *dev)
 					     UM_VEC2_DEV_QUIESCING);
 		if (ret)
 			break;
-		um_vec2_fd_close(vdev);
+		um_vec2_close_backend(vdev);
 		ret = um_vec2_dev_transition(&vdev->life,
 					     UM_VEC2_DEV_REGISTERED);
 		break;
