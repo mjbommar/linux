@@ -325,6 +325,7 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 
 	/* Reset per-session counters; preserve strict_replay across re-arm. */
 	rec->buffer_used = 0;
+	rec->buffer_replayed = 0;
 	rec->sequence = 0;
 	rec->entries_recorded = 0;
 	rec->entries_replayed = 0;
@@ -475,7 +476,8 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec)
 	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
 
 	rec->state = KVM_V2_RECORD_REPLAYING;
-	rec->entries_replayed = 0;	/* replay starts from cursor 0 */
+	rec->buffer_replayed = 0;	/* replay reads from byte cursor 0 */
+	rec->entries_replayed = 0;	/* replay starts from entry cursor 0 */
 
 	if (need_register)
 		static_branch_enable(&um_kvm_v2_record_enabled);
@@ -655,26 +657,136 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_observe_syscall);
 
-/*
- * Phase 3 stub — replay-side consume hook.
+/**
+ * kvm_v2_record_consume_syscall - replay-side FIFO consume.
+ * @rec:        active container; caller has typically already gated on
+ *              kvm_v2_record_active(). NULL is tolerated (no-op,
+ *              returns 0).
+ * @syscall_nr: NR the dispatcher just received (cached at the
+ *              syscall_trap.c hook site BEFORE PT_SYSCALL_NR is
+ *              cleared). The replay walker validates this against
+ *              the next log entry's recorded NR.
+ * @ret_value:  out-param. On rc > 0, written with the recorded
+ *              entry->syscall.retval so the caller can stuff it into
+ *              regs->gp[HOST_AX] and skip live handle_syscall.
  *
- * Returns 0 ("entry not served — fall through to live syscall") in
- * Phase 1; Phase 3 fills in the FIFO walk + -EILSEQ on NR-mismatch
- * + -ENODATA on end-of-log. The pre-handle_syscall arm of
- * kvm_v2_handle_io_trap calls this gated by the same static key as
- * the observe hook; the @ret_value out-param carries the served
- * return value when the function returns > 0.
+ * Walks @rec->buffer in FIFO order starting at @rec->buffer_replayed
+ * (the read cursor, distinct from @rec->buffer_used = write cursor).
+ * Each entry's @size header field advances the cursor — Phase 2's
+ * append helper writes @size = sizeof(entry); Phase 5-6 will mix
+ * payload sizes per kind under the same @size discipline.
+ *
+ * Returns:
+ *   1         entry served (the only success-with-side-effects path).
+ *             *ret_value populated; cursor advanced; entries_replayed
+ *             incremented by 1.
+ *   0         no work — @rec NULL or @rec->state != REPLAYING. The
+ *             caller falls through to live handle_syscall.
+ *   -ENODATA  end-of-log: @buffer_replayed >= @buffer_used. In strict
+ *             replay this is a divergence (the record ran longer than
+ *             the replay needed to reproduce); the caller delivers
+ *             SIGSEGV. In loose replay the caller falls through.
+ *   -EILSEQ   sequence error: the next entry's @kind is not
+ *             KVM_V2_REPLAY_SYSCALL (buffer corruption — Phase 2's
+ *             observe hook only writes SYSCALL entries) or its
+ *             @syscall.nr does not match the dispatcher's @syscall_nr
+ *             (replay diverged from record on syscall stream). Same
+ *             strict / loose handling at the caller as -ENODATA.
+ *
+ * Locking: takes @rec->lock so a racing _stop on another CPU can't
+ * tear down state between the state check and the cursor advance.
+ * The mutex is the same one the observe hook holds; under Phase 1-3
+ * single-vCPU KUnit the lock is uncontended.
+ *
+ * Mirror of v1's kvm_record_consume_syscall (kvm-v1-archive/record.c:
+ * 1085-1160) adapted to the v2 per-record buffer (vs v1's global
+ * active-record + log array). v1 returned the NR-mismatch as -EILSEQ
+ * AND the end-of-log as -ENODATA via separate error codes; the v2
+ * port preserves that surface — the syscall_trap.c hook's strict-mode
+ * pr_info distinguishes them via rc itself for operator-visible
+ * divergence diagnostics.
  */
 int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
 				  unsigned long syscall_nr,
 				  long *ret_value)
 {
-	/* Phase 3 — fill in: pop next KVM_V2_REPLAY_SYSCALL entry,
-	 * validate NR matches, return entry->ret_value via out-param.
+	struct kvm_v2_replay_entry *e;
+	size_t cursor;
+	int rc;
+
+	if (!rec)
+		return 0;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_REPLAYING) {
+		/*
+		 * A racing _stop may have advanced past REPLAYING between
+		 * the hook site's static_branch read and our entry. Quiet
+		 * no-op — caller falls through to live (the same outcome
+		 * it would have got if the gate had already patched out).
+		 */
+		mutex_unlock(&rec->lock);
+		return 0;
+	}
+
+	cursor = rec->buffer_replayed;
+	if (cursor >= rec->buffer_used) {
+		/* End-of-log. */
+		rc = -ENODATA;
+		goto out_unlock;
+	}
+
+	/*
+	 * Bounds check: a partial entry at the tail would indicate buffer
+	 * corruption. Phase 2's append helper only commits whole entries
+	 * (the size-check fails atomically before the write) but the
+	 * defensive read here keeps the walker robust against future
+	 * mid-write torn states (Phase 6 multi-vCPU may surface them).
 	 */
-	(void)rec;
-	(void)syscall_nr;
-	(void)ret_value;
-	return 0;
+	if (cursor + sizeof(*e) > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
+
+	if (e->kind != KVM_V2_REPLAY_SYSCALL) {
+		/*
+		 * Phase 2's observe hook only emits SYSCALL entries; a
+		 * different kind at the cursor means either buffer
+		 * corruption or a future kind (RDTSC/SIGALRM — Phase 5/6)
+		 * the consume_syscall walker doesn't know how to skip.
+		 * Treat as divergence per memo 27 §3.2.
+		 */
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	if (e->syscall.nr != (s32)syscall_nr) {
+		/* Replay diverged from record on the syscall NR stream. */
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	if (e->size < sizeof(*e) || cursor + e->size > rec->buffer_used) {
+		/*
+		 * Defensive: size header lies (would advance past
+		 * buffer_used) — treat as buffer corruption / divergence.
+		 */
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	/* Entry served. Populate out-param + advance cursors. */
+	if (ret_value)
+		*ret_value = (long)e->syscall.retval;
+	rec->buffer_replayed = cursor + e->size;
+	rec->entries_replayed++;
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall);

@@ -11949,4 +11949,158 @@ point) carries the full sketch.
 
 ---
 
+## D133 (2026-05-16) — record/replay v2 port Phase 3: consume_syscall + strict-replay hook
+
+**Track:** B (Time-machine).
+
+**Decision.** #169 (record/replay) Phase 3 closes the loop: fills in
+the Phase 1 `consume_syscall` stub with a real FIFO walker over
+`rec->buffer`, wires the matching pre-`handle_syscall` hook in
+`syscall_trap.c::kvm_v2_handle_io_trap`, and lands the
+`test_kvm_v2_record_strict_replay` KUnit case that exercises the
+record → replay round trip end-to-end. Phase 1 (D131) landed the
+state-machine skeleton + the
+`DEFINE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled)` gate; Phase 2
+(D132) wired the `observe_syscall` hook AFTER `handle_syscall`.
+Phase 3 is symmetric: the `consume_syscall` hook fires BEFORE
+`handle_syscall`, gated by the same static key, and on a served
+entry (`rc > 0`) jumps past the live syscall to the post-call
+marshal-out path via a new `skip_handle_syscall:` label.
+
+**Three surface decisions Phase 3 took.**
+
+  1. **Cursor-only advance on success.** `consume_syscall` advances
+     `rec->buffer_replayed` ONLY when an entry is fully validated
+     and served (`rc == 1`). On `-ENODATA` / `-EILSEQ` the cursor
+     stays at the rejected entry so the operator can dump
+     `rec->buffer + rec->buffer_replayed` post-mortem and read out
+     the divergent entry's kind / nr / retval / args. The
+     alternative — "advance on every consume regardless" — was
+     rejected because it destroys the diagnostic trail (a
+     strict-mode SIGSEGV kills the task; if the cursor points
+     ONE PAST the divergent entry, the operator can't see what
+     diverged). Validated by the test case's "matching NR after
+     a failed NR-mismatch divergence still serves" sub-scenario.
+
+  2. **`skip_handle_syscall:` label placement.** The replay-served
+     path must skip three things and preserve two:
+        - **Skip:** `handle_syscall(regs)` (the whole point);
+                    the `interrupt_end()` `-ERESTART*` drain
+                    (we'd double-translate the recorded retval);
+                    the Phase 2 observe hook (re-observing during
+                    replay would inflate `entries_recorded`).
+        - **Preserve:** `PT_SYSCALL_NR(regs->gp) = -1;` clear
+                    (cross-path orig_ax-leakage protection per
+                    commit a478952b8da0; a subsequent #PF
+                    dispatcher's interrupt_end would
+                    misinterpret stale orig_ax as in-progress
+                    syscall → SIGILL); the marshal-out (SYSRETQ
+                    needs the right RIP/RFLAGS in RCX/R11).
+     The label seam lands right BEFORE the `PT_SYSCALL_NR` clear
+     — the only placement that gets all three "skip" + both
+     "preserve" requirements right. Documented inline so future
+     Phase 5/6 hooks have an explicit invariant.
+
+  3. **Strict-mode `force_sig(SIGSEGV)` continues past
+     `goto skip_handle_syscall`.** Two options were considered:
+        - (a) Return early from `kvm_v2_handle_io_trap` with a
+              non-zero rc after the `force_sig` call.
+        - (b) `goto skip_handle_syscall` after the `force_sig`
+              call, run the marshal-out normally, let the queued
+              SIGSEGV deliver on the next return-to-userspace
+              check.
+     Picked (b). The vcpu.c call site doesn't have a stable
+     error-propagation contract; the in-tree behaviour on a
+     non-zero rc from `kvm_v2_handle_io_trap` is "halt the
+     vmexit loop and panic," which is the wrong outcome for a
+     per-task divergence (the WHOLE pool would die instead of
+     just the divergent task). The (b) path lets the kernel
+     re-enter the guest cleanly; `get_signal` → `do_signal`
+     delivers the queued SIGSEGV on the next user-mode return
+     check. Same semantics as v1's strict-replay path
+     (`kvm-v1-archive/syscall_class.c`'s `force_sig` + return
+     to the dispatch loop).
+
+**`buffer_replayed` cursor.** Phase 3 adds `size_t
+buffer_replayed` to `struct kvm_v2_record` as the read cursor,
+distinct from Phase 2's `buffer_used` write cursor. Invariant:
+`buffer_replayed <= buffer_used` at all times. Reset to 0 by
+`kvm_v2_record_start` (rewind on record arm) and by
+`kvm_v2_record_replay` (rewind on replay arm). The consume walker
+reads `entry->size` from the header (Phase 2's append helper sets
+this to `sizeof(entry)`; Phase 5/6 will mix payload sizes per
+kind) to advance the cursor per-entry without knowing each kind's
+fixed-size payload at compile time.
+
+**KUnit verification.** Boot under `backend=force=kvm-v2 mem=512M
+ncpus=1 init=/bin/echo`. All 4 suites pass:
+
+  - `kvm_v2_marshal`: 8/8 (unchanged).
+  - `kvm_v2_byteshape`: 9/9 (unchanged).
+  - `kvm_v2_snapshot`: 2/2 (unchanged).
+  - `kvm_v2_record`: 4/4 (was 3/3 at Phase 2; new case
+    `test_kvm_v2_record_strict_replay` exercises the consume
+    walker through three sub-scenarios — happy-path FIFO consume
+    × 5 → -ENODATA, NR-mismatch divergence → -EILSEQ + cursor
+    preservation, and not-REPLAYING quiet no-op).
+
+Beyond KUnit: `/bin/echo` boots to the same VFS-mount panic as
+Phase 2 with no record container ever instantiated outside the
+KUnit cases. The new pre-`handle_syscall` hook block compiles to
+a 5-byte NOP when record is off (jump_label_init at boot patches
+the `static_branch_unlikely` to its no-record direction). Phase 3
+is zero-cost when off.
+
+**LoC delta.** ~405 lines added across:
+
+  - `arch/um/backend/kvm-v2/record.c` +124 (consume body + the
+    two `buffer_replayed` resets in _start / _replay).
+  - `arch/um/backend/kvm-v2/syscall_trap.c` +85 (hook + label +
+    `linux/sched/signal.h` include).
+  - `arch/um/backend/kvm-v2/kvm_v2_backend.h` +32 (field +
+    kerneldoc + prototype rewrite).
+  - `arch/um/backend/kvm-v2/test_record.c` +164 (new KUnit case
+    with three sub-scenarios).
+
+4 existing files modified; 0 files added; 0 files removed; 0
+behavioral changes to existing call sites.
+
+**checkpatch.** 0 errors, 7 warnings — all 7 are the same
+"Prefer 'fallthrough;' over fallthrough comment" false positive
+(prose mentions of "fall through" in kerneldoc; no switch-case
+fallthrough is involved). Same false positives Phase 1 hit; the
+flagged comments are documenting the control-flow contract of
+the rc=0 / rc<0 + !strict paths to the syscall_trap.c hook,
+not statement-level fallthroughs.
+
+**Recommended Phase 4 entry point.** Phase 4 wires gadget-disable
+into the record arm/disarm path so the 11 gadgeted NRs (getpid,
+gettid, getuid, clock_gettime, ...) become observable to the
+Phase 2 observe hook + replayable by the Phase 3 consume hook.
+Per memo 27 §3.3 the decision is Option A: a per-vCPU
+`KVM_V2_GADGET_OFF_RECORD` byte in the gadget state page;
+`lstar_gadget.S:gadget_entry` reads it (5 bytes: `cmpb $0, ...;
+jne fallback`) and branches to the fallback path when set.
+`record.c` adds `kvm_v2_record_set_gadget_fallback(bool)` called
+from `_start` / `_stop` / `_replay` / `_destroy`. Without Phase
+4 a recorded workload that calls a gadgeted NR (e.g. `getpid`)
+produces NO log entry; the replay sees the live `getpid` go
+through to handle_syscall and the strict_replay contract fails
+on the first gadgeted call. The diary
+(`13-record-port-phase3.md` §Recommended Phase 4 entry point)
+carries the full sketch.
+
+**Refs.**
+  - `02-workstreams/D-kvm-backend/27-record-replay-v2-port.md`
+    §Phase 3 + §3.2.
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/13-record-port-phase3.md`
+    (the diary for this landing).
+  - D132 (record/replay Phase 2; predecessor).
+  - D131 (record/replay Phase 1; predecessor).
+  - D130 (memo 27 design contract).
+  - Commit `41e0de91afb8` (Phase 2 landing).
+  - Commit `358c4d3c83ab` (Phase 1 landing).
+
+---
+
 ## (Future entries here, as decisions are made)

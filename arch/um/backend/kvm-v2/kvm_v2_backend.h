@@ -1052,8 +1052,12 @@ struct kvm_v2_replay_entry {
  *		  container is returned to the caller the buffer is
  *		  guaranteed non-NULL until _destroy/_free.
  * @buffer_size:  total bytes allocated for @buffer.
- * @buffer_used:  bytes consumed by appended entries; Phase 2 grows
- *		  this. Phase 1 keeps it at zero.
+ * @buffer_used:  bytes consumed by appended entries (write cursor);
+ *		  Phase 2 grows this. Phase 1 keeps it at zero.
+ * @buffer_replayed: read cursor for the Phase 3 replay walker;
+ *		  bytes consumed via kvm_v2_record_consume_syscall.
+ *		  Reset to 0 by kvm_v2_record_replay; invariant
+ *		  @buffer_replayed <= @buffer_used at all times.
  * @sequence:	  monotonic counter handed out to each appended entry.
  *		  Phase 6's SIGALRM-on-syscall-count plumbing uses this.
  * @entries_recorded: count of entries appended (= the number of
@@ -1088,6 +1092,7 @@ struct kvm_v2_record {
 	void				*buffer;
 	size_t				buffer_size;
 	size_t				buffer_used;
+	size_t				buffer_replayed;
 	u64				sequence;
 	u64				entries_recorded;
 	u64				entries_replayed;
@@ -1158,9 +1163,27 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 				   const struct uml_pt_regs *regs);
 
 /*
- * Phase 3 stub — replay-side consume hook. Returns 0 in Phase 1
- * ("no entry served"). Phase 3 fills in the FIFO walk + -EILSEQ /
- * -ENODATA semantics.
+ * Replay-side consume hook (Phase 3). FIFO walk over @rec->buffer
+ * starting at @rec->buffer_replayed. Returns:
+ *
+ *   > 0 (1):    entry served — *ret_value populated with the recorded
+ *               syscall retval; @rec->buffer_replayed advanced by
+ *               entry->size; @rec->entries_replayed bumped. Caller
+ *               must skip live handle_syscall + write @ret_value back
+ *               into regs->gp[HOST_AX].
+ *   = 0:        @rec is NULL or @rec->state != REPLAYING (no-op).
+ *               Caller falls through to live handle_syscall.
+ *   -ENODATA:   end-of-log (no more entries at the cursor). In strict
+ *               replay mode the caller delivers SIGSEGV to current;
+ *               in loose mode the caller falls through to live.
+ *   -EILSEQ:    sequence error — next entry's kind != SYSCALL OR
+ *               entry->syscall.nr != @syscall_nr. Strict-mode
+ *               divergence; loose mode fall-through.
+ *
+ * Locking: takes @rec->lock to serialise against a racing _stop /
+ * future observation. The same mutex protects @buffer_used so the
+ * "buffer_replayed <= buffer_used" invariant is consistent under
+ * concurrent access.
  */
 int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
 				  unsigned long syscall_nr,

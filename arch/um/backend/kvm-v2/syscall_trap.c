@@ -103,6 +103,7 @@
 #include <linux/mm_types.h>	/* init_mm */
 #include <linux/pgtable.h>	/* pgd_index, set_pgd */
 #include <linux/printk.h>
+#include <linux/sched/signal.h>	/* force_sig — Phase 3 strict-replay divergence */
 #include <linux/set_memory.h>
 #include <linux/signal.h>	/* clear_siginfo, kernel_siginfo_t */
 #include <linux/string.h>
@@ -2193,6 +2194,80 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 
 	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_PRE, regs, run, vcpu);
 
+	/*
+	 * Record/replay v2 — replay consume hook (memo 27 §Phase 3, §3.2).
+	 *
+	 * Slot: BEFORE handle_syscall. Symmetric to the Phase 2 observe
+	 * site below (which runs AFTER handle_syscall to capture the
+	 * post-call retval). When a recorded log was previously captured
+	 * (rec->state == REPLAYING after kvm_v2_record_replay), this
+	 * block walks the next entry, validates kind == SYSCALL +
+	 * NR equality, and on a match writes the recorded retval into
+	 * regs->gp[HOST_AX] then jumps past handle_syscall to the
+	 * marshal-out path. The live syscall is NOT issued — replay's
+	 * whole contract is "reproduce the recorded side effects without
+	 * re-issuing them against the host."
+	 *
+	 * Three rc paths:
+	 *
+	 *   rc > 0:   entry served. Stuff served_ret into HOST_AX, clear
+	 *             PT_SYSCALL_NR (defensive — the Phase 2 hook below
+	 *             expects the syscall_nr-already-cleared shape we'd
+	 *             normally hit AFTER handle_syscall), and goto past
+	 *             handle_syscall to the post-call marshal-out.
+	 *
+	 *   rc == 0:  not REPLAYING (or rec NULL race against _stop).
+	 *             Fall through to live handle_syscall.
+	 *
+	 *   rc < 0:   -ENODATA (end-of-log) or -EILSEQ (kind/NR mismatch).
+	 *             In strict_replay mode, deliver SIGSEGV to current —
+	 *             divergence is a hard fault. In loose mode, fall
+	 *             through to live handle_syscall (and pr_info the
+	 *             miss for the operator).
+	 *
+	 * The strict-mode `force_sig(SIGSEGV)` path is the one new
+	 * task-visible signal Phase 3 introduces. SIGSEGV mirrors v1
+	 * (kvm-v1-archive/syscall_class.c's strict-replay arms used the
+	 * same signal) and matches the operator mental model: divergence
+	 * == corrupt-program == segfault. The force_sig delivery uses
+	 * the existing #include <linux/sched/signal.h> machinery; we
+	 * still goto past handle_syscall so the marshal-out path runs
+	 * normally — the kernel will deliver the queued signal on the
+	 * task's next return-to-userspace check.
+	 *
+	 * Zero hot-path cost when off: the static-key gate compiles to
+	 * a 5-byte NOP patched out at boot; the new hook block adds zero
+	 * cycles to non-record runtime (same shape as the Phase 2 site
+	 * above the marshal-out).
+	 */
+	if (static_branch_unlikely(&um_kvm_v2_record_enabled)) {
+		struct kvm_v2_record *rec = kvm_v2_record_active();
+
+		if (rec && rec->state == KVM_V2_RECORD_REPLAYING) {
+			long served_ret = 0;
+			int rc;
+
+			rc = kvm_v2_record_consume_syscall(rec, syscall_nr,
+							   &served_ret);
+			if (rc > 0) {
+				regs->gp[HOST_AX] = (unsigned long)served_ret;
+				goto skip_handle_syscall;
+			}
+			if (rc < 0 && rec->strict_replay) {
+				pr_info_ratelimited(
+					"kvm-v2 record: strict replay divergence nr=%lu rc=%d entries_replayed=%llu\n",
+					syscall_nr, rc, rec->entries_replayed);
+				force_sig(SIGSEGV);
+				goto skip_handle_syscall;
+			}
+			/*
+			 * rc == 0 (not REPLAYING / racing _stop) or
+			 * (rc < 0 and !strict_replay): drop through to
+			 * live handle_syscall below.
+			 */
+		}
+	}
+
 	handle_syscall(regs);
 
 	KVMV2_TRACE(KVMV2_OP_HANDLE_SYSCALL_POST, regs, run, vcpu);
@@ -2310,6 +2385,16 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 						      regs);
 	}
 
+	/*
+	 * Phase 3 (memo 27 §3.2) replay-served path rejoins here: skip
+	 * the live handle_syscall + the interrupt_end -ERESTART* block +
+	 * the Phase 2 observe hook (we just emitted the recorded retval
+	 * into HOST_AX from the log). The PT_SYSCALL_NR clear below + the
+	 * marshal-out still run so SYSRETQ pops the right RIP/RFLAGS and
+	 * the cross-path orig_ax-leakage protection (commit a478952b8da0)
+	 * stays armed for any subsequent exception dispatcher hits.
+	 */
+skip_handle_syscall:
 	/*
 	 * Mirror seccomp's pattern at arch/um/backend/seccomp/trap_user.c:
 	 * 187-188: clear PT_SYSCALL_NR after handle_syscall returns, so

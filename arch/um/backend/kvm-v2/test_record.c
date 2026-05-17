@@ -387,10 +387,174 @@ static void test_kvm_v2_record_observe(struct kunit *test)
 			   static_branch_unlikely(&um_kvm_v2_record_enabled));
 }
 
+/**
+ * test_kvm_v2_record_strict_replay - exercise the Phase 3 consume hook.
+ *
+ * Drives kvm_v2_record_consume_syscall directly through a record →
+ * replay round trip and asserts:
+ *
+ *   1. Observed entries come back in FIFO order with the recorded
+ *      retval.
+ *   2. End-of-log returns -ENODATA.
+ *   3. NR-mismatch (replay-time nr != record-time nr) returns
+ *      -EILSEQ.
+ *
+ * No live vCPU dependency — same shape as test_kvm_v2_record_observe:
+ * the consume_syscall walker is a pure C state-machine read over the
+ * Phase 2 append buffer. The Phase 3 syscall_trap.c hook is exercised
+ * indirectly (its contract is "consult kvm_v2_record_active; call
+ * consume_syscall; act on the rc"); the hook's strict_replay
+ * force_sig(SIGSEGV) path is implicit in the rc < 0 contract this
+ * case validates.
+ *
+ * Sequence — happy path:
+ *   1. alloc → start.
+ *   2. Observe 5 entries with NR=__NR_getpid (39) + distinct retvals
+ *      (4242..4246) so we can detect the FIFO order on consume.
+ *   3. stop → assert buffer_used == 5 * sizeof(entry),
+ *      entries_recorded == 5.
+ *   4. replay → assert state == REPLAYING, buffer_replayed == 0,
+ *      entries_replayed == 0.
+ *   5. Consume × 5: each call returns 1 with the matching retval;
+ *      buffer_replayed advances by sizeof(entry); entries_replayed
+ *      grows monotonically.
+ *   6. 6th consume → -ENODATA (end-of-log).
+ *
+ * Sequence — NR divergence:
+ *   1. fresh alloc → start.
+ *   2. Observe 1 entry with NR=39.
+ *   3. stop → replay.
+ *   4. Consume with NR=40 (different) → -EILSEQ. Cursor does NOT
+ *      advance — operator-visible diagnosis (you can read out the
+ *      next entry and see what record had).
+ */
+static void test_kvm_v2_record_strict_replay(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	const unsigned long nr_getpid = 39;
+	const unsigned long nr_getppid = 110;
+	const long retvals[5] = { 4242, 4243, 4244, 4245, 4246 };
+	long got;
+	size_t prev_cursor;
+	int rc;
+	int i;
+
+	/* ---- Happy path: 5-entry FIFO consume + end-of-log. ---- */
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+
+	/* Synthesize 5 SYSCALL entries via the observe path. NULL @regs
+	 * is fine — Phase 3's consume walker doesn't care about args[],
+	 * only kind + size + nr + retval.
+	 */
+	for (i = 0; i < 5; i++) {
+		kvm_v2_record_observe_syscall(rec, nr_getpid,
+					      retvals[i], NULL);
+	}
+
+	KUNIT_EXPECT_EQ(test, rec->buffer_used,
+			5 * sizeof(struct kvm_v2_replay_entry));
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, (u64)5);
+
+	/* Stop → Replay. Read cursor must reset on replay arm. */
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+	KUNIT_EXPECT_EQ(test, rec->state, KVM_V2_RECORD_REPLAYING);
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, (size_t)0);
+	KUNIT_EXPECT_EQ(test, rec->entries_replayed, (u64)0);
+
+	/* FIFO consume × 5. */
+	for (i = 0; i < 5; i++) {
+		got = 0;
+		prev_cursor = rec->buffer_replayed;
+		rc = kvm_v2_record_consume_syscall(rec, nr_getpid, &got);
+		KUNIT_EXPECT_EQ(test, rc, 1);
+		KUNIT_EXPECT_EQ(test, got, retvals[i]);
+		KUNIT_EXPECT_EQ(test, rec->buffer_replayed,
+				prev_cursor +
+				sizeof(struct kvm_v2_replay_entry));
+		KUNIT_EXPECT_EQ(test, rec->entries_replayed, (u64)(i + 1));
+	}
+
+	/* 6th consume — end-of-log. */
+	got = 0xdead;
+	prev_cursor = rec->buffer_replayed;
+	rc = kvm_v2_record_consume_syscall(rec, nr_getpid, &got);
+	KUNIT_EXPECT_EQ(test, rc, -ENODATA);
+	/*
+	 * Cursor does NOT advance past end-of-log; the operator can
+	 * inspect buffer_replayed to see how far replay got.
+	 */
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, prev_cursor);
+	KUNIT_EXPECT_EQ(test, rec->entries_replayed, (u64)5);
+
+	/* NULL @ret_value is tolerated on the cursor-advance path
+	 * (caller wanted to skip the live syscall but didn't care about
+	 * the retval; pathological but defensible — observed in v1
+	 * kselftest harness when only counting consume calls).
+	 */
+	kvm_v2_record_destroy(rec);
+
+	/* ---- Divergence: NR-mismatch returns -EILSEQ. ---- */
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+
+	kvm_v2_record_observe_syscall(rec, nr_getpid, 100, NULL);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+	prev_cursor = rec->buffer_replayed;
+	got = 0xbeef;
+	rc = kvm_v2_record_consume_syscall(rec, nr_getppid, &got);
+	KUNIT_EXPECT_EQ(test, rc, -EILSEQ);
+	/*
+	 * Cursor does NOT advance on divergence — strict-mode hook will
+	 * SIGSEGV the task; the buffer position is preserved for
+	 * diagnostic dump.
+	 */
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, prev_cursor);
+	KUNIT_EXPECT_EQ(test, rec->entries_replayed, (u64)0);
+
+	/*
+	 * Sanity: matching NR after the failed divergence still serves
+	 * (the cursor never advanced, so the entry is still there).
+	 */
+	got = 0;
+	rc = kvm_v2_record_consume_syscall(rec, nr_getpid, &got);
+	KUNIT_EXPECT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, got, 100L);
+
+	/* ---- Not-REPLAYING state: consume is a quiet no-op. ---- */
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, rec->state, KVM_V2_RECORD_STOPPED);
+
+	got = 0xabcd;
+	rc = kvm_v2_record_consume_syscall(rec, nr_getpid, &got);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+	/* Out-param untouched on no-op path. */
+	KUNIT_EXPECT_EQ(test, got, 0xabcdL);
+
+	/* NULL @rec: also a quiet no-op returning 0. */
+	rc = kvm_v2_record_consume_syscall(NULL, nr_getpid, &got);
+	KUNIT_EXPECT_EQ(test, rc, 0);
+
+	kvm_v2_record_destroy(rec);
+
+	KUNIT_EXPECT_FALSE(test,
+			   static_branch_unlikely(&um_kvm_v2_record_enabled));
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_basic),
 	KUNIT_CASE(test_kvm_v2_record_state_transitions),
 	KUNIT_CASE(test_kvm_v2_record_observe),
+	KUNIT_CASE(test_kvm_v2_record_strict_replay),
 	{}
 };
 
