@@ -238,8 +238,15 @@ IP allocation: the daemon assigns per-worker /30s from
 / `{{TAP_NAME}}` placeholders the daemon substitutes per worker.
 
 Design: `phase-J-tier3-design-2026-05-14.md`. The per-worker IP
-allocation carve-out in `run-soak-daemon.sh` is task #25 — still
-pending until VECTOR rebuild lets us smoke-test the daemon change.
+allocation carve-out in `run-soak-daemon.sh` landed in commit
+`ba63d93515a5` (task #25, bash-side scope closed): the daemon
+branches on workload name in `run_one_phase`, spawning
+`$WORKERS` parallel `umlctl gate loop --workers 1` invocations
+for tier3 workloads with per-worker `{{HOST_IP}}` /
+`{{GUEST_IP}}` / `{{TAP_NAME}}` substitution. Verified under
+dry-run smoke (no stray `{{...}}` placeholders in worker
+TOMLs); live smoke under a `CONFIG_UML_NET_VECTOR=y` kernel
+is operator pre-flight.
 
 ## LTP bootstrap
 
