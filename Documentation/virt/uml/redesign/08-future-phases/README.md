@@ -259,8 +259,9 @@ parking-lot designs for future prioritization.
   Initial legacy-vs-vector2 `umlctl` performance baseline: adds a
   guest-to-host TCP helper script, fixes the legacy `vec` parser so it
   leaves `vec2.` / `vec2=` for vector2 in both-drivers kernels, records
-  short 32 MiB guest-to-host and host-to-guest comparisons, and keeps
-  the full performance gate open. Not a commitment.
+  short 32 MiB guest-to-host and host-to-guest comparisons, adds
+  byte-list/repeat support with a vector2 repeated-size smoke, and
+  keeps the full performance gate open. Not a commitment.
 - [37-uml-vector-driver-v2-sandbox-strace-audit.md](37-uml-vector-driver-v2-sandbox-strace-audit.md) —
   Focused vector2 fd-handoff sandbox audit: wires `umlctl up --strace`
   into supervised starts, records the UML tracee PID for clean

@@ -90,4 +90,10 @@ tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
 UML_VECTOR_PERF_DIRECTION=both \
   tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
     --kernel /path/to/uml/linux
+
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_BYTES_LIST=1048576,33554432 \
+UML_VECTOR_PERF_REPEAT=3 \
+  tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel /path/to/uml/linux
 ```

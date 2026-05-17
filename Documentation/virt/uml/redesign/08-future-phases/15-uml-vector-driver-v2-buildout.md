@@ -124,6 +124,11 @@ shape, and inspectable ethtool surfaces:
   fd multiqueue measured 456 MiB/s on the same host, making
   performance a measured open blocker rather than an unmeasured
   unknown;
+- repeated-size perf harness support: the helper accepts byte-count
+  lists and repeat counts, writes per-size/per-repeat output
+  directories plus a `repeat` summary column, and a vector2-only smoke
+  passed guest-to-host and host-to-guest 1 MiB/2 MiB transfers with no
+  lingering TAP;
 - `umlctl up --strace` wiring for audited vector2 fd-handoff runs:
   the supervisor records the UML tracee PID rather than the strace
   wrapper PID, `down --force --rm` removes the traced auto-queue run
@@ -773,11 +778,13 @@ Performance baseline follow-up:
   - vector2 `vec2.0` host-to-guest TCP over launcher-owned fd
     multiqueue: 32 MiB at 456 MiB/s guest-side;
   - direction `both` vector2 smoke with 1 MiB each way;
+  - repeated-size vector2-only smoke for 1 MiB and 2 MiB in both
+    directions;
   - no lingering baseline TAP device.
 - Therefore the performance gate now has an initial comparison harness
   and an explicit vector2 guest-to-host regression to investigate.
-  UDP packet rate, syscall profiles, repeated transfer sizes, and CPU
-  profiles remain open.
+  UDP packet rate, syscall profiles, repeated legacy-vs-vector2 transfer
+  sizes, and CPU profiles remain open.
 
 ### V2-R9 - Transport Parity
 

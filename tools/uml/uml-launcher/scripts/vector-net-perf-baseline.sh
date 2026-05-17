@@ -11,13 +11,15 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-usage: vector-net-perf-baseline.sh [--kernel PATH] [--drivers LIST] [--direction DIR] [--bytes N] [--out DIR]
+usage: vector-net-perf-baseline.sh [--kernel PATH] [--drivers LIST] [--direction DIR] [--bytes N] [--bytes-list LIST] [--repeat N] [--out DIR]
 
 Environment overrides:
   UML_KERNEL                 UML kernel path when --kernel is omitted
   UML_VECTOR_PERF_DRIVERS    comma-separated drivers, default: vector,vector2
   UML_VECTOR_PERF_DIRECTION  guest-to-host, host-to-guest, or both; default: guest-to-host
   UML_VECTOR_PERF_BYTES      bytes sent by the guest per run, default: 33554432
+  UML_VECTOR_PERF_BYTES_LIST comma-separated byte counts; overrides UML_VECTOR_PERF_BYTES
+  UML_VECTOR_PERF_REPEAT     repetitions per driver/direction/size, default: 1
   UML_VECTOR_PERF_PORT       host TCP sink port, default: 19091
   UML_VECTOR_PERF_BACKEND    umlctl backend, default: seccomp
   UML_VECTOR_PERF_QUEUES     vector2 queue intent, default: auto
@@ -30,6 +32,8 @@ kernel="${UML_KERNEL:-}"
 drivers="${UML_VECTOR_PERF_DRIVERS:-vector,vector2}"
 direction="${UML_VECTOR_PERF_DIRECTION:-guest-to-host}"
 bytes="${UML_VECTOR_PERF_BYTES:-33554432}"
+bytes_list="${UML_VECTOR_PERF_BYTES_LIST:-}"
+repeat="${UML_VECTOR_PERF_REPEAT:-1}"
 port="${UML_VECTOR_PERF_PORT:-19091}"
 backend="${UML_VECTOR_PERF_BACKEND:-seccomp}"
 queues="${UML_VECTOR_PERF_QUEUES:-auto}"
@@ -51,6 +55,14 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--bytes)
 		bytes="$2"
+		shift 2
+		;;
+	--bytes-list)
+		bytes_list="$2"
+		shift 2
+		;;
+	--repeat)
+		repeat="$2"
 		shift 2
 		;;
 	--out)
@@ -89,10 +101,25 @@ guest-to-host|host-to-guest|both)
 	exit 2
 	;;
 esac
+if [[ "$repeat" == '' || "$repeat" == *[!0-9]* || "$repeat" -lt 1 ]]; then
+	echo "repeat must be a positive integer (got $repeat)" >&2
+	exit 2
+fi
+
+if [[ -z "$bytes_list" ]]; then
+	bytes_list="$bytes"
+fi
+IFS=',' read -r -a byte_counts <<<"$bytes_list"
+for b in "${byte_counts[@]}"; do
+	if [[ "$b" == '' || "$b" == *[!0-9]* || "$b" -lt 1 ]]; then
+		echo "byte counts must be positive integers (got $b)" >&2
+		exit 2
+	fi
+done
 
 mkdir -p "$out"
 summary="$out/summary.tsv"
-printf 'driver\tdirection\tbytes\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\n' > "$summary"
+printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\n' > "$summary"
 
 queue_toml() {
 	local driver="$1"
@@ -118,8 +145,9 @@ queue_toml() {
 
 start_sink() {
 	local host_log="$1"
+	local run_bytes="$2"
 
-	python3 -u - "$port" "$bytes" >"$host_log" 2>&1 <<'PY' &
+	python3 -u - "$port" "$run_bytes" >"$host_log" 2>&1 <<'PY' &
 import socket
 import sys
 import time
@@ -171,8 +199,9 @@ wait_sink_ready() {
 host_send() {
 	local guest_ip="$1"
 	local host_log="$2"
+	local run_bytes="$3"
 
-	python3 -u - "$guest_ip" "$port" "$bytes" >"$host_log" 2>&1 <<'PY'
+	python3 -u - "$guest_ip" "$port" "$run_bytes" >"$host_log" 2>&1 <<'PY'
 import socket
 import sys
 import time
@@ -311,14 +340,16 @@ EOF
 run_driver() {
 	local driver="$1"
 	local perf_dir="$2"
+	local run_bytes="$3"
+	local repeat_idx="$4"
 	local safe_driver="${driver//[^A-Za-z0-9_.-]/_}"
 	local safe_dir="${perf_dir//[^A-Za-z0-9_.-]/_}"
-	local run_dir="$out/${safe_driver}-${safe_dir}"
+	local run_dir="$out/${safe_driver}-${safe_dir}-b${run_bytes}-r${repeat_idx}"
 	local umlf="$run_dir/Umlfile.toml"
 	local umlctl_log="$run_dir/umlctl-up.log"
 	local guest_log="$run_dir/guest.log"
 	local host_log="$run_dir/host-${safe_dir}.log"
-	local name="vector-net-perf-$safe_driver-$safe_dir"
+	local name="vperf-$safe_driver-$safe_dir-b${run_bytes}-r${repeat_idx}"
 	local driver_tag="vec"
 	local dir_tag="g2h"
 	local tap
@@ -366,7 +397,8 @@ ports = []
 
 [env]
 PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
-UML_VECTOR_PERF_BYTES = "$bytes"
+UML_VECTOR_PERF_BYTES = "$run_bytes"
+UML_VECTOR_PERF_REPEAT = "$repeat_idx"
 UML_VECTOR_PERF_PORT = "$port"
 
 [[init.phases]]
@@ -384,7 +416,7 @@ keep_running_on_failure = false
 EOF
 
 	if [[ "$perf_dir" == "guest-to-host" ]]; then
-		start_sink "$host_log"
+		start_sink "$host_log" "$run_bytes"
 		sink_pid="$SINK_PID"
 		trap 'kill "$sink_pid" 2>/dev/null || true' RETURN
 		wait_sink_ready "$host_log"
@@ -418,7 +450,7 @@ EOF
 			return 1
 		fi
 
-		if ! host_send "10.93.0.2" "$host_log"; then
+		if ! host_send "10.93.0.2" "$host_log" "$run_bytes"; then
 			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
 			echo "host TCP send failed for driver=$driver; see $host_log" >&2
@@ -442,8 +474,8 @@ EOF
 	host_seconds="$(sed -n 's/.* seconds=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 	host_mib_s="$(sed -n 's/.* mib_s=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$driver" "$perf_dir" "$bytes" "$guest_seconds" "$guest_mib_s" \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$guest_seconds" "$guest_mib_s" \
 		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" >> "$summary"
 	echo "$guest_line"
 	echo "$host_line"
@@ -457,7 +489,11 @@ else
 fi
 for driver in "${driver_list[@]}"; do
 	for perf_dir in "${direction_list[@]}"; do
-		run_driver "$driver" "$perf_dir"
+		for run_bytes in "${byte_counts[@]}"; do
+			for repeat_idx in $(seq 1 "$repeat"); do
+				run_driver "$driver" "$perf_dir" "$run_bytes" "$repeat_idx"
+			done
+		done
 	done
 done
 

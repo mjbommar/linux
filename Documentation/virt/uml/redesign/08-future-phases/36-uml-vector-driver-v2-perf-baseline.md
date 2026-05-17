@@ -5,8 +5,9 @@
 
 This note records the first repeatable legacy-vs-vector2 performance
 baseline harness for `umlctl`.  It is intentionally small: one TCP
-stream per direction, one transfer size, and one host.  It is useful as
-a regression tripwire and as a convenient operator workflow, but it does
+stream per direction and one host.  The harness now supports multiple
+transfer sizes and repetitions, which makes it more useful as a
+regression tripwire and as a convenient operator workflow, but it does
 not close the replacement performance gate.
 
 ## Harness
@@ -24,9 +25,10 @@ The helper:
 - starts a host Python TCP sink for guest-to-host runs;
 - starts a guest Python TCP sink for host-to-guest runs;
 - boots the UML guest through `umlctl up`;
-- sends a fixed byte count across the selected direction;
+- sends one or more fixed byte counts across the selected direction;
 - records guest-side and host-side MiB/s;
-- writes a TSV summary and per-run logs;
+- writes a TSV summary, including transfer size and repeat index, plus
+  per-run logs;
 - tears the instance down with `umlctl down --force --rm`.
 
 Defaults:
@@ -35,6 +37,7 @@ Defaults:
 drivers: vector,vector2
 direction: guest-to-host
 bytes:   33554432
+repeat:  1
 port:    19091
 backend: seccomp
 queues:  auto for vector2, forced to 1 for legacy vector
@@ -52,6 +55,14 @@ UML_VECTOR_PERF_DIRECTION=host-to-guest \
 UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g \
   tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
   --kernel /home/mjbommar/projects/personal/.build/um-vector-r2-both/linux
+
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_BYTES_LIST=1048576,2097152 \
+UML_VECTOR_PERF_REPEAT=3 \
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-repeat \
+  tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+  --kernel /home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux
 ```
 
 ## Parser Collision Found
@@ -165,6 +176,60 @@ both-drivers kernel, no parser collision, and no lingering
 A final script smoke also verified `UML_VECTOR_PERF_DIRECTION=both`
 with vector2 and a 1 MiB transfer in both directions.
 
+## Repeated-Size Harness Smoke
+
+The helper was extended with:
+
+- `--bytes-list` / `UML_VECTOR_PERF_BYTES_LIST`;
+- `--repeat` / `UML_VECTOR_PERF_REPEAT`;
+- per-run output directories keyed by driver, direction, byte count,
+  and repeat index;
+- a `repeat` column in `summary.tsv`.
+
+Smoke command:
+
+```sh
+rm -rf /tmp/um-vector-perf-repeat-smoke
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_BYTES_LIST=1048576,2097152 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-repeat-smoke \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel /home/mjbommar/projects/personal/.build/um-vector-r1-v2only/linux
+```
+
+Output:
+
+```text
+VECTOR_NET_PERF direction=guest-to-host driver=vector2 transport=fd queues=4 bytes=1048576 seconds=0.016120 mib_s=62.034
+HOST_SINK bytes=1048576 seconds=0.004909 mib_s=203.710 addr=('10.93.0.2', 56126)
+VECTOR_NET_PERF direction=guest-to-host driver=vector2 transport=fd queues=4 bytes=2097152 seconds=0.022033 mib_s=90.771
+HOST_SINK bytes=2097152 seconds=0.010026 mib_s=199.482 addr=('10.93.0.2', 40974)
+VECTOR_NET_PERF direction=host-to-guest driver=vector2 transport=fd queues=4 bytes=1048576 seconds=0.003217 mib_s=310.834 addr=('10.93.0.1', 46518)
+HOST_SEND bytes=1048576 seconds=0.005527 mib_s=180.922
+VECTOR_NET_PERF direction=host-to-guest driver=vector2 transport=fd queues=4 bytes=2097152 seconds=0.004875 mib_s=410.256 addr=('10.93.0.1', 49884)
+HOST_SEND bytes=2097152 seconds=0.006060 mib_s=330.042
+summary: /tmp/um-vector-perf-repeat-smoke/summary.tsv
+TAP_G2H_ABSENT
+TAP_H2G_ABSENT
+```
+
+Summary shape:
+
+```text
+driver   direction      bytes    repeat  guest_mib_s  host_mib_s
+vector2  guest-to-host  1048576  1       62.034       203.710
+vector2  guest-to-host  2097152  1       90.771       199.482
+vector2  host-to-guest  1048576  1       310.834      180.922
+vector2  host-to-guest  2097152  1       410.256      330.042
+```
+
+This smoke verifies the harness mechanics and vector2 cleanup across
+multiple transfer sizes.  It is not a replacement decision because it
+does not compare legacy vector across those sizes and uses only one
+repeat per size.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
@@ -182,7 +247,8 @@ whether fd multiqueue batching work improves throughput.
 The full replacement performance gate still needs:
 
 - UDP packet rate;
-- larger and repeated transfer sizes;
+- larger repeated transfer-size comparisons across legacy vector and
+  vector2;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
 - CPU cycles per packet if practical;
