@@ -133,10 +133,11 @@ shape, and inspectable ethtool surfaces:
 - KVM-v2 readiness narrowed: a correctly configured
   `CONFIG_UM_BACKEND_KVM_V2=y` vector2 runtime passes no-network
   readiness, vector2 fd-handoff smoke, and a one-shot Django
-  stdlib-shim vector2 fd smoke on KVM-v2; the full Django 30-run KVM-v2
-  gate is still partial at `PASS=29/30 FAIL=1` due to a guest
-  `python3` abort during server startup, with high `KVM_V2_TLB_LAG`
-  diagnostics in the KVM-v2 logs;
+  stdlib-shim vector2 fd smoke on KVM-v2; one full Django 30-run KVM-v2
+  gate failed at `PASS=29/30 FAIL=1` due to a guest `python3` abort
+  during server startup, while the diagnostic rerun passed
+  `PASS=30/30 FAIL=0`; high `KVM_V2_TLB_LAG` diagnostics remain in the
+  KVM-v2 logs;
 - live real FastAPI + uvicorn success on seccomp through
   vector2 launcher-owned fd handoff with `queues = "auto"` resolving
   to two queues: one-shot gateway ping, `SERVER_READY`,
@@ -189,10 +190,11 @@ Missing runtime pieces:
 
 - no real timer-driven coalescing;
 - no feature negotiation;
-- no clean 30/30 Tier 3 workload proof on kvm-v2; the latest Django
-  vector2 fd attempt reached `PASS=29/30 FAIL=1` and failed from a
-  KVM-v2 guest `python3` abort rather than a vector2 open/registration
-  failure;
+- no fully explained Tier 3 workload proof on kvm-v2; one Django
+  vector2 fd attempt reached `PASS=29/30 FAIL=1` from a KVM-v2 guest
+  `python3` abort rather than a vector2 open/registration failure, and
+  a diagnostic rerun reached `PASS=30/30 FAIL=0` but still emitted high
+  `KVM_V2_TLB_LAG` diagnostics;
 - no repeated long soak loop;
 - no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
   now has an initial clean bidirectional pass plus three repeats with
@@ -1021,11 +1023,15 @@ KVM-v2 readiness follow-up:
     only `PASS=29/30 FAIL=1 TIMEOUT=0`; iteration 25 aborted guest
     `python3` before `SERVER_READY`, printed `SERVER_FAIL`, and then
     hit the expected secondary init-exit panic;
+  - after the diagnostic template update, a second KVM-v2 Django
+    vector2 fd repetition passed `PASS=30/30 FAIL=0 TIMEOUT=0`; all 30
+    copied logs contained `SERVER_READY`, `GUEST_CURL ok=100 fail=0`,
+    and `TIER3_OK`, and no fail signatures;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
     and repeated `KVM_V2_TLB_LAG` values above 1000 during the Django
-    runs.
+    runs, including max lag 2117 in the clean 30/30 rerun.
 - Diagnostic follow-up:
   - Tier 3 Django and FastAPI templates now dump their server logs before
     `SERVER_FAIL`, using `DJANGO_LOG_BEGIN`/`DJANGO_LOG_END` and
@@ -1034,10 +1040,10 @@ KVM-v2 readiness follow-up:
     vector2 fd-handoff kernel args;
   - a Django vector2 seccomp live check passed `PASS=1/1`.
 - Therefore the old "KVM-v2 cannot even boot before vector2" blocker is
-  narrowed to a KVM-v2 application-workload stability blocker.  Vector2
-  fd handoff works on KVM-v2, but the KVM-v2 Django 30/30 requirement is
-  still open until the guest Python abort and high TLB-lag behavior are
-  fixed or cleanly explained.
+  narrowed to a KVM-v2 application-workload stability question.  Vector2
+  fd handoff works on KVM-v2, and one Django 30/30 run is clean, but the
+  prior guest Python abort and persistent high TLB-lag behavior must be
+  fixed or cleanly explained before KVM-v2 Tier 3 readiness is final.
 
 ### V2-R9 - Transport Parity
 

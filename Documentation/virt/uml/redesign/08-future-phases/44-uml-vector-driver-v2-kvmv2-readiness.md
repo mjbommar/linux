@@ -132,9 +132,9 @@ The copied log records `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, and
 However, this run also emitted `KVM_V2_TLB_LAG` above the documented
 high-risk threshold, with max observed lag 1734.
 
-### Tier 3 Django 30-Run Attempt
+### Tier 3 Django 30-Run Attempts
 
-The full KVM-v2 vector2 Django repetition is still not closed:
+The first full KVM-v2 vector2 Django repetition was not clean:
 
 ```
 UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux \
@@ -168,6 +168,38 @@ itself the exact failure predicate for iteration 25.
 The TAP `v2djkv0` was absent after the failed 30-run gate, and no running
 UML instance remained.
 
+After the Tier 3 templates were updated to dump server stderr before
+`SERVER_FAIL`, the same KVM-v2 vector2 Django shape was rerun with tap
+`v2djkv1`:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux \
+  umlctl gate loop -f /tmp/tier3-django-v2-kvmv2-diag.toml \
+    -W 1 -M 30 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --out /tmp/um-tier3-django-v2-kvmv2-diag-30
+
+PASS=30/30 FAIL=0 TIMEOUT=0
+```
+
+The copied logs contained:
+
+```
+SERVER_READY=30
+GUEST_CURL ok=100 fail=0: 30
+TIER3_OK=30
+bad_signatures=0
+```
+
+`v2djkv1` was absent after teardown, and no UML instance remained.  The
+KVM-v2 logs still emitted the documented boot-time `BUG_PR` diagnostics
+and high `KVM_V2_TLB_LAG`; max observed lag in the clean rerun was 2117.
+
+This provides one successful KVM-v2 vector2 Django 30/30 gate, but it
+does not fully close the KVM-v2 workload item because the immediately
+preceding 29/30 failure is still unexplained and the high TLB-lag
+diagnostics persist.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -193,17 +225,18 @@ The old "KVM-v2 no-network readiness" diagnosis was too coarse.  With a
 properly configured runtime kernel, KVM-v2 boots, vector2 registers,
 vector2 fd handoff works, and a single Django stdlib-shim run can pass.
 
-The remaining blocker is narrower and more serious: KVM-v2 is not yet
-stable enough for the vector2 Tier 3 Django 30/30 proof.  The failure is
-a guest Python abort during server startup under KVM-v2, while the same
-vector2 Django shape passes under seccomp.  The vector2 driver should not
-claim KVM-v2 Tier 3 readiness until this backend abort/TLB-lag class is
-fixed or otherwise explained with repeatable clean evidence.
+The remaining blocker is narrower than the original readiness failure:
+KVM-v2 can boot and can produce a clean vector2 Django 30/30 run, but it
+also produced a 29/30 run with a guest Python abort under the same
+workload shape.  The vector2 driver should not claim final KVM-v2 Tier 3
+readiness until this backend abort/TLB-lag class is fixed or otherwise
+explained with repeatable clean evidence.
 
 ## Next Work
 
-1. Re-run the 30/30 gate with KVM-v2 state trace enabled or the existing
-   TLB-lag diagnostics promoted into a per-run summary.
+1. Re-run the 30/30 gate enough times to bound the observed flake rate,
+   ideally with KVM-v2 state trace enabled or the existing TLB-lag
+   diagnostics promoted into a per-run summary.
 2. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
 3. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and

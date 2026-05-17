@@ -313,10 +313,10 @@ parking-lot designs for future prioritization.
   KVM-v2 readiness checkpoint for vector2: rebuilds a proper
   `CONFIG_UM_BACKEND_KVM_V2=y` vector2 runtime, records no-network
   seccomp and KVM-v2 readiness passes, vector2 fd handoff on KVM-v2,
-  and a Django stdlib-shim smoke pass. The 30-run Django gate is still
-  partial at `PASS=29/30 FAIL=1`, with a guest `python3` abort and
-  high `KVM_V2_TLB_LAG` diagnostics, so this remains a blocker. Not a
-  commitment.
+  and Django stdlib-shim smoke. One 30-run Django gate failed at
+  `PASS=29/30 FAIL=1` with a guest `python3` abort, while a diagnostic
+  rerun passed `PASS=30/30 FAIL=0`; high `KVM_V2_TLB_LAG` diagnostics
+  remain, so this is evidence, not final readiness. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
