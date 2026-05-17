@@ -188,9 +188,9 @@ parking-lot designs for future prioritization.
   R7 implementation note for `umlctl` and Tier 3 integration:
   `network.driver = "vector2"`, `--network-driver`,
   `--sweep network.driver=...`, dry-run network plans, soak v2
-  aliases, v2 metadata, teardown hardening, seccomp smoke evidence,
-  KUnit evidence, and the remaining kvm-v2 readiness gap. Not a
-  commitment.
+  aliases, v2 metadata, teardown hardening, seccomp smoke and 30/30
+  repetition evidence, KUnit evidence, and the remaining kvm-v2
+  readiness gap. Not a commitment.
 - [24-uml-vector-driver-v2-umlctl-usability.md](24-uml-vector-driver-v2-umlctl-usability.md) —
   R7 follow-up note for the operator-facing `umlctl`/vector v2
   contract: guest `UMLCTL_NETWORK_*` metadata, driver-neutral workload
@@ -214,6 +214,10 @@ parking-lot designs for future prioritization.
   packet movement: shared runtime queue helpers, raw Ethernet TX/RX
   over an inherited fd, fd NAPI/IRQ startup, KUnit coverage, and a
   no-root manual ARP/ICMP ping smoke. Not a commitment.
+- [28-uml-vector-driver-v2-r7-seccomp-30of30.md](28-uml-vector-driver-v2-r7-seccomp-30of30.md) —
+  R7 partial validation note for vector2 TAP under seccomp:
+  Tier 3 Django stdlib-shim `PASS=30/30`, teardown evidence, and the
+  remaining kvm-v2 readiness limitation. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

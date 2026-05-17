@@ -210,6 +210,33 @@ PASS=2/2 FAIL=0 TIMEOUT=0
 TAP_ABSENT
 ```
 
+Seccomp 30/30 follow-up:
+
+```text
+tools/uml/uml-launcher/target/debug/umlctl gate loop \
+  -f /tmp/um-vector-r7-dry/_tier3-django-v2-seccomp-w0.toml \
+  --network-driver vector2 \
+  -W 1 -M 30 --timeout 180 \
+  --out /tmp/um-vector-r9-seccomp-v2-m30
+
+==> default PASS=30/30 FAIL=0 TIMEOUT=0 rate=100.0% (Wilson 95% CI [88.6%, 100.0%]) elapsed=234s
+```
+
+Every run reached:
+
+```text
+SERVER_READY
+TIER3_OK
+REPRO_DONE rc=0
+```
+
+Teardown check:
+
+```text
+tap_absent_rc=1
+Device "soak-tap0" does not exist.
+```
+
 KVM-v2 cleanup smoke after propagating the 180-second gate-loop timeout
 to `umlctl up --ready-timeout`:
 
@@ -277,7 +304,7 @@ before vector2-specific kvm-v2 datapath validation can be meaningful.
 
 R7 does not claim:
 
-- 30/30 Tier 3 Django success on both seccomp and kvm-v2;
+- 30/30 Tier 3 Django success on kvm-v2;
 - kvm-v2 baseline readiness for no-network workloads on this kernel;
 - FastAPI/uvicorn live validation;
 - 2h or 24h soak success;

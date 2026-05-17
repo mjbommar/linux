@@ -69,6 +69,7 @@ shape, and inspectable ethtool surfaces:
 - `umlctl` selection of experimental v2 TAP queue count through
   `[network] queues` and `--network-queues`;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
+- 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
   `queues=2` TAP;
 - TAP teardown hardening after successful loops and failed starts.
@@ -81,7 +82,7 @@ Missing runtime pieces:
 - no launcher-manifest fd path for convenient sandbox fd ownership;
 - no real timer-driven coalescing;
 - no feature negotiation;
-- no 30/30 Tier 3 workload proof on both seccomp and kvm-v2;
+- no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
 - no full multiqueue validation story: fd multiqueue, queue-to-CPU
   policy, KCSAN, and broader fairness/performance profiles remain
@@ -534,16 +535,21 @@ R7 implementation note:
   - `kunit.py parse` over `um_vector2_*`: 64/64 passed;
   - seccomp v2 Tier 3 stdlib smoke: 1/1 pass through
     `--sweep network.driver=vector2`;
+  - seccomp v2 Tier 3 stdlib repetition: 30/30 pass through
+    `--network-driver vector2`, every run reached `SERVER_READY`,
+    `TIER3_OK`, and `REPRO_DONE rc=0`, and `soak-tap0` was absent
+    after teardown;
   - seccomp repeated cleanup smoke: 2/2 pass, TAP absent after loop;
   - kvm-v2 Tier 3 smoke still fails `umlctl up` readiness after the
     full 180-second budget, but TAP is absent after failure cleanup;
   - kvm-v2 no-network isolation also fails readiness before the Linux
     boot banner while the same kernel boots under seccomp, so the
     current kvm-v2 R7 blocker is not vector2-specific.
-- Therefore R7 is partially satisfied.  Selection, observability, and
-  teardown safety landed; the full 30/30 seccomp+kvm-v2 and long-soak
-  eligibility gates remain open, and kvm-v2 baseline readiness must be
-  fixed before vector2-specific kvm-v2 datapath claims are meaningful.
+- Therefore R7 is partially satisfied.  Selection, observability,
+  teardown safety, and the seccomp 30/30 Tier 3 gate landed; kvm-v2
+  30/30 and long-soak eligibility remain open, and kvm-v2 baseline
+  readiness must be fixed before vector2-specific kvm-v2 datapath
+  claims are meaningful.
 
 ### V2-R8 - Multiqueue
 
