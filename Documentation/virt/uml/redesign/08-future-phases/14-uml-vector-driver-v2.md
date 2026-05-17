@@ -821,6 +821,18 @@ Validation:
 - injected failure at every open step unwinds without leaks;
 - NAPI/IRQ/fd ordering tests pass.
 
+Implementation checkpoint:
+
+- `arch/um/drivers/vector2_model.{c,h}` adds pure device and channel
+  lifecycle transition helpers under the `um_vec2_*` prefix.
+- `CONFIG_UML_NET_VECTOR_V2_MODEL_KUNIT=y` builds
+  `arch/um/drivers/vector2_model_test.c`, a KUnit suite covering the
+  normal device path, open-failure unwind, illegal device transitions,
+  normal channel activation/close, channel failure unwind, illegal
+  channel transitions, and state-name helpers.
+- This checkpoint intentionally remains model-only; no existing vector
+  netdev open/close path calls the state model yet.
+
 ### Phase V5 - Multiqueue
 
 Deliverables:

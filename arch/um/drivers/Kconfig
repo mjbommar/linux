@@ -140,6 +140,9 @@ config UML_NET_VECTOR
 config UML_NET_VECTOR_V2_CONFIG
 	bool
 
+config UML_NET_VECTOR_V2_MODEL
+	bool
+
 config UML_NET_VECTOR_V2_KUNIT
 	bool "Vector networking v2 config parser KUnit tests"
 	depends on KUNIT
@@ -151,6 +154,20 @@ config UML_NET_VECTOR_V2_KUNIT
 	  not replace the existing vector network driver; they validate
 	  the isolated parser and policy checks before the runtime data
 	  path is migrated.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_MODEL_KUNIT
+	bool "Vector networking v2 state model KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_MODEL
+	default n
+	help
+	  Build KUnit tests for the explicit device and channel lifecycle
+	  state machines used by the proposed UML vector networking v2
+	  rewrite. These tests validate legal transitions and failure
+	  unwind paths before runtime open/close code uses the model.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
