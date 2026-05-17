@@ -359,6 +359,8 @@ int um_vec2_tap_open(struct um_vec2_dev *vdev)
 		return -EOPNOTSUPP;
 	if (!vdev->cfg.ifname[0])
 		return -EINVAL;
+	if (!vdev->netdev)
+		return -ENODEV;
 	if (vdev->channels)
 		return -EBUSY;
 

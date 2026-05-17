@@ -651,17 +651,36 @@ int um_vec2_netdev_register(struct um_vec2_dev *vdev)
 	if (ret)
 		goto out_free_netdev;
 
+	/*
+	 * Publish vdev->netdev BEFORE register_netdevice() makes dev
+	 * visible to the kernel netdev framework.  After register_netdevice()
+	 * returns, a racing netlink "ip link set vec2.X up" can call
+	 * ndo_open() (um_vec2_netdev_open) which dispatches into the host
+	 * backend.  The TAP backend has no vdev->netdev NULL guard and
+	 * dereferences dev->mtu in um_vec2_runtime_frame_len(); without
+	 * this ordering a NULL deref is possible in the window between
+	 * register_netdevice() returning and the post-register
+	 * vdev->netdev = dev assignment.  See audit R1.
+	 *
+	 * On any failure below, NULL the field back out so an out-path
+	 * free_netdev() doesn't leave vdev->netdev pointing at freed memory.
+	 */
+	vdev->netdev = dev;
+
 	rtnl_lock();
 	ret = register_netdevice(dev);
 	rtnl_unlock();
-	if (ret)
+	if (ret) {
+		vdev->netdev = NULL;
 		goto out_free_netdev;
+	}
 
 	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_REGISTERED);
-	if (ret)
+	if (ret) {
+		vdev->netdev = NULL;
 		goto out_unregister_netdev;
+	}
 
-	vdev->netdev = dev;
 	vdev->registered_queues = queues;
 	pr_info("registered netdev %s for vec2.%u\n", dev->name, vdev->unit);
 	return 0;
