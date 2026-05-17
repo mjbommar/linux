@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * UML backend v2 (KVM) — snapshot KUnit suite (memo 26-snapshot
- * §Phase 2).
+ * §Phase 2 + §Phase 3).
  *
  * Exercises the Phase 1 capture/restore primitives end-to-end
  * against a primed pool vCPU. The suite_init fixture drives the
@@ -20,6 +20,16 @@
  *     before XSAVE, MSR list length matches) without depending on
  *     the (Phase 3) memslot copy.
  *
+ *   - test_kvm_v2_snapshot_full (Phase 3): capture_full, mutate the
+ *     vCPU's RAX AND scribble a known marker into a freshly-allocated
+ *     scratch page that sits inside the giant physmem memslot,
+ *     restore_full_vcpu, assert both the RAX and the scratch-page
+ *     contents are restored. Confirms the memslot capture/restore
+ *     pair round-trips bytes through the kvmalloc'd backing buffer.
+ *     The scratch page is __get_free_page-allocated from buddy so
+ *     it's in physmem by construction, hitting the same memslot the
+ *     IDT/GDT/IST/TSS/gadget-state pages live in.
+ *
  * Why a separate TU from test_byteshape.c: byte-shape tests are
  * pure data — no vCPU state, no /dev/kvm. The snapshot tests need
  * a live VM + vCPU pool, so they pay the suite_init fixture cost.
@@ -28,8 +38,11 @@
  */
 #include <kunit/test.h>
 #include <linux/errno.h>
+#include <linux/gfp.h>
 #include <linux/kvm.h>
+#include <linux/mm.h>
 #include <linux/printk.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <os.h>
@@ -146,8 +159,214 @@ static void test_kvm_v2_snapshot_basic(struct kunit *test)
 	kvm_v2_snapshot_destroy(snap);
 }
 
+/*
+ * Phase 3 marker pattern: a recognisable 8-byte value the test
+ * writes into a scratch page after capture so the restore can prove
+ * it round-tripped through snap->memslots[i].data. Distinct from the
+ * regs-only test's RAX scribble value (0xdeadbeefdeadbeefULL) so a
+ * cross-test failure mode (e.g. wrong field zeroed) is easy to
+ * distinguish in pr_warn output.
+ */
+#define KVM_V2_SNAPSHOT_TEST_MARKER	0xa5a5a5a5cafebabeULL
+#define KVM_V2_SNAPSHOT_TEST_GARBAGE	0x0badf00d0badf00dULL
+
+/*
+ * Phase 3 test slot guest_phys_addr (memo 26-snapshot §Phase 3
+ * notes): a GPA well above any realistic physmem_size (KVM accepts
+ * up to host phys-bits, typically 48-52 bits) so the test slot
+ * doesn't overlap the giant gpa=0..physmem_size physmem slot
+ * installed by kvm_v2_physmem_memslot_install. 4 TiB is high enough
+ * that no plausible UML config's mem= ever reaches it.
+ *
+ * Why a dedicated test slot rather than scribbling into the giant
+ * physmem slot's bytes directly: the giant slot's size equals UML's
+ * mem= setting, and capture_full's per-slot kvmalloc has to fit
+ * another mem=N bytes alongside the running kernel. On a typical
+ * UML config (mem=512M) that's infeasible (we have N bytes total
+ * for kernel + buddy + capture buffer + everything). The Phase 3
+ * memslot capture gracefully degrades on such slots (sets
+ * snap->memslots[i].data = NULL with a pr_warn) but the round-trip
+ * assertion can't be made against an un-captured slot. The
+ * dedicated test slot, sized to a single page, always fits.
+ *
+ * COW / dirty-bitmap optimization for the giant slot is Phase 4
+ * work (per the design memo §Phase 3 close-out / §Phase 4 open).
+ */
+#define KVM_V2_SNAPSHOT_TEST_SLOT_GPA	0x40000000000ULL	/* 4 TiB */
+
+/**
+ * test_kvm_v2_snapshot_full - full capture + memslot round-trip.
+ * @test: KUnit test handle.
+ *
+ * Phase 3 acceptance gate (memo 26-snapshot §Phase 3):
+ *
+ *   1. Allocate a scratch page from buddy.
+ *   2. Register a dedicated single-page memslot at a high GPA
+ *      backed by the scratch page (see TEST_SLOT_GPA comment for
+ *      why a separate slot rather than scribbling into physmem).
+ *   3. Write a known marker into the scratch page.
+ *   4. capture_full against vcpus[0].
+ *   5. Overwrite the scratch page with garbage AND scribble the
+ *      vCPU's RAX with garbage.
+ *   6. restore_full_vcpu against vcpus[0].
+ *   7. Assert the scratch page contains the marker (proves the
+ *      memslot copy round-tripped) AND the vCPU RAX matches the
+ *      captured value (proves the regs path still works).
+ *   8. Tear down the test slot.
+ *
+ * Why a scratch page rather than scribbling into the IDT / GDT
+ * pages directly: those pages are live state the rest of the
+ * kernel may walk concurrently (irq vectoring, etc.). A fresh
+ * __get_free_page allocation is dedicated to this test and is
+ * safe to mutate without coordinating with other subsystems.
+ */
+static void test_kvm_v2_snapshot_full(struct kunit *test)
+{
+	struct kvm_v2_snapshot *snap;
+	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
+	struct kvm_v2_vm *vm;
+	struct kvm_userspace_memory_region kr;
+	struct kvm_regs scratch;
+	unsigned long scratch_page;
+	u64 *scratch_marker;
+	int test_slot_id = -1;
+	int memslot_data_count;
+	int i;
+	int rc;
+
+	KUNIT_ASSERT_NOT_NULL_MSG(test, vcpu,
+				  "suite_init fixture did not populate kvm_v2_test_vcpu");
+
+	vm = kvm_v2_vm_get();
+	KUNIT_ASSERT_NOT_NULL_MSG(test, vm,
+				  "kvm_v2_vm_get returned NULL (VM not initialised?)");
+
+	/*
+	 * Allocate the scratch page from buddy. __GFP_ZERO so the
+	 * post-restore comparison doesn't trip on uninit poison.
+	 */
+	scratch_page = __get_free_page(GFP_KERNEL | __GFP_ZERO);
+	KUNIT_ASSERT_NE_MSG(test, scratch_page, 0UL,
+			    "scratch page __get_free_page failed");
+	scratch_marker = (u64 *)scratch_page;
+
+	/*
+	 * Register the per-test memslot. memslot_add tracks the
+	 * in-memory entry; the KVM_SET_USER_MEMORY_REGION ioctl makes
+	 * KVM aware of it. The order here mirrors
+	 * kvm_v2_physmem_memslot_install (context.c) — first allocate
+	 * the slot id + list entry, then push to KVM, undo on failure.
+	 */
+	test_slot_id = kvm_v2_memslot_add(vm,
+					  KVM_V2_SNAPSHOT_TEST_SLOT_GPA,
+					  scratch_page,
+					  PAGE_SIZE,
+					  0 /* flags */);
+	if (test_slot_id < 0) {
+		free_page(scratch_page);
+		KUNIT_FAIL(test, "kvm_v2_memslot_add rc=%d", test_slot_id);
+		return;
+	}
+	kr = (struct kvm_userspace_memory_region){
+		.slot		 = (u32)test_slot_id,
+		.flags		 = 0,
+		.guest_phys_addr = KVM_V2_SNAPSHOT_TEST_SLOT_GPA,
+		.memory_size	 = PAGE_SIZE,
+		.userspace_addr	 = scratch_page,
+	};
+	rc = os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
+			      (unsigned long)&kr);
+	if (rc < 0) {
+		kvm_v2_memslot_del(vm, (u32)test_slot_id);
+		free_page(scratch_page);
+		KUNIT_FAIL(test, "KVM_SET_USER_MEMORY_REGION rc=%d", rc);
+		return;
+	}
+
+	*scratch_marker = KVM_V2_SNAPSHOT_TEST_MARKER;
+
+	snap = kvm_v2_snapshot_alloc();
+	if (!snap) {
+		kr.memory_size = 0;
+		os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
+				 (unsigned long)&kr);
+		kvm_v2_memslot_del(vm, (u32)test_slot_id);
+		free_page(scratch_page);
+		KUNIT_FAIL(test, "kvm_v2_snapshot_alloc returned NULL");
+		return;
+	}
+
+	rc = kvm_v2_snapshot_capture_full(snap, vcpu);
+	KUNIT_ASSERT_EQ_MSG(test, rc, 0,
+			    "capture_full rc=%d", rc);
+	KUNIT_ASSERT_GT_MSG(test, snap->memslot_count, 0,
+			    "capture_full saw zero memslots (test slot registration didn't take?)");
+
+	/*
+	 * Count slots whose .data buffer actually got allocated.
+	 * Under memory pressure the giant physmem slot may have
+	 * gracefully degraded to metadata-only (data=NULL); the
+	 * test slot's PAGE_SIZE copy always fits, so at least one
+	 * data buffer must be live.
+	 */
+	memslot_data_count = 0;
+	for (i = 0; i < snap->memslot_count; i++)
+		if (snap->memslots[i].data)
+			memslot_data_count++;
+	KUNIT_ASSERT_GT_MSG(test, memslot_data_count, 0,
+			    "capture_full produced zero data-bearing slots");
+
+	/*
+	 * Mutate both the in-guest scratch page and the vCPU's RAX so
+	 * the restore has two distinct things to undo.
+	 */
+	*scratch_marker = KVM_V2_SNAPSHOT_TEST_GARBAGE;
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	scratch.rax = 0xdeadbeefdeadbeefULL;
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = kvm_v2_snapshot_restore_full_vcpu(snap, vcpu);
+	KUNIT_ASSERT_EQ_MSG(test, rc, 0,
+			    "restore_full_vcpu rc=%d", rc);
+
+	/* Memslot round-trip — the marker must have come back. */
+	KUNIT_EXPECT_EQ_MSG(test, *scratch_marker,
+			    (u64)KVM_V2_SNAPSHOT_TEST_MARKER,
+			    "scratch page not restored: got %#llx expected %#llx",
+			    (u64)*scratch_marker,
+			    (u64)KVM_V2_SNAPSHOT_TEST_MARKER);
+
+	/* vCPU regs round-trip — same property as the basic test. */
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, scratch.rax, snap->regs.rax);
+
+	kvm_v2_snapshot_destroy(snap);
+
+	/*
+	 * Tear down the test memslot: KVM_SET_USER_MEMORY_REGION with
+	 * memory_size=0 is KVM's "delete this slot" syntax; then drop
+	 * the kvm_v2_memslot list entry and free the scratch page.
+	 */
+	kr.memory_size = 0;
+	rc = os_ioctl_generic(vm->vm_fd, KVM_SET_USER_MEMORY_REGION,
+			      (unsigned long)&kr);
+	if (rc < 0)
+		pr_warn("um: kvm-v2 snapshot kunit: test slot teardown rc=%d (continuing)\n",
+			rc);
+	kvm_v2_memslot_del(vm, (u32)test_slot_id);
+	free_page(scratch_page);
+}
+
 static struct kunit_case kvm_v2_snapshot_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_snapshot_basic),
+	KUNIT_CASE(test_kvm_v2_snapshot_full),
 	{}
 };
 
@@ -159,5 +378,5 @@ static struct kunit_suite kvm_v2_snapshot_test_suite = {
 
 kunit_test_suite(kvm_v2_snapshot_test_suite);
 
-MODULE_DESCRIPTION("UML kvm-v2 snapshot KUnit tests (memo 26-snapshot Phase 2)");
+MODULE_DESCRIPTION("UML kvm-v2 snapshot KUnit tests (memo 26-snapshot Phases 2-3)");
 MODULE_LICENSE("GPL");

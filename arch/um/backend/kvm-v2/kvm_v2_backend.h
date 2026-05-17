@@ -752,13 +752,14 @@ int  kvm_v2_mm_region_removed(struct mm_struct *mm,
 			      const struct um_memory_region *region);
 
 /*
- * Snapshot (memo 26-snapshot, Time-machine #168 Phase 1).
+ * Snapshot (memo 26-snapshot, Time-machine #168 Phases 1-3).
  *
  * Captures a vCPU's scalar state (registers, sregs, XSAVE area,
- * XCR0, pending-events, 7 MSRs) into a heap-allocated container
- * so a later kvm_v2_snapshot_restore_full() reinstates it. v1's
- * working implementation lives at kvm-v1-archive/snapshot.c
- * (647 LoC); v2's port handles three deltas:
+ * XCR0, pending-events, 7 MSRs) plus the per-VM memslot contents
+ * (Phase 3) into a heap-allocated container so a later
+ * kvm_v2_snapshot_restore_full() reinstates it. v1's working
+ * implementation lives at kvm-v1-archive/snapshot.c (647 LoC);
+ * v2's port handles three deltas:
  *
  *   1. Per-host-CPU vCPU pool — snapshot picks the pool entry whose
  *      vcpu->last_task == current (memo 26-snapshot §3.1 / §4.3).
@@ -766,23 +767,62 @@ int  kvm_v2_mm_region_removed(struct mm_struct *mm,
  *      upper-128 is preserved (§3.2).
  *   3. New: KVM_GET_XCRS captures XCR0 itself (§3.3).
  *
- * Phase 1 implements alloc/destroy/free + capture_regs_only +
- * restore_full. The full kvm_v2_snapshot_capture (memslot + per-VM
- * IDT/GDT + per-vCPU IST/TSS/gadget-state) is Phase 3; the function
- * exists as a stub returning -EOPNOTSUPP so the public surface is
- * stable from this commit forward.
+ * Phase 1 implemented alloc/destroy/free + capture_regs_only +
+ * restore_full(regs-only path). Phase 2 stood up the KUnit fixture
+ * for vCPU priming at boot time. Phase 3 (this revision) implements
+ * the full capture path:
  *
- * Phase 1 design memo:
+ *   - Per-VM memslot copy. The v2 layout has a single giant
+ *     physmem memslot (gpa=0..physmem_size, hva=uml_physmem)
+ *     installed by kvm_v2_physmem_memslot_install plus any future
+ *     per-region memslots from region.c. The full capture walks
+ *     vm->memslots under vm->lock and copies each slot's bytes to
+ *     a kvmalloc'd buffer hung off snap->memslots[i].data.
+ *   - IDT/GDT/IST/TSS/gadget-state pages all live in physmem
+ *     (allocated via __get_free_page / alloc_page from the buddy
+ *     allocator; UML's physmem covers all kernel pages by
+ *     construction) so they're snapshotted IMPLICITLY by the
+ *     physmem memslot copy. There is no separate "capture IDT"
+ *     step — the bytes are part of the memslot copy.
+ *
+ * Phase 3 design memo:
  *   Documentation/virt/uml/redesign/02-workstreams/
- *   D-kvm-backend/26-snapshot-v2-port.md
+ *   D-kvm-backend/26-snapshot-v2-port.md §Phase 3
  */
 #define KVM_V2_SNAPSHOT_MSR_COUNT	7
 
 /**
- * struct kvm_v2_snapshot - captured vCPU + (future) memslot state.
+ * struct kvm_v2_memslot_snapshot - per-memslot capture entry.
+ *
+ * One entry per registered memslot. Allocated as a heap array
+ * (snap->memslots) by kvm_v2_snapshot_capture_full; freed by
+ * kvm_v2_snapshot_free.
+ *
+ * @region:	the KVM_SET_USER_MEMORY_REGION descriptor that was
+ *		used to register the slot. Restore replays it through
+ *		KVM_SET_USER_MEMORY_REGION to make sure the host-side
+ *		mapping is in place before we memcpy bytes back.
+ * @data:	kvmalloc'd copy of the slot's contents at capture
+ *		time (size = region.memory_size). NULL means "skip
+ *		this entry" — used by restore-side defensive checks.
+ * @data_size:	size of @data in bytes; matches region.memory_size.
+ */
+struct kvm_v2_memslot_snapshot {
+	struct kvm_userspace_memory_region	region;
+	void					*data;
+	size_t					 data_size;
+};
+
+/**
+ * struct kvm_v2_snapshot - captured vCPU + memslot state.
  *
  * @regs:	GP regs (RIP/RSP/RFLAGS + 16 GPRs). KVM_GET_REGS.
  * @sregs:	segments + CR0/2/3/4 + IDT/GDT/TR/LDT. KVM_GET_SREGS.
+ *		Phase 3: also covers the IDT/GDT/TSS base/limit fields
+ *		(sregs.idt / sregs.gdt / sregs.tr) — those are scalar
+ *		descriptor-table cache state, NOT the table contents
+ *		themselves (the contents live in physmem and ride the
+ *		memslot copy).
  * @xsave:	XSAVE area (4 KB legacy fixed-size struct kvm_xsave;
  *		KVM_GET_XSAVE). Covers X87/SSE/YMM under v2's XCR0=0x7;
  *		AVX-512/AMX bits stay zero per the curated CPUID mask
@@ -794,11 +834,16 @@ int  kvm_v2_mm_region_removed(struct mm_struct *mm,
  *		KVM_GET_VCPU_EVENTS.
  * @msrs:	7-entry MSR list (LSTAR/STAR/FMASK/KERNEL_GS_BASE/
  *		FS_BASE/GS_BASE/EFER). KVM_GET_MSRS.
- * @mem_backing: memslot copy backing buffer. NULL when the snapshot
- *		was captured by kvm_v2_snapshot_capture_regs_only.
- *		Phase 3 populates this via kvmalloc(physmem_size).
- * @mem_size:	size of @mem_backing in bytes; 0 when @mem_backing is
- *		NULL.
+ * @memslots:	Phase 3: per-memslot capture array. NULL when the
+ *		snapshot was captured by kvm_v2_snapshot_capture_regs_only.
+ *		Allocated by capture_full via kvmalloc(memslot_count
+ *		* sizeof(*memslots)); each entry's .data is a separate
+ *		kvmalloc'd buffer sized by region.memory_size.
+ * @memslot_count: number of valid entries in @memslots.
+ * @mem_backing: legacy single-buffer field kept for ABI continuity
+ *		with Phase 1. Always NULL under Phase 3; @memslots
+ *		is the authoritative storage.
+ * @mem_size:	legacy single-buffer length; always 0 under Phase 3.
  */
 struct kvm_v2_snapshot {
 	struct kvm_regs		regs;
@@ -811,6 +856,8 @@ struct kvm_v2_snapshot {
 		__u32 pad;
 		struct kvm_msr_entry entries[KVM_V2_SNAPSHOT_MSR_COUNT];
 	} msrs;
+	struct kvm_v2_memslot_snapshot	*memslots;
+	int				 memslot_count;
 	void	*mem_backing;
 	size_t	 mem_size;
 };
@@ -821,6 +868,43 @@ void  kvm_v2_snapshot_free(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_capture(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_restore_full(struct kvm_v2_snapshot *snap);
+
+/*
+ * Phase 3 explicit-vCPU variants (memo 26-snapshot §Phase 3). Take a
+ * @vcpu argument so callers can snapshot/restore against an arbitrary
+ * pool entry rather than the implicit kvm_v2_snapshot_pick_vcpu()
+ * result. The Phase 1 wrappers above forward to these with vcpu=NULL,
+ * which falls back to the pick-by-last_task helper.
+ *
+ * kvm_v2_snapshot_capture_full captures regs + sregs + xsave + xcrs +
+ * events + msrs + memslot contents. The memslot contents include the
+ * IDT/GDT/IST/TSS/gadget-state pages (allocated from buddy → in
+ * physmem → covered by the giant physmem memslot at gpa=0..
+ * physmem_size). No separate "capture IDT" step is needed.
+ *
+ * kvm_v2_snapshot_restore_full_vcpu restores all of the above. Restore
+ * order:
+ *   1. memslot memcpy back (so descriptor-table pages are valid
+ *      before we install the cached sregs.{idt,gdt,tr} bases).
+ *   2. KVM_SET_SREGS (must precede KVM_SET_REGS — RIP/RSP validation
+ *      against the post-SREGS segment cache).
+ *   3. KVM_SET_REGS / SET_XCRS / SET_XSAVE / SET_VCPU_EVENTS /
+ *      SET_MSRS.
+ *
+ * Post-restore: clear vcpu->cpuid_primed if @vcpu differs from the
+ * vCPU the snapshot was captured against (memo §C v2-deltas — cross-
+ * vCPU restore needs the next dispatch's lazy CPUID arming to run
+ * against the restored sregs state). Phase 3 doesn't track that
+ * cross-vCPU identity, so we conservatively leave cpuid_primed alone
+ * for same-vCPU restore (the captured CPUID is already installed) and
+ * leave the cross-vCPU semantics for Phase 4. The cross-task gates
+ * (last_task / last_mm / fpu_owner_task / fpu_dirty) ARE cleared — see
+ * memo §4.5.
+ */
+int kvm_v2_snapshot_capture_full(struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu);
+int kvm_v2_snapshot_restore_full_vcpu(const struct kvm_v2_snapshot *snap,
+				      struct kvm_v2_vcpu *vcpu);
 
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
 /*
