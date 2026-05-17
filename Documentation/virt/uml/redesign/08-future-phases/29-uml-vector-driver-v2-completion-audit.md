@@ -232,7 +232,11 @@ Validation evidence recorded in the checkpoint docs includes:
   `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` helper
   reassembled the failure dump into 5140 parsed / 5140 complete entries,
   reported the pid 161/1 trace distribution, and showed neighboring pass
-  logs had higher TLB-lag maxima without a trace dump;
+  logs had higher TLB-lag maxima without a trace dump; the older
+  `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
+  pass reported 4 critical pid/tmm stability violations around the
+  pid 161/1 transition, while `mmap-zero` reported no mmap-returned-zero
+  event;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -245,7 +249,10 @@ list is:
   has one clean Django `PASS=30/30` rerun, and now captures and parses a
   trace-ring dump on failure, but longer samples still fail at
   `PASS=57/60 FAIL=2 TIMEOUT=1` and `PASS=59/60 FAIL=1 TIMEOUT=0`
-  with guest Python failures and one startup timeout;
+  with guest Python failures and one startup timeout; the next backend
+  audit must resolve whether the pid/tmm invariant hits are only stale
+  model artifacts from allowed sleeping syscalls or a real stale
+  shared-vCPU state-consumption bug;
 - repeat vector2 Tier 3 Django on kvm-v2 after the backend
   investigation until the flake rate is acceptably bounded;
 - decide whether the FastAPI/uvicorn 30/30 repetition is sufficient for

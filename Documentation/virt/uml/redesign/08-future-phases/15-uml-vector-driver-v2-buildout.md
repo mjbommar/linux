@@ -1089,6 +1089,13 @@ KVM-v2 readiness follow-up:
     reported pids `161=4004` and `1=1136`, max mm-generation lag 4822,
     and neighboring pass logs with higher TLB-lag maxima but no failure
     dump;
+  - the older
+    `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
+    pass reported 4 critical pid/tmm stability violations around the
+    pid 161/1 transition, while `mmap-zero` reported no mmap-returned-zero
+    event; this is now a focused backend state-ownership question because
+    the current `migrate_disable()` design permits sleeping syscalls to
+    schedule and reuse the per-host-CPU vCPU;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
@@ -1113,9 +1120,11 @@ KVM-v2 readiness follow-up:
 - Therefore the old "KVM-v2 cannot even boot before vector2" blocker is
   narrowed to a KVM-v2 application-workload stability question.  Vector2
   fd handoff works on KVM-v2, one Django 30/30 run is clean, and the
-  trace-enabled path now captures a failing state-ring dump, but the
-  longer 60-run samples still fail from KVM-v2 guest userspace execution
-  instability.  KVM-v2 Tier 3 readiness remains open.
+  trace-enabled path now captures and parses a failing state-ring dump,
+  but the longer 60-run samples still fail from KVM-v2 guest userspace
+  execution instability.  The next backend audit is whether post-syscall
+  handling can ever consume stale shared-vCPU state after a sleeping
+  syscall schedules away.  KVM-v2 Tier 3 readiness remains open.
 
 ### V2-R9 - Transport Parity
 

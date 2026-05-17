@@ -404,6 +404,48 @@ debugging pass can focus on the pid 161/1 transition history and the
 final syscall/page-fault sequence rather than vector2 registration or fd
 handoff.
 
+The older state-trace invariant checker gives a second view of the same
+dump:
+
+```
+tools/testing/selftests/um/state-trace/parse-trace.py summary \
+  /tmp/um-tier3-django-v2-kvmv2-trace-60/p0_default/w0/run-21.log
+
+Parsed 5140 snapshots
+Incomplete entries (missing sections): 0
+
+tools/testing/selftests/um/state-trace/parse-trace.py invariants \
+  /tmp/um-tier3-django-v2-kvmv2-trace-60/p0_default/w0/run-21.log \
+  --limit 20
+
+510 violations: 4 CRITICAL, 506 WARNING
+CRITICAL seq=2473318: VCPU_RUN_ENTRY pid=161 seq=2473309 != VCPU_RUN_EXIT pid=1
+CRITICAL seq=2473317: pid=1 mid-dispatch, started pid=161 at seq=2473309
+CRITICAL seq=2470212: tmm changed mid-dispatch 61156a80 -> 61156200
+CRITICAL seq=2473318: tmm changed mid-dispatch 61156200 -> 61156ec0
+```
+
+The same checker found no mmap-returned-zero anomaly:
+
+```
+tools/testing/selftests/um/state-trace/parse-trace.py mmap-zero \
+  /tmp/um-tier3-django-v2-kvmv2-trace-60/p0_default/w0/run-21.log
+
+Found 0 mmap-returned-zero events
+```
+
+The critical entries need careful interpretation.  The invariant file
+was written for an older "no task switch inside one dispatch" model, but
+the current KVM-v2 code deliberately uses `migrate_disable()` rather
+than `preempt_disable()`, so a syscall can sleep and another UML task can
+reuse the per-host-CPU vCPU before the first task resumes.  The trace at
+seq 2473317 is still valuable because it shows mixed ownership in one
+sample: the header/task fields are pid 1 while the live `kvm_run` fields
+still reflect the prior pid 161 syscall exit.  The next KVM-v2 backend
+audit must decide whether this is only a trace/invariant-model artifact
+or whether any post-syscall path still consumes stale shared-vCPU state
+after a sleeping syscall.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -444,9 +486,12 @@ for backend analysis.
 1. Use the parsed iteration 21 `KVMV2T` dump to inspect the pid 161/1
    transition history, final syscall/page-fault sequence, and the large
    `mmgen - vlast` gap around `HANDLE_SYSCALL_POST`.
-2. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
+2. Audit the shared-vCPU syscall return path after sleeping syscalls:
+   prove that post-syscall code never consumes stale `kvm_run` state
+   after another task reuses the per-host-CPU vCPU, or fix that path.
+3. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
-3. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
+4. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
    only then update the completion audit from partial to done.
 
 ## Diagnostic Follow-Up
@@ -476,3 +521,6 @@ Validation for the diagnostic change:
 - `tools/testing/selftests/um/soak/kvmv2-trace-summary.py` reassembled
   that dump into 5140 parsed / 5140 complete entries and validated JSON
   output for follow-on tooling.
+- `tools/testing/selftests/um/state-trace/parse-trace.py invariants`
+  reported 4 critical pid/tmm stability violations around the pid 161/1
+  transition and `mmap-zero` reported no mmap-returned-zero event.
