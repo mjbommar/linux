@@ -4,10 +4,10 @@
 **Date:** 2026-05-17.
 
 This note records the first explicit vector2 queue-to-CPU policy.  It
-does not close the multiqueue replacement gate by itself; KCSAN,
-longer SMP traffic, fairness, and performance profiles still need to
-run.  It does make the queue selection model small enough to reason
-about and test.
+does not close the multiqueue replacement gate by itself; the short
+KCSAN smoke in the follow-up note is useful, but longer SMP traffic,
+fairness, and performance profiles still need to run.  It does make the
+queue selection model small enough to reason about and test.
 
 ## Policy
 
@@ -91,9 +91,20 @@ umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fd-multiqueue.toml \
 TAP_ABSENT
 ```
 
+Follow-up KCSAN smoke with `queues = "auto"` resolving to four queues:
+
+```text
+umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml \
+  -W 1 -M 1 --timeout 240 --pass-marker VECTOR2_AUTO_QUEUES_OK
+[umlctl gate loop] w0 iter1: Pass
+==> default PASS=1/1 FAIL=0 TIMEOUT=0 rate=100.0%
+TAP_ABSENT
+no BUG: KCSAN / data-race signatures in the captured run log
+```
+
 ## Remaining Work
 
-- KCSAN on TAP and fd multiqueue traffic.
+- Longer KCSAN on TAP and fd multiqueue traffic.
 - Longer SMP traffic runs that confirm XPS queue selection under load.
 - Fairness and performance profiles against legacy vector and vector2
   in-process TAP.

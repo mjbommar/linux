@@ -232,6 +232,17 @@ parking-lot designs for future prioritization.
   R8 follow-up note for explicit vector2 queue-to-CPU policy:
   `ndo_select_queue`, XPS setup, modulo CPU/queue mapping rules, KUnit
   coverage, and remaining KCSAN/perf gaps. Not a commitment.
+- [32-uml-vector-driver-v2-umlctl-auto-queues.md](32-uml-vector-driver-v2-umlctl-auto-queues.md) —
+  R8 follow-up note for `umlctl` automatic vector2 queue sizing:
+  `queues = "auto"` / `--network-queues auto`, resolution from
+  `[runtime].ncpus`, resolved queue metadata, manifest labels, gate-loop
+  sweep support, dry-run evidence, and remaining replacement gates. Not
+  a commitment.
+- [33-uml-vector-driver-v2-r8d-kcsan-auto-queue-smoke.md](33-uml-vector-driver-v2-r8d-kcsan-auto-queue-smoke.md) —
+  R8 partial validation note for a short KCSAN-instrumented seccomp
+  gate run of vector2 fd multiqueue through `queues = "auto"`:
+  `PASS=1/1`, no TAP leak, resolved queue metadata, and no KCSAN
+  data-race signatures. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

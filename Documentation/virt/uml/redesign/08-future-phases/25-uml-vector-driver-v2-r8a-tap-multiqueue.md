@@ -24,16 +24,20 @@ counts.
 - ethtool queue counters aggregate across all open channels.
 - `umlctl` supports:
   - `[network] queues = N`;
+  - later follow-up: `[network] queues = "auto"` resolves from
+    `[runtime].ncpus`;
   - `umlctl up --network-queues N`;
+  - later follow-up: `umlctl up --network-queues auto`;
   - `umlctl gate loop --network-queues N`;
-  - `umlctl gate loop --sweep network.queues=1,2`;
+  - `umlctl gate loop --sweep network.queues=1,2` and later
+    `network.queues=1,auto`;
   - host TAP setup with `multi_queue` for vector2 queues above one;
   - host TAP teardown with matching `multi_queue` deletion.
 
-Later fd-handoff work changes the default single-queue vector2
-`host_mode=auto` plan to `transport=fd`.  Multiqueue vector2 still uses
-`transport=tap,mode=inproc`; force `--network-host-mode inproc` if a
-single-queue vs multiqueue comparison must keep host mode constant.
+Later fd-handoff work changes the default vector2 `host_mode=auto`
+plan, including multiqueue, to `transport=fd`.  Force
+`--network-host-mode inproc` only when a comparison must keep trusted
+in-process host behavior constant.
 
 ## User Surface
 
@@ -46,6 +50,18 @@ driver = "vector2"
 queues = 2
 ```
 
+or:
+
+```toml
+[runtime]
+ncpus = 2
+
+[network]
+mode = "tap"
+driver = "vector2"
+queues = "auto"
+```
+
 One-off CLI override:
 
 ```sh
@@ -56,7 +72,14 @@ umlctl gate loop -f workload.toml --network-driver vector2 --network-queues 2 -W
 Dry-run output shows:
 
 ```text
-mode=tap driver=vector2 guest_dev=vec2.0 host_tap=soak-tap0 transport=tap host_mode=inproc queues=2
+mode=tap driver=vector2 guest_dev=vec2.0 host_tap=soak-tap0 transport=fd host_mode=fd queues=2 queue_spec=2
+kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=2
+```
+
+For a forced trusted in-process comparison, dry-run output shows:
+
+```text
+mode=tap driver=vector2 guest_dev=vec2.0 host_tap=soak-tap0 transport=tap host_mode=inproc queues=2 queue_spec=2
 kernel_arg=vec2.0:transport=tap,mode=inproc,ifname=soak-tap0,depth=128,queues=2
 sudo sh -c "ip tuntap add dev soak-tap0 mode tap user ... multi_queue"
 sudo sh -c "ip tuntap del dev soak-tap0 mode tap multi_queue"

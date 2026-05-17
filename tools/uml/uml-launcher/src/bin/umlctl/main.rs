@@ -287,9 +287,9 @@ struct GateLoopArgs {
     network_driver: Option<String>,
 
     /// Override `[network].queues` for every generated worker
-    /// Umlfile. Values above 1 require vector2.
-    #[arg(long = "network-queues", value_name = "N")]
-    network_queues: Option<u32>,
+    /// Umlfile. Use `auto` to match each worker's runtime.ncpus.
+    #[arg(long = "network-queues", value_name = "N|auto")]
+    network_queues: Option<deploy::NetworkQueueSpec>,
 
     /// Override `[network].host_mode` for every generated worker
     /// Umlfile. `auto` picks launcher-owned inherited fd TAP for
@@ -568,10 +568,11 @@ struct UpArgs {
     #[arg(long = "network-driver", value_name = "vector|vector2")]
     network_driver: Option<String>,
 
-    /// Override `[network].queues` without editing the Umlfile. Values
-    /// above 1 require vector2.
-    #[arg(long = "network-queues", value_name = "N")]
-    network_queues: Option<u32>,
+    /// Override `[network].queues` without editing the Umlfile. Use
+    /// `auto` to match runtime.ncpus. Values above 1, and `auto`,
+    /// require vector2.
+    #[arg(long = "network-queues", value_name = "N|auto")]
+    network_queues: Option<deploy::NetworkQueueSpec>,
 
     /// Override `[network].host_mode` without editing the Umlfile.
     /// `fd` makes umlctl open TAP queue fds and pass them to vector2.
@@ -817,7 +818,7 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
             .with_context(|| format!("apply --network-driver {driver}"))?;
     }
     if let Some(queues) = args.network_queues {
-        deploy::set_network_queues(&mut uml, queues)
+        deploy::set_network_queue_spec(&mut uml, queues.clone())
             .with_context(|| format!("apply --network-queues {queues}"))?;
     }
     if let Some(host_mode) = args.network_host_mode.as_deref() {
@@ -916,13 +917,14 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         );
         if let Some(plan) = &compiled.network_plan {
             eprintln!(
-                "[umlctl] network: driver={} guest_dev={} tap={} transport={} host_mode={} queues={}",
+                "[umlctl] network: driver={} guest_dev={} tap={} transport={} host_mode={} queues={} queue_spec={}",
                 plan.driver,
                 plan.guest_dev,
                 plan.tap_name,
                 plan.transport,
                 plan.host_mode,
                 plan.queue_count,
+                plan.queue_spec,
             );
             if let Some(fd) = plan.inherited_fd {
                 eprintln!(
@@ -958,13 +960,14 @@ fn print_network_plan(compiled: &deploy::Compiled) {
     println!("== network plan ==");
     if let Some(plan) = &compiled.network_plan {
         println!(
-            "  mode=tap driver={} guest_dev={} host_tap={} transport={} host_mode={} queues={}",
+            "  mode=tap driver={} guest_dev={} host_tap={} transport={} host_mode={} queues={} queue_spec={}",
             plan.driver,
             plan.guest_dev,
             plan.tap_name,
             plan.transport,
             plan.host_mode,
             plan.queue_count,
+            plan.queue_spec,
         );
         println!("  kernel_arg={}", plan.kernel_arg);
         if let Some(fd) = plan.inherited_fd {

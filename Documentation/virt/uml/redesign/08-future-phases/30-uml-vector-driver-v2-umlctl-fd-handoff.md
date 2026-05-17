@@ -26,6 +26,22 @@ queues = 4
 # host_mode defaults to "auto"
 ```
 
+For a normal vector2 SMP deployment, the preferred convenience form is:
+
+```toml
+[runtime]
+ncpus = 4
+
+[network]
+mode = "tap"
+driver = "vector2"
+queues = "auto"
+# host_mode defaults to "auto"
+```
+
+`umlctl` resolves `auto` to the requested vCPU count before launch.  The
+vector2 driver still receives an explicit numeric `queues=N`.
+
 `host_mode = "auto"` now maps this to:
 
 ```text
@@ -84,6 +100,7 @@ umlctl.network.tap_name=<tap>
 umlctl.network.transport=fd
 umlctl.network.host_mode=fd
 umlctl.network.queues=<N>
+umlctl.network.queue_spec=<N-or-auto>
 umlctl.network.fd=200
 umlctl.network.fd_count=<N>
 ```
@@ -98,7 +115,7 @@ Single-queue vector2:
 
 ```text
 == network plan ==
-  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=uml-tap0 transport=fd host_mode=fd queues=1
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=uml-tap0 transport=fd host_mode=fd queues=1 queue_spec=1
   kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128
   inherited_fds=tap:uml-tap0 -> fd=200
 ```
@@ -107,16 +124,25 @@ Multiqueue vector2:
 
 ```text
 == network plan ==
-  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=uml-tap0 transport=fd host_mode=fd queues=4
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=uml-tap0 transport=fd host_mode=fd queues=4 queue_spec=4
   kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4
   inherited_fds=tap:uml-tap0 -> fds=200..203
+```
+
+Automatic vector2 queue sizing:
+
+```text
+== network plan ==
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2autoq0 transport=fd host_mode=fd queues=4 queue_spec=auto
+  kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4
+  inherited_fds=tap:v2autoq0 -> fds=200..203
 ```
 
 Trusted in-process comparison remains available:
 
 ```text
 == network plan ==
-  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=uml-tap0 transport=tap host_mode=inproc queues=4
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=uml-tap0 transport=tap host_mode=inproc queues=4 queue_spec=4
   kernel_arg=vec2.0:transport=tap,mode=inproc,ifname=uml-tap0,depth=128,queues=4
 ```
 
@@ -167,7 +193,7 @@ cargo run --manifest-path tools/uml/uml-launcher/Cargo.toml \
 confirmed:
 
 ```text
-transport=fd host_mode=fd queues=4
+transport=fd host_mode=fd queues=4 queue_spec=4
 kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4
 inherited_fds=tap:uml-tap0 -> fds=200..203
 ```
@@ -183,12 +209,14 @@ cargo run --manifest-path tools/uml/uml-launcher/Cargo.toml \
 confirmed trusted in-process comparison remains explicit:
 
 ```text
-transport=tap host_mode=inproc queues=4
+transport=tap host_mode=inproc queues=4 queue_spec=4
 kernel_arg=vec2.0:transport=tap,mode=inproc,ifname=uml-tap0,depth=128,queues=4
 ```
 
 The explicit fd multiqueue combination now resolves to
 `transport=fd,mode=fd,fd=200,queues=N`; it is no longer rejected.
+The automatic queue sizing path resolves `queues = "auto"` from
+`[runtime].ncpus` before rendering the same fd multiqueue shape.
 
 Live `umlctl up` fd-handoff smoke:
 
@@ -204,7 +232,7 @@ The dry-run network plan for that Umlfile was:
 
 ```text
 == network plan ==
-  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2fd0 transport=fd host_mode=fd queues=1
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2fd0 transport=fd host_mode=fd queues=1 queue_spec=1
   kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128
   inherited_fds=tap:v2fd0 -> fd=200
 ```
@@ -212,7 +240,7 @@ The dry-run network plan for that Umlfile was:
 The live run reached the guest marker:
 
 ```text
-[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fd0 transport=fd host_mode=fd queues=1
+[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fd0 transport=fd host_mode=fd queues=1 queue_spec=1
 [umlctl] network-fd: open tap=v2fd0 and inherit fd=200
 started v2fdhandoff pid=3485995 run_id=01KRTWVEZH98GMK0YSCCB43T3H
 wait-for matched /FD_HANDOFF_OK/
@@ -277,7 +305,7 @@ The dry-run network plan for that Umlfile was:
 
 ```text
 == network plan ==
-  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2fdmq0 transport=fd host_mode=fd queues=4
+  mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2fdmq0 transport=fd host_mode=fd queues=4 queue_spec=4
   kernel_arg=vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4
   inherited_fds=tap:v2fdmq0 -> fds=200..203
 ```
@@ -285,7 +313,7 @@ The dry-run network plan for that Umlfile was:
 The live run reached the guest marker:
 
 ```text
-[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fdmq0 transport=fd host_mode=fd queues=4
+[umlctl] network: driver=vector2 guest_dev=vec2.0 tap=v2fdmq0 transport=fd host_mode=fd queues=4 queue_spec=4
 [umlctl] network-fd: open tap=v2fdmq0 and inherit fds=200..203
 started vector2-fd-multiqueue pid=3563521 run_id=01KRTYJRQBXHFTPRFHPMT702WH
 [umlctl] wait-for matched /VECTOR2_FD_MULTIQUEUE_OK/
@@ -298,6 +326,7 @@ Kernel command line: ... vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4 .
 uml-vector2: vec2.0 configured transport=fd mode=fd requested_queues=4 runtime_queues=4 depth=128
 UMLCTL_NETWORK_FD=200
 UMLCTL_NETWORK_FD_COUNT=4
+UMLCTL_NETWORK_QUEUE_SPEC=4
 UMLCTL_NETWORK_QUEUES=4
 UMLCTL_NETWORK_TRANSPORT=fd
 numtxqueues 4

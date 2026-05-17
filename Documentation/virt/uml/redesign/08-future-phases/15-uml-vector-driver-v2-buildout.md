@@ -81,9 +81,17 @@ shape, and inspectable ethtool surfaces:
 - launcher-owned vector2 fd multiqueue handoff through `umlctl`:
   `queues=N` maps to a contiguous inherited fd range starting at fd
   200, with live 4-queue gateway ping and clean TAP teardown;
+- `umlctl` automatic vector2 queue sizing: `queues = "auto"` and
+  `--network-queues auto` resolve from `[runtime].ncpus` before
+  rendering numeric `queues=N`, inherited fd counts, manifest labels,
+  and guest `UMLCTL_NETWORK_*` metadata;
 - explicit vector2 queue-to-CPU policy through `ndo_select_queue` and
   XPS setup, with KUnit coverage for the deterministic CPU/queue
   modulo rules;
+- short KCSAN-instrumented seccomp smoke for `queues = "auto"` over
+  launcher-owned vector2 fd multiqueue: `PASS=1/1`, no TAP leak,
+  `requested_queues=4 runtime_queues=4`, and no KCSAN data-race
+  signatures in the captured run log;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -610,7 +618,8 @@ R8a implementation note:
   - TX maps `skb_get_queue_mapping()` to a v2 channel and uses subqueue
     stop/wake for backpressure;
   - ethtool queue counters aggregate across open channels;
-  - `umlctl` exposes `[network] queues`, `--network-queues`, and
+  - `umlctl` exposes `[network] queues`, `queues = "auto"`,
+    `--network-queues`, `--network-queues auto`, and
     `--sweep network.queues=...`;
   - `umlctl` host setup and teardown use matching `multi_queue` TAP
     flags for vector2 multiqueue.

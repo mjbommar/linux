@@ -1,0 +1,77 @@
+# umlctl Umlfile - vector2 fd smoke with automatic queue sizing.
+#
+# This is the convenience path for normal SMP experiments:
+# `queues = "auto"` resolves to [runtime].ncpus, so users can scale
+# vCPUs and vector2 queues from one place while the generated UML
+# command line still carries an explicit numeric queues=N.
+#
+# Usage:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml \
+#       --wait-for VECTOR2_AUTO_QUEUES_OK
+#
+# Inspect first:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml --dry-run
+#
+# Tear down:
+#   umlctl down -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml --rm
+
+schema_version = 1
+
+[instance]
+name = "vector2-auto-queues"
+labels = { service = "network-smoke", driver = "vector2", transport = "fd", queues = "auto" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "512M"
+ncpus = 4
+
+[network]
+mode = "tap"
+driver = "vector2"
+host_mode = "auto"
+queues = "auto"
+tap_name = "v2autoq0"
+guest_ip = "10.90.0.2/24"
+host_ip = "10.90.0.1/24"
+gateway = "10.90.0.1"
+nameservers = ["8.8.8.8", "1.1.1.1"]
+masquerade_via = "auto"
+ports = []
+
+[env]
+PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
+
+[[init.phases]]
+name = "network-metadata"
+cmd = "env | grep '^UMLCTL_NETWORK_' | sort; echo UMLCTL_NETDEV=$UMLCTL_NETDEV"
+
+[[init.phases]]
+name = "link"
+cmd = "ip -d link show \"$UMLCTL_NETDEV\"; ip addr show \"$UMLCTL_NETDEV\""
+
+[[init.phases]]
+name = "gateway"
+cmd = "ping -c 3 \"$UMLCTL_GATEWAY\""
+timeout_secs = 20
+
+[[init.phases]]
+name = "stats"
+cmd = "command -v ethtool >/dev/null 2>&1 && ethtool -S \"$UMLCTL_NETDEV\" || true"
+
+[[init.phases]]
+name = "ready"
+cmd = "echo VECTOR2_AUTO_QUEUES_OK"
+
+[debug]
+strace = false
+gdb = false
+gdb_port = 5678
+log_dir = ""
+keep_running_on_failure = false

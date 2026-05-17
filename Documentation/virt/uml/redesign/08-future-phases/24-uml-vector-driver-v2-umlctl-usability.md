@@ -17,7 +17,7 @@ The stable selection surface is:
 [network]
 mode = "tap"
 driver = "vector2"
-queues = 1
+queues = 1       # or "auto" to match [runtime].ncpus
 # host_mode defaults to "auto"
 ```
 
@@ -32,6 +32,17 @@ Multiqueue produces a contiguous inherited fd range:
 
 ```text
 vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4
+```
+
+For SMP experiments, `queues = "auto"` is the convenient shape.  It
+resolves to `[runtime].ncpus` in `umlctl`, then emits the same numeric
+driver command line as a fixed queue count.  The CLI and gate-loop
+override accept the same value:
+
+```sh
+umlctl up -f tier3-django.toml --network-driver vector2 --network-queues auto --dry-run
+umlctl gate loop -f tier3-django.toml --network-driver vector2 --network-queues auto -W 1 -M 10
+umlctl gate loop -f tier3-django.toml --network-driver vector2 --sweep network.queues=1,auto -W 1 -M 10
 ```
 
 `umlctl` opens the host TAP after setup and inherits one fd per queue
@@ -91,6 +102,7 @@ UMLCTL_GUEST_IP
 UMLCTL_GATEWAY
 UMLCTL_NETWORK_TRANSPORT
 UMLCTL_NETWORK_HOST_MODE
+UMLCTL_NETWORK_QUEUE_SPEC
 UMLCTL_NETWORK_QUEUES
 UMLCTL_NETWORK_FD
 UMLCTL_NETWORK_FD_COUNT
@@ -126,7 +138,7 @@ prints:
 - host TAP name;
 - transport;
 - host mode;
-- queue count;
+- resolved queue count and original queue spec;
 - exact UML kernel command-line argument;
 - inherited fd or fd-range mapping when vector2 fd handoff is selected.
 
@@ -159,6 +171,7 @@ Use this sequence when checking a vector v2 workload:
 
 ```sh
 umlctl up -f workload.toml --network-driver vector2 --dry-run
+umlctl up -f workload.toml --network-driver vector2 --network-queues auto --dry-run
 umlctl gate loop -f workload.toml --network-driver vector2 -W 1 -M 1 --timeout 120
 umlctl gate loop -f workload.toml --sweep network.driver=vector,vector2 -W 1 -M 30 --timeout 180
 ```
@@ -185,6 +198,9 @@ This follow-up was checked with:
   `vec2.0:transport=fd,mode=fd,fd=200,depth=128` kernel argument;
 - `tools/uml/uml-launcher/examples/vector2-fd-handoff.toml` dry-run
   coverage for the dedicated fd-handoff smoke path;
+- `tools/uml/uml-launcher/examples/vector2-auto-queues.toml` dry-run
+  coverage for `queues = "auto"`, including resolved `queues=4`,
+  `queue_spec=auto`, and inherited fds `200..203`;
 - a synthetic sleeping-kernel ready-timeout, confirming `umlctl up`
   prints `pid`, `run_id`, and `init_log`;
 - a synthetic `umlctl gate loop` ready-timeout, confirming `run-1.log`

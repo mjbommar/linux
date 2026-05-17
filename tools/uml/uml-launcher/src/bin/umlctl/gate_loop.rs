@@ -51,7 +51,7 @@ struct LoopArgs {
     json: bool,
     kernel_override: Option<PathBuf>,
     network_driver_override: Option<String>,
-    network_queues_override: Option<u32>,
+    network_queues_override: Option<deploy::NetworkQueueSpec>,
     network_host_mode_override: Option<String>,
 }
 
@@ -206,10 +206,7 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
             bail!("use either --network-driver or --sweep network.driver=..., not both");
         }
     }
-    if let Some(queues) = args.network_queues {
-        if queues == 0 {
-            bail!("--network-queues must be >= 1");
-        }
+    if args.network_queues.is_some() {
         if sweep_axes.iter().any(|axis| axis.key == "network.queues") {
             bail!("use either --network-queues or --sweep network.queues=..., not both");
         }
@@ -283,8 +280,8 @@ fn run_one_point(
         deploy::set_network_driver(&mut base, driver)
             .with_context(|| format!("apply --network-driver {driver}"))?;
     }
-    if let Some(queues) = lo.network_queues_override {
-        deploy::set_network_queues(&mut base, queues)
+    if let Some(queues) = &lo.network_queues_override {
+        deploy::set_network_queue_spec(&mut base, queues.clone())
             .with_context(|| format!("apply --network-queues {queues}"))?;
     }
     if let Some(host_mode) = lo.network_host_mode_override.as_deref() {
@@ -394,10 +391,10 @@ fn apply_sweep_point(u: &mut deploy::Umlfile, point: &SweepPoint) -> Result<()> 
     }
     for (k, v) in &point.0 {
         if k == "network.queues" {
-            let queues: u32 = v
+            let queues: deploy::NetworkQueueSpec = v
                 .parse()
                 .with_context(|| format!("parse --sweep network.queues={v}"))?;
-            deploy::set_network_queues(u, queues)
+            deploy::set_network_queue_spec(u, queues)
                 .with_context(|| format!("apply --sweep network.queues={v}"))?;
         }
     }
@@ -771,12 +768,41 @@ mode = "tap"
         apply_sweep_point(&mut u, &point).unwrap();
 
         assert_eq!(u.network.driver, "vector2");
-        assert_eq!(u.network.queues, 2);
+        assert_eq!(u.network.queues, deploy::NetworkQueueSpec::Fixed(2));
         assert_eq!(u.network.host_mode, "inproc");
         assert_eq!(u.env.get("MT_JITTER_NS").map(String::as_str), Some("100"));
         assert!(!u.env.contains_key("network.driver"));
         assert!(!u.env.contains_key("network.queues"));
         assert!(!u.env.contains_key("network.host_mode"));
+    }
+
+    #[test]
+    fn network_queue_sweep_accepts_auto_spec() {
+        let mut u: deploy::Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[runtime]
+ncpus = 4
+[network]
+mode = "tap"
+driver = "vector2"
+"#,
+        )
+        .unwrap();
+        let point = SweepPoint(vec![("network.queues".into(), "auto".into())]);
+
+        apply_sweep_point(&mut u, &point).unwrap();
+
+        assert_eq!(u.network.queues, deploy::NetworkQueueSpec::Auto);
+        assert_eq!(
+            deploy::resolve_network_queues(&u.network, &u.runtime).unwrap(),
+            4
+        );
+        assert!(!u.env.contains_key("network.queues"));
     }
 
     #[test]
