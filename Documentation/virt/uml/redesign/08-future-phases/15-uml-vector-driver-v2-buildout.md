@@ -130,6 +130,13 @@ shape, and inspectable ethtool surfaces:
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
   `queues=2` TAP;
+- KVM-v2 readiness narrowed: a correctly configured
+  `CONFIG_UM_BACKEND_KVM_V2=y` vector2 runtime passes no-network
+  readiness, vector2 fd-handoff smoke, and a one-shot Django
+  stdlib-shim vector2 fd smoke on KVM-v2; the full Django 30-run KVM-v2
+  gate is still partial at `PASS=29/30 FAIL=1` due to a guest
+  `python3` abort during server startup, with high `KVM_V2_TLB_LAG`
+  diagnostics in the KVM-v2 logs;
 - live real FastAPI + uvicorn success on seccomp through
   vector2 launcher-owned fd handoff with `queues = "auto"` resolving
   to two queues: one-shot gateway ping, `SERVER_READY`,
@@ -182,7 +189,10 @@ Missing runtime pieces:
 
 - no real timer-driven coalescing;
 - no feature negotiation;
-- no 30/30 Tier 3 workload proof on kvm-v2;
+- no clean 30/30 Tier 3 workload proof on kvm-v2; the latest Django
+  vector2 fd attempt reached `PASS=29/30 FAIL=1` and failed from a
+  KVM-v2 guest `python3` abort rather than a vector2 open/registration
+  failure;
 - no repeated long soak loop;
 - no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
   now has an initial clean bidirectional pass plus three repeats with
@@ -650,16 +660,14 @@ R7 implementation note:
     `TIER3_OK`, and `REPRO_DONE rc=0`, and `soak-tap0` was absent
     after teardown;
   - seccomp repeated cleanup smoke: 2/2 pass, TAP absent after loop;
-  - kvm-v2 Tier 3 smoke still fails `umlctl up` readiness after the
-    full 180-second budget, but TAP is absent after failure cleanup;
-  - kvm-v2 no-network isolation also fails readiness before the Linux
-    boot banner while the same kernel boots under seccomp, so the
-    current kvm-v2 R7 blocker is not vector2-specific.
+  - the original kvm-v2 Tier 3 smoke failed `umlctl up` readiness
+    because the vector2-only runtime used for the attempt did not build
+    `CONFIG_UM_BACKEND_KVM_V2`; a later checkpoint with a correctly
+    configured KVM-v2 runtime supersedes that broad readiness diagnosis.
 - Therefore R7 is partially satisfied.  Selection, observability,
   teardown safety, and the seccomp 30/30 Tier 3 gate landed; kvm-v2
-  30/30 and long-soak eligibility remain open, and kvm-v2 baseline
-  readiness must be fixed before vector2-specific kvm-v2 datapath
-  claims are meaningful.
+  30/30 and long-soak eligibility remain open pending the later
+  KVM-v2 Python-abort/TLB-lag investigation.
 
 ### V2-R8 - Multiqueue
 
@@ -985,6 +993,44 @@ Live failed-open injection follow-up:
 - Therefore the runtime failed-open proof is closed for the vector2 fd
   handoff open path.  Broader repeated soaks, kvm-v2 reruns, and
   performance/fairness disposition remain open.
+
+KVM-v2 readiness follow-up:
+
+- `44-uml-vector-driver-v2-kvmv2-readiness.md` records the first
+  KVM-v2 checkpoint with a correctly configured vector2 runtime kernel.
+- Implemented or built:
+  - separate runtime build
+    `/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux`;
+  - `CONFIG_UM_BACKEND_KVM_V2=y`,
+    `CONFIG_UM_BACKEND_DYNAMIC=y`, `CONFIG_UML_NET_VECTOR_V2=y`, and
+    `CONFIG_UML_NET_VECTOR_V2_SANDBOX=y`;
+  - no repository code change was needed to boot KVM-v2 with vector2.
+- Evidence collected:
+  - KVM-v2-enabled UML runtime build passed;
+  - `cargo build --manifest-path tools/uml/uml-launcher/Cargo.toml
+    --bin umlctl` passed;
+  - no-network seccomp control passed `PASS=1/1`;
+  - no-network KVM-v2 readiness passed `PASS=1/1`;
+  - vector2 fd-handoff over KVM-v2 passed `PASS=1/1`, registered
+    `vec2.0`, used inherited fd 200, and left no `v2fd0` TAP or UML
+    process;
+  - Tier 3 Django stdlib-shim vector2 fd smoke on KVM-v2 passed
+    `PASS=1/1` with `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, and
+    `TIER3_OK`;
+  - Tier 3 Django stdlib-shim vector2 fd repetition on KVM-v2 reached
+    only `PASS=29/30 FAIL=1 TIMEOUT=0`; iteration 25 aborted guest
+    `python3` before `SERVER_READY`, printed `SERVER_FAIL`, and then
+    hit the expected secondary init-exit panic;
+  - the same generated Django/vector2 shape passed a seccomp control
+    `PASS=3/3 FAIL=0 TIMEOUT=0`;
+  - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
+    and repeated `KVM_V2_TLB_LAG` values above 1000 during the Django
+    runs.
+- Therefore the old "KVM-v2 cannot even boot before vector2" blocker is
+  narrowed to a KVM-v2 application-workload stability blocker.  Vector2
+  fd handoff works on KVM-v2, but the KVM-v2 Django 30/30 requirement is
+  still open until the guest Python abort and high TLB-lag behavior are
+  fixed or cleanly explained.
 
 ### V2-R9 - Transport Parity
 

@@ -309,6 +309,14 @@ parking-lot designs for future prioritization.
   open/failure/close counters, registered state, clean TAP/process
   teardown, and no warning/BUG/KCSAN/data-race signatures. Not a
   commitment.
+- [44-uml-vector-driver-v2-kvmv2-readiness.md](44-uml-vector-driver-v2-kvmv2-readiness.md) —
+  KVM-v2 readiness checkpoint for vector2: rebuilds a proper
+  `CONFIG_UM_BACKEND_KVM_V2=y` vector2 runtime, records no-network
+  seccomp and KVM-v2 readiness passes, vector2 fd handoff on KVM-v2,
+  and a Django stdlib-shim smoke pass. The 30-run Django gate is still
+  partial at `PASS=29/30 FAIL=1`, with a guest `python3` abort and
+  high `KVM_V2_TLB_LAG` diagnostics, so this remains a blocker. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
