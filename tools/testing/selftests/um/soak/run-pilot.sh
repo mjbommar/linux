@@ -132,6 +132,7 @@ case "$WORKLOAD" in
         ;;
     stress-ng) WORKLOADS=(stress-ng); TIMEOUTS=("$TIMEOUT") ;;
     cpython-soak) WORKLOADS=(cpython-soak); TIMEOUTS=("$TIMEOUT") ;;
+    django-loopback-none) WORKLOADS=(django-loopback-none); TIMEOUTS=("$TIMEOUT") ;;
     kbuild-tiny) WORKLOADS=(kbuild-tiny); TIMEOUTS=("$TIMEOUT") ;;
     memcheck) WORKLOADS=(memcheck); TIMEOUTS=("$TIMEOUT") ;;
     iocheck) WORKLOADS=(iocheck); TIMEOUTS=("$TIMEOUT") ;;

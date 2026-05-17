@@ -149,6 +149,7 @@ declare -A TIMEOUT_FOR=(
 	[memcheck]=90 [iocheck]=120 [stress-ng]=120
 	[cpython-soak]=360 [kbuild-tiny]=600
 	[tier1-pylibs]=90 [tier2-uv-pylibs]=120
+	[django-loopback-none]=180
 	[tier3-django]=180 [tier3-fastapi]=180
 	[tier3-django-v2]=180 [tier3-fastapi-v2]=180
 	[ltp-runner]=3600

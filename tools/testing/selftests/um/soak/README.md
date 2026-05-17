@@ -27,6 +27,7 @@ Companion docs:
 | `iocheck.c` | write/fsync/read/verify loop on tmpfs (fio replacement). Per-block deterministic key; catches pagecache / writeback / fsync ordering bugs. |
 | `tier1-smoketest.py` | Tier 1 host-installed Python C-extension smoke (requests + cryptography; numpy deferred — see "Known issues" below). 0.16 s on host, 2-5 s in UML. |
 | `tier2-uv-smoketest.py` | Tier 2 deterministic smoke (httpx + pyyaml + pendulum + numpy). Run from a `uv`-built persistent venv (see "Tier 2 bootstrap" below). |
+| `django-loopback-none.toml.template` | Django-shaped stdlib HTTP loopback control with `network.mode = "none"`; isolates KVM-v2 process/socket/server flakes from vector2 TAP/fd setup. |
 | `tier3-django.toml.template` | Tier 3 Django-shaped loopback HTTP server. Requires `CONFIG_UML_NET_VECTOR=y` kernel rebuild (see "Tier 3 bootstrap" below). |
 | `tier3-fastapi.toml.template` | Tier 3 FastAPI-shaped loopback. Same pre-flight as `tier3-django`. |
 | `ltp-runner.toml.template` | LTP test runner driven by `kirk` (LTP's new Python runner). Requires LTP + kirk installed under `/opt/` (see "LTP bootstrap" below). |
@@ -48,6 +49,7 @@ load knobs.
 | `iocheck` | pagecache write/read coherence + fsync ordering | ~3 s | 64 MB × 4 iters × 4 K blocks on tmpfs |
 | `stress-ng` | futex/pipe/switch IPC + `--verify` | ~10 s | `--vm` disabled — see SMP-T57 |
 | `cpython-soak` | Python regrtest curated subset (signal/io/mmap/fork/threadsignals/etc.) | ~60-120 s | Tight set picked to fit ~60 s under UML overhead |
+| `django-loopback-none` | stdlib HTTP server + loopback readiness/curl with no UML network device | ~5-180 s | KVM-v2/vector2 isolation control; failures here are backend workload bugs, not vector2 TAP/fd setup |
 | `kbuild-tiny` | tinyconfig UML kernel build (fork-storm / pipe / file I/O) | ~3-5 min | `KBUILD_OUTPUT=/tmp/build` to avoid hostfs write fan-out |
 | `tier1-pylibs` | host-installed Python C-extension exercise (requests URL+JSON+headers, cryptography AES-256-CBC roundtrip on 4 KiB block) | ~5-10 s | numpy deferred — see "Known issues" |
 | `tier2-uv-pylibs` | pre-built-venv pip C-extension exercise (httpx URL+JSON, pyyaml round-trip, pendulum tz math, numpy linalg+FFT) | ~2-5 s | needs Tier 2 bootstrap below; uv-managed |

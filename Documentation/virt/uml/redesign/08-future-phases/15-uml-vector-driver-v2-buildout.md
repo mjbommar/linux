@@ -1121,6 +1121,15 @@ KVM-v2 readiness follow-up:
     diagnostics with max lag 2685, so TLB lag alone is not a failure
     classifier and simple no-network Python import startup did not
     reproduce the Django abort class;
+  - a no-network KVM-v2 Django-loopback control using the same trace
+    runtime kept the stdlib HTTP server, loopback readiness probe, and
+    100 in-guest `/health` requests but removed vector2 entirely with
+    `network.mode = "none"`; the reusable template is
+    `tools/testing/selftests/um/soak/django-loopback-none.toml.template`.
+    It reproduced the workload flake at `PASS=27/30 FAIL=2 TIMEOUT=1`,
+    including one fatal Python `Executing a cache` abort in the
+    readiness-probe helper, one abort of the background HTTP server
+    before readiness, and one timeout during `django-up`;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
@@ -1148,14 +1157,15 @@ KVM-v2 readiness follow-up:
   trace-enabled path now captures and parses a failing state-ring dump,
   but the longer samples still fail from KVM-v2 guest userspace
   execution instability.  A no-network Python import control did not
-  reproduce the abort across 3000 fresh import startups, so the
-  remaining signal points at the full Django/server/network timing shape
-  or another KVM-v2 state path rather than Python import startup alone.
-  The direct post-syscall stale-`kvm_run` consumption path has been
-  removed and stale `uml_pt_regs` ownership is now ruled out by trace
-  evidence; the next backend audit must focus on guest memory/TLB state
-  and other KVM-v2 userspace-corruption paths.  KVM-v2 Tier 3 readiness
-  remains open.
+  reproduce the abort across 3000 fresh import startups, but a
+  no-network Django-loopback control reproduced the flake without any
+  vector2 fd/TAP setup.  The remaining signal points at KVM-v2
+  process/socket/server workload state rather than vector2 queue or fd
+  handoff behavior.  The direct post-syscall stale-`kvm_run`
+  consumption path has been removed and stale `uml_pt_regs` ownership is
+  now ruled out by trace evidence; the next backend audit must focus on
+  guest memory/TLB state and other KVM-v2 userspace-corruption paths.
+  KVM-v2 Tier 3 readiness remains open.
 
 ### V2-R9 - Transport Parity
 

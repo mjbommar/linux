@@ -62,7 +62,7 @@ Current status update against the short remaining list:
 
 | Item | Current Status | Notes |
 | --- | --- | --- |
-| kvm-v2 baseline readiness blocker | Partial / narrowed | No-network readiness, vector2 fd-handoff, one-shot Django vector2 smoke, and a no-network Python import control now pass on a correctly configured KVM-v2 runtime. The remaining KVM-v2 issue is a guest userspace execution flake under the full Django/Python workload shape, not a generic boot/readiness failure. |
+| kvm-v2 baseline readiness blocker | Partial / narrowed | No-network readiness, vector2 fd-handoff, one-shot Django vector2 smoke, and a no-network Python import control now pass on a correctly configured KVM-v2 runtime, but a no-network Django-loopback control fails. The remaining KVM-v2 issue is a guest userspace execution flake under the Django/server/socket workload shape, not vector2 fd/TAP setup or generic boot readiness. |
 | kvm-v2 + vector2 Tier 3 30/30 | Partial / not accepted | One diagnostic Django vector2 KVM-v2 run reached `PASS=30/30 FAIL=0 TIMEOUT=0`, but longer or trace-enabled samples still failed at `PASS=57/60 FAIL=2 TIMEOUT=1`, `PASS=59/60 FAIL=1 TIMEOUT=0`, and later `PASS=29/30 FAIL=1 TIMEOUT=0`. This remains open until the backend flake is fixed or bounded with clean repeat evidence. |
 | FastAPI variant | Done for seccomp vector2 fd | Real FastAPI + uvicorn vector2 fd handoff passed smoke and `PASS=30/30 FAIL=0 TIMEOUT=0`, with every run reaching `FASTAPI_HTTP ok=51 fail=0`. |
 | fd multiqueue | Done for current launch/core path | Core KUnit, live `umlctl` fd multiqueue, auto queue sizing, per-queue stats, and clean TAP teardown evidence are recorded. |
@@ -281,6 +281,16 @@ Validation evidence recorded in the checkpoint docs includes:
   contained 947 `KVM_V2_TLB_LAG` diagnostics with max lag 2685, so
   simple no-network Python import startup did not reproduce the abort
   class and TLB lag alone is not a failure classifier;
+- KVM-v2 no-network Django-loopback control:
+  the same trace runtime reproduced the workload flake without vector2
+  at `PASS=27/30 FAIL=2 TIMEOUT=1`; the reusable template is
+  `tools/testing/selftests/um/soak/django-loopback-none.toml.template`.
+  The 27 passing logs reached `SERVER_READY`, `GUEST_CURL ok=100
+  fail=0`, and `TIER3_OK`, while the non-passing logs included a fatal
+  Python `Executing a cache` abort in the readiness-probe helper, an
+  abort of the background stdlib HTTP server before readiness, and a
+  timeout during `django-up`.  This makes the KVM-v2 backend the blocker
+  for vector2 KVM-v2 Tier 3 acceptance;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -297,9 +307,10 @@ list is:
   failures and one startup timeout; the direct post-syscall stale
   `kvm_run` consumption path has been removed and stale `uml_pt_regs`
   ownership has been ruled out; a no-network Python import control did
-  not reproduce the abort across 3000 fresh import startups, so the next
-  backend audit must resolve guest memory/TLB state, the full
-  Django/server/network timing shape, or another KVM-v2
+  not reproduce the abort across 3000 fresh import startups, but a
+  no-network Django-loopback control reproduced the flake without
+  vector2, so the next backend audit must resolve guest memory/TLB
+  state, Django/server/socket workload state, or another KVM-v2
   userspace-corruption path;
 - repeat vector2 Tier 3 Django on kvm-v2 after the backend
   investigation until the flake rate is acceptably bounded;

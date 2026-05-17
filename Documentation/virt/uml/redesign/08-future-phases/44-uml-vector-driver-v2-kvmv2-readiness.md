@@ -669,6 +669,73 @@ startup/import without a network device.  It also strengthens the
 earlier conclusion that high `KVM_V2_TLB_LAG` is not a direct
 per-iteration failure classifier.
 
+### No-Network Django Loopback Control
+
+The next control kept the Django-shaped stdlib HTTP server, guest
+loopback readiness probe, and 100 in-guest `/health` requests, but used
+`network.mode = "none"` so no vector2 TAP/fd device was configured.
+The reusable template is
+`tools/testing/selftests/um/soak/django-loopback-none.toml.template`.
+The runtime shape otherwise matched the KVM-v2 trace runs:
+
+- `backend = "kvm-v2"`;
+- `append = ["kvm_v2_trace_enable"]`;
+- `mem = "1024M"`;
+- `ncpus = 2`.
+
+Smoke:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/kvmv2-django-loopback-none-trace.toml \
+    -W 1 -M 1 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --fail-marker 'SERVER_FAIL|TIER3_FAIL|Fatal Python error|Segmentation fault|Aborted|kernel BUG|Kernel panic' \
+    --out /tmp/um-kvmv2-django-loopback-none-trace-smoke
+
+PASS=1/1 FAIL=0 TIMEOUT=0
+```
+
+30-run control:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/kvmv2-django-loopback-none-trace.toml \
+    -W 1 -M 30 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --fail-marker 'SERVER_FAIL|TIER3_FAIL|Fatal Python error|Segmentation fault|Aborted|kernel BUG|Kernel panic' \
+    --out /tmp/um-kvmv2-django-loopback-none-trace-30
+
+PASS=27/30 FAIL=2 TIMEOUT=1
+```
+
+The 27 passing logs reached `SERVER_READY`, `GUEST_CURL ok=100
+fail=0`, and `TIER3_OK`.  The non-passing logs show the same KVM-v2
+userspace-execution class without any vector2 network device:
+
+- iteration 9 aborted a guest `python3` readiness-probe helper with
+  `Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.`
+  while executing `<frozen getpath>`;
+- iteration 21 timed out during `django-up` before `SERVER_READY`;
+- iteration 23 aborted the background `python3
+  /tmp/tier3-django-loopback-app.py` server before readiness.
+
+The no-network Django-loopback sample contained 885 `KVM_V2_TLB_LAG`
+diagnostics with max lag 2392.  The non-passing iterations had max lags
+596, 2113, and 1255, while passing iterations also reached max lags
+above 2300.  Again, TLB lag is not a direct classifier.
+
+This is the strongest isolation result so far: vector2 fd/TAP setup is
+not required to reproduce the Django-shaped KVM-v2 failure.  The
+remaining vector2 KVM-v2 gate is blocked by the backend's
+userspace/process/socket workload stability, not by demonstrated
+vector2 queue or fd-handoff behavior.  A follow-up trace run should
+avoid fail-fast matching on `Fatal Python error` / `Aborted` so the
+guest shell can dump the state ring before `umlctl` tears the instance
+down.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -703,25 +770,30 @@ userspace-execution flake class is fixed or otherwise explained with
 repeatable clean evidence.  The trace-enabled rerun confirms the same
 Python abort class and now preserves a complete KVM-v2 state-ring dump
 for backend analysis.  A separate no-network Python import control
-passed 30/30 with 3000 fresh import processes, so the current evidence
-points at the full Django/server/network timing shape or another KVM-v2
-state path, not at simple Python import startup by itself.
+passed 30/30 with 3000 fresh import processes, but a no-network
+Django-loopback control reproduced the same class at `PASS=27/30
+FAIL=2 TIMEOUT=1`.  The current evidence points at KVM-v2
+process/socket/server workload state rather than vector2 fd/TAP setup or
+simple Python import startup by itself.
 
 ## Next Work
 
-1. Use the parsed iteration 21 `KVMV2T` dump to inspect the pid 161/1
+1. Capture a full KVM-v2 state trace from the no-network
+   Django-loopback control by letting the guest failure path dump the
+   ring before `umlctl` classifies the run as failed.
+2. Use the parsed iteration 21 `KVMV2T` dump to inspect the pid 161/1
    transition history, final syscall/page-fault sequence, and the large
    `mmgen - vlast` gap around `HANDLE_SYSCALL_POST`.
-2. Audit the remaining task/mm transition cases after `execve`,
+3. Audit the remaining task/mm transition cases after `execve`,
    `exit_group`, and sleeping syscalls now that the direct post-syscall
    `kvm_run` reuse has been removed.
-3. Treat stale `regs` ownership as ruled out unless a future trace shows
+4. Treat stale `regs` ownership as ruled out unless a future trace shows
    `regs_owner_mismatches > 0`.
-4. Treat high `KVM_V2_TLB_LAG` as insufficient by itself: passing
+5. Treat high `KVM_V2_TLB_LAG` as insufficient by itself: passing
    Django and no-network Python controls also show large lag values.
    Continue auditing whether lag is symptomatic or part of a broader
    task/mm/TLB ordering issue.
-5. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
+6. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
    only then update the completion audit from partial to done.
 
 ## Diagnostic Follow-Up
@@ -774,3 +846,10 @@ Validation for the diagnostic change:
   BUG, panic, KCSAN, or trace-dump markers.  Passing logs still showed
   947 `KVM_V2_TLB_LAG` diagnostics with max lag 2685, so TLB lag alone
   is not a failure classifier.
+- a no-network KVM-v2 Django-loopback control using the same trace
+  runtime reproduced the workload flake without vector2:
+  `PASS=27/30 FAIL=2 TIMEOUT=1`.  The failures were a fatal Python
+  `Executing a cache` abort in the readiness-probe helper and an abort
+  of the background stdlib HTTP server before readiness; the timeout
+  also occurred during `django-up`.  This proves vector2 fd/TAP setup is
+  not required for the KVM-v2 Django-shaped failure class.
