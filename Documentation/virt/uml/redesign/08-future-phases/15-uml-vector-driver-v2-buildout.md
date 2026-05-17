@@ -9,8 +9,8 @@ vector v2 scaffolding becomes a real driver that can replace the
 current `CONFIG_UML_NET_VECTOR` implementation?
 
 The answer is: a full runtime driver still has to be built.  The
-current v2 code is valuable foundation work, but it is not a netdev
-driver yet.
+current v2 code has advanced past scaffolding into an experimental
+netdev driver, but the replacement gates are not closed.
 
 ## Current State
 
@@ -30,9 +30,9 @@ The following v2 foundations exist:
 Those pieces prove parser policy, queue ownership, transport header
 bounds checks, fake-host behavior, and lifecycle transitions.
 
-R1 through R6 have now added the first runtime attachments, the first
-trusted TAP packet path, and the first inspectable ethtool hardening
-surface:
+R1 through R8 plus the fd datapath follow-up have now added runtime
+attachments, packet movement, `umlctl` selection, multiqueue TAP
+shape, and inspectable ethtool surfaces:
 
 - `CONFIG_UML_NET_VECTOR_V2`, default `n`;
 - v2-only command-line collection through `vec2.<n>:` and `vec2=`;
@@ -84,7 +84,8 @@ Missing runtime pieces:
 - no 30/30 Tier 3 workload proof on both seccomp and kvm-v2;
 - no repeated long soak loop;
 - no full multiqueue validation story: fd multiqueue, queue-to-CPU
-  policy, KCSAN, and queue distribution remain open;
+  policy, KCSAN, and broader fairness/performance profiles remain
+  open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.
@@ -407,9 +408,10 @@ R5 implementation note:
   channel-owned NAPI/read IRQ, `ndo_start_xmit()` enqueue, TAP TX/RX
   host ops, vnet-header normalization, KUnit TX/RX pipe-backed tests,
   and a guest-to-host ping smoke with 3/3 replies.
-- R5 is still single-queue trusted TAP only.  It does not satisfy fd
-  datapath, sandbox helper/proxy, multiqueue, ethtool, performance, or
-  Tier 3 replacement gates.
+- R5 was single-queue trusted TAP only.  Later checkpoints add fd
+  datapath, ethtool, `umlctl`, and TAP multiqueue pieces.  Sandbox
+  helper/proxy, fd multiqueue, performance, KCSAN, kvm-v2, and full
+  Tier 3 replacement gates remain open.
 
 R5 fd follow-up note:
 
