@@ -22,14 +22,82 @@
 
 #define UM_VEC2_NAPI_MAX_WEIGHT	64U
 
+static void um_vec2_netdev_tx_timeout(struct net_device *dev,
+				      unsigned int txqueue);
+static void um_vec2_netdev_set_rx_mode(struct net_device *dev);
+#ifdef CONFIG_NET_POLL_CONTROLLER
+static void um_vec2_netdev_poll_controller(struct net_device *dev);
+#endif
+
 static const struct net_device_ops um_vec2_netdev_ops = {
 	.ndo_open		= um_vec2_netdev_open,
 	.ndo_stop		= um_vec2_netdev_stop,
 	.ndo_start_xmit		= um_vec2_netdev_start_xmit,
 	.ndo_select_queue	= um_vec2_netdev_select_queue,
+	.ndo_tx_timeout		= um_vec2_netdev_tx_timeout,
+	.ndo_set_rx_mode	= um_vec2_netdev_set_rx_mode,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= um_vec2_netdev_poll_controller,
+#endif
 };
+
+/*
+ * Minimal watchdog handler: log the timeout and mark the queue start
+ * timestamp so netif_tx_lock_bh can deliver the next xmit attempt.
+ * Matches legacy vector_kern.c's vector_net_tx_timeout shape: the
+ * driver does not auto-reset state today because the backend has no
+ * "TX stuck" notion separate from BACKEND_DEAD.  Logging the event
+ * is what tooling needs.  See audit P2.4.
+ */
+static void um_vec2_netdev_tx_timeout(struct net_device *dev,
+				      unsigned int txqueue)
+{
+	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+
+	netdev_warn(dev, "vector v2 ndo_tx_timeout queue=%u state=%s\n",
+		    txqueue, um_vec2_dev_state_name(vdev->life.state));
+	netif_trans_update(dev);
+}
+
+/*
+ * ndo_set_rx_mode stub.  The host TAP backend negotiates flags at
+ * /dev/net/tun open time (IFF_TAP | IFF_NO_PI | IFF_VNET_HDR) and
+ * has no live interface for per-multicast/promisc filter changes
+ * from the guest side.  Accept the call (avoid -EOPNOTSUPP noise
+ * from "ip" / userspace) and rely on the host's TAP for upstream
+ * filtering.  See audit P2.5.
+ */
+static void um_vec2_netdev_set_rx_mode(struct net_device *dev)
+{
+	netdev_dbg(dev, "vector v2 ndo_set_rx_mode flags=0x%x\n", dev->flags);
+}
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+/*
+ * netconsole support: drive a poll cycle on each channel's NAPI to
+ * flush the receive ring without waiting for an IRQ.  Legacy parity
+ * (vector_kern.c::vector_net_poll_controller).  See audit P2.6.
+ */
+static void um_vec2_netdev_poll_controller(struct net_device *dev)
+{
+	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+	unsigned int i;
+
+	if (!vdev->channels)
+		return;
+	for (i = 0; i < vdev->num_channels; i++) {
+		struct um_vec2_channel *channel = &vdev->channels[i];
+
+		if (channel->rx_irq != UM_VEC2_NO_IRQ) {
+			disable_irq(channel->rx_irq);
+			napi_schedule(&channel->napi);
+			enable_irq(channel->rx_irq);
+		}
+	}
+}
+#endif
 
 static void um_vec2_stop_datapath(struct net_device *dev,
 				  struct um_vec2_dev *vdev);
@@ -545,7 +613,17 @@ int um_vec2_netdev_stop(struct net_device *dev)
 					     UM_VEC2_DEV_REGISTERED);
 		break;
 	default:
-		ret = -EINVAL;
+		/*
+		 * ndo_stop is expected to be idempotent: returning an
+		 * error here would make "ip link set vec2.X down" fail
+		 * for already-stopped devices, which the netdev framework
+		 * (and operator tooling) treats as a hard failure.  Log
+		 * the unexpected state for diagnostics and return 0.
+		 * See audit B5.
+		 */
+		netdev_warn(dev,
+			    "vector v2 ndo_stop called in unexpected state %s; treating as already stopped\n",
+			    um_vec2_dev_state_name(vdev->life.state));
 		break;
 	}
 

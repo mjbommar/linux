@@ -56,7 +56,6 @@ enum um_vec2_key_id {
 	UM_VEC2_KEY_VNL,
 	UM_VEC2_KEY_DESCR,
 	UM_VEC2_KEY_PORT,
-	UM_VEC2_KEY_VDE_MODE,
 	UM_VEC2_KEY_GROUP,
 	UM_VEC2_KEY_FAIL_OPEN_AFTER,
 	UM_VEC2_KEY_UNKNOWN,
@@ -224,7 +223,6 @@ static bool um_vec2_key_trusted_host_only(enum um_vec2_key_id key)
 	case UM_VEC2_KEY_VNL:
 	case UM_VEC2_KEY_DESCR:
 	case UM_VEC2_KEY_PORT:
-	case UM_VEC2_KEY_VDE_MODE:
 	case UM_VEC2_KEY_GROUP:
 		return true;
 	default:
@@ -497,10 +495,6 @@ static int um_vec2_parse_value(enum um_vec2_key_id id, const char *key,
 					  key, value, err);
 	case UM_VEC2_KEY_PORT:
 		return um_vec2_copy_value(cfg->port, sizeof(cfg->port),
-					  key, value, err);
-	case UM_VEC2_KEY_VDE_MODE:
-		return um_vec2_copy_value(cfg->mode_string,
-					  sizeof(cfg->mode_string),
 					  key, value, err);
 	case UM_VEC2_KEY_GROUP:
 		return um_vec2_copy_value(cfg->group, sizeof(cfg->group),

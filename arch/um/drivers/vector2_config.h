@@ -128,7 +128,6 @@ struct um_vec2_config {
 	char vnl[UM_VEC2_PATH_MAX];
 	char descr[UM_VEC2_DESCR_MAX];
 	char port[UM_VEC2_PORT_MAX];
-	char mode_string[UM_VEC2_PORT_MAX];
 	char group[UM_VEC2_PORT_MAX];
 };
 

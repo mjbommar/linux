@@ -277,6 +277,17 @@ static int um_vec2_tap_channel_attach_fd(struct um_vec2_dev *vdev,
 out_free_queue:
 	channel->host = NULL;
 	um_vec2_queue_pair_free(channel, dev);
+	/*
+	 * Mirror FD backend's unwind: drive the channel lifecycle through
+	 * QUIESCING -> CLOSED so subsequent introspection sees a clean
+	 * terminal state rather than the partial ALLOCATED/FD_ATTACHED
+	 * state left by the failed transition.  See audit B4.
+	 */
+	if (um_vec2_chan_can_transition(channel->life.state,
+					UM_VEC2_CHAN_QUIESCING))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
+	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
 out_free_host:
 	kfree(taphost);
 	return ret;
