@@ -76,6 +76,9 @@ int um_vec2_cmdline_for_each(int (*fn)(const struct um_vec2_cmdline_spec *spec,
 
 void um_vec2_ethtool_attach(struct net_device *dev);
 
+int um_vec2_fd_open(struct um_vec2_dev *vdev);
+void um_vec2_fd_close(struct um_vec2_dev *vdev);
+
 int um_vec2_netdev_open(struct net_device *dev);
 int um_vec2_netdev_stop(struct net_device *dev);
 netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,

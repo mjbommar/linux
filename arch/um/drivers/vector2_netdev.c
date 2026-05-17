@@ -28,6 +28,29 @@ static struct um_vec2_dev *um_vec2_from_netdev(struct net_device *dev)
 	return priv->vdev;
 }
 
+static int um_vec2_open_backend(struct um_vec2_dev *vdev)
+{
+	switch (vdev->cfg.transport) {
+	case UM_VEC2_TRANSPORT_FD:
+		return um_vec2_fd_open(vdev);
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static int um_vec2_unwind_open(struct um_vec2_dev *vdev)
+{
+	int ret;
+
+	um_vec2_fd_close(vdev);
+
+	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_QUIESCING);
+	if (ret)
+		return ret;
+
+	return um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_REGISTERED);
+}
+
 int um_vec2_netdev_open(struct net_device *dev)
 {
 	struct um_vec2_dev *vdev = um_vec2_from_netdev(dev);
@@ -44,16 +67,24 @@ int um_vec2_netdev_open(struct net_device *dev)
 		goto out;
 
 	netif_carrier_off(dev);
-	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_QUIESCING);
-	if (ret)
-		goto out;
+	netif_stop_queue(dev);
 
-	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_REGISTERED);
-	if (ret)
+	ret = um_vec2_open_backend(vdev);
+	if (ret) {
+		netdev_info(dev, "vector v2 host backend is not available: %d\n",
+			    ret);
+		if (um_vec2_unwind_open(vdev))
+			netdev_err(dev, "vector v2 open unwind failed\n");
 		goto out;
+	}
 
-	netdev_info(dev, "vector v2 host backend is not implemented yet\n");
-	ret = -EOPNOTSUPP;
+	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_RUNNING);
+	if (ret) {
+		um_vec2_fd_close(vdev);
+		if (um_vec2_unwind_open(vdev))
+			netdev_err(dev, "vector v2 open unwind failed\n");
+		goto out;
+	}
 
 out:
 	mutex_unlock(&vdev->lock);
@@ -78,6 +109,7 @@ int um_vec2_netdev_stop(struct net_device *dev)
 					     UM_VEC2_DEV_QUIESCING);
 		if (ret)
 			break;
+		um_vec2_fd_close(vdev);
 		ret = um_vec2_dev_transition(&vdev->life,
 					     UM_VEC2_DEV_REGISTERED);
 		break;

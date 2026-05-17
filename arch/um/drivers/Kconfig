@@ -288,6 +288,20 @@ config UML_NET_VECTOR_V2_NETDEV_KUNIT
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.
 
+config UML_NET_VECTOR_V2_HOST_FD_KUNIT
+	bool "Vector networking v2 fd host KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 fd host backend.
+	  These tests validate direct-fd duplication, close unwind, bad-fd
+	  failure behavior, and netdev open/stop lifecycle integration before
+	  packet movement is implemented.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
 endmenu
 
 config VIRTIO_UML

@@ -30,7 +30,8 @@ The following v2 foundations exist:
 Those pieces prove parser policy, queue ownership, transport header
 bounds checks, fake-host behavior, and lifecycle transitions.
 
-R1 and R2 have now added the first runtime attachments:
+R1 through R3 have now added the first runtime attachments and the
+first trusted host-open skeleton:
 
 - `CONFIG_UML_NET_VECTOR_V2`, default `n`;
 - v2-only command-line collection through `vec2.<n>:` and `vec2=`;
@@ -40,17 +41,23 @@ R1 and R2 have now added the first runtime attachments:
 - forced single-queue `alloc_etherdev_mqs()`;
 - `register_netdevice()` for inspectable `vec2.<unit>` netdevs;
 - read-only `ethtool -i`;
-- `ndo_open()` failure unwind to `REGISTERED` with `-EOPNOTSUPP`.
+- `ndo_open()` failure unwind to `REGISTERED` with `-EOPNOTSUPP`;
+- trusted direct-fd duplication and close unwind;
+- `ip link set vec2.0 up/down` success for
+  `CONFIG_UML_NET_VECTOR_V2_INPROC=y` plus
+  `vec2.0:transport=fd,fd=<n>`.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
-They still do not provide a live host backend or packet movement.
+They still do not provide packet movement.
 
 Missing runtime pieces:
 
 - no live `ndo_start_xmit()`;
 - no live NAPI poll function;
 - no live IRQ registration;
-- no TAP or fd host backend wired to real host fds;
+- no fd packet movement;
+- no launcher-manifest fd path for sandbox mode;
+- no trusted TAP host backend;
 - no v2 ethtool stats, rings, coalescing, or feature controls;
 - no feature negotiation;
 - no live single-queue smoke test;
@@ -292,6 +299,16 @@ Validation:
 Exit gate:
 
 - `ip link set vec2 up/down` works with fds and no packets.
+
+R3 implementation note:
+
+- `19-uml-vector-driver-v2-r3-fd-backend.md` records the trusted
+  direct-fd backend, fd duplication ownership rule, channel lifecycle
+  attach/close, `ndo_open()` success for fd mode, sandbox rejection of
+  direct `fd=`, manual runtime checks, build matrix, and 55-test KUnit
+  result.
+- R3 still has no packet movement.  The fd-backed netdev opens with
+  `NO-CARRIER` and stopped queues until the datapath phase.
 
 ### V2-R4 - Trusted TAP Backend
 

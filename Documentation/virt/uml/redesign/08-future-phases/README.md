@@ -163,6 +163,11 @@ parking-lot designs for future prioritization.
   read-only ethtool driver info, clean `-EOPNOTSUPP` open unwind,
   manual runtime evidence, build matrix, and KUnit coverage. Not a
   commitment.
+- [19-uml-vector-driver-v2-r3-fd-backend.md](19-uml-vector-driver-v2-r3-fd-backend.md) —
+  R3 implementation note for the trusted direct-fd backend: fd
+  duplication ownership, channel lifecycle attach/close, fd-mode
+  `ip link up/down`, sandbox rejection of raw `fd=`, build matrix,
+  manual runtime evidence, and KUnit coverage. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
