@@ -1,0 +1,549 @@
+# uml-vector-driver-v2 buildout plan
+
+**Status:** BUILDOUT PLAN - vector v2 is not swap-ready.
+**Date:** 2026-05-17.
+**Owner:** future UML networking workstream.
+
+This memo answers the practical question: what remains before the
+vector v2 scaffolding becomes a real driver that can replace the
+current `CONFIG_UML_NET_VECTOR` implementation?
+
+The answer is: a full runtime driver still has to be built.  The
+current v2 code is valuable foundation work, but it is not a netdev
+driver yet.
+
+## Current State
+
+The following v2 foundations exist:
+
+- `arch/um/drivers/vector2_config.{c,h}` plus KUnit tests.
+- `arch/um/drivers/vector2_queue.{c,h}` plus KUnit tests.
+- `arch/um/drivers/vector2_model.{c,h}` plus KUnit tests.
+- `arch/um/drivers/vector2_host.h`.
+- `arch/um/drivers/vector2_fake_host.{c,h}` plus KUnit tests.
+- `arch/um/drivers/vector2_transport.{c,h}` plus KUnit tests.
+- `Documentation/virt/uml/redesign/08-future-phases/models/vector2/`
+  starter TLA+ models.
+- `Documentation/virt/uml/redesign/08-future-phases/14-uml-vector-driver-v2.md`
+  architecture memo.
+
+Those pieces prove parser policy, queue ownership, transport header
+bounds checks, fake-host behavior, and lifecycle transitions.  They do
+not attach to the Linux networking stack.
+
+Missing runtime pieces:
+
+- no v2 `struct net_device_ops`;
+- no v2 `register_netdevice()` / `register_netdev()` path;
+- no v2 command-line device registration path;
+- no v2 platform-driver or late-init registration path;
+- no `vector2_net_open()` / `vector2_net_stop()`;
+- no live `ndo_start_xmit()`;
+- no live NAPI poll function;
+- no live IRQ registration;
+- no TAP or fd host backend wired to real host fds;
+- no v2 ethtool operations;
+- no feature negotiation;
+- no live single-queue smoke test;
+- no multiqueue runtime path;
+- no compatibility switch from old `vecN:` to v2.
+
+Therefore vector v2 must run as an experimental parallel driver first.
+It must not silently replace the old driver until the gates below pass.
+
+## Strategic Direction
+
+Build vector v2 as a real driver in parallel under a distinct runtime
+surface, then replace the legacy implementation only after measured
+correctness and performance evidence exists.
+
+Recommended development surface:
+
+```text
+CONFIG_UML_NET_VECTOR=y          # old driver, unchanged during bring-up
+CONFIG_UML_NET_VECTOR_V2=y       # new experimental runtime driver
+
+vec0:...                         # old driver syntax, production path
+vec2.0:... or vec2=0,...         # v2 development path
+```
+
+The exact boot syntax can be refined, but the boundary matters:
+developers must be able to boot old and new vector drivers from the
+same kernel and compare them without changing unrelated infrastructure.
+
+The short-term Tier 3 blocker in `vector_net_open()` should be fixed in
+the legacy driver as a separate patch.  That unblocks validation.  It is
+not a substitute for the v2 rewrite, and the v2 rewrite should not be
+rushed into production to fix one legacy NULL dereference.
+
+## Definition Of Done
+
+Vector v2 is eligible to replace the old driver only when all of these
+are true:
+
+1. `CONFIG_UML_NET_VECTOR_V2=y` builds a live netdev driver without
+   requiring any KUnit-only options.
+2. A v2 command-line spec registers a netdev with stable names.
+3. `ip link set <v2dev> up` reaches `RUNNING` through the v2 lifecycle
+   model.
+4. `ip link set <v2dev> down` reaches `REGISTERED` and can repeat at
+   least 10,000 times under failure injection.
+5. Single-queue TAP works in trusted mode.
+6. Single-queue fd transport works with launcher-supplied fds.
+7. TX and RX move packets through v2 queues, not legacy
+   `struct vector_queue`.
+8. `ping`, TCP loopback, and the Tier 3 Django/FastAPI loopback smoke
+   pass on both `backend=force=seccomp` and `backend=force=kvm-v2`.
+9. KUnit covers config, lifecycle, queue ownership, fake host,
+   transport headers, host-open failure injection, and open/close
+   unwind.
+10. ethtool stats and ring queries work while stopped and running.
+11. No host helper command, raw socket, TAP open, or BPF load can occur
+    in sandbox mode.
+12. A multiqueue TAP/fd path passes KCSAN and shows per-queue counter
+    distribution.
+13. Performance is no worse than the old vector driver for the
+    accepted replacement scope, or the regression is explicitly
+    documented and accepted.
+14. The old `vecN:` compatibility path either maps to v2 or has a
+    documented transition period.
+15. The patch series remains reviewable and bisectable.
+
+## Non-Negotiable Design Rules
+
+- Keep `um_vec2_*` symbols until the replacement series is ready.
+- Keep one concept per file: config, core, host ops, transport ops,
+  queues, NAPI, ethtool, tests.
+- Every runtime resource transition must go through the lifecycle model
+  or through a documented wrapper that updates it.
+- Do not use legacy string-token parser output after v2 parse.
+- Do not cast packet headers into typed structs.  Use the v2
+  bounds-checked transport helpers.
+- Do not let sandbox mode compile in trusted host operations.
+- Do not make multiqueue lockless until the locked per-queue model has
+  tests, KCSAN, and performance data.
+- Do not treat old-driver bug fixes as evidence that v2 is complete.
+
+## Runtime File Plan
+
+The existing foundation files should remain.  Add runtime files in
+small reviewable steps:
+
+```text
+arch/um/drivers/
++-- vector2_internal.h       # private runtime structs and invariants
++-- vector2_cmdline.c        # vec2 command-line collection
++-- vector2_core.c           # platform/netdev registration
++-- vector2_netdev.c         # net_device_ops implementation
++-- vector2_napi.c           # NAPI poll, IRQ arming, coalescing
++-- vector2_ethtool.c        # stats, ring params, feature reporting
++-- vector2_host_fd.c        # pre-opened fd backend
++-- vector2_host_tap.c       # trusted in-process TAP backend
++-- vector2_user.c           # UML host syscall wrappers, if needed
++-- vector2_transport_tap.c  # no extra overlay, vnet header policy
++-- vector2_transport_raw.c  # trusted raw backend integration
++-- vector2_transport_gre.c  # GRE ops around safe helpers
++-- vector2_transport_l2tpv3.c
+`-- vector2_uapi.rst         # command-line contract
+```
+
+`vector2_user.c` should exist only for host syscalls that cannot live
+cleanly in kernel-side UML code.  It must not become a second copy of
+the old all-in-one `vector_user.c`.
+
+## Implementation Phases
+
+### V2-R0 - Current Driver Freeze And Reproducer
+
+Goal: preserve behavior while v2 is built.
+
+Deliverables:
+
+- Reproducer doc for the legacy TAP NULL dereference:
+  `vec0:transport=tap,ifname=soak-tap0,depth=128` plus
+  `ip link set vec0 up`.
+- Minimal legacy fix for the current `vector_net_open()` crash.
+- Smoke script that proves the crash is fixed on the old driver.
+- Baseline throughput and syscall-count measurements for old TAP/fd.
+
+Validation:
+
+- legacy TAP Tier 3 smoke reaches `SERVER_READY`;
+- legacy `vec0` open/close repeat test passes;
+- no v2 files are used to claim this result.
+
+Why this phase exists: it keeps Phase J moving and gives v2 a known
+behavioral target.
+
+### V2-R1 - Runtime Kconfig And Command-Line Skeleton
+
+Goal: make v2 visible as a real, experimental runtime build target.
+
+Deliverables:
+
+- `CONFIG_UML_NET_VECTOR_V2` visible, default `n`, marked
+  experimental.
+- `CONFIG_UML_NET_VECTOR_V2_INPROC` for trusted host operations.
+- `CONFIG_UML_NET_VECTOR_V2_SANDBOX` or equivalent policy gate.
+- `vector2_cmdline.c` collects v2 device specs without touching the old
+  `vecN:` parser.
+- `vector2_core.c` has a late-init registration hook.
+- `vector2_internal.h` defines `struct um_vec2_dev`,
+  `struct um_vec2_channel`, and `struct um_vec2_queue_pair`.
+
+Validation:
+
+- kernel builds with old driver only, v2 only, both, and neither;
+- `vec2` malformed specs fail with parser diagnostics, not partial
+  devices;
+- booting with no `vec2` specs is a no-op.
+
+Exit gate:
+
+- `grep -R "net_device_ops" arch/um/drivers/vector2_*` finds the v2
+  table once R2 lands, not before.
+
+### V2-R2 - Netdev Registration With Stub Data Path
+
+Goal: register a v2 netdev that can be inspected but does not yet move
+packets.
+
+Deliverables:
+
+- `alloc_etherdev_mqs()` call with `queues=1` forced initially.
+- `static const struct net_device_ops um_vec2_netdev_ops`.
+- `register_netdevice()` path wired from parsed v2 command line.
+- `ndo_open` and `ndo_stop` that transition state but return
+  `-EOPNOTSUPP` until a host backend is selected.
+- read-only ethtool driver info.
+- device unregister cleanup.
+
+Validation:
+
+- boot with `vec2.0:transport=fd,...` creates a visible netdev;
+- `ip link show` works;
+- `ip link set up` fails cleanly if backend is not implemented;
+- repeated register/unregister under failure injection leaks nothing.
+
+Exit gate:
+
+- no v2 packet movement yet, but all netdev lifetime objects are owned
+  and freed by v2 code.
+
+### V2-R3 - fd Host Backend First
+
+Goal: support the lowest-privilege data source before trusted TAP.
+
+Deliverables:
+
+- `vector2_host_fd.c` consumes launcher-supplied RX/TX fds.
+- fd ownership is explicit: inherited by UML, duplicated, or borrowed
+  from launcher policy, never ambiguous.
+- `fd` transport validation distinguishes "trusted raw fd number on
+  command line" from "launcher-supplied manifest fd".
+- fake-host tests are extended to the same ops contract used by fd.
+- open/close failure injection at every fd attach step.
+
+Validation:
+
+- a socketpair-based manual test can bring `vec2` up without root;
+- fd death returns `-ENODEV` and moves channel to `QUIESCING`;
+- no `/dev/net/tun`, raw socket, helper execution, or BPF load is
+  reachable in this backend.
+
+Exit gate:
+
+- `ip link set vec2 up/down` works with fds and no packets.
+
+### V2-R4 - Trusted TAP Backend
+
+Goal: provide the first useful TAP runtime path.
+
+Deliverables:
+
+- `vector2_host_tap.c` opens or attaches to a TAP device only when
+  trusted in-process mode is enabled.
+- vnet header negotiation is explicit and reflected in feature flags.
+- TAP fd close/unwind follows channel state.
+- TAP host options (`ifname`, helper commands, BPF file) are policy
+  gated.
+
+Validation:
+
+- `vec2.0:transport=tap,mode=inproc,ifname=soak-tap0,depth=128`
+  opens and closes repeatedly;
+- sandbox build rejects the same spec before host fd creation;
+- `strace` shows TAP open only in trusted mode.
+
+Exit gate:
+
+- `ip link set vec2 up` reaches `RUNNING` on TAP without packet
+  movement.
+
+### V2-R5 - Single-Queue RX/TX Data Path
+
+Goal: move packets through v2 queues.
+
+Deliverables:
+
+- `ndo_start_xmit()` maps an skb to a v2 TX descriptor.
+- TX uses v2 ring ownership and completes skb ownership exactly once.
+- RX uses v2 batch ownership and delivers packets through NAPI.
+- `sendmsg`/`sendmmsg` and `recvmsg`/`recvmmsg` assembly is separated
+  from queue ownership.
+- BQL accounting is correct on success, partial send, drop, and hard
+  error.
+- NAPI poll never touches a queue that is absent for the selected mode.
+
+Validation:
+
+- KUnit fake-host tests cover partial TX, EAGAIN, ENOBUFS, fd death,
+  short RX, allocation failure, and reset;
+- manual TAP `ping` works;
+- guest-to-host and host-to-guest TCP smoke works;
+- KASAN/KFENCE clean if available;
+- 10,000 open/close cycles pass.
+
+Exit gate:
+
+- Tier 3 stdlib HTTP smoke reaches `SERVER_READY` with v2 TAP on both
+  seccomp and kvm-v2.
+
+### V2-R6 - ethtool, Stats, And Feature Policy
+
+Goal: make v2 inspectable and safe while stopped.
+
+Deliverables:
+
+- ethtool driver info, ring params, coalesce params, and stats.
+- stopped-state ethtool queries never dereference runtime-only queues.
+- per-queue stats fold into device stats.
+- feature changes that alter buffer shape require stopped state or an
+  explicit quiesce/reopen path.
+
+Validation:
+
+- ethtool queries pass before open, while running, and after close;
+- stats read during traffic does not race under KCSAN;
+- feature toggles fail closed when unsafe.
+
+Exit gate:
+
+- v2 is operational enough for routine debugging.
+
+### V2-R7 - Tier 3 And Soak Eligibility
+
+Goal: prove the single-queue TAP/fd implementation under the workload
+that exposed the legacy problem.
+
+Deliverables:
+
+- `umlctl` or soak-template support for selecting v2 networking.
+- Tier 3 Django and FastAPI template variants for v2.
+- crash scraper records v2 netdev name, backend, transport, queue
+  count, and host mode.
+
+Validation:
+
+- Tier 3 Django stdlib shim passes 30/30 on seccomp and kvm-v2;
+- Tier 3 FastAPI or uvicorn variant passes if dependencies are present;
+- 2h soak includes v2 Tier 3 without panic, OOM, or stuck TAP teardown.
+
+Exit gate:
+
+- v2 can be used as an experimental Tier 3 path, but legacy is still
+  the production `vecN:` path.
+
+### V2-R8 - Multiqueue
+
+Goal: scale without changing ownership semantics.
+
+Deliverables:
+
+- `alloc_etherdev_mqs()` uses parsed `queues=N`.
+- one queue pair per queue;
+- one NAPI instance per RX queue;
+- one fd or fd pair per queue for fd/TAP where supported;
+- per-queue IRQ registration and teardown;
+- queue-to-CPU mapping and stats.
+
+Validation:
+
+- `queues=2` and `queues=num_online_cpus()` pass ping/TCP/Tier 3;
+- KCSAN clean under parallel traffic;
+- queue counters show distribution;
+- no global driver lock in steady-state TX/RX profiles.
+
+Exit gate:
+
+- v2 has the SMP shape required for the long-term replacement.
+
+### V2-R9 - Transport Parity
+
+Goal: move non-TAP transports onto safe v2 transport ops.
+
+Deliverables:
+
+- raw trusted transport;
+- GRE transport around `vector2_transport` helpers;
+- L2TPv3 transport around `vector2_transport` helpers;
+- hybrid and BESS decisions: implement, defer, or explicitly drop.
+- transport-specific feature flags and validation.
+
+Validation:
+
+- old happy-path examples pass or fail with documented migration
+  errors;
+- short header and mismatch cases remain covered by KUnit/fuzz;
+- transport state is immutable while running.
+
+Exit gate:
+
+- maintainers agree the remaining compatibility gaps are acceptable.
+
+### V2-R10 - Sandbox Integration
+
+Goal: enforce the UML v2 security boundary.
+
+Deliverables:
+
+- sandbox profile disables in-process TAP/raw/GRE/L2TP host creation;
+- fd-only path accepts launcher-owned fds;
+- optional proxy/helper path only if it beats virtio-net on a measured
+  requirement;
+- guest-triggered helper execution and BPF loading are unavailable in
+  sandbox builds.
+
+Validation:
+
+- `strace` of the UML process in sandbox mode shows no `/dev/net/tun`,
+  raw socket, helper execution, or BPF file load;
+- helper or launcher owns privileged fds;
+- policy rejection messages name the option and profile.
+
+Exit gate:
+
+- vector v2 is safe to document next to UML v2 sandboxing without
+  creating privilege confusion.
+
+### V2-R11 - Replacement And Legacy Removal
+
+Goal: make v2 the implementation behind `CONFIG_UML_NET_VECTOR`.
+
+Deliverables:
+
+- compatibility mode maps old `vecN:` specs to v2 typed config;
+- `CONFIG_UML_NET_VECTOR_LEGACY` remains available for one transition
+  cycle if maintainers want it;
+- docs update `Documentation/virt/uml/user_mode_linux_howto_v2.rst`;
+- old driver files are deleted or archived behind `BROKEN`;
+- patch series describes migration and performance evidence.
+
+Validation:
+
+- old command-line examples work or fail with documented diagnostics;
+- CI matrix passes;
+- Tier 1/2/3, LTP selected subset, and 24h soak pass;
+- performance baseline accepted.
+
+Exit gate:
+
+- old `vector_kern.c` and `vector_user.c` no longer own the production
+  vector networking path.
+
+## Test Matrix
+
+Required KUnit suites:
+
+- config parser;
+- lifecycle state model;
+- TX/RX queue ownership;
+- fake host;
+- fd host;
+- TAP host policy;
+- transport headers;
+- netdev open/close failure injection;
+- ethtool stopped/running behavior;
+- multiqueue queue selection and stats.
+
+Required manual tests:
+
+```text
+backend=force=seccomp  transport=fd   queues=1  ip link up/down
+backend=force=kvm-v2   transport=fd   queues=1  ip link up/down
+backend=force=seccomp  transport=tap  queues=1  ping + TCP
+backend=force=kvm-v2   transport=tap  queues=1  ping + TCP
+backend=force=seccomp  transport=tap  queues=1  Tier 3 Django
+backend=force=kvm-v2   transport=tap  queues=1  Tier 3 Django
+backend=force=seccomp  transport=tap  queues=2  parallel TCP
+backend=force=kvm-v2   transport=tap  queues=2  parallel TCP
+```
+
+Required static and dynamic checks:
+
+- `git diff --check`;
+- `scripts/checkpatch.pl --strict --file` for every new file;
+- GCC UML build;
+- Clang UML build before replacement;
+- sparse before replacement;
+- KCSAN on multiqueue;
+- KASAN/KFENCE where UML build support allows it;
+- `strace` sandbox audit;
+- perf or tracepoint profile for single-queue and multiqueue TAP.
+
+## Performance Gates
+
+Record old driver and v2 numbers on the same host, same kernel config,
+same TAP setup:
+
+- TCP throughput guest to host;
+- TCP throughput host to guest;
+- UDP packet rate;
+- CPU cycles per packet if perf data is practical;
+- syscall batch sizes;
+- NAPI poll budget utilization;
+- TX partial-send rate;
+- RX allocation failure rate under pressure.
+
+Replacement is blocked if v2 has an unexplained large regression in
+the accepted replacement scope.  A regression can be accepted only if
+the safety/security benefit is documented and the old driver remains
+available for one transition cycle.
+
+## First Three Patch Series
+
+The next concrete work should be:
+
+1. **Legacy crash fix and baseline.**
+   Fix the existing TAP NULL dereference, add a repro note, and collect
+   old-driver TAP/fd smoke and performance baseline.
+
+2. **v2 runtime skeleton.**
+   Add `CONFIG_UML_NET_VECTOR_V2`, `vector2_internal.h`,
+   `vector2_cmdline.c`, and `vector2_core.c`.  Register an inspectable
+   netdev under a v2-only command-line syntax.  No packets yet.
+
+3. **fd backend plus open/close.**
+   Wire `vector2_host_fd.c` to real fds, implement `ndo_open` and
+   `ndo_stop` through the lifecycle model, and pass repeated open/close
+   failure injection.
+
+Only after those three series should trusted TAP packet movement start.
+
+## Workstream Exit Summary
+
+The long-term path is not "patch the scaffold until it happens to
+work."  It is:
+
+1. keep the old driver alive long enough to unblock validation;
+2. build a separate v2 runtime driver under explicit experimental
+   Kconfig and command-line surfaces;
+3. prove fd and TAP single-queue correctness;
+4. scale to multiqueue;
+5. enforce sandbox policy;
+6. replace the old driver only after compatibility, soak, and
+   performance gates pass.
+
+That is the right long-term shape because it lets us use the existing
+foundation work without converting a test scaffold into production code
+by accident.

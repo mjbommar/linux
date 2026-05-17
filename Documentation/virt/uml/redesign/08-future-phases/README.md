@@ -142,6 +142,12 @@ parking-lot designs for future prioritization.
   split, SMP/multiqueue design, formal-model hooks, and a clear
   security split between trusted in-process vector networking and
   UML v2 sandbox helper networking. Not a commitment.
+- [15-uml-vector-driver-v2-buildout.md](15-uml-vector-driver-v2-buildout.md) —
+  concrete buildout plan for turning the vector v2 foundations into a
+  real netdev driver: runtime Kconfig, command-line registration,
+  `net_device_ops`, fd/TAP host backends, TX/RX datapath, multiqueue,
+  sandbox policy, replacement gates, and validation matrix. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

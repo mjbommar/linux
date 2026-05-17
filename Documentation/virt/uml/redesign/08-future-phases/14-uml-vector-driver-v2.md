@@ -27,6 +27,11 @@ That shape was practical when the goal was "make vector networking
 work", but it is a poor substrate for formal modeling, SMP scaling,
 or the sandbox profile's host-side isolation model.
 
+Runtime buildout note: this memo is the architecture reference, not a
+claim that vector v2 is swap-ready.  The concrete plan for finishing a
+real netdev driver lives in
+`15-uml-vector-driver-v2-buildout.md`.
+
 ## Motivation
 
 The UML redesign has made networking more important than it was in the
