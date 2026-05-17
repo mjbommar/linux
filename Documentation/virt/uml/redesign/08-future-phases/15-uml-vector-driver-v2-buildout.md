@@ -101,6 +101,10 @@ shape, and inspectable ethtool surfaces:
   rebuilt KCSAN auto-queue fd multiqueue gate passes
   `PASS=10/10 FAIL=0 TIMEOUT=0` with no warning, panic, KCSAN,
   data-race, or TAP leak;
+- KCSAN FastAPI workload smoke: the real FastAPI + uvicorn vector2 fd
+  handoff workload passes once under the KCSAN UML kernel with
+  `FASTAPI_HTTP ok=51 fail=0`, no warning/BUG/KCSAN/data-race
+  signatures, and clean TAP/process teardown;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -770,6 +774,25 @@ R8d/R8e implementation notes:
 - Therefore the specific queue-lock lockdep bug found by repeated
   KCSAN smoke is closed.  Heavier KCSAN traffic, fairness/performance
   profiles, and kvm-v2 evidence remain open.
+
+KCSAN FastAPI follow-up:
+
+- `40-uml-vector-driver-v2-kcsan-fastapi.md` records the first real
+  application workload under the KCSAN vector2 kernel.
+- Evidence collected:
+  - `vector2-fastapi-smoke.toml` over vector2 fd handoff;
+  - KCSAN kernel
+    `/home/mjbommar/projects/personal/.build/um-vector-r8c-kcsan/linux`;
+  - `queues = "auto"` resolved to two inherited TAP fds, 200..201;
+  - `PASS=1/1 FAIL=0 TIMEOUT=0`, elapsed 137 seconds;
+  - `SERVER_READY`, `FASTAPI_HTTP ok=51 fail=0`,
+    `VECTOR2_FASTAPI_OK`, `REPRO_DONE rc=0`;
+  - no `WARNING`, `BUG`, `KCSAN`, `data-race`, panic, or failure
+    signatures in the copied run log;
+  - no lingering `v2fastapi0` or UML process.
+- Therefore vector2 has KCSAN evidence beyond ping/ethtool smoke, but
+  concurrent TCP/UDP flows, longer runtime, and fairness profiles
+  remain open.
 
 Performance baseline follow-up:
 

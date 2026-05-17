@@ -282,6 +282,12 @@ parking-lot designs for future prioritization.
   `ip link down/up`, verifies ethtool open/close deltas, records a
   25-cycle smoke plus a 10,000-cycle pass with clean TAP/process
   teardown, and leaves failed-open injection open. Not a commitment.
+- [40-uml-vector-driver-v2-kcsan-fastapi.md](40-uml-vector-driver-v2-kcsan-fastapi.md) —
+  KCSAN workload evidence for vector2 fd handoff: runs the real
+  FastAPI + uvicorn smoke under the KCSAN UML kernel, records
+  `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`, clean TAP/process
+  teardown, and no warning/BUG/KCSAN/data-race signatures. Not a
+  commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

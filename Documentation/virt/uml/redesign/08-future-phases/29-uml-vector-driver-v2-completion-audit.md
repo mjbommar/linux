@@ -30,7 +30,7 @@ experimental netdev exists.
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 75/75 after fd wrong-type, fd multiqueue unwind, queue-to-CPU policy coverage, fd open/stop repeat stress, bad-fd unwind, and missing-config failure stress | Partial: KUnit coverage improved, but live failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher; a traced vector2 auto-queue fd boot found no actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec in the vector host path; `umlctl gate loop --audit-vector-sandbox` now preserves per-iteration strace/audit logs and fails on those forbidden vector host operations | Partial: local gate exists and one audited boot passed, but CI/long workload coverage and guest userspace raw/netlink socket policy remain open |
-| Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; heavier KCSAN traffic and fairness profiles absent | Partial |
+| Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; one KCSAN FastAPI vector2 fd workload passed; concurrent TCP/UDP KCSAN and fairness profiles absent | Partial |
 | Performance parity or accepted regression | Initial `umlctl` bidirectional TCP baseline exists; repeated legacy-vs-vector2 TCP sweep now covers both directions, 1 MiB/8 MiB/32 MiB, two repeats per cell; vector2 remains slower guest-to-host and much faster host-to-guest on this host; UDP, syscall, CPU, and broader host/kernel profiles remain absent | Partial: mixed results measured, not accepted |
 | Legacy `vecN:` compatibility transition | Legacy remains production path; no v2 compatibility switch | Open |
 | Reviewable, bisectable patch series | Work is split across pushed commits and checkpoint docs | Ongoing |
@@ -94,6 +94,11 @@ Validation evidence recorded in the checkpoint docs includes:
   lingering `v2autoq0`, `um_vector2_*` KUnit 72/72, and no
   `WARNING`, `BUG`, `KCSAN`, `data-race`, panic, or lockdep signatures
   in the captured run logs;
+- KCSAN FastAPI vector2 fd workload: `PASS=1/1 FAIL=0 TIMEOUT=0`,
+  `SERVER_READY`, `FASTAPI_HTTP ok=51 fail=0`,
+  `VECTOR2_FASTAPI_OK`, `REPRO_DONE rc=0`, no warning/BUG/KCSAN
+  signatures in the copied run log, no lingering `v2fastapi0`, and no
+  UML process leak;
 - short `umlctl gate loop` vector2 fd handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0` and no lingering `v2fd0`;
 - short `umlctl gate loop` vector2 fd multiqueue repetition:
@@ -160,7 +165,7 @@ list is:
 - validate queue-to-CPU policy under longer SMP traffic;
 - decide and implement a live failed-open injection knob if replacement
   approval requires runtime failed-open proof beyond KUnit;
-- run heavier KCSAN on multiqueue traffic;
+- run concurrent TCP/UDP KCSAN traffic and fairness profiles;
 - expand performance profiling beyond TCP throughput and explain or
   accept the measured guest-to-host regression and mixed bidirectional
   results;
