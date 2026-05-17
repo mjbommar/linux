@@ -296,6 +296,16 @@ struct GateLoopArgs {
     /// vector2, including multiqueue.
     #[arg(long = "network-host-mode", value_name = "auto|fd|inproc")]
     network_host_mode: Option<String>,
+
+    /// Wrap every generated worker in strace and preserve one
+    /// strace-<iter>.log next to the copied init.log.
+    #[arg(long)]
+    strace: bool,
+
+    /// Fail an iteration if the strace log shows forbidden vector2
+    /// sandbox host operations. Implies --strace.
+    #[arg(long = "audit-vector-sandbox")]
+    audit_vector_sandbox: bool,
 }
 
 #[derive(clap::Args, Debug)]

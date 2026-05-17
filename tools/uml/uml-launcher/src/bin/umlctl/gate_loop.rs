@@ -53,6 +53,8 @@ struct LoopArgs {
     network_driver_override: Option<String>,
     network_queues_override: Option<deploy::NetworkQueueSpec>,
     network_host_mode_override: Option<String>,
+    strace: bool,
+    audit_vector_sandbox: bool,
 }
 
 /// One `--sweep KEY=v1,v2,v3` axis.
@@ -79,6 +81,12 @@ impl SweepPoint {
                 .join(",")
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct WorkerSpec {
+    toml_path: PathBuf,
+    strace_log: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -236,6 +244,8 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
         network_driver_override: args.network_driver,
         network_queues_override: args.network_queues,
         network_host_mode_override: args.network_host_mode,
+        strace: args.strace || args.audit_vector_sandbox,
+        audit_vector_sandbox: args.audit_vector_sandbox,
     })
 }
 
@@ -290,16 +300,22 @@ fn run_one_point(
     }
     let stem = base.instance.name.clone();
 
-    let mut worker_files: Vec<PathBuf> = Vec::with_capacity(lo.workers as usize);
+    let mut worker_files: Vec<WorkerSpec> = Vec::with_capacity(lo.workers as usize);
     for w in 0..lo.workers {
         let mut u = base.clone();
         u.instance.name = format!("{stem}-w{w}");
         // base.debug.log_dir was already filled by Umlfile::from_path
         // with the ORIGINAL stem, so renaming instance.name without
         // also resetting log_dir would leave all workers writing the
-        // SAME init.sh path concurrently — they race and bricks the
-        // boot. Reset to match the new name.
-        u.debug.log_dir = format!("logs/{}", u.instance.name);
+        // SAME init.sh/strace paths concurrently. Keep generated
+        // worker runtime files under the gate output directory so
+        // audit artifacts stay with the copied per-iteration logs.
+        let runtime_log_dir = point_subdir.join(format!("runtime-w{w}"));
+        fs::create_dir_all(&runtime_log_dir)?;
+        u.debug.log_dir = runtime_log_dir.display().to_string();
+        if lo.strace {
+            u.debug.strace = true;
+        }
         apply_sweep_point(&mut u, point)?;
         // Optional kernel override (CLI > Umlfile).
         if let Some(k) = &lo.kernel_override {
@@ -309,7 +325,10 @@ fn run_one_point(
         let serialized = toml::to_string_pretty(&u).context("serialize generated Umlfile")?;
         fs::write(&toml_path, serialized)
             .with_context(|| format!("write {}", toml_path.display()))?;
-        worker_files.push(toml_path);
+        worker_files.push(WorkerSpec {
+            toml_path,
+            strace_log: lo.strace.then(|| runtime_log_dir.join("strace.log")),
+        });
     }
 
     let pass = Arc::new(AtomicU32::new(0));
@@ -318,9 +337,10 @@ fn run_one_point(
 
     let started = Instant::now();
     let mut handles = Vec::with_capacity(lo.workers as usize);
-    for (w, toml_path) in worker_files.iter().enumerate() {
+    for (w, worker) in worker_files.iter().enumerate() {
         let umlctl = umlctl.clone();
-        let toml_path = toml_path.clone();
+        let toml_path = worker.toml_path.clone();
+        let strace_log = worker.strace_log.clone();
         let pass = Arc::clone(&pass);
         let fail = Arc::clone(&fail);
         let timeout = Arc::clone(&timeout);
@@ -331,6 +351,7 @@ fn run_one_point(
         let fail_marker = lo.fail_marker.clone();
         let timeout_secs = lo.timeout_secs;
         let iters = lo.iters;
+        let audit_vector_sandbox = lo.audit_vector_sandbox;
         let log_dir = point_subdir.join(format!("w{w}"));
         fs::create_dir_all(&log_dir)?;
         let quiet = quiet || lo.json;
@@ -347,6 +368,8 @@ fn run_one_point(
                     &fail_marker,
                     timeout_secs,
                     &log_dir,
+                    strace_log.as_deref(),
+                    audit_vector_sandbox,
                     i,
                 );
                 match status {
@@ -433,6 +456,8 @@ fn run_one_iter(
     fail_marker: &str,
     timeout_secs: u64,
     log_dir: &Path,
+    strace_log: Option<&Path>,
+    audit_vector_sandbox: bool,
     iter: u32,
 ) -> IterStatus {
     // Make sure no leftover instance or host resources with this name
@@ -506,7 +531,15 @@ fn run_one_iter(
         copy_or_create(&init_log, &saved);
     }
 
-    if !cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "post") {
+    let cleanup_ok = cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "post");
+    let strace_ok = capture_and_audit_strace(
+        strace_log,
+        audit_vector_sandbox,
+        &log_dir.join(format!("strace-{iter}.log")),
+        &log_dir.join(format!("strace-audit-{iter}.log")),
+    );
+
+    if !cleanup_ok || !strace_ok {
         return IterStatus::Fail;
     }
 
@@ -564,6 +597,103 @@ fn audit_tap_absent(tap_name: Option<&str>, sys_class_net: &Path, dst: &Path) ->
 
 fn tap_present_in(tap_name: &str, sys_class_net: &Path) -> bool {
     sys_class_net.join(tap_name).exists()
+}
+
+fn capture_and_audit_strace(
+    strace_log: Option<&Path>,
+    audit_vector_sandbox: bool,
+    saved_trace: &Path,
+    audit_log: &Path,
+) -> bool {
+    let Some(src) = strace_log else {
+        return true;
+    };
+
+    if src.exists() {
+        let _ = fs::copy(src, saved_trace);
+    } else if audit_vector_sandbox {
+        let _ = fs::write(
+            audit_log,
+            format!(
+                "vector sandbox strace audit failed: missing {}\n",
+                src.display()
+            ),
+        );
+        return false;
+    } else {
+        return true;
+    }
+
+    if !audit_vector_sandbox {
+        return true;
+    }
+
+    audit_vector_sandbox_strace(src, audit_log)
+}
+
+fn audit_vector_sandbox_strace(strace_log: &Path, audit_log: &Path) -> bool {
+    let s = match fs::read_to_string(strace_log) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fs::write(
+                audit_log,
+                format!(
+                    "vector sandbox strace audit failed: read {}: {e}\n",
+                    strace_log.display()
+                ),
+            );
+            return false;
+        }
+    };
+
+    for (idx, line) in s.lines().enumerate() {
+        if let Some(reason) = forbidden_vector_sandbox_line(line) {
+            let _ = fs::write(
+                audit_log,
+                format!(
+                    "vector sandbox strace audit failed: {reason} at line {}\n{}\n",
+                    idx + 1,
+                    line
+                ),
+            );
+            return false;
+        }
+    }
+
+    let _ = fs::write(
+        audit_log,
+        "vector sandbox strace audit passed: no host TAP open, TUNSETIFF, AF_PACKET, bpf(), or UML network-helper exec\n",
+    );
+    true
+}
+
+fn forbidden_vector_sandbox_line(line: &str) -> Option<&'static str> {
+    let (pid, rest) = line.split_once(' ')?;
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    if (rest.starts_with("open(") || rest.starts_with("openat("))
+        && rest.contains("\"/dev/net/tun\"")
+    {
+        return Some("/dev/net/tun open");
+    }
+    if rest.starts_with("ioctl(") && rest.contains("TUNSETIFF") {
+        return Some("TUNSETIFF ioctl");
+    }
+    if rest.starts_with("socket(AF_PACKET") {
+        return Some("AF_PACKET socket");
+    }
+    if rest.starts_with("bpf(") {
+        return Some("bpf syscall");
+    }
+    if (rest.starts_with("execve(") || rest.starts_with("execveat("))
+        && (rest.contains("uml_net") || rest.contains("uml_switch"))
+    {
+        return Some("UML network helper exec");
+    }
+
+    None
 }
 
 fn run_umlctl(umlctl: &Path, args: &[&str]) -> String {
@@ -845,6 +975,50 @@ driver = "vector2"
         assert_eq!(
             failed_up_init_log_path(out, runs).unwrap(),
             PathBuf::from("/state/runs/01ABC/init.log")
+        );
+    }
+
+    #[test]
+    fn vector_sandbox_audit_ignores_string_buffers_and_guest_netlink() {
+        assert_eq!(
+            forbidden_vector_sandbox_line(
+                "12 pread64(17, \"\\0/dev/net/tun\\0ioctl(TUNSETIFF)\"..., 4096, 0) = 4096"
+            ),
+            None
+        );
+        assert_eq!(
+            forbidden_vector_sandbox_line(
+                "13 socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE) = 41"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn vector_sandbox_audit_rejects_host_operations() {
+        assert_eq!(
+            forbidden_vector_sandbox_line(
+                "12 openat(AT_FDCWD, \"/dev/net/tun\", O_RDWR|O_CLOEXEC) = 4"
+            ),
+            Some("/dev/net/tun open")
+        );
+        assert_eq!(
+            forbidden_vector_sandbox_line("12 ioctl(4, TUNSETIFF, 0x7ffc) = 0"),
+            Some("TUNSETIFF ioctl")
+        );
+        assert_eq!(
+            forbidden_vector_sandbox_line("12 socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL)) = 4"),
+            Some("AF_PACKET socket")
+        );
+        assert_eq!(
+            forbidden_vector_sandbox_line("12 bpf(BPF_PROG_LOAD, 0x7ffc, 144) = 4"),
+            Some("bpf syscall")
+        );
+        assert_eq!(
+            forbidden_vector_sandbox_line(
+                "12 execve(\"/usr/lib/uml/uml_net\", [\"uml_net\"], 0x7ffc) = 0"
+            ),
+            Some("UML network helper exec")
         );
     }
 }
