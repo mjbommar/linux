@@ -275,6 +275,51 @@ static void vector2_tap_rx_batch_reads_frame_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+/*
+ * B2 regression: short frame must propagate -EPROTO from rx_batch.
+ *
+ * um_vec2_tap_read_skb() returns -EPROTO when the host-read frame
+ * is too short to even contain a virtio_net_hdr.  Pre-fix, the rx
+ * loop would `break` on -EPROTO and then unconditionally zero ret
+ * before the complete label, masking the error.  The NAPI poll
+ * therefore never saw -EPROTO and UM_VEC2_STAT_RX_PROTO_DROPS was
+ * dead for TAP.  Post-fix, -EPROTO `goto complete`s with ret
+ * preserved (matching the FD backend's pattern), so the NAPI poll
+ * sees the error and increments the counter.
+ */
+static void vector2_tap_rx_batch_short_frame_returns_eproto_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_tap_test_alloc_vdev(test, 16);
+	struct net_device *dev = vector2_tap_test_alloc_netdev(test, vdev);
+	struct um_vec2_channel *channel;
+	/*
+	 * 4 bytes is well below sizeof(struct virtio_net_hdr).  read_skb
+	 * sees ret <= sizeof(hdr) and returns -EPROTO.
+	 */
+	unsigned char short_frame[4] = { 0 };
+	int fds[2] = { -1, -1 };
+	int ret;
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_tap_attach_fd(vdev, fds[0]), 0);
+	fds[0] = -1;
+	channel = &vdev->channels[0];
+
+	KUNIT_ASSERT_EQ(test,
+			os_write_file(fds[1], short_frame, sizeof(short_frame)),
+			(int)sizeof(short_frame));
+
+	ret = channel->host->ops->rx_batch(channel->host, &channel->queue->rx,
+					   1, vector2_tap_rx_alloc,
+					   vector2_tap_rx_release, dev);
+	KUNIT_EXPECT_EQ(test, ret, -EPROTO);
+
+	um_vec2_tap_close(vdev);
+	vector2_tap_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 static void vector2_tap_sandbox_open_fails_closed_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_tap_test_alloc_vdev(test, 2);
@@ -313,6 +358,7 @@ static struct kunit_case vector2_tap_test_cases[] = {
 	KUNIT_CASE(vector2_tap_attach_rejects_busy_test),
 	KUNIT_CASE(vector2_tap_tx_batch_writes_frame_test),
 	KUNIT_CASE(vector2_tap_rx_batch_reads_frame_test),
+	KUNIT_CASE(vector2_tap_rx_batch_short_frame_returns_eproto_test),
 	KUNIT_CASE(vector2_tap_sandbox_open_fails_closed_test),
 	KUNIT_CASE(vector2_tap_netdev_open_unwinds_sandbox_test),
 	{}

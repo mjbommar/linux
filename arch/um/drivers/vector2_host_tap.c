@@ -104,13 +104,10 @@ static int um_vec2_tap_rx_batch(struct um_vec2_host *host,
 		struct sk_buff *skb = batch->slot[i].owner;
 
 		ret = um_vec2_tap_read_skb(taphost, skb);
-		if (!ret)
+		if (!ret || ret == -EAGAIN)
 			break;
-		if (ret < 0) {
-			if (ret == -EPROTO)
-				break;
+		if (ret < 0)
 			goto complete;
-		}
 		lens[received++] = ret;
 	}
 
