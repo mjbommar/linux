@@ -202,11 +202,25 @@ fixed or otherwise explained with repeatable clean evidence.
 
 ## Next Work
 
-1. Capture the failing guest `django.log` before init halts so the Python
-   abort has userspace stderr evidence.
-2. Re-run the 30/30 gate with KVM-v2 state trace enabled or the existing
+1. Re-run the 30/30 gate with KVM-v2 state trace enabled or the existing
    TLB-lag diagnostics promoted into a per-run summary.
-3. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
+2. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
-4. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
+3. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
    only then update the completion audit from partial to done.
+
+## Diagnostic Follow-Up
+
+After the failed 30-run gate, the Tier 3 Django and FastAPI templates
+were updated to dump `/tmp/django.log` or `/tmp/fastapi.log` between
+`*_LOG_BEGIN` and `*_LOG_END` before printing `SERVER_FAIL`.  This does
+not fix the KVM-v2 abort, but it ensures the next failing iteration
+preserves userspace server stderr in the copied `run-*.log`.
+
+Validation for the diagnostic change:
+
+- generated Django and FastAPI vector2 fd handoff dry-runs contained the
+  new log markers and rendered `backend=force=seccomp` plus
+  `vec2.0:transport=fd,mode=fd,fd=200,depth=128`;
+- a Django vector2 seccomp live check passed `PASS=1/1 FAIL=0 TIMEOUT=0`
+  with `TIER3_OK`.

@@ -83,6 +83,11 @@ http.server.HTTPServer(('0.0.0.0', 8080), H).serve_forever()
 PY
 python3 /tmp/tier3-django-app.py >/tmp/django.log 2>&1 &
 echo $! > /tmp/django.pid
+dump_server_log() {
+    echo DJANGO_LOG_BEGIN
+    cat /tmp/django.log 2>/dev/null || true
+    echo DJANGO_LOG_END
+}
 port_ready() {
 python3 - <<'PY'
 import socket, sys
@@ -100,7 +105,7 @@ for i in $(seq 1 60); do
     port_ready && break
     sleep 0.5
 done
-port_ready || { echo SERVER_FAIL; exit 1; }
+port_ready || { dump_server_log; echo SERVER_FAIL; exit 1; }
 echo SERVER_READY
 """
 expect = "SERVER_READY"

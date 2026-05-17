@@ -1026,6 +1026,13 @@ KVM-v2 readiness follow-up:
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
     and repeated `KVM_V2_TLB_LAG` values above 1000 during the Django
     runs.
+- Diagnostic follow-up:
+  - Tier 3 Django and FastAPI templates now dump their server logs before
+    `SERVER_FAIL`, using `DJANGO_LOG_BEGIN`/`DJANGO_LOG_END` and
+    `FASTAPI_LOG_BEGIN`/`FASTAPI_LOG_END` markers;
+  - generated Django and FastAPI dry-runs confirmed the new markers and
+    vector2 fd-handoff kernel args;
+  - a Django vector2 seccomp live check passed `PASS=1/1`.
 - Therefore the old "KVM-v2 cannot even boot before vector2" blocker is
   narrowed to a KVM-v2 application-workload stability blocker.  Vector2
   fd handoff works on KVM-v2, but the KVM-v2 Django 30/30 requirement is
