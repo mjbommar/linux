@@ -681,15 +681,24 @@ Optional but encouraged:
 
 ```text
 Documentation/virt/uml/redesign/08-future-phases/models/vector2/
-+-- device-state.tla
-+-- channel-state.tla
-+-- tx-ring.tla
-+-- rx-batch.tla
++-- device_state.tla
++-- channel_state.tla
++-- tx_ring.tla
++-- rx_batch.tla
 `-- README.md
 ```
 
 The models do not need to describe Linux networking. They should
 describe resource ownership, allowed transitions, and queue invariants.
+
+Implementation checkpoint:
+
+- `Documentation/virt/uml/redesign/08-future-phases/models/vector2/`
+  now contains starter TLA+ models for the v2 device state machine,
+  channel state machine, TX ring counters, and RX batch counters.
+- The models intentionally track the same pure helper boundaries as the
+  current v2 KUnit code rather than attempting to model Linux networking
+  or host syscalls.
 
 ## Validation Ladder
 
