@@ -249,6 +249,12 @@ parking-lot designs for future prioritization.
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
   `REPRO_DONE rc=0`, a short `PASS=10/10` repetition, and no TAP
   leak. Not a commitment.
+- [35-uml-vector-driver-v2-r8e-kcsan-lockdep.md](35-uml-vector-driver-v2-r8e-kcsan-lockdep.md) —
+  R8 follow-up for a lockdep warning found during repeated KCSAN
+  validation: process-context queue users now disable bottom halves,
+  vector2 KUnit passes 72/72, and the auto-queue fd multiqueue KCSAN
+  gate passes `PASS=10/10` with no warning, panic, KCSAN, data-race,
+  or TAP leak. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

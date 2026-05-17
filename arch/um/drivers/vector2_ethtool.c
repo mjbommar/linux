@@ -4,7 +4,8 @@
  *
  * These callbacks deliberately tolerate stopped devices: runtime-only queue
  * pointers are sampled only after NULL checks and while holding the v2
- * lifecycle mutex.  Queue counters are protected by their queue locks.
+ * lifecycle mutex.  Queue counters are protected by their queue locks with
+ * bottom halves disabled because NAPI takes the same locks from softirq.
  */
 
 #include <linux/ethtool.h>
@@ -356,7 +357,7 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 			continue;
 
 		q = channel->index;
-		spin_lock(&queue->tx_lock);
+		spin_lock_bh(&queue->tx_lock);
 		data[UM_VEC2_ETHTOOL_STAT_TX_RING_DEPTH] += queue->tx.depth;
 		data[UM_VEC2_ETHTOOL_STAT_TX_RING_USED] += queue->tx.count;
 		data[UM_VEC2_ETHTOOL_STAT_TX_RING_MAX_USED] +=
@@ -384,9 +385,9 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_RELEASED] =
 				queue->tx.released;
 		}
-		spin_unlock(&queue->tx_lock);
+		spin_unlock_bh(&queue->tx_lock);
 
-		spin_lock(&queue->rx_lock);
+		spin_lock_bh(&queue->rx_lock);
 		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_DEPTH] += queue->rx.depth;
 		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_FILLED] += queue->rx.filled;
 		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_PREPARED_TOTAL] +=
@@ -414,7 +415,7 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
 				queue->rx.released_total;
 		}
-		spin_unlock(&queue->rx_lock);
+		spin_unlock_bh(&queue->rx_lock);
 	}
 
 	mutex_unlock(&vdev->lock);

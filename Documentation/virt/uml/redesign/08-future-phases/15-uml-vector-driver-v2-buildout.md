@@ -92,6 +92,12 @@ shape, and inspectable ethtool surfaces:
   launcher-owned vector2 fd multiqueue: `PASS=1/1`, no TAP leak,
   `requested_queues=4 runtime_queues=4`, and no KCSAN data-race
   signatures in the captured run log;
+- queue lockdep follow-up for that KCSAN path: ethtool stats and the
+  netdev transmit path now disable bottom halves while taking queue
+  locks shared with NAPI, `um_vector2_*` KUnit passes 72/72, and the
+  rebuilt KCSAN auto-queue fd multiqueue gate passes
+  `PASS=10/10 FAIL=0 TIMEOUT=0` with no warning, panic, KCSAN,
+  data-race, or TAP leak;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -119,8 +125,8 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
-- no full multiqueue validation story: KCSAN, long SMP traffic, and
-  broader fairness/performance profiles remain open;
+- no full multiqueue validation story: heavier KCSAN traffic, long SMP
+  traffic, and broader fairness/performance profiles remain open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.
@@ -687,7 +693,32 @@ R8c implementation note:
   - rebuilt KUnit UML kernel;
   - `um_vector2_*` KUnit: 72/72 passed.
 - Therefore the queue-to-CPU policy item has an implementation and
-  unit-level model coverage.  KCSAN, long SMP traffic, performance
+  unit-level model coverage.  Long SMP traffic, performance profiles,
+  and kvm-v2 evidence remain open.
+
+R8d/R8e implementation notes:
+
+- `33-uml-vector-driver-v2-r8d-kcsan-auto-queue-smoke.md` records the
+  first KCSAN-instrumented `queues = "auto"` vector2 fd multiqueue
+  smoke.
+- `35-uml-vector-driver-v2-r8e-kcsan-lockdep.md` records the repeated
+  KCSAN follow-up.
+- Implemented in R8e:
+  - process-context queue users in ethtool stats and netdev transmit
+    now disable bottom halves when taking queue locks shared with NAPI;
+  - vector2 fd multiqueue was rebuilt and rerun under KCSAN.
+- Evidence collected:
+  - targeted object build for `vector2_ethtool.o` and
+    `vector2_netdev.o`;
+  - rebuilt KCSAN runtime UML kernel;
+  - rebuilt KUnit UML kernel;
+  - `um_vector2_*` KUnit: 72/72 passed;
+  - post-fix KCSAN auto-queue fd multiqueue gate:
+    `PASS=10/10 FAIL=0 TIMEOUT=0`, no lingering `v2autoq0`, and no
+    `WARNING`, `BUG`, `KCSAN`, `data-race`, panic, or lockdep
+    signatures in the captured run logs.
+- Therefore the specific queue-lock lockdep bug found by repeated
+  KCSAN smoke is closed.  Heavier KCSAN traffic, fairness/performance
   profiles, and kvm-v2 evidence remain open.
 
 ### V2-R9 - Transport Parity

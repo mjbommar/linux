@@ -569,17 +569,17 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 	}
 
 	queue = channel->queue;
-	spin_lock(&queue->tx_lock);
+	spin_lock_bh(&queue->tx_lock);
 	if (um_vec2_tx_ring_full(&queue->tx)) {
 		netif_stop_subqueue(dev, channel->index);
 		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_BUSY);
-		spin_unlock(&queue->tx_lock);
+		spin_unlock_bh(&queue->tx_lock);
 		return NETDEV_TX_BUSY;
 	}
 
 	ret = um_vec2_tx_ring_enqueue(&queue->tx, skb, len);
 	if (ret) {
-		spin_unlock(&queue->tx_lock);
+		spin_unlock_bh(&queue->tx_lock);
 		dev->stats.tx_dropped++;
 		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
 		dev_kfree_skb_any(skb);
@@ -587,7 +587,7 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 	}
 	if (um_vec2_tx_ring_full(&queue->tx))
 		netif_stop_subqueue(dev, channel->index);
-	spin_unlock(&queue->tx_lock);
+	spin_unlock_bh(&queue->tx_lock);
 
 	napi_schedule(&channel->napi);
 	return NETDEV_TX_OK;

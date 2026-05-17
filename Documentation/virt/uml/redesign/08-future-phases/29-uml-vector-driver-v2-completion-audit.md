@@ -30,7 +30,7 @@ experimental netdev exists.
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 72/72 after fd wrong-type, fd multiqueue unwind, and queue-to-CPU policy coverage | Partial: coverage exists, but more failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher | Partial: needs strace/audit gate |
-| Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; short KCSAN auto-queue fd multiqueue smoke passed with no data-race signatures; broader KCSAN and fairness profiles absent | Partial |
+| Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; heavier KCSAN traffic and fairness profiles absent | Partial |
 | Performance parity or accepted regression | No current v2 vs legacy perf baseline in this checkpoint set | Open |
 | Legacy `vecN:` compatibility transition | Legacy remains production path; no v2 compatibility switch | Open |
 | Reviewable, bisectable patch series | Work is split across pushed commits and checkpoint docs | Ongoing |
@@ -76,6 +76,11 @@ Validation evidence recorded in the checkpoint docs includes:
   `PASS=1/1 FAIL=0 TIMEOUT=0`, no lingering `v2autoq0`,
   `requested_queues=4 runtime_queues=4`, `UMLCTL_NETWORK_QUEUE_SPEC=auto`,
   and no `BUG: KCSAN` / `data-race` signatures in the run log;
+- repeated KCSAN vector2 auto-queue fd multiqueue gate after the
+  queue-lock bottom-half fix: `PASS=10/10 FAIL=0 TIMEOUT=0`, no
+  lingering `v2autoq0`, `um_vector2_*` KUnit 72/72, and no
+  `WARNING`, `BUG`, `KCSAN`, `data-race`, panic, or lockdep signatures
+  in the captured run logs;
 - short `umlctl gate loop` vector2 fd handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0` and no lingering `v2fd0`;
 - short `umlctl gate loop` vector2 fd multiqueue repetition:
@@ -103,7 +108,7 @@ list is:
 - rerun vector2 Tier 3 Django 30/30 on kvm-v2 after that fix;
 - repeat the FastAPI/uvicorn vector2 seccomp smoke as a longer soak;
 - validate queue-to-CPU policy under longer SMP traffic;
-- run longer KCSAN on multiqueue traffic;
+- run heavier KCSAN on multiqueue traffic;
 - collect legacy-vs-v2 performance baselines;
 - run a repeated long soak with vector2 workloads;
 - decide and implement the legacy `vecN:` transition.

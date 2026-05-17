@@ -1,12 +1,17 @@
 # UML vector driver v2 R8d KCSAN auto-queue smoke
 
-**Status:** R8 partial - short KCSAN smoke only.
+**Status:** R8 partial - superseded by the R8e lockdep follow-up.
 **Date:** 2026-05-17.
 
 This note records a focused KCSAN run for the `umlctl` vector2
 auto-queue path.  It is useful evidence that the launcher-owned fd
 multiqueue path boots and moves traffic under a KCSAN UML kernel, but
 it is not the full long SMP/KCSAN validation gate.
+
+The later R8e follow-up extends this path to ten iterations, documents
+the lockdep warning found by scanning all logs, fixes the queue locking
+discipline, and records a clean post-fix `PASS=10/10` KCSAN run.  See
+`35-uml-vector-driver-v2-r8e-kcsan-lockdep.md`.
 
 ## Kernel
 
@@ -96,9 +101,10 @@ kcsan: non-strict mode configured - use CONFIG_KCSAN_STRICT=y to see all data ra
 
 ## Remaining Gate
 
-This smoke proves that the auto queue sizing path and vector2 fd
-multiqueue path can pass one KCSAN-instrumented seccomp run.  It does
-not close the full R8 concurrency gate.  Remaining work:
+This smoke proved that the auto queue sizing path and vector2 fd
+multiqueue path could pass one KCSAN-instrumented seccomp run.  The
+later R8e scan found and fixed a queue-lock lockdep warning on this
+same path.  Remaining work:
 
 - longer KCSAN traffic with concurrent TCP/UDP flows;
 - queue fairness and per-queue distribution measurements;
