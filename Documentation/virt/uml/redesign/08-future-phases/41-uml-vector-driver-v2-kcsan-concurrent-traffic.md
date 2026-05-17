@@ -140,18 +140,48 @@ phase .* failed
 
 The scan returned no matches.
 
+## Repeat Run
+
+The same default harness was then repeated three more times:
+
+```sh
+for i in 1 2 3; do
+  out="/tmp/um-vector2-kcsan-traffic-repeat/run-$i"
+  tools/uml/uml-launcher/scripts/vector2-kcsan-concurrent-traffic.sh \
+    --kernel /home/mjbommar/projects/personal/.build/um-vector-r8c-kcsan/linux \
+    --out "$out" >"/tmp/um-vector2-kcsan-traffic-repeat/run-$i.summary"
+done
+```
+
+All three repeat runs passed with exact TCP byte counts, exact UDP
+packet/byte counts, all four TX queues non-zero, all four RX queues
+non-zero, `VECTOR2_KCSAN_TRAFFIC_OK`, `TAP_ABSENT`, and
+`UML_PROCESS_ABSENT`.
+
+Queue distribution summaries:
+
+```text
+run-1 TX=1898,371,1071,1798 RX=2126,1212,1496,1433
+run-2 TX=1123,1556,1892,649 RX=1718,1587,2286,667
+run-3 TX=1424,614,1291,1118 RX=850,1735,2005,1113
+```
+
+The repeat logs and summaries were scanned for the same warning, BUG,
+panic, KCSAN, data-race, failure, failed-phase, `not ok`, and `FAILED`
+signatures.  The scan returned no matches.
+
 ## What This Closes
 
 This checkpoint closes the specific "no concurrent TCP/UDP KCSAN
 traffic" gap from the previous audit.  It also records the first
 KCSAN-era queue distribution profile where all four vector2 TX queues
-and all four vector2 RX queues moved during concurrent traffic.
+and all four vector2 RX queues moved during concurrent traffic, plus
+three consecutive repeat passes of the same gate.
 
 ## What Remains Open
 
 The broader multiqueue validation gate still needs:
 
-- repeated KCSAN concurrency runs, not just one clean pass;
 - longer SMP traffic durations;
 - varied queue/CPU counts and flow counts;
 - comparison on additional hosts and kernels;

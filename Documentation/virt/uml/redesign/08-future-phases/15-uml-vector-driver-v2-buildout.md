@@ -109,7 +109,8 @@ shape, and inspectable ethtool surfaces:
   `vector2-kcsan-concurrent-traffic.sh` helper runs four TCP flows and
   four UDP flows in both directions under the KCSAN UML kernel, verifies
   exact byte/packet counts, records all four TX and RX queues moving,
-  and tears down with no warning/BUG/KCSAN/data-race signatures;
+  and tears down with no warning/BUG/KCSAN/data-race signatures across
+  the initial pass plus three repeat runs;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -182,8 +183,9 @@ Missing runtime pieces:
   failure stress and successful 10,000-cycle runtime repetition, but no
   runtime knob to intentionally fail selected opens;
 - no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
-  now has one clean bidirectional pass with queue distribution, but
-  longer SMP traffic, repeated KCSAN runs, and broader
+  now has an initial clean bidirectional pass plus three repeats with
+  queue distribution, but
+  longer SMP traffic, varied queue/flow counts, and broader
   fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
   policy for guest userspace raw/netlink sockets visible in UML host
@@ -839,9 +841,12 @@ KCSAN concurrent traffic follow-up:
     UML process;
   - no `WARNING`, `BUG`, `KCSAN`, `data-race`, panic, failure, or
     failed-phase signatures in the captured logs.
+  - three additional default repeat runs passed with all four TX/RX
+    queues non-zero and no warning/BUG/KCSAN/data-race/panic/failure
+    signatures.
 - Therefore the previous "no concurrent TCP/UDP KCSAN traffic" gap is
-  closed for one clean vector2 fd multiqueue pass.  Repetition, longer
-  SMP runtime, varied queue/flow counts, kvm-v2 reruns, and broader
+  closed for vector2 fd multiqueue with repeat evidence.  Longer SMP
+  runtime, varied queue/flow counts, kvm-v2 reruns, and broader
   performance/fairness analysis remain open.
 
 FastAPI 30-pass follow-up:
