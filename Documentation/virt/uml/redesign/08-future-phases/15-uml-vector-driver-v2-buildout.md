@@ -1112,6 +1112,15 @@ KVM-v2 readiness follow-up:
     `PASS=29/30 FAIL=1 TIMEOUT=0` with
     `regs_owner_mismatches: count=0`, ruling out stale `uml_pt_regs`
     ownership as the direct explanation for the pid/tmm invariant hits;
+  - a no-network KVM-v2 Python import control using the same trace
+    runtime passed `PASS=30/30 FAIL=0 TIMEOUT=0`; every copied run log
+    had exactly one `PY_IMPORT_COUNT ok=100` marker, giving 3000 fresh
+    `python3` import startups for the Django-failure stdlib modules
+    without fatal Python, abort, BUG, panic, KCSAN, or trace-dump
+    markers.  The passing logs still contained 947 `KVM_V2_TLB_LAG`
+    diagnostics with max lag 2685, so TLB lag alone is not a failure
+    classifier and simple no-network Python import startup did not
+    reproduce the Django abort class;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
@@ -1138,11 +1147,15 @@ KVM-v2 readiness follow-up:
   fd handoff works on KVM-v2, one Django 30/30 run is clean, and the
   trace-enabled path now captures and parses a failing state-ring dump,
   but the longer samples still fail from KVM-v2 guest userspace
-  execution instability.  The direct post-syscall stale-`kvm_run`
-  consumption path has been removed and stale `uml_pt_regs` ownership is
-  now ruled out by trace evidence; the next backend audit must focus on
-  guest memory/TLB state and other KVM-v2 userspace-corruption paths.
-  KVM-v2 Tier 3 readiness remains open.
+  execution instability.  A no-network Python import control did not
+  reproduce the abort across 3000 fresh import startups, so the
+  remaining signal points at the full Django/server/network timing shape
+  or another KVM-v2 state path rather than Python import startup alone.
+  The direct post-syscall stale-`kvm_run` consumption path has been
+  removed and stale `uml_pt_regs` ownership is now ruled out by trace
+  evidence; the next backend audit must focus on guest memory/TLB state
+  and other KVM-v2 userspace-corruption paths.  KVM-v2 Tier 3 readiness
+  remains open.
 
 ### V2-R9 - Transport Parity
 

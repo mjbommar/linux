@@ -612,6 +612,63 @@ use in the trace or dispatcher.  The remaining KVM-v2 bug is still a
 guest userspace corruption issue, but it is no longer explained by the
 post-syscall `kvm_run` mismatch or stale `uml_pt_regs` ownership.
 
+### No-Network Python Import Control
+
+To separate the vector2 fd/network path from KVM-v2 userspace execution,
+a no-network control Umlfile was generated with:
+
+- `backend = "kvm-v2"`;
+- `append = ["kvm_v2_trace_enable"]`;
+- `network.mode = "none"`;
+- `mem = "1024M"`;
+- `ncpus = 2`.
+
+Each boot ran 100 fresh `python3` processes importing the same stdlib
+modules present in the failing Django stack (`email.utils`,
+`http.server`, `ipaddress`, `re`, `socket`, and `urllib.parse`).  On
+failure the phase would dump the KVM-v2 trace ring and print
+`PY_IMPORT_FAIL`.
+
+Smoke:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/kvmv2-python-import-trace.toml \
+    -W 1 -M 1 --timeout 180 \
+    --pass-marker PY_IMPORT_LOOP_OK \
+    --fail-marker 'PY_IMPORT_FAIL|Fatal Python error|Segmentation fault|Aborted|kernel BUG|Kernel panic' \
+    --out /tmp/um-kvmv2-python-import-trace-smoke
+
+PASS=1/1 FAIL=0 TIMEOUT=0
+```
+
+30-run control:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/kvmv2-python-import-trace.toml \
+    -W 1 -M 30 --timeout 180 \
+    --pass-marker PY_IMPORT_LOOP_OK \
+    --fail-marker 'PY_IMPORT_FAIL|Fatal Python error|Segmentation fault|Aborted|kernel BUG|Kernel panic' \
+    --out /tmp/um-kvmv2-python-import-trace-30
+
+PASS=30/30 FAIL=0 TIMEOUT=0
+```
+
+All 30 copied run logs contained exactly one `PY_IMPORT_COUNT ok=100`
+marker and no `PY_IMPORT_FAIL`, `Fatal Python error`, segmentation
+fault, abort, kernel BUG, panic, KCSAN, or trace-dump marker.  Across
+the passing sample, the run logs still contained 947
+`KVM_V2_TLB_LAG` diagnostics with a maximum lag of 2685.
+
+This does not clear KVM-v2 for vector2 Tier 3.  It does show that the
+observed Django abort is not reproduced by simple repeated Python
+startup/import without a network device.  It also strengthens the
+earlier conclusion that high `KVM_V2_TLB_LAG` is not a direct
+per-iteration failure classifier.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -645,7 +702,10 @@ driver should not claim final KVM-v2 Tier 3 readiness until this backend
 userspace-execution flake class is fixed or otherwise explained with
 repeatable clean evidence.  The trace-enabled rerun confirms the same
 Python abort class and now preserves a complete KVM-v2 state-ring dump
-for backend analysis.
+for backend analysis.  A separate no-network Python import control
+passed 30/30 with 3000 fresh import processes, so the current evidence
+points at the full Django/server/network timing shape or another KVM-v2
+state path, not at simple Python import startup by itself.
 
 ## Next Work
 
@@ -657,8 +717,10 @@ for backend analysis.
    `kvm_run` reuse has been removed.
 3. Treat stale `regs` ownership as ruled out unless a future trace shows
    `regs_owner_mismatches > 0`.
-4. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
-   unrelated to the Python abort.
+4. Treat high `KVM_V2_TLB_LAG` as insufficient by itself: passing
+   Django and no-network Python controls also show large lag values.
+   Continue auditing whether lag is symptomatic or part of a broader
+   task/mm/TLB ordering issue.
 5. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
    only then update the completion audit from partial to done.
 
@@ -705,3 +767,10 @@ Validation for the diagnostic change:
   `PASS=29/30 FAIL=1 TIMEOUT=0`; the failed trace reported
   `regs_owner_mismatches: count=0`, ruling out stale `uml_pt_regs`
   ownership as the direct explanation for the pid/tmm invariant hits.
+- a no-network KVM-v2 Python import control using the same trace runtime
+  passed `PASS=30/30 FAIL=0 TIMEOUT=0`; each run completed 100 fresh
+  `python3` import startups for the Django-failure stdlib modules, for
+  3000 successful import processes total, with no fatal Python, abort,
+  BUG, panic, KCSAN, or trace-dump markers.  Passing logs still showed
+  947 `KVM_V2_TLB_LAG` diagnostics with max lag 2685, so TLB lag alone
+  is not a failure classifier.
