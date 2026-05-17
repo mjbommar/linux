@@ -310,7 +310,8 @@ config UML_NET_VECTOR_V2_HOST_FD_KUNIT
 	  Build KUnit tests for the experimental vector v2 fd host backend.
 	  These tests validate direct-fd duplication, close unwind, bad-fd
 	  failure behavior, netdev open/stop lifecycle integration, and
-	  single-queue raw-frame TX/RX over a supplied fd.
+	  raw-frame TX/RX over supplied fds, including contiguous-fd
+	  multiqueue open and failure unwind.
 
 	  Say N for production builds. Say Y while developing the vector
 	  networking v2 rewrite.

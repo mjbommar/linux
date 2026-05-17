@@ -22,6 +22,9 @@ ethtool surfaces as the trusted TAP path.
 - `um_vector2_host_fd` KUnit now covers fd TX and RX packet movement.
 - fd open now preflights the inherited fd with `os_stat_fd()` and
   rejects unsupported file types before allocating channel state.
+- fd multiqueue core now treats `fd=N,queues=Q` as a contiguous
+  inherited-fd range `N..N+Q-1`, validates the whole range before
+  duplicating any fd, and unwinds already-opened channels on failure.
 - sandbox builds accept inherited `fd=` specs while still rejecting
   host resource creation options such as TAP `ifname=`.
 
@@ -69,6 +72,15 @@ kunit.py parse /tmp/um-vector-fd-diagnostics-kunit.log
 Testing complete. Ran 69 tests: passed: 69
 ```
 
+After fd multiqueue core:
+
+```text
+/home/mjbommar/projects/personal/.build/um-vector-r1-kunit/linux \
+  mem=256M kunit.filter_glob='um_vector2_*' kunit_shutdown=halt
+kunit.py parse /tmp/um-vector-fd-multiqueue-kunit.log
+Testing complete. Ran 71 tests: passed: 71
+```
+
 The new fd diagnostic KUnit cases verify both closed/missing fd and
 wrong-type fd behavior:
 
@@ -84,6 +96,9 @@ The new fd tests cover:
 - fd-backed `netdev_open()` now reaching carrier-on through the common
   datapath startup path.
 - bad inherited fd diagnostics and closed-state unwind.
+- two-queue contiguous-fd open/close;
+- full-range fd validation before duplication, so a missing later fd
+  cannot be masked by `dup()` reusing that fd number.
 
 Manual no-root fd datapath smoke:
 
@@ -179,7 +194,7 @@ still exists under `/sys/class/net` after `down --force --rm`.
 This checkpoint does not close the fd replacement gates.  Remaining fd
 work includes:
 
-- fd multiqueue;
+- launcher-owned fd multiqueue handoff and live TAP validation;
 - fd batching with `sendmmsg()` / `recvmmsg()` or an accepted simpler
   replacement;
 - scatter-gather TX without forced linearization;

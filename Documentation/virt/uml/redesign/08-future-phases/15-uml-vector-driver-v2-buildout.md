@@ -76,6 +76,8 @@ shape, and inspectable ethtool surfaces:
   ethtool queue counters, and clean TAP teardown;
 - fd open preflight diagnostics for missing and wrong-type inherited
   fds, with closed-state unwind covered by KUnit;
+- fd multiqueue core for contiguous inherited fd ranges, with KUnit
+  coverage for two-queue open/close and missing-later-fd unwind;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - `umlctl gate loop` cleanup audit for TAP-backed Umlfiles, so a
@@ -95,9 +97,9 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
-- no full multiqueue validation story: fd multiqueue, queue-to-CPU
-  policy, KCSAN, and broader fairness/performance profiles remain
-  open;
+- no full multiqueue validation story: launcher-owned fd multiqueue,
+  queue-to-CPU policy, KCSAN, and broader fairness/performance
+  profiles remain open;
 - no compatibility switch from old `vecN:` to v2.
 
 Therefore vector v2 must run as an experimental parallel driver first.

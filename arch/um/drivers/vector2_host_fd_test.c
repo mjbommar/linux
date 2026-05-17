@@ -41,8 +41,10 @@ static struct net_device *
 vector2_fd_test_alloc_netdev(struct kunit *test, struct um_vec2_dev *vdev)
 {
 	struct net_device *dev;
+	unsigned int queues = um_vec2_netdev_queue_count(vdev);
 
-	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), 1, 1);
+	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), queues,
+				 queues);
 	KUNIT_ASSERT_NOT_NULL(test, dev);
 
 	um_vec2_netdev_init(vdev, dev);
@@ -120,6 +122,64 @@ static void vector2_fd_wrong_type_fails_closed_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
 
 	os_close_file(fd);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
+static void vector2_fd_multiqueue_open_close_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 6);
+	struct net_device *dev;
+	int fds[2] = { -1, -1 };
+
+	vdev->cfg.queues = 2;
+	dev = vector2_fd_test_alloc_netdev(test, vdev);
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, fds[1], fds[0] + 1);
+	vdev->cfg.fd = fds[0];
+	vdev->cfg.has_fd = true;
+
+	KUNIT_EXPECT_EQ(test, um_vec2_fd_open(vdev), 0);
+	KUNIT_ASSERT_NOT_NULL(test, vdev->channels);
+	KUNIT_ASSERT_NOT_NULL(test, vdev->channels[0].host);
+	KUNIT_ASSERT_NOT_NULL(test, vdev->channels[1].host);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 2U);
+	KUNIT_EXPECT_EQ(test, vdev->channels[0].index, 0U);
+	KUNIT_EXPECT_EQ(test, vdev->channels[1].index, 1U);
+	KUNIT_EXPECT_NE(test, vdev->channels[0].rx_fd,
+			vdev->channels[1].rx_fd);
+
+	um_vec2_fd_close(vdev);
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+
+	vector2_fd_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
+static void vector2_fd_multiqueue_missing_second_fd_unwinds_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 7);
+	struct net_device *dev;
+	int fds[2] = { -1, -1 };
+
+	vdev->cfg.queues = 2;
+	dev = vector2_fd_test_alloc_netdev(test, vdev);
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, fds[1], fds[0] + 1);
+	os_close_file(fds[1]);
+	fds[1] = -1;
+	vdev->cfg.fd = fds[0];
+	vdev->cfg.has_fd = true;
+
+	KUNIT_EXPECT_EQ(test, um_vec2_fd_open(vdev), -EBADF);
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+
+	vector2_fd_test_close_pipe(fds);
 	vdev->netdev = NULL;
 	free_netdev(dev);
 }
@@ -315,6 +375,8 @@ static struct kunit_case vector2_fd_test_cases[] = {
 	KUNIT_CASE(vector2_fd_open_close_test),
 	KUNIT_CASE(vector2_fd_bad_fd_fails_closed_test),
 	KUNIT_CASE(vector2_fd_wrong_type_fails_closed_test),
+	KUNIT_CASE(vector2_fd_multiqueue_open_close_test),
+	KUNIT_CASE(vector2_fd_multiqueue_missing_second_fd_unwinds_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_test),
 	KUNIT_CASE(vector2_fd_tx_batch_writes_frame_test),
 	KUNIT_CASE(vector2_fd_rx_batch_reads_frame_test),

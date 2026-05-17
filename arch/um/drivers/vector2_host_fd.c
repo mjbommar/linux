@@ -152,15 +152,16 @@ static const char *um_vec2_fd_mode_name(unsigned int mode)
 	}
 }
 
-static int um_vec2_fd_validate_source(struct um_vec2_dev *vdev)
+static int um_vec2_fd_validate_source(struct um_vec2_dev *vdev,
+				      unsigned int source_fd)
 {
 	struct uml_stat st;
 	int ret;
 
-	ret = os_stat_fd(vdev->cfg.fd, &st);
+	ret = os_stat_fd(source_fd, &st);
 	if (ret) {
 		pr_err("vec2.%u inherited fd %u is not usable: fstat failed ret=%d\n",
-		       vdev->unit, vdev->cfg.fd, ret);
+		       vdev->unit, source_fd, ret);
 		return ret;
 	}
 
@@ -170,7 +171,7 @@ static int um_vec2_fd_validate_source(struct um_vec2_dev *vdev)
 
 	pr_err("vec2.%u inherited fd %u has unsupported type %s mode=0%o; "
 	       "expected char, fifo, or socket\n",
-	       vdev->unit, vdev->cfg.fd, um_vec2_fd_mode_name(st.ust_mode),
+	       vdev->unit, source_fd, um_vec2_fd_mode_name(st.ust_mode),
 	       st.ust_mode);
 	return -EINVAL;
 }
@@ -189,41 +190,25 @@ static void um_vec2_fd_host_close(struct um_vec2_fd_host *fdhost)
 	fdhost->tx_fd = -1;
 }
 
-int um_vec2_fd_open(struct um_vec2_dev *vdev)
+static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
+				   struct um_vec2_channel *channel,
+				   unsigned int index,
+				   unsigned int source_fd)
 {
 	struct um_vec2_fd_host *fdhost;
-	struct um_vec2_channel *channel;
 	struct net_device *dev = vdev->netdev;
 	int fd;
 	int ret;
 
-	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_FD || !vdev->cfg.has_fd)
-		return -EINVAL;
-	if (!dev)
-		return -ENODEV;
-	if (um_vec2_netdev_queue_count(vdev) != 1)
-		return -EOPNOTSUPP;
-	if (vdev->channels)
-		return -EBUSY;
-
-	ret = um_vec2_fd_validate_source(vdev);
-	if (ret)
-		return ret;
-
-	channel = kzalloc_obj(*channel);
-	if (!channel)
-		return -ENOMEM;
-
 	fdhost = kzalloc_obj(*fdhost);
-	if (!fdhost) {
-		ret = -ENOMEM;
-		goto out_free_channel;
-	}
+	if (!fdhost)
+		return -ENOMEM;
 	fdhost->rx_fd = UM_VEC2_NO_FD;
 	fdhost->tx_fd = UM_VEC2_NO_FD;
 
 	um_vec2_chan_lifecycle_init(&channel->life);
 	channel->vdev = vdev;
+	channel->index = index;
 	channel->rx_fd = UM_VEC2_NO_FD;
 	channel->tx_fd = UM_VEC2_NO_FD;
 	channel->rx_irq = UM_VEC2_NO_IRQ;
@@ -236,7 +221,7 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 	if (ret)
 		goto out_free_host;
 
-	fd = os_dup_file(vdev->cfg.fd);
+	fd = os_dup_file(source_fd);
 	if (fd < 0) {
 		ret = fd;
 		goto out_free_queue;
@@ -279,14 +264,12 @@ out_free_queue:
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
 out_free_host:
 	kfree(fdhost);
-out_free_channel:
-	kfree(channel);
 	return ret;
 }
 
-void um_vec2_fd_close(struct um_vec2_dev *vdev)
+static void um_vec2_fd_channel_close(struct um_vec2_channel *channel,
+				     struct net_device *dev)
 {
-	struct um_vec2_channel *channel = vdev->channels;
 	struct um_vec2_fd_host *fdhost;
 
 	if (!channel)
@@ -300,12 +283,78 @@ void um_vec2_fd_close(struct um_vec2_dev *vdev)
 	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
 
-	um_vec2_queue_pair_free(channel, vdev->netdev);
+	um_vec2_queue_pair_free(channel, dev);
 	channel->host = NULL;
 	channel->rx_fd = UM_VEC2_NO_FD;
 	channel->tx_fd = UM_VEC2_NO_FD;
 	kfree(fdhost);
-	kfree(channel);
+}
+
+int um_vec2_fd_open(struct um_vec2_dev *vdev)
+{
+	struct um_vec2_channel *channels;
+	unsigned int queues;
+	unsigned int i;
+	int ret;
+
+	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_FD || !vdev->cfg.has_fd)
+		return -EINVAL;
+	if (!vdev->netdev)
+		return -ENODEV;
+	if (vdev->channels)
+		return -EBUSY;
+
+	queues = um_vec2_netdev_queue_count(vdev);
+	if (vdev->cfg.fd > INT_MAX - (queues - 1)) {
+		pr_err("vec2.%u inherited fd range fd=%u queues=%u exceeds INT_MAX\n",
+		       vdev->unit, vdev->cfg.fd, queues);
+		return -EINVAL;
+	}
+
+	/*
+	 * Validate the whole inherited-fd range before duplicating any fd.
+	 * Otherwise dup() for an early queue could reuse a closed later
+	 * queue fd number and mask a broken launcher handoff.
+	 */
+	for (i = 0; i < queues; i++) {
+		ret = um_vec2_fd_validate_source(vdev, vdev->cfg.fd + i);
+		if (ret)
+			return ret;
+	}
+
+	channels = kcalloc(queues, sizeof(*channels), GFP_KERNEL);
+	if (!channels)
+		return -ENOMEM;
+
+	for (i = 0; i < queues; i++) {
+		ret = um_vec2_fd_channel_open(vdev, &channels[i], i,
+					      vdev->cfg.fd + i);
+		if (ret)
+			goto out_close_channels;
+	}
+
+	vdev->channels = channels;
+	vdev->num_channels = queues;
+	return 0;
+
+out_close_channels:
+	while (i--)
+		um_vec2_fd_channel_close(&channels[i], vdev->netdev);
+	kfree(channels);
+	return ret;
+}
+
+void um_vec2_fd_close(struct um_vec2_dev *vdev)
+{
+	struct um_vec2_channel *channels = vdev->channels;
+	unsigned int i;
+
+	if (!channels)
+		return;
+
+	for (i = 0; i < vdev->num_channels; i++)
+		um_vec2_fd_channel_close(&channels[i], vdev->netdev);
+	kfree(channels);
 	vdev->channels = NULL;
 	vdev->num_channels = 0;
 }
