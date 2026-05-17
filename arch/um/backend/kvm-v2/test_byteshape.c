@@ -26,9 +26,15 @@
  * the production validation gate.
  */
 #include <kunit/test.h>
+#include <linux/errno.h>
+#include <linux/kvm.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
+#include <os.h>
+
+#include "kvm_v2_backend.h"
 #include "syscall_trap.h"
 
 /* Assembled blobs from lstar_gadget.S — see also syscall_trap.c. */
@@ -332,6 +338,61 @@ static void test_idt_simple_stub_bytes(struct kunit *test)
 }
 
 /* ---------------------------------------------------------------- */
+/* Snapshot Phase 1 round-trip                                      */
+/* Memo 26-snapshot §5 — capture, modify the vCPU's RAX, restore,   */
+/* assert the snapshot's RAX is what the vCPU reads back.           */
+/* Runtime gate: kvm_v2_vcpu_get(0) must return non-NULL.           */
+/* ---------------------------------------------------------------- */
+
+static void test_kvm_v2_snapshot_basic(struct kunit *test)
+{
+	struct kvm_v2_snapshot *snap;
+	struct kvm_v2_vcpu *vcpu;
+	struct kvm_regs scratch;
+	int rc;
+
+	/*
+	 * Build-time KUnit env may not have a v2 vCPU pool up. Skip
+	 * cleanly so the case stays compilable + runnable, exercising
+	 * the type-shape against the snapshot header. Phase 2 will
+	 * stand up a real boot-time KUnit env where this test
+	 * actually runs end-to-end.
+	 */
+	vcpu = kvm_v2_vcpu_get(0);
+	if (!vcpu || vcpu->vcpu_fd < 0)
+		kunit_skip(test, "no v2 vCPU pool (run under a v2 boot)");
+
+	snap = kvm_v2_snapshot_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, snap);
+
+	rc = kvm_v2_snapshot_capture_regs_only(snap);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/*
+	 * Stomp on the vCPU's RAX so the restore has something to
+	 * undo. The captured snapshot still holds the original RAX
+	 * value; after restore_full the vCPU should match.
+	 */
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	scratch.rax = 0xdeadbeefdeadbeefULL;
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = kvm_v2_snapshot_restore_full(snap);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_EXPECT_EQ(test, scratch.rax, snap->regs.rax);
+
+	kvm_v2_snapshot_destroy(snap);
+}
+
+/* ---------------------------------------------------------------- */
 /* Suite registration                                               */
 /* ---------------------------------------------------------------- */
 
@@ -345,6 +406,7 @@ static struct kunit_case kvm_v2_byteshape_test_cases[] = {
 	KUNIT_CASE(test_lstar_gadget_size_bounded),
 	KUNIT_CASE(test_idt_pf_stub_bytes),
 	KUNIT_CASE(test_idt_simple_stub_bytes),
+	KUNIT_CASE(test_kvm_v2_snapshot_basic),
 	{}
 };
 

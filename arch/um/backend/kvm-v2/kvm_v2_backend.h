@@ -12,6 +12,7 @@
 
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
+#include <linux/kvm.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -749,5 +750,76 @@ int  kvm_v2_mm_region_added(struct mm_struct *mm,
 			    const struct um_memory_region *region);
 int  kvm_v2_mm_region_removed(struct mm_struct *mm,
 			      const struct um_memory_region *region);
+
+/*
+ * Snapshot (memo 26-snapshot, Time-machine #168 Phase 1).
+ *
+ * Captures a vCPU's scalar state (registers, sregs, XSAVE area,
+ * XCR0, pending-events, 7 MSRs) into a heap-allocated container
+ * so a later kvm_v2_snapshot_restore_full() reinstates it. v1's
+ * working implementation lives at kvm-v1-archive/snapshot.c
+ * (647 LoC); v2's port handles three deltas:
+ *
+ *   1. Per-host-CPU vCPU pool — snapshot picks the pool entry whose
+ *      vcpu->last_task == current (memo 26-snapshot §3.1 / §4.3).
+ *   2. KVM_GET_FPU → KVM_GET_XSAVE so SMP-T57 Phase A's XCR0.YMM
+ *      upper-128 is preserved (§3.2).
+ *   3. New: KVM_GET_XCRS captures XCR0 itself (§3.3).
+ *
+ * Phase 1 implements alloc/destroy/free + capture_regs_only +
+ * restore_full. The full kvm_v2_snapshot_capture (memslot + per-VM
+ * IDT/GDT + per-vCPU IST/TSS/gadget-state) is Phase 3; the function
+ * exists as a stub returning -EOPNOTSUPP so the public surface is
+ * stable from this commit forward.
+ *
+ * Phase 1 design memo:
+ *   Documentation/virt/uml/redesign/02-workstreams/
+ *   D-kvm-backend/26-snapshot-v2-port.md
+ */
+#define KVM_V2_SNAPSHOT_MSR_COUNT	7
+
+/**
+ * struct kvm_v2_snapshot - captured vCPU + (future) memslot state.
+ *
+ * @regs:	GP regs (RIP/RSP/RFLAGS + 16 GPRs). KVM_GET_REGS.
+ * @sregs:	segments + CR0/2/3/4 + IDT/GDT/TR/LDT. KVM_GET_SREGS.
+ * @xsave:	XSAVE area (4 KB legacy fixed-size struct kvm_xsave;
+ *		KVM_GET_XSAVE). Covers X87/SSE/YMM under v2's XCR0=0x7;
+ *		AVX-512/AMX bits stay zero per the curated CPUID mask
+ *		so KVM_GET_XSAVE2's variable-size shape isn't required.
+ * @xcrs:	XCR0 (and any future XCRn). KVM_GET_XCRS. v1 omitted
+ *		this; v2 needs it because SMP-T57 Phase A made XCR0
+ *		non-trivial.
+ * @events:	pending exception / IRQ window / NMI state.
+ *		KVM_GET_VCPU_EVENTS.
+ * @msrs:	7-entry MSR list (LSTAR/STAR/FMASK/KERNEL_GS_BASE/
+ *		FS_BASE/GS_BASE/EFER). KVM_GET_MSRS.
+ * @mem_backing: memslot copy backing buffer. NULL when the snapshot
+ *		was captured by kvm_v2_snapshot_capture_regs_only.
+ *		Phase 3 populates this via kvmalloc(physmem_size).
+ * @mem_size:	size of @mem_backing in bytes; 0 when @mem_backing is
+ *		NULL.
+ */
+struct kvm_v2_snapshot {
+	struct kvm_regs		regs;
+	struct kvm_sregs	sregs;
+	struct kvm_xsave	xsave;
+	struct kvm_xcrs		xcrs;
+	struct kvm_vcpu_events	events;
+	struct {
+		__u32 nmsrs;
+		__u32 pad;
+		struct kvm_msr_entry entries[KVM_V2_SNAPSHOT_MSR_COUNT];
+	} msrs;
+	void	*mem_backing;
+	size_t	 mem_size;
+};
+
+struct kvm_v2_snapshot *kvm_v2_snapshot_alloc(void);
+void  kvm_v2_snapshot_destroy(struct kvm_v2_snapshot *snap);
+void  kvm_v2_snapshot_free(struct kvm_v2_snapshot *snap);
+int   kvm_v2_snapshot_capture(struct kvm_v2_snapshot *snap);
+int   kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap);
+int   kvm_v2_snapshot_restore_full(struct kvm_v2_snapshot *snap);
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

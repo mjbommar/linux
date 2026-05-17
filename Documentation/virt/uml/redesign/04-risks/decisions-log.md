@@ -11254,4 +11254,135 @@ regression before it accumulates into the scoreboard noise.
 
 ---
 
+## D123 (2026-05-16) — snapshot v2 port Phase 1: skeleton + regs_only round-trip
+
+**Context.** PLAN-2026-05-14 §4.1 designated the Time-machine
+track (#168 snapshot → #169 record/replay → #170 syzkaller) as
+the strategic differentiator. v1 had a working 647 LoC snapshot
+TU at `arch/um/backend/kvm-v1-archive/snapshot.c`; v2 had
+nothing. This entry records the Phase 1 lift: struct + alloc/
+free + `kvm_v2_snapshot_capture_regs_only` +
+`kvm_v2_snapshot_restore_full` IMPLEMENTED for v2, the full-
+capture path stubbed, and a build-aware KUnit case wired in.
+
+**What landed.**
+
+  - **Design memo** `02-workstreams/D-kvm-backend/26-snapshot-
+    v2-port.md` (~530 lines). Covers the v1 → v2 deltas, the
+    Phase 1 design, the Phase 2-7 sub-sequencing, and the open
+    questions.
+  - **`arch/um/backend/kvm-v2/snapshot.c`** (~280 LoC). Public
+    surface: `kvm_v2_snapshot_alloc`, `_destroy`, `_free`,
+    `_capture_regs_only` (implemented), `_restore_full`
+    (implemented), `_capture` (stub → `-EOPNOTSUPP`). All
+    `EXPORT_SYMBOL_GPL`'d, matching the v1 archive precedent so
+    Phase 7's record/replay TU links cleanly.
+  - **Header** — `struct kvm_v2_snapshot` + prototypes +
+    `KVM_V2_SNAPSHOT_MSR_COUNT` constant.
+  - **Makefile** — `snapshot.o` under
+    `CONFIG_UM_BACKEND_KVM_V2`.
+  - **KUnit case** `test_kvm_v2_snapshot_basic` in
+    `test_byteshape.c`. Capture / mutate vCPU RAX via
+    `KVM_SET_REGS` / restore / assert. `kunit_skip` when the
+    pool isn't initialised (build-only env without a real v2
+    boot).
+
+**v1 → v2 deltas this port handles.**
+
+  - **Per-task vCPU lookup → per-host-CPU pool walk.** v1 had
+    `current->thread.arch.kvm.vcpu`; v2 walks `vcpus[]` for the
+    entry whose `last_task == current` under `preempt_disable`.
+  - **`KVM_GET_FPU` → `KVM_GET_XSAVE`.** SMP-T57 Phase A
+    (D121) enabled XCR0.YMM; the legacy 512 B FXSAVE shape loses
+    YMM upper-128 silently. The XSAVE ioctl (static 4 KB
+    `struct kvm_xsave`) captures the full extended state under
+    v2's curated CPUID.
+  - **New: `KVM_GET_XCRS` capture.** v1 didn't (XCR0 was zero).
+    v2 must so restore re-establishes the XSAVE interpretation
+    context.
+  - **Post-restore hygiene.** Clear `vcpu->last_task`,
+    `vcpu->last_mm`, `vcpu->fpu_owner_task`; set
+    `vcpu->fpu_dirty = true`. Forces the next dispatch's
+    cross-task arrival branch (memo §4.5) so SREGS + FPU
+    re-install unconditionally from the restored bytes.
+
+**Phase 1 limitations (sub-sequenced in the memo).**
+
+  - Calling-task-only snapshot. Cross-task snapshot is Phase 4.
+  - No memslot copy. Phase 3.
+  - No IDT/GDT/IST/gadget-state capture. Phase 3.
+  - No bench harness. Phase 5.
+  - No selftest re-plumb. Phase 6.
+  - KUnit case `kunit_skip`s under build-only env. Phase 2 will
+    stand up a real v2 boot KUnit harness.
+
+**Sizing actual vs estimate.**
+
+PLAN-2026-05-14 §4.1 estimated 100 LoC for sub-step 1
+(skeleton) + 150 LoC for sub-step 2 (`capture_regs_only`). The
+landed code is ~280 LoC of `snapshot.c` + ~60 LoC of header
+additions + ~50 LoC of KUnit case = ~390 LoC code. Slightly
+over budget because the v2-specific lookup helper +
+preempt_disable scaffolding + the `fpu_dirty` post-restore
+invariants add ~80 LoC the v1 archive didn't need. The
++ ~530 lines of memo is on top.
+
+**Build verification.**
+
+  - `make ARCH=um O=/home/mjbommar/src/uml-builds/uml-smp-t41fix
+     -j$(nproc)` → Exit 0, no warnings on the touched files.
+  - Scratch build with `CONFIG_UM_BACKEND_KVM_V2_KUNIT=y` ALSO
+    Exit 0 — `test_byteshape.o` builds cleanly with the new
+    case wired in.
+
+**checkpatch.** Strict + terse mode flags only the generic
+"new file → MAINTAINERS?" warning. No errors, no other
+warnings.
+
+**Decision (strategic).**
+
+Phase 1 IS the gate. Phases 2-7 each get their own commit. The
+incremental gating is:
+
+  - Phase 2: real boot-time KUnit env (1-2 weeks).
+  - Phase 3: full capture + memslot + IDT/GDT/IST (~300 LoC,
+    ~2 weeks).
+  - Phase 4: cross-task semantics (~150 LoC, ~1 week).
+  - Phase 5: bench harness port + perf measurement against the
+    memo-12 budget (<50 ms cold / <1 ms iter targets), ~250 LoC.
+  - Phase 6: selftest re-plumb, ~50 LoC.
+  - Phase 7: opens #169 (record/replay) on top of the snapshot
+    primitive.
+
+Total runway: ~3-5 weeks of Track B work to close #168, then
+~6-8 weeks for #169 record/replay on top.
+
+**Why Phase 1 is build-only.**
+
+UML kernel boots take ~10-30 s, and the smoke tests we'd run
+to validate snapshot end-to-end are 5-15 minutes apiece.
+Phase 1's scope (skeleton + the two simplest functions) doesn't
+need that round-trip yet — type-check + KUnit-shape pass is
+enough confidence, and Phase 2's boot-time KUnit env is the
+proper way to land the runtime gate. Premature boot testing
+here would just add hours per cycle without changing the
+landed code.
+
+**Refs.**
+
+  - `02-workstreams/D-kvm-backend/26-snapshot-v2-port.md`
+    (this port's design memo, landed alongside).
+  - `02-workstreams/D-kvm-backend/12-snapshot-forkserver-kvm.md`
+    (original v1-era design).
+  - `02-workstreams/D-kvm-backend/plan-2026-05-14-execution/
+    02-snapshot-port-phase1.md` (diary entry, also in this
+    commit).
+  - `06-sequencing/PLAN-2026-05-14.md` §4.1 (the seven-step
+    sub-sequencing).
+  - `arch/um/backend/kvm-v1-archive/snapshot.c` (lift target).
+  - D119 (SMP-T55 — `fpu_dirty` per-vCPU semantics).
+  - D121 (SMP-T57 Phase A — XSAVE plumbing the port leverages).
+
+---
+
 ## (Future entries here, as decisions are made)

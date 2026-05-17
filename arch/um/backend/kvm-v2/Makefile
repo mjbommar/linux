@@ -13,6 +13,13 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += syscall_trap.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
 
+# Snapshot / forkserver primitives (Time-machine #168 Phase 1).
+# Port of arch/um/backend/kvm-v1-archive/snapshot.c onto v2's
+# vCPU pool + memslot shape. See
+# Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+# 26-snapshot-v2-port.md for the design memo + Phase sub-sequencing.
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += snapshot.o
+
 # Phase H gadget LSTAR trampoline body — assembled blob, position-
 # independent x86_64 stub copied at runtime into the per-VM
 # trampoline page. Pattern: arch/x86/kernel/ftrace_64.S +

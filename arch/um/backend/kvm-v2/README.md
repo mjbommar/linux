@@ -66,6 +66,7 @@ investigation session — see memo 26 §H.1b.
 | `syscall_trap.c`  | LSTAR trampoline + IO-trap dispatcher (syscall + #PF + #GP + #UD + #DE + #OF) |
 | `kvm_v2_backend.h`| Internal types + helper declarations                    |
 | `ops.c`           | Backend ops table — `.vcpu_run = kvm_v2_vcpu_run` post-D.5 |
+| `snapshot.c`      | Snapshot / forkserver primitives (Time-machine #168 Phase 1) — capture/restore vCPU scalar state via KVM_GET/SET_{REGS,SREGS,XSAVE,XCRS,VCPU_EVENTS,MSRS} |
 | `test_marshal.c`  | KUnit suite for marshal-shape correctness               |
 
 ## Read first (in order)
