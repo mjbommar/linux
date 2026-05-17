@@ -306,7 +306,9 @@ R7 does not claim:
 
 - 30/30 Tier 3 Django success on kvm-v2;
 - kvm-v2 baseline readiness for no-network workloads on this kernel;
-- FastAPI/uvicorn live validation;
+- longer FastAPI/uvicorn validation after the one-shot seccomp
+  vector2 fd smoke in
+  `34-uml-vector-driver-v2-fastapi-uvicorn-smoke.md`;
 - 2h or 24h soak success;
 - host-to-guest TCP battery outside the in-guest HTTP curl loop;
 - fd datapath packet movement;

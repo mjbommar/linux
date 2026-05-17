@@ -59,4 +59,6 @@ vector2 TAP.  The R7 gate is still incomplete because:
 - kvm-v2 no-network readiness currently fails before Linux boot output;
 - the kvm-v2 vector2 Tier 3 30/30 gate cannot be interpreted until
   that baseline backend issue is fixed;
-- the FastAPI/uvicorn variant and long-soak proof remain open.
+- longer FastAPI/uvicorn repetition and long-soak proof remain open.
+  A later one-shot seccomp FastAPI/uvicorn smoke is recorded in
+  `34-uml-vector-driver-v2-fastapi-uvicorn-smoke.md`.

@@ -243,6 +243,11 @@ parking-lot designs for future prioritization.
   gate run of vector2 fd multiqueue through `queues = "auto"`:
   `PASS=1/1`, no TAP leak, resolved queue metadata, and no KCSAN
   data-race signatures. Not a commitment.
+- [34-uml-vector-driver-v2-fastapi-uvicorn-smoke.md](34-uml-vector-driver-v2-fastapi-uvicorn-smoke.md) —
+  R7/R8 validation note for a real FastAPI + uvicorn one-shot under
+  vector2 fd handoff on seccomp: gateway ping, `SERVER_READY`,
+  `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
+  `REPRO_DONE rc=0`, and no TAP leak. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

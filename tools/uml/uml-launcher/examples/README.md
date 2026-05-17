@@ -48,6 +48,7 @@ CLI flags > TOML > env vars > defaults.
 | [`vector2-fd-handoff.toml`](vector2-fd-handoff.toml) | Minimal vector2 TAP smoke using launcher-owned inherited fd handoff |
 | [`vector2-fd-multiqueue.toml`](vector2-fd-multiqueue.toml) | Vector2 TAP smoke using launcher-owned inherited fd multiqueue |
 | [`vector2-auto-queues.toml`](vector2-auto-queues.toml) | Vector2 TAP smoke using `queues = "auto"` to match runtime.ncpus |
+| [`vector2-fastapi-smoke.toml`](vector2-fastapi-smoke.toml) | Vector2 FastAPI/uvicorn smoke using fd handoff and automatic queue sizing |
 | [`cpython-test.toml`](cpython-test.toml) | CPython standard test suite — canonical "is the env real?" check |
 
 The Umlfile configs are not magic either: they're TOML that drives
@@ -74,4 +75,7 @@ UML_KERNEL=/path/to/uml/linux \
   umlctl up -f tools/uml/uml-launcher/examples/vector2-fd-multiqueue.toml --dry-run
 UML_KERNEL=/path/to/uml/linux \
   umlctl up -f tools/uml/uml-launcher/examples/vector2-auto-queues.toml --dry-run
+UML_KERNEL=/path/to/uml/linux \
+  umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fastapi-smoke.toml \
+    -W 1 -M 1 --timeout 240 --pass-marker VECTOR2_FASTAPI_OK
 ```

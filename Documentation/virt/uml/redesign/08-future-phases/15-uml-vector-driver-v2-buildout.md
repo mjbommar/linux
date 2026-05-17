@@ -102,6 +102,11 @@ shape, and inspectable ethtool surfaces:
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2
   `queues=2` TAP;
+- live real FastAPI + uvicorn one-shot success on seccomp through
+  vector2 launcher-owned fd handoff with `queues = "auto"` resolving
+  to two queues: gateway ping, `SERVER_READY`,
+  `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`,
+  `REPRO_DONE rc=0`, and clean TAP teardown;
 - TAP teardown hardening after successful loops and failed starts.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
