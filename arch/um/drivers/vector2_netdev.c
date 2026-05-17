@@ -363,6 +363,19 @@ complete:
 	return rx_done;
 
 backend_dead:
+	/*
+	 * Terminal state: backend signalled -ENODEV (host fd closed,
+	 * TAP vanished, etc.).  We stop xmit + drop carrier so the
+	 * netdev framework + tooling see "link down" + queue stopped.
+	 * Recovery requires "ip link set vec2.X down && up" — the
+	 * B5-fixed um_vec2_netdev_stop now handles the carrier-off
+	 * + queues-stopped state idempotently, so a subsequent
+	 * "down" drives lifecycle back to REGISTERED and "up"
+	 * re-opens cleanly.  Auto-recovery is intentionally not
+	 * attempted: the operator has to fix whatever the host
+	 * condition was before retry can succeed.  See audit P3.3 +
+	 * 47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md.
+	 */
 	netif_tx_stop_all_queues(dev);
 	netif_carrier_off(dev);
 	if (rx_done < 0)
@@ -588,6 +601,15 @@ int um_vec2_netdev_open(struct net_device *dev)
 		um_vec2_netdev_configure_xps(dev, dev->real_num_tx_queues);
 		netif_carrier_on(dev);
 		netif_tx_start_all_queues(dev);
+		/*
+		 * napi_schedule() under vdev->lock is safe: it sets
+		 * NAPI_STATE_SCHED and raises a softirq, taking no
+		 * external locks itself.  The softirq runs
+		 * um_vec2_netdev_poll in a separate context which never
+		 * takes vdev->lock, so there is no AB-BA ordering risk.
+		 * See audit R4 +
+		 * 47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md.
+		 */
 		for (i = 0; i < vdev->num_channels; i++)
 			napi_schedule(&vdev->channels[i].napi);
 		ret = 0;
@@ -654,6 +676,16 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 
 	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_XMIT_CALLS);
 
+	/*
+	 * The lifecycle check below is intentionally unlocked.  The
+	 * netdev framework guarantees `__LINK_STATE_START` is cleared
+	 * and any in-flight `ndo_start_xmit` has drained (via
+	 * synchronize_net) before our `um_vec2_netdev_stop` runs, so
+	 * a parallel ndo_stop cannot tear down the backend while we
+	 * are here.  Adding `vdev->lock` would defeat the spin_lock_bh
+	 * fast path with no real-world benefit.  See audit R3 +
+	 * 47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md.
+	 */
 	if (!um_vec2_dev_can_xmit(&vdev->life)) {
 		dev->stats.tx_dropped++;
 		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
