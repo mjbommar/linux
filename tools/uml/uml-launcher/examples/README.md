@@ -106,3 +106,11 @@ UML_VECTOR_PERF_REPEAT=3 \
   tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
     --kernel /path/to/uml/linux
 ```
+
+For a KCSAN-oriented vector2 concurrent TCP/UDP gate with queue
+distribution checks, use the focused helper:
+
+```sh
+tools/uml/uml-launcher/scripts/vector2-kcsan-concurrent-traffic.sh \
+  --kernel /path/to/kcsan-uml/linux
+```

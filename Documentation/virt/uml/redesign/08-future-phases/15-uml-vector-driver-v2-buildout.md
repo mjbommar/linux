@@ -105,6 +105,11 @@ shape, and inspectable ethtool surfaces:
   handoff workload passes once under the KCSAN UML kernel with
   `FASTAPI_HTTP ok=51 fail=0`, no warning/BUG/KCSAN/data-race
   signatures, and clean TAP/process teardown;
+- KCSAN concurrent TCP/UDP workload gate: the
+  `vector2-kcsan-concurrent-traffic.sh` helper runs four TCP flows and
+  four UDP flows in both directions under the KCSAN UML kernel, verifies
+  exact byte/packet counts, records all four TX and RX queues moving,
+  and tears down with no warning/BUG/KCSAN/data-race signatures;
 - short `umlctl gate loop` vector2 fd-handoff repetition:
   `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - short `umlctl gate loop` vector2 fd-multiqueue repetition:
@@ -174,8 +179,10 @@ Missing runtime pieces:
 - no live failed-open injection proof; the fd path has bounded KUnit
   failure stress and successful 10,000-cycle runtime repetition, but no
   runtime knob to intentionally fail selected opens;
-- no full multiqueue validation story: heavier KCSAN traffic, long SMP
-  traffic, and broader fairness/performance profiles remain open;
+- no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
+  now has one clean bidirectional pass with queue distribution, but
+  longer SMP traffic, repeated KCSAN runs, and broader
+  fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
   policy for guest userspace raw/netlink sockets visible in UML host
   traces; a local `umlctl gate loop --audit-vector-sandbox` gate exists
@@ -791,8 +798,49 @@ KCSAN FastAPI follow-up:
     signatures in the copied run log;
   - no lingering `v2fastapi0` or UML process.
 - Therefore vector2 has KCSAN evidence beyond ping/ethtool smoke, but
-  concurrent TCP/UDP flows, longer runtime, and fairness profiles
-  remain open.
+  this FastAPI run by itself does not cover concurrent TCP/UDP flows,
+  longer runtime, or fairness profiles.
+
+KCSAN concurrent traffic follow-up:
+
+- `41-uml-vector-driver-v2-kcsan-concurrent-traffic.md` records the
+  first reusable KCSAN gate for concurrent vector2 TCP and UDP traffic
+  in both directions.
+- Implemented:
+  - `tools/uml/uml-launcher/scripts/vector2-kcsan-concurrent-traffic.sh`;
+  - host-side TCP and UDP sinks for guest-to-host traffic;
+  - generated Umlfile using vector2 fd handoff, `queues = "auto"`,
+    four vCPUs, and launcher-owned inherited TAP fds;
+  - guest-side TCP and UDP sinks for host-to-guest traffic;
+  - UDP pacing and larger receive buffers so KCSAN-era receiver
+    scheduling does not turn the gate into a userspace UDP burst-loss
+    test;
+  - final success-marker hold-open so successful runs can be torn down
+    without a PID 1 exit panic in the copied log;
+  - `ethtool -S` queue distribution checks that require TX and RX
+    movement on multiple queues.
+- Evidence collected:
+  - KCSAN kernel
+    `/home/mjbommar/projects/personal/.build/um-vector-r8c-kcsan/linux`;
+  - runtime shape:
+    `driver=vector2 guest_dev=vec2.0 tap=v2kcstraffic0 transport=fd host_mode=fd queues=4 queue_spec=auto`;
+  - guest-to-host TCP: 4 connections, 4,194,304 bytes received;
+  - guest-to-host UDP: 1024 unique packets, 524,288 bytes received;
+  - host-to-guest TCP: 4 connections, 4,194,304 bytes received by the
+    guest;
+  - host-to-guest UDP: 1024 packets, 524,288 bytes received by the
+    guest;
+  - queue distribution:
+    `VECTOR2_KCSAN_QUEUE_TX values=1815,465,1799,1589 nonzero=4` and
+    `VECTOR2_KCSAN_QUEUE_RX values=3040,726,1183,1788 nonzero=4`;
+  - `VECTOR2_KCSAN_TRAFFIC_OK`, no lingering `v2kcstraffic0`, and no
+    UML process;
+  - no `WARNING`, `BUG`, `KCSAN`, `data-race`, panic, failure, or
+    failed-phase signatures in the captured logs.
+- Therefore the previous "no concurrent TCP/UDP KCSAN traffic" gap is
+  closed for one clean vector2 fd multiqueue pass.  Repetition, longer
+  SMP runtime, varied queue/flow counts, kvm-v2 reruns, and broader
+  performance/fairness analysis remain open.
 
 Performance baseline follow-up:
 

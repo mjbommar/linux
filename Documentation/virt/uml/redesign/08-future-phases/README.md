@@ -288,6 +288,12 @@ parking-lot designs for future prioritization.
   `FASTAPI_HTTP ok=51 fail=0`, `VECTOR2_FASTAPI_OK`, clean TAP/process
   teardown, and no warning/BUG/KCSAN/data-race signatures. Not a
   commitment.
+- [41-uml-vector-driver-v2-kcsan-concurrent-traffic.md](41-uml-vector-driver-v2-kcsan-concurrent-traffic.md) —
+  KCSAN concurrent traffic evidence for vector2 fd multiqueue: adds a
+  reusable host/guest TCP+UDP harness, records exact bidirectional
+  TCP byte counts and UDP packet counts, verifies all four TX and RX
+  queues moved, and captures clean teardown with no
+  warning/BUG/KCSAN/data-race signatures. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 
