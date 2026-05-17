@@ -811,6 +811,26 @@ Implementation checkpoint:
 - This checkpoint intentionally does not wrap the legacy TAP/raw host
   syscalls yet; it establishes the testable boundary first.
 
+Transport-safety checkpoint:
+
+- `arch/um/drivers/vector2_transport.{c,h}` adds bounds-checked GRE and
+  L2TPv3 header build/parse helpers.  All multi-byte fields are read
+  and written through explicit unaligned big-endian helpers after a
+  `len - offset` bounds check; no transport helper casts into packet
+  storage.
+- The helpers use immutable host-endian specs and return `-EMSGSIZE`
+  for short buffers and `-EPROTO` for transport identifier mismatches
+  such as an unexpected GRE key, GRE protocol, L2TPv3 data marker,
+  session, or cookie.
+- `CONFIG_UML_NET_VECTOR_V2_TRANSPORT_KUNIT=y` builds
+  `arch/um/drivers/vector2_transport_test.c`, a KUnit suite covering
+  GRE key/sequence headers, GRE short buffers, GRE mismatch handling,
+  minimal GRE, L2TPv3 UDP/cookie/counter headers, 32-bit cookies,
+  L2TPv3 short buffers, and L2TPv3 mismatch handling.
+- This checkpoint is not wired into the existing transport modules yet;
+  it creates the safe parsing/building surface that later transport ops
+  can consume.
+
 ### Phase V3 - Queue Rewrite
 
 Deliverables:
