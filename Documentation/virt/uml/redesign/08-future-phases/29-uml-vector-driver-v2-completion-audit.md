@@ -26,7 +26,7 @@ experimental netdev exists.
 | Single-queue trusted TAP packet path | R5 TAP datapath doc; ping smokes; Tier 3 seccomp 30/30 | Done for trusted TAP/seccomp |
 | Single-queue and multiqueue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP fds as inherited fd ranges starting at 200; live single-queue and 4-queue `umlctl up` fd-handoff smokes passed; `queues = "auto"` / `--network-queues auto` resolve to numeric vector2 fd ranges from `[runtime].ncpus` | Done for launch path; deeper SMP/perf still open |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
-| Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; real FastAPI + uvicorn vector2 fd smoke passes seccomp 30/30 with `FASTAPI_HTTP ok=51 fail=0` each run; a correctly configured KVM-v2 vector2 runtime now passes no-network readiness, vector2 fd-handoff, and a one-shot Django smoke; one Django KVM-v2 30-run attempt was `PASS=29/30 FAIL=1`, a diagnostic rerun passed `PASS=30/30 FAIL=0`, and a longer diagnostic sample reached only `PASS=57/60 FAIL=2 TIMEOUT=1` from guest `python3` segfault/abort before `SERVER_READY` plus one `django-up` timeout | Partial: kvm-v2 Tier 3 remains unstable; hours-long workload soak remains open |
+| Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; real FastAPI + uvicorn vector2 fd smoke passes seccomp 30/30 with `FASTAPI_HTTP ok=51 fail=0` each run; a correctly configured KVM-v2 vector2 runtime now passes no-network readiness, vector2 fd-handoff, and a one-shot Django smoke; one Django KVM-v2 30-run attempt was `PASS=29/30 FAIL=1`, a diagnostic rerun passed `PASS=30/30 FAIL=0`, a longer diagnostic sample reached only `PASS=57/60 FAIL=2 TIMEOUT=1`, and a trace-enabled rerun reached `PASS=59/60 FAIL=1 TIMEOUT=0` while capturing `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140` for the guest Python abort | Partial: kvm-v2 Tier 3 remains unstable; hours-long workload soak remains open |
 | KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 76/76 after fd wrong-type, fd multiqueue unwind, queue-to-CPU policy coverage, fd open/stop repeat stress, bad-fd unwind, missing-config failure stress, and injected failed-open coverage | Done for current implemented surfaces; more tests needed as new transports/features land |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher; a traced vector2 auto-queue fd boot found no actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec in the vector host path; `umlctl gate loop --audit-vector-sandbox` now preserves per-iteration strace/audit logs and fails on those forbidden vector host operations | Partial: local gate exists and one audited boot passed, but CI/long workload coverage and guest userspace raw/netlink socket policy remain open |
@@ -215,6 +215,20 @@ Validation evidence recorded in the checkpoint docs includes:
   (`Segmentation fault` and `Fatal Python error:
   _PyEval_EvalFrameDefault: Executing a cache.`), one `django-up`
   timeout, no lingering `v2djkv2`, and max `KVM_V2_TLB_LAG=2172`;
+- KVM-v2 state-trace follow-up:
+  `/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux`
+  was built with `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y` and
+  `CONFIG_DEBUG_FS=y`; Tier 3 templates now dump
+  `/sys/kernel/debug/um_kvm_v2_trace/dump` on `SERVER_FAIL` when
+  present; a trace-enabled Django/vector2 KVM-v2 smoke passed
+  `PASS=1/1 FAIL=0 TIMEOUT=0`; a trace-enabled 60-run reached
+  `PASS=59/60 FAIL=1 TIMEOUT=0`, with iteration 21 aborting guest
+  `python3` before `SERVER_READY`, dumping
+  `Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.`
+  while importing `re` / `email.utils` / `http.server`, and then
+  emitting `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`; the failed
+  iteration max `KVM_V2_TLB_LAG` was 943, while the run max was 2410
+  and 59/60 logs had max lag above 1000;
 - TAP teardown checks showing no lingering `soak-tap0`.
 
 ## Remaining Work
@@ -224,9 +238,10 @@ list is:
 
 - fix or explain the remaining KVM-v2 Django workload instability: the
   correctly configured KVM-v2 runtime now boots, runs vector2 fd smoke,
-  and has one clean Django `PASS=30/30` rerun, but a longer sample is
-  only `PASS=57/60 FAIL=2 TIMEOUT=1` with guest Python failures and one
-  startup timeout;
+  has one clean Django `PASS=30/30` rerun, and now captures a
+  trace-ring dump on failure, but longer samples still fail at
+  `PASS=57/60 FAIL=2 TIMEOUT=1` and `PASS=59/60 FAIL=1 TIMEOUT=0`
+  with guest Python failures and one startup timeout;
 - repeat vector2 Tier 3 Django on kvm-v2 after the backend
   investigation until the flake rate is acceptably bounded;
 - decide whether the FastAPI/uvicorn 30/30 repetition is sufficient for

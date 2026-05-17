@@ -147,7 +147,10 @@ shape, and inspectable ethtool surfaces:
   `PASS=30/30 FAIL=0`; a longer diagnostic sample then reached only
   `PASS=57/60 FAIL=2 TIMEOUT=1`, with guest `python3` segfault/abort
   before `SERVER_READY` and one `django-up` timeout; high
-  `KVM_V2_TLB_LAG` diagnostics remain in the KVM-v2 logs;
+  `KVM_V2_TLB_LAG` diagnostics remain in the KVM-v2 logs; a
+  trace-enabled KVM-v2 rerun reached `PASS=59/60 FAIL=1 TIMEOUT=0` and
+  captured the Python abort with `KVMV2T_DUMP_BEGIN reason=debugfs
+  entries=5140`;
 - live real FastAPI + uvicorn success on seccomp through
   vector2 launcher-owned fd handoff with `queues = "auto"` resolving
   to two queues: one-shot gateway ping, `SERVER_READY`,
@@ -205,7 +208,9 @@ Missing runtime pieces:
   `python3` abort rather than a vector2 open/registration failure, and
   a diagnostic rerun reached `PASS=30/30 FAIL=0`, but a longer
   diagnostic sample reached only `PASS=57/60 FAIL=2 TIMEOUT=1` with
-  guest Python failures and one startup timeout;
+  guest Python failures and one startup timeout; a trace-enabled rerun
+  reached `PASS=59/60 FAIL=1 TIMEOUT=0` and captured a `KVMV2T` dump
+  for the Python abort, but the failure remains unexplained;
 - no repeated long soak loop;
 - no full multiqueue validation story: concurrent TCP/UDP KCSAN traffic
   now has an initial clean bidirectional pass, three repeats, fixed
@@ -1065,24 +1070,42 @@ KVM-v2 readiness follow-up:
     dumped `Fatal Python error: _PyEval_EvalFrameDefault: Executing a
     cache.` while importing `http` / `enum.py`, and the timeout stalled
     during `django-up`;
+  - separate trace-enabled runtime build
+    `/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux`
+    passed with `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y` and
+    `CONFIG_DEBUG_FS=y`;
+  - a trace-enabled Django/vector2 KVM-v2 smoke with
+    `kvm_v2_trace_enable` passed `PASS=1/1 FAIL=0 TIMEOUT=0` and logged
+    `um: kvm-v2 state-trace: ENABLED at boot via kvm_v2_trace_enable`;
+  - a trace-enabled Django/vector2 KVM-v2 60-run reached
+    `PASS=59/60 FAIL=1 TIMEOUT=0`; iteration 21 aborted guest
+    `python3` before `SERVER_READY` with
+    `Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.`
+    while importing `re` / `email.utils` / `http.server`, then dumped
+    `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`;
   - the same generated Django/vector2 shape passed a seccomp control
     `PASS=3/3 FAIL=0 TIMEOUT=0`;
   - KVM-v2 logs contain the documented boot-time `BUG_PR` diagnostics
     and repeated `KVM_V2_TLB_LAG` values above 1000 during the Django
     runs, including max lag 2117 in the clean 30/30 rerun and max lag
-    2172 in the 60-run sample; the 60-run failures themselves had lower
-    max lag values, so TLB lag is not a direct per-iteration classifier.
+    2172 in the first 60-run sample and 2410 in the trace-enabled
+    60-run; the failing iterations themselves had lower max lag values,
+    including 943 in the trace-enabled abort, so TLB lag is not a direct
+    per-iteration classifier.
 - Diagnostic follow-up:
   - Tier 3 Django and FastAPI templates now dump their server logs before
     `SERVER_FAIL`, using `DJANGO_LOG_BEGIN`/`DJANGO_LOG_END` and
     `FASTAPI_LOG_BEGIN`/`FASTAPI_LOG_END` markers;
+  - those templates also dump the KVM-v2 state trace ring on
+    `SERVER_FAIL` when `/sys/kernel/debug/um_kvm_v2_trace/dump` exists;
   - generated Django and FastAPI dry-runs confirmed the new markers and
     vector2 fd-handoff kernel args;
   - a Django vector2 seccomp live check passed `PASS=1/1`.
 - Therefore the old "KVM-v2 cannot even boot before vector2" blocker is
   narrowed to a KVM-v2 application-workload stability question.  Vector2
-  fd handoff works on KVM-v2, and one Django 30/30 run is clean, but the
-  longer 60-run sample still fails from KVM-v2 guest userspace execution
+  fd handoff works on KVM-v2, one Django 30/30 run is clean, and the
+  trace-enabled path now captures a failing state-ring dump, but the
+  longer 60-run samples still fail from KVM-v2 guest userspace execution
   instability.  KVM-v2 Tier 3 readiness remains open.
 
 ### V2-R9 - Transport Parity

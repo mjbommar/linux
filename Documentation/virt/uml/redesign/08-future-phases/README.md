@@ -318,7 +318,10 @@ parking-lot designs for future prioritization.
   `PASS=29/30 FAIL=1` with a guest `python3` abort, while a diagnostic
   rerun passed `PASS=30/30 FAIL=0`; a longer sample then reached only
   `PASS=57/60 FAIL=2 TIMEOUT=1` from guest Python failures before
-  `SERVER_READY` plus one startup timeout. Not a commitment.
+  `SERVER_READY` plus one startup timeout. A trace-enabled rerun reached
+  `PASS=59/60 FAIL=1 TIMEOUT=0` and captured
+  `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140` for the Python abort.
+  Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

@@ -249,6 +249,112 @@ this sample: 57/60 logs had max lag above 1000, with max observed lag
 (`675`, `732`, and `741`), so TLB lag remains a workload risk signal but
 not the direct per-iteration classifier.
 
+### Tier 3 Django State-Trace Capture
+
+The next diagnostic checkpoint built a separate KVM-v2/vector2 runtime
+with the state trace ring enabled:
+
+```
+/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux
+
+# CONFIG_SMP is not set
+CONFIG_UM_BACKEND_KVM_V2=y
+CONFIG_UM_BACKEND_KVM_V2_GADGET=y
+CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y
+CONFIG_DEBUG_FS=y
+CONFIG_UML_NET_VECTOR_V2=y
+CONFIG_UML_NET_VECTOR_V2_SANDBOX=y
+```
+
+The Tier 3 Django and FastAPI templates now attempt a no-op-unless-
+available KVM-v2 trace dump on `SERVER_FAIL`: they mount debugfs if
+needed, write `1` to `/sys/kernel/debug/um_kvm_v2_trace/dump` when the
+file exists, and bracket the copied output with
+`KVM_V2_TRACE_DUMP_BEGIN` / `KVM_V2_TRACE_DUMP_END`.
+
+A rendered Django/vector2 dry-run confirmed that the trace dump function
+coexists with the normal fd handoff:
+
+```
+backend=force=kvm-v2
+vec2.0:transport=fd,mode=fd,fd=200,depth=128
+mode=tap driver=vector2 guest_dev=vec2.0 host_tap=v2trace0 transport=fd
+```
+
+A one-shot trace-enabled smoke passed:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  umlctl gate loop -f /tmp/tier3-django-v2-kvmv2-trace-smoke.toml \
+    -W 1 -M 1 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --out /tmp/um-tier3-django-v2-kvmv2-trace-smoke
+
+PASS=1/1 FAIL=0 TIMEOUT=0
+```
+
+The smoke log contained:
+
+```
+um: kvm-v2 state-trace: ENABLED at boot via kvm_v2_trace_enable
+um: kvm-v2 state-trace debugfs at /sys/kernel/debug/um_kvm_v2_trace/
+uml-vector2: registered netdev vec2.0 for vec2.0
+SERVER_READY
+GUEST_CURL ok=100 fail=0
+TIER3_OK
+```
+
+The trace-enabled 60-run used the same Django/vector2 shape with
+`append = ["kvm_v2_trace_enable"]`:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  umlctl gate loop -f /tmp/tier3-django-v2-kvmv2-trace-60.toml \
+    -W 1 -M 60 --timeout 180 \
+    --pass-marker TIER3_OK \
+    --out /tmp/um-tier3-django-v2-kvmv2-trace-60
+
+PASS=59/60 FAIL=1 TIMEOUT=0
+```
+
+Marker counts:
+
+```
+SERVER_READY=59
+TIER3_OK=59
+SERVER_FAIL=1
+KVM_V2_TRACE_DUMP_BEGIN=1
+Fatal Python error=1
+```
+
+Iteration 21 failed before `SERVER_READY`:
+
+```
+/tmp/.../init.sh: line 106: 35 Aborted python3 /tmp/tier3-django-app.py
+DJANGO_LOG_BEGIN
+Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.
+...
+  File "/usr/lib/python3.14/re/_parser.py", line 514 in _parse
+  File "/usr/lib/python3.14/re/__init__.py", line 315 in <module>
+  File "/usr/lib/python3.14/email/utils.py", line 26 in <module>
+  File "/usr/lib/python3.14/http/server.py", line 94 in <module>
+  File "/tmp/tier3-django-app.py", line 1 in <module>
+DJANGO_LOG_END
+KVM_V2_TRACE_DUMP_BEGIN
+KVMV2T_DUMP_BEGIN reason=debugfs entries=5140
+...
+KVMV2T_DUMP_END entries=5140
+KVM_V2_TRACE_DUMP_END
+SERVER_FAIL
+```
+
+The TAP `v2djtr1` was absent after teardown, and no matching UML
+instance remained.  The failed iteration's max `KVM_V2_TLB_LAG` was
+943, while the maximum across the 60-run was 2410 and 59/60 logs had
+max lag above 1000.  As with the earlier flake sample, TLB lag is not a
+per-iteration classifier; the new value is that the Python abort is now
+paired with a captured KVM-v2 state-ring dump.
+
 ### Seccomp Control
 
 The same generated Django/vector2 shape passed a short seccomp control
@@ -280,13 +386,14 @@ longer 60-run sample still produced guest Python segfault/abort failures
 and one startup timeout under the same workload shape.  The vector2
 driver should not claim final KVM-v2 Tier 3 readiness until this backend
 userspace-execution flake class is fixed or otherwise explained with
-repeatable clean evidence.
+repeatable clean evidence.  The trace-enabled rerun confirms the same
+Python abort class and now preserves a KVM-v2 state-ring dump for
+backend analysis.
 
 ## Next Work
 
-1. Re-run the 30/30 gate enough times to bound the observed flake rate,
-   ideally with KVM-v2 state trace enabled or the existing TLB-lag
-   diagnostics promoted into a per-run summary.
+1. Analyze the iteration 21 `KVMV2T` dump from the trace-enabled
+   59/60 run against neighboring pass logs.
 2. Determine whether high `KVM_V2_TLB_LAG` is causal, symptomatic, or
    unrelated to the Python abort.
 3. After the KVM-v2 backend fix, rerun the vector2 Django 30/30 gate and
@@ -300,6 +407,11 @@ were updated to dump `/tmp/django.log` or `/tmp/fastapi.log` between
 not fix the KVM-v2 abort, but it ensures the next failing iteration
 preserves userspace server stderr in the copied `run-*.log`.
 
+After the trace-enabled run, the same templates also dump the KVM-v2
+state trace ring on `SERVER_FAIL` when a trace-capable kernel exposes
+`/sys/kernel/debug/um_kvm_v2_trace/dump`.  The behavior is a no-op for
+normal kernels without `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE`.
+
 Validation for the diagnostic change:
 
 - generated Django and FastAPI vector2 fd handoff dry-runs contained the
@@ -307,3 +419,7 @@ Validation for the diagnostic change:
   `vec2.0:transport=fd,mode=fd,fd=200,depth=128`;
 - a Django vector2 seccomp live check passed `PASS=1/1 FAIL=0 TIMEOUT=0`
   with `TIER3_OK`.
+- a Django vector2 KVM-v2 trace smoke passed `PASS=1/1 FAIL=0
+  TIMEOUT=0` with the state trace enabled at boot;
+- a Django vector2 KVM-v2 trace 60-run captured a failing iteration with
+  `KVMV2T_DUMP_BEGIN reason=debugfs entries=5140`.
