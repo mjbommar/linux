@@ -269,6 +269,12 @@ parking-lot designs for future prioritization.
   `umlctl gate loop --audit-vector-sandbox`, and documents a narrowed
   syscall scan with no actual host TAP open, `TUNSETIFF`, `AF_PACKET`,
   BPF, or UML helper exec from the vector host path. Not a commitment.
+- [38-uml-vector-driver-v2-fd-failure-stress.md](38-uml-vector-driver-v2-fd-failure-stress.md) —
+  Focused fd backend KUnit stress: repeats vector2 netdev open/stop
+  1000 times, checks bad-fd `ndo_open()` unwind, repeats missing-fd
+  backend failure 10,000 times, records `um_vector2_*` KUnit 75/75, and
+  keeps the live 10,000-cycle `ip link up/down` failure-injection gate
+  open. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

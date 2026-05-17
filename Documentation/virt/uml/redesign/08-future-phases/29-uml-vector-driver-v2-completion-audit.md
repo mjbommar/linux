@@ -22,12 +22,12 @@ experimental netdev exists.
 | --- | --- | --- |
 | Build live netdev driver under `CONFIG_UML_NET_VECTOR_V2=y` | `vector2_cmdline.c`, `vector2_core.c`, `vector2_netdev.c`, `vector2_host_fd.c`, `vector2_host_tap.c`, `vector2_runtime.c`; runtime UML builds passed for trusted and sandbox configs | Partial: experimental only |
 | Register stable v2 netdev names | `vec2.<unit>` registration through `register_netdevice()`; runtime logs show `registered netdev vec2.0` | Done for v2 syntax |
-| `ip link set up/down` reaches modeled lifecycle | KUnit lifecycle tests; fd/TAP netdev open/stop tests; manual TAP/fd smokes | Partial: not 10,000-cycle failure-injection proof |
+| `ip link set up/down` reaches modeled lifecycle | KUnit lifecycle tests; fd/TAP netdev open/stop tests; fd KUnit repeats netdev open/stop 1000 times; manual TAP/fd smokes | Partial: not live 10,000-cycle failure-injection proof |
 | Single-queue trusted TAP packet path | R5 TAP datapath doc; ping smokes; Tier 3 seccomp 30/30 | Done for trusted TAP/seccomp |
 | Single-queue and multiqueue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP fds as inherited fd ranges starting at 200; live single-queue and 4-queue `umlctl up` fd-handoff smokes passed; `queues = "auto"` / `--network-queues auto` resolve to numeric vector2 fd ranges from `[runtime].ncpus` | Done for launch path; deeper SMP/perf still open |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
 | Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; real FastAPI + uvicorn vector2 fd smoke passes seccomp 10/10 with `FASTAPI_HTTP ok=51 fail=0` each run; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and long FastAPI soak remain open |
-| KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 72/72 after fd wrong-type, fd multiqueue unwind, and queue-to-CPU policy coverage | Partial: coverage exists, but more failure injection remains |
+| KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind, queue policy | `um_vector2_*` KUnit passes 75/75 after fd wrong-type, fd multiqueue unwind, queue-to-CPU policy coverage, fd open/stop repeat stress, bad-fd unwind, and missing-config failure stress | Partial: KUnit coverage improved, but live failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher; a traced vector2 auto-queue fd boot found no actual `/dev/net/tun` open, `TUNSETIFF`, `AF_PACKET`, `bpf()`, or UML network-helper exec in the vector host path; `umlctl gate loop --audit-vector-sandbox` now preserves per-iteration strace/audit logs and fails on those forbidden vector host operations | Partial: local gate exists and one audited boot passed, but CI/long workload coverage and guest userspace raw/netlink socket policy remain open |
 | Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue core opens contiguous inherited fd ranges under KUnit; `umlctl` fd multiqueue passes live 4-queue smoke and 3/3 gate loop; vector2 has explicit `ndo_select_queue` plus XPS queue-to-CPU policy; repeated KCSAN auto-queue fd multiqueue smoke found and fixed a queue-lock bottom-half lockdep warning, then passed `PASS=10/10` with no warning, KCSAN, or data-race signatures; heavier KCSAN traffic and fairness profiles absent | Partial |
@@ -50,16 +50,21 @@ Recent pushed checkpoints:
 - post-audit follow-up - `umlctl` vector2 single-queue TAP fd handoff.
 - post-audit follow-up - vector2 fd multiqueue and queue-to-CPU
   policy.
+- post-audit follow-up - fd failure-stress KUnit.
 
 Validation evidence recorded in the checkpoint docs includes:
 
 - targeted vector2 object builds;
 - full trusted runtime UML build;
 - full sandbox runtime UML build;
-- `um_vector2_*` KUnit: 72/72 passed;
+- `um_vector2_*` KUnit: 75/75 passed after fd failure-stress coverage;
 - no-root fd ping over inherited UNIX datagram fd;
 - sandbox-only fd ping over inherited UNIX datagram fd;
 - fd open diagnostics for missing and wrong-type inherited fds;
+- fd failure-stress KUnit: 1000 repeated netdev open/stop cycles,
+  bad-fd `ndo_open()` unwind to closed state, 10,000 direct missing-fd
+  backend failures, `um_vector2_host_fd` 11/11, and no KUnit log
+  warning/error signatures;
 - fd multiqueue core KUnit for contiguous inherited fd ranges and
   missing-later-fd unwind;
 - live `umlctl up` vector2 fd handoff over TAP fd 200, with
@@ -140,6 +145,8 @@ list is:
 - rerun vector2 Tier 3 Django 30/30 on kvm-v2 after that fix;
 - repeat the FastAPI/uvicorn vector2 seccomp smoke as a longer soak;
 - validate queue-to-CPU policy under longer SMP traffic;
+- run live 10,000-cycle vector2 `ip link up/down` failure injection with
+  leak checks;
 - run heavier KCSAN on multiqueue traffic;
 - expand legacy-vs-v2 performance baselines and explain or accept the
   measured guest-to-host regression and mixed bidirectional results;

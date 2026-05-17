@@ -76,6 +76,9 @@ shape, and inspectable ethtool surfaces:
   ethtool queue counters, and clean TAP teardown;
 - fd open preflight diagnostics for missing and wrong-type inherited
   fds, with closed-state unwind covered by KUnit;
+- fd failure-stress KUnit coverage for 1000 repeated netdev open/stop
+  cycles, bad-fd `ndo_open()` unwind to closed state, and 10,000 direct
+  missing-config fd-open failures with no attached channels;
 - fd multiqueue core for contiguous inherited fd ranges, with KUnit
   coverage for two-queue open/close and missing-later-fd unwind;
 - launcher-owned vector2 fd multiqueue handoff through `umlctl`:
@@ -156,6 +159,8 @@ Missing runtime pieces:
 - no feature negotiation;
 - no 30/30 Tier 3 workload proof on kvm-v2;
 - no repeated long soak loop;
+- no live 10,000-cycle `ip link up/down` failure-injection proof; the
+  fd path has bounded KUnit stress, but not runtime repetition evidence;
 - no full multiqueue validation story: heavier KCSAN traffic, long SMP
   traffic, and broader fairness/performance profiles remain open;
 - no repeated or CI-enforced sandbox syscall audit gate, and no final
@@ -785,6 +790,26 @@ Performance baseline follow-up:
   and an explicit vector2 guest-to-host regression to investigate.
   UDP packet rate, syscall profiles, repeated legacy-vs-vector2 transfer
   sizes, and CPU profiles remain open.
+
+Fd failure-stress follow-up:
+
+- `38-uml-vector-driver-v2-fd-failure-stress.md` records the focused fd
+  lifecycle KUnit checkpoint.
+- Implemented:
+  - repeated netdev open/stop over an inherited fd for 1000 iterations;
+  - invalid-fd `ndo_open()` unwind with closed-state, carrier, channel,
+    and counter checks;
+  - direct missing-config fd-open failure for 10,000 iterations with no
+    channel attachment.
+- Evidence collected:
+  - targeted object build for `vector2_host_fd_test.o`;
+  - rebuilt KUnit UML kernel;
+  - `um_vector2_*` KUnit: 75/75 passed;
+  - no `not ok`, `FAILED`, `panic`, `BUG`, `WARNING`, `KCSAN`,
+    `data-race`, or lockdep signatures in the captured KUnit log.
+- Therefore the unit-level fd failure-injection story is stronger, but
+  the replacement gate still needs a live 10,000-cycle `ip link up/down`
+  failure-injection run with leak checks.
 
 ### V2-R9 - Transport Parity
 

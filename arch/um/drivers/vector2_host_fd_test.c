@@ -7,12 +7,16 @@
 #include <linux/etherdevice.h>
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
+#include <linux/sched.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
 
 #include <os.h>
 
 #include "vector2_internal.h"
+
+#define VECTOR2_FD_OPEN_STOP_STRESS_ITERS	1000U
+#define VECTOR2_FD_FAILURE_STRESS_ITERS		10000U
 
 static struct um_vec2_dev *vector2_fd_test_alloc_vdev(struct kunit *test,
 						      unsigned int unit)
@@ -209,6 +213,124 @@ static void vector2_fd_netdev_open_stop_test(struct kunit *test)
 	vector2_fd_test_close_pipe(fds);
 }
 
+static void vector2_fd_netdev_open_stop_repeats_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 8);
+	struct net_device *dev;
+	unsigned int i;
+	int fds[2] = { -1, -1 };
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	vdev->cfg.fd = fds[0];
+	vdev->cfg.has_fd = true;
+	dev = vector2_fd_test_alloc_netdev(test, vdev);
+
+	for (i = 0; i < VECTOR2_FD_OPEN_STOP_STRESS_ITERS; i++) {
+		int ret;
+
+		ret = um_vec2_netdev_open(dev);
+		if (ret) {
+			KUNIT_FAIL(test, "iter %u open ret=%d", i, ret);
+			break;
+		}
+		if (vdev->life.state != UM_VEC2_DEV_RUNNING) {
+			KUNIT_FAIL(test, "iter %u state after open=%d", i,
+				   vdev->life.state);
+			break;
+		}
+		if (!vdev->channels || !netif_carrier_ok(dev)) {
+			KUNIT_FAIL(test, "iter %u open did not attach channel", i);
+			break;
+		}
+
+		ret = um_vec2_netdev_stop(dev);
+		if (ret) {
+			KUNIT_FAIL(test, "iter %u stop ret=%d", i, ret);
+			break;
+		}
+		if (vdev->life.state != UM_VEC2_DEV_REGISTERED ||
+		    vdev->channels || netif_carrier_ok(dev)) {
+			KUNIT_FAIL(test, "iter %u stop did not return closed", i);
+			break;
+		}
+
+		if (!(i & 0x3f))
+			cond_resched();
+	}
+
+	KUNIT_EXPECT_EQ(test, i, VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS),
+			(u64)VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_FAILURES),
+			0ULL);
+	KUNIT_EXPECT_EQ(test, um_vec2_stat_read(vdev, UM_VEC2_STAT_CLOSES),
+			(u64)VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
+
+	if (vdev->life.state != UM_VEC2_DEV_REGISTERED)
+		um_vec2_netdev_stop(dev);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+	vector2_fd_test_close_pipe(fds);
+}
+
+static void vector2_fd_netdev_bad_fd_unwinds_closed_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 9);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
+	int ret;
+
+	vdev->cfg.fd = INT_MAX;
+	vdev->cfg.has_fd = true;
+
+	ret = um_vec2_netdev_open(dev);
+	KUNIT_EXPECT_EQ(test, ret, -EBADF);
+	KUNIT_EXPECT_EQ(test, vdev->life.state, UM_VEC2_DEV_REGISTERED);
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+	KUNIT_EXPECT_FALSE(test, netif_carrier_ok(dev));
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS),
+			1ULL);
+	KUNIT_EXPECT_EQ(test,
+			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_FAILURES),
+			1ULL);
+	KUNIT_EXPECT_EQ(test, um_vec2_stat_read(vdev, UM_VEC2_STAT_CLOSES),
+			0ULL);
+	KUNIT_EXPECT_EQ(test, um_vec2_netdev_stop(dev), 0);
+
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
+static void vector2_fd_missing_config_repeats_closed_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 10);
+	unsigned int i;
+
+	vdev->cfg.has_fd = false;
+
+	for (i = 0; i < VECTOR2_FD_FAILURE_STRESS_ITERS; i++) {
+		int ret;
+
+		ret = um_vec2_fd_open(vdev);
+		if (ret != -EINVAL) {
+			KUNIT_FAIL(test, "iter %u fd open ret=%d", i, ret);
+			break;
+		}
+		if (vdev->channels || vdev->num_channels) {
+			KUNIT_FAIL(test, "iter %u missing-fd left channels", i);
+			break;
+		}
+
+		if (!(i & 0x1ff))
+			cond_resched();
+	}
+
+	KUNIT_EXPECT_EQ(test, i, VECTOR2_FD_FAILURE_STRESS_ITERS);
+}
+
 struct vector2_fd_tx_trace {
 	unsigned int packets;
 	unsigned int bytes;
@@ -378,6 +500,9 @@ static struct kunit_case vector2_fd_test_cases[] = {
 	KUNIT_CASE(vector2_fd_multiqueue_open_close_test),
 	KUNIT_CASE(vector2_fd_multiqueue_missing_second_fd_unwinds_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_test),
+	KUNIT_CASE(vector2_fd_netdev_open_stop_repeats_test),
+	KUNIT_CASE(vector2_fd_netdev_bad_fd_unwinds_closed_test),
+	KUNIT_CASE(vector2_fd_missing_config_repeats_closed_test),
 	KUNIT_CASE(vector2_fd_tx_batch_writes_frame_test),
 	KUNIT_CASE(vector2_fd_rx_batch_reads_frame_test),
 	{}
