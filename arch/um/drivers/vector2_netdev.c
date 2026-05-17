@@ -627,6 +627,23 @@ void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
 	dev->min_mtu = UM_VEC2_MIN_MTU;
 	dev->max_mtu = vdev->cfg.mtu;
 	dev->netdev_ops = &um_vec2_netdev_ops;
+
+	/*
+	 * Wire parser-time feature toggles into the kernel netdev surface.
+	 * Pre-fix, cfg.gro/gso/csum were parsed but never consulted: the
+	 * ethtool / "ip link show" view of features was a lie.  Mirror
+	 * the legacy driver's baseline (SG + FRAGLIST) and layer the
+	 * parser flags on top so reviewers + tooling see the same shape
+	 * the cmdline asked for.  See audit P1.2.
+	 */
+	dev->hw_features = NETIF_F_SG | NETIF_F_FRAGLIST;
+	if (vdev->cfg.gro)
+		dev->hw_features |= NETIF_F_GRO;
+	if (vdev->cfg.gso)
+		dev->hw_features |= NETIF_F_GSO;
+	if (vdev->cfg.csum)
+		dev->hw_features |= NETIF_F_HW_CSUM;
+	dev->features = dev->hw_features;
 	dev->watchdog_timeo = HZ;
 	dev->irq = 0;
 
