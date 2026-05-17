@@ -109,12 +109,11 @@ R8 is still open.  This checkpoint does not yet provide:
 
 - fd multiqueue;
 - queue-to-CPU mapping policy;
-- per-queue ethtool stat names;
 - KCSAN evidence;
 - queue-distribution evidence under parallel traffic;
 - kvm-v2 multiqueue evidence, because kvm-v2 currently fails
   no-network readiness before vector2 can be meaningfully validated.
 
-The next vector-owned R8 step should add explicit queue distribution
-instrumentation and a small parallel traffic smoke that proves packets
-reach more than one queue under SMP.
+R8b adds the per-queue ethtool stat names needed for distribution
+instrumentation.  A later R8 checkpoint still needs a small parallel
+traffic smoke that proves packets reach more than one queue under SMP.

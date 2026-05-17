@@ -55,8 +55,10 @@ surface:
 - single-queue trusted TAP TX/RX through v2 queue ownership;
 - NAPI/read-IRQ integration for trusted TAP;
 - write-IRQ wakeup for TAP TX backpressure;
-- ethtool stats, ring reporting, stopped-only ring resizing, and
-  coalesce policy reporting;
+  - ethtool stats, ring reporting, stopped-only ring resizing, and
+    coalesce policy reporting;
+  - dynamic per-queue ethtool stats for v2 queue distribution
+    observability;
 - trusted TAP ping smoke with repeated up/ping/down loops;
 - `umlctl` and soak-daemon selection for experimental v2 TAP through
   `network.driver = "vector2"`;
@@ -559,6 +561,27 @@ R8a implementation note:
 - Therefore R8 is partially satisfied.  TAP has the first real
   multiqueue runtime shape; fd multiqueue, queue distribution proof,
   KCSAN, queue-to-CPU policy, and kvm-v2 evidence remain open.
+
+R8b implementation note:
+
+- `26-uml-vector-driver-v2-r8b-queue-observability.md` records the
+  per-queue ethtool statistics checkpoint.
+- Implemented:
+  - dynamic `ethtool -S` stat count based on configured, registered,
+    and open queue counts;
+  - stable `queue<N>_<counter>` stat names for TX ring and RX batch
+    counters;
+  - stopped devices report zero-valued per-queue counters for their
+    configured queue count.
+- Evidence collected:
+  - rebuilt KUnit UML kernel;
+  - `um_vector2_*` KUnit: 66/66 passed;
+  - live `queues=2` seccomp smoke with `ethtool -S vec2.0`
+    showing `queue0_*` and `queue1_*` stats, 3/3 ping success,
+    `QUEUE_STATS_OK`, `PASS=1/1`, and TAP absent after teardown.
+- Therefore the R8 observability surface is usable for distribution
+  experiments, but distribution proof, KCSAN, fd multiqueue, and
+  kvm-v2 evidence remain open.
 
 ### V2-R9 - Transport Parity
 

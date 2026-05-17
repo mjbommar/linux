@@ -203,6 +203,11 @@ parking-lot designs for future prioritization.
   pair per queue, TX maps by skb queue, `umlctl` exposes
   `[network] queues` / `--network-queues`, and seccomp multiqueue smoke
   evidence is recorded. Not a commitment.
+- [26-uml-vector-driver-v2-r8b-queue-observability.md](26-uml-vector-driver-v2-r8b-queue-observability.md) —
+  R8 partial implementation note for per-queue observability:
+  dynamic `ethtool -S` queue stat names, stopped/running stable stat
+  shape, KUnit coverage, and live seccomp `queues=2` ethtool evidence.
+  Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

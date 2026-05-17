@@ -207,6 +207,10 @@ static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
 	unsigned int count;
 	int tx_depth;
 	int rx_depth;
+	int q0_tx_depth;
+	int q1_tx_depth;
+	int q0_rx_depth;
+	int q1_rx_depth;
 	u64 *data;
 	unsigned int i;
 
@@ -238,13 +242,33 @@ static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
 	data = vector2_ethtool_test_stats(test, dev, &count);
 	tx_depth = vector2_ethtool_find_stat(test, dev, "tx_ring_depth");
 	rx_depth = vector2_ethtool_find_stat(test, dev, "rx_batch_depth");
+	q0_tx_depth = vector2_ethtool_find_stat(test, dev,
+						"queue0_tx_ring_depth");
+	q1_tx_depth = vector2_ethtool_find_stat(test, dev,
+						"queue1_tx_ring_depth");
+	q0_rx_depth = vector2_ethtool_find_stat(test, dev,
+						"queue0_rx_batch_depth");
+	q1_rx_depth = vector2_ethtool_find_stat(test, dev,
+						"queue1_rx_batch_depth");
 
 	KUNIT_ASSERT_GE(test, tx_depth, 0);
 	KUNIT_ASSERT_GE(test, rx_depth, 0);
+	KUNIT_ASSERT_GE(test, q0_tx_depth, 0);
+	KUNIT_ASSERT_GE(test, q1_tx_depth, 0);
+	KUNIT_ASSERT_GE(test, q0_rx_depth, 0);
+	KUNIT_ASSERT_GE(test, q1_rx_depth, 0);
 	KUNIT_ASSERT_LT(test, tx_depth, (int)count);
 	KUNIT_ASSERT_LT(test, rx_depth, (int)count);
+	KUNIT_ASSERT_LT(test, q0_tx_depth, (int)count);
+	KUNIT_ASSERT_LT(test, q1_tx_depth, (int)count);
+	KUNIT_ASSERT_LT(test, q0_rx_depth, (int)count);
+	KUNIT_ASSERT_LT(test, q1_rx_depth, (int)count);
 	KUNIT_EXPECT_EQ(test, data[tx_depth], 4ULL);
 	KUNIT_EXPECT_EQ(test, data[rx_depth], 4ULL);
+	KUNIT_EXPECT_EQ(test, data[q0_tx_depth], 2ULL);
+	KUNIT_EXPECT_EQ(test, data[q1_tx_depth], 2ULL);
+	KUNIT_EXPECT_EQ(test, data[q0_rx_depth], 2ULL);
+	KUNIT_EXPECT_EQ(test, data[q1_rx_depth], 2ULL);
 
 	vdev->channels = NULL;
 	vdev->num_channels = 0;

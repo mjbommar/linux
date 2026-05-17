@@ -52,6 +52,22 @@ enum um_vec2_ethtool_stat {
 	UM_VEC2_ETHTOOL_STAT_MAX,
 };
 
+enum um_vec2_ethtool_queue_stat {
+	UM_VEC2_ETHTOOL_QUEUE_TX_RING_DEPTH,
+	UM_VEC2_ETHTOOL_QUEUE_TX_RING_USED,
+	UM_VEC2_ETHTOOL_QUEUE_TX_RING_MAX_USED,
+	UM_VEC2_ETHTOOL_QUEUE_TX_RING_ENQUEUED,
+	UM_VEC2_ETHTOOL_QUEUE_TX_RING_COMPLETED,
+	UM_VEC2_ETHTOOL_QUEUE_TX_RING_RELEASED,
+	UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_DEPTH,
+	UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_FILLED,
+	UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_PREPARED_TOTAL,
+	UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RECEIVED_TOTAL,
+	UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_CONSUMED_TOTAL,
+	UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL,
+	UM_VEC2_ETHTOOL_QUEUE_STAT_MAX,
+};
+
 static const char um_vec2_ethtool_stat_names
 	[UM_VEC2_ETHTOOL_STAT_MAX][ETH_GSTRING_LEN] = {
 	[UM_VEC2_ETHTOOL_STAT_LIFECYCLE_STATE] =
@@ -126,6 +142,41 @@ static const char um_vec2_ethtool_stat_names
 		"rx_batch_released_total",
 };
 
+static const char * const um_vec2_ethtool_queue_stat_names
+	[UM_VEC2_ETHTOOL_QUEUE_STAT_MAX] = {
+	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_DEPTH] =
+		"tx_ring_depth",
+	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_USED] =
+		"tx_ring_used",
+	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_MAX_USED] =
+		"tx_ring_max_used",
+	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_ENQUEUED] =
+		"tx_ring_enqueued",
+	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_COMPLETED] =
+		"tx_ring_completed",
+	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_RELEASED] =
+		"tx_ring_released",
+	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_DEPTH] =
+		"rx_batch_depth",
+	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_FILLED] =
+		"rx_batch_filled",
+	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_PREPARED_TOTAL] =
+		"rx_batch_prepared_total",
+	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RECEIVED_TOTAL] =
+		"rx_batch_received_total",
+	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_CONSUMED_TOTAL] =
+		"rx_batch_consumed_total",
+	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
+		"rx_batch_released_total",
+};
+
+static unsigned int um_vec2_ethtool_queue_count(struct um_vec2_dev *vdev)
+{
+	unsigned int queues = max(vdev->cfg.queues, vdev->registered_queues);
+
+	return max(queues, vdev->num_channels);
+}
+
 static void um_vec2_get_drvinfo(struct net_device *dev,
 				struct ethtool_drvinfo *info)
 {
@@ -136,9 +187,16 @@ static void um_vec2_get_drvinfo(struct net_device *dev,
 
 static int um_vec2_get_sset_count(struct net_device *dev, int sset)
 {
+	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+	unsigned int queues;
+
 	switch (sset) {
 	case ETH_SS_STATS:
-		return UM_VEC2_ETHTOOL_STAT_MAX;
+		mutex_lock(&vdev->lock);
+		queues = um_vec2_ethtool_queue_count(vdev);
+		mutex_unlock(&vdev->lock);
+		return UM_VEC2_ETHTOOL_STAT_MAX +
+		       queues * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX;
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -146,11 +204,29 @@ static int um_vec2_get_sset_count(struct net_device *dev, int sset)
 
 static void um_vec2_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 {
+	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+	unsigned int queues;
+	unsigned int q;
+	unsigned int s;
+
 	if (stringset != ETH_SS_STATS)
 		return;
 
 	memcpy(data, um_vec2_ethtool_stat_names,
 	       sizeof(um_vec2_ethtool_stat_names));
+
+	mutex_lock(&vdev->lock);
+	queues = um_vec2_ethtool_queue_count(vdev);
+	mutex_unlock(&vdev->lock);
+
+	data += sizeof(um_vec2_ethtool_stat_names);
+	for (q = 0; q < queues; q++) {
+		for (s = 0; s < UM_VEC2_ETHTOOL_QUEUE_STAT_MAX; s++) {
+			snprintf(data, ETH_GSTRING_LEN, "queue%u_%s", q,
+				 um_vec2_ethtool_queue_stat_names[s]);
+			data += ETH_GSTRING_LEN;
+		}
+	}
 }
 
 static void um_vec2_get_ringparam(struct net_device *dev,
@@ -222,10 +298,15 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
 	struct um_vec2_channel *channel;
 	struct um_vec2_queue_pair *queue;
-
-	memset(data, 0, sizeof(u64) * UM_VEC2_ETHTOOL_STAT_MAX);
+	unsigned int queues;
+	unsigned int q;
 
 	mutex_lock(&vdev->lock);
+	queues = um_vec2_ethtool_queue_count(vdev);
+	memset(data, 0,
+	       sizeof(u64) * (UM_VEC2_ETHTOOL_STAT_MAX +
+			      queues * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX));
+
 	data[UM_VEC2_ETHTOOL_STAT_LIFECYCLE_STATE] = vdev->life.state;
 	data[UM_VEC2_ETHTOOL_STAT_TRANSPORT] = vdev->cfg.transport;
 	data[UM_VEC2_ETHTOOL_STAT_HOST_MODE] = vdev->cfg.mode;
@@ -274,6 +355,7 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 		if (!queue)
 			continue;
 
+		q = channel->index;
 		spin_lock(&queue->tx_lock);
 		data[UM_VEC2_ETHTOOL_STAT_TX_RING_DEPTH] += queue->tx.depth;
 		data[UM_VEC2_ETHTOOL_STAT_TX_RING_USED] += queue->tx.count;
@@ -285,6 +367,23 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 			queue->tx.completed;
 		data[UM_VEC2_ETHTOOL_STAT_TX_RING_RELEASED] +=
 			queue->tx.released;
+		if (q < queues) {
+			u64 *qdata = data + UM_VEC2_ETHTOOL_STAT_MAX +
+				     q * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX;
+
+			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_DEPTH] =
+				queue->tx.depth;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_USED] =
+				queue->tx.count;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_MAX_USED] =
+				queue->tx.max_count;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_ENQUEUED] =
+				queue->tx.enqueued;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_COMPLETED] =
+				queue->tx.completed;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_RELEASED] =
+				queue->tx.released;
+		}
 		spin_unlock(&queue->tx_lock);
 
 		spin_lock(&queue->rx_lock);
@@ -298,6 +397,23 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 			queue->rx.consumed_total;
 		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RELEASED_TOTAL] +=
 			queue->rx.released_total;
+		if (q < queues) {
+			u64 *qdata = data + UM_VEC2_ETHTOOL_STAT_MAX +
+				     q * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX;
+
+			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_DEPTH] =
+				queue->rx.depth;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_FILLED] =
+				queue->rx.filled;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_PREPARED_TOTAL] =
+				queue->rx.prepared_total;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RECEIVED_TOTAL] =
+				queue->rx.received_total;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_CONSUMED_TOTAL] =
+				queue->rx.consumed_total;
+			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
+				queue->rx.released_total;
+		}
 		spin_unlock(&queue->rx_lock);
 	}
 
