@@ -10,21 +10,36 @@
 #define pr_fmt(fmt) "uml-vector2-tap: " fmt
 
 #include <linux/container_of.h>
+#include <linux/etherdevice.h>
 #include <linux/errno.h>
 #include <linux/if.h>
+#include <linux/if_ether.h>
 #include <linux/if_tun.h>
+#include <linux/if_vlan.h>
+#include <linux/netdevice.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/virtio_net.h>
 
 #include <os.h>
 
 #include "vector2_internal.h"
 
 #define UM_VEC2_TUN_PATH	"/dev/net/tun"
+#define UM_VEC2_TAP_MAX_BATCH	64U
 
 struct um_vec2_tap_host {
 	struct um_vec2_host host;
+	struct net_device *dev;
+	unsigned int frame_len;
 	int fd;
 };
+
+static int um_vec2_tap_write_skb(struct um_vec2_tap_host *taphost,
+				 struct sk_buff *skb);
+static int um_vec2_tap_read_skb(struct um_vec2_tap_host *taphost,
+				struct sk_buff *skb);
 
 static struct um_vec2_tap_host *um_vec2_host_to_tap(struct um_vec2_host *host)
 {
@@ -37,7 +52,32 @@ static int um_vec2_tap_tx_batch(struct um_vec2_host *host,
 				um_vec2_queue_release_fn complete,
 				void *cookie)
 {
-	return -EOPNOTSUPP;
+	struct um_vec2_tap_host *taphost = um_vec2_host_to_tap(host);
+	unsigned int sent = 0;
+	int ret = 0;
+
+	while (sent < budget && !um_vec2_tx_ring_empty(ring)) {
+		const struct um_vec2_tx_desc *desc;
+		struct sk_buff *skb;
+
+		desc = um_vec2_tx_ring_peek(ring, 0);
+		if (!desc)
+			break;
+
+		skb = desc->owner;
+		ret = um_vec2_tap_write_skb(taphost, skb);
+		if (!ret)
+			break;
+		if (ret < 0)
+			return sent ? (int)sent : ret;
+
+		ret = um_vec2_tx_ring_complete(ring, 1, complete, cookie);
+		if (ret)
+			return sent ? (int)sent : ret;
+		sent++;
+	}
+
+	return sent;
 }
 
 static int um_vec2_tap_rx_batch(struct um_vec2_host *host,
@@ -45,7 +85,45 @@ static int um_vec2_tap_rx_batch(struct um_vec2_host *host,
 				unsigned int budget, um_vec2_rx_alloc_fn alloc,
 				um_vec2_queue_release_fn release, void *cookie)
 {
-	return -EOPNOTSUPP;
+	struct um_vec2_tap_host *taphost = um_vec2_host_to_tap(host);
+	unsigned int lens[UM_VEC2_TAP_MAX_BATCH];
+	unsigned int received = 0;
+	unsigned int i;
+	int ret;
+
+	if (!budget)
+		return 0;
+	if (budget > batch->depth)
+		return -EINVAL;
+	if (budget > UM_VEC2_TAP_MAX_BATCH)
+		budget = UM_VEC2_TAP_MAX_BATCH;
+
+	ret = um_vec2_rx_batch_prepare(batch, budget, alloc, release, cookie);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < budget; i++) {
+		struct sk_buff *skb = batch->slot[i].owner;
+
+		ret = um_vec2_tap_read_skb(taphost, skb);
+		if (!ret)
+			break;
+		if (ret < 0) {
+			if (ret == -EPROTO)
+				break;
+			goto complete;
+		}
+		lens[received++] = ret;
+	}
+
+	ret = 0;
+
+complete:
+	if (um_vec2_rx_batch_complete(batch, received, lens, release, cookie))
+		return -EIO;
+	if (received)
+		return received;
+	return ret == -EAGAIN ? 0 : ret;
 }
 
 static const struct um_vec2_host_ops um_vec2_tap_host_ops = {
@@ -64,6 +142,151 @@ static void um_vec2_tap_host_close(struct um_vec2_tap_host *taphost)
 	taphost->fd = -1;
 }
 
+static unsigned int um_vec2_tap_frame_len(const struct net_device *dev)
+{
+	return sizeof(struct virtio_net_hdr) + dev->mtu + ETH_HLEN + VLAN_HLEN;
+}
+
+static void um_vec2_tap_tx_drop(void *owner, unsigned int len, void *cookie)
+{
+	struct net_device *dev = cookie;
+	struct sk_buff *skb = owner;
+
+	if (dev)
+		dev->stats.tx_dropped++;
+	dev_kfree_skb_any(skb);
+}
+
+static void um_vec2_tap_rx_release(void *owner, unsigned int len, void *cookie)
+{
+	struct sk_buff *skb = owner;
+
+	dev_kfree_skb_any(skb);
+}
+
+static void um_vec2_tap_queue_free(struct um_vec2_channel *channel,
+				   struct net_device *dev)
+{
+	struct um_vec2_queue_pair *queue = channel->queue;
+
+	if (!queue)
+		return;
+
+	um_vec2_tx_ring_reset(&queue->tx, um_vec2_tap_tx_drop, dev);
+	um_vec2_rx_batch_reset(&queue->rx, um_vec2_tap_rx_release, dev);
+	kfree(queue->rx_slot);
+	kfree(queue->tx_desc);
+	kfree(queue);
+	channel->queue = NULL;
+}
+
+static int um_vec2_tap_queue_alloc(struct um_vec2_channel *channel,
+				   unsigned int depth)
+{
+	struct um_vec2_queue_pair *queue;
+	int ret;
+
+	queue = kzalloc_obj(*queue);
+	if (!queue)
+		return -ENOMEM;
+
+	queue->tx_desc = kcalloc(depth, sizeof(*queue->tx_desc), GFP_KERNEL);
+	if (!queue->tx_desc) {
+		ret = -ENOMEM;
+		goto out_free_queue;
+	}
+
+	queue->rx_slot = kcalloc(depth, sizeof(*queue->rx_slot), GFP_KERNEL);
+	if (!queue->rx_slot) {
+		ret = -ENOMEM;
+		goto out_free_tx;
+	}
+
+	spin_lock_init(&queue->tx_lock);
+	spin_lock_init(&queue->rx_lock);
+
+	ret = um_vec2_tx_ring_init(&queue->tx, queue->tx_desc, depth);
+	if (ret)
+		goto out_free_rx;
+
+	ret = um_vec2_rx_batch_init(&queue->rx, queue->rx_slot, depth);
+	if (ret)
+		goto out_free_rx;
+
+	channel->queue = queue;
+	return 0;
+
+out_free_rx:
+	kfree(queue->rx_slot);
+out_free_tx:
+	kfree(queue->tx_desc);
+out_free_queue:
+	kfree(queue);
+	return ret;
+}
+
+static int um_vec2_tap_write_skb(struct um_vec2_tap_host *taphost,
+				 struct sk_buff *skb)
+{
+	struct virtio_net_hdr hdr;
+	unsigned int original_len = skb->len;
+	int ret;
+
+	ret = skb_cow_head(skb, sizeof(hdr));
+	if (ret)
+		return ret;
+
+	ret = skb_linearize(skb);
+	if (ret)
+		return ret;
+
+	ret = virtio_net_hdr_from_skb(skb, &hdr, true, false, 0);
+	if (ret)
+		return ret;
+
+	skb_push(skb, sizeof(hdr));
+	skb_copy_to_linear_data(skb, &hdr, sizeof(hdr));
+
+	ret = os_write_file(taphost->fd, skb->data, skb->len);
+	skb_pull(skb, sizeof(hdr));
+	if (ret == -EAGAIN || ret == -ENOBUFS)
+		return 0;
+	if (ret < 0)
+		return ret;
+	if (ret != original_len + sizeof(hdr))
+		return -EIO;
+
+	return ret;
+}
+
+static int um_vec2_tap_read_skb(struct um_vec2_tap_host *taphost,
+				struct sk_buff *skb)
+{
+	struct virtio_net_hdr hdr;
+	unsigned char *data;
+	int ret;
+
+	data = skb_put(skb, taphost->frame_len);
+	ret = os_read_file(taphost->fd, data, taphost->frame_len);
+	if (ret == -EAGAIN)
+		return 0;
+	if (ret < 0)
+		return ret;
+	if (ret <= sizeof(hdr))
+		return -EPROTO;
+
+	skb_trim(skb, ret);
+	memcpy(&hdr, skb->data, sizeof(hdr));
+	skb_pull(skb, sizeof(hdr));
+
+	ret = virtio_net_hdr_to_skb(skb, &hdr, true);
+	if (ret)
+		return -EPROTO;
+
+	skb->dev = taphost->dev;
+	return skb->len;
+}
+
 static int um_vec2_tap_create_fd(const char *ifname)
 {
 	struct ifreq ifr = {};
@@ -80,6 +303,10 @@ static int um_vec2_tap_create_fd(const char *ifname)
 	strscpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 
 	ret = os_ioctl_generic(fd, TUNSETIFF, (unsigned long)&ifr);
+	if (ret)
+		goto out_close;
+
+	ret = os_set_fd_block(fd, 0);
 	if (ret)
 		goto out_close;
 
@@ -102,12 +329,15 @@ int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
 {
 	struct um_vec2_tap_host *taphost;
 	struct um_vec2_channel *channel;
+	struct net_device *dev = vdev->netdev;
 	int ret;
 
 	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
 		return -EINVAL;
 	if (fd < 0)
 		return -EBADF;
+	if (!dev)
+		return -ENODEV;
 	if (vdev->channels)
 		return -EBUSY;
 
@@ -122,11 +352,20 @@ int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
 	}
 
 	um_vec2_chan_lifecycle_init(&channel->life);
+	channel->vdev = vdev;
+	channel->rx_irq = UM_VEC2_NO_IRQ;
+	channel->tx_irq = UM_VEC2_NO_IRQ;
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
 	if (ret)
 		goto out_free_host;
 
+	ret = um_vec2_tap_queue_alloc(channel, vdev->cfg.depth);
+	if (ret)
+		goto out_free_host;
+
 	taphost->host.ops = &um_vec2_tap_host_ops;
+	taphost->dev = dev;
+	taphost->frame_len = um_vec2_tap_frame_len(dev);
 	taphost->fd = fd;
 	channel->host = &taphost->host;
 
@@ -139,6 +378,7 @@ int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd)
 	return 0;
 
 out_free_host:
+	um_vec2_tap_queue_free(channel, dev);
 	kfree(taphost);
 out_free_channel:
 	kfree(channel);
@@ -170,6 +410,17 @@ int um_vec2_tap_open(struct um_vec2_dev *vdev)
 	return ret;
 }
 
+int um_vec2_tap_fd(struct um_vec2_channel *channel)
+{
+	struct um_vec2_tap_host *taphost;
+
+	if (!channel || !channel->host)
+		return -EINVAL;
+
+	taphost = um_vec2_host_to_tap(channel->host);
+	return taphost->fd;
+}
+
 void um_vec2_tap_close(struct um_vec2_dev *vdev)
 {
 	struct um_vec2_channel *channel = vdev->channels;
@@ -186,6 +437,7 @@ void um_vec2_tap_close(struct um_vec2_dev *vdev)
 	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
 
+	um_vec2_tap_queue_free(channel, vdev->netdev);
 	kfree(taphost);
 	kfree(channel);
 	vdev->channels = NULL;

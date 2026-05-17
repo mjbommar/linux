@@ -30,8 +30,8 @@ The following v2 foundations exist:
 Those pieces prove parser policy, queue ownership, transport header
 bounds checks, fake-host behavior, and lifecycle transitions.
 
-R1 through R4 have now added the first runtime attachments and the
-first trusted host-open skeletons:
+R1 through R5 have now added the first runtime attachments and the
+first trusted TAP packet path:
 
 - `CONFIG_UML_NET_VECTOR_V2`, default `n`;
 - v2-only command-line collection through `vec2.<n>:` and `vec2=`;
@@ -50,22 +50,21 @@ first trusted host-open skeletons:
   close unwind;
 - `ip link set vec2.0 up/down` success for
   `CONFIG_UML_NET_VECTOR_V2_INPROC=y` plus
-  `vec2.0:transport=tap,ifname=<tap>`.
+  `vec2.0:transport=tap,ifname=<tap>`;
+- single-queue trusted TAP TX/RX through v2 queue ownership;
+- NAPI/read-IRQ integration for trusted TAP;
+- trusted TAP ping smoke with `3 packets transmitted, 3 received`.
 
 Those pieces attach v2 to the Linux networking stack for inspection.
-They still do not provide packet movement.
+They still do not provide replacement-ready networking.
 
 Missing runtime pieces:
 
-- no live `ndo_start_xmit()`;
-- no live NAPI poll function;
-- no live IRQ registration;
 - no fd packet movement;
 - no launcher-manifest fd path for sandbox mode;
-- no TAP packet movement;
 - no v2 ethtool stats, rings, coalescing, or feature controls;
 - no feature negotiation;
-- no live single-queue smoke test;
+- no repeated single-queue soak loop;
 - no multiqueue runtime path;
 - no compatibility switch from old `vecN:` to v2.
 
@@ -382,9 +381,20 @@ Exit gate:
 - Tier 3 stdlib HTTP smoke reaches `SERVER_READY` with v2 TAP on both
   seccomp and kvm-v2.
 
+R5 implementation note:
+
+- `21-uml-vector-driver-v2-r5-tap-datapath.md` records the first
+  trusted TAP packet path: queue allocation, nonblocking TAP fd,
+  channel-owned NAPI/read IRQ, `ndo_start_xmit()` enqueue, TAP TX/RX
+  host ops, vnet-header normalization, KUnit TX/RX pipe-backed tests,
+  and a guest-to-host ping smoke with 3/3 replies.
+- R5 is still single-queue trusted TAP only.  It does not satisfy fd
+  datapath, sandbox helper/proxy, multiqueue, ethtool, performance, or
+  Tier 3 replacement gates.
+
 ### V2-R6 - ethtool, Stats, And Feature Policy
 
-Goal: make v2 inspectable and safe while stopped.
+Goal: make v2 inspectable, safe while stopped, and harder to wedge.
 
 Deliverables:
 
@@ -393,6 +403,7 @@ Deliverables:
 - per-queue stats fold into device stats.
 - feature changes that alter buffer shape require stopped state or an
   explicit quiesce/reopen path.
+- write-side `-EAGAIN` handling cannot leave a full TX ring stuck.
 
 Validation:
 
@@ -607,9 +618,15 @@ The next concrete work should be:
    builds fail-closed before `/dev/net/tun`, and validate repeated
    `ip link set vec2.0 up/down` without packet movement.
 
-Those first four series have now taken v2 from parked scaffolding to an
-experimental inspectable netdev with trusted fd and TAP open/close
-paths.  Trusted TAP packet movement starts in R5, not in R4.
+5. **Single-queue TAP packet path.**
+   Wire TAP TX/RX through v2 queues, add NAPI/read-IRQ ownership, and
+   prove guest-to-host ping before claiming any soak or replacement
+   readiness.
+
+Those first five series have now taken v2 from parked scaffolding to an
+experimental inspectable netdev with trusted fd open/close and a
+working single-queue trusted TAP packet path.  The next work is
+hardening, observability, repeated soak, and then multiqueue.
 
 ## Workstream Exit Summary
 

@@ -174,6 +174,11 @@ parking-lot designs for future prioritization.
   attach/close, TAP-mode `ip link up/down`, sandbox rejection of
   direct `ifname=`, `strace` sandbox evidence, build evidence, and
   KUnit coverage. Not a commitment.
+- [21-uml-vector-driver-v2-r5-tap-datapath.md](21-uml-vector-driver-v2-r5-tap-datapath.md) —
+  R5 implementation note for the first trusted TAP packet path: v2
+  queue ownership, NAPI/read-IRQ channel ownership, TAP TX/RX host ops,
+  vnet-header normalization, guest-to-host ping evidence, known
+  replacement blockers, and KUnit coverage. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

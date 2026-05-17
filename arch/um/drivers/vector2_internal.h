@@ -23,6 +23,7 @@
 
 #define UM_VEC2_DRIVER_NAME	"uml-vector-v2"
 #define UM_VEC2_NAME_PREFIX	"vec2"
+#define UM_VEC2_NO_IRQ		(-1)
 
 enum um_vec2_cmdline_form {
 	UM_VEC2_CMDLINE_DOT,
@@ -46,10 +47,14 @@ struct um_vec2_queue_pair {
 
 struct um_vec2_channel {
 	struct um_vec2_chan_lifecycle life;
+	struct um_vec2_dev *vdev;
 	struct um_vec2_host *host;
 	struct um_vec2_queue_pair *queue;
+	struct napi_struct napi;
 	int rx_irq;
 	int tx_irq;
+	bool napi_added;
+	bool napi_enabled;
 };
 
 struct um_vec2_dev {
@@ -80,6 +85,7 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev);
 void um_vec2_fd_close(struct um_vec2_dev *vdev);
 int um_vec2_tap_open(struct um_vec2_dev *vdev);
 int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd);
+int um_vec2_tap_fd(struct um_vec2_channel *channel);
 void um_vec2_tap_close(struct um_vec2_dev *vdev);
 
 int um_vec2_netdev_open(struct net_device *dev);

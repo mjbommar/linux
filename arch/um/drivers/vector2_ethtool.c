@@ -13,7 +13,7 @@ static void um_vec2_get_drvinfo(struct net_device *dev,
 	struct ethtool_drvinfo *info)
 {
 	strscpy(info->driver, UM_VEC2_DRIVER_NAME, sizeof(info->driver));
-	strscpy(info->version, "r4-tap-skeleton", sizeof(info->version));
+	strscpy(info->version, "r5-tap-datapath", sizeof(info->version));
 	strscpy(info->bus_info, "uml", sizeof(info->bus_info));
 }
 

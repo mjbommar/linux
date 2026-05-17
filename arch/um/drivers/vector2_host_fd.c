@@ -84,6 +84,9 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 	}
 
 	um_vec2_chan_lifecycle_init(&channel->life);
+	channel->vdev = vdev;
+	channel->rx_irq = UM_VEC2_NO_IRQ;
+	channel->tx_irq = UM_VEC2_NO_IRQ;
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
 	if (ret)
 		goto out_free_host;
