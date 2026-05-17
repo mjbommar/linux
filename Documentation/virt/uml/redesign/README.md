@@ -110,8 +110,8 @@ docs/uml-redesign/
     ├── 10-uml-record-replay.md       deterministic capture + replay
     ├── 11-uml-api-daemon.md          rootless REST API surface
     ├── 12-uml-perfetto-trace.md      tracefs → Perfetto converter
-    └── 13-uml-observability-spine.md run_id + schema + bundle format
-                                      (O1 + O2.1 + O3.1 LANDED 2026-04-24)
+    ├── 13-uml-observability-spine.md run_id + schema + bundle format
+    └── 14-uml-vector-driver-v2.md    safe high-performance vector net rewrite
 ```
 
 ## Live status

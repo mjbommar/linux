@@ -134,6 +134,15 @@ parking-lot designs for future prioritization.
   substrate. Multi-quarter; phases O1-O6. Not a
   commitment.
 
+### Networking architecture (2026-05-17)
+
+- [14-uml-vector-driver-v2.md](14-uml-vector-driver-v2.md) —
+  complete rewrite plan for UML vector networking: typed config,
+  explicit lifecycle and queue state machines, host/transport ops
+  split, SMP/multiqueue design, formal-model hooks, and a clear
+  security split between trusted in-process vector networking and
+  UML v2 sandbox helper networking. Not a commitment.
+
 Dependency graph for this batch (→ = "needs"):
 
 ```
