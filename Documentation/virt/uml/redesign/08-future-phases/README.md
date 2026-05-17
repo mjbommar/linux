@@ -148,6 +148,10 @@ parking-lot designs for future prioritization.
   `net_device_ops`, fd/TAP host backends, TX/RX datapath, multiqueue,
   sandbox policy, replacement gates, and validation matrix. Not a
   commitment.
+- [16-uml-vector-legacy-tap-crash-r0.md](16-uml-vector-legacy-tap-crash-r0.md) —
+  R0 note for the legacy TAP NULL dereference found during Tier 3
+  Django smoke testing: reproducer, root cause, queue-optional fix,
+  and validation commands. Not a commitment.
 
 Dependency graph for this batch (→ = "needs"):
 

@@ -112,8 +112,10 @@ docs/uml-redesign/
     ├── 12-uml-perfetto-trace.md      tracefs → Perfetto converter
     ├── 13-uml-observability-spine.md run_id + schema + bundle format
     ├── 14-uml-vector-driver-v2.md    safe high-performance vector net rewrite
-    └── 15-uml-vector-driver-v2-buildout.md
+    ├── 15-uml-vector-driver-v2-buildout.md
                                         concrete runtime-driver buildout plan
+    └── 16-uml-vector-legacy-tap-crash-r0.md
+                                        legacy TAP crash R0 fix note
 ```
 
 ## Live status

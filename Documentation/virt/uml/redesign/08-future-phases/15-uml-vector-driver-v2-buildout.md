@@ -175,6 +175,14 @@ Validation:
 Why this phase exists: it keeps Phase J moving and gives v2 a known
 behavioral target.
 
+R0 implementation note:
+
+- `16-uml-vector-legacy-tap-crash-r0.md` records the
+  `vec0:transport=tap,ifname=soak-tap0,depth=128` reproducer, the
+  queue-optional legacy-driver fix, and the manual validation commands.
+- This R0 fix is legacy-driver containment only.  It does not satisfy
+  any v2 runtime-driver replacement gate.
+
 ### V2-R1 - Runtime Kconfig And Command-Line Skeleton
 
 Goal: make v2 visible as a real, experimental runtime build target.
