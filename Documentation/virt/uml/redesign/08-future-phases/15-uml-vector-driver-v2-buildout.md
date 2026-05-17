@@ -74,6 +74,10 @@ shape, and inspectable ethtool surfaces:
 - live `umlctl up` single-queue vector2 fd-handoff smoke with
   launcher-owned TAP inherited as fd 200, successful gateway ping,
   ethtool queue counters, and clean TAP teardown;
+- fd open preflight diagnostics for missing and wrong-type inherited
+  fds, with closed-state unwind covered by KUnit;
+- short `umlctl gate loop` vector2 fd-handoff repetition:
+  `PASS=3/3 FAIL=0 TIMEOUT=0`;
 - live Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - 30/30 Tier 3 Django stdlib-shim success on seccomp through v2 TAP;
 - live Tier 3 Django stdlib-shim success on seccomp through v2

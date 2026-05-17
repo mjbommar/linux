@@ -13,6 +13,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/stat.h>
 
 #include <os.h>
 
@@ -129,6 +130,51 @@ static const struct um_vec2_host_ops um_vec2_fd_host_ops = {
 	.rx_batch	= um_vec2_fd_rx_batch,
 };
 
+static const char *um_vec2_fd_mode_name(unsigned int mode)
+{
+	switch (mode & S_IFMT) {
+	case S_IFCHR:
+		return "char";
+	case S_IFIFO:
+		return "fifo";
+	case S_IFSOCK:
+		return "socket";
+	case S_IFREG:
+		return "regular";
+	case S_IFDIR:
+		return "directory";
+	case S_IFBLK:
+		return "block";
+	case S_IFLNK:
+		return "symlink";
+	default:
+		return "unknown";
+	}
+}
+
+static int um_vec2_fd_validate_source(struct um_vec2_dev *vdev)
+{
+	struct uml_stat st;
+	int ret;
+
+	ret = os_stat_fd(vdev->cfg.fd, &st);
+	if (ret) {
+		pr_err("vec2.%u inherited fd %u is not usable: fstat failed ret=%d\n",
+		       vdev->unit, vdev->cfg.fd, ret);
+		return ret;
+	}
+
+	if (S_ISCHR(st.ust_mode) || S_ISFIFO(st.ust_mode) ||
+	    S_ISSOCK(st.ust_mode))
+		return 0;
+
+	pr_err("vec2.%u inherited fd %u has unsupported type %s mode=0%o; "
+	       "expected char, fifo, or socket\n",
+	       vdev->unit, vdev->cfg.fd, um_vec2_fd_mode_name(st.ust_mode),
+	       st.ust_mode);
+	return -EINVAL;
+}
+
 static void um_vec2_fd_host_close(struct um_vec2_fd_host *fdhost)
 {
 	if (!fdhost)
@@ -159,6 +205,10 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 		return -EOPNOTSUPP;
 	if (vdev->channels)
 		return -EBUSY;
+
+	ret = um_vec2_fd_validate_source(vdev);
+	if (ret)
+		return ret;
 
 	channel = kzalloc_obj(*channel);
 	if (!channel)

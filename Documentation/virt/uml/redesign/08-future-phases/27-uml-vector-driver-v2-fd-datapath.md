@@ -20,6 +20,8 @@ ethtool surfaces as the trusted TAP path.
 - fd RX reads raw Ethernet frames into the v2 RX batch.
 - fd channels use the same NAPI/read-IRQ/write-IRQ startup path as TAP.
 - `um_vector2_host_fd` KUnit now covers fd TX and RX packet movement.
+- fd open now preflights the inherited fd with `os_stat_fd()` and
+  rejects unsupported file types before allocating channel state.
 - sandbox builds accept inherited `fd=` specs while still rejecting
   host resource creation options such as TAP `ifname=`.
 
@@ -58,12 +60,30 @@ kunit.py parse /tmp/um-vector-fd-datapath-kunit.log
 Testing complete. Ran 68 tests: passed: 68
 ```
 
+After fd preflight diagnostics:
+
+```text
+/home/mjbommar/projects/personal/.build/um-vector-r1-kunit/linux \
+  mem=256M kunit.filter_glob='um_vector2_*' kunit_shutdown=halt
+kunit.py parse /tmp/um-vector-fd-diagnostics-kunit.log
+Testing complete. Ran 69 tests: passed: 69
+```
+
+The new fd diagnostic KUnit cases verify both closed/missing fd and
+wrong-type fd behavior:
+
+```text
+uml-vector2-fd: vec2.1 inherited fd 2147483647 is not usable: fstat failed ret=-9
+uml-vector2-fd: vec2.5 inherited fd 11 has unsupported type directory mode=040775; expected char, fifo, or socket
+```
+
 The new fd tests cover:
 
 - raw-frame TX from the v2 TX ring into a supplied UNIX datagram fd;
 - raw-frame RX from a supplied UNIX datagram fd into the v2 RX batch;
 - fd-backed `netdev_open()` now reaching carrier-on through the common
   datapath startup path.
+- bad inherited fd diagnostics and closed-state unwind.
 
 Manual no-root fd datapath smoke:
 
@@ -133,14 +153,28 @@ FD_HANDOFF_OK
 Device "v2fd0" does not exist.
 ```
 
+Repeated `umlctl gate loop` fd-handoff smoke:
+
+```text
+umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml \
+  -W 1 -M 3 --timeout 120 --pass-marker VECTOR2_FD_HANDOFF_OK
+==> default PASS=3/3 FAIL=0 TIMEOUT=0 rate=100.0%
+```
+
+Each saved run log showed `vec2.0:transport=fd,mode=fd,fd=200`,
+`uml-vector2: registered netdev vec2.0`, successful 3/3 ping, and
+queue0 TX/RX counters.  A post-loop TAP check returned:
+
+```text
+fd_diag_gate_tap_after_rc=1
+Device "v2fd0" does not exist.
+```
+
 ## Remaining Work
 
 This checkpoint does not close the fd replacement gates.  Remaining fd
 work includes:
 
-- repeated live `umlctl up` fd-handoff coverage under gate loop;
-- stronger sandbox fd diagnostics when the referenced fd is missing or
-  has the wrong type;
 - fd multiqueue;
 - fd batching with `sendmmsg()` / `recvmmsg()` or an accepted simpler
   replacement;

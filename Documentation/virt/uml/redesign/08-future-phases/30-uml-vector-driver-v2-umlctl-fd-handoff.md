@@ -227,6 +227,24 @@ tap_after2_rc=1
 Device "v2fd0" does not exist.
 ```
 
+Repeated gate-loop smoke after fd preflight diagnostics:
+
+```text
+umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-fd-handoff.toml \
+  -W 1 -M 3 --timeout 120 --pass-marker VECTOR2_FD_HANDOFF_OK
+[umlctl gate loop] w0 iter1: Pass
+[umlctl gate loop] w0 iter2: Pass
+[umlctl gate loop] w0 iter3: Pass
+==> default PASS=3/3 FAIL=0 TIMEOUT=0 rate=100.0%
+```
+
+The post-loop TAP check confirmed teardown:
+
+```text
+fd_diag_gate_tap_after_rc=1
+Device "v2fd0" does not exist.
+```
+
 ## Remaining Work
 
 - fd multiqueue;

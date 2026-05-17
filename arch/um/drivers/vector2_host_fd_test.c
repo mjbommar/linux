@@ -104,6 +104,26 @@ static void vector2_fd_bad_fd_fails_closed_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_fd_wrong_type_fails_closed_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 5);
+	struct net_device *dev = vector2_fd_test_alloc_netdev(test, vdev);
+	int fd;
+
+	fd = os_open_file(".", of_read(OPENFLAGS()), 0);
+	KUNIT_ASSERT_GE(test, fd, 0);
+	vdev->cfg.fd = fd;
+	vdev->cfg.has_fd = true;
+
+	KUNIT_EXPECT_EQ(test, um_vec2_fd_open(vdev), -EINVAL);
+	KUNIT_EXPECT_NULL(test, vdev->channels);
+	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
+
+	os_close_file(fd);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 static void vector2_fd_netdev_open_stop_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 2);
@@ -294,6 +314,7 @@ static void vector2_fd_rx_batch_reads_frame_test(struct kunit *test)
 static struct kunit_case vector2_fd_test_cases[] = {
 	KUNIT_CASE(vector2_fd_open_close_test),
 	KUNIT_CASE(vector2_fd_bad_fd_fails_closed_test),
+	KUNIT_CASE(vector2_fd_wrong_type_fails_closed_test),
 	KUNIT_CASE(vector2_fd_netdev_open_stop_test),
 	KUNIT_CASE(vector2_fd_tx_batch_writes_frame_test),
 	KUNIT_CASE(vector2_fd_rx_batch_reads_frame_test),

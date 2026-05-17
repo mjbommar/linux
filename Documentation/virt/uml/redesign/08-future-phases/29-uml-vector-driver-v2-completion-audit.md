@@ -27,7 +27,7 @@ experimental netdev exists.
 | Single-queue fd transport with launcher-supplied fds | fd datapath exists over inherited fds; sandbox accepts inherited `fd=`; manual no-root fd ping smokes; `umlctl` records manifest labels and passes vector2 TAP as inherited fd 200; live `umlctl up` fd-handoff smoke passed | Done for single-queue fd |
 | TX/RX move through v2 queues, not legacy queues | `vector2_queue` rings/batches used by fd and TAP; KUnit TX/RX tests | Done for implemented fd/TAP paths |
 | Tier 3 Django/FastAPI on seccomp and kvm-v2 | Django stdlib shim passes seccomp 30/30; kvm-v2 no-network readiness fails before vector2 validation | Partial: kvm-v2 and FastAPI remain open |
-| KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind | `um_vector2_*` KUnit passes 68/68 | Partial: coverage exists, but more failure injection remains |
+| KUnit coverage for config, lifecycle, queue, fake host, transport, host-open failure, unwind | `um_vector2_*` KUnit passes 69/69 after fd wrong-type preflight coverage | Partial: coverage exists, but more failure injection remains |
 | ethtool stats and ring queries stopped/running | R6/R8b docs; KUnit ethtool tests; live queue stats | Done for current surfaces |
 | Sandbox blocks host helper/TAP/raw/BPF creation | parser rejects trusted host options without `INPROC`; TAP sandbox KUnit; inherited fd allowed by policy; `umlctl` fd handoff keeps TAP opening in the launcher | Partial: needs strace/audit gate |
 | Multiqueue TAP/fd KCSAN and distribution | TAP multiqueue works and queue counters move; fd multiqueue absent; no KCSAN result | Partial |
@@ -54,11 +54,14 @@ Validation evidence recorded in the checkpoint docs includes:
 - targeted vector2 object builds;
 - full trusted runtime UML build;
 - full sandbox runtime UML build;
-- `um_vector2_*` KUnit: 68/68 passed;
+- `um_vector2_*` KUnit: 69/69 passed;
 - no-root fd ping over inherited UNIX datagram fd;
 - sandbox-only fd ping over inherited UNIX datagram fd;
+- fd open diagnostics for missing and wrong-type inherited fds;
 - live `umlctl up` vector2 fd handoff over TAP fd 200, with
   `FD_HANDOFF_OK` and clean TAP teardown;
+- short `umlctl gate loop` vector2 fd handoff repetition:
+  `PASS=3/3 FAIL=0 TIMEOUT=0` and no lingering `v2fd0`;
 - vector2 TAP seccomp Tier 3 Django stdlib shim: 30/30 passed;
 - vector2 TAP `queues=2` seccomp smoke and queue distribution evidence;
 - TAP teardown checks showing no lingering `soak-tap0`.
