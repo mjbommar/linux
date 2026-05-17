@@ -58,6 +58,20 @@ Recent pushed checkpoints:
 - post-audit follow-up - KVM-v2 vector2 readiness narrowed to Django
   workload instability.
 
+Current status update against the short remaining list:
+
+| Item | Current Status | Notes |
+| --- | --- | --- |
+| kvm-v2 baseline readiness blocker | Partial / narrowed | No-network readiness, vector2 fd-handoff, and one-shot Django vector2 smoke now pass on a correctly configured KVM-v2 runtime. The remaining KVM-v2 issue is a guest userspace execution flake under Django/Python workload pressure, not a generic boot/readiness failure. |
+| kvm-v2 + vector2 Tier 3 30/30 | Partial / not accepted | One diagnostic Django vector2 KVM-v2 run reached `PASS=30/30 FAIL=0 TIMEOUT=0`, but longer or trace-enabled samples still failed at `PASS=57/60 FAIL=2 TIMEOUT=1`, `PASS=59/60 FAIL=1 TIMEOUT=0`, and later `PASS=29/30 FAIL=1 TIMEOUT=0`. This remains open until the backend flake is fixed or bounded with clean repeat evidence. |
+| FastAPI variant | Done for seccomp vector2 fd | Real FastAPI + uvicorn vector2 fd handoff passed smoke and `PASS=30/30 FAIL=0 TIMEOUT=0`, with every run reaching `FASTAPI_HTTP ok=51 fail=0`. |
+| fd multiqueue | Done for current launch/core path | Core KUnit, live `umlctl` fd multiqueue, auto queue sizing, per-queue stats, and clean TAP teardown evidence are recorded. |
+| queue-to-CPU policy | Done for implementation and unit coverage | vector2 has explicit `ndo_select_queue`, XPS setup, and KUnit coverage. Longer SMP fairness validation remains part of the broader performance/KCSAN work. |
+| KCSAN on multiqueue | Partial / materially progressed | No longer a plain open item: auto-queue fd multiqueue passed `PASS=10/10`, FastAPI passed once under KCSAN, concurrent TCP/UDP traffic passed with all four TX/RX queues moving, and varied KCSAN profiles include two-queue/six-flow and paced eight-flow/four-queue evidence. Longer fairness matrices, additional host/kernel coverage, and kvm-v2 reruns remain open. |
+| legacy-vs-v2 perf baseline | Partial / measured, not accepted | Repeated TCP sweeps now cover both directions, 1 MiB/8 MiB/32 MiB, and two repeats per cell. Results are mixed: vector2 is slower guest-to-host and much faster host-to-guest on this host. UDP, syscall, CPU, and acceptance analysis remain open. |
+| long-soak proof | Open | No repeated hours-long vector2 workload soak has been accepted yet. |
+| sandbox strace/audit gate | Done locally / broader rollout open | `umlctl gate loop --audit-vector-sandbox` preserves per-iteration strace/audit logs and fails on forbidden vector host operations; one audited vector2 auto-queue fd boot passed. CI/preflight wiring, longer workload coverage, and guest raw/netlink policy remain open. |
+
 Validation evidence recorded in the checkpoint docs includes:
 
 - targeted vector2 object builds;
