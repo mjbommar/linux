@@ -516,6 +516,107 @@ After each technique, the disposition gate is:
 
 ---
 
+## Round 13 Update (2026-05-18) — Plan Status
+
+After working through Techniques A–F:
+
+### Executed and analyzed
+
+* **A — `perf record -a -g -e kvmmmu:*`** — DONE. 621k SPTE clears
+  in 1130s; 91 % were end-of-iter VM teardown; 9 % were kcompactd
+  migration. With `vm.compaction_proactiveness=0` confirmed: aborts
+  still fire, so kcompactd is not the cause. See R13 addendum in
+  50-doc.
+
+* **B — bpftrace on `__mmu_notifier_invalidate_range_start`** —
+  DONE. 27 k events in 240 s with KSM/khugepaged/swappiness/THP all
+  off; 100 % from `comm=linux`, zero from external mover threads.
+
+* **B' (T72, R13 follow-up) — bpftrace `os_unmap_memory` bucketed
+  by VA prefix** — DONE. Critical refinement: of the ~100/s
+  `os_unmap_memory` calls, ALL fire on `0x7ff...` (host kernel /
+  stub VA range). ZERO fire on `0x550...` (guest user VA range
+  where bytecode lives). UML does NOT host-munmap the bytecode
+  page. The R8/R13 "23 k events in 240 s" were on guest-kernel
+  VAs, not guest user heap.
+
+* **C — ftrace tracepoints on `kvmmmu:*`** — DONE (lightweight
+  variant; not function_graph, which has Heisenbug risk). 2,665
+  `kvm_mmu_prepare_zap_page` events captured; **0
+  `fast_page_fault`**; 0 `kvm_mmu_zap_all_fast`; 0
+  `handle_mmio_page_fault`. **The lockless fast page-fault path
+  never fires under this workload** — so the 2024 Tao Su patch
+  (fast_pf not saving mmu_invalidate_seq) is not a candidate
+  upstream fix.
+
+* **D — per-bytecode-page checksum monitor** — DONE in userspace
+  form (`tools/uml/diag/round13-bytecode-monitor/bc-monitor.c`,
+  LD_PRELOAD library wrapping `getpid`/`gettid`/`clock_gettime`).
+  Iterated v1→v4. v4 catches deterministic Python startup
+  arena-zeroing pattern on the first heap page (not the bug), but
+  has a seed-race for pages allocated via `brk` AFTER monitor
+  init. v5 redesign needed for cache-abort capture; deferred
+  pending Arm B result and reopened hypothesis space.
+
+* **E — KVM debugfs counter sampling** — DONE (1 Hz, ~545 samples
+  via `~/src/r13-techE/sample-kvm-counters.sh`). Global counters
+  stable; per-VM debugfs (`/sys/kernel/debug/kvm/<pid>/`) confirms
+  `pf_fast = 0` per VM, ` pf_fixed > pf_taken` slightly (suggests
+  slow-path refault retries).
+
+* **F — `CONFIG_KVM_MMU_AUDIT` rebuild** — UNAVAILABLE. Verified
+  by `grep KVM_MMU_AUDIT /lib/modules/$(uname -r)/build/arch/x86/kvm/`:
+  the option has been removed upstream. F is no longer applicable
+  on a modern host kernel.
+
+### Hypothesis status after R13 work
+
+Ruled out by negative evidence:
+- External host mover threads (kcompactd, kswapd, khugepaged, KSM)
+- Host pagecache reclaim of the python binary
+- Fast-page-fault / mmu_invalidate_seq race (path doesn't fire)
+- UML's tlb-sync host-munmap of the bytecode page (T72)
+- UML's `os_drop_memory(MADV_REMOVE)` on the hot path (not called)
+- User-syscall-mediated corruption (Round 11)
+- Entry-save block corruption (T60 audit)
+- Pool-share / cross-vCPU pinning (R4/R7/R8)
+- `MAP_POPULATE` alone (T71 Arm A)
+
+Reopened by R13's T72 negative result:
+- The corruption is NOT mmu_notifier-mediated SPTE staleness on
+  the bytecode page. Some other path is at work.
+
+Candidates for next-round (Round 14) work:
+- **H12 (CoW zero-fill)** — Python forks before module init?
+  Unlikely (frozen-getpath fires during interpreter bootstrap,
+  before any user-level fork) but the spawner.c forkserver pattern
+  in kvm-v2 may cause a relevant CoW. Test: trace `do_wp_page` on
+  the bytecode page via kfunc bpftrace.
+- **H13 (FPU/XSAVE residue with zero-fill)** — SMP-T57 enabled
+  XSAVE; if a subsequent `XRSTOR` or `FNINIT` zeros AVX state and
+  the guest's CPython uses AVX `memset`, a wrong-length write
+  could zero into the bytecode page. Test: rebuild CPython with
+  `-mno-avx -mno-avx2 -mno-sse4` to disable AVX-based glibc
+  memset.
+- **H14 (KVM-internal non-mmu_notifier bug)** — e.g., a
+  `vcpu_enter_guest` path that writes to guest memory directly
+  via `kvm_write_guest`. Audit kvm-v2 for any such writes.
+- **H15 (Microarchitectural artefact)** — TLB-coherence corner
+  case under deeply-elided dispatch boundaries (gadget). Test:
+  add a forced `outb` every N gadget invocations to bring
+  dispatch frequency back to seccomp levels.
+- **H16 (CPython arena recycling)** — the Python obmalloc arena
+  allocator recycles freed PyMalloc blocks. If a freed bytecode
+  buffer's underlying arena pool gets re-used for fresh
+  zero-allocated PyObject struct fields, the zero-write zone
+  could land at the bytecode VA. Test: instrument
+  `_PyObject_Free` and `_PyObject_Malloc` for the bytecode VA.
+
+### Plan
+
+Round 14 will pick from H12–H16 based on Arm B result (currently
+running) and rate-vs-baseline comparison.
+
 ## What This Plan Does NOT Cover
 
 - **Userspace memory-corruption tools** (Valgrind, ASan,
