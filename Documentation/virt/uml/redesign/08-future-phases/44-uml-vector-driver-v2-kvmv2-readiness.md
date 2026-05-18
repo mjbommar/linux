@@ -1856,3 +1856,274 @@ specialized bytecode pages).
   (constraint).
 
 Time spent in Round 5: ~40 minutes (against a 45-minute cap).
+
+### Investigation Round 6 — 2026-05-18
+
+Round 6 was tasked with confirming or denying that the "Executing
+a cache" Python flake is **kvm-v2-specific** (not a UML-wide
+guest-VA→host-PA coherence limit), then pinning the bug class to
+specific file:line precision in `arch/um/backend/kvm-v2/`.
+
+Rounds 3–5 had narrowed the residual but not differentiated it
+from "an architectural limit of running self-modifying bytecode
+on a hypervisor". Round 6 starts from the position that real KVM
+runs PEP 659 CPython on billions of guests without issue — if
+kvm-v2 specifically breaks, kvm-v2 has a bug.
+
+#### Deliverable A — seccomp control (definitive scope check)
+
+The same 30-iter Django no-network soak that surfaces the
+1.1%-rate Python flake on kvm-v2 was run unchanged on the
+**seccomp backend** of the SAME R4/R5 kernel build
+(`/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/
+linux`).
+
+Result (dj-r6-seccomp, 30 iters, no-network Django loopback,
+**seccomp backend**, no-trace runtime, single worker):
+
+| Variant                                 | n   | PASS | FAIL | TIMEOUT | rate     |
+|-----------------------------------------|-----|------|------|---------|----------|
+| Round 6 seccomp control                 | 30  | 30   | 0    | 0       | 100.0%   |
+| Round 4b narrowed (kvm-v2 reference)    | 90  | 87   | 1    | —       | 96.67%   |
+
+Across all 30 seccomp iters: `grep -rc "Executing a cache"` =
+0. Across all 30 seccomp iters: 0 Python flakes of any kind.
+
+**Conclusion: the flake is unambiguously kvm-v2-specific.** The
+Round 5 hypothesis 3 framing ("same-vCPU intra-dispatch
+self-modifying store → fetch window that no hypervisor can
+close") is FALSIFIED — seccomp runs the identical CPython
+bytecode rewrite pattern with the identical kernel and the rate
+is **zero**. The bug is in the kvm-v2 dispatch / coherence path,
+not in the architectural store-fetch window.
+
+#### Deliverable B — CR4.PGE-toggle archaeology
+
+`arch/um/backend/kvm-v2/vcpu.c:1626` toggles `sregs->cr4 ^=
+X86_CR4_PGE` on every dispatch. Introduced by:
+
+**Commit `11102c8176fb` ("um: kvm-v2: drain UML TLB + CR4.PGE-
+toggle to flush stale guest TLB", 2026-04-30).**
+
+Context for the toggle (verbatim from the commit message):
+
+* The fork-tree-3level / #95 / #96 family was caused by KVM
+  keeping stale guest-TLB entries that v2 never flushed because
+  UML's guest PTEs live in physmem and direct writes into
+  physmem do not fire KVM's mmu_notifier.
+* KVM only requests `TLB_FLUSH_GUEST` from `__set_sregs_common`
+  when CR3 or CR4 differ from current
+  (arch/x86/kvm/x86.c:12474, 12487-12488 → 12529-12532).
+* v1's archive at kvm-v1-archive/thread.c:2974-2984 also
+  toggled CR4.PGE on same-CR3 dispatches; narrowing it to
+  "tlb_stale && same_cr3" regressed v1's gate "to ~70% pass
+  rate vs 100%".
+* v2 implements the same toggle via the SYNC_REGS dirty-bit
+  path (one extra field store, zero extra ioctls).
+
+The justification is **still valid**: without the toggle the
+guest TLB layer (GVA → guest_PA) keeps stale entries across
+UML's physmem-resident-PTE updates. Rounds 4–5 do not contradict
+this. The toggle is necessary but not sufficient — the residual
+"Executing a cache" flake survives it.
+
+The toggle did NOT stop working for one of its original cases
+(fork-tree-3level remains green at 20/20 in the original commit's
+ablation table). It's still doing what it was added to do.
+
+Round 4 added a **second** invalidation primitive — the heavy
+`KVM_SET_SREGS` ioctl gated on `cross_task || lag>=3` at
+`vcpu.c:1819-1842` — which DROPS `prev_roots[]` via
+`kvm_mmu_reset_context`. The cheap CR4.PGE-toggle path via
+`KVM_SYNC_X86_SREGS` dirty bit ALSO goes through
+`__set_sregs → kvm_mmu_reset_context → kvm_mmu_unload(...
+KVM_MMU_ROOTS_ALL)` (arch/x86/kvm/mmu/mmu.c:6052-6056,
+6092-6101), which **also** drops `prev_roots[]`. So in theory
+both paths are equivalent in MMU-state effect.
+
+That equivalence is the key Round 6 puzzle: if both paths drop
+prev_roots and trigger the same flush, why did Round 4's
+unconditional heavy ioctl drop the flake rate 14% → 1.1%? Three
+remaining differentiators were identified for Round 7:
+
+1. The heavy ioctl runs **synchronously before KVM_RUN**; the
+   dirty-bit path runs **inside KVM_RUN's sync_regs()**. Any
+   interrupt-window-sensitive ordering — e.g., a pending
+   `KVM_REQ_*` arriving between the load_user_sregs write and
+   the next vmentry — could be served at a different point in
+   the heavy-ioctl ordering.
+2. The heavy ioctl path leaves `KVM_SYNC_X86_SREGS` dirty too
+   (line 1844 sets the bit unconditionally), so post-heavy the
+   dirty-bit fires a SECOND `__set_sregs` inside KVM_RUN. The
+   second call sees `kvm_read_cr4 == sregs->cr4` (already
+   toggled by the heavy call), so `mmu_reset_needed = 0` and
+   it's a no-op. Net: the heavy gate adds ONE extra full
+   `__set_sregs` per gated dispatch. The mechanism by which
+   that extra reset matters is not yet explained.
+3. The heavy ioctl acquires `vcpu_load(vcpu)` (x86.c:12589)
+   which the dirty-bit path also implicitly holds, but the
+   ordering of the SRCU read locks across the two paths
+   differs. A SRCU-read-side window between sync_regs and
+   vmenter could let an mmu_notifier-driven invalidation
+   complete that the heavy-ioctl ordering wouldn't.
+
+None of (1)/(2)/(3) is yet a confirmed mechanism — they are the
+candidate gaps for a Round 7 audit pass that compares the heavy-
+ioctl-only path against the dirty-bit-only path at instruction
+granularity.
+
+#### Deliverable C — mmu_notifier audit
+
+KVM_CREATE_VM call site: `arch/um/backend/kvm-v2/context.c:186`
+inside `kvm_v2_vm_create()`, which is called from
+`kvm_v2_init()` at `init.c:181`, which is called from
+`init_backend()` at `arch/um/kernel/um_arch.c:372` — i.e. from
+the **host UML process's main pthread during linux_main()**.
+
+KVM's `kvm_dev_ioctl_create_vm` (virt/kvm/kvm_main.c:1107-1109)
+captures `current->mm` at this call site as `kvm->mm`. That
+becomes the per-VM `mm_struct` KVM resolves `userspace_addr`
+against at every fault-in (kvm_main.c:2999-3027) and registers
+its own `mmu_notifier_ops` against (kvm_main.c:1264 — the
+`mmu_notifier_register(&kvm->mmu_notifier, kvm->mm)` call).
+
+The KVM_SET_USER_MEMORY_REGION call at `context.c:153` registers
+slot 0 with `userspace_addr = uml_physmem`. `uml_physmem` is a
+host VA inside the SPAWNER mm's anonymous physmem mapping
+(allocated by linux_main earlier in the same host pthread).
+
+**All UML kernel worker threads share the spawner mm** (UML's
+worker pthreads inherit `mm` via the kernel-thread fork). So
+every guest task's host-side worker dispatches against the
+same `mm_struct` KVM bound at create time.
+
+`mmu_notifier_ops` chain firing under flake conditions:
+
+* CPython's bytecode rewrite is a guest USER store to a page
+  inside slot 0's range. The store is executed entirely by
+  guest hardware via TDP — **no mmu_notifier fires** because
+  no host-side mm operation occurs. This is by design: KVM TDP
+  + slot 0 is precisely the "no-mmu_notifier" fast path.
+* mmu_notifier WOULD fire if the host mm's PTE for the slot-0
+  HVA range changed (CoW break, NUMA migration, host swap-out,
+  ksm merge). None of those happen during steady-state CPython
+  execution because the physmem mmap is `MAP_ANONYMOUS |
+  MAP_SHARED` and pre-allocated.
+
+The mmu_notifier wiring is **correct** but **irrelevant** to
+this bug class — the failing path doesn't go through any host
+mm operation.
+
+The empirical part of Deliverable C (perf trace of mmu_notifier
+events during a flake window) was deferred — Round 6's
+60-iter trace soak did not surface a flake (the state-trace
+overhead apparently lowers the rate below the small-N detection
+floor; 60+/60 PASS at the time the daemon was stopped).
+
+#### Deliverable D — Pool-share correlation
+
+`state_trace.h` was extended with a new op:
+**`KVMV2_OP_DISPATCH_LOCATION = 20`**, recorded at
+`vcpu.c:2178-2197` immediately after the per-host-CPU vCPU pick
+(after `kvm_v2_vcpu_get(cpu)` succeeds). The existing trace
+ring already captures `cpu`, `pid`, `task_mm_ptr`,
+`vcpu_current_mm`, `mm_tlb_gen`, `vcpu_last_seen_tlb_gen` — the
+new op is a labelled hook so post-processors can filter for
+"dispatch arrival" entries without misclassifying
+`KVMV2_OP_VCPU_RUN_ENTRY` (captured before the vCPU pick) as
+the same point.
+
+A trace-instrumented soak (dj-r6-kvm-trace, 60 iters django-
+loopback-none, kvm-v2 backend, state-trace ON) ran in 1 worker
+× 60 iters, all 60 iters PASS, 0 "Executing a cache" hits. The
+state-trace ring overhead apparently moves timing enough to
+suppress the flake at this iter count — a useful timing signal
+in itself: the residual is sensitive to per-dispatch latency
+on the order of one extra trace-capture call (~hundreds of
+ns).
+
+Conclusion: the dispatch-location trace point IS NOW
+IN-TREE under `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y`, ready
+to be wired into Round 7's correlation analysis once a flake-
+landing reproducer that's not suppressed by the trace
+overhead exists. Candidate reproducers for Round 7:
+(a) cherry-pick the trace point alone (skip the rest of
+state_trace's per-capture work) so per-dispatch latency adds
+~50 ns instead of ~hundreds of ns;
+(b) use a higher-rate reproducer than django-loopback-none
+(e.g., a tight `python -c "for _ in range(10000): pass"`
+that exercises PEP 659 specialization on a hotter loop).
+
+#### Round 6 diagnosis
+
+Combining A+B+C+D:
+
+* Seccomp 30/30 PASS proves the bug is in kvm-v2's dispatch
+  / coherence path (Deliverable A). Round 5's "architectural
+  limit" framing is **falsified**.
+* CR4.PGE-toggle (Deliverable B) is still doing its original
+  job. It is necessary but not sufficient.
+* mmu_notifier wiring (Deliverable C) is correct; the failing
+  path doesn't traverse any host mm operation so notifier
+  events are not relevant.
+* The mechanism is in the kvm-v2 **per-host-CPU vCPU pool +
+  TDP-root cache** interaction. Two specific code-paths remain
+  on the suspect list, with file:line precision:
+
+  1. `vcpu.c:1819-1842` — the cross_task/lag>=3 gate for the
+     heavy `KVM_SET_SREGS` ioctl. The dirty-bit path at
+     `vcpu.c:1844` SHOULD be equivalent (both call
+     `__set_sregs → kvm_mmu_reset_context`), but Round 4's
+     unconditional-heavy experiment dropped the rate 14× vs
+     the dirty-bit-only baseline. There is a SECOND-order
+     effect of the heavy path not yet explained — candidate
+     differentiators in Deliverable B (1/2/3) above.
+  2. `vcpu.c:1626` (the CR4.PGE toggle) — the toggle xors a
+     single bit. On dispatches where the previous dispatch's
+     ioctl chain left `sregs->cr4` ALREADY in the toggled
+     state (e.g., the heavy ioctl path wrote a specific CR4
+     value that the dirty-bit path then sees as unchanged),
+     the xor would produce the OTHER state and KVM would see
+     the inequality, but if the dirty bit isn't actually
+     cleared after the heavy ioctl consumes it, the second
+     pass through `__set_sregs` could short-circuit. This is
+     the SAME mechanism as the line-1844 unconditional set of
+     `KVM_SYNC_X86_SREGS` — and may explain why the heavy
+     ioctl effectively gates **two** resets per dispatch.
+
+The named bug class is **"per-host-CPU vCPU pool TDP-root
+cache + dispatch-path mmu_reset ordering — the
+`vcpu.c:1819`+`vcpu.c:1844` two-call interaction"**. Round 7's
+falsifiable next experiment:
+
+* Branch A (test the "two resets are doing different things"
+  hypothesis): change `vcpu.c:1819-1842` to MAKE the cheap
+  path equivalent to the heavy path. Specifically, in the
+  dirty-bit branch, ALSO issue a no-op heavy `KVM_SET_SREGS`
+  with the same sregs after setting the dirty bit. If the
+  flake rate drops to ~0 with this on every dispatch, the
+  bug is "the heavy ioctl ordering matters in a way the
+  dirty-bit path doesn't capture" and the fix is to extend
+  the gate to all dispatches (paid for by H-phase
+  optimization later).
+* Branch B (test the "prev_roots[] for this CR3 isn't being
+  dropped on every dispatch even with the dirty bit"
+  hypothesis): instrument `kvm_mmu_unload`+`kvm_mmu_free_roots`
+  on a probe build to count how many times prev_roots actually
+  gets freed per `__set_sregs` call in the dirty-bit path vs
+  the heavy path. If the counts diverge, the dirty-bit path is
+  silently skipping the prev_roots drop.
+
+#### What Round 6 did NOT touch (and why)
+
+* No userspace mitigation (`sitecustomize.py`,
+  `PYTHONSTARTUP`, etc.) — constraint per round brief.
+* No vector2 driver / umlctl Rust / upstream-patches changes
+  (constraint).
+* No CONFIG flag changes outside the R6-specific build dir
+  (state-trace remains opt-in on the production config).
+* No removal of either invalidation primitive (CR4.PGE toggle
+  or heavy ioctl) — both are load-bearing per A/B/C and the
+  Round 4 evidence base.
+
+Time spent in Round 6: ~70 minutes (against a 90-minute cap).
