@@ -1275,3 +1275,185 @@ Time spent in Round 2: ~30 minutes (against a 90-minute cap).  All
 diagnostic infrastructure committed; the captured-pre-corruption ring
 dumps in `/tmp/dj-r2-B` are available for Round 3 inspection without
 re-running the soak.
+
+### Investigation Round 3 — 2026-05-17
+
+Round 3 was tasked with shipping a fix for the regs-leak fingerprint
+identified at the end of Round 2 (run-1 seq 133154 POST_TLB_SYNC,
+`run->s.regs` holding pid 34's leftover cr3/cr2/rip/vmm while
+`current` is already pid 32).  Acceptance criteria: either close the
+bug via 3× 30/30 PASS plus a 60-iter ≥99% PASS run, or return with a
+tighter hypothesis if the regs-leak is not the proximal cause.
+
+#### Outcome: returning with a tighter hypothesis (route b)
+
+The Round-2 regs-leak fingerprint, when walked carefully against the
+captured trace ring, is NOT the proximal cause of the failure.  The
+load path correctly rewrites the stale fields before KVM_RUN, and the
+remaining same-task same-mm corruption window points at a different
+mechanism (KVM guest-TLB / TDP cache staleness for mutable CPython
+bytecode pages).
+
+#### Trace re-analysis: the load path is correct
+
+Walking `/tmp/dj-r2-B run-1` seq 133152..133158 cycle (pid 34 NM
+exit → pid 32 dispatch) field-by-field:
+
+| seq    | op                 | pid | cr3        | cr2     | rip               | rsp               |
+|--------|--------------------|-----|------------|---------|-------------------|-------------------|
+| 133152 | POST_KVM_RUN  pid34| 34  | be4000     | 40bba010| ffffe000000021c0  | ffffe00000004fd8  |
+| 133153 | VCPU_RUN_ENTRY p32 | 32  | (run NULL — pre-pick window)                       |
+| 133154 | POST_TLB_SYNC p32  | 32  | **be4000** | **40bba010** | **ffffe000000021c0** | **ffffe00000004fd8** |
+| 133155 | POST_LOAD_SREGS p32| 32  | **bf1000** | **0**   | ffffe000000021c0  | ffffe00000004fd8  |
+| 133156 | POST_IST_RESTORE   | 32  | bf1000     | 0       | ffffe000000021c0  | ffffe00000004fd8  |
+| 133157 | POST_FPU_INSTALL   | 32  | bf1000     | 0       | ffffe000000021c0  | ffffe00000004fd8  |
+| 133158 | PRE_KVM_RUN   p32  | 32  | bf1000     | 0       | **40349d80**      | **7f7fff812248**  |
+
+Observations:
+
+1. **POST_TLB_SYNC captures BEFORE `kvm_v2_load_user_sregs` runs.**
+   The trace hook at vcpu.c:2244 fires after `um_tlb_sync` but
+   before the SREGS load — so `run->s.regs` necessarily shows the
+   PRIOR task's leftover state at that point.  Seeing pid 34's
+   cr3/cr2/rip there is *expected wiring*, not a bug.
+2. **POST_LOAD_SREGS at seq 133155 shows the correct rewrites.**
+   `cr3` flipped from `be4000` (pid 34's mm) to `bf1000` (pid 32's
+   mm).  `cr2` was zeroed by the cross-task gate at vcpu.c:1574.
+   `cr4` toggled PGE bit `40620 → 406a0`.  `KVM_SET_SREGS` ioctl
+   (cross-task gate at vcpu.c:1774) ran to drop KVM's TDP MMU
+   `prev_roots[]`.
+3. **GPRs (rip/rsp) are marshalled later, at PRE_KVM_RUN.**  The
+   GPR write at vcpu.c:2307 (`kvm_v2_marshal_to_kvm_regs`) happens
+   between POST_FPU_INSTALL and PRE_KVM_RUN, which is why
+   POST_LOAD_SREGS still shows pid 34's leftover GPRs.  By
+   PRE_KVM_RUN (seq 133158) the GPRs are pid 32's user-mode
+   rip=`40349d80` and rsp=`7f7fff812248`, with `host_ip` and
+   `host_sp` in the trace matching exactly.
+
+So at the point KVM_RUN actually consumes `run->s.regs` (between
+PRE_KVM_RUN and POST_KVM_RUN), every field is pid 32's correct
+value.  The Round-2 hypothesis that pid 34's state "leaks" into
+pid 32's KVM_RUN is contradicted by the trace.
+
+#### Empirical control: 3× 30-iter on non-trace runtime
+
+Three back-to-back 30-iter Django-loopback-none runs on
+`/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux`
+(no trace, no debugfs — production-shaped kernel):
+
+| Run | Result          | Path                |
+|-----|-----------------|---------------------|
+| 1   | 30/30 PASS      | `/tmp/dj-r3-baseline` |
+| 2   | 30/30 PASS      | `/tmp/dj-r3-run2`     |
+| 3   | **17/30 then FAIL** at iter 17 | `/tmp/dj-r3-run3`     |
+
+The iter-17 failure surfaced as the canonical
+`Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.`
+in pid 32 (the Django stdlib http server's eval loop).  Confirms
+the bug still reproduces at ~3-5% on the non-trace runtime — not
+just a trace-build artifact.  Acceptance criterion (a) is NOT met.
+
+#### Tighter hypothesis (route b): same-task same-mm bytecode read returns stale page
+
+The Round-2 fingerprint pointed at cross-task contamination via
+register state; the corrected reading is that the proximal cause is
+a **same-task same-mm read of stale guest memory** for a CPython
+bytecode page that another guest-mode write (CPython's bytecode
+specialization machinery) had updated since the prior dispatch.
+
+Supporting evidence:
+
+* The user-mode failure signature is `Executing a cache` — CPython
+  3.14's eval loop landed on a CACHE pseudo-opcode (specialization
+  cache slot) where a real opcode should have been.  This requires
+  the bytecode array's *content* to read back wrong, not for a
+  register to be wrong.
+* The Mode-1 SIGSEGV at user_rip=`53a69a` (cpython text) with
+  cr2=0 error=4 is the downstream consequence: a heap pointer in
+  CPython's eval state read NULL because a structure traversal
+  hit a bytecode mis-decoded as a pointer field.
+* Mode-2's EINTR-loop "stuck at user_rip=513cea cr2=0 cr3=baf000"
+  is the same NULL-deref failure but caught BEFORE the IDT[14]
+  stub fires — the in-guest TLB / TDP cache for the kernel-half
+  trampoline page is stale, so the #PF can't be delivered and
+  KVM_RUN keeps returning EINTR.
+* Both modes pin to the same task (pid 32 python http server) and
+  same user-text VA range — the specialization-prone hot loop in
+  CPython.  This is the workload fingerprint of bytecode-cache
+  divergence, not register-state divergence.
+
+The mechanism: CPython 3.14 self-modifies bytecode via specialization
+(rewrites opcodes in `_co_code_adaptive` mid-execution).  Each such
+write is a guest-mode store from user CPL.  KVM's TDP cache reflects
+the physmem update (because UML's spawner-mm-backed physmem mapping
+is mmu-notifier-visible to KVM); however the in-guest CPU's *own
+TLB* may have cached a translation for the bytecode page that
+predates the next attribute change.  On UP the per-dispatch
+`sregs->cr4 ^= X86_CR4_PGE` toggle at vcpu.c:1626 is supposed to
+flush via KVM's `mmu_reset_needed` path on the next vmenter — but
+the toggle is XOR, so two same-cr3 same-mm dispatches with a
+KVM_RUN that EINTR'd between them cancel the toggle (no net change
+in the cr4 field KVM consumes), leaving the guest TLB intact across
+the conceptual "two dispatches" boundary.
+
+This is consistent with Mode-2's `max_mm_lag: lag=888` from run-29
+— the same vCPU never bumped its `last_seen_tlb_gen` because no
+dispatch made forward progress through CR4-flush territory.
+
+#### What Round 3 did NOT touch (and why)
+
+I deliberately did NOT ship a code change to kvm-v2.  Reasons:
+
+1. The leading candidate fix (replace `cr4 ^= PGE` with
+   `cr4 |= PGE` on dispatches that just-returned-EINTR, or force a
+   non-XOR-cancelling flush) is a one-line change but it interacts
+   with the already-complex EINTR-rewind paths
+   (`kvm_v2_handle_nm_eintr_inline`, the LSTAR-EINTR rewind at
+   vcpu.c:2625, the cross-task gate at vcpu.c:1774).  Without a
+   reproducer that closes the bug, shipping a speculative change
+   risks introducing a new failure mode that takes another round
+   to diagnose.
+2. The existing SMP-T55 / T33 / T26 fixes already cover the
+   register / CR3 / FPU surfaces.  The remaining failure is in the
+   guest-TLB / TDP path — a different mechanism layer that wants
+   its own dedicated experiment (e.g., an unconditional
+   `KVM_SET_SREGS` ioctl after every EINTR to force a full
+   `__set_sregs2` path that drops `prev_roots[]`).
+3. Acceptance (b) was the user-sanctioned out for "regs-leak not
+   the proximal cause" — and that condition is met by the trace
+   re-analysis above.
+
+#### Concrete Round 4 next step
+
+The cleanest experiment to test the bytecode-page-staleness
+hypothesis without touching production code:
+
+1. Add a one-line probe at vcpu.c just before `os_ioctl_generic(
+   vcpu->vcpu_fd, KVM_RUN, 0)`: force a full `KVM_SET_SREGS`
+   ioctl on every dispatch (not just cross-task).  This forces
+   `__set_sregs2 → kvm_mmu_reset_context` which drops the TDP
+   `prev_roots[]` cache on EVERY entry.  If the failure rate
+   drops from ~3-5% to <1%, the hypothesis is confirmed and the
+   right shape is a narrower predicate ("force on
+   suspected-stale-tlb").  If unchanged, the hypothesis is
+   wrong and the mechanism is elsewhere.
+2. Concurrently, run a non-CPython workload (e.g., a small C
+   program that read-loops a self-modifying byte array) on the
+   same kvm-v2 runtime.  If the same "stale read" symptom
+   reproduces there, the CPython-specific bytecode-cache shape
+   is just the canary; the root cause is generic guest-TLB
+   coherence.  If CPython-only, the right fix may live in
+   CPython startup hardening (PYTHONUNBUFFERED + disable
+   specialization) rather than kvm-v2.
+
+#### Acceptance evidence
+
+3× 30-iter PASS counts: 30/30, 30/30, 17/30 (fail @ iter 17 with
+"Executing a cache").  60-iter run NOT attempted — preceding 17/30
+already disqualifies acceptance (a).
+
+No code change committed in Round 3.  Diagnostic value of the trace
+re-analysis (regs-leak is not the cause) committed via this memo
+update.
+
+Time spent in Round 3: ~85 minutes (against a 90-minute cap).
