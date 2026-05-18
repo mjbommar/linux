@@ -344,3 +344,115 @@ in the kvmmmu trace, correlate to the GFN of the bytecode page.
 * `~/src/r11-bpftrace/kvmmmu-trace.bt` — bpftrace script
 * `~/src/r11-bpftrace/kvmmmu-trace.out` — first capture (48 KB)
 * `~/src/r11-bpftrace/kvmmmu-trace-v2.out` — longer capture
+
+## Round 13 Addendum (2026-05-18): perf record kvmmmu + mmu_notifier sources
+
+Per stop-hook insistence on completing the deeper-debug plan
+(`51-kvm-v2-django-flake-deeper-debug-plan.md` Techniques A–F),
+ran Technique A (`perf record -a -g -e kvmmmu:*`) and Technique B
+(filtered bpftrace kvmmmu kprobes).
+
+### Technique A — perf record (1130s soak, 607 MB perf.data)
+
+Filtered properly on `new_spte 8000000000000000$` (= `SHADOW_NONPRESENT_VALUE`,
+KVM's "cleared" marker — Round 12's filter on `new_spte 0` missed
+these and reported 0 events incorrectly).
+
+Total SPTE clears: 621,836.
+- 568,768 (91%) traced to `kvm_v2_vm_destroy → kvm_v2_shutdown →
+  sysrq_handle_reboot` — end-of-iter VM teardown, NOT bug-relevant.
+- 53,068 (9%) mid-run, all from `kcompactd0`:
+  `kcompactd → compact_zone → migrate_pages → migrate_folio_unmap →
+   try_to_migrate → __rmap_walk_file → try_to_migrate_one →
+   __mmu_notifier_invalidate_range_start →
+   kvm_mmu_notifier_invalidate_range_start → kvm_unmap_gfn_range →
+   tdp_mmu_zap_leafs → handle_changed_spte`.
+
+Cheap dispositive: rerun with `vm.compaction_proactiveness=0` +
+THP off → all `compact_*` vmstat counters confirmed zero delta
+over a 15-min soak, yet a cache abort still captured. **Already
+in H5 — re-confirmed: kcompactd is not the cause.**
+
+### Technique B — bpftrace on `__mmu_notifier_invalidate_range_start`
+
+With KSM/khugepaged/compaction/THP-defrag/swappiness all off:
+
+240s of soak, 27,176 mmu_notifier invocations, **all** from
+`comm=linux` (UML's own host process). Breakdown:
+
+| Source | Count |
+| --- | --- |
+| `do_vmi_munmap → vms_complete_munmap_vmas → unmap_region` (UML's `kern_unmap`) | 23,861 |
+| `do_wp_page → handle_pte_fault` (CoW faults) | 3,048 |
+| `unmap_region → __mmap_region → do_mmap` (UML's `kern_map`) | 63 |
+| `change_protection_range → do_mprotect_pkey` (UML's mprotect) | 55 |
+| `madvise_vma_behavior` (do_madvise) | 42 |
+| `shmem_fallocate → madvise_remove` (MADV_REMOVE) | 34 |
+| `vma_adjust_trans_huge → __split_vma` | 30 |
+| `exec_mmap → load_elf_binary` (execve) | 20 |
+| `exit_mmap` (process exit) | 9 + 14 + 4 |
+
+26,965 of 27,176 reached `kvm_mmu_notifier_invalidate_range_start`.
+
+**Zero from external kernel threads** (kcompactd/kswapd/ksmd/
+khugepaged). All KVM SPTE zaps during a Django soak come from
+UML's own page-sync syscalls.
+
+### H11 (new) — Inverted gadget bounds check
+
+While auditing the gadget for the bug-relevant memory writes,
+disassembled `lstar_gadget.o` and compared to v1 archive's
+documented byte tables.
+
+```
+v1:  0x65 0x48 0x39 0x34 0x25 ...   (CMP r/m64, r64 → mem - reg)
+     "cmp %rsi, %gs:0x1030; jbe taken when cap <= rsi (rsi >= cap)" ✓
+v2:  0x65 0x48 0x3b 0x3c 0x25 ...   (CMP r64, r/m64 → reg - mem)
+     "cmp %gs:0x28, %rdi; jbe taken when rdi <= cap" ✗ INVERTED
+```
+
+In `lstar_gadget.S`, GAS emits opcode `0x3b` (CMP r64, r/m64)
+for `cmpq %gs:OFFSET, %rdi` because rdi is the destination
+register. The resulting compare is `rdi − cap`, and `jbe fallback`
+fires when `rdi <= cap`. Valid user pointers (`rdi < TASK_SIZE`)
+ALWAYS take the fallback; only kernel-space pointers would let
+the body execute.
+
+Practical effect: `h_time`, `h_getcpu`, and `h_clock_gettime`'s
+store paths are **dead code** in normal usage. Only the
+pid-family handlers (no bounds check) actually run the gadget
+body to completion. This is consistent with Round 9's result
+(disabling those three handlers reduced rate from 2/120 → 1/120
+within CI — they were already mostly inactive).
+
+This is NOT the cache-abort root cause (writes never reach user
+heap), but it IS a separate ABI/perf bug: clock_gettime/getcpu/
+time fast-paths don't actually exist in v2. Filed as T68. Fix:
+swap operand order to `cmpq %rdi, %gs:OFFSET` so GAS emits `0x39`.
+
+### Round 13 disposition
+
+Round 13 ruled out (re-confirmed): kcompactd migration, external
+mover threads (KSM/khugepaged/kswapd), host pagecache reclaim of
+python binary.
+
+Round 13 newly identified (separate issue): inverted bounds check
+in v2 gadget vs v1 — performance bug, not cache-abort cause.
+
+Root cause of cache flake remains UML-internal — most likely
+candidate is the deferred-PTE-sync / TLB-coherence interaction
+on the gadget-elided dispatch path (Open Question #2 in the
+"Hypotheses Not Yet Tested" section above).
+
+The next step needs the per-bytecode-page checksum monitor or
+gdb hardware-watchpoint approach (Techniques D + F in the
+deeper-debug plan) to catch the corrupting write red-handed.
+
+### Diagnostic artefacts (Round 13)
+
+* `~/src/r13-perf/kvm.perf.data` — 607 MB perf record (1130s)
+* `~/src/r13-perf/all-stacks.txt` — perf script -F dump
+* `~/src/r13-mmu-notifier/mmu-callers.bt` — bpftrace script
+* `~/src/r13-mmu-notifier/mmu-callers.out` — 240s capture
+* `~/src/r13-mmu-locked-soak/` — knobs-off short soak (40 iters)
+* `~/src/r13-no-compact-soak/` — compaction-off soak (40 iters)
