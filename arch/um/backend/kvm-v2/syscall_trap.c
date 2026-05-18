@@ -1735,6 +1735,50 @@ static int kvm_v2_handle_io_pf(struct uml_pt_regs *regs,
 	segv_handler(SIGSEGV, NULL, regs, NULL);
 
 	/*
+	 * Round 2 Django silent-crash hook (2026-05-17): if segv_handler
+	 * just called force_sig_fault(SIGSEGV/SIGBUS) — i.e., the fault
+	 * was unfixable and handle_page_fault returned -EFAULT / -EACCES —
+	 * the terminate-class signal is now queued on current. This is the
+	 * silent-crash path: the user task will be killed by the next
+	 * interrupt_end()'s do_signal without writing anything to stderr,
+	 * bypassing the user-mode tgkill+SIGABRT trigger in
+	 * kvm_v2_state_trace_capture()'s HANDLE_SYSCALL_PRE hook.
+	 *
+	 * Freeze the trace ring NOW, before interrupt_end() consumes the
+	 * signal and the task starts exiting. One-shot via cmpxchg inside
+	 * kvm_v2_state_trace_freeze — first hit wins. Captured pid/cr2/
+	 * user_rip in the dmesg log together with KVMV2T_DUMP entries from
+	 * the soak harness's debugfs dump pins down the moment of failure.
+	 *
+	 * We test sigismember (not fatal_signal_pending — that only checks
+	 * SIGKILL) on SIGSEGV and SIGBUS only; do not include SIGABRT
+	 * because the kernel-side path here never queues SIGABRT.
+	 */
+	if (current && current->sighand) {
+		unsigned long irqflags;
+		bool queued = false;
+
+		spin_lock_irqsave(&current->sighand->siglock, irqflags);
+		queued = sigismember(&current->pending.signal, SIGSEGV) ||
+			 sigismember(&current->pending.signal, SIGBUS) ||
+			 sigismember(&current->signal->shared_pending.signal,
+				     SIGSEGV) ||
+			 sigismember(&current->signal->shared_pending.signal,
+				     SIGBUS);
+		spin_unlock_irqrestore(&current->sighand->siglock, irqflags);
+		if (queued) {
+			char reason[96];
+
+			snprintf(reason, sizeof(reason),
+				 "fatal-segv cr2=%llx user_rip=%llx err=%llx",
+				 (unsigned long long)cr2,
+				 (unsigned long long)frame.user_rip,
+				 (unsigned long long)frame.error_code);
+			kvm_v2_state_trace_freeze(reason);
+		}
+	}
+
+	/*
 	 * SMP-T26 H_E experiment was tested here (2026-05-02): forced
 	 * TDP/EPT cache invalidation via madvise(MADV_DONTNEED) on the
 	 * spawner mm range corresponding to the freshly-mapped guest PA
