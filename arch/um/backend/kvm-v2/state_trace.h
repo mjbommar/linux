@@ -50,6 +50,16 @@ enum kvm_v2_trace_op {
 	KVMV2_OP_VCPU_RUN_EXIT        = 17, /* vcpu.c: bottom of vcpu_run  */
 	KVMV2_OP_TRACE_TRIGGER        = 18, /* dump trigger marker         */
 	KVMV2_OP_EINTR_INLINE_LSTAR   = 19, /* vcpu.c: SMP-T25 LSTAR-EINTR */
+	KVMV2_OP_DISPATCH_LOCATION    = 20, /* vcpu.c: Round 6 pool-share
+					     * correlation — records the
+					     * (host_cpu, vcpu, pid, mm,
+					     * dispatch_seq) tuple after the
+					     * per-host-CPU vCPU pick in
+					     * kvm_v2_vcpu_run so post-process
+					     * can correlate flakes with
+					     * pool-slot reuse / cross-CPU
+					     * task migration windows.
+					     */
 	KVMV2_OP_MAX
 };
 

@@ -2177,6 +2177,23 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	run = vcpu->kvm_run;
 
 	/*
+	 * Round 6 Deliverable D (2026-05-18): record the dispatch
+	 * (host_cpu, vcpu, pid, mm) tuple BEFORE any per-dispatch state
+	 * fixup. This trace point lets post-processing correlate
+	 * "Executing a cache" Python flakes with the preceding ~50
+	 * dispatches' pool-slot reuse / cross-host-CPU migration window
+	 * for the same guest task. The existing state-trace fields
+	 * cpu/pid/task_mm_ptr/vcpu_current_mm already carry the data;
+	 * KVMV2_OP_DISPATCH_LOCATION is just a labelled hook so dump
+	 * post-processors can filter for "dispatch arrival" entries
+	 * cheaply (op==20) without re-deriving "is this a vcpu_run
+	 * entry" from the broader VCPU_RUN_ENTRY op (which is captured
+	 * before vcpu is picked and therefore lacks vcpu.cpu / vcpu's
+	 * current_mm).
+	 */
+	KVMV2_TRACE(KVMV2_OP_DISPATCH_LOCATION, regs, run, vcpu);
+
+	/*
 	 * D.0a: lazy first-run CPUID install. The eager install at
 	 * vcpu_create_one was removed (kzalloc fails at init_backend
 	 * time before the buddy allocator is up). By first KVM_RUN the
