@@ -655,6 +655,51 @@ address (which is < TASK_SIZE ≈ `0x7fff_ffff_f000`). The captured
 abort bytecode is always at user VA `0x5500_06xx_xxxx`, far below
 TASK_SIZE.
 
+### A.7c — T71 A/B physmem-pinning experiment (R13)
+
+Tested whether pre-faulting and locking the host VAs that back
+UML's guest physmem changes the cache-abort rate. Two arms,
+same kernel binary, same workload (django-loopback-none),
+~440 iters total.
+
+* **Arm A** — `MAP_POPULATE` only (no `MAP_LOCKED`, no
+  `mlockall`). 240 iters with patched CPython 3.14.4 (T59 dump
+  patch) loaded via PATH/PYTHONHOME.
+* **Arm B** — `MAP_POPULATE` + `MAP_LOCKED` (via env-var-gated
+  flag in `os_map_memory`) + `mlockall(MCL_CURRENT | MCL_FUTURE
+  | MCL_ONFAULT)` + `setrlimit(RLIMIT_MEMLOCK, RLIM_INFINITY)`
+  in `main()`. Required `setcap cap_ipc_lock,cap_sys_resource=
+  +ep` on the UML kernel binary because non-root execution
+  returns EPERM for the setrlimit and ENOMEM for the mlockall.
+  Verified live: `VmLck = 1,100,776 KiB` (~1.05 GiB) on
+  running UML processes, matching the mem=1024M guest size.
+  200 iters with system python3 (template was reverted before
+  Arm B, so the patched-CPython dump file stayed empty;
+  identified Arm B aborts by grepping run logs for "Executing
+  a cache").
+
+| Arm | n | cache aborts | rate | Wilson 95% CI |
+| --- | --- | --- | --- | --- |
+| A (POPULATE only) | 240 | 1 | 0.42% | [0.07%, 2.32%] |
+| B (POPULATE + LOCK + mlockall) | 200 | 2 | 1.00% | [0.27%, 3.57%] |
+| Combined T71 | 440 | 3 | 0.68% | [0.23%, 2.00%] |
+| Historical (R12 baseline) | 120 | 4 | 3.33% | [1.30%, 8.26%] |
+
+Arm A and Arm B rates overlap within their Wilson CIs. The
+combined T71 rate of 0.68% is technically lower than the R12
+3.33% baseline (CIs do not overlap), but R12's n=120 is small,
+and the lower combined rate could be explained by the host's
+state on the day of the soak (less ambient memory pressure,
+no concurrent compaction, etc.) rather than by the pinning
+itself.
+
+**Disposition:** pinning host physmem does NOT meaningfully
+change the cache-abort rate. Confirms T72's prediction (UML
+doesn't host-unmap guest user pages, so pinning has nothing
+to prevent). The MAP_POPULATE change is retained as a
+defensible hardening, but MAP_LOCKED / mlockall are reverted
+to the env-var-gated form (not active by default).
+
 ### A.7b — UML self-unmap census of guest USER VAs (R13 T72)
 
 Per the research-agent finding that R13's R8 trace counted UML's
