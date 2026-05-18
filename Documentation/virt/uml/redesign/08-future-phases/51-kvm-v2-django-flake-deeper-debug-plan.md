@@ -586,31 +586,63 @@ Reopened by R13's T72 negative result:
 - The corruption is NOT mmu_notifier-mediated SPTE staleness on
   the bytecode page. Some other path is at work.
 
-Candidates for next-round (Round 14) work:
+Candidates for next-round (Round 14) work, with R13 audit status:
+
 - **H12 (CoW zero-fill)** — Python forks before module init?
   Unlikely (frozen-getpath fires during interpreter bootstrap,
-  before any user-level fork) but the spawner.c forkserver pattern
-  in kvm-v2 may cause a relevant CoW. Test: trace `do_wp_page` on
-  the bytecode page via kfunc bpftrace.
+  before any user-level fork — abort pid is the first python,
+  no fork yet) but the spawner.c forkserver pattern in kvm-v2
+  may cause a relevant CoW. Test: trace `do_wp_page` on the
+  bytecode page via kfunc bpftrace. **Status: PROBABLE NEGATIVE
+  (captured aborts are in pid=32, the first python; no fork
+  has happened).**
 - **H13 (FPU/XSAVE residue with zero-fill)** — SMP-T57 enabled
   XSAVE; if a subsequent `XRSTOR` or `FNINIT` zeros AVX state and
   the guest's CPython uses AVX `memset`, a wrong-length write
   could zero into the bytecode page. Test: rebuild CPython with
   `-mno-avx -mno-avx2 -mno-sse4` to disable AVX-based glibc
-  memset.
+  memset. **Status: R13 partial audit shows XSAVE save/restore
+  is only at snapshot-ioctl time (snapshot.c), NOT on per-dispatch
+  hot path. The per-dispatch FPU handling uses KVM_GET_FPU/SET_FPU
+  which is well-audited. Likely negative, but not 100% conclusive.**
 - **H14 (KVM-internal non-mmu_notifier bug)** — e.g., a
   `vcpu_enter_guest` path that writes to guest memory directly
-  via `kvm_write_guest`. Audit kvm-v2 for any such writes.
-- **H15 (Microarchitectural artefact)** — TLB-coherence corner
-  case under deeply-elided dispatch boundaries (gadget). Test:
-  add a forced `outb` every N gadget invocations to bring
-  dispatch frequency back to seccomp levels.
-- **H16 (CPython arena recycling)** — the Python obmalloc arena
-  allocator recycles freed PyMalloc blocks. If a freed bytecode
-  buffer's underlying arena pool gets re-used for fresh
-  zero-allocated PyObject struct fields, the zero-write zone
-  could land at the bytecode VA. Test: instrument
-  `_PyObject_Free` and `_PyObject_Malloc` for the bytecode VA.
+  via `kvm_write_guest`. **Status: RULED OUT by R13 code audit
+  (grep) — kvm-v2 has NO calls to `kvm_write_guest`,
+  `kvm_vcpu_write_guest`, `copy_to_user_kvm`, `kvm_vcpu_map`, or
+  similar host-side direct-write primitives. The only `copy_to_user`
+  reference in kvm-v2 is a COMMENT in region.c (no actual call).
+  No `memcpy`/`memset` targets guest VAs. UML's KVM backend never
+  writes guest memory directly through any host-side path.**
+- **H15 (Microarchitectural artefact / dispatch-elision)** —
+  TLB-coherence corner case under deeply-elided dispatch
+  boundaries (gadget). The leading candidate. Test: add a forced
+  `outb` every N gadget invocations to bring dispatch frequency
+  back to seccomp levels. Requires gadget asm change + UML
+  rebuild + soak. **Status: NOT YET TESTED; highest-priority
+  R14 experiment.**
+- **H16 (CPython specialization torn-write race)** — CPython 3.14
+  PEP 659 specialization writes cache slots in-place. If the
+  specialization machinery zero-fills cache slots BEFORE writing
+  the actual cached data, and the thread is interrupted (signal /
+  scheduler) between the zero-fill and the write, the slots stay
+  zero. Next dispatch reads 0x0000 codeunits and triggers TARGET
+  (CACHE). The bug would be CPython's, but only manifests on
+  kvm-v2 because the gadget makes syscalls so fast that
+  specialization races more often. Test: read CPython
+  Python/specialize.c for any pattern matching `memset(cache, 0,
+  ...) → ... write specialization data`. **Status: NOT YET
+  AUDITED; second-priority R14 experiment.**
+
+### Round 14 priority
+
+If T71 Arm B confirms MAP_LOCKED + mlockall has no rate effect
+(as T72 predicts), H15 and H16 become the only remaining live
+hypotheses. H15 is more invasive but more KVM-coherence-focused;
+H16 is a CPython internal audit and could be done without any
+kernel work. **Run H16 audit first** (cheap; could close the bug
+via "this is a CPython bug, file upstream"), then if negative,
+implement H15 (forced gadget exits).
 
 ### Plan
 
