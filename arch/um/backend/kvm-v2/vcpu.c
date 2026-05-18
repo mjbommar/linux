@@ -1076,6 +1076,13 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	v->fpu_owner_task  = NULL;
 
 	/*
+	 * Round 7 Branch B: per-vCPU dispatch-path counters start at zero.
+	 * See struct comment for rationale.
+	 */
+	v->dispatch_heavy_count = 0;
+	v->dispatch_cheap_count = 0;
+
+	/*
 	 * Phase C.3: enable KVM_CAP_SYNC_REGS for this vCPU. With
 	 * kvm_valid_regs set at create time, every subsequent KVM_RUN
 	 * populates kvm_run->s.regs.{regs,sregs} into the mmap'd struct
@@ -1168,6 +1175,30 @@ static void kvm_v2_vcpu_destroy_one(struct kvm_v2_vcpu *v)
 {
 	if (v->vcpu_fd < 0)
 		return;
+
+	/*
+	 * Round 7 Branch B: report the lifetime dispatch path split
+	 * before tearing the vCPU down. The numerator/denominator is
+	 * what Round 7 is trying to distinguish — does the cheap
+	 * dirty-bit path dominate dispatches even on the failing
+	 * kvm-v2 Django workload, and does the heavy ioctl gate fire
+	 * at the rate the Round 4 tlb_gen-lag analysis predicted?
+	 */
+	{
+		u64 heavy = v->dispatch_heavy_count;
+		u64 cheap = v->dispatch_cheap_count;
+		u64 total = heavy + cheap;
+
+		pr_info("um: kvm-v2 vcpu_destroy: cpu=%d dispatches=heavy:%llu cheap:%llu total:%llu heavy_pct=%llu.%02llu\n",
+			v->cpu,
+			(unsigned long long)heavy,
+			(unsigned long long)cheap,
+			(unsigned long long)total,
+			(unsigned long long)(total ? heavy * 100 / total : 0),
+			(unsigned long long)(total
+				? (heavy * 10000 / total) % 100
+				: 0));
+	}
 
 	/*
 	 * mmap of kvm_run survives the vcpu_fd close (the mapping is
@@ -1824,6 +1855,14 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 					  (unsigned long)&full);
 
 		/*
+		 * Round 7 Branch B: dispatch went through the heavy
+		 * `KVM_SET_SREGS → __set_sregs → kvm_mmu_reset_context`
+		 * path. Single-writer per vCPU (this dispatch thread under
+		 * migrate_disable), no atomic needed.
+		 */
+		vcpu->dispatch_heavy_count++;
+
+		/*
 		 * SMP-T47 (mainstream-readiness audit P2 #6): if this
 		 * cross-task ioctl ever fails, the heavy
 		 * `__set_sregs2 → kvm_mmu_reset_context` path didn't run
@@ -1839,6 +1878,18 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 			pr_warn_ratelimited("um: kvm-v2 prev_roots-drop KVM_SET_SREGS failed (rc=%d) on vcpu=%d cross_task=%d lag=%llu — stale prev_roots[] possible; SMP-T33/T56 bug class returns\n",
 					    rc, vcpu->cpu, cross_task,
 					    (unsigned long long)vcpu->last_dispatch_tlb_lag);
+	} else {
+		/*
+		 * Round 7 Branch B: dispatch will rely on the cheap
+		 * `KVM_SYNC_X86_SREGS` dirty-bit path inside KVM's
+		 * `sync_regs() → __set_sregs` on the next KVM_RUN entry.
+		 * Both heavy and cheap paths drive the same KVM helper,
+		 * so per-vCPU heavy/cheap totals at shutdown distinguish
+		 * "the gate fires" from "the cheap path leaks past the
+		 * MMU reset" if the cheap counter grows without bound and
+		 * dispatch failures still occur.
+		 */
+		vcpu->dispatch_cheap_count++;
 	}
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;

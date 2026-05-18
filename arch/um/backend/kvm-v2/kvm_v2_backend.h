@@ -513,6 +513,39 @@ struct kvm_v2_vcpu {
 	 */
 	struct task_struct *eintr_run_task;
 	unsigned int        eintr_run_count;
+
+	/*
+	 * Round 7 Branch B (2026-05-18): per-vCPU dispatch path audit.
+	 *
+	 * The kvm-v2 Django-loopback flake (state-audit/44 Round 4-6) is
+	 * gated through kvm_v2_load_user_sregs at vcpu.c:1819: when
+	 * `cross_task || lag>=KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD` we
+	 * issue a heavy `KVM_SET_SREGS` ioctl (the "prev_roots[]-drop"
+	 * path); otherwise the cheap `KVM_SYNC_X86_SREGS` dirty-bit path
+	 * runs on the next KVM_RUN. Round 4 showed forcing heavy on every
+	 * dispatch suppresses the flake; the narrowed gate retains a 1%
+	 * residual that the cheap path leaks past. Both code paths
+	 * ultimately invoke `__set_sregs → kvm_mmu_reset_context` in KVM,
+	 * so under the "they're functionally equivalent" framing the gate
+	 * should not matter for the prev_roots[]-staleness class of bug.
+	 *
+	 * These counters expose the empirical heavy/cheap split per vCPU
+	 * so the next post-soak inspection (`pr_info` at vcpu_destroy +
+	 * a ratelimited tick every 1M dispatches) confirms (a) the heavy
+	 * path is firing on the order Round 4 predicted, and (b) the cheap
+	 * path actually dominates dispatch volume. If a future fix forces
+	 * heavy-only (or vice versa), the per-vCPU totals fall out as a
+	 * single line in dmesg without re-enabling the state_trace ring
+	 * (which Round 6 showed Heisenbugs away the flake).
+	 *
+	 * Plain u64 (not atomic): kvm_v2_load_user_sregs is only ever
+	 * called from this vCPU's dispatch thread under migrate_disable(),
+	 * so there is no concurrent writer. The destroy-side read is
+	 * after kvm_v2_vcpu_destroy_one has serialised against all
+	 * dispatch (the VM is tearing down).
+	 */
+	u64 dispatch_heavy_count;
+	u64 dispatch_cheap_count;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);
