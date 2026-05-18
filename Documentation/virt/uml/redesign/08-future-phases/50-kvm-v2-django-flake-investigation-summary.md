@@ -223,3 +223,74 @@ demonstrably correct under audit? Either:
 
 The next round needs the bpftrace + CPython-debug-with-gdb
 tooling I keep promising but haven't actually wired up.
+
+## Round 11 Addendum (2026-05-18): bpftrace + cscope evidence
+
+Per stop-hook insistence, ran the user-named techniques: bpftrace
+uprobes on UML kernel binary's marshal/io_trap functions + cscope
+cross-references on regs->gp[] marshal paths.
+
+### Setup
+
+* **cscope index** built over `arch/um arch/x86/kvm virt/kvm`
+  (386 files). Stored at `~/src/r11-bpftrace/cscope.out`.
+* **bpftrace** with uprobes on `kvm_v2_marshal_from_kvm_regs`,
+  `kvm_v2_marshal_to_kvm_regs`, `kvm_v2_handle_io_trap` of UML
+  kernel binary `.build/um-vector-r8-t58/linux`. Plus tracepoints
+  `signal:signal_generate` and `signal:signal_deliver` for
+  SIGABRT/SIGSEGV to comm="python3*".
+* Soak ran concurrently with patched CPython for ground-truth
+  cache-abort dump.
+
+### Evidence captured
+
+* **n=240 across two soaks**: 4 SIGABRT events captured, 1 cache
+  hit captured WITH register-state + bytecode dump.
+* **trace volume**: 4.6GB + 2.0GB across two runs (~7 million
+  marshal events per minute under load).
+* **cscope confirmed**: only kvm-v2 host code that writes to
+  regs->gp[HOST_DX/R8/R10] is the SMP-T58 EINTR-mid-LSTAR-gadget
+  recovery at vcpu.c:2787-2794. No other host-side writes to those
+  user-affecting GPRs.
+* **bpftrace confirmed for failing pid (host pid 65376, guest
+  pid 32 running ipaddress.py _make_netmask)**:
+  - 906K events captured for that pid
+  - Zero `munmap` / `mmap` / `madvise` / `mremap` events targeted
+    the bytecode page (0x550000818xxx)
+  - 1509 `brk` events but all oscillated at heap boundaries
+    BELOW the bytecode page; bytecode page was always within the
+    heap-mapped region per /proc/self/maps
+  - No syscall in the trace zeroes the bytecode region directly
+
+### What this means
+
+Syscall-level memory clearing is ruled out. The bug is BELOW the
+user-syscall layer — at the KVM/TDP/SPTE level. The corrupting
+mechanism does NOT pass through any host-visible syscall.
+
+The narrowed hypothesis space:
+- KVM-internal TDP/SPTE staleness triggered by reduced
+  dispatch-boundary frequency under the gadget path.
+- Some specific KVM kvmmmu code path that the gadget triggers
+  more often than the no-gadget path.
+
+To distinguish requires KVM-internal tracing (kvmmmu tracepoints
++ correlation with bytecode VAs). bpftrace cannot observe the
+mechanism from the host-userspace level alone.
+
+### Diagnostic artefacts preserved
+
+* `~/src/r11-bpftrace/cscope.out` — cross-reference index
+* `~/src/r11-bpftrace/cscope.files` — file list
+* `~/src/r11-bpftrace/marshal-trace-v2.bt` — bpftrace script
+* `~/src/r11-bpftrace/marshal-trace-v3.out` — 2GB trace + 1 SIGABRT
+* `~/src/r11-bpftrace/marshal-trace-1.out` — 76MB earlier trace
+* `/home/mjbommar/cache-abort-dump.log` — CPython ground-truth dump
+
+### Round 11 disposition
+
+Still no confirmed root cause. The bpftrace + cscope work
+narrowed the mechanism further (ruled out user-syscall-mediated
+corruption) but the actual KVM-internal mechanism remains
+unidentified. Operational workaround
+`CONFIG_UM_BACKEND_KVM_V2_GADGET=n` remains the path to ship.
