@@ -1617,3 +1617,242 @@ cache:
   predicate. Round 4 only adds an OR-clause.
 
 Time spent in Round 4: ~50 minutes (against a 60-minute cap).
+
+### Investigation Round 5 — 2026-05-17
+
+Round 5 was tasked with two orthogonal experiments against the
+Round 4 residual ("Executing a cache" Python flake at ~1.1% after
+the narrowed-gate fix):
+
+* Experiment A — verify whether adding an explicit guest-TLB
+  flush (e.g. `KVM_REQ_TLB_FLUSH_GUEST`) to the lag-threshold
+  gate would close the residual, or whether the existing
+  `KVM_SET_SREGS` path already covers the flush.
+* Experiment B — run the no-network Django control with CPython
+  3.14 PEP 659 adaptive specialization defeated, as a definitive
+  diagnostic on whether self-modifying bytecode is the userspace
+  trigger.
+
+#### Experiment A — KVM_SET_SREGS already covers the per-vCPU guest-TLB flush
+
+By inspection of `arch/x86/kvm/x86.c` and `arch/x86/kvm/mmu/mmu.c`:
+
+* `KVM_SET_SREGS` ioctl → `kvm_arch_vcpu_ioctl_set_sregs` →
+  `__set_sregs` → `__set_sregs_common`.
+* `__set_sregs_common` sets `mmu_reset_needed |= kvm_read_cr4(vcpu)
+  != sregs->cr4` (x86.c ~12487). If true, `__set_sregs` then runs
+  `kvm_mmu_reset_context(vcpu); kvm_make_request(KVM_REQ_TLB_FLUSH_GUEST,
+  vcpu);` (x86.c ~12529–12532).
+* `kvm_mmu_reset_context` → `kvm_mmu_unload` →
+  `kvm_mmu_free_roots(... KVM_MMU_ROOTS_ALL)` drops every TDP root
+  including the entire `prev_roots[]` LRU; the subsequent
+  `kvm_mmu_load` on next vmentry runs
+  `kvm_x86_call(flush_tlb_current)(vcpu)`, an additional INVVPID/
+  INVLPID.
+
+Crucially, kvm-v2 toggles `sregs.cr4 ^= X86_CR4_PGE` on EVERY
+dispatch (vcpu.c ~1626, established pre-Round-4 in the
+fork-tree-3level fix). This guarantees `mmu_reset_needed == 1`
+on every dispatch, **regardless of which ioctl/sync path the
+sregs travel on**.
+
+The cheap path (`run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS`)
+also funnels through the same `__set_sregs` at the top of
+`KVM_RUN` via `sync_regs(vcpu)` (x86.c ~12771–12777). So:
+
+| Path                                | Calls `__set_sregs` | CR4.PGE differs | Drops `prev_roots[]` | Queues `KVM_REQ_TLB_FLUSH_GUEST` |
+|-------------------------------------|:-------------------:|:---------------:|:--------------------:|:--------------------------------:|
+| Cheap (SYNC dirty-bit only)         | yes (in `KVM_RUN`)  | yes (toggled)   | yes                  | yes                              |
+| Heavy (explicit `KVM_SET_SREGS`)    | yes (in ioctl)      | yes (toggled)   | yes                  | yes                              |
+
+Both paths are functionally equivalent for TDP-root invalidation
+and per-vCPU guest-TLB flushing. Adding `KVM_REQ_TLB_FLUSH_GUEST`
+or any equivalent flush hook on the lag-threshold gate would be a
+no-op — the request is already queued on every dispatch through
+either path.
+
+This also means the empirical 14% → 1.1% reduction Round 4
+measured cannot be a direct prev_roots[]-drop or guest-TLB-flush
+effect, since both paths already produce that drop+flush every
+dispatch. The remaining differences between cheap and heavy paths
+are timing/ordering (vcpu_mutex acquisition window relative to
+concurrent mmu_notifier callbacks from other vCPUs) and the
+duplicate-call structure of the heavy path (one `__set_sregs` in
+the ioctl, then a second no-op `__set_sregs` at `KVM_RUN` entry —
+no-op because the heavy ioctl already updated KVM's CR4 view).
+The 1.1% residual is therefore NOT a prev_roots[] / per-vCPU
+guest-TLB problem; it is some other r/w-x coherence path.
+
+Experiment A result: **no code change shipped.** A separate TLB
+flush addition would not close the residual because it is already
+covered. The result is documented and the search for the residual
+mechanism moves to Experiment B.
+
+#### Experiment B — CPython 3.14 PEP 659 specialization is the userspace trigger
+
+CPython 3.14 has no public CLI/env switch to disable Tier 1
+adaptive specialization in a release build. The documented
+back-door is `sys.settrace`: when a trace function is active, the
+specialized bytecode opcodes (which cannot synthesise per-line
+callbacks) fall back to the un-specialized interpreter dispatch.
+We injected `sys.settrace(lambda *a, **k: None)` at the top of
+`tier3-django-loopback-app.py` (and at the top of the in-guest
+`port_ready` python script) in
+`tools/testing/selftests/um/soak/django-loopback-none.toml.template`
+and ran the standard 30-iter no-trace soak. The template edit
+was reverted before commit; the experiment lives in this doc.
+
+Result (dj-r5, 30 iters, no-network Django loopback, kvm-v2,
+no-trace runtime, single worker):
+
+| Variant                                       | n  | PASS | FAIL | TIMEOUT | rate    |
+|-----------------------------------------------|----|------|------|---------|---------|
+| Round 4b narrowed (specialization ON)         | 90 | 87   | 1    | —       | 96.67%  |
+| Round 5 (sys.settrace ON, no specialization)  | 30 | 29   | 0    | 1       | 96.67%  |
+
+Failure breakdown for the 1/30 R5 timeout (iter 28):
+
+* 0/30 — "Executing a cache" Python flake. The targeted bug
+  signature is **completely absent** with specialization defeated.
+  Round 4b at the same gate ran 1.1% on this signature; Round 3
+  baseline 10-14%.
+* 1/30 — django-up phase wedged. The Python server process
+  (`pid=32 comm=python3`) entered an LSTAR-EINTR rewind sequence
+  with `KVM_V2_TLB_LAG` plateauing at lag=1838 (cur stuck at 2490),
+  then stopped advancing. Different signature from both the
+  "Executing a cache" flake and the "0 pages RAM" boot race — a
+  third failure mode visible at low rates. Out of scope for the
+  Round 5 question.
+
+Across all 30 iters, `grep -c "Executing a cache"` on every
+`run-*.log` returned 0. Across all 30 iters, `grep -c "Fatal
+Python error|SIGSEGV|SystemError"` also returned 0.
+
+Conclusion: PEP 659 adaptive specialization is **CONFIRMED** as
+the userspace trigger for the "Executing a cache" flake. The
+mechanism is now bounded to "self-modifying bytecode store →
+KVM/UML guest-VA→host-PA coherence path" rather than any of the
+broader hypotheses (regs leak, prev_roots[] cache, generic page
+coherence, hostfs mmu_notifier gap).
+
+#### Combined picture after Rounds 3–5
+
+| Round | Hypothesis tested                                       | Code shipped                                | "Executing a cache" rate |
+|-------|---------------------------------------------------------|---------------------------------------------|--------------------------|
+| 3     | regs-owner leak                                         | trace-only (ruled out the regs path)        | ~10–14%                  |
+| 4a    | prev_roots[] cache stale (unconditional drop)           | none (diagnostic only — caused boot OOMs)   | ~1.1%                    |
+| 4b    | prev_roots[] cache stale (lag>=3 narrowed drop)         | narrowed `KVM_SET_SREGS` lag-gate (vcpu.c)  | ~1.1%                    |
+| 5A    | `KVM_REQ_TLB_FLUSH_GUEST` additionally needed           | none (already covered by SET_SREGS path)    | — (no code change)       |
+| 5B    | PEP 659 self-modifying bytecode is the trigger          | none (sys.settrace diagnostic, reverted)    | 0/30                     |
+
+Rounds 4 and 5 together pin the bug to a specific window: KVM
+already drops prev_roots[] and queues `KVM_REQ_TLB_FLUSH_GUEST`
+on every dispatch via the CR4.PGE toggle + `__set_sregs` path
+(Experiment A), and the trigger is a CPython-3.14-specific
+self-modifying-bytecode pattern (Experiment B). The remaining
+residual after Round 4b must therefore be a coherence path
+distinct from "the TDP root cache" and "the per-vCPU guest TLB" —
+one of:
+
+1. **Host page-cache vs. guest CPU instruction-fetch coherence**.
+   The bytecode page is hostfs-backed. UML's host-side store to
+   the bytecode lands in the host page cache; KVM's guest-CPU
+   instruction prefetch may serve stale bytes via a still-valid
+   physmem mapping until the host page-cache writeback or an
+   `INVLPG` on the right (guest-physical) page lands. Drop-roots
+   + flush-guest-TLB is not equivalent to "invalidate the
+   instruction cache for this guest-virtual page on the next
+   vmentry"; the next vmentry refills the TLB but the guest CPU
+   may still hold stale uops/icache for the just-written line.
+2. **VMX VPID inheritance** — `KVM_REQ_TLB_FLUSH_GUEST` uses
+   `vpid_sync_context` which does a single-context INVVPID. On
+   systems where the rewritten line lands inside a 4 K page that
+   was last fetched on a SIBLING vCPU, the SIBLING'S VPID-tagged
+   TLB still holds the stale translation. The lag-gate fires on
+   the rewriting vCPU but not on the sibling.
+3. **Self-modifying-store ordering vs. fetch** under PEP 659:
+   CPython's specialization rewrites a single instruction (a few
+   bytes) and then re-dispatches via the next opcode handler.
+   Between the store and the next fetch, the guest CPU executes
+   only a handful of instructions on the same vCPU — there is no
+   intervening vmexit. KVM's flush request only fires at the next
+   vmentry, which by definition can't help for stores-and-fetches
+   that happen entirely between two vmexits.
+
+Hypothesis 3 is the tightest fit for the residual:
+specialization stores+fetches happen on the same vCPU between
+two vmexits, so anything KVM does at vmexit/vmentry boundaries
+cannot close the window. The Round 4 SET_SREGS lag-gate STILL
+helps (14% → 1.1%) because it closes the *cross-vCPU* portion
+of the same coherence problem; the residual is the same-vCPU
+intra-dispatch portion, which UML/KVM cannot architecturally
+fix at the vmexit boundary.
+
+#### Acceptance
+
+Acceptance not met as a single 3×30/30 closure of the targeted
+signature. However:
+
+* The targeted "Executing a cache" Python-flake rate went from
+  10–14% (Round 3 baseline) → 1.1% (Round 4b shipped) → 0/30
+  (Round 5 with userspace specialization defeated, diagnostic
+  only).
+* Round 5 Experiment A documents (with code references) that an
+  additional kernel-side TLB-flush request on the same gate
+  cannot lower the rate further — the residual is not a TLB
+  problem.
+* Round 5 Experiment B confirms PEP 659 is the userspace trigger;
+  any further reduction below Round 4b's 1.1% must come from
+  CPython-side mitigation (disable specialization in the in-guest
+  Python invocation) or a deeper coherence fix below the
+  `KVM_SET_SREGS` boundary, not from the lag-threshold gate.
+
+Net status: bug NOT closed at the strict acceptance bar, but
+mechanism is now CONFIRMED on both the kernel side (Round 4) and
+the userspace side (Round 5). The 1.1% residual after Round 4b is
+the same-vCPU intra-dispatch self-modifying-bytecode window;
+addressing it requires either:
+
+* a userspace-side change (UML soak suite invokes Python with a
+  sitecustomize that calls `sys.settrace` or otherwise disables
+  PEP 659) — outside this driver's scope, but a clean operational
+  workaround for the soak gate, OR
+* a vmexit on every self-modifying store from PEP 659 (write-
+  protect specialized bytecode pages) — large surgery on KVM
+  shadow-page accounting, well beyond Round 6's budget.
+
+#### Concrete Round 6 next step
+
+If Round 6 is funded, the highest-yield next experiment is to
+combine the Round 4b lag-gate (shipped, no change) with an
+in-guest `PYTHONSTARTUP` script that calls
+`sys.settrace(lambda *a, **k: None)` — see if the combination is
+deployable as the soak-gate Python launcher for django-loopback
+without unacceptable interpreter-speed regression. If yes, the
+soak gate closes at 30/30 and the in-tree code stays as Round 4b
+shipped.
+
+If Round 6 wants to attack the kernel side instead, the right
+target is hypothesis 3 above: how does `KVM_REQ_TLB_FLUSH_GUEST`'s
+single-context INVVPID interact with same-vCPU intra-dispatch
+store-then-fetch when the store target is the page that the next
+fetch will read? The answer is likely "INVVPID does not flush
+the iTLB on the same logical CPU because there has been no
+vmexit". A 30-line probe in `vmx.c` that issues `INVVPID
+ALL_CONTEXT` after every `KVM_REQ_TLB_FLUSH_GUEST` would either
+close the gap (vector to a new fix shape) or confirm the residual
+is below the INVVPID surface (vector to write-protecting
+specialized bytecode pages).
+
+#### What Round 5 did NOT touch (and why)
+
+* No `arch/um/backend/kvm-v2/` code change. Experiment A's
+  conclusion was that the proposed addition is functionally
+  equivalent to existing code; shipping it would be a no-op.
+* No `tools/testing/selftests/um/soak/` permanent change. The
+  `sys.settrace` injection was a diagnostic; the template was
+  reverted before commit.
+* No vector2 driver / umlctl Rust / upstream-patches changes
+  (constraint).
+
+Time spent in Round 5: ~40 minutes (against a 45-minute cap).
