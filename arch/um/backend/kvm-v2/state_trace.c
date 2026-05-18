@@ -80,7 +80,23 @@ DEFINE_STATIC_KEY_FALSE(kvm_v2_state_trace_key);
  */
 static atomic_t trace_frozen = ATOMIC_INIT(0);
 
-#define KVMV2_TRACE_RING_BYTES_DEFAULT  (2UL * 1024 * 1024)
+/*
+ * Round 2 (Django investigation, 2026-05-17): the default 2 MB / CPU
+ * ring captures only ~5400 entries, but Python startup runs orders of
+ * magnitude more syscalls. Bumped to 32 MB / CPU so the
+ * fatal-signal / fatal-segv auto-freeze (capture()'s POST-segv_handler
+ * and HANDLE_SYSCALL_PRE hooks) lands inside the still-live ring with
+ * room for the full pre-corruption window. CI configs can override via
+ * the new `kvm_v2_trace_bytes=` kernel parameter or the existing
+ * debugfs `ring_bytes` file (read at next enable=1 transition).
+ *
+ * vmalloc accounting: with KVMV2_TRACE_RING_BYTES_DEFAULT = 32 MB and
+ * NR_CPUS_DEFAULT = 1 (UP), this consumes 32 MB of vmalloc on a 1 GB
+ * UML mem config — well under the vmalloc area's headroom on x86_64.
+ * SMP CI configs that need to scale to NR_CPUS > 1 should set
+ * kvm_v2_trace_bytes= explicitly to bound total vmalloc cost.
+ */
+#define KVMV2_TRACE_RING_BYTES_DEFAULT  (32UL * 1024 * 1024)
 #define KVMV2_TRACE_DUMP_BATCH          32
 
 struct kvm_v2_trace_ring {
@@ -601,6 +617,50 @@ static int __init kvm_v2_state_trace_enable_at_boot(char *unused)
 	return 0;
 }
 __setup("kvm_v2_trace_enable", kvm_v2_state_trace_enable_at_boot);
+
+/*
+ * Round 2 (2026-05-17): override the per-CPU ring size from the kernel
+ * command line. Useful for CI configs that need a smaller default than
+ * the now-32 MB compile-time default, or for investigations that want
+ * an even bigger ring (e.g., 64 MB) without recompiling. Format:
+ * `kvm_v2_trace_bytes=<unsigned-long>`. Accepts bare integers (bytes)
+ * or 'k'/'m'/'g' suffix via memparse(). Read once at boot — must
+ * appear BEFORE `kvm_v2_trace_enable` or be combined in the same
+ * cmdline so the boot-arm initcall picks up the override.
+ */
+static int __init kvm_v2_state_trace_set_bytes(char *str)
+{
+	unsigned long sz;
+
+	if (!str || !*str)
+		return 0;
+	sz = memparse(str, NULL);
+	if (sz < 64UL * sizeof(struct kvm_v2_state_snap))
+		sz = 64UL * sizeof(struct kvm_v2_state_snap);
+	ring_bytes = sz;
+	return 0;
+}
+__setup("kvm_v2_trace_bytes=", kvm_v2_state_trace_set_bytes);
+
+/*
+ * Round 2 (2026-05-17, Django silent-crash hook): freeze the trace ring
+ * from any kvm-v2 call site that has just identified an
+ * about-to-terminate event whose root cause is upstream in the trace
+ * window. One-shot via cmpxchg — first hit wins. `reason` is logged for
+ * post-mortem grep ("KVMV2T_ANOMALY <reason>").
+ *
+ * Distinct from kvm_v2_state_trace_capture()'s built-in HANDLE_SYSCALL_PRE
+ * fatal-signal trigger, which only catches USER-initiated signal
+ * delivery (tgkill/tkill/kill/rt_sigqueueinfo). This helper is for
+ * KERNEL-initiated signal delivery (force_sig_fault SIGSEGV/SIGBUS from
+ * segv_handler) where there is no syscall hook to ride.
+ */
+void kvm_v2_state_trace_freeze(const char *reason)
+{
+	if (atomic_cmpxchg(&trace_frozen, 0, 1) == 0)
+		pr_emerg("KVMV2T_ANOMALY %s pid=%u — froze trace ring\n",
+			 reason, current ? current->pid : 0);
+}
 
 /*
  * Defer ring alloc + static-key enable to subsys_initcall — vmalloc and

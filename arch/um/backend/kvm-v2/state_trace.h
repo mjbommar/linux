@@ -122,6 +122,7 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 
 void kvm_v2_state_trace_dump(const char *reason);
 void kvm_v2_state_trace_clear(void);
+void kvm_v2_state_trace_freeze(const char *reason);
 
 #define KVMV2_TRACE(op_, regs_, run_, vcpu_) do {			\
 	if (static_branch_unlikely(&kvm_v2_state_trace_key))		\
@@ -137,6 +138,7 @@ static inline void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 					      struct kvm_v2_vcpu *vcpu) { }
 static inline void kvm_v2_state_trace_dump(const char *reason) { }
 static inline void kvm_v2_state_trace_clear(void) { }
+static inline void kvm_v2_state_trace_freeze(const char *reason) { }
 
 #define KVMV2_TRACE(op_, regs_, run_, vcpu_) do { } while (0)
 
