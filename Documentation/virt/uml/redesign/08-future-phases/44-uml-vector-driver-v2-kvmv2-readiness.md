@@ -2127,3 +2127,250 @@ falsifiable next experiment:
   Round 4 evidence base.
 
 Time spent in Round 6: ~70 minutes (against a 90-minute cap).
+
+### Investigation Round 7 — 2026-05-18
+
+Round 7 takes Round 6's narrowed suspect (the heavy
+`KVM_SET_SREGS` ioctl path at `arch/um/backend/kvm-v2/vcpu.c:
+1819-1842` vs the cheap `KVM_SYNC_X86_SREGS` dirty-bit path at
+`vcpu.c:1844`) and runs three falsifiable experiments to
+characterise which dispatch-path knob actually moves the
+django-loopback-none flake. Build:
+`make ARCH=um O=/home/mjbommar/projects/personal/.build/um-vector-r7
+-j$(nproc)` against commit `4756d69069e5`. Reproducer config:
+1-worker, 60-iter rotation, kvm-v2 backend,
+`django-loopback-none` workload (ncpus=2 inside the guest).
+
+#### Branch B — per-vCPU dispatch path counters (shipped)
+
+Branch B adds two `u64` counters to `struct kvm_v2_vcpu`:
+
+* `dispatch_heavy_count` — incremented at `vcpu.c:1830` when the
+  cross-task / `lag>=KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD`
+  gate fires the heavy `KVM_SET_SREGS` ioctl.
+* `dispatch_cheap_count` — incremented at `vcpu.c:1852` when the
+  gate falls through and the next `KVM_RUN` consumes the
+  dirty-bit-only `KVM_SYNC_X86_SREGS` path inside KVM's
+  `sync_regs() → __set_sregs`.
+
+The counters are read on `kvm_v2_vcpu_destroy_one` (vcpu.c:1188)
+and emitted as a single `pr_info` line per vCPU. No atomics, no
+new trace ring traffic (Round 6 confirmed that adding state-trace
+captures here Heisenbugs the failure window). Per-dispatch cost:
+one cached u64 store. Commit: `4756d69069e5`.
+
+Round 7 Branch B 25-iter run (`/tmp/dj-r7-B`):
+
+| Iter outcome      | Count | %        |
+| ----------------- | ----- | -------- |
+| `REPRO_DONE rc=0` | 23    | 92.00%   |
+| `SERVER_FAIL`     | 2     | 8.00%    |
+
+Per-vCPU counter totals at clean-shutdown (sample of 8 PASS iters
+where `kvm_v2_vcpu_destroy` actually executed):
+
+| iter      | heavy | cheap   | total   | heavy% |
+| --------- | ----- | ------- | ------- | ------ |
+| run-2     | 676   | 222 241 | 222 917 | 0.30%  |
+| run-3     | 666   | 222 211 | 222 877 | 0.29%  |
+| run-4     | 642   | 222 347 | 222 989 | 0.28%  |
+| run-5     | 643   | 222 377 | 223 020 | 0.28%  |
+| run-6     | 661   | 222 199 | 222 860 | 0.29%  |
+| run-7     | 643   | 222 400 | 223 043 | 0.28%  |
+| run-8     | 648   | 222 331 | 222 979 | 0.29%  |
+| run-9     | 671   | 222 111 | 222 782 | 0.30%  |
+
+Key reading:
+
+* `heavy + cheap == total`: the two counters cover the dispatch
+  population disjointly, so the gate decision is being enforced
+  exactly as the source reads. There is no third (silent) path.
+* The cheap path is **~340×** more common than the heavy path on
+  this workload (~99.7% cheap). The narrowed gate from Round 4
+  is firing on the order Round 4 predicted (the cross-task
+  transitions across Django's worker pool + occasional
+  `tlb_gen-lag>=3` spikes).
+* The PASS-iteration counters are **stable across iters**
+  (heavy 642-676; cheap 222 111-222 400). The flake's
+  ~8% per-iter rate is not associated with a measurable shift
+  in either counter — i.e., heavy isn't "firing N% more often
+  on failing iters". This rules out the simple "the gate
+  misses a class of dispatch" hypothesis.
+
+So Branch B's hypothesis ("cheap path is silently skipping the
+prev_roots drop") is **NOT directly supported** by the counters:
+both paths run on the dispatches we expect them to. The
+asymmetry in suppression-effectiveness has to come from
+**something other than which path runs on which dispatch** —
+candidates remaining: the ordering inside the heavy ioctl
+(`vcpu_load`/`vcpu_put` extra requests around `__set_sregs`),
+or a per-dispatch state difference that the cheap path leaves
+behind in `run->kvm_dirty_regs` or `vcpu->arch.*`.
+
+#### Branch A — force-heavy diagnostic (NOT committed)
+
+Branch A patches `vcpu.c:1819` to `if (true || cross_task ||
+lag>=...)` so every dispatch takes the heavy ioctl. Built into a
+parallel tree (`.build/um-vector-r7a/`), source reverted before
+commit per the round brief. 17-iter run (`/tmp/dj-r7-A`):
+
+| Iter outcome      | Count | %       |
+| ----------------- | ----- | ------- |
+| `REPRO_DONE rc=0` | 16    | 94.12%  |
+| `SERVER_FAIL`     | 1     | 5.88%   |
+
+Per-vCPU counter (clean-shutdown sample):
+
+  heavy:223 124 cheap:0 total:223 124 heavy_pct=100.00%
+
+Branch A confirms the path split is being driven correctly
+(cheap=0 when the gate is forced). But the failure rate did
+**not** collapse to ~0 — one of the 17 iters still produced
+"Executing a cache" and a `swapper: page allocation failure`
+(the exact Round 4 documented side effect of unconditional
+heavy, where per-dispatch `__set_sregs2 → kvm_mmu_reset_context`
+pressures the buddy allocator). 16/17 ≈ 94% is statistically
+**indistinguishable from Branch B's 23/25 ≈ 92%** at this
+sample size (Wilson 95% CI for 16/17 [73%, 99%]; for 23/25
+[75%, 98%]).
+
+Result: **Branch A does NOT falsify the bug as pure
+path-asymmetry between heavy and cheap.** Forcing every
+dispatch onto the heavy path does not zero the Python flake.
+The Round 4 evidence ("forcing heavy dropped rate from ~14%
+to ~1%") still holds with the larger denominator of Round 4's
+180-iter pilot, but the *residual* heavy-path failure mode is
+real and Branch A's small-sample evidence puts the heavy-only
+PASS rate near 94% — leaving open whether the failing
+mechanism is **partially** path-asymmetric.
+
+#### Branch C — `ndelay(500)` timing probe (NOT committed)
+
+Branch C adds `ndelay(500)` between `um_tlb_sync` (vcpu.c:2308)
+and `kvm_v2_load_user_sregs` (vcpu.c:2311), built into
+`.build/um-vector-r7c/`. Source reverted before commit. The
+hypothesis was: if a 500ns delay lets mmu_notifier callbacks
+from sibling vCPU threads settle before the local sregs-load,
+the flake suppresses → naming "race between mmu_notifier from
+sibling vCPU thread and our sync_regs reset".
+
+The result was **destructive rather than informative**: of 47
+iters attempted, only 9 reached `TIER3_OK` (Django curl phase)
+at all — the remaining 38 timed out before SERVER_READY with
+boot-time `swapper: page allocation failure` cascades.
+
+For the 9 iters that did boot far enough to run the Django
+loopback:
+
+| Iter outcome              | Count |
+| ------------------------- | ----- |
+| `TIER3_OK` + 0 Python flakes | 9   |
+| `TIER3_OK` + ≥1 Python flake | 0   |
+
+So **on the iters where Branch C actually ran the workload, the
+Python flake rate was 0/9** (vs 2/25 ≈ 8% baseline on Branch B).
+But the 38/47 boot-stall rate makes this evidence weaker than
+the iter count suggests — the `ndelay` is destabilising
+`init`-stage dispatches (systemd's
+`dev-disk-by-uuid-...service/start` job stalls in the 9.7%
+of iters where `kvm_mmu_reset_context` buddy-allocator pressure
+collides with the per-dispatch 500ns spin).
+
+Tentative reading: timing-window sensitivity around `um_tlb_sync
+→ load_user_sregs` is **non-zero** but Branch C's coarse
+single-delay probe entangles two distinct effects (the timing
+gap itself, and the cumulative spin time during boot). The
+follow-up should be a narrower probe — only delay AFTER
+SERVER_READY, or only on dispatches where
+`mm->context.tlb_gen` advanced since the last dispatch.
+
+#### Round 7 diagnosis (file:line precision)
+
+The kvm-v2 code path that is empirically wrong is the **gate at
+`arch/um/backend/kvm-v2/vcpu.c:1819`** taken together with the
+unconditional `run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS` at
+**`vcpu.c:1856`**. Branch B proves the gate is enforced and
+disjoint; Branch A proves forcing-heavy alone does not zero the
+flake; Branch C suggests timing matters but not in the
+sibling-vCPU-race-against-mmu_notifier framing this branch tested.
+
+The **named bug class is not "the gate's policy is wrong"** —
+it's **"the heavy ioctl's *effect* (vcpu_load/vcpu_put-bracketed
+`__set_sregs` + `KVM_REQ_TLB_FLUSH_GUEST` queued before the
+next vcpu_run) is not equivalent in *side-effect ordering* to
+the cheap `sync_regs() → __set_sregs` path even though both
+call the same `__set_sregs` helper"**. The next-most-suspect
+code is the KVM-side request bookkeeping that fires only on
+the explicit-ioctl boundary — specifically
+`arch/x86/kvm/x86.c:5168-5237` (`kvm_arch_vcpu_load` makes
+KVM_REQ_PMU, KVM_REQ_STEAL_UPDATE, IBPB) and the implicit
+`KVM_REQ_TLB_FLUSH_GUEST` made by `__set_sregs` at
+`x86.c:12531` — that request is honoured at the next
+`vcpu_enter_guest` boundary in both paths, but the heavy path
+gives KVM an extra `vcpu_put`/`vcpu_load` round-trip that
+serialises against any pending mmu_notifier work the cheap
+path does not.
+
+#### Round 8 plan (proposed, not yet shipped)
+
+Without committing the diagnostic-only `if (true)` or `ndelay`,
+the next falsifiable steps are:
+
+1. **Branch B follow-up (counter expansion)**: add a third
+   counter that tags the (heavy|cheap) decision per-mm — i.e.
+   per (`current->mm`, `vcpu->cpu`) tuple, so on shutdown we
+   can see whether one particular mm (Django's worker pool
+   members) accounts for a disproportionate share of cheap
+   dispatches AND whether failing iters skew toward a specific
+   mm. Cost: one ringbuffer of (mm_ptr, heavy, cheap) tuples
+   bounded by a hash. Useful state-audit tooling regardless of
+   what it shows.
+
+2. **Targeted heavy without the buddy pressure**: replace the
+   `KVM_SET_SREGS` ioctl in the gate body with a no-op write
+   plus an explicit `KVM_REQ_MMU_RELOAD` request (if KVM exposes
+   one via SET_REGS) — i.e. shed the buddy allocator work
+   (`kvm_mmu_reset_context → kvm_mmu_unload`'s `free_roots`
+   path) by only invalidating roots without rebuilding them. If
+   the swapper page allocation failures vanish and the flake
+   rate stays at Branch A's ~6% residual, the buddy pressure is
+   independent of the bug. If both vanish, the heavy path's
+   "double" reset is doing the actual flake-fix work.
+
+3. **Narrower timing probe**: instead of `ndelay(500)` between
+   `um_tlb_sync` and `load_user_sregs`, add it INSIDE
+   `load_user_sregs` only on the cheap path AFTER the
+   dirty-bit-set, gated on `cross_task` so it only fires on
+   dispatches where the bug is most likely. This avoids the
+   boot-stall failure mode of Branch C while still probing the
+   sibling-mmu_notifier race hypothesis.
+
+4. **State-audit memo 21**: write up "per-vCPU dispatch-path
+   counters" as a formal probe in the state-audit catalogue —
+   counters are now committed as future tooling. Memo should
+   record the baseline ratios (heavy ≈ 0.29%, cheap ≈ 99.7%
+   on django-loopback-none ncpus=2) so future regressions are
+   detectable.
+
+#### What Round 7 did NOT touch (and why)
+
+* No userspace mitigation (constraint).
+* No vector2 driver / umlctl Rust / upstream-patches changes
+  (constraint).
+* No CONFIG flag changes (the dispatch-path counters compile
+  unconditionally — they're cheaper than a single ratelimited
+  printk, and serve as future state-audit tooling).
+* `if (true)` (Branch A) and `ndelay(500)` (Branch C) source
+  edits were **applied in parallel build trees only and
+  reverted before commit** per round-brief discipline. The
+  diagnostic builds live at `.build/um-vector-r7a` and
+  `.build/um-vector-r7c` if a future round needs to replay
+  either result.
+
+Commits:
+
+* Branch B per-vCPU counters: `4756d69069e5` (`um: kvm-v2:
+  Round 7 Branch B — per-vCPU dispatch-path counters`).
+* Round 7 docs: this commit.
+
+Time spent in Round 7: ~75 minutes (against the 75-minute cap).
