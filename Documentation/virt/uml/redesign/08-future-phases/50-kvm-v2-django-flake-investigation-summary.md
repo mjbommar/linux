@@ -655,6 +655,45 @@ address (which is < TASK_SIZE ≈ `0x7fff_ffff_f000`). The captured
 abort bytecode is always at user VA `0x5500_06xx_xxxx`, far below
 TASK_SIZE.
 
+### A.7b — UML self-unmap census of guest USER VAs (R13 T72)
+
+Per the research-agent finding that R13's R8 trace counted UML's
+own `mmu_notifier` traffic at 23,861 events / 240s but did not
+separate guest-user VAs from guest-kernel VAs, ran a refined
+bpftrace uprobe on `os_unmap_memory` in the UML binary,
+bucketing by upper VA bits.
+
+Result over a representative 60s window of the kvm-v2+Django
+soak with active iters:
+
+| VA prefix range | unmap count |
+| --- | --- |
+| `0x7ff_0...` (host kernel / stub VA range) | 11 |
+| `0x550_0...` (guest user VA range, where bytecode lives) | **0** |
+
+UML's `os_unmap_memory` essentially **never** fires on guest-user
+VAs during normal operation. The 23,861 events seen in R8/R13's
+`__mmu_notifier_invalidate_range_start` census were almost all
+host-kernel / stub-region unmaps that happen to also fire the
+notifier, NOT unmaps of guest user heap (where the bytecode
+lives).
+
+Consequence: the hypothesis "UML's tlb-sync host-munmaps the
+bytecode page and KVM races on the refault" is **NOT supported by
+the data**. UML doesn't host-unmap the bytecode page. The
+mmu_notifier-driven SPTE zap mechanism cannot be the cause for
+the bytecode-page corruption, because no such mmu_notifier fires
+on that page's host VA.
+
+Reopens the hypothesis space:
+- The cache-flake bytes go to zero through some path that is NOT
+  mmu_notifier-mediated.
+- Candidates: CoW with zero-fill new page; KVM-internal bug
+  unrelated to mmu_notifier (e.g., FPU/XSAVE state leak with
+  zero-fill); a microarchitectural artefact specific to UML's
+  vCPU setup; a CPython arena recycling pattern that's safe on
+  seccomp but unsafe on kvm-v2 due to a different memory model.
+
 ### A.7a — Technique C/E live analysis (R13)
 
 While the v3 bytecode-monitor soak ran, we kept ftrace tracepoints
