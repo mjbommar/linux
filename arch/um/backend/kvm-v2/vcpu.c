@@ -2755,6 +2755,45 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 								       KVM_SET_MSRS,
 								       (unsigned long)&req);
 					}
+					/*
+					 * SMP-T58 (Round 9, 2026-05-18): recover
+					 * user RDX/R8/R10 from gadget state-page
+					 * SAVE slots when EINTR caught the body
+					 * AFTER the corresponding entry-save
+					 * instruction completed.
+					 *
+					 * Without this, scratch writes inside
+					 * h_time / h_getcpu / h_clock_gettime
+					 * (MONO_SEC into R10, MONO_NSEC into R8,
+					 * REAL_SEC into RDX) leak into eintr_regs
+					 * and propagate as "user" GPRs on the
+					 * next dispatch, violating Linux x86_64
+					 * syscall ABI (RDX/R8/R10 preserved
+					 * across SYSCALL). Same shape as T41's
+					 * PF-stub RAX recovery from IST top-56
+					 * (commit af659ad4297d).
+					 *
+					 * Entry-save byte offsets are locked by
+					 * test_byteshape.c::
+					 * test_lstar_gadget_entry_sequence:
+					 *   swapgs           ends at LSTAR + 3
+					 *   SAVE_RDX (movq)  ends at LSTAR + 12
+					 *   SAVE_R8  (movq)  ends at LSTAR + 21
+					 *   SAVE_R10 (movq)  ends at LSTAR + 30
+					 */
+					if (vcpu->gadget_state_kva) {
+						u8 *page = (u8 *)vcpu->gadget_state_kva;
+
+						if (eintr_regs.rip >= KVM_V2_LSTAR_GVA + 12)
+							regs->gp[HOST_DX] =
+								*(u64 *)(page + KVM_V2_GADGET_OFF_SAVE_RDX);
+						if (eintr_regs.rip >= KVM_V2_LSTAR_GVA + 21)
+							regs->gp[HOST_R8] =
+								*(u64 *)(page + KVM_V2_GADGET_OFF_SAVE_R8);
+						if (eintr_regs.rip >= KVM_V2_LSTAR_GVA + 30)
+							regs->gp[HOST_R10] =
+								*(u64 *)(page + KVM_V2_GADGET_OFF_SAVE_R10);
+					}
 					{
 						static atomic64_t lstar_eintr_count;
 						long n = atomic64_inc_return(&lstar_eintr_count);
