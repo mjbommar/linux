@@ -455,6 +455,35 @@ struct kvm_v2_vcpu {
 	void	    *gadget_state_kva;
 	phys_addr_t  gadget_state_gpa;
 	u64	     gadget_state_gva;
+
+	/*
+	 * Round 2 Django investigation (2026-05-17): same-task consecutive
+	 * EINTR counter. The Django-loopback flake's captured pre-corruption
+	 * window (memo §44 Round 2) is a task stuck in a KVM_RUN → EINTR
+	 * loop for tens of dispatches without any vmexit (KVM_EXIT_IO /
+	 * KVM_EXIT_INTR alternation that NEVER reaches port=0xf4/0xfd). The
+	 * in-guest CPU has CR2 pinned at a user-half address but no IDT
+	 * delivery fires — the #PF handler stub VA is presumably unreachable
+	 * (TLB/TDP stale for kernel-half trampoline mapping, or IST page
+	 * unmapped). The task is alive but making zero forward progress.
+	 *
+	 * eintr_run_task and eintr_run_count track the (task, consecutive)
+	 * pair on this vCPU. Reset whenever a different task takes over,
+	 * or whenever this task gets a non-EINTR KVM_RUN return
+	 * (KVM_EXIT_IO etc.) — i.e., made any progress. When count crosses
+	 * a configurable threshold (kvm_v2_eintr_loop_threshold), the
+	 * state-trace ring is auto-frozen and a one-shot pr_emerg fires
+	 * with the stuck task's pid/RIP/CR2/CR3 so post-mortem grep can
+	 * pin down the moment forward-progress stopped.
+	 *
+	 * Threshold default: 16 (one SIGALRM tick ≈ 10ms; 16 consecutive
+	 * EINTRs ≈ 160ms of no-progress stall, well above any legitimate
+	 * SIGALRM-EINTR-during-vmexit blip but well below the 30-second
+	 * SERVER_FAIL timeout). Settable via debugfs at boot time and via
+	 * the `kvm_v2_eintr_loop_threshold=` kernel parameter.
+	 */
+	struct task_struct *eintr_run_task;
+	unsigned int        eintr_run_count;
 };
 
 int  kvm_v2_vcpu_create(struct kvm_v2_vm *vm);

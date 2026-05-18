@@ -77,6 +77,32 @@ extern const u8 kvm_v2_lstar_gadget_start[];
 extern const u8 kvm_v2_lstar_gadget_end[];
 
 /*
+ * Round 2 Django investigation (2026-05-17): EINTR-loop-without-progress
+ * threshold. The captured pre-corruption window for the Django flake
+ * shows the stuck task takes ~63 consecutive same-task EINTR_PATHs
+ * before SERVER_FAIL fires; 16 is a safe early-detection point that
+ * still requires ~160ms of no-progress stall (well above any benign
+ * single-tick EINTR blip) before the state-trace ring auto-freezes.
+ *
+ * Override via `kvm_v2_eintr_loop_threshold=N` on the kernel command
+ * line. 0 disables the detection entirely. See struct kvm_v2_vcpu
+ * eintr_run_task / eintr_run_count for the per-vCPU state.
+ */
+unsigned int kvm_v2_eintr_loop_threshold = 16;
+
+static int __init kvm_v2_set_eintr_loop_threshold(char *str)
+{
+	unsigned int n;
+
+	if (!str || !*str)
+		return 0;
+	if (kstrtouint(str, 0, &n) == 0)
+		kvm_v2_eintr_loop_threshold = n;
+	return 0;
+}
+__setup("kvm_v2_eintr_loop_threshold=", kvm_v2_set_eintr_loop_threshold);
+
+/*
  * The pool. Sized at compile time to NR_CPUS — bounded (UML's
  * NR_CPUS_RANGE_END is 64, NR_CPUS_DEFAULT=1 without SMP) and bss-
  * resident, which sidesteps the buddy-allocator-not-up constraint
@@ -2453,6 +2479,51 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				KVMV2_TRACE(KVMV2_OP_EINTR_PATH, regs, run, vcpu);
 				kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
 				kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
+
+				/*
+				 * Round 2 Django investigation (2026-05-17):
+				 * detect stuck-in-EINTR-loop. A same-task
+				 * repeating EINTR with no intervening
+				 * KVM_EXIT_IO means the in-guest CPU is making
+				 * zero forward progress — either spinning at a
+				 * legitimate RIP (unlikely; SIGALRM ticks would
+				 * normally interrupt forward-progress code at
+				 * different RIPs) or faulting at a VA whose
+				 * IDT-delivery pathway is broken (the captured
+				 * Django failure window from memo §44 Round 2).
+				 *
+				 * Bump the counter on same-task EINTR; reset on
+				 * cross-task or on the non-EINTR exit path
+				 * below. Freeze the state-trace ring once the
+				 * counter crosses the threshold so the dump
+				 * captures the moment progress stopped, not
+				 * SERVER_FAIL's flood that comes 30+ seconds
+				 * later.
+				 *
+				 * One-shot via kvm_v2_state_trace_freeze's
+				 * cmpxchg; subsequent EINTR loops on the same
+				 * boot just bump the counter without re-firing.
+				 */
+				if (vcpu->eintr_run_task == current) {
+					vcpu->eintr_run_count++;
+				} else {
+					vcpu->eintr_run_task  = current;
+					vcpu->eintr_run_count = 1;
+				}
+				if (kvm_v2_eintr_loop_threshold &&
+				    vcpu->eintr_run_count ==
+				    kvm_v2_eintr_loop_threshold) {
+					char reason[128];
+
+					snprintf(reason, sizeof(reason),
+						 "eintr-loop pid=%d count=%u rip=%llx cr2=%llx cr3=%llx",
+						 current ? current->pid : 0,
+						 vcpu->eintr_run_count,
+						 (unsigned long long)eintr_regs.rip,
+						 (unsigned long long)eintr_sregs.cr2,
+						 (unsigned long long)eintr_sregs.cr3);
+					kvm_v2_state_trace_freeze(reason);
+				}
 				/*
 				 * #121-D15 fix (2026-05-01): if EINTR caught us
 				 * with RIP pointing at an in-guest exception
@@ -2664,6 +2735,18 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		 */
 		kvm_v2_marshal_from_kvm_regs(regs, &eintr_regs);
 		kvm_v2_marshal_sregs_back(regs, &eintr_sregs);
+
+		/*
+		 * Round 2 Django investigation (2026-05-17): a non-EINTR
+		 * KVM_RUN return path means the in-guest CPU made forward
+		 * progress (KVM_EXIT_IO is the only other exit reason
+		 * dispatched below; HLT / FAIL_ENTRY / INTERNAL_ERROR all
+		 * panic). Reset the EINTR-loop counter — the captured
+		 * stuck-task signal we look for is "consecutive EINTR with
+		 * no intervening vmexit on the same task", not "EINTR ever".
+		 */
+		vcpu->eintr_run_task  = NULL;
+		vcpu->eintr_run_count = 0;
 	}
 
 	/*
