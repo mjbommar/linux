@@ -329,6 +329,61 @@ void kvm_v2_state_trace_capture(enum kvm_v2_trace_op op,
 				 "ts=%llu seq=%u — froze trace ring (Bug B)\n",
 				 e->pid, e->cpu, e->ts, e->seq);
 	}
+
+	/*
+	 * Django-bug investigation 2026-05-17 (memo §44 Investigation Round
+	 * 2026-05-17, hypothesis A.2): auto-freeze the ring when a guest
+	 * userspace task issues a fatal-signal syscall. The Django flake
+	 * surfaces as a CPython "Executing a cache" abort whose moment of
+	 * corruption is many thousands of syscalls earlier than the
+	 * SERVER_FAIL marker that triggers the debugfs dump; with a 2 MB
+	 * default ring the corruption point is gone by dump time. Catching
+	 * the SIGABRT delivery — which fires immediately AFTER Py_FatalError
+	 * writes its message but BEFORE the abort handler runs — freezes
+	 * the ring while the corruption context is still fresh.
+	 *
+	 * Watched syscalls: tgkill (NR 234), kill (NR 62),
+	 * rt_sigqueueinfo (NR 129), tkill (NR 200). All take signo in a
+	 * predictable arg slot:
+	 *   tgkill(tgid, tid, sig)              → rdx = sig (HOST_DX)
+	 *   tkill(tid, sig)                     → rsi = sig (HOST_SI)
+	 *   kill(pid, sig)                      → rsi = sig (HOST_SI)
+	 *   rt_sigqueueinfo(tgid, sig, *info)   → rsi = sig (HOST_SI)
+	 *
+	 * Watched signals: SIGABRT (6) is the canonical fatal-abort signal
+	 * that CPython, glibc assert(), and most language runtimes use.
+	 * Including SIGSEGV (11) catches BSD-style abort-via-segfault and
+	 * the rare cases where the runtime mishandles a SIGSEGV and tries
+	 * to re-signal itself.
+	 *
+	 * Hook fires only for in-guest user-mode syscalls (HANDLE_SYSCALL_PRE
+	 * runs in handle_io_trap → before handle_syscall executes), so the
+	 * captured trace ends one entry before the would-be syscall handler.
+	 * One-shot via cmpxchg.
+	 */
+	if (op == KVMV2_OP_HANDLE_SYSCALL_PRE && regs) {
+		unsigned long nr  = regs->gp[HOST_ORIG_AX];
+		unsigned long sig = 0;
+
+		switch (nr) {
+		case 234: /* __NR_tgkill */
+			sig = regs->gp[HOST_DX];
+			break;
+		case 62:  /* __NR_kill  */
+		case 200: /* __NR_tkill */
+		case 129: /* __NR_rt_sigqueueinfo */
+			sig = regs->gp[HOST_SI];
+			break;
+		default:
+			break;
+		}
+		if (sig == 6 /* SIGABRT */ || sig == 11 /* SIGSEGV */) {
+			if (atomic_cmpxchg(&trace_frozen, 0, 1) == 0)
+				pr_emerg("KVMV2T_ANOMALY fatal-signal pid=%u cpu=%u "
+					 "ts=%llu seq=%u nr=%lu sig=%lu — froze trace ring\n",
+					 e->pid, e->cpu, e->ts, e->seq, nr, sig);
+		}
+	}
 }
 
 static const char *op_name(u8 op)

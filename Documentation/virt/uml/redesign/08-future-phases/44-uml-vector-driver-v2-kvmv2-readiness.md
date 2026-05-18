@@ -895,3 +895,242 @@ Validation for the diagnostic change:
   of the background stdlib HTTP server before readiness; the timeout
   also occurred during `django-up`.  This proves vector2 fd/TAP setup is
   not required for the KVM-v2 Django-shaped failure class.
+
+### Investigation Round 2026-05-17 — UP Single-vCPU Audit
+
+A follow-up audit ran the no-network Django-loopback control on the
+non-trace KVM-v2 runtime
+(`/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux`)
+and re-examined the existing trace captures with fresh eyes.
+
+Configuration observations:
+
+- The runtime kernel has `CONFIG_SMP=n`, `CONFIG_NR_CPUS_DEFAULT=1`.
+  Despite `ncpus=2` on the kernel command line, the UML log says
+  `Unknown kernel command line parameters "ncpus=2", will be passed to
+  user space` and only one host CPU is active.  All captured trace
+  records have `cpu=0`.  The bug is therefore a *UP-only* failure class
+  and not directly the SMP-class issues the existing SMP-T16 / T17 /
+  T22 / T23 / T26 / T29 / T33 / T55 fixes targeted.
+- `kvm_v2_tlb_kick_others()` is `#if IS_ENABLED(CONFIG_SMP)` and a no-op
+  on this kernel.  The per-vCPU `last_seen_tlb_gen` tracking still runs
+  but has only diagnostic value on UP.
+
+Baseline rerun (non-trace kernel):
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2/linux \
+  UMLCTL=/home/mjbommar/projects/personal/linux/tools/uml/uml-launcher/target/release/umlctl \
+  bash tools/testing/selftests/um/soak/run-soak-daemon.sh \
+    --budget-sec 900 --backends kvm-v2 \
+    --workloads django-loopback-none \
+    --workers 1 --iters-per-rotation 30 \
+    --out /tmp/dj-bug-baseline-30
+
+PASS=29/30 FAIL=0 TIMEOUT=1 rate=96.7%
+```
+
+Iteration 18 timed out in `django-up`.  The run log shows the background
+python server (pid 32, mm `60b4a200`) repeatedly dispatching with the
+`KVM_V2_TLB_LAG` printk firing 30 times — the bound — and the last
+~10 prints showing identical `last=651 cur=2473 lag=1822` values, with
+no `SERVER_READY`, no `SERVER_FAIL`, and no kernel panic.  The python
+server appears to be alive on the vCPU but making no forward progress
+toward listen/accept (no further mmap-class syscalls bumping `tlb_gen`,
+no further user-visible output).
+
+Re-reading the existing 60-run trace dump
+(`/tmp/um-tier3-django-v2-kvmv2-trace-60/p0_default/w0/run-21.log`):
+
+- The state-trace ring is 2 MB/CPU = ~5400 entries.  The captured 5140
+  entries cover only `seq_range: 2468741..2473880`.  Python ran tens of
+  thousands of syscalls between fork+execve and the cache-abort; the
+  ring wrapped many times.  The actual moment of bytecode corruption
+  is no longer in the ring by the time `SERVER_FAIL` triggers the
+  dump.  The last trace entry is a `write(1, "ok", 2)` from pid 1 —
+  long after the abort.
+- The flagged `syscall_switches` / `dispatch_switches` /
+  `post_syscall_mismatches` items in the trace-summary helper output
+  are explained by normal kernel behavior:
+  - The `pid 161 → pid 1` switch at seq 2473316/2473317 is an
+    `__NR_exit_group` from pid 161 (Python) followed immediately by
+    init's `__NR_wait4` returning 161 (init reaped the child).  Two
+    different `vcpu_run` invocations, both legitimately on the same
+    per-CPU vCPU.
+  - The `pid 161` execve transition at seq 2470210/2470211 is a normal
+    cross-mm change (`tmm=61156a80` → `61156200`, `mmgen` resets from
+    4974 to 1 for the fresh mm).  The next `load_user_sregs` then
+    detects `cross_task` and issues a full `KVM_SET_SREGS` that drops
+    KVM TDP MMU `prev_roots`.
+  - The `mm_backsteps` events are normal cross-mm dispatches where the
+    new mm's `tlb_gen` is lower than the per-vCPU `last_seen_tlb_gen`
+    inherited from the prior mm.  This is what the cross-task gate is
+    designed to handle.
+  - `regs_owner_mismatches: count=0` in every recent trace continues
+    to rule out stale `uml_pt_regs` pointer use.
+- The repeating `last=651 cur=2473` `KVM_V2_TLB_LAG` print pattern in
+  the timeout iteration is explained by pid 32 and pid 1 alternating
+  dispatches.  Each pid-32 dispatch sees `last=651` (= init's mm's
+  `tlb_gen` from the previous interleaved init dispatch); each init
+  dispatch would see `last=2473` (= pid-32's mm gen from the previous
+  pid-32 dispatch).  Init's mm gen is much lower so init dispatches do
+  not trip the `>=3` threshold.  This is *expected behavior* on UP and
+  is not by itself a corruption indicator.
+
+Audit of the suspected ownership-flip sites in vcpu.c:
+
+- The cross-task `KVM_SET_SREGS` ioctl on a `last_task != current ||
+  last_mm != current->mm` transition (line 1748) fires the heavy
+  `__set_sregs2 → kvm_mmu_reset_context` path.  This was supposed to
+  close SMP-T33; for the UP Django shape it still runs on every fork
+  and execve.  No path was identified where it would silently fail and
+  leave stale `prev_roots[]`.
+- The `cr2` zero gate (line 1523) only fires on cross-task /
+  cross-mm transitions.  Same-task same-mm re-entries preserve the
+  KVM-architectural `cr2`.  No same-mm corruption window was found.
+- The FPU dual-restore in `kvm_v2_vcpu_run` (line 2261-2272 iotrap
+  block following `fpu_install_on_first_run`) installs the per-task
+  `iotrap_fpu` AFTER `fpu`.  When both `fpu_valid` and
+  `iotrap_fpu_valid` are true, two `KVM_SET_FPU` ioctls fire with
+  identical payloads (the `fpu` snapshot at context-switch-out and the
+  `iotrap_fpu` snapshot at the most recent post-vmexit are taken
+  against the same `vcpu->arch.guest_fpu` and so contain the same
+  bytes).  The double restore is wasteful but not corrupting.
+- The `um_tlb_sync(current->mm)` call at line 2211 runs before
+  `load_user_sregs` on every dispatch.  Any deferred PTE updates from
+  a prior dispatch's `handle_syscall` are committed to the spawner mm
+  (and thus visible to KVM's mmu_notifier) before the next `KVM_RUN`.
+
+Recurring failure shape ("Executing a cache"):
+
+The user-mode SIGABRT comes from CPython 3.14's
+`_PyEval_EvalFrameDefault` `case CACHE: UNREACHABLE("Executing a
+cache")`.  This fires when the bytecode interpreter's IP lands on a
+CACHE pseudo-opcode (specialization cache slot) instead of a real
+opcode.  Possible mechanisms:
+
+1. Bytecode array was written but the eval loop read a stale page (TLB
+   or KVM TDP cache miss-update).
+2. CPython's in-place specialization replaced a variable-length op
+   mid-execution and the dispatcher misread the new length.
+3. Heap corruption of the `PyCodeObject._co_code_adaptive` buffer.
+
+On UP single-vCPU, the per-dispatch CR4.PGE toggle flushes the guest
+TLB, the per-dispatch `um_tlb_sync` propagates pending PTE updates to
+the spawner mm (and via mmu_notifier into KVM's TDP cache), and the
+per-dispatch FPU restore re-installs per-task FPU.  No identified path
+explains a *same-task same-mm* read of a stale page.
+
+Remaining concrete hypotheses for the next investigation round:
+
+A. **Ring is too small to capture the failure point.**  The default
+   2 MB / CPU ring fits ~5400 entries but Python startup runs orders
+   of magnitude more syscalls.  The moment of corruption is gone from
+   the ring by the time `SERVER_FAIL` triggers the dump.  Two ways to
+   move forward:
+   1. Increase ring size to, e.g., 64 MB so it can absorb most of
+      Python startup (~150k entries).  Tradeoff: vmalloc pressure on
+      a 1 GB UML mem config.
+   2. Add a kernel-side trigger that auto-freezes the ring earlier —
+      e.g., on `__NR_tgkill` with `sig == SIGABRT` (the signal Python
+      uses to abort), which fires before the user-mode error message
+      is written and before the abort handler runs.  Tgkill is
+      syscall NR 234 on x86_64.
+
+B. **Audit `interrupt_end()` interactions with deferred PTE work.**
+   The post-syscall `interrupt_end()` at vcpu.c:2338 may schedule out
+   while pending mremap/munmap/mprotect work is queued on the current
+   mm.  If the *same* task is rescheduled later on the same vCPU
+   without doing any host mm operation in the interim, the
+   `um_tlb_sync` at the next dispatch runs and bumps `tlb_gen` then —
+   but KVM's TDP cache may have been silently pre-populated with
+   stale SPTEs during the preceding vmexit handling.  Concretely:
+   verify that no path between `KVM_RUN` exit and the next
+   `KVM_RUN` entry mutates guest physmem (PT pages, user pages)
+   without going through `um_tlb_sync`.
+
+C. **Audit the page-table-page free / reuse path** (UMPTFREE diagnostic
+   is currently the only signal).  Each Django readiness iteration
+   frees hundreds of PT pages.  If a freed PT page is reused for a
+   different mm's PT before KVM's TDP cache has dropped any SPTE that
+   still points at it, cross-mm corruption is possible.  Verify that
+   `destroy_context()` / `um_mmu_gather_drain()` synchronously
+   invalidate every SPTE referencing the freed page on UP.
+
+D. **Make `KVM_V2_TLB_LAG` only fire on same-mm regressions.**  The
+   current code prints on every cross-mm dispatch because the per-vCPU
+   `last_seen_tlb_gen` is shared across mms.  A same-mm-gated print
+   would surface genuine within-mm staleness and silence the cross-mm
+   diagnostic noise.  This is a diagnostic-quality improvement that
+   would make future trace dumps more useful.
+
+This round did not produce a fix.  The bug is reproducible on UP with
+the no-network Django-loopback control at roughly 3-10% per 30-run
+sample, and the existing 2 MB trace ring cannot reach the moment of
+corruption.  Next concrete step recommended: implement hypothesis A.2
+(tgkill+SIGABRT auto-freeze) and rerun the 30-run control on the trace
+runtime to capture the immediate pre-abort state.
+
+#### Hypothesis A.2 landed — fatal-signal auto-freeze
+
+`arch/um/backend/kvm-v2/state_trace.c:KVMV2_OP_HANDLE_SYSCALL_PRE`
+now auto-freezes the trace ring when a guest userspace task is about
+to issue `tgkill` / `tkill` / `kill` / `rt_sigqueueinfo` with
+`SIGABRT` (signo 6) or `SIGSEGV` (signo 11) as the signal argument.
+The check uses syscall NR + arg-slot lookup (no string compare, no
+extra ioctls); zero hot-path cost for the common case (the existing
+HANDLE_SYSCALL_PRE site already passes `regs` so the check is two
+loads + two compares).
+
+Validation smoke confirms the freeze fires:
+
+```
+UML_KERNEL=/home/mjbommar/projects/personal/.build/um-vector-r1-kvmv2-trace/linux \
+  tools/uml/uml-launcher/target/release/umlctl gate loop \
+    -f /tmp/dj-bug-trace-smoke.toml \
+    -W 1 -M 1 --timeout 60 \
+    --pass-marker ABORT_DONE \
+    --out /tmp/dj-bug-trace-smoke-out
+
+PASS=1/1
+KVMV2T_ANOMALY fatal-signal pid=31 cpu=0 ts=200000000 seq=87519 nr=234 sig=6 — froze trace ring
+ABORT_DONE
+```
+
+The smoke runs `python3 -c "import os; os.abort()"` which delivers
+SIGABRT via `__NR_tgkill` (nr=234, sig=6) — confirming the syscall +
+signal predicates wire to the right `regs->gp[]` arg slot.
+
+A follow-up 30-iter django-loopback-none run on the trace runtime
+captured a SERVER_FAIL at iter 30 with the trace dump present
+(`KVMV2T_DUMP_BEGIN reason=debugfs entries=4854`) but **no
+KVMV2T_ANOMALY fatal-signal line**.  Inspection shows
+`DJANGO_LOOPBACK_LOG_BEGIN`/`_END` is empty — the python server died
+silently, NOT via `Py_FatalError → abort()`.  This identifies a second
+failure mode for the Django-loopback bug: a SILENT crash (likely
+SIGSEGV-via-kernel-not-self-raise) that bypasses the SIGABRT trigger.
+
+Two follow-ups needed:
+
+1. **Widen the auto-freeze trigger to cover kernel-delivered SIGSEGV.**
+   The current hook only fires on syscall-initiated signal delivery.
+   For a kernel-delivered SIGSEGV (the segv_handler / handle_io_pf
+   path), the freeze must hook in
+   `kvm_v2_handle_io_pf`/`segv_handler` when the resolved fault is
+   non-fixable (SEGV terminate).  That hook fires while the trace ring
+   still has the moment-of-fault context.
+2. **Investigate the SILENT-crash failure mode separately.**  The
+   empty Django log + SERVER_FAIL marker without `Aborted` / `Fatal
+   Python error` suggests the python server was killed by an
+   unhandled signal (kernel sent it, glibc didn't get a chance to
+   write `Aborted` to stderr).  This is consistent with a
+   write-to-unmapped-page or execute-on-cache scenario where the
+   process is terminated by the kernel before its own stderr write
+   path executes.
+
+The 30-iter run also surfaced an unrelated "instance already running"
+issue from leftover umlctl state on the same host; iter 2-10 failed
+because of stale instance toml not cleaned up between the prior
+baseline run and this one.  Real failures: iter 1 PASS, iter 11-29
+PASS (19 consecutive), iter 30 SERVER_FAIL (silent crash).  The
+underlying KVM-v2 Django-loopback failure rate remains ~3%.
