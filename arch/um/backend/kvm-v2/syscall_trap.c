@@ -2168,6 +2168,65 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 	 */
 	switch (run->io.port) {
 	case UM_KVM_TRAP_SYSCALL:
+		/*
+		 * SMP-T60 GADGET-SAVE-AUDIT: at gadget-fallback IO trap, verify
+		 * the per-vCPU state-page SAVE_RDX/R8/R10 slots actually got
+		 * written with the user's pre-SYSCALL RDX/R8/R10. The gadget's
+		 * entry-save block writes them via `movq %rdx, %gs:0x50` etc.
+		 * If GS_BASE was wrong at entry-swapgs (e.g., MSR_KERNEL_GS_BASE
+		 * was corrupted), those writes land OUTSIDE the state page and
+		 * the slots retain whatever was there before. Since we're now
+		 * back in host mode with the user RDX/R8/R10 in run->s.regs.regs
+		 * (post-fallback-restore = same as entry values), compare the
+		 * two. Mismatch = corrupted GS_BASE captured.
+		 *
+		 * One-shot per kernel boot (rate-limited atomic), trace-ring
+		 * freeze on mismatch for post-mortem. Cheap on success path:
+		 * three 8-byte reads + three compares + atomic_read.
+		 */
+		if (vcpu->gadget_state_kva) {
+			u8 *page = (u8 *)vcpu->gadget_state_kva;
+			u64 slot_rdx = *(u64 *)(page + KVM_V2_GADGET_OFF_SAVE_RDX);
+			u64 slot_r8  = *(u64 *)(page + KVM_V2_GADGET_OFF_SAVE_R8);
+			u64 slot_r10 = *(u64 *)(page + KVM_V2_GADGET_OFF_SAVE_R10);
+			u64 user_rdx = run->s.regs.regs.rdx;
+			u64 user_r8  = run->s.regs.regs.r8;
+			u64 user_r10 = run->s.regs.regs.r10;
+
+			if (slot_rdx != user_rdx || slot_r8 != user_r8 ||
+			    slot_r10 != user_r10) {
+				static atomic_t saw_mismatch = ATOMIC_INIT(0);
+				if (atomic_inc_return(&saw_mismatch) <= 10) {
+					struct kvm_sregs sregs_now;
+					int rc;
+
+					(void)kvm_v2_state_trace_freeze("BUG_T60: gadget SAVE slot != user reg");
+					rc = os_ioctl_generic(vcpu->vcpu_fd,
+							      KVM_GET_SREGS,
+							      (unsigned long)&sregs_now);
+					pr_emerg("um: kvm-v2 BUG_T60 GADGET-SAVE-MISMATCH cpu=%d pid=%d comm=%s rip=%llx\n",
+						 vcpu->cpu, current->pid, current->comm,
+						 (unsigned long long)run->s.regs.regs.rip);
+					pr_emerg("  slot_rdx=%#llx user_rdx=%#llx %s\n",
+						 (unsigned long long)slot_rdx,
+						 (unsigned long long)user_rdx,
+						 slot_rdx == user_rdx ? "MATCH" : "MISMATCH");
+					pr_emerg("  slot_r8 =%#llx user_r8 =%#llx %s\n",
+						 (unsigned long long)slot_r8,
+						 (unsigned long long)user_r8,
+						 slot_r8 == user_r8 ? "MATCH" : "MISMATCH");
+					pr_emerg("  slot_r10=%#llx user_r10=%#llx %s\n",
+						 (unsigned long long)slot_r10,
+						 (unsigned long long)user_r10,
+						 slot_r10 == user_r10 ? "MATCH" : "MISMATCH");
+					if (rc == 0)
+						pr_emerg("  gs.base=%#llx (expected STATE_GVA=%#llx) %s\n",
+							 (unsigned long long)sregs_now.gs.base,
+							 (unsigned long long)KVM_V2_GADGET_STATE_GVA(vcpu->cpu),
+							 sregs_now.gs.base == KVM_V2_GADGET_STATE_GVA(vcpu->cpu) ? "MATCH" : "MISMATCH");
+				}
+			}
+		}
 		break;	/* fall through to SYSCALL handler below */
 	case UM_KVM_TRAP_PF:
 		return kvm_v2_handle_io_pf(regs, run, vcpu);
