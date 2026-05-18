@@ -306,12 +306,27 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 {
 	void *loc;
 	int prot;
+	int flags;
 
 	prot = (r ? PROT_READ : 0) | (w ? PROT_WRITE : 0) |
 		(x ? PROT_EXEC : 0);
 
-	loc = mmap64((void *) virt, len, prot, MAP_SHARED | MAP_FIXED,
-		     fd, off);
+	/*
+	 * SMP-T71 experiment (2026-05-18, Round 13): add MAP_POPULATE so
+	 * the host PTEs are installed at mmap time rather than on first
+	 * touch. The kvm-v2 Django cache-flake hypothesis is that KVM's
+	 * fast-page-fault path races with UML's mmap/munmap pattern from
+	 * um_tlb_sync; pre-populating may eliminate the refault window.
+	 *
+	 * MAP_LOCKED would additionally tell the host kernel to lock the
+	 * resulting pages in RAM, blocking migration/reclaim. Gate on
+	 * `um_kvm_v2_pin_physmem` so we can A/B test without rebuilds.
+	 */
+	flags = MAP_SHARED | MAP_FIXED | MAP_POPULATE;
+	if (getenv("UM_KVM_V2_PIN_PHYSMEM"))
+		flags |= MAP_LOCKED;
+
+	loc = mmap64((void *)virt, len, prot, flags, fd, off);
 	if (loc == MAP_FAILED)
 		return -errno;
 	return 0;

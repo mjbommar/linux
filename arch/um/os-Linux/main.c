@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/personality.h>
 #include <as-layout.h>
@@ -167,6 +168,33 @@ int __init main(int argc, char **argv, char **envp)
 	}
 
 	set_stklim();
+
+	/*
+	 * SMP-T71 (Round 13): under UM_KVM_V2_PIN_PHYSMEM, raise
+	 * RLIMIT_MEMLOCK to infinity and mlockall current + future
+	 * mappings. Combined with MAP_POPULATE|MAP_LOCKED in
+	 * os_map_memory, this prevents the host kernel from migrating,
+	 * reclaiming, or KSM-merging UML's guest physmem pages and
+	 * ensures KVM's gfn_to_pfn refault path always finds a present
+	 * PFN. Used as a controlled experiment to test whether the
+	 * Django cache-flake mechanism is in the host-VA churn path
+	 * (mmu_notifier-driven SPTE zap + race-prone refault) — see
+	 * Documentation/virt/uml/redesign/08-future-phases/
+	 * 50-kvm-v2-django-flake-investigation-summary.md Appendix A.
+	 *
+	 * Gated by env var so the same kernel binary supports both arms
+	 * of an A/B test without rebuild.
+	 */
+	if (getenv("UM_KVM_V2_PIN_PHYSMEM")) {
+		struct rlimit rl;
+
+		rl.rlim_cur = RLIM_INFINITY;
+		rl.rlim_max = RLIM_INFINITY;
+		if (setrlimit(RLIMIT_MEMLOCK, &rl) < 0)
+			perror("SMP-T71 setrlimit(RLIMIT_MEMLOCK)");
+		if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) < 0)
+			perror("SMP-T71 mlockall");
+	}
 
 	setup_env_path();
 
