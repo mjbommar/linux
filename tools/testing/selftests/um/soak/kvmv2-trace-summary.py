@@ -71,6 +71,14 @@ def parse_file(path: Path) -> dict[str, Any]:
     markers = collections.Counter()
     fatal_context: list[str] = []
     capture_fatal_context = 0
+    # Round 2 (2026-05-17, Django investigation): capture the trace
+    # auto-freeze anomaly lines emitted by state_trace.c. The
+    # fatal-signal (HANDLE_SYSCALL_PRE tgkill+SIGABRT/SIGSEGV) and
+    # fatal-segv (post-segv_handler kernel-delivered SIGSEGV/SIGBUS)
+    # triggers both write a single dmesg line of the form
+    #   `KVMV2T_ANOMALY <reason> ...`
+    # that pinpoints the moment the trace ring was frozen.
+    anomalies: list[str] = []
 
     with path.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -93,6 +101,9 @@ def parse_file(path: Path) -> dict[str, Any]:
                 markers["trace_dump_begin"] += 1
             if "KVM_V2_TRACE_DUMP_END" in raw:
                 markers["trace_dump_end"] += 1
+            if "KVMV2T_ANOMALY" in raw:
+                markers["trace_anomaly"] += 1
+                anomalies.append(raw)
 
             if capture_fatal_context > 0:
                 fatal_context.append(raw)
@@ -195,6 +206,7 @@ def parse_file(path: Path) -> dict[str, Any]:
         "path": str(path),
         "markers": dict(markers),
         "fatal_context": fatal_context,
+        "anomalies": anomalies,
         "dumps": begins,
         "dump_ends": ends,
         "entries": len(flattened),
@@ -512,6 +524,10 @@ def print_text(summary: dict[str, Any], limit: int) -> None:
     if summary["fatal_context"]:
         print("fatal_context:")
         for line in summary["fatal_context"]:
+            print(f"  {line}")
+    if summary.get("anomalies"):
+        print("trace_anomalies:")
+        for line in summary["anomalies"]:
             print(f"  {line}")
     if summary["last_entries"]:
         print("last_entries:")
