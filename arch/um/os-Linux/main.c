@@ -170,20 +170,26 @@ int __init main(int argc, char **argv, char **envp)
 	set_stklim();
 
 	/*
-	 * SMP-T71 (Round 13): under UM_KVM_V2_PIN_PHYSMEM, raise
-	 * RLIMIT_MEMLOCK to infinity and mlockall current + future
-	 * mappings. Combined with MAP_POPULATE|MAP_LOCKED in
-	 * os_map_memory, this prevents the host kernel from migrating,
-	 * reclaiming, or KSM-merging UML's guest physmem pages and
-	 * ensures KVM's gfn_to_pfn refault path always finds a present
-	 * PFN. Used as a controlled experiment to test whether the
-	 * Django cache-flake mechanism is in the host-VA churn path
-	 * (mmu_notifier-driven SPTE zap + race-prone refault) — see
-	 * Documentation/virt/uml/redesign/08-future-phases/
-	 * 50-kvm-v2-django-flake-investigation-summary.md Appendix A.
+	 * SMP-T71 (Round 13): optionally raise RLIMIT_MEMLOCK and
+	 * mlockall all current + future mappings. Combined with
+	 * MAP_POPULATE in os_map_memory, this would prevent the host
+	 * kernel from migrating / reclaiming / KSM-merging UML's
+	 * physmem pages. Round 13 T72 disproved the working hypothesis
+	 * (UML doesn't host-unmap guest user pages at all — the
+	 * mmu_notifier traffic was on guest kernel VAs only), so
+	 * pinning is no longer dispositive. Kept as a gated knob in
+	 * case future work needs it.
 	 *
-	 * Gated by env var so the same kernel binary supports both arms
-	 * of an A/B test without rebuild.
+	 * Gated by UM_KVM_V2_PIN_PHYSMEM env var. Note: umlctl strips
+	 * the env when spawning, passing only PATH/HOME/USER/LANG/TERM
+	 * plus the [env] section of the toml — neither carries this
+	 * var by default. To activate, the soak harness must export it
+	 * before the umlctl invocation OR add it to umlctl's
+	 * passthrough list in tools/uml/uml-launcher/src/bin/umlctl/
+	 * gate.rs and up.rs.
+	 *
+	 * Both setrlimit and mlockall require CAP_IPC_LOCK or a raised
+	 * RLIMIT_MEMLOCK — non-root execution returns EPERM/ENOMEM.
 	 */
 	if (getenv("UM_KVM_V2_PIN_PHYSMEM")) {
 		struct rlimit rl;
