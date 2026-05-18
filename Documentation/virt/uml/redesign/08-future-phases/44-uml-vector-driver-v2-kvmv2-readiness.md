@@ -2554,3 +2554,108 @@ Round 8 commits:
 * `/tmp/dj-r8-umlctl-pin3.sh` (taskset wrapper, not committed)
 * `/tmp/dj-r8-mmu-trace.bt` (bpftrace audit script, not committed)
 * This docs section.
+
+### Round 9 — CPython ground-truth dump of the cache-abort bytes
+
+**Date:** 2026-05-18.
+
+Round 9 patched CPython 3.14.4 to dump bytecode bytes + register state
+at the `_PyEval_EvalFrameDefault` "Executing a cache" abort site.
+Ground truth from 4 captured aborts confirms what the rate-based
+investigations could only infer.
+
+#### Method
+
+Patched the `TARGET(CACHE)` handler in
+`Python/generated_cases.c.h:1498` to write, on every abort:
+- pid, frame address, instr_ptr, code object start, offset, size
+- co_filename + co_name + firstlineno
+- contiguous zero-region extent around instr_ptr
+- 64 codeunits (128 bytes) of bytecode around the abort point
+- CPU register snapshot (RAX/RBX/RDX/RSI/RDI/R8/R10/RSP) via inline asm
+- /proc/self/maps line containing instr_ptr
+
+Patched python installed at `/home/mjbommar/cpy-t59/bin/python3.14`
+with `PYTHONHOME=/home/mjbommar/cpy-t59`. Wrapped into the soak
+template via PATH override.
+
+#### Findings
+
+**Bytecode bytes read as zero where real opcodes should be.** The
+CACHE opcode value is 0 in CPython 3.14, so any region of bytecode
+that reads `0x0000 0x0000 ...` dispatches to the CACHE TARGET and
+panics. The dump compares against the SOURCE .py file's compiled
+bytecode and shows real opcodes (e.g. `BUILD_TUPLE 0 = 0x002f`)
+should be present where 0x0000 is observed.
+
+**Zero region sizes vary across hits** — 16 bytes (8 codeunits),
+24 bytes, 40 bytes. The region is contiguous within a single page;
+real opcodes are present immediately before and after.
+
+**All hits happen in module-init code:**
+- `html/entities.py <module>` (offset 8, 16 bytes zero)
+- `<frozen getpath> <module>` (offset 12, 26 bytes zero)
+- `<frozen importlib._bootstrap> _fix_up_module` (offset 12, 40 bytes zero)
+- `enum.py convert_class` (offset 13, 24 bytes zero)
+
+**All hits are in user heap** (rwxp, anonymous):
+`/proc/self/maps`: `550000698000-5500007e7000 rwxp 00000000 00:00 0 [heap]`
+
+#### Bisection of gadget involvement
+
+n=120 each variant, same kernel build except for the gadget Kconfig
+or gadget-handler edits:
+
+| variant                                 | gadget | h_time | h_getcpu | h_clock_gettime | pid-family | cache hits |
+| --------------------------------------- | ------ | ------ | -------- | --------------- | ---------- | ---------- |
+| Baseline (Round 8 build)                | on     | on     | on       | on              | on         | 2/240      |
+| `CONFIG_UM_BACKEND_KVM_V2_GADGET=n`     | off    | -      | -        | -               | -          | **0/120**  |
+| Disable scratch handlers (jmp fallback) | on     | off    | off      | off             | on         | 1/120      |
+
+The gadget IS involved. But disabling the three scratch-using
+handlers (which were the most plausible "writes to user pointer"
+source) does NOT close the bug: 1 cache hit still observed with
+only pid-family handlers active. The corruption mechanism is in a
+code path that runs even for the pid-family fast path — most likely
+the entry-save block (`movq %rdx, %gs:0x50; movq %r8, %gs:0x58;
+movq %r10, %gs:0x60`) under a corrupted GS_BASE, or in the gadget's
+mid-flight EINTR-recovery path SMP-T56 ships.
+
+#### Register snapshot at abort (1 dump entry with regs)
+
+```
+REGS: rax=0x550000698450 rbx=0xd rdx=0x2 rsi=0x2c rdi=0x5500003ca571
+      r8=0x0 r10=0x1b6 rsp=0x7f7fffb8ca70
+```
+
+R8 = 0 is suggestive but inconclusive — these are post-abort
+register values (CPython eval-loop internals), not at-gadget-entry
+values.
+
+#### Operational disposition
+
+* **Workaround:** ship with `CONFIG_UM_BACKEND_KVM_V2_GADGET=n`.
+  Confirmed 0 cache hits across 120 iters. Performance cost: gadget
+  syscalls (getpid/gettid/clock_gettime/time/getcpu) lose their
+  stay-in-guest fast path. Per the perf-getpid benchmark in
+  STATUS.md, this gives up the ~1050× getpid speedup over seccomp —
+  significant for syscall-heavy workloads, but Tier 3 Django runs
+  reliably without it.
+* **Diagnostic artefacts preserved** at
+  `tools/uml/diag/round9-cpython-cache-dump/` — patch + 4 dump
+  entries — so a future investigator can re-apply the patch and
+  capture more reproducible-case data.
+
+#### What Round 9 did NOT close
+
+* Specific mechanism: WHY the gadget entry-save block (or whatever
+  runs in the gadget hot path) intermittently writes zeros to user
+  heap memory. Hypothesis space includes:
+  - KERNEL_GS_BASE corruption (despite SMP-T56's recovery)
+  - State-page slot writes via a corrupted GS_BASE landing on user
+    memory
+  - mid-flight EINTR-rewind from SMP-T56 with edge-case register
+    state
+* SMP-T58 fix (LSTAR EINTR GPR recovery) shipped at
+  `bab1d5c54056` is a real ABI-compliance fix but is NOT THE Django
+  flake fix — failure rate is statistically unchanged with T58 in.
