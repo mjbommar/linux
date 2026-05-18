@@ -228,7 +228,16 @@ gadget_entry:
 	movq	%gs:KVM_V2_GADGET_OFF_REAL_SEC, %rdx
 	testq	%rdi, %rdi		/* tloc may be NULL */
 	je	L_time_no_store
-	cmpq	%gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP, %rdi
+	/*
+	 * T68 (2026-05-18): operand order is `cmpq %reg, %mem` so GAS
+	 * emits opcode 0x39 (CMP r/m64, r64) → flags reflect (cap - rdi);
+	 * jbe taken when cap <= rdi (i.e. rdi >= cap) → fallback. The
+	 * inverted form `cmpq %mem, %reg` (opcode 0x3B, flags = rdi - cap)
+	 * shipped pre-T68 and made `jbe` fire on valid user pointers,
+	 * turning h_time's user-store path into dead code. v1 byte-table
+	 * reference: kvm-v1-archive/thread.c:1063+ used the same encoding.
+	 */
+	cmpq	%rdi, %gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP
 	jbe	fallback
 	movq	%rdx, (%rdi)		/* *tloc = REAL_SEC */
 L_time_no_store:
@@ -305,14 +314,16 @@ tail:
 h_getcpu:
 	testq	%rdi, %rdi
 	je	L_cpu_skip
-	cmpq	%gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP, %rdi
+	/* T68: see h_time bounds-check comment — operand order matters. */
+	cmpq	%rdi, %gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP
 	jbe	fallback		/* GAS emits jbe rel8/rel32 as needed */
 	movl	%gs:KVM_V2_GADGET_OFF_CPU_ID, %edx
 	movl	%edx, (%rdi)
 L_cpu_skip:
 	testq	%rsi, %rsi
 	je	L_node_skip
-	cmpq	%gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP, %rsi
+	/* T68: see h_time bounds-check comment. */
+	cmpq	%rsi, %gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP
 	jbe	fallback
 	xorl	%r10d, %r10d
 	movl	%r10d, (%rsi)
@@ -353,7 +364,8 @@ h_clock_gettime:
 	movq	%gs:KVM_V2_GADGET_OFF_MONO_NSEC, %r8
 	cmpl	%edx, %gs:KVM_V2_GADGET_OFF_SEQ
 	jne	fallback
-	cmpq	%gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP, %rsi
+	/* T68: see h_time bounds-check comment. */
+	cmpq	%rsi, %gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP
 	jbe	fallback
 	movq	%r10, (%rsi)		/* ts->sec */
 	movq	%r8,  8(%rsi)		/* ts->nsec */
