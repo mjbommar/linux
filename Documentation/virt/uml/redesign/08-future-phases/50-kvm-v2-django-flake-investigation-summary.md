@@ -456,3 +456,232 @@ deeper-debug plan) to catch the corrupting write red-handed.
 * `~/src/r13-mmu-notifier/mmu-callers.out` — 240s capture
 * `~/src/r13-mmu-locked-soak/` — knobs-off short soak (40 iters)
 * `~/src/r13-no-compact-soak/` — compaction-off soak (40 iters)
+* `~/src/r13-seccomp-baseline/` — 320 iters, 320 PASS (seccomp control)
+* `~/src/r13-monitor-soak/` — kvm-v2 + LD_PRELOAD bc-monitor soak
+* `tools/uml/diag/round13-bytecode-monitor/bc-monitor.c` — T69 monitor source
+* `/home/mjbommar/bc-monitor.log` — BC_NEW_ZERO event log
+
+## Appendix A — Memory-Management Architecture (host + guest)
+
+This appendix maps every place where a page that backs a kvm-v2
+guest's user memory can be **unmapped, migrated, or replaced** —
+i.e., every place that fires `mmu_notifier_invalidate_range_start`
+and therefore causes KVM to zap one or more SPTEs in the guest's
+TDP. Catalogued so future investigations don't re-do the bisection
+work of Rounds 8/13.
+
+UML's guest physical RAM is backed by a host tmpfs file
+(`/dev/shm/...vm_file-XXXXXX`, created by
+`arch/um/os-Linux/mem.c::create_tmp_file`). The UML host process
+(`linux`) mmaps that file MAP_SHARED at the `uml_physmem` base,
+then carves the guest user/kernel VAs out of host VA space. KVM
+sees the same host VA layout as the spawner mm. Anything that
+touches a host PTE in that range — from the host side OR from
+UML's own page-sync code — propagates to KVM's TDP via the
+mmu_notifier registered on the spawner mm at KVM_CREATE_VM.
+
+The full landscape:
+
+### A.1 — Host-side mover threads (external to UML)
+
+These run in host kernel threads and can fire mmu_notifier at any
+time. Each was tested in Round 8 (H5) and re-confirmed in Round 13.
+
+| Thread / mechanism | Trigger | Effect on UML pages | Status |
+| --- | --- | --- | --- |
+| **kcompactd0..N** | Proactive memory compaction (`vm.compaction_proactiveness`, default 20). One thread per NUMA node. Wakes when free-fragmentation index exceeds threshold | Migrates anon/shmem pages to defragment; calls `try_to_migrate` → `__mmu_notifier_invalidate_range_start` on every page being moved. Content preserved across migration. | RULED OUT (R8 H5, R13 perf — 53k SPTE clears via this path during one soak but cache aborts still fired with compaction off) |
+| **kswapd0..N** | Page reclaim under memory pressure (`vm.watermark_scale_factor`, `vm.swappiness`). Wakes when free memory drops below low watermark | Writes anonymous pages to swap, evicts file-backed pagecache; fires mmu_notifier on each unmap. Refault re-reads from swap/file. | RULED OUT (R13 bpftrace — 0 events from kswapd during a knobs-off soak that still produced 0/0 aborts) |
+| **khugepaged** | Collapses 4K base pages into 2MB hugepages (`/sys/kernel/mm/transparent_hugepage/khugepaged/`). Periodic scan | Replaces a contiguous 2MB region of 4K PTEs with a single PMD entry; mmu_notifier fires over the whole region. | RULED OUT (R13 — defrag=0 throughout, vmstat `pgsteal_khugepaged` flat) |
+| **ksmd** (KSM) | Kernel Same-page Merging (`/sys/kernel/mm/ksm/run`). Periodic scan of `madvise(MADV_MERGEABLE)` pages | Deduplicates identical pages; replaces N PTEs with N references to one shared page. mmu_notifier fires per replaced PTE. UML does NOT mark physmem MERGEABLE, but THP defrag-promoted pages can be implicitly merged. | RULED OUT (R13 — `ksm/run=0`, aborts unchanged) |
+| **NUMA balancing** | `kernel.numa_balancing`. Periodically marks pages "no-access" then page-faults to detect access locality, migrating cross-node pages | mmu_notifier on each unmap during prot-none cycle + on migration. | NOT TESTED but already 0 on this host (`numa_balancing=0`); irrelevant on UP host |
+| **DAMON** (`kdamond.N`) | Data access monitoring infrastructure (`/sys/kernel/mm/damon/`). Periodically samples access bits | If DAMON_RECLAIM scheme active, may unmap cold pages. mmu_notifier fires. | NOT TESTED; default-off on this host |
+| **Page-cache reclaim** | LRU reclamation of file-backed pagecache pages (kswapd + direct reclaim) | Evicts pagecache pages; mmu_notifier fires for shared-file mappings. Irrelevant for UML's tmpfs-anon pages, relevant for the python ELF binary mapped from hostfs. | RULED OUT (R13 — pagecache dropped, free memory 16GB+) |
+| **Process exit / exec** (per-process) | `do_exit` → `exit_mmap`; `bprm_execve` → `exec_mmap` | Tears down the entire mm via `__mmput`. mmu_notifier fires over all VMAs. | EXPECTED (R13 — 23 events captured at iter shutdown, not bug-relevant) |
+| **`__do_munmap` from any process** | Any host-userspace `munmap(2)` | mmu_notifier over the unmapped range. | RULED OUT for the python pid (R11 bpftrace — 0 munmaps targeted the bytecode page; user-syscall path is clean) |
+| **`__do_mprotect`** | Any host-userspace `mprotect(2)` | mmu_notifier over the protected range (KVM may demote SPTE write-permission). | RULED OUT for the python pid (R11 + R13) |
+| **`madvise_remove` / MADV_REMOVE** | Punches hole in shmem-backed mappings | `shmem_fallocate(FALLOC_FL_PUNCH_HOLE)` → `unmap_mapping_range` → mmu_notifier. CONTENT GOES TO ZERO. | Only used by UML's `os_drop_memory` (mconsole mem-hotplug); not on the hot path |
+| **`do_wp_page` / CoW** | Copy-on-write page fault on a shared/cow page | Allocates fresh anon page, copies content, fires mmu_notifier to install the new mapping. Content preserved. | EXPECTED traffic from UML's stub-mm sharing; 3k events in R13 240s bpftrace |
+| **THP collapse / split / defrag** | `vma_adjust_trans_huge`, `__split_vma`, `khugepaged_scan` | Splits a PMD into 512 PTEs or vice versa; mmu_notifier fires. | DISABLED in R13 (THP=never); not the cause |
+
+**R13 dispositive control:** with `compaction_proactiveness=0`,
+`transparent_hugepage/enabled=never`, `transparent_hugepage/defrag=never`,
+`ksm/run=0`, `khugepaged/defrag=0`, `swappiness=0`, and 16+ GB free
+RAM (pagecache dropped), a bpftrace census over 240s of soak
+captured **27,176** `__mmu_notifier_invalidate_range_start`
+invocations — **all** from `comm=linux` (the UML process itself).
+**Zero** from any external mover thread. Cache aborts continued
+to fire. The bug is below this layer.
+
+### A.2 — KVM-internal SPTE state machine
+
+KVM's mmu_notifier callback path on the host side:
+
+```
+__mmu_notifier_invalidate_range_start
+  → kvm_mmu_notifier_invalidate_range_start
+    → kvm_unmap_gfn_range
+      → kvm_tdp_mmu_unmap_gfn_range
+        → tdp_mmu_zap_leafs
+          → handle_changed_spte
+            (writes SHADOW_NONPRESENT_VALUE = 0x8000_0000_0000_0000
+             to the SPTE; ratchets mmu_notifier_seq)
+```
+
+Guest re-faults later refill via:
+
+```
+npf_interception                       (AMD SVM NPF VMEXIT)
+  → svm_handle_exit → kvm_mmu_page_fault → kvm_mmu_do_page_fault
+    → kvm_tdp_page_fault → kvm_tdp_mmu_map
+      → tdp_mmu_map_handle_target_level
+        → tdp_mmu_set_spte_atomic
+          → handle_changed_spte
+            (installs PFN derived from get_user_pages on the host VA)
+```
+
+Coherence guarantees we rely on:
+
+* `mmu_notifier_seq` cross-checked in `kvm_mmu_do_page_fault` —
+  if any invalidation happened between the start of the page-fault
+  walk and the SPTE install, the fault is retried. This prevents
+  installing a stale PFN.
+* `prev_roots[]` LRU cache of up to 4 prior TDP root pgds — kept
+  across CR3 switches so KVM can fast-switch to a previously-seen
+  root without rebuilding. SMP-T33 era investigation traced the
+  Django flake here transiently (R3 H1) but Round 7 re-baseline
+  showed the apparent fix was sample-size variance.
+* CR4.PGE toggle on every `kvm_v2_load_user_sregs` (vcpu.c:1819+)
+  forces a guest-side TLB flush on every dispatch entry. This is
+  what makes UML's "host modifies guest pgd in-place" pattern
+  safe — even if a guest TLB still cached a stale GVA→GPA, the
+  PGE toggle nukes it on the next entry.
+
+What the gadget elides: when a syscall is fully handled by the
+in-guest LSTAR gadget (getpid/getuid/etc.), there is **no KVM exit**
+at all. Therefore no `kvm_v2_load_user_sregs`, no CR4.PGE flush,
+no `um_mmu_gather_drain`, and `mmu_notifier_seq` is not even read.
+This is the substrate of the leading remaining hypothesis: that
+some staleness accumulates across long runs of gadget-handled
+syscalls.
+
+### A.3 — UML's own page-table sync (guest kernel mirrors host VA)
+
+UML manages its own pgd. Every guest-side PTE update is mirrored
+into the host VA via `arch/um/kernel/tlb.c::um_tlb_sync`. The
+sync runs:
+
+* on `tlb_flush_mmu` from the guest kernel's mmu_gather path;
+* lazily, at every dispatch entry, via the `pte_needsync` bit
+  walked by `update_pte_range`.
+
+For each present PTE that has `_PAGE_NEEDSYNC` set:
+
+```c
+phys = pte_val(*pte) & PAGE_MASK;
+fd   = phys_mapping(phys, &offset);           /* always physmem_fd */
+os_map_memory(va, fd, offset, PAGE_SIZE, r, w, x);  /* mmap MAP_SHARED|MAP_FIXED */
+```
+
+For each non-present PTE:
+
+```c
+os_unmap_memory(va, PAGE_SIZE);   /* host munmap */
+```
+
+This is THE dominant source of mmu_notifier traffic during normal
+operation. R13 bpftrace census: **23,861** unmaps and **63** maps
+from this path over 240s. Every one fires
+`kvm_mmu_notifier_invalidate_range_start` → SPTE zap on every page
+that's currently mapped in the affected range.
+
+`os_map_memory` is `mmap(va, len, prot, MAP_SHARED|MAP_FIXED, fd, off)`.
+The MAP_FIXED + the same physmem fd means content is preserved
+across the unmap+remap cycle: the underlying tmpfs file pages
+stay alive. Refault reads from the file → same bytes the guest
+wrote earlier.
+
+Caveat: between the host `munmap` and the host `mmap`, the host
+VA is **unmapped**. If the guest accesses that GPA in this window
+(unlikely on UP, possible across vCPUs on SMP), KVM's
+`gfn_to_pfn` runs GUP on a VMA-less VA → returns -EFAULT → KVM
+injects #PF into the guest. We do not see #PF injections in the
+trace ring at abort time; this argues against this being the
+mechanism.
+
+### A.4 — UML's deferred-free queue (SMP-T20)
+
+`arch/um/kernel/tlb.c::um_mmu_gather_drain` accumulates pages
+freed by guest-side mmu_gather and defers actual release via
+`call_rcu` (SMP-T20). Drained from the backend's vcpu_run loop
+**after** KVM_RUN's CR4.PGE flush.
+
+Rationale recap: local CR4.PGE only flushes the current vCPU's
+guest TLB. Other vCPUs may still cache GVA→GPA translations to
+the recycled pages until their next dispatch entry. RCU defers
+the actual `free_pages` until every CPU has passed through a
+quiescent state — which under PREEMPT=n means every vCPU has
+exited KVM_RUN at least once → every vCPU has executed its own
+CR4.PGE toggle → safe.
+
+Failure mode if the drain is delayed (e.g., because a long run
+of in-guest gadget dispatches starves the drain): pages sit in
+the queue, accumulating. Currently the queue is bounded only by
+RCU grace-period latency, not by count. If a stale-TLB-induced
+write hits a queued page that gets recycled before the grace
+period elapses, the queued page's content is corrupted from the
+guest's perspective. This is **the leading remaining hypothesis**
+for the Django cache flake; not yet directly tested.
+
+### A.5 — UML's madvise primitives
+
+| Function | Syscall | Use | Status |
+| --- | --- | --- | --- |
+| `os_drop_memory(addr, len)` | `madvise(MADV_REMOVE)` | mconsole `mem-hotplug remove`. Punches hole in physmem file — **content goes to zero**. | Not on hot path; only invoked via mconsole user command |
+| `os_drop_caching(addr, len)` | `madvise(MADV_DONTNEED)` | SMP-T26 H_E experiment — forced TDP invalidation after fresh anon-page mapping. Reverted; comment-only marker remains. | UNUSED in current code (callers removed); the function still exists in os.h |
+| `os_protect_memory(addr, len, r,w,x)` | `mprotect(2)` | UML's permission updates for the guest's user pages | Fires mmu_notifier (R13 — 55 events / 240s) |
+
+### A.6 — Host process VAs of interest in UML
+
+| Region | Host VA | Notes |
+| --- | --- | --- |
+| Guest physical memory | `uml_physmem` ... `uml_physmem + mem=size` | Backed by tmpfs vm_file (MAP_SHARED). All guest user + kernel pages live here |
+| Stub / kvm-v2 trampoline | `STUB_START` (high) | Per-mm shared. Includes IDT/GDT/IST + LSTAR trampoline + gadget state pages. Carved from trampoline_pte_kva slots |
+| Per-vCPU gadget state page | `KVM_V2_TRAMPOLINE_GVA + (KVM_V2_GADGET_BASE_SLOT + cpu) * 0x1000` | 4 KB per vCPU. Holds TGID/TID/UID/EUID/GID/EGID/PPID/CPU_ID/REAL_SEC/MONO_SEC/MONO_NSEC/BUDGET/SAVE_RDX/SAVE_R8/SAVE_R10/TASK_SIZE_CAP |
+| Per-vCPU IST stack | `KVM_V2_IST_STACK_TOP_GVA(cpu)` | Used by IDT-handled exceptions |
+
+The state page GVA at `0xffffe0..._....` lives in the host
+**kernel** half of guest VA space. It cannot alias any user heap
+address (which is < TASK_SIZE ≈ `0x7fff_ffff_f000`). The captured
+abort bytecode is always at user VA `0x5500_06xx_xxxx`, far below
+TASK_SIZE.
+
+### A.7 — What is NOT yet instrumented
+
+The only host-side path that could still write zeros into a user
+heap region:
+
+1. **A queued-but-not-yet-recycled physmem file page being
+   replaced when the queue drains** — would require the host
+   tmpfs file to receive a punched-hole write at the relevant
+   offset. No code path currently does this except
+   `os_drop_memory` (mconsole). Reading `/proc/$pid/status`
+   `VmHWM` over a soak would catch any physmem file shrinkage.
+
+2. **CoW on the python binary's mapped-from-hostfs pages where
+   the new anon page is allocated zero-fill** — the host
+   `do_wp_page` path normally copies source content; a zero
+   new-page is only possible if the source page itself was
+   somehow zero (which is the bug we're chasing).
+
+3. **A stale-TLB write through the gadget state page** — if a
+   guest user-mode write happens to land on a GVA that aliases
+   the state page (only possible if TASK_SIZE_CAP is bypassed),
+   the write goes to the state page. v2's bounds check was
+   inverted (T68) but the resulting "always fallback" semantics
+   actually made this safer, not more dangerous.
+
+The bytecode-integrity monitor (T69, `bc-monitor.so`) inverts the
+search: instead of looking for what *writes* zeros, it watches the
+user pages for any page that *acquires* a fresh ≥20-byte zero run
+and times-tamps the gadget syscall that immediately preceded it.
+Results pending current soak.
