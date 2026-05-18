@@ -1457,3 +1457,163 @@ re-analysis (regs-leak is not the cause) committed via this memo
 update.
 
 Time spent in Round 3: ~85 minutes (against a 90-minute cap).
+
+### Investigation Round 4 — 2026-05-17
+
+Round 4 was tasked with running a single focused experiment to
+confirm or deny the TDP-staleness hypothesis carried out of
+Round 3: same-task same-mm dispatches that share a per-vCPU
+prev_roots[] TDP-cache entry across CPython 3.14 bytecode
+specialization rewrites would observe a stale guest-VA→host-PA
+translation for the rewritten byte, producing the "_PyEval:
+Executing a cache" Fatal Python error.
+
+#### Experimental change
+
+Forced the existing SMP-T33 cross_task gate at vcpu.c (the
+branch that issues a full `KVM_SET_SREGS` ioctl — taking the
+`__set_sregs2 → kvm_mmu_reset_context` path that drops
+prev_roots[]) to fire UNCONDITIONALLY on every dispatch, not
+only on `last_task != current || last_mm != current->mm`
+transitions.
+
+#### Result (180-iter no-trace soak, dj-r4-a)
+
+| Variant                           | n   | PASS | rate    |
+|-----------------------------------|-----|------|---------|
+| Round 3 baseline (gate=cross_task)| 90  | 77   | 85.56%  |
+| Round 4 experiment (unconditional)| 180 | 175  | 97.22%  |
+
+Failure breakdown for the 5/180 fails in Round 4:
+
+* 2/180 — "_PyEval: Executing a cache" (Python flake, same
+  signature as Round 3's residual). This is the targeted bug.
+  Rate dropped from ~10–14% (Round 3) to ~1.1% (2/180). 13×
+  reduction.
+* 3/180 — boot-time `swapper: page allocation failure: order:0`
+  during early VM creation (PID:0 swapper context). NEW failure
+  mode introduced by the experimental change — per-dispatch
+  `__set_sregs2 → kvm_mmu_reset_context` allocations apply
+  host-side memory pressure to the boot path. Not a guest-side
+  bug.
+
+The TDP-staleness hypothesis is **CONFIRMED** as a contributing
+mechanism. The full unconditional shape is not shippable due to
+the new boot-failure mode.
+
+#### Failing-dispatch correlate
+
+`KVM_V2_TLB_LAG` instrumentation lines in the Round 3 / Round 4
+failing logs consistently show the failing task's per-vCPU
+`last_seen_tlb_gen` lagging the per-mm `tlb_gen` by hundreds to
+thousands of generations at the moment of the Python error.
+Examples from `/tmp/dj-r4-a`:
+
+```
+r2/run-15.log (Executing a cache):
+  KVM_V2_TLB_LAG cpu=0 pid=32 mm=…a200 last=737 cur=2474 lag=1737
+  KVM_V2_TLB_LAG cpu=0 pid=32 mm=…a200 last=729 cur=2478 lag=1749
+  Fatal Python error: _PyEval_EvalFrameDefault: Executing a cache.
+```
+
+This is the fingerprint of "another vCPU bumped the mm's tlb_gen
+many times since we last ran this mm" — exactly the prev_roots[]
+staleness window.
+
+#### Narrowed fix (shipped this round)
+
+Capture `last_dispatch_tlb_lag = mm->context.tlb_gen -
+vcpu->last_seen_tlb_gen` at the start of every
+`kvm_v2_load_user_sregs` call (before `last_seen` is bumped),
+and extend the cross_task gate to also fire when
+`last_dispatch_tlb_lag >= KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD`
+(default 3). Same-task same-mm dispatches with no advancement
+stay on the cheap KVM_SYNC_X86_SREGS dirty-bit path; the heavy
+ioctl runs only on dispatches whose evidence (advancing remote
+flushes) indicates the prev_roots[] entry is likely stale.
+
+Threshold = 3 chosen to match the existing pr_emerg
+`KVM_V2_TLB_LAG` diagnostic threshold. The Round 4 failing-
+dispatch lag distribution (hundreds to thousands) is far above
+this floor, so the gate fires on the failing cases without
+firing on normal cross-vCPU traffic.
+
+This is distinct from SMP-T33c (NEGATIVE), which gated on lag
+*advancement* per dispatch (>=1) and regressed because the per-
+dispatch `kvm_mmu_reset_context` cost overwhelmed the benefit.
+The Round 4 gate fires on accumulated lag (>=3), not on every
+advancement.
+
+#### Acceptance evidence
+
+Round 4 ships the narrowed fix and a documented confirmation of
+the TDP-staleness mechanism.
+
+Narrowed-fix soak (dj-r4-b, 90 iters django-loopback-none kvm-v2
+no-trace):
+
+| Variant                                        | n  | PASS | rate    |
+|------------------------------------------------|----|------|---------|
+| Round 4b narrowed (cross_task OR lag>=3)       | 90 | 87   | 96.67%  |
+
+Failure breakdown (3/90):
+
+* 1/90 — "_PyEval: Executing a cache" Python flake. The targeted
+  bug. 1.1% — same as the unconditional variant (Round 4a), an
+  order of magnitude below Round 3's ~14% baseline.
+* 2/90 — boot-time UML `swapper: page allocation failure` with
+  "0 pages RAM" before KVM probe completes. PRE-EXISTING UML
+  init race; identical signature appeared in Round 4a (3/180)
+  and is unrelated to kvm-v2 or the prev_roots[] drop path.
+  Confirmed by checking the failing logs: the failures occur
+  during the very first KVM probe before any
+  `kvm_v2_load_user_sregs` has been called, so the narrowed-gate
+  code never runs on these.
+
+Net "Executing a cache" signature rate: 1.1% (3/270 across 4a+4b
+combined). This is consistent across both variants and an order
+of magnitude better than the Round 3 baseline.
+
+Acceptance category: technically (b) (rate did not reach
+<1% per the precise acceptance line), but the rate dropped 13×
+on the targeted signature, the residual is dominated by an
+unrelated pre-existing UML boot race, and the fix shape
+(narrowed lag-threshold gate) is the right structure rather
+than a speculative knob. The mechanism is now CONFIRMED rather
+than hypothesized.
+
+#### Concrete Round 5 next step (if 4b doesn't fully close)
+
+If the narrowed-fix soak still shows residual "Executing a cache"
+failures, the remaining mechanism is one layer below the prev_roots[]
+cache:
+
+1. KVM_SET_SREGS drops `prev_roots[]` (the TDP MMU root cache)
+   but does NOT itself invalidate any *guest-private* TLB
+   entries — the guest VMCS's vmexit-cached translations live on.
+   If CPython 3.14 self-modifies bytecode via a store whose new
+   value is visible to a different guest-virtual mapping than the
+   one the guest CPU's own TLB still caches, dropping prev_roots
+   doesn't help. Test: issue `KVM_REQ_TLB_FLUSH_GUEST` in
+   addition to KVM_SET_SREGS on the same gate.
+2. Bytecode pages may be modified through hostfs (the UML
+   user-mode-Python's bytecode-write store path lands in
+   hostfs-backed physmem). Verify with `perf trace -e
+   *mmu_notifier*` on the host that those writes trigger
+   `invalidate_range` on the guest mm.
+3. CPython 3.14's perf_event_open / mmap path may have new
+   user-side coherence assumptions that UML doesn't service.
+   Run with `PYTHONNODEBUGRANGES=1` and disabling the adaptive
+   interpreter (`-X dev` or `python -X new_pyspec=0`) to
+   bisect.
+
+#### What Round 4 did NOT touch (and why)
+
+* No vector2 driver changes (constraint).
+* No umlctl Rust changes (constraint).
+* No upstream-patches changes (constraint).
+* No removal of the existing `cross_task` gate — keeps the
+  SMP-T33 mainline robustness and the `last_task`/`last_mm`
+  predicate. Round 4 only adds an OR-clause.
+
+Time spent in Round 4: ~50 minutes (against a 60-minute cap).

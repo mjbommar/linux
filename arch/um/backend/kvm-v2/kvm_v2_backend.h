@@ -41,6 +41,20 @@ struct um_memory_region;
 #define KVM_V2_MAX_USER_MEM_SLOTS	32767
 
 /*
+ * SMP-T56 / Round 4 narrowed fix (2026-05-17): per-dispatch lag
+ * threshold at which kvm_v2_load_user_sregs forces a full
+ * KVM_SET_SREGS ioctl (in addition to the SMP-T33 cross_task gate)
+ * to drop KVM's per-vCPU prev_roots[] TDP cache. Empirically lag>=3
+ * is the existing pr_emerg KVM_V2_TLB_LAG diagnostic's threshold;
+ * the Round 4 unconditional-variant evidence pairs failure
+ * occurrence with lag in the hundreds-to-thousands range, so 3 is
+ * a deliberately conservative starting point — below the noise
+ * floor of normal cross-vCPU workloads but well below the failing
+ * dispatch lags. Tunable in a future round if needed.
+ */
+#define KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD	3
+
+/*
  * Per-UML-kernel-invocation VM context (memo 26 §A.2). Single instance
  * lives in context.c; init.c reaches it via kvm_v2_vm_get() once
  * kvm_v2_vm_create() has succeeded. memslots is populated by Phase B
@@ -357,6 +371,21 @@ struct kvm_v2_vcpu {
 	 */
 	atomic64_t last_seen_tlb_gen;
 	struct mm_struct *current_mm;
+
+	/*
+	 * SMP-T56 / Round 4 narrowed fix (2026-05-17): captured tlb_gen
+	 * lag at the start of each dispatch — `mm->context.tlb_gen -
+	 * vcpu->last_seen_tlb_gen` BEFORE last_seen is updated. The
+	 * cross_task gate at the end of load_user_sregs consumes this:
+	 * when lag >= KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD, KVM's
+	 * per-vCPU prev_roots[] cache for this mm's CR3 is treated as
+	 * highly likely stale (other vCPUs have bumped tlb_gen multiple
+	 * times since we last ran this mm) and we issue the heavy
+	 * KVM_SET_SREGS ioctl that drops prev_roots[] via
+	 * __set_sregs2 → kvm_mmu_reset_context. Plain field — only ever
+	 * read/written under this vCPU's dispatch thread.
+	 */
+	u64 last_dispatch_tlb_lag;
 
 	/*
 	 * SMP-T16 fix (2026-05-02): Bug A — preserve hardware-architectural

@@ -1660,7 +1660,26 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 			}
 		}
 
+		/*
+		 * SMP-T56 / Round 4 narrowed fix (2026-05-17): record the
+		 * tlb_gen lag for the cross_task gate below. When lag exceeds
+		 * KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD, other vCPUs have
+		 * bumped the per-mm tlb_gen multiple times since this vCPU
+		 * last ran the mm — so KVM's per-vCPU prev_roots[] cache for
+		 * this mm's CR3 is highly likely stale. Forcing a full
+		 * KVM_SET_SREGS drops prev_roots[] via
+		 * __set_sregs2 → kvm_mmu_reset_context. The unconditional
+		 * variant (Round 4 first pass) cut the "Executing a cache"
+		 * Python flake rate from 14.4% to 1.1% but caused boot-time
+		 * page-allocation panics; a lag-threshold gate keeps the
+		 * benefit on the few dispatches that actually need it.
+		 */
+		vcpu->last_dispatch_tlb_lag =
+			(cur_gen > last) ? (cur_gen - last) : 0;
+
 		atomic64_set(&vcpu->last_seen_tlb_gen, cur_gen);
+	} else {
+		vcpu->last_dispatch_tlb_lag = 0;
 	}
 
 	/*
@@ -1770,8 +1789,36 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	 * Cross-task gate uses the same `last_task != current || last_mm !=
 	 * current->mm` predicate established by SMP-T16 (cr2 zero) and
 	 * SMP-T23 (extended for cross-mm execve transitions).
+	 *
+	 * SMP-T56 / Round 4 (2026-05-17): testing showed forcing the
+	 * heavy KVM_SET_SREGS UNCONDITIONALLY on every dispatch dropped
+	 * the django-loopback-none "Executing a cache" Python flake rate
+	 * from ~14% (Round 3 baseline) to ~1.1% (2/180 over a 180-iter
+	 * no-trace soak), confirming that same-task same-mm dispatches
+	 * with a stale per-vCPU TDP prev_roots[] cache are a real
+	 * mechanism behind the flake. The unconditional variant however
+	 * also caused 3/180 boot-time `swapper: page allocation failure`
+	 * panics from per-dispatch __set_sregs2 → kvm_mmu_reset_context
+	 * allocation pressure — so we narrow with a tlb_gen lag gate.
+	 *
+	 * Narrowed trigger: fire the heavy ioctl when guest tlb_gen has
+	 * advanced by KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD since this
+	 * vCPU last dispatched the mm. "Lag advanced" means another vCPU
+	 * (or remote flush) bumped the per-mm tlb_gen multiple times
+	 * without us catching up — i.e. there exist mmu_notifier-mediated
+	 * physmem PTE attribute changes that the per-vCPU prev_roots[]
+	 * entry for this CR3 likely hasn't observed. Same-task same-mm
+	 * with no advancement falls through the cheap KVM_SYNC_X86_SREGS
+	 * dirty-bit path; the heavy path runs only on dispatches that
+	 * actually need it. SMP-T33c (negative) gated on *any*
+	 * advancement (>=1); this gate is *>= 3*, which the Round 4
+	 * evidence shows matches the failing dispatch lag range (hundreds
+	 * to thousands) without firing on the normal cross-vCPU noise
+	 * floor.
 	 */
-	if (cross_task) {
+	if (cross_task ||
+	    vcpu->last_dispatch_tlb_lag >=
+		    KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD) {
 		struct kvm_sregs full = *sregs;
 		int rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
 					  (unsigned long)&full);
@@ -1789,8 +1836,9 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 		 * skips both branches).
 		 */
 		if (WARN_ON_ONCE(rc < 0))
-			pr_warn_ratelimited("um: kvm-v2 cross-task KVM_SET_SREGS failed (rc=%d) on vcpu=%d — stale prev_roots[] possible; SMP-T33 bug class returns\n",
-					    rc, vcpu->cpu);
+			pr_warn_ratelimited("um: kvm-v2 prev_roots-drop KVM_SET_SREGS failed (rc=%d) on vcpu=%d cross_task=%d lag=%llu — stale prev_roots[] possible; SMP-T33/T56 bug class returns\n",
+					    rc, vcpu->cpu, cross_task,
+					    (unsigned long long)vcpu->last_dispatch_tlb_lag);
 	}
 
 	run->kvm_dirty_regs |= KVM_SYNC_X86_SREGS;
