@@ -294,3 +294,53 @@ narrowed the mechanism further (ruled out user-syscall-mediated
 corruption) but the actual KVM-internal mechanism remains
 unidentified. Operational workaround
 `CONFIG_UM_BACKEND_KVM_V2_GADGET=n` remains the path to ship.
+
+## Round 12 Addendum (2026-05-18): kvmmmu tracepoints
+
+Per stop-hook insistence on going 1 layer deeper than bpftrace
+host-uprobes (which Round 11 ruled out as showing the corruption
+directly), set up bpftrace on the **kvmmmu:* tracepoint family**
+to capture TDP/SPTE events from KVM internals.
+
+### Setup
+
+bpftrace script `/home/mjbommar/src/r11-bpftrace/kvmmmu-trace.bt`
+hooks:
+- `tracepoint:kvmmmu:kvm_tdp_mmu_spte_changed` (per-SPTE write)
+- `tracepoint:kvmmmu:kvm_mmu_prepare_zap_page` (MMU zap precursor)
+- `tracepoint:kvmmmu:kvm_mmu_zap_all_fast` (full TDP zap)
+- `tracepoint:kvmmmu:fast_page_fault` (fast-path EPT fault)
+- `tracepoint:signal:signal_generate sig==6||sig==11` (SIGABRT/SIGSEGV)
+
+Per-level counts also captured for SPTE granularity.
+
+### First trace results
+
+7-minute soak under kvm-v2 with patched CPython + kvmmmu bpftrace:
+- 919,226 SPTE changes at level 1 (4KB)
+- 2,756 at level 2 (2MB)
+- 126 at level 3 / 126 at level 4
+- 1,504 PREPARE_ZAP events
+- 0 ZAP_ALL_FAST events
+- 0 SPTE_ZERO events (new_spte==0 writes)
+
+3 SIGABRTs captured but the 3 failed iters were **init.sh exit_group(1)**
+(boot-time "0 pages RAM" UML race), NOT the cache-abort class.
+Patched CPython produced 0 cache-dump entries this run — the bug
+class didn't fire in 60 iters.
+
+PREPARE_ZAP pattern: bursts of 5–25 zaps over 60ms, with 5-second
+gaps between bursts. Total rate ~3.5/sec across the soak.
+
+### Pending: capture a TRUE cache abort with kvmmmu trace
+
+Round 12 v2 in progress: longer soak (1200s budget) with
+`--continue-on-fail-threshold` so it doesn't stop early on the
+init.sh boot race. Goal: catch at least one cache-abort SIGABRT
+in the kvmmmu trace, correlate to the GFN of the bytecode page.
+
+### Diagnostic artefacts (Round 12)
+
+* `~/src/r11-bpftrace/kvmmmu-trace.bt` — bpftrace script
+* `~/src/r11-bpftrace/kvmmmu-trace.out` — first capture (48 KB)
+* `~/src/r11-bpftrace/kvmmmu-trace-v2.out` — longer capture
