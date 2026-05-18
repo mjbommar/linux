@@ -1134,3 +1134,144 @@ because of stale instance toml not cleaned up between the prior
 baseline run and this one.  Real failures: iter 1 PASS, iter 11-29
 PASS (19 consecutive), iter 30 SERVER_FAIL (silent crash).  The
 underlying KVM-v2 Django-loopback failure rate remains ~3%.
+
+### Investigation Round 2 — 2026-05-17
+
+Round 2 implemented the three follow-ups recommended at the end of
+Round 1:
+
+1. Bumped `KVMV2_TRACE_RING_BYTES_DEFAULT` from 2 MB to 32 MB and
+   added a new `kvm_v2_trace_bytes=<size>` kernel parameter so the
+   ring can be sized at boot without recompiling.  Empirically the
+   32 MB / CPU default holds ~77k entries — large enough to enclose
+   pid 32 (python http server)'s fork+execve through silent-SIGSEGV
+   on the captured failure modes.
+2. Widened the auto-freeze trigger surface from the Round-1
+   user-mode-syscall-only hook (HANDLE_SYSCALL_PRE tgkill+SIGABRT) to
+   cover BOTH the kernel-delivered SIGSEGV path (new post-segv_handler
+   check in `kvm_v2_handle_io_pf`, freezes on queued SIGSEGV/SIGBUS)
+   AND the stuck-EINTR-no-progress path (new same-task EINTR-loop
+   detector in `kvm_v2_vcpu_run`, freezes after 16 consecutive
+   same-task EINTR returns).
+3. Reran the no-network Django-loopback control on the trace runtime.
+
+#### Captured failure modes
+
+Two distinct on-vCPU symptoms, both reproducing at roughly the same
+~3-7%-per-30-iter rate and both now caught by ring-freeze triggers:
+
+**Mode 1 — kernel-delivered SIGSEGV (silent crash)**.
+`/tmp/dj-r2-B run-1` (iter 1, this build):
+
+```
+python3[32]: segfault at 0 ip 000000000053a69a sp 00007f7fff8124a0
+             error 4 in python3.14[13a69a,422000+386000]
+KVMV2T_ANOMALY fatal-segv cr2=0 user_rip=53a69a err=4 pid=32 —
+             froze trace ring
+```
+
+* user_rip 0x53a69a is in CPython's text segment (python3.14 base
+  0x422000 + 0x11869a) — the bytecode interpreter or one of its hot
+  helpers.
+* cr2=0 + error 4 (P=0 U=1 R=0) is a NULL pointer DEREF in user mode,
+  not a stack/heap miss.
+* The fault made it through to `kvm_v2_handle_io_pf` (which is why
+  the new post-segv_handler hook fired) — i.e., the IDT[14] stub
+  delivered the fault correctly, but UML's `handle_page_fault`
+  returned -EFAULT because there is no VMA at address 0.
+* The 32 MB ring captured 77672 entries (seq 55497..133168)
+  bracketing the failing dispatch.
+
+**Mode 2 — stuck same-task EINTR loop (no forward progress)**.
+`/tmp/dj-r2-B run-29` (iter 29, this build):
+
+```
+KVMV2T_ANOMALY eintr-loop pid=32 count=16 rip=513cea cr2=0 cr3=baf000
+             — froze trace ring
+```
+
+* Same task as Mode 1 (pid 32, python http server), same user-text
+  range (0x513cea is also in CPython text after 0x422000 base).
+* cr2=0 again — looks like the same NULL deref shape but the IDT[14]
+  stub never fires.  `kvm_v2_handle_io_pf` doesn't run; only
+  `KVMV2_OP_EINTR_PATH` entries accumulate.
+* The trace summary on the dump shows `max_mm_lag: lag=888 cpu=0
+  seq=144153 pid=32 op=POST_TLB_SYNC mmgen=1022 vlast=134` — pid 32's
+  mm gen has advanced 888 generations beyond the vCPU's last-seen TLB
+  gen, the largest staleness window seen so far in any captured
+  Django dump.
+
+Both modes pin to the same task (pid 32 / python http server) and to
+NULL CR2 in user-text RIPs.  The shared shape strongly suggests one
+underlying corruption mechanism that surfaces as two failure modes
+depending on whether KVM's TDP cache for the kernel-half trampoline
+mapping is current enough to deliver the IDT[14] stub fault.
+
+#### Cross-task contamination window (preserved evidence)
+
+`run-1`'s trace around the pid 34 → pid 32 context switch (seq
+133152..133158) shows a five-snapshot window where `run->s.regs`
+lags `current->mm`:
+
+| seq    | op             | tmm      | cr3    | rip               | cr2      | vmm      |
+|--------|----------------|----------|--------|-------------------|----------|----------|
+| 133152 | POST_KVM_RUN   (pid 34) | 60b72a80 | be4000 | ffffe000000021c0 | 40bba010 | 60b72a80 |
+| 133153 | VCPU_RUN_ENTRY (pid 32) | 60b72200 | (run NULL)         | —      | —        | —        |
+| 133154 | POST_TLB_SYNC  (pid 32) | 60b72200 | **be4000** | **ffffe000000021c0** | **40bba010** | **60b72a80** |
+| 133155 | POST_LOAD_SREGS(pid 32) | 60b72200 | bf1000 | ffffe000000021c0 | 0        | 60b72200 |
+| 133158 | PRE_KVM_RUN    (pid 32) | 60b72200 | bf1000 | 40349d80         | 0        | 60b72200 |
+
+At seq 133154 the task has switched but `run.s.regs` still holds pid
+34's leftover sregs (cr3, cr2, vmm) and gprs (rip, rsp, ...).
+`load_user_sregs` then rewrites cr3 / fs / gs / cr2 (cross-task
+cr2-zeroing fires correctly), and `marshal_to_kvm_regs` between
+POST_IST_RESTORE and PRE_KVM_RUN finally writes the GPRs.  No
+identified single-cycle path lets a stale field reach KVM_RUN's
+vmentry, but the cross-task window does briefly hold pid 34's cr3 in
+the SYNC_REGS mmap with pid 32's task active — if KVM consumes the
+mmap (e.g. via a deferred KVM_GET_*) inside that window the contents
+could leak between tasks.  This is the most concrete cross-task
+contamination signature captured to date.
+
+#### What did NOT close the bug
+
+Round 2 did NOT achieve 3× 30/30 PASS.  The 30-iter control on this
+build (`/tmp/dj-r2-A`, `/tmp/dj-r2-B`) reproduced both failure modes
+at the previously-documented rate.  The trace infrastructure now
+captures the failing context with high fidelity — the bug analysis
+from here forward operates on the captured ring rather than on
+speculation.
+
+#### Round 3 next step (concrete, for follow-on iteration)
+
+Walk the captured `/tmp/dj-r2-B run-1` and `run-29` ring dumps to
+identify the **first** entry where pid 32's user-state diverges from
+expected — i.e., look for the dispatch where a register value, a
+heap-pointer write, or an mm-state transition introduced the NULL
+CR2.  Concretely:
+
+* Add a new trace section that captures the first 16 bytes at
+  `frame.user_rip` on every HANDLE_IO_PF and HANDLE_SYSCALL.  This
+  will let the parser show which instruction Python was executing
+  immediately before the NULL CR2 — distinguishing between
+  bytecode-corruption-class (where the byte sequence at the RIP is
+  not a real opcode) and pointer-deref-class (where the byte sequence
+  is a normal MOV from %rdx etc).  Requires a copy-from-user helper
+  that respects the cross-mm VA range (cannot just deref the host
+  VA; must walk pid 32's mm).
+* Cross-correlate the seq 133154 cross-task POST_TLB_SYNC entry's
+  field-staleness against subsequent dispatches' RIP/CR2: if the
+  divergence pattern is consistent across runs, that fingerprints the
+  contamination source.
+* Re-test the SMP-T26 H_E experiment (forced TDP/EPT cache
+  invalidation via `madvise(MADV_DONTNEED)` on the spawner mm range
+  after `segv_handler`) against this UP-Django shape — Mode 2's
+  888-generation TLB lag at run-29 looks like exactly the case where
+  H_E SHOULD have helped if the mechanism is TDP cache aliasing.
+  This time the trace ring will show whether the fix changes the
+  captured failure context.
+
+Time spent in Round 2: ~30 minutes (against a 90-minute cap).  All
+diagnostic infrastructure committed; the captured-pre-corruption ring
+dumps in `/tmp/dj-r2-B` are available for Round 3 inspection without
+re-running the soak.
