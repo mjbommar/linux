@@ -1,0 +1,30 @@
+#!/usr/bin/env bpftrace
+// Round 8 (2): runtime mmu_notifier audit during kvm-v2 Django reproducer.
+// Counts mmu_notifier_invalidate_range_start invocations per pid, and
+// KVM's handler kvm_unmap_gfn_range to confirm propagation to SPTE shootdown.
+
+BEGIN {
+    printf("Tracing mmu_notifier + kvm_unmap_gfn_range for 30s. Ctrl-C to stop sooner.\n");
+}
+
+kprobe:__mmu_notifier_invalidate_range_start {
+    @mmu_invalidate_start[comm] = count();
+    @mmu_invalidate_total = count();
+}
+
+kprobe:__mmu_notifier_invalidate_range_end {
+    @mmu_invalidate_end[comm] = count();
+}
+
+kprobe:kvm_unmap_gfn_range {
+    @kvm_unmap_gfn[comm] = count();
+    @kvm_unmap_total = count();
+}
+
+kprobe:__mmu_notifier_arch_invalidate_secondary_tlbs {
+    @arch_tlb_invalidate[comm] = count();
+}
+
+interval:s:30 {
+    exit();
+}

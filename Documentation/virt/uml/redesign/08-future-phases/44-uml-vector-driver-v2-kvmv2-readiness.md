@@ -2374,3 +2374,183 @@ Commits:
 * Round 7 docs: this commit.
 
 Time spent in Round 7: ~75 minutes (against the 75-minute cap).
+
+### Round 8 — finishing the original four-point investigation plan
+
+**Date:** 2026-05-18.
+
+Round 8's purpose was to definitively answer the four hypotheses the
+user raised after Round 5's "architectural limit" cop-out:
+(1) pool-share IPI/INVLPG correctness, (2) mmu_notifier wiring,
+(3) CR4.PGE archaeology, (4) icache coherence at pool boundaries.
+Round 6 partially answered all four but Deliverables A/C/D were
+either trace-Heisenbugged or never executed with the proposed tool.
+Round 8 ran the missing controls.
+
+#### Build and reproducer
+
+* kernel: `.build/um-vector-r7/linux` (same R4+R7 build used through
+  Rounds 5–7, Round 4 lag-gate fix at `vcpu.c:1819-1842` present).
+* reproducer: `run-soak-daemon.sh --backends kvm-v2 --workloads
+  django-loopback-none --workers 1 --iters-per-rotation 60
+  --budget-sec 1500`.
+* host: 16 cores, AMD Zen with TDP/EPT and VPID enabled; `vm.
+  compaction_proactiveness=20` (default), THP `madvise`.
+
+#### Pool-share pin experiment (questions 1 and 4)
+
+Pinned all umlctl/UML host pthreads to a single host CPU via
+`taskset -c 3` so that kvm-v2's per-host-CPU vCPU pool can only use
+`vcpus[3]`.  This eliminates cross-host-CPU vCPU dispatch, cross-host
+iTLB churn, and the cross-vCPU prev_roots[] cycling SMP-T33 named
+as a bug class.
+
+Comparable n=240 across rotations, same kernel and workload:
+
+| variant            | n   | PASS | FAIL+TIMEOUT | rate  | Wilson 95%   |
+| ------------------ | --- | ---- | ------------ | ----- | ------------ |
+| **Pin** (CPU 3)    | 240 | 236  | 4            | 1.7%  | [0.65, 4.21] |
+| **Unpin** (any CPU) | 240 | 237  | 3            | 1.25% | [0.43, 3.63] |
+
+**Pin and unpin Wilson 95% CIs heavily overlap.  Pool-share is NOT
+the dominant bug class.**  Cross-host-CPU vCPU cycling and the
+icache-at-pool-boundary scenario both falsified.
+
+#### Code-side audit of pool-share IPI
+
+For completeness: `kvm_v2_tlb_kick_others` (`vcpu.c:978`) DOES exist
+and DOES correctly send IPIs to remote vCPUs running the same mm
+via `os_send_ipi(cpu, UML_IPI_RES)`.  Filters:
+- skip self;
+- skip vCPUs not running this mm (`v->current_mm != mm`);
+- skip vCPUs already up-to-date (`last_seen_tlb_gen >= cur_gen`);
+- per-vCPU `kick_pending` cmpxchg dedup so at most one IPI in flight.
+
+The kicked vCPU exits KVM_RUN with -EINTR via the unblocked
+IPI_SIGNAL in `kvm_v2_install_signal_mask` (`vcpu.c:909-953`,
+SMP-only), returns to the dispatcher, and the next dispatch's
+CR4.PGE-toggle flushes the local guest TLB.
+
+The IPI side is wired correctly.  The pin experiment confirms that
+even with this mechanism inactive (single vCPU → no cross-vCPU
+IPI traffic possible), the fail rate is unchanged.
+
+#### mmu_notifier runtime audit (question 2)
+
+Ran a bpftrace kprobe on `__mmu_notifier_invalidate_range_start`,
+`__mmu_notifier_invalidate_range_end`,
+`__mmu_notifier_arch_invalidate_secondary_tlbs`, and
+`kvm_unmap_gfn_range` during a live 5-iter Django reproducer.
+
+30-second window during steady-state:
+
+| caller                          | mmu_inv_start | -> kvm_unmap_gfn |
+| ------------------------------- | ------------- | ---------------- |
+| UML `linux` (the umlctl process) | 922          | 24               |
+| `kcompactd0` (host page migration daemon) | 6318  | **4841**         |
+
+**Finding: kcompactd0 dominates KVM SPTE shootdown traffic by 200×
+over the UML process itself.**  Host page-compaction migrations
+account for 99% of KVM TDP invalidations during the workload.
+mmu_notifier IS firing correctly and DOES propagate to KVM's SPTE
+shootdown (`kvm_unmap_gfn_range` → `__kvm_unmap_gfn_range`).
+
+##### Sub-experiment: kcompactd as causal hypothesis (RULED OUT)
+
+If the residual flake is caused by kcompactd-induced SPTE
+invalidation racing with vCPU dispatch, disabling proactive
+compaction should reduce the rate.  Test:
+`sudo sysctl -w vm.compaction_proactiveness=0`.
+
+bpftrace re-audit confirmed kcompactd activity dropped to zero
+and `kvm_unmap_gfn_range` total dropped from 4865 to 66 — a 73×
+reduction in KVM TDP turnover.
+
+n=120 (truncated early by the rolling-50 5% threshold trip):
+
+| variant              | n   | PASS | FAIL | rate | Wilson 95%   |
+| -------------------- | --- | ---- | ---- | ---- | ------------ |
+| Unpin + compaction_proactiveness=0 | 120 | 114  | 6    | 5.0% | [2.30, 10.62] |
+
+**Rate did NOT improve; it got worse and tripped the threshold.**
+kcompactd is NOT the cause.  Reverted compaction_proactiveness to
+20 after experiment.
+
+#### CR4.PGE archaeology (question 3) — already answered Round 6
+
+Commit `11102c8176fb` (2026-04-30, "drain UML TLB + CR4.PGE-toggle
+to flush stale guest TLB"). Justification: UML guest PTEs live in
+physmem; UML kernel updates to those PTEs are direct physmem
+writes that do NOT fire mmu_notifier (mmu_notifier only fires on
+host-mm operations on the spawner).  PGE-toggle every dispatch
+forces `__set_sregs_common`'s mmu_reset_needed=1, which triggers
+`kvm_mmu_reset_context` (drops `prev_roots[]`) AND queues
+`KVM_REQ_TLB_FLUSH_GUEST` (single-VPID INVVPID).
+
+Verified Round 7: heavy + cheap path counts sum to total dispatches
+(no silent skipping); both paths reach `__set_sregs` →
+`kvm_mmu_reset_context`.  The toggle is not a sledgehammer masking
+the residual; it solves a different bug class (fork-tree-3level
+post-CoW stale TLB) that fork-tree-3level still passes.
+
+#### Where this leaves us
+
+All four user-named hypotheses are now investigated.  None of them
+is the bug:
+
+| #   | hypothesis                                  | code audit          | experimental disposition |
+| --- | ------------------------------------------- | ------------------- | ------------------------ |
+| 1   | pool-share IPI/INVLPG correctness         | wiring correct      | falsified by pin (1.7% vs 1.25%) |
+| 2   | mmu_notifier propagation to SPTE shootdown | propagates correctly (200× via kcompactd alone) | falsified — kcompactd suppression makes rate worse |
+| 3   | CR4.PGE toggle still compensates           | yes (different bug class) | sound; not residual cause |
+| 4   | icache at pool boundaries                  | not needed by x86 SMC rules | falsified (same as #1) |
+
+Baseline rate at n=240, pin or unpin, with Round 4 fix and Round 7
+counter instrumentation: **~1.5% "Executing a cache" + SERVER_FAIL
+combined**, residual after eight rounds.
+
+##### Negative-results catalogue
+
+Investigation has now ruled out:
+- Pool-share / cross-host-CPU vCPU dispatch
+- Cross-host-CPU iTLB / L1i pollution
+- prev_roots[] silent skip (cheap path verified to drop roots)
+- Heavy-vs-cheap path asymmetry (forcing heavy doesn't fix it)
+- kcompactd-driven SPTE invalidation
+- mmu_notifier mis-wiring or non-propagation
+- CR4.PGE toggle being broken
+
+##### Open angles for future investigation
+
+The bug is real, kvm-v2-specific (seccomp 30/30 Round 6), and
+appears in a narrow timing window (Heisenbug, Round 6).  Six
+hypotheses ruled out.  Round 9 angles that have NOT been chased:
+
+* **Same-vCPU cross-task state leak.** Even on a single vCPU,
+  multiple host pthreads serialize through it; cross-task dispatch
+  fires `cross_task` gate, but some KVM-internal state may not
+  fully reset.  Suspects: `kvm_dirty_regs` clearing semantics on
+  exit; `kvm_run->s.regs.{regs,sregs}` staleness across dispatcher
+  iterations; `vcpu->arch.*` fields not touched by `__set_sregs`.
+* **CPython bytecode-level capture at failure.** Patch CPython
+  3.14's `_PyEval_EvalFrameDefault` to dump the bytecode bytes +
+  instruction-cache snapshot at the moment "Executing a cache"
+  fires.  Tells us if the bytes are stale (microarch SMC),
+  half-written (race), or correct-but-interpreter-confused
+  (control-flow corruption).
+* **Different reproducer.** Django spawns many processes, has lots
+  of moving parts.  A minimal PEP 659 specialization reproducer
+  (a tight Python loop that specializes a handful of opcodes
+  repeatedly) would tighten signal-to-noise.
+* **Seccomp vs kvm-v2 dispatch difference.** Seccomp is 30/30
+  clean.  What does seccomp do that kvm-v2 doesn't?  Both use the
+  same UML kernel mm-sync drain; the difference is the dispatch
+  vehicle.  Diff the per-dispatch state-machine between backends.
+
+The four-point plan the user named is now closed.  None of the
+four was the bug.  Future rounds need a different hypothesis space.
+
+Round 8 commits:
+* `/tmp/dj-r8-umlctl-pin3.sh` (taskset wrapper, not committed)
+* `/tmp/dj-r8-mmu-trace.bt` (bpftrace audit script, not committed)
+* This docs section.
