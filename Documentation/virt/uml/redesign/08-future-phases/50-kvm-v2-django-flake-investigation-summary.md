@@ -655,6 +655,43 @@ address (which is < TASK_SIZE ≈ `0x7fff_ffff_f000`). The captured
 abort bytecode is always at user VA `0x5500_06xx_xxxx`, far below
 TASK_SIZE.
 
+### A.7a — Technique C/E live analysis (R13)
+
+While the v3 bytecode-monitor soak ran, we kept ftrace tracepoints
+on `kvmmmu:kvm_mmu_prepare_zap_page`, `kvmmmu:fast_page_fault`,
+`kvmmmu:kvm_mmu_zap_all_fast`, `signal:signal_generate` (sig 6/11
+only), and a 1Hz sampler on
+`/sys/kernel/debug/kvm/{exits,halt_exits,io_exits,mmio_exits,
+remote_tlb_flush_requests,pf_taken,pf_fixed,pf_emulate,
+pf_spurious,pf_fast,pf_mmio_spte_created,tlb_flush,l1d_flush}`.
+
+Over a ~25-min soak:
+
+* **2,665 `kvm_mmu_prepare_zap_page` events** captured. GFNs cluster
+  in a few hundred ranges; all happen on `cpu=0` from `linux` PIDs.
+* **0 `kvm_mmu_zap_all_fast`** — no full-TDP zaps; the zaps are
+  always range-scoped (via mmu_notifier_invalidate_range_start).
+* **0 `fast_page_fault`** — every TDP page fault during the soak
+  took the SLOW path (`tdp_mmu_set_spte_atomic` under `mmu_lock`
+  with `mmu_invalidate_seq` retry). This eliminates the 2024 Tao
+  Su fast-PF/seq-save race as the mechanism — that race only fires
+  when fast_pf is active.
+* **0 `handle_mmio_page_fault` / `mark_mmio_spte`** — no MMIO
+  weirdness in the TDP.
+* **1 `signal:signal_generate sig=6`** — the captured cache abort.
+
+The fact that `fast_page_fault` is dead under our workload is a
+genuine narrowing of the hypothesis space: the bug HAS to be in
+the slow-path refault (with `mmu_invalidate_seq` retry) or in the
+range-scoped zap path itself, not in the lockless fast path.
+
+Tech E counter trends: `remote_tlb_flush_requests` and `pf_taken`
+both stable across the soak; no anomalous excursion at the abort
+sample (the failing VM tore down before the next 1Hz tick captured
+its post-abort state — per-VM debugfs is required to do
+per-second-resolution correlation, which requires the VM to still
+be alive at sample time).
+
 ### A.7 — What is NOT yet instrumented
 
 The only host-side path that could still write zeros into a user
