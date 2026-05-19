@@ -34,6 +34,7 @@ mod history;
 mod manifest;
 mod metrics;
 mod paths;
+mod preflight;
 mod registry;
 mod run;
 mod schema;

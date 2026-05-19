@@ -22,6 +22,7 @@ use super::console_split;
 use super::dmesg_parse;
 use super::manifest::Manifest;
 use super::paths::Paths;
+use super::preflight;
 use super::run;
 use super::{StartArgs, StopArgs};
 
@@ -172,6 +173,16 @@ pub fn start_with_fds(
         cmd.stdin(Stdio::null());
     }
     install_pre_exec(&mut cmd, !args.foreground, inherited_fds);
+
+    // SMP-T84 (memo 52 §3.4): preflight resource verification.
+    // Each warning is logged but the run proceeds — kernel-side
+    // fallbacks handle missing hugepage pool / cgroup writability
+    // gracefully.
+    if !m.host_env.is_empty() || m.cgroup_v2.is_some() {
+        if let Ok(report) = preflight::run(&m.host_env, m.cgroup_v2.as_ref()) {
+            report.print();
+        }
+    }
 
     // SMP-T83 (memo 52 §2.3): if the manifest has a cgroup_v2
     // config, create the per-instance cgroup with limits BEFORE
