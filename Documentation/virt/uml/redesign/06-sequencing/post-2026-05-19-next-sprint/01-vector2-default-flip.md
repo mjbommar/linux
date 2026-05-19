@@ -3,7 +3,7 @@
 **Sprint:** post-2026-05-19
 **Priority:** HIGH
 **Effort:** small flip (≤ 20 LoC) plus multi-step gating
-**Status:** Step 1 DONE 2026-05-19 (30/30 PASS); Steps 2–5 planned
+**Status:** Steps 1 + 4a DONE 2026-05-19; Steps 2, 3, 4b, 5 pending
 **Owner:** TBD
 **Predecessors:**
   [`08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md`](../../08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md),
@@ -155,7 +155,33 @@ lower bound on aggregate PASS rate per backend.
 
 ### Step 4 — Flip the umlctl default + propagate
 
-Once Steps 1–3 pass:
+Sub-split for execution clarity:
+
+#### Step 4a — opt-in mission gate (DONE 2026-05-19)
+
+Add `umlctl mission --with-vector2` which runs a Phase 7
+vector2-stress gate against `tier3-django-v2`. Independent of
+the default flip; lets reviewers / CI catch a vector2-side
+regression *before* anything default-changes.
+
+Shipped at commit `02fe7d14f476`. CLI:
+
+```text
+--with-vector2          Opt-in Phase 7 vector2 stress test.
+--vector2-iters <N>     Phase 7 iter count (default 5).
+```
+
+End-to-end verified on AMD Ryzen 7 7840HS:
+
+```text
+[Phase 7] PASS vector2 (340.1s) — 8/8 PASS (vector2 + kvm-v2
+                                  tier3-django-v2);
+                                  0 panics 0 sigbus
+```
+
+#### Step 4b — actual default flip (HELD on Steps 2 + 3)
+
+Once Steps 2 and 3 also pass:
 
 ```rust
 // tools/uml/uml-launcher/src/bin/umlctl/deploy.rs::NetworkSection::default
@@ -167,9 +193,6 @@ Plus:
   - Update soak templates `tier3-django.toml.template` and
     `tier3-fastapi.toml.template` to bake `driver = "vector2"`
     (today they use `{{NETWORK_DRIVER}}`).
-  - Add `--with-vector2` flag (or Phase 5b) to
-    `umlctl mission` that runs at least one tier3 iteration to
-    exercise the new default end-to-end.
   - Update `Documentation/virt/uml/redesign/STATUS.md` and memo 52
     documentation pointers.
 
