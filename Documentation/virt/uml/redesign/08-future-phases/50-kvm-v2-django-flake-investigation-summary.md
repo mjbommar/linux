@@ -540,6 +540,43 @@ H18: rate drops to 0 because no YMM-upper-half writes occur.
    for the correctness benefit. (snapshot.c already pays this cost on
    snapshot+restore paths.)
 
+### R14 validation — fix shipped (commit `1f3dd82d8d4b`)
+
+The T73 fix went through two iterations:
+
+**T73 v1 (incomplete) — refuted by validation.** Initial pass
+upgraded three of the five callsites (per-dispatch save at
+vcpu.c:2524, per-dispatch restore at vcpu.c:2404, fork capture
+at vcpu.c:3012). Validation soak with FULL AVX enabled in glibc:
+**4 cache aborts in 180 iters = 2.22%** (Wilson CI [0.87%,
+5.57%]) — same as baseline. The fix didn't work because the
+TASK SWITCH-OUT capture (`vcpu.c:3148`, called from
+`kvm_v2_context_switch`) and POST-FORK INSTALL
+(`vcpu.c:3240`, called from `kvm_v2_fpu_install_on_first_run`)
+still used legacy `KVM_GET_FPU` / `KVM_SET_FPU`. YMM upper
+continued to leak through those paths.
+
+**T73 v2 (complete) — confirmed.** All five callsites now use
+`KVM_GET_XSAVE` / `KVM_SET_XSAVE`. Validation soak with full
+AVX:
+
+| Soak | n | cache aborts | rate | Wilson 95% CI |
+| --- | --- | --- | --- | --- |
+| T73 v2 (FIXED kernel, full AVX) | 220 | 0 | 0.00% | [0%, 1.72%] |
+| T73 v1 (partial fix, full AVX) | 180 | 4 | 2.22% | [0.87%, 5.57%] |
+| H17v2 (orig kernel, AVX off) | 250 | 0 | 0.00% | [0%, 1.51%] |
+| Arm A (orig kernel, MAP_POPULATE) | 240 | 1 | 0.42% | [0.07%, 2.32%] |
+| Historical baseline R12 | 120 | 4 | 3.33% | [1.30%, 8.26%] |
+
+Two-proportion z-test, T73 v2 vs historical baseline R12: **z =
+-2.71, p = 0.007** — statistically significant rate reduction.
+
+The operational workaround `CONFIG_UM_BACKEND_KVM_V2_GADGET=n`
+can now be retired. The gadget's role was simply to amplify
+dispatch-boundary frequency (more in-guest syscalls → more YMM
+operations → more cross-task FPU register exposure → more chances
+to land mid-`vmovdqu` ymm).
+
 ### Why prior rounds missed this
 
 * SMP-T26/T27 fixed cross-task FPU leak for FXSAVE-covered state
