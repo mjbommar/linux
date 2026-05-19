@@ -4,8 +4,10 @@
 **Priority:** HIGH
 **Effort:** medium (~200–400 LoC across `fs/hostfs/{hostfs_user,hostfs_kern}.c`)
 **Status:** Phase 1 DONE 2026-05-19 (`fa6af32c14ea`).  Phase 2
-DONE 2026-05-19 (`3625a424df36`).  Phase 3 (FSYNC / FALLOCATE
-on the ring) planned.
+DONE 2026-05-19 (`3625a424df36`).  Phase 3 (FSYNC on the ring)
+DONE 2026-05-19 (`4c1e7a1d86f8`).  FALLOCATE follow-on remains
+optional (host filesystem rarely sees explicit fallocate from
+hostfs callers).
 **Depends on:** host kernel ≥ 5.6 for io_uring; ≥ 5.6 for `openat2`.
 Can run in parallel with memos #1 and #2.
 
