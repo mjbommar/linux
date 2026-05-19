@@ -1,14 +1,32 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-17 (**vector2 networking status journal**).
-Vector2 is no longer scaffolding-only: it has live netdev registration,
+Last updated: 2026-05-19 (**Round 14 closure + time-machine ports
+landed**). The 14-round CPython cache-flake bug (5 weeks under
+investigation) shipped its root-cause fix as SMP-T73 (kvm-v2
+KVM_GET_FPU → KVM_GET_XSAVE in 5 per-task save/restore sites) +
+T74/T75/T76 latent-bug follow-ups (DEBUGREGS pinned, VCPU_EVENTS
+per-task save/restore, CPUID leaf 0xD sub-leaf consistency) + T77
+feature-enablement checklist for future un-mask audits. Tier 3
+django-loopback-none re-validation on the post-R14 kernel: **120/120
+PASS, Wilson 95% [96.90%, 100.00%]**, 24h soak now running in
+background (kernel HEAD `dc7df03c4b3c`).
+
+Time-machine track (Track B per PLAN-2026-05-14 §4.1) landed in
+the same session: snapshot #168 Phases 4-6 (cross-task semantics +
+cmdline+debugfs bench harness + selftest re-plumb) and record/replay
+#169 Phases 4-7 (gadget-bypass + RDTSC log + SIGALRM anchor +
+selftest re-plumb). Snapshot bench: capture **38.9 µs** / median
+restore **13 µs** (memo-12 targets <50 ms / <1 ms — ~1300× / 75×
+under). KUnit suites: kvm_v2_snapshot 3/3, kvm_v2_record 7/7.
+
+Vector2 is no longer scaffolding-only: live netdev registration,
 trusted TAP/fd datapaths, `umlctl` selection, fd multiqueue,
 queue-to-CPU policy, KUnit coverage, KCSAN workload evidence, sandbox
-audit evidence, and substantial seccomp Tier 3 workload evidence.  It is
-still not replacement-ready because KVM-v2 Tier 3 remains blocked by a
-separate Django/server/socket workload instability, the 7200-second
-seccomp soak has not completed naturally, SMP fairness/performance work
-remains open, and CI/preflight rollout is not finished.
+audit evidence, and substantial seccomp Tier 3 workload evidence.
+**KVM-v2 Tier 3 is now unblocked** (the Django flake that gated it is
+fixed). Remaining work: 7200-second seccomp soak natural completion,
+SMP fairness/performance work, CI/preflight rollout, the 24h kvm-v2
+soak natural completion.
 
 Previous update: 2026-05-14 (**PLAN-2026-05-14 execution session — Phase J Track A scaffolding round + Track B time-machine ports + Track D upstream queue prep.** Daily deliverables added since 2026-05-07: SMP-T57 Phase A AVX/XSAVE enable (kvm-v2 80/80 first post-Phase-A soak), Phase J Tier 2 pre-built uv venv (80/80 PASS), Phase J Tier 3 design + templates (per-worker IP /30 carve-out from `192.168.42.0/24`), LTP runner template (kirk-driven), tier3 daemon-side per-worker fanout in `run-soak-daemon.sh`, Series 3 (ftrace-notrace-generic-v1) regenerated to READY, Series 7 cover letter rewritten for v2 redesign (414 → 900 lines), snapshot v2 port Phase 1 + Phase 2 (KUnit suite 3/3 passes), record/replay v2 port design memo (#169, 1012 lines + 7-phase sub-sequence). Three sub-agents in flight: #168 Phase 3 (full capture), Series 4 backend-ops-abstraction-rfc draft, SMP-T55 +50% UP-hop bisect. Decisions-log catch-up through D130. Prior 2026-05-07 STATUS context preserved below.) (**Prior context — STATUS drift cleanup + experimental verification pass 2026-05-07.** Verified on AMD Ryzen 7 7840HS (Zen 4) against post-T54/T56/gadget kernel rebuilt to current HEAD: substrate gate kvm-v2 **PASS=25/FAIL=3/XFAIL=3** (seccomp identical), cpython-parity **21/21 PARITY**, mt-mini SMP T=8 ncpus=4 N=30 **30/30 = 100%**, bench-py **kvm-v2 4.00× faster than seccomp** (matches 2026-05-04 cross-host baseline), bench-micro getpid **kvm-v2 ~1050× faster** (89-105 cyc / 109k cyc seccomp), T57 stress-ng `--vm --verify` reproduces SIGILL on kvm-v2 only. **One unmasked finding: `perf-py-startup` gate FAILS** (ratio_v2_over_seccomp = 1.250 vs max=1.2 on Python startup workload) — surfaced as **SMP-T55** in this update; root cause is T26/T27 always-`KVM_GET_FPU` reverting H.2 lazy-FPU. Hot-path workloads unaffected. Drift fixes: T33-as-mt-mini-closer marked HISTORICAL (T41 was true closure); migrate_disable site count corrected (3 not 5); phase ledger extended with T33/T36/T37/T41/T47/T54/T56 + gadget revival + perf-O1 rows. Prior `2026-05-05` Phase J pilot context preserved at `02-workstreams/D-kvm-backend/phase-J-pilot-2026-05-05.md`; SMP-T55 fix plan at memo state-audit/23.)
 
@@ -43,11 +61,12 @@ End-of-day vector2 seccomp Tier 3 soak status:
 
 Short remaining vector2 list:
 
-- KVM-v2 baseline readiness is narrowed but still open: no-network
-  readiness/import controls pass, while no-network Django-loopback
-  reproduces the userspace flake without vector2;
-- KVM-v2 + vector2 Tier 3 30/30 is not accepted until the backend flake
-  is fixed or bounded with repeat evidence;
+- **KVM-v2 baseline readiness CLOSED 2026-05-19** (Round 14 — see
+  the new "Round 14 closure" section below): the no-network Django-
+  loopback reproducer hit 120/120 PASS on the post-R14 kernel, Wilson
+  95% [96.90%, 100.00%]. 24h soak running.
+- KVM-v2 + vector2 Tier 3 30/30 is now unblocked at the backend layer;
+  re-run on the post-R14 kernel + the vector2 stack is the next gate.
 - FastAPI variant, fd multiqueue, and queue-to-CPU policy are done for
   current seccomp/launcher-owned paths;
 - KCSAN on multiqueue has meaningful coverage, but longer fairness
@@ -363,14 +382,55 @@ reaffirmed.
   after the migrate_disable fix removed the IPI-storm scenario.
 - **SMP-T1 through SMP-T13** — full state-audit investigation arc.
 
+### Closed (Round 14 — 2026-05-19)
+
+- **Django cache-flake bug** (5-week investigation, Rounds 1-14):
+  root cause was legacy `KVM_GET_FPU` in 5 per-task save/restore
+  sites failing to preserve YMM upper 128 bits after SMP-T57 Phase A
+  un-masked AVX. Shipped as **SMP-T73** (switch all 5 sites to
+  KVM_GET_XSAVE/KVM_SET_XSAVE; struct kvm_fpu → struct kvm_xsave in
+  arch_thread.kvm_v2). Validated: 220/220 PASS at first soak (p =
+  0.007 vs baseline) + 120/120 on the post-R14 kernel with full
+  R14 chain (T74/T75/T76). 24h soak running.
+- **SMP-T74** — DEBUGREGS pinned-zero at vCPU create (latent
+  cross-task leak via the same architectural shape as T73).
+- **SMP-T75** — VCPU_EVENTS per-task save/restore (mirrors the
+  iotrap_fpu pattern T73 fixed; latent cross-task leak for
+  exception-pending-at-exit shapes).
+- **SMP-T76** — CPUID leaf 0xD sub-leaves 5/6/7/17/18 masked so
+  the state-component descriptors are consistent with the un-masked
+  feature bits.
+- **SMP-T77** — feature-enablement checklist memo (state-audit
+  Layer 26) documenting what changes when a new CPUID bit is later
+  un-masked (AVX-512 / AMX / PKRU / CET / AVX-VNNI / AVX10+APX) so
+  the next maintainer doesn't re-walk T26/T57/T73's audit gap.
+
+### Closed (Time-machine track — 2026-05-19)
+
+- **#168 snapshot port** — Phase 4 (cross-task semantics with
+  per-task iotrap_fpu + iotrap_events round-trip), Phase 5 (cmdline
+  + debugfs bench harness, `kvm_v2_snapshot_bench=N`), Phase 6
+  (selftest re-plumb). Bench targets (memo-12) met by ~3 orders of
+  magnitude: capture **38.9 µs** vs <50 ms target, median restore
+  **13 µs** vs <1 ms target. KUnit kvm_v2_snapshot: 3/3 (basic,
+  full, task).
+- **#169 record/replay port** — Phase 4 (LSTAR gadget bypass byte
+  KVM_V2_GADGET_OFF_RECORD; record_start forces gadget-shadowed NRs
+  to fallback so observe_syscall sees every NR), Phase 5 (RDTSC
+  observe/consume + anon-union payload restructure of replay_entry),
+  Phase 6 (SIGALRM determinism via syscall-count anchor), Phase 7
+  (KUnit + selftest re-plumb). KUnit kvm_v2_record: 7/7
+  (basic, state, observe, strict_replay, gadget_bypass, rdtsc,
+  sigalrm).
+
 ### In progress / next
 
 - **#166** — this STATUS.md refresh (you are reading the result).
-- **#167** — Phase J validation: 24h continuous, Tier 1/2/3, soak.
-- **#168** — KVM-aware `um_snapshot_ready` (was #250, deferred per
-  #274). Unblocked.
-- **#169** — first-class time-travel + record/replay extensions
-  (was #253). Unblocked.
+- **#167** — Phase J 24h kvm-v2 soak running (`r14-24h-soak`,
+  django-loopback-none + cpython-soak workloads, 86400s budget).
+- **#175** — Series 7 kvm-backend-series cover letter is now
+  unblocked at the backend layer (Tier 3 acceptance evidence
+  gathered; final 24h soak completion is the last paragraph).
 
 ### Deferred residual flakes (P2)
 
