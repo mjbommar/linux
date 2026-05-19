@@ -9,14 +9,32 @@
 
 #ifdef CONFIG_UM_BACKEND_KVM_V2
 /*
- * Phase C.4.0: per-task FPU snapshot for v2's KVM_GET_FPU /
- * KVM_SET_FPU dance (memo 26 §C.4). Embedding the legacy 512 B
- * kvm_fpu directly in arch_thread mirrors v1's solution to the
- * B-FPU-HASH-UAF class — task lifetime owns the storage, no
- * separate allocation, no slab-recycle hazard. AVX/AVX-512 are
- * masked at CPUID by kvm_v2_curate_cpuid (vcpu.c), so the
- * legacy 512 B FXSAVE area is sufficient; KVM_GET/SET_XSAVE
- * is moot under our curated guest.
+ * Phase C.4.0 (rev SMP-T73, 2026-05-18): per-task FPU snapshot for
+ * v2's KVM_GET_XSAVE / KVM_SET_XSAVE dance. Embedding the
+ * struct kvm_xsave directly in arch_thread mirrors v1's solution
+ * to the B-FPU-HASH-UAF class — task lifetime owns the storage,
+ * no separate allocation, no slab-recycle hazard.
+ *
+ * Originally used struct kvm_fpu (legacy 512 B FXSAVE area)
+ * because Phase C.4.0 predates SMP-T57 Phase A. Comment then
+ * read "AVX/AVX-512 are masked at CPUID; KVM_GET/SET_XSAVE is
+ * moot." SMP-T57 Phase A (commit ab68bf077de3, 2026-05-04)
+ * un-masked AVX/AVX2/FMA/F16C/OSXSAVE/XSAVE in CPUID and set
+ * CR4.OSXSAVE + XCR0 = FP|SSE|YMM, so glibc now uses AVX-256
+ * memcpy / memset variants. The legacy 512 B FXSAVE area only
+ * covers x87 + XMM low 128; YMM upper 128 lives in the extended
+ * XSAVE state (CPUID leaf 0xD layout) and is lost per-dispatch
+ * if we keep using KVM_GET_FPU.
+ *
+ * That YMM-upper loss across the per-host-CPU vCPU pool drove
+ * the Django cache-abort flake — 14 rounds of investigation
+ * before correlation with prior T26/T27 + T57 Phase A reasoning
+ * landed the fix. See R14 addendum in
+ * Documentation/virt/uml/redesign/08-future-phases/
+ * 50-kvm-v2-django-flake-investigation-summary.md.
+ *
+ * Cost: 4 KB - 512 B = 3.5 KB extra per task_struct. snapshot.c
+ * already pays this for the snapshot ioctls. Acceptable.
  */
 #include <asm/kvm.h>
 #endif
@@ -27,7 +45,7 @@ struct arch_thread {
         struct faultinfo faultinfo;
 #ifdef CONFIG_UM_BACKEND_KVM_V2
 	struct {
-		struct kvm_fpu fpu;
+		struct kvm_xsave fpu;
 		bool fpu_valid;
 		/*
 		 * Per-task IST frame snapshot. The CPU pushes the
@@ -72,8 +90,13 @@ struct arch_thread {
 		 * ffffff0000000000000000` (kernel struct data) across
 		 * a #PF cycle — exact same pattern as the residual
 		 * mt-mmap-stress page corruption.
+		 *
+		 * SMP-T73 (2026-05-18): switched from struct kvm_fpu
+		 * (legacy 512 B FXSAVE — x87 + XMM low 128) to
+		 * struct kvm_xsave (4 KB extended XSAVE — includes
+		 * YMM upper 128). See header comment above.
 		 */
-		struct kvm_fpu iotrap_fpu;
+		struct kvm_xsave iotrap_fpu;
 		bool iotrap_fpu_valid;
 
 		/*

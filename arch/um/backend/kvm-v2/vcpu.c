@@ -2401,7 +2401,16 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	 * 0000000000000000` drift directly.
 	 */
 	if (current->thread.arch.kvm_v2.iotrap_fpu_valid) {
-		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
+		/*
+		 * SMP-T73 (2026-05-18): KVM_SET_XSAVE (4 KB struct
+		 * kvm_xsave), not KVM_SET_FPU (legacy 512 B FXSAVE).
+		 * The legacy ioctl only restores x87 + XMM low 128;
+		 * post-SMP-T57-Phase-A the guest uses AVX-256 ymm
+		 * registers whose upper 128 lives in the extended
+		 * XSAVE state. See processor_64.h header comment +
+		 * Round 14 doc addendum.
+		 */
+		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_XSAVE,
 				       (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
 		current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
 		/*
@@ -2518,10 +2527,18 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 		if (vcpu->fpu_dirty || vcpu->fpu_owner_task != current ||
 		    static_branch_unlikely(&um_kvm_v2_record_enabled)) {
-			struct kvm_fpu *iotrap = &current->thread.arch.kvm_v2.iotrap_fpu;
+			/*
+			 * SMP-T73 (2026-05-18): KVM_GET_XSAVE (4 KB struct
+			 * kvm_xsave), not KVM_GET_FPU (legacy 512 B FXSAVE).
+			 * Per-dispatch save must include YMM upper 128 to
+			 * prevent cross-task XMM-upper leak through the
+			 * per-host-CPU vCPU pool. This is the cache-flake
+			 * root cause; see processor_64.h header comment.
+			 */
+			struct kvm_xsave *iotrap = &current->thread.arch.kvm_v2.iotrap_fpu;
 			int fpu_rc;
 
-			fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+			fpu_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_XSAVE,
 						  (unsigned long)iotrap);
 			current->thread.arch.kvm_v2.iotrap_fpu_valid = (fpu_rc == 0);
 			if (fpu_rc == 0) {
@@ -3009,10 +3026,17 @@ int kvm_v2_fpu_capture_for_fork(struct arch_thread *from,
 		return 0;
 	}
 
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+	/*
+	 * SMP-T73 (2026-05-18): KVM_GET_XSAVE (4 KB struct kvm_xsave),
+	 * not KVM_GET_FPU (legacy 512 B FXSAVE). Fork-side capture must
+	 * include YMM upper 128 so the child's first dispatch's
+	 * KVM_SET_XSAVE restores the full parent FPU state, including
+	 * any AVX-256 register contents glibc's IFUNC variants depend on.
+	 */
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_XSAVE,
 			      (unsigned long)&to->kvm_v2.fpu);
 	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_fork: KVM_GET_FPU(cpu=%d vcpu_fd=%d) failed (%d) — child gets arch-default FPU\n",
+		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_fork: KVM_GET_XSAVE(cpu=%d vcpu_fd=%d) failed (%d) — child gets arch-default FPU\n",
 				    cpu, vcpu->vcpu_fd, rc);
 		to->kvm_v2.fpu_valid = false;
 		trace_um_backend_kvm_v2_fpu_capture(cpu, 0);
@@ -3121,10 +3145,16 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from)
 		return;
 	}
 
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_FPU,
+	/*
+	 * SMP-T73 (2026-05-18): KVM_GET_XSAVE (4 KB struct kvm_xsave),
+	 * not KVM_GET_FPU (legacy 512 B FXSAVE). Switch-out capture
+	 * must include YMM upper 128 to preserve cross-vCPU task
+	 * migration of full AVX state. See processor_64.h header.
+	 */
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_XSAVE,
 			      (unsigned long)&from->thread.arch.kvm_v2.fpu);
 	if (rc < 0) {
-		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_switch_out: KVM_GET_FPU(cpu=%d vcpu_fd=%d) failed (%d) — preserving prior snapshot if any\n",
+		pr_warn_ratelimited("um: kvm-v2 fpu_capture_for_switch_out: KVM_GET_XSAVE(cpu=%d vcpu_fd=%d) failed (%d) — preserving prior snapshot if any\n",
 				    cpu, vcpu->vcpu_fd, rc);
 		/* SMP-T29: do NOT clear fpu_valid here either — preserve
 		 * any prior valid snapshot. */
@@ -3209,11 +3239,18 @@ EXPORT_SYMBOL_GPL(kvm_v2_context_switch);
 static int kvm_v2_fpu_install_on_first_run(struct kvm_v2_vcpu *vcpu)
 {
 	struct arch_thread *a = &current->thread.arch;
-	struct kvm_fpu init_fpu;
+	struct kvm_xsave init_fpu;
 	int rc, was_valid;
 
 	if (a->kvm_v2.fpu_valid) {
-		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_FPU,
+		/*
+		 * SMP-T73 (2026-05-18): KVM_SET_XSAVE (4 KB struct
+		 * kvm_xsave), not KVM_SET_FPU. Restoring only the legacy
+		 * 512 B FXSAVE area leaves YMM upper 128 in whatever
+		 * state the per-host-CPU vCPU last held — i.e., another
+		 * task's leftover AVX state. See processor_64.h header.
+		 */
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_XSAVE,
 				      (unsigned long)&a->kvm_v2.fpu);
 		if (rc < 0)
 			return rc;
