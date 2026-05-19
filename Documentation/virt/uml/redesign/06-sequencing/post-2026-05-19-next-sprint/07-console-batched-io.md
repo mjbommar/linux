@@ -4,8 +4,38 @@
 **Priority:** LOW-MEDIUM
 **Effort:** small (~100 LoC across `arch/um/drivers/chan_user.c`
 and `arch/um/os-Linux/file.c`)
-**Status:** planned
+**Status:** investigated 2026-05-19, win smaller than agent estimate
 **Depends on:** none.
+
+## Update 2026-05-19 — investigation note
+
+The original sub-agent finding called the console path a
+"byte-buffered `write()` loop" stalling on `dmesg | head -10000`.
+Code reading shows that's not the current shape:
+
+* `arch/um/drivers/line.c::flush_buffer` writes the LINE_BUFSIZE
+  ring buffer in 1–2 `write_chan` calls (only 2 when the ring
+  wraps).
+* `arch/um/drivers/chan_user.c::generic_write` calls host
+  `write()` once for the full buffer and only loops on short
+  writes (`written += err; n - written`).
+
+So the dramatic win the agent predicted does not apply to the
+typical case. The remaining `writev` opportunity is:
+
+* Coalescing the ring-wrap case (2 syscalls → 1).
+* Multi-console fan-out (con0+con1+...) — printk currently
+  walks each console with a separate `write_chan`; one `writev`
+  per console group would help if N consoles > 1.
+
+That's a real but small win (~5–10% syscall reduction on heavy
+console traffic, no impact on interactive). **Recommendation:
+deprioritise to "filler item, opportunistic"**; the larger
+critical-path items (memo #2 UBD io_uring, memo #3 hostfs
+io_uring) remain the right next investment.
+
+The original design below is kept for reference if a future
+maintainer wants to pick it up.
 
 ## Why this matters
 

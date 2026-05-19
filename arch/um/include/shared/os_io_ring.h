@@ -18,6 +18,7 @@
 
 #include <linux/types.h>
 
+struct iovec;
 struct os_io_ring;
 
 struct os_io_cqe {
@@ -34,6 +35,12 @@ int os_io_ring_submit_pread(struct os_io_ring *ring, int fd, void *buf,
 int os_io_ring_submit_pwrite(struct os_io_ring *ring, int fd,
 			     const void *buf, size_t len,
 			     unsigned long long off, __u64 user_data);
+int os_io_ring_submit_preadv(struct os_io_ring *ring, int fd,
+			     const struct iovec *iov, int iovcnt,
+			     unsigned long long off, __u64 user_data);
+int os_io_ring_submit_pwritev(struct os_io_ring *ring, int fd,
+			      const struct iovec *iov, int iovcnt,
+			      unsigned long long off, __u64 user_data);
 int os_io_ring_submit_fsync(struct os_io_ring *ring, int fd,
 			    __u64 user_data);
 

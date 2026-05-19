@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <linux/io_uring.h>
 
 #include <os_io_ring.h>
@@ -249,6 +250,44 @@ int os_io_ring_submit_pwrite(struct os_io_ring *r, int fd,
 	sqe->fd     = fd;
 	sqe->addr   = (__u64)(uintptr_t)buf;
 	sqe->len    = (__u32)len;
+	sqe->off    = off;
+	sqe->user_data = user_data;
+	return sqe_commit(r);
+}
+
+int os_io_ring_submit_preadv(struct os_io_ring *r, int fd,
+			     const struct iovec *iov, int iovcnt,
+			     unsigned long long off, __u64 user_data)
+{
+	struct io_uring_sqe *sqe = sqe_acquire(r);
+
+	if (!sqe)
+		return -EAGAIN;
+
+	memset(sqe, 0, sizeof(*sqe));
+	sqe->opcode = IORING_OP_READV;
+	sqe->fd     = fd;
+	sqe->addr   = (__u64)(uintptr_t)iov;
+	sqe->len    = (__u32)iovcnt;
+	sqe->off    = off;
+	sqe->user_data = user_data;
+	return sqe_commit(r);
+}
+
+int os_io_ring_submit_pwritev(struct os_io_ring *r, int fd,
+			      const struct iovec *iov, int iovcnt,
+			      unsigned long long off, __u64 user_data)
+{
+	struct io_uring_sqe *sqe = sqe_acquire(r);
+
+	if (!sqe)
+		return -EAGAIN;
+
+	memset(sqe, 0, sizeof(*sqe));
+	sqe->opcode = IORING_OP_WRITEV;
+	sqe->fd     = fd;
+	sqe->addr   = (__u64)(uintptr_t)iov;
+	sqe->len    = (__u32)iovcnt;
 	sqe->off    = off;
 	sqe->user_data = user_data;
 	return sqe_commit(r);

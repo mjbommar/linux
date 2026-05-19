@@ -36,6 +36,7 @@
 #include <linux/vmalloc.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
+#include <linux/uio.h>
 #include <kern_util.h>
 #include "mconsole_kern.h"
 #include <init.h>
@@ -1541,6 +1542,11 @@ static int io_count;
  * file so __init code paths see them without reorder pain.
  */
 
+/*
+ * MAX_SG = 64 is the block-layer cap on physical segments per request
+ * (set in ubd_blk_mq_ops above).  A single vectored SQE can therefore
+ * cover up to MAX_SG iovec entries.
+ */
 struct ubd_pending_slot {
 	int		in_use;
 	int		op;            /* REQ_OP_READ / REQ_OP_WRITE */
@@ -1549,6 +1555,16 @@ struct ubd_pending_slot {
 	unsigned long	total;         /* original requested length */
 	unsigned long	done;          /* bytes completed so far */
 	unsigned long long off;
+
+	/*
+	 * Phase 3 (memo #2): vectored submission.  When .vec_cnt > 0
+	 * the slot represents a single IORING_OP_READV / WRITEV
+	 * spanning io_desc[0..vec_cnt-1].  Short-completion fall-back
+	 * routes the remainder through the per-segment path via
+	 * ubd_ring_resubmit_vectored().
+	 */
+	int		vec_cnt;
+	struct iovec	vec[MAX_SG];
 };
 
 static struct os_io_ring *ubd_ring;
@@ -1569,12 +1585,65 @@ static int ubd_slot_alloc(void)
 
 static void ubd_slot_free(int i) { ubd_slots[i].in_use = 0; }
 
+/*
+ * Vectored-slot short-completion: trim consumed iovecs from the
+ * front and resubmit the remainder as a fresh writev/readv.  Used
+ * by ubd_ring_resubmit when s->vec_cnt > 0.
+ */
+static int ubd_ring_resubmit_vectored(int slot_idx)
+{
+	struct ubd_pending_slot *s = &ubd_slots[slot_idx];
+	unsigned long long off = s->off + s->done;
+	unsigned long pos = 0;
+	int i, j;
+
+	for (i = 0; i < s->vec_cnt; i++) {
+		unsigned long ilen = s->vec[i].iov_len;
+
+		if (pos + ilen > s->done)
+			break;
+		pos += ilen;
+	}
+	if (i >= s->vec_cnt)
+		return -EINVAL;	/* over-completed — caller frees slot */
+
+	if (s->done > pos) {
+		unsigned long inner = s->done - pos;
+
+		s->vec[i].iov_base = (char *)s->vec[i].iov_base + inner;
+		s->vec[i].iov_len -= inner;
+	}
+	if (i > 0) {
+		for (j = 0; j < s->vec_cnt - i; j++)
+			s->vec[j] = s->vec[i + j];
+		s->vec_cnt -= i;
+	}
+	s->done = 0;
+	s->off  = off;
+	s->total = 0;
+	for (j = 0; j < s->vec_cnt; j++)
+		s->total += s->vec[j].iov_len;
+
+	if (s->op == REQ_OP_READ)
+		return os_io_ring_submit_preadv(ubd_ring, s->fd, s->vec,
+						s->vec_cnt, off, slot_idx);
+	return os_io_ring_submit_pwritev(ubd_ring, s->fd, s->vec,
+					 s->vec_cnt, off, slot_idx);
+}
+
 static int ubd_ring_resubmit(int slot_idx)
 {
 	struct ubd_pending_slot *s = &ubd_slots[slot_idx];
-	unsigned long remaining = s->total - s->done;
-	char *buf = s->buf ? s->buf + s->done : NULL;
-	unsigned long long off = s->off + s->done;
+	unsigned long remaining;
+	char *buf;
+	unsigned long long off;
+
+	if (s->vec_cnt > 0)
+		return ubd_ring_resubmit_vectored(slot_idx);
+
+	remaining = s->total - s->done;
+	buf = s->buf ? s->buf + s->done : NULL;
+	off = s->off + s->done;
 
 	if (s->op == REQ_OP_READ)
 		return os_io_ring_submit_pread(ubd_ring, s->fd, buf,
@@ -1599,12 +1668,13 @@ static int ubd_ring_submit_one(int op, int fd, char *buf,
 	if (slot < 0)
 		return -EAGAIN;
 	s = &ubd_slots[slot];
-	s->op    = op;
-	s->fd    = fd;
-	s->buf   = buf;
-	s->total = len;
-	s->done  = 0;
-	s->off   = off;
+	s->op      = op;
+	s->fd      = fd;
+	s->buf     = buf;
+	s->total   = len;
+	s->done    = 0;
+	s->off     = off;
+	s->vec_cnt = 0;
 
 	rc = ubd_ring_resubmit(slot);
 	if (rc < 0) {
@@ -1612,6 +1682,75 @@ static int ubd_ring_submit_one(int op, int fd, char *buf,
 		return rc;
 	}
 	return slot;
+}
+
+/*
+ * Phase 3 (memo #2) — vectored submission.
+ *
+ * When a request's io_desc[] is entirely uniform (sector_mask == 0 +
+ * cow_offset == -1 everywhere), all descriptors target the same fd
+ * and run contiguously on disk.  Coalesce them into a single
+ * IORING_OP_WRITEV / READV submission: one SQE instead of desc_cnt.
+ *
+ * Caller has already excluded the non-R/W ops; both branches here
+ * are safe.  Returns slot index on success, -errno on failure
+ * (-EAGAIN if the ring is full; the caller is expected to harvest
+ * one CQE and retry, same shape as ubd_ring_submit_one).
+ */
+static int ubd_ring_submit_vectored(int op, struct io_thread_req *req,
+				    unsigned long long base_off)
+{
+	int slot, rc, i;
+	struct ubd_pending_slot *s;
+	unsigned long total = 0;
+
+	slot = ubd_slot_alloc();
+	if (slot < 0)
+		return -EAGAIN;
+	s = &ubd_slots[slot];
+	s->op      = op;
+	s->fd      = req->fds[0];
+	s->buf     = NULL;
+	s->done    = 0;
+	s->off     = base_off + req->offsets[0];
+	s->vec_cnt = req->desc_cnt;
+	for (i = 0; i < req->desc_cnt; i++) {
+		s->vec[i].iov_base = req->io_desc[i].buffer;
+		s->vec[i].iov_len  = req->io_desc[i].length;
+		total += req->io_desc[i].length;
+	}
+	s->total = total;
+
+	if (op == REQ_OP_READ)
+		rc = os_io_ring_submit_preadv(ubd_ring, s->fd, s->vec,
+					      s->vec_cnt, s->off, slot);
+	else
+		rc = os_io_ring_submit_pwritev(ubd_ring, s->fd, s->vec,
+					       s->vec_cnt, s->off, slot);
+	if (rc < 0) {
+		ubd_slot_free(slot);
+		return rc;
+	}
+	return slot;
+}
+
+static bool ubd_req_vectored_eligible(struct io_thread_req *req)
+{
+	int i;
+
+	if (req->desc_cnt < 2)
+		return false;
+	for (i = 0; i < req->desc_cnt; i++) {
+		struct io_desc *d = &req->io_desc[i];
+
+		if (d->sector_mask != 0)
+			return false;
+		if (d->cow_offset != -1)
+			return false;
+		if (!d->buffer)
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -1642,6 +1781,50 @@ static void do_io_ring(struct io_thread_req *req)
 	 * mutate req->offset in flight.
 	 */
 	base_offset = req->offset;
+
+	/*
+	 * Phase 3 fast-path: one writev/readv for the whole request
+	 * when every desc is uniform (no COW overlay, no sector mask).
+	 */
+	if (ubd_req_vectored_eligible(req)) {
+		int slot;
+
+		for (;;) {
+			slot = ubd_ring_submit_vectored(op, req, base_offset);
+			if (slot >= 0) {
+				submitted++;
+				break;
+			}
+			if (slot != -EAGAIN) {
+				req->error = map_error(-slot);
+				goto harvest;
+			}
+			/* Ring full — wait for any CQE and retry. */
+			{
+				struct os_io_cqe cqe;
+				int hrc = os_io_ring_wait_cqe(ubd_ring,
+							      &cqe, -1);
+
+				if (hrc < 0) {
+					req->error = map_error(-hrc);
+					goto harvest;
+				}
+				if (hrc == 1) {
+					/* Spurious CQE before our submit;
+					 * the harvest loop below is the
+					 * only entity that touches slots,
+					 * so just release this one.
+					 */
+					ubd_slot_free(cqe.user_data);
+				}
+			}
+		}
+		/* Mirror per-desc base_offset advance for the whole req. */
+		for (i = 0; i < req->desc_cnt; i++)
+			base_offset += req->io_desc[i].length;
+		/* Skip per-desc loop — vectored path covers all descs. */
+		goto harvest;
+	}
 
 	for (i = 0; !req->error && i < req->desc_cnt; i++) {
 		struct io_desc *d = &req->io_desc[i];
