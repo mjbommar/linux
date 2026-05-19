@@ -461,6 +461,110 @@ deeper-debug plan) to catch the corrupting write red-handed.
 * `tools/uml/diag/round13-bytecode-monitor/bc-monitor.c` — T69 monitor source
 * `/home/mjbommar/bc-monitor.log` — BC_NEW_ZERO event log
 
+## Round 14 (2026-05-18 / 2026-05-19) — Root cause found
+
+### H16 audit — CPython specialization torn-write race RULED OUT
+
+Read `Python/specialize.c` for any zero-then-write pattern that could
+leave bytecode in a torn state. `set_opcode()` and `specialize()` use
+single-byte atomic writes (`_Py_atomic_compare_exchange_uint8` under
+GIL_DISABLED, plain `instr->op.code = opcode` otherwise) plus a 2-byte
+counter store via `set_counter`. No memset of cache slots; no
+multi-byte zeroing path. **CPython cannot produce a 16-byte contiguous
+zero region in active bytecode.**
+
+### H17 audit — diff against compiled bytecode
+
+Built CPython 3.14 from source and compiled `<frozen importlib._bootstrap>`
+from `inspect.getsource()`. Expected bytes at offsets 8-15:
+`52 02 74 03 52 02 74 04 52 02 73 05 52 03 17 00` (a chain of
+`LOAD_CONST / STORE_NAME / STORE_GLOBAL / MAKE_FUNCTION`). Captured
+abort at those same offsets: `00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00`. **The corrupting agent writes exactly 16 contiguous bytes of
+zero, replacing valid module-init bytecode.** Sizes across captures
+(16/24/26/40 bytes) match SIMD store granularities (xmm=16, ymm=32).
+
+### H18 (THE FIX) — YMM-upper leaks per-dispatch because save uses KVM_GET_FPU instead of KVM_GET_XSAVE
+
+Cross-referenced prior memos. Two earlier landings interact in a way
+the comment at `arch/x86/um/asm/processor_64.h:11-20` was never updated
+to reflect:
+
+* **SMP-T26/T27 fix** (commit `76b1d98b2006`, Layer 15 memo,
+  2026-05-02): cross-task FPU leak in `_int_malloc` MOVUPS. Fix: make
+  `KVM_GET_FPU` unconditional after every KVM_RUN. State at the time:
+  AVX was masked in CPUID, so legacy 512 B FXSAVE = full FPU state.
+  Comment at `processor_64.h:18`: "the legacy 512 B FXSAVE area is
+  sufficient; KVM_GET/SET_XSAVE is moot under our curated guest."
+* **SMP-T57 Phase A** (commit `ab68bf077de3`, memo state-audit/25,
+  2026-05-04): unmask AVX/AVX2/FMA/F16C/OSXSAVE/XSAVE in CPUID, set
+  CR4.OSXSAVE, set XCR0 = FP|SSE|YMM. From this point on, glibc's
+  IFUNC dispatch selects AVX-256 memcpy / memset / strcmp etc.,
+  which write **32 bytes** via `vmovdqu ymm, (mem)`.
+* **The gap nobody updated:** `arch/um/backend/kvm-v2/vcpu.c:2524`
+  still calls `KVM_GET_FPU` (legacy 512 B FXSAVE — x87 + XMM low 128
+  only). The 256-bit YMM upper half is **not captured** per-dispatch.
+  Cross-task vCPU pool sharing combined with the now-active AVX-256
+  glibc memcpy means a dispatch boundary between the YMM load and
+  the YMM store loses the upper 128 bits to whatever task last ran
+  on the same physical vCPU. The next-task YMM store writes
+  `[16 correct low bytes][16 leftover/zero upper bytes]` into the
+  destination — exactly the captured corruption pattern.
+
+The `snapshot.c` code already uses `KVM_GET_XSAVE` / `KVM_SET_XSAVE`
+(4 KB struct kvm_xsave) for save/restore because it correctly accounts
+for SMP-T57 Phase A's XCR0.YMM bit (snapshot.c:30, snapshot.c:158-160
+explicitly note "the legacy 512 B FXSAVE area only covers X87+SSE;
+YMM upper lives in the extended areas"). The **per-dispatch hot path**
+in vcpu.c was never upgraded.
+
+### H17 dispositive test (independent confirmation)
+
+Soak with `GLIBC_TUNABLES=glibc.cpu.hwcaps=-AVX,-AVX2,-AVX_Fast_Unaligned_Load`
+to force scalar/SSE2 memcpy in glibc (bypasses the AVX-256 ymm
+stores entirely). 90 iters elapsed, 90 PASS, **0 cache aborts**.
+Final result pending soak completion. Expected confirmation under
+H18: rate drops to 0 because no YMM-upper-half writes occur.
+
+### The fix (R14 implementation queue)
+
+1. Change `arch/x86/um/asm/processor_64.h`:
+   - `struct kvm_fpu iotrap_fpu;` → `struct kvm_xsave iotrap_fpu;`
+   - `struct kvm_fpu fpu;` → `struct kvm_xsave fpu;` (fork-side)
+   - Update the now-stale "AVX/AVX-512 are masked at CPUID" comment.
+2. Change `arch/um/backend/kvm-v2/vcpu.c`:
+   - `KVM_GET_FPU` → `KVM_GET_XSAVE` at line ~2524
+   - `KVM_SET_FPU` → `KVM_SET_XSAVE` at line ~1772
+   - Same for `kvm_v2_fpu_capture_for_fork` callsite
+3. Memory cost: 4 KB - 512 B = 3.5 KB extra per task_struct. Acceptable
+   for the correctness benefit. (snapshot.c already pays this cost on
+   snapshot+restore paths.)
+
+### Why prior rounds missed this
+
+* SMP-T26/T27 fixed cross-task FPU leak for FXSAVE-covered state
+  (x87 + XMM low 128). The fix verified with `threaded-fork-malloc
+  0/24000 PASS`. But the bug class wasn't reasoned about for YMM
+  upper because AVX was still masked at the time.
+* SMP-T57 Phase A enabled AVX correctly for guest execution (CPUID,
+  CR4.OSXSAVE, XCR0) but didn't trigger a review of every existing
+  KVM_GET_FPU / KVM_SET_FPU callsite. The Layer 15 memo's "Why prior
+  ablations didn't help" list explicitly states "H6 (XSAVE/AVX):
+  structurally impossible (CPUID disables AVX)" — true at memo-write
+  time, made stale by T57 Phase A.
+* Rounds 1-13 of the Django flake investigation never looked at the
+  FPU per-dispatch path because (a) seccomp baseline was clean (it
+  uses native FPU, no save/restore needed) and (b) the bug appeared
+  only with `CONFIG_UM_BACKEND_KVM_V2_GADGET=y`, which biased the
+  investigation toward gadget-specific theories. In reality, the
+  gadget makes the bug *more frequent* (more in-guest syscalls →
+  more YMM use → more dispatch boundaries crossed with leftover
+  state) but isn't the underlying cause. The gadget=n workaround
+  works because gadget=n routes every syscall through `KVM_EXIT_IO →
+  kvm_v2_handle_io_trap → vcpu_run`, which gives the dispatch loop
+  more chances to capture/install FPU per-task — and because seccomp
+  is the natural comparator for that path.
+
 ## Appendix A — Memory-Management Architecture (host + guest)
 
 This appendix maps every place where a page that backs a kvm-v2
