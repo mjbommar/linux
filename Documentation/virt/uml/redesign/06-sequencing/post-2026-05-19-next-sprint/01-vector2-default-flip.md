@@ -3,10 +3,12 @@
 **Sprint:** post-2026-05-19
 **Priority:** HIGH
 **Effort:** small flip (≤ 20 LoC) plus multi-step gating
-**Status:** Steps 1 + 4a DONE 2026-05-19; Step 2 partial measurement
+**Status:** Steps 1 + 3 + 4a DONE 2026-05-19.  Step 3 long-soak
+PASSES with 440/440 across 4 cells, aggregate 98.28 % Wilson lower
+bound per backend (gate ≥ 97 %).  Step 2 partial measurement
 2026-05-19 (gate FAILS in inproc mode 0.108 vs 0.85; fd-handoff
-path needs supervisor wiring — see §"Step 2 partial result"); Steps
-3, 4b, 5 still pending
+path needs supervisor wiring — see §"Step 2 — partial result").
+Steps 4b + 5 HELD on Step 2 fd-handoff re-measure.
 **Owner:** TBD
 **Predecessors:**
   [`08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md`](../../08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md),
@@ -191,6 +193,38 @@ output directory.
 **Acceptance:** both soaks complete by budget exhaustion (not
 operator stop, not failure-stop), with ≥ 97% Wilson 95% CI
 lower bound on aggregate PASS rate per backend.
+
+#### Step 3 — RESULT (2026-05-19) — PASS
+
+Run `r15-vector2-7200-long` (`~/src/r15-vector2-7200-long/`),
+2026-05-19 19:56–22:00 UTC, 7474 s elapsed (3.8% over budget on
+the natural-completion drain), 22 rotations.
+
+| workload         | backend  |   n | PASS | FAIL | rate     | Wilson 95% lower |
+|------------------|----------|-----|------|------|----------|------------------|
+| tier3-django-v2  | kvm-v2   | 110 |  110 |    0 | 100.00%  | 96.63%           |
+| tier3-django-v2  | seccomp  | 110 |  110 |    0 | 100.00%  | 96.63%           |
+| tier3-fastapi-v2 | kvm-v2   | 110 |  110 |    0 | 100.00%  | 96.63%           |
+| tier3-fastapi-v2 | seccomp  | 110 |  110 |    0 | 100.00%  | 96.63%           |
+
+Per-backend aggregate (the gate-relevant cut, n=220):
+
+  - kvm-v2 aggregate (220/220 PASS): **Wilson 95% lower = 98.28%**
+  - seccomp aggregate (220/220 PASS): **Wilson 95% lower = 98.28%**
+
+Both above the 97 % gate.  Zero throttle pauses, zero
+operator-stop / failure-stop conditions.  Acceptance gate
+**PASSES**.
+
+Notable: the binary at `$HOME/src/uml-builds/uml-smp-t41fix/linux`
+was rebuilt six times across the soak (commits 76c428c95d8e
+random-getrandom, b2ff4c0b775e time-travel hook,
+44a1ca55a72a io_uring substrate, ef60f68cd398 UBD io_uring,
+708b7c3f3253 UBD offset fix, f25fcd47be37 UBD vectored
+submission, fa6af32c14ea hostfs host_resolve=strict).  Each new
+iteration of the soak's worker fork picks up the latest binary
+on disk, so the 440-PASS-in-a-row also smoke-tests those landings
+under sustained tier3 stress.
 
 ### Step 4 — Flip the umlctl default + propagate
 
