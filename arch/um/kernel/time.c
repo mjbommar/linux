@@ -69,6 +69,21 @@ static void time_travel_set_time(unsigned long long ns)
 		panic("The system was going to sleep forever, aborting");
 
 	time_travel_time = ns;
+
+	/*
+	 * Post-2026-05-19 sprint memo 04: notify the redesign hook layer
+	 * of every time-travel advance.  um_on_clock_read() fans the
+	 * value into the static-key-gated time-travel, KFENCE-sample and
+	 * record/replay observers.  Production builds with all three keys
+	 * off pay zero cost (the inline is patched out entirely).  See
+	 * arch/um/include/asm/um-hooks.h::um_on_clock_read.
+	 *
+	 * The redesign hook __um_time_travel_clock() (arch/um/kernel/
+	 * hooks.c:252) was defined and exported pre-sprint but never
+	 * called; this single line wires it into the canonical clock-
+	 * advance choke point.
+	 */
+	um_on_clock_read(ns);
 }
 
 enum time_travel_message_handling {
