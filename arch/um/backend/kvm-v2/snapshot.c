@@ -51,8 +51,11 @@
  */
 
 #include <linux/cleanup.h>
+#include <linux/debugfs.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
+#include <linux/init.h>
+#include <linux/ktime.h>
 #include <linux/kvm.h>
 #include <linux/list.h>
 #include <linux/mm.h>
@@ -61,8 +64,10 @@
 #include <linux/sched.h>		/* current */
 #include <linux/slab.h>
 #include <linux/smp.h>
+#include <linux/sort.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
 #include <os.h>
@@ -896,3 +901,222 @@ int kvm_v2_snapshot_restore_task(const struct kvm_v2_snapshot *snap,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_snapshot_restore_task);
+
+/*
+ * kvm_v2_snapshot_bench — Phase 5 bench harness (memo 26-snapshot
+ * §Phase 5). Port of v1's kvm_snapshot_bench surface:
+ *
+ *   - Boot-time: kernel cmdline `kvm_v2_snapshot_bench=N` fires once
+ *     at late_initcall_sync. Used by selftest runners that want a
+ *     deterministic measurement without an init-script handshake.
+ *   - Debugfs: write decimal N to /sys/kernel/debug/um/kvm_v2_
+ *     snapshot_bench (only when CONFIG_DEBUG_FS=y). Useful for
+ *     ad-hoc measurements from inside a booted UML.
+ *
+ * Both paths emit the same dmesg line:
+ *
+ *   um: kvm-v2 snapshot bench: capture=%llu ns; restore_full ns:
+ *     median=%llu p95=%llu min=%llu max=%llu n=%u mode=%s
+ *
+ * Bounded by KVM_V2_SNAPSHOT_BENCH_N_MAX so a runaway echo / cmdline
+ * can't pin the CPU forever. Median + p95 reporting matches v1's
+ * statistical hygiene.
+ *
+ * Memo-12 targets: <50 ms cold-capture / <1 ms iteration restore.
+ * If capture_full -ENOMEM under tight vmalloc, fall back to
+ * capture_regs_only so the bench still produces a number; the dmesg
+ * "mode=" suffix flags which path ran.
+ */
+#define KVM_V2_SNAPSHOT_BENCH_N_MAX	1024
+
+static int kvm_v2_snapshot_bench_u64_cmp(const void *a, const void *b)
+{
+	u64 da = *(const u64 *)a;
+	u64 db = *(const u64 *)b;
+
+	if (da < db)
+		return -1;
+	if (da > db)
+		return 1;
+	return 0;
+}
+
+/*
+ * Drive an N-iteration capture-once + restore_full-N-times bench
+ * cycle. Returns 0 on success, -errno on the first failure. Used by
+ * both the cmdline and debugfs entry points.
+ *
+ * Caller owns @samples buffer (length >= @n). On success the buffer
+ * is sorted in-place and the summary is emitted via pr_info.
+ *
+ * Allocates + frees its own kvm_v2_snapshot internally; the snapshot
+ * is not exposed to the caller.
+ */
+static int kvm_v2_snapshot_bench_run(unsigned int n, u64 *samples)
+{
+	struct kvm_v2_snapshot *snap;
+	u64 t0, t1;
+	u64 cap_cyc;
+	unsigned int i;
+	bool full_mode;
+	int rc;
+
+	snap = kvm_v2_snapshot_alloc();
+	if (!snap)
+		return -ENOMEM;
+
+	/*
+	 * Try the full capture (regs + memslot) first. If kvmalloc the
+	 * memslot buffer fails (UML's vmalloc area is bounded and tight
+	 * at late_initcall_sync on bigger physmem configs), fall back
+	 * to regs-only so the bench still produces a measurement.
+	 */
+	t0 = ktime_get_ns();
+	rc = kvm_v2_snapshot_capture(snap);
+	t1 = ktime_get_ns();
+	if (rc == -ENOMEM) {
+		pr_info("um: kvm-v2 snapshot bench: full capture kvmalloc failed; retrying regs-only\n");
+		t0 = ktime_get_ns();
+		rc = kvm_v2_snapshot_capture_regs_only(snap);
+		t1 = ktime_get_ns();
+	}
+	if (rc < 0) {
+		pr_warn("um: kvm-v2 snapshot bench: capture failed (%d) — vCPU not yet KVM_RUN'd?\n",
+			rc);
+		goto out_destroy;
+	}
+	cap_cyc = t1 - t0;
+	full_mode = (snap->memslot_count > 0);
+
+	for (i = 0; i < n; i++) {
+		t0 = ktime_get_ns();
+		rc = kvm_v2_snapshot_restore_full(snap);
+		t1 = ktime_get_ns();
+		if (rc < 0) {
+			pr_warn("um: kvm-v2 snapshot bench: restore_full failed at iter %u (%d)\n",
+				i, rc);
+			goto out_destroy;
+		}
+		samples[i] = t1 - t0;
+	}
+
+	sort(samples, n, sizeof(u64), kvm_v2_snapshot_bench_u64_cmp, NULL);
+	pr_info("um: kvm-v2 snapshot bench: capture=%llu ns; restore_full ns: median=%llu p95=%llu min=%llu max=%llu n=%u mode=%s\n",
+		cap_cyc,
+		samples[n / 2],
+		samples[(n * 95) / 100],
+		samples[0],
+		samples[n - 1],
+		n,
+		full_mode ? "full" : "regs-only");
+	rc = 0;
+
+out_destroy:
+	kvm_v2_snapshot_destroy(snap);
+	return rc;
+}
+
+#ifdef CONFIG_DEBUG_FS
+
+static ssize_t kvm_v2_snapshot_bench_write(struct file *f,
+					   const char __user *buf,
+					   size_t count, loff_t *ppos)
+{
+	char tmp[16];
+	u64 *samples;
+	long ln;
+	unsigned int n;
+	size_t copy_n;
+	int rc;
+
+	copy_n = min_t(size_t, count, sizeof(tmp) - 1);
+	if (copy_from_user(tmp, buf, copy_n))
+		return -EFAULT;
+	tmp[copy_n] = '\0';
+	if (copy_n > 0 && tmp[copy_n - 1] == '\n')
+		tmp[copy_n - 1] = '\0';
+
+	rc = kstrtol(tmp, 10, &ln);
+	if (rc < 0)
+		return rc;
+	if (ln <= 0 || ln > KVM_V2_SNAPSHOT_BENCH_N_MAX)
+		return -EINVAL;
+	n = (unsigned int)ln;
+
+	samples = kvmalloc_array(n, sizeof(u64), GFP_KERNEL);
+	if (!samples)
+		return -ENOMEM;
+
+	rc = kvm_v2_snapshot_bench_run(n, samples);
+	kvfree(samples);
+	return rc < 0 ? rc : (ssize_t)count;
+}
+
+static const struct file_operations kvm_v2_snapshot_bench_fops = {
+	.write = kvm_v2_snapshot_bench_write,
+};
+
+static int __init kvm_v2_snapshot_debugfs_init(void)
+{
+	struct dentry *d;
+
+	d = debugfs_lookup("um", NULL);
+	if (!d) {
+		d = debugfs_create_dir("um", NULL);
+		if (IS_ERR(d))
+			return PTR_ERR(d);
+	}
+
+	debugfs_create_file("kvm_v2_snapshot_bench", 0200, d, NULL,
+			    &kvm_v2_snapshot_bench_fops);
+	return 0;
+}
+late_initcall_sync(kvm_v2_snapshot_debugfs_init);
+
+#endif /* CONFIG_DEBUG_FS */
+
+/*
+ * Boot-time cmdline driver. Set N via `kvm_v2_snapshot_bench=N` on
+ * the UML kernel cmdline; the late_initcall_sync below fires the
+ * bench once with that N. 0 / unset = no bench.
+ */
+static unsigned int kvm_v2_snapshot_bench_n_at_boot;
+
+static int __init kvm_v2_snapshot_bench_setup(char *s)
+{
+	long ln;
+
+	if (!s || kstrtol(s, 10, &ln) < 0)
+		return 1;
+	if (ln < 0 || ln > KVM_V2_SNAPSHOT_BENCH_N_MAX)
+		return 1;
+	kvm_v2_snapshot_bench_n_at_boot = (unsigned int)ln;
+	return 1;
+}
+__setup("kvm_v2_snapshot_bench=", kvm_v2_snapshot_bench_setup);
+
+static int __init kvm_v2_snapshot_bench_late_init(void)
+{
+	u64 *samples;
+	unsigned int n;
+	int rc;
+
+	n = kvm_v2_snapshot_bench_n_at_boot;
+	if (!n)
+		return 0;
+
+	samples = kvmalloc_array(n, sizeof(u64), GFP_KERNEL);
+	if (!samples) {
+		pr_warn("um: kvm-v2 snapshot bench: kvmalloc(%u samples) failed\n",
+			n);
+		return 0;
+	}
+
+	rc = kvm_v2_snapshot_bench_run(n, samples);
+	if (rc < 0)
+		pr_warn("um: kvm-v2 snapshot bench: bench_run rc=%d\n", rc);
+
+	kvfree(samples);
+	return 0;
+}
+late_initcall_sync(kvm_v2_snapshot_bench_late_init);
