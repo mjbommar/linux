@@ -761,8 +761,18 @@ void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
 	dev->hw_features = NETIF_F_SG | NETIF_F_FRAGLIST;
 	if (vdev->cfg.gro)
 		dev->hw_features |= NETIF_F_GRO;
-	if (vdev->cfg.gso)
+	if (vdev->cfg.gso) {
+		/*
+		 * GSO + TSO go together: the TCP stack only generates
+		 * large GSO skbs when NETIF_F_TSO* is advertised, and
+		 * `virtio_net_hdr_from_skb` in our tap/fd write path
+		 * encodes the gso_type for the host kernel to segment
+		 * (saves the per-MTU-frame syscall cost — memo 01
+		 * Step 2 root cause).
+		 */
 		dev->hw_features |= NETIF_F_GSO;
+		dev->hw_features |= NETIF_F_TSO | NETIF_F_TSO6;
+	}
 	if (vdev->cfg.csum)
 		dev->hw_features |= NETIF_F_HW_CSUM;
 	dev->features = dev->hw_features;

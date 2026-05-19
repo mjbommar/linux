@@ -9,11 +9,14 @@
 #include <linux/etherdevice.h>
 #include <linux/errno.h>
 #include <linux/if_ether.h>
+#include <linux/if_tun.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
+#include <linux/virtio_net.h>
+#include <uapi/linux/if.h>
 
 #include <os.h>
 
@@ -30,11 +33,47 @@ struct um_vec2_fd_host {
 	unsigned int frame_len;
 	int rx_fd;
 	int tx_fd;
+	bool vnet_hdr;	/* inherited fd has IFF_VNET_HDR set */
 };
 
 static struct um_vec2_fd_host *um_vec2_host_to_fd(struct um_vec2_host *host)
 {
 	return container_of(host, struct um_vec2_fd_host, host);
+}
+
+/*
+ * Send one skb to the host TAP fd.  When @vnet_hdr is true the
+ * tap was opened with IFF_VNET_HDR — we prepend a virtio_net_hdr
+ * so the host kernel can offload large TCP segments (TSO) instead
+ * of forcing the guest to MTU-segment.  Mirrors vector2_host_tap.c.
+ */
+static int um_vec2_fd_write_skb(int fd, struct sk_buff *skb, bool vnet_hdr)
+{
+	if (vnet_hdr) {
+		struct virtio_net_hdr hdr;
+		unsigned int original_len = skb->len;
+		int ret;
+
+		ret = skb_cow_head(skb, sizeof(hdr));
+		if (ret)
+			return ret;
+		ret = virtio_net_hdr_from_skb(skb, &hdr, true, false, 0);
+		if (ret)
+			return ret;
+		skb_push(skb, sizeof(hdr));
+		skb_copy_to_linear_data(skb, &hdr, sizeof(hdr));
+		ret = os_write_file(fd, skb->data, skb->len);
+		skb_pull(skb, sizeof(hdr));
+		if (ret == -EAGAIN || ret == -ENOBUFS)
+			return ret;
+		if (ret < 0)
+			return ret;
+		if (ret != original_len + (int)sizeof(hdr))
+			return -EIO;
+		return original_len;
+	}
+
+	return os_write_file(fd, skb->data, skb->len);
 }
 
 static int um_vec2_fd_tx_batch(struct um_vec2_host *host,
@@ -60,7 +99,7 @@ static int um_vec2_fd_tx_batch(struct um_vec2_host *host,
 		if (ret)
 			return sent ? (int)sent : ret;
 
-		ret = os_write_file(fdhost->tx_fd, skb->data, skb->len);
+		ret = um_vec2_fd_write_skb(fdhost->tx_fd, skb, fdhost->vnet_hdr);
 		if (ret == -EAGAIN || ret == -ENOBUFS)
 			break;
 		if (ret < 0)
@@ -109,12 +148,29 @@ static int um_vec2_fd_rx_batch(struct um_vec2_host *host,
 			break;
 		if (ret < 0)
 			goto complete;
-		if (ret < ETH_HLEN) {
-			ret = -EPROTO;
-			goto complete;
+
+		if (fdhost->vnet_hdr) {
+			struct virtio_net_hdr hdr;
+
+			if (ret <= (int)sizeof(hdr)) {
+				ret = -EPROTO;
+				goto complete;
+			}
+			skb_trim(skb, ret);
+			memcpy(&hdr, skb->data, sizeof(hdr));
+			skb_pull(skb, sizeof(hdr));
+			if (virtio_net_hdr_to_skb(skb, &hdr, true)) {
+				ret = -EPROTO;
+				goto complete;
+			}
+		} else {
+			if (ret < ETH_HLEN) {
+				ret = -EPROTO;
+				goto complete;
+			}
+			skb_trim(skb, ret);
 		}
 
-		skb_trim(skb, ret);
 		skb->dev = fdhost->dev;
 		lens[received++] = skb->len;
 	}
@@ -246,7 +302,24 @@ static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
 
 	fdhost->host.ops = &um_vec2_fd_host_ops;
 	fdhost->dev = dev;
-	fdhost->frame_len = um_vec2_runtime_frame_len(dev, false);
+
+	/*
+	 * Probe the inherited tap fd for IFF_VNET_HDR.  When set, the
+	 * tap was opened with virtio_net_hdr-prefixed framing — vec2
+	 * can then use IORING-style TSO and the guest→host TCP path
+	 * stops paying per-MTU-frame syscall cost (memo 01 Step 2).
+	 * Probe failure (non-tap fd, ENOTTY) is benign — we just fall
+	 * back to the raw-frame shape.
+	 */
+	{
+		struct ifreq ifr = {};
+		int probe;
+
+		probe = os_ioctl_generic(fd, TUNGETIFF, (unsigned long)&ifr);
+		fdhost->vnet_hdr = (probe == 0) &&
+				   ((ifr.ifr_flags & IFF_VNET_HDR) != 0);
+	}
+	fdhost->frame_len = um_vec2_runtime_frame_len(dev, fdhost->vnet_hdr);
 	fdhost->rx_fd = fd;
 	fdhost->tx_fd = fd;
 	channel->host = &fdhost->host;
