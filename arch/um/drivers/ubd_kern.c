@@ -1625,6 +1625,7 @@ static void do_io_ring(struct io_thread_req *req)
 {
 	int submitted = 0, harvested = 0;
 	int i, op;
+	u64 base_offset;
 
 	op = req_op(req->req);
 	if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
@@ -1634,10 +1635,19 @@ static void do_io_ring(struct io_thread_req *req)
 		return;
 	}
 
+	/*
+	 * Mirror legacy do_io()'s req->offset += len advance across
+	 * io_desc[] entries — otherwise multi-bvec requests would all
+	 * target the same on-disk offset.  Local snapshot so we don't
+	 * mutate req->offset in flight.
+	 */
+	base_offset = req->offset;
+
 	for (i = 0; !req->error && i < req->desc_cnt; i++) {
 		struct io_desc *d = &req->io_desc[i];
 		int nsectors = d->length / req->sectorsize;
 		int start = 0;
+		unsigned long last_len = 0;
 
 		do {
 			int bit = ubd_test_bit(start,
@@ -1653,9 +1663,10 @@ static void do_io_ring(struct io_thread_req *req)
 				(unsigned char *)&d->sector_mask) == bit)
 				end++;
 
-			off = req->offset + req->offsets[bit] +
+			off = base_offset + req->offsets[bit] +
 			      start * req->sectorsize;
 			len = (end - start) * req->sectorsize;
+			last_len = len;
 			buf = d->buffer
 			      ? &d->buffer[start * req->sectorsize]
 			      : NULL;
@@ -1723,6 +1734,8 @@ static void do_io_ring(struct io_thread_req *req)
 			}
 			start = end;
 		} while (start < nsectors);
+
+		base_offset += last_len;
 	}
 
 harvest:
@@ -1764,6 +1777,8 @@ harvest:
 			}
 		}
 	}
+
+	req->offset = base_offset;
 
 	/* Bitmap update stays synchronous (memo §Phase 5). */
 	for (i = 0; !req->error && i < req->desc_cnt; i++)
