@@ -626,12 +626,85 @@ static void test_kvm_v2_record_gadget_bypass(struct kunit *test)
 			    seen_state_page - seen_off);
 }
 
+/**
+ * test_kvm_v2_record_rdtsc - Phase 5 RDTSC observe/consume round-trip.
+ * @test: KUnit test handle.
+ *
+ * Sequence:
+ *   1. alloc.
+ *   2. start.
+ *   3. observe_rdtsc N times with a known pattern of TSC values.
+ *   4. stop → replay.
+ *   5. consume_rdtsc N times, assert each returned value matches the
+ *      recorded pattern in the same order.
+ *   6. extra consume must return -ENODATA (end-of-log).
+ *   7. destroy.
+ *
+ * Confirms the Phase 5 observe/consume + union-payload plumbing
+ * round-trips byte-identically. Independent of the trap-on-RDTSC
+ * VMCS programming (memo 27 §6 Q1), which lands separately — the
+ * API contract proven here is what that wiring will call into.
+ */
+static void test_kvm_v2_record_rdtsc(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	const u64 pattern[] = {
+		0x0000000012345678ULL,
+		0xa5a5a5a5cafebabeULL,
+		0xfedcba9876543210ULL,
+		0x0000000000000001ULL,	/* smallest interesting */
+		0xffffffffffffffffULL,	/* saturated */
+	};
+	u64 got;
+	int rc;
+	size_t i;
+
+	rec = kvm_v2_record_alloc(0);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_v2_record_start(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	for (i = 0; i < ARRAY_SIZE(pattern); i++)
+		kvm_v2_record_observe_rdtsc(rec, pattern[i]);
+
+	KUNIT_EXPECT_EQ_MSG(test,
+			    rec->entries_recorded, (u64)ARRAY_SIZE(pattern),
+			    "expected %zu entries recorded, got %llu",
+			    ARRAY_SIZE(pattern), rec->entries_recorded);
+
+	rc = kvm_v2_record_stop(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = kvm_v2_record_replay(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	for (i = 0; i < ARRAY_SIZE(pattern); i++) {
+		got = 0;
+		rc = kvm_v2_record_consume_rdtsc(rec, &got);
+		KUNIT_ASSERT_EQ_MSG(test, rc, 1,
+				    "consume_rdtsc[%zu] rc=%d", i, rc);
+		KUNIT_EXPECT_EQ_MSG(test, got, pattern[i],
+				    "consume_rdtsc[%zu] got %#llx expected %#llx",
+				    i, got, pattern[i]);
+	}
+
+	/* End-of-log: extra consume must return -ENODATA. */
+	got = 0xdeadbeefdeadbeefULL;
+	rc = kvm_v2_record_consume_rdtsc(rec, &got);
+	KUNIT_EXPECT_EQ_MSG(test, rc, -ENODATA,
+			    "consume past end returned %d (want -ENODATA)", rc);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_basic),
 	KUNIT_CASE(test_kvm_v2_record_state_transitions),
 	KUNIT_CASE(test_kvm_v2_record_observe),
 	KUNIT_CASE(test_kvm_v2_record_strict_replay),
 	KUNIT_CASE(test_kvm_v2_record_gadget_bypass),
+	KUNIT_CASE(test_kvm_v2_record_rdtsc),
 	{}
 };
 

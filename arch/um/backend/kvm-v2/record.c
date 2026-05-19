@@ -708,6 +708,54 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 EXPORT_SYMBOL_GPL(kvm_v2_record_observe_syscall);
 
 /**
+ * kvm_v2_record_observe_rdtsc - log one RDTSC/RDTSCP read into @rec.
+ * @rec:       active container (NULL is a quiet no-op).
+ * @tsc_value: TSC value captured at the RDTSC vmexit site.
+ *
+ * Phase 5 of #169 (memo 27 §3.4). Appends a KVM_V2_REPLAY_RDTSC entry
+ * carrying @tsc_value in the @rdtsc payload union arm. Same record-
+ * state gate + buffer-full quiet-drop shape as observe_syscall.
+ *
+ * Caller is the RDTSC vmexit handler (future wiring). Phase 5 lands
+ * the API + KUnit only; the trap-on-RDTSC VMCS programming is filed
+ * as memo 27 §6 Q1 work — once that wiring lands, this hook fires
+ * unchanged.
+ */
+void kvm_v2_record_observe_rdtsc(struct kvm_v2_record *rec, u64 tsc_value)
+{
+	struct kvm_v2_replay_entry *e;
+	const size_t need = sizeof(*e);
+
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_RECORDING) {
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	if (rec->buffer_used + need > rec->buffer_size) {
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + rec->buffer_used);
+	memset(e, 0, sizeof(*e));
+	e->kind		= KVM_V2_REPLAY_RDTSC;
+	e->size		= (u32)need;
+	e->sequence	= ++rec->sequence;
+	e->rdtsc.value	= tsc_value;
+
+	rec->buffer_used += need;
+	rec->entries_recorded++;
+
+	mutex_unlock(&rec->lock);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_observe_rdtsc);
+
+/**
  * kvm_v2_record_consume_syscall - replay-side FIFO consume.
  * @rec:        active container; caller has typically already gated on
  *              kvm_v2_record_active(). NULL is tolerated (no-op,
@@ -840,3 +888,73 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall);
+
+/**
+ * kvm_v2_record_consume_rdtsc - replay-side FIFO consume for RDTSC.
+ * @rec:       active container; NULL is a quiet no-op returning 0.
+ * @value_out: out-param. On rc > 0, written with the recorded TSC value.
+ *
+ * Phase 5 of #169 (memo 27 §3.4). Walks @rec->buffer in FIFO order at
+ * @rec->buffer_replayed and serves the next entry, asserting its
+ * @kind == KVM_V2_REPLAY_RDTSC. Returns the same rc set as
+ * kvm_v2_record_consume_syscall:
+ *
+ *   1         entry served; @value_out populated, cursor advanced.
+ *   0         no work — @rec NULL or state != REPLAYING.
+ *  -ENODATA   end-of-log.
+ *  -EILSEQ    next entry's kind is not RDTSC (interleaved-stream
+ *             divergence — caller decides strict / loose handling).
+ *
+ * Phase 5 keeps the same shared-cursor model as consume_syscall. The
+ * future mixed-stream walker (memo 27 §"Phase 7+ multi-vCPU") will
+ * extend with kind-skipping; for Phase 5 KUnit purposes the recorded
+ * stream is RDTSC-only, so the shared cursor works as-is.
+ */
+int kvm_v2_record_consume_rdtsc(struct kvm_v2_record *rec, u64 *value_out)
+{
+	struct kvm_v2_replay_entry *e;
+	size_t cursor;
+	int rc;
+
+	if (!rec)
+		return 0;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_REPLAYING) {
+		mutex_unlock(&rec->lock);
+		return 0;
+	}
+
+	cursor = rec->buffer_replayed;
+	if (cursor >= rec->buffer_used) {
+		rc = -ENODATA;
+		goto out_unlock;
+	}
+	if (cursor + sizeof(*e) > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
+
+	if (e->kind != KVM_V2_REPLAY_RDTSC) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+	if (e->size < sizeof(*e) || cursor + e->size > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	if (value_out)
+		*value_out = e->rdtsc.value;
+	rec->buffer_replayed = cursor + e->size;
+	rec->entries_replayed++;
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_consume_rdtsc);

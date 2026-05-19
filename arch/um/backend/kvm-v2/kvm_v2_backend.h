@@ -1182,12 +1182,29 @@ struct kvm_v2_replay_entry {
 	u32	kind;
 	u32	size;
 	u64	sequence;
-	struct {
-		s32	nr;
-		s32	_pad;
-		u64	retval;
-		u64	args[6];
-	} syscall;
+	/*
+	 * Per-kind payload. Anonymous union — `e->syscall.foo` and
+	 * `e->rdtsc.foo` are both accessed via the entry pointer with
+	 * no extra qualifier. Discriminator is @kind; consumers
+	 * validate (e->kind == EXPECTED_KIND) before touching the
+	 * payload member of that kind.
+	 *
+	 * Phase 5 (#169) adds @rdtsc alongside @syscall. Phase 6 will
+	 * add @sigalrm; Phase 2.5 will add the side-buffer-routed
+	 * @sockaddr / @iov siblings under the same union.
+	 */
+	union {
+		struct {
+			s32	nr;
+			s32	_pad;
+			u64	retval;
+			u64	args[6];
+		} syscall;
+		struct {
+			u64	value;	/* RDTSC / RDTSCP TSC read */
+			u64	_pad[7];
+		} rdtsc;
+	};
 };
 
 /**
@@ -1338,6 +1355,29 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
 				  unsigned long syscall_nr,
 				  long *ret_value);
+
+/*
+ * Phase 5 (#169) RDTSC observe/consume.
+ *
+ * observe_rdtsc appends a KVM_V2_REPLAY_RDTSC entry to @rec->buffer
+ * carrying the captured TSC value. consume_rdtsc walks @rec->buffer
+ * forward from @rec->buffer_replayed and serves the next RDTSC entry,
+ * writing its value via @value_out.
+ *
+ * The current consume walker is per-stream (one cursor shared by the
+ * syscall and rdtsc kinds). Phase 6's mixed-stream consumer will
+ * extend with kind-skipping; today the test workloads keep the
+ * streams ordered enough that this works in practice. Phase 5's
+ * KUnit exercises observe/consume in isolation (no mixed-stream).
+ *
+ * observe_rdtsc has the same quiet-no-op shape as observe_syscall:
+ * NULL @rec, state != RECORDING, or buffer-full all silently drop the
+ * append. consume_rdtsc returns 1 on success, 0 on quiet no-op
+ * (NULL @rec or state != REPLAYING), -ENODATA on end-of-log, -EILSEQ
+ * on kind mismatch.
+ */
+void kvm_v2_record_observe_rdtsc(struct kvm_v2_record *rec, u64 tsc_value);
+int  kvm_v2_record_consume_rdtsc(struct kvm_v2_record *rec, u64 *value_out);
 
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
 /*
