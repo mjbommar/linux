@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
@@ -307,6 +308,7 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 	void *loc;
 	int prot;
 	int flags;
+	const char *thp_knob;
 
 	prot = (r ? PROT_READ : 0) | (w ? PROT_WRITE : 0) |
 		(x ? PROT_EXEC : 0);
@@ -321,14 +323,86 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 	 * MAP_LOCKED would additionally tell the host kernel to lock the
 	 * resulting pages in RAM, blocking migration/reclaim. Gate on
 	 * `um_kvm_v2_pin_physmem` so we can A/B test without rebuilds.
+	 *
+	 * SMP-T81 (memo 52 §2.1): if UM_HUGEPAGES=2M or =1G, request
+	 * explicit hugepage backing via MAP_HUGETLB. Massive TLB pressure
+	 * reduction (1 GiB physmem at 4K = 262144 PTEs vs 512 at 2M vs
+	 * 1 at 1G). Falls back to 4K (with a perror) if the hugepage pool
+	 * is empty — operator should pre-reserve via
+	 * /proc/sys/vm/nr_hugepages.
 	 */
 	flags = MAP_SHARED | MAP_FIXED | MAP_POPULATE;
 	if (getenv("UM_KVM_V2_PIN_PHYSMEM"))
 		flags |= MAP_LOCKED;
 
+	{
+		const char *hp = getenv("UM_HUGEPAGES");
+
+		if (hp) {
+			int huge_shift = 0;
+
+			if (!strcmp(hp, "2M"))
+				huge_shift = 21;	/* MAP_HUGE_2MB */
+			else if (!strcmp(hp, "1G"))
+				huge_shift = 30;	/* MAP_HUGE_1GB */
+			/* anything else (off/auto/empty): keep 4K */
+
+			if (huge_shift)
+				flags |= MAP_HUGETLB | (huge_shift << MAP_HUGE_SHIFT);
+		}
+	}
+
 	loc = mmap64((void *)virt, len, prot, flags, fd, off);
+	if (loc == MAP_FAILED && (flags & MAP_HUGETLB)) {
+		/*
+		 * SMP-T81 fallback: hugepage pool exhausted (typical:
+		 * /proc/sys/vm/nr_hugepages unreserved). Retry with 4K so
+		 * the run proceeds; operator sees the warning + can reserve
+		 * the pool for the next launch.
+		 */
+		perror("um: UM_HUGEPAGES requested but mmap returned ENOMEM; falling back to 4K");
+		flags &= ~(MAP_HUGETLB | (0x3fU << MAP_HUGE_SHIFT));
+		loc = mmap64((void *)virt, len, prot, flags, fd, off);
+	}
 	if (loc == MAP_FAILED)
 		return -errno;
+
+	/*
+	 * SMP-T78 (memo 52 §1.1): tell host KSM to skip this range.
+	 * KSM (Kernel Same-page Merging) is a host-side feature that
+	 * scans VM memory looking for identical pages and merges them
+	 * via COW. Removes a known noise source for hypervisor
+	 * workloads (latency spikes when the guest writes to a merged
+	 * page and the host has to un-share). Apply unconditionally —
+	 * EINVAL on a host without KSM configured is fine.
+	 */
+	if (madvise(loc, len, MADV_UNMERGEABLE) < 0 && errno != EINVAL)
+		perror("um: SMP-T78 madvise(MADV_UNMERGEABLE)");
+
+	/*
+	 * SMP-T79 (memo 52 §1.2): apply Transparent Huge Pages policy
+	 * for predictability. UM_THP=off → NOHUGEPAGE (predictable,
+	 * no khugepaged scan latency spikes); =on → HUGEPAGE
+	 * (throughput-oriented, eager defrag); =auto/unset → inherit
+	 * system default (today's behaviour).
+	 *
+	 * Distinct from MAP_HUGETLB (SMP-T81 above): MAP_HUGETLB
+	 * guarantees specific page sizes from the pre-reserved
+	 * hugetlbfs pool; MADV_HUGEPAGE is opportunistic via
+	 * khugepaged on regular 4K-backed memory.
+	 */
+	thp_knob = getenv("UM_THP");
+	if (thp_knob) {
+		if (!strcmp(thp_knob, "off")) {
+			if (madvise(loc, len, MADV_NOHUGEPAGE) < 0)
+				perror("um: SMP-T79 madvise(MADV_NOHUGEPAGE)");
+		} else if (!strcmp(thp_knob, "on")) {
+			if (madvise(loc, len, MADV_HUGEPAGE) < 0)
+				perror("um: SMP-T79 madvise(MADV_HUGEPAGE)");
+		}
+		/* "auto"/anything else: no madvise, inherit default. */
+	}
+
 	return 0;
 }
 

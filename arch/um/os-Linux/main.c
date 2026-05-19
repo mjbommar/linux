@@ -4,10 +4,13 @@
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sched.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -200,6 +203,104 @@ int __init main(int argc, char **argv, char **envp)
 			perror("SMP-T71 setrlimit(RLIMIT_MEMLOCK)");
 		if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) < 0)
 			perror("SMP-T71 mlockall");
+	}
+
+	/*
+	 * SMP-T80 (memo 52 §1.3): apply OOM score adjustment if
+	 * UM_OOM_SCORE_ADJ env var is set. Value range [-1000, +1000];
+	 * the host kernel clamps out-of-range values. Operator policy:
+	 *   - Soak harness: UM_OOM_SCORE_ADJ=+500 → UML is expendable,
+	 *     gets killed first when host is under memory pressure.
+	 *   - Long-running research session: -500 → UML is precious.
+	 *   - Production: 0 (host policy decides).
+	 */
+	{
+		const char *oom_str = getenv("UM_OOM_SCORE_ADJ");
+
+		if (oom_str) {
+			int fd = open("/proc/self/oom_score_adj",
+				      O_WRONLY | O_CLOEXEC);
+
+			if (fd < 0) {
+				perror("SMP-T80 open(/proc/self/oom_score_adj)");
+			} else {
+				ssize_t n = write(fd, oom_str, strlen(oom_str));
+
+				if (n < 0)
+					perror("SMP-T80 write(oom_score_adj)");
+				close(fd);
+			}
+		}
+	}
+
+	/*
+	 * SMP-T82 (memo 52 §2.2): apply process-level CPU affinity if
+	 * UM_KVM_V2_CPU_AFFINITY env var is set. Format: comma-
+	 * separated CPU list with optional ranges, e.g. "0-3" or
+	 * "0,2,4". Confines the UML process (and all its host threads)
+	 * to the listed CPU subset.
+	 *
+	 * Under v2's per-host-CPU vCPU pool design, this consolidates
+	 * the working set: all guest tasks dispatching land on vCPUs
+	 * within the listed CPU subset, which keeps the host's per-CPU
+	 * KVM caches (mmu_cache, posted_interrupts) warm. Cross-vCPU
+	 * transitions within the subset still occur (load balancing
+	 * within the affinity mask) but the host-thread-migrates-to-
+	 * a-cold-CPU class is eliminated.
+	 *
+	 * Parser is intentionally simple: handles "M" / "M-N" /
+	 * "M,N,..." / combinations. Anything malformed → perror +
+	 * inherit existing affinity (don't fail the boot).
+	 */
+	{
+		const char *aff = getenv("UM_KVM_V2_CPU_AFFINITY");
+
+		if (aff && *aff) {
+			cpu_set_t mask;
+			const char *p = aff;
+			char *end;
+			long lo, hi;
+			int parsed_any = 0;
+
+			CPU_ZERO(&mask);
+			while (*p) {
+				lo = strtol(p, &end, 10);
+				if (end == p)
+					break;
+				p = end;
+				hi = lo;
+				if (*p == '-') {
+					p++;
+					hi = strtol(p, &end, 10);
+					if (end == p)
+						break;
+					p = end;
+				}
+				if (lo >= 0 && hi >= lo && hi < CPU_SETSIZE) {
+					long cpu;
+
+					for (cpu = lo; cpu <= hi; cpu++)
+						CPU_SET((int)cpu, &mask);
+					parsed_any = 1;
+				}
+				if (*p == ',')
+					p++;
+				else if (*p)
+					break;
+			}
+			if (parsed_any) {
+				int rc;
+
+				errno = 0;
+				rc = sched_setaffinity(0, sizeof(mask), &mask);
+				if (rc < 0 && errno != 0)
+					perror("SMP-T82 sched_setaffinity");
+			} else {
+				fprintf(stderr,
+					"SMP-T82: malformed UM_KVM_V2_CPU_AFFINITY='%s' — ignoring\n",
+					aff);
+			}
+		}
 	}
 
 	setup_env_path();
