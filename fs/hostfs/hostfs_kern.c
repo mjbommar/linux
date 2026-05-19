@@ -25,6 +25,23 @@
 
 struct hostfs_fs_info {
 	char *host_root_path;
+	/*
+	 * Per memo #3 (post-2026-05-19 sprint, hostfs openat2): when
+	 * @resolve_strict is true, hostfs_open() routes file opens
+	 * through open_file_strict() which uses openat2(@host_root_fd,
+	 * <relative>, RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS).  This
+	 * blocks symlink-escape out of the mount root.
+	 *
+	 * Default (off) preserves the legacy bare-open64() path — some
+	 * hostfs deployments deliberately rely on symlink traversal
+	 * out of the configured root.
+	 *
+	 * @host_root_fd is the O_PATH | O_DIRECTORY fd opened on
+	 * @host_root_path at fill_super; closed at put_super.
+	 * Valid (>= 0) only when @resolve_strict is true.
+	 */
+	int host_root_fd;
+	bool resolve_strict;
 };
 
 struct hostfs_inode_info {
@@ -318,7 +335,47 @@ retry:
 	if (name == NULL)
 		return -ENOMEM;
 
-	fd = open_file(name, r, w, append);
+	{
+		struct hostfs_fs_info *fsi = ino->i_sb->s_fs_info;
+
+		if (fsi->resolve_strict && fsi->host_root_fd >= 0) {
+			/*
+			 * Memo #3 Phase 1: strict path resolution.  The
+			 * absolute @name starts with @host_root_path; the
+			 * remainder is what we hand to openat2.  If the
+			 * resulting fd is -ELOOP / -EXDEV, the symlink
+			 * pointed out of the mount root and we honour the
+			 * rejection (do NOT fall back to open_file —
+			 * that would defeat the security guarantee).
+			 */
+			size_t root_len = strlen(fsi->host_root_path);
+			const char *rel = name;
+
+			if (strncmp(name, fsi->host_root_path, root_len) == 0)
+				rel = name + root_len;
+
+			fd = open_file_strict(fsi->host_root_fd, rel,
+					      r, w, append);
+			if (fd == -ENOSYS) {
+				/*
+				 * Host kernel < 5.6 — openat2 unavailable.
+				 * Demote to legacy ONCE with a warning;
+				 * subsequent opens take the legacy path
+				 * silently.  This is the only fallback
+				 * permitted under strict mode.
+				 */
+				pr_warn_once("hostfs: host_resolve=strict but host lacks openat2 — falling back to legacy resolution\n");
+				fsi->resolve_strict = false;
+				if (fsi->host_root_fd >= 0) {
+					os_close_file(fsi->host_root_fd);
+					fsi->host_root_fd = -1;
+				}
+				fd = open_file(name, r, w, append);
+			}
+		} else {
+			fd = open_file(name, r, w, append);
+		}
+	}
 	__putname(name);
 	if (fd < 0)
 		return fd;
@@ -963,15 +1020,43 @@ static int hostfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (sb->s_root == NULL)
 		return -ENOMEM;
 
+	/*
+	 * Memo #3 Phase 1: if the user opted into strict path
+	 * resolution, open the mount root with O_PATH | O_DIRECTORY
+	 * for openat2() to anchor on.  Failure demotes back to legacy
+	 * (logged so the operator notices).
+	 */
+	if (fsi->resolve_strict) {
+		fsi->host_root_fd = open_root_path(fsi->host_root_path);
+		if (fsi->host_root_fd < 0) {
+			pr_warn("hostfs: host_resolve=strict requested but open(%s, O_PATH) failed (%d); falling back to legacy resolution\n",
+				fsi->host_root_path, fsi->host_root_fd);
+			fsi->host_root_fd = -1;
+			fsi->resolve_strict = false;
+		} else {
+			pr_info("hostfs: host_resolve=strict armed for %s (root_fd=%d)\n",
+				fsi->host_root_path, fsi->host_root_fd);
+		}
+	}
+
 	return 0;
 }
 
 enum hostfs_parma {
 	Opt_hostfs,
+	Opt_host_resolve,
+};
+
+static const struct constant_table hostfs_resolve_mode[] = {
+	{ "legacy", 0 },
+	{ "strict", 1 },
+	{},
 };
 
 static const struct fs_parameter_spec hostfs_param_specs[] = {
 	fsparam_string_empty("hostfs",		Opt_hostfs),
+	fsparam_enum("host_resolve",		Opt_host_resolve,
+		     hostfs_resolve_mode),
 	{}
 };
 
@@ -997,6 +1082,10 @@ static int hostfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			return -ENOMEM;
 		kfree(fsi->host_root_path);
 		fsi->host_root_path = tmp_root;
+		break;
+	case Opt_host_resolve:
+		/* result.uint_32 = 0 (legacy) / 1 (strict). */
+		fsi->resolve_strict = (result.uint_32 != 0);
 		break;
 	}
 
@@ -1056,6 +1145,8 @@ static int hostfs_init_fs_context(struct fs_context *fc)
 		kfree(fsi);
 		return -ENOMEM;
 	}
+	fsi->host_root_fd = -1;
+	fsi->resolve_strict = false;
 	fc->s_fs_info = fsi;
 	fc->ops = &hostfs_context_ops;
 	return 0;
@@ -1063,8 +1154,16 @@ static int hostfs_init_fs_context(struct fs_context *fc)
 
 static void hostfs_kill_sb(struct super_block *s)
 {
+	struct hostfs_fs_info *fsi = s->s_fs_info;
+
+	if (fsi && fsi->host_root_fd >= 0) {
+		os_close_file(fsi->host_root_fd);
+		fsi->host_root_fd = -1;
+	}
 	kill_anon_super(s);
-	kfree(s->s_fs_info);
+	if (fsi)
+		kfree(fsi->host_root_path);
+	kfree(fsi);
 }
 
 static struct file_system_type hostfs_type = {

@@ -98,6 +98,111 @@ int open_file(char *path, int r, int w, int append)
 	else return fd;
 }
 
+/*
+ * Per Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-
+ * next-sprint/03-hostfs-io-uring-openat2.md (memo #3, Phase 1).
+ *
+ * Strict path resolution via openat2(@root_fd, @rel, ...) with
+ * RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS.  Symlinks pointing
+ * outside the mount root and magic-link traversal both fail with
+ * -ELOOP / -EXDEV.  Used only when the hostfs mount carries the
+ * opt-in `host_resolve=strict` parameter; default behaviour
+ * remains the bare open64() path above.
+ *
+ * @rel may start with a "/" — openat2 with RESOLVE_BENEATH treats
+ * @root_fd as the relative-resolution anchor, so a leading slash
+ * is tolerated; we strip it defensively to keep the
+ * "obviously-relative" semantic clear in the error path.
+ *
+ * Falls back with -ENOSYS if the host kernel < 5.6 doesn't have
+ * openat2; caller demotes to open_file().
+ */
+#ifndef __NR_openat2
+# if defined(__x86_64__)
+#  define __NR_openat2 437
+# elif defined(__i386__)
+#  define __NR_openat2 437
+# elif defined(__aarch64__)
+#  define __NR_openat2 437
+# else
+#  warning "openat2 syscall number unknown for this arch"
+# endif
+#endif
+
+#ifndef RESOLVE_BENEATH
+# define RESOLVE_BENEATH        0x08
+#endif
+#ifndef RESOLVE_NO_MAGICLINKS
+# define RESOLVE_NO_MAGICLINKS  0x02
+#endif
+
+struct __hostfs_open_how {
+	__u64 flags;
+	__u64 mode;
+	__u64 resolve;
+};
+
+int open_root_path(const char *path)
+{
+	int fd;
+
+#ifndef O_PATH
+#  define O_PATH 010000000
+#endif
+	fd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	if (fd < 0)
+		return -errno;
+	return fd;
+}
+
+int open_file_strict(int root_fd, const char *rel, int r, int w, int append)
+{
+	struct __hostfs_open_how how;
+	int oflags = 0;
+	long fd;
+
+	if (root_fd < 0)
+		return -EBADF;
+	if (!rel)
+		return -EINVAL;
+
+	if (r && !w)
+		oflags = O_RDONLY;
+	else if (!r && w)
+		oflags = O_WRONLY;
+	else if (r && w)
+		oflags = O_RDWR;
+	else
+		return -EINVAL;
+
+	if (append)
+		oflags |= O_APPEND;
+	oflags |= O_LARGEFILE | O_CLOEXEC;
+
+	memset(&how, 0, sizeof(how));
+	how.flags   = (__u64)oflags;
+	how.mode    = 0;
+	how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
+
+	/* Strip leading '/' so callers can pass either absolute or
+	 * relative without surprises (openat2 with RESOLVE_BENEATH
+	 * treats both as relative to root_fd). */
+	while (*rel == '/')
+		rel++;
+	if (!*rel)
+		rel = ".";
+
+#ifdef __NR_openat2
+	fd = syscall(__NR_openat2, root_fd, rel, &how, sizeof(how));
+	if (fd < 0)
+		return -errno;
+	return (int)fd;
+#else
+	(void)how;
+	return -ENOSYS;
+#endif
+}
+
 void *open_dir(char *path, int *err_out)
 {
 	DIR *dir;
