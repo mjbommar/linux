@@ -186,7 +186,20 @@ enum um_kvm_iotrap {
 #define KVM_V2_GADGET_OFF_EUID		0x18	/* Phase 3: geteuid */
 #define KVM_V2_GADGET_OFF_GID		0x1c	/* Phase 3: getgid */
 #define KVM_V2_GADGET_OFF_EGID		0x20	/* Phase 4: getegid */
-/* +0x24 is a 4-byte gap (alignment for the 8B TASK_SIZE_CAP below). */
+#define KVM_V2_GADGET_OFF_RECORD	0x24	/* #169 Phase 4: u8 record-mode
+						 * gadget-bypass flag. When non-zero
+						 * the gadget body unconditionally
+						 * branches to the fallback path so
+						 * record/replay sees every syscall
+						 * via the handle_io_trap observe
+						 * hook. Cleared at install; set by
+						 * kvm_v2_record_start (all-pool
+						 * walk) and re-cleared by the
+						 * record-stop disarm. Cost when
+						 * unset: one untaken cmp+jne per
+						 * gadget entry. Memo 27 §3.3
+						 * Option A. */
+/* +0x25..+0x27 padding (3 bytes — alignment for the 8B TASK_SIZE_CAP below). */
 #define KVM_V2_GADGET_OFF_TASK_SIZE_CAP	0x28	/* Phase 5: u64, set once at install
 						 * (task_size - 16, 16B safety margin
 						 * matches v1's lifecycle.c:974). Used

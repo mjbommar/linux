@@ -34,12 +34,14 @@
 #include <kunit/test.h>
 #include <linux/errno.h>
 #include <linux/jump_label.h>
+#include <linux/smp.h>		/* nr_cpu_ids */
 #include <linux/string.h>
 #include <linux/types.h>
 
 #include <sysdep/ptrace.h>	/* struct uml_pt_regs + HOST_* slot offsets */
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"	/* KVM_V2_GADGET_OFF_RECORD */
 
 /**
  * test_kvm_v2_record_basic - exercise the happy-path state machine.
@@ -550,11 +552,86 @@ static void test_kvm_v2_record_strict_replay(struct kunit *test)
 			   static_branch_unlikely(&um_kvm_v2_record_enabled));
 }
 
+/**
+ * test_kvm_v2_record_gadget_bypass - Phase 4 LSTAR gadget bypass byte.
+ * @test: KUnit test handle.
+ *
+ * Asserts that `kvm_v2_record_start` writes the per-vCPU gadget
+ * bypass byte (KVM_V2_GADGET_OFF_RECORD) to non-zero on every pool
+ * vCPU that has a gadget_state_kva populated, and that
+ * `kvm_v2_record_stop` re-clears it.
+ *
+ * Scope: walks the pool, samples the byte before/after start/stop.
+ * Skips cleanly if NO pool vCPU has the gadget state installed —
+ * the assertion would have nothing to observe (e.g. early-boot
+ * KUnit env where gadget_state_install hasn't run, or a config
+ * with CONFIG_UM_BACKEND_KVM_V2_GADGET=n).
+ */
+static void test_kvm_v2_record_gadget_bypass(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	int cpu;
+	int seen_state_page = 0;
+	int seen_on = 0;
+	int seen_off = 0;
+	int rc;
+
+	rec = kvm_v2_record_alloc(0);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_v2_record_start(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/* Post-start: every populated state page must show byte != 0. */
+	for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+		struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(cpu);
+		const u8 *flag;
+
+		if (!v || !v->gadget_state_kva)
+			continue;
+		seen_state_page++;
+		flag = (const u8 *)v->gadget_state_kva +
+			KVM_V2_GADGET_OFF_RECORD;
+		if (READ_ONCE(*flag) != 0)
+			seen_on++;
+	}
+
+	rc = kvm_v2_record_stop(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/* Post-stop: every populated state page must show byte == 0. */
+	for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+		struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(cpu);
+		const u8 *flag;
+
+		if (!v || !v->gadget_state_kva)
+			continue;
+		flag = (const u8 *)v->gadget_state_kva +
+			KVM_V2_GADGET_OFF_RECORD;
+		if (READ_ONCE(*flag) == 0)
+			seen_off++;
+	}
+
+	kvm_v2_record_destroy(rec);
+
+	if (seen_state_page == 0) {
+		kunit_skip(test, "no gadget_state_kva on any pool vCPU (kvm-v2 gadget disabled at boot?)");
+		return;
+	}
+	KUNIT_EXPECT_EQ_MSG(test, seen_on, seen_state_page,
+			    "record_start did not set bypass byte on %d vCPU(s)",
+			    seen_state_page - seen_on);
+	KUNIT_EXPECT_EQ_MSG(test, seen_off, seen_state_page,
+			    "record_stop did not clear bypass byte on %d vCPU(s)",
+			    seen_state_page - seen_off);
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_basic),
 	KUNIT_CASE(test_kvm_v2_record_state_transitions),
 	KUNIT_CASE(test_kvm_v2_record_observe),
 	KUNIT_CASE(test_kvm_v2_record_strict_replay),
+	KUNIT_CASE(test_kvm_v2_record_gadget_bypass),
 	{}
 };
 

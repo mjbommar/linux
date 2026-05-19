@@ -53,6 +53,7 @@
 #include <linux/mutex.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
+#include <linux/smp.h>			/* nr_cpu_ids */
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
@@ -60,6 +61,7 @@
 #include <sysdep/ptrace.h>		/* struct uml_pt_regs */
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"		/* KVM_V2_GADGET_OFF_RECORD */
 
 /*
  * Hot-path gate.
@@ -88,6 +90,37 @@ EXPORT_SYMBOL_GPL(um_kvm_v2_record_enabled);
  */
 static DEFINE_SPINLOCK(um_kvm_v2_record_lock);
 static struct kvm_v2_record *um_kvm_v2_active_record;
+
+/*
+ * kvm_v2_record_set_gadget_bypass - flip the LSTAR gadget's record-mode
+ *                                   bypass byte on every pool vCPU.
+ * @on: true to force the gadget body to take the fallback path on each
+ *      entry (record mode), false to release the bypass (normal mode).
+ *
+ * Phase 4 of #169 (memo 27 §3.3 Option A). The gadget body reads byte
+ * KVM_V2_GADGET_OFF_RECORD from its per-vCPU gadget_state page on
+ * every entry; non-zero forces the fallback path so the syscall vmexit
+ * + observe_syscall hook see every NR.
+ *
+ * Safe to call before the per-vCPU gadget_state_kva is installed
+ * (vcpu->gadget_state_kva == NULL); the per-cpu skip leaves later
+ * install paths to populate the byte to zero via __GFP_ZERO. Idempotent
+ * for the same @on across re-arms.
+ */
+static void kvm_v2_record_set_gadget_bypass(bool on)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+		struct kvm_v2_vcpu *v = kvm_v2_vcpu_get(cpu);
+		u8 *flag;
+
+		if (!v || !v->gadget_state_kva)
+			continue;
+		flag = (u8 *)v->gadget_state_kva + KVM_V2_GADGET_OFF_RECORD;
+		WRITE_ONCE(*flag, on ? 1 : 0);
+	}
+}
 
 /*
  * Default buffer size when kvm_v2_record_alloc's caller passes 0.
@@ -178,8 +211,17 @@ static bool kvm_v2_record_disarm_gate(struct kvm_v2_record *rec)
 	if (was_active)
 		um_kvm_v2_active_record = NULL;
 	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
-	if (was_active)
+	if (was_active) {
 		static_branch_disable(&um_kvm_v2_record_enabled);
+		/*
+		 * Phase 4 (#169): drop the per-vCPU LSTAR gadget bypass so
+		 * normal gadget hot-path resumes. Order matters: disable
+		 * the static-key first (so any in-flight handle_io_trap
+		 * stops invoking observe_syscall) then release the bypass
+		 * byte (so subsequent gadget entries take the fast path).
+		 */
+		kvm_v2_record_set_gadget_bypass(false);
+	}
 	return was_active;
 }
 
@@ -339,9 +381,17 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 	 */
 	static_branch_enable(&um_kvm_v2_record_enabled);
 
+	/*
+	 * Phase 4 (#169): force the LSTAR gadget into fallback mode on
+	 * every pool vCPU so the 11 gadget-shadowed syscalls become
+	 * observable to handle_io_trap + observe_syscall. Mirrored by
+	 * kvm_v2_record_disarm_gate which clears the byte on stop.
+	 */
+	kvm_v2_record_set_gadget_bypass(true);
+
 	mutex_unlock(&rec->lock);
 
-	pr_info("um: kvm-v2 record_start: armed (buffer_size=%zu, strict_replay=%d)\n",
+	pr_info("um: kvm-v2 record_start: armed (buffer_size=%zu, strict_replay=%d, gadget_bypass=on)\n",
 		rec->buffer_size, rec->strict_replay);
 	return rc;
 }

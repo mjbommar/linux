@@ -71,6 +71,7 @@
 #define KVM_V2_GADGET_OFF_EUID		0x18
 #define KVM_V2_GADGET_OFF_GID		0x1c
 #define KVM_V2_GADGET_OFF_EGID		0x20
+#define KVM_V2_GADGET_OFF_RECORD	0x24	/* #169 Phase 4: u8 record-mode bypass flag */
 #define KVM_V2_GADGET_OFF_TASK_SIZE_CAP	0x28
 #define KVM_V2_GADGET_OFF_REAL_SEC	0x30
 #define KVM_V2_GADGET_OFF_MONO_SEC	0x38
@@ -174,6 +175,22 @@ gadget_entry:
 	movq	%rdx, %gs:KVM_V2_GADGET_OFF_SAVE_RDX
 	movq	%r8,  %gs:KVM_V2_GADGET_OFF_SAVE_R8
 	movq	%r10, %gs:KVM_V2_GADGET_OFF_SAVE_R10
+
+	/*
+	 * Record-mode bypass (#169 Phase 4, memo 27 §3.3 Option A).
+	 * If the per-vCPU RECORD flag is non-zero, force the in-guest
+	 * fallback path so observe_syscall sees every NR. Placed AFTER
+	 * the SAVE_* writes so the fallback's restore-of-SAVE_* lands
+	 * the original user RDX/R8/R10 (the saves are unconditional —
+	 * cost when record-off = three movs we'd issue anyway).
+	 *
+	 * Cost when record OFF: one untaken cmpb + jne per gadget entry.
+	 * Cost when record ON: ~30× slowdown on the 11 gadget-handled
+	 * NRs (gadget ~50 cyc → handle_syscall ~1500 cyc) which is the
+	 * intended record-side overhead.
+	 */
+	cmpb	$0, %gs:KVM_V2_GADGET_OFF_RECORD
+	jne	fallback
 
 	/*
 	 * getcpu pre-check (NR=309=0x135 doesn't fit imm8, so we test
