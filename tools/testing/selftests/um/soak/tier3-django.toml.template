@@ -149,3 +149,11 @@ echo REPRO_DONE rc=$?
 """
 expect = ""
 timeout_secs = 10
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500

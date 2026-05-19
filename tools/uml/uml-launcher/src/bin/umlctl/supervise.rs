@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::cgroup;
 use super::console_split;
 use super::dmesg_parse;
 use super::manifest::Manifest;
@@ -154,6 +155,15 @@ pub fn start_with_fds(
     };
     cmd.args(&argv).stdout(stdout_cfg).stderr(stderr_cfg);
 
+    // SMP-T78..T82 (memo 52 §1-§2): apply host_env from manifest.
+    // Each entry becomes a UM_* env var read by os-Linux/main.c /
+    // os-Linux/process.c at UML startup (UM_THP / UM_OOM_SCORE_ADJ /
+    // UM_KVM_V2_CPU_AFFINITY / UM_HUGEPAGES / UM_KVM_V2_PIN_PHYSMEM).
+    // Empty map = no-op (inherit caller's env unchanged).
+    for (k, v) in &m.host_env {
+        cmd.env(k, v);
+    }
+
     if args.foreground {
         // Foreground: parent tty stays in the loop; Ctrl-C
         // travels through the normal tty pgrp path.
@@ -162,6 +172,17 @@ pub fn start_with_fds(
         cmd.stdin(Stdio::null());
     }
     install_pre_exec(&mut cmd, !args.foreground, inherited_fds);
+
+    // SMP-T83 (memo 52 §2.3): if the manifest has a cgroup_v2
+    // config, create the per-instance cgroup with limits BEFORE
+    // spawn. We move the pid in after spawn returns. Failure is
+    // not fatal — ensure_cgroup logs and returns None when the
+    // cgroup hierarchy isn't writable, and we proceed
+    // unconstrained.
+    let cgroup_path = m
+        .cgroup_v2
+        .as_ref()
+        .and_then(|cfg| cgroup::ensure_cgroup(&args.name, cfg).ok().flatten());
 
     // Capture CLOCK_BOOTTIME immediately before spawn so the
     // recorded host_ts_ns_at_exec is as close as we can make it
@@ -176,6 +197,12 @@ pub fn start_with_fds(
             .unwrap_or_else(|| child.id()),
         None => child.id(),
     };
+
+    // SMP-T83: move the freshly-spawned pid into the cgroup so
+    // the limits take effect.
+    if let Some(cg) = &cgroup_path {
+        cgroup::move_pid_in(cg, pid);
+    }
 
     write_pidfile(&pidfile, pid).map_err(StartError::Other)?;
     write_run_id_file(&paths.run_id_file_path(&args.name), &run_id).map_err(StartError::Other)?;
@@ -386,6 +413,11 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
 
     let _ = std::fs::remove_file(&pidfile);
     let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
+
+    // SMP-T83: teardown the per-instance cgroup. Safe to call
+    // even if no cgroup was created at start (no-op on missing
+    // dir). EBUSY (still-non-empty cgroup) is logged + ignored.
+    cgroup::teardown(&args.name);
 
     Ok(StopInfo {
         pid,

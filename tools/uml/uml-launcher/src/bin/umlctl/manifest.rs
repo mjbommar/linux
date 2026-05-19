@@ -20,6 +20,26 @@ pub struct Manifest {
     pub runtime: RuntimeSection,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Host-process env vars to apply at UML spawn (memo 52
+    /// SMP-T78..T82 translated from Umlfile.host_resources at
+    /// create-time). Empty map means "inherit current env."
+    #[serde(default)]
+    pub host_env: BTreeMap<String, String>,
+    /// Cgroup v2 limits to install at UML spawn (memo 52 §2.3
+    /// SMP-T83). None means "don't create a per-instance
+    /// cgroup."
+    #[serde(default)]
+    pub cgroup_v2: Option<CgroupV2Config>,
+}
+
+/// Cgroup v2 limits, written to a per-instance subgroup under
+/// /sys/fs/cgroup/uml.slice/<instance-name>/ before the UML pid
+/// is moved in. Empty-string fields mean "don't set this limit."
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CgroupV2Config {
+    pub memory_max: String,
+    pub cpu_max: String,
+    pub pids_max: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -110,6 +130,8 @@ impl Manifest {
                 forkserver,
             },
             labels: labels_map,
+            host_env: BTreeMap::new(),
+            cgroup_v2: None,
         })
     }
 

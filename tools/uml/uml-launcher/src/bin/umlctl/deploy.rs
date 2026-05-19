@@ -72,6 +72,10 @@ pub struct Umlfile {
     pub init: InitSection,
     #[serde(default)]
     pub debug: DebugSection,
+    /// Host-process resource controls (memo 52 SMP-T78..T84).
+    /// Optional — empty section → no env vars set, no cgroup created.
+    #[serde(default)]
+    pub host_resources: HostResourcesSection,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -295,6 +299,64 @@ pub struct InitPhase {
     /// Per-phase timeout in seconds. 0 = inherit.
     #[serde(default)]
     pub timeout_secs: u32,
+}
+
+/// Host-process resource controls — memo 52
+/// (Documentation/virt/uml/redesign/08-future-phases/
+///  52-uml-host-resource-controls.md).
+///
+/// Declarative TOML form of the SMP-T78..T84 features. Empty
+/// section (the default) leaves the host process unmanaged.
+///
+/// Translated into env vars (UM_THP / UM_OOM_SCORE_ADJ /
+/// UM_KVM_V2_CPU_AFFINITY / UM_HUGEPAGES / UM_KVM_V2_PIN_PHYSMEM)
+/// at UML spawn time. Cgroup v2 limits (memory_max / cpu_max /
+/// pids_max) are written to a per-instance cgroup before exec.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct HostResourcesSection {
+    /// SMP-T79 transparent-huge-page policy on physmem.
+    /// "off" → MADV_NOHUGEPAGE (predictable, no defrag latency).
+    /// "on"  → MADV_HUGEPAGE (throughput-oriented).
+    /// "auto" / "" → inherit system default.
+    pub thp: String,
+
+    /// SMP-T80 OOM score adjustment. None → no write to
+    /// /proc/self/oom_score_adj. Some(n) → write n (range
+    /// [-1000, +1000], host clamps out-of-range).
+    pub oom_score_adj: Option<i32>,
+
+    /// SMP-T82 process-level CPU affinity. CPU list with optional
+    /// ranges, e.g. "0-3" / "0,2,4" / "0-1,4-5". Empty → no
+    /// sched_setaffinity call (inherit current mask).
+    pub cpu_affinity: String,
+
+    /// SMP-T81 hugepage backing for physmem.
+    /// "2M" → MAP_HUGETLB | MAP_HUGE_2MB.
+    /// "1G" → MAP_HUGETLB | MAP_HUGE_1GB.
+    /// "off" / "" → 4 KiB.
+    /// Requires the host hugetlbfs pool to be pre-reserved via
+    /// /proc/sys/vm/nr_hugepages. Empty pool → 4 KiB fallback +
+    /// pr_warn at boot.
+    pub hugepages: String,
+
+    /// SMP-T71 MAP_LOCKED on physmem. Foundation pin/populate is
+    /// always active under T71; setting this true additionally
+    /// applies MAP_LOCKED on the physmem mapping (requires
+    /// cap_ipc_lock setcap on the UML binary).
+    pub pin_physmem: bool,
+
+    /// SMP-T83 cgroup v2 memory.max. "1G" / "512M" / "0" (unlimited).
+    /// Empty → no cgroup memory limit set.
+    pub memory_max: String,
+
+    /// SMP-T83 cgroup v2 cpu.max. "200%" (two full cores) /
+    /// "100ms 100ms" (raw cgroup v2 form). Empty → no cgroup
+    /// cpu limit.
+    pub cpu_max: String,
+
+    /// SMP-T83 cgroup v2 pids.max. Empty → no pids limit.
+    pub pids_max: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -1176,6 +1238,44 @@ fn detect_default_iface() -> Result<String> {
 
 /// Run a list of `sh -c` steps via sudo, stopping on first failure.
 /// Used by `up` (setup_steps) and `down` (teardown_steps; non-fatal).
+/// SMP-T78..T84: translate `Umlfile.host_resources` into the
+/// manifest's host_env + cgroup_v2 fields. Empty input fields
+/// produce no entries (leave manifest unchanged).
+///
+/// Memo 52 (Documentation/virt/uml/redesign/08-future-phases/
+/// 52-uml-host-resource-controls.md). The kernel-side knobs read
+/// UM_* env vars at UML startup; this function is the declarative
+/// → procedural bridge.
+pub fn apply_host_resources(hr: &HostResourcesSection, m: &mut crate::manifest::Manifest) {
+    if !hr.thp.is_empty() {
+        m.host_env.insert("UM_THP".into(), hr.thp.clone());
+    }
+    if let Some(n) = hr.oom_score_adj {
+        m.host_env
+            .insert("UM_OOM_SCORE_ADJ".into(), n.to_string());
+    }
+    if !hr.cpu_affinity.is_empty() {
+        m.host_env
+            .insert("UM_KVM_V2_CPU_AFFINITY".into(), hr.cpu_affinity.clone());
+    }
+    if !hr.hugepages.is_empty() && hr.hugepages != "off" {
+        m.host_env
+            .insert("UM_HUGEPAGES".into(), hr.hugepages.clone());
+    }
+    if hr.pin_physmem {
+        m.host_env
+            .insert("UM_KVM_V2_PIN_PHYSMEM".into(), "1".into());
+    }
+
+    if !hr.memory_max.is_empty() || !hr.cpu_max.is_empty() || hr.pids_max.is_some() {
+        m.cgroup_v2 = Some(crate::manifest::CgroupV2Config {
+            memory_max: hr.memory_max.clone(),
+            cpu_max: hr.cpu_max.clone(),
+            pids_max: hr.pids_max,
+        });
+    }
+}
+
 pub fn run_sudo_steps(steps: &[String], stop_on_failure: bool, quiet: bool) -> Result<()> {
     for cmd in steps {
         if !quiet {

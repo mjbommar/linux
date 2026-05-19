@@ -23,6 +23,7 @@ use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+mod cgroup;
 mod console_split;
 mod deploy;
 mod dmesg_parse;
@@ -891,7 +892,7 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         labels.extend(deploy::network_plan_labels(plan));
     }
 
-    let m = manifest::Manifest::from_create_args(
+    let mut m = manifest::Manifest::from_create_args(
         &uml.instance.name,
         std::path::Path::new(&uml.kernel.path),
         Some("umlctl-up"),
@@ -904,6 +905,10 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         &labels,
     )
     .context("build manifest from Umlfile")?;
+    /* SMP-T78..T84: translate Umlfile.host_resources into host_env
+     * + cgroup_v2 on the manifest. Empty fields leave the manifest
+     * unchanged (no env, no cgroup). */
+    deploy::apply_host_resources(&uml.host_resources, &mut m);
     std::fs::create_dir_all(manifest_path.parent().unwrap())
         .context("create instances directory")?;
     m.write_to(&manifest_path).context("write manifest")?;
