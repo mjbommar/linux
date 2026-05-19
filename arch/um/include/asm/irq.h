@@ -12,7 +12,7 @@
 #define SIGIO_WRITE_IRQ 	7
 #define TELNETD_IRQ 		8
 #define XTERM_IRQ 		9
-#define RANDOM_IRQ 		10
+/* IRQ slot 10 was RANDOM_IRQ (retired with the os_getrandom() refactor). */
 #define SIGCHLD_IRQ		11
 
 #ifdef CONFIG_UML_NET_VECTOR
