@@ -371,6 +371,7 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 	rec->sequence = 0;
 	rec->entries_recorded = 0;
 	rec->entries_replayed = 0;
+	rec->syscall_count = 0;
 	rec->state = KVM_V2_RECORD_RECORDING;
 
 	/*
@@ -702,6 +703,13 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 
 	rec->buffer_used += need;
 	rec->entries_recorded++;
+	/*
+	 * Phase 6 anchor (memo 27 §3.6(b)): every observed syscall bumps
+	 * @syscall_count, which is the value sampled into a sigalrm log
+	 * entry's @syscall_count_at slot if a SIGALRM is recorded between
+	 * this syscall and the next.
+	 */
+	rec->syscall_count++;
 
 	mutex_unlock(&rec->lock);
 }
@@ -958,3 +966,124 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_rdtsc);
+
+/**
+ * kvm_v2_record_observe_sigalrm - log one signal-injection event.
+ * @rec:   active container (NULL is a quiet no-op).
+ * @signo: host signal number being delivered to the guest.
+ *
+ * Phase 6 of #169 (memo 27 §3.6(b)). Snapshots @rec->syscall_count
+ * into a new KVM_V2_REPLAY_INTERRUPT entry's @sigalrm.syscall_count_at
+ * slot, carrying @signo alongside. The replay driver later gates
+ * signal injection on the recorded count matching its live counter
+ * (Phase 6 wiring lives in the dispatcher's signal-arrival path; this
+ * commit lands the log shape only).
+ *
+ * Same quiet-no-op shape as observe_syscall: NULL @rec, state !=
+ * RECORDING, or buffer-full drop quietly.
+ */
+void kvm_v2_record_observe_sigalrm(struct kvm_v2_record *rec, u32 signo)
+{
+	struct kvm_v2_replay_entry *e;
+	const size_t need = sizeof(*e);
+
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_RECORDING) {
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	if (rec->buffer_used + need > rec->buffer_size) {
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + rec->buffer_used);
+	memset(e, 0, sizeof(*e));
+	e->kind			= KVM_V2_REPLAY_INTERRUPT;
+	e->size			= (u32)need;
+	e->sequence		= ++rec->sequence;
+	e->sigalrm.signo	= signo;
+	e->sigalrm.syscall_count_at = rec->syscall_count;
+
+	rec->buffer_used += need;
+	rec->entries_recorded++;
+
+	mutex_unlock(&rec->lock);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_observe_sigalrm);
+
+/**
+ * kvm_v2_record_consume_sigalrm - replay-side FIFO consume for SIGALRM.
+ * @rec:                       active container; NULL is quiet no-op
+ *                             returning 0.
+ * @signo_out:                 out-param. On rc > 0 receives the
+ *                             recorded signal number.
+ * @syscall_count_at_out:      out-param. On rc > 0 receives the
+ *                             syscall_count anchor captured at record
+ *                             time. Replay driver gates injection on
+ *                             this matching the live counter.
+ *
+ * Phase 6 of #169. Walks @rec->buffer from @rec->buffer_replayed for
+ * the next KVM_V2_REPLAY_INTERRUPT entry. Same rc set as
+ * consume_syscall / consume_rdtsc: 1 / 0 / -ENODATA / -EILSEQ.
+ *
+ * The shared-cursor model applies — Phase 5 commit's comment about
+ * the mixed-stream walker applies here too.
+ */
+int kvm_v2_record_consume_sigalrm(struct kvm_v2_record *rec,
+				  u32 *signo_out,
+				  u64 *syscall_count_at_out)
+{
+	struct kvm_v2_replay_entry *e;
+	size_t cursor;
+	int rc;
+
+	if (!rec)
+		return 0;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_REPLAYING) {
+		mutex_unlock(&rec->lock);
+		return 0;
+	}
+
+	cursor = rec->buffer_replayed;
+	if (cursor >= rec->buffer_used) {
+		rc = -ENODATA;
+		goto out_unlock;
+	}
+	if (cursor + sizeof(*e) > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
+
+	if (e->kind != KVM_V2_REPLAY_INTERRUPT) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+	if (e->size < sizeof(*e) || cursor + e->size > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	if (signo_out)
+		*signo_out = e->sigalrm.signo;
+	if (syscall_count_at_out)
+		*syscall_count_at_out = e->sigalrm.syscall_count_at;
+	rec->buffer_replayed = cursor + e->size;
+	rec->entries_replayed++;
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_consume_sigalrm);

@@ -698,6 +698,107 @@ static void test_kvm_v2_record_rdtsc(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+/**
+ * test_kvm_v2_record_sigalrm - Phase 6 SIGALRM observe/consume round-trip.
+ * @test: KUnit test handle.
+ *
+ * Verifies the Phase 6 anchor mechanism: rec->syscall_count bumps on
+ * each observe_syscall, the captured count is reflected in a sigalrm
+ * entry's @syscall_count_at field, and consume_sigalrm returns the
+ * pair byte-identically.
+ *
+ * Sequence:
+ *   1. alloc + start.
+ *   2. Interleave a 3-syscall + sigalrm + 2-syscall + sigalrm pattern.
+ *      After the first sigalrm, syscall_count_at must == 3; after the
+ *      second, syscall_count_at must == 5.
+ *   3. stop → replay.
+ *   4. consume_syscall × 3, consume_sigalrm, consume_syscall × 2,
+ *      consume_sigalrm — assert each rc == 1 and the sigalrm anchors
+ *      match the expected counts.
+ *
+ * Independent of the actual host signal-interception wiring. The
+ * API contract proven here is what that wiring will call into.
+ */
+#include <linux/signal.h>	/* SIGALRM */
+static void test_kvm_v2_record_sigalrm(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	const s32 nr_getpid = 39;
+	struct uml_pt_regs regs;
+	u32 signo;
+	u64 anchor;
+	long retval;
+	int rc;
+	int i;
+
+	memset(&regs, 0, sizeof(regs));
+
+	rec = kvm_v2_record_alloc(0);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_v2_record_start(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/* First sigalrm should anchor at syscall_count == 3. */
+	for (i = 0; i < 3; i++)
+		kvm_v2_record_observe_syscall(rec, nr_getpid,
+					      (long)(1000 + i), &regs);
+	kvm_v2_record_observe_sigalrm(rec, SIGALRM);
+
+	/* Second sigalrm at syscall_count == 5. */
+	for (i = 3; i < 5; i++)
+		kvm_v2_record_observe_syscall(rec, nr_getpid,
+					      (long)(1000 + i), &regs);
+	kvm_v2_record_observe_sigalrm(rec, SIGALRM);
+
+	KUNIT_EXPECT_EQ_MSG(test, rec->syscall_count, 5ULL,
+			    "expected syscall_count=5, got %llu",
+			    rec->syscall_count);
+
+	rc = kvm_v2_record_stop(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = kvm_v2_record_replay(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/* Walk: 3 syscall + 1 sigalrm + 2 syscall + 1 sigalrm. */
+	for (i = 0; i < 3; i++) {
+		retval = 0;
+		rc = kvm_v2_record_consume_syscall(rec, nr_getpid, &retval);
+		KUNIT_ASSERT_EQ_MSG(test, rc, 1,
+				    "consume_syscall[%d] rc=%d", i, rc);
+	}
+	signo = 0; anchor = 0;
+	rc = kvm_v2_record_consume_sigalrm(rec, &signo, &anchor);
+	KUNIT_ASSERT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, signo, (u32)SIGALRM);
+	KUNIT_EXPECT_EQ_MSG(test, anchor, 3ULL,
+			    "first sigalrm anchor expected 3, got %llu",
+			    anchor);
+
+	for (i = 0; i < 2; i++) {
+		retval = 0;
+		rc = kvm_v2_record_consume_syscall(rec, nr_getpid, &retval);
+		KUNIT_ASSERT_EQ_MSG(test, rc, 1,
+				    "consume_syscall[%d] (post-sigalrm) rc=%d",
+				    i, rc);
+	}
+	signo = 0; anchor = 0;
+	rc = kvm_v2_record_consume_sigalrm(rec, &signo, &anchor);
+	KUNIT_ASSERT_EQ(test, rc, 1);
+	KUNIT_EXPECT_EQ(test, signo, (u32)SIGALRM);
+	KUNIT_EXPECT_EQ_MSG(test, anchor, 5ULL,
+			    "second sigalrm anchor expected 5, got %llu",
+			    anchor);
+
+	/* End-of-log. */
+	rc = kvm_v2_record_consume_sigalrm(rec, &signo, &anchor);
+	KUNIT_EXPECT_EQ(test, rc, -ENODATA);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_basic),
 	KUNIT_CASE(test_kvm_v2_record_state_transitions),
@@ -705,6 +806,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_strict_replay),
 	KUNIT_CASE(test_kvm_v2_record_gadget_bypass),
 	KUNIT_CASE(test_kvm_v2_record_rdtsc),
+	KUNIT_CASE(test_kvm_v2_record_sigalrm),
 	{}
 };
 

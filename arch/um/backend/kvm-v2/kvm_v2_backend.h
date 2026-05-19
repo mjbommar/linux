@@ -1204,6 +1204,23 @@ struct kvm_v2_replay_entry {
 			u64	value;	/* RDTSC / RDTSCP TSC read */
 			u64	_pad[7];
 		} rdtsc;
+		struct {
+			/*
+			 * Phase 6 (memo 27 §3.6(b)) — SIGALRM determinism.
+			 * @signo            host signal number (SIGALRM in
+			 *                   the common case; SIGIO / SIGVTALRM
+			 *                   if the future timer mode changes).
+			 * @syscall_count_at injected at this rec->syscall_count
+			 *                   anchor. The replay-side
+			 *                   consume_sigalrm gates on the
+			 *                   current syscall_count == this
+			 *                   captured value.
+			 */
+			u32	signo;
+			u32	_pad0;
+			u64	syscall_count_at;
+			u64	_pad1[6];
+		} sigalrm;
 	};
 };
 
@@ -1263,6 +1280,15 @@ struct kvm_v2_record {
 	u64				sequence;
 	u64				entries_recorded;
 	u64				entries_replayed;
+	/*
+	 * Phase 6 anchor (memo 27 §3.6(b)): bumped on each
+	 * observe_syscall append; sampled into a sigalrm entry's
+	 * @syscall_count_at slot at SIGALRM delivery so the replay
+	 * driver can gate signal injection on a count-match.
+	 * Independent of @sequence (which counts all entries
+	 * regardless of kind).
+	 */
+	u64				syscall_count;
 	struct mutex			lock;
 };
 
@@ -1378,6 +1404,31 @@ int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
  */
 void kvm_v2_record_observe_rdtsc(struct kvm_v2_record *rec, u64 tsc_value);
 int  kvm_v2_record_consume_rdtsc(struct kvm_v2_record *rec, u64 *value_out);
+
+/*
+ * Phase 6 (#169) SIGALRM determinism via syscall-count anchor.
+ *
+ * Each observe_syscall append bumps @rec->syscall_count (a separate
+ * counter from @sequence so the SIGALRM log can reference a stable
+ * anchor independent of mixed-kind entries). At SIGALRM delivery
+ * time (host signal interception or VMCS interrupt-window exit, per
+ * the Phase 6 wiring) the caller invokes observe_sigalrm with the
+ * signo + current @syscall_count snapshot; the entry lands in the
+ * stream under KVM_V2_REPLAY_INTERRUPT.
+ *
+ * On replay, the dispatcher gates each SIGALRM injection on
+ * consume_sigalrm returning 1 — but only when the current
+ * @syscall_count == the entry's captured @syscall_count_at. This is
+ * memo 27 §3.6 decision (b): "syscall-count-driven SIGALRM."
+ *
+ * Phase 6 lands the API + KUnit-level round-trip; the host-side
+ * signal-interception wiring that turns a real SIGALRM into an
+ * observe_sigalrm call is a follow-on (memo §"Phase 6 wiring").
+ */
+void kvm_v2_record_observe_sigalrm(struct kvm_v2_record *rec, u32 signo);
+int  kvm_v2_record_consume_sigalrm(struct kvm_v2_record *rec,
+				   u32 *signo_out,
+				   u64 *syscall_count_at_out);
 
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
 /*
