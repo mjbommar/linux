@@ -88,6 +88,25 @@ static int io_remainder_size;
 #define UBD_RING_DEPTH 256
 static struct os_io_ring *ubd_ring;
 
+/*
+ * Memo #2 perf-comparison knob.  Set via cmdline `um_ubd_no_uring=1`
+ * to force the legacy synchronous helper-thread path even when the
+ * host kernel could support io_uring.  Used by the A/B bench in
+ * tools/testing/selftests/um/ubd-bench/.  Default 0 keeps the
+ * io_uring path enabled.
+ *
+ * Note: name starts with `um_ubd_` rather than `ubd_` because
+ * __setup("ubd", ubd_setup) above does a prefix match and would
+ * otherwise capture this and try to parse it as a device spec.
+ */
+static int ubd_no_io_uring;
+static int __init ubd_no_io_uring_setup(char *s)
+{
+	ubd_no_io_uring = simple_strtol(s, NULL, 0);
+	return 1;
+}
+__setup("um_ubd_no_uring=", ubd_no_io_uring_setup);
+
 
 
 static inline int ubd_test_bit(__u64 bit, unsigned char *data)
@@ -1138,13 +1157,21 @@ static int __init ubd_driver_init(void)
 	 * within-request parallelism.  If io_uring_setup is unavailable
 	 * (older host, seccomp-blocked) ubd_ring stays NULL and the
 	 * legacy synchronous do_io path runs unchanged.
+	 *
+	 * `ubd_no_io_uring=1` cmdline forces the legacy path for A/B
+	 * perf comparison without changing the binary.
 	 */
-	ubd_ring = os_io_ring_create(UBD_RING_DEPTH);
-	if (ubd_ring)
-		printk(KERN_INFO "ubd: io_uring substrate active (depth=%d)\n",
-		       UBD_RING_DEPTH);
-	else
-		printk(KERN_INFO "ubd: io_uring unavailable, using legacy sync I/O\n");
+	if (ubd_no_io_uring) {
+		printk(KERN_INFO "ubd: io_uring disabled by ubd_no_io_uring=1; using legacy sync I/O\n");
+		ubd_ring = NULL;
+	} else {
+		ubd_ring = os_io_ring_create(UBD_RING_DEPTH);
+		if (ubd_ring)
+			printk(KERN_INFO "ubd: io_uring substrate active (depth=%d)\n",
+			       UBD_RING_DEPTH);
+		else
+			printk(KERN_INFO "ubd: io_uring unavailable, using legacy sync I/O\n");
+	}
 	err = um_request_irq(UBD_IRQ, thread_fd, IRQ_READ, ubd_intr,
 			     0, "ubd", ubd_devs);
 	if(err < 0)
