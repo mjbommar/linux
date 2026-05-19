@@ -9,7 +9,12 @@ path = "{{KERNEL}}"
 backend = "{{BACKEND}}"
 
 [runtime]
-mem = "512M"
+# CPython 3.14 + a curated stdlib testset peaks at ~600-800 MB resident
+# under UML; 512M was historically too tight and produced a guest-side
+# "System is deadlocked on memory" panic every iteration (r14-24h-soak
+# 2026-05-19 evidence). 1024M leaves ~250 MB headroom for the test
+# harness + buddy fragmentation under sustained iteration.
+mem = "1024M"
 ncpus = 4
 
 [network]
