@@ -94,6 +94,22 @@ pub struct MissionArgs {
     /// class on django-loopback while catching real regressions.
     #[arg(long, default_value = "97.0")]
     pub soak_min_pct: f64,
+
+    /// Opt-in Phase 5b: stress the vector2 network driver under
+    /// kvm-v2 with the tier3-django-v2 workload. Requires host-side
+    /// TAP + iptables capability (sudo -n). Per memo 01 of the
+    /// post-2026-05-19 sprint, this is the path to the umlctl
+    /// default-driver flip; running it from the mission gate
+    /// catches a vector2-side regression before the default change.
+    #[arg(long)]
+    pub with_vector2: bool,
+
+    /// Phase 5b vector2 soak iteration count. Default 5 — small
+    /// enough to keep the mission gate under 30 minutes total but
+    /// big enough to catch the historical 1/30 R14 flake shape if
+    /// it ever returns.
+    #[arg(long, default_value = "5")]
+    pub vector2_iters: u32,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,10 +166,17 @@ pub fn run(args: MissionArgs) -> Result<()> {
         out_dir.display()
     );
 
-    let phases: Vec<u32> = if args.quick {
-        vec![1, 2, 3, 4, 6]
-    } else {
-        vec![1, 2, 3, 4, 5, 6]
+    // Phase ordering:
+    //   1 KUnit, 2 bench, 3 substrate, 4 host_resources,
+    //   5 diverse soak, 7 vector2 stress (opt-in), 6 diagnostic.
+    // Phase 7 (vector2) runs before Phase 6 because diagnostic
+    // wants to capture the final reproducibility metadata after
+    // every gate has run.
+    let phases: Vec<u32> = match (args.quick, args.with_vector2) {
+        (true, true)   => vec![1, 2, 3, 4, 7, 6],
+        (true, false)  => vec![1, 2, 3, 4, 6],
+        (false, true)  => vec![1, 2, 3, 4, 5, 7, 6],
+        (false, false) => vec![1, 2, 3, 4, 5, 6],
     };
 
     let mut results: Vec<PhaseResult> = Vec::new();
@@ -235,6 +258,7 @@ fn run_phase(
         4 => phase4_host_resources(args, out_dir)?,
         5 => phase5_diverse_soak(args, selftests_dir, out_dir)?,
         6 => phase6_diagnostic(args, out_dir)?,
+        7 => phase7_vector2_stress(args, selftests_dir, out_dir)?,
         _ => anyhow::bail!("unknown phase {phase_id}"),
     };
     Ok(PhaseResult {
@@ -601,6 +625,172 @@ fn phase5_diverse_soak(
         )
     };
     Ok(("soak", verdict, summary, details))
+}
+
+/// Phase 7 (opt-in, --with-vector2): stress the vector2 network driver
+/// under kvm-v2 with the tier3-django-v2 workload. Required gate
+/// before flipping the umlctl default driver from "vector" to
+/// "vector2" (memo 01 of the post-2026-05-19 sprint).
+///
+/// Drives the run-soak-daemon.sh harness with N iterations of
+/// tier3-django-v2 (which routes the {{NETWORK_DRIVER}} template
+/// placeholder to vector2 via tier3_network_driver in the daemon).
+/// Acceptance: every iteration PASS, 0 panics, 0 SIGBUS,
+/// TLB_LAG-correlated noise OK as long as verdict is PASS.
+///
+/// Requires host-side TAP + iptables capability (sudo -n). If the
+/// preflight detects this is unavailable, the phase SKIPs cleanly.
+fn phase7_vector2_stress(
+    args: &MissionArgs,
+    selftests_dir: &Path,
+    out_dir: &Path,
+) -> Result<(&'static str, Verdict, String, BTreeMap<String, String>)> {
+    let mut details = BTreeMap::new();
+
+    // Probe for passwordless sudo: vector2 + tap setup needs it.
+    let sudo_ok = Command::new("sudo")
+        .args(["-n", "true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !sudo_ok {
+        details.insert("sudo_probe".into(), "sudo -n unavailable".into());
+        return Ok((
+            "vector2",
+            Verdict::Skip,
+            "host lacks passwordless sudo for TAP setup".into(),
+            details,
+        ));
+    }
+
+    let daemon = selftests_dir.join("soak/run-soak-daemon.sh");
+    if !daemon.exists() {
+        details.insert(
+            "daemon".into(),
+            format!("MISSING:{}", daemon.display()),
+        );
+        return Ok((
+            "vector2",
+            Verdict::Fail,
+            "soak daemon script absent".into(),
+            details,
+        ));
+    }
+
+    let soak_out = out_dir.join("phase-7-vector2");
+    std::fs::create_dir_all(&soak_out).ok();
+
+    let iters = args.vector2_iters.to_string();
+    // 180s timeout * iters with some slack.
+    let budget_sec = (args.vector2_iters as u64 * 240 + 60).to_string();
+
+    let log = out_dir.join("phase-7-vector2.log");
+    let mut cmd = Command::new("bash");
+    cmd.arg(&daemon)
+        .arg("--backends")
+        .arg("kvm-v2")
+        .arg("--workloads")
+        .arg("tier3-django-v2")
+        .arg("--workers")
+        .arg("1")
+        .arg("--iters-per-rotation")
+        .arg(&iters)
+        .arg("--budget-sec")
+        .arg(&budget_sec)
+        .arg("--out")
+        .arg(&soak_out);
+    cmd.env("UML_KERNEL", &args.kernel);
+
+    let out = cmd
+        .output()
+        .context("spawn vector2 stress soak daemon")?;
+    let _ = std::fs::write(&log, &out.stdout);
+
+    let scoreboard = soak_out.join("scoreboard.jsonl");
+    if !scoreboard.exists() {
+        details.insert("scoreboard".into(), "absent".into());
+        return Ok((
+            "vector2",
+            Verdict::Fail,
+            "vector2 soak produced no scoreboard.jsonl".into(),
+            details,
+        ));
+    }
+
+    let text = std::fs::read_to_string(&scoreboard).unwrap_or_default();
+    let mut pass = 0u64;
+    let mut fail = 0u64;
+    let mut panic_n = 0u64;
+    let mut total = 0u64;
+    let mut sigbus = false;
+    let mut driver_seen = String::new();
+    for line in text.lines() {
+        total += 1;
+        if line.contains("\"verdict\":\"PASS\"") {
+            pass += 1;
+        } else if line.contains("\"verdict\":\"PANIC\"") {
+            panic_n += 1;
+        } else if line.contains("\"verdict\":\"FAIL\"") {
+            fail += 1;
+        }
+        if line.contains("Kernel mode signal 7") {
+            sigbus = true;
+        }
+        // Confirm the driver actually was vector2 (defensive: catch a
+        // case where the daemon's tier3_network_driver routing broke).
+        if driver_seen.is_empty() {
+            const KEY: &str = "\"uml_network_driver\":\"";
+            if let Some(i) = line.find(KEY) {
+                let s = &line[i + KEY.len()..];
+                if let Some(e) = s.find('"') {
+                    driver_seen = s[..e].to_string();
+                }
+            }
+        }
+    }
+
+    details.insert("total".into(), total.to_string());
+    details.insert("pass".into(), pass.to_string());
+    details.insert("fail".into(), fail.to_string());
+    details.insert("panic".into(), panic_n.to_string());
+    details.insert("driver_seen".into(), driver_seen.clone());
+
+    if total == 0 {
+        return Ok((
+            "vector2",
+            Verdict::Fail,
+            "scoreboard.jsonl was empty".into(),
+            details,
+        ));
+    }
+    if driver_seen != "vector2" {
+        return Ok((
+            "vector2",
+            Verdict::Fail,
+            format!(
+                "expected uml_network_driver=vector2 but saw \"{driver_seen}\""
+            ),
+            details,
+        ));
+    }
+
+    let gate_ok = pass == total && panic_n == 0 && !sigbus;
+    let (verdict, summary) = if gate_ok {
+        (
+            Verdict::Pass,
+            format!(
+                "{pass}/{total} PASS (vector2 + kvm-v2 tier3-django-v2); 0 panics 0 sigbus"
+            ),
+        )
+    } else {
+        (
+            Verdict::Fail,
+            format!(
+                "{pass}/{total} PASS; panics={panic_n} sigbus={sigbus}"
+            ),
+        )
+    };
+    Ok(("vector2", verdict, summary, details))
 }
 
 fn phase6_diagnostic(
