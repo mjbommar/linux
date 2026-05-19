@@ -158,20 +158,20 @@ kernel; they cannot test another Linux kernel as the target. \\
 \begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}X@{}}
 \toprule
 Cutoff & \texttt{\CutoffCommit} on \texttt{\BranchName} \\
-Functional headline & \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, and post-gadget performance \\
+Functional headline & \KVMvTwo{} guest entry, syscall dispatch, exceptions, signals, SMP state repair, post-gadget performance, snapshot + record/replay primitives, declarative host resource controls \\
 Parity & cpython-parity 21/21 under UP and SMP \\
 Substrate gate & PASS=25/FAIL=3/XFAIL=3, matching seccomp \\
-2h soak & \KVMvTwo{} 200/200 PASS; aggregate 397/400 PASS \\
+R14 cache-flake & closed (SMP-T73 YMM-upper XSAVE leak), 220/220 validation soak \\
+Snapshot bench & 38.9~$\mu$s capture, 13~$\mu$s median restore (memo-12 targets <50~ms / <1~ms) \\
+\texttt{umlctl mission} & 6/6 phases PASS in $\sim$15~min wall-clock \\
 Benchmark & Faster than seccomp on all eight hosts and all three tiers \\
 \bottomrule
 \end{tabularx}
-\vspace{1em}
+\vspace{0.6em}
 \begin{center}
-\done\quad backend/gates/profile foundation
+\done\quad foundation + R14 + snapshot/RR + host resources
 \hspace{1em}
-\progress\quad sustained validation
-\hspace{1em}
-\blocked\quad large upstream series until validation
+\progress\quad 24h long-tail soak; Series 7 LKML submission
 \end{center}
 \end{frame}
 
@@ -188,12 +188,16 @@ Upstream prerequisites & Seccomp-mode \UML{} and upstream SMP are
 enabling context that the redesign builds on. \\
 Redesigned here & Backend ops, static-key gates, profile matrix,
 \KVMvTwo{} state ownership, validation ladder, and upstream sequencing. \\
-Implemented here & \texttt{arch/um/backend/kvm-v2/}, profile docs and
-configs, snapshot/forkserver v1, \texttt{umlctl}, launcher, gates,
-soak, benchmark, and parity selftests. \\
-Planned or paused & KVM-aware snapshot readiness, full record/replay,
-time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
-\texttt{arch/um} series packaging. \\
+Implemented here & \texttt{arch/um/backend/kvm-v2/} including
+snapshot (Phase 1--6) and record/replay (Phase 1--7) ports;
+profile docs and configs; snapshot/forkserver v1; \texttt{umlctl}
+with \texttt{mission} subcommand + \texttt{[host\_resources]} TOML +
+cgroup v2 + preflight; launcher, gates, soak (11 templates),
+benchmark, and parity selftests. \\
+Planned or paused & 24h long-tail soak; Series 7 LKML submission;
+record/replay host-side signal wiring; syzkaller \texttt{vm/uml}
+(external); LTP curation; Tier 3 host resources (RT / NUMA /
+\texttt{O\_DIRECT}). \\
 \bottomrule
 \end{tabularx}
 \vspace{0.55em}
@@ -212,8 +216,8 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 \node[metric,text=UMLBlue,yshift=0.28cm] at (a.center) {21/21};
 \node[label,yshift=-0.36cm] at (a.center) {cpython parity\\UP and SMP};
 \node[card,fill=UMLGreen!10,right=0.45cm of a] (b) {};
-\node[metric,text=UMLGreen,yshift=0.28cm] at (b.center) {200/200};
-\node[label,yshift=-0.36cm] at (b.center) {\KVMvTwo{} two-hour\\validation pilot};
+\node[metric,text=UMLGreen,yshift=0.28cm] at (b.center) {6/6};
+\node[label,yshift=-0.36cm] at (b.center) {\texttt{umlctl mission}\\acceptance phases};
 \node[card,fill=UMLAmber!12,below=0.35cm of a] (c) {};
 \node[metric,text=UMLAmber,yshift=0.28cm] at (c.center) {193--908x};
 \node[label,yshift=-0.36cm] at (c.center) {micro speedup\\over seccomp};
@@ -232,7 +236,7 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 1 & Branch value proposition & One upstream Linux tree can produce fast, research, fuzz, sandbox, library, and deterministic profiles. \\
 2 & Adjacent-tool boundary & QEMU, Firecracker, gVisor, LKL, and containers solve different problems; none is the branch target. \\
 3 & Shared architecture & Backend ops, static-key gates, and profile defconfigs keep variation explicit. \\
-4 & Landed vs planned & Core architecture, \KVMvTwo{}, tooling, and gates exist; 24h validation, LTP, syzkaller, and replay remain. \\
+4 & Landed vs planned & Core architecture, \KVMvTwo{}, snapshot/RR ports, host resource controls, and the \texttt{umlctl mission} acceptance gate are in tree; 24h long-tail soak and Series 7 LKML submission remain. \\
 \bottomrule
 \end{tabularx}
 \end{frame}
@@ -243,10 +247,10 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
 \toprule
 \# & Question & Short answer \\
 \midrule
-5 & SMP and state & v2 now has an explicit state-home contract and audit trail for per-task, per-vCPU, and per-mm state. \\
-6 & Speed beyond micro & Python and stress tiers win on every benchmark host, not only \texttt{getpid}. \\
-7 & Upstream bar & Finish sustained validation and split small subsystem series before the large \texttt{arch/um} series. \\
-8 & Review pressure & Put pressure on the data model, validation breadth, upstream slicing, and replay/snapshot claims. \\
+5 & SMP and state & v2 has explicit state-home contract + audit trail; R14 (YMM-upper XSAVE leak) closed via SMP-T73; T74/T75/T76 latent-bug follow-ups; T77 future-feature checklist. \\
+6 & Speed beyond micro & Python + stress tiers win on every benchmark host; snapshot bench 38.9~$\mu$s capture and 13~$\mu$s median restore. \\
+7 & Upstream bar & \texttt{umlctl mission} (6/6 phases, $\sim$15 min) is the new acceptance gate; Series 7 cover letter needs refresh + submission. \\
+8 & Review pressure & Put pressure on the data model, the 24h long-tail soak, the host-side record/replay signal wiring, and the host\_resources cgroup integration. \\
 \bottomrule
 \end{tabularx}
 \end{frame}
@@ -261,19 +265,22 @@ time-machine workflow, syzkaller \texttt{vm/uml}, LTP, and upstream
   progp/.style={draw=UMLAmber,fill=UMLAmber!15},
 ]
 \node[phase,donep] (a) {backend\\contract};
-\node[phase,donep,right=0.08cm of a] (b) {profile\\matrix};
-\node[phase,donep,right=0.08cm of b] (c) {KVM v1\\lesson};
-\node[phase,donep,right=0.08cm of c] (d) {KVM v2\\core};
-\node[phase,donep,right=0.08cm of d] (e) {SMP state\\audit};
-\node[phase,donep,right=0.08cm of e] (f) {gadget +\\perf};
-\node[phase,progp,right=0.08cm of f] (j) {24h\\validation};
+\node[phase,donep,right=0.06cm of a] (b) {profile\\matrix};
+\node[phase,donep,right=0.06cm of b] (c) {KVM v1\\lesson};
+\node[phase,donep,right=0.06cm of c] (d) {KVM v2\\core};
+\node[phase,donep,right=0.06cm of d] (e) {SMP state\\audit};
+\node[phase,donep,right=0.06cm of e] (f) {gadget +\\perf};
+\node[phase,donep,right=0.06cm of f] (g) {R14\\fix};
+\node[phase,donep,right=0.06cm of g] (h) {snap +\\record};
+\node[phase,donep,right=0.06cm of h] (k) {host\\resources};
+\node[phase,progp,right=0.06cm of k] (j) {24h\\soak};
 \draw[-{Latex[length=2mm]},thick,UMLMuted] ($(a.south)+(0,-0.35)$) -- ($(j.south)+(0,-0.35)$);
 \end{tikzpicture}
-\vspace{1em}
+\vspace{0.6em}
 
 \begin{itemize}
-  \item Internal diary phase labels map to the milestone sequence above.
-  \item The remaining frontier is sustained workload breadth before upstreaming.
+  \item Three new green lanes since the prior cutoff: R14 closure (SMP-T73), snapshot Phase 1--6 + record/replay Phase 1--7 ports, and host resource controls (SMP-T78--T84).
+  \item The remaining frontier is the 24h long-tail soak and Series 7 LKML submission.
 \end{itemize}
 \end{frame}
 
@@ -434,34 +441,66 @@ Host signal delivery & \texttt{KVM\_SET\_SIGNAL\_MASK} & \texttt{SIGALRM} cannot
 ]
 \node[rung,live] (l0) {\textbf{tooling builds} -- launcher and \texttt{umlctl}};
 \node[rung,live,below=0.05cm of l0] (l1) {\textbf{kernel builds} -- selected profile compiles and links};
-\node[rung,live,below=0.05cm of l1] (l2) {\textbf{internal contracts} -- KUnit, marshal, byte-shape checks};
+\node[rung,live,below=0.05cm of l1] (l2) {\textbf{internal contracts} -- KUnit marshal/byte-shape; snapshot 3/3; record/replay 7/7};
 \node[rung,live,below=0.05cm of l2] (l3) {\textbf{substrate parity} -- PASS=25/FAIL=3/XFAIL=3, matching seccomp};
 \node[rung,live,below=0.05cm of l3] (l4) {\textbf{process/syscall classes} -- fork, exec, mmap, signals};
-\node[rung,live,below=0.05cm of l4] (l5) {\textbf{performance gates} -- prevent fast-path regression};
+\node[rung,live,below=0.05cm of l4] (l5) {\textbf{performance gates} -- micro/Python/stress + snapshot bench (38.9~$\mu$s / 13~$\mu$s)};
 \node[rung,live,below=0.05cm of l5] (l6) {\textbf{real workload boot} -- Python and stress workloads};
-\node[rung,prog,below=0.05cm of l6] (l7) {\textbf{sustained validation} -- 24h soak plus Tier 2/3 and LTP curation};
+\node[rung,live,below=0.05cm of l6] (l7) {\textbf{\texttt{umlctl mission}} -- 6/6 phases PASS, 100/100 soak, $\sim$15~min};
+\node[rung,prog,below=0.05cm of l7] (l8) {\textbf{24-hour long-tail soak} -- the remaining wall-clock evidence};
 \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{Sustained Validation: First Pilot}
+\begin{frame}{Mission-Accomplished: Single-Binary Verdict}
 \small
-\begin{tabular}{@{}lrrrr@{}}
+\begin{tabularx}{\textwidth}{@{}p{0.04\textwidth}p{0.20\textwidth}p{0.10\textwidth}p{0.10\textwidth}X@{}}
 \toprule
-Tuple & n & pass & fail & rate \\
+\# & Phase & Verdict & Duration & Summary \\
 \midrule
-\KVMvTwo{} aggregate & 200 & 200 & 0 & 100.00\% \\
-seccomp aggregate & 200 & 197 & 3 & 98.50\% \\
-\textbf{total} & \textbf{400} & \textbf{397} & \textbf{3} & \textbf{99.25\%} \\
+1 & KUnit & \done & 5.0~s & 10/10 cases (snap 3 + record 7) \\
+2 & Bench & \done & 2.5~s & cap 35~$\mu$s, median 13~$\mu$s \\
+3 & Substrate & \done & 3.5~s & cpython-tier0 PASS \\
+4 & Host resources & \done & 1.4~s & UM\_THP / UM\_OOM\_SCORE\_ADJ / affinity applied \\
+5 & Diverse soak & \done & 855~s & 100/100 PASS; 0 panics / 0 SIGBUS / 0 high-cr2 \\
+6 & Diagnostic & \done & 0.4~s & kernel/host/cgroup/hugepage metadata \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
+\vspace{0.6em}
 
-\vspace{1em}
+\centering
+\pill{UMLGreen}{MISSION\_ACCOMPLISHED in 867~s (kernel=\texttt{9ccbf5e7bb58})}\par
+\scriptsize
+One command (\texttt{umlctl mission --kernel <path>}); JSON scoreboard for CI; \texttt{--quick} skips Phase 5 for $\sim$12~s dev iteration.
+\end{frame}
+
+\begin{frame}{The R14 Cache-Flake Saga in One Slide}
+\scriptsize
+\begin{columns}[T,onlytextwidth]
+\column{0.49\textwidth}
+\begin{block}{Five weeks, fourteen rounds}
 \begin{itemize}
-  \item This is a pilot for the 24-hour validation bar, not the final upstream gate.
-  \item 35 minutes wall before threshold-trip clean stop.
-  \item Three failures were iocheck/seccomp timeout shape, not data corruption.
-  \item \KVMvTwo{} passed every iteration across memcheck, iocheck, stress-ng, and tier1-pylibs.
+  \item 1--2\% bytecode corruption rate in Django soak
+  \item KVMvTwo{} only; seccomp clean
+  \item Eliminated through R1--R12: KSM, khugepaged, kswapd, host pagecache, fast-page-fault, TLB coherence, mmu\_notifier, UML self-unmap, physmem residency, CPython specialization, gadget bounds (T68 shipped as side-effect)
+  \item R13 ruled out MAP\_POPULATE pinning as the cause (kept as foundation T71)
 \end{itemize}
+\end{block}
+\column{0.49\textwidth}
+\begin{block}{Round 14: root cause + fix}
+\begin{itemize}
+  \item Corruption shape: 16 valid bytes + 16 zero bytes = half AVX2 vector
+  \item SMP-T57 had un-masked AVX in CPUID; XCR0=0x7
+  \item glibc IFUNC picked AVX2 \texttt{vmovdqu ymm} memcpy
+  \item Per-task FPU save/restore used legacy \texttt{KVM\_GET\_FPU} (512~B FXSAVE)
+  \item \emph{No YMM upper-128 coverage} $\Rightarrow$ cross-task leak
+  \item Fix (SMP-T73): \texttt{KVM\_GET\_FPU} $\to$ \texttt{KVM\_GET\_XSAVE} at 5 sites
+  \item 220/220 validation soak; $p = 0.007$
+\end{itemize}
+\end{block}
+\end{columns}
+\vspace{0.4em}
+\centering
+\pill{UMLBlue}{LESSON}\quad Three infrastructure follow-ons: T74/T75/T76 latent-bug closures, T77 future-feature checklist, memo 52 host resource controls.
 \end{frame}
 
 \section{Performance}
@@ -571,19 +610,47 @@ checks SMP/page-fault pressure. Both are same-host speedups over seccomp.
 \toprule
 Surface & State & Reading \\
 \midrule
-Snapshot/forkserver v1 & \done & \texttt{um\_snapshot\_ready()},
-fds 198/199, \texttt{state\_version}, launcher plumbing, and
-\texttt{snapshot-smoke} are present. \\
-v1 ceiling & \limit & status is hard-coded zero; no on-disk snapshot;
+Snapshot/forkserver v1 & \done & C-09 legacy: \texttt{um\_snapshot\_ready()},
+fds 198/199, \texttt{state\_version}, launcher plumbing,
+\texttt{snapshot-smoke}. \\
+v1 ceiling & \limit & status hard-coded zero; no on-disk snapshot;
 short non-blocking payloads only; no SMP. \\
-KVM-aware readiness & \planned & Issue \#168 is unblocked but sits
-behind sustained validation. \\
+KVM-aware snapshot v2 (\#168) & \done & Memo 26 Phase 1--6 in tree:
+alloc/capture/restore, KUnit 3/3 (basic, full, cross-task), bench
+harness (38.9~$\mu$s / 13~$\mu$s), selftest re-plumbed. \\
+KVM-aware record/replay v2 (\#169) & \done & Memo 27 Phase 1--7 in tree:
+state machine, observe/consume primitives (SYSCALL + RDTSC +
+SIGALRM), gadget-bypass byte, KUnit 7/7, selftest re-plumbed. \\
 Time-travel profile & \progress & UP/seccomp profile exists; runtime
 hook gate exists; slow path is still a counter stub. \\
-Record/replay/time machine & \planned & Issue \#169 covers the real
-event log, replay consumer, and workflow. \\
+Host signal wiring for replay & \planned & Log shape proven by KUnit;
+remaining work is the host SIGALRM interception that triggers
+\texttt{observe\_sigalrm}. \\
 \bottomrule
 \end{tabularx}
+\end{frame}
+
+\begin{frame}{Host Resource Controls (Memo 52)}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.12\textwidth}p{0.42\textwidth}X@{}}
+\toprule
+ID & Lever & Knob \\
+\midrule
+T71 & MAP\_POPULATE + MAP\_LOCKED + mlockall & \texttt{UM\_KVM\_V2\_PIN\_PHYSMEM=1} \\
+T78 & MADV\_UNMERGEABLE on physmem & unconditional \\
+T79 & MADV\_NOHUGEPAGE / MADV\_HUGEPAGE & \texttt{UM\_THP=off / on / auto} \\
+T80 & \texttt{/proc/self/oom\_score\_adj} write & \texttt{UM\_OOM\_SCORE\_ADJ=N} \\
+T81 & MAP\_HUGETLB 2M / 1G & \texttt{UM\_HUGEPAGES=2M / 1G} \\
+T82 & \texttt{sched\_setaffinity} at startup & \texttt{UM\_KVM\_V2\_CPU\_AFFINITY=list} \\
+T83 & cgroup v2 per-instance subgroup & \texttt{[host\_resources]} TOML in umlctl \\
+T84 & preflight verification & automatic when knobs set \\
+T85--T87 & SCHED\_FIFO RT / NUMA / O\_DIRECT & \planned~(deferred per memo 52 \S3) \\
+\bottomrule
+\end{tabularx}
+\vspace{0.4em}
+\centering
+\pill{UMLBlue}{DECLARATIVE}\quad
+\texttt{[host\_resources]} in any \texttt{umlctl} \texttt{.toml}; preflight emits clear stderr warnings for empty hugepage pool / unwritable cgroup / missing CAP\_IPC\_LOCK
 \end{frame}
 
 \begin{frame}{What Remains}
@@ -591,19 +658,20 @@ event log, replay consumer, and workflow. \\
 \column{0.49\textwidth}
 \begin{block}{Validation}
 \begin{itemize}
-  \item formal 24h sustained run
-  \item Tier 2/Tier 3 templates
-  \item LTP curation
+  \item 24h long-tail wall-clock soak
+  \item Tier 2/Tier 3 template hardening
+  \item LTP curation finalisation
   \item wider CI matrix
 \end{itemize}
 \end{block}
 \column{0.47\textwidth}
-\begin{block}{Resumed work}
+\begin{block}{Resumed/external work}
 \begin{itemize}
-  \item KVM-aware snapshot readiness
-  \item record/replay extensions
-  \item syzkaller \texttt{vm/uml}
-  \item optional AVX-512 follow-up
+  \item Series 7 LKML cover-letter refresh + submission
+  \item Record/replay host signal wiring
+  \item Snapshot ELF64-core export (\#181)
+  \item syzkaller \texttt{vm/uml} (external)
+  \item Tier 3 host resources (RT/NUMA/O\_DIRECT)
 \end{itemize}
 \end{block}
 \end{columns}
@@ -611,17 +679,17 @@ event log, replay consumer, and workflow. \\
 
 \begin{frame}{Upstream Path}
 \small
-\begin{tabularx}{\textwidth}{@{}r p{0.34\textwidth}p{0.2\textwidth}X@{}}
+\begin{tabularx}{\textwidth}{@{}r p{0.34\textwidth}p{0.16\textwidth}X@{}}
 \toprule
 \# & Series & Subsystem & State \\
 \midrule
 1 & bpf-hygiene-v1 & BPF & ready \\
 2 & kmsan-arch-callback-rfc & mm/kmsan & ready \\
-3 & ftrace-notrace-generic-v1 & tracing & prepared \\
-4 & backend ops abstraction RFC & arch/um & to write \\
-5 & static-key hot paths & arch/um & to write \\
+3 & ftrace-notrace-generic-v1 & tracing & ready \\
+4 & backend ops abstraction RFC & arch/um & drafted \\
+5 & static-key hot paths & arch/um & drafted \\
 6 & per-profile C-series & arch/um + subsystems & blocked \\
-7 & KVM backend & arch/um + KVM & blocked by sustained validation \\
+7 & KVM backend & arch/um + KVM & cover-letter drafted; \emph{backend-layer unblocked} after R14 + mission gate; needs refresh + submission \\
 \bottomrule
 \end{tabularx}
 \end{frame}
@@ -652,14 +720,16 @@ event log, replay consumer, and workflow. \\
 
 \begin{frame}{Closing Summary}
 \Large
-\textbf{The branch is now an implementation with a validation frontier.}
+\textbf{The branch is now an implementation with a wall-clock validation frontier.}
 
-\vspace{0.8em}
+\vspace{0.6em}
 \normalsize
 \begin{itemize}
-  \item The architectural shape is coherent: backends, gates, profiles.
-  \item \KVMvTwo{} has crossed the hardest feasibility line: real workloads, SMP, and speed.
-  \item The next credible milestone is sustained validation and an upstreamable series plan.
+  \item Architectural shape is coherent: backends, gates, profiles.
+  \item \KVMvTwo{} has crossed the hardest feasibility line: real workloads, SMP, speed, snapshot, record/replay, host resource controls.
+  \item The five-week Round-14 cache-flake (YMM-upper XSAVE leak) was root-caused and fixed with infrastructure follow-ons (T74--T77, memo 52).
+  \item A single command --- \texttt{umlctl mission --kernel <path>} --- gives any reviewer a reproducible 15-minute binary verdict.
+  \item Remaining credible milestone: the 24-hour long-tail soak and the Series 7 LKML submission.
 \end{itemize}
 \end{frame}
 
@@ -689,12 +759,35 @@ s7 & Ryzen 7 7840HS & 904x & 3.91x & 4.89x \\
   \item \texttt{00-vision.md}: goals, non-goals, stakeholders.
   \item \texttt{STATUS.md}: live state, phase ledger, blockers.
   \item \texttt{01-architecture/}: three layers, invariants, data flow.
-  \item \texttt{02-workstreams/D-kvm-backend/}: KVM design, v1-to-v2 restart memos, state audit, benchmarks, sustained validation.
-  \item \texttt{03-architecture-review-2026-04-27/}: root-cause synthesis for the v1 contract mismatch.
-  \item \texttt{03-profiles/}: profile matrix and cost model.
-  \item \texttt{tools/testing/selftests/um/}: gates, benchmarks, soak, parity.
-  \item \texttt{tools/uml/uml-launcher/}: launcher and \texttt{umlctl}.
+  \item \texttt{02-workstreams/D-kvm-backend/}: KVM design, v1-to-v2 restart memos, state audit, benchmarks, snapshot+RR port memos (26 + 27).
+  \item \texttt{02-workstreams/D-kvm-backend/state-audit/26-feature-enablement-checklist.md}: T77 forward-looking un-mask checklist.
+  \item \texttt{08-future-phases/50-...django-flake-investigation-summary.md}: R14 root-cause narrative.
+  \item \texttt{08-future-phases/52-uml-host-resource-controls.md}: memo 52 (T78--T84 + T85--T87 deferred).
+  \item \texttt{tools/testing/selftests/um/}: gates, benchmarks, soak, parity, snapshot-kvm-smoke, kvm-record-smoke, kvm-snapshot-bench.
+  \item \texttt{tools/uml/uml-launcher/}: launcher, \texttt{umlctl}, \texttt{mission} / \texttt{cgroup} / \texttt{preflight} modules.
 \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Backup: \texttt{umlctl mission} CLI}
+\small
+\begin{verbatim}
+$ umlctl mission --kernel <PATH> [--out DIR]
+                 [--quick] [--continue-on-fail]
+                 [--soak-budget-sec N] [--soak-min-pct PCT]
+                 [--selftests-dir DIR]
+
+[Phase 1] PASS kunit       (~5s) -- 10/10 KUnit cases
+[Phase 2] PASS bench       (~3s) -- capture=35us median=13us
+[Phase 3] PASS substrate   (~4s) -- cpython-tier0 PASS
+[Phase 4] PASS host_res    (~1s) -- env knobs applied
+[Phase 5] PASS soak        (~14m)-- 100/100 PASS; 0 anomalies
+[Phase 6] PASS diagnostic  (<1s) -- metadata captured
+MISSION_ACCOMPLISHED in 867s (kernel=9ccbf5e7bb58)
+\end{verbatim}
+\scriptsize
+JSON scoreboard at \texttt{<out>/scoreboard.json}. Exit 0 on
+ACCOMPLISHED, non-zero with \texttt{MISSION\_FAILED phase=<N> <name>:
+<reason>} on any phase failure.
 \end{frame}
 
 \end{document}

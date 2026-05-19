@@ -20,8 +20,8 @@ profile-driven builds, and validation artifacts from one source tree.
 ]
 \node[box] (vision) {\textbf{Branch claim.} One kernel tree can produce fast production \UML{}, sanitizer-heavy research \UML{}, fuzzing \UML{}, sandbox \UML{}, library-mode \UML{}, and time-travel \UML{}.};
 \node[box,below=of vision] (arch) {\textbf{Architecture.} Layer 1 abstracts the trap mechanism with \texttt{struct um\_backend\_ops}; Layer 2 places static-key gates on hot paths; Layer 3 composes compile-time sanitizers and profile features.};
-\node[box,below=of arch] (state) {\textbf{Current state at \ReportDate.} Backend abstraction, static-key infrastructure, profile work, \texttt{umlctl}, selftests, and \KVMvTwo{} are in-tree. \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, and post-gadget performance; sustained validation is in progress.};
-\node[box,below=of state] (evidence) {\textbf{Evidence.} \KVMvTwo{} matches seccomp on the substrate gate, reaches cpython-parity 21/21 under UP and SMP, passes 200/200 \KVMvTwo{} iterations in the first post-T57 two-hour soak, and is faster than seccomp on all eight benchmark hosts.};
+\node[box,below=of arch] (state) {\textbf{Current state at \ReportDate.} Backend abstraction, static-key infrastructure, profile work, \texttt{umlctl}, selftests, and \KVMvTwo{} are in-tree. \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, post-gadget performance, snapshot+record/replay primitives, and declarative host resource controls. The Round-14 Django cache-flake (1--2\% under sustained iteration) was root-caused and fixed (SMP-T73, YMM-upper XSAVE leak).};
+\node[box,below=of state] (evidence) {\textbf{Evidence.} \KVMvTwo{} matches seccomp on the substrate gate, reaches cpython-parity 21/21 under UP and SMP, passes the in-tree \texttt{umlctl mission} acceptance gate end-to-end (6/6 phases, 100/100 soak, $\sim$15 min), and is faster than seccomp on all eight benchmark hosts. Snapshot bench: capture 38.9~$\mu$s, median restore 13~$\mu$s ($\sim$1300$\times$ / $\sim$75$\times$ under the memo-12 targets).};
 \end{tikzpicture}
 \caption{The report in four claims. Each claim maps back to a tracked source document or measured artefact.}
 \end{figure}
@@ -78,7 +78,7 @@ Known hard problems & Treat trap cost and SMP state ownership as implementation 
 \begin{figure}[h]
 \centering
 \metriccard{UMLBlue}{21/21}{cpython parity\\UP and SMP}\hfill
-\metriccard{UMLGreen}{200/200}{\KVMvTwo{} two-hour\\validation pilot}\hfill
+\metriccard{UMLGreen}{6/6}{\texttt{umlctl mission}\\acceptance phases}\hfill
 \metriccard{UMLAmber}{193--908x}{micro speedup\\over seccomp}\hfill
 \metriccard{UMLTeal}{7 series}{staged upstream\\submission queue}
 \caption{Dashboard metrics at the reporting cutoff. The numbers are intentionally sparse: each is backed by a source table later in the report.}
@@ -91,11 +91,11 @@ Known hard problems & Treat trap cost and SMP state ownership as implementation 
 \toprule
 Reporting date & \ReportDate \\
 Cutoff commit & \texttt{\CutoffCommit} on \texttt{\BranchName} \\
-Project corpus & 253 files under \texttt{Documentation/virt/uml/redesign/}; 32 top-level \texttt{tools/testing/selftests/um/} test areas; \texttt{arch/um/backend/kvm-v2/} implementation present \\
-Functional headline & \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, and post-gadget performance; formal 24-hour validation remains open \\
-Parity headline & cpython-parity is 21/21 under both UP and SMP; substrate gate is PASS=25/FAIL=3/XFAIL=3, matching seccomp \\
-Performance headline & post-gadget \KVMvTwo{} beats seccomp on all eight lab hosts: micro 193--908x, Python 2.99--4.06x, stress 3.71--8.72x \\
-Validation headline & first post-T57 two-hour soak: \KVMvTwo{} 200/200 PASS; aggregate 397/400 PASS, with the three failures isolated to iocheck/seccomp timeout behavior \\
+Project corpus & 255+ files under \texttt{Documentation/virt/uml/redesign/}; 32 top-level \texttt{tools/testing/selftests/um/} test areas; \texttt{arch/um/backend/kvm-v2/} implementation present including snapshot, record, state-trace, lstar-gadget, byteshape and marshal KUnit \\
+Functional headline & \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, post-gadget performance, snapshot + record/replay primitives (KUnit 3+7 = 10/10), declarative host resource controls (SMP-T78--T84), and a first-class \texttt{umlctl mission} acceptance gate (6/6 phases PASS in $\sim$15 min) \\
+Parity headline & cpython-parity is 21/21 under both UP and SMP; substrate gate is PASS=25/FAIL=3/XFAIL=3, matching seccoMP; cache-flake bug from Round 14 closed via SMP-T73 (5-week investigation, YMM-upper XSAVE save/restore leak under AVX un-mask) \\
+Performance headline & post-gadget \KVMvTwo{} beats seccomp on all eight lab hosts: micro 193--908x, Python 2.99--4.06x, stress 3.71--8.72x; snapshot capture 38.9~$\mu$s and median restore 13~$\mu$s vs memo-12 targets of <50~ms / <1~ms \\
+Validation headline & \texttt{umlctl mission} (6-phase comprehensive gate): 10/10 KUnit cases, bench gates met, substrate PASS, host\_resources end-to-end verified, 100/100 PASS across 5 diverse workloads in $\sim$8 min soak, 0 panics / 0 SIGBUS / 0 high-cr2; 24-hour long-tail soak is the remaining wall-clock evidence \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -111,8 +111,8 @@ ID & Workstream & State & Summary \\
 \midrule
 A & Backend abstraction & \donepill & \texttt{um\_backend\_ops} contract, ptrace/seccomp split, KUnit contract, and documentation landed. \\
 B & Static-key hot paths & \donepill & Hot-path gates, debugfs controls, and runtime flip demonstration landed. \\
-C & Profiles and gaps & \statuspill{UMLGreen}{MOSTLY} & Defconfigs and major sanitizer/tracing ports are largely landed; snapshot, syzkaller, and some resumed features remain. \\
-D & KVM backend & \progresspill & \KVMvTwo{} is functional and performant; 24-hour validation, Tier 2/3, LTP, and upstream packaging are the active edge. \\
+C & Profiles and gaps & \statuspill{UMLGreen}{MOSTLY} & Defconfigs and major sanitizer/tracing ports are largely landed; snapshot v2 + record/replay v2 ports now in tree; syzkaller binding remains external. \\
+D & KVM backend & \donepill & \KVMvTwo{} functional + performant + R14 cache-flake fixed (SMP-T73); snapshot Phase 1--6 and record/replay Phase 1--7 ports landed; host resource controls (SMP-T78--T84) shipped; \texttt{umlctl mission} acceptance gate operational. 24h long-tail soak and Series 7 upstream submission remain. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -126,8 +126,16 @@ is a backend contract; production can choose \KVM{}, CI can choose
 whether it wants no hooks, runtime hooks, or heavy compile-time
 instrumentation.
 
-The current branch has crossed the highest-risk implementation path:
-\KVMvTwo{} can run real guest userspace, handle SMP, preserve
-cross-task state, and beat \Seccomp{} on measured workloads. The
-remaining gate is sustained validation: reliability, breadth, and
-upstreamable series boundaries.
+The current branch has crossed the highest-risk implementation
+path: \KVMvTwo{} can run real guest userspace, handle SMP, preserve
+cross-task state, survive a 14-round real-world flake investigation
+(Round~14's YMM-upper-128 XSAVE leak under AVX un-mask, fixed as
+SMP-T73), beat \Seccomp{} on measured workloads, snapshot and replay
+its own state, and accept declarative host resource controls.
+
+A single command --- \texttt{umlctl mission --kernel <path>} ---
+now produces a binary acceptance verdict in $\sim$15~min wall:
+all six phases must pass (KUnit, performance bench, substrate
+parity, host resource controls, diverse workload soak, diagnostic
+snapshot). The remaining gate is the wall-clock 24-hour soak and
+the LKML upstream submission of the kvm-backend series.

@@ -126,9 +126,41 @@ s7 & Ryzen 7 7840HS & 904x & 3.91x & 4.89x \\
 \end{tabular}
 \end{table}
 
+\subsection{Snapshot Benchmark}
+
+The Phase 5 snapshot bench harness (\texttt{kvm\_v2\_snapshot\_bench=N}
+on the kernel cmdline, or via \texttt{/sys/kernel/debug/um/kvm\_v2\_snapshot\_bench})
+runs an $N$-iteration capture-once + restore-full-$N$-times cycle
+on the in-tree \KVMvTwo{} snapshot primitives.
+
+\begin{table}[h]
+\centering
+\caption{Snapshot bench result, kernel \texttt{9ccbf5e7bb58}, AMD Ryzen 7 7840HS, N=64.}
+\small
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Metric & Value & Memo-12 target \\
+\midrule
+Capture (one-shot) & 35--39~$\mu$s & < 50~ms ($\sim$1300$\times$ under) \\
+Restore (median) & 13~$\mu$s & < 1~ms ($\sim$75$\times$ under) \\
+Restore (p95) & 16--19~$\mu$s & --- \\
+Restore (min) & 12.5~$\mu$s & --- \\
+Restore (max) & 19--22~$\mu$s & --- \\
+Mode & full & ``full'' = memslot copy ran; falls back to ``regs-only'' on kvmalloc -ENOMEM \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 13~$\mu$s median restore is striking. The memo-12 target of
+``sub-ms iteration'' was set conservatively before the v2 vCPU
+pool and identity-mapped memslot landed; v2's design intent now
+shows up in the bench: no per-restore TLB shootdown, the memslot
+memcpy is a single host-VA-to-host-VA copy, and the regs/sregs
+push is a fixed-size ioctl chain.
+
 \subsection{Performance Interpretation}
 
-The performance story has three layers:
+The performance story has four layers:
 \begin{itemize}
   \item \textbf{Mechanism win.} The micro tier proves that
         in-guest fast-path dispatch removes most seccomp signal/stub
@@ -139,9 +171,16 @@ The performance story has three layers:
   \item \textbf{Concurrency win.} The stress tier is mmap/page-fault
         heavy, so the gadget is less directly relevant; the continuing
         3.71--8.72x speedup comes from the broader vCPU and SMP design.
+  \item \textbf{Snapshot win.} The snapshot capture/restore numbers
+        are within the sub-ms iteration budget the memo-12 design
+        called for, by orders of magnitude. Record/replay sessions
+        can now realistically checkpoint at every observed-syscall
+        boundary without budget pressure.
 \end{itemize}
 
 The correct benchmark unit is the ratio against seccomp on the same
 host, not the raw absolute latency across machines. That choice
 removes most CPU-frequency and microarchitecture noise and keeps the
-claim tied to a backend decision.
+claim tied to a backend decision. For snapshot the comparison is
+against the memo-12 design budget, which is the closest thing to a
+``one host, one budget'' reference for snapshot/replay work.

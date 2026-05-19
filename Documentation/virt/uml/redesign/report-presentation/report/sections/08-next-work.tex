@@ -5,26 +5,28 @@
 \begin{table}[h]
 \centering
 \caption{Next work at the reporting cutoff.}
-\begin{tabularx}{\linewidth}{@{}p{0.21\linewidth}p{0.18\linewidth}X@{}}
+\begin{tabularx}{\linewidth}{@{}p{0.27\linewidth}p{0.16\linewidth}X@{}}
 \toprule
 Item & State & Notes \\
 \midrule
-24h sustained validation & \progresspill & Daemon exists and passed a two-hour short run; formal 24-hour run remains. \\
-Tier 2 / Tier 3 & \progresspill & Designs exist; templates and bootstrap flow still need implementation. \\
-LTP curation & \plannedpill & Needs KEEP/SKIP list and a \UML{}-appropriate runner. \\
-KVM-aware snapshot readiness & \plannedpill & Unblocked after Python parity closure; resumes after sustained validation. \\
-Record/replay and time machine & \plannedpill & Time-travel profile exists; full replay workflow remains paused. \\
-AVX-512 follow-up & \plannedpill & Optional follow-up for the remaining T57 vm-method failures. \\
+24h long-tail soak & \progresspill & The \texttt{umlctl mission} 15-min acceptance gate passes 6/6 phases including 100/100 soak. The wall-clock 24-hour run remains as the long-tail evidence; the rig is in place. \\
+Series 7 (kvm-backend) LKML submission & \progresspill & Cover letter is drafted (414 $\to$ 900 lines pre-R14). Now backend-layer unblocked by R14 closure + the \texttt{umlctl mission} acceptance gate; needs cover-letter refresh to record the snapshot+RR landings and submission. \\
+Record/replay host-side signal wiring & \plannedpill & The log shape, observe/consume API, KUnit suite, and replay-side gating all proven via memo 27 Phase 4--7. Remaining work is the host-side signal-interception that turns a real SIGALRM into an \texttt{observe\_sigalrm} call. \\
+Tier 3 host resources (T85/T86/T87) & \plannedpill & SCHED\_FIFO RT, NUMA \texttt{mbind}, \texttt{O\_DIRECT} for hostfs. Memo 52 \S3 keeps the design; implementation opens only when a concrete operator question demands it. \\
+Snapshot ELF64-core export (\#181) & \plannedpill & The snapshot port is done; the gdb/crash-tool export is a separate follow-on. \\
+syzkaller \texttt{vm/uml} binding & planned external & The in-tree forkserver surface is pinned (snapshot v1 C-09); the remaining \texttt{pkg/vm/uml} Go driver belongs in the syzkaller repository. \\
+LTP curation finalization & \plannedpill & The \texttt{ltp-runner} soak template exists; the curated KEEP/SKIP list and \UML{}-appropriate runner refinements still need committing. \\
+AVX-512 / AMX / PKRU / CET un-mask & \plannedpill & Memo state-audit Layer 26 (SMP-T77) preserves the checklist; each future un-mask follows it. AVX-VNNI and AVX10 require no XSAVE-pipe changes (T73's XSAVE plumbing covers them). \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 \subsection{Snapshot, Replay, and Time-Travel Status}
 
-The ``time machine'' story should be presented as a staged roadmap,
-not as a finished product. The branch has real snapshot/forkserver
-plumbing and an explicit time-travel profile, but full record/replay
-is still future work.
+The ``time machine'' story has substantially advanced since the
+previous reporting cutoff. Snapshot and record/replay ports are
+landed in tree; the remaining work is host-side wiring rather
+than design.
 
 \begin{table}[h]
 \centering
@@ -34,25 +36,44 @@ is still future work.
 \toprule
 Surface & State & Reading \\
 \midrule
-Snapshot/forkserver v1 & \donepill & C-09 landed a cooperative
+Snapshot/forkserver v1 & \donepill & C-09 (legacy):
 \texttt{um\_snapshot\_ready()} point, AFL-compatible fds 198/199,
 \texttt{/sys/kernel/um/state\_version}, launcher fd plumbing, and
 \texttt{snapshot-smoke} coverage. \\
 v1 ceiling & known limit & Status is reported as zero, payloads must
 be short and non-blocking, there is no on-disk snapshot, and v1 is
 not SMP-capable. These are documented limits, not hidden claims. \\
-KVM-aware readiness & \plannedpill & Issue \#168 is unblocked by
-Python parity closure but intentionally sits behind sustained validation. \\
+KVM-aware snapshot v2 (\#168) & \donepill & Memo 26-snapshot Phase 1--6
+landed: \texttt{kvm\_v2\_snapshot\_alloc/capture/restore} surface
+(regs-only and full), KUnit 3/3 cases including the Phase-4
+cross-task semantics test, \texttt{kvm\_v2\_snapshot\_bench}
+cmdline + debugfs harness (Phase 5), and the
+\texttt{snapshot-kvm-smoke} selftest re-plumbed against v2
+case names (Phase 6). Bench numbers: 38.9~$\mu$s capture,
+13~$\mu$s median restore. \\
+KVM-aware record/replay v2 (\#169) & \donepill & Memo 27 Phase 1--7
+landed: \texttt{kvm\_v2\_record\_*} state machine, static-key
+hot-path gate, observe/consume primitives for SYSCALL + RDTSC +
+SIGALRM kinds, anonymous-union replay-entry payload, LSTAR-gadget
+\texttt{KVM\_V2\_GADGET\_OFF\_RECORD} bypass byte, KUnit 7/7
+cases (basic / state / observe / strict\_replay / gadget\_bypass
+/ rdtsc / sigalrm), and the \texttt{kvm-record-smoke} selftest
+re-plumbed against v2 case names. \\
 Time-travel profile & profile exists & \texttt{uml/time-travel}
 selects seccomp-only, UP, \texttt{CONFIG\_UML\_TIME\_TRAVEL\_SUPPORT},
 and debug surfaces. The runtime hook gate exists; today its slow path
 is still a counter stub. \\
-Record/replay/time machine & \plannedpill & Issue \#169 covers the
-first-class deterministic replay extension. The event log, replay
-consumer, and user workflow are not implemented yet. \\
-Syzkaller binding & planned external & The in-tree forkserver surface
-is pinned; the remaining \texttt{pkg/vm/uml} Go driver belongs in the
-syzkaller repository. \\
+Record/replay host wiring & \plannedpill & The log shape and
+replay-side gating are KUnit-proven. The remaining work is the
+host-side signal-interception path that turns a real SIGALRM into
+an \texttt{observe\_sigalrm} call, plus the trap-on-RDTSC VMCS
+programming (memo 27 \S6 Q1 spike). \\
+Snapshot ELF64-core export (\#181) & \plannedpill & Lift to a
+gdb/crash-tool-loadable artefact, gated on snapshot v2 in tree
+(now complete). \\
+Syzkaller binding & planned external & The in-tree forkserver
+surface is pinned; the remaining \texttt{pkg/vm/uml} Go driver
+belongs in the syzkaller repository. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -78,11 +99,11 @@ state drift the state-audit method was built to catch.
 \midrule
 1 & \texttt{bpf-hygiene-v1} & 2 patches & BPF & ready \\
 2 & \texttt{kmsan-arch-callback-rfc} & 1 RFC patch & mm/kmsan & ready \\
-3 & \texttt{ftrace-notrace-generic-v1} & 1 patch & tracing/ftrace & prepared \\
-4 & backend ops abstraction RFC & about 12 patches & arch/um & to write \\
-5 & static-key hot paths & about 6 patches & arch/um & to write \\
+3 & \texttt{ftrace-notrace-generic-v1} & 1 patch & tracing/ftrace & ready \\
+4 & backend ops abstraction RFC & about 12 patches & arch/um & drafted \\
+5 & static-key hot paths & about 6 patches & arch/um & drafted \\
 6 & per-profile C-series & about 20 patches & arch/um plus subsystems & blocked by Series 7 ordering \\
-7 & KVM backend series & about 15 patches & arch/um plus KVM & blocked by sustained validation \\
+7 & KVM backend series & about 15 patches & arch/um plus KVM & cover-letter drafted (414~$\to$~900 lines); backend-layer unblocked by R14 closure + \texttt{umlctl mission} acceptance gate; needs cover-letter refresh + submission \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -101,7 +122,13 @@ The upstream path makes three narrower claims:
   \item static-key hooks are the right kernel-native way to make
         instrumentation runtime-flippable without charging every
         profile.
-  \item the \KVMvTwo{} evidence is strong enough to justify continued
-        validation and an eventual upstream RFC, but the large \KVM{}
-        series should wait until sustained validation is formalized.
+  \item The \KVMvTwo{} evidence is now strong enough to submit. The
+        Round-14 cache-flake closure (SMP-T73) was the last
+        substantive correctness gap; the snapshot and record/replay
+        v2 ports landed in tree with full KUnit coverage; host
+        resource controls (memo 52, SMP-T78--T84) shipped as
+        declarative TOML + cgroup v2 in \texttt{umlctl}; and the
+        single-command \texttt{umlctl mission} acceptance gate
+        gives a binary, reproducible 15-minute verdict for any
+        reviewer to run locally.
 \end{enumerate}
