@@ -445,15 +445,59 @@ static int hostfs_file_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/*
+ * Phase 3 (memo #3): route fsync through the writeback ring when
+ * available.  Mostly cosmetic — fsync is a single syscall either
+ * way — but it (a) makes the wb_ring fully own all I/O on a
+ * hostfs inode, removing the "ring for writes, sync for sync"
+ * inconsistency, and (b) frees the inode lock during the actual
+ * host fsync since IORING_OP_FSYNC runs on a kernel worker.
+ *
+ * @datasync maps to IORING_FSYNC_DATASYNC.  We don't expose a
+ * range fsync — io_uring's FSYNC opcode doesn't either; the
+ * file_write_and_wait_range above already restricts what reaches
+ * the underlying host fd.
+ */
+static int hostfs_fsync_ring(struct hostfs_fs_info *fsi, int fd, int datasync)
+{
+	struct os_io_cqe cqe;
+	int rc;
+
+	mutex_lock(&fsi->wb_lock);
+	rc = os_io_ring_submit_fsync(fsi->wb_ring, fd, 0);
+	if (rc < 0) {
+		mutex_unlock(&fsi->wb_lock);
+		return rc;
+	}
+	for (;;) {
+		int hrc = os_io_ring_wait_cqe(fsi->wb_ring, &cqe, -1);
+
+		if (hrc < 0) {
+			mutex_unlock(&fsi->wb_lock);
+			return hrc;
+		}
+		if (hrc == 1)
+			break;
+	}
+	mutex_unlock(&fsi->wb_lock);
+	if (cqe.res < 0)
+		return cqe.res;
+	return 0;
+}
+
 static int hostfs_fsync(struct file *file, loff_t start, loff_t end,
 			int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
+	struct hostfs_fs_info *fsi = inode->i_sb->s_fs_info;
 	int ret;
 
 	ret = file_write_and_wait_range(file, start, end);
 	if (ret)
 		return ret;
+
+	if (fsi && fsi->wb_ring)
+		return hostfs_fsync_ring(fsi, HOSTFS_I(inode)->fd, datasync);
 
 	inode_lock(inode);
 	ret = fsync_file(HOSTFS_I(inode)->fd, datasync);
