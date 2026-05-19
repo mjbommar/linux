@@ -2,26 +2,37 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # um/kvm-record-smoke/run-kvm-record-smoke.sh — kselftest for the
-# Phase-3 task #253 record/replay primitive skeleton.
+# v2 record/replay primitives (#169 Phase 7).
 #
-# Boots UML with `backend=force=kvm` and asserts the in-tree KUnit
-# case kvm_record_basic_test (added in commit 56274adfe16b) reports
-# "ok N kvm_record_basic_test". That case exercises the kvm_record_
-# alloc / start / stop / replay / destroy lifecycle on the freshly-
-# booted vCPU.
+# Boots UML with `backend=force=kvm-v2` and asserts every KUnit case
+# in the kvm_v2_record suite reports PASS:
 #
-# Pattern mirrors um/snapshot-kvm-smoke/run-snapshot-kvm-smoke.sh:
-# build/boot/KUnit-shape regression guard. When subsequent memo-13
-# steps land (TSC / syscall / interrupt / random / MMIO recording),
-# this selftest extends with a record→KVM_RUN→replay round-trip
-# verifying the recorded entries replay byte-identically.
+#   test_kvm_v2_record_basic            — lifecycle (alloc/start/stop/
+#                                         replay/destroy) + gate flips.
+#   test_kvm_v2_record_state_transitions— invalid-edge -EINVAL coverage.
+#   test_kvm_v2_record_observe          — Phase 2 observe append.
+#   test_kvm_v2_record_strict_replay    — Phase 3 consume + strict mode.
+#   test_kvm_v2_record_gadget_bypass    — Phase 4 gadget RECORD byte.
+#   test_kvm_v2_record_rdtsc            — Phase 5 RDTSC round-trip.
+#   test_kvm_v2_record_sigalrm          — Phase 6 SIGALRM anchor round-trip.
+#
+# Build/boot/KUnit-shape regression guard: a kvm-v2 backend regression
+# that breaks any of the record/replay primitives fails here.
+#
+# Pre-v2 history: this script previously targeted the v1 path
+# (backend=force=kvm + kvm_record_basic_test / kvm_record_roundtrip_test
+# case names + kvm_record_ctl debugfs node). Phase 7 of the v2 port
+# re-plumbs against the v2 symbol surface. The debugfs runtime path
+# is deferred — the v2 backend ships C/KUnit surface only; a debugfs
+# control file is filed as Phase 7+ follow-on once the runtime hook
+# wiring matures.
 #
 # Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
 #
 # Environment:
-#   UML_BINARY  UML kernel built with CONFIG_UM_BACKEND_KVM_INTEGRATED=y
-#               and CONFIG_UM_BACKEND_CONTRACT_TEST=y (default
-#               /tmp/uml-kvmint/linux).
+#   UML_BINARY  UML kernel built with CONFIG_UM_BACKEND_KVM_V2=y +
+#               CONFIG_UM_BACKEND_KVM_V2_KUNIT=y. Default
+#               /tmp/uml-kvmint/linux.
 #   UML_MEM     mem= argument. Default 128M.
 
 set -u
@@ -58,104 +69,50 @@ if ! ensure_kvm_readable; then
 fi
 
 OUT=$(timeout --kill-after=10 30 "$BINARY" \
-	backend=force=kvm \
+	backend=force=kvm-v2 \
 	init=/bin/true mem="$MEM" \
 	con=null con0=fd:0,fd:1 \
 	root=/dev/root rootfstype=hostfs rw \
 	panic=-1 </dev/null 2>&1 || true)
 
-OBSERVED=$(echo "$OUT" | sed -n 's/^um: backend = \([a-z]*\).*/\1/p' | head -1)
-if [ "$OBSERVED" != "kvm" ]; then
-	echo "SKIP: backend probed to '$OBSERVED' (need kvm)" >&2
+OBSERVED=$(echo "$OUT" | sed -n 's/^um: backend = \([a-z0-9-]*\).*/\1/p' | head -1)
+if [ "$OBSERVED" != "kvm-v2" ]; then
+	echo "SKIP: backend probed to '$OBSERVED' (need kvm-v2)" >&2
 	exit 4
 fi
 
-KU_LINE=$(echo "$OUT" | grep -E '^[[:space:]]+ok [0-9]+ kvm_record_basic_test' | head -1)
-if [ -z "$KU_LINE" ]; then
-	echo "KVM_RECORD_SMOKE: FAIL (no 'ok N kvm_record_basic_test' KUnit line)"
-	echo "$OUT" | grep -E 'kvm_record|backend = ' | head -5
-	exit 1
-fi
-
-# Also gate the round-trip KUnit (commit 14414378fde9), which
-# exercises the FIFO order + cursor-exhaustion + side-buffer
-# round-trip + NR-mismatch divergence assertions. It skips on
-# early boot when kvm_record_start can't capture (vcpu / memslot
-# not yet up at KUnit time); we tolerate that but require the
-# `ok N` line either way.
-KU_LINE_RT=$(echo "$OUT" | grep -E '^[[:space:]]+ok [0-9]+ kvm_record_roundtrip_test' | head -1)
-if [ -z "$KU_LINE_RT" ]; then
-	echo "KVM_RECORD_SMOKE: FAIL (no 'ok N kvm_record_roundtrip_test' KUnit line)"
-	exit 1
-fi
-
-KU_INFO=$(echo "$OUT" | grep -E 'kvm_record_start rc=' | head -1)
-
-echo "KVM_RECORD_SMOKE: PASS ${KU_LINE# *}"
-echo "KVM_RECORD_SMOKE: PASS ${KU_LINE_RT# *}"
-if [ -n "$KU_INFO" ]; then
-	echo "KVM_RECORD_SMOKE: info ${KU_INFO# *}"
-fi
-
-# Optional second pass: drive the debugfs control surface from a
-# booted UML, end-to-end. Requires /bin/sh on hostfs (post-#272 +
-# #273 the kvm backend can run a dynamically-linked /bin/sh
-# cleanly). SKIPped if /bin/sh is missing.
-if [ "${RECORD_RUNTIME:-1}" = "1" ] && [ -x /bin/sh ]; then
-	GUEST=$(mktemp /tmp/kvm-record-smoke-guest.XXXXXX.sh)
-	cat > "$GUEST" <<'GUEST_EOF'
-#!/bin/sh
-mkdir -p /sys/kernel/debug 2>/dev/null
-mount -t debugfs none /sys/kernel/debug 2>/dev/null
-if [ ! -e /sys/kernel/debug/um/kvm_record_ctl ]; then
-	echo "GUEST_RECORD: no debugfs node"
-	exit 0
-fi
-echo start > /sys/kernel/debug/um/kvm_record_ctl
-echo "GUEST_RECORD: started"
-# Trigger a few syscalls so the dispatcher's gated hook fires.
-# `id`, `date`, etc. are coreutils symlinks; tiny syscall count.
-id >/dev/null 2>&1
-date >/dev/null 2>&1
-true
-echo stop > /sys/kernel/debug/um/kvm_record_ctl
-echo "GUEST_RECORD: stopped"
-cat /sys/kernel/debug/um/kvm_record_state
-echo destroy > /sys/kernel/debug/um/kvm_record_ctl
-GUEST_EOF
-	chmod +x "$GUEST"
-
-	OUT2=$(timeout --kill-after=10 30 "$BINARY" \
-		backend=force=kvm \
-		init="$GUEST" mem="$MEM" \
-		con=null con0=fd:0,fd:1 \
-		root=/dev/root rootfstype=hostfs rw \
-		panic=-1 </dev/null 2>&1 || true)
-	rm -f "$GUEST"
-
-	# Extract the kvm_record_state line; format is
-	#   recording=N replaying=N log_count=N log_capacity=N
-	STATE=$(echo "$OUT2" | grep -E '^recording=' | head -1)
-	GUARD=$(echo "$OUT2" | grep -E 'GUEST_RECORD:' | head -3)
-	if [ -n "$STATE" ]; then
-		LOG_COUNT=$(echo "$STATE" | sed -E 's/.*log_count=([0-9]+).*/\1/')
-		echo "KVM_RECORD_SMOKE: runtime $STATE"
-		# log_count > 0 means the dispatcher hook fired. We
-		# don't fail on log_count==0 because the gated hook
-		# only catches Class-A passthrough syscalls — short
-		# guest scripts that VMEXIT only via gadget paths can
-		# legitimately produce zero entries. Surface the count
-		# so a reader can see the result.
-		if [ "$LOG_COUNT" -gt 0 ]; then
-			echo "KVM_RECORD_SMOKE: hook fired ($LOG_COUNT log entries)"
-		else
-			echo "KVM_RECORD_SMOKE: hook did not fire (no Class-A VMEXITs in guest script)"
-		fi
-	else
-		# Don't fail the test — runtime path is best-effort.
-		HINT=$(echo "$OUT2" | grep -E 'GUEST_RECORD:|kvm_record|fatal' | head -2)
-		echo "KVM_RECORD_SMOKE: runtime skipped ($HINT)"
+# The full v2 KUnit record suite — must all PASS.
+CASES=(
+	"test_kvm_v2_record_basic"
+	"test_kvm_v2_record_state_transitions"
+	"test_kvm_v2_record_observe"
+	"test_kvm_v2_record_strict_replay"
+	"test_kvm_v2_record_gadget_bypass"
+	"test_kvm_v2_record_rdtsc"
+	"test_kvm_v2_record_sigalrm"
+)
+MISSING=()
+for case in "${CASES[@]}"; do
+	if ! echo "$OUT" | grep -Eq "^[[:space:]]+ok [0-9]+ ${case}\b"; then
+		MISSING+=("$case")
 	fi
+done
+if [ "${#MISSING[@]}" -gt 0 ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (KUnit case(s) not PASS: ${MISSING[*]})"
+	echo "$OUT" | grep -E 'kvm_v2_record|backend = ' | head -10
+	exit 1
 fi
+
+KU_INFO=$(echo "$OUT" | grep -E 'um: kvm-v2 record_start: armed' | head -1)
+
+echo "KVM_RECORD_SMOKE: PASS (7/7 record cases — basic, state, observe, strict_replay, gadget_bypass, rdtsc, sigalrm)"
+if [ -n "$KU_INFO" ]; then
+	echo "KVM_RECORD_SMOKE: info ${KU_INFO}"
+fi
+
+# Note: a debugfs runtime path (kvm_v2_record_ctl + state) is deferred
+# to Phase 7+ once a host-side observe wiring lands that the guest
+# control flow can drive. The KUnit suite above proves the full
+# observe/consume contract works end-to-end.
 
 exit 0
