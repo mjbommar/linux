@@ -51,7 +51,54 @@ silver-bullet bug fixes. They become high-value when:
 4. squeezing the last 10% out of KVM_RUN throughput (hugepages
    + CPU pinning).
 
-## What already ships (R13 T71 baseline)
+## What already ships (post 2026-05-19 implementation pass)
+
+**Tier 1 + Tier 2 (less RT/NUMA/O_DIRECT) shipped:** SMP-T78
+through T84 landed in `umlctl-deploy` on 2026-05-19. The
+declarative TOML form in `[host_resources]` is wired through
+umlctl → manifest → spawn env / cgroup setup. End-to-end
+verified on AMD Ryzen 7 7840HS:
+
+| ID    | Lever                             | Source        | Knob                       |
+|-------|-----------------------------------|---------------|----------------------------|
+| T71   | MAP_POPULATE on physmem           | process.c     | (unconditional)            |
+| T71   | MAP_LOCKED on physmem             | process.c     | UM_KVM_V2_PIN_PHYSMEM=1    |
+| T71   | mlockall(MCL_CURRENT/FUTURE)      | main.c        | UM_KVM_V2_PIN_PHYSMEM=1    |
+| T78   | MADV_UNMERGEABLE on physmem       | process.c     | (unconditional)            |
+| T79   | MADV_NOHUGEPAGE/MADV_HUGEPAGE     | process.c     | UM_THP=off / on / auto     |
+| T80   | /proc/self/oom_score_adj          | main.c        | UM_OOM_SCORE_ADJ=N         |
+| T81   | MAP_HUGETLB \| MAP_HUGE_2MB/1GB   | process.c     | UM_HUGEPAGES=2M / 1G       |
+| T82   | sched_setaffinity at startup      | main.c        | UM_KVM_V2_CPU_AFFINITY=L   |
+| T83   | cgroup v2 limits + per-instance   | umlctl + supervise.rs + cgroup.rs | `[host_resources]` memory_max/cpu_max/pids_max |
+| T84   | preflight verification            | umlctl + preflight.rs | (automatic when knobs set) |
+
+**Declarative form via umlctl:**
+
+```toml
+[host_resources]
+thp = "off"             # SMP-T79
+oom_score_adj = 500     # SMP-T80
+cpu_affinity = "0-3"    # SMP-T82
+hugepages = "2M"        # SMP-T81
+pin_physmem = true      # SMP-T71
+memory_max = "1G"       # SMP-T83
+cpu_max = "200%"        # SMP-T83
+pids_max = 1024         # SMP-T83
+```
+
+All 11 in-tree soak templates updated with a default block
+(`thp = "off"`, `oom_score_adj = 500`) so the standard soak
+runs get the predictability win out of the box. Hugepages,
+cpu_affinity, and cgroup limits stay opt-in pending host-side
+operator setup.
+
+**Tier 3 (SCHED_FIFO, NUMA, O_DIRECT) — DEFERRED.** Per §3.1-§3.3
+each opens only when a concrete operator question demands it
+(multi-tenant CI host → §3.1; multi-socket bench rig → §3.2;
+multi-UML memory-pressure soak → §3.3). Implementation skeletons
+not started; designs preserved below.
+
+## What was in tree before this implementation pass (R13 T71 baseline)
 
 `arch/um/os-Linux/process.c::os_map_memory`:
 
