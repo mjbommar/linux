@@ -47,12 +47,17 @@ timeout_secs = 5
 [[init.phases]]
 name = "tcp-send"
 cmd = """
-python3 - <<'PY'
+SENDER=/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/net-bench/tcp-send
+if [ -x "$SENDER" ]; then
+    "$SENDER" {{HOST_IP_PLAIN}} {{BENCH_PORT}} {{DURATION_SEC}}
+else
+    # Fallback to Python (slower; pre-TSO numbers reproduced via PY).
+    python3 - <<'PY'
 import socket, time
 s = socket.socket()
 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 s.connect(("{{HOST_IP_PLAIN}}", {{BENCH_PORT}}))
-buf = b"X" * 65536
+buf = b"X" * (1 << 20)
 t0 = time.monotonic()
 n = 0
 while time.monotonic() - t0 < {{DURATION_SEC}}:
@@ -62,6 +67,7 @@ mbps = n * 8.0 / dt / 1e6
 print("BENCH_RESULT mbps=%.1f bytes=%d dt=%.2f" % (mbps, n, dt))
 s.close()
 PY
+fi
 echo REPRO_DONE rc=$?
 """
 expect = ""
