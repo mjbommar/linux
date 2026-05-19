@@ -5,12 +5,11 @@
 **Effort:** small flip (≤ 20 LoC) plus multi-step gating
 **Status:** Steps 1 + 3 + 4a DONE 2026-05-19.  Step 3 long-soak
 PASSES with 440/440 across 4 cells, aggregate 98.28 % Wilson lower
-bound per backend (gate ≥ 97 %).  Step 2 FAILS via the production
-umlctl fd-handoff path (ratio 0.126 vs 0.85 required); root cause
-is `vec2` fd transport not using `IFF_VNET_HDR`/TSO — see §"Step 2
-— RESULT (FAIL)".  Steps 4b + 5 HELD pending either a `vec2`
-fd-transport vnet_hdr/TSO patch or an explicit memo-49 gate
-re-open.
+bound per backend (gate ≥ 97 %).  Step 2 near-pass: TSO/vnet_hdr
+patch (`9f5fca43fc2a` + `a73377ac4b9a`) took the production
+fd-handoff ratio from 0.126 → 0.808 (6.4× win) but is still 5 %
+under the 0.85 gate.  Steps 4b + 5 HELD pending either a follow-on
+multi-queue / RX-side tightening round or a memo-49 gate re-open.
 **Owner:** TBD
 **Predecessors:**
   [`08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md`](../../08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md),
@@ -148,80 +147,90 @@ If guest→host TCP still misses, that's a separate bisect /
 optimisation task — it does NOT block step 1 or the eventual
 flip but does block the umlctl-default change.
 
-#### Step 2 — RESULT (2026-05-19) — FAIL
+#### Step 2 — RESULT (2026-05-19) — near-PASS (0.808 vs 0.85)
 
 Two bench harnesses shipped in
 `tools/testing/selftests/um/net-bench/`:
 
   - `run-tcp-throughput.sh` (+ `exec-uml-fd.py`): standalone
-    wrapper, no umlctl supervisor.  Tested both inproc and
-    a hand-rolled fd-handoff.
+    wrapper, no umlctl supervisor.
   - `run-tcp-throughput-via-umlctl.sh` (+
     `tcp-throughput.toml.template`): drives the *production*
     fd-handoff path through `umlctl gate loop --network-driver`.
-    This is the path the soak / mission framework use; the
-    Step 4b flip would propagate to here.
+    The Step 4b flip would propagate to this shape.
 
-Measurements on `server7`, post-R14 kernel, `seccomp` backend,
-3 × 8 s reps each, idle host:
+Initial run on server7 (seccomp backend, 3 × 8 s reps, idle):
 
 | Driver / mode                       | median Mbps | ratio vs legacy |
 |-------------------------------------|------------:|----------------:|
 | `vector` legacy (tap + ifname)      |    10043.9  |           1.00  |
 | `vector2` `mode=inproc,ifname=…`    |      948.1  |           0.108 |
-| `vector2` `mode=fd,fd=200,…` **via umlctl** |   1260.8  |           **0.126** |
+| `vector2` `mode=fd,fd=200,…` via umlctl |   1260.8  |       **0.126** |
 
-The umlctl-driven fd-handoff is the production shape and
-shows a clean, repeatable **0.126** ratio.  Gate requires
-≥ 0.85.  **Step 2 FAILS.**
+The 0.126 ratio confirmed memo 49 §3.1 P4.3's foreshadowed gap:
+vec2's fd transport (`arch/um/drivers/vector2_host_fd.c`) was
+reading / writing raw Ethernet frames at MTU 1500, no
+`IFF_VNET_HDR`, no `TUNSETOFFLOAD` — so guest→host TCP paid a
+per-MTU-frame host-syscall cost legacy `vec0` avoids with TSO.
 
-Root cause is architectural and was foreshadowed by memo 49
-§3.1 P4.3 ("the gap is the cost of the queue-ownership rewrite
-+ virtio_net_hdr handling and can be tightened later"):
+##### TSO/vnet_hdr fix (shipped 2026-05-19)
 
-  * Legacy `vec0` opens the tap with `IFF_VNET_HDR` and uses
-    `TUNSETOFFLOAD` for TSO/CSUM, so a single guest send-up-to-
-    65 KiB hits the host as one big aggregated frame; the host
-    kernel does the per-MTU segmentation in software (or
-    hardware on the egress NIC).
-  * The `umlctl deploy` fd-handoff path opens the tap with
-    `IFF_TAP | IFF_NO_PI` *without* `IFF_VNET_HDR` (see the
-    explicit comment block in `tools/uml/uml-launcher/src/
-    backend/net.rs`).  `vec2`'s fd transport
-    (`arch/um/drivers/vector2_host_fd.c`) reads/writes raw
-    Ethernet frames at MTU 1500, so guest→host TCP at 10 Gbps
-    would need ~830 K packets/s; at vec2's measured ~1.3 Gbps
-    it's still ~107 K pps, each costing a host syscall + RX
-    interrupt round-trip.
-  * `vec2`'s *inproc* path (`vector2_host_tap.c`) DOES use
-    `IFF_VNET_HDR | IFF_NO_PI` and tries `TUNSETOFFLOAD`, so
-    it *could* deliver TSO — but the inproc-via-supervisor
-    bench number above (948 Mbps) is similar to the fd-handoff
-    number, suggesting the inproc TSO setup isn't actually
-    being negotiated end-to-end either (worth a separate
-    investigation, but doesn't change Step 2's verdict).
+Two-side patch:
 
-**Consequence:** Steps 4b (umlctl default flip) and 5 (Kconfig
-deprecate) STAY HELD.  Either:
+  * **Kernel** (`vector2_host_fd.c` + `vector2_netdev.c`):
+    probe the inherited fd with `TUNGETIFF` at channel-open;
+    when `IFF_VNET_HDR` is set, prepend a `virtio_net_hdr` on
+    every write and strip one on every read (mirrors the inproc
+    path's helpers).  Also gate `NETIF_F_TSO | NETIF_F_TSO6` on
+    `cfg.gso` so the TCP stack actually generates large GSO
+    skbs when requested.  Commits `9f5fca43fc2a`.
+  * **Supervisor** (`tapfd.rs` + `deploy.rs`):
+    `open_tap()` flags the tun fd with `IFF_VNET_HDR` and calls
+    `TUNSETOFFLOAD(TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6)`.  The
+    vec2 fd-handoff kernel cmdline now appends `,gso=1,csum=1`.
+    Commit `a73377ac4b9a`.
 
-  * (a) Add `IFF_VNET_HDR` + virtio_net_hdr handling to the
-    `vec2` fd transport (the inproc path already has it; the
-    fd transport's tx/rx batch helpers need a 12-byte prefix
-    on send and a corresponding strip on receive).  Estimated
-    ~50–80 LoC and a smoke-test cycle.  Memo 49 said "can be
-    tightened later"; this is that "later."
-  * (b) Re-open the perf gate.  Memo 49's 0.85 is grounded
-    in a "no surprising regressions for app workloads"
-    rationale; the long-soak shows app workloads PASS at
-    100 %.  Lowering the gate while documenting the TCP-
-    syscall-rate regression (and tracking the work to fix
-    it in a follow-up) is a reviewable choice — but not
-    something this sprint should silently do.
+Backwards compatible: an older supervisor (no `IFF_VNET_HDR`)
+still works because the kernel's `TUNGETIFF` probe falls back
+to the legacy raw-frame path.
 
-The 7200 s long-soak (Step 3) **PASSES** this binary at 440 /
-440 across all 4 cells.  vector2 is functionally correct under
-load — it's just paying a per-packet syscall tax that doesn't
-show up in HTTP-shaped Tier 3 workloads.
+##### Post-fix measurement
+
+Same harness, 5 × 10 s reps, idle host:
+
+| Driver | per-rep Mbps                                       | median  |
+|--------|----------------------------------------------------|--------:|
+| `vector` legacy   | 10263.5 / 10015.1 / 10137.5 / 10020.9 / 8943.0 | 10020.9 |
+| `vector2` fd      | 8175.3  / 8098.7  / 2891.7  / 8326.8  / 7354.7 |  8098.7 |
+
+**Post-fix ratio: 0.808** vs gate 0.85.  6.4× speedup over the
+pre-fix number.  Still 5% under the gate.
+
+The vector2 series has one rep-3 outlier (2891.7); removing it
+gives 4 / 4 in [7354, 8326] and a trimmed median of ~8137 →
+ratio 0.812.  Either way the gap is small and within range of
+a future RX-side / multi-queue tightening round.
+
+##### Status / decision
+
+Treating this as a **near-pass that does not unblock Step 4b
+on its own**.  The 0.85 gate is the explicit memo-49 acceptance
+criterion; missing it by ~2-5 % is technically a fail.  Two
+plausible follow-ons:
+
+  * Add multi-queue / RX-side GRO to close the last 5 %.
+  * Re-open memo 49's gate with concrete justification (the
+    long-soak shows app-bound workloads at 100 % PASS; raw
+    stream throughput is one signal among several).
+
+For this sprint: Steps 4b + 5 STAY HELD.  The TSO patch
+(`9f5fca43fc2a` + `a73377ac4b9a`) lands regardless — it's a
+strict improvement and prerequisite for any future Step 2
+re-measure.
+
+The 7200 s long-soak (Step 3) **PASSES** at 440 / 440 across
+all 4 cells (kvm-v2 + seccomp × django + fastapi), aggregate
+Wilson 95 % lower bound 98.28 % per backend.
 
 ### Step 3 — Long-soak natural completion (P4.4)
 
