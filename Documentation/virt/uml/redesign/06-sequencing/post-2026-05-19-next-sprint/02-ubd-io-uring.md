@@ -5,7 +5,10 @@
 **Effort:** medium-large (~400–700 LoC across `arch/um/drivers/ubd_*.c`
 and `arch/um/os-Linux/file.c`)
 **Status:** Phase 1 DONE 2026-05-19 (`44a1ca55a72a`).  Phase 2a
-DONE 2026-05-19 (`ef60f68cd398`).  Phases 2b / 3 / 4 / 5 planned.
+DONE 2026-05-19 (`ef60f68cd398`).  do_io_ring multi-bvec offset
+fix DONE 2026-05-19 (`708b7c3f3253`).  Phase 3 (vectored
+submission) DONE 2026-05-19 (`f25fcd47be37`).  Phases 2b / 4 / 5
+planned.
 **Depends on:** host kernel ≥ 5.6 for io_uring; can run in parallel
 with memos #1 and #3.
 
