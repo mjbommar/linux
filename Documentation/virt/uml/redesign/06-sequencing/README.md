@@ -13,6 +13,18 @@ When and in what order. Three views of the same plan:
   seven phases with explicit dependency + risk-retiring
   sequencing. Drives execution after the Q1 milestone cluster
   landed.
+- [PLAN-2026-05-14.md](PLAN-2026-05-14.md) — 2026-05-14: previous
+  sprint plan (Phase J Track A scaffolding round + Track B
+  time-machine ports + Track D upstream queue prep).
+- [post-2026-05-14-next-sprint.md](post-2026-05-14-next-sprint.md)
+  — earlier next-sprint plan; subsumed by the 05-19 plan below
+  after Round 14 closure + memo 52 landings.
+- [post-2026-05-19-next-sprint/](post-2026-05-19-next-sprint/) —
+  **current sprint plan** (8 per-system memos under one
+  README). Sequencing: vector2 default flip → UBD io_uring →
+  hostfs io_uring + `openat2` → time-travel record/replay
+  wiring → common epoll completion → vCPU thread pinning →
+  console batching → virtio-rng modernisation.
 
 ## The shape
 
