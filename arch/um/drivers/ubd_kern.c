@@ -1557,6 +1557,13 @@ struct ubd_pending_slot {
 	unsigned long long off;
 
 	/*
+	 * Phase 2b (memo #2): the owning request, so a CQE harvested
+	 * from any pending slot can be routed back to its req's error
+	 * field even when slots from many reqs are in flight at once.
+	 */
+	struct io_thread_req	*req;
+
+	/*
 	 * Phase 3 (memo #2): vectored submission.  When .vec_cnt > 0
 	 * the slot represents a single IORING_OP_READV / WRITEV
 	 * spanning io_desc[0..vec_cnt-1].  Short-completion fall-back
@@ -1658,8 +1665,9 @@ static int ubd_ring_resubmit(int slot_idx)
  * ring-full (-EAGAIN) the caller is expected to harvest some CQEs
  * and retry.
  */
-static int ubd_ring_submit_one(int op, int fd, char *buf,
-			       unsigned long len, unsigned long long off)
+static int ubd_ring_submit_one(struct io_thread_req *req, int op, int fd,
+			       char *buf, unsigned long len,
+			       unsigned long long off)
 {
 	int slot, rc;
 	struct ubd_pending_slot *s;
@@ -1675,6 +1683,7 @@ static int ubd_ring_submit_one(int op, int fd, char *buf,
 	s->done    = 0;
 	s->off     = off;
 	s->vec_cnt = 0;
+	s->req     = req;
 
 	rc = ubd_ring_resubmit(slot);
 	if (rc < 0) {
@@ -1714,6 +1723,7 @@ static int ubd_ring_submit_vectored(int op, struct io_thread_req *req,
 	s->done    = 0;
 	s->off     = base_off + req->offsets[0];
 	s->vec_cnt = req->desc_cnt;
+	s->req     = req;
 	for (i = 0; i < req->desc_cnt; i++) {
 		s->vec[i].iov_base = req->io_desc[i].buffer;
 		s->vec[i].iov_len  = req->io_desc[i].length;
@@ -1760,6 +1770,219 @@ static bool ubd_req_vectored_eligible(struct io_thread_req *req)
  * sync do_io for FLUSH / DISCARD / WRITE_ZEROES which aren't yet on
  * the ring (memo §Phase 5).
  */
+/*
+ * Phase 2b (memo #2) — cross-request parallelism helpers.
+ *
+ * do_io_ring() handles a single request at a time: submit all its
+ * SQEs, drain all its CQEs, do its bitmap update.  That leaves the
+ * ring's depth largely unused when the block layer hands us a batch
+ * of N requests (UBD_REQ_BUFFER_SIZE / sizeof(*req) reqs per
+ * bulk_req_safe_read).
+ *
+ * do_io_ring_batch() submits the SQEs for every request in the
+ * batch *before* draining, so multiple reqs are in flight at once.
+ * CQEs are routed back to the owning req via slot->req->error;
+ * bitmap updates run after the final drain.  Same correctness
+ * properties as the per-req path, modulo CQE ordering (which
+ * already wasn't guaranteed).
+ */
+static int ubd_handle_cqe(const struct os_io_cqe *cqe)
+{
+	struct ubd_pending_slot *s = &ubd_slots[cqe->user_data];
+
+	if (cqe->res < 0) {
+		if (s->req && !s->req->error)
+			s->req->error = map_error(-cqe->res);
+		ubd_slot_free(cqe->user_data);
+		return 1;
+	}
+	if (cqe->res == 0) {
+		if (s->op == REQ_OP_READ && s->buf)
+			memset(s->buf + s->done, 0, s->total - s->done);
+		ubd_slot_free(cqe->user_data);
+		return 1;
+	}
+	s->done += cqe->res;
+	if (s->done < s->total) {
+		int rc = ubd_ring_resubmit(cqe->user_data);
+
+		if (rc < 0) {
+			if (s->req && !s->req->error)
+				s->req->error = map_error(-rc);
+			ubd_slot_free(cqe->user_data);
+			return 1;
+		}
+		return 0;
+	}
+	ubd_slot_free(cqe->user_data);
+	return 1;
+}
+
+/*
+ * Drain CQEs until the ring is empty.  Used after do_io_ring_batch
+ * has submitted SQEs for every request in the bulk batch.
+ */
+static void ubd_ring_drain_all(void)
+{
+	while (os_io_ring_in_flight(ubd_ring) > 0) {
+		struct os_io_cqe cqe;
+		int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+
+		if (hrc < 0) {
+			pr_err_ratelimited("ubd: io_uring drain failed: %d\n",
+					   hrc);
+			break;
+		}
+		if (hrc == 1)
+			ubd_handle_cqe(&cqe);
+	}
+}
+
+/*
+ * Submit one SQE, harvesting a CQE if the ring is full.  Returns
+ * the slot index on success or a negative -errno.  Distinct from
+ * ubd_ring_submit_one in that this *blocks* on EAGAIN until the
+ * ring has space (vs. returning EAGAIN to the caller).
+ */
+static int ubd_submit_with_harvest(struct io_thread_req *req, int op,
+				   int fd, char *buf, unsigned long len,
+				   unsigned long long off)
+{
+	int slot;
+
+	for (;;) {
+		slot = ubd_ring_submit_one(req, op, fd, buf, len, off);
+		if (slot >= 0)
+			return slot;
+		if (slot != -EAGAIN)
+			return slot;
+		{
+			struct os_io_cqe cqe;
+			int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+
+			if (hrc < 0)
+				return hrc;
+			if (hrc == 1)
+				ubd_handle_cqe(&cqe);
+		}
+	}
+}
+
+static int ubd_submit_vectored_with_harvest(int op, struct io_thread_req *req,
+					    unsigned long long base_off)
+{
+	int slot;
+
+	for (;;) {
+		slot = ubd_ring_submit_vectored(op, req, base_off);
+		if (slot >= 0)
+			return slot;
+		if (slot != -EAGAIN)
+			return slot;
+		{
+			struct os_io_cqe cqe;
+			int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+
+			if (hrc < 0)
+				return hrc;
+			if (hrc == 1)
+				ubd_handle_cqe(&cqe);
+		}
+	}
+}
+
+static void ubd_submit_req_async(struct io_thread_req *req)
+{
+	u64 base_offset;
+	int i, op;
+
+	op = req_op(req->req);
+	if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
+		/* FLUSH / DISCARD / WRITE_ZEROES — sync fallback. */
+		for (i = 0; !req->error && i < req->desc_cnt; i++)
+			do_io(req, &req->io_desc[i]);
+		return;
+	}
+
+	base_offset = req->offset;
+
+	if (ubd_req_vectored_eligible(req)) {
+		int slot = ubd_submit_vectored_with_harvest(op, req, base_offset);
+
+		if (slot < 0 && !req->error)
+			req->error = map_error(-slot);
+		return;
+	}
+
+	for (i = 0; !req->error && i < req->desc_cnt; i++) {
+		struct io_desc *d = &req->io_desc[i];
+		int nsectors = d->length / req->sectorsize;
+		int start = 0;
+		unsigned long last_len = 0;
+
+		do {
+			int bit = ubd_test_bit(start,
+				(unsigned char *)&d->sector_mask);
+			int end = start;
+			__u64 off;
+			unsigned long len;
+			char *buf;
+			int slot;
+
+			while (end < nsectors &&
+			       ubd_test_bit(end,
+				(unsigned char *)&d->sector_mask) == bit)
+				end++;
+
+			off = base_offset + req->offsets[bit] +
+			      start * req->sectorsize;
+			len = (end - start) * req->sectorsize;
+			last_len = len;
+			buf = d->buffer
+			      ? &d->buffer[start * req->sectorsize]
+			      : NULL;
+
+			slot = ubd_submit_with_harvest(req, op, req->fds[bit],
+						       buf, len, off);
+			if (slot < 0) {
+				if (!req->error)
+					req->error = map_error(-slot);
+				return;
+			}
+			start = end;
+		} while (start < nsectors);
+
+		base_offset += last_len;
+	}
+}
+
+static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
+{
+	int i, j;
+
+	/*
+	 * Phase 1: submit every request's SQEs.  The submission loop
+	 * itself harvests CQEs from earlier reqs whenever the ring is
+	 * full, so the maximum in-flight is bounded by UBD_RING_DEPTH.
+	 */
+	for (i = 0; i < n_reqs; i++)
+		ubd_submit_req_async(reqs[i]);
+
+	/* Phase 2: drain remaining in-flight SQEs from any req. */
+	ubd_ring_drain_all();
+
+	/* Phase 3: bitmap updates per request. */
+	for (i = 0; i < n_reqs; i++) {
+		struct io_thread_req *req = reqs[i];
+		int op = req_op(req->req);
+
+		if (op != REQ_OP_READ && op != REQ_OP_WRITE)
+			continue;
+		for (j = 0; !req->error && j < req->desc_cnt; j++)
+			req->error = update_bitmap(req, &req->io_desc[j]);
+	}
+}
+
 static void do_io_ring(struct io_thread_req *req)
 {
 	int submitted = 0, harvested = 0;
@@ -1855,7 +2078,7 @@ static void do_io_ring(struct io_thread_req *req)
 			      : NULL;
 
 			for (;;) {
-				slot = ubd_ring_submit_one(op,
+				slot = ubd_ring_submit_one(req, op,
 					req->fds[bit], buf, len, off);
 				if (slot >= 0) {
 					submitted++;
@@ -1989,16 +2212,23 @@ void *io_thread(void *arg)
 			continue;
 		}
 
-		for (count = 0; count < n/sizeof(struct io_thread_req *); count++) {
-			struct io_thread_req *req = io_req_buffer[count];
-			int i;
+		if (ubd_ring) {
+			/* Phase 2b (memo #2): cross-req parallelism — all
+			 * reqs in the bulk batch overlap on the ring.
+			 */
+			io_count += n / sizeof(struct io_thread_req *);
+			do_io_ring_batch(io_req_buffer,
+					 n / sizeof(struct io_thread_req *));
+		} else {
+			for (count = 0;
+			     count < n / sizeof(struct io_thread_req *);
+			     count++) {
+				struct io_thread_req *req = io_req_buffer[count];
+				int i;
 
-			io_count++;
-			if (ubd_ring) {
-				/* Phase 2a (memo #2): per-req async path. */
-				do_io_ring(req);
-			} else {
-				for (i = 0; !req->error && i < req->desc_cnt; i++)
+				io_count++;
+				for (i = 0; !req->error && i < req->desc_cnt;
+				     i++)
 					do_io(req, &(req->io_desc[i]));
 			}
 		}
