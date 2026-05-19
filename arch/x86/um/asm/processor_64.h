@@ -126,6 +126,34 @@ struct arch_thread {
 		bool saved_cr2_valid;
 
 		/*
+		 * SMP-T75 (Round 14 HW-audit Q2): per-task snapshot of
+		 * the in-kernel pending-exception / interrupt-shadow /
+		 * NMI / SMI queue, captured via KVM_GET_VCPU_EVENTS
+		 * after KVM_RUN exits and restored via
+		 * KVM_SET_VCPU_EVENTS before the next KVM_RUN entry.
+		 *
+		 * Same architectural shape as iotrap_fpu (SMP-T73 /
+		 * T26/T27). Without this, the per-host-CPU vCPU pool
+		 * leaks a task's queued-but-not-yet-injected exception
+		 * (events.exception.pending=1 at vmexit time) into the
+		 * next dispatching task. The IST-frame restore at
+		 * vcpu.c:2390 handles the hardware-pushed IST stack but
+		 * NOT KVM's in-kernel pending-event queue.
+		 *
+		 * Round 14 HW audit identified this as a latent bug —
+		 * dormant only because the UML guest's normal exception
+		 * mix has the bulk of pending exceptions land before
+		 * KVM_RUN returns (page faults injected and consumed in
+		 * the same dispatch). A workload that triggers
+		 * exception-pending-at-exit (debug traps, async NMI from
+		 * #MC, certain SVM intercepts) would cross-task leak.
+		 *
+		 * Capacity: struct kvm_vcpu_events is ~184 B. Cheap.
+		 */
+		struct kvm_vcpu_events iotrap_events;
+		bool iotrap_events_valid;
+
+		/*
 		 * SMP-T22 (2026-05-02): one-shot bypass of CR0.TS arming
 		 * in kvm_v2_load_user_sregs. Set true by the host-side
 		 * #NM handlers (kvm_v2_handle_io_nm and the EINTR variant
@@ -177,6 +205,7 @@ static inline void arch_flush_thread(struct arch_thread *thread)
 #ifdef CONFIG_UM_BACKEND_KVM_V2
 	thread->kvm_v2.fpu_valid = false;
 	thread->kvm_v2.iotrap_fpu_valid = false;
+	thread->kvm_v2.iotrap_events_valid = false;
 	thread->kvm_v2.ist_pending = false;
 	thread->kvm_v2.saved_cr2_valid = false;
 	thread->kvm_v2.saved_cr2_at_eintr = 0;
@@ -213,6 +242,7 @@ static inline void arch_copy_thread(struct arch_thread *from,
 	 * (KVM_GET_FPU into to->kvm_v2.fpu); leave that field alone.
 	 */
 	to->kvm_v2.iotrap_fpu_valid = false;
+	to->kvm_v2.iotrap_events_valid = false;
 	to->kvm_v2.ist_pending = false;
 	to->kvm_v2.saved_cr2_valid = false;
 	to->kvm_v2.saved_cr2_at_eintr = 0;

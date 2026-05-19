@@ -249,7 +249,32 @@ static void kvm_v2_curate_cpuid(struct kvm_cpuid2 *cpuid)
 		 * gives the active mask. Phase B (full AVX-512/AMX) will
 		 * un-mask those leaf-1/leaf-7 bits and bump XCR0
 		 * accordingly.
+		 *
+		 * SMP-T76 (Round 14 HW-audit Q4): keep sub-leaf 0 EAX
+		 * intact for SET_XCRS to accept FP|SSE|YMM, but zero out
+		 * the per-component descriptors for masked features.
+		 * Userspace cpuid(1) and __builtin_cpu_supports() inside
+		 * the guest read leaf 0xD sub-leaves k=5,6,7 (AVX-512
+		 * OPMASK / ZMM_Hi256 / Hi16_ZMM) and k=17,18 (AMX
+		 * XTILECFG / XTILEDATA) for state-component size / offset.
+		 * If we let the host's advertisements through, the guest
+		 * sees ~8 KB XTILEDATA on Intel SPR/EMR + AMX-supported
+		 * sizes on the Ryzen ZenN-with-AMX hosts that will exist,
+		 * while leaf 7's AMX feature bits are masked — internally
+		 * inconsistent.
+		 *
+		 * Zeroing the descriptors makes the advertisement self-
+		 * consistent with the feature-bit mask. Sub-leaves 1, 2
+		 * (XSAVES + AVX YMM upper) are kept since we DO use YMM.
 		 */
+		if (e->function == 0xD && (e->index == 5 || e->index == 6 ||
+					   e->index == 7 || e->index == 17 ||
+					   e->index == 18)) {
+			e->eax = 0;
+			e->ebx = 0;
+			e->ecx = 0;
+			e->edx = 0;
+		}
 	}
 }
 
@@ -1156,6 +1181,41 @@ static int kvm_v2_vcpu_create_one(struct kvm_v2_vm *vm, int cpu, int mmap_size)
 	rc = kvm_v2_install_signal_mask(vcpu_fd);
 	if (rc < 0)
 		goto err_unmap_kvm_run;
+
+	/*
+	 * SMP-T74 (Round 14 HW-audit Q1): pin DR0-DR7 to zero at vCPU
+	 * create time. The per-host-CPU vCPU pool means multiple UML
+	 * tasks share one vCPU; without an explicit reset, any DR0-DR3
+	 * (linear breakpoint address) or DR7 (enable mask) bits set by
+	 * one task persist into the next task's dispatch.
+	 *
+	 * The UML guest does NOT use hardware debug registers — guest
+	 * CPL=3 code can't MOV to/from DR (privileged at CPL>0), the
+	 * curated CPUID does not advertise KVM_GUESTDBG_* capability,
+	 * and no in-guest gdb / kernel watchpoint path is wired up.
+	 * Therefore a one-time install at create is sufficient: with
+	 * DR7 enables clear, no #DB is ever raised, so DR6 never gets
+	 * hardware-updated either. If a future change ever needs the
+	 * guest to use HW breakpoints, this becomes a per-task save/
+	 * restore in the same shape as the iotrap_fpu pair (T73).
+	 *
+	 * Same architectural shape as the cross-task FPU leak T26/T27/
+	 * T73 fixed; this preempts the leak before it can become a
+	 * latent bug. See Documentation/virt/uml/redesign/08-future-
+	 * phases/50-kvm-v2-django-flake-investigation-summary.md
+	 * Round 14 HW-audit Q1.
+	 */
+	{
+		struct kvm_debugregs zero_dr = { 0 };
+
+		rc = os_ioctl_generic(vcpu_fd, KVM_SET_DEBUGREGS,
+				      (unsigned long)&zero_dr);
+		if (rc < 0) {
+			pr_err("um: kvm-v2 vcpu_create_one: KVM_SET_DEBUGREGS(vcpu_fd=%d) failed (%d) — DR0-DR7 cross-task leak window remains\n",
+			       vcpu_fd, rc);
+			goto err_unmap_kvm_run;
+		}
+	}
 
 	trace_um_backend_kvm_v2_vcpu_create(vcpu_fd, v->kvm_run_size);
 	return 0;
@@ -2422,6 +2482,22 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		vcpu->fpu_owner_task  = current;
 	}
 
+	/*
+	 * SMP-T75 (Round 14 HW-audit Q2): restore per-task pending-event
+	 * snapshot before re-entering the guest. Mirrors the iotrap_fpu
+	 * SET above. Without this, KVM's in-kernel pending-exception /
+	 * interrupt-shadow / NMI / SMI queue for the previous task on
+	 * this per-host-CPU vCPU bleeds into the current task's first
+	 * vmentry. Dormant on the django soak workload (canonical #PF +
+	 * #UD via gadget mostly inject before vmexit returns) but #DB /
+	 * async #MC NMIs / SVM intercept-injects would fire it.
+	 */
+	if (current->thread.arch.kvm_v2.iotrap_events_valid) {
+		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_VCPU_EVENTS,
+				       (unsigned long)&current->thread.arch.kvm_v2.iotrap_events);
+		current->thread.arch.kvm_v2.iotrap_events_valid = false;
+	}
+
 	KVMV2_TRACE(KVMV2_OP_POST_FPU_INSTALL, regs, run, vcpu);
 
 	/*
@@ -2556,6 +2632,24 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		 * so the next dispatch's pre-run SET still finds it true and
 		 * re-installs.
 		 */
+	}
+
+	/*
+	 * SMP-T75 (Round 14 HW-audit Q2): capture per-task pending-event
+	 * snapshot AFTER KVM_RUN exits, mirroring iotrap_fpu. Storing
+	 * the GET result in arch_thread lets the next dispatch's
+	 * KVM_SET_VCPU_EVENTS re-install it before the next KVM_RUN —
+	 * preventing the per-host-CPU vCPU pool from leaking pending
+	 * exceptions / NMI / SMI / interrupt-shadow state across tasks.
+	 */
+	{
+		struct kvm_vcpu_events *iotrap_ev =
+			&current->thread.arch.kvm_v2.iotrap_events;
+		int ev_rc;
+
+		ev_rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_VCPU_EVENTS,
+					 (unsigned long)iotrap_ev);
+		current->thread.arch.kvm_v2.iotrap_events_valid = (ev_rc == 0);
 	}
 
 	/*
