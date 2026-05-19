@@ -5,11 +5,15 @@
 **Effort:** small flip (≤ 20 LoC) plus multi-step gating
 **Status:** Steps 1 + 3 + 4a DONE 2026-05-19.  Step 3 long-soak
 PASSES with 440/440 across 4 cells, aggregate 98.28 % Wilson lower
-bound per backend (gate ≥ 97 %).  Step 2 near-pass: TSO/vnet_hdr
+bound per backend (gate ≥ 97 %).  Step 2 partial: TSO/vnet_hdr
 patch (`9f5fca43fc2a` + `a73377ac4b9a`) took the production
-fd-handoff ratio from 0.126 → 0.808 (6.4× win) but is still 5 %
-under the 0.85 gate.  Steps 4b + 5 HELD pending either a follow-on
-multi-queue / RX-side tightening round or a memo-49 gate re-open.
+fd-handoff guest→host throughput from ~1.3 Gbps to ~12.8 Gbps
+(median, C sender), ratio 0.126 → 0.721 — a real improvement but
+the C-sender bench reveals the remaining gap is larger than the
+Python bench suggested.  Steps 4b + 5 HELD pending either a
+follow-on driver tightening round (multi-queue, RX-side GRO, CPU
+pinning to reduce tail variance) or a memo-49 gate re-open
+grounded in the long-soak's app-workload PASS evidence.
 **Owner:** TBD
 **Predecessors:**
   [`08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md`](../../08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md),
@@ -194,17 +198,34 @@ Backwards compatible: an older supervisor (no `IFF_VNET_HDR`)
 still works because the kernel's `TUNGETIFF` probe falls back
 to the legacy raw-frame path.
 
-##### Post-fix measurement
+##### Post-fix measurement (Python sender — bottlenecked)
 
-Same harness, 5 × 10 s reps, idle host:
+Same harness, 5 × 10 s reps, idle host, Python sender:
 
 | Driver | per-rep Mbps                                       | median  |
 |--------|----------------------------------------------------|--------:|
 | `vector` legacy   | 10263.5 / 10015.1 / 10137.5 / 10020.9 / 8943.0 | 10020.9 |
 | `vector2` fd      | 8175.3  / 8098.7  / 2891.7  / 8326.8  / 7354.7 |  8098.7 |
 
-**Post-fix ratio: 0.808** vs gate 0.85.  6.4× speedup over the
-pre-fix number.  Still 5% under the gate.
+**Python-bench ratio: 0.808** vs gate 0.85.  6.4× speedup over
+the pre-fix number.  Looks like a near-pass — but **Python is
+the sender bottleneck** at ~10 Gbps and masks the real gap.
+
+##### Re-measurement with the C sender (commit `a33aa88be09f`)
+
+Same harness + a compiled tcp-send.c (1 MiB sends, no Python
+overhead), 5 × 10 s reps:
+
+| Driver | per-rep Mbps                                       | median  |
+|--------|----------------------------------------------------|--------:|
+| `vector` legacy   | 19491.9 / 17764.5 / 19751.8 / 5623.5 / 5843.7  | 17764.5 |
+| `vector2` fd      | 14650.3 /  5369.2 /  4714.2 / 12815.1 / 14552.1| 12815.1 |
+
+**C-bench ratio: 0.721** — the true post-TSO gap.  Both
+drivers exhibit high variance (some reps in the 5–6 Gbps
+floor); the lower tail is host scheduling contention, not the
+driver.  Median ratio is the load-bearing figure for memo-49's
+P4.3 acceptance.
 
 The vector2 series has one rep-3 outlier (2891.7); removing it
 gives 4 / 4 in [7354, 8326] and a trimmed median of ~8137 →
