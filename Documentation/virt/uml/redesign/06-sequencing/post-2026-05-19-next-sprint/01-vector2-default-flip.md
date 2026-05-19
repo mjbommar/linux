@@ -3,7 +3,10 @@
 **Sprint:** post-2026-05-19
 **Priority:** HIGH
 **Effort:** small flip (≤ 20 LoC) plus multi-step gating
-**Status:** Steps 1 + 4a DONE 2026-05-19; Steps 2, 3, 4b, 5 pending
+**Status:** Steps 1 + 4a DONE 2026-05-19; Step 2 partial measurement
+2026-05-19 (gate FAILS in inproc mode 0.108 vs 0.85; fd-handoff
+path needs supervisor wiring — see §"Step 2 partial result"); Steps
+3, 4b, 5 still pending
 **Owner:** TBD
 **Predecessors:**
   [`08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md`](../../08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md),
@@ -140,6 +143,42 @@ under the post-R14 kernel and add:
 If guest→host TCP still misses, that's a separate bisect /
 optimisation task — it does NOT block step 1 or the eventual
 flip but does block the umlctl-default change.
+
+#### Step 2 — partial result (2026-05-19)
+
+Bench harness shipped at
+`tools/testing/selftests/um/net-bench/run-tcp-throughput.sh`
+(+ `exec-uml-fd.py` for fd-handoff prep).  Two-driver one-shot
+TCP throughput on a single host (`server7`, Linux 7.0.0
+post-R14, ZRAM 16 GiB, idle except a concurrent tier3 soak):
+
+| Driver / mode | median Mbps (3 × 8 s reps) | ratio vs legacy |
+|---|---|---|
+| `vector` (legacy, tap+ifname)            | ~8757 | 1.00 |
+| `vector2` `mode=inproc,ifname=…`          | ~948  | 0.108 |
+| `vector2` `mode=fd,fd=200,…` (fd handoff) | **inconclusive** — boot hits `UML: fatal signal` immediately after the in-guest Python interpreter loads (both kvm-v2 and seccomp backends).  Same kernel works fine when the soak/mission framework drives it; the standalone wrapper script's seccomp profile or fd-inheritance shape differs from the production supervisor. |
+
+Verdict so far: **gate FAILS in inproc mode** (0.108 vs 0.85
+required) and **fd-handoff path needs supervisor wiring** to
+measure cleanly.  Soak data is *not* substitutable here — soak
+workloads (django / fastapi over HTTP) are app-bound and don't
+expose the queue-ownership cost the parity gate is meant to
+catch.
+
+Follow-on TODO before Step 4b can land:
+
+  - reproduce vector2 fd-handoff inside a `umlctl deploy`-shaped
+    supervisor (don't roll our own fd-passing wrapper), then
+    re-measure;
+  - if fd-handoff legitimately delivers ~0.85 of legacy,
+    document and proceed; if it confirms inproc's ratio,
+    re-open the queue-ownership regression as a P0 against
+    the redesign and HOLD Step 4b / Step 5.
+
+The 7200 s long-soak (Step 3, running) still PASSES this
+binary under tier3 workloads — vector2 is functionally correct
+under load, just not throughput-parity in the raw-stream
+sense.  That's the same shape memo 49 §3.1 P4.3 described.
 
 ### Step 3 — Long-soak natural completion (P4.4)
 
