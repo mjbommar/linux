@@ -42,7 +42,9 @@
 #include <linux/kvm.h>
 #include <linux/mm.h>
 #include <linux/printk.h>
+#include <linux/sched.h>		/* current */
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #include <os.h>
@@ -364,9 +366,143 @@ static void test_kvm_v2_snapshot_full(struct kunit *test)
 	free_page(scratch_page);
 }
 
+/**
+ * test_kvm_v2_snapshot_task - Phase 4 cross-task semantics round-trip.
+ * @test: KUnit test handle.
+ *
+ * Phase 4 acceptance gate (memo 26-snapshot §Phase 4):
+ *
+ *   1. Stage a recognisable pattern into current->thread.arch.kvm_v2.
+ *      iotrap_fpu and current->thread.arch.kvm_v2.iotrap_events, and
+ *      set their _valid flags.
+ *   2. capture_task against vcpus[0].
+ *   3. Stomp current's iotrap_* fields with a contrasting pattern
+ *      (and clear the _valid flags) so the restore has something to
+ *      undo.
+ *   4. restore_task against vcpus[0].
+ *   5. Assert the original pattern is back AND the _valid flags are
+ *      restored to true. Confirms the task_iotrap_* fields round-trip
+ *      independently of the vCPU's KVM_GET_XSAVE view.
+ *   6. Snapshot from a fresh _alloc and try restore_task: must reject
+ *      with -EINVAL because task_state_captured is false. Confirms
+ *      the gate prevents accidentally zeroing current's state from a
+ *      snapshot that never captured it.
+ *
+ * Why this test matters: under the per-host-CPU vCPU pool, the
+ * snapshot's @xsave reflects whichever task last ran on the vCPU,
+ * NOT the calling task's saved iotrap_fpu. Without Phase 4,
+ * record/replay (#169) would lose the calling task's per-task FPU
+ * state across a capture/restore cycle (since the calling task may
+ * have been switched out and its FPU saved to iotrap_fpu rather
+ * than living in the vCPU).
+ */
+static void test_kvm_v2_snapshot_task(struct kunit *test)
+{
+#ifdef CONFIG_UM_BACKEND_KVM_V2
+	struct kvm_v2_snapshot *snap;
+	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
+	/*
+	 * kvm_xsave is 4 KB; combined with the snapshot allocation
+	 * already in scope the kernel stack would blow Wframe-larger-
+	 * than= (memo 26-snapshot §Phase 3 frame-size lesson). Allocate
+	 * the entry-state save buffer on the heap so we stay under 1024 B.
+	 */
+	struct kvm_xsave *saved_fpu;
+	struct kvm_vcpu_events saved_events;
+	bool saved_fpu_valid;
+	bool saved_events_valid;
+	const u8 marker_fpu_byte    = 0xa5;
+	const u8 garbage_fpu_byte   = 0x5a;
+	int rc;
+
+	KUNIT_ASSERT_NOT_NULL_MSG(test, vcpu,
+				  "suite_init fixture did not populate kvm_v2_test_vcpu");
+
+	saved_fpu = kzalloc(sizeof(*saved_fpu), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, saved_fpu);
+
+	/* Save current's existing iotrap state so we can restore it
+	 * unmodified at test exit (KUnit test should be transparent).
+	 */
+	*saved_fpu         = current->thread.arch.kvm_v2.iotrap_fpu;
+	saved_events       = current->thread.arch.kvm_v2.iotrap_events;
+	saved_fpu_valid    = current->thread.arch.kvm_v2.iotrap_fpu_valid;
+	saved_events_valid = current->thread.arch.kvm_v2.iotrap_events_valid;
+
+	/* Stage the marker pattern. */
+	memset(&current->thread.arch.kvm_v2.iotrap_fpu, marker_fpu_byte,
+	       sizeof(current->thread.arch.kvm_v2.iotrap_fpu));
+	current->thread.arch.kvm_v2.iotrap_fpu_valid = true;
+	memset(&current->thread.arch.kvm_v2.iotrap_events, marker_fpu_byte,
+	       sizeof(current->thread.arch.kvm_v2.iotrap_events));
+	current->thread.arch.kvm_v2.iotrap_events_valid = true;
+
+	snap = kvm_v2_snapshot_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, snap);
+
+	rc = kvm_v2_snapshot_capture_task(snap, vcpu);
+	KUNIT_ASSERT_EQ_MSG(test, rc, 0, "capture_task rc=%d", rc);
+	KUNIT_EXPECT_TRUE(test, snap->task_state_captured);
+	KUNIT_EXPECT_TRUE(test, snap->task_iotrap_fpu_valid);
+	KUNIT_EXPECT_TRUE(test, snap->task_iotrap_events_valid);
+	KUNIT_EXPECT_EQ(test, snap->task_source_pid, current->pid);
+	KUNIT_EXPECT_EQ(test,
+			((u8 *)&snap->task_iotrap_fpu)[0],
+			marker_fpu_byte);
+
+	/* Stomp current's fields with a contrasting pattern. */
+	memset(&current->thread.arch.kvm_v2.iotrap_fpu, garbage_fpu_byte,
+	       sizeof(current->thread.arch.kvm_v2.iotrap_fpu));
+	current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
+	memset(&current->thread.arch.kvm_v2.iotrap_events, garbage_fpu_byte,
+	       sizeof(current->thread.arch.kvm_v2.iotrap_events));
+	current->thread.arch.kvm_v2.iotrap_events_valid = false;
+
+	rc = kvm_v2_snapshot_restore_task(snap, vcpu);
+	KUNIT_ASSERT_EQ_MSG(test, rc, 0, "restore_task rc=%d", rc);
+
+	/* The marker must have come back. */
+	KUNIT_EXPECT_TRUE(test,
+		current->thread.arch.kvm_v2.iotrap_fpu_valid);
+	KUNIT_EXPECT_TRUE(test,
+		current->thread.arch.kvm_v2.iotrap_events_valid);
+	KUNIT_EXPECT_EQ(test,
+		((u8 *)&current->thread.arch.kvm_v2.iotrap_fpu)[0],
+		marker_fpu_byte);
+	KUNIT_EXPECT_EQ(test,
+		((u8 *)&current->thread.arch.kvm_v2.iotrap_events)[0],
+		marker_fpu_byte);
+
+	kvm_v2_snapshot_destroy(snap);
+
+	/*
+	 * Gate test: a fresh snapshot has task_state_captured=false;
+	 * restore_task must reject it rather than zero current's state.
+	 */
+	snap = kvm_v2_snapshot_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, snap);
+	KUNIT_EXPECT_FALSE(test, snap->task_state_captured);
+	rc = kvm_v2_snapshot_restore_task(snap, vcpu);
+	KUNIT_EXPECT_EQ_MSG(test, rc, -EINVAL,
+		"restore_task on un-captured snapshot returned %d (want -EINVAL)",
+		rc);
+	kvm_v2_snapshot_destroy(snap);
+
+	/* Restore the test-entry state (be a good KUnit citizen). */
+	current->thread.arch.kvm_v2.iotrap_fpu          = *saved_fpu;
+	current->thread.arch.kvm_v2.iotrap_events       = saved_events;
+	current->thread.arch.kvm_v2.iotrap_fpu_valid    = saved_fpu_valid;
+	current->thread.arch.kvm_v2.iotrap_events_valid = saved_events_valid;
+	kfree(saved_fpu);
+#else
+	kunit_skip(test, "CONFIG_UM_BACKEND_KVM_V2 not enabled");
+#endif
+}
+
 static struct kunit_case kvm_v2_snapshot_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_snapshot_basic),
 	KUNIT_CASE(test_kvm_v2_snapshot_full),
+	KUNIT_CASE(test_kvm_v2_snapshot_task),
 	{}
 };
 

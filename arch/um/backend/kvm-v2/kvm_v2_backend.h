@@ -939,6 +939,28 @@ struct kvm_v2_memslot_snapshot {
  *		with Phase 1. Always NULL under Phase 3; @memslots
  *		is the authoritative storage.
  * @mem_size:	legacy single-buffer length; always 0 under Phase 3.
+ * @task_iotrap_fpu: Phase 4. Per-task FPU snapshot pulled from
+ *		current->thread.arch.kvm_v2.iotrap_fpu at capture time.
+ *		Distinct from @xsave (which reflects the vCPU's view, i.e.
+ *		whichever task last dispatched). On a per-host-CPU vCPU
+ *		pool shared by multiple UML tasks, capturing the calling
+ *		task's saved iotrap_fpu lets restore re-bind FPU state to
+ *		the correct task regardless of which task happens to own
+ *		the vCPU at restore time.
+ * @task_iotrap_events: Phase 4. Per-task pending-event snapshot
+ *		pulled from current->thread.arch.kvm_v2.iotrap_events
+ *		(the SMP-T75 architectural shape).
+ * @task_iotrap_fpu_valid: true iff iotrap_fpu was populated on the
+ *		source task at capture time.
+ * @task_iotrap_events_valid: true iff iotrap_events was populated.
+ * @task_source_pid: pid of the task that called capture_task. Used
+ *		for debug/traceability only — restore is "to current,"
+ *		not "to source_pid."
+ * @task_state_captured: true iff one of the kvm_v2_snapshot_capture_
+ *		task variants populated the task_* fields; gate for
+ *		restore_task to refuse to install task state from a
+ *		snapshot that never captured it (would zero current's
+ *		iotrap_*_valid and lose state across restore).
  */
 struct kvm_v2_snapshot {
 	struct kvm_regs		regs;
@@ -955,6 +977,14 @@ struct kvm_v2_snapshot {
 	int				 memslot_count;
 	void	*mem_backing;
 	size_t	 mem_size;
+
+	/* Phase 4 — cross-task semantics (memo 26-snapshot §Phase 4). */
+	struct kvm_xsave	task_iotrap_fpu;
+	struct kvm_vcpu_events	task_iotrap_events;
+	bool			task_iotrap_fpu_valid;
+	bool			task_iotrap_events_valid;
+	bool			task_state_captured;
+	pid_t			task_source_pid;
 };
 
 struct kvm_v2_snapshot *kvm_v2_snapshot_alloc(void);
@@ -1000,6 +1030,33 @@ int kvm_v2_snapshot_capture_full(struct kvm_v2_snapshot *snap,
 				 struct kvm_v2_vcpu *vcpu);
 int kvm_v2_snapshot_restore_full_vcpu(const struct kvm_v2_snapshot *snap,
 				      struct kvm_v2_vcpu *vcpu);
+
+/*
+ * Phase 4 cross-task variants (memo 26-snapshot §Phase 4). The
+ * capture path issues capture_full AND then copies the calling
+ * task's iotrap_fpu / iotrap_events into the snapshot's task_*
+ * fields. The restore path issues restore_full_vcpu AND then
+ * installs the snapshot's task_* fields into current's arch_thread.
+ *
+ * Use case: record/replay (#169) snapshots from task A's context at
+ * a deterministic checkpoint, then later replays from possibly-task-A
+ * (in-process restore) or possibly-task-B (cross-task replay). The
+ * cross-task path needs the iotrap_* pair re-bound to the replaying
+ * task's arch_thread so the next dispatch sees the right per-task
+ * state via the SMP-T73 / SMP-T75 plumbing.
+ *
+ * Distinct API rather than a flag on capture_full so callers that
+ * deliberately want vCPU-only state (debug snapshot of a foreign
+ * vCPU) don't pay the iotrap_* copy and don't accidentally clobber
+ * current's iotrap_* on restore.
+ *
+ * Returns same as the underlying _full variants; -EINVAL if
+ * restore_task is called against a snapshot with !task_state_captured.
+ */
+int kvm_v2_snapshot_capture_task(struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu);
+int kvm_v2_snapshot_restore_task(const struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu);
 
 /*
  * Record/replay v2 port (memo 27, #169). Phase 1: state machine +

@@ -757,3 +757,142 @@ int kvm_v2_snapshot_restore_full(struct kvm_v2_snapshot *snap)
 	return kvm_v2_snapshot_restore_full_vcpu(snap, NULL);
 }
 EXPORT_SYMBOL_GPL(kvm_v2_snapshot_restore_full);
+
+/*
+ * Phase 4 helpers — copy current task's per-task arch_thread state
+ * (iotrap_fpu + iotrap_events, the SMP-T73 / SMP-T75 plumbing) into
+ * or out of the snapshot. Static because external callers go through
+ * kvm_v2_snapshot_capture_task / kvm_v2_snapshot_restore_task, which
+ * sequence these alongside the existing _full primitives.
+ *
+ * Why "current" rather than an explicit task pointer: callers
+ * snapshot/restore from their own context (record/replay #169 reaches
+ * a checkpoint boundary inside the recording task). The CONFIG_UM_
+ * BACKEND_KVM_V2 arch_thread fields are per-task storage and the
+ * security model is that only the task itself touches them. Phase 4
+ * keeps that invariant.
+ */
+#ifdef CONFIG_UM_BACKEND_KVM_V2
+static void kvm_v2_snapshot_capture_current_task_state(struct kvm_v2_snapshot *snap)
+{
+	snap->task_iotrap_fpu_valid =
+		current->thread.arch.kvm_v2.iotrap_fpu_valid;
+	if (snap->task_iotrap_fpu_valid)
+		snap->task_iotrap_fpu = current->thread.arch.kvm_v2.iotrap_fpu;
+
+	snap->task_iotrap_events_valid =
+		current->thread.arch.kvm_v2.iotrap_events_valid;
+	if (snap->task_iotrap_events_valid)
+		snap->task_iotrap_events =
+			current->thread.arch.kvm_v2.iotrap_events;
+
+	snap->task_source_pid     = current->pid;
+	snap->task_state_captured = true;
+}
+
+static void kvm_v2_snapshot_restore_current_task_state(const struct kvm_v2_snapshot *snap)
+{
+	current->thread.arch.kvm_v2.iotrap_fpu_valid =
+		snap->task_iotrap_fpu_valid;
+	if (snap->task_iotrap_fpu_valid)
+		current->thread.arch.kvm_v2.iotrap_fpu = snap->task_iotrap_fpu;
+
+	current->thread.arch.kvm_v2.iotrap_events_valid =
+		snap->task_iotrap_events_valid;
+	if (snap->task_iotrap_events_valid)
+		current->thread.arch.kvm_v2.iotrap_events =
+			snap->task_iotrap_events;
+}
+#endif
+
+/**
+ * kvm_v2_snapshot_capture_task - capture vCPU + memslot state AND
+ *                                the calling task's iotrap_* state.
+ * @snap: caller-allocated snapshot to fill.
+ * @vcpu: explicit pool entry to capture against; NULL forwards to
+ *        kvm_v2_snapshot_pick_vcpu (per-host-CPU fallback).
+ *
+ * Cross-task variant of capture_full. The vCPU-level state is
+ * captured the same way; additionally the calling task's
+ * arch_thread.kvm_v2.iotrap_fpu + iotrap_events are copied into the
+ * snapshot's task_* fields so a later kvm_v2_snapshot_restore_task
+ * can re-install them on the replaying task — even if that task
+ * isn't the original source_pid.
+ *
+ * Returns 0 on success, propagates errors from capture_full.
+ */
+int kvm_v2_snapshot_capture_task(struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu)
+{
+	int rc;
+
+	if (!snap)
+		return -EINVAL;
+
+	rc = kvm_v2_snapshot_capture_full(snap, vcpu);
+	if (rc < 0)
+		return rc;
+
+#ifdef CONFIG_UM_BACKEND_KVM_V2
+	kvm_v2_snapshot_capture_current_task_state(snap);
+#else
+	snap->task_state_captured = false;
+#endif
+
+	pr_info("um: kvm-v2 snapshot: captured task state (pid=%d, fpu_valid=%d, events_valid=%d)\n",
+		snap->task_source_pid,
+		snap->task_iotrap_fpu_valid,
+		snap->task_iotrap_events_valid);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_snapshot_capture_task);
+
+/**
+ * kvm_v2_snapshot_restore_task - restore vCPU + memslot state AND
+ *                                the calling task's iotrap_* state.
+ * @snap: previously-captured snapshot (must have been captured by
+ *        kvm_v2_snapshot_capture_task — task_state_captured must be
+ *        true, else -EINVAL).
+ * @vcpu: explicit pool entry to restore against; NULL forwards to
+ *        kvm_v2_snapshot_pick_vcpu.
+ *
+ * Cross-task variant of restore_full_vcpu. Restores the vCPU-level
+ * state via the existing path, then installs the snapshot's task_*
+ * fields into current's arch_thread.kvm_v2.iotrap_fpu /
+ * iotrap_events.
+ *
+ * Restore is "to current," not "to the snapshot's source_pid." The
+ * arch_thread fields are per-task storage and only the calling task
+ * may write its own (the kernel could in principle write a remote
+ * task_struct, but that conflicts with the iotrap_* invariant that
+ * writes happen on the dispatch boundary). For record/replay #169
+ * the replay driver is the task that wants the state — by design.
+ *
+ * Returns 0 on success, -EINVAL if @snap was not captured with the
+ * _task variant, propagates errors from restore_full_vcpu.
+ */
+int kvm_v2_snapshot_restore_task(const struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu)
+{
+	int rc;
+
+	if (!snap)
+		return -EINVAL;
+	if (!snap->task_state_captured) {
+		pr_warn("um: kvm-v2 snapshot: restore_task on snapshot with no captured task state\n");
+		return -EINVAL;
+	}
+
+	rc = kvm_v2_snapshot_restore_full_vcpu(snap, vcpu);
+	if (rc < 0)
+		return rc;
+
+#ifdef CONFIG_UM_BACKEND_KVM_V2
+	kvm_v2_snapshot_restore_current_task_state(snap);
+#endif
+
+	pr_info("um: kvm-v2 snapshot: restored task state (source_pid=%d → current pid=%d)\n",
+		snap->task_source_pid, current->pid);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_snapshot_restore_task);
