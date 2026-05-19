@@ -20,6 +20,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use mission::MissionArgs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -33,6 +34,7 @@ mod gate_loop;
 mod history;
 mod manifest;
 mod metrics;
+mod mission;
 mod paths;
 mod preflight;
 mod registry;
@@ -128,6 +130,13 @@ enum Cmd {
     /// said. See memo 30-gate-discipline.md.
     #[command(subcommand)]
     Gate(GateCmd),
+    /// Mission-accomplished acceptance gate for the kvm-v2 backend.
+    /// Runs the full 6-phase comprehensive check in ~10-15 min:
+    /// (1) KUnit, (2) bench, (3) substrate, (4) host_resources,
+    /// (5) diverse soak, (6) diagnostic snapshot. Single binary
+    /// verdict: MISSION_ACCOMPLISHED / MISSION_FAILED. See memo
+    /// 52 (host resource controls) + STATUS.md.
+    Mission(MissionArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -698,6 +707,7 @@ fn run() -> Result<()> {
             GateCmd::List(args) => cmd_gate_list(args),
             GateCmd::Loop(args) => gate_loop::run(&paths, args, cli.quiet),
         },
+        Cmd::Mission(args) => mission::run(args),
     }
 }
 
