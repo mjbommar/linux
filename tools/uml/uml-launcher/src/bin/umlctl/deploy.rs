@@ -637,7 +637,15 @@ fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<Ne
                     queue_count,
                     fail_open_after: net.fail_open_after,
                     kernel_arg: format!(
-                        "vec2.0:transport=fd,mode=fd,fd={fd},depth=128{queue_arg}{fail_open_arg}",
+                        // gso=on + csum=on are safe with the fd-handoff
+                        // shape — tapfd.rs opens /dev/net/tun with
+                        // IFF_VNET_HDR + TUNSETOFFLOAD(TUN_F_CSUM | TSO*),
+                        // so the kernel's TCP stack hands large GSO skbs
+                        // down and `virtio_net_hdr_from_skb` encodes the
+                        // gso_type for the host to segment.  Cuts the
+                        // per-MTU-frame syscall cost that drove memo 01
+                        // Step 2's 0.126 ratio.
+                        "vec2.0:transport=fd,mode=fd,fd={fd},depth=128,gso=1,csum=1{queue_arg}{fail_open_arg}",
                         fd = VECTOR2_TAP_FD,
                         queue_arg = queue_arg,
                         fail_open_arg = fail_open_arg,
@@ -1440,7 +1448,7 @@ tap_name = "soak-tap0"
         assert_eq!(plan.inherited_fd_count, 1);
         assert_eq!(
             plan.kernel_arg,
-            "vec2.0:transport=fd,mode=fd,fd=200,depth=128",
+            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,gso=1,csum=1",
         );
         let labels = network_plan_labels(&plan);
         assert!(labels.contains(&"umlctl.network.fd=200".to_string()));
@@ -1472,7 +1480,7 @@ fail_open_after = 2
         assert_eq!(plan.fail_open_after, Some(2));
         assert_eq!(
             plan.kernel_arg,
-            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,fail_open_after=2",
+            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,gso=1,csum=1,fail_open_after=2",
         );
         assert!(s.contains("export UMLCTL_NETWORK_FAIL_OPEN_AFTER='2'"));
         let labels = network_plan_labels(&plan);
@@ -1521,7 +1529,7 @@ queues = 4
         assert_eq!(plan.inherited_fd_count, 4);
         assert_eq!(
             plan.kernel_arg,
-            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4",
+            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,gso=1,csum=1,queues=4",
         );
         let labels = network_plan_labels(&plan);
         assert!(labels.contains(&"umlctl.network.fd=200".to_string()));
@@ -1560,7 +1568,7 @@ queues = "auto"
         assert_eq!(plan.queue_count, 4);
         assert_eq!(
             plan.kernel_arg,
-            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,queues=4",
+            "vec2.0:transport=fd,mode=fd,fd=200,depth=128,gso=1,csum=1,queues=4",
         );
         assert!(s.contains("export UMLCTL_NETWORK_QUEUE_SPEC='auto'"));
         assert!(s.contains("export UMLCTL_NETWORK_QUEUES='4'"));
