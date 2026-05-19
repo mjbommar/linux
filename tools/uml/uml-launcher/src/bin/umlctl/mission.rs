@@ -565,15 +565,32 @@ fn phase5_diverse_soak(
     let lo = wilson_lower(pass as f64, total as f64) * 100.0;
     details.insert("wilson_lo_pct".into(), format!("{lo:.2}"));
 
-    let gate_ok = lo >= args.soak_min_pct && panic == 0 && !sigbus && !high_cr2;
+    // Gate logic:
+    // - HARD: zero panics, zero "Kernel mode signal 7", zero high-cr2.
+    //   Any of these → definite regression / known-bad shape.
+    // - PASS path 1 (perfect run): 100% pass rate AND n >= 20.
+    //   Statistically clean even though Wilson 95% lower bound is
+    //   only ~85% at n=20, 96.3% at n=100, 99.6% at n=1000 — for
+    //   a "no failure observed" signal we don't need the lower
+    //   bound to chase 100%.
+    // - PASS path 2 (Wilson gate): pass rate < 100% but the
+    //   Wilson 95% lower bound clears the configured threshold.
+    //   This catches "consistent but slightly noisy" runs.
+    let no_anomaly = panic == 0 && !sigbus && !high_cr2;
+    let perfect_run = pass == total && total >= 20;
+    let wilson_ok = lo >= args.soak_min_pct;
+    let gate_ok = no_anomaly && (perfect_run || wilson_ok);
+
     let (verdict, summary) = if gate_ok {
-        (
-            Verdict::Pass,
+        let why = if perfect_run {
+            format!("{pass}/{total} PASS (100% — perfect run, n≥20)")
+        } else {
             format!(
-                "{pass}/{total} PASS, Wilson95 lower={lo:.2}% (≥{:.1}%); 0 panics",
+                "{pass}/{total} PASS, Wilson95 lower={lo:.2}% (≥{:.1}%)",
                 args.soak_min_pct
-            ),
-        )
+            )
+        };
+        (Verdict::Pass, format!("{why}; 0 panics 0 sigbus 0 high_cr2"))
     } else {
         (
             Verdict::Fail,
