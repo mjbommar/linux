@@ -50,7 +50,7 @@ deferred to the sprint after this one.
 | # | Memo | Priority | Effort | Depends on | Status (2026-05-19) |
 |---|------|----------|--------|-----------|--------|
 | 1 | [vector2 default flip + stress](01-vector2-default-flip.md) | HIGH | small flip (10 LoC) + 30/30 + 7200s soak + perf-gate work | none — start here | Steps 1 + 3 + 4a DONE; Step 2 partial (TSO patch 0.126 → 0.721 ratio, gap to gate); 4b + 5 HELD |
-| 2 | [UBD io_uring port](02-ubd-io-uring.md) | HIGH | 400–700 LoC + new `os_*` shims | host kernel ≥ 5.6 | Phases 1 + 2a + 3 DONE (substrate + within-req parallel + vectored submission); 2b + 4 + 5 planned |
+| 2 | [UBD io_uring port](02-ubd-io-uring.md) | HIGH | 400–700 LoC + new `os_*` shims | host kernel ≥ 5.6 | Phases 1 + 2a + 2b + 3 DONE (substrate + within-req parallel + cross-req parallel + vectored submission); 4 + 5 optional follow-ons |
 | 3 | [hostfs `openat2` + io_uring writeback](03-hostfs-io-uring-openat2.md) | HIGH | 200–400 LoC | host kernel ≥ 5.6; can parallel with #2 | Phases 1 + 2 + 3 DONE (openat2 strict, writepages ring, fsync ring) |
 | 4 | [Time-travel ↔ record/replay wiring](04-time-travel-record-replay.md) | MEDIUM-HIGH | 200–400 LoC | record/replay Phase 1–7 (done) | Phase 1 hook DONE; Phases 2–4 deferred to a backend-neutral RR follow-on sprint |
 | 5 | [Common epoll I/O completion thread](05-common-io-completion-epoll.md) | MEDIUM | 300–500 LoC | #2 and #3 | planned — both prerequisites largely landed, but consolidation can wait for the next sprint |
