@@ -121,12 +121,20 @@ eliminate the per-iter mmap overhead.
 
 The legacy fork()+SIGKILL path is retained behind
 `um_template_pause_private_stack=0` for regression testing
-only.
+only.  The private-stack clone() path is the production default
+and what Phase 2 builds on.
 
-(a) is the simplest path and is what Phase 2 will use.
+The child stack is cached (file-static in
+`os_template_pause_fork_clone`), so per-iter mmap overhead is
+paid only on the first call.
 
-Until then, do NOT extend the M-fork child path with any inline
-syscall or kernel call.  The SIGKILL is the production contract.
+For Phase 2 work that needs to extend the child path with real
+syscalls (identity re-plumbing — dev_set_mac_address,
+inet_rtm_newaddr, tap fd swap), enable
+`CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG=y` and boot with
+`um_template_pause_mfc_diag=1` to install the SIGSEGV/SIGBUS/
+SIGILL/SIGFPE handler that dumps any child-side faults via raw
+write to fd 1.
 | 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
