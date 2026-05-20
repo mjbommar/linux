@@ -36,6 +36,7 @@
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/proc_fs.h>
+#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
@@ -272,73 +273,47 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		}
 		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
 
-		/* (B) FORK
-		 *
-		 * preempt_disable across the fork() syscall AND across
-		 * the entire post-fork path pins both parent and child
-		 * to "no scheduler activity until we explicitly
-		 * preempt_enable" — protects against the UML_LONGJMP
-		 * jmp_buf hazard where, post-fork, UML's scheduler might
-		 * pick a different task (e.g. swapper) and longjmp into
-		 * a CoW'd jmp_buf that's stale relative to the new
-		 * process's stack layout.
-		 *
-		 * Empirical bisect (2026-05-20): without preempt_disable
-		 * here, the forked-child UML kernel's scheduler picks
-		 * the idle task instead of init.sh and sleeps in idle
-		 * forever — the child path's code never runs.
-		 */
-		preempt_disable();
+		/* (B) FORK */
 		child_pid = os_template_pause_fork();
 		if (child_pid < 0) {
 			pr_err("template_pause: fork failed: %d\n", child_pid);
-			preempt_enable();
 			(void)um_skas_respawn_all_stubs();
 			os_snapshot_unblock_iter_signals();
 			return child_pid;
 		}
 
 		if (child_pid == 0) {
-			/* (D-child) — RESPAWN child's own stubs in its own
-			 * process tree, THEN do the existing worker_init
-			 * forget/rebuild of SIGIO + POSIX-timer + sched state.
+			/* (D-child) — In the forked child, IMMEDIATELY
+			 * disable preemption so the kernel's voluntary-
+			 * schedule paths don't UML_LONGJMP into a CoW'd
+			 * task's stale jmp_buf (whose saved RIP is a
+			 * guest-userspace address that has no valid
+			 * mapping in the child process).
 			 *
-			 * KNOWN-BROKEN: bisect (2026-05-20) confirms the child's
-			 * UML kernel scheduler immediately picks a stale
-			 * UML_LONGJMP target (a guest-userspace IP from a CoW'd
-			 * task's jmp_buf) and the host CPU jumps to an invalid
-			 * address (e.g. 0x2d6b62 — within guest-userspace VA
-			 * range but with no valid mapping in the child).  Host
-			 * delivers SIGSEGV → UML's trap.c relay path panics with
-			 * "Kernel tried to access user memory" because is_user
-			 * is false (IP < TASK_SIZE).  Master ALSO panics from
-			 * the same hazard.  See 09-fork-server-STATUS.md.
-			 *
-			 * Solving this requires either:
-			 *   (a) preventing UML's scheduler from picking any
-			 *       task whose jmp_buf is stale relative to the
-			 *       child's process state (sched_worker_detach_
-			 *       other_tasks pre-fork, then re-attach in
-			 *       parent post-fork), OR
-			 *   (b) moving the ready point to before any guest
-			 *       userspace has run (AFL forkserver's invariant
-			 *       — see arch/um/kernel/snapshot.c).
+			 * Bisect (2026-05-20) confirmed:
+			 *   1. Without sched_worker_detach_other_tasks
+			 *      called HERE (in the child, after fork),
+			 *      the first schedule() call picks a stale-
+			 *      jmp_buf task and panics.
+			 *   2. The detach MUST happen before any function
+			 *      call that might schedule (e.g. start_user-
+			 *      space's wait_stub_done_seccomp futex wait).
 			 */
+			preempt_disable();
+			sched_worker_detach_other_tasks();
 			n = um_skas_respawn_all_stubs();
 			if (n < 0) {
 				pr_err("template_pause: child stub respawn failed: %d\n",
 				       n);
+				preempt_enable();
 				return n;
 			}
 			um_snapshot_worker_init();
+			preempt_enable();
 			*first_blob = blob;
 			return 0;
 		}
 
-		/* Parent path: re-enable preemption now that we are
-		 * NOT entering the fragile child path.
-		 */
-		preempt_enable();
 		/* (C-parent) — RESPAWN master's own stubs.  The master keeps
 		 * its UML task list intact; we just need fresh stub children.
 		 */
