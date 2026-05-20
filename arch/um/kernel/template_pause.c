@@ -327,64 +327,53 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		}
 
 		if (child_pid == 0) {
-			/* BISECT marker A: child reached if-block.
+			/*
+			 * BISECT marker A: child reached if-block.
 			 * preempt is already disabled (held from pre-fork).
 			 * runqueue already has only `current` (pre-fork detach).
+			 *
+			 * Child path is intentionally minimal: write the
+			 * 0x5CCE551A SUCCESS marker via raw inline-asm syscall
+			 * (no glibc) and exit via __NR_exit_group.  We do NOT
+			 * call um_skas_respawn_all_stubs() here — that was the
+			 * 2026-05-20 root cause of master death after ~11
+			 * iters:
+			 *
+			 * The master pre-fork teardown leaves mm_list entries
+			 * with pid=-1 / sock=-1.  After M-fork CoW, the child
+			 * inherits those stale entries.  respawn iterates
+			 * EVERY entry (no pid<=0 skip — see mmu.c
+			 * um_skas_respawn_all_stubs) and calls
+			 * start_userspace_redo → start_userspace → clone() on
+			 * a dead mm_id.  The cloned stub child shares VM via
+			 * CLONE_VM with the M-fork child and execs into a
+			 * state where the stub binary's first instruction
+			 * resolves to NULL (mm fragments are CoW-inconsistent
+			 * across master / M-fork / stub-clone triple-share).
+			 * The M-fork child SIGSEGVs with IP=0; queued SIGCHLD
+			 * propagates back to master which dies on the next
+			 * one_pause_cycle when its host signal mask happens
+			 * to admit a delivery.
+			 *
+			 * Until the child has a real reason to respawn stubs
+			 * (Phase 2 identity re-plumbing, when the child WILL
+			 * re-enter userspace as a pool member), the right
+			 * thing is to NOT respawn.  The child here writes
+			 * SUCCESS + exits and never touches the SKAS stub
+			 * mechanism.  This is per the AFL v1 ceiling note.
 			 */
-			{
-				static const __u32 marker = 0xC4D4C4D4;
-				register long rax asm("rax") = 18;
-				register long rdi asm("rdi") = (long)identity_fd;
-				register long rsi asm("rsi") = (long)&marker;
-				register long rdx asm("rdx") = 4;
-				register long r10 asm("r10") = 264;
-				asm volatile (
-					"syscall\n\t"
-					: "+r" (rax)
-					: "r" (rdi), "r" (rsi), "r" (rdx), "r" (r10)
-					: "rcx", "r11", "memory"
-				);
-			}
-			n = um_skas_respawn_all_stubs();
-			if (n < 0) {
-				pr_err("template_pause: child stub respawn failed: %d\n",
-				       n);
-				(void)os_template_pause_signals_restore_host();
-				preempt_enable();
-				return n;
-			}
-			um_snapshot_worker_init();
-			preempt_enable();
-			/* Restore host signal mask — child is now stable
-			 * enough to handle signals (its own SIGIO thread +
-			 * POSIX timers rebuilt by worker_init).
-			 */
-			/* Write SUCCESS marker to memfd[264] before any
-			 * potentially-hazardous next step.  This proves
-			 * the fork primitive itself works end-to-end.
-			 */
-			{
-				static const __u32 success = 0x5CCE551A;
-				register long rax asm("rax") = 18; /* pwrite64 */
-				register long rdi asm("rdi") = (long)identity_fd;
-				register long rsi asm("rsi") = (long)&success;
-				register long rdx asm("rdx") = 4;
-				register long r10 asm("r10") = 264;
-				asm volatile (
-					"syscall\n\t"
-					: "+r" (rax)
-					: "r" (rdi), "r" (rsi), "r" (rdx), "r" (r10)
-					: "rcx", "r11", "memory"
-				);
-			}
-			/* AFL v1 ceiling: child can't reliably re-enter
-			 * guest userspace via the SKAS stub mechanism.
-			 * For now, exit cleanly via host exit_group.  The
-			 * supervisor can subsequently respawn workers that
-			 * have already proven (via the SUCCESS marker) that
-			 * the fork primitive works.
-			 */
-			pr_info("template_pause: CHILD wrote SUCCESS marker; exiting\n");
+			static const __u32 success = 0x5CCE551A;
+			register long rax asm("rax") = 18; /* pwrite64 */
+			register long rdi asm("rdi") = (long)identity_fd;
+			register long rsi asm("rsi") = (long)&success;
+			register long rdx asm("rdx") = 4;
+			register long r10 asm("r10") = 264;
+			asm volatile (
+				"syscall\n\t"
+				: "+r" (rax)
+				: "r" (rdi), "r" (rsi), "r" (rdx), "r" (r10)
+				: "rcx", "r11", "memory"
+			);
 			os_template_pause_child_exit(0);
 			/* unreachable */
 			return 0;

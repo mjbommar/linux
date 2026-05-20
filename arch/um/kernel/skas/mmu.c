@@ -383,9 +383,7 @@ int um_skas_respawn_all_stubs(void)
 	struct mm_id **arr;
 	int n, i, respawned = 0, last_err = 0;
 
-	printk(KERN_INFO "%s: entry\n", __func__);
 	n = snapshot_mm_ids(&arr);
-	printk(KERN_INFO "%s: snapshot returned n=%d\n", __func__, n);
 	if (n <= 0)
 		return n;
 
@@ -393,11 +391,28 @@ int um_skas_respawn_all_stubs(void)
 		struct mm_id *id = arr[i];
 		int err;
 
-		printk(KERN_INFO "%s: about to redo id=%p pid=%d sock=%d stack=%lx\n",
-		       __func__, id, id->pid, id->sock, id->stack);
+		/*
+		 * Skip entries that were already torn down (pid <= 0) by
+		 * a previous um_skas_teardown_all_stubs() call.  Without
+		 * this guard, respawn would call start_userspace_redo on
+		 * a dead mm_id whose stack/sock state is in the post-
+		 * teardown sentinel state; clone() then sets up a stub
+		 * child that shares VM with the caller and crashes at
+		 * IP=0 (the M-fork CoW + CLONE_VM triple-share corrupts
+		 * the stub binary's entry-point lookup).  Diagnosed
+		 * 2026-05-20 via template-pause-fork-stress reproducing
+		 * a master-death at iter ~11 every run.
+		 *
+		 * The caller's contract is: respawn revives the stubs
+		 * the caller previously asked to teardown for fork
+		 * safety.  A dead entry that the caller did NOT pair
+		 * with teardown is the caller's bug — don't blindly
+		 * revive it.
+		 */
+		if (id->pid <= 0)
+			continue;
+
 		err = start_userspace_redo(id);
-		printk(KERN_INFO "%s: redo returned err=%d new pid=%d\n",
-		       __func__, err, id->pid);
 		if (err) {
 			printk(KERN_ERR
 			       "%s: respawn for mm %p failed: %d\n",

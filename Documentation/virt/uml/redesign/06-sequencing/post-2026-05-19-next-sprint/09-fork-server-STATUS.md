@@ -15,9 +15,64 @@ should be re-read at the start of each session.
 | 2a-P3 | `assert_fork_safety` mid-syscall refusal | LANDED (2026-05-20)  | `985fd78ab070` |
 | 2a-P4 | Wire teardown → fork → respawn into loop | LANDED (2026-05-20)  | `5dac39adad4f` |
 | 2a-P5 | template-pause-fork-smoke selftest   | LANDED (2026-05-20)   | `c417eccf869e` |
-| 2a-P6 | template-pause-fork-stress selftest (6 gates, 3-attempt retry) | LANDED (2026-05-20) | (this commit) |
-| 2a-P7 | umlctl `mission` Phase 8 wiring (full-mission only) | LANDED (2026-05-20) | (this commit) |
-| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — primary hazard fixed, secondary v1-ceiling hazard documented** | (all above) |
+| 2a-P6 | template-pause-fork-stress selftest (6 strict gates, no retry) | LANDED (2026-05-20) | `972d19478c91` + this |
+| 2a-P7 | umlctl `mission` Phase 8 wiring (full-mission only) | LANDED (2026-05-20) | `972d19478c91` |
+| 2a-P8 | M-fork child dead-code respawn removal — eliminates one death path | LANDED (2026-05-20) | this commit |
+| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — partial fix landed; residual race in M-fork child path keeps fork-stress ~40 % pass at single attempt** | (all above) |
+
+## Open bugs (2026-05-20)
+
+### B1: M-fork child wait_stub_done_seccomp pid=-1 race
+
+After the 2026-05-20 dead-code respawn removal (commit `this`),
+fork-stress still fails ~60 % of runs at N=100 iterations.  When it
+fails, master dies at iter ≈ 6–11 with:
+
+  ```
+  wait_stub_done_seccomp : failed to wait for stub, pid = -1, errno = 0
+  Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b
+  ```
+
+Bisect evidence (see commit log for raw boot.log captures):
+
+  * Master and M-fork child both successfully return from the
+    `__NR_fork` syscall.  Master logs `BISECT MASTER post-fork
+    child_pid=N` consistently.
+  * The M-fork child SOMETIMES reaches the post-fork inline write
+    syscall and writes the `tplp-CHILD-after-fork` marker; in those
+    iterations everything works.  Roughly 1 in 100–700 iters.
+  * In the OTHER iterations, the M-fork child panics BEFORE the
+    inline write — the kernel-mode-fault location is in stack
+    address space (e.g., IP=0x68803d66, same value across runs).
+    This suggests a corrupted control-flow transfer, possibly via
+    UML's task scheduler longjmp'ing into a CoW'd stack with a
+    stale JB_IP.
+  * Repeated `template_pause: torn down 0 stub(s) pre-fork` lines
+    show that mm_list has stale dead entries (`pid=-1`) but
+    teardown correctly skips them.  However, in the M-fork child
+    a kernel path is somehow reaching `wait_stub_done_seccomp` on
+    these dead entries — `start_userspace` isn't called explicitly
+    from the child path anymore (the explicit `respawn_all_stubs`
+    call was removed), so an INDIRECT call site remains to be
+    isolated.
+
+Open hypotheses to test (in order of cheapness):
+
+  1. `seccomp_mm_create` is called when the kernel creates a new
+     mm during M-fork child startup.  Audit whether new-mm
+     creation happens on the M-fork child path.
+  2. `do_syscall_stub` (from um_stub_mm_map / um_stub_mm_unmap)
+     might be invoked when the M-fork child page-faults on
+     anything that needs guest-side mapping.  Audit fault paths.
+  3. UML's `switch_threads(me, you)` might pick up a different
+     task post-fork — but `sched_worker_detach_other_tasks` is
+     supposed to prevent that.  Verify the runqueue state after
+     fork in the M-fork child.
+
+Until B1 is closed, Phase 8 in `umlctl mission` will fail ~60 %
+of runs against the experimental fork kernel.  Phase 8 SKIPs
+cleanly when no fork kernel is present, so the rest of mission is
+unaffected on production hosts.
 | 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
