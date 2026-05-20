@@ -112,45 +112,92 @@ Call Trace:
     is in UML's seccomp stub address range; the access at 0x2670fc
     is a small invalid address.
 
-**Root cause (probable)**:
-  Same v1-ceiling class of bug documented in
-  `arch/um/kernel/snapshot.c` for the AFL forkserver path.  UML
-  emulates guest userspace via the SKAS/seccomp stub mechanism,
-  which uses per-stub-process tids and shared mmap state.  After
-  the host process forks, those tids point into the parent's
-  address space and the shared stub mmap state diverges in
-  CoW-incompatible ways.
+**Root cause (narrowed 2026-05-20)**:
+  The crash IP is consistently `0x68803bde` (varies by build) and
+  the bad guest-userspace address varies per run (`0x265d57`,
+  `0x2670fc`, `0x26ac13` across three boots — small heap-ish
+  numbers, consistent with ASLR'd guest-userspace data).  The IP
+  is in UML's stub-child code range (`0x68800000–0x68804000`).
 
-  The AFL forkserver path documents this in `um_snapshot_worker_init()`:
+  Concrete sequence:
 
-  > Seccomp stub children: no stubs exist at ready-point because
-  > no guest userspace task has run yet. First user-space syscall
-  > in a worker (commit 3d) will lazily spawn one via
-  > start_userspace().
+    1. Master boots, spawns the SKAS seccomp **stub child** via
+       `clone(CLONE_VM | CLONE_VFORK | ...)` to host guest
+       userspace.  The stub child shares the master's mm.
+    2. init.sh runs, writes to /proc/um/template_pause.
+    3. Kernel template_pause_enter: identity read, SIGSTOP/SIGCONT.
+    4. Kernel: `syscall(__NR_fork)` from the master's main thread.
+       The fork(2) host syscall clones ONLY the calling thread —
+       the stub child is a *separate kernel task* and is NOT
+       duplicated.  The parent's mm is CoW'd.
+    5. From this moment:
+         * Parent UML has new CoW'd mm.
+         * Stub child STILL has CLONE_VM-shared access to the
+           parent's mm — but now any write the parent does
+           triggers CoW, and the new physical page is in the
+           parent's mm only.  The stub child still sees the
+           ORIGINAL physical page through its CLONE_VM mapping.
+         * Memory the parent reads from / writes to via the
+           stub-mediated path now references different physical
+           memory than what the stub child sees.
+    6. When the parent next schedules a guest userspace task via
+       the stub mechanism (PTRACE_SYSEMU equivalent in seccomp
+       mode), the stub child decodes addresses against its stale
+       view and SEGVs at a divergent address.
 
-  But by the time `um_template_pause_enter()` runs (after init has
-  already started), the seccomp stubs ARE up — they were spawned
-  during the boot path before init.sh ran.  So we're in the
-  un-handled-by-AFL territory.
+  This is **not** something `um_snapshot_worker_init()` can
+  handle from inside the child: by the time `worker_init` runs,
+  the parent has already been corrupted (its stub child's view
+  has diverged).  The fix must happen pre-fork OR re-spawn stubs
+  in both halves post-fork.
+
+  Why the AFL forkserver doesn't hit this: its ready point is
+  reached *before* first userspace.  No stub child exists yet at
+  fork time — the worker lazily spawns one on its first guest-
+  userspace syscall (per the `worker_init()` doc-comment).
+  Template-pause runs AFTER init has executed, so stubs are
+  already up.
 
 **Fix sketches**:
 
-  1. **Rebuild stubs in worker_init.**  Extend
-     `um_snapshot_worker_init()` to tear down inherited stub
-     children and re-spawn them.  Touches
-     `arch/um/os-Linux/skas/process.c` heavily.
-  2. **Tear down + respawn stubs in BOTH parent and child.**  The
-     parent's stub state is also corrupted (it's the parent's
-     SEGV the smoke test observes).  Tear-and-respawn before the
-     first fork; thereafter forks inherit stub-less state.
-  3. **Avoid running userspace in the parent post-fork.**
-     Requires the parent to never re-enter UML kernel scheduling
-     — which is what `os_snapshot_block_iter_signals()` is meant
-     to do but evidently doesn't fully cover this case.
+  1. **Tear down stubs in the PARENT pre-fork, respawn post-fork
+     in BOTH halves.**  Right before `os_template_pause_fork()`,
+     send SIGKILL to the master's stub child and waitpid-reap it
+     so the master has no CLONE_VM-attached task.  After fork, in
+     both parent and child, lazily respawn the stub child via the
+     existing `start_userspace()` path on the next guest
+     userspace syscall.  Touches `arch/um/os-Linux/skas/process.c`
+     and `arch/um/kernel/skas/process.c`.
 
-Estimated effort: 1–2 weeks for sketch #2, longer for #1.  Filed
-as the blocker on Phase 1c (daemon), Phase 4 (syzkaller shim), and
-the performance acceptance gates in §Step 4 below.
+  2. **Early ready point — fork before first userspace.**
+     Hook template_pause into the boot path BEFORE init runs (a
+     new `__setup` callback that pauses in `init/main.c`'s
+     `rest_init`-equivalent path).  No stubs exist yet; fork
+     model matches the AFL forkserver's well-tested invariant.
+     The bootstrap script no longer drives the pause — the
+     kernel pauses itself on the way to init.  Costs the
+     ability to run guest setup before pause; pool members
+     start with no guest userspace state.
+
+  3. **Pivot to the existing AFL forkserver path.**  Reuse the
+     fd-198/199 protocol but provide an identity-blob channel
+     alongside it (e.g., on fd 200).  Saves implementing a new
+     fork path entirely; inherits the AFL path's existing
+     correctness work and KVM refusal.
+
+Estimated effort:
+
+  * Sketch #2: ~1 day (smallest scope; clean re-use of AFL
+    invariants).  Drawback: the bootstrap-script flexibility
+    Phase 1a gave us is lost.
+  * Sketch #1: ~3-5 days (touches SKAS heavily but is the
+    proper engineering answer).
+  * Sketch #3: ~1 day (mostly wiring + identity-channel
+    grafting).  Drawback: the pool members go through the AFL
+    path's existing limitations (KVM refused, etc).
+
+Filed as the blocker on Phase 1c (daemon), Phase 4 (syzkaller
+shim), and the performance acceptance gates in §Step 4 below.
 
 ### Step 1 — Kernel-side fork loop (~80 LoC kernel)
 
