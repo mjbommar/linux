@@ -12,5 +12,10 @@
 #     by the kernel.
 
 TEST_PROGS := run-template-pause-fork-stress.sh
+# Meta-test: validates each strict gate fires when its synthetic
+# failure mode is present.  Runs without a kernel — needed because
+# production runs always pass and a buggy gate would silently mask
+# kernel regressions.  Fast (<5 s), no privileges required.
+TEST_PROGS += gates-self-test.py
 
 include ../../lib.mk
