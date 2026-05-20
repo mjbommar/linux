@@ -57,6 +57,21 @@ deferred to the sprint after this one.
 | 6 | [vCPU host-thread CPU pinning](06-vcpu-thread-cpu-pinning.md) | MEDIUM | 200 LoC | memo 52 (done) | Largely subsumed: kvm-v2 per-host-CPU pool already pins each vCPU's KVM_RUN by construction.  Documented-as-superseded; real follow-on is cgroup-cpuset + NUMA mbind, deferred under memo 52 §3.2 Tier 3. |
 | 7 | [Console batched I/O (`writev` / `vmsplice`)](07-console-batched-io.md) | LOW-MEDIUM | ~100 LoC | none | Phase 1 DONE (`25a339e9f460`): ring-wrap coalesced into one writev.  Phase 2 (vmsplice for pipe consoles) deferred. |
 | 8 | [virtio-rng modernisation](08-virtio-rng.md) | LOW | 50–150 LoC | none | Phase 1 DONE (`76c428c95d8e`, `os_getrandom()` direct).  Phase 2 (Rust vhost-user-rng backend) — sandbox-isolation only, no perf or correctness gap vs Phase 1, deferred. |
+| 9 | [Fork-server snapshot restore](09-fork-server-snapshot-restore.md) | HIGH (strategic) | ~700 LoC | memo 26 snapshot (done), fast_boot knob (`e4ab828f1555` — done) | designed 2026-05-19 (`f060373fd930`).  Firecracker-class spawn from snapshot — three-phase build, awaits sprint allocation. |
+| 10 | [vhost-net datapath](10-vhost-net-datapath.md) | MEDIUM-HIGH | ~500 LoC | vector2 TSO/vnet_hdr (done) | designed 2026-05-19 (`f060373fd930`).  Closes the last 13 % gap to legacy vector single-stream TCP via host-kernel vhost-net. |
+
+## "Truly insanely good" sprint additions (post-2026-05-19)
+
+Following the "what would make UML v2 genuinely compete with
+Firecracker / Cloud Hypervisor" review, four extra workstreams
+were added on top of the original 8:
+
+| # | Item | Status |
+|---|------|--------|
+| 9  | Fork-server snapshot restore | **DESIGNED** (memo 09); awaits implementation sprint. |
+| 10 | vhost-net for network datapath | **DESIGNED** (memo 10); awaits implementation sprint. |
+| 11 | Transparency subcommands (`umlctl strace / gdb / bpf`) | **DONE** (`bd1ccf243ff5`).  The host's debug toolchain works on the UML guest because the guest IS a host process.  Five pre-canned bpftrace one-liners + gdb with vmlinux + strace with a sane default filter, all under `umlctl <name> {strace,gdb,bpf}`. |
+| 12 | Sub-200 ms boot (`[runtime].fast_boot = true`) | **DONE** (`e4ab828f1555`).  207 ms wall-clock boot on the reference host (vs 308 ms median without the knob); the `lpj=<sniffed>` cmdline arg eliminates BogoMIPS calibration jitter, and `quiet` removes per-printk host-stderr serialization. |
 
 ## Sequencing rationale
 
