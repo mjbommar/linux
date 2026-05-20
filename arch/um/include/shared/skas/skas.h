@@ -51,6 +51,17 @@ extern int um_skas_teardown_all_stubs(void);
 extern int um_skas_respawn_all_stubs(void);
 
 /*
+ * Phase 2a — child-only stub forget.  Used after fork(2) in the
+ * forked child to disclaim the inherited stub-child pids (which
+ * are owned by the parent, not the child) without killing them.
+ * Marks every mm's id.pid = -1 and zeros its stub_data round-trip
+ * fields so start_userspace_redo can clone-and-handshake fresh.
+ * The original stub-child host processes stay alive in the parent;
+ * the child gets a fresh tree.
+ */
+extern int um_skas_forget_all_stubs(void);
+
+/*
  * um_skas_other_mm_mid_syscall() — Memo 09 Phase 2a defensive check.
  *
  * Returns true if any mm in mm_list other than @caller has

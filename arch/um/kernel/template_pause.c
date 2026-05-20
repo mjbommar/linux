@@ -300,6 +300,9 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			 *      space's wait_stub_done_seccomp futex wait).
 			 */
 			preempt_disable();
+			/* Detach all inherited tasks so schedule() can't
+			 * longjmp into a stale jmp_buf.
+			 */
 			sched_worker_detach_other_tasks();
 			n = um_skas_respawn_all_stubs();
 			if (n < 0) {

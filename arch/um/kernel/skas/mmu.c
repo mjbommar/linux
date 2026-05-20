@@ -342,6 +342,42 @@ int um_skas_other_mm_mid_syscall(struct mm_id *caller)
 	return busy;
 }
 
+int um_skas_forget_all_stubs(void)
+{
+	struct mm_id **arr;
+	int n, i, forgotten = 0;
+
+	n = snapshot_mm_ids(&arr);
+	if (n <= 0)
+		return n;
+
+	for (i = 0; i < n; i++) {
+		struct mm_id *id = arr[i];
+		struct stub_data *stub_data = (void *)id->stack;
+
+		/* DO NOT kill — the stub child is alive in the parent
+		 * process and we'd disturb that.  Just mark id as
+		 * detached.
+		 */
+		id->pid = -1;
+		if (id->sock >= 0) {
+			os_close_file(id->sock);
+			id->sock = -1;
+		}
+		stub_data->futex = 0;
+		stub_data->signal = 0;
+		stub_data->si_offset = 0;
+		stub_data->mctx_offset = 0;
+		stub_data->syscall_data_len = 0;
+		id->syscall_data_len = 0;
+		id->syscall_fd_num = 0;
+		forgotten++;
+	}
+
+	kfree(arr);
+	return forgotten;
+}
+
 int um_skas_respawn_all_stubs(void)
 {
 	struct mm_id **arr;
