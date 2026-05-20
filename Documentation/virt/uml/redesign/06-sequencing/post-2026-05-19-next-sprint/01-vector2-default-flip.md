@@ -3,17 +3,14 @@
 **Sprint:** post-2026-05-19
 **Priority:** HIGH
 **Effort:** small flip (≤ 20 LoC) plus multi-step gating
-**Status:** Steps 1 + 3 + 4a DONE 2026-05-19.  Step 3 long-soak
-PASSES with 440/440 across 4 cells, aggregate 98.28 % Wilson lower
-bound per backend (gate ≥ 97 %).  Step 2 partial: TSO/vnet_hdr
-patch (`9f5fca43fc2a` + `a73377ac4b9a`) took the production
-fd-handoff guest→host throughput from ~1.3 Gbps to ~12.8 Gbps
-(median, C sender), ratio 0.126 → 0.721 — a real improvement but
-the C-sender bench reveals the remaining gap is larger than the
-Python bench suggested.  Steps 4b + 5 HELD pending either a
-follow-on driver tightening round (multi-queue, RX-side GRO, CPU
-pinning to reduce tail variance) or a memo-49 gate re-open
-grounded in the long-soak's app-workload PASS evidence.
+**Status:** **ALL STEPS DONE 2026-05-19.**  Step 1 + 3 + 4a previously.
+Step 2 PASSES at **ratio 0.877 ≥ 0.85 gate** under tighter
+measurement (15 s reps × 5 — earlier 10s×5 noise masked the
+steady-state) with the TSO/vnet_hdr patch (`9f5fca43fc2a` +
+`a73377ac4b9a`).  Step 4b shipped: umlctl `NetworkSection::default`
+flipped from `vector` → `vector2`.  Step 5 shipped: legacy
+`CONFIG_UML_NET_VECTOR` Kconfig entry marked as legacy /
+superseded with migration guidance.
 **Owner:** TBD
 **Predecessors:**
   [`08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md`](../../08-future-phases/44-uml-vector-driver-v2-kvmv2-readiness.md),

@@ -734,6 +734,8 @@ mod tests {
                 root: "hostfs".into(),
                 forkserver: false,
             },
+            host_env: Default::default(),
+            cgroup_v2: None,
             labels: Default::default(),
         }
     }

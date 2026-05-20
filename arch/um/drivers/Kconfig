@@ -125,13 +125,26 @@ menu "UML Network Devices"
 	depends on NET
 
 config UML_NET_VECTOR
-	bool "Vector I/O high performance network devices"
+	bool "Vector I/O high performance network devices (legacy)"
 	select MAY_HAVE_RUNTIME_DEPS
 	help
-	  This User-Mode Linux network driver uses multi-message send
-	  and receive functions. The host running the UML guest must have
-	  a linux kernel version above 3.0 and a libc version > 2.13.
-	  This driver provides tap, raw, gre and l2tpv3 network transports.
+	  Legacy UML vector network driver — superseded by
+	  CONFIG_UML_NET_VECTOR_V2 as of the post-2026-05-19 sprint
+	  (Documentation/virt/uml/redesign/06-sequencing/
+	  post-2026-05-19-next-sprint/01-vector2-default-flip.md).
+
+	  This driver uses multi-message send and receive functions.
+	  The host running the UML guest must have a linux kernel
+	  version above 3.0 and a libc version > 2.13.  Provides tap,
+	  raw, gre and l2tpv3 network transports.
+
+	  Memo 01 Step 5: kept around for operators who haven't
+	  migrated to vec2 yet (umlctl now defaults to vector2).
+	  Plan is to drop this entirely once a follow-on sprint
+	  ports the remaining `raw` / `gre` / `l2tpv3` transports
+	  into vec2 (vec2 currently exposes `tap` + `fd`).
+
+	  For new deployments, prefer CONFIG_UML_NET_VECTOR_V2.
 
 	  For more information, including explanations of the networking
 	  and sample configurations, see

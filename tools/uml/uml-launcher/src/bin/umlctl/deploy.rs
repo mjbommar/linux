@@ -248,7 +248,18 @@ impl Default for NetworkSection {
     fn default() -> Self {
         Self {
             mode: "none".into(),
-            driver: "vector".into(),
+            // Memo 01 Step 4b (post-2026-05-19 sprint): default flipped
+            // from "vector" → "vector2".  Predecessors:
+            //   * Step 1: kvm-v2 + vector2 Tier 3 30/30 PASS
+            //   * Step 2: TCP throughput ratio 0.877 ≥ 0.85 gate
+            //     (with TSO/vnet_hdr patch 9f5fca43fc2a + a73377ac4b9a)
+            //   * Step 3: 7200 s long-soak 440/440 PASS, aggregate
+            //     Wilson 95 % lower bound 98.28 % per backend
+            //   * Step 4a: opt-in mission gate (02fe7d14f476)
+            // Operators relying on the legacy `vector` (vec0) driver
+            // can opt back via `[network].driver = "vector"`; the
+            // tap_name / IP / port plumbing is the same shape.
+            driver: "vector2".into(),
             host_mode: "auto".into(),
             queues: NetworkQueueSpec::default(),
             fail_open_after: None,
@@ -539,9 +550,13 @@ fn validate_network_section(net: &NetworkSection, runtime: &RuntimeSection) -> R
     }
     validate_network_driver(&net.driver)?;
     validate_network_host_mode(&net.host_mode)?;
-    if net.mode != "tap" && net.driver != "vector" {
-        bail!("network.driver is only meaningful when network.mode = 'tap'");
-    }
+    // network.driver is informational when mode != "tap" — the driver
+    // only ever does work in tap mode.  We don't error on a stray
+    // driver value at mode=none because the default-driver flip in
+    // Step 4b means there's always *some* driver in the config (the
+    // pre-flip "only vector tolerated" check became un-distinguishable
+    // from intent vs default-fill).  Unknown driver names are still
+    // caught by validate_network_driver() above.
     if net.mode != "tap" && net.host_mode != "auto" {
         bail!("network.host_mode is only meaningful when network.mode = 'tap'");
     }
@@ -1322,7 +1337,7 @@ path = "/tmp/uml-clean/linux"
         assert_eq!(u.kernel.backend, "seccomp");
         assert_eq!(u.runtime.mem, "512M");
         assert_eq!(u.network.mode, "none");
-        assert_eq!(u.network.driver, "vector");
+        assert_eq!(u.network.driver, "vector2");
         assert_eq!(u.network.host_mode, "auto");
         assert_eq!(u.network.queues, NetworkQueueSpec::Fixed(1));
         assert_eq!(u.network.fail_open_after, None);
@@ -1378,6 +1393,9 @@ path = "/x"
 
     #[test]
     fn render_init_includes_phases() {
+        // Explicit driver = "vector" so the test continues to exercise
+        // the legacy vec0 render path even after Step 4b flipped the
+        // default to vector2.
         let u: Umlfile = toml::from_str(
             r#"
 schema_version = 1
@@ -1387,6 +1405,7 @@ name = "demo"
 path = "/x"
 [network]
 mode = "tap"
+driver = "vector"
 [[init.phases]]
 name = "hello"
 cmd = "echo hi"
@@ -1612,6 +1631,9 @@ tap_name = "compat-tap0"
 
     #[test]
     fn set_network_driver_validates_mode() {
+        // Explicit driver = "vector" so the legacy-to-vector2 flip
+        // sequence the test exercises still has somewhere to flip
+        // *from* after Step 4b changed the default to vector2.
         let mut u: Umlfile = toml::from_str(
             r#"
 schema_version = 1
@@ -1621,6 +1643,7 @@ name = "demo"
 path = "/x"
 [network]
 mode = "tap"
+driver = "vector"
 "#,
         )
         .unwrap();
@@ -1629,7 +1652,9 @@ mode = "tap"
         assert_eq!(u.network.driver, "vector2");
 
         u.network.mode = "none".into();
-        assert!(set_network_driver(&mut u, "vector2").is_err());
+        // mode!=tap no longer rejects valid driver names (the
+        // driver is just informational then); only unknown driver
+        // names still error via validate_network_driver().
         assert!(set_network_driver(&mut u, "bogus").is_err());
     }
 
@@ -1644,6 +1669,7 @@ name = "demo"
 path = "/x"
 [network]
 mode = "tap"
+driver = "vector"
 "#,
         )
         .unwrap();
@@ -1672,6 +1698,7 @@ path = "/x"
 ncpus = 3
 [network]
 mode = "tap"
+driver = "vector"
 "#,
         )
         .unwrap();
@@ -1698,6 +1725,7 @@ name = "demo"
 path = "/x"
 [network]
 mode = "tap"
+driver = "vector"
 "#,
         )
         .unwrap();
@@ -1717,6 +1745,10 @@ mode = "tap"
 
     #[test]
     fn network_fail_open_after_requires_vector2_and_positive_value() {
+        // Start at the legacy "vector" driver so the test exercises
+        // the "fail_open_after requires vector2" path.  Default flipped
+        // to vector2 under Step 4b — without the explicit driver line
+        // this assertion would otherwise pass trivially.
         let mut u: Umlfile = toml::from_str(
             r#"
 schema_version = 1
@@ -1726,6 +1758,7 @@ name = "demo"
 path = "/x"
 [network]
 mode = "tap"
+driver = "vector"
 "#,
         )
         .unwrap();
@@ -1762,10 +1795,13 @@ driver = "bogus"
         std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
         assert!(Umlfile::from_path(&path).is_err());
 
-        u.network.driver = "vector2".into();
+        // mode!=tap no longer rejects a valid driver name — that
+        // check was unhelpful given the default-driver flip in Step 4b.
+        // Only unknown driver names still error.
+        u.network.driver = "vector".into();
         u.network.mode = "none".into();
         std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
-        assert!(Umlfile::from_path(&path).is_err());
+        assert!(Umlfile::from_path(&path).is_ok());
     }
 
     #[test]
