@@ -480,7 +480,7 @@ that nails it.
 | §11 | UBD bench diagnosis                | CLOSED — diagnosis was WRONG, corrected | `fc15959c8d75` |
 | §12 | UBD Phase 5 COW test               | CLOSED   | `189369e8826d` |
 | §13 | mission KUnit count                | CLOSED — selftest now 8/8 | `1bb6dd6b6d38` |
-| §14 | clean post-all-patches soak        | RUNNING — see below |
+| §14 | clean post-all-patches soak        | CLOSED — see below |
 | §15 | validator restore                  | CLOSED via driver_explicit | `fa99a4364c58` |
 | §16 | apply_host_resources contract test | CLOSED   | `045e7aa71121` |
 | §17 | lpj host-machine assumption        | CLOSED — documented inline | `045e7aa71121` |
@@ -607,13 +607,52 @@ plus the human-readable "8/8 ... time_travel" string makes the
 count grow with each new KUnit case.  Mission `--quick` now
 shows the updated count in Phase 1's output.
 
-**§14 (clean soak on frozen binary).**  Running at the time
-this section was written: 30 min budget against the
-`d9cf4bcb1006` binary (everything else in this audit-fix
-sprint applied).  Result will be recorded in the soak's
-`summary.md`.  If it's not 100 % PASS, the audit-fix sprint
-itself introduced a regression — to be addressed in a
-follow-on.
+**§14 (clean soak on frozen binary).**  CLOSED — but the first
+run *did* find a regression that this audit-fix sprint had
+introduced.
+
+First run (against `d9cf4bcb1006`): 139/140 PASS with **one
+PANIC** on `tier3-django-v2/kvm-v2` iter 2.  Root cause was a
+real bug in the §1 hook wiring: `kvm_v2_record_start` auto-
+enabled `um_hook_record_replay` on every call, which made
+`__um_record_event_clock` fire from real kernel timer
+interrupts.  During a KUnit run that uses
+`kvm_v2_record_start` to arm a private rec for synthetic
+observe/consume, those live time-travel events interleaved with
+the test's synthetic SYSCALL entries and caused
+`consume_syscall` to trip `-EILSEQ`.  Mission `--quick`'s
+shorter boot window happened to dodge the race; the soak's
+longer kvm-v2 boot path triggered it.
+
+Fix at `9e50b36a922f`: don't auto-enable the global hook gate
+in `kvm_v2_record_start` / `_replay`.  Add explicit opt-in:
+
+```c
+void kvm_v2_record_engage_global_hooks(void);
+void kvm_v2_record_disengage_global_hooks(void);
+```
+
+Production callers engage explicitly; KUnit tests don't.  The
+observe/consume API and the `time_travel_set_time` →
+`um_time_travel_consume_replay` call chain are unchanged — the
+fix is purely about WHEN the gate flips on, not what the hook
+does once engaged.
+
+Second run (against the fixed binary):
+
+  140/140 PASS    (35 iters × 4 cells)
+  0 PANIC, 0 FAIL, 0 TIMEOUT
+  0 throttle pauses, 0 host errors
+  1954 s elapsed (108 % of 1800 s budget — natural drain)
+  Per-backend aggregate Wilson 95 % lower bound: 94.8 %
+    (below the 97 % gate at n=70; the original 7200 s soak's
+     n=220 per backend is what hits 98.28 %.  140 iters in 30
+     min is "smoke" not "gate.")
+
+The interesting thing: the soak's value as a regression
+finder paid off immediately.  This audit-fix sprint introduced
+a real bug AND caught it within 30 min of cumulative test
+time.  That's exactly what §14 was demanding.
 
 **§15 (validator restore).**  CLOSED at `fa99a4364c58`.
 `NetworkSection` gains a `driver_explicit: bool` set by the
