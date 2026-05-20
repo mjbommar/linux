@@ -4,7 +4,11 @@
 **Priority:** LOW-MEDIUM
 **Effort:** small (~100 LoC across `arch/um/drivers/chan_user.c`
 and `arch/um/os-Linux/file.c`)
-**Status:** investigated 2026-05-19, win smaller than agent estimate
+**Status:** investigated 2026-05-19; Phase 1 (ring-wrap coalescing
+via writev) DONE 2026-05-19 (`25a339e9f460`).  Phase 2 (vmsplice
+for pipe consoles) deferred — page-ownership accounting absent
+from line.c's static ring buffer and the per-call win is small
+vs Phase 1.
 **Depends on:** none.
 
 ## Update 2026-05-19 — investigation note

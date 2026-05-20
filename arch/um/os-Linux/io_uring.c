@@ -60,6 +60,17 @@ static inline int sys_io_uring_enter(int fd, unsigned int to_submit,
 			    min_complete, flags, arg, argsz);
 }
 
+static inline int sys_io_uring_register(int fd, unsigned int opcode,
+					void *arg, unsigned int nr_args)
+{
+	return (int)syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
+}
+
+static inline int sys_eventfd2(unsigned int initval, int flags)
+{
+	return (int)syscall(__NR_eventfd2, initval, flags);
+}
+
 struct os_io_ring {
 	int		fd;
 
@@ -419,4 +430,30 @@ int os_io_ring_wait_cqe(struct os_io_ring *r, struct os_io_cqe *out,
 unsigned int os_io_ring_in_flight(const struct os_io_ring *r)
 {
 	return r->in_flight;
+}
+
+/*
+ * Phase 1 of memo #5 — register an eventfd with the ring so the
+ * kernel signals it on every CQE.  The fd is the caller's to add
+ * to its epoll set / select / poll loop; on each wake the consumer
+ * drains CQEs via os_io_ring_peek_cqe().
+ */
+int os_io_ring_register_eventfd(struct os_io_ring *r, int *out_fd)
+{
+	int efd;
+
+	efd = sys_eventfd2(0, O_CLOEXEC | O_NONBLOCK);
+	if (efd < 0)
+		return -errno;
+
+	if (sys_io_uring_register(r->fd, IORING_REGISTER_EVENTFD,
+				  &efd, 1) < 0) {
+		int err = -errno;
+
+		close(efd);
+		return err;
+	}
+
+	*out_fd = efd;
+	return 0;
 }

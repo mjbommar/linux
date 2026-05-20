@@ -50,4 +50,17 @@ int os_io_ring_wait_cqe(struct os_io_ring *ring, struct os_io_cqe *out,
 
 unsigned int os_io_ring_in_flight(const struct os_io_ring *ring);
 
+/*
+ * Phase 1 of memo #5 (common epoll completion).  Attach an eventfd
+ * to the ring; the kernel signals it on every CQE.  The eventfd
+ * can be added to UML's global epollfd loop so all io_uring
+ * consumers' completions flow through one thread.
+ *
+ * Returns 0 on success and stores the eventfd in *out_fd (caller
+ * owns it — close on ring tear-down).  Returns -errno on failure
+ * (older host kernel without IORING_REGISTER_EVENTFD, or eventfd
+ * blocked by seccomp).
+ */
+int os_io_ring_register_eventfd(struct os_io_ring *ring, int *out_fd);
+
 #endif /* __UM_OS_IO_RING_H__ */
