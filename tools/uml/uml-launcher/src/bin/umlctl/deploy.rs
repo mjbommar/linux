@@ -129,8 +129,7 @@ impl Default for RuntimeSection {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(deny_unknown_fields, default)]
+#[derive(Serialize, Debug, Clone)]
 pub struct NetworkSection {
     /// "none" (default) or "tap".
     pub mode: String,
@@ -155,6 +154,85 @@ pub struct NetworkSection {
     /// Each entry: "host_port:guest_port[/proto]" — proto defaults
     /// to tcp. Implemented via host-side DNAT to guest_ip:guest_port.
     pub ports: Vec<String>,
+    /// Set to true by the TOML deserializer when `driver` was present
+    /// in the source file (vs. serde-defaulted to "vector2").
+    /// Validator uses this to distinguish "operator explicitly chose
+    /// a driver while mode=none" (error) from "operator left it alone
+    /// and the default flowed in" (fine).  Skipped on serialize so
+    /// round-tripped manifests don't accumulate this metadata.
+    #[serde(skip)]
+    pub driver_explicit: bool,
+}
+
+/* Manual Deserialize so we can track whether `driver` was present in
+ * the source TOML.  serde's #[serde(default)] flatten makes it
+ * impossible to distinguish "field absent" from "field present with
+ * default-equal value" — exactly the case HONEST-AUDIT §15 flagged.
+ * The wrapper struct uses Option<String> for driver, then resolve()
+ * fills in the post-flip default ("vector2") and sets
+ * driver_explicit accordingly.
+ */
+impl<'de> serde::Deserialize<'de> for NetworkSection {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, default)]
+        struct Raw {
+            mode: String,
+            driver: Option<String>,
+            host_mode: String,
+            queues: NetworkQueueSpec,
+            fail_open_after: Option<u32>,
+            tap_name: String,
+            guest_ip: String,
+            host_ip: String,
+            gateway: String,
+            nameservers: Vec<String>,
+            masquerade_via: String,
+            ports: Vec<String>,
+        }
+        impl Default for Raw {
+            fn default() -> Self {
+                let d = NetworkSection::default();
+                Self {
+                    mode: d.mode,
+                    driver: None,
+                    host_mode: d.host_mode,
+                    queues: d.queues,
+                    fail_open_after: d.fail_open_after,
+                    tap_name: d.tap_name,
+                    guest_ip: d.guest_ip,
+                    host_ip: d.host_ip,
+                    gateway: d.gateway,
+                    nameservers: d.nameservers,
+                    masquerade_via: d.masquerade_via,
+                    ports: d.ports,
+                }
+            }
+        }
+        let r = Raw::deserialize(deserializer)?;
+        let (driver, driver_explicit) = match r.driver {
+            Some(d) => (d, true),
+            None => ("vector2".to_string(), false),
+        };
+        Ok(NetworkSection {
+            mode: r.mode,
+            driver,
+            host_mode: r.host_mode,
+            queues: r.queues,
+            fail_open_after: r.fail_open_after,
+            tap_name: r.tap_name,
+            guest_ip: r.guest_ip,
+            host_ip: r.host_ip,
+            gateway: r.gateway,
+            nameservers: r.nameservers,
+            masquerade_via: r.masquerade_via,
+            ports: r.ports,
+            driver_explicit,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +361,7 @@ impl Default for NetworkSection {
             nameservers: vec!["8.8.8.8".into(), "1.1.1.1".into()],
             masquerade_via: "auto".into(),
             ports: Vec::new(),
+            driver_explicit: false,
         }
     }
 }
@@ -472,9 +551,14 @@ pub fn validate_network_driver(driver: &str) -> Result<()> {
 pub fn set_network_driver(uml: &mut Umlfile, driver: &str) -> Result<()> {
     validate_network_driver(driver)?;
     let old = uml.network.driver.clone();
+    let old_explicit = uml.network.driver_explicit;
     uml.network.driver = driver.to_string();
+    // Set by CLI / sweep / programmatic mutation — counts as explicit
+    // for validation purposes (HONEST-AUDIT §15).
+    uml.network.driver_explicit = true;
     if let Err(e) = validate_network_section(&uml.network, &uml.runtime) {
         uml.network.driver = old;
+        uml.network.driver_explicit = old_explicit;
         return Err(e);
     }
     Ok(())
@@ -564,12 +648,21 @@ fn validate_network_section(net: &NetworkSection, runtime: &RuntimeSection) -> R
     validate_network_driver(&net.driver)?;
     validate_network_host_mode(&net.host_mode)?;
     // network.driver is informational when mode != "tap" — the driver
-    // only ever does work in tap mode.  We don't error on a stray
-    // driver value at mode=none because the default-driver flip in
-    // Step 4b means there's always *some* driver in the config (the
-    // pre-flip "only vector tolerated" check became un-distinguishable
-    // from intent vs default-fill).  Unknown driver names are still
-    // caught by validate_network_driver() above.
+    // only ever does work in tap mode.  HONEST-AUDIT §15 restore: we
+    // distinguish "operator explicitly set driver while mode=none"
+    // (error — they're confused about what driver does) from "field
+    // defaulted to vector2 in absence of any setting" (harmless).
+    // The driver_explicit flag is populated by the manual Deserialize
+    // impl above.  Unknown driver names are still caught by
+    // validate_network_driver() above regardless of mode.
+    if net.mode != "tap" && net.driver_explicit {
+        bail!(
+            "network.driver = {:?} is only meaningful when \
+             network.mode = 'tap'; drop the line if you want \
+             the default driver to flow through silently",
+            net.driver
+        );
+    }
     if net.mode != "tap" && net.host_mode != "auto" {
         bail!("network.host_mode is only meaningful when network.mode = 'tap'");
     }
@@ -1704,11 +1797,13 @@ driver = "vector"
 
         set_network_driver(&mut u, "vector2").unwrap();
         assert_eq!(u.network.driver, "vector2");
+        // set_network_driver flips driver_explicit on (HONEST-AUDIT §15).
+        assert!(u.network.driver_explicit);
 
         u.network.mode = "none".into();
-        // mode!=tap no longer rejects valid driver names (the
-        // driver is just informational then); only unknown driver
-        // names still error via validate_network_driver().
+        // mode!=tap rejects an explicitly-set driver (operator must
+        // either set mode=tap or drop the explicit driver= line).
+        assert!(set_network_driver(&mut u, "vector2").is_err());
         assert!(set_network_driver(&mut u, "bogus").is_err());
     }
 
@@ -1849,13 +1944,16 @@ driver = "bogus"
         std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
         assert!(Umlfile::from_path(&path).is_err());
 
-        // mode!=tap no longer rejects a valid driver name — that
-        // check was unhelpful given the default-driver flip in Step 4b.
-        // Only unknown driver names still error.
+        // mode!=tap rejects an explicitly-set driver
+        // (HONEST-AUDIT §15 — restored after the original drop).
+        // The check uses driver_explicit which the manual
+        // Deserialize impl sets to true whenever `driver` is
+        // present in the TOML source.
         u.network.driver = "vector".into();
+        u.network.driver_explicit = true;
         u.network.mode = "none".into();
         std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
-        assert!(Umlfile::from_path(&path).is_ok());
+        assert!(Umlfile::from_path(&path).is_err());
     }
 
     #[test]
