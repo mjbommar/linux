@@ -110,6 +110,15 @@ pub struct MissionArgs {
     /// it ever returns.
     #[arg(long, default_value = "5")]
     pub vector2_iters: u32,
+
+    /// Phase 8 UML kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK=y
+    /// for the fork-stress selftest.  Falls back to
+    /// $HOME/src/uml-builds/uml-tplpause-fork/linux when the env var
+    /// is unset.  Phase 8 SKIPs if the resolved path doesn't exist
+    /// (the main mission kernel is normally NOT built with fork
+    /// support).  Phase 8 runs only on full missions, never quick.
+    #[arg(long, env = "UM_FORK_KERNEL")]
+    pub fork_kernel: Option<PathBuf>,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,15 +177,19 @@ pub fn run(args: MissionArgs) -> Result<()> {
 
     // Phase ordering:
     //   1 KUnit, 2 bench, 3 substrate, 4 host_resources,
-    //   5 diverse soak, 7 vector2 stress (opt-in), 6 diagnostic.
-    // Phase 7 (vector2) runs before Phase 6 because diagnostic
+    //   5 diverse soak, 7 vector2 stress (opt-in),
+    //   8 fork-stress (only on full missions, separate kernel),
+    //   6 diagnostic last.
+    // Phases 7 and 8 both run before Phase 6 because diagnostic
     // wants to capture the final reproducibility metadata after
-    // every gate has run.
+    // every gate has run.  Phase 8 is skipped in quick mode — its
+    // retry harness + ~5s per attempt is too expensive for the
+    // 2-3 min quick-iteration budget.
     let phases: Vec<u32> = match (args.quick, args.with_vector2) {
         (true, true)   => vec![1, 2, 3, 4, 7, 6],
         (true, false)  => vec![1, 2, 3, 4, 6],
-        (false, true)  => vec![1, 2, 3, 4, 5, 7, 6],
-        (false, false) => vec![1, 2, 3, 4, 5, 6],
+        (false, true)  => vec![1, 2, 3, 4, 5, 7, 8, 6],
+        (false, false) => vec![1, 2, 3, 4, 5, 8, 6],
     };
 
     let mut results: Vec<PhaseResult> = Vec::new();
@@ -259,6 +272,7 @@ fn run_phase(
         5 => phase5_diverse_soak(args, selftests_dir, out_dir)?,
         6 => phase6_diagnostic(args, out_dir)?,
         7 => phase7_vector2_stress(args, selftests_dir, out_dir)?,
+        8 => phase8_fork_stress(args, selftests_dir, out_dir)?,
         _ => anyhow::bail!("unknown phase {phase_id}"),
     };
     Ok(PhaseResult {
@@ -791,6 +805,139 @@ fn phase7_vector2_stress(
         )
     };
     Ok(("vector2", verdict, summary, details))
+}
+
+// Phase 8 — Memo 09 template-pause + fork stress.
+//
+// Drives the master through hundreds of fork-on-resume iterations
+// and asserts the six gates documented in run-template-pause-fork-
+// stress.sh (master alive, distinct child pids, RSS drift ≤ 5%, no
+// post-teardown stub leak, ≥ N iters in window, identity-blob
+// round-trip).
+//
+// Requires a separate kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK
+// =y, because the main mission kernel is normally configured for
+// kvm-v2 (which assert_fork_safety() refuses).  Resolved from
+// --fork-kernel / $UM_FORK_KERNEL, with the dev-host default of
+// $HOME/src/uml-builds/uml-tplpause-fork/linux.  SKIPs cleanly when
+// that binary doesn't exist — the rest of the mission still gates.
+fn phase8_fork_stress(
+    args: &MissionArgs,
+    selftests_dir: &Path,
+    out_dir: &Path,
+) -> Result<(&'static str, Verdict, String, BTreeMap<String, String>)> {
+    let mut details = BTreeMap::new();
+
+    let fork_kernel = args.fork_kernel.clone().unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        PathBuf::from(format!("{home}/src/uml-builds/uml-tplpause-fork/linux"))
+    });
+    details.insert("fork_kernel".into(), fork_kernel.display().to_string());
+    if !fork_kernel.exists() {
+        return Ok((
+            "fork-stress",
+            Verdict::Skip,
+            format!(
+                "fork-stress kernel absent at {} (set --fork-kernel or build CONFIG_UM_TEMPLATE_PAUSE_FORK=y)",
+                fork_kernel.display()
+            ),
+            details,
+        ));
+    }
+
+    let script = selftests_dir.join("template-pause-fork-stress/run-template-pause-fork-stress.sh");
+    if !script.exists() {
+        details.insert("script".into(), format!("MISSING:{}", script.display()));
+        return Ok((
+            "fork-stress",
+            Verdict::Fail,
+            "fork-stress selftest script absent".into(),
+            details,
+        ));
+    }
+
+    let log = out_dir.join("phase-8-fork-stress.log");
+    let mut cmd = Command::new("bash");
+    cmd.arg(&script);
+    cmd.env("UML_BINARY", &fork_kernel);
+    // Use the script's defaults for N / SECS / BLOBS / RSS_DRIFT /
+    // ATTEMPTS.  Override per-mission only if a regression of the
+    // residual v1-ceiling makes the default attempts insufficient.
+
+    let out = cmd.output().context("spawn fork-stress selftest")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::write(&log, format!("=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"));
+
+    // Parse "attempt N PASSED" / "all N attempts FAILED" lines + per-
+    // gate detail rows for the scoreboard.
+    let passed_attempt = stdout
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("######## attempt ")
+                .and_then(|s| s.strip_suffix(" PASSED — stopping retry loop ########"))
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+    let attempts_failed = stdout.contains("all ") && stdout.contains(" attempts FAILED");
+    let mut last_iters = String::new();
+    let mut last_distinct_pids = String::new();
+    let mut last_drift = String::new();
+    let mut last_blobs = String::new();
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("G5 master iterations   : ") {
+            last_iters = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("G2 distinct child pids : ") {
+            last_distinct_pids = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("G3 RSS drift           : ") {
+            last_drift = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("G6 identity round-trip : ") {
+            last_blobs = rest.trim().to_string();
+        }
+    }
+    if !last_iters.is_empty() {
+        details.insert("g5_iters".into(), last_iters.clone());
+    }
+    if !last_distinct_pids.is_empty() {
+        details.insert("g2_child_pids".into(), last_distinct_pids);
+    }
+    if !last_drift.is_empty() {
+        details.insert("g3_rss_drift".into(), last_drift);
+    }
+    if !last_blobs.is_empty() {
+        details.insert("g6_blobs".into(), last_blobs);
+    }
+    if let Some(n) = passed_attempt {
+        details.insert("attempt_passed".into(), n.to_string());
+    }
+
+    // SKIP propagation: the script exits 4 when kernel lacks the
+    // CONFIG_UM_TEMPLATE_PAUSE_FORK feature OR python3 is missing.
+    if out.status.code() == Some(4) {
+        return Ok((
+            "fork-stress",
+            Verdict::Skip,
+            "fork-stress kernel lacks CONFIG_UM_TEMPLATE_PAUSE_FORK or python3 missing".into(),
+            details,
+        ));
+    }
+
+    if out.status.success() {
+        let summary = match passed_attempt {
+            Some(n) => format!("PASS on attempt {n} (G5 iters={last_iters})"),
+            None => format!("PASS (G5 iters={last_iters})"),
+        };
+        Ok(("fork-stress", Verdict::Pass, summary, details))
+    } else {
+        let summary = if attempts_failed {
+            format!("FAIL: all attempts failed (last G5 iters={last_iters})")
+        } else {
+            format!(
+                "FAIL: script exited rc={:?} (last G5 iters={last_iters})",
+                out.status.code()
+            )
+        };
+        Ok(("fork-stress", Verdict::Fail, summary, details))
+    }
 }
 
 fn phase6_diagnostic(

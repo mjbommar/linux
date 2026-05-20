@@ -15,6 +15,8 @@ should be re-read at the start of each session.
 | 2a-P3 | `assert_fork_safety` mid-syscall refusal | LANDED (2026-05-20)  | `985fd78ab070` |
 | 2a-P4 | Wire teardown → fork → respawn into loop | LANDED (2026-05-20)  | `5dac39adad4f` |
 | 2a-P5 | template-pause-fork-smoke selftest   | LANDED (2026-05-20)   | `c417eccf869e` |
+| 2a-P6 | template-pause-fork-stress selftest (6 gates, 3-attempt retry) | LANDED (2026-05-20) | (this commit) |
+| 2a-P7 | umlctl `mission` Phase 8 wiring (full-mission only) | LANDED (2026-05-20) | (this commit) |
 | 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — primary hazard fixed, secondary v1-ceiling hazard documented** | (all above) |
 | 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
@@ -36,13 +38,29 @@ umlctl pool spawn \
 
 returns a JSON envelope describing the running pool member.
 
-Three selftests guard the end-to-end:
+Selftests guarding the end-to-end:
 
   * `tools/testing/selftests/um/template-pause-smoke/` — kernel-side
     primitive (unarmed, armed-no-identity, armed-with-identity).
+  * `tools/testing/selftests/um/template-pause-fork-smoke/` —
+    structural smoke of the fork-on-resume primitive (teardown +
+    fork() return + child pid write-back).
+  * `tools/testing/selftests/um/template-pause-fork-stress/` —
+    six-gate stress over hundreds of fork-on-resume iterations:
+    G1 fork primitive ran, G2 distinct child pids, G3 RSS drift
+    ≤ 5 %, G4 no post-teardown stub leak, G5 ≥ N iterations within
+    the window, G6 identity-blob round-trip.  Has a 3-attempt
+    retry harness to absorb the residual v1-ceiling flakiness.
   * `tools/testing/selftests/um/pool-spawn-smoke/` — umlctl wrapper.
   * `pool::tests` in `tools/uml/uml-launcher/src/bin/umlctl/pool.rs`
     — identity-blob layout + MAC parser.
+
+`umlctl mission` (full, non-`--quick`) drives the stress test as
+Phase 8 against a separate CONFIG_UM_TEMPLATE_PAUSE_FORK=y kernel
+(via `--fork-kernel` / `$UM_FORK_KERNEL`, defaulting to
+`$HOME/src/uml-builds/uml-tplpause-fork/linux`).  Phase 8 SKIPs
+cleanly when that kernel is absent, so the rest of the mission
+gate still runs on hosts without the experimental build.
 
 ## What does NOT work today
 
