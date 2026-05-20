@@ -163,8 +163,86 @@ Call Trace:
   Template-pause runs AFTER init has executed, so stubs are
   already up.
 
-**Update 2026-05-20 (after landing Patches 1, 2, 4 of the
-PHASE2A-DESIGN.md plan)**:
+**Update 2026-05-20 (after landing all 6 patches AND extensive bisect)**:
+
+  The Phase 2a structural plan is complete; the v1-ceiling hazard
+  was narrowed precisely.  Findings below correct the design memo's
+  fix sketches (the agent's `start_userspace_redo` design is still
+  the right structural fix for the SKAS stub-pid aliasing — that
+  hazard is gone — but a SECOND hazard remains).
+
+**The second hazard, narrowed (bisect, 2026-05-20)**:
+
+  The forked child's UML kernel cannot execute even a single C
+  statement after fork return.  Instrumented inline-asm pwrite
+  markers placed IMMEDIATELY after the fork syscall do not fire —
+  the child sleeps in `anon_pipe_write` for ~1 s then dies with
+  SIGABRT (UML's panic exit signal via `uml_abort`).  Reaping with
+  PR_SET_CHILD_SUBREAPER confirms BOTH halves get SIGABRT.
+
+  The kernel panic message is `Kernel tried to access user memory
+  at addr 0x2d6b62, ip 0x2d6b62` (addr == ip, the IP is the bad
+  value).  The IP is in the **guest-userspace VA range** — exactly
+  what you'd see if UML's kernel longjmp'd into a CoW'd
+  `task_struct->thread.arch.jmp_buf` whose saved RIP was a guest-
+  userspace address.  In the parent process that VA is mapped
+  (via the seccomp stub child); in the forked child it is not.
+
+  Concretely: after fork returns in the child, before my inline asm
+  pwrite runs, UML's scheduler picks SOME runqueue task and
+  `UML_LONGJMP`s into its `jmp_buf`.  That task's saved IP was in
+  guest userspace at the time of last context switch.  The child
+  has no stub child to mediate guest userspace execution, so the
+  host CPU jumps to the unmapped guest-userspace IP, SIGSEGV's,
+  UML's `trap.c::relay_signal` sees a kernel-mode IP < TASK_SIZE,
+  and panics.
+
+  This affects BOTH halves: the parent ALSO picks a stale runqueue
+  task on its next schedule and panics for the same reason (its
+  stub child for that mm was killed by `um_skas_teardown_all_stubs`
+  pre-fork, but the parent's task list still references stubs by
+  pid — the master's mms get respawn'd by
+  `um_skas_respawn_all_stubs` in the parent path, but only AFTER
+  the parent has already scheduled and panicked).
+
+**Why `preempt_disable` doesn't help**:
+
+  Confirmed empirically.  UML's scheduler doesn't honor
+  preempt_count for the longjmp-to-task path on syscall return —
+  the host kernel delivers queued signals (SIGCHLD / SIGALRM
+  inherited from the parent's signal queue) at syscall-return time,
+  UML's sig_handler runs, `sig_handler_common` calls
+  `unblock_signals_trace()` which dispatches queued handlers,
+  one of which runs `switch_threads()` → `UML_LONGJMP` → bad
+  jmp_buf → panic.
+
+**Real fix (informed by the bisect)**:
+
+  Three layers needed, in order:
+
+  1. **Detach ALL non-current tasks from the runqueue PRE-FORK**
+     in the master.  Existing helper:
+     `sched_worker_detach_other_tasks()` in `kernel/sched/core.c`
+     under `CONFIG_UM_SNAPSHOT_FORKSERVER`.  Call this before
+     `os_template_pause_fork` so that after fork, the runqueue
+     contains only `current` (init.sh) in both halves.  Schedule
+     can't pick a stale task because there are none.
+
+  2. **Block ALL host signals pre-fork via `sigprocmask` at host
+     level**, not just UML's `signals_enabled=0`.  This prevents
+     host-kernel signal delivery during the fork+respawn window.
+     Restore the mask in BOTH halves after they've stabilized.
+
+  3. **Re-attach detached tasks in the parent only AFTER**
+     `um_skas_respawn_all_stubs` completes.  In the child, the
+     detached tasks STAY detached (the child is a one-shot pool
+     member; its scheduling needs are minimal).
+
+  Total scope: ~80 LoC kernel patch on top of what's already in
+  tree.  All five design patches landed are necessary
+  building blocks but not sufficient.
+
+**Fix sketches** (original — historical, for context):
 
 The SKAS stub-pid aliasing hazard (the primary root cause the
 research-agent narrowed) is **fixed** by the pre-fork teardown.

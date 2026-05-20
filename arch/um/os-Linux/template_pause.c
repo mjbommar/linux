@@ -61,17 +61,55 @@
  * Returns 0 on success (SIGSTOP raised + SIGCONT resumed), -errno
  * on syscall failure.
  */
+static int __attribute__((__noinline__))
+os_template_pause_stop_self_inner(void)
+{
+	register long rax asm("rax");
+	long pid;
+
+	/*
+	 * Inline-asm getpid + kill.  Bypasses glibc's syscall()
+	 * wrappers — both of which can route through
+	 * __syscall_cancel, which has been observed to write to an
+	 * internal libc cancellation pipe whose reader pthread does
+	 * NOT exist in a forked child (raw fork only duplicates the
+	 * calling thread).  Direct syscall instructions have zero
+	 * libc state.
+	 */
+
+	/* getpid */
+	rax = __NR_getpid;
+	asm volatile (
+		"syscall\n\t"
+		: "+r" (rax)
+		:
+		: "rcx", "r11", "memory"
+	);
+	if (rax <= 0)
+		return -EINVAL;
+	pid = rax;
+
+	/* kill(pid, SIGSTOP) */
+	{
+		register long rax_k asm("rax") = __NR_kill;
+		register long rdi_k asm("rdi") = pid;
+		register long rsi_k asm("rsi") = SIGSTOP;
+
+		asm volatile (
+			"syscall\n\t"
+			: "+r" (rax_k)
+			: "r" (rdi_k), "r" (rsi_k)
+			: "rcx", "r11", "memory"
+		);
+		if (rax_k < 0 && rax_k > -4096)
+			return (int)rax_k;
+	}
+	return 0;
+}
+
 int os_template_pause_stop_self(void)
 {
-	int pid = os_getpid();
-
-	if (pid <= 0)
-		return -EINVAL;
-
-	if (kill(pid, SIGSTOP) < 0)
-		return -errno;
-
-	return 0;
+	return os_template_pause_stop_self_inner();
 }
 
 /*
@@ -114,14 +152,25 @@ int os_template_pause_identity_fd(void)
  * fork() aliases /dev/kvm fds and per-vCPU mmap state and corrupts
  * both parent and child.
  */
+static int __attribute__((__noinline__))
+os_template_pause_fork_inner(void)
+{
+	register long rax asm("rax") = __NR_fork;
+
+	asm volatile (
+		"syscall\n\t"
+		: "+r" (rax)
+		:
+		: "rcx", "r11", "memory"
+	);
+	if (rax < 0 && rax > -4096)
+		return (int)rax;
+	return (int)rax;
+}
+
 int os_template_pause_fork(void)
 {
-	long ret;
-
-	ret = syscall(__NR_fork);
-	if (ret < 0)
-		return -errno;
-	return (int)ret;
+	return os_template_pause_fork_inner();
 }
 
 /*
@@ -136,27 +185,58 @@ int os_template_pause_fork(void)
 int os_template_pause_write_child_pid(int fd, off_t offset, int child_pid)
 {
 	__u32 le = (__u32)child_pid;
-	ssize_t n;
+	long n;
 
 	if (fd < 0)
 		return -EBADF;
-	if (lseek(fd, offset, SEEK_SET) < 0)
-		return -errno;
+
+	/*
+	 * Raw __NR_pwrite64 — bypasses glibc's cancellation-point
+	 * machinery (__syscall_cancel) that has historically misbehaved
+	 * when called from post-fork UML kernel context (see
+	 * os_template_pause_stop_self for the same rationale, and
+	 * arch/um/kernel/snapshot.c's wait4 hazard commentary).
+	 *
+	 * pwrite is positional — no separate lseek call needed, so we
+	 * don't need to make two cancellation-point-affected calls.
+	 */
 	for (;;) {
-		n = write(fd, &le, sizeof(le));
-		if (n == (ssize_t)sizeof(le))
+		n = syscall(__NR_pwrite64, fd, &le, sizeof(le), (off_t)offset);
+		if (n == (long)sizeof(le))
 			return 0;
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
 			return -errno;
 		}
-		/* short write — implausible for memfd, but retry from
-		 * the new offset.
-		 */
-		if (lseek(fd, offset + n, SEEK_SET) < 0)
-			return -errno;
+		/* Implausible short write on memfd; bail. */
+		return -EIO;
 	}
+}
+
+/*
+ * Bisect helper: raw __NR_exit_group so a forked-child UML kernel
+ * can exit cleanly without going through glibc's at_exit handlers
+ * (which are not safe to invoke from UML kernel context post-fork,
+ * for the same reasons that wait4 / kill via glibc hit the
+ * cancellation-point hazard).
+ */
+void os_template_pause_child_exit(int code)
+{
+	/* Inline-asm syscall: bypasses glibc.  exit_group never
+	 * returns, so we don't need to capture rax.  Args: edi = code.
+	 */
+	register long rax_in asm("rax") = __NR_exit_group;
+	register long rdi_in asm("rdi") = (long)code;
+	asm volatile (
+		"syscall\n\t"
+		:
+		: "r" (rax_in), "r" (rdi_in)
+		: "rcx", "r11", "memory"
+	);
+	/* unreachable */
+	for (;;)
+		;
 }
 
 /*

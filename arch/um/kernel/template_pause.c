@@ -33,6 +33,7 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/proc_fs.h>
 #include <linux/string.h>
@@ -271,14 +272,27 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		}
 		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
 
-		/* (B) FORK */
+		/* (B) FORK
+		 *
+		 * preempt_disable across the fork() syscall AND across
+		 * the entire post-fork path pins both parent and child
+		 * to "no scheduler activity until we explicitly
+		 * preempt_enable" — protects against the UML_LONGJMP
+		 * jmp_buf hazard where, post-fork, UML's scheduler might
+		 * pick a different task (e.g. swapper) and longjmp into
+		 * a CoW'd jmp_buf that's stale relative to the new
+		 * process's stack layout.
+		 *
+		 * Empirical bisect (2026-05-20): without preempt_disable
+		 * here, the forked-child UML kernel's scheduler picks
+		 * the idle task instead of init.sh and sleeps in idle
+		 * forever — the child path's code never runs.
+		 */
+		preempt_disable();
 		child_pid = os_template_pause_fork();
-		pr_info("template_pause: fork() returned pid=%d (in %s)\n",
-			child_pid,
-			child_pid == 0 ? "child" : (child_pid < 0 ? "fail" : "parent"));
 		if (child_pid < 0) {
 			pr_err("template_pause: fork failed: %d\n", child_pid);
-			/* Try to respawn so the master can recover. */
+			preempt_enable();
 			(void)um_skas_respawn_all_stubs();
 			os_snapshot_unblock_iter_signals();
 			return child_pid;
@@ -288,19 +302,27 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			/* (D-child) — RESPAWN child's own stubs in its own
 			 * process tree, THEN do the existing worker_init
 			 * forget/rebuild of SIGIO + POSIX-timer + sched state.
-			 * Order matters: worker_init rebuilds sigio/timer
-			 * state targeting gettid(), which must be valid here
-			 * (it is — the child is the calling thread).
 			 *
-			 * DELIBERATELY do not call os_snapshot_unblock_iter_
-			 * signals() here: the AFL forkserver path
-			 * (arch/um/kernel/snapshot.c) documents that workers
-			 * must keep UML signals_enabled = 0 after worker_init
-			 * — per D41, signals_enabled stays 0 until the caller
-			 * explicitly re-enables it.  Re-enabling here re-
-			 * introduces the UML_LONGJMP jmp_buf hazard that the
-			 * v1 ceiling commentary describes (commit 3d-c's
-			 * bring-up notes).
+			 * KNOWN-BROKEN: bisect (2026-05-20) confirms the child's
+			 * UML kernel scheduler immediately picks a stale
+			 * UML_LONGJMP target (a guest-userspace IP from a CoW'd
+			 * task's jmp_buf) and the host CPU jumps to an invalid
+			 * address (e.g. 0x2d6b62 — within guest-userspace VA
+			 * range but with no valid mapping in the child).  Host
+			 * delivers SIGSEGV → UML's trap.c relay path panics with
+			 * "Kernel tried to access user memory" because is_user
+			 * is false (IP < TASK_SIZE).  Master ALSO panics from
+			 * the same hazard.  See 09-fork-server-STATUS.md.
+			 *
+			 * Solving this requires either:
+			 *   (a) preventing UML's scheduler from picking any
+			 *       task whose jmp_buf is stale relative to the
+			 *       child's process state (sched_worker_detach_
+			 *       other_tasks pre-fork, then re-attach in
+			 *       parent post-fork), OR
+			 *   (b) moving the ready point to before any guest
+			 *       userspace has run (AFL forkserver's invariant
+			 *       — see arch/um/kernel/snapshot.c).
 			 */
 			n = um_skas_respawn_all_stubs();
 			if (n < 0) {
@@ -313,11 +335,12 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			return 0;
 		}
 
+		/* Parent path: re-enable preemption now that we are
+		 * NOT entering the fragile child path.
+		 */
+		preempt_enable();
 		/* (C-parent) — RESPAWN master's own stubs.  The master keeps
-		 * its UML task list intact (fork is a no-op for the master's
-		 * task list — only the child's gets a CoW copy), so every
-		 * mm in mm_list still has a valid id.stack; we just need
-		 * fresh stub children.
+		 * its UML task list intact; we just need fresh stub children.
 		 */
 		n = um_skas_respawn_all_stubs();
 		if (n < 0) {

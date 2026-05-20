@@ -347,7 +347,9 @@ int um_skas_respawn_all_stubs(void)
 	struct mm_id **arr;
 	int n, i, respawned = 0, last_err = 0;
 
+	printk(KERN_INFO "%s: entry\n", __func__);
 	n = snapshot_mm_ids(&arr);
+	printk(KERN_INFO "%s: snapshot returned n=%d\n", __func__, n);
 	if (n <= 0)
 		return n;
 
@@ -355,7 +357,11 @@ int um_skas_respawn_all_stubs(void)
 		struct mm_id *id = arr[i];
 		int err;
 
+		printk(KERN_INFO "%s: about to redo id=%p pid=%d sock=%d stack=%lx\n",
+		       __func__, id, id->pid, id->sock, id->stack);
 		err = start_userspace_redo(id);
+		printk(KERN_INFO "%s: redo returned err=%d new pid=%d\n",
+		       __func__, err, id->pid);
 		if (err) {
 			printk(KERN_ERR
 			       "%s: respawn for mm %p failed: %d\n",
