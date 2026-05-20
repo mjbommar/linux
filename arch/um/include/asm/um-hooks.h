@@ -107,6 +107,14 @@ void __um_perf_context_switch(struct task_struct *from,
 void __um_time_travel_clock(u64 ns);
 void __um_kfence_clock_tick(u64 ns);
 
+/*
+ * memo 04 Phase 3 (post-2026-05-19 sprint): replay-side override for
+ * time_travel_set_time().  Returns true iff *ns was overwritten with
+ * a previously-recorded value.  Called from time.c under the
+ * um_hook_record_replay gate.
+ */
+bool um_time_travel_consume_replay(u64 *ns);
+
 /* --- Hook helpers (inlined at call site) ---------------------------- */
 /*
  * Each helper is __always_inline so the jump-label machinery expands

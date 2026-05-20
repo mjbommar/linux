@@ -33,6 +33,25 @@
 #include <asm/um-hooks.h>
 #include <sysdep/ptrace.h>
 
+/*
+ * memo 04 Phase 2/3 (post-2026-05-19 sprint): wire the time-travel
+ * record/replay hook into kvm-v2's record machinery.  The
+ * kvm_v2_record_{active, observe_time_travel, consume_time_travel}
+ * functions live in arch/um/backend/kvm-v2/record.c, which only
+ * gets built under CONFIG_UM_BACKEND_KVM_V2.  Pull them in by
+ * forward declaration here so we don't drag the full kvm_v2 header
+ * into a kernel TU.
+ */
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2)
+struct kvm_v2_record;
+struct kvm_v2_record *kvm_v2_record_active(void);
+void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
+				       u64 ns_at_advance);
+int  kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
+				       u64 *ns_out,
+				       u64 *syscall_count_anchor_out);
+#endif
+
 /* --- Gate definitions (6) ------------------------------------------- */
 
 DEFINE_STATIC_KEY_FALSE(um_hook_trace_syscalls);
@@ -229,10 +248,61 @@ EXPORT_SYMBOL_GPL(__um_record_event_irq);
 
 notrace void __um_record_event_clock(u64 ns)
 {
+	/*
+	 * memo 04 Phase 2: observe each time_travel_set_time advance.
+	 * Inside observe_time_travel, the rec->state == RECORDING gate
+	 * filters out the replay-side and "just allocated, not yet
+	 * armed" cases.  Calls during REPLAY mode are a quiet no-op
+	 * (the consume side runs from um_time_travel_consume_replay
+	 * before this hook fires).
+	 */
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2)
+	struct kvm_v2_record *rec = kvm_v2_record_active();
+
+	if (rec)
+		kvm_v2_record_observe_time_travel(rec, ns);
+#else
 	(void)ns;
+#endif
 	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
 }
 EXPORT_SYMBOL_GPL(__um_record_event_clock);
+
+/**
+ * um_time_travel_consume_replay - replay-side override for the
+ * time_travel_set_time() ns value.
+ * @ns: in/out — if a recorded value is consumed, *ns is overwritten.
+ *
+ * Returns true iff the recorded value was consumed and *ns updated.
+ *
+ * memo 04 Phase 3 (post-2026-05-19 sprint).  Called from
+ * arch/um/kernel/time.c::time_travel_set_time under the
+ * um_hook_record_replay static-key gate, BEFORE the value is
+ * committed to time_travel_time, so the replay run sees the same
+ * monotonic-clock sequence the recording run did.
+ *
+ * Quiet no-op when CONFIG_UM_BACKEND_KVM_V2 is off or when no
+ * record container is active.
+ */
+notrace bool um_time_travel_consume_replay(u64 *ns)
+{
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2)
+	struct kvm_v2_record *rec = kvm_v2_record_active();
+	u64 recorded;
+
+	if (!rec)
+		return false;
+	if (kvm_v2_record_consume_time_travel(rec, &recorded, NULL) != 1)
+		return false;
+	*ns = recorded;
+	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
+	return true;
+#else
+	(void)ns;
+	return false;
+#endif
+}
+EXPORT_SYMBOL_GPL(um_time_travel_consume_replay);
 
 notrace void __um_perf_syscall(struct pt_regs *regs)
 {

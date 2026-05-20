@@ -62,6 +62,22 @@ notrace unsigned long long sched_clock(void)
 
 static void time_travel_set_time(unsigned long long ns)
 {
+	/*
+	 * memo 04 Phase 3 (post-2026-05-19 sprint): if we're replaying a
+	 * recorded run, override @ns with the value captured at this
+	 * advance during the original record run.  Done BEFORE the
+	 * backwards-time panic so a backwards-going replay (which would
+	 * indicate divergence from the original run) still trips the
+	 * panic.
+	 *
+	 * Quiet no-op when CONFIG_UM_BACKEND_KVM_V2=n, when no record
+	 * container is active, or when the log is exhausted / not in
+	 * REPLAYING state.  Static-key gate keeps off-state cost at one
+	 * predicted-not-taken branch.
+	 */
+	if (static_branch_unlikely(&um_hook_record_replay))
+		um_time_travel_consume_replay(&ns);
+
 	if (unlikely(ns < time_travel_time))
 		panic("time-travel: time goes backwards %lld -> %lld\n",
 		      time_travel_time, ns);
@@ -74,14 +90,10 @@ static void time_travel_set_time(unsigned long long ns)
 	 * Post-2026-05-19 sprint memo 04: notify the redesign hook layer
 	 * of every time-travel advance.  um_on_clock_read() fans the
 	 * value into the static-key-gated time-travel, KFENCE-sample and
-	 * record/replay observers.  Production builds with all three keys
-	 * off pay zero cost (the inline is patched out entirely).  See
+	 * record/replay observers (the record-side observe lives there).
+	 * Production builds with all three keys off pay zero cost (the
+	 * inline is patched out entirely).  See
 	 * arch/um/include/asm/um-hooks.h::um_on_clock_read.
-	 *
-	 * The redesign hook __um_time_travel_clock() (arch/um/kernel/
-	 * hooks.c:252) was defined and exported pre-sprint but never
-	 * called; this single line wires it into the canonical clock-
-	 * advance choke point.
 	 */
 	um_on_clock_read(ns);
 }

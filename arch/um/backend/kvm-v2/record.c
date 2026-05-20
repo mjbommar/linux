@@ -59,6 +59,7 @@
 #include <linux/vmalloc.h>
 
 #include <sysdep/ptrace.h>		/* struct uml_pt_regs */
+#include <asm/um-hooks.h>		/* um_hook_record_replay */
 
 #include "kvm_v2_backend.h"
 #include "syscall_trap.h"		/* KVM_V2_GADGET_OFF_RECORD */
@@ -213,6 +214,7 @@ static bool kvm_v2_record_disarm_gate(struct kvm_v2_record *rec)
 	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
 	if (was_active) {
 		static_branch_disable(&um_kvm_v2_record_enabled);
+		static_branch_disable(&um_hook_record_replay);
 		/*
 		 * Phase 4 (#169): drop the per-vCPU LSTAR gadget bypass so
 		 * normal gadget hot-path resumes. Order matters: disable
@@ -383,6 +385,16 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 	static_branch_enable(&um_kvm_v2_record_enabled);
 
 	/*
+	 * Memo 04 Phase 2 (post-2026-05-19 sprint): enable the
+	 * generic um_hook_record_replay gate so the existing
+	 * __um_record_event_* hook callbacks (including
+	 * __um_record_event_clock which is wired to observe_time_travel)
+	 * start firing.  Symmetric disable lives in
+	 * kvm_v2_record_disarm_gate.
+	 */
+	static_branch_enable(&um_hook_record_replay);
+
+	/*
 	 * Phase 4 (#169): force the LSTAR gadget into fallback mode on
 	 * every pool vCPU so the 11 gadget-shadowed syscalls become
 	 * observable to handle_io_trap + observe_syscall. Mirrored by
@@ -530,8 +542,16 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec)
 	rec->buffer_replayed = 0;	/* replay reads from byte cursor 0 */
 	rec->entries_replayed = 0;	/* replay starts from entry cursor 0 */
 
-	if (need_register)
+	if (need_register) {
 		static_branch_enable(&um_kvm_v2_record_enabled);
+		/*
+		 * Memo 04 Phase 3: enable the generic hook gate so
+		 * time_travel_set_time's call to
+		 * um_time_travel_consume_replay fires.  Symmetric
+		 * disable in kvm_v2_record_disarm_gate.
+		 */
+		static_branch_enable(&um_hook_record_replay);
+	}
 
 	mutex_unlock(&rec->lock);
 

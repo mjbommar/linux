@@ -90,6 +90,7 @@ CASES=(
 	"test_kvm_v2_record_gadget_bypass"
 	"test_kvm_v2_record_rdtsc"
 	"test_kvm_v2_record_sigalrm"
+	"test_kvm_v2_record_time_travel"
 )
 MISSING=()
 for case in "${CASES[@]}"; do
@@ -105,7 +106,7 @@ fi
 
 KU_INFO=$(echo "$OUT" | grep -E 'um: kvm-v2 record_start: armed' | head -1)
 
-echo "KVM_RECORD_SMOKE: PASS (7/7 record cases — basic, state, observe, strict_replay, gadget_bypass, rdtsc, sigalrm)"
+echo "KVM_RECORD_SMOKE: PASS (8/8 record cases — basic, state, observe, strict_replay, gadget_bypass, rdtsc, sigalrm, time_travel)"
 if [ -n "$KU_INFO" ]; then
 	echo "KVM_RECORD_SMOKE: info ${KU_INFO}"
 fi
