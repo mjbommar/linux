@@ -253,10 +253,13 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			os_snapshot_unblock_iter_signals();
 			return n;
 		}
-		pr_debug("template_pause: torn down %d stub(s) pre-fork\n", n);
+		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
 
 		/* (B) FORK */
 		child_pid = os_template_pause_fork();
+		pr_info("template_pause: fork() returned pid=%d (in %s)\n",
+			child_pid,
+			child_pid == 0 ? "child" : (child_pid < 0 ? "fail" : "parent"));
 		if (child_pid < 0) {
 			pr_err("template_pause: fork failed: %d\n", child_pid);
 			/* Try to respawn so the master can recover. */
