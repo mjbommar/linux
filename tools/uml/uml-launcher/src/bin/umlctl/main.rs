@@ -48,6 +48,17 @@ struct BpfArgs {
     /// Pre-canned script name.  Omit (or pass "menu") to list.
     script: Option<String>,
 }
+
+#[derive(Subcommand, Debug)]
+enum PoolCmd {
+    /// Boot a UML in template-pause mode, write its identity blob,
+    /// SIGCONT it, and return the host pid (+ instance info as JSON
+    /// when --json). This is the unit primitive of the umlctl pool
+    /// integration; Phase 1c will add a long-lived `pool serve`
+    /// daemon plus a Unix-socket `take` RPC.  Until then, callers
+    /// (syzkaller harness, smoke tests) drive `spawn` directly.
+    Spawn(pool::SpawnArgs),
+}
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -63,6 +74,7 @@ mod manifest;
 mod metrics;
 mod mission;
 mod paths;
+mod pool;
 mod preflight;
 mod registry;
 mod run;
@@ -180,6 +192,9 @@ enum Cmd {
     /// the menu of available scripts (syscalls / pagefaults / io /
     /// net / sched).
     Bpf(BpfArgs),
+    /// Fork-server pool integration (Memo 09).
+    #[command(subcommand)]
+    Pool(PoolCmd),
 }
 
 #[derive(Subcommand, Debug)]
@@ -754,6 +769,9 @@ fn run() -> Result<()> {
         Cmd::Strace(args) => transparency::cmd_strace(&paths, &args.name, &args.extra),
         Cmd::Gdb(args) => transparency::cmd_gdb(&paths, &args.name, &args.extra),
         Cmd::Bpf(args) => transparency::cmd_bpf(&paths, &args.name, args.script.as_deref()),
+        Cmd::Pool(sub) => match sub {
+            PoolCmd::Spawn(args) => pool::cmd_spawn(args, cli.quiet),
+        },
     }
 }
 
