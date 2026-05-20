@@ -88,6 +88,21 @@ static bool template_pause_fork_armed_flag __read_mostly;
  */
 static bool template_pause_early_armed_flag __read_mostly;
 
+/*
+ * Diagnostic-mode arm.  Off by default.  Armed by
+ * `um_template_pause_mfc_diag=1` on the kernel cmdline.  When set,
+ * master skips the post-fork SIGKILL of the M-fork child, and the
+ * child installs `mfc_diag_segv_handler` for SIGSEGV/SIGBUS/
+ * SIGILL/SIGFPE before doing __NR_exit_group(0).  If the child
+ * faults during exit, the handler dumps sig/addr/rip/cr2 to fd 1
+ * and exits with code 7.
+ *
+ * Production builds leave this off — the SIGKILL fix guarantees
+ * zero panics and is the documented Phase 2a contract.  This flag
+ * exists for Phase 2 work where the child path is being extended.
+ */
+static bool template_pause_mfc_diag_armed_flag __read_mostly;
+
 /* Diagnostic only — counts how many SIGSTOP/SIGCONT cycles this
  * process (or any of its forked descendants that still share the
  * .data segment) has been through.  A fresh fork() inherits the
@@ -116,11 +131,50 @@ static int __init template_pause_setup(char *str)
 }
 __setup("um_template_pause", template_pause_setup);
 
+static int __init template_pause_mfc_diag_setup(char *str)
+{
+	if (str && (str[0] == '=' && str[1] == '1'))
+		template_pause_mfc_diag_armed_flag = true;
+	else if (str && str[0] == '\0')
+		template_pause_mfc_diag_armed_flag = true;
+	if (template_pause_mfc_diag_armed_flag)
+		pr_warn("template_pause: MFC diagnostic mode armed — SIGKILL of M-fork child disabled, fault handler installed.  Expect MFC_FAULT lines or panics in boot.log.\n");
+	return 1;
+}
+__setup("um_template_pause_mfc_diag", template_pause_mfc_diag_setup);
+
 bool um_template_pause_armed(void)
 {
 	return template_pause_armed_flag;
 }
 EXPORT_SYMBOL_GPL(um_template_pause_armed);
+
+/*
+ * MFC_DIAG — M-fork child fault diagnostic.
+ *
+ * When the M-fork child path's diagnostic mode is enabled, the child
+ * installs this as its SIGSEGV/SIGBUS/SIGILL/SIGFPE handler.  On a
+ * fault, the handler writes the fault sig number, faulting address
+ * (siginfo->si_addr), and the user-mode RIP at fault time
+ * (ucontext->uc_mcontext.gregs[REG_RIP]) to fd 1 via raw write,
+ * then raw __NR_exit_group(7) so the harness can distinguish a
+ * "caught fault" exit (code 7) from a clean exit (code 0).
+ *
+ * Implementation is hand-rolled to avoid touching anything in
+ * libc, the kernel allocator, or the locking subsystem from the
+ * post-fork hazard window.  Each output byte goes through one
+ * inline-asm __NR_write call; the formatter is a per-nibble hex
+ * unroller.  No memory allocation, no printk, no kernel mutexes.
+ *
+ * The offset of REG_RIP within ucontext_t is x86_64-specific:
+ * struct ucontext { ... mcontext_t mc; ... }
+ * where mcontext_t starts with gregs[NGREG=23] then fpregs.
+ * On x86_64, REG_RIP is gregs[16].  ucontext_t's mc starts at
+ * offset 0x28 (sigset_t before it).  So &uc->uc_mcontext.gregs[16]
+ * is at uc + 0x28 + 16*8 = uc + 0xa8.
+ */
+static void mfc_diag_segv_handler(int sig, void *si_arg, void *uc_arg);
+static void mfc_diag_restorer(void);
 
 /*
  * Read + validate the identity blob.  Returns 0 on a present + valid
@@ -199,6 +253,230 @@ static int one_pause_cycle(const char *named_point, int identity_fd,
 }
 
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK
+
+/*
+ * MFC diagnostic restorer — used as sa_restorer when the M-fork
+ * child installs a custom signal handler.  The kernel jumps here
+ * when the handler returns; this thunk invokes __NR_rt_sigreturn
+ * to restore the pre-signal user-mode context.  Hand-rolled in
+ * inline asm because the C function prologue is not safe for use
+ * as a signal restorer (RSP would be wrong).
+ */
+__attribute__((naked))
+__used __maybe_unused
+static void mfc_diag_restorer(void)
+{
+	asm volatile (
+		"movq $15, %%rax\n\t"   /* __NR_rt_sigreturn */
+		"syscall\n\t"
+		: : : "memory"
+	);
+}
+
+/*
+ * MFC diagnostic SIGSEGV/SIGBUS/SIGILL/SIGFPE handler.  Dumps the
+ * fault info via raw write syscalls, then raw exit_group(7).
+ *
+ * Args follow the SA_SIGINFO calling convention:
+ *   rdi = signum, rsi = struct siginfo *, rdx = struct ucontext *
+ *
+ * We DO NOT trust ucontext layout from <signal.h> because (a) it's
+ * a userspace UAPI header (not normally included in kernel C) and
+ * (b) we need byte-exact offsets to reach REG_RIP and REG_CR2.
+ * Hand-roll the layout per Linux x86_64 ABI (siginfo_t.si_addr at
+ * offset 16, ucontext_t.uc_mcontext.gregs[REG_RIP=16] at offset
+ * 0x28 + 16*8 = 0xa8).
+ */
+/*
+ * MFC immediate post-fork-syscall dumper.  Called from a custom
+ * fork inner that does the fork syscall and IMMEDIATELY jumps here
+ * BEFORE doing any ret.  Dumps regs + nearby stack via raw write
+ * then exit_group(7) so we can see what the child's stack contents
+ * actually are at fork-syscall-return time.
+ *
+ * Only called from the M-fork child (parent goes a different path
+ * after its fork returns).
+ */
+__used __maybe_unused
+static void mfc_diag_post_fork_dumper(unsigned long rsp, unsigned long rbp,
+				       unsigned long r15)
+{
+	char buf[400];
+	int i, p = 0;
+	unsigned long val;
+	unsigned long *stack;
+
+#define APPEND_STR(s) do {					\
+		const char *_s = (s);				\
+		while (*_s && p < (int)sizeof(buf) - 1)	\
+			buf[p++] = *_s++;			\
+	} while (0)
+#define APPEND_HEX(v) do {					\
+		val = (v);					\
+		buf[p++] = '0';					\
+		buf[p++] = 'x';					\
+		for (i = 15; i >= 0; i--) {			\
+			unsigned int nib = (val >> (i*4)) & 0xf; \
+			buf[p++] = nib < 10 ? '0' + nib : 'a' + nib - 10; \
+		}						\
+	} while (0)
+
+	APPEND_STR("MFC_POSTFORK rsp=");
+	APPEND_HEX(rsp);
+	APPEND_STR(" rbp=");
+	APPEND_HEX(rbp);
+	APPEND_STR(" r15=");
+	APPEND_HEX(r15);
+	APPEND_STR(" stack[0..5]=");
+	stack = (unsigned long *)rsp;
+	for (i = 0; i < 6; i++) {
+		APPEND_HEX(stack[i]);
+		buf[p++] = ' ';
+	}
+	buf[p++] = '\n';
+#undef APPEND_STR
+#undef APPEND_HEX
+
+	{
+		register long rax_w asm("rax") = 1;
+		register long rdi_w asm("rdi") = 1;
+		register long rsi_w asm("rsi") = (long)buf;
+		register long rdx_w asm("rdx") = p;
+
+		asm volatile ("syscall\n\t"
+			: "+r" (rax_w)
+			: "r" (rdi_w), "r" (rsi_w), "r" (rdx_w)
+			: "rcx", "r11", "memory");
+	}
+
+	{
+		register long rax_x asm("rax") = 231;
+		register long rdi_x asm("rdi") = 7;
+
+		asm volatile ("syscall\n\t"
+			:
+			: "r" (rax_x), "r" (rdi_x)
+			: "rcx", "r11", "memory");
+	}
+	for (;;);
+}
+
+__used __maybe_unused
+static void mfc_diag_segv_handler(int sig, void *si_arg, void *uc_arg)
+{
+	unsigned long fault_addr = 0;
+	unsigned long fault_rip = 0;
+	unsigned long fault_cr2 = 0;
+	unsigned long fault_err = 0;
+	char buf[160];
+	int i, p = 0;
+	unsigned long val;
+
+	/* siginfo_t->si_addr is at offset 16 (sigtrap fields union). */
+	if (si_arg)
+		fault_addr = *(unsigned long *)((char *)si_arg + 16);
+
+	/* sigcontext_64 layout inside ucontext_t.uc_mcontext (offset
+	 * 0x28 inside uc):
+	 *   r8 r9 r10 r11 r12 r13 r14 r15  (offsets 0x28..0x68)
+	 *   rdi rsi rbp rbx rdx rax rcx rsp (offsets 0x68..0xa8)
+	 *   rip eflags ...                  (offset 0xa8, 0xb0)
+	 * Followed by cs/gs/fs/ss/err/trapno/oldmask/cr2 — cr2 at +0xe0,
+	 * err at +0xc0 (15 fields × 8 = 120 + base 0x28 = 0xa0, hmm
+	 * the layout is more complex).  Use known offsets.
+	 */
+	unsigned long fault_rsp = 0;
+	unsigned long fault_rbp = 0;
+	unsigned long fault_r15 = 0;
+
+	if (uc_arg) {
+		/* offset = 0x28 (uc_mcontext start) + N*8 for gregs[N] */
+		fault_r15 = *(unsigned long *)((char *)uc_arg + 0x28 + 7*8);
+		fault_rbp = *(unsigned long *)((char *)uc_arg + 0x28 + 10*8);
+		fault_rsp = *(unsigned long *)((char *)uc_arg + 0x28 + 15*8);
+		fault_rip = *(unsigned long *)((char *)uc_arg + 0x28 + 16*8);
+		/* err at sigcontext+152, cr2 at sigcontext+176 (after
+		 * the 8-byte cs/gs/fs/ss padding).  Plus 0x28 base.
+		 */
+		fault_err = *(unsigned long *)((char *)uc_arg + 0x28 + 152);
+		fault_cr2 = *(unsigned long *)((char *)uc_arg + 0x28 + 176);
+	}
+
+	/* Format: "MFC_FAULT sig=%d addr=0xX rip=0xX cr2=0xX err=0xX rsp=0xX rbp=0xX r15=0xX\n" */
+#define APPEND_STR(s) do {					\
+		const char *_s = (s);				\
+		while (*_s && p < (int)sizeof(buf) - 1)	\
+			buf[p++] = *_s++;			\
+	} while (0)
+#define APPEND_HEX(v) do {					\
+		val = (v);					\
+		buf[p++] = '0';					\
+		buf[p++] = 'x';					\
+		for (i = 15; i >= 0; i--) {			\
+			unsigned int nib = (val >> (i*4)) & 0xf; \
+			buf[p++] = nib < 10 ? '0' + nib : 'a' + nib - 10; \
+		}						\
+	} while (0)
+	APPEND_STR("MFC_FAULT sig=");
+	buf[p++] = '0' + ((sig / 10) % 10);
+	buf[p++] = '0' + (sig % 10);
+	APPEND_STR(" addr=");
+	APPEND_HEX(fault_addr);
+	APPEND_STR(" rip=");
+	APPEND_HEX(fault_rip);
+	APPEND_STR(" cr2=");
+	APPEND_HEX(fault_cr2);
+	APPEND_STR(" err=");
+	APPEND_HEX(fault_err);
+	APPEND_STR(" rsp=");
+	APPEND_HEX(fault_rsp);
+	APPEND_STR(" rbp=");
+	APPEND_HEX(fault_rbp);
+	APPEND_STR(" r15=");
+	APPEND_HEX(fault_r15);
+	APPEND_STR(" stack[0..5]=");
+	{
+		unsigned long *sp = (unsigned long *)fault_rsp;
+		int j;
+
+		for (j = 0; j < 6; j++) {
+			APPEND_HEX(sp[j]);
+			buf[p++] = ' ';
+		}
+	}
+	buf[p++] = '\n';
+#undef APPEND_STR
+#undef APPEND_HEX
+
+	/* Raw __NR_write to fd 1. */
+	{
+		register long rax_w asm("rax") = 1;
+		register long rdi_w asm("rdi") = 1;
+		register long rsi_w asm("rsi") = (long)buf;
+		register long rdx_w asm("rdx") = p;
+
+		asm volatile ("syscall\n\t"
+			: "+r" (rax_w)
+			: "r" (rdi_w), "r" (rsi_w), "r" (rdx_w)
+			: "rcx", "r11", "memory");
+	}
+
+	/* Raw __NR_exit_group(7) so harness can identify "caught
+	 * fault" via WEXITSTATUS(7).
+	 */
+	{
+		register long rax_x asm("rax") = 231;
+		register long rdi_x asm("rdi") = 7;
+
+		asm volatile ("syscall\n\t"
+			:
+			: "r" (rax_x), "r" (rdi_x)
+			: "rcx", "r11", "memory");
+	}
+	/* unreachable */
+	for (;;)
+		;
+}
 
 /*
  * Refuse the fork-on-resume path under the KVM backend.  Same
@@ -305,6 +583,47 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		}
 
 		/*
+		 * DIAG MODE: install MFC handler in MASTER pre-fork.
+		 * fork() inherits sigaction table, so M-fork child
+		 * will have OUR handler when it faults.  Done only
+		 * once per master lifetime via the armed_installed flag.
+		 */
+		if (template_pause_mfc_diag_armed_flag) {
+			static bool armed_installed;
+
+			if (!armed_installed) {
+				struct {
+					void (*sa_handler_)(int, void *, void *);
+					unsigned long sa_flags;
+					void (*sa_restorer)(void);
+					unsigned long sa_mask;
+				} act = {
+					.sa_handler_ = mfc_diag_segv_handler,
+					.sa_flags = 0x44000004UL,
+					.sa_restorer = mfc_diag_restorer,
+					.sa_mask = 0,
+				};
+				int s, sigs[4] = {11, 7, 4, 8};
+
+				for (s = 0; s < 4; s++) {
+					register long rax_a asm("rax") = 13;
+					register long rdi_a asm("rdi") = sigs[s];
+					register long rsi_a asm("rsi") = (long)&act;
+					register long rdx_a asm("rdx") = 0;
+					register long r10_a asm("r10") = 8;
+
+					asm volatile ("syscall\n\t"
+						: "+r" (rax_a)
+						: "r" (rdi_a), "r" (rsi_a),
+						  "r" (rdx_a), "r" (r10_a)
+						: "rcx", "r11", "memory");
+				}
+				armed_installed = true;
+				pr_info("template_pause: MFC handler installed pre-fork\n");
+			}
+		}
+
+		/*
 		 * (A.6) Detach all non-current tasks from the runqueue
 		 * BEFORE fork.  After fork, both halves have ONLY
 		 * `current` in their CFS runqueue, so schedule() can't
@@ -366,13 +685,27 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			 * exit_group bypasses any kernel cleanup that would
 			 * traverse the broken stub state.
 			 */
+			if (template_pause_mfc_diag_armed_flag) {
+				/* MFC diagnostic: do __NR_exit_group(0).
+				 * Handler was pre-installed by master (see
+				 * MFC handler install block before fork).
+				 */
+				register long rax_x asm("rax") = 231;
+				register long rdi_x asm("rdi") = 0;
+
+				asm volatile ("syscall\n\t"
+					:
+					: "r" (rax_x), "r" (rdi_x)
+					: "rcx", "r11", "memory");
+			}
+
 			/*
-			 * Pure infinite loop — master will SIGKILL the
-			 * M-fork child immediately in its parent path.
-			 * The child never executes any host syscall.
-			 * The for-loop only exists to satisfy the
-			 * compiler; it never iterates because SIGKILL
-			 * lands first.
+			 * Production path: pure infinite loop.  Master
+			 * SIGKILL'd the M-fork child immediately in its
+			 * parent path (see comment block by the kill below).
+			 * The child never executes any host syscall.  The
+			 * for-loop exists only to satisfy the compiler; it
+			 * never iterates because SIGKILL lands first.
 			 */
 			for (;;)
 				;
@@ -431,7 +764,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		 * reason as the other os_template_pause syscalls: glibc
 		 * cancellation-pipe hazard.
 		 */
-		{
+		if (!template_pause_mfc_diag_armed_flag) {
 			/* x86_64 __NR_kill = 62, SIGKILL = 9 */
 			register long rax_k asm("rax") = 62;
 			register long rdi_k asm("rdi") = (long)child_pid;

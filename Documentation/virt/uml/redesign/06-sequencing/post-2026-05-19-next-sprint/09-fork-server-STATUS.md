@@ -39,42 +39,79 @@ match, G7 zero kernel panics, G8 ≥ 5 % /proc capture rate.
 ## Open bug B1 (deferred to Phase 2; does not gate Phase 2a)
 
 After the 2026-05-20 P9 fix (pre-SIGKILL the M-fork child immediately
-in master's parent path), 0 panics across 100+ runs at N=100, with
-fork-stress G7 (zero panics) gating strictly.
+in master's parent path), 0 panics across 100 strict-gate runs at
+N=100, fork-stress G7 (zero panics) gating strictly.
 
-Bisect evidence accumulated during P8 → P9:
+## ROOT CAUSE (2026-05-20, isolated via MFC diagnostic mode)
 
-  * Any user-space code in the M-fork child (even single inline
-    syscall like `__NR_exit_group(0)` or `__NR_pwrite64`) triggers
-    UML's segv_handler to fire with `is_user=0` at a user-range
-    RIP.  The RIP increments by 2 per iteration — consistent
-    with some inherited stub state's IP being advanced and re-
-    faulted each fork.
-  * Master SIGKILL'ing the child before child returns to user
-    mode from the fork syscall → 0 panics.  This is the P9 fix.
+UML's physmem is mapped `MAP_SHARED` (see arch/um/os-Linux/process.c
+::os_map_memory: `flags = MAP_SHARED | MAP_FIXED | MAP_POPULATE`).
+UML kernel allocations — including kernel stacks via the buddy
+allocator → page allocator → physmem — live in this shared
+mapping.  Master and M-fork child therefore share the same
+PHYSICAL pages for their kernel stacks even though they're
+separate host processes.
 
-Root cause of WHY the child's first user-mode instruction triggers
-the SIGSEGV is NOT fully isolated.  Working hypothesis: UML's
-signal-handling state inherited via CoW (sigaltstack from
-`set_sigstack(cpu_irqstacks[0], THREAD_SIZE)` at skas startup,
-signal handlers from `set_handler(SIGSEGV/SIGBUS/...)`, current
-host signal mask from `os_template_pause_signals_block_host`) is
-in a post-fork state where ANY syscall-return path triggers UML's
-SIGSEGV handler to fire.  UML interprets the regs->is_user=0
-(default in initial state) and panics with the user-range RIP.
+After fork:
+  1. Master's `ret` in os_template_pause_fork_inner pops the
+     CORRECT return address from stack (CoW behavior is fine for
+     the immediate post-syscall path before master writes).
+  2. Master continues parent path, calling printk, write_child_pid,
+     and one_pause_cycle.  Each call PUSHES to the (shared) stack.
+  3. M-fork child, concurrently, is at its own `ret` in inner.
+     M-fork child reads the SAME stack slot — but by now master
+     has overwritten it (because MAP_SHARED, not CoW).
+  4. The popped value is whatever master most recently pushed:
+     typically a callee-saved register (R15) holding the address
+     of a static flag like `template_pause_mfc_diag_armed_flag`
+     (0x6072c02c) or other data pointer.
+  5. M-fork child jumps to that address, which is in .bss (not
+     executable), and SIGSEGVs.
+  6. UML's `sig_handler_common` sets `regs->is_user = 0`
+     (default), reads the user-range fault IP, calls segv() which
+     panics via `arch/um/kernel/trap.c::segv()` line 372
+     ("Kernel tried to access user memory at addr 0xX, ip 0xX").
 
-Investigating further requires a dedicated diagnostic path —
-either install a SIGSEGV handler in the M-fork child that dumps
-RIP/CR2/regs via raw write (chicken-and-egg: that handler's
-install path is also subject to the same hazard), or attach ptrace
-from master to the child and capture state.  Both are non-trivial
-and deferred to Phase 2 work where the child WILL need to do
-useful syscalls (identity re-plumbing: dev_set_mac_address,
-inet_rtm_newaddr, etc.).
+The 2-byte-per-iter address walk we observed earlier is master's
+R15 (or similar reg) holding successively-different stack addresses
+each iteration — the iteration counter accumulating in the
+allocator changes which slot master writes.
 
-Until B1 is closed, the M-fork child path MUST remain "infinite
-loop waiting to be SIGKILL'd by master".  Do not extend it with
-any inline syscall or kernel call.
+Diagnostic mode (compiled in but disarmed): boot with
+`um_template_pause_mfc_diag=1` to skip the SIGKILL and install
+`mfc_diag_segv_handler` for SIGSEGV/SIGBUS/SIGILL/SIGFPE in master
+pre-fork.  M-fork child inherits the handler via fork's sigaction
+table inheritance.  Faults are captured as `MFC_FAULT sig=N
+addr=0xX rip=0xX cr2=0xX err=0xX rsp=0xX rbp=0xX r15=0xX
+stack[0..5]=...` lines in the boot log.
+
+## Phase 2a contract
+
+For Phase 2a, M-fork children have no role: master is the only
+process that ever returns to guest userspace (pool member identity
+re-plumbing is Phase 2 work).  The empirical SIGKILL fix is the
+correct contract: master forks, immediately SIGKILLs the child,
+continues looping.  Strict fork-stress passes 100/100.
+
+## Phase 2 path forward (when child needs to actually run)
+
+To safely execute M-fork child user-space code, one of:
+
+  (a) Use `__NR_clone` instead of `__NR_fork`, passing an explicit
+      private child_stack mmap'd MAP_PRIVATE.  Master's stack
+      writes to its own page no longer corrupt the child's view.
+  (b) Pre-fork, master copies its kernel stack to a private mmap;
+      post-fork, the child fixes its RSP to point at the private
+      copy.  More invasive; preserves fork()'s simpler ABI.
+  (c) Refactor UML to allocate kernel stacks outside physmem
+      (large change; would require an alternative stub-stack
+      mapping mechanism since stub children also need to map
+      kernel stacks).
+
+(a) is the simplest path and is what Phase 2 will use.
+
+Until then, do NOT extend the M-fork child path with any inline
+syscall or kernel call.  The SIGKILL is the production contract.
 | 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
