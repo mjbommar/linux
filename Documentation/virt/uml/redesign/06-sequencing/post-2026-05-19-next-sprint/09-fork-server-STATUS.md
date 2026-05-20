@@ -10,11 +10,15 @@ should be re-read at the start of each session.
 |-------|--------------------------------------|-----------------------|-----------------|
 | 1a    | Kernel template-pause hook           | LANDED (2026-05-20)   | `5051e9c90342`  |
 | 1b    | umlctl integration (MVP `pool spawn`)| LANDED (2026-05-20)   | `5979caa69440`  |
-| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — broken** (2026-05-20) | this commit |
-| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on 2a fix  | —               |
+| 2a-P1 | start_userspace_redo + os_skas_reap_stub | LANDED (2026-05-20) | `0993765a704c` |
+| 2a-P2 | mm_list-walking teardown / respawn helpers | LANDED (2026-05-20) | `d40d124f3abe` |
+| 2a-P4 | Wire teardown → fork → respawn into loop | LANDED (2026-05-20)  | `5dac39adad4f` |
+| 2a-P3 | `assert_fork_safety` mid-syscall refusal | DEFERRED (defensive; not needed yet) | — |
+| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — primary hazard fixed, secondary hazard remains** | (above 3 commits) |
+| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on 2a-P5 fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
-| 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a fix     | —               |
+| 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a-P5 fix  | —               |
 
 ## What works today
 
@@ -158,7 +162,55 @@ Call Trace:
   Template-pause runs AFTER init has executed, so stubs are
   already up.
 
-**Fix sketches**:
+**Update 2026-05-20 (after landing Patches 1, 2, 4 of the
+PHASE2A-DESIGN.md plan)**:
+
+The SKAS stub-pid aliasing hazard (the primary root cause the
+research-agent narrowed) is **fixed** by the pre-fork teardown.
+Smoke run with `um_template_pause=fork`:
+
+```
+template_pause: torn down 1 stub(s) pre-fork    <-- new
+template_pause: fork returned pid=N
+template_pause: PARENT branch entered (new child pid=N)
+template_pause: raising SIGSTOP at "fork-min" (pid=master_pid)
+Kernel panic - not syncing: Kernel mode fault at addr 0x4, ip 0x4
+ [<6003a6fa>] um_template_pause_enter+0xf0/0x100
+ [<6003a7d0>] template_pause_proc_write+0xc6/0xdd
+```
+
+The crash IP changed from the previous session's
+`0x68803bde` (inside stub-child code) to `0x4` (NULL function
+call).  The frames show `um_template_pause_enter+0xf0` — the
+return-from-fork_on_resume_loop epilogue — meaning the panicking
+process IS returning from fork_on_resume_loop.  That can only
+happen in the CHILD path (the parent's path is an infinite loop).
+So **M-fork1 is the crashing process**, panicking as it tries to
+return up through the UML kernel scheduler after worker_init().
+
+This is the **AFL forkserver v1 ceiling** — the same class of bug
+documented in `arch/um/kernel/snapshot.c` around lines 340-360.
+UML schedules tasks via UML_LONGJMP into jmp_buf structures saved
+pre-fork.  M-fork1's jmp_buf references stack frames that are
+valid only in the parent's address-space layout; CoW makes the
+addresses *look* right but any actual scheduler activity in the
+child trips a NULL function pointer in switch_threads().
+
+The fix is not about SKAS stubs at all.  It's about scheduler-state
+preservation across fork — the AFL path documents that the worker
+"may run un-preemptible code (echo, exit) before halting" but
+cannot reliably yield to the scheduler.  Template-pause's child
+returns up through several stack frames before halting, which is
+enough scheduler activity to trip the same hazard.
+
+**Next investigation step (Patch 5 of the PHASE2A-DESIGN.md plan)**:
+the child's return path needs to be either (a) replaced with a
+direct guest-userspace dispatch that bypasses scheduler return
+paths, or (b) extended to repair jmp_buf state post-fork.  Both
+need familiarity with `arch/um/kernel/process.c::switch_threads`
+and the UML_LONGJMP machinery in `arch/um/include/shared/longjmp.h`.
+
+**Fix sketches** (original — historical, for context):
 
   1. **Tear down stubs in the PARENT pre-fork, respawn post-fork
      in BOTH halves.**  Right before `os_template_pause_fork()`,
