@@ -71,10 +71,12 @@ struct openflags {
 	unsigned int a : 1;	/* O_APPEND */
 	unsigned int e : 1;	/* O_EXCL */
 	unsigned int cl : 1;    /* FD_CLOEXEC */
+	unsigned int dr : 1;    /* O_DIRECT (memo #2 Phase 4) */
 };
 
 #define OPENFLAGS() ((struct openflags) { .r = 0, .w = 0, .s = 0, .c = 0, \
-					  .t = 0, .a = 0, .e = 0, .cl = 0 })
+					  .t = 0, .a = 0, .e = 0, .cl = 0, \
+					  .dr = 0 })
 
 static inline struct openflags of_read(struct openflags flags)
 {
@@ -133,6 +135,12 @@ static inline struct openflags of_excl(struct openflags flags)
 static inline struct openflags of_cloexec(struct openflags flags)
 {
 	flags.cl = 1;
+	return flags;
+}
+
+static inline struct openflags of_direct(struct openflags flags)
+{
+	flags.dr = 1;
 	return flags;
 }
 

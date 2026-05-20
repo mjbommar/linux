@@ -47,15 +47,19 @@ setup_image() {
 
 run_uml() {
     local label=$1     # "legacy" or "io_uring"
-    local extra_cmd=$2 # e.g. "ubd_no_io_uring=1" or ""
+    local extra_cmd=$2 # e.g. "um_ubd_no_uring=1" or ""
     local img=$3
     local init=$4
     local out=$OUT/boot-$label.log
 
+    # ubd0D=... opens the backing file with O_DIRECT, bypassing
+    # the host page cache so the queue-depth difference between
+    # the io_uring path and the legacy depth-1 helper actually
+    # shows up in measured throughput (memo #2 Phase 4).
     timeout 240 "$KERNEL" \
         mem=1024M rootfstype=hostfs rootflags=/ root=/dev/root rw \
         backend=kvm-v2 ncpus=4 \
-        ubda="$img" \
+        ubd0D="$img" \
         $extra_cmd \
         init="$init" >"$out" 2>&1 || true
 

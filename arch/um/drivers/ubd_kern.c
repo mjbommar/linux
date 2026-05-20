@@ -296,7 +296,7 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 		*index_out = n;
 
 	err = -EINVAL;
-	for (i = 0; i < sizeof("rscdt="); i++) {
+	for (i = 0; i < sizeof("rscdtD="); i++) {
 		switch (*str) {
 		case 'r':
 			flags.w = 0;
@@ -313,12 +313,30 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 		case 't':
 			ubd_dev->no_trim = 1;
 			break;
+		case 'D':
+			/*
+			 * memo #2 Phase 4: O_DIRECT on the backing file.
+			 * Skips the host page cache so io_uring's queue
+			 * depth (UBD_RING_DEPTH = 256) actually shows
+			 * up as a measured win — buffered I/O lets the
+			 * host pagecache absorb writes and mask the
+			 * ring's advantage over the legacy depth-1
+			 * helper thread.
+			 *
+			 * Requires page-aligned bvecs (the block layer
+			 * already guarantees this for whole-page bios;
+			 * sub-page sectored I/O via COW sector_mask
+			 * could still trip O_DIRECT alignment on some
+			 * host filesystems).
+			 */
+			flags.dr = 1;
+			break;
 		case '=':
 			str++;
 			goto break_loop;
 		default:
 			*error_out = "Expected '=' or flag letter "
-				"(r, s, c, t or d)";
+				"(r, s, c, t, D, or d)";
 			goto out;
 		}
 		str++;
@@ -395,6 +413,12 @@ __uml_help(ubd_setup,
 "    UMLs and file locking will be turned off - this is appropriate for a\n"
 "    cluster filesystem and inappropriate at almost all other times.\n\n"
 "    't' will disable trim/discard support on the device (enabled by default).\n\n"
+"    'D' will open the backing file with O_DIRECT, bypassing the host page\n"
+"    cache. Pairs naturally with the io_uring submission path (memo #2);\n"
+"    the host's queue depth then drives throughput rather than the page\n"
+"    cache. Requires page-aligned bvecs (default for whole-page block I/O\n"
+"    on Linux); sub-page sectored I/O via COW may trip O_DIRECT alignment\n"
+"    on some host filesystems.\n\n"
 "    An optional device serial number can be exposed using the serial parameter\n"
 "    on the cmdline which is exposed as a sysfs entry. This is particularly\n"
 "    useful when a unique number should be given to the device. Note when\n"

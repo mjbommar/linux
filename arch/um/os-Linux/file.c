@@ -184,6 +184,8 @@ int os_open_file(const char *file, struct openflags flags, int mode)
 		f |= O_EXCL;
 	if (flags.a)
 		f |= O_APPEND;
+	if (flags.dr)
+		f |= O_DIRECT;
 
 	fd = open64(file, f, mode);
 	if (fd < 0)
