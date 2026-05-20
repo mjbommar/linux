@@ -799,6 +799,115 @@ static void test_kvm_v2_record_sigalrm(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+/**
+ * test_kvm_v2_record_time_travel - memo 04 Phase 4 round-trip.
+ * @test: KUnit test handle.
+ *
+ * Mirrors test_kvm_v2_record_rdtsc but for time_travel_set_time
+ * advances.  Verifies that the (ns_at_advance, syscall_count_anchor)
+ * pair round-trips byte-identically through observe + consume, and
+ * that the anchor reflects rec->syscall_count at the observe site.
+ *
+ * Confirms the Phase 2 (observe) + Phase 3 (consume) API contract
+ * the post-2026-05-19 sprint memo 04 sets up.  Independent of the
+ * live wiring from arch/um/kernel/time.c::time_travel_set_time
+ * (which lands as a follow-on: replace the current
+ * __um_time_travel_clock hook with a record-aware version that
+ * observes / consumes via these APIs).
+ */
+static void test_kvm_v2_record_time_travel(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+	const u64 ns_pattern[] = {
+		1000ULL,            /* 1 us */
+		2500ULL,
+		1000000ULL,         /* 1 ms */
+		1000000000ULL,      /* 1 s  */
+		0xffffffffffffffffULL,  /* saturated */
+	};
+	u64 ns_got, anchor_got;
+	int rc;
+	size_t i;
+
+	rec = kvm_v2_record_alloc(0);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	rc = kvm_v2_record_start(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/*
+	 * Interleave time-travel observes with syscall observes so the
+	 * captured syscall_count_anchor varies between entries (same
+	 * shape as the SIGALRM anchor coverage).  Anchor[i] == number
+	 * of observe_syscall calls before the i-th observe_time_travel.
+	 */
+	for (i = 0; i < ARRAY_SIZE(ns_pattern); i++) {
+		size_t k;
+
+		for (k = 0; k < i; k++) {
+			/* Dummy syscall observation — NULL regs is
+			 * tolerated by observe_syscall (see existing
+			 * test_kvm_v2_record_observe usage).
+			 */
+			kvm_v2_record_observe_syscall(rec, 39 /* __NR_getpid */,
+						      0, NULL);
+		}
+		kvm_v2_record_observe_time_travel(rec, ns_pattern[i]);
+	}
+
+	rc = kvm_v2_record_stop(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	rc = kvm_v2_record_replay(rec);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	/* Walk the stream — interleaved syscall/tt entries. */
+	{
+		size_t tt_idx = 0;
+		size_t syscalls_consumed_total = 0;
+		long got;
+
+		for (i = 0; i < ARRAY_SIZE(ns_pattern); i++) {
+			size_t k;
+
+			for (k = 0; k < i; k++) {
+				got = 0;
+				rc = kvm_v2_record_consume_syscall(rec,
+								   39, &got);
+				KUNIT_ASSERT_EQ_MSG(test, rc, 1,
+						    "consume_syscall pre-tt[%zu][%zu] rc=%d",
+						    i, k, rc);
+				syscalls_consumed_total++;
+			}
+			ns_got = 0;
+			anchor_got = 0;
+			rc = kvm_v2_record_consume_time_travel(rec, &ns_got,
+							       &anchor_got);
+			KUNIT_ASSERT_EQ_MSG(test, rc, 1,
+					    "consume_time_travel[%zu] rc=%d",
+					    tt_idx, rc);
+			KUNIT_EXPECT_EQ_MSG(test, ns_got, ns_pattern[i],
+					    "tt[%zu] ns got %#llx expected %#llx",
+					    tt_idx, ns_got, ns_pattern[i]);
+			KUNIT_EXPECT_EQ_MSG(test, anchor_got,
+					    (u64)syscalls_consumed_total,
+					    "tt[%zu] anchor got %llu expected %zu",
+					    tt_idx, anchor_got,
+					    syscalls_consumed_total);
+			tt_idx++;
+		}
+	}
+
+	/* End-of-log. */
+	ns_got = 0xdeadbeefdeadbeefULL;
+	anchor_got = 0;
+	rc = kvm_v2_record_consume_time_travel(rec, &ns_got, &anchor_got);
+	KUNIT_EXPECT_EQ_MSG(test, rc, -ENODATA,
+			    "consume past end returned %d (want -ENODATA)", rc);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_basic),
 	KUNIT_CASE(test_kvm_v2_record_state_transitions),
@@ -807,6 +916,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_record_gadget_bypass),
 	KUNIT_CASE(test_kvm_v2_record_rdtsc),
 	KUNIT_CASE(test_kvm_v2_record_sigalrm),
+	KUNIT_CASE(test_kvm_v2_record_time_travel),
 	{}
 };
 
