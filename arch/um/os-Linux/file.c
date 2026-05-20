@@ -13,6 +13,7 @@
 #include <linux/falloc.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/uio.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -83,6 +84,29 @@ int os_access(const char *file, int mode)
 		return -errno;
 
 	return 0;
+}
+
+/*
+ * Memo #7 Phase 1: scatter-gather write.  Used by the console
+ * ring-wrap coalescing path in arch/um/drivers/line.c to combine
+ * two write(2) syscalls into one writev(2) when the LINE_BUFSIZE
+ * ring wraps.  Loops on EINTR; treats EAGAIN as "0 bytes written"
+ * (the caller already handles partial-write retry).
+ */
+ssize_t os_writev(int fd, const struct iovec *iov, int iovcnt)
+{
+	ssize_t n;
+
+	do {
+		errno = 0;
+		n = writev(fd, iov, iovcnt);
+	} while (n < 0 && errno == EINTR);
+
+	if (n >= 0)
+		return n;
+	if (errno == EAGAIN)
+		return 0;
+	return -errno;
 }
 
 /* FIXME? required only by hostaudio (because it passes ioctls verbatim) */

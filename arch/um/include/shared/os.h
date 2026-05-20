@@ -155,6 +155,15 @@ extern int os_mode_fd(int fd, int mode);
 
 extern int os_seek_file(int fd, unsigned long long offset);
 extern int os_open_file(const char *file, struct openflags flags, int mode);
+
+/*
+ * Memo #7 Phase 1: scatter-gather write wrapper for the console
+ * ring-wrap coalescing case in line.c::flush_buffer.  Saves one
+ * syscall per wrap.  Returns total bytes written, 0 on EAGAIN,
+ * or -errno.
+ */
+struct iovec;
+extern ssize_t os_writev(int fd, const struct iovec *iov, int iovcnt);
 extern int os_read_file(int fd, void *buf, int len);
 extern int os_write_file(int fd, const void *buf, int count);
 extern int os_sync_file(int fd);
