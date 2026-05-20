@@ -251,7 +251,7 @@ if ! grep -q CASE3_POST_PAUSE "$OUT/case3.log"; then
 	tail -40 "$OUT/case3.log"
 	exit 1
 fi
-if ! grep -q "template_pause: identity instance=\"pool-member-3\"" "$OUT/case3.log"; then
+if ! grep -q "template_pause: identity .*instance=\"pool-member-3\"" "$OUT/case3.log"; then
 	echo "FAIL case 3: kernel did not parse identity blob"
 	grep template_pause "$OUT/case3.log"
 	exit 1

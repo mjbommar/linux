@@ -10,11 +10,11 @@ should be re-read at the start of each session.
 |-------|--------------------------------------|-----------------------|-----------------|
 | 1a    | Kernel template-pause hook           | LANDED (2026-05-20)   | `5051e9c90342`  |
 | 1b    | umlctl integration (MVP `pool spawn`)| LANDED (2026-05-20)   | `5979caa69440`  |
-| 1c    | `umlctl pool serve` daemon + multi-take | PENDING            | —               |
+| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — broken** (2026-05-20) | this commit |
+| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on 2a fix  | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
-| 2a    | Kernel-side fork-on-resume loop      | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
-| 4     | syzkaller `vm/uml` Go shim           | PENDING               | —               |
+| 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a fix     | —               |
 
 ## What works today
 
@@ -65,6 +65,92 @@ Three selftests guard the end-to-end:
    The KVM-aware fork path is filed as Phase 5+.
 
 ## Next steps, in order of priority
+
+### Phase 2a failure analysis (2026-05-20 attempt)
+
+Phase 2a kernel code is in tree (this commit) but the fork-on-resume
+loop is **known-broken** and gated behind
+`CONFIG_UM_TEMPLATE_PAUSE_FORK` (off by default, EXPERIMENTAL).
+Setup arms via `um_template_pause=fork` on the cmdline.
+
+**Observed failure** (smoke test `~/src/tplpause-fork-smoke2.sh`,
+2026-05-20):
+
+```
+template_pause: armed via kernel cmdline (fork-on-resume) — EXPERIMENTAL
+[boot ...]
+POOL_BOOT_OK
+template_pause: enter("fork-loop") — identity_fd=4
+template_pause: raising SIGSTOP at "fork-loop" (pid=N)
+[supervisor sends SIGCONT]
+template_pause: resumed via SIGCONT at "fork-loop" (pid=N, count=1)
+template_pause: identity at "fork-loop" instance="pool-take-1" mac=... [valid]
+template_pause: raising SIGSTOP at "fork-loop" (pid=N)   ← parent's second pause
+Kernel panic - not syncing: Kernel tried to access user memory at addr 0x2670fc, ip 0x68803bde
+CPU: 0 UID: 0 PID: 1 Comm: init.sh
+Call Trace:
+ fork_on_resume_loop+0x148   ← right after one_pause_cycle() returns
+ um_template_pause_enter
+ template_pause_proc_write
+ vfs_write
+ ksys_write
+ sys_write
+ handle_syscall
+```
+
+**What works structurally**:
+  * Master fork(2)s exactly once per SIGCONT.
+  * Parent successfully writes the new child's pid to memfd offset
+    260 (verified by reading it back from the supervisor side).
+  * Parent's second pr_info("raising SIGSTOP") line prints — the
+    control flow IS reaching the next iteration.
+
+**What breaks**:
+  * After the parent's second SIGSTOP attempt, a guest userspace
+    task (PID 1 = init.sh, the task that was blocked in
+    write(/proc/um/template_pause)) SEGVs.  The IP (0x68803bde)
+    is in UML's seccomp stub address range; the access at 0x2670fc
+    is a small invalid address.
+
+**Root cause (probable)**:
+  Same v1-ceiling class of bug documented in
+  `arch/um/kernel/snapshot.c` for the AFL forkserver path.  UML
+  emulates guest userspace via the SKAS/seccomp stub mechanism,
+  which uses per-stub-process tids and shared mmap state.  After
+  the host process forks, those tids point into the parent's
+  address space and the shared stub mmap state diverges in
+  CoW-incompatible ways.
+
+  The AFL forkserver path documents this in `um_snapshot_worker_init()`:
+
+  > Seccomp stub children: no stubs exist at ready-point because
+  > no guest userspace task has run yet. First user-space syscall
+  > in a worker (commit 3d) will lazily spawn one via
+  > start_userspace().
+
+  But by the time `um_template_pause_enter()` runs (after init has
+  already started), the seccomp stubs ARE up — they were spawned
+  during the boot path before init.sh ran.  So we're in the
+  un-handled-by-AFL territory.
+
+**Fix sketches**:
+
+  1. **Rebuild stubs in worker_init.**  Extend
+     `um_snapshot_worker_init()` to tear down inherited stub
+     children and re-spawn them.  Touches
+     `arch/um/os-Linux/skas/process.c` heavily.
+  2. **Tear down + respawn stubs in BOTH parent and child.**  The
+     parent's stub state is also corrupted (it's the parent's
+     SEGV the smoke test observes).  Tear-and-respawn before the
+     first fork; thereafter forks inherit stub-less state.
+  3. **Avoid running userspace in the parent post-fork.**
+     Requires the parent to never re-enter UML kernel scheduling
+     — which is what `os_snapshot_block_iter_signals()` is meant
+     to do but evidently doesn't fully cover this case.
+
+Estimated effort: 1–2 weeks for sketch #2, longer for #1.  Filed
+as the blocker on Phase 1c (daemon), Phase 4 (syzkaller shim), and
+the performance acceptance gates in §Step 4 below.
 
 ### Step 1 — Kernel-side fork loop (~80 LoC kernel)
 

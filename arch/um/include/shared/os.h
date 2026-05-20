@@ -266,6 +266,8 @@ extern void os_snapshot_unblock_iter_signals(void);
 extern int os_template_pause_stop_self(void);
 extern int os_template_pause_identity_fd(void);
 extern ssize_t os_template_pause_read_identity(int fd, void *buf, size_t len);
+extern int os_template_pause_fork(void);
+extern int os_template_pause_write_child_pid(int fd, off_t offset, int child_pid);
 
 extern void init_new_thread_signals(void);
 

@@ -34,8 +34,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <asm/unistd.h>
+#include <linux/types.h>
 
 #include <os.h>
 
@@ -95,6 +98,65 @@ int os_template_pause_identity_fd(void)
 		return -EBADF;
 
 	return (int)fd;
+}
+
+/*
+ * Fork via raw __NR_fork.  Identical mechanics to
+ * os_snapshot_fork_worker (workstream C-09): bypass glibc's
+ * cancellation-point + per-thread state machinery that has
+ * historically misbehaved when called from UML kernel context.
+ * Returns the child pid in the parent, 0 in the child, or
+ * a negative errno.
+ *
+ * Phase 2a (fork-on-resume) uses this for every taken pool member.
+ * The KVM-backend restriction is enforced in-kernel (see
+ * arch/um/kernel/template_pause.c assert_fork_safety) — under KVM
+ * fork() aliases /dev/kvm fds and per-vCPU mmap state and corrupts
+ * both parent and child.
+ */
+int os_template_pause_fork(void)
+{
+	long ret;
+
+	ret = syscall(__NR_fork);
+	if (ret < 0)
+		return -errno;
+	return (int)ret;
+}
+
+/*
+ * Write the just-forked child's host pid into the identity memfd
+ * at offset @offset (typically `sizeof(struct um_template_identity)`
+ * so the supervisor can read it back without conflicting with the
+ * blob at offset 0).  Used by the parent side of the fork-on-resume
+ * loop to report the new pool-member pid to the supervisor.
+ *
+ * Returns 0 on success, -errno on syscall failure.
+ */
+int os_template_pause_write_child_pid(int fd, off_t offset, int child_pid)
+{
+	__u32 le = (__u32)child_pid;
+	ssize_t n;
+
+	if (fd < 0)
+		return -EBADF;
+	if (lseek(fd, offset, SEEK_SET) < 0)
+		return -errno;
+	for (;;) {
+		n = write(fd, &le, sizeof(le));
+		if (n == (ssize_t)sizeof(le))
+			return 0;
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		/* short write — implausible for memfd, but retry from
+		 * the new offset.
+		 */
+		if (lseek(fd, offset + n, SEEK_SET) < 0)
+			return -errno;
+	}
 }
 
 /*
