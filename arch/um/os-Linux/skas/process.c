@@ -477,39 +477,31 @@ out_close:
 }
 
 /*
- * start_userspace_redo() — replace a stub child after a fork(2).
+ * os_skas_reap_stub() — SIGKILL + wait4 the stub child attached to a
+ * given mm_id, close the parent-side socketpair end, and zero the
+ * stub_data round-trip fields so a subsequent start_userspace()
+ * sees fresh state.
  *
- * Used by the template-pause fork-on-resume loop (Memo 09 Phase 2a):
+ * Used by the template-pause fork-on-resume loop (Memo 09 Phase 2a)
+ * BOTH:
+ *   * Pre-fork in the master, where every stub child must be killed
+ *     so fork() does not alias their pids into the forked-child
+ *     UML's mm_list (where two processes would race to drive them).
+ *   * As the first half of start_userspace_redo() below.
  *
- *   * Pre-fork in the master: every per-mm stub child is killed so
- *     fork() does not alias their pids into the forked-child UML's
- *     mm_list (where they would be raced against by both sides).
- *   * Post-fork in BOTH parent and child paths: every mm whose stub
- *     was just killed gets a fresh stub child clone()'d in the local
- *     process tree.
+ * Idempotent: if mm_id->pid <= 0, the kill/wait is skipped and only
+ * the sock close / stub_data zero / id field reset runs.
  *
- * Contract:
- *   * If @mm_id->pid > 0, sends SIGKILL + wait4(__WALL) (raw __NR_wait4
- *     per the os_snapshot_waitpid_status rationale: glibc's
- *     cancellation-point wrapper has historically misbehaved when
- *     called from UML kernel context).
- *   * Closes @mm_id->sock if open.
- *   * Zeroes the stub_data round-trip fields (futex, signal, si_offset,
- *     mctx_offset, syscall_data_len) — a leftover syscall_data_len
- *     from before the kill would cause the new stub's first
- *     stub_signal_interrupt iteration to recvmsg() against a stale fd
- *     map and fail confusingly.
- *   * Calls start_userspace() to clone a fresh stub child.
+ * Uses raw __NR_wait4 per the os_snapshot_waitpid_status rationale:
+ * glibc's cancellation-point waitpid wrapper has historically
+ * misbehaved when called from UML kernel context.
  *
- * Idempotent w.r.t. the kill side: if @mm_id->pid is -1 (already
- * dead / never spawned) the kill is skipped and only the respawn
- * runs.  Always respawns.
- *
- * Returns 0 on success, -errno on clone/socketpair failure.  Failure
- * leaves @mm_id->pid == -1 so subsequent vcpu_run sees the dead-mm
- * state that the existing mm_sigchld_irq logic already handles.
+ * Returns 0 on success, -errno on kill/wait failure (other than
+ * ESRCH/ECHILD which are treated as "stub already gone" and silently
+ * tolerated).  On error, leaves @mm_id in a partially-reaped state;
+ * the caller is responsible for not driving the stub further.
  */
-int start_userspace_redo(struct mm_id *mm_id)
+int os_skas_reap_stub(struct mm_id *mm_id)
 {
 	struct stub_data *proc_data = (void *)mm_id->stack;
 	long ret;
@@ -563,6 +555,26 @@ int start_userspace_redo(struct mm_id *mm_id)
 	mm_id->syscall_data_len = 0;
 	mm_id->syscall_fd_num = 0;
 
+	return 0;
+}
+
+/*
+ * start_userspace_redo() — replace a stub child after a fork(2).
+ *
+ * Equivalent to os_skas_reap_stub() followed by start_userspace().
+ * Idempotent w.r.t. the kill side: a previously-reaped mm
+ * (pid == -1) is just respawned.  Always respawns.
+ *
+ * Returns 0 on success, -errno on clone/socketpair failure.  Failure
+ * leaves @mm_id->pid == -1 so subsequent vcpu_run sees the dead-mm
+ * state that the existing mm_sigchld_irq logic already handles.
+ */
+int start_userspace_redo(struct mm_id *mm_id)
+{
+	int err = os_skas_reap_stub(mm_id);
+
+	if (err)
+		return err;
 	return start_userspace(mm_id);
 }
 

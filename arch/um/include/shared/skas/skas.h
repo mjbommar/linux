@@ -27,4 +27,27 @@ extern void current_mm_sync(void);
 void initial_jmpbuf_lock(void);
 void initial_jmpbuf_unlock(void);
 
+/*
+ * Memo 09 Phase 2a — bulk stub teardown / respawn.
+ *
+ * Walks the per-process mm_list (private to arch/um/kernel/skas/mmu.c)
+ * and applies a SIGKILL+wait4 sweep across every stub child, then a
+ * start_userspace_redo sweep to re-create them.  Used by the template-
+ * pause fork-on-resume loop to eliminate stub-pid aliasing across a
+ * fork(2) of the host UML process.
+ *
+ * Both helpers MAY block (kill is non-blocking but the wait isn't,
+ * and start_userspace performs a futex round-trip).  Callers must be
+ * in process context and must hold no lock that conflicts with
+ * mm_list_lock.
+ *
+ * Safe-to-call invariant: mm_list must be quiescent — no concurrent
+ * init_new_context or destroy_context.  The template-pause caller
+ * achieves this by gating UML signal dispatch
+ * (os_snapshot_block_iter_signals) and being the only userspace
+ * syscall in flight (its own write to /proc/um/template_pause).
+ */
+extern int um_skas_teardown_all_stubs(void);
+extern int um_skas_respawn_all_stubs(void);
+
 #endif

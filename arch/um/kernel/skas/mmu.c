@@ -230,3 +230,122 @@ static int __init init_child_tracking(void)
 	return 0;
 }
 early_initcall(init_child_tracking)
+
+/*
+ * Memo 09 Phase 2a — bulk stub teardown + respawn.
+ *
+ * Two helpers used by arch/um/kernel/template_pause.c's
+ * fork-on-resume loop to eliminate stub-pid aliasing across a
+ * fork(2) of the host UML process:
+ *
+ *   - um_skas_teardown_all_stubs() — SIGKILL+wait4 every stub child
+ *     in mm_list, mark each mm's id.pid = -1 (and id.sock = -1).
+ *
+ *   - um_skas_respawn_all_stubs() — for every mm whose id.pid is -1
+ *     (sentinel set by the teardown), call start_userspace_redo()
+ *     to clone a fresh stub child.
+ *
+ * The snapshot-then-iterate pattern (mirrors mm_sigchld_irq's lock
+ * discipline): hold mm_list_lock only long enough to copy
+ * struct mm_id * pointers into a kmalloc'd array, drop the lock,
+ * then call host syscalls.  See the contract comment on the
+ * extern declarations in shared/skas/skas.h.
+ */
+
+/* Build a snapshot of mm_id pointers from mm_list.  Returns the
+ * number of entries written to @out (caller pre-sized via a count
+ * pass) on success, or -ENOMEM on alloc failure.  Callers free @out
+ * with kfree().
+ */
+static int snapshot_mm_ids(struct mm_id ***out)
+{
+	struct mm_context *ctx;
+	struct mm_id **arr;
+	int n = 0, i = 0;
+
+	/* Count under the lock so the allocation matches. */
+	scoped_guard(spinlock_irqsave, &mm_list_lock) {
+		list_for_each_entry(ctx, &mm_list, list)
+			n++;
+	}
+
+	if (n == 0) {
+		*out = NULL;
+		return 0;
+	}
+
+	arr = kmalloc_array(n, sizeof(*arr), GFP_KERNEL);
+	if (!arr)
+		return -ENOMEM;
+
+	scoped_guard(spinlock_irqsave, &mm_list_lock) {
+		list_for_each_entry(ctx, &mm_list, list) {
+			if (i < n)
+				arr[i++] = &ctx->id;
+		}
+	}
+
+	*out = arr;
+	return i;
+}
+
+int um_skas_teardown_all_stubs(void)
+{
+	struct mm_id **arr;
+	int n, i, dead = 0;
+
+	n = snapshot_mm_ids(&arr);
+	if (n <= 0)
+		return n;
+
+	for (i = 0; i < n; i++) {
+		struct mm_id *id = arr[i];
+		int err;
+
+		if (id->pid <= 0)
+			continue;
+
+		err = os_skas_reap_stub(id);
+		if (err) {
+			printk(KERN_WARNING
+			       "%s: reap_stub(pid=%d) failed: %d\n",
+			       __func__, id->pid, err);
+			continue;
+		}
+		dead++;
+	}
+
+	kfree(arr);
+	return dead;
+}
+
+int um_skas_respawn_all_stubs(void)
+{
+	struct mm_id **arr;
+	int n, i, respawned = 0, last_err = 0;
+
+	n = snapshot_mm_ids(&arr);
+	if (n <= 0)
+		return n;
+
+	for (i = 0; i < n; i++) {
+		struct mm_id *id = arr[i];
+		int err;
+
+		/* Respawn the mms we just tore down (and any that were
+		 * already dead — start_userspace_redo handles both).
+		 */
+		err = start_userspace_redo(id);
+		if (err) {
+			printk(KERN_ERR
+			       "%s: respawn for mm %p failed: %d\n",
+			       __func__, id, err);
+			last_err = err;
+			continue;
+		}
+		respawned++;
+	}
+
+	kfree(arr);
+	return last_err ? last_err : respawned;
+}
