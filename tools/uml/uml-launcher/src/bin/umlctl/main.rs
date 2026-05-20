@@ -21,6 +21,33 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use mission::MissionArgs;
+
+#[derive(clap::Args, Debug)]
+struct StraceArgs {
+    /// Instance name.
+    name: String,
+    /// Extra args passed through to strace (e.g. `-e trace=openat`).
+    /// When empty, a reasonable default filter is applied.
+    #[arg(last = true)]
+    extra: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct GdbArgs {
+    /// Instance name.
+    name: String,
+    /// Extra args passed through to gdb (e.g. `-ex 'b sys_open'`).
+    #[arg(last = true)]
+    extra: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct BpfArgs {
+    /// Instance name.
+    name: String,
+    /// Pre-canned script name.  Omit (or pass "menu") to list.
+    script: Option<String>,
+}
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -42,6 +69,7 @@ mod run;
 mod schema;
 mod supervise;
 mod tapfd;
+mod transparency;
 
 /// Top-level `umlctl` invocation.
 #[derive(Parser, Debug)]
@@ -137,6 +165,21 @@ enum Cmd {
     /// verdict: MISSION_ACCOMPLISHED / MISSION_FAILED. See memo
     /// 52 (host resource controls) + STATUS.md.
     Mission(MissionArgs),
+    /// Attach strace to a running UML guest — the guest IS a host
+    /// process under both seccomp and kvm-v2 backends, so the host
+    /// strace shows every guest syscall.  No other VMM offers this
+    /// transparency.
+    Strace(StraceArgs),
+    /// Attach gdb to a running UML guest with the guest vmlinux
+    /// loaded.  Set breakpoints in guest code, inspect guest state,
+    /// detach without stopping the guest.  Again, possible only
+    /// because the guest is a host process.
+    Gdb(GdbArgs),
+    /// Run a pre-canned bpftrace script targeting the running UML
+    /// guest's PID.  `umlctl bpf <instance>` with no script prints
+    /// the menu of available scripts (syscalls / pagefaults / io /
+    /// net / sched).
+    Bpf(BpfArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -708,6 +751,9 @@ fn run() -> Result<()> {
             GateCmd::Loop(args) => gate_loop::run(&paths, args, cli.quiet),
         },
         Cmd::Mission(args) => mission::run(args),
+        Cmd::Strace(args) => transparency::cmd_strace(&paths, &args.name, &args.extra),
+        Cmd::Gdb(args) => transparency::cmd_gdb(&paths, &args.name, &args.extra),
+        Cmd::Bpf(args) => transparency::cmd_bpf(&paths, &args.name, args.script.as_deref()),
     }
 }
 
