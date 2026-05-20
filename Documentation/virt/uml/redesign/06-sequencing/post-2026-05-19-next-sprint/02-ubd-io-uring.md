@@ -4,12 +4,15 @@
 **Priority:** HIGH
 **Effort:** medium-large (~400–700 LoC across `arch/um/drivers/ubd_*.c`
 and `arch/um/os-Linux/file.c`)
-**Status:** Phase 1 DONE 2026-05-19 (`44a1ca55a72a`).  Phase 2a
-DONE 2026-05-19 (`ef60f68cd398`).  do_io_ring multi-bvec offset
-fix DONE 2026-05-19 (`708b7c3f3253`).  Phase 3 (vectored
-submission) DONE 2026-05-19 (`f25fcd47be37`).  Phase 2b
-(cross-request parallelism) DONE 2026-05-19 (`3e3cf923676d`).
-Phases 4 (O_DIRECT) / 5 (COW bitmap drain) planned.
+**Status:** ALL PHASES DONE 2026-05-19.
+  * Phase 1 substrate (`44a1ca55a72a`)
+  * Phase 2a within-req parallel (`ef60f68cd398`)
+  * Multi-bvec offset fix (`708b7c3f3253`)
+  * Phase 3 vectored submission (`f25fcd47be37`)
+  * Phase 2b cross-request parallel (`3e3cf923676d`)
+  * Phase 4 O_DIRECT (`1ce2b2764cd1`) + lazy submit + fast-path
+  * `um_ubd_no_uring=` A/B knob + bench (`b305e1ae5516`)
+  * Phase 5 COW bitmap drain (this commit)
 **Depends on:** host kernel ≥ 5.6 for io_uring; can run in parallel
 with memos #1 and #3.
 

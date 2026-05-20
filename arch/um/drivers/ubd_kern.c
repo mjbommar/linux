@@ -2042,16 +2042,42 @@ static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
 	/* Phase 2: drain remaining in-flight SQEs from any req. */
 	ubd_ring_drain_all();
 
-	/* Phase 3: bitmap updates per request. */
+	/*
+	 * Phase 5 (memo #2): batched COW bitmap drain through the ring.
+	 * Submit one IORING_OP_WRITE per cow_offset != -1 segment, drain
+	 * together at the end.  For non-COW UBD images every cow_offset
+	 * is -1 so the submission loop is a no-op and the drain returns
+	 * immediately; for COW images this cuts N sync pwrite syscalls
+	 * per batch down to one io_uring_enter + the per-CQE drain.
+	 *
+	 * The slot table is fully free at this point (the main drain
+	 * above zeroed in_flight).  ubd_submit_with_harvest handles ring
+	 * pressure by harvesting one CQE when the slot pool is full.
+	 */
 	for (i = 0; i < n_reqs; i++) {
 		struct io_thread_req *req = reqs[i];
 		int op = req_op(req->req);
 
 		if (op != REQ_OP_READ && op != REQ_OP_WRITE)
 			continue;
-		for (j = 0; !req->error && j < req->desc_cnt; j++)
-			req->error = update_bitmap(req, &req->io_desc[j]);
+		if (req->error)
+			continue;
+		for (j = 0; j < req->desc_cnt; j++) {
+			struct io_desc *d = &req->io_desc[j];
+			int slot;
+
+			if (d->cow_offset == -1)
+				continue;
+			slot = ubd_submit_with_harvest(
+				req, REQ_OP_WRITE, req->fds[1],
+				(char *)&d->bitmap_words,
+				sizeof(d->bitmap_words),
+				d->cow_offset);
+			if (slot < 0 && !req->error)
+				req->error = map_error(-slot);
+		}
 	}
+	ubd_ring_drain_all();
 }
 
 static void do_io_ring(struct io_thread_req *req)
