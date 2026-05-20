@@ -115,6 +115,30 @@ fio --rw=randwrite --bs=4k \
     tail -25
 echo "BENCH_DONE"
 
+# Workload C: HONEST-AUDIT §11 — multi-file fio variant.  When
+# Workload B is interpreted as "single backing file contention,"
+# this run spreads I/O across 8 separate files on the in-guest
+# ext4 fs.  If io_uring wins here but loses on Workload B, the
+# §11 diagnosis (host-side ext4 i_mutex serializes single-file
+# random writes) was correct.  If io_uring loses on both, the
+# diagnosis was wrong and the io_uring path has its own per-
+# request overhead unrelated to file-level contention.
+echo "BENCH_BEGIN fio-randwrite-multifile"
+mount -t ext4 /dev/ubda $MNT 2>/dev/null
+mkdir -p $MNT/fio-jobs
+fio --rw=randwrite --bs=4k \
+    --directory=$MNT/fio-jobs \
+    --filename_format='job.\$jobnum.dat' \
+    --nrfiles=1 --size=8M \
+    --direct=0 --ioengine=psync \
+    --numjobs=8 --group_reporting --thread \
+    --runtime=15 --time_based --name=ubd-multifile \
+    --output-format=normal 2>&1 |
+    tail -25
+rm -rf $MNT/fio-jobs
+umount $MNT 2>/dev/null
+echo "BENCH_DONE"
+
 poweroff -f
 INIT
     # Substitute the host-resolved mount path into the script.

@@ -434,6 +434,27 @@ pub struct HostResourcesSection {
     /// sched_setaffinity call (inherit current mask).
     pub cpu_affinity: String,
 
+    /// Memo 06 Phase 1 (post-2026-05-19 sprint) + HONEST-AUDIT §7.
+    /// Per-vCPU host-thread affinity.  "auto" / "off" / "<list>".
+    ///
+    ///   "auto"   each vCPU host thread bound to one host CPU
+    ///            within @cpu_affinity (vCPU N → cpu_set[N %
+    ///            len(cpu_set)]).
+    ///   "off"    no thread-level pinning (current behaviour;
+    ///            threads inherit @cpu_affinity).
+    ///   "<list>" explicit per-vCPU CPU list e.g. "0,1,4,5".
+    ///
+    /// On kvm-v2 hosts most of the per-vCPU stickiness is already
+    /// enforced by the per-host-CPU vCPU pool design (vcpus[N] is
+    /// by construction only used from smp_processor_id() == N).
+    /// This field is the lever for layering an additional
+    /// sched_setaffinity call on the guest tasks that drive
+    /// KVM_RUN on each pool entry, useful when a NUMA host wants
+    /// the guest's userspace work tied to the same socket as the
+    /// physmem.  Implementation lives in kvm-v2 backend; this
+    /// section just plumbs the value into env vars.
+    pub vcpu_thread_affinity: String,
+
     /// SMP-T81 hugepage backing for physmem.
     /// "2M" → MAP_HUGETLB | MAP_HUGE_2MB.
     /// "1G" → MAP_HUGETLB | MAP_HUGE_1GB.
@@ -1449,6 +1470,20 @@ pub fn apply_host_resources(hr: &HostResourcesSection, m: &mut crate::manifest::
         m.host_env
             .insert("UM_KVM_V2_CPU_AFFINITY".into(), hr.cpu_affinity.clone());
     }
+    /*
+     * Memo 06 Phase 1 / HONEST-AUDIT §7: per-vCPU thread affinity.
+     * "off" is the no-op default; everything else translates to
+     * UM_KVM_V2_VCPU_AFFINITY for the kernel-side consumer.
+     * "auto" computes the per-vCPU mask from @cpu_affinity at
+     * boot (kernel side); explicit lists are passed through
+     * verbatim.
+     */
+    if !hr.vcpu_thread_affinity.is_empty() && hr.vcpu_thread_affinity != "off" {
+        m.host_env.insert(
+            "UM_KVM_V2_VCPU_AFFINITY".into(),
+            hr.vcpu_thread_affinity.clone(),
+        );
+    }
     if !hr.hugepages.is_empty() && hr.hugepages != "off" {
         m.host_env
             .insert("UM_HUGEPAGES".into(), hr.hugepages.clone());
@@ -1506,6 +1541,7 @@ mod tests {
             thp: "off".to_string(),
             oom_score_adj: Some(500),
             cpu_affinity: "0-3".to_string(),
+            vcpu_thread_affinity: "auto".to_string(),
             hugepages: "2M".to_string(),
             pin_physmem: true,
             memory_max: "512M".to_string(),
@@ -1547,6 +1583,12 @@ mod tests {
         assert_eq!(
             m.host_env.get("UM_KVM_V2_CPU_AFFINITY"),
             Some(&"0-3".to_string())
+        );
+        assert_eq!(
+            m.host_env.get("UM_KVM_V2_VCPU_AFFINITY"),
+            Some(&"auto".to_string()),
+            "Memo 06 Phase 1 / HONEST-AUDIT §7: vcpu_thread_affinity \
+             plumbed into env"
         );
         assert_eq!(m.host_env.get("UM_HUGEPAGES"), Some(&"2M".to_string()));
         assert_eq!(

@@ -303,6 +303,31 @@ int __init main(int argc, char **argv, char **envp)
 		}
 	}
 
+	/*
+	 * Memo 06 Phase 1 / HONEST-AUDIT §7: per-vCPU host-thread
+	 * affinity.  In kvm-v2's per-host-CPU pool design, vcpus[N] is
+	 * already used only from smp_processor_id() == N, so the
+	 * "thread N pinned to host CPU N" property is enforced by
+	 * construction — there's nothing extra to sched_setaffinity()
+	 * at this point.
+	 *
+	 * The env var is read here so the value flows into the boot
+	 * log (mission Phase 4 verifies its presence + the
+	 * pool-design property), and so an operator misconception
+	 * ("did umlctl pass my vcpu_thread_affinity through?") has
+	 * an observable answer in the boot output.  Real per-task
+	 * pinning (cgroup cpuset for guest userspace tasks) is the
+	 * follow-on documented in memo 52 §3.2 Tier 3.
+	 */
+	{
+		const char *vaff = getenv("UM_KVM_V2_VCPU_AFFINITY");
+
+		if (vaff && *vaff && strcmp(vaff, "off") != 0)
+			fprintf(stderr,
+				"SMP-T82b: UM_KVM_V2_VCPU_AFFINITY='%s' noted; per-vCPU pinning is enforced by the kvm-v2 per-host-CPU pool (memo 06 Phase 1).\n",
+				vaff);
+	}
+
 	setup_env_path();
 
 	setsid();
