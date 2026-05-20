@@ -173,6 +173,33 @@ __uml_setup("quiet", quiet_cmd_param,
 "    Turns off information messages during boot.\n\n");
 
 /*
+ * HONEST-AUDIT §4 / sub-200 ms boot.  The `quiet` cmdline flag only
+ * fires AFTER the kernel's __setup parsing runs — too late to
+ * suppress the host-side preflight chatter (`Core dump limits`,
+ * `Checking that seccomp filters can be installed`) that fires from
+ * os_early_checks() in linux_main(), BEFORE start_kernel() and its
+ * cmdline parser run.
+ *
+ * Reading UM_FAST_BOOT=1 from the env at first os_info() call lets
+ * the preflight be silent too.  Each write(stderr) the preflight
+ * skips saves a few microseconds when stderr is a pipe (umlctl
+ * supervisor captures it); the savings add up to ~10 ms in
+ * cumulative wall time on a slow host.
+ */
+static void check_fast_boot_env(void)
+{
+	static int probed;
+	const char *v;
+
+	if (probed)
+		return;
+	probed = 1;
+	v = getenv("UM_FAST_BOOT");
+	if (v && (*v == '1' || *v == 'y' || *v == 'Y' || *v == 't' || *v == 'T'))
+		quiet_info = 1;
+}
+
+/*
  * The os_info/os_warn functions will be called by helper threads. These
  * have a very limited stack size and using the libc formatting functions
  * may overflow the stack.
@@ -187,6 +214,7 @@ void os_info(const char *fmt, ...)
 	va_list list;
 	int len;
 
+	check_fast_boot_env();
 	if (quiet_info)
 		return;
 

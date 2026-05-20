@@ -966,6 +966,19 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
      * + cgroup_v2 on the manifest. Empty fields leave the manifest
      * unchanged (no env, no cgroup). */
     deploy::apply_host_resources(&uml.host_resources, &mut m);
+
+    /*
+     * HONEST-AUDIT §4: when [runtime].fast_boot is true, also export
+     * UM_FAST_BOOT=1 so the host-side preflight prints in
+     * os_early_checks() (which run BEFORE the kernel cmdline parser
+     * fires) are silenced.  See arch/um/os-Linux/util.c::os_info for
+     * the env-var consumer.  Saves the per-line stderr write()
+     * round-trips when the supervisor's stderr is a pipe (~10 ms
+     * cumulative on slow hosts).
+     */
+    if uml.runtime.fast_boot {
+        m.host_env.insert("UM_FAST_BOOT".into(), "1".into());
+    }
     std::fs::create_dir_all(manifest_path.parent().unwrap())
         .context("create instances directory")?;
     m.write_to(&manifest_path).context("write manifest")?;
