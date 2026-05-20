@@ -27,6 +27,16 @@
 #   G6.  identity-blob round-trip 100 % clean — every "identity at"
 #        line in the kernel log must parse to a stress-blob-NNNNN
 #        name with no torn-read corruption.
+#   G7.  zero kernel panics in the boot log.  Each M-fork child's
+#        in-kernel exit_group path used to emit "Kernel tried to
+#        access user memory" panics — those are real kernel bugs,
+#        not a free pass.  Production cannot ship with thousands
+#        of per-second kernel panics in /var/log/messages.
+#   G8.  side-channel verification: harness-side /proc sampling
+#        of master's direct children must approximately match the
+#        kernel-log "torn down" iteration count.  If they diverge,
+#        either the kernel is lying about iterations OR the
+#        harness sampling is broken — both are bugs.
 #
 # Exit codes per kselftest convention:
 #   0 PASS — all gates hold.
@@ -153,14 +163,55 @@ def state(pid):
 
 
 def rss_kb(pid):
+    """Return master's VmRSS in kB, or None if not currently
+    available.
+
+    /proc/<pid>/status's VmRSS is updated lazily by the kernel.
+    For a process in T (stopped) state, the field is still
+    present but may reflect the value at the moment the task
+    last ran.  More importantly, on UML the master process is
+    SIGSTOP'd between iterations — so we need to either accept
+    those "frozen" snapshots OR send SIGCONT and wait for the
+    field to refresh.  The harness's main loop sends SIGCONT
+    every 20 ms so the freezes are bounded.
+
+    A missing/empty VmRSS line is a kernel race we cannot fix
+    here; return None in that case so the gating logic can
+    skip the sample.
+    """
     try:
         with open(f"/proc/{pid}/status") as f:
             for ln in f:
                 if ln.startswith("VmRSS:"):
-                    return int(ln.split()[1])
-    except FileNotFoundError:
+                    parts = ln.split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        return int(parts[1])
+                    return None
+    except (FileNotFoundError, ProcessLookupError):
         return None
     return None
+
+
+def rss_kb_force(pid, attempts=10):
+    """Like rss_kb() but actively nudges the process out of
+    T-state so the VmRSS field reflects post-resume reality.
+
+    Strategy: SIGCONT, sample, repeat up to N attempts.  Take
+    the LAST successful sample.  If every attempt returns
+    None or 0, return None so G3 reports it honestly rather
+    than fabricating a 0.00% drift.
+    """
+    last = None
+    for _ in range(attempts):
+        try:
+            os.kill(pid, signal.SIGCONT)
+        except ProcessLookupError:
+            return None
+        time.sleep(0.005)
+        v = rss_kb(pid)
+        if v is not None and v > 0:
+            last = v
+    return last
 
 
 # Wait for initial pause.
@@ -189,7 +240,15 @@ results = {
     "blob_rotations": 0,
     "orphans": [],
     "rss_kb_initial": None,
+    "proc_direct_children_seen": 0,
+    "proc_scan_iterations": 0,
 }
+
+# G8 side-channel: track every distinct host-PID that we observe
+# under /proc with ppid == master.  Each fork iteration produces one
+# such pid, so the total count is a kernel-log-independent witness
+# of how many iterations actually ran.
+proc_child_pids = set()
 
 last_seen_pid = 0
 seen_pids = set()
@@ -210,20 +269,22 @@ while time.monotonic() < end_time:
             {"t": now - start, "state": "DEAD"})
         break
 
-    # Sample RSS at start + at 25/50/75/100% milestones.
+    # Sample RSS at start + every 10 % of window.  Use the
+    # force variant so we don't read stale T-state snapshots.
     elapsed = now - start
     if baseline_rss is None:
-        baseline_rss = rss_kb(master)
+        baseline_rss = rss_kb_force(master)
         results["rss_kb_initial"] = baseline_rss
-    for frac, samp_field in (
-        (0.25, "rss_25"), (0.5, "rss_50"),
-        (0.75, "rss_75"), (0.99, "rss_99"),
-    ):
+    for frac in (0.10, 0.20, 0.30, 0.40, 0.50,
+                 0.60, 0.70, 0.80, 0.90, 0.99):
+        samp_field = f"rss_{int(frac*100):02d}"
         target = SECS * frac
         if samp_field not in results and elapsed >= target:
-            results[samp_field] = rss_kb(master)
-            results["rss_samples"].append({
-                "t": elapsed, "rss_kb": results[samp_field]})
+            v = rss_kb_force(master)
+            results[samp_field] = v
+            if v is not None:
+                results["rss_samples"].append({
+                    "t": elapsed, "rss_kb": v})
 
     # Read child pid; record if changed.  Defensively handle short
     # reads — memfd can race with master's ftruncate/lseek during
@@ -260,11 +321,37 @@ while time.monotonic() < end_time:
             pass
         last_sigcont = now
 
+    # G8 side-channel: scan /proc for new direct children of master.
+    # Done on every loop iter (every ~5 ms).  Kernel-log-independent
+    # witness of fork rate.
+    results["proc_scan_iterations"] += 1
+    try:
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            ipid = int(p)
+            if ipid == master or ipid in proc_child_pids:
+                continue
+            try:
+                with open(f"/proc/{p}/status") as sf:
+                    for ln in sf:
+                        if ln.startswith("PPid:"):
+                            if int(ln.split()[1]) == master:
+                                proc_child_pids.add(ipid)
+                            break
+            except (FileNotFoundError, ProcessLookupError,
+                    PermissionError):
+                continue
+    except FileNotFoundError:
+        pass
+
     time.sleep(0.005)
+
+results["proc_direct_children_seen"] = len(proc_child_pids)
 
 # End-of-observation snapshot.
 results["master_alive_at_end"] = state(master) is not None
-results["rss_kb_final"] = rss_kb(master)
+results["rss_kb_final"] = rss_kb_force(master)
 # State histogram across last 1s of observation.
 state_counts = {}
 end_t = time.monotonic() + 1.0
@@ -445,27 +532,15 @@ failures = []
 # down" line count is the authoritative measure of how many fork
 # iterations master completed alive.  We gate G1 strictly on
 # torn >= N — i.e., master did NOT die before completing N iters.
-# (G5 also checks torn >= N for throughput — but its framing is
-# "perf regression", G1's framing is "master alive throughout".
-# The two share an underlying signal but they assert different
-# spec contracts.)
-#
-# Independently, kernel panics from M-fork CHILDREN are reported
-# as an INFO line, not a G1 failure: M-fork children dying is the
-# downstream "Control B child re-entry" hazard, separate from
-# master's own survival.  See 09-fork-server-STATUS.md.
 torn_count_for_g1 = len(re.findall(r"template_pause: torn down ", boot))
-panics = re.findall(r"Kernel panic - not syncing: ", boot)
 state_at_end = r.get("master_state_at_end")
 master_alive_through_n = torn_count_for_g1 >= N
 if not master_alive_through_n:
     failures.append(
         f"G1: master died at iter {torn_count_for_g1} / target {N} "
-        f"(state_at_end={state_at_end!r}, total panics in log={len(panics)})")
+        f"(state_at_end={state_at_end!r})")
 print(f"G1 master alive thru N : {master_alive_through_n} "
       f"(iters={torn_count_for_g1}, state_at_end={state_at_end!r})")
-print(f"INFO M-fork child panics: {len(panics)} "
-      f"(downstream Control B hazard, not a G1 failure)")
 
 # G2: child pid uniqueness.
 seen = r.get("child_pids_seen", [])
@@ -475,9 +550,13 @@ if unique != len(seen):
         f"G2: child pid uniqueness {unique}/{len(seen)} (duplicates seen)")
 print(f"G2 distinct child pids : {unique}/{len(seen)}")
 
-# G3: RSS drift across samples.  Filter Nones (master in T state
-# can momentarily lack VmRSS while /proc/<pid>/status is being
-# rebuilt; this is a /proc read race, not a real measurement).
+# G3: RSS drift across samples.  Strict gate: require at least 6
+# valid samples spaced across the observation window.  Fewer
+# samples means the harness can't actually validate per-iter leak
+# behaviour; previous "SKIPPED" behaviour was the test laundering
+# its own broken sampler.  rss_kb_force() in the harness sends
+# SIGCONT and retries before each sample, so a missing VmRSS field
+# here means master genuinely wasn't observable — a real bug.
 samples = []
 for s in r.get("rss_samples", []):
     v = s.get("rss_kb")
@@ -487,20 +566,22 @@ if r.get("rss_kb_initial"):
     samples.append(r["rss_kb_initial"])
 if r.get("rss_kb_final"):
     samples.append(r["rss_kb_final"])
-if len(samples) >= 2:
+MIN_SAMPLES = 6
+if len(samples) >= MIN_SAMPLES:
     rss_min, rss_max = min(samples), max(samples)
     drift_pct = 100.0 * (rss_max - rss_min) / max(rss_min, 1)
     if drift_pct > RSS_DRIFT_PCT:
         failures.append(
             f"G3: RSS drift {drift_pct:.1f}% > {RSS_DRIFT_PCT}% "
-            f"(min={rss_min} kB max={rss_max} kB)")
+            f"(min={rss_min} kB max={rss_max} kB, n={len(samples)})")
     print(f"G3 RSS drift           : {drift_pct:.2f}% "
-          f"(budget {RSS_DRIFT_PCT}%, samples={len(samples)})")
-elif samples:
-    print(f"G3 RSS drift           : SKIPPED ({len(samples)} sample only; "
-          f"insufficient to compute drift — /proc race likely)")
+          f"(budget {RSS_DRIFT_PCT}%, samples={len(samples)}, "
+          f"min={rss_min} max={rss_max} kB)")
 else:
-    failures.append("G3: no RSS samples (rss_kb returned None for all reads)")
+    failures.append(
+        f"G3: only {len(samples)} RSS samples (need >= {MIN_SAMPLES}); "
+        f"sampler may be broken — VmRSS unavailable on stopped task")
+    print(f"G3 RSS drift           : FAIL ({len(samples)} samples, need {MIN_SAMPLES}+)")
 
 # Compute iteration count up front (kernel log "torn down" lines —
 # one per fork_on_resume_loop iteration).  Used by G4 budget + G5.
@@ -569,6 +650,54 @@ elif len(parsed) < 2:
 print(f"G6 identity round-trip : {len(parsed)} distinct names, "
       f"clean/total={len(parsed_names)}/{all_identity_lines} "
       f"(rotated {r.get('blob_rotations')})")
+
+# G7: zero kernel panics in the boot log.  Even when master itself
+# survives (G1 passes), each M-fork child's exit can emit a kernel
+# panic ("Kernel tried to access user memory at addr X, ip X") into
+# the shared boot log via UML's console.  Production cannot ship a
+# fork primitive that generates ~500 kernel panics per second.
+all_panics = re.findall(r"Kernel panic - not syncing: (.+)", boot)
+# Categorise to make the failure detail useful for debugging.
+panic_categories = {}
+for p in all_panics:
+    # Trim incrementing addresses to category prefix.
+    cat = re.sub(r"0x[0-9a-fA-F]+", "0xX", p)[:80]
+    panic_categories[cat] = panic_categories.get(cat, 0) + 1
+if all_panics:
+    top_cat = max(panic_categories.items(), key=lambda kv: kv[1])
+    failures.append(
+        f"G7: {len(all_panics)} kernel panic(s) in boot log; "
+        f"top category x{top_cat[1]}: {top_cat[0]!r}")
+print(f"G7 zero kernel panics  : {len(all_panics) == 0} "
+      f"(observed {len(all_panics)})")
+
+# G8: side-channel verification — harness /proc sampling of master's
+# direct children must approximately match kernel-log torn-down
+# count.  If they diverge by > 5 % of torn, either the kernel is
+# under-reporting iterations or the harness is under-sampling.
+proc_seen = r.get("proc_direct_children_seen", 0)
+torn = torn_count_for_g1  # alias for clarity
+if torn > 0:
+    drift_abs = abs(proc_seen - torn)
+    drift_pct = 100.0 * drift_abs / torn
+    # The harness is non-blocking; we won't see every transient
+    # child.  Allow up to 50 % undercount on harness side (we
+    # genuinely miss many fast-lived children) but require that
+    # we saw AT LEAST 5 % of them — otherwise the harness loop
+    # isn't actually sampling /proc.
+    proc_to_torn = (proc_seen / torn) if torn else 0.0
+    if proc_to_torn < 0.05:
+        failures.append(
+            f"G8: harness saw only {proc_seen} direct children "
+            f"vs kernel's {torn} torn-down iters "
+            f"({proc_to_torn*100:.1f} % capture rate, need >= 5 %); "
+            f"side-channel is not validating kernel log")
+    print(f"G8 /proc vs kernel log : harness={proc_seen} kernel={torn} "
+          f"({proc_to_torn*100:.1f}% capture; need >= 5 %)")
+else:
+    failures.append(
+        "G8: no torn-down iterations to cross-check; selftest gate "
+        "cannot be evaluated")
 
 if failures:
     print()

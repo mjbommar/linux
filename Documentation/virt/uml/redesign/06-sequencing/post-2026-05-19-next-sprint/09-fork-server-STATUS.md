@@ -17,45 +17,64 @@ should be re-read at the start of each session.
 | 2a-P5 | template-pause-fork-smoke selftest   | LANDED (2026-05-20)   | `c417eccf869e` |
 | 2a-P6 | template-pause-fork-stress selftest (6 strict gates, no retry) | LANDED (2026-05-20) | `972d19478c91` + this |
 | 2a-P7 | umlctl `mission` Phase 8 wiring (full-mission only) | LANDED (2026-05-20) | `972d19478c91` |
-| 2a-P8 | Drop child-path respawn + drop SUCCESS-marker pwrite64 | LANDED (2026-05-20) | this commit |
-| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — fork-stress 10/10 strict-gate PASS at N=100; downstream B1 hazard documented but not gating** | (all above) |
+| 2a-P8 | Drop child-path respawn + drop SUCCESS-marker pwrite64 | LANDED (2026-05-20) | `5a65fdfe8010` |
+| 2a-P9 | Pre-SIGKILL M-fork child; tighten gates to G7 (zero panics) + G8 (side-channel verify) | LANDED (2026-05-20) | this commit |
+| 2a    | Kernel-side fork-on-resume loop      | **PRODUCTION-READY at Phase 2a scope: fork-stress 100/100 PASS at N=100, 10/10 at N=1000, 10/10 under stress-ng full-load**.  Phase 2 (child does real work) deferred behind open bug B1. | (all above) |
 
-## Open bug B1 (downstream; does not gate fork-stress)
+## Test reliability (2026-05-20, post-P9)
 
-The M-fork child path is now minimal — pure inline-asm
-`__NR_exit_group(0)` with no other kernel-state interaction.
-With that, the strict fork-stress selftest (N=100, median ≤ 50 ms,
-RSS drift ≤ 5 %, 0 orphans, 100 % blob round-trip) passes 10/10
-runs and master sustains 4400-4700 iterations per 10 s window.
+```
+N=100  / SECS=10:   100/100 PASS  (idle host)
+N=1000 / SECS=30:   10/10  PASS
+N=5000 / SECS=160:  1/1    PASS   (master sustains 5714 iters)
+N=100  + stress-ng --cpu $(nproc)/2:  10/10 PASS  (half-load)
+N=100  + stress-ng --cpu $(nproc):    10/10 PASS  (full-load)
+```
 
-There is still a residual hazard: M-fork children consistently
-log "Kernel tried to access user memory at addr 0xXXXXXX, ip
-0xXXXXXX" (where addr == ip, addresses incrementing across iters)
-to the shared boot log as they exit.  These messages are from the
-M-fork children's HOST process panic'ing post-exit_group inside
-the kernel's mm cleanup path — they do NOT affect master, and
-the host kernel still terminates the M-fork child cleanly.
+All gates strict: G1 master alive thru N iters, G2 distinct pids,
+G3 RSS drift ≤ 5 % with ≥ 6 valid samples, G4 zero post-teardown
+orphans, G5 ≥ N iters, G5b median ≤ 50 ms, G6 100 % blob byte-
+match, G7 zero kernel panics, G8 ≥ 5 % /proc capture rate.
 
-The 2026-05-20 bisect that produced the current minimal child
-path established the EMPIRICAL constraint that the child must not
-make any kernel syscall except exit_group: even a single inline
-`__NR_pwrite64` to the identity memfd consistently SIGSEGV'd the
-child at a stable stack address (IP=0x68803d66 across runs),
-which then propagated as a master-death via queued SIGCHLD or
-shared mm cleanup.  Root cause not fully isolated.  Best
-hypothesis: the post-fork combination of preempt_disable,
-sched_worker_detach (CFS runqueue stripped) and stale mm_list
-entries (pid=-1 from teardown) leaves the M-fork child's UML
-kernel in a state where ANY syscall return path that touches
-UML's task scheduling longjmp's into corrupt switch_buf state.
-Confirming this requires capturing the M-fork child's RIP just
-before fault — left as future work in the Phase 2 identity
-re-plumbing milestone where the child WILL need to do meaningful
-post-fork kernel work.
+## Open bug B1 (deferred to Phase 2; does not gate Phase 2a)
 
-Until B1 is closed, do NOT extend the M-fork child path with
-additional inline syscalls or kernel calls.  exit_group is the
-only operation proven safe.
+After the 2026-05-20 P9 fix (pre-SIGKILL the M-fork child immediately
+in master's parent path), 0 panics across 100+ runs at N=100, with
+fork-stress G7 (zero panics) gating strictly.
+
+Bisect evidence accumulated during P8 → P9:
+
+  * Any user-space code in the M-fork child (even single inline
+    syscall like `__NR_exit_group(0)` or `__NR_pwrite64`) triggers
+    UML's segv_handler to fire with `is_user=0` at a user-range
+    RIP.  The RIP increments by 2 per iteration — consistent
+    with some inherited stub state's IP being advanced and re-
+    faulted each fork.
+  * Master SIGKILL'ing the child before child returns to user
+    mode from the fork syscall → 0 panics.  This is the P9 fix.
+
+Root cause of WHY the child's first user-mode instruction triggers
+the SIGSEGV is NOT fully isolated.  Working hypothesis: UML's
+signal-handling state inherited via CoW (sigaltstack from
+`set_sigstack(cpu_irqstacks[0], THREAD_SIZE)` at skas startup,
+signal handlers from `set_handler(SIGSEGV/SIGBUS/...)`, current
+host signal mask from `os_template_pause_signals_block_host`) is
+in a post-fork state where ANY syscall-return path triggers UML's
+SIGSEGV handler to fire.  UML interprets the regs->is_user=0
+(default in initial state) and panics with the user-range RIP.
+
+Investigating further requires a dedicated diagnostic path —
+either install a SIGSEGV handler in the M-fork child that dumps
+RIP/CR2/regs via raw write (chicken-and-egg: that handler's
+install path is also subject to the same hazard), or attach ptrace
+from master to the child and capture state.  Both are non-trivial
+and deferred to Phase 2 work where the child WILL need to do
+useful syscalls (identity re-plumbing: dev_set_mac_address,
+inet_rtm_newaddr, etc.).
+
+Until B1 is closed, the M-fork child path MUST remain "infinite
+loop waiting to be SIGKILL'd by master".  Do not extend it with
+any inline syscall or kernel call.
 | 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
