@@ -12,10 +12,11 @@ should be re-read at the start of each session.
 | 1b    | umlctl integration (MVP `pool spawn`)| LANDED (2026-05-20)   | `5979caa69440`  |
 | 2a-P1 | start_userspace_redo + os_skas_reap_stub | LANDED (2026-05-20) | `0993765a704c` |
 | 2a-P2 | mm_list-walking teardown / respawn helpers | LANDED (2026-05-20) | `d40d124f3abe` |
+| 2a-P3 | `assert_fork_safety` mid-syscall refusal | LANDED (2026-05-20)  | `985fd78ab070` |
 | 2a-P4 | Wire teardown → fork → respawn into loop | LANDED (2026-05-20)  | `5dac39adad4f` |
-| 2a-P3 | `assert_fork_safety` mid-syscall refusal | DEFERRED (defensive; not needed yet) | — |
-| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — primary hazard fixed, secondary hazard remains** | (above 3 commits) |
-| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on 2a-P5 fix | —               |
+| 2a-P5 | template-pause-fork-smoke selftest   | LANDED (2026-05-20)   | `c417eccf869e` |
+| 2a    | Kernel-side fork-on-resume loop      | **EXPERIMENTAL — primary hazard fixed, secondary v1-ceiling hazard documented** | (all above) |
+| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
 | 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a-P5 fix  | —               |
