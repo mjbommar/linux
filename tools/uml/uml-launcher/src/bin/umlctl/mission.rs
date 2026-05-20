@@ -869,20 +869,17 @@ fn phase8_fork_stress(
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let _ = std::fs::write(&log, format!("=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"));
 
-    // Parse "attempt N PASSED" / "all N attempts FAILED" lines + per-
-    // gate detail rows for the scoreboard.
-    let passed_attempt = stdout
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("######## attempt ")
-                .and_then(|s| s.strip_suffix(" PASSED — stopping retry loop ########"))
-                .and_then(|s| s.parse::<u32>().ok())
-        });
-    let attempts_failed = stdout.contains("all ") && stdout.contains(" attempts FAILED");
+    // Parse per-gate detail rows for the scoreboard.  The selftest
+    // script's strict single-attempt format prints G[1-8] lines plus
+    // a final VERDICT line.  (Older versions had a retry harness
+    // with "######## attempt N PASSED" markers; that was removed
+    // when the strict gates landed.)
     let mut last_iters = String::new();
     let mut last_distinct_pids = String::new();
     let mut last_drift = String::new();
     let mut last_blobs = String::new();
+    let mut g7_panics = String::new();
+    let mut g8_capture = String::new();
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("G5 master iterations   : ") {
             last_iters = rest.trim().to_string();
@@ -892,6 +889,10 @@ fn phase8_fork_stress(
             last_drift = rest.trim().to_string();
         } else if let Some(rest) = line.strip_prefix("G6 identity round-trip : ") {
             last_blobs = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("G7 zero kernel panics  : ") {
+            g7_panics = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("G8 /proc vs kernel log : ") {
+            g8_capture = rest.trim().to_string();
         }
     }
     if !last_iters.is_empty() {
@@ -906,8 +907,11 @@ fn phase8_fork_stress(
     if !last_blobs.is_empty() {
         details.insert("g6_blobs".into(), last_blobs);
     }
-    if let Some(n) = passed_attempt {
-        details.insert("attempt_passed".into(), n.to_string());
+    if !g7_panics.is_empty() {
+        details.insert("g7_panics".into(), g7_panics);
+    }
+    if !g8_capture.is_empty() {
+        details.insert("g8_capture".into(), g8_capture);
     }
 
     // SKIP propagation: the script exits 4 when kernel lacks the
@@ -922,21 +926,22 @@ fn phase8_fork_stress(
     }
 
     if out.status.success() {
-        let summary = match passed_attempt {
-            Some(n) => format!("PASS on attempt {n} (G5 iters={last_iters})"),
-            None => format!("PASS (G5 iters={last_iters})"),
-        };
-        Ok(("fork-stress", Verdict::Pass, summary, details))
+        Ok((
+            "fork-stress",
+            Verdict::Pass,
+            format!("PASS (G5 iters={last_iters})"),
+            details,
+        ))
     } else {
-        let summary = if attempts_failed {
-            format!("FAIL: all attempts failed (last G5 iters={last_iters})")
-        } else {
+        Ok((
+            "fork-stress",
+            Verdict::Fail,
             format!(
                 "FAIL: script exited rc={:?} (last G5 iters={last_iters})",
                 out.status.code()
-            )
-        };
-        Ok(("fork-stress", Verdict::Fail, summary, details))
+            ),
+            details,
+        ))
     }
 }
 

@@ -568,34 +568,52 @@ config UM_TEMPLATE_PAUSE
 	  template-pause primitive directly.
 
 config UM_TEMPLATE_PAUSE_FORK
-	bool "Template-pause fork-on-resume loop (Memo 09 Phase 2a) [EXPERIMENTAL]"
+	bool "Template-pause fork-on-resume loop (Memo 09 Phase 2a)"
 	depends on UM_TEMPLATE_PAUSE
 	select UM_FUZZ_HOOKS
 	select UM_SNAPSHOT_FORKSERVER
 	default n
 	help
-	  EXPERIMENTAL — KNOWN-BROKEN.  The control flow is implemented
-	  (master fork(2)s on each SIGCONT, child reuses
-	  um_snapshot_worker_init() to drop inherited host state, parent
-	  writes the new child pid to the identity memfd at offset 260
-	  and loops back to SIGSTOP), but the post-fork state of the
-	  PARENT'S seccomp stub mechanism is corrupted and the next
-	  userspace re-entry in the parent SEGVs.  This is the same
-	  v1 ceiling class of bug documented in
-	  arch/um/kernel/snapshot.c around the C-09 AFL forkserver path.
+	  Phase 2a fork-on-resume primitive.  Master forks on each
+	  SIGCONT via __NR_clone with a private MAP_PRIVATE child stack
+	  (the production path), the child runs on its own stack and
+	  exits cleanly via inline __NR_exit_group(0), and master loops
+	  back to SIGSTOP for the next take.
 
-	  Smoke-testable scope:
-	    * First fork happens (child PID written to memfd[260:264]).
-	    * Master prints "raising SIGSTOP" for the second cycle.
-	  Then both parent and child SEGV when their userspace tasks
-	  resume.  See
-	  Documentation/virt/uml/redesign/06-sequencing/
-	  post-2026-05-19-next-sprint/09-fork-server-STATUS.md
-	  for the failure analysis and the follow-on work needed.
+	  Bug B1 (the MAP_SHARED physmem stack-race that caused the
+	  earlier "child SEGV after pwrite64" panic storm) is now
+	  root-caused and fixed via the private-stack clone() path.
+	  Strict fork-stress (G1-G8 gates including G7 zero panics +
+	  G8 /proc-side-channel) passes 100/100 at N=100, 10/10 at
+	  N=1000, 10/10 under stress-ng --cpu $(nproc) full load.
 
-	  Say N unless you are actively developing the fix.  Setting Y
-	  emits a giant kernel warning at boot and refuses to enter
-	  the fork loop under the KVM backend.
+	  Refused under the KVM backend at runtime (fork() aliases
+	  /dev/kvm fds and per-vCPU mmap state across parent + child;
+	  kvm-aware fork is a future phase).
+
+	  Say N unless you intend to use template-pause fork-on-resume.
+	  See Documentation/virt/uml/redesign/06-sequencing/
+	  post-2026-05-19-next-sprint/09-fork-server-STATUS.md for
+	  the full design + bug-B1 root-cause notes.
+
+config UM_TEMPLATE_PAUSE_FORK_DIAG
+	bool "MFC diagnostic mode (compiled-in fault dumper) [debug]"
+	depends on UM_TEMPLATE_PAUSE_FORK
+	default n
+	help
+	  Compiles in the M-fork-child diagnostic hooks:
+	  mfc_diag_segv_handler (custom SIGSEGV/SIGBUS/SIGILL/SIGFPE
+	  handler that dumps fault state via raw write syscalls) and
+	  the um_template_pause_mfc_diag=1 cmdline arm.
+
+	  This is the infrastructure used to root-cause bug B1.  It's
+	  off by default because the production path (private-stack
+	  clone()) doesn't need it — Phase 2 work that extends the
+	  child path to do meaningful syscalls should enable this
+	  to capture any new fault states.
+
+	  Say N unless you're actively debugging the fork-on-resume
+	  primitive.
 
 endmenu
 

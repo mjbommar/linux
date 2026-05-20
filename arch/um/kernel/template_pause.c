@@ -88,6 +88,7 @@ static bool template_pause_fork_armed_flag __read_mostly;
  */
 static bool template_pause_early_armed_flag __read_mostly;
 
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 /*
  * Diagnostic-mode arm.  Off by default.  Armed by
  * `um_template_pause_mfc_diag=1` on the kernel cmdline.  When set,
@@ -97,11 +98,10 @@ static bool template_pause_early_armed_flag __read_mostly;
  * faults during exit, the handler dumps sig/addr/rip/cr2 to fd 1
  * and exits with code 7.
  *
- * Production builds leave this off — the SIGKILL fix guarantees
- * zero panics and is the documented Phase 2a contract.  This flag
- * exists for Phase 2 work where the child path is being extended.
+ * Only compiled in under CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG.
  */
 static bool template_pause_mfc_diag_armed_flag __read_mostly;
+#endif
 
 /*
  * Private-stack mode arm.  DEFAULT ON in fork mode (the production
@@ -148,6 +148,7 @@ static int __init template_pause_setup(char *str)
 }
 __setup("um_template_pause", template_pause_setup);
 
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 static int __init template_pause_mfc_diag_setup(char *str)
 {
 	if (str && (str[0] == '=' && str[1] == '1'))
@@ -159,6 +160,7 @@ static int __init template_pause_mfc_diag_setup(char *str)
 	return 1;
 }
 __setup("um_template_pause_mfc_diag", template_pause_mfc_diag_setup);
+#endif
 
 static int __init template_pause_private_stack_setup(char *str)
 {
@@ -204,8 +206,10 @@ EXPORT_SYMBOL_GPL(um_template_pause_armed);
  * offset 0x28 (sigset_t before it).  So &uc->uc_mcontext.gregs[16]
  * is at uc + 0x28 + 16*8 = uc + 0xa8.
  */
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 static void mfc_diag_segv_handler(int sig, void *si_arg, void *uc_arg);
 static void mfc_diag_restorer(void);
+#endif
 
 /*
  * Read + validate the identity blob.  Returns 0 on a present + valid
@@ -285,6 +289,7 @@ static int one_pause_cycle(const char *named_point, int identity_fd,
 
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK
 
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 /*
  * MFC diagnostic restorer — used as sa_restorer when the M-fork
  * child installs a custom signal handler.  The kernel jumps here
@@ -509,6 +514,7 @@ static void mfc_diag_segv_handler(int sig, void *si_arg, void *uc_arg)
 	for (;;)
 		;
 }
+#endif /* CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG */
 
 /*
  * Refuse the fork-on-resume path under the KVM backend.  Same
@@ -614,6 +620,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 				sret);
 		}
 
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 		/*
 		 * DIAG MODE: install MFC handler in MASTER pre-fork.
 		 * fork() inherits sigaction table, so M-fork child
@@ -654,6 +661,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 				pr_info("template_pause: MFC handler installed pre-fork\n");
 			}
 		}
+#endif /* CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG */
 
 		/*
 		 * (A.6) Detach all non-current tasks from the runqueue
@@ -730,6 +738,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			 * exit_group bypasses any kernel cleanup that would
 			 * traverse the broken stub state.
 			 */
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 			if (template_pause_mfc_diag_armed_flag) {
 				/* MFC diagnostic: do __NR_exit_group(0).
 				 * Handler was pre-installed by master (see
@@ -743,6 +752,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 					: "r" (rax_x), "r" (rdi_x)
 					: "rcx", "r11", "memory");
 			}
+#endif
 
 			/*
 			 * Production path: pure infinite loop.  Master
@@ -809,7 +819,10 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		 * reason as the other os_template_pause syscalls: glibc
 		 * cancellation-pipe hazard.
 		 */
-		if (!template_pause_mfc_diag_armed_flag &&
+		if (
+#ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
+		    !template_pause_mfc_diag_armed_flag &&
+#endif
 		    !template_pause_private_stack_armed_flag) {
 			/* x86_64 __NR_kill = 62, SIGKILL = 9.  Skipped in
 			 * private-stack mode because the child exited via
