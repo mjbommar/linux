@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <mem_user.h>
 #include <sys/mman.h>
@@ -473,6 +474,96 @@ out_close:
 	mm_id->pid = -1;
 
 	return err;
+}
+
+/*
+ * start_userspace_redo() — replace a stub child after a fork(2).
+ *
+ * Used by the template-pause fork-on-resume loop (Memo 09 Phase 2a):
+ *
+ *   * Pre-fork in the master: every per-mm stub child is killed so
+ *     fork() does not alias their pids into the forked-child UML's
+ *     mm_list (where they would be raced against by both sides).
+ *   * Post-fork in BOTH parent and child paths: every mm whose stub
+ *     was just killed gets a fresh stub child clone()'d in the local
+ *     process tree.
+ *
+ * Contract:
+ *   * If @mm_id->pid > 0, sends SIGKILL + wait4(__WALL) (raw __NR_wait4
+ *     per the os_snapshot_waitpid_status rationale: glibc's
+ *     cancellation-point wrapper has historically misbehaved when
+ *     called from UML kernel context).
+ *   * Closes @mm_id->sock if open.
+ *   * Zeroes the stub_data round-trip fields (futex, signal, si_offset,
+ *     mctx_offset, syscall_data_len) — a leftover syscall_data_len
+ *     from before the kill would cause the new stub's first
+ *     stub_signal_interrupt iteration to recvmsg() against a stale fd
+ *     map and fail confusingly.
+ *   * Calls start_userspace() to clone a fresh stub child.
+ *
+ * Idempotent w.r.t. the kill side: if @mm_id->pid is -1 (already
+ * dead / never spawned) the kill is skipped and only the respawn
+ * runs.  Always respawns.
+ *
+ * Returns 0 on success, -errno on clone/socketpair failure.  Failure
+ * leaves @mm_id->pid == -1 so subsequent vcpu_run sees the dead-mm
+ * state that the existing mm_sigchld_irq logic already handles.
+ */
+int start_userspace_redo(struct mm_id *mm_id)
+{
+	struct stub_data *proc_data = (void *)mm_id->stack;
+	long ret;
+	int err;
+
+	if (mm_id->pid > 0) {
+		if (kill(mm_id->pid, SIGKILL) < 0 && errno != ESRCH) {
+			err = -errno;
+			printk(UM_KERN_ERR "%s: kill(%d, SIGKILL) failed: %d\n",
+			       __func__, mm_id->pid, err);
+			return err;
+		}
+		for (;;) {
+			ret = syscall(__NR_wait4, mm_id->pid, NULL, __WALL, NULL);
+			if (ret == mm_id->pid)
+				break;
+			if (ret < 0) {
+				if (errno == EINTR)
+					continue;
+				/* ECHILD is fine: stub already reaped by
+				 * an earlier SIGCHLD path or was never our
+				 * direct child after a fork race.
+				 */
+				if (errno == ECHILD)
+					break;
+				err = -errno;
+				printk(UM_KERN_ERR "%s: wait4(%d) failed: %d\n",
+				       __func__, mm_id->pid, err);
+				return err;
+			}
+		}
+	}
+
+	if (mm_id->sock >= 0) {
+		close(mm_id->sock);
+		mm_id->sock = -1;
+	}
+
+	/* Zero the round-trip fields so the new stub's first futex
+	 * handshake sees fresh state.  Leave the rest of stub_data
+	 * alone — pages, code, mctx storage, fault info — those are
+	 * stub-binary-owned and respawn doesn't alter them.
+	 */
+	proc_data->futex = 0;
+	proc_data->signal = 0;
+	proc_data->si_offset = 0;
+	proc_data->mctx_offset = 0;
+	proc_data->syscall_data_len = 0;
+
+	mm_id->pid = -1;
+	mm_id->syscall_data_len = 0;
+	mm_id->syscall_fd_num = 0;
+
+	return start_userspace(mm_id);
 }
 
 /*

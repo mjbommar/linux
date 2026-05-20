@@ -360,6 +360,7 @@ int um_stub_mm_unmap(struct mm_id *mm_idp, unsigned long addr,
 extern int is_skas_winch(int pid, int fd, void *data);
 extern void send_stub_syscall_fds(struct mm_id *mm_idp);
 extern int start_userspace(struct mm_id *mm_id);
+extern int start_userspace_redo(struct mm_id *mm_id);
 extern void userspace(struct uml_pt_regs *regs);
 extern void new_thread(void *stack, jmp_buf *buf, void (*handler)(void));
 extern void switch_threads(jmp_buf *me, jmp_buf *you);
