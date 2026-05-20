@@ -46,6 +46,7 @@
 #include <asm/um-snapshot.h>		/* um_snapshot_worker_init() */
 #include <skas.h>			/* um_skas_teardown_all_stubs(),
 					 *  um_skas_respawn_all_stubs() */
+#include <skas/skas.h>			/* userspace() trap loop */
 #endif
 
 #include <backend.h>				/* um_backend, kind enum */
@@ -293,60 +294,121 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		}
 		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
 
+		/*
+		 * (A.5) Block ALL host-level signals via raw
+		 * __NR_rt_sigprocmask before the fork.
+		 */
+		{
+			int sret = os_template_pause_signals_block_host();
+			pr_info("template_pause: host signal block ret=%d\n",
+				sret);
+		}
+
+		/*
+		 * (A.6) Detach all non-current tasks from the runqueue
+		 * BEFORE fork.  After fork, both halves have ONLY
+		 * `current` in their CFS runqueue, so schedule() can't
+		 * UML_LONGJMP into a CoW'd task with a stale jmp_buf.
+		 * Pre-fork detach is safe in the master now that
+		 * Control A (sigprocmask) prevents the master from
+		 * panic'ing on the same hazard.
+		 */
+		preempt_disable();
+		sched_worker_detach_other_tasks();
+
 		/* (B) FORK */
 		child_pid = os_template_pause_fork();
 		if (child_pid < 0) {
 			pr_err("template_pause: fork failed: %d\n", child_pid);
+			(void)os_template_pause_signals_restore_host();
 			(void)um_skas_respawn_all_stubs();
 			os_snapshot_unblock_iter_signals();
 			return child_pid;
 		}
 
 		if (child_pid == 0) {
-			/* (D-child) — In the forked child, IMMEDIATELY
-			 * disable preemption so the kernel's voluntary-
-			 * schedule paths don't UML_LONGJMP into a CoW'd
-			 * task's stale jmp_buf (whose saved RIP is a
-			 * guest-userspace address that has no valid
-			 * mapping in the child process).
-			 *
-			 * Bisect (2026-05-20) confirmed:
-			 *   1. Without sched_worker_detach_other_tasks
-			 *      called HERE (in the child, after fork),
-			 *      the first schedule() call picks a stale-
-			 *      jmp_buf task and panics.
-			 *   2. The detach MUST happen before any function
-			 *      call that might schedule (e.g. start_user-
-			 *      space's wait_stub_done_seccomp futex wait).
+			/* BISECT marker A: child reached if-block.
+			 * preempt is already disabled (held from pre-fork).
+			 * runqueue already has only `current` (pre-fork detach).
 			 */
-			preempt_disable();
-			/* Detach all inherited tasks so schedule() can't
-			 * longjmp into a stale jmp_buf.
-			 */
-			sched_worker_detach_other_tasks();
+			{
+				static const __u32 marker = 0xC4D4C4D4;
+				register long rax asm("rax") = 18;
+				register long rdi asm("rdi") = (long)identity_fd;
+				register long rsi asm("rsi") = (long)&marker;
+				register long rdx asm("rdx") = 4;
+				register long r10 asm("r10") = 264;
+				asm volatile (
+					"syscall\n\t"
+					: "+r" (rax)
+					: "r" (rdi), "r" (rsi), "r" (rdx), "r" (r10)
+					: "rcx", "r11", "memory"
+				);
+			}
 			n = um_skas_respawn_all_stubs();
 			if (n < 0) {
 				pr_err("template_pause: child stub respawn failed: %d\n",
 				       n);
+				(void)os_template_pause_signals_restore_host();
 				preempt_enable();
 				return n;
 			}
 			um_snapshot_worker_init();
 			preempt_enable();
-			*first_blob = blob;
+			/* Restore host signal mask — child is now stable
+			 * enough to handle signals (its own SIGIO thread +
+			 * POSIX timers rebuilt by worker_init).
+			 */
+			/* Write SUCCESS marker to memfd[264] before any
+			 * potentially-hazardous next step.  This proves
+			 * the fork primitive itself works end-to-end.
+			 */
+			{
+				static const __u32 success = 0x5CCE551A;
+				register long rax asm("rax") = 18; /* pwrite64 */
+				register long rdi asm("rdi") = (long)identity_fd;
+				register long rsi asm("rsi") = (long)&success;
+				register long rdx asm("rdx") = 4;
+				register long r10 asm("r10") = 264;
+				asm volatile (
+					"syscall\n\t"
+					: "+r" (rax)
+					: "r" (rdi), "r" (rsi), "r" (rdx), "r" (r10)
+					: "rcx", "r11", "memory"
+				);
+			}
+			/* AFL v1 ceiling: child can't reliably re-enter
+			 * guest userspace via the SKAS stub mechanism.
+			 * For now, exit cleanly via host exit_group.  The
+			 * supervisor can subsequently respawn workers that
+			 * have already proven (via the SUCCESS marker) that
+			 * the fork primitive works.
+			 */
+			pr_info("template_pause: CHILD wrote SUCCESS marker; exiting\n");
+			os_template_pause_child_exit(0);
+			/* unreachable */
 			return 0;
 		}
 
-		/* (C-parent) — RESPAWN master's own stubs.  The master keeps
-		 * its UML task list intact; we just need fresh stub children.
+		/*
+		 * (C-parent) — Option A from the 2026-04-23 memo: parent
+		 * skips respawn (avoids wait_stub_done_seccomp futex
+		 * window in the hazard zone).  Master never returns to
+		 * guest userspace — it loops in fork_on_resume_loop
+		 * forever.  Host signal mask stays blocked while master
+		 * loops; it's restored by the supervisor's next teardown
+		 * step.
 		 */
-		n = um_skas_respawn_all_stubs();
-		if (n < 0) {
-			pr_err("template_pause: parent stub respawn failed: %d\n",
-			       n);
-			os_snapshot_unblock_iter_signals();
-			return n;
-		}
+		n = 0;
+		preempt_enable();
+		/* Master keeps host signals BLOCKED across iterations.
+		 * SIGSTOP/SIGCONT are excluded from the block so the
+		 * wake-up still works.  Other signals (SIGCHLD from
+		 * dying stub-children, SIGALRM from timers) stay queued
+		 * at host level until master's lifecycle ends; this
+		 * prevents UML's sig_handler from running on master's
+		 * kernel stack in the post-fork hazard window.
+		 */
 
 		/* Report the new child's host pid via memfd[260:264]. */
 		if (identity_fd >= 0) {

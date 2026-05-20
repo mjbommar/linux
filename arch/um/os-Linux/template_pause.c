@@ -174,6 +174,89 @@ int os_template_pause_fork(void)
 }
 
 /*
+ * Host-level signal block (Control A from the 2026-05-20 external-
+ * research recommendation).  os_snapshot_block_iter_signals only
+ * blocks UML's TLS-level `signals_enabled` dispatch flag; the HOST
+ * kernel still delivers signals to our process, and UML's
+ * `hard_handler` → `sig_handler` runs on the interrupted task's
+ * kernel stack.  When the stack is tight, the handler's own C
+ * frame can overwrite ancestor saved-RIP slots, corrupting the
+ * `ret` of `um_template_pause_enter`'s epilogue post-fork.
+ *
+ * Raw __NR_rt_sigprocmask bypasses glibc — glibc's sigprocmask
+ * routes through __syscall_cancel which has its own post-fork
+ * hazards (the cancellation pipe).
+ *
+ * The mask excludes SIGSTOP/SIGCONT/SIGKILL (cannot be blocked
+ * anyway) and SIGSEGV/SIGBUS/SIGILL/SIGFPE (blocking synchronous
+ * signals is undefined — they would still be delivered and would
+ * still corrupt the stack; the assumption is that we don't take
+ * them).
+ *
+ * `saved` is plumbed in a thread-local-ish static so the matching
+ * restore can find it without the caller having to track sigset_t.
+ * Single-threaded use only (template-pause master + forked child
+ * each have their own .data copy via CoW).
+ */
+/*
+ * Kernel sigset_t is 8 bytes on x86_64 (64-bit mask).  glibc's
+ * userspace sigset_t is 128 bytes (1024 bits, future-proof).  When
+ * calling rt_sigprocmask via raw syscall, the SIZE arg must be the
+ * KERNEL size (8), not sizeof(sigset_t) which is glibc's.  Use a
+ * raw u64 to hold the mask so we don't depend on the sigset_t
+ * representation.
+ */
+#define KERNEL_SIGSET_BYTES 8
+
+static unsigned long os_template_pause_saved_sigmask;
+static int os_template_pause_sigmask_armed;
+
+int os_template_pause_signals_block_host(void)
+{
+	unsigned long fillmask;
+	long ret;
+
+	/* Block everything except SIGKILL (can't be blocked anyway),
+	 * SIGSTOP / SIGCONT (need for pause/resume), and the
+	 * synchronous fault signals (their delivery is undefined when
+	 * blocked).  Signal numbers on x86_64 Linux:
+	 *   SIGKILL=9, SIGSEGV=11, SIGFPE=8, SIGBUS=7, SIGILL=4,
+	 *   SIGSTOP=19, SIGCONT=18.
+	 */
+	fillmask = ~0UL;
+	fillmask &= ~(1UL << (9 - 1));   /* SIGKILL */
+	fillmask &= ~(1UL << (19 - 1));  /* SIGSTOP */
+	fillmask &= ~(1UL << (18 - 1));  /* SIGCONT */
+	fillmask &= ~(1UL << (11 - 1));  /* SIGSEGV */
+	fillmask &= ~(1UL << (7 - 1));   /* SIGBUS */
+	fillmask &= ~(1UL << (4 - 1));   /* SIGILL */
+	fillmask &= ~(1UL << (8 - 1));   /* SIGFPE */
+
+	ret = syscall(__NR_rt_sigprocmask, SIG_SETMASK,
+		      &fillmask, &os_template_pause_saved_sigmask,
+		      KERNEL_SIGSET_BYTES);
+	if (ret < 0)
+		return -errno;
+	os_template_pause_sigmask_armed = 1;
+	return 0;
+}
+
+int os_template_pause_signals_restore_host(void)
+{
+	long ret;
+
+	if (!os_template_pause_sigmask_armed)
+		return 0;
+	ret = syscall(__NR_rt_sigprocmask, SIG_SETMASK,
+		      &os_template_pause_saved_sigmask, NULL,
+		      KERNEL_SIGSET_BYTES);
+	os_template_pause_sigmask_armed = 0;
+	if (ret < 0)
+		return -errno;
+	return 0;
+}
+
+/*
  * Write the just-forked child's host pid into the identity memfd
  * at offset @offset (typically `sizeof(struct um_template_identity)`
  * so the supervisor can read it back without conflicting with the
