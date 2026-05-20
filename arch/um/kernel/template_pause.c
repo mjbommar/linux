@@ -328,54 +328,56 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 
 		if (child_pid == 0) {
 			/*
-			 * BISECT marker A: child reached if-block.
-			 * preempt is already disabled (held from pre-fork).
-			 * runqueue already has only `current` (pre-fork detach).
+			 * M-fork child path: MINIMAL — just __NR_exit_group.
 			 *
-			 * Child path is intentionally minimal: write the
-			 * 0x5CCE551A SUCCESS marker via raw inline-asm syscall
-			 * (no glibc) and exit via __NR_exit_group.  We do NOT
-			 * call um_skas_respawn_all_stubs() here — that was the
-			 * 2026-05-20 root cause of master death after ~11
-			 * iters:
+			 * Empirical findings (2026-05-20 bisect, see
+			 * 09-fork-server-STATUS.md):
 			 *
-			 * The master pre-fork teardown leaves mm_list entries
-			 * with pid=-1 / sock=-1.  After M-fork CoW, the child
-			 * inherits those stale entries.  respawn iterates
-			 * EVERY entry (no pid<=0 skip — see mmu.c
-			 * um_skas_respawn_all_stubs) and calls
-			 * start_userspace_redo → start_userspace → clone() on
-			 * a dead mm_id.  The cloned stub child shares VM via
-			 * CLONE_VM with the M-fork child and execs into a
-			 * state where the stub binary's first instruction
-			 * resolves to NULL (mm fragments are CoW-inconsistent
-			 * across master / M-fork / stub-clone triple-share).
-			 * The M-fork child SIGSEGVs with IP=0; queued SIGCHLD
-			 * propagates back to master which dies on the next
-			 * one_pause_cycle when its host signal mask happens
-			 * to admit a delivery.
+			 *   (a) um_skas_respawn_all_stubs() in the child path
+			 *       iterates mm_list entries the master already
+			 *       tore down (pid=-1) and clone()s a new stub
+			 *       child sharing VM with the M-fork child.  The
+			 *       CoW + CLONE_VM triple-share corrupts the
+			 *       stub binary's entry-point and the M-fork
+			 *       child SIGSEGVs at IP=0.  REMOVED.
 			 *
-			 * Until the child has a real reason to respawn stubs
-			 * (Phase 2 identity re-plumbing, when the child WILL
-			 * re-enter userspace as a pool member), the right
-			 * thing is to NOT respawn.  The child here writes
-			 * SUCCESS + exits and never touches the SKAS stub
-			 * mechanism.  This is per the AFL v1 ceiling note.
+			 *   (b) Even an inline-asm __NR_pwrite64 to the
+			 *       identity memfd (the old SUCCESS-marker write)
+			 *       consistently crashed the M-fork child at a
+			 *       stable stack address (IP=0x68803d66 across
+			 *       runs) regardless of teardown state.  Bisected
+			 *       to: bare exit_group → 10/10 strict-gate PASS
+			 *       at N=100, sustaining 4500+ master iters in
+			 *       10 s.  Root cause not fully isolated — likely
+			 *       interaction between the pwrite64 syscall
+			 *       return path and stale post-fork kernel state
+			 *       (sched_worker_detach + preempt_disable +
+			 *       dead mm_list).
+			 *
+			 *   (c) The SUCCESS marker was never load-bearing
+			 *       for any fork-stress gate: G2 (distinct child
+			 *       pids) reads memfd[260:264], which MASTER
+			 *       writes in the parent path.  Master's
+			 *       continued iteration is itself the proof that
+			 *       fork() worked.
+			 *
+			 * preempt_disable stays held from pre-fork (no
+			 * preempt_enable in the child path).  Raw inline-asm
+			 * exit_group bypasses any kernel cleanup that would
+			 * traverse the broken stub state.
 			 */
-			static const __u32 success = 0x5CCE551A;
-			register long rax asm("rax") = 18; /* pwrite64 */
-			register long rdi asm("rdi") = (long)identity_fd;
-			register long rsi asm("rsi") = (long)&success;
-			register long rdx asm("rdx") = 4;
-			register long r10 asm("r10") = 264;
+			register long rax_x asm("rax") = 231; /* exit_group */
+			register long rdi_x asm("rdi") = 0;
+
 			asm volatile (
 				"syscall\n\t"
-				: "+r" (rax)
-				: "r" (rdi), "r" (rsi), "r" (rdx), "r" (r10)
+				:
+				: "r" (rax_x), "r" (rdi_x)
 				: "rcx", "r11", "memory"
 			);
-			os_template_pause_child_exit(0);
 			/* unreachable */
+			for (;;)
+				;
 			return 0;
 		}
 
