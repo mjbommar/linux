@@ -214,7 +214,13 @@ static bool kvm_v2_record_disarm_gate(struct kvm_v2_record *rec)
 	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
 	if (was_active) {
 		static_branch_disable(&um_kvm_v2_record_enabled);
-		static_branch_disable(&um_hook_record_replay);
+		/*
+		 * Note: we do NOT disable um_hook_record_replay here.
+		 * That gate is owned by kvm_v2_record_engage_global_hooks
+		 * / _disengage_global_hooks (memo 04 Phase 2/3 post-audit
+		 * fix); if engage was called, the symmetric disengage on
+		 * the same code path is what flips it off.
+		 */
 		/*
 		 * Phase 4 (#169): drop the per-vCPU LSTAR gadget bypass so
 		 * normal gadget hot-path resumes. Order matters: disable
@@ -385,14 +391,27 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 	static_branch_enable(&um_kvm_v2_record_enabled);
 
 	/*
-	 * Memo 04 Phase 2 (post-2026-05-19 sprint): enable the
-	 * generic um_hook_record_replay gate so the existing
-	 * __um_record_event_* hook callbacks (including
-	 * __um_record_event_clock which is wired to observe_time_travel)
-	 * start firing.  Symmetric disable lives in
-	 * kvm_v2_record_disarm_gate.
+	 * Memo 04 Phase 2 (post-2026-05-19 sprint) — the global hook
+	 * gate (um_hook_record_replay) is NOT auto-enabled here.
+	 *
+	 * The first iteration enabled it on every kvm_v2_record_start
+	 * call.  HONEST-AUDIT §1 follow-up: that caused the boot-time
+	 * KUnit test_kvm_v2_record_time_travel to fail intermittently
+	 * because the real kernel timer's time_travel_set_time() fires
+	 * during the test, the hook chain calls observe_time_travel on
+	 * the active rec (the test's rec, since the test called
+	 * kvm_v2_record_start), and that injects unexpected
+	 * TIME_TRAVEL entries between the test's synthetic SYSCALL
+	 * entries — making consume_syscall trip -EILSEQ at the head
+	 * of the log.
+	 *
+	 * Resolution: production callers (a future
+	 * `umlctl record start --engage-hooks` flow, or kernel-side
+	 * arming on a profile flag) opt in via
+	 * kvm_v2_record_engage_global_hooks() below.  KUnit tests
+	 * don't engage; they exercise the observe/consume API
+	 * directly without contention from live kernel events.
 	 */
-	static_branch_enable(&um_hook_record_replay);
 
 	/*
 	 * Phase 4 (#169): force the LSTAR gadget into fallback mode on
@@ -542,16 +561,15 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec)
 	rec->buffer_replayed = 0;	/* replay reads from byte cursor 0 */
 	rec->entries_replayed = 0;	/* replay starts from entry cursor 0 */
 
-	if (need_register) {
+	if (need_register)
 		static_branch_enable(&um_kvm_v2_record_enabled);
-		/*
-		 * Memo 04 Phase 3: enable the generic hook gate so
-		 * time_travel_set_time's call to
-		 * um_time_travel_consume_replay fires.  Symmetric
-		 * disable in kvm_v2_record_disarm_gate.
-		 */
-		static_branch_enable(&um_hook_record_replay);
-	}
+	/*
+	 * Memo 04 Phase 3 — same rationale as record_start above:
+	 * um_hook_record_replay is NOT auto-enabled on replay.  Real
+	 * replay arming goes through kvm_v2_record_engage_global_hooks()
+	 * which the production driver path calls; the KUnit tests
+	 * exercise consume_* directly without engaging the live gate.
+	 */
 
 	mutex_unlock(&rec->lock);
 
@@ -1209,3 +1227,35 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_time_travel);
+
+/**
+ * kvm_v2_record_engage_global_hooks - flip on um_hook_record_replay.
+ *
+ * memo 04 Phase 2/3 + HONEST-AUDIT §1 follow-up.  Production callers
+ * arm the live-event hooks by calling this AFTER kvm_v2_record_start
+ * (or _replay) succeeds.  KUnit tests don't call this so their
+ * synthetic observe / consume sequences aren't polluted by real
+ * timer interrupts firing through __um_record_event_clock.
+ *
+ * Idempotent: multiple calls are safe.  Symmetric to
+ * kvm_v2_record_disengage_global_hooks below.
+ *
+ * No-op when CONFIG_UM_BACKEND_KVM_V2 is off (the gate doesn't exist).
+ */
+void kvm_v2_record_engage_global_hooks(void)
+{
+	static_branch_enable(&um_hook_record_replay);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_engage_global_hooks);
+
+/**
+ * kvm_v2_record_disengage_global_hooks - flip off um_hook_record_replay.
+ *
+ * Counterpart of engage_global_hooks.  Production calls this on
+ * teardown (`umlctl record stop`).
+ */
+void kvm_v2_record_disengage_global_hooks(void)
+{
+	static_branch_disable(&um_hook_record_replay);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_disengage_global_hooks);

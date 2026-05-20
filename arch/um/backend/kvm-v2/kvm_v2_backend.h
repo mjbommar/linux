@@ -1474,6 +1474,23 @@ int  kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
 				       u64 *ns_out,
 				       u64 *syscall_count_anchor_out);
 
+/*
+ * memo 04 Phase 2/3 + HONEST-AUDIT §1 follow-up.  The
+ * `um_hook_record_replay` static-key gate is global — once on, it
+ * fires from every time_travel_set_time call.  That contention
+ * with KUnit tests (which exercise observe_/consume_ APIs directly
+ * on a private rec) means the gate must NOT be auto-enabled by
+ * kvm_v2_record_start.  Production callers explicitly engage via:
+ *
+ *   kvm_v2_record_engage_global_hooks();   // arm
+ *   ... use rec ...
+ *   kvm_v2_record_disengage_global_hooks();// disarm
+ *
+ * Tests skip these — they only call the observe/consume API.
+ */
+void kvm_v2_record_engage_global_hooks(void);
+void kvm_v2_record_disengage_global_hooks(void);
+
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
 /*
  * Snapshot Phase 2 (memo 26-snapshot §Phase 2): KUnit fixture hook
