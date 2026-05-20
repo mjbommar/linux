@@ -188,24 +188,33 @@ int os_template_pause_fork(void)
  *     run in the child must be inline-asm-only, never touching
  *     locals or function calls.
  *
- * The child stack is intentionally LEAKED on the master side (small
- * mmap, 8 KiB).  Per-iteration leak is bounded; future Phase 2 code
- * should cache and reuse a single child_stack region across iters.
+ * Stack-cache discipline: the 8 KiB private stack is allocated ONCE
+ * (file-static) and reused across all iterations.  This is safe
+ * because master never writes to the stack (only the child does,
+ * via the inline-asm post-clone path, and the child's writes
+ * trigger CoW — master's page stays clean).  Without caching, a
+ * long-running master accumulates one 8 KiB VMA per iteration
+ * (12k iters → 96 MB virtual / thousands of /proc/<pid>/maps
+ * entries).
  */
+static void *os_template_pause_clone_stack_base;
+
 int os_template_pause_fork_clone(void)
 {
-	void *child_stack_base;
 	unsigned long child_stack_top;
 	long ret;
 
-	/* 8 KiB private stack — anonymous + private. */
-	child_stack_base = mmap(NULL, 8192,
-				 PROT_READ | PROT_WRITE,
-				 MAP_PRIVATE | MAP_ANONYMOUS,
-				 -1, 0);
-	if (child_stack_base == MAP_FAILED)
-		return -errno;
-	child_stack_top = (unsigned long)child_stack_base + 8192 - 16;
+	if (!os_template_pause_clone_stack_base) {
+		void *base = mmap(NULL, 8192,
+				   PROT_READ | PROT_WRITE,
+				   MAP_PRIVATE | MAP_ANONYMOUS,
+				   -1, 0);
+		if (base == MAP_FAILED)
+			return -errno;
+		os_template_pause_clone_stack_base = base;
+	}
+	child_stack_top = (unsigned long)os_template_pause_clone_stack_base +
+			   8192 - 16;
 
 	/* Raw __NR_clone (x86_64 = 56).  In the CHILD, rax = 0 and
 	 * RSP = child_stack_top; in the PARENT, rax = child pid.
@@ -243,12 +252,10 @@ int os_template_pause_fork_clone(void)
 		ret = rax;
 	}
 
-	/* Parent only reaches here.  Note: we LEAK child_stack_base —
-	 * it's intentional, the child terminates via exit_group so it
-	 * never references it anyway, and master will see a small
-	 * monotonic VMA leak per iter.  Phase 2 caches + reuses.
+	/* Parent only reaches here.  The cached
+	 * os_template_pause_clone_stack_base is preserved for the next
+	 * call — see the static-cache rationale above.
 	 */
-	(void)child_stack_base;
 	if (ret < 0 && ret > -4096)
 		return (int)ret;
 	return (int)ret;
