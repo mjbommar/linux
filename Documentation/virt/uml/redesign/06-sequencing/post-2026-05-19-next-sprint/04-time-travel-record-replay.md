@@ -8,6 +8,16 @@ and `arch/um/backend/kvm-v2/record.c`)
 **Depends on:** record/replay Phase 1–7 (done — memo 27);
 snapshot Phase 1–6 (done — memo 26).
 
+**Status:** Phases 1 + 2 + 3 + 4 DONE 2026-05-19.
+  * Phase 1 hook wired (`b2ff4c0b775e`)
+  * Phase 2 observer + Phase 3 consumer (`f03b12af1267`)
+  * Phase 4 KUnit round-trip (`980ebb779ee8`)
+
+Remaining: live wiring from time.c::time_travel_set_time to
+observe / consume under a static-key gate, which needs the
+record/replay arming-signal path exposed to time.c.  Small
+follow-on.
+
 ## Why this matters
 
 The branch shipped record/replay Phase 1–7 in the previous sprint:
