@@ -1360,6 +1360,27 @@ fn guest_ip_addr(guest_ip: &str) -> Result<String> {
 /// Used by fast-boot to pass `lpj=` on the kernel cmdline so the
 /// in-kernel BogoMIPS calibration loop is skipped — that calibration
 /// rounds up to the next jiffy and adds ~100 ms of wall-clock jitter.
+///
+/// HONEST-AUDIT §17 — host-machine assumption.  The BogoMIPS this
+/// reads is from the *deploy host* (the machine umlctl is running
+/// on), which is the same machine the UML guest will run on.  So
+/// the calibration matches the actual hardware the guest's
+/// udelay() / mdelay() will execute on — which is what we want.
+///
+/// The corner that *could* be wrong: if the UML binary is later
+/// migrated to a different host without re-running umlctl deploy,
+/// the cmdline-baked lpj is stale.  In practice UML's udelay()
+/// loops go through the host scheduler anyway, so the calibration
+/// error only affects the lower bound of the delay (the host
+/// scheduler-imposed upper bound dominates).  The practical
+/// downside is small but the corner exists.
+///
+/// Mitigation if it ever matters: bracket the value with the
+/// observed mean across `/proc/cpuinfo` (multi-socket / asymmetric
+/// hosts can have varying BogoMIPS per CPU), or pass `lpj=` only
+/// when /proc/cpuinfo is stable enough.  For now we use the first
+/// BogoMIPS line which is enough for the homogeneous single-socket
+/// hosts our bench / serverless use cases target.
 fn sniff_host_lpj() -> Option<u64> {
     use std::io::BufRead;
     let f = std::fs::File::open("/proc/cpuinfo").ok()?;
@@ -1469,6 +1490,114 @@ pub fn run_sudo_steps(steps: &[String], stop_on_failure: bool, quiet: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HONEST-AUDIT §16: when this test was first added the manifest
+    /// fixture in supervise.rs was missing host_env and cgroup_v2,
+    /// which the production code path populates via
+    /// apply_host_resources().  This test locks the contract: every
+    /// HostResourcesSection field that should map to host_env or
+    /// cgroup_v2 ends up in the Manifest.
+    #[test]
+    fn apply_host_resources_populates_host_env_and_cgroup_v2() {
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let hr = HostResourcesSection {
+            thp: "off".to_string(),
+            oom_score_adj: Some(500),
+            cpu_affinity: "0-3".to_string(),
+            hugepages: "2M".to_string(),
+            pin_physmem: true,
+            memory_max: "512M".to_string(),
+            cpu_max: "200%".to_string(),
+            pids_max: Some(512),
+        };
+
+        let mut m = crate::manifest::Manifest {
+            schema_version: 1,
+            instance: crate::manifest::InstanceSection {
+                name: "test".into(),
+                created_at: "2026-05-19T00:00:00Z".into(),
+            },
+            kernel: crate::manifest::KernelSection {
+                path: PathBuf::from("/x"),
+                sha256: "deadbeef".into(),
+                profile: "research".into(),
+                backend: "seccomp".into(),
+            },
+            runtime: crate::manifest::RuntimeSection {
+                mem: "256M".into(),
+                ncpus: 1,
+                cmdline: "".into(),
+                root: "hostfs".into(),
+                forkserver: false,
+            },
+            host_env: BTreeMap::new(),
+            cgroup_v2: None,
+            labels: Default::default(),
+        };
+
+        apply_host_resources(&hr, &mut m);
+
+        assert_eq!(m.host_env.get("UM_THP"), Some(&"off".to_string()));
+        assert_eq!(
+            m.host_env.get("UM_OOM_SCORE_ADJ"),
+            Some(&"500".to_string())
+        );
+        assert_eq!(
+            m.host_env.get("UM_KVM_V2_CPU_AFFINITY"),
+            Some(&"0-3".to_string())
+        );
+        assert_eq!(m.host_env.get("UM_HUGEPAGES"), Some(&"2M".to_string()));
+        assert_eq!(
+            m.host_env.get("UM_KVM_V2_PIN_PHYSMEM"),
+            Some(&"1".to_string())
+        );
+
+        let cg = m.cgroup_v2.expect("cgroup_v2 populated");
+        assert_eq!(cg.memory_max, "512M");
+        assert_eq!(cg.cpu_max, "200%");
+        assert_eq!(cg.pids_max, Some(512));
+    }
+
+    /// And the inverse: an empty / default HostResourcesSection
+    /// leaves both fields untouched.  Locks in "you can opt out by
+    /// simply not setting [host_resources]".
+    #[test]
+    fn apply_host_resources_default_leaves_manifest_clean() {
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let hr = HostResourcesSection::default();
+        let mut m = crate::manifest::Manifest {
+            schema_version: 1,
+            instance: crate::manifest::InstanceSection {
+                name: "test".into(),
+                created_at: "2026-05-19T00:00:00Z".into(),
+            },
+            kernel: crate::manifest::KernelSection {
+                path: PathBuf::from("/x"),
+                sha256: "deadbeef".into(),
+                profile: "research".into(),
+                backend: "seccomp".into(),
+            },
+            runtime: crate::manifest::RuntimeSection {
+                mem: "256M".into(),
+                ncpus: 1,
+                cmdline: "".into(),
+                root: "hostfs".into(),
+                forkserver: false,
+            },
+            host_env: BTreeMap::new(),
+            cgroup_v2: None,
+            labels: Default::default(),
+        };
+
+        apply_host_resources(&hr, &mut m);
+
+        assert!(m.host_env.is_empty(), "host_env should stay empty for default HostResourcesSection");
+        assert!(m.cgroup_v2.is_none(), "cgroup_v2 should stay None for default HostResourcesSection");
+    }
 
     #[test]
     fn schema_roundtrip_minimal() {
