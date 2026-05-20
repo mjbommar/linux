@@ -253,7 +253,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			os_snapshot_unblock_iter_signals();
 			return n;
 		}
-		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
+		pr_debug("template_pause: torn down %d stub(s) pre-fork\n", n);
 
 		/* (B) FORK */
 		child_pid = os_template_pause_fork();
@@ -272,31 +272,35 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			 * Order matters: worker_init rebuilds sigio/timer
 			 * state targeting gettid(), which must be valid here
 			 * (it is — the child is the calling thread).
+			 *
+			 * DELIBERATELY do not call os_snapshot_unblock_iter_
+			 * signals() here: the AFL forkserver path
+			 * (arch/um/kernel/snapshot.c) documents that workers
+			 * must keep UML signals_enabled = 0 after worker_init
+			 * — per D41, signals_enabled stays 0 until the caller
+			 * explicitly re-enables it.  Re-enabling here re-
+			 * introduces the UML_LONGJMP jmp_buf hazard that the
+			 * v1 ceiling commentary describes (commit 3d-c's
+			 * bring-up notes).
 			 */
 			n = um_skas_respawn_all_stubs();
 			if (n < 0) {
 				pr_err("template_pause: child stub respawn failed: %d\n",
 				       n);
-				os_snapshot_unblock_iter_signals();
 				return n;
 			}
 			um_snapshot_worker_init();
-			os_snapshot_unblock_iter_signals();
 			*first_blob = blob;
 			return 0;
 		}
 
-		pr_info("template_pause: PARENT branch entered (new child pid=%d)\n",
-			child_pid);
-		/* (C-parent) — DELIBERATELY no respawn on the parent side
-		 * yet.  For single-take, the parent only needs to report
-		 * the new child pid and then re-pause indefinitely; it does
-		 * not need to drive guest userspace again before SIGSTOP.
-		 * Multi-take semantics (parent serves multiple consecutive
-		 * takes from one master) require parent-side respawn — left
-		 * as future work in the same TU.
+		/* (C-parent) — RESPAWN master's own stubs.  The master keeps
+		 * its UML task list intact (fork is a no-op for the master's
+		 * task list — only the child's gets a CoW copy), so every
+		 * mm in mm_list still has a valid id.stack; we just need
+		 * fresh stub children.
 		 */
-		n = 0;
+		n = um_skas_respawn_all_stubs();
 		if (n < 0) {
 			pr_err("template_pause: parent stub respawn failed: %d\n",
 			       n);
