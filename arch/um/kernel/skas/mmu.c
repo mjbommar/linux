@@ -332,9 +332,6 @@ int um_skas_respawn_all_stubs(void)
 		struct mm_id *id = arr[i];
 		int err;
 
-		/* Respawn the mms we just tore down (and any that were
-		 * already dead — start_userspace_redo handles both).
-		 */
 		err = start_userspace_redo(id);
 		if (err) {
 			printk(KERN_ERR

@@ -42,6 +42,8 @@
 #include <asm/um-template-pause.h>
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK
 #include <asm/um-snapshot.h>		/* um_snapshot_worker_init() */
+#include <skas.h>			/* um_skas_teardown_all_stubs(),
+					 *  um_skas_respawn_all_stubs() */
 #endif
 
 #include <backend.h>				/* um_backend, kind enum */
@@ -219,7 +221,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 			       struct um_template_identity *first_blob)
 {
 	struct um_template_identity blob;
-	int ret, child_pid;
+	int ret, child_pid, n;
 
 	ret = assert_fork_safety(named_point);
 	if (ret)
@@ -234,26 +236,75 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 	os_snapshot_block_iter_signals();
 
 	for (;;) {
+		/*
+		 * (A) PRE-FORK: kill every stub child in mm_list.  Without
+		 * this, fork(2) aliases the master's stub pids into the
+		 * forked-child UML's mm_list (which inherits via CoW), and
+		 * the two halves race to drive the same stubs — corrupting
+		 * the 16-bit offset fields in stub_data and SEGVing deep
+		 * inside stub code.  See
+		 * Documentation/virt/uml/redesign/06-sequencing/post-
+		 * 2026-05-19-next-sprint/09-fork-server-PHASE2A-DESIGN.md
+		 * §2 for the full hazard model.
+		 */
+		n = um_skas_teardown_all_stubs();
+		if (n < 0) {
+			pr_err("template_pause: stub teardown failed: %d\n", n);
+			os_snapshot_unblock_iter_signals();
+			return n;
+		}
+		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
+
+		/* (B) FORK */
 		child_pid = os_template_pause_fork();
 		if (child_pid < 0) {
 			pr_err("template_pause: fork failed: %d\n", child_pid);
+			/* Try to respawn so the master can recover. */
+			(void)um_skas_respawn_all_stubs();
 			os_snapshot_unblock_iter_signals();
 			return child_pid;
 		}
+
 		if (child_pid == 0) {
-			/* Child path — drop parent-inherited host state
-			 * via the snapshot/forkserver worker init helper.
-			 * Identity is in `blob`; Phase 2 will act on it.
+			/* (D-child) — RESPAWN child's own stubs in its own
+			 * process tree, THEN do the existing worker_init
+			 * forget/rebuild of SIGIO + POSIX-timer + sched state.
+			 * Order matters: worker_init rebuilds sigio/timer
+			 * state targeting gettid(), which must be valid here
+			 * (it is — the child is the calling thread).
 			 */
+			n = um_skas_respawn_all_stubs();
+			if (n < 0) {
+				pr_err("template_pause: child stub respawn failed: %d\n",
+				       n);
+				os_snapshot_unblock_iter_signals();
+				return n;
+			}
 			um_snapshot_worker_init();
 			os_snapshot_unblock_iter_signals();
 			*first_blob = blob;
 			return 0;
 		}
 
-		/* Parent path — report the new child pid to the
-		 * supervisor and loop back to SIGSTOP.
+		pr_info("template_pause: PARENT branch entered (new child pid=%d)\n",
+			child_pid);
+		/* (C-parent) — DELIBERATELY no respawn on the parent side
+		 * yet.  For single-take, the parent only needs to report
+		 * the new child pid and then re-pause indefinitely; it does
+		 * not need to drive guest userspace again before SIGSTOP.
+		 * Multi-take semantics (parent serves multiple consecutive
+		 * takes from one master) require parent-side respawn — left
+		 * as future work in the same TU.
 		 */
+		n = 0;
+		if (n < 0) {
+			pr_err("template_pause: parent stub respawn failed: %d\n",
+			       n);
+			os_snapshot_unblock_iter_signals();
+			return n;
+		}
+
+		/* Report the new child's host pid via memfd[260:264]. */
 		if (identity_fd >= 0) {
 			int werr = os_template_pause_write_child_pid(
 				identity_fd,
@@ -264,6 +315,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 					child_pid, werr);
 		}
 
+		/* (E) Next take's pause. */
 		ret = one_pause_cycle(named_point, identity_fd, &blob);
 		if (ret) {
 			os_snapshot_unblock_iter_signals();
