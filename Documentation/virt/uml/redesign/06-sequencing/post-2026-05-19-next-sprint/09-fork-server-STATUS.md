@@ -216,6 +216,60 @@ Call Trace:
   one of which runs `switch_threads()` → `UML_LONGJMP` → bad
   jmp_buf → panic.
 
+**Update 2026-05-20 (Round 2 — early-pause + every-mitigation bisect)**:
+
+  Tried `um_template_pause=early-fork` which arms the kernel to
+  pause INSIDE a late_initcall_sync, BEFORE `run_init_process` —
+  AFL forkserver's "v1-friendly" ready point invariant.  At this
+  point there are NO guest userspace tasks, NO SKAS stub
+  children, and the runqueue has only kthreads + the kernel_init
+  task itself.
+
+  Result: master STILL panics, this time with "Segfault with no
+  mm" (because at initcall time `current->mm == NULL`).  Same
+  call frame: `um_template_pause_enter+0xf0/0x100` — the function
+  epilogue's `ret` instruction popping a corrupted saved-RIP.
+
+  Combined-bisect outcome across the full matrix:
+
+  | Variant                              | Master survives fork? |
+  |--------------------------------------|------------------------|
+  | Teardown + respawn (design's path)   | No — IP=0x2d6b62 etc.  |
+  | No teardown                          | No — IP=0x4            |
+  | Pre-fork sched_worker_detach         | No — crashes the master before fork |
+  | Child-side detach + respawn          | No (master path still) |
+  | Inline asm syscalls everywhere       | No                     |
+  | preempt_disable across fork          | No                     |
+  | Early-pause (no userspace, no stubs) | No — "Segfault with no mm" |
+
+  The COMMON denominator across all variants is `um_template_pause_
+  enter+0xf0` — the function epilogue's `ret`.  The master's
+  saved-RIP slot on the kernel stack is being corrupted by something
+  in the path between the fork syscall returning and any subsequent
+  code reading from that slot.  CoW should preserve the slot
+  contents.  Yet it doesn't, consistently, across all configurations.
+
+**Conclusion: this is genuinely beyond a single-session fix.**
+
+The hypothesis is that UML's host-process stack frame for the kernel
+task running fork_on_resume_loop has some invariant — probably
+related to UML's own jmp_buf save/restore in `switch_threads`, the
+SKAS stub-child reaper signal path, or the CFS task accounting —
+that gets violated by raw `__NR_fork`.  Fixing it requires either:
+
+  (a) Adding a CRIU-style checkpoint/restore (memo 26's path,
+      which Memo 09 explicitly rejected for the fast-spawn use
+      case but may be unavoidable);
+  (b) Re-architecting UML's task scheduling to use a freezer-cgroup
+      pre-fork barrier (the v2 direction the existing
+      sched_worker_detach_other_tasks comment in
+      kernel/sched/core.c points at);
+  (c) Constraining the master to be SINGLE-THREADED at fork time
+      (no SIGIO thread, no POSIX-timer threads), so the host
+      kernel's fork has no sibling-thread state to lose.
+
+Each is a multi-week engineering effort, not a single-commit fix.
+
 **Real fix (informed by the bisect)**:
 
   Three layers needed, in order:

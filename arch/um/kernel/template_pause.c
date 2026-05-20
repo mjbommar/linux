@@ -73,6 +73,20 @@ static bool template_pause_armed_flag __read_mostly;
  */
 static bool template_pause_fork_armed_flag __read_mostly;
 
+/*
+ * Early-pause mode.  Armed by `um_template_pause=early` on the
+ * cmdline.  In this mode the kernel pauses ITSELF (via a late
+ * initcall) before run_init_process is reached — no guest userspace
+ * has executed, no SKAS stub children exist, and the runqueue holds
+ * only kernel-mode tasks.  This is the AFL forkserver's
+ * "v1-friendly" ready point invariant and avoids the v1-ceiling
+ * UML_LONGJMP-into-stale-jmp_buf hazard that the late ready point
+ * (via /proc/um/template_pause from init) triggers.
+ *
+ * Combinable with =fork: `um_template_pause=early-fork` arms BOTH.
+ */
+static bool template_pause_early_armed_flag __read_mostly;
+
 /* Diagnostic only — counts how many SIGSTOP/SIGCONT cycles this
  * process (or any of its forked descendants that still share the
  * .data segment) has been through.  A fresh fork() inherits the
@@ -85,7 +99,13 @@ static atomic_t template_pause_count = ATOMIC_INIT(0);
 static int __init template_pause_setup(char *str)
 {
 	template_pause_armed_flag = true;
-	if (str && !strcmp(str, "=fork")) {
+	if (str && (!strcmp(str, "=early") || !strcmp(str, "=early-fork"))) {
+		template_pause_early_armed_flag = true;
+		if (!strcmp(str, "=early-fork"))
+			template_pause_fork_armed_flag = true;
+		pr_info("template_pause: armed via kernel cmdline (early-pause%s)\n",
+			template_pause_fork_armed_flag ? " + fork-on-resume" : "");
+	} else if (str && !strcmp(str, "=fork")) {
 		template_pause_fork_armed_flag = true;
 		pr_warn("template_pause: armed via kernel cmdline (fork-on-resume) — EXPERIMENTAL; known to corrupt parent-side seccomp stub state. See 09-fork-server-STATUS.md.\n");
 	} else {
@@ -461,3 +481,25 @@ static int __init template_pause_proc_init(void)
 	return 0;
 }
 late_initcall(template_pause_proc_init);
+
+/*
+ * Early-pause initcall: if armed via `um_template_pause=early` or
+ * `=early-fork`, pause the kernel HERE (inside the last late_initcall
+ * after proc_init) — before run_init_process spawns userspace and
+ * before any SKAS stub child is created.  This is AFL forkserver's
+ * "v1-friendly" ready point.
+ *
+ * Returning 0 lets the boot proceed normally (init.sh runs as usual)
+ * for kernels where the early flag is NOT armed.
+ */
+static int __init template_pause_early_init(void)
+{
+	if (!template_pause_armed_flag || !template_pause_early_armed_flag)
+		return 0;
+
+	pr_info("template_pause: entering early-pause initcall\n");
+	(void)um_template_pause_enter("early-initcall");
+	pr_info("template_pause: early-pause initcall returned\n");
+	return 0;
+}
+late_initcall_sync(template_pause_early_init);
