@@ -109,10 +109,39 @@ if ! grep -q "master SIGSTOPped; sending SIGCONT" "$OUT/spawn.err"; then
 	exit 1
 fi
 
-# Tear down.
-kill -KILL "$CHILD_PID" 2>/dev/null || true
+# Now exercise pool list + destroy against the spawned member.
+LIST_OUT=$("$UMLCTL" pool list --json)
+if ! echo "$LIST_OUT" | grep -q "\"pid\":${CHILD_PID}"; then
+	echo "FAIL: pool list --json did not include pid $CHILD_PID"
+	echo "$LIST_OUT"
+	exit 1
+fi
+echo "pool list --json includes pid $CHILD_PID: PASS"
+
+DESTROY_OUT=$("$UMLCTL" pool destroy "$CHILD_PID" --json)
+if ! echo "$DESTROY_OUT" | python3 -c \
+	'import json,sys; o=json.load(sys.stdin); sys.exit(0 if o["destroyed"] else 1)'; then
+	echo "FAIL: pool destroy did not report destroyed=true"
+	echo "$DESTROY_OUT"
+	exit 1
+fi
+echo "pool destroy reports destroyed=true: PASS"
+
+if kill -0 "$CHILD_PID" 2>/dev/null; then
+	echo "FAIL: pid $CHILD_PID still alive after destroy"
+	exit 1
+fi
+echo "pid $CHILD_PID no longer alive: PASS"
+
+# Subsequent list should not include the dead pid.
+if "$UMLCTL" pool list --json | grep -q "\"pid\":${CHILD_PID}"; then
+	echo "FAIL: pool list still includes dead pid $CHILD_PID"
+	exit 1
+fi
+echo "post-destroy list omits dead pid: PASS"
+
 CHILD_PID=
 
 echo
-echo "VERDICT: umlctl pool spawn drives template-pause end-to-end"
+echo "VERDICT: umlctl pool spawn/list/destroy lifecycle works end-to-end"
 exit 0

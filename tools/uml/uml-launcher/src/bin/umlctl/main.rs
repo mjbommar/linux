@@ -58,6 +58,13 @@ enum PoolCmd {
     /// daemon plus a Unix-socket `take` RPC.  Until then, callers
     /// (syzkaller harness, smoke tests) drive `spawn` directly.
     Spawn(pool::SpawnArgs),
+    /// List live pool members previously created by `pool spawn`.
+    /// Reads $RUNTIME_DIR/pools/members/*.json + filters out
+    /// records whose pid is no longer alive.
+    List(pool::ListArgs),
+    /// Kill a pool member + remove its record.  Default is SIGKILL;
+    /// pass --graceful for SIGTERM + grace period + SIGKILL escalation.
+    Destroy(pool::DestroyArgs),
 }
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -770,7 +777,9 @@ fn run() -> Result<()> {
         Cmd::Gdb(args) => transparency::cmd_gdb(&paths, &args.name, &args.extra),
         Cmd::Bpf(args) => transparency::cmd_bpf(&paths, &args.name, args.script.as_deref()),
         Cmd::Pool(sub) => match sub {
-            PoolCmd::Spawn(args) => pool::cmd_spawn(args, cli.quiet),
+            PoolCmd::Spawn(args) => pool::cmd_spawn(args, &paths, cli.quiet),
+            PoolCmd::List(args) => pool::cmd_list(args, &paths, cli.quiet),
+            PoolCmd::Destroy(args) => pool::cmd_destroy(args, &paths, cli.quiet),
         },
     }
 }

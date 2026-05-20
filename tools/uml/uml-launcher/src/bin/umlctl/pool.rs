@@ -46,6 +46,7 @@ use std::ffi::CString;
 use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The on-wire identity blob.  Layout matches
@@ -125,7 +126,7 @@ pub struct SpawnArgs {
     pub json: bool,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct SpawnResult {
     pub pid: i32,
     pub instance: String,
@@ -140,7 +141,36 @@ pub struct SpawnResult {
     pub identity_blob_size: usize,
 }
 
-pub fn cmd_spawn(args: SpawnArgs, quiet: bool) -> Result<()> {
+/// Directory holding per-pool-member records.  One JSON file per
+/// spawn under `$RUNTIME_DIR/pools/members/<pid>.json` so `pool list`
+/// and `pool destroy` can find them without needing a long-lived
+/// supervisor.  Stale entries (where the pid is no longer alive)
+/// are pruned by `list` and `destroy` on read.
+fn pool_members_dir(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("pools").join("members")
+}
+
+fn member_path(runtime_dir: &Path, pid: i32) -> PathBuf {
+    pool_members_dir(runtime_dir).join(format!("{}.json", pid))
+}
+
+fn record_spawn(runtime_dir: &Path, r: &SpawnResult) -> Result<()> {
+    let dir = pool_members_dir(runtime_dir);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    let path = member_path(runtime_dir, r.pid);
+    let json = serde_json::to_string_pretty(r)
+        .context("serialize spawn record")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn pid_is_alive(pid: i32) -> bool {
+    Path::new(&format!("/proc/{}", pid)).is_dir()
+}
+
+pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> Result<()> {
     if !args.kernel.exists() {
         bail!("kernel not found: {}", args.kernel.display());
     }
@@ -263,6 +293,11 @@ pub fn cmd_spawn(args: SpawnArgs, quiet: bool) -> Result<()> {
         identity_blob_size: blob.len(),
     };
 
+    // Record the spawn so `pool list` + `pool destroy` can find it.
+    if let Err(e) = record_spawn(&paths.runtime_dir, &result) {
+        eprintln!("umlctl pool spawn: warning: record_spawn failed: {:#}", e);
+    }
+
     if args.json {
         let s = serde_json::to_string(&result)
             .context("serialize spawn result")?;
@@ -292,6 +327,177 @@ pub fn cmd_spawn(args: SpawnArgs, quiet: bool) -> Result<()> {
         std::mem::forget(memfd);
     }
 
+    Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Emit one JSON object per member instead of a human table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DestroyArgs {
+    /// Host pid of the pool member to destroy.  Sends SIGKILL +
+    /// waits up to 2s for the process to disappear, then removes
+    /// the record file.
+    pub pid: i32,
+
+    /// SIGTERM first (graceful), wait up to --grace-secs, then
+    /// SIGKILL if still alive.  Without this flag, SIGKILL is sent
+    /// directly (default; safe for pool members which don't have a
+    /// meaningful graceful-shutdown path).
+    #[arg(long)]
+    pub graceful: bool,
+
+    /// How long to wait before escalating to SIGKILL.
+    #[arg(long, default_value_t = 5, value_name = "SECONDS")]
+    pub grace_secs: u64,
+
+    /// Print the destroyed member as JSON (instead of a status line).
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Walk $RUNTIME/pools/members/, read each record, drop stale ones
+/// (where the pid is no longer alive), and emit the rest.  Prunes
+/// stale records as a side-effect.
+pub fn cmd_list(args: ListArgs, paths: &crate::paths::Paths, _quiet: bool) -> Result<()> {
+    let dir = pool_members_dir(&paths.runtime_dir);
+    if !dir.exists() {
+        if args.json {
+            // empty array on stdout for scriptability
+            println!("[]");
+        } else {
+            println!("(no pool members registered)");
+        }
+        return Ok(());
+    }
+
+    let mut members: Vec<SpawnResult> = Vec::new();
+    for ent in std::fs::read_dir(&dir)
+        .with_context(|| format!("readdir {}", dir.display()))?
+    {
+        let ent = ent?;
+        let p = ent.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let rec: SpawnResult = match serde_json::from_slice(&bytes) {
+            Ok(r) => r,
+            Err(_) => {
+                // Corrupt record — drop it.
+                let _ = std::fs::remove_file(&p);
+                continue;
+            }
+        };
+        if !pid_is_alive(rec.pid) {
+            // Prune stale.
+            let _ = std::fs::remove_file(&p);
+            continue;
+        }
+        members.push(rec);
+    }
+    members.sort_by_key(|m| m.pid);
+
+    if args.json {
+        for m in &members {
+            println!("{}", serde_json::to_string(m)
+                .context("serialize member")?);
+        }
+    } else if members.is_empty() {
+        println!("(no live pool members)");
+    } else {
+        println!("{:>8}  {:<24}  {:<19}  {:<18}  {:<12}",
+                 "PID", "INSTANCE", "MAC", "IPv4", "MEM");
+        for m in &members {
+            println!("{:>8}  {:<24}  {:<19}  {:<18}  {:<12}",
+                     m.pid, m.instance, m.mac, m.ipv4_cidr, m.mem);
+        }
+    }
+    Ok(())
+}
+
+pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) -> Result<()> {
+    let record_path = member_path(&paths.runtime_dir, args.pid);
+    let record: Option<SpawnResult> = std::fs::read(&record_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+
+    if !pid_is_alive(args.pid) {
+        // Already gone — just clean up the record.
+        let _ = std::fs::remove_file(&record_path);
+        if !quiet {
+            eprintln!("umlctl pool destroy: pid {} already dead; record cleaned",
+                      args.pid);
+        }
+        if args.json {
+            // emit best-effort JSON shape
+            let envelope = serde_json::json!({
+                "pid": args.pid,
+                "destroyed": false,
+                "reason": "already_dead",
+                "record": record,
+            });
+            println!("{}", envelope);
+        }
+        return Ok(());
+    }
+
+    let sig = if args.graceful { libc::SIGTERM } else { libc::SIGKILL };
+    if !quiet {
+        eprintln!("umlctl pool destroy: signal {} → pid {}", sig, args.pid);
+    }
+    let r = unsafe { libc::kill(args.pid, sig) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("kill pool member");
+    }
+
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(if args.graceful { args.grace_secs } else { 2 });
+    while std::time::Instant::now() < deadline {
+        if !pid_is_alive(args.pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let escalated = if pid_is_alive(args.pid) && args.graceful {
+        if !quiet {
+            eprintln!("umlctl pool destroy: grace expired; escalating to SIGKILL");
+        }
+        unsafe { libc::kill(args.pid, libc::SIGKILL) };
+        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline2 {
+            if !pid_is_alive(args.pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        true
+    } else { false };
+
+    let _ = std::fs::remove_file(&record_path);
+
+    let still_alive = pid_is_alive(args.pid);
+    if args.json {
+        let envelope = serde_json::json!({
+            "pid": args.pid,
+            "destroyed": !still_alive,
+            "escalated_to_sigkill": escalated,
+            "record": record,
+        });
+        println!("{}", envelope);
+    } else if !quiet {
+        println!("umlctl pool destroy: pid {} {}", args.pid,
+                 if still_alive { "STILL ALIVE (giving up)" } else { "destroyed" });
+    }
     Ok(())
 }
 
