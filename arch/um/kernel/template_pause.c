@@ -103,6 +103,23 @@ static bool template_pause_early_armed_flag __read_mostly;
  */
 static bool template_pause_mfc_diag_armed_flag __read_mostly;
 
+/*
+ * Private-stack mode arm.  DEFAULT ON in fork mode (the production
+ * fix for bug B1, validated 2026-05-20).  Can be disabled via
+ * `um_template_pause_private_stack=0` on the kernel cmdline for
+ * the legacy __NR_fork + post-fork SIGKILL behaviour (used for
+ * regression testing or in case the clone() path has a bug).
+ *
+ * Mechanism: master uses __NR_clone (NOT __NR_fork) with a private
+ * MAP_PRIVATE | MAP_ANONYMOUS stack for the child.  This bypasses
+ * the MAP_SHARED physmem stack-race documented in B1.  The child's
+ * first instruction post-clone runs on its OWN stack, so master's
+ * concurrent writes to MASTER's stack don't corrupt the child's
+ * view.  Child does inline __NR_exit_group(0) and terminates
+ * cleanly — no panic, no SIGKILL needed.
+ */
+static bool template_pause_private_stack_armed_flag __read_mostly = true;
+
 /* Diagnostic only — counts how many SIGSTOP/SIGCONT cycles this
  * process (or any of its forked descendants that still share the
  * .data segment) has been through.  A fresh fork() inherits the
@@ -142,6 +159,20 @@ static int __init template_pause_mfc_diag_setup(char *str)
 	return 1;
 }
 __setup("um_template_pause_mfc_diag", template_pause_mfc_diag_setup);
+
+static int __init template_pause_private_stack_setup(char *str)
+{
+	if (str && str[0] == '=' && str[1] == '0')
+		template_pause_private_stack_armed_flag = false;
+	else if (str && str[0] == '=' && str[1] == '1')
+		template_pause_private_stack_armed_flag = true;
+	else if (str && str[0] == '\0')
+		template_pause_private_stack_armed_flag = true;
+	pr_info("template_pause: private-stack mode = %s\n",
+		template_pause_private_stack_armed_flag ? "ENABLED (production)" : "DISABLED (legacy fork+SIGKILL)");
+	return 1;
+}
+__setup("um_template_pause_private_stack", template_pause_private_stack_setup);
 
 bool um_template_pause_armed(void)
 {
@@ -635,8 +666,21 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		preempt_disable();
 		sched_worker_detach_other_tasks();
 
-		/* (B) FORK */
-		child_pid = os_template_pause_fork();
+		/* (B) FORK
+		 *
+		 * Private-stack mode (Phase 2 path forward, fixes bug B1):
+		 * use __NR_clone with a private MAP_PRIVATE child stack so
+		 * master's post-fork stack writes can't corrupt the child's
+		 * view.  The child in this path will be on its own stack
+		 * and will exit_group via inline asm — so it terminates
+		 * naturally without needing SIGKILL.
+		 *
+		 * Default path: __NR_fork + post-fork SIGKILL.  See B1.
+		 */
+		if (template_pause_private_stack_armed_flag)
+			child_pid = os_template_pause_fork_clone();
+		else
+			child_pid = os_template_pause_fork();
 		if (child_pid < 0) {
 			pr_err("template_pause: fork failed: %d\n", child_pid);
 			(void)os_template_pause_signals_restore_host();
@@ -764,8 +808,12 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		 * reason as the other os_template_pause syscalls: glibc
 		 * cancellation-pipe hazard.
 		 */
-		if (!template_pause_mfc_diag_armed_flag) {
-			/* x86_64 __NR_kill = 62, SIGKILL = 9 */
+		if (!template_pause_mfc_diag_armed_flag &&
+		    !template_pause_private_stack_armed_flag) {
+			/* x86_64 __NR_kill = 62, SIGKILL = 9.  Skipped in
+			 * private-stack mode because the child exited via
+			 * exit_group inside os_template_pause_fork_clone.
+			 */
 			register long rax_k asm("rax") = 62;
 			register long rdi_k asm("rdi") = (long)child_pid;
 			register long rsi_k asm("rsi") = 9;

@@ -34,6 +34,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -171,6 +172,86 @@ os_template_pause_fork_inner(void)
 int os_template_pause_fork(void)
 {
 	return os_template_pause_fork_inner();
+}
+
+/*
+ * Phase 2 fork primitive: __NR_clone with private MAP_PRIVATE child
+ * stack.  Solves bug B1 (UML's physmem MAP_SHARED kernel-stack race)
+ * by giving the child its own stack region, so master's post-fork
+ * stack writes don't corrupt the child's view.
+ *
+ * Semantics:
+ *   * Parent returns: child PID (positive) or -errno.  Same as fork.
+ *   * Child returns: does NOT return.  Exits via __NR_exit_group(0)
+ *     inline.  The child is on a private stack — it cannot do `ret`
+ *     because the private stack is empty.  Any C code that would
+ *     run in the child must be inline-asm-only, never touching
+ *     locals or function calls.
+ *
+ * The child stack is intentionally LEAKED on the master side (small
+ * mmap, 8 KiB).  Per-iteration leak is bounded; future Phase 2 code
+ * should cache and reuse a single child_stack region across iters.
+ */
+int os_template_pause_fork_clone(void)
+{
+	void *child_stack_base;
+	unsigned long child_stack_top;
+	long ret;
+
+	/* 8 KiB private stack — anonymous + private. */
+	child_stack_base = mmap(NULL, 8192,
+				 PROT_READ | PROT_WRITE,
+				 MAP_PRIVATE | MAP_ANONYMOUS,
+				 -1, 0);
+	if (child_stack_base == MAP_FAILED)
+		return -errno;
+	child_stack_top = (unsigned long)child_stack_base + 8192 - 16;
+
+	/* Raw __NR_clone (x86_64 = 56).  In the CHILD, rax = 0 and
+	 * RSP = child_stack_top; in the PARENT, rax = child pid.
+	 *
+	 * After the syscall, BOTH halves resume in this function.  We
+	 * must distinguish them and route the child to exit_group via
+	 * raw inline asm only — the child has no usable C stack.
+	 */
+	{
+		register long rax asm("rax") = 56; /* __NR_clone */
+		register long rdi asm("rdi") = 17; /* SIGCHLD */
+		register long rsi asm("rsi") = child_stack_top;
+		register long rdx asm("rdx") = 0;  /* parent_tid */
+		register long r10 asm("r10") = 0;  /* child_tid */
+		register long r8  asm("r8")  = 0;  /* tls */
+
+		asm volatile (
+			"syscall\n\t"
+			"testq %%rax, %%rax\n\t"
+			"jnz 1f\n\t"
+			/* CHILD path: rax = 0.  Do raw exit_group(0).
+			 * Cannot use C — RSP is the private stack, no
+			 * usable locals.  Cannot `ret`.
+			 */
+			"movq $231, %%rax\n\t"   /* __NR_exit_group */
+			"xorq %%rdi, %%rdi\n\t"
+			"syscall\n\t"
+			"2: jmp 2b\n\t"           /* unreachable */
+			"1:\n\t"
+			: "+r" (rax)
+			: "r" (rdi), "r" (rsi), "r" (rdx),
+			  "r" (r10), "r" (r8)
+			: "rcx", "r11", "memory"
+		);
+		ret = rax;
+	}
+
+	/* Parent only reaches here.  Note: we LEAK child_stack_base —
+	 * it's intentional, the child terminates via exit_group so it
+	 * never references it anyway, and master will see a small
+	 * monotonic VMA leak per iter.  Phase 2 caches + reuses.
+	 */
+	(void)child_stack_base;
+	if (ret < 0 && ret > -4096)
+		return (int)ret;
+	return (int)ret;
 }
 
 /*
