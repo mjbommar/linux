@@ -535,6 +535,32 @@ config UM_SNAPSHOT_FORKSERVER
 
 	  Say N unless you're building a fuzz-profile UML.
 
+config UM_TEMPLATE_PAUSE
+	bool "Template-pause + fork hook (Memo 09)"
+	default n
+	help
+	  Compile arch/um/kernel/template_pause.c: the cooperative in-
+	  kernel seam that lets a booted UML quiesce at a named "ready
+	  point," SIGSTOP the host process for an external supervisor
+	  (umlctl pool serve) to fork(2), and resume on SIGCONT with a
+	  per-child identity blob applied.
+
+	  Distinct from CONFIG_UM_SNAPSHOT_FORKSERVER's AFL-style path:
+	  this hook does NOT fork from inside the kernel; it only
+	  pauses and resumes, leaving fork(2) to the supervisor.  This
+	  is the keystone of the post-2026-05-19 "umlctl pool" sprint
+	  (Memo 09); see Documentation/virt/uml/redesign/06-sequencing/
+	  post-2026-05-19-next-sprint/09-fork-server-snapshot-restore.md.
+
+	  Adds a /proc/um/template_pause write trigger when armed via
+	  the "um_template_pause" kernel cmdline.  No-op (no /proc
+	  entry created, no static cost) when the cmdline arg is
+	  absent.  Safe to set Y in research and production profiles —
+	  the cmdline gates all visible behaviour.
+
+	  Say N unless you intend to use `umlctl pool` or test the
+	  template-pause primitive directly.
+
 endmenu
 
 source "arch/um/drivers/Kconfig"

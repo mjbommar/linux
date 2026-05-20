@@ -29,6 +29,7 @@ obj-$(CONFIG_BPF_JIT) += x86_nops.o bpf_jit_stubs.o
 obj-$(CONFIG_KPROBES) += kprobes/
 obj-$(CONFIG_RETHOOK) += rethook.o
 obj-$(CONFIG_UM_SNAPSHOT_FORKSERVER) += snapshot.o
+obj-$(CONFIG_UM_TEMPLATE_PAUSE) += template_pause.o
 obj-$(CONFIG_UM_WORKER_PROCESS) += spawner.o
 # rethook's trampoline runs on every probed function's return;
 # it must not itself be traced (same discipline as kprobes).

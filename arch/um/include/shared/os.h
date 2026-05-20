@@ -256,6 +256,17 @@ extern int os_timer_worker_rebuild(void);
 extern void os_snapshot_block_iter_signals(void);
 extern void os_snapshot_unblock_iter_signals(void);
 
+/* Template-pause primitives (Memo 09 Phase 1a).
+ *
+ * Thin host-syscall wrappers used by the in-kernel
+ * arch/um/kernel/template_pause.c driver. Defined in
+ * arch/um/os-Linux/template_pause.c; see that file for the
+ * per-function contract.
+ */
+extern int os_template_pause_stop_self(void);
+extern int os_template_pause_identity_fd(void);
+extern ssize_t os_template_pause_read_identity(int fd, void *buf, size_t len);
+
 extern void init_new_thread_signals(void);
 
 extern int os_map_memory(void *virt, int fd, unsigned long long off,

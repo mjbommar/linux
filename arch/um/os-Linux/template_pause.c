@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * UML template-pause user-space helpers (Memo 09 Phase 1a).
+ *
+ * Thin host-syscall wrappers that the in-kernel template_pause path
+ * (arch/um/kernel/template_pause.c) needs to reach across the
+ * os-Linux boundary:
+ *
+ *   os_template_pause_stop_self():
+ *	Raise SIGSTOP on the current host process and return when the
+ *	supervisor SIGCONTs us (which, for a forked child, happens
+ *	after the supervisor has written the per-child identity blob
+ *	to the memfd at UM_TEMPLATE_IDENTITY_FD).
+ *
+ *   os_template_pause_identity_fd():
+ *	Resolve UM_TEMPLATE_IDENTITY_FD from the host environment,
+ *	validate it is open, and return it.  Returns -ENOENT if the
+ *	env var is unset (no identity-blob channel — pool master
+ *	before fork, or non-pool boot) or -EBADF if the fd is bogus.
+ *
+ *   os_template_pause_read_identity(fd, buf, len):
+ *	Read up to @len bytes from a memfd; lseek to 0 first so the
+ *	supervisor can rewrite the blob between takes without
+ *	creating a fresh fd.  Short reads (memfd shorter than @len)
+ *	return the bytes actually read; -errno on host failure.
+ *
+ * These are USER_OBJS-scope helpers — they must not call into kernel
+ * code.  The in-kernel driver lives in arch/um/kernel/template_pause.c.
+ */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <os.h>
+
+#define UM_TEMPLATE_IDENTITY_FD_ENV "UM_TEMPLATE_IDENTITY_FD"
+
+/*
+ * SIGSTOP on self.  SIGSTOP cannot be masked or caught — the host
+ * kernel suspends the process unconditionally, and we resume here
+ * only when SIGCONT arrives.  No sigsuspend() needed: kill() returns
+ * after the stop+resume cycle as if the call had blocked for the
+ * duration of the suspension.
+ *
+ * Rationale for kill(getpid(), ...) over raise():
+ *   - raise() is libc's wrapper around tgkill(getpid(), gettid(),
+ *     ...) and uses pthread state we don't want to depend on at
+ *     this point.  Plain kill(getpid(), SIGSTOP) is the simplest
+ *     possible primitive and is what existing UML code uses
+ *     (compare os_alarm_process / os_kill_process).
+ *
+ * Returns 0 on success (SIGSTOP raised + SIGCONT resumed), -errno
+ * on syscall failure.
+ */
+int os_template_pause_stop_self(void)
+{
+	int pid = os_getpid();
+
+	if (pid <= 0)
+		return -EINVAL;
+
+	if (kill(pid, SIGSTOP) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/*
+ * Parse UM_TEMPLATE_IDENTITY_FD and return the fd, or a negative
+ * errno if unavailable.  Validates the fd is currently open via
+ * fcntl(F_GETFD) so a stale env var (parent exec'd into us with a
+ * dead fd) shows up cleanly rather than failing later on read().
+ */
+int os_template_pause_identity_fd(void)
+{
+	const char *v;
+	char *end;
+	long fd;
+
+	v = getenv(UM_TEMPLATE_IDENTITY_FD_ENV);
+	if (!v || !*v)
+		return -ENOENT;
+
+	fd = strtol(v, &end, 10);
+	if (*end != '\0' || fd < 0 || fd > INT32_MAX)
+		return -EINVAL;
+
+	if (fcntl((int)fd, F_GETFD) < 0)
+		return -EBADF;
+
+	return (int)fd;
+}
+
+/*
+ * Read identity blob from a memfd.  Supervisor lays out exactly one
+ * struct um_template_identity at offset 0 each time it takes a pool
+ * member, so we seek to 0 before reading.  Short reads (memfd is
+ * smaller than @len) are tolerated — caller asserts magic + version
+ * before trusting any field.
+ */
+ssize_t os_template_pause_read_identity(int fd, void *buf, size_t len)
+{
+	ssize_t got = 0, n;
+
+	if (fd < 0)
+		return -EBADF;
+	if (!buf || !len)
+		return -EINVAL;
+
+	if (lseek(fd, 0, SEEK_SET) < 0)
+		return -errno;
+
+	while ((size_t)got < len) {
+		n = read(fd, (char *)buf + got, len - got);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		if (n == 0)
+			break;	/* short read: memfd shorter than @len */
+		got += n;
+	}
+
+	return got;
+}
