@@ -5,7 +5,14 @@
 **Effort:** small (~50–150 LoC across `arch/um/drivers/random.c`,
 the existing `arch/um/drivers/virtio_uml.c` infrastructure, and
 `tools/uml/uml-launcher/`)
-**Status:** planned
+**Status:** Phase 1 DONE 2026-05-19 (`76c428c95d8e` — random.c now
+calls os_getrandom() directly, dropping the /dev/random fd +
+SIGIO loop).  Phase 2 (Rust vhost-user-rng backend) and Phase 3
+(`umlctl` selection plumbing) deferred — Phase 1 already
+delivers the entropy-availability fix the memo set out to land;
+Phase 2's only added benefit is sandbox isolation (running rng
+in a separate process), which is a follow-on architectural
+choice rather than a sprint-blocking gap.
 **Depends on:** none (`virtio_uml` infrastructure already in tree).
 
 ## Why this matters

@@ -4,7 +4,20 @@
 **Priority:** MEDIUM
 **Effort:** small (~200 LoC across `tools/uml/uml-launcher/` and
 `arch/um/os-Linux/main.c`)
-**Status:** planned
+**Status:** investigated 2026-05-19 — design partially subsumed.
+The kvm-v2 backend's per-host-CPU vCPU pool already pins each
+vCPU's KVM_RUN to its own host CPU by construction: `vcpus[N]`
+is *only* used from `smp_processor_id() == N`, so Phase 1's
+intent ("each vCPU's KVM_RUN host thread stays on its own host
+CPU") is essentially free from the pool design.  What memo 6
+*additionally* wanted — pinning specific guest kernel **tasks**
+to specific host CPUs — doesn't map cleanly onto UML's threading
+model (UML's task threads aren't 1:1 with QEMU/KVM-style vCPU
+threads; Linux schedules them across the process's CPU mask).
+The realistic next step is cgroup-cpuset partitioning + NUMA
+mbind, both already deferred under memo 52 §3.2 (Tier 3).
+Memo 6 is therefore documented-as-superseded; Phase 2-4 wait
+for a NUMA-host bench appearance.
 **Depends on:** memo 52 (done — provides the
 `[host_resources]` TOML and `UM_KVM_V2_CPU_AFFINITY` env-var).
 
