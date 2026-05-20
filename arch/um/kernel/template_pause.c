@@ -389,7 +389,8 @@ static void mfc_diag_post_fork_dumper(unsigned long rsp, unsigned long rbp,
 			: "r" (rax_x), "r" (rdi_x)
 			: "rcx", "r11", "memory");
 	}
-	for (;;);
+	for (;;)
+		;
 }
 
 __used __maybe_unused
