@@ -87,6 +87,18 @@ struct os_io_ring {
 
 	/* Bookkeeping for callers. */
 	unsigned int	in_flight;
+
+	/*
+	 * Lazy-submit counter: number of SQEs whose tail-bump has
+	 * landed but which haven't been handed to io_uring_enter yet.
+	 * Flushed implicitly by the next wait_cqe / peek_cqe (since
+	 * waiting / peeking is the only operation that cares about
+	 * the kernel actually starting on them).  Cuts the
+	 * io_uring_enter syscall cost from O(N) to O(1) per cycle —
+	 * critical for the small-random-IO regression vs legacy
+	 * (memo #2 Phase 2b/4 follow-on).
+	 */
+	unsigned int	pending_submit;
 };
 
 struct os_io_ring *os_io_ring_create(unsigned int entries)
@@ -202,8 +214,9 @@ static struct io_uring_sqe *sqe_acquire(struct os_io_ring *r)
 
 /*
  * Commit the SQE: advance the SQ tail (release ordering pairs with
- * the kernel's acquire-load) and call io_uring_enter to wake the
- * kernel-side worker.
+ * the kernel's acquire-load) and defer io_uring_enter until the
+ * next peek/wait — the kernel only needs to know about the new
+ * tail when we're ready to consume completions.
  */
 static int sqe_commit(struct os_io_ring *r)
 {
@@ -211,9 +224,33 @@ static int sqe_commit(struct os_io_ring *r)
 
 	__atomic_store_n(r->sq_tail, tail + 1, __ATOMIC_RELEASE);
 	r->in_flight++;
+	r->pending_submit++;
+	return 0;
+}
 
-	if (sys_io_uring_enter(r->fd, 1, 0, 0, NULL, 0) < 0)
+/*
+ * Flush all pending lazy submissions to the kernel.  Called from
+ * peek_cqe / wait_cqe before they consult the CQ ring.
+ *
+ * Returns 0 on success or -errno from io_uring_enter.
+ */
+static int sqe_flush(struct os_io_ring *r)
+{
+	unsigned int to_submit = r->pending_submit;
+	int submitted;
+
+	if (!to_submit)
+		return 0;
+
+	submitted = sys_io_uring_enter(r->fd, to_submit, 0, 0, NULL, 0);
+	if (submitted < 0)
 		return -errno;
+	/*
+	 * Kernel can consume fewer SQEs than requested under SQ
+	 * pressure; the un-consumed ones stay queued at tail and the
+	 * next flush picks them up.
+	 */
+	r->pending_submit -= submitted;
 	return 0;
 }
 
@@ -313,9 +350,17 @@ int os_io_ring_submit_fsync(struct os_io_ring *r, int fd, __u64 user_data)
  */
 int os_io_ring_peek_cqe(struct os_io_ring *r, struct os_io_cqe *out)
 {
-	__u32 head = *r->cq_head;
-	__u32 tail = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE);
+	__u32 head;
+	__u32 tail;
 	struct io_uring_cqe *cqe;
+	int rc;
+
+	rc = sqe_flush(r);
+	if (rc < 0)
+		return rc;
+
+	head = *r->cq_head;
+	tail = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE);
 
 	if (head == tail)
 		return 0;

@@ -2012,6 +2012,26 @@ static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
 	int i, j;
 
 	/*
+	 * Phase 2b fast-path (memo #2): when the bulk batch is one
+	 * single-desc request, the io_uring path has no parallelism
+	 * to win — just a fixed +2 syscall cycle (sqe_commit +
+	 * io_uring_enter + cqe_poll) over the legacy depth-1 pwrite.
+	 * Small-block O_DIRECT workloads (fio --bs=4k --numjobs=N
+	 * --ioengine=psync) hit this case on every iteration because
+	 * each fio thread serially waits for its own write to
+	 * complete before queueing the next.  Bench shows the io_uring
+	 * path is ~24 % slower than legacy here; the fast-path
+	 * regression-proofs it.
+	 */
+	if (n_reqs == 1 && reqs[0]->desc_cnt <= 1) {
+		struct io_thread_req *req = reqs[0];
+
+		for (j = 0; !req->error && j < req->desc_cnt; j++)
+			do_io(req, &req->io_desc[j]);
+		return;
+	}
+
+	/*
 	 * Phase 1: submit every request's SQEs.  The submission loop
 	 * itself harvests CQEs from earlier reqs whenever the ring is
 	 * full, so the maximum in-flight is bounded by UBD_RING_DEPTH.
