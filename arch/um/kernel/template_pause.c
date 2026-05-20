@@ -193,6 +193,22 @@ static int assert_fork_safety(const char *named_point)
 		       named_point);
 		return -EOPNOTSUPP;
 	}
+
+	/*
+	 * Refuse if any OTHER mm has a stub parked in FUTEX_IN_KERN —
+	 * tearing it down (which §3.3's loop will do) would leave the
+	 * task parked forever from the kernel's view, indistinguishable
+	 * from a stub crash, and the existing mm_sigchld_irq path
+	 * would fire fatal_sigsegv on it.  The caller's own mm is
+	 * exempt (it IS mid-syscall — that's the proc_write that
+	 * brought us here).  See PHASE2A-DESIGN.md §3.5.
+	 */
+	if (um_skas_other_mm_mid_syscall(current_mm_id())) {
+		pr_err("template_pause: fork-on-resume refused at \"%s\" — another mm is mid-syscall (FUTEX_IN_KERN). Quiesce other guest tasks before pausing.\n",
+		       named_point);
+		return -EBUSY;
+	}
+
 	return 0;
 }
 

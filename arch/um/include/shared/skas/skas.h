@@ -50,4 +50,22 @@ void initial_jmpbuf_unlock(void);
 extern int um_skas_teardown_all_stubs(void);
 extern int um_skas_respawn_all_stubs(void);
 
+/*
+ * um_skas_other_mm_mid_syscall() — Memo 09 Phase 2a defensive check.
+ *
+ * Returns true if any mm in mm_list other than @caller has
+ * stub_data->futex == FUTEX_IN_KERN (i.e., is currently parked in
+ * the kernel-handles-syscall half of the stub round-trip).
+ *
+ * Used by template_pause's assert_fork_safety to refuse the fork
+ * path when another guest task is mid-syscall — tearing down its
+ * stub now would leave it parked forever, indistinguishable from
+ * a stub crash, and the existing mm_sigchld_irq path would fire
+ * fatal_sigsegv on it.  See PHASE2A-DESIGN.md §3.5.
+ *
+ * @caller may be NULL (no caller to exempt).
+ */
+/* Returns 1 if a mid-syscall mm was found, 0 otherwise. */
+extern int um_skas_other_mm_mid_syscall(struct mm_id *caller);
+
 #endif

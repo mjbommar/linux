@@ -319,6 +319,29 @@ int um_skas_teardown_all_stubs(void)
 	return dead;
 }
 
+int um_skas_other_mm_mid_syscall(struct mm_id *caller)
+{
+	struct mm_context *ctx;
+	int busy = 0;
+
+	scoped_guard(spinlock_irqsave, &mm_list_lock) {
+		list_for_each_entry(ctx, &mm_list, list) {
+			struct stub_data *stub_data;
+
+			if (&ctx->id == caller)
+				continue;
+			if (ctx->id.pid <= 0)
+				continue;
+			stub_data = (void *)ctx->id.stack;
+			if (stub_data->futex == FUTEX_IN_KERN) {
+				busy = 1;
+				break;
+			}
+		}
+	}
+	return busy;
+}
+
 int um_skas_respawn_all_stubs(void)
 {
 	struct mm_id **arr;
