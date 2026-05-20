@@ -18,8 +18,10 @@ should be re-read at the start of each session.
 | 2a-P6 | template-pause-fork-stress selftest (6 strict gates, no retry) | LANDED (2026-05-20) | `972d19478c91` + this |
 | 2a-P7 | umlctl `mission` Phase 8 wiring (full-mission only) | LANDED (2026-05-20) | `972d19478c91` |
 | 2a-P8 | Drop child-path respawn + drop SUCCESS-marker pwrite64 | LANDED (2026-05-20) | `5a65fdfe8010` |
-| 2a-P9 | Pre-SIGKILL M-fork child; tighten gates to G7 (zero panics) + G8 (side-channel verify) | LANDED (2026-05-20) | this commit |
-| 2a    | Kernel-side fork-on-resume loop      | **PRODUCTION-READY at Phase 2a scope: fork-stress 100/100 PASS at N=100, 10/10 at N=1000, 10/10 under stress-ng full-load**.  Phase 2 (child does real work) deferred behind open bug B1. | (all above) |
+| 2a-P9 | Pre-SIGKILL M-fork child; tighten gates to G7 (zero panics) + G8 (side-channel verify) | LANDED (2026-05-20) | `870c368726fd` |
+| 2a-P10 | Root-cause B1 — captured M-fork child fault state via custom SIGSEGV handler | LANDED (2026-05-20) | `9c6c4948dc70` |
+| 2a-P11 | **Fix B1**: __NR_clone with private MAP_PRIVATE child stack, default ON | LANDED (2026-05-20) | `d057cf28f482` |
+| 2a    | Kernel-side fork-on-resume loop      | **PRODUCTION**: fork-stress 100/100 PASS at N=100 strict gates, 10/10 at N=1000, 10/10 under stress-ng full-load.  ZERO panics across 120 runs. Bug B1 ROOT-CAUSED + FIXED via private-stack clone(). | (all above) |
 
 ## Test reliability (2026-05-20, post-P9)
 
@@ -36,13 +38,21 @@ G3 RSS drift ≤ 5 % with ≥ 6 valid samples, G4 zero post-teardown
 orphans, G5 ≥ N iters, G5b median ≤ 50 ms, G6 100 % blob byte-
 match, G7 zero kernel panics, G8 ≥ 5 % /proc capture rate.
 
-## Open bug B1 (deferred to Phase 2; does not gate Phase 2a)
+## Bug B1 — ROOT CAUSED AND FIXED (2026-05-20)
 
-After the 2026-05-20 P9 fix (pre-SIGKILL the M-fork child immediately
-in master's parent path), 0 panics across 100 strict-gate runs at
-N=100, fork-stress G7 (zero panics) gating strictly.
+After the P9 SIGKILL workaround (committed first as a stopgap) and
+P10 diagnostic capture, the underlying race was fully isolated.
+P11 ships the actual fix: __NR_clone with a private MAP_PRIVATE
+child stack.  Fork-stress now passes 100/100 strict gates without
+any SIGKILL hack — master can let the child run and the child
+terminates cleanly via inline __NR_exit_group(0) on its private
+stack.
 
-## ROOT CAUSE (2026-05-20, isolated via MFC diagnostic mode)
+The SIGKILL fork()-based path is retained as a fallback (boot
+with `um_template_pause_private_stack=0` to enable it) for
+regression testing.
+
+## ROOT CAUSE (isolated via MFC diagnostic mode, validated via P11)
 
 UML's physmem is mapped `MAP_SHARED` (see arch/um/os-Linux/process.c
 ::os_map_memory: `flags = MAP_SHARED | MAP_FIXED | MAP_POPULATE`).
@@ -85,28 +95,33 @@ table inheritance.  Faults are captured as `MFC_FAULT sig=N
 addr=0xX rip=0xX cr2=0xX err=0xX rsp=0xX rbp=0xX r15=0xX
 stack[0..5]=...` lines in the boot log.
 
-## Phase 2a contract
+## Production contract (Phase 2a)
 
-For Phase 2a, M-fork children have no role: master is the only
-process that ever returns to guest userspace (pool member identity
-re-plumbing is Phase 2 work).  The empirical SIGKILL fix is the
-correct contract: master forks, immediately SIGKILLs the child,
-continues looping.  Strict fork-stress passes 100/100.
+`um_template_pause=fork` arms fork-on-resume.  Default behaviour
+(no extra cmdline flag needed):
 
-## Phase 2 path forward (when child needs to actually run)
+  * Master uses `__NR_clone` with a private MAP_PRIVATE child
+    stack via `os_template_pause_fork_clone()`.
+  * The child runs on the private stack, does inline
+    `__NR_exit_group(0)`, terminates cleanly.
+  * No SIGKILL needed.  No panics.
 
-To safely execute M-fork child user-space code, one of:
+Phase 2 (identity re-plumbing) builds on this: the child can now
+safely execute inline-asm syscalls (dev_set_mac_address,
+inet_rtm_newaddr, tap fd swap via SCM_RIGHTS, etc.) without
+re-triggering B1, because its stack is private.
 
-  (a) Use `__NR_clone` instead of `__NR_fork`, passing an explicit
-      private child_stack mmap'd MAP_PRIVATE.  Master's stack
-      writes to its own page no longer corrupt the child's view.
-  (b) Pre-fork, master copies its kernel stack to a private mmap;
-      post-fork, the child fixes its RSP to point at the private
-      copy.  More invasive; preserves fork()'s simpler ABI.
-  (c) Refactor UML to allocate kernel stacks outside physmem
-      (large change; would require an alternative stub-stack
-      mapping mechanism since stub children also need to map
-      kernel stacks).
+## Phase 2 implementation notes
+
+Current `os_template_pause_fork_clone()` leaks the 8 KiB private
+stack VMA on every iteration in master.  Acceptable for Phase 2a
+(bounded leak rate, master is short-lived).  Phase 2 should cache
+and reuse a single child_stack region across iterations to
+eliminate the per-iter mmap overhead.
+
+The legacy fork()+SIGKILL path is retained behind
+`um_template_pause_private_stack=0` for regression testing
+only.
 
 (a) is the simplest path and is what Phase 2 will use.
 
