@@ -1087,3 +1087,105 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_sigalrm);
+
+/**
+ * kvm_v2_record_observe_time_travel - log one time_travel_set_time advance.
+ * @rec:           active container (NULL is a quiet no-op).
+ * @ns_at_advance: the ns value passed into time_travel_set_time.
+ *
+ * memo 04 Phase 2 (post-2026-05-19 sprint).  Appends a
+ * KVM_V2_REPLAY_TIME_TRAVEL entry carrying @ns_at_advance and the
+ * current @rec->syscall_count anchor.  Same buffer-full quiet-drop /
+ * state-gate shape as observe_rdtsc / observe_sigalrm.
+ */
+void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
+				       u64 ns_at_advance)
+{
+	struct kvm_v2_replay_entry *e;
+	const size_t need = sizeof(*e);
+
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_RECORDING) {
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	if (rec->buffer_used + need > rec->buffer_size) {
+		mutex_unlock(&rec->lock);
+		return;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + rec->buffer_used);
+	memset(e, 0, sizeof(*e));
+	e->kind				= KVM_V2_REPLAY_TIME_TRAVEL;
+	e->size				= (u32)need;
+	e->sequence			= ++rec->sequence;
+	e->time_travel.ns_at_advance	= ns_at_advance;
+	e->time_travel.syscall_count_anchor = rec->syscall_count;
+
+	rec->buffer_used += need;
+	rec->entries_recorded++;
+
+	mutex_unlock(&rec->lock);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_observe_time_travel);
+
+/**
+ * kvm_v2_record_consume_time_travel - replay-side FIFO consume.
+ * @rec:                       active container; NULL tolerated.
+ * @ns_out:                    out-param. On rc > 0, written with the
+ *                             recorded ns value.
+ * @syscall_count_anchor_out:  optional out-param (may be NULL).  On
+ *                             rc > 0, written with the captured
+ *                             rec->syscall_count anchor — caller may
+ *                             use this for divergence detection.
+ *
+ * memo 04 Phase 3 (post-2026-05-19 sprint).  Returns 1 on success, 0
+ * on quiet no-op (NULL @rec or state != REPLAYING), -ENODATA on
+ * end-of-log, -EILSEQ on kind mismatch.  Same shape as
+ * consume_sigalrm.
+ */
+int kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
+				      u64 *ns_out,
+				      u64 *syscall_count_anchor_out)
+{
+	struct kvm_v2_replay_entry *e;
+	size_t cursor;
+	int rc = 0;
+
+	if (!rec || !ns_out)
+		return 0;
+
+	mutex_lock(&rec->lock);
+
+	if (rec->state != KVM_V2_RECORD_REPLAYING)
+		goto out_unlock;
+
+	cursor = rec->buffer_replayed;
+	if (cursor + sizeof(*e) > rec->buffer_used) {
+		rc = -ENODATA;
+		goto out_unlock;
+	}
+
+	e = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
+	if (e->kind != KVM_V2_REPLAY_TIME_TRAVEL) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	*ns_out = e->time_travel.ns_at_advance;
+	if (syscall_count_anchor_out)
+		*syscall_count_anchor_out = e->time_travel.syscall_count_anchor;
+	rec->buffer_replayed = cursor + e->size;
+	rec->entries_replayed++;
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_consume_time_travel);

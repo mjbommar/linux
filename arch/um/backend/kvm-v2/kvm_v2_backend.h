@@ -1127,6 +1127,10 @@ enum kvm_v2_replay_kind {
 	KVM_V2_REPLAY_VVAR_READ,/* vvar refresh capture (Phase 5) */
 	KVM_V2_REPLAY_INTERRUPT,/* preemption injection point */
 	KVM_V2_REPLAY_MMIO_READ,/* device read (future) */
+	KVM_V2_REPLAY_TIME_TRAVEL,/* time_travel_set_time() advance —
+				   * memo 04 Phase 2 (post-2026-05-19
+				   * sprint).
+				   */
 };
 
 /**
@@ -1221,6 +1225,26 @@ struct kvm_v2_replay_entry {
 			u64	syscall_count_at;
 			u64	_pad1[6];
 		} sigalrm;
+		struct {
+			/*
+			 * memo 04 Phase 2 (post-2026-05-19 sprint) —
+			 * time_travel_set_time(ns) advance.  Captured at
+			 * observe time, replayed at consume time so the
+			 * guest sees the same monotonic-clock sequence
+			 * across record + replay runs.
+			 *
+			 * @ns_at_advance         the ns value passed into
+			 *                       time_travel_set_time.
+			 * @syscall_count_anchor  rec->syscall_count at the
+			 *                       observe site — same anchor
+			 *                       shape as sigalrm, so the
+			 *                       replay-side consume can
+			 *                       defend against drift.
+			 */
+			u64	ns_at_advance;
+			u64	syscall_count_anchor;
+			u64	_pad[6];
+		} time_travel;
 	};
 };
 
@@ -1429,6 +1453,26 @@ void kvm_v2_record_observe_sigalrm(struct kvm_v2_record *rec, u32 signo);
 int  kvm_v2_record_consume_sigalrm(struct kvm_v2_record *rec,
 				   u32 *signo_out,
 				   u64 *syscall_count_at_out);
+
+/*
+ * memo 04 Phase 2/3 (post-2026-05-19 sprint) — time_travel_set_time(ns)
+ * observe + consume.  Hooks live next to the time-travel-clock site in
+ * arch/um/kernel/time.c (the Phase 1 hook landed at b2ff4c0b775e).
+ *
+ * observe_time_travel: append a KVM_V2_REPLAY_TIME_TRAVEL entry carrying
+ * @ns_at_advance.  The current @rec->syscall_count is captured as
+ * @syscall_count_anchor so replay can defend against drift, same shape
+ * as observe_sigalrm.
+ *
+ * consume_time_travel: returns 1 on success (with @ns_out written), 0
+ * on quiet no-op (NULL @rec or state != REPLAYING), -ENODATA on
+ * end-of-log, -EILSEQ on kind mismatch.
+ */
+void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
+				       u64 ns_at_advance);
+int  kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
+				       u64 *ns_out,
+				       u64 *syscall_count_anchor_out);
 
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
 /*
