@@ -1059,6 +1059,28 @@ int kvm_v2_snapshot_restore_task(const struct kvm_v2_snapshot *snap,
 				 struct kvm_v2_vcpu *vcpu);
 
 /*
+ * #181 — snapshot v2 ELF64-core export.
+ *
+ * Write a previously-captured snapshot to disk in the ET_CORE shape
+ * gdb / readelf / crash(8) understand. The on-disk file consists of
+ * an Elf64 header, a PT_NOTE phdr (NT_PRSTATUS + NT_FPREGSET +
+ * NT_X86_XSTATE + a UML-private state note), and one PT_LOAD per
+ * captured memslot mapped at p_vaddr == guest_phys_addr.
+ *
+ * The two entry points differ only in caller plumbing — _to_fd is the
+ * memfd-friendly path used by the KUnit test, _to_file is what the
+ * debugfs trigger and the kernel-side `filp_open` path use.
+ *
+ * Defined in snapshot_elf.c. Format spec lives at
+ * Documentation/virt/uml/snapshot-elf-format.rst.
+ */
+struct file;
+int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
+				       struct file *file);
+int kvm_v2_snapshot_elf_export_to_fd(const struct kvm_v2_snapshot *snap,
+				     int fd);
+
+/*
  * Record/replay v2 port (memo 27, #169). Phase 1: state machine +
  * static-key gate only; observation/consume hooks land in Phase 2-3.
  *

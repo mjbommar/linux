@@ -37,15 +37,25 @@
  * even on builds that don't init kvm-v2 successfully).
  */
 #include <kunit/test.h>
+#include <linux/elf.h>
+#include <linux/elfcore.h>
 #include <linux/errno.h>
+#include <linux/fcntl.h>
+#include <linux/file.h>
+#include <linux/fs.h>
 #include <linux/gfp.h>
 #include <linux/kvm.h>
 #include <linux/mm.h>
+#include <linux/mm_types.h>		/* EMPTY_VMA_FLAGS */
 #include <linux/printk.h>
 #include <linux/sched.h>		/* current */
+#include <linux/shmem_fs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 #include <linux/types.h>
+#include <linux/uaccess.h>
+#include <linux/user.h>			/* struct user_regs_struct */
 
 #include <os.h>
 
@@ -499,10 +509,211 @@ static void test_kvm_v2_snapshot_task(struct kunit *test)
 #endif
 }
 
+/*
+ * Helper: count memslots whose data buffer was allocated. Used by
+ * test_kvm_v2_snapshot_elf_basic to match its assertion against the
+ * same count the ELF writer used. Declared here rather than as a
+ * static in snapshot_elf.c so the test TU can read the count without
+ * adding an exported symbol whose only consumer is a test.
+ */
+static int kvm_v2_snapshot_elf_count_load_test_helper(const struct kvm_v2_snapshot *snap)
+{
+	int i, n = 0;
+
+	if (!snap || !snap->memslots)
+		return 0;
+	for (i = 0; i < snap->memslot_count; i++)
+		if (snap->memslots[i].data && snap->memslots[i].data_size > 0)
+			n++;
+	return n;
+}
+
+/**
+ * test_kvm_v2_snapshot_elf_basic - ELF64-core export round-trip (#181).
+ * @test: KUnit test handle.
+ *
+ * #181 acceptance gate. Captures a regs-only snapshot, writes a known
+ * marker into the vCPU's RAX so the captured snap->regs.rax has a
+ * predictable value, exports the snapshot to an in-kernel tmpfs file
+ * (shmem_kernel_file_setup — no userspace fd dance required), reads
+ * the file back into memory, and parses the ELF header to verify:
+ *
+ *   - ELF magic + ELFCLASS64 + ELFDATA2LSB + e_type == ET_CORE.
+ *   - At least one PT_NOTE phdr is present.
+ *   - PT_LOAD count matches the count of data-bearing memslots
+ *     (zero for a regs-only snapshot per Phase 1's contract).
+ *   - The NT_PRSTATUS note exists and its pr_reg.rax field equals
+ *     the captured snap->regs.rax (i.e. the marker we wrote).
+ *
+ * Why shmem rather than vfs_truncate(memfd_create()): memfd_create is
+ * a userspace-only syscall (no in-kernel symbol export);
+ * shmem_kernel_file_setup is the documented "give me a tmpfs file
+ * handle from kernel context" API used by drivers/gpu/drm/i915 and
+ * fs/ipc/shm.c. The returned struct file * can be passed straight to
+ * kvm_v2_snapshot_elf_export_to_file.
+ */
+static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
+{
+	struct kvm_v2_snapshot *snap;
+	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
+	struct kvm_regs scratch;
+	struct file *f;
+	void *buf;
+	size_t buf_size;
+	loff_t pos;
+	struct elf64_hdr *ehdr;
+	struct elf64_phdr *phdrs;
+	int pt_note_count = 0;
+	int pt_load_count = 0;
+	bool saw_nt_prstatus = false;
+	u64 prstatus_rax = 0;
+	int i;
+	int rc;
+
+	KUNIT_ASSERT_NOT_NULL_MSG(test, vcpu,
+				  "suite_init fixture did not populate kvm_v2_test_vcpu");
+
+	/*
+	 * Stamp a recognisable RAX value so the captured snapshot has a
+	 * known marker we can verify after the ELF round-trip.
+	 */
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	scratch.rax = 0x18112026ULL;	/* #181 / 2026 — a memorable marker. */
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_REGS,
+			      (unsigned long)&scratch);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+
+	snap = kvm_v2_snapshot_alloc();
+	KUNIT_ASSERT_NOT_NULL(test, snap);
+
+	rc = kvm_v2_snapshot_capture_regs_only(snap);
+	KUNIT_ASSERT_EQ(test, rc, 0);
+	KUNIT_ASSERT_EQ_MSG(test, snap->regs.rax, 0x18112026ULL,
+			    "captured RAX (%#llx) does not match the marker (%#llx)",
+			    snap->regs.rax, 0x18112026ULL);
+
+	/*
+	 * Open a kernel-only tmpfs file (anonymous shmem). 0 size means
+	 * "grow as we write."
+	 */
+	f = shmem_kernel_file_setup("kvm-v2-snap.elf", 0, EMPTY_VMA_FLAGS);
+	if (IS_ERR(f)) {
+		kvm_v2_snapshot_destroy(snap);
+		KUNIT_FAIL(test, "shmem_kernel_file_setup rc=%ld",
+			   PTR_ERR(f));
+		return;
+	}
+
+	rc = kvm_v2_snapshot_elf_export_to_file(snap, f);
+	KUNIT_ASSERT_EQ_MSG(test, rc, 0, "export_to_file rc=%d", rc);
+
+	/*
+	 * Read the file back into a heap buffer. snap->regs+sregs+
+	 * notes+headers fits well under 16 KB for a regs-only export.
+	 */
+	buf_size = 16384;
+	buf = kvzalloc(buf_size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+
+	pos = 0;
+	rc = kernel_read(f, buf, buf_size, &pos);
+	KUNIT_ASSERT_GT_MSG(test, rc, (int)sizeof(struct elf64_hdr),
+			    "kernel_read rc=%d (need at least Ehdr)", rc);
+
+	ehdr = (struct elf64_hdr *)buf;
+	KUNIT_ASSERT_EQ(test, ehdr->e_ident[EI_MAG0], ELFMAG0);
+	KUNIT_ASSERT_EQ(test, ehdr->e_ident[EI_MAG1], ELFMAG1);
+	KUNIT_ASSERT_EQ(test, ehdr->e_ident[EI_MAG2], ELFMAG2);
+	KUNIT_ASSERT_EQ(test, ehdr->e_ident[EI_MAG3], ELFMAG3);
+	KUNIT_EXPECT_EQ(test, ehdr->e_ident[EI_CLASS], ELFCLASS64);
+	KUNIT_EXPECT_EQ(test, ehdr->e_ident[EI_DATA], ELFDATA2LSB);
+	KUNIT_EXPECT_EQ(test, ehdr->e_type, ET_CORE);
+	KUNIT_EXPECT_EQ(test, ehdr->e_machine, EM_X86_64);
+
+	/*
+	 * Walk the phdr table — PT_NOTE / PT_LOAD count must match the
+	 * snapshot's memslot inventory (regs-only → 0 PT_LOAD, 1 PT_NOTE).
+	 */
+	phdrs = (struct elf64_phdr *)((u8 *)buf + ehdr->e_phoff);
+	for (i = 0; i < ehdr->e_phnum; i++) {
+		if (phdrs[i].p_type == PT_NOTE)
+			pt_note_count++;
+		else if (phdrs[i].p_type == PT_LOAD)
+			pt_load_count++;
+	}
+	KUNIT_EXPECT_GT(test, pt_note_count, 0);
+	KUNIT_EXPECT_EQ_MSG(test, pt_load_count,
+			    kvm_v2_snapshot_elf_count_load_test_helper(snap),
+			    "PT_LOAD count does not match data-bearing memslot count");
+
+	/*
+	 * Scan the notes for NT_PRSTATUS and pull RAX out. The Nhdr
+	 * stream lives at phdrs[note].p_offset for whatever length
+	 * .p_filesz says.
+	 */
+	for (i = 0; i < ehdr->e_phnum; i++) {
+		u8 *note;
+		u32 note_end;
+		u32 cur;
+
+		if (phdrs[i].p_type != PT_NOTE)
+			continue;
+		if (phdrs[i].p_offset + phdrs[i].p_filesz > buf_size)
+			continue;	/* Truncated; can't safely walk. */
+		note = (u8 *)buf + phdrs[i].p_offset;
+		note_end = phdrs[i].p_filesz;
+		cur = 0;
+		while (cur + sizeof(struct elf64_note) <= note_end) {
+			struct elf64_note *nh =
+				(struct elf64_note *)(note + cur);
+			u32 namesz = nh->n_namesz;
+			u32 descsz = nh->n_descsz;
+			u32 paystart;
+
+			cur += sizeof(*nh);
+			paystart = cur + ((namesz + 3) & ~3u);
+			if (paystart + descsz > note_end)
+				break;
+			if (nh->n_type == NT_PRSTATUS &&
+			    descsz >= sizeof(struct elf_prstatus)) {
+				struct elf_prstatus *ps =
+					(struct elf_prstatus *)(note + paystart);
+				/*
+				 * pr_reg layout (x86_64 user_regs_struct):
+				 * ax is the 11th unsigned long (offset 80).
+				 * See arch/x86/include/asm/user_64.h.
+				 */
+				struct user_regs_struct *ur =
+					(struct user_regs_struct *)&ps->pr_reg;
+
+				saw_nt_prstatus = true;
+				prstatus_rax = ur->ax;
+				break;
+			}
+			cur = paystart + ((descsz + 3) & ~3u);
+		}
+		if (saw_nt_prstatus)
+			break;
+	}
+
+	KUNIT_EXPECT_TRUE_MSG(test, saw_nt_prstatus,
+			      "NT_PRSTATUS not found in PT_NOTE");
+	KUNIT_EXPECT_EQ_MSG(test, prstatus_rax, 0x18112026ULL,
+			    "NT_PRSTATUS pr_reg.ax (%#llx) does not match snap->regs.rax (%#llx)",
+			    prstatus_rax, snap->regs.rax);
+
+	kvfree(buf);
+	fput(f);
+	kvm_v2_snapshot_destroy(snap);
+}
+
 static struct kunit_case kvm_v2_snapshot_test_cases[] = {
 	KUNIT_CASE(test_kvm_v2_snapshot_basic),
 	KUNIT_CASE(test_kvm_v2_snapshot_full),
 	KUNIT_CASE(test_kvm_v2_snapshot_task),
+	KUNIT_CASE(test_kvm_v2_snapshot_elf_basic),
 	{}
 };
 

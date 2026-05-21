@@ -474,7 +474,21 @@ reaffirmed.
 - **#171** — ARM64 KVM v2 backend port (blocked by #178 + #183).
 - **#172** — RISC-V KVM v2 backend port (blocked by #178 + #183).
 - **#173** — cross-host CI matrix expansion.
-- **#181** — snapshot v2 ELF64-core export (blocked by #168).
+- **#181** — snapshot v2 ELF64-core export — **DONE**. New
+  `arch/um/backend/kvm-v2/snapshot_elf.c` writes an ET_CORE-shaped
+  ELF64 with NT_PRSTATUS / NT_FPREGSET / NT_X86_XSTATE notes plus
+  a UML-private state note carrying sregs/events/xcrs/MSR list +
+  memslot descriptors. `readelf -n` parses cleanly; `gdb -c
+  dump.elf` opens and prints `info registers`. New
+  `kvm_v2_snapshot_elf_export_path` debugfs trigger; new `umlctl
+  snapshot export <name> --output dump.elf` operator wrapper; new
+  `tools/uml/uml-gdb/uml-snapshot.py` gdb helper exposing
+  `uml-snap-info`, `uml-snap-sregs`, `uml-snap-msrs`,
+  `uml-snap-memslots`. KUnit suite kvm_v2_snapshot grew 3 → 4
+  cases (added `test_kvm_v2_snapshot_elf_basic`); new selftest
+  `tools/testing/selftests/um/snapshot-elf-roundtrip/` boots UML,
+  triggers the dump, validates via readelf + gdb. Format spec at
+  Documentation/virt/uml/snapshot-elf-format.rst.
 - **#182** — observability spine extensions O2.2 + O3.2.
 - **#183** — C-06 BPF JIT B2 portable-emitter refactor.
 
