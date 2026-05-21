@@ -1,8 +1,23 @@
 # UML Redesign — Status Tracker
 
 Last updated: 2026-05-21 (**sprint-execution session — fork-server
-Phase 1c daemon + Memo 4 integration gate + LTP curation
-operator-ready + Series 7 squash plan**). Five tasks closed today:
+Phase 1c daemon + Memo 4 integration gate + Phase 2 identity +
+Phase 3 pool-bench + #181 ELF64 + LTP curation operator-ready +
+Series 7 squash plan + 24h soak relaunched**). **Operator footgun
+warning:** `make ARCH=um O=$BUILD -j$(nproc)` against a fresh
+Kconfig surface (new `CONFIG_UM_TEMPLATE_PAUSE*` symbols introduced
+by Phase 2a/2 commits) will run `oldconfig` interactively.  When
+stdin is `/dev/null` (CI / scripts) the prompt is silently
+abandoned and prior `CONFIG_UM_BACKEND_KVM_V2=y` can be DROPPED
+to `is not set`.  Workaround: `yes "" | make ARCH=um O=$BUILD
+oldconfig` first, then `make ARCH=um O=$BUILD -j$(nproc)`.  This
+session spent 90 min mistaking a config regression for a host KVM
+state corruption — the bench at boot succeeded for kvm-v2 builds
+but silently fell back to seccomp (and on `backend=force=kvm-v2`
+hung in early init before printing a panic).  Logged here so the
+next session doesn't re-walk it.
+
+Five tasks closed today:
 (1) `umlctl pool serve` daemon (~620 LoC Rust + selftest), flipping
 Memo 09 Phase 1c from BLOCKED-on-UML_LONGJMP (stale) to READY;
 (2) Memo 04 integration bench — `kvm_v2_record_clock_bench=N`
