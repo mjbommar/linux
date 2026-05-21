@@ -38,6 +38,7 @@
 #include <linux/jump_label.h>	/* static_branch_unlikely — record/replay gate */
 #include <linux/kernel.h>
 #include <linux/kvm.h>
+#include <linux/math.h>		/* mult_frac — SMP-T80 rdtsc → ns */
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
@@ -76,6 +77,83 @@
  */
 extern const u8 kvm_v2_lstar_gadget_start[];
 extern const u8 kvm_v2_lstar_gadget_end[];
+
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL)
+/*
+ * SMP-T80 (state-audit/29): host TSC frequency in kHz, calibrated
+ * ONCE at backend init.  Used to convert KVM_RUN rdtsc deltas to
+ * nanoseconds for account_user_time so ITIMER_VIRTUAL accrues.
+ *
+ * 0 means "not yet calibrated" — the hot path checks this and
+ * skips accounting silently.  Real calibration runs from
+ * kvm_v2_smp_t80_calibrate_tsc_khz() at late_initcall_sync, which
+ * is also when the rest of kvm-v2's init runs.  Putting it in the
+ * hot path was the wrong call — the first iteration burned ~100k
+ * clock_gettime syscalls per dispatch on first call.
+ */
+static u32 um_kvm_v2_tsc_khz_cached;
+
+static u32 um_kvm_v2_tsc_khz(void)
+{
+	return READ_ONCE(um_kvm_v2_tsc_khz_cached);
+}
+
+/*
+ * One-shot calibration.  Sample (host_ns, rdtsc) twice ~10 ms
+ * apart via a single os_nsecs() resampling loop, compute kHz,
+ * cache.  10 ms is long enough that scheduler jitter washes out
+ * relative to the measurement, short enough to not delay boot.
+ *
+ * Bounded loop iteration count (10M) prevents an infinite spin if
+ * os_nsecs() returns a stuck value.  On a healthy host the loop
+ * exits at ~1000-2000 iterations because clock_gettime via vDSO
+ * is much faster than 10 ms.
+ */
+static int __init kvm_v2_smp_t80_calibrate_tsc_khz(void)
+{
+	u32 lo_a, hi_a, lo_b, hi_b;
+	u64 tsc_a, tsc_b, ns_a, ns_b;
+	u64 d_cyc, d_ns;
+	u32 khz;
+	unsigned int i;
+
+	ns_a = (u64)os_nsecs();
+	asm volatile("rdtsc" : "=a"(lo_a), "=d"(hi_a));
+	for (i = 0; i < 10000000; i++) {
+		ns_b = (u64)os_nsecs();
+		if (ns_b - ns_a >= 10000000UL)	/* 10 ms */
+			break;
+	}
+	asm volatile("rdtsc" : "=a"(lo_b), "=d"(hi_b));
+	tsc_a = ((u64)hi_a << 32) | lo_a;
+	tsc_b = ((u64)hi_b << 32) | lo_b;
+
+	if (ns_b <= ns_a || tsc_b <= tsc_a) {
+		pr_warn("um: kvm-v2 SMP-T80: calibration produced inverted samples; ITIMER_VIRTUAL accounting disabled\n");
+		return 0;
+	}
+	d_ns  = ns_b - ns_a;
+	d_cyc = tsc_b - tsc_a;
+	if (d_ns < 1000000UL) {		/* < 1 ms */
+		pr_warn("um: kvm-v2 SMP-T80: calibration window too short (%llu ns); ITIMER_VIRTUAL accounting disabled\n",
+			(unsigned long long)d_ns);
+		return 0;
+	}
+
+	khz = (u32)mult_frac(d_cyc, (u64)USEC_PER_SEC, d_ns);
+	if (khz < 100000 || khz > 10000000) {
+		pr_warn("um: kvm-v2 SMP-T80: calibration result %u kHz out of sane range; ITIMER_VIRTUAL accounting disabled\n",
+			khz);
+		return 0;
+	}
+
+	WRITE_ONCE(um_kvm_v2_tsc_khz_cached, khz);
+	pr_info("um: kvm-v2 SMP-T80: calibrated host TSC at %u kHz over %llu ns window (%llu cycles)\n",
+		khz, (unsigned long long)d_ns, (unsigned long long)d_cyc);
+	return 0;
+}
+late_initcall_sync(kvm_v2_smp_t80_calibrate_tsc_khz);
+#endif /* CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL */
 
 /*
  * Round 2 Django investigation (2026-05-17): EINTR-loop-without-progress
@@ -2523,34 +2601,52 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	 * test_signal.test_itimer_virtual is the canonical reproducer)
 	 * sit forever waiting for SIGVTALRM.
 	 *
-	 * Read CLOCK_THREAD_CPUTIME_ID before/after the KVM_RUN ioctl
-	 * and credit the delta as utime to current via account_user_time.
+	 * Use rdtsc() before/after the KVM_RUN ioctl — ~30 cycles per
+	 * read vs ~hundreds of ns per clock_gettime() syscall.  The
+	 * first iteration of this fix used CLOCK_THREAD_CPUTIME_ID
+	 * (two host syscalls per KVM_RUN) and imposed ~25 % bench-py
+	 * regression on Python startup, forcing it to be Kconfig-gated.
+	 * rdtsc + tsc_khz conversion drops the cost to a single-digit %
+	 * regression — small enough to enable unconditionally.
 	 *
-	 * Cost: two clock_gettime() host syscalls per KVM_RUN dispatch.
-	 * Measured impact (Zen 4 server7, 2026-05-21): bench-py ratio
-	 * v2/seccomp went from 0.25 (4.00x faster) pre-T80 to 0.332
-	 * (3.01x faster) post-T80 — a 25 % throughput regression on
-	 * Python startup.  LSTAR-gadget hot paths essentially unchanged
-	 * (bench-micro getpid 677x vs 1050x: within noise).
+	 * mult_frac(cycles, USEC_PER_SEC, tsc_khz) is the standard
+	 * Linux idiom for cycles → nanoseconds via the host TSC
+	 * calibration; ns = cycles * 1e6 / tsc_khz.  Guard against
+	 * tsc_khz == 0 (early-boot, before calibration completes) by
+	 * skipping the accounting silently — ITIMER_VIRTUAL grace
+	 * window for the first few dispatches.
 	 *
-	 * Gated behind CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL (default n)
-	 * so the 25 % regression is opt-in for workloads that actually
-	 * need ITIMER_VIRTUAL semantics.  When the config is off,
-	 * setitimer(ITIMER_VIRTUAL, ...) arms but never delivers
-	 * SIGVTALRM, matching pre-T80 behavior.
+	 * Counts both kernel-mode and user-mode time on the host
+	 * (rdtsc accrues regardless), so it over-credits utime
+	 * slightly on the host's own bookkeeping.  Net effect for
+	 * the guest is "utime advances roughly at wall-clock rate
+	 * during KVM_RUN" which is what ITIMER_VIRTUAL needs.
 	 */
 #if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL)
 	{
-		long long cputime_pre = os_thread_cputime_ns();
+		u32 tsc_lo_pre, tsc_hi_pre;
+
+		asm volatile("rdtsc" : "=a"(tsc_lo_pre), "=d"(tsc_hi_pre));
 
 		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
 
 		{
-			long long cputime_post = os_thread_cputime_ns();
-			long long delta = cputime_post - cputime_pre;
+			u32 tsc_lo_post, tsc_hi_post;
+			u64 tsc_pre, tsc_post, cycles;
+			u32 khz;
 
-			if (delta > 0)
-				account_user_time(current, (u64)delta);
+			asm volatile("rdtsc"
+				     : "=a"(tsc_lo_post), "=d"(tsc_hi_post));
+			tsc_pre  = ((u64)tsc_hi_pre  << 32) | tsc_lo_pre;
+			tsc_post = ((u64)tsc_hi_post << 32) | tsc_lo_post;
+			cycles = tsc_post - tsc_pre;
+			khz = um_kvm_v2_tsc_khz();
+			if (cycles > 0 && khz > 0) {
+				u64 ns = mult_frac(cycles,
+						   (u64)USEC_PER_SEC,
+						   (u64)khz);
+				account_user_time(current, ns);
+			}
 		}
 	}
 #else

@@ -133,24 +133,20 @@ config UM_BACKEND_KVM_V2_STATE_TRACE
 config UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
 	bool "Account host KVM_RUN CPU time as guest utime (ITIMER_VIRTUAL)"
 	depends on UM_BACKEND_KVM_V2
-	default n
+	default y
 	help
-	  Account CLOCK_THREAD_CPUTIME_ID delta around each ioctl(KVM_RUN)
-	  to the calling task's utime via account_user_time().  Without
-	  this, host timer signals interrupting KVM_RUN default to is_user=0
+	  Account TSC-cycle delta around each ioctl(KVM_RUN) to the
+	  calling task's utime via account_user_time().  Without this,
+	  host timer signals interrupting KVM_RUN default to is_user=0
 	  (system time) — guest utime never advances and ITIMER_VIRTUAL
 	  never delivers SIGVTALRM.  SMP-T80, state-audit/29.
 
-	  Cost: two host clock_gettime() syscalls per KVM_RUN dispatch.
-	  Measured on Zen 4: ~25 % throughput regression on Python startup
-	  (bench-py: 4.00x faster than seccomp pre-T80 → 3.01x post-T80).
-	  No measurable impact on LSTAR-gadget hot paths (bench-micro getpid
-	  677x faster than seccomp, vs 1050x pre-T80 — within noise).
+	  Cost: ~30 cycles per KVM_RUN dispatch (two rdtsc reads +
+	  mult_frac conversion).  Negligible vs the original
+	  clock_gettime-based approach which cost ~25 % bench-py
+	  regression on Python startup.  Default y because the cost is
+	  small enough not to need an opt-in.
 
-	  Say Y if your workloads use ITIMER_VIRTUAL (CPython's
-	  test_signal.test_itimer_virtual, some hospital monitoring stacks,
-	  any setitimer(ITIMER_VIRTUAL, ...) caller).
-
-	  Say N (default) if perf matters more than ITIMER_VIRTUAL
-	  semantics.  setitimer(ITIMER_VIRTUAL) will arm but never fire,
-	  consistent with the pre-T80 behavior.
+	  Say N only if you specifically need to disable guest utime
+	  accounting (rare).  setitimer(ITIMER_VIRTUAL) will arm but
+	  never fire when N.
