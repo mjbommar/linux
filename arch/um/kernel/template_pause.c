@@ -42,6 +42,7 @@
 #include <linux/uaccess.h>
 
 #include <asm/um-template-pause.h>
+#include "template_pause_identity.h"
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK
 #include <asm/um-snapshot.h>		/* um_snapshot_worker_init() */
 #include <skas.h>			/* um_skas_teardown_all_stubs(),
@@ -592,6 +593,31 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 
 	for (;;) {
 		/*
+		 * (A0) PRE-FORK IDENTITY APPLY (Phase 2).
+		 *
+		 * Apply the just-read identity blob to the MASTER's
+		 * in-guest netdev.  The forked child inherits the
+		 * applied identity via CoW; the master's own identity
+		 * drifts to the latest blob (invisible to consumers
+		 * because the master is never exposed as a pool
+		 * member).  Failures are logged but non-fatal — a bad
+		 * blob does not abort the fork loop.
+		 *
+		 * Idempotence: re-applying the same blob is a no-op
+		 * at the net-stack layer.  See
+		 * template_pause_identity.c for the full rationale on
+		 * why this happens in the parent rather than the
+		 * child.
+		 */
+		if (blob.magic == UM_TEMPLATE_IDENTITY_MAGIC) {
+			int aerr = um_template_identity_apply(&blob);
+
+			if (aerr)
+				pr_warn("template_pause: identity apply at \"%s\" returned %d (continuing)\n",
+					named_point, aerr);
+		}
+
+		/*
 		 * (A) PRE-FORK: kill every stub child in mm_list.  Without
 		 * this, fork(2) aliases the master's stub pids into the
 		 * forked-child UML's mm_list (which inherits via CoW), and
@@ -910,6 +936,20 @@ int um_template_pause_enter(const char *named_point)
 
 	if (template_pause_fork_armed_flag)
 		return fork_on_resume_loop(named_point, identity_fd, &blob);
+
+	/*
+	 * Phase 1a single-shot path: master IS the taken instance.
+	 * Apply identity directly so the master boots up as the
+	 * configured pool member.  Failures are logged but
+	 * non-fatal so a bad blob does not refuse the pause.
+	 */
+	if (blob.magic == UM_TEMPLATE_IDENTITY_MAGIC) {
+		int aerr = um_template_identity_apply(&blob);
+
+		if (aerr)
+			pr_warn("template_pause: identity apply at \"%s\" returned %d (continuing)\n",
+				named_point, aerr);
+	}
 
 	return 0;
 }
