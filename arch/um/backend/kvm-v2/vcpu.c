@@ -2525,11 +2525,21 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 	 *
 	 * Read CLOCK_THREAD_CPUTIME_ID before/after the KVM_RUN ioctl
 	 * and credit the delta as utime to current via account_user_time.
-	 * Over-credits slightly (CLOCK_THREAD_CPUTIME_ID counts kernel-
-	 * mode setup around the ioctl too) but the under-count was 100 %
-	 * before this fix; over-counting by <1 % per ioctl is the
-	 * tractable compromise.
+	 *
+	 * Cost: two clock_gettime() host syscalls per KVM_RUN dispatch.
+	 * Measured impact (Zen 4 server7, 2026-05-21): bench-py ratio
+	 * v2/seccomp went from 0.25 (4.00x faster) pre-T80 to 0.332
+	 * (3.01x faster) post-T80 — a 25 % throughput regression on
+	 * Python startup.  LSTAR-gadget hot paths essentially unchanged
+	 * (bench-micro getpid 677x vs 1050x: within noise).
+	 *
+	 * Gated behind CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL (default n)
+	 * so the 25 % regression is opt-in for workloads that actually
+	 * need ITIMER_VIRTUAL semantics.  When the config is off,
+	 * setitimer(ITIMER_VIRTUAL, ...) arms but never delivers
+	 * SIGVTALRM, matching pre-T80 behavior.
 	 */
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL)
 	{
 		long long cputime_pre = os_thread_cputime_ns();
 
@@ -2543,6 +2553,9 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				account_user_time(current, (u64)delta);
 		}
 	}
+#else
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+#endif
 
 	KVMV2_TRACE(KVMV2_OP_POST_KVM_RUN, regs, run, vcpu);
 
