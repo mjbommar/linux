@@ -766,6 +766,78 @@ static int __init mconsole_init(void)
 
 __initcall(mconsole_init);
 
+/*
+ * Re-init the mconsole socket against a NEW absolute path.
+ * Memo 09 Phase 4 / hardening-plan §1.6: pool members spawned via
+ * template_pause fork-on-resume inherit the master's mconsole IRQ
+ * + socket, so umlctl exec to "pool member N" actually hits the
+ * master.  After the per-take identity blob delivers a unique
+ * mconsole_path, the M-fork child calls this to bind a fresh
+ * socket so the daemon can address each member individually.
+ *
+ * Steps:
+ *   1. Free the inherited MCONSOLE_IRQ (releases the old fd as a
+ *      side effect via the per-irq teardown that um_free_irq runs).
+ *   2. Close the old fd path explicitly + unlink the old socket
+ *      filename, since the master is still alive and will continue
+ *      to own its socket via its own IRQ binding.
+ *   3. Create a new Unix socket at @path.
+ *   4. Register a new IRQ on the new fd.
+ *
+ * Errors leave the inherited path in place (best effort).  Callers
+ * see -EINVAL on a bad @path, -errno on a syscall failure.
+ *
+ * Returns 0 on success.  Not __init because it runs post-boot.
+ */
+int mconsole_reinit_for_pool_member(const char *path)
+{
+	long new_sock;
+	int err;
+	size_t path_len;
+
+	if (!path)
+		return -EINVAL;
+	path_len = strlen(path);
+	if (path_len == 0 || path_len >= UNIX_PATH_MAX)
+		return -EINVAL;
+
+	/*
+	 * Detach the old IRQ + fd FIRST so um_request_irq below sees a
+	 * clean MCONSOLE_IRQ slot.  The master's binding survives — we
+	 * forked from it but never share fd-table state because the
+	 * master uses a separate kernel-side socket fd (not the inherited
+	 * one) for its own dispatch.  Closing here only releases the
+	 * child's CoW'd reference.
+	 */
+	um_free_irq(MCONSOLE_IRQ, NULL);
+
+	new_sock = os_create_unix_socket(path, path_len + 1, 1);
+	if (new_sock < 0) {
+		pr_warn("mconsole_reinit: os_create_unix_socket(%s) failed: %ld\n",
+			path, new_sock);
+		return (int)new_sock;
+	}
+	if (os_set_fd_block(new_sock, 0)) {
+		os_close_file(new_sock);
+		return -EIO;
+	}
+
+	err = um_request_irq(MCONSOLE_IRQ, new_sock, IRQ_READ,
+			     mconsole_interrupt, IRQF_SHARED, "mconsole",
+			     (void *)new_sock);
+	if (err < 0) {
+		pr_warn("mconsole_reinit: um_request_irq failed: %d\n", err);
+		os_close_file(new_sock);
+		return err;
+	}
+
+	strscpy(mconsole_socket_name, path, 256);	/* defined in mconsole_user.c */
+	pr_info("mconsole: re-bound on %s for pool member\n",
+		mconsole_socket_name);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mconsole_reinit_for_pool_member);
+
 static ssize_t mconsole_proc_write(struct file *file,
 		const char __user *buffer, size_t count, loff_t *pos)
 {

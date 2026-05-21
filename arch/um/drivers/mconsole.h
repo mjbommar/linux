@@ -68,6 +68,15 @@ struct mc_request
 
 extern char mconsole_socket_name[];
 
+/*
+ * Memo 09 Phase 4: pool members spawned via template_pause fork-on-
+ * resume call this after applying their identity blob, so each
+ * member binds its own mconsole socket and is individually
+ * addressable by `umlctl exec`.  See arch/um/kernel/template_pause_
+ * identity.c.
+ */
+int mconsole_reinit_for_pool_member(const char *path);
+
 extern int mconsole_unlink_socket(void);
 extern int mconsole_reply_len(struct mc_request *req, const char *reply,
 			      int len, int err, int more);

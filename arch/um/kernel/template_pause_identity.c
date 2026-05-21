@@ -65,6 +65,7 @@
 
 #include <asm/um-template-pause.h>
 #include "template_pause_identity.h"
+#include "../drivers/mconsole.h"	/* mconsole_reinit_for_pool_member — Phase 4 */
 
 /*
  * Parse an IPv4 CIDR string like "10.7.0.42/24" into a network-order
@@ -428,6 +429,37 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 	rc = apply_default_route(dev, blob);
 	if (rc && !first_err)
 		first_err = rc;
+
+	/*
+	 * Memo 09 Phase 4 (hardening-plan §1.6): per-pool-member
+	 * mconsole socket.  Without this, every pool member inherits
+	 * the master's mconsole IRQ + socket file, so `umlctl exec
+	 * --pid <member>` ends up addressing the master rather than
+	 * the specific member.  The identity blob's mconsole_path
+	 * (96 bytes) carries the per-member path the daemon synthesized;
+	 * if it's non-empty, rebind here.
+	 *
+	 * Failure is not fatal — the member still works for everything
+	 * except remote exec.  Log via apply_mconsole's own pr_info on
+	 * success; mconsole_reinit_for_pool_member already pr_warn's
+	 * on failure.
+	 */
+	if (blob->mconsole_path[0] != '\0') {
+		size_t plen;
+		char path[sizeof(blob->mconsole_path) + 1];
+
+		/* Defensive NUL-terminate; blob fields are not guaranteed
+		 * to be NUL-terminated.
+		 */
+		memcpy(path, blob->mconsole_path, sizeof(blob->mconsole_path));
+		path[sizeof(blob->mconsole_path)] = '\0';
+		plen = strnlen(path, sizeof(blob->mconsole_path));
+		if (plen > 0) {
+			rc = mconsole_reinit_for_pool_member(path);
+			if (rc && !first_err)
+				first_err = rc;
+		}
+	}
 
 	return first_err;
 }
