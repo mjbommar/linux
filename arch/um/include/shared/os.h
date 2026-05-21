@@ -438,4 +438,14 @@ static inline void os_local_ipi_enable(void) { }
 static inline void os_local_ipi_disable(void) { }
 #endif /* CONFIG_SMP */
 
+/*
+ * SMP-T80 — kvm-v2 dispatch loop brackets ioctl(KVM_RUN, ...) with
+ * these so the host signal handler can route ticks-during-KVM_RUN
+ * to guest utime instead of stime.  No effect on non-kvm-v2
+ * backends.
+ */
+void os_kvm_run_enter(void);
+void os_kvm_run_exit(void);
+int  os_in_kvm_run(void);
+
 #endif

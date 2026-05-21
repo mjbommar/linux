@@ -35,12 +35,55 @@ void (*sig_info[NSIG])(int, struct siginfo *, struct uml_pt_regs *, void *mc) = 
 	[SIGCHLD]	= sigchld_handler,
 };
 
+/*
+ * SMP-T80 (state-audit/29): per-thread flag set by the kvm-v2
+ * dispatch loop around ioctl(KVM_RUN, ...).  sig_handler_common
+ * reads this to route timer ticks (and other host signals) that
+ * interrupt KVM_RUN to the guest task's utime rather than stime —
+ * the guest's userspace code is the work being interrupted, so the
+ * tick legitimately belongs to utime.
+ *
+ * Thread-local: each UML host thread (one per pool vCPU) has its
+ * own flag.  The kernel-half code calls os_kvm_run_enter/exit() to
+ * bracket the ioctl; sig_handler_common reads via os_in_kvm_run().
+ *
+ * The previous rdtsc-based account_user_time() approach
+ * double-counted (host tick path still credited stime), producing
+ * 2x getrusage() values.  This approach is single-credit: the tick
+ * lands on utime instead of stime.  Sub-tick precision is lost
+ * (HZ=100 → 10 ms granularity) but ITIMER_VIRTUAL's typical
+ * threshold (≥ 100 ms) still works.
+ */
+static __thread int um_in_kvm_run;
+
+void os_kvm_run_enter(void)
+{
+	um_in_kvm_run = 1;
+}
+
+void os_kvm_run_exit(void)
+{
+	um_in_kvm_run = 0;
+}
+
+int os_in_kvm_run(void)
+{
+	return um_in_kvm_run;
+}
+
 static void sig_handler_common(int sig, struct siginfo *si, mcontext_t *mc)
 {
 	struct uml_pt_regs r;
 	bool kprobes_sigtrap;
 
-	r.is_user = 0;
+	/*
+	 * SMP-T80: when the signal interrupts ioctl(KVM_RUN, ...), the
+	 * guest user-mode code is what was running — the tick should be
+	 * accounted to utime, not stime.  os_in_kvm_run() returns 1
+	 * during the bracketed ioctl call.  No effect when seccomp /
+	 * non-kvm backend is in use (flag stays 0).
+	 */
+	r.is_user = os_in_kvm_run();
 	if (sig == SIGSEGV) {
 		/* For segfaults, we want the data from the sigcontext. */
 		get_regs_from_mc(&r, mc);
@@ -150,6 +193,17 @@ static void timer_real_alarm_handler(mcontext_t *mc)
 		get_regs_from_mc(&regs, mc);
 	else
 		memset(&regs, 0, sizeof(regs));
+	/*
+	 * SMP-T80 (state-audit/29): if SIGALRM fired during
+	 * ioctl(KVM_RUN, ...), the tick belongs to guest utime
+	 * (guest's user-mode code was running).  get_regs_from_mc
+	 * does NOT set is_user — it only copies host GPRs/segments
+	 * — so without this we'd read whatever uninitialized stack
+	 * memory happened to land in regs.is_user.  Default to 0
+	 * (stime) otherwise, matching pre-T80 behavior on non-kvm
+	 * backends.
+	 */
+	regs.is_user = os_in_kvm_run();
 	timer_handler(SIGALRM, NULL, &regs);
 }
 
