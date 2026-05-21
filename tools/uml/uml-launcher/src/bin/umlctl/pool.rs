@@ -365,6 +365,14 @@ pub struct DestroyArgs {
     /// Print the destroyed member as JSON (instead of a status line).
     #[arg(long)]
     pub json: bool,
+
+    /// When set, route the destroy through the `pool serve` daemon
+    /// at `$RUNTIME_DIR/uml/pools/<name>/api.sock` instead of acting
+    /// on a file-based spawn record.  The daemon owns the actual
+    /// member process tree, so daemon-spawned members must be
+    /// destroyed this way.  Spec memo 11 §3.3.
+    #[arg(long, value_name = "POOL")]
+    pub name: Option<String>,
 }
 
 /// Walk $RUNTIME/pools/members/, read each record, drop stale ones
@@ -431,6 +439,39 @@ pub fn cmd_list(args: ListArgs, paths: &crate::paths::Paths, _quiet: bool) -> Re
 }
 
 pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) -> Result<()> {
+    // Daemon-routed mode (Memo 09 Phase 4 / spec memo 11 §3.3).  When
+    // --name is given, the file-based bookkeeping doesn't apply — the
+    // daemon owns the master+children tree, so we send the destroy
+    // RPC and surface its reply.
+    if let Some(pool_name) = &args.name {
+        let socket = crate::pool_client::pool_socket_path(&paths.runtime_dir, pool_name);
+        if !socket.exists() {
+            bail!(
+                "no pool daemon at {} (start one with `umlctl pool serve --name {}`)",
+                socket.display(),
+                pool_name
+            );
+        }
+        let req = serde_json::json!({"op": "destroy", "pid": args.pid});
+        let reply = crate::pool_client::rpc(&socket, &req).context("destroy RPC")?;
+        let reply = crate::pool_client::unwrap_envelope(reply)?;
+        if args.json {
+            println!("{}", reply);
+        } else if !quiet {
+            let destroyed = reply
+                .get("destroyed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            println!(
+                "umlctl pool destroy: pid {} {} (daemon pool={})",
+                args.pid,
+                if destroyed { "destroyed" } else { "STILL ALIVE" },
+                pool_name
+            );
+        }
+        return Ok(());
+    }
+
     let record_path = member_path(&paths.runtime_dir, args.pid);
     let record: Option<SpawnResult> = std::fs::read(&record_path)
         .ok()
