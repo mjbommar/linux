@@ -3053,6 +3053,20 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 		if (rc < 0)
 			panic("kvm-v2: io_trap (cpu=%d port=%#x) failed: %d",
 			      cpu, run->io.port, rc);
+
+		/*
+		 * SMP-T78: kvm_v2_handle_io_trap releases migrate_disable
+		 * around handle_syscall (so sched_setaffinity can succeed).
+		 * On return, the task may be on a different host CPU.
+		 * Re-fetch cpu/vcpu/run so the post-trap KVMV2_TRACE below
+		 * and the matching migrate_enable record correct values.
+		 * Re-fetch is safe even when no migration happened (idempotent
+		 * on the same CPU).
+		 */
+		cpu = smp_processor_id();
+		vcpu = kvm_v2_vcpu_get(cpu);
+		if (vcpu)
+			run = vcpu->kvm_run;
 		break;
 	case KVM_EXIT_HLT:
 	case KVM_EXIT_FAIL_ENTRY:

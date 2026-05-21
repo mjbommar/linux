@@ -40,21 +40,19 @@ timeout_secs = 0
 # rc=$?` where echo's 0 masks pipeline failure).
 [[init.phases]]
 name = "pytest"
-# 9-module curated subset.  `test_os` and `test_posix` were dropped
-# because they contain `sched_setaffinity`-exercising sub-tests that
-# fail deterministically under kvm-v2 SMP: `kvm_v2_vcpu_run` holds
-# `migrate_disable()` over dispatch (the SMP-T13 fix that pins the
-# task to its host CPU so `vcpu`/`run` pointers stay valid across
-# `KVM_RUN`); Linux's `__set_cpus_allowed_ptr_locked` returns
-# `-EBUSY` when `migrate_disable > 0`, so any test that calls
-# `os.sched_setaffinity(0, mask)` cannot pass under kvm-v2 SMP by
-# construction.  SMP-T78 in state-audit/27 documents the three
-# resolution options; this template applies the cheapest (Option
-# A: skip the test class).  Dropping the two modules rather than
-# using `-x EXCLUDE` because regrtest's `-x` is greedy and silently
-# changes the selection model (consumes positional args as more
-# exclusions, expands to the full ~481-module test suite).
-cmd = "python3 -m test --timeout 60 -j 2 test_signal test_io test_mmap test_fcntl test_select test_threadsignals test_fork1 test_random test_hashlib && echo PYTEST_OK || (echo PYTEST_FAIL; exit 1)"
+# 11-module curated subset (RESTORED 2026-05-21 post-SMP-T78 fix).
+# kvm-v2's syscall dispatcher now releases migrate_disable() around
+# handle_syscall, letting sched_setaffinity succeed under SMP without
+# tripping the EBUSY guard in kernel/sched/core.c:3179.  test_os and
+# test_posix are back in the curated set.
+#
+# test_signal.test_itimer_virtual remains an issue (SMP-T80, state-
+# audit/29) but only triggers under ITIMER_VIRTUAL — the rest of
+# test_signal passes.  We do NOT exclude test_signal because doing so
+# loses coverage of the SIGCHLD/SIGINT/SIGALRM paths Series 7 needs to
+# claim; if the itimer_virtual subtest still fails post-T78 fix, we
+# revisit with Option B from memo 29 (clock_gettime delta credit).
+cmd = "python3 -m test --timeout 60 -j 2 test_signal test_io test_mmap test_fcntl test_os test_select test_threadsignals test_posix test_fork1 test_random test_hashlib && echo PYTEST_OK || (echo PYTEST_FAIL; exit 1)"
 expect = ""
 timeout_secs = 240
 

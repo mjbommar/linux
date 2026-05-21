@@ -2370,7 +2370,29 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 		}
 	}
 
+	/*
+	 * SMP-T78 (state-audit/27): the outer kvm_v2_vcpu_run holds
+	 * migrate_disable() for the whole dispatch (the SMP-T13 fix that
+	 * pins @vcpu/@run validity across schedule()).  Linux's
+	 * __set_cpus_allowed_ptr_locked refuses sched_setaffinity()
+	 * requests that exclude the current CPU when migration_disabled
+	 * is held — see kernel/sched/core.c:3179 — and triggers a
+	 * WARN_ON_ONCE + -EBUSY.  That breaks any guest workload that
+	 * legitimately wants to migrate (CPython's
+	 * test_process_cpu_count_affinity is the canonical reproducer).
+	 *
+	 * Release the pin around handle_syscall(): the syscall path
+	 * touches only @regs (per-task, migration-safe), not @vcpu/@run.
+	 * After handle_syscall returns, the calling task may be on a
+	 * different host CPU; the outer kvm_v2_vcpu_run loop's NEXT
+	 * iteration will re-fetch vcpu/run from smp_processor_id().
+	 * The kvm_v2_handle_io_trap caller MUST NOT touch @run or @vcpu
+	 * after we return — see the post-syscall block below for the
+	 * existing matching invariant.
+	 */
+	migrate_enable();
 	handle_syscall(regs);
+	migrate_disable();
 
 	/*
 	 * Do not pass @run or @vcpu after handle_syscall().  A blocking
