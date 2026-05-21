@@ -1,0 +1,53 @@
+# Phase J LTP TRIAGE-LATER suite-list — Phase J + 1 candidates.
+# SPDX-License-Identifier: GPL-2.0
+#
+# Curation walk: Documentation/virt/uml/redesign/02-workstreams/
+#   D-kvm-backend/phase-J-ltp-curation-2026-05-14.md §2.1 (rows
+#   marked TRIAGE-LATER) + §2.2 (rolled-up list).
+#
+# These suites are NOT in the initial Phase J kirk invocation.
+# They require a one-shot verification cycle (see memo §6.3) to
+# confirm they CONF-out cleanly under UML rather than FAIL; once
+# verified, promote to ltp-suite.txt and drop the entry here.
+#
+# Verification pattern (per memo §6.2):
+#   python3 /opt/kirk/kirk --sut host \
+#       --run-suite <one-of-these> \
+#       --skip-file ltp-skip.txt \
+#       --json-report /tmp/triage-<name>.json
+#   # then inspect FAIL/CONF/PASS counts in the JSON.
+
+# memo §2.1 — UML has no NUMA topology; expect CONF, not FAIL.
+numa
+
+# memo §2.1 — AF_ALG socket tests; CONFIG_CRYPTO_USER_API=y is in the
+# UML reference build, so these should pass.
+crypto
+
+# memo §2.1 — growfiles/fsstress on TMPDIR; on UML the TMPDIR is
+# hostfs-backed, so "filesystem stress" becomes "hostfs stress on
+# the host's real FS". Useful as a hostfs torture test if operator
+# accepts that semantics.
+fs
+
+# memo §2.1 — DAC permission tests; depends on hostfs honouring
+# the expected chown/chmod semantics.
+fs_perms_simple
+
+# memo §2.1 — POSIX fcntl(F_SETLK) tests; UML's range-lock
+# implementation has historically had edge cases.
+fcntl-locktests
+
+# memo §2.1 — wqueue01-09; depends on CONFIG_WATCH_QUEUE; if the
+# UML reference config doesn't enable it, tests CONF-out cleanly.
+watchqueue
+
+# memo §2.1 — tests of host userspace commands (cp, mv, ln, ar,
+# tar, gzip). Useful smoke of the whole guest userspace; uncertain
+# whether the test rig assumes a richer shell environment than
+# the UML guest provides.
+commands
+
+# memo §2.1 — POSIX conformance; partly overlaps `syscalls`. Defer
+# to Phase J + 1 once core syscalls KEEP is green.
+open_posix_testsuite

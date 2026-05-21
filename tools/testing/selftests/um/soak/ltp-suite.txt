@@ -1,0 +1,31 @@
+# Phase J LTP KEEP suite-list — kirk --run-suite consumer.
+# SPDX-License-Identifier: GPL-2.0
+#
+# Curation walk: Documentation/virt/uml/redesign/02-workstreams/
+#   D-kvm-backend/phase-J-ltp-curation-2026-05-14.md §2.2.
+#
+# Each non-comment, non-blank line is a runtest/* basename that
+# kirk accepts under --run-suite. The 9-suite list below totals
+# ~2 200 raw entries before the per-test skip-list (ltp-skip.txt)
+# is applied; effective active test count is ~2 050.
+#
+# Per-cycle wall-clock budget: 45 min target / 60 min hard kill.
+#
+# When to amend:
+#   - Add suites graduated from TRIAGE-LATER (see ltp-triage.txt).
+#   - Never add a SKIP suite (kvm, containers, controllers,
+#     hugetlb, tracing, net.*, net_stress.*, realtime, cve,
+#     watchqueue, uevent, dio, ltp-aio*, scsi_debug.*, tpm_tools,
+#     smack, fs_bind, fs_readonly, power_management_tests,
+#     crashme, connectors, dma_thread_diotest, cpuhotplug,
+#     hyperthreading, ima, irq, input, kernel_misc, staging).
+
+smoketest
+syscalls
+syscalls-ipc
+sched
+pty
+mm
+nptl
+math
+capability
