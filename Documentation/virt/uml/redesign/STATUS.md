@@ -1,6 +1,22 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-19 (**Round 14 closure + time-machine ports
+Last updated: 2026-05-21 (**sprint-execution session — fork-server
+Phase 1c daemon + Memo 4 integration gate + LTP curation
+operator-ready + Series 7 squash plan**). Five tasks closed today:
+(1) `umlctl pool serve` daemon (~620 LoC Rust + selftest), flipping
+Memo 09 Phase 1c from BLOCKED-on-UML_LONGJMP (stale) to READY;
+(2) Memo 04 integration bench — `kvm_v2_record_clock_bench=N`
+cmdline + selftest — verified at N=1/50/100/500/4096 all PASS;
+(3) LTP curation materialised + preflight checklist memo, Phase J
+LTP row flipped to READY for operator preflight; (4) Series 7
+squash audit plan — 19 patches with LoC + bisect-risk + pre-flight
+gates per patch (1235 lines in `upstream-patches/kvm-backend-
+series/SQUASH-AUDIT-PLAN.md`); (5) Phase 3 pool-bench harness
++ Phase 2 kernel identity re-plumbing + #181 ELF64-core export
+all in worktree sub-agents (cherry-pick + integration-test pass
+pending).
+
+Previous update: 2026-05-19 (**Round 14 closure + time-machine ports
 landed**). The 14-round CPython cache-flake bug (5 weeks under
 investigation) shipped its root-cause fix as SMP-T73 (kvm-v2
 KVM_GET_FPU → KVM_GET_XSAVE in 5 per-task save/restore sites) +
@@ -8,8 +24,13 @@ T74/T75/T76 latent-bug follow-ups (DEBUGREGS pinned, VCPU_EVENTS
 per-task save/restore, CPUID leaf 0xD sub-leaf consistency) + T77
 feature-enablement checklist for future un-mask audits. Tier 3
 django-loopback-none re-validation on the post-R14 kernel: **120/120
-PASS, Wilson 95% [96.90%, 100.00%]**, 24h soak now running in
-background (kernel HEAD `dc7df03c4b3c`).
+PASS, Wilson 95% [96.90%, 100.00%]**.  **24h soak honest status:**
+the three prior 86 400 s budgets (`r14-24h-soak`, `r14-24h-soak-
+diverse`, `r14-24h-soak-hostres`) all stopped between 1486 s and
+4022 s on 2026-05-19; none reached natural completion — operator
+session ended.  Restart on the post-memo-04 kernel is queued as
+the wall-clock prerequisite for Series 7 send (kernel HEAD
+`94e8d71b8f6d` at this writing).
 
 Time-machine track (Track B per PLAN-2026-05-14 §4.1) landed in
 the same session: snapshot #168 Phases 4-6 (cross-task semantics +
