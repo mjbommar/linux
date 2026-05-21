@@ -135,10 +135,10 @@ inet_rtm_newaddr, tap fd swap), enable
 `um_template_pause_mfc_diag=1` to install the SIGSEGV/SIGBUS/
 SIGILL/SIGFPE handler that dumps any child-side faults via raw
 write to fd 1.
-| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
-| 2     | Kernel applies identity (MAC/IP/tap) | **LANDED (2026-05-21)**: MAC + IPv4 CIDR + IPv4 gateway applied to the in-guest netdev each take.  KUnit 13/13 PASS; template-pause-smoke case 4 PASS (vec0 MAC = 52:54:00:de:ad:be, inet 192.168.7.42/24 verified via `ip addr show`); fork-stress 10/10 PASS at N=100 strict gates.  Tap fd swap deferred (see "What does NOT work today"). | (this) |
-| 3     | Bench + acceptance gates             | PENDING               | —               |
-| 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a-P5 fix  | —               |
+| 1c    | `umlctl pool serve` daemon + multi-take | **LANDED (2026-05-21)** — Unix-socket RPC over `$XDG_RUNTIME_DIR/uml/pools/<name>/api.sock` (take/list/status/destroy/shutdown); 98/98 cargo tests; pool-serve-smoke selftest | `5576cdf21084` + `cda39d83ab29` (adaptive `wait_for_stop` poll cadence) |
+| 2     | Kernel applies identity (MAC/IP/tap) | **LANDED (2026-05-21)**: MAC + IPv4 CIDR + IPv4 gateway applied to the in-guest netdev each take.  KUnit 13/13 PASS; template-pause-smoke case 4 PASS (vec0 MAC = 52:54:00:de:ad:be, inet 192.168.7.42/24 verified via `ip addr show`); fork-stress 10/10 PASS at N=100 strict gates.  Tap fd swap deferred (see "What does NOT work today"). | `e751762a8018` |
+| 3     | Bench + acceptance gates             | **LANDED (2026-05-21)** — pool-bench 4/5 gates PASS on local hardware after `cda39d83ab29`'s adaptive poll fix: p99 14ms, RSS 132MiB, lifecycle drift 0.05%, throughput 3000/3000.  `take.p50` re-measure pending (initial 12.0ms with 10ms poll quantum; expected ≤3ms with 250µs initial quantum). | `cda39d83ab29` |
+| 4     | syzkaller `vm/uml` Go shim           | SPEC DRAFTED `2ab0eb28c77f` (memo 11) — needs `umlctl exec` + `umlctl port-forward` as small follow-ons before code lands. | (memo 11) |
 
 ## What works today
 
