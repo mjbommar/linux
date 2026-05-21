@@ -135,7 +135,7 @@ inet_rtm_newaddr, tap fd swap), enable
 `um_template_pause_mfc_diag=1` to install the SIGSEGV/SIGBUS/
 SIGILL/SIGFPE handler that dumps any child-side faults via raw
 write to fd 1.
-| 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
+| 1c    | `umlctl pool serve` daemon + multi-take | READY (depends on Phase 2a `d057cf28f482`) | — |
 | 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
 | 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a-P5 fix  | —               |
@@ -169,8 +169,34 @@ Selftests guarding the end-to-end:
     the window, G6 identity-blob round-trip.  Has a 3-attempt
     retry harness to absorb the residual v1-ceiling flakiness.
   * `tools/testing/selftests/um/pool-spawn-smoke/` — umlctl wrapper.
+  * `tools/testing/selftests/um/pool-serve-smoke/` — `umlctl pool
+    serve` daemon end-to-end: boots the master in fork mode,
+    take/destroy/shutdown over the Unix socket, asserts the taken
+    pid is no longer runnable post-destroy.  SKIPs cleanly when
+    `$UM_FORK_KERNEL` is unset.
   * `pool::tests` in `tools/uml/uml-launcher/src/bin/umlctl/pool.rs`
     — identity-blob layout + MAC parser.
+  * `pool_serve::tests` in
+    `tools/uml/uml-launcher/src/bin/umlctl/pool_serve.rs` — JSON
+    RPC parser + path layout.
+
+Phase 1c daemon, end-to-end:
+
+```sh
+umlctl pool serve --name p1 --kernel /path/to/fork-kernel --background
+# (in another shell)
+python3 -c "
+import json, socket
+s = socket.socket(socket.AF_UNIX); s.connect('\$XDG_RUNTIME_DIR/uml/pools/p1/api.sock')
+s.sendall(b'{\"op\":\"take\",\"instance\":\"m1\",\"mac\":\"52:54:00:11:22:33\"}\n')
+print(s.recv(4096).decode())
+"
+```
+
+returns `{"ok":true,"result":{"pid":N, ...}}`.  Supported ops:
+`take`, `list`, `status`, `destroy` (pid), `shutdown`.  Wire format
++ tests are in
+`tools/uml/uml-launcher/src/bin/umlctl/pool_serve.rs`.
 
 `umlctl mission` (full, non-`--quick`) drives the stress test as
 Phase 8 against a separate CONFIG_UM_TEMPLATE_PAUSE_FORK=y kernel
@@ -181,11 +207,15 @@ gate still runs on hosts without the experimental build.
 
 ## What does NOT work today
 
-1. **One member per master**.  The kernel
-   `um_template_pause_enter()` returns after one SIGSTOP/SIGCONT
-   cycle.  The master IS the taken instance; there is no
-   fork-from-pause.  To get N siblings today, run N separate
-   `umlctl pool spawn` commands, each booting a fresh master.
+1. **M-fork child has no userspace presence yet**.  With the
+   private-stack clone path (Phase 2a, `d057cf28f482`) the master
+   does loop in `fork_on_resume_loop` and the daemon can drive
+   thousands of takes back-to-back, but the M-fork child exits
+   immediately via `__NR_exit_group` from inline asm — it never
+   returns to UML userspace, so its host pid is captured at fork
+   time and reported to the supervisor, then the kernel reaps it.
+   Phase 2 will extend the child path with identity re-plumbing
+   so the taken member is a real long-lived sibling kernel.
 
 2. **Identity blob is logged, not applied**.  The kernel reads
    the blob, validates magic + version, and emits a dmesg line.
@@ -193,10 +223,11 @@ gate still runs on hosts without the experimental build.
    Pool members today inherit the master's identity for everything
    except the dmesg log line.
 
-3. **No long-lived supervisor**.  Each `pool spawn` is a one-shot
-   foreground command.  No `pool serve`, no Unix socket API, no
-   replenish, no take RPC, no `pool list` / `pool status` /
-   `pool destroy`.
+3. **No warm-pool pre-replenish**.  `umlctl pool serve` (Phase 1c,
+   commit on this branch) brings up a long-lived supervisor with a
+   Unix-socket take/list/status/destroy/shutdown RPC, but the
+   `--min_warm N` pre-fork loop is a TODO — every take today is
+   lazy.  Hooks are in `pool_serve.rs::replenish_warm_pool()`.
 
 4. **No KVM-backend fork support**.  Phase 1a does not fork, so
    kvm-v2 is fine.  When Phase 2a (kernel-side fork loop) lands,
