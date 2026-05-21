@@ -55,9 +55,16 @@ use std::process::Command;
 /// char[64] instance_name, u8[6] mac_addr, u8[2] _pad, char[16]
 /// tap_name, char[20] ipv4_cidr, char[16] ipv4_gateway, char[96]
 /// mconsole_path, u8[32] reserved.  Total 260 bytes.
-const IDENTITY_BLOB_SIZE: usize = 4 + 4 + 64 + 6 + 2 + 16 + 20 + 16 + 96 + 32;
-const IDENTITY_MAGIC: u32 = 0x44495455; // 'UTID' little-endian
-const IDENTITY_VERSION: u32 = 1;
+pub(crate) const IDENTITY_BLOB_SIZE: usize = 4 + 4 + 64 + 6 + 2 + 16 + 20 + 16 + 96 + 32;
+pub(crate) const IDENTITY_MAGIC: u32 = 0x44495455; // 'UTID' little-endian
+pub(crate) const IDENTITY_VERSION: u32 = 1;
+
+/// Offset within the identity memfd where the master writes the
+/// most recently forked child's host pid (u32 little-endian).  Matches
+/// `sizeof(struct um_template_identity)` in the kernel header — the
+/// pid is appended immediately after the blob proper.  See
+/// `arch/um/kernel/template_pause.c::fork_on_resume_loop()`.
+pub(crate) const IDENTITY_CHILD_PID_OFFSET: usize = IDENTITY_BLOB_SIZE;
 
 #[derive(Args, Debug)]
 pub struct SpawnArgs {
@@ -166,7 +173,7 @@ fn record_spawn(runtime_dir: &Path, r: &SpawnResult) -> Result<()> {
     Ok(())
 }
 
-fn pid_is_alive(pid: i32) -> bool {
+pub(crate) fn pid_is_alive(pid: i32) -> bool {
     Path::new(&format!("/proc/{}", pid)).is_dir()
 }
 
@@ -507,7 +514,7 @@ pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) 
 /// resumed instance alive long enough for `pool spawn`'s caller to
 /// observe / interact with it.  Override with --init for anything
 /// non-trivial.
-fn default_init_script(instance: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn default_init_script(instance: &str) -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("umlctl-pool-init-{}.sh", std::process::id()));
     let content = format!(
@@ -530,7 +537,7 @@ fn default_init_script(instance: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn parse_mac(s: &str) -> Result<[u8; 6]> {
+pub(crate) fn parse_mac(s: &str) -> Result<[u8; 6]> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
         bail!("expected 6 colon-separated octets, got {}", parts.len());
@@ -543,7 +550,7 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
     Ok(out)
 }
 
-fn build_identity_blob(
+pub(crate) fn build_identity_blob(
     instance: &str,
     mac: &[u8; 6],
     tap: &str,
@@ -573,7 +580,7 @@ fn build_identity_blob(
     Ok(blob)
 }
 
-fn create_identity_memfd(blob: &[u8]) -> Result<OwnedFd> {
+pub(crate) fn create_identity_memfd(blob: &[u8]) -> Result<OwnedFd> {
     let name = CString::new("um-pool-identity").unwrap();
     // MFD_CLOEXEC = 1; we explicitly clear cloexec in pre_exec
     // before execve so the child inherits the fd.
