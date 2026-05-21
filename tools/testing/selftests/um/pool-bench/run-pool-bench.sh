@@ -535,12 +535,31 @@ else:
     report("take.p99", f"{p99:.1f}ms", f"{GATE_P99_MS:.1f}ms", p99 <= GATE_P99_MS)
 
 # Gate 2: memory amplification.
+#
+# The gate is meaningless without live children to measure.
+# Phase 2a's pre-private-stack code SIGKILL'd children immediately
+# post-fork, which would let this gate silently PASS at
+# (master + supervisor) RSS only — a misleading "200 MiB for 100
+# forks" claim when the real number was "200 MiB for 0 live
+# children."  Hardening-plan §1.5 fix: require at least half the
+# attempted forks to be alive when we sample RSS; report a clear
+# FAIL otherwise.  Operators reading this output get a real
+# amplification number or an honest "gate cannot measure" verdict.
 total_kb = r.get("gate2_total_kb", 0)
 total_mib = total_kb / 1024.0
-report("rss.100forks",
-       f"{total_mib:.1f}MiB",
-       f"{GATE_RSS_TOTAL_MIB:.0f}MiB",
-       total_mib <= GATE_RSS_TOTAL_MIB)
+attempted = r.get("gate2_forks_attempted", 0) or 1
+live = r.get("gate2_live_children", 0)
+live_frac = live / attempted
+if live_frac < 0.5:
+    report("rss.100forks",
+           f"{total_mib:.1f}MiB (only {live}/{attempted} live; gate cannot measure)",
+           f"{GATE_RSS_TOTAL_MIB:.0f}MiB",
+           False)
+else:
+    report("rss.100forks",
+           f"{total_mib:.1f}MiB ({live}/{attempted} live)",
+           f"{GATE_RSS_TOTAL_MIB:.0f}MiB",
+           total_mib <= GATE_RSS_TOTAL_MIB)
 
 # Gate 3: lifecycle drift.
 drift = r.get("gate3_drift_pct", 0.0)
