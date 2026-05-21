@@ -136,7 +136,7 @@ inet_rtm_newaddr, tap fd swap), enable
 SIGILL/SIGFPE handler that dumps any child-side faults via raw
 write to fd 1.
 | 1c    | `umlctl pool serve` daemon + multi-take | BLOCKED on UML_LONGJMP fix | —               |
-| 2     | Kernel applies identity (MAC/IP/tap) | PENDING               | —               |
+| 2     | Kernel applies identity (MAC/IP/tap) | **LANDED (2026-05-21)**: MAC + IPv4 CIDR + IPv4 gateway applied to the in-guest netdev each take.  KUnit 13/13 PASS; template-pause-smoke case 4 PASS (vec0 MAC = 52:54:00:de:ad:be, inet 192.168.7.42/24 verified via `ip addr show`); fork-stress 10/10 PASS at N=100 strict gates.  Tap fd swap deferred (see "What does NOT work today"). | (this) |
 | 3     | Bench + acceptance gates             | PENDING               | —               |
 | 4     | syzkaller `vm/uml` Go shim           | BLOCKED on 2a-P5 fix  | —               |
 
@@ -179,6 +179,63 @@ Phase 8 against a separate CONFIG_UM_TEMPLATE_PAUSE_FORK=y kernel
 cleanly when that kernel is absent, so the rest of the mission
 gate still runs on hosts without the experimental build.
 
+### Phase 2 — identity application (2026-05-21)
+
+Phase 2 lives in `arch/um/kernel/template_pause_identity.c`.  On
+each take the master:
+
+  * reads the per-take identity blob from the supervisor's memfd,
+  * resolves the in-guest netdev by scanning for the first
+    registered interface whose name starts with `vec` (UML vector
+    driver) or `eth` (legacy `uml_net` driver) — see "Design
+    choice" below for why this is not the blob's `tap_name`,
+  * sets the MAC via `dev_set_mac_address` under RTNL,
+  * clears any prior IPv4 primary address (idempotence),
+  * binds the new IPv4 via `devinet_ioctl(SIOCSIFADDR /
+    SIOCSIFNETMASK)` and brings the iface up via SIOCSIFFLAGS,
+  * installs the default route via the blob's `ipv4_gateway`
+    using `ip_rt_ioctl(SIOCADDRT)`.
+
+Failures at any step are logged via `pr_warn` and the loop
+continues — a bad blob never aborts the fork loop.
+
+The apply happens in the MASTER (parent), not the M-fork child.
+Rationale: the M-fork child runs on a private stack and cannot
+safely re-enter kernel C code that touches shared physmem (bug B1
+hazard zone).  The forked child inherits the applied identity via
+CoW; the master's own netdev state drifts to the latest blob
+across iterations (invisible to consumers because the master is
+never exposed as a pool member).
+
+**Design choice — tap_name vs in-guest netdev**: the blob's
+`tap_name` is the HOST-side TAP device created by the supervisor
+(via `ip tuntap add`), not the in-guest netdev name.  UML's vector
+driver names interfaces `vecN`; the legacy `uml_net` driver uses
+`ethN`.  Neither matches what the supervisor put in `tap_name`,
+which is a host artefact.  The cheapest dispositive test (boot a
+UML guest, run `ip link show`) confirms: the in-guest netdev is
+`vec0`, not `tap-pool-foo`.  Phase 2 therefore resolves the
+target by scanning `for_each_netdev(&init_net, ...)` with a small
+priority order (`vec*` > `eth*` > anything-but-lo).  Adding a new
+field to the blob for the in-guest name would require a v2 blob
+format and break the wire format already shared with umlctl — not
+worth it for the single-netdev-per-pool case Phase 2 covers.
+
+Tests guarding the apply path:
+
+  * `arch/um/kernel/template_pause_identity_test.c` — 13 KUnit
+    cases over the parse helpers (CIDR, address, mask-from-prefix),
+    enabled by `CONFIG_UM_TEMPLATE_PAUSE_IDENTITY_KUNIT=y`.
+  * `tools/testing/selftests/um/template-pause-smoke/` case 4 —
+    boots UML with `vec0:transport=fd`, writes a blob, SIGCONTs,
+    verifies via in-guest `ip addr show vec0` that the MAC and
+    IPv4 actually changed.  SKIPs cleanly when the build lacks
+    `CONFIG_UML_NET_VECTOR`.
+  * `tools/testing/selftests/um/template-pause-fork-stress/` —
+    unchanged.  Validated post-Phase-2 at 10/10 PASS, N=100,
+    strict gates (G1-G8 including G7 zero panics), confirming
+    the apply path doesn't regress the fork-on-resume primitive.
+
 ## What does NOT work today
 
 1. **One member per master**.  The kernel
@@ -187,11 +244,16 @@ gate still runs on hosts without the experimental build.
    fork-from-pause.  To get N siblings today, run N separate
    `umlctl pool spawn` commands, each booting a fresh master.
 
-2. **Identity blob is logged, not applied**.  The kernel reads
-   the blob, validates magic + version, and emits a dmesg line.
-   It does NOT yet swap MAC, rebind IPv4, or swap the tap fd.
-   Pool members today inherit the master's identity for everything
-   except the dmesg log line.
+2. **Tap fd swap not yet wired**.  Phase 2 (this commit) applies
+   MAC + IPv4 CIDR + IPv4 default gateway to the in-guest netdev
+   via `dev_set_mac_address` + `devinet_ioctl(SIOCSIFADDR/
+   SIOCSIFNETMASK/SIOCSIFFLAGS)` + `ip_rt_ioctl(SIOCADDRT)`.  What
+   the kernel does NOT yet do: hot-swap the underlying TAP fd via
+   SCM_RIGHTS on the identity-blob channel.  Pool members keep
+   the master's TAP fd, which is fine for single-tenant pools but
+   prevents per-take TAP isolation.  Tracked as a follow-on
+   (Phase 2.2 in the original memo; gate behind
+   `CONFIG_UM_TEMPLATE_PAUSE_FORK_TAP_SWAP` when it lands).
 
 3. **No long-lived supervisor**.  Each `pool spawn` is a one-shot
    foreground command.  No `pool serve`, no Unix socket API, no
