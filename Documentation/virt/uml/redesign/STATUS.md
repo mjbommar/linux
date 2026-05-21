@@ -17,6 +17,39 @@ but silently fell back to seccomp (and on `backend=force=kvm-v2`
 hung in early init before printing a panic).  Logged here so the
 next session doesn't re-walk it.
 
+**Two new SMP findings filed today (state-audit/27 + 28):**
+
+- **SMP-T78** — `test_os.test_process_cpu_count_affinity` returns
+  EBUSY on kvm-v2 under SMP because `kvm_v2_vcpu_run` holds
+  `migrate_disable()` over dispatch (SMP-T13).  Linux's
+  `__set_cpus_allowed_ptr_locked` returns -EBUSY when
+  migrate_disable > 0.  Architectural, not a regression.  Soak
+  template fix: drop test_os + test_posix from the curated
+  cpython-soak set (commit `17ca05177ac7`); skipping the right
+  way to avoid `python -m test -x`'s greedy nargs eating the
+  positional list.  Two harder follow-ups (SMP-T78b: relax
+  migrate_disable around syscall dispatch; SMP-T78c: kernel
+  patch __set_cpus_allowed_ptr_locked to EAGAIN) deferred.
+- **SMP-T79** — `kvm_v2_snapshot` KUnit suite pass=2 fail=2
+  under ncpus=4, pass=4 fail=0 under UP.  `kvm_v2_snapshot_pick_
+  vcpu` falls back to `vcpus[smp_processor_id()]` when no
+  `last_task == current` match; under KUnit kthread + SMP, that
+  picked a vCPU other than the suite_init-primed `vcpus[0]`.
+  Fix landed at `0bc97be2170b`: pin the failing tests to CPU 0
+  via `set_cpus_allowed_ptr`.  Verified pass=4 under both UP
+  and ncpus=4.
+
+**Third finding (NOT YET resolved):** `test_signal.test_itimer_
+virtual` fails under kvm-v2 SMP.  Symptom: SIGVTALRM never
+delivered; CPython test worker exits non-zero after burning CPU.
+Likely root cause: virtual itimer accounting (UML host-side
+sigaction + ITIMER_VIRTUAL bookkeeping) doesn't reach the guest
+under kvm-v2's dispatch path.  Filed as SMP-T80 for the next
+session; for now the cpython-soak workload is **deferred from the
+24h soak template** while it's investigated — the post-SMP-T78v3
+relaunch runs memcheck + iocheck + stress-ng only (all 60+ iters
+PASS as of this writing).
+
 Five tasks closed today:
 (1) `umlctl pool serve` daemon (~620 LoC Rust + selftest), flipping
 Memo 09 Phase 1c from BLOCKED-on-UML_LONGJMP (stale) to READY;
