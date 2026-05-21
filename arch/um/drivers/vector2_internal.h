@@ -158,6 +158,9 @@ extern int um_vec2_fd_fault_index;
 int um_vec2_tap_open(struct um_vec2_dev *vdev);
 int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd);
 void um_vec2_tap_close(struct um_vec2_dev *vdev);
+/* Memo 09 Phase 2.2: re-bind to a different host TAP name. */
+int um_vec2_tap_reopen_for_pool_member(struct net_device *dev,
+				       const char *new_ifname);
 
 int um_vec2_netdev_open(struct net_device *dev);
 int um_vec2_netdev_stop(struct net_device *dev);

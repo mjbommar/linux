@@ -418,3 +418,46 @@ void um_vec2_tap_close(struct um_vec2_dev *vdev)
 	vdev->channels = NULL;
 	vdev->num_channels = 0;
 }
+
+/*
+ * Memo 09 Phase 2.2 — re-bind this vec2 netdev to a different
+ * host TAP interface name (closing the inherited channels and
+ * opening fresh ones via TUNSETIFF on the new name).
+ *
+ * Used by Phase 2 identity-apply when the M-fork child needs its
+ * own TAP (the master's TAP fd is shared via CoW post-fork, so all
+ * pool members would otherwise contend on the same host interface).
+ *
+ * The new TAP is created via the standard um_vec2_tap_open() path
+ * which opens /dev/net/tun + TUNSETIFF.  Caller must hold a
+ * reference to @dev (the netdev is alive throughout the call).
+ *
+ * Returns 0 on success, -EINVAL for a non-TAP vec2 interface or
+ * empty new_ifname, -errno on tap_open failure.  On failure the
+ * old channels are already torn down — caller must accept that
+ * the netdev is now without a working backend; recovery requires
+ * either retrying with a valid name or calling um_vec2_tap_close
+ * + a fresh open with the original name.
+ */
+int um_vec2_tap_reopen_for_pool_member(struct net_device *dev,
+				       const char *new_ifname)
+{
+	struct um_vec2_dev *vdev;
+
+	if (!dev || !new_ifname || !*new_ifname)
+		return -EINVAL;
+
+	vdev = um_vec2_dev_from_netdev(dev);
+	if (!vdev)
+		return -EINVAL;
+	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
+		return -EINVAL;
+	if (strnlen(new_ifname, sizeof(vdev->cfg.ifname)) >=
+	    sizeof(vdev->cfg.ifname))
+		return -ENAMETOOLONG;
+
+	um_vec2_tap_close(vdev);
+	strscpy(vdev->cfg.ifname, new_ifname, sizeof(vdev->cfg.ifname));
+	return um_vec2_tap_open(vdev);
+}
+EXPORT_SYMBOL_GPL(um_vec2_tap_reopen_for_pool_member);

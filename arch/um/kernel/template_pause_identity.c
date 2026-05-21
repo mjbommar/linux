@@ -66,6 +66,10 @@
 #include <asm/um-template-pause.h>
 #include "template_pause_identity.h"
 #include "../drivers/mconsole.h"	/* mconsole_reinit_for_pool_member — Phase 4 */
+#if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2)
+/* um_vec2_tap_reopen_for_pool_member — Memo 09 Phase 2.2 */
+#include "../drivers/vector2_internal.h"
+#endif
 
 /*
  * Parse an IPv4 CIDR string like "10.7.0.42/24" into a network-order
@@ -421,6 +425,57 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 	if (rc && !first_err)
 		first_err = rc;
 	rtnl_unlock();
+
+	/*
+	 * Memo 09 Phase 2.2 (hardening-plan §1.4): swap the netdev's
+	 * underlying host TAP to a per-member name.  Without this,
+	 * every pool member ends up sharing the master's TAP via CoW
+	 * — the interface name is wrong, the host's bridge / IP
+	 * configuration was set up against ONE TAP, and SIOCSIFFLAGS
+	 * UP later fails because the inherited fd is bogus from the
+	 * test harness's perspective.
+	 *
+	 * blob->tap_name carries the per-member host TAP name the
+	 * daemon allocated.  We open a fresh /dev/net/tun fd with
+	 * TUNSETIFF(<that name>) and attach it to the netdev.  The
+	 * operator is responsible for the host-side TAP existing (or
+	 * being creatable with the calling guest's CAP_NET_ADMIN).
+	 *
+	 * Reopen only valid for vec2 TAP-backed netdevs.  Non-vec2
+	 * (legacy uml_net eth0, virtio-net) → skip silently; those
+	 * use different mechanisms.  Failure is non-fatal but
+	 * recorded as first_err so the caller knows the network is
+	 * not yet usable.
+	 *
+	 * Done BEFORE apply_ipv4 + apply_default_route so the
+	 * IPv4-on-up sequence below sees the right fd.
+	 */
+#if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2)
+	if (blob->tap_name[0] != '\0' && !strncmp(dev->name, "vec", 3)) {
+		size_t tlen;
+		char tap_name[sizeof(blob->tap_name) + 1];
+
+		memcpy(tap_name, blob->tap_name, sizeof(blob->tap_name));
+		tap_name[sizeof(blob->tap_name)] = '\0';
+		tlen = strnlen(tap_name, sizeof(blob->tap_name));
+		if (tlen > 0) {
+			rc = um_vec2_tap_reopen_for_pool_member(dev, tap_name);
+			if (rc) {
+				pr_warn("template_pause: tap-reopen(%s, %s) failed: %d; identity partially applied\n",
+					dev->name, tap_name, rc);
+				if (!first_err)
+					first_err = rc;
+			} else {
+				pr_info("template_pause: tap-reopened %s on host TAP %s\n",
+					dev->name, tap_name);
+			}
+		}
+	}
+#else
+	if (blob->tap_name[0] != '\0')
+		pr_warn_once("template_pause: blob->tap_name=%s but CONFIG_UML_NET_VECTOR_V2=n; per-member TAP swap unavailable\n",
+			     blob->tap_name);
+#endif
 
 	rc = apply_ipv4(dev, blob);
 	if (rc && !first_err)
