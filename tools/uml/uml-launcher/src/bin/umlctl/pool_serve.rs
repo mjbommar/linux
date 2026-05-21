@@ -146,6 +146,16 @@ pub(crate) enum Request {
     Destroy {
         pid: i32,
     },
+    Exec {
+        pid: i32,
+        argv: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        #[serde(default)]
+        cwd: String,
+        #[serde(default)]
+        timeout_secs: u64,
+    },
     Shutdown,
 }
 
@@ -221,6 +231,16 @@ impl DaemonState {
                 }
                 Err(e) => serde_json::json!({"ok": false, "error": format!("{:#}", e)}),
             },
+            Request::Exec {
+                pid,
+                argv,
+                env,
+                cwd,
+                timeout_secs,
+            } => match self.do_exec(pid, &argv, &env, &cwd, timeout_secs) {
+                Ok(v) => v,
+                Err(e) => serde_json::json!({"ok": false, "error": format!("{:#}", e)}),
+            },
             Request::Shutdown => {
                 self.shutdown_requested.store(1, Ordering::SeqCst);
                 serde_json::json!({"ok": true})
@@ -231,6 +251,31 @@ impl DaemonState {
     /// Drive one fork-on-resume cycle and capture the resulting
     /// child pid.  Holds the implicit single-threaded lock via the
     /// outer event loop; do not call concurrently.
+    /// Per spec memo 11 §6 question 2: synthesize a per-instance
+    /// mconsole socket path when the caller leaves it empty.  This
+    /// keeps `umlctl exec` working even when the take RPC came from a
+    /// caller (eg the syzkaller shim) that doesn't care to pick the
+    /// path.  The directory is the per-pool runtime dir, which the
+    /// daemon already creates in `cmd_serve`.
+    fn synthesize_mconsole_path(&self, instance: &str) -> String {
+        let dir = self
+            .socket_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let safe: String = instance
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        dir.join(format!("{}.mconsole", safe)).display().to_string()
+    }
+
     fn do_take(
         &self,
         instance: &str,
@@ -240,6 +285,13 @@ impl DaemonState {
         gateway: &str,
         mconsole: &str,
     ) -> Result<MemberRecord> {
+        let synth_storage;
+        let mconsole = if mconsole.is_empty() {
+            synth_storage = self.synthesize_mconsole_path(instance);
+            synth_storage.as_str()
+        } else {
+            mconsole
+        };
         let mac_bytes = pool::parse_mac(mac).context("parse mac")?;
         let blob = pool::build_identity_blob(instance, &mac_bytes, tap, ipv4, gateway, mconsole)
             .context("build identity blob")?;
@@ -308,6 +360,133 @@ impl DaemonState {
         };
         self.members.lock().unwrap().insert(child_pid, rec.clone());
         Ok(rec)
+    }
+
+    /// `exec` RPC handler.  Spec memo 11 §3.1.  Today's MVP backend
+    /// drives the member's mconsole socket via the standard
+    /// `uml_mconsole(1)` tool if it's installed; otherwise the verb
+    /// returns a clean diagnostic instead of pretending to work.
+    ///
+    /// Returns a JSON object shaped as the spec's exec reply
+    /// envelope: `{"ok":true, "stdout":"…", "stderr":"…", "exit":N,
+    /// "signal":S, "duration_ms":D, "timed_out":bool}` on completion,
+    /// or `{"ok":false, "error":"…"}` on failure.
+    ///
+    /// Note on the in-guest exec primitive: `uml_mconsole exec` is
+    /// the standard Linux upstream tool but is not present on all
+    /// hosts; when it's absent we surface that as a clear operator
+    /// message rather than silently producing empty output.  Future
+    /// work (spec memo 11 §6 question 3) replaces this with a pty
+    /// pair + SCM_RIGHTS-passed master fd; the envelope stays the
+    /// same so callers don't need to change.
+    fn do_exec(
+        &self,
+        pid: i32,
+        argv: &[String],
+        env: &HashMap<String, String>,
+        cwd: &str,
+        timeout_secs: u64,
+    ) -> Result<serde_json::Value> {
+        if argv.is_empty() {
+            bail!("exec requires non-empty argv");
+        }
+        let member = {
+            let members = self.members.lock().unwrap();
+            members
+                .get(&pid)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such pool member pid {}", pid))?
+        };
+        if member.mconsole_path.is_empty() {
+            bail!(
+                "pool member pid {} has no mconsole socket; respawn the daemon \
+                 against a kernel that exposes one",
+                pid
+            );
+        }
+        if !Path::new(&member.mconsole_path).exists() {
+            bail!(
+                "pool member pid {} mconsole socket {:?} not present yet \
+                 (the in-guest exec primitive is not available in this build; \
+                 see Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-next-sprint/11-syzkaller-shim-spec.md §6 q2)",
+                pid, member.mconsole_path
+            );
+        }
+        // We expose the standard `uml_mconsole exec` shape here.  If
+        // the host doesn't have it, surface that explicitly.
+        let tool = which_uml_mconsole();
+        let tool = tool.ok_or_else(|| {
+            anyhow!(
+                "uml_mconsole(1) not found in PATH; install the `user-mode-linux-tools` \
+                 package or set UML_MCONSOLE=/path/to/uml_mconsole"
+            )
+        })?;
+        let mut cmd_str = String::from("exec ");
+        // mconsole exec expects a single shell line; quote-safe-join.
+        for (i, a) in argv.iter().enumerate() {
+            if i > 0 {
+                cmd_str.push(' ');
+            }
+            cmd_str.push_str(&shell_quote(a));
+        }
+        if !cwd.is_empty() {
+            cmd_str = format!("cd {} && {}", shell_quote(cwd), cmd_str);
+        }
+        for (k, v) in env {
+            cmd_str = format!("{}={} {}", shell_quote(k), shell_quote(v), cmd_str);
+        }
+
+        let started = Instant::now();
+        let mut child = Command::new(&tool)
+            .arg(&member.mconsole_path)
+            .arg(&cmd_str)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn {}", tool.display()))?;
+
+        let deadline = if timeout_secs > 0 {
+            Some(Instant::now() + Duration::from_secs(timeout_secs))
+        } else {
+            None
+        };
+        let mut timed_out = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if let Some(d) = deadline {
+                        if Instant::now() >= d {
+                            let _ = child.kill();
+                            timed_out = true;
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => return Err(anyhow!("wait for mconsole exec: {}", e)),
+            }
+        }
+        let output = child
+            .wait_with_output()
+            .context("collect mconsole exec output")?;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let exit_code = output
+            .status
+            .code()
+            .unwrap_or(if timed_out { 124 } else { -1 });
+        let signal = output.status.signal_from_status().unwrap_or(0);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            "exit": exit_code,
+            "signal": signal,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
+        }))
     }
 
     fn do_destroy(&self, pid: i32) -> Result<bool> {
@@ -415,10 +594,10 @@ fn wait_for_stop(pid: i32, deadline: Duration) -> Result<()> {
             Err(e) => bail!("read {}: {}", stat_path, e),
         }
         let sleep_us: u64 = match iter / 8 {
-            0 => 250,           // 0..7  → 250 µs (sub-ms detection)
-            1 => 1_000,         // 8..15 → 1 ms
-            2 => 4_000,         // 16..23 → 4 ms
-            _ => 16_000,        // 24..  → 16 ms cap
+            0 => 250,    // 0..7  → 250 µs (sub-ms detection)
+            1 => 1_000,  // 8..15 → 1 ms
+            2 => 4_000,  // 16..23 → 4 ms
+            _ => 16_000, // 24..  → 16 ms cap
         };
         std::thread::sleep(Duration::from_micros(sleep_us));
         iter = iter.saturating_add(1);
@@ -741,6 +920,65 @@ fn handle_client(state: &DaemonState, stream: UnixStream) {
     }
 }
 
+/// Locate `uml_mconsole(1)` on the host.  Prefers $UML_MCONSOLE,
+/// then PATH lookup.  Returns None if absent so callers can produce a
+/// user-friendly error rather than letting `Command::spawn` fail with
+/// ENOENT.
+fn which_uml_mconsole() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("UML_MCONSOLE") {
+        let pb = PathBuf::from(&p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let cand = PathBuf::from(dir).join("uml_mconsole");
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// POSIX shell-quote a single argument.  Sufficient for piping
+/// argv through `uml_mconsole exec`; not for full shell expansion.
+/// Public-in-module for tests.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | '=' | ':'))
+    {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Tiny shim so `do_exec` can read the signal field without pulling
+/// in std::os::unix::process::ExitStatusExt at every call site.
+trait ExitStatusSignal {
+    fn signal_from_status(&self) -> Option<i32>;
+}
+impl ExitStatusSignal for std::process::ExitStatus {
+    fn signal_from_status(&self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        self.signal()
+    }
+}
+
 // Suppress dead-code warning while replenish is wired-but-unused.
 #[allow(dead_code)]
 fn replenish_warm_pool(_state: &DaemonState) {
@@ -818,6 +1056,49 @@ mod tests {
         assert!(parse_request("not json").is_err());
         assert!(parse_request(r#"{"op":"bogus"}"#).is_err());
         assert!(parse_request(r#"{"op":"destroy"}"#).is_err()); // missing pid
+    }
+
+    #[test]
+    fn parse_exec_request() {
+        let r = parse_request(
+            r#"{"op":"exec","pid":1234,"argv":["/bin/sh","-c","echo hi"],"timeout_secs":30}"#,
+        )
+        .unwrap();
+        match r {
+            Request::Exec {
+                pid,
+                argv,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(pid, 1234);
+                assert_eq!(argv, vec!["/bin/sh", "-c", "echo hi"]);
+                assert_eq!(timeout_secs, 30);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_exec_requires_argv() {
+        // argv is required (no #[serde(default)]); missing → error.
+        assert!(parse_request(r#"{"op":"exec","pid":1}"#).is_err());
+    }
+
+    #[test]
+    fn shell_quote_safe_chars_unchanged() {
+        assert_eq!(shell_quote("hello"), "hello");
+        assert_eq!(shell_quote("/usr/bin/sh"), "/usr/bin/sh");
+        assert_eq!(shell_quote("FOO=bar"), "FOO=bar");
+        assert_eq!(shell_quote("a-b_c.d"), "a-b_c.d");
+    }
+
+    #[test]
+    fn shell_quote_special_chars_wrapped() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("a;b|c&d"), "'a;b|c&d'");
     }
 
     #[test]
