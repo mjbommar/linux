@@ -197,6 +197,24 @@ int os_template_pause_fork(void)
  * (12k iters → 96 MB virtual / thousands of /proc/<pid>/maps
  * entries).
  */
+/*
+ * 8 KiB is enough for the only thing the child does (one __NR_exit_group
+ * inline asm).  16-byte top offset reserves the x86_64 ABI's red-zone
+ * scratch + alignment headroom even though we never actually use C
+ * stack frames in the child.
+ */
+#define MFC_CLONE_STACK_BYTES   8192
+#define MFC_CLONE_STACK_TOP_OFF 16
+
+/* x86_64 syscall numbers used by the inline clone+exit dance.  Hard-
+ * coded rather than pulled from <asm/unistd.h> because UML's os-Linux
+ * side is built against the host's libc headers; the host's libc
+ * numbering matches the x86_64 ABI we target unconditionally.
+ */
+#define MFC_NR_CLONE_X86_64       56
+#define MFC_NR_EXIT_GROUP_X86_64  231
+#define MFC_CLONE_FLAGS_FORK_LIKE 17 /* SIGCHLD — fork-equivalent */
+
 static void *os_template_pause_clone_stack_base;
 
 int os_template_pause_fork_clone(void)
@@ -205,7 +223,7 @@ int os_template_pause_fork_clone(void)
 	long ret;
 
 	if (!os_template_pause_clone_stack_base) {
-		void *base = mmap(NULL, 8192,
+		void *base = mmap(NULL, MFC_CLONE_STACK_BYTES,
 				   PROT_READ | PROT_WRITE,
 				   MAP_PRIVATE | MAP_ANONYMOUS,
 				   -1, 0);
@@ -214,18 +232,18 @@ int os_template_pause_fork_clone(void)
 		os_template_pause_clone_stack_base = base;
 	}
 	child_stack_top = (unsigned long)os_template_pause_clone_stack_base +
-			   8192 - 16;
+			   MFC_CLONE_STACK_BYTES - MFC_CLONE_STACK_TOP_OFF;
 
-	/* Raw __NR_clone (x86_64 = 56).  In the CHILD, rax = 0 and
-	 * RSP = child_stack_top; in the PARENT, rax = child pid.
+	/* Raw __NR_clone.  In the CHILD, rax = 0 and RSP = child_stack_top;
+	 * in the PARENT, rax = child pid.
 	 *
 	 * After the syscall, BOTH halves resume in this function.  We
 	 * must distinguish them and route the child to exit_group via
 	 * raw inline asm only — the child has no usable C stack.
 	 */
 	{
-		register long rax asm("rax") = 56; /* __NR_clone */
-		register long rdi asm("rdi") = 17; /* SIGCHLD */
+		register long rax asm("rax") = MFC_NR_CLONE_X86_64;
+		register long rdi asm("rdi") = MFC_CLONE_FLAGS_FORK_LIKE;
 		register long rsi asm("rsi") = child_stack_top;
 		register long rdx asm("rdx") = 0;  /* parent_tid */
 		register long r10 asm("r10") = 0;  /* child_tid */
@@ -239,14 +257,15 @@ int os_template_pause_fork_clone(void)
 			 * Cannot use C — RSP is the private stack, no
 			 * usable locals.  Cannot `ret`.
 			 */
-			"movq $231, %%rax\n\t"   /* __NR_exit_group */
+			"movq %[exit_nr], %%rax\n\t"
 			"xorq %%rdi, %%rdi\n\t"
 			"syscall\n\t"
 			"2: jmp 2b\n\t"           /* unreachable */
 			"1:\n\t"
 			: "+r" (rax)
 			: "r" (rdi), "r" (rsi), "r" (rdx),
-			  "r" (r10), "r" (r8)
+			  "r" (r10), "r" (r8),
+			  [exit_nr] "i" (MFC_NR_EXIT_GROUP_X86_64)
 			: "rcx", "r11", "memory"
 		);
 		ret = rax;
