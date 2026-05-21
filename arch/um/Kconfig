@@ -615,6 +615,20 @@ config UM_TEMPLATE_PAUSE_FORK_DIAG
 	  Say N unless you're actively debugging the fork-on-resume
 	  primitive.
 
+config UM_TEMPLATE_PAUSE_IDENTITY_KUNIT
+	bool "Template-pause identity-apply KUnit tests"
+	depends on UM_TEMPLATE_PAUSE && KUNIT
+	default n
+	help
+	  Build KUnit tests for the parse helpers in
+	  arch/um/kernel/template_pause_identity.c (IPv4 CIDR
+	  parsing, IPv4 address parsing, prefix-to-netmask conversion).
+	  These exercise the pure-C parse path with no net-stack
+	  dependencies, so they run cleanly on any UML KUnit kernel.
+
+	  Say N for production builds; Y while developing or
+	  regressing the identity-apply path.
+
 endmenu
 
 source "arch/um/drivers/Kconfig"
