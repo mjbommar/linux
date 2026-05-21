@@ -65,6 +65,10 @@ enum PoolCmd {
     /// Kill a pool member + remove its record.  Default is SIGKILL;
     /// pass --graceful for SIGTERM + grace period + SIGKILL escalation.
     Destroy(pool::DestroyArgs),
+    /// Long-lived supervisor: boots one master in fork mode, accepts
+    /// take/list/status/destroy/shutdown RPCs on a Unix socket under
+    /// $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.  Memo 09 Phase 1c.
+    Serve(pool_serve::ServeArgs),
 }
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -82,6 +86,7 @@ mod metrics;
 mod mission;
 mod paths;
 mod pool;
+mod pool_serve;
 mod preflight;
 mod registry;
 mod run;
@@ -780,6 +785,7 @@ fn run() -> Result<()> {
             PoolCmd::Spawn(args) => pool::cmd_spawn(args, &paths, cli.quiet),
             PoolCmd::List(args) => pool::cmd_list(args, &paths, cli.quiet),
             PoolCmd::Destroy(args) => pool::cmd_destroy(args, &paths, cli.quiet),
+            PoolCmd::Serve(args) => pool_serve::cmd_serve(args, &paths, cli.quiet),
         },
     }
 }
