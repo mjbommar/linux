@@ -348,6 +348,7 @@ extern int os_timer_one_shot(int cpu, unsigned long long nsecs);
 extern void os_timer_disable(int cpu);
 extern long long os_persistent_clock_emulation(void);
 extern long long os_nsecs(void);
+extern long long os_thread_cputime_ns(void);
 
 /* skas/mem.c */
 int syscall_stub_flush(struct mm_id *mm_idp);

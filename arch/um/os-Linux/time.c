@@ -173,6 +173,30 @@ long long os_nsecs(void)
 	return timespec_to_ns(&ts);
 }
 
+/*
+ * Per-thread CPU time in nanoseconds (CLOCK_THREAD_CPUTIME_ID).
+ * Counts host CPU time accrued by the calling host thread, including
+ * time spent inside ioctl(KVM_RUN, ...).  Used by the kvm-v2 backend
+ * to credit user-CPU time accumulated during guest execution to the
+ * calling guest task — without it, ITIMER_VIRTUAL accounting (and any
+ * other utime-sensitive guest path) doesn't accrue.
+ *
+ * SMP-T80 fix: prior to this helper, kvm-v2's KVM_RUN time was
+ * accounted to "system" via timer_handler's r.is_user=0 default,
+ * giving ITIMER_VIRTUAL workloads 0 % progress under the kvm-v2
+ * backend.  Crediting deltas of CLOCK_THREAD_CPUTIME_ID around each
+ * ioctl(KVM_RUN) restores the user-time semantics CPython's
+ * test_itimer_virtual depends on.
+ */
+long long os_thread_cputime_ns(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+		return 0;
+	return timespec_to_ns(&ts);
+}
+
 static __thread int wake_signals;
 
 void os_idle_prepare(void)

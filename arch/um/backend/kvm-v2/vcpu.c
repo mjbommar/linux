@@ -42,6 +42,7 @@
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
 #include <linux/sched.h>
+#include <linux/kernel_stat.h>	/* account_user_time — SMP-T80 KVM_RUN credit */
 #include <linux/signal.h>	/* sigset_t / sigfillset / sigdelset / SIGALRM
 				 * (D.5-fix-2 install_signal_mask) */
 #include <linux/slab.h>
@@ -2512,7 +2513,36 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 
 	KVMV2_TRACE(KVMV2_OP_PRE_KVM_RUN, regs, run, vcpu);
 
-	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+	/*
+	 * SMP-T80 (state-audit/29): credit guest CPU time to the calling
+	 * task's user-time counter so ITIMER_VIRTUAL accrues.
+	 *
+	 * Without this, sig_handler_common defaults r.is_user=0 and the
+	 * timer tick interrupting KVM_RUN goes to stime, not utime —
+	 * `setitimer(ITIMER_VIRTUAL, ...)` based workloads (CPython's
+	 * test_signal.test_itimer_virtual is the canonical reproducer)
+	 * sit forever waiting for SIGVTALRM.
+	 *
+	 * Read CLOCK_THREAD_CPUTIME_ID before/after the KVM_RUN ioctl
+	 * and credit the delta as utime to current via account_user_time.
+	 * Over-credits slightly (CLOCK_THREAD_CPUTIME_ID counts kernel-
+	 * mode setup around the ioctl too) but the under-count was 100 %
+	 * before this fix; over-counting by <1 % per ioctl is the
+	 * tractable compromise.
+	 */
+	{
+		long long cputime_pre = os_thread_cputime_ns();
+
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+
+		{
+			long long cputime_post = os_thread_cputime_ns();
+			long long delta = cputime_post - cputime_pre;
+
+			if (delta > 0)
+				account_user_time(current, (u64)delta);
+		}
+	}
 
 	KVMV2_TRACE(KVMV2_OP_POST_KVM_RUN, regs, run, vcpu);
 
