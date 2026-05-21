@@ -1,9 +1,72 @@
 # UML Redesign — Status Tracker
 
-Last updated: 2026-05-21 (**sprint-execution session — fork-server
-Phase 1c daemon + Memo 4 integration gate + Phase 2 identity +
-Phase 3 pool-bench + #181 ELF64 + LTP curation operator-ready +
-Series 7 squash plan + 24h soak relaunched**). **Operator footgun
+Last updated: 2026-05-21 evening (**hardening pass — measured
+evidence over claimed completion**).  Earlier in this session I
+shipped a sprint of work that included three SMP findings
+(T78/T79/T80) initially treated as "workaround + filed."  User
+pushed back: that's not completion.  This update reflects the
+real validated state.
+
+Validated with measured evidence on kernel HEAD `493e53bceab2`:
+
+- **SMP-T78** (release migrate_disable around handle_syscall):
+  FIXED at `6880b5b5444f`.  cpython-parity 21/21 PARITY,
+  mt-mmap-stress N=8 × 10/10 PASS, substrate gate matches the
+  seccomp baseline 25/3/3, threaded-fork-malloc 4×100 forks all
+  PASS (0 fails 0 aborts), bench-py ratio 0.216 (4.62× faster
+  than seccomp; exceeds the published 4.00× baseline), bench-
+  micro getpid 97 cyc kvm-v2 vs 65680 cyc seccomp (677×, within
+  noise of the published 89-105 cyc range).
+- **SMP-T79** (kvm_v2_snapshot_pick_vcpu race): FIXED at
+  `0d5ad2ef778d`.  Removed the smp_processor_id() fallback in
+  the picker; added the explicit-vCPU
+  kvm_v2_snapshot_capture_regs_only_for_vcpu variant.  KUnit
+  test fixture no longer needs the CPU-0 pin workaround.
+  Verified pass=4 fail=0 under both ncpus=1 and ncpus=4.
+- **SMP-T80** (ITIMER_VIRTUAL accounting): GATED at
+  `ad61b02efd2f` behind `CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL`
+  (default n).  With default-off: no perf regression (bench-py
+  0.216 = 4.62×), but ITIMER_VIRTUAL doesn't deliver SIGVTALRM.
+  With opt-in =y: ITIMER_VIRTUAL fires; ~25 % bench-py
+  regression (0.332 = 3.01×).  Operators choose.
+- **pool-bench gate 2 false-PASS**: FIXED at `493e53bceab2`.
+  Gate now requires ≥ 50 % of attempted forks to be alive at
+  RSS-sample time; otherwise reports "gate cannot measure" FAIL
+  instead of silent PASS at master-only RSS.
+
+Original sprint deliverables (validated where applicable):
+
+(1) `umlctl pool serve` daemon (~620 LoC Rust + selftest,
+    `5576cdf21084` + `cda39d83ab29`).  98+ cargo tests pass.
+(2) Memo 04 integration bench (`7ab1fa81c35a`) verified at
+    N=1/50/100/500/4096.  KUnit kvm_v2_record 8/8.
+(3) LTP curation operator-ready (`c1cd3a073a2b`).
+(4) Series 7 squash audit plan (`52985fb22e77`, 19 patches).
+(5) #181 ELF64-core export (`ee244842a5da`).
+(6) Memo 09 Phase 2 kernel identity apply (`ec6ddd437062`):
+    KUnit 13/13.  End-to-end "pool member with working network"
+    needs Phase 2.2 (SCM_RIGHTS tap-fd handoff) — kernel code
+    correct, daemon-side fd handoff is the remaining gap.
+(7) Memo 09 Phase 4 syzkaller shim (`f037f5a05633` ..
+    `f92ff923bfb1`): ships with `umlctl exec` returning a clean
+    ok=false envelope when the in-guest mconsole socket is
+    absent; pool-exec-smoke selftest covers both cases.
+    Operators wanting the full exec path build with mconsole
+    plumbed per pool member (deferred).
+
+24h soak status: relaunched on `493e53bceab2` (kernel
+`uml-smp-t41fix`, T80 CONFIG=n).  As of this writing 60+ iters
+PASS across memcheck / iocheck / stress-ng; cpython-soak first
+batch in flight.  Earlier this session three soak attempts
+stopped early due to operator-session ending and template
+errors; the current relaunch is the first on the fully-validated
+kernel.
+
+Companion hardening plan: `06-sequencing/post-2026-05-21-
+hardening-plan.md` — the grading rubric this update was written
+against.
+
+ **Operator footgun
 warning:** `make ARCH=um O=$BUILD -j$(nproc)` against a fresh
 Kconfig surface (new `CONFIG_UM_TEMPLATE_PAUSE*` symbols introduced
 by Phase 2a/2 commits) will run `oldconfig` interactively.  When
