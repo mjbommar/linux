@@ -20,6 +20,14 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
 # 26-snapshot-v2-port.md for the design memo + Phase sub-sequencing.
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += snapshot.o
 
+# Snapshot-to-disk ELF64-core export (#181).
+# Writes an in-memory kvm_v2_snapshot to a caller-supplied file fd as
+# an ET_CORE-shaped ELF that gdb / readelf / crash(8) can parse. See
+# Documentation/virt/uml/snapshot-elf-format.rst for the on-disk
+# layout and Documentation/virt/uml/redesign/08-future-phases/
+# 02-snapshot-to-disk.md for the design rationale.
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += snapshot_elf.o
+
 # Record/replay primitives (Time-machine #169 Phase 1).
 # Port of arch/um/backend/kvm-v1-archive/record.c onto v2's vCPU-pool
 # + LSTAR-gadget + signal-queue topology. Phase 1 lands the state

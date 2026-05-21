@@ -86,6 +86,7 @@ mod preflight;
 mod registry;
 mod run;
 mod schema;
+mod snapshot;
 mod supervise;
 mod tapfd;
 mod transparency;
@@ -202,6 +203,23 @@ enum Cmd {
     /// Fork-server pool integration (Memo 09).
     #[command(subcommand)]
     Pool(PoolCmd),
+    /// Snapshot of a running UML guest's KVM-v2 state (#181).
+    ///
+    /// Today: `export` triggers an ELF64-core dump via debugfs and
+    /// writes it to a host path the operator nominates. Future verbs
+    /// will cover the lazy-restore tier (memo 02-snapshot-to-disk.md
+    /// Phase 4) once that lands.
+    #[command(subcommand)]
+    Snapshot(SnapshotCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum SnapshotCmd {
+    /// Capture + write an ELF64-core file for a running UML guest.
+    /// The file is a gdb / readelf / crash(8) loadable artifact; the
+    /// on-disk format is documented at
+    /// Documentation/virt/uml/snapshot-elf-format.rst.
+    Export(snapshot::ExportArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -780,6 +798,9 @@ fn run() -> Result<()> {
             PoolCmd::Spawn(args) => pool::cmd_spawn(args, &paths, cli.quiet),
             PoolCmd::List(args) => pool::cmd_list(args, &paths, cli.quiet),
             PoolCmd::Destroy(args) => pool::cmd_destroy(args, &paths, cli.quiet),
+        },
+        Cmd::Snapshot(sub) => match sub {
+            SnapshotCmd::Export(args) => snapshot::cmd_export(&paths, args, cli.quiet),
         },
     }
 }
