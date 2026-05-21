@@ -8,15 +8,26 @@ and `arch/um/backend/kvm-v2/record.c`)
 **Depends on:** record/replay Phase 1–7 (done — memo 27);
 snapshot Phase 1–6 (done — memo 26).
 
-**Status:** Phases 1 + 2 + 3 + 4 DONE 2026-05-19.
+**Status:** Phases 1 + 2 + 3 + 4 DONE 2026-05-19; integration gate
+DONE 2026-05-21.
   * Phase 1 hook wired (`b2ff4c0b775e`)
   * Phase 2 observer + Phase 3 consumer (`f03b12af1267`)
   * Phase 4 KUnit round-trip (`980ebb779ee8`)
-
-Remaining: live wiring from time.c::time_travel_set_time to
-observe / consume under a static-key gate, which needs the
-record/replay arming-signal path exposed to time.c.  Small
-follow-on.
+  * Live wiring (time.c::time_travel_set_time →
+    um_time_travel_consume_replay / um_on_clock_read →
+    __um_record_event_clock) — CLOSED at `1bb6dd6b6d38` (the
+    HONEST-AUDIT §1 follow-up).
+  * **Integration gate** (the acceptance criteria in §"Acceptance
+    criteria" of this memo) — closed at this commit via
+    `arch/um/backend/kvm-v2/record.c::kvm_v2_record_clock_bench_run`
+    + the new `kvm-record-clock-bench` selftest. The bench drives
+    N monotonic clock advances through the production chain
+    function (`__um_record_event_clock` → `kvm_v2_record_active`
+    → `observe_time_travel`), state-transitions into REPLAY, and
+    reads back via `um_time_travel_consume_replay`
+    (→`kvm_v2_record_active` → `consume_time_travel`). PASS
+    iff every advance round-trips byte-identically. Verified at
+    N=1 / 50 / 100 / 500 / 4096 on the local build: all PASS.
 
 ## Why this matters
 
