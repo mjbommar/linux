@@ -136,10 +136,22 @@ static void test_kvm_v2_snapshot_basic(struct kunit *test)
 	struct kvm_v2_snapshot *snap;
 	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
 	struct kvm_regs scratch;
+	struct cpumask saved_mask;
 	int rc;
 
 	KUNIT_ASSERT_NOT_NULL_MSG(test, vcpu,
 				  "suite_init fixture did not populate kvm_v2_test_vcpu");
+
+	/*
+	 * SMP-T79 (state-audit/28): kvm_v2_snapshot_pick_vcpu falls back
+	 * to vcpus[smp_processor_id()] when no vCPU has last_task ==
+	 * current.  Under ncpus > 1, the KUnit kthread may run on a CPU
+	 * other than 0, picking a vCPU that's NOT vcpus[0] (the one
+	 * suite_init primed and that this test's KVM_SET_REGS targets).
+	 * Pin to CPU 0 for the test body so the picker lands on vcpus[0].
+	 */
+	cpumask_copy(&saved_mask, &current->cpus_mask);
+	set_cpus_allowed_ptr(current, cpumask_of(0));
 
 	snap = kvm_v2_snapshot_alloc();
 	KUNIT_ASSERT_NOT_NULL(test, snap);
@@ -169,6 +181,7 @@ static void test_kvm_v2_snapshot_basic(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, scratch.rax, snap->regs.rax);
 
 	kvm_v2_snapshot_destroy(snap);
+	set_cpus_allowed_ptr(current, &saved_mask);
 }
 
 /*
@@ -557,6 +570,7 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 	struct kvm_v2_snapshot *snap;
 	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
 	struct kvm_regs scratch;
+	struct cpumask saved_mask;
 	struct file *f;
 	void *buf;
 	size_t buf_size;
@@ -572,6 +586,14 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL_MSG(test, vcpu,
 				  "suite_init fixture did not populate kvm_v2_test_vcpu");
+
+	/*
+	 * SMP-T79 pin (state-audit/28): match the test's KVM_SET_REGS
+	 * target (vcpus[0]) by pinning the kthread to CPU 0 so the
+	 * snapshot's vCPU picker lands on the same entry.
+	 */
+	cpumask_copy(&saved_mask, &current->cpus_mask);
+	set_cpus_allowed_ptr(current, cpumask_of(0));
 
 	/*
 	 * Stamp a recognisable RAX value so the captured snapshot has a
@@ -707,6 +729,7 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 	kvfree(buf);
 	fput(f);
 	kvm_v2_snapshot_destroy(snap);
+	set_cpus_allowed_ptr(current, &saved_mask);
 }
 
 static struct kunit_case kvm_v2_snapshot_test_cases[] = {
