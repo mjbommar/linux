@@ -64,11 +64,25 @@ enum PoolCmd {
     List(pool::ListArgs),
     /// Kill a pool member + remove its record.  Default is SIGKILL;
     /// pass --graceful for SIGTERM + grace period + SIGKILL escalation.
+    /// With `--name <pool>`, routes through the daemon socket
+    /// (Memo 09 Phase 4 / spec memo 11 §3.3).
     Destroy(pool::DestroyArgs),
     /// Long-lived supervisor: boots one master in fork mode, accepts
-    /// take/list/status/destroy/shutdown RPCs on a Unix socket under
-    /// $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.  Memo 09 Phase 1c.
+    /// take/list/status/destroy/exec/shutdown RPCs on a Unix socket
+    /// under $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.  Memo 09
+    /// Phase 1c + Phase 4.
     Serve(pool_serve::ServeArgs),
+    /// Client-side `take`: sends a take RPC to a running `pool serve`
+    /// daemon and prints the `SpawnResult` it returns.  Equivalent to
+    /// driving the socket protocol from a shell; the syzkaller Go
+    /// shim shells out to this verb on every `Create()`.  Spec memo
+    /// 11 §3.3.
+    Take(pool_take_status::TakeArgs),
+    /// Client-side `status`: query the running `pool serve` daemon
+    /// for its master pid, member count, and socket path.  Useful
+    /// from operator scripts; the syzkaller shim's `Info()` calls
+    /// it.  Spec memo 11 §3.3.
+    Status(pool_take_status::StatusArgs),
 }
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -78,6 +92,7 @@ mod console_split;
 mod deploy;
 mod dmesg_parse;
 mod events;
+mod exec;
 mod gate;
 mod gate_loop;
 mod history;
@@ -86,7 +101,10 @@ mod metrics;
 mod mission;
 mod paths;
 mod pool;
+mod pool_client;
 mod pool_serve;
+mod pool_take_status;
+mod port_forward;
 mod preflight;
 mod registry;
 mod run;
@@ -208,6 +226,17 @@ enum Cmd {
     /// Fork-server pool integration (Memo 09).
     #[command(subcommand)]
     Pool(PoolCmd),
+    /// Run a command inside a running pool member via the `pool serve`
+    /// daemon's exec RPC.  Returns the in-guest command's stdout,
+    /// stderr, and exit code.  With `--json`, emits NDJSON frames
+    /// shaped per spec memo 11 §3.4 for the syzkaller shim.  Memo 09
+    /// Phase 4.
+    Exec(exec::ExecArgs),
+    /// Return a host:port address the guest can dial to reach a
+    /// host-side service.  TAP-direct mode by default (the guest's
+    /// gateway IP is the host).  Memo 09 Phase 4, spec memo 11 §3.2.
+    #[command(name = "port-forward")]
+    PortForward(port_forward::PortForwardArgs),
     /// Snapshot of a running UML guest's KVM-v2 state (#181).
     ///
     /// Today: `export` triggers an ELF64-core dump via debugfs and
@@ -804,7 +833,11 @@ fn run() -> Result<()> {
             PoolCmd::List(args) => pool::cmd_list(args, &paths, cli.quiet),
             PoolCmd::Destroy(args) => pool::cmd_destroy(args, &paths, cli.quiet),
             PoolCmd::Serve(args) => pool_serve::cmd_serve(args, &paths, cli.quiet),
+            PoolCmd::Take(args) => pool_take_status::cmd_take(args, &paths, cli.quiet),
+            PoolCmd::Status(args) => pool_take_status::cmd_status(args, &paths, cli.quiet),
         },
+        Cmd::Exec(args) => exec::cmd_exec(args, &paths, cli.quiet),
+        Cmd::PortForward(args) => port_forward::cmd_port_forward(args, &paths, cli.quiet),
         Cmd::Snapshot(sub) => match sub {
             SnapshotCmd::Export(args) => snapshot::cmd_export(&paths, args, cli.quiet),
         },
