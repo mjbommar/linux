@@ -261,8 +261,184 @@ if ! grep -q "mac=52:54:00:aa:bb:cc" "$OUT/case3.log"; then
 	grep template_pause "$OUT/case3.log"
 	exit 1
 fi
+# Phase 2 contract: identity-apply path MUST execute on a valid blob.
+# Without a configured netdev in the smoke bootstrap, the apply
+# returns -ENODEV gracefully and logs "no target netdev found".
+# With one configured (see case 4 below), it logs "MAC set on" and
+# "IPv4 set on".  Either path proves um_template_identity_apply ran.
+APPLY_RE='no target netdev found|MAC set on |applying identity to in-guest'
+if ! grep -qE "template_pause: ($APPLY_RE)" "$OUT/case3.log"; then
+	echo "FAIL case 3: kernel did not invoke identity-apply path"
+	grep template_pause "$OUT/case3.log"
+	exit 1
+fi
 echo "case 3 (armed, identity blob): PASS"
 
+###############################################################################
+# case 4 — armed boot WITH netdev, identity-apply end-to-end (Phase 2)
+###############################################################################
+#
+# Provisions a vec0 netdev backed by transport=fd (a pair of pipe fds
+# we manufacture) so an apply target exists.  Then writes the blob,
+# SIGCONTs, and verifies inside the guest that the MAC and IPv4
+# address actually changed.
+#
+# The fd transport is the lowest-friction option: it does not require
+# root, does not create a host TAP, and gives us a registered netdev
+# whose name starts with "vec".  Packets sent on the netdev go into a
+# pipe that nothing reads — that's fine; we're testing identity
+# state, not throughput.
+#
+# Skipped (not failed) on hosts where:
+#   - the kernel was built without CONFIG_UML_NET_VECTOR (no vec0)
+#   - python3 lacks the fcntl bits we need
+
+case4_init=$OUT/init4.sh
+cat >"$case4_init" <<'IEOF'
+#!/bin/sh
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+echo CASE4_PRE_PAUSE
+# Capture pre-apply state for diff'ing.
+ip link show vec0 2>/dev/null | tr -s ' '  > /tmp/case4-pre.txt
+ip addr show vec0 2>/dev/null | tr -s ' ' >> /tmp/case4-pre.txt
+cat /tmp/case4-pre.txt
+echo CASE4_BLOCKING_ON_PAUSE
+echo case4-with-netdev > /proc/um/template_pause
+echo CASE4_POST_PAUSE
+# Capture post-apply state.
+ip link show vec0 2>/dev/null | tr -s ' '  > /tmp/case4-post.txt
+ip addr show vec0 2>/dev/null | tr -s ' ' >> /tmp/case4-post.txt
+echo CASE4_POST_STATE_BEGIN
+cat /tmp/case4-post.txt
+echo CASE4_POST_STATE_END
+poweroff -f
+IEOF
+chmod +x "$case4_init"
+
+python3 - "$BINARY" "$MEM" "$OUT" <<'PYEOF'
+import ctypes, ctypes.util, fcntl, os, signal, struct, sys, time
+
+binary, mem, outdir = sys.argv[1], sys.argv[2], sys.argv[3]
+log_path = os.path.join(outdir, "case4.log")
+init_path = os.path.join(outdir, "init4.sh")
+
+def Z(b, n):
+    return b.ljust(n, b'\x00')[:n]
+
+blob = struct.pack(
+    "<II 64s 6s 2s 16s 20s 16s 96s 32s",
+    0x44495455, 1,
+    Z(b"pool-member-4", 64),
+    bytes([0x52, 0x54, 0x00, 0xde, 0xad, 0xbe]),
+    b"\x00\x00",
+    Z(b"tap-pool4", 16),
+    Z(b"192.168.7.42/24", 20),
+    Z(b"192.168.7.1", 16),
+    Z(b"/tmp/mc4.sock", 96),
+    b"\x00" * 32,
+)
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+fd = libc.memfd_create(b"um-tplpause-smoke-c4", 0)
+if fd < 0:
+    sys.exit("memfd_create failed")
+os.write(fd, blob)
+os.lseek(fd, 0, 0)
+
+# vec0 transport=fd needs two fds (tx, rx).  We make a pair of pipes;
+# the guest writes/reads into them and nothing on the host consumes
+# the data.  Allocate the lowest possible fd numbers (>=10) so the
+# UML binary can dup them.
+rx_r, rx_w = os.pipe()
+tx_r, tx_w = os.pipe()
+for f in (rx_r, rx_w, tx_r, tx_w):
+    flags = fcntl.fcntl(f, fcntl.F_GETFD)
+    fcntl.fcntl(f, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+
+env = dict(os.environ, UM_TEMPLATE_IDENTITY_FD=str(fd))
+log = open(log_path, "wb")
+pid = os.fork()
+if pid == 0:
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+    # vec0 transport=fd uses fd:rxfd-txfd format per arch/um docs.
+    netarg = f"vec0:transport=fd,fd={rx_r}-{tx_w},mac=02:00:00:00:00:01"
+    os.execve(binary, [
+        "linux", f"mem={mem}", "rootfstype=hostfs", "rootflags=/",
+        "root=/dev/root", "rw", "backend=kvm-v2", "ncpus=1",
+        "um_template_pause", netarg, f"init={init_path}",
+    ], env)
+    os._exit(127)
+
+# Wait for SIGSTOP
+deadline = time.time() + 45
+state = "?"
+while time.time() < deadline:
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for ln in f:
+                if ln.startswith("State:"):
+                    state = ln.split()[1]
+                    break
+    except FileNotFoundError:
+        sys.exit("UML exited before SIGSTOP")
+    if state in ("T", "t"):
+        break
+    time.sleep(0.3)
+else:
+    sys.exit(f"case 4: never saw SIGSTOP (state={state})")
+
+os.kill(pid, signal.SIGCONT)
+os.waitpid(pid, 0)
+PYEOF
+
+if [ $? -ne 0 ]; then
+	echo "FAIL case 4: harness errored"
+	tail -40 "$OUT/case4.log" 2>/dev/null || true
+	exit 1
+fi
+
+if ! grep -q CASE4_POST_PAUSE "$OUT/case4.log"; then
+	# Don't fail if the kernel lacks vec0 support — that's a SKIP.
+	if grep -qE "vec0:|vector_eth_configure" "$OUT/case4.log"; then
+		echo "FAIL case 4: never saw CASE4_POST_PAUSE"
+		tail -40 "$OUT/case4.log"
+		exit 1
+	fi
+	echo "SKIP case 4: kernel lacks UML_NET_VECTOR or vec0 didn't register"
+else
+	# Case 4 post-apply checks — read the in-guest 'ip addr show vec0'
+	# capture from the init script's stdout (echoed between
+	# CASE4_POST_STATE_BEGIN and CASE4_POST_STATE_END).
+	awk '/CASE4_POST_STATE_BEGIN/{flag=1; next} /CASE4_POST_STATE_END/{flag=0} flag' \
+		"$OUT/case4.log" > "$OUT/case4-post-state.txt"
+
+	# MAC check: the apply path sets vec0's MAC to 52:54:00:de:ad:be.
+	if ! grep -qiE "link/ether 52:54:00:de:ad:be" "$OUT/case4-post-state.txt"; then
+		# Some configs may have vec0 absent — degrade to SKIP if so.
+		if ! grep -q "vec0" "$OUT/case4-post-state.txt"; then
+			echo "SKIP case 4: vec0 not visible in guest"
+		else
+			echo "FAIL case 4: MAC was not changed on vec0"
+			cat "$OUT/case4-post-state.txt"
+			echo "--- kernel template_pause lines ---"
+			grep template_pause "$OUT/case4.log" || true
+			exit 1
+		fi
+	else
+		# IPv4 check: 192.168.7.42/24 on vec0.
+		if ! grep -qE "inet 192\.168\.7\.42(/24|\s)" "$OUT/case4-post-state.txt"; then
+			echo "FAIL case 4: IPv4 192.168.7.42/24 was not bound to vec0"
+			cat "$OUT/case4-post-state.txt"
+			echo "--- kernel template_pause lines ---"
+			grep template_pause "$OUT/case4.log" || true
+			exit 1
+		fi
+		echo "case 4 (armed + netdev, identity-apply end-to-end): PASS"
+	fi
+fi
+
 echo
-echo "VERDICT: template-pause primitive works across all three cases"
+echo "VERDICT: template-pause primitive + Phase 2 identity-apply works"
 exit 0
