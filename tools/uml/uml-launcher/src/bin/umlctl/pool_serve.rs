@@ -380,9 +380,20 @@ fn pid_runnable(pid: i32) -> bool {
 /// the kernel via fork-on-resume — the master keeps sending SIGSTOP
 /// to itself, and a parent waitpid only collects ONE stop-notification
 /// per iteration.  /proc shows the cumulative state.
+///
+/// Poll cadence is tuned to Memo 09 Phase 3's `take.p50 ≤ 5 ms` gate:
+/// the fast path (master re-pauses in <2 ms in steady state) needs a
+/// sub-ms quantum or the gate's measured latency tail is dominated by
+/// sleep, not by kernel work.  Adaptive backoff starts at 250 µs (fast
+/// path; ~4 polls cover the typical kernel fork + identity-apply +
+/// SIGSTOP window), then doubles every 8 iterations to 1 ms, 4 ms, and
+/// finally 16 ms.  The slow path (cold-boot, pool replenish) reaches
+/// the 16 ms cap after ~32 iterations (~75 ms of busy-poll equivalent),
+/// matching the prior 10 ms-throughout cost.
 fn wait_for_stop(pid: i32, deadline: Duration) -> Result<()> {
     let end = Instant::now() + deadline;
     let stat_path = format!("/proc/{}/stat", pid);
+    let mut iter: u32 = 0;
     while Instant::now() < end {
         match std::fs::read_to_string(&stat_path) {
             Ok(s) => {
@@ -403,7 +414,14 @@ fn wait_for_stop(pid: i32, deadline: Duration) -> Result<()> {
             }
             Err(e) => bail!("read {}: {}", stat_path, e),
         }
-        std::thread::sleep(Duration::from_millis(10));
+        let sleep_us: u64 = match iter / 8 {
+            0 => 250,           // 0..7  → 250 µs (sub-ms detection)
+            1 => 1_000,         // 8..15 → 1 ms
+            2 => 4_000,         // 16..23 → 4 ms
+            _ => 16_000,        // 24..  → 16 ms cap
+        };
+        std::thread::sleep(Duration::from_micros(sleep_us));
+        iter = iter.saturating_add(1);
     }
     bail!("timeout waiting for pid {} to re-SIGSTOP", pid)
 }
