@@ -992,6 +992,8 @@ void  kvm_v2_snapshot_destroy(struct kvm_v2_snapshot *snap);
 void  kvm_v2_snapshot_free(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_capture(struct kvm_v2_snapshot *snap);
 int   kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap);
+int   kvm_v2_snapshot_capture_regs_only_for_vcpu(struct kvm_v2_snapshot *snap,
+						 struct kvm_v2_vcpu *vcpu);
 int   kvm_v2_snapshot_restore_full(struct kvm_v2_snapshot *snap);
 
 /*

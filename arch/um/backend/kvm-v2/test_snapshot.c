@@ -136,27 +136,25 @@ static void test_kvm_v2_snapshot_basic(struct kunit *test)
 	struct kvm_v2_snapshot *snap;
 	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
 	struct kvm_regs scratch;
-	struct cpumask saved_mask;
 	int rc;
 
 	KUNIT_ASSERT_NOT_NULL_MSG(test, vcpu,
 				  "suite_init fixture did not populate kvm_v2_test_vcpu");
 
-	/*
-	 * SMP-T79 (state-audit/28): kvm_v2_snapshot_pick_vcpu falls back
-	 * to vcpus[smp_processor_id()] when no vCPU has last_task ==
-	 * current.  Under ncpus > 1, the KUnit kthread may run on a CPU
-	 * other than 0, picking a vCPU that's NOT vcpus[0] (the one
-	 * suite_init primed and that this test's KVM_SET_REGS targets).
-	 * Pin to CPU 0 for the test body so the picker lands on vcpus[0].
-	 */
-	cpumask_copy(&saved_mask, &current->cpus_mask);
-	set_cpus_allowed_ptr(current, cpumask_of(0));
-
 	snap = kvm_v2_snapshot_alloc();
 	KUNIT_ASSERT_NOT_NULL(test, snap);
 
-	rc = kvm_v2_snapshot_capture_regs_only(snap);
+	/*
+	 * SMP-T79 (state-audit/28): use the explicit-vCPU capture
+	 * variant so we exercise the same code path KUnit and
+	 * production callers will share.  Pre-T79 this test used
+	 * the implicit capture_regs_only() and relied on
+	 * pick_vcpu's smp_processor_id() fallback — flaky under
+	 * ncpus > 1 because the kthread could land on a non-0 CPU
+	 * and pick a vCPU whose KVM state did not reflect
+	 * suite_init's prime of vcpus[0].
+	 */
+	rc = kvm_v2_snapshot_capture_regs_only_for_vcpu(snap, vcpu);
 	KUNIT_ASSERT_EQ(test, rc, 0);
 
 	/*
@@ -172,7 +170,13 @@ static void test_kvm_v2_snapshot_basic(struct kunit *test)
 			      (unsigned long)&scratch);
 	KUNIT_ASSERT_EQ(test, rc, 0);
 
-	rc = kvm_v2_snapshot_restore_full(snap);
+	/*
+	 * SMP-T79 (same rationale as the capture above): use the
+	 * explicit-vCPU restore variant.  restore_full(snap) would
+	 * defer to pick_vcpu and return -ENODEV under KUnit
+	 * (kthread has no last_task match in the pool).
+	 */
+	rc = kvm_v2_snapshot_restore_full_vcpu(snap, vcpu);
 	KUNIT_ASSERT_EQ(test, rc, 0);
 
 	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_REGS,
@@ -181,7 +185,6 @@ static void test_kvm_v2_snapshot_basic(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, scratch.rax, snap->regs.rax);
 
 	kvm_v2_snapshot_destroy(snap);
-	set_cpus_allowed_ptr(current, &saved_mask);
 }
 
 /*
@@ -570,7 +573,6 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 	struct kvm_v2_snapshot *snap;
 	struct kvm_v2_vcpu *vcpu = kvm_v2_test_vcpu;
 	struct kvm_regs scratch;
-	struct cpumask saved_mask;
 	struct file *f;
 	void *buf;
 	size_t buf_size;
@@ -588,14 +590,6 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 				  "suite_init fixture did not populate kvm_v2_test_vcpu");
 
 	/*
-	 * SMP-T79 pin (state-audit/28): match the test's KVM_SET_REGS
-	 * target (vcpus[0]) by pinning the kthread to CPU 0 so the
-	 * snapshot's vCPU picker lands on the same entry.
-	 */
-	cpumask_copy(&saved_mask, &current->cpus_mask);
-	set_cpus_allowed_ptr(current, cpumask_of(0));
-
-	/*
 	 * Stamp a recognisable RAX value so the captured snapshot has a
 	 * known marker we can verify after the ELF round-trip.
 	 */
@@ -610,7 +604,7 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 	snap = kvm_v2_snapshot_alloc();
 	KUNIT_ASSERT_NOT_NULL(test, snap);
 
-	rc = kvm_v2_snapshot_capture_regs_only(snap);
+	rc = kvm_v2_snapshot_capture_regs_only_for_vcpu(snap, vcpu);
 	KUNIT_ASSERT_EQ(test, rc, 0);
 	KUNIT_ASSERT_EQ_MSG(test, snap->regs.rax, 0x18112026ULL,
 			    "captured RAX (%#llx) does not match the marker (%#llx)",
@@ -729,7 +723,6 @@ static void test_kvm_v2_snapshot_elf_basic(struct kunit *test)
 	kvfree(buf);
 	fput(f);
 	kvm_v2_snapshot_destroy(snap);
-	set_cpus_allowed_ptr(current, &saved_mask);
 }
 
 static struct kunit_case kvm_v2_snapshot_test_cases[] = {

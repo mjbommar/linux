@@ -96,17 +96,20 @@ static const u32 kvm_v2_snapshot_msr_indices[KVM_V2_SNAPSHOT_MSR_COUNT] = {
  *
  * Phase 1 invariant (memo 26-snapshot §4.3): the vCPU whose
  * last_task == current is the one whose KVM-owned state holds
- * current's most recent dispatch result. If no entry matches yet
- * (fresh task, never dispatched), fall back to the vCPU pinned to
- * the current host CPU index — that's where the next dispatch would
- * land, and an "empty" capture there is at least well-defined.
+ * current's most recent dispatch result.
  *
  * Caller responsibility: hold preempt_disable() across the lookup
  * and the subsequent ioctl calls so the per-CPU vCPU mapping
  * doesn't shift mid-flight.
  *
- * Returns NULL if the pool isn't initialised yet (early-boot
- * harness builds where init_backend() has not run).
+ * Returns NULL if no vCPU has last_task == current (e.g. a fresh
+ * task that has never dispatched, or a KUnit kthread).  Callers
+ * with that situation must pass an explicit vCPU via the _for_vcpu
+ * variant — see SMP-T79 (state-audit/28).  The pre-T79 fallback
+ * to vcpus[smp_processor_id()] was racy under ncpus>1: the
+ * smp_processor_id() could pick a vCPU whose KVM state did not
+ * reflect the test's KVM_SET_REGS target, producing the
+ * "captured RAX is 0" symptom the soak surfaced.
  */
 static struct kvm_v2_vcpu *kvm_v2_snapshot_pick_vcpu(void)
 {
@@ -118,7 +121,7 @@ static struct kvm_v2_vcpu *kvm_v2_snapshot_pick_vcpu(void)
 		if (v && v->last_task == current)
 			return v;
 	}
-	return kvm_v2_vcpu_get(smp_processor_id());
+	return NULL;
 }
 
 /*
@@ -417,6 +420,46 @@ int kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap)
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_snapshot_capture_regs_only);
+
+/**
+ * kvm_v2_snapshot_capture_regs_only_for_vcpu - capture against an
+ *                                              explicit vCPU.
+ * @snap: caller-allocated snapshot.
+ * @vcpu: explicit pool entry to capture from.  Caller asserts the
+ *        KVM state on @vcpu reflects what they expect to capture
+ *        (e.g. the KUnit suite_init primed vcpus[0]; calls here
+ *        pass that vcpus[0] directly rather than relying on
+ *        pick_vcpu's last_task heuristic).
+ *
+ * SMP-T79 (state-audit/28): added so KUnit tests don't need to
+ * pin themselves to CPU 0 just to make pick_vcpu's
+ * smp_processor_id() fallback land on vcpus[0].  Removes a
+ * production-vs-test divergence — production goes through
+ * kvm_v2_snapshot_capture_regs_only (last_task match) and
+ * gets -ENODEV cleanly if there's no match.
+ *
+ * Returns 0 on success; -EINVAL if @snap or @vcpu is NULL or
+ * @vcpu->vcpu_fd < 0; -errno on the first ioctl failure.
+ */
+int kvm_v2_snapshot_capture_regs_only_for_vcpu(struct kvm_v2_snapshot *snap,
+					       struct kvm_v2_vcpu *vcpu)
+{
+	int rc;
+
+	if (!snap || !vcpu || vcpu->vcpu_fd < 0)
+		return -EINVAL;
+
+	memset(snap, 0, sizeof(*snap));
+
+	preempt_disable();
+	rc = kvm_v2_snapshot_capture_vcpu_state(snap, vcpu);
+	if (rc == 0)
+		pr_info("um: kvm-v2 snapshot: captured regs+sregs+xsave+xcrs+events+%u msrs (regs-only, explicit vcpu=%d)\n",
+			KVM_V2_SNAPSHOT_MSR_COUNT, vcpu->cpu);
+	preempt_enable();
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_snapshot_capture_regs_only_for_vcpu);
 
 /*
  * kvm_v2_snapshot_capture_memslots - copy each memslot's bytes into
