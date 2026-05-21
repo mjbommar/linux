@@ -715,6 +715,14 @@ static int __init mount_proc(void)
  */
 static char *notify_socket = NULL;
 
+/*
+ * SMP-T80 follow-up / Phase 4 — track the current mconsole socket
+ * fd so mconsole_reinit_for_pool_member can pass the right dev_id
+ * to um_free_irq (which matches by (irq, dev_id)).  Pre-T80 this
+ * was a local variable inside mconsole_init.
+ */
+static long mconsole_current_sock = -1;
+
 static int __init mconsole_init(void)
 {
 	/* long to avoid size mismatch warnings from gcc */
@@ -738,6 +746,7 @@ static int __init mconsole_init(void)
 
 	register_reboot_notifier(&reboot_notifier);
 
+	mconsole_current_sock = sock;
 	err = um_request_irq(MCONSOLE_IRQ, sock, IRQ_READ, mconsole_interrupt,
 			     IRQF_SHARED, "mconsole", (void *)sock);
 	if (err < 0) {
@@ -791,6 +800,7 @@ __initcall(mconsole_init);
  */
 int mconsole_reinit_for_pool_member(const char *path)
 {
+	long old_sock = mconsole_current_sock;
 	long new_sock;
 	int err;
 	size_t path_len;
@@ -803,13 +813,24 @@ int mconsole_reinit_for_pool_member(const char *path)
 
 	/*
 	 * Detach the old IRQ + fd FIRST so um_request_irq below sees a
-	 * clean MCONSOLE_IRQ slot.  The master's binding survives — we
-	 * forked from it but never share fd-table state because the
-	 * master uses a separate kernel-side socket fd (not the inherited
-	 * one) for its own dispatch.  Closing here only releases the
-	 * child's CoW'd reference.
+	 * clean MCONSOLE_IRQ slot.
+	 *
+	 * Note on dev_id: um_free_irq matches by (irq, dev_id), and
+	 * mconsole_init registered with dev_id = (void *)sock.  Earlier
+	 * iterations passed NULL here, which silently failed to release
+	 * the irqaction — the new socket's IRQ then went to the wrong
+	 * handler and umlctl exec never worked.  Pass the recorded sock
+	 * via mconsole_current_sock.
+	 *
+	 * The inherited fd is CoW from the master.  Closing it in the
+	 * child releases the child's per-fd reference; the master's fd
+	 * is independent and survives.
 	 */
-	um_free_irq(MCONSOLE_IRQ, NULL);
+	if (old_sock >= 0) {
+		um_free_irq(MCONSOLE_IRQ, (void *)old_sock);
+		os_close_file(old_sock);
+		mconsole_current_sock = -1;
+	}
 
 	new_sock = os_create_unix_socket(path, path_len + 1, 1);
 	if (new_sock < 0) {
@@ -831,9 +852,10 @@ int mconsole_reinit_for_pool_member(const char *path)
 		return err;
 	}
 
+	mconsole_current_sock = new_sock;
 	strscpy(mconsole_socket_name, path, 256);	/* defined in mconsole_user.c */
-	pr_info("mconsole: re-bound on %s for pool member\n",
-		mconsole_socket_name);
+	pr_info("mconsole: re-bound on %s for pool member (sock=%ld)\n",
+		mconsole_socket_name, new_sock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mconsole_reinit_for_pool_member);
