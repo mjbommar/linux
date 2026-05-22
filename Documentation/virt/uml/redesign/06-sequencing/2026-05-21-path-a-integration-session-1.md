@@ -67,3 +67,45 @@ Path A: PASS.  Path C: Outcome 2 confirmed.  Path A integration:
 
 Days 2-7 are subsequent-session work.  The state of the codebase is
 honest and self-consistent: selftests encode the verifiable truth.
+
+## Day-2 amendment (2026-05-22)
+
+Continued the same session into day-2 work.  Additional commits:
+
+```
+757888e5680c  AFL preconditions in assert_fork_safety (task #18)
+0d834f5d7fa5  stub_data is fully load-bearing (experiment)
+07bc5fbb15eb  early-fork + pool_member experiment
+d7e28a4f5d00  state-audit/32 — v1 ceiling is mid-fn SIGSEGV, not ret
+a1d6d0020ccc  block host signals BEFORE SIGSTOP (hardening)
+c2829c412367  um_skas_disown_inherited() helper (infrastructure)
+4d8b6bc65d3d  split identity blob parse from apply
+efdbe59e9d66  state-audit/32 — per-member physmem isolation needed
+```
+
+22 commits total.  Architectural finding nailed down:
+
+  **UML's physmem_fd is MAP_SHARED across all forked UML kernels.**
+  Per-member stub isolation requires per-member physmem_fd, a
+  refactor of init_new_context + arch_um_load_physmem.  This is the
+  actual blocker for sustained N-member dispatch; it's a separate
+  workstream from Path A integration.
+
+What's verifiably done (selftest truth):
+  - template-pause-pivot-smoke: 20/20 PIVOT_OK
+  - template-pause-pool-member-smoke: init.sh → MEMBER_DONE PASS,
+    with identity-parsed marker confirmed
+  - template-pause-pool-sustained-smoke: iter-1 PASS, iter-2+
+    XFAIL (documented blocker)
+
+What's needed for full 1.3 build-out per Memo 09 §2:
+  - Per-pool-member physmem_fd backing (separate workstream)
+  - Once that lands, um_skas_disown_inherited() +
+    um_skas_respawn_all_stubs() in child_entry_pool_member can be
+    re-enabled; sustained dispatch should PASS.
+  - Selftest sustained-smoke becomes the acceptance gate.
+
+What's blocked downstream (not session-shippable):
+  - Pool-bench under N members (Memo 09 Phase 3 scaffold ready)
+  - syzkaller vm/uml shim (task #4)
+  - Series 7 send (task #7; also blocked on 24h soak completion)
