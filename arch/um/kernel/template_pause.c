@@ -406,15 +406,15 @@ child_entry_pool_member(void)
 	 * Step A of the pool-completion roadmap (per-member
 	 * physmem isolation) — the replicate call site stays
 	 * unwired pending the post-swap user-mode wake-up fix.
-	 * Variant 19 (temporary scheduler/hrtimer instrumentation
-	 * in kernel/sched/core.c + kernel/time/hrtimer.c + arch/
-	 * um/os-Linux/skas/process.c) DISPOSITIVELY localized the
-	 * break: bash's sleep(1) NEVER reaches hrtimer_start_
-	 * range_ns post-replicate.  The chain is broken
-	 * upstream of UML's hrtimer wheel — somewhere in the
-	 * stub's SIGSYS handler path or earlier (bash never
-	 * traps into the kernel for nanosleep).  Stub interaction
-	 * is candidate (1) from the postmortem.
+	 * Variant 20 (stub-init + start_userspace_tramp trace)
+	 * localized the failure to the SECOND new stub
+	 * (start_userspace path, for /bin/sleep's forked mm).
+	 * The first new stub (start_userspace_fresh with per-mm
+	 * memfd) works.  The second new stub clone()s OK but
+	 * never completes execve → never sends first SIGSYS
+	 * back to kernel.  Hypothesis: stub_exe_fd or one of
+	 * the file descriptor flags interacts poorly with the
+	 * post-replicate VM state.
 	 */
 
 	/*
