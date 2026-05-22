@@ -211,6 +211,33 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     allocation (Option 1 of two paths I proposed) is the only
     way forward.
 
+    UPDATE 2026-05-22 (day-2 attempt 2 — early-fork +
+    pool_member): tried combining um_template_pause=early-fork
+    (which pauses BEFORE init.sh runs — mm_list is empty at
+    that ready point, no stub aliasing) with the existing
+    pool_member arm.
+
+    Result: child fires POOL_ENTER, then kernel panic.
+    child_entry_pool_member's userspace() call assumes
+    current==init.sh's task with valid user pt_regs.  In early-
+    fork context current is the late-initcall task (kernel-mode
+    only, no user regs).  Calling userspace() on a kernel-mode
+    task crashes.
+
+    Architectural lesson: the child entry function is bound to
+    LATE-fork semantics (drop into existing init.sh task).
+    Early-fork would need a DIFFERENT child entry that
+    reconstructs a clean kernel-side longjmp target and lets
+    the initcall caller continue booting normally — the child
+    would then go through standard kernel boot path, eventually
+    spawning its own fresh init.sh task with fresh mm + stub
+    via the normal start_userspace lazy path.
+
+    That's a second child-entry variant (call it
+    `child_entry_early_pool_member`) — a third arm separate from
+    pivot_test and pool_member.  Approach is sound but is a
+    new commit series.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
