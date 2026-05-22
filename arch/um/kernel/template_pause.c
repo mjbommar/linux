@@ -384,23 +384,25 @@ child_entry_pool_member(void)
 	 * Each pool member's stub now has private stub_data; no
 	 * inter-member aliasing.
 	 */
-	/*
-	 * disown_inherited + start_userspace_fresh + flush_tlb_mm wire-
-	 * up is GATED.  Investigation: clone() succeeds, stub completes
-	 * handshake, userspace() begins dispatch, init.sh's first
-	 * userspace access SIGSEGVs because the fresh stub has only
-	 * stub_code + stub_data mapped.  flush_tlb_mm marks VMAs but
-	 * um_tlb_sync only pushes PRESENT PTEs.  Lazy fault-driven
-	 * mapping IS happening but too slow to reach POST_PAUSE within
-	 * test windows.
-	 *
-	 * Real next step: bulk-push present PTEs via a dedicated helper
-	 * (or extend um_tlb_sync to be triggered with no range-mark
-	 * dependency).  State-audit/32 has full diagnostic.  Helpers
-	 * remain in tree.
-	 */
-	(void)um_skas_disown_inherited;
-	(void)start_userspace_fresh;
+	{
+		int dret = um_skas_disown_inherited();
+		struct mm_id *id = current_mm_id();
+
+		if (dret > 0 && id) {
+			(void)start_userspace_fresh(id);
+			/*
+			 * Bulk-push init.sh's existing PTEs to the new
+			 * stub.  Without this, init.sh's first userspace
+			 * access SIGSEGVs and the lazy fault-recovery
+			 * path is too slow.  um_skas_force_resync_mm
+			 * walks all VMAs, marks every present PTE
+			 * _PAGE_NEEDSYNC, then triggers um_tlb_sync
+			 * which calls mm_region_added for each page.
+			 */
+			if (current->mm)
+				(void)um_skas_force_resync_mm(current->mm);
+		}
+	}
 
 	/*
 	 * Mark this host process as a pool member so future

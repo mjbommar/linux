@@ -419,6 +419,96 @@ int um_skas_forget_all_stubs(void)
  * failure (in which case the partially-disowned state is left as-
  * is; caller should not respawn).
  */
+/*
+ * Walk every present PTE in @mm and mark it _PAGE_NEEDSYNC, then
+ * trigger um_tlb_sync to push them all to the backend.
+ *
+ * Used by template_pause's pool_member fork loop after
+ * start_userspace_fresh: the new stub has only stub_code +
+ * stub_data mapped (execveat reset its address space), but
+ * init.sh's mm already has VMAs and present PTEs from before
+ * the fork.  Without this eager push, init.sh's first userspace
+ * access SIGSEGVs and gets mapped lazily one page per syscall
+ * round-trip — too slow for any realistic workload.
+ *
+ * The walk mirrors update_pte_range in tlb.c but only sets
+ * the needsync bit (does NOT push directly).  um_tlb_sync's
+ * normal sweep then drives the push.
+ */
+static void mm_force_resync_pmd(pmd_t *pmd, unsigned long addr,
+				unsigned long end)
+{
+	pte_t *pte;
+
+	pte = pte_offset_kernel(pmd, addr);
+	do {
+		if (pte_present(*pte))
+			*pte = pte_mkneedsync(*pte);
+	} while (pte++, addr += PAGE_SIZE, addr < end);
+}
+
+static void mm_force_resync_pud(pud_t *pud, unsigned long addr,
+				unsigned long end)
+{
+	pmd_t *pmd;
+	unsigned long next;
+
+	pmd = pmd_offset(pud, addr);
+	do {
+		next = pmd_addr_end(addr, end);
+		if (!pmd_none(*pmd) && !pmd_bad(*pmd))
+			mm_force_resync_pmd(pmd, addr, next);
+	} while (pmd++, addr = next, addr < end);
+}
+
+static void mm_force_resync_p4d(p4d_t *p4d, unsigned long addr,
+				unsigned long end)
+{
+	pud_t *pud;
+	unsigned long next;
+
+	pud = pud_offset(p4d, addr);
+	do {
+		next = pud_addr_end(addr, end);
+		if (!pud_none(*pud) && !pud_bad(*pud))
+			mm_force_resync_pud(pud, addr, next);
+	} while (pud++, addr = next, addr < end);
+}
+
+int um_skas_force_resync_mm(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
+	pgd_t *pgd;
+	unsigned long addr, next, lo = ~0UL, hi = 0;
+	p4d_t *p4d;
+
+	if (!mm)
+		return -EINVAL;
+
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma) {
+		addr = vma->vm_start;
+		if (addr < lo)
+			lo = addr;
+		if (vma->vm_end > hi)
+			hi = vma->vm_end;
+		pgd = pgd_offset(mm, addr);
+		do {
+			next = pgd_addr_end(addr, vma->vm_end);
+			if (!pgd_none(*pgd) && !pgd_bad(*pgd)) {
+				p4d = p4d_offset(pgd, addr);
+				mm_force_resync_p4d(p4d, addr, next);
+			}
+		} while (pgd++, addr = next, addr < vma->vm_end);
+	}
+	mmap_read_unlock(mm);
+
+	if (lo < hi)
+		um_tlb_mark_sync(mm, lo, hi);
+	return um_tlb_sync(mm);
+}
+
 int um_skas_disown_inherited(void)
 {
 	struct mm_id **arr;

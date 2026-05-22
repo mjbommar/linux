@@ -73,6 +73,15 @@ extern int um_skas_forget_all_stubs(void);
 extern int um_skas_disown_inherited(void);
 
 /*
+ * um_skas_force_resync_mm() — mark every present PTE in @mm as
+ * needing sync, then call um_tlb_sync.  Pushes all of @mm's
+ * existing pages to the active backend's stub via
+ * mm_region_added.  Used by template_pause's pool-member fork
+ * loop after spawning a fresh stub.
+ */
+extern int um_skas_force_resync_mm(struct mm_struct *mm);
+
+/*
  * um_skas_other_mm_mid_syscall() — Memo 09 Phase 2a defensive check.
  *
  * Returns true if any mm in mm_list other than @caller has
