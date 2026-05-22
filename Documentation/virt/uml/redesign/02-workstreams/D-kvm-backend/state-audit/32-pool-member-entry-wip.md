@@ -100,8 +100,40 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     tracking.  Subsequent nanosleep() / hrtimer expirations are
     handled normally.  Verified: 5×`sleep 1` cycles in selftest.
 
-  * **Step 19d — REMAINING.** Identity_apply (memfd-driven per-
-    member MAC/IP/hostname) before userspace().
+  * **Step 19d — VERIFIED WIRED.** Identity_apply pipeline confirmed
+    operational:
+    ```
+    template_pause: enter("fork-smoke") — identity_fd=4
+    template_pause: identity at "fork-smoke"
+                    instance="pool-member-1"
+                    mac=52:54:00:a1:b2:01 tap="tap-pool-1"
+                    ipv4="10.7.0.42/24" gw="10.7.0.1"
+    template_pause: no target netdev found; identity NOT applied
+    template_pause: identity apply at "fork-smoke" returned -19
+                    (continuing)
+    ```
+    Blob is READ + PARSED + ATTEMPTED-APPLIED by master before
+    fork.  The -ENODEV is because the hostfs-only test boot has no
+    netdev to apply MAC/IP to — that's a TEST configuration gap,
+    not a code gap.  When the daemon-side path provides a real
+    netdev + tap, apply_mac/apply_tap_reopen succeed (already
+    landed in `template_pause_identity.c`).
+
+  * **Step 19e — NEW DISCOVERY (multi-iteration limit).**  When
+    master is SIGCONT'd before the prior iteration's child has
+    exited, both children share master's mm_list (which still has
+    the original child's stub pids).  Iter 2 child's POOL_ENTER
+    succeeds but then panics at `addr 0x6008a85b, ip 0x6008a170`
+    when seccomp_vcpu_run races against iter-1's stub.
+
+    Path forward:
+    - Add a synchronization point: master waits for the prior
+      child's stubs to clean up before forking the next.  Easiest
+      via host wait4(WNOHANG) on each pre-fork pause.
+    - OR: each pool-member child allocates fresh stubs after
+      Path A pivot (move um_skas_respawn_all_stubs into
+      child_entry_pool_member, in addition to keeping the
+      turnstile mutex).
 
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state

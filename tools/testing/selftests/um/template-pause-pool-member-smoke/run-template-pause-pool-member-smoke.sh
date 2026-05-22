@@ -54,6 +54,12 @@ while [ $i -lt 5 ]; do
 	i=$((i+1))
 	echo "TPPM_MEMBER_TICK $i pid=$$"
 done
+# Read back applied identity (if any) — proves master ran
+# um_template_identity_apply on this iteration's blob.
+if [ -r /proc/sys/kernel/hostname ]; then
+	HN=$(cat /proc/sys/kernel/hostname 2>/dev/null)
+	echo "TPPM_HOSTNAME=$HN"
+fi
 echo TPPM_MEMBER_DONE pid=$$
 sleep 9999
 IEOF
@@ -61,13 +67,44 @@ chmod +x "$OUT/init.sh"
 
 PYRC=0
 python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" <<'PYEOF' || PYRC=$?
-import ctypes, os, signal, sys, time
+import ctypes, ctypes.util, fcntl, os, signal, struct, sys, time
 
 kernel, init_path, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-libc = ctypes.CDLL(None)
+def Z(b, n):
+    return b.ljust(n, b'\x00')[:n]
+
+# Identity blob — supervisor stamps the pool-member identity.
+# Master reads this at fork iteration start and calls
+# um_template_identity_apply() before forking the child.
+blob = struct.pack(
+    "<II 64s 6s 2s 16s 20s 16s 96s 32s",
+    0x44495455, 1,                   # magic, version
+    Z(b"pool-member-1", 64),         # instance_name
+    bytes([0x52, 0x54, 0x00, 0xa1, 0xb2, 0x01]),
+    b"\x00\x00",
+    Z(b"tap-pool-1", 16),
+    Z(b"10.7.0.42/24", 20),
+    Z(b"10.7.0.1", 16),
+    Z(b"", 96), b"\x00" * 32,
+)
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+fd = libc.memfd_create(b"um-tplpause-pool-member-smoke", 0x0001)
+if fd < 0:
+    sys.exit(f"memfd_create: {os.strerror(ctypes.get_errno())}")
+os.ftruncate(fd, 264)
+os.lseek(fd, 0, 0)
+os.write(fd, blob)
+# Zero the child-pid write-back slot at offset 260
+os.lseek(fd, 260, 0)
+os.write(fd, b"\x00\x00\x00\x00")
+flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+fcntl.fcntl(fd, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+
 libc.prctl(36, 1, 0, 0, 0)
 
+env = dict(os.environ, UM_TEMPLATE_IDENTITY_FD=str(fd))
 log = open(log_path, "wb")
 pid = os.fork()
 if pid == 0:
@@ -79,7 +116,7 @@ if pid == 0:
         "um_template_pause=fork",
         "um_template_pause_pool_member=1",
         f"init={init_path}",
-    ], os.environ.copy())
+    ], env)
     os._exit(127)
 
 def state(p):
@@ -150,12 +187,18 @@ ticks      = content.count("TPPM_MEMBER_TICK")
 done       = content.count("TPPM_MEMBER_DONE")
 panic      = "Kernel panic" in content
 ceiling    = "um_template_pause_enter+0xf" in content
+identity_apply_ok = "identity apply" not in content or \
+                    "identity apply at" not in content or \
+                    "returned 0" in content
+identity_logged = ("identity_fd=" in content or
+                   "identity blob parsed" in content)
 
 print(f"POOL_ENTER       : {pool_enter}")
 print(f"TPPM_POST_PAUSE  : {post_pause}")
 print(f"TPPM_MEMBER_ALIVE_1: {alive_1}")
 print(f"TPPM_MEMBER_TICK : {ticks}")
 print(f"TPPM_MEMBER_DONE : {done}")
+print(f"identity_fd seen : {identity_logged}")
 print(f"Kernel panic     : {panic}")
 print(f"v1 ceiling IP    : {ceiling}")
 
