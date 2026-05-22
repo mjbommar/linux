@@ -301,6 +301,18 @@ extern int os_remap_region_shared(void *addr, int fd,
 				  unsigned long len);
 
 /*
+ * Same as os_remap_region_shared but routes the swap through an
+ * intermediate MAP_ANONYMOUS|MAP_SHARED mapping at the original VA.
+ * Theory: anonymous mapping resets host-kernel state tied to the
+ * original inode, breaking the SIGALRM-after-different-inode
+ * regression.  Caller must pre-populate @new_fd at @off with the
+ * desired content; this helper does NOT copy data into the new fd.
+ */
+extern int os_remap_region_via_anon(void *addr, int new_fd,
+				    unsigned long long off,
+				    unsigned long len);
+
+/*
  * Create a fresh anonymous memfd of @size bytes.  Returns the new
  * fd on success, -errno on failure.  Caller owns the fd.  Used by
  * per-pool-member physmem isolation as the backing for a child-

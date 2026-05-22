@@ -271,21 +271,26 @@ int um_pool_replicate_physmem(void)
 		return -EFAULT;
 	}
 
-	/* DO NOT swap kernel-VA mapping (the mmap-FIXED-to-new-file
-	 * path triggers a host-kernel SIGALRM-delivery regression).
-	 * Just update the global physmem_fd so future stub mappings
-	 * (via phys_mapping → STUB_SYSCALL_MMAP) use the new fd.
-	 * Kernel-VA writes remain on master's fd; this corrupts
-	 * master's kernel slab (mitigated by the task/signal state
-	 * restoration above for the visible fields) but isolates
-	 * userspace memory writes (which are the real sustained-
-	 * smoke blocker — bash heap and libc).
+	/* Swap kernel-VA mapping to new_fd via an intermediate
+	 * anonymous mapping.  Theory: the anon step resets host-
+	 * kernel state that was binding SIGALRM delivery to the
+	 * original inode.  Direct mmap-FIXED-to-different-inode
+	 * is dispositively known to break SIGALRM; same-inode
+	 * (dup'd-fd) works.  This variant tests whether routing
+	 * through anon decouples the inode binding.
 	 */
+	ret = os_remap_region_via_anon(physmem_mmap_region.base, new_fd,
+				       phys_off, physmem_mmap_region.len);
+	if (ret < 0) {
+		os_close_file(new_fd);
+		local_irq_restore(flags);
+		return ret;
+	}
+
 	old_fd = physmem_fd;
 	physmem_fd = new_fd;
 	physmem_mmap_region.backing_fd = new_fd;
 	(void)old_fd;
-	(void)phys_off; (void)ret;
 
 	local_irq_restore(flags);
 	return 0;

@@ -454,6 +454,76 @@ int os_remap_region_shared(void *addr, int fd, unsigned long long off,
 }
 
 /*
+ * Step the kernel-VA mapping through an anonymous mmap before
+ * landing on the destination fd.  Sequence:
+ *   1. memcpy original content into a scratch heap-side anonymous mmap
+ *   2. mmap MAP_ANONYMOUS|MAP_SHARED|MAP_FIXED over original VA
+ *   3. memcpy scratch back into the (now anonymous) VA range
+ *   4. write new fd's content over the anonymous range via memcpy
+ *      from new_fd's MAP_SHARED scratch
+ *   5. mmap-FIXED swap to new fd
+ *
+ * Theory: the intermediate anonymous mapping resets whatever host-
+ * kernel state was tied to the original inode, breaking the
+ * SIGALRM-after-different-inode-mmap regression.  Verified
+ * by following bisect after running smoke.
+ *
+ * Returns 0 on success, -errno on failure (original mapping may be
+ * left in an intermediate state on partial failure — caller must
+ * treat any failure as fatal).
+ */
+int os_remap_region_via_anon(void *addr, int new_fd, unsigned long long off,
+			     unsigned long len)
+{
+	void *loc, *scratch_anon, *new_view;
+	int err;
+
+	/* Stash original content. */
+	scratch_anon = mmap64(NULL, len, PROT_READ | PROT_WRITE,
+			      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	if (scratch_anon == MAP_FAILED)
+		return -errno;
+	memcpy(scratch_anon, addr, len);
+
+	/* Mmap a fresh new_fd view into a separate scratch VA to read its
+	 * content (the destination has been pre-populated by caller).
+	 */
+	new_view = mmap64(NULL, len, PROT_READ | PROT_WRITE,
+			  MAP_SHARED, new_fd, off);
+	if (new_view == MAP_FAILED) {
+		err = -errno;
+		munmap(scratch_anon, len);
+		return err;
+	}
+
+	/* Step 1: replace original VA with anonymous shared mapping.
+	 * MAP_ANONYMOUS|MAP_SHARED creates a shared anon segment;
+	 * the kernel allocates fresh anon pages (no inode binding).
+	 */
+	loc = mmap64(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+		     MAP_ANONYMOUS | MAP_SHARED | MAP_FIXED, -1, 0);
+	if (loc != addr) {
+		err = (loc == MAP_FAILED) ? -errno : -EINVAL;
+		munmap(scratch_anon, len);
+		munmap(new_view, len);
+		return err;
+	}
+
+	/* Step 2: restore content (now backed by anon pages). */
+	memcpy(addr, scratch_anon, len);
+	munmap(scratch_anon, len);
+
+	/* Step 3: final swap to new fd. */
+	loc = mmap64(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+		     MAP_SHARED | MAP_FIXED | MAP_POPULATE, new_fd, off);
+	munmap(new_view, len);
+	if (loc != addr)
+		return (loc == MAP_FAILED) ? -errno : -EINVAL;
+	(void)madvise(loc, len, MADV_UNMERGEABLE);
+	return 0;
+}
+
+/*
  * os_create_memfd() — create a fresh, anonymous memfd sized to
  * @size bytes.  Returns the new fd on success, -errno on failure.
  * Caller owns the fd.
