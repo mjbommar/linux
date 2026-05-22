@@ -194,6 +194,7 @@ Update the global `physmem_fd` so new stubs (and future
     | (15) replicate + 200 ms in-kernel SIGALRM drain + timer reprime    | FAIL (bash hangs in sleep) |
     | (16) replicate + arm 1s one-shot + 1.5s busy_wait → diagnose        | FIRES (itv 1s→0, ov 0→0 = 1s timer fires + signal delivered) |
     | (17) MINIMAL LINUX-ONLY REPRO (no UML, `tools/testing/selftests/um/mmap-fixed-sigalrm-repro/`) | **PASS** (post_swap_sigalrms=1) → **dispositive proof the bug is NOT in the host kernel's signal/timer subsystem; it is UML-specific** |
+    | (18) replicate + cond_resched + schedule_timeout_interruptible(1ms) | FAIL (bash hangs in sleep) — scheduler hygiene yield does not recover |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the
