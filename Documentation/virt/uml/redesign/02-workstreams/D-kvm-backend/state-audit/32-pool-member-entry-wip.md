@@ -238,6 +238,54 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     pivot_test and pool_member.  Approach is sound but is a
     new commit series.
 
+    UPDATE 2026-05-22 (day-2 attempt 3 — early-fork +
+    continue_child): added an experimental `continue_child` arm
+    that makes the child take ordinary __NR_fork and return up the
+    syscall stack normally (Memo 09 §2 original design).
+    Combined with `um_template_pause=early-fork` to test if the
+    v1 ceiling avoids early mode (no init.sh stub yet).
+
+    Result: v1 ceiling FIRES even in early mode.  Panic IP =
+    `um_template_pause_enter+0xf6/0x147` (same offset as
+    state-audit/30 documented for late-fork).
+
+    Diagnosis: `os_template_pause_signals_block_host()` is called
+    AFTER SIGCONT, not before SIGSTOP.  Signals queued during the
+    SIGSTOP window (SIGALRM, SIGCHLD, SIGIO) fire on master's
+    kernel stack between SIGCONT and signal_block — UML's
+    hard_handler runs, the handler frame pushes onto master's
+    kernel stack, and corrupts the saved-RIP slot at
+    um_template_pause_enter's `ret` epilogue.  Child inherits
+    that corrupted stack via CoW, hits the corruption on return.
+
+    So even in early mode, ANY return-up-the-syscall-stack path
+    needs Path A protection.  The early-fork + continue_child arm
+    is therefore moot — we'd still need a clean-stack pivot, just
+    one that lands at a kernel boot continuation (not userspace()).
+
+    Removed continue_child arm from the tree (it added a cmdline
+    that didn't fix what it was designed to fix).  Empirical
+    finding preserved here.
+
+    Refined direction:
+      - `child_entry_early_pool_member(void)` (new entry function):
+        uses Path A primitive to land on a private stack with a
+        clean RBP, then constructs a fresh jmp_buf representing
+        "resume at do_one_initcall after template_pause_early_init"
+        and longjmps to it.  Master saves the jmp_buf via
+        UML_SETJMP before entering um_template_pause_enter.
+      - Per-member mm naturally arises because each child's
+        kernel boot creates its own init.sh task with its own
+        new mm via init_new_context (fresh stub via lazy
+        start_userspace).
+      - Multi-iter sustained: master loops in fork_on_resume_loop
+        (no return), each child gets to boot from late_initcall
+        forward — N independent VM instances.
+
+    Status: this is the clean architectural path.  Implementation
+    spans several layers (jmp_buf save + new Path A entry + UML
+    boot-resume validation) and is a 2-3 day commit series.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
