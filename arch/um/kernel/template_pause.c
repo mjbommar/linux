@@ -384,6 +384,33 @@ child_entry_pool_member(void)
 	 * Each pool member's stub now has private stub_data; no
 	 * inter-member aliasing.
 	 */
+	/*
+	 * Restore init.sh task/signal state.  Kernel slab allocations
+	 * (task_struct, signal_struct) live in UML's MAP_SHARED
+	 * physmem_fd — not CoW'd across forked UML kernels.  The
+	 * previous pool-member iteration's do_exit path mutated these
+	 * fields when init.sh exited (set PF_EXITING, decremented
+	 * signal->live to 0, set group_exit_code, etc.) and those
+	 * writes propagated back to master and to this iteration's
+	 * child.
+	 *
+	 * Without restoration, iter 2's do_exit path skips the
+	 * is_global_init panic (because group_dead is false:
+	 * signal->live decrements from 0 to -1) and reaches
+	 * find_child_reaper → zap_pid_ns_processes → BUG.
+	 */
+	current->flags &= ~(PF_EXITING | PF_POSTCOREDUMP | PF_SIGNALED);
+	WRITE_ONCE(current->__state, TASK_RUNNING);
+	current->exit_state = 0;
+	current->exit_code = 0;
+	atomic_set(&current->signal->live, 1);
+	current->signal->group_exit_code = 0;
+	current->signal->flags = 0;
+	if (current->mm) {
+		atomic_set(&current->mm->mm_users, 2);
+		atomic_set(&current->mm->mm_count, 2);
+	}
+
 	{
 		int dret = um_skas_disown_inherited();
 		struct mm_id *id = current_mm_id();
