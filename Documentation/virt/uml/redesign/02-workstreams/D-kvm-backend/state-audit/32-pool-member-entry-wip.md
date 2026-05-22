@@ -286,6 +286,49 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     spans several layers (jmp_buf save + new Path A entry + UML
     boot-resume validation) and is a 2-3 day commit series.
 
+    UPDATE 2026-05-22 (day-2 attempt 4 — pre-SIGSTOP signal block):
+    Reordered one_pause_cycle to call
+    `os_template_pause_signals_block_host()` BEFORE the SIGSTOP/
+    SIGCONT cycle instead of after.  Made the block idempotent so
+    repeated calls don't overwrite saved_sigmask.
+
+    This hardens the master-side signal-delivery window
+    (legitimately a fix at the source) — pre-SIGSTOP block was
+    committed in a1d6d0020ccc.  Both selftests still PASS.
+
+    Then re-tested continue_child + early-fork to see if the v1
+    ceiling was actually closed.  Result: still fails with same
+    "Segfault with no mm" at um_template_pause_enter+0xf6.
+
+    Disassembly finding: um_template_pause_enter+0xf6 is NOT the
+    function epilogue's `ret` — it's a `mov %eax, %r12d`
+    instruction MID-FUNCTION (before the +0x132 epilogue at
+    `add $0x118, %rsp`).  That instruction has no memory access
+    and cannot fault on its own.
+
+    Implication: the v1 ceiling is NOT saved-RIP corruption from
+    signal-handler frames.  It's a SIGSEGV INJECTION from
+    somewhere else mid-function — possibly seccomp filter
+    inheritance, ptrace stop, or a process-wide condition the
+    forked child trips on its first kernel-mode syscall return.
+
+    Specifically: the fork() returns to the CHILD at this
+    instruction; the child has inherited seccomp filter from the
+    parent's seccomp backend; if the next syscall trips a
+    seccomp rule the child wasn't supposed to inherit, SIGSYS
+    or SIGSEGV could fire here.
+
+    This changes the diagnostic story for state-audit/30:
+    Outcome 2's "Phase 2a panic" is NOT a saved-RIP epilogue
+    issue.  It's a mid-function signal injection.  The Path A
+    fix (avoid the return path entirely) still works because it
+    sidesteps the entire post-fork kernel return path — but the
+    Path A primitive's success doesn't IMPLY the saved-RIP
+    hypothesis was correct.
+
+    continue_child arm removed (still doesn't fix the underlying
+    issue).  Pre-SIGSTOP block kept as legitimate hardening.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
