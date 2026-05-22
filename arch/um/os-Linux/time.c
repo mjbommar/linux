@@ -74,6 +74,57 @@ int os_timer_set_interval(int cpu, unsigned long long nsecs)
 	return 0;
 }
 
+/*
+ * Diagnostic: read timer expiry state via timer_getoverrun and
+ * timer_gettime.  Used by pool-member triage to distinguish two
+ * SIGALRM-after-swap failure modes:
+ *   - overrun > 0 → host POSIX timer is firing but signals lost
+ *     (delivery problem)
+ *   - overrun == 0 + it_value > 0 → timer armed, hasn't fired
+ *     yet (timer is genuinely stopped or far in future)
+ *   - it_value == 0 → timer disarmed
+ *
+ * Stores results in @out_overrun and @out_it_value_ns.  Returns
+ * 0 on success, -errno on failure.
+ */
+int os_timer_diagnose(unsigned long *out_overrun,
+		      unsigned long long *out_it_value_ns)
+{
+	struct itimerspec its;
+	int rc;
+	int cpu = 0;
+
+	rc = timer_getoverrun(event_high_res_timer[cpu]);
+	if (rc < 0)
+		return -errno;
+	*out_overrun = (unsigned long)rc;
+
+	if (timer_gettime(event_high_res_timer[cpu], &its) < 0)
+		return -errno;
+	*out_it_value_ns = (unsigned long long)its.it_value.tv_sec
+				* UM_NSEC_PER_SEC
+			   + its.it_value.tv_nsec;
+	return 0;
+}
+
+/*
+ * Diagnostic: busy-wait via clock_nanosleep for @nsecs.  Used by
+ * pool-member variant 9 to wait for the POSIX timer to expire
+ * without depending on UML's signal-driven scheduler tick.
+ */
+void os_busy_wait_ns(unsigned long long nsecs)
+{
+	struct timespec ts = {
+		.tv_sec  = nsecs / UM_NSEC_PER_SEC,
+		.tv_nsec = nsecs % UM_NSEC_PER_SEC,
+	};
+
+	/* CLOCK_MONOTONIC + relative request — does not depend on
+	 * signal delivery to return.
+	 */
+	(void)clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
+}
+
 int os_timer_one_shot(int cpu, unsigned long long nsecs)
 {
 	struct itimerspec its = {

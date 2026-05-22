@@ -329,6 +329,17 @@ extern int os_create_memfd(const char *name, unsigned long long size);
 extern int os_drain_pending_signals(void);
 
 /*
+ * Diagnostic: read POSIX timer expiry state via timer_getoverrun
+ * and timer_gettime.  Stores overrun count and it_value (ns) in
+ * the out parameters.  Returns 0 on success or -errno.
+ */
+extern int os_timer_diagnose(unsigned long *out_overrun,
+			     unsigned long long *out_it_value_ns);
+
+/* Busy-wait via clock_nanosleep — used by variant 9 diagnostic. */
+extern void os_busy_wait_ns(unsigned long long nsecs);
+
+/*
  * Create an unnamed tmpfs file via O_TMPFILE on @dir of @size
  * bytes.  Parallel to os_create_memfd() but uses the same
  * mechanism as setup_physmem's boot-time physmem_fd.  Used for

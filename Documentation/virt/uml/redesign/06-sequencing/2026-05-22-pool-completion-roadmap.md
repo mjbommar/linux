@@ -185,6 +185,8 @@ Update the global `physmem_fd` so new stubs (and future
     | (6) anon intermediate (`os_remap_region_via_anon`) → new fd    | FAIL (SIGALRM)    |
     | (7) close inherited io_uring fds, then mmap-FIXED swap (closed=2) | FAIL (SIGALRM)    |
     | (8) post-swap sigtimedwait drain of pending signals (drained=0) | FAIL (SIGALRM)    |
+    | (9) post-swap timer_gettime + os_busy_wait_ns(200ms)            | FIRES (timer disarmed, ov=0) |
+    | (10) post-swap 50ms periodic timer + 525ms busy-wait             | FIRES (itv cycles at ~50ms, ov stays 0 = signals delivered) |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the
@@ -195,13 +197,20 @@ Update the global `physmem_fd` so new stubs (and future
     target VA; (7) disproves the io_uring TIF_NOTIFY_SIGNAL
     hypothesis — closing 2 io_uring fds (ubd + hostfs writeback)
     before the swap does not restore SIGALRM delivery; (8)
-    disproves the "stuck pending signal" hypothesis — drained=0
-    via sigtimedwait post-swap, meaning the host kernel is NOT
-    even queueing SIGALRM (host POSIX timer doesn't fire, or
-    fires and is silently dropped).  This last finding shifts
-    the suspect from signal-delivery to signal-generation: the
-    host kernel's POSIX timer itself stops generating events
-    after the mmap-FIXED-to-different-inode swap.
+    initially suggested the "stuck pending signal" hypothesis
+    (drained=0 via sigtimedwait post-swap), BUT variants (9)
+    and (10) DISPROVED that interpretation.  Variant (9) showed
+    a single 50ms one-shot timer fires correctly post-swap
+    (it_value drops to 0, overrun=0 = signal-delivered-once).
+    Variant (10) ran a 50ms PERIODIC timer over 525ms and
+    observed it_value cycling at ~50ms with overrun stable at
+    0, proving SIGALRM is delivered every tick.
+
+    **The bug is NOT in signal delivery.**  The SIGALRM-after-
+    swap dispatch is fine.  The actual breakage is downstream:
+    UML's scheduler / hrtimer wake-up path doesn't propagate
+    the tick to bash's userspace task even though the kernel-
+    side timer handler is running.
 
   * **Symptom of (3)/(4):** bash reaches `TPPM_MEMBER_ALIVE_1`
     then `sleep 1` never returns — host SIGALRM stops being

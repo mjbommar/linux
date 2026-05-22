@@ -403,9 +403,20 @@ child_entry_pool_member(void)
 	}
 
 	/*
+	 * Variant 10 finding (2026-05-22): SIGALRM delivery IS
+	 * working post-replicate.  Periodic 50ms timer over 525ms
+	 * showed it_value cycling at ~50ms and overrun stable at
+	 * 0 (signal delivered each tick).  The bug is NOT signal
+	 * delivery — it is downstream in the scheduler / hrtimer
+	 * wake-up path (bash's nanosleep doesn't wake even though
+	 * the host timer is firing and UML's signal handler runs).
+	 * Next investigation focus: post-swap scheduler / runqueue
+	 * state.  See roadmap §3.1 Option B variant table.
+	 */
+
+	/*
 	 * Step A of the pool-completion roadmap (per-member
-	 * physmem isolation) — the replicate call site stays
-	 * unwired pending the SIGALRM-host-state fix.
+	 * physmem isolation) — historical context.
 	 *
 	 * Empirical bisect (this commit's investigation):
 	 *   (1) Same-fd mmap-FIXED (um_pool_remap_self_test):
