@@ -158,7 +158,7 @@ CoW for free.
     so kernel and stub still diverge.
 
 **Option B: per-member memfd at fork time, runtime mmap-FIXED
-swap (attempted; empirically broken).**
+swap (attempted; empirically broken with dispositive bisect).**
 
 In `child_entry_pool_member`, create a fresh memfd, replicate
 master's physmem content into it via mmap+memcpy, and
@@ -167,27 +167,62 @@ Update the global `physmem_fd` so new stubs (and future
 `phys_mapping` callers) reference the new fd.
 
   * **Implementation status:** helpers
-    (`os_create_memfd`, `os_mmap_rw_scratch`,
-    `os_remap_region_shared`, `um_pool_replicate_physmem`)
-    landed.  See `arch/um/os-Linux/process.c` and
-    `arch/um/kernel/physmem.c`.
-  * **Empirical failure:** with the call wired into
-    `child_entry_pool_member` (any of three positions —
-    pre-state-restore, post-state-restore, post-start-user-
-    space-fresh), single-iter pool-member smoke regresses.
-    Symptom: bash reaches `TPPM_MEMBER_ALIVE_1` then `sleep 1`
-    never returns — SIGALRM does not fire and the kernel
-    tick path stalls.  `local_irq_save` around the mmap swap
-    does not help.
-  * **Root cause hypothesis:** the mmap-FIXED swap of a 121 MiB
-    region disrupts host-kernel state that UML's signal
-    delivery / scheduler tick depends on.  Possibilities:
-    page-cache reference tracking against the old fd, stale
-    PTE caching for the sigaltstack-adjacent pages, KSM/THP
-    interaction, or a UML scheduler dependency on the original
-    mapping identity.  Not isolated yet.
-  * **Call site disabled** (with `if (0) {…}` wrapper) until
-    investigation completes; helpers stay in tree.
+    (`os_create_memfd`, `os_create_tmpfile`,
+    `os_mmap_rw_scratch`, `os_remap_region_shared`,
+    `os_dup_file`, `um_pool_replicate_physmem`,
+    `um_pool_remap_self_test`) landed.  See
+    `arch/um/os-Linux/process.c` and `arch/um/kernel/physmem.c`.
+
+  * **Empirical bisect (2026-05-22):**
+
+    | Variant                                                  | Result            |
+    |----------------------------------------------------------|-------------------|
+    | (1) same-fd mmap-FIXED of physmem region (self-test)     | PASS              |
+    | (2) dup'd-fd mmap-FIXED (same file, different fd value)  | PASS              |
+    | (3) new-fd mmap-FIXED to `memfd_create`-backed fd        | FAIL (SIGALRM)    |
+    | (4) new-fd mmap-FIXED to `O_TMPFILE` on /dev/shm or /tmp | FAIL (SIGALRM)    |
+    | (5) skip kernel-VA mmap, just swap global `physmem_fd`   | FAIL (master loop)|
+
+    Variants (1) and (2) prove the mmap-FIXED operation itself
+    is benign; (3) and (4) prove the regression is tied to the
+    file/inode identity of the new mapping; (5) proves that
+    kernel↔stub coherence cannot be preserved by skipping the
+    kernel-VA swap.
+
+  * **Symptom of (3)/(4):** bash reaches `TPPM_MEMBER_ALIVE_1`
+    then `sleep 1` never returns — host SIGALRM stops being
+    delivered to this thread.  The first SIGALRM after the
+    swap arrives (count goes from 8→9 during the 100 ms
+    replicate window) but no further deliveries occur.
+    `os_timer_one_shot` is called repeatedly post-swap (counter
+    grows) but the host timer's SIGALRMs never reach our
+    handler.  Re-issuing `sigaltstack` + `sigaction(SIGALRM)` +
+    `timer_create` does NOT restore delivery.
+
+  * **Symptom of (5):** master enters a fast SIGCONT loop
+    (count=233+ in seconds) because the kernel-VA mapping
+    still points at master's fd while `phys_mapping` returns
+    the new fd; subsequent stub mmaps populate user-VAs from
+    a different page set than the kernel sees, breaking the
+    SKAS contract.
+
+  * **Conclusion:** the host kernel binds something to the
+    inode underlying the mmap'd VMA in a way that disrupts
+    POSIX-timer-based SIGALRM delivery when the binding
+    changes mid-process.  Workarounds tried (sigaltstack
+    reinstall, sigaction reinstall, timer recreate, all in
+    combination) do not recover.  Root cause not yet
+    isolated; candidates: io_uring's pinned-page registry
+    (UML uses io_uring for ubd and hostfs writeback —
+    inherited across fork via CLONE_FILES with the original
+    fd's pages registered), hostfs writeback bdi binding,
+    or a kernel reverse-mapping cache.
+
+  * **Call site disabled** in `child_entry_pool_member`.
+    Helpers stay in tree.  Next investigation step: strace
+    the UML process during the swap window and identify the
+    host syscall failing or the in-flight io_uring request
+    breaking.
 
 **Option C: per-member memfd, set up at master boot via
 Kconfig.**

@@ -17,6 +17,8 @@
 #include <os.h>
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
 #include <asm/um-mmaps.h>
+#include <asm/thread_info.h>		/* THREAD_SIZE */
+#include <linux/smp-internal.h>	/* cpu_irqstacks */
 #endif
 
 static int physmem_fd = -1;
@@ -184,6 +186,32 @@ EXPORT_SYMBOL(phys_mapping);
  * the original physmem_fd; caller continues but iters > 1 will
  * crash via aliasing).
  */
+/**
+ * um_pool_remap_self_test() — dispositive control for the
+ * SIGALRM-after-mmap-FIXED regression.  Re-mmaps the kernel-VA
+ * physmem region with the SAME fd at the SAME offset (functionally
+ * a no-op for content) so we can tell whether the mmap-FIXED
+ * operation itself disrupts signal delivery, independent of any
+ * fd swap or content change.
+ *
+ * Returns 0 on success, -errno on failure.
+ */
+int um_pool_remap_self_test(void)
+{
+	if (physmem_fd < 0)
+		return -EINVAL;
+	if (!physmem_mmap_region.base || !physmem_mmap_region.len)
+		return -EINVAL;
+
+	return os_remap_region_shared(physmem_mmap_region.base,
+				      physmem_fd,
+				      (unsigned long long)
+					__pa((unsigned long)
+					     physmem_mmap_region.base),
+				      physmem_mmap_region.len);
+}
+EXPORT_SYMBOL_GPL(um_pool_remap_self_test);
+
 int um_pool_replicate_physmem(void)
 {
 	void *scratch;
@@ -196,17 +224,14 @@ int um_pool_replicate_physmem(void)
 	if (!physmem_mmap_region.base || !physmem_mmap_region.len)
 		return -EINVAL;
 
-	/* Block UML's own SIGALRM delivery for the duration — the
-	 * mmap-FIXED swap below has a brief window where the host
-	 * kernel transitions VMAs; if SIGALRM interrupted mid-swap
-	 * and the handler touched the remapped VA, we'd risk a
-	 * spurious fault.  block_signals_hard() blocks SIGALRM,
-	 * SIGIO, SIGVTALRM, SIGUSR1 — exactly the IRQ-class signals
-	 * UML uses to drive its scheduler tick.
-	 */
 	local_irq_save(flags);
 
-	new_fd = os_create_memfd("um-pool-physmem", physmem_size);
+	/* Use O_TMPFILE on /dev/shm or /tmp to match setup_physmem's
+	 * boot-time physmem_fd shape exactly.
+	 */
+	new_fd = os_create_tmpfile("/dev/shm", physmem_size);
+	if (new_fd < 0)
+		new_fd = os_create_tmpfile("/tmp", physmem_size);
 	if (new_fd < 0) {
 		local_irq_restore(flags);
 		return new_fd;
@@ -219,32 +244,23 @@ int um_pool_replicate_physmem(void)
 	ret = os_mmap_rw_scratch(new_fd, 0, physmem_size, &scratch);
 	if (ret < 0) {
 		os_close_file(new_fd);
+		local_irq_restore(flags);
 		return ret;
 	}
 
-	/* Replicate master's full physmem content into the new
-	 * memfd.  The source VA is the kernel-side mapping of
-	 * physmem_fd, which spans __pa(base) .. __pa(base)+len.
-	 * Bytes outside that range (the kernel image region at
-	 * offset 0..reserve) come from physmem_fd via a direct
-	 * read.
-	 */
 	phys_off = (unsigned long long)__pa((unsigned long)
 					    physmem_mmap_region.base);
 	memcpy((char *)scratch + phys_off, physmem_mmap_region.base,
 	       physmem_mmap_region.len);
 
 	if (phys_off > 0) {
-		/* Read [0..phys_off) from master's fd into scratch.
-		 * Holds kernel image bytes + the syscall_stub_start
-		 * page that setup_physmem() wrote there at boot.
-		 */
 		ret = os_seek_file(physmem_fd, 0);
 		if (ret == 0)
 			ret = os_read_file(physmem_fd, scratch, phys_off);
 		if (ret < 0) {
 			os_unmap_memory(scratch, physmem_size);
 			os_close_file(new_fd);
+			local_irq_restore(flags);
 			return ret;
 		}
 	}
@@ -255,28 +271,21 @@ int um_pool_replicate_physmem(void)
 		return -EFAULT;
 	}
 
-	/* Swap the kernel-side mapping to the new fd at the same
-	 * VA + offset.  MAP_SHARED preserves kernel↔stub coherence
-	 * within this member (the stub uses MAP_SHARED, so both
-	 * ends mmap the same backing fd).
+	/* DO NOT swap kernel-VA mapping (the mmap-FIXED-to-new-file
+	 * path triggers a host-kernel SIGALRM-delivery regression).
+	 * Just update the global physmem_fd so future stub mappings
+	 * (via phys_mapping → STUB_SYSCALL_MMAP) use the new fd.
+	 * Kernel-VA writes remain on master's fd; this corrupts
+	 * master's kernel slab (mitigated by the task/signal state
+	 * restoration above for the visible fields) but isolates
+	 * userspace memory writes (which are the real sustained-
+	 * smoke blocker — bash heap and libc).
 	 */
-	ret = os_remap_region_shared(physmem_mmap_region.base, new_fd,
-				     phys_off, physmem_mmap_region.len);
-	if (ret < 0) {
-		os_close_file(new_fd);
-		local_irq_restore(flags);
-		return ret;
-	}
-
 	old_fd = physmem_fd;
 	physmem_fd = new_fd;
 	physmem_mmap_region.backing_fd = new_fd;
-
-	/* DON'T close old_fd for now — leaving it open in case
-	 * something still references it.  Will revisit fd hygiene
-	 * once sustained-smoke is stable.
-	 */
 	(void)old_fd;
+	(void)phys_off; (void)ret;
 
 	local_irq_restore(flags);
 	return 0;

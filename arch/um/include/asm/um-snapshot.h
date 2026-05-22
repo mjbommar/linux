@@ -78,11 +78,20 @@ void um_snapshot_worker_init(void);
  */
 int um_pool_replicate_physmem(void);
 
+/*
+ * Dispositive control: re-mmap kernel-VA physmem with the
+ * existing physmem_fd at the same offset (functionally a no-op
+ * for content).  Used to isolate whether the mmap-FIXED act
+ * alone breaks UML's SIGALRM delivery.
+ */
+int um_pool_remap_self_test(void);
+
 #else /* !CONFIG_UM_SNAPSHOT_FORKSERVER */
 
 static inline void um_snapshot_ready(const char *named_point) { }
 static inline void um_snapshot_worker_init(void) { }
 static inline int um_pool_replicate_physmem(void) { return 0; }
+static inline int um_pool_remap_self_test(void) { return 0; }
 
 #endif /* CONFIG_UM_SNAPSHOT_FORKSERVER */
 

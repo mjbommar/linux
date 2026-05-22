@@ -309,6 +309,15 @@ extern int os_remap_region_shared(void *addr, int fd,
 extern int os_create_memfd(const char *name, unsigned long long size);
 
 /*
+ * Create an unnamed tmpfs file via O_TMPFILE on @dir of @size
+ * bytes.  Parallel to os_create_memfd() but uses the same
+ * mechanism as setup_physmem's boot-time physmem_fd.  Used for
+ * memfd-vs-tmpfs bisect of the per-pool-member physmem isolation.
+ */
+extern int os_create_tmpfile(const char *dir, unsigned long long size);
+
+
+/*
  * mmap @fd at @off for @len bytes as a scratch VA (host-chosen
  * address, MAP_SHARED, RW).  On success, stores VA in *@out_addr
  * and returns 0; on failure returns -errno (out_addr untouched).

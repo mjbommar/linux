@@ -507,6 +507,31 @@ int os_create_memfd(const char *name, unsigned long long size)
 	return fd;
 }
 
+/*
+ * os_create_tmpfile() — create an unnamed tmpfs file via
+ * open(O_TMPFILE) on @dir, sized to @size bytes.  Parallel to
+ * os_create_memfd() but using a "real" tmpfs file (the same
+ * mechanism setup_physmem uses for the boot-time physmem_fd).
+ * Useful to bisect whether the new-fd timer regression is
+ * memfd-vs-tmpfs sensitive.
+ */
+int os_create_tmpfile(const char *dir, unsigned long long size)
+{
+	int fd, err;
+
+	fd = open(dir, O_CLOEXEC | O_RDWR | O_EXCL | O_TMPFILE, 0600);
+	if (fd < 0)
+		return -errno;
+
+	if (ftruncate(fd, size) < 0) {
+		err = -errno;
+		close(fd);
+		return err;
+	}
+
+	return fd;
+}
+
 int os_unmap_memory(void *addr, int len)
 {
 	int err;

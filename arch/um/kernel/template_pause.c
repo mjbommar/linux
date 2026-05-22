@@ -403,15 +403,44 @@ child_entry_pool_member(void)
 
 	/*
 	 * Step A of the pool-completion roadmap (per-member
-	 * physmem isolation) is NOT wired in here yet.  Two
-	 * approaches were ruled out empirically — see roadmap
-	 * §3.1 for details and §3.2 for the recommended Option C
-	 * (boot-time per-member memfd) follow-up.  Helpers
-	 * `um_pool_replicate_physmem`, `os_create_memfd`,
-	 * `os_mmap_rw_scratch`, and `os_remap_region_shared` are
-	 * already landed and will be reused by Option C; today
-	 * they are unwired so single-iter stays PASS and
-	 * sustained XFAILs cleanly at the documented ceiling.
+	 * physmem isolation) — the replicate call site stays
+	 * unwired pending the SIGALRM-host-state fix.
+	 *
+	 * Empirical bisect (this commit's investigation):
+	 *   (1) Same-fd mmap-FIXED (um_pool_remap_self_test):
+	 *       PASS — content unchanged, timer keeps firing.
+	 *   (2) Dup'd-fd mmap-FIXED (same file, different fd
+	 *       value): PASS — host kernel finds same inode, no
+	 *       signal-delivery disruption.  But provides no
+	 *       isolation since both ends back onto the same file.
+	 *   (3) New-fd mmap-FIXED to memfd_create()-backed fd
+	 *       with copy_file_range-equivalent content: FAIL —
+	 *       SIGALRM stops being delivered post-swap.
+	 *   (4) New-fd mmap-FIXED to O_TMPFILE-backed fd (same
+	 *       create path as setup_physmem boot-time fd):
+	 *       FAIL — same SIGALRM regression as (3).
+	 *   (5) Skip kernel-VA mmap-FIXED entirely, just update
+	 *       global physmem_fd to point to new memfd:
+	 *       FAIL — master enters fast SIGCONT loop (kernel↔
+	 *       stub coherence broken: kernel writes via kernel
+	 *       VA on old fd, stub maps user VAs from new fd,
+	 *       VAs read different content).
+	 *
+	 * The host-kernel signal-delivery state ties to the file
+	 * identity backing the VMA in a way that re-issuing
+	 * sigaltstack + sigaction(SIGALRM) + timer_create does
+	 * not recover.  Root cause not yet isolated (candidates:
+	 * io_uring queue's pinned pages, hostfs writeback bdi
+	 * binding, some kernel cache referencing the original
+	 * inode); a strace-on-the-UML-process trace is the next
+	 * concrete debug step.
+	 *
+	 * The replicate/remap helpers stay in tree (call sites
+	 * `os_create_memfd`, `os_create_tmpfile`,
+	 * `os_mmap_rw_scratch`, `os_remap_region_shared`,
+	 * `um_pool_replicate_physmem`, `um_pool_remap_self_test`)
+	 * so the eventual workaround can re-enable them with a
+	 * one-line change.
 	 */
 
 	{
