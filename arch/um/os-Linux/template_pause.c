@@ -416,6 +416,17 @@ int os_template_pause_signals_block_host(void)
 {
 	unsigned long fillmask;
 	long ret;
+	unsigned long *saveptr;
+
+	/*
+	 * Idempotent: if already armed, do not overwrite
+	 * os_template_pause_saved_sigmask — that snapshot must
+	 * reflect the PRE-FIRST-BLOCK state so restore returns to
+	 * the unblocked mask.  Subsequent calls just re-set the same
+	 * mask (no-op at kernel level).
+	 */
+	saveptr = os_template_pause_sigmask_armed ?
+		  NULL : &os_template_pause_saved_sigmask;
 
 	/* Block everything except SIGKILL (can't be blocked anyway),
 	 * SIGSTOP / SIGCONT (need for pause/resume), and the
@@ -434,7 +445,7 @@ int os_template_pause_signals_block_host(void)
 	fillmask &= ~(1UL << (8 - 1));   /* SIGFPE */
 
 	ret = syscall(__NR_rt_sigprocmask, SIG_SETMASK,
-		      &fillmask, &os_template_pause_saved_sigmask,
+		      &fillmask, saveptr,
 		      KERNEL_SIGSET_BYTES);
 	if (ret < 0)
 		return -errno;

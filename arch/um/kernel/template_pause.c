@@ -468,6 +468,27 @@ static int one_pause_cycle(const char *named_point, int identity_fd,
 {
 	int ret;
 
+	/*
+	 * Block host signals BEFORE SIGSTOP, not after SIGCONT.
+	 *
+	 * If signals are blocked only post-SIGCONT (the previous order),
+	 * then queued signals (SIGALRM, SIGCHLD, SIGIO) accumulated
+	 * during the stop window fire on master's kernel stack between
+	 * SIGCONT and signal_block.  UML's hard_handler runs on the
+	 * interrupted task's kernel stack, and the handler frame
+	 * corrupts the saved-RIP at this function's caller's epilogue
+	 * — the v1 ceiling documented in state-audit/30.
+	 *
+	 * Blocking BEFORE SIGSTOP closes that window: signals queue at
+	 * the host kernel level but are not delivered until master
+	 * explicitly unblocks (which it never does in the fork loop).
+	 * SIGSTOP/SIGCONT are unmaskable so the stop/resume cycle still
+	 * works.
+	 *
+	 * Idempotent on repeated calls (same rt_sigprocmask mask).
+	 */
+	(void)os_template_pause_signals_block_host();
+
 	pr_info("template_pause: raising SIGSTOP at \"%s\" (pid=%d)\n",
 		named_point, os_getpid());
 	ret = os_template_pause_stop_self();
