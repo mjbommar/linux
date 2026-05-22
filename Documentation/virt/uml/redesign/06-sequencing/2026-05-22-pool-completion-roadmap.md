@@ -404,11 +404,14 @@ Either unblocks Step A.
 | AFL preconditions in `assert_fork_safety` | landed (`757888e5680c`) |
 | Identity blob parse/apply split | landed (`4d8b6bc65d3d`) |
 | Pre-SIGSTOP host signal block | landed (`a1d6d0020ccc`) |
-| Replication primitives (memfd_create + mmap+memcpy + swap) | landed; call site disabled |
-| Step A — Option A (MAP_PRIVATE) | ruled out: stub stays MAP_SHARED |
-| Step A — Option B (runtime mmap-FIXED swap) | implemented, regresses timer; investigation pending |
-| Step A — Option C (boot-time per-member memfd) | designed; recommended next step |
+| Replication primitives (`os_create_memfd`, `os_create_tmpfile`, `os_mmap_rw_scratch`, `os_remap_region_shared`, `os_dup_file`) | landed (`0d323527e32d`, `8369c1bbd448`) |
+| `um_pool_replicate_physmem` + `um_pool_remap_self_test` | landed (`0d323527e32d`, `8369c1bbd448`); call site unwired |
+| Step A — Option A (MAP_PRIVATE) | RULED OUT: stub `MAP_SHARED|MAP_FIXED` is hard-coded |
+| Step A — Option B (runtime mmap-FIXED swap) | IMPLEMENTED, regresses SIGALRM; dispositively bisected (`8369c1bbd448`) — host kernel binds something to the inode underlying the VMA |
+| Step A — Option C (boot-time per-member memfd) | designed; per the bisect, same root cause likely applies (any mmap-FIXED-to-different-inode breaks SIGALRM) |
+| Step A — next debug step | strace UML kernel across the swap with proper PID tracking (UML kernel is strace's CHILD; attach via `/proc/<strace_pid>/task/*`); inspect `io_uring_register`/`io_uring_enter` for fd-pinning evidence |
 | Sustained-smoke XFAIL → PASS | **PENDING — Step A unresolved** |
 | Pool-bench N=100 acceptance | pending |
-| syzkaller vm/uml shim | pending |
-| Series 7 LKML send | gated on soak |
+| syzkaller `vm/uml` shim | pending (lives in syzkaller repo; spec at `11-syzkaller-shim-spec.md`) |
+| Pool USAGE operator guide | landed (`7de8423ddd48`) |
+| Series 7 LKML send | gated on 24 h soak; previous soak SIGTERM'd at 1 h |
