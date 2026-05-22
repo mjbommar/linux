@@ -321,6 +321,14 @@ extern int os_remap_region_via_anon(void *addr, int new_fd,
 extern int os_create_memfd(const char *name, unsigned long long size);
 
 /*
+ * Drain any pending signals via sigtimedwait with a zero timeout.
+ * Returns the count of signals drained.  Used by pool-member
+ * physmem-isolation triage to test the "stuck pending signal"
+ * hypothesis for SIGALRM-after-swap delivery failures.
+ */
+extern int os_drain_pending_signals(void);
+
+/*
  * Create an unnamed tmpfs file via O_TMPFILE on @dir of @size
  * bytes.  Parallel to os_create_memfd() but uses the same
  * mechanism as setup_physmem's boot-time physmem_fd.  Used for

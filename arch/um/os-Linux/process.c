@@ -560,6 +560,31 @@ int os_mmap_rw_scratch(int fd, unsigned long long off, unsigned long len,
 	return 0;
 }
 
+/*
+ * Drain any pending signals via sigtimedwait with a zero timeout.
+ * Per the research subagent's recommendation, this forces a
+ * get_signal()-equivalent pass that may clear stuck signal-
+ * delivery state (e.g., TIF_NOTIFY_SIGNAL from inherited io_uring
+ * task_work, or other accumulated pending state).  Returns the
+ * count of signals drained.
+ */
+int os_drain_pending_signals(void)
+{
+	sigset_t all;
+	siginfo_t si;
+	struct timespec ts = { .tv_sec = 0, .tv_nsec = 0 };
+	int count = 0, r;
+
+	sigfillset(&all);
+	while ((r = syscall(__NR_rt_sigtimedwait, &all, &si, &ts,
+			    sizeof(sigset_t))) > 0) {
+		count++;
+		if (count > 64)
+			break;	/* sanity cap */
+	}
+	return count;
+}
+
 int os_create_memfd(const char *name, unsigned long long size)
 {
 	int fd, err;

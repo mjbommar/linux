@@ -184,6 +184,7 @@ Update the global `physmem_fd` so new stubs (and future
     | (5) skip kernel-VA mmap, just swap global `physmem_fd`        | FAIL (master loop)|
     | (6) anon intermediate (`os_remap_region_via_anon`) → new fd    | FAIL (SIGALRM)    |
     | (7) close inherited io_uring fds, then mmap-FIXED swap (closed=2) | FAIL (SIGALRM)    |
+    | (8) post-swap sigtimedwait drain of pending signals (drained=0) | FAIL (SIGALRM)    |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the
@@ -193,7 +194,14 @@ Update the global `physmem_fd` so new stubs (and future
     intermediate MAP_ANONYMOUS|MAP_SHARED mapping at the
     target VA; (7) disproves the io_uring TIF_NOTIFY_SIGNAL
     hypothesis — closing 2 io_uring fds (ubd + hostfs writeback)
-    before the swap does not restore SIGALRM delivery.
+    before the swap does not restore SIGALRM delivery; (8)
+    disproves the "stuck pending signal" hypothesis — drained=0
+    via sigtimedwait post-swap, meaning the host kernel is NOT
+    even queueing SIGALRM (host POSIX timer doesn't fire, or
+    fires and is silently dropped).  This last finding shifts
+    the suspect from signal-delivery to signal-generation: the
+    host kernel's POSIX timer itself stops generating events
+    after the mmap-FIXED-to-different-inode swap.
 
   * **Symptom of (3)/(4):** bash reaches `TPPM_MEMBER_ALIVE_1`
     then `sleep 1` never returns — host SIGALRM stops being
