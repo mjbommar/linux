@@ -195,6 +195,15 @@ struct tramp_data {
 	struct stub_data *stub_data;
 	/* 0 is inherited, 1 is the kernel side */
 	int sockpair[2];
+	/*
+	 * If >= 0, override phys_mapping() for stub_data — pass this
+	 * fd to the stub child instead of UML's shared physmem_fd.
+	 * Used by start_userspace_fresh() so post-fork pool members
+	 * get a per-mm stub_data backing fd (memfd) and the stub maps
+	 * physically-isolated memory.  Offset is always 0 in this
+	 * mode.  If -1, fall back to phys_mapping (the default).
+	 */
+	int stub_data_fd_override;
 };
 
 #ifndef CLOSE_RANGE_CLOEXEC
@@ -243,9 +252,19 @@ static int userspace_tramp(void *data)
 					      &offset);
 	init_data.stub_code_offset = MMAP_OFFSET(offset);
 
-	init_data.stub_data_fd = phys_mapping(uml_to_phys(tramp_data->stub_data),
-					      &offset);
-	init_data.stub_data_offset = MMAP_OFFSET(offset);
+	if (tramp_data->stub_data_fd_override >= 0) {
+		/* Per-mm memfd: stub_data lives in its own backing fd
+		 * (start_userspace_fresh path), not UML's shared
+		 * physmem_fd.  Used to give post-fork pool members
+		 * physically-isolated stub_data.
+		 */
+		init_data.stub_data_fd = tramp_data->stub_data_fd_override;
+		init_data.stub_data_offset = 0;
+	} else {
+		init_data.stub_data_fd = phys_mapping(uml_to_phys(tramp_data->stub_data),
+						      &offset);
+		init_data.stub_data_offset = MMAP_OFFSET(offset);
+	}
 
 	/*
 	 * Avoid leaking unneeded FDs to the stub by setting CLOEXEC on all FDs
@@ -255,6 +274,15 @@ static int userspace_tramp(void *data)
 	syscall(__NR_close_range, 0, ~0U, CLOSE_RANGE_CLOEXEC);
 
 	fcntl(init_data.stub_data_fd, F_SETFD, 0);
+	/*
+	 * In the override path stub_code_fd != stub_data_fd (data is
+	 * a per-mm memfd; code is still UML's physmem_fd holding the
+	 * stub binary text).  The default path has them equal — both
+	 * are physmem_fd — so the fcntl above implicitly clears
+	 * CLOEXEC on both.  Be explicit so the override case works.
+	 */
+	if (init_data.stub_code_fd != init_data.stub_data_fd)
+		fcntl(init_data.stub_code_fd, F_SETFD, 0);
 
 	/* dup2 signaling FD/socket to STDIN */
 	if (dup2(tramp_data->sockpair[0], 0) < 0)
@@ -379,6 +407,7 @@ int start_userspace(struct mm_id *mm_id)
 	struct stub_data *proc_data = (void *)mm_id->stack;
 	struct tramp_data tramp_data = {
 		.stub_data = proc_data,
+		.stub_data_fd_override = -1,
 	};
 	void *stack;
 	unsigned long sp;
@@ -556,6 +585,142 @@ int os_skas_reap_stub(struct mm_id *mm_id)
 	mm_id->syscall_fd_num = 0;
 
 	return 0;
+}
+
+/*
+ * start_userspace_fresh() — spawn a stub with PRIVATE stub_data
+ * backing.
+ *
+ * Standard start_userspace() relies on UML's global physmem_fd
+ * for stub_data: the kernel allocates a page via __get_free_pages,
+ * phys_mapping() resolves that to (physmem_fd, offset), the stub
+ * mmaps physmem_fd at that offset.  For pool-member children
+ * post-fork, physmem_fd is MAP_SHARED with the master and all
+ * sibling pool members — every stub reads/writes the SAME physical
+ * bytes.  Sustained N-member dispatch is impossible in this model.
+ *
+ * This variant creates a PER-CALL memfd for stub_data, mmaps it
+ * MAP_SHARED into the calling process (which becomes the new
+ * id->stack VA), and passes the memfd to the stub via the
+ * stub_data_fd_override path so the stub mmaps the SAME memfd
+ * (in CLONE_VM child context, the mmap is shared with this
+ * process).  Each pool member gets physically-isolated stub_data.
+ *
+ * Memfd lifecycle: the kernel-side mmap keeps the memfd alive
+ * through the mm's destroy_context (where id->stack is freed via
+ * munmap path).  The stub's mmap independently keeps the
+ * underlying pages alive across the stub's lifetime.  The fd
+ * number itself is closed in the parent after passing to the stub.
+ *
+ * Returns 0 on success or -errno on failure.
+ */
+int start_userspace_fresh(struct mm_id *mm_id)
+{
+	const size_t map_size = STUB_DATA_PAGES * UM_KERN_PAGE_SIZE;
+	struct stub_data *proc_data;
+	struct tramp_data tramp_data;
+	void *stack;
+	unsigned long sp;
+	int data_fd, err;
+
+	/* Per-mm stub_data memfd. */
+	data_fd = syscall(__NR_memfd_create, "um-pool-stubdata", 0);
+	if (data_fd < 0)
+		return -errno;
+	if (ftruncate(data_fd, map_size) < 0) {
+		err = -errno;
+		close(data_fd);
+		return err;
+	}
+
+	/* mmap MAP_SHARED into this UML kernel's address space.  The
+	 * resulting VA replaces mm_id->stack; both kernel-side
+	 * accesses and the stub (via CLONE_VM share with same VA)
+	 * see the same physical memory backed by data_fd.
+	 */
+	proc_data = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
+			 MAP_SHARED, data_fd, 0);
+	if (proc_data == MAP_FAILED) {
+		err = -errno;
+		close(data_fd);
+		return err;
+	}
+
+	/* Zero the new page (memfd_create + ftruncate gives zeros
+	 * already, but be explicit for clarity).
+	 */
+	memset(proc_data, 0, map_size);
+
+	/* Replace the inherited id->stack with our private mapping.
+	 * The OLD page (master's stub_data) is left behind — child
+	 * doesn't own it.  Per-iteration leak budget: STUB_DATA_PAGES
+	 * of address space (and zero physical pages, since master's
+	 * page is still mapped by master).
+	 */
+	mm_id->stack = (unsigned long)proc_data;
+
+	tramp_data.stub_data = proc_data;
+	tramp_data.stub_data_fd_override = data_fd;
+
+	/* Temporary stack for userspace_tramp. */
+	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
+		     PROT_READ | PROT_WRITE | PROT_EXEC,
+		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (stack == MAP_FAILED) {
+		err = -errno;
+		goto out_close_data;
+	}
+	sp = (unsigned long)stack + UM_KERN_PAGE_SIZE;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, tramp_data.sockpair)) {
+		err = -errno;
+		munmap(stack, UM_KERN_PAGE_SIZE);
+		goto out_close_data;
+	}
+
+	if (um_backend && um_backend->stub_syscall_uses_futex)
+		proc_data->futex = FUTEX_IN_CHILD;
+
+	mm_id->pid = clone(userspace_tramp, (void *)sp,
+			   CLONE_VFORK | CLONE_VM | SIGCHLD,
+			   (void *)&tramp_data);
+	if (mm_id->pid < 0) {
+		err = -errno;
+		close(tramp_data.sockpair[0]);
+		close(tramp_data.sockpair[1]);
+		munmap(stack, UM_KERN_PAGE_SIZE);
+		goto out_close_data;
+	}
+
+	wait_stub_done_seccomp(mm_id, 1, 1);
+
+	if (munmap(stack, UM_KERN_PAGE_SIZE) < 0) {
+		err = -errno;
+		goto out_kill;
+	}
+
+	close(tramp_data.sockpair[0]);
+
+	if (um_backend && um_backend->has_syscall_stub_fd_map)
+		mm_id->sock = tramp_data.sockpair[1];
+	else
+		close(tramp_data.sockpair[1]);
+
+	/* Parent no longer needs the fd reference — stub has its own
+	 * mmap keeping the backing alive; our mmap (proc_data) keeps
+	 * a kernel-side reference too.
+	 */
+	close(data_fd);
+	return 0;
+
+out_kill:
+	os_kill_ptraced_process(mm_id->pid, 1);
+out_close_data:
+	munmap(proc_data, map_size);
+	close(data_fd);
+	mm_id->stack = 0;
+	mm_id->pid = -1;
+	return err;
 }
 
 /*

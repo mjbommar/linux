@@ -375,6 +375,14 @@ extern int is_skas_winch(int pid, int fd, void *data);
 extern void send_stub_syscall_fds(struct mm_id *mm_idp);
 extern int start_userspace(struct mm_id *mm_id);
 extern int start_userspace_redo(struct mm_id *mm_id);
+/*
+ * Variant of start_userspace() that backs stub_data with a per-mm
+ * memfd (private to the calling process) instead of UML's global
+ * physmem_fd.  Required for pool-member children to get physically-
+ * isolated stub_data.  See arch/um/os-Linux/skas/process.c for the
+ * full contract.
+ */
+extern int start_userspace_fresh(struct mm_id *mm_id);
 extern int os_skas_reap_stub(struct mm_id *mm_id);
 extern void userspace(struct uml_pt_regs *regs);
 extern void new_thread(void *stack, jmp_buf *buf, void (*handler)(void));

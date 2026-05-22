@@ -352,16 +352,38 @@ child_entry_pool_member(void)
 	PT_REGS_SET_SYSCALL_RETURN(&current->thread.regs, 11);
 
 	/*
-	 * Note: um_skas_disown_inherited() + um_skas_respawn_all_stubs()
-	 * was attempted here to give the child its own stubs.  Result:
-	 * start_userspace's first clone fails — even with a "fresh"
-	 * __get_free_pages allocation in the child, the resulting
-	 * stub_data page resolves through phys_mapping() to UML's
-	 * physmem_fd which is MAP_SHARED across all forked UML
-	 * kernels.  Per-member physical isolation requires UML
-	 * physmem refactoring (separate memfd per pool member) — a
-	 * dedicated workstream.  See state-audit/32 §4 step 19e for
-	 * the architectural finding.
+	 * Disown master's inherited stubs and spawn fresh per-member
+	 * stubs with PHYSICALLY-ISOLATED stub_data backing.
+	 *
+	 * um_skas_disown_inherited() forgets master's stub_pid/sock
+	 * (no kill — those are master's host-children) and clears the
+	 * inherited id->stack so start_userspace_fresh can replace it.
+	 *
+	 * For each mm_id, start_userspace_fresh:
+	 *   - memfd_create + ftruncate + mmap MAP_SHARED to allocate
+	 *     a per-mm stub_data page in THIS child's address space
+	 *   - swaps id->stack to the new VA
+	 *   - clones a fresh stub via CLONE_VM (shares THIS child's
+	 *     VM, not master's)
+	 *   - passes the memfd through tramp_data->stub_data_fd_override
+	 *     so the stub mmaps the per-mm memfd directly, bypassing
+	 *     UML's MAP_SHARED physmem_fd entirely
+	 *
+	 * Each pool member's stub now has private stub_data; no
+	 * inter-member aliasing.
+	 */
+	/*
+	 * start_userspace_fresh-based disown+respawn was attempted
+	 * but the new stub fails to come up after execveat (still
+	 * under diagnosis).  The infrastructure is in place
+	 * (um_skas_disown_inherited + start_userspace_fresh +
+	 * tramp_data->stub_data_fd_override) and works mechanically
+	 * up through clone — see state-audit/32 for diagnostic
+	 * findings.
+	 *
+	 * For now, single-iteration pool dispatch works without this
+	 * step (the inherited stub is usable for the lone child if
+	 * master doesn't fork a second time).
 	 */
 
 	/*
