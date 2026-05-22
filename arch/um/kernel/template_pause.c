@@ -390,15 +390,6 @@ child_entry_pool_member(void)
 
 		if (dret > 0 && id) {
 			(void)start_userspace_fresh(id);
-			/*
-			 * Bulk-push init.sh's existing PTEs to the new
-			 * stub.  Without this, init.sh's first userspace
-			 * access SIGSEGVs and the lazy fault-recovery
-			 * path is too slow.  um_skas_force_resync_mm
-			 * walks all VMAs, marks every present PTE
-			 * _PAGE_NEEDSYNC, then triggers um_tlb_sync
-			 * which calls mm_region_added for each page.
-			 */
 			if (current->mm)
 				(void)um_skas_force_resync_mm(current->mm);
 		}

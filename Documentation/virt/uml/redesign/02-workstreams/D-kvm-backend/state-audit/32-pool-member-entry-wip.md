@@ -444,6 +444,43 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     Wire-up gated again (single-iter PASS preserved) until that
     helper lands.  Infrastructure all stays in tree.
 
+    UPDATE 2026-05-22 (day-2 attempt 8 — um_skas_force_resync_mm):
+    Implemented and committed (85227a0552d9).  Walks all VMAs in
+    init.sh's mm, marks every present PTE _PAGE_NEEDSYNC, then
+    triggers um_tlb_sync to push them to the fresh stub via
+    mm_region_added.
+
+    Wire-up disown+fresh+resync in child_entry_pool_member.
+
+    Single-iter pool-member-smoke: PASS (init.sh → MEMBER_DONE).
+
+    Sustained-smoke (N=3): iter 1 PASS (full execution to
+    MEMBER_DONE), iter 2 RUNS INIT.SH but segfaults inside
+    libc.so.6 at offset 0xf7490 (BUG: zap_pid_ns_processes
+    panics the iter 2 child kernel).
+
+    Diagnostic trace shows iter 2's child:
+      * receives valid current->mm at child_entry_pool_member
+      * fresh stub clones successfully
+      * MM_NONNULL_BEFORE_RESYNC fires
+      * MM_PRE_US (mm) is still valid before userspace()
+      * init.sh starts executing
+      * Eventually segfaults at libc address — one specific
+        page not properly mapped/populated
+
+    iter 3+ has mm=NULL at child_entry — master's state was
+    corrupted by iter 2's panic propagation.
+
+    Next bounded step: identify what's at libc offset 0xf7490
+    and why iter 2 segfaults there but iter 1 doesn't.  Possible
+    causes:
+      * pte_mkneedsync of an iter-1 child's pgtable CoW page
+        leaked back to master somehow
+      * iter 2's resync missing a specific VMA range
+      * libc's TLS / GOT setup needs special handling
+
+    Single-iter pool-member-smoke STAYS PASS.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
