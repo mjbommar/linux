@@ -140,6 +140,23 @@ static bool template_pause_private_stack_armed_flag __read_mostly = true;
  */
 static bool template_pause_pivot_test_armed_flag __read_mostly;
 
+/*
+ * Pool-member arm.  Off by default.  Armed by
+ * `um_template_pause_pool_member=1` on the kernel cmdline.
+ *
+ * When set, master uses os_template_pause_fork_clone_to(@entry) and
+ * the child runs `child_entry_pool_member()` on the private stack:
+ * preempt_enable + host signal restore + SKAS stub respawn + drop
+ * into userspace() — the canonical UML "resume the userspace task"
+ * pattern.  The result: each post-fork child becomes a long-lived
+ * UML kernel running init.sh's continuation.
+ *
+ * This is the Memo 09 §2 design realized end-to-end.  See
+ * Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+ * state-audit/31-path-a-kernel-integration.md §3 for the rationale.
+ */
+static bool template_pause_pool_member_armed_flag __read_mostly;
+
 /* Diagnostic only — counts how many SIGSTOP/SIGCONT cycles this
  * process (or any of its forked descendants that still share the
  * .data segment) has been through.  A fresh fork() inherits the
@@ -208,6 +225,18 @@ static int __init template_pause_pivot_test_setup(char *str)
 }
 __setup("um_template_pause_pivot_test", template_pause_pivot_test_setup);
 
+static int __init template_pause_pool_member_setup(char *str)
+{
+	if (str && str[0] == '=' && str[1] == '1')
+		template_pause_pool_member_armed_flag = true;
+	else if (str && str[0] == '\0')
+		template_pause_pool_member_armed_flag = true;
+	if (template_pause_pool_member_armed_flag)
+		pr_warn("template_pause: POOL-MEMBER mode = ARMED — M-fork child will drop into userspace() as a long-lived pool member.\n");
+	return 1;
+}
+__setup("um_template_pause_pool_member", template_pause_pool_member_setup);
+
 /*
  * Child entry for Path A pivot-test mode.  Runs on a MAP_PRIVATE
  * stack allocated by os_template_pause_fork_clone_to() — does NOT
@@ -244,6 +273,69 @@ child_entry_pivot_test(void)
 			      : "r" (erax), "r" (erdi)
 			      : "rcx", "r11", "memory");
 	}
+	__builtin_unreachable();
+}
+
+/*
+ * Real pool-member child entry.  Runs on a MAP_PRIVATE 8 KiB stack
+ * post-clone (allocated by os_template_pause_fork_clone_to()).
+ *
+ * UML resolves `current` via cpu_tasks[uml_curr_cpu()] (a per-CPU
+ * table — see arch/um/include/asm/current.h), NOT thread_info-on-
+ * stack.  So `current` still points at init.sh's task struct (the
+ * one that called write to /proc/um/template_pause), even from our
+ * private stack.
+ *
+ * Sequence:
+ *
+ *   1. preempt_enable() — master held preempt_disable across fork.
+ *   2. os_template_pause_signals_restore_host() — master blocked
+ *      host signals pre-fork; child must unblock so timer ticks,
+ *      SIGIO, SIGCHLD reach the seccomp dispatch loop.
+ *   3. PT_REGS_SET_SYSCALL_RETURN(init.sh's regs, write_count) —
+ *      the /proc write that triggered template_pause is "returning"
+ *      with the byte count.  We pick a fixed value (11 = length of
+ *      "fork-smoke\n") for the smoke harness; production would
+ *      arrange for master to stash the real count before fork.
+ *   4. um_skas_respawn_all_stubs() — master tore the stubs down
+ *      pre-fork (see fork_on_resume_loop step (A)).  Child needs
+ *      a fresh stub for its own userspace.
+ *   5. userspace(&current->thread.regs.regs) — drop into the
+ *      seccomp dispatch loop forever, pumping init.sh's userspace.
+ *      Never returns.
+ */
+static void __noreturn
+child_entry_pool_member(void)
+{
+	static const char enter_msg[] = "POOL_ENTER\n";
+	register long rax asm("rax") = 1;
+	register long rdi asm("rdi") = 1;
+	register long rsi asm("rsi") = (long)enter_msg;
+	register long rdx asm("rdx") = sizeof(enter_msg) - 1;
+
+	asm volatile ("syscall"
+		      : "+r" (rax)
+		      : "r" (rdi), "r" (rsi), "r" (rdx)
+		      : "rcx", "r11", "memory");
+
+	preempt_enable();
+	(void)os_template_pause_signals_restore_host();
+
+	/*
+	 * Set init.sh's syscall return value.  AX was -ENOSYS (master
+	 * never finished the syscall return path for the write to
+	 * /proc/um/template_pause).  Init.sh wrote "fork-smoke\n" (11
+	 * bytes); set RAX = 11 so the shell sees write succeed.
+	 */
+	PT_REGS_SET_SYSCALL_RETURN(&current->thread.regs, 11);
+
+	/*
+	 * Drop into userspace forever.  With master's stub teardown
+	 * gated off in pool_member mode (see fork_on_resume_loop step
+	 * A), the per-mm turnstile mutex is intact and seccomp_vcpu_run
+	 * can take it.
+	 */
+	userspace(&current->thread.regs.regs);
 	__builtin_unreachable();
 }
 
@@ -698,13 +790,25 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		 * 2026-05-19-next-sprint/09-fork-server-PHASE2A-DESIGN.md
 		 * §2 for the full hazard model.
 		 */
-		n = um_skas_teardown_all_stubs();
-		if (n < 0) {
-			pr_err("template_pause: stub teardown failed: %d\n", n);
-			os_snapshot_unblock_iter_signals();
-			return n;
+		/*
+		 * Pool-member mode (Memo 09 §2) needs master to keep stubs
+		 * ALIVE across fork so the post-fork child inherits a
+		 * working per-mm SKAS context (turnstile mutex, mm_id
+		 * stack page).  Skip teardown in that mode; see
+		 * state-audit/32-pool-member-entry-wip.md.
+		 */
+		if (template_pause_pool_member_armed_flag) {
+			pr_info("template_pause: skipping pre-fork stub teardown (pool_member mode keeps SKAS state)\n");
+			n = 0;
+		} else {
+			n = um_skas_teardown_all_stubs();
+			if (n < 0) {
+				pr_err("template_pause: stub teardown failed: %d\n", n);
+				os_snapshot_unblock_iter_signals();
+				return n;
+			}
+			pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
 		}
-		pr_info("template_pause: torn down %d stub(s) pre-fork\n", n);
 
 		/*
 		 * (A.5) Block ALL host-level signals via raw
@@ -782,7 +886,10 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		 *
 		 * Default path: __NR_fork + post-fork SIGKILL.  See B1.
 		 */
-		if (template_pause_pivot_test_armed_flag)
+		if (template_pause_pool_member_armed_flag)
+			child_pid = os_template_pause_fork_clone_to(
+				child_entry_pool_member);
+		else if (template_pause_pivot_test_armed_flag)
 			child_pid = os_template_pause_fork_clone_to(
 				child_entry_pivot_test);
 		else if (template_pause_private_stack_armed_flag)
@@ -922,6 +1029,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 		    !template_pause_mfc_diag_armed_flag &&
 #endif
+		    !template_pause_pool_member_armed_flag &&
 		    !template_pause_pivot_test_armed_flag &&
 		    !template_pause_private_stack_armed_flag) {
 			/* x86_64 __NR_kill = 62, SIGKILL = 9.  Skipped in
