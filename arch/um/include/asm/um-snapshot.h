@@ -66,10 +66,23 @@ void um_snapshot_ready(const char *named_point);
  */
 void um_snapshot_worker_init(void);
 
+/*
+ * Replicate master's physmem_fd content into a fresh per-member
+ * memfd, swap the kernel-side MAP_SHARED mapping to the new fd,
+ * and update the global physmem_fd so subsequent stub mmaps also
+ * use the new fd.  Called by pool-member fork-child entry to
+ * physically isolate this member from master and siblings while
+ * preserving kernel↔stub coherence within the member.
+ *
+ * Returns 0 on success, -errno on failure.
+ */
+int um_pool_replicate_physmem(void);
+
 #else /* !CONFIG_UM_SNAPSHOT_FORKSERVER */
 
 static inline void um_snapshot_ready(const char *named_point) { }
 static inline void um_snapshot_worker_init(void) { }
+static inline int um_pool_replicate_physmem(void) { return 0; }
 
 #endif /* CONFIG_UM_SNAPSHOT_FORKSERVER */
 

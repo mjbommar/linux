@@ -417,6 +417,96 @@ int os_protect_memory(void *addr, unsigned long len, int r, int w, int x)
 	return 0;
 }
 
+/*
+ * os_remap_region_shared() — atomically swap the backing fd for a
+ * MAP_SHARED region.  Used by pool-member fork-child entry to
+ * isolate physmem: replicate master's physmem content into a fresh
+ * memfd, then point the kernel's MAP_SHARED mapping at the new fd.
+ *
+ * MAP_SHARED is preserved across the swap (kernel↔stub coherence
+ * within a member relies on both ends mapping the same fd
+ * MAP_SHARED; see arch/um/kernel/skas/stub.c which always uses
+ * MAP_SHARED | MAP_FIXED for STUB_SYSCALL_MMAP).
+ *
+ * The replacement is VMA-atomic at the host kernel level; kernel
+ * code executing from the affected VA range continues because the
+ * new mapping's pages have identical bytes (replicated via
+ * copy_file_range before this call).
+ *
+ * Returns 0 on success, -errno on failure (old mapping intact).
+ */
+int os_remap_region_shared(void *addr, int fd, unsigned long long off,
+			   unsigned long len)
+{
+	void *loc;
+
+	loc = mmap64(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+		     MAP_SHARED | MAP_FIXED | MAP_POPULATE, fd, off);
+	if (loc == MAP_FAILED)
+		return -errno;
+	if (loc != addr)
+		return -EINVAL;
+	/* Mirror os_map_memory()'s MADV_UNMERGEABLE so KSM doesn't
+	 * scan and merge the replicated pages (latency noise source).
+	 */
+	(void)madvise(loc, len, MADV_UNMERGEABLE);
+	return 0;
+}
+
+/*
+ * os_create_memfd() — create a fresh, anonymous memfd sized to
+ * @size bytes.  Returns the new fd on success, -errno on failure.
+ * Caller owns the fd.
+ *
+ * Used by per-pool-member physmem isolation: caller mmaps the new
+ * fd into a scratch VA, memcpy's master's physmem content into it,
+ * then re-mmaps the kernel-side physmem region MAP_SHARED|MAP_FIXED
+ * over the new fd (see um_pool_replicate_physmem).
+ *
+ * memfd_create is preferred over a tmpfs tempfile because it
+ * (a) is anonymous (no name collisions, no /tmp pressure) and
+ * (b) cannot be backdoored via path interception.
+ */
+/*
+ * os_mmap_rw_scratch() — mmap @fd at @off for @len bytes as a
+ * scratch VA (host-chosen address, MAP_SHARED, RW).  Stores the
+ * resulting VA in *@out_addr.  Returns 0 on success or -errno on
+ * failure (*@out_addr untouched).
+ *
+ * Used by per-pool-member physmem isolation: caller mmaps the
+ * fresh memfd as scratch, memcpy's master's physmem content into
+ * it, then re-mmaps the kernel VA over the new fd.
+ */
+int os_mmap_rw_scratch(int fd, unsigned long long off, unsigned long len,
+		       void **out_addr)
+{
+	void *loc;
+
+	loc = mmap64(NULL, len, PROT_READ | PROT_WRITE,
+		     MAP_SHARED, fd, off);
+	if (loc == MAP_FAILED)
+		return -errno;
+	*out_addr = loc;
+	return 0;
+}
+
+int os_create_memfd(const char *name, unsigned long long size)
+{
+	int fd, err;
+
+	fd = syscall(__NR_memfd_create, name, 0);
+	if (fd < 0)
+		return -errno;
+
+	if (ftruncate(fd, size) < 0) {
+		err = -errno;
+		close(fd);
+		return err;
+	}
+
+	return fd;
+}
+
 int os_unmap_memory(void *addr, int len)
 {
 	int err;

@@ -135,68 +135,115 @@ this roadmap supersedes.
 
 ## 3. The architectural fix: per-pool-member physmem backing
 
-### 3.1 Two viable approaches
+### 3.1 Three approaches, two ruled out empirically
 
-**Option A: MAP_PRIVATE flip.**
+**Option A: MAP_PRIVATE flip (ruled out).**
 
 Change `os_map_memory`'s physmem flags from `MAP_SHARED` to
-`MAP_PRIVATE`.  Fork() then gets host-kernel page-table CoW
-for free.  Each forked UML kernel writes to its own private
-copy of any page it modifies.  Identical reads still share
-underlying pages until first write.
+`MAP_PRIVATE`.  Idea: fork() then gets host-kernel page-table
+CoW for free.
 
-  * **Pro:** O(1) per fork at fork time; host kernel does the
-    work via standard CoW PTE bits.  Memory amplification stays
-    at ~"sum of dirty deltas" instead of "N × master size".
-  * **Pro:** Hits the latency target (5 ms p50) trivially.
-  * **Con:** Breaks D36 v2 snapshot-to-disk path, which reads
-    `physmem_fd` directly to serialize guest RAM.  With
-    MAP_PRIVATE, the fd content is the pre-write template; the
-    actual process state is in CoW'd private pages.
-  * **Con:** May break other consumers that expect to read
-    physmem via the backing fd.
-  * **Mitigation for snapshot writer:** add a separate path that
-    reads via `/proc/self/mem` (or `process_vm_readv`) to capture
-    the post-write process state, not the template.
+  * **Why it doesn't work:** UML kernel↔stub coherence relies
+    on both ends mapping `physmem_fd` MAP_SHARED.  Concretely,
+    `arch/um/kernel/skas/stub.c::syscall_handler` issues
+    `STUB_MMAP_NR` with hard-coded `MAP_SHARED | MAP_FIXED`
+    (line 54).  If the kernel-side mapping flips to MAP_PRIVATE,
+    kernel writes at kernel VAs go to anonymous CoW pages and
+    never reach the stub's MAP_SHARED view of the same fd; the
+    very first userspace page delivery breaks (observed:
+    init.sh segfault at libc 0x4014c490 on iter-1 with private
+    kernel mapping).
+  * Flipping BOTH ends to MAP_PRIVATE doesn't help either —
+    different VMAs of the same file get independent CoW pages,
+    so kernel and stub still diverge.
 
-**Option B: per-member memfd at fork time.**
+**Option B: per-member memfd at fork time, runtime mmap-FIXED
+swap (attempted; empirically broken).**
 
-In `child_entry_pool_member`, create a fresh memfd, copy
-master's physmem content into it via `copy_file_range`, and
-remap the physmem VA range to back-onto the new memfd.
+In `child_entry_pool_member`, create a fresh memfd, replicate
+master's physmem content into it via mmap+memcpy, and
+mmap-FIXED swap the kernel-side mapping over to the new fd.
+Update the global `physmem_fd` so new stubs (and future
+`phys_mapping` callers) reference the new fd.
 
-  * **Pro:** No global flag change.  D36 snapshot writer
-    unaffected (master's fd is still the source).
-  * **Pro:** Each pool member's backing is explicitly private;
-    no surprise sharing.
-  * **Con:** ~50 ms memcpy per fork for 128 MiB physmem.  Misses
-    the 5 ms p50 target by 10×.
-  * **Con:** Memory amplification grows linearly with member
-    count (each member holds a full copy in its memfd).  Misses
-    the ≤200 MiB at N=100 target.
-  * **Mitigation:** lazy-copy via reflink (`copy_file_range`
-    falls back to dense copy on tmpfs; on btrfs/zfs it's O(1)).
-    Move tmpfs → reflink-capable backing.  Adds operator
-    complexity.
+  * **Implementation status:** helpers
+    (`os_create_memfd`, `os_mmap_rw_scratch`,
+    `os_remap_region_shared`, `um_pool_replicate_physmem`)
+    landed.  See `arch/um/os-Linux/process.c` and
+    `arch/um/kernel/physmem.c`.
+  * **Empirical failure:** with the call wired into
+    `child_entry_pool_member` (any of three positions —
+    pre-state-restore, post-state-restore, post-start-user-
+    space-fresh), single-iter pool-member smoke regresses.
+    Symptom: bash reaches `TPPM_MEMBER_ALIVE_1` then `sleep 1`
+    never returns — SIGALRM does not fire and the kernel
+    tick path stalls.  `local_irq_save` around the mmap swap
+    does not help.
+  * **Root cause hypothesis:** the mmap-FIXED swap of a 121 MiB
+    region disrupts host-kernel state that UML's signal
+    delivery / scheduler tick depends on.  Possibilities:
+    page-cache reference tracking against the old fd, stale
+    PTE caching for the sigaltstack-adjacent pages, KSM/THP
+    interaction, or a UML scheduler dependency on the original
+    mapping identity.  Not isolated yet.
+  * **Call site disabled** (with `if (0) {…}` wrapper) until
+    investigation completes; helpers stay in tree.
 
-### 3.2 Recommendation
+**Option C: per-member memfd, set up at master boot via
+Kconfig.**
 
-**Land Option A (MAP_PRIVATE) gated behind a Kconfig
-(`CONFIG_UM_POOL_MEMBER_FORK=y`) so the snapshot-to-disk path
-stays default.**
+Have master's `setup_physmem` create the memfd-backed file from
+the start, behind `CONFIG_UM_POOL_MEMBER_FORK=y`.  Each forked
+member is then a CoW (MAP_SHARED inherited via fork inherits
+the same fd reference; the member can re-`open(/proc/self/fd/N)`
+to detach).  This avoids the runtime mmap-FIXED swap entirely.
 
-  * The pool model is the production target for the syzkaller
-    integration; the snapshot-to-disk path is a separate
-    feature.
-  * MAP_PRIVATE matches the memo 09 vision's stated assumption
-    ("each child is a CoW duplicate").
-  * The implementation is a single-line change in
-    `os_map_memory` + Kconfig + a new fork-time path that
-    `madvise(MADV_DONTFORK)` regions registered as
-    `UM_MMAP_REMAP_IN_WORKER` (i.e., KASAN shadow).
-  * If/when D36 snapshot-to-disk needs to coexist, add a
-    `process_vm_readv`-based writer that reads the running
-    UML kernel's post-CoW pages.
+  * **Pro:** No runtime mapping disruption; signal/timer paths
+    untouched.
+  * **Pro:** Master's mapping is always MAP_SHARED on memfd;
+    snapshot-to-disk (D36) continues to read the same file
+    directly.
+  * **Con:** Doesn't solve sharing across forks by itself —
+    fork inheritance of MAP_SHARED still aliases members to
+    master.  Combine with `dup`-then-`copy_file_range`-to-new-
+    memfd in child to break the aliasing (with cross-fs EXDEV
+    handled by mmap+memcpy fallback, as in the Option B
+    helpers).  The CRITICAL difference vs Option B: do the
+    replication BEFORE master ever maps physmem at kernel VAs
+    (i.e., during master boot for the per-member template), so
+    no mmap-FIXED swap is ever needed at member-fork time.
+  * **Status:** designed but not implemented.  Recommended
+    next step.
+
+### 3.2 Recommendation (revised after empirical findings)
+
+**Option C is the most promising path forward.**
+
+Reasoning:
+
+  * Option A (MAP_PRIVATE flip) is fundamentally incompatible
+    with UML's hard-coded stub `MAP_SHARED` mmap in
+    `stub.c::syscall_handler`.  Cannot be fixed without a
+    significant stub rewrite.
+  * Option B (runtime mmap-FIXED swap) is implemented and
+    correct in theory, but empirically disrupts UML's
+    signal/timer subsystem.  Until the disruption is root-
+    caused, this approach is blocked.
+  * Option C (per-member memfd, set up at boot, replicated
+    in child via the existing helpers) avoids the runtime
+    mmap swap.  The replication can still use the
+    `os_create_memfd` + `os_mmap_rw_scratch` + memcpy
+    primitives, but at MASTER BOOT TIME (before any kernel-
+    side mapping is established).  Member fork inherits via
+    standard fork CoW on master's MAP_SHARED memfd mapping;
+    member then `dup` + replicate to a new memfd and the
+    kernel mapping at member's address space stays MAP_SHARED
+    on the (now per-member) fd.  The KEY trick: the kernel-VA
+    mapping is established ONCE per process via the normal
+    boot path, never re-established via MAP_FIXED.
+  * Estimated cost: 5–50 ms per member fork depending on
+    sparse-page density (most of physmem is zeros during
+    syzkaller-style boots).  Acceptable for p99.
 
 ---
 
@@ -322,7 +369,11 @@ Either unblocks Step A.
 | AFL preconditions in `assert_fork_safety` | landed (`757888e5680c`) |
 | Identity blob parse/apply split | landed (`4d8b6bc65d3d`) |
 | Pre-SIGSTOP host signal block | landed (`a1d6d0020ccc`) |
-| Sustained-smoke XFAIL → PASS | **PENDING — gated on Step A** |
+| Replication primitives (memfd_create + mmap+memcpy + swap) | landed; call site disabled |
+| Step A — Option A (MAP_PRIVATE) | ruled out: stub stays MAP_SHARED |
+| Step A — Option B (runtime mmap-FIXED swap) | implemented, regresses timer; investigation pending |
+| Step A — Option C (boot-time per-member memfd) | designed; recommended next step |
+| Sustained-smoke XFAIL → PASS | **PENDING — Step A unresolved** |
 | Pool-bench N=100 acceptance | pending |
 | syzkaller vm/uml shim | pending |
 | Series 7 LKML send | gated on soak |

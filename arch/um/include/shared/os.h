@@ -288,6 +288,33 @@ extern int os_map_memory(void *virt, int fd, unsigned long long off,
 			 unsigned long len, int r, int w, int x);
 extern int os_protect_memory(void *addr, unsigned long len,
 			     int r, int w, int x);
+/*
+ * Atomically swap the backing fd of a MAP_SHARED region.  Used by
+ * pool-member physmem isolation: after replicating master's
+ * physmem content into a fresh memfd, point the kernel's MAP_SHARED
+ * mapping at the new fd.  MAP_SHARED is preserved so that kernel↔
+ * stub coherence within the member (both ends mmap the same fd
+ * MAP_SHARED) keeps working.
+ */
+extern int os_remap_region_shared(void *addr, int fd,
+				  unsigned long long off,
+				  unsigned long len);
+
+/*
+ * Create a fresh anonymous memfd of @size bytes.  Returns the new
+ * fd on success, -errno on failure.  Caller owns the fd.  Used by
+ * per-pool-member physmem isolation as the backing for a child-
+ * private replica of master's physmem content.
+ */
+extern int os_create_memfd(const char *name, unsigned long long size);
+
+/*
+ * mmap @fd at @off for @len bytes as a scratch VA (host-chosen
+ * address, MAP_SHARED, RW).  On success, stores VA in *@out_addr
+ * and returns 0; on failure returns -errno (out_addr untouched).
+ */
+extern int os_mmap_rw_scratch(int fd, unsigned long long off,
+			      unsigned long len, void **out_addr);
 extern int os_unmap_memory(void *addr, int len);
 extern int os_drop_memory(void *addr, int length);
 extern int os_drop_caching(void *addr, int length);	/* SMP-T26: madvise(DONTNEED) */

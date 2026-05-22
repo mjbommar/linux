@@ -156,6 +156,134 @@ int phys_mapping(unsigned long phys, unsigned long long *offset_out)
 }
 EXPORT_SYMBOL(phys_mapping);
 
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+/**
+ * um_pool_replicate_physmem() — fork-child entry helper that
+ * isolates this UML kernel's physmem from master and sibling pool
+ * members.
+ *
+ * Replicates master's physmem_fd content into a fresh memfd, swaps
+ * the kernel-side MAP_SHARED mapping over to the new fd, and
+ * updates the global physmem_fd so that:
+ *
+ *   - Subsequent kernel slab/page-allocator writes land in the
+ *     child-private memfd.
+ *   - phys_mapping() returns the new fd, so new stubs spawned by
+ *     start_userspace_fresh() also mmap the new fd (kernel↔stub
+ *     coherence within the member preserved by both ends using
+ *     MAP_SHARED on the same fd).
+ *   - Master's physmem_fd and master's existing stubs are
+ *     untouched (they continue using the original fd).
+ *
+ * MUST be called from the pool-member child entry, AFTER Path A
+ * pivot (private kernel stack so the MAP_FIXED remap doesn't
+ * unmap the page we're running on) and BEFORE any kernel slab
+ * write that would otherwise leak back to master.
+ *
+ * Returns 0 on success, -errno on failure (kernel still mapped to
+ * the original physmem_fd; caller continues but iters > 1 will
+ * crash via aliasing).
+ */
+int um_pool_replicate_physmem(void)
+{
+	void *scratch;
+	int new_fd, old_fd, ret;
+	unsigned long long phys_off;
+	unsigned long flags;
+
+	if (physmem_fd < 0)
+		return -EINVAL;
+	if (!physmem_mmap_region.base || !physmem_mmap_region.len)
+		return -EINVAL;
+
+	/* Block UML's own SIGALRM delivery for the duration — the
+	 * mmap-FIXED swap below has a brief window where the host
+	 * kernel transitions VMAs; if SIGALRM interrupted mid-swap
+	 * and the handler touched the remapped VA, we'd risk a
+	 * spurious fault.  block_signals_hard() blocks SIGALRM,
+	 * SIGIO, SIGVTALRM, SIGUSR1 — exactly the IRQ-class signals
+	 * UML uses to drive its scheduler tick.
+	 */
+	local_irq_save(flags);
+
+	new_fd = os_create_memfd("um-pool-physmem", physmem_size);
+	if (new_fd < 0) {
+		local_irq_restore(flags);
+		return new_fd;
+	}
+
+	/* mmap the new fd as a scratch VA so we can populate it
+	 * from the kernel's existing physmem-VA mapping (which is
+	 * still backed by master's physmem_fd at this point).
+	 */
+	ret = os_mmap_rw_scratch(new_fd, 0, physmem_size, &scratch);
+	if (ret < 0) {
+		os_close_file(new_fd);
+		return ret;
+	}
+
+	/* Replicate master's full physmem content into the new
+	 * memfd.  The source VA is the kernel-side mapping of
+	 * physmem_fd, which spans __pa(base) .. __pa(base)+len.
+	 * Bytes outside that range (the kernel image region at
+	 * offset 0..reserve) come from physmem_fd via a direct
+	 * read.
+	 */
+	phys_off = (unsigned long long)__pa((unsigned long)
+					    physmem_mmap_region.base);
+	memcpy((char *)scratch + phys_off, physmem_mmap_region.base,
+	       physmem_mmap_region.len);
+
+	if (phys_off > 0) {
+		/* Read [0..phys_off) from master's fd into scratch.
+		 * Holds kernel image bytes + the syscall_stub_start
+		 * page that setup_physmem() wrote there at boot.
+		 */
+		ret = os_seek_file(physmem_fd, 0);
+		if (ret == 0)
+			ret = os_read_file(physmem_fd, scratch, phys_off);
+		if (ret < 0) {
+			os_unmap_memory(scratch, physmem_size);
+			os_close_file(new_fd);
+			return ret;
+		}
+	}
+
+	if (os_unmap_memory(scratch, physmem_size) < 0) {
+		os_close_file(new_fd);
+		local_irq_restore(flags);
+		return -EFAULT;
+	}
+
+	/* Swap the kernel-side mapping to the new fd at the same
+	 * VA + offset.  MAP_SHARED preserves kernel↔stub coherence
+	 * within this member (the stub uses MAP_SHARED, so both
+	 * ends mmap the same backing fd).
+	 */
+	ret = os_remap_region_shared(physmem_mmap_region.base, new_fd,
+				     phys_off, physmem_mmap_region.len);
+	if (ret < 0) {
+		os_close_file(new_fd);
+		local_irq_restore(flags);
+		return ret;
+	}
+
+	old_fd = physmem_fd;
+	physmem_fd = new_fd;
+	physmem_mmap_region.backing_fd = new_fd;
+
+	/* DON'T close old_fd for now — leaving it open in case
+	 * something still references it.  Will revisit fd hygiene
+	 * once sustained-smoke is stable.
+	 */
+	(void)old_fd;
+
+	local_irq_restore(flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(um_pool_replicate_physmem);
+#endif /* CONFIG_UM_SNAPSHOT_FORKSERVER */
+
 static int __init uml_mem_setup(char *line, int *add)
 {
 	char *retptr;
