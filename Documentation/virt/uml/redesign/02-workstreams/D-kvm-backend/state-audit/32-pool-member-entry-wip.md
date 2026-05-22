@@ -329,6 +329,45 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     continue_child arm removed (still doesn't fix the underlying
     issue).  Pre-SIGSTOP block kept as legitimate hardening.
 
+    UPDATE 2026-05-22 (day-2 attempt 5 — per-member stub allocation):
+    Implemented `um_skas_disown_inherited()` in
+    arch/um/kernel/skas/mmu.c: iterates the child's CoW'd mm_list,
+    forgets master's stub_pid/sock (no kill), and swaps each
+    id->stack to a FRESH `__get_free_pages` allocation.  Paired
+    with `um_skas_respawn_all_stubs()` to spawn a per-child stub
+    via start_userspace → clone(CLONE_VM) under the CHILD's host
+    process context.
+
+    Result: start_userspace's first clone fails — the child's
+    new stub still corrupts.  Investigation:
+
+      * phys_mapping(uml_to_phys(id->stack)) returns UML's
+        global physmem_fd plus an offset.
+      * physmem_fd is mapped MAP_SHARED across ALL forked UML
+        kernels (master, every pool-member child, every stub).
+      * `__get_free_pages` in the child returns a kernel VA, but
+        that VA resolves to a physmem_fd offset that's still
+        shared with every other UML kernel and stub.
+      * "Fresh" child-side allocation provides VA isolation but
+        NOT physical isolation.  The stub mmaps physmem_fd at
+        that offset and sees the same physical bytes master sees.
+
+    ARCHITECTURAL LIMIT: UML's stub-data isolation model is
+    fundamentally based on each UML kernel having its OWN
+    physmem_fd.  Forked UML kernels (master + pool members) all
+    share master's physmem_fd via MAP_SHARED.  Per-member stub
+    isolation requires per-member physmem_fd — a refactor of
+    init_new_context / arch_um_load_physmem to allow per-pool-
+    member memfd backing.
+
+    `um_skas_disown_inherited()` is preserved in the tree as
+    infrastructure for that future workstream — when per-member
+    physmem lands, the helper is half the wiring already done.
+
+    state-audit/32 step 19e refined: the answer is NOT "give
+    child its own stub_data" alone — it's "give child its own
+    physmem_fd, which gives it its own stub_data automatically."
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
