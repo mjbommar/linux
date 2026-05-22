@@ -368,6 +368,47 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     child its own stub_data" alone — it's "give child its own
     physmem_fd, which gives it its own stub_data automatically."
 
+    UPDATE 2026-05-22 (day-2 attempt 6 — focused per-mm memfd
+    backing for stub_data):
+
+    Realized the previous "needs physmem refactor" framing was
+    overly broad.  Only the stub_data page needs per-pool-member
+    physical isolation, not all of physmem.  Implemented:
+
+      * `arch/um/os-Linux/skas/process.c` — added field
+        `tramp_data->stub_data_fd_override`.  When >= 0,
+        userspace_tramp uses it as init_data.stub_data_fd
+        instead of phys_mapping(physmem_fd) — the stub mmaps the
+        override fd at offset 0.  Also added fcntl(F_SETFD, 0)
+        on stub_code_fd when it differs from stub_data_fd, so
+        physmem_fd survives execveat in the override path.
+
+      * `start_userspace_fresh(struct mm_id *id)` — memfd_create
+        a per-mm stub_data backing, ftruncate to
+        STUB_DATA_PAGES * PAGE_SIZE, mmap MAP_SHARED into the
+        calling UML kernel's address space, set mm_id->stack to
+        the new VA, clone the stub with stub_data_fd_override
+        set to the memfd.
+
+      * Wire-up in child_entry_pool_member: paired with
+        um_skas_disown_inherited(), DIS_R=1 (mm_id disowned),
+        SUF_ENTER, TR_OV=0xe (override fd 14) all fire.
+        clone() returns successfully to parent (CLONE_VFORK
+        unblocks).
+
+    Failure: stub child fails to complete its post-execveat
+    handshake.  wait_stub_done_seccomp times out / mm_id->pid
+    transitions to -1 via SIGCHLD path.  Stub binary's mmap of
+    stub_data from the memfd should succeed (memfd is ftruncated,
+    CLOEXEC cleared, fd survives execveat) but evidently does
+    not.  Further diagnosis needs stub-side instrumentation
+    (raw-syscall write inside stub_exe.c before/after each mmap).
+
+    Status: infrastructure committed (06968e3f5f27), NOT wired
+    into child_entry_pool_member.  Next session's first action:
+    instrument stub_exe.c with exit codes 11/12/13/14 + raw-
+    syscall write to a debug fd to identify which mmap fails.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
