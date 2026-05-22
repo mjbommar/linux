@@ -481,6 +481,58 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
 
     Single-iter pool-member-smoke STAYS PASS.
 
+    UPDATE 2026-05-22 (day-2 attempt 9 — state restoration):
+    Identified that libc+0xf7490 is `hlt` inside `_exit@@GLIBC_2.2.5`
+    — the "trap if exit_group syscall returned" defensive instruction
+    after the exit_group syscall.  For it to execute, exit_group
+    returned to userspace (didn't kill the process).
+
+    Root-cause diagnostic chain:
+      1. Kernel slab allocations (task_struct, signal_struct,
+         mm_struct) live in UML's MAP_SHARED physmem_fd, NOT CoW'd
+         across forked UML kernels.
+      2. When iteration N's child runs init.sh's `exit 0`, its
+         do_exit path mutates these fields (PF_EXITING set,
+         signal->live decremented to 0, group_exit_code set, etc.)
+      3. Those writes propagate back to master and to iteration
+         N+1's child.
+      4. Iter 2's do_exit sees signal->live = 0, decrements to -1,
+         group_dead = false → skips is_global_init panic →
+         find_child_reaper → zap_pid_ns_processes → BUG.
+
+    Fix committed (aabfd4082413): reset task/signal/mm fields in
+    child_entry_pool_member entry.  task->flags &= ~PF_EXITING, etc.
+    signal->live = 1, mm refcounts = 2.
+
+    Result: iter 2's do_exit panic shape now MATCHES iter 1's
+    "Attempted to kill init" — kernel-state consistency achieved
+    across iterations.
+
+    REMAINING ARCHITECTURAL LIMIT:
+
+    Iter 2's bash STILL segfaults at libc hlt before reaching
+    MEMBER_DONE.  Userspace memory (bash's heap, stack, libc
+    static state) ALSO lives in MAP_SHARED physmem_fd.  Iter 1's
+    userspace writes (modifying bash's heap during execution)
+    propagate to master and iter 2.
+
+    To make sustained dispatch fully work, the iteration must
+    EITHER:
+      * use per-pool-member physmem_fd (wholesale UML refactor)
+      * snapshot + restore bash's userspace pages between iters
+        (large kernel addition: walk init.sh's mm VMAs and
+        copy each page to a snapshot store before fork; restore
+        post-iter-N before iter-N+1 forks)
+
+    Either path is significantly larger than the in-scope Path A
+    integration.  The work landed here (disown + fresh stub +
+    force resync + kernel state reset) is the maximum that's
+    achievable without per-member physmem isolation.
+
+    Single-iter pool-member-smoke STAYS PASS.  Sustained-smoke
+    iter 1 PASS, iter 2+ documented XFAIL on userspace state
+    sharing.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
