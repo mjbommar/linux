@@ -10,10 +10,14 @@
 #
 # Exit codes:
 #   0   PASS — N members all reached MEMBER_DONE (NOT YET ACHIEVABLE)
-#   4   SKIP — kernel binary missing, OR iter 1 PASS + iter 2 hits
-#              the documented inherited-stub-aliasing panic (the
-#              expected current behavior; bug tracked in
-#              state-audit/32 §4 step 19e).
+#   4   SKIP — kernel binary missing, OR iter 1 PASS + iter 2+
+#              hits the architectural limit: UML's physmem_fd is
+#              MAP_SHARED across forked UML kernels; iter 1's
+#              userspace writes to bash's heap propagate to
+#              iter 2 via shared backing, causing bash mis-replay.
+#              Fix requires per-pool-member physmem_fd (wholesale
+#              UML refactor) or userspace page snapshot/restore.
+#              Tracked in state-audit/32.
 #   1   FAIL — iter 1 itself broke (regression in pool-member entry).
 
 set -u
@@ -161,8 +165,10 @@ if done >= N and not panic:
     print(f"PASS: {done}/{N} pool members reached MEMBER_DONE")
     sys.exit(0)
 # Iter 1 worked but subsequent iters crashed — expected today.
-print(f"XFAIL: iter 1 PASS, iter 2+ hits inherited-stub-aliasing")
-print("       (state-audit/32 §4 step 19e — needs new SKAS API)")
+print(f"XFAIL: iter 1 PASS, iter 2+ hits MAP_SHARED physmem limit")
+print("       — bash userspace pages shared across forked UML")
+print("       kernels.  Needs per-member physmem_fd refactor.")
+print("       Tracked in state-audit/32.")
 sys.exit(4)
 PYEOF
 
