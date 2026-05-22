@@ -187,11 +187,11 @@ ticks      = content.count("TPPM_MEMBER_TICK")
 done       = content.count("TPPM_MEMBER_DONE")
 panic      = "Kernel panic" in content
 ceiling    = "um_template_pause_enter+0xf" in content
-identity_apply_ok = "identity apply" not in content or \
-                    "identity apply at" not in content or \
-                    "returned 0" in content
 identity_logged = ("identity_fd=" in content or
-                   "identity blob parsed" in content)
+                   "identity blob parsed" in content or
+                   "identity-parsed" in content)
+identity_parsed = "identity-parsed" in content and \
+                  'name="pool-member-1"' in content
 
 print(f"POOL_ENTER       : {pool_enter}")
 print(f"TPPM_POST_PAUSE  : {post_pause}")
@@ -199,6 +199,7 @@ print(f"TPPM_MEMBER_ALIVE_1: {alive_1}")
 print(f"TPPM_MEMBER_TICK : {ticks}")
 print(f"TPPM_MEMBER_DONE : {done}")
 print(f"identity_fd seen : {identity_logged}")
+print(f"identity-parsed  : {identity_parsed}")
 print(f"Kernel panic     : {panic}")
 print(f"v1 ceiling IP    : {ceiling}")
 
@@ -219,6 +220,9 @@ if ticks < 3:
     sys.exit(1)
 if done < 1:
     print("FAIL: init.sh did not reach MEMBER_DONE")
+    sys.exit(1)
+if not identity_parsed:
+    print("FAIL: identity blob parse marker not found")
     sys.exit(1)
 print("PASS")
 PYEOF

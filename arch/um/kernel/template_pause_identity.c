@@ -403,6 +403,24 @@ static int apply_default_route(struct net_device *dev,
  * Must be called in process context with no locks held.  RTNL is
  * taken internally as needed.
  */
+/*
+ * um_template_identity_log_parsed() — log the blob's contents
+ * after validation.  Split out from um_template_identity_apply()
+ * so callers can verify "did the blob parse cleanly?" without
+ * also requiring a target netdev to exist (selftests with hostfs-
+ * only boots have no netdev, so the apply step returns -ENODEV
+ * even though the parse half is correct).
+ */
+void um_template_identity_log_parsed(const struct um_template_identity *blob)
+{
+	if (!blob)
+		return;
+	pr_info("template_pause: identity-parsed name=\"%s\" mac=%pM tap=\"%s\" ip=\"%s\" gw=\"%s\"\n",
+		blob->instance_name, blob->mac_addr,
+		blob->tap_name, blob->ipv4_cidr, blob->ipv4_gateway);
+}
+EXPORT_SYMBOL_GPL(um_template_identity_log_parsed);
+
 int um_template_identity_apply(const struct um_template_identity *blob)
 {
 	struct net_device *dev;
@@ -411,11 +429,19 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 	if (!blob)
 		return -EINVAL;
 
+	/*
+	 * Log the parsed blob first.  This always succeeds (blob is
+	 * non-NULL by this point) and gives selftests a reliable
+	 * marker that the read+parse pipeline worked, independent of
+	 * whether a netdev is present to apply to.
+	 */
+	um_template_identity_log_parsed(blob);
+
 	rtnl_lock();
 	dev = find_target_netdev(&init_net);
 	if (!dev) {
 		rtnl_unlock();
-		pr_warn("template_pause: no target netdev found; identity NOT applied\n");
+		pr_warn("template_pause: no target netdev found; identity NOT applied (parse OK)\n");
 		return -ENODEV;
 	}
 	pr_info("template_pause: applying identity to in-guest netdev %s (blob tap=\"%s\")\n",

@@ -34,4 +34,12 @@ __be32 um_template_identity_cidr_mask(u8 prefix_len);
  */
 int um_template_identity_apply(const struct um_template_identity *blob);
 
+/*
+ * Log the parsed identity blob to dmesg.  Always succeeds (no
+ * external state required); selftests can grep for the
+ * "identity-parsed" marker to verify the read+parse pipeline
+ * without requiring a netdev for the apply step.
+ */
+void um_template_identity_log_parsed(const struct um_template_identity *blob);
+
 #endif /* _ARCH_UM_KERNEL_TEMPLATE_PAUSE_IDENTITY_H */
