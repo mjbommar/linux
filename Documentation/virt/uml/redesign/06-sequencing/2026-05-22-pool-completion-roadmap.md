@@ -191,6 +191,7 @@ Update the global `physmem_fd` so new stubs (and future
     | (12) plain replicate, no instrumentation                          | FAIL (bash hangs in sleep) |
     | (13) replicate + post-swap timer_worker_forget+rebuild+one_shot   | FAIL (bash hangs in sleep) |
     | (14) variant 13 + post-swap os_idle_prepare() (rebuild signalfd)  | FAIL (bash hangs in sleep) |
+    | (15) replicate + 200 ms in-kernel SIGALRM drain + timer reprime    | FAIL (bash hangs in sleep) |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the

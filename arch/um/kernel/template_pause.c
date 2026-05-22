@@ -406,19 +406,9 @@ child_entry_pool_member(void)
 	 * Step A of the pool-completion roadmap (per-member
 	 * physmem isolation) — the replicate call site stays
 	 * unwired pending a fix for the post-swap idle-sleep
-	 * regression.  Variants 1-14 mapped in roadmap §3.1.
-	 * Variant 14 (rebuild timer + signalfd post-swap)
-	 * disproved the inherited-signalfd hypothesis;
-	 * variants 9-10 already established that signal
-	 * delivery itself is intact post-swap.
-	 *
-	 * Latest hypothesis: signalfd READS post-swap return
-	 * something other than SIGALRM (despite the handler
-	 * firing), OR the kernel idle loop's need_resched
-	 * check after signalfd return doesn't see bash's task
-	 * as runnable.  Both require deeper UML kernel-side
-	 * instrumentation than this dispositive-bisect series
-	 * accommodates.
+	 * regression.  Variants 1-15 mapped in roadmap §3.1
+	 * narrow but do not fix.  Helpers in tree are ready
+	 * for the eventual one-line re-wire.
 	 */
 
 	/*
