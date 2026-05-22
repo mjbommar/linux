@@ -30,13 +30,16 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/cpumask.h>
 #include <linux/errno.h>
+#include <linux/hardirq.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
@@ -721,6 +724,48 @@ static void mfc_diag_segv_handler(int sig, void *si_arg, void *uc_arg)
  */
 static int assert_fork_safety(const char *named_point)
 {
+	int violations = 0;
+
+	/*
+	 * AFL forkserver preconditions ported from
+	 * arch/um/kernel/snapshot.c::um_snapshot_assert_ready().  These
+	 * are the same invariants the C-09 v1 forkserver path enforces:
+	 * the fork-on-resume path has the same pre-fork hazard surface
+	 * (post-fork SIGIO / POSIX-timer / runqueue / signal-state
+	 * inheritance), so the same gates apply.
+	 *
+	 * See Documentation/virt/uml/redesign/02-workstreams/D-kvm-
+	 * backend/state-audit/32-pool-member-entry-wip.md and
+	 * EXTERNAL-RESEARCH §5 for the rationale.
+	 *
+	 * Use WARN_ONCE so each violation prints once with a stack
+	 * trace (diagnostic-friendly) but the function still returns
+	 * -EBUSY to refuse the fork.
+	 */
+	if (WARN_ONCE(in_hardirq() || in_softirq(),
+		      "%s(\"%s\"): fork-on-resume entered from IRQ/softirq context\n",
+		      __func__, named_point))
+		violations++;
+
+	if (WARN_ONCE(signal_pending(current),
+		      "%s(\"%s\"): fork-on-resume entered with pending signals\n",
+		      __func__, named_point))
+		violations++;
+
+	if (WARN_ONCE(num_online_cpus() > 1,
+		      "%s(\"%s\"): fork-on-resume not yet supported under SMP; park secondary vCPUs or build with NR_CPUS=1\n",
+		      __func__, named_point))
+		violations++;
+
+	if (WARN_ONCE(um_get_signals() != 1,
+		      "%s(\"%s\"): UML signals_enabled is %d at fork-on-resume entry; must be 1 per D41 signal-gating contract\n",
+		      __func__, named_point, um_get_signals()))
+		violations++;
+
+	/*
+	 * KVM-backend refusal — same as snapshot.c.  fork() under KVM
+	 * aliases /dev/kvm + per-vCPU mmap state into the child.
+	 */
 	if (um_backend && um_backend->kind == UM_BACKEND_KIND_KVM) {
 		pr_err("template_pause: fork-on-resume refused under KVM backend at \"%s\" — kvm-aware fork is a future phase\n",
 		       named_point);
@@ -742,7 +787,7 @@ static int assert_fork_safety(const char *named_point)
 		return -EBUSY;
 	}
 
-	return 0;
+	return violations ? -EBUSY : 0;
 }
 
 /*
