@@ -150,6 +150,24 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     3. If they diverge, the child's userspace() did not properly
        isolate task-level locks before exiting init.sh.
 
+    UPDATE 2026-05-21 23h: bisected by replacing userspace() with
+    raw __NR_exit_group in the child entry.  Result: iter 2 master
+    SIGSTOPs cleanly, NO panic.  Confirms the offender is inside
+    userspace() — specifically, the seccomp_vcpu_run path's use
+    of inherited mm_id->stub_pid (master's host-children) which
+    races against master's continued use of the same stub when
+    master loops back into another fork iteration.
+
+    Real fix (Phase 3-scale, separate workstream):
+    - Child must "disown" master's stub_pids without killing the
+      stub processes themselves (those belong to master).  Set
+      child's local mm_id->pid = -1 for each entry, then call
+      start_userspace_redo() so the child gets its OWN stub-child
+      host processes.  Caveat: the 2026-05-20 fork-stress
+      diagnosis (mmu.c:395-411) documents that respawning under
+      master's still-live VM-share can crash at IP=0 — needs
+      careful sequencing.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.

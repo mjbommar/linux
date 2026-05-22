@@ -349,10 +349,12 @@ child_entry_pool_member(void)
 	PT_REGS_SET_SYSCALL_RETURN(&current->thread.regs, 11);
 
 	/*
-	 * Drop into userspace forever.  With master's stub teardown
-	 * gated off in pool_member mode (see fork_on_resume_loop step
-	 * A), the per-mm turnstile mutex is intact and seccomp_vcpu_run
-	 * can take it.
+	 * Drop into userspace forever.  Single-iteration dispatch works
+	 * (selftest template-pause-pool-member-smoke PASS).  Multi-
+	 * iteration dispatch crashes iter 2 in scheduler code — see
+	 * state-audit/32 §4 step 19e for the diagnostic finding that
+	 * the offender is userspace()'s use of inherited stub_pid
+	 * (master's host-children, not the child's).
 	 */
 	userspace(&current->thread.regs.regs);
 	__builtin_unreachable();
