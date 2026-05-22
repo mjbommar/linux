@@ -406,9 +406,9 @@ child_entry_pool_member(void)
 	 * Step A of the pool-completion roadmap (per-member
 	 * physmem isolation) — the replicate call site stays
 	 * unwired pending a fix for the post-swap idle-sleep
-	 * regression.  Variants 1-15 mapped in roadmap §3.1
-	 * narrow but do not fix.  Helpers in tree are ready
-	 * for the eventual one-line re-wire.
+	 * regression.  Variants 1-16 mapped in roadmap §3.1 and
+	 * the bisect postmortem; helpers are ready for one-line
+	 * re-wire once the host-side root cause is identified.
 	 */
 
 	/*
