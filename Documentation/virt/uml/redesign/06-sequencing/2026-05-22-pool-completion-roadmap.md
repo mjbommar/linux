@@ -175,19 +175,22 @@ Update the global `physmem_fd` so new stubs (and future
 
   * **Empirical bisect (2026-05-22):**
 
-    | Variant                                                  | Result            |
-    |----------------------------------------------------------|-------------------|
-    | (1) same-fd mmap-FIXED of physmem region (self-test)     | PASS              |
-    | (2) dup'd-fd mmap-FIXED (same file, different fd value)  | PASS              |
-    | (3) new-fd mmap-FIXED to `memfd_create`-backed fd        | FAIL (SIGALRM)    |
-    | (4) new-fd mmap-FIXED to `O_TMPFILE` on /dev/shm or /tmp | FAIL (SIGALRM)    |
-    | (5) skip kernel-VA mmap, just swap global `physmem_fd`   | FAIL (master loop)|
+    | Variant                                                       | Result            |
+    |---------------------------------------------------------------|-------------------|
+    | (1) same-fd mmap-FIXED of physmem region (self-test)          | PASS              |
+    | (2) dup'd-fd mmap-FIXED (same file, different fd value)       | PASS              |
+    | (3) new-fd mmap-FIXED to `memfd_create`-backed fd             | FAIL (SIGALRM)    |
+    | (4) new-fd mmap-FIXED to `O_TMPFILE` on /dev/shm or /tmp      | FAIL (SIGALRM)    |
+    | (5) skip kernel-VA mmap, just swap global `physmem_fd`        | FAIL (master loop)|
+    | (6) anon intermediate (`os_remap_region_via_anon`) → new fd    | FAIL (SIGALRM)    |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the
     file/inode identity of the new mapping; (5) proves that
     kernel↔stub coherence cannot be preserved by skipping the
-    kernel-VA swap.
+    kernel-VA swap; (6) proves the regression survives an
+    intermediate MAP_ANONYMOUS|MAP_SHARED mapping at the
+    target VA.
 
   * **Symptom of (3)/(4):** bash reaches `TPPM_MEMBER_ALIVE_1`
     then `sleep 1` never returns — host SIGALRM stops being
