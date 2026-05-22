@@ -121,6 +121,25 @@ static bool template_pause_mfc_diag_armed_flag __read_mostly;
  */
 static bool template_pause_private_stack_armed_flag __read_mostly = true;
 
+/*
+ * Path A integration smoke arm.  Off by default.  Armed by
+ * `um_template_pause_pivot_test=1` on the kernel cmdline.
+ *
+ * When set, master uses os_template_pause_fork_clone_to(@entry) and
+ * the child runs `child_entry_pivot_test` on the private stack — a
+ * kernel C function that writes a "PIVOT_OK\n" marker via raw
+ * __NR_write and exits cleanly.  Master skips the post-fork SIGKILL
+ * because the child terminates itself.
+ *
+ * The goal of this mode is end-to-end proof that the Path A stack-
+ * pivot primitive (validated host-side in
+ * tools/testing/selftests/um/rt-sigreturn-isolation/) crosses the v1
+ * ceiling on a real UML kernel: if PIVOT_OK appears in the host
+ * log, kernel C code executed in the M-fork child without hitting
+ * the corrupted-saved-RIP panic at um_template_pause_enter+0xf6.
+ */
+static bool template_pause_pivot_test_armed_flag __read_mostly;
+
 /* Diagnostic only — counts how many SIGSTOP/SIGCONT cycles this
  * process (or any of its forked descendants that still share the
  * .data segment) has been through.  A fresh fork() inherits the
@@ -176,6 +195,57 @@ static int __init template_pause_private_stack_setup(char *str)
 	return 1;
 }
 __setup("um_template_pause_private_stack", template_pause_private_stack_setup);
+
+static int __init template_pause_pivot_test_setup(char *str)
+{
+	if (str && str[0] == '=' && str[1] == '1')
+		template_pause_pivot_test_armed_flag = true;
+	else if (str && str[0] == '\0')
+		template_pause_pivot_test_armed_flag = true;
+	if (template_pause_pivot_test_armed_flag)
+		pr_warn("template_pause: PATH-A pivot-test mode = ARMED — M-fork child will run child_entry_pivot_test on private stack and self-exit.\n");
+	return 1;
+}
+__setup("um_template_pause_pivot_test", template_pause_pivot_test_setup);
+
+/*
+ * Child entry for Path A pivot-test mode.  Runs on a MAP_PRIVATE
+ * stack allocated by os_template_pause_fork_clone_to() — does NOT
+ * share the master's kernel stack, so the v1-ceiling saved-RIP
+ * corruption cannot reach us (see state-audit/30-path-c-v1-ceiling-
+ * confirmed.md).
+ *
+ * Implementation: raw inline-asm only (no glibc, no kernel locks,
+ * no printk).  Writes a fixed marker to host fd 1 then exit_group(0).
+ *
+ * If "PIVOT_OK" appears in boot output, the Path A primitive crossed
+ * the ceiling end-to-end on this host kernel.
+ */
+static void __noreturn
+child_entry_pivot_test(void)
+{
+	static const char marker[] = "PIVOT_OK\n";
+	register long rax asm("rax") = 1;       /* __NR_write */
+	register long rdi asm("rdi") = 1;       /* host fd 1 */
+	register long rsi asm("rsi") = (long)marker;
+	register long rdx asm("rdx") = sizeof(marker) - 1;
+
+	asm volatile ("syscall"
+		      : "+r" (rax)
+		      : "r" (rdi), "r" (rsi), "r" (rdx)
+		      : "rcx", "r11", "memory");
+
+	{
+		register long erax asm("rax") = 231;    /* __NR_exit_group */
+		register long erdi asm("rdi") = 0;
+
+		asm volatile ("syscall"
+			      :
+			      : "r" (erax), "r" (erdi)
+			      : "rcx", "r11", "memory");
+	}
+	__builtin_unreachable();
+}
 
 bool um_template_pause_armed(void)
 {
@@ -712,7 +782,10 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 		 *
 		 * Default path: __NR_fork + post-fork SIGKILL.  See B1.
 		 */
-		if (template_pause_private_stack_armed_flag)
+		if (template_pause_pivot_test_armed_flag)
+			child_pid = os_template_pause_fork_clone_to(
+				child_entry_pivot_test);
+		else if (template_pause_private_stack_armed_flag)
 			child_pid = os_template_pause_fork_clone();
 		else
 			child_pid = os_template_pause_fork();
@@ -849,6 +922,7 @@ static int fork_on_resume_loop(const char *named_point, int identity_fd,
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK_DIAG
 		    !template_pause_mfc_diag_armed_flag &&
 #endif
+		    !template_pause_pivot_test_armed_flag &&
 		    !template_pause_private_stack_armed_flag) {
 			/* x86_64 __NR_kill = 62, SIGKILL = 9.  Skipped in
 			 * private-stack mode because the child exited via
