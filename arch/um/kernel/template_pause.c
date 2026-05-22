@@ -322,6 +322,18 @@ child_entry_pool_member(void)
 	(void)os_template_pause_signals_restore_host();
 
 	/*
+	 * Per timer(7), POSIX interval timers are NOT preserved across
+	 * fork(2): the child must rebuild its own SIGALRM source.
+	 * os_timer_worker_forget() zeroes the inherited timer_t handles
+	 * (they would deliver to master's gettid() otherwise); the
+	 * rebuild creates a fresh CLOCK_MONOTONIC timer targeting this
+	 * thread's tid.  Without this, nanosleep() in the child never
+	 * wakes up.
+	 */
+	os_timer_worker_forget();
+	(void)os_timer_worker_rebuild();
+
+	/*
 	 * Set init.sh's syscall return value.  AX was -ENOSYS (master
 	 * never finished the syscall return path for the write to
 	 * /proc/um/template_pause).  Init.sh wrote "fork-smoke\n" (11
