@@ -457,3 +457,67 @@ int os_io_ring_register_eventfd(struct os_io_ring *r, int *out_fd)
 	*out_fd = efd;
 	return 0;
 }
+
+/*
+ * os_close_inherited_io_uring_fds() — walk /proc/self/fd, close
+ * every io_uring file inherited via fork.  Returns the count of
+ * fds closed.  Use case: pool-member fork-child entry, before any
+ * SIGALRM-sensitive operation (mmap-FIXED swap, etc.) — the
+ * research subagent's hypothesis is that inherited io_uring task_
+ * work (with TWA_SIGNAL) sets TIF_NOTIFY_SIGNAL on the child and
+ * blocks subsequent signal delivery via `signal_pending()` short-
+ * circuits.  Closing the io_uring fds drops the task_work
+ * association.
+ *
+ * Identifies io_uring fds via /proc/self/fd/<n> symlink content:
+ * an io_uring fd's readlink target is `anon_inode:[io_uring]`.
+ * Robust against fd-table layout differences from one boot to
+ * another.
+ */
+/*
+ * Conservative variant: probe a small range of plausible io_uring
+ * fd numbers and close those that look like io_uring backings.
+ * Uses only direct syscalls — no libc TLS, no snprintf, no
+ * stack-heavy state.  Identification via readlinkat returning a
+ * path that contains the literal "io_uring" substring.
+ *
+ * Range: fd 3..63 covers UML's typical io_uring fd allocation
+ * (ubd_ring + hostfs writeback ring + any auxiliary).  Fds below
+ * 3 are stdio.  Above 63 we'd be unlikely to encounter io_uring
+ * fds in early-init UML.
+ */
+int os_close_inherited_io_uring_fds(void)
+{
+	int fd, closed = 0;
+	char path[24];
+	char target[128];
+	ssize_t r;
+
+	for (fd = 3; fd < 64; fd++) {
+		/* Build "/proc/self/fd/<fd>" manually — no snprintf. */
+		int p = 0;
+		const char prefix[] = "/proc/self/fd/";
+		int digits[3], dlen = 0, v = fd;
+
+		memcpy(path, prefix, sizeof(prefix) - 1);
+		p = sizeof(prefix) - 1;
+		do {
+			digits[dlen++] = v % 10;
+			v /= 10;
+		} while (v > 0 && dlen < 3);
+		while (dlen > 0)
+			path[p++] = '0' + digits[--dlen];
+		path[p] = '\0';
+
+		r = syscall(__NR_readlinkat, -100 /*AT_FDCWD*/, path,
+			    target, sizeof(target) - 1);
+		if (r < 0)
+			continue;
+		target[r] = '\0';
+		if (strstr(target, "io_uring")) {
+			if (syscall(__NR_close, fd) == 0)
+				closed++;
+		}
+	}
+	return closed;
+}

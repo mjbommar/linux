@@ -51,6 +51,7 @@
 #include <skas.h>			/* um_skas_teardown_all_stubs(),
 					 *  um_skas_respawn_all_stubs() */
 #include <skas/skas.h>			/* userspace() trap loop */
+#include <os_io_ring.h>			/* os_close_inherited_io_uring_fds */
 #endif
 
 #include <backend.h>				/* um_backend, kind enum */

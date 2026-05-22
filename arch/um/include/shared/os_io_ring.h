@@ -63,4 +63,15 @@ unsigned int os_io_ring_in_flight(const struct os_io_ring *ring);
  */
 int os_io_ring_register_eventfd(struct os_io_ring *ring, int *out_fd);
 
+/*
+ * Close every io_uring fd in the calling process's fd table,
+ * identified by /proc/self/fd/<n> symlink target containing
+ * "io_uring".  Used by the pool-member fork-child entry to drop
+ * inherited io_uring task_work associations BEFORE any signal-
+ * sensitive operation (TIF_NOTIFY_SIGNAL stickiness hypothesis,
+ * per the SIGALRM-after-swap dispositive bisect).  Returns the
+ * number of fds closed, or -errno on opendir failure.
+ */
+int os_close_inherited_io_uring_fds(void);
+
 #endif /* __UM_OS_IO_RING_H__ */
