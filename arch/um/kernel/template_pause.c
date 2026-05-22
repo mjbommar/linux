@@ -349,12 +349,22 @@ child_entry_pool_member(void)
 	PT_REGS_SET_SYSCALL_RETURN(&current->thread.regs, 11);
 
 	/*
-	 * Drop into userspace forever.  Single-iteration dispatch works
-	 * (selftest template-pause-pool-member-smoke PASS).  Multi-
-	 * iteration dispatch crashes iter 2 in scheduler code — see
-	 * state-audit/32 §4 step 19e for the diagnostic finding that
-	 * the offender is userspace()'s use of inherited stub_pid
-	 * (master's host-children, not the child's).
+	 * Drop into userspace forever.  Single-iteration works — see
+	 * selftest template-pause-pool-member-smoke.
+	 *
+	 * Sustained multi-iteration dispatch crashes iter 2: bisected
+	 * to userspace()'s use of inherited mm_id->stub_pid (master's
+	 * host-children).  Attempted fix —
+	 * um_skas_forget_all_stubs() + um_skas_respawn_all_stubs() in
+	 * child entry — crashes the FIRST child:
+	 * start_userspace_redo's clone() under master's CoW VM-share
+	 * still hits the IP=0 corruption documented in mmu.c:395-411.
+	 *
+	 * Real Phase 3 fix needs SKAS infrastructure aware of "child
+	 * post-Path-A pivot is a fresh-VM context that can clone new
+	 * stubs without inheriting the parent's address-space
+	 * corruption."  Out of scope for this Path A integration
+	 * workstream; tracked in state-audit/32 §4 step 19e.
 	 */
 	userspace(&current->thread.regs.regs);
 	__builtin_unreachable();

@@ -168,6 +168,28 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
       master's still-live VM-share can crash at IP=0 — needs
       careful sequencing.
 
+    UPDATE 2026-05-22 00h: ATTEMPTED um_skas_forget_all_stubs +
+    um_skas_respawn_all_stubs in child entry.  Result: FIRST
+    child crashes immediately with kernel panic (no TPPM_POST_PAUSE
+    even printed; child dies in start_userspace_redo).  Confirms
+    the IP=0 hazard from the mmu.c comment is alive even under
+    Path A pivot — the child's clone() in start_userspace_redo
+    still creates a stub that shares VM with master's
+    address-space via CoW, and the triple-share (master / child /
+    new-stub) corrupts the stub's binary entry-point lookup.
+
+    Next attempt (deferred to dedicated SKAS workstream):
+    Modify start_userspace_redo to use a CLONE_VM-less path
+    when called from a post-Path-A child (the child has already
+    been "split" from master's VM via clone() without CLONE_VM —
+    so its address space IS independent; the new stub just needs
+    to know that).  This is a new SKAS API.
+
+    Restored: child_entry_pool_member does NOT call forget +
+    respawn — single-iteration dispatch works without them and
+    the multi-iter fix needs deeper SKAS work.  Diagnostic
+    findings preserved in the source comment.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
