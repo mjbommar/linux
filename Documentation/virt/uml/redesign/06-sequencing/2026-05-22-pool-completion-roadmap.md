@@ -187,6 +187,10 @@ Update the global `physmem_fd` so new stubs (and future
     | (8) post-swap sigtimedwait drain of pending signals (drained=0) | FAIL (SIGALRM)    |
     | (9) post-swap timer_gettime + os_busy_wait_ns(200ms)            | FIRES (timer disarmed, ov=0) |
     | (10) post-swap 50ms periodic timer + 525ms busy-wait             | FIRES (itv cycles at ~50ms, ov stays 0 = signals delivered) |
+    | (11) replicate + arm 50ms periodic + diag through start_userspace_fresh | ARMED through stub creation (itv stays ~50ms post-startfresh) |
+    | (12) plain replicate, no instrumentation                          | FAIL (bash hangs in sleep) |
+    | (13) replicate + post-swap timer_worker_forget+rebuild+one_shot   | FAIL (bash hangs in sleep) |
+    | (14) variant 13 + post-swap os_idle_prepare() (rebuild signalfd)  | FAIL (bash hangs in sleep) |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the
