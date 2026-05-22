@@ -190,6 +190,27 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     the multi-iter fix needs deeper SKAS work.  Diagnostic
     findings preserved in the source comment.
 
+    UPDATE 2026-05-22 (day 2 attempt — master-side stub_data
+    reset): tried adding `um_skas_reset_stub_data_all()` to
+    clear MAP_SHARED stub_data scratch fields in master between
+    iterations (preserving pid/sock so the live stub child stays
+    usable).  Both variants — full reset and "soft" reset
+    preserving stub_data->futex — broke iter-1's child: init.sh
+    didn't return from the /proc write, no MEMBER_DONE.
+
+    Lesson: stub_data is FULLY load-bearing.  Even the
+    syscall_data_len + signal + offsets are part of an
+    end-to-end protocol the stub depends on.  Master CANNOT
+    safely mutate stub_data while the stub is alive and
+    handshake-active.  The reset path is removed; the per-
+    iteration corruption is unavoidable without per-child mm.
+
+    Confirmed direction: each pool member needs its OWN mm_id
+    with its own MAP_SHARED stub_data page and its own stub
+    child.  No middle-ground exists.  Per-member mm pre-
+    allocation (Option 1 of two paths I proposed) is the only
+    way forward.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.
