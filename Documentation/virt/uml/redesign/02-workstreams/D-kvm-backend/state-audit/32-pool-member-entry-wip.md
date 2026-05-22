@@ -119,21 +119,36 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     netdev + tap, apply_mac/apply_tap_reopen succeed (already
     landed in `template_pause_identity.c`).
 
-  * **Step 19e — NEW DISCOVERY (multi-iteration limit).**  When
-    master is SIGCONT'd before the prior iteration's child has
-    exited, both children share master's mm_list (which still has
-    the original child's stub pids).  Iter 2 child's POOL_ENTER
-    succeeds but then panics at `addr 0x6008a85b, ip 0x6008a170`
-    when seccomp_vcpu_run races against iter-1's stub.
+  * **Step 19e — multi-iteration crash (master-side state leak).**
+    After iter 1 fully completes (child boots, runs to MEMBER_DONE,
+    exits 0, host-side reaped) — iter 2 SIGCONT to master succeeds,
+    master reads + applies blob, forks via Path A primitive, child
+    enters POOL_ENTER... and then panics at:
+      `addr 0x6008a85b, ip 0x6008a170`
+      `__clear_task_blocked_on+0x61` jumping to `up_read+0xb`.
 
-    Path forward:
-    - Add a synchronization point: master waits for the prior
-      child's stubs to clean up before forking the next.  Easiest
-      via host wait4(WNOHANG) on each pre-fork pause.
-    - OR: each pool-member child allocates fresh stubs after
-      Path A pivot (move um_skas_respawn_all_stubs into
-      child_entry_pool_member, in addition to keeping the
-      turnstile mutex).
+    The panic is in the SCHEDULER's task-blocked-on path, NOT in
+    SKAS / stub state.  This means iter 1's path mutated master's
+    scheduler state (rwsem owner chain or task->blocked_on linkage)
+    in a way that survives the fork into iter 2 child.
+
+    The candidate sites in `child_entry_pool_member` that touch
+    cross-task state:
+      - `preempt_enable()`
+      - `os_template_pause_signals_restore_host()` (raw rt_sigprocmask)
+      - `os_timer_worker_forget/rebuild/one_shot`
+      - `PT_REGS_SET_SYSCALL_RETURN(&current->thread.regs, 11)`
+      - `userspace(...)` (long-lived seccomp dispatch on init.sh's
+        task_struct)
+
+    Path forward (next session, ~2-4 hours):
+    1. Add raw-syscall diagnostic prints WAS-ACQUIRED/WAS-RELEASED
+       on rtnl_lock + per-mm turnstile before/after the iter 1
+       child's userspace() call.
+    2. Snapshot master's `current->blocked_on` / `mm->mmap_lock`
+       state pre-iter-1 and pre-iter-2 — should be identical.
+    3. If they diverge, the child's userspace() did not properly
+       isolate task-level locks before exiting init.sh.
 
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
