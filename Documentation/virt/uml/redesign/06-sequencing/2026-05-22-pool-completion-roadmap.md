@@ -195,6 +195,7 @@ Update the global `physmem_fd` so new stubs (and future
     | (16) replicate + arm 1s one-shot + 1.5s busy_wait → diagnose        | FIRES (itv 1s→0, ov 0→0 = 1s timer fires + signal delivered) |
     | (17) MINIMAL LINUX-ONLY REPRO (no UML, `tools/testing/selftests/um/mmap-fixed-sigalrm-repro/`) | **PASS** (post_swap_sigalrms=1) → **dispositive proof the bug is NOT in the host kernel's signal/timer subsystem; it is UML-specific** |
     | (18) replicate + cond_resched + schedule_timeout_interruptible(1ms) | FAIL (bash hangs in sleep) — scheduler hygiene yield does not recover |
+    | (19) replicate + TEMPORARY printk in try_to_wake_up + hrtimer_start_range_ns + hrtimer_interrupt + wait_stub_done_seccomp | **DISPOSITIVE LOCALIZATION:** bash (pid=1) never appears in `try_to_wake_up` post-MEMBER_ALIVE_1; bash's `sleep(1)` NEVER reaches `hrtimer_start_range_ns` (40 hrtimer_start events: 39 are ksoftirqd, 1 is bash's early 1ms boot one_shot); `HRTIMER_INT next=KTIME_MAX` confirms rb-tree empty. The chain is broken **upstream of UML's hrtimer wheel** — bash never traps into the kernel for nanosleep. Stub-side SIGSYS handler path (postmortem candidate (1) clone-CLONE_VM stub interaction) is the next focused investigation target. |
 
     Variants (1) and (2) prove the mmap-FIXED operation itself
     is benign; (3) and (4) prove the regression is tied to the

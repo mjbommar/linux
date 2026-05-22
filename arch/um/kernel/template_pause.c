@@ -405,16 +405,16 @@ child_entry_pool_member(void)
 	/*
 	 * Step A of the pool-completion roadmap (per-member
 	 * physmem isolation) — the replicate call site stays
-	 * unwired.  Variants 1-18 mapped in roadmap §3.1 and the
-	 * bisect postmortem; variant 17 (minimal Linux-only
-	 * repro at tools/testing/selftests/um/mmap-fixed-sigalrm-
-	 * repro/) dispositively narrows the bug to UML-internal
-	 * code in one of three candidates: clone(CLONE_VM) stub
-	 * MM, hrtimer_interrupt callback chain, or task rq state.
-	 * Variant 18 (cond_resched + schedule_timeout post-swap)
-	 * also did not recover; the wake-up failure is deeper
-	 * than scheduler hygiene.  Helpers are ready for one-line
-	 * re-wire once the UML-side root cause is identified.
+	 * unwired pending the post-swap user-mode wake-up fix.
+	 * Variant 19 (temporary scheduler/hrtimer instrumentation
+	 * in kernel/sched/core.c + kernel/time/hrtimer.c + arch/
+	 * um/os-Linux/skas/process.c) DISPOSITIVELY localized the
+	 * break: bash's sleep(1) NEVER reaches hrtimer_start_
+	 * range_ns post-replicate.  The chain is broken
+	 * upstream of UML's hrtimer wheel — somewhere in the
+	 * stub's SIGSYS handler path or earlier (bash never
+	 * traps into the kernel for nanosleep).  Stub interaction
+	 * is candidate (1) from the postmortem.
 	 */
 
 	/*
