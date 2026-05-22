@@ -281,6 +281,100 @@ int os_template_pause_fork_clone(void)
 }
 
 /*
+ * Variant of os_template_pause_fork_clone() that, in the child, does
+ * not exit_group(0) — instead jmpq's into a caller-supplied @entry on
+ * the private stack.
+ *
+ * This is the Path A stack-pivot primitive (validated in
+ * tools/testing/selftests/um/rt-sigreturn-isolation/) applied to the
+ * post-clone child path.  The child's %rsp points at a fresh
+ * MAP_PRIVATE region — it does NOT share the corrupted saved-RIP
+ * slots of the parent's kernel stack, so the v1 ceiling that crashes
+ * the standard return-up-the-syscall-stack path (documented in
+ * state-audit/30-path-c-v1-ceiling-confirmed.md) is bypassed.
+ *
+ * Contract:
+ *   - @entry must not return.  Mark it __noreturn.
+ *   - @entry runs on an 8 KiB MAP_PRIVATE stack — no large C frames.
+ *   - @entry runs with the kernel's data segment fully visible (post-
+ *     fork, all pages are present) but with master's locks/preempt
+ *     state inherited.  The first call inside @entry should be
+ *     preempt_enable() if master held it.
+ *   - Returns child PID in the PARENT, or -errno on clone failure.
+ *
+ * The stack is allocated once and reused across calls — the M-fork
+ * loop calls this many times per master lifetime, and re-mmap'ing
+ * costs ~5us per call.  Children that survive past the first jmpq
+ * own their stack page until the child process exits.  If a future
+ * caller wants per-child stacks (for pool members that run
+ * concurrently), this needs to grow a per-call mmap.
+ */
+typedef void __attribute__((__noreturn__)) (*os_template_pause_child_entry_t)(void);
+
+int os_template_pause_fork_clone_to(os_template_pause_child_entry_t entry)
+{
+	unsigned long child_stack_top;
+	long ret;
+
+	if (!entry)
+		return -EINVAL;
+
+	if (!os_template_pause_clone_stack_base) {
+		void *base = mmap(NULL, MFC_CLONE_STACK_BYTES,
+				   PROT_READ | PROT_WRITE,
+				   MAP_PRIVATE | MAP_ANONYMOUS,
+				   -1, 0);
+		if (base == MAP_FAILED)
+			return -errno;
+		os_template_pause_clone_stack_base = base;
+	}
+	child_stack_top = (unsigned long)os_template_pause_clone_stack_base +
+			   MFC_CLONE_STACK_BYTES - MFC_CLONE_STACK_TOP_OFF;
+
+	/*
+	 * Raw __NR_clone.  In the CHILD, rax = 0 and RSP = child_stack_top;
+	 * the CHILD then does:
+	 *	xorq %rbp, %rbp
+	 *	jmpq *%[entry]
+	 * — the Path A primitive.  No `ret`, no `call`, no C frame: the
+	 * child never touches the parent's kernel stack again.
+	 */
+	{
+		register long rax asm("rax") = MFC_NR_CLONE_X86_64;
+		register long rdi asm("rdi") = MFC_CLONE_FLAGS_FORK_LIKE;
+		register long rsi asm("rsi") = child_stack_top;
+		register long rdx asm("rdx") = 0;
+		register long r10 asm("r10") = 0;
+		register long r8  asm("r8")  = 0;
+
+		asm volatile (
+			"syscall\n\t"
+			"testq %%rax, %%rax\n\t"
+			"jnz 1f\n\t"
+			/*
+			 * CHILD path: rax = 0.  Pivot to clean state and
+			 * jmpq into @entry.  RSP is already the private
+			 * stack (clone() set it from rsi).
+			 */
+			"xorq %%rbp, %%rbp\n\t"
+			"jmpq *%[entry]\n\t"
+			"2: jmp 2b\n\t"           /* unreachable */
+			"1:\n\t"
+			: "+r" (rax)
+			: "r" (rdi), "r" (rsi), "r" (rdx),
+			  "r" (r10), "r" (r8),
+			  [entry] "r" (entry)
+			: "rcx", "r11", "memory"
+		);
+		ret = rax;
+	}
+
+	if (ret < 0 && ret > -4096)
+		return (int)ret;
+	return (int)ret;
+}
+
+/*
  * Host-level signal block (Control A from the 2026-05-20 external-
  * research recommendation).  os_snapshot_block_iter_signals only
  * blocks UML's TLS-level `signals_enabled` dispatch flag; the HOST

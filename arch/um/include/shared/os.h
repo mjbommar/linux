@@ -268,6 +268,15 @@ extern int os_template_pause_identity_fd(void);
 extern ssize_t os_template_pause_read_identity(int fd, void *buf, size_t len);
 extern int os_template_pause_fork(void);
 extern int os_template_pause_fork_clone(void);
+/*
+ * Path A primitive: post-clone child jmpq's into @entry on a private
+ * stack instead of exit_group(0).  @entry must not return.  See
+ * arch/um/os-Linux/template_pause.c for the full contract and
+ * Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+ * state-audit/30-path-c-v1-ceiling-confirmed.md for the motivation.
+ */
+typedef void __attribute__((__noreturn__)) (*os_template_pause_child_entry_t)(void);
+extern int os_template_pause_fork_clone_to(os_template_pause_child_entry_t entry);
 extern int os_template_pause_write_child_pid(int fd, off_t offset, int child_pid);
 extern void os_template_pause_child_exit(int code);
 extern int os_template_pause_signals_block_host(void);
