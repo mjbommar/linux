@@ -409,6 +409,41 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     instrument stub_exe.c with exit codes 11/12/13/14 + raw-
     syscall write to a debug fd to identify which mmap fails.
 
+    UPDATE 2026-05-22 (day-2 attempt 7 — full diagnostic cycle):
+    Re-wired disown+fresh in child_entry_pool_member with
+    dump_stack diagnostic in do_exit + waitpid(WNOHANG) +
+    pre/post print markers + SIGCHLD unblock + flush_tlb_mm.
+    Identified the actual failure mechanism:
+
+      * `start_userspace_fresh` clones the new stub successfully.
+      * `wait_stub_done_seccomp` returns (stub completes initial
+        handshake — its first __NR_exit traps via seccomp SIGSYS).
+      * `userspace()` enters its dispatch loop.
+      * Each iteration: seccomp_vcpu_run delivers init.sh's
+        userspace state to the new stub.  Stub jumps to init.sh's
+        RIP.  Init.sh's userspace tries to access ANY memory page
+        — SIGSEGV (the stub only has stub_code + stub_data mapped).
+      * Each SIGSEGV is handled by the page-fault path which
+        eventually adds the page to the stub via mm_region_added.
+      * Init.sh makes very slow progress (one page per
+        round-trip) and doesn't reach POST_PAUSE within 45-second
+        wait windows.
+
+    THE REAL FIX: bulk-push init.sh's existing VMAs to the new
+    stub immediately after start_userspace_fresh.  flush_tlb_mm
+    only marks RANGES for the sync mechanism; um_tlb_sync acts on
+    PRESENT PTEs but doesn't pre-walk VMAs.
+
+    Concrete next step:
+      void um_skas_push_all_vmas_to_stub(struct mm_struct *mm) {
+          for_each_vma(vmi, mm)
+              um_backend_dispatch(mm_region_added, mm, &region);
+      }
+    Then call from child_entry_pool_member after start_userspace_fresh.
+
+    Wire-up gated again (single-iter PASS preserved) until that
+    helper lands.  Infrastructure all stays in tree.
+
   * Task #18 (AFL preconditions in `assert_fork_safety`) — direct
     blocker for regression sentinels of these stub-state
     assumptions.

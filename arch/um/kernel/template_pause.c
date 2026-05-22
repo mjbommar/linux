@@ -160,6 +160,18 @@ static bool template_pause_pivot_test_armed_flag __read_mostly;
  */
 static bool template_pause_pool_member_armed_flag __read_mostly;
 
+/*
+ * Per-host-process flag: set in child_entry_pool_member after the
+ * fresh stub is up.  This child IS a pool member; subsequent
+ * template_pause writes from its userspace (e.g., init.sh's
+ * `echo > /proc/um/template_pause` running again) must not
+ * recursively re-enter the fork-on-resume loop — there's no
+ * daemon to SIGCONT the child, so it would hang forever at
+ * SIGSTOP.  Inherited via CoW (each child sets it independently
+ * in its own page); master never sees it set.
+ */
+static bool template_pause_pool_member_active;
+
 /* Diagnostic only — counts how many SIGSTOP/SIGCONT cycles this
  * process (or any of its forked descendants that still share the
  * .data segment) has been through.  A fresh fork() inherits the
@@ -373,21 +385,31 @@ child_entry_pool_member(void)
 	 * inter-member aliasing.
 	 */
 	/*
-	 * Wiring of um_skas_disown_inherited() + start_userspace_fresh()
-	 * deferred — testing reveals init.sh enters do_exit shortly
-	 * after the new stub clone, panicking the child UML kernel
-	 * ("Attempted to kill init!" with exit code 0x1e00).  Cause
-	 * unclear; suspect that interrupt_end() in userspace() processes
-	 * a pending signal that terminates init.sh.  Needs further
-	 * diagnostic cycles.
+	 * disown_inherited + start_userspace_fresh + flush_tlb_mm wire-
+	 * up is GATED.  Investigation: clone() succeeds, stub completes
+	 * handshake, userspace() begins dispatch, init.sh's first
+	 * userspace access SIGSEGVs because the fresh stub has only
+	 * stub_code + stub_data mapped.  flush_tlb_mm marks VMAs but
+	 * um_tlb_sync only pushes PRESENT PTEs.  Lazy fault-driven
+	 * mapping IS happening but too slow to reach POST_PAUSE within
+	 * test windows.
 	 *
-	 * Infrastructure remains in tree (06968e3f5f27) for the next
-	 * iteration.
+	 * Real next step: bulk-push present PTEs via a dedicated helper
+	 * (or extend um_tlb_sync to be triggered with no range-mark
+	 * dependency).  State-audit/32 has full diagnostic.  Helpers
+	 * remain in tree.
 	 */
+	(void)um_skas_disown_inherited;
+	(void)start_userspace_fresh;
 
 	/*
-	 * Drop into userspace forever.
+	 * Mark this host process as a pool member so future
+	 * template_pause writes from its userspace are no-ops.
+	 * Prevents recursive SIGSTOP-without-daemon hangs (still
+	 * useful for the single-iteration path).
 	 */
+	template_pause_pool_member_active = true;
+
 	userspace(&current->thread.regs.regs);
 	__builtin_unreachable();
 }
@@ -1216,6 +1238,12 @@ int um_template_pause_enter(const char *named_point)
 		pr_info("template_pause: enter(\"%s\") refused — um_template_pause not on cmdline\n",
 			named_point);
 		return -ENODEV;
+	}
+
+	if (template_pause_pool_member_active) {
+		pr_info("template_pause: enter(\"%s\") refused — already a pool member\n",
+			named_point);
+		return 0;
 	}
 
 	identity_fd = os_template_pause_identity_fd();
