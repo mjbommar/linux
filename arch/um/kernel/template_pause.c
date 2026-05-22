@@ -373,11 +373,16 @@ child_entry_pool_member(void)
 	 * inter-member aliasing.
 	 */
 	/*
-	 * start_userspace_fresh wiring deferred — the new stub fails
-	 * post-execveat for reasons that need stub-side instrumentation
-	 * to diagnose (likely mmap of memfd from stub_exe.c).
-	 * Infrastructure (um_skas_disown_inherited + start_userspace_fresh)
-	 * is in tree at commit 06968e3f5f27.
+	 * Wiring of um_skas_disown_inherited() + start_userspace_fresh()
+	 * deferred — testing reveals init.sh enters do_exit shortly
+	 * after the new stub clone, panicking the child UML kernel
+	 * ("Attempted to kill init!" with exit code 0x1e00).  Cause
+	 * unclear; suspect that interrupt_end() in userspace() processes
+	 * a pending signal that terminates init.sh.  Needs further
+	 * diagnostic cycles.
+	 *
+	 * Infrastructure remains in tree (06968e3f5f27) for the next
+	 * iteration.
 	 */
 
 	/*

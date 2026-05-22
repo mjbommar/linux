@@ -423,7 +423,6 @@ int um_skas_disown_inherited(void)
 {
 	struct mm_id **arr;
 	int n, i, disowned = 0;
-	unsigned long fresh_stack;
 
 	n = snapshot_mm_ids(&arr);
 	if (n <= 0)
@@ -432,26 +431,21 @@ int um_skas_disown_inherited(void)
 	for (i = 0; i < n; i++) {
 		struct mm_id *id = arr[i];
 
-		fresh_stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO,
-					       ilog2(STUB_DATA_PAGES));
-		if (fresh_stack == 0) {
-			kfree(arr);
-			return -ENOMEM;
-		}
-
 		/* Forget the parent's stub-pid + sock (don't kill — that
-		 * stub belongs to the parent host process).
+		 * stub belongs to the parent host process).  Caller is
+		 * expected to follow with start_userspace_fresh(), which
+		 * will overwrite id->stack with a per-mm memfd-backed
+		 * page and clone a fresh stub.
+		 *
+		 * Do NOT __get_free_pages here — the post-fork page
+		 * allocator state is CoW'd from master and allocating
+		 * trips __del_page_from_free_list corruption.
 		 */
 		id->pid = -1;
 		if (id->sock >= 0) {
 			os_close_file(id->sock);
 			id->sock = -1;
 		}
-
-		/* Swap to fresh stub_data page in this child's physmem.
-		 * The old page is left behind for master to clean up.
-		 */
-		id->stack = fresh_stack;
 		id->syscall_data_len = 0;
 		id->syscall_fd_num = 0;
 		disowned++;
