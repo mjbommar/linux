@@ -134,6 +134,35 @@ Instrument the wake-up chain.  Specifically:
      FIXED swap).  If it does reproduce, file it as a Linux kernel
      bug and look for known regressions in this area.
 
+**UPDATE (2026-05-22):** Variant (16) and a minimal Linux-only
+repro (in tree at `tools/testing/selftests/um/mmap-fixed-sigalrm-
+repro/`) both PROVE the host POSIX-timer + SIGALRM delivery path
+is INTACT across mmap-FIXED-to-different-inode swaps:
+
+  * The standalone repro arms a 50 ms one-shot timer on a tmpfs
+    MAP_SHARED region, swaps the region's backing to a different
+    O_TMPFILE inode with memcpy'd content, re-arms, and counts
+    SIGALRMs in 200 ms windows on each side of the swap.
+  * Result: `pre_swap_sigalrms=1 post_swap_sigalrms=1` — signals
+    are delivered identically both sides of the swap.
+  * **This dispositively narrows the search to UML-side code.**
+    The bug is NOT in the host kernel's signal-delivery or
+    POSIX-timer subsystems.  It is in UML's kernel-mode handling
+    of one of:
+      - the `clone(CLONE_VM)`-shared stub MM interaction with the
+        mmap-FIXED swap (UML's stubs share VM with the kernel
+        process — any swap is visible to the stub but the
+        stub's own pid/futex state may not survive cleanly)
+      - UML's `hrtimer_interrupt` callback chain on the
+        clock_event_device path (run from the SIGALRM handler;
+        relies on UML kernel data structures that ARE in
+        physmem-backed slabs and DO change inode underneath
+        them at swap time)
+      - The runqueue state of the bash task in physmem-backed
+        slabs (`task->__state`, `task->on_rq`, the CFS rq
+        tree) — content is memcpy'd at swap but the host
+        kernel's view of the underlying pages changes
+
 ## 5. Helpers landed and ready for one-line re-wire
 
 The following helpers are in tree and tested compilable, waiting for
