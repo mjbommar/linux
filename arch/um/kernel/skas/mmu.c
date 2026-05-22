@@ -378,6 +378,89 @@ int um_skas_forget_all_stubs(void)
 	return forgotten;
 }
 
+/*
+ * um_skas_disown_inherited() — post-fork helper for pool-member
+ * children.
+ *
+ * After the Path A clone(), the child UML kernel inherits the
+ * parent's mm_list with each entry's stub_pid pointing at the
+ * parent's stub host-child, AND each id->stack pointing at the
+ * parent-allocated stub_data page.  The stub_data page is in
+ * UML's physmem and the stub processes mmap it via the inherited
+ * stub_data_fd — so even though CoW separates the kernel's VA,
+ * the stub_data fd resolves to the SAME PHYSICAL PAGE for master,
+ * master's stub, AND the child's would-be stub.  That triple-
+ * share is the inherited-stub-aliasing corruption.
+ *
+ * This helper makes the child's mm_list ENTRY-OWNING again:
+ *   1. id->pid = -1 (do NOT kill — that's master's host-child).
+ *   2. id->sock = -1 (close inherited fd locally).
+ *   3. ALLOCATE FRESH __get_free_pages for id->stack.  This is
+ *      the critical step — the new pages live in the child's
+ *      kernel physmem (a CoW-private region after fork), so the
+ *      physmem fd that phys_mapping() resolves for it is
+ *      DIFFERENT from master's.  A subsequent start_userspace()
+ *      clones a stub that mmaps THIS fd, getting a private
+ *      stub_data page.
+ *   4. Reset id syscall scratch fields.
+ *
+ * The OLD id->stack page is leaked from the child's perspective
+ * — it still belongs to master's stub, and master's master mm
+ * still references it.  Per-iteration leak budget: STUB_DATA_PAGES
+ * pages.  Acceptable for pool dispatch where the child is short-
+ * to-medium lived.
+ *
+ * Caller must then call um_skas_respawn_all_stubs() to
+ * start_userspace_redo each entry — at that point id->pid is -1
+ * so respawn will call start_userspace which clones a fresh
+ * stub using the new id->stack physmem fd.
+ *
+ * Returns count of mm_id entries disowned, or -errno on alloc
+ * failure (in which case the partially-disowned state is left as-
+ * is; caller should not respawn).
+ */
+int um_skas_disown_inherited(void)
+{
+	struct mm_id **arr;
+	int n, i, disowned = 0;
+	unsigned long fresh_stack;
+
+	n = snapshot_mm_ids(&arr);
+	if (n <= 0)
+		return n;
+
+	for (i = 0; i < n; i++) {
+		struct mm_id *id = arr[i];
+
+		fresh_stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO,
+					       ilog2(STUB_DATA_PAGES));
+		if (fresh_stack == 0) {
+			kfree(arr);
+			return -ENOMEM;
+		}
+
+		/* Forget the parent's stub-pid + sock (don't kill — that
+		 * stub belongs to the parent host process).
+		 */
+		id->pid = -1;
+		if (id->sock >= 0) {
+			os_close_file(id->sock);
+			id->sock = -1;
+		}
+
+		/* Swap to fresh stub_data page in this child's physmem.
+		 * The old page is left behind for master to clean up.
+		 */
+		id->stack = fresh_stack;
+		id->syscall_data_len = 0;
+		id->syscall_fd_num = 0;
+		disowned++;
+	}
+
+	kfree(arr);
+	return disowned;
+}
+
 int um_skas_respawn_all_stubs(void)
 {
 	struct mm_id **arr;

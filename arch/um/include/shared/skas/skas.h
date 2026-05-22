@@ -62,6 +62,17 @@ extern int um_skas_respawn_all_stubs(void);
 extern int um_skas_forget_all_stubs(void);
 
 /*
+ * um_skas_disown_inherited() — post-fork helper for pool-member
+ * children.  Forgets master's stub_pid/sock references AND swaps
+ * each mm_id->stack to a fresh __get_free_pages allocation so the
+ * physmem fd phys_mapping() resolves is private to this child.
+ * Must be paired with a subsequent um_skas_respawn_all_stubs() to
+ * clone fresh stubs that use the new pages.  Returns disowned-
+ * entry count or -ENOMEM.
+ */
+extern int um_skas_disown_inherited(void);
+
+/*
  * um_skas_other_mm_mid_syscall() — Memo 09 Phase 2a defensive check.
  *
  * Returns true if any mm in mm_list other than @caller has

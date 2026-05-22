@@ -352,22 +352,20 @@ child_entry_pool_member(void)
 	PT_REGS_SET_SYSCALL_RETURN(&current->thread.regs, 11);
 
 	/*
-	 * Drop into userspace forever.  Single-iteration works — see
-	 * selftest template-pause-pool-member-smoke.
-	 *
-	 * Sustained multi-iteration dispatch crashes iter 2: bisected
-	 * to userspace()'s use of inherited mm_id->stub_pid (master's
-	 * host-children).  Attempted fix —
-	 * um_skas_forget_all_stubs() + um_skas_respawn_all_stubs() in
-	 * child entry — crashes the FIRST child:
-	 * start_userspace_redo's clone() under master's CoW VM-share
-	 * still hits the IP=0 corruption documented in mmu.c:395-411.
-	 *
-	 * Real Phase 3 fix needs SKAS infrastructure aware of "child
-	 * post-Path-A pivot is a fresh-VM context that can clone new
-	 * stubs without inheriting the parent's address-space
-	 * corruption."  Out of scope for this Path A integration
-	 * workstream; tracked in state-audit/32 §4 step 19e.
+	 * Note: um_skas_disown_inherited() + um_skas_respawn_all_stubs()
+	 * was attempted here to give the child its own stubs.  Result:
+	 * start_userspace's first clone fails — even with a "fresh"
+	 * __get_free_pages allocation in the child, the resulting
+	 * stub_data page resolves through phys_mapping() to UML's
+	 * physmem_fd which is MAP_SHARED across all forked UML
+	 * kernels.  Per-member physical isolation requires UML
+	 * physmem refactoring (separate memfd per pool member) — a
+	 * dedicated workstream.  See state-audit/32 §4 step 19e for
+	 * the architectural finding.
+	 */
+
+	/*
+	 * Drop into userspace forever.
 	 */
 	userspace(&current->thread.regs.regs);
 	__builtin_unreachable();
