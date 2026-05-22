@@ -373,17 +373,11 @@ child_entry_pool_member(void)
 	 * inter-member aliasing.
 	 */
 	/*
-	 * start_userspace_fresh-based disown+respawn was attempted
-	 * but the new stub fails to come up after execveat (still
-	 * under diagnosis).  The infrastructure is in place
-	 * (um_skas_disown_inherited + start_userspace_fresh +
-	 * tramp_data->stub_data_fd_override) and works mechanically
-	 * up through clone — see state-audit/32 for diagnostic
-	 * findings.
-	 *
-	 * For now, single-iteration pool dispatch works without this
-	 * step (the inherited stub is usable for the lone child if
-	 * master doesn't fork a second time).
+	 * start_userspace_fresh wiring deferred — the new stub fails
+	 * post-execveat for reasons that need stub-side instrumentation
+	 * to diagnose (likely mmap of memfd from stub_exe.c).
+	 * Infrastructure (um_skas_disown_inherited + start_userspace_fresh)
+	 * is in tree at commit 06968e3f5f27.
 	 */
 
 	/*
