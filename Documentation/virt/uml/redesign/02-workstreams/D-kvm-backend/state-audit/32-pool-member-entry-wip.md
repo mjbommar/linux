@@ -1,14 +1,19 @@
-# Pool-member entry — boot reached, sleep does not return
+# Pool-member entry — fully functional, init.sh runs to completion
 
 **Date:** 2026-05-21 late evening
-**Status:** Pool member init.sh executes userspace code post-fork —
-the /proc write returns rc=0, the next `echo` runs, and the
-MEMBER_ALIVE_1 marker reaches host stdout.  `sleep 2` does not
-complete; MEMBER_ALIVE_2 never prints.
+**Status:** PASS end-to-end.  Pool member boots, init.sh executes
+userspace code, multiple sleep+echo cycles complete, MEMBER_DONE
+reached.  Verified by new selftest
+`template-pause-pool-member-smoke`.
 
-UPDATE: the architectural fix worked.  Gating
-`um_skas_teardown_all_stubs()` on `!pool_member_armed` preserved
-the per-mm turnstile mutex and unblocked userspace().
+Resolved in three stacked fixes:
+  1. Gate `um_skas_teardown_all_stubs()` on `!pool_member_armed` —
+     preserve per-mm turnstile mutex.
+  2. `os_timer_worker_forget()` + `os_timer_worker_rebuild()` in
+     child entry — POSIX timers don't survive fork(2).
+  3. `os_timer_one_shot(0, 1ms)` after rebuild — prime the
+     clockevent so `set_next_event` re-establishes tracking for
+     the next hrtimer expiration.
 
 ---
 
@@ -88,15 +93,12 @@ seccomp_vcpu_run's `enter_turnstile(current_mm_id())` succeeds.
     the /proc write trigger.  This is the first time post-fork
     userspace progress has happened in this tree.
 
-  * **Step 19c — REMAINING.** `sleep 2` does not complete;
-    MEMBER_ALIVE_2 never prints.  Hypothesis: the child's
-    inherited timer state is in flux (master held preempt_disable
-    + signal-mask block across fork, child restored signals but
-    not the UML kernel timer wheel).  Need to investigate what
-    sleep(2) goes through in the child — nanosleep() syscall →
-    UML's hrtimer → host SIGALRM timer.  The host process
-    inherits master's timer settings; whether they tick in the
-    child is the next data point.
+  * **Step 19c — DONE.** Timer wakeups work in the child:
+    `os_timer_worker_rebuild()` re-creates the per-CPU POSIX
+    timer; `os_timer_one_shot(0, 1ms)` arms it to fire ~1ms
+    later, which re-establishes the clockevent's next_event
+    tracking.  Subsequent nanosleep() / hrtimer expirations are
+    handled normally.  Verified: 5×`sleep 1` cycles in selftest.
 
   * **Step 19d — REMAINING.** Identity_apply (memfd-driven per-
     member MAC/IP/hostname) before userspace().

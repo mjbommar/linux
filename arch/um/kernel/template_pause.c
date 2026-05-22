@@ -332,6 +332,13 @@ child_entry_pool_member(void)
 	 */
 	os_timer_worker_forget();
 	(void)os_timer_worker_rebuild();
+	/*
+	 * Arm a near-immediate one-shot so the kernel's tick path
+	 * gets called and re-establishes its next_event tracking.
+	 * Without this, the inherited clock_event_device state may
+	 * not call set_next_event for the next hrtimer expiration.
+	 */
+	(void)os_timer_one_shot(0, 1000000ULL); /* 1ms */
 
 	/*
 	 * Set init.sh's syscall return value.  AX was -ENOSYS (master
