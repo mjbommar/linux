@@ -269,7 +269,12 @@ impl NetworkSetup {
         eprintln!("                (may prompt for sudo if not NOPASSWD)");
 
         // Idempotent cleanup of any leftover from a previous crash.
-        let _ = sudo(&["ip", "tuntap", "del", "dev", &self.tap_name, "mode", "tap"]);
+        // `ip link delete` is more reliable than `ip tuntap del` here:
+        // the former works regardless of how the device was originally
+        // opened, the latter requires the device to still be in a
+        // matching tuntap state (and silently no-ops otherwise, leaving
+        // the device behind for our subsequent `add` to collide with).
+        let _ = sudo(&["ip", "link", "delete", &self.tap_name]);
 
         sudo_required(&[
             "ip", "tuntap", "add", "dev", &self.tap_name, "mode", "tap", "user", &user,
