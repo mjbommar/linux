@@ -28,6 +28,7 @@ sudo make install   # installs all three to /usr/local/bin
 | `umlbuild rootfs`   | a populated rootfs directory under `$XDG_CACHE_HOME/uml-build/rootfs/<profile>/` |
 | `umlbuild image`    | an ubd-attachable ext4 image, no sudo required |
 | `umlbuild instance` | runs all three + writes a `Umlfile.toml` |
+| `umlbuild shell`    | docker-shaped: build (if needed) + drop into an interactive shell or REPL inside the guest |
 | `umlbuild profile`  | `list` enumerates profiles; `show NAME` pretty-prints one |
 
 Each lower verb is independently runnable. `instance` is the orchestrator
@@ -110,6 +111,45 @@ End-to-end orchestrator.  Produces under `DIR/`:
 
 The emitted Umlfile sets `[runtime].root = "ubd"` so umlctl skips its
 hostfs synthesis and lets the rootfs's `/sbin/init` run as PID 1.
+
+### `umlbuild shell` — docker-shaped one-shot
+
+```
+umlbuild shell [--profile NAME] [--cmd PATH] [--out DIR] [--force]
+```
+
+Build (or reuse) an instance, then `execve()` into the kernel so the
+host TTY is the guest's console.  Like `docker run -it python bash`
+but built on UML.
+
+```
+# /bin/sh in a 3 MB minimum-viable guest:
+umlbuild shell --profile mvp
+
+# Python REPL in the sandbox profile (with py3-pip + ssl):
+umlbuild shell --profile sandbox --cmd /usr/bin/python3
+
+# bash in the dev profile (which ships bash + gcc + gdb):
+umlbuild shell --profile dev --cmd /bin/bash
+
+# Run a one-off command instead of an interactive prompt:
+echo 'python3 -c "print(42)"' | umlbuild shell --profile mvp
+```
+
+The default `--cmd /bin/sh` works on any Alpine-based profile.  Type
+`exit` or Ctrl-D to leave; the kernel powers down (you'll see a
+"Kernel panic — Attempted to kill init" message, which is the normal
+UML shutdown path when PID 1 exits).
+
+Differences from `umlctl up`:
+
+|                       | `umlctl up`                          | `umlbuild shell`                |
+|-----------------------|--------------------------------------|---------------------------------|
+| stdin                 | none (`/dev/null`)                   | host TTY (`fd:0`)               |
+| stdout                | log file in `~/.local/state/uml/runs/` | host TTY (`fd:1`)               |
+| init                  | umlctl-synthesized init.sh (hostfs)  | user-chosen binary (--cmd)      |
+| supervision           | child process, signal-tracked        | execve, foregrounded            |
+| use case              | batch / unattended                   | interactive REPL / debugging    |
 
 ## Profiles
 

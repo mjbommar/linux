@@ -23,6 +23,7 @@ mod kernel;
 mod paths;
 mod profile;
 mod rootfs;
+mod shell;
 
 /// Top-level `umlbuild` invocation.
 #[derive(Parser, Debug)]
@@ -66,6 +67,11 @@ enum Command {
     /// End-to-end: kernel + rootfs + image + emitted Umlfile.toml.
     Instance(instance::InstanceArgs),
 
+    /// Build (if needed) + drop into an interactive shell or REPL
+    /// inside the freshly-booted guest.  Docker-shaped UX:
+    /// `umlbuild shell --profile sandbox --cmd /usr/bin/python3`.
+    Shell(shell::ShellArgs),
+
     /// List or show profiles.
     #[command(subcommand)]
     Profile(profile::ProfileCmd),
@@ -81,6 +87,7 @@ fn main() {
         Command::Rootfs(args) => rootfs::run(args),
         Command::Image(args) => image::run(args),
         Command::Instance(args) => instance::run(args),
+        Command::Shell(args) => shell::run(args),
         Command::Profile(cmd) => profile::run(cmd),
     };
 
