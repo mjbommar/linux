@@ -1,7 +1,7 @@
 # Minimum Viable UML — what's the smallest UML binary that can run Python?
 
-**Date:** 2026-05-23  
-**Author:** mjbommar  
+**Date:** 2026-05-23
+**Author:** mjbommar
 **Goal:** find, by iterative shrinking and re-expanding, the smallest UML
 kernel binary that can boot far enough to execute the umlctl cpython-tier0
 gate (`python3` imports + a handful of stdlib tests under

@@ -485,7 +485,9 @@ mount -t tmpfs    tmpfs  /results        2>/dev/null || true
 # Cmdline override path: sandbox.cmdfile=/etc/other-cmd can point
 # elsewhere.  We pick that up via /proc/cmdline (no spaces in the path
 # value, so awk word-split works fine).
-CMDFILE=$(awk -v RS=' ' '/^sandbox\.cmdfile=/{{ sub(/^sandbox\.cmdfile=/, ""); print }}' /proc/cmdline 2>/dev/null)
+CMDFILE=$(awk -v RS=' ' \
+    '/^sandbox\.cmdfile=/{{ sub(/^sandbox\.cmdfile=/, ""); print }}' \
+    /proc/cmdline 2>/dev/null)
 [ -z "$CMDFILE" ] && CMDFILE=/etc/sandbox.cmd
 if [ -r "$CMDFILE" ]; then
     SANDBOX_CMD=$(cat "$CMDFILE")

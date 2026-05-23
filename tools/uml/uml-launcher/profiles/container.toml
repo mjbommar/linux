@@ -1,0 +1,90 @@
+# umlbuild profile — "container": run OCI containers inside UML.
+#
+# Mirrors the docker-in-UML kernel config from the 2026-05-22 demo:
+# base_defconfig + cgroup v2 + all namespaces + overlay + bridge +
+# netfilter + nftables.  The rootfs ships `runc` so the guest can
+# execute OCI bundles natively (defense-in-depth on top of UML's
+# kernel boundary).
+#
+# Estimated stripped kernel: ~110 MB.  Trade: large but capable.
+
+schema_version = 1
+
+[profile]
+name        = "container"
+description = "UML with cgroup v2 + namespaces + overlayfs + runc for OCI containers."
+
+[kernel]
+base_config = "base_defconfig"
+enable = [
+    # User + PID + net + UTS + IPC namespaces.
+    "USER_NS",
+    "PID_NS",
+    "NET_NS",
+    "UTS_NS",
+    "IPC_NS",
+    "TIME_NS",
+    # cgroup v2 controllers used by runc / docker.
+    "MEMCG",
+    "CPUSETS",
+    "CGROUP_PIDS",
+    "CGROUP_DEVICE",
+    "CGROUP_FREEZER",
+    "CGROUP_CPUACCT",
+    "CGROUP_SCHED",
+    # Overlay FS for container image layers.
+    "OVERLAY_FS",
+    "OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW",
+    # Networking primitives needed by Docker/runc.
+    "BRIDGE",
+    "VETH",
+    "BRIDGE_NETFILTER",
+    "NF_CONNTRACK",
+    "NF_NAT",
+    "NF_TABLES",
+    "NF_TABLES_INET",
+    "NF_TABLES_NETDEV",
+    "NFT_NAT",
+    "NFT_MASQ",
+    "NFT_REDIR",
+    "IP_NF_IPTABLES",
+    "IP_NF_FILTER",
+    "IP_NF_NAT",
+    "IP_NF_TARGET_MASQUERADE",
+    # Other container niceties.
+    "IPVLAN",
+    "MACVLAN",
+    "POSIX_MQUEUE",
+    "KEYS",
+]
+disable = []
+strip   = true
+
+[rootfs]
+base         = "alpine"
+sandbox_uid  = 0   # runc needs CAP_SYS_ADMIN; stay root in the guest.
+
+[rootfs.alpine]
+version  = "3.20.3"
+sha256   = "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
+mirror   = "https://dl-cdn.alpinelinux.org/alpine"
+packages = [
+    "runc",
+    "busybox-extras",
+    "ca-certificates",
+    "python3",
+]
+
+[image]
+size   = "1G"
+fstype = "ext4"
+label  = "uml-container"
+
+# Default workload: print runc version + cgroup controllers.  Build
+# an actual OCI bundle inside the guest by extending [instance].
+# sandbox_cmd, or rebuild the image with the bundle pre-staged.
+[instance]
+mem         = "1024M"
+ncpus       = 1
+backend     = "seccomp"
+sandbox_cmd = "mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null; echo runc: $(runc --version | head -1); echo controllers: $(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null); echo namespaces:; ls /proc/self/ns/ | sed 's/^/  /'"

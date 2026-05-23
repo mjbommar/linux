@@ -268,7 +268,7 @@ Built-in profiles to ship at v1 (under
   2. **`--rootless`:** drive `apk` from the host directly with
      `--root $rootfs --no-chown --keys-dir /etc/apk/keys`, avoiding
      the chroot. Alpine's `apk` supports this since 2.10.
-  
+
   v1 ships option (2) wherever possible; falls back to (1) with a
   clear error message if it can't.
 - **Debian path:** `mmdebstrap --mode=unshare` runs entirely rootless

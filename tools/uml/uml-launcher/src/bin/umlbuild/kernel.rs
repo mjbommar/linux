@@ -164,7 +164,11 @@ pub fn run(args: KernelArgs) -> Result<()> {
     Ok(())
 }
 
-fn write_base_config(source: &std::path::Path, build_dir: &std::path::Path, base: &str) -> Result<()> {
+fn write_base_config(
+    source: &std::path::Path,
+    build_dir: &std::path::Path,
+    base: &str,
+) -> Result<()> {
     // Resolve the base config target.  Accepts:
     //   - "tinyconfig", "allnoconfig", "allyesconfig", any make target
     //   - "base_defconfig", "x86_64_defconfig" -> defconfig from arch/um/configs/
