@@ -277,28 +277,17 @@ bool __tlb_remove_page_size(struct mmu_gather *tlb, struct page *page, int page_
 
 #ifdef CONFIG_MMU_GATHER_TABLE_FREE
 
-#ifdef CONFIG_UML
+#ifdef CONFIG_DEBUG_UM_PT_FREE
 /*
- * SMP-T39 (2026-05-03) PT-page free diagnostic. Logs PFN of every
- * PT page being freed back to buddy via the RCU-deferred mmu_gather
- * path. Used to test the hypothesis that mt-mini's "got=0 expect=N"
- * residual is from a sibling vCPU writing to a stale guest-TLB
- * mapping after a PT page has been recycled to user data.
+ * SMP-T39 PT-page free diagnostic.  Logs PFN of every PT page freed
+ * back to buddy via the RCU-deferred mmu_gather path.  Was load-bearing
+ * for diagnosing mt-mini "got=0 expect=N" residuals across vCPUs; the
+ * underlying race is now fixed (see commit history around SMP-T79),
+ * so this is off by default.  Re-enable via CONFIG_DEBUG_UM_PT_FREE
+ * if a similar PT-recycle hypothesis ever resurfaces.
  *
- * Output format: "UMPTFREE pfn=<hex> count=<dec>\n" emitted to
- * dmesg via pr_info, ratelimited to ~10/sec to avoid log flooding
- * (a 50-iter mt-mini × 8 threads = ~12 PT frees per boot at
- * baseline; under stress we may see 100s/sec across 4 workers).
- *
- * Read via `dmesg | grep UMPTFREE` and cross-reference against
- * mt-mini's VERIFY_FAIL pointer (resolves to a guest VA, then to a
- * GPA via UML's pgd, then to a host PFN via the physmem memslot —
- * see arch/um/backend/kvm-v2/context.c for the identity mapping).
- *
- * Disabled at compile time when CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE
- * is off, since this is a diagnostic-only path. Wait — that gate
- * lives in the v2 backend, not in mm/. For now use unconditional
- * UML gating; the perf cost is one atomic_inc + occasional pr_info.
+ * Output format: "UMPTFREE pfn=<hex> count=<dec>\n" — first 32 frees
+ * always, then every 100th, to avoid drowning dmesg.
  */
 static atomic_long_t um_pt_free_count = ATOMIC_LONG_INIT(0);
 
@@ -308,9 +297,6 @@ static void um_log_pt_free(struct ptdesc *pt)
 	struct page *p = ptdesc_page(pt);
 	unsigned long pfn = page_to_pfn(p);
 
-	/* First N always, then every 100th — captures startup
-	 * burst plus periodic samples without drowning dmesg.
-	 */
 	if (n <= 32 || (n % 100) == 0)
 		pr_info("UMPTFREE pfn=%lx count=%ld\n", pfn, n);
 }
@@ -321,7 +307,7 @@ static void __tlb_remove_table_free(struct mmu_table_batch *batch)
 	int i;
 
 	for (i = 0; i < batch->nr; i++) {
-#ifdef CONFIG_UML
+#ifdef CONFIG_DEBUG_UM_PT_FREE
 		um_log_pt_free((struct ptdesc *)batch->tables[i]);
 #endif
 		__tlb_remove_table(batch->tables[i]);
