@@ -688,6 +688,13 @@ fn build_kernel_argv(m: &Manifest) -> Vec<String> {
             argv.push("root=/dev/root".into());
             argv.push("rw".into());
         }
+        "ubd" => {
+            // ubd-rooted instance (umlbuild-emitted Umlfile): the
+            // Umlfile's [kernel].append carries the actual
+            // ubd0=PATH + root=/dev/ubda + rw tokens, so emit
+            // nothing here.  Adding `root=ubd` would be a literal
+            // unknown-device the kernel would warn about.
+        }
         other => {
             // v1 otherwise-passthrough: let the caller hand-roll
             // `root=ubd0` etc. via the manifest's `root` field.

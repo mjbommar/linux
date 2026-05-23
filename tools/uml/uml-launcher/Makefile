@@ -48,7 +48,11 @@ install: all
 ifneq ($(CARGO_PRESENT),)
 	install -D -m 0755 target/release/uml-launcher \
 		$(DESTDIR)$(PREFIX)/bin/uml-launcher
-	@echo "uml-launcher installed to $(DESTDIR)$(PREFIX)/bin/uml-launcher"
+	install -D -m 0755 target/release/umlctl \
+		$(DESTDIR)$(PREFIX)/bin/umlctl
+	install -D -m 0755 target/release/umlbuild \
+		$(DESTDIR)$(PREFIX)/bin/umlbuild
+	@echo "Installed uml-launcher, umlctl, umlbuild to $(DESTDIR)$(PREFIX)/bin/"
 else
 	@echo "uml-launcher: cargo not found; nothing to install."
 endif

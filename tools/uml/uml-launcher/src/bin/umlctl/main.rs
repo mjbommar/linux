@@ -1043,7 +1043,12 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         &uml.runtime.mem,
         &uml.kernel.backend,
         &cmdline,
-        "hostfs",
+        // When the Umlfile's [runtime].root is something other than
+        // "hostfs" (e.g. "ubd", emitted by `umlbuild instance`), pass
+        // it through to the manifest so supervise::build_kernel_argv's
+        // passthrough arm handles it (no rootfstype=hostfs, no
+        // root=/dev/root).
+        &uml.runtime.root,
         false,
         uml.runtime.ncpus,
         &labels,
@@ -1070,17 +1075,19 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         .context("create instances directory")?;
     m.write_to(&manifest_path).context("write manifest")?;
 
-    // Now start. Map the Umlfile's `init.script` (compiled) into the
-    // start args' init field. Note: supervise::start consumes the
-    // manifest's cmdline + init separately; we cheat by stuffing
-    // init=PATH into cmdline. (TODO: cleaner manifest extension.)
-    let init_arg = format!("init={}", compiled.init_script.display());
+    // For hostfs-rooted instances, map the Umlfile's compiled
+    // init.sh into init=PATH on the cmdline.  For ubd-rooted
+    // instances (umlbuild output), the rootfs ships its own
+    // /sbin/init — don't override.
     let mut full_cmdline = cmdline.clone();
-    if !full_cmdline.is_empty() {
-        full_cmdline.push(' ');
+    if uml.runtime.root == "hostfs" {
+        let init_arg = format!("init={}", compiled.init_script.display());
+        if !full_cmdline.is_empty() {
+            full_cmdline.push(' ');
+        }
+        full_cmdline.push_str(&init_arg);
     }
-    full_cmdline.push_str(&init_arg);
-    // Rewrite manifest with the init= cmdline merged in.
+    // Rewrite manifest with the (possibly init=-augmented) cmdline.
     let mut m2 = m.clone();
     m2.runtime.cmdline = full_cmdline;
     m2.write_to(&manifest_path)?;

@@ -23,6 +23,14 @@ path = "src/main.rs"
 name = "umlctl"
 path = "src/bin/umlctl/main.rs"
 
+# umlbuild — reproducible UML instance builder (kernel + rootfs
+# + ubd image + emitted Umlfile.toml). Sibling of umlctl;
+# umlctl runs an instance, umlbuild constructs one. Same
+# shared deps. See src/bin/umlbuild/SPEC.md.
+[[bin]]
+name = "umlbuild"
+path = "src/bin/umlbuild/main.rs"
+
 [dependencies]
 # CLI parsing + env-var fallbacks + shell completions.
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }

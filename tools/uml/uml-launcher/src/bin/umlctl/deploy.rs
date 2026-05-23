@@ -117,6 +117,22 @@ pub struct RuntimeSection {
     /// with calibration jitter.
     #[serde(default)]
     pub fast_boot: bool,
+    /// Root filesystem source.  Defaults to "hostfs" (the historical
+    /// umlctl-up behavior): host's `/` is bind-mounted as the guest's
+    /// root via hostfs, and umlctl synthesizes an init.sh that runs
+    /// the init.phases pipeline.
+    ///
+    /// Set to "ubd" when the Umlfile was emitted by `umlbuild instance`
+    /// — the kernel boots from a ubd-attached ext4 image specified by
+    /// `kernel.append`, and umlctl skips its init.sh synthesis (the
+    /// rootfs ships its own /sbin/init).  Any other value is passed
+    /// through verbatim as `root=<value>` (e.g. "/dev/ubdb").
+    #[serde(default = "default_root")]
+    pub root: String,
+}
+
+fn default_root() -> String {
+    "hostfs".to_string()
 }
 
 impl Default for RuntimeSection {
@@ -125,6 +141,7 @@ impl Default for RuntimeSection {
             mem: "512M".into(),
             ncpus: 1,
             fast_boot: false,
+            root: default_root(),
         }
     }
 }
