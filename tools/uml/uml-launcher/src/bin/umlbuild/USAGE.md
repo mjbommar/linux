@@ -132,9 +132,35 @@ umlbuild shell --profile sandbox --cmd /usr/bin/python3
 # bash in the dev profile (which ships bash + gcc + gdb):
 umlbuild shell --profile dev --cmd /bin/bash
 
+# Outbound networking — TAP + MASQUERADE auto-wired via sudo.
+# Inside the guest, `urllib.request.urlopen('https://www.python.org/')` works.
+umlbuild shell --profile sandbox-net --network tap --cmd /usr/bin/python3
+
 # Run a one-off command instead of an interactive prompt:
 echo 'python3 -c "print(42)"' | umlbuild shell --profile mvp
 ```
+
+### Networking (`--network tap`)
+
+With `--network tap`, `umlbuild shell`:
+
+1. Creates a host TAP (`umlb-tap0` by default), assigns the profile's
+   `[network].host_ip`, brings it up.
+2. Enables `net.ipv4.ip_forward=1` and adds `iptables MASQUERADE` from
+   the TAP's CIDR to the host's default-route interface (auto-detected
+   from `/proc/net/route`; override with `--nat-via <iface>`).
+3. Adds `iptables -A FORWARD` rules so packets can traverse the TAP.
+4. Boots the kernel with `vec0:transport=tap,ifname=umlb-tap0,depth=128`.
+5. The rootfs's `/sbin/init` reads `/etc/sandbox.net` (baked at image
+   build time) and runs `ip addr add 10.7.0.2/24 dev vec0; ip link
+   set vec0 up; ip route add default via 10.7.0.1` plus writes
+   `/etc/resolv.conf`.
+6. On shell exit, tears all of the above down (idempotent — leftovers
+   from prior crashes are removed first).
+
+All host-side network setup requires `sudo`; if you don't have
+NOPASSWD, you'll be prompted once.  Use the `sandbox-net` profile for
+a turnkey example.
 
 The default `--cmd /bin/sh` works on any Alpine-based profile.  Type
 `exit` or Ctrl-D to leave; the kernel powers down (you'll see a
@@ -196,10 +222,11 @@ sandbox_cmd = "python3 -c 'print(\"hi\")'"
 
 | name | starting point | est. stripped kernel | image | what it does |
 |------|----------------|----------------------|-------|--------------|
-| `mvp`       | tinyconfig + 17 Kconfig flips | ~3.3 MB  | 200 MB ext4 (sparse) | runs `python3` from Alpine 3.20; ubd-rooted |
-| `sandbox`   | tinyconfig + mvp + NET/INET/UNIX/OVERLAY_FS/EVENTFD/EPOLL | ~6 MB    | 500 MB | safe-enough for untrusted Python: loopback, tmpfs overlay, sandbox uid=1000, `py3-pip` + `ca-certificates` |
-| `dev`       | base_defconfig                | ~90 MB   | 2 GB   | development UML: gcc, git, gdb, strace, vim in Alpine |
-| `container` | base_defconfig + USER_NS/PID_NS/MEMCG/OVERLAY_FS/BRIDGE/NF_TABLES/etc. + runc | ~110 MB | 1 GB | runs OCI containers inside the guest via runc (defense-in-depth over UML's kernel boundary) |
+| `mvp`         | tinyconfig + 17 Kconfig flips | ~3.3 MB  | 200 MB ext4 (sparse) | runs `python3` from Alpine 3.20; ubd-rooted |
+| `sandbox`     | mvp + NET/INET/UNIX/OVERLAY_FS/EVENTFD/EPOLL | ~6 MB    | 500 MB | safe-enough for untrusted Python: loopback, tmpfs overlay, sandbox uid=1000, `py3-pip` + `ca-certificates` |
+| `sandbox-net` | sandbox + UML_NET_VECTOR + IP_PNP | ~7 MB    | 500 MB | outbound networking via TAP+MASQUERADE (set up by `umlbuild shell --network tap`); iproute2 + curl + ca-certs |
+| `dev`         | base_defconfig                | ~90 MB   | 2 GB   | development UML: gcc, git, gdb, strace, vim in Alpine |
+| `container`   | base_defconfig + USER_NS/PID_NS/MEMCG/OVERLAY_FS/BRIDGE/NF_TABLES/etc. + runc | ~110 MB | 1 GB | runs OCI containers inside the guest via runc (defense-in-depth over UML's kernel boundary) |
 
 All four are in `tools/uml/uml-launcher/profiles/`.  Build any of them:
 

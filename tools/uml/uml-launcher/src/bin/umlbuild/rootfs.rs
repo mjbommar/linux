@@ -446,11 +446,47 @@ fn install_init(prof: &profile::Profile, out: &Path) -> Result<()> {
     std::fs::write(&cmd_path, cmd)
         .with_context(|| format!("write {}", cmd_path.display()))?;
 
+    // Bake the network plan into /etc/sandbox.net so /sbin/init can
+    // bring up the NIC defensively (no-op if mode = "none").  Format
+    // is a sourceable shell snippet — simpler than parsing TOML in ash.
+    let net_path = out.join("etc/sandbox.net");
+    let net = &prof.network;
+    let dns_lines = net
+        .dns
+        .iter()
+        .map(|s| format!("nameserver {s}"))
+        .collect::<Vec<_>>()
+        .join("\\n");
+    let net_sh = format!(
+        "# umlbuild-generated network plan; sourced by /sbin/init.\n\
+         NET_MODE={mode}\n\
+         NET_GUEST_DEV={guest_dev}\n\
+         NET_GUEST_IP={guest_ip}\n\
+         NET_GATEWAY={gw}\n\
+         NET_DNS_RESOLV='{dns_lines}'\n",
+        mode = net.mode,
+        guest_dev = guest_dev_for_driver(&net.driver),
+        guest_ip = net.guest_ip,
+        gw = net.gateway,
+        dns_lines = dns_lines,
+    );
+    std::fs::write(&net_path, net_sh)
+        .with_context(|| format!("write {}", net_path.display()))?;
+
     // Pre-create the /results mountpoint so the init's tmpfs mount has
     // somewhere to land.
     std::fs::create_dir_all(out.join("results")).ok();
 
     Ok(())
+}
+
+/// Map the profile's `network.driver` to the guest-visible netdev name.
+/// vector v1 = `vec0`, vector v2 = `vec2.0`.
+fn guest_dev_for_driver(driver: &str) -> &'static str {
+    match driver {
+        "vector2" => "vec2.0",
+        _ => "vec0",
+    }
 }
 
 /// The init template.  Mirrors umlctl/deploy.rs::render_init_script in
@@ -481,18 +517,40 @@ mount -t tmpfs    tmpfs  /results        2>/dev/null || true
 # Loopback up.  Best-effort; not all profiles include iproute2.
 ( ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null ) || true
 
-# Read the sandbox command from /etc/sandbox.cmd (baked at build time).
-# Cmdline override path: sandbox.cmdfile=/etc/other-cmd can point
-# elsewhere.  We pick that up via /proc/cmdline (no spaces in the path
-# value, so awk word-split works fine).
-CMDFILE=$(awk -v RS=' ' \
-    '/^sandbox\.cmdfile=/{{ sub(/^sandbox\.cmdfile=/, ""); print }}' \
+# Bring up the guest NIC if the profile baked a network plan.
+if [ -r /etc/sandbox.net ]; then
+    # shellcheck disable=SC1091
+    . /etc/sandbox.net
+    if [ "$NET_MODE" = "tap" ] && [ -n "$NET_GUEST_DEV" ]; then
+        ip addr add "$NET_GUEST_IP" dev "$NET_GUEST_DEV" 2>/dev/null
+        ip link set "$NET_GUEST_DEV" up 2>/dev/null
+        ip route add default via "$NET_GATEWAY" 2>/dev/null
+        printf '%b\n' "$NET_DNS_RESOLV" > /etc/resolv.conf
+        echo "umlbuild-init: brought up $NET_GUEST_DEV ($NET_GUEST_IP via $NET_GATEWAY)"
+    fi
+fi
+
+# Resolve the sandbox command, in priority order:
+#   1. sandbox.cmdb64=<base64> on /proc/cmdline  (interactive shell verb)
+#   2. sandbox.cmdfile=<path> on /proc/cmdline   (alt baked path)
+#   3. /etc/sandbox.cmd                          (default, baked at build)
+SANDBOX_CMD=""
+CMDB64=$(awk -v RS=' ' \
+    '/^sandbox\.cmdb64=/{{ sub(/^sandbox\.cmdb64=/, ""); print }}' \
     /proc/cmdline 2>/dev/null)
-[ -z "$CMDFILE" ] && CMDFILE=/etc/sandbox.cmd
-if [ -r "$CMDFILE" ]; then
-    SANDBOX_CMD=$(cat "$CMDFILE")
-else
-    SANDBOX_CMD="/bin/sh"
+if [ -n "$CMDB64" ]; then
+    SANDBOX_CMD=$(printf '%s' "$CMDB64" | base64 -d 2>/dev/null)
+fi
+if [ -z "$SANDBOX_CMD" ]; then
+    CMDFILE=$(awk -v RS=' ' \
+        '/^sandbox\.cmdfile=/{{ sub(/^sandbox\.cmdfile=/, ""); print }}' \
+        /proc/cmdline 2>/dev/null)
+    [ -z "$CMDFILE" ] && CMDFILE=/etc/sandbox.cmd
+    if [ -r "$CMDFILE" ]; then
+        SANDBOX_CMD=$(cat "$CMDFILE")
+    else
+        SANDBOX_CMD="/bin/sh"
+    fi
 fi
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -500,24 +558,36 @@ export HOME=/root
 export TERM=dumb
 export SHELL=/bin/sh
 
-echo "umlbuild-init: profile={name} cmdfile=$CMDFILE"
+echo "umlbuild-init: profile={name}"
 echo "umlbuild-init: cmd: $SANDBOX_CMD"
 
+# Interactive vs captured mode: when stdin is a TTY (shell verb), run
+# the cmd attached so the user sees output as it streams + can type.
+# Otherwise (batch/umlctl), redirect to /results/ so the host can
+# scrape the output after boot.
+RUN_AS=""
 if [ "{uid}" -ne 0 ] && id sandbox >/dev/null 2>&1; then
-    # Drop privileges if a 'sandbox' user exists.
-    su sandbox -s /bin/sh -c "cd /tmp && $SANDBOX_CMD" >/results/stdout 2>/results/stderr
-    RC=$?
+    RUN_AS="su sandbox -s /bin/sh -c"
 else
-    /bin/sh -c "cd /tmp && $SANDBOX_CMD" >/results/stdout 2>/results/stderr
-    RC=$?
+    RUN_AS="/bin/sh -c"
 fi
 
-echo "$RC" >/results/rc
-echo "umlbuild-init: ----- stdout -----"
-cat /results/stdout 2>/dev/null
-echo "umlbuild-init: ----- stderr -----"
-cat /results/stderr 2>/dev/null
-echo "umlbuild-init: ----- done rc=$RC -----"
+if [ -t 0 ]; then
+    # Interactive: stdio passes through to the host TTY.
+    $RUN_AS "cd /tmp && $SANDBOX_CMD"
+    RC=$?
+    echo "umlbuild-init: ----- done rc=$RC -----"
+else
+    # Batch: capture stdio into /results/ for host-side scraping.
+    $RUN_AS "cd /tmp && $SANDBOX_CMD" >/results/stdout 2>/results/stderr
+    RC=$?
+    echo "$RC" >/results/rc
+    echo "umlbuild-init: ----- stdout -----"
+    cat /results/stdout 2>/dev/null
+    echo "umlbuild-init: ----- stderr -----"
+    cat /results/stderr 2>/dev/null
+    echo "umlbuild-init: ----- done rc=$RC -----"
+fi
 
 sync
 poweroff -f 2>/dev/null

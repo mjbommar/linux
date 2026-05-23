@@ -1,0 +1,106 @@
+# umlbuild profile — "sandbox-net": sandbox profile + outbound networking.
+#
+# Adds the legacy `vector` driver (CONFIG_UML_NET_VECTOR) and iproute2
+# + ca-certificates in the rootfs so a guest userland can `urllib.request.
+# urlopen("https://www.python.org/")` end-to-end.
+#
+# Used by `umlbuild shell --profile sandbox-net --network tap`.  The
+# shell verb sudo-creates the host-side TAP, wires up MASQUERADE for
+# outbound NAT, runs the kernel foregrounded, then tears down on exit.
+#
+# Inside the guest, /sbin/init reads /etc/sandbox.net (baked at build
+# time) for static IP + gateway + DNS, then `ip addr / ip route / cat
+# > /etc/resolv.conf` before exec'ing the sandbox command.
+
+schema_version = 1
+
+[profile]
+name        = "sandbox-net"
+description = "Sandbox + outbound networking (vector driver, sudo TAP setup)."
+
+[kernel]
+base_config = "tinyconfig"
+enable = [
+    # --- mvp baseline ---
+    "64BIT",
+    "PRINTK",
+    "NULL_CHAN",
+    "HOSTFS",
+    "BINFMT_ELF",
+    "BINFMT_SCRIPT",
+    "PROC_FS",
+    "UM_WORKER_PROCESS",
+    "STDERR_CONSOLE",
+    "FUTEX",
+    "BLOCK",
+    "BLK_DEV_UBD",
+    "EXT4_FS",
+    "JBD2",
+    "DEVTMPFS",
+    "DEVTMPFS_MOUNT",
+    "TMPFS",
+    "SHMEM",
+    "UNIX98_PTYS",
+    "DEVPTS_FS",
+    # --- sandbox additions: loopback networking + overlay ---
+    "NET",
+    "INET",
+    "UNIX",
+    "PACKET",
+    "OVERLAY_FS",
+    "HW_RANDOM",
+    "EVENTFD",
+    "TIMERFD",
+    "SIGNALFD",
+    "EPOLL",
+    # --- net additions: vector driver + IP stack + NAT-friendly bits ---
+    "UML_NET",
+    "UML_NET_VECTOR",
+    "NETDEVICES",
+    "NET_CORE",
+    "IP_PNP",
+    "INET_DIAG",
+    "TCP_CONG_CUBIC",
+    # ICMP for ping-from-guest; if the user only wants TCP this is
+    # optional, but it's a cheap ~12 KB and the standard expectation.
+    "IP_MULTICAST",
+]
+disable = []
+strip = true
+
+[rootfs]
+base         = "alpine"
+sandbox_uid  = 0   # leave root inside so /sbin/init can ip-addr-add.
+
+[rootfs.alpine]
+version  = "3.20.3"
+sha256   = "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
+mirror   = "https://dl-cdn.alpinelinux.org/alpine"
+packages = [
+    "python3",
+    "py3-pip",
+    "busybox-extras",
+    "ca-certificates",
+    "iproute2",
+    "curl",
+]
+
+[image]
+size   = "500M"
+fstype = "ext4"
+label  = "uml-sandbox-net"
+
+[instance]
+mem         = "512M"
+ncpus       = 1
+backend     = "seccomp"
+sandbox_cmd = "echo '--- guest network ---'; ip addr; echo; echo '--- resolv ---'; cat /etc/resolv.conf; echo; echo '--- curl test ---'; curl -fsS --max-time 8 https://1.1.1.1/ -o /dev/null -w 'HTTP %{http_code} from %{remote_ip} in %{time_total}s\\n'; echo; echo '--- python3 urlopen ---'; python3 -c 'import urllib.request; print(urllib.request.urlopen(\"https://www.python.org/\", timeout=8).read(100))'"
+
+[network]
+mode     = "tap"            # "tap" or "none"
+driver   = "vector"         # "vector" (v1, stable) or "vector2"
+tap_name = "umlb-tap0"
+host_ip  = "10.7.0.1/24"
+guest_ip = "10.7.0.2/24"
+gateway  = "10.7.0.1"
+dns      = ["1.1.1.1", "8.8.8.8"]

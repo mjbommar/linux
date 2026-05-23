@@ -25,6 +25,42 @@ pub struct Profile {
     pub image: ImageSpec,
     #[serde(default)]
     pub instance: InstanceDefaults,
+    #[serde(default)]
+    pub network: NetworkSpec,
+}
+
+/// Networking knobs baked into the rootfs at build time + carried
+/// through to the kernel cmdline at boot.
+///
+/// `mode = "none"` (default) produces a guest with only loopback.
+/// `mode = "tap"` requires the operator to bring up the host TAP
+/// (umlbuild shell --network tap handles this via sudo); the guest's
+/// /sbin/init brings up the corresponding NIC inside the guest and
+/// writes /etc/resolv.conf from `dns`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields, default)]
+pub struct NetworkSpec {
+    pub mode: String,          // "none" or "tap"
+    pub driver: String,        // "vector" (v1) or "vector2"
+    pub tap_name: String,      // host-side TAP device name
+    pub host_ip: String,       // e.g. "10.7.0.1/24"
+    pub guest_ip: String,      // e.g. "10.7.0.2/24"
+    pub gateway: String,       // e.g. "10.7.0.1"
+    pub dns: Vec<String>,      // e.g. ["1.1.1.1", "8.8.8.8"]
+}
+
+impl Default for NetworkSpec {
+    fn default() -> Self {
+        Self {
+            mode: "none".into(),
+            driver: "vector".into(),
+            tap_name: "umlb-tap0".into(),
+            host_ip: "10.7.0.1/24".into(),
+            guest_ip: "10.7.0.2/24".into(),
+            gateway: "10.7.0.1".into(),
+            dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
