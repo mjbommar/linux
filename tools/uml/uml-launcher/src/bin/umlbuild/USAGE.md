@@ -224,7 +224,7 @@ sandbox_cmd = "python3 -c 'print(\"hi\")'"
 |------|----------------|----------------------|-------|--------------|
 | `mvp`         | tinyconfig + 17 Kconfig flips | ~3.3 MB  | 200 MB ext4 (sparse) | runs `python3` from Alpine 3.20; ubd-rooted |
 | `sandbox`     | mvp + NET/INET/UNIX/OVERLAY_FS/EVENTFD/EPOLL | ~6 MB    | 500 MB | safe-enough for untrusted Python: loopback, tmpfs overlay, sandbox uid=1000, `py3-pip` + `ca-certificates` |
-| `sandbox-net` | sandbox + UML_NET_VECTOR + IP_PNP | ~7 MB    | 500 MB | outbound networking via TAP+MASQUERADE (set up by `umlbuild shell --network tap`); iproute2 + curl + ca-certs |
+| `sandbox-net` | sandbox + UML_NET_VECTOR_V2 + IP_PNP | ~7 MB    | 500 MB | outbound networking via TAP+MASQUERADE (set up by `umlbuild shell --network tap`); guest interface is `vec2.0` (v2 driver); iproute2 + curl + ca-certs |
 | `dev`         | base_defconfig                | ~90 MB   | 2 GB   | development UML: gcc, git, gdb, strace, vim in Alpine |
 | `container`   | base_defconfig + USER_NS/PID_NS/MEMCG/OVERLAY_FS/BRIDGE/NF_TABLES/etc. + runc | ~110 MB | 1 GB | runs OCI containers inside the guest via runc (defense-in-depth over UML's kernel boundary) |
 

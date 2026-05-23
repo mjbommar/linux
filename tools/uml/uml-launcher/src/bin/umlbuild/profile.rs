@@ -53,7 +53,11 @@ impl Default for NetworkSpec {
     fn default() -> Self {
         Self {
             mode: "none".into(),
-            driver: "vector".into(),
+            // v2 default: current architecture, no per-packet GSO
+            // log spam, `vec2.0` guest interface name.  Set
+            // driver = "vector" explicitly to use the legacy v1
+            // driver.
+            driver: "vector2".into(),
             tap_name: "umlb-tap0".into(),
             host_ip: "10.7.0.1/24".into(),
             guest_ip: "10.7.0.2/24".into(),
