@@ -67,6 +67,13 @@ pub struct ShellArgs {
     /// default-route interface).  Only used when --network=tap.
     #[arg(long, value_name = "IFACE", default_value = "auto")]
     pub nat_via: String,
+
+    /// Show the kernel boot banner and per-subsystem init messages.
+    /// Default: pass `quiet` on the kernel cmdline so only warn-level
+    /// and above reach the console — the REPL prompt is the first
+    /// thing you see after the umlbuild-init line.
+    #[arg(long)]
+    pub verbose_kernel: bool,
 }
 
 pub fn run(args: ShellArgs) -> Result<()> {
@@ -142,6 +149,14 @@ pub fn run(args: ShellArgs) -> Result<()> {
         "con0=fd:0,fd:1".into(),
         "con1=null,fd:1".into(),
     ];
+
+    // Suppress the kernel boot banner + per-subsystem init messages
+    // unless --verbose-kernel is set.  `quiet` raises the console
+    // loglevel; warnings and errors still come through.
+    if !args.verbose_kernel {
+        argv.push("quiet".into());
+        argv.push("loglevel=4".into());
+    }
 
     if use_init_dispatch {
         // Encode --cmd into the cmdline, let /sbin/init do its thing

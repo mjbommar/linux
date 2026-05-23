@@ -236,6 +236,12 @@ fn run_make(
     args: &[&str],
     phase: &str,
 ) -> Result<()> {
+    let log_path = build_dir.join(format!("umlbuild-{phase}.log"));
+    eprintln!(
+        "umlbuild kernel: make {} (log: {})",
+        args.join(" "),
+        log_path.display()
+    );
     tracing::info!(phase, jobs, "umlbuild kernel: make {}", args.join(" "));
     let mut cmd = Command::new("make");
     cmd.current_dir(source);
@@ -244,10 +250,37 @@ fn run_make(
     for a in args {
         cmd.arg(a);
     }
-    let status = cmd
-        .status()
-        .with_context(|| format!("spawn make for phase '{phase}'"))?;
+    // Pipe make output to a log file by default — kernel builds dump
+    // thousands of `CC file.o` lines that drown any interactive shell.
+    // The user sees the make invocation summary; errors are propagated
+    // via the exit status (then we tail the log on failure for the
+    // operator to see).  Set UMLBUILD_VERBOSE=1 to keep stdout/stderr
+    // attached.
+    let verbose = std::env::var_os("UMLBUILD_VERBOSE").is_some();
+    let status = if verbose {
+        cmd.status()
+            .with_context(|| format!("spawn make for phase '{phase}'"))?
+    } else {
+        let log = std::fs::File::create(&log_path)
+            .with_context(|| format!("create {}", log_path.display()))?;
+        let log2 = log
+            .try_clone()
+            .with_context(|| format!("clone log fd for {}", log_path.display()))?;
+        cmd.stdout(log).stderr(log2);
+        cmd.status()
+            .with_context(|| format!("spawn make for phase '{phase}'"))?
+    };
     if !status.success() {
+        // On failure, surface the last bit of the log so the operator
+        // sees what broke without having to know the path.
+        if !verbose {
+            eprintln!("umlbuild kernel: make {phase} failed — last 30 log lines:");
+            if let Ok(text) = std::fs::read_to_string(&log_path) {
+                for line in text.lines().rev().take(30).collect::<Vec<_>>().iter().rev() {
+                    eprintln!("    {line}");
+                }
+            }
+        }
         bail!("make {phase} exited with {status}");
     }
     Ok(())
