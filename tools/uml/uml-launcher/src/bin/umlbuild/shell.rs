@@ -18,9 +18,10 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::{instance, profile};
 
@@ -207,21 +208,41 @@ pub fn run(args: ShellArgs) -> Result<()> {
     eprintln!("                Ctrl-D or `exit` to leave; kernel will power down.");
     eprintln!();
 
+    // When our stdin is not a TTY (i.e. the user is piping or
+    // redirecting), the UML console's `fd:0` source will see EOF
+    // almost immediately and tear down the console before init can
+    // produce any output.  Detect that and route the kernel's stdin
+    // from /dev/null instead, which stays open for the lifetime of
+    // the kernel.  For interactive use (host stdin IS a TTY), pass
+    // through normally so line editing + Ctrl-C work.
+    let stdin_is_tty = unsafe { libc::isatty(std::io::stdin().as_raw_fd()) } == 1;
+
     let result = if net_setup.is_some() {
         // fork+wait so we can run network teardown after the kernel exits.
-        let status = Command::new(&kernel)
-            .args(&argv)
+        let mut cmd = Command::new(&kernel);
+        cmd.args(&argv);
+        if !stdin_is_tty {
+            cmd.stdin(Stdio::null());
+        }
+        let status = cmd
             .status()
             .with_context(|| format!("spawn {}", kernel.display()));
         if let Some(plan) = &net_setup {
             plan.tear_down();
         }
         status.map(|_| ())
+    } else if !stdin_is_tty {
+        // Same batch-stdin rescue when there's no network setup —
+        // but no teardown needed, so we can still use fork+wait.
+        let mut cmd = Command::new(&kernel);
+        cmd.args(&argv);
+        cmd.stdin(Stdio::null());
+        cmd.status()
+            .with_context(|| format!("spawn {}", kernel.display()))
+            .map(|_| ())
     } else {
-        // No teardown needed; execve to give the kernel the TTY directly.
-        let err = Command::new(&kernel)
-            .args(&argv)
-            .exec();
+        // Interactive + no network: execve to give the kernel the TTY directly.
+        let err = Command::new(&kernel).args(&argv).exec();
         return Err(anyhow::Error::new(err)
             .context(format!("execve {}", kernel.display())));
     };

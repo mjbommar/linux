@@ -84,6 +84,7 @@ sha256   = "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
 mirror   = "https://dl-cdn.alpinelinux.org/alpine"
 packages = [
     "python3",
+    "python3-tests",   # CPython stdlib regression tests (test_struct, test_math, ...)
     "py3-pip",
     "busybox-extras",
     "ca-certificates",
