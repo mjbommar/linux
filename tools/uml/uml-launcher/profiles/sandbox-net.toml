@@ -44,6 +44,7 @@ enable = [
     "SHMEM",
     "UNIX98_PTYS",
     "DEVPTS_FS",
+    "FILE_LOCKING",       # flock/F_SETLK/F_SETLKW — Python test_fcntl
     # --- sandbox additions: loopback networking + overlay ---
     "NET",
     "INET",

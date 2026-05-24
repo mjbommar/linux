@@ -1,0 +1,66 @@
+# umlctl Umlfile — run CPython's FULL standard test suite inside UML.
+#
+# Unlike cpython-test.toml which uses a curated 29-module subset that
+# deliberately avoids fork/exec/subprocess paths (documented as
+# "out of scope, divergence from seccomp parity"), this Umlfile runs
+# `python3 -m test` with no module list — all ~521 stdlib test
+# modules.  Used to capture the HONEST UML failure ledger and as the
+# regression gate for fixing them.
+#
+# Expected runtime on the reference host: 30-60 min depending on which
+# subprocess-related tests hang vs crash vs pass.
+#
+# Usage:
+#
+#   UML_KERNEL=$HOME/src/uml-builds/uml-smp-t41fix/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/cpython-test-full.toml
+#   umlctl logs cpython-test-full --tail 1000
+
+schema_version = 1
+
+[instance]
+name = "cpython-test-full"
+labels = { workload = "cpython-test-full", purpose = "umlctl-validation-honest" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+# 8 GB fits comfortably inside the typical host /dev/shm budget
+# (UML's physmem comes from there).  Combined with -j2 + per-test
+# memlimit this is enough for the full stdlib suite without OOM.
+mem = "8192M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "smoke"
+cmd  = "python3 -c 'import sys; print(\"python\", sys.version); print(\"executable:\", repr(sys.executable))'"
+
+[[init.phases]]
+name = "cpython-test-full"
+# Full stdlib suite.  -j4 in parallel, generous per-test timeout (300s)
+# because UML's fork/exec/subprocess path is slow and we want true
+# failures separated from timeouts.
+cmd  = """
+mkdir -p /tmp/cpython-out && cd /tmp/cpython-out && \
+python3 -m test --quiet -j2 --timeout=300
+"""
+
+[[init.phases]]
+name = "report"
+cmd  = "echo CPYTHON_TEST_FULL_DONE rc=$?"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false
