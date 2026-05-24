@@ -1,0 +1,30 @@
+# Expected-failure allowlist for the full CPython stdlib regrtest
+# under UML.  One module name per line (e.g. "test_subprocess" or
+# "test.test_asyncio.test_streams").  Lines starting with # are
+# comments.
+#
+# The cpython-full gate compares the actual failure set against
+# this list.  PASS iff actual == expected (or strict subset).
+# Any NEW failure breaks the gate — that's the point.
+#
+# Format: one module name per line, no quoting.  Match the leftmost
+# token of regrtest's "test <name> failed" output.
+#
+# This file starts EMPTY.  It will be populated by the first
+# `make -C tools/testing/selftests/um/cpython-full` run; the run
+# script prints the actual failure list which you then commit here
+# with an issue link per line.
+#
+# Every line in this file should have:
+#   - the module that fails
+#   - WHY it fails (one-line root cause)
+#   - link to the issue tracking the fix
+#
+# Example:
+#   # test_strict_replay deadlocks on kvm-v2 because the shadow PGD
+#   # invalidation races a cross-CPU memory barrier; see issue #243.
+#   test_kvm_v2_strict_replay
+#
+# DO NOT add a line here without filling in WHY + the issue link.
+# Silent additions are how the original cpython-test gate became
+# misleading (29 of 439 modules, no annotation about WHY only 29).

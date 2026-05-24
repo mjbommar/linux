@@ -54,6 +54,36 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	spin_lock_init(&mm->context.sync_tlb_lock);
 
 	/*
+	 * dup_mm() (fork's copy_mm path) bytewise-copies the parent
+	 * mm_struct, which includes the sync_tlb_range_{from,to}
+	 * window the parent had pending at fork time.  The child mm
+	 * has no PTEs of its own yet, so propagating those would
+	 * cause the next um_tlb_sync on the child to flush a region
+	 * that's meaningful only in the parent.  Worse, a partial
+	 * range can confuse the backend dispatcher into a no-op
+	 * "already flushed" decision when the child later actually
+	 * does need a sync.  Reset to the canonical "no range" state.
+	 */
+	mm->context.sync_tlb_range_from = 0;
+	mm->context.sync_tlb_range_to = 0;
+
+	/*
+	 * Per-mm guest-TLB generation counter.  Same dup_mm hazard:
+	 * inheriting the parent's tlb_gen value lets a vCPU whose
+	 * last_seen_tlb_gen happens to match (because it last ran on
+	 * a different mm at the same generation) skip the CR4.PGE
+	 * flush when switching to this fresh mm.  Guest TLB then
+	 * holds parent's stale GVA->GPA translations, faulting on
+	 * the child's anon pages and incrementing MM_ANONPAGES on
+	 * a mm whose unmap path won't see the matching PTE.
+	 * Manifests as parallel-fork+exec workloads producing
+	 *   BUG: Bad rss-counter state ... MM_ANONPAGES val:1
+	 * + TLS-region SEGVs in libc/python.  Reset to 0 so the very
+	 * first dispatch on the child mm always flushes.
+	 */
+	atomic64_set(&mm->context.tlb_gen, 0);
+
+	/*
 	 * Memo §H.1b residual fix: deferred-free page list. dup_mm()
 	 * bytewise-copies the parent mm including these fields, so we
 	 * must reset for the new mm. See arch/um/include/asm/mmu.h
