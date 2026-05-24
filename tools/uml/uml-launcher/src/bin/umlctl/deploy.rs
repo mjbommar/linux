@@ -1116,6 +1116,18 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
         }
         s.push_str("__RESOLV__\n");
     }
+    // /etc/hosts is REQUIRED for getaddrinfo("localhost") to succeed
+    // without an external DNS lookup.  Many Python tests bind sockets
+    // to "localhost" (test_asyncio.test_events, test_multiprocessing*,
+    // test_concurrent_futures.*) and would otherwise hit
+    //   OSError: [Errno -3] Temporary failure in name resolution
+    // because the tmpfs /etc above shadows the host's /etc/hosts.
+    s.push_str("cat > /etc/hosts <<'__HOSTS__'\n");
+    s.push_str("127.0.0.1   localhost localhost.localdomain\n");
+    s.push_str("::1         localhost ip6-localhost ip6-loopback\n");
+    s.push_str("ff02::1     ip6-allnodes\n");
+    s.push_str("ff02::2     ip6-allrouters\n");
+    s.push_str("__HOSTS__\n");
     s.push_str("\n");
 
     // Network up (tap-specific config — lo already up above).

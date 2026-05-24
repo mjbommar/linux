@@ -1,0 +1,41 @@
+# Tight-focus repro: just test_multiprocessing_fork.test_misc + a few
+# concurrent_futures subtests, VERBOSE so we capture the actual
+# exceptions instead of "multiple errors occurred".
+schema_version = 1
+
+[instance]
+name = "cpython-fork-debug"
+labels = { workload = "cpython-fork-debug" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "4096M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "fork-debug"
+cmd = """
+cd /tmp && python3 -m test -v --timeout=120 \
+  test_multiprocessing_fork.test_misc 2>&1 | tail -200
+"""
+
+[[init.phases]]
+name = "report"
+cmd = "echo FORK_DEBUG_DONE rc=$?"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false
