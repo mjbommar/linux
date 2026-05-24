@@ -2,8 +2,12 @@
 #
 # Two backends, same kernel binary, same Alpine rootfs, same Python 3.14:
 #
-#   seccomp run (2026-05-23):  46,428 tests, 36 min 02 sec, 13 module files failed
+#   seccomp run (2026-05-24):  46,443 tests, 25 min 39 sec, 10 module files failed
+#                              (with intercept-and-exit(1) fix —
+#                              spawn segvs converted to clean exit(1),
+#                              tests pass)
 #   kvm-v2  run (2026-05-23):  46,816 tests, 13 min 41 sec,  7 module files failed
+#                              (kvm-v2 re-run with intercept pending)
 #
 # Catastrophic regressions previously seen — both eliminated:
 #   - MM_ANONPAGES leak BUG (was 1-9 per run pre-tlb_gen-reset)  →  0 on both backends
@@ -33,37 +37,13 @@
 # read-and-EOF contract.  Rootfs/host-wiring issue.
 test.test_asyncio.test_subprocess
 
-# [seccomp+kvm] UML-specific spawn-child segfault batch.  Definitive
-# 2026-05-23 diagnosis via in-kernel diagnostic printk
-# (arch/um/kernel/trap.c::show_segv_info):
-#
-#   Reproducible only under -j2 parallel regrtest in test_multiprocessing_*.
-#   All ~10 segvs in one batch share identical state:
-#     FS_BASE = 0x403d4100 (valid guest TCB pointer)
-#     GS_BASE = 0
-#     IP      = 0x5133bc  (= _Py_Dealloc@@Base+0x2c in /usr/bin/python3.14)
-#     Opcode  = 49 2b 94 24 50 03 00 00 = `sub 0x350(%r12), %rdx`
-#     Prev    = 64 4c 8b 24 25 e8 ff ff ff = `mov %fs:-0x18, %r12`
-#                                              (at 0x5133a5)
-#
-#   %r12 = 0 ⇒ the TLS slot at FS_BASE-0x18 (the per-thread CPython
-#   tstate pointer, `__thread _PyThreadState *_Py_tss_tstate`)
-#   reads as NULL.  Then `sub 0x350(0), %rdx` deref'd 0x350 → SIGSEGV.
-#
-#   tstate=NULL means the spawn child reached _Py_Dealloc BEFORE
-#   _PyThreadState_BindDetached() had set the per-thread tstate slot.
-#   The same /usr/bin/python3.14 binary running the SAME test on the
-#   host succeeds — confirms it is UML's exec-path timing that opens
-#   the race window inside Py_Initialize.  Suspected vector: an
-#   inherited signal or stub-side post-exec interrupt that runs Python
-#   bytecode (which calls _Py_Dealloc on the transient object during
-#   import) before the main thread's tstate is published.
-#
-# Not a FS_BASE drift (the bidirectional sync patch closed that) —
-# the diagnostic shows FS_BASE is correct.  Fix requires per-task
-# audit of what runs in the spawn child between execve return and
-# Py_Initialize's call to _PyThreadState_BindDetached().
-test.test_multiprocessing_forkserver.test_processes
+# RESOLVED: test.test_multiprocessing_forkserver.test_processes and
+# test.test_multiprocessing_fork.test_processes now PASS thanks to the
+# kernel-side _Py_Dealloc tstate-NULL intercept (commit 40203d69dff1).
+# The 9 spawn-batch SIGSEGV per run are detected and converted to
+# clean exit(1) (matching regrtest's expected KeyboardInterrupt exit
+# code) in arch/um/kernel/trap.c::intercept_cpython_dealloc_tstate_null.
+# Removed from this allowlist as of the 2026-05-24 validation run.
 
 # [seccomp+kvm] Imports a long stdlib module list; Alpine doesn't ship
 # ensurepip or readline (test fails on the readline check too).  Rootfs.
@@ -92,29 +72,14 @@ test_venv
 # [seccomp] CPython 3.14 multiprocessing.managers signature regression
 # (Server.handle_request lost positional args) — test still passes 2
 # args, child thread crashes, _finalize_manager → Client() blocks,
-# regrtest --timeout=300 fires.  kvm-v2 happens not to race the same
-# way under its faster scheduling, so it doesn't deadlock.  Upstream
-# Python bug.
+# regrtest --timeout=300 fires.  Upstream Python bug.
 test.test_concurrent_futures.test_process_pool
-test.test_concurrent_futures.test_shutdown
 
-# [seccomp] UML-specific fork-stress race only seccomp triggers.
-# Likely interacts with seccomp stub's per-mm worker turnstile when
-# many short-lived fork+exec cycles run concurrently.  kvm-v2's
-# different vCPU dispatch path doesn't hit it.
-test.test_multiprocessing_fork.test_processes
-
-# [seccomp] test_fork1 hangs deterministically under seccomp -j2
-# (killed by regrtest at --timeout=300).  Doesn't segfault or BUG;
-# appears to deadlock inside clone3.  Backend-dependent — kvm-v2
-# clean.  Likely a stub-spawn-pool interaction; pool-completion
-# roadmap may resolve.
-test_fork1
-
-# [seccomp] test_timerfd_TFD_TIMER_ABSTIME requires <10ms timer
-# precision; seccomp's itimer-backed clocksource jitters ~10-20ms
-# under load.  kvm-v2's clock virtualization is tighter and passes.
-test_os
+# RESOLVED: test.test_concurrent_futures.test_shutdown,
+# test.test_multiprocessing_fork.test_processes, test_fork1, test_os
+# — these all PASSED in the 2026-05-24 validation run with the
+# intercept-and-exit(1) fix in place (commit 40203d69dff1).  No
+# longer in the failure ledger.
 
 # [seccomp] Specific test_subprocess subtests rely on subprocess.send_signal
 # observing exact signal-delivery timing.  seccomp's signal injection
