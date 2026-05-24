@@ -258,6 +258,35 @@ static void show_segv_info(struct uml_pt_regs *regs)
 
 	print_vma_addr(KERN_CONT " in ", UPT_IP(regs));
 	printk(KERN_CONT "\n");
+
+#if defined(CONFIG_X86_64) && defined(HOST_FS_BASE)
+	/*
+	 * Diagnostic for the parallel-spawn segv class — log FS_BASE/GS_BASE
+	 * from pt_regs alongside the instruction bytes near IP, so we can
+	 * distinguish "the TLS read returned 0" (FS_BASE valid, but TLS
+	 * slot zero) from "FS_BASE itself is wrong / unmapped".
+	 *
+	 * Conditioned on a tiny per-task gate so this only fires once per
+	 * task — avoids 10x spam on the parallel-spawn segv batch but still
+	 * captures one representative.
+	 */
+	if (!(tsk->flags & PF_SIGNALED) && fi->error_code == 4) {
+		unsigned long fs_base = regs->gp[HOST_FS_BASE];
+		unsigned long gs_base = regs->gp[HOST_GS_BASE];
+		u8 opcode[16] = { 0 };
+		int n;
+
+		n = copy_from_user(opcode, (void __user *)UPT_IP(regs),
+				   sizeof(opcode));
+		printk(KERN_INFO
+		       "%s[%d]: SEGV diag FS_BASE=%lx GS_BASE=%lx opcode%s=",
+		       tsk->comm, task_pid_nr(tsk), fs_base, gs_base,
+		       n ? "(short)" : "");
+		for (int i = 0; i < sizeof(opcode) - n; i++)
+			printk(KERN_CONT "%02x ", opcode[i]);
+		printk(KERN_CONT "\n");
+	}
+#endif
 }
 
 static void bad_segv(struct faultinfo fi, unsigned long ip)

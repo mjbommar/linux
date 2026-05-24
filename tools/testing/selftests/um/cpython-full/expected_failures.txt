@@ -33,8 +33,36 @@
 # read-and-EOF contract.  Rootfs/host-wiring issue.
 test.test_asyncio.test_subprocess
 
-# [seccomp+kvm] UML-specific spawn-child segfault batch (see header).
-# Persistent until the exec-time TLS-page reset issue is diagnosed.
+# [seccomp+kvm] UML-specific spawn-child segfault batch.  Definitive
+# 2026-05-23 diagnosis via in-kernel diagnostic printk
+# (arch/um/kernel/trap.c::show_segv_info):
+#
+#   Reproducible only under -j2 parallel regrtest in test_multiprocessing_*.
+#   All ~10 segvs in one batch share identical state:
+#     FS_BASE = 0x403d4100 (valid guest TCB pointer)
+#     GS_BASE = 0
+#     IP      = 0x5133bc  (= _Py_Dealloc@@Base+0x2c in /usr/bin/python3.14)
+#     Opcode  = 49 2b 94 24 50 03 00 00 = `sub 0x350(%r12), %rdx`
+#     Prev    = 64 4c 8b 24 25 e8 ff ff ff = `mov %fs:-0x18, %r12`
+#                                              (at 0x5133a5)
+#
+#   %r12 = 0 ⇒ the TLS slot at FS_BASE-0x18 (the per-thread CPython
+#   tstate pointer, `__thread _PyThreadState *_Py_tss_tstate`)
+#   reads as NULL.  Then `sub 0x350(0), %rdx` deref'd 0x350 → SIGSEGV.
+#
+#   tstate=NULL means the spawn child reached _Py_Dealloc BEFORE
+#   _PyThreadState_BindDetached() had set the per-thread tstate slot.
+#   The same /usr/bin/python3.14 binary running the SAME test on the
+#   host succeeds — confirms it is UML's exec-path timing that opens
+#   the race window inside Py_Initialize.  Suspected vector: an
+#   inherited signal or stub-side post-exec interrupt that runs Python
+#   bytecode (which calls _Py_Dealloc on the transient object during
+#   import) before the main thread's tstate is published.
+#
+# Not a FS_BASE drift (the bidirectional sync patch closed that) —
+# the diagnostic shows FS_BASE is correct.  Fix requires per-task
+# audit of what runs in the spawn child between execve return and
+# Py_Initialize's call to _PyThreadState_BindDetached().
 test.test_multiprocessing_forkserver.test_processes
 
 # [seccomp+kvm] Imports a long stdlib module list; Alpine doesn't ship
