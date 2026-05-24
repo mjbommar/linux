@@ -1121,14 +1121,24 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     // already mounted tmpfs on /tmp above), then restore them after.
     // hostfs is read-write to /tmp from the guest, so this stash is
     // a guest-side copy not a host-touching one.
-    s.push_str("# Stash files we want to survive the tmpfs /etc overlay.\n");
+    s.push_str("# Stash essential /etc files BEFORE the tmpfs overlay so they\n");
+    s.push_str("# survive the mount.  Without these, tests like test_grp,\n");
+    s.push_str("# test_pwd, test_socket, test_asyncio.test_subprocess fail\n");
+    s.push_str("# with surprising errors (getpwuid, getgrnam, getservbyname,\n");
+    s.push_str("# nsswitch resolution).\n");
     s.push_str("mkdir -p /tmp/.umlctl-etc-stash 2>/dev/null\n");
-    s.push_str("for f in services nsswitch.conf protocols ssl ca-certificates; do\n");
+    s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
+    s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
+    s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
+    s.push_str("         machine-id localtime timezone; do\n");
     s.push_str("    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n");
     s.push_str("done\n");
     s.push_str("mount -t tmpfs tmpfs /etc 2>/dev/null || true\n");
     s.push_str("# Restore stashed files into the fresh tmpfs.\n");
-    s.push_str("for f in services nsswitch.conf protocols ssl ca-certificates; do\n");
+    s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
+    s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
+    s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
+    s.push_str("         machine-id localtime timezone; do\n");
     s.push_str("    [ -e \"/tmp/.umlctl-etc-stash/$f\" ] && \\\n");
     s.push_str("        cp -a \"/tmp/.umlctl-etc-stash/$f\" \"/etc/\" 2>/dev/null\n");
     s.push_str("done\n");
