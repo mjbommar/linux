@@ -3,11 +3,9 @@
 # Two backends, same kernel binary, same Alpine rootfs, same Python 3.14:
 #
 #   seccomp run (2026-05-24):  46,443 tests, 25 min 39 sec, 10 module files failed
-#                              (with intercept-and-exit(1) fix —
-#                              spawn segvs converted to clean exit(1),
-#                              tests pass)
-#   kvm-v2  run (2026-05-23):  46,816 tests, 13 min 41 sec,  7 module files failed
-#                              (kvm-v2 re-run with intercept pending)
+#                              (9 spawn segvs intercepted → clean exit(1))
+#   kvm-v2  run (2026-05-24):  46,734 tests, 15 min 30 sec,  7 module files failed
+#                              (9 spawn segvs intercepted → clean exit(1))
 #
 # Catastrophic regressions previously seen — both eliminated:
 #   - MM_ANONPAGES leak BUG (was 1-9 per run pre-tlb_gen-reset)  →  0 on both backends
