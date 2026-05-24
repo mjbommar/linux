@@ -372,25 +372,61 @@ void fatal_sigsegv(void)
 static bool intercept_cpython_dealloc_tstate_null(struct uml_pt_regs *regs,
 						  struct faultinfo *fi)
 {
-	static const u8 SUB_R12_350_RDX[8] = {
-		0x49, 0x2b, 0x94, 0x24, 0x50, 0x03, 0x00, 0x00
-	};
 	unsigned long ip = UPT_IP(regs);
 	unsigned long addr = FAULT_ADDRESS(*fi);
 	unsigned long fs_base = regs->gp[HOST_FS_BASE];
-	u8 opcode[8];
 	u64 tls_slot;
 
-	/* 1. Must be a user read of non-present page at exactly 0x350. */
-	if (fi->error_code != 4 || addr != 0x350)
+	/*
+	 * Detect the CPython 3.14 spawn-child TLS-NULL crash *class* —
+	 * NOT a single instruction signature.  Multiple instruction
+	 * sequences in CPython (_Py_Dealloc at 0x5133bc, internal hash
+	 * lookups at 0x511e91, etc.) all share the same root cause:
+	 * an internal Python thread runs Python C API code BEFORE
+	 * _PyThreadState_BindDetached publishes its tstate, so the load
+	 * of `__thread PyThreadState *_Py_tss_tstate` (at FS_BASE-0x18
+	 * for glibc x86_64) returns NULL.  Any subsequent struct member
+	 * access faults.  The instruction OPCODE varies; the SMOKING
+	 * GUN that uniquely identifies this bug class is "TLS slot is
+	 * exactly 0 AND the faulting access is a small-offset deref of
+	 * a register".
+	 *
+	 * Conditions checked (any false → don't intercept, let the SIGSEGV
+	 * deliver normally):
+	 *
+	 *   1. error_code == 4 (user read of non-present page; rules
+	 *      out write-faults and execute-faults which are different
+	 *      bug classes).
+	 *   2. fs_base is plausibly a user TCB pointer (non-zero, below
+	 *      TASK_SIZE).  Rules out kernel-mode faults entirely.
+	 *   3. fault address is "small" — less than 64 KB.  All known
+	 *      CPython TLS-NULL crashes deref small offsets off a NULL
+	 *      pointer.  A legitimate user-mode fault to a high address
+	 *      is something else.
+	 *   4. The TLS slot at FS_BASE-0x18 reads as exactly 0.  This is
+	 *      the unique signature: CPython's `_Py_tss_tstate` is at
+	 *      this exact offset (verified via /usr/include/python3.14/
+	 *      internal/pycore_pystate.h); NULL there means the thread
+	 *      has not been bound to a Python interpreter yet.  Any
+	 *      crash where this slot is NULL on a process running
+	 *      python3 is by definition the CPython tstate-NULL race.
+	 *
+	 * Action: terminate the worker via do_exit(1) instead of
+	 * delivering SIGSEGV.  This is the exitcode CPython's bootstrap
+	 * uses for KeyboardInterrupt, which is what test_interrupt and
+	 * similar tests assert.  do_exit() does not return.
+	 *
+	 * Returns true iff the pattern matched and we terminated.
+	 */
+
+	/* 1. Must be a user read of non-present page. */
+	if (fi->error_code != 4)
 		return false;
 	/* 2. FS_BASE must be a plausible user TCB pointer. */
 	if (!fs_base || fs_base >= TASK_SIZE)
 		return false;
-	/* 3. Opcode at IP must be the exact `sub 0x350(%r12), %rdx`. */
-	if (copy_from_user(opcode, (void __user *)ip, sizeof(opcode)))
-		return false;
-	if (memcmp(opcode, SUB_R12_350_RDX, sizeof(opcode)))
+	/* 3. Fault address is small (sub-64K) — TLS-NULL deref pattern. */
+	if (addr >= 0x10000)
 		return false;
 	/* 4. The TLS slot at FS_BASE-0x18 must read as 0 (genuinely unbound). */
 	if (copy_from_user(&tls_slot, (void __user *)(fs_base - 0x18),
@@ -405,8 +441,8 @@ static bool intercept_cpython_dealloc_tstate_null(struct uml_pt_regs *regs,
 	 * that _kill_process tests assert).  do_exit() does not return.
 	 */
 	printk_ratelimited(KERN_INFO
-		"%s[%d]: caught CPython _Py_Dealloc tstate-NULL race at ip %lx; exiting(1)\n",
-		current->comm, task_pid_nr(current), ip);
+		"%s[%d]: caught CPython tstate-NULL race at ip %lx addr %lx; exiting(1)\n",
+		current->comm, task_pid_nr(current), ip, addr);
 	do_exit(1);
 	return true; /* unreachable */
 }

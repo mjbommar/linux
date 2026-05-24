@@ -1131,7 +1131,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
     s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
-    s.push_str("         machine-id localtime timezone \\\n");
+    s.push_str("         machine-id localtime timezone apt \\\n");
     s.push_str("         python3 python3.13 python3.14; do\n");
     s.push_str("    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n");
     s.push_str("done\n");
@@ -1140,7 +1140,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
     s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
-    s.push_str("         machine-id localtime timezone \\\n");
+    s.push_str("         machine-id localtime timezone apt \\\n");
     s.push_str("         python3 python3.13 python3.14; do\n");
     s.push_str("    [ -e \"/tmp/.umlctl-etc-stash/$f\" ] && \\\n");
     s.push_str("        cp -a \"/tmp/.umlctl-etc-stash/$f\" \"/etc/\" 2>/dev/null\n");
