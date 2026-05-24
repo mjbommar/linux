@@ -1,0 +1,23 @@
+schema_version = 1
+[instance]
+name = "asyncio-subprocess-repro"
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+[runtime]
+mem = "2048M"
+ncpus = 2
+[network]
+mode = "none"
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+[[init.phases]]
+name = "asyncio-test"
+cmd = "ls -la /etc/services 2>&1 | head -1; cd /tmp && python3 -m test -v --rerun no --timeout 90 test_asyncio.test_subprocess 2>&1 | tail -200"
+[[init.phases]]
+name = "report"
+cmd = "echo ASYNCIO_DONE rc=$?"
+[debug]
+log_dir = ""

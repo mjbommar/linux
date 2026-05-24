@@ -1105,10 +1105,33 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("ip link set lo up 2>/dev/null || true\n");
     s.push_str("\n");
 
-    // tmpfs /etc so we can write resolv.conf without touching the
-    // host's /etc (under hostfs that file is the host's). The mount
-    // is private to this UML instance and goes away on shutdown.
+    // tmpfs /etc so we can write resolv.conf + hosts without touching
+    // the host's /etc (under hostfs that file is the host's).  The
+    // mount is private to this UML instance and goes away on shutdown.
+    //
+    // CRITICAL: the tmpfs shadows the host's /etc/services,
+    // /etc/nsswitch.conf, /etc/protocols, etc.  getaddrinfo()
+    // consults /etc/services to resolve port names (e.g. "http")
+    // and nsswitch.conf to decide whether to consult /etc/hosts at
+    // all.  Without them, asyncio + multiprocessing tests that bind
+    // to named ports fail with
+    //   socket.gaierror: [Errno -8] Servname not supported
+    //
+    // Stash the essential files in /tmp BEFORE the tmpfs mount (we
+    // already mounted tmpfs on /tmp above), then restore them after.
+    // hostfs is read-write to /tmp from the guest, so this stash is
+    // a guest-side copy not a host-touching one.
+    s.push_str("# Stash files we want to survive the tmpfs /etc overlay.\n");
+    s.push_str("mkdir -p /tmp/.umlctl-etc-stash 2>/dev/null\n");
+    s.push_str("for f in services nsswitch.conf protocols ssl ca-certificates; do\n");
+    s.push_str("    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n");
+    s.push_str("done\n");
     s.push_str("mount -t tmpfs tmpfs /etc 2>/dev/null || true\n");
+    s.push_str("# Restore stashed files into the fresh tmpfs.\n");
+    s.push_str("for f in services nsswitch.conf protocols ssl ca-certificates; do\n");
+    s.push_str("    [ -e \"/tmp/.umlctl-etc-stash/$f\" ] && \\\n");
+    s.push_str("        cp -a \"/tmp/.umlctl-etc-stash/$f\" \"/etc/\" 2>/dev/null\n");
+    s.push_str("done\n");
     if !uml.network.nameservers.is_empty() {
         s.push_str("cat > /etc/resolv.conf <<'__RESOLV__'\n");
         for ns in &uml.network.nameservers {
@@ -1121,7 +1144,9 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     // to "localhost" (test_asyncio.test_events, test_multiprocessing*,
     // test_concurrent_futures.*) and would otherwise hit
     //   OSError: [Errno -3] Temporary failure in name resolution
-    // because the tmpfs /etc above shadows the host's /etc/hosts.
+    // even when /etc snapshot above succeeded — the host's /etc/hosts
+    // doesn't always include the standard localhost entries (some
+    // distros leave it minimal).
     s.push_str("cat > /etc/hosts <<'__HOSTS__'\n");
     s.push_str("127.0.0.1   localhost localhost.localdomain\n");
     s.push_str("::1         localhost ip6-localhost ip6-loopback\n");
