@@ -1123,14 +1123,16 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     // a guest-side copy not a host-touching one.
     s.push_str("# Stash essential /etc files BEFORE the tmpfs overlay so they\n");
     s.push_str("# survive the mount.  Without these, tests like test_grp,\n");
-    s.push_str("# test_pwd, test_socket, test_asyncio.test_subprocess fail\n");
-    s.push_str("# with surprising errors (getpwuid, getgrnam, getservbyname,\n");
-    s.push_str("# nsswitch resolution).\n");
+    s.push_str("# test_pwd, test_socket, test_asyncio.test_subprocess,\n");
+    s.push_str("# test___all__ fail with surprising errors (getpwuid,\n");
+    s.push_str("# getgrnam, getservbyname, nsswitch resolution, broken\n");
+    s.push_str("# /usr/lib/python3.X/sitecustomize.py symlink).\n");
     s.push_str("mkdir -p /tmp/.umlctl-etc-stash 2>/dev/null\n");
     s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
     s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
-    s.push_str("         machine-id localtime timezone; do\n");
+    s.push_str("         machine-id localtime timezone \\\n");
+    s.push_str("         python3 python3.13 python3.14; do\n");
     s.push_str("    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n");
     s.push_str("done\n");
     s.push_str("mount -t tmpfs tmpfs /etc 2>/dev/null || true\n");
@@ -1138,7 +1140,8 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("for f in services nsswitch.conf protocols passwd group \\\n");
     s.push_str("         shadow gshadow hosts.allow hosts.deny ssl \\\n");
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
-    s.push_str("         machine-id localtime timezone; do\n");
+    s.push_str("         machine-id localtime timezone \\\n");
+    s.push_str("         python3 python3.13 python3.14; do\n");
     s.push_str("    [ -e \"/tmp/.umlctl-etc-stash/$f\" ] && \\\n");
     s.push_str("        cp -a \"/tmp/.umlctl-etc-stash/$f\" \"/etc/\" 2>/dev/null\n");
     s.push_str("done\n");
