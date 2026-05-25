@@ -82,6 +82,12 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	 * first dispatch on the child mm always flushes.
 	 */
 	atomic64_set(&mm->context.tlb_gen, 0);
+	{
+		int i;
+
+		for (i = 0; i < NR_CPUS; i++)
+			atomic64_set(&mm->context.tlb_gen_seen_by[i], 0);
+	}
 
 	/*
 	 * Memo §H.1b residual fix: deferred-free page list. dup_mm()

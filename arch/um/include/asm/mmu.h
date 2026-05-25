@@ -66,18 +66,25 @@ typedef struct mm_context {
 	 * counter, mirroring v1-archive's shadow_mm->tlb_gen pattern
 	 * (kvm-v1-archive/kvm_backend.h:618). Incremented by
 	 * um_tlb_sync after a successful PTE drain. Compared at each
-	 * vCPU's dispatch against the per-vCPU last_seen_tlb_gen; on
-	 * mismatch the vCPU does its CR4.PGE-toggle guest-TLB flush
-	 * and updates last_seen.
+	 * vCPU's dispatch against tlb_gen_seen_by[cpu]; on mismatch
+	 * the vCPU does its CR4.PGE-toggle guest-TLB flush and
+	 * updates its slot.
 	 *
 	 * Also used by kvm-v2's tlb_kick_others to TARGET cross-vCPU
-	 * IPIs: only kick vCPUs whose last_seen is stale relative to
-	 * THIS mm's tlb_gen (and whose current_mm is THIS mm). That
-	 * narrowing is what differentiates this attempt from commit C
-	 * (broadcast IPI storm) and 9f0ff6257e8b (cmpxchg-dedup'd
-	 * broadcast — still too eager under high mm-churn).
+	 * IPIs: only kick vCPUs whose tlb_gen_seen_by[cpu] is stale
+	 * relative to THIS mm's tlb_gen. That narrowing differentiates
+	 * this from commit C (broadcast IPI storm) and 9f0ff6257e8b
+	 * (cmpxchg-dedup'd broadcast — still too eager under high
+	 * mm-churn).
+	 *
+	 * tlb_gen_seen_by is per-(mm, cpu) — the previous per-vCPU
+	 * last_seen_tlb_gen was cross-mm-contaminated: dispatching
+	 * mm_B (gen=5) after mm_A (gen=3000) wrote 5 into the single
+	 * counter, so returning to mm_A showed lag=2995 (false) and
+	 * could also fool the kicker into skipping needed IPIs.
 	 */
 	atomic64_t tlb_gen;
+	atomic64_t tlb_gen_seen_by[NR_CPUS];
 } mm_context_t;
 
 #define INIT_MM_CONTEXT(mm)						\

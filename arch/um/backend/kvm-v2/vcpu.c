@@ -1031,11 +1031,12 @@ void kvm_v2_tlb_kick_others(struct mm_struct *mm)
 			continue;
 		/*
 		 * G.2-fix narrowing #2: skip vCPUs already up-to-date.
-		 * Their last_seen_tlb_gen >= cur_gen means they've already
-		 * flushed for this gen bump (or a later one). No need to
-		 * kick.
+		 * Read from the per-(mm, cpu) array so we compare against
+		 * this cpu's last-seen gen for THIS mm specifically, not
+		 * a cross-mm-contaminated per-vCPU counter.
 		 */
-		if (atomic64_read(&v->last_seen_tlb_gen) >= cur_gen)
+		if (atomic64_read(&mm->context.tlb_gen_seen_by[cpu]) >=
+		    cur_gen)
 			continue;
 		/*
 		 * G.2-cont dedup: at most one IPI in flight per vCPU.
@@ -1729,47 +1730,43 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	atomic_set(&vcpu->kick_pending, 0);
 	WRITE_ONCE(vcpu->current_mm, current->mm);
 	if (current->mm) {
+		int cpu = vcpu->cpu;
 		u64 cur_gen = atomic64_read(&current->mm->context.tlb_gen);
-		u64 last    = atomic64_read(&vcpu->last_seen_tlb_gen);
+		u64 last    = atomic64_read(
+				&current->mm->context.tlb_gen_seen_by[cpu]);
 
-		/*
-		 * SMP-T11 / Layer-6 A10 instrumentation (2026-05-01):
-		 * Detect cross-vCPU stale guest TLB. If this vCPU's
-		 * last_seen lags the per-mm tlb_gen by >=3, another vCPU
-		 * has bumped gen multiple times without us flushing. Note:
-		 * we DO toggle CR4.PGE every dispatch (vcpu.c:1259), so a
-		 * lag here means we missed N drains since our last
-		 * dispatch on this mm. Bound to 30 hits per boot.
-		 */
 		if (cur_gen >= last + 3) {
 			static atomic_t tlb_lag_hits = ATOMIC_INIT(0);
 			if (atomic_inc_return(&tlb_lag_hits) <= 30) {
 				pr_emerg("KVM_V2_TLB_LAG cpu=%d pid=%d mm=%px last=%llu cur=%llu lag=%llu\n",
-					 vcpu->cpu, current->pid, current->mm,
+					 cpu, current->pid, current->mm,
 					 (unsigned long long)last,
 					 (unsigned long long)cur_gen,
 					 (unsigned long long)(cur_gen - last));
 			}
 		}
 
-		/*
-		 * SMP-T56 / Round 4 narrowed fix (2026-05-17): record the
-		 * tlb_gen lag for the cross_task gate below. When lag exceeds
-		 * KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD, other vCPUs have
-		 * bumped the per-mm tlb_gen multiple times since this vCPU
-		 * last ran the mm — so KVM's per-vCPU prev_roots[] cache for
-		 * this mm's CR3 is highly likely stale. Forcing a full
-		 * KVM_SET_SREGS drops prev_roots[] via
-		 * __set_sregs2 → kvm_mmu_reset_context. The unconditional
-		 * variant (Round 4 first pass) cut the "Executing a cache"
-		 * Python flake rate from 14.4% to 1.1% but caused boot-time
-		 * page-allocation panics; a lag-threshold gate keeps the
-		 * benefit on the few dispatches that actually need it.
-		 */
 		vcpu->last_dispatch_tlb_lag =
 			(cur_gen > last) ? (cur_gen - last) : 0;
 
-		atomic64_set(&vcpu->last_seen_tlb_gen, cur_gen);
+		atomic64_set(
+			&current->mm->context.tlb_gen_seen_by[cpu], cur_gen);
+
+		/*
+		 * TOCTOU close: another vCPU may have bumped tlb_gen
+		 * between our read of cur_gen and the write above.  If
+		 * so, our prev_roots[] cache is stale for the NEW gen
+		 * even though we think lag==0.  Re-read and force the
+		 * heavy KVM_SET_SREGS path if the gen moved.
+		 */
+		smp_mb();
+		{
+			u64 recheck = atomic64_read(
+					&current->mm->context.tlb_gen);
+			if (recheck != cur_gen)
+				vcpu->last_dispatch_tlb_lag =
+					KVM_V2_TLB_LAG_PREV_ROOTS_DROP_THRESHOLD;
+		}
 	} else {
 		vcpu->last_dispatch_tlb_lag = 0;
 	}
