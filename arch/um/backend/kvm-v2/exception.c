@@ -235,19 +235,22 @@ static const u8 kvm_v2_handler_stub_ud[]    = { 0xe6, UM_KVM_TRAP_UD,    0x48, 0
 static const u8 kvm_v2_handler_stub_de[]    = { 0xe6, UM_KVM_TRAP_DE,    0x48, 0xcf };
 static const u8 kvm_v2_handler_stub_of[]    = { 0xe6, UM_KVM_TRAP_OF,    0x48, 0xcf };
 static const u8 kvm_v2_handler_stub_panic[] = { 0xe6, UM_KVM_TRAP_PANIC, 0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_db[]    = { 0xe6, UM_KVM_TRAP_DB,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_ss[]    = { 0xe6, UM_KVM_TRAP_SS,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_ac[]    = { 0xe6, UM_KVM_TRAP_AC,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_df[]    = { 0xe6, UM_KVM_TRAP_DF,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_ts[]    = { 0xe6, UM_KVM_TRAP_TS,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_np[]    = { 0xe6, UM_KVM_TRAP_NP,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_mf[]    = { 0xe6, UM_KVM_TRAP_MF,    0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_xm[]    = { 0xe6, UM_KVM_TRAP_XM,    0x48, 0xcf };
 
 /*
- * #BP slot stub: kept for symmetry with the IDT[3] gate that points at
- * it, but in-guest #BP dispatch uses KVM_GUESTDBG_USE_SW_BP →
- * KVM_EXIT_DEBUG (memo 26 §E.3 option 2), not the IO-port path. The
- * stub IS reachable if KVM_GUESTDBG isn't wired (E.3 may not enable
- * the cap on every vcpu); use UM_KVM_TRAP_PANIC so any actual entry
- * via this stub trips the host-side panic dispatch loud and clear
- * rather than silently consuming an unhandled port. This matches the
- * "stub is unused under normal operation" semantics the spec calls
- * for at the artefact-3 sketch.
+ * #BP (INT3) stub: delivers SIGTRAP to the faulting process via the
+ * host-side UM_KVM_TRAP_BP dispatch. No error code pushed by the CPU.
+ * Reachable from ld.so's _dl_debug_state (INT3 marker), CPython's
+ * faulthandler, and any user-space debugger interaction.
  */
-static const u8 kvm_v2_handler_stub_bp[]    = { 0xe6, UM_KVM_TRAP_PANIC, 0x48, 0xcf };
+static const u8 kvm_v2_handler_stub_bp[]    = { 0xe6, UM_KVM_TRAP_BP, 0x48, 0xcf };
 
 /*
  * SMP-T22 (2026-05-02) — #NM (vec 7) handler stub: vmexit-on-fault.
@@ -413,6 +416,22 @@ static void kvm_v2_populate_handlers(void *handlers_kva)
 	       kvm_v2_handler_stub_panic, sizeof(kvm_v2_handler_stub_panic));
 	memcpy(base + KVM_V2_HANDLER_SLOT_NM    * KVM_V2_HANDLER_SLOT_STRIDE,
 	       kvm_v2_handler_stub_nm,    sizeof(kvm_v2_handler_stub_nm));
+	memcpy(base + KVM_V2_HANDLER_SLOT_DB    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_db,    sizeof(kvm_v2_handler_stub_db));
+	memcpy(base + KVM_V2_HANDLER_SLOT_SS    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_ss,    sizeof(kvm_v2_handler_stub_ss));
+	memcpy(base + KVM_V2_HANDLER_SLOT_AC    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_ac,    sizeof(kvm_v2_handler_stub_ac));
+	memcpy(base + KVM_V2_HANDLER_SLOT_DF    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_df,    sizeof(kvm_v2_handler_stub_df));
+	memcpy(base + KVM_V2_HANDLER_SLOT_TS    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_ts,    sizeof(kvm_v2_handler_stub_ts));
+	memcpy(base + KVM_V2_HANDLER_SLOT_NP    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_np,    sizeof(kvm_v2_handler_stub_np));
+	memcpy(base + KVM_V2_HANDLER_SLOT_MF    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_mf,    sizeof(kvm_v2_handler_stub_mf));
+	memcpy(base + KVM_V2_HANDLER_SLOT_XM    * KVM_V2_HANDLER_SLOT_STRIDE,
+	       kvm_v2_handler_stub_xm,    sizeof(kvm_v2_handler_stub_xm));
 }
 
 static void kvm_v2_populate_gdt(void *gdt_kva)
@@ -486,6 +505,22 @@ static void kvm_v2_populate_idt(void *idt_kva)
 	 */
 	kvm_v2_idt_set_gate(idt_kva, 7,
 		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_NM * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 1,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_DB * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 12,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_SS * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 17,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_AC * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 8,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_DF * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 10,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_TS * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 11,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_NP * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 16,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_MF * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
+	kvm_v2_idt_set_gate(idt_kva, 19,
+		KVM_V2_HANDLERS_GVA + KVM_V2_HANDLER_SLOT_XM * KVM_V2_HANDLER_SLOT_STRIDE, 0, 1);
 }
 
 /*
@@ -990,6 +1025,16 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 	 * IDT last (references the handler GVAs we just placed).
 	 */
 	kvm_v2_populate_handlers(handlers_kva);
+
+	/* Verify GP stub bytes immediately after populate */
+	{
+		u8 *gp = (u8 *)handlers_kva + KVM_V2_HANDLER_SLOT_GP * KVM_V2_HANDLER_SLOT_STRIDE;
+
+		pr_info("um: kvm-v2 handler_verify: GP stub @+0x%x = [%02x %02x %02x %02x %02x %02x %02x %02x] (expect e6 f9 48 83 c4 08 48 cf)\n",
+			KVM_V2_HANDLER_SLOT_GP * KVM_V2_HANDLER_SLOT_STRIDE,
+			gp[0], gp[1], gp[2], gp[3], gp[4], gp[5], gp[6], gp[7]);
+	}
+
 	kvm_v2_populate_gdt(gdt_kva);
 	kvm_v2_populate_idt(idt_kva);
 
@@ -1038,6 +1083,19 @@ int kvm_v2_exception_install(struct kvm_v2_vm *vm)
 	vm->idt_gpa       = idt_gpa;
 	vm->handlers_kva  = handlers_kva;
 	vm->handlers_gpa  = handlers_gpa;
+
+	/*
+	 * Write-protect the handler page from the host side so KVM's
+	 * EPT marks the GPA non-writable. The guest PTE at PTE[2] is
+	 * already RO, but the physmem memslot provides a second
+	 * writable path to the same physical page. A stale or
+	 * corrupted GS_BASE during the LSTAR gadget can cause the
+	 * gadget's save block to write through the physmem path,
+	 * overwriting handler stub bytes (observed: GP stub port
+	 * byte 0xf9 → 0xf8). Host-side mprotect propagates through
+	 * KVM's mmu_notifier → EPT write-protect, closing this path.
+	 */
+	os_protect_memory(handlers_kva, PAGE_SIZE, 1, 0, 1); /* r-x */
 	vm->gdt_kva       = gdt_kva;
 	vm->gdt_gpa       = gdt_gpa;
 

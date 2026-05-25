@@ -80,6 +80,15 @@ enum um_kvm_iotrap {
 					 * to coexist with lazy-FPU TS arming. */
 	/* #BP (vector 3) intentionally NOT in this enum — handled via
 	 * KVM_GUESTDBG_USE_SW_BP → KVM_EXIT_DEBUG. */
+	UM_KVM_TRAP_BP      = 0xfe,	/* #BP (vector  3); breakpoint (INT3) */
+	UM_KVM_TRAP_DB      = 0xf5,	/* #DB (vector  1); debug exception */
+	UM_KVM_TRAP_DF      = 0xf2,	/* #DF (vector  8); double fault */
+	UM_KVM_TRAP_SS      = 0xf7,	/* #SS (vector 12); stack segment */
+	UM_KVM_TRAP_AC      = 0xf3,	/* #AC (vector 17); alignment check */
+	UM_KVM_TRAP_TS      = 0xf1,	/* #TS (vector 10); invalid TSS */
+	UM_KVM_TRAP_NP      = 0xef,	/* #NP (vector 11); segment not present */
+	UM_KVM_TRAP_MF      = 0xee,	/* #MF (vector 16); x87 FP exception */
+	UM_KVM_TRAP_XM      = 0xed,	/* #XM (vector 19); SIMD FP exception */
 	UM_KVM_TRAP_PANIC   = 0xf8,	/* unhandled-vector stub; host
 					 * panics on this port (E.3+
 					 * dispatch coverage gap signal). */
@@ -335,6 +344,14 @@ static_assert(KVM_V2_GADGET_OFF_MONO_NSEC + 8 <= KVM_V2_GADGET_OFF_BUDGET,
 #define KVM_V2_HANDLER_SLOT_PF		5	/* #PF (vec 14) */
 #define KVM_V2_HANDLER_SLOT_PANIC	6	/* fallback for any other vector */
 #define KVM_V2_HANDLER_SLOT_NM		7	/* #NM (vec 7) — Phase H.2 lazy FPU */
+#define KVM_V2_HANDLER_SLOT_DB		8	/* #DB (vec 1) */
+#define KVM_V2_HANDLER_SLOT_SS		9	/* #SS (vec 12) */
+#define KVM_V2_HANDLER_SLOT_AC		10	/* #AC (vec 17) */
+#define KVM_V2_HANDLER_SLOT_DF		11	/* #DF (vec 8) */
+#define KVM_V2_HANDLER_SLOT_TS		12	/* #TS (vec 10) */
+#define KVM_V2_HANDLER_SLOT_NP		13	/* #NP (vec 11) */
+#define KVM_V2_HANDLER_SLOT_MF		14	/* #MF (vec 16) */
+#define KVM_V2_HANDLER_SLOT_XM		15	/* #XM (vec 19) */
 
 /*
  * Phase E.2: per-vCPU IST stack + TSS pages. Per memo 26 §E.2 each

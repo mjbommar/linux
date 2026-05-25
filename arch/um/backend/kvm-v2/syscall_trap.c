@@ -2138,21 +2138,92 @@ static int kvm_v2_handle_io_panic(struct uml_pt_regs *regs,
 {
 	struct kvm_v2_ist_frame frame;
 
-	(void)regs;
 	kvm_v2_ist_frame_read(vcpu, &frame, false /* unknown — best-effort */);
 
 	trace_um_backend_kvm_v2_iotrap_panic(run->io.port, frame.user_rip);
 
-	panic("kvm-v2: unhandled exception (port=%#x cpu=%d) user_rip=%#llx user_cs=%#llx user_rflags=%#llx user_rsp=%#llx",
-	      run->io.port, vcpu->cpu,
-	      frame.user_rip, frame.user_cs,
-	      frame.user_rflags, frame.user_rsp);
+	/*
+	 * Deliver SIGSEGV to the faulting process instead of panicking
+	 * the entire kernel.  The panic stub fires for any IDT vector
+	 * without a dedicated handler (#DB, #AC, #XM, etc.).  These
+	 * are user-mode faults that should kill the offending process,
+	 * not the kernel.  Follow the #GP handler pattern.
+	 */
+	{
+		/*
+		 * Dump raw IST stack top bytes — the CPU pushes the
+		 * exception frame growing downward from ist_stack_top.
+		 * Read 48 bytes below the top to cover the error-code
+		 * layout (6 u64: err, RIP, CS, RFLAGS, RSP, SS).
+		 */
+		u64 ist_raw[6] = {0};
+
+		if (vcpu->ist_stack_kva) {
+			u8 *top = (u8 *)vcpu->ist_stack_kva + PAGE_SIZE;
+
+			memcpy(ist_raw, top - 48, sizeof(ist_raw));
+		}
+		{
+			u64 pml4_508 = 0;
+
+			if (current->mm && current->mm->pgd)
+				pml4_508 = ((u64 *)current->mm->pgd)[448];
+			{
+				u8 io_al = 0;
+				u64 data_off = run->io.data_offset;
+				u8 stub_bytes[4] = {0};
+				struct kvm_v2_vm *vm = kvm_v2_vm_get();
+
+				if (data_off && data_off < 4096)
+					io_al = *((u8 *)run + data_off);
+				if (vm && vm->handlers_kva) {
+					u64 rip = run->s.regs.regs.rip;
+					u64 off = rip - KVM_V2_HANDLERS_GVA;
+
+					if (off < PAGE_SIZE && off + 4 <= PAGE_SIZE)
+						memcpy(stub_bytes,
+						       (u8 *)vm->handlers_kva + off,
+						       4);
+				}
+				pr_warn_ratelimited("kvm-v2: unhandled vec (port=%#x cpu=%d pid=%d) "
+						    "run_rip=%#llx stub=[%02x %02x %02x %02x] "
+						    "ist=[%#llx %#llx] rip=%#llx\n",
+						    run->io.port,
+						    vcpu->cpu, current->pid,
+						    (u64)run->s.regs.regs.rip,
+						    stub_bytes[0], stub_bytes[1],
+						    stub_bytes[2], stub_bytes[3],
+						    ist_raw[0], ist_raw[1],
+						    frame.user_rip);
+			}
+		}
+	}
+
+	regs->gp[HOST_IP]     = frame.user_rip;
+	regs->gp[HOST_SP]     = frame.user_rsp;
+	regs->gp[HOST_EFLAGS] = frame.user_rflags;
+	regs->is_user         = 1;
+
+	regs->faultinfo.error_code = 0;
+	regs->faultinfo.cr2        = 0;
+	regs->faultinfo.trap_no    = 0;
+
+	segv_handler(SIGSEGV, NULL, regs, NULL);
+
+	interrupt_end();
+
+	kvm_v2_ist_frame_write(vcpu, regs, false /* no error code */);
+	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+
+	return 0;
 }
 
 int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 			  struct kvm_run *run,
 			  struct kvm_v2_vcpu *vcpu)
 {
+	struct kvm_v2_ist_frame frame_scratch;
 	unsigned long syscall_nr;
 	u16 io_port;
 
@@ -2240,6 +2311,88 @@ int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 		return kvm_v2_handle_io_of(regs, run, vcpu);
 	case UM_KVM_TRAP_NM:
 		return kvm_v2_handle_io_nm(regs, run, vcpu);
+	case UM_KVM_TRAP_BP:
+		/* #BP (vector 3, INT3) — no error code. Deliver SIGTRAP. */
+		kvm_v2_ist_frame_read(vcpu, &frame_scratch, false);
+		regs->gp[HOST_IP]     = frame_scratch.user_rip;
+		regs->gp[HOST_SP]     = frame_scratch.user_rsp;
+		regs->gp[HOST_EFLAGS] = frame_scratch.user_rflags;
+		regs->is_user         = 1;
+		regs->faultinfo.error_code = 0;
+		regs->faultinfo.cr2        = 0;
+		regs->faultinfo.trap_no    = 3;
+		kvm_v2_dispatch_relay(regs, SIGTRAP, TRAP_BRKPT);
+		interrupt_end();
+		kvm_v2_ist_frame_write(vcpu, regs, false);
+		kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+		return 0;
+	case UM_KVM_TRAP_DB:
+		/* #DB (vector 1) — no error code. Deliver SIGTRAP. */
+		kvm_v2_ist_frame_read(vcpu, &frame_scratch, false);
+		regs->gp[HOST_IP]     = frame_scratch.user_rip;
+		regs->gp[HOST_SP]     = frame_scratch.user_rsp;
+		regs->gp[HOST_EFLAGS] = frame_scratch.user_rflags;
+		regs->is_user         = 1;
+		regs->faultinfo.error_code = 0;
+		regs->faultinfo.cr2        = 0;
+		regs->faultinfo.trap_no    = 1;
+		kvm_v2_dispatch_relay(regs, SIGTRAP, TRAP_TRACE);
+		interrupt_end();
+		kvm_v2_ist_frame_write(vcpu, regs, false);
+		kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+		return 0;
+	case UM_KVM_TRAP_SS:
+		/* #SS (vector 12) — has error code. Deliver SIGSEGV. */
+		kvm_v2_ist_frame_read(vcpu, &frame_scratch, true);
+		regs->gp[HOST_IP]     = frame_scratch.user_rip;
+		regs->gp[HOST_SP]     = frame_scratch.user_rsp;
+		regs->gp[HOST_EFLAGS] = frame_scratch.user_rflags;
+		regs->is_user         = 1;
+		regs->faultinfo.error_code = (int)frame_scratch.error_code;
+		regs->faultinfo.cr2        = 0;
+		regs->faultinfo.trap_no    = 12;
+		segv_handler(SIGSEGV, NULL, regs, NULL);
+		interrupt_end();
+		kvm_v2_ist_frame_write(vcpu, regs, true);
+		kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+		return 0;
+	case UM_KVM_TRAP_AC:
+		/* #AC (vector 17) — has error code (always 0). Deliver SIGBUS. */
+		kvm_v2_ist_frame_read(vcpu, &frame_scratch, true);
+		regs->gp[HOST_IP]     = frame_scratch.user_rip;
+		regs->gp[HOST_SP]     = frame_scratch.user_rsp;
+		regs->gp[HOST_EFLAGS] = frame_scratch.user_rflags;
+		regs->is_user         = 1;
+		regs->faultinfo.error_code = (int)frame_scratch.error_code;
+		regs->faultinfo.cr2        = 0;
+		regs->faultinfo.trap_no    = 17;
+		segv_handler(SIGSEGV, NULL, regs, NULL);
+		interrupt_end();
+		kvm_v2_ist_frame_write(vcpu, regs, true);
+		kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+		return 0;
+	case UM_KVM_TRAP_DF:
+		/* #DF (vector 8) — has error code (always 0). Deliver SIGSEGV. */
+		kvm_v2_ist_frame_read(vcpu, &frame_scratch, true);
+		regs->gp[HOST_IP]     = frame_scratch.user_rip;
+		regs->gp[HOST_SP]     = frame_scratch.user_rsp;
+		regs->gp[HOST_EFLAGS] = frame_scratch.user_rflags;
+		regs->is_user         = 1;
+		regs->faultinfo.error_code = 0;
+		regs->faultinfo.cr2        = 0;
+		regs->faultinfo.trap_no    = 8;
+		pr_warn_ratelimited("kvm-v2: #DF double fault cpu=%d pid=%d rip=%#llx\n",
+				    vcpu->cpu, current->pid, frame_scratch.user_rip);
+		segv_handler(SIGSEGV, NULL, regs, NULL);
+		interrupt_end();
+		kvm_v2_ist_frame_write(vcpu, regs, true);
+		kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
+		run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
+		return 0;
 	case UM_KVM_TRAP_PANIC:
 	default:
 		return kvm_v2_handle_io_panic(regs, run, vcpu);
