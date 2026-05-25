@@ -1,0 +1,50 @@
+schema_version = 1
+
+[instance]
+name = "cpython-system"
+labels = { workload = "cpython-system" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "4096M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+PYTHONUNBUFFERED = "1"
+
+[[init.phases]]
+name = "smoke"
+cmd = """
+SYS=/usr/bin/python3.14
+ls -la $SYS
+$SYS -c 'import sys; print(sys.version)'
+"""
+
+[[init.phases]]
+name = "run-spawn-module"
+cmd = """
+SYS=/usr/bin/python3.14
+cd /tmp
+echo '=== system Python -j2 spawn module ==='
+timeout 600 $SYS -m test -j2 --timeout=120 test_multiprocessing_spawn 2>&1 | tail -20
+echo "test exit: $?"
+"""
+
+[[init.phases]]
+name = "report"
+cmd = "echo CPYTHON_SYSTEM_DONE"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false
