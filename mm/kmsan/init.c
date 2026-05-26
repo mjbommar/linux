@@ -27,7 +27,7 @@ static int future_index __initdata;
  * Record a range of memory for which the metadata pages will be created once
  * the page allocator becomes available.
  */
-static void __init kmsan_record_future_shadow_range(void *start, void *end)
+void __init kmsan_record_future_shadow_range(void *start, void *end)
 {
 	u64 nstart = (u64)start, nend = (u64)end, cstart, cend;
 	bool merged = false;
@@ -66,6 +66,18 @@ static void __init kmsan_record_future_shadow_range(void *start, void *end)
 }
 
 /*
+ * Default arch hook. Architectures that need to reserve additional
+ * shadow/origin VA regions at early boot override this symbol; others
+ * get the empty no-op and behave identically to before this hook
+ * existed. An override typically host-mmap()s its shadow/origin
+ * regions and then calls kmsan_record_future_shadow_range() for each
+ * of them so the generic per-page metadata init covers them too.
+ */
+void __weak __init kmsan_arch_init_early_shadow(void)
+{
+}
+
+/*
  * Initialize the shadow for existing mappings during kernel initialization.
  * These include kernel text/data sections, NODE_DATA and future ranges
  * registered while creating other data (e.g. percpu).
@@ -78,6 +90,12 @@ void __init kmsan_init_shadow(void)
 	phys_addr_t p_start, p_end;
 	u64 loop;
 	int nid;
+
+	/*
+	 * Let architectures register arch-specific shadow/origin VA
+	 * ranges before the generic reserved-range sweep picks them up.
+	 */
+	kmsan_arch_init_early_shadow();
 
 	for_each_reserved_mem_range(loop, &p_start, &p_end)
 		kmsan_record_future_shadow_range(phys_to_virt(p_start),

@@ -47,6 +47,30 @@ void __init kmsan_init_shadow(void);
 void __init kmsan_init_runtime(void);
 
 /**
+ * kmsan_arch_init_early_shadow() - Arch hook called from kmsan_init_shadow().
+ *
+ * Called once from kmsan_init_shadow() before the generic reserved-range
+ * sweep. Architectures that need to reserve additional shadow/origin VA
+ * regions (for example, to host-mmap() them) override this symbol and
+ * call kmsan_record_future_shadow_range() for each range they want the
+ * subsequent kmsan_init_alloc_meta_for_range() loop to process.
+ *
+ * The default is an empty no-op; architectures that do not override it
+ * see no behavioral change.
+ */
+void __init kmsan_arch_init_early_shadow(void);
+
+/**
+ * kmsan_record_future_shadow_range() - Record a range for later metadata alloc.
+ * @start: start of range (inclusive).
+ * @end:   end of range (exclusive).
+ *
+ * Recorded ranges are processed by kmsan_init_alloc_meta_for_range() after
+ * the reserved-range sweep completes.
+ */
+void __init kmsan_record_future_shadow_range(void *start, void *end);
+
+/**
  * kmsan_memblock_free_pages() - handle freeing of memblock pages.
  * @page:	struct page to free.
  * @order:	order of @page.
