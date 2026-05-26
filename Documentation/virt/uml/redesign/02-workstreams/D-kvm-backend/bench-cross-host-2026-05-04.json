@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-05-04T00:45:00Z",
+  "tree_head": "81665d4c2343",
+  "kernel_under_test": {
+    "build_dir": "~/src/uml-builds/uml-smp-t41fix",
+    "build_flavor": "SMP",
+    "smp_max_cpus": 4,
+    "build_commit": "81665d4c2343",
+    "includes_fix_stack": "T25 + T26/T27 + T29 + T33 + T36 + T37 + T41"
+  },
+  "methodology": {
+    "harness": "tools/testing/selftests/um/bench/run-bench.sh",
+    "tiers": {
+      "bench-micro": "100k iter rdtsc-bracketed SYS_getpid loop, ncpus=1, unit=cyc_per_call",
+      "bench-py": "5 samples + 1 warmup of canned Python (hash + fs + getpid + socket), ncpus=1, unit=elapsed_ms",
+      "bench-stress": "3 samples + 1 warmup of mt-mini SMP T=8 strict_memset, ncpus=4, unit=elapsed_ms_per_iter"
+    },
+    "governor_required": "performance",
+    "all_hosts_governor_at_run": "performance"
+  },
+  "headlines": [
+    "kvm-v2 is faster than seccomp on every host on every tier (8 hosts \u00d7 3 tiers).",
+    "micro tier: 1.34\u00d7 (oldest Skylake-S Xeon) \u2192 2.22\u00d7 (Zen 4) faster.",
+    "py tier: 1.03\u00d7 (Alder Lake i5) \u2192 1.64\u00d7 (Zen 4) faster.",
+    "stress tier: 3.62\u00d7 (Kaby Lake) \u2192 11.97\u00d7 (Alder Lake i9) faster.",
+    "Zero STRICT_MEMSET_FAIL / VERIFY_FAIL across 24 mt-mini runs (8 hosts \u00d7 3 samples). T41 fix holds across all silicon families."
+  ],
+  "hosts": [
+    {
+      "tag": "s0",
+      "cpu": "12th Gen Intel(R) Core(TM) i9-12900K",
+      "short_cpu": "i9-12900K",
+      "uarch": "Alder Lake P",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 13194,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 28660,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 150.65,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 234.7,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 171,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 2047,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.4604,
+        "bench-py": 0.6419,
+        "bench-stress": 0.0835
+      }
+    },
+    {
+      "tag": "s1",
+      "cpu": "Intel(R) Xeon(R) CPU E3-1225 v6 @ 3.30GHz",
+      "short_cpu": "Xeon E3-1225 v6",
+      "uarch": "Kaby Lake",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 54281,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 75509,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 553.07,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 640.14,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 577,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 2087,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.7189,
+        "bench-py": 0.864,
+        "bench-stress": 0.2765
+      }
+    },
+    {
+      "tag": "s2",
+      "cpu": "Intel(R) Xeon(R) CPU E3-1225 v5 @ 3.30GHz",
+      "short_cpu": "Xeon E3-1225 v5",
+      "uarch": "Skylake-S",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 58418,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 78329,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 585.1,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 669.68,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 636,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 2435,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.7458,
+        "bench-py": 0.8737,
+        "bench-stress": 0.2612
+      }
+    },
+    {
+      "tag": "s3",
+      "cpu": "Intel(R) Xeon(R) W-2123 CPU @ 3.60GHz",
+      "short_cpu": "Xeon W-2123",
+      "uarch": "Skylake-SP",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 49603,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 69850,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 454.42,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 545.15,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 489,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 1909,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.7101,
+        "bench-py": 0.8336,
+        "bench-stress": 0.2562
+      }
+    },
+    {
+      "tag": "s4",
+      "cpu": "12th Gen Intel(R) Core(TM) i5-12600K",
+      "short_cpu": "i5-12600K",
+      "uarch": "Alder Lake",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 17626,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 28776,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 207.02,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 212.79,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 237,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 2155,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.6125,
+        "bench-py": 0.9729,
+        "bench-stress": 0.11
+      }
+    },
+    {
+      "tag": "s5",
+      "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+      "short_cpu": "Ryzen 7 7840HS",
+      "uarch": "Zen 4",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 36060,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 78383,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 318.3,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 474.0,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 326,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 1584,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.46,
+        "bench-py": 0.6715,
+        "bench-stress": 0.2058
+      }
+    },
+    {
+      "tag": "s6",
+      "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+      "short_cpu": "Ryzen 7 7840HS",
+      "uarch": "Zen 4",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 36539,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 78551,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 322.3,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 528.3,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 348,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 1414,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.4652,
+        "bench-py": 0.6101,
+        "bench-stress": 0.2461
+      }
+    },
+    {
+      "tag": "s7",
+      "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+      "short_cpu": "Ryzen 7 7840HS",
+      "uarch": "Zen 4",
+      "governor": "performance",
+      "tiers": {
+        "bench-micro": {
+          "kvm-v2": {
+            "p50": 36714,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 81512,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-py": {
+          "kvm-v2": {
+            "p50": 321.43,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 517.81,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        },
+        "bench-stress": {
+          "kvm-v2": {
+            "p50": 354,
+            "strict_fails": 0,
+            "verify_fails": 0
+          },
+          "seccomp": {
+            "p50": 1535,
+            "strict_fails": 0,
+            "verify_fails": 0
+          }
+        }
+      },
+      "ratios": {
+        "bench-micro": 0.4504,
+        "bench-py": 0.6207,
+        "bench-stress": 0.2306
+      }
+    }
+  ]
+}

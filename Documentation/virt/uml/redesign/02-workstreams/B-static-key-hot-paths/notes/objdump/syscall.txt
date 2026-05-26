@@ -1,0 +1,107 @@
+
+/tmp/uml-matrix-dynamic/arch/um/kernel/skas/syscall.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <handle_syscall>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	55                   	push   %rbp
+   5:	48 89 e5             	mov    %rsp,%rbp
+   8:	41 55                	push   %r13
+   a:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+  11:	00 00 00 
+  14:	41 54                	push   %r12
+  16:	53                   	push   %rbx
+  17:	48 89 fb             	mov    %rdi,%rbx
+  1a:	52                   	push   %rdx
+  1b:	48 8b 47 78          	mov    0x78(%rdi),%rax
+  1f:	48 c7 47 50 da ff ff 	movq   $0xffffffffffffffda,0x50(%rdi)
+  26:	ff 
+  27:	48 89 87 f0 00 00 00 	mov    %rax,0xf0(%rdi)
+  2e:	41 8b 45 00          	mov    0x0(%r13),%eax
+  32:	85 c0                	test   %eax,%eax
+  34:	7e 0c                	jle    42 <handle_syscall+0x42>
+  36:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  3d:	00 00 00 
+  40:	ff d0                	call   *%rax
+  42:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+  49:	00 00 
+  4b:	85 c0                	test   %eax,%eax
+  4d:	7e 0f                	jle    5e <handle_syscall+0x5e>
+  4f:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  56:	00 00 00 
+  59:	48 89 df             	mov    %rbx,%rdi
+  5c:	ff d0                	call   *%rax
+  5e:	49 bc 00 00 00 00 00 	movabs $0x0,%r12
+  65:	00 00 00 
+  68:	41 8b 04 24          	mov    (%r12),%eax
+  6c:	85 c0                	test   %eax,%eax
+  6e:	7e 0f                	jle    7f <handle_syscall+0x7f>
+  70:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  77:	00 00 00 
+  7a:	48 89 df             	mov    %rbx,%rdi
+  7d:	ff d0                	call   *%rax
+  7f:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+  86:	00 00 
+  88:	85 c0                	test   %eax,%eax
+  8a:	7e 0f                	jle    9b <handle_syscall+0x9b>
+  8c:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  93:	00 00 00 
+  96:	48 89 df             	mov    %rbx,%rdi
+  99:	ff d0                	call   *%rax
+  9b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  a2:	00 00 00 
+  a5:	48 89 df             	mov    %rbx,%rdi
+  a8:	ff d0                	call   *%rax
+  aa:	85 c0                	test   %eax,%eax
+  ac:	75 5f                	jne    10d <handle_syscall+0x10d>
+  ae:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+  b5:	00 00 00 
+  b8:	48 8b 00             	mov    (%rax),%rax
+  bb:	0f ba e0 09          	bt     $0x9,%eax
+  bf:	72 3c                	jb     fd <handle_syscall+0xfd>
+  c1:	48 8b 83 f0 00 00 00 	mov    0xf0(%rbx),%rax
+  c8:	3d d7 01 00 00       	cmp    $0x1d7,%eax
+  cd:	77 3e                	ja     10d <handle_syscall+0x10d>
+  cf:	48 98                	cltq
+  d1:	48 8b 4b 38          	mov    0x38(%rbx),%rcx
+  d5:	48 8b 53 60          	mov    0x60(%rbx),%rdx
+  d9:	49 ba 00 00 00 00 00 	movabs $0x0,%r10
+  e0:	00 00 00 
+  e3:	48 8b 73 68          	mov    0x68(%rbx),%rsi
+  e7:	48 8b 7b 70          	mov    0x70(%rbx),%rdi
+  eb:	4c 8b 4b 40          	mov    0x40(%rbx),%r9
+  ef:	4c 8b 43 48          	mov    0x48(%rbx),%r8
+  f3:	41 ff 14 c2          	call   *(%r10,%rax,8)
+  f7:	48 89 43 50          	mov    %rax,0x50(%rbx)
+  fb:	eb 10                	jmp    10d <handle_syscall+0x10d>
+  fd:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 104:	00 00 00 
+ 107:	ff d0                	call   *%rax
+ 109:	ff c0                	inc    %eax
+ 10b:	75 b4                	jne    c1 <handle_syscall+0xc1>
+ 10d:	41 8b 45 00          	mov    0x0(%r13),%eax
+ 111:	85 c0                	test   %eax,%eax
+ 113:	7e 0f                	jle    124 <handle_syscall+0x124>
+ 115:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 11c:	00 00 00 
+ 11f:	48 89 df             	mov    %rbx,%rdi
+ 122:	ff d0                	call   *%rax
+ 124:	41 8b 04 24          	mov    (%r12),%eax
+ 128:	85 c0                	test   %eax,%eax
+ 12a:	7e 0f                	jle    13b <handle_syscall+0x13b>
+ 12c:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 133:	00 00 00 
+ 136:	48 89 df             	mov    %rbx,%rdi
+ 139:	ff d0                	call   *%rax
+ 13b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 142:	00 00 00 
+ 145:	48 89 df             	mov    %rbx,%rdi
+ 148:	ff d0                	call   *%rax
+ 14a:	58                   	pop    %rax
+ 14b:	5b                   	pop    %rbx
+ 14c:	41 5c                	pop    %r12
+ 14e:	41 5d                	pop    %r13
+ 150:	5d                   	pop    %rbp
+ 151:	c3                   	ret

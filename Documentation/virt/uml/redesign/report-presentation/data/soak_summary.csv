@@ -1,0 +1,14 @@
+run;workload;backend;n;pass;fail;rate;ci_low;ci_high
+pilot-2026-05-14;memcheck;kvm-v2;60;60;0;100.00;93.98;100.00
+pilot-2026-05-14;memcheck;seccomp;60;60;0;100.00;93.98;100.00
+pilot-2026-05-14;iocheck;kvm-v2;60;60;0;100.00;93.98;100.00
+pilot-2026-05-14;iocheck;seccomp;60;57;3;95.00;86.30;98.29
+pilot-2026-05-14;stress-ng;kvm-v2;40;40;0;100.00;91.24;100.00
+pilot-2026-05-14;stress-ng;seccomp;40;40;0;100.00;91.24;100.00
+pilot-2026-05-14;tier1-pylibs;kvm-v2;40;40;0;100.00;91.24;100.00
+pilot-2026-05-14;tier1-pylibs;seccomp;40;40;0;100.00;91.24;100.00
+mission-2026-05-19;memcheck;kvm-v2;20;20;0;100.00;83.89;100.00
+mission-2026-05-19;iocheck;kvm-v2;20;20;0;100.00;83.89;100.00
+mission-2026-05-19;stress-ng;kvm-v2;20;20;0;100.00;83.89;100.00
+mission-2026-05-19;tier1-pylibs;kvm-v2;20;20;0;100.00;83.89;100.00
+mission-2026-05-19;django-loopback-none;kvm-v2;20;20;0;100.00;83.89;100.00

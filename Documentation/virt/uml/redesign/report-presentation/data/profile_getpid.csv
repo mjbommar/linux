@@ -1,0 +1,11 @@
+profile;backend;getpid_ns;slowdown
+native-host;host syscall;50;1.0
+prod-fast;KVM;80;1.6
+prod-with-hooks;KVM;85;1.7
+research;seccomp;715;14
+fuzz;seccomp;550;11
+fuzz-deep;seccomp;1200;24
+sandbox;seccomp-only;505;10
+library;direct;6;0.12
+embedded;ptrace;2000;40
+time-travel;seccomp;1200;24

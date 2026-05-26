@@ -1,0 +1,134 @@
+\section{Remaining Work and Upstream Path}
+
+\subsection{Immediate Work}
+
+\begin{table}[h]
+\centering
+\caption{Next work at the reporting cutoff.}
+\begin{tabularx}{\linewidth}{@{}p{0.27\linewidth}p{0.16\linewidth}X@{}}
+\toprule
+Item & State & Notes \\
+\midrule
+24h long-tail soak & \progresspill & The \texttt{umlctl mission} 15-min acceptance gate passes 6/6 phases including 100/100 soak. The wall-clock 24-hour run remains as the long-tail evidence; the rig is in place. \\
+Series 7 (kvm-backend) LKML submission & \progresspill & Cover letter is drafted (414 $\to$ 900 lines pre-R14). Now backend-layer unblocked by R14 closure + the \texttt{umlctl mission} acceptance gate; needs cover-letter refresh to record the snapshot+RR landings and submission. \\
+Record/replay host-side signal wiring & \plannedpill & The log shape, observe/consume API, KUnit suite, and replay-side gating all proven via memo 27 Phase 4--7. Remaining work is the host-side signal-interception that turns a real SIGALRM into an \texttt{observe\_sigalrm} call. \\
+Tier 3 host resources (T85/T86/T87) & \plannedpill & SCHED\_FIFO RT, NUMA \texttt{mbind}, \texttt{O\_DIRECT} for hostfs. Memo 52 \S3 keeps the design; implementation opens only when a concrete operator question demands it. \\
+Snapshot ELF64-core export (\#181) & \plannedpill & The snapshot port is done; the gdb/crash-tool export is a separate follow-on. \\
+syzkaller \texttt{vm/uml} binding & planned external & The in-tree forkserver surface is pinned (snapshot v1 C-09); the remaining \texttt{pkg/vm/uml} Go driver belongs in the syzkaller repository. \\
+LTP curation finalization & \plannedpill & The \texttt{ltp-runner} soak template exists; the curated KEEP/SKIP list and \UML{}-appropriate runner refinements still need committing. \\
+AVX-512 / AMX / PKRU / CET un-mask & \plannedpill & Memo state-audit Layer 26 (SMP-T77) preserves the checklist; each future un-mask follows it. AVX-VNNI and AVX10 require no XSAVE-pipe changes (T73's XSAVE plumbing covers them). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Snapshot, Replay, and Time-Travel Status}
+
+The ``time machine'' story has substantially advanced since the
+previous reporting cutoff. Snapshot and record/replay ports are
+landed in tree; the remaining work is host-side wiring rather
+than design.
+
+\begin{table}[h]
+\centering
+\caption{Snapshot, replay, and time-travel state.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}L{0.18\linewidth}Y@{}}
+\toprule
+Surface & State & Reading \\
+\midrule
+Snapshot/forkserver v1 & \donepill & C-09 (legacy):
+\texttt{um\_snapshot\_ready()} point, AFL-compatible fds 198/199,
+\texttt{/sys/kernel/um/state\_version}, launcher fd plumbing, and
+\texttt{snapshot-smoke} coverage. \\
+v1 ceiling & known limit & Status is reported as zero, payloads must
+be short and non-blocking, there is no on-disk snapshot, and v1 is
+not SMP-capable. These are documented limits, not hidden claims. \\
+KVM-aware snapshot v2 (\#168) & \donepill & Memo 26-snapshot Phase 1--6
+landed: \texttt{kvm\_v2\_snapshot\_alloc/capture/restore} surface
+(regs-only and full), KUnit 3/3 cases including the Phase-4
+cross-task semantics test, \texttt{kvm\_v2\_snapshot\_bench}
+cmdline + debugfs harness (Phase 5), and the
+\texttt{snapshot-kvm-smoke} selftest re-plumbed against v2
+case names (Phase 6). Bench numbers: 38.9~$\mu$s capture,
+13~$\mu$s median restore. \\
+KVM-aware record/replay v2 (\#169) & \donepill & Memo 27 Phase 1--7
+landed: \texttt{kvm\_v2\_record\_*} state machine, static-key
+hot-path gate, observe/consume primitives for SYSCALL + RDTSC +
+SIGALRM kinds, anonymous-union replay-entry payload, LSTAR-gadget
+\texttt{KVM\_V2\_GADGET\_OFF\_RECORD} bypass byte, KUnit 7/7
+cases (basic / state / observe / strict\_replay / gadget\_bypass
+/ rdtsc / sigalrm), and the \texttt{kvm-record-smoke} selftest
+re-plumbed against v2 case names. \\
+Time-travel profile & profile exists & \texttt{uml/time-travel}
+selects seccomp-only, UP, \texttt{CONFIG\_UML\_TIME\_TRAVEL\_SUPPORT},
+and debug surfaces. The runtime hook gate exists; today its slow path
+is still a counter stub. \\
+Record/replay host wiring & \plannedpill & The log shape and
+replay-side gating are KUnit-proven. The remaining work is the
+host-side signal-interception path that turns a real SIGALRM into
+an \texttt{observe\_sigalrm} call, plus the trap-on-RDTSC VMCS
+programming (memo 27 \S6 Q1 spike). \\
+Snapshot ELF64-core export (\#181) & \plannedpill & Lift to a
+gdb/crash-tool-loadable artefact, gated on snapshot v2 in tree
+(now complete). \\
+Syzkaller binding & planned external & The in-tree forkserver
+surface is pinned; the remaining \texttt{pkg/vm/uml} Go driver
+belongs in the syzkaller repository. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Residual Risks}
+
+Two narrow residual flake classes are tracked as P2: an mt-mini
+page-recycling class and a high-yield mt-yieldonly RIP-corruption
+class. They are not current sustained-validation blockers and do not block
+snapshot/record-replay resumption, but they should remain visible in
+the report because they represent exactly the kind of concurrency
+state drift the state-audit method was built to catch.
+
+\subsection{Upstream Queue}
+
+\begin{table}[h]
+\centering
+\caption{Sequenced upstream queue.}
+\small
+\begin{tabularx}{\linewidth}{@{}r p{0.28\linewidth}p{0.18\linewidth}p{0.18\linewidth}X@{}}
+\toprule
+\# & Series & Size & Subsystem & Status \\
+\midrule
+1 & \texttt{bpf-hygiene-v1} & 2 patches & BPF & ready \\
+2 & \texttt{kmsan-arch-callback-rfc} & 1 RFC patch & mm/kmsan & ready \\
+3 & \texttt{ftrace-notrace-generic-v1} & 1 patch & tracing/ftrace & ready \\
+4 & backend ops abstraction RFC & about 12 patches & arch/um & drafted \\
+5 & static-key hot paths & about 6 patches & arch/um & drafted \\
+6 & per-profile C-series & about 20 patches & arch/um plus subsystems & blocked by Series 7 ordering \\
+7 & KVM backend series & about 15 patches & arch/um plus KVM & cover-letter drafted (414~$\to$~900 lines); backend-layer unblocked by R14 closure + \texttt{umlctl mission} acceptance gate; needs cover-letter refresh + submission \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The upstream strategy is deliberately staged. Small, independent
+subsystem patches go first. The backend abstraction is the tentpole.
+Static-key hot paths and profile work follow. The \KVM{} backend is
+last because it is the largest technical and review burden.
+
+\subsection{Main Message for Maintainers}
+
+The upstream path makes three narrower claims:
+\begin{enumerate}
+  \item \UML{} already has multiple backend mechanisms; making the
+        backend contract explicit is a cleanup and an enabling move.
+  \item static-key hooks are the right kernel-native way to make
+        instrumentation runtime-flippable without charging every
+        profile.
+  \item The \KVMvTwo{} evidence is now strong enough to submit. The
+        Round-14 cache-flake closure (SMP-T73) was the last
+        substantive correctness gap; the snapshot and record/replay
+        v2 ports landed in tree with full KUnit coverage; host
+        resource controls (memo 52, SMP-T78--T84) shipped as
+        declarative TOML + cgroup v2 in \texttt{umlctl}; and the
+        single-command \texttt{umlctl mission} acceptance gate
+        gives a binary, reproducible 15-minute verdict for any
+        reviewer to run locally.
+\end{enumerate}

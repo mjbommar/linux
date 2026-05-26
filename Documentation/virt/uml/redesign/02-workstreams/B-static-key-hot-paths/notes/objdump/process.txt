@@ -1,0 +1,546 @@
+
+/tmp/uml-matrix-dynamic/arch/um/kernel/process.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <new_thread_handler>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	55                   	push   %rbp
+   5:	48 89 e5             	mov    %rsp,%rbp
+   8:	53                   	push   %rbx
+   9:	48 bb 00 00 00 00 00 	movabs $0x0,%rbx
+  10:	00 00 00 
+  13:	56                   	push   %rsi
+  14:	48 8b 03             	mov    (%rbx),%rax
+  17:	48 8b b8 20 08 00 00 	mov    0x820(%rax),%rdi
+  1e:	48 85 ff             	test   %rdi,%rdi
+  21:	74 0c                	je     2f <new_thread_handler+0x2f>
+  23:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  2a:	00 00 00 
+  2d:	ff d0                	call   *%rax
+  2f:	48 8b 03             	mov    (%rbx),%rax
+  32:	31 d2                	xor    %edx,%edx
+  34:	48 89 90 20 08 00 00 	mov    %rdx,0x820(%rax)
+  3b:	48 8b b8 d0 08 00 00 	mov    0x8d0(%rax),%rdi
+  42:	ff 90 c8 08 00 00    	call   *0x8c8(%rax)
+  48:	48 8b 3b             	mov    (%rbx),%rdi
+  4b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  52:	00 00 00 
+  55:	48 81 c7 e0 08 00 00 	add    $0x8e0,%rdi
+  5c:	ff d0                	call   *%rax
+  5e:	59                   	pop    %rcx
+  5f:	5b                   	pop    %rbx
+  60:	5d                   	pop    %rbp
+  61:	c3                   	ret
+
+0000000000000062 <fork_handler>:
+  62:	f3 0f 1e fa          	endbr64
+  66:	55                   	push   %rbp
+  67:	48 89 e5             	mov    %rsp,%rbp
+  6a:	53                   	push   %rbx
+  6b:	48 bb 00 00 00 00 00 	movabs $0x0,%rbx
+  72:	00 00 00 
+  75:	50                   	push   %rax
+  76:	48 8b 03             	mov    (%rbx),%rax
+  79:	48 8b b8 20 08 00 00 	mov    0x820(%rax),%rdi
+  80:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  87:	00 00 00 
+  8a:	ff d0                	call   *%rax
+  8c:	48 8b 3b             	mov    (%rbx),%rdi
+  8f:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  96:	00 00 00 
+  99:	ff d0                	call   *%rax
+  9b:	48 8b 3b             	mov    (%rbx),%rdi
+  9e:	31 d2                	xor    %edx,%edx
+  a0:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  a7:	00 00 00 
+  aa:	48 89 97 20 08 00 00 	mov    %rdx,0x820(%rdi)
+  b1:	48 81 c7 e0 08 00 00 	add    $0x8e0,%rdi
+  b8:	ff d0                	call   *%rax
+  ba:	59                   	pop    %rcx
+  bb:	5b                   	pop    %rbx
+  bc:	5d                   	pop    %rbp
+  bd:	c3                   	ret
+
+00000000000000be <uml_strdup>:
+  be:	f3 0f 1e fa          	endbr64
+  c2:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  c9:	00 00 00 
+  cc:	55                   	push   %rbp
+  cd:	be c0 0c 00 00       	mov    $0xcc0,%esi
+  d2:	48 89 e5             	mov    %rsp,%rbp
+  d5:	ff d0                	call   *%rax
+  d7:	5d                   	pop    %rbp
+  d8:	c3                   	ret
+
+00000000000000d9 <free_stack>:
+  d9:	f3 0f 1e fa          	endbr64
+  dd:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  e4:	00 00 00 
+  e7:	55                   	push   %rbp
+  e8:	48 89 e5             	mov    %rsp,%rbp
+  eb:	ff d0                	call   *%rax
+  ed:	5d                   	pop    %rbp
+  ee:	c3                   	ret
+
+00000000000000ef <alloc_stack>:
+  ef:	f3 0f 1e fa          	endbr64
+  f3:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  fa:	00 00 00 
+  fd:	83 fe 01             	cmp    $0x1,%esi
+ 100:	55                   	push   %rbp
+ 101:	89 fe                	mov    %edi,%esi
+ 103:	19 ff                	sbb    %edi,%edi
+ 105:	81 e7 a0 04 00 00    	and    $0x4a0,%edi
+ 10b:	48 89 e5             	mov    %rsp,%rbp
+ 10e:	81 c7 20 08 00 00    	add    $0x820,%edi
+ 114:	ff d0                	call   *%rax
+ 116:	5d                   	pop    %rbp
+ 117:	c3                   	ret
+
+0000000000000118 <__switch_to>:
+ 118:	f3 0f 1e fa          	endbr64
+ 11c:	55                   	push   %rbp
+ 11d:	48 89 e5             	mov    %rsp,%rbp
+ 120:	41 55                	push   %r13
+ 122:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+ 129:	00 00 00 
+ 12c:	41 54                	push   %r12
+ 12e:	49 89 fc             	mov    %rdi,%r12
+ 131:	53                   	push   %rbx
+ 132:	48 89 f3             	mov    %rsi,%rbx
+ 135:	51                   	push   %rcx
+ 136:	8b 46 08             	mov    0x8(%rsi),%eax
+ 139:	48 89 be 20 08 00 00 	mov    %rdi,0x820(%rsi)
+ 140:	49 89 74 c5 00       	mov    %rsi,0x0(%r13,%rax,8)
+ 145:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+ 14c:	00 00 
+ 14e:	85 c0                	test   %eax,%eax
+ 150:	7e 0c                	jle    15e <__switch_to+0x46>
+ 152:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 159:	00 00 00 
+ 15c:	ff d0                	call   *%rax
+ 15e:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+ 165:	00 00 
+ 167:	85 c0                	test   %eax,%eax
+ 169:	7e 12                	jle    17d <__switch_to+0x65>
+ 16b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 172:	00 00 00 
+ 175:	48 89 de             	mov    %rbx,%rsi
+ 178:	4c 89 e7             	mov    %r12,%rdi
+ 17b:	ff d0                	call   *%rax
+ 17d:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+ 184:	00 00 
+ 186:	85 c0                	test   %eax,%eax
+ 188:	7e 12                	jle    19c <__switch_to+0x84>
+ 18a:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 191:	00 00 00 
+ 194:	48 89 de             	mov    %rbx,%rsi
+ 197:	4c 89 e7             	mov    %r12,%rdi
+ 19a:	ff d0                	call   *%rax
+ 19c:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 1a3:	00 00 00 
+ 1a6:	48 89 de             	mov    %rbx,%rsi
+ 1a9:	4c 89 e7             	mov    %r12,%rdi
+ 1ac:	ff 50 60             	call   *0x60(%rax)
+ 1af:	49 8b 7d 00          	mov    0x0(%r13),%rdi
+ 1b3:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1ba:	00 00 00 
+ 1bd:	ff d0                	call   *%rax
+ 1bf:	49 8b 45 00          	mov    0x0(%r13),%rax
+ 1c3:	48 8b 80 20 08 00 00 	mov    0x820(%rax),%rax
+ 1ca:	5a                   	pop    %rdx
+ 1cb:	5b                   	pop    %rbx
+ 1cc:	41 5c                	pop    %r12
+ 1ce:	41 5d                	pop    %r13
+ 1d0:	5d                   	pop    %rbp
+ 1d1:	c3                   	ret
+
+00000000000001d2 <interrupt_end>:
+ 1d2:	f3 0f 1e fa          	endbr64
+ 1d6:	55                   	push   %rbp
+ 1d7:	48 89 e5             	mov    %rsp,%rbp
+ 1da:	41 57                	push   %r15
+ 1dc:	49 bf 00 00 00 00 00 	movabs $0x0,%r15
+ 1e3:	00 00 00 
+ 1e6:	41 56                	push   %r14
+ 1e8:	49 be 00 00 00 00 00 	movabs $0x0,%r14
+ 1ef:	00 00 00 
+ 1f2:	41 55                	push   %r13
+ 1f4:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+ 1fb:	00 00 00 
+ 1fe:	41 54                	push   %r12
+ 200:	49 bc 00 00 00 00 00 	movabs $0x0,%r12
+ 207:	00 00 00 
+ 20a:	53                   	push   %rbx
+ 20b:	48 83 ec 18          	sub    $0x18,%rsp
+ 20f:	49 8b 14 24          	mov    (%r12),%rdx
+ 213:	48 8d 82 e0 08 00 00 	lea    0x8e0(%rdx),%rax
+ 21a:	48 8b 1a             	mov    (%rdx),%rbx
+ 21d:	48 89 45 c8          	mov    %rax,-0x38(%rbp)
+ 221:	f7 c3 0e 01 00 00    	test   $0x10e,%ebx
+ 227:	74 4a                	je     273 <interrupt_end+0xa1>
+ 229:	f6 c3 04             	test   $0x4,%bl
+ 22c:	74 03                	je     231 <interrupt_end+0x5f>
+ 22e:	41 ff d5             	call   *%r13
+ 231:	f6 c3 0a             	test   $0xa,%bl
+ 234:	74 07                	je     23d <interrupt_end+0x6b>
+ 236:	48 8b 7d c8          	mov    -0x38(%rbp),%rdi
+ 23a:	41 ff d6             	call   *%r14
+ 23d:	0f ba e3 08          	bt     $0x8,%ebx
+ 241:	73 27                	jae    26a <interrupt_end+0x98>
+ 243:	49 8b 14 24          	mov    (%r12),%rdx
+ 247:	80 62 01 fe          	andb   $0xfe,0x1(%rdx)
+ 24b:	49 8b 14 24          	mov    (%r12),%rdx
+ 24f:	48 8b 92 90 06 00 00 	mov    0x690(%rdx),%rdx
+ 256:	48 85 d2             	test   %rdx,%rdx
+ 259:	74 0c                	je     267 <interrupt_end+0x95>
+ 25b:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+ 262:	00 00 00 
+ 265:	ff d2                	call   *%rdx
+ 267:	41 ff d7             	call   *%r15
+ 26a:	49 8b 14 24          	mov    (%r12),%rdx
+ 26e:	48 8b 1a             	mov    (%rdx),%rbx
+ 271:	eb ae                	jmp    221 <interrupt_end+0x4f>
+ 273:	48 83 c4 18          	add    $0x18,%rsp
+ 277:	5b                   	pop    %rbx
+ 278:	41 5c                	pop    %r12
+ 27a:	41 5d                	pop    %r13
+ 27c:	41 5e                	pop    %r14
+ 27e:	41 5f                	pop    %r15
+ 280:	5d                   	pop    %rbp
+ 281:	c3                   	ret
+
+0000000000000282 <get_current_pid>:
+ 282:	f3 0f 1e fa          	endbr64
+ 286:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 28d:	00 00 00 
+ 290:	8b 80 48 04 00 00    	mov    0x448(%rax),%eax
+ 296:	c3                   	ret
+
+0000000000000297 <copy_thread>:
+ 297:	f3 0f 1e fa          	endbr64
+ 29b:	55                   	push   %rbp
+ 29c:	b9 72 00 00 00       	mov    $0x72,%ecx
+ 2a1:	48 89 e5             	mov    %rsp,%rbp
+ 2a4:	41 57                	push   %r15
+ 2a6:	41 56                	push   %r14
+ 2a8:	41 55                	push   %r13
+ 2aa:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+ 2b1:	00 00 00 
+ 2b4:	41 54                	push   %r12
+ 2b6:	49 89 f4             	mov    %rsi,%r12
+ 2b9:	53                   	push   %rbx
+ 2ba:	48 89 fb             	mov    %rdi,%rbx
+ 2bd:	48 81 c7 18 08 00 00 	add    $0x818,%rdi
+ 2c4:	48 83 ec 18          	sub    $0x18,%rsp
+ 2c8:	48 8b 46 40          	mov    0x40(%rsi),%rax
+ 2cc:	4c 8b 36             	mov    (%rsi),%r14
+ 2cf:	4c 8b 7e 30          	mov    0x30(%rsi),%r15
+ 2d3:	48 89 45 c8          	mov    %rax,-0x38(%rbp)
+ 2d7:	31 c0                	xor    %eax,%eax
+ 2d9:	f3 ab                	rep stos %eax,(%rdi)
+ 2db:	48 8d bb e0 08 00 00 	lea    0x8e0(%rbx),%rdi
+ 2e2:	48 83 7e 60 00       	cmpq   $0x0,0x60(%rsi)
+ 2e7:	75 43                	jne    32c <copy_thread+0x95>
+ 2e9:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 2f0:	00 00 00 
+ 2f3:	ba 00 01 00 00       	mov    $0x100,%edx
+ 2f8:	48 8d b0 e0 08 00 00 	lea    0x8e0(%rax),%rsi
+ 2ff:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 306:	00 00 00 
+ 309:	ff d0                	call   *%rax
+ 30b:	31 c0                	xor    %eax,%eax
+ 30d:	48 89 83 30 09 00 00 	mov    %rax,0x930(%rbx)
+ 314:	4d 85 ff             	test   %r15,%r15
+ 317:	74 07                	je     320 <copy_thread+0x89>
+ 319:	4c 89 bb 78 09 00 00 	mov    %r15,0x978(%rbx)
+ 320:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+ 327:	00 00 00 
+ 32a:	eb 33                	jmp    35f <copy_thread+0xc8>
+ 32c:	49 8b 45 00          	mov    0x0(%r13),%rax
+ 330:	48 8d b3 e0 09 00 00 	lea    0x9e0(%rbx),%rsi
+ 337:	ff 90 88 00 00 00    	call   *0x88(%rax)
+ 33d:	49 8b 44 24 60       	mov    0x60(%r12),%rax
+ 342:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+ 349:	00 00 00 
+ 34c:	48 89 83 c8 08 00 00 	mov    %rax,0x8c8(%rbx)
+ 353:	49 8b 44 24 68       	mov    0x68(%r12),%rax
+ 358:	48 89 83 d0 08 00 00 	mov    %rax,0x8d0(%rbx)
+ 35f:	49 8b 45 00          	mov    0x0(%r13),%rax
+ 363:	48 8b 73 18          	mov    0x18(%rbx),%rsi
+ 367:	48 89 df             	mov    %rbx,%rdi
+ 36a:	ff 50 50             	call   *0x50(%rax)
+ 36d:	49 83 7c 24 60 00    	cmpq   $0x0,0x60(%r12)
+ 373:	74 04                	je     379 <copy_thread+0xe2>
+ 375:	31 c0                	xor    %eax,%eax
+ 377:	eb 29                	jmp    3a2 <copy_thread+0x10b>
+ 379:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 380:	00 00 00 
+ 383:	48 89 df             	mov    %rbx,%rdi
+ 386:	ff d0                	call   *%rax
+ 388:	41 0f ba e6 13       	bt     $0x13,%r14d
+ 38d:	73 e6                	jae    375 <copy_thread+0xde>
+ 38f:	48 8b 75 c8          	mov    -0x38(%rbp),%rsi
+ 393:	48 89 df             	mov    %rbx,%rdi
+ 396:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 39d:	00 00 00 
+ 3a0:	ff d0                	call   *%rax
+ 3a2:	48 83 c4 18          	add    $0x18,%rsp
+ 3a6:	5b                   	pop    %rbx
+ 3a7:	41 5c                	pop    %r12
+ 3a9:	41 5d                	pop    %r13
+ 3ab:	41 5e                	pop    %r14
+ 3ad:	41 5f                	pop    %r15
+ 3af:	5d                   	pop    %rbp
+ 3b0:	c3                   	ret
+
+00000000000003b1 <initial_thread_cb>:
+ 3b1:	f3 0f 1e fa          	endbr64
+ 3b5:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 3bc:	00 00 00 
+ 3bf:	55                   	push   %rbp
+ 3c0:	48 89 e5             	mov    %rsp,%rbp
+ 3c3:	ff d0                	call   *%rax
+ 3c5:	5d                   	pop    %rbp
+ 3c6:	c3                   	ret
+
+00000000000003c7 <arch_dup_task_struct>:
+ 3c7:	f3 0f 1e fa          	endbr64
+ 3cb:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 3d2:	00 00 00 
+ 3d5:	55                   	push   %rbp
+ 3d6:	48 39 c6             	cmp    %rax,%rsi
+ 3d9:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 3e0:	00 00 00 
+ 3e3:	48 89 e5             	mov    %rsp,%rbp
+ 3e6:	41 54                	push   %r12
+ 3e8:	49 bc 00 00 00 00 00 	movabs $0x0,%r12
+ 3ef:	00 00 00 
+ 3f2:	53                   	push   %rbx
+ 3f3:	48 89 fb             	mov    %rdi,%rbx
+ 3f6:	75 29                	jne    421 <arch_dup_task_struct+0x5a>
+ 3f8:	ba 00 0a 00 00       	mov    $0xa00,%edx
+ 3fd:	ff d0                	call   *%rax
+ 3ff:	49 63 14 24          	movslq (%r12),%rdx
+ 403:	48 8d bb 00 0a 00 00 	lea    0xa00(%rbx),%rdi
+ 40a:	31 f6                	xor    %esi,%esi
+ 40c:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 413:	00 00 00 
+ 416:	48 81 ea 00 0a 00 00 	sub    $0xa00,%rdx
+ 41d:	ff d0                	call   *%rax
+ 41f:	eb 06                	jmp    427 <arch_dup_task_struct+0x60>
+ 421:	49 63 14 24          	movslq (%r12),%rdx
+ 425:	ff d0                	call   *%rax
+ 427:	5b                   	pop    %rbx
+ 428:	31 c0                	xor    %eax,%eax
+ 42a:	41 5c                	pop    %r12
+ 42c:	5d                   	pop    %rbp
+ 42d:	c3                   	ret
+
+000000000000042e <um_idle_sleep>:
+ 42e:	f3 0f 1e fa          	endbr64
+ 432:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 439:	00 00 00 
+ 43c:	55                   	push   %rbp
+ 43d:	48 89 e5             	mov    %rsp,%rbp
+ 440:	ff d0                	call   *%rax
+ 442:	5d                   	pop    %rbp
+ 443:	c3                   	ret
+
+0000000000000444 <arch_cpu_idle>:
+ 444:	f3 0f 1e fa          	endbr64
+ 448:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 44f:	00 00 00 
+ 452:	55                   	push   %rbp
+ 453:	48 89 e5             	mov    %rsp,%rbp
+ 456:	ff d0                	call   *%rax
+ 458:	5d                   	pop    %rbp
+ 459:	c3                   	ret
+
+000000000000045a <arch_cpu_idle_prepare>:
+ 45a:	f3 0f 1e fa          	endbr64
+ 45e:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 465:	00 00 00 
+ 468:	55                   	push   %rbp
+ 469:	48 89 e5             	mov    %rsp,%rbp
+ 46c:	ff d0                	call   *%rax
+ 46e:	5d                   	pop    %rbp
+ 46f:	c3                   	ret
+
+0000000000000470 <__uml_cant_sleep>:
+ 470:	f3 0f 1e fa          	endbr64
+ 474:	55                   	push   %rbp
+ 475:	48 89 e5             	mov    %rsp,%rbp
+ 478:	53                   	push   %rbx
+ 479:	48 bb 00 00 00 00 00 	movabs $0x0,%rbx
+ 480:	00 00 00 
+ 483:	51                   	push   %rcx
+ 484:	48 8b 03             	mov    (%rbx),%rax
+ 487:	8b 40 0c             	mov    0xc(%rax),%eax
+ 48a:	85 c0                	test   %eax,%eax
+ 48c:	74 07                	je     495 <__uml_cant_sleep+0x25>
+ 48e:	b8 01 00 00 00       	mov    $0x1,%eax
+ 493:	eb 21                	jmp    4b6 <__uml_cant_sleep+0x46>
+ 495:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 49c:	00 00 00 
+ 49f:	ff d0                	call   *%rax
+ 4a1:	85 c0                	test   %eax,%eax
+ 4a3:	74 e9                	je     48e <__uml_cant_sleep+0x1e>
+ 4a5:	48 8b 03             	mov    (%rbx),%rax
+ 4a8:	8b 40 0c             	mov    0xc(%rax),%eax
+ 4ab:	a9 00 ff ff 00       	test   $0xffff00,%eax
+ 4b0:	0f 95 c0             	setne  %al
+ 4b3:	0f b6 c0             	movzbl %al,%eax
+ 4b6:	5a                   	pop    %rdx
+ 4b7:	5b                   	pop    %rbx
+ 4b8:	5d                   	pop    %rbp
+ 4b9:	c3                   	ret
+
+00000000000004ba <uml_need_resched>:
+ 4ba:	f3 0f 1e fa          	endbr64
+ 4be:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 4c5:	00 00 00 
+ 4c8:	48 8b 00             	mov    (%rax),%rax
+ 4cb:	48 c1 e8 02          	shr    $0x2,%rax
+ 4cf:	83 e0 01             	and    $0x1,%eax
+ 4d2:	c3                   	ret
+
+00000000000004d3 <do_uml_exitcalls>:
+ 4d3:	f3 0f 1e fa          	endbr64
+ 4d7:	55                   	push   %rbp
+ 4d8:	48 89 e5             	mov    %rsp,%rbp
+ 4db:	41 54                	push   %r12
+ 4dd:	49 bc 00 00 00 00 00 	movabs $0x0,%r12
+ 4e4:	00 00 00 
+ 4e7:	53                   	push   %rbx
+ 4e8:	48 bb 00 00 00 00 00 	movabs $0x0,%rbx
+ 4ef:	00 00 00 
+ 4f2:	48 83 eb 08          	sub    $0x8,%rbx
+ 4f6:	4c 39 e3             	cmp    %r12,%rbx
+ 4f9:	72 04                	jb     4ff <do_uml_exitcalls+0x2c>
+ 4fb:	ff 13                	call   *(%rbx)
+ 4fd:	eb f3                	jmp    4f2 <do_uml_exitcalls+0x1f>
+ 4ff:	5b                   	pop    %rbx
+ 500:	41 5c                	pop    %r12
+ 502:	5d                   	pop    %rbp
+ 503:	c3                   	ret
+
+0000000000000504 <copy_from_user_proc>:
+ 504:	f3 0f 1e fa          	endbr64
+ 508:	55                   	push   %rbp
+ 509:	48 89 e5             	mov    %rsp,%rbp
+ 50c:	41 55                	push   %r13
+ 50e:	41 54                	push   %r12
+ 510:	53                   	push   %rbx
+ 511:	48 63 da             	movslq %edx,%rbx
+ 514:	51                   	push   %rcx
+ 515:	48 81 fb ff ff ff 7f 	cmp    $0x7fffffff,%rbx
+ 51c:	76 3c                	jbe    55a <copy_from_user_proc+0x56>
+ 51e:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 525:	00 00 00 
+ 528:	80 38 00             	cmpb   $0x0,(%rax)
+ 52b:	75 28                	jne    555 <copy_from_user_proc+0x51>
+ 52d:	c6 00 01             	movb   $0x1,(%rax)
+ 530:	31 c9                	xor    %ecx,%ecx
+ 532:	ba 09 00 00 00       	mov    $0x9,%edx
+ 537:	be 39 00 00 00       	mov    $0x39,%esi
+ 53c:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 543:	00 00 00 
+ 546:	31 c0                	xor    %eax,%eax
+ 548:	49 b8 00 00 00 00 00 	movabs $0x0,%r8
+ 54f:	00 00 00 
+ 552:	41 ff d0             	call   *%r8
+ 555:	49 89 dc             	mov    %rbx,%r12
+ 558:	eb 4d                	jmp    5a7 <copy_from_user_proc+0xa3>
+ 55a:	48 89 f2             	mov    %rsi,%rdx
+ 55d:	49 89 fd             	mov    %rdi,%r13
+ 560:	49 89 dc             	mov    %rbx,%r12
+ 563:	48 01 da             	add    %rbx,%rdx
+ 566:	72 26                	jb     58e <copy_from_user_proc+0x8a>
+ 568:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 56f:	00 00 00 
+ 572:	48 3b 10             	cmp    (%rax),%rdx
+ 575:	73 17                	jae    58e <copy_from_user_proc+0x8a>
+ 577:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 57e:	00 00 00 
+ 581:	48 89 da             	mov    %rbx,%rdx
+ 584:	ff d0                	call   *%rax
+ 586:	49 89 c4             	mov    %rax,%r12
+ 589:	48 85 c0             	test   %rax,%rax
+ 58c:	74 19                	je     5a7 <copy_from_user_proc+0xa3>
+ 58e:	4c 29 e3             	sub    %r12,%rbx
+ 591:	4c 89 e2             	mov    %r12,%rdx
+ 594:	31 f6                	xor    %esi,%esi
+ 596:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 59d:	00 00 00 
+ 5a0:	49 8d 7c 1d 00       	lea    0x0(%r13,%rbx,1),%rdi
+ 5a5:	ff d0                	call   *%rax
+ 5a7:	5a                   	pop    %rdx
+ 5a8:	44 89 e0             	mov    %r12d,%eax
+ 5ab:	5b                   	pop    %rbx
+ 5ac:	41 5c                	pop    %r12
+ 5ae:	41 5d                	pop    %r13
+ 5b0:	5d                   	pop    %rbp
+ 5b1:	c3                   	ret
+
+00000000000005b2 <singlestepping>:
+ 5b2:	f3 0f 1e fa          	endbr64
+ 5b6:	48 a1 00 00 00 00 00 	movabs 0x0,%rax
+ 5bd:	00 00 00 
+ 5c0:	48 8b 00             	mov    (%rax),%rax
+ 5c3:	48 c1 e8 0a          	shr    $0xa,%rax
+ 5c7:	83 e0 01             	and    $0x1,%eax
+ 5ca:	c3                   	ret
+
+00000000000005cb <__get_wchan>:
+ 5cb:	f3 0f 1e fa          	endbr64
+ 5cf:	55                   	push   %rbp
+ 5d0:	48 89 e5             	mov    %rsp,%rbp
+ 5d3:	41 57                	push   %r15
+ 5d5:	41 56                	push   %r14
+ 5d7:	41 55                	push   %r13
+ 5d9:	41 54                	push   %r12
+ 5db:	53                   	push   %rbx
+ 5dc:	51                   	push   %rcx
+ 5dd:	4c 8b 77 18          	mov    0x18(%rdi),%r14
+ 5e1:	4d 85 f6             	test   %r14,%r14
+ 5e4:	75 05                	jne    5eb <__get_wchan+0x20>
+ 5e6:	45 31 e4             	xor    %r12d,%r12d
+ 5e9:	eb 55                	jmp    640 <__get_wchan+0x75>
+ 5eb:	48 8b 9f 90 08 00 00 	mov    0x890(%rdi),%rbx
+ 5f2:	4c 39 f3             	cmp    %r14,%rbx
+ 5f5:	72 ef                	jb     5e6 <__get_wchan+0x1b>
+ 5f7:	49 bf 00 00 00 00 00 	movabs $0x0,%r15
+ 5fe:	00 00 00 
+ 601:	45 31 ed             	xor    %r13d,%r13d
+ 604:	49 8d 86 00 40 00 00 	lea    0x4000(%r14),%rax
+ 60b:	48 39 c3             	cmp    %rax,%rbx
+ 60e:	73 d6                	jae    5e6 <__get_wchan+0x1b>
+ 610:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 617:	00 00 00 
+ 61a:	4c 8b 23             	mov    (%rbx),%r12
+ 61d:	4c 89 e7             	mov    %r12,%rdi
+ 620:	ff d0                	call   *%rax
+ 622:	85 c0                	test   %eax,%eax
+ 624:	75 11                	jne    637 <__get_wchan+0x6c>
+ 626:	4c 89 e7             	mov    %r12,%rdi
+ 629:	41 ff d7             	call   *%r15
+ 62c:	85 c0                	test   %eax,%eax
+ 62e:	74 0a                	je     63a <__get_wchan+0x6f>
+ 630:	45 84 ed             	test   %r13b,%r13b
+ 633:	74 05                	je     63a <__get_wchan+0x6f>
+ 635:	eb 09                	jmp    640 <__get_wchan+0x75>
+ 637:	41 b5 01             	mov    $0x1,%r13b
+ 63a:	48 83 c3 08          	add    $0x8,%rbx
+ 63e:	eb c4                	jmp    604 <__get_wchan+0x39>
+ 640:	5a                   	pop    %rdx
+ 641:	4c 89 e0             	mov    %r12,%rax
+ 644:	5b                   	pop    %rbx
+ 645:	41 5c                	pop    %r12
+ 647:	41 5d                	pop    %r13
+ 649:	41 5e                	pop    %r14
+ 64b:	41 5f                	pop    %r15
+ 64d:	5d                   	pop    %rbp
+ 64e:	c3                   	ret

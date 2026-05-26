@@ -1,0 +1,13 @@
+metric;value
+Reporting date;2026-05-19
+Cutoff commit;fffd84d83955
+Branch;umlctl-deploy
+Redesign docs;276 files
+KVM v2 implementation state;guest entry, syscall dispatch, exceptions, signals, SMP repair, post-gadget performance, snapshot Phase 1-6, record/replay Phase 1-7, host resource controls (SMP-T78-T84) all in tree; umlctl mission gate operational
+Functional parity;cpython-parity 21/21 under UP and SMP; Round-14 Django cache-flake closed via SMP-T73 (YMM-upper XSAVE leak) with 220/220 validation soak
+Substrate gate;kvm-v2 PASS=25 FAIL=3 XFAIL=3 matching seccomp
+Snapshot bench;capture 38.9us; median restore 13us (memo-12 targets <50ms / <1ms)
+umlctl mission acceptance gate;6/6 phases PASS in ~15min wall-clock; 100/100 soak; 0 panics / 0 SIGBUS / 0 high-cr2
+Vector2 seccomp Tier 3;requested-stop 6142/7200s; 970/970 PASS; Django-v2 490/490; FastAPI-v2 480/480
+Cross-host benchmark;micro 193x-908x; Python 2.99x-4.06x; stress 3.71x-8.72x faster than seccomp
+Open formal gate;24h long-tail wall-clock soak; Series 7 LKML cover-letter refresh + submission

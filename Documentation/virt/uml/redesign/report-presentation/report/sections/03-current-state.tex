@@ -1,0 +1,186 @@
+\section{Current State}
+
+\subsection{Source Basis}
+
+The report is grounded in the branch's source material: goal and plan
+documents, landed code, the bug diary, current status, and measured
+evidence. The main source classes are:
+
+\begin{table}[h]
+\centering
+\caption{How the project corpus maps into this report.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.16\linewidth}L{0.33\linewidth}Y@{}}
+\toprule
+Source class & Representative paths & Use in the report \\
+\midrule
+Plan and vision & \path{00-vision.md}, \path{README.md}, \path{report-presentation/PLAN.md} & Defines the goal, non-goals, architecture narrative, and publishing shape. \\
+Architecture & \path{01-architecture/}, \path{02-workstreams/} & Defines layers, workstreams, dependencies, profiles, and sequencing. \\
+Code & \path{arch/um/include/shared/backend.h}, \path{arch/um/backend/kvm-v2/}, \path{tools/uml/uml-launcher/} & Confirms that the report is describing landed implementation, not only design. \\
+Diary and state & \path{STATUS.md}, \path{state-audit/}, sustained-validation memos & Provides current truth, bug chronology, closure criteria, and remaining work. \\
+Evidence & \path{tools/testing/selftests/um/}, benchmark and soak memos & Supplies measured performance, parity, soak, and gate data. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Inherited \UML{} Versus This Branch}
+
+The attribution boundary matters. I checked it by diffing
+\texttt{origin/master...HEAD} across \texttt{arch/um},
+\texttt{tools/uml}, \texttt{tools/testing/selftests/um}, and
+\texttt{Documentation/virt/uml}. That diff spans 688 UML-related
+files, with 154,501 insertions and 823 deletions. The number is a
+scope check, not an authorship claim: the existing \UML{} model, the
+Linux kernel, and generic \KVM{} facilities remain inherited foundations.
+
+\begin{table}[h]
+\centering
+\caption{Attribution boundary for the current branch.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}Y@{}}
+\toprule
+Category & What the report means \\
+\midrule
+Inherited \UML{} and Linux & Linux-as-a-host-process, the upstream
+\UML{} port, legacy ptrace execution, existing kernel subsystems,
+the host KVM API, and the general idea of deterministic time-travel
+are not claimed as new work here. \\
+Recent upstream prerequisites & Seccomp-mode \UML{} and upstream
+SMP work are treated as enabling context. The redesign builds on
+them; it does not present them as branch-local inventions. \\
+Redesigned in this project & The explicit backend-ops contract,
+static-key hook model, profile matrix, validation ladder, staged
+upstream queue, and \KVMvTwo{} state-ownership method are the project
+architecture. \\
+Implemented in this branch & \path{arch/um/backend/kvm-v2/} including
+snapshot.c (Phase 1--6 with cmdline+debugfs bench harness),
+record.c (Phase 1--7 with gadget-bypass, RDTSC, SIGALRM, KUnit 7/7),
+state-trace, lstar-gadget, byteshape and marshal KUnit suites;
+backend contract code; profile configs and docs;
+snapshot/forkserver v1 (C-09); the Rust launcher and \texttt{umlctl}
+including the new \texttt{mission} subcommand (6-phase acceptance
+gate), \texttt{[host\_resources]} TOML schema, cgroup v2 + preflight
+modules; KVM/soak/benchmark selftests with the diverse-workload soak
+daemon; the report/deck workspace. \\
+Planned or paused & 24-hour long-tail soak (the operational gate
+remaining after the \texttt{umlctl mission} 15-min acceptance gate),
+LKML upstream Series 7 (kvm-backend), syzkaller \texttt{vm/uml} (external),
+LTP curation, and Tier 3 host resource controls (SMP-T85 SCHED\_FIFO,
+T86 NUMA, T87 O\_DIRECT --- design memo 52 §3 preserves the design
+until a concrete operator question demands implementation). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Landed Versus Open}
+
+The branch contains substantial code and test infrastructure:
+
+\begin{itemize}
+  \item \texttt{arch/um/include/shared/backend.h} defines the backend
+        contract used by host-side and kernel-side translation units.
+  \item \texttt{arch/um/backend/seccomp/} and ptrace integration
+        provide the non-\KVM{} backends.
+  \item \texttt{arch/um/backend/kvm-v2/} contains the active \KVMvTwo{}
+        implementation: vCPU, memory, syscall, exception, region,
+        state-trace, LSTAR gadget; snapshot (Phase 1--6, with
+        cmdline + debugfs bench harness) and record/replay
+        (Phase 1--7, KUnit 7/7) primitives; KUnit suites for byte-shape,
+        marshal, snapshot, and record.
+  \item \texttt{arch/um/os-Linux/} carries the SMP-T78--T82 host-side
+        resource-control levers: \texttt{MAP\_POPULATE} and
+        \texttt{MAP\_LOCKED} on physmem, \texttt{mlockall},
+        \texttt{madvise(MADV\_UNMERGEABLE)} on physmem,
+        \texttt{MADV\_HUGEPAGE}/\texttt{NOHUGEPAGE} control,
+        \texttt{/proc/self/oom\_score\_adj} write, optional
+        \texttt{MAP\_HUGETLB} 2M/1G backing, and process-level
+        \texttt{sched\_setaffinity}.
+  \item \texttt{tools/uml/uml-launcher/} and \texttt{umlctl} provide
+        host-side launch, supervision, gate, gate-loop, history, and
+        deployment machinery, plus the new \texttt{[host\_resources]}
+        TOML section (cgroup v2 limits + env var translation),
+        cgroup module, preflight verification module, and the
+        \texttt{mission} subcommand (6-phase acceptance gate).
+  \item \texttt{tools/testing/selftests/um/} contains benchmark,
+        parity, gate, soak (daemon-driven, 11 workload templates each
+        carrying a default \texttt{[host\_resources]} block),
+        snapshot, KVM record, ftrace, kprobes, KMSAN, and process
+        reproducer coverage.
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  lane/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,minimum height=0.75cm,align=center},
+  done/.style={draw=UMLGreen,fill=UMLGreen!12},
+  prog/.style={draw=UMLAmber,fill=UMLAmber!14},
+  label/.style={font=\footnotesize\bfseries},
+]
+\node[lane,done,minimum width=1.55cm] (a) {backend\\contract};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of a] (b) {runtime\\gates};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of b] (c) {profile\\matrix};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of c] (d) {KVM v2\\core};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of d] (g) {SMP\\state audit};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of g] (h) {R14\\fix};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of h] (i) {snap+\\record};
+\node[lane,done,minimum width=1.55cm,right=0.10cm of i] (k) {host\\resources};
+\node[lane,prog,minimum width=1.55cm,right=0.10cm of k] (j) {24h\\soak};
+\draw[-{Latex[length=2mm]},thick,UMLMuted] (a.south) ++(0,-0.35) -- ($(j.south)+(0,-0.35)$);
+\node[label,below=0.62cm of d] {state at reporting cutoff};
+\end{tikzpicture}
+\caption{Milestone state. The R14 cache-flake fix (SMP-T73 YMM-upper XSAVE leak), snapshot Phase 1--6, record/replay Phase 1--7, and host-resource controls (SMP-T78--T84) all landed since the previous reporting cutoff. The remaining open lane is the 24-hour wall-clock soak.}
+\end{figure}
+
+\subsection{Current Functional Reading}
+
+\begin{table}[h]
+\centering
+\caption{Functional status from \texttt{STATUS.md}.}
+\begin{tabularx}{\linewidth}{@{}L{0.31\linewidth}L{0.19\linewidth}Y@{}}
+\toprule
+Surface & Reading & Interpretation \\
+\midrule
+\texttt{init=/bin/echo} & UP + SMP yes & Basic guest entry works under \KVMvTwo{}. \\
+Python smoke & UP + SMP yes & \texttt{python3 -V}, hashlib, ssl, and single imports work. \\
+Substrate gate & PASS=25, FAIL=3, XFAIL=3 & \KVMvTwo{} matches \Seccomp{} on the curated substrate gate. \\
+cpython-parity & 21/21 & The old P0, Python C-extension import crashes, is functionally closed. \\
+mt-mini T=8, ncpus=4 & 30/30 or better in current runs & SMP memory stress reaches the current acceptance bar. \\
+threaded-fork-malloc & 0/24000 child failures & Cross-task XMM/FPU guarantee survived the T55/T57 fixes. \\
+wide cpython-parity & 134 parity, 0 regression & Larger curated module sweep found no \KVMvTwo{} regression. \\
+Round-14 Django cache-flake & closed (SMP-T73) & 1--2\% bytecode-page YMM-upper-128 corruption fixed by switching 5 per-task FPU save/restore sites from \texttt{KVM\_GET\_FPU} to \texttt{KVM\_GET\_XSAVE}. 220/220 PASS validation, p=0.007 vs baseline. \\
+Snapshot/RR KUnit & 10/10 cases & 3 snapshot (basic, full, task) + 7 record/replay (basic, state, observe, strict\_replay, gadget\_bypass, rdtsc, sigalrm). \\
+Snapshot bench & 38.9 $\mu$s capture, 13 $\mu$s median restore & Memo-12 targets <50 ms / <1 ms cleared by $\sim$1300$\times$ and $\sim$75$\times$ respectively. \\
+\texttt{umlctl mission} acceptance gate & 6/6 phases PASS, $\sim$15 min wall & KUnit + bench + substrate + host\_resources + 100/100 soak + diagnostic, 0 panics / 0 SIGBUS / 0 high-cr2 anomalies. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Open State}
+
+The important open items are bounded:
+\begin{itemize}
+  \item The 15-minute \texttt{umlctl mission} acceptance gate
+        passes 6/6 phases including a 100/100 diverse-workload soak.
+        The 24-hour continuous run remains as the long-tail
+        wall-clock evidence; Tier 2/Tier 3 templates and LTP curation
+        are wired into the soak daemon and need long-running confirmation.
+  \item Snapshot Phase 1--6 and record/replay Phase 1--7 are in
+        tree (memo 26 + memo 27); the remaining record/replay work
+        is the host-side signal-interception wiring that turns a
+        real SIGALRM into an \texttt{observe\_sigalrm} call (the
+        log shape and replay-side gating are already proven by KUnit).
+  \item The R14 Round-14 cache-flake closure (SMP-T73 YMM-upper
+        XSAVE leak, plus T74/T75/T76 latent-bug follow-ups and the
+        T77 feature-enablement checklist) is landed and validated.
+        AVX-512 / AMX / PKRU / CET / AVX-VNNI un-mask remains
+        future work; memo 52 §1--§2 documents the prerequisite
+        check-list and the host-side levers shipped to ease it.
+  \item The LKML queue is sequenced; Series 7 (kvm-backend) is now
+        backend-layer unblocked by R14 closure and the new acceptance
+        gate, pending cover-letter refresh and submission.
+  \item Tier 3 host-resource features (SCHED\_FIFO RT, NUMA binding,
+        \texttt{O\_DIRECT} for hostfs I/O) are deferred per memo 52 §3:
+        the design is preserved, implementation opens only when a
+        concrete operator question demands it (multi-tenant CI host,
+        multi-socket bench rig, multi-UML memory-pressure soak).
+\end{itemize}

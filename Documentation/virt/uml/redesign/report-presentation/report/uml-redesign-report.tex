@@ -1,0 +1,113 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=0.85in,headheight=15pt]{geometry}
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setsansfont{Latin Modern Sans}
+\setmonofont{Latin Modern Mono}
+
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,shapes.geometric,backgrounds,matrix}
+\usepackage{pgfplots}
+\usepackage{pgfplotstable}
+\pgfplotsset{compat=1.18}
+\usepackage{siunitx}
+\sisetup{detect-all,group-separator={,},group-minimum-digits=4}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{xurl}
+\usepackage{hyperref}
+\usepackage[backend=biber,style=numeric,sorting=none]{biblatex}
+\addbibresource{../shared/sources.bib}
+
+\input{../shared/common.tex}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=UMLBlue,
+  citecolor=UMLTeal,
+  urlcolor=UMLBlue,
+  pdftitle={\ProjectTitle: \ProjectSubtitle},
+  pdfauthor={M. J. Bommarito}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\ProjectTitle}
+\rhead{\ReportDate}
+\cfoot{\thepage}
+
+\setlist[itemize]{leftmargin=1.35em}
+\setlist[enumerate]{leftmargin=1.45em}
+\renewcommand{\arraystretch}{1.18}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\newcommand{\statuspill}[2]{%
+  \begingroup
+  \setlength{\fboxsep}{3pt}%
+  \colorbox{#1!12}{\textcolor{#1}{\footnotesize\textbf{#2}}}%
+  \endgroup
+}
+\newcommand{\donepill}{\statuspill{UMLGreen}{DONE}}
+\newcommand{\progresspill}{\statuspill{UMLAmber}{IN PROGRESS}}
+\newcommand{\blockedpill}{\statuspill{UMLRed}{BLOCKED}}
+\newcommand{\plannedpill}{\statuspill{UMLBlue}{PLANNED}}
+\newcommand{\metriccard}[3]{%
+  \begin{minipage}[t]{0.235\linewidth}
+  \centering
+  \colorbox{#1!12}{\begin{minipage}{0.92\linewidth}
+    \centering\vspace{0.45em}
+    {\Large\textbf{\textcolor{#1}{#2}}}\\[0.25em]
+    {\footnotesize #3}
+    \vspace{0.45em}
+  \end{minipage}}
+  \end{minipage}
+}
+
+\title{\textbf{\ProjectTitle}\\[0.35em]\large \ProjectSubtitle}
+\author{Reporting cutoff: branch \texttt{\BranchName}, commit \texttt{\CutoffCommit}}
+\date{\ReportDate}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report summarizes the User Mode Linux redesign branch as of
+\ReportDate. It is a state report for maintainers: the first pages
+state the branch claim, the delta from inherited \UML{}, and the
+current validation position; later sections provide design detail,
+benchmark data, validation evidence, and remaining work. The central
+claim is that the redesign has moved beyond paper architecture:
+backend abstraction, static-key gates, profile work, the Rust launcher,
+and a substantial \KVMvTwo{} backend are present in-tree. The remaining
+formal gate is sustained validation and upstream packaging.
+\end{abstract}
+
+\newpage
+\input{sections/01-executive-summary.tex}
+
+\newpage
+\tableofcontents
+\newpage
+
+\input{sections/02-goal-vision.tex}
+\input{sections/03-current-state.tex}
+\input{sections/04-architecture.tex}
+\input{sections/05-kvm-v2-design.tex}
+\input{sections/06-profiles-validation.tex}
+\input{sections/07-performance.tex}
+\input{sections/08-next-work.tex}
+\input{sections/09-source-map.tex}
+
+\printbibliography
+\end{document}

@@ -1,0 +1,876 @@
+
+/tmp/uml-matrix-dynamic/arch/um/kernel/irq.o:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000000000 <get_irq_entry_by_fd>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+   b:	00 00 00 
+   e:	48 8b 02             	mov    (%rdx),%rax
+  11:	48 39 d0             	cmp    %rdx,%rax
+  14:	74 0a                	je     20 <get_irq_entry_by_fd+0x20>
+  16:	39 78 10             	cmp    %edi,0x10(%rax)
+  19:	74 07                	je     22 <get_irq_entry_by_fd+0x22>
+  1b:	48 8b 00             	mov    (%rax),%rax
+  1e:	eb f1                	jmp    11 <get_irq_entry_by_fd+0x11>
+  20:	31 c0                	xor    %eax,%eax
+  22:	c3                   	ret
+
+0000000000000023 <dummy>:
+  23:	f3 0f 1e fa          	endbr64
+  27:	c3                   	ret
+
+0000000000000028 <remove_irq_entry>:
+  28:	f3 0f 1e fa          	endbr64
+  2c:	48 85 ff             	test   %rdi,%rdi
+  2f:	74 3e                	je     6f <remove_irq_entry+0x47>
+  31:	55                   	push   %rbp
+  32:	48 89 e5             	mov    %rsp,%rbp
+  35:	53                   	push   %rbx
+  36:	48 89 fb             	mov    %rdi,%rbx
+  39:	52                   	push   %rdx
+  3a:	40 84 f6             	test   %sil,%sil
+  3d:	74 0f                	je     4e <remove_irq_entry+0x26>
+  3f:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  46:	00 00 00 
+  49:	8b 7f 10             	mov    0x10(%rdi),%edi
+  4c:	ff d0                	call   *%rax
+  4e:	48 8b 13             	mov    (%rbx),%rdx
+  51:	48 8b 43 08          	mov    0x8(%rbx),%rax
+  55:	48 89 42 08          	mov    %rax,0x8(%rdx)
+  59:	48 89 10             	mov    %rdx,(%rax)
+  5c:	48 c7 03 00 01 00 00 	movq   $0x100,(%rbx)
+  63:	48 c7 43 08 22 01 00 	movq   $0x122,0x8(%rbx)
+  6a:	00 
+  6b:	58                   	pop    %rax
+  6c:	5b                   	pop    %rbx
+  6d:	5d                   	pop    %rbp
+  6e:	c3                   	ret
+  6f:	c3                   	ret
+
+0000000000000070 <arch_local_irq_save>:
+  70:	f3 0f 1e fa          	endbr64
+  74:	55                   	push   %rbp
+  75:	48 89 e5             	mov    %rsp,%rbp
+  78:	53                   	push   %rbx
+  79:	50                   	push   %rax
+  7a:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  81:	00 00 00 
+  84:	ff d0                	call   *%rax
+  86:	31 ff                	xor    %edi,%edi
+  88:	89 c3                	mov    %eax,%ebx
+  8a:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  91:	00 00 00 
+  94:	ff d0                	call   *%rax
+  96:	48 63 c3             	movslq %ebx,%rax
+  99:	5a                   	pop    %rdx
+  9a:	5b                   	pop    %rbx
+  9b:	5d                   	pop    %rbp
+  9c:	c3                   	ret
+
+000000000000009d <free_irq_by_fd>:
+  9d:	f3 0f 1e fa          	endbr64
+  a1:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  a8:	00 00 00 
+  ab:	55                   	push   %rbp
+  ac:	48 89 e5             	mov    %rsp,%rbp
+  af:	41 54                	push   %r12
+  b1:	41 89 fc             	mov    %edi,%r12d
+  b4:	53                   	push   %rbx
+  b5:	ff d0                	call   *%rax
+  b7:	48 89 c3             	mov    %rax,%rbx
+  ba:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  c1:	00 00 00 
+  c4:	44 89 e7             	mov    %r12d,%edi
+  c7:	be 01 00 00 00       	mov    $0x1,%esi
+  cc:	ff d0                	call   *%rax
+  ce:	48 89 c7             	mov    %rax,%rdi
+  d1:	49 89 c4             	mov    %rax,%r12
+  d4:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  db:	00 00 00 
+  de:	ff d0                	call   *%rax
+  e0:	89 df                	mov    %ebx,%edi
+  e2:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  e9:	00 00 00 
+  ec:	ff d0                	call   *%rax
+  ee:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  f5:	00 00 00 
+  f8:	4c 89 e7             	mov    %r12,%rdi
+  fb:	ff d0                	call   *%rax
+  fd:	5b                   	pop    %rbx
+  fe:	41 5c                	pop    %r12
+ 100:	5d                   	pop    %rbp
+ 101:	c3                   	ret
+
+0000000000000102 <normal_irq_set_wake>:
+ 102:	f3 0f 1e fa          	endbr64
+ 106:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 10d:	00 00 00 
+ 110:	55                   	push   %rbp
+ 111:	48 89 e5             	mov    %rsp,%rbp
+ 114:	41 54                	push   %r12
+ 116:	49 89 fc             	mov    %rdi,%r12
+ 119:	53                   	push   %rbx
+ 11a:	89 f3                	mov    %esi,%ebx
+ 11c:	ff d0                	call   *%rax
+ 11e:	48 b9 00 00 00 00 00 	movabs $0x0,%rcx
+ 125:	00 00 00 
+ 128:	48 8b 11             	mov    (%rcx),%rdx
+ 12b:	48 39 ca             	cmp    %rcx,%rdx
+ 12e:	74 3b                	je     16b <normal_irq_set_wake+0x69>
+ 130:	83 7a 24 00          	cmpl   $0x0,0x24(%rdx)
+ 134:	74 19                	je     14f <normal_irq_set_wake+0x4d>
+ 136:	41 8b 74 24 04       	mov    0x4(%r12),%esi
+ 13b:	39 72 20             	cmp    %esi,0x20(%rdx)
+ 13e:	75 0f                	jne    14f <normal_irq_set_wake+0x4d>
+ 140:	31 c9                	xor    %ecx,%ecx
+ 142:	48 6b c9 18          	imul   $0x18,%rcx,%rcx
+ 146:	85 db                	test   %ebx,%ebx
+ 148:	0f 95 44 0a 2a       	setne  0x2a(%rdx,%rcx,1)
+ 14d:	eb 1c                	jmp    16b <normal_irq_set_wake+0x69>
+ 14f:	83 7a 3c 00          	cmpl   $0x0,0x3c(%rdx)
+ 153:	75 05                	jne    15a <normal_irq_set_wake+0x58>
+ 155:	48 8b 12             	mov    (%rdx),%rdx
+ 158:	eb d1                	jmp    12b <normal_irq_set_wake+0x29>
+ 15a:	41 8b 74 24 04       	mov    0x4(%r12),%esi
+ 15f:	39 72 38             	cmp    %esi,0x38(%rdx)
+ 162:	75 f1                	jne    155 <normal_irq_set_wake+0x53>
+ 164:	b9 01 00 00 00       	mov    $0x1,%ecx
+ 169:	eb d7                	jmp    142 <normal_irq_set_wake+0x40>
+ 16b:	89 c7                	mov    %eax,%edi
+ 16d:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 174:	00 00 00 
+ 177:	ff d0                	call   *%rax
+ 179:	31 c0                	xor    %eax,%eax
+ 17b:	5b                   	pop    %rbx
+ 17c:	41 5c                	pop    %r12
+ 17e:	5d                   	pop    %rbp
+ 17f:	c3                   	ret
+
+0000000000000180 <update_irq_entry>:
+ 180:	f3 0f 1e fa          	endbr64
+ 184:	55                   	push   %rbp
+ 185:	48 89 fa             	mov    %rdi,%rdx
+ 188:	8b 7f 24             	mov    0x24(%rdi),%edi
+ 18b:	8b 42 10             	mov    0x10(%rdx),%eax
+ 18e:	48 89 e5             	mov    %rsp,%rbp
+ 191:	0b 7a 3c             	or     0x3c(%rdx),%edi
+ 194:	74 12                	je     1a8 <update_irq_entry+0x28>
+ 196:	89 c6                	mov    %eax,%esi
+ 198:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 19f:	00 00 00 
+ 1a2:	ff d0                	call   *%rax
+ 1a4:	b0 01                	mov    $0x1,%al
+ 1a6:	eb 10                	jmp    1b8 <update_irq_entry+0x38>
+ 1a8:	89 c7                	mov    %eax,%edi
+ 1aa:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1b1:	00 00 00 
+ 1b4:	ff d0                	call   *%rax
+ 1b6:	31 c0                	xor    %eax,%eax
+ 1b8:	5d                   	pop    %rbp
+ 1b9:	c3                   	ret
+
+00000000000001ba <deactivate_fd>:
+ 1ba:	f3 0f 1e fa          	endbr64
+ 1be:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1c5:	00 00 00 
+ 1c8:	55                   	push   %rbp
+ 1c9:	48 89 e5             	mov    %rsp,%rbp
+ 1cc:	41 56                	push   %r14
+ 1ce:	41 89 f6             	mov    %esi,%r14d
+ 1d1:	41 55                	push   %r13
+ 1d3:	41 54                	push   %r12
+ 1d5:	41 89 fc             	mov    %edi,%r12d
+ 1d8:	53                   	push   %rbx
+ 1d9:	ff d0                	call   *%rax
+ 1db:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1e2:	00 00 00 
+ 1e5:	ff d0                	call   *%rax
+ 1e7:	49 89 c5             	mov    %rax,%r13
+ 1ea:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 1f1:	00 00 00 
+ 1f4:	44 89 e7             	mov    %r12d,%edi
+ 1f7:	ff d0                	call   *%rax
+ 1f9:	48 85 c0             	test   %rax,%rax
+ 1fc:	75 04                	jne    202 <deactivate_fd+0x48>
+ 1fe:	31 db                	xor    %ebx,%ebx
+ 200:	eb 49                	jmp    24b <deactivate_fd+0x91>
+ 202:	48 89 c3             	mov    %rax,%rbx
+ 205:	83 78 24 00          	cmpl   $0x0,0x24(%rax)
+ 209:	74 0b                	je     216 <deactivate_fd+0x5c>
+ 20b:	44 3b 70 20          	cmp    0x20(%rax),%r14d
+ 20f:	75 05                	jne    216 <deactivate_fd+0x5c>
+ 211:	31 d2                	xor    %edx,%edx
+ 213:	89 50 24             	mov    %edx,0x24(%rax)
+ 216:	83 7b 3c 00          	cmpl   $0x0,0x3c(%rbx)
+ 21a:	74 0b                	je     227 <deactivate_fd+0x6d>
+ 21c:	44 3b 73 38          	cmp    0x38(%rbx),%r14d
+ 220:	75 05                	jne    227 <deactivate_fd+0x6d>
+ 222:	31 c0                	xor    %eax,%eax
+ 224:	89 43 3c             	mov    %eax,0x3c(%rbx)
+ 227:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 22e:	00 00 00 
+ 231:	48 89 df             	mov    %rbx,%rdi
+ 234:	ff d0                	call   *%rax
+ 236:	84 c0                	test   %al,%al
+ 238:	75 c4                	jne    1fe <deactivate_fd+0x44>
+ 23a:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 241:	00 00 00 
+ 244:	31 f6                	xor    %esi,%esi
+ 246:	48 89 df             	mov    %rbx,%rdi
+ 249:	ff d0                	call   *%rax
+ 24b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 252:	00 00 00 
+ 255:	44 89 ef             	mov    %r13d,%edi
+ 258:	ff d0                	call   *%rax
+ 25a:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 261:	00 00 00 
+ 264:	48 89 df             	mov    %rbx,%rdi
+ 267:	ff d0                	call   *%rax
+ 269:	44 89 e7             	mov    %r12d,%edi
+ 26c:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 273:	00 00 00 
+ 276:	ff d0                	call   *%rax
+ 278:	5b                   	pop    %rbx
+ 279:	41 5c                	pop    %r12
+ 27b:	41 5d                	pop    %r13
+ 27d:	41 5e                	pop    %r14
+ 27f:	5d                   	pop    %rbp
+ 280:	c3                   	ret
+
+0000000000000281 <um_request_irq>:
+ 281:	f3 0f 1e fa          	endbr64
+ 285:	55                   	push   %rbp
+ 286:	48 89 e5             	mov    %rsp,%rbp
+ 289:	41 57                	push   %r15
+ 28b:	41 56                	push   %r14
+ 28d:	41 55                	push   %r13
+ 28f:	41 54                	push   %r12
+ 291:	53                   	push   %rbx
+ 292:	89 fb                	mov    %edi,%ebx
+ 294:	48 83 ec 38          	sub    $0x38,%rsp
+ 298:	83 ff ff             	cmp    $0xffffffff,%edi
+ 29b:	75 20                	jne    2bd <um_request_irq+0x3c>
+ 29d:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 2a4:	00 00 00 
+ 2a7:	bb 0c 00 00 00       	mov    $0xc,%ebx
+ 2ac:	48 0f ab 18          	bts    %rbx,(%rax)
+ 2b0:	73 0b                	jae    2bd <um_request_irq+0x3c>
+ 2b2:	48 ff c3             	inc    %rbx
+ 2b5:	48 83 fb 40          	cmp    $0x40,%rbx
+ 2b9:	75 f1                	jne    2ac <um_request_irq+0x2b>
+ 2bb:	eb 04                	jmp    2c1 <um_request_irq+0x40>
+ 2bd:	85 db                	test   %ebx,%ebx
+ 2bf:	79 0a                	jns    2cb <um_request_irq+0x4a>
+ 2c1:	bb e4 ff ff ff       	mov    $0xffffffe4,%ebx
+ 2c6:	e9 36 02 00 00       	jmp    501 <um_request_irq+0x280>
+ 2cb:	4c 89 4d b0          	mov    %r9,-0x50(%rbp)
+ 2cf:	41 89 d4             	mov    %edx,%r12d
+ 2d2:	41 89 f6             	mov    %esi,%r14d
+ 2d5:	4c 89 45 b8          	mov    %r8,-0x48(%rbp)
+ 2d9:	48 89 4d c0          	mov    %rcx,-0x40(%rbp)
+ 2dd:	83 fe ff             	cmp    $0xffffffff,%esi
+ 2e0:	75 37                	jne    319 <um_request_irq+0x98>
+ 2e2:	48 8b 4d b8          	mov    -0x48(%rbp),%rcx
+ 2e6:	4c 8b 4d 10          	mov    0x10(%rbp),%r9
+ 2ea:	31 d2                	xor    %edx,%edx
+ 2ec:	89 df                	mov    %ebx,%edi
+ 2ee:	4c 8b 45 b0          	mov    -0x50(%rbp),%r8
+ 2f2:	48 8b 75 c0          	mov    -0x40(%rbp),%rsi
+ 2f6:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 2fd:	00 00 00 
+ 300:	48 81 c9 00 00 20 00 	or     $0x200000,%rcx
+ 307:	ff d0                	call   *%rax
+ 309:	41 89 c7             	mov    %eax,%r15d
+ 30c:	85 c0                	test   %eax,%eax
+ 30e:	0f 89 ed 01 00 00    	jns    501 <um_request_irq+0x280>
+ 314:	e9 d4 01 00 00       	jmp    4ed <um_request_irq+0x26c>
+ 319:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 320:	00 00 00 
+ 323:	44 89 e7             	mov    %r12d,%edi
+ 326:	ff d0                	call   *%rax
+ 328:	44 89 f7             	mov    %r14d,%edi
+ 32b:	89 45 c8             	mov    %eax,-0x38(%rbp)
+ 32e:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 335:	00 00 00 
+ 338:	ff d0                	call   *%rax
+ 33a:	41 89 c7             	mov    %eax,%r15d
+ 33d:	85 c0                	test   %eax,%eax
+ 33f:	0f 88 8d 01 00 00    	js     4d2 <um_request_irq+0x251>
+ 345:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 34c:	00 00 00 
+ 34f:	ff d0                	call   *%rax
+ 351:	48 89 c1             	mov    %rax,%rcx
+ 354:	49 bf 00 00 00 00 00 	movabs $0x0,%r15
+ 35b:	00 00 00 
+ 35e:	44 89 f7             	mov    %r14d,%edi
+ 361:	41 ff d7             	call   *%r15
+ 364:	89 4d cc             	mov    %ecx,-0x34(%rbp)
+ 367:	48 89 c2             	mov    %rax,%rdx
+ 36a:	48 85 c0             	test   %rax,%rax
+ 36d:	74 5d                	je     3cc <um_request_irq+0x14b>
+ 36f:	45 31 ed             	xor    %r13d,%r13d
+ 372:	44 89 e0             	mov    %r12d,%eax
+ 375:	48 6b c0 18          	imul   $0x18,%rax,%rax
+ 379:	83 7c 02 24 00       	cmpl   $0x0,0x24(%rdx,%rax,1)
+ 37e:	75 1c                	jne    39c <um_request_irq+0x11b>
+ 380:	48 89 55 a8          	mov    %rdx,-0x58(%rbp)
+ 384:	44 89 f7             	mov    %r14d,%edi
+ 387:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 38e:	00 00 00 
+ 391:	ff d0                	call   *%rax
+ 393:	48 8b 55 a8          	mov    -0x58(%rbp),%rdx
+ 397:	e9 cc 00 00 00       	jmp    468 <um_request_irq+0x1e7>
+ 39c:	31 c9                	xor    %ecx,%ecx
+ 39e:	ba 09 00 00 00       	mov    $0x9,%edx
+ 3a3:	be 3e 01 00 00       	mov    $0x13e,%esi
+ 3a8:	31 c0                	xor    %eax,%eax
+ 3aa:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 3b1:	00 00 00 
+ 3b4:	41 bf 8e ff ff ff    	mov    $0xffffff8e,%r15d
+ 3ba:	49 b8 00 00 00 00 00 	movabs $0x0,%r8
+ 3c1:	00 00 00 
+ 3c4:	41 ff d0             	call   *%r8
+ 3c7:	e9 f5 00 00 00       	jmp    4c1 <um_request_irq+0x240>
+ 3cc:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 3d3:	00 00 00 
+ 3d6:	ba 50 00 00 00       	mov    $0x50,%edx
+ 3db:	48 8b 38             	mov    (%rax),%rdi
+ 3de:	be 20 09 00 00       	mov    $0x920,%esi
+ 3e3:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 3ea:	00 00 00 
+ 3ed:	ff d0                	call   *%rax
+ 3ef:	49 89 c5             	mov    %rax,%r13
+ 3f2:	48 85 c0             	test   %rax,%rax
+ 3f5:	75 1a                	jne    411 <um_request_irq+0x190>
+ 3f7:	8b 7d cc             	mov    -0x34(%rbp),%edi
+ 3fa:	41 bf f4 ff ff ff    	mov    $0xfffffff4,%r15d
+ 400:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 407:	00 00 00 
+ 40a:	ff d0                	call   *%rax
+ 40c:	e9 dc 00 00 00       	jmp    4ed <um_request_irq+0x26c>
+ 411:	44 89 f7             	mov    %r14d,%edi
+ 414:	41 ff d7             	call   *%r15
+ 417:	48 89 c2             	mov    %rax,%rdx
+ 41a:	48 85 c0             	test   %rax,%rax
+ 41d:	0f 85 4f ff ff ff    	jne    372 <um_request_irq+0xf1>
+ 423:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 42a:	00 00 00 
+ 42d:	48 8b 10             	mov    (%rax),%rdx
+ 430:	4c 89 e8             	mov    %r13,%rax
+ 433:	45 89 75 10          	mov    %r14d,0x10(%r13)
+ 437:	48 a3 00 00 00 00 00 	movabs %rax,0x0
+ 43e:	00 00 00 
+ 441:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 448:	00 00 00 
+ 44b:	49 89 45 00          	mov    %rax,0x0(%r13)
+ 44f:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 456:	00 00 00 
+ 459:	49 89 55 08          	mov    %rdx,0x8(%r13)
+ 45d:	4c 89 2a             	mov    %r13,(%rdx)
+ 460:	ff d0                	call   *%rax
+ 462:	4c 89 ea             	mov    %r13,%rdx
+ 465:	45 31 ed             	xor    %r13d,%r13d
+ 468:	4d 6b e4 18          	imul   $0x18,%r12,%r12
+ 46c:	48 8b 45 10          	mov    0x10(%rbp),%rax
+ 470:	48 89 d7             	mov    %rdx,%rdi
+ 473:	4a 89 44 22 18       	mov    %rax,0x18(%rdx,%r12,1)
+ 478:	8b 45 c8             	mov    -0x38(%rbp),%eax
+ 47b:	42 89 5c 22 20       	mov    %ebx,0x20(%rdx,%r12,1)
+ 480:	42 89 44 22 24       	mov    %eax,0x24(%rdx,%r12,1)
+ 485:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 48c:	00 00 00 
+ 48f:	42 c6 44 22 28 01    	movb   $0x1,0x28(%rdx,%r12,1)
+ 495:	ff d0                	call   *%rax
+ 497:	84 c0                	test   %al,%al
+ 499:	75 23                	jne    4be <um_request_irq+0x23d>
+ 49b:	31 c9                	xor    %ecx,%ecx
+ 49d:	ba 09 00 00 00       	mov    $0x9,%edx
+ 4a2:	be 67 01 00 00       	mov    $0x167,%esi
+ 4a7:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 4ae:	00 00 00 
+ 4b1:	49 b8 00 00 00 00 00 	movabs $0x0,%r8
+ 4b8:	00 00 00 
+ 4bb:	41 ff d0             	call   *%r8
+ 4be:	45 31 ff             	xor    %r15d,%r15d
+ 4c1:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 4c8:	00 00 00 
+ 4cb:	8b 7d cc             	mov    -0x34(%rbp),%edi
+ 4ce:	ff d0                	call   *%rax
+ 4d0:	eb 03                	jmp    4d5 <um_request_irq+0x254>
+ 4d2:	45 31 ed             	xor    %r13d,%r13d
+ 4d5:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 4dc:	00 00 00 
+ 4df:	4c 89 ef             	mov    %r13,%rdi
+ 4e2:	ff d0                	call   *%rax
+ 4e4:	45 85 ff             	test   %r15d,%r15d
+ 4e7:	0f 84 f5 fd ff ff    	je     2e2 <um_request_irq+0x61>
+ 4ed:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 4f4:	00 00 00 
+ 4f7:	48 63 db             	movslq %ebx,%rbx
+ 4fa:	48 0f b3 18          	btr    %rbx,(%rax)
+ 4fe:	44 89 fb             	mov    %r15d,%ebx
+ 501:	48 83 c4 38          	add    $0x38,%rsp
+ 505:	89 d8                	mov    %ebx,%eax
+ 507:	5b                   	pop    %rbx
+ 508:	41 5c                	pop    %r12
+ 50a:	41 5d                	pop    %r13
+ 50c:	41 5e                	pop    %r14
+ 50e:	41 5f                	pop    %r15
+ 510:	5d                   	pop    %rbp
+ 511:	c3                   	ret
+
+0000000000000512 <um_free_irq>:
+ 512:	f3 0f 1e fa          	endbr64
+ 516:	55                   	push   %rbp
+ 517:	48 89 e5             	mov    %rsp,%rbp
+ 51a:	41 57                	push   %r15
+ 51c:	41 56                	push   %r14
+ 51e:	41 55                	push   %r13
+ 520:	41 54                	push   %r12
+ 522:	4c 63 e7             	movslq %edi,%r12
+ 525:	53                   	push   %rbx
+ 526:	51                   	push   %rcx
+ 527:	41 83 fc 40          	cmp    $0x40,%r12d
+ 52b:	0f 87 da 00 00 00    	ja     60b <um_free_irq+0xf9>
+ 531:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 538:	00 00 00 
+ 53b:	49 89 f6             	mov    %rsi,%r14
+ 53e:	ff d0                	call   *%rax
+ 540:	49 89 c7             	mov    %rax,%r15
+ 543:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 54a:	00 00 00 
+ 54d:	48 8b 18             	mov    (%rax),%rbx
+ 550:	48 39 c3             	cmp    %rax,%rbx
+ 553:	74 74                	je     5c9 <um_free_irq+0xb7>
+ 555:	83 7b 24 00          	cmpl   $0x0,0x24(%rbx)
+ 559:	74 4f                	je     5aa <um_free_irq+0x98>
+ 55b:	44 3b 63 20          	cmp    0x20(%rbx),%r12d
+ 55f:	75 49                	jne    5aa <um_free_irq+0x98>
+ 561:	4c 3b 73 18          	cmp    0x18(%rbx),%r14
+ 565:	75 43                	jne    5aa <um_free_irq+0x98>
+ 567:	45 31 ed             	xor    %r13d,%r13d
+ 56a:	4d 6b ed 18          	imul   $0x18,%r13,%r13
+ 56e:	8b 7b 10             	mov    0x10(%rbx),%edi
+ 571:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 578:	00 00 00 
+ 57b:	ff d0                	call   *%rax
+ 57d:	31 d2                	xor    %edx,%edx
+ 57f:	48 89 df             	mov    %rbx,%rdi
+ 582:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 589:	00 00 00 
+ 58c:	42 89 54 2b 24       	mov    %edx,0x24(%rbx,%r13,1)
+ 591:	ff d0                	call   *%rax
+ 593:	84 c0                	test   %al,%al
+ 595:	75 32                	jne    5c9 <um_free_irq+0xb7>
+ 597:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 59e:	00 00 00 
+ 5a1:	31 f6                	xor    %esi,%esi
+ 5a3:	48 89 df             	mov    %rbx,%rdi
+ 5a6:	ff d0                	call   *%rax
+ 5a8:	eb 21                	jmp    5cb <um_free_irq+0xb9>
+ 5aa:	83 7b 3c 00          	cmpl   $0x0,0x3c(%rbx)
+ 5ae:	75 05                	jne    5b5 <um_free_irq+0xa3>
+ 5b0:	48 8b 1b             	mov    (%rbx),%rbx
+ 5b3:	eb 9b                	jmp    550 <um_free_irq+0x3e>
+ 5b5:	44 3b 63 38          	cmp    0x38(%rbx),%r12d
+ 5b9:	75 f5                	jne    5b0 <um_free_irq+0x9e>
+ 5bb:	4c 3b 73 30          	cmp    0x30(%rbx),%r14
+ 5bf:	75 ef                	jne    5b0 <um_free_irq+0x9e>
+ 5c1:	41 bd 01 00 00 00    	mov    $0x1,%r13d
+ 5c7:	eb a1                	jmp    56a <um_free_irq+0x58>
+ 5c9:	31 db                	xor    %ebx,%ebx
+ 5cb:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 5d2:	00 00 00 
+ 5d5:	44 89 ff             	mov    %r15d,%edi
+ 5d8:	ff d0                	call   *%rax
+ 5da:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 5e1:	00 00 00 
+ 5e4:	48 89 df             	mov    %rbx,%rdi
+ 5e7:	ff d0                	call   *%rax
+ 5e9:	4c 89 f6             	mov    %r14,%rsi
+ 5ec:	44 89 e7             	mov    %r12d,%edi
+ 5ef:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 5f6:	00 00 00 
+ 5f9:	ff d0                	call   *%rax
+ 5fb:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 602:	00 00 00 
+ 605:	4c 0f b3 20          	btr    %r12,(%rax)
+ 609:	eb 30                	jmp    63b <um_free_irq+0x129>
+ 60b:	45 89 e0             	mov    %r12d,%r8d
+ 60e:	ba 09 00 00 00       	mov    $0x9,%edx
+ 613:	be e6 01 00 00       	mov    $0x1e6,%esi
+ 618:	31 c0                	xor    %eax,%eax
+ 61a:	48 b9 00 00 00 00 00 	movabs $0x0,%rcx
+ 621:	00 00 00 
+ 624:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 62b:	00 00 00 
+ 62e:	49 b9 00 00 00 00 00 	movabs $0x0,%r9
+ 635:	00 00 00 
+ 638:	41 ff d1             	call   *%r9
+ 63b:	58                   	pop    %rax
+ 63c:	5b                   	pop    %rbx
+ 63d:	41 5c                	pop    %r12
+ 63f:	41 5d                	pop    %r13
+ 641:	41 5e                	pop    %r14
+ 643:	41 5f                	pop    %r15
+ 645:	5d                   	pop    %rbp
+ 646:	c3                   	ret
+
+0000000000000647 <deactivate_all_fds>:
+ 647:	f3 0f 1e fa          	endbr64
+ 64b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 652:	00 00 00 
+ 655:	55                   	push   %rbp
+ 656:	48 89 e5             	mov    %rsp,%rbp
+ 659:	41 55                	push   %r13
+ 65b:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+ 662:	00 00 00 
+ 665:	41 54                	push   %r12
+ 667:	49 bc 00 00 00 00 00 	movabs $0x0,%r12
+ 66e:	00 00 00 
+ 671:	53                   	push   %rbx
+ 672:	51                   	push   %rcx
+ 673:	ff d0                	call   *%rax
+ 675:	49 8b 1c 24          	mov    (%r12),%rbx
+ 679:	4c 39 e3             	cmp    %r12,%rbx
+ 67c:	74 0b                	je     689 <deactivate_all_fds+0x42>
+ 67e:	8b 7b 10             	mov    0x10(%rbx),%edi
+ 681:	41 ff d5             	call   *%r13
+ 684:	48 8b 1b             	mov    (%rbx),%rbx
+ 687:	eb f0                	jmp    679 <deactivate_all_fds+0x32>
+ 689:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 690:	00 00 00 
+ 693:	ff d0                	call   *%rax
+ 695:	31 c0                	xor    %eax,%eax
+ 697:	5a                   	pop    %rdx
+ 698:	5b                   	pop    %rbx
+ 699:	41 5c                	pop    %r12
+ 69b:	41 5d                	pop    %r13
+ 69d:	5d                   	pop    %rbp
+ 69e:	c3                   	ret
+
+000000000000069f <do_IRQ>:
+ 69f:	f3 0f 1e fa          	endbr64
+ 6a3:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 6aa:	00 00 00 
+ 6ad:	55                   	push   %rbp
+ 6ae:	48 89 e5             	mov    %rsp,%rbp
+ 6b1:	41 55                	push   %r13
+ 6b3:	41 54                	push   %r12
+ 6b5:	49 89 f4             	mov    %rsi,%r12
+ 6b8:	53                   	push   %rbx
+ 6b9:	89 fb                	mov    %edi,%ebx
+ 6bb:	51                   	push   %rcx
+ 6bc:	4c 8b 28             	mov    (%rax),%r13
+ 6bf:	48 89 f0             	mov    %rsi,%rax
+ 6c2:	48 a3 00 00 00 00 00 	movabs %rax,0x0
+ 6c9:	00 00 00 
+ 6cc:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 6d3:	00 00 00 
+ 6d6:	ff d0                	call   *%rax
+ 6d8:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+ 6df:	00 00 
+ 6e1:	85 c0                	test   %eax,%eax
+ 6e3:	7e 11                	jle    6f6 <do_IRQ+0x57>
+ 6e5:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 6ec:	00 00 00 
+ 6ef:	4c 89 e6             	mov    %r12,%rsi
+ 6f2:	89 df                	mov    %ebx,%edi
+ 6f4:	ff d0                	call   *%rax
+ 6f6:	a1 00 00 00 00 00 00 	movabs 0x0,%eax
+ 6fd:	00 00 
+ 6ff:	85 c0                	test   %eax,%eax
+ 701:	7e 0e                	jle    711 <do_IRQ+0x72>
+ 703:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 70a:	00 00 00 
+ 70d:	89 df                	mov    %ebx,%edi
+ 70f:	ff d0                	call   *%rax
+ 711:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 718:	00 00 00 
+ 71b:	89 df                	mov    %ebx,%edi
+ 71d:	ff d0                	call   *%rax
+ 71f:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 726:	00 00 00 
+ 729:	ff d0                	call   *%rax
+ 72b:	4c 89 e8             	mov    %r13,%rax
+ 72e:	48 a3 00 00 00 00 00 	movabs %rax,0x0
+ 735:	00 00 00 
+ 738:	5a                   	pop    %rdx
+ 739:	b8 01 00 00 00       	mov    $0x1,%eax
+ 73e:	5b                   	pop    %rbx
+ 73f:	41 5c                	pop    %r12
+ 741:	41 5d                	pop    %r13
+ 743:	5d                   	pop    %rbp
+ 744:	c3                   	ret
+
+0000000000000745 <sigio_handler>:
+ 745:	f3 0f 1e fa          	endbr64
+ 749:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 750:	00 00 00 
+ 753:	80 38 00             	cmpb   $0x0,(%rax)
+ 756:	0f 85 ce 00 00 00    	jne    82a <sigio_handler+0xe5>
+ 75c:	55                   	push   %rbp
+ 75d:	48 89 e5             	mov    %rsp,%rbp
+ 760:	41 57                	push   %r15
+ 762:	41 56                	push   %r14
+ 764:	41 55                	push   %r13
+ 766:	41 54                	push   %r12
+ 768:	53                   	push   %rbx
+ 769:	48 83 ec 18          	sub    $0x18,%rsp
+ 76d:	48 89 55 c0          	mov    %rdx,-0x40(%rbp)
+ 771:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 778:	00 00 00 
+ 77b:	ff d0                	call   *%rax
+ 77d:	41 89 c4             	mov    %eax,%r12d
+ 780:	85 c0                	test   %eax,%eax
+ 782:	7f 20                	jg     7a4 <sigio_handler+0x5f>
+ 784:	83 f8 fc             	cmp    $0xfffffffc,%eax
+ 787:	74 e8                	je     771 <sigio_handler+0x2c>
+ 789:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 790:	00 00 00 
+ 793:	ff d0                	call   *%rax
+ 795:	48 83 c4 18          	add    $0x18,%rsp
+ 799:	5b                   	pop    %rbx
+ 79a:	41 5c                	pop    %r12
+ 79c:	41 5d                	pop    %r13
+ 79e:	41 5e                	pop    %r14
+ 7a0:	41 5f                	pop    %r15
+ 7a2:	5d                   	pop    %rbp
+ 7a3:	c3                   	ret
+ 7a4:	49 be 00 00 00 00 00 	movabs $0x0,%r14
+ 7ab:	00 00 00 
+ 7ae:	31 db                	xor    %ebx,%ebx
+ 7b0:	49 bf 00 00 00 00 00 	movabs $0x0,%r15
+ 7b7:	00 00 00 
+ 7ba:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 7c1:	00 00 00 
+ 7c4:	89 df                	mov    %ebx,%edi
+ 7c6:	ff d0                	call   *%rax
+ 7c8:	4c 8d 68 20          	lea    0x20(%rax),%r13
+ 7cc:	48 83 c0 50          	add    $0x50,%rax
+ 7d0:	48 89 45 c8          	mov    %rax,-0x38(%rbp)
+ 7d4:	41 8b 75 04          	mov    0x4(%r13),%esi
+ 7d8:	85 f6                	test   %esi,%esi
+ 7da:	74 38                	je     814 <sigio_handler+0xcf>
+ 7dc:	89 df                	mov    %ebx,%edi
+ 7de:	41 ff d6             	call   *%r14
+ 7e1:	85 c0                	test   %eax,%eax
+ 7e3:	7e 2f                	jle    814 <sigio_handler+0xcf>
+ 7e5:	41 80 7d 08 00       	cmpb   $0x0,0x8(%r13)
+ 7ea:	74 23                	je     80f <sigio_handler+0xca>
+ 7ec:	41 c6 45 08 00       	movb   $0x0,0x8(%r13)
+ 7f1:	48 8b 75 c0          	mov    -0x40(%rbp),%rsi
+ 7f5:	41 8b 7d 00          	mov    0x0(%r13),%edi
+ 7f9:	41 c6 45 09 00       	movb   $0x0,0x9(%r13)
+ 7fe:	41 ff d7             	call   *%r15
+ 801:	41 80 7d 09 00       	cmpb   $0x0,0x9(%r13)
+ 806:	75 e9                	jne    7f1 <sigio_handler+0xac>
+ 808:	41 c6 45 08 01       	movb   $0x1,0x8(%r13)
+ 80d:	eb 05                	jmp    814 <sigio_handler+0xcf>
+ 80f:	41 c6 45 09 01       	movb   $0x1,0x9(%r13)
+ 814:	49 83 c5 18          	add    $0x18,%r13
+ 818:	4c 3b 6d c8          	cmp    -0x38(%rbp),%r13
+ 81c:	75 b6                	jne    7d4 <sigio_handler+0x8f>
+ 81e:	ff c3                	inc    %ebx
+ 820:	41 39 dc             	cmp    %ebx,%r12d
+ 823:	75 95                	jne    7ba <sigio_handler+0x75>
+ 825:	e9 47 ff ff ff       	jmp    771 <sigio_handler+0x2c>
+ 82a:	c3                   	ret
+
+000000000000082b <um_irqs_suspend>:
+ 82b:	f3 0f 1e fa          	endbr64
+ 82f:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 836:	00 00 00 
+ 839:	55                   	push   %rbp
+ 83a:	48 89 e5             	mov    %rsp,%rbp
+ 83d:	41 57                	push   %r15
+ 83f:	41 56                	push   %r14
+ 841:	41 55                	push   %r13
+ 843:	41 54                	push   %r12
+ 845:	53                   	push   %rbx
+ 846:	52                   	push   %rdx
+ 847:	c6 00 01             	movb   $0x1,(%rax)
+ 84a:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 851:	00 00 00 
+ 854:	ff d0                	call   *%rax
+ 856:	49 89 c4             	mov    %rax,%r12
+ 859:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+ 860:	00 00 00 
+ 863:	49 be 00 00 00 00 00 	movabs $0x0,%r14
+ 86a:	00 00 00 
+ 86d:	49 bf 00 00 00 00 00 	movabs $0x0,%r15
+ 874:	00 00 00 
+ 877:	49 8b 5d 00          	mov    0x0(%r13),%rbx
+ 87b:	4c 39 eb             	cmp    %r13,%rbx
+ 87e:	74 43                	je     8c3 <um_irqs_suspend+0x98>
+ 880:	83 7b 24 00          	cmpl   $0x0,0x24(%rbx)
+ 884:	74 11                	je     897 <um_irqs_suspend+0x6c>
+ 886:	80 7b 2a 00          	cmpb   $0x0,0x2a(%rbx)
+ 88a:	74 05                	je     891 <um_irqs_suspend+0x66>
+ 88c:	48 8b 1b             	mov    (%rbx),%rbx
+ 88f:	eb ea                	jmp    87b <um_irqs_suspend+0x50>
+ 891:	83 7b 20 07          	cmpl   $0x7,0x20(%rbx)
+ 895:	74 f5                	je     88c <um_irqs_suspend+0x61>
+ 897:	83 7b 3c 00          	cmpl   $0x0,0x3c(%rbx)
+ 89b:	75 18                	jne    8b5 <um_irqs_suspend+0x8a>
+ 89d:	8b 7b 10             	mov    0x10(%rbx),%edi
+ 8a0:	c6 43 48 01          	movb   $0x1,0x48(%rbx)
+ 8a4:	41 ff d6             	call   *%r14
+ 8a7:	8b 7b 10             	mov    0x10(%rbx),%edi
+ 8aa:	41 ff d7             	call   *%r15
+ 8ad:	85 c0                	test   %eax,%eax
+ 8af:	0f 94 43 49          	sete   0x49(%rbx)
+ 8b3:	eb d7                	jmp    88c <um_irqs_suspend+0x61>
+ 8b5:	80 7b 42 00          	cmpb   $0x0,0x42(%rbx)
+ 8b9:	75 d1                	jne    88c <um_irqs_suspend+0x61>
+ 8bb:	83 7b 38 07          	cmpl   $0x7,0x38(%rbx)
+ 8bf:	75 dc                	jne    89d <um_irqs_suspend+0x72>
+ 8c1:	eb c9                	jmp    88c <um_irqs_suspend+0x61>
+ 8c3:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 8ca:	00 00 00 
+ 8cd:	44 89 e7             	mov    %r12d,%edi
+ 8d0:	ff d0                	call   *%rax
+ 8d2:	58                   	pop    %rax
+ 8d3:	5b                   	pop    %rbx
+ 8d4:	41 5c                	pop    %r12
+ 8d6:	41 5d                	pop    %r13
+ 8d8:	41 5e                	pop    %r14
+ 8da:	41 5f                	pop    %r15
+ 8dc:	5d                   	pop    %rbp
+ 8dd:	c3                   	ret
+
+00000000000008de <um_irqs_resume>:
+ 8de:	f3 0f 1e fa          	endbr64
+ 8e2:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 8e9:	00 00 00 
+ 8ec:	55                   	push   %rbp
+ 8ed:	48 89 e5             	mov    %rsp,%rbp
+ 8f0:	41 56                	push   %r14
+ 8f2:	41 55                	push   %r13
+ 8f4:	41 54                	push   %r12
+ 8f6:	53                   	push   %rbx
+ 8f7:	ff d0                	call   *%rax
+ 8f9:	49 89 c4             	mov    %rax,%r12
+ 8fc:	49 bd 00 00 00 00 00 	movabs $0x0,%r13
+ 903:	00 00 00 
+ 906:	49 be 00 00 00 00 00 	movabs $0x0,%r14
+ 90d:	00 00 00 
+ 910:	49 8b 5d 00          	mov    0x0(%r13),%rbx
+ 914:	4c 39 eb             	cmp    %r13,%rbx
+ 917:	0f 84 99 00 00 00    	je     9b6 <um_irqs_resume+0xd8>
+ 91d:	80 7b 48 00          	cmpb   $0x0,0x48(%rbx)
+ 921:	0f 84 87 00 00 00    	je     9ae <um_irqs_resume+0xd0>
+ 927:	8b 7b 10             	mov    0x10(%rbx),%edi
+ 92a:	41 ff d6             	call   *%r14
+ 92d:	41 89 c0             	mov    %eax,%r8d
+ 930:	85 c0                	test   %eax,%eax
+ 932:	79 2d                	jns    961 <um_irqs_resume+0x83>
+ 934:	ba 09 00 00 00       	mov    $0x9,%edx
+ 939:	be 69 02 00 00       	mov    $0x269,%esi
+ 93e:	31 c0                	xor    %eax,%eax
+ 940:	48 b9 00 00 00 00 00 	movabs $0x0,%rcx
+ 947:	00 00 00 
+ 94a:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 951:	00 00 00 
+ 954:	49 b9 00 00 00 00 00 	movabs $0x0,%r9
+ 95b:	00 00 00 
+ 95e:	41 ff d1             	call   *%r9
+ 961:	c6 43 48 00          	movb   $0x0,0x48(%rbx)
+ 965:	80 7b 49 00          	cmpb   $0x0,0x49(%rbx)
+ 969:	74 43                	je     9ae <um_irqs_resume+0xd0>
+ 96b:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 972:	00 00 00 
+ 975:	8b 7b 10             	mov    0x10(%rbx),%edi
+ 978:	ff d0                	call   *%rax
+ 97a:	41 89 c0             	mov    %eax,%r8d
+ 97d:	85 c0                	test   %eax,%eax
+ 97f:	79 2d                	jns    9ae <um_irqs_resume+0xd0>
+ 981:	ba 09 00 00 00       	mov    $0x9,%edx
+ 986:	be 6e 02 00 00       	mov    $0x26e,%esi
+ 98b:	31 c0                	xor    %eax,%eax
+ 98d:	48 b9 00 00 00 00 00 	movabs $0x0,%rcx
+ 994:	00 00 00 
+ 997:	48 bf 00 00 00 00 00 	movabs $0x0,%rdi
+ 99e:	00 00 00 
+ 9a1:	49 b9 00 00 00 00 00 	movabs $0x0,%r9
+ 9a8:	00 00 00 
+ 9ab:	41 ff d1             	call   *%r9
+ 9ae:	48 8b 1b             	mov    (%rbx),%rbx
+ 9b1:	e9 5e ff ff ff       	jmp    914 <um_irqs_resume+0x36>
+ 9b6:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 9bd:	00 00 00 
+ 9c0:	44 89 e7             	mov    %r12d,%edi
+ 9c3:	ff d0                	call   *%rax
+ 9c5:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 9cc:	00 00 00 
+ 9cf:	c6 00 00             	movb   $0x0,(%rax)
+ 9d2:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 9d9:	00 00 00 
+ 9dc:	ff d0                	call   *%rax
+ 9de:	5b                   	pop    %rbx
+ 9df:	41 5c                	pop    %r12
+ 9e1:	41 5d                	pop    %r13
+ 9e3:	41 5e                	pop    %r14
+ 9e5:	5d                   	pop    %rbp
+ 9e6:	c3                   	ret
+
+00000000000009e7 <sigchld_handler>:
+ 9e7:	f3 0f 1e fa          	endbr64
+ 9eb:	55                   	push   %rbp
+ 9ec:	48 89 d6             	mov    %rdx,%rsi
+ 9ef:	bf 0b 00 00 00       	mov    $0xb,%edi
+ 9f4:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+ 9fb:	00 00 00 
+ 9fe:	48 89 e5             	mov    %rsp,%rbp
+ a01:	ff d0                	call   *%rax
+ a03:	5d                   	pop    %rbp
+ a04:	c3                   	ret
+
+0000000000000a05 <arch_show_interrupts>:
+ a05:	f3 0f 1e fa          	endbr64
+ a09:	31 c0                	xor    %eax,%eax
+ a0b:	c3                   	ret
+
+Disassembly of section .init.text:
+
+0000000000000000 <init_IRQ>:
+   0:	f3 0f 1e fa          	endbr64
+   4:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+   b:	00 00 00 
+   e:	55                   	push   %rbp
+   f:	31 c9                	xor    %ecx,%ecx
+  11:	31 ff                	xor    %edi,%edi
+  13:	48 be 00 00 00 00 00 	movabs $0x0,%rsi
+  1a:	00 00 00 
+  1d:	48 89 e5             	mov    %rsp,%rbp
+  20:	41 54                	push   %r12
+  22:	49 bc 00 00 00 00 00 	movabs $0x0,%r12
+  29:	00 00 00 
+  2c:	53                   	push   %rbx
+  2d:	bb 01 00 00 00       	mov    $0x1,%ebx
+  32:	41 ff d4             	call   *%r12
+  35:	48 ba 00 00 00 00 00 	movabs $0x0,%rdx
+  3c:	00 00 00 
+  3f:	89 df                	mov    %ebx,%edi
+  41:	ff c3                	inc    %ebx
+  43:	31 c9                	xor    %ecx,%ecx
+  45:	48 be 00 00 00 00 00 	movabs $0x0,%rsi
+  4c:	00 00 00 
+  4f:	41 ff d4             	call   *%r12
+  52:	83 fb 40             	cmp    $0x40,%ebx
+  55:	75 de                	jne    35 <init_IRQ+0x35>
+  57:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  5e:	00 00 00 
+  61:	ff d0                	call   *%rax
+  63:	5b                   	pop    %rbx
+  64:	41 5c                	pop    %r12
+  66:	5d                   	pop    %rbp
+  67:	c3                   	ret
+
+0000000000000068 <arch_probe_nr_irqs>:
+  68:	f3 0f 1e fa          	endbr64
+  6c:	b8 40 00 00 00       	mov    $0x40,%eax
+  71:	c3                   	ret

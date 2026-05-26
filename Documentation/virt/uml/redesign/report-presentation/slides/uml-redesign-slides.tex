@@ -1,0 +1,793 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+
+\usepackage{fontspec}
+\setsansfont{Latin Modern Sans}
+\setmonofont{Latin Modern Mono}
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,shapes.geometric}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{siunitx}
+\usepackage{hyperref}
+
+\input{../shared/common.tex}
+
+\usetheme[progressbar=frametitle,numbering=fraction]{metropolis}
+\metroset{block=fill}
+\pgfplotsset{compat=1.18}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{normal text}{fg=UMLInk,bg=white}
+\setbeamercolor{title}{fg=UMLInk}
+\setbeamercolor{frametitle}{fg=white,bg=UMLBlue}
+\setbeamercolor{progress bar}{fg=UMLAmber,bg=UMLGrid}
+\setbeamercolor{structure}{fg=UMLBlue}
+\setbeamercolor{block title}{fg=white,bg=UMLBlue}
+\setbeamercolor{block body}{fg=UMLInk,bg=UMLPanel}
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\setbeamerfont{title}{series=\bfseries,size=\LARGE}
+
+\newcommand{\pill}[2]{\colorbox{#1!14}{\textcolor{#1}{\footnotesize\textbf{#2}}}}
+\newcommand{\done}{\pill{UMLGreen}{DONE}}
+\newcommand{\progress}{\pill{UMLAmber}{IN PROGRESS}}
+\newcommand{\planned}{\pill{UMLBlue}{PLANNED}}
+\newcommand{\limit}{\pill{UMLRed}{LIMIT}}
+\newcommand{\blocked}{\pill{UMLRed}{BLOCKED}}
+
+\title{\ProjectTitle}
+\subtitle{\ProjectSubtitle}
+\author{Reporting cutoff: \texttt{\BranchName} @ \texttt{\CutoffCommit}}
+\date{\ReportDate}
+
+\begin{document}
+
+\begin{frame}[plain]
+\vspace*{0.35cm}
+{\usebeamerfont{title}\usebeamercolor[fg]{title}\ProjectTitle\par}
+\vspace{0.28cm}
+{\large\ProjectSubtitle\par}
+\vspace{1.0cm}
+{\small Reporting cutoff:\par}
+{\small\texttt{\BranchName} @ \texttt{\CutoffCommit}\par}
+\vfill
+{\small\ReportDate\par}
+\end{frame}
+
+\section{Goal and State}
+
+\begin{frame}{Thesis}
+\begin{columns}[T,onlytextwidth]
+\column{0.53\textwidth}
+\Large
+\textbf{This branch makes the \UML{} execution contract profile-driven.}
+
+\vspace{0.7em}
+\normalsize
+The proposal keeps \UML{} as Linux built for a host process, then makes
+backend choice, instrumentation, and validation explicit review surfaces.
+
+\column{0.43\textwidth}
+\begin{tikzpicture}[
+  box/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,align=center,minimum width=4.8cm,minimum height=0.85cm,font=\small},
+]
+\node[box,fill=UMLGreen!10] (a) {backend abstraction};
+\node[box,fill=UMLBlue!10,below=0.15cm of a] (b) {static-key hot paths};
+\node[box,fill=UMLAmber!12,below=0.15cm of b] (c) {profile composition};
+\node[box,fill=UMLPanel,below=0.15cm of c] (d) {sustained validation};
+\end{tikzpicture}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Preserved Contract and Branch Delta}
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{Preserved \UML{} contract}
+\begin{itemize}
+  \item upstream Linux built as \texttt{arch/um}
+  \item host-process execution model
+  \item rootless/debuggable operation
+  \item no full machine model in scope
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{Branch-local deltas}
+\begin{itemize}
+  \item explicit backend-ops contract
+  \item \KVMvTwo{} trap backend
+  \item static-key instrumentation gates
+  \item profile defconfigs and validation gates
+\end{itemize}
+\end{block}
+\end{columns}
+\vspace{0.45em}
+\centering
+\pill{UMLBlue}{CLAIM}\quad change mechanism and policy surfaces, not \UML{} semantics
+\end{frame}
+
+\begin{frame}{Branch Goal}
+\begin{columns}[T,onlytextwidth]
+\column{0.50\textwidth}
+\begin{block}{Profiles from one tree}
+\begin{itemize}
+  \item near-native \texttt{prod-fast}
+  \item sanitizer-heavy \texttt{research}
+  \item KCOV/snapshot \texttt{fuzz}
+  \item minimized \texttt{sandbox}
+  \item direct-call \texttt{library}
+  \item deterministic \texttt{time-travel}
+\end{itemize}
+\end{block}
+\column{0.46\textwidth}
+\begin{block}{Out of scope}
+\begin{itemize}
+  \item a Linux reimplementation
+  \item a QEMU/Firecracker replacement
+  \item a container runtime
+  \item a from-scratch hypervisor
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Adjacent Tool Boundary}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.19\textwidth}p{0.36\textwidth}X@{}}
+\toprule
+Tool & Useful comparison & Boundary for this branch \\
+\midrule
+QEMU/KVM & General virtual machines, device models, booting real images. &
+This branch keeps the \UML{} host-process kernel model; it is not adding
+a full machine/device model. \\
+Firecracker & Minimal production microVMs. & It optimizes a different
+surface: cloud isolation and boot footprint, not \texttt{arch/um}
+profile composition. \\
+gVisor & Userspace kernel sandboxing. & It proves useful backend patterns,
+but it is not the Linux kernel under test. \\
+LKL & Direct-call Linux library harnesses. & It is fast, but loses the
+normal user/kernel ring split that several \UML{} profiles preserve. \\
+Containers & Process isolation and deployment. & They share the host
+kernel; they cannot test another Linux kernel as the target. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{Current State at \ReportDate}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}X@{}}
+\toprule
+Cutoff & \texttt{\CutoffCommit} on \texttt{\BranchName} \\
+Functional headline & \KVMvTwo{} guest entry, syscall dispatch, exceptions, signals, SMP state repair, post-gadget performance, snapshot + record/replay primitives, declarative host resource controls \\
+Parity & cpython-parity 21/21 under UP and SMP \\
+Substrate gate & PASS=25/FAIL=3/XFAIL=3, matching seccomp \\
+R14 cache-flake & closed (SMP-T73 YMM-upper XSAVE leak), 220/220 validation soak \\
+Snapshot bench & 38.9~$\mu$s capture, 13~$\mu$s median restore (memo-12 targets <50~ms / <1~ms) \\
+\texttt{umlctl mission} & 6/6 phases PASS in $\sim$15~min wall-clock \\
+Benchmark & Faster than seccomp on all eight hosts and all three tiers \\
+\bottomrule
+\end{tabularx}
+\vspace{0.6em}
+\begin{center}
+\done\quad foundation + R14 + snapshot/RR + host resources
+\hspace{1em}
+\progress\quad 24h long-tail soak; Series 7 LKML submission
+\end{center}
+\end{frame}
+
+\begin{frame}{Inherited UML Versus This Branch}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.25\textwidth}X@{}}
+\toprule
+Category & Reading \\
+\midrule
+Inherited \UML{} and Linux & Linux-as-a-host-process, legacy ptrace,
+generic kernel subsystems, existing KVM APIs, and the broad idea of
+time travel are foundations, not branch-local inventions. \\
+Upstream prerequisites & Seccomp-mode \UML{} and upstream SMP are
+enabling context that the redesign builds on. \\
+Redesigned here & Backend ops, static-key gates, profile matrix,
+\KVMvTwo{} state ownership, validation ladder, and upstream sequencing. \\
+Implemented here & \texttt{arch/um/backend/kvm-v2/} including
+snapshot (Phase 1--6) and record/replay (Phase 1--7) ports;
+profile docs and configs; snapshot/forkserver v1; \texttt{umlctl}
+with \texttt{mission} subcommand + \texttt{[host\_resources]} TOML +
+cgroup v2 + preflight; launcher, gates, soak (11 templates),
+benchmark, and parity selftests. \\
+Planned or paused & 24h long-tail soak; Series 7 LKML submission;
+record/replay host-side signal wiring; syzkaller \texttt{vm/uml}
+(external); LTP curation; Tier 3 host resources (RT / NUMA /
+\texttt{O\_DIRECT}). \\
+\bottomrule
+\end{tabularx}
+\vspace{0.55em}
+\pill{UMLBlue}{DIFF CHECK}\quad
+\texttt{origin/master...HEAD} over UML paths: 688 files, 154{,}501 insertions, 823 deletions.
+\end{frame}
+
+\begin{frame}{Evidence Dashboard}
+\centering
+\begin{tikzpicture}[
+  card/.style={draw=UMLGrid,rounded corners=2pt,minimum width=3.25cm,minimum height=1.6cm,inner sep=7pt},
+  metric/.style={font=\Large\bfseries},
+  label/.style={font=\scriptsize,text=UMLMuted,align=center},
+]
+\node[card,fill=UMLBlue!9] (a) {};
+\node[metric,text=UMLBlue,yshift=0.28cm] at (a.center) {21/21};
+\node[label,yshift=-0.36cm] at (a.center) {cpython parity\\UP and SMP};
+\node[card,fill=UMLGreen!10,right=0.45cm of a] (b) {};
+\node[metric,text=UMLGreen,yshift=0.28cm] at (b.center) {6/6};
+\node[label,yshift=-0.36cm] at (b.center) {\texttt{umlctl mission}\\acceptance phases};
+\node[card,fill=UMLAmber!12,below=0.35cm of a] (c) {};
+\node[metric,text=UMLAmber,yshift=0.28cm] at (c.center) {193--908x};
+\node[label,yshift=-0.36cm] at (c.center) {micro speedup\\over seccomp};
+\node[card,fill=UMLTeal!10,right=0.45cm of c] (d) {};
+\node[metric,text=UMLTeal,yshift=0.28cm] at (d.center) {7 series};
+\node[label,yshift=-0.36cm] at (d.center) {staged upstream\\submission queue};
+\end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Eight Answers: Branch Claims}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.05\textwidth}p{0.28\textwidth}X@{}}
+\toprule
+\# & Question & Short answer \\
+\midrule
+1 & Branch value proposition & One upstream Linux tree can produce fast, research, fuzz, sandbox, library, and deterministic profiles. \\
+2 & Adjacent-tool boundary & QEMU, Firecracker, gVisor, LKL, and containers solve different problems; none is the branch target. \\
+3 & Shared architecture & Backend ops, static-key gates, and profile defconfigs keep variation explicit. \\
+4 & Landed vs planned & Core architecture, \KVMvTwo{}, snapshot/RR ports, host resource controls, and the \texttt{umlctl mission} acceptance gate are in tree; 24h long-tail soak and Series 7 LKML submission remain. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{Eight Answers: Review Pressure Points}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.05\textwidth}p{0.28\textwidth}X@{}}
+\toprule
+\# & Question & Short answer \\
+\midrule
+5 & SMP and state & v2 has explicit state-home contract + audit trail; R14 (YMM-upper XSAVE leak) closed via SMP-T73; T74/T75/T76 latent-bug follow-ups; T77 future-feature checklist. \\
+6 & Speed beyond micro & Python + stress tiers win on every benchmark host; snapshot bench 38.9~$\mu$s capture and 13~$\mu$s median restore. \\
+7 & Upstream bar & \texttt{umlctl mission} (6/6 phases, $\sim$15 min) is the new acceptance gate; Series 7 cover letter needs refresh + submission. \\
+8 & Review pressure & Put pressure on the data model, the 24h long-tail soak, the host-side record/replay signal wiring, and the host\_resources cgroup integration. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\section{Architecture}
+
+\begin{frame}{Milestone Map}
+\centering
+\begin{tikzpicture}[
+  phase/.style={draw=UMLGrid,rounded corners=2pt,minimum width=1.72cm,minimum height=0.82cm,align=center,font=\scriptsize},
+  donep/.style={draw=UMLGreen,fill=UMLGreen!12},
+  progp/.style={draw=UMLAmber,fill=UMLAmber!15},
+]
+\node[phase,donep] (a) {backend\\contract};
+\node[phase,donep,right=0.06cm of a] (b) {profile\\matrix};
+\node[phase,donep,right=0.06cm of b] (c) {KVM v1\\lesson};
+\node[phase,donep,right=0.06cm of c] (d) {KVM v2\\core};
+\node[phase,donep,right=0.06cm of d] (e) {SMP state\\audit};
+\node[phase,donep,right=0.06cm of e] (f) {gadget +\\perf};
+\node[phase,donep,right=0.06cm of f] (g) {R14\\fix};
+\node[phase,donep,right=0.06cm of g] (h) {snap +\\record};
+\node[phase,donep,right=0.06cm of h] (k) {host\\resources};
+\node[phase,progp,right=0.06cm of k] (j) {24h\\soak};
+\draw[-{Latex[length=2mm]},thick,UMLMuted] ($(a.south)+(0,-0.35)$) -- ($(j.south)+(0,-0.35)$);
+\end{tikzpicture}
+\vspace{0.6em}
+
+\begin{itemize}
+  \item Three new green lanes since the prior cutoff: R14 closure (SMP-T73), snapshot Phase 1--6 + record/replay Phase 1--7 ports, and host resource controls (SMP-T78--T84).
+  \item The remaining frontier is the 24h long-tail soak and Series 7 LKML submission.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Three-Layer Architecture}
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw=UMLGrid,rounded corners=3pt,minimum width=0.78\textwidth,minimum height=0.85cm,align=center},
+  arr/.style={-{Latex[length=2mm]},thick,UMLMuted},
+]
+\node[layer,fill=UMLBlue!8] (l3) {Layer 3: compile-time wraps\\KASAN, KMSAN, KCSAN, KFENCE};
+\node[layer,fill=UMLTeal!8,below=0.25cm of l3] (l2) {Layer 2: static-key gates\\trace, KCOV, replay, time-travel, perf};
+\node[layer,fill=UMLGreen!8,below=0.25cm of l2] (l1) {Layer 1: backend ops table\\ptrace, seccomp, KVM};
+\node[layer,fill=UMLPanel,below=0.25cm of l1] (host) {host kernel and hardware};
+\draw[arr] (host) -- (l1);
+\draw[arr] (l1) -- (l2);
+\draw[arr] (l2) -- (l3);
+\end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Layer 1: Backend Contract}
+\begin{columns}[T,onlytextwidth]
+\column{0.47\textwidth}
+\begin{block}{Contract categories}
+\begin{itemize}
+  \item lifecycle and trap
+  \item memory regions
+  \item scheduling and IPI
+  \item time
+  \item debug/register access
+\end{itemize}
+\end{block}
+\column{0.49\textwidth}
+\begin{block}{Design point}
+\begin{itemize}
+  \item every backend implements the table
+  \item single-backend builds can inline calls
+  \item dynamic builds select at boot
+  \item capability flags replace global backend booleans
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Profiles Are Product Points}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.17\textwidth}p{0.19\textwidth}p{0.23\textwidth}X@{}}
+\toprule
+Profile & Backend & Hooks & Role \\
+\midrule
+prod-fast & KVM $>$ seccomp & none & near-native production \\
+prod-with-hooks & KVM $>$ seccomp & compiled, off & production with emergency observability \\
+research & seccomp & trace, kprobes & sanitizer/debug profile \\
+fuzz & seccomp & KCOV, snapshot & syzkaller/harness fuzzing \\
+fuzz-deep & seccomp & KCOV, replay & race and replay investigations \\
+sandbox & seccomp-only & none compiled & minimized TCB \\
+library & direct & n/a & LKL-style harnesses \\
+time-travel & seccomp & deterministic time & replayable execution \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{KVM v2 Model}
+\centering
+\begin{tikzpicture}[
+  region/.style={draw=UMLGrid,rounded corners=3pt,align=center,inner sep=7pt,minimum height=1.0cm},
+  arr/.style={-{Latex[length=2mm]},thick,UMLMuted},
+  note/.style={font=\scriptsize,text=UMLMuted,align=center},
+]
+\node[region,fill=UMLGreen!10,minimum width=3.2cm] (user) {guest userspace\\ring 3};
+\node[region,fill=UMLBlue!10,minimum width=3.2cm,right=1.85cm of user] (kernel) {\UML{} kernel\\ring 0};
+\node[region,fill=UMLPanel,minimum width=8.2cm,below=1.1cm of $(user)!0.5!(kernel)$] (host) {host process boundary\\KVM ioctls, signals, files, timers};
+\draw[arr] (user.east) -- node[above,note]{syscall / LSTAR} (kernel.west);
+\draw[arr] (kernel.south) -- node[right,note]{host assist} ($(kernel.south)+(0,-0.52)$) -- ($(host.north)+(2.0,0)$);
+\draw[arr] ($(host.north)+(-2.0,0)$) -- ($(user.south)+(0,-0.52)$) -- node[left,note]{resume} (user.south);
+\end{tikzpicture}
+\vspace{0.8em}
+
+\small
+This is a trap mechanism for \UML{}, not a general-purpose VMM.
+\end{frame}
+
+\begin{frame}{What KVM v1 Taught Us}
+\small
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{v1 design pressure}
+\begin{itemize}
+  \item treat KVM as a faster trap loop
+  \item share too much vCPU/run state
+  \item repair state after exits
+  \item maintain shadow page-table state
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{lesson}
+\begin{itemize}
+  \item SMP turns repair workarounds into races
+  \item \texttt{kvm\_run} must have one active owner
+  \item host signals need KVM-visible masking
+  \item every state item needs an authoritative home
+\end{itemize}
+\end{block}
+\end{columns}
+\vspace{0.35em}
+\centering
+\pill{UMLBlue}{DESIGN SHIFT}\quad from ``fix the next trap'' to an explicit state-ownership contract
+\end{frame}
+
+\begin{frame}{Changed Data Model}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.25\textwidth}p{0.25\textwidth}X@{}}
+\toprule
+State class & Authoritative home & Contract in v2 \\
+\midrule
+\texttt{kvm\_run} and vCPU registers & per-host-CPU vCPU & Pick while migration is disabled; no other CPU owns that run page during dispatch. \\
+Guest GPRs and syscall ABI & task registers plus sync-regs mmap & Marshal into KVM before entry and back to \UML{} after exit at explicit boundaries. \\
+FPU/XSAVE & per-task snapshots plus vCPU dirty epoch & Install on first use, capture when ownership changes, avoid cross-task XMM leakage. \\
+IST and exception frames & per-task frame snapshots over per-vCPU pages & Restore before dispatch; snapshot interrupted stubs instead of reading another task's frame. \\
+TLB state & per-mm generation plus per-vCPU last-seen state & Memory changes become generation changes; vCPUs refresh or get kicked. \\
+Host signal delivery & \texttt{KVM\_SET\_SIGNAL\_MASK} & \texttt{SIGALRM} cannot arbitrarily break the KVM window; a dedicated kick signal can. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{The Hard Part Was State Ownership}
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{Audit inputs}
+\begin{itemize}
+  \item 149 state items
+  \item 50+ operations
+  \item ownership matrix
+  \item suspect register audits
+  \item runtime state trace
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{Bug classes closed}
+\begin{itemize}
+  \item migration while using per-CPU vCPU state
+  \item EINTR mid-stub register recovery
+  \item cross-task FPU/XMM leakage
+  \item worker fd leak and shutdown hang
+  \item AVX/XSAVE \#UD drift
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+\section{Validation}
+
+\begin{frame}{Validation Ladder}
+\centering
+\begin{tikzpicture}[
+  rung/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,minimum width=0.82\textwidth,minimum height=0.45cm,align=left,inner xsep=6pt,font=\scriptsize},
+  live/.style={draw=UMLGreen,fill=UMLGreen!10},
+  prog/.style={draw=UMLAmber,fill=UMLAmber!12},
+]
+\node[rung,live] (l0) {\textbf{tooling builds} -- launcher and \texttt{umlctl}};
+\node[rung,live,below=0.05cm of l0] (l1) {\textbf{kernel builds} -- selected profile compiles and links};
+\node[rung,live,below=0.05cm of l1] (l2) {\textbf{internal contracts} -- KUnit marshal/byte-shape; snapshot 3/3; record/replay 7/7};
+\node[rung,live,below=0.05cm of l2] (l3) {\textbf{substrate parity} -- PASS=25/FAIL=3/XFAIL=3, matching seccomp};
+\node[rung,live,below=0.05cm of l3] (l4) {\textbf{process/syscall classes} -- fork, exec, mmap, signals};
+\node[rung,live,below=0.05cm of l4] (l5) {\textbf{performance gates} -- micro/Python/stress + snapshot bench (38.9~$\mu$s / 13~$\mu$s)};
+\node[rung,live,below=0.05cm of l5] (l6) {\textbf{real workload boot} -- Python and stress workloads};
+\node[rung,live,below=0.05cm of l6] (l7) {\textbf{\texttt{umlctl mission}} -- 6/6 phases PASS, 100/100 soak, $\sim$15~min};
+\node[rung,prog,below=0.05cm of l7] (l8) {\textbf{24-hour long-tail soak} -- the remaining wall-clock evidence};
+\end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Mission-Accomplished: Single-Binary Verdict}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.04\textwidth}p{0.20\textwidth}p{0.10\textwidth}p{0.10\textwidth}X@{}}
+\toprule
+\# & Phase & Verdict & Duration & Summary \\
+\midrule
+1 & KUnit & \done & 5.0~s & 10/10 cases (snap 3 + record 7) \\
+2 & Bench & \done & 2.5~s & cap 35~$\mu$s, median 13~$\mu$s \\
+3 & Substrate & \done & 3.5~s & cpython-tier0 PASS \\
+4 & Host resources & \done & 1.4~s & UM\_THP / UM\_OOM\_SCORE\_ADJ / affinity applied \\
+5 & Diverse soak & \done & 855~s & 100/100 PASS; 0 panics / 0 SIGBUS / 0 high-cr2 \\
+6 & Diagnostic & \done & 0.4~s & kernel/host/cgroup/hugepage metadata \\
+\bottomrule
+\end{tabularx}
+\vspace{0.6em}
+
+\centering
+\pill{UMLGreen}{MISSION\_ACCOMPLISHED in 867~s (kernel=\texttt{9ccbf5e7bb58})}\par
+\scriptsize
+One command (\texttt{umlctl mission --kernel <path>}); JSON scoreboard for CI; \texttt{--quick} skips Phase 5 for $\sim$12~s dev iteration.
+\end{frame}
+
+\begin{frame}{The R14 Cache-Flake Saga in One Slide}
+\scriptsize
+\begin{columns}[T,onlytextwidth]
+\column{0.49\textwidth}
+\begin{block}{Five weeks, fourteen rounds}
+\begin{itemize}
+  \item 1--2\% bytecode corruption rate in Django soak
+  \item KVMvTwo{} only; seccomp clean
+  \item Eliminated through R1--R12: KSM, khugepaged, kswapd, host pagecache, fast-page-fault, TLB coherence, mmu\_notifier, UML self-unmap, physmem residency, CPython specialization, gadget bounds (T68 shipped as side-effect)
+  \item R13 ruled out MAP\_POPULATE pinning as the cause (kept as foundation T71)
+\end{itemize}
+\end{block}
+\column{0.49\textwidth}
+\begin{block}{Round 14: root cause + fix}
+\begin{itemize}
+  \item Corruption shape: 16 valid bytes + 16 zero bytes = half AVX2 vector
+  \item SMP-T57 had un-masked AVX in CPUID; XCR0=0x7
+  \item glibc IFUNC picked AVX2 \texttt{vmovdqu ymm} memcpy
+  \item Per-task FPU save/restore used legacy \texttt{KVM\_GET\_FPU} (512~B FXSAVE)
+  \item \emph{No YMM upper-128 coverage} $\Rightarrow$ cross-task leak
+  \item Fix (SMP-T73): \texttt{KVM\_GET\_FPU} $\to$ \texttt{KVM\_GET\_XSAVE} at 5 sites
+  \item 220/220 validation soak; $p = 0.007$
+\end{itemize}
+\end{block}
+\end{columns}
+\vspace{0.4em}
+\centering
+\pill{UMLBlue}{LESSON}\quad Three infrastructure follow-ons: T74/T75/T76 latent-bug closures, T77 future-feature checklist, memo 52 host resource controls.
+\end{frame}
+
+\section{Performance}
+
+\begin{frame}{How To Read the Benchmarks}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.22\textwidth}p{0.32\textwidth}X@{}}
+\toprule
+Tier & What it measures & Why it matters \\
+\midrule
+Micro & RDTSC-bracketed \texttt{getpid}-style loop. & Isolates the trap mechanism and LSTAR gadget cost. \\
+Native context & Profile cost model relative to normal Linux \texttt{getpid}. & Prevents a speedup-over-seccomp chart from hiding absolute scale. \\
+Python & Startup and mixed-syscall userland workload. & Checks whether the micro win survives real imports and dynamic linking. \\
+Stress & SMP memory and page-fault-heavy workload. & Checks whether performance survives correctness pressure. \\
+\bottomrule
+\end{tabularx}
+\vspace{0.7em}
+\scriptsize
+Charts use same-host speedup over seccomp because raw cycles are not
+portable across CPU generations. The native baseline table gives the
+human-scale reference point.
+\end{frame}
+
+\begin{frame}{Micro Benchmark: The Gadget Changed the Cost Class}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.9\textwidth,
+  height=5.6cm,
+  ybar,
+  ymin=0,
+  ylabel={speedup over seccomp (x)},
+  symbolic x coords={s0,s1,s2,s3,s4,s5,s6,s7},
+  xtick=data,
+  bar width=12pt,
+  fill=UMLGreen!70,
+  draw=UMLGreen,
+  nodes near coords,
+  nodes near coords style={font=\tiny,rotate=90,anchor=west},
+  grid=major,
+  major grid style={draw=UMLGrid},
+]
+\addplot table[col sep=semicolon,x=host,y=micro]{../data/bench_speedups.csv};
+\end{axis}
+\end{tikzpicture}
+\vspace{0.3em}
+
+\scriptsize
+This chart answers only the narrow mechanism question: a gadget-covered
+trivial syscall no longer pays the seccomp signal/stub round trip.
+\end{frame}
+
+\begin{frame}{Native Baseline Context}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}p{0.26\textwidth}X@{}}
+\toprule
+Path & Relative to normal & Reading \\
+\midrule
+Normal Linux \texttt{getpid} & 1.0x, 50 ns & Baseline used by the profile cost model. \\
+\KVMvTwo{} \texttt{prod-fast} & 1.6x, 80 ns & Same order as native for gadget-covered calls. \\
+\Seccomp{} profiles & 10--24x, 505--1200 ns & Expected for research, fuzz, sandbox, and time-travel. \\
+ptrace fallback & 40x, 2{,}000 ns & Compatibility path, not the speed target. \\
+direct library & 0.12x, 6 ns & Fast because it removes the ring split. \\
+\bottomrule
+\end{tabularx}
+\vspace{0.7em}
+
+\scriptsize
+The cross-host benchmark still reports same-host speedup over
+\Seccomp{}; this table provides user-facing native-system context.
+\end{frame}
+
+\begin{frame}{Python and Stress Tiers}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.9\textwidth,
+  height=5.6cm,
+  ybar,
+  ymin=0,
+  ymax=10,
+  ylabel={speedup over seccomp (x)},
+  symbolic x coords={s0,s1,s2,s3,s4,s5,s6,s7},
+  xtick=data,
+  bar width=7pt,
+  legend style={at={(0.5,1.06)},anchor=south,legend columns=2,draw=none,font=\footnotesize},
+  grid=major,
+  major grid style={draw=UMLGrid},
+]
+\addplot+[fill=UMLBlue!65,draw=UMLBlue] table[col sep=semicolon,x=host,y=py]{../data/bench_speedups.csv};
+\addplot+[fill=UMLAmber!75,draw=UMLAmber] table[col sep=semicolon,x=host,y=stress]{../data/bench_speedups.csv};
+\legend{Python,stress}
+\end{axis}
+\end{tikzpicture}
+\vspace{0.3em}
+
+\scriptsize
+Python checks userland startup and dynamic-linking behavior; stress
+checks SMP/page-fault pressure. Both are same-host speedups over seccomp.
+\end{frame}
+
+\section{Roadmap}
+
+\begin{frame}{Snapshot, Replay, Time Travel}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.27\textwidth}p{0.18\textwidth}X@{}}
+\toprule
+Surface & State & Reading \\
+\midrule
+Snapshot/forkserver v1 & \done & C-09 legacy: \texttt{um\_snapshot\_ready()},
+fds 198/199, \texttt{state\_version}, launcher plumbing,
+\texttt{snapshot-smoke}. \\
+v1 ceiling & \limit & status hard-coded zero; no on-disk snapshot;
+short non-blocking payloads only; no SMP. \\
+KVM-aware snapshot v2 (\#168) & \done & Memo 26 Phase 1--6 in tree:
+alloc/capture/restore, KUnit 3/3 (basic, full, cross-task), bench
+harness (38.9~$\mu$s / 13~$\mu$s), selftest re-plumbed. \\
+KVM-aware record/replay v2 (\#169) & \done & Memo 27 Phase 1--7 in tree:
+state machine, observe/consume primitives (SYSCALL + RDTSC +
+SIGALRM), gadget-bypass byte, KUnit 7/7, selftest re-plumbed. \\
+Time-travel profile & \progress & UP/seccomp profile exists; runtime
+hook gate exists; slow path is still a counter stub. \\
+Host signal wiring for replay & \planned & Log shape proven by KUnit;
+remaining work is the host SIGALRM interception that triggers
+\texttt{observe\_sigalrm}. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{Host Resource Controls (Memo 52)}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}p{0.12\textwidth}p{0.42\textwidth}X@{}}
+\toprule
+ID & Lever & Knob \\
+\midrule
+T71 & MAP\_POPULATE + MAP\_LOCKED + mlockall & \texttt{UM\_KVM\_V2\_PIN\_PHYSMEM=1} \\
+T78 & MADV\_UNMERGEABLE on physmem & unconditional \\
+T79 & MADV\_NOHUGEPAGE / MADV\_HUGEPAGE & \texttt{UM\_THP=off / on / auto} \\
+T80 & \texttt{/proc/self/oom\_score\_adj} write & \texttt{UM\_OOM\_SCORE\_ADJ=N} \\
+T81 & MAP\_HUGETLB 2M / 1G & \texttt{UM\_HUGEPAGES=2M / 1G} \\
+T82 & \texttt{sched\_setaffinity} at startup & \texttt{UM\_KVM\_V2\_CPU\_AFFINITY=list} \\
+T83 & cgroup v2 per-instance subgroup & \texttt{[host\_resources]} TOML in umlctl \\
+T84 & preflight verification & automatic when knobs set \\
+T85--T87 & SCHED\_FIFO RT / NUMA / O\_DIRECT & \planned~(deferred per memo 52 \S3) \\
+\bottomrule
+\end{tabularx}
+\vspace{0.4em}
+\centering
+\pill{UMLBlue}{DECLARATIVE}\quad
+\texttt{[host\_resources]} in any \texttt{umlctl} \texttt{.toml}; preflight emits clear stderr warnings for empty hugepage pool / unwritable cgroup / missing CAP\_IPC\_LOCK
+\end{frame}
+
+\begin{frame}{What Remains}
+\begin{columns}[T,onlytextwidth]
+\column{0.49\textwidth}
+\begin{block}{Validation}
+\begin{itemize}
+  \item 24h long-tail wall-clock soak
+  \item Tier 2/Tier 3 template hardening
+  \item LTP curation finalisation
+  \item wider CI matrix
+\end{itemize}
+\end{block}
+\column{0.47\textwidth}
+\begin{block}{Resumed/external work}
+\begin{itemize}
+  \item Series 7 LKML cover-letter refresh + submission
+  \item Record/replay host signal wiring
+  \item Snapshot ELF64-core export (\#181)
+  \item syzkaller \texttt{vm/uml} (external)
+  \item Tier 3 host resources (RT/NUMA/O\_DIRECT)
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Upstream Path}
+\small
+\begin{tabularx}{\textwidth}{@{}r p{0.34\textwidth}p{0.16\textwidth}X@{}}
+\toprule
+\# & Series & Subsystem & State \\
+\midrule
+1 & bpf-hygiene-v1 & BPF & ready \\
+2 & kmsan-arch-callback-rfc & mm/kmsan & ready \\
+3 & ftrace-notrace-generic-v1 & tracing & ready \\
+4 & backend ops abstraction RFC & arch/um & drafted \\
+5 & static-key hot paths & arch/um & drafted \\
+6 & per-profile C-series & arch/um + subsystems & blocked \\
+7 & KVM backend & arch/um + KVM & cover-letter drafted; \emph{backend-layer unblocked} after R14 + mission gate; needs refresh + submission \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{Maintainer Review Questions}
+\small
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\begin{block}{Architecture}
+\begin{itemize}
+  \item Is the backend contract minimal?
+  \item Are state homes explicit enough?
+  \item Does \KVMvTwo{} leak VMM assumptions into \UML{} core?
+  \item Are profile defaults defensible upstream?
+\end{itemize}
+\end{block}
+\column{0.48\textwidth}
+\begin{block}{Evidence}
+\begin{itemize}
+  \item Is the validation ladder broad enough?
+  \item Are seccomp comparisons the right control?
+  \item Which LTP failures should be KEEP vs SKIP?
+  \item Are snapshot/replay claims scoped tightly?
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Closing Summary}
+\Large
+\textbf{The branch is now an implementation with a wall-clock validation frontier.}
+
+\vspace{0.6em}
+\normalsize
+\begin{itemize}
+  \item Architectural shape is coherent: backends, gates, profiles.
+  \item \KVMvTwo{} has crossed the hardest feasibility line: real workloads, SMP, speed, snapshot, record/replay, host resource controls.
+  \item The five-week Round-14 cache-flake (YMM-upper XSAVE leak) was root-caused and fixed with infrastructure follow-ons (T74--T77, memo 52).
+  \item A single command --- \texttt{umlctl mission --kernel <path>} --- gives any reviewer a reproducible 15-minute binary verdict.
+  \item Remaining credible milestone: the 24-hour long-tail soak and the Series 7 LKML submission.
+\end{itemize}
+\end{frame}
+
+\appendix
+
+\begin{frame}{Backup: Detailed Speedups}
+\scriptsize
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Host & CPU & micro & Python & stress \\
+\midrule
+s0 & i9-12900K & 284x & 3.73x & 7.26x \\
+s1 & Xeon E3-1225 v6 & 743x & 3.05x & 3.71x \\
+s2 & Xeon E3-1225 v5 & 813x & 2.99x & 3.94x \\
+s3 & Xeon W-2123 & 707x & 3.14x & 4.16x \\
+s4 & i5-12600K & 193x & 2.99x & 8.72x \\
+s5 & Ryzen 7 7840HS & 861x & 3.87x & 4.30x \\
+s6 & Ryzen 7 7840HS & 908x & 4.06x & 4.32x \\
+s7 & Ryzen 7 7840HS & 904x & 3.91x & 4.89x \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{Backup: Source Map}
+\small
+\begin{itemize}
+  \item \texttt{00-vision.md}: goals, non-goals, stakeholders.
+  \item \texttt{STATUS.md}: live state, phase ledger, blockers.
+  \item \texttt{01-architecture/}: three layers, invariants, data flow.
+  \item \texttt{02-workstreams/D-kvm-backend/}: KVM design, v1-to-v2 restart memos, state audit, benchmarks, snapshot+RR port memos (26 + 27).
+  \item \texttt{02-workstreams/D-kvm-backend/state-audit/26-feature-enablement-checklist.md}: T77 forward-looking un-mask checklist.
+  \item \texttt{08-future-phases/50-...django-flake-investigation-summary.md}: R14 root-cause narrative.
+  \item \texttt{08-future-phases/52-uml-host-resource-controls.md}: memo 52 (T78--T84 + T85--T87 deferred).
+  \item \texttt{tools/testing/selftests/um/}: gates, benchmarks, soak, parity, snapshot-kvm-smoke, kvm-record-smoke, kvm-snapshot-bench.
+  \item \texttt{tools/uml/uml-launcher/}: launcher, \texttt{umlctl}, \texttt{mission} / \texttt{cgroup} / \texttt{preflight} modules.
+\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Backup: \texttt{umlctl mission} CLI}
+\small
+\begin{verbatim}
+$ umlctl mission --kernel <PATH> [--out DIR]
+                 [--quick] [--continue-on-fail]
+                 [--soak-budget-sec N] [--soak-min-pct PCT]
+                 [--selftests-dir DIR]
+
+[Phase 1] PASS kunit       (~5s) -- 10/10 KUnit cases
+[Phase 2] PASS bench       (~3s) -- capture=35us median=13us
+[Phase 3] PASS substrate   (~4s) -- cpython-tier0 PASS
+[Phase 4] PASS host_res    (~1s) -- env knobs applied
+[Phase 5] PASS soak        (~14m)-- 100/100 PASS; 0 anomalies
+[Phase 6] PASS diagnostic  (<1s) -- metadata captured
+MISSION_ACCOMPLISHED in 867s (kernel=9ccbf5e7bb58)
+\end{verbatim}
+\scriptsize
+JSON scoreboard at \texttt{<out>/scoreboard.json}. Exit 0 on
+ACCOMPLISHED, non-zero with \texttt{MISSION\_FAILED phase=<N> <name>:
+<reason>} on any phase failure.
+\end{frame}
+
+\end{document}

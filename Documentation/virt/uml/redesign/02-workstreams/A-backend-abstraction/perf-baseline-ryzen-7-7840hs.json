@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-05-03T22:00:00Z",
+  "tree_head": "b1e0a3bb3673",
+  "informational": true,
+  "informational_reason": [
+    "Captured directly via umlctl + getpid-loop init=, not via",
+    "the canonical uml-perf-capture.sh wrapper (which was designed",
+    "for v1's 3-backend matrix and is not v2-aware).",
+    "Schema mirrors xeon-e3-1225-v6 baseline but the per-backend",
+    "rows are cyc/getpid (single-shot rdtsc-bracketed loop)",
+    "instead of the wrapper's cycles+instructions+task_clock_us",
+    "triple. Comparable across backends/builds, not directly",
+    "comparable to the Apr-22 Xeon baseline numbers.",
+    "Cross-link: Documentation/virt/uml/redesign/02-workstreams/",
+    "D-kvm-backend/measurements-2026-05-post-T41.md."
+  ],
+  "host": {
+    "tag": "server7",
+    "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+    "uarch": "Zen 4",
+    "ncpu": 16,
+    "smt_threads_per_core": 2,
+    "gcc": "15.2.0",
+    "glibc": "2.43-2ubuntu2",
+    "host_kernel": "7.0.0-15-generic",
+    "perf_cpu": 0,
+    "cpufreq_governor": "performance",
+    "boost_mhz_during_run": 5004
+  },
+  "binary_under_test": {
+    "tool": "tools/testing/selftests/um/perf-getpid/getpid-loop",
+    "n_iters": 100000,
+    "warmup_iters": 1000,
+    "syscall": "SYS_getpid (raw asm `syscall`)",
+    "clock_source": "rdtsc"
+  },
+  "backends": [
+    {
+      "backend": "kvm-v2",
+      "build_flavor": "UP",
+      "build_dir": "~/src/uml-builds/uml-clean",
+      "build_commit": "ad18db7c3768",
+      "runs": [
+        {"cyc_per_call": 24484, "ns_per_call": 6455},
+        {"cyc_per_call": 24485, "ns_per_call": 6455},
+        {"cyc_per_call": 24459, "ns_per_call": 6448}
+      ],
+      "median_cyc_per_call": 24484,
+      "median_ns_per_call": 6455
+    },
+    {
+      "backend": "seccomp",
+      "build_flavor": "UP",
+      "build_dir": "~/src/uml-builds/uml-clean",
+      "build_commit": "ad18db7c3768",
+      "runs": [
+        {"cyc_per_call": 62300, "ns_per_call": 16425},
+        {"cyc_per_call": 62362, "ns_per_call": 16441},
+        {"cyc_per_call": 61709, "ns_per_call": 16269}
+      ],
+      "median_cyc_per_call": 62322,
+      "median_ns_per_call": 16425
+    },
+    {
+      "backend": "kvm-v2",
+      "build_flavor": "SMP",
+      "build_dir": "~/src/uml-builds/uml-smp-t41fix",
+      "build_commit": "b1e0a3bb3673",
+      "build_includes": "SMP-T41 user-RAX recovery in handle_pf_eintr_inline",
+      "runs": [
+        {"cyc_per_call": 36808, "ns_per_call": 9704},
+        {"cyc_per_call": 36764, "ns_per_call": 9692},
+        {"cyc_per_call": 36876, "ns_per_call": 9722}
+      ],
+      "median_cyc_per_call": 36808,
+      "median_ns_per_call": 9704
+    },
+    {
+      "backend": "seccomp",
+      "build_flavor": "SMP",
+      "build_dir": "~/src/uml-builds/uml-smp-t41fix",
+      "build_commit": "b1e0a3bb3673",
+      "runs": [
+        {"cyc_per_call": 74903, "ns_per_call": 19748},
+        {"cyc_per_call": 74497, "ns_per_call": 19641},
+        {"cyc_per_call": 76348, "ns_per_call": 20128}
+      ],
+      "median_cyc_per_call": 74903,
+      "median_ns_per_call": 19748
+    }
+  ],
+  "ratios": {
+    "kvm_v2_UP_over_seccomp_UP": 0.393,
+    "kvm_v2_SMP_over_seccomp_SMP": 0.491,
+    "smp_overhead_kvm_v2_smp_over_up": 1.503,
+    "smp_overhead_seccomp_smp_over_up": 1.202
+  },
+  "absent_backends": {
+    "ptrace": {
+      "removed_in_commit": "06c88545ae2c",
+      "removed_in_memo": "memo 25 R11",
+      "note": "ptrace backend deleted from the tree (~600 LoC). No measurement possible against current source."
+    },
+    "kvm_v1_fallback": {
+      "archived_in_memo": "memo 25 R10",
+      "note": "v1 KVM backend moved to arch/um/backend/kvm-v1-archive/ (CONFIG_UM_BACKEND_KVM_V1_ARCHIVE depends on BROKEN). Historical measurements in measurements.md."
+    },
+    "kvm_v1_gadget": {
+      "archived_in_memo": "memo 25 R10",
+      "note": "v1 gadget design (the <100 ns target). Not in active tree. Different mechanism than v2 — the gadget stays in guest for whitelisted syscalls; v2 always vmexits."
+    }
+  }
+}

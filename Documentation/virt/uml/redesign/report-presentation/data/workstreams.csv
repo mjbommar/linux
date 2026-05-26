@@ -1,0 +1,5 @@
+id;name;effort_em;state;headline
+A;Backend abstraction;6;complete;um_backend_ops plus ptrace/seccomp contract landed
+B;Static-key hot paths;4;complete;runtime gates and debugfs controls landed
+C;Profiles and feature gaps;8;mostly landed;defconfigs plus KFENCE/KCSAN/kprobes/ftrace/KMSAN work mostly in tree; snapshot v2 + record/replay v2 ports now in tree
+D;KVM backend;6;complete;KVM v2 functional + R14 cache-flake fixed (SMP-T73 YMM-upper XSAVE leak); snapshot/RR ports; host resource controls; umlctl mission acceptance gate operational. 24h long-tail soak + Series 7 LKML submission remain.

@@ -1,0 +1,141 @@
+\section{Executive Summary}
+
+\subsection{Goal and Current Position}
+
+This branch proposes a profile-driven direction for \UML{} while
+preserving the existing contract: the upstream Linux kernel built as
+\texttt{arch/um} and executed as a host process. The target is not
+another virtual machine monitor, not a container runtime, and not a
+Linux reimplementation. The branch-local work is the combination of
+swappable execution backends, runtime instrumentation gates,
+profile-driven builds, and validation artifacts from one source tree.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node distance=0.55cm,
+  box/.style={rounded corners=2pt,draw=UMLGrid,fill=UMLPanel,text width=0.84\textwidth,align=left,inner sep=8pt},
+  title/.style={font=\bfseries\large,text=UMLInk},
+  key/.style={font=\bfseries,text=UMLBlue},
+]
+\node[box] (vision) {\textbf{Branch claim.} One kernel tree can produce fast production \UML{}, sanitizer-heavy research \UML{}, fuzzing \UML{}, sandbox \UML{}, library-mode \UML{}, and time-travel \UML{}.};
+\node[box,below=of vision] (arch) {\textbf{Architecture.} Layer 1 abstracts the trap mechanism with \texttt{struct um\_backend\_ops}; Layer 2 places static-key gates on hot paths; Layer 3 composes compile-time sanitizers and profile features.};
+\node[box,below=of arch] (state) {\textbf{Current state at \ReportDate.} Backend abstraction, static-key infrastructure, profile work, \texttt{umlctl}, selftests, and \KVMvTwo{} are in-tree. \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, post-gadget performance, snapshot+record/replay primitives, and declarative host resource controls. The Round-14 Django cache-flake (1--2\% under sustained iteration) was root-caused and fixed (SMP-T73, YMM-upper XSAVE leak).};
+\node[box,below=of state] (evidence) {\textbf{Evidence.} \KVMvTwo{} matches seccomp on the substrate gate, reaches cpython-parity 21/21 under UP and SMP, passes the in-tree \texttt{umlctl mission} acceptance gate end-to-end (6/6 phases, 100/100 soak, $\sim$15 min), and is faster than seccomp on all eight benchmark hosts. Snapshot bench: capture 38.9~$\mu$s, median restore 13~$\mu$s ($\sim$1300$\times$ / $\sim$75$\times$ under the memo-12 targets).};
+\end{tikzpicture}
+\caption{The report in four claims. Each claim maps back to a tracked source document or measured artefact.}
+\end{figure}
+
+\subsection{Existing UML Contract and Branch Questions}
+
+The branch assumes the existing \UML{} contract: Linux itself runs as a
+userspace process, remains debuggable and rootless, and can host
+isolated Linux instances without emulating a full machine
+\cite{dike-als2000,uml-howto,uml-homepage}. The proposed changes keep
+that contract and concentrate on branch-local pressure points:
+userspace trap cost, multiprocessor state ownership, profile
+composition, and validation breadth.
+
+\begin{table}[h]
+\centering
+\caption{Existing UML contract mapped to the branch-local response.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.24\linewidth}Y Y@{}}
+\toprule
+Existing property & Constraint carried forward & Branch-local response \\
+\midrule
+Kernel as a normal host process & Preserve rootless development, CI usability, and reproducible debugging where nested virtualization is unavailable. & Keep stock-host execution through ptrace/seccomp, but add KVM as a fast backend when available. \\
+Isolated Linux instances & Preserve cheap Linux environments without new hardware or privileged host setup. & Make sandbox a profile, not the whole architecture; choose minimal code, seccomp-only defaults, and explicit validation. \\
+Faithful upstream kernel & Preserve Linux behavior rather than introducing a userspace reimplementation with semantic drift. & Build the upstream kernel as \UML{}; profiles change defaults and instrumentation, not kernel semantics. \\
+Debuggable experimentation & Preserve normal \UML{} debugging value while adding tracing, coverage, and replay hooks as explicit features. & Layer 2 static keys make observability a runtime decision; Layer 3 composes sanitizers by profile. \\
+Known hard problems & Treat trap cost and SMP state ownership as implementation and validation problems, not as presentation claims. & \KVMvTwo{} and sustained validation directly target syscall cost, SMP state ownership, parity, and long-run reliability. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Questions the report uses to bound the branch claims.}
+\small
+\begin{tabularx}{\linewidth}{@{}L{0.04\linewidth}Y Y@{}}
+\toprule
+\# & Question & Where answered \\
+\midrule
+1 & What branch-local value proposition is being proposed? & Branch claim, non-goals, existing-contract table, and profile matrix. \\
+2 & What is the boundary relative to QEMU, Firecracker, gVisor, LKL, and containers? & Non-goals, design boundary, and adjacent-work comparisons. \\
+3 & What single architecture lets fast production, research, fuzzing, sandbox, library, and time-travel coexist? & Three-layer architecture and profile sections. \\
+4 & What has actually landed, and what is still only planned? & Current-state tables, source map, and upstream queue. \\
+5 & Does \KVMvTwo{} preserve Linux-visible state across SMP, signals, FPU/XSAVE, faults, and task switches? & KVM design, state-audit method, recent-fix table, and validation ladder. \\
+6 & Does the performance win survive beyond a microbenchmark? & Micro, Python, and stress-tier benchmark sections. \\
+7 & What validation bar remains before upstreaming? & Sustained validation, Tier 2/3/LTP, and next-work sections. \\
+8 & What should maintainer review put pressure on next? & Open-state list, remaining risks, and upstream-path sections. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Cutoff Snapshot}
+
+\begin{figure}[h]
+\centering
+\metriccard{UMLBlue}{21/21}{cpython parity\\UP and SMP}\hfill
+\metriccard{UMLGreen}{6/6}{\texttt{umlctl mission}\\acceptance phases}\hfill
+\metriccard{UMLAmber}{193--908x}{micro speedup\\over seccomp}\hfill
+\metriccard{UMLTeal}{7 series}{staged upstream\\submission queue}
+\caption{Dashboard metrics at the reporting cutoff. The numbers are intentionally sparse: each is backed by a source table later in the report.}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\caption{Reporting snapshot.}
+\begin{tabularx}{\linewidth}{@{}>{\bfseries}L{0.27\linewidth}Y@{}}
+\toprule
+Reporting date & \ReportDate \\
+Cutoff commit & \texttt{\CutoffCommit} on \texttt{\BranchName} \\
+Project corpus & 255+ files under \texttt{Documentation/virt/uml/redesign/}; 32 top-level \texttt{tools/testing/selftests/um/} test areas; \texttt{arch/um/backend/kvm-v2/} implementation present including snapshot, record, state-trace, lstar-gadget, byteshape and marshal KUnit \\
+Functional headline & \KVMvTwo{} has working guest entry, syscall dispatch, exceptions, signals, SMP state repair, post-gadget performance, snapshot + record/replay primitives (KUnit 3+7 = 10/10), declarative host resource controls (SMP-T78--T84), and a first-class \texttt{umlctl mission} acceptance gate (6/6 phases PASS in $\sim$15 min) \\
+Parity headline & cpython-parity is 21/21 under both UP and SMP; substrate gate is PASS=25/FAIL=3/XFAIL=3, matching seccoMP; cache-flake bug from Round 14 closed via SMP-T73 (5-week investigation, YMM-upper XSAVE save/restore leak under AVX un-mask) \\
+Performance headline & post-gadget \KVMvTwo{} beats seccomp on all eight lab hosts: micro 193--908x, Python 2.99--4.06x, stress 3.71--8.72x; snapshot capture 38.9~$\mu$s and median restore 13~$\mu$s vs memo-12 targets of <50~ms / <1~ms \\
+Validation headline & \texttt{umlctl mission} (6-phase comprehensive gate): 10/10 KUnit cases, bench gates met, substrate PASS, host\_resources end-to-end verified, 100/100 PASS across 5 diverse workloads in $\sim$8 min soak, 0 panics / 0 SIGBUS / 0 high-cr2; 24-hour long-tail soak is the remaining wall-clock evidence \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{What Is Done, What Is Not}
+
+\begin{table}[h]
+\centering
+\caption{Status by major workstream.}
+\begin{tabularx}{\linewidth}{@{}p{0.10\linewidth}p{0.22\linewidth}p{0.18\linewidth}X@{}}
+\toprule
+ID & Workstream & State & Summary \\
+\midrule
+A & Backend abstraction & \donepill & \texttt{um\_backend\_ops} contract, ptrace/seccomp split, KUnit contract, and documentation landed. \\
+B & Static-key hot paths & \donepill & Hot-path gates, debugfs controls, and runtime flip demonstration landed. \\
+C & Profiles and gaps & \statuspill{UMLGreen}{MOSTLY} & Defconfigs and major sanitizer/tracing ports are largely landed; snapshot v2 + record/replay v2 ports now in tree; syzkaller binding remains external. \\
+D & KVM backend & \donepill & \KVMvTwo{} functional + performant + R14 cache-flake fixed (SMP-T73); snapshot Phase 1--6 and record/replay Phase 1--7 ports landed; host resource controls (SMP-T78--T84) shipped; \texttt{umlctl mission} acceptance gate operational. 24h long-tail soak and Series 7 upstream submission remain. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{First Three-Page Takeaway}
+
+The branch is best understood as a transition from one default
+execution story to an explicit profile matrix. The common lower layer
+is a backend contract; production can choose \KVM{}, CI can choose
+\Seccomp{}, legacy hosts can choose ptrace, and each profile can decide
+whether it wants no hooks, runtime hooks, or heavy compile-time
+instrumentation.
+
+The current branch has crossed the highest-risk implementation
+path: \KVMvTwo{} can run real guest userspace, handle SMP, preserve
+cross-task state, survive a 14-round real-world flake investigation
+(Round~14's YMM-upper-128 XSAVE leak under AVX un-mask, fixed as
+SMP-T73), beat \Seccomp{} on measured workloads, snapshot and replay
+its own state, and accept declarative host resource controls.
+
+A single command --- \texttt{umlctl mission --kernel <path>} ---
+now produces a binary acceptance verdict in $\sim$15~min wall:
+all six phases must pass (KUnit, performance bench, substrate
+parity, host resource controls, diverse workload soak, diagnostic
+snapshot). The remaining gate is the wall-clock 24-hour soak and
+the LKML upstream submission of the kvm-backend series.

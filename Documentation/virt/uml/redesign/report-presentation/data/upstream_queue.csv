@@ -1,0 +1,8 @@
+series;name;patches;subsystem;status
+1;bpf-hygiene-v1;2;BPF;ready
+2;kmsan-arch-callback-rfc;1;mm/kmsan;ready
+3;ftrace-notrace-generic-v1;1;tracing/ftrace;ready
+4;backend-ops-abstraction-rfc;12;arch/um;drafted
+5;static-key-hot-paths;6;arch/um;drafted
+6;per-profile C-series;20;arch/um plus subsystems;blocked by series 7
+7;kvm-backend-series;15;arch/um plus kvm;cover-letter drafted; backend-layer unblocked by R14 closure + umlctl mission gate; needs refresh + submission

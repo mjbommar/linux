@@ -1,0 +1,57 @@
+From 5b95b1bb3e6aa9b589b417f376cd0992902abd6c Mon Sep 17 00:00:00 2001
+From: mjbommar <michael.bommarito@gmail.com>
+Date: Mon, 20 Apr 2026 22:06:03 -0400
+Subject: [PATCH bpf-next 0/2] bpf, x86: two hygiene fixes in bpf_jit_comp.c
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two small hygiene cleanups in arch/x86/net/bpf_jit_comp.c. Both
+are zero-functional-change on x86 defconfig (bpf_jit_comp.o byte-
+for-byte size unchanged in my testing); they make the TU's
+dependencies more explicit and migrate two direct pt_regs field
+accesses to the generic helpers that kprobes, uprobes, and ftrace
+already use.
+
+Patch 1 — "bpf, x86: explicitly include <asm/cpufeature.h>"
+
+  bpf_jit_comp.c calls boot_cpu_has(X86_FEATURE_BMI2) and
+  cpu_feature_enabled(X86_FEATURE_INDIRECT_THUNK_ITS) without an
+  explicit include of <asm/cpufeature.h>. On x86 defconfig the
+  declarations are available transitively through
+  <asm/nospec-branch.h>; under thinner include-path arrangements
+  the chain can drop them and the build fails at
+  bpf_jit_comp.c:1997 ("implicit declaration of function
+  'boot_cpu_has'") and at :676 (DISABLED_MASK_BIT_SET implicit
+  declaration via the cpu_feature_enabled expansion).
+
+  Making the dependency explicit is a pure-hygiene fix.
+
+Patch 2 — "bpf, x86: use instruction_pointer helpers in
+          ex_handler_bpf"
+
+  The arena-access exception handler accesses the trapped PC via
+  regs->ip directly (once to report, once to skip the faulting
+  instruction). Convert both sites to instruction_pointer() and
+  instruction_pointer_set(); these are static-always-inline
+  wrappers in arch/x86/include/asm/ptrace.h that compile to the
+  same field access on x86. Matches the pattern used across the
+  tree (kprobes, uprobes, ftrace) for pt_regs PC access.
+
+Both patches compile clean on x86_64 defconfig + BPF_JIT=y; they
+do not change emitted JIT code or the kernel ABI.
+
+No Fixes: tag — these predate any recent regression and both
+files have been stable for many cycles. Please consider for
+bpf-next.
+
+mjbommar (2):
+  bpf, x86: explicitly include <asm/cpufeature.h>
+  bpf, x86: use instruction_pointer helpers in ex_handler_bpf
+
+ arch/x86/net/bpf_jit_comp.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+--
+2.53.0
+

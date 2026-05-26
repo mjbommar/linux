@@ -1,0 +1,71 @@
+\section{Goal and Vision}
+
+\subsection{Problem Statement}
+
+The branch starts from the existing \UML{} contract: Linux itself is
+compiled to run as a userspace program, with real kernel semantics and
+a deployable target in environments where full hardware virtualization
+is not available. The branch-local problem is to add a reviewable
+structure for performance, feature composition, and operational
+validation without changing what \UML{} means.
+
+The proposed bar for this branch is:
+\begin{itemize}
+  \item production \UML{} should approach native syscall cost when
+        the host exposes \KVM{};
+  \item research \UML{} should ship with sanitizers, tracing,
+        kprobes, ftrace, BPF, KGDB, and debug surfaces composed from
+        one tree;
+  \item fuzzing \UML{} should provide KCOV, snapshot/forkserver
+        startup, and a path toward a syzkaller \texttt{vm/uml}
+        backend;
+  \item sandbox \UML{} should compile out debug surfaces and minimize
+        host attack surface;
+  \item time-travel and record/replay should become a profile, not a
+        niche configuration footnote.
+\end{itemize}
+
+\subsection{Non-Goals}
+
+The design boundary is explicit. It does not reimplement Linux in
+another language. gVisor is useful prior art for backend structure and
+\KVM{} execution, but \UML{} keeps Linux semantics by building Linux
+itself \cite{gvisor-platforms}. It is not a microVM competitor to
+Firecracker \cite{firecracker}; the problem here is kernel research
+and fuzzing fidelity, not cloud cold-start packaging. It is not a
+unikernel-only library effort either, although the library profile
+borrows from LKL where that model is useful \cite{lkl}.
+
+\subsection{Success Criteria}
+
+The branch succeeds when a developer can select a profile, build it
+from the same tree, and get an artifact whose performance and
+instrumentation properties match its intended use:
+
+\begin{table}[h]
+\centering
+\caption{Target profile outcomes.}
+\begin{tabularx}{\linewidth}{@{}p{0.21\linewidth}X@{}}
+\toprule
+Profile & Intended outcome \\
+\midrule
+\texttt{prod-fast} & \KVM{} backend, no hooks, near-native syscall path. \\
+\texttt{prod-with-hooks} & Fast production binary with hooks compiled but off; tracing can be enabled after a crash without rebuilding. \\
+\texttt{research} & Debug-friendly \UML{} with tracing, kprobes, sanitizers, and interactive control surfaces. \\
+\texttt{fuzz} / \texttt{fuzz-deep} & KCOV, snapshots, sanitizer coverage, replay-oriented hooks, and syzkaller integration. \\
+\texttt{sandbox} & Minimal debug surface and minimized host-side trust boundary. \\
+\texttt{library} & LKL-style direct-call mode for harnesses that can sacrifice ring-split fidelity. \\
+\texttt{time-travel} & Deterministic time and replay hooks as a first-class shipped configuration. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Why Now}
+
+The timing is tied to concrete prerequisites: seccomp mode exists, SMP
+support exists, and kernel instrumentation is mature enough to compose
+around static keys and profile-specific Kconfig. Adjacent projects
+also supply useful models: gVisor for backend/platform design, crosvm
+for host process decomposition \cite{crosvm}, syzkaller for fuzzing
+expectations \cite{syzkaller}, and upstream kernel policy for
+AI-assisted development disclosure \cite{coding-assistants}.

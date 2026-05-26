@@ -1,0 +1,7 @@
+build/*
+!build/report/
+build/report/*
+!build/report/uml-redesign-report.pdf
+!build/slides/
+build/slides/*
+!build/slides/uml-redesign-slides.pdf

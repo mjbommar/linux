@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-04-22T04:12:21Z",
+  "tree_head": "23c5bc7d17ed",
+  "host": {
+    "cpu": "Intel(R) Xeon(R) CPU E3-1225 v6 @ 3.30GHz",
+    "ncpu": 4,
+    "gcc": "15.2.0",
+    "glibc": "2.43",
+    "kernel": "7.0.0-13-generic",
+    "perf_cpu": 0,
+    "cpufreq_governor": "performance"
+  },
+  "backends": [
+    {"backend":"PTRACE_ONLY","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":198051821,"p50":198405986,"p75":362677581},"instructions":{"p25":335422917,"p50":343490768,"p75":623455082},"task_clock_us":{"p25":60340,"p50":60450,"p75":110350}},
+    {"backend":"SECCOMP_ONLY","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":191092970,"p50":191190938,"p75":191397577},"instructions":{"p25":329083268,"p50":333754657,"p75":335611191},"task_clock_us":{"p25":58140,"p50":58170,"p75":58230}},
+    {"backend":"DYN_ptrace","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":190437745,"p50":190537405,"p75":190602976},"instructions":{"p25":332399446,"p50":337183255,"p75":337327520},"task_clock_us":{"p25":57940,"p50":57970,"p75":57990}},
+    {"backend":"DYN_seccomp","iters":10,"cpu":0,"governor":"performance","cycles":{"p25":190486392,"p50":190671958,"p75":355347709},"instructions":{"p25":331912981,"p50":334078031,"p75":619060759},"task_clock_us":{"p25":57950,"p50":58010,"p75":108030}}
+  ]
+}

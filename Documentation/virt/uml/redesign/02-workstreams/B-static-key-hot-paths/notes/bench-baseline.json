@@ -1,0 +1,38 @@
+{
+  "format": "b05-v1",
+  "date": "2026-04-18",
+  "machine": "ubuntu 26.04, 4-cpu host, gcc 15.2",
+  "kernel_config": "DYNAMIC + DEBUG_FS",
+  "backend_default": "ptrace",
+  "jump_label": "c-fallback (HAVE_ARCH_JUMP_LABEL=n; see D19)",
+  "stats_backend": "per-CPU u64 counters (see D22; was atomic64 pre-D22)",
+  "methodology": {
+    "iters_per_batch": 100000,
+    "batches": 10,
+    "metric": "median ns per call, scaled by 1000",
+    "clock": "ktime_get_ns (first-pass; rdtscp+pin deferred to B-05-precise)",
+    "measurement_site": "kernel-side tight loop (arch/um/kernel/hooks_bench.c)"
+  },
+  "capture": "median of 3 back-to-back runs after one warmup",
+  "results_ns_per_call_x1000": {
+    "syscall_entry":   { "off": 2127, "on": 12766, "gates_checked": 4 },
+    "syscall_exit":    { "off": 1216, "on":  6333, "gates_checked": 2 },
+    "context_switch":  { "off": 1822, "on": 10053, "gates_checked": 3 },
+    "clock_read":      { "off": 1520, "on":  9446, "gates_checked": 3 }
+  },
+  "derived_per_gate_ns_x1000": {
+    "syscall_entry_off_per_gate":   532,
+    "syscall_exit_off_per_gate":    608,
+    "context_switch_off_per_gate":  607,
+    "clock_read_off_per_gate":      507
+  },
+  "invariant_i3_ceiling_ns": 2.0,
+  "invariant_i3_status": "met comfortably in spirit under C fallback (worst per-gate off-state ~0.61 ns); literal I3 (JIT NOP, target ~0.3 ns) unlocked by B-04 per D19",
+  "ci_regression_ceiling_pct": 15,
+  "notes": [
+    "On-state numbers reflect a real per-CPU counter write inside the slow-path stub (~3 ns/gate); workstream C consumers with heavier slow paths will naturally run higher. Compare changes as deltas against this baseline, not as absolutes.",
+    "Off-state numbers in the four-hook-helper shape (syscall_entry, syscall_exit, context_switch, clock_read). page_fault and irq_entry are not in the bench because their paths don't run in a tight-loop context; rely on end-to-end perf numbers for those (workstream A-07).",
+    "Single-sample capture — CI should run N>=3 and pick median. See uml-gate-bench-compare.sh."
+  ],
+  "revisit_when": "HAVE_ARCH_JUMP_LABEL lands (see D19); off-state figures should drop further toward ~0.3 ns/gate."
+}

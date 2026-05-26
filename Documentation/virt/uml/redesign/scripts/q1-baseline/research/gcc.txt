@@ -1,0 +1,9 @@
+/usr/bin/x86_64-linux-gnu-ld.bfd: warning: arch/um/kernel/skas/stub_exe.dbg has a LOAD segment with RWX permissions
+fs/coredump.c:1209:1: warning: the frame size of 1184 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+fs/select.c:1029:1: warning: the frame size of 1264 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+fs/select.c:611:1: warning: the frame size of 1072 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+kernel/trace/ftrace.c:5719:1: warning: the frame size of 1072 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+lib/maple_tree.c:3117:1: warning: the frame size of 1168 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+mm/vma.c:2804:1: warning: the frame size of 1392 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+net/core/rtnetlink.c:2557:1: warning: the frame size of 1056 bytes is larger than 1024 bytes [-Wframe-larger-than=]
+net/core/sysctl_net_core.c:350:1: warning: the frame size of 1088 bytes is larger than 1024 bytes [-Wframe-larger-than=]

@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Per-commit checkpatch gate.
+#
+# Runs `scripts/checkpatch.pl --strict -g <sha>` against every
+# commit touched by a push or PR to `uml-redesign-plan`. This
+# matches AGENT-PROMPT.md's "every PR" policy for the Q1 quality
+# bar — no commit should merge with checkpatch errors. The
+# --strict flag elevates `CHECK:` lines to warnings so the
+# column-width nits (which we've hit multiple times during
+# mid-session development) fail the job rather than pass
+# silently.
+#
+# Fork-only workflow (kernel tree's top-level `.gitignore`
+# excludes `.github`, so this ships via `git add -f` like the
+# other CI workflows). Runs fast (seconds per commit on
+# runner-hardware) so it's appropriate as a per-commit gate.
+
+name: checkpatch
+
+on:
+  push:
+    branches: [uml-redesign-plan]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checkpatch:
+    name: checkpatch --strict
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 so checkpatch can walk the commit
+          # range backwards on pushes that land multiple
+          # commits at once. Default depth 1 would only see
+          # HEAD.
+          fetch-depth: 50
+
+      - name: Install checkpatch deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            perl python3 python3-ply python3-git
+
+      - name: Determine commit range
+        id: range
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)
+              # PR events: compare against the PR base, walk
+              # all PR commits.
+              base='${{ github.event.pull_request.base.sha }}'
+              head='${{ github.event.pull_request.head.sha }}'
+              ;;
+            push)
+              # Push events: walk the commits pushed in this
+              # event. github.event.before is the ref's SHA
+              # before the push.
+              base='${{ github.event.before }}'
+              head='${{ github.event.after }}'
+              # First push to a branch has before = all-zeros;
+              # fall back to checking just the head commit in
+              # that case.
+              if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+                base=HEAD~1
+              fi
+              ;;
+            *)
+              base=HEAD~1
+              head=HEAD
+              ;;
+          esac
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "head=$head" >>"$GITHUB_OUTPUT"
+          echo "Range: $base..$head"
+
+      - name: Run checkpatch per commit
+        run: |
+          set -e
+          base='${{ steps.range.outputs.base }}'
+          head='${{ steps.range.outputs.head }}'
+          fail=0
+          for sha in $(git rev-list --reverse "$base..$head"); do
+            echo "::group::checkpatch $sha $(git log -1 --format=%s "$sha")"
+            # Ignored rules (each has a specific reason, not
+            # a blanket suppression):
+            #
+            #   BAD_SIGN_OFF    — "Non-standard signature:
+            #     Co-authored-by:" fires on every commit in
+            #     this branch because we use the co-author
+            #     tag for attribution.
+            #   EMAIL_SUBJECT   — "A patch subject line should
+            #     describe the change not the tool that found
+            #     it" fires on commits whose subject mentions
+            #     checkpatch/sparse/smatch — which commits
+            #     *configuring* those tools necessarily do.
+            #   FILE_PATH_CHANGES — fires any time a file is
+            #     added/moved/deleted, prompting a MAINTAINERS
+            #     update. Not applicable to fork-only additions
+            #     under .github/, Documentation/virt/uml/redesign/
+            #     etc. that don't go upstream.
+            #   USE_RELATIVE_PATH — warns when a changelog body
+            #     mentions an absolute path. For workflow +
+            #     tool-config commits the absolute paths (e.g.
+            #     `/usr/share/selinux/devel/Makefile`,
+            #     `/etc/apparmor.d/uml-launcher`) are part of
+            #     the system contract being documented — not
+            #     an in-tree path that should be rewritten
+            #     relative to the kernel source root.
+            #   ARCH_INCLUDE_LINUX — suggests `<linux/*>` over
+            #     `<asm/*>` under arch/. For arch-private
+            #     headers like arch/um/include/asm/kmsan.h
+            #     that live INSIDE arch/um/ and reference
+            #     their sibling asm/* files, the asm/ form is
+            #     the correct one — the linux/ wrapper may
+            #     not even exist for every sibling.
+            #   LINE_SPACING — CHECK-level preference for a
+            #     blank line after every struct/union/enum
+            #     declaration. We follow it where it reads
+            #     well, but not as a hard per-commit gate;
+            #     enforcement belongs in the reviewer's
+            #     judgement, not the pipeline.
+            #   COMMIT_COMMENT_SYMBOL — warns on `#` at the
+            #     start of a line in the commit body. That's
+            #     correct for actual git comment syntax but
+            #     hits our section-header style ("# 1.") in
+            #     longer commit bodies. The messages land
+            #     intact because `git commit -m` doesn't
+            #     strip comments from -m input.
+            #   PREFER_KERNEL_TYPES / BIT_MACRO — suggests
+            #     the kernel's <linux/bits.h> BIT / BIT_ULL
+            #     helpers over (1UL<<n). Correct for kernel
+            #     sources; wrong for standalone userspace
+            #     spikes under Documentation/ that can't
+            #     include kernel headers. Ignored so the
+            #     D-workstream KVM spike harness doesn't
+            #     trip the CI gate.
+            #   PREFER_KERNEL_TYPES — "prefer u64 over
+            #     uint64_t, u32 over uint32_t, ..." is the
+            #     kernel-internal-style rule. Wrong for
+            #     standalone userspace C under Documentation/
+            #     that includes <stdint.h>. Same class of
+            #     false-positive as BIT_MACRO.
+            #   UNSPECIFIED_INT — "prefer 'unsigned int' over
+            #     bare 'unsigned'" — pedantic style point
+            #     not applicable to throwaway spike code
+            #     whose only consumer is the spike itself.
+            #   CAMELCASE — flags PRIu64 / PRId64 / PRIx64
+            #     from <inttypes.h>. Those are standard C
+            #     library macros, not an in-tree naming
+            #     convention we should rewrite.
+            #   COMMIT_LOG_LONG_LINE — a body line exceeds
+            #     the 75-char soft limit. In isolation we'd
+            #     fix this by wrapping. But checkpatch's
+            #     GIT_COMMIT_ID rule simultaneously requires
+            #     prior-commit references to sit on a single
+            #     line as `commit <sha> ("<title>")`, and
+            #     long commit titles (which are common on
+            #     this branch — workstream + sub-step prefixes
+            #     bloat the subject line) push the reference
+            #     past 75 chars. Wrapping to satisfy
+            #     COMMIT_LOG_LONG_LINE then breaks
+            #     GIT_COMMIT_ID. Ignoring COMMIT_LOG_LONG_LINE
+            #     preserves the more load-bearing GIT_COMMIT_ID
+            #     lint.
+            if ! scripts/checkpatch.pl --strict --no-summary \
+                    --ignore=BAD_SIGN_OFF,EMAIL_SUBJECT,FILE_PATH_CHANGES,USE_RELATIVE_PATH,ARCH_INCLUDE_LINUX,LINE_SPACING,COMMIT_COMMENT_SYMBOL,BIT_MACRO,PREFER_KERNEL_TYPES,UNSPECIFIED_INT,CAMELCASE,COMMIT_LOG_LONG_LINE \
+                    -g "$sha"; then
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::checkpatch reported errors on one or more commits"
+            exit 1
+          fi

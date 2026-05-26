@@ -1,0 +1,89 @@
+\appendix
+\section{Source Map}
+
+\begin{longtable}{@{}L{0.36\linewidth}L{0.56\linewidth}@{}}
+\caption{Primary source material used for this report.}\\
+\toprule
+Path & Role in the report \\
+\midrule
+\endfirsthead
+\toprule
+Path & Role in the report \\
+\midrule
+\endhead
+\path{00-vision.md} & Vision, non-goals, success criteria, stakeholder framing. \\
+\path{README.md} & Top-level project layout and high-level architecture summary. \\
+\path{STATUS.md} & Current state, phase ledger, workstream status, open items. \\
+\path{01-architecture/three-layers.md} & Backend/gate/wrap architecture. \\
+\path{01-architecture/data-flow.md} & Per-profile syscall cost model and profile comparison. \\
+\path{02-workstreams/README.md} & Workstream decomposition and critical path. \\
+\path{02-workstreams/D-kvm-backend/README.md} & \KVM{} backend motivation and design framing. \\
+\path{03-architecture-review-2026-04-27/00-synthesis.md} & v1 root-cause analysis: KVM state ownership, signal masking, and shadow page-table lessons. \\
+\path{02-workstreams/D-kvm-backend/25-v2-restart-guide.md} & Mechanical archive/restart plan that records why v1 was retired and what v2 had to change. \\
+\path{02-workstreams/D-kvm-backend/26-v2-implementation-plan.md} & Detailed v2 implementation plan and milestone diary. \\
+\path{02-workstreams/D-kvm-backend/state-audit/} & State ownership audit, bug chronology, and recent fixes. \\
+\path{02-workstreams/D-kvm-backend/state-audit/26-feature-enablement-checklist.md} & SMP-T77 forward-looking checklist: what changes when a new CPUID bit is un-masked (AVX-512 / AMX / PKRU / CET). \\
+\path{02-workstreams/D-kvm-backend/26-snapshot-v2-port.md} & Snapshot port design memo (Phase 1--6 sub-sequencing). \\
+\path{02-workstreams/D-kvm-backend/27-record-replay-v2-port.md} & Record/replay port design memo (Phase 1--7 sub-sequencing). \\
+\path{02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md} & Cross-host benchmark data and methodology. \\
+\path{02-workstreams/D-kvm-backend/phase-J-soak-2h-2026-05-14.md} & First sustained-validation pilot result (subsumed by \texttt{umlctl mission} as the canonical acceptance artefact). \\
+\path{08-future-phases/50-kvm-v2-django-flake-investigation-summary.md} & Round 1--14 cache-flake investigation summary; root-cause narrative for SMP-T73. \\
+\path{08-future-phases/51-kvm-v2-django-flake-deeper-debug-plan.md} & Round-13 deeper-debug plan that fed the Round-14 close. \\
+\path{08-future-phases/52-uml-host-resource-controls.md} & Host resource controls plan (SMP-T78--T84 implementation + T85--T87 deferred design). \\
+\path{03-profiles/README.md} & Profile matrix and estimated per-profile cost model. \\
+\path{05-validation/} & Validation tiers, benchmarks, conformance, CI, and quality strategy. \\
+\path{upstream-patches/SUBMISSION-QUEUE.md} & Sequenced LKML/upstream queue. \\
+\path{tools/testing/selftests/um/} & Concrete gate, parity, soak, benchmark, and reproducer harnesses. \\
+\path{tools/testing/selftests/um/soak/*.toml.template} & 11 soak workload templates, each with a default \texttt{[host\_resources]} block (memo 52). \\
+\path{tools/testing/selftests/um/snapshot-kvm-smoke/} & v2 snapshot KUnit smoke harness (3/3 cases). \\
+\path{tools/testing/selftests/um/kvm-snapshot-bench/} & Capture/restore latency benchmark gate. \\
+\path{tools/testing/selftests/um/kvm-record-smoke/} & v2 record/replay KUnit smoke harness (7/7 cases). \\
+\path{tools/uml/uml-launcher/} & Host-side launcher and \texttt{umlctl} machinery. \\
+\path{tools/uml/uml-launcher/src/bin/umlctl/mission.rs} & SMP-T96 mission-accomplished subcommand: 6-phase acceptance gate, JSON scoreboard, binary verdict. \\
+\path{tools/uml/uml-launcher/src/bin/umlctl/cgroup.rs} & SMP-T83 cgroup v2 per-instance subgroup management. \\
+\path{tools/uml/uml-launcher/src/bin/umlctl/preflight.rs} & SMP-T84 preflight resource verification module. \\
+\path{arch/um/backend/kvm-v2/snapshot.c} & Snapshot port implementation (Phase 1--6) including cmdline + debugfs bench harness. \\
+\path{arch/um/backend/kvm-v2/record.c} & Record/replay port implementation (Phase 1--7). \\
+\path{arch/um/backend/kvm-v2/test_snapshot.c} & Snapshot KUnit suite. \\
+\path{arch/um/backend/kvm-v2/test_record.c} & Record/replay KUnit suite. \\
+\path{arch/um/os-Linux/process.c} & Host-side \texttt{os\_map\_memory} carries the memo-52 SMP-T71/T78/T79/T81 levers. \\
+\path{arch/um/os-Linux/main.c} & Host-side \texttt{os\_main} carries the memo-52 SMP-T71/T80/T82 levers. \\
+\bottomrule
+\end{longtable}
+
+\section{Reporting Data Files}
+
+The report and deck share normalized data under
+\path{Documentation/virt/uml/redesign/report-presentation/data/}.
+At this cutoff the important files are:
+
+\begin{itemize}
+  \item \texttt{bench\_speedups.csv} and \texttt{bench\_ratios.csv}
+        for the eight-host post-gadget benchmark.
+  \item \texttt{soak\_summary.csv} for the 2026-05-14 two-hour
+        sustained-validation pilot (now subsumed by the
+        \texttt{umlctl mission} acceptance gate as the canonical
+        artefact, but retained for chronology).
+  \item \texttt{profile\_getpid.csv} for profile cost visualization.
+  \item \texttt{workstreams.csv}, \texttt{validation\_ladder.csv},
+        \texttt{upstream\_queue.csv}, and \texttt{status\_kpis.csv}
+        for status tables.
+\end{itemize}
+
+Reproducing the canonical acceptance artefact:
+
+\begin{verbatim}
+$ umlctl mission --kernel <path-to-uml-binary>
+[Phase 1] PASS kunit            ( ~5s)  -- 10/10 KUnit cases PASS
+[Phase 2] PASS bench            ( ~3s)  -- capture=35us median=13us
+[Phase 3] PASS substrate        ( ~4s)  -- cpython-tier0 PASS
+[Phase 4] PASS host_resources   ( ~1s)  -- env knobs applied silently
+[Phase 5] PASS soak             (~14m)  -- 100/100 PASS; 0 panics
+[Phase 6] PASS diagnostic       (~<1s)  -- metadata captured
+MISSION_ACCOMPLISHED in 867s (kernel=9ccbf5e7bb58, host=<H>)
+\end{verbatim}
+
+JSON scoreboard at \texttt{<out>/scoreboard.json}. \texttt{--quick}
+skips Phase 5 (the diverse-workload soak) for $\sim$12-second dev
+iteration. \texttt{--continue-on-fail} runs all six phases regardless
+to collect every signal in one pass.

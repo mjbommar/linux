@@ -1,0 +1,112 @@
+\section{Architecture}
+
+\subsection{Three Layers}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw=UMLGrid,rounded corners=3pt,minimum width=0.86\linewidth,minimum height=1.1cm,align=center,inner sep=6pt},
+  arrow/.style={-{Latex[length=2.5mm]},thick,UMLMuted},
+]
+\node[layer,fill=UMLBlue!8] (l3) {\textbf{Layer 3: compile-time wraps}\\KASAN, KMSAN, KCSAN, KFENCE, UBSAN, profile-selected instrumentation};
+\node[layer,fill=UMLTeal!8,below=0.35cm of l3] (l2) {\textbf{Layer 2: static-key gates}\\syscall entry, syscall exit, page fault, context switch, time, KCOV, trace, replay};
+\node[layer,fill=UMLGreen!8,below=0.35cm of l2] (l1) {\textbf{Layer 1: backend ops table}\\ptrace, seccomp, KVM selected by build or boot policy};
+\node[layer,fill=UMLPanel,below=0.35cm of l1] (host) {\textbf{Host kernel and hardware}\\signals, seccomp, KVM, timers, files, memory mapping};
+\draw[arrow] (host) -- (l1);
+\draw[arrow] (l1) -- (l2);
+\draw[arrow] (l2) -- (l3);
+\end{tikzpicture}
+\caption{The architectural decomposition. Lower layers do not know about higher-layer policy; profiles choose points in the product space.}
+\end{figure}
+
+Layer 1 isolates the mechanism that makes guest userspace run:
+ptrace, \Seccomp{}, or \KVM{}. Layer 2 isolates optional runtime
+observation and policy hooks. Layer 3 isolates compiler-level
+instrumentation whose cost is inherent in the binary. This structure
+matches the host kernel's own composition strategy: explicit lower
+interfaces, static keys for runtime feature toggles, and Kconfig for
+compile-time feature selection.
+
+\subsection{Layer 1: Backend Contract}
+
+The live contract is \texttt{struct um\_backend\_ops}. It has
+metadata, capability flags, lifecycle hooks, vCPU execution, memory
+region callbacks, scheduling hooks, TLB kick support, time hooks, and
+debug/introspection hooks. The important design choices are:
+
+\begin{itemize}
+  \item every in-tree backend populates the whole table; unsupported
+        cold operations return an explicit error rather than leaving
+        NULL fields;
+  \item single-backend builds can compile calls down to direct calls;
+        dynamic builds can select at boot and pay one stable indirect
+        call;
+  \item backend capability flags replaced legacy global booleans, so
+        host-side code asks the selected backend what stub, reaper, and
+        syscall behavior it needs;
+  \item per-mm memory state is owned by the backend, which lets
+        \Seccomp{} keep its stub model while \KVMvTwo{} manages
+        memslots and guest mappings.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Backend contract categories.}
+\begin{tabularx}{\linewidth}{@{}p{0.2\linewidth}p{0.19\linewidth}X@{}}
+\toprule
+Category & Representative ops & Why it belongs in Layer 1 \\
+\midrule
+Lifecycle/trap & \texttt{probe}, \texttt{init}, \texttt{vcpu\_run} & Backend availability and guest execution are mechanism-specific. \\
+Memory & \texttt{mm\_create}, region add, remove, protect & ptrace/seccomp stubs and \KVM{} memslots have different state models. \\
+Scheduling & thread create, context switch, IPI & Guest scheduling touches backend-owned vCPU or stub state. \\
+Time & clock read, timer set & Determinism and backend timing sources must be abstracted. \\
+Debug & register read/write & KGDB and inspection need a common contract over different mechanisms. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Layer 2: Static-Key Hot Paths}
+
+Layer 2 is the answer to a central tension: a research build wants
+hooks everywhere; a production build wants the hot path cold and
+small. Static keys make the disabled case a patched NOP sequence and
+the enabled case an explicit branch to slow-path code. The off-state
+cost model is therefore stable and auditable.
+
+The report treats Layer 2 as a policy plane rather than a pile of
+tracepoints. The same hot path can support tracing, KCOV,
+record/replay, time-travel, and performance event emission, provided
+each hook has a clear default state and each profile declares which
+hooks are compiled and enabled.
+
+\subsection{Layer 3: Compile-Time Instrumentation}
+
+Layer 3 includes KASAN, KMSAN, KCSAN, KFENCE, UBSAN, and related
+compiler- or allocator-level instrumentation. These features cannot be
+made free by a runtime branch. They change code generation, memory
+layout, or allocator behavior. The architecture therefore treats them
+as profile-level build choices that compose with any backend below.
+
+\subsection{A Syscall Through the Stack}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  flowstep/.style={draw=UMLGrid,fill=UMLPanel,rounded corners=2pt,minimum width=2.6cm,minimum height=0.8cm,align=center,font=\small},
+  fast/.style={draw=UMLGreen,fill=UMLGreen!10},
+  slow/.style={draw=UMLAmber,fill=UMLAmber!12},
+  arr/.style={-{Latex[length=2mm]},thick,UMLMuted},
+]
+\node[flowstep,fast] (u) {guest ring 3\\\texttt{syscall}};
+\node[flowstep,fast,right=0.7cm of u] (gadget) {LSTAR gadget\\in guest};
+\node[flowstep,fast,right=0.7cm of gadget] (kernel) {\UML{} syscall\\handler};
+\node[flowstep,right=0.7cm of kernel] (gates) {Layer 2\\gates};
+\node[flowstep,right=0.7cm of gates] (ret) {\texttt{sysretq}\\guest ring 3};
+\draw[arr] (u) -- (gadget);
+\draw[arr] (gadget) -- (kernel);
+\draw[arr] (kernel) -- (gates);
+\draw[arr] (gates) -- (ret);
+\node[below=0.35cm of gadget,font=\footnotesize,text=UMLMuted] {fast-path calls stay inside the KVM guest};
+\end{tikzpicture}
+\caption{\KVMvTwo{} fast syscall shape after gadget revival. Trivial syscalls avoid a host vmexit on the hot path.}
+\end{figure}

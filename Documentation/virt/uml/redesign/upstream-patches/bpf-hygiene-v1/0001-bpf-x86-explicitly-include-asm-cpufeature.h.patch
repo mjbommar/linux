@@ -1,0 +1,61 @@
+From e2b686c9621896f3b5556e4c0abfc987cde1cfec Mon Sep 17 00:00:00 2001
+From: mjbommar <michael.bommarito@gmail.com>
+Date: Mon, 20 Apr 2026 22:01:49 -0400
+Subject: [PATCH bpf-next 1/2] bpf, x86: explicitly include <asm/cpufeature.h>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+arch/x86/net/bpf_jit_comp.c uses boot_cpu_has(X86_FEATURE_BMI2)
+and cpu_feature_enabled(X86_FEATURE_INDIRECT_THUNK_ITS) but
+does not explicitly #include <asm/cpufeature.h>. On bare-metal
+x86 defconfig the declarations resolve transitively through
+<asm/nospec-branch.h> or another neighbor; under other include-
+path arrangements (e.g. sub-architectures that reuse arch/x86
+headers selectively) the transitive chain may not deliver
+DISABLED_MASK_BIT_SET / static_cpu_has and the build fails with
+"implicit declaration" errors.
+
+Add the explicit include alongside the existing <asm/*> block.
+No functional change on x86 defconfig — headers are already in
+the transitive closure; this is a hygiene-only fix that makes
+the dependency self-evident and the TU buildable under include-
+path arrangements that don't happen to pick up the transitive
+include.
+
+A downstream consumer that exposed this (building the JIT
+against a thinner x86-header-forwarding environment) observed
+the error at arch/x86/net/bpf_jit_comp.c:1997 and
+arch/x86/net/bpf_jit_comp.c:676 where cpu_feature_enabled
+expands to a DISABLED_MASK_BIT_SET reference; making
+<asm/cpufeature.h> explicit resolves both.
+
+Note: checkpatch suggests <linux/cpufeature.h> but that header
+is the GENERIC_CPU_AUTOPROBE device-module-probing wrapper and
+does not expose boot_cpu_has / cpu_feature_enabled / X86_FEATURE_*
+macros. The correct include for this file's needs is the
+arch-specific one, consistent with the surrounding <asm/*>
+headers.
+
+Signed-off-by: mjbommar <michael.bommarito@gmail.com>
+
+Co-authored-by: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ arch/x86/net/bpf_jit_comp.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/x86/net/bpf_jit_comp.c b/arch/x86/net/bpf_jit_comp.c
+index e9b78040d703..28e6041ea145 100644
+--- a/arch/x86/net/bpf_jit_comp.c
++++ b/arch/x86/net/bpf_jit_comp.c
+@@ -12,6 +12,7 @@
+ #include <linux/bpf.h>
+ #include <linux/memory.h>
+ #include <linux/sort.h>
++#include <asm/cpufeature.h>
+ #include <asm/extable.h>
+ #include <asm/ftrace.h>
+ #include <asm/set_memory.h>
+-- 
+2.53.0
+

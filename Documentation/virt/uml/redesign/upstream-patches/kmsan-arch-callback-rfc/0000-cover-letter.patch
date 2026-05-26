@@ -1,0 +1,105 @@
+From 44aeccf6190385e353ff804d5f0f75d252ac73cb Mon Sep 17 00:00:00 2001
+From: Michael Bommarito <michael.bommarito@gmail.com>
+Date: Wed, 22 Apr 2026 12:31:19 -0400
+Subject: [RFC PATCH 0/1] mm/kmsan: arch-opt-in shadow init hook to unblock new
+ architectures
+
+Hello Alexander, Dmitry, mm list,
+
+This RFC proposes a small addition to mm/kmsan/ that lets
+architectures reserve and map their KMSAN shadow/origin VA regions
+at early boot without patching mm/kmsan/init.c. The patch is
+deliberately minimal and non-invasive:
+
+  - One new __weak hook (kmsan_arch_init_early_shadow) called
+    from kmsan_init_shadow() before the existing reserved-range
+    sweep. Default is an empty no-op.
+  - One visibility change: kmsan_record_future_shadow_range()
+    becomes non-static so an override can register arch-specific
+    ranges through the same path the generic sweep already uses.
+  - No existing call site changes; no policy in mm/kmsan/.
+
+Architectures that don't define the weak override (x86_64, s390)
+observe no behavioral difference. A local build verification on
+x86_64 defconfig + CONFIG_KMSAN=y with LLVM=1 shows mm/kmsan/init.o
+grows by 32 text bytes + 8 data bytes after the patch — the
+irreducible cost of the weak hook + the new call site — with no
+semantic change in the existing sweep.
+
+Motivating user
+===============
+
+User-Mode Linux (UML), which is seeing renewed investment (backend
+abstraction via struct um_backend_ops, section split for dynamic
+instrumentation, full ftrace + kprobes + kretprobes via rethook +
+function_graph, BPF JIT, KASAN / KFENCE / KCSAN / UBSAN per
+profile, AFL-compatible forkserver for fuzz, a Rust uml-launcher
+host tool, etc. — see Documentation/virt/uml/redesign/README.md in
+the accompanying linux-um tree).
+
+UML runs as a host userspace process. It has no direct-map region;
+its KASAN shadow is a host mmap() at a fixed virtual address, set
+up pre-main() by the arch-specific .kasan_init section pointer
+(arch/um/kernel/mem.c::kasan_init() + arch/um/include/asm/kasan.h).
+KMSAN's shadow and origin require the same mmap treatment AND
+per-page metadata via struct page, which only the generic init
+sweep can provide — hence the hook.
+
+With the hook, UML defines kmsan_arch_init_early_shadow() in its
+arch tree, mmaps the shadow/origin ranges at fixed VAs past the
+KASAN shadow, and calls kmsan_record_future_shadow_range() for
+each so the subsequent kmsan_init_alloc_meta_for_range() sweep
+populates per-page metadata for them. The companion UML-side
+series is separate from this one and only makes sense after this
+lands; I'd be happy to post it alongside as a dependent series if
+helpful.
+
+Why RFC
+=======
+
+The semantic surface is small, but it IS a new surface on
+mm/kmsan/. I'd rather have your approval on the shape before UML
+depends on it — if a callback-registration API would fit better,
+or if you'd prefer the hook live elsewhere in the init sequence,
+I can revise. The diff at the proposed shape is ~20 lines of
+generic code and I've tried to make every decision small and
+defensible.
+
+Payoff
+======
+
+Beyond the immediate UML use case, the hook is a path for any
+future arch that wants to use a non-direct-map shadow layout
+without carrying a patch to mm/kmsan/. UML as an existence proof
+gives KMSAN a second, fast, host-process-native testing target
+that doesn't require KVM or hardware — useful for regression-
+testing the sanitizer itself, and for running KMSAN under UML's
+syzkaller vm/uml backend (in flight) and AFL-compatible fork-
+server (landed).
+
+Checklist
+=========
+
+  - scripts/checkpatch.pl --strict: clean.
+  - x86_64 defconfig + CONFIG_KMSAN=y + LLVM=1: mm/kmsan/init.o
+    builds clean; semantic behavior of kmsan_init_shadow() is
+    unchanged when no arch override is defined (verified by
+    symbol table + size delta analysis).
+  - Full x86_64 boot verification with CONFIG_KMSAN=y: pending
+    (request for reviewer or I can arrange one pre-merge).
+  - UML-side companion series: on uml-redesign-plan branch;
+    boot + KMSAN KUnit results TBD once this hook lands.
+
+Thank you for your time.
+
+Michael Bommarito (1):
+  mm/kmsan: add kmsan_arch_init_early_shadow() weak hook for arch shadow
+    VA init
+
+ include/linux/kmsan.h | 24 ++++++++++++++++++++++++
+ mm/kmsan/init.c       | 20 +++++++++++++++++++-
+ 2 files changed, 43 insertions(+), 1 deletion(-)
+
+--
+2.53.0
+
