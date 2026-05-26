@@ -377,7 +377,27 @@ static void kthread_affine_node(void)
 	free_cpumask_var(affinity);
 }
 
-static int kthread(void *_create)
+/*
+ * notrace: the generic function_graph tracer pushes a shadow-
+ * stack entry at kthread() entry, expecting a matching pop on
+ * return. kthread() does not return — it ends in do_exit().
+ * On native x86 the leaked entry is harmless (the ret_stack
+ * walk tolerates stale entries because frame unwinding doesn't
+ * dereference the leaked retp). On UML the walker DOES
+ * dereference, because UML resumes tasks via kernel_longjmp
+ * into a different host-thread context whose stack addresses
+ * don't match the leaked retp — the stale pointer then gets
+ * popped via a graphed function's ret and jumped through.
+ * Observed crash: SEGV in schedule+0x4a (RAX=0) with
+ * return_to_handler on the stack twice. See UML redesign
+ * decisions-log D34 for the full three-leak-source analysis.
+ *
+ * The narrow fix (matching the D34 2026-04-21 addendum under
+ * D45) is to skip graph tracing at this specific entry. Any
+ * user-written kthread threadfn is still graph-traced; only
+ * the generic kthread()-the-wrapper is skipped.
+ */
+static notrace int kthread(void *_create)
 {
 	static const struct sched_param param = { .sched_priority = 0 };
 	/* Copy data: it's on kthread's stack */
