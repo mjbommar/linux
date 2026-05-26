@@ -12,12 +12,15 @@
 #include <linux/bpf.h>
 #include <linux/memory.h>
 #include <linux/sort.h>
+#include <asm/cpufeature.h>
 #include <asm/extable.h>
 #include <asm/ftrace.h>
+#include <asm/nops.h>
 #include <asm/set_memory.h>
 #include <asm/nospec-branch.h>
 #include <asm/text-patching.h>
 #include <asm/unwind.h>
+#include <asm/vsyscall.h>
 #include <asm/cfi.h>
 
 static bool all_callee_regs_used[4] = {true, true, true, true};
@@ -197,6 +200,28 @@ static const int reg2hex[] = {
 };
 
 static const int reg2pt_regs[] = {
+#ifdef CONFIG_UML
+	/*
+	 * UML's struct pt_regs wraps struct uml_pt_regs with a
+	 * gp[] array indexed by HOST_* constants; the x86 member
+	 * names (ax, di, r14, ...) don't exist. Map each BPF
+	 * register to the equivalent gp[] index so the emitted
+	 * arena-access exception handler can find the faulting
+	 * register correctly. Workstream C-06 per
+	 * Documentation/virt/uml/redesign/04-risks/decisions-log.md
+	 * D43 fifth-view. Bare-metal x86 (#else) is unchanged.
+	 */
+	[BPF_REG_0] = offsetof(struct pt_regs, regs.gp[HOST_AX]),
+	[BPF_REG_1] = offsetof(struct pt_regs, regs.gp[HOST_DI]),
+	[BPF_REG_2] = offsetof(struct pt_regs, regs.gp[HOST_SI]),
+	[BPF_REG_3] = offsetof(struct pt_regs, regs.gp[HOST_DX]),
+	[BPF_REG_4] = offsetof(struct pt_regs, regs.gp[HOST_CX]),
+	[BPF_REG_5] = offsetof(struct pt_regs, regs.gp[HOST_R8]),
+	[BPF_REG_6] = offsetof(struct pt_regs, regs.gp[HOST_BX]),
+	[BPF_REG_7] = offsetof(struct pt_regs, regs.gp[HOST_R13]),
+	[BPF_REG_8] = offsetof(struct pt_regs, regs.gp[HOST_R14]),
+	[BPF_REG_9] = offsetof(struct pt_regs, regs.gp[HOST_R15]),
+#else
 	[BPF_REG_0] = offsetof(struct pt_regs, ax),
 	[BPF_REG_1] = offsetof(struct pt_regs, di),
 	[BPF_REG_2] = offsetof(struct pt_regs, si),
@@ -207,6 +232,7 @@ static const int reg2pt_regs[] = {
 	[BPF_REG_7] = offsetof(struct pt_regs, r13),
 	[BPF_REG_8] = offsetof(struct pt_regs, r14),
 	[BPF_REG_9] = offsetof(struct pt_regs, r15),
+#endif
 };
 
 /*
@@ -1490,13 +1516,13 @@ bool ex_handler_bpf(const struct exception_table_entry *x, struct pt_regs *regs)
 		arena_reg = FIELD_GET(FIXUP_ARENA_REG_MASK, x->fixup);
 		off = FIELD_GET(DATA_ARENA_OFFSET_MASK, x->data);
 		addr = *(unsigned long *)((void *)regs + arena_reg) + off;
-		bpf_prog_report_arena_violation(is_write, addr, regs->ip);
+		bpf_prog_report_arena_violation(is_write, addr, instruction_pointer(regs));
 	}
 
 	/* jump over faulting load and clear dest register */
 	if (reg != DONT_CLEAR)
 		*(unsigned long *)((void *)regs + reg) = 0;
-	regs->ip += insn_len;
+	instruction_pointer_set(regs, instruction_pointer(regs) + insn_len);
 
 	return true;
 }
