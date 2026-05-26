@@ -21,6 +21,7 @@
 #include <linux/random.h>
 #include <linux/smp-internal.h>
 
+#include <asm/backend.h>
 #include <asm/processor.h>
 #include <asm/cpufeature.h>
 #include <asm/sections.h>
@@ -121,9 +122,19 @@ const struct seq_operations cpuinfo_op = {
 	.show	= show_cpuinfo,
 };
 
-/* Set in linux_main */
+/*
+ * Memo 25 R1 abstraction. Today both anchors equal `__binary_start
+ * & PAGE_MASK` (low host VA in PML4[0]); the v2 KVM build will set
+ * uml_physmem to a high constant (PML4[256+]) so the guest pgd's
+ * kernel half no longer overlaps user mappings, while
+ * __binary_start_hva stays at the low host VA where UML's pages
+ * actually live. See arch/um/include/shared/mem.h for the
+ * conceptual split.
+ */
 unsigned long uml_physmem;
 EXPORT_SYMBOL(uml_physmem);
+unsigned long __binary_start_hva;
+EXPORT_SYMBOL(__binary_start_hva);
 
 unsigned long uml_reserved; /* Also modified in mem_init */
 unsigned long start_vm;
@@ -345,6 +356,22 @@ int __init linux_main(int argc, char **argv, char **envp)
 	/* OS sanity checks that need to happen before the kernel runs */
 	os_early_checks();
 
+	/*
+	 * Pick a backend RIGHT NOW — before start_uml() calls
+	 * thread_start_idle() (which dispatches through um_backend) and
+	 * before timekeeping_init() calls read_persistent_clock64()
+	 * (likewise). os_early_checks() above set `using_seccomp` based
+	 * on the host probe; init_backend() consumes that together with
+	 * the `backend=` cmdline override already parsed by
+	 * uml_backend_config() into backend_arg_requested/backend_arg_force.
+	 * The backend_args arg is reserved for future per-backend knobs.
+	 */
+	{
+		struct um_backend_args backend_args = { 0 };
+
+		init_backend(&backend_args);
+	}
+
 	get_host_cpu_features(parse_host_cpu_flags, parse_cache_line);
 
 	brk_start = (unsigned long) sbrk(0);
@@ -361,7 +388,8 @@ int __init linux_main(int argc, char **argv, char **envp)
 		physmem_size += diff;
 	}
 
-	uml_physmem = (unsigned long) __binary_start & PAGE_MASK;
+	__binary_start_hva = (unsigned long) __binary_start & PAGE_MASK;
+	uml_physmem = __binary_start_hva;	/* memo 25 R1: equal today; v2 splits them */
 
 	/* Reserve up to 4M after the current brk */
 	uml_reserved = ROUND_4M(brk_start) + (1 << 22);
@@ -407,6 +435,13 @@ int __init __weak read_initrd(void)
 void __init setup_arch(char **cmdline_p)
 {
 	u8 rng_seed[32];
+
+	/*
+	 * init_backend() runs from linux_main() above (right after
+	 * os_early_checks), not here — that's required so that
+	 * start_uml()'s thread_start_idle() dispatch has um_backend
+	 * already set. setup_arch must NOT re-run init_backend.
+	 */
 
 	stack_protections((unsigned long) init_task.stack);
 	setup_physmem(uml_physmem, uml_reserved, physmem_size);
@@ -466,11 +501,21 @@ void alternatives_smp_module_del(struct module *mod)
 void *text_poke(void *addr, const void *opcode, size_t len)
 {
 	/*
-	 * In UML, the only reference to this function is in
-	 * apply_relocate_add(), which shouldn't ever actually call this
-	 * because UML doesn't have live patching.
+	 * Historically a no-op WARN on UML because the only caller
+	 * was apply_relocate_add() which shouldn't ever fire (UML
+	 * has no live patching). With workstream C-06 (BPF JIT),
+	 * arch/x86/net/bpf_jit_comp.c now calls via text_poke_copy()
+	 * during JIT image finalization — a legitimate callsite.
+	 * Keep the WARN so genuinely-unexpected callers still
+	 * surface, but gate it on !in_task() to silence the common
+	 * JIT-compile path (which runs in task context with
+	 * preemption enabled).
+	 *
+	 * If anyone calls text_poke from IRQ or hardirq context on
+	 * UML they really do need to be flagged — that would be a
+	 * cross-subsystem bug.
 	 */
-	WARN_ON(1);
+	WARN_ON(!in_task());
 
 	return memcpy(addr, opcode, len);
 }

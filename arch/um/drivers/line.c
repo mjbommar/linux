@@ -10,6 +10,7 @@
 
 #include "chan.h"
 #include <irq_kern.h>
+#include <linux/uio.h>
 #include <irq_user.h>
 #include <kern_util.h>
 #include <os.h>
@@ -135,7 +136,49 @@ static int flush_buffer(struct line *line)
 		return 1;
 
 	if (line->tail < line->head) {
-		/* line->buffer + LINE_BUFSIZE is the end of the buffer! */
+		/*
+		 * Ring-wrap case: data spans `line->head .. buffer_end`
+		 * and `buffer_start .. line->tail`.  Memo #7 Phase 1:
+		 * coalesce the two writes into one writev(2) when the
+		 * channel is an fd-shaped sink (the common case —
+		 * pty/pts/port/fd all are).  This saves one host
+		 * syscall per ring-wrap on heavy console traffic
+		 * (dmesg | head -N, boot log replay).  Falls back to
+		 * the two-call shape when the channel doesn't carry an
+		 * fd or when writev returns short.
+		 */
+		struct chan *chan = line->chan_out;
+		int total_first  = line->buffer + LINE_BUFSIZE - line->head;
+		int total_second = line->tail - line->buffer;
+
+		if (chan && chan->fd_out >= 0 && total_first > 0 &&
+		    total_second > 0) {
+			struct iovec iov[2] = {
+				{ .iov_base = line->head,    .iov_len = total_first  },
+				{ .iov_base = line->buffer,  .iov_len = total_second },
+			};
+			ssize_t wv = os_writev(chan->fd_out, iov, 2);
+
+			if (wv > 0) {
+				if ((int)wv >= total_first) {
+					int rem = (int)wv - total_first;
+
+					line->head = line->buffer + rem;
+					if (line->head == line->tail)
+						return 1;
+					return 0;
+				}
+				/* Short write inside the first segment. */
+				line->head += (int)wv;
+				return 0;
+			}
+			if (wv == 0)
+				return 0;
+			/* wv < 0 — fall through to legacy write_chan path
+			 * so error handling stays on one code path.
+			 */
+		}
+
 		count = line->buffer + LINE_BUFSIZE - line->head;
 
 		n = write_chan(line->chan_out, line->head, count,

@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <mem_user.h>
 #include <sys/mman.h>
@@ -18,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <asm/unistd.h>
+#include <backend.h>
 #include <as-layout.h>
 #include <init.h>
 #include <kern_util.h>
@@ -31,7 +33,6 @@
 #include <linux/futex.h>
 #include <linux/threads.h>
 #include <timetravel.h>
-#include <asm-generic/rwonce.h>
 #include "../internal.h"
 
 int is_skas_winch(int pid, int fd, void *data)
@@ -39,112 +40,44 @@ int is_skas_winch(int pid, int fd, void *data)
 	return pid == getpgrp();
 }
 
-static const char *ptrace_reg_name(int idx)
-{
-#define R(n) case HOST_##n: return #n
-
-	switch (idx) {
-#ifdef __x86_64__
-	R(BX);
-	R(CX);
-	R(DI);
-	R(SI);
-	R(DX);
-	R(BP);
-	R(AX);
-	R(R8);
-	R(R9);
-	R(R10);
-	R(R11);
-	R(R12);
-	R(R13);
-	R(R14);
-	R(R15);
-	R(ORIG_AX);
-	R(CS);
-	R(SS);
-	R(EFLAGS);
-#elif defined(__i386__)
-	R(IP);
-	R(SP);
-	R(EFLAGS);
-	R(AX);
-	R(BX);
-	R(CX);
-	R(DX);
-	R(SI);
-	R(DI);
-	R(BP);
-	R(CS);
-	R(SS);
-	R(DS);
-	R(FS);
-	R(ES);
-	R(GS);
-	R(ORIG_AX);
-#endif
-	}
-	return "";
-}
-
-static int ptrace_dump_regs(int pid)
-{
-	unsigned long regs[MAX_REG_NR];
-	int i;
-
-	if (ptrace(PTRACE_GETREGS, pid, 0, regs) < 0)
-		return -errno;
-
-	printk(UM_KERN_ERR "Stub registers -\n");
-	for (i = 0; i < ARRAY_SIZE(regs); i++) {
-		const char *regname = ptrace_reg_name(i);
-
-		printk(UM_KERN_ERR "\t%s\t(%2d): %lx\n", regname, i, regs[i]);
-	}
-
-	return 0;
-}
-
 /*
- * Signals that are OK to receive in the stub - we'll just continue it.
- * SIGWINCH will happen when UML is inside a detached screen.
+ * Ship the queued syscall_fd_map[] fds to the stub child via SCM_RIGHTS
+ * over mm_idp->sock. Extracted from wait_stub_done_seccomp's prelude so
+ * the WORKER_PROCESS=y path can run it from the spawner (those fds
+ * live in the spawner's FD table) before handing the futex round-trip
+ * off to the worker (memo 28 E.3d.2).
  */
-#define STUB_SIG_MASK ((1 << SIGALRM) | (1 << SIGWINCH))
-
-/* Signals that the stub will finish with - anything else is an error */
-#define STUB_DONE_MASK (1 << SIGTRAP)
-
-void wait_stub_done(int pid)
+void send_stub_syscall_fds(struct mm_id *mm_idp)
 {
-	int n, status, err;
+	const char byte = 0;
+	struct iovec iov = {
+		.iov_base = (void *)&byte,
+		.iov_len  = sizeof(byte),
+	};
+	union {
+		char data[CMSG_SPACE(sizeof(mm_idp->syscall_fd_map))];
+		struct cmsghdr align;
+	} ctrl;
+	struct msghdr msgh = {
+		.msg_iov    = &iov,
+		.msg_iovlen = 1,
+	};
+	unsigned int fds_size;
+	struct cmsghdr *cmsg;
 
-	while (1) {
-		CATCH_EINTR(n = waitpid(pid, &status, WUNTRACED | __WALL));
-		if ((n < 0) || !WIFSTOPPED(status))
-			goto bad_wait;
-
-		if (((1 << WSTOPSIG(status)) & STUB_SIG_MASK) == 0)
-			break;
-
-		err = ptrace(PTRACE_CONT, pid, 0, 0);
-		if (err) {
-			printk(UM_KERN_ERR "%s : continue failed, errno = %d\n",
-			       __func__, errno);
-			fatal_sigsegv();
-		}
-	}
-
-	if (((1 << WSTOPSIG(status)) & STUB_DONE_MASK) != 0)
+	if (!mm_idp->syscall_fd_num)
 		return;
 
-bad_wait:
-	err = ptrace_dump_regs(pid);
-	if (err)
-		printk(UM_KERN_ERR "Failed to get registers from stub, errno = %d\n",
-		       -err);
-	printk(UM_KERN_ERR "%s : failed to wait for SIGTRAP, pid = %d, n = %d, errno = %d, status = 0x%x\n",
-	       __func__, pid, n, errno, status);
-	fatal_sigsegv();
+	fds_size = sizeof(int) * mm_idp->syscall_fd_num;
+	msgh.msg_control    = ctrl.data;
+	msgh.msg_controllen = CMSG_SPACE(fds_size);
+	cmsg = CMSG_FIRSTHDR(&msgh);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type  = SCM_RIGHTS;
+	cmsg->cmsg_len   = CMSG_LEN(fds_size);
+	memcpy(CMSG_DATA(cmsg), mm_idp->syscall_fd_map, fds_size);
+
+	CATCH_EINTR(syscall(__NR_sendmsg, mm_idp->sock, &msgh, 0));
 }
 
 void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
@@ -204,7 +137,7 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 			 * Either way, if PID is negative, then we have no
 			 * choice but to kill the task.
 			 */
-			if (__READ_ONCE(mm_idp->pid) < 0)
+			if (UM_USER_READ_ONCE(mm_idp->pid) < 0)
 				goto out_kill;
 
 			ret = syscall(__NR_futex, &data->futex,
@@ -217,7 +150,7 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 			}
 		} while (data->futex == FUTEX_IN_CHILD);
 
-		if (__READ_ONCE(mm_idp->pid) < 0)
+		if (UM_USER_READ_ONCE(mm_idp->pid) < 0)
 			goto out_kill;
 
 		running = 0;
@@ -248,32 +181,11 @@ out_kill:
 
 extern unsigned long current_stub_stack(void);
 
-static void get_skas_faultinfo(int pid, struct faultinfo *fi)
-{
-	int err;
-
-	err = ptrace(PTRACE_CONT, pid, 0, SIGSEGV);
-	if (err) {
-		printk(UM_KERN_ERR "Failed to continue stub, pid = %d, "
-		       "errno = %d\n", pid, errno);
-		fatal_sigsegv();
-	}
-	wait_stub_done(pid);
-
-	/*
-	 * faultinfo is prepared by the stub_segv_handler at start of
-	 * the stub stack page. We just have to copy it.
-	 */
-	memcpy(fi, (void *)current_stub_stack(), sizeof(*fi));
-}
-
-static void handle_trap(struct uml_pt_regs *regs)
-{
-	if ((UPT_IP(regs) >= STUB_START) && (UPT_IP(regs) < STUB_END))
-		fatal_sigsegv();
-
-	handle_syscall(regs);
-}
+/*
+ * get_skas_faultinfo() and handle_trap() moved into
+ * arch/um/backend/ptrace/trap_user.c with workstream A-02.HOT-1
+ * (they're ptrace-only).
+ */
 
 extern char __syscall_stub_start[];
 
@@ -283,6 +195,15 @@ struct tramp_data {
 	struct stub_data *stub_data;
 	/* 0 is inherited, 1 is the kernel side */
 	int sockpair[2];
+	/*
+	 * If >= 0, override phys_mapping() for stub_data — pass this
+	 * fd to the stub child instead of UML's shared physmem_fd.
+	 * Used by start_userspace_fresh() so post-fork pool members
+	 * get a per-mm stub_data backing fd (memfd) and the stub maps
+	 * physically-isolated memory.  Offset is always 0 in this
+	 * mode.  If -1, fall back to phys_mapping (the default).
+	 */
+	int stub_data_fd_override;
 };
 
 #ifndef CLOSE_RANGE_CLOEXEC
@@ -294,13 +215,26 @@ static int userspace_tramp(void *data)
 	struct tramp_data *tramp_data = data;
 	char *const argv[] = { "uml-userspace", NULL };
 	unsigned long long offset;
+	/*
+	 * Stub-child seccomp wiring. init_data.seccomp is the
+	 * boolean "install the SIGSYS filter" flag the stub
+	 * binary reads; the handler/restorer trampoline offsets
+	 * pick between stub_signal_interrupt (seccomp SIGSYS
+	 * entry) and stub_segv_handler (ptrace SIGSEGV entry).
+	 * Routed through um_backend->stub_child_runs_seccomp
+	 * per D59 Phase II Lift #4d. um_backend is populated
+	 * because userspace_tramp runs inside clone() of the
+	 * first start_userspace call, which is post-init_backend
+	 * (um_arch.c::linux_main ordering).
+	 */
+	bool want_seccomp = um_backend && um_backend->stub_child_runs_seccomp;
 	struct stub_init_data init_data = {
-		.seccomp = using_seccomp,
+		.seccomp = want_seccomp,
 		.stub_start = STUB_START,
 	};
 	int ret;
 
-	if (using_seccomp) {
+	if (want_seccomp) {
 		init_data.signal_handler = STUB_CODE +
 					   (unsigned long) stub_signal_interrupt -
 					   (unsigned long) __syscall_stub_start;
@@ -318,9 +252,19 @@ static int userspace_tramp(void *data)
 					      &offset);
 	init_data.stub_code_offset = MMAP_OFFSET(offset);
 
-	init_data.stub_data_fd = phys_mapping(uml_to_phys(tramp_data->stub_data),
-					      &offset);
-	init_data.stub_data_offset = MMAP_OFFSET(offset);
+	if (tramp_data->stub_data_fd_override >= 0) {
+		/* Per-mm memfd: stub_data lives in its own backing fd
+		 * (start_userspace_fresh path), not UML's shared
+		 * physmem_fd.  Used to give post-fork pool members
+		 * physically-isolated stub_data.
+		 */
+		init_data.stub_data_fd = tramp_data->stub_data_fd_override;
+		init_data.stub_data_offset = 0;
+	} else {
+		init_data.stub_data_fd = phys_mapping(uml_to_phys(tramp_data->stub_data),
+						      &offset);
+		init_data.stub_data_offset = MMAP_OFFSET(offset);
+	}
 
 	/*
 	 * Avoid leaking unneeded FDs to the stub by setting CLOEXEC on all FDs
@@ -330,6 +274,15 @@ static int userspace_tramp(void *data)
 	syscall(__NR_close_range, 0, ~0U, CLOSE_RANGE_CLOEXEC);
 
 	fcntl(init_data.stub_data_fd, F_SETFD, 0);
+	/*
+	 * In the override path stub_code_fd != stub_data_fd (data is
+	 * a per-mm memfd; code is still UML's physmem_fd holding the
+	 * stub binary text).  The default path has them equal — both
+	 * are physmem_fd — so the fcntl above implicitly clears
+	 * CLOEXEC on both.  Be explicit so the override case works.
+	 */
+	if (init_data.stub_code_fd != init_data.stub_data_fd)
+		fcntl(init_data.stub_code_fd, F_SETFD, 0);
 
 	/* dup2 signaling FD/socket to STDIN */
 	if (dup2(tramp_data->sockpair[0], 0) < 0)
@@ -412,6 +365,16 @@ static int __init init_stub_exe_fd(void)
 		}
 
 		close(stub_exe_fd);
+		/*
+		 * FD disposition (C-09 commit 4): inherit. The stub
+		 * binary fd is the fexecve() target for every
+		 * userspace stub spawn and is held for the UML
+		 * kernel's entire lifetime. Workers inherit it CoW
+		 * and reuse it to spawn their own stubs. O_CLOEXEC
+		 * here is correct: start_userspace() separately
+		 * unshares fds into the stub child's file table
+		 * via the tramp socketpair.
+		 */
 		stub_exe_fd = open(tmpfile, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
 		if (stub_exe_fd < 0) {
 			unlink(tmpfile);
@@ -444,10 +407,11 @@ int start_userspace(struct mm_id *mm_id)
 	struct stub_data *proc_data = (void *)mm_id->stack;
 	struct tramp_data tramp_data = {
 		.stub_data = proc_data,
+		.stub_data_fd_override = -1,
 	};
 	void *stack;
 	unsigned long sp;
-	int status, n, err;
+	int err;
 
 	/* setup a temporary stack page */
 	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
@@ -463,7 +427,15 @@ int start_userspace(struct mm_id *mm_id)
 	/* set stack pointer to the end of the stack page, so it can grow downwards */
 	sp = (unsigned long)stack + UM_KERN_PAGE_SIZE;
 
-	/* socket pair for init data and SECCOMP FD passing (no CLOEXEC here) */
+	/*
+	 * Socket pair for init data and SECCOMP FD passing.
+	 * FD disposition (C-09 commit 4): exec-transmit. No
+	 * SOCK_CLOEXEC on purpose — the userspace stub child
+	 * exec()s into the stub binary and must inherit this fd to
+	 * receive init data and (optionally) a seccomp fd from the
+	 * UML kernel. This is the one socketpair() in arch/um that
+	 * intentionally survives exec; do not "fix" it.
+	 */
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, tramp_data.sockpair)) {
 		err = -errno;
 		printk(UM_KERN_ERR "%s : socketpair failed, errno = %d\n",
@@ -471,7 +443,14 @@ int start_userspace(struct mm_id *mm_id)
 		return err;
 	}
 
-	if (using_seccomp)
+	/*
+	 * Pre-clone futex seed — only meaningful for backends
+	 * whose stub dispatch uses the futex-wait_stub_done_
+	 * seccomp round-trip. Routed through
+	 * um_backend->stub_syscall_uses_futex per D59 Phase II
+	 * Lift #4d (mirrors the 4c dispatch-mechanism flag).
+	 */
+	if (um_backend && um_backend->stub_syscall_uses_futex)
 		proc_data->futex = FUTEX_IN_CHILD;
 
 	mm_id->pid = clone(userspace_tramp, (void *) sp,
@@ -484,35 +463,13 @@ int start_userspace(struct mm_id *mm_id)
 		goto out_close;
 	}
 
-	if (using_seccomp) {
-		wait_stub_done_seccomp(mm_id, 1, 1);
-	} else {
-		do {
-			CATCH_EINTR(n = waitpid(mm_id->pid, &status,
-						WUNTRACED | __WALL));
-			if (n < 0) {
-				err = -errno;
-				printk(UM_KERN_ERR "%s : wait failed, errno = %d\n",
-				       __func__, errno);
-				goto out_kill;
-			}
-		} while (WIFSTOPPED(status) && (WSTOPSIG(status) == SIGALRM));
-
-		if (!WIFSTOPPED(status) || (WSTOPSIG(status) != SIGSTOP)) {
-			err = -EINVAL;
-			printk(UM_KERN_ERR "%s : expected SIGSTOP, got status = %d\n",
-			       __func__, status);
-			goto out_kill;
-		}
-
-		if (ptrace(PTRACE_SETOPTIONS, mm_id->pid, NULL,
-			   (void *) PTRACE_O_TRACESYSGOOD) < 0) {
-			err = -errno;
-			printk(UM_KERN_ERR "%s : PTRACE_SETOPTIONS failed, errno = %d\n",
-			       __func__, errno);
-			goto out_kill;
-		}
-	}
+	/*
+	 * Wait for the stub child to reach its initial ready state via
+	 * the futex round-trip. KVM doesn't reach this code path.
+	 * (Pre-memo-25-R11 the else branch handled ptrace's SIGSTOP +
+	 * PTRACE_SETOPTIONS dance; ptrace was removed.)
+	 */
+	wait_stub_done_seccomp(mm_id, 1, 1);
 
 	if (munmap(stack, UM_KERN_PAGE_SIZE) < 0) {
 		err = -errno;
@@ -522,7 +479,15 @@ int start_userspace(struct mm_id *mm_id)
 	}
 
 	close(tramp_data.sockpair[0]);
-	if (using_seccomp)
+	/*
+	 * Retain the parent-side sockpair FD only for backends
+	 * that use it for subsequent SCM_RIGHTS FD passing to
+	 * the stub child (seccomp). Ptrace closes it; KVM never
+	 * gets here. Routed through um_backend->has_syscall_
+	 * stub_fd_map per D59 Phase II Lift #4d (the sockpair
+	 * retention is part of the same fd-map mechanism).
+	 */
+	if (um_backend && um_backend->has_syscall_stub_fd_map)
 		mm_id->sock = tramp_data.sockpair[1];
 	else
 		close(tramp_data.sockpair[1]);
@@ -540,254 +505,270 @@ out_close:
 	return err;
 }
 
-static int unscheduled_userspace_iterations;
-extern unsigned long tt_extra_sched_jiffies;
+/*
+ * os_skas_reap_stub() — SIGKILL + wait4 the stub child attached to a
+ * given mm_id, close the parent-side socketpair end, and zero the
+ * stub_data round-trip fields so a subsequent start_userspace()
+ * sees fresh state.
+ *
+ * Used by the template-pause fork-on-resume loop (Memo 09 Phase 2a)
+ * BOTH:
+ *   * Pre-fork in the master, where every stub child must be killed
+ *     so fork() does not alias their pids into the forked-child
+ *     UML's mm_list (where two processes would race to drive them).
+ *   * As the first half of start_userspace_redo() below.
+ *
+ * Idempotent: if mm_id->pid <= 0, the kill/wait is skipped and only
+ * the sock close / stub_data zero / id field reset runs.
+ *
+ * Uses raw __NR_wait4 per the os_snapshot_waitpid_status rationale:
+ * glibc's cancellation-point waitpid wrapper has historically
+ * misbehaved when called from UML kernel context.
+ *
+ * Returns 0 on success, -errno on kill/wait failure (other than
+ * ESRCH/ECHILD which are treated as "stub already gone" and silently
+ * tolerated).  On error, leaves @mm_id in a partially-reaped state;
+ * the caller is responsible for not driving the stub further.
+ */
+int os_skas_reap_stub(struct mm_id *mm_id)
+{
+	struct stub_data *proc_data = (void *)mm_id->stack;
+	long ret;
+	int err;
 
+	if (mm_id->pid > 0) {
+		if (kill(mm_id->pid, SIGKILL) < 0 && errno != ESRCH) {
+			err = -errno;
+			printk(UM_KERN_ERR "%s: kill(%d, SIGKILL) failed: %d\n",
+			       __func__, mm_id->pid, err);
+			return err;
+		}
+		for (;;) {
+			ret = syscall(__NR_wait4, mm_id->pid, NULL, __WALL, NULL);
+			if (ret == mm_id->pid)
+				break;
+			if (ret < 0) {
+				if (errno == EINTR)
+					continue;
+				/* ECHILD is fine: stub already reaped by
+				 * an earlier SIGCHLD path or was never our
+				 * direct child after a fork race.
+				 */
+				if (errno == ECHILD)
+					break;
+				err = -errno;
+				printk(UM_KERN_ERR "%s: wait4(%d) failed: %d\n",
+				       __func__, mm_id->pid, err);
+				return err;
+			}
+		}
+	}
+
+	if (mm_id->sock >= 0) {
+		close(mm_id->sock);
+		mm_id->sock = -1;
+	}
+
+	/* Zero the round-trip fields so the new stub's first futex
+	 * handshake sees fresh state.  Leave the rest of stub_data
+	 * alone — pages, code, mctx storage, fault info — those are
+	 * stub-binary-owned and respawn doesn't alter them.
+	 */
+	proc_data->futex = 0;
+	proc_data->signal = 0;
+	proc_data->si_offset = 0;
+	proc_data->mctx_offset = 0;
+	proc_data->syscall_data_len = 0;
+
+	mm_id->pid = -1;
+	mm_id->syscall_data_len = 0;
+	mm_id->syscall_fd_num = 0;
+
+	return 0;
+}
+
+/*
+ * start_userspace_fresh() — spawn a stub with PRIVATE stub_data
+ * backing.
+ *
+ * Standard start_userspace() relies on UML's global physmem_fd
+ * for stub_data: the kernel allocates a page via __get_free_pages,
+ * phys_mapping() resolves that to (physmem_fd, offset), the stub
+ * mmaps physmem_fd at that offset.  For pool-member children
+ * post-fork, physmem_fd is MAP_SHARED with the master and all
+ * sibling pool members — every stub reads/writes the SAME physical
+ * bytes.  Sustained N-member dispatch is impossible in this model.
+ *
+ * This variant creates a PER-CALL memfd for stub_data, mmaps it
+ * MAP_SHARED into the calling process (which becomes the new
+ * id->stack VA), and passes the memfd to the stub via the
+ * stub_data_fd_override path so the stub mmaps the SAME memfd
+ * (in CLONE_VM child context, the mmap is shared with this
+ * process).  Each pool member gets physically-isolated stub_data.
+ *
+ * Memfd lifecycle: the kernel-side mmap keeps the memfd alive
+ * through the mm's destroy_context (where id->stack is freed via
+ * munmap path).  The stub's mmap independently keeps the
+ * underlying pages alive across the stub's lifetime.  The fd
+ * number itself is closed in the parent after passing to the stub.
+ *
+ * Returns 0 on success or -errno on failure.
+ */
+int start_userspace_fresh(struct mm_id *mm_id)
+{
+	const size_t map_size = STUB_DATA_PAGES * UM_KERN_PAGE_SIZE;
+	struct stub_data *proc_data;
+	struct tramp_data tramp_data;
+	void *stack;
+	unsigned long sp;
+	int data_fd, err;
+
+	/* Per-mm stub_data memfd. */
+	data_fd = syscall(__NR_memfd_create, "um-pool-stubdata", 0);
+	if (data_fd < 0)
+		return -errno;
+	if (ftruncate(data_fd, map_size) < 0) {
+		err = -errno;
+		close(data_fd);
+		return err;
+	}
+
+	/* mmap MAP_SHARED into this UML kernel's address space.  The
+	 * resulting VA replaces mm_id->stack; both kernel-side
+	 * accesses and the stub (via CLONE_VM share with same VA)
+	 * see the same physical memory backed by data_fd.
+	 */
+	proc_data = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
+			 MAP_SHARED, data_fd, 0);
+	if (proc_data == MAP_FAILED) {
+		err = -errno;
+		close(data_fd);
+		return err;
+	}
+
+	/* Zero the new page (memfd_create + ftruncate gives zeros
+	 * already, but be explicit for clarity).
+	 */
+	memset(proc_data, 0, map_size);
+
+	/* Replace the inherited id->stack with our private mapping.
+	 * The OLD page (master's stub_data) is left behind — child
+	 * doesn't own it.  Per-iteration leak budget: STUB_DATA_PAGES
+	 * of address space (and zero physical pages, since master's
+	 * page is still mapped by master).
+	 */
+	mm_id->stack = (unsigned long)proc_data;
+
+	tramp_data.stub_data = proc_data;
+	tramp_data.stub_data_fd_override = data_fd;
+
+	/* Temporary stack for userspace_tramp. */
+	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
+		     PROT_READ | PROT_WRITE | PROT_EXEC,
+		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (stack == MAP_FAILED) {
+		err = -errno;
+		goto out_close_data;
+	}
+	sp = (unsigned long)stack + UM_KERN_PAGE_SIZE;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, tramp_data.sockpair)) {
+		err = -errno;
+		munmap(stack, UM_KERN_PAGE_SIZE);
+		goto out_close_data;
+	}
+
+	if (um_backend && um_backend->stub_syscall_uses_futex)
+		proc_data->futex = FUTEX_IN_CHILD;
+
+	mm_id->pid = clone(userspace_tramp, (void *)sp,
+			   CLONE_VFORK | CLONE_VM | SIGCHLD,
+			   (void *)&tramp_data);
+	if (mm_id->pid < 0) {
+		err = -errno;
+		close(tramp_data.sockpair[0]);
+		close(tramp_data.sockpair[1]);
+		munmap(stack, UM_KERN_PAGE_SIZE);
+		goto out_close_data;
+	}
+
+	wait_stub_done_seccomp(mm_id, 1, 1);
+
+	if (munmap(stack, UM_KERN_PAGE_SIZE) < 0) {
+		err = -errno;
+		goto out_kill;
+	}
+
+	close(tramp_data.sockpair[0]);
+
+	if (um_backend && um_backend->has_syscall_stub_fd_map)
+		mm_id->sock = tramp_data.sockpair[1];
+	else
+		close(tramp_data.sockpair[1]);
+
+	/* Parent no longer needs the fd reference — stub has its own
+	 * mmap keeping the backing alive; our mmap (proc_data) keeps
+	 * a kernel-side reference too.
+	 */
+	close(data_fd);
+	return 0;
+
+out_kill:
+	os_kill_ptraced_process(mm_id->pid, 1);
+out_close_data:
+	munmap(proc_data, map_size);
+	close(data_fd);
+	mm_id->stack = 0;
+	mm_id->pid = -1;
+	return err;
+}
+
+/*
+ * start_userspace_redo() — replace a stub child after a fork(2).
+ *
+ * Equivalent to os_skas_reap_stub() followed by start_userspace().
+ * Idempotent w.r.t. the kill side: a previously-reaped mm
+ * (pid == -1) is just respawned.  Always respawns.
+ *
+ * Returns 0 on success, -errno on clone/socketpair failure.  Failure
+ * leaves @mm_id->pid == -1 so subsequent vcpu_run sees the dead-mm
+ * state that the existing mm_sigchld_irq logic already handles.
+ */
+int start_userspace_redo(struct mm_id *mm_id)
+{
+	int err = os_skas_reap_stub(mm_id);
+
+	if (err)
+		return err;
+	return start_userspace(mm_id);
+}
+
+/*
+ * Counter shared between both backends' run_userspace impls and
+ * reset by switch_threads (below) on every context switch. It
+ * implements the time-travel-mode rate-limit on extra scheduler
+ * jiffies — counting UNSCHEDULED iterations of the per-backend trap
+ * loop body. Per-backend trap loops extern-declare it.
+ */
+unsigned int unscheduled_userspace_iterations;
+
+/*
+ * Trap loop. Per-iteration body lives in the active backend's
+ * run_userspace op; this function is just the loop scaffolding.
+ *
+ * The dispatch macro is the single source of truth for which backend
+ * runs: in *_ONLY builds it expands to a direct call to the chosen
+ * backend; in DYNAMIC builds init_backend() set `um_backend` to
+ * match the host probe (`using_seccomp`) before this function is
+ * ever entered.
+ */
 void userspace(struct uml_pt_regs *regs)
 {
-	int err, status, op;
-	siginfo_t si_local;
-	siginfo_t *si;
-	int sig;
-
 	/* Handle any immediate reschedules or signals */
 	interrupt_end();
 
-	while (1) {
-		struct mm_id *mm_id = current_mm_id();
-
-		/*
-		 * At any given time, only one CPU thread can enter the
-		 * turnstile to operate on the same stub process, including
-		 * executing stub system calls (mmap and munmap).
-		 */
-		enter_turnstile(mm_id);
-
-		/*
-		 * When we are in time-travel mode, userspace can theoretically
-		 * do a *lot* of work without being scheduled. The problem with
-		 * this is that it will prevent kernel bookkeeping (primarily
-		 * the RCU) from running and this can for example cause OOM
-		 * situations.
-		 *
-		 * This code accounts a jiffie against the scheduling clock
-		 * after the defined userspace iterations in the same thread.
-		 * By doing so the situation is effectively prevented.
-		 */
-		if (time_travel_mode == TT_MODE_INFCPU ||
-		    time_travel_mode == TT_MODE_EXTERNAL) {
-#ifdef CONFIG_UML_MAX_USERSPACE_ITERATIONS
-			if (CONFIG_UML_MAX_USERSPACE_ITERATIONS &&
-			    unscheduled_userspace_iterations++ >
-			    CONFIG_UML_MAX_USERSPACE_ITERATIONS) {
-				tt_extra_sched_jiffies += 1;
-				unscheduled_userspace_iterations = 0;
-			}
-#endif
-		}
-
-		time_travel_print_bc_msg();
-
-		current_mm_sync();
-
-		if (using_seccomp) {
-			struct stub_data *proc_data = (void *) mm_id->stack;
-
-			err = set_stub_state(regs, proc_data, singlestepping());
-			if (err) {
-				printk(UM_KERN_ERR "%s - failed to set regs: %d",
-				       __func__, err);
-				fatal_sigsegv();
-			}
-
-			/* Must have been reset by the syscall caller */
-			if (proc_data->restart_wait != 0)
-				panic("Programming error: Flag to only run syscalls in child was not cleared!");
-
-			/* Mark pending syscalls for flushing */
-			proc_data->syscall_data_len = mm_id->syscall_data_len;
-
-			wait_stub_done_seccomp(mm_id, 0, 0);
-
-			sig = proc_data->signal;
-
-			if (sig == SIGTRAP && proc_data->err != 0) {
-				printk(UM_KERN_ERR "%s - Error flushing stub syscalls",
-				       __func__);
-				syscall_stub_dump_error(mm_id);
-				mm_id->syscall_data_len = proc_data->err;
-				fatal_sigsegv();
-			}
-
-			mm_id->syscall_data_len = 0;
-			mm_id->syscall_fd_num = 0;
-
-			err = get_stub_state(regs, proc_data, NULL);
-			if (err) {
-				printk(UM_KERN_ERR "%s - failed to get regs: %d",
-				       __func__, err);
-				fatal_sigsegv();
-			}
-
-			if (proc_data->si_offset > sizeof(proc_data->sigstack) - sizeof(*si))
-				panic("%s - Invalid siginfo offset from child", __func__);
-
-			si = &si_local;
-			memcpy(si, &proc_data->sigstack[proc_data->si_offset], sizeof(*si));
-
-			regs->is_user = 1;
-
-			/* Fill in ORIG_RAX and extract fault information */
-			PT_SYSCALL_NR(regs->gp) = si->si_syscall;
-			if (sig == SIGSEGV) {
-				mcontext_t *mcontext = (void *)&proc_data->sigstack[proc_data->mctx_offset];
-
-				GET_FAULTINFO_FROM_MC(regs->faultinfo, mcontext);
-			}
-		} else {
-			int pid = mm_id->pid;
-
-			/* Flush out any pending syscalls */
-			err = syscall_stub_flush(mm_id);
-			if (err) {
-				if (err == -ENOMEM)
-					report_enomem();
-
-				printk(UM_KERN_ERR "%s - Error flushing stub syscalls: %d",
-					__func__, -err);
-				fatal_sigsegv();
-			}
-
-			/*
-			 * This can legitimately fail if the process loads a
-			 * bogus value into a segment register.  It will
-			 * segfault and PTRACE_GETREGS will read that value
-			 * out of the process.  However, PTRACE_SETREGS will
-			 * fail.  In this case, there is nothing to do but
-			 * just kill the process.
-			 */
-			if (ptrace(PTRACE_SETREGS, pid, 0, regs->gp)) {
-				printk(UM_KERN_ERR "%s - ptrace set regs failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (put_fp_registers(pid, regs->fp)) {
-				printk(UM_KERN_ERR "%s - ptrace set fp regs failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (singlestepping())
-				op = PTRACE_SYSEMU_SINGLESTEP;
-			else
-				op = PTRACE_SYSEMU;
-
-			if (ptrace(op, pid, 0, 0)) {
-				printk(UM_KERN_ERR "%s - ptrace continue failed, op = %d, errno = %d\n",
-				       __func__, op, errno);
-				fatal_sigsegv();
-			}
-
-			CATCH_EINTR(err = waitpid(pid, &status, WUNTRACED | __WALL));
-			if (err < 0) {
-				printk(UM_KERN_ERR "%s - wait failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			regs->is_user = 1;
-			if (ptrace(PTRACE_GETREGS, pid, 0, regs->gp)) {
-				printk(UM_KERN_ERR "%s - PTRACE_GETREGS failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (get_fp_registers(pid, regs->fp)) {
-				printk(UM_KERN_ERR "%s -  get_fp_registers failed, errno = %d\n",
-				       __func__, errno);
-				fatal_sigsegv();
-			}
-
-			if (WIFSTOPPED(status)) {
-				sig = WSTOPSIG(status);
-
-				/*
-				 * These signal handlers need the si argument
-				 * and SIGSEGV needs the faultinfo.
-				 * The SIGIO and SIGALARM handlers which constitute
-				 * the majority of invocations, do not use it.
-				 */
-				switch (sig) {
-				case SIGSEGV:
-					get_skas_faultinfo(pid,
-							   &regs->faultinfo);
-					fallthrough;
-				case SIGTRAP:
-				case SIGILL:
-				case SIGBUS:
-				case SIGFPE:
-				case SIGWINCH:
-					ptrace(PTRACE_GETSIGINFO, pid, 0,
-					       (struct siginfo *)&si_local);
-					si = &si_local;
-					break;
-				default:
-					si = NULL;
-					break;
-				}
-			} else {
-				sig = 0;
-			}
-		}
-
-		exit_turnstile(mm_id);
-
-		UPT_SYSCALL_NR(regs) = -1; /* Assume: It's not a syscall */
-
-		if (sig) {
-			switch (sig) {
-			case SIGSEGV:
-				if (using_seccomp || PTRACE_FULL_FAULTINFO)
-					(*sig_info[SIGSEGV])(SIGSEGV,
-							     (struct siginfo *)si,
-							     regs, NULL);
-				else
-					segv(regs->faultinfo, 0, 1, NULL, NULL);
-
-				break;
-			case SIGSYS:
-				handle_syscall(regs);
-				break;
-			case SIGTRAP + 0x80:
-				handle_trap(regs);
-				break;
-			case SIGTRAP:
-				relay_signal(SIGTRAP, (struct siginfo *)si, regs, NULL);
-				break;
-			case SIGALRM:
-				break;
-			case SIGIO:
-			case SIGILL:
-			case SIGBUS:
-			case SIGFPE:
-			case SIGWINCH:
-				block_signals_trace();
-				(*sig_info[sig])(sig, (struct siginfo *)si, regs, NULL);
-				unblock_signals_trace();
-				break;
-			default:
-				printk(UM_KERN_ERR "%s - child stopped with signal %d\n",
-				       __func__, sig);
-				fatal_sigsegv();
-			}
-			interrupt_end();
-
-			/* Avoid -ERESTARTSYS handling in host */
-			if (PT_SYSCALL_NR_OFFSET != PT_SYSCALL_RET_OFFSET)
-				PT_SYSCALL_NR(regs->gp) = -1;
-		}
-	}
+	while (1)
+		um_backend_dispatch(vcpu_run, regs);
 }
 
 void new_thread(void *stack, jmp_buf *buf, void (*handler)(void))

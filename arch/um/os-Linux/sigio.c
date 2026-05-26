@@ -107,9 +107,16 @@ static void write_sigio_workaround(void)
 	if (write_sigio_td)
 		goto out;
 
-	epollfd = epoll_create(MAX_EPOLL_EVENTS);
+	/*
+	 * FD disposition (C-09 commit 4): worker-rebuild. The SIGIO
+	 * helper thread's epollfd is dropped in
+	 * os_sigio_worker_forget() and recreated in
+	 * os_sigio_worker_rebuild() (see below) after a forkserver
+	 * fork(). EPOLL_CLOEXEC ensures no leaks into exec().
+	 */
+	epollfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epollfd < 0) {
-		printk(UM_KERN_ERR "%s: epoll_create failed, errno = %d\n",
+		printk(UM_KERN_ERR "%s: epoll_create1 failed, errno = %d\n",
 		       __func__, errno);
 		goto out;
 	}
@@ -156,6 +163,73 @@ static void sigio_cleanup(void)
 }
 
 __uml_exitcall(sigio_cleanup);
+
+/*
+ * Abandon inherited SIGIO helper-thread state after a fork()
+ * (workstream C-09, commit 3c). Unlike sigio_cleanup(), this does
+ * NOT try to signal/join the helper thread: in a forked child the
+ * pthread handle in write_sigio_td is stale (the thread only exists
+ * in the parent) and joining would either hang or corrupt state.
+ * Safe action is to close our copy of epollfd, drop the handle, and
+ * let the OS reclaim anything else on exit_group.
+ *
+ * Called only from the forkserver worker path via the public wrapper
+ * in arch/um/kernel/snapshot.c.
+ */
+void os_sigio_worker_forget(void)
+{
+	if (epollfd != -1) {
+		close(epollfd);
+		epollfd = -1;
+	}
+	/* Drop without kill: the pthread handle is from the parent. */
+	write_sigio_td = NULL;
+}
+
+/*
+ * Re-install SIGIO helper-thread state in a forkserver worker
+ * (workstream C-09, commit 3d-b). Pair with os_sigio_worker_forget:
+ * that call dropped the parent-inherited epollfd + pthread handle;
+ * this one creates a fresh epollfd and spawns a new helper thread
+ * in the worker's own address space.
+ *
+ * Mirrors write_sigio_workaround() above. Returns 0 on success or
+ * -errno on failure; the worker path treats failure as non-fatal
+ * for commit 3d-b (worker exits immediately at end of
+ * um_snapshot_worker_init either way), but commit 3d-c will use
+ * the return to decide whether to resume guest code.
+ */
+int os_sigio_worker_rebuild(void)
+{
+	int err;
+
+	if (epollfd != -1)
+		return 0;	/* already rebuilt; idempotent */
+
+	/*
+	 * FD disposition (C-09 commit 4): worker-rebuild — this is the
+	 * rebuild-side creation. EPOLL_CLOEXEC is atomic to match
+	 * write_sigio_workaround() above.
+	 */
+	epollfd = epoll_create1(EPOLL_CLOEXEC);
+	if (epollfd < 0) {
+		err = -errno;
+		printk(UM_KERN_ERR "%s: epoll_create1 failed, errno = %d\n",
+		       __func__, errno);
+		return err;
+	}
+
+	err = os_run_helper_thread(&write_sigio_td, write_sigio_thread, NULL);
+	if (err < 0) {
+		printk(UM_KERN_ERR "%s: os_run_helper_thread failed, errno = %d\n",
+		       __func__, -err);
+		close(epollfd);
+		epollfd = -1;
+		return err;
+	}
+
+	return 0;
+}
 
 /* Used as a flag during SIGIO testing early in boot */
 static int got_sigio;

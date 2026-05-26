@@ -111,19 +111,22 @@ static void vector_reset_stats(struct vector_private *vp)
 	 * in vector_poll.
 	 */
 
-	spin_lock(&vp->rx_queue->head_lock);
+	if (vp->rx_queue)
+		spin_lock(&vp->rx_queue->head_lock);
 	vp->estats.rx_queue_max = 0;
 	vp->estats.rx_queue_running_average = 0;
 	vp->estats.rx_encaps_errors = 0;
 	vp->estats.sg_ok = 0;
 	vp->estats.sg_linearized = 0;
-	spin_unlock(&vp->rx_queue->head_lock);
+	if (vp->rx_queue)
+		spin_unlock(&vp->rx_queue->head_lock);
 
 	/* TX stats are modified with TX head_lock held
 	 * in vector_send.
 	 */
 
-	spin_lock(&vp->tx_queue->head_lock);
+	if (vp->tx_queue)
+		spin_lock(&vp->tx_queue->head_lock);
 	vp->estats.tx_timeout_count = 0;
 	vp->estats.tx_restart_queue = 0;
 	vp->estats.tx_kicks = 0;
@@ -131,7 +134,8 @@ static void vector_reset_stats(struct vector_private *vp)
 	vp->estats.tx_flow_control_xoff = 0;
 	vp->estats.tx_queue_max = 0;
 	vp->estats.tx_queue_running_average = 0;
-	spin_unlock(&vp->tx_queue->head_lock);
+	if (vp->tx_queue)
+		spin_unlock(&vp->tx_queue->head_lock);
 }
 
 static int get_mtu(struct arglist *def)
@@ -1124,8 +1128,11 @@ static int vector_net_close(struct net_device *dev)
 		um_free_irq(vp->tx_irq, dev);
 		vp->tx_irq = 0;
 	}
-	napi_disable(&vp->napi);
-	netif_napi_del(&vp->napi);
+	if (vp->napi_added) {
+		napi_disable(&vp->napi);
+		netif_napi_del(&vp->napi);
+		vp->napi_added = false;
+	}
 	if (vp->fds->rx_fd > 0) {
 		if (vp->bpf)
 			uml_vector_detach_bpf(vp->fds->rx_fd, vp->bpf);
@@ -1142,12 +1149,19 @@ static int vector_net_close(struct net_device *dev)
 	vp->bpf = NULL;
 	kfree(vp->fds->remote_addr);
 	kfree(vp->transport_data);
+	vp->transport_data = NULL;
 	kfree(vp->header_rxbuffer);
+	vp->header_rxbuffer = NULL;
 	kfree(vp->header_txbuffer);
-	if (vp->rx_queue != NULL)
+	vp->header_txbuffer = NULL;
+	if (vp->rx_queue) {
 		destroy_queue(vp->rx_queue);
-	if (vp->tx_queue != NULL)
+		vp->rx_queue = NULL;
+	}
+	if (vp->tx_queue) {
 		destroy_queue(vp->tx_queue);
+		vp->tx_queue = NULL;
+	}
 	kfree(vp->fds);
 	vp->fds = NULL;
 	vp->in_error = false;
@@ -1161,17 +1175,19 @@ static int vector_poll(struct napi_struct *napi, int budget)
 	int err;
 	bool tx_enqueued = false;
 
-	if ((vp->options & VECTOR_TX) != 0)
+	if ((vp->options & VECTOR_TX) != 0 && vp->tx_queue)
 		tx_enqueued = (vector_send(vp->tx_queue) > 0);
-	spin_lock(&vp->rx_queue->head_lock);
-	if ((vp->options & VECTOR_RX) > 0)
+	if ((vp->options & VECTOR_RX) > 0) {
+		if (!vp->rx_queue)
+			return 0;
+		spin_lock(&vp->rx_queue->head_lock);
 		err = vector_mmsg_rx(vp, budget);
-	else {
+		spin_unlock(&vp->rx_queue->head_lock);
+	} else {
 		err = vector_legacy_rx(vp);
 		if (err > 0)
 			err = 1;
 	}
-	spin_unlock(&vp->rx_queue->head_lock);
 	if (err > 0)
 		work_done += err;
 
@@ -1218,6 +1234,8 @@ static int vector_net_open(struct net_device *dev)
 			vp->rx_header_size,
 			MAX_IOV_SIZE
 		);
+		if (!vp->rx_queue)
+			goto out_close;
 		atomic_set(&vp->rx_queue->queue_depth, get_depth(vp->parsed));
 	} else {
 		vp->header_rxbuffer = kmalloc(
@@ -1234,6 +1252,8 @@ static int vector_net_open(struct net_device *dev)
 			vp->header_size,
 			MAX_IOV_SIZE
 		);
+		if (!vp->tx_queue)
+			goto out_close;
 	} else {
 		vp->header_txbuffer = kmalloc(vp->header_size, GFP_KERNEL);
 		if (vp->header_txbuffer == NULL)
@@ -1243,6 +1263,7 @@ static int vector_net_open(struct net_device *dev)
 	netif_napi_add_weight(vp->dev, &vp->napi, vector_poll,
 			      get_depth(vp->parsed));
 	napi_enable(&vp->napi);
+	vp->napi_added = true;
 
 	/* READ IRQ */
 	err = um_request_irq(
@@ -1420,11 +1441,12 @@ static void vector_get_ringparam(struct net_device *netdev,
 				 struct netlink_ext_ack *extack)
 {
 	struct vector_private *vp = netdev_priv(netdev);
+	unsigned int depth = get_depth(vp->parsed);
 
-	ring->rx_max_pending = vp->rx_queue->max_depth;
-	ring->tx_max_pending = vp->tx_queue->max_depth;
-	ring->rx_pending = vp->rx_queue->max_depth;
-	ring->tx_pending = vp->tx_queue->max_depth;
+	ring->rx_max_pending = (vp->options & VECTOR_RX) ? depth : 0;
+	ring->tx_max_pending = (vp->options & VECTOR_TX) ? depth : 0;
+	ring->rx_pending = vp->rx_queue ? vp->rx_queue->max_depth : 0;
+	ring->tx_pending = vp->tx_queue ? vp->tx_queue->max_depth : 0;
 }
 
 static void vector_get_strings(struct net_device *dev, u32 stringset, u8 *buf)
@@ -1466,11 +1488,15 @@ static void vector_get_ethtool_stats(struct net_device *dev,
 	 * to date.
 	 */
 
-	spin_lock(&vp->tx_queue->head_lock);
-	spin_lock(&vp->rx_queue->head_lock);
+	if (vp->tx_queue)
+		spin_lock(&vp->tx_queue->head_lock);
+	if (vp->rx_queue)
+		spin_lock(&vp->rx_queue->head_lock);
 	memcpy(tmp_stats, &vp->estats, sizeof(struct vector_estats));
-	spin_unlock(&vp->rx_queue->head_lock);
-	spin_unlock(&vp->tx_queue->head_lock);
+	if (vp->rx_queue)
+		spin_unlock(&vp->rx_queue->head_lock);
+	if (vp->tx_queue)
+		spin_unlock(&vp->tx_queue->head_lock);
 }
 
 static int vector_get_coalesce(struct net_device *netdev,
@@ -1700,6 +1726,14 @@ static int __init vector_setup(char *str)
 	int n, err;
 	struct vector_cmd_line_arg *new;
 
+	/*
+	 * The legacy "vec" setup prefix also matches the v2 prefixes.
+	 * Leave "vec2." and "vec2=" for vector2; keep legacy "vec2:" as
+	 * unit 2.
+	 */
+	if (str[0] == '2' && (str[1] == '.' || str[1] == '='))
+		return 0;
+
 	err = vector_parse(str, &n, &str, &error);
 	if (err) {
 		pr_err("Couldn't parse '%s': %s\n", str, error);
@@ -1761,6 +1795,3 @@ static int vector_net_init(void)
 }
 
 __initcall(vector_net_init);
-
-
-

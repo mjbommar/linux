@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <as-layout.h>
+#include <backend.h>
 #include <kern_util.h>
 #include <os.h>
 #include <skas.h>
@@ -34,22 +35,89 @@ void (*sig_info[NSIG])(int, struct siginfo *, struct uml_pt_regs *, void *mc) = 
 	[SIGCHLD]	= sigchld_handler,
 };
 
+/*
+ * SMP-T80 (state-audit/29): per-thread flag set by the kvm-v2
+ * dispatch loop around ioctl(KVM_RUN, ...).  sig_handler_common
+ * reads this to route timer ticks (and other host signals) that
+ * interrupt KVM_RUN to the guest task's utime rather than stime —
+ * the guest's userspace code is the work being interrupted, so the
+ * tick legitimately belongs to utime.
+ *
+ * Thread-local: each UML host thread (one per pool vCPU) has its
+ * own flag.  The kernel-half code calls os_kvm_run_enter/exit() to
+ * bracket the ioctl; sig_handler_common reads via os_in_kvm_run().
+ *
+ * The previous rdtsc-based account_user_time() approach
+ * double-counted (host tick path still credited stime), producing
+ * 2x getrusage() values.  This approach is single-credit: the tick
+ * lands on utime instead of stime.  Sub-tick precision is lost
+ * (HZ=100 → 10 ms granularity) but ITIMER_VIRTUAL's typical
+ * threshold (≥ 100 ms) still works.
+ */
+static __thread int um_in_kvm_run;
+
+void os_kvm_run_enter(void)
+{
+	um_in_kvm_run = 1;
+}
+
+void os_kvm_run_exit(void)
+{
+	um_in_kvm_run = 0;
+}
+
+int os_in_kvm_run(void)
+{
+	return um_in_kvm_run;
+}
+
 static void sig_handler_common(int sig, struct siginfo *si, mcontext_t *mc)
 {
 	struct uml_pt_regs r;
+	bool kprobes_sigtrap;
 
-	r.is_user = 0;
+	/*
+	 * SMP-T80: when the signal interrupts ioctl(KVM_RUN, ...), the
+	 * guest user-mode code is what was running — the tick should be
+	 * accounted to utime, not stime.  os_in_kvm_run() returns 1
+	 * during the bracketed ioctl call.  No effect when seccomp /
+	 * non-kvm backend is in use (flag stays 0).
+	 */
+	r.is_user = os_in_kvm_run();
 	if (sig == SIGSEGV) {
 		/* For segfaults, we want the data from the sigcontext. */
 		get_regs_from_mc(&r, mc);
 		GET_FAULTINFO_FROM_MC(r.faultinfo, mc);
 	}
 
+	/*
+	 * Kprobes on UML needs the guest register state populated from
+	 * the sigcontext so kprobe_int3_handler() / kprobe_debug_handler()
+	 * can find the probe site (IP) and drive single-step via TF. On
+	 * return we write the (possibly mutated) regs back to the
+	 * mcontext so the host's sigreturn resumes with the handler's
+	 * changes — different IP for out-of-line single-step, adjusted
+	 * EFLAGS for TF management.
+	 */
+	kprobes_sigtrap = IS_ENABLED(CONFIG_KPROBES) && sig == SIGTRAP;
+	if (kprobes_sigtrap)
+		get_regs_from_mc(&r, mc);
+
 	/* enable signals if sig isn't IRQ signal */
 	if ((sig != SIGIO) && (sig != SIGWINCH) && (sig != SIGCHLD))
 		unblock_signals_trace();
 
 	(*sig_info[sig])(sig, si, &r, mc);
+
+	if (kprobes_sigtrap && !r.is_user) {
+		/*
+		 * X86_EFLAGS_TF = 0x100 (kernel header isn't usable
+		 * in this USER-side TU).
+		 */
+		bool tf = r.gp[HOST_EFLAGS] & 0x100UL;
+
+		get_mc_from_regs(&r, mc, tf);
+	}
 }
 
 /*
@@ -125,6 +193,17 @@ static void timer_real_alarm_handler(mcontext_t *mc)
 		get_regs_from_mc(&regs, mc);
 	else
 		memset(&regs, 0, sizeof(regs));
+	/*
+	 * SMP-T80 (state-audit/29): if SIGALRM fired during
+	 * ioctl(KVM_RUN, ...), the tick belongs to guest utime
+	 * (guest's user-mode code was running).  get_regs_from_mc
+	 * does NOT set is_user — it only copies host GPRs/segments
+	 * — so without this we'd read whatever uninitialized stack
+	 * memory happened to land in regs.is_user.  Default to 0
+	 * (stime) otherwise, matching pre-T80 behavior on non-kvm
+	 * backends.
+	 */
+	regs.is_user = os_in_kvm_run();
 	timer_handler(SIGALRM, NULL, &regs);
 }
 
@@ -225,10 +304,33 @@ void set_handler(int sig)
 	sigaddset(&action.sa_mask, SIGIO);
 	sigaddset(&action.sa_mask, SIGWINCH);
 	sigaddset(&action.sa_mask, SIGALRM);
-	if (using_seccomp)
+	/*
+	 * Mask SIGCHLD inside other handlers only when the active
+	 * backend actually uses it as a child-reaper IRQ — the
+	 * seccomp backend does, ptrace+KVM don't. Reads the ops-
+	 * table capability flag rather than the legacy
+	 * `using_seccomp` int per D59 Phase II Lift #4a. um_backend
+	 * is non-NULL here because set_handler() is invoked from
+	 * start_uml() after init_backend() populates the pointer
+	 * (see arch/um/kernel/um_arch.c::linux_main); the NULL
+	 * guard stays as belt-and-suspenders for any future
+	 * early-boot caller.
+	 */
+	if (um_backend && um_backend->uses_stub_reaper)
 		sigaddset(&action.sa_mask, SIGCHLD);
 
 	if (sig == SIGSEGV)
+		flags |= SA_NODEFER;
+
+	/*
+	 * Kprobes needs nested SIGTRAP too: a kprobe's pre_handler can
+	 * legitimately call a function that is itself probed
+	 * (lib/tests/test_kprobes.c "test_kprobe_missed" exercises
+	 * exactly this). Without SA_NODEFER, a SIGTRAP while we're
+	 * already in the SIGTRAP handler is masked, and the host
+	 * delivers the default "terminate + core dump" action instead.
+	 */
+	if (IS_ENABLED(CONFIG_KPROBES) && sig == SIGTRAP)
 		flags |= SA_NODEFER;
 
 	if (sigismember(&action.sa_mask, sig))
@@ -282,7 +384,7 @@ static inline void __unblock_signals(void)
 	os_local_ipi_enable();
 }
 
-void block_signals(void)
+void notrace block_signals(void)
 {
 	__block_signals();
 	/*
@@ -294,7 +396,7 @@ void block_signals(void)
 	barrier();
 }
 
-void unblock_signals(void)
+void notrace unblock_signals(void)
 {
 	int save_pending;
 
@@ -372,12 +474,29 @@ void unblock_signals(void)
 	}
 }
 
-int um_get_signals(void)
+/*
+ * um_get_signals / um_set_signals are the UML equivalents of
+ * arch_local_save_flags / arch_local_irq_restore (see
+ * arch/um/include/asm/irqflags.h). On native x86 those map to
+ * inline asm, so there is no function-entry NOP that ftrace could
+ * ever patch; on UML they are real C functions. Any future change
+ * to this file's Makefile strip-set (currently CFLAGS_REMOVE_
+ * signal.o := $(CC_FLAGS_FTRACE) in arch/um/os-Linux/Makefile)
+ * must keep these out of the traceable surface, because a graph-
+ * traced arch_local_irq_restore from inside free_irq's mutex
+ * window is the bug captured in decisions-log D34 addendum-3.
+ * The `notrace` keyword provides belt-and-suspenders even when
+ * the Makefile strip is in effect: it explicitly declares intent
+ * and suppresses the patchable-function-entry attribute at the
+ * source level so the file's ftrace-traceability does not change
+ * silently if someone edits the Makefile.
+ */
+int notrace um_get_signals(void)
 {
 	return signals_enabled;
 }
 
-int um_set_signals(int enable)
+int notrace um_set_signals(int enable)
 {
 	int ret;
 	if (signals_enabled == enable)
@@ -391,7 +510,7 @@ int um_set_signals(int enable)
 	return ret;
 }
 
-int um_set_signals_trace(int enable)
+int notrace um_set_signals_trace(int enable)
 {
 	int ret;
 	if (signals_enabled == enable)

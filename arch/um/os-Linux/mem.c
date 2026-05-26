@@ -46,10 +46,33 @@ void kasan_map_memory(void *start, size_t len)
 		exit(1);
 	}
 
-	if (madvise(start, len, MADV_DONTFORK)) {
-		os_info("Couldn't set MADV_DONTFORK on shadow memory: %s\n.",
-			strerror(errno));
-		exit(1);
+	/*
+	 * Workstream C-09 / D37 pull-forward #6.
+	 *
+	 * Historically we set MADV_DONTFORK on the KASAN shadow so it
+	 * wasn't inherited into child processes. That is still the
+	 * right default for non-fuzz profiles — the shadow is a 16 TB
+	 * VA region, and needlessly COW'ing it into every host fork
+	 * wastes kernel page-table memory and makes strace/ps output
+	 * confusing. But the C-09 snapshot/forkserver (CONFIG_UM_FUZZ_HOOKS)
+	 * forks the UML process itself per fuzz iteration, and the
+	 * forked worker needs to inherit the shadow via COW — otherwise
+	 * the first KASAN-instrumented kernel access in the worker
+	 * SEGVs on an unmapped shadow range. See D35's Q2 and D37 #6
+	 * for the analysis.
+	 *
+	 * Under CONFIG_UM_FUZZ_HOOKS, skip the MADV_DONTFORK so fork()
+	 * propagates the shadow mapping. The per-iteration COW cost on
+	 * sparsely-populated shadow is bounded by how much kernel VA
+	 * the testcase touches; empirically well under 1 ms per iter
+	 * for syzkaller-shaped workloads.
+	 */
+	if (!IS_ENABLED(CONFIG_UM_FUZZ_HOOKS)) {
+		if (madvise(start, len, MADV_DONTFORK)) {
+			os_info("Couldn't set MADV_DONTFORK on shadow memory: %s\n.",
+				strerror(errno));
+			exit(1);
+		}
 	}
 }
 
@@ -142,6 +165,17 @@ static int __init make_tempfile(const char *template)
 		}
 	}
 
+	/*
+	 * FD disposition (C-09 commit 4): inherit (physmem fd).
+	 * This fd backs the UML kernel's physical-memory file and
+	 * is the target of all kernel-page mmap()s. Across a
+	 * forkserver fork() the worker inherits this fd and the
+	 * associated mappings (MAP_SHARED on the same inode via
+	 * MADV_DOFORK; see arch/um/kernel/physmem.c). Closing or
+	 * re-creating it in the worker would unmap the kernel's
+	 * .data and heap. Must remain CLOEXEC to avoid leaks into
+	 * the userspace stub's exec().
+	 */
 #ifdef O_TMPFILE
 	fd = open(tempdir, O_CLOEXEC | O_RDWR | O_EXCL | O_TMPFILE, 0700);
 	/*
@@ -164,6 +198,15 @@ static int __init make_tempfile(const char *template)
 		os_warn("open - cannot create %s: %s\n", tempname,
 			strerror(errno));
 		goto out;
+	}
+	/*
+	 * mkstemp() has no SOCK_CLOEXEC-style atomic flag; set
+	 * FD_CLOEXEC immediately after create to match the
+	 * O_TMPFILE path's disposition.
+	 */
+	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+		perror("fcntl FD_CLOEXEC");
+		goto close;
 	}
 	if (unlink(tempname) < 0) {
 		perror("unlink");

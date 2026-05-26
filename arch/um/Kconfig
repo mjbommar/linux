@@ -21,8 +21,22 @@ config UML
 	select HAVE_ARCH_AUDITSYSCALL
 	select HAVE_ARCH_KASAN if X86_64
 	select HAVE_ARCH_KASAN_VMALLOC if HAVE_ARCH_KASAN
+	select HAVE_ARCH_KCSAN if X86_64
+	select HAVE_ARCH_KFENCE if X86_64
+	# KMSAN-on-UML uses the VMALLOC-quarter-split layout per
+	# decisions-log D62 (2026-04-23, supersedes D58). Shadow +
+	# origin live inside the VMALLOC range; see
+	# `arch/um/include/asm/pgtable.h` and
+	# `Documentation/virt/uml/redesign/02-workstreams/
+	# C-profiles-and-gaps/07-port-kmsan-redesign.md`.
+	select HAVE_ARCH_KMSAN if X86_64
+	select HAVE_ARCH_KMSAN_VMALLOC if HAVE_ARCH_KMSAN
 	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ASM_MODVERSIONS
+	# HAVE_EXIT_THREAD was selected by UM_BACKEND_KVM_INTEGRATED for
+	# v1's per-task vCPU teardown (kvm_vcpu_handle freed in
+	# exit_thread). v1 is archived (memo 25 Part 1); v2 will reselect
+	# this when its per-task vCPU lifecycle is implemented.
 	select HAVE_UID16
 	select HAVE_DEBUG_KMEMLEAK
 	select HAVE_DEBUG_BUGVERBOSE
@@ -42,6 +56,36 @@ config UML
 	select ARCH_HAS_UBSAN
 	select HAVE_ARCH_TRACEHOOK
 	select HAVE_SYSCALL_TRACEPOINTS
+	select HAVE_FUNCTION_TRACER if X86_64
+	select HAVE_DYNAMIC_FTRACE if HAVE_FUNCTION_TRACER
+	select FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
+		if DYNAMIC_FTRACE
+	# HAVE_FUNCTION_GRAPH_TRACER depends on CC_FLAGS_FTRACE being
+	# stripped from arch/um's signal-dispatch + longjmp-entry TUs
+	# (see arch/um/os-Linux/Makefile + arch/um/kernel/Makefile
+	# CFLAGS_REMOVE_<file>.o lines, landed as C-04 commit 3a) and
+	# on the notrace annotations in arch/um/kernel/signal.c's
+	# arch_local_irq_* helpers. See Documentation/virt/uml/
+	# redesign/04-risks/decisions-log.md D34 for the full
+	# background.
+	select HAVE_FUNCTION_GRAPH_TRACER if HAVE_FUNCTION_TRACER
+	select HAVE_KPROBES if X86_64
+	# HAVE_RETHOOK auto-selects RETHOOK and turns on KRETPROBE_ON_RETHOOK,
+	# which is how modern x86_64 supplies KRETPROBES (see D33). No need
+	# to also select HAVE_KRETPROBES — arch/Kconfig's KRETPROBES depends
+	# on (HAVE_KRETPROBES || HAVE_RETHOOK).
+	select HAVE_RETHOOK if X86_64
+	# BPF JIT (workstream C-06 v1 per D43 fifth-view). UML
+	# consumes arch/x86/net/bpf_jit_comp.c with a handful of
+	# UML-local shim headers (asm/vsyscall.h, cpufeature.h's
+	# DISABLED_MASK_BIT_SET stub, arch/um/kernel/x86_nops.c)
+	# plus a small CONFIG_UM branch in bpf_jit_comp.c's
+	# reg2pt_regs[] table. Bare-metal x86 builds are
+	# bit-identical past the three upstream-bound hygiene
+	# commits (e2b686c96, 5b95b1bb3, this series). See
+	# Documentation/virt/uml/redesign/02-workstreams/
+	# C-profiles-and-gaps/06-port-bpf-jit.md.
+	select HAVE_EBPF_JIT if X86_64
 	select THREAD_INFO_IN_TASK
 	select SPARSE_IRQ
 	select MMU_GATHER_RCU_TABLE_FREE
@@ -290,6 +334,302 @@ config KASAN_SHADOW_OFFSET
 	  with anything. The default is 0x100000000000, which works even if mem is
 	  set to a large value. On low-memory systems, try 0x7fff8000, as it fits
 	  into the immediate of most instructions, improving performance.
+
+# KMSAN_SHADOW_OFFSET / KMSAN_ORIGIN_OFFSET Kconfig entries
+# removed in the D62 redesign (2026-04-23, supersedes D58).
+# The VMALLOC-quarter-split layout derives shadow/origin VAs
+# from VMALLOC_START at compile time; no config-tunable base
+# address is needed. If a future variant needs per-build
+# tuning (e.g. a sub-quarter slice), add the Kconfig back
+# with a sensible default and update asm/pgtable.h to
+# consume it.
+
+#
+# Backend selection (workstream A; matches the planned shape in
+# Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/04-kconfig.md).
+#
+# The typed backend ops table lives at arch/um/include/asm/backend.h.
+# Two questions, in order:
+#   1. Which backend implementations get compiled in?
+#   2. How does um_backend_dispatch() resolve?
+#
+# Invariants:
+#   *_ONLY  ⇒ exactly one backend compiled in (no other backends)
+#   DYNAMIC ⇒ at least two backends compiled in
+#
+# The dispatch-mode choice block enforces this via `select` so the
+# user picks intent first and the backend set follows automatically.
+#
+config UM_BACKEND_SECCOMP
+	bool
+	depends on HAVE_ARCH_SECCOMP_FILTER
+	help
+	  Selected by the dispatch mode below. Don't toggle this directly.
+	  Compiles arch/um/backend/seccomp/ — the seccomp-trapped trap
+	  mechanism merged in 6.16 (Benjamin Berg). ~3-4× faster syscall
+	  round-trip than ptrace via SIGSYS + futex.
+
+config UM_WORKER_PROCESS
+	bool "Per-mm host worker process model (memo 25 R4)"
+	default y
+	help
+	  Spawn one host worker process per guest mm instead of cloning
+	  every guest task into the spawner's VA space. The seccomp
+	  stub child runs inside the worker; spawner ↔ worker IPC uses
+	  a per-worker UNIX socket pair (memo 28).
+
+	  This is the host-process / threading restructure the v2 KVM
+	  backend (memo 26) needs: each guest mm gets a separate host
+	  VA space, eliminating the cross-mm host-VA collision bug
+	  class (memo 22 BUG.1 family; memo 24 item #2). seccomp users
+	  also benefit (no more software-only mm separation), but the
+	  payoff is concentrated on the v2 path.
+
+	  As of memo 28 E.6 (defconfig flip), default y. R4's E.1
+	  through E.5 sequence has fully landed: per-mm worker spawn,
+	  in-worker start_userspace, dispatcher kthread skeleton,
+	  vcpu_run rerouted through worker IPC (E.3d.2). init=python3
+	  boots cleanly under =y; substrate gate at PASS=25 FAIL=3
+	  EXPECTED_FAIL=3 matches WORKER_PROCESS=n bit-for-bit.
+
+	  See Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
+	  28-r4-worker-design.md for the design (especially Parts L,
+	  M, N for the architectural revisions vs. the original spec).
+
+config UM_WORKER_SMOKE_TEST_ON_BOOT
+	bool "Run worker IPC smoke test on boot"
+	depends on UM_WORKER_PROCESS
+	default n
+	help
+	  Trigger arch/um/kernel/spawner.c::worker_smoke_test() once
+	  during late_initcall. Spawns a throwaway worker process,
+	  drives the four-message E.3b round-trip
+	  (STUB_ALLOC_REQ → WRITE_REGS → RETURN_VALUE → WRITE_REGS_ACK),
+	  verifies the sentinel echoes back, and reaps. Boot logs
+	  "um: worker smoke: round-trip OK" on success or an error
+	  line on failure.
+
+	  Useful when developing R4 worker-process changes — gives a
+	  one-shot canary that the IPC dispatcher still works without
+	  needing to wire the seccomp backend through the worker first.
+
+	  Adds a few hundred milliseconds to boot. Say N for normal
+	  development; Y when iterating on worker IPC code.
+
+config UM_BACKEND_KVM_V1_ARCHIVE
+	bool
+	depends on BROKEN
+	help
+	  Archived v1 KVM backend at arch/um/backend/kvm-v1-archive/.
+	  Reaches mean 19.4/21 on the cpython-parity gate post-A.4i but
+	  has known structural issues (memo 22 Bug B, memo 24 clean-slate
+	  items). Not built. Kept in-tree as a reference for v2
+	  implementers; depends on BROKEN so the build system never
+	  selects it. The v2 reimplementation lives at
+	  arch/um/backend/kvm-v2/ (memo 26).
+
+source "arch/um/backend/kvm-v2/Kconfig"
+
+choice
+	prompt "UML backend dispatch mode"
+	default UM_BACKEND_DYNAMIC if HAVE_ARCH_SECCOMP_FILTER
+	default UM_BACKEND_SECCOMP_ONLY
+	help
+	  How um_backend_dispatch() resolves and which backends compile.
+
+	  *_ONLY modes inline the dispatch macro to a direct call to the
+	  chosen backend; zero indirect-dispatch cost, smallest binary,
+	  smallest TCB. Pick this for sandbox / embedded profiles.
+
+	  DYNAMIC compiles every available backend and chooses at boot
+	  via the `backend=` kernel command line. One well-predicted
+	  indirect call per dispatch site (~5-10 cycles). Pick this for
+	  distros and CI matrices that need a single binary to run
+	  anywhere.
+
+	  ptrace backend was removed in memo 25 refactor 11 (B);
+	  seccomp-filter has been mainline since 3.5 (2012) and is
+	  universal on real hosts. Anyone genuinely without seccomp
+	  should pin to a v6.16-or-earlier UML.
+
+config UM_BACKEND_SECCOMP_ONLY
+	bool "seccomp backend only (single-backend inline)"
+	depends on HAVE_ARCH_SECCOMP_FILTER
+	select UM_BACKEND_SECCOMP
+	help
+	  um_backend_dispatch() expands to direct seccomp_<op>() calls.
+	  Smallest binary, zero indirect-dispatch cost. ~3-4× faster
+	  syscall path than ptrace via SIGSYS. Requires the host to
+	  support seccomp filter installation.
+
+config UM_BACKEND_DYNAMIC
+	bool "Dynamic backend selection (seccomp [+ kvm-v2 when ready])"
+	depends on HAVE_ARCH_SECCOMP_FILTER
+	select UM_BACKEND_SECCOMP
+	help
+	  seccomp backend compiled in; init_backend() selects it at
+	  boot. Default for distros. KVM backend selection lands with
+	  v2 (memo 26); v1 is archived (UM_BACKEND_KVM_V1_ARCHIVE,
+	  depends on BROKEN).
+
+endchoice
+
+config UM_BACKEND_CONTRACT_TEST
+	tristate "UML backend conformance tests (KUnit)"
+	depends on KUNIT
+	default n
+	help
+	  Build the per-op KUnit conformance tests under
+	  arch/um/backend/contract/. Each op in struct um_backend_ops gets
+	  one test; cross-backend equivalence and perf-regression tests
+	  land with workstream A-05.
+
+	  Say N for production builds; Y or M to validate a backend.
+
+#
+# UM_BACKEND_KVM_HARNESS / UM_BACKEND_KVM_INTEGRATED / UM_BACKEND_KVM_GADGET
+# all gated v1's KVM backend behaviour and are removed with the v1 archive
+# (memo 25 Part 1). v2 lives under arch/um/backend/kvm-v2/ (memo 26) and
+# will introduce a single CONFIG_UM_BACKEND_KVM_V2; the v1 sub-knobs do
+# not survive into v2 because v2 has no harness/INTEGRATED split (one
+# real backend) and no gadget (vmcall-only syscall path).
+#
+
+#
+# Fuzzer-oriented hooks (workstream C-09).
+#
+# Umbrella Kconfig option for fuzzing-only kernel features. Its job is
+# to give the fuzz and fuzz-deep profiles a single toggle that turns on
+# snapshot/forkserver, future KCOV hot-loop optimisations, and the
+# `prctl(PR_SET_CHILD_SUBREAPER)` infrastructure needed to reap
+# forkserver workers cleanly at >=1000 iter/s.
+#
+# See Documentation/virt/uml/redesign/03-profiles/fuzz.md and
+# 02-workstreams/C-profiles-and-gaps/09-snapshot-forkserver.md for the
+# surface this enables.
+#
+config UM_FUZZ_HOOKS
+	bool "Fuzzer-oriented hooks (forkserver, KCOV hot-loop, reaping)"
+	default n
+	help
+	  Enable fuzzer-oriented kernel features: the snapshot/forkserver
+	  seam (CONFIG_UM_SNAPSHOT_FORKSERVER below), and future KCOV hot-
+	  loop and reaping refinements. Off by default; enabled by the
+	  fuzz and fuzz-deep profile defconfigs.
+
+	  Say N for production and research builds; Y for fuzz builds.
+
+config UM_SNAPSHOT_FORKSERVER
+	bool "Snapshot/forkserver seam (workstream C-09)"
+	depends on UM_FUZZ_HOOKS
+	default n
+	help
+	  Compile arch/um/kernel/snapshot.c: the cooperative in-kernel
+	  seam that lets UML quiesce to a known-good "ready point" and
+	  fork() itself for each fuzz iteration. Implements the AFL-style
+	  forkserver wire protocol on fds 198/199 and binds onto
+	  syzkaller's RunSnapshot API.
+
+	  Details, rationale (D35), format choice for v2 snapshot-to-disk
+	  (D36), and v1 pull-forward scope (D37) live in
+	  Documentation/virt/uml/redesign/02-workstreams/
+	  C-profiles-and-gaps/09-snapshot-forkserver.md.
+
+	  Say N unless you're building a fuzz-profile UML.
+
+config UM_TEMPLATE_PAUSE
+	bool "Template-pause + fork hook (Memo 09)"
+	default n
+	help
+	  Compile arch/um/kernel/template_pause.c: the cooperative in-
+	  kernel seam that lets a booted UML quiesce at a named "ready
+	  point," SIGSTOP the host process for an external supervisor
+	  (umlctl pool serve) to fork(2), and resume on SIGCONT with a
+	  per-child identity blob applied.
+
+	  Two cmdline modes:
+
+	    um_template_pause          — Phase 1a, single SIGSTOP /
+				          SIGCONT cycle; the master IS
+				          the taken instance.
+	    um_template_pause=fork     — Phase 2a, fork-on-resume loop:
+				          each SIGCONT forks the master,
+				          the child wakes as the taken
+				          instance, the master re-pauses
+				          ready for the next take.  Requires
+				          CONFIG_UM_TEMPLATE_PAUSE_FORK.
+
+	  No-op (no /proc entry created, no static cost) when the
+	  cmdline arg is absent.  Safe to set Y in research and
+	  production profiles — the cmdline gates all visible behaviour.
+
+	  See Documentation/virt/uml/redesign/06-sequencing/
+	  post-2026-05-19-next-sprint/09-fork-server-snapshot-restore.md.
+
+	  Say N unless you intend to use `umlctl pool` or test the
+	  template-pause primitive directly.
+
+config UM_TEMPLATE_PAUSE_FORK
+	bool "Template-pause fork-on-resume loop (Memo 09 Phase 2a)"
+	depends on UM_TEMPLATE_PAUSE
+	select UM_FUZZ_HOOKS
+	select UM_SNAPSHOT_FORKSERVER
+	default n
+	help
+	  Phase 2a fork-on-resume primitive.  Master forks on each
+	  SIGCONT via __NR_clone with a private MAP_PRIVATE child stack
+	  (the production path), the child runs on its own stack and
+	  exits cleanly via inline __NR_exit_group(0), and master loops
+	  back to SIGSTOP for the next take.
+
+	  Bug B1 (the MAP_SHARED physmem stack-race that caused the
+	  earlier "child SEGV after pwrite64" panic storm) is now
+	  root-caused and fixed via the private-stack clone() path.
+	  Strict fork-stress (G1-G8 gates including G7 zero panics +
+	  G8 /proc-side-channel) passes 100/100 at N=100, 10/10 at
+	  N=1000, 10/10 under stress-ng --cpu $(nproc) full load.
+
+	  Refused under the KVM backend at runtime (fork() aliases
+	  /dev/kvm fds and per-vCPU mmap state across parent + child;
+	  kvm-aware fork is a future phase).
+
+	  Say N unless you intend to use template-pause fork-on-resume.
+	  See Documentation/virt/uml/redesign/06-sequencing/
+	  post-2026-05-19-next-sprint/09-fork-server-STATUS.md for
+	  the full design + bug-B1 root-cause notes.
+
+config UM_TEMPLATE_PAUSE_FORK_DIAG
+	bool "MFC diagnostic mode (compiled-in fault dumper) [debug]"
+	depends on UM_TEMPLATE_PAUSE_FORK
+	default n
+	help
+	  Compiles in the M-fork-child diagnostic hooks:
+	  mfc_diag_segv_handler (custom SIGSEGV/SIGBUS/SIGILL/SIGFPE
+	  handler that dumps fault state via raw write syscalls) and
+	  the um_template_pause_mfc_diag=1 cmdline arm.
+
+	  This is the infrastructure used to root-cause bug B1.  It's
+	  off by default because the production path (private-stack
+	  clone()) doesn't need it — Phase 2 work that extends the
+	  child path to do meaningful syscalls should enable this
+	  to capture any new fault states.
+
+	  Say N unless you're actively debugging the fork-on-resume
+	  primitive.
+
+config UM_TEMPLATE_PAUSE_IDENTITY_KUNIT
+	bool "Template-pause identity-apply KUnit tests"
+	depends on UM_TEMPLATE_PAUSE && KUNIT
+	default n
+	help
+	  Build KUnit tests for the parse helpers in
+	  arch/um/kernel/template_pause_identity.c (IPv4 CIDR
+	  parsing, IPv4 address parsing, prefix-to-netmask conversion).
+	  These exercise the pure-C parse path with no net-stack
+	  dependencies, so they run cleanly on any UML KUnit kernel.
+
+	  Say N for production builds; Y while developing or
+	  regressing the identity-apply path.
 
 endmenu
 

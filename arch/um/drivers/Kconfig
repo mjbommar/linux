@@ -125,17 +125,230 @@ menu "UML Network Devices"
 	depends on NET
 
 config UML_NET_VECTOR
-	bool "Vector I/O high performance network devices"
+	bool "Vector I/O high performance network devices (legacy)"
 	select MAY_HAVE_RUNTIME_DEPS
 	help
-	  This User-Mode Linux network driver uses multi-message send
-	  and receive functions. The host running the UML guest must have
-	  a linux kernel version above 3.0 and a libc version > 2.13.
-	  This driver provides tap, raw, gre and l2tpv3 network transports.
+	  Legacy UML vector network driver — superseded by
+	  CONFIG_UML_NET_VECTOR_V2 as of the post-2026-05-19 sprint
+	  (Documentation/virt/uml/redesign/06-sequencing/
+	  post-2026-05-19-next-sprint/01-vector2-default-flip.md).
+
+	  This driver uses multi-message send and receive functions.
+	  The host running the UML guest must have a linux kernel
+	  version above 3.0 and a libc version > 2.13.  Provides tap,
+	  raw, gre and l2tpv3 network transports.
+
+	  Memo 01 Step 5: kept around for operators who haven't
+	  migrated to vec2 yet (umlctl now defaults to vector2).
+	  Plan is to drop this entirely once a follow-on sprint
+	  ports the remaining `raw` / `gre` / `l2tpv3` transports
+	  into vec2 (vec2 currently exposes `tap` + `fd`).
+
+	  For new deployments, prefer CONFIG_UML_NET_VECTOR_V2.
 
 	  For more information, including explanations of the networking
 	  and sample configurations, see
 	  <file:Documentation/virt/uml/user_mode_linux_howto_v2.rst>.
+
+config UML_NET_VECTOR_V2
+	bool "Vector networking v2 experimental runtime skeleton"
+	select UML_NET_VECTOR_V2_CONFIG
+	select UML_NET_VECTOR_V2_MODEL
+	select UML_NET_VECTOR_V2_QUEUE
+	default n
+	help
+	  Build the experimental UML vector networking v2 runtime skeleton.
+	  This is not a replacement for CONFIG_UML_NET_VECTOR yet: it only
+	  collects v2 command-line specs, parses them through the typed v2
+	  configuration parser, and creates internal v2 runtime objects for
+	  later netdev registration work.
+
+	  Say N for production builds. Say Y only while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_INPROC
+	bool "Permit vector networking v2 trusted in-process host operations"
+	depends on UML_NET_VECTOR_V2
+	default n
+	help
+	  Permit vector v2 runtime parsing to accept options that require the
+	  UML process to directly consume host networking authority, such as
+	  TAP interface names, helper scripts, direct host fd numbers, and BPF
+	  file paths. This mode is for trusted development and compatibility
+	  bring-up only.
+
+	  Say N for sandboxed UML v2 execution.
+
+config UML_NET_VECTOR_V2_SANDBOX
+	bool
+	depends on UML_NET_VECTOR_V2
+	default y if !UML_NET_VECTOR_V2_INPROC
+
+config UML_NET_VECTOR_V2_CONFIG
+	bool
+
+config UML_NET_VECTOR_V2_QUEUE
+	bool
+
+config UML_NET_VECTOR_V2_FAKE_HOST
+	bool
+	select UML_NET_VECTOR_V2_QUEUE
+
+config UML_NET_VECTOR_V2_TRANSPORT
+	bool
+
+config UML_NET_VECTOR_V2_MODEL
+	bool
+
+config UML_NET_VECTOR_V2_KUNIT
+	bool "Vector networking v2 config parser KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_CONFIG
+	default n
+	help
+	  Build KUnit tests for the typed configuration parser used by
+	  the proposed UML vector networking v2 rewrite. These tests do
+	  not replace the existing vector network driver; they validate
+	  the isolated parser and policy checks before the runtime data
+	  path is migrated.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_QUEUE_KUNIT
+	bool "Vector networking v2 queue ownership KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_QUEUE
+	default n
+	help
+	  Build KUnit tests for the explicit TX ring and RX batch ownership
+	  helpers used by the proposed UML vector networking v2 rewrite.
+	  These tests validate wraparound, partial completion, RX prepare
+	  and consume ordering, and failure unwind without changing the
+	  existing vector network data path.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_TRANSPORT_KUNIT
+	bool "Vector networking v2 transport header KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_TRANSPORT
+	default n
+	help
+	  Build KUnit tests for bounds-checked GRE and L2TPv3 header build
+	  and parse helpers used by the proposed UML vector networking v2
+	  rewrite. These tests validate that short buffers and mismatched
+	  transport identifiers fail closed without touching the existing
+	  vector network data path.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_FAKE_HOST_KUNIT
+	bool "Vector networking v2 fake host KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_FAKE_HOST
+	default n
+	help
+	  Build KUnit tests for the host-ops boundary and deterministic fake
+	  host used by the proposed UML vector networking v2 rewrite. These
+	  tests exercise partial TX completion, transient host errors, empty
+	  RX, RX allocation unwind, and fd death without using host network
+	  resources.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_MODEL_KUNIT
+	bool "Vector networking v2 state model KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2_MODEL
+	default n
+	help
+	  Build KUnit tests for the explicit device and channel lifecycle
+	  state machines used by the proposed UML vector networking v2
+	  rewrite. These tests validate legal transitions and failure
+	  unwind paths before runtime open/close code uses the model.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_CMDLINE_KUNIT
+	bool "Vector networking v2 command-line KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 runtime command-line
+	  splitter. These tests validate the distinct vec2 syntax before the
+	  runtime driver grows netdev registration or packet movement.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_NETDEV_KUNIT
+	bool "Vector networking v2 netdev skeleton KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	select UML_NET_VECTOR_V2_FAKE_HOST
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 netdev skeleton.
+	  These tests validate stable device naming, lifecycle unwind for
+	  backend-missing open, stopped-state stop handling, xmit safety,
+	  configured queue counts, the deterministic queue-to-CPU policy
+	  used for XPS setup, and the NAPI poll path branches (healthy
+	  round, backend-dead, tx-more rescheduling, rx alloc error,
+	  rx protocol drop) driven via the deterministic fake host.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_ETHTOOL_KUNIT
+	bool "Vector networking v2 ethtool KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	select UML_NET_VECTOR_V2_FAKE_HOST
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 ethtool surface.
+	  These tests validate stopped-state stats, ring depth policy,
+	  counter export, and ethtool stats-read while traffic is in
+	  flight (spin_lock_bh contention against the fake host backend)
+	  before the driver is considered replacement-ready.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_HOST_FD_KUNIT
+	bool "Vector networking v2 fd host KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 fd host backend.
+	  These tests validate direct-fd duplication, close unwind, bad-fd
+	  failure behavior, netdev open/stop lifecycle integration, and
+	  raw-frame TX/RX over supplied fds, including contiguous-fd
+	  multiqueue open and failure unwind.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
+
+config UML_NET_VECTOR_V2_HOST_TAP_KUNIT
+	bool "Vector networking v2 TAP host KUnit tests"
+	depends on KUNIT
+	select UML_NET_VECTOR_V2
+	default n
+	help
+	  Build KUnit tests for the experimental vector v2 trusted TAP host
+	  backend. These tests validate fd ownership, close unwind, and
+	  sandbox fail-closed behavior without requiring a real host TAP
+	  device in KUnit.
+
+	  Say N for production builds. Say Y while developing the vector
+	  networking v2 rewrite.
 
 endmenu
 

@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <init.h>
 #include <as-layout.h>
+#include <backend.h>
 #include <mm_id.h>
 #include <os.h>
 #include <ptrace_user.h>
@@ -44,7 +45,19 @@ void syscall_stub_dump_error(struct mm_id *mm_idp)
 	print_hex_dump(UM_KERN_ERR, "    syscall data: ", 0,
 		       16, 4, sc, sizeof(*sc), 0);
 
-	if (using_seccomp) {
+	/*
+	 * Dump the per-mm SCM_RIGHTS fd map only for backends
+	 * that actually populate it (seccomp today). Reads the
+	 * ops-table capability flag rather than the legacy
+	 * `using_seccomp` int per D59 Phase II Lift #4b. Debug-
+	 * path only — called from the error branch of
+	 * do_syscall_stub below and from the seccomp backend's
+	 * run_userspace when the stub reports an errored
+	 * syscall batch. um_backend is guaranteed non-NULL here
+	 * (all callers run post-init_backend); the guard is
+	 * belt-and-suspenders.
+	 */
+	if (um_backend && um_backend->has_syscall_stub_fd_map) {
 		printk(UM_KERN_ERR "%s: FD map num: %d", __func__,
 		       mm_idp->syscall_fd_num);
 		print_hex_dump(UM_KERN_ERR,
@@ -65,53 +78,27 @@ static inline unsigned long *check_init_stack(struct mm_id * mm_idp,
 	return stack;
 }
 
-static unsigned long syscall_regs[MAX_REG_NR];
-
-static int __init init_syscall_regs(void)
-{
-	get_safe_registers(syscall_regs, NULL);
-
-	syscall_regs[REGS_IP_INDEX] = STUB_CODE +
-		((unsigned long) stub_syscall_handler -
-		 (unsigned long) __syscall_stub_start);
-	syscall_regs[REGS_SP_INDEX] = STUB_DATA +
-		offsetof(struct stub_data, sigstack) +
-		sizeof(((struct stub_data *) 0)->sigstack) -
-		sizeof(void *);
-
-	return 0;
-}
-
-__initcall(init_syscall_regs);
-
 static inline long do_syscall_stub(struct mm_id *mm_idp)
 {
 	struct stub_data *proc_data = (void *)mm_idp->stack;
-	int n, i;
-	int err, pid = mm_idp->pid;
+	int pid = mm_idp->pid;
 
 	/* Inform process how much we have filled in. */
 	proc_data->syscall_data_len = mm_idp->syscall_data_len;
 
-	if (using_seccomp) {
+	/*
+	 * Dispatch via the futex + wait_stub_done_seccomp round-trip
+	 * (the only stub-child mechanism after memo 25 refactor 11
+	 * removed ptrace). The stub_syscall_uses_futex flag is still
+	 * checked so a future per-mm-worker-process backend (memo 25
+	 * R4 / memo 26) can opt out without further dispatch surgery.
+	 */
+	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		proc_data->restart_wait = 1;
 		wait_stub_done_seccomp(mm_idp, 0, 1);
 	} else {
-		n = ptrace_setregs(pid, syscall_regs);
-		if (n < 0) {
-			printk(UM_KERN_ERR "Registers -\n");
-			for (i = 0; i < MAX_REG_NR; i++)
-				printk(UM_KERN_ERR "\t%d\t0x%lx\n", i, syscall_regs[i]);
-			panic("%s : PTRACE_SETREGS failed, errno = %d\n",
-			      __func__, -n);
-		}
-
-		err = ptrace(PTRACE_CONT, pid, 0, 0);
-		if (err)
-			panic("Failed to continue stub, pid = %d, errno = %d\n",
-			      pid, errno);
-
-		wait_stub_done(pid);
+		panic("%s : no stub-child backend supports the legacy ptrace dispatch (memo 25 R11); pid = %d",
+		      __func__, pid);
 	}
 
 	/*
@@ -128,7 +115,12 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 		mm_idp->syscall_data_len = 0;
 	}
 
-	if (using_seccomp)
+	/*
+	 * Reset the FD-map count only for backends that populate
+	 * it. Routed through um_backend->has_syscall_stub_fd_map
+	 * per D59 Phase II Lift #4c.
+	 */
+	if (um_backend && um_backend->has_syscall_stub_fd_map)
 		mm_idp->syscall_fd_num = 0;
 
 	return mm_idp->syscall_data_len;
@@ -197,8 +189,14 @@ static int get_stub_fd(struct mm_id *mm_idp, int fd)
 {
 	int i;
 
-	/* Find an FD slot (or flush and use first) */
-	if (!using_seccomp)
+	/*
+	 * Only the seccomp backend maintains an FD indirection
+	 * table for SCM_RIGHTS; ptrace returns the raw FD
+	 * straight through. Routed through
+	 * um_backend->has_syscall_stub_fd_map per D59 Phase II
+	 * Lift #4c.
+	 */
+	if (!um_backend || !um_backend->has_syscall_stub_fd_map)
 		return fd;
 
 	/* Already crashed, value does not matter */
@@ -231,8 +229,9 @@ static int get_stub_fd(struct mm_id *mm_idp, int fd)
 	return 0;
 }
 
-int map(struct mm_id *mm_idp, unsigned long virt, unsigned long len, int prot,
-	int phys_fd, unsigned long long offset)
+int um_stub_mm_map(struct mm_id *mm_idp, unsigned long virt,
+		   unsigned long len, int prot, int phys_fd,
+		   unsigned long long offset)
 {
 	struct stub_syscall *sc;
 
@@ -242,7 +241,13 @@ int map(struct mm_id *mm_idp, unsigned long virt, unsigned long len, int prot,
 	    sc->mem.offset == MMAP_OFFSET(offset - sc->mem.length)) {
 		int prev_fd = sc->mem.fd;
 
-		if (using_seccomp)
+		/*
+		 * The stored sc->mem.fd is a slot-index on seccomp
+		 * (indirection through mm_id->syscall_fd_map), a raw
+		 * FD on ptrace. Routed through um_backend->has_
+		 * syscall_stub_fd_map per D59 Phase II Lift #4c.
+		 */
+		if (um_backend && um_backend->has_syscall_stub_fd_map)
 			prev_fd = mm_idp->syscall_fd_map[sc->mem.fd];
 
 		if (phys_fd == prev_fd) {
@@ -264,7 +269,8 @@ int map(struct mm_id *mm_idp, unsigned long virt, unsigned long len, int prot,
 	return 0;
 }
 
-int unmap(struct mm_id *mm_idp, unsigned long addr, unsigned long len)
+int um_stub_mm_unmap(struct mm_id *mm_idp, unsigned long addr,
+		     unsigned long len)
 {
 	struct stub_syscall *sc;
 

@@ -40,6 +40,32 @@ struct hostfs_stat {
 extern int stat_file(const char *path, struct hostfs_stat *p, int fd);
 extern int access_file(char *path, int r, int w, int x);
 extern int open_file(char *path, int r, int w, int append);
+
+/*
+ * Per Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-
+ * next-sprint/03-hostfs-io-uring-openat2.md (memo #3, Phase 1):
+ *
+ * open_file_strict() resolves @rel via openat2(root_fd, rel, ...) with
+ * RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS. Symlink-escape from the
+ * hostfs mount root is rejected (-ELOOP / -EXDEV).
+ *
+ * Caller opens the hostfs mount root once at fill_super with O_PATH
+ * | O_DIRECTORY and passes its fd as @root_fd here.  @rel must be
+ * the path relative to that root (leading "/" tolerated; openat2
+ * with RESOLVE_BENEATH treats the root_fd as the new "/" anyway).
+ *
+ * Returns the opened fd on success, -errno on failure.  In particular
+ * returns -ENOSYS / -EINVAL if the host kernel doesn't expose
+ * openat2 (< 5.6); callers fall back to open_file() in that case.
+ */
+extern int open_file_strict(int root_fd, const char *rel,
+			    int r, int w, int append);
+
+/*
+ * Open @path with O_PATH | O_DIRECTORY | O_CLOEXEC for use as the
+ * @root_fd anchor in open_file_strict().  Returns the fd or -errno.
+ */
+extern int open_root_path(const char *path);
 extern void *open_dir(char *path, int *err_out);
 extern void seek_dir(void *stream, unsigned long long pos);
 extern char *read_dir(void *stream, unsigned long long *pos_out,

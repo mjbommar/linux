@@ -38,6 +38,14 @@ extern unsigned long long physmem_size;
 
 extern unsigned long high_physmem;
 extern unsigned long uml_physmem;
+/*
+ * Memo 25 R1 abstraction: host VA where UML pages physically live.
+ * Today equals uml_physmem; under v2 KVM (memo 26 Phase B) the two
+ * split, with uml_physmem moving to PML4[256+] for the guest pgd
+ * while __binary_start_hva stays at the low host VA the host
+ * process can actually access. See arch/um/include/shared/mem.h.
+ */
+extern unsigned long __binary_start_hva;
 extern unsigned long uml_reserved;
 extern unsigned long end_vm;
 extern unsigned long start_vm;

@@ -10,6 +10,7 @@
 #include <linux/swap.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <asm/patchable.h>
 #include <asm/sections.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -22,8 +23,32 @@
 #include <um_malloc.h>
 #include <linux/sched/task.h>
 #include <linux/kasan.h>
+#include <linux/kmsan.h>
+#ifdef CONFIG_KMSAN
+#include <asm/kmsan.h>
+#endif
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+#include <asm/um-mmaps.h>
+#endif
 
 #ifdef CONFIG_KASAN
+#if defined(CONFIG_UM_SNAPSHOT_FORKSERVER)
+/* Entry in the C-09 kernel mmap registry (D37 pull-forward #1) that
+ * describes the KASAN shadow mapping. Registered after
+ * kasan_map_memory(). REMAP_IN_WORKER is not set because D37 pull-
+ * forward #6 drops MADV_DONTFORK on the shadow under
+ * CONFIG_UM_FUZZ_HOOKS, so workers inherit via COW instead. Shadow
+ * contents are not in v2 snapshots by default — too sparse to
+ * justify; snapshot restore reconstructs the needed shadow from the
+ * allocator state.
+ */
+static struct um_mmap_region kasan_shadow_mmap_region = {
+	.name  = "kasan-shadow",
+	.flags = UM_MMAP_INHERIT_COW,
+	.backing_fd = -1,
+};
+#endif
+
 void __init kasan_init(void)
 {
 	/*
@@ -31,6 +56,13 @@ void __init kasan_init(void)
 	 * the host machine will allocate physical memory as necessary.
 	 */
 	kasan_map_memory((void *)KASAN_SHADOW_START, KASAN_SHADOW_SIZE);
+
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+	kasan_shadow_mmap_region.base = (void *)KASAN_SHADOW_START;
+	kasan_shadow_mmap_region.len  = KASAN_SHADOW_SIZE;
+	um_register_mmap_region(&kasan_shadow_mmap_region);
+#endif
+
 	init_task.kasan_depth = 0;
 	/*
 	 * Since kasan_init() is called before main(),
@@ -43,6 +75,27 @@ static void (*kasan_init_ptr)(void)
 __section(".kasan_init") __used
 = kasan_init;
 #endif
+
+/*
+ * Under the D62 VMALLOC-quarter-split layout (2026-04-23,
+ * supersedes D58), KMSAN shadow + origin live inside the
+ * VMALLOC range's 2nd and 3rd quarters (see
+ * arch/um/include/asm/pgtable.h). The generic mm/kmsan/
+ * shadow.c::vmalloc_meta arithmetic maps every vmalloc or
+ * module address to its shadow/origin via VMALLOC_START
+ * offset + KMSAN_VMALLOC_*_OFFSET — no arch-specific
+ * bootstrap mmap required. The weak generic
+ * kmsan_arch_init_early_shadow() from mm/kmsan/init.c is
+ * the correct no-op; do NOT override it here.
+ *
+ * The dedicated-slab mmap regions previously registered
+ * with um_register_mmap_region() are similarly unnecessary
+ * under the quarter-split: vmalloc pages (including the
+ * KMSAN shadow/origin quarters) already inherit through
+ * the normal snapshot-forkserver vmalloc COW path, which
+ * C-09 already validates for vmalloc-backed allocations
+ * more broadly.
+ */
 
 /*
  * Initialized during boot, and readonly for initializing page tables
@@ -136,4 +189,6 @@ void mark_rodata_ro(void)
 	unsigned long rodata_end = PFN_ALIGN(__end_rodata);
 
 	os_protect_memory((void *)rodata_start, rodata_end - rodata_start, 1, 0, 0);
+
+	um_section_split_finalize();
 }

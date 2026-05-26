@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Base UML configuration shared by every uml/<profile> defconfig.
+#
+# This file intentionally holds only settings that every profile
+# wants regardless of its posture. Profile-specific tuning
+# (sanitizers, tracers, sandbox disables, backend pinning) lives
+# in arch/um/configs/profiles/<profile>.config and is merged on
+# top via merge_config.sh.
+#
+# Convention:
+#   - if a feature is on here and any profile disables it, that
+#     disable lives in the fragment (e.g. sandbox disables
+#     DEBUG_KERNEL);
+#   - if a feature is off here and any profile enables it, that
+#     enable lives in the fragment (e.g. research enables KASAN);
+#   - settings that never change across profiles live only here.
+#
+# Keep this file lean — every line is paid for by every profile.
+
+# --- init / basic kernel -------------------------------------------
+CONFIG_SYSVIPC=y
+CONFIG_POSIX_MQUEUE=y
+CONFIG_NO_HZ=y
+CONFIG_HIGH_RES_TIMERS=y
+CONFIG_LOG_BUF_SHIFT=14
+
+# --- cgroups (many workloads need them) ----------------------------
+CONFIG_CGROUPS=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_CGROUP_DEVICE=y
+CONFIG_CPUSETS=y
+CONFIG_CGROUP_CPUACCT=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_BLK_CGROUP=y
+
+# --- sysfs / procfs / tmpfs / devtmpfs -----------------------------
+CONFIG_SYSFS_DEPRECATED=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_PROC_KCORE=y
+CONFIG_TMPFS=y
+
+# --- per-mm host worker process (memo 25 R4 / memo 28 E.6) ---------
+CONFIG_UM_WORKER_PROCESS=y
+
+# --- character devices (stdin/stdout) ------------------------------
+CONFIG_NULL_CHAN=y
+CONFIG_PORT_CHAN=y
+CONFIG_PTY_CHAN=y
+CONFIG_TTY_CHAN=y
+CONFIG_XTERM_CHAN=y
+CONFIG_CON_CHAN="pts"
+CONFIG_SSL=y
+CONFIG_SSL_CHAN="pts"
+CONFIG_LEGACY_PTY_COUNT=32
+
+# --- block / fs ----------------------------------------------------
+CONFIG_BLK_DEV_UBD=y
+CONFIG_BLK_DEV_LOOP=m
+CONFIG_BLK_DEV_NBD=m
+CONFIG_EXT4_FS=y
+CONFIG_ISO9660_FS=m
+CONFIG_JOLIET=y
+CONFIG_HOSTFS=y
+CONFIG_BINFMT_MISC=m
+
+# --- network (basic only; profiles may add protocols) --------------
+CONFIG_NET=y
+CONFIG_PACKET=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+# CONFIG_IPV6 is not set
+
+# --- network drivers (common ones) ---------------------------------
+CONFIG_DUMMY=m
+CONFIG_TUN=m
+CONFIG_PPP=m
+CONFIG_SLIP=m
+
+# --- entropy -------------------------------------------------------
+# CONFIG_HW_RANDOM is not set
+CONFIG_UML_RANDOM=y
+
+# --- nls -----------------------------------------------------------
+CONFIG_NLS=y
+
+# --- misc ----------------------------------------------------------
+CONFIG_QUOTA=y
+CONFIG_AUTOFS_FS=m
+# CONFIG_PID_NS is not set
+
+# Debug info is kept per-toolchain-default; profiles that want
+# maximum debug (research) flip it to DWARF5 explicitly.
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_FRAME_WARN=1024

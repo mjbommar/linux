@@ -64,6 +64,29 @@ int os_start_cpu_thread(int cpu)
 	if (err != 0)
 		goto err;
 
+	/*
+	 * SMP-T37 (2026-05-03): pin guest CPU `cpu`'s host pthread to
+	 * host CPU `cpu` via pthread_setaffinity_np. Under v2's
+	 * per-host-CPU vCPU pool, this means a given guest CPU always
+	 * dispatches against the same vCPU FD — eliminates one source of
+	 * cross-vCPU aliasing (the host scheduler migrating the pthread
+	 * mid-flight to a different host CPU and thus a different vCPU
+	 * pool entry). Guest task migration across guest CPUs is
+	 * orthogonal and still happens; this only locks the host-pthread
+	 * → host-CPU mapping. Failure is non-fatal (logged + carry on).
+	 */
+	{
+		cpu_set_t cpuset;
+
+		CPU_ZERO(&cpuset);
+		CPU_SET(cpu, &cpuset);
+		if (pthread_setaffinity_np(cpu_threads[cpu], sizeof(cpuset),
+					   &cpuset) != 0)
+			printk(UM_KERN_WARNING
+			       "um: SMP-T37: pthread_setaffinity_np(cpu=%d) failed; carrying on with default scheduler placement\n",
+			       cpu);
+	}
+
 	return 0;
 
 err:
@@ -94,6 +117,11 @@ int os_send_ipi(int cpu, int vector)
 	union sigval value = { .sival_int = vector };
 
 	return pthread_sigqueue(cpu_threads[cpu], IPI_SIGNAL, value);
+}
+
+int os_ipi_signum(void)
+{
+	return IPI_SIGNAL;
 }
 
 static void __local_ipi_set(int enable)
@@ -145,4 +173,20 @@ void __init os_init_smp(void)
 		panic("%s: sigaction failed, errno = %d", __func__, errno);
 
 	cpu_threads[0] = pthread_self();
+
+	/*
+	 * SMP-T37 (2026-05-03): pin the boot pthread (guest CPU 0) to
+	 * host CPU 0. Same reasoning as os_start_cpu_thread above —
+	 * guest CPU 0 dispatch should always use vCPU pool[0].
+	 */
+	{
+		cpu_set_t cpuset;
+
+		CPU_ZERO(&cpuset);
+		CPU_SET(0, &cpuset);
+		if (pthread_setaffinity_np(cpu_threads[0], sizeof(cpuset),
+					   &cpuset) != 0)
+			printk(UM_KERN_WARNING
+			       "um: SMP-T37: pthread_setaffinity_np(boot cpu=0) failed; carrying on with default scheduler placement\n");
+	}
 }

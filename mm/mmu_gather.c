@@ -15,6 +15,12 @@
 
 #include <asm/tlb.h>
 
+#ifdef CONFIG_UML
+/* See arch/um/include/asm/tlbflush.h — defer page-free until next
+ * vcpu_run dispatch's CR4.PGE flush has executed (memo §H.1b). */
+#include <asm/tlbflush.h>
+#endif
+
 #ifndef CONFIG_MMU_GATHER_NO_GATHER
 
 static bool tlb_next_batch(struct mmu_gather *tlb)
@@ -147,8 +153,59 @@ static void tlb_batch_pages_flush(struct mmu_gather *tlb)
 {
 	struct mmu_gather_batch *batch;
 
+#ifdef CONFIG_UML
+	/*
+	 * Memo §H.1b residual fix: defer page-free until after the
+	 * guest TLB has actually been flushed. Standard mm assumes
+	 * tlb_flush_mmu_tlbonly() invalidated the TLB before this
+	 * point, so freeing pages back to buddy here is safe. UML's
+	 * flush is deferred to the next vcpu_run dispatch's CR4.PGE
+	 * toggle (kvm-v2/vcpu.c:1148) — freeing here exposes a window
+	 * where kernel slab can take a freed PFN and write data while
+	 * the guest CPU still has user-half TLB entries pointing at
+	 * it. Hand the encoded_page array to UML's per-mm deferred
+	 * queue; arch/um/kernel/tlb.c:um_mmu_gather_drain releases
+	 * them after the next KVM_RUN actually flushes the TLB.
+	 */
+	/*
+	 * Walk EVERY batch in the chain (not just while batch->nr),
+	 * because we mutate nr inside the loop — exiting early on the
+	 * first batch we fully defer would miss any subsequent ones.
+	 */
+	if (tlb->mm) {
+		for (batch = &tlb->local; batch; batch = batch->next) {
+			unsigned int deferred;
+
+			if (!batch->nr)
+				continue;
+			deferred = um_mmu_gather_defer(tlb->mm,
+						       batch->encoded_pages,
+						       batch->nr);
+			batch->nr -= deferred;
+		}
+	}
+
+	/*
+	 * SMP-T36 (2026-05-03): the standard free loop below
+	 * (`while batch && batch->nr`) terminates at the first batch with
+	 * nr==0. For non-UML kernels that's correct because batches fill
+	 * in order: a non-full batch is always the last one. But UML's
+	 * deferral loop above can leave a fully-deferred batch (nr=0)
+	 * EARLIER in the chain than a partially-deferred one (nr>0,
+	 * happens when kmalloc OOM hit __um_defer_append_locked
+	 * mid-batch). Stopping at the first empty batch then leaks the
+	 * surviving entries of later batches AND keeps the encoded_page
+	 * array referencing pages that never get freed. Walk every batch
+	 * and skip empties.
+	 */
+	for (batch = &tlb->local; batch; batch = batch->next)
+		if (batch->nr)
+			__tlb_batch_free_encoded_pages(batch);
+#else
+
 	for (batch = &tlb->local; batch && batch->nr; batch = batch->next)
 		__tlb_batch_free_encoded_pages(batch);
+#endif
 	tlb->active = &tlb->local;
 }
 
@@ -220,12 +277,41 @@ bool __tlb_remove_page_size(struct mmu_gather *tlb, struct page *page, int page_
 
 #ifdef CONFIG_MMU_GATHER_TABLE_FREE
 
+#ifdef CONFIG_DEBUG_UM_PT_FREE
+/*
+ * SMP-T39 PT-page free diagnostic.  Logs PFN of every PT page freed
+ * back to buddy via the RCU-deferred mmu_gather path.  Was load-bearing
+ * for diagnosing mt-mini "got=0 expect=N" residuals across vCPUs; the
+ * underlying race is now fixed (see commit history around SMP-T79),
+ * so this is off by default.  Re-enable via CONFIG_DEBUG_UM_PT_FREE
+ * if a similar PT-recycle hypothesis ever resurfaces.
+ *
+ * Output format: "UMPTFREE pfn=<hex> count=<dec>\n" — first 32 frees
+ * always, then every 100th, to avoid drowning dmesg.
+ */
+static atomic_long_t um_pt_free_count = ATOMIC_LONG_INIT(0);
+
+static void um_log_pt_free(struct ptdesc *pt)
+{
+	long n = atomic_long_inc_return(&um_pt_free_count);
+	struct page *p = ptdesc_page(pt);
+	unsigned long pfn = page_to_pfn(p);
+
+	if (n <= 32 || (n % 100) == 0)
+		pr_info("UMPTFREE pfn=%lx count=%ld\n", pfn, n);
+}
+#endif
+
 static void __tlb_remove_table_free(struct mmu_table_batch *batch)
 {
 	int i;
 
-	for (i = 0; i < batch->nr; i++)
+	for (i = 0; i < batch->nr; i++) {
+#ifdef CONFIG_DEBUG_UM_PT_FREE
+		um_log_pt_free((struct ptdesc *)batch->tables[i]);
+#endif
 		__tlb_remove_table(batch->tables[i]);
+	}
 
 	free_page((unsigned long)batch);
 }

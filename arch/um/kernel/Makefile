@@ -14,11 +14,50 @@ CPPFLAGS_vmlinux.lds := -DSTART=$(LDS_START)		\
 			$(LDS_EXTRA)
 always-$(KBUILD_BUILTIN) := vmlinux.lds
 
-obj-y = config.o exec.o exitcode.o irq.o ksyms.o mem.o \
-	physmem.o process.o ptrace.o reboot.o sigio.o \
-	signal.o sysrq.o time.o tlb.o trap.o \
+obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
+	physmem.o process.o ptrace.o reboot.o section_split.o sigio.o \
+	signal.o sysrq.o time.o tlb.o trace.o trap.o um_diag.o \
 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
+
+# x86_nops[] + link-time stubs for bpf_jit_comp.c's cpu_feature-
+# gated references to retpoline thunks, cfi_mode, clear_bhb_loop,
+# text_poke_set (workstream C-06, per D43 fifth-view). Bare-
+# metal x86 gets these from arch/x86/kernel/ TUs UML doesn't
+# build.
+obj-$(CONFIG_BPF_JIT) += x86_nops.o bpf_jit_stubs.o
+
+obj-$(CONFIG_KPROBES) += kprobes/
+obj-$(CONFIG_RETHOOK) += rethook.o
+obj-$(CONFIG_UM_SNAPSHOT_FORKSERVER) += snapshot.o
+obj-$(CONFIG_UM_TEMPLATE_PAUSE) += template_pause.o template_pause_identity.o
+obj-$(CONFIG_UM_TEMPLATE_PAUSE_IDENTITY_KUNIT) += template_pause_identity_test.o
+obj-$(CONFIG_UM_WORKER_PROCESS) += spawner.o
+# rethook's trampoline runs on every probed function's return;
+# it must not itself be traced (same discipline as kprobes).
+KASAN_SANITIZE_rethook.o  := n
+KCSAN_SANITIZE_rethook.o  := n
+KCOV_INSTRUMENT_rethook.o := n
+CFLAGS_REMOVE_rethook.o   := $(CC_FLAGS_FTRACE)
+obj-$(CONFIG_DEBUG_FS) += um_debugfs.o hooks_bench.o
 obj-y += load_file.o
+
+obj-$(CONFIG_FUNCTION_TRACER) += mcount.o
+obj-$(CONFIG_DYNAMIC_FTRACE)  += ftrace.o
+
+# Prevent recursion: ftrace's own machinery must not be traced.
+CFLAGS_REMOVE_ftrace.o        := $(CC_FLAGS_FTRACE)
+# section_split.c backs um_kernel_text_patch_{begin,end}, which
+# ftrace calls under stop_machine. Must not itself be traced.
+CFLAGS_REMOVE_section_split.o := $(CC_FLAGS_FTRACE)
+# early_printk runs before ftrace_init().
+CFLAGS_REMOVE_early_printk.o  := $(CC_FLAGS_FTRACE)
+# process.c contains new_thread_handler and fork_handler. Both
+# are entered via UML_LONGJMP during task creation rather than a
+# normal `call`; their function_graph prologue push would
+# therefore rewrite garbage at 8(%rsp) and never see a matching
+# return_to_handler pop, leaking one shadow-stack entry per
+# task creation. See decisions-log D34 (source 2).
+CFLAGS_REMOVE_process.o       := $(CC_FLAGS_FTRACE)
 
 obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
 obj-$(CONFIG_GPROF)	+= gprof_syms.o

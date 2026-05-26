@@ -51,19 +51,23 @@ int run_helper(void (*pre_exec)(void *), void *pre_data, char **argv)
 	if (stack == 0)
 		return -ENOMEM;
 
-	ret = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+	/*
+	 * FD disposition (C-09 commit 4): exec-probe. Both ends
+	 * CLOEXEC — the child's exec()-success closes fds[1]
+	 * without ever touching write(), and the parent reads 0
+	 * bytes to learn that exec() succeeded. An exec failure
+	 * leaves fds[1] open in the child just long enough for it
+	 * to write(&errno, ...) back before exiting. SOCK_CLOEXEC
+	 * atomic on creation replaces the separate
+	 * socketpair() + fcntl(fds[1], F_SETFD) sequence, which
+	 * had a fork race between the two calls.
+	 */
+	ret = socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds);
 	if (ret < 0) {
 		ret = -errno;
 		printk(UM_KERN_ERR "run_helper : pipe failed, errno = %d\n",
 		       errno);
 		goto out_free;
-	}
-
-	ret = os_set_exec_close(fds[1]);
-	if (ret < 0) {
-		printk(UM_KERN_ERR "run_helper : setting FD_CLOEXEC failed, "
-		       "ret = %d\n", -ret);
-		goto out_close;
 	}
 
 	sp = stack + UM_KERN_PAGE_SIZE;
@@ -107,7 +111,6 @@ int run_helper(void (*pre_exec)(void *), void *pre_data, char **argv)
 
 out_free2:
 	kfree(data.buf);
-out_close:
 	if (fds[1] != -1)
 		close(fds[1]);
 	close(fds[0]);

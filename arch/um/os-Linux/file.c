@@ -13,6 +13,7 @@
 #include <linux/falloc.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/uio.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -83,6 +84,29 @@ int os_access(const char *file, int mode)
 		return -errno;
 
 	return 0;
+}
+
+/*
+ * Memo #7 Phase 1: scatter-gather write.  Used by the console
+ * ring-wrap coalescing path in arch/um/drivers/line.c to combine
+ * two write(2) syscalls into one writev(2) when the LINE_BUFSIZE
+ * ring wraps.  Loops on EINTR; treats EAGAIN as "0 bytes written"
+ * (the caller already handles partial-write retry).
+ */
+ssize_t os_writev(int fd, const struct iovec *iov, int iovcnt)
+{
+	ssize_t n;
+
+	do {
+		errno = 0;
+		n = writev(fd, iov, iovcnt);
+	} while (n < 0 && errno == EINTR);
+
+	if (n >= 0)
+		return n;
+	if (errno == EAGAIN)
+		return 0;
+	return -errno;
 }
 
 /* FIXME? required only by hostaudio (because it passes ioctls verbatim) */
@@ -184,6 +208,8 @@ int os_open_file(const char *file, struct openflags flags, int mode)
 		f |= O_EXCL;
 	if (flags.a)
 		f |= O_APPEND;
+	if (flags.dr)
+		f |= O_DIRECT;
 
 	fd = open64(file, f, mode);
 	if (fd < 0)
@@ -206,7 +232,15 @@ int os_connect_socket(const char *name)
 	sock.sun_family = AF_UNIX;
 	snprintf(sock.sun_path, sizeof(sock.sun_path), "%s", name);
 
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * Caller owns the fd; SOCK_CLOEXEC is atomic-safe default.
+	 * Currently consumed by arch/um/kernel/time.c (time-travel
+	 * controller socket) and drivers/virtio_uml.c (vhost-user
+	 * socket) — both retained across snapshot fork as CoW'd
+	 * file table entries, neither needs exec-survival.
+	 */
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0) {
 		err = -errno;
 		goto out;
@@ -313,7 +347,14 @@ int os_file_size(const char *file, unsigned long long *size_out)
 		int fd;
 		long blocks;
 
-		fd = open(file, O_RDONLY, 0);
+		/*
+		 * FD disposition (C-09 commit 4): ephemeral. Opened,
+		 * ioctl'd for BLKGETSIZE, closed synchronously in this
+		 * function. Never held across a snapshot ready-point;
+		 * O_CLOEXEC is belt-and-braces defense against stray
+		 * exec() between open and close.
+		 */
+		fd = open(file, O_RDONLY | O_CLOEXEC, 0);
 		if (fd < 0) {
 			err = -errno;
 			printk(UM_KERN_ERR "Couldn't open \"%s\", "
@@ -366,25 +407,40 @@ int os_pipe(int *fds, int stream, int close_on_exec)
 {
 	int err, type = stream ? SOCK_STREAM : SOCK_DGRAM;
 
-	err = socketpair(AF_UNIX, type, 0, fds);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * close_on_exec=1 callers (chan/rtc/virtio/ubd) hold the
+	 * pipe inside the UML process only; close_on_exec=0
+	 * callers (harddog, port) intentionally exec a helper and
+	 * rely on the child inheriting the fd.
+	 *
+	 * Create atomically with SOCK_CLOEXEC; for
+	 * !close_on_exec callers, clear FD_CLOEXEC on both ends
+	 * after the fact. This closes the pre-fcntl race window
+	 * for the common close_on_exec=1 path — previously a
+	 * fork() between socketpair() and the fcntl() loop
+	 * leaked an unsealed fd into the child.
+	 */
+	err = socketpair(AF_UNIX, type | SOCK_CLOEXEC, 0, fds);
 	if (err < 0)
 		return -errno;
 
-	if (!close_on_exec)
+	if (close_on_exec)
 		return 0;
 
-	err = os_set_exec_close(fds[0]);
+	err = fcntl(fds[0], F_SETFD, 0);
 	if (err < 0)
 		goto error;
 
-	err = os_set_exec_close(fds[1]);
+	err = fcntl(fds[1], F_SETFD, 0);
 	if (err < 0)
 		goto error;
 
 	return 0;
 
  error:
-	printk(UM_KERN_ERR "os_pipe : Setting FD_CLOEXEC failed, err = %d\n",
+	err = -errno;
+	printk(UM_KERN_ERR "os_pipe : Clearing FD_CLOEXEC failed, err = %d\n",
 	       -err);
 	close(fds[1]);
 	close(fds[0]);
@@ -455,7 +511,14 @@ int os_accept_connection(int fd)
 {
 	int new;
 
-	new = accept(fd, NULL, 0);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * accept4 with SOCK_CLOEXEC is atomic (races with fork
+	 * were possible under plain accept()+fcntl). The accepted
+	 * fd is handed to the caller's driver; snapshot behavior
+	 * inherits the caller's disposition.
+	 */
+	new = accept4(fd, NULL, 0, SOCK_CLOEXEC);
 	if (new < 0)
 		return -errno;
 	return new;
@@ -544,15 +607,23 @@ int os_create_unix_socket(const char *file, int len, int close_on_exec)
 	struct sockaddr_un addr;
 	int sock, err;
 
-	sock = socket(PF_UNIX, SOCK_DGRAM, 0);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * Only two callers today: mconsole (close_on_exec=1,
+	 * owns socket for UML lifetime) and xterm driver
+	 * (close_on_exec=1, bootstrap). Both pass 1; we still
+	 * honour the parameter for the theoretical 0 case by
+	 * clearing CLOEXEC after the atomic create.
+	 */
+	sock = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (sock < 0)
 		return -errno;
 
-	if (close_on_exec) {
-		err = os_set_exec_close(sock);
+	if (!close_on_exec) {
+		err = fcntl(sock, F_SETFD, 0);
 		if (err < 0)
 			printk(UM_KERN_ERR "create_unix_socket : "
-			       "close_on_exec failed, err = %d", -err);
+			       "clearing CLOEXEC failed, err = %d", -errno);
 	}
 
 	addr.sun_family = AF_UNIX;
@@ -633,7 +704,13 @@ int os_falloc_zeroes(int fd, unsigned long long offset, int len)
 
 int os_eventfd(unsigned int initval, int flags)
 {
-	int fd = eventfd(initval, flags);
+	/*
+	 * FD disposition (C-09 commit 4): consumer-disposition.
+	 * Currently only consumed by drivers/virtio_uml.c with
+	 * flags=0; force EFD_CLOEXEC so the fd never leaks into
+	 * exec() (stub trampoline, helper subprocess).
+	 */
+	int fd = eventfd(initval, flags | EFD_CLOEXEC);
 
 	if (fd < 0)
 		return -errno;
@@ -706,6 +783,25 @@ int os_poll(unsigned int n, const int *fds)
 void *os_mmap_rw_shared(int fd, size_t size)
 {
 	void *res = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+	if (res == MAP_FAILED)
+		return NULL;
+
+	return res;
+}
+
+/*
+ * MAP_ANONYMOUS | MAP_SHARED allocation. Same shape as
+ * os_mmap_rw_shared() but fd-less — the kernel backs the mapping
+ * with a fresh anonymous shmem file visible only to this process.
+ * Needed by the KVM backend's D-04b.1b harness, which wants a
+ * host-VA region that KVM can back memslots with (MAP_PRIVATE
+ * would COW on guest writes and diverge from the host copy).
+ */
+void *os_mmap_rw_anon_shared(size_t size)
+{
+	void *res = mmap(NULL, size, PROT_READ | PROT_WRITE,
+			 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
 	if (res == MAP_FAILED)
 		return NULL;

@@ -34,12 +34,31 @@ ifdef CONFIG_64BIT
 	KBUILD_CFLAGS += -mcmodel=large
 endif
 
+# Ftrace call-site emission (workstream C-05, decisions-log D29).
+# Under -mcmodel=large, GCC's -pg -mfentry expands to a 33-byte
+# indirect call sequence that recordmcount cannot recognize. Use
+# -fpatchable-function-entry=5,0 instead: the compiler emits a
+# 5-byte NOP at function entry and records the address in
+# __patchable_function_entries. Matches arm64/riscv/parisc.
+ifeq ($(CONFIG_DYNAMIC_FTRACE),y)
+  KBUILD_CPPFLAGS += -DCC_USING_PATCHABLE_FUNCTION_ENTRY
+  CC_FLAGS_FTRACE := -fpatchable-function-entry=5,0
+endif
+
 HOST_DIR := arch/$(HEADER_ARCH)
 
 include $(srctree)/$(ARCH_DIR)/Makefile-skas
 include $(srctree)/$(HOST_DIR)/Makefile.um
 
 core-y += $(HOST_DIR)/um/
+
+# Workstream C-06 v1: pull arch/x86/net/ into the UML build when
+# BPF JIT is configured. UML-local shim headers in
+# arch/um/include/asm/ + arch/um/kernel/x86_nops.c +
+# bpf_jit_comp.c's CONFIG_UM reg2pt_regs[] branch satisfy the
+# x86-host divergences. See Documentation/virt/uml/redesign/
+# 02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md.
+core-$(CONFIG_BPF_JIT) += $(HOST_DIR)/net/
 
 SHARED_HEADERS	:= $(ARCH_DIR)/include/shared
 ARCH_INCLUDE	:= -I$(srctree)/$(SHARED_HEADERS)
@@ -102,11 +121,45 @@ linux: vmlinux
 	@echo '  LINK $@'
 	$(Q)ln -f $< $@
 
+# --- uml/<profile> configure targets (workstream C-01) -------------
+#
+# Merge arch/um/configs/base_defconfig with
+# arch/um/configs/profiles/<profile>.config into .config, then let
+# the user run `make ARCH=um -j N` to build. Same workflow as the
+# kernel's standard defconfig path.
+
+UML_PROFILES := prod-fast prod-with-hooks research research-kmsan \
+		fuzz fuzz-deep race sandbox embedded time-travel
+
+PHONY += $(addprefix uml/,$(UML_PROFILES)) uml/list-profiles
+
+$(addprefix uml/,$(UML_PROFILES)): uml/%:
+	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/kconfig/merge_config.sh \
+		-m -O $(objtree) \
+		$(srctree)/arch/um/configs/base_defconfig \
+		$(srctree)/arch/um/configs/profiles/$*.config
+	$(Q)$(MAKE) -f $(srctree)/Makefile ARCH=um olddefconfig
+	@echo
+	@echo 'Configured for UML profile: $*'
+	@echo 'See Documentation/virt/uml/profiles/$*.rst for details.'
+	@echo 'Now run:  make ARCH=um -j$$(nproc)'
+
+uml/list-profiles:
+	@echo 'Available UML profiles (use: make ARCH=um uml/<profile>):'
+	@for p in $(UML_PROFILES); do echo "    uml/$$p"; done
+	@echo
+	@echo 'Per-profile documentation in Documentation/virt/uml/profiles/.'
+
 define archhelp
-  echo '* linux		- Binary kernel image (./linux) - for backward'
-  echo '		   compatibility only, this creates a hard link to the'
-  echo '		   real kernel binary, the "vmlinux" binary you'
-  echo '		   find in the kernel root.'
+  echo '* linux		  - Binary kernel image (./linux) - for backward'
+  echo '		    compatibility only, this creates a hard link to the'
+  echo '		    real kernel binary, the "vmlinux" binary you'
+  echo '		    find in the kernel root.'
+  echo '  uml/<profile>   - Configure for a named UML profile'
+  echo '                    (prod-fast, prod-with-hooks, research, fuzz,'
+  echo '                    fuzz-deep, race, sandbox, embedded, time-travel).'
+  echo '                    See Documentation/virt/uml/profiles/.'
+  echo '  uml/list-profiles - List available UML profile targets.'
 endef
 
 archheaders:

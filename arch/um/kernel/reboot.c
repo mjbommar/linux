@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/oom.h>
 #include <linux/reboot.h>
+#include <backend.h>
 #include <kern_util.h>
 #include <os.h>
 #include <skas.h>
@@ -38,6 +39,21 @@ static void kill_off_processes(void)
 
 void uml_cleanup(void)
 {
+	/*
+	 * Backend shutdown() is part of the Documentation/virt/uml/
+	 * backend-contract.rst lifecycle contract (cold, called on
+	 * reboot/halt, releases backend resources). Dispatch it
+	 * before kmalloc_ok=0 so the backend can still free things
+	 * if it needs to. um_backend is NULL only if init_backend()
+	 * never ran — that can happen if a fatal error during very
+	 * early boot reaches the reboot path; skip in that case.
+	 * Matching ptrace and seccomp shutdown ops are no-ops
+	 * today; the dispatch exists so a future KVM backend with
+	 * real resources to release is plumbed correctly.
+	 */
+	if (um_backend && um_backend->shutdown)
+		um_backend->shutdown();
+
 	kmalloc_ok = 0;
 	do_uml_exitcalls();
 	kill_off_processes();

@@ -36,12 +36,14 @@
 #include <linux/vmalloc.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
+#include <linux/uio.h>
 #include <kern_util.h>
 #include "mconsole_kern.h"
 #include <init.h>
 #include <irq_kern.h>
 #include "ubd.h"
 #include <os.h>
+#include <os_io_ring.h>
 #include "cow.h"
 
 /* Max request size is determined by sector mask - 32K */
@@ -76,6 +78,34 @@ static int irq_remainder_size;
 static struct io_thread_req **io_req_buffer;
 static struct io_thread_req *io_remainder;
 static int io_remainder_size;
+
+/*
+ * Phase 2a of memo #2 (UBD io_uring) — declarations hoisted here so
+ * ubd_driver_init can initialise the ring (forward reference resolved
+ * at file scope).  Definitions and the do_io_ring() body live next to
+ * the legacy do_io() further down.
+ */
+#define UBD_RING_DEPTH 256
+static struct os_io_ring *ubd_ring;
+
+/*
+ * Memo #2 perf-comparison knob.  Set via cmdline `um_ubd_no_uring=1`
+ * to force the legacy synchronous helper-thread path even when the
+ * host kernel could support io_uring.  Used by the A/B bench in
+ * tools/testing/selftests/um/ubd-bench/.  Default 0 keeps the
+ * io_uring path enabled.
+ *
+ * Note: name starts with `um_ubd_` rather than `ubd_` because
+ * __setup("ubd", ubd_setup) above does a prefix match and would
+ * otherwise capture this and try to parse it as a device spec.
+ */
+static int ubd_no_io_uring;
+static int __init ubd_no_io_uring_setup(char *s)
+{
+	ubd_no_io_uring = simple_strtol(s, NULL, 0);
+	return 1;
+}
+__setup("um_ubd_no_uring=", ubd_no_io_uring_setup);
 
 
 
@@ -266,7 +296,7 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 		*index_out = n;
 
 	err = -EINVAL;
-	for (i = 0; i < sizeof("rscdt="); i++) {
+	for (i = 0; i < sizeof("rscdtD="); i++) {
 		switch (*str) {
 		case 'r':
 			flags.w = 0;
@@ -283,12 +313,30 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 		case 't':
 			ubd_dev->no_trim = 1;
 			break;
+		case 'D':
+			/*
+			 * memo #2 Phase 4: O_DIRECT on the backing file.
+			 * Skips the host page cache so io_uring's queue
+			 * depth (UBD_RING_DEPTH = 256) actually shows
+			 * up as a measured win — buffered I/O lets the
+			 * host pagecache absorb writes and mask the
+			 * ring's advantage over the legacy depth-1
+			 * helper thread.
+			 *
+			 * Requires page-aligned bvecs (the block layer
+			 * already guarantees this for whole-page bios;
+			 * sub-page sectored I/O via COW sector_mask
+			 * could still trip O_DIRECT alignment on some
+			 * host filesystems).
+			 */
+			flags.dr = 1;
+			break;
 		case '=':
 			str++;
 			goto break_loop;
 		default:
 			*error_out = "Expected '=' or flag letter "
-				"(r, s, c, t or d)";
+				"(r, s, c, t, D, or d)";
 			goto out;
 		}
 		str++;
@@ -365,6 +413,12 @@ __uml_help(ubd_setup,
 "    UMLs and file locking will be turned off - this is appropriate for a\n"
 "    cluster filesystem and inappropriate at almost all other times.\n\n"
 "    't' will disable trim/discard support on the device (enabled by default).\n\n"
+"    'D' will open the backing file with O_DIRECT, bypassing the host page\n"
+"    cache. Pairs naturally with the io_uring submission path (memo #2);\n"
+"    the host's queue depth then drives throughput rather than the page\n"
+"    cache. Requires page-aligned bvecs (default for whole-page block I/O\n"
+"    on Linux); sub-page sectored I/O via COW may trip O_DIRECT alignment\n"
+"    on some host filesystems.\n\n"
 "    An optional device serial number can be exposed using the serial parameter\n"
 "    on the cmdline which is exposed as a sysfs entry. This is particularly\n"
 "    useful when a unique number should be given to the device. Note when\n"
@@ -480,6 +534,10 @@ static void kill_io_thread(void)
 {
 	if (io_td)
 		os_kill_helper_thread(io_td);
+	if (ubd_ring) {
+		os_io_ring_destroy(ubd_ring);
+		ubd_ring = NULL;
+	}
 }
 
 __uml_exitcall(kill_io_thread);
@@ -1117,6 +1175,27 @@ static int __init ubd_driver_init(void)
 		       "falling back to synchronous I/O\n", -err);
 		return 0;
 	}
+	/*
+	 * Phase 2a (memo #2): try to bring up the io_uring substrate.
+	 * If it succeeds, do_io_ring takes over for read/write ops with
+	 * within-request parallelism.  If io_uring_setup is unavailable
+	 * (older host, seccomp-blocked) ubd_ring stays NULL and the
+	 * legacy synchronous do_io path runs unchanged.
+	 *
+	 * `ubd_no_io_uring=1` cmdline forces the legacy path for A/B
+	 * perf comparison without changing the binary.
+	 */
+	if (ubd_no_io_uring) {
+		printk(KERN_INFO "ubd: io_uring disabled by ubd_no_io_uring=1; using legacy sync I/O\n");
+		ubd_ring = NULL;
+	} else {
+		ubd_ring = os_io_ring_create(UBD_RING_DEPTH);
+		if (ubd_ring)
+			printk(KERN_INFO "ubd: io_uring substrate active (depth=%d)\n",
+			       UBD_RING_DEPTH);
+		else
+			printk(KERN_INFO "ubd: io_uring unavailable, using legacy sync I/O\n");
+	}
 	err = um_request_irq(UBD_IRQ, thread_fd, IRQ_READ, ubd_intr,
 			     0, "ubd", ubd_devs);
 	if(err < 0)
@@ -1490,6 +1569,725 @@ int kernel_fd = -1;
 /* Only changed by the io thread. XXX: currently unused. */
 static int io_count;
 
+/*
+ * Per Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-
+ * next-sprint/02-ubd-io-uring.md (memo #2, Phase 2a).
+ *
+ * Async per-request submission via the host io_uring substrate
+ * (arch/um/os-Linux/io_uring.c).  Each request's segments are
+ * submitted in parallel; completions are harvested in any order;
+ * partial reads/writes are re-submitted for the remainder.
+ *
+ * The DISCARD / WRITE_ZEROES / FLUSH paths stay on the legacy
+ * synchronous helpers (memo §Phase 5 future work).  Bitmap update
+ * stays synchronous (memo §Phase 5 with IOSQE_IO_DRAIN).
+ *
+ * Cross-request parallelism (memo Phase 2b) requires restructuring
+ * the io_thread loop to drain reqs into the ring without per-req
+ * harvest barriers.  This commit lands within-request parallelism
+ * only — already a measurable win on multi-segment requests (the
+ * common case for MAX_SG > 1 workloads like Postgres / mmapped
+ * pagewriteback).
+ *
+ * UBD_RING_DEPTH + ubd_ring forward-declared near the top of the
+ * file so __init code paths see them without reorder pain.
+ */
+
+/*
+ * MAX_SG = 64 is the block-layer cap on physical segments per request
+ * (set in ubd_blk_mq_ops above).  A single vectored SQE can therefore
+ * cover up to MAX_SG iovec entries.
+ */
+struct ubd_pending_slot {
+	int		in_use;
+	int		op;            /* REQ_OP_READ / REQ_OP_WRITE */
+	int		fd;
+	char		*buf;          /* may be NULL for short-read zerofill */
+	unsigned long	total;         /* original requested length */
+	unsigned long	done;          /* bytes completed so far */
+	unsigned long long off;
+
+	/*
+	 * Phase 2b (memo #2): the owning request, so a CQE harvested
+	 * from any pending slot can be routed back to its req's error
+	 * field even when slots from many reqs are in flight at once.
+	 */
+	struct io_thread_req	*req;
+
+	/*
+	 * Phase 3 (memo #2): vectored submission.  When .vec_cnt > 0
+	 * the slot represents a single IORING_OP_READV / WRITEV
+	 * spanning io_desc[0..vec_cnt-1].  Short-completion fall-back
+	 * routes the remainder through the per-segment path via
+	 * ubd_ring_resubmit_vectored().
+	 */
+	int		vec_cnt;
+	struct iovec	vec[MAX_SG];
+};
+
+static struct os_io_ring *ubd_ring;
+static struct ubd_pending_slot ubd_slots[UBD_RING_DEPTH];
+
+static int ubd_slot_alloc(void)
+{
+	int i;
+
+	for (i = 0; i < UBD_RING_DEPTH; i++) {
+		if (!ubd_slots[i].in_use) {
+			ubd_slots[i].in_use = 1;
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void ubd_slot_free(int i) { ubd_slots[i].in_use = 0; }
+
+/*
+ * Vectored-slot short-completion: trim consumed iovecs from the
+ * front and resubmit the remainder as a fresh writev/readv.  Used
+ * by ubd_ring_resubmit when s->vec_cnt > 0.
+ */
+static int ubd_ring_resubmit_vectored(int slot_idx)
+{
+	struct ubd_pending_slot *s = &ubd_slots[slot_idx];
+	unsigned long long off = s->off + s->done;
+	unsigned long pos = 0;
+	int i, j;
+
+	for (i = 0; i < s->vec_cnt; i++) {
+		unsigned long ilen = s->vec[i].iov_len;
+
+		if (pos + ilen > s->done)
+			break;
+		pos += ilen;
+	}
+	if (i >= s->vec_cnt)
+		return -EINVAL;	/* over-completed — caller frees slot */
+
+	if (s->done > pos) {
+		unsigned long inner = s->done - pos;
+
+		s->vec[i].iov_base = (char *)s->vec[i].iov_base + inner;
+		s->vec[i].iov_len -= inner;
+	}
+	if (i > 0) {
+		for (j = 0; j < s->vec_cnt - i; j++)
+			s->vec[j] = s->vec[i + j];
+		s->vec_cnt -= i;
+	}
+	s->done = 0;
+	s->off  = off;
+	s->total = 0;
+	for (j = 0; j < s->vec_cnt; j++)
+		s->total += s->vec[j].iov_len;
+
+	if (s->op == REQ_OP_READ)
+		return os_io_ring_submit_preadv(ubd_ring, s->fd, s->vec,
+						s->vec_cnt, off, slot_idx);
+	return os_io_ring_submit_pwritev(ubd_ring, s->fd, s->vec,
+					 s->vec_cnt, off, slot_idx);
+}
+
+static int ubd_ring_resubmit(int slot_idx)
+{
+	struct ubd_pending_slot *s = &ubd_slots[slot_idx];
+	unsigned long remaining;
+	char *buf;
+	unsigned long long off;
+
+	if (s->vec_cnt > 0)
+		return ubd_ring_resubmit_vectored(slot_idx);
+
+	remaining = s->total - s->done;
+	buf = s->buf ? s->buf + s->done : NULL;
+	off = s->off + s->done;
+
+	if (s->op == REQ_OP_READ)
+		return os_io_ring_submit_pread(ubd_ring, s->fd, buf,
+					       remaining, off, slot_idx);
+	return os_io_ring_submit_pwrite(ubd_ring, s->fd, buf,
+					remaining, off, slot_idx);
+}
+
+/*
+ * Submit one contiguous (op, fd, buf, off, len) tuple to the ring.
+ * Returns the allocated slot index on success or -errno.  On
+ * ring-full (-EAGAIN) the caller is expected to harvest some CQEs
+ * and retry.
+ */
+static int ubd_ring_submit_one(struct io_thread_req *req, int op, int fd,
+			       char *buf, unsigned long len,
+			       unsigned long long off)
+{
+	int slot, rc;
+	struct ubd_pending_slot *s;
+
+	slot = ubd_slot_alloc();
+	if (slot < 0)
+		return -EAGAIN;
+	s = &ubd_slots[slot];
+	s->op      = op;
+	s->fd      = fd;
+	s->buf     = buf;
+	s->total   = len;
+	s->done    = 0;
+	s->off     = off;
+	s->vec_cnt = 0;
+	s->req     = req;
+
+	rc = ubd_ring_resubmit(slot);
+	if (rc < 0) {
+		ubd_slot_free(slot);
+		return rc;
+	}
+	return slot;
+}
+
+/*
+ * Phase 3 (memo #2) — vectored submission.
+ *
+ * When a request's io_desc[] is entirely uniform (sector_mask == 0 +
+ * cow_offset == -1 everywhere), all descriptors target the same fd
+ * and run contiguously on disk.  Coalesce them into a single
+ * IORING_OP_WRITEV / READV submission: one SQE instead of desc_cnt.
+ *
+ * Caller has already excluded the non-R/W ops; both branches here
+ * are safe.  Returns slot index on success, -errno on failure
+ * (-EAGAIN if the ring is full; the caller is expected to harvest
+ * one CQE and retry, same shape as ubd_ring_submit_one).
+ */
+static int ubd_ring_submit_vectored(int op, struct io_thread_req *req,
+				    unsigned long long base_off)
+{
+	int slot, rc, i;
+	struct ubd_pending_slot *s;
+	unsigned long total = 0;
+
+	slot = ubd_slot_alloc();
+	if (slot < 0)
+		return -EAGAIN;
+	s = &ubd_slots[slot];
+	s->op      = op;
+	s->fd      = req->fds[0];
+	s->buf     = NULL;
+	s->done    = 0;
+	s->off     = base_off + req->offsets[0];
+	s->vec_cnt = req->desc_cnt;
+	s->req     = req;
+	for (i = 0; i < req->desc_cnt; i++) {
+		s->vec[i].iov_base = req->io_desc[i].buffer;
+		s->vec[i].iov_len  = req->io_desc[i].length;
+		total += req->io_desc[i].length;
+	}
+	s->total = total;
+
+	if (op == REQ_OP_READ)
+		rc = os_io_ring_submit_preadv(ubd_ring, s->fd, s->vec,
+					      s->vec_cnt, s->off, slot);
+	else
+		rc = os_io_ring_submit_pwritev(ubd_ring, s->fd, s->vec,
+					       s->vec_cnt, s->off, slot);
+	if (rc < 0) {
+		ubd_slot_free(slot);
+		return rc;
+	}
+	return slot;
+}
+
+static bool ubd_req_vectored_eligible(struct io_thread_req *req)
+{
+	int i;
+
+	if (req->desc_cnt < 2)
+		return false;
+	for (i = 0; i < req->desc_cnt; i++) {
+		struct io_desc *d = &req->io_desc[i];
+
+		if (d->sector_mask != 0)
+			return false;
+		if (d->cow_offset != -1)
+			return false;
+		if (!d->buffer)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Async path for a single req.  Submits every read/write
+ * sub-segment (split by sector_mask bit, same as legacy do_io) and
+ * harvests all completions before returning.  Falls back to legacy
+ * sync do_io for FLUSH / DISCARD / WRITE_ZEROES which aren't yet on
+ * the ring (memo §Phase 5).
+ */
+/*
+ * Phase 2b (memo #2) — cross-request parallelism helpers.
+ *
+ * do_io_ring() handles a single request at a time: submit all its
+ * SQEs, drain all its CQEs, do its bitmap update.  That leaves the
+ * ring's depth largely unused when the block layer hands us a batch
+ * of N requests (UBD_REQ_BUFFER_SIZE / sizeof(*req) reqs per
+ * bulk_req_safe_read).
+ *
+ * do_io_ring_batch() submits the SQEs for every request in the
+ * batch *before* draining, so multiple reqs are in flight at once.
+ * CQEs are routed back to the owning req via slot->req->error;
+ * bitmap updates run after the final drain.  Same correctness
+ * properties as the per-req path, modulo CQE ordering (which
+ * already wasn't guaranteed).
+ */
+static int ubd_handle_cqe(const struct os_io_cqe *cqe)
+{
+	struct ubd_pending_slot *s = &ubd_slots[cqe->user_data];
+
+	if (cqe->res < 0) {
+		if (s->req && !s->req->error)
+			s->req->error = map_error(-cqe->res);
+		ubd_slot_free(cqe->user_data);
+		return 1;
+	}
+	if (cqe->res == 0) {
+		if (s->op == REQ_OP_READ && s->buf)
+			memset(s->buf + s->done, 0, s->total - s->done);
+		ubd_slot_free(cqe->user_data);
+		return 1;
+	}
+	s->done += cqe->res;
+	if (s->done < s->total) {
+		int rc = ubd_ring_resubmit(cqe->user_data);
+
+		if (rc < 0) {
+			if (s->req && !s->req->error)
+				s->req->error = map_error(-rc);
+			ubd_slot_free(cqe->user_data);
+			return 1;
+		}
+		return 0;
+	}
+	ubd_slot_free(cqe->user_data);
+	return 1;
+}
+
+/*
+ * Drain CQEs until the ring is empty.  Used after do_io_ring_batch
+ * has submitted SQEs for every request in the bulk batch.
+ */
+static void ubd_ring_drain_all(void)
+{
+	while (os_io_ring_in_flight(ubd_ring) > 0) {
+		struct os_io_cqe cqe;
+		int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+
+		if (hrc < 0) {
+			pr_err_ratelimited("ubd: io_uring drain failed: %d\n",
+					   hrc);
+			break;
+		}
+		if (hrc == 1)
+			ubd_handle_cqe(&cqe);
+	}
+}
+
+/*
+ * Submit one SQE, harvesting a CQE if the ring is full.  Returns
+ * the slot index on success or a negative -errno.  Distinct from
+ * ubd_ring_submit_one in that this *blocks* on EAGAIN until the
+ * ring has space (vs. returning EAGAIN to the caller).
+ */
+static int ubd_submit_with_harvest(struct io_thread_req *req, int op,
+				   int fd, char *buf, unsigned long len,
+				   unsigned long long off)
+{
+	int slot;
+
+	for (;;) {
+		slot = ubd_ring_submit_one(req, op, fd, buf, len, off);
+		if (slot >= 0)
+			return slot;
+		if (slot != -EAGAIN)
+			return slot;
+		{
+			struct os_io_cqe cqe;
+			int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+
+			if (hrc < 0)
+				return hrc;
+			if (hrc == 1)
+				ubd_handle_cqe(&cqe);
+		}
+	}
+}
+
+static int ubd_submit_vectored_with_harvest(int op, struct io_thread_req *req,
+					    unsigned long long base_off)
+{
+	int slot;
+
+	for (;;) {
+		slot = ubd_ring_submit_vectored(op, req, base_off);
+		if (slot >= 0)
+			return slot;
+		if (slot != -EAGAIN)
+			return slot;
+		{
+			struct os_io_cqe cqe;
+			int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+
+			if (hrc < 0)
+				return hrc;
+			if (hrc == 1)
+				ubd_handle_cqe(&cqe);
+		}
+	}
+}
+
+static void ubd_submit_req_async(struct io_thread_req *req)
+{
+	u64 base_offset;
+	int i, op;
+
+	op = req_op(req->req);
+	if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
+		/* FLUSH / DISCARD / WRITE_ZEROES — sync fallback. */
+		for (i = 0; !req->error && i < req->desc_cnt; i++)
+			do_io(req, &req->io_desc[i]);
+		return;
+	}
+
+	base_offset = req->offset;
+
+	if (ubd_req_vectored_eligible(req)) {
+		int slot = ubd_submit_vectored_with_harvest(op, req, base_offset);
+
+		if (slot < 0 && !req->error)
+			req->error = map_error(-slot);
+		return;
+	}
+
+	for (i = 0; !req->error && i < req->desc_cnt; i++) {
+		struct io_desc *d = &req->io_desc[i];
+		int nsectors = d->length / req->sectorsize;
+		int start = 0;
+		unsigned long last_len = 0;
+
+		do {
+			int bit = ubd_test_bit(start,
+				(unsigned char *)&d->sector_mask);
+			int end = start;
+			__u64 off;
+			unsigned long len;
+			char *buf;
+			int slot;
+
+			while (end < nsectors &&
+			       ubd_test_bit(end,
+				(unsigned char *)&d->sector_mask) == bit)
+				end++;
+
+			off = base_offset + req->offsets[bit] +
+			      start * req->sectorsize;
+			len = (end - start) * req->sectorsize;
+			last_len = len;
+			buf = d->buffer
+			      ? &d->buffer[start * req->sectorsize]
+			      : NULL;
+
+			slot = ubd_submit_with_harvest(req, op, req->fds[bit],
+						       buf, len, off);
+			if (slot < 0) {
+				if (!req->error)
+					req->error = map_error(-slot);
+				return;
+			}
+			start = end;
+		} while (start < nsectors);
+
+		base_offset += last_len;
+	}
+}
+
+static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
+{
+	int i, j;
+
+	/*
+	 * Phase 2b fast-path (memo #2): when the bulk batch is one
+	 * single-desc request, the io_uring path has no parallelism
+	 * to win — just a fixed +2 syscall cycle (sqe_commit +
+	 * io_uring_enter + cqe_poll) over the legacy depth-1 pwrite.
+	 * Small-block O_DIRECT workloads (fio --bs=4k --numjobs=N
+	 * --ioengine=psync) hit this case on every iteration because
+	 * each fio thread serially waits for its own write to
+	 * complete before queueing the next.  Bench shows the io_uring
+	 * path is ~24 % slower than legacy here; the fast-path
+	 * regression-proofs it.
+	 */
+	if (n_reqs == 1 && reqs[0]->desc_cnt <= 1) {
+		struct io_thread_req *req = reqs[0];
+
+		for (j = 0; !req->error && j < req->desc_cnt; j++)
+			do_io(req, &req->io_desc[j]);
+		return;
+	}
+
+	/*
+	 * Phase 1: submit every request's SQEs.  The submission loop
+	 * itself harvests CQEs from earlier reqs whenever the ring is
+	 * full, so the maximum in-flight is bounded by UBD_RING_DEPTH.
+	 */
+	for (i = 0; i < n_reqs; i++)
+		ubd_submit_req_async(reqs[i]);
+
+	/* Phase 2: drain remaining in-flight SQEs from any req. */
+	ubd_ring_drain_all();
+
+	/*
+	 * Phase 5 (memo #2): batched COW bitmap drain through the ring.
+	 * Submit one IORING_OP_WRITE per cow_offset != -1 segment, drain
+	 * together at the end.  For non-COW UBD images every cow_offset
+	 * is -1 so the submission loop is a no-op and the drain returns
+	 * immediately; for COW images this cuts N sync pwrite syscalls
+	 * per batch down to one io_uring_enter + the per-CQE drain.
+	 *
+	 * The slot table is fully free at this point (the main drain
+	 * above zeroed in_flight).  ubd_submit_with_harvest handles ring
+	 * pressure by harvesting one CQE when the slot pool is full.
+	 */
+	for (i = 0; i < n_reqs; i++) {
+		struct io_thread_req *req = reqs[i];
+		int op = req_op(req->req);
+
+		if (op != REQ_OP_READ && op != REQ_OP_WRITE)
+			continue;
+		if (req->error)
+			continue;
+		for (j = 0; j < req->desc_cnt; j++) {
+			struct io_desc *d = &req->io_desc[j];
+			int slot;
+
+			if (d->cow_offset == -1)
+				continue;
+			slot = ubd_submit_with_harvest(
+				req, REQ_OP_WRITE, req->fds[1],
+				(char *)&d->bitmap_words,
+				sizeof(d->bitmap_words),
+				d->cow_offset);
+			if (slot < 0 && !req->error)
+				req->error = map_error(-slot);
+		}
+	}
+	ubd_ring_drain_all();
+}
+
+static void do_io_ring(struct io_thread_req *req)
+{
+	int submitted = 0, harvested = 0;
+	int i, op;
+	u64 base_offset;
+
+	op = req_op(req->req);
+	if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
+		/* FLUSH / DISCARD / WRITE_ZEROES — sync fallback. */
+		for (i = 0; !req->error && i < req->desc_cnt; i++)
+			do_io(req, &req->io_desc[i]);
+		return;
+	}
+
+	/*
+	 * Mirror legacy do_io()'s req->offset += len advance across
+	 * io_desc[] entries — otherwise multi-bvec requests would all
+	 * target the same on-disk offset.  Local snapshot so we don't
+	 * mutate req->offset in flight.
+	 */
+	base_offset = req->offset;
+
+	/*
+	 * Phase 3 fast-path: one writev/readv for the whole request
+	 * when every desc is uniform (no COW overlay, no sector mask).
+	 */
+	if (ubd_req_vectored_eligible(req)) {
+		int slot;
+
+		for (;;) {
+			slot = ubd_ring_submit_vectored(op, req, base_offset);
+			if (slot >= 0) {
+				submitted++;
+				break;
+			}
+			if (slot != -EAGAIN) {
+				req->error = map_error(-slot);
+				goto harvest;
+			}
+			/* Ring full — wait for any CQE and retry. */
+			{
+				struct os_io_cqe cqe;
+				int hrc = os_io_ring_wait_cqe(ubd_ring,
+							      &cqe, -1);
+
+				if (hrc < 0) {
+					req->error = map_error(-hrc);
+					goto harvest;
+				}
+				if (hrc == 1) {
+					/* Spurious CQE before our submit;
+					 * the harvest loop below is the
+					 * only entity that touches slots,
+					 * so just release this one.
+					 */
+					ubd_slot_free(cqe.user_data);
+				}
+			}
+		}
+		/* Mirror per-desc base_offset advance for the whole req. */
+		for (i = 0; i < req->desc_cnt; i++)
+			base_offset += req->io_desc[i].length;
+		/* Skip per-desc loop — vectored path covers all descs. */
+		goto harvest;
+	}
+
+	for (i = 0; !req->error && i < req->desc_cnt; i++) {
+		struct io_desc *d = &req->io_desc[i];
+		int nsectors = d->length / req->sectorsize;
+		int start = 0;
+		unsigned long last_len = 0;
+
+		do {
+			int bit = ubd_test_bit(start,
+				(unsigned char *)&d->sector_mask);
+			int end = start;
+			__u64 off;
+			unsigned long len;
+			char *buf;
+			int slot;
+
+			while (end < nsectors &&
+			       ubd_test_bit(end,
+				(unsigned char *)&d->sector_mask) == bit)
+				end++;
+
+			off = base_offset + req->offsets[bit] +
+			      start * req->sectorsize;
+			len = (end - start) * req->sectorsize;
+			last_len = len;
+			buf = d->buffer
+			      ? &d->buffer[start * req->sectorsize]
+			      : NULL;
+
+			for (;;) {
+				slot = ubd_ring_submit_one(req, op,
+					req->fds[bit], buf, len, off);
+				if (slot >= 0) {
+					submitted++;
+					break;
+				}
+				if (slot != -EAGAIN) {
+					req->error = map_error(-slot);
+					goto harvest;
+				}
+				/* Ring full — harvest one CQE and retry. */
+				{
+					struct os_io_cqe cqe;
+					int hrc = os_io_ring_wait_cqe(
+						ubd_ring, &cqe, -1);
+					if (hrc < 0) {
+						req->error = map_error(-hrc);
+						goto harvest;
+					}
+					if (hrc == 1) {
+						struct ubd_pending_slot *s =
+						   &ubd_slots[cqe.user_data];
+						if (cqe.res < 0) {
+							req->error =
+							  map_error(-cqe.res);
+							ubd_slot_free(
+							  cqe.user_data);
+							harvested++;
+						} else if (cqe.res == 0) {
+							if (s->op == REQ_OP_READ
+							    && s->buf)
+								memset(
+								 s->buf + s->done,
+								 0,
+								 s->total - s->done);
+							ubd_slot_free(
+							  cqe.user_data);
+							harvested++;
+						} else {
+							s->done += cqe.res;
+							if (s->done < s->total) {
+								int rc =
+								 ubd_ring_resubmit(
+								  cqe.user_data);
+								if (rc < 0) {
+									req->error =
+									 map_error(-rc);
+									ubd_slot_free(
+									 cqe.user_data);
+									harvested++;
+								}
+							} else {
+								ubd_slot_free(
+								  cqe.user_data);
+								harvested++;
+							}
+						}
+					}
+				}
+			}
+			start = end;
+		} while (start < nsectors);
+
+		base_offset += last_len;
+	}
+
+harvest:
+	while (harvested < submitted) {
+		struct os_io_cqe cqe;
+		int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
+		struct ubd_pending_slot *s;
+
+		if (hrc < 0) {
+			req->error = map_error(-hrc);
+			break;
+		}
+		if (hrc == 0)
+			continue;
+		s = &ubd_slots[cqe.user_data];
+		if (cqe.res < 0) {
+			if (!req->error)
+				req->error = map_error(-cqe.res);
+			ubd_slot_free(cqe.user_data);
+			harvested++;
+		} else if (cqe.res == 0) {
+			if (s->op == REQ_OP_READ && s->buf)
+				memset(s->buf + s->done, 0,
+				       s->total - s->done);
+			ubd_slot_free(cqe.user_data);
+			harvested++;
+		} else {
+			s->done += cqe.res;
+			if (s->done < s->total) {
+				int rc = ubd_ring_resubmit(cqe.user_data);
+				if (rc < 0) {
+					req->error = map_error(-rc);
+					ubd_slot_free(cqe.user_data);
+					harvested++;
+				}
+			} else {
+				ubd_slot_free(cqe.user_data);
+				harvested++;
+			}
+		}
+	}
+
+	req->offset = base_offset;
+
+	/* Bitmap update stays synchronous (memo §Phase 5). */
+	for (i = 0; !req->error && i < req->desc_cnt; i++)
+		req->error = update_bitmap(req, &req->io_desc[i]);
+}
+
 void *io_thread(void *arg)
 {
 	int n, count, written, res;
@@ -1511,14 +2309,25 @@ void *io_thread(void *arg)
 			continue;
 		}
 
-		for (count = 0; count < n/sizeof(struct io_thread_req *); count++) {
-			struct io_thread_req *req = io_req_buffer[count];
-			int i;
+		if (ubd_ring) {
+			/* Phase 2b (memo #2): cross-req parallelism — all
+			 * reqs in the bulk batch overlap on the ring.
+			 */
+			io_count += n / sizeof(struct io_thread_req *);
+			do_io_ring_batch(io_req_buffer,
+					 n / sizeof(struct io_thread_req *));
+		} else {
+			for (count = 0;
+			     count < n / sizeof(struct io_thread_req *);
+			     count++) {
+				struct io_thread_req *req = io_req_buffer[count];
+				int i;
 
-			io_count++;
-			for (i = 0; !req->error && i < req->desc_cnt; i++)
-				do_io(req, &(req->io_desc[i]));
-
+				io_count++;
+				for (i = 0; !req->error && i < req->desc_cnt;
+				     i++)
+					do_io(req, &(req->io_desc[i]));
+			}
 		}
 
 		written = 0;

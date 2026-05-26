@@ -9,19 +9,28 @@
 #include <linux/mm.h>
 
 /*
- * In UML, we need to sync the TLB over by using mmap/munmap syscalls from
- * the process handling the MM (which can be the kernel itself).
+ * UML's TLB-sync contract (memo 25 R3 — backend decoupled).
  *
- * To track updates, we can hook into set_ptes and flush_tlb_*. With set_ptes
- * we catch all PTE transitions where memory that was unusable becomes usable.
- * While with flush_tlb_* we can track any memory that becomes unusable and
- * even if a higher layer of the page table was modified.
+ * UML "syncs the TLB" by reaching out from the kernel into the
+ * stub-child process (or, under v2 KVM, the per-mm worker process)
+ * and replaying mmap/munmap syscalls so the host VA layout matches
+ * the guest pgd. The set_ptes + flush_tlb_* call sites mark the
+ * affected VA range via um_tlb_mark_sync(); um_tlb_sync() is the
+ * single drain point that walks the pgd, computes per-PTE
+ * (prot, fd, offset) tuples, and dispatches to the backend's
+ * mm_region_added / mm_region_removed ops.
  *
- * So, we simply track updates using both methods and mark the memory area to
- * be synced later on. The only special case is that flush_tlb_kern_* needs to
- * be executed immediately as there is no good synchronization point in that
- * case. In contrast, in the set_ptes case we can wait for the next kernel
- * segfault before we do the synchornization.
+ * Per memo 25 R3, this layer carries NO backend-specific knowledge:
+ * pte_clear / set_pte / set_ptes / pmd_clear etc. mark VAs as
+ * needing sync; they never call a backend op directly. Backends
+ * see range notifications at drain time, never per-PTE writes.
+ * (v1's kvm_shadow_sync_pte hook-everywhere model — a major source
+ * of race classes — was stripped in memo 25 Step 3.)
+ *
+ * The only special case is that flush_tlb_kernel_range() drains
+ * immediately (kernel-VA mappings have no later synchronization
+ * point); user-mm flushes wait for the next set_pte / segfault /
+ * task switch before draining.
  *
  *  - flush_tlb_all() flushes all processes TLBs
  *  - flush_tlb_mm(mm) flushes the specified mm context TLB's
@@ -34,6 +43,19 @@ extern int um_tlb_sync(struct mm_struct *mm);
 
 extern void flush_tlb_all(void);
 extern void flush_tlb_mm(struct mm_struct *mm);
+
+/*
+ * Memo §H.1b residual fix: deferred free for mmu_gather pages.
+ * mmu_gather's tlb_batch_pages_flush calls um_mmu_gather_defer
+ * to hand pages off to the per-mm deferred queue; the active
+ * backend's vcpu_run calls um_mmu_gather_drain after KVM_RUN's
+ * CR4.PGE flush has executed, freeing the deferred pages safely.
+ */
+struct encoded_page;
+unsigned int um_mmu_gather_defer(struct mm_struct *mm,
+				 struct encoded_page **encoded,
+				 unsigned int nr);
+void um_mmu_gather_drain(struct mm_struct *mm);
 
 static inline void flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long address)

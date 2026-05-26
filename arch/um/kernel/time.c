@@ -15,8 +15,10 @@
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/threads.h>
+#include <asm/backend.h>
 #include <asm/irq.h>
 #include <asm/param.h>
+#include <asm/um-hooks.h>
 #include <kern_util.h>
 #include <os.h>
 #include <linux/delay.h>
@@ -60,6 +62,22 @@ notrace unsigned long long sched_clock(void)
 
 static void time_travel_set_time(unsigned long long ns)
 {
+	/*
+	 * memo 04 Phase 3 (post-2026-05-19 sprint): if we're replaying a
+	 * recorded run, override @ns with the value captured at this
+	 * advance during the original record run.  Done BEFORE the
+	 * backwards-time panic so a backwards-going replay (which would
+	 * indicate divergence from the original run) still trips the
+	 * panic.
+	 *
+	 * Quiet no-op when CONFIG_UM_BACKEND_KVM_V2=n, when no record
+	 * container is active, or when the log is exhausted / not in
+	 * REPLAYING state.  Static-key gate keeps off-state cost at one
+	 * predicted-not-taken branch.
+	 */
+	if (static_branch_unlikely(&um_hook_record_replay))
+		um_time_travel_consume_replay(&ns);
+
 	if (unlikely(ns < time_travel_time))
 		panic("time-travel: time goes backwards %lld -> %lld\n",
 		      time_travel_time, ns);
@@ -67,6 +85,17 @@ static void time_travel_set_time(unsigned long long ns)
 		panic("The system was going to sleep forever, aborting");
 
 	time_travel_time = ns;
+
+	/*
+	 * Post-2026-05-19 sprint memo 04: notify the redesign hook layer
+	 * of every time-travel advance.  um_on_clock_read() fans the
+	 * value into the static-key-gated time-travel, KFENCE-sample and
+	 * record/replay observers (the record-side observe lives there).
+	 * Production builds with all three keys off pay zero cost (the
+	 * inline is patched out entirely).  See
+	 * arch/um/include/asm/um-hooks.h::um_on_clock_read.
+	 */
+	um_on_clock_read(ns);
 }
 
 enum time_travel_message_handling {
@@ -628,7 +657,7 @@ void time_travel_sleep(void)
 	int cpu = raw_smp_processor_id();
 
 	if (time_travel_mode == TT_MODE_BASIC)
-		os_timer_disable(cpu);
+		um_backend_dispatch(set_timer, cpu, 0, UM_TIMER_DISABLE);
 
 	time_travel_update_time(next, true);
 
@@ -637,11 +666,15 @@ void time_travel_sleep(void)
 		if (time_travel_timer_event.fn == time_travel_periodic_timer) {
 			/*
 			 * This is somewhat wrong - we should get the first
-			 * one sooner like the os_timer_one_shot() below...
+			 * one sooner like the one-shot path below...
 			 */
-			os_timer_set_interval(cpu, time_travel_timer_interval);
+			um_backend_dispatch(set_timer, cpu,
+					    time_travel_timer_interval,
+					    UM_TIMER_PERIODIC);
 		} else {
-			os_timer_one_shot(cpu, time_travel_timer_event.time - next);
+			um_backend_dispatch(set_timer, cpu,
+					    time_travel_timer_event.time - next,
+					    UM_TIMER_ONE_SHOT);
 		}
 	}
 }
@@ -714,10 +747,10 @@ static void time_travel_set_start(void)
 	case TT_MODE_INFCPU:
 	case TT_MODE_BASIC:
 		if (!time_travel_start_set)
-			time_travel_start = os_persistent_clock_emulation();
+			time_travel_start = um_backend_dispatch(read_persistent_clock_ns);
 		break;
 	case TT_MODE_OFF:
-		/* we just read the host clock with os_persistent_clock_emulation() */
+		/* we just read the host clock via the backend op */
 		break;
 	}
 
@@ -790,7 +823,7 @@ static int itimer_shutdown(struct clock_event_device *evt)
 
 	if (time_travel_mode != TT_MODE_INFCPU &&
 	    time_travel_mode != TT_MODE_EXTERNAL)
-		os_timer_disable(cpu);
+		um_backend_dispatch(set_timer, cpu, 0, UM_TIMER_DISABLE);
 
 	return 0;
 }
@@ -811,7 +844,8 @@ static int itimer_set_periodic(struct clock_event_device *evt)
 
 	if (time_travel_mode != TT_MODE_INFCPU &&
 	    time_travel_mode != TT_MODE_EXTERNAL)
-		os_timer_set_interval(cpu, interval);
+		um_backend_dispatch(set_timer, cpu, interval,
+				    UM_TIMER_PERIODIC);
 
 	return 0;
 }
@@ -831,7 +865,9 @@ static int itimer_next_event(unsigned long delta,
 
 	if (time_travel_mode != TT_MODE_INFCPU &&
 	    time_travel_mode != TT_MODE_EXTERNAL)
-		return os_timer_one_shot(raw_smp_processor_id(), delta);
+		return um_backend_dispatch(set_timer,
+					   raw_smp_processor_id(), delta,
+					   UM_TIMER_ONE_SHOT);
 
 	return 0;
 }
@@ -901,7 +937,12 @@ static u64 timer_read(struct clocksource *cs)
 		return time_travel_time / TIMER_MULTIPLIER;
 	}
 
-	return os_nsecs() / TIMER_MULTIPLIER;
+	{
+		u64 ns = um_backend_dispatch(read_clock_ns);
+
+		um_on_clock_read(ns);
+		return ns / TIMER_MULTIPLIER;
+	}
 }
 
 static struct clocksource timer_clocksource = {
@@ -960,7 +1001,7 @@ void read_persistent_clock64(struct timespec64 *ts)
 	if (time_travel_mode != TT_MODE_OFF)
 		nsecs = time_travel_start + time_travel_time;
 	else
-		nsecs = os_persistent_clock_emulation();
+		nsecs = um_backend_dispatch(read_persistent_clock_ns);
 
 	set_normalized_timespec64(ts, nsecs / NSEC_PER_SEC,
 				  nsecs % NSEC_PER_SEC);

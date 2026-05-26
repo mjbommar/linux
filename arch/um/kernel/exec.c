@@ -12,6 +12,7 @@
 #include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <asm/current.h>
+#include <asm/backend.h>
 #include <asm/processor.h>
 #include <linux/uaccess.h>
 #include <as-layout.h>
@@ -24,8 +25,9 @@ void flush_thread(void)
 {
 	arch_flush_thread(&current->thread.arch);
 
-	get_safe_registers(current_pt_regs()->regs.gp,
-			   current_pt_regs()->regs.fp);
+	um_backend_dispatch(init_thread_regs,
+			    current_pt_regs()->regs.gp,
+			    current_pt_regs()->regs.fp);
 }
 
 void start_thread(struct pt_regs *regs, unsigned long eip, unsigned long esp)

@@ -16,6 +16,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <as-layout.h>
+#include <asm/um-hooks.h>
 #include <kern_util.h>
 #include <os.h>
 #include <irq_user.h>
@@ -97,6 +98,14 @@ static void irq_event_handler(struct time_travel_event *ev)
 		return;
 	}
 
+	/*
+	 * Time-travel synthetic IRQ delivery: no trap regs available, so
+	 * pass NULL. The Layer 2 slow paths (arch/um/kernel/hooks.c)
+	 * treat regs as opaque and swallow the argument; a future real
+	 * consumer that needs regs must handle NULL explicitly for this
+	 * code path and the one in irq_do_pending_events().
+	 */
+	um_on_irq_entry(reg->irq, NULL);
 	generic_handle_irq(reg->irq);
 }
 
@@ -143,6 +152,8 @@ static void irq_do_pending_events(bool timetravel_handlers_only)
 			 */
 			if (reg->pending_event) {
 				irq_enter();
+				/* time-travel pending replay — no trap regs */
+				um_on_irq_entry(reg->irq, NULL);
 				generic_handle_irq(reg->irq);
 				irq_exit();
 				reg->pending_event = false;
@@ -473,6 +484,7 @@ unsigned int do_IRQ(int irq, struct uml_pt_regs *regs)
 {
 	struct pt_regs *old_regs = set_irq_regs((struct pt_regs *)regs);
 	irq_enter();
+	um_on_irq_entry(irq, regs);
 	generic_handle_irq(irq);
 	irq_exit();
 	set_irq_regs(old_regs);

@@ -120,6 +120,7 @@ struct vector_private {
 
 	bool rexmit_scheduled;
 	bool opened;
+	bool napi_added;
 	bool in_write_poll;
 	bool in_error;
 

@@ -10,6 +10,7 @@
 #include <linux/magic.h>
 #include <linux/module.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/pagemap.h>
 #include <linux/statfs.h>
 #include <linux/slab.h>
@@ -22,9 +23,54 @@
 #include "hostfs.h"
 #include <init.h>
 #include <kern.h>
+#include <os_io_ring.h>
+
+/*
+ * Phase 2 (memo #3): per-superblock io_uring substrate for batched
+ * async writeback.  Created at fill_super; destroyed at kill_sb.
+ * If os_io_ring_create returns NULL (older host, seccomp blocks
+ * io_uring, etc.) the writeback path falls through to the legacy
+ * sync write_file() loop.
+ */
+#define HOSTFS_WB_RING_DEPTH	128
+
+struct hostfs_wb_slot {
+	int		in_use;
+	struct folio	*folio;
+	loff_t		off;
+	size_t		total;
+	size_t		done;
+};
 
 struct hostfs_fs_info {
 	char *host_root_path;
+	/*
+	 * Per memo #3 (post-2026-05-19 sprint, hostfs openat2): when
+	 * @resolve_strict is true, hostfs_open() routes file opens
+	 * through open_file_strict() which uses openat2(@host_root_fd,
+	 * <relative>, RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS).  This
+	 * blocks symlink-escape out of the mount root.
+	 *
+	 * Default (off) preserves the legacy bare-open64() path — some
+	 * hostfs deployments deliberately rely on symlink traversal
+	 * out of the configured root.
+	 *
+	 * @host_root_fd is the O_PATH | O_DIRECTORY fd opened on
+	 * @host_root_path at fill_super; closed at put_super.
+	 * Valid (>= 0) only when @resolve_strict is true.
+	 */
+	int host_root_fd;
+	bool resolve_strict;
+
+	/*
+	 * Phase 2 (memo #3): io_uring writeback.  Optional; NULL ring
+	 * means the writepages path falls back to legacy synchronous
+	 * write_file() calls.  Serialised on @wb_lock since the ring
+	 * has a single producer/consumer view of the SQ/CQ rings.
+	 */
+	struct os_io_ring	*wb_ring;
+	struct mutex		wb_lock;
+	struct hostfs_wb_slot	wb_slots[HOSTFS_WB_RING_DEPTH];
 };
 
 struct hostfs_inode_info {
@@ -318,7 +364,47 @@ retry:
 	if (name == NULL)
 		return -ENOMEM;
 
-	fd = open_file(name, r, w, append);
+	{
+		struct hostfs_fs_info *fsi = ino->i_sb->s_fs_info;
+
+		if (fsi->resolve_strict && fsi->host_root_fd >= 0) {
+			/*
+			 * Memo #3 Phase 1: strict path resolution.  The
+			 * absolute @name starts with @host_root_path; the
+			 * remainder is what we hand to openat2.  If the
+			 * resulting fd is -ELOOP / -EXDEV, the symlink
+			 * pointed out of the mount root and we honour the
+			 * rejection (do NOT fall back to open_file —
+			 * that would defeat the security guarantee).
+			 */
+			size_t root_len = strlen(fsi->host_root_path);
+			const char *rel = name;
+
+			if (strncmp(name, fsi->host_root_path, root_len) == 0)
+				rel = name + root_len;
+
+			fd = open_file_strict(fsi->host_root_fd, rel,
+					      r, w, append);
+			if (fd == -ENOSYS) {
+				/*
+				 * Host kernel < 5.6 — openat2 unavailable.
+				 * Demote to legacy ONCE with a warning;
+				 * subsequent opens take the legacy path
+				 * silently.  This is the only fallback
+				 * permitted under strict mode.
+				 */
+				pr_warn_once("hostfs: host_resolve=strict but host lacks openat2 — falling back to legacy resolution\n");
+				fsi->resolve_strict = false;
+				if (fsi->host_root_fd >= 0) {
+					os_close_file(fsi->host_root_fd);
+					fsi->host_root_fd = -1;
+				}
+				fd = open_file(name, r, w, append);
+			}
+		} else {
+			fd = open_file(name, r, w, append);
+		}
+	}
 	__putname(name);
 	if (fd < 0)
 		return fd;
@@ -359,15 +445,59 @@ static int hostfs_file_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/*
+ * Phase 3 (memo #3): route fsync through the writeback ring when
+ * available.  Mostly cosmetic — fsync is a single syscall either
+ * way — but it (a) makes the wb_ring fully own all I/O on a
+ * hostfs inode, removing the "ring for writes, sync for sync"
+ * inconsistency, and (b) frees the inode lock during the actual
+ * host fsync since IORING_OP_FSYNC runs on a kernel worker.
+ *
+ * @datasync maps to IORING_FSYNC_DATASYNC.  We don't expose a
+ * range fsync — io_uring's FSYNC opcode doesn't either; the
+ * file_write_and_wait_range above already restricts what reaches
+ * the underlying host fd.
+ */
+static int hostfs_fsync_ring(struct hostfs_fs_info *fsi, int fd, int datasync)
+{
+	struct os_io_cqe cqe;
+	int rc;
+
+	mutex_lock(&fsi->wb_lock);
+	rc = os_io_ring_submit_fsync(fsi->wb_ring, fd, 0);
+	if (rc < 0) {
+		mutex_unlock(&fsi->wb_lock);
+		return rc;
+	}
+	for (;;) {
+		int hrc = os_io_ring_wait_cqe(fsi->wb_ring, &cqe, -1);
+
+		if (hrc < 0) {
+			mutex_unlock(&fsi->wb_lock);
+			return hrc;
+		}
+		if (hrc == 1)
+			break;
+	}
+	mutex_unlock(&fsi->wb_lock);
+	if (cqe.res < 0)
+		return cqe.res;
+	return 0;
+}
+
 static int hostfs_fsync(struct file *file, loff_t start, loff_t end,
 			int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
+	struct hostfs_fs_info *fsi = inode->i_sb->s_fs_info;
 	int ret;
 
 	ret = file_write_and_wait_range(file, start, end);
 	if (ret)
 		return ret;
+
+	if (fsi && fsi->wb_ring)
+		return hostfs_fsync_ring(fsi, HOSTFS_I(inode)->fd, datasync);
 
 	inode_lock(inode);
 	ret = fsync_file(HOSTFS_I(inode)->fd, datasync);
@@ -396,13 +526,184 @@ static const struct file_operations hostfs_dir_fops = {
 	.fsync		= hostfs_fsync,
 };
 
+/*
+ * Phase 2 (memo #3) helpers — slot table + ring-driven writeback.
+ *
+ * Caller holds fsi->wb_lock for everything that touches @ring or
+ * @wb_slots[].
+ */
+static int hostfs_wb_slot_alloc(struct hostfs_fs_info *fsi)
+{
+	int i;
+
+	for (i = 0; i < HOSTFS_WB_RING_DEPTH; i++) {
+		if (!fsi->wb_slots[i].in_use) {
+			fsi->wb_slots[i].in_use = 1;
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void hostfs_wb_slot_free(struct hostfs_fs_info *fsi, int i)
+{
+	fsi->wb_slots[i].in_use = 0;
+	fsi->wb_slots[i].folio = NULL;
+}
+
+static int hostfs_wb_submit_slot(struct hostfs_fs_info *fsi, int slot, int fd)
+{
+	struct hostfs_wb_slot *s = &fsi->wb_slots[slot];
+	size_t remaining = s->total - s->done;
+	void *buf;
+
+	buf = folio_address(s->folio) + s->done;
+	return os_io_ring_submit_pwrite(fsi->wb_ring, fd, buf, remaining,
+					s->off + s->done, slot);
+}
+
+/*
+ * Handle one CQE.  Returns 0 if the slot is fully resolved (folio
+ * unlocked, slot freed); 1 if a partial-completion resubmit was
+ * issued and the caller should keep harvesting; <0 on resubmit
+ * error.
+ */
+static int hostfs_wb_handle_cqe(struct hostfs_fs_info *fsi,
+				 struct address_space *mapping, int fd,
+				 const struct os_io_cqe *cqe)
+{
+	int slot = (int)cqe->user_data;
+	struct hostfs_wb_slot *s = &fsi->wb_slots[slot];
+	struct folio *folio = s->folio;
+
+	if (cqe->res < 0) {
+		mapping_set_error(mapping, cqe->res);
+		folio_unlock(folio);
+		hostfs_wb_slot_free(fsi, slot);
+		return 0;
+	}
+	if (cqe->res == 0) {
+		/* Treat as short write: mark folio bad and unlock. */
+		mapping_set_error(mapping, -EIO);
+		folio_unlock(folio);
+		hostfs_wb_slot_free(fsi, slot);
+		return 0;
+	}
+	s->done += cqe->res;
+	if (s->done >= s->total) {
+		folio_unlock(folio);
+		hostfs_wb_slot_free(fsi, slot);
+		return 0;
+	}
+	/* Partial completion — resubmit the remainder. */
+	{
+		int rc = hostfs_wb_submit_slot(fsi, slot, fd);
+
+		if (rc < 0) {
+			mapping_set_error(mapping, rc);
+			folio_unlock(folio);
+			hostfs_wb_slot_free(fsi, slot);
+			return rc;
+		}
+	}
+	return 1;
+}
+
+static int hostfs_writepages_async(struct address_space *mapping,
+				    struct writeback_control *wbc)
+{
+	struct inode *inode = mapping->host;
+	struct hostfs_fs_info *fsi = inode->i_sb->s_fs_info;
+	loff_t i_size = i_size_read(inode);
+	struct folio *folio = NULL;
+	unsigned int in_flight = 0;
+	int fd = HOSTFS_I(inode)->fd;
+	int err = 0;
+
+	mutex_lock(&fsi->wb_lock);
+
+	while ((folio = writeback_iter(mapping, wbc, folio, &err))) {
+		loff_t pos = folio_pos(folio);
+		size_t count = folio_size(folio);
+		int slot;
+
+		if (count > i_size - pos)
+			count = i_size - pos;
+
+		/* Wait for a free slot. */
+		for (;;) {
+			slot = hostfs_wb_slot_alloc(fsi);
+			if (slot >= 0)
+				break;
+			{
+				struct os_io_cqe cqe;
+				int hrc = os_io_ring_wait_cqe(fsi->wb_ring,
+							      &cqe, -1);
+
+				if (hrc < 0) {
+					err = hrc;
+					goto unlock_folio;
+				}
+				if (hrc == 1) {
+					hostfs_wb_handle_cqe(fsi, mapping,
+							     fd, &cqe);
+					in_flight--;
+				}
+			}
+		}
+
+		fsi->wb_slots[slot].folio = folio;
+		fsi->wb_slots[slot].off   = pos;
+		fsi->wb_slots[slot].total = count;
+		fsi->wb_slots[slot].done  = 0;
+
+		{
+			int rc = hostfs_wb_submit_slot(fsi, slot, fd);
+
+			if (rc < 0) {
+				hostfs_wb_slot_free(fsi, slot);
+				err = rc;
+				goto unlock_folio;
+			}
+		}
+		in_flight++;
+		continue;
+
+unlock_folio:
+		mapping_set_error(mapping, err);
+		folio_unlock(folio);
+	}
+
+	/* Drain everything we submitted. */
+	while (in_flight > 0) {
+		struct os_io_cqe cqe;
+		int hrc = os_io_ring_wait_cqe(fsi->wb_ring, &cqe, -1);
+
+		if (hrc < 0) {
+			err = hrc;
+			break;
+		}
+		if (hrc == 1) {
+			hostfs_wb_handle_cqe(fsi, mapping, fd, &cqe);
+			in_flight--;
+		}
+	}
+
+	mutex_unlock(&fsi->wb_lock);
+	return err;
+}
+
 static int hostfs_writepages(struct address_space *mapping,
 		struct writeback_control *wbc)
 {
 	struct inode *inode = mapping->host;
+	struct hostfs_fs_info *fsi = inode->i_sb->s_fs_info;
 	struct folio *folio = NULL;
 	loff_t i_size = i_size_read(inode);
 	int err = 0;
+
+	if (fsi && fsi->wb_ring)
+		return hostfs_writepages_async(mapping, wbc);
 
 	while ((folio = writeback_iter(mapping, wbc, folio, &err))) {
 		loff_t pos = folio_pos(folio);
@@ -963,15 +1264,54 @@ static int hostfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (sb->s_root == NULL)
 		return -ENOMEM;
 
+	/*
+	 * Memo #3 Phase 2: optional io_uring writeback substrate.
+	 * NULL ring is benign — hostfs_writepages falls back to the
+	 * legacy synchronous write_file loop.
+	 */
+	mutex_init(&fsi->wb_lock);
+	fsi->wb_ring = os_io_ring_create(HOSTFS_WB_RING_DEPTH);
+	if (fsi->wb_ring)
+		pr_info("hostfs: io_uring writeback substrate active (depth=%d)\n",
+			HOSTFS_WB_RING_DEPTH);
+
+	/*
+	 * Memo #3 Phase 1: if the user opted into strict path
+	 * resolution, open the mount root with O_PATH | O_DIRECTORY
+	 * for openat2() to anchor on.  Failure demotes back to legacy
+	 * (logged so the operator notices).
+	 */
+	if (fsi->resolve_strict) {
+		fsi->host_root_fd = open_root_path(fsi->host_root_path);
+		if (fsi->host_root_fd < 0) {
+			pr_warn("hostfs: host_resolve=strict requested but open(%s, O_PATH) failed (%d); falling back to legacy resolution\n",
+				fsi->host_root_path, fsi->host_root_fd);
+			fsi->host_root_fd = -1;
+			fsi->resolve_strict = false;
+		} else {
+			pr_info("hostfs: host_resolve=strict armed for %s (root_fd=%d)\n",
+				fsi->host_root_path, fsi->host_root_fd);
+		}
+	}
+
 	return 0;
 }
 
 enum hostfs_parma {
 	Opt_hostfs,
+	Opt_host_resolve,
+};
+
+static const struct constant_table hostfs_resolve_mode[] = {
+	{ "legacy", 0 },
+	{ "strict", 1 },
+	{},
 };
 
 static const struct fs_parameter_spec hostfs_param_specs[] = {
 	fsparam_string_empty("hostfs",		Opt_hostfs),
+	fsparam_enum("host_resolve",		Opt_host_resolve,
+		     hostfs_resolve_mode),
 	{}
 };
 
@@ -997,6 +1337,10 @@ static int hostfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			return -ENOMEM;
 		kfree(fsi->host_root_path);
 		fsi->host_root_path = tmp_root;
+		break;
+	case Opt_host_resolve:
+		/* result.uint_32 = 0 (legacy) / 1 (strict). */
+		fsi->resolve_strict = (result.uint_32 != 0);
 		break;
 	}
 
@@ -1056,6 +1400,8 @@ static int hostfs_init_fs_context(struct fs_context *fc)
 		kfree(fsi);
 		return -ENOMEM;
 	}
+	fsi->host_root_fd = -1;
+	fsi->resolve_strict = false;
 	fc->s_fs_info = fsi;
 	fc->ops = &hostfs_context_ops;
 	return 0;
@@ -1063,8 +1409,20 @@ static int hostfs_init_fs_context(struct fs_context *fc)
 
 static void hostfs_kill_sb(struct super_block *s)
 {
+	struct hostfs_fs_info *fsi = s->s_fs_info;
+
+	if (fsi && fsi->host_root_fd >= 0) {
+		os_close_file(fsi->host_root_fd);
+		fsi->host_root_fd = -1;
+	}
+	if (fsi && fsi->wb_ring) {
+		os_io_ring_destroy(fsi->wb_ring);
+		fsi->wb_ring = NULL;
+	}
 	kill_anon_super(s);
-	kfree(s->s_fs_info);
+	if (fsi)
+		kfree(fsi->host_root_path);
+	kfree(fsi);
 }
 
 static struct file_system_type hostfs_type = {

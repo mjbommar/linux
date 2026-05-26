@@ -181,9 +181,20 @@ int get_stub_state(struct uml_pt_regs *regs, struct stub_data *data,
 
 	memcpy(&regs->fp, xstate_stub, xstate_size);
 
-	/* We do not need to read the x86_64 FS_BASE/GS_BASE registers as
-	 * we do not permit userspace to set them directly.
+#ifndef CONFIG_X86_32
+	/*
+	 * The SECCOMP BPF filter ALLOWs __NR_arch_prctl, so guest userspace
+	 * sets FS_BASE/GS_BASE directly without a SIGSYS round-trip.  The
+	 * stub-side handler (arch/um/kernel/skas/stub.c stub_signal_interrupt)
+	 * re-reads the host FS_BASE/GS_BASE into arch_data on every signal
+	 * trap, so arch_data is now the authoritative view.  Mirror it back
+	 * into pt_regs.gp[FS_BASE/GS_BASE] so the next set_stub_state's
+	 * compare doesn't decide a stale gp[] value differs from the live
+	 * arch_data and wrongly push the stale value back into the stub.
 	 */
+	regs->gp[FS_BASE / sizeof(unsigned long)] = data->arch_data.fs_base;
+	regs->gp[GS_BASE / sizeof(unsigned long)] = data->arch_data.gs_base;
+#endif
 
 #ifdef CONFIG_X86_32
 	/* Read the i387 legacy FP registers */

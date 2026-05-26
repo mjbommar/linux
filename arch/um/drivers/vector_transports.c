@@ -200,11 +200,14 @@ static int raw_verify_header(
 
 	if ((vheader->gso_type != VIRTIO_NET_HDR_GSO_NONE) &&
 		(vp->req_size != 65536)) {
-		if (net_ratelimit())
-			netdev_err(
-				vp->dev,
-				GSO_ERROR
-		);
+		/*
+		 * Fire at most once per interface — the underlying
+		 * condition (req_size != 64K) is a static property
+		 * of the open vector device, so repeating the warning
+		 * per packet just floods any interactive console.
+		 * Operators only need to know once.
+		 */
+		netdev_err_once(vp->dev, GSO_ERROR "\n");
 	}
 	if ((vheader->flags & VIRTIO_NET_HDR_F_DATA_VALID) > 0)
 		return 1;

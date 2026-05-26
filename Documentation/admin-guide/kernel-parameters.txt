@@ -8290,6 +8290,14 @@ Kernel parameters
 
 			Can be used multiple times for multiple devices.
 
+	vec2.		[UML] Configure an experimental vector networking v2
+			device. Syntax:
+			vec2.<n>:<option>=<value>,<option>=<value>
+
+	vec2=		[UML] Configure an experimental vector networking v2
+			device. Syntax:
+			vec2=<n>,<option>=<value>,<option>=<value>
+
 	vga=		[BOOT,X86-32] Select a particular video mode
 			See Documentation/arch/x86/boot.rst and
 			Documentation/admin-guide/svga.rst.

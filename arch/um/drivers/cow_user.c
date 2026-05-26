@@ -19,7 +19,7 @@
  * arch/um/Makefile remaps strrchr to kernel_strrchr; call the kernel
  * name directly to avoid glibc >= 2.43's C23 strrchr macro.
  */
-char *kernel_strrchr(const char *, int);
+extern char *kernel_strrchr(const char *, int);
 
 #define PATH_LEN_V1 256
 

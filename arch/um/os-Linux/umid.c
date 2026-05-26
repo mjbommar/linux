@@ -145,7 +145,13 @@ static inline int is_umdir_used(char *dir)
 
 	snprintf(file, filelen, "%s/pid", dir);
 
-	fd = open(file, O_RDONLY);
+	/*
+	 * FD disposition (C-09 commit 4): ephemeral. Opened to read
+	 * the umdir pid file during the dir-in-use check, closed at
+	 * function exit. O_CLOEXEC for defensive hygiene; the fd
+	 * never reaches a snapshot ready-point.
+	 */
+	fd = open(file, O_RDONLY | O_CLOEXEC);
 	if (fd < 0) {
 		fd = -errno;
 		if (fd != -ENOENT) {
@@ -219,7 +225,16 @@ static void __init create_pid_file(void)
 	if (umid_file_name("pid", file, n))
 		goto out;
 
-	fd = open(file, O_RDWR | O_CREAT | O_EXCL, 0644);
+	/*
+	 * FD disposition (C-09 commit 4): parent-only, long-lived.
+	 * The umid pid file is owned by the parent UML process for
+	 * its entire lifetime. Snapshot workers inherit it CoW but
+	 * must not write to it (that would race with the parent's
+	 * future cleanup); worker-side discipline lives in the
+	 * snapshot forget path. O_CLOEXEC is atomic-safe; the file
+	 * doesn't cross exec() anyway.
+	 */
+	fd = open(file, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
 	if (fd < 0) {
 		printk(UM_KERN_ERR "Open of machine pid file \"%s\" failed: "
 		       "%s\n", file, strerror(errno));

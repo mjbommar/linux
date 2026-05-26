@@ -26,6 +26,11 @@ struct pt_regs {
 #define PT_REGS_SYSCALL_NR(r) UPT_SYSCALL_NR(&(r)->regs)
 
 #define instruction_pointer(regs) PT_REGS_IP(regs)
+/* rethook's generic trampoline handler calls instruction_pointer_set() to
+ * redirect the returning control flow through the real caller's address.
+ * UML has no native setter; delegate to the lvalue form of UPT_IP.
+ */
+#define instruction_pointer_set(regs, val) (PT_REGS_IP(regs) = (val))
 
 #define PTRACE_OLDSETOPTIONS 21
 

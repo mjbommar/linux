@@ -20,6 +20,7 @@
 #include <sys/resource.h>
 #include <asm/ldt.h>
 #include <asm/unistd.h>
+#include <backend.h>
 #include <init.h>
 #include <os.h>
 #include <smp.h>
@@ -36,45 +37,6 @@
 #include <registers.h>
 #include <skas.h>
 #include "internal.h"
-
-static void ptrace_child(void)
-{
-	int ret;
-	/* Calling os_getpid because some libcs cached getpid incorrectly */
-	int pid = os_getpid(), ppid = getppid();
-	int sc_result;
-
-	if (change_sig(SIGWINCH, 0) < 0 ||
-	    ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) {
-		perror("ptrace");
-		kill(pid, SIGKILL);
-	}
-	kill(pid, SIGSTOP);
-
-	/*
-	 * This syscall will be intercepted by the parent. Don't call more than
-	 * once, please.
-	 */
-	sc_result = os_getpid();
-
-	if (sc_result == pid)
-		/* Nothing modified by the parent, we are running normally. */
-		ret = 1;
-	else if (sc_result == ppid)
-		/*
-		 * Expected in check_ptrace and check_sysemu when they succeed
-		 * in modifying the stack frame
-		 */
-		ret = 0;
-	else
-		/* Serious trouble! This could be caused by a bug in host 2.6
-		 * SKAS3/2.6 patch before release -V6, together with a bug in
-		 * the UML code itself.
-		 */
-		ret = 2;
-
-	exit(ret);
-}
 
 static void fatal_perror(const char *str)
 {
@@ -93,145 +55,12 @@ static void fatal(char *fmt, ...)
 	exit(1);
 }
 
-static void non_fatal(char *fmt, ...)
-{
-	va_list list;
-
-	va_start(list, fmt);
-	vfprintf(stderr, fmt, list);
-	va_end(list);
-}
-
-static int start_ptraced_child(void)
-{
-	int pid, n, status;
-
-	fflush(stdout);
-
-	pid = fork();
-	if (pid == 0)
-		ptrace_child();
-	else if (pid < 0)
-		fatal_perror("start_ptraced_child : fork failed");
-
-	CATCH_EINTR(n = waitpid(pid, &status, WUNTRACED));
-	if (n < 0)
-		fatal_perror("check_ptrace : waitpid failed");
-	if (!WIFSTOPPED(status) || (WSTOPSIG(status) != SIGSTOP))
-		fatal("check_ptrace : expected SIGSTOP, got status = %d",
-		      status);
-
-	return pid;
-}
-
-static void stop_ptraced_child(int pid, int exitcode)
-{
-	int status, n;
-
-	if (ptrace(PTRACE_CONT, pid, 0, 0) < 0)
-		fatal_perror("stop_ptraced_child : ptrace failed");
-
-	CATCH_EINTR(n = waitpid(pid, &status, 0));
-	if (!WIFEXITED(status) || (WEXITSTATUS(status) != exitcode)) {
-		int exit_with = WEXITSTATUS(status);
-		fatal("stop_ptraced_child : child exited with exitcode %d, "
-		      "while expecting %d; status 0x%x\n", exit_with,
-		      exitcode, status);
-	}
-}
-
-static void __init check_sysemu(void)
-{
-	int pid, n, status, count=0;
-
-	os_info("Checking syscall emulation for ptrace...");
-	pid = start_ptraced_child();
-
-	if ((ptrace(PTRACE_SETOPTIONS, pid, 0,
-		   (void *) PTRACE_O_TRACESYSGOOD) < 0))
-		fatal_perror("check_sysemu: PTRACE_SETOPTIONS failed");
-
-	while (1) {
-		count++;
-		if (ptrace(PTRACE_SYSEMU_SINGLESTEP, pid, 0, 0) < 0)
-			goto fail;
-		CATCH_EINTR(n = waitpid(pid, &status, WUNTRACED));
-		if (n < 0)
-			fatal_perror("check_sysemu: wait failed");
-
-		if (WIFSTOPPED(status) &&
-		    (WSTOPSIG(status) == (SIGTRAP|0x80))) {
-			if (!count) {
-				non_fatal("check_sysemu: SYSEMU_SINGLESTEP "
-					  "doesn't singlestep");
-				goto fail;
-			}
-			n = ptrace(PTRACE_POKEUSER, pid, PT_SYSCALL_RET_OFFSET,
-				   os_getpid());
-			if (n < 0)
-				fatal_perror("check_sysemu : failed to modify "
-					     "system call return");
-			break;
-		}
-		else if (WIFSTOPPED(status) && (WSTOPSIG(status) == SIGTRAP))
-			count++;
-		else {
-			non_fatal("check_sysemu: expected SIGTRAP or "
-				  "(SIGTRAP | 0x80), got status = %d\n",
-				  status);
-			goto fail;
-		}
-	}
-	stop_ptraced_child(pid, 0);
-
-	os_info("OK\n");
-
-	return;
-
-fail:
-	stop_ptraced_child(pid, 1);
-	fatal("missing\n");
-}
-
-static void __init check_ptrace(void)
-{
-	int pid, syscall, n, status;
-
-	os_info("Checking that ptrace can change system call numbers...");
-	pid = start_ptraced_child();
-
-	if ((ptrace(PTRACE_SETOPTIONS, pid, 0,
-		   (void *) PTRACE_O_TRACESYSGOOD) < 0))
-		fatal_perror("check_ptrace: PTRACE_SETOPTIONS failed");
-
-	while (1) {
-		if (ptrace(PTRACE_SYSCALL, pid, 0, 0) < 0)
-			fatal_perror("check_ptrace : ptrace failed");
-
-		CATCH_EINTR(n = waitpid(pid, &status, WUNTRACED));
-		if (n < 0)
-			fatal_perror("check_ptrace : wait failed");
-
-		if (!WIFSTOPPED(status) ||
-		   (WSTOPSIG(status) != (SIGTRAP | 0x80)))
-			fatal("check_ptrace : expected (SIGTRAP|0x80), "
-			       "got status = %d", status);
-
-		syscall = ptrace(PTRACE_PEEKUSER, pid, PT_SYSCALL_NR_OFFSET,
-				 0);
-		if (syscall == __NR_getpid) {
-			n = ptrace(PTRACE_POKEUSER, pid, PT_SYSCALL_NR_OFFSET,
-				   __NR_getppid);
-			if (n < 0)
-				fatal_perror("check_ptrace : failed to modify "
-					     "system call");
-			break;
-		}
-	}
-	stop_ptraced_child(pid, 0);
-	os_info("OK\n");
-	check_sysemu();
-}
+/*
+ * Pre-memo-25-R11: check_ptrace + check_sysemu + start/stop_ptraced_child
+ * + ptrace_child verified the host's ptrace + PTRACE_SYSEMU support
+ * before init_backend selected the ptrace backend. With ptrace removed,
+ * the probes are unreachable; deleted along with the backend impl.
+ */
 
 extern unsigned long host_fp_size;
 extern unsigned long exec_regs[MAX_REG_NR];
@@ -421,6 +250,81 @@ void  __init get_host_cpu_features(
 	}
 }
 
+/*
+ * `backend=` boot param (workstream A-04). Parsed early in linux_main
+ * via __uml_setup; consumed by init_backend() in arch/um/kernel/backend.c.
+ *
+ *   backend=auto                  — Kconfig default + using_seccomp probe
+ *   backend=ptrace                — prefer ptrace; fall through if N/A
+ *   backend=seccomp               — prefer seccomp; fall through if N/A
+ *   backend=force=ptrace          — require ptrace; panic if N/A
+ *   backend=force=seccomp         — require seccomp; panic if N/A
+ *
+ * The legacy `seccomp=on/auto/off` boot param is preserved for one
+ * release as an alias; `backend=` takes precedence when both are set.
+ */
+int backend_arg_requested __initdata;	/* enum um_backend_kind */
+int backend_arg_force __initdata;
+
+static int __init uml_backend_config(char *line, int *add)
+{
+	*add = 0;
+
+	if (strcmp(line, "auto") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_NONE;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "ptrace") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_PTRACE;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "seccomp") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "kvm") == 0 || strcmp(line, "kvm-v2") == 0) {
+		/*
+		 * "kvm-v2" is a synonym for "kvm" — there is only one KVM
+		 * backend in-tree (v1 archived; v2 pending memo 26 phases).
+		 * The synonym lets ops/test scripts spell out which v# they
+		 * mean without needing to know that selection collapses
+		 * inside init_backend.
+		 */
+		backend_arg_requested = UM_BACKEND_KIND_KVM;
+		backend_arg_force = 0;
+	} else if (strcmp(line, "force=ptrace") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_PTRACE;
+		backend_arg_force = 1;
+	} else if (strcmp(line, "force=seccomp") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_SECCOMP;
+		backend_arg_force = 1;
+	} else if (strcmp(line, "force=kvm") == 0 ||
+		   strcmp(line, "force=kvm-v2") == 0) {
+		backend_arg_requested = UM_BACKEND_KIND_KVM;
+		backend_arg_force = 1;
+	} else {
+		static const char valid[] =
+			"auto ptrace seccomp kvm kvm-v2 force=ptrace force=seccomp force=kvm force=kvm-v2";
+
+		fatal("Invalid backend option '%s'; valid: %s\n", line, valid);
+	}
+	return 0;
+}
+
+__uml_setup("backend=", uml_backend_config,
+"backend=<auto|seccomp|kvm|force=seccomp|force=kvm>\n"
+"    Pick the trap mechanism. `auto' (default) uses Kconfig +\n"
+"    runtime probe. Bare names are preferences that fall through\n"
+"    to seccomp if the requested backend isn't built. `force=' makes\n"
+"    the choice mandatory and panics if the requested backend isn't\n"
+"    compiled in or fails its probe.\n"
+"\n"
+"    `ptrace' is parsed for compatibility but the ptrace backend was\n"
+"    removed (memo 25 refactor 11; archived at the\n"
+"    kvm-v1-archive-20260428 tag). `kvm' is archived (v1) / pending\n"
+"    (v2 — memos 25-26).\n"
+"\n"
+"    Replaces the legacy `seccomp=on/auto/off' param (still accepted\n"
+"    for one release).\n\n"
+);
+
 static int seccomp_config __initdata;
 
 static int __init uml_seccomp_config(char *line, int *add)
@@ -472,7 +376,43 @@ void __init os_early_checks(void)
 	 */
 	check_tmpexec();
 
-	if (seccomp_config) {
+	/*
+	 * If neither stub-child backend is compiled in, there's
+	 * nothing to probe. (Pre-archive: KVM_ONLY builds took this
+	 * path because they had no stub-child backend at all. v2's
+	 * eventual KVM_ONLY equivalent will reuse the same guard.)
+	 */
+	if (!IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
+	    !IS_ENABLED(CONFIG_UM_BACKEND_PTRACE))
+		return;
+
+	/*
+	 * Run the seccomp probe whenever CONFIG_UM_BACKEND_SECCOMP is
+	 * compiled in. Previously the probe was gated on an explicit
+	 * `seccomp=` or `backend=seccomp` request, which made
+	 * `backend=auto` (the DYNAMIC default, and what every
+	 * `uml/<profile>` Makefile target bakes in) silently prefer
+	 * ptrace — contradicting prod-fast's documented "backend=auto
+	 * picks seccomp where available" and producing a ~3–4× slower
+	 * default than the profile advertises.
+	 *
+	 * The probe is cheap (a single fork+prctl pair under
+	 * init_seccomp), and `pick_dynamic_backend()` already chooses
+	 * ptrace when `using_seccomp == 0`, so there's no semantic
+	 * downside to always running it; only upside is closing the
+	 * prod-fast UX gap.
+	 *
+	 * `backend=force=ptrace` still skips the probe entirely
+	 * (trivially satisfied by the ptrace branch further down) —
+	 * but nobody on DYNAMIC force-requests ptrace and then cares
+	 * whether the probe fired.
+	 *
+	 * init_backend() (called from linux_main() right after this
+	 * function) consumes the using_seccomp result + boot params
+	 * and selects the backend authoritatively.
+	 */
+	if (IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
+	    backend_arg_requested != UM_BACKEND_KIND_PTRACE) {
 		if (init_seccomp()) {
 			using_seccomp = 1;
 			return;
@@ -480,16 +420,17 @@ void __init os_early_checks(void)
 
 		if (seccomp_config == 2)
 			fatal("SECCOMP userspace requested but not functional!\n");
+		/*
+		 * `backend=force=seccomp` will be panicked by init_backend
+		 * once it sees using_seccomp == 0; we don't fatal here so
+		 * the diagnostic message above is the user-visible signal.
+		 */
 	}
 
-	if (uml_ncpus > 1)
-		fatal("SMP is not supported with PTRACE userspace.\n");
-
-	using_seccomp = 0;
-	check_ptrace();
-
-	pid = start_ptraced_child();
-	if (init_pid_registers(pid))
-		fatal("Failed to initialize default registers");
-	stop_ptraced_child(pid, 1);
+	/*
+	 * No ptrace fallback after memo 25 R11 — seccomp is the only
+	 * stub-child backend in tree. Pin to v6.16 or earlier UML if
+	 * the host genuinely lacks CONFIG_SECCOMP_FILTER.
+	 */
+	fatal("seccomp probe failed and no fallback backend is available; pin to v6.16 or earlier UML or fix the host's seccomp support\n");
 }

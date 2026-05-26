@@ -649,7 +649,8 @@ static int vhost_user_set_mem_table(struct virtio_uml_device *vu_dev)
 		.header.size = offsetof(typeof(msg.payload.mem_regions), regions[1]),
 		.payload.mem_regions.num = 1,
 	};
-	unsigned long reserved = uml_reserved - uml_physmem;
+	/* Offset of `reserved` within the physmem region (host VA math) */
+	unsigned long reserved = uml_reserved - __binary_start_hva;
 	int fds[2];
 	int rc;
 
