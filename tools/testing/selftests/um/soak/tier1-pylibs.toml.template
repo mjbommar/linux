@@ -1,0 +1,70 @@
+schema_version = 1
+volumes = []
+
+[instance]
+name = "soak-tier1-pylibs-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "1536M"   # numpy + cryptography + requests need ~ 1 GB resident; +50% slack
+ncpus = 4
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+# Phase J Tier 1 — pytest on host-installed Python C-extensions.
+# Spec: phase-J-design-2026-05-07.md §3.1.
+#
+# The memo's literal `pytest --pyargs requests.tests` shape doesn't work
+# because Debian/Ubuntu's apt packages don't ship the upstream `tests/`
+# submodules. Implementer pivot: a single deterministic smoke script
+# (`tier1-smoketest.py`) exercises requests + cryptography + numpy in
+# one ~200 ms wall-clock pass. This matches the memo's "favour breadth
+# over depth" guidance — three C-extension stacks every iteration.
+#
+# Same pipefail-loss discipline as cpython-soak: trailing
+# `&& echo OK || (echo FAIL; exit 1)` (NOT `; echo rc=$?`).
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 0
+
+# Initial Tier 1 surface: requests + cryptography. Numpy was scoped per
+# the design memo §3.1 but reliably fails to import inside UML when
+# preceded by `cryptography` IN ANY MODE — same Python process, sequential
+# subprocesses, even with cd-changes. This reproduces on BOTH kvm-v2 AND
+# seccomp (= NOT a backend regression — UML-environment issue), so it's
+# tracked as a Phase J follow-up rather than blocking the rest of Tier 1.
+# Numpy will rejoin once the import-chain pathology is understood.
+#
+# Cryptography alone covers the original P0 (#274) C-extension SIGSEGV
+# class via OpenSSL bindings (AES-CBC encrypt/decrypt round-trip on a 4
+# KiB block). Requests covers urllib3 / charset_normalizer URL parsing.
+[[init.phases]]
+name = "tier1-pylibs"
+cmd = "cd /tmp && python3 {{SOAK_DIR}}/tier1-smoketest.py requests && python3 {{SOAK_DIR}}/tier1-smoketest.py cryptography && echo TIER1_OK || (echo TIER1_FAIL; exit 1)"
+expect = ""
+timeout_secs = 90
+
+[[init.phases]]
+name = "report"
+cmd = "echo REPRO_DONE rc=$?"
+expect = ""
+timeout_secs = 0
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500

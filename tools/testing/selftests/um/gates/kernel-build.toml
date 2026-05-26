@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# L1: ARCH=um kernel incremental build gate.
+#
+# Catches the dumbest regression: a commit that breaks `make`. Cheap
+# (~5 sec on a warm cache, ~30 sec for a small change) so it runs on
+# every commit. Builds out-of-tree under O=$BUILD_DIR; the default is
+# ~/src/uml-builds/uml-clean so the 700 MB tree never lands on /tmp
+# tmpfs (memory note: tmpfs fill silently breaks Bash stdout
+# capture).
+#
+# This gate doesn't run KUnit or boot the kernel — it just ensures
+# `vmlinux` was produced. L2 (kunit-marshal) chains off the same
+# build dir to validate behavior.
+
+schema_version = 1
+
+[gate]
+name = "kernel-build"
+description = "make ARCH=um -j$(nproc) into ~/src/uml-builds/uml-clean"
+phase = "L1"
+
+[run]
+# We let the user override BUILD_DIR via env; default lands under
+# their HOME so it survives reboots and tmpfs evictions. The build
+# command is plain make — no defconfig, since the gate assumes the
+# build dir is already configured. (Configuring is a manual step the
+# user does once: `make ARCH=um O=$BUILD_DIR defconfig`.)
+cmd = """
+set -euo pipefail
+BUILD_DIR=${BUILD_DIR:-$HOME/src/uml-builds/uml-clean}
+test -f "$BUILD_DIR/.config" || { echo "ERROR: $BUILD_DIR has no .config — run 'make ARCH=um O=$BUILD_DIR defconfig' first" >&2; exit 2; }
+make ARCH=um O="$BUILD_DIR" -j"$(nproc)" 2>&1 | tail -50
+test -x "$BUILD_DIR/linux"
+echo "BUILD-OK: $BUILD_DIR/linux"
+"""
+budget_sec = 600
+
+[parse]
+# `make` exits 0 on success; that's the most authoritative signal.
+# We additionally key off the BUILD-OK trailer in case stdout was
+# captured but exit code went missing (e.g. inside a flaky pipeline).
+pass_on_exit_zero = true
+
+[[parse.metrics]]
+name  = "build_dir"
+regex = "BUILD-OK: (\\S+)"
+
+[thresholds]
+require_clean_exit = true

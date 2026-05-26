@@ -1,0 +1,78 @@
+schema_version = 1
+volumes = []
+
+# TCP throughput bench workload — used by run-tcp-throughput-via-umlctl.sh
+# to measure guest→host TCP under either legacy vector or vector2 driver
+# via the production fd-handoff path that umlctl deploy uses.
+#
+# Placeholders (substituted by the wrapper):
+#   {{KERNEL}}, {{BACKEND}}, {{TAP_NAME}},
+#   {{HOST_IP}}, {{GUEST_IP}}, {{HOST_IP_PLAIN}}, {{GUEST_IP_PLAIN}},
+#   {{NETWORK_DRIVER}}, {{DURATION_SEC}}, {{BENCH_PORT}}
+
+[instance]
+name = "tcp-throughput-{{NETWORK_DRIVER}}-{{BACKEND}}"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "512M"
+ncpus = 2
+
+[network]
+mode = "tap"
+driver = "{{NETWORK_DRIVER}}"
+tap_name = "{{TAP_NAME}}"
+guest_ip = "{{GUEST_IP}}"
+host_ip = "{{HOST_IP}}"
+gateway = "{{HOST_IP_PLAIN}}"
+nameservers = []
+masquerade_via = "auto"
+ports = []
+
+[env]
+TMPDIR = "/tmp"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 5
+
+# Phase 2: TCP throughput sender — connect to host sink, stream for N
+# seconds, print BENCH_RESULT.  The wrapper script starts the host
+# sink on {{HOST_IP_PLAIN}}:{{BENCH_PORT}} before invoking umlctl.
+[[init.phases]]
+name = "tcp-send"
+cmd = """
+SENDER=/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/net-bench/tcp-send
+if [ -x "$SENDER" ]; then
+    "$SENDER" {{HOST_IP_PLAIN}} {{BENCH_PORT}} {{DURATION_SEC}}
+else
+    # Fallback to Python (slower; pre-TSO numbers reproduced via PY).
+    python3 - <<'PY'
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+s.connect(("{{HOST_IP_PLAIN}}", {{BENCH_PORT}}))
+buf = b"X" * (1 << 20)
+t0 = time.monotonic()
+n = 0
+while time.monotonic() - t0 < {{DURATION_SEC}}:
+    n += s.send(buf)
+dt = time.monotonic() - t0
+mbps = n * 8.0 / dt / 1e6
+print("BENCH_RESULT mbps=%.1f bytes=%d dt=%.2f" % (mbps, n, dt))
+s.close()
+PY
+fi
+echo REPRO_DONE rc=$?
+"""
+expect = ""
+timeout_secs = 60
+
+[host_resources]
+thp = "off"
+oom_score_adj = 500

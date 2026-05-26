@@ -1,0 +1,48 @@
+schema_version = 1
+volumes = []
+
+[instance]
+name = "soak-memcheck-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "512M"
+ncpus = 4
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 0
+
+# 256MB region, 2 iters = ~3-5s on Zen 4. Catches anon-mmap CoW
+# bugs, page-out/in corruption, walking-bit / addressing wiring
+# bugs in UML's MM. Strict pattern verify per qword.
+[[init.phases]]
+name = "memcheck"
+cmd = "/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/soak/memcheck 256 2"
+expect = ""
+timeout_secs = 60
+
+[[init.phases]]
+name = "report"
+cmd = "echo REPRO_DONE rc=$?"
+expect = ""
+timeout_secs = 0
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500

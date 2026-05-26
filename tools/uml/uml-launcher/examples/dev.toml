@@ -1,0 +1,15 @@
+# uml-launcher daily-driver config.
+#
+# Fast boot + interactive /bin/sh on stdio. Tune `kernel` and
+# `mem` to whatever your local build tree and host memory allow.
+#
+# Typical use:
+#   make ARCH=um defconfig
+#   make ARCH=um O=/tmp/uml-dev -j$(nproc)
+#   uml-launcher run --config ~/.config/uml-launcher/dev.toml
+
+kernel = "/tmp/uml-dev/linux"
+init   = "/bin/sh"
+mem    = "256M"
+root   = "hostfs"
+console = "stdio"

@@ -1,0 +1,54 @@
+# umlctl Umlfile — full CPython stdlib suite on the kvm-v2 backend.
+#
+# Sibling of cpython-test-full.toml (seccomp).  Run both with the
+# same kernel binary to compare backend behavior on the same workload.
+#
+#   umlctl up -f tools/uml/uml-launcher/examples/cpython-test-full.toml      # seccomp
+#   umlctl up -f tools/uml/uml-launcher/examples/cpython-test-full-kvm.toml  # kvm-v2
+#
+# A backend has "subprocess parity" iff both runs produce the same
+# pass/fail set on test_multiprocessing*, test_concurrent_futures*,
+# test_asyncio.test_subprocess, test_subprocess.
+
+schema_version = 1
+
+[instance]
+name = "cpython-test-full-kvm"
+labels = { workload = "cpython-test-full-kvm", purpose = "umlctl-validation-honest", backend = "kvm-v2" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "kvm-v2"
+append = []
+
+[runtime]
+mem = "8192M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "smoke"
+cmd  = "python3 -c 'import sys; print(\"python\", sys.version); print(\"executable:\", repr(sys.executable))'"
+
+[[init.phases]]
+name = "cpython-test-full-kvm"
+cmd  = """
+mkdir -p /tmp/cpython-out && cd /tmp/cpython-out && \
+python3 -m test --quiet -j2 --timeout=300
+"""
+
+[[init.phases]]
+name = "report"
+cmd  = "echo CPYTHON_TEST_FULL_KVM_DONE rc=$?"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false

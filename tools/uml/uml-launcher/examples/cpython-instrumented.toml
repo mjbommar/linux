@@ -1,0 +1,82 @@
+schema_version = 1
+
+[instance]
+name = "cpython-instrumented"
+labels = { workload = "cpython-instrumented" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "8192M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+PYTHONUNBUFFERED = "1"
+
+[[init.phases]]
+name = "smoke"
+cmd = """
+INSTR=/home/mjbommar/src/r14-cpython-audit/cpython/python
+ls -la $INSTR
+$INSTR -c 'print("HELLO from instrumented")' 2>&1 | head -10
+echo "smoke exit: $?"
+"""
+
+[[init.phases]]
+name = "run-failing-test"
+cmd = """
+INSTR=/home/mjbommar/src/r14-cpython-audit/cpython/python
+# Diag log: per-thread counters dumped ONLY at DEALLOC_NULL time.
+# Each crashing thread contributes ONE line; the line says whether
+# tstate was ever bound (SET>0) and the live TLS value at fault.
+# Place it under hostfs so we can read it from the host even after
+# the guest exits.
+DIAG_LOG=/home/mjbommar/tmp/uml-pystate-diag.log
+mkdir -p /home/mjbommar/tmp
+rm -f "$DIAG_LOG"
+touch "$DIAG_LOG"
+chmod 666 "$DIAG_LOG"
+export UMLDIAG_LOG="$DIAG_LOG"
+
+cd /tmp
+timeout 2400 $INSTR -m test --quiet -j2 --timeout=300 2>&1 | tail -50
+echo "test exit: $?"
+echo
+echo "=== UMLDIAG file size: $(wc -c < $DIAG_LOG) bytes ==="
+echo "DEALLOC_NULL count:  $(grep -c '^DEALLOC_NULL ' $DIAG_LOG)"
+echo
+echo "=== All DEALLOC_NULL records (one per crashing OS thread) ==="
+grep '^DEALLOC_NULL ' $DIAG_LOG
+echo
+echo "=== Verdict per record ==="
+grep '^DEALLOC_NULL ' $DIAG_LOG | while read line; do
+    set_count=$(echo "$line" | grep -oP 'SET=\\d+' | grep -oP '\\d+')
+    clr_count=$(echo "$line" | grep -oP 'CLR=\\d+' | grep -oP '\\d+')
+    last_op=$(echo "$line" | grep -oP 'last_op=\\d+' | grep -oP '\\d+')
+    if [ "$set_count" = "0" ]; then
+        echo "NEVER_BOUND: $line"
+    elif [ "$last_op" = "2" ]; then
+        echo "CLEARED_BEFORE_FAULT: $line"
+    else
+        echo "BOUND_BUT_TLS_LOST: $line"
+    fi
+done
+"""
+
+[[init.phases]]
+name = "report"
+cmd = "echo CPYTHON_INSTRUMENTED_DONE"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false

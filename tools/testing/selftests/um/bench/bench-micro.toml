@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# bench-micro — pure trap-mechanism cyc/getpid micro-benchmark.
+#
+# Boots UML with the static `getpid-loop` C binary as init=. The
+# binary runs N=100000 SYS_getpid round-trips, rdtsc-bracketed,
+# and prints one PERF_GETPID summary line. We re-emit it as
+# BENCH-style for the host-side run-bench.sh parser.
+#
+# Tier budget: <10 s wall (single boot, one ncpus=1 vCPU, 100k
+# syscalls). Comparison cell: backend-substitution + repeat for
+# samples.
+
+schema_version = 1
+
+[instance]
+name = "bench-micro"
+
+[kernel]
+path    = "${UML_KERNEL}"
+backend = "BENCH_BACKEND_PLACEHOLDER"
+append  = []
+
+[runtime]
+mem    = "256M"
+ncpus  = 1
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+
+[[init.phases]]
+name = "bench"
+cmd  = "${BENCH_DIR}/../perf-getpid/getpid-loop"
+
+[[init.phases]]
+name = "bench_done"
+cmd  = "echo BENCH_RUN_DONE"

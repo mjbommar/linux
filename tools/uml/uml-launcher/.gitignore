@@ -1,0 +1,6 @@
+# Cargo build output (Cargo.lock is checked in per binary-crate convention).
+/target/
+
+# umlctl writes per-instance logs/ and per-run scoreboard captures here
+# at run time; nothing in here is source.
+logs/

@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# um/umlctl-smoke/run-umlctl-smoke.sh — regression guard for
+# tools/uml/uml-launcher/src/bin/umlctl (the multi-instance
+# lifecycle CLI described in Documentation/virt/uml/redesign/
+# 08-future-phases/05-umlctl.md).
+#
+# Drives the full umlctl v1 lifecycle against a fake kernel (a
+# shell script that prints the ready marker and then sleeps),
+# so the test covers the CLI + supervision code without
+# depending on a real UML build.
+#
+# The regression this really locks in: `umlctl stop` must
+# terminate the child cleanly with no orphan-accumulation. If
+# a future change breaks the signal + poll + escalate path, the
+# final `pgrep` check fails and this selftest goes red.
+#
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+#
+# Environment:
+#   UMLCTL        path to umlctl binary (default: walk up the
+#                 tree to tools/uml/uml-launcher/target/debug/
+#                 then release/)
+#   KEEP_TMPDIR   if set, leave the state/runtime tmpdir for
+#                 debugging.
+
+set -u
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+
+if [ -n "${UMLCTL:-}" ]; then
+	UMLCTL_BIN="$UMLCTL"
+else
+	ROOT=$(cd "$DIR/../../../../.." && pwd)
+	UMLCTL_BIN=""
+	for cand in \
+		"$ROOT/tools/uml/uml-launcher/target/debug/umlctl" \
+		"$ROOT/tools/uml/uml-launcher/target/release/umlctl"; do
+		if [ -x "$cand" ]; then
+			UMLCTL_BIN="$cand"
+			break
+		fi
+	done
+fi
+
+if [ -z "$UMLCTL_BIN" ] || [ ! -x "$UMLCTL_BIN" ]; then
+	echo "SKIP: umlctl not built (run: cargo build --bin umlctl -C tools/uml/uml-launcher)" >&2
+	exit 4
+fi
+
+TMP=$(mktemp -d)
+cleanup() {
+	rc=$?
+	if [ -z "${KEEP_TMPDIR:-}" ]; then
+		rm -rf "$TMP"
+	else
+		echo "tmp retained at $TMP"
+	fi
+	exit $rc
+}
+trap cleanup EXIT INT TERM
+
+# Fake kernel: print the ready marker so the detach-mode
+# ready-wait trips, then sleep long enough that `ps` + `stop`
+# land while it's alive. The mix of printk-shape lines
+# (`[    0.000000] …`, `<4>…`) and bare init-stdout lines
+# exercises the O1.2 console split. Lines are dual-written
+# to stderr for detach-mode only (where umlctl redirects
+# stderr into init.log too). The "first" instance uses a
+# clean log so lifecycle tests that assume no-splat behave
+# as they did before O3.1.
+cat > "$TMP/linux" <<'FAKE'
+#!/bin/sh
+echo "Checking that host ptys support output SIGIO..."
+echo "[    0.000000] Linux version fake"
+echo "[    0.123456] Booting Linux on physical CPU 0x0"
+echo "<4>random: crng init done"
+echo "Welcome to Linux"
+echo "Freeing unused kernel memory"
+echo "[   12.345678] Run /sbin/init as init process"
+exec sleep 120
+FAKE
+chmod +x "$TMP/linux"
+
+# A "splat" kernel fixture: emits canonical sanitizer /
+# panic / oom / stall lines so the O3.1 dmesg parser turns
+# them into events.jsonl records post-stop. Used in Part H
+# below; the lifecycle tests in Parts A-G use the clean
+# fixture above.
+cat > "$TMP/linux-splat" <<'SPLAT'
+#!/bin/sh
+echo "[    0.000000] Linux version fake"
+echo "Freeing unused kernel memory"
+echo "[    1.234567] BUG: KASAN: use-after-free in foo+0x1/0x2"
+echo "[    1.245678] BUG: KFENCE: out-of-bounds read in bar+0x5"
+echo "[    1.256789] BUG: KCSAN: data-race in baz (reads)"
+echo "[    1.267890] UBSAN: shift-out-of-bounds in file.c:12:4"
+echo "[    1.278901] Out of memory: Killed process 99 (hog)"
+echo "[    1.289012] rcu: INFO: rcu_sched detected stalls on CPUs/tasks"
+echo "[    1.290123] WARNING: possible circular locking dependency detected"
+echo "[    1.301234] watchdog: BUG: soft lockup - CPU#0 stuck for 22s!"
+exec sleep 120
+SPLAT
+chmod +x "$TMP/linux-splat"
+
+STATE_DIR="$TMP/state"
+RUNTIME_DIR="$TMP/run"
+ARGS="--state-dir $STATE_DIR --runtime-dir $RUNTIME_DIR"
+NAME="smoke-1"
+
+fail() {
+	echo "UMLCTL_SMOKE: FAIL $1"
+	exit 1
+}
+
+# --- Part A: name validation rejects bad names ---
+if "$UMLCTL_BIN" $ARGS create "Bad Name" --kernel "$TMP/linux" 2>/dev/null; then
+	fail "create accepted invalid name 'Bad Name'"
+fi
+if "$UMLCTL_BIN" $ARGS create "-leading" --kernel "$TMP/linux" 2>/dev/null; then
+	fail "create accepted invalid name '-leading'"
+fi
+
+# --- Part B: create + manifest shape ---
+"$UMLCTL_BIN" $ARGS create "$NAME" \
+	--kernel "$TMP/linux" \
+	--profile research \
+	--mem 128M \
+	--label env=smoketest \
+	>/dev/null || fail "create failed"
+
+MANIFEST="$STATE_DIR/instances/$NAME.toml"
+[ -f "$MANIFEST" ] || fail "manifest file not written"
+grep -q 'schema_version = 1' "$MANIFEST" \
+	|| fail "manifest missing schema_version"
+grep -q 'profile = "research"' "$MANIFEST" \
+	|| fail "manifest missing profile"
+grep -q '^env = "smoketest"$' "$MANIFEST" \
+	|| fail "manifest missing label"
+
+# Duplicate create without --force → exit 4 (conflict).
+"$UMLCTL_BIN" $ARGS create "$NAME" --kernel "$TMP/linux" 2>/dev/null
+rc=$?
+[ $rc -eq 4 ] || fail "duplicate create exited $rc (want 4)"
+
+# --- Part C: start + ps + logs + stop ---
+START_OUT=$("$UMLCTL_BIN" $ARGS start "$NAME" --ready-timeout 10) \
+	|| fail "start failed"
+echo "$START_OUT" | grep -Eq 'run_id=[0-9A-HJKMNP-TV-Z]{26}' \
+	|| fail "start output missing ULID run_id: $START_OUT"
+
+PIDFILE="$RUNTIME_DIR/$NAME.pid"
+RUN_ID_FILE="$RUNTIME_DIR/$NAME.run_id"
+[ -f "$PIDFILE" ] || fail "pidfile not written"
+[ -f "$RUN_ID_FILE" ] || fail "run_id side-file not written"
+PID=$(awk '{print $1}' "$PIDFILE")
+# A5 pidfile format: "<pid> <starttime>\n". Starttime is
+# read from /proc/<pid>/stat at spawn time so umlctl can
+# detect pid-reuse on subsequent identity checks.
+PID_STARTTIME=$(awk '{print $2}' "$PIDFILE")
+[ -n "$PID_STARTTIME" ] || fail "pidfile missing A5 starttime field: $(cat "$PIDFILE")"
+RUN_ID=$(cat "$RUN_ID_FILE")
+kill -0 "$PID" 2>/dev/null || fail "pid $PID not alive after start"
+
+# Bundle directory exists and contains the expected skeleton.
+BUNDLE_DIR="$STATE_DIR/runs/$RUN_ID"
+[ -d "$BUNDLE_DIR" ] || fail "bundle dir missing: $BUNDLE_DIR"
+[ -f "$BUNDLE_DIR/run.json" ] || fail "run.json missing: $BUNDLE_DIR/run.json"
+[ -f "$BUNDLE_DIR/init.log" ] || fail "init.log missing: $BUNDLE_DIR/init.log"
+grep -q "\"run_id\": \"$RUN_ID\"" "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing run_id: $(cat "$BUNDLE_DIR/run.json")"
+grep -q "\"instance\": \"$NAME\"" "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing instance"
+grep -q '"host_ts_ns_at_exec"' "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing host_ts_ns_at_exec"
+
+# ps lists the running instance.
+PS_OUT=$("$UMLCTL_BIN" $ARGS ps)
+echo "$PS_OUT" | grep -q "^$NAME" || fail "ps output missing $NAME: $PS_OUT"
+echo "$PS_OUT" | grep -q "running" || fail "ps not marking running: $PS_OUT"
+
+# ps --json emits NDJSON.
+JSON_OUT=$("$UMLCTL_BIN" $ARGS --json ps)
+echo "$JSON_OUT" | grep -q "\"name\":\"$NAME\"" \
+	|| fail "json ps missing name: $JSON_OUT"
+echo "$JSON_OUT" | grep -q "\"state\":\"running\"" \
+	|| fail "json ps missing running state"
+
+# ps --filter label=env=smoketest matches.
+FILT=$("$UMLCTL_BIN" $ARGS ps --filter label=env=smoketest --quiet)
+[ "$FILT" = "$NAME" ] || fail "label filter mismatch: got '$FILT'"
+
+# ps --filter label=env=wrong does not match.
+FILT_NO=$("$UMLCTL_BIN" $ARGS ps --filter label=env=wrong --quiet)
+[ -z "$FILT_NO" ] || fail "negative label filter returned '$FILT_NO'"
+
+# logs prints the fake kernel's ready marker.
+LOG_OUT=$("$UMLCTL_BIN" $ARGS logs "$NAME")
+echo "$LOG_OUT" | grep -q "Linux version fake" \
+	|| fail "logs missing ready marker: $LOG_OUT"
+
+# umlctl dmesg before stop works via on-the-fly init.log
+# filter (kernel.log hasn't been materialized yet). Should
+# see kernel-shape lines and NOT userspace lines.
+DMESG_LIVE=$("$UMLCTL_BIN" $ARGS dmesg "$NAME")
+echo "$DMESG_LIVE" | grep -q 'Linux version fake' \
+	|| fail "live dmesg missing Linux version: $DMESG_LIVE"
+echo "$DMESG_LIVE" | grep -q 'crng init done' \
+	|| fail "live dmesg missing <4> priority line: $DMESG_LIVE"
+if echo "$DMESG_LIVE" | grep -q '^Welcome to Linux$'; then
+	fail "live dmesg should not include userspace: $DMESG_LIVE"
+fi
+if echo "$DMESG_LIVE" | grep -q '^Checking that host ptys'; then
+	fail "live dmesg should not include pre-printk: $DMESG_LIVE"
+fi
+
+# --- O2: umlctl metrics scrapes /proc/<pid>/* while live ---
+METRICS_OUT=$("$UMLCTL_BIN" $ARGS metrics "$NAME") \
+	|| fail "metrics failed while running"
+echo "$METRICS_OUT" | grep -Eq "^pid +$PID\$" \
+	|| fail "metrics missing pid $PID: $METRICS_OUT"
+echo "$METRICS_OUT" | grep -q "^state " \
+	|| fail "metrics missing state line"
+echo "$METRICS_OUT" | grep -q "^vm_rss_bytes " \
+	|| fail "metrics missing vm_rss_bytes"
+echo "$METRICS_OUT" | grep -q "^threads " \
+	|| fail "metrics missing threads"
+echo "$METRICS_OUT" | grep -q "^sched " \
+	|| fail "metrics missing sched"
+
+# --json rendering is valid JSON with the expected shape.
+JSON_METRICS=$("$UMLCTL_BIN" $ARGS --json metrics "$NAME") \
+	|| fail "json metrics failed"
+echo "$JSON_METRICS" | grep -q "\"pid\": $PID" \
+	|| fail "json metrics missing pid: $JSON_METRICS"
+echo "$JSON_METRICS" | grep -q '"proc"' \
+	|| fail "json metrics missing proc block"
+echo "$JSON_METRICS" | grep -q '"cgroup"' \
+	|| fail "json metrics missing cgroup block"
+
+# --- Part D: stop must actually kill the child ---
+STOP_OUT=$("$UMLCTL_BIN" $ARGS stop "$NAME") || fail "stop failed"
+echo "$STOP_OUT" | grep -q "run_id=$RUN_ID" \
+	|| fail "stop output missing run_id: $STOP_OUT"
+
+# Give the kernel a moment to reap.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	if ! kill -0 "$PID" 2>/dev/null; then
+		break
+	fi
+	sleep 0.1
+done
+
+if kill -0 "$PID" 2>/dev/null; then
+	fail "pid $PID still alive after stop (the orphan-killer is broken)"
+fi
+
+[ ! -f "$PIDFILE" ] || fail "pidfile lingered after stop: $PIDFILE"
+[ ! -f "$RUN_ID_FILE" ] || fail "run_id side-file lingered after stop"
+
+# run.json should now be finalized with exit-side fields.
+grep -q '"host_ts_ns_at_exit"' "$BUNDLE_DIR/run.json" \
+	|| fail "run.json not finalized on stop (no host_ts_ns_at_exit)"
+grep -q '"signal_sent": "TERM"' "$BUNDLE_DIR/run.json" \
+	|| fail "run.json missing signal_sent=TERM after stop"
+
+# O1.2: stop should have materialized kernel.log next to
+# init.log, containing only the printk-shape lines from the
+# merged console.
+[ -f "$BUNDLE_DIR/kernel.log" ] || fail "kernel.log not derived on stop: $BUNDLE_DIR/kernel.log"
+grep -q 'Linux version fake' "$BUNDLE_DIR/kernel.log" \
+	|| fail "kernel.log missing printk timestamp line"
+grep -q 'crng init done' "$BUNDLE_DIR/kernel.log" \
+	|| fail "kernel.log missing <4> priority line"
+if grep -q '^Welcome to Linux$' "$BUNDLE_DIR/kernel.log"; then
+	fail "kernel.log leaked userspace stdout"
+fi
+if grep -q '^Checking that host ptys' "$BUNDLE_DIR/kernel.log"; then
+	fail "kernel.log leaked pre-printk UML init noise"
+fi
+
+# umlctl dmesg after stop reads the materialized kernel.log
+# directly — exercise --tail to verify the truncation path.
+DMESG_OUT=$("$UMLCTL_BIN" $ARGS dmesg "$NAME")
+echo "$DMESG_OUT" | grep -q 'Run /sbin/init as init process' \
+	|| fail "post-stop dmesg missing last printk line: $DMESG_OUT"
+DMESG_TAIL=$("$UMLCTL_BIN" $ARGS dmesg "$NAME" --tail 1)
+[ "$(echo "$DMESG_TAIL" | wc -l)" = "1" ] \
+	|| fail "dmesg --tail 1 should return exactly 1 line"
+
+# Resolve by run_id directly.
+DMESG_DIRECT=$("$UMLCTL_BIN" $ARGS dmesg "$RUN_ID")
+echo "$DMESG_DIRECT" | grep -q 'Linux version fake' \
+	|| fail "dmesg <run_id> should resolve directly"
+
+# stop of already-stopped instance → exit 6 (not running).
+"$UMLCTL_BIN" $ARGS stop "$NAME" 2>/dev/null
+rc=$?
+[ $rc -eq 6 ] || fail "stop-of-stopped exited $rc (want 6)"
+
+# metrics of a stopped instance → exit 6 (scrape needs a live pid).
+"$UMLCTL_BIN" $ARGS metrics "$NAME" 2>/dev/null
+rc=$?
+[ $rc -eq 6 ] || fail "metrics on stopped exited $rc (want 6)"
+
+# --- Part E: rm + history ---
+"$UMLCTL_BIN" $ARGS rm "$NAME" >/dev/null || fail "rm failed"
+[ ! -f "$MANIFEST" ] || fail "manifest lingered after rm: $MANIFEST"
+
+# rm of nonexistent → exit 3.
+"$UMLCTL_BIN" $ARGS rm "$NAME" 2>/dev/null
+rc=$?
+[ $rc -eq 3 ] || fail "rm-of-missing exited $rc (want 3)"
+
+# history.jsonl captured all four lifecycle events.
+HIST="$STATE_DIR/history.jsonl"
+[ -f "$HIST" ] || fail "history.jsonl not written"
+for ev in create start stop rm; do
+	grep -q "\"event\":\"$ev\"" "$HIST" \
+		|| fail "history missing event '$ev'"
+done
+
+# start + stop history entries must include the run_id (added
+# by the observability-spine O1.1 lift).
+grep '"event":"start"' "$HIST" | grep -q "\"run_id\":\"$RUN_ID\"" \
+	|| fail "history start event missing run_id"
+grep '"event":"stop"' "$HIST" | grep -q "\"run_id\":\"$RUN_ID\"" \
+	|| fail "history stop event missing run_id"
+
+# Bundle should have been cleaned up by `rm` (no --keep-logs).
+[ ! -d "$BUNDLE_DIR" ] || fail "bundle dir lingered after rm: $BUNDLE_DIR"
+
+# --- Part G: observability-spine events.jsonl + schema verb ---
+#
+# Spin up a second instance just to populate events.jsonl so
+# we can assert on the structured-event pipeline (O1.3). The
+# bundle we torched in Part E took its events.jsonl with it.
+N2="smoke-events"
+"$UMLCTL_BIN" $ARGS create "$N2" --kernel "$TMP/linux" --profile research \
+	>/dev/null || fail "events create failed"
+"$UMLCTL_BIN" $ARGS start "$N2" --ready-timeout 10 >/dev/null \
+	|| fail "events start failed"
+N2_RUN_ID=$(cat "$RUNTIME_DIR/$N2.run_id")
+"$UMLCTL_BIN" $ARGS stop "$N2" >/dev/null || fail "events stop failed"
+
+EV="$STATE_DIR/runs/$N2_RUN_ID/events.jsonl"
+[ -f "$EV" ] || fail "events.jsonl not written: $EV"
+
+# Both start + stop uml.lifecycle.v1 records present.
+grep -q '"schema":"uml.lifecycle.v1"' "$EV" \
+	|| fail "events.jsonl missing uml.lifecycle.v1 schema"
+grep -q '"event.action":"start"' "$EV" \
+	|| fail "events.jsonl missing start action"
+grep -q '"event.action":"stop"' "$EV" \
+	|| fail "events.jsonl missing stop action"
+grep -q "\"run_id\":\"$N2_RUN_ID\"" "$EV" \
+	|| fail "events.jsonl missing run_id"
+grep -q '"host_ts_ns":' "$EV" \
+	|| fail "events.jsonl missing host_ts_ns (boot-offset clock)"
+
+# umlctl schema lists declared schemas.
+SCHEMA_OUT=$("$UMLCTL_BIN" schema)
+echo "$SCHEMA_OUT" | grep -q uml.lifecycle.v1 \
+	|| fail "schema verb missing uml.lifecycle.v1"
+echo "$SCHEMA_OUT" | grep -q uml.panic.v1 \
+	|| fail "schema verb missing uml.panic.v1"
+echo "$SCHEMA_OUT" | grep -q uml.oom.v1 \
+	|| fail "schema verb missing uml.oom.v1"
+
+# umlctl events <name> reads the latest bundle's events.jsonl.
+EVENTS_OUT=$("$UMLCTL_BIN" $ARGS events "$N2")
+[ "$(echo "$EVENTS_OUT" | wc -l)" = "2" ] \
+	|| fail "events verb should return 2 lifecycle events, got: $EVENTS_OUT"
+echo "$EVENTS_OUT" | grep -q '"event.action":"start"' \
+	|| fail "events output missing start action"
+echo "$EVENTS_OUT" | grep -q '"event.action":"stop"' \
+	|| fail "events output missing stop action"
+
+# --filter event.action=start narrows to one event.
+FILT_OUT=$("$UMLCTL_BIN" $ARGS events "$N2" --filter event.action=start)
+[ "$(echo "$FILT_OUT" | wc -l)" = "1" ] \
+	|| fail "filter event.action=start should narrow to 1, got: $FILT_OUT"
+
+# Name-or-run-id ambiguity: passing the literal run_id reads
+# the bundle directly without looking up the instance.
+DIRECT_OUT=$("$UMLCTL_BIN" $ARGS events "$N2_RUN_ID" --filter event.action=stop)
+[ "$(echo "$DIRECT_OUT" | wc -l)" = "1" ] \
+	|| fail "events <run_id> should resolve directly, got: $DIRECT_OUT"
+
+# Bad filter → exit 1.
+"$UMLCTL_BIN" $ARGS events "$N2" --filter bogus 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "bad filter should exit 1, got $rc"
+
+# --- umlctl assert ---
+# Pass case: no sanitizer events in a fake-kernel run.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" \
+	--no-kasan --no-kcsan --no-panic --no-oom --no-rcu-stall \
+	|| fail "assert --no-* predicates should pass on a clean fake-kernel run"
+
+# Pass case: require a schema that IS emitted.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" --require uml.lifecycle.v1 \
+	|| fail "assert --require uml.lifecycle.v1 should pass"
+
+# Fail case: require a schema that is NOT emitted.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" --require uml.panic.v1 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "assert --require uml.panic.v1 should fail (rc=$rc)"
+
+# Fail case: inject a synthetic KASAN event + assert --no-kasan.
+EV2="$STATE_DIR/runs/$N2_RUN_ID/events.jsonl"
+cat >> "$EV2" <<SYNTH
+{"@timestamp":"2026-04-23T23:00:00Z","host_ts_ns":99,"run_id":"$N2_RUN_ID","instance":"$N2","schema":"uml.sanitizer.kasan.v1","event.category":"sanitizer","event.severity":"error","event.action":"use-after-free"}
+SYNTH
+"$UMLCTL_BIN" $ARGS --quiet assert "$N2" --no-kasan 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "assert --no-kasan should fail after synthetic injection (rc=$rc)"
+
+# Misuse: assert with no predicates → exit 2.
+"$UMLCTL_BIN" $ARGS assert "$N2" 2>/dev/null
+rc=$?
+[ $rc -eq 2 ] || fail "assert with no predicates should exit 2 (got $rc)"
+
+# umlctl export --bundle produces a self-contained .tar.zst.
+# Skip if `tar --zstd` isn't available on this host.
+if tar --zstd --version >/dev/null 2>&1; then
+	BUNDLE_OUT="$TMP/$N2.umlbundle.tar.zst"
+	"$UMLCTL_BIN" $ARGS --quiet export "$N2" --bundle "$BUNDLE_OUT" \
+		|| fail "export --bundle failed"
+	[ -s "$BUNDLE_OUT" ] || fail "export produced empty bundle"
+
+	# Unpack and verify the shape.
+	UNPACK="$TMP/unpack"
+	mkdir -p "$UNPACK"
+	tar --zstd -xf "$BUNDLE_OUT" -C "$UNPACK" \
+		|| fail "unpack exported bundle failed"
+	[ -d "$UNPACK/$N2_RUN_ID" ] || fail "unpacked bundle missing $N2_RUN_ID/"
+	[ -f "$UNPACK/$N2_RUN_ID/run.json" ] || fail "bundle missing run.json"
+	[ -f "$UNPACK/$N2_RUN_ID/events.jsonl" ] || fail "bundle missing events.jsonl"
+	[ -f "$UNPACK/$N2_RUN_ID/manifest.toml" ] || fail "bundle missing manifest snapshot"
+	# O1.2: exported bundle must include the derived kernel.log
+	# sidecar so post-mortem viewers can dmesg-split offline.
+	[ -f "$UNPACK/$N2_RUN_ID/kernel.log" ] || fail "bundle missing kernel.log"
+	grep -q "\"run_id\": \"$N2_RUN_ID\"" "$UNPACK/$N2_RUN_ID/run.json" \
+		|| fail "unpacked run.json missing run_id"
+else
+	echo "SKIP: tar --zstd unavailable; export assertions skipped"
+fi
+
+"$UMLCTL_BIN" $ARGS rm "$N2" >/dev/null
+
+# --- Part H: O3.1 dmesg parser turns kernel splats into events ---
+#
+# Spin up a third instance backed by the splat fixture;
+# umlctl stop must emit one spine event per recognized
+# sanitizer / panic / oom / stall / lockdep / watchdog
+# line. `umlctl assert --no-*` must then fire.
+N3="smoke-splat"
+"$UMLCTL_BIN" $ARGS create "$N3" --kernel "$TMP/linux-splat" \
+	>/dev/null || fail "splat create failed"
+"$UMLCTL_BIN" $ARGS start "$N3" --ready-timeout 10 >/dev/null \
+	|| fail "splat start failed"
+N3_RUN_ID=$(cat "$RUNTIME_DIR/$N3.run_id")
+"$UMLCTL_BIN" $ARGS stop "$N3" >/dev/null || fail "splat stop failed"
+
+EV3="$STATE_DIR/runs/$N3_RUN_ID/events.jsonl"
+[ -f "$EV3" ] || fail "splat events.jsonl missing"
+
+# Each declared schema must appear exactly once (one splat
+# line per kind in the fixture).
+for schema in uml.sanitizer.kasan.v1 uml.sanitizer.kfence.v1 \
+		uml.sanitizer.kcsan.v1 uml.sanitizer.ubsan.v1 \
+		uml.oom.v1 uml.rcu_stall.v1 uml.lockdep.v1 \
+		uml.watchdog_stall.v1; do
+	COUNT=$(grep -c "\"schema\":\"$schema\"" "$EV3" || true)
+	[ "$COUNT" = "1" ] || fail "expected 1 $schema event, got $COUNT"
+done
+
+# Payload should carry a trimmed `message` field for the
+# sanitizer/panic families (the parser strips the splat
+# prefix before emitting).
+grep -q '"message":"use-after-free in foo+0x1/0x2"' "$EV3" \
+	|| fail "KASAN message payload not trimmed: $(grep KASAN "$EV3")"
+
+# assert --no-kasan must now fire against real parser output
+# (no synthetic injection).
+"$UMLCTL_BIN" $ARGS --quiet assert "$N3" --no-kasan 2>/dev/null
+rc=$?
+[ $rc -eq 1 ] || fail "assert --no-kasan should catch real parser output (rc=$rc)"
+
+# assert --no-panic should PASS because the splat fixture
+# has no panic line.
+"$UMLCTL_BIN" $ARGS --quiet assert "$N3" --no-panic \
+	|| fail "assert --no-panic should pass (no panic in fixture)"
+
+# umlctl schema lists the new sanitizer / stall / lockdep /
+# watchdog schemas after the O3.1 expansion.
+SCHEMA_OUT=$("$UMLCTL_BIN" schema)
+for s in uml.sanitizer.kfence.v1 uml.rcu_stall.v1 uml.lockdep.v1 \
+		uml.watchdog_stall.v1; do
+	echo "$SCHEMA_OUT" | grep -q "$s" \
+		|| fail "schema registry missing $s"
+done
+
+"$UMLCTL_BIN" $ARGS rm "$N3" >/dev/null
+
+# --- Part I: A6 early-exit detection via Child::try_wait() ---
+#
+# Fake kernel that exits IMMEDIATELY with nonzero status. umlctl
+# start --detach should notice via child.try_wait() and return
+# SPAWN_EXITED_EARLY well under the --ready-timeout budget.
+# Pre-A6 the runner polled kill(pid, 0) which sees a zombie as
+# live, so it would only report READY_TIMEOUT after the full
+# timeout elapsed (15s below). Post-A6 we expect an error
+# within ~1s.
+cat > "$TMP/linux-earlyexit" <<'EE'
+#!/bin/sh
+exit 42
+EE
+chmod +x "$TMP/linux-earlyexit"
+N4="smoke-earlyexit"
+"$UMLCTL_BIN" $ARGS create "$N4" --kernel "$TMP/linux-earlyexit" \
+	>/dev/null || fail "earlyexit create failed"
+T0=$(date +%s)
+"$UMLCTL_BIN" $ARGS start "$N4" --ready-timeout 15 2>/tmp/earlyexit.err
+RC=$?
+T1=$(date +%s)
+ELAPSED=$((T1 - T0))
+[ $RC -ne 0 ] || fail "earlyexit start should fail (got rc=0)"
+[ $ELAPSED -lt 5 ] || fail "earlyexit detection took ${ELAPSED}s; should be <5s post-A6"
+grep -q "kernel exited before reaching ready marker" /tmp/earlyexit.err \
+	|| fail "earlyexit err missing 'kernel exited' diagnostic: $(cat /tmp/earlyexit.err)"
+# run.json should record SPAWN_EXITED_EARLY with the child's
+# exit status (42).
+N4_RUN_ID=$(ls "$STATE_DIR/runs/" | while read r; do
+	grep -l "\"instance\": \"$N4\"" "$STATE_DIR/runs/$r/run.json" 2>/dev/null \
+		&& echo "$r" && break
+done)
+N4_RUN_ID=$(ls "$STATE_DIR/runs/" | tail -1)
+grep -q "SPAWN_EXITED_EARLY" "$STATE_DIR/runs/$N4_RUN_ID/run.json" \
+	|| fail "earlyexit run.json missing SPAWN_EXITED_EARLY: $(cat "$STATE_DIR/runs/$N4_RUN_ID/run.json")"
+grep -q "\"exit_status\": 42" "$STATE_DIR/runs/$N4_RUN_ID/run.json" \
+	|| fail "earlyexit run.json missing exit_status=42: $(cat "$STATE_DIR/runs/$N4_RUN_ID/run.json")"
+"$UMLCTL_BIN" $ARGS rm -f "$N4" >/dev/null 2>&1 || true
+
+# --- Part F: no orphans ---
+LEAK=$(pgrep -f "$TMP/linux" || true)
+[ -z "$LEAK" ] || fail "orphan processes left: $LEAK"
+
+echo "UMLCTL_SMOKE: PASS"
+exit 0

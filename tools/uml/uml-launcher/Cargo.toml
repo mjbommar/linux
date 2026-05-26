@@ -1,0 +1,115 @@
+[package]
+name = "uml-launcher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Host-side launcher for User-Mode Linux kernels"
+license = "GPL-2.0"
+repository = "https://github.com/torvalds/linux"
+readme = "README.md"
+keywords = ["uml", "user-mode-linux", "linux", "kernel"]
+categories = ["command-line-utilities", "virtualization"]
+
+[[bin]]
+name = "uml-launcher"
+path = "src/main.rs"
+
+# umlctl — multi-instance lifecycle CLI (parking-lot
+# 08-future-phases/05-umlctl.md v1). Shares the launcher
+# crate's deps (clap, figment, serde, shared_child,
+# signal-hook, tracing, anyhow, nix, libc) so there's no
+# dependency-tree bloat. See src/bin/umlctl.rs.
+[[bin]]
+name = "umlctl"
+path = "src/bin/umlctl/main.rs"
+
+# umlbuild — reproducible UML instance builder (kernel + rootfs
+# + ubd image + emitted Umlfile.toml). Sibling of umlctl;
+# umlctl runs an instance, umlbuild constructs one. Same
+# shared deps. See src/bin/umlbuild/SPEC.md.
+[[bin]]
+name = "umlbuild"
+path = "src/bin/umlbuild/main.rs"
+
+[dependencies]
+# CLI parsing + env-var fallbacks + shell completions.
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+# Hierarchical config: CLI > env > TOML > defaults, merged via providers.
+figment = { version = "0.10", features = ["toml", "env"] }
+serde = { version = "1", features = ["derive"] }
+# Supervision: same Child handle across signal thread + main thread.
+shared_child = "1.0"
+# SIGINT/SIGTERM/SIGCHLD dispatch on a dedicated thread.
+signal-hook = "0.3"
+# Structured logging + JSON output + EnvFilter.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Error context at boundaries. Binary-only — no library API, no eyre ceremony.
+anyhow = "1"
+# dup2(2) inside CommandExt::pre_exec for forkserver fd 198/199 plumbing.
+# MSRV-safe subset; don't chase the full nix surface.
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
+# Owned fds for passing raw host fds into the child.
+libc = "0.2"
+# umlctl manifest serialization: figment can read TOML but
+# not write it. Use the canonical `toml` crate for emission.
+toml = "0.8"
+# umlctl timestamps in manifests + history.jsonl. RFC3339
+# format; no tz plumbing beyond local offset.
+time = { version = "0.3", features = ["formatting", "parsing", "local-offset", "macros"] }
+# umlctl history.jsonl emission + `ps --json` output.
+serde_json = "1"
+# umlctl kernel binary hash for manifest.kernel.sha256.
+sha2 = "0.10"
+# umlctl hex-encode the sha256 digest for the manifest.
+hex = "0.4"
+# umlctl `up` Umlfile env-var expansion ($HOME, ${UML_KERNEL}).
+# default features only; no full-shell-syntax expansion.
+shellexpand = { version = "3", default-features = false, features = ["base-0"] }
+
+# --- C-10 v2: vhost-user backend stack (rust-vmm) ----------------
+# vhost-user-backend 0.22 pins vm-memory = "=0.17.1" exactly; match
+# it with `=` so cargo resolves to the exact version the backend
+# crate was tested against rather than a newer vm-memory that
+# might not satisfy the pin transitively.
+vhost = { version = "0.16", features = ["vhost-user-backend"] }
+vhost-user-backend = "0.22"
+vm-memory = { version = "=0.17.1", features = ["backend-mmap", "backend-atomic"] }
+virtio-bindings = "0.2"
+virtio-queue = "0.17"
+vmm-sys-util = "0.15"
+# Sync primitives for Arc<RwLock<Backend>> — vhost-user-backend
+# needs the backend to be Clone so we wrap it in Arc<RwLock<>>.
+# (RwLock from std is fine; no tokio here — keep v2 sync.)
+log = "0.4"
+# Per-backend BPF seccomp filters (C-10 v2 commit 3). Firecracker-
+# authored, now standalone rust-vmm. Used in allow-list posture:
+# every syscall outside the class-specific set triggers
+# SECCOMP_RET_KILL_PROCESS. Applied after rust-vmm setup, before
+# the event-loop enters its run() — matches Firecracker discipline
+# per D52.
+seccompiler = "0.5"
+
+[dev-dependencies]
+# tempfile backs the precedence regression tests that materialize
+# a real TOML config file (see config.rs::tests). No runtime dep.
+tempfile = "3"
+# `vhost-user-frontend` pulls in Frontend::connect + GET_FEATURES /
+# SET_FEATURES / SET_MEM_TABLE / SET_VRING_* on the frontend side so
+# integration tests can drive a real vhost-user handshake against
+# our backends without spawning qemu or UML. Dev-only — production
+# only ships the backend half. Feature is additive with the
+# `vhost-user-backend` dep already declared.
+vhost = { version = "0.16", features = ["vhost-user-frontend"] }
+
+[profile.release]
+# Small, fast, distro-friendly: keep symbols for debuginfo
+# packages, strip at install-time if packagers want that.
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
+[profile.dev]
+# Fast iteration; debug assertions on.
+opt-level = 0

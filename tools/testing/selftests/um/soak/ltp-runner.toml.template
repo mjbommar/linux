@@ -1,0 +1,129 @@
+schema_version = 1
+volumes = []
+
+# Phase J LTP runner — kirk-driven LTP suite execution.
+# Spec: phase-J-design-2026-05-07.md §4 + phase-J-ltp-curation-
+# 2026-05-14.md §4.
+#
+# Operator pre-flight (ONE-TIME, NOT yet done at landing):
+#   1. git clone --depth 1 https://github.com/linux-test-project/ltp /opt/ltp-src
+#      cd /opt/ltp-src && make autotools && ./configure
+#      make -j$(nproc) && sudo make install   # → /opt/ltp
+#   2. git clone --depth 1 https://github.com/linux-test-project/kirk /opt/kirk
+#      (kirk is Python; no compile needed; runs with system python3)
+#   3. Confirm /opt/ltp and /opt/kirk are hostfs-visible from the
+#      guest (default hostfs root makes them visible at the same
+#      path).
+#   4. (Done in-tree.) The curated 112-entry skip-list is at
+#      tools/testing/selftests/um/soak/ltp-skip.txt; the
+#      `--skip-file {{SOAK_DIR}}/ltp-skip.txt` reference below
+#      resolves to it once the daemon expands {{SOAK_DIR}}. If
+#      the soak directory isn't hostfs-visible from the guest
+#      at the same path, the operator must arrange a bind-mount
+#      OR copy ltp-skip.txt to /opt/uml-soak/ltp-skip.txt and
+#      edit the path below.
+#
+# Daemon scheduling (per Phase J design §4.3): runs every 8
+# daemon rotations rather than every rotation, due to the
+# 45-60 min per-cycle wall-clock. The daemon's rotation counter
+# in run-soak-daemon.sh switches LTP on/off via the per-workload
+# frequency attribute (memo phase-J-design-2026-05-07.md §2.7
+# open question — to be added at template-list expansion time).
+
+[instance]
+name = "soak-ltp-runner-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "2048M"   # LTP's mm + ipc stressors need headroom
+ncpus = 4
+
+[network]
+mode = "none"   # LTP runs we exercise don't need network
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+HOME = "/home/mjbommar"
+PATH = "/opt/ltp/testcases/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 5
+
+# Phase 2: kirk-driven LTP run.
+#
+# kirk invocation per LTP curation memo §4:
+#   --run-suite <suite>    : the curated suite name (or path to suite file)
+#   --skip-file <file>     : per-test deny-list (112 entries seeded by curation memo §3)
+#   --json-report <file>   : machine-readable verdict, parsed by the report phase
+#   --sut host             : run on the local (in-guest) host, not via SSH
+#
+# Wall-clock budget: 45 min target, 60 min hard kill. The
+# template's timeout_secs hands the daemon's per-iter timeout.
+[[init.phases]]
+name = "ltp-run"
+cmd = """
+cd /opt/kirk
+python3 ./kirk \
+    --sut host \
+    --run-suite {{SOAK_DIR}}/ltp-suite.txt \
+    --skip-file {{SOAK_DIR}}/ltp-skip.txt \
+    --json-report /tmp/ltp-report.json \
+    --verbose 2>&1 | tee /tmp/ltp-run.log
+echo LTP_RUN_RC=$?
+"""
+expect = ""
+timeout_secs = 3600   # 60 min hard kill per LTP curation memo §5
+
+# Phase 3: parse + emit verdict.
+#
+# Bridge from kirk's JSON output to the daemon's REPRO_DONE
+# convention. kirk's JSON has a top-level `tests` array; each
+# entry has `status` in {PASS, CONF, FAIL, BROK, …}. The bridge:
+#   - PASS or CONF (skipped-by-CONFIG) → counts as PASS
+#   - FAIL or BROK → counts as FAIL
+#   - Anything > X% FAIL of total → emit LTP_FAIL else LTP_OK
+#
+# The X% threshold for "soak it's a regression" vs "noise floor"
+# is a Phase J operational tuning knob; default 1% per LTP
+# curation memo §5. The kirk JSON is preserved at logs/ltp-
+# report-<run>.json for post-mortem regardless of verdict.
+[[init.phases]]
+name = "report"
+cmd = """
+python3 -c '
+import json, sys
+with open("/tmp/ltp-report.json") as f:
+    rep = json.load(f)
+tests = rep.get("tests", [])
+pass_n = sum(1 for t in tests if t.get("status") in ("PASS", "CONF"))
+fail_n = sum(1 for t in tests if t.get("status") in ("FAIL", "BROK"))
+total = len(tests)
+fail_pct = (fail_n * 100.0 / total) if total else 0.0
+print(f"LTP_SUMMARY tests={total} pass={pass_n} fail={fail_n} fail_pct={fail_pct:.2f}")
+if total == 0:
+    print("LTP_FAIL — empty result")
+    sys.exit(1)
+if fail_pct > 1.0:
+    print(f"LTP_FAIL — fail_pct {fail_pct:.2f}% > 1% threshold")
+    sys.exit(1)
+print("LTP_OK")
+'
+echo REPRO_DONE rc=$?
+"""
+expect = ""
+timeout_secs = 60
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500

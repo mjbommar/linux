@@ -1,0 +1,109 @@
+# umlctl Umlfile — FastAPI server hosted inside a UML guest.
+#
+# Inspired by docker-compose.yml: one declarative file describes
+# everything a workload needs to come up — kernel, network, ports,
+# volumes, env, init phases. `umlctl up -f fastapi.toml` does the
+# rest.
+#
+# What this Umlfile demonstrates:
+#   - Backend selection (seccomp, switchable to kvm-v2 once stable).
+#   - Auto-managed TAP device + NAT + port-forward (no hand-rolled
+#     iptables; `umlctl down` undoes it all).
+#   - tmpfs /etc + scripted /etc/resolv.conf so DNS works inside
+#     the guest without touching the host's symlinked resolv.conf.
+#   - Volume bind-mount of a pre-built venv (read-only by default).
+#   - Multi-phase init (echo a marker → start uvicorn).
+#
+# Usage:
+#   1. Pre-build a venv with the Python deps you want available
+#      inside the guest (run on the host, since uv handles the
+#      pypi resolution there):
+#
+#        uv venv $HOME/uml-venv --python 3.14
+#        uv pip install --python $HOME/uml-venv/bin/python \
+#            fastapi-slim uvicorn
+#
+#   2. Bring it up:
+#
+#        umlctl up -f tools/uml/uml-launcher/examples/fastapi.toml
+#
+#   3. Curl from the host (via the port-forward):
+#
+#        curl http://127.0.0.1:8765/
+#        curl http://127.0.0.1:8765/sum/100
+#
+#   4. Tear down:
+#
+#        umlctl down -f tools/uml/uml-launcher/examples/fastapi.toml
+#
+# To debug:
+#   umlctl logs fastapi-demo --tail 200
+#   umlctl dmesg fastapi-demo
+#   umlctl events fastapi-demo --follow
+#   umlctl up -f fastapi.toml --strace             # wrap UML in strace
+#   umlctl up -f fastapi.toml --gdb --gdb-port 5678 # remote-attach gdb
+
+schema_version = 1
+
+[instance]
+name = "fastapi-demo"
+labels = { service = "api", env = "dev", purpose = "umlctl-demo" }
+
+[kernel]
+# Path supports $HOME / ${UML_KERNEL} expansion. Kept generic so
+# this file ships in-tree without baking my dev paths.
+path = "${UML_KERNEL}"
+backend = "seccomp"
+# Extra raw cmdline args the launcher should pass through. The
+# `vec0:transport=tap,...` arg is auto-generated from the
+# [network] section.
+append = []
+
+[runtime]
+mem = "2048M"
+ncpus = 1
+
+[network]
+mode        = "tap"
+driver      = "vector"              # override with: --network-driver vector2
+# vector2 defaults host_mode="auto": umlctl opens launcher-owned TAP
+# fd(s) and passes them to vector2. Use --network-queues N for a fixed
+# multiqueue count, --network-queues auto to match [runtime].ncpus, or
+# --network-host-mode inproc for trusted comparisons.
+tap_name    = "uml-tap0"
+guest_ip    = "10.7.0.2/24"
+host_ip     = "10.7.0.1/24"
+gateway     = "10.7.0.1"
+nameservers = ["8.8.8.8", "1.1.1.1"]
+masquerade_via = "auto"             # autodetect host's default-route iface
+ports       = ["8765:8765/tcp"]     # host:guest[/proto]
+
+[[volumes]]
+src  = "${HOME}/uml-venv"
+dst  = "/opt/venv"
+mode = "ro"
+
+[env]
+HOME = "${HOME}"
+PATH = "/opt/venv/bin:/usr/bin:/bin:/sbin:/usr/sbin"
+
+# Phases run sequentially after networking + volumes are up.
+# Each is a single shell command; failures abort.
+[[init.phases]]
+name = "ready"
+cmd  = "echo BOOT-OK"
+
+[[init.phases]]
+name = "serve"
+cmd  = "/opt/venv/bin/python -m uvicorn --host 0.0.0.0 --port 8765 --app-dir /tmp app:app"
+# Note: the `app:app` import target needs an `app.py` somewhere
+# `--app-dir` can find. For the simplest demo, write one to
+# /tmp/app.py before running `umlctl up`. See the README for a
+# minimal example.
+
+[debug]
+strace = false
+gdb = false
+gdb_port = 5678
+log_dir = ""                        # default: ./logs/<instance-name>/
+keep_running_on_failure = false

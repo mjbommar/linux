@@ -1,0 +1,112 @@
+# umlctl Umlfile — run CPython's standard test suite inside UML.
+#
+# This is the canonical "is the kernel + backend + init env actually
+# usable for real Python workloads?" check. The host's distro Python
+# test suite is one of the most exhaustive workloads available — it
+# exercises subprocess, multiprocessing, threading, signals, sockets
+# (loopback), pty/devpts, /proc, /sys, asyncio, regrtest worker
+# processes, etc.
+#
+# What this Umlfile demonstrates / verifies:
+#   - umlctl's auto-init-script bring-up provides everything CPython
+#     needs out of the box: PATH/HOME/TERM/SHELL env, /proc, /sys,
+#     /dev/pts, /dev/shm, /tmp, and loopback up. (See
+#     tools/uml/uml-launcher/src/bin/umlctl/deploy.rs::render_init_script.)
+#   - regrtest's worker-process model (`python -m test -j N`) works
+#     because the env defaults give children a resolvable
+#     sys.executable.
+#   - Backend swap is a one-line change ([kernel].backend) — same
+#     workload runs unchanged under seccomp or kvm-v2.
+#
+# Usage:
+#
+#   # build the kernel (first time):
+#   make ARCH=um O=$HOME/src/uml-builds/uml-smp -j$(nproc)
+#
+#   # run with the default backend (seccomp):
+#   UML_KERNEL=$HOME/src/uml-builds/uml-smp/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/cpython-test.toml
+#
+#   # run with kvm-v2 (after editing [kernel].backend below):
+#   UML_KERNEL=$HOME/src/uml-builds/uml-smp/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/cpython-test.toml
+#
+#   umlctl logs cpython-test --tail 200
+#   umlctl down -f tools/uml/uml-launcher/examples/cpython-test.toml
+#
+# Performance reference (140-module subset, AMD Ryzen 7 7840HS, SMP):
+#   kvm-v2:  1m55s, 7107 tests, 1 transient ordering flake
+#   seccomp: 2m23s, 7108 tests, 0 transient flakes
+#   Both have 5 deterministic skips for missing-host-feature reasons
+#   (test_ensurepip needs python3-ensurepip; test_cmd is a parallel-
+#   worker race rare under both backends).
+
+schema_version = 1
+
+[instance]
+name = "cpython-test"
+labels = { workload = "cpython-test", purpose = "umlctl-validation" }
+
+[kernel]
+path = "${UML_KERNEL}"
+# Swap to "kvm-v2" to exercise the KVM-accelerated backend on
+# hosts with /dev/kvm available.
+backend = "seccomp"
+append = []
+
+[runtime]
+# 2 GB matches the regrtest --j2 worker memory needs comfortably.
+mem = "2048M"
+# Single guest CPU is fine — regrtest's parallelism is via worker
+# subprocesses, not threads. ncpus=4 also works (and exercises the
+# SMP backend code under v2) but doesn't speed up regrtest much.
+ncpus = 1
+
+[network]
+# No external networking needed — CPython test suite mostly avoids
+# net, and the few tests that bind sockets only need loopback.
+# umlctl brings lo up unconditionally regardless of mode (since
+# 0cc99f99b6dd), so this is fine.
+mode = "none"
+
+# No volumes needed: CPython is part of the host's hostfs root.
+
+[env]
+# Host /tmp is small (tmpfs); regrtest creates worker dirs at
+# /tmp/test_python_worker_NN. The init script tmpfs-mounts /tmp
+# already, so this just ensures regrtest finds its scratch.
+TMPDIR = "/tmp"
+# Pin random seed for reproducible runs (drop for fuzzing-style work).
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "smoke"
+cmd  = "python3 -c 'import sys; print(\"python\", sys.version); print(\"executable:\", repr(sys.executable))'"
+
+[[init.phases]]
+name = "cpython-test-curated"
+# A curated subset of ~30 stdlib modules: pure-CPU + memory, no
+# host-feature dependencies. Mirrors the cpython-parity gate
+# (tools/testing/selftests/um/cpython-parity/cpython-parity.sh)
+# but uses python -m test for the worker-process model.
+cmd  = """
+mkdir -p /tmp/cpython-out && cd /tmp/cpython-out && \
+python3 -m test --quiet -j2 --timeout=120 \
+  test_struct test_math test_int test_float test_complex \
+  test_bytes test_string test_list test_tuple test_dict test_set \
+  test_bisect test_array test_heapq test_collections \
+  test_itertools test_functools test_operator test_typing test_abc \
+  test_decimal test_fractions test_hashlib \
+  test_zlib test_re test_io test_docxmlrpc test_external_inspection \
+  test_ioctl
+"""
+
+[[init.phases]]
+name = "report"
+cmd  = "echo CPYTHON_TEST_DONE rc=$?"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false

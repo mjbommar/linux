@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# um/template-pause-pool-sustained-smoke — N-member sustained
+# pool dispatch.
+#
+# Currently EXPECTED TO FAIL on iter 2.  Documents the actual
+# crash signature so the next session has a regression fingerprint
+# to fix against.
+#
+# Exit codes:
+#   0   PASS — N members all reached MEMBER_DONE (NOT YET ACHIEVABLE)
+#   4   SKIP — kernel binary missing, OR iter 1 PASS + iter 2+
+#              hits the architectural limit: UML's physmem_fd is
+#              MAP_SHARED across forked UML kernels; iter 1's
+#              userspace writes to bash's heap propagate to
+#              iter 2 via shared backing, causing bash mis-replay.
+#              Fix requires per-pool-member physmem_fd (wholesale
+#              UML refactor) or userspace page snapshot/restore.
+#              Tracked in state-audit/32.
+#   1   FAIL — iter 1 itself broke (regression in pool-member entry).
+
+set -u
+
+KERNEL=${UML_BINARY:-$HOME/src/uml-builds/uml-tplpause-fork/linux}
+N=3
+
+if [ ! -x "$KERNEL" ]; then
+	echo "SKIP: UML binary $KERNEL not found"
+	exit 4
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "SKIP: python3 required"
+	exit 4
+fi
+
+OUT=$(mktemp -d -t template-pause-pool-sustained-smoke.XXXXXX)
+trap 'rm -rf "$OUT"' EXIT
+
+cat >"$OUT/init.sh" <<'IEOF'
+#!/bin/sh
+mount -t proc proc /proc 2>/dev/null
+echo SUSTAINED_PRE_PAUSE pid=$$
+echo fork-smoke > /proc/um/template_pause
+echo SUSTAINED_POST_PAUSE pid=$$ rc=$?
+echo SUSTAINED_MEMBER_DONE pid=$$
+exit 0
+IEOF
+chmod +x "$OUT/init.sh"
+
+PYRC=0
+python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" "$N" <<'PYEOF' || PYRC=$?
+import ctypes, ctypes.util, fcntl, os, signal, struct, sys, time
+
+kernel, init_path, log_path, n_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+N = int(n_str)
+
+def Z(b, n): return b.ljust(n, b'\x00')[:n]
+def make_blob(idx):
+    return struct.pack(
+        "<II 64s 6s 2s 16s 20s 16s 96s 32s",
+        0x44495455, 1,
+        Z(f"pool-member-{idx}".encode(), 64),
+        bytes([0x52, 0x54, 0x00, idx, 0xb2, 0x01]),
+        b"\x00\x00",
+        Z(f"tap-pool-{idx}".encode(), 16),
+        Z(f"10.7.0.{40+idx}/24".encode(), 20),
+        Z(b"10.7.0.1", 16),
+        Z(b"", 96), b"\x00" * 32,
+    )
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+fd = libc.memfd_create(b"um-pool-sustained", 0x0001)
+os.ftruncate(fd, 264)
+os.lseek(fd, 0, 0); os.write(fd, make_blob(1))
+os.lseek(fd, 260, 0); os.write(fd, b"\x00" * 4)
+flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+fcntl.fcntl(fd, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+libc.prctl(36, 1, 0, 0, 0)
+
+env = dict(os.environ, UM_TEMPLATE_IDENTITY_FD=str(fd))
+log = open(log_path, "wb")
+pid = os.fork()
+if pid == 0:
+    os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
+    os.execve(kernel, ["linux", "mem=128M", "rootfstype=hostfs",
+                       "rootflags=/", "root=/dev/root", "rw", "ncpus=1",
+                       "um_template_pause=fork",
+                       "um_template_pause_pool_member=1",
+                       f"init={init_path}"], env)
+    os._exit(127)
+
+def state(p):
+    try:
+        with open(f"/proc/{p}/status") as fh:
+            for ln in fh:
+                if ln.startswith("State:"):
+                    return ln.split()[1]
+    except FileNotFoundError: return "X"
+    return "?"
+
+def wait_state(p, want, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        s = state(p)
+        if s == want or s == "X": return s
+        time.sleep(0.05)
+    return state(p)
+
+def count_done():
+    try:
+        with open(log_path, errors="replace") as fh:
+            return fh.read().count("SUSTAINED_MEMBER_DONE")
+    except FileNotFoundError: return 0
+
+prev = 0
+for i in range(1, N+1):
+    s = wait_state(pid, "T", 15)
+    if s != "T":
+        print(f"iter {i}: master state {s}, abort")
+        break
+    if i < N:
+        os.lseek(fd, 0, 0); os.write(fd, make_blob(i+1))
+    os.kill(pid, signal.SIGCONT)
+    end = time.time() + 20
+    while time.time() < end:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]: pass
+        except ChildProcessError: pass
+        c = count_done()
+        if c > prev:
+            prev = c
+            print(f"iter {i}: MEMBER_DONE total={c}")
+            break
+        time.sleep(0.2)
+    else:
+        print(f"iter {i}: TIMEOUT")
+        break
+    time.sleep(0.5)
+
+if state(pid) not in ("X", "?"):
+    os.kill(pid, signal.SIGKILL)
+    try: os.waitpid(pid, 0)
+    except ChildProcessError: pass
+
+with open(log_path, errors="replace") as fh:
+    content = fh.read()
+
+done = content.count("SUSTAINED_MEMBER_DONE")
+panic = "Kernel panic" in content
+ceiling = "um_template_pause_enter+0xf" in content
+
+print(f"SUSTAINED_MEMBER_DONE : {done}")
+print(f"Kernel panic          : {panic}")
+print(f"v1 ceiling regression : {ceiling}")
+
+# Honest verdict:
+if ceiling:
+    print("FAIL: v1 ceiling regressed")
+    sys.exit(1)
+if done < 1:
+    print("FAIL: iter 1 broken (regression in pool-member entry)")
+    sys.exit(1)
+if done >= N and not panic:
+    print(f"PASS: {done}/{N} pool members reached MEMBER_DONE")
+    sys.exit(0)
+# Iter 1 worked but subsequent iters crashed — expected today.
+print(f"XFAIL: iter 1 PASS, iter 2+ hits MAP_SHARED physmem limit")
+print("       — bash userspace pages shared across forked UML")
+print("       kernels.  Needs per-member physmem_fd refactor.")
+print("       Tracked in state-audit/32.")
+sys.exit(4)
+PYEOF
+
+case $PYRC in
+0) exit 0;;
+4) exit 4;;
+*) exit 1;;
+esac

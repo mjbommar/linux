@@ -1,0 +1,159 @@
+schema_version = 1
+volumes = []
+
+# Phase J Tier 3 — Django loopback HTTP server.
+# Spec: phase-J-design-2026-05-07.md §3.3 + phase-J-tier3-
+# design-2026-05-14.md §7.1.
+#
+# Operator pre-flight (ONE-TIME, NOT yet done at landing):
+#   1. apt-get install python3-django (or `uv` venv with django)
+#   2. Rebuild the kernel with CONFIG_UML_NET_VECTOR=y:
+#        cd ~/src/uml-builds/uml-smp-t41fix
+#        ./scripts/config --enable CONFIG_UML_NET_VECTOR
+#        make ARCH=um O=$(pwd) olddefconfig -j
+#        make ARCH=um O=$(pwd) -j
+#      Verify: grep CONFIG_UML_NET_VECTOR=y .config
+#   3. Set up host-side iptables NAT for tap (umlctl handles
+#      this automatically when [network] mode = "tap").
+#
+# Daemon-side IP allocation (per memo §6.1): the soak daemon
+# substitutes {{WORKER_IDX}} + per-worker /30 IPs from
+# 192.168.42.0/24. Tier 3 spawns N `--workers 1` umlctl gate
+# loop invocations rather than one `--workers N` — the
+# `gate_loop.rs:253-277` worker-fanout doesn't rewrite network
+# sections per worker, so we sidestep by per-worker compilation.
+
+[instance]
+name = "soak-tier3-django-{{BACKEND}}-w{{WORKER_IDX}}"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+# 1024M headroom — first live smoke at mem=768M tripped a
+# swapper page allocation failure (order:0) during guest boot
+# under the deferred-physmem-memslot v2 path. Bumping to 1024M
+# leaves room for the Django + cryptography import set plus the
+# kvm-v2 vCPU pool's pinned overhead.
+mem = "1024M"
+ncpus = 2
+
+[network]
+mode = "tap"
+driver = "{{NETWORK_DRIVER}}"
+tap_name = "{{TAP_NAME}}"
+guest_ip = "{{GUEST_IP}}"
+host_ip = "{{HOST_IP}}"
+gateway = "{{HOST_IP_PLAIN}}"
+nameservers = []
+masquerade_via = "auto"
+ports = []
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+HOME = "/home/mjbommar"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 5
+
+# Phase 2: bring up the Django server in background; wait for socket-up.
+# The `expect = "SERVER_READY"` blocks the gate-loop wait-for until
+# the marker prints; the host-side curl battery (run-soak-daemon.sh)
+# can then probe http://{{GUEST_IP_PLAIN}}:8080/health.
+[[init.phases]]
+name = "django-up"
+cmd = """
+cd /tmp && cat > tier3-django-app.py <<'PY'
+import http.server, json
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            body = json.dumps({"ok": True}).encode()
+            self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        else:
+            self.send_error(404)
+    def log_message(self, *a, **kw):
+        pass
+http.server.HTTPServer(('0.0.0.0', 8080), H).serve_forever()
+PY
+python3 /tmp/tier3-django-app.py >/tmp/django.log 2>&1 &
+echo $! > /tmp/django.pid
+dump_server_log() {
+    echo DJANGO_LOG_BEGIN
+    cat /tmp/django.log 2>/dev/null || true
+    echo DJANGO_LOG_END
+}
+dump_kvm_v2_trace() {
+    mkdir -p /sys/kernel/debug 2>/dev/null || true
+    grep -q ' /sys/kernel/debug ' /proc/mounts 2>/dev/null ||
+        mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    if [ -w /sys/kernel/debug/um_kvm_v2_trace/dump ]; then
+        echo KVM_V2_TRACE_DUMP_BEGIN
+        echo 1 > /sys/kernel/debug/um_kvm_v2_trace/dump 2>/dev/null || true
+        dmesg | grep 'KVMV2T' | tail -n 400 2>/dev/null || true
+        echo KVM_V2_TRACE_DUMP_END
+    fi
+}
+port_ready() {
+python3 - <<'PY'
+import socket, sys
+s = socket.socket()
+s.settimeout(0.2)
+try:
+    s.connect(("127.0.0.1", 8080))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+for i in $(seq 1 60); do
+    port_ready && break
+    sleep 0.5
+done
+port_ready || { dump_server_log; dump_kvm_v2_trace; echo SERVER_FAIL; exit 1; }
+echo SERVER_READY
+"""
+expect = "SERVER_READY"
+timeout_secs = 45
+
+# Phase 3: in-guest self-test — 100 serial requests to /health.
+[[init.phases]]
+name = "guest-curl"
+cmd = """
+ok=0; fail=0
+for i in $(seq 1 100); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' \
+        http://127.0.0.1:8080/health)
+    if [ "$code" = "200" ]; then ok=$((ok+1));
+    else fail=$((fail+1)); fi
+done
+echo "GUEST_CURL ok=$ok fail=$fail"
+[ "$fail" -eq 0 ] && echo TIER3_OK || (echo TIER3_FAIL; exit 1)
+"""
+expect = ""
+timeout_secs = 30
+
+# Phase 4: shutdown server, drain logs.
+[[init.phases]]
+name = "shutdown"
+cmd = """
+kill $(cat /tmp/django.pid) 2>/dev/null || true
+sleep 1
+echo REPRO_DONE rc=$?
+"""
+expect = ""
+timeout_secs = 10
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500

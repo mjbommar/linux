@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# L3: full substrate gate (class-a-env + class-b-process +
+# class-c-syscall + class-d-structural).
+#
+# Wraps run-regrtest-repros.sh, which boots a UML kernel with the
+# repro harness as init=, walks every per-class runner, and emits one
+# `REPRO: <name> PASS|FAIL|EXPECTED_FAIL` line per test plus a
+# SUMMARY trailer. We count from the per-test lines so a single
+# missing-summary doesn't silently zero the gate.
+#
+# Backend selection: {{backend}} flows into the harness's BACKEND
+# env, which forwards it as `backend=force=<name>` on the cmdline.
+# {{kernel}} is the absolute path to the UML kernel binary.
+#
+# Thresholds reflect the CURRENT LINE, not a target.
+#   - seccomp: PASS=25 FAIL=3 EXPECTED_FAIL=3 (memo 26 §E.4)
+#   - kvm-v2:  the PASS count varies by phase; today the class-a-env
+#              subset is 6, with #95/#96 still open for class-b/c/d.
+# A single threshold pair has to cover both backends, so we set the
+# floor at the WORSE backend's current PASS count and the ceiling at
+# the BETTER backend's FAIL tolerance. That gives v2 a hard "don't
+# regress past 6" floor and seccomp a softer one (it's currently
+# 25 — any drop is still a PASS-delta in `umlctl gate diff`).
+#
+# Loosening either threshold requires a memo entry citing the reason
+# (memo 30-gate-discipline.md §"the carve-out rule"). Tightening as
+# v2 catches up to seccomp is just progress — bump min_pass.
+
+schema_version = 1
+
+[gate]
+name = "regrtest-substrate"
+description = "Substrate gate: all 4 reproducer classes via run-regrtest-repros.sh"
+phase = "E.4"
+
+[run]
+cmd = "bash tools/testing/selftests/um/regrtest-repros/run-regrtest-repros.sh"
+budget_sec = 240
+
+[run.env]
+UML_BINARY = "{{kernel}}"
+BACKEND    = "{{backend}}"
+TIMEOUT    = "120"
+# VERBOSE=1 dumps the entire kernel boot log alongside REPRO: lines;
+# default off so the parse layer only sees PASS/FAIL/EXPECTED_FAIL
+# markers. Set VERBOSE=1 ad-hoc when debugging a specific run.
+
+[parse]
+pass_regex          = "^REPRO: \\S+ PASS"
+fail_regex          = "^REPRO: \\S+ FAIL"
+expected_fail_regex = "^REPRO: \\S+ EXPECTED_FAIL"
+
+[thresholds]
+# Worst-backend (kvm-v2 substrate) floor. Pre-TLB-fix line was
+# PASS=4..9 mode=4. Post-TLB-fix at 11102c8176fb + 3d426c4cb0c7
+# the line is PASS=5..10 with mode=5. Threshold 5 reflects the
+# CURRENT floor — regressions below 5 surface as gate FAILs.
+min_pass  = 5
+# seccomp's current line; v2 is allowed to ride at this ceiling
+# until #95/#96 close.
+max_fail  = 3
+# The harness exits 1 whenever FAIL>0; that's already captured by
+# max_fail. A boot-level failure (kernel panic, OOM) still shows up
+# as pass=0 which fails min_pass.
+require_clean_exit = false

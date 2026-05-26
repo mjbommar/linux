@@ -1,0 +1,73 @@
+schema_version = 1
+volumes = []
+
+[instance]
+name = "soak-tier2-uv-pylibs-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+mem = "1536M"   # uv venv setup + numpy + pendulum can spike to ~ 800 MB; +slack
+ncpus = 4
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+HOME = "/home/mjbommar"
+
+# Phase J Tier 2 — pre-built venv Python C-extension exercise.
+# Spec: phase-J-design-2026-05-07.md §3.2 (post-uv-swap).
+#
+# Originally designed around `uv run --with <pkg>` per invocation,
+# but uv's offline resolver was unreliable inside UML (the simple
+# index walk back through historic versions didn't always find
+# cached wheels). Switched to a pre-built persistent venv: `uv
+# venv` + `uv pip install` once on the host produces a ~ 70 MB
+# self-contained venv at ~/.cache/uml-soak-tier2-venv. The
+# template invokes that venv's `python` directly — no resolver
+# work, no network, no cache traversal at run time.
+#
+# The #17 numpy-after-cryptography import-chain pathology is
+# sidestepped by-construction: this venv doesn't include
+# cryptography (that's Tier 1's territory), so the trigger sequence
+# never fires. If a future Tier 2 ever needs both, run them as
+# separate Python invocations OR install cryptography in this same
+# venv and verify the import order from a clean venv works.
+#
+# Bootstrap (one-time, host-side; documented in soak/README.md):
+#
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
+#   uv venv ~/.cache/uml-soak-tier2-venv
+#   uv pip install --python ~/.cache/uml-soak-tier2-venv/bin/python \
+#                   httpx pyyaml pendulum numpy
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 0
+
+[[init.phases]]
+name = "tier2-uv-pylibs"
+cmd = "cd /tmp && /home/mjbommar/.cache/uml-soak-tier2-venv/bin/python {{SOAK_DIR}}/tier2-uv-smoketest.py && echo TIER2_OK || (echo TIER2_FAIL; exit 1)"
+expect = ""
+timeout_secs = 120
+
+[[init.phases]]
+name = "report"
+cmd = "echo REPRO_DONE rc=$?"
+expect = ""
+timeout_secs = 0
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500

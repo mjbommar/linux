@@ -1,0 +1,96 @@
+# umlbuild profile — "sandbox": safe enough to run untrusted code.
+#
+# Builds on top of `mvp`: same tinyconfig + the kernel knobs needed to
+# make Python actually useful (loopback networking, a writable tmpfs
+# overlay at /tmp + /home, devpts for subprocess pty, real /dev/random
+# entropy).  The host UML process can still be cgroup-bounded by the
+# operator before launch; nothing inside the guest can break out of
+# the kernel-as-process boundary.
+#
+# Differences from mvp:
+#   - sandbox_uid = 1000  (init drops to non-root before exec'ing)
+#   - +NET +INET +UNIX +PACKET   (loopback + AF_UNIX subprocess pipes)
+#   - +TMPFS_POSIX_ACL +OVERLAY_FS  (writable overlay over read-only image)
+#   - +CONFIG_RANDOM            (real /dev/urandom)
+#   - ca-certificates + python3-pip in the rootfs
+#   - 500 MB image (enough room for pip-installed deps)
+#
+# Estimated stripped kernel: ~6 MB (vs mvp's ~3 MB).
+
+schema_version = 1
+
+[profile]
+name        = "sandbox"
+description = "Safe-enough UML for untrusted Python: tmpfs overlay, loopback, no host fs access."
+
+[kernel]
+base_config = "tinyconfig"
+enable = [
+    # --- mvp baseline ---
+    "64BIT",
+    "PRINTK",
+    "NULL_CHAN",
+    "HOSTFS",
+    "BINFMT_ELF",
+    "BINFMT_SCRIPT",
+    "PROC_FS",
+    "UM_WORKER_PROCESS",
+    "STDERR_CONSOLE",
+    "FUTEX",
+    "BLOCK",
+    "BLK_DEV_UBD",
+    "EXT4_FS",
+    "JBD2",
+    "DEVTMPFS",
+    "DEVTMPFS_MOUNT",
+    "TMPFS",
+    "SHMEM",
+    "UNIX98_PTYS",
+    "DEVPTS_FS",
+    "FILE_LOCKING",       # flock/F_SETLK/F_SETLKW — Python test_fcntl
+    # --- sandbox additions ---
+    # Loopback networking + AF_UNIX so Python's subprocess + socket
+    # modules actually work.  No external NIC; no TAP.
+    "NET",
+    "INET",
+    "UNIX",
+    "PACKET",
+    # Overlay filesystem so the guest's /home and /tmp can be writable
+    # without persisting through reboot.
+    "OVERLAY_FS",
+    # Real entropy.
+    "HW_RANDOM",
+    # eventfd / timerfd / signalfd / epoll — Python asyncio needs these.
+    "EVENTFD",
+    "TIMERFD",
+    "SIGNALFD",
+    "EPOLL",
+]
+disable = []
+strip = true
+
+[rootfs]
+base         = "alpine"
+sandbox_uid  = 1000
+
+[rootfs.alpine]
+version  = "3.20.3"
+sha256   = "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
+mirror   = "https://dl-cdn.alpinelinux.org/alpine"
+packages = [
+    "python3",
+    "py3-pip",
+    "busybox-extras",
+    "ca-certificates",
+]
+
+[image]
+size   = "500M"
+fstype = "ext4"
+label  = "uml-sandbox"
+
+[instance]
+mem         = "512M"
+ncpus       = 1
+backend     = "seccomp"
+sandbox_cmd = "python3 -c 'import sys, socket, ssl, json; s = socket.socket(); s.bind((\"127.0.0.1\", 0)); print(\"sandbox:\", sys.version.split()[0], \"port\", s.getsockname()[1], \"ssl\", ssl.OPENSSL_VERSION.split()[1])'"

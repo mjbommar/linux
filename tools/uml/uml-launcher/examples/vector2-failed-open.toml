@@ -1,0 +1,131 @@
+# umlctl Umlfile - vector2 live failed-open injection.
+#
+# This is the runtime counterpart to the vector2 open-unwind KUnit
+# tests. The generated init script performs the initial network bring-up
+# successfully, then this workload drives a real second `ndo_open()`
+# through `ip link set up` and verifies that the injected failure leaves
+# the device closed and registered.
+#
+# Usage:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl gate loop -f tools/uml/uml-launcher/examples/vector2-failed-open.toml \
+#       -W 1 -M 1 --timeout 180 \
+#       --pass-marker VECTOR2_FAILED_OPEN_OK \
+#       --fail-marker 'VECTOR2_FAILED_OPEN_.*(FAIL|UNEXPECTED|MISSING|BAD)|VERIFY_FAIL|kernel BUG|Kernel panic|BUG:|WARNING:|KCSAN:|data-race'
+#
+# Inspect first:
+#   UML_KERNEL=/path/to/uml/linux \
+#     umlctl up -f tools/uml/uml-launcher/examples/vector2-failed-open.toml --dry-run
+
+schema_version = 1
+
+[instance]
+name = "vector2-failed-open"
+labels = { service = "network-lifecycle", driver = "vector2", transport = "fd", fault = "fail-open-after-2" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "512M"
+ncpus = 2
+
+[network]
+mode = "tap"
+driver = "vector2"
+host_mode = "auto"
+queues = 1
+fail_open_after = 2
+tap_name = "v2failopen0"
+guest_ip = "10.95.0.2/24"
+host_ip = "10.95.0.1/24"
+gateway = "10.95.0.1"
+nameservers = ["8.8.8.8", "1.1.1.1"]
+masquerade_via = "auto"
+ports = []
+
+[env]
+PATH = "/usr/bin:/bin:/sbin:/usr/sbin"
+
+[[init.phases]]
+name = "network-metadata"
+cmd = "env | grep '^UMLCTL_NETWORK_' | sort; echo UMLCTL_NETDEV=$UMLCTL_NETDEV"
+
+[[init.phases]]
+name = "gateway-before"
+cmd = "ping -c 3 \"$UMLCTL_GATEWAY\""
+timeout_secs = 20
+
+[[init.phases]]
+name = "failed-open"
+timeout_secs = 60
+cmd = """
+set -eu
+dev="$UMLCTL_NETDEV"
+command -v ethtool >/dev/null 2>&1 || {
+  echo "VECTOR2_FAILED_OPEN_MISSING_ETHTOOL"
+  exit 1
+}
+get_stat() {
+  ethtool -S "$dev" 2>/dev/null |
+    sed -n "s/^[[:space:]]*$1:[[:space:]]*//p" |
+    tail -n 1
+}
+before_open="$(get_stat open_attempts)"
+before_fail="$(get_stat open_failures)"
+before_close="$(get_stat closes)"
+before_state="$(get_stat lifecycle_state)"
+if [ -z "$before_open" ] || [ -z "$before_fail" ] || [ -z "$before_close" ] || [ -z "$before_state" ]; then
+  echo "VECTOR2_FAILED_OPEN_MISSING_COUNTERS before_open=$before_open before_fail=$before_fail before_close=$before_close before_state=$before_state"
+  ethtool -S "$dev" || true
+  exit 1
+fi
+if [ "$before_state" -ne 4 ]; then
+  echo "VECTOR2_FAILED_OPEN_BAD_INITIAL_STATE state=$before_state"
+  ethtool -S "$dev" || true
+  exit 1
+fi
+ip link set "$dev" down || {
+  echo "VECTOR2_FAILED_OPEN_DOWN_FAIL"
+  exit 1
+}
+if ip link set "$dev" up; then
+  echo "VECTOR2_FAILED_OPEN_UNEXPECTED_SUCCESS"
+  ethtool -S "$dev" || true
+  exit 1
+fi
+after_open="$(get_stat open_attempts)"
+after_fail="$(get_stat open_failures)"
+after_close="$(get_stat closes)"
+after_state="$(get_stat lifecycle_state)"
+if [ -z "$after_open" ] || [ -z "$after_fail" ] || [ -z "$after_close" ] || [ -z "$after_state" ]; then
+  echo "VECTOR2_FAILED_OPEN_MISSING_COUNTERS after_open=$after_open after_fail=$after_fail after_close=$after_close after_state=$after_state"
+  ethtool -S "$dev" || true
+  exit 1
+fi
+open_delta=$((after_open - before_open))
+fail_delta=$((after_fail - before_fail))
+close_delta=$((after_close - before_close))
+if [ "$open_delta" -ne 1 ] || [ "$fail_delta" -ne 1 ] || [ "$close_delta" -ne 1 ] || [ "$after_state" -ne 2 ]; then
+  echo "VECTOR2_FAILED_OPEN_BAD_COUNTERS open_delta=$open_delta fail_delta=$fail_delta close_delta=$close_delta before_state=$before_state after_state=$after_state before_open=$before_open after_open=$after_open before_fail=$before_fail after_fail=$after_fail before_close=$before_close after_close=$after_close"
+  ethtool -S "$dev" || true
+  ip -d link show "$dev" || true
+  exit 1
+fi
+echo "VECTOR2_FAILED_OPEN_COUNTERS open_delta=$open_delta fail_delta=$fail_delta close_delta=$close_delta before_state=$before_state after_state=$after_state before_open=$before_open after_open=$after_open before_fail=$before_fail after_fail=$after_fail before_close=$before_close after_close=$after_close"
+ethtool -S "$dev"
+ip -d link show "$dev"
+"""
+
+[[init.phases]]
+name = "ready"
+cmd = "echo VECTOR2_FAILED_OPEN_OK"
+
+[debug]
+strace = false
+gdb = false
+gdb_port = 5678
+log_dir = ""
+keep_running_on_failure = false

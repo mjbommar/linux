@@ -1,0 +1,69 @@
+# umlbuild profile — "dev": full-featured UML for ergonomic development.
+#
+# Starts from arch/um/configs/base_defconfig (the same config the rest
+# of the project's `make ARCH=um` builds use), and just builds a
+# ubd-rooted Alpine instance on top.  No Kconfig hand-tuning: if the
+# upstream defconfig works for everyone, it works here.
+#
+# This is the profile to reach for when you want to *develop* something
+# inside a UML guest (compiling a hostfs-shared workspace, running
+# kselftest, attaching gdb to a process) rather than benchmark
+# minimum size.
+#
+# Estimated stripped kernel: ~90 MB (vs mvp's ~3 MB).  Trade: 30x
+# bigger binary, but every Kconfig you'd want is on.
+
+schema_version = 1
+
+[profile]
+name        = "dev"
+description = "Development UML: base_defconfig + Alpine rootfs with gcc/git/strace."
+
+[kernel]
+base_config = "base_defconfig"
+enable = []
+disable = []
+strip   = true
+
+[rootfs]
+base         = "alpine"
+sandbox_uid  = 0   # dev profile stays root inside — you're debugging.
+
+[rootfs.alpine]
+version  = "3.20.3"
+sha256   = "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
+mirror   = "https://dl-cdn.alpinelinux.org/alpine"
+packages = [
+    # Languages + interpreters.
+    "python3",
+    "py3-pip",
+    "bash",
+    # Build tools (for `cargo install`, `pip install`, `make` in
+    # hostfs-shared dirs).
+    "gcc",
+    "musl-dev",
+    "make",
+    "git",
+    # Debug + introspection.
+    "strace",
+    "ltrace",
+    "gdb",
+    "vim",
+    # Common admin utilities.
+    "curl",
+    "ca-certificates",
+    "tar",
+    "xz",
+    "busybox-extras",
+]
+
+[image]
+size   = "2G"
+fstype = "ext4"
+label  = "uml-dev"
+
+[instance]
+mem         = "2048M"
+ncpus       = 2
+backend     = "seccomp"
+sandbox_cmd = "python3 -c 'import sys, platform; print(\"dev:\", platform.uname()); print(\"py:\", sys.version)' && /bin/sh -c 'echo hello from dev && uname -a && gcc --version | head -1'"

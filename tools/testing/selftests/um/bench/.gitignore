@@ -1,0 +1,3 @@
+# Per-run captures from run-bench.sh and the host-side bundle wrappers.
+logs/
+*.jsonl

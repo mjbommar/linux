@@ -1,0 +1,58 @@
+# Repro: parallel fork+exec from two threads, see if the SMP-T36-class
+# UML mm-counter / deferred-free race fires when two mm teardowns happen
+# concurrently.  Smaller than running regrtest -j2.
+schema_version = 1
+
+[instance]
+name = "parallel-segv-repro"
+labels = { workload = "parallel-segv-repro" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "2048M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "parallel-repro"
+cmd = """
+cd /tmp && python3 -c '
+import os, sys, threading, time
+# Two threads each repeatedly fork+exec /bin/true.  Mimics what regrtest -j2
+# does with test_multiprocessing_spawn running parallel test_threads.
+def hammer(label, n):
+    for i in range(n):
+        pid = os.fork()
+        if pid == 0:
+            os.execv("/bin/true", ["/bin/true"])
+        os.waitpid(pid, 0)
+    print(f"thread {label}: done {n} fork+exec cycles")
+N = 200
+t1 = threading.Thread(target=hammer, args=("A", N))
+t2 = threading.Thread(target=hammer, args=("B", N))
+t0 = time.time()
+t1.start(); t2.start()
+t1.join(); t2.join()
+print(f"DONE in {time.time()-t0:.1f}s; survived 2 * {N} = {2*N} concurrent fork+exec")
+'
+"""
+
+[[init.phases]]
+name = "report"
+cmd = "echo PARALLEL_REPRO_DONE rc=$?"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false

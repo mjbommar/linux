@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# bench-py — canned Python workload exercising the four syscall
+# classes that diverge most between UML backends:
+#   1. CPU+mm: hashlib.sha256 over 8 MiB (no syscalls in hot loop)
+#   2. fs:     200× (open/write/close/stat) + 200× (open/read/close)
+#              in tmpfs
+#   3. trap:   20000× os.getpid() (bare syscall)
+#   4. fd:     100× (socketpair + close-both) — fd lifecycle
+#
+# Tier budget: <30 s for SAMPLES=5 + WARMUP=1. Each section runs
+# in ~1 s on a modern host. Median over samples is the comparison
+# cell.
+
+schema_version = 1
+
+[instance]
+name = "bench-py"
+
+[kernel]
+path    = "${UML_KERNEL}"
+backend = "BENCH_BACKEND_PLACEHOLDER"
+append  = []
+
+[runtime]
+mem    = "256M"
+ncpus  = 1
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+BENCH_SAMPLES = "5"
+BENCH_WARMUP  = "1"
+
+[[init.phases]]
+name = "bench"
+cmd  = "python3 ${BENCH_DIR}/bench-py.py"
+
+[[init.phases]]
+name = "bench_done"
+cmd  = "echo BENCH_RUN_DONE"

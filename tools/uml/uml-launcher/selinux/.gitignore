@@ -1,0 +1,7 @@
+# Build artifacts produced by
+#   make -f /usr/share/selinux/devel/Makefile uml_launcher.pp
+# The .pp is the compiled binary policy module (installed via
+# `semodule -i`); keep it out of source control and rebuild
+# on demand.
+uml_launcher.pp
+tmp/

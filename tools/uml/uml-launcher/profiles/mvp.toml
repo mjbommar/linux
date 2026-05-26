@@ -1,0 +1,81 @@
+# umlbuild profile — "mvp": the minimum-viable UML.
+#
+# Derived from the 2026-05-23-minimum-viable-uml diary: starting from
+# `tinyconfig`, eleven explicit Kconfig flips produce a 2.4 MB stripped
+# UML binary that boots through hostfs and runs cpython-tier0.
+#
+# This profile additionally builds a tiny Alpine-based ubd rootfs so
+# the resulting instance boots from /dev/ubda (not hostfs).  Total
+# instance footprint: ~3 MB kernel + ~30 MB image = ~33 MB.
+
+schema_version = 1
+
+[profile]
+name        = "mvp"
+description = "Minimum viable UML (2.4 MB kernel, Alpine 3.20 + python3, ubd-rooted)."
+
+# ---------------------------------------------------------------------
+# Kernel: tinyconfig + 11 forced enables (each one is required by a
+# specific boot failure documented in the diary).
+# ---------------------------------------------------------------------
+[kernel]
+base_config = "tinyconfig"
+enable = [
+    "64BIT",
+    "PRINTK",
+    "NULL_CHAN",
+    "HOSTFS",
+    "BINFMT_ELF",
+    "BINFMT_SCRIPT",
+    "PROC_FS",
+    "UM_WORKER_PROCESS",
+    "STDERR_CONSOLE",
+    "FUTEX",
+    # Needed to mount /dev/ubda as root:
+    "BLOCK",
+    "BLK_DEV_UBD",
+    "EXT4_FS",
+    # EXT4 selects JBD2 + BUFFER_HEAD + CRC16/32 + FS_IOMAP, but be
+    # explicit so we notice if a Kconfig refactor breaks selection.
+    "JBD2",
+    # Needed by Alpine's /sbin/init helpers + busybox:
+    "DEVTMPFS",
+    "DEVTMPFS_MOUNT",
+    "TMPFS",
+    "SHMEM",
+    "UNIX98_PTYS",
+    "DEVPTS_FS",
+    "FILE_LOCKING",       # flock/F_SETLK/F_SETLKW — Python test_fcntl
+]
+disable = []
+strip   = true
+
+# ---------------------------------------------------------------------
+# Rootfs: Alpine minirootfs + python3.
+# ---------------------------------------------------------------------
+[rootfs]
+base         = "alpine"
+sandbox_uid  = 0    # mvp stays root inside the guest; sandbox profile drops to 1000
+
+[rootfs.alpine]
+version  = "3.20.3"
+sha256   = "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c"
+mirror   = "https://dl-cdn.alpinelinux.org/alpine"
+packages = ["python3", "busybox-extras"]
+
+# ---------------------------------------------------------------------
+# Image: 200 MB ext4 is comfortable for a python-only sandbox.
+# ---------------------------------------------------------------------
+[image]
+size   = "200M"
+fstype = "ext4"
+label  = "uml-mvp"
+
+# ---------------------------------------------------------------------
+# Default instance shape (baked into the emitted Umlfile.toml).
+# ---------------------------------------------------------------------
+[instance]
+mem         = "256M"
+ncpus       = 1
+backend     = "seccomp"
+sandbox_cmd = "python3 -c 'import sys, hashlib; print(\"mvp:\", sys.version.split()[0], hashlib.sha256(b\"hello\").hexdigest())'"

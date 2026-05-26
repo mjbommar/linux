@@ -1,0 +1,44 @@
+## <summary>UML host launcher + vhost-user backend supervisor.</summary>
+
+########################################
+## <summary>
+##      Execute uml-launcher in the uml_launcher_t domain.
+##      Use this interface when a caller domain legitimately
+##      launches uml-launcher on behalf of a user or service.
+## </summary>
+## <param name="domain">
+##      <summary>
+##              Domain allowed to transition.
+##      </summary>
+## </param>
+#
+interface(`uml_launcher_domtrans',`
+        gen_require(`
+                type uml_launcher_t, uml_launcher_exec_t;
+        ')
+
+        corecmd_search_bin($1)
+        domtrans_pattern($1, uml_launcher_exec_t, uml_launcher_t)
+')
+
+########################################
+## <summary>
+##      Run uml-launcher in its own domain and allow the
+##      caller to signal it. Composes the domtrans rule above
+##      with signal permissions, matching what a systemd
+##      unit or interactive caller typically needs.
+## </summary>
+## <param name="domain">
+##      <summary>
+##              Domain allowed access.
+##      </summary>
+## </param>
+#
+interface(`uml_launcher_run',`
+        gen_require(`
+                type uml_launcher_t;
+        ')
+
+        uml_launcher_domtrans($1)
+        allow $1 uml_launcher_t:process signal;
+')

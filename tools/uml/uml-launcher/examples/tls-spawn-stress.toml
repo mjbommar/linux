@@ -1,0 +1,167 @@
+schema_version = 1
+
+[instance]
+name = "tls-spawn-stress"
+labels = { workload = "tls-spawn-stress" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "1024M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+
+[[init.phases]]
+name = "write-source"
+cmd = """
+mkdir -p /tmp/t
+
+# child.c: exec'd process. Mimics spawn-worker. Checks its TLS state.
+cat > /tmp/t/child.c << 'EOFCEOF'
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+
+/* Same TLS layout shape as CPython: a __thread pointer that's
+ * 0-initialised (.tbss) and the calling code expects to set
+ * it later. */
+static __thread void *_Py_tss_tstate_mimic = NULL;
+static __thread uint64_t bound_marker = 0;
+
+static void *internal_thread(void *arg) {
+    /* Mimic what a CPython internal thread might do: dereference
+     * its tstate slot before anyone bound it. */
+    if (_Py_tss_tstate_mimic != NULL) {
+        /* Slot pre-populated — that would be the UML-leaks-TLS bug. */
+        fprintf(stderr, "FAIL_LEAK: internal thread sees pre-populated _Py_tss_tstate=%p in fresh exec'd child (PID %d)\\n",
+                _Py_tss_tstate_mimic, getpid());
+        exit(2);
+    }
+    if (bound_marker != 0) {
+        fprintf(stderr, "FAIL_LEAK: bound_marker = %lx in fresh thread (PID %d)\\n", bound_marker, getpid());
+        exit(2);
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    int iter = (argc > 1) ? atoi(argv[1]) : 0;
+
+    /* Main thread: are OUR slots initialised correctly? */
+    if (_Py_tss_tstate_mimic != NULL) {
+        fprintf(stderr, "FAIL_LEAK: main thread sees pre-populated _Py_tss_tstate=%p iter=%d PID %d\\n",
+                _Py_tss_tstate_mimic, iter, getpid());
+        return 2;
+    }
+    if (bound_marker != 0) {
+        fprintf(stderr, "FAIL_LEAK: bound_marker = %lx in main of fresh exec iter=%d PID %d\\n",
+                bound_marker, iter, getpid());
+        return 2;
+    }
+
+    /* Now publish — mimic _PyThreadState_BindDetached() */
+    _Py_tss_tstate_mimic = (void *)0xcafef00ddeadbeefULL;
+    bound_marker = 0x1234567890abcdefULL;
+
+    /* Spawn an internal thread that should see ITS OWN fresh TLS,
+     * not main's. */
+    pthread_t t;
+    pthread_create(&t, NULL, internal_thread, NULL);
+    pthread_join(t, NULL);
+
+    /* Main's TLS should still be intact after child thread ran. */
+    if (_Py_tss_tstate_mimic != (void *)0xcafef00ddeadbeefULL) {
+        fprintf(stderr, "FAIL: main TLS clobbered by child thread iter=%d PID %d (got %p)\\n",
+                iter, getpid(), _Py_tss_tstate_mimic);
+        return 3;
+    }
+    if (bound_marker != 0x1234567890abcdefULL) {
+        fprintf(stderr, "FAIL: main bound_marker clobbered iter=%d PID %d (got %lx)\\n",
+                iter, getpid(), bound_marker);
+        return 3;
+    }
+
+    return 0;
+}
+EOFCEOF
+
+# driver.c: fork+exec many children, like multiprocessing.spawn does.
+cat > /tmp/t/driver.c << 'EOFCEOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    int N = (argc > 1) ? atoi(argv[1]) : 100;
+    int fail = 0;
+    for (int i = 0; i < N; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            char iter_str[32];
+            snprintf(iter_str, sizeof(iter_str), "%d", i);
+            execl("/tmp/t/child", "/tmp/t/child", iter_str, (char *)NULL);
+            perror("execl");
+            _exit(127);
+        }
+        int status;
+        waitpid(pid, &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            if (WIFEXITED(status))
+                fprintf(stderr, "iter %d: child exit=%d\\n", i, WEXITSTATUS(status));
+            else
+                fprintf(stderr, "iter %d: child signal=%d\\n", i, WTERMSIG(status));
+            fail++;
+        }
+    }
+    printf("DRIVER_DONE: %d iterations, %d failures\\n", N, fail);
+    return fail ? 1 : 0;
+}
+EOFCEOF
+ls -la /tmp/t/
+"""
+
+[[init.phases]]
+name = "compile"
+cmd = """
+gcc -O2 -pthread -o /tmp/t/child /tmp/t/child.c 2>&1
+gcc -O2 -o /tmp/t/driver /tmp/t/driver.c 2>&1
+ls -la /tmp/t/
+"""
+
+[[init.phases]]
+name = "single-child-smoke"
+cmd = """
+echo '=== single child invocation (should PASS) ==='
+/tmp/t/child 0
+echo "single exit: $?"
+"""
+
+[[init.phases]]
+name = "stress-driver"
+cmd = """
+echo '=== 200 fork+exec child iterations ==='
+/tmp/t/driver 200
+echo "driver exit: $?"
+"""
+
+[[init.phases]]
+name = "report"
+cmd = "echo TLS_SPAWN_STRESS_DONE"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false

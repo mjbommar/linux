@@ -1,0 +1,42 @@
+# Minimal repro for the python3.14 segfault@0x5133bc inside UML when
+# the multiprocessing test suite's spawn-method tests run.
+schema_version = 1
+
+[instance]
+name = "spawn-segv-repro"
+labels = { workload = "spawn-segv-repro" }
+
+[kernel]
+path = "${UML_KERNEL}"
+backend = "seccomp"
+append = []
+
+[runtime]
+mem = "2048M"
+ncpus = 2
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+PYTHONFAULTHANDLER = "1"
+
+[[init.phases]]
+name = "spawn-repro"
+# Run just the spawn-method test_processes — short and tightly focused
+# on the fork+exec path that segfaulted in the full suite.
+cmd = """
+cd /tmp && timeout 90 python3 -m test -v --timeout 60 test_multiprocessing_spawn.test_processes 2>&1 | tail -120
+"""
+
+[[init.phases]]
+name = "report"
+cmd = "echo SPAWN_REPRO_DONE rc=$?"
+
+[debug]
+strace = false
+gdb = false
+log_dir = ""
+keep_running_on_failure = false

@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# L5: minimal Python startup wall-clock, kvm-v2 vs seccomp.
+#
+# Wraps run-perf-py-startup.sh, which runs N samples per backend,
+# computes medians, and emits a SUMMARY line in the same shape as
+# run-perf-getpid (so the parser is the same). The harness already
+# enforces the ratio gate; this descriptor just records the row in
+# the scoreboard for trend.
+#
+# Resolution caveat: printk timestamps have 10 ms granularity, so
+# individual samples bucket to multiples of 10 ms. Adequate for
+# spotting regressions that double the time; not adequate for
+# fine-grained tuning. For tighter numbers use perf-getpid.
+
+schema_version = 1
+
+[gate]
+name = "perf-py-startup"
+description = "Minimal Python startup ratio kvm-v2:seccomp (printk-timestamp)"
+phase = "H.1"
+
+[run]
+cmd = "bash tools/testing/selftests/um/perf-py-startup/run-perf-py-startup.sh"
+budget_sec = 180
+
+[run.env]
+UML_BINARY    = "{{kernel}}"
+SAMPLES       = "7"
+MAX_V2_RATIO  = "1.2"
+
+[parse]
+pass_on_exit_zero = true
+
+[[parse.metrics]]
+name  = "seccomp_med_s"
+regex = "seccomp_med=([0-9.]+)"
+[[parse.metrics]]
+name  = "kvm_v2_med_s"
+regex = "kvm_v2_med=([0-9.]+)"
+[[parse.metrics]]
+name  = "ratio_v2_over_seccomp"
+regex = "ratio_v2_over_seccomp=([0-9.]+)"
+
+[thresholds]
+require_clean_exit = true

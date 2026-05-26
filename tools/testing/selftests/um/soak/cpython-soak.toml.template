@@ -1,0 +1,73 @@
+schema_version = 1
+volumes = []
+
+[instance]
+name = "soak-cpython-{{BACKEND}}-w0"
+
+[kernel]
+path = "{{KERNEL}}"
+backend = "{{BACKEND}}"
+
+[runtime]
+# CPython 3.14 + a curated stdlib testset peaks at ~600-800 MB resident
+# under UML; 512M was historically too tight and produced a guest-side
+# "System is deadlocked on memory" panic every iteration (r14-24h-soak
+# 2026-05-19 evidence). 1024M leaves ~250 MB headroom for the test
+# harness + buddy fragmentation under sustained iteration.
+mem = "1024M"
+ncpus = 4
+
+[network]
+mode = "none"
+
+[env]
+TMPDIR = "/tmp"
+PYTHONHASHSEED = "0"
+
+[[init.phases]]
+name = "smoke"
+cmd = "/bin/true && echo SMOKE_OK"
+expect = ""
+timeout_secs = 0
+
+# Curated subset focused on syscall hot paths kvm-v2 must handle
+# correctly. Tight set picked to complete in ~60-90s wall-clock under
+# UML overhead. Skips heavyweights (test_subprocess /
+# test_concurrent_futures / test_threading would each take >60s under
+# UML). Phase succeeds iff regrtest returns 0; explicit `|| (echo
+# PYTEST_FAIL; exit 1)` ensures the phase wrapper sees non-zero on
+# any failure (avoids the pipefail-loss bug from `cmd | tail; echo
+# rc=$?` where echo's 0 masks pipeline failure).
+[[init.phases]]
+name = "pytest"
+# 10-module curated subset for the default kvm-v2 build (T78 in;
+# T80 gated, default off).  test_signal is dropped because its
+# ItimerTest.test_itimer_virtual subtest requires the opt-in
+# CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL=y build (SMP-T80,
+# state-audit/29) — with the default n build, setitimer(ITIMER_
+# VIRTUAL, ...) arms but never fires, and regrtest's worker-
+# subprocess model makes class-level skips at runtime annoying.
+# Operators wanting full signal coverage should build with
+# CONFIG_UM_BACKEND_KVM_V2_ITIMER_VIRTUAL=y and add test_signal
+# back to the curated list locally (~25 % bench-py regression
+# is the trade).
+#
+# test_posix is included; SMP-T78's release-of-migrate_disable
+# around handle_syscall makes sched_setaffinity succeed under SMP.
+cmd = "python3 -m test --timeout 60 -j 2 test_io test_mmap test_fcntl test_os test_select test_threadsignals test_posix test_fork1 test_random test_hashlib && echo PYTEST_OK || (echo PYTEST_FAIL; exit 1)"
+expect = ""
+timeout_secs = 240
+
+[[init.phases]]
+name = "report"
+cmd = "echo REPRO_DONE rc=$?"
+expect = ""
+timeout_secs = 0
+
+[host_resources]
+# SMP-T78..T84 (memo 52: UML host resource controls).
+# Soak defaults: predictable THP, expendable OOM bias.
+# Hugepages and cpu_affinity opt-in — require host-side reservation.
+# Cgroup limits opt-in — require writable cgroup hierarchy.
+thp = "off"
+oom_score_adj = 500
