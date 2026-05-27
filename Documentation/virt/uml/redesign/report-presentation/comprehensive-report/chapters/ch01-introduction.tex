@@ -1,0 +1,377 @@
+% ==========================================================================
+%  Chapter 1 — Introduction
+% ==========================================================================
+\chapter{Introduction}
+\label{ch:introduction}
+
+\epigraph{%
+  The best way to understand a kernel is to run it where you can poke at it.%
+}{Jeff Dike, 2000}
+
+\section{What is User-Mode Linux?}
+\label{sec:intro-what-is-uml}
+
+User-Mode Linux (\UML{}) is an architecture port of the Linux kernel in which
+the kernel itself executes as an ordinary userspace process on a host Linux
+system.  Where a conventional kernel runs on bare metal---managing page tables,
+servicing interrupts, and scheduling threads with the full authority of CPU ring
+0---\UML{} performs all of these functions from ring 3, mediating access to host
+resources through the host kernel's system call interface.
+
+In the Linux source tree, \UML{} lives alongside x86, ARM, RISC-V, and the
+other architecture ports under \umlpath{arch/um/}.  It shares the same
+scheduler, the same VFS layer, the same memory management subsystem, and the
+same networking stack as every other port.  The code that differs is precisely
+the code that must differ: the low-level trap handling, context switching,
+timer management, and memory mapping routines that, on hardware architectures,
+speak directly to the CPU and chipset.  In \UML{}, these routines instead call
+\syscall{clone}, \syscall{mmap}, \syscall{sigaction}, \syscall{ioctl}, and a
+handful of other host system calls.
+
+Jeff Dike created \UML{} in 1999--2000 and presented it at the USENIX Annual
+Linux Showcase in Atlanta~\cite{dike2000}.  The original implementation used
+the \texttt{ptrace} system call to intercept guest system calls: the \UML{}
+kernel ran as a tracing process that caught every \texttt{SIGTRAP} delivered
+when a guest userspace process invoked a system call.  This mechanism, while
+conceptually elegant, imposed a heavy performance penalty---each guest syscall
+required multiple context switches between the tracing kernel and the traced
+guest---and the subsequent two decades of \UML{} development can be read as a
+sustained effort to reduce that overhead.
+
+The architecture is best understood through the Popek--Goldberg
+framework~\cite{popek1974}.  A \emph{virtual machine monitor} (VMM)
+must faithfully reproduce the behavior of the underlying machine for guest
+software while retaining control over resource allocation.  Traditional VMMs
+achieve this by exploiting hardware privilege rings: the guest kernel believes
+it runs in ring 0, but the VMM intercepts sensitive instructions from a more
+privileged mode.  \UML{} inverts this arrangement.  There is no privilege
+separation \emph{at the hardware level} between the \UML{} kernel and its
+guests; instead, the host kernel enforces separation through the ordinary
+process isolation guarantees of Linux itself.  The \UML{} kernel and its guest
+processes are all host-level processes.  What distinguishes them is that the
+\UML{} kernel interposes on guest system calls before they can reach the
+host---first via \texttt{ptrace}, later via \Seccomp{} filters, and now,
+in the v2 redesign, optionally via \KVM{}.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    layer/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=12cm,
+      minimum height=1.2cm,
+      rounded corners=4pt,
+      font=\small
+    },
+    label/.style={
+      font=\footnotesize\itshape,
+      text=UMLMuted,
+      anchor=west
+    },
+    arrow/.style={
+      -{Stealth[length=5pt]},
+      thick,
+      color=UMLMuted
+    }
+  ]
+
+  \node[layer=UMLBlue!8]  (host)    at (0,0)   {\textbf{Host Linux Kernel} (ring 0)};
+  \node[layer=UMLTeal!8]  (backend) at (0,1.6)  {\textbf{Backend} (\texttt{ptrace} / \Seccomp{} / \KVMvTwo{})};
+  \node[layer=UMLGreen!8] (uml)     at (0,3.2)  {\textbf{UML Kernel} (\umlpath{arch/um/})};
+  \node[layer=KernelGold!8](guest)  at (0,4.8)  {\textbf{Guest Userspace}};
+
+  \node[label] at (-6.4,0)   {Hardware privilege};
+  \node[label] at (-6.4,1.6) {Syscall interposition};
+  \node[label] at (-6.4,3.2) {Full Linux kernel};
+  \node[label] at (-6.4,4.8) {Unmodified binaries};
+
+  \draw[arrow] (guest.south) -- (uml.north)
+    node[midway,right,font=\scriptsize] {guest syscall};
+  \draw[arrow] (uml.south) -- (backend.north)
+    node[midway,right,font=\scriptsize] {backend ops};
+  \draw[arrow] (backend.south) -- (host.north)
+    node[midway,right,font=\scriptsize] {host syscalls / \texttt{KVM\_RUN}};
+
+\end{tikzpicture}
+\caption[UML architectural layers]{%
+  The four-layer \UML{} architecture.  Guest userspace programs issue system
+  calls that are trapped by the \UML{} kernel.  The \UML{} kernel services
+  these using standard Linux kernel subsystems, performing I/O through the
+  backend and host kernel layers.
+}
+\label{fig:intro-layers}
+\end{figure}
+
+
+\section{Why UML Matters}
+\label{sec:intro-why}
+
+In a landscape crowded with virtualization and sandboxing technologies---\KVM{},
+Xen~\cite{barham2003}, Firecracker~\cite{firecracker}, gVisor~\cite{gvisor},
+containers, unikernels---it is reasonable to ask whether \UML{} still
+has a role.  The answer is emphatically yes, precisely because \UML{} occupies
+a unique and underserved niche in the design space.
+
+\subsection{The real kernel, not a reimplementation}
+
+gVisor's Sentry~\cite{gvisor} reimplements the Linux system call interface in
+Go.  It is an impressive feat of engineering, but it is not the Linux kernel:
+subtle semantic differences arise when the Sentry's interpretation of a system
+call diverges from the kernel's.  The Linux Kernel Library
+(\textsc{LKL})~\cite{lkl} compiles the kernel as a linkable library, but
+strips away process scheduling and user/kernel separation.
+
+\UML{}, by contrast, \emph{is} the Linux kernel.  Every syscall handler,
+every scheduler decision, every lock acquisition follows the same code paths
+as a kernel running on x86 hardware.  A bug found in \UML{} is a bug in
+mainline Linux, and a fix validated in \UML{} is a fix for every architecture.
+This fidelity is not accidental---it is a consequence of \UML{} being an
+\texttt{arch/} port, sharing all architecture-independent code with the rest
+of the tree.
+
+\subsection{Full user/kernel separation}
+
+Unlike \textsc{LKL}, which runs kernel code in the same address space and
+privilege level as the application, \UML{} maintains genuine user/kernel
+separation.  Guest userspace processes run in separate host processes with
+restricted memory mappings.  A bug in a guest program cannot corrupt \UML{}
+kernel data structures any more than a bug in a userspace program can corrupt
+a bare-metal kernel.  This separation is essential for security research,
+kernel fuzzing, and any application where the guest is untrusted.
+
+\subsection{No hardware virtualization requirements}
+
+\KVM{}~\cite{kivity2007} and Firecracker~\cite{agache2020} require hardware
+virtualization extensions (Intel VT-x or AMD-V) and access to
+\umlpath{/dev/kvm}.  In many environments---containerized CI/CD runners,
+shared cloud instances, locked-down workstations---\texttt{/dev/kvm} is
+unavailable.  \UML{} with the \texttt{ptrace} or \Seccomp{} backends has no
+such requirement: it runs wherever a Linux userspace process can run.  This
+makes it uniquely suited for environments where hardware-assisted
+virtualization is either absent or administratively prohibited.
+
+\subsection{Application domains}
+\label{sec:intro-applications}
+
+The combination of kernel fidelity, process isolation, and minimal host
+requirements makes \UML{} valuable across a range of application domains:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Kernel development and debugging.]
+    A developer can compile the kernel, run it under \texttt{gdb}, set
+    breakpoints in the scheduler, single-step through the page fault handler,
+    and inspect kernel data structures---all from an ordinary terminal.
+    No reboot, no serial console, no JTAG probe.
+
+  \item[Kernel fuzzing.]
+    Coverage-guided fuzzers like syzkaller~\cite{syzkaller} and
+    kAFL~\cite{schumilo2017} benefit from fast boot times and deterministic
+    execution.  \UML{} boots in under a second, can be snapshot/restored
+    without hardware support, and when combined with \textsc{LKL}-style
+    in-process execution for the fast path, can achieve millions of syscalls
+    per second.
+
+  \item[Network simulation.]
+    Projects like Netkit~\cite{pizzonia2008} and Marionnet~\cite{marionnet}
+    use \UML{} to run dozens or hundreds of virtual Linux machines, each with
+    its own networking stack, connected by virtual switches and routers.
+    Students and researchers can build and tear down complex network topologies
+    entirely in userspace.
+
+  \item[Security research.]
+    \UML{} provides a complete kernel attack surface without requiring trust in
+    hardware or a hypervisor.  Researchers can study kernel exploits, test
+    sandboxing mechanisms, and develop mitigations in a fully controlled
+    environment.
+
+  \item[CI/CD and automated testing.]
+    Kernel selftests, \texttt{kselftest} suites, and distribution build
+    processes benefit from a lightweight kernel environment that can be
+    instantiated in seconds inside a container or a GitHub Actions runner.
+
+  \item[Education.]
+    \UML{} turns the kernel into something a student can compile, run, modify,
+    and observe without risk to the host system---lowering the barrier to
+    kernel development from ``dedicated test machine'' to ``laptop terminal.''
+\end{description}
+
+
+\section{The Current Moment}
+\label{sec:intro-moment}
+
+This report is written at a moment of unusual convergence for \UML{}.  Five
+developments, none individually decisive but collectively transformative,
+have created a window of opportunity for the most significant redesign of
+\UML{} since its creation.
+
+\paragraph{1. The \Seccomp{} backend reaches mainline.}
+The \Seccomp{} backend, which replaces the decades-old \texttt{ptrace}
+mechanism with \texttt{SECCOMP\_IOCTL\_NOTIF\_SEND}-based syscall interception,
+was merged for Linux 6.16.  This single change reduced guest syscall overhead
+from approximately \SI{3}{\micro\second} (ptrace round-trip) to roughly
+\SI{300}{\nano\second}, making \UML{} competitive with lightweight hypervisors
+for I/O-intensive workloads.
+
+\paragraph{2. SMP support lands.}
+Historically, \UML{} was a uniprocessor architecture.  The addition of SMP
+support---mapping \UML{} virtual CPUs to host threads with proper inter-processor
+interrupt (IPI) emulation and TLB synchronization---allows \UML{} to exercise
+the kernel's concurrency paths, which is precisely where the most dangerous
+bugs hide.
+
+\paragraph{3. gVisor's systrap validates swappable backends.}
+Google's gVisor project demonstrated with its systrap platform~\cite{gvisor-systrap}
+that a syscall-interposition system can support multiple backend mechanisms
+behind a common interface.  The gVisor Sentry originally used \texttt{ptrace},
+then \KVM{}, then systrap---each time improving performance while maintaining
+the same guest-facing semantics.  This architectural precedent directly informed
+the backend-ops abstraction in the \UML{} v2 redesign.
+
+\paragraph{4. \textsc{LKL} shows what speed is possible.}
+The Linux Kernel Library~\cite{lkl,purdila2010} compiles Linux as a
+single-threaded library with no MMU or process separation.  It achieves
+extraordinary fuzzing throughput---millions of operations per second---at
+the cost of fidelity: there is no guest userspace, no scheduling, no realistic
+attack surface.  \textsc{LKL} represents one extreme of the speed--fidelity
+tradeoff.  The \UML{} v2 redesign aims to approach \textsc{LKL}'s speed while
+retaining \UML{}'s complete kernel semantics.
+
+\paragraph{5. The kernel community accepts AI-assisted development.}
+The addition of the \texttt{coding-assistants.html} document to the kernel's
+\umlpath{Documentation/process/} directory~\cite{coding-assistants} signals an
+institutional willingness to engage with AI-assisted patch development.  The v2
+redesign demonstrates what becomes possible when AI tools are used not to
+generate mechanical patches, but to navigate architectural decisions across a
+codebase of \num{30000000}+ lines of code.
+
+
+\section{Report Structure}
+\label{sec:intro-structure}
+
+This report is organized as follows:
+
+\begin{description}[style=nextline,leftmargin=2em,font=\bfseries]
+  \item[Chapter~\ref{ch:introduction}: Introduction]
+    (This chapter.)  Motivation, context, and scope.
+
+  \item[Chapter 2: History]
+    The evolution of \UML{} from Dike's original \texttt{ptrace}-based
+    prototype through the TT/SKAS transition, the years of maintenance
+    mode, and the recent resurgence of interest.
+
+  \item[Chapter 3: Foundations]
+    Background material on virtualization theory (Popek--Goldberg), Linux
+    process primitives (\texttt{ptrace}, \Seccomp{}, \texttt{clone},
+    \texttt{mmap}), and the \KVM{} API---the building blocks from which
+    \UML{} is constructed.
+
+  \item[Chapter 4: UML Architecture]
+    The high-level architecture of \UML{}: how it maps kernel abstractions
+    (virtual memory, interrupts, timers, I/O) onto host-level mechanisms.
+    The backend-ops abstraction layer and its role in enabling pluggable
+    backends.
+
+  \item[Chapter 5: UML Implementation]
+    A detailed walk through the \UML{} source tree, covering boot
+    sequence, system call handling, memory management, signal delivery,
+    SMP, and device I/O.
+
+  \item[Chapter 6: The \KVMvTwo{} Backend]
+    Design and implementation of the new \KVM{}-based backend.  How
+    \texttt{KVM\_CREATE\_VM}, \texttt{KVM\_CREATE\_VCPU}, and
+    \texttt{KVM\_RUN} are used to achieve approximately \SI{100}{\nano\second}
+    syscall latency for guest-to-kernel transitions.
+
+  \item[Chapter 7: Applications]
+    Detailed case studies: kernel debugging under \texttt{gdb}, syzkaller
+    integration, network simulation, CI/CD pipelines, and educational use.
+
+  \item[Chapter 8: Related Work]
+    Comparison with \KVM{}/QEMU, Xen, Firecracker, gVisor, \textsc{LKL},
+    Dune~\cite{belay2012}, containers, and unikernels~\cite{madhavapeddy2013}.
+
+  \item[Chapter 9: The v2 Redesign]
+    The complete contribution of this work: backend-ops abstraction, \KVMvTwo{}
+    backend, SMP, snapshot/restore, record/replay, comprehensive selftests,
+    and the Rust \texttt{umlctl} launcher tool.  Design rationale, trade-offs,
+    and lessons learned.
+
+  \item[Chapter 10: Conclusion]
+    Summary of contributions, open problems, and future directions.
+
+  \item[Appendix A: Source Map]
+    Annotated directory listing of the \UML{} source tree with the v2
+    additions.
+
+  \item[Appendix B: Benchmarks]
+    Raw benchmark data and methodology for the performance measurements
+    cited throughout the report.
+\end{description}
+
+
+\section{Contributions of This Work}
+\label{sec:intro-contributions}
+
+The v2 redesign of User-Mode Linux, developed by Michael Bommarito with
+AI-assisted tooling, contributes the following:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Backend operations abstraction.}
+    A \texttt{struct um\_backend\_ops} interface
+    (defined in \umlpath{arch/um/include/shared/backend.h})
+    that decouples the \UML{} kernel from any single syscall-interposition
+    mechanism.  The abstraction defines a contract for backend lifecycle
+    management, guest process creation, syscall interception, context switching,
+    and memory mapping.  New backends can be added by implementing this
+    interface without modifying core \UML{} code.
+
+  \item \textbf{The \KVMvTwo{} backend.}
+    A new backend that uses the \KVM{} API to run \UML{} guest code in
+    hardware-accelerated virtual CPUs.  When the guest executes a system call,
+    the resulting VM exit is handled directly by the \UML{} kernel---no
+    \texttt{ptrace} round-trip, no \Seccomp{} notification.  Measured syscall
+    latency is approximately \SI{100}{\nano\second}, a $3\times$ improvement
+    over \Seccomp{} and a $30\times$ improvement over \texttt{ptrace}.
+
+  \item \textbf{SMP support.}
+    Multi-processor support for \UML{}, mapping virtual CPUs to host threads
+    with proper IPI emulation, TLB shootdown, and memory barrier semantics.
+    This enables \UML{} to exercise---and expose bugs in---the kernel's
+    concurrent code paths.
+
+  \item \textbf{Snapshot and restore.}
+    Mechanisms for capturing and restoring the complete state of a running
+    \UML{} instance, enabling fast restart for fuzzing workloads and
+    reproducible bug investigation.
+
+  \item \textbf{Record and replay.}
+    Deterministic record/replay infrastructure that captures non-deterministic
+    events (timer interrupts, I/O completions) during execution and replays
+    them faithfully, enabling time-travel debugging of kernel code.
+
+  \item \textbf{Comprehensive selftests.}
+    A test suite under \umlpath{tools/testing/selftests/um/} covering backend
+    lifecycle, syscall interception, SMP behavior, memory management, and
+    performance regression detection.
+
+  \item \textbf{The \texttt{umlctl} launcher.}
+    A Rust-based command-line tool for building, configuring, launching, and
+    managing \UML{} instances.  It handles kernel compilation, root filesystem
+    preparation, backend selection, and instance lifecycle, reducing the barrier
+    to entry from a page of shell commands to a single invocation.
+\end{enumerate}
+
+\noindent
+These contributions are organized as seven series-level commits on
+the \texttt{mjbommar/linux} tree (branch \texttt{next}), based on
+\texttt{torvalds/master} at v7.1-rc5.  Each series is independently
+reviewable and bisectable.
+
+\bigskip
+
+The remainder of this report proceeds from history and theory
+(Chapters~2--3), through architecture and implementation (Chapters~4--6),
+to applications and evaluation (Chapters~7--8), and concludes with
+the complete v2 redesign narrative (Chapter~9) and future
+directions (Chapter~10).

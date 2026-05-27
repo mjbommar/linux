@@ -1,0 +1,981 @@
+% ==========================================================================
+%  Chapter 2: History of User-Mode Linux
+% ==========================================================================
+
+\chapter{History of User-Mode Linux}
+\label{ch:history}
+
+\epigraph{``I'm doing a (free) operating system (just a hobby, won't be big and
+professional like gnu) for 386(486) AT clones.''}{---Linus Torvalds, 1991~\cite{torvalds1991}}
+
+\noindent
+User-Mode Linux did not emerge in a vacuum.  Its existence is a consequence of
+design decisions made years before its conception---most notably, the Linux
+kernel's clean separation of architecture-dependent and architecture-independent
+code.  This chapter traces the full arc: from the early Linux kernel and the
+debugging problems that motivated \UML{}, through its creation and golden era, into
+a decade of decline, and finally to the revival that produced the modern
+multi-backend architecture described in this report.
+
+% ------------------------------------------------------------------
+\section{The Linux Kernel Before UML (1991--1999)}
+\label{sec:history-prelude}
+% ------------------------------------------------------------------
+
+On October 5, 1991, Linus Torvalds posted the famous announcement to
+\texttt{comp.os.minix} describing his ``free minix-like kernel sources for
+386-AT''~\cite{torvalds1991}.  Linux 0.01 was a monolithic kernel that ran
+exclusively on the Intel 80386 processor.  It supported a single address space
+layout, a single disk controller, and a handful of system calls.  But it
+compiled, it booted, and it was free.
+
+Over the next eight years, Linux grew at an extraordinary rate.  The 1.0 release
+(March 1994) was the first declared stable; 2.0 (June 1996) added symmetric
+multiprocessing (SMP) support and multiple architecture ports---Alpha, SPARC,
+MIPS, m68k, PowerPC.  The 2.2 release (January 1999) brought improved SMP
+scalability, better networking, and the beginnings of enterprise-grade
+reliability.  By the end of the decade, Linux was running on everything from
+embedded routers to IBM mainframes, and kernel development involved hundreds of
+contributors worldwide.
+
+\subsection{The \texttt{arch/} Abstraction}
+\label{sec:history-arch-abstraction}
+
+The most architecturally consequential decision of this era was the directory
+structure that emerged to support multiple hardware platforms.  Rather than
+scattering \texttt{\#ifdef} conditionals throughout the code, Linux adopted a
+clean split: the \umlpath{arch/} directory contained all architecture-specific
+code---trap handling, context switching, page table manipulation, signal
+delivery, system call entry---while the rest of the tree
+(\umlpath{kernel/}, \umlpath{mm/}, \umlpath{fs/}, \umlpath{net/},
+\umlpath{drivers/}) remained architecture-independent.
+
+Each architecture port implemented a well-defined interface: functions like
+\texttt{switch\_to()}, \texttt{copy\_thread()}, \texttt{start\_thread()}, and
+page table accessors (\texttt{pgd\_val()}, \texttt{pte\_val()}, etc.).  The
+interface was never formally specified---it evolved organically as new
+architectures were added---but it was remarkably clean.  A new port meant
+implementing perhaps 50--100 key functions and data structures, after which the
+entire kernel (scheduler, VFS, networking stack, memory manager) would work
+without modification.
+
+This abstraction was conceived to support hardware architectures: x86, Alpha,
+SPARC, ARM.  No one anticipated that someone would write an ``architecture'' where
+the hardware was another copy of Linux itself.
+
+\subsection{The Debugging Problem}
+\label{sec:history-debugging}
+
+Kernel debugging in the 1990s was, to put it charitably, primitive.  The primary
+tools were:
+
+\begin{description}[leftmargin=2em,labelindent=1em]
+  \item[\texttt{printk()}] The kernel's printf equivalent.  Developers added
+    \texttt{printk()} calls, rebuilt the kernel, rebooted, reproduced the bug,
+    read the console output.  This cycle could take minutes to hours depending on
+    the bug.
+
+  \item[Serial console] A step up: connect two machines with a serial cable, use
+    one to observe the other's console output.  Essential for debugging panics
+    where the screen was already dead.
+
+  \item[\texttt{kgdb}] An external patch (never merged into mainline during this
+    era) that allowed GDB to connect to a running kernel via serial line.  It
+    worked, but it required a second machine, serial hardware, and careful setup.
+    Breakpoints in interrupt handlers were hazardous.
+
+  \item[\texttt{kdb}] SGI's kernel debugger, also out-of-tree.  More capable
+    than \texttt{kgdb} for some workflows, but equally dependent on specialized
+    hardware setups.
+
+  \item[Crash analysis] When the kernel panicked, you got a register dump and a
+    call trace.  Interpreting these required intimate knowledge of the
+    architecture's calling conventions and the ability to cross-reference
+    addresses against \texttt{System.map}.
+\end{description}
+
+\noindent
+What you could \emph{not} do was the thing that every application programmer
+took for granted: run the code under a debugger.  You could not set a breakpoint
+in the scheduler and single-step through a context switch.  You could not attach
+\texttt{valgrind} to the memory manager.  You could not run the kernel under
+\texttt{strace} to see what system calls it made.  The kernel was the bottom of
+the stack---there was nothing underneath it to provide these services.
+
+This asymmetry between kernel and userspace development productivity was a
+constant source of frustration.  It also meant that certain classes of bugs---race
+conditions, memory corruption, subtle locking errors---were disproportionately
+expensive to diagnose and fix.  The kernel needed a way to be a \emph{process}.
+
+% ------------------------------------------------------------------
+\section{Jeff Dike and the Creation of UML (1999--2001)}
+\label{sec:history-creation}
+% ------------------------------------------------------------------
+
+Jeff Dike was a kernel developer at VA Linux Systems in the late 1990s.  VA
+Linux was one of the first companies to build a business around Linux, and its
+engineers were deeply involved in kernel development.  Dike had been thinking
+about the debugging problem and, more broadly, about how to make the kernel more
+accessible for development and experimentation.
+
+His key insight was deceptively simple: \emph{the Linux kernel's
+\texttt{arch/} abstraction is clean enough that you can write an
+``architecture'' where the ``hardware'' is the host kernel's system call
+interface.}
+
+Consider what an architecture port must provide: a way to create and switch
+between address spaces, a way to handle interrupts and traps, a way to start and
+stop the CPU, a way to manage memory pages.  All of these have direct analogs in
+the POSIX API:
+
+\begin{itemize}[nosep]
+  \item Address spaces $\to$ \syscall{mmap}, \syscall{mprotect}, \syscall{munmap}
+  \item Interrupts $\to$ POSIX signals (SIGALRM for the timer tick, SIGIO for I/O)
+  \item Context switching $\to$ \syscall{setjmp}/\syscall{longjmp} or signal stack manipulation
+  \item Trap handling $\to$ \syscall{ptrace} to intercept guest system calls
+  \item Physical memory $\to$ a large \syscall{mmap}'d file (the ``physical memory'' file)
+  \item Block devices $\to$ host files accessed via \syscall{read}/\syscall{write}
+  \item Network devices $\to$ host TAP/TUN interfaces or Unix domain sockets
+\end{itemize}
+
+\noindent
+The resulting system would not be an emulator.  It would not translate
+instructions or simulate hardware.  It \emph{would be} the Linux kernel---the
+same source code, compiled for a different ``architecture.''  The kernel's
+scheduler would schedule processes; its VFS would manage file systems; its TCP/IP
+stack would route packets.  The only difference was that instead of running on
+bare metal (or in a hypervisor), it ran as a collection of ordinary Linux
+processes.
+
+\subsection{The Initial Announcement}
+\label{sec:history-announcement}
+
+Dike announced User-Mode Linux on the Linux Kernel Mailing List (LKML) in
+1999.  The initial response was a mixture of fascination and skepticism.  Some
+developers immediately grasped the implications for debugging and testing.
+Others questioned whether the performance overhead would make it practical.
+A few doubted whether the \texttt{arch/} interface was really clean enough to
+support such an unconventional ``architecture.''
+
+Dike persisted.  By 2000, he had a working implementation that could boot a
+full Linux system, run a shell, and execute userspace programs.  He presented
+the work at the 4th Annual Linux Showcase and Conference (ALS) in
+Atlanta~\cite{dike2000}.
+
+\subsection{The Tracing Thread (TT) Mode}
+\label{sec:history-tt}
+
+The first \UML{} execution engine used a model called ``tracing thread'' (tt)
+mode.  The architecture was as follows:
+
+\begin{enumerate}[nosep]
+  \item The \UML{} kernel ran as a single host process (the ``tracing thread'').
+  \item Each guest userspace process was a separate host process.
+  \item The tracing thread used \syscall{ptrace} to attach to every guest
+    process as a debugger.
+  \item When a guest process made a system call, the host kernel delivered a
+    \texttt{SIGTRAP} to the tracing thread (via the ptrace notification
+    mechanism).
+  \item The tracing thread intercepted the system call, extracted its arguments
+    from the guest's registers, dispatched it to the \UML{} kernel's system call
+    handler, wrote the result back into the guest's registers, and resumed the
+    guest.
+\end{enumerate}
+
+\noindent
+This worked, and it was conceptually elegant: ptrace was designed exactly for
+this kind of process inspection and control.  But it had significant drawbacks:
+
+\begin{description}[leftmargin=2em,labelindent=1em]
+  \item[Host visibility] Every guest process appeared as a real process on the
+    host.  If the guest ran 500 processes, the host's process table showed 500+
+    entries.  This was confusing for administrators and made it impossible to
+    cleanly distinguish guest and host processes.
+
+  \item[Security] Because guest processes were real host processes, they had
+    real PIDs, real signal delivery, and real access to \texttt{/proc/self/}.
+    A sufficiently determined attacker inside the guest could potentially
+    escape---for example, by exploiting ptrace race conditions or by directly
+    invoking host system calls that the tracing thread failed to intercept.
+
+  \item[Performance] Every guest system call required \emph{at minimum} four
+    context switches: guest $\to$ host kernel (for the syscall trap) $\to$
+    tracing thread (SIGTRAP delivery) $\to$ host kernel (to resume guest) $\to$
+    guest.  In practice, the overhead was worse because the tracing thread also
+    needed to read and write guest registers via \texttt{PTRACE\_PEEKUSR} and
+    \texttt{PTRACE\_POKEUSR}.  Each such operation was itself a system call.
+
+  \item[Signal handling] Delivering a signal to a guest process required
+    elaborate coordination between the tracing thread, the host kernel's signal
+    machinery, and the guest's signal handling code.  Getting this right was one
+    of the most complex parts of the implementation.
+\end{description}
+
+\noindent
+Despite these limitations, tt mode was a remarkable achievement.  For the first
+time, a developer could run the Linux kernel under GDB, set breakpoints in the
+scheduler, single-step through context switches, and use \texttt{valgrind} to
+detect memory errors.  The productivity impact was immediate and
+substantial~\cite{dike2001}.
+
+\subsection{Key Insight: UML Is Not an Emulator}
+\label{sec:history-not-emulator}
+
+It is worth emphasizing a point that was frequently misunderstood (and still
+is): \UML{} is not an emulator.  Emulators like Bochs or (later) QEMU translate
+machine instructions from one ISA to another, or simulate hardware devices.
+\UML{} does neither.  The guest kernel code is \emph{compiled natively} for the
+host architecture.  When a function like \texttt{schedule()} runs inside \UML{},
+it is executing the same compiled x86-64 instructions that it would on bare
+metal.  The architecture layer merely provides a different implementation of the
+hardware abstraction---one that talks to the host kernel instead of to physical
+hardware.
+
+This distinction has profound implications for fidelity.  Code that works in
+\UML{} will work on bare metal (modulo hardware-specific drivers), and bugs found
+in \UML{} are real kernel bugs.  \UML{} is the kernel, running in a different
+environment.
+
+% ------------------------------------------------------------------
+\section{The SKAS Evolution (2002--2006)}
+\label{sec:history-skas}
+% ------------------------------------------------------------------
+
+The limitations of tt mode---particularly the security and host-visibility
+problems---motivated a fundamental redesign of the execution engine.  The
+result was SKAS: \textbf{S}eparate \textbf{K}ernel \textbf{A}ddress
+\textbf{S}pace mode.
+
+\subsection{The Problem with Shared Address Spaces}
+\label{sec:history-skas-problem}
+
+In tt mode, the \UML{} kernel code ran in the same address space as the
+guest process it was currently serving.  This meant that a guest process
+could, in principle, read or corrupt kernel data structures.  The tracing
+thread did its best to prevent this, but the fundamental architecture made
+strong isolation impossible.
+
+The goal of SKAS was to give the \UML{} kernel its own address space,
+separate from all guest processes.  When a guest process made a system call,
+execution would switch to the kernel address space, handle the call, and
+switch back---just as a real kernel switches between kernel and user mode
+via privilege ring transitions.
+
+\subsection{SKAS0: No Host Kernel Patches Required}
+\label{sec:history-skas0}
+
+The first SKAS implementation, known as SKAS0, achieved address space
+separation using only standard host kernel facilities.  The technique was
+ingenious:
+
+\begin{enumerate}[nosep]
+  \item The \UML{} kernel ran in a dedicated host process with its own
+    address space.
+  \item Guest processes each had their own host process (as in tt mode),
+    but the tracing thread could now switch the guest process's memory
+    mappings to point at the kernel's address space when needed.
+  \item Address space switching was accomplished via careful use of
+    \texttt{PTRACE\_SYSCALL} to intercept \syscall{mmap} calls and remap
+    the process's memory.
+\end{enumerate}
+
+\noindent
+SKAS0 was a major improvement over tt mode.  Guest processes could no longer
+directly access kernel memory, and the security model was substantially
+stronger.  The performance cost of the address-space switching was nontrivial,
+but the security benefits were considered worth it.
+
+\subsection{SKAS3: The /proc/mm Approach}
+\label{sec:history-skas3}
+
+SKAS0's address-space manipulation was clever but slow, requiring multiple
+system calls per switch.  Dike proposed a host kernel extension---a
+\texttt{/proc/mm} interface---that would allow a tracing process to directly
+manipulate another process's address space with a single system call.  This
+variant was called SKAS3 (the number referring to the host kernel patch
+revision that introduced the necessary support).
+
+With \texttt{/proc/mm}, the tracing thread could:
+\begin{itemize}[nosep]
+  \item Create a new memory management context via \texttt{/proc/mm}
+  \item Map and unmap pages in that context with a single \syscall{ioctl}
+  \item Switch a traced process between contexts efficiently
+\end{itemize}
+
+\noindent
+The performance improvement over SKAS0 was significant---roughly 2x for
+system-call-intensive workloads.  However, the approach required running a
+patched host kernel, which limited adoption.  Most users preferred the
+slightly slower SKAS0 over the burden of maintaining a custom host kernel.
+
+\subsection{SKAS4 and the OLS Talks}
+\label{sec:history-skas4}
+
+Dike continued refining the approach.  SKAS4 proposed further optimizations
+to the host kernel interface, aiming to minimize the number of context switches
+required for guest system call handling.  He presented this work at the Ottawa
+Linux Symposium in 2006~\cite{dike-ols2006}, building on his earlier OLS 2003
+talk~\cite{dike-ols2003} that had focused on making \UML{} ``ready for the
+mainstream.''
+
+The SKAS evolution demonstrated a recurring tension in \UML{}'s history:
+achieving good performance often required host kernel modifications, but
+requiring host kernel modifications limited adoption.  This tension would
+recur with every subsequent execution engine, including the seccomp backend
+and the \KVMvTwo{} backend described in this report.
+
+\subsection{The Prentice Hall Book}
+\label{sec:history-book}
+
+In 2006, Dike published \emph{User Mode Linux} with Prentice
+Hall~\cite{dike2006book}.  The book provided the first comprehensive treatment
+of \UML{}'s architecture, covering the tt and SKAS execution models, the memory
+system, device drivers, networking, and debugging techniques.  It also included
+practical guidance on using \UML{} for development, testing, and virtual
+hosting.
+
+The book remains the most detailed single source on \UML{}'s original
+architecture, although much of the implementation detail it describes has
+since been superseded by the seccomp and \KVMvTwo{} backends.
+
+% ------------------------------------------------------------------
+\section{Mainline Merge and the Golden Era (2002--2010)}
+\label{sec:history-golden}
+% ------------------------------------------------------------------
+
+\UML{} was merged into the Linux 2.5 development tree in 2002 and was
+included in the 2.6.0 release (December 2003).  The merge was a significant
+event: \UML{} was the first virtualization technology to be included in the
+mainline Linux kernel.  Its presence in \umlpath{arch/um/} gave it
+legitimacy and ensured that kernel API changes would (in theory) be
+propagated to the \UML{} port along with every other architecture.
+
+The years from 2002 to roughly 2010 represented \UML{}'s golden era.  During
+this period, it was actively developed, widely used, and considered a key
+part of the kernel developer's toolkit.
+
+\subsection{Kernel Development and Debugging}
+\label{sec:history-kernel-dev}
+
+The primary use case was exactly what Dike had envisioned: making kernel
+development easier.  With \UML{}, a developer could:
+
+\begin{itemize}[nosep]
+  \item Boot a full Linux system in seconds, without hardware or a heavy VM
+  \item Run the kernel under GDB with full source-level debugging
+  \item Use \texttt{valgrind} to detect memory errors in kernel code
+  \item Test file system changes without risking data on real disks
+  \item Reproduce and debug race conditions in the scheduler
+  \item Develop and test networking code with virtual networks
+  \item Run kernel unit tests without dedicated hardware
+\end{itemize}
+
+\noindent
+The fast boot time was particularly valuable.  A \UML{} instance could go from
+cold start to a shell prompt in under two seconds on contemporary hardware,
+compared to minutes for a full hardware boot.  For the edit-compile-test cycle,
+this speed difference was transformative.
+
+\subsection{Netkit and Network Simulation}
+\label{sec:history-netkit}
+
+One of \UML{}'s most successful applications was Netkit, a network emulation
+tool developed by Maurizio Pizzonia and Massimo Rimondini at Roma Tre
+University~\cite{pizzonia2008}.  Netkit used \UML{} instances as virtual network
+nodes, connected by virtual Ethernet links implemented via Unix domain sockets.
+
+Netkit enabled educators and researchers to create complex network topologies on
+a single machine.  A student could configure a multi-router network with BGP,
+OSPF, DNS, and DHCP---all running real Linux networking code---on a laptop.
+Netkit was widely adopted in networking courses at universities across Europe
+and became one of \UML{}'s most visible applications.
+
+The related project Marionnet~\cite{marionnet} provided a graphical interface
+for constructing virtual network topologies, further lowering the barrier to
+entry for network education and experimentation.
+
+\subsection{Security Research and Honeypots}
+\label{sec:history-honeypots}
+
+\UML{} found a natural audience in the security research community.  Its
+lightweight isolation made it useful for:
+
+\begin{description}[leftmargin=2em,labelindent=1em]
+  \item[Honeypots] Running deliberately vulnerable systems to attract and study
+    attackers.  \UML{}'s low overhead made it practical to run many instances
+    on a single host, and its isolation (especially in SKAS mode) provided
+    reasonable confidence that a compromised guest could not easily escape to
+    the host.
+
+  \item[Malware analysis] Executing suspicious binaries in a controlled
+    environment where every system call could be observed.
+
+  \item[Intrusion detection research] Running experimental IDS systems against
+    realistic kernel and network stacks.
+\end{description}
+
+\subsection{Virtual Hosting}
+\label{sec:history-vhosting}
+
+Before containers and lightweight VMs became mainstream, \UML{} was used by
+some hosting providers to offer virtual private servers (VPS).  Each customer
+received a \UML{} instance with its own root filesystem, network configuration,
+and process space.  The overhead was lower than full hardware emulation (which
+at the time meant something like VMware or Bochs), and the isolation model was
+stronger than chroot-based approaches.
+
+Companies like Linode (in its early days, before switching to Xen) and various
+European hosting providers offered \UML{}-based VPS products.  While the
+performance overhead of ptrace-based system call interception made \UML{} slower
+than native execution, it was adequate for many web hosting and
+light-computation workloads.
+
+% ------------------------------------------------------------------
+\section{Decline and Maintenance Mode (2010--2020)}
+\label{sec:history-decline}
+% ------------------------------------------------------------------
+
+\UML{}'s decline was not the result of any single event.  It was the
+cumulative effect of multiple technological shifts that eroded its competitive
+advantages while \UML{} itself stagnated.
+
+\subsection{Hardware Virtualization Changes the Landscape}
+\label{sec:history-hwvirt}
+
+The most consequential shift was the arrival of hardware virtualization
+support in commodity x86 processors.  Intel released VT-x (originally
+codenamed ``Vanderpool'') in late 2005 on the Pentium 4 662 and
+672~\cite{intel-vt}.  AMD followed in 2006 with AMD-V (SVM, originally
+``Pacifica'')~\cite{amd-svm}.  These extensions added a new privilege
+level---VMX root and non-root modes (Intel) or host and guest modes
+(AMD)---that allowed a hypervisor to run unmodified guest operating systems
+with near-native performance.
+
+The impact on the virtualization landscape was seismic.  Before VT-x/AMD-V,
+running an unmodified guest OS on x86 required either full emulation
+(slow), binary translation (complex, patented by VMware), or
+paravirtualization (required guest OS modifications, as with Xen).
+Hardware virtualization made it possible to run unmodified guests with
+overhead measured in single-digit percentages rather than factors of 2--10x.
+
+For \UML{}, this was an existential threat.  \UML{}'s ptrace-based system
+call interception imposed an overhead of roughly 1--5\,\textmu{}s per guest
+system call.  For a workload making 100,000 system calls per second, this
+translated to 0.1--0.5 seconds of overhead per second of execution---a
+10--50\% performance penalty on a system-call-intensive workload.  Hardware
+virtualization reduced the equivalent overhead to tens of nanoseconds per
+VM exit, roughly two orders of magnitude faster.
+
+\subsection{KVM: Virtualization in the Kernel}
+\label{sec:history-kvm}
+
+The decisive blow came in February 2007, when Avi Kivity's KVM (Kernel-based
+Virtual Machine) was merged into Linux 2.6.20~\cite{kivity2007}.  \KVM{}
+leveraged VT-x/AMD-V to turn the Linux kernel itself into a hypervisor.  It
+was elegant, minimal (the initial patch was under 10,000 lines), and
+\emph{fast}.
+
+\KVM{}'s architecture was the mirror image of \UML{}'s.  Where \UML{} ran a
+kernel as a userspace process, \KVM{} ran guest kernels in hardware-supported
+VM mode, with the host kernel as the hypervisor.  Where \UML{} used ptrace
+to intercept system calls, \KVM{} used VT-x/AMD-V to trap only privileged
+operations.  Where \UML{} shared the host's physical memory via \syscall{mmap},
+\KVM{} used hardware page tables (EPT/NPT) to provide isolated guest physical
+address spaces.
+
+Combined with QEMU~\cite{bellard2005} for device emulation, \KVM{} quickly
+became the default virtualization solution for Linux.  It offered near-native
+performance for CPU-bound workloads and excellent I/O performance via virtio
+paravirtualized drivers.  For the use cases where \UML{} had been the best
+available option---kernel development, testing, lightweight VMs---\KVM{}/QEMU
+was now competitive and often superior.
+
+\subsection{Containers Capture the Lightweight Market}
+\label{sec:history-containers}
+
+The other major technological shift was the rise of OS-level virtualization
+(containers).  The Linux kernel's cgroup and namespace infrastructure matured
+between 2006 and 2013~\cite{soltesz2007,namespaces}, providing the building
+blocks for lightweight isolation: PID namespaces (2008), network namespaces
+(2009), user namespaces (2012), and cgroup v1 for resource accounting and
+limits.
+
+Docker, released in 2013, packaged these primitives into an accessible
+developer tool and ignited the container revolution.  For the use case of
+``run an isolated Linux environment with low overhead,'' containers offered
+effectively zero additional syscall overhead (the guest ran natively, sharing
+the host kernel) and millisecond startup times.
+
+Containers did not provide the kernel-level isolation that \UML{} offered---a
+container shared the host kernel, so kernel bugs affected all containers---but
+for the vast majority of development and deployment workloads, the trade-off
+was acceptable.  The combination of near-zero overhead and excellent tooling
+made containers the dominant lightweight isolation mechanism.
+
+\subsection{Code Rot and Declining Maintenance}
+\label{sec:history-rot}
+
+As users migrated to \KVM{} and containers, developer attention followed.
+\UML{}'s maintenance situation deteriorated:
+
+\begin{itemize}[nosep]
+  \item The tt mode was eventually removed, simplifying the codebase but
+    also removing a working (if slow) execution engine.
+  \item SMP support was never completed; \UML{} remained UP-only for over
+    a decade.
+  \item Various kernel API changes were not properly propagated to
+    \umlpath{arch/um/}, causing build breakages that sometimes persisted
+    for entire release cycles.
+  \item The SKAS0 mode accumulated technical debt, with workarounds and
+    hacks layered on top of the original ptrace-based design.
+  \item Test coverage was minimal---there were no automated selftests, and
+    manual testing was sporadic at best.
+  \item Documentation drifted out of date with the actual implementation.
+\end{itemize}
+
+\noindent
+Richard Weinberger took over as nominal maintainer, and his efforts kept
+\UML{} from being removed entirely.  But the subsystem was in maintenance
+mode: patches were mostly limited to fixing build breakages caused by core
+kernel API changes, with little new feature development.
+
+The perception within the kernel community reflected this state.  \UML{} was
+widely viewed as a legacy subsystem---useful in its time, but superseded by
+better alternatives.  Proposals to remove it from the tree surfaced
+periodically, though they never gained enough traction to reach consensus.
+
+% ------------------------------------------------------------------
+\section{The Linux Virtualization Timeline}
+\label{sec:history-virt-timeline}
+% ------------------------------------------------------------------
+
+To understand \UML{}'s trajectory, it helps to place it in the broader context
+of Linux virtualization history.  The following milestones shaped the landscape
+in which \UML{} operated:
+
+\subsection{Xen and Paravirtualization (2003)}
+\label{sec:history-xen}
+
+Xen, developed at the University of Cambridge, introduced efficient
+paravirtualization for x86~\cite{barham2003}.  By modifying the guest OS to
+make ``hypercalls'' instead of privileged instructions, Xen achieved
+virtualization overhead as low as 2--5\% for many workloads.  Xen was widely
+adopted in cloud computing (notably by Amazon Web Services in its early
+infrastructure) and demonstrated that high-performance virtualization was
+possible even without hardware support.
+
+Xen's success illustrated a design philosophy opposite to \UML{}'s: rather
+than making the kernel run as a userspace process, Xen made the hardware (or
+a thin software layer mimicking hardware) available to multiple kernel
+instances.  Both approaches achieved isolation, but Xen's approach was more
+natural for production deployment.
+
+\subsection{Intel VT-x and AMD-V (2005--2006)}
+\label{sec:history-hwext}
+
+Intel's VT-x~\cite{intel-vt} and AMD's SVM~\cite{amd-svm} extensions added
+hardware support for virtualization to commodity x86 processors.  The key
+features included:
+
+\begin{itemize}[nosep]
+  \item A new CPU mode (VMX non-root / guest mode) for running guest code
+  \item Automatic trapping of privileged operations to the hypervisor
+    (VM exits)
+  \item Hardware-managed guest/host state save/restore (VMCS/VMCB)
+  \item Extended Page Tables (EPT, Intel, 2008) and Nested Page Tables
+    (NPT, AMD, 2007) for efficient guest address translation
+\end{itemize}
+
+\noindent
+These extensions eliminated the need for binary translation or
+paravirtualization, enabling hypervisors to run unmodified guest operating
+systems with near-native performance.  They also provided a hardware-enforced
+security boundary between guest and host that was far stronger than any
+software-based approach, including \UML{}'s ptrace-based isolation.
+
+\subsection{KVM Enters Mainline (2007)}
+\label{sec:history-kvm-merge}
+
+\KVM{}'s merge into Linux 2.6.20~\cite{kivity2007} was a watershed moment.
+It established that the Linux kernel itself would be the primary hypervisor
+for Linux-based virtualization, rather than an external project like Xen or
+a proprietary product like VMware.  \KVM{}'s tight integration with the Linux
+kernel meant that it benefited automatically from every kernel improvement:
+scheduler optimizations improved guest scheduling, memory management
+improvements improved guest memory performance, and so on.
+
+\subsection{Cgroups and Namespaces Mature (2008--2013)}
+\label{sec:history-cgroups}
+
+The cgroup and namespace infrastructure that would eventually underpin
+containers was developed incrementally between 2006 and 2013~\cite{namespaces}.
+Key milestones included:
+
+\begin{itemize}[nosep]
+  \item 2006: cgroup v1 infrastructure merged
+  \item 2008: PID namespaces
+  \item 2009: Network namespaces
+  \item 2012: User namespaces (allowing unprivileged container creation)
+  \item 2013: Docker 0.1 released, combining cgroups, namespaces, and
+    union filesystems into an accessible tool
+\end{itemize}
+
+\noindent
+Containers~\cite{soltesz2007} did not provide the same isolation guarantees
+as virtual machines (a kernel exploit in a container compromises the host),
+but they offered effectively zero overhead and subsecond startup.  For
+development workflows and many production deployments, this trade-off was
+overwhelmingly attractive.
+
+\subsection{gVisor: A Different Approach (2018)}
+\label{sec:history-gvisor}
+
+Google's gVisor~\cite{gvisor}, released in 2018, represented a fascinating
+convergence with some of \UML{}'s original ideas.  gVisor implements a
+user-space kernel (called Sentry) that intercepts guest system calls and
+reimplements them in Go.  Like \UML{}, gVisor runs guest applications as
+processes on the host.  Unlike \UML{}, gVisor does not use the Linux kernel
+source code---it is a clean-room reimplementation of the Linux system call
+interface.
+
+gVisor's original platform used ptrace for system call interception (just
+as \UML{}'s tt mode did), and later moved to a KVM-based platform for
+better performance.  In 2023, gVisor introduced Systrap, a SIGSYS-based
+platform that uses seccomp-bpf for system call interception---conceptually
+identical to the approach that Benjamin Berg would bring to \UML{}.
+
+The parallel evolution is striking: two projects, decades apart, converging
+on the same insight that seccomp-bpf provides a faster mechanism for system
+call interception than ptrace.
+
+\subsection{Firecracker: MicroVMs for Serverless (2020)}
+\label{sec:history-firecracker}
+
+Amazon Web Services released Firecracker in 2020~\cite{agache2020}, a
+purpose-built virtual machine monitor (VMM) for serverless computing.
+Firecracker uses \KVM{} as its hypervisor but strips away nearly all of
+QEMU's device emulation complexity, providing only a minimal set of
+paravirtualized devices (virtio-net, virtio-block, a serial console).  The
+result is a VMM that can boot a guest in approximately 125\,ms and
+consumes less than 5\,MB of memory per VM.
+
+Firecracker's existence demonstrated that the performance gap between VMs
+and containers could be narrowed dramatically with careful engineering.  It
+also showed that for production workloads requiring strong isolation, the
+kernel community had converged on \KVM{} as the foundation.
+
+% ------------------------------------------------------------------
+\section{The Revival (2020--2026)}
+\label{sec:history-revival}
+% ------------------------------------------------------------------
+
+Against this backdrop, several independent threads of development converged
+in the early 2020s to revive \UML{}.  The motivations were varied, but they
+shared a common recognition that \UML{}'s unique position---a real kernel
+running as a userspace process---provided capabilities that no other
+virtualization technology could match.
+
+\subsection{Benjamin Berg and the Seccomp Backend}
+\label{sec:history-seccomp}
+
+The most consequential development was Benjamin Berg's work on a seccomp-based
+execution backend.  The idea, building on the seccomp-bpf
+framework~\cite{seccomp-bpf} that Will Drewry had added to the kernel in 2012,
+was to replace ptrace-based system call interception with SIGSYS-based
+notification.
+
+The mechanism works as follows:
+\begin{enumerate}[nosep]
+  \item A seccomp-bpf filter is installed that matches all system calls from
+    guest processes.
+  \item When a guest process makes a system call, the kernel generates a
+    \texttt{SIGSYS} signal instead of executing the system call.
+  \item The signal handler (running in the \UML{} kernel context) examines
+    the system call, dispatches it to the appropriate \UML{} kernel handler,
+    and manipulates the guest's register state to reflect the result.
+  \item Execution resumes in the guest process with the system call appearing
+    to have completed normally.
+\end{enumerate}
+
+\noindent
+The performance advantage over ptrace was substantial.  Ptrace-based
+interception required a minimum of two context switches per system call
+(guest $\to$ tracer $\to$ guest) plus additional system calls for register
+access.  The seccomp approach handled everything within a single signal
+delivery, which the kernel could process largely in-place.  Benchmarks showed
+roughly 3--4x improvement in system call throughput.
+
+Berg also redesigned the \UML{} process model around futex-based
+synchronization, replacing the signal-heavy IPC that the old ptrace backend
+had used.  The result was a cleaner, faster, and more maintainable execution
+engine.
+
+The seccomp backend was merged into Linux 6.16 (released 2025), marking the
+first major new feature to land in \umlpath{arch/um/} in over a decade.
+
+\subsection{Tiwei Bie and SMP Support}
+\label{sec:history-smp}
+
+Tiwei Bie (Intel) developed a series of patches to bring SMP support to
+\UML{}.  The v4 series implemented multi-CPU scheduling using host threads
+as virtual CPUs, with appropriate locking and synchronization to ensure
+correct concurrent execution.
+
+SMP support was a long-standing gap in \UML{}'s capabilities.  Modern
+kernel code is thoroughly concurrent, with per-CPU data, RCU, and lock-free
+algorithms that behave differently on UP and SMP systems.  Running \UML{}
+in UP mode meant that an entire class of concurrency bugs---the class that
+is most difficult to diagnose and fix---was invisible.
+
+\subsection{Anton Ivanov and Virtio-UML}
+\label{sec:history-virtio}
+
+Anton Ivanov contributed virtio-uml, a transport layer that allows \UML{}
+to use virtio devices via vhost-user or direct kernel virtio backends.
+This work was significant because it connected \UML{} to the broader virtio
+ecosystem: instead of implementing custom device models for each device
+type (block, network, console), \UML{} could use the same paravirtualized
+device stack that \KVM{}/QEMU, Firecracker, and other VMMs used.
+
+\subsection{Hajime Tazaki and the LKL-into-UML RFC}
+\label{sec:history-lkl}
+
+Hajime Tazaki submitted an RFC series (reaching v8) proposing to unify the
+Linux Kernel Library (LKL)~\cite{lkl,tazaki2019} into \UML{}.  LKL
+compiled the Linux kernel as a library that could be linked into userspace
+applications, providing access to the kernel's networking stack, file
+systems, and other subsystems without running a full VM.
+
+The LKL-into-\UML{} RFC stalled due to the complexity of reconciling LKL's
+library model with \UML{}'s process model, but it demonstrated continuing
+interest in the fundamental idea of running kernel code in userspace.  It
+also highlighted the need for a cleaner backend abstraction---a need that
+the modern \texttt{backend\_ops} architecture addresses.
+
+\subsection{The Coding Assistants Policy}
+\label{sec:history-ai}
+
+In April 2026, the Linux kernel documentation was updated with
+\texttt{coding-assistants.rst}~\cite{coding-assistants}, establishing
+official guidelines for AI-assisted kernel development.  While not specific
+to \UML{}, this policy change facilitated the rapid development of
+infrastructure code (selftests, documentation, build tooling) that had been
+a persistent bottleneck.
+
+\subsection{The v2 Architecture}
+\label{sec:history-v2}
+
+The convergence of these efforts---seccomp backend, SMP, virtio, and renewed
+community interest---created the conditions for a more fundamental redesign.
+The v2 architecture, detailed in Chapter~\ref{ch:v2redesign} of this report,
+introduces a \texttt{backend\_ops} abstraction layer that cleanly separates
+the \UML{} kernel from its execution engine.  This allows multiple backends
+(seccomp, \KVMvTwo{}, and potentially others) to coexist, selected at boot
+time, while sharing the rest of the kernel infrastructure.
+
+The \KVMvTwo{} backend, described in Chapter~\ref{ch:kvm}, leverages
+the same \KVM{} hardware virtualization that powers production cloud
+infrastructure, but uses it to accelerate \UML{} rather than to replace it.
+This closes the performance gap with bare-metal execution while preserving
+\UML{}'s defining advantage: the kernel runs as a debuggable, instrumentable
+userspace process.
+
+% ------------------------------------------------------------------
+\section{Timeline}
+\label{sec:history-timeline-fig}
+% ------------------------------------------------------------------
+
+Figure~\ref{fig:timeline} presents a visual timeline of the major events
+described in this chapter, placing \UML{}'s development in the context of
+the broader Linux virtualization ecosystem.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=0.32cm,
+  event/.style={fill=UMLBlue!8, draw=UMLBlue!40, rounded corners=2pt,
+                font=\scriptsize, text width=3.8cm, align=left, inner sep=3pt},
+  virt/.style={fill=UMLTeal!8, draw=UMLTeal!40, rounded corners=2pt,
+               font=\scriptsize, text width=3.8cm, align=left, inner sep=3pt},
+  uml/.style={fill=UMLGreen!8, draw=UMLGreen!50, rounded corners=2pt,
+              font=\scriptsize, text width=3.8cm, align=left, inner sep=3pt},
+  decline/.style={fill=UMLRed!6, draw=UMLRed!30, rounded corners=2pt,
+                  font=\scriptsize, text width=3.8cm, align=left, inner sep=3pt},
+  yearmark/.style={font=\tiny\bfseries, color=UMLMuted},
+  connector/.style={thin, color=UMLMuted!60},
+]
+
+% --- Axis ---
+\draw[thick, color=UMLInk!50, -{Stealth[length=5pt]}] (0,0) -- (36,0);
+
+% Year marks
+\foreach \y/\label in {%
+  0/1991, 2.6/1993, 5.1/1995, 7.7/1997, 10.3/1999,
+  12.9/2001, 15.4/2003, 17.9/2005, 20.6/2007, 23.1/2009,
+  25.7/2011, 28.3/2013, 30.9/2015, 33.4/2018, 34.9/2020,
+  35.4/2022, 35.7/2024, 36/2026} {
+  \draw[color=UMLMuted!40] (\y, -0.15) -- (\y, 0.15);
+  \node[yearmark, below] at (\y, -0.2) {\label};
+}
+
+% --- Upper events (UML and kernel) ---
+
+% Linux 0.01
+\node[event, anchor=south west] (linux) at (0, 1.8)
+  {\textbf{1991} Linux 0.01 released};
+\draw[connector] (0, 0.1) -- (0, 1.8);
+
+% Linux 2.0 SMP
+\node[event, anchor=south west] (smp) at (4.5, 3.5)
+  {\textbf{1996} Linux 2.0: SMP,\\multi-arch};
+\draw[connector] (6.4, 0.1) -- (6.4, 3.5);
+
+% UML announced
+\node[uml, anchor=south west] (uml-ann) at (9.3, 1.8)
+  {\textbf{1999} Jeff Dike announces UML (tt mode)};
+\draw[connector] (10.3, 0.1) -- (10.3, 1.8);
+
+% UML ALS 2000
+\node[uml, anchor=south west] (als) at (11, 3.8)
+  {\textbf{2000} UML presented at ALS};
+\draw[connector] (11.6, 0.1) -- (11.6, 3.8);
+
+% UML mainline
+\node[uml, anchor=south west] (mainline) at (14.2, 1.8)
+  {\textbf{2002--03} UML merged into\\Linux 2.6.x mainline};
+\draw[connector] (14.2, 0.1) -- (14.2, 1.8);
+
+% SKAS
+\node[uml, anchor=south west] (skas) at (14.2, 5.0)
+  {\textbf{2002--06} SKAS0/3/4\\evolution};
+\draw[connector] (15.4, 0.1) -- (15.4, 5.0);
+
+% Dike book
+\node[uml, anchor=south west] (book) at (17.5, 3.5)
+  {\textbf{2006} Dike publishes\\UML book (Prentice Hall)};
+\draw[connector] (17.9, 0.1) -- (17.9, 3.5);
+
+% Netkit
+\node[uml, anchor=south west] (netkit) at (20.2, 5.0)
+  {\textbf{2008} Netkit: UML for\\network education};
+\draw[connector] (20.6, 0.1) -- (20.6, 5.0);
+
+% UML decline
+\node[decline, anchor=south west] (rot) at (25, 3.5)
+  {\textbf{2010--20} Maintenance mode;\\code rot, no SMP};
+\draw[connector] (27, 0.1) -- (27, 3.5);
+
+% Seccomp backend
+\node[uml, anchor=south west] (seccomp) at (33.5, 5.0)
+  {\textbf{2025} Seccomp backend\\merged (Linux 6.16)};
+\draw[connector] (34.9, 0.1) -- (34.9, 5.0);
+
+% v2 redesign
+\node[uml, anchor=south west] (v2) at (34, 1.8)
+  {\textbf{2026} backend\_ops +\\kvm-v2 + SMP};
+\draw[connector] (36, 0.1) -- (36, 1.8);
+
+% --- Lower events (competing technologies) ---
+
+% Xen
+\node[virt, anchor=north west] (xen) at (14.2, -1.5)
+  {\textbf{2003} Xen para-\\virtualization};
+\draw[connector] (15.4, -0.1) -- (15.4, -1.5);
+
+% VT-x
+\node[virt, anchor=north west] (vtx) at (17, -3.3)
+  {\textbf{2005--06} Intel VT-x,\\AMD-V released};
+\draw[connector] (17.9, -0.1) -- (17.9, -3.3);
+
+% KVM
+\node[virt, anchor=north west] (kvm) at (19.5, -1.5)
+  {\textbf{2007} KVM merged into\\Linux mainline};
+\draw[connector] (20.6, -0.1) -- (20.6, -1.5);
+
+% Docker
+\node[virt, anchor=north west] (docker) at (28, -1.5)
+  {\textbf{2013} Docker released;\\containers go mainstream};
+\draw[connector] (28.3, -0.1) -- (28.3, -1.5);
+
+% gVisor
+\node[virt, anchor=north west] (gvisor-node) at (32.5, -3.3)
+  {\textbf{2018} gVisor: user-space\\kernel (Google)};
+\draw[connector] (33.4, -0.1) -- (33.4, -3.3);
+
+% Firecracker
+\node[virt, anchor=north west] (fc) at (33.5, -1.5)
+  {\textbf{2020} Firecracker microVMs};
+\draw[connector] (34.9, -0.1) -- (34.9, -1.5);
+
+% --- Legend ---
+\node[anchor=north west, font=\scriptsize\bfseries, color=UMLInk] at (0, -5.0) {Legend:};
+\node[uml, anchor=west, minimum height=0.4cm, text width=1.8cm] at (2.5, -5.0) {UML event};
+\node[virt, anchor=west, minimum height=0.4cm, text width=2.5cm] at (8, -5.0) {Competing technology};
+\node[event, anchor=west, minimum height=0.4cm, text width=2.5cm] at (14, -5.0) {Linux kernel milestone};
+\node[decline, anchor=west, minimum height=0.4cm, text width=1.8cm] at (20, -5.0) {Decline period};
+
+\end{tikzpicture}
+
+\caption{Timeline of User-Mode Linux development in the context of Linux
+  kernel and virtualization history (1991--2026).  Upper events relate to
+  \UML{} and the Linux kernel; lower events show competing virtualization
+  technologies that shaped \UML{}'s trajectory.}
+\label{fig:timeline}
+\end{figure}
+
+% ------------------------------------------------------------------
+\section{Lessons from History}
+\label{sec:history-lessons}
+% ------------------------------------------------------------------
+
+The arc of \UML{}'s history offers several lessons relevant to the v2
+redesign:
+
+\paragraph{Architecture matters more than performance.}
+\UML{}'s original \texttt{arch/} insight---that a well-abstracted interface
+can be reimplemented on top of very different substrates---was correct in
+1999, correct in 2007 when applied to \KVM{}, and remains correct today.
+The v2 \texttt{backend\_ops} abstraction applies the same principle within
+\UML{} itself: abstracting the execution engine so that new backends (seccomp,
+\KVM{}, and future possibilities) can be added without rewriting the rest of
+the architecture.
+
+\paragraph{The ptrace tax was real.}
+\UML{}'s decade-long decline was not due to a fundamental flaw in the concept
+of running a kernel as a userspace process.  It was due to a specific
+implementation bottleneck: ptrace-based system call interception was too slow.
+The seccomp backend demonstrates that with a better interception mechanism,
+the concept remains viable.  The \KVMvTwo{} backend goes further, eliminating
+the interception overhead entirely for most operations.
+
+\paragraph{Isolation without hardware is still valuable.}
+Containers have no kernel-level isolation.  Hardware VMs provide strong
+isolation but require VT-x/AMD-V and cannot be run inside many restricted
+environments (CI/CD containers, nested VMs, some cloud instances).  \UML{}
+occupies a unique middle ground: real kernel isolation, implemented purely in
+software, runnable anywhere a Linux process can run.  This niche has expanded
+rather than contracted as CI/CD pipelines and restricted environments have
+become ubiquitous.
+
+\paragraph{Debugging the kernel will always matter.}
+No amount of hardware virtualization performance eliminates the need to debug
+the kernel.  \KVM{}/QEMU provides a debuggable target via GDB's remote
+protocol, but the developer experience is qualitatively different from running
+the kernel as a native process.  \UML{} allows kernel code to be debugged with
+the same tools, workflows, and muscle memory that developers use for userspace
+applications.  This advantage is permanent.
+
+\paragraph{Maintenance requires a constituency.}
+\UML{}'s decade of rot was a maintenance problem, not a technical one.  The
+technology had no organized user community demanding features, no companies
+depending on it for production workloads, and no continuous integration
+preventing regressions.  The v2 effort addresses this by integrating kselftests,
+providing comprehensive documentation, and connecting \UML{} to use cases
+(kernel fuzzing, CI/CD, AI-assisted development) that create ongoing
+demand for maintenance.
+
+\bigskip
+\noindent
+With this historical context established, we turn in the next chapter to the
+technical foundations on which \UML{} is built: the Linux process model,
+the ptrace and seccomp interfaces, and the \KVM{} API.

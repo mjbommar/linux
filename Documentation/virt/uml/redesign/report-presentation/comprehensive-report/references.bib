@@ -1,0 +1,574 @@
+% ==========================================================================
+%  User-Mode Linux: Comprehensive Technical Report — Bibliography
+% ==========================================================================
+
+% --- UML Primary Sources ---
+
+@inproceedings{dike2000,
+  author    = {Jeff Dike},
+  title     = {A User-mode Port of the {Linux} Kernel},
+  booktitle = {Proceedings of the 4th Annual Linux Showcase and Conference (ALS)},
+  year      = {2000},
+  publisher = {USENIX Association},
+  address   = {Atlanta, GA},
+  url       = {https://www.usenix.org/legacy/publications/library/proceedings/als00/2000papers/papers/full_papers/dike/dike_html/}
+}
+
+@inproceedings{dike2001,
+  author    = {Jeff Dike},
+  title     = {User-mode {Linux}},
+  booktitle = {Proceedings of the 5th Annual Linux Showcase and Conference},
+  year      = {2001},
+  publisher = {USENIX Association}
+}
+
+@misc{dike-ols2003,
+  author       = {Jeff Dike},
+  title        = {Making {UML} Ready for the Mainstream},
+  howpublished = {Ottawa Linux Symposium},
+  year         = {2003}
+}
+
+@misc{dike-ols2006,
+  author       = {Jeff Dike},
+  title        = {{SKAS4}---{UML}'s New Execution Engine},
+  howpublished = {Ottawa Linux Symposium},
+  year         = {2006}
+}
+
+@misc{uml-homepage,
+  title        = {User Mode {Linux} --- Project Homepage},
+  howpublished = {\url{https://user-mode-linux.sourceforge.net/}},
+  note         = {Jeff Dike's original project page},
+  year         = {2000}
+}
+
+@misc{uml-howto,
+  title        = {User Mode {Linux} {HOWTO}},
+  howpublished = {\url{https://docs.kernel.org/virt/uml/user_mode_linux_howto_v2.html}},
+  note         = {Linux kernel documentation}
+}
+
+@book{dike2006book,
+  author    = {Jeff Dike},
+  title     = {User Mode {Linux}},
+  publisher = {Prentice Hall},
+  year      = {2006},
+  isbn      = {978-0131865051},
+  note      = {The definitive guide to UML by its creator}
+}
+
+% --- Linux Kernel History and Development ---
+
+@misc{torvalds1991,
+  author       = {Linus Torvalds},
+  title        = {Free minix-like kernel sources for 386-{AT}},
+  howpublished = {comp.os.minix Usenet posting},
+  year         = {1991},
+  month        = oct
+}
+
+@book{love2010,
+  author    = {Robert Love},
+  title     = {Linux Kernel Development},
+  edition   = {3rd},
+  publisher = {Addison-Wesley},
+  year      = {2010},
+  isbn      = {978-0672329463}
+}
+
+@book{bovet2005,
+  author    = {Daniel P. Bovet and Marco Cesati},
+  title     = {Understanding the {Linux} Kernel},
+  edition   = {3rd},
+  publisher = {O'Reilly Media},
+  year      = {2005},
+  isbn      = {978-0596005658}
+}
+
+@book{corbet2005,
+  author    = {Jonathan Corbet and Alessandro Rubini and Greg Kroah-Hartman},
+  title     = {{Linux} Device Drivers},
+  edition   = {3rd},
+  publisher = {O'Reilly Media},
+  year      = {2005},
+  isbn      = {978-0596005900}
+}
+
+@book{gorman2004,
+  author    = {Mel Gorman},
+  title     = {Understanding the {Linux} Virtual Memory Manager},
+  publisher = {Prentice Hall},
+  year      = {2004},
+  isbn      = {978-0131453487}
+}
+
+% --- Virtualization Foundations ---
+
+@article{popek1974,
+  author  = {Gerald J. Popek and Robert P. Goldberg},
+  title   = {Formal Requirements for Virtualizable Third Generation Architectures},
+  journal = {Communications of the ACM},
+  volume  = {17},
+  number  = {7},
+  pages   = {412--421},
+  year    = {1974},
+  doi     = {10.1145/361011.361073}
+}
+
+@article{goldberg1973,
+  author  = {Robert P. Goldberg},
+  title   = {Architecture of Virtual Machines},
+  journal = {AFIPS Conference Proceedings},
+  volume  = {42},
+  pages   = {309--318},
+  year    = {1973}
+}
+
+@inproceedings{smith2005,
+  author    = {James E. Smith and Ravi Nair},
+  title     = {The Architecture of Virtual Machines},
+  journal   = {Computer},
+  volume    = {38},
+  number    = {5},
+  pages     = {32--38},
+  year      = {2005},
+  publisher = {IEEE}
+}
+
+@book{smith2005book,
+  author    = {James E. Smith and Ravi Nair},
+  title     = {Virtual Machines: Versatile Platforms for Systems and Processes},
+  publisher = {Morgan Kaufmann},
+  year      = {2005},
+  isbn      = {978-1558609105}
+}
+
+% --- KVM ---
+
+@inproceedings{kivity2007,
+  author    = {Avi Kivity and Yaniv Kamay and Dor Laor and Uri Lublin and Anthony Liguori},
+  title     = {{kvm}: the {Linux} Virtual Machine Monitor},
+  booktitle = {Proceedings of the Linux Symposium},
+  year      = {2007},
+  volume    = {1},
+  pages     = {225--230}
+}
+
+@misc{kvm-api,
+  title        = {{KVM} {API} Documentation},
+  howpublished = {\url{https://docs.kernel.org/virt/kvm/api.html}},
+  note         = {Linux kernel documentation}
+}
+
+@misc{kvm-internals,
+  title        = {{KVM} Internals},
+  howpublished = {\url{https://docs.kernel.org/virt/kvm/}},
+  note         = {Linux kernel documentation}
+}
+
+% --- Xen ---
+
+@inproceedings{barham2003,
+  author    = {Paul Barham and Boris Dragovic and Keir Fraser and Steven Hand and Tim Harris and Alex Ho and Rolf Neugebauer and Ian Pratt and Andrew Warfield},
+  title     = {{Xen} and the Art of Virtualization},
+  booktitle = {Proceedings of the 19th ACM Symposium on Operating Systems Principles (SOSP)},
+  year      = {2003},
+  pages     = {164--177},
+  publisher = {ACM},
+  doi       = {10.1145/945445.945462}
+}
+
+% --- gVisor ---
+
+@misc{gvisor,
+  title        = {g{V}isor: Container Runtime Sandbox},
+  howpublished = {\url{https://gvisor.dev/}},
+  note         = {Google project}
+}
+
+@misc{gvisor-platforms,
+  title        = {g{V}isor Architecture Guide: Platforms},
+  howpublished = {\url{https://gvisor.dev/docs/architecture_guide/platforms/}},
+  note         = {gVisor documentation}
+}
+
+@misc{gvisor-systrap,
+  title        = {Introducing Systrap: a fast g{V}isor platform},
+  howpublished = {\url{https://gvisor.dev/blog/2023/04/28/systrap-release/}},
+  note         = {gVisor blog, April 2023}
+}
+
+@inproceedings{young2019,
+  author    = {Eric Young and Zhongxing Xu and Ian Lewis and Elmar Buber},
+  title     = {g{V}isor: A Sandboxed Container Runtime for Untrusted Code},
+  year      = {2019},
+  note      = {Google Cloud blog and internal documentation}
+}
+
+% --- Firecracker ---
+
+@inproceedings{agache2020,
+  author    = {Alexandru Agache and Marc Brooker and Alexandra Iordache and Anthony Liguori and Rolf Neugebauer and Phil Piwonka and Diana-Maria Popa},
+  title     = {Firecracker: Lightweight Virtualization for Serverless Applications},
+  booktitle = {Proceedings of the 17th USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year      = {2020},
+  publisher = {USENIX Association},
+  pages     = {419--434}
+}
+
+@misc{firecracker,
+  title        = {Firecracker Micro{VM}},
+  howpublished = {\url{https://firecracker-microvm.github.io/}},
+  note         = {Project documentation}
+}
+
+% --- Linux Kernel Library (LKL) ---
+
+@inproceedings{purdila2010,
+  author    = {Octavian Purdila and Lucian Adrian Grijincu and Nicolae Tapus},
+  title     = {{LKL}: The {Linux} Kernel Library},
+  booktitle = {Proceedings of the 9th RoEduNet IEEE International Conference},
+  year      = {2010},
+  pages     = {328--333},
+  doi       = {10.1109/ROEDUNET.2010.5541417}
+}
+
+@misc{lkl,
+  title        = {{LKL}: {Linux} Kernel Library},
+  howpublished = {\url{https://github.com/lkl/linux}},
+  note         = {Project repository}
+}
+
+@misc{tazaki2019,
+  author       = {Hajime Tazaki},
+  title        = {Unify {LKL} into {UML}},
+  howpublished = {\url{https://lore.kernel.org/lkml/}},
+  note         = {LKML RFC series, v8, 2019},
+  year         = {2019}
+}
+
+% --- Unikernels ---
+
+@inproceedings{madhavapeddy2013,
+  author    = {Anil Madhavapeddy and Richard Mortier and Charalampos Rotsos and David Scott and Balraj Singh and Thomas Gazagnaire and Steven Smith and Steven Hand and Jon Crowcroft},
+  title     = {Unikernels: Library Operating Systems for the Cloud},
+  booktitle = {Proceedings of the 18th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  year      = {2013},
+  pages     = {461--472},
+  doi       = {10.1145/2451116.2451167}
+}
+
+@inproceedings{kuenzer2021,
+  author    = {Simon Kuenzer and Vlad-Andrei B\u{a}doiu and Hugo Le Feuvre and Sharan Santhanam and Alexander Jung and Gaulthier Gain and Cyril Soldani and Costin Lupu and \c{S}tefan Rusu and Felipe Huici and Andrii Kenber and Wei Chen and Stefan Teodorescu and C\u{a}t\u{a}lin Radu and Costin Raiciu and Pierre Olivier},
+  title     = {Unikraft: Fast, Specialized Unikernels the Easy Way},
+  booktitle = {Proceedings of the Sixteenth European Conference on Computer Systems (EuroSys)},
+  year      = {2021},
+  doi       = {10.1145/3447786.3456248}
+}
+
+% --- Containers ---
+
+@inproceedings{soltesz2007,
+  author    = {Stephen Soltesz and Herbert P\"{o}tzl and Marc E. Fiuczynski and Andy Bavier and Larry Peterson},
+  title     = {Container-based Operating System Virtualization: A Scalable, High-Performance Alternative to Hypervisors},
+  booktitle = {Proceedings of the 2nd ACM SIGOPS/EuroSys European Conference on Computer Systems},
+  year      = {2007},
+  pages     = {275--287},
+  doi       = {10.1145/1272996.1273025}
+}
+
+@misc{namespaces,
+  author       = {Michael Kerrisk},
+  title        = {Namespaces in operation},
+  howpublished = {\url{https://lwn.net/Articles/531114/}},
+  note         = {LWN.net series, 2013},
+  year         = {2013}
+}
+
+@misc{cgroups-v2,
+  title        = {Control Group v2},
+  howpublished = {\url{https://docs.kernel.org/admin-guide/cgroup-v2.html}},
+  note         = {Linux kernel documentation}
+}
+
+% --- Library Operating Systems ---
+
+@inproceedings{porter2011,
+  author    = {Donald E. Porter and Silas Boyd-Wickizer and Jon Howell and Rolf Neugebauer and Galen Hunt},
+  title     = {Rethinking the Library {OS} from the Top Down},
+  booktitle = {Proceedings of the 16th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  year      = {2011},
+  pages     = {291--304},
+  doi       = {10.1145/1950365.1950399},
+  note      = {Drawbridge / Bascule}
+}
+
+@inproceedings{tsai2014,
+  author    = {Chia-Che Tsai and Kumar Saurabh Arora and Nehal Bandi and Bhushan Jain and William Jannen and Jitin John and Harry A. Kalodner and Vrushali Kulkarni and Daniela Oliveira and Donald E. Porter},
+  title     = {Cooperation and Security Isolation of Library {OS}es for Multi-Process Applications},
+  booktitle = {Proceedings of the 9th European Conference on Computer Systems (EuroSys)},
+  year      = {2014},
+  doi       = {10.1145/2592798.2592812},
+  note      = {Graphene}
+}
+
+@misc{gramine,
+  title        = {Gramine Library {OS}},
+  howpublished = {\url{https://gramineproject.io/}},
+  note         = {Successor to Graphene; SGX support}
+}
+
+% --- Dune ---
+
+@inproceedings{belay2012,
+  author    = {Adam Belay and Andrea Bittau and Ali Mashtizadeh and David Terei and David Mazi\`eres and Christos Kozyrakis},
+  title     = {Dune: Safe User-level Access to Privileged {CPU} Features},
+  booktitle = {Proceedings of the 10th USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year      = {2012},
+  pages     = {335--348},
+  publisher = {USENIX Association}
+}
+
+% --- Microkernels ---
+
+@article{liedtke1995,
+  author  = {Jochen Liedtke},
+  title   = {On $\mu$-Kernel Construction},
+  journal = {ACM SIGOPS Operating Systems Review},
+  volume  = {29},
+  number  = {5},
+  pages   = {237--250},
+  year    = {1995},
+  doi     = {10.1145/224057.224075}
+}
+
+@inproceedings{pike1990,
+  author    = {Rob Pike and Dave Presotto and Ken Thompson and Howard Trickey and Phil Winterbottom},
+  title     = {The Use of Name Spaces in {Plan 9}},
+  booktitle = {Proceedings of the 2nd ACM SIGOPS European Workshop},
+  year      = {1990}
+}
+
+@article{engler1995,
+  author  = {Dawson R. Engler and M. Frans Kaashoek and James O'Toole},
+  title   = {Exokernel: An Operating System Architecture for Application-Level Resource Management},
+  journal = {ACM SIGOPS Operating Systems Review},
+  volume  = {29},
+  number  = {5},
+  pages   = {251--266},
+  year    = {1995}
+}
+
+% --- Seccomp and Sandboxing ---
+
+@misc{seccomp-bpf,
+  title        = {{SECCOMP\_BPF}: Seccomp filter},
+  howpublished = {\url{https://docs.kernel.org/userspace-api/seccomp_filter.html}},
+  note         = {Linux kernel documentation}
+}
+
+@misc{ptrace-man,
+  title        = {ptrace(2) --- {Linux} manual page},
+  howpublished = {\url{https://man7.org/linux/man-pages/man2/ptrace.2.html}}
+}
+
+% --- Fuzzing ---
+
+@misc{syzkaller,
+  title        = {syzkaller: kernel fuzzer},
+  howpublished = {\url{https://github.com/google/syzkaller}},
+  note         = {Project repository}
+}
+
+@inproceedings{vyukov2015,
+  author    = {Dmitry Vyukov},
+  title     = {syzkaller: an unsupervised, coverage-guided, fuzzer for {Linux} kernel},
+  year      = {2015},
+  note      = {Google internal presentation; public syzkaller repo}
+}
+
+@inproceedings{schumilo2017,
+  author    = {Sergej Schumilo and Cornelius Aschermann and Robert Gawlik and Sebastian Schinzel and Thorsten Holz},
+  title     = {{kAFL}: Hardware-Assisted Feedback Fuzzing for {OS} Kernels},
+  booktitle = {Proceedings of the 26th USENIX Security Symposium},
+  year      = {2017},
+  pages     = {167--182}
+}
+
+% --- x86 Architecture ---
+
+@manual{intel-sdm,
+  title        = {{Intel\textregistered{}} 64 and {IA}-32 Architectures Software Developer's Manual},
+  organization = {Intel Corporation},
+  year         = {2024},
+  note         = {Volume 3: System Programming Guide}
+}
+
+@manual{amd-apm,
+  title        = {{AMD64} Architecture Programmer's Manual},
+  organization = {Advanced Micro Devices},
+  year         = {2024},
+  note         = {Volume 2: System Programming}
+}
+
+% --- VMware and Industry ---
+
+@misc{vmware-history,
+  author       = {Mendel Rosenblum},
+  title        = {The Reincarnation of Virtual Machines},
+  howpublished = {ACM Queue},
+  year         = {2004}
+}
+
+@inproceedings{adams2006,
+  author    = {Keith Adams and Ole Agesen},
+  title     = {A Comparison of Software and Hardware Techniques for x86 Virtualization},
+  booktitle = {Proceedings of the 12th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)},
+  year      = {2006},
+  pages     = {2--13},
+  doi       = {10.1145/1168857.1168860}
+}
+
+% --- crosvm and Cloud Hypervisor ---
+
+@misc{crosvm,
+  title        = {crosvm Book: Architecture Overview},
+  howpublished = {\url{https://crosvm.dev/book/architecture/overview.html}},
+  note         = {Chrome OS virtual machine monitor}
+}
+
+@misc{cloud-hypervisor,
+  title        = {Cloud Hypervisor},
+  howpublished = {\url{https://www.cloudhypervisor.org/}},
+  note         = {Open-source VMM for cloud workloads}
+}
+
+% --- Network Simulation and UML Usage ---
+
+@article{pizzonia2008,
+  author  = {Maurizio Pizzonia and Massimo Rimondini},
+  title   = {Netkit: Network Emulation for Education},
+  journal = {Software: Practice and Experience},
+  volume  = {38},
+  number  = {2},
+  pages   = {151--171},
+  year    = {2008},
+  doi     = {10.1002/spe.825}
+}
+
+@misc{marionnet,
+  title        = {Marionnet: a virtual network laboratory},
+  howpublished = {\url{https://www.marionnet.org/}},
+  note         = {Uses UML for network simulation}
+}
+
+@misc{mlnx,
+  author       = {Xorp},
+  title        = {Virtualized Network Topology using {UML}},
+  howpublished = {Xorp technical notes},
+  year         = {2003}
+}
+
+% --- Linux Process Model ---
+
+@misc{seccomp-filter-lwn,
+  author       = {Will Drewry},
+  title        = {Seccomp filter},
+  howpublished = {\url{https://lwn.net/Articles/475043/}},
+  year         = {2012},
+  note         = {LWN.net}
+}
+
+@misc{futex-lwn,
+  author       = {Ulrich Drepper},
+  title        = {Futexes Are Tricky},
+  howpublished = {\url{https://dept-info.labri.fr/~denis/Enseignement/2008-IR/Articles/01-futex.pdf}},
+  year         = {2011}
+}
+
+% --- AI-Assisted Development ---
+
+@misc{coding-assistants,
+  title        = {{Linux} Kernel Documentation: Coding Assistants},
+  howpublished = {\url{https://docs.kernel.org/process/coding-assistants.html}},
+  note         = {Linux kernel documentation, April 2026}
+}
+
+% --- QEMU ---
+
+@inproceedings{bellard2005,
+  author    = {Fabrice Bellard},
+  title     = {{QEMU}, a Fast and Portable Dynamic Translator},
+  booktitle = {Proceedings of the USENIX Annual Technical Conference (FREENIX Track)},
+  year      = {2005},
+  pages     = {41--46}
+}
+
+% --- Hardware Virtualization Extensions ---
+
+@misc{intel-vt,
+  title        = {{Intel\textregistered{}} Virtualization Technology ({VT}-x)},
+  organization = {Intel Corporation},
+  howpublished = {\url{https://www.intel.com/content/www/us/en/virtualization/virtualization-technology/intel-virtualization-technology.html}},
+  note         = {First released 2005 on Pentium 4 662/672}
+}
+
+@misc{amd-svm,
+  title        = {{AMD-V}: {AMD} Virtualization ({SVM})},
+  organization = {Advanced Micro Devices},
+  howpublished = {AMD64 Architecture Programmer's Manual, Volume 2, Ch. 15},
+  note         = {First released 2006 on Athlon 64}
+}
+
+% --- eBPF ---
+
+@misc{ebpf,
+  title        = {e{BPF}},
+  howpublished = {\url{https://ebpf.io/}},
+  note         = {Extended Berkeley Packet Filter documentation}
+}
+
+% --- Kernel Sanitizers ---
+
+@misc{kasan,
+  title        = {{KASAN}: Kernel Address Sanitizer},
+  howpublished = {\url{https://docs.kernel.org/dev-tools/kasan.html}},
+  note         = {Linux kernel documentation}
+}
+
+@misc{kmsan,
+  title        = {{KMSAN}: Kernel Memory Sanitizer},
+  howpublished = {\url{https://docs.kernel.org/dev-tools/kmsan.html}},
+  note         = {Linux kernel documentation}
+}
+
+@misc{kcsan,
+  title        = {{KCSAN}: Kernel Concurrency Sanitizer},
+  howpublished = {\url{https://docs.kernel.org/dev-tools/kcsan.html}},
+  note         = {Linux kernel documentation}
+}
+
+% --- Record/Replay ---
+
+@inproceedings{dunlap2002,
+  author    = {George W. Dunlap and Samuel T. King and Sukru Cinar and Murtaza Basrai and Peter M. Chen},
+  title     = {{ReVirt}: Enabling Intrusion Analysis through Virtual-Machine Logging and Replay},
+  booktitle = {Proceedings of the 5th Symposium on Operating Systems Design and Implementation (OSDI)},
+  year      = {2002},
+  pages     = {211--224}
+}
+
+@misc{rr-project,
+  title        = {rr: lightweight recording \& deterministic debugging},
+  howpublished = {\url{https://rr-project.org/}},
+  note         = {Mozilla project}
+}
+
+% --- WSL ---
+
+@misc{wsl1,
+  title        = {Windows Subsystem for {Linux} Overview},
+  howpublished = {\url{https://learn.microsoft.com/en-us/windows/wsl/about}},
+  note         = {Microsoft documentation; WSL1 used syscall translation, WSL2 uses Hyper-V VM}
+}

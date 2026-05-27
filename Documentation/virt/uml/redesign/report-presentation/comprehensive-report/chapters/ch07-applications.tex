@@ -1,0 +1,882 @@
+% ==========================================================================
+%  Chapter 7 — Applications and Use Cases
+% ==========================================================================
+\chapter{Applications and Use Cases}
+\label{ch:applications}
+
+\epigraph{%
+  The value of UML is not that it virtualizes hardware---it's that it
+  makes the kernel a first-class debugging target.%
+}{Jeff Dike, Ottawa Linux Symposium, 2003}
+
+User-Mode Linux's unique position in the virtualization design space---a
+real kernel running as a debuggable userspace process---gives it a set
+of application domains that no other single technology covers.  This
+chapter surveys seven categories of use, ranging from established
+practice (kernel debugging, network simulation) to emerging
+opportunities made newly practical by the v2 redesign (coverage-guided
+fuzzing, record/replay, snapshot-based iteration).
+
+For each domain we describe the use case, explain why \UML{} is suited
+to it, identify the limitations of current alternatives, and where
+applicable, sketch the concrete workflow.
+
+
+% ------------------------------------------------------------------
+\section{Kernel Development and Debugging}
+\label{sec:app-debugging}
+% ------------------------------------------------------------------
+
+The most natural use of \UML{} is the one Jeff Dike built it for:
+running a Linux kernel under an ordinary debugger.
+
+\subsection{The debugging workflow}
+
+Because the \UML{} kernel is an ELF binary linked with full DWARF
+debug information, a developer can attach \texttt{gdb} to it exactly
+as one would attach to any other process:
+
+\begin{lstlisting}[language=bash,caption={Launching UML under gdb}]
+# Build with debug info
+make ARCH=um O=build-um defconfig
+make ARCH=um O=build-um -j$(nproc)
+
+# Launch under gdb
+gdb --args build-um/vmlinux mem=512M \
+    root=/dev/root rootfstype=hostfs rootflags=/
+\end{lstlisting}
+
+From the \texttt{gdb} prompt the developer can:
+
+\begin{itemize}[leftmargin=2em]
+  \item Set breakpoints in any kernel function:
+        \texttt{break do\_sys\_open}, \texttt{break \_\_schedule}.
+  \item Single-step through the page fault handler, the scheduler,
+        or the VFS layer.
+  \item Inspect kernel data structures: \texttt{print *current},
+        \texttt{print runqueues->cfs.nr\_running}.
+  \item Use hardware watchpoints to catch unexpected writes to specific
+        memory addresses.
+  \item Examine the state of every ``CPU'' (host thread) using
+        \texttt{info threads} and \texttt{thread apply all bt}.
+\end{itemize}
+
+This is qualitatively different from debugging a bare-metal or
+QEMU-hosted kernel.  On bare metal, kernel debugging requires a serial
+console, a JTAG probe, or KGDB---all of which add latency, limit the
+set of available debugger commands, and require physical access to the
+target machine.  With QEMU, one can use \texttt{gdb} over the GDB
+remote protocol (\texttt{-s -S} flags), but the debugger operates on
+the QEMU process, not on native host memory.  Variable inspection
+requires the debugger to translate guest virtual addresses through
+emulated page tables, and performance-sensitive operations like
+conditional breakpoints incur orders-of-magnitude slowdowns due to
+the remote protocol round-trips.
+
+With \UML{}, the kernel \emph{is} the debuggee.  \texttt{gdb} reads
+kernel memory through the same \texttt{ptrace} / \texttt{process\_vm\_readv}
+mechanisms it uses for any local process.  Conditional breakpoints
+evaluate at native speed.  The full repertoire of \texttt{gdb} Python
+scripting is available for custom pretty-printers, breakpoint commands,
+and automated inspection.
+
+\subsection{kprobes and ftrace integration}
+
+\UML{} supports the kernel's dynamic instrumentation frameworks.  A
+developer can use \texttt{trace-cmd} from the host to record function
+call graphs, schedule events, and lock contention traces.  Because
+\UML{}'s \texttt{/sys/kernel/debug/tracing} is exposed through the
+host filesystem (via \texttt{hostfs}), the developer can use familiar
+host-side tools without installing anything inside the guest.
+
+The kprobes subsystem allows inserting breakpoints at arbitrary kernel
+addresses at runtime without recompilation.  Combined with eBPF~\cite{ebpf},
+this enables sophisticated monitoring and analysis scenarios---for
+example, counting the number of times a specific lock is contended per
+second, or recording the arguments to every \syscall{open} call that
+returns \texttt{EACCES}.
+
+\subsection{Sanitizer support}
+
+\UML{} supports KASAN~\cite{kasan} (Kernel Address Sanitizer),
+KMSAN~\cite{kmsan} (Kernel Memory Sanitizer), and
+KCSAN~\cite{kcsan} (Kernel Concurrency Sanitizer).  Because the
+kernel runs as a userspace process, the shadow memory regions that
+these sanitizers require can be allocated through ordinary
+\syscall{mmap} calls without the complex early-boot memory management
+that sanitizers require on hardware architectures.  This makes \UML{}
+an ideal platform for sanitizer-heavy development workflows where
+every memory access is checked for validity.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    box/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=3.8cm,
+      minimum height=1.0cm,
+      rounded corners=3pt,
+      font=\small,
+      align=center
+    },
+    arrow/.style={
+      -{Stealth[length=5pt]},
+      thick,
+      color=UMLMuted
+    }
+  ]
+
+  % Developer tools
+  \node[box=UMLBlue!8]  (gdb)    at (0,0)     {\textbf{gdb} / \textbf{rr}};
+  \node[box=UMLTeal!8]  (trace)  at (4.5,0)   {\textbf{trace-cmd}\\ftrace};
+  \node[box=UMLGreen!8] (san)    at (9,0)     {\textbf{KASAN}\\KMSAN / KCSAN};
+
+  % UML kernel
+  \node[box=KernelGold!8,minimum width=12.8cm] (uml) at (4.5,-1.8)
+    {\textbf{UML Kernel} (single ELF binary with DWARF info)};
+
+  % Arrows
+  \draw[arrow] (gdb.south)   -- ++(0,-0.4) -| ($(uml.north west)+(1.5,0)$);
+  \draw[arrow] (trace.south) -- (uml.north);
+  \draw[arrow] (san.south)   -- ++(0,-0.4) -| ($(uml.north east)+(-1.5,0)$);
+
+\end{tikzpicture}
+\caption[Kernel debugging ecosystem under UML]{%
+  Three complementary debugging approaches available when running the
+  kernel under \UML{}: interactive debugging with \texttt{gdb} (or
+  \texttt{rr} for record/replay), dynamic tracing with ftrace and
+  \texttt{trace-cmd}, and compile-time sanitizers (KASAN, KMSAN, KCSAN).
+  All three operate on the same kernel binary and can be used
+  simultaneously.
+}
+\label{fig:app-debug-ecosystem}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{Kernel Fuzzing}
+\label{sec:app-fuzzing}
+% ------------------------------------------------------------------
+
+Coverage-guided kernel fuzzing is the most effective automated technique
+for finding kernel bugs.  Google's syzkaller~\cite{syzkaller,vyukov2015}
+is the world's most widely used kernel fuzzer, responsible for
+discovering thousands of bugs in the Linux kernel since its introduction
+in 2015.  Understanding how \UML{} fits into the fuzzing landscape
+requires examining both the current state of the art and the
+performance bottlenecks that limit it.
+
+\subsection{The current landscape: QEMU-KVM}
+
+Syzkaller's standard deployment targets QEMU/KVM virtual machines.
+Each fuzzing instance boots a kernel inside a QEMU VM, runs a
+\texttt{syz-executor} process that generates and executes syscall
+programs, and collects coverage feedback via KCOV
+(\texttt{CONFIG\_KCOV}).  The fuzzer mutates syscall sequences based
+on which new code paths were exercised.
+
+This architecture works well but imposes significant overhead:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Boot time.}  A QEMU/KVM instance takes 2--5 seconds to
+        boot to the point where the fuzzer can begin executing syscalls.
+  \item \textbf{Hardware requirement.}  QEMU/KVM requires
+        \texttt{/dev/kvm}, which is unavailable in many CI/CD environments,
+        nested virtualization scenarios, and shared cloud instances.
+  \item \textbf{Communication overhead.}  The fuzzer communicates with
+        the executor inside the VM through a virtio-serial channel or SSH.
+        Each syscall program dispatch involves cross-VM communication.
+  \item \textbf{Reset time.}  After a crash, the VM must be rebooted
+        or restored from a snapshot, adding seconds of dead time.
+\end{enumerate}
+
+\subsection{The LKL precedent}
+
+The Linux Kernel Library~\cite{lkl,purdila2010} demonstrated what
+becomes possible when these overheads are eliminated.  By compiling the
+kernel as a library and executing syscalls as function calls within the
+same process, LKL-based fuzzers achieved approximately 60$\times$ the
+throughput of QEMU-based approaches.  The LKL fuzzer can execute millions
+of syscall sequences per second because there is no VM boundary, no boot
+process, and no communication channel---the fuzzer and the kernel share
+an address space.
+
+However, LKL achieves this speed by sacrificing fidelity.  There is no
+user/kernel separation, no process scheduling, no realistic signal
+delivery, and no memory protection.  Bugs that depend on race conditions
+between user and kernel execution, memory mapping semantics, or signal
+handling are invisible to an LKL-based fuzzer.  The attack surface that
+LKL exposes is a strict subset of the real kernel's attack surface.
+
+\subsection{UML as a fuzzing target}
+
+\UML{} occupies the sweet spot between QEMU and LKL:
+
+\begin{table}[ht]
+\centering
+\caption{Fuzzing target comparison}
+\label{tab:fuzz-comparison}
+\begin{tabularx}{\textwidth}{l Y Y Y}
+\toprule
+\textbf{Property}  & \textbf{QEMU/KVM} & \textbf{LKL} & \textbf{UML (v2)} \\
+\midrule
+Boot time         & 2--5\,s           & N/A (library)    & $<$\,500\,ms \\
+Syscall fidelity  & Full              & Partial          & Full \\
+Process isolation & Full (HW)         & None             & Full (SW) \\
+KCOV support      & Yes               & Custom           & Yes \\
+Hardware requirement & /dev/kvm       & None             & None \\
+Reset mechanism   & VM reboot/snapshot & Process restart & Snapshot/restore \\
+Reset time        & 2--5\,s           & $<$\,1\,ms       & $<$\,1\,ms \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+With the v2 redesign's snapshot/restore capability, a \UML{} fuzzing
+instance can be reset to a known-good state in under a millisecond.
+The instance boots once, reaches the fuzzing entry point, takes a
+snapshot, and then restores to that snapshot after each syscall sequence.
+This eliminates boot time from the critical path entirely.
+
+\subsection{The syzkaller vm/uml backend}
+
+Syzkaller's architecture already supports pluggable VM backends through
+its \texttt{vm/} package.  Adding a \UML{} backend requires implementing
+the \texttt{vmimpl.Pool} and \texttt{vmimpl.Instance} interfaces:
+
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{Create()} --- launch a \UML{} instance with the fuzzing
+        kernel and root filesystem.
+  \item \texttt{Forward()} --- set up port forwarding (trivial with \UML{}'s
+        host networking).
+  \item \texttt{Copy()} --- copy the \texttt{syz-executor} binary into the
+        guest (via \texttt{hostfs}).
+  \item \texttt{Run()} --- execute a command inside the guest and capture
+        output.
+  \item \texttt{Close()} --- terminate the instance.
+\end{itemize}
+
+Because \UML{} guest filesystems can be mounted via \texttt{hostfs}---a
+direct pass-through of the host filesystem---there is no need for the
+SSH or serial-port communication channels that QEMU requires.  The
+fuzzer can write syscall programs directly to a shared directory and
+read coverage data from the same path.
+
+\subsection{KCOV integration}
+
+KCOV (\texttt{CONFIG\_KCOV}) instruments the kernel to record which
+basic blocks are executed during each syscall.  \UML{} supports KCOV
+natively because KCOV is architecture-independent---it hooks into the
+compiler's instrumentation callbacks, not into architecture-specific
+trap handling.  The \texttt{/sys/kernel/debug/kcov} interface is
+available inside the \UML{} guest and can be accessed through
+\texttt{hostfs} from the host-side fuzzer.
+
+
+% ------------------------------------------------------------------
+\section{Network Simulation}
+\label{sec:app-network}
+% ------------------------------------------------------------------
+
+One of the most successful real-world deployments of \UML{} has been
+in network simulation and education, where the ability to run many
+independent Linux instances---each with its own full networking
+stack---without any hardware virtualization support has proven
+invaluable.
+
+\subsection{Netkit}
+
+Netkit~\cite{pizzonia2008}, developed by Maurizio Pizzonia and Massimo
+Rimondini at Roma Tre University, is the most widely used \UML{}-based
+networking tool.  Each Netkit ``virtual machine'' is a \UML{} instance
+connected to virtual Ethernet segments implemented as UNIX domain sockets.
+A lab configuration file specifies the topology: which machines exist,
+which interfaces they have, and which virtual collision domains they
+connect to.
+
+A typical Netkit lab might define a topology with:
+
+\begin{itemize}[leftmargin=2em]
+  \item Three routers running OSPF (via Quagga or FRRouting).
+  \item Two Ethernet segments with multiple hosts.
+  \item A NAT gateway connecting the virtual topology to the host network.
+  \item A DNS server and a web server on separate subnets.
+\end{itemize}
+
+Each of these ``machines'' is a \UML{} process consuming 32--64\,MB of
+memory.  A laptop can run dozens of instances simultaneously, enabling
+students to build and experiment with network topologies that would
+otherwise require a rack of physical hardware.
+
+Netkit has been adopted by universities in Italy, Brazil, Germany,
+Australia, and elsewhere for teaching courses on computer networking,
+network security, and system administration.  The Netkit-NG fork
+updated the project for modern kernels, and Kathara (a Docker-based
+reimagining) continues the tradition, though with a shift away from
+\UML{} toward containers.
+
+\subsection{Marionnet}
+
+Marionnet~\cite{marionnet}, developed at Paris 13 University, provides
+a graphical interface for building virtual network topologies using
+\UML{}.  Students drag and drop routers, switches, and hosts onto a
+canvas, connect them with virtual cables, and then start the entire
+topology.  Each node runs a full Linux instance under \UML{}, providing
+realistic behavior including ARP, ICMP, TCP connection establishment,
+and routing protocol convergence.
+
+\subsection{Wireless network simulation}
+
+Intel's WiFi team has used \UML{} for wireless network simulation,
+running multiple \UML{} instances with virtual wireless interfaces
+(mac80211\_hwsim) to test WiFi drivers and the \texttt{cfg80211}/\texttt{mac80211}
+stack without physical wireless hardware.  This allows automated testing
+of scenarios like roaming, channel switching, power management, and
+multi-AP coordination that would be difficult to reproduce reliably
+with physical hardware.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    host/.style={
+      draw=UMLGrid,
+      fill=UMLGreen!8,
+      minimum width=2.0cm,
+      minimum height=0.9cm,
+      rounded corners=3pt,
+      font=\small\bfseries
+    },
+    switch/.style={
+      draw=UMLGrid,
+      fill=UMLTeal!8,
+      minimum width=2.0cm,
+      minimum height=0.7cm,
+      rounded corners=3pt,
+      font=\small
+    },
+    router/.style={
+      draw=UMLGrid,
+      fill=UMLBlue!8,
+      minimum width=2.0cm,
+      minimum height=0.9cm,
+      rounded corners=3pt,
+      font=\small\bfseries
+    },
+    link/.style={
+      thick,
+      color=UMLMuted
+    }
+  ]
+
+  % Router
+  \node[router] (r1) at (4.5,2.5) {Router R1};
+
+  % Switches
+  \node[switch] (sw1) at (1.5,1.2) {Switch SW1};
+  \node[switch] (sw2) at (7.5,1.2) {Switch SW2};
+
+  % Hosts
+  \node[host] (h1) at (0,0) {Host A};
+  \node[host] (h2) at (3,0) {Host B};
+  \node[host] (h3) at (6,0) {Host C};
+  \node[host] (h4) at (9,0) {Host D};
+
+  % Links
+  \draw[link] (r1) -- (sw1);
+  \draw[link] (r1) -- (sw2);
+  \draw[link] (sw1) -- (h1);
+  \draw[link] (sw1) -- (h2);
+  \draw[link] (sw2) -- (h3);
+  \draw[link] (sw2) -- (h4);
+
+  % Labels
+  \node[font=\scriptsize\itshape,color=UMLMuted,below=0.1cm of h1]
+    {UML instance};
+  \node[font=\scriptsize\itshape,color=UMLMuted,below=0.1cm of h4]
+    {UML instance};
+  \node[font=\scriptsize\itshape,color=UMLMuted,above=0.1cm of r1]
+    {UML instance (OSPF)};
+
+\end{tikzpicture}
+\caption[Netkit-style network topology]{%
+  A simple Netkit-style network topology.  Each host, switch, and
+  router is an independent \UML{} instance.  Virtual Ethernet
+  segments are implemented as UNIX domain sockets on the host.
+  The entire topology runs as ordinary userspace processes without
+  any hardware virtualization.
+}
+\label{fig:app-netkit}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{Security Research}
+\label{sec:app-security}
+% ------------------------------------------------------------------
+
+Security researchers need environments where they can safely execute
+kernel exploits, analyze malware behavior at the kernel level, and
+develop mitigations---all without risking the host system.  \UML{}
+provides this environment with properties that neither containers nor
+traditional VMs fully match.
+
+\subsection{Kernel exploit development and analysis}
+
+When analyzing a kernel vulnerability---say, a use-after-free in a
+filesystem driver---a researcher needs to:
+
+\begin{enumerate}[leftmargin=2em]
+  \item Build a kernel with the vulnerable code and full debug symbols.
+  \item Trigger the vulnerability reliably.
+  \item Observe the kernel state at the moment of corruption.
+  \item Develop and test a mitigation.
+\end{enumerate}
+
+With \UML{}, every step happens in a single terminal session.  The
+researcher builds the vulnerable kernel as an ELF binary, runs it
+under \texttt{gdb}, sets a watchpoint on the freed memory region,
+and observes the exact instruction that performs the use-after-free.
+The kernel's full DWARF debug information is available, so the
+researcher can inspect the call stack, the state of the slab
+allocator, and the contents of every relevant data structure.
+
+\subsection{Advantage over containers}
+
+Containers (Docker, Kubernetes) share the host kernel.  A kernel
+exploit that works in a container works against the host.  This is
+not a theoretical concern: container escape vulnerabilities
+(CVE-2019-5736, CVE-2020-15257, CVE-2022-0185) regularly demonstrate
+that namespace and cgroup isolation do not constitute a security
+boundary at the kernel level.
+
+\UML{} provides genuine kernel isolation.  Each \UML{} instance
+runs its own kernel in a separate address space.  A kernel exploit
+that achieves code execution inside a \UML{} instance has compromised
+a userspace process from the host's perspective.  It has no access
+to the host kernel's data structures, no ability to manipulate host
+page tables, and no path to privilege escalation on the host.  The
+host kernel's normal process isolation guarantees contain the
+compromised \UML{} instance.
+
+\subsection{Honeypot deployment}
+
+\UML{}'s lightweight footprint makes it practical to deploy
+kernel-level honeypots.  Each honeypot is a \UML{} instance running
+a deliberately vulnerable kernel, configured to log all system calls
+and network traffic.  Because \UML{} instances are ordinary processes,
+they can be monitored, resource-limited (via cgroups), and terminated
+from the host without any special hypervisor tooling.  The host can
+run dozens or hundreds of honeypot instances, each presenting a
+different kernel version or configuration to probe for attacker
+behavior.
+
+\subsection{Malware analysis}
+
+Kernel-level malware (rootkits, bootkits) requires a real kernel
+environment for analysis.  Running such malware in a container is
+dangerous because the malware has direct access to the host kernel.
+Running it in a QEMU VM is safe but makes observation difficult:
+the analyst must use the GDB remote protocol or custom QEMU plugins
+to inspect kernel state.  \UML{} provides the best of both
+worlds---a real kernel that the malware can infect, with the full
+observability of a native userspace process.
+
+
+% ------------------------------------------------------------------
+\section{CI/CD and Automated Testing}
+\label{sec:app-cicd}
+% ------------------------------------------------------------------
+
+Continuous integration and testing of kernel code requires an
+environment that can boot a kernel, run tests, and report results.
+The dominant approach uses QEMU/KVM, but this has a fundamental
+limitation: it requires access to \texttt{/dev/kvm}.
+
+\subsection{The /dev/kvm problem}
+
+Many CI/CD environments lack hardware virtualization support:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[GitHub Actions (default runners).]
+    The standard GitHub-hosted runners do not expose \texttt{/dev/kvm}.
+    Larger runners with KVM access are available at increased cost.
+  \item[Shared cloud instances.]
+    Many cloud providers do not support nested virtualization on their
+    standard instance types.  Even when nested virtualization is
+    available, it incurs significant performance overhead.
+  \item[Containerized CI.]
+    CI systems that run jobs inside containers (Jenkins with Docker,
+    GitLab CI) typically do not pass through \texttt{/dev/kvm} to
+    the container for security reasons.
+  \item[Locked-down workstations.]
+    Corporate environments may disable hardware virtualization in BIOS
+    or restrict access to \texttt{/dev/kvm} via udev rules.
+\end{description}
+
+\UML{} with the \Seccomp{} or \texttt{ptrace} backend has no such
+requirement.  It runs wherever a Linux userspace process can run.
+This makes it uniquely suited for kernel testing in environments where
+hardware-assisted virtualization is unavailable.
+
+\subsection{kselftest integration}
+
+The kernel's self-test framework (\texttt{tools/testing/selftests/})
+includes tests that require a running kernel environment.  The v2
+redesign adds a comprehensive test suite under
+\umlpath{tools/testing/selftests/um/} that exercises backend lifecycle
+management, syscall interception, SMP behavior, and memory management.
+
+These tests can be run as part of a standard CI pipeline:
+
+\begin{lstlisting}[language=bash,caption={Running kselftest under UML in CI}]
+# Build UML kernel with kselftest support
+make ARCH=um O=build-um defconfig
+make ARCH=um O=build-um -j$(nproc)
+
+# Run the UML-specific selftests
+make ARCH=um O=build-um -C tools/testing/selftests/um run_tests
+
+# Run broader kernel selftests under UML
+./build-um/vmlinux mem=512M \
+    init=/path/to/run-selftests.sh
+\end{lstlisting}
+
+\subsection{Linux Test Project (LTP)}
+
+The Linux Test Project (LTP) is a comprehensive test suite covering
+syscall behavior, filesystem semantics, memory management, IPC, and
+networking.  LTP tests can run inside a \UML{} instance with no
+modifications, exercising the real kernel code paths.  Because \UML{}
+boots in under a second, a CI pipeline can boot a fresh \UML{} instance
+for each test group, providing isolation without the multi-second
+overhead of QEMU boot cycles.
+
+\subsection{Bisection workflows}
+
+When a kernel regression is identified, \texttt{git bisect} requires
+building and testing many kernel versions.  With QEMU, each test
+iteration takes 10--30 seconds (build + boot + test + shutdown).
+With \UML{}, the same cycle takes 2--5 seconds because:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \UML{} builds are faster (smaller architecture-specific code).
+  \item Boot time is under 500\,ms.
+  \item No VM teardown is needed---the process simply exits.
+\end{enumerate}
+
+Over a typical bisection of 12--15 steps, this difference compounds
+from minutes with QEMU to under a minute with \UML{}.
+
+
+% ------------------------------------------------------------------
+\section{Education}
+\label{sec:app-education}
+% ------------------------------------------------------------------
+
+Operating systems courses have a persistent pedagogical problem: the
+gap between theory and practice.  Students learn about schedulers,
+virtual memory, and file systems in lecture, but interacting with a
+real kernel traditionally required dedicated hardware, serial console
+access, and the risk of bricking a machine.
+
+\subsection{UML as a teaching tool}
+
+\UML{} eliminates this barrier.  Every student can:
+
+\begin{enumerate}[leftmargin=2em]
+  \item Clone the kernel source tree on their laptop.
+  \item Build it as a \texttt{ARCH=um} binary in minutes
+        (faster than a full x86 build because the architecture-specific
+        code is smaller).
+  \item Run the kernel in a terminal window.
+  \item Modify kernel code, rebuild, and re-run---a cycle measured in
+        seconds.
+  \item Attach \texttt{gdb} to observe the scheduler making decisions,
+        the page fault handler allocating pages, or the VFS dispatching
+        I/O to a filesystem.
+\end{enumerate}
+
+There is no risk to the student's laptop.  The worst that can happen
+is the \UML{} process crashes---which is itself an educational
+experience, as the student can examine the core dump.
+
+\subsection{Concrete course applications}
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Process scheduling.]
+    Students can add \texttt{printk} statements to the CFS scheduler,
+    rebuild in seconds, and observe the scheduling decisions made for
+    competing workloads.  With \texttt{gdb}, they can single-step
+    through \texttt{pick\_next\_task\_fair()} and watch the red-black
+    tree traversal in real time.
+
+  \item[Virtual memory.]
+    Students can trace page fault handling from the initial trap through
+    \texttt{handle\_mm\_fault()}, page table walk, page allocation, and
+    PTE installation.  \UML{}'s memory management uses host \syscall{mmap}
+    calls, making it possible to correlate kernel-level page faults with
+    host-level memory operations.
+
+  \item[Filesystem implementation.]
+    Students can build a minimal filesystem module, load it into a
+    running \UML{} instance, and trace the complete path of a
+    \syscall{read} call from the system call entry point through the
+    VFS layer, the filesystem-specific \texttt{read\_iter} implementation,
+    and the block layer.
+
+  \item[Device drivers.]
+    \UML{}'s virtual device model allows students to write simple
+    character and block device drivers that interact with host-side
+    files.  The driver runs in the \UML{} kernel, and its behavior
+    can be observed from both the guest perspective (via
+    \texttt{/dev/} entries) and the host perspective (via
+    \texttt{gdb} and \texttt{strace}).
+
+  \item[Concurrency and synchronization.]
+    With SMP support in the v2 redesign, students can observe real
+    lock contention, priority inversion, and RCU grace periods.  KCSAN
+    can be enabled to catch data races, turning abstract concurrency
+    bugs into concrete, reproducible reports.
+\end{description}
+
+\subsection{Comparison with teaching alternatives}
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of OS teaching environments}
+\label{tab:edu-comparison}
+\begin{tabularx}{\textwidth}{l Y Y Y Y}
+\toprule
+\textbf{Property} & \textbf{xv6} & \textbf{QEMU/KVM} & \textbf{Minix} & \textbf{UML} \\
+\midrule
+Real kernel code    & No   & Yes  & No   & Yes \\
+Native debugging    & No   & GDB remote & No & GDB native \\
+Rebuild cycle       & Fast & Slow & Medium & Fast \\
+Hardware required   & None & /dev/kvm & None & None \\
+Industry relevance  & Low  & High & Low  & High \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+xv6 (MIT's teaching OS) is elegant and well-documented, but it is
+not Linux.  Skills learned in xv6 do not directly transfer to
+kernel development.  QEMU/KVM runs real Linux but requires hardware
+virtualization and imposes slow iteration cycles.  \UML{} is the
+only option that combines the real Linux kernel with the fast
+iteration and native debuggability that an educational environment
+demands.
+
+
+% ------------------------------------------------------------------
+\section{Record/Replay for Bug Reproduction}
+\label{sec:app-record-replay}
+% ------------------------------------------------------------------
+
+Many of the most difficult kernel bugs are non-deterministic: they
+depend on the precise timing of interrupts, the order of concurrent
+operations, or the exact sequence of I/O completions.  Reproducing
+such bugs is often the hardest part of fixing them.  Record/replay
+systems address this by capturing the non-deterministic inputs to a
+computation during a ``record'' run and replaying them exactly during
+a ``replay'' run, guaranteeing deterministic reproduction.
+
+\subsection{Existing approaches}
+
+\textbf{rr}~\cite{rr-project} (Mozilla) is the most successful
+userspace record/replay system.  It records the results of system
+calls, signal deliveries, and non-deterministic instructions
+(\texttt{RDTSC}, \texttt{RDRAND}) during a recording session, and
+replays them faithfully.  However, rr operates at the userspace level:
+it can record and replay a userspace program, but it cannot record and
+replay kernel execution.  If a bug is in the kernel, rr cannot help.
+
+\textbf{ReVirt}~\cite{dunlap2002} demonstrated virtual machine-level
+record/replay by logging all non-deterministic events (interrupts,
+DMA, device I/O) entering a VM.  But ReVirt required modifications
+to the hypervisor and imposed significant overhead.
+
+\subsection{UML record/replay}
+
+\UML{}'s architecture makes record/replay uniquely tractable.  The
+sources of non-determinism in a \UML{} instance are precisely
+enumerable:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Timer interrupts.}  Generated by host-side
+        \texttt{SIGALRM} signals.  The record layer logs the exact
+        instruction pointer at which each signal was delivered.
+  \item \textbf{I/O completions.}  Disk reads, network packet arrivals,
+        and other I/O events arrive as host system call return values.
+        The record layer logs these values.
+  \item \textbf{Inter-processor interrupts.}  In SMP mode, IPIs from
+        other virtual CPUs introduce ordering non-determinism.  The
+        record layer logs the IPI delivery order.
+  \item \textbf{Host entropy.}  Calls to \syscall{getrandom} or reads
+        from \texttt{/dev/urandom} on the host.  The record layer logs
+        the returned bytes.
+\end{enumerate}
+
+During replay, the record layer intercepts each of these sources and
+injects the logged values at the exact same points in execution.  The
+result is bit-for-bit deterministic replay of the kernel's execution,
+including all scheduler decisions, lock acquisitions, and memory
+allocations.
+
+\subsection{Time-travel debugging}
+
+When combined with \texttt{gdb}, record/replay enables \emph{time-travel
+debugging}: the ability to run the kernel execution backward.  The
+developer can set a watchpoint on a corrupted data structure, run
+backward to the point of corruption, and identify the exact code path
+that caused it.  This is the kernel-level equivalent of rr's
+\texttt{reverse-continue} command, applied to the kernel itself.
+
+Jeff Dike implemented an early version of time-travel support for
+\UML{}, and the v2 redesign extends this with SMP-aware recording
+and the ability to replay across snapshot/restore boundaries.
+
+
+% ------------------------------------------------------------------
+\section{Snapshot/Restore for Fast Iteration}
+\label{sec:app-snapshot}
+% ------------------------------------------------------------------
+
+The ability to capture the complete state of a running kernel and
+restore it later is valuable for several workflows:
+
+\subsection{Fuzzing reset}
+
+As discussed in Section~\ref{sec:app-fuzzing}, coverage-guided fuzzers
+need to reset the kernel to a clean state after each test iteration.
+With snapshot/restore, this reset is a memory operation rather than a
+reboot.  The v2 implementation captures:
+
+\begin{itemize}[leftmargin=2em]
+  \item All guest physical memory pages (via \syscall{mmap} snapshots).
+  \item CPU register state for all virtual CPUs.
+  \item Kernel timer state.
+  \item Virtual device state (block device positions, network queue
+        contents).
+\end{itemize}
+
+Restore replays these snapshots by remapping memory regions and
+restoring register state.  Because \UML{}'s memory is ordinary
+process memory (anonymous \syscall{mmap} regions), the snapshot can
+use copy-on-write semantics: the restore operation marks all pages
+as CoW, and only pages that are actually modified during the next
+test iteration incur a copy.  This makes restore effectively
+sub-microsecond for the common case where only a small fraction of
+pages are modified between iterations.
+
+\subsection{Debugging iteration}
+
+A developer investigating a complex kernel bug can take a snapshot
+just before the bug manifests, then repeatedly restore and re-examine
+the bug with different breakpoints, watchpoints, or instrumentation.
+This is similar to recording and replaying, but more flexible: the
+developer can modify kernel code between restore iterations, recompile
+individual modules, and reload them into the restored kernel.
+
+\subsection{Test parallelization}
+
+A single snapshot can be restored into multiple independent \UML{}
+instances, each running a different test.  This enables embarrassingly
+parallel testing: boot the kernel once, take a snapshot at the
+test-ready state, and fork it into $N$ copies, each running one test
+suite.  The boot cost is amortized across all test suites.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    state/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=2.5cm,
+      minimum height=0.8cm,
+      rounded corners=3pt,
+      font=\small
+    },
+    arrow/.style={
+      -{Stealth[length=5pt]},
+      thick,
+      color=UMLMuted
+    },
+    darrow/.style={
+      -{Stealth[length=5pt]},
+      thick,
+      dashed,
+      color=UMLAmber
+    }
+  ]
+
+  % Boot sequence
+  \node[state=UMLBlue!8]  (boot)  at (0,0)     {Boot};
+  \node[state=UMLGreen!8] (snap)  at (3,0)     {Snapshot};
+
+  % Fork into multiple instances
+  \node[state=KernelGold!8] (t1) at (7,1)   {Test Suite A};
+  \node[state=KernelGold!8] (t2) at (7,0)   {Test Suite B};
+  \node[state=KernelGold!8] (t3) at (7,-1)  {Test Suite C};
+
+  % Restore arrows
+  \draw[arrow] (boot) -- (snap);
+  \draw[darrow] (snap) -- (t1) node[midway,above,font=\scriptsize] {restore};
+  \draw[darrow] (snap) -- (t2);
+  \draw[darrow] (snap) -- (t3) node[midway,below,font=\scriptsize] {restore};
+
+  % Annotation
+  \node[font=\scriptsize\itshape,color=UMLMuted] at (3,-1.5)
+    {Boot cost paid once};
+  \node[font=\scriptsize\itshape,color=UMLMuted] at (7,-1.9)
+    {Each restore: $<$\,1\,$\mu$s (CoW)};
+
+\end{tikzpicture}
+\caption[Snapshot-based test parallelization]{%
+  Snapshot-based test parallelization.  The kernel boots once and
+  reaches a test-ready state.  A snapshot is taken and restored into
+  multiple independent instances, each running a different test suite.
+  Restore uses copy-on-write semantics for sub-microsecond latency.
+}
+\label{fig:app-snapshot-parallel}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{Summary}
+\label{sec:app-summary}
+% ------------------------------------------------------------------
+
+The applications surveyed in this chapter share a common theme:
+\UML{} provides capabilities that require the \emph{combination} of
+kernel fidelity, process-level debuggability, and minimal host
+requirements---a combination that no other single technology offers.
+
+\begin{table}[ht]
+\centering
+\caption{Application domains and key UML advantages}
+\label{tab:app-summary}
+\begin{tabularx}{\textwidth}{l Y Y}
+\toprule
+\textbf{Application} & \textbf{Key UML advantage} & \textbf{Alternative limitations} \\
+\midrule
+Kernel debugging   & Native gdb, full DWARF        & QEMU: remote protocol only \\
+Kernel fuzzing     & No /dev/kvm, fast reset        & QEMU: slow boot; LKL: no isolation \\
+Network simulation & Many instances, no HW virt     & Physical hardware: expensive \\
+Security research  & Full kernel isolation           & Containers: shared kernel \\
+CI/CD testing      & Runs anywhere Linux runs        & QEMU: requires /dev/kvm \\
+Education          & Fast rebuild, native debug      & xv6: not real Linux \\
+Record/replay      & Enumerable non-determinism      & rr: userspace only \\
+Snapshot/restore   & Sub-$\mu$s CoW restore          & QEMU: multi-second restore \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The v2 redesign strengthens \UML{}'s position in each of these domains.
+The backend-ops abstraction allows choosing the optimal backend for each
+use case (seccomp for portability, kvm-v2 for performance).  SMP support
+enables testing of concurrent code paths.  Snapshot/restore and
+record/replay transform \UML{} from a development convenience into a
+serious research infrastructure.
+
+Chapter~\ref{ch:related} examines how \UML{} compares to the related
+systems that serve some of these same domains.

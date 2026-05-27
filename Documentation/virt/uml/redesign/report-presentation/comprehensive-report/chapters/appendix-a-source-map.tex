@@ -1,0 +1,369 @@
+% ==========================================================================
+%  Appendix A — Source Code Map
+% ==========================================================================
+\chapter{Source Code Map}
+\label{app:sourcemap}
+
+This appendix provides a comprehensive map of the \UML{} source tree
+as of the v2 redesign (branch \texttt{next}, May 2026).  The tree
+spans three primary locations in the kernel source: the architecture
+port (\umlpath{arch/um/}), the tooling directory
+(\umlpath{tools/uml/}), and the kselftest suite
+(\umlpath{tools/testing/selftests/um/}).
+
+\section{Overall Statistics}
+\label{sec:sourcemap-stats}
+
+\begin{table}[ht]
+\centering
+\caption{Source tree summary statistics.}
+\label{tab:sourcemap-summary}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Tree & Files & Lines & Description \\
+\midrule
+\umlpath{arch/um/}                 & 352   &  89,248 & Architecture port \\
+\umlpath{tools/uml/}              & 101   &  28,857 & Host-side tooling (excl.\ build artifacts) \\
+\umlpath{tools/testing/selftests/um/} & 316 & 142,474 & Kselftest suites \\
+\midrule
+\textbf{Total}                     & \textbf{769} & \textbf{260,579} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Architecture Port: \texttt{arch/um/}}
+\label{sec:sourcemap-arch}
+
+\begin{longtable}{@{}L{0.38\linewidth}rrY@{}}
+\caption{Directory structure of \umlpath{arch/um/}.}
+\label{tab:sourcemap-archum}\\
+\toprule
+Directory & Files & Lines & Description \\
+\midrule
+\endfirsthead
+\toprule
+Directory & Files & Lines & Description \\
+\midrule
+\endhead
+\midrule
+\multicolumn{4}{r@{}}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+\umlpath{arch/um/} (top-level)
+  & 9 & 942
+  & Makefile, Kconfig, defconfig entry points. \\
+
+\umlpath{arch/um/backend/}
+  & 3 & 16
+  & Backend layer root: Makefile and Kconfig for backend selection. \\
+
+\umlpath{arch/um/backend/common/}
+  & 4 & 18
+  & Shared backend utilities (Makefile, Kconfig stubs). \\
+
+\umlpath{arch/um/backend/contract/}
+  & 3 & 1,886
+  & KUnit behavioral contract tests that verify each backend against the same specification. \\
+
+\umlpath{arch/um/backend/kvm-v1-archive/}
+  & 14 & 12,600
+  & Preserved v1 KVM backend (retired) for reference and diffing against v2. \\
+
+\umlpath{arch/um/backend/kvm-v2/}
+  & 25 & 18,296
+  & Complete \KVMvTwo{} backend: \texttt{vcpu.c} (vCPU lifecycle, \texttt{KVM\_RUN} dispatch), \texttt{syscall\_trap.c} (IDT exception dispatch), \texttt{exception.c} (IDT/GDT/TSS setup), \texttt{context.c} (VM lifecycle, memslots), \texttt{lstar\_gadget.S} (in-guest SYSCALL trampoline), \texttt{snapshot.c}, \texttt{record.c}, KUnit suites. \\
+
+\umlpath{arch/um/backend/seccomp/}
+  & 11 & 562
+  & Seccomp backend implementation (refactored through \texttt{um\_backend\_ops}). \\
+
+\umlpath{arch/um/configs/}
+  & 3 & 224
+  & Base defconfigs for \texttt{ARCH=um}. \\
+
+\umlpath{arch/um/configs/profiles/}
+  & 10 & 552
+  & Named profile defconfig fragments: \texttt{prod-fast}, \texttt{prod-with-hooks}, \texttt{research}, \texttt{fuzz}, \texttt{fuzz-deep}, \texttt{sandbox}, \texttt{library}, \texttt{embedded}, \texttt{time-travel}. \\
+
+\umlpath{arch/um/drivers/}
+  & 85 & 25,125
+  & UML device drivers: \texttt{ubd} (block), \texttt{net} (virtual networking), \texttt{mconsole} (management console), \texttt{port} (serial ports), \texttt{harddog} (watchdog), \texttt{vector} (vector I/O), \texttt{virt-pci} (virtio PCI transport), \texttt{rtc} (real-time clock). \\
+
+\umlpath{arch/um/include/asm/}
+  & 55 & 3,120
+  & Architecture-specific headers: \texttt{pgtable.h} (PTE layout, x86-aligned), \texttt{mmu\_context.h} (mm switching), \texttt{processor.h} (thread state), \texttt{tlbflush.h} (TLB invalidation API). \\
+
+\umlpath{arch/um/include/asm/fpu/}
+  & 1 & 22
+  & FPU state management stubs. \\
+
+\umlpath{arch/um/include/asm/trace/}
+  & 1 & 720
+  & Tracepoint definitions for backend events. \\
+
+\umlpath{arch/um/include/linux/}
+  & 3 & 126
+  & UML-specific internal Linux headers. \\
+
+\umlpath{arch/um/include/shared/}
+  & 25 & 2,031
+  & Headers shared between kernel-side and os-side code: \texttt{backend.h} (\texttt{struct um\_backend\_ops} definition), \texttt{os.h} (host OS interface), \texttt{kern\_util.h} (kernel utility declarations). \\
+
+\umlpath{arch/um/include/shared/skas/}
+  & 3 & 208
+  & SKAS-mode shared structures: process/mm state, stub page definitions. \\
+
+\umlpath{arch/um/include/uapi/asm/}
+  & 1 & 1
+  & UAPI header stubs. \\
+
+\umlpath{arch/um/kernel/}
+  & 52 & 12,051
+  & Core kernel: \texttt{trap.c} (fault handling, CPython segv intercept), \texttt{process.c} (context switch), \texttt{smp.c} (SMP/IPI), \texttt{tlb.c} (TLB sync), \texttt{syscall.c} (syscall dispatch), \texttt{time.c} (timer/clock), \texttt{signal.c} (signal delivery), \texttt{mem.c} (memory init). \\
+
+\umlpath{arch/um/kernel/kprobes/}
+  & 2 & 398
+  & Kprobes architecture support for UML. \\
+
+\umlpath{arch/um/kernel/skas/}
+  & 11 & 1,720
+  & SKAS-mode kernel code: process creation, clone, mmu context, stub lifecycle. \\
+
+\umlpath{arch/um/os-Linux/}
+  & 25 & 7,398
+  & Host-side OS interface: \texttt{process.c} (\texttt{os\_map\_memory}, resource controls), \texttt{main.c} (host-side \texttt{os\_main}), \texttt{signal.c} (signal setup), \texttt{sigio.c} (async I/O polling), \texttt{file.c} (host file ops), \texttt{mem.c} (physmem mmap). \\
+
+\umlpath{arch/um/os-Linux/skas/}
+  & 5 & 1,205
+  & SKAS-mode host-side code: stub execution, process tracing, memory management. \\
+
+\umlpath{arch/um/scripts/}
+  & 1 & 27
+  & Build scripts (Makefile.rules). \\
+
+\midrule
+\textbf{Total \texttt{arch/um/}}
+  & \textbf{352} & \textbf{89,248}
+  & \\
+\end{longtable}
+
+
+\section{Host-Side Tooling: \texttt{tools/uml/}}
+\label{sec:sourcemap-tools}
+
+\begin{longtable}{@{}L{0.40\linewidth}rrY@{}}
+\caption{Directory structure of \umlpath{tools/uml/} (excluding build artifacts).}
+\label{tab:sourcemap-tools}\\
+\toprule
+Directory & Files & Lines & Description \\
+\midrule
+\endfirsthead
+\toprule
+Directory & Files & Lines & Description \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+
+\umlpath{tools/uml/} (top-level)
+  & 1 & 60
+  & Top-level Makefile. \\
+
+\umlpath{tools/uml/uml-launcher/}
+  & 5 & 186
+  & Cargo.toml, Cargo.lock, build configuration. \\
+
+\umlpath{tools/uml/uml-launcher/src/}
+  & 6 & 1,432
+  & Library root: \texttt{lib.rs}, config parsing, instance management, error types. \\
+
+\umlpath{tools/uml/uml-launcher/src/backend/}
+  & 6 & 3,307
+  & Backend detection and management: KVM availability probing, seccomp detection, backend selection logic. \\
+
+\umlpath{tools/uml/uml-launcher/src/bin/umlctl/}
+  & 27 & 14,596
+  & The \texttt{umlctl} binary: subcommands for \texttt{create}, \texttt{start}, \texttt{stop}, \texttt{ps}, \texttt{logs}, \texttt{metrics}, \texttt{up}, \texttt{build}, \texttt{mission}. Key modules include \texttt{mission.rs} (6-phase acceptance gate), \texttt{cgroup.rs} (cgroup v2 management), \texttt{preflight.rs} (resource verification). \\
+
+\umlpath{tools/uml/uml-launcher/src/bin/umlbuild/}
+  & 10 & 2,281
+  & The \texttt{umlbuild} binary: kernel compilation with profile selection and output directory management. \\
+
+\umlpath{tools/uml/uml-launcher/profiles/}
+  & 5 & 450
+  & TOML profile definitions mapping named profiles to Kconfig fragments and backend defaults. \\
+
+\umlpath{tools/uml/uml-launcher/examples/}
+  & 23 & 1,641
+  & Example Umlfiles (TOML deployment specifications) demonstrating various configurations. \\
+
+\umlpath{tools/uml/uml-launcher/scripts/}
+  & 2 & 1,237
+  & Helper scripts for rootfs preparation and environment setup. \\
+
+\umlpath{tools/uml/uml-gdb/}
+  & 1 & 366
+  & GDB helper scripts for UML kernel debugging. \\
+
+\umlpath{tools/uml/syzkaller-vm-shim/}
+  & 2 & ---
+  & Placeholder for the syzkaller \texttt{vm/uml} shim. \\
+
+\umlpath{tools/uml/diag/}
+  & 6 & 315
+  & Diagnostic tools developed during debugging: round-8 MMU audit, round-9 CPython cache dump, round-13 bytecode monitor. \\
+
+\midrule
+\textbf{Total \texttt{tools/uml/}} (source only)
+  & \textbf{101} & \textbf{28,857}
+  & \\
+\end{longtable}
+
+
+\section{Kselftest Suite: \texttt{tools/testing/selftests/um/}}
+\label{sec:sourcemap-selftests}
+
+The kselftest directory contains 53 test suites spanning the full
+validation ladder.  Table~\ref{tab:sourcemap-selftests} groups them
+by category.
+
+\begin{longtable}{@{}L{0.32\linewidth}p{0.06\linewidth}p{0.06\linewidth}Y@{}}
+\caption{Kselftest suites in \umlpath{tools/testing/selftests/um/}.}
+\label{tab:sourcemap-selftests}\\
+\toprule
+Suite & Files & Lines & Description \\
+\midrule
+\endfirsthead
+\toprule
+Suite & Files & Lines & Description \\
+\midrule
+\endhead
+\midrule
+\multicolumn{4}{r@{}}{\textit{Continued on next page}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+
+\multicolumn{4}{@{}l}{\textbf{Substrate Parity}} \\
+\midrule
+\texttt{cpython-parity/}     & 3  & 214  & 21-module CPython parity gate (both backends). \\
+\texttt{cpython-tier0/}      & 3  & 184  & Minimal CPython smoke test. \\
+\texttt{cpython-full/}       & 3  & 223  & Full CPython 3.14 regrtest ($\sim$400 modules). \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{KVM Backend Tests}} \\
+\midrule
+\texttt{kvm-smoke/}          & 2  & 131  & Basic \KVMvTwo{} boot and syscall. \\
+\texttt{kvm-isolation/}      & 5  & 867  & Memory isolation between guest and host. \\
+\texttt{kvm-bounds/}         & 3  & 344  & Memory bounds checking. \\
+\texttt{kvm-mm-smoke/}       & 3  & 371  & Memory management operations under KVM. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Snapshot and Record/Replay}} \\
+\midrule
+\texttt{snapshot-smoke/}     & 4  & 371  & Snapshot v1 lifecycle test. \\
+\texttt{snapshot-kvm-smoke/} & 2  & 123  & KVM-aware snapshot (v2) smoke. \\
+\texttt{snapshot-elf-roundtrip/} & 3 & 255 & ELF-core export round-trip. \\
+\texttt{kvm-snapshot-bench/} & 2  & 114  & Capture/restore latency benchmark. \\
+\texttt{kvm-record-smoke/}   & 2  & 128  & Record/replay v2 KUnit integration. \\
+\texttt{kvm-record-clock-bench/} & 2 & 126 & RDTSC record overhead benchmark. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{SMP and Concurrency Stress}} \\
+\midrule
+\texttt{mt-mmap-stress/}     & 26 & 24,905 & Multi-threaded mmap stress with strict memory verification (mt-mini). \\
+\texttt{fork-tree-3level/}   & 5  & 2,547 & Three-level fork tree with threaded-fork-malloc stress. \\
+\texttt{template-pause-smoke/}   & 2 & 459 & Template/pause snapshot lifecycle. \\
+\texttt{template-pause-fork-smoke/} & 2 & 206 & Fork from paused template. \\
+\texttt{template-pause-fork-stress/} & 3 & 950 & Stressed fork from paused template. \\
+\texttt{template-pause-pivot-smoke/} & 2 & 178 & Pivot-root from paused template. \\
+\texttt{template-pause-pool-*}   & 4 & 641 & Pool member lifecycle and sustained operation. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Performance}} \\
+\midrule
+\texttt{bench/}              & 8  & 679  & Cross-host micro/py/stress benchmark harness. \\
+\texttt{perf-getpid/}        & 5  & 480  & RDTSC-bracketed getpid latency. \\
+\texttt{perf-py-startup/}    & 1  & 132  & Python startup wallclock. \\
+\texttt{perf-pidfam/}        & 3  & 332  & PID-family creation cost. \\
+\texttt{perf-fallback/}      & 3  & 400  & Ptrace fallback performance. \\
+\texttt{pool-bench/}         & 2  & 624  & Instance pool throughput. \\
+\texttt{net-bench/}          & 7  & 640  & Network I/O throughput. \\
+\texttt{ubd-bench/}          & 3  & 499  & Block device (ubd) I/O throughput. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Instrumentation}} \\
+\midrule
+\texttt{ftrace-smoke/}       & 3  & 174  & Ftrace basic function tracing. \\
+\texttt{kmsan-smoke/}        & 3  & 161  & KMSAN shadow validation. \\
+\texttt{kprobes-stress/}     & 3  & 255  & Kprobes attach/detach stress. \\
+\texttt{hooks-flip/}         & 3  & 157  & Static-key hook enable/disable. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Soak and Sustained Validation}} \\
+\midrule
+\texttt{soak/}               & 25 & 8,773 & 11 TOML-templated soak workloads: memcheck, iocheck, stress-ng, tier1-pylibs, django-loopback, and more. Python orchestrator with Wilson CI scoring. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Process and Syscall}} \\
+\midrule
+\texttt{dyn-loader/}         & 2  & 177  & Dynamic loader interposition. \\
+\texttt{rt-sigreturn-isolation/} & 5 & 2,772 & \texttt{rt\_sigreturn} signal-frame isolation. \\
+\texttt{userspace-smoke/}    & 3  & 245  & Basic userspace exec smoke. \\
+\texttt{transparency/}       & 1  & 165  & Guest transparency checks. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Tooling and Integration}} \\
+\midrule
+\texttt{launcher-smoke/}     & 4  & 388  & \texttt{umlctl} launcher integration. \\
+\texttt{umlctl-smoke/}       & 2  & 556  & \texttt{umlctl} subcommand smoke. \\
+\texttt{umlbuild/}           & 2  & 129  & \texttt{umlbuild} compilation test. \\
+\texttt{profiles/}           & 3  & 357  & Profile build and boot validation. \\
+\texttt{gates/}              & 7  & 332  & Gate framework validation. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Regression Reproducers}} \\
+\midrule
+\texttt{regrtest-repros/}    & 6  & 495  & Classified reproducers: env (A), process (B), syscall (C), structural (D). \\
+\texttt{cve-repro/}          & 3  & 305  & CVE reproduction harnesses. \\
+\texttt{mmap-fixed-sigalrm-repro/} & 2 & 211 & SIGALRM/mmap-FIXED deadlock reproducer. \\
+\midrule
+
+\multicolumn{4}{@{}l}{\textbf{Miscellaneous}} \\
+\midrule
+\texttt{df-preserve/}        & 3  & 353  & Filesystem state preservation. \\
+\texttt{pool-exec-smoke/}    & 2  & 233  & Pool exec lifecycle. \\
+\texttt{pool-port-forward-smoke/} & 2 & 184 & Pool port forwarding. \\
+\texttt{pool-serve-smoke/}   & 2  & 248  & Pool HTTP serve test. \\
+\texttt{pool-spawn-smoke/}   & 2  & 159  & Pool spawn lifecycle. \\
+\texttt{state-trace/}        & 1  & 513  & State-trace analysis tool. \\
+\texttt{vector2-sandbox-audit/} & 2 & 183 & Vector2 network sandbox audit. \\
+\end{longtable}
+
+
+\section{File Type Distribution}
+\label{sec:sourcemap-filetypes}
+
+\begin{table}[ht]
+\centering
+\caption{File type distribution across the v2 source tree.}
+\label{tab:sourcemap-filetypes}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Type & Primary Location & Role \\
+\midrule
+C source (\texttt{.c})     & \umlpath{arch/um/}, backends  & Kernel-side implementation \\
+C headers (\texttt{.h})    & \umlpath{arch/um/include/}    & Interface definitions \\
+Assembly (\texttt{.S})     & \umlpath{backend/kvm-v2/}     & LSTAR gadget, stub pages \\
+Rust (\texttt{.rs})        & \umlpath{tools/uml/uml-launcher/} & Host-side tooling \\
+TOML (\texttt{.toml})      & \umlpath{tools/uml/}, selftests   & Config, profiles, soak templates \\
+Shell (\texttt{.sh})       & Selftests                     & Test orchestration \\
+Python (\texttt{.py})      & Selftests                     & Soak orchestrator, analysis \\
+Kconfig                    & \umlpath{arch/um/}            & Build configuration \\
+Makefile                   & Throughout                    & Build rules \\
+\bottomrule
+\end{tabular}
+\end{table}

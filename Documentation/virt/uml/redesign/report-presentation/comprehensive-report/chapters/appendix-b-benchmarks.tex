@@ -1,0 +1,556 @@
+% ==========================================================================
+%  Appendix B — Benchmark Data
+% ==========================================================================
+\chapter{Benchmark Data}
+\label{app:benchmarks}
+
+This appendix presents the complete benchmark data and methodology
+underlying the performance claims in Chapters~\ref{ch:v2redesign}
+and~\ref{ch:conclusion}.  All measurements were taken on the
+\texttt{mjbommar/linux} tree (branch \texttt{next}), kernel commit
+\texttt{9ccbf5e7bb58}, with the host CPU governor set to
+\texttt{performance}.  Hosts span Skylake-S through Zen~4 and
+Alder Lake.
+
+
+% ------------------------------------------------------------------
+\section{Methodology}
+\label{sec:bench-method}
+% ------------------------------------------------------------------
+
+The benchmark suite uses three tiers, each measuring a different
+aspect of backend performance:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Micro tier.]
+    A tight \texttt{getpid()} loop bracketed by \texttt{RDTSC}.
+    Measures pure trap-mechanism cost: the round-trip from guest
+    userspace through the backend to the \UML{} kernel and back.
+    This tier is dominated by the syscall interception mechanism and
+    is insensitive to kernel processing time.
+
+  \item[Application tier (Python startup).]
+    A canned Python interpreter startup with a mixed-syscall workload
+    (\texttt{python3 -c "import hashlib"}).  Exercises
+    \texttt{mmap}, \texttt{mprotect}, \texttt{open}, \texttt{read},
+    \texttt{fstat}, \texttt{brk}, process creation, dynamic linking,
+    and C-extension loading.
+
+  \item[Stress tier (mt-mini).]
+    An SMP stress workload with T=8 threads on ncpus=4, performing
+    concurrent \texttt{mmap}/\texttt{munmap}/\texttt{mprotect}
+    operations with strict memory verification after each iteration.
+    Measures both backend performance and SMP correctness under
+    concurrency pressure.
+\end{description}
+
+\noindent
+The benchmark unit is speedup over seccomp on the same host.  This
+ratio cancels most CPU-frequency and microarchitecture noise and
+ties the claim to a backend decision rather than a hardware selection.
+
+
+% ------------------------------------------------------------------
+\section{Per-Syscall Latency}
+\label{sec:bench-syscall}
+% ------------------------------------------------------------------
+
+Table~\ref{tab:syscall-latency} summarizes the round-trip cost of a
+single \syscall{getpid} invocation under each backend mechanism,
+contextualized against a native Linux host syscall baseline and
+the LKL direct-call reference.
+
+\begin{table}[htbp]
+\centering
+\caption{Per-syscall (\texttt{getpid}) round-trip latency by backend.}
+\label{tab:syscall-latency}
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Backend & Mode & Cycles & Approx.\ ns & Notes \\
+\midrule
+Native host syscall & ring 0 entry & $\sim$150 & $\sim$50 & Baseline (not UML) \\
+\KVMvTwo{} + gadget & In-guest LSTAR & $\sim$90 & $\sim$25 & No VMEXIT; 10 trivial NRs \\
+\KVMvTwo{} (exit path) & \texttt{KVM\_EXIT\_IO} & $\sim$36,800 & $\sim$150 & IO-port exit path \\
+\Seccomp{} & SIGSYS + futex & $\sim$110,000 & 300--500 & Default backend (6.16+) \\
+ptrace (archived) & \texttt{PTRACE\_SYSEMU} & 3,000--15,000 & 1,000--5,000 & Removed in memo 25 R11 \\
+\midrule
+LKL (direct call) & function call & $\sim$18 & $\sim$6 & No ring split; not comparable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=16pt,
+    width=0.88\textwidth,
+    height=6.5cm,
+    ymode=log,
+    log basis y=10,
+    ymin=10,
+    ymax=200000,
+    ylabel={Cycles (log scale)},
+    symbolic x coords={LKL,kvm-v2 gadget,native,kvm-v2 exit,seccomp,ptrace},
+    xtick=data,
+    x tick label style={rotate=20,anchor=east,font=\small},
+    nodes near coords,
+    every node near coord/.append style={font=\tiny,above},
+    enlarge x limits=0.18,
+    grid=major,
+    ymajorgrids=true,
+    major grid style={draw=UMLGrid},
+]
+\addplot[fill=UMLBlue!60,draw=UMLBlue] coordinates {
+    (LKL,18)
+    (kvm-v2 gadget,90)
+    (native,150)
+    (kvm-v2 exit,36800)
+    (seccomp,110000)
+    (ptrace,9000)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Per-syscall round-trip cost comparison (log scale, cycles).
+  The LSTAR gadget achieves $\sim$1,200$\times$ improvement over
+  the \Seccomp{} backend for trivial syscalls.  LKL is shown for
+  reference but sacrifices ring-split fidelity.}
+\label{fig:syscall-cycles}
+\end{figure}
+
+\paragraph{The LSTAR gadget.}
+The $\sim$25\,ns / $\sim$90-cycle result for \KVMvTwo{} with the
+LSTAR gadget warrants explanation.  The gadget is an in-guest
+\texttt{SYSCALL} handler installed at the LSTAR MSR address.  When
+the guest executes \texttt{SYSCALL}, the CPU dispatches to the
+gadget page \emph{without} a VMEXIT.  The gadget performs fast-path
+handling (for trivial syscalls like \texttt{getpid}) and returns to
+guest userspace via \texttt{SYSRET}.  Only syscalls requiring
+kernel-side processing trigger a VMEXIT.  This achieves sub-native
+latency because the native host syscall traverses speculative-execution
+mitigations (KPTI, retpoline) that the in-guest gadget does not need.
+
+
+% ------------------------------------------------------------------
+\section{Cross-Host Benchmark Results}
+\label{sec:bench-crosshost}
+% ------------------------------------------------------------------
+
+Table~\ref{tab:bench-crosshost} reports the complete cross-host
+benchmark results across all three tiers.
+
+\begin{table}[htbp]
+\centering
+\caption{Post-gadget \KVMvTwo{} speedup over seccomp across 8 hosts.}
+\label{tab:bench-crosshost}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Host & CPU & Micro & Python & Stress \\
+\midrule
+s0 & Intel Core i9-12900K   & 284$\times$  & 3.73$\times$ & 7.26$\times$ \\
+s1 & Intel Xeon E3-1225 v6  & 743$\times$  & 3.05$\times$ & 3.71$\times$ \\
+s2 & Intel Xeon E3-1225 v5  & 813$\times$  & 2.99$\times$ & 3.94$\times$ \\
+s3 & Intel Xeon W-2123      & 707$\times$  & 3.14$\times$ & 4.16$\times$ \\
+s4 & Intel Core i5-12600K   & 193$\times$  & 2.99$\times$ & 8.72$\times$ \\
+s5 & AMD Ryzen 7 7840HS     & 861$\times$  & 3.87$\times$ & 4.30$\times$ \\
+s6 & AMD Ryzen 7 7840HS     & 908$\times$  & 4.06$\times$ & 4.32$\times$ \\
+s7 & AMD Ryzen 7 7840HS     & 904$\times$  & 3.91$\times$ & 4.89$\times$ \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{Range}} & \textbf{193--908$\times$} & \textbf{2.99--4.06$\times$} & \textbf{3.71--8.72$\times$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Micro Tier}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=14pt,
+    width=0.88\textwidth,
+    height=6cm,
+    ylabel={Micro speedup over seccomp ($\times$)},
+    symbolic x coords={s0,s1,s2,s3,s4,s5,s6,s7},
+    xtick=data,
+    ymin=0,
+    nodes near coords,
+    every node near coord/.append style={font=\small},
+    enlarge x limits=0.12,
+    grid=major,
+    ymajorgrids=true,
+    major grid style={draw=UMLGrid},
+    xlabel={Host},
+]
+\addplot[fill=UMLTeal!70,draw=UMLTeal] coordinates {
+    (s0,284) (s1,743) (s2,813) (s3,707) (s4,193)
+    (s5,861) (s6,908) (s7,904)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Micro-tier (getpid-loop) speedup.  The variation across hosts
+  reflects differences in seccomp notification overhead rather than
+  KVM performance: the \KVMvTwo{} gadget cost is consistently 87--153
+  cycles, while seccomp costs vary from $\sim$15,000 to $\sim$140,000
+  cycles by host.}
+\label{fig:bench-micro}
+\end{figure}
+
+
+\subsection{Application Tier (Python Startup)}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=14pt,
+    width=0.88\textwidth,
+    height=6cm,
+    ylabel={Python startup speedup ($\times$)},
+    symbolic x coords={s0,s1,s2,s3,s4,s5,s6,s7},
+    xtick=data,
+    ymin=0,
+    ymax=5.5,
+    nodes near coords,
+    every node near coord/.append style={font=\small},
+    enlarge x limits=0.12,
+    grid=major,
+    ymajorgrids=true,
+    major grid style={draw=UMLGrid},
+    xlabel={Host},
+]
+\addplot[fill=UMLGreen!70,draw=UMLGreen] coordinates {
+    (s0,3.73) (s1,3.05) (s2,2.99) (s3,3.14) (s4,2.99)
+    (s5,3.87) (s6,4.06) (s7,3.91)
+};
+\draw[dashed,UMLAmber,thick] (axis cs:s0,3.47) -- (axis cs:s7,3.47)
+  node[pos=0.5,above,font=\footnotesize\color{UMLAmber}] {mean = 3.47$\times$};
+\end{axis}
+\end{tikzpicture}
+\caption{\KVMvTwo{} Python startup speedup over seccomp.  The consistent
+  3--4$\times$ band across diverse hardware confirms an architectural
+  (backend mechanism) improvement, not a microarchitecture-specific one.}
+\label{fig:bench-py-speedup}
+\end{figure}
+
+
+\subsection{Stress Tier}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=14pt,
+    width=0.88\textwidth,
+    height=6cm,
+    ylabel={Stress speedup ($\times$)},
+    symbolic x coords={s0,s1,s2,s3,s4,s5,s6,s7},
+    xtick=data,
+    ymin=0,
+    ymax=10,
+    nodes near coords,
+    every node near coord/.append style={font=\small},
+    enlarge x limits=0.12,
+    grid=major,
+    ymajorgrids=true,
+    major grid style={draw=UMLGrid},
+    xlabel={Host},
+]
+\addplot[fill=UMLAmber!70,draw=UMLAmber] coordinates {
+    (s0,7.26) (s1,3.71) (s2,3.94) (s3,4.16) (s4,8.72)
+    (s5,4.30) (s6,4.32) (s7,4.89)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Stress tier (mt-mini SMP T=8, ncpus=4) speedup.  The wider
+  variance (3.71--8.72$\times$) reflects the mmap/page-fault-heavy
+  workload where TLB shootdown cost and host scheduler behavior create
+  per-host variation.  Zero strict memory failures on any host.}
+\label{fig:bench-stress}
+\end{figure}
+
+The stress tier combines performance with correctness.  Each mt-mini
+iteration allocates memory, writes patterns, forks or spawns threads,
+and verifies memory content after concurrent modification.  A single
+bit-flip constitutes a test failure.  The 3.71--8.72$\times$ speedup
+comes from the broader vCPU and SMP design, not solely the gadget.
+
+
+% ------------------------------------------------------------------
+\section{Snapshot Performance}
+\label{sec:bench-snapshot}
+% ------------------------------------------------------------------
+
+The \KVMvTwo{} snapshot benchmark exercises
+\texttt{kvm\_v2\_snapshot\_alloc/capture/restore} with $N=64$
+iterations of capture-once, restore-$N$-times.
+
+\begin{table}[htbp]
+\centering
+\caption{Snapshot benchmark (kernel \texttt{9ccbf5e7bb58}, AMD Ryzen 7 7840HS, $N=64$).}
+\label{tab:snapshot-perf}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Metric & Value & Design target & Margin \\
+\midrule
+Capture (one-shot)       & 35--39\,$\mu$s  & $<$\,50\,ms  & $\sim$1,300$\times$ under \\
+Restore (median)         & 13\,$\mu$s      & $<$\,1\,ms   & $\sim$77$\times$ under \\
+Restore (p95)            & 16--19\,$\mu$s  & ---           & --- \\
+Restore (min)            & 12.5\,$\mu$s    & ---           & --- \\
+Restore (max)            & 19--22\,$\mu$s  & ---           & --- \\
+Mode                     & full            & ---           & memslot copy executed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=20pt,
+    width=0.72\textwidth,
+    height=5.5cm,
+    ylabel={Latency ($\mu$s)},
+    symbolic x coords={capture,restore (med),restore (p95),restore (max)},
+    xtick=data,
+    x tick label style={font=\small},
+    ymin=0,
+    ymax=50,
+    nodes near coords,
+    every node near coord/.append style={font=\small},
+    enlarge x limits=0.20,
+    grid=major,
+    ymajorgrids=true,
+    major grid style={draw=UMLGrid},
+]
+\addplot[fill=UMLBlue!65,draw=UMLBlue] coordinates {
+    (capture,38.9)
+    (restore (med),13)
+    (restore (p95),17.5)
+    (restore (max),20.5)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Snapshot capture and restore latency.  The \SI{13}{\micro\second}
+  median restore enables checkpoint-at-every-syscall workflows without
+  budget pressure.}
+\label{fig:bench-snapshot}
+\end{figure}
+
+\paragraph{Why so fast.}
+The snapshot design avoids the three operations that dominate
+checkpoint/restore cost in conventional systems: (1)~no per-restore
+TLB shootdown (identity-mapped memslots); (2)~single host-VA-to-host-VA
+\texttt{memcpy} for memslot restore (no page-table walk); (3)~fixed-size
+\texttt{ioctl} chain for register/SREGS push (no variable-length data).
+
+Record/replay KUnit suite (\texttt{kvm\_v2\_record}): 7/7 tests pass,
+covering basic recording, state machine transitions, syscall observation,
+strict replay, gadget bypass, RDTSC interception, and SIGALRM anchoring.
+
+
+% ------------------------------------------------------------------
+\section{CPython Substrate Parity}
+\label{sec:bench-cpython}
+% ------------------------------------------------------------------
+
+The CPython parity gate runs 21 CPython 3.14 test modules on both
+backends and requires identical results.
+
+\begin{table}[htbp]
+\centering
+\caption{CPython substrate parity results.}
+\label{tab:bench-cpython}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Backend & PASS & FAIL & XFAIL & Parity \\
+\midrule
+\KVMvTwo{}    & 25 & 3 & 3 & --- \\
+Seccomp       & 25 & 3 & 3 & --- \\
+\midrule
+\textbf{Match} & \checkmark & \checkmark & \checkmark & \textbf{21/21} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The three FAIL results are known \UML{} limitations (not backend
+regressions): tests depending on \texttt{/proc/self/maps} layout,
+hardware timer resolution, or host-specific device nodes.  The three
+XFAIL results are test-side expected failures unrelated to the backend.
+The critical property is not that all tests pass, but that both
+backends produce \emph{identical} results---confirming functional
+equivalence of the \KVMvTwo{} and seccomp execution paths.
+
+The wide parity gate extends this to 135 modules: 134/135 match
+exactly, with a single \texttt{KVM\_BETTER} result (a test that
+passes on \KVMvTwo{} but fails on seccomp due to timing sensitivity)
+and zero regressions.
+
+
+% ------------------------------------------------------------------
+\section{Validation Gates}
+\label{sec:bench-gates}
+% ------------------------------------------------------------------
+
+\begin{table}[htbp]
+\centering
+\caption{Key validation gates (May 2026, kernel HEAD on \texttt{next}).}
+\label{tab:validation-gates}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Gate & Result & N & Notes \\
+\midrule
+cpython-parity (seccomp)          & 21/21 PARITY   & 21 modules  & UP and SMP \\
+cpython-parity (kvm-v2)           & 21/21 PARITY   & 21 modules  & UP and SMP \\
+Wide cpython-parity (kvm-v2)      & 134/135 PARITY & 135 modules & 1 KVM\_BETTER, 0 regression \\
+Substrate gate (seccomp)          & 25/3/3         & 31 tests    & PASS/FAIL/XFAIL \\
+Substrate gate (kvm-v2)           & 25/3/3         & 31 tests    & Matches seccomp exactly \\
+mt-mini SMP (T=8, ncpus=4)        & 400/400        & 400 boots   & Wilson 95\% [99.0\%, 100.0\%] \\
+threaded-fork-malloc               & 0/116,000      & 30 boots    & 0 CHILD\_FAIL across 116K forks \\
+threaded-subprocess-wait           & 10/10          & 10 boots    & 0/4,000 subprocess failures \\
+bench-micro getpid (kvm-v2)       & 89--105 cyc    & 8 hosts     & $\sim$1,000$\times$ vs seccomp \\
+perf-py-startup (kvm-v2/seccomp)  & 1.10 ratio     & ---         & Gate ceiling: $\leq$1.20 \\
+Phase J pilot soak                 & 240/240        & 3 workloads & memcheck/iocheck/stress-ng \\
+Django Tier 3 (post-R14)           & 120/120        & loopback    & Wilson 95\% [96.90\%, 100.00\%] \\
+\texttt{umlctl mission}           & 6/6 phases     & 100 soak    & 867s wall-clock; 0 panics \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ------------------------------------------------------------------
+\section{Profile Cost Model}
+\label{sec:bench-profiles}
+% ------------------------------------------------------------------
+
+Table~\ref{tab:profile-cost} breaks down the per-syscall cost by
+architectural layer for each profile, demonstrating the three-layer
+composition property.
+
+\begin{table}[htbp]
+\centering
+\caption{Per-syscall cost breakdown by profile and layer.}
+\label{tab:profile-cost}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Profile & Layer 1 (trap) & Layer 2 (gates) & Layer 3 (wraps) & Total \\
+\midrule
+prod-fast (KVM, no hooks)     & $\sim$70\,ns  & $\sim$1.5\,ns  & 0\,ns         & $\sim$72\,ns \\
+prod-with-hooks (KVM, trace)  & $\sim$70\,ns  & $\sim$80\,ns   & 0\,ns         & $\sim$150\,ns \\
+research (seccomp, full)      & $\sim$300\,ns & $\sim$80\,ns   & $\sim$100\,ns & $\sim$480\,ns \\
+fuzz (seccomp, KCOV+KASAN)    & $\sim$300\,ns & $\sim$10\,ns   & $\sim$100\,ns & $\sim$410\,ns \\
+sandbox (seccomp-only, none)  & $\sim$300\,ns & $\sim$1.5\,ns  & 0\,ns         & $\sim$302\,ns \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=9pt,
+    width=0.92\textwidth,
+    height=6.5cm,
+    ymode=log,
+    log basis y=10,
+    ymin=4,
+    ymax=3000,
+    ylabel={Estimated getpid cost (ns, log scale)},
+    symbolic x coords={library,native,prod-fast,prod-hooks,seccomp,sandbox,fuzz,research,fuzz-deep,time-travel,embedded},
+    xtick=data,
+    x tick label style={rotate=35,anchor=east,font=\footnotesize},
+    nodes near coords,
+    every node near coord/.append style={font=\tiny,rotate=90,anchor=west},
+    enlarge x limits=0.08,
+    grid=major,
+    ymajorgrids=true,
+    major grid style={draw=UMLGrid},
+]
+\addplot[fill=UMLBlue!70,draw=UMLBlue] coordinates {
+    (library,6)
+    (native,50)
+    (prod-fast,80)
+    (prod-hooks,85)
+    (seccomp,400)
+    (sandbox,505)
+    (fuzz,550)
+    (research,715)
+    (fuzz-deep,1200)
+    (time-travel,1200)
+    (embedded,2000)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Profile cost model.  The value of the profile system is the
+  ability to span from direct-call library mode (\SI{6}{\nano\second})
+  through heavily instrumented research and time-travel builds
+  (\SI{1.2}{\micro\second}) without forking the tree.  The
+  \texttt{native} bar is a bare-metal host reference, not a UML
+  profile.}
+\label{fig:bench-profiles}
+\end{figure}
+
+\noindent
+The key property: same source tree, radically different runtime
+behaviors.  Layer~1 dominates (backend choice), Layer~2 is near-free
+when off (static-key NOPs), Layer~3 is compile-time and orthogonal
+to both.
+
+
+% ------------------------------------------------------------------
+\section{Summary of Performance Claims}
+\label{sec:bench-summary}
+% ------------------------------------------------------------------
+
+\begin{table}[htbp]
+\centering
+\caption{Summary of validated performance claims.}
+\label{tab:bench-summary}
+\begin{tabularx}{\linewidth}{@{}p{0.26\linewidth}p{0.20\linewidth}p{0.22\linewidth}Y@{}}
+\toprule
+Claim & Target & Achieved & Methodology \\
+\midrule
+Gadget syscall latency     & $\sim$100\,ns         & $\sim$25\,ns / 90 cycles    & RDTSC-bracketed getpid \\
+Python startup speedup     & faster than seccomp    & 2.99--4.06$\times$          & 8-host cross-comparison \\
+Stress tier speedup        & faster than seccomp    & 3.71--8.72$\times$          & mt-mini SMP T=8 ncpus=4 \\
+Micro tier speedup         & faster than seccomp    & 193--908$\times$            & getpid-loop \\
+Snapshot capture           & $<$\,50\,ms            & 35--39\,$\mu$s              & kvm\_v2\_snapshot\_bench N=64 \\
+Snapshot restore (median)  & $<$\,1\,ms             & 13\,$\mu$s                  & kvm\_v2\_snapshot\_bench N=64 \\
+CPython parity             & identical results      & 21/21 match                 & cpython-parity gate \\
+Soak pass rate             & 100\%                  & 100/100                     & umlctl mission \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Interpretation.}
+The performance story has four layers:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Mechanism win.}  The micro tier proves that in-guest
+    fast-path dispatch removes most seccomp signal/stub cost for
+    trivial syscalls.
+  \item \textbf{Workload win.}  The Python tier proves that real
+    userland startup benefits from those trivial syscalls becoming
+    cheap.
+  \item \textbf{Concurrency win.}  The stress tier is mmap/page-fault
+    heavy, so the gadget is less directly relevant; the continuing
+    3.71--8.72$\times$ speedup comes from the broader vCPU and SMP
+    design.
+  \item \textbf{Snapshot win.}  The snapshot capture/restore numbers
+    are within the sub-ms iteration budget by orders of magnitude.
+    Record/replay sessions can now realistically checkpoint at every
+    observed-syscall boundary without budget pressure.
+\end{itemize}
+
+\noindent
+The correct benchmark unit is the ratio against seccomp on the same
+host, not the raw absolute latency across machines.  That choice
+removes most CPU-frequency and microarchitecture noise and keeps the
+claim tied to a backend decision.

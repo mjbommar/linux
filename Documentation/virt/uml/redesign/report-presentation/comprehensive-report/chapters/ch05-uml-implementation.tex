@@ -1,0 +1,1115 @@
+% ==========================================================================
+%  Chapter 5 — UML Implementation Details
+% ==========================================================================
+\chapter{UML Implementation Details}
+\label{ch:implementation}
+
+\epigraph{%
+  Show me the data structures and I won't usually need your code;
+  it will be obvious.%
+}{Fred Brooks, paraphrased}
+
+This chapter descends from the architectural overview of the previous chapters
+into the concrete data structures, code paths, and protocols that make
+User-Mode Linux work.  Where earlier chapters described \emph{what} UML does,
+this chapter describes \emph{how}: the exact sequence of system calls, signal
+deliveries, futex operations, and page-table walks that execute when a guest
+process issues a system call, takes a page fault, or is context-switched.
+All code references are relative to the \texttt{arch/um/} subtree of the Linux
+6.16+ source unless noted otherwise.
+
+% ------------------------------------------------------------------
+\section{Process Lifecycle}
+\label{sec:impl-process-lifecycle}
+
+A UML guest process is, from the host kernel's perspective, just another
+userspace thread.  Its lifecycle maps onto the standard Linux process model
+but with a UML-specific twist at each stage: creation, scheduling, and
+destruction are all mediated through the active backend.
+
+\subsection{Creation: \texttt{fork} through \texttt{copy\_thread}}
+\label{sec:impl-process-creation}
+
+When a guest process calls \syscall{fork} or \syscall{clone}, the standard
+kernel path reaches \texttt{copy\_process()}, which eventually calls the
+architecture-specific \texttt{copy\_thread()} in
+\umlpath{arch/um/kernel/process.c}.  This function is the first point where
+UML diverges from a hardware architecture port:
+
+\begin{lstlisting}[language=KernelC,caption={Simplified \texttt{copy\_thread()} --- task creation dispatch},label=lst:copy-thread]
+int copy_thread(struct task_struct *p,
+                const struct kernel_clone_args *args)
+{
+    void (*handler)(void);
+
+    p->thread = (struct thread_struct) INIT_THREAD;
+
+    if (!args->fn) {
+        /* Forking a user process: copy parent's register state */
+        memcpy(&p->thread.regs.regs, current_pt_regs(),
+               sizeof(p->thread.regs.regs));
+        PT_REGS_SET_SYSCALL_RETURN(&p->thread.regs, 0);
+        if (sp != 0)
+            REGS_SP(p->thread.regs.regs.gp) = sp;
+        handler = fork_handler;
+        arch_copy_thread(&current->thread.arch, &p->thread.arch);
+    } else {
+        /* Kernel thread: set up fresh register state */
+        um_backend_dispatch(init_thread_regs,
+                            p->thread.regs.regs.gp,
+                            p->thread.regs.regs.fp);
+        p->thread.request.thread.proc = args->fn;
+        p->thread.request.thread.arg  = args->fn_arg;
+        handler = new_thread_handler;
+    }
+
+    um_backend_dispatch(thread_create, p,
+                        task_stack_page(p), handler);
+    return 0;
+}
+\end{lstlisting}
+
+The key dispatch is \texttt{um\_backend\_dispatch(thread\_create, ...)} at the
+end.  For the seccomp backend, this initializes the child's
+\texttt{jmp\_buf} (the \texttt{switch\_buf} in \texttt{thread\_struct}) so
+that the first context switch into the new task will \texttt{longjmp} to the
+chosen \texttt{handler}---either \texttt{fork\_handler} for user processes or
+\texttt{new\_thread\_handler} for kernel threads.
+
+\subsection{The \texttt{thread\_struct} and Per-Task State}
+\label{sec:impl-thread-struct}
+
+Every Linux task has an architecture-specific \texttt{thread\_struct} embedded
+in its \texttt{task\_struct}.  UML's definition
+(\umlpath{arch/um/include/asm/processor-generic.h}) is compact but
+information-dense:
+
+\begin{lstlisting}[language=KernelC,caption={UML's \texttt{thread\_struct}},label=lst:thread-struct]
+struct thread_struct {
+    struct pt_regs     *segv_regs;     /* saved regs at SEGV time */
+    struct task_struct *prev_sched;    /* previous task (for tail) */
+    struct arch_thread  arch;          /* x86-specific: TLS, debug */
+    jmp_buf             switch_buf;    /* longjmp target for ctxsw */
+    struct {
+        struct {
+            int   (*proc)(void *);     /* kernel thread entry fn */
+            void   *arg;               /* kernel thread argument */
+        } thread;
+    } request;
+    void               *segv_continue;
+    struct pt_regs      regs;          /* variable-sized: includes FP */
+};
+\end{lstlisting}
+
+The \texttt{switch\_buf} field is the heart of the seccomp backend's context
+switch mechanism: it is a \texttt{jmp\_buf} that records the exact point in
+host userspace where this task's execution was last suspended.  The
+\texttt{arch} sub-structure (\texttt{struct arch\_thread}) carries
+architecture-dependent state such as TLS base addresses
+(\texttt{fs\_base}/\texttt{gs\_base} on x86-64) and debug register state.
+
+\subsection{Context Switch: \texttt{\_\_switch\_to}}
+\label{sec:impl-context-switch}
+
+The core scheduler's \texttt{context\_switch()} calls the architecture-specific
+\texttt{\_\_switch\_to()}, which on UML dispatches to the backend:
+
+\begin{lstlisting}[language=KernelC,caption={UML context switch},label=lst:switch-to]
+struct task_struct *__switch_to(struct task_struct *from,
+                               struct task_struct *to)
+{
+    to->thread.prev_sched = from;
+    set_current(to);
+    um_on_context_switch(from, to);
+    um_backend_dispatch(context_switch, from, to);
+    arch_switch_to(current);
+    return current->thread.prev_sched;
+}
+\end{lstlisting}
+
+For the \textbf{seccomp backend}, \texttt{context\_switch} performs a
+\texttt{setjmp}/\texttt{longjmp}: the outgoing task saves its execution state
+into \texttt{from->thread.switch\_buf} via \texttt{setjmp}, and then
+\texttt{longjmp}s to the saved state in \texttt{to->thread.switch\_buf}.  This
+is a purely userspace operation---no host kernel involvement, no system calls.
+The host kernel never knows that UML has switched from one ``guest task'' to
+another; the host thread simply jumps to a different code address.
+
+For a future \textbf{KVM backend}, the context switch would instead
+load the new task's register state into the VMCS/VMCB before the next
+\texttt{KVM\_RUN} ioctl---the vCPU hardware itself enforces the switch.
+
+\subsection{Destruction}
+
+Task destruction follows the standard Linux \texttt{do\_exit()} path.  The
+backend-specific cleanup is minimal for seccomp: the stub child process
+(which is per-mm, not per-task) is destroyed only when the last task sharing
+that mm exits, at which point \texttt{mm\_destroy()} is called through the
+backend ops table.
+
+% ------------------------------------------------------------------
+\section{The Seccomp Backend: Trap Path Walkthrough}
+\label{sec:impl-seccomp-trap}
+
+The seccomp backend, implemented primarily in
+\umlpath{arch/um/kernel/skas/stub.c} and
+\umlpath{arch/um/os-Linux/skas/process.c}, is the production backend
+for current UML.  This section walks through the complete lifecycle of a
+guest system call, step by step.
+
+\subsection{Step 1: Guest Issues a System Call}
+
+A guest userspace process (running as a host thread inside a seccomp-filtered
+address space) executes \texttt{syscall} (x86-64) or \texttt{int 0x80}.  The
+host kernel's syscall entry path is reached, but \emph{before} the syscall
+can execute, the BPF seccomp filter installed by UML's stub setup intercepts
+it.
+
+The filter returns \texttt{SECCOMP\_RET\_TRAP}, which causes the host kernel
+to:
+\begin{enumerate}[nosep]
+  \item Abort the system call (it never executes on the host).
+  \item Deliver a \texttt{SIGSYS} signal to the stub child process.
+\end{enumerate}
+
+\subsection{Step 2: \texttt{stub\_signal\_interrupt} --- The Stub Handler}
+\label{sec:impl-stub-signal-interrupt}
+
+The \texttt{SIGSYS} signal is caught by
+\texttt{stub\_signal\_interrupt()}\linebreak (\umlpath{arch/um/kernel/skas/stub.c}),
+which runs on the signal stack inside the stub child's address space.
+This handler is the most performance-critical code in the seccomp backend;
+it executes for every guest system call, signal, and timer interrupt.
+
+The handler performs five critical operations:
+
+\begin{enumerate}
+\item \textbf{Save signal context.}  The signal number, \texttt{siginfo\_t}
+  offset, and \texttt{mcontext\_t} offset (both relative to the signal stack
+  base) are stored into the shared \texttt{stub\_data} page:
+\begin{lstlisting}[language=KernelC,numbers=none]
+d->signal    = sig;
+d->si_offset = (unsigned long)info
+             - (unsigned long)&d->sigstack[0];
+d->mctx_offset = (unsigned long)&uc->uc_mcontext
+               - (unsigned long)&d->sigstack[0];
+\end{lstlisting}
+
+\item \textbf{TLS base synchronization} (x86-64 only).  Because UML's
+  seccomp filter \texttt{ALLOW}s \texttt{arch\_prctl}, guest userspace can
+  change \texttt{FS\_BASE}/\texttt{GS\_BASE} directly without a SIGSYS
+  round-trip.  The stub must re-read the authoritative values from the host
+  kernel before handing control back to UML, or subsequent set/get comparisons
+  will operate on stale data---a bug that manifested as Python segfaults in
+  \texttt{\_Py\_Dealloc} through NULL TLS dereferences:
+\begin{lstlisting}[language=KernelC,numbers=none]
+#ifdef CONFIG_X86_64
+stub_syscall2(__NR_arch_prctl, ARCH_GET_FS,
+              (unsigned long)&d->arch_data.fs_base);
+stub_syscall2(__NR_arch_prctl, ARCH_GET_GS,
+              (unsigned long)&d->arch_data.gs_base);
+#endif
+\end{lstlisting}
+
+\item \textbf{Wake the UML kernel via futex.}  The stub sets
+  \texttt{d->futex = FUTEX\_IN\_KERN} and issues a
+  \texttt{FUTEX\_WAKE} on the futex word, then enters a
+  \texttt{FUTEX\_WAIT} loop until the UML kernel changes the futex value
+  back (see Section~\ref{sec:impl-futex-protocol}).
+
+\item \textbf{Execute queued stub syscalls} (if any).  When the UML kernel
+  needs to modify the stub child's address space (mmap, munmap), it queues
+  the operations in \texttt{stub\_data.syscall\_data[]} and wakes the stub.
+  The stub processes these via the \texttt{syscall\_handler()} inline function,
+  receiving any file descriptors via SCM\_RIGHTS over a Unix socket.
+
+\item \textbf{Restore architecture-dependent state.}  Before returning from
+  the signal handler (which triggers \texttt{rt\_sigreturn} to restore the
+  guest's mcontext), the stub calls
+  \texttt{stub\_seccomp\_restore\_state(\&d->arch\_data)} to apply any
+  register modifications the UML kernel wrote into the shared page.
+\end{enumerate}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    box/.style={
+      draw=UMLBlue!70, fill=UMLBlue!5, rounded corners=3pt,
+      minimum width=3.6cm, minimum height=0.9cm,
+      font=\small, align=center, text=UMLInk
+    },
+    stubbox/.style={
+      draw=UMLTeal!70, fill=UMLTeal!5, rounded corners=3pt,
+      minimum width=3.6cm, minimum height=0.9cm,
+      font=\small, align=center, text=UMLInk
+    },
+    hostbox/.style={
+      draw=UMLMuted!70, fill=UMLPanel, rounded corners=3pt,
+      minimum width=3.6cm, minimum height=0.9cm,
+      font=\small, align=center, text=UMLInk
+    },
+    arr/.style={-{Stealth[length=5pt]}, thick, color=UMLBlue!70},
+    darr/.style={-{Stealth[length=5pt]}, thick, color=UMLTeal!70, dashed},
+    note/.style={font=\scriptsize\itshape, text=UMLMuted},
+    every node/.style={inner sep=4pt}
+  ]
+
+  % Guest side
+  \node[box] (guest) at (0, 0) {Guest calls\\[-2pt]\texttt{write(2)}};
+
+  % Host kernel
+  \node[hostbox] (seccomp) at (0, -1.6) {Host kernel:\\[-2pt]seccomp filter\\[-2pt]\texttt{RET\_TRAP}};
+
+  % Stub handler
+  \node[stubbox] (sigsys) at (0, -3.2) {Stub receives\\[-2pt]\texttt{SIGSYS}};
+  \node[stubbox] (save) at (0, -4.8) {Save regs to\\[-2pt]\texttt{stub\_data}};
+  \node[stubbox] (tls) at (0, -6.4) {Sync TLS:\\[-2pt]\texttt{ARCH\_GET\_FS/GS}};
+  \node[stubbox] (futex1) at (0, -8.0) {\texttt{FUTEX\_WAKE}\\[-2pt]UML kernel};
+
+  % UML kernel side
+  \node[box] (dispatch) at (5.8, -8.0) {UML kernel:\\[-2pt]\texttt{handle\_syscall}};
+  \node[box] (result) at (5.8, -6.4) {Write result to\\[-2pt]\texttt{stub\_data}};
+  \node[box] (futex2) at (5.8, -4.8) {\texttt{FUTEX\_WAKE}\\[-2pt]stub child};
+
+  % Return path
+  \node[stubbox] (restore) at (0, -9.6) {Restore state;\\[-2pt]\texttt{rt\_sigreturn}};
+  \node[box] (resume) at (0, -11.2) {Guest resumes\\[-2pt]at next insn};
+
+  % Arrows
+  \draw[arr] (guest) -- (seccomp);
+  \draw[arr] (seccomp) -- (sigsys);
+  \draw[arr] (sigsys) -- (save);
+  \draw[arr] (save) -- (tls);
+  \draw[arr] (tls) -- (futex1);
+  \draw[darr] (futex1) -- (dispatch) node[note, midway, above] {futex wake};
+  \draw[arr] (dispatch) -- (result);
+  \draw[arr] (result) -- (futex2);
+  \draw[darr] (futex2) -- (restore) node[note, midway, left, xshift=-3mm] {futex wake};
+  \draw[arr] (restore) -- (resume);
+
+  % Annotations
+  \node[note, anchor=east] at (-2.2, -4.8) {stub address space};
+  \node[note, anchor=west] at (8.0, -6.4) {UML kernel process};
+
+  % Bracket for stub side
+  \draw[decorate, decoration={brace, amplitude=6pt, mirror},
+        UMLTeal!50, thick]
+    (-2.0, -2.8) -- (-2.0, -10.0)
+    node[note, midway, left, xshift=-8pt, align=right]
+    {Runs inside\\stub child};
+
+\end{tikzpicture}
+\caption{The seccomp trap path: complete lifecycle of a guest system call.
+Solid arrows show the control flow; dashed arrows show the futex-mediated
+handoff between the stub child and the UML kernel process.}
+\label{fig:seccomp-trap-path}
+\end{figure}
+
+\subsection{The Futex Protocol}
+\label{sec:impl-futex-protocol}
+
+Communication between the stub child and the UML kernel uses a shared-memory
+futex protocol~\cite{futex-lwn}.  The futex word lives at
+\texttt{stub\_data.futex} and takes two values:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Constant} & \textbf{Value} & \textbf{Meaning} \\
+\midrule
+\texttt{FUTEX\_IN\_CHILD} & 0 & Stub child is running (guest mode) \\
+\texttt{FUTEX\_IN\_KERN}  & 1 & UML kernel owns control \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The protocol proceeds as follows:
+
+\begin{enumerate}[nosep]
+\item \textbf{Stub $\to$ kernel:} The stub sets
+  \texttt{futex = FUTEX\_IN\_KERN}, then issues
+  \texttt{futex(FUTEX\_WAKE, 1)} to wake the UML kernel thread.
+\item \textbf{Stub waits:} The stub loops on
+  \texttt{futex(FUTEX\_WAIT, FUTEX\_IN\_KERN)} until the value changes.
+  Spurious wakeups (\texttt{-EINTR}) are retried; unexpected errors cause
+  the stub to \texttt{exit\_group(1)}.
+\item \textbf{Kernel processes:} The UML kernel reads the saved registers and
+  signal information from \texttt{stub\_data}, dispatches to
+  \texttt{handle\_syscall()}, writes the result back, and then sets
+  \texttt{futex = FUTEX\_IN\_CHILD} followed by
+  \texttt{futex(FUTEX\_WAKE, 1)}.
+\item \textbf{Stub resumes:} The stub's \texttt{FUTEX\_WAIT} returns; it
+  checks for queued syscalls and, finding none (or having processed them),
+  calls \texttt{stub\_seccomp\_restore\_state()} and returns from the signal
+  handler, which triggers \texttt{rt\_sigreturn} and resumes guest execution.
+\end{enumerate}
+
+The critical invariant is that only one side is ``active'' at any time: when
+the futex word is \texttt{FUTEX\_IN\_KERN}, the stub is sleeping in the
+kernel's futex wait queue and will not execute any guest code; when it is
+\texttt{FUTEX\_IN\_CHILD}, the UML kernel thread is sleeping.  This mutual
+exclusion is what allows the shared \texttt{stub\_data} page to be accessed
+without locks.
+
+\subsection{The \texttt{stub\_data} Structure}
+\label{sec:impl-stub-data}
+
+The shared communication page between the stub child and the UML kernel is
+defined in \umlpath{arch/um/include/shared/skas/stub-data.h}:
+
+\begin{lstlisting}[language=KernelC,caption={The \texttt{stub\_data} structure},label=lst:stub-data-impl]
+struct stub_data {
+    long err;                    /* syscall error from stub handler */
+
+    int syscall_data_len;        /* number of queued stub syscalls */
+    /* Batched syscall descriptors, sized to fill one page minus
+     * overhead for the other fields (128 bytes reserved) */
+    struct stub_syscall syscall_data[...]  __aligned(16);
+
+    /* Shared with signal handler (seccomp mode only) */
+    short         restart_wait;  /* re-enter wait loop after batch */
+    unsigned int  futex;         /* FUTEX_IN_CHILD / FUTEX_IN_KERN */
+    int           signal;        /* signal number (e.g., SIGSYS) */
+    unsigned short si_offset;    /* siginfo_t offset in sigstack */
+    unsigned short mctx_offset;  /* mcontext_t offset in sigstack */
+
+    /* Architecture-specific state for seccomp restore */
+    struct stub_data_arch arch_data;
+
+    /* Signal stack for the stub's signal handlers */
+    unsigned char sigstack[UM_KERN_PAGE_SIZE]
+                  __aligned(UM_KERN_PAGE_SIZE);
+};
+\end{lstlisting}
+
+The \texttt{syscall\_data[]} array carries batched memory operations:
+
+\begin{lstlisting}[language=KernelC,caption={Stub syscall descriptor},label=lst:stub-syscall]
+enum stub_syscall_type {
+    STUB_SYSCALL_UNSET = 0,
+    STUB_SYSCALL_MMAP,
+    STUB_SYSCALL_MUNMAP,
+};
+
+struct stub_syscall {
+    struct {
+        unsigned long addr;
+        unsigned long length;
+        unsigned long offset;
+        int fd;
+        int prot;
+    } mem;
+    enum stub_syscall_type syscall;
+};
+\end{lstlisting}
+
+The batching mechanism is crucial for TLB synchronization performance: instead
+of waking the stub for each individual mmap/munmap, the UML kernel can queue
+multiple operations and wake the stub once.
+
+% ------------------------------------------------------------------
+\section{Memory Management Implementation}
+\label{sec:impl-memory}
+
+UML's memory subsystem must bridge two page-table hierarchies: the guest page
+tables that the Linux mm subsystem manages, and the host page tables that the
+host kernel manages for the stub child's address space.  The bridge between
+them is the TLB synchronization path.
+
+\subsection{Physical Memory: The Backing File}
+\label{sec:impl-physmem}
+
+All guest physical memory is backed by a single temporary file, created
+at boot by \texttt{setup\_physmem()} in \umlpath{arch/um/kernel/physmem.c}.
+The function calls \texttt{create\_mem\_file(len)} to create an unlinked
+temporary file of size \texttt{physmem\_size}, then \texttt{mmap}s it into
+the UML process's address space with \texttt{MAP\_SHARED}.  This file
+descriptor---stored in the static \texttt{physmem\_fd}---is the single source
+of truth for all guest RAM.
+
+The \texttt{phys\_mapping()} function translates a guest physical address to
+a (file descriptor, offset) pair:
+
+\begin{lstlisting}[language=KernelC,caption={Physical address to file mapping},label=lst:phys-mapping]
+int phys_mapping(unsigned long phys, unsigned long long *offset_out)
+{
+    int fd = -1;
+    if (phys < physmem_size) {
+        fd = physmem_fd;
+        *offset_out = phys;
+    }
+    return fd;
+}
+\end{lstlisting}
+
+When the seccomp backend needs to map a guest page into the stub child's
+address space, it issues an \texttt{mmap(MAP\_SHARED | MAP\_FIXED)} on
+\texttt{physmem\_fd} at the appropriate offset.  Because both the UML kernel
+and the stub child map the same file with \texttt{MAP\_SHARED}, changes made
+by the kernel (e.g., writing to a page that backs a guest buffer) are
+immediately visible to the stub child, and vice versa.
+
+\subsection{The TLB Sync Path: \texttt{um\_tlb\_sync}}
+\label{sec:impl-tlb-sync}
+
+When the guest kernel modifies a page table entry (e.g., through
+\texttt{set\_pte}, \texttt{set\_ptes}, or any of the \texttt{flush\_tlb\_*}
+family), UML does not immediately reflect the change in the host address space.
+Instead, it \emph{marks} the affected range for deferred synchronization:
+
+\begin{lstlisting}[language=KernelC,caption={TLB mark for deferred sync (from \texttt{pgtable.h})},label=lst:tlb-mark]
+static inline void um_tlb_mark_sync(struct mm_struct *mm,
+                                    unsigned long start,
+                                    unsigned long end)
+{
+    /* Expand the pending sync range to include [start, end) */
+    if (!mm->context.sync_tlb_range_to ||
+         start < mm->context.sync_tlb_range_from)
+        mm->context.sync_tlb_range_from = start;
+    if (end > mm->context.sync_tlb_range_to)
+        mm->context.sync_tlb_range_to = end;
+}
+\end{lstlisting}
+
+The actual synchronization happens in \texttt{um\_tlb\_sync()}
+(\umlpath{arch/um/kernel/tlb.c}), which is called before the guest is allowed
+to resume execution---typically from the backend's \texttt{vcpu\_run} dispatch.
+The function walks the guest page directory over the marked range
+\texttt{[sync\_tlb\_range\_from, sync\_tlb\_range\_to)}, inspecting each leaf
+PTE:
+
+\begin{itemize}[nosep]
+\item If the PTE is \textbf{present} and \texttt{pte\_needsync()} returns true,
+  the function constructs a \texttt{struct um\_memory\_region} and dispatches
+  through the backend's \texttt{mm\_region\_added} op (which, for seccomp,
+  queues a \texttt{STUB\_SYSCALL\_MMAP} into \texttt{stub\_data}).
+\item If the PTE is \textbf{not present} and \texttt{pte\_needsync()} returns
+  true, a \texttt{mm\_region\_removed} dispatch queues a
+  \texttt{STUB\_SYSCALL\_MUNMAP}.
+\item On success, the PTE is marked up-to-date via \texttt{pte\_mkuptodate()}.
+\end{itemize}
+
+\subsection{The \texttt{mm\_context\_t} and Generation Tracking}
+\label{sec:impl-mm-context}
+
+UML extends the standard \texttt{mm\_struct} with a \texttt{mm\_context\_t}
+(\umlpath{arch/um/include/asm/mmu.h}) that carries per-mm state for the
+TLB sync and backend interaction:
+
+\begin{lstlisting}[language=KernelC,caption={UML's \texttt{mm\_context\_t} (key fields)},label=lst:mm-context]
+typedef struct mm_context {
+    struct mm_id    id;              /* stub child PID, socket, etc. */
+    struct mutex    turnstile;       /* serialize stub access */
+
+    /* Deferred TLB sync range */
+    spinlock_t      sync_tlb_lock;
+    unsigned long   sync_tlb_range_from;
+    unsigned long   sync_tlb_range_to;
+
+    /* Deferred page free (mmu_gather integration) */
+    spinlock_t      deferred_free_lock;
+    struct list_head deferred_free_pages;
+    unsigned int    deferred_free_count;
+
+    /* Per-mm TLB generation counter */
+    atomic64_t      tlb_gen;
+    atomic64_t      tlb_gen_seen_by[NR_CPUS];
+} mm_context_t;
+\end{lstlisting}
+
+The \texttt{mm\_id} sub-structure identifies the stub child associated with
+this mm:
+
+\begin{lstlisting}[language=KernelC,caption={The \texttt{mm\_id} structure},label=lst:mm-id]
+struct mm_id {
+    int pid;                     /* stub child PID */
+    unsigned long stack;         /* shared stub_data page address */
+    int syscall_data_len;        /* current batch length */
+    /* Seccomp-only fields */
+    int sock;                    /* Unix socket to stub child */
+    int syscall_fd_num;          /* number of fds to send */
+    int syscall_fd_map[STUB_MAX_FDS]; /* fd table for SCM_RIGHTS */
+};
+\end{lstlisting}
+
+The \texttt{tlb\_gen} counter is incremented after each successful
+\texttt{um\_tlb\_sync()} drain.  Under SMP configurations, each vCPU tracks
+\texttt{tlb\_gen\_seen\_by[cpu]}; when a vCPU's seen generation lags behind the
+current generation, it knows a TLB flush is needed before resuming guest
+execution.
+
+\subsection{The \texttt{um\_memory\_region} Descriptor}
+\label{sec:impl-memory-region}
+
+The interface between the mm-arbiter (TLB sync) and the backend uses a
+clean, backend-agnostic descriptor:
+
+\begin{lstlisting}[language=KernelC,caption={Memory region descriptor},label=lst:um-memory-region]
+struct um_memory_region {
+    unsigned long va;        /* guest virtual address */
+    unsigned long len;       /* region length */
+    int           prot;      /* UM_PROT_READ|WRITE|EXEC */
+    int           phys_fd;   /* physmem fd (-1 for unmap) */
+    u64           offset;    /* offset into phys_fd */
+    void         *backend_data;  /* opaque, backend-managed */
+};
+\end{lstlisting}
+
+For the seccomp backend, \texttt{mm\_region\_added} translates this into a
+\texttt{mmap(MAP\_SHARED | MAP\_FIXED, phys\_fd, offset)} in the stub child's
+address space.  The \texttt{backend\_data} field is reserved for the KVM
+backend, which will use it to track memslot IDs.
+
+% ------------------------------------------------------------------
+\section{Signal Handling}
+\label{sec:impl-signals}
+
+UML repurposes the host's POSIX signal mechanism to implement kernel
+``interrupts.''  Three signals carry the bulk of the work:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Host Signal} & \textbf{UML Semantics} & \textbf{Handler} \\
+\midrule
+\texttt{SIGALRM} & Timer interrupt (HZ tick) & \texttt{timer\_alarm\_handler} \\
+\texttt{SIGIO}   & I/O event notification    & \texttt{sig\_handler} $\to$ \texttt{sigio\_handler} \\
+\texttt{SIGSEGV} & Page fault                & \texttt{sig\_handler} $\to$ \texttt{segv\_handler} \\
+\texttt{SIGCHLD} & Stub child death (seccomp) & \texttt{sig\_handler} $\to$ \texttt{sigchld\_handler} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Signal Installation and Masking}
+\label{sec:impl-signal-masking}
+
+All UML signal handlers are installed by \texttt{set\_handler()} in
+\umlpath{arch/um/os-Linux/signal.c}, which uses \texttt{sigaction} with
+\texttt{SA\_SIGINFO | SA\_ONSTACK}.  The function constructs a signal mask
+that blocks all IRQ-class signals (\texttt{SIGIO}, \texttt{SIGWINCH},
+\texttt{SIGALRM}) inside any handler, preventing nested interrupts.
+\texttt{SIGCHLD} is conditionally masked only when the active backend
+uses the stub reaper (\texttt{um\_backend->uses\_stub\_reaper}):
+
+\begin{lstlisting}[language=KernelC,caption={Conditional SIGCHLD masking based on backend capability},label=lst:sigchld-mask]
+if (um_backend && um_backend->uses_stub_reaper)
+    sigaddset(&action.sa_mask, SIGCHLD);
+\end{lstlisting}
+
+\texttt{SIGSEGV} is installed with \texttt{SA\_NODEFER} so that nested
+page faults can be handled (the page fault handler may itself access
+unmapped memory during its processing).  Similarly, \texttt{SIGTRAP} uses
+\texttt{SA\_NODEFER} when kprobes are enabled, since a probe handler can call
+a function that is itself probed.
+
+\subsection{Signals as Interrupts: The Enable/Disable Discipline}
+\label{sec:impl-signal-discipline}
+
+UML implements the kernel's \texttt{local\_irq\_disable()}/\texttt{local\_irq\_enable()} as signal blocking, not via
+\texttt{sigprocmask} (which would require a system call on every
+enable/disable), but through a per-thread software flag:
+
+\begin{lstlisting}[language=KernelC,caption={Software-based IRQ disable},label=lst:signals-enabled]
+__thread int signals_enabled;
+static __thread unsigned int signals_pending;
+
+void block_signals(void) {
+    if (!signals_enabled) return;
+    signals_enabled = 0;
+    barrier();
+}
+\end{lstlisting}
+
+When a signal arrives with \texttt{signals\_enabled == 0}, the handler records
+the signal in \texttt{signals\_pending} and returns immediately without
+processing it.  When \texttt{unblock\_signals()} is later called, it checks
+\texttt{signals\_pending} and dispatches any accumulated signals in priority
+order: \texttt{SIGIO} first (to avoid stranding I/O events), then
+\texttt{SIGCHLD}, then \texttt{SIGALRM}:
+
+\begin{lstlisting}[language=KernelC,caption={Deferred signal dispatch in \texttt{unblock\_signals()}},label=lst:unblock-dispatch]
+void unblock_signals(void) {
+    /* ... enable signals ... */
+    while (1) {
+        barrier();
+        save_pending = signals_pending;
+        if (save_pending == 0) return;
+        signals_pending = 0;
+        __block_signals();
+
+        if (save_pending & SIGIO_MASK)
+            sig_handler_common(SIGIO, NULL, NULL);
+        if (save_pending & SIGCHLD_MASK)
+            sigchld_handler(SIGCHLD, NULL, &regs, NULL);
+        if ((save_pending & SIGALRM_MASK) &&
+            (!(signals_active & SIGALRM_MASK)))
+            timer_real_alarm_handler(NULL);
+
+        __unblock_signals();
+    }
+}
+\end{lstlisting}
+
+This loop structure means that signals can ``stack'': a timer interrupt that
+arrives while processing an I/O event will be caught on the next iteration.
+The \texttt{signals\_active} bitmask prevents reentrant timer handling.
+
+\subsection{The Timer Interrupt}
+
+\texttt{SIGALRM} drives UML's tick.  The backend's \texttt{set\_timer} op
+configures the host timer (via \texttt{setitimer} or \texttt{timer\_settime})
+in one-shot or periodic mode.  When the alarm fires,
+\texttt{timer\_alarm\_handler()} blocks signals, calls
+\texttt{timer\_real\_alarm\_handler()} (which invokes the standard kernel
+\texttt{timer\_handler}), and re-enables signals.  The standard kernel timer
+subsystem then drives the scheduler tick, process accounting, and all
+timer-wheel-based timeouts.
+
+% ------------------------------------------------------------------
+\section{The hostfs Filesystem}
+\label{sec:impl-hostfs}
+
+The \texttt{hostfs} filesystem (\umlpath{fs/hostfs/}) provides UML guests
+with direct access to the host's filesystem tree.  It implements the Linux VFS
+interface by forwarding each operation to the corresponding host system call.
+
+\subsection{Architecture}
+
+\texttt{hostfs} is structured as a two-layer filesystem:
+
+\begin{itemize}[nosep]
+\item \textbf{Kernel layer} (\texttt{hostfs\_kern.c}): Implements VFS
+  operations (\texttt{inode\_operations}, \texttt{file\_operations},
+  \texttt{address\_space\_operations}) using the internal API.
+\item \textbf{User layer} (\texttt{hostfs\_user.c}): Implements the actual
+  host system calls (\texttt{open}, \texttt{read}, \texttt{write},
+  \texttt{stat}, etc.) in USER-mode compilation units that can include
+  host \texttt{<fcntl.h>}, \texttt{<sys/stat.h>}, etc.
+\end{itemize}
+
+Each \texttt{hostfs\_inode\_info} carries an open host file descriptor
+(\texttt{fd}) alongside the standard \texttt{vfs\_inode}.  Guest read/write
+operations are forwarded directly to the host fd.  The mount option specifies
+which host directory serves as the root of the mounted filesystem.
+
+\subsection{io\_uring Integration for Async Writeback}
+
+Recent UML adds an optional \texttt{io\_uring} substrate for batched
+asynchronous writeback.  The per-superblock \texttt{hostfs\_fs\_info} carries
+a \texttt{struct os\_io\_ring *wb\_ring} created at mount time with a depth of
+128 entries.  When available, the writepages path submits write SQEs to the
+ring instead of issuing synchronous \texttt{write} calls, improving throughput
+for workloads with heavy file I/O.  If io\_uring is unavailable (older host
+kernel, seccomp filtering blocks it), the path falls back transparently to
+the legacy synchronous \texttt{write\_file()} loop.
+
+\subsection{Security: openat2 and RESOLVE\_BENEATH}
+
+When the \texttt{resolve\_strict} mount option is active, \texttt{hostfs}
+routes file opens through \texttt{openat2()} with
+\texttt{RESOLVE\_BENEATH | RESOLVE\_NO\_MAGICLINKS}, using an \texttt{O\_PATH}
+directory fd opened on the mount root.  This prevents symlink-escape attacks
+where a guest process creates a symlink pointing outside the configured
+hostfs root.
+
+% ------------------------------------------------------------------
+\section{Boot Sequence}
+\label{sec:impl-boot}
+
+UML boots as a regular userspace executable.  The sequence from
+\texttt{./linux} invocation to a running guest is shown in
+Figure~\ref{fig:boot-sequence} and proceeds through these stages.
+
+\subsection{Stage 1: Host Process Setup (\texttt{os-Linux/main.c})}
+\label{sec:impl-boot-stage1}
+
+The UML binary's \texttt{main()} performs host-level initialization:
+
+\begin{enumerate}[nosep]
+\item \textbf{Disable ASLR.} Calls \texttt{personality(ADDR\_NO\_RANDOMIZE)}
+  and re-execs itself if the personality changed.  UML requires deterministic
+  address layout for its stub mappings.
+\item \textbf{Set stack limit.} Caps \texttt{RLIMIT\_STACK} at 8\,MB to
+  ensure consistent stack placement.
+\item \textbf{Install fatal handlers.} Registers \texttt{SIGINT} and
+  \texttt{SIGTERM} handlers that call \texttt{\_exit(1)} immediately
+  (async-signal-safe).
+\item \textbf{Enter \texttt{linux\_main()}.}  Control transfers to
+  \umlpath{arch/um/kernel/um\_arch.c}.
+\end{enumerate}
+
+\subsection{Stage 2: Kernel Pre-Boot (\texttt{linux\_main})}
+\label{sec:impl-boot-stage2}
+
+\texttt{linux\_main()} bridges host userspace and the kernel boot path:
+
+\begin{enumerate}[nosep]
+\item \textbf{Parse command line.}  Iterates \texttt{argv}, calling
+  \texttt{uml\_checksetup()} for UML-specific parameters (\texttt{mem=},
+  \texttt{root=}, \texttt{backend=}, etc.).
+\item \textbf{Compute address space layout.}  Determines
+  \texttt{host\_task\_size}, \texttt{stub\_start}, \texttt{task\_size},
+  \texttt{physmem\_size}, VMALLOC boundaries.
+\item \textbf{Run early host checks.}  \texttt{os\_early\_checks()} probes
+  for seccomp, ptrace capabilities, and \texttt{/dev/kvm} availability.  Sets
+  the \texttt{using\_seccomp} flag if the host supports seccomp-BPF.
+\item \textbf{Select and initialize the backend.}  Calls
+  \texttt{init\_backend()}, which selects the compiled-in backend (seccomp,
+  KVM, or dynamically chosen), validates its HOT ops, runs \texttt{probe()}
+  and \texttt{init()}, and logs the selection.
+\item \textbf{Set up physical memory.}  Calls \texttt{setup\_physmem()},
+  which creates the backing tempfile and maps it into the process.
+\item \textbf{Enter \texttt{start\_uml()}.}  Calls
+  \texttt{start\_kernel()}, the standard Linux boot entry point.
+\end{enumerate}
+
+\subsection{Stage 3: Standard Linux Boot (\texttt{start\_kernel})}
+\label{sec:impl-boot-stage3}
+
+From \texttt{start\_kernel()} onward, UML follows the same boot path as every
+other Linux architecture port: \texttt{setup\_arch()} initializes
+architecture-specific data structures, the mm subsystem initializes,
+the scheduler starts, and eventually \texttt{kernel\_init()} mounts the root
+filesystem and runs \texttt{/sbin/init}.
+
+The root filesystem can be:
+\begin{itemize}[nosep]
+\item A \texttt{ubd} (User-Mode Block Device) backed by a host disk image.
+\item A \texttt{hostfs} mount pointing at a host directory tree.
+\item An \texttt{initrd} loaded from a host file.
+\end{itemize}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    stage/.style={
+      draw=UMLBlue!70, fill=UMLBlue!5, rounded corners=3pt,
+      minimum width=11cm, minimum height=1.0cm,
+      font=\small, align=left, text=UMLInk,
+      inner xsep=8pt
+    },
+    arr/.style={-{Stealth[length=5pt]}, thick, color=UMLBlue!50},
+    note/.style={font=\scriptsize, text=UMLMuted, anchor=west}
+  ]
+
+  \node[stage] (s1) at (0, 0)
+    {\textbf{1.}~\texttt{main()} ---
+     Disable ASLR, set stack limit, install fatal handlers};
+  \node[stage] (s2) at (0, -1.5)
+    {\textbf{2.}~\texttt{linux\_main()} ---
+     Parse cmdline, compute layout, \texttt{os\_early\_checks()}};
+  \node[stage] (s3) at (0, -3.0)
+    {\textbf{3.}~\texttt{init\_backend()} ---
+     Select backend (seccomp/KVM), validate HOT ops, probe \& init};
+  \node[stage] (s4) at (0, -4.5)
+    {\textbf{4.}~\texttt{setup\_physmem()} ---
+     Create tmpfile, mmap guest RAM (\texttt{MAP\_SHARED})};
+  \node[stage] (s5) at (0, -6.0)
+    {\textbf{5.}~\texttt{start\_kernel()} ---
+     Standard Linux boot: mm init, scheduler, driver init};
+  \node[stage] (s6) at (0, -7.5)
+    {\textbf{6.}~\texttt{kernel\_init()} ---
+     Mount root (ubd/hostfs), run \texttt{/sbin/init}};
+
+  \draw[arr] (s1) -- (s2);
+  \draw[arr] (s2) -- (s3);
+  \draw[arr] (s3) -- (s4);
+  \draw[arr] (s4) -- (s5);
+  \draw[arr] (s5) -- (s6);
+
+  \node[note] at (6.2, 0)     {\texttt{os-Linux/main.c}};
+  \node[note] at (6.2, -1.5)  {\texttt{kernel/um\_arch.c}};
+  \node[note] at (6.2, -3.0)  {\texttt{kernel/backend.c}};
+  \node[note] at (6.2, -4.5)  {\texttt{kernel/physmem.c}};
+  \node[note] at (6.2, -6.0)  {\texttt{init/main.c}};
+  \node[note] at (6.2, -7.5)  {\texttt{init/main.c}};
+
+\end{tikzpicture}
+\caption{UML boot sequence from \texttt{./linux} invocation to running init.}
+\label{fig:boot-sequence}
+\end{figure}
+
+% ------------------------------------------------------------------
+\section{The Backend Ops Table}
+\label{sec:impl-backend-ops}
+
+The backend abstraction is the central architectural element of the
+post-redesign UML.  All backend-specific behavior is accessed through a single
+vtable: \texttt{struct um\_backend\_ops}, defined in
+\umlpath{arch/um/include/shared/backend.h}.
+
+\subsection{Structure Definition}
+
+\begin{lstlisting}[language=KernelC,caption={The \texttt{um\_backend\_ops} structure (annotated excerpt)},label=lst:backend-ops-impl]
+struct um_backend_ops {
+    const char              *name;
+    enum um_backend_kind     kind;
+    u32                      contract_version;
+
+    /* Capability flags */
+    bool  uses_stub_reaper;        /* SIGCHLD for stub child death */
+    bool  has_syscall_stub_fd_map; /* SCM_RIGHTS fd-passing */
+    bool  stub_syscall_uses_futex; /* futex vs ptrace dispatch */
+    bool  stub_child_runs_seccomp; /* SIGSYS filter in stub */
+
+    /* Lifecycle and trap (4 ops) */
+    int  (*probe)(void);
+    int  (*init)(const struct um_backend_args *args);
+    void (*shutdown)(void);
+    void (*vcpu_run)(struct uml_pt_regs *regs);       /* HOT */
+
+    /* Memory (5 ops) */
+    int  (*mm_create)(struct mm_struct *mm);
+    void (*mm_destroy)(struct mm_struct *mm);
+    int  (*mm_region_added)(...);                      /* HOT */
+    int  (*mm_region_removed)(...);                    /* HOT */
+    int  (*mm_region_protected)(...);
+
+    /* Scheduling (4 ops) */
+    int  (*thread_create)(struct task_struct *p, ...);
+    int  (*thread_start_idle)(void *stack, ...);
+    void (*context_switch)(struct task_struct *prev,    /* HOT */
+                           struct task_struct *next);
+    int  (*ipi_send)(int cpu, int vector);
+
+    /* Cross-vCPU TLB flush kick (may be NULL) */
+    void (*tlb_kick_others)(struct mm_struct *mm);
+
+    /* Time (3 ops) */
+    u64  (*read_clock_ns)(void);                       /* HOT */
+    int  (*set_timer)(int cpu, u64 deadline_ns,
+                      enum um_timer_mode mode);
+    u64  (*read_persistent_clock_ns)(void);
+
+    /* Debug / introspection (3 ops) */
+    void (*init_thread_regs)(unsigned long *gp,
+                             unsigned long *fp);
+    int  (*read_guest_regs)(struct task_struct *t, ...);
+    int  (*write_guest_regs)(struct task_struct *t, ...);
+};
+\end{lstlisting}
+
+\subsection{Dispatch Mechanism}
+
+The dispatch macro in \texttt{backend.h} provides zero-cost abstraction for
+single-backend builds and dynamic dispatch for multi-backend builds:
+
+\begin{lstlisting}[language=KernelC,caption={Backend dispatch macro},label=lst:dispatch-macro-impl]
+#if defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
+  /* Direct call -- no indirect branch, no pointer dereference */
+# define um_backend_dispatch(op, ...) \
+         seccomp_##op(__VA_ARGS__)
+#else
+  /* Dynamic dispatch through the ops table pointer */
+# define um_backend_dispatch(op, ...) \
+         (um_backend->op(__VA_ARGS__))
+#endif
+\end{lstlisting}
+
+In \texttt{SECCOMP\_ONLY} builds (the default configuration), every
+\texttt{um\_backend\_dispatch(context\_switch, prev, next)} expands to
+\texttt{seccomp\_context\_switch(prev, next)}---a direct function call with
+no indirect branch prediction penalty.  In \texttt{DYNAMIC} builds, the
+compiler generates an indirect call through the \texttt{um\_backend} pointer,
+which is set once at boot by \texttt{init\_backend()} and never modified
+afterward.
+
+\subsection{Backend Selection at Boot}
+
+\texttt{init\_backend()} in \umlpath{arch/um/kernel/backend.c} resolves the
+backend at boot time through a three-step process:
+
+\begin{enumerate}[nosep]
+\item \textbf{Parse boot parameters.}  The \texttt{backend=} kernel command
+  line parameter is parsed by \texttt{uml\_backend\_config()} into
+  \texttt{backend\_arg\_requested} and \texttt{backend\_arg\_force}.
+\item \textbf{Select backend.}  In \texttt{SECCOMP\_ONLY} builds, seccomp is
+  always selected.  In \texttt{DYNAMIC} builds, \texttt{pick\_dynamic\_backend()}
+  consults the boot parameter, falls back to seccomp if the requested backend
+  is unavailable (unless \texttt{force} was specified, in which case it panics).
+\item \textbf{Validate and initialize.}  \texttt{validate\_hot\_ops()} checks
+  that all HOT ops (\texttt{vcpu\_run}, \texttt{mm\_region\_added},
+  \texttt{mm\_region\_removed}, \texttt{context\_switch},
+  \texttt{read\_clock\_ns}) are non-NULL.  Then \texttt{probe()} and
+  \texttt{init()} are called on the selected backend.
+\end{enumerate}
+
+\subsection{Capability Flags}
+
+The four boolean capability flags on the ops table replace the legacy
+\texttt{using\_seccomp} global integer with structured, per-behavior queries.
+This design allows code throughout UML to ask ``does the active backend use
+futex-based stub dispatch?''\ rather than ``is this the seccomp backend?''---a
+distinction that matters when the KVM backend might share some traits with
+seccomp (e.g., futex-based communication for memory operations) but not
+others (e.g., no SIGSYS filter).
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Flag} & \textbf{ptrace} & \textbf{seccomp} & \textbf{KVM} \\
+\midrule
+\texttt{uses\_stub\_reaper}        & -- & \checkmark & -- \\
+\texttt{has\_syscall\_stub\_fd\_map} & -- & \checkmark & -- \\
+\texttt{stub\_syscall\_uses\_futex} & -- & \checkmark & -- \\
+\texttt{stub\_child\_runs\_seccomp} & -- & \checkmark & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+(The ptrace backend has been removed; its column is included for historical
+reference.  The KVM backend's flags will be populated when its ops table
+matures past the stub stage.)
+
+% ------------------------------------------------------------------
+\section{Key Code Listings: Annotated Excerpts}
+\label{sec:impl-code-listings}
+
+This section presents annotated excerpts of the three most important
+implementation artifacts discussed above, with commentary on the
+non-obvious design choices.
+
+\subsection{The Complete Futex Protocol in \texttt{stub\_signal\_interrupt}}
+\label{sec:impl-futex-listing}
+
+\begin{lstlisting}[language=KernelC,caption={Futex protocol in \texttt{stub\_signal\_interrupt()} (from \texttt{arch/um/kernel/skas/stub.c})},label=lst:futex-protocol-full]
+/* Phase 1: Hand control to UML kernel */
+restart_wait:
+    d->futex = FUTEX_IN_KERN;
+    do {
+        res = stub_syscall3(__NR_futex,
+                            (unsigned long)&d->futex,
+                            FUTEX_WAKE, 1);
+    } while (res == -EINTR);
+
+    /* Phase 2: Sleep until UML kernel wakes us */
+    do {
+        res = stub_syscall4(__NR_futex,
+                            (unsigned long)&d->futex,
+                            FUTEX_WAIT, FUTEX_IN_KERN, 0);
+    } while (res == -EINTR || d->futex == FUTEX_IN_KERN);
+
+    /* Phase 3: Validate -- unexpected errors are fatal */
+    if (res < 0 && res != -EAGAIN)
+        stub_syscall1(__NR_exit_group, 1);
+
+    /* Phase 4: Process any queued memory operations */
+    if (d->syscall_data_len) {
+        /* Receive FDs via SCM_RIGHTS over Unix socket */
+        do {
+            res = stub_syscall3(__NR_recvmsg, 0,
+                                (unsigned long)&msghdr, 0);
+        } while (res == -EINTR);
+        if (res < 0 && res != -EAGAIN)
+            stub_syscall1(__NR_exit_group, 1);
+
+        /* Execute mmap/munmap batch */
+        res = syscall_handler(fd_map);
+
+        /* Close transferred FDs */
+        while (num_fds)
+            stub_syscall2(__NR_close, fd_map[--num_fds], 0);
+    }
+
+    /* Phase 5: Re-enter wait if batch failed or restart
+     * was requested (sets signal=SIGSYS for the kernel) */
+    if (res < 0 || d->restart_wait) {
+        d->signal = SIGSYS;
+        d->restart_wait = 0;
+        goto restart_wait;
+    }
+
+    /* Phase 6: Restore architecture state and return */
+    stub_seccomp_restore_state(&d->arch_data);
+    /* rt_sigreturn restores guest mcontext */
+\end{lstlisting}
+
+Key design decisions in this protocol:
+
+\begin{enumerate}[nosep]
+\item \textbf{Retry on \texttt{-EINTR}.}  Both the wake and wait loops
+  explicitly retry on \texttt{EINTR} because any unmasked signal can interrupt
+  the futex syscall.
+\item \textbf{\texttt{-EAGAIN} is benign.}  \texttt{FUTEX\_WAIT} returns
+  \texttt{-EAGAIN} if the futex value changed between the comparison and the
+  sleep---this is a spurious wakeup, handled by the outer check
+  \texttt{d->futex == FUTEX\_IN\_KERN}.
+\item \textbf{All other errors are fatal.}  The stub child operates in a
+  minimal environment; unexpected futex errors indicate corruption or kernel
+  bugs, and the only safe response is to terminate.
+\item \textbf{SCM\_RIGHTS fd passing.}  File descriptors needed by
+  \texttt{mmap} (e.g., \texttt{physmem\_fd}) cannot be directly referenced by
+  the stub child (different process).  UML sends them over a Unix socket
+  using the SCM\_RIGHTS ancillary message mechanism, and the stub receives
+  them in the \texttt{fd\_map} array.
+\item \textbf{Restart loop.}  If a batched syscall fails or the UML kernel
+  sets \texttt{restart\_wait}, the stub re-enters the futex wait loop rather
+  than returning to guest code.  This gives the UML kernel a chance to retry
+  or take corrective action.
+\end{enumerate}
+
+\subsection{The \texttt{syscall\_handler} Batch Processor}
+\label{sec:impl-syscall-handler}
+
+\begin{lstlisting}[language=KernelC,caption={The stub's syscall batch processor},label=lst:syscall-handler]
+static __always_inline int syscall_handler(int fd_map[STUB_MAX_FDS])
+{
+    struct stub_data *d = get_stub_data();
+    int i;
+    unsigned long res;
+    int fd;
+
+    for (i = 0; i < d->syscall_data_len; i++) {
+        struct stub_syscall *sc = &d->syscall_data[i];
+
+        switch (sc->syscall) {
+        case STUB_SYSCALL_MMAP:
+            fd = fd_map ? fd_map[sc->mem.fd] : sc->mem.fd;
+            res = stub_syscall6(STUB_MMAP_NR,
+                    sc->mem.addr, sc->mem.length,
+                    sc->mem.prot,
+                    MAP_SHARED | MAP_FIXED,
+                    fd, sc->mem.offset);
+            if (res != sc->mem.addr) {
+                d->err = res;
+                d->syscall_data_len = i;
+                return -1;
+            }
+            break;
+        case STUB_SYSCALL_MUNMAP:
+            res = stub_syscall2(__NR_munmap,
+                    sc->mem.addr, sc->mem.length);
+            if (res) {
+                d->err = res;
+                d->syscall_data_len = i;
+                return -1;
+            }
+            break;
+        default:
+            d->err = -95; /* EOPNOTSUPP */
+            d->syscall_data_len = i;
+            return -1;
+        }
+    }
+
+    d->err = 0;
+    d->syscall_data_len = 0;
+    return 0;
+}
+\end{lstlisting}
+
+On error, the handler records which syscall failed (by truncating
+\texttt{syscall\_data\_len} to \texttt{i}) and the error code in
+\texttt{d->err}.  The UML kernel can then determine exactly which operation
+failed and what the host kernel returned.
+
+\vspace{1em}
+
+\noindent
+Together, these data structures and code paths form the core execution engine
+of User-Mode Linux.  The backend ops table provides the abstraction layer;
+the stub child and futex protocol provide the trap mechanism; the TLB sync
+path bridges guest and host page tables; and the signal handling infrastructure
+turns POSIX signals into kernel interrupts.  The next chapter examines the
+v2 redesign that adds a KVM-based backend as an alternative to this
+seccomp-based architecture.

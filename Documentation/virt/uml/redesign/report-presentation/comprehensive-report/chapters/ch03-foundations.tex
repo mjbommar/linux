@@ -1,0 +1,926 @@
+% ==========================================================================
+%  Chapter 3 — Technical Foundations
+%  User-Mode Linux: A Comprehensive Technical Report
+% ==========================================================================
+
+\chapter{Technical Foundations}
+\label{ch:foundations}
+
+\epigraph{Any sufficiently complex virtual machine architecture is
+indistinguishable from a real one.}{---with apologies to Arthur C. Clarke}
+
+This chapter establishes the technical concepts required to understand
+how a kernel can run as an ordinary userspace process.  We begin with
+the classical virtualization taxonomy and show where user-mode kernels
+fit---and where they do not.  We then trace the x86 privilege model
+from its original ring-based design through the hardware virtualization
+extensions that now underpin \KVM{}.  Finally, we examine the Linux
+process-model primitives that \UML{} exploits---\syscall{ptrace},
+\Seccomp{}, \syscall{mmap}, and the \KVM{} ioctl interface---and compare
+the three trap mechanisms that have defined \UML{}'s performance
+envelope over the past quarter century.
+
+
+% ------------------------------------------------------------------
+\section{Virtualization Taxonomy}
+\label{sec:foundations:taxonomy}
+
+\subsection{The Popek--Goldberg Requirements}
+
+The formal study of virtual machines begins with Goldberg's 1973
+taxonomy of \emph{virtual machine monitors} (VMMs)~\cite{goldberg1973}
+and the celebrated Popek--Goldberg theorem of 1974~\cite{popek1974}.
+Their framework identifies three properties a VMM must satisfy:
+
+\begin{enumerate}[label=\textbf{P\arabic*.},leftmargin=2.5em]
+  \item \textbf{Equivalence (Fidelity).}
+        A program running under the VMM exhibits behavior identical to
+        that observed when running directly on the hardware, with at
+        most timing differences.
+  \item \textbf{Resource Control (Safety).}
+        The VMM retains complete control of the virtualized resources.
+        No guest operation may access a resource not explicitly
+        allocated to that guest.
+  \item \textbf{Efficiency (Performance).}
+        A statistically dominant fraction of guest instructions execute
+        directly on the hardware without VMM intervention.
+\end{enumerate}
+
+The theorem proves that a VMM satisfying all three properties can be
+constructed for any \emph{third-generation architecture}\footnote{
+  Popek and Goldberg use ``third generation'' to mean a conventional
+  von~Neumann machine with a supervisor/user mode split, exemplified by
+  IBM~System/370.}
+if and only if the set of \emph{sensitive instructions}\footnote{
+  Instructions whose behavior depends on the current privilege level or
+  that affect the machine's resource-allocation state.}
+is a subset of the set of \emph{privileged instructions} (those that
+trap when executed in user mode).  When every sensitive instruction is
+privileged, the VMM can intercept all guest attempts to observe or
+modify machine state by running the guest at a lower privilege level
+and catching the resulting traps.
+
+\subsection{Taxonomy of Hypervisors}
+
+Smith and Nair~\cite{smith2005book} refine the taxonomy into two
+orthogonal dimensions:
+
+\begin{description}[style=nextline]
+  \item[Type~1 (bare-metal) vs.\ Type~2 (hosted) hypervisors.]
+    A Type~1 hypervisor runs directly on the hardware with no
+    intervening operating system (e.g., VMware ESXi, Xen).  A Type~2
+    hypervisor runs as a process atop a host OS (e.g., VMware
+    Workstation, VirtualBox).  \KVM{} blurs the boundary: it is a
+    loadable module that turns the Linux kernel itself into a Type~1
+    hypervisor while simultaneously serving as a host OS.
+
+  \item[Full virtualization vs.\ paravirtualization vs.\ OS-level.]
+    Full virtualization presents an unmodified hardware interface to
+    the guest; the guest kernel need not know it is virtualized.
+    Paravirtualization (exemplified by Xen~\cite{barham2003}) modifies
+    the guest kernel to replace sensitive instructions with explicit
+    \emph{hypercalls}.  OS-level virtualization (containers) shares a
+    single kernel instance and isolates guests via namespaces and
+    cgroups~\cite{soltesz2007}.
+\end{description}
+
+\subsection{Where User-Mode Kernels Fit}
+
+\UML{} does not fit cleanly into any of these categories, and this
+taxonomic awkwardness is part of what makes it interesting.
+
+\begin{itemize}
+  \item It is not a hypervisor in the Popek--Goldberg sense, because
+        it does not satisfy the Efficiency property: in the original
+        \syscall{ptrace}-based design, \emph{every} guest system call
+        requires VMM intervention.
+  \item It is not OS-level virtualization, because it runs an
+        independent kernel instance with its own scheduler, memory
+        management, and driver stack.
+  \item It is not paravirtualization, because the guest userspace is
+        unmodified---ordinary Linux binaries run without recompilation.
+  \item With the \KVM{} backend (Chapter~\ref{ch:kvm}), \UML{}
+        gains the Efficiency property: a dominant fraction of guest
+        instructions execute directly on the CPU inside a \KVM{}
+        virtual machine, and the LSTAR gadget handles trivial system
+        calls entirely in-guest without any VMM exit.
+\end{itemize}
+
+Perhaps the most accurate characterization is that \UML{} is a
+\emph{process-level system virtual machine}~\cite{smith2005book}:
+it implements a complete system interface (an entire Linux kernel)
+within the confines of a host process.  The \KVM{} backend promotes
+it to a \emph{hybrid} system VM that uses hardware virtualization for
+the hot path while retaining the hosted-process model for I/O,
+lifecycle management, and debugging.
+
+
+% ------------------------------------------------------------------
+\section{The x86 Privilege Model}
+\label{sec:foundations:privilege}
+
+\subsection{Rings, CPL, and DPL}
+
+The x86 architecture defines four privilege levels, conventionally
+called \emph{rings} 0 through 3.  The \textbf{Current Privilege Level}
+(CPL) is the ring at which the processor is currently executing; it is
+encoded in the two least-significant bits of the CS and SS segment
+selectors.  The \textbf{Descriptor Privilege Level} (DPL) field in
+segment descriptors, gate descriptors, and page-table entries gates
+access: a code segment can only be called from a CPL that is at least
+as privileged as the target DPL.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  ring/.style={draw, thick, circle, minimum size=#1, color=UMLBlue!80},
+  rlabel/.style={font=\small\bfseries, color=UMLInk},
+  desc/.style={font=\footnotesize, color=UMLMuted, text width=3.5cm, align=center}
+]
+  % Rings (outermost first for layering)
+  \node[ring=7.0cm, fill=UMLBlue!5]  (r3) at (0,0) {};
+  \node[ring=5.2cm, fill=UMLTeal!5]  (r2) at (0,0) {};
+  \node[ring=3.4cm, fill=UMLGreen!5] (r1) at (0,0) {};
+  \node[ring=1.6cm, fill=KernelGold!15] (r0) at (0,0) {};
+
+  % Labels
+  \node[rlabel] at (0,0)    {Ring 0};
+  \node[rlabel] at (0,1.1)  {Ring 1};
+  \node[rlabel] at (0,2.0)  {Ring 2};
+  \node[rlabel] at (0,2.9)  {Ring 3};
+
+  % Descriptions
+  \node[desc] at (4.2, 0)    {Kernel mode\\(traditional OS)};
+  \node[desc] at (4.2, 1.1)  {Device drivers\\(rarely used)};
+  \node[desc] at (4.2, 2.0)  {Device drivers\\(rarely used)};
+  \node[desc] at (4.2, 2.9)  {User mode\\(\textbf{UML runs here})};
+
+  % Brace for UML
+  \draw[decorate, decoration={brace, amplitude=6pt, raise=4pt},
+        thick, UMLRed]
+    (5.8, 2.3) -- (5.8, 3.5)
+    node[midway, right=12pt, font=\footnotesize\bfseries, color=UMLRed,
+         text width=2.5cm, align=left]
+    {UML kernel +\\UML userspace};
+\end{tikzpicture}
+\caption{The x86 privilege ring model.  Traditional kernels occupy
+Ring~0; \UML{} runs entirely at Ring~3 (CPL=3), sharing the same
+privilege level as ordinary user processes.}
+\label{fig:x86-rings}
+\end{figure}
+
+Traditional operating systems use a two-ring model: the kernel at
+Ring~0, user processes at Ring~3.  Rings~1 and~2 exist in hardware
+but are almost universally unused.\footnote{OS/2 and a few
+microkernel-inspired designs briefly used Ring~1 or Ring~2 for device
+drivers, but the x86-64 long mode effectively reduces the model to
+two rings in practice.}
+
+\subsection{Implications for UML}
+
+\UML{} runs entirely at Ring~3.  This has several consequences:
+
+\begin{enumerate}
+  \item \textbf{No privileged instructions.}
+        The \UML{} kernel cannot execute \texttt{cli}/\texttt{sti}
+        (interrupt control), \texttt{mov~cr3} (page-table switching),
+        \texttt{lgdt}/\texttt{lidt} (descriptor-table loading), or
+        any other privileged instruction.  Every such operation must
+        be emulated via host system calls.
+
+  \item \textbf{No direct hardware access.}
+        All I/O must pass through the host kernel's system-call
+        interface.  \UML{}'s block driver issues \syscall{read}/\syscall{write}
+        on a host file descriptor; its network driver uses host sockets
+        or TUN/TAP devices.
+
+  \item \textbf{Shared address space with the host.}
+        The \UML{} process occupies the same 48-bit (or 57-bit) virtual
+        address space managed by the host kernel.  The host kernel's
+        own mappings (above the canonical hole) are inaccessible from
+        CPL=3, but the host's ASLR layout, vDSO, and stack placement
+        all constrain where \UML{} can place its own data structures.
+
+  \item \textbf{System call interception required.}
+        When guest userspace issues a \texttt{syscall} instruction, it
+        would normally trap into the \emph{host} kernel, not the
+        \UML{} kernel.  \UML{} must intercept this trap and redirect
+        it to its own system-call handler.  The mechanism for this
+        interception---\syscall{ptrace}, \Seccomp{}, or \KVM{}---is
+        the defining architectural choice of each \UML{} backend.
+\end{enumerate}
+
+
+% ------------------------------------------------------------------
+\section{Hardware Virtualization Extensions}
+\label{sec:foundations:hwvirt}
+
+The x86 architecture famously violates the Popek--Goldberg
+requirements: several sensitive instructions (notably \texttt{popf},
+\texttt{sgdt}, and \texttt{pushf}) are not privileged and therefore
+do not trap when executed in user mode~\cite{adams2006}.  This made
+software-only full virtualization on x86 difficult, requiring either
+binary translation (VMware) or paravirtualization (Xen).
+
+Hardware virtualization extensions---Intel VT-x (2005) and AMD-V
+(2006)---solve this by adding a new, orthogonal dimension of privilege.
+
+\subsection{Intel VT-x (VMX)}
+
+VT-x~\cite{intel-sdm} introduces \textbf{VMX root mode} (the
+hypervisor) and \textbf{VMX non-root mode} (the guest).  The
+transition between the two is mediated by a per-vCPU data structure
+called the \textbf{Virtual Machine Control Structure} (VMCS):
+
+\begin{description}[style=nextline]
+  \item[VM Entry (\texttt{VMLAUNCH} / \texttt{VMRESUME}).]
+    The hypervisor loads guest state from the VMCS and transfers
+    control to the guest.  The guest runs at whatever CPL the VMCS
+    guest-state area specifies---typically Ring~0 for a full-system
+    guest, or Ring~3 for a process-level guest like \UML{}'s \KVM{}
+    backend.
+
+  \item[VM Exit.]
+    Certain events cause the processor to stop guest execution,
+    save guest state into the VMCS, and transfer control back to
+    VMX root mode.  The exit reason is recorded in the VMCS.
+    Events that cause exits include: execution of privileged
+    instructions, I/O instructions (if the I/O bitmap so indicates),
+    external interrupts, page faults (if configured), and the
+    \texttt{CPUID} instruction.
+
+  \item[Extended Page Tables (EPT).]
+    EPT provides a second level of address translation: guest-physical
+    addresses (GPAs) are translated to host-physical addresses (HPAs)
+    by hardware, without any hypervisor intervention for non-faulting
+    accesses.  This eliminates the ``shadow page table'' overhead that
+    made pre-EPT virtualization expensive.
+\end{description}
+
+\subsection{AMD-V (SVM)}
+
+AMD's Secure Virtual Machine~\cite{amd-apm} follows the same
+principles with different terminology: the per-vCPU structure is the
+\textbf{Virtual Machine Control Block} (VMCB); the hardware nested
+paging feature is called \textbf{Nested Page Tables} (NPT); and the
+entry/exit instructions are \texttt{VMRUN} and---implicitly---any
+intercepted event.  The functional model is equivalent for the
+purposes of this report.
+
+\subsection{KVM and the ioctl Interface}
+
+\KVM{}~\cite{kivity2007} exposes hardware virtualization to userspace
+through a layered ioctl interface on \texttt{/dev/kvm}:
+
+\begin{enumerate}
+  \item \texttt{KVM\_CREATE\_VM} returns a VM file descriptor.
+  \item \texttt{KVM\_SET\_USER\_MEMORY\_REGION} on the VM fd maps
+        host-virtual memory into the guest-physical address space
+        (backing EPT/NPT).
+  \item \texttt{KVM\_CREATE\_VCPU} on the VM fd returns a vCPU file
+        descriptor, with a shared \texttt{struct kvm\_run} page
+        accessible via \syscall{mmap} on the vCPU fd.
+  \item \texttt{KVM\_RUN} on the vCPU fd enters VMX/SVM non-root mode.
+        When the guest causes an exit, \texttt{KVM\_RUN} returns and
+        the exit reason + auxiliary data are available in the shared
+        \texttt{kvm\_run} page.
+\end{enumerate}
+
+\subsection{Why This Matters for UML}
+
+\UML{}'s \KVM{} backend uses this interface to run guest code at
+Ring~3 \emph{inside a virtual machine}, while the \UML{} kernel
+process remains an ordinary userspace process on the host.  The
+critical insight is that \KVM{}'s VM entry/exit cycle is far cheaper
+than a \syscall{ptrace} round-trip or even a \Seccomp{} SIGSYS
+delivery.  A \texttt{KVM\_RUN} $\rightarrow$ \texttt{KVM\_EXIT\_IO}
+round-trip costs approximately \SIrange{100}{150}{\nano\second}; with
+the LSTAR gadget (Section~\ref{sec:foundations:trap-compare}), trivial
+system calls complete in approximately 90 cycles without exiting the
+VM at all.
+
+
+% ------------------------------------------------------------------
+\section{The Linux Process Model}
+\label{sec:foundations:process-model}
+
+From the host kernel's perspective, a running \UML{} instance is an
+ordinary multi-threaded process (or set of processes, depending on the
+backend).  \UML{} exploits a specific set of Linux system calls to
+implement its virtualization layer.
+
+\subsection{ptrace: The Original Trap Mechanism}
+
+The \syscall{ptrace} system call~\cite{ptrace-man} allows one process
+(the \emph{tracer}) to observe and control the execution of another
+(the \emph{tracee}).  \UML{}'s original backend uses:
+
+\begin{description}[style=nextline]
+  \item[\texttt{PTRACE\_SYSEMU}.]
+    Resumes the tracee but intercepts the next system call
+    \emph{without executing it}.  The tracee stops with a
+    \texttt{SIGTRAP|0x80} signal.  This is the key extension that
+    Jeff Dike contributed to the Linux kernel specifically for
+    \UML{}: without it, the host kernel would execute the guest's
+    system call before \UML{} could intercept it.
+
+  \item[\texttt{PTRACE\_GETREGS} / \texttt{PTRACE\_SETREGS}.]
+    Read and write the tracee's general-purpose registers.  \UML{}
+    reads the registers to determine which system call the guest
+    requested (from \texttt{RAX}) and its arguments (from
+    \texttt{RDI}, \texttt{RSI}, \texttt{RDX}, \texttt{R10},
+    \texttt{R8}, \texttt{R9} per the x86-64 ABI), then writes the
+    return value back into \texttt{RAX}.
+\end{description}
+
+\subsection{seccomp: The Modern Trap Mechanism}
+
+The \Seccomp{} BPF filter~\cite{seccomp-bpf} was originally designed
+for sandboxing (Chrome, Firefox, container runtimes), but its
+\texttt{SECCOMP\_RET\_TRAP} return action proved ideal for \UML{}.
+When a seccomp filter returns \texttt{SECCOMP\_RET\_TRAP}, the kernel
+delivers a \texttt{SIGSYS} signal to the thread that issued the
+system call---without executing it.  This is functionally equivalent
+to \texttt{PTRACE\_SYSEMU} but with dramatically lower overhead
+because the signal is delivered in-process rather than requiring a
+context switch to an external tracer.
+
+\subsection{futex: Stub Synchronization}
+
+The \syscall{futex} system call provides efficient userspace-to-kernel
+synchronization~\cite{futex-lwn}.  In the \Seccomp{} backend, the
+stub process and the \UML{} kernel use a shared \texttt{futex} word
+(in the \texttt{stub\_data} page) to implement a lightweight turnstile:
+the stub writes its trap state, issues \texttt{FUTEX\_WAKE}, and blocks
+on \texttt{FUTEX\_WAIT}; the \UML{} kernel wakes, processes the trap,
+writes the result, and wakes the stub.
+
+\subsection{mmap / munmap / mprotect: Guest Memory}
+
+\UML{} implements guest ``physical'' memory as a host-side anonymous
+mapping or a file-backed mapping (typically on \texttt{tmpfs}).  Guest
+page-table changes are realized by calling \syscall{mmap},
+\syscall{munmap}, and \syscall{mprotect} on the host to adjust the
+stub process's address space.  Each guest TLB flush translates to a
+batch of these host system calls.
+
+\subsection{clone / fork: Guest Processes}
+
+Each guest process in \UML{} is backed by a host process (or thread,
+depending on the configuration).  The \syscall{clone} system call
+creates the host-side entity; \texttt{CLONE\_VM} may or may not be
+used depending on whether the backend shares address spaces.
+
+\subsection{KVM ioctl Interface}
+\label{sec:foundations:kvm-api}
+
+The \KVM{} backend~\cite{kvm-api} replaces the \syscall{ptrace} and
+\Seccomp{} trap mechanisms with hardware-assisted virtualization.  The
+key ioctls are:
+
+\begin{lstlisting}[language=KernelC,caption={KVM ioctl sequence for
+UML's v2 backend.},label=lst:kvm-ioctls]
+/* VM creation (once per UML instance) */
+vm_fd = ioctl(kvm_fd, KVM_CREATE_VM, 0);
+
+/* Map guest physical memory (host tmpfs -> guest GPA) */
+struct kvm_userspace_memory_region mem = {
+    .slot            = 0,
+    .guest_phys_addr = 0,
+    .memory_size     = physmem_size,
+    .userspace_addr  = (u64)uml_physmem,
+};
+ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &mem);
+
+/* Per-vCPU creation (one per host CPU in the pool) */
+vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, cpu_id);
+run = mmap(NULL, sizeof(struct kvm_run), PROT_RW,
+           MAP_SHARED, vcpu_fd, 0);
+
+/* Hot loop: enter guest, handle exit, re-enter */
+while (1) {
+    ioctl(vcpu_fd, KVM_RUN, 0);
+    switch (run->exit_reason) {
+    case KVM_EXIT_IO:
+        handle_io_trap(regs, run, vcpu);
+        break;
+    /* ... other exit reasons ... */
+    }
+}
+\end{lstlisting}
+
+
+% ------------------------------------------------------------------
+\section{Address Space Layout}
+\label{sec:foundations:address-space}
+
+\UML{} must carve a complete kernel and user address space out of the
+host process's available virtual address range.  The layout differs
+between the \Seccomp{} and \KVM{} backends.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  block/.style={draw, thick, minimum width=10cm, minimum height=0.8cm,
+                font=\footnotesize\ttfamily, anchor=south west},
+  label/.style={font=\footnotesize, color=UMLMuted, anchor=east},
+  >=Stealth
+]
+  % Seccomp layout
+  \node[font=\small\bfseries, color=UMLBlue] at (5, 7.8) {Seccomp Backend Address Space};
+
+  \node[block, fill=UMLRed!10]    (hk) at (0, 7)
+    {Host kernel (inaccessible from CPL=3)};
+  \node[label] at (-0.2, 7.4) {\texttt{0xffff...}};
+
+  \node[block, fill=UMLMuted!10]  (gap1) at (0, 6)
+    {(canonical hole --- unmapped)};
+
+  \node[block, fill=UMLBlue!10]   (ukt) at (0, 5)
+    {UML kernel text + data + bss};
+  \node[label] at (-0.2, 5.4) {\texttt{0x6000...}};
+
+  \node[block, fill=UMLGreen!10]  (phys) at (0, 4)
+    {UML ``physical memory'' (mmap'd tmpfs / anon)};
+  \node[label] at (-0.2, 4.4) {\texttt{uml\_physmem}};
+
+  \node[block, fill=KernelGold!10] (guest) at (0, 3)
+    {Guest userspace mappings (via stub mmap)};
+  \node[label] at (-0.2, 3.4) {\texttt{0x0000...}};
+
+  \node[block, fill=UMLAmber!10]  (stub) at (0, 2)
+    {Stub pages (code + 2 data pages)};
+  \node[label] at (-0.2, 2.4) {\texttt{STUB\_START}};
+
+  \draw[decorate, decoration={brace, amplitude=6pt, raise=4pt},
+        thick, UMLTeal]
+    (10.2, 2) -- (10.2, 5.8)
+    node[midway, right=12pt, font=\footnotesize, color=UMLTeal,
+         text width=2.5cm, align=left]
+    {Managed by\\UML kernel};
+
+  % KVM layout annotation
+  \node[font=\small\bfseries, color=UMLBlue] at (5, 1.0) {KVM Backend: adds PML4 guest page tables};
+  \node[font=\footnotesize, color=UMLMuted, text width=10cm, align=center] at (5, 0.3)
+    {Guest runs in KVM with its own PML4. PML4[448] maps the kernel-half\\
+     trampoline (LSTAR, IDT, GDT, TSS, IST stacks, gadget state pages).\\
+     PML4[0..255] map guest userspace via EPT-backed physical memory.};
+\end{tikzpicture}
+\caption{Address space layout for the \Seccomp{} backend.  The \KVM{}
+backend additionally constructs guest-side PML4 page tables
+that map the same physical memory through EPT/NPT.}
+\label{fig:address-space}
+\end{figure}
+
+\subsection{Seccomp Backend Layout}
+
+The \Seccomp{} backend's stub process has the following regions in its
+virtual address space (Figure~\ref{fig:address-space}):
+
+\begin{enumerate}
+  \item \textbf{Guest userspace} (\texttt{0x0} to approximately
+        \texttt{TASK\_SIZE}).  Mapped by the \UML{} kernel via batched
+        \syscall{mmap}/\syscall{mprotect} calls into the stub process.
+
+  \item \textbf{Stub pages} (\texttt{STUB\_START} to \texttt{STUB\_END}).
+        Three pages: one page of stub executable code (the \texttt{SIGSYS}
+        handler, the \syscall{futex} wait/wake loop, the syscall-batch
+        executor) and two pages of \texttt{stub\_data} (shared state:
+        registers, signal information, the futex word, and the
+        syscall-batch buffer).
+
+  \item \textbf{UML physical memory} (\texttt{uml\_physmem}).
+        The contiguous region backing guest RAM, typically \syscall{mmap}'d
+        from a \texttt{tmpfs} file descriptor or as anonymous memory.
+        Guest page tables reference offsets within this region.
+
+  \item \textbf{UML kernel text/data.}  The \UML{} binary's own code
+        and data segments, loaded by the host's ELF loader.
+\end{enumerate}
+
+\subsection{KVM Backend: Guest Page Tables}
+
+The \KVM{} backend constructs a full x86-64 PML4 page-table hierarchy
+for the guest.  \UML{}'s physical memory is registered with \KVM{}
+via \texttt{KVM\_SET\_USER\_MEMORY\_REGION}, which populates EPT/NPT
+entries so that guest-physical addresses translate through host-virtual
+addresses to host-physical pages without hypervisor intervention on
+each access.
+
+The guest PML4 contains a \emph{kernel half} at PML4 slot~448
+(guest virtual address \texttt{0xffffe000\_00000000}) that maps the
+trampoline page (LSTAR entry point), the IDT, exception handler stubs,
+the GDT, per-vCPU TSS and IST stack pages, and per-vCPU gadget state
+pages.  This kernel-half mapping is marked \texttt{US=0}
+(supervisor-only) so guest userspace at CPL=3 cannot access it
+directly; the CPU transitions to CPL=0 only transiently during the
+\texttt{SYSCALL} instruction's microarchitectural handling before the
+LSTAR trampoline code runs.
+
+
+% ------------------------------------------------------------------
+\section{Trap Mechanisms Compared}
+\label{sec:foundations:trap-compare}
+
+The performance of \UML{} is dominated by the cost of intercepting
+guest system calls.  Three mechanisms have been used historically and
+in the current implementation.  Figure~\ref{fig:trap-paths} illustrates
+the data flow for each.
+
+\subsection{ptrace: PTRACE\_SYSEMU}
+
+The original \UML{} trap mechanism uses \syscall{ptrace} to intercept
+every guest system call:
+
+\begin{enumerate}
+  \item Guest userspace executes the \texttt{syscall} instruction.
+  \item The host kernel intercepts it (via \texttt{PTRACE\_SYSEMU})
+        and stops the tracee with signal \texttt{SIGTRAP|0x80}.
+  \item The \UML{} kernel (the tracer) wakes from \syscall{waitpid}.
+  \item \texttt{PTRACE\_GETREGS} reads the tracee's register state.
+  \item The \UML{} kernel dispatches the appropriate handler.
+  \item \texttt{PTRACE\_SETREGS} writes the return value.
+  \item \texttt{PTRACE\_SYSEMU} resumes the tracee.
+\end{enumerate}
+
+Each round-trip requires two context switches between the tracer and
+the tracee plus multiple kernel transitions.  Measured latency:
+\textbf{\SIrange{1}{5}{\micro\second}} per system call.
+
+\subsection{seccomp: SIGSYS + futex}
+
+The \Seccomp{} backend (contributed by Johannes Berg, circa 2022)
+replaces the external-tracer model with an in-process signal:
+
+\begin{enumerate}
+  \item Guest userspace executes the \texttt{syscall} instruction.
+  \item The host kernel's seccomp filter returns
+        \texttt{SECCOMP\_RET\_TRAP}, delivering \texttt{SIGSYS} to
+        the stub thread---\emph{without executing the system call}.
+  \item The stub's \texttt{SIGSYS} handler saves register state into
+        the shared \texttt{stub\_data} page.
+  \item The stub issues \texttt{FUTEX\_WAKE} on the shared futex word,
+        waking the \UML{} kernel thread.
+  \item The \UML{} kernel reads registers from \texttt{stub\_data},
+        dispatches the handler, and writes the result back.
+  \item The \UML{} kernel issues \texttt{FUTEX\_WAKE}; the stub wakes
+        from its \texttt{FUTEX\_WAIT} and resumes guest execution from
+        the signal return path.
+\end{enumerate}
+
+Because no external tracer is involved, the context-switch overhead is
+eliminated.  The signal delivery and futex round-trip are the dominant
+costs.  Measured latency: \textbf{\SIrange{300}{500}{\nano\second}}
+per system call---roughly an order of magnitude faster than \syscall{ptrace}.
+
+\subsection{KVM: vmentry/vmexit + LSTAR Gadget}
+
+The \KVM{} backend replaces the signal-based mechanism with hardware
+VM entry/exit:
+
+\begin{enumerate}
+  \item Guest userspace executes the \texttt{syscall} instruction.
+  \item The CPU loads \texttt{MSR\_LSTAR} into RIP (standard x86-64
+        \texttt{SYSCALL} behavior).  Inside the guest VM, LSTAR points
+        to the \UML{} trampoline page.
+  \item The LSTAR trampoline executes \texttt{out \%al, \$0xf4}
+        (an I/O instruction on port \texttt{0xf4}).
+  \item The I/O instruction causes a \texttt{KVM\_EXIT\_IO} VM exit.
+  \item The \UML{} kernel (running in VMX root mode via the
+        \texttt{KVM\_RUN} return path) reads the exit reason, extracts
+        registers from the shared \texttt{kvm\_run} page, and dispatches
+        the system-call handler.
+  \item The handler writes the return value into \texttt{kvm\_run},
+        and the next \texttt{KVM\_RUN} call re-enters the guest.
+        The guest resumes via \texttt{sysretq} from the trampoline.
+\end{enumerate}
+
+Measured latency for the full round-trip:
+\textbf{\SIrange{100}{150}{\nano\second}} per system call.
+
+\subsubsection{The LSTAR Gadget: Avoiding the Exit Entirely}
+
+For a curated set of trivial system calls (\syscall{getpid},
+\syscall{gettid}, \syscall{getppid}, \syscall{getuid},
+\syscall{geteuid}, \syscall{getgid}, \syscall{getegid},
+\syscall{getcpu}, \syscall{time}, and
+\texttt{clock\_gettime(CLOCK\_MONOTONIC)}), the LSTAR trampoline
+contains an expanded 343-byte \emph{gadget} that handles the system
+call entirely within the guest, without any VM exit:
+
+\begin{enumerate}
+  \item \texttt{swapgs} switches GS base to a per-vCPU state page
+        populated by the host on each context switch.
+  \item A dispatch chain (\texttt{cmp}/\texttt{je} on the syscall
+        number in \texttt{EAX}) routes to the appropriate handler.
+  \item The handler reads the pre-computed return value from the
+        per-vCPU state page via \texttt{\%gs:offset}.
+  \item \texttt{swapgs} + \texttt{sysretq} returns directly to guest
+        userspace.
+\end{enumerate}
+
+The entire sequence---including the \texttt{SYSCALL}/\texttt{SYSRET}
+pair---completes in approximately \textbf{90~cycles} ($\approx$
+\SI{30}{\nano\second} at \SI{3}{\giga\hertz}).  For workloads that
+call \syscall{getpid} or \texttt{clock\_gettime} in tight loops, this
+approaches bare-metal performance.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, thick, rounded corners=3pt, minimum height=0.7cm,
+              font=\footnotesize, text width=2.3cm, align=center},
+  arrow/.style={-{Stealth[length=5pt]}, thick},
+  phase/.style={font=\footnotesize\bfseries, color=UMLBlue},
+  timing/.style={font=\scriptsize\itshape, color=UMLRed}
+]
+  % ptrace path
+  \node[phase] at (-1.5, 5.5) {ptrace};
+  \node[box, fill=KernelGold!15] (p1) at (0, 5) {Guest\\syscall};
+  \node[box, fill=UMLRed!10]     (p2) at (3, 5) {Host kernel\\SYSEMU stop};
+  \node[box, fill=UMLBlue!10]    (p3) at (6, 5) {waitpid\\GETREGS};
+  \node[box, fill=UMLGreen!10]   (p4) at (9, 5) {UML\\handler};
+  \node[box, fill=UMLBlue!10]    (p5) at (12, 5) {SETREGS\\SYSEMU};
+  \draw[arrow] (p1) -- (p2);
+  \draw[arrow] (p2) -- (p3);
+  \draw[arrow] (p3) -- (p4);
+  \draw[arrow] (p4) -- (p5);
+  \draw[arrow, dashed] (p5) .. controls (14, 5) and (14, 5.8) ..
+    (12.5, 5.8) -- (-0.5, 5.8) .. controls (-2, 5.8) and (-2, 5) .. (p1);
+  \node[timing] at (6, 4.3) {$\sim$1--5 \textmu{}s per syscall};
+
+  % seccomp path
+  \node[phase] at (-1.5, 3.0) {seccomp};
+  \node[box, fill=KernelGold!15] (s1) at (0, 2.5) {Guest\\syscall};
+  \node[box, fill=UMLAmber!10]   (s2) at (3, 2.5) {SIGSYS\\handler};
+  \node[box, fill=UMLTeal!10]    (s3) at (6, 2.5) {futex wake\\UML kernel};
+  \node[box, fill=UMLGreen!10]   (s4) at (9, 2.5) {UML\\handler};
+  \node[box, fill=UMLTeal!10]    (s5) at (12, 2.5) {futex wake\\stub};
+  \draw[arrow] (s1) -- (s2);
+  \draw[arrow] (s2) -- (s3);
+  \draw[arrow] (s3) -- (s4);
+  \draw[arrow] (s4) -- (s5);
+  \draw[arrow, dashed] (s5) .. controls (14, 2.5) and (14, 3.3) ..
+    (12.5, 3.3) -- (-0.5, 3.3) .. controls (-2, 3.3) and (-2, 2.5) .. (s1);
+  \node[timing] at (6, 1.8) {$\sim$300--500 ns per syscall};
+
+  % KVM path
+  \node[phase] at (-1.5, 0.5) {KVM};
+  \node[box, fill=KernelGold!15] (k1) at (0, 0) {Guest\\SYSCALL};
+  \node[box, fill=UMLAmber!15]   (k2) at (3, 0) {LSTAR\\out \$0xf4};
+  \node[box, fill=UMLRed!10]     (k3) at (6, 0) {KVM\_EXIT\\\_IO};
+  \node[box, fill=UMLGreen!10]   (k4) at (9, 0) {UML\\handler};
+  \node[box, fill=UMLBlue!10]    (k5) at (12, 0) {KVM\_RUN\\re-enter};
+  \draw[arrow] (k1) -- (k2);
+  \draw[arrow] (k2) -- (k3);
+  \draw[arrow] (k3) -- (k4);
+  \draw[arrow] (k4) -- (k5);
+  \draw[arrow, dashed] (k5) .. controls (14, 0) and (14, 0.8) ..
+    (12.5, 0.8) -- (-0.5, 0.8) .. controls (-2, 0.8) and (-2, 0) .. (k1);
+  \node[timing] at (6, -0.7) {$\sim$100--150 ns per syscall
+    (gadget: $\sim$90 cycles, no exit)};
+\end{tikzpicture}
+\caption{System call interception paths for the three \UML{} trap
+mechanisms.  Dashed arrows show the return-to-guest path.}
+\label{fig:trap-paths}
+\end{figure}
+
+\subsection{Comparison Table}
+
+\begin{table}[ht]
+\centering
+\caption{Trap mechanism comparison.  Latencies are representative
+measurements for a null system call (e.g., \syscall{getpid}) on
+contemporary hardware (Intel Alder Lake / AMD Zen~4, 2024--2026).}
+\label{tab:trap-comparison}
+\small
+\begin{tabularx}{\textwidth}{@{} l Y Y Y @{}}
+\toprule
+\textbf{Property} &
+  \textbf{ptrace} &
+  \textbf{seccomp} &
+  \textbf{KVM (v2)} \\
+\midrule
+Trap mechanism &
+  \texttt{PTRACE\_SYSEMU} $\rightarrow$ \texttt{SIGTRAP|0x80} &
+  \texttt{SECCOMP\_RET\_TRAP} $\rightarrow$ \texttt{SIGSYS} &
+  \texttt{SYSCALL} $\rightarrow$ LSTAR $\rightarrow$ \texttt{out} $\rightarrow$ \texttt{KVM\_EXIT\_IO} \\
+\midrule
+Syscall latency &
+  \SIrange{1}{5}{\micro\second} &
+  \SIrange{300}{500}{\nano\second} &
+  \SIrange{100}{150}{\nano\second} \\
+\midrule
+Gadget fast-path &
+  N/A &
+  N/A &
+  $\sim$90 cycles ($\sim$\SI{30}{\nano\second}), no VM exit \\
+\midrule
+Context switches &
+  2 per syscall (tracer $\leftrightarrow$ tracee) &
+  0 (in-process signal) &
+  1 VM exit + 1 VM entry \\
+\midrule
+Host kernel requirement &
+  \texttt{PTRACE\_SYSEMU} support &
+  \texttt{SECCOMP\_RET\_TRAP} (kernel $\geq$ 3.5) &
+  \texttt{/dev/kvm} + VT-x/AMD-V \\
+\midrule
+Guest memory model &
+  \syscall{mmap} into stub process &
+  \syscall{mmap} into stub process &
+  \texttt{KVM\_SET\_USER\_MEMORY\_REGION} (EPT/NPT) \\
+\midrule
+SMP model &
+  One host process per guest CPU &
+  One host thread per guest CPU &
+  One vCPU per host CPU (pool) \\
+\midrule
+Debugging support &
+  Full ptrace attach &
+  Limited (signal-based) &
+  \texttt{KVM\_GUESTDBG\_*} (breakpoints, single-step) \\
+\midrule
+Kernel version in-tree &
+  v2.4.x -- present (mainline) &
+  v6.1 -- present (Berg series) &
+  v2 in development (this work) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+% ------------------------------------------------------------------
+\section{Memory Management Under UML}
+\label{sec:foundations:memory}
+
+\subsection{Guest Physical Memory}
+
+\UML{}'s ``physical memory'' is a contiguous host-virtual region of
+size \texttt{physmem\_size} (set by the \texttt{mem=} boot parameter,
+default \SI{64}{\mebi\byte}).  It is backed either by a file on
+\texttt{tmpfs} (the traditional approach) or by an anonymous
+\texttt{MAP\_PRIVATE} mapping.  The file-backed approach supports
+\texttt{MAP\_SHARED} semantics, enabling host-side inspection of
+guest memory; the anonymous approach avoids filesystem overhead.
+
+Guest physical addresses are simple offsets into this region:
+\begin{equation*}
+  \text{host\_va}(\text{gpa}) = \texttt{uml\_physmem} + \text{gpa}
+\end{equation*}
+
+\subsection{Guest Page Tables}
+
+\UML{} maintains full x86-64 four-level page tables (PML4 $\rightarrow$
+PDP $\rightarrow$ PD $\rightarrow$ PT) in guest physical memory.  These
+page tables serve different purposes depending on the backend:
+
+\begin{description}[style=nextline]
+  \item[Seccomp/ptrace backends.]
+    Guest page tables exist only as a data structure internal to the
+    \UML{} kernel.  They record the guest's virtual-to-physical
+    mappings, but the \emph{actual} address translation is performed
+    by the host kernel's page tables (the stub process's
+    \texttt{mm\_struct}).  When the guest modifies a PTE, \UML{} must
+    call \syscall{mmap}/\syscall{mprotect} on the stub process to
+    make the host-side mapping match.
+
+  \item[KVM backend.]
+    Guest page tables are loaded into the vCPU's CR3 and walked by
+    hardware during guest execution.  EPT/NPT provides the second
+    level of translation (guest-physical to host-physical).  \UML{}
+    still maintains the guest page tables as data structures, but
+    they are now \emph{live}---the CPU reads them directly.
+\end{description}
+
+\subsection{The TLB Synchronization Problem}
+\label{sec:foundations:tlb-sync}
+
+When the \UML{} kernel modifies a guest page-table entry---due to a
+page fault, an \syscall{mmap}, an \syscall{mprotect}, or a process
+exit---the change must be propagated to the execution substrate:
+
+\begin{description}[style=nextline]
+  \item[Seccomp backend:]
+    Each PTE change is translated into a host \syscall{mmap} or
+    \syscall{mprotect} call, batched into the stub's syscall buffer
+    (\texttt{stub\_data->syscall\_data}), and flushed on the next
+    stub round-trip.  This is the \texttt{um\_tlb\_sync()} path in
+    \umlpath{arch/um/kernel/tlb.c}.
+
+  \item[KVM backend:]
+    PTE changes are written directly into the guest page-table pages
+    (which live in \UML{}'s physical memory region).  The \UML{} kernel
+    then issues \texttt{INVLPG} or a full CR3 reload within the guest
+    to invalidate stale TLB entries.  On SMP configurations,
+    \texttt{tlb\_kick\_others()} sends an IPI to force all other vCPUs
+    to flush their TLBs as well---this is the \KVM{}-specific backend
+    op that the \Seccomp{} backend leaves NULL (the host kernel's
+    mmu\_notifier mechanism handles cross-CPU invalidation
+    transparently for the \Seccomp{} path).
+\end{description}
+
+The TLB sync path is one of the most performance-sensitive operations
+in \UML{}.  The \Seccomp{} backend batches multiple PTE changes into
+a single stub round-trip (amortizing the futex wake/wait overhead over
+dozens of mappings), while the \KVM{} backend avoids host system calls
+entirely for the common case, paying only the cost of a guest-side
+\texttt{INVLPG} or CR3 write.
+
+
+% ------------------------------------------------------------------
+\section{Signal Handling}
+\label{sec:foundations:signals}
+
+Signals are the ``interrupts'' of the \UML{} kernel.  Where a
+bare-metal kernel receives timer ticks via a local APIC interrupt and
+I/O notifications via device IRQs, \UML{} receives:
+
+\begin{description}[style=nextline]
+  \item[\texttt{SIGALRM}:]
+    Timer interrupts.  The \UML{} kernel programs a host
+    \texttt{timer\_create}/\texttt{timer\_settime} timer (or
+    \texttt{setitimer} on older configurations) that delivers
+    \texttt{SIGALRM} at the frequency required by the guest's
+    \texttt{HZ} setting.  This drives the scheduler tick, watchdog
+    timers, and all time-dependent kernel subsystems.
+
+  \item[\texttt{SIGIO}:]
+    I/O readiness notifications.  \UML{}'s virtual device drivers
+    register host file descriptors with the \UML{} IRQ subsystem,
+    which uses \texttt{epoll} (or \texttt{poll}) and arranges for
+    \texttt{SIGIO} delivery when any registered descriptor becomes
+    ready.  This is the functional equivalent of a hardware IRQ
+    line going active.
+
+  \item[\texttt{SIGSEGV}:]
+    Page faults.  When guest code accesses an address that is not
+    mapped in the stub process's host-side page tables (for the
+    \Seccomp{} backend) or that causes an EPT violation (for the
+    \KVM{} backend), the resulting fault is delivered to the \UML{}
+    kernel, which resolves it by consulting the guest page tables,
+    allocating physical pages if necessary, and updating the mapping.
+
+  \item[\texttt{SIGSYS}:]
+    System call interception (\Seccomp{} backend only).  As described
+    in Section~\ref{sec:foundations:trap-compare}, the seccomp filter's
+    \texttt{SECCOMP\_RET\_TRAP} action delivers this signal to indicate
+    that the guest issued a system call.
+\end{description}
+
+\subsection{Signal Delivery Across Backends}
+
+The signal model differs substantially between backends:
+
+\begin{itemize}
+  \item \textbf{Seccomp backend:}
+    \texttt{SIGALRM} and \texttt{SIGIO} are delivered asynchronously
+    to the \UML{} kernel thread (the ``spawner'' process or the per-mm
+    worker process).  The signal handler runs in the \UML{} kernel's
+    context, interrupting whatever kernel code was executing.  Signal
+    masking ensures that only one signal is handled at a time.
+
+  \item \textbf{KVM backend:}
+    While a vCPU is inside \texttt{KVM\_RUN}, host signals cannot be
+    delivered to the thread---the thread is in kernel space executing
+    the KVM entry/exit loop.  Instead, pending signals cause
+    \texttt{KVM\_RUN} to return with \texttt{-EINTR} (or, with
+    signal-window-based delivery, the signal is handled before the
+    next \texttt{KVM\_RUN} call).  The \UML{} kernel's vCPU run loop
+    checks for pending signals after each VM exit and dispatches
+    them through the standard \UML{} interrupt-handling path.
+
+    This means \texttt{SIGALRM} timer ticks are effectively ``held''
+    during guest execution and processed at the next VM exit
+    boundary.  For the LSTAR gadget fast path, which handles system
+    calls without any VM exit, this creates a timer-delivery gap:
+    a tight loop calling only gadget-handled system calls could
+    theoretically starve the timer.  The gadget's \emph{budget}
+    mechanism addresses this: each gadget-handled
+    \texttt{clock\_gettime} call decrements a per-vCPU budget counter,
+    and when the budget reaches zero, the gadget falls back to the
+    full VM exit path, ensuring the host has an opportunity to deliver
+    pending signals.
+\end{itemize}
+
+\subsection{Signal Masking and Reentrancy}
+
+\UML{}'s signal handlers must be carefully written to avoid reentrancy
+issues.  The \UML{} kernel uses \texttt{sigprocmask} to block signals
+during critical sections (analogous to \texttt{local\_irq\_disable()}
+on bare metal) and unblocks them at safe points (analogous to
+\texttt{local\_irq\_enable()}).  The \texttt{block\_signals\_trace()} /
+\texttt{unblock\_signals\_trace()} wrappers in
+\umlpath{arch/um/os-Linux/signal.c} implement this protocol, and all
+signal-handler dispatchers use them to ensure that a \texttt{SIGALRM}
+arriving during \texttt{SIGIO} handling (or vice versa) is deferred
+rather than creating a nested handler invocation that could corrupt
+kernel state.
+
+\bigskip
+
+With these foundations established---the virtualization taxonomy, the
+x86 privilege model, hardware virtualization extensions, the Linux
+process model, address-space layout, trap mechanisms, memory
+management, and signal handling---we are now equipped to examine the
+architecture of \UML{} itself in Chapter~\ref{ch:architecture}.

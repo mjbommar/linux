@@ -1,0 +1,1120 @@
+% ==========================================================================
+%  Chapter 8 — Related Work and Comparative Analysis
+% ==========================================================================
+\chapter{Related Work}
+\label{ch:related}
+
+\epigraph{%
+  Every isolation technology is a point in a multi-dimensional
+  trade-off space: compatibility, performance, security, and
+  operational complexity.  Understanding where each point lies is
+  prerequisite to choosing wisely.%
+}{}
+
+User-Mode Linux does not exist in isolation.  The past two decades have
+produced a rich ecosystem of virtualization, sandboxing, and kernel
+abstraction technologies, each occupying a different point in the
+design space.  This chapter provides a detailed comparison with nine
+related systems, analyzing the architectural decisions that differentiate
+them from \UML{} and the trade-offs those decisions entail.  We conclude
+with a comprehensive comparison table (Section~\ref{sec:related-table})
+that summarizes the landscape.
+
+For each system, we describe the core architecture, identify the key
+design decisions that differentiate it from \UML{}, and assess the
+implications for compatibility, performance, security, and operational
+deployment.
+
+
+% ------------------------------------------------------------------
+\section{gVisor}
+\label{sec:related-gvisor}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+gVisor~\cite{gvisor} is Google's user-space kernel, open-sourced in
+2018.  Its core component, the \emph{Sentry}, is a process written
+in Go that reimplements approximately 200 Linux system calls.  When
+a containerized application issues a system call, it is intercepted
+and handled by the Sentry rather than by the host Linux kernel.  This
+interposition provides a security boundary: even if the application
+exploits a bug in the Sentry's syscall implementation, it cannot
+directly compromise the host kernel.
+
+gVisor has evolved through three platform backends~\cite{gvisor-platforms}:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[ptrace (2018).]
+    The original platform.  The Sentry attaches to application
+    processes via \texttt{ptrace} and intercepts syscalls.  This is
+    architecturally identical to \UML{}'s original mechanism, and it
+    suffers from the same performance limitations: each syscall
+    requires multiple context switches between the tracer (Sentry)
+    and the tracee (application).
+
+  \item[KVM (2018).]
+    The Sentry runs in a lightweight KVM virtual machine.
+    Application code runs in guest ring 3; the Sentry runs in guest
+    ring 0.  Syscall traps are handled as VM exits.  This is
+    conceptually similar to \UML{}'s \KVMvTwo{} backend, but the
+    ``kernel'' being run in ring 0 is the Go Sentry, not the real
+    Linux kernel.
+
+  \item[Systrap (2023).]
+    The newest platform~\cite{gvisor-systrap}.  It uses a combination
+    of shared memory, per-thread signal handlers, and a dedicated
+    ``stub'' process to handle syscalls without the overhead of
+    \texttt{ptrace} or \KVM{}.  The application's syscall instruction
+    triggers a \texttt{SIGSYS} signal (installed via seccomp-BPF),
+    which vectors to a handler that dispatches the syscall to the
+    Sentry via shared memory.  This achieves near-native performance
+    for many workloads.
+\end{description}
+
+\subsection{Key difference: reimplementation vs.\ the real kernel}
+
+The fundamental architectural difference between gVisor and \UML{}
+is that gVisor \emph{reimplements} the Linux syscall interface while
+\UML{} \emph{is} the Linux kernel.  This distinction has profound
+consequences:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Compatibility.]
+    gVisor's Sentry implements a subset of the Linux ABI.  System
+    calls that are not implemented, or whose semantics differ subtly
+    from the kernel's implementation, can cause application failures.
+    Google maintains a compatibility matrix documenting which syscalls
+    are supported and at what level of fidelity.  \UML{}, by contrast,
+    supports every syscall that the Linux kernel supports, because it
+    \emph{is} the Linux kernel.  There is no compatibility matrix
+    because there is no reimplementation.
+
+  \item[Bug fidelity.]
+    A bug found in gVisor is a bug in the Go Sentry code.  It may or
+    may not correspond to a real kernel bug.  A bug found in \UML{}
+    is a bug in the Linux kernel source tree, directly applicable to
+    every architecture.  This makes \UML{} suitable for kernel
+    development and testing in a way that gVisor fundamentally is not.
+
+  \item[Security posture.]
+    gVisor's reimplementation is a \emph{feature} from a security
+    perspective: by not running the real kernel, it avoids exposing
+    the real kernel's attack surface to untrusted containers.  The
+    Sentry presents a smaller, memory-safe (Go) attack surface.
+    \UML{}, running the real kernel, inherits the real kernel's
+    vulnerabilities.  However, those vulnerabilities are contained
+    within a host-level process, so exploitation achieves
+    compromise of a userspace process, not the host kernel.
+\end{description}
+
+\subsection{Performance comparison}
+
+gVisor with the systrap platform achieves syscall latencies of
+approximately 1--3\,$\mu$s for simple syscalls~\cite{gvisor-systrap}.
+\UML{} with the \Seccomp{} backend achieves approximately 300\,ns;
+with \KVMvTwo{}, approximately 100\,ns.  For I/O-intensive workloads,
+gVisor's overhead is dominated by the cost of reimplementing filesystem
+and networking operations in Go, whereas \UML{} uses the kernel's
+native C implementations.  For compute-intensive workloads where
+syscalls are infrequent, both systems approach native performance.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    layer/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=5cm,
+      minimum height=0.9cm,
+      rounded corners=3pt,
+      font=\small,
+      align=center
+    },
+    label/.style={
+      font=\footnotesize\itshape,
+      color=UMLMuted,
+      anchor=south
+    },
+    arrow/.style={
+      -{Stealth[length=5pt]},
+      thick,
+      color=UMLMuted
+    }
+  ]
+
+  % gVisor stack (left)
+  \node[label] at (-3.5,4.6) {gVisor};
+  \node[layer=KernelGold!8] (gapp) at (-3.5,4)  {Application};
+  \node[layer=UMLTeal!8]    (gsen) at (-3.5,2.8) {Sentry (Go, $\sim$200 syscalls)};
+  \node[layer=UMLBlue!8]    (gplat) at (-3.5,1.6) {Platform (ptrace/KVM/systrap)};
+  \node[layer=UMLBlue!15]   (ghost) at (-3.5,0.4) {Host Kernel};
+
+  \draw[arrow] (gapp.south) -- (gsen.north);
+  \draw[arrow] (gsen.south) -- (gplat.north);
+  \draw[arrow] (gplat.south) -- (ghost.north);
+
+  % UML stack (right)
+  \node[label] at (3.5,4.6) {UML};
+  \node[layer=KernelGold!8] (uapp) at (3.5,4)  {Guest Application};
+  \node[layer=UMLGreen!8]   (uker) at (3.5,2.8) {UML Kernel (real Linux)};
+  \node[layer=UMLTeal!8]    (ubak) at (3.5,1.6) {Backend (seccomp/kvm-v2)};
+  \node[layer=UMLBlue!15]   (uhost) at (3.5,0.4) {Host Kernel};
+
+  \draw[arrow] (uapp.south) -- (uker.north);
+  \draw[arrow] (uker.south) -- (ubak.north);
+  \draw[arrow] (ubak.south) -- (uhost.north);
+
+  % Separator
+  \draw[dashed,color=UMLGrid] (0,-0.1) -- (0,5.0);
+
+\end{tikzpicture}
+\caption[gVisor vs.\ UML architecture]{%
+  Architectural comparison of gVisor and \UML{}.  gVisor interposes a
+  Go-language Sentry that reimplements Linux syscalls.  \UML{} runs the
+  actual Linux kernel, using a backend for syscall interception.  The
+  layers are analogous but the kernel layer is fundamentally different:
+  reimplementation (gVisor) vs.\ the real kernel (\UML{}).
+}
+\label{fig:related-gvisor-uml}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{Firecracker}
+\label{sec:related-firecracker}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+Firecracker~\cite{agache2020,firecracker} is a virtual machine monitor
+(VMM) developed by Amazon Web Services (AWS) and open-sourced in 2018.
+Written in Rust, it uses the KVM API to create lightweight virtual
+machines (``microVMs'') with a minimal device model.  Firecracker is
+the execution engine behind AWS Lambda and AWS Fargate.
+
+A Firecracker microVM includes:
+
+\begin{itemize}[leftmargin=2em]
+  \item A KVM-based virtual CPU with full hardware-assisted
+        virtualization (Intel VT-x / AMD-V).
+  \item A minimal device model: virtio-net, virtio-block, a serial
+        console, and a minimal i8042 keyboard controller.  No PCI bus,
+        no USB, no GPU emulation.
+  \item A custom boot protocol that loads the guest kernel directly
+        into memory, bypassing BIOS/UEFI boot.
+\end{itemize}
+
+Firecracker achieves cold-start times of under 125\,ms and memory
+overhead of approximately 5\,MB per microVM.
+
+\subsection{Key difference: full VM vs.\ process}
+
+Firecracker runs a \emph{complete virtual machine} with its own kernel
+instance, guest physical memory, and emulated hardware.  The guest kernel
+runs in the VM's ring 0 (guest mode), with full hardware privilege within
+the VM.  Communication between the guest and the host occurs through
+virtio devices and VM exits.
+
+\UML{} runs the kernel as a \emph{process}.  There is no emulated hardware,
+no virtio devices (in the conventional sense), and no guest physical memory
+separate from the host's process address space.  The \UML{} kernel
+accesses host resources through system calls, not through device emulation.
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Isolation model.]
+    Firecracker provides hardware-enforced isolation: the guest cannot
+    access host memory outside its designated physical memory region
+    because the CPU's EPT/NPT page tables prevent it.  \UML{} provides
+    software-enforced isolation: the guest cannot access host memory
+    because the host kernel's process isolation prevents it.  Both
+    provide strong isolation, but Firecracker's hardware enforcement
+    is a stronger guarantee against kernel vulnerabilities in the host.
+
+  \item[Use case.]
+    Firecracker is designed for multi-tenant cloud isolation: running
+    thousands of untrusted customer workloads on shared hardware.
+    \UML{} is designed for kernel development, debugging, testing,
+    and research---environments where the guest is not necessarily
+    untrusted, but where observability and fast iteration matter more
+    than multi-tenant security.
+
+  \item[Hardware requirements.]
+    Firecracker requires \texttt{/dev/kvm} and hardware virtualization
+    extensions.  \UML{} with the \Seccomp{} or \texttt{ptrace} backend
+    requires neither.
+
+  \item[Host tool access.]
+    A Firecracker guest is an opaque VM from the host's perspective.
+    Debugging the guest kernel requires GDB remote protocol over serial.
+    A \UML{} guest is a host process: \texttt{gdb}, \texttt{strace},
+    \texttt{perf}, and every other host tool work directly.
+\end{description}
+
+\subsection{Performance}
+
+For I/O throughput, Firecracker benefits from virtio's efficient
+batched I/O model and KVM's hardware-accelerated instruction
+execution.  For syscall-heavy workloads, the VM exit cost
+(approximately 1--2\,$\mu$s per exit on modern hardware) is
+comparable to \UML{}'s \Seccomp{} backend.  \UML{}'s \KVMvTwo{}
+backend, which also uses KVM but avoids the full VM device model,
+can achieve lower per-syscall latency because the exit handler is a
+simple function call within the \UML{} process, not a return to
+a separate VMM process.
+
+
+% ------------------------------------------------------------------
+\section{Linux Kernel Library (LKL)}
+\label{sec:related-lkl}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+The Linux Kernel Library (\textsc{LKL})~\cite{purdila2010,lkl}
+compiles the Linux kernel as a static library (\texttt{liblinux.a})
+that can be linked into an ordinary application.  The application
+calls kernel functions directly---\texttt{lkl\_sys\_open()},
+\texttt{lkl\_sys\_read()}, etc.---and the kernel executes in the
+same address space and at the same privilege level as the application.
+
+\textsc{LKL} achieves this by:
+
+\begin{enumerate}[leftmargin=2em]
+  \item Implementing a minimal \texttt{arch/lkl/} port that maps
+        kernel threading to host pthreads, kernel memory allocation
+        to host \syscall{malloc}, and kernel timers to host timer
+        APIs.
+  \item Disabling the MMU.  There is no virtual memory translation;
+        kernel and application share a flat address space.
+  \item Disabling process scheduling.  There is no userspace; the
+        kernel exists solely to provide its subsystems (VFS, networking,
+        block layer) as library functions.
+\end{enumerate}
+
+\subsection{Performance}
+
+\textsc{LKL}'s in-process execution model eliminates all
+interposition overhead.  A ``syscall'' is a function call: the
+application pushes arguments onto the stack, calls the kernel
+function, and gets the result back immediately.  There is no context
+switch, no signal delivery, no trap handler.  This makes \textsc{LKL}
+extraordinarily fast for workloads that consist primarily of kernel
+operations.
+
+Fuzzing studies have reported approximately 60$\times$ throughput
+improvement when using \textsc{LKL} compared to QEMU/KVM targets.
+This number is the motivation for many of the v2 redesign's
+performance optimizations.
+
+\subsection{Limitations}
+
+\textsc{LKL}'s speed comes at a fundamental cost:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[No user/kernel separation.]
+    The application and the kernel share an address space.  A buffer
+    overflow in the kernel can corrupt application data and vice versa.
+    There is no protection boundary, so \textsc{LKL} cannot be used to
+    study real syscall behavior where \syscall{copy\_from\_user} /
+    \syscall{copy\_to\_user} semantics matter.
+
+  \item[No process model.]
+    \textsc{LKL} does not support multiple processes, scheduling, or
+    signals.  Bugs that depend on process interaction, scheduling
+    decisions, or signal delivery are invisible.
+
+  \item[No SMP.]
+    \textsc{LKL} is single-threaded from the kernel's perspective.
+    Concurrency bugs, which are among the most dangerous kernel bugs,
+    cannot be found or reproduced.
+
+  \item[No realistic attack surface.]
+    Because there is no user/kernel boundary, the attack surface that
+    \textsc{LKL} exposes to a fuzzer is a strict subset of the real
+    kernel's attack surface.  Entire classes of vulnerabilities---those
+    involving user-pointer validation, memory mapping semantics, and
+    inter-process communication---are absent.
+\end{description}
+
+\subsection{The LKL--UML unification effort}
+
+Hajime Tazaki proposed unifying \textsc{LKL} into \UML{} in a series
+of RFC patches~\cite{tazaki2019} that reached v8 before stalling.
+The core idea was to make \textsc{LKL} a ``backend'' or operating
+mode of \UML{}, sharing the same \texttt{arch/um/} code but with a
+compilation option that strips away process isolation for maximum
+speed.  This would allow a single codebase to serve both the
+high-fidelity (\UML{}) and high-speed (\textsc{LKL}) use cases.
+
+The v2 redesign's backend-ops abstraction lays the groundwork for
+this unification.  A hypothetical \texttt{lkl} backend could implement
+the \texttt{struct um\_backend\_ops} interface with trivial stubs
+(no-op for process creation, direct function call for syscall
+dispatch), providing \textsc{LKL}-like performance within the \UML{}
+framework.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    box/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=3.5cm,
+      minimum height=2.5cm,
+      rounded corners=4pt,
+      font=\small,
+      align=center
+    },
+    label/.style={
+      font=\small\bfseries,
+      color=UMLInk
+    }
+  ]
+
+  % LKL
+  \node[box=UMLRed!6] (lkl) at (0,0) {
+    \textbf{Single address space}\\[3pt]
+    No MMU\\
+    No processes\\
+    No scheduling\\[3pt]
+    \textit{60$\times$ speed}
+  };
+  \node[label,above=0.2cm of lkl] {LKL};
+
+  % UML
+  \node[box=UMLGreen!8] (uml) at (5,0) {
+    \textbf{Full kernel}\\[3pt]
+    Process isolation\\
+    SMP scheduling\\
+    Real syscall path\\[3pt]
+    \textit{Full fidelity}
+  };
+  \node[label,above=0.2cm of uml] {UML};
+
+  % QEMU
+  \node[box=UMLBlue!8] (qemu) at (10,0) {
+    \textbf{Full VM}\\[3pt]
+    Hardware emulation\\
+    Device model\\
+    Guest physical memory\\[3pt]
+    \textit{Any architecture}
+  };
+  \node[label,above=0.2cm of qemu] {QEMU/KVM};
+
+  % Spectrum arrow
+  \draw[-{Stealth[length=6pt]},very thick,color=UMLMuted]
+    (-2,-2.2) -- (12,-2.2);
+  \node[font=\footnotesize,color=UMLMuted,anchor=north] at (-2,-2.3)
+    {Speed};
+  \node[font=\footnotesize,color=UMLMuted,anchor=north] at (12,-2.3)
+    {Fidelity};
+  \node[font=\footnotesize\itshape,color=UMLAmber,anchor=north] at (5,-2.3)
+    {UML v2 target: both};
+
+\end{tikzpicture}
+\caption[Speed--fidelity spectrum]{%
+  The speed--fidelity spectrum of kernel execution environments.
+  \textsc{LKL} maximizes speed by eliminating all isolation.
+  QEMU/KVM maximizes fidelity by emulating complete hardware.
+  \UML{} v2 aims to approach \textsc{LKL}'s speed while
+  retaining full kernel fidelity.
+}
+\label{fig:related-spectrum}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{QEMU and KVM}
+\label{sec:related-qemu-kvm}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+QEMU~\cite{bellard2005} is a full-system emulator that translates
+guest instructions to host instructions via a technique called
+Tiny Code Generator (TCG) dynamic binary translation.  When combined
+with KVM~\cite{kivity2007}, QEMU uses hardware virtualization
+extensions to execute guest code directly on the CPU, with the TCG
+path used only for emulating devices and handling privileged
+instructions.
+
+QEMU/KVM is the standard tool for kernel development and testing.
+It provides:
+
+\begin{itemize}[leftmargin=2em]
+  \item Full hardware emulation: PCI bus, USB, network interfaces,
+        block devices, GPU (via virtio-gpu or QXL), serial ports,
+        RTC, APIC, IOAPIC, and more.
+  \item Multi-architecture support: x86, ARM, RISC-V, PowerPC,
+        MIPS, s390x, and others.
+  \item Snapshot support via QEMU savevm.
+  \item GDB debugging via the GDB remote protocol.
+  \item Live migration between hosts.
+\end{itemize}
+
+\subsection{Comparison with UML}
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Architecture support.]
+    QEMU can emulate any supported architecture on any host.  A
+    developer can test an ARM kernel on an x86 workstation.  \UML{}
+    runs only the host's native architecture (x86-64 on an x86-64
+    host).  For cross-architecture testing, QEMU is the only option.
+
+  \item[Device emulation.]
+    QEMU provides realistic device emulation, essential for testing
+    device drivers.  \UML{}'s devices are virtual abstractions
+    (\texttt{ubd} for block, \texttt{tuntap}/\texttt{vector} for
+    networking) that do not correspond to real hardware.  For driver
+    development, QEMU is necessary.
+
+  \item[Startup time.]
+    QEMU/KVM requires 2--5 seconds to boot a kernel to userspace.
+    \UML{} boots in under 500\,ms.  For workflows that require many
+    boot cycles (bisection, fuzzing, CI), this difference is
+    significant.
+
+  \item[Debugging experience.]
+    QEMU exposes a GDB remote protocol server.  The developer connects
+    \texttt{gdb} to this server and debugs the guest kernel over a
+    socket.  This works but imposes limitations: conditional breakpoints
+    are evaluated on the debugger side (requiring round-trips for each
+    check), variable inspection requires translating through guest page
+    tables, and the full \texttt{gdb} Python scripting API is
+    available but slow.
+
+    \UML{} provides native \texttt{gdb} access.  The kernel is a
+    local process; \texttt{gdb} reads its memory directly.  Conditional
+    breakpoints evaluate at native speed.  The debugging experience
+    is qualitatively superior.
+
+  \item[Host tool access.]
+    A QEMU guest is isolated from the host.  Sharing files requires
+    virtio-9p, NFS, or SSH.  \texttt{strace}, \texttt{perf}, and
+    other host tools cannot observe the guest kernel.  A \UML{} guest
+    is a host process: all host tools work directly, and
+    \texttt{hostfs} provides zero-overhead filesystem sharing.
+
+  \item[Hardware requirements.]
+    QEMU with TCG (software emulation) requires no hardware
+    virtualization, but is 10--100$\times$ slower than native execution.
+    QEMU/KVM requires \texttt{/dev/kvm}.  \UML{} with \Seccomp{}
+    runs at near-native speed without any hardware requirements.
+\end{description}
+
+\subsection{Complementary roles}
+
+\UML{} and QEMU/KVM are not competitors; they serve different
+purposes.  QEMU/KVM is essential for cross-architecture testing,
+driver development, and production virtualization.  \UML{} is
+superior for kernel debugging, rapid iteration, and environments
+lacking \texttt{/dev/kvm}.  A comprehensive kernel development
+workflow uses both.
+
+
+% ------------------------------------------------------------------
+\section{Containers}
+\label{sec:related-containers}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+Linux containers (Docker, Kubernetes, LXC) use namespaces and
+cgroups~\cite{soltesz2007,namespaces,cgroups-v2} to provide
+isolated execution environments that share the host kernel.  Each
+container has its own view of the PID namespace, network namespace,
+mount namespace, and (optionally) user namespace, but all containers
+execute system calls against the same kernel instance.
+
+Containers are extraordinarily lightweight---startup times of tens
+of milliseconds, memory overhead of kilobytes---because there is
+no kernel to boot, no device model to initialize, and no memory
+to dedicate to a separate kernel instance.
+
+\subsection{The shared-kernel problem}
+
+The shared kernel is both containers' greatest strength and their
+greatest weakness:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Strength.]
+    Because all containers share the kernel, there is no duplication
+    of kernel memory, no boot overhead, and no performance penalty for
+    syscall dispatch.  A containerized application's \syscall{read}
+    call goes directly to the kernel with zero interposition overhead.
+
+  \item[Weakness.]
+    A kernel vulnerability is a vulnerability in \emph{every}
+    container on the host.  Container escape exploits
+    (CVE-2019-5736: runc; CVE-2020-15257: containerd; CVE-2022-0185:
+    filesystem) demonstrate repeatedly that namespace and cgroup
+    isolation do not constitute a security boundary.  The kernel
+    developers explicitly document that namespaces are not a
+    security feature for untrusted code.
+\end{description}
+
+\subsection{Comparison with UML}
+
+\UML{} provides per-instance kernel isolation.  Each \UML{} instance
+runs its own kernel, so a kernel vulnerability in one instance cannot
+affect another instance or the host.  This comes at a cost:
+
+\begin{itemize}[leftmargin=2em]
+  \item \UML{} instances consume more memory (kernel per instance).
+  \item \UML{} instances have longer startup times (kernel boot).
+  \item Syscalls in \UML{} incur interposition overhead.
+\end{itemize}
+
+For multi-tenant isolation of untrusted workloads, the industry
+has moved toward combining containers with lightweight VMs
+(Firecracker, Kata Containers) or user-space kernels (gVisor).
+\UML{} occupies a middle ground: lighter than a full VM, heavier
+than a container, but with genuine kernel isolation and the unique
+advantage of running the real kernel for development and testing
+purposes.
+
+
+% ------------------------------------------------------------------
+\section{Unikernels}
+\label{sec:related-unikernels}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+Unikernels~\cite{madhavapeddy2013,kuenzer2021} are specialized,
+single-purpose machine images that combine an application with the
+minimal set of kernel libraries needed to run it.  The application
+and kernel run in a single address space at a single privilege level,
+eliminating the user/kernel boundary.
+
+Notable unikernel projects include:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[MirageOS~\cite{madhavapeddy2013}.]
+    Written in OCaml.  Compiles an application and its OS dependencies
+    into a single Xen or KVM bootable image.  Extremely small attack
+    surface (no shell, no multi-user system, no unnecessary drivers).
+
+  \item[Unikraft~\cite{kuenzer2021}.]
+    A modular unikernel construction toolkit.  The developer selects
+    which kernel components (scheduler, memory allocator, network
+    stack) to include.  Achieves boot times under 1\,ms for minimal
+    configurations and throughput exceeding that of Linux for
+    specialized workloads.
+
+  \item[IncludeOS.]
+    A C++ unikernel for cloud applications.  The application
+    \texttt{\#include}s the OS as a library.
+\end{description}
+
+\subsection{Comparison with UML}
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Boot time.]
+    Unikernels boot in milliseconds (sometimes sub-millisecond for
+    Unikraft), compared to \UML{}'s $\sim$500\,ms.  However,
+    unikernels typically run on a hypervisor (Xen or KVM), so the
+    total startup includes hypervisor overhead.
+
+  \item[Compatibility.]
+    Unikernels sacrifice compatibility for specialization.  A
+    MirageOS unikernel cannot run arbitrary Linux binaries.  Unikraft
+    has a Linux-compatible syscall layer, but it is incomplete.
+    \UML{} runs unmodified Linux binaries because it is the real
+    Linux kernel.
+
+  \item[Debugging.]
+    Unikernels are notoriously difficult to debug.  There is no
+    shell to log into, no \texttt{gdb} to attach, and the
+    single-address-space design means that a crash destroys the
+    entire environment including any in-memory logs.  \UML{} provides
+    full native debugging.
+
+  \item[Security model.]
+    Unikernels reduce the attack surface by eliminating unnecessary
+    code, but the single-address-space design means that any
+    vulnerability that achieves code execution has full control
+    of the machine.  \UML{} maintains user/kernel separation,
+    so a compromised guest process is still constrained by the
+    \UML{} kernel's process isolation.
+
+  \item[Use case overlap.]
+    There is minimal overlap between unikernels and \UML{}.
+    Unikernels are for production deployment of specialized services.
+    \UML{} is for kernel development, testing, and research.  They
+    occupy opposite corners of the design space.
+\end{description}
+
+
+% ------------------------------------------------------------------
+\section{Dune}
+\label{sec:related-dune}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+Dune~\cite{belay2012} is a system that provides safe user-level
+access to privileged CPU features.  Developed at Stanford, Dune uses
+Intel VT-x to place a process into a non-root mode VM where it has
+access to ring 0 features: page table manipulation, interrupt
+handling, and privileged register access.  The process can manage
+its own virtual memory, handle its own page faults, and implement
+custom exception handlers, all without modifying the host kernel
+(beyond loading the Dune kernel module).
+
+Dune's design is motivated by applications that benefit from
+hardware privilege features:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Sandboxing.}  A process can create a ring 3 sandbox
+        within its own address space, with hardware-enforced isolation.
+  \item \textbf{Garbage collection.}  A runtime can use dirty bits
+        in page table entries to track memory writes, enabling
+        write-barrier-free garbage collection.
+  \item \textbf{Networking.}  A process can map NIC registers into
+        its address space and handle interrupts directly, bypassing
+        the kernel's network stack for zero-copy I/O.
+\end{itemize}
+
+\subsection{Relationship to UML's KVM backend}
+
+Dune and \UML{}'s \KVMvTwo{} backend share a fundamental mechanism:
+both use KVM to run code in a non-root mode VM with access to
+privileged features.  The differences are in scope and purpose:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Scope.]
+    Dune gives privilege to a \emph{single process}.  \KVMvTwo{}
+    runs an \emph{entire kernel} in the VM, with that kernel managing
+    its own guest processes.
+
+  \item[Kernel involvement.]
+    In Dune, the application code running in ring 0 is arbitrary
+    user-written code.  In \UML{}'s \KVMvTwo{}, the code running
+    in the VM's ring 0 is the Linux kernel itself.
+
+  \item[Process model.]
+    Dune's VM contains a single application.  \UML{}'s VM contains
+    a kernel that can create and schedule multiple guest processes,
+    each running in the VM's ring 3.
+
+  \item[Hardware requirements.]
+    Both require \texttt{/dev/kvm} and VT-x.  \UML{} has fallback
+    backends (seccomp, ptrace) that do not.
+\end{description}
+
+Dune can be viewed as a building block for what \UML{}'s \KVMvTwo{}
+backend accomplishes at a larger scale.  Dune demonstrates that
+KVM's non-root mode is useful for more than traditional VMs; \UML{}'s
+\KVMvTwo{} backend demonstrates that it can host an entire kernel.
+
+
+% ------------------------------------------------------------------
+\section{Library OS: Graphene / Gramine}
+\label{sec:related-libos}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+The Library OS concept~\cite{porter2011} proposes moving OS
+functionality out of the kernel and into a library linked with the
+application.  Instead of making system calls to a shared kernel,
+the application calls library functions that implement OS
+semantics.  The library OS runs on a minimal ``PAL'' (Platform
+Adaptation Layer) that provides basic primitives: memory mapping,
+thread creation, and I/O.
+
+Graphene~\cite{tsai2014}, later renamed Gramine~\cite{gramine},
+is the most prominent implementation of this concept.  Gramine
+runs unmodified Linux binaries by intercepting their syscalls and
+handling them within a library OS that runs in the same process.
+Gramine's primary use case is running applications inside Intel
+SGX enclaves, where the untrusted host OS cannot be relied upon
+to correctly implement system calls.
+
+\subsection{Comparison with UML}
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Shared goal.]
+    Both Gramine and \UML{} aim to run Linux applications in
+    environments where the host kernel is not directly serving
+    the application's system calls.  Gramine interposes a library;
+    \UML{} interposes an entire kernel.
+
+  \item[Compatibility.]
+    Gramine implements a subset of the Linux ABI (approximately
+    150 syscalls).  Like gVisor, it faces the reimplementation
+    problem: subtle differences from the kernel's behavior cause
+    application failures.  \UML{} implements the complete Linux
+    ABI because it is the complete Linux kernel.
+
+  \item[Threat model.]
+    Gramine's threat model assumes an untrusted host OS (SGX
+    enclaves).  \UML{}'s threat model assumes a trusted host
+    kernel.  These are essentially opposite assumptions.
+
+  \item[Performance.]
+    Gramine's in-process syscall handling is fast for
+    compute-intensive workloads but incurs overhead for I/O
+    (which must be forwarded through the PAL to the untrusted
+    host).  \UML{}'s overhead is primarily in syscall interception
+    (100--300\,ns per syscall with modern backends).
+
+  \item[Use case.]
+    Gramine is for running applications in hostile environments
+    (SGX, cloud with untrusted host).  \UML{} is for running
+    kernels in development/test environments.  The overlap is
+    minimal.
+\end{description}
+
+
+% ------------------------------------------------------------------
+\section{WSL1}
+\label{sec:related-wsl1}
+% ------------------------------------------------------------------
+
+\subsection{Architecture}
+
+Windows Subsystem for Linux version 1~\cite{wsl1}, shipped in
+Windows 10 Anniversary Update (2016), implemented a Linux-compatible
+kernel interface on Windows through syscall translation.  When a
+Linux binary executed a syscall, the Windows kernel's \emph{lxcore}
+driver translated it into equivalent Windows NT kernel calls.
+
+WSL1 was a remarkable engineering achievement: it could run unmodified
+Linux ELF binaries on a Windows kernel without a VM.  For many
+workloads (development tools, scripting, basic server software),
+it worked well.
+
+\subsection{The reimplementation problem}
+
+WSL1's approach is conceptually identical to gVisor's: reimplement
+the Linux syscall interface on a different substrate.  And it
+encountered the same fundamental problem: the long tail of
+compatibility issues.  Syscalls that worked differently in subtle
+ways (\texttt{fork} semantics, signal delivery timing,
+\texttt{/proc} filesystem contents, inotify behavior) caused
+failures in applications that depended on exact Linux semantics.
+
+Microsoft ultimately abandoned the syscall-translation approach in
+favor of WSL2, which runs a real Linux kernel in a Hyper-V virtual
+machine.  This decision is a powerful validation of the principle
+that \UML{} embodies: if you need Linux semantics, run the Linux
+kernel.
+
+\subsection{Lessons for UML}
+
+WSL1's trajectory---from ambitious syscall translation to pragmatic
+VM hosting---illustrates the fundamental difficulty of reimplementing
+a kernel interface.  The Linux kernel has accumulated 35 years of
+syscall semantics, much of it undocumented, some of it accidental,
+all of it depended upon by real applications.  Any reimplementation
+will eventually encounter the long tail of edge cases where it
+diverges from the real kernel.
+
+\UML{} avoids this problem entirely.  It is not a reimplementation;
+it is the real kernel running on a different substrate.  The
+compatibility question for \UML{} is not ``does it implement
+\texttt{epoll} correctly?'' but ``does it intercept and forward
+syscalls correctly?''---a much smaller and more tractable problem.
+
+
+% ------------------------------------------------------------------
+\section{Comprehensive Comparison}
+\label{sec:related-table}
+% ------------------------------------------------------------------
+
+Table~\ref{tab:related-comparison} presents a comprehensive
+comparison of the systems discussed in this chapter across seven
+dimensions: approach, year, kernel compatibility, performance
+overhead, hardware requirements, primary use case, and security
+model.
+
+\begin{table}[ht]
+\centering
+\caption{Comprehensive comparison of related systems}
+\label{tab:related-comparison}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\textwidth}{l l L{2.5cm} L{2.0cm} L{1.8cm} L{2.5cm}}
+\toprule
+\textbf{System} & \textbf{Year} & \textbf{Approach} & \textbf{Kernel compat.} & \textbf{HW req.} & \textbf{Primary use} \\
+\midrule
+\textbf{UML}
+  & 2000
+  & Kernel as process
+  & Full (is the kernel)
+  & None\textsuperscript{a}
+  & Dev, debug, test \\
+gVisor
+  & 2018
+  & Syscall reimpl.\ (Go)
+  & Partial ($\sim$200 syscalls)
+  & None\textsuperscript{a}
+  & Container sandbox \\
+Firecracker
+  & 2018
+  & MicroVM (KVM)
+  & Full (separate kernel)
+  & VT-x/AMD-V
+  & Multi-tenant cloud \\
+\textsc{LKL}
+  & 2010
+  & Kernel as library
+  & Partial (no processes)
+  & None
+  & Fuzzing, research \\
+QEMU/KVM
+  & 2005/07
+  & Full VM + HW virt
+  & Full (any arch)
+  & VT-x\textsuperscript{b}
+  & General purpose \\
+Containers
+  & 2007+
+  & Shared kernel
+  & Full (same kernel)
+  & None
+  & App deployment \\
+Unikernels
+  & 2013
+  & Single-image OS
+  & Minimal
+  & Hypervisor
+  & Specialized services \\
+Dune
+  & 2012
+  & User-level VT-x
+  & N/A (not a kernel)
+  & VT-x
+  & Process sandboxing \\
+Gramine
+  & 2014
+  & Library OS (SGX)
+  & Partial ($\sim$150 syscalls)
+  & SGX\textsuperscript{c}
+  & Confidential computing \\
+WSL1
+  & 2016
+  & Syscall translation
+  & Partial (long tail)
+  & None
+  & Dev tools on Windows \\
+\bottomrule
+\end{tabularx}
+
+\smallskip
+\noindent
+\textsuperscript{a}\,With seccomp/ptrace backend; KVM backend requires /dev/kvm. \quad
+\textsuperscript{b}\,QEMU TCG mode does not require VT-x but is 10--100$\times$ slower. \quad
+\textsuperscript{c}\,Gramine also runs without SGX in ``direct'' mode.
+\end{table}
+
+Table~\ref{tab:related-properties} compares the systems across
+qualitative dimensions relevant to \UML{}'s target use cases.
+
+\begin{table}[ht]
+\centering
+\caption{Qualitative property comparison}
+\label{tab:related-properties}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\textwidth}{l c c c c c}
+\toprule
+\textbf{System}
+  & \textbf{Native gdb}
+  & \textbf{Kernel isolation}
+  & \textbf{Fast boot}
+  & \textbf{Record/replay}
+  & \textbf{Snapshot} \\
+\midrule
+\textbf{UML (v2)}
+  & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+gVisor
+  & ---        & \checkmark\textsuperscript{*} & \checkmark & --- & --- \\
+Firecracker
+  & ---        & \checkmark & \checkmark & --- & \checkmark \\
+\textsc{LKL}
+  & \checkmark & ---        & N/A        & ---        & --- \\
+QEMU/KVM
+  & ---        & \checkmark & ---        & ---        & \checkmark \\
+Containers
+  & ---        & ---        & \checkmark & ---        & --- \\
+Unikernels
+  & ---        & \checkmark & \checkmark & ---        & --- \\
+Dune
+  & ---        & ---        & N/A        & ---        & --- \\
+Gramine
+  & ---        & \checkmark\textsuperscript{*} & \checkmark & --- & --- \\
+WSL1
+  & ---        & \checkmark\textsuperscript{*} & \checkmark & --- & --- \\
+\bottomrule
+\end{tabularx}
+
+\smallskip
+\noindent
+\textsuperscript{*}\,Isolation through reimplementation (not a real kernel), so
+kernel-level bugs in the host are not exposed but compatibility gaps exist.\\
+\checkmark\,= supported. \quad ---\,= not supported or not applicable.
+\end{table}
+
+
+% ------------------------------------------------------------------
+\section{Architectural Taxonomy}
+\label{sec:related-taxonomy}
+% ------------------------------------------------------------------
+
+The systems surveyed in this chapter can be organized along two
+primary architectural axes: the \emph{execution substrate} (how
+guest code is run) and the \emph{kernel model} (what provides
+OS semantics).
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    sys/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=2.2cm,
+      minimum height=0.8cm,
+      rounded corners=3pt,
+      font=\small\bfseries
+    }
+  ]
+
+  % Axes
+  \draw[-{Stealth[length=6pt]},thick,color=UMLMuted]
+    (-1,-0.5) -- (-1,7) node[above,font=\small] {Kernel fidelity};
+  \draw[-{Stealth[length=6pt]},thick,color=UMLMuted]
+    (-1,-0.5) -- (11,-0.5) node[right,font=\small] {Isolation strength};
+
+  % Systems positioned
+  \node[sys=UMLRed!10]    (lkl)   at (0.5,0.8)  {LKL};
+  \node[sys=UMLAmber!10]  (dune)  at (3.5,1.5)  {Dune};
+  \node[sys=UMLAmber!10]  (gvis)  at (5.5,3.0)  {gVisor};
+  \node[sys=UMLAmber!10]  (gram)  at (7.5,2.5)  {Gramine};
+  \node[sys=UMLAmber!10]  (wsl)   at (3.0,3.5)  {WSL1};
+  \node[sys=KernelGold!15](cont)  at (1.5,5.0)  {Containers};
+  \node[sys=UMLBlue!10]   (fc)    at (8.5,5.5)  {Firecracker};
+  \node[sys=UMLBlue!10]   (qemu)  at (9.5,6.3)  {QEMU/KVM};
+  \node[sys=UMLTeal!10]   (unik)  at (6.5,1.0)  {Unikernels};
+  \node[sys=UMLGreen!15]  (uml)   at (5.5,5.8)  {\UML{} v2};
+
+  % Annotations
+  \node[font=\scriptsize\itshape,color=UMLMuted] at (1.0,7.0)
+    {Real Linux kernel};
+  \node[font=\scriptsize\itshape,color=UMLMuted] at (1.0,0.0)
+    {Reimplementation / none};
+  \node[font=\scriptsize\itshape,color=UMLMuted] at (0.5,-1.0)
+    {No boundary};
+  \node[font=\scriptsize\itshape,color=UMLMuted] at (10.5,-1.0)
+    {Hardware VM};
+
+\end{tikzpicture}
+\caption[Architectural taxonomy of isolation systems]{%
+  Two-dimensional taxonomy of the systems discussed in this chapter.
+  The vertical axis measures kernel fidelity (how closely the system
+  matches real Linux kernel behavior).  The horizontal axis measures
+  isolation strength (the degree of hardware/software boundary between
+  the guest and host).  \UML{} v2 occupies a unique position: high
+  kernel fidelity (it is the real kernel) with strong software-enforced
+  isolation.
+}
+\label{fig:related-taxonomy}
+\end{figure}
+
+\subsection{Execution substrate}
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Hardware VM (QEMU/KVM, Firecracker).]
+    Guest code runs on real CPU hardware in a hardware-isolated VM.
+    Maximum isolation, maximum compatibility with real hardware, but
+    requires VT-x/AMD-V and imposes VM exit overhead.
+
+  \item[Process-level interposition (UML, gVisor).]
+    Guest code runs as host processes.  Syscalls are intercepted
+    via ptrace, seccomp, or KVM and handled by a supervisor
+    (the UML kernel or gVisor's Sentry).  No hardware
+    virtualization required (in non-KVM modes).
+
+  \item[In-process / library (LKL, unikernels, Gramine).]
+    Application and kernel code share an address space.  No
+    interposition overhead, but no isolation between application
+    and kernel.
+
+  \item[Kernel extension (containers, Dune).]
+    The host kernel is extended or configured to provide isolation
+    (containers via namespaces/cgroups, Dune via VT-x non-root mode).
+    Guest code runs directly on the host kernel with restricted
+    visibility.
+\end{description}
+
+\subsection{Kernel model}
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Real Linux kernel (UML, QEMU/KVM, Firecracker, containers).]
+    The real Linux kernel provides OS semantics.  In containers, it
+    is the host kernel; in QEMU/KVM and Firecracker, it is a
+    guest kernel; in \UML{}, it is the \UML{} kernel binary.
+
+  \item[Reimplemented kernel (gVisor, WSL1, Gramine).]
+    A separate codebase reimplements (a subset of) the Linux
+    syscall interface.  This avoids exposing the real kernel's
+    attack surface but introduces compatibility risk.
+
+  \item[Minimal / absent kernel (LKL, unikernels).]
+    The kernel is either compiled as a library (LKL) or reduced
+    to the minimum needed for a specific application (unikernels).
+    Kernel semantics are partial or specialized.
+\end{description}
+
+\UML{} is unique in combining the real Linux kernel (maximum
+compatibility and fidelity) with process-level execution (host-tool
+accessibility and minimal hardware requirements).  This combination
+is what makes it irreplaceable for the use cases described in
+Chapter~\ref{ch:applications}.
+
+
+% ------------------------------------------------------------------
+\section{Summary}
+\label{sec:related-summary}
+% ------------------------------------------------------------------
+
+The related work surveyed in this chapter demonstrates that \UML{}
+occupies a distinct and valuable position in the isolation/virtualization
+landscape.  The key insight is that most related systems optimize for
+\emph{either} production deployment (Firecracker, gVisor, containers,
+unikernels) \emph{or} development speed (LKL, Dune), but not both
+kernel fidelity and developer experience.
+
+\UML{}'s contribution is precisely this combination:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Full kernel fidelity.}  Unlike gVisor, WSL1, and
+        Gramine, \UML{} does not reimplement the kernel.  A bug
+        found in \UML{} is a bug in Linux.
+
+  \item \textbf{Full user/kernel separation.}  Unlike \textsc{LKL}
+        and unikernels, \UML{} maintains the process model, scheduling,
+        and memory protection.
+
+  \item \textbf{No hardware requirements.}  Unlike QEMU/KVM,
+        Firecracker, and Dune, \UML{} (with seccomp) runs wherever
+        a Linux process can run.
+
+  \item \textbf{Native host-tool access.}  Unlike every VM-based
+        system, \UML{} exposes the kernel to \texttt{gdb},
+        \texttt{strace}, \texttt{perf}, and every other host tool
+        as a first-class debugging target.
+
+  \item \textbf{Kernel isolation.}  Unlike containers, \UML{} provides
+        per-instance kernel isolation, making it safe for security
+        research and untrusted workloads.
+\end{enumerate}
+
+The v2 redesign strengthens \UML{}'s position by adding capabilities
+(snapshot/restore, record/replay, SMP) that were previously available
+only in heavier systems (QEMU, Firecracker) or not available at all
+(kernel-level record/replay).  Chapter~\ref{ch:v2redesign} describes
+these contributions in detail.

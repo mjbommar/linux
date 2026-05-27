@@ -1,0 +1,614 @@
+% ==========================================================================
+%  Chapter 9 — The v2 Redesign Project
+% ==========================================================================
+\chapter{The v2 Redesign Project}
+\label{ch:v2redesign}
+
+\epigraph{%
+  A good architecture is one that allows the system to be easily changed.%
+}{Robert C. Martin}
+
+\section{Project Overview}
+\label{sec:v2-overview}
+
+The v2 redesign of User-Mode Linux is a ground-up rearchitecture of
+the \UML{} backend layer, validation infrastructure, and operational
+tooling.  The work lives in the \texttt{mjbommar/linux} kernel tree
+(branch \texttt{next}), based on \texttt{torvalds/master} at
+v7.1-rc5.  It was developed between late 2025 and May 2026 by
+Michael~J.~Bommarito~II with substantial AI-assisted tooling
+(Anthropic Claude).
+
+The tree is organized around four branches:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[\texttt{master}]
+    Tracks \texttt{torvalds/master}; the baseline.
+  \item[\texttt{next}]
+    The integration branch.  All seven series-level commits live here,
+    rebased onto \texttt{master} at each Linus pull.
+  \item[\texttt{fixes}]
+    Hotfixes that will be cherry-picked into \texttt{next} and submitted
+    independently.
+  \item[\texttt{umlctl-deploy}]
+    Deployment-tested snapshots of \texttt{tools/uml/uml-launcher/}
+    for operators who need a stable \texttt{umlctl} without tracking
+    the kernel tree.
+\end{description}
+
+\noindent
+The development history comprises roughly 1,236 development commits,
+compressed during rebase into seven clean series-level commits on
+\texttt{next}.  Each series is independently reviewable and
+bisectable.  The total diff against \texttt{torvalds/master} spans
+approximately 248,000 insertions across 1,005 files, of which roughly
+134,500 lines are documentation, 54,000 are tooling and selftests,
+33,400 are the \KVMvTwo{} backend, and 25,900 are the backend-ops
+abstraction and core infrastructure.
+
+
+\section{Design Goals}
+\label{sec:v2-goals}
+
+The redesign is driven by seven concrete, measurable goals drawn from
+the project vision document:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Near-native syscall overhead on the \KVM{} backend.}
+    The target is approximately \SI{100}{\nano\second} per guest syscall
+    when the host exposes \texttt{/dev/kvm}.  The achieved result is
+    approximately 90~cycles ($\sim$\SI{25}{\nano\second} on modern
+    hardware) for LSTAR-gadget-covered syscalls---exceeding the
+    original goal by roughly $4\times$.
+
+  \item \textbf{Full kernel instrumentation.}
+    KASAN, KMSAN, KCSAN, KFENCE, KCOV, kprobes, ftrace, and BPF JIT
+    must all be composable from a single tree.  Instrumentation is
+    controlled by Kconfig profiles and static keys, not by separate
+    builds or out-of-tree patches.
+
+  \item \textbf{Deterministic time-travel and record/replay.}
+    The record/replay infrastructure captures non-deterministic events
+    (SYSCALL exits, RDTSC results, SIGALRM deliveries) during
+    execution and replays them faithfully.  The time-travel profile
+    provides deterministic clock semantics.
+
+  \item \textbf{Snapshot/forkserver startup under \SI{50}{\milli\second}.}
+    The achieved result is \SI{38.9}{\micro\second} capture and
+    \SI{13}{\micro\second} median restore---roughly $1{,}300\times$
+    and $75\times$ faster than the original targets, respectively.
+
+  \item \textbf{Three explicit profiles with inverted defaults.}
+    Research, fuzz, and sandbox profiles ship with different backend
+    selections, different instrumentation, and different host attack
+    surface.  The profile system spans nine named configurations
+    (Table~\ref{tab:v2-profiles}), each built from the same tree
+    with a single \texttt{make ARCH=um O=\ldots} invocation.
+
+  \item \textbf{Runtime-flippable hooks.}
+    Static keys (\texttt{DECLARE\_STATIC\_KEY\_FALSE}) gate
+    instrumentation hooks at the binary level.  A
+    \texttt{prod-with-hooks} build compiles all hook sites but
+    patches them to NOPs at boot; a debugfs write or a crash handler
+    can enable them without rebuilding.
+
+  \item \textbf{Backend abstraction with swappable trap mechanisms.}
+    \texttt{struct um\_backend\_ops} defines a contract for backend
+    lifecycle, guest process creation, syscall interception, context
+    switching, and memory mapping.  The ptrace, seccomp, and \KVMvTwo{}
+    backends implement this interface.  New backends can be added
+    without modifying core \UML{} code.
+\end{enumerate}
+
+\begin{table}[ht]
+\centering
+\caption{Profile matrix: nine named configurations from one tree.}
+\label{tab:v2-profiles}
+\small
+\begin{tabularx}{\linewidth}{@{}p{0.16\linewidth}p{0.16\linewidth}p{0.20\linewidth}p{0.14\linewidth}Y@{}}
+\toprule
+Profile & Backend & Hooks & Sanitizers & Purpose \\
+\midrule
+\texttt{prod-fast}       & KVM $>$ seccomp & none            & none          & Minimum overhead \\
+\texttt{prod-with-hooks} & KVM $>$ seccomp & compiled, off   & none          & Post-failure observability \\
+\texttt{research}        & seccomp         & trace, kprobes  & KASAN, UBSAN  & Debug and exploit reproduction \\
+\texttt{fuzz}            & seccomp         & KCOV, snapshot  & KASAN         & syzkaller integration \\
+\texttt{fuzz-deep}       & seccomp         & KCOV, snap, replay & KASAN, KCSAN & Race and replay investigations \\
+\texttt{sandbox}         & seccomp-only    & none compiled   & none          & Minimized TCB \\
+\texttt{library}         & direct call     & n/a             & opt.\ KASAN   & LKL-style harness \\
+\texttt{embedded}        & ptrace          & none            & none          & Old-host fallback \\
+\texttt{time-travel}     & seccomp         & trace, TT       & KASAN         & Deterministic clock / replay \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+\section{What We Are Not Building}
+\label{sec:v2-nongoals}
+
+The design boundary is explicit.  The v2 redesign is not:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[A kernel reimplementation (gVisor).]
+    gVisor's Sentry~\cite{gvisor} reimplements the Linux syscall
+    interface in Go.  \UML{} \emph{is} the Linux kernel.  Every
+    scheduler decision, every lock acquisition, every VFS path follows
+    the same code as a kernel running on x86 hardware.
+
+  \item[A unikernel (Unikraft, MirageOS).]
+    Unikernels~\cite{kuenzer2021,madhavapeddy2013} compile application
+    and kernel into a single-address-space image, sacrificing process
+    isolation for boot speed.  \UML{} maintains genuine user/kernel
+    separation.
+
+  \item[A microVM (Firecracker, Cloud Hypervisor).]
+    Firecracker~\cite{agache2020} and Cloud Hypervisor~\cite{cloud-hypervisor}
+    are minimal VMMs optimized for serverless cold-start.  \UML{}'s
+    value proposition is kernel research and debugging fidelity, not
+    cloud packaging.
+
+  \item[A container runtime.]
+    Containers share the host kernel.  \UML{} runs its own kernel,
+    with its own scheduler, its own VFS, and its own memory management.
+    A bug in a container's workload can exploit the host kernel; a bug
+    in a \UML{} guest's workload can only exploit the \UML{} kernel.
+
+  \item[A hypervisor.]
+    \UML{} is a guest, not a host.  It does not manage hardware, does
+    not provide a VMM API, and does not schedule other virtual machines.
+    When \UML{} uses \KVM{}, it is a \KVM{} \emph{consumer}, not a
+    \KVM{} replacement.
+\end{description}
+
+\noindent
+The clearest way to state the design intent: \UML{} is the full Linux
+kernel, running in userspace, with pluggable trap mechanisms and
+composable instrumentation.  Nothing more, nothing less.
+
+
+\section{The Series Breakdown}
+\label{sec:v2-series}
+
+The seven series-level commits are organized by subsystem scope,
+review audience, and dependency order.  Table~\ref{tab:v2-series}
+summarizes the series; the subsections below provide detail.
+
+\begin{table}[ht]
+\centering
+\caption{Seven series-level commits on \texttt{torvalds/master}.}
+\label{tab:v2-series}
+\small
+\begin{tabularx}{\linewidth}{@{}r p{0.30\linewidth} r r Y@{}}
+\toprule
+\# & Series & Files & Insertions & Subsystem \\
+\midrule
+1 & BPF JIT stub + x86 hygiene         &   2 &     123 & BPF \\
+2 & KMSAN early-shadow callback         &   2 &      43 & mm/kmsan \\
+3 & notrace on kthread/smpboot          &   2 &      31 & tracing/ftrace \\
+4 & Backend ops abstraction (RFC)       & 165 &  25,869 & arch/um \\
+5 & \KVMvTwo{} backend                  &  52 &  33,374 & arch/um + KVM \\
+6 & \texttt{umlctl} + kselftests        & 364 &  54,000 & tools/ \\
+7 & Documentation                       & 420 & 134,539 & Documentation/ \\
+\midrule
+  & \textbf{Total}                      & \textbf{1,005} & \textbf{247,979} & \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+
+\subsection{Series 1: BPF JIT Stub and x86 Hygiene}
+\label{sec:v2-series1}
+
+\textbf{Commit:} \texttt{c1084ea01e06} ---
+\texttt{um: bpf: add JIT stub and x86 hygiene for UML}
+
+Two files changed, 123 insertions.  This series adds
+\texttt{arch/um} BPF JIT stubs and fixes x86 BPF JIT compilation
+under \UML{}, where direct code generation targets the host's JIT
+engine.  The change is small, self-contained, and reviewable by the
+BPF maintainers independently of any \UML{} redesign.
+
+
+\subsection{Series 2: KMSAN Early-Shadow Callback}
+\label{sec:v2-series2}
+
+\textbf{Commit:} \texttt{be9dbd18e75e} ---
+\texttt{mm/kmsan: add arch early-shadow callback for UML physmem layout}
+
+Two files changed, 43 insertions.  \UML{}'s physical memory
+(\texttt{physmem}) is a single contiguous \syscall{mmap} region, not
+the standard \texttt{pfn-to-page} layout that KMSAN's generic
+initialization expects.  This series adds an architecture callback in
+\texttt{kmsan\_init\_shadow()} so \UML{} can provide its
+shadow/origin mappings from its own address space.  The change touches
+\texttt{mm/kmsan/} and is reviewable by the KMSAN maintainer
+independently.
+
+
+\subsection{Series 3: notrace on Signal-Adjacent Thread Functions}
+\label{sec:v2-series3}
+
+\textbf{Commit:} \texttt{8301623cf952} ---
+\texttt{kthread/smpboot: add notrace to signal-adjacent thread functions}
+
+Two files changed, 31 insertions.  Under
+\texttt{-fpatchable-function-entry} (used by ftrace on architectures
+including \UML{}), \texttt{kthread()} and \texttt{smpboot\_thread\_fn()}
+are instrumented, but they run in contexts where the ftrace trampoline
+may not be safe (signal delivery, early boot).  The \texttt{notrace}
+annotation is a generic improvement that benefits any architecture
+with patchable function entry, not only \UML{}.
+
+
+\subsection{Series 4: Backend Ops Abstraction (Tentpole RFC)}
+\label{sec:v2-series4}
+
+\textbf{Commit:} \texttt{86b74b8993d0} ---
+\texttt{um: backend ops abstraction + SMP + TLB sync + infrastructure}
+
+This is the tentpole series: 165 files changed, 25,869 insertions,
+approximately 932 deletions.  It introduces the core architectural
+change that the rest of the redesign depends on.
+
+\paragraph{struct um\_backend\_ops.}
+A typed dispatch table with operations for backend lifecycle (init,
+cleanup), guest process management (create, fork, exec, exit),
+syscall interception (trap, return), context switching, and memory
+mapping.  The existing ptrace and seccomp code paths are refactored
+through this table.
+
+\paragraph{SMP support.}
+Virtual CPUs are mapped to host threads with per-CPU dispatch.
+Inter-processor interrupt (IPI) emulation uses \texttt{eventfd} on
+the host.  TLB synchronization is rewritten with a deferred-free
+mechanism, \texttt{sync\_tlb\_range} pattern, and
+\texttt{page\_table\_lock} integration.
+
+\paragraph{PTE rework.}
+PTE bits are realigned to x86 hardware paging format, enabling a
+single-store \texttt{set\_pte} that eliminates the TDP walker race
+present in the old multi-store sequence.  The \texttt{pte\_read}/\texttt{pte\_exec}
+fix (adopted upstream as \texttt{cd4126d48f7f}) is included.
+
+\paragraph{Infrastructure.}
+Additional components include hostfs io\_uring writeback substrate,
+section-split infrastructure for \texttt{.text.frozen},
+snapshot/forkserver worker lifecycle management, deferred TLB batch
+for \texttt{mm/mmu\_gather.c}, per-CPU RSS drift correction for
+\texttt{mm/mmap.c}, and a CFS worker-detach helper in
+\texttt{kernel/sched/core.c}.
+
+
+\subsection{Series 5: KVM v2 Backend}
+\label{sec:v2-series5}
+
+\textbf{Commit:} \texttt{12b19d012f9f} ---
+\texttt{um: kvm-v2: add KVM-based backend for User-Mode Linux}
+
+52 files changed, 33,374 insertions.  This series adds the complete
+\KVM{}-based execution backend.  The guest runs inside a \KVM{} VM
+with EPT/VT-x, replacing the ptrace/seccomp signal-mediated syscall
+path with \texttt{VMRESUME}/\texttt{VMEXIT}.
+
+Key components of \umlpath{arch/um/backend/kvm-v2/}:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[\texttt{vcpu.c}] Per-vCPU lifecycle, \texttt{KVM\_RUN}
+    dispatch loop, SREGS synchronization.
+  \item[\texttt{syscall\_trap.c}] IDT exception dispatch covering all
+    x86 vectors (\#DE, \#DB, \#BP, \#OF, \#UD, \#NM, \#DF, \#TS,
+    \#NP, \#SS, \#GP, \#PF, \#MF, \#AC, \#XM).
+  \item[\texttt{exception.c}] IDT/GDT/TSS/handler page setup.
+  \item[\texttt{context.c}] VM lifecycle and physmem memslot management.
+  \item[\texttt{lstar\_gadget.S}] In-guest \texttt{SYSCALL} trampoline
+    that handles fast-path syscalls without a \texttt{VMEXIT},
+    achieving $\sim$90-cycle latency.
+  \item[\texttt{snapshot.c}] KVM-aware snapshot with capture/restore
+    for regs, sregs, and memslot state.
+  \item[\texttt{record.c}] Record/replay state machine with static-key
+    hot-path gating.
+  \item[\texttt{test\_snapshot.c}, \texttt{test\_record.c}] KUnit test
+    suites (3/3 and 7/7 cases, respectively).
+\end{description}
+
+\noindent
+The series also preserves the v1 \KVM{} backend as
+\umlpath{arch/um/backend/kvm-v1-archive/} for reference, and includes
+contract tests in \umlpath{arch/um/backend/contract/}.
+
+
+\subsection{Series 6: umlctl and Kselftests}
+\label{sec:v2-series6}
+
+\textbf{Commit:} \texttt{dba578471251} ---
+\texttt{um: add umlctl launcher tool + kselftests}
+
+364 files changed, 54,000 insertions.  This series adds two major
+components.
+
+\paragraph{umlctl (\umlpath{tools/uml/uml-launcher/}).}
+A Rust CLI for managing \UML{} instances: create, start, stop,
+\texttt{ps}, logs, metrics, and \texttt{up} (declarative deployment
+from TOML Umlfiles).  The crate comprises 65 Rust source files
+totaling approximately 22,000 lines, plus profiles, examples, and
+scripts.  Key subcommands include:
+
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{umlctl mission} --- Six-phase acceptance gate with
+    JSON scoreboard and binary verdict ($\sim$15 minutes wall-clock).
+  \item \texttt{umlctl up} --- Declarative instance launch from TOML.
+  \item \texttt{umlctl build} --- Kernel build with profile selection.
+  \item Cgroup v2 per-instance subgroup management and preflight
+    resource verification.
+\end{itemize}
+
+\paragraph{kselftests (\umlpath{tools/testing/selftests/um/}).}
+53 test suites spanning 316 files.  Categories include:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Substrate parity:} \texttt{cpython-parity},
+    \texttt{cpython-tier0}, \texttt{cpython-full}.
+  \item \textbf{Backend tests:} \texttt{kvm-smoke},
+    \texttt{kvm-isolation}, \texttt{kvm-bounds}, \texttt{kvm-mm-smoke}.
+  \item \textbf{Snapshot/replay:} \texttt{snapshot-smoke},
+    \texttt{snapshot-kvm-smoke}, \texttt{kvm-record-smoke},
+    \texttt{kvm-snapshot-bench}, \texttt{kvm-record-clock-bench}.
+  \item \textbf{SMP stress:} \texttt{mt-mmap-stress},
+    \texttt{fork-tree-3level}, \texttt{template-pause-*}.
+  \item \textbf{Performance:} \texttt{bench}, \texttt{perf-getpid},
+    \texttt{perf-py-startup}, \texttt{pool-bench}, \texttt{net-bench}.
+  \item \textbf{Instrumentation:} \texttt{ftrace-smoke},
+    \texttt{kmsan-smoke}, \texttt{kprobes-stress}, \texttt{hooks-flip}.
+  \item \textbf{Soak:} 11 TOML-templated workloads for sustained
+    validation (memcheck, iocheck, stress-ng, tier1-pylibs,
+    django-loopback, and more).
+\end{itemize}
+
+
+\subsection{Series 7: Documentation}
+\label{sec:v2-series7}
+
+\textbf{Commit:} \texttt{f8d5d3df25a8} ---
+\texttt{Documentation/virt/uml: add comprehensive UML documentation}
+
+420 files changed, 134,539 insertions.  This series adds operator
+documentation for all \UML{} subsystems (backends, kprobes, ftrace,
+KMSAN, debugfs, snapshot/ELF-core, section-split, profiles), the
+complete redesign planning tree (vision, architecture, workstreams,
+sequencing, decisions log, risk register), the upstream submission
+queue with per-series submission notes, and CI workflows for
+checkpatch, \KVM{} probe, uml-launcher build, and profile boot
+validation.
+
+
+\section{Validation Methodology}
+\label{sec:v2-validation}
+
+The v2 redesign is validated through a multi-tier methodology that
+progresses from unit tests through full-workload soak runs.  The
+design principle is that each tier must pass before the next is
+attempted, and the entire ladder is automated through
+\texttt{umlctl mission}.
+
+\subsection{The Validation Ladder}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Tooling builds.}  The Rust \texttt{umlctl} crate and
+    all selftests compile cleanly.
+
+  \item \textbf{Kernel builds.}  Every named profile compiles and
+    links under \texttt{make ARCH=um O=\ldots}.
+
+  \item \textbf{Internal contracts.}  KUnit suites pass: snapshot 3/3,
+    record/replay 7/7, marshal/byte-shape checks.
+
+  \item \textbf{Substrate parity gate.}  The CPython test suite runs
+    on both backends with identical results: PASS=25, FAIL=3, XFAIL=3.
+    The 21 modules in the cpython-parity gate pass identically on
+    \KVMvTwo{} and seccomp, confirming functional equivalence.
+
+  \item \textbf{Process and syscall classes.}  Dedicated selftests
+    exercise fork, exec, mmap, signals, dynamic loader, and
+    \texttt{rt\_sigreturn} isolation.
+
+  \item \textbf{Performance gates.}  Micro (getpid-loop),
+    application (Python startup), and stress (mt-mini SMP T=8 ncpus=4)
+    tiers, plus snapshot benchmark (capture \SI{38.9}{\micro\second},
+    restore \SI{13}{\micro\second}).
+
+  \item \textbf{Real workload boot.}  Python and stress workloads
+    complete successfully on both backends.
+
+  \item \textbf{\texttt{umlctl mission} acceptance gate.}
+    Six phases, $\sim$15 minutes wall-clock, 100/100 soak iterations,
+    binary PASS/FAIL verdict with JSON scoreboard.
+
+  \item \textbf{24-hour long-tail soak.}  The remaining wall-clock
+    evidence for milestone candidates.
+\end{enumerate}
+
+\subsection{The \texttt{umlctl mission} Gate}
+
+The \texttt{umlctl mission} command is the canonical acceptance
+artifact.  A single invocation runs six fail-fast phases:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{KUnit} ($\sim$5\,s) --- 10/10 cases PASS (snapshot 3 +
+    record 7).
+  \item \textbf{Bench} ($\sim$3\,s) --- Capture \SI{35}{\micro\second},
+    median restore \SI{13}{\micro\second}.
+  \item \textbf{Substrate} ($\sim$4\,s) --- cpython-tier0 PASS.
+  \item \textbf{Host resources} ($\sim$1\,s) --- Environment knobs applied.
+  \item \textbf{Diverse soak} ($\sim$14\,min) --- 100/100 PASS across
+    memcheck, iocheck, stress-ng, tier1-pylibs, and
+    django-loopback; zero panics, zero SIGBUS, zero high-cr2.
+  \item \textbf{Diagnostic} ($<$1\,s) --- Kernel SHA, host metadata,
+    hugepage pool sizing, cgroup v2 state captured.
+\end{enumerate}
+
+\noindent
+Any single regression in any phase produces
+\texttt{MISSION\_FAILED phase=\textit{N}} on stderr and a non-zero
+exit.  The gate explicitly fails on panics, ``Kernel mode signal~7''
+(\texttt{/dev/shm} exhaustion), and ``high-cr2'' (the residual
+user-fault class).
+
+\subsection{Third-Party and Real-World Tests}
+
+Beyond the in-tree selftests, the validation methodology includes:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Tier 1 Python libraries:} NumPy, requests, Flask,
+    SQLAlchemy, and other commonly-used packages exercised during soak.
+  \item \textbf{Django loopback:} A Django test server with HTTP
+    request/response validation.
+  \item \textbf{LTP (Linux Test Project):} Curated subset with
+    \UML{}-appropriate runner refinements (in progress).
+  \item \textbf{stress-ng:} CPU, memory, and I/O stress patterns.
+\end{itemize}
+
+
+\section{The CPython Bug Discovery}
+\label{sec:v2-cpython-bug}
+
+During substrate parity validation, \UML{} uncovered a latent bug in
+CPython 3.14's \texttt{Py\_FinalizeEx} teardown sequence.  The bug
+manifested as a segmentation fault during interpreter shutdown, caused
+by a race condition in \texttt{\_Py\_Dealloc} where the thread state
+(\texttt{tstate}) pointer is NULL-dereferenced after
+\texttt{PyStdPrinter\_Type}'s deallocation hook runs.
+
+On hardware and under conventional hypervisors, the race is nearly
+invisible: the timing window is too narrow to hit reliably.  \UML{}'s
+slower execution---particularly under the seccomp backend---widens
+the window enough that the race triggers reproducibly.  The \KVMvTwo{}
+backend, being faster, hits it less frequently but still observably.
+
+\paragraph{The fix.}
+Commit \texttt{40203d69dff1} adds a five-condition intercept in
+\umlpath{arch/um/kernel/trap.c::segv()} that detects the specific
+\texttt{tstate}-NULL dereference pattern during \texttt{Py\_FinalizeEx}
+and converts it to a clean \texttt{exit(1)} instead of a kernel
+panic.  The fix was validated with zero SEGV occurrences per run on
+both backends.
+
+\paragraph{The broader lesson.}
+This discovery demonstrates a category of value that no other
+virtualization technology provides.  Hardware runs too fast to expose
+the race.  Containers share the host kernel and cannot alter execution
+timing.  gVisor reimplements the syscall layer and may not reproduce
+the same ordering.  Only \UML{}---the real kernel, running at
+controllable speed, with full debugging---can simultaneously reproduce
+the bug, diagnose the root cause, and validate the fix.  It is
+precisely the kernel-fidelity-plus-debuggability combination that
+justifies \UML{}'s continued existence.
+
+
+\section{Upstream Submission Plan}
+\label{sec:v2-upstream}
+
+The upstream strategy is deliberately staged to minimize review burden
+and maximize the probability of acceptance.
+
+\subsection{Phase 1: Independent Subsystem Patches (Series 1--3)}
+
+Series 1 (BPF JIT stub), Series 2 (KMSAN early-shadow), and
+Series 3 (notrace on kthread/smpboot) are small, self-contained
+patches that touch code outside \umlpath{arch/um/}.  They are
+reviewable by the respective subsystem maintainers (BPF, mm/kmsan,
+tracing/ftrace) without requiring any understanding of the \UML{}
+redesign.  These are submitted first to establish a track record and
+to get the cross-subsystem prerequisites in place.
+
+\subsection{Phase 2: The Tentpole RFC (Series 4)}
+
+Series 4, the backend-ops abstraction, is the architectural
+centerpiece.  It refactors existing code through a new interface
+without changing observable behavior for existing backends.  The RFC
+submission is accompanied by a detailed cover letter explaining:
+
+\begin{itemize}[leftmargin=2em]
+  \item Why the abstraction is needed (multiple backends already exist;
+    making the contract explicit is a cleanup).
+  \item What the interface looks like (\texttt{struct um\_backend\_ops}).
+  \item How existing backends are migrated (ptrace and seccomp
+    refactored through the ops table).
+  \item What the abstraction enables (the \KVMvTwo{} backend, future
+    backends).
+\end{itemize}
+
+\noindent
+This is the series that must land before anything else can follow.
+
+\subsection{Phase 3: KVM Backend and Tooling (Series 5--7)}
+
+Series 5 (the \KVMvTwo{} backend), Series 6 (\texttt{umlctl} and
+kselftests), and Series 7 (documentation) depend on Series 4.  They
+are submitted after the backend-ops abstraction is accepted or has
+received sufficient positive review signal.  The cover letter for
+Series 5 includes the complete benchmark data
+(Appendix~\ref{app:benchmarks}), the \texttt{umlctl mission}
+acceptance gate results, and instructions for reviewers to reproduce
+the validation locally.
+
+\subsection{The LKML Strategy}
+
+The submission targets the \texttt{linux-um} mailing list with
+CC to relevant subsystem maintainers.  Key considerations:
+
+\begin{itemize}[leftmargin=2em]
+  \item AI-assisted development is disclosed per the kernel's
+    \texttt{coding-assistants.html} policy~\cite{coding-assistants}.
+  \item Each series carries a \texttt{Signed-off-by} from the human
+    author and a \texttt{Co-authored-by} from the AI tool.
+  \item The submission queue document
+    (\umlpath{upstream-patches/SUBMISSION-QUEUE.md}) tracks the
+    status of each series.
+\end{itemize}
+
+
+\section{Lessons Learned}
+\label{sec:v2-lessons}
+
+Several lessons emerged from the development process that may be
+useful to future large-scale kernel rearchitecture efforts.
+
+\paragraph{1. The backend contract must be explicit and tested.}
+The single most valuable architectural decision was defining
+\texttt{struct um\_backend\_ops} early and writing contract tests
+(\umlpath{arch/um/backend/contract/}) that verify each backend
+against the same behavioral specification.  Every subsequent bug
+was diagnosed faster because the contract narrowed the search space.
+
+\paragraph{2. Substrate parity is the right acceptance criterion.}
+Using CPython's test suite as the primary acceptance criterion---rather
+than microbenchmarks or unit tests alone---caught bugs that no
+synthetic test would have found.  The CPython teardown race
+(Section~\ref{sec:v2-cpython-bug}) is the most dramatic example, but
+subtler issues in signal delivery, mmap semantics, and dynamic loader
+behavior were also caught by substrate parity testing.
+
+\paragraph{3. State audits prevent regression spirals.}
+The v1 \KVM{} backend was retired because of accumulated state
+ownership confusion between the \UML{} kernel and the \KVM{} host.
+The v2 design was informed by a formal state audit
+(\umlpath{02-workstreams/D-kvm-backend/state-audit/}) that mapped
+every piece of shared state, its owner, its synchronization mechanism,
+and its failure mode.  This audit prevented the same class of bugs
+from recurring.
+
+\paragraph{4. The investigation discipline pays for itself.}
+The project memory records a discipline: ``run the cheapest
+dispositive control FIRST; never declare `architectural' or ship
+userspace workarounds without it.''  Every time this discipline was
+followed, it saved hours.  Every time it was violated (the pool
+physmem isolation episode, the SIGALRM/mmap-FIXED deadlock), it cost
+days.
+
+\paragraph{5. Compress early, compress often.}
+The 1,236 development commits exist because iterative development
+requires iterative commits.  But for upstream submission, only the
+logical decomposition matters.  The rebase from 1,236 commits to 7
+series was done once, at the end, when the design was stable.
+Attempting to maintain a clean commit history during active
+development would have been a net drag on velocity.

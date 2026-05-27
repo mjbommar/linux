@@ -1,0 +1,1261 @@
+% ==========================================================================
+%  Chapter 6 — The KVM v2 Backend
+% ==========================================================================
+\chapter{The KVM v2 Backend}
+\label{ch:kvm}
+
+\epigraph{%
+  The fastest system call is the one that never leaves the guest.%
+}{Design principle, LSTAR gadget}
+
+The \KVMvTwo{} backend is the crown jewel of the v2 redesign.  Where the
+\Seccomp{} backend interposes on guest system calls through a host-kernel
+signal delivery path---\texttt{SIGSYS} generation, futex round-trip, handler
+dispatch---the \KVMvTwo{} backend uses hardware virtualization extensions to
+run guest code in VMX non-root mode and intercepts system calls through a
+purpose-built trampoline that converts the x86 \texttt{SYSCALL} instruction
+into a KVM VM exit.  The result is a per-syscall overhead reduction of three
+orders of magnitude for trivial calls and a $3$--$4\times$ end-to-end
+improvement for real-world workloads.
+
+This chapter describes the architecture, trap path, exception handling,
+vCPU pool design, SMP challenges, snapshot/record-replay support, and
+measured performance of the \KVMvTwo{} backend.
+
+
+% ------------------------------------------------------------------
+\section{Motivation}
+\label{sec:kvm-motivation}
+% ------------------------------------------------------------------
+
+The \Seccomp{} backend (Chapter~5) was a major advance over \texttt{ptrace},
+reducing per-syscall overhead from approximately \SI{3}{\micro\second} to
+roughly \SI{300}{\nano\second}.  Yet this overhead is fundamentally bounded
+by the mechanics of the interposition path:
+
+\begin{enumerate}[leftmargin=2em]
+  \item The guest process executes a \texttt{syscall} instruction.
+  \item The host kernel's seccomp filter fires, generating a \texttt{SIGSYS}
+        signal.
+  \item The \texttt{SIGSYS} handler copies register state into a shared
+        \texttt{stub\_data} page and issues a futex wake to the \UML{} kernel
+        thread.
+  \item The \UML{} kernel thread futex-waits, wakes, reads the register state,
+        dispatches the system call, writes the result back to
+        \texttt{stub\_data}, and futex-wakes the guest stub.
+  \item The guest stub futex-waits, wakes, restores registers from
+        \texttt{stub\_data}, and returns to the guest.
+\end{enumerate}
+
+Each step involves a host kernel entry/exit, signal delivery, or futex
+operation.  The aggregate cost---two kernel entries for signal delivery, two
+futex round-trips, plus the seccomp filter evaluation---places a floor of
+approximately \SI{300}{\nano\second} on every guest system call, regardless
+of how trivial the call itself might be.
+
+The \KVM{} approach replaces this entire chain with a single mechanism: the
+VM exit.  When a guest running in VMX non-root mode executes an instruction
+that causes a VM exit (an I/O port access, in our design), the CPU
+transitions directly from guest mode to host mode in a single hardware
+operation.  On modern hardware, a \texttt{VMRUN}\,/\,\texttt{VMEXIT} cycle
+costs approximately \SIrange{150}{200}{\nano\second} for a minimal exit and
+re-entry~\cite{kivity2007, intel-sdm}.  With hardware improvements in each
+CPU generation---Intel's recent FRED (Flexible Return and Event Delivery)
+and AMD's VMCB Clean Bits optimizations---this number continues to
+decrease.
+
+For syscall-heavy workloads---Python startup (thousands of \texttt{mmap},
+\texttt{mprotect}, \texttt{read}, and \texttt{stat} calls), web server
+request handling, build systems---the per-syscall overhead dominates
+end-to-end latency.  A backend that reduces this overhead by $3\times$ or
+more translates directly into faster boot, faster test cycles, and faster
+fuzzing throughput.
+
+Google's gVisor project provided the conceptual proof that this approach
+works at scale~\cite{gvisor-platforms}.  gVisor's \KVM{} platform runs
+application code in VMX non-root mode and intercepts system calls through
+hypercalls (\texttt{VMCALL} / \texttt{VMMCALL}).  The \UML{} \KVMvTwo{}
+backend applies the same principle but with a critical difference: gVisor
+reimplements the Linux syscall ABI in Go, while \UML{} \emph{is} the Linux
+kernel.  The fidelity guarantee is absolute.
+
+
+% ------------------------------------------------------------------
+\section{Architecture Overview}
+\label{sec:kvm-arch}
+% ------------------------------------------------------------------
+
+The \KVMvTwo{} backend operates as a regular unprivileged process that
+opens \umlpath{/dev/kvm} and uses the \KVM{} API~\cite{kvm-api} to create
+a virtual machine, configure vCPUs, and run guest code.  No kernel modules
+are loaded; no root privileges are required beyond read-write access to
+\umlpath{/dev/kvm}.  The architecture is organized around four
+initialization phases:
+
+\begin{description}[style=nextline,leftmargin=2em]
+  \item[Phase A: VM creation.]
+    Open \umlpath{/dev/kvm}, negotiate required capabilities
+    (\texttt{KVM\_CAP\_SYNC\_REGS}, \texttt{KVM\_CAP\_SET\_GUEST\_DEBUG}),
+    issue \texttt{KVM\_CREATE\_VM} to obtain a VM file descriptor, and probe
+    the API version (\texttt{KVM\_API\_VERSION = 12}).
+
+  \item[Phase B: Memory layout.]
+    Map guest physical memory using \texttt{KVM\_SET\_USER\_MEMORY\_REGION}.
+    A single identity-offset memslot covers \texttt{[0, physmem\_size)} at
+    host VA \texttt{uml\_physmem}, giving the guest direct access to \UML{}'s
+    physical memory pool.  Additional per-region memslots are registered as
+    the \UML{} memory arbiter surfaces address ranges.
+
+  \item[Phase C: vCPU pool.]
+    Create one \KVM{} vCPU per host CPU (\texttt{nr\_cpu\_ids} vCPUs via
+    \texttt{KVM\_CREATE\_VCPU}).  Each vCPU gets a \texttt{kvm\_run}
+    shared-memory mapping (\texttt{mmap} of the vCPU fd), CPUID installed
+    (\texttt{KVM\_SET\_CPUID2} with a curated mask), MSRs programmed
+    (\texttt{LSTAR}, \texttt{STAR}, \texttt{FMASK},
+    \texttt{KERNEL\_GS\_BASE}), production SREGS
+    (\texttt{CR0}/\texttt{CR4}/\texttt{EFER} for 64-bit long mode), and a
+    signal mask (\texttt{KVM\_SET\_SIGNAL\_MASK} allowing only
+    \texttt{SIGALRM} and the IPI signal).
+
+  \item[Phase D--E: Trap infrastructure.]
+    Allocate and populate the LSTAR trampoline page, install the
+    kernel-half page table chain at PML4[448], build the IDT/GDT/TSS
+    structures, allocate per-vCPU IST stacks and gadget state pages, and
+    flip the \texttt{.vcpu\_run} ops pointer from \Seccomp{} to \KVMvTwo{}.
+\end{description}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    box/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=4.5cm,
+      minimum height=1.1cm,
+      rounded corners=3pt,
+      font=\small,
+      align=center
+    },
+    arr/.style={
+      -{Stealth[length=5pt]},
+      thick,
+      color=UMLMuted
+    },
+    note/.style={
+      font=\scriptsize\itshape,
+      text=UMLMuted
+    }
+  ]
+
+  % Host kernel
+  \node[box=UMLBlue!8] (host) at (0,-0.5)
+    {\textbf{Host Kernel}\\{\scriptsize KVM module, /dev/kvm}};
+
+  % UML process
+  \node[box=UMLTeal!8] (uml) at (0,1.5)
+    {\textbf{UML Kernel Process}\\{\scriptsize Backend dispatch, vcpu\_run}};
+
+  % KVM VM
+  \node[box=UMLGreen!8] (kvm) at (-3.5,3.5)
+    {\textbf{KVM VM}\\{\scriptsize vm\_fd, memslots}};
+
+  % vCPU pool
+  \node[box=KernelGold!8] (vcpu0) at (0.5,3.5)
+    {\textbf{vCPU 0}\\{\scriptsize kvm\_run mmap}};
+  \node[box=KernelGold!8] (vcpu1) at (3.8,3.5)
+    {\textbf{vCPU 1}\\{\scriptsize kvm\_run mmap}};
+  \node[note] at (6.0,3.5) {$\cdots$};
+
+  % Guest userspace
+  \node[box=UMLRed!8] (guest) at (0.5,5.5)
+    {\textbf{Guest Userspace}\\{\scriptsize CPL=3, VMX non-root}};
+
+  % Arrows
+  \draw[arr] (uml) -- (host)
+    node[midway,right,note] {KVM\_RUN ioctl};
+  \draw[arr] (kvm.south) -- (uml.north west)
+    node[midway,left,note] {VM state};
+  \draw[arr] (uml.north) -- (vcpu0.south)
+    node[midway,right,note] {dispatch};
+  \draw[arr] (uml.north east) -- (vcpu1.south west)
+    node[midway,right,note] {};
+  \draw[arr] (vcpu0.north) -- (guest.south)
+    node[midway,right,note] {VMENTRY};
+  \draw[arr,dashed] (guest.south west) -- (vcpu0.north west)
+    node[midway,left,note] {VMEXIT};
+
+  % Memslot
+  \draw[arr,dotted,UMLAmber] (kvm.east) -- (vcpu0.west)
+    node[midway,above,note,text=UMLAmber] {memslots};
+\end{tikzpicture}
+\caption[KVM v2 architecture overview]{%
+  High-level architecture of the \KVMvTwo{} backend.  The \UML{} kernel
+  process opens \umlpath{/dev/kvm}, creates a single VM with one or more
+  memslots, and creates a pool of vCPUs.  Guest userspace runs at CPL=3 in
+  VMX non-root mode; system calls cause VM exits that return control to
+  the \UML{} kernel's dispatch loop.
+}
+\label{fig:kvm-arch-overview}
+\end{figure}
+
+The guest runs at CPL=3 (ring 3) in VMX non-root mode from the very first
+\texttt{KVM\_RUN}.  This is a deliberate design choice: earlier iterations
+started at CPL=0 and relied on the first \texttt{SYSCALL}$\to$\texttt{SYSRETQ}
+round-trip to drop to CPL=3, but this left a window where guest user code
+ran with kernel privilege---catastrophic for \texttt{fork}'s child process
+which executes glibc post-fork bookkeeping before any system call.  The
+production SREGS install sets user-mode CS (selector \texttt{0x2b}, DPL=3) and
+user-mode SS (selector \texttt{0x23}, DPL=3) so the guest enters CPL=3
+immediately.
+
+
+% ------------------------------------------------------------------
+\section{The Trap Path}
+\label{sec:kvm-trap-path}
+% ------------------------------------------------------------------
+
+The core of the \KVMvTwo{} backend is the trap path: the sequence of events
+from a guest \texttt{SYSCALL} instruction to the \UML{} kernel's dispatch
+and back.  This path replaces the \Seccomp{} backend's
+\texttt{SIGSYS}\,+\,futex chain with a hardware-mediated VM exit.
+
+\subsection{Step-by-step walk-through}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Guest userspace at CPL=3 executes \texttt{SYSCALL}.}
+    The guest application (e.g., \texttt{/bin/ls}) invokes a system call via
+    the standard \texttt{syscall} instruction.  The CPU saves the return
+    address in \texttt{RCX} and the user \texttt{RFLAGS} in \texttt{R11},
+    clears \texttt{RFLAGS} bits per \texttt{MSR\_SYSCALL\_MASK} (= \texttt{0x47700}:
+    TF, IF, DF, IOPL, NT, AC), and loads \texttt{RIP} from
+    \texttt{MSR\_LSTAR}.
+
+  \item \textbf{CPU transitions to CPL=0 via MSR\_LSTAR.}
+    \texttt{MSR\_LSTAR} is programmed to \texttt{KVM\_V2\_LSTAR\_GVA} =
+    \texttt{0xffffe00000000040}, a kernel-half virtual address reachable via
+    the page table chain installed at PML4[448].  The CPU loads
+    \texttt{CS} from \texttt{MSR\_STAR[47:32]} = selector \texttt{0x08}
+    (kernel CS, DPL=0) and begins executing at the trampoline.
+
+  \item \textbf{Trampoline: \texttt{out \%al, \$0xf4} (I/O port trap).}
+    The trampoline executes a single privileged I/O instruction: \texttt{out}
+    to port \texttt{0xf4} (\texttt{UM\_KVM\_TRAP\_SYSCALL}).  Because the
+    guest is in VMX non-root mode and the I/O bitmap is configured to trap
+    on all ports, this instruction causes an unconditional VM exit with
+    \texttt{kvm\_run->exit\_reason = KVM\_EXIT\_IO} and
+    \texttt{kvm\_run->io.port = 0xf4}.
+
+  \item \textbf{\texttt{KVM\_EXIT\_IO} returns control to host.}
+    The \texttt{KVM\_RUN} ioctl returns to the \UML{} kernel's
+    \texttt{kvm\_v2\_vcpu\_run} dispatch loop.  Register state is available
+    immediately via \texttt{KVM\_CAP\_SYNC\_REGS}: the
+    \texttt{kvm\_run->s.regs.regs} structure contains the full GPR set
+    without a separate \texttt{KVM\_GET\_REGS} ioctl.
+
+  \item \textbf{UML host dispatch: \texttt{handle\_io\_trap} $\to$
+        \texttt{handle\_syscall}.}
+    The dispatch function reads the I/O port, identifies the trap class
+    (syscall, page fault, general protection fault, etc.), and for
+    \texttt{UM\_KVM\_TRAP\_SYSCALL}:
+    \begin{itemize}
+      \item Marshals GPRs from \texttt{kvm\_run->s.regs.regs} into
+            \texttt{struct uml\_pt\_regs} via
+            \texttt{kvm\_v2\_marshal\_from\_kvm\_regs}.
+      \item Sets \texttt{HOST\_IP} = the user continuation address from
+            \texttt{RCX} and \texttt{HOST\_EFLAGS} = the user flags from
+            \texttt{R11} (the SYSCALL convention).
+      \item Calls \texttt{handle\_syscall} at
+            \umlpath{arch/um/kernel/skas/syscall.c}---the same common
+            entry point the \Seccomp{} backend uses.
+    \end{itemize}
+
+  \item \textbf{Result marshaled back via sync-regs dirty bits.}
+    After \texttt{handle\_syscall} returns, the \UML{} kernel writes
+    the updated \texttt{uml\_pt\_regs} (including the syscall return value
+    in \texttt{RAX}) back into \texttt{kvm\_run->s.regs.regs} via
+    \texttt{kvm\_v2\_marshal\_to\_kvm\_regs} and sets the
+    \texttt{KVM\_SYNC\_X86\_REGS} dirty bit so \texttt{KVM\_RUN}
+    picks up the new values on the next entry.
+
+  \item \textbf{\texttt{KVM\_RUN} re-enters; trampoline
+        \texttt{SYSRETQ} drops to CPL=3.}
+    The next \texttt{KVM\_RUN} enters guest mode with \texttt{RIP} pointing
+    at the \texttt{sysretq} instruction (byte \texttt{48 0f 07}) that
+    immediately follows the \texttt{out} in the trampoline.
+    \texttt{SYSRETQ} loads \texttt{RIP} from \texttt{RCX} (the user
+    continuation), \texttt{RFLAGS} from \texttt{R11}, and
+    \texttt{CS} from \texttt{MSR\_STAR[63:48]+16|3} = selector
+    \texttt{0x2b} (user CS, DPL=3), returning the guest to
+    CPL=3 user code.
+\end{enumerate}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    step/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=11cm,
+      minimum height=0.9cm,
+      rounded corners=3pt,
+      font=\small,
+      align=center
+    },
+    arr/.style={
+      -{Stealth[length=4pt]},
+      thick,
+      color=UMLMuted
+    },
+    timing/.style={
+      font=\scriptsize,
+      text=UMLMuted,
+      anchor=west
+    }
+  ]
+
+  \node[step=KernelGold!8] (s1) at (0,7)
+    {Guest CPL=3: \texttt{syscall} (NR in RAX)};
+  \node[step=UMLTeal!8]    (s2) at (0,5.8)
+    {CPU $\to$ CPL=0 via MSR\_LSTAR \quad $\to$ PML4[448] trampoline};
+  \node[step=UMLGreen!8]   (s3) at (0,4.6)
+    {Trampoline: \texttt{out \%al, \$0xf4} \quad (2 bytes: \texttt{e6 f4})};
+  \node[step=UMLBlue!8]    (s4) at (0,3.4)
+    {\texttt{KVM\_EXIT\_IO} $\to$ host returns from \texttt{KVM\_RUN}};
+  \node[step=UMLBlue!12]   (s5) at (0,2.2)
+    {UML dispatch: marshal regs $\to$ \texttt{handle\_syscall()}};
+  \node[step=UMLBlue!8]    (s6) at (0,1.0)
+    {Marshal result $\to$ \texttt{kvm\_run->s.regs} $\to$ \texttt{KVM\_RUN}};
+  \node[step=UMLGreen!8]   (s7) at (0,-0.2)
+    {Guest re-entry: \texttt{sysretq} \quad (3 bytes: \texttt{48 0f 07})};
+  \node[step=KernelGold!8] (s8) at (0,-1.4)
+    {Guest CPL=3: continues at user RIP from RCX};
+
+  \foreach \a/\b in {s1/s2, s2/s3, s3/s4, s4/s5, s5/s6, s6/s7, s7/s8}
+    \draw[arr] (\a.south) -- (\b.north);
+
+  % Timing annotations
+  \node[timing] at (5.8,7)   {$\sim$0};
+  \node[timing] at (5.8,5.8) {SYSCALL $\sim$20\,cyc};
+  \node[timing] at (5.8,4.6) {1 insn};
+  \node[timing] at (5.8,3.4) {VMEXIT $\sim$500\,cyc};
+  \node[timing] at (5.8,2.2) {varies by NR};
+  \node[timing] at (5.8,1.0) {marshal $\sim$50\,cyc};
+  \node[timing] at (5.8,-0.2) {VMENTRY $\sim$500\,cyc};
+  \node[timing] at (5.8,-1.4) {SYSRETQ $\sim$20\,cyc};
+
+\end{tikzpicture}
+\caption[KVM v2 trap path]{%
+  The \KVMvTwo{} trap path from guest \texttt{SYSCALL} through host dispatch
+  and back.  The critical overhead is the VMEXIT\,+\,VMENTRY cycle
+  ($\sim$\num{1000} cycles total), compared to the \Seccomp{} backend's
+  signal delivery + futex round-trip ($\sim$\num{36000} cycles).
+}
+\label{fig:kvm-trap-path}
+\end{figure}
+
+The trampoline itself is exactly five bytes:
+
+\begin{lstlisting}[language={[x86masm]Assembler},
+    caption={LSTAR trampoline bytes (fallback path)},
+    label={lst:lstar-fallback}]
+    out  %al, $0xf4      ; e6 f4   -- KVM_EXIT_IO (port = SYSCALL)
+    sysretq              ; 48 0f 07 -- drop to CPL=3, RIP=RCX
+\end{lstlisting}
+
+The simplicity is intentional.  No register save, no stack switch, no
+\texttt{swapgs}.  The guest's registers are captured by \KVM{}'s sync-regs
+mechanism at VM exit; the host reads them directly from the shared
+\texttt{kvm\_run} mapping.  This zero-copy register path avoids the
+\texttt{KVM\_GET\_REGS} / \texttt{KVM\_SET\_REGS} ioctl overhead that
+would otherwise add two more kernel entries per dispatch.
+
+
+\subsection{The SYSCALL mask}
+
+\texttt{MSR\_SYSCALL\_MASK} (also known as \texttt{MSR\_FMASK}) is programmed
+to \texttt{0x47700}, which clears TF, IF, DF, IOPL, NT, and AC from
+\texttt{RFLAGS} on \texttt{SYSCALL} entry.  The DF (direction flag) mask
+is critical: a v1 post-mortem discovered that leaking \texttt{DF=1} from
+userland into the kernel-half trampoline caused \texttt{REP MOVSB} and
+\texttt{memmove} operations to run with \texttt{STD} instead of \texttt{CLD},
+silently corrupting kernel memory.  The mask matches Linux's native
+\texttt{syscall\_init} configuration.
+
+
+% ------------------------------------------------------------------
+\section{The LSTAR Gadget}
+\label{sec:kvm-gadget}
+% ------------------------------------------------------------------
+
+The trap path described above requires a VM exit and re-entry for every
+system call---approximately \num{1000} cycles on modern hardware.  For
+trivial system calls that return a single cached value
+(\texttt{getpid}, \texttt{gettid}, \texttt{getuid}, etc.), this overhead is
+disproportionate: the actual work is a single register load.
+
+The LSTAR gadget eliminates the VM exit entirely for these calls by
+handling them \emph{in-guest} at CPL=0 within the trampoline page itself.
+When the guest \texttt{SYSCALL}s, the gadget dispatches on the syscall
+number in \texttt{RAX}:
+
+\begin{itemize}
+  \item If the NR matches a handled trivial call, the gadget reads the
+    result from a per-vCPU state page (accessed via \texttt{swapgs} +
+    \texttt{mov \%gs:OFFSET, \%eax}) and falls through to \texttt{SYSRETQ}
+    without ever executing the \texttt{out} instruction.
+  \item If the NR does not match, the gadget falls through to the
+    \texttt{out \%al, \$0xf4} instruction, taking the normal VM exit path.
+\end{itemize}
+
+\subsection{Handled system calls}
+
+The gadget handles the following system calls entirely in-guest:
+
+\begin{table}[ht]
+\centering
+\caption{LSTAR gadget handled system calls}
+\label{tab:gadget-syscalls}
+\begin{tabular}{lrlll}
+\toprule
+\textbf{Syscall} & \textbf{NR} & \textbf{State offset} & \textbf{Phase} & \textbf{Notes} \\
+\midrule
+\texttt{getpid}   & 39  & \texttt{+0x08} (TGID)     & 1 & \texttt{task\_tgid\_vnr} \\
+\texttt{gettid}   & 186 & \texttt{+0x0c} (TID)      & 3 & \texttt{task\_pid\_vnr} \\
+\texttt{getppid}  & 110 & \texttt{+0x10} (PPID)     & 4 & parent PID \\
+\texttt{getuid}   & 102 & \texttt{+0x14} (UID)      & 3 & real UID \\
+\texttt{geteuid}  & 107 & \texttt{+0x18} (EUID)     & 3 & effective UID \\
+\texttt{getgid}   & 104 & \texttt{+0x1c} (GID)      & 3 & real GID \\
+\texttt{getegid}  & 108 & \texttt{+0x20} (EGID)     & 4 & effective GID \\
+\texttt{getcpu}   & 309 & \texttt{+0x04} (CPU\_ID)  & 5 & CPU id + node \\
+\texttt{time}     & 201 & \texttt{+0x30} (REAL\_SEC) & 6 & \texttt{CLOCK\_REALTIME} seconds \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-vCPU state page mechanism}
+
+Each vCPU owns a dedicated 4\,KB ``gadget state page'' mapped into the
+kernel-half address space via the PML4[448] page table chain.
+\texttt{MSR\_KERNEL\_GS\_BASE} is programmed per-vCPU to the page's guest
+virtual address, so the gadget's \texttt{swapgs} instruction loads the
+correct GS base for the running vCPU.  The host refreshes the page's fields
+in \texttt{load\_user\_sregs} before each \texttt{KVM\_RUN}:
+
+\begin{lstlisting}[language=KernelC,
+    caption={Per-vCPU gadget state page refresh (simplified)},
+    label={lst:gadget-refresh}]
+/* In kvm_v2_load_user_sregs, before KVM_RUN: */
+state = (u32 *)vcpu->gadget_state_kva;
+state[KVM_V2_GADGET_OFF_TGID / 4]     = task_tgid_vnr(current);
+state[KVM_V2_GADGET_OFF_TID / 4]      = task_pid_vnr(current);
+state[KVM_V2_GADGET_OFF_CPU_ID / 4]   = vcpu->cpu;
+state[KVM_V2_GADGET_OFF_REAL_SEC / 4]  = ktime_get_real_ts64().tv_sec;
+\end{lstlisting}
+
+Per-vCPU isolation is essential for SMP correctness: different tasks run
+on different vCPUs simultaneously, and a single shared page would suffer
+writer races.  Each vCPU's host CPU pthread is the sole writer; the gadget
+running on the same vCPU is the sole reader.  Writer and reader are
+exclusive in time without requiring any lock.
+
+\subsection{Dispatch tree layout}
+
+The gadget body (assembled in \umlpath{arch/um/backend/kvm-v2/lstar\_gadget.S},
+approximately 341 bytes) uses a two-stage dispatch:
+
+\begin{enumerate}[leftmargin=2em]
+  \item A leading \texttt{cmp \$0x135, \%eax} handles \texttt{getcpu}
+    (NR~309), which does not fit in the imm8 range used by the second stage.
+  \item An upper-byte guard (\texttt{test \%ah, \%ah}) filters NRs $\geq 256$
+    to the fallback path.
+  \item A \texttt{cmp}/\texttt{je} chain dispatches the remaining NRs:
+    \texttt{0x27} (getpid), \texttt{0xba} (gettid), \texttt{0x6e} (getppid),
+    \texttt{0x66} (getuid), \texttt{0x6b} (geteuid), \texttt{0x68} (getgid),
+    \texttt{0x6c} (getegid), \texttt{0xc9} (time).
+\end{enumerate}
+
+Each handler reads its field from the state page, places the result in
+\texttt{EAX}, restores any clobbered registers (RDX, R8, R10 are saved to
+\texttt{\%gs:SAVE\_RDX} etc.\ at gadget entry), executes \texttt{swapgs} to
+restore user GS, and falls through to \texttt{SYSRETQ}.
+
+\subsection{Performance impact}
+
+The gadget eliminates the VM exit for trivial calls entirely.  A
+\texttt{getpid} call handled by the gadget costs approximately 90 cycles
+(the \texttt{SYSCALL} transition + \texttt{swapgs} + one memory read +
+\texttt{SYSRETQ}), compared to $\sim$\num{36800} cycles through the full
+VM exit path or $\sim$\num{110000} cycles through the \Seccomp{} backend.
+
+\subsection{Record/replay bypass}
+
+When record/replay is active, the gadget must be disabled so that every
+system call passes through the host-side \texttt{handle\_io\_trap} where
+the observe hook can log the call.  A per-vCPU \texttt{RECORD} flag at
+offset \texttt{+0x24} in the state page gates a conditional branch at gadget
+entry: when non-zero, the gadget unconditionally falls through to the
+\texttt{out} instruction.  The cost when the flag is unset (the common case)
+is a single untaken \texttt{cmp}+\texttt{jne}---effectively zero overhead.
+
+
+% ------------------------------------------------------------------
+\section{Exception Handling}
+\label{sec:kvm-exceptions}
+% ------------------------------------------------------------------
+
+Guest code generates not only system calls but also hardware exceptions:
+page faults (\#PF), general protection faults (\#GP), undefined opcodes
+(\#UD), divide errors (\#DE), overflow (\#OF), breakpoints (\#BP), debug
+exceptions (\#DB), and others.  The \KVMvTwo{} backend must handle all of
+these; without proper exception infrastructure, the first guest page fault
+would cascade to a triple fault and terminate the VM.
+
+\subsection{IDT, GDT, and TSS layout}
+
+The backend installs a full x86-64 interrupt descriptor table (IDT), global
+descriptor table (GDT), and task state segment (TSS) in the kernel-half
+address space under PML4[448].  These structures occupy four 4\,KB pages:
+
+\begin{table}[ht]
+\centering
+\caption{Kernel-half page layout in PML4[448] / PUD[0] / PMD[0]}
+\label{tab:kernel-half-layout}
+\begin{tabular}{lllp{6cm}}
+\toprule
+\textbf{PTE slot} & \textbf{GVA} & \textbf{Content} & \textbf{Notes} \\
+\midrule
+0 & \texttt{0xffffe00000000000} & Trampoline & LSTAR body at +\texttt{0x40} \\
+1 & \texttt{0xffffe00000001000} & IDT        & 256 $\times$ 16\,B gate descriptors \\
+2 & \texttt{0xffffe00000002000} & Handlers   & 16 $\times$ 16\,B stub slots \\
+3 & \texttt{0xffffe00000003000} & GDT        & 8 $\times$ 8\,B descriptors \\
+4+2$i$ & varies & IST stack  & Per-vCPU $i$; RW, kernel-only \\
+5+2$i$ & varies & TSS body   & Per-vCPU $i$; 104\,B long-mode TSS \\
+$G$+$i$ & varies & Gadget state & Per-vCPU $i$; 4\,KB state page \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The GDT contains eight entries: null (slot~0), kernel CS (\texttt{0x08},
+DPL=0, slot~1), kernel DS (\texttt{0x10}, DPL=0, slot~2), STAR-base
+padding (slot~3), user DS (\texttt{0x23}, DPL=3, slot~4), user CS
+(\texttt{0x2b}, DPL=3, slot~5), and a 16-byte TSS descriptor spanning
+slots~6--7.  The selectors match the \texttt{MSR\_STAR} programming
+so \texttt{SYSCALL} and \texttt{SYSRETQ} transition correctly between
+kernel and user code segments.
+
+\subsection{Handler stubs}
+
+Each IDT entry points at a 4-byte handler stub in the handlers page:
+
+\begin{lstlisting}[language={[x86masm]Assembler},
+    caption={Exception handler stub (e.g., \#PF at port 0xf6)},
+    label={lst:exception-stub}]
+    out  %al, $0xf6    ; e6 f6  -- trap to host with port = PF
+    iretq              ; 48 cf  -- resume interrupted context
+\end{lstlisting}
+
+The stub does \emph{not} read \texttt{CR2} or save any registers---this is
+deliberate.  Reading \texttt{CR2} in the stub would clobber \texttt{RAX}
+before the host's sync-regs marshal captures the guest's pre-fault register
+state.  Instead, the host reads \texttt{CR2} from
+\texttt{kvm\_run->s.regs.sregs.cr2}, which \KVM{} populates on exit via the
+sync-regs path.  Each exception class has a unique I/O port number:
+
+\begin{table}[ht]
+\centering
+\caption{IO-port trap class encoding}
+\label{tab:iotrap-ports}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Exception} & \textbf{Port} & \textbf{Host handler} \\
+\midrule
+\#DE (divide error)     & \texttt{0xfb} & \texttt{relay\_signal(SIGFPE)} \\
+\#DB (debug)            & \texttt{0xf5} & \texttt{relay\_signal(SIGTRAP)} \\
+\#BP (breakpoint)       & \texttt{0xfe} & \texttt{KVM\_EXIT\_DEBUG} path \\
+\#OF (overflow)         & \texttt{0xfc} & \texttt{relay\_signal(SIGFPE)} \\
+\#UD (undefined opcode) & \texttt{0xfa} & \texttt{relay\_signal(SIGILL)} \\
+\#NM (device N/A)       & \texttt{0xfd} & lazy FPU \texttt{CR0.TS} clear \\
+\#GP (general prot.)    & \texttt{0xf9} & \texttt{relay\_signal(SIGSEGV)} \\
+\#PF (page fault)       & \texttt{0xf6} & \texttt{segv\_handler(CR2)} \\
+\#DF (double fault)     & \texttt{0xf2} & panic \\
+\#SS (stack segment)    & \texttt{0xf7} & \texttt{relay\_signal(SIGSEGV)} \\
+\#AC (alignment check)  & \texttt{0xf3} & \texttt{relay\_signal(SIGBUS)} \\
+\textit{other}          & \texttt{0xf8} & panic \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{IST stacks and triple-fault prevention}
+
+Every exception gate specifies IST=1, directing the CPU to load \texttt{RSP}
+from the TSS's IST1 field during exception delivery.  Without IST stacks,
+the CPU would use the current \texttt{RSP}---which during guest userspace
+execution points at the user stack, a location the kernel-mode handler
+stub cannot safely push to (wrong privilege level, wrong address space).
+
+Each vCPU has its own IST stack page and TSS body.  Per-vCPU TSS is
+required because the IST1 pointer differs per vCPU, and sharing a TSS
+would create collision risk if two vCPUs took exceptions simultaneously.
+The 4\,KB IST stack provides ample headroom: the handler stubs execute only
+\texttt{out} + \texttt{iretq}, so the maximum stack usage is the 40-byte
+\texttt{iretq} frame plus an 8-byte error code---48 bytes total against
+4096 bytes of space.
+
+\subsection{The \#BP handler and debugger support}
+
+Breakpoints (\texttt{int3} at vector~3) use a different interception path.
+Rather than the IO-port trap mechanism, \texttt{KVM\_GUESTDBG\_USE\_SW\_BP}
+is enabled via \texttt{KVM\_SET\_GUEST\_DEBUG}, causing \texttt{int3} to
+exit with \texttt{KVM\_EXIT\_DEBUG}.  This provides cleaner integration
+with the \UML{} kernel's \texttt{gdb} stub and allows interception of
+\texttt{ld.so}'s \texttt{\_dl\_debug\_state} breakpoints for dynamic linker
+events.  The IDT gate for \#BP is still installed at DPL=3 (so user-mode
+\texttt{int3} is reachable) but the gate stub is effectively dead code
+when \texttt{KVM\_GUESTDBG\_USE\_SW\_BP} is active.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    page/.style={
+      draw=UMLGrid,
+      fill=#1,
+      minimum width=2.8cm,
+      minimum height=1.6cm,
+      rounded corners=2pt,
+      font=\scriptsize,
+      align=center
+    },
+    pte/.style={
+      draw=UMLGrid,
+      fill=UMLPanel,
+      minimum width=1.2cm,
+      minimum height=0.55cm,
+      font=\tiny,
+      align=center
+    },
+    arr/.style={
+      -{Stealth[length=4pt]},
+      color=UMLMuted
+    }
+  ]
+
+  % PML4
+  \node[pte] (pml4) at (0,4.5) {PML4[448]};
+  % PUD
+  \node[pte] (pud) at (0,3.3) {PUD[0]};
+  % PMD
+  \node[pte] (pmd) at (0,2.1) {PMD[0]};
+
+  % PTE entries
+  \node[pte] (pte0) at (-4, 0.5) {PTE[0]};
+  \node[pte] (pte1) at (-2, 0.5) {PTE[1]};
+  \node[pte] (pte2) at ( 0, 0.5) {PTE[2]};
+  \node[pte] (pte3) at ( 2, 0.5) {PTE[3]};
+  \node[pte] (pte4) at ( 4, 0.5) {PTE[4+]};
+
+  % Pages
+  \node[page=UMLTeal!8]    (tramp) at (-4,-1.2) {\textbf{Trampoline}\\LSTAR +0x40};
+  \node[page=UMLGreen!8]   (idt)   at (-2,-1.2) {\textbf{IDT}\\256 gates};
+  \node[page=UMLAmber!8]   (hdl)   at ( 0,-1.2) {\textbf{Handlers}\\16 stubs};
+  \node[page=UMLBlue!8]    (gdt)   at ( 2,-1.2) {\textbf{GDT}\\8 entries};
+  \node[page=KernelGold!8] (ist)   at ( 4,-1.2) {\textbf{IST/TSS}\\per-vCPU};
+
+  % Arrows
+  \draw[arr] (pml4) -- (pud);
+  \draw[arr] (pud)  -- (pmd);
+  \draw[arr] (pmd.south west) -- (pte0.north);
+  \draw[arr] (pmd.south)      -- (pte2.north);
+  \draw[arr] (pmd.south east) -- (pte4.north);
+  \draw[arr] (pte0) -- (tramp);
+  \draw[arr] (pte1) -- (idt);
+  \draw[arr] (pte2) -- (hdl);
+  \draw[arr] (pte3) -- (gdt);
+  \draw[arr] (pte4) -- (ist);
+
+\end{tikzpicture}
+\caption[PML4 kernel-half layout]{%
+  The kernel-half page table chain installed at PML4[448].  A single PUD,
+  PMD, and PTE page maps the trampoline, IDT, handlers, GDT, and
+  per-vCPU IST/TSS/gadget pages into the guest's kernel-half address
+  space.  All pages carry kernel-only permissions (US=0) so guest
+  userspace at CPL=3 cannot access them directly.
+}
+\label{fig:pml4-layout}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{Per-CPU vCPU Pool}
+\label{sec:kvm-vcpu-pool}
+% ------------------------------------------------------------------
+
+The \KVMvTwo{} backend creates one \KVM{} vCPU per host CPU
+(\texttt{nr\_cpu\_ids} vCPUs total), organized as a static
+\texttt{NR\_CPUS}-sized array in BSS.  This is a deliberate design choice
+with implications for both performance and correctness.
+
+\subsection{Why per-CPU, not per-task}
+
+An alternative design would create one vCPU per \UML{} task (process).
+This was rejected for three reasons:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{KVM's TDP cache coherence model.}
+    \KVM{}'s two-dimensional paging (TDP / EPT / NPT) maintains a
+    \texttt{prev\_roots[]} cache per vCPU that stores recently used
+    guest CR3 roots~\cite{intel-sdm}.  This cache expects a small, stable
+    set of vCPUs.  Creating thousands of vCPUs (one per guest process)
+    would blow out the cache, thrash the MMU notifier, and negate the
+    TDP performance advantage.
+
+  \item \textbf{Resource limits.}
+    Each vCPU consumes a \texttt{kvm\_run} mmap page, kernel-side
+    \texttt{vcpu\_arch} state ($\sim$16\,KB), and a host file descriptor.
+    A system running hundreds of \UML{} tasks would exhaust file descriptor
+    limits or memory.
+
+  \item \textbf{Scheduling affinity.}
+    A per-CPU pool naturally aligns with the host scheduler: the \UML{} task
+    running on host CPU~$k$ uses vCPU~$k$.  No explicit affinity management
+    is needed; the pool index is simply \texttt{raw\_smp\_processor\_id()}.
+\end{enumerate}
+
+\subsection{The migrate\_disable discipline (SMP-T13)}
+
+The per-CPU pool model introduces a critical invariant: between the
+\texttt{raw\_smp\_processor\_id()} call that selects the vCPU and the
+\texttt{KVM\_RUN} ioctl that uses it, the task must not migrate to a
+different host CPU.  If it did, the \texttt{KVM\_RUN} would issue against
+a vCPU owned by a different CPU's pthread, violating \KVM{}'s per-vCPU
+serialization requirement.
+
+The fix is \texttt{migrate\_disable()} around the vCPU selection and use:
+
+\begin{lstlisting}[language=KernelC,
+    caption={Per-CPU vCPU dispatch with migrate\_disable},
+    label={lst:migrate-disable}]
+void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
+{
+    struct kvm_v2_vcpu *vcpu;
+    int cpu;
+
+    migrate_disable();
+    cpu = raw_smp_processor_id();
+    vcpu = kvm_v2_vcpu_get(cpu);
+    /* ... marshal regs, load CR3/FS/GS ... */
+    rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_RUN, 0);
+    /* ... marshal results ... */
+    migrate_enable();
+}
+\end{lstlisting}
+
+The \texttt{migrate\_disable()} call prevents the host scheduler from
+migrating the current thread to another CPU for the duration of the
+critical section.  This is lighter than \texttt{preempt\_disable()} (which
+disables preemption entirely) and sufficient for the pool invariant.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    cpu/.style={
+      draw=UMLGrid,
+      fill=UMLBlue!8,
+      minimum width=2.5cm,
+      minimum height=1.3cm,
+      rounded corners=3pt,
+      font=\small,
+      align=center
+    },
+    vcpu/.style={
+      draw=UMLGrid,
+      fill=KernelGold!8,
+      minimum width=2.5cm,
+      minimum height=1.0cm,
+      rounded corners=3pt,
+      font=\small,
+      align=center
+    },
+    task/.style={
+      draw=UMLGrid,
+      fill=UMLGreen!8,
+      minimum width=1.6cm,
+      minimum height=0.8cm,
+      rounded corners=2pt,
+      font=\scriptsize,
+      align=center
+    },
+    arr/.style={
+      -{Stealth[length=4pt]},
+      thick,
+      color=UMLMuted
+    },
+    note/.style={
+      font=\scriptsize\itshape,
+      text=UMLMuted
+    }
+  ]
+
+  % Host CPUs
+  \node[cpu] (c0) at (0,0) {\textbf{Host CPU 0}};
+  \node[cpu] (c1) at (3.5,0) {\textbf{Host CPU 1}};
+  \node[cpu] (c2) at (7,0) {\textbf{Host CPU 2}};
+
+  % vCPUs
+  \node[vcpu] (v0) at (0,1.8) {vCPU 0};
+  \node[vcpu] (v1) at (3.5,1.8) {vCPU 1};
+  \node[vcpu] (v2) at (7,1.8) {vCPU 2};
+
+  % Tasks
+  \node[task] (t0) at (-0.7,3.3) {Task A};
+  \node[task] (t1) at (0.7,3.3) {Task B};
+  \node[task] (t2) at (3.5,3.3) {Task C};
+  \node[task] (t3) at (6.3,3.3) {Task D};
+  \node[task] (t4) at (7.7,3.3) {Task E};
+
+  % Bindings
+  \draw[arr] (c0) -- (v0);
+  \draw[arr] (c1) -- (v1);
+  \draw[arr] (c2) -- (v2);
+
+  \draw[arr,dashed] (t0.south) -- (v0.north);
+  \draw[arr,dashed] (t1.south) -- (v0.north);
+  \draw[arr,dashed] (t2.south) -- (v1.north);
+  \draw[arr,dashed] (t3.south) -- (v2.north);
+  \draw[arr,dashed] (t4.south) -- (v2.north);
+
+  % Label
+  \node[note] at (3.5,-1.0) {1:1 binding (host CPU $\leftrightarrow$ vCPU);
+    N:1 multiplexing (tasks $\to$ vCPU)};
+
+\end{tikzpicture}
+\caption[Per-CPU vCPU pool]{%
+  The per-CPU vCPU pool.  Each host CPU is permanently bound to one KVM
+  vCPU.  Multiple \UML{} tasks multiplex onto a single vCPU; the
+  \texttt{migrate\_disable()} discipline ensures that a task uses the vCPU
+  corresponding to the host CPU it is currently running on.
+}
+\label{fig:vcpu-pool}
+\end{figure}
+
+
+% ------------------------------------------------------------------
+\section{SMP Challenges and Solutions}
+\label{sec:kvm-smp}
+% ------------------------------------------------------------------
+
+The combination of SMP support and the per-CPU vCPU pool created a rich
+surface of concurrency bugs.  These were systematically identified and
+fixed through a state-audit framework that assigned each bug a tracking
+identifier (SMP-T$nn$).  This section describes the most significant
+issues and their resolutions.
+
+\subsection{SMP-T13: migrate\_disable (Section~\ref{sec:kvm-vcpu-pool})}
+
+The headline fix.  Without \texttt{migrate\_disable()}, a task could be
+migrated between CPU selection and \texttt{KVM\_RUN}, using the wrong
+vCPU.  This manifested as sporadic ``KVM\_RUN on wrong vCPU'' errors
+under SMP workloads.
+
+\subsection{SMP-T26/T27: FPU cross-task leak}
+
+On a per-CPU vCPU shared by multiple tasks, the FPU state
+(XMM0--XMM15, YMM upper halves) leaked between tasks.  Task~A's
+\texttt{vpxor \%xmm6,\%xmm6,\%xmm6} would leave residual state in the
+vCPU's guest FPU; Task~B on the same vCPU could observe Task~A's
+XMM values.
+
+\paragraph{Fix.}
+Issue \texttt{KVM\_GET\_FPU} (later upgraded to \texttt{KVM\_GET\_XSAVE})
+after \emph{every} \texttt{KVM\_RUN} return, capturing the vCPU's FPU state
+into the task's per-thread \texttt{iotrap\_fpu} storage.  Before each
+\texttt{KVM\_RUN}, issue \texttt{KVM\_SET\_FPU} from the incoming task's
+\texttt{iotrap\_fpu}.  This ensures complete FPU isolation between tasks
+sharing a vCPU.
+
+\subsection{SMP-T29: fork-snapshot clobber}
+
+When a \UML{} process forked, the child inherited the parent's per-thread
+KVM state including FPU snapshots, but the vCPU's live state reflected
+whichever task last ran.  The child's first dispatch could install the
+parent's stale FPU snapshot, corrupting computation.
+
+\paragraph{Fix.}
+Capture FPU state on context-switch-out
+(\texttt{kvm\_v2\_fpu\_capture\_for\_switch\_out}) so each task's snapshot is
+always current.  On fork, the child inherits a consistent FPU snapshot from
+the parent's last context-switch-out.
+
+\subsection{SMP-T33/T41: TDP prev\_roots cache contamination}
+
+\KVM{}'s per-vCPU \texttt{prev\_roots[]} TDP cache stores recently used
+CR3 roots for fast reuse.  When multiple \UML{} tasks with different
+\texttt{mm\_struct}s shared a vCPU, stale \texttt{prev\_roots} entries
+caused \KVM{} to walk obsolete page tables, producing incorrect physical
+address translations.
+
+\paragraph{Fix.}
+Track the TLB generation counter (\texttt{mm->context.tlb\_gen}) per vCPU.
+When the lag between the vCPU's \texttt{last\_seen\_tlb\_gen} and the mm's
+current generation exceeds a threshold (3 by default), force a heavy
+\texttt{KVM\_SET\_SREGS} ioctl that triggers
+\texttt{kvm\_mmu\_reset\_context} in the host kernel, flushing the
+\texttt{prev\_roots} cache.
+
+SMP-T41 additionally fixed an EINTR-mid-PF-stub RAX recovery issue: when a
+\texttt{SIGALRM} interrupted \texttt{KVM\_RUN} between the CPU's IDT
+delivery of \#PF and the stub's \texttt{out} instruction, the host captured
+the stub's partially-clobbered RAX (still holding the \texttt{out} port
+number from the instruction stream, not the user's pre-fault value).
+
+\subsection{SMP-T55: lazy FPU epoch flag}
+
+The unconditional \texttt{KVM\_GET\_FPU} after every \texttt{KVM\_RUN}
+(the SMP-T26/T27 fix) imposed a per-dispatch cost of approximately
+\SI{2}{\micro\second}.  Most dispatches do not touch the FPU at all.
+
+\paragraph{Fix.}
+A per-vCPU \texttt{fpu\_dirty} epoch flag predicates the post-vmexit
+\texttt{KVM\_GET\_XSAVE}.  The flag is set on cross-task arrival, when
+\texttt{CR0.TS} is clear after exit (indicating the guest used the FPU),
+or on \#NM handling.  When the flag is clear and the same task is
+re-entering, the GET is skipped entirely---recovering the lazy-FPU
+performance win without sacrificing cross-task isolation.
+
+\subsection{SMP-T57: AVX/XSAVE enablement}
+
+The curated CPUID mask initially suppressed all XSAVE-related features
+(AVX, AVX2, FMA, F16C) because \texttt{CR4.OSXSAVE} was not set and
+\texttt{XCR0} was not programmed.  This caused glibc's IFUNC dispatch to
+select scalar code paths even on AVX-capable hardware.
+
+\paragraph{Fix.}
+A three-part change: (1)~un-mask XSAVE/OSXSAVE/AVX/AVX2/FMA/F16C in the
+curated CPUID, (2)~set \texttt{CR4.OSXSAVE} via SREGS after CPUID is
+installed, (3)~program \texttt{XCR0 = 0x7} (X87 | SSE | YMM) via
+\texttt{KVM\_SET\_XCRS}.  The FPU capture path was simultaneously
+upgraded from \texttt{KVM\_GET\_FPU} (legacy 512\,B FXSAVE) to
+\texttt{KVM\_GET\_XSAVE} (4\,KB, covering YMM upper halves).
+
+\subsection{SMP-T73: KVM\_GET\_FPU to KVM\_GET\_XSAVE}
+
+A Django test suite exposed intermittent cache corruption that traced to
+the FPU save/restore path.  The root cause was that
+\texttt{KVM\_GET\_FPU} captures only the legacy 512-byte FXSAVE area,
+which does not include the upper 128 bits of YMM registers.  When an
+AVX-using library (OpenSSL, NumPy) ran on one task and the FPU state
+was restored to a different task, the upper YMM halves were zeroed.
+
+\paragraph{Fix.}
+Replace all \texttt{KVM\_GET\_FPU} / \texttt{KVM\_SET\_FPU} calls with
+\texttt{KVM\_GET\_XSAVE} / \texttt{KVM\_SET\_XSAVE}, which capture the
+full extended state including YMM upper halves under \texttt{XCR0 = 0x7}.
+
+\medskip
+
+\begin{table}[ht]
+\centering
+\caption{SMP state-audit tracker summary (selected items)}
+\label{tab:smp-audit}
+\begin{tabular}{lp{8cm}l}
+\toprule
+\textbf{ID} & \textbf{Issue} & \textbf{Status} \\
+\midrule
+SMP-T13 & \texttt{migrate\_disable} around vCPU dispatch & \statusdone \\
+SMP-T16 & CR2 zeroed on same-task re-entry (SIGALRM race) & \statusdone \\
+SMP-T22 & \#NM host-side CR0.TS clear (lazy FPU) & \statusdone \\
+SMP-T23 & Cross-mm CR2 leak on \texttt{execve} & \statusdone \\
+SMP-T26/27 & FPU cross-task XMM/YMM leak & \statusdone \\
+SMP-T29 & Fork-snapshot FPU clobber & \statusdone \\
+SMP-T33 & TDP \texttt{prev\_roots[]} cache contamination & \statusdone \\
+SMP-T41 & EINTR-mid-PF-stub RAX recovery & \statusdone \\
+SMP-T55 & Lazy FPU epoch flag (perf regression fix) & \statusdone \\
+SMP-T56 & TLB lag threshold for \texttt{prev\_roots} drop & \statusdone \\
+SMP-T57 & AVX/XSAVE/OSXSAVE enablement (\texttt{CR4} + \texttt{XCR0}) & \statusdone \\
+SMP-T73 & \texttt{KVM\_GET\_FPU} $\to$ \texttt{KVM\_GET\_XSAVE} & \statusdone \\
+SMP-T75 & Per-task pending-event snapshot & \statusdone \\
+SMP-T76 & CPUID leaf 0xD sub-leaf sanitization & \statusdone \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ------------------------------------------------------------------
+\section{TLB Synchronization}
+\label{sec:kvm-tlb}
+% ------------------------------------------------------------------
+
+Under SMP, page table updates made by one vCPU must be visible to all other
+vCPUs that share the same \texttt{mm\_struct}.  The \KVMvTwo{} backend uses
+a cross-vCPU TLB kick mechanism:
+
+\begin{enumerate}[leftmargin=2em]
+  \item After \texttt{um\_tlb\_sync} drains pending TLB entries,
+    \texttt{kvm\_v2\_tlb\_kick\_others} iterates online CPUs (excluding self).
+  \item For each remote vCPU whose \texttt{current\_mm} matches the flushing
+    mm, an IPI (\texttt{pthread\_sigqueue} via \texttt{os\_send\_ipi}) is sent.
+  \item The IPI causes the remote vCPU's \texttt{KVM\_RUN} to return
+    with \texttt{-EINTR}.
+  \item On the next dispatch, \texttt{load\_user\_sregs} toggles
+    \texttt{CR4.PGE} (set then clear), which flushes the guest TLB.
+  \item A per-vCPU \texttt{kick\_pending} atomic provides deduplication:
+    at most one IPI is in flight per vCPU at any time.
+\end{enumerate}
+
+The \texttt{mm}-narrowing optimization avoids sending IPIs to vCPUs running
+different address spaces, reducing unnecessary VM exits under workloads with
+many concurrent processes.
+
+
+% ------------------------------------------------------------------
+\section{Snapshot and Record/Replay}
+\label{sec:kvm-snapshot}
+% ------------------------------------------------------------------
+
+The \KVMvTwo{} backend provides two complementary state-capture mechanisms:
+snapshot (for checkpoint/restore) and record/replay (for deterministic
+debugging).
+
+\subsection{Snapshot}
+
+A snapshot captures the complete state of a running \UML{} instance:
+
+\begin{itemize}
+  \item \textbf{vCPU scalar state:}
+    General-purpose registers (\texttt{KVM\_GET\_REGS}), segment registers
+    and control registers (\texttt{KVM\_GET\_SREGS}), extended FPU state
+    (\texttt{KVM\_GET\_XSAVE}, 4\,KB), extended control registers
+    (\texttt{KVM\_GET\_XCRS}), pending events (\texttt{KVM\_GET\_VCPU\_EVENTS}),
+    and seven MSRs (LSTAR, STAR, FMASK, KERNEL\_GS\_BASE, FS\_BASE,
+    GS\_BASE, EFER) via \texttt{KVM\_GET\_MSRS}.
+
+  \item \textbf{Per-task state:}
+    The running task's \texttt{iotrap\_fpu} (FPU snapshot) and
+    \texttt{iotrap\_events} (pending events), distinct from the vCPU's
+    view---essential because on a shared vCPU pool, the task's saved state
+    may differ from whichever task last dispatched on that vCPU.
+
+  \item \textbf{Memory:}
+    Each registered memslot's contents are copied to a \texttt{kvmalloc}'d
+    buffer.  The IDT, GDT, TSS, IST stacks, and gadget state pages reside
+    in the physmem region and are captured implicitly by the physmem memslot
+    copy.
+\end{itemize}
+
+\noindent
+Capture takes approximately \SI{39}{\micro\second} for scalar state (the
+memslot copy dominates for larger memory sizes); restore takes approximately
+\SI{13}{\micro\second}.  The snapshot can be exported as an ELF64 core file
+for post-mortem analysis with \texttt{gdb} or \texttt{crash}.
+
+\subsection{Record/replay}
+
+The record/replay subsystem captures non-deterministic events during
+execution and replays them faithfully:
+
+\begin{itemize}
+  \item \textbf{Syscall observation:}
+    Under \texttt{static\_branch\_unlikely(\&um\_kvm\_v2\_record\_enabled)},
+    every system call that passes through the host-side
+    \texttt{handle\_io\_trap} is logged: syscall number, return value,
+    and all six argument registers.
+
+  \item \textbf{RDTSC interception:}
+    \KVM{} is configured to trap \texttt{RDTSC}/\texttt{RDTSCP}
+    instructions, and the intercepted values are recorded.  On replay, the
+    same values are injected, ensuring cycle-counter determinism.
+
+  \item \textbf{SIGALRM anchoring:}
+    Timer interrupts (\texttt{SIGALRM}) are the primary source of
+    non-determinism in \UML{}'s scheduling.  The record phase logs the
+    instruction count at each timer delivery; the replay phase triggers
+    timer interrupts at the same instruction boundaries.
+
+  \item \textbf{Gadget bypass:}
+    When recording is active, the LSTAR gadget is disabled via the
+    per-vCPU \texttt{RECORD} flag (\texttt{+0x24} in the state page),
+    forcing all system calls through the host-side observe hook.  This
+    ensures the recording captures every call, not just the subset that
+    would otherwise take the VM exit path.
+\end{itemize}
+
+The state machine transitions through four states: \textsc{Init} $\to$
+\textsc{Recording} $\to$ \textsc{Stopped} $\to$ \textsc{Replaying}.  A
+\texttt{strict\_replay} flag (default: true) causes any divergence between
+recorded and replayed syscall results to deliver \texttt{SIGKILL} to the
+replaying process, preventing silent corruption from propagating.
+
+
+% ------------------------------------------------------------------
+\section{Performance Results}
+\label{sec:kvm-performance}
+% ------------------------------------------------------------------
+
+Table~\ref{tab:kvm-perf-comparison} summarizes the performance
+comparison between the \Seccomp{} and \KVMvTwo{} backends across several
+representative benchmarks.  All measurements are from the same host
+hardware (AMD Zen~4, 64\,GB RAM, Linux~7.x host kernel) with the \UML{}
+kernel compiled from the \texttt{mjbommar/linux} tree at identical
+commit points.
+
+\begin{table}[ht]
+\centering
+\caption{Backend performance comparison}
+\label{tab:kvm-perf-comparison}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Benchmark} & \textbf{Seccomp} & \textbf{KVM v2} & \textbf{KVM gadget} & \textbf{Speedup} \\
+\midrule
+\texttt{getpid} latency (cycles) & \num{110000} & \num{36800} & \num{90} & $1222\times$ \\
+\texttt{getpid} latency (ns)     & $\sim$300    & $\sim$100   & $<1$     & $>300\times$ \\
+Python 3.x startup (ms)          & 840          & 220         & ---      & $3.8\times$ \\
+\texttt{/bin/true} boot-to-exit (\textmu{}s) & 1200 & 450   & ---      & $2.7\times$ \\
+cpython test suite (pass/total)   & 21/21        & 21/21       & ---      & parity \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=18pt,
+    width=0.85\textwidth,
+    height=7cm,
+    ylabel={Cycles per \texttt{getpid} call},
+    ymode=log,
+    log basis y=10,
+    ymin=10,
+    ymax=500000,
+    symbolic x coords={seccomp,kvm-v2 (exit),kvm-v2 (gadget)},
+    xtick=data,
+    xticklabel style={font=\small},
+    nodes near coords,
+    nodes near coords style={font=\scriptsize,above},
+    every node near coord/.append style={yshift=2pt},
+    enlarge x limits=0.3,
+    grid=major,
+    grid style={UMLGrid},
+    ylabel style={font=\small},
+    title style={font=\small\bfseries},
+    title={Per-syscall \texttt{getpid} latency (log scale)},
+    legend style={font=\scriptsize,at={(0.02,0.98)},anchor=north west},
+    area legend,
+  ]
+  \addplot[fill=UMLRed!60,draw=UMLRed!80]
+    coordinates {(seccomp,110000) (kvm-v2 (exit),36800) (kvm-v2 (gadget),90)};
+\end{axis}
+\end{tikzpicture}
+\caption[Per-syscall getpid latency]{%
+  Per-syscall \texttt{getpid} latency across the three execution paths.
+  The \Seccomp{} backend pays $\sim$\num{110000} cycles for the signal +
+  futex round-trip.  The \KVMvTwo{} VM exit path reduces this to
+  $\sim$\num{36800} cycles.  The LSTAR gadget eliminates the VM exit
+  entirely, achieving $\sim$90 cycles---a three-order-of-magnitude
+  improvement.
+}
+\label{fig:kvm-getpid-perf}
+\end{figure}
+
+\subsection{Python startup}
+
+Python startup is a particularly demanding benchmark for syscall overhead
+because CPython's import machinery performs thousands of system calls
+during interpreter initialization: \texttt{stat}, \texttt{open},
+\texttt{read}, \texttt{fstat}, \texttt{mmap}, \texttt{mprotect},
+\texttt{close}, \texttt{getpid}, and others.  The \KVMvTwo{} backend
+achieves a consistent $3$--$4\times$ speedup over \Seccomp{} for Python
+startup across eight different host hardware configurations tested.
+
+\subsection{Correctness: cpython parity}
+
+The cpython test suite serves as the primary correctness gate for the
+\KVMvTwo{} backend.  All 21 test classes pass identically on both backends,
+confirming that the \KVMvTwo{} trap path, exception handling, FPU
+management, and SMP synchronization correctly implement the Linux syscall
+and signal-delivery semantics that CPython depends on.
+
+\subsection{Overhead breakdown}
+
+\begin{table}[ht]
+\centering
+\caption{Overhead breakdown for a single guest syscall (KVM v2, exit path)}
+\label{tab:kvm-overhead-breakdown}
+\begin{tabular}{lr}
+\toprule
+\textbf{Component} & \textbf{Approximate cycles} \\
+\midrule
+Guest \texttt{SYSCALL} (CPL 3 $\to$ 0) & 20 \\
+Trampoline \texttt{out} execution       & 5 \\
+VM exit (hardware)                      & 500 \\
+Host marshal from sync-regs             & 50 \\
+UML \texttt{handle\_syscall} dispatch   & varies \\
+Host marshal to sync-regs               & 50 \\
+VM entry (hardware)                     & 500 \\
+Trampoline \texttt{SYSRETQ}            & 20 \\
+\midrule
+\textbf{Fixed overhead (excl.\ dispatch)} & $\sim$\textbf{\num{1145}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The fixed overhead of approximately \num{1145} cycles per syscall is
+dominated by the VM exit and entry hardware costs ($\sim$\num{1000}
+cycles combined).  This is the fundamental floor of the VM exit approach.
+Hardware improvements in future CPU generations (Intel FRED, AMD VMCB
+Clean Bits, reduced VMCS read/write latency) will lower this floor
+further.  For trivial calls, the LSTAR gadget bypasses this floor entirely.
+
+
+% ------------------------------------------------------------------
+\section{Summary}
+\label{sec:kvm-summary}
+% ------------------------------------------------------------------
+
+The \KVMvTwo{} backend demonstrates that hardware virtualization extensions
+can be used not just for traditional virtual machines but as a high-performance
+syscall interposition mechanism for an architecture port of the Linux kernel.
+The key insights are:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{IO-port trapping as a syscall gate.}
+    The \texttt{out} instruction provides a deterministic, minimal-cost
+    VM exit path that encodes the trap class in the port number.  No
+    hypercall instruction (\texttt{VMCALL}/\texttt{VMMCALL}) is needed;
+    the existing KVM IO-exit infrastructure handles the dispatch.
+
+  \item \textbf{Stay-in-guest optimization.}
+    The LSTAR gadget proves that common system calls can be handled
+    entirely within VMX non-root mode by maintaining per-vCPU state pages
+    and a compact dispatch tree at the \texttt{MSR\_LSTAR} entry point.
+    The $1000\times$ improvement for \texttt{getpid} is not a synthetic
+    benchmark artifact---Python, which calls \texttt{getpid} during
+    every module import for logging, directly benefits.
+
+  \item \textbf{SMP requires systematic state auditing.}
+    The per-CPU vCPU pool creates shared mutable state (FPU, TDP cache,
+    CR2, IST stacks) that requires careful isolation.  The SMP-T$nn$
+    state-audit framework proved essential for systematically identifying
+    and fixing these issues; ad-hoc debugging would have been
+    intractable.
+
+  \item \textbf{The KVM API is sufficient.}
+    No kernel modifications are required.  The standard \KVM{} API----%
+    \texttt{KVM\_CREATE\_VM}, \texttt{KVM\_CREATE\_VCPU}, \texttt{KVM\_RUN},
+    \texttt{KVM\_SET\_USER\_MEMORY\_REGION}, \texttt{KVM\_SET\_CPUID2},
+    \texttt{KVM\_SET\_MSRS}, \texttt{KVM\_SET\_SREGS},
+    \texttt{KVM\_SET\_XCRS}, and \texttt{KVM\_SET\_SIGNAL\_MASK}---provides
+    everything needed to implement a full syscall interposition backend
+    with exception handling, FPU management, and SMP support~\cite{kvm-api}.
+\end{enumerate}
+
+\noindent
+The design draws directly from gVisor's KVM platform~\cite{gvisor-platforms}
+and Dune's user-level access to privileged CPU
+features~\cite{belay2012}, while inheriting the full fidelity of the Linux
+kernel by virtue of being an \texttt{arch/um/} port.  The combination of
+hardware-accelerated execution with exact kernel semantics positions \UML{}
+as a uniquely capable platform for kernel development, testing, fuzzing,
+and security research.

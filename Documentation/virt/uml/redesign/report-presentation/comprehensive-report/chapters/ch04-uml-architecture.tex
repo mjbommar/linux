@@ -1,0 +1,1087 @@
+% ==========================================================================
+%  Chapter 4 — UML Architecture and Design
+% ==========================================================================
+\chapter{UML Architecture and Design}
+\label{ch:architecture}
+
+\epigraph{%
+  Every architecture port is a negotiation between the abstractions the kernel
+  expects and the mechanisms the hardware provides.  In UML, the ``hardware''
+  is another kernel.%
+}{Author's observation}
+
+User-Mode Linux is, at its core, an architecture port.  It implements the same
+interfaces that \texttt{arch/x86}, \texttt{arch/arm64}, or \texttt{arch/riscv}
+implement---trap dispatch, context switching, page table management, timer
+infrastructure, SMP synchronization---but the target ``hardware'' is not a CPU
+in ring~0.  It is the host Linux kernel, accessed through system calls.  This
+chapter describes the internal architecture of the \texttt{arch/um/} tree as it
+stands after the v2 redesign: the directory layout, the three-layer abstraction
+model, the backend selection mechanism, the stub process model, guest memory
+management, symmetric multiprocessing, the device model, and the build system.
+
+
+% --------------------------------------------------------------------------
+\section{The \texttt{arch/um/} Directory}
+\label{sec:arch-um-dir}
+
+In the Linux source tree, every supported architecture lives under a dedicated
+subdirectory of \texttt{arch/}.  UML is no exception: \texttt{arch/um/}
+contains roughly 40{,}000 lines of C (excluding tests and the archived v1 KVM
+backend) spread across six major subdirectories and their associated headers.
+What makes UML special is that the ``hardware abstraction layer'' at the bottom
+of this code does not talk to PCI buses, interrupt controllers, or MMU hardware.
+Instead it calls \syscall{clone}, \syscall{mmap}, \syscall{mprotect},
+\syscall{futex}, \syscall{ioctl}, and \syscall{sigaction} on the host
+kernel~\cite{dike2000,dike2006book}.
+
+\subsection{Directory Structure}
+
+Table~\ref{tab:arch-um-dirs} summarizes the top-level layout.  Two features of
+this structure deserve emphasis.
+
+\begin{table}[ht]
+\centering
+\caption{Top-level directories under \texttt{arch/um/}.}
+\label{tab:arch-um-dirs}
+\rowcolors{2}{UMLPanel}{white}
+\begin{tabularx}{\textwidth}{l Y}
+\toprule
+\textbf{Directory} & \textbf{Purpose} \\
+\midrule
+\texttt{kernel/}   & Core kernel-side logic: trap dispatch (\texttt{trap.c}),
+                      TLB synchronization (\texttt{tlb.c}), SMP
+                      (\texttt{smp.c}), timekeeping (\texttt{time.c}), backend
+                      arbiter (\texttt{backend.c}), Layer~2 static-key hooks
+                      (\texttt{hooks.c}, \texttt{hooks\_bench.c}), template
+                      pause (\texttt{template\_pause.c}), process management
+                      (\texttt{process.c}), and the linker script
+                      (\texttt{vmlinux.lds.S}). \\
+\texttt{os-Linux/} & Host-side userspace code: signal handling
+                      (\texttt{signal.c}), memory operations (\texttt{mem.c}),
+                      process management (\texttt{process.c}), SMP pthread
+                      lifecycle (\texttt{smp.c}), startup and probe
+                      (\texttt{start\_up.c}), and the \texttt{skas/}
+                      subdirectory containing the SKAS trap loop
+                      (\texttt{process.c}) and stub syscall batching
+                      (\texttt{mem.c}). These files are compiled with
+                      \texttt{USER\_CFLAGS}---they link against glibc and the
+                      host kernel's UAPI. \\
+\texttt{backend/}  & Pluggable backend implementations.  Currently:
+                      \texttt{seccomp/} (the mainline seccomp-SIGSYS backend),
+                      \texttt{kvm-v2/} (the v2 KVM backend), \texttt{common/}
+                      (shared backend utilities), \texttt{contract/} (KUnit
+                      conformance tests), and \texttt{kvm-v1-archive/} (the
+                      archived v1 implementation, gated by
+                      \texttt{depends on BROKEN}). \\
+\texttt{drivers/}  & UML-specific device drivers: the \texttt{ubd} block
+                      device, vector and vector2 network drivers, console/TTY
+                      drivers, the management console (\texttt{mconsole}),
+                      virtio-uml, vfio-uml, and the host audio passthrough. \\
+\texttt{include/}  & Headers, organized into \texttt{asm/} (kernel-internal
+                      architecture headers), \texttt{shared/} (headers
+                      reachable from both kernel and USER translation units),
+                      and \texttt{uapi/} (userspace-visible ABI). \\
+\texttt{configs/}  & Default Kconfig files: \texttt{x86\_64\_defconfig},
+                      \texttt{i386\_defconfig}, \texttt{base\_defconfig}, and a
+                      \texttt{profiles/} subdirectory with tuned configurations
+                      for production, fuzzing, research, and sandbox use
+                      cases. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+First, the split between \texttt{kernel/} and \texttt{os-Linux/} is an artifact
+of UML's dual-world nature.  Code in \texttt{kernel/} is compiled as kernel
+code: it has access to \texttt{<linux/types.h>}, \texttt{<linux/spinlock.h>},
+the kernel's \texttt{printk}, and all the usual kernel APIs.  Code in
+\texttt{os-Linux/} is compiled as \emph{host userspace} code: it can call
+\texttt{malloc}, \texttt{pthread\_create}, and POSIX signal functions directly.
+The two worlds share data structures through the headers in
+\texttt{include/shared/}, but they cannot freely call each other's functions
+without crossing the kernel/user boundary through well-defined interfaces (the
+\texttt{os\_*} function family declared in \texttt{include/shared/os.h}).
+
+Second, the \texttt{backend/} directory is new in the v2 redesign.  Prior to
+the backend ops abstraction (Section~\ref{sec:three-layer}), the seccomp and
+ptrace trap mechanisms were interleaved throughout \texttt{os-Linux/skas/} and
+gated by \texttt{if (using\_seccomp)} conditionals.  The v2 work extracted each
+backend into its own directory with a clean ops table, making it possible to
+add the KVM backend without touching the seccomp code paths.
+
+
+% --------------------------------------------------------------------------
+\section{The Three-Layer Architecture}
+\label{sec:three-layer}
+
+The v2 redesign formalized UML's runtime instrumentation and trap-mechanism
+abstraction into three cleanly separated layers.  This decomposition is the
+central architectural contribution of the redesign effort.  Each layer addresses
+a different concern, and the layers compose orthogonally: any combination of
+Layer~1 backend, Layer~2 gate configuration, and Layer~3 sanitizer set produces
+a valid kernel.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  layer/.style={
+    draw, rounded corners=6pt, minimum width=13cm, minimum height=1.8cm,
+    font=\small, align=center, text width=12cm
+  },
+  arr/.style={-{Stealth[length=5pt]}, thick, color=UMLMuted},
+  lbl/.style={font=\footnotesize\bfseries, color=UMLMuted}
+]
+
+% Layer 3 — top
+\node[layer, fill=UMLGreen!8, draw=UMLGreen!50] (l3) at (0,6.5)
+  {\textbf{Layer 3: Compile-Time Wraps}\\[2pt]
+   KASAN \quad KMSAN \quad KCSAN \quad KFENCE \quad KCOV\\[1pt]
+   \textit{Completely orthogonal to Layers 1 and 2}};
+
+% Layer 2 — middle
+\node[layer, fill=UMLTeal!8, draw=UMLTeal!50] (l2) at (0,3.8)
+  {\textbf{Layer 2: Static-Key Hot-Path Gates}\\[2pt]
+   6 gates: \texttt{trace\_syscalls}, \texttt{kcov\_enabled},
+   \texttt{time\_travel\_active},\\
+   \texttt{kfence\_sample}, \texttt{record\_replay},
+   \texttt{perf\_dispatch}\\[1pt]
+   \textit{Off: $\sim$1--2\,ns (NOP/predicted branch) \quad
+   On: hook fires (tracing, coverage, record/replay)}};
+
+% Layer 1 — bottom
+\node[layer, fill=UMLBlue!8, draw=UMLBlue!50] (l1) at (0,1.0)
+  {\textbf{Layer 1: Backend Ops Table}\\[2pt]
+   \texttt{struct um\_backend\_ops} --- 18+ operations in 5 categories\\
+   seccomp (SIGSYS + futex) \quad | \quad kvm-v2 (\texttt{/dev/kvm} ioctl)\\[1pt]
+   \textit{Single-backend: direct call \quad Dynamic: indirect call
+   ($\sim$5--10 cycles)}};
+
+% Cost arrows
+\draw[arr] (l1.north) -- (l2.south)
+  node[midway, right=3pt, lbl] {composes};
+\draw[arr] (l2.north) -- (l3.south)
+  node[midway, right=3pt, lbl] {composes};
+
+% Side annotation
+\node[font=\footnotesize\itshape, color=UMLMuted, text width=3cm, align=center]
+  at (8.2,3.8) {Runtime\\toggleable\\per-event};
+\node[font=\footnotesize\itshape, color=UMLMuted, text width=3cm, align=center]
+  at (8.2,1.0) {Build-time\\or boot-time\\selection};
+\node[font=\footnotesize\itshape, color=UMLMuted, text width=3cm, align=center]
+  at (8.2,6.5) {Compile-time\\Kconfig};
+
+\end{tikzpicture}
+\caption{The three-layer architecture of UML's v2 redesign.  Each layer
+  composes orthogonally with the others.}
+\label{fig:three-layers}
+\end{figure}
+
+
+\subsection{Layer 1: The Backend Ops Table}
+\label{sec:layer1}
+
+The foundation of the architecture is \texttt{struct um\_backend\_ops}, defined
+in \texttt{arch/um/include/shared/backend.h}.  Every backend---seccomp,
+kvm-v2, and any future backend---populates a single global instance of this
+structure.  The structure carries a contract version
+(\texttt{UM\_BACKEND\_CONTRACT\_VERSION}, currently~2), a backend kind
+enumeration, four capability flags, and 18 function pointers organized into
+five categories:
+
+\begin{lstlisting}[language=KernelC, caption={Abbreviated
+  \texttt{struct um\_backend\_ops} (from
+  \texttt{arch/um/include/shared/backend.h}).},
+  label={lst:backend-ops}]
+struct um_backend_ops {
+    const char       *name;
+    enum um_backend_kind kind;
+    u32              contract_version;
+
+    /* Capability flags */
+    bool  uses_stub_reaper;
+    bool  has_syscall_stub_fd_map;
+    bool  stub_syscall_uses_futex;
+    bool  stub_child_runs_seccomp;
+
+    /* Lifecycle and trap (4) */
+    int  (*probe)(void);
+    int  (*init)(const struct um_backend_args *args);
+    void (*shutdown)(void);
+    void (*vcpu_run)(struct uml_pt_regs *regs);         /* HOT */
+
+    /* Memory (5) */
+    int  (*mm_create)(struct mm_struct *mm);
+    void (*mm_destroy)(struct mm_struct *mm);
+    int  (*mm_region_added)(...);                        /* HOT */
+    int  (*mm_region_removed)(...);                      /* HOT */
+    int  (*mm_region_protected)(...);
+
+    /* Scheduling (4 + 1 optional) */
+    int  (*thread_create)(...);
+    int  (*thread_start_idle)(...);
+    void (*context_switch)(struct task_struct *prev,     /* HOT */
+                           struct task_struct *next);
+    int  (*ipi_send)(int cpu, int vector);
+    void (*tlb_kick_others)(struct mm_struct *mm);  /* may be NULL */
+
+    /* Time (3) */
+    u64  (*read_clock_ns)(void);                        /* HOT */
+    int  (*set_timer)(int cpu, u64 deadline_ns,
+                      enum um_timer_mode mode);
+    u64  (*read_persistent_clock_ns)(void);
+
+    /* Debug / introspection (3) */
+    void (*init_thread_regs)(...);
+    int  (*read_guest_regs)(...);
+    int  (*write_guest_regs)(...);
+};
+\end{lstlisting}
+
+The \textbf{HOT ops}---\texttt{vcpu\_run}, \texttt{mm\_region\_added},
+\texttt{mm\_region\_removed}, \texttt{context\_switch}, and
+\texttt{read\_clock\_ns}---are the operations invoked on every guest system
+call, page fault, context switch, or timer read.  These are validated non-NULL
+at boot time by \texttt{validate\_hot\_ops()} in
+\umlpath{arch/um/kernel/backend.c}; a NULL hot op triggers an immediate kernel
+panic with a diagnostic message identifying the missing operation.
+
+The dispatch macro provides the performance-critical abstraction:
+
+\begin{lstlisting}[language=KernelC, caption={The dispatch macro resolves at
+  compile time in single-backend builds.}, label={lst:dispatch-macro}]
+#if defined(CONFIG_UM_BACKEND_SECCOMP_ONLY)
+# define um_backend_dispatch(op, ...) seccomp_##op(__VA_ARGS__)
+#else
+# define um_backend_dispatch(op, ...) (um_backend->op(__VA_ARGS__))
+#endif
+\end{lstlisting}
+
+In a single-backend build (\kconfig{UM\_BACKEND\_SECCOMP\_ONLY}), the macro
+expands to a direct function call via token pasting---zero indirect dispatch
+overhead.  In a dynamic build (\kconfig{UM\_BACKEND\_DYNAMIC}), the macro
+becomes a function pointer dereference through the global
+\texttt{um\_backend} pointer, costing a single well-predicted indirect call
+($\sim$5--10 cycles on modern x86).
+
+
+\subsection{Layer 2: Static-Key Hot-Path Gates}
+\label{sec:layer2}
+
+Layer~2 addresses a design tension that plagues every kernel instrumentation
+system: the choice between \emph{fast} and \emph{observable}.  Traditional
+approaches force this choice at compile time (e.g., enabling
+\kconfig{FTRACE} imposes a permanent overhead) or at boot time (e.g., kernel
+command-line tracing parameters).  UML's static-key gates make observability a
+\emph{runtime decision per event}.
+
+The mechanism uses Linux's jump-label infrastructure
+(\texttt{<linux/jump\_label.h>}).  Each gate is a
+\texttt{DEFINE\_STATIC\_KEY\_FALSE} instance.  When off, the call site contains
+either a 5-byte NOP (with \texttt{HAVE\_ARCH\_JUMP\_LABEL}) or a load-compare
+branch that the CPU's branch predictor resolves in under 2\,ns.  When on, the
+jump-label machinery patches the NOP to a jump into the slow-path handler.
+
+Six gates are currently defined, each controlling a family of hook sites:
+
+\begin{enumerate}[leftmargin=2em, itemsep=2pt]
+\item \texttt{um\_hook\_trace\_syscalls} --- system call entry/exit tracing,
+  page fault tracing, context switch tracing, IRQ entry tracing, clock read
+  tracing.
+\item \texttt{um\_hook\_kcov\_enabled} --- coverage-guided fuzzing feedback
+  at syscall boundaries.
+\item \texttt{um\_hook\_time\_travel\_active} --- deterministic time injection
+  for reproducible execution.
+\item \texttt{um\_hook\_kfence\_sample} --- KFENCE heap sampling at clock ticks.
+\item \texttt{um\_hook\_record\_replay} --- record/replay event capture at
+  syscall, page fault, context switch, IRQ, and clock boundaries.
+\item \texttt{um\_hook\_perf\_dispatch} --- performance counter dispatch at
+  syscall and context switch points.
+\end{enumerate}
+
+The hook helpers are declared \texttt{\_\_always\_inline} so that the
+static-branch check expands \emph{at the call site}, not inside a function
+prologue.  A typical helper composes multiple gates:
+
+\begin{lstlisting}[language=KernelC, caption={The \texttt{um\_on\_syscall\_entry}
+  hook helper composes four gates into a single inline expansion.},
+  label={lst:hook-helper}]
+static __always_inline void um_on_syscall_entry(struct pt_regs *regs)
+{
+    if (static_branch_unlikely(&um_hook_trace_syscalls))
+        __um_trace_syscall_entry(regs);
+    if (static_branch_unlikely(&um_hook_kcov_enabled))
+        __um_kcov_record_syscall(regs);
+    if (static_branch_unlikely(&um_hook_record_replay))
+        __um_record_event_syscall_entry(regs);
+    if (static_branch_unlikely(&um_hook_perf_dispatch))
+        __um_perf_syscall(regs);
+}
+\end{lstlisting}
+
+Gate state is toggled at runtime through debugfs:
+\texttt{/sys/kernel/debug/um/hooks/<name>} accepts writes of \texttt{1} (on)
+or \texttt{0} (off).  Each gate maintains per-CPU hit counters, summed
+on read through \texttt{um\_hook\_stats\_read()}, for observability without
+cross-CPU cacheline contention.
+
+An in-kernel microbenchmark
+(\umlpath{arch/um/kernel/hooks\_bench.c}) measures per-gate
+cost at runtime via debugfs: 10 batches of 100{,}000 iterations each per hook
+site, median reported.  This is the source of truth for the cost model.
+
+
+\subsection{Layer 3: Compile-Time Wraps}
+\label{sec:layer3}
+
+Layer~3 comprises the standard kernel sanitizer and coverage tools that UML
+supports by virtue of being a ``normal'' architecture port compiled by a
+standard compiler toolchain:
+
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+\item \textbf{KASAN} (Kernel Address Sanitizer)~\cite{kasan} --- detects
+  out-of-bounds and use-after-free bugs in slab/page allocator objects.
+\item \textbf{KMSAN} (Kernel Memory Sanitizer)~\cite{kmsan} --- detects
+  uses of uninitialized memory.
+\item \textbf{KCSAN} (Kernel Concurrency Sanitizer)~\cite{kcsan} --- detects
+  data races via compile-time instrumentation of memory accesses.
+\item \textbf{KFENCE} --- lightweight probabilistic heap-object guard-page
+  detection, sampling at timer ticks (gated by the Layer~2
+  \texttt{kfence\_sample} hook).
+\item \textbf{KCOV} --- coverage-guided fuzzing feedback, collecting per-task
+  coverage bitmaps for tools like syzkaller~\cite{syzkaller}.
+\end{itemize}
+
+These wraps are completely orthogonal to Layers~1 and~2.  A KASAN-instrumented
+UML running the seccomp backend with all Layer~2 gates off is a valid
+configuration; so is a clean (no-sanitizer) UML running the kvm-v2 backend with
+all gates on.  The three layers multiply rather than interfere.
+
+
+\subsection{Cost Model}
+\label{sec:cost-model}
+
+Table~\ref{tab:cost-model} shows the approximate per-event overhead for each
+layer and their composition into representative profiles.  The baseline is a
+``bare'' guest system call round-trip (guest $\to$ trap $\to$ kernel
+$\to$ return).  All figures assume x86-64, seccomp backend, single-backend
+inline dispatch.
+
+\begin{table}[ht]
+\centering
+\caption{Per-syscall-roundtrip cost model across layers and profiles.
+  Figures are representative; actual measurements vary with host
+  microarchitecture and workload.}
+\label{tab:cost-model}
+\rowcolors{2}{UMLPanel}{white}
+\begin{tabular}{l r r r r}
+\toprule
+\textbf{Profile} & \textbf{Layer 1} & \textbf{Layer 2} & \textbf{Layer 3}
+  & \textbf{Total overhead} \\
+\midrule
+\texttt{prod-fast}
+  & 0 (inline)     & $\sim$4--8\,ns (4 NOPs)   & 0           & $\sim$4--8\,ns \\
+\texttt{prod-with-hooks}
+  & 0 (inline)     & $\sim$50--100\,ns (gates on) & 0         & $\sim$50--100\,ns \\
+\texttt{research}
+  & $\sim$5--10\,ns & $\sim$50--100\,ns        & 0           & $\sim$55--110\,ns \\
+\texttt{fuzz}
+  & 0 (inline)     & $\sim$20--40\,ns (kcov on) & KASAN: 2--3$\times$ & 2--3$\times$ \\
+\texttt{fuzz-deep}
+  & 0 (inline)     & $\sim$50--100\,ns          & KASAN+KMSAN: 4--6$\times$ & 4--6$\times$ \\
+\texttt{race}
+  & $\sim$5--10\,ns & $\sim$50--100\,ns        & KCSAN: 3--5$\times$ & 3--5$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The key insight is that Layers~1 and~2 add \emph{nanoseconds} of overhead per
+event, while Layer~3 (sanitizers) dominates total cost when enabled.  The
+three-layer decomposition ensures that the fast path pays only for what it
+uses, and the decision to enable observability never requires a rebuild.
+
+
+% --------------------------------------------------------------------------
+\section{Backend Selection Mechanism}
+\label{sec:backend-selection}
+
+Backend selection operates at two levels: \emph{build-time} configuration
+through Kconfig, and \emph{boot-time} resolution through the
+\texttt{backend=} kernel command-line parameter.
+
+\subsection{Build-Time: Kconfig}
+
+The Kconfig choice block in \umlpath{arch/um/Kconfig} offers two dispatch
+modes:
+
+\begin{description}[leftmargin=2em, style=nextline]
+\item[\kconfig{UM\_BACKEND\_SECCOMP\_ONLY}]
+  Single-backend inline dispatch.  The \texttt{um\_backend\_dispatch()} macro
+  expands to direct \texttt{seccomp\_<op>()} calls via token pasting.  Zero
+  indirect-dispatch cost.  Smallest binary.  This is the recommended mode for
+  production and sandbox deployments.
+
+\item[\kconfig{UM\_BACKEND\_DYNAMIC}]
+  Multi-backend indirect dispatch.  Compiles every available backend
+  (currently seccomp; kvm-v2 joins this path once its Phase~A integration
+  is complete).  The dispatch macro dereferences the global
+  \texttt{um\_backend} pointer, costing one well-predicted indirect call per
+  site.  This is the recommended mode for distribution kernels and CI matrices
+  that need a single binary to support multiple backends.
+\end{description}
+
+Both modes \texttt{select UM\_BACKEND\_SECCOMP}; the seccomp backend is always
+available.  The kvm-v2 backend is gated by \kconfig{UM\_BACKEND\_KVM\_V2},
+which in turn depends on \texttt{EXPERT} and \kconfig{UM\_BACKEND\_DYNAMIC}.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=4pt, minimum width=3.2cm,
+              minimum height=1.2cm, font=\small, align=center},
+  decision/.style={draw, diamond, aspect=2.2, inner sep=1pt,
+                   font=\small, align=center},
+  arr/.style={-{Stealth[length=5pt]}, thick},
+  note/.style={font=\scriptsize\itshape, color=UMLMuted}
+]
+
+\node[box, fill=UMLPanel] (start) at (0,0) {Kconfig\\choice};
+
+\node[decision, fill=UMLBlue!8] (kc) at (0,-2)
+  {\footnotesize SECCOMP\\ONLY?};
+
+\node[box, fill=UMLGreen!10] (inline) at (-3.5,-4.2)
+  {Inline dispatch\\direct calls};
+\node[box, fill=UMLTeal!10] (dyn) at (3.5,-4.2)
+  {Dynamic dispatch\\indirect calls};
+
+\node[decision, fill=UMLTeal!8] (boot) at (3.5,-6.5)
+  {\footnotesize \texttt{backend=}\\param?};
+
+\node[box, fill=UMLAmber!10] (auto) at (0.5,-8.5) {auto\\(seccomp)};
+\node[box, fill=UMLAmber!10] (seccomp) at (3.5,-8.5) {seccomp};
+\node[box, fill=UMLAmber!10] (kvm) at (6.5,-8.5) {kvm-v2};
+
+\draw[arr] (start) -- (kc);
+\draw[arr] (kc) -- node[left, note] {yes} (inline);
+\draw[arr] (kc) -- node[right, note] {no} (dyn);
+\draw[arr] (dyn) -- (boot);
+\draw[arr] (boot) -- node[left, note] {auto} (auto);
+\draw[arr] (boot) -- node[left, note] {seccomp} (seccomp);
+\draw[arr] (boot) -- node[right, note] {force=kvm} (kvm);
+
+\node[note, text width=3cm] at (-3.5,-5.5)
+  {\texttt{seccomp\_vcpu\_run()}\\called directly};
+
+\end{tikzpicture}
+\caption{Backend selection flow: build-time Kconfig choice followed by
+  boot-time parameter resolution.}
+\label{fig:backend-selection}
+\end{figure}
+
+
+\subsection{Boot-Time: \texttt{init\_backend()}}
+
+The function \texttt{init\_backend()} in \umlpath{arch/um/kernel/backend.c} is
+called once from \texttt{setup\_arch()} during early boot.  It resolves the
+backend selection, validates HOT ops, invokes the backend's \texttt{probe()}
+and \texttt{init()} lifecycle ops, and sets the immutable global
+\texttt{um\_backend} pointer.
+
+In \kconfig{UM\_BACKEND\_DYNAMIC} builds, the resolution cascade in
+\texttt{pick\_dynamic\_backend()} is:
+
+\begin{enumerate}[leftmargin=2em]
+\item If \texttt{backend=force=<kind>} was specified and the requested backend
+  is not compiled in, the kernel panics immediately.
+\item If \texttt{backend=<kind>} was specified (non-force), the requested
+  backend is used if available; otherwise the kernel falls back with a
+  \texttt{pr\_warn}.
+\item If \texttt{backend=auto} (the default) or no parameter was given, the
+  seccomp backend is selected.
+\end{enumerate}
+
+The ptrace backend was removed entirely in the v2 refactoring.  Requesting
+\texttt{backend=force=ptrace} triggers a panic with a diagnostic message
+directing the user to pin to v6.16 or earlier.
+
+
+% --------------------------------------------------------------------------
+\section{The Stub Mechanism}
+\label{sec:stub-mechanism}
+
+The seccomp backend's core abstraction is the \emph{stub child}: a minimal
+host process that serves as the execution container for a single guest
+\texttt{mm\_struct}.  Each guest address space gets its own stub child, created
+by \texttt{mm\_create()} and destroyed by \texttt{mm\_destroy()}.  The stub
+provides the host-side process context in which guest userspace code runs
+and guest system calls are intercepted.
+
+\subsection{Stub Lifecycle}
+
+When a new guest \texttt{mm\_struct} is created (e.g., on \texttt{fork()} or
+\texttt{exec()}), the seccomp backend's \texttt{mm\_create} op clones a new
+host child process.  This child---the stub---is not a conventional process.  It
+executes a minimal trampoline (the ``stub code'') that:
+
+\begin{enumerate}[leftmargin=2em]
+\item Installs a seccomp BPF filter~\cite{seccomp-bpf} that traps all system
+  calls, delivering \texttt{SIGSYS} to the stub's signal handler instead of
+  executing the syscall on the host.
+\item Maps a shared communication page (the \texttt{stub\_data} structure) at a
+  fixed address in its address space.
+\item Enters an infinite loop: wait on a futex in \texttt{stub\_data},
+  process a batch of memory-management syscalls, and signal completion.
+\end{enumerate}
+
+\subsection{The \texttt{stub\_data} Structure}
+
+The shared \texttt{stub\_data} page (Listing~\ref{lst:stub-data}) is the
+communication channel between the UML kernel (running in the host parent
+process) and the stub child.  It occupies exactly one page
+(\texttt{UM\_KERN\_PAGE\_SIZE}) and contains:
+
+\begin{lstlisting}[language=KernelC, caption={The \texttt{stub\_data}
+  structure (from \texttt{arch/um/include/shared/skas/stub-data.h}).},
+  label={lst:stub-data}]
+struct stub_data {
+    long err;
+    int syscall_data_len;
+    struct stub_syscall syscall_data[...] __aligned(16);
+
+    /* Shared with signal handler (seccomp mode) */
+    short restart_wait;
+    unsigned int futex;   /* FUTEX_IN_CHILD or FUTEX_IN_KERN */
+    int signal;
+    unsigned short si_offset;
+    unsigned short mctx_offset;
+
+    struct stub_data_arch arch_data;
+
+    /* Signal handler stack */
+    unsigned char sigstack[UM_KERN_PAGE_SIZE]
+        __aligned(UM_KERN_PAGE_SIZE);
+};
+\end{lstlisting}
+
+The \texttt{syscall\_data} array holds a batch of \texttt{mmap}/\texttt{munmap}
+operations that the stub executes on behalf of the UML kernel's TLB
+synchronization layer.  Batching amortizes the futex wake/wait round-trip cost
+across multiple memory operations.
+
+\subsection{Futex-Based Synchronization}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  proc/.style={draw, rounded corners=4pt, minimum width=2.8cm,
+               minimum height=0.8cm, font=\small, fill=#1},
+  msg/.style={-{Stealth[length=4pt]}, thick, color=#1},
+  note/.style={font=\scriptsize, color=UMLMuted},
+  timeline/.style={thick, color=UMLMuted}
+]
+
+% UML kernel (parent) timeline
+\node[font=\small\bfseries, color=UMLBlue] at (-3,5.5) {UML Kernel};
+\draw[timeline] (-3,5) -- (-3,-1);
+
+% Stub child timeline
+\node[font=\small\bfseries, color=UMLTeal] at (3,5.5) {Stub Child};
+\draw[timeline] (3,5) -- (3,-1);
+
+% Step 1: Kernel fills syscall batch
+\node[proc=UMLBlue!10] (k1) at (-3,4.2) {Fill batch};
+\node[note, anchor=east] at (-4.5,4.2) {\texttt{syscall\_data[]}};
+
+% Step 2: futex = FUTEX_IN_CHILD, wake
+\draw[msg=UMLBlue] (-3,3.5) -- node[above, note]
+  {\texttt{futex} $\leftarrow$ \texttt{IN\_CHILD}; wake} (3,3.5);
+
+% Step 3: Stub processes batch
+\node[proc=UMLTeal!10] (s1) at (3,2.5) {Execute batch};
+\node[note, anchor=west] at (4.5,2.5) {mmap/munmap};
+
+% Step 4: futex = FUTEX_IN_KERN, wake parent
+\draw[msg=UMLTeal] (3,1.5) -- node[above, note]
+  {\texttt{futex} $\leftarrow$ \texttt{IN\_KERN}; wake} (-3,1.5);
+
+% Step 5: Kernel reads err
+\node[proc=UMLBlue!10] (k2) at (-3,0.5) {Check \texttt{err}};
+
+% Step 6: Resume guest
+\node[proc=UMLBlue!10] (k3) at (-3,-0.5) {Resume guest};
+\node[proc=UMLTeal!10] (s2) at (3,0.5) {Wait on futex};
+
+\end{tikzpicture}
+\caption{Futex-based synchronization between the UML kernel and the seccomp
+  stub child.  The shared \texttt{stub\_data.futex} field alternates between
+  \texttt{FUTEX\_IN\_CHILD} and \texttt{FUTEX\_IN\_KERN}.}
+\label{fig:stub-sync}
+\end{figure}
+
+Communication uses a single \texttt{unsigned int futex} field in
+\texttt{stub\_data}.  The protocol is simple
+(Figure~\ref{fig:stub-sync}):
+
+\begin{enumerate}[leftmargin=2em]
+\item The UML kernel fills the \texttt{syscall\_data} array with the batch of
+  memory operations to perform.
+\item The kernel sets \texttt{futex = FUTEX\_IN\_CHILD} and issues a
+  \texttt{FUTEX\_WAKE} system call~\cite{futex-lwn}.
+\item The stub child wakes, iterates through \texttt{syscall\_data}, executes
+  each mmap/munmap, and records any error in \texttt{err}.
+\item The stub sets \texttt{futex = FUTEX\_IN\_KERN} and issues
+  \texttt{FUTEX\_WAKE}.
+\item The kernel wakes, checks \texttt{err}, and proceeds.
+\end{enumerate}
+
+This is substantially faster than the old ptrace-based mechanism, which
+required a \texttt{PTRACE\_SETREGS} + \texttt{PTRACE\_CONT} + wait round-trip
+per operation~\cite{ptrace-man}.  The seccomp path achieves roughly 3--4$\times$
+lower syscall round-trip latency.
+
+
+% --------------------------------------------------------------------------
+\section{Guest Memory Management}
+\label{sec:guest-mm}
+
+UML's guest physical memory is backed by a host-side memory object: typically
+an anonymous \texttt{mmap} or a \texttt{tmpfs} file.  Guest page table changes
+are not self-effectuating---there is no hardware MMU to walk guest page tables.
+Instead, every guest PTE modification must be translated into a host system
+call (\texttt{mmap}, \texttt{munmap}, or \texttt{mprotect}) that adjusts the
+stub child's host address space to match.
+
+\subsection{The TLB Synchronization Layer}
+
+The mm-arbiter in \umlpath{arch/um/kernel/tlb.c} implements the
+\texttt{um\_tlb\_sync()} function, which is the single drain point for pending
+guest page table changes.  The flow is:
+
+\begin{enumerate}[leftmargin=2em]
+\item Guest kernel code (e.g., \texttt{do\_mmap}, \texttt{do\_munmap},
+  page fault handler) modifies PTEs and calls \texttt{um\_tlb\_mark\_sync()},
+  which records the affected address range in per-mm
+  \texttt{sync\_tlb\_range\_from}/\texttt{sync\_tlb\_range\_to} fields.
+\item Before the next guest userspace entry (\texttt{vcpu\_run}),
+  \texttt{um\_tlb\_sync()} walks the per-mm page table over the marked range,
+  inspects \texttt{pte\_needsync()} on each leaf, and emits a
+  \texttt{struct um\_memory\_region} per dirty PTE.
+\item Each region is dispatched through the backend's
+  \texttt{mm\_region\_added()} or \texttt{mm\_region\_removed()} op.  For the
+  seccomp backend, these ops translate into stub child mmap/munmap batches.
+  For kvm-v2, they translate into KVM memslot updates.
+\item After a successful drain, the mm-arbiter increments the per-mm
+  \texttt{tlb\_gen} counter and, if the backend provides a
+  \texttt{tlb\_kick\_others} op, invokes it to notify other vCPUs.
+\end{enumerate}
+
+\subsection{SMP TLB Generation Tracking}
+\label{sec:tlb-gen}
+
+Under SMP, multiple vCPUs may be executing code from the same
+\texttt{mm\_struct} concurrently.  When one vCPU modifies a page table and
+drains via \texttt{um\_tlb\_sync()}, the other vCPUs must be notified so they
+can flush their local view of the guest TLB.
+
+The mechanism uses two counters per mm, defined in
+\umlpath{arch/um/include/asm/mmu.h}:
+
+\begin{lstlisting}[language=KernelC, caption={Per-mm TLB generation counters
+  for SMP coherence.}, label={lst:tlb-gen}]
+typedef struct mm_context {
+    /* ... */
+    atomic64_t tlb_gen;
+    atomic64_t tlb_gen_seen_by[NR_CPUS];
+} mm_context_t;
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=2em]
+\item \texttt{tlb\_gen}: a monotonically increasing counter, incremented after
+  each successful \texttt{um\_tlb\_sync()} drain.
+\item \texttt{tlb\_gen\_seen\_by[cpu]}: for each vCPU, the most recent
+  \texttt{tlb\_gen} value at which that vCPU flushed its local TLB state.
+\end{itemize}
+
+On each \texttt{vcpu\_run} dispatch, the vCPU compares its
+\texttt{tlb\_gen\_seen\_by[cpu]} against the current \texttt{tlb\_gen}.  On
+mismatch, it performs a guest TLB flush (for kvm-v2, a CR4.PGE toggle inside
+KVM\_RUN) and updates its slot.
+
+The cross-vCPU kick is targeted: \texttt{tlb\_kick\_others()} only sends IPIs
+to vCPUs whose \texttt{tlb\_gen\_seen\_by[cpu]} is stale relative to the
+current mm's \texttt{tlb\_gen}.  This narrowing eliminates the IPI storm that a
+broadcast approach would cause under high mm-churn workloads.
+
+An important subtlety: \texttt{tlb\_gen\_seen\_by} is per-(mm, cpu), not
+per-vCPU globally.  A previous design used a single per-vCPU
+\texttt{last\_seen\_tlb\_gen} counter, but this suffered from cross-mm
+contamination: dispatching mm$_B$ (gen=5) after mm$_A$ (gen=3000) wrote 5 into
+the single counter, causing a return to mm$_A$ to see a spurious lag of 2995
+and potentially misleading the kicker.
+
+\subsection{Deferred Free: The mmu\_gather Integration}
+
+A subtlety of UML's deferred TLB-sync model is that it violates the standard
+\texttt{mmu\_gather} contract.  In a hardware architecture, \texttt{mmu\_gather}
+collects pages during an unmap, issues a TLB flush, and then frees the pages.
+In UML, the TLB flush does not happen until the next \texttt{vcpu\_run}
+dispatch.  This creates a window where freed pages could be reused by the
+kernel while stale TLB entries still point to them.
+
+The fix (rooted in \texttt{mm\_context\_t.deferred\_free\_pages}) intercepts
+the page-free path: instead of releasing pages immediately, they are queued
+on a per-mm deferred list and freed at the start of the next
+\texttt{vcpu\_run}, after the guest TLB has been flushed.
+
+
+% --------------------------------------------------------------------------
+\section{SMP Implementation}
+\label{sec:smp}
+
+UML implements symmetric multiprocessing by running one host pthread per
+virtual CPU.  This is a cooperative model: the host kernel schedules the
+pthreads, and UML's scheduler runs within each pthread to multiplex guest
+tasks.
+
+\subsection{Thread Model}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  cpu/.style={draw, rounded corners=6pt, minimum width=3cm,
+              minimum height=4cm, fill=#1, font=\small},
+  task/.style={draw, rounded corners=3pt, minimum width=2.2cm,
+               minimum height=0.6cm, fill=white, font=\scriptsize},
+  arr/.style={-{Stealth[length=4pt]}, thick, color=UMLMuted},
+  lbl/.style={font=\footnotesize\bfseries}
+]
+
+% Host process box
+\node[draw, dashed, rounded corners=8pt, minimum width=14cm,
+      minimum height=6.5cm, fill=UMLPanel, label={[lbl]above:Host Process
+      (UML binary)}] at (0,0) {};
+
+% vCPU 0
+\node[cpu=UMLBlue!10] (cpu0) at (-4.5,0) {};
+\node[lbl, color=UMLBlue] at (-4.5,1.6) {vCPU 0};
+\node[font=\scriptsize, color=UMLMuted] at (-4.5,1.1)
+  {pthread 0 (pinned)};
+\node[task] at (-4.5,0.3) {guest task A};
+\node[task] at (-4.5,-0.5) {guest task B};
+\node[task, fill=UMLGreen!10] at (-4.5,-1.3) {idle thread};
+
+% vCPU 1
+\node[cpu=UMLBlue!10] (cpu1) at (-0.5,0) {};
+\node[lbl, color=UMLBlue] at (-0.5,1.6) {vCPU 1};
+\node[font=\scriptsize, color=UMLMuted] at (-0.5,1.1)
+  {pthread 1 (pinned)};
+\node[task] at (-0.5,0.3) {guest task C};
+\node[task, fill=UMLGreen!10] at (-0.5,-0.5) {idle thread};
+
+% vCPU N-1
+\node[cpu=UMLBlue!10] (cpuN) at (4.5,0) {};
+\node[lbl, color=UMLBlue] at (4.5,1.6) {vCPU $N{-}1$};
+\node[font=\scriptsize, color=UMLMuted] at (4.5,1.1)
+  {pthread $N{-}1$ (pinned)};
+\node[task] at (4.5,0.3) {guest task D};
+\node[task] at (4.5,-0.5) {guest task E};
+\node[task, fill=UMLGreen!10] at (4.5,-1.3) {idle thread};
+
+% Dots
+\node[font=\Large, color=UMLMuted] at (2,0) {\ldots};
+
+% IPI arrows
+\draw[arr, color=UMLAmber, bend left=20] (-3.2,-2) to
+  node[below, font=\scriptsize, color=UMLAmber] {IPI (reschedule, call, TLB)}
+  (-1.8,-2);
+\draw[arr, color=UMLAmber, bend left=20] (1,-2) to (3.2,-2);
+
+\end{tikzpicture}
+\caption{UML SMP thread model: one host pthread per virtual CPU, each pinned
+  to a host CPU via \texttt{pthread\_setaffinity\_np}.  Guest tasks are
+  scheduled within each pthread by UML's copy of the Linux scheduler.}
+\label{fig:smp-model}
+\end{figure}
+
+At boot time, CPU~0 runs on the main thread.  For each additional CPU
+($1$ through $N{-}1$), \texttt{os\_start\_cpu\_thread()} in
+\umlpath{arch/um/os-Linux/smp.c} calls \texttt{pthread\_create()} to spawn a
+new host thread.  Each thread is immediately pinned to the corresponding host
+CPU via \texttt{pthread\_setaffinity\_np()} (SMP-T37):
+
+\begin{lstlisting}[language=KernelC, caption={CPU affinity pinning for vCPU
+  threads (from \texttt{arch/um/os-Linux/smp.c}).}, label={lst:affinity}]
+cpu_set_t cpuset;
+CPU_ZERO(&cpuset);
+CPU_SET(cpu, &cpuset);
+pthread_setaffinity_np(cpu_threads[cpu], sizeof(cpuset), &cpuset);
+\end{lstlisting}
+
+This pinning ensures that each guest CPU's host thread always executes on the
+same physical CPU, which is critical for the kvm-v2 backend's per-host-CPU
+vCPU pool: a given guest CPU always dispatches against the same KVM vCPU file
+descriptor.
+
+\subsection{Context Switching}
+
+A guest context switch is a call to the backend's \texttt{context\_switch(prev,
+next)} op.  For the seccomp backend, this involves saving and restoring the
+register state of the stub child process.  For kvm-v2, it involves saving
+FPU state from the per-CPU vCPU into \texttt{prev->thread} and loading
+\texttt{next->thread}'s saved state.
+
+\subsection{IPI Delivery}
+
+Inter-processor interrupts are sent through \texttt{um\_backend\_dispatch(ipi\_send, cpu, vector)}.  Four IPI vectors are defined:
+
+\begin{description}[leftmargin=2em, font=\ttfamily, itemsep=2pt]
+\item[UML\_IPI\_RES] Reschedule request (triggers \texttt{scheduler\_ipi()}).
+\item[UML\_IPI\_CALL\_SINGLE] Single-function call
+  (\texttt{generic\_smp\_call\_function\_single\_interrupt()}).
+\item[UML\_IPI\_CALL] Broadcast function call
+  (\texttt{generic\_smp\_call\_function\_interrupt()}).
+\item[UML\_IPI\_STOP] CPU offline (enter infinite pause loop).
+\end{description}
+
+The template-pause mechanism (\umlpath{arch/um/kernel/template\_pause.c})
+builds on top of the IPI infrastructure: it allows the UML kernel to quiesce
+all vCPUs to a named ``ready point,'' \texttt{SIGSTOP} the host process for
+an external supervisor to fork, and resume with per-child identity blobs.
+This is the foundation of the pool-based deployment model.
+
+\subsection{The \texttt{migrate\_disable} Fix (SMP-T13)}
+\label{sec:smp-t13}
+
+A critical correctness bug in the kvm-v2 backend's SMP support was discovered
+and fixed in the SMP-T13 work item (May~2026).  The issue: UML builds with
+\kconfig{PREEMPT\_VOLUNTARY}, which makes \texttt{preempt\_disable()} a no-op.
+The kvm-v2 backend's \texttt{vcpu\_run} looks up the per-host-CPU vCPU pointer
+using \texttt{smp\_processor\_id()} and then enters \texttt{KVM\_RUN}.  If the
+host scheduler migrates the pthread to a different host CPU between the
+lookup and the ioctl, the dispatch proceeds against the wrong vCPU---writing
+register state to the wrong \texttt{kvm\_run} mmap, executing the wrong
+vCPU's code.
+
+The fix uses \texttt{migrate\_disable()}, which pins the running task to its
+current host CPU regardless of the preempt-count semantics.  Voluntary
+scheduling (e.g., inside \texttt{handle\_syscall} via \texttt{sched\_yield})
+is still allowed---the key invariant is that when the task \emph{resumes}, it
+resumes on the \emph{same} CPU, so the per-CPU vCPU pointer remains valid.
+
+
+% --------------------------------------------------------------------------
+\section{Device Model}
+\label{sec:device-model}
+
+UML provides a set of paravirtualized devices that bridge the guest kernel's
+standard driver interfaces to host resources.  These are not emulations of
+physical hardware; they are purpose-built drivers that use host system calls
+for I/O.
+
+\begin{table}[ht]
+\centering
+\caption{UML device drivers and their host-side backing mechanisms.}
+\label{tab:devices}
+\rowcolors{2}{UMLPanel}{white}
+\begin{tabularx}{\textwidth}{l l Y}
+\toprule
+\textbf{Device} & \textbf{Source} & \textbf{Description} \\
+\midrule
+\texttt{ubd} &
+  \texttt{ubd\_kern.c} &
+  Block device backed by host files (typically raw disk images or sparse
+  files).  Supports multiple partitions, copy-on-write layers, and synchronous
+  or asynchronous I/O modes. \\
+
+Vector network &
+  \texttt{vector\_kern.c} &
+  Legacy network driver using vector (scatter-gather) transport.  Supports
+  TAP, raw sockets, and various encapsulation modes. \\
+
+Vector2 network &
+  \texttt{vector2\_core.c} &
+  Next-generation network driver with a modular transport/model/queue
+  architecture.  Supports TAP devices, host file descriptors, ethtool
+  statistics, and pluggable queue management.  Default in the v2
+  redesign. \\
+
+Console/TTY &
+  \texttt{stdio\_console.c} &
+  Serial-like consoles mapped to host stdio, PTYs, or named pipes.  Multiple
+  virtual consoles supported (\texttt{con0}, \texttt{con1}, \ldots),
+  including the stderr console for early-boot diagnostics. \\
+
+\texttt{mconsole} &
+  \texttt{mconsole\_kern.c} &
+  UML-specific management console accessible via a Unix domain socket.
+  Supports runtime commands: \texttt{halt}, \texttt{reboot}, \texttt{config}
+  (hot-add devices), \texttt{sysrq}, \texttt{cad} (Ctrl-Alt-Del), and
+  \texttt{proc} (read /proc entries from outside). \\
+
+\texttt{virtio-uml} &
+  \texttt{virtio\_uml.c} &
+  Standard virtio devices using vhost-user sockets.  Allows UML to use the
+  same virtio device backends (e.g., vhost-user-blk, vhost-user-net) that
+  QEMU and other VMMs use. \\
+
+\texttt{hostfs} &
+  \texttt{fs/hostfs/} &
+  Passthrough filesystem that maps a host directory tree directly into the
+  guest's VFS namespace.  Not a block device driver but a filesystem type
+  (\texttt{mount -t hostfs}).  Invaluable for development: edit files on
+  the host, see them immediately inside the guest. \\
+
+\texttt{vfio-uml} &
+  \texttt{vfio\_kern.c} &
+  VFIO device passthrough for assigning host PCI devices to the UML guest
+  (requires IOMMU support on the host). \\
+
+Harddog &
+  \texttt{harddog\_kern.c} &
+  Software watchdog timer backed by a host helper process. \\
+
+RTC &
+  \texttt{rtc\_kern.c} &
+  Real-time clock providing time-of-day to the guest, backed by host
+  \texttt{clock\_gettime}. \\
+
+Random &
+  \texttt{random.c} &
+  Entropy source backed by host \texttt{/dev/urandom}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The device model is deliberately thin.  Because UML runs as a userspace process,
+it cannot intercept hardware interrupts or DMA transactions.  Instead, UML
+devices use file descriptor-based I/O and signal-driven notification
+(typically \texttt{SIGIO}) to simulate device interrupts.  The
+\umlpath{arch/um/kernel/sigio.c} and \umlpath{arch/um/os-Linux/sigio.c} files
+manage the translation of host fd readability events into UML interrupt
+delivery.
+
+The vector2 network driver deserves special mention: it replaces the legacy
+vector driver with a cleanly layered architecture separating the transport
+mechanism (how packets reach the host), the device model (how the kernel sees
+the NIC), and the queue management (how packets are buffered and batched).
+Each layer is independently testable via KUnit, and the transport layer is
+pluggable---adding a new transport (e.g., AF\_XDP) requires implementing a
+small interface without touching the core driver.
+
+
+% --------------------------------------------------------------------------
+\section{Build System}
+\label{sec:build-system}
+
+Building UML requires specifying \texttt{ARCH=um} on the make command line.
+This selects the \umlpath{arch/um/} directory as the architecture-specific
+source tree and uses the host's native compiler (no cross-compilation toolchain
+needed, since the ``target'' is the host architecture itself running in
+userspace).
+
+\subsection{Basic Build}
+
+\begin{lstlisting}[language=bash, caption={Standard UML build commands.},
+  label={lst:build}]
+# Configure
+make ARCH=um O=build/um x86_64_defconfig
+
+# Optional: customize
+make ARCH=um O=build/um menuconfig
+
+# Build
+make ARCH=um O=build/um -j$(nproc)
+
+# Result: build/um/vmlinux (an ELF binary)
+\end{lstlisting}
+
+The output is a standard ELF binary named \texttt{vmlinux} that can be executed
+directly from the command line:
+
+\begin{lstlisting}[language=bash]
+./build/um/vmlinux mem=512M rootfstype=hostfs \
+    rw init=/bin/bash
+\end{lstlisting}
+
+\subsection{The \texttt{O=} Discipline}
+
+An important operational requirement is to \emph{always} use the \texttt{O=}
+out-of-tree build directory.  A bare \texttt{make ARCH=um} (without \texttt{O=})
+contaminates the source tree with generated files that opaquely break future
+\texttt{O=} builds.  Recovery requires \texttt{make mrproper} (which removes
+all generated files, including \texttt{.config}).  All examples in this report
+and in the project's CI configurations use the \texttt{O=build/um} convention.
+
+\subsection{Kconfig Structure}
+
+UML's Kconfig inherits from the host architecture (\texttt{x86} on x86-64
+hosts) but adds UML-specific options under the \texttt{UML}-prefixed namespace.
+Key configuration groups include:
+
+\begin{description}[leftmargin=2em, style=nextline]
+\item[\kconfig{UM\_BACKEND\_*}] Backend selection (Section~\ref{sec:backend-selection}).
+\item[\kconfig{UM\_BACKEND\_KVM\_V2}] The v2 KVM backend (requires \texttt{EXPERT}).
+\item[\kconfig{UM\_WORKER\_PROCESS}] Per-mm host worker process model.
+\item[\kconfig{UM\_TEMPLATE\_PAUSE\_FORK}] Fork-on-resume pool model.
+\item[\kconfig{UML\_NET\_*}] Network transport selection (TAP, raw, etc.).
+\item[\kconfig{BLK\_DEV\_UBD}] The \texttt{ubd} block device.
+\item[\kconfig{HOSTFS}] Host filesystem passthrough.
+\end{description}
+
+The \texttt{profiles/} subdirectory under \umlpath{arch/um/configs/} provides
+ready-made configurations for common use cases: \texttt{prod-fast} (minimal
+overhead, single-backend inline dispatch, no sanitizers),
+\texttt{fuzz} (KASAN + KCOV + snapshot/forkserver), \texttt{research}
+(dynamic dispatch with all hooks available), and others.
+
+\subsection{SUBARCH and Host Architecture}
+
+UML's build system uses a \texttt{SUBARCH} variable to determine the host
+architecture.  On x86-64 systems, \texttt{SUBARCH=x86} is detected
+automatically.  The host architecture's headers (e.g., register layouts,
+calling conventions, signal frame structures) are pulled in from
+\texttt{arch/x86/} via the \texttt{HEADER\_ARCH} mechanism in the top-level
+\umlpath{arch/um/Makefile}:
+
+\begin{lstlisting}[language=make, caption={Host architecture header
+  selection.}]
+HEADER_ARCH := $(SUBARCH)
+ifneq ($(filter $(SUBARCH),x86 x86_64 i386),)
+    HEADER_ARCH := x86
+endif
+HOST_DIR := arch/$(HEADER_ARCH)
+\end{lstlisting}
+
+This dual-architecture nature---\texttt{arch/um/} for UML-specific code,
+\texttt{arch/x86/} for host-specific data structures---is what allows UML to
+run unmodified x86-64 binaries in the guest while itself being a fundamentally
+different ``architecture'' from the kernel's perspective.
+
+
+% --------------------------------------------------------------------------
+\section{Chapter Summary}
+\label{sec:arch-summary}
+
+UML's architecture is the product of a sustained negotiation between the
+abstractions the Linux kernel expects from a hardware platform and the
+mechanisms available through the host kernel's system call interface.  The v2
+redesign formalized this negotiation into three orthogonal layers:
+
+\begin{enumerate}[leftmargin=2em]
+\item A \textbf{backend ops table} that encapsulates the trap mechanism behind
+  a stable 18-operation interface, enabling both seccomp and KVM backends to
+  coexist with zero code duplication in the shared kernel paths.
+\item \textbf{Static-key gates} that make observability a per-event runtime
+  decision, with nanosecond-scale overhead when disabled and no rebuild
+  required to toggle.
+\item \textbf{Compile-time sanitizer wraps} that compose with the first two
+  layers without interference, enabling the full spectrum from bare-metal-speed
+  production to deep sanitizer coverage.
+\end{enumerate}
+
+The stub mechanism, TLB generation tracking, SMP thread pinning, and device
+model complete the picture of a virtual machine monitor that is simultaneously
+a kernel architecture port, a testing platform, and a research vehicle.
+Chapter~\ref{ch:implementation} explores the implementation details of each
+subsystem, and Chapter~\ref{ch:kvm} describes how the kvm-v2 backend
+leverages this architecture to add hardware-accelerated execution.

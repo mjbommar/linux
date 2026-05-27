@@ -1,0 +1,220 @@
+% ==========================================================================
+%  User-Mode Linux: A Comprehensive Technical Report
+%  Michael J. Bommarito II
+%  May 2026
+% ==========================================================================
+\documentclass[11pt,twoside,openright]{book}
+
+\usepackage[a4paper,margin=1in,headheight=15pt]{geometry}
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setsansfont{Latin Modern Sans}
+\setmonofont[Scale=0.88]{Latin Modern Mono}
+
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,shapes.geometric,backgrounds,
+                 matrix,decorations.pathreplacing,chains}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{siunitx}
+\sisetup{detect-all,group-separator={,},group-minimum-digits=4}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{xurl}
+\usepackage{hyperref}
+\usepackage[backend=biber,style=numeric,sorting=none,maxbibnames=99]{biblatex}
+\addbibresource{references.bib}
+\usepackage{tocloft}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{textcomp}
+\usepackage{microtype}
+\usepackage{epigraph}
+\usepackage{titlesec}
+
+% --- Colors ---
+\definecolor{UMLBlue}{HTML}{1F5A7A}
+\definecolor{UMLTeal}{HTML}{287D7D}
+\definecolor{UMLGreen}{HTML}{2E7D32}
+\definecolor{UMLAmber}{HTML}{B36B00}
+\definecolor{UMLRed}{HTML}{A83232}
+\definecolor{UMLInk}{HTML}{182026}
+\definecolor{UMLMuted}{HTML}{66717A}
+\definecolor{UMLPanel}{HTML}{F3F6F8}
+\definecolor{UMLGrid}{HTML}{D9E1E7}
+\definecolor{CodeBg}{HTML}{F5F7FA}
+\definecolor{KernelGold}{HTML}{9B870C}
+
+% --- Hyperref ---
+\hypersetup{
+  colorlinks=true,
+  linkcolor=UMLBlue,
+  citecolor=UMLTeal,
+  urlcolor=UMLBlue,
+  pdftitle={User-Mode Linux: A Comprehensive Technical Report},
+  pdfauthor={Michael J. Bommarito II},
+  pdfsubject={Linux kernel, virtualization, User-Mode Linux}
+}
+
+% --- Listings ---
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{CodeBg},
+  frame=single,
+  rulecolor=\color{UMLGrid},
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=4,
+  showstringspaces=false,
+  keywordstyle=\color{UMLBlue}\bfseries,
+  commentstyle=\color{UMLMuted}\itshape,
+  stringstyle=\color{UMLTeal},
+  numbers=left,
+  numberstyle=\tiny\color{UMLMuted},
+  numbersep=8pt,
+  xleftmargin=2em,
+  framexleftmargin=1.5em,
+  captionpos=b,
+  aboveskip=1em,
+  belowskip=0.5em
+}
+
+\lstdefinelanguage{KernelC}{
+  language=C,
+  morekeywords={__always_inline,__section,__user,__kernel,__iomem,
+                u8,u16,u32,u64,s8,s16,s32,s64,bool,
+                atomic_t,atomic64_t,spinlock_t,
+                CONFIG_UM_BACKEND_SECCOMP,CONFIG_UM_BACKEND_KVM_V2,
+                DECLARE_STATIC_KEY_FALSE,static_branch_unlikely,
+                unlikely,likely,BUG_ON,WARN_ON,
+                DEFINE_MUTEX,DEFINE_SPINLOCK,
+                pr_info,pr_err,pr_warn,pr_debug,
+                MODULE_LICENSE,MODULE_AUTHOR},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+
+% --- Headers and footers ---
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\textit{User-Mode Linux: A Comprehensive Technical Report}}
+\fancyhead[RO]{\small\textit{\leftmark}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- Chapter formatting ---
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{UMLBlue}}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-20pt}{40pt}
+
+% --- Table column types ---
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\renewcommand{\arraystretch}{1.18}
+
+% --- Custom commands ---
+\newcommand{\UML}{\textsf{UML}}
+\newcommand{\KVM}{\textsf{KVM}}
+\newcommand{\KVMvTwo}{\texttt{kvm-v2}}
+\newcommand{\Seccomp}{\texttt{seccomp}}
+\newcommand{\umlpath}[1]{\texttt{#1}}
+\newcommand{\syscall}[1]{\texttt{#1()}}
+\newcommand{\kconfig}[1]{\texttt{CONFIG\_#1}}
+\newcommand{\ns}{\,ns}
+\newcommand{\us}{\,\textmu{}s}
+
+\newcommand{\statusdone}{\textcolor{UMLGreen}{\textbf{DONE}}}
+\newcommand{\statusprogress}{\textcolor{UMLAmber}{\textbf{IN PROGRESS}}}
+\newcommand{\statusblocked}{\textcolor{UMLRed}{\textbf{BLOCKED}}}
+
+% --- Document ---
+\begin{document}
+
+% ===== TITLE PAGE =====
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+
+{\Huge\bfseries\color{UMLBlue} User-Mode Linux}\\[0.8cm]
+{\LARGE\color{UMLInk} A Comprehensive Technical Report}\\[0.3cm]
+{\large\color{UMLMuted} History, Architecture, Implementation, and the v2 Redesign}
+
+\vspace{2cm}
+
+{\Large Michael J. Bommarito II}\\[0.3cm]
+{\normalsize\texttt{michael.bommarito@gmail.com}}
+
+\vspace{1.5cm}
+
+{\large May 2026}
+
+\vspace{2cm}
+
+\begin{tikzpicture}[scale=0.8]
+  % Stylized layer diagram
+  \fill[UMLBlue!10,rounded corners=8pt] (-4,-0.5) rectangle (4,0.5);
+  \fill[UMLTeal!10,rounded corners=8pt] (-4,1) rectangle (4,2);
+  \fill[UMLGreen!10,rounded corners=8pt] (-4,2.5) rectangle (4,3.5);
+  \fill[KernelGold!10,rounded corners=8pt] (-4,4) rectangle (4,5);
+
+  \node[font=\small\bfseries,color=UMLBlue] at (0,0) {Host Kernel (Linux)};
+  \node[font=\small\bfseries,color=UMLTeal] at (0,1.5) {Backend Layer (seccomp / kvm-v2)};
+  \node[font=\small\bfseries,color=UMLGreen] at (0,3) {UML Kernel (arch/um/)};
+  \node[font=\small\bfseries,color=KernelGold] at (0,4.5) {Guest Userspace};
+
+  \draw[-{Stealth[length=6pt]},thick,color=UMLMuted] (4.5,0) -- (4.5,5)
+    node[midway,right,font=\footnotesize] {Privilege};
+\end{tikzpicture}
+
+\vfill
+
+{\small
+Based on the \texttt{mjbommar/linux} kernel tree, branch \texttt{next}\\
+7 series-level commits on \texttt{torvalds/master} (v7.1-rc5+)\\[0.5em]
+\textit{Prepared with assistance from Claude (Anthropic)}
+}
+\end{titlepage}
+
+% ===== FRONT MATTER =====
+\frontmatter
+\tableofcontents
+\newpage
+\listoffigures
+\listoftables
+
+% ===== MAIN MATTER =====
+\mainmatter
+
+\input{chapters/ch01-introduction.tex}
+\input{chapters/ch02-history.tex}
+\input{chapters/ch03-foundations.tex}
+\input{chapters/ch04-uml-architecture.tex}
+\input{chapters/ch05-uml-implementation.tex}
+\input{chapters/ch06-kvm-v2-backend.tex}
+\input{chapters/ch07-applications.tex}
+\input{chapters/ch08-related-work.tex}
+\input{chapters/ch09-v2-redesign.tex}
+\input{chapters/ch10-conclusion.tex}
+
+% ===== BACK MATTER =====
+\backmatter
+\printbibliography[heading=bibintoc]
+
+\appendix
+\input{chapters/appendix-a-source-map.tex}
+\input{chapters/appendix-b-benchmarks.tex}
+
+\end{document}
