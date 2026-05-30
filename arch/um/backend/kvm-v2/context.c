@@ -222,7 +222,7 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 	 * (bit 4) tells KVM to skip the IA32_APERF (0xE7) / IA32_MPERF
 	 * (0xE8) rdmsr intercept and let the guest read the host
 	 * counters directly.  Without it KVM returns zero — the
-	 * regression Anderson hit with QEMU + libvirt, which plumb
+	 * regression the QEMU+libvirt userspace VMM does not surface, which plumb
 	 * HLT/MWAIT/PAUSE/CSTATE via -overcommit cpu-pm=on but not
 	 * APERFMPERF.  See Documentation/virt/uml/aperf-mperf.rst.
 	 *

@@ -14,6 +14,62 @@ ordering KVM enforces), see
 [`Documentation/virt/uml/aperf-mperf.rst`](../../aperf-mperf.rst).
 
 
+## Is this actually useful?  Honest assessment
+
+Short answer: **yes for two narrow purposes, no for a third you might
+expect.**
+
+The feature plumbs a per-VM KVM cap.  But the cap only changes the
+behavior of `rdmsr 0xE7/0xE8` *when that instruction executes at
+guest CPL=0 inside the KVM guest*.  For UML, almost no code runs
+there:
+
+* UML's "kernel" code runs as a host userspace process at host
+  CPL=3 — it issues KVM ioctls but never executes inside the KVM
+  guest itself.
+* Guest userspace runs at guest CPL=3 inside the KVM guest.
+  `rdmsr` `#GP`s at CPL=3 unconditionally, cap or no cap.
+* The only code at guest CPL=0 inside the KVM guest is the LSTAR
+  trampoline / gadget and the IDT exception handlers — small,
+  hand-written assembly stubs that do not currently `rdmsr` on
+  APERF/MPERF.
+
+So three uses, ranked by honesty:
+
+1. **Useful (yes): a faithful-VMM reference.** UML's kvm-v2 now
+   correctly plumbs `KVM_X86_DISABLE_EXITS_APERFMPERF`.  That makes
+   it a known-good userspace VMM against which to compare
+   behaviors — e.g. when chasing why a different userspace VMM
+   (QEMU + libvirt is the current case) returns zero on these MSRs
+   despite advertising the feature via CPUID.  The demo + status
+   probe isolate "did the userspace ioctl get issued and accepted"
+   from "did the guest read the right value" — which is the exact
+   delineation Maintainers debugging the QEMU/libvirt gap need.
+
+2. **Useful (yes): future-proofing for a gadget consumer.** When
+   someone adds an `rdmsr 0xE7/0xE8` to the LSTAR gadget body (or a
+   custom syscall NR routed through it), the bit will already be
+   set per-VM and that code will read real host counters at guest
+   CPL=0.  Without the cap-enable now, that future work would also
+   have to land the ioctl plumbing.  We've split the two changes
+   so the assembly-level gadget work can land independently.
+
+3. **NOT useful (no): reading APERF/MPERF values from inside the
+   running UML guest today.**  There is no consumer yet.  A guest
+   userspace program that wants the counters cannot get them
+   without one of the three adaptations under "Adapting for
+   guest-side counter reads" below.  If your goal is to see the
+   numbers, this feature alone is insufficient.
+
+If point 3 is what you actually want and you don't need (1) or (2),
+the honest answer is "this feature doesn't help you yet."  The
+gadget extension under "Adapting" path 2 is the smallest gap to
+close — roughly 20 lines of assembly in `lstar_gadget.S` plus a
+custom NR, plus a few lines in the demo to call it via inline `asm
+volatile("syscall")`.  Happy to land that as a follow-up if you
+want the counters surfaced to guest userspace.
+
+
 ## What the demo proves
 
 1. UML's kvm-v2 backend issued `KVM_ENABLE_CAP` for
@@ -23,9 +79,10 @@ ordering KVM enforces), see
 3. The verdict reflects the operator's intent (`toggle=on` with the
    boot param, `toggle=off` when explicitly disabled).
 
-That sequence is the architectural plumbing Anderson's QEMU+libvirt
-chain is missing.  The demo here proves the kernel-side path works
-when a userspace VMM does request the cap correctly.
+That sequence is the architectural plumbing the upstream QEMU +
+libvirt chain is missing today.  The demo here proves the
+kernel-side path works when a userspace VMM does request the cap
+correctly.
 
 
 ## What the demo does NOT prove
@@ -36,7 +93,7 @@ host CPL=3 — `rdmsr` would `#GP` there, regardless of the
 disable-exits bit.  The KVM passthrough only affects code running at
 **guest** CPL=0 inside the KVM guest (real guest kernels under QEMU;
 for kvm-v2 specifically, only the LSTAR gadget and exception stubs).
-For a regular Linux guest under QEMU (Anderson's actual case), the
+For a regular Linux guest under QEMU (the upstream-VMM case), the
 guest kernel runs at guest CPL=0 and reads the MSRs natively once
 the cap is set.  See the bridging notes in
 [`../../aperf-mperf.rst`](../../aperf-mperf.rst) under
@@ -168,7 +225,7 @@ If you want to actually see APERF/MPERF *values* (not just confirm
 the plumbing), you need code running at guest CPL=0 inside KVM.
 Three options:
 
-1. **Real Linux guest under QEMU.** Apply Anderson's QEMU patch to
+1. **Real Linux guest under QEMU.** Apply a QEMU patch to
    plumb `KVM_X86_DISABLE_EXITS_APERFMPERF`, then run a regular
    Linux guest with a small kernel module that calls
    `rdmsrl_safe(MSR_IA32_APERF, ...)`.  This is the production

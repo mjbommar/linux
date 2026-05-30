@@ -164,7 +164,7 @@ build with the Kconfig=n) the output reads::
 To actually read APERF/MPERF *values* from a guest, see the example
 README at ``Documentation/virt/uml/examples/aperf-mperf/README.md``
 under "Adapting for guest-side counter reads".  Three options
-documented: real Linux guest under QEMU (Anderson's case), an LSTAR
+documented: real Linux guest under QEMU (the upstream-VMM case), an LSTAR
 gadget extension, or in-kernel nested KVM.
 
 Selftest
@@ -172,23 +172,23 @@ Selftest
 
 A boot-and-read kselftest lives at
 ``tools/testing/selftests/um/aperf-mperf-smoke/``.  It boots a
-``kvm-v2`` UML kernel, reads the debugfs probe twice with a busy
-delay in between, and asserts:
-
-1. Both probes return ``aperf > 0`` and ``mperf > 0``.
-2. The second probe's counters strictly exceed the first.
-3. The ratio ``aperf / mperf`` is within a sane range (0.5 .. 2.0).
+``kvm-v2`` UML kernel, runs the freestanding demo at
+``Documentation/virt/uml/examples/aperf-mperf/aperf-mperf-demo`` as
+``init=``, reads the status probe, and asserts the demo emits
+``APERF_MPERF_DEMO: PASS plumbing_ok=1`` -- i.e., vm_create issued
+``KVM_ENABLE_CAP`` and KVM accepted the cap.  It does NOT assert
+non-zero counter values (see "Verifying from inside the guest"
+above for why).
 
 Run::
 
   cd tools/testing/selftests/um/aperf-mperf-smoke
-  ./run.sh /path/to/uml-kernel-binary
+  UML_BINARY=/path/to/uml-kernel-binary ./run-aperf-mperf-smoke.sh
 
 The test prints ``PASS`` on success and ``FAIL: <reason>`` on
-failure.  The kernel binary must be built with
-``CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y`` and the host
-CPU must support ``X86_FEATURE_APERFMPERF``; both prerequisites are
-checked at the start of the script.
+failure.  Skips when the kernel binary or demo binary is absent,
+when ``/dev/kvm`` is unreadable, or when the host CPU lacks
+``X86_FEATURE_APERFMPERF``.
 
 Bridging back to QEMU / libvirt
 ===============================

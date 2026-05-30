@@ -42,11 +42,12 @@
  *
  *   The architectural value is real: UML's kvm-v2 is now a faithful
  *   KVM userspace VMM with respect to APERFMPERF disable-exits.
- *   That fills the gap Anderson hit in QEMU+libvirt and gives him a
- *   reproducer for the cap-plumbing logic.  Actually consuming the
- *   counters from guest code is a separate problem (see the README
- *   under Documentation/virt/uml/examples/aperf-mperf/ for the
- *   bridging notes).
+ *   That fills the cap-plumbing gap in the upstream QEMU+libvirt
+ *   userspace VMM and provides a reproducer for the cap-plumbing
+ *   logic.  Actually consuming the counters from guest code is a
+ *   separate problem (see the README under
+ *   Documentation/virt/uml/examples/aperf-mperf/ for the bridging
+ *   notes).
  *
  * Constraints captured here so this file stays self-contained:
  *

@@ -10,11 +10,11 @@ um: kvm-v2 probed: kvm_fd=3 api=12 caps=0x103 (A.2 — creating VM)
 um: kvm-v2 vm_create: APERF/MPERF MSR passthrough enabled (guest CPL=0 rdmsr(0xE7/0xE8) reads host counters; UML kernel runs at host CPL=3 and cannot itself exercise the path)
 um: kvm-v2 physmem_memslot: deferred (uml_physmem=0x0 physmem_size=0x8000000 not yet populated; lazy retry will land it)
 swapper: page allocation failure: order:0, mode:0x100(__GFP_ZERO), nodemask=(null)
-CPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted 7.1.0-rc5-00016-gb024c1647c94-dirty #8 VOLUNTARY 
+CPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted 7.1.0-rc5-00017-g442621da6b4a-dirty #9 VOLUNTARY 
 Stack:
- 7fffffffc050 604f592a 603f28eb 00000000
+ 7fffffffbf70 604f592a 603f28eb 00000000
  ffffff00 604f592a 605a0548 604f43b9
- 7fffffffc080 6002d648 00000005 00000000
+ 7fffffffbfa0 6002d648 00000005 00000000
 Call Trace:
 Mem-Info:
 active_anon:0 inactive_anon:0 isolated_anon:0
@@ -39,7 +39,7 @@ um: kvm-v2 install_sregs: vcpu_fd=5 cr0=0x80010023 cr4=0x620 efer=0xd01 cs.l=1
 um: kvm-v2 install_sigmask: vcpu_fd=5 (sigfillset minus SIGALRM)
 um: kvm-v2 vcpu_create: pool of 1 vCPU(s) up (kvm_run_size=12288)
 um: backend = kvm-v2 (contract v2)
-Linux version 7.1.0-rc5-00016-gb024c1647c94-dirty (mjbommar@server7) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #8 Sat May 30 11:24:23 EDT 2026
+Linux version 7.1.0-rc5-00017-g442621da6b4a-dirty (mjbommar@server7) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #9 Sat May 30 11:31:43 EDT 2026
 random: crng init done
 Zone ranges:
   Normal   [mem 0x0000000000000000-0x0000000067ffffff]
@@ -57,7 +57,7 @@ mem auto-init: stack:all(zero), heap alloc:off, heap free:off
 SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
 NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 64
 clocksource: timer: mask: 0xffffffffffffffff max_cycles: 0x1cd42e205, max_idle_ns: 881590404426 ns
-Calibrating delay loop... 9817.29 BogoMIPS (lpj=49086464)
+Calibrating delay loop... 9989.32 BogoMIPS (lpj=49946624)
 Checking that host ptys support output SIGIO...Yes
 pid_max: default: 32768 minimum: 301
 Mount-cache hash table entries: 512 (order: 0, 4096 bytes, linear)
@@ -96,7 +96,7 @@ TCP: Hash tables configured (established 1024 bind 1024)
 UDP hash table entries: 256 (order: 2, 16384 bytes, linear)
 NET: Registered PF_UNIX/PF_LOCAL protocol family
 printk: legacy console [stderr0] disabled
-mconsole (version 2) initialized on /home/mjbommar/.uml/7uSWd7/mconsole
+mconsole (version 2) initialized on /home/mjbommar/.uml/otIOtm/mconsole
 Checking host MADV_REMOVE support...OK
 ubd: io_uring substrate active (depth=256)
 workingset: timestamp_bits=62 (anon: 58) max_order=15 bucket_order=0 (anon: 0)
@@ -117,7 +117,7 @@ hostfs: io_uring writeback substrate active (depth=128)
 VFS: Mounted root (hostfs filesystem) on device 0:16.
 devtmpfs: mounted
 VFS: Pivoted into new rootfs
-um: section split: .text.frozen 000000002508f5a3..000000006c3027c6 (4009 KiB), .um_patch_text 000000005a7254ba..000000005a7254ba (0 KiB)
+um: section split: .text.frozen 00000000f0989a3f..000000000ba670ab (4009 KiB), .um_patch_text 000000006b60578e..000000006b60578e (0 KiB)
 Run /home/mjbommar/projects/personal/linux/Documentation/virt/uml/examples/aperf-mperf/aperf-mperf-demo as init process
 um: kvm-v2 cpuid_install: CPUID installed (67 entries; RDRAND/RDSEED/AVX-512/FSGSBASE masked; SMP-T57 un-masked XSAVE/OSXSAVE/AVX/AVX2/FMA/F16C)
 um: kvm-v2 install_xcrs: vcpu_fd=5 set=0x7 get_rc=0 nr=1 xcr0=0x7
@@ -128,7 +128,7 @@ APERF_MPERF_DEMO: host_feature_aperfmperf=1
 APERF_MPERF_DEMO: status=enabled
 APERF_MPERF_DEMO: PASS plumbing_ok=1
 Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000000
-CPU: 0 UID: 0 PID: 1 Comm: aperf-mperf-dem Not tainted 7.1.0-rc5-00016-gb024c1647c94-dirty #8 VOLUNTARY 
+CPU: 0 UID: 0 PID: 1 Comm: aperf-mperf-dem Not tainted 7.1.0-rc5-00017-g442621da6b4a-dirty #9 VOLUNTARY 
 Stack:
  68803950 604f592a 603f28eb 00000000
  00000001 604f592a 68803a08 60024f68
@@ -173,3 +173,4 @@ Call Trace:
  [<6004bfc8>] ? userspace+0x0/0x2b
  [<6002f7ef>] new_thread_handler+0x5e/0x62
 um: DIAG panic: dumping last 0 mm-syscall events (head_snap=0)
+Aborted (core dumped)

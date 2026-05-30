@@ -19,13 +19,12 @@
  *   code that runs at guest CPL=0 inside the KVM guest is the LSTAR
  *   gadget and the IDT/exception stubs; exposing rdmsr through the
  *   gadget would require an additional custom NR (out of scope
- *   here).  For a regular Linux guest running under QEMU (which is
- *   Anderson's case), the guest kernel runs at guest CPL=0 and
- *   benefits directly from the cap.  See ../../aperf-mperf.rst for
- *   the bridging notes.
+ *   here).  For a regular Linux guest running under QEMU, the guest
+ *   kernel runs at guest CPL=0 and reads the MSRs natively once the
+ *   cap is set — see ../../aperf-mperf.rst for the bridging notes.
  *
  *   So this demo establishes that the architectural plumbing is
- *   correct — the bit the QEMU patch is missing.
+ *   correct — the bit upstream QEMU is not setting today.
  *
  * Designed to run as `init=` under UML with no rootfs image and no
  * libc — same minimal-ELF pattern as the existing mm-smoke-loop
