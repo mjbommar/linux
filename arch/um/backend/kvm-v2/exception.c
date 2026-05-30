@@ -887,6 +887,25 @@ int kvm_v2_install_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
 	WRITE_ONCE(*(u64 *)((u8 *)kva + KVM_V2_GADGET_OFF_TASK_SIZE_CAP),
 		   (u64)task_size - 16);
 
+#ifdef CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
+	/*
+	 * h_aperfmperf gate.  The gadget body checks this byte BEFORE
+	 * issuing rdmsr 0xE7/0xE8; with the byte clear it falls back
+	 * to the host trap path, avoiding the #GP injection KVM would
+	 * deliver when the disable-exits cap isn't set.
+	 *
+	 * The predicate is set globally by vm_create when the
+	 * KVM_ENABLE_CAP ioctl succeeds.  We use kvm_v2_aperfmperf_enabled()
+	 * as a near-proxy: it's true iff the operator requested the
+	 * cap.  If KVM later rejected the cap (host lacks the feature),
+	 * the toggle would still read true but the rdmsr would #GP --
+	 * so we also gate on the ioctl_attempted/ioctl_rc record from
+	 * aperfmperf.c via kvm_v2_aperfmperf_cap_active().
+	 */
+	WRITE_ONCE(*((u8 *)kva + KVM_V2_GADGET_OFF_APERF_CAP),
+		   kvm_v2_aperfmperf_cap_active() ? 1 : 0);
+#endif
+
 	pr_info("um: kvm-v2 per_vcpu_gadget_state: cpu=%d vcpu_fd=%d gpa=%pa gva=%#llx (pte_idx=%u, task_size_cap=%#llx)\n",
 		cpu, vcpu->vcpu_fd, &gpa, (unsigned long long)gva, pte_idx,
 		(unsigned long long)((u64)task_size - 16));

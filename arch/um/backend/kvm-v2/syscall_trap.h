@@ -182,6 +182,39 @@ enum um_kvm_iotrap {
  * gadget slot is 132 + 63 = 195 — comfortably under the 512-PTE
  * table limit. Same defensive overflow guard as IST/TSS install.
  */
+/*
+ * UML-private syscall NR for the APERF/MPERF gadget consumer.
+ *
+ * 0xc0de is well above the highest Linux x86_64 syscall number
+ * (~470 as of v7.1) so it cannot collide with a present or
+ * reasonably-future upstream NR.  The high bits of the NR (0xff00)
+ * mean the gadget's upper-byte guard would reject it; the
+ * h_aperfmperf pre-check therefore runs BEFORE the guard, mirroring
+ * the getcpu (NR=309) escape hatch.
+ *
+ * The interface, documented in
+ * Documentation/virt/uml/examples/aperf-mperf/README.md:
+ *
+ *   long uml_aperfmperf(struct um_aperfmperf *out);
+ *
+ *   struct um_aperfmperf { u64 aperf; u64 mperf; };
+ *
+ *   Returns 0; writes raw IA32_APERF / IA32_MPERF host-counter
+ *   values into *out.  Out-of-range pointer falls back to the host
+ *   trap path (which will return -ENOSYS).  NULL pointer is a
+ *   silent no-op that returns 0 (used by the kselftest as a
+ *   gadget-presence probe).
+ *
+ * The rdmsr instructions execute at guest CPL=0 inside the KVM
+ * guest; with CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y +
+ * kvm_v2_aperfmperf=on the cap-enable in vm_create lets KVM pass
+ * the reads through to hardware.  Without it, KVM intercepts and
+ * returns zero -- so the same gadget body works in both modes and
+ * the demo can use the zero/non-zero split as a self-check on the
+ * cap-plumbing layer.
+ */
+#define KVM_V2_NR_UML_APERFMPERF	0xc0de
+
 #define KVM_V2_GADGET_BASE_SLOT		(KVM_V2_IST_BASE_SLOT + 2 * NR_CPUS)
 #define KVM_V2_GADGET_STATE_GVA(cpu)	(KVM_V2_TRAMPOLINE_GVA + \
 					 (KVM_V2_GADGET_BASE_SLOT + (cpu)) * 0x1000ULL)
@@ -253,6 +286,30 @@ enum um_kvm_iotrap {
 						 * h_clock_gettime (MONO_SEC
 						 * staging) and h_getcpu (zero
 						 * for *node). */
+#define KVM_V2_GADGET_OFF_SAVE_RCX	0x68	/* h_aperfmperf scratch: user
+						 * RCX (= user RIP for SYSRETQ)
+						 * saved before rdmsr (which
+						 * reads ECX as MSR index input
+						 * and clobbers it), restored
+						 * before tail.  Saved ONLY by
+						 * h_aperfmperf, not by the
+						 * gadget entry preamble — no
+						 * other handler touches RCX, so
+						 * the cost stays localized to
+						 * the consumer.
+						 */
+#define KVM_V2_GADGET_OFF_APERF_CAP	0x70	/* u8.  Set to 1 by exception.c
+						 * after a successful APERFMPERF
+						 * disable-exits ioctl; left at
+						 * 0 otherwise.  h_aperfmperf
+						 * checks this byte FIRST and
+						 * falls back to the host trap
+						 * path if zero — guards against
+						 * rdmsr #GP injection when the
+						 * cap is off (KVM would not let
+						 * the gadget read through to
+						 * hardware in that case).
+						 */
 #define KVM_V2_VVAR_BUDGET_INITIAL	10000	/* Phase 7: ~30µs of clock_gettime work
 						 * before falling back to host refresh.
 						 * v1 used the same value at lifecycle.c
@@ -285,8 +342,14 @@ static_assert(KVM_V2_GADGET_OFF_SAVE_RDX + 8 <= KVM_V2_GADGET_OFF_SAVE_R8,
 	      "SAVE_RDX overlaps SAVE_R8");
 static_assert(KVM_V2_GADGET_OFF_SAVE_R8 + 8 <= KVM_V2_GADGET_OFF_SAVE_R10,
 	      "SAVE_R8 overlaps SAVE_R10");
-static_assert(KVM_V2_GADGET_OFF_SAVE_R10 + 8 <= 4096,
-	      "SAVE_R10 spills past state-page PAGE_SIZE");
+static_assert(KVM_V2_GADGET_OFF_SAVE_R10 + 8 <= KVM_V2_GADGET_OFF_SAVE_RCX,
+	      "SAVE_R10 overlaps SAVE_RCX");
+static_assert(KVM_V2_GADGET_OFF_SAVE_RCX % 8 == 0,
+	      "SAVE_RCX must be 8-byte aligned");
+static_assert(KVM_V2_GADGET_OFF_SAVE_RCX + 8 <= KVM_V2_GADGET_OFF_APERF_CAP,
+	      "SAVE_RCX overlaps APERF_CAP");
+static_assert(KVM_V2_GADGET_OFF_APERF_CAP + 1 <= 4096,
+	      "APERF_CAP spills past state-page PAGE_SIZE");
 
 /* Pre-existing fields must not collide with the SAVE block. */
 static_assert(KVM_V2_GADGET_OFF_BUDGET + 4 <= KVM_V2_GADGET_OFF_SAVE_RDX,

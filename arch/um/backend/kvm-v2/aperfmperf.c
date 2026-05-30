@@ -121,6 +121,22 @@ void kvm_v2_aperfmperf_record_ioctl(int rc)
 }
 
 /*
+ * Consumed by exception.c::kvm_v2_install_per_vcpu_gadget_state to
+ * decide whether to set the per-vCPU APERF_CAP byte that the
+ * h_aperfmperf gadget body checks before issuing rdmsr.
+ *
+ * Returns true only when vm_create both attempted the cap-enable
+ * AND KVM accepted it.  This is the definitive "rdmsr from guest
+ * CPL=0 will pass through to hardware" predicate; using just the
+ * toggle would mis-arm the gadget on hosts that lack
+ * X86_FEATURE_APERFMPERF (KVM rejects the ioctl in that case).
+ */
+bool kvm_v2_aperfmperf_cap_active(void)
+{
+	return ioctl_attempted && ioctl_rc == 0;
+}
+
+/*
  * Boot-param parser.  Accepts on/off/1/0/y/n; bare key without value
  * defaults to on.  Unknown values warn and leave the default
  * untouched — silently accepting garbage would hide cmdline typos.

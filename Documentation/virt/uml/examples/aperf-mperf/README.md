@@ -54,20 +54,23 @@ So three uses, ranked by honesty:
    have to land the ioctl plumbing.  We've split the two changes
    so the assembly-level gadget work can land independently.
 
-3. **NOT useful (no): reading APERF/MPERF values from inside the
-   running UML guest today.**  There is no consumer yet.  A guest
-   userspace program that wants the counters cannot get them
-   without one of the three adaptations under "Adapting for
-   guest-side counter reads" below.  If your goal is to see the
-   numbers, this feature alone is insufficient.
+3. **Useful (yes, as of the LSTAR gadget extension):
+   reading APERF/MPERF values from guest userspace.**  The LSTAR
+   gadget body in `arch/um/backend/kvm-v2/lstar_gadget.S` now
+   handles a UML-private syscall NR=`0xc0de`
+   (`KVM_V2_NR_UML_APERFMPERF`) that issues `rdmsr 0xE7` /
+   `rdmsr 0xE8` at guest CPL=0 and writes the two `u64`s back to
+   a userspace-supplied `struct um_aperfmperf { u64 aperf, mperf; }`.
+   The demo here calls it via inline `syscall` and prints the raw
+   values, the cross-sample delta, and the APERF/MPERF ratio.
 
-If point 3 is what you actually want and you don't need (1) or (2),
-the honest answer is "this feature doesn't help you yet."  The
-gadget extension under "Adapting" path 2 is the smallest gap to
-close — roughly 20 lines of assembly in `lstar_gadget.S` plus a
-custom NR, plus a few lines in the demo to call it via inline `asm
-volatile("syscall")`.  Happy to land that as a follow-up if you
-want the counters surfaced to guest userspace.
+   The gadget consults a per-vCPU `APERF_CAP` byte (offset 0x70
+   in the gadget state page) programmed by exception.c at install
+   time from `kvm_v2_aperfmperf_cap_active()` — when the cap is
+   off (Kconfig=n, cmdline=off, or host lacks the feature), the
+   gadget falls back to the host trap path and the syscall
+   returns `-ENOSYS`.  That prevents a `#GP` injection that would
+   otherwise kill the userspace process.
 
 
 ## What the demo proves
@@ -219,27 +222,57 @@ so the probe always reports the precise outcome of the cap-enable
 ioctl.
 
 
-## Adapting for guest-side counter reads
+## Reading the counters from guest userspace
 
-If you want to actually see APERF/MPERF *values* (not just confirm
-the plumbing), you need code running at guest CPL=0 inside KVM.
-Three options:
+The demo here does the work, but here is the shape if you want
+to use the gadget syscall from a different program.  The interface
+lives at `KVM_V2_NR_UML_APERFMPERF` (`0xc0de`) in
+`arch/um/backend/kvm-v2/syscall_trap.h`:
 
-1. **Real Linux guest under QEMU.** Apply a QEMU patch to
-   plumb `KVM_X86_DISABLE_EXITS_APERFMPERF`, then run a regular
-   Linux guest with a small kernel module that calls
-   `rdmsrl_safe(MSR_IA32_APERF, ...)`.  This is the production
-   scenario; UML serves as evidence the kernel API works.
+```c
+struct um_aperfmperf {
+    uint64_t aperf;
+    uint64_t mperf;
+};
 
-2. **UML LSTAR gadget extension.** Add a new gadget syscall NR to
-   `arch/um/backend/kvm-v2/lstar_gadget.S` that executes
-   `rdmsr` on 0xE7/0xE8 at guest CPL=0 (which is where the gadget
-   body runs) and returns the values in `%rax` / `%rdx`.  Demo
-   userspace would then call the new NR via inline asm.  Invasive
-   (touches the assembled gadget; needs the
-   `kvm_v2_byteshape` KUnit suite updated).
+static inline long uml_aperfmperf(struct um_aperfmperf *out)
+{
+    long rc;
+    asm volatile (
+        "syscall"
+        : "=a"(rc)
+        : "0"((long)0xc0de), "D"(out)
+        : "rcx", "r11", "memory"
+    );
+    return rc;
+}
+```
 
-3. **In-kernel guest kernel under nested KVM.** Not currently
+* Returns `0` on success and writes both fields of `*out`.
+* Returns `-ENOSYS` when the gadget isn't installed
+  (`CONFIG_UM_BACKEND_KVM_V2_GADGET=n`) or the per-vCPU `APERF_CAP`
+  byte is clear (cap-enable failed or was off — see the README's
+  honest-utility section above).
+* `out=NULL` is a silent success — useful as a gadget-presence probe.
+* Values are raw IA32_APERF / IA32_MPERF host counters for the
+  CPU the vCPU is pinned to.  Per-vCPU pinning means the counter
+  reflects the same physical CPU across consecutive calls in a
+  pinning lifetime; cross-CPU migration would mean a fresh
+  baseline (UML's kvm-v2 backend pins vCPUs to host CPUs via
+  SMP-T37, so this isn't a concern in practice).
+
+## Alternative paths (for non-UML use)
+
+If you're not in UML and want the same observation, two other
+options exist:
+
+1. **Real Linux guest under QEMU.** Apply a QEMU patch to plumb
+   `KVM_X86_DISABLE_EXITS_APERFMPERF`, then run a regular Linux
+   guest with a small kernel module that calls
+   `rdmsrl_safe(MSR_IA32_APERF, ...)`.  Same kernel-side API; UML
+   serves as evidence that side works correctly.
+
+2. **In-kernel guest kernel under nested KVM.** Not currently
    supported by kvm-v2 (one VM per UML instance per D57).
 
 

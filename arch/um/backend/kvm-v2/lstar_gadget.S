@@ -80,6 +80,8 @@
 #define KVM_V2_GADGET_OFF_SAVE_RDX	0x50
 #define KVM_V2_GADGET_OFF_SAVE_R8	0x58
 #define KVM_V2_GADGET_OFF_SAVE_R10	0x60
+#define KVM_V2_GADGET_OFF_SAVE_RCX	0x68	/* APERF/MPERF: user RCX save */
+#define KVM_V2_GADGET_OFF_APERF_CAP	0x70	/* APERF/MPERF: u8 cap-active */
 
 /*
  * Syscall numbers — Linux x86_64 ABI constants. Hardcoded here
@@ -96,6 +98,9 @@
 #define NR_TIME		201	/* 0xc9 */
 #define NR_CLOCK_GETTIME 228	/* 0xe4 */
 #define NR_GETCPU	309	/* 0x135 — does NOT fit in 8 bits */
+#define NR_UML_APERFMPERF 0xc0de /* UML-private; well above any Linux NR.
+				 * Same out-of-imm8 escape-hatch pattern
+				 * as getcpu (pre-check before guard). */
 
 #define UM_KVM_TRAP_SYSCALL	0xf4	/* see syscall_trap.h enum um_kvm_iotrap */
 
@@ -200,6 +205,21 @@ gadget_entry:
 	cmpl	$NR_GETCPU, %eax
 	jne	1f			/* skip the rel32 if not getcpu */
 	jmp	h_getcpu		/* GAS emits jmp rel32 */
+1:
+
+	/*
+	 * UML-private APERF/MPERF gadget pre-check (NR=0xc0de — same
+	 * out-of-imm8 escape-hatch pattern as getcpu).  Handler reads
+	 * IA32_APERF (0xE7) and IA32_MPERF (0xE8) at guest CPL=0; the
+	 * KVM_CAP_X86_DISABLE_EXITS / APERFMPERF cap enabled in
+	 * vm_create lets the rdmsr instructions pass through to
+	 * hardware.  See syscall_trap.h::KVM_V2_NR_UML_APERFMPERF for
+	 * the ABI doc and Documentation/virt/uml/examples/aperf-mperf/
+	 * for the consumer.
+	 */
+	cmpl	$NR_UML_APERFMPERF, %eax
+	jne	1f
+	jmp	h_aperfmperf
 1:
 
 	/*
@@ -387,6 +407,74 @@ h_clock_gettime:
 	movq	%r10, (%rsi)		/* ts->sec */
 	movq	%r8,  8(%rsi)		/* ts->nsec */
 	xorl	%eax, %eax		/* return 0 */
+	jmp	tail
+
+/* ----------- h_aperfmperf body -----------
+ * UML-private NR=0xc0de.
+ *
+ *   long uml_aperfmperf(struct um_aperfmperf *out);
+ *   struct um_aperfmperf { u64 aperf; u64 mperf; };
+ *
+ * On entry: RDI=out, RAX=NR=0xc0de, swapgs done, SAVE_RDX/R8/R10
+ * already populated by the entry preamble.
+ *
+ * NULL RDI: skip the rdmsr block, return 0 (gadget-presence probe
+ * for the kselftest — `syscall(0xc0de, NULL)` returns 0 if the
+ * gadget intercepted, -ENOSYS if it fell through to the host).
+ *
+ * Non-NULL: bounds-check RDI against TASK_SIZE_CAP (same pattern
+ * as h_getcpu / h_clock_gettime).  On success, save user RCX
+ * (= user RIP for SYSRETQ — rdmsr reads ECX as MSR index input
+ * and clobbers it), rdmsr 0xE7 → APERF, rdmsr 0xE8 → MPERF, store
+ * both as u64 at *RDI, restore RCX, fall through to tail.
+ *
+ * RDX gets clobbered by rdmsr (writes to EDX) but tail's restore
+ * from SAVE_RDX puts the user value back.  R8/R10 unchanged.
+ *
+ * The cap-enable in vm_create (Kconfig + cmdline gated) decides
+ * whether the rdmsrs pass through to hardware or get KVM-emulated
+ * to zero.  Both behaviors are correct gadget output — the
+ * userspace demo distinguishes them via the zero/non-zero split.
+ */
+h_aperfmperf:
+	/*
+	 * Cap-active gate.  If the per-vCPU APERF_CAP byte is zero
+	 * (vm_create did not enable KVM_X86_DISABLE_EXITS_APERFMPERF
+	 * or KVM rejected the cap), KVM would inject #GP on the
+	 * rdmsr below — kill it before the rdmsr happens by falling
+	 * back to the host trap path.  The host's handle_syscall
+	 * will return -ENOSYS for NR=0xc0de, which the userspace
+	 * demo distinguishes from a real failure.
+	 */
+	cmpb	$0, %gs:KVM_V2_GADGET_OFF_APERF_CAP
+	je	fallback
+
+	testq	%rdi, %rdi
+	je	L_aperf_skip
+	/* T68: see h_time bounds-check comment — operand order matters. */
+	cmpq	%rdi, %gs:KVM_V2_GADGET_OFF_TASK_SIZE_CAP
+	jbe	fallback
+
+	/* Save user RCX before rdmsr clobbers ECX. */
+	movq	%rcx, %gs:KVM_V2_GADGET_OFF_SAVE_RCX
+
+	/* rdmsr IA32_APERF (0xE7) → EDX:EAX (high:low 32 bits). */
+	movl	$0xe7, %ecx
+	rdmsr
+	movl	%eax,  0(%rdi)		/* aperf lo32 */
+	movl	%edx,  4(%rdi)		/* aperf hi32 */
+
+	/* rdmsr IA32_MPERF (0xE8) → EDX:EAX. */
+	movl	$0xe8, %ecx
+	rdmsr
+	movl	%eax,  8(%rdi)		/* mperf lo32 */
+	movl	%edx, 12(%rdi)		/* mperf hi32 */
+
+	/* Restore user RCX so SYSRETQ returns to the user RIP. */
+	movq	%gs:KVM_V2_GADGET_OFF_SAVE_RCX, %rcx
+
+L_aperf_skip:
+	xorl	%eax, %eax		/* return 0 (success) */
 	jmp	tail
 
 SYM_DATA_END_LABEL(kvm_v2_lstar_gadget_start, SYM_L_GLOBAL,

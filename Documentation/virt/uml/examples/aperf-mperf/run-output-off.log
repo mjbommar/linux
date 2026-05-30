@@ -9,11 +9,11 @@ um: kvm-v2 probe: /dev/kvm OK (API 12)
 um: kvm-v2 probed: kvm_fd=3 api=12 caps=0x103 (A.2 — creating VM)
 um: kvm-v2 physmem_memslot: deferred (uml_physmem=0x0 physmem_size=0x8000000 not yet populated; lazy retry will land it)
 swapper: page allocation failure: order:0, mode:0x100(__GFP_ZERO), nodemask=(null)
-CPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted 7.1.0-rc5-00017-g442621da6b4a-dirty #9 VOLUNTARY 
+CPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted 7.1.0-rc5-00018-g1547df42a286-dirty #11 VOLUNTARY 
 Stack:
- 7fffffffbf70 604f592a 603f28eb 00000000
- ffffff00 604f592a 605a0548 604f43b9
- 7fffffffbfa0 6002d648 00000004 00000000
+ 7fffffffbf90 604f594a 603f292b 00000000
+ ffffff00 604f594a 605a0548 604f43d9
+ 7fffffffbfc0 6002d648 00000004 00000000
 Call Trace:
 Mem-Info:
 active_anon:0 inactive_anon:0 isolated_anon:0
@@ -38,7 +38,7 @@ um: kvm-v2 install_sregs: vcpu_fd=5 cr0=0x80010023 cr4=0x620 efer=0xd01 cs.l=1
 um: kvm-v2 install_sigmask: vcpu_fd=5 (sigfillset minus SIGALRM)
 um: kvm-v2 vcpu_create: pool of 1 vCPU(s) up (kvm_run_size=12288)
 um: backend = kvm-v2 (contract v2)
-Linux version 7.1.0-rc5-00017-g442621da6b4a-dirty (mjbommar@server7) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #9 Sat May 30 11:31:43 EDT 2026
+Linux version 7.1.0-rc5-00018-g1547df42a286-dirty (mjbommar@server7) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #11 Sat May 30 11:41:33 EDT 2026
 random: crng init done
 Zone ranges:
   Normal   [mem 0x0000000000000000-0x0000000067ffffff]
@@ -56,7 +56,7 @@ mem auto-init: stack:all(zero), heap alloc:off, heap free:off
 SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
 NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 64
 clocksource: timer: mask: 0xffffffffffffffff max_cycles: 0x1cd42e205, max_idle_ns: 881590404426 ns
-Calibrating delay loop... 10013.90 BogoMIPS (lpj=50069504)
+Calibrating delay loop... 9997.51 BogoMIPS (lpj=49987584)
 Checking that host ptys support output SIGIO...Yes
 pid_max: default: 32768 minimum: 301
 Mount-cache hash table entries: 512 (order: 0, 4096 bytes, linear)
@@ -78,7 +78,7 @@ um: kvm-v2 per_vcpu_gadget_state: cpu=0 vcpu_fd=5 gpa=0x0000000000921000 gva=0xf
 um: kvm-v2 install_descriptors_sregs: vcpu_fd=5 idt=0xffffe00000001000 (limit=0xfff) gdt=0xffffe00000003000 (limit=0x3f) tr.base=0xffffe00000005000 tr.limit=103 tr.sel=0x30 tr.type=11
 um: kvm-v2 exception_install: GDT TSS_DESC slot=6 base=0xffffe00000005000 limit=103 (vCPU 0 TSS — per-vCPU SREGS.tr overrides)
 um: kvm-v2 exception_install: idt_gpa=0x000000000091c000 idt_gva=0xffffe00000001000 handlers_gpa=0x000000000091d000 handlers_gva=0xffffe00000002000 gdt_gpa=0x000000000091e000 gdt_gva=0xffffe00000003000 (256 IDT vectors / 8 GDT slots)
-um: kvm-v2 trampoline_upgrade: LSTAR body upgraded to 460-byte gadget at +0x40 (per-vCPU state pages confirmed installed)
+um: kvm-v2 trampoline_upgrade: LSTAR body upgraded to 561-byte gadget at +0x40 (per-vCPU state pages confirmed installed)
 pps_core: LinuxPPS API ver. 1 registered
 pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
 PTP clock support registered
@@ -95,7 +95,7 @@ TCP: Hash tables configured (established 1024 bind 1024)
 UDP hash table entries: 256 (order: 2, 16384 bytes, linear)
 NET: Registered PF_UNIX/PF_LOCAL protocol family
 printk: legacy console [stderr0] disabled
-mconsole (version 2) initialized on /home/mjbommar/.uml/7MrWOh/mconsole
+mconsole (version 2) initialized on /home/mjbommar/.uml/n0pnW0/mconsole
 Checking host MADV_REMOVE support...OK
 ubd: io_uring substrate active (depth=256)
 workingset: timestamp_bits=62 (anon: 58) max_order=15 bucket_order=0 (anon: 0)
@@ -116,7 +116,7 @@ hostfs: io_uring writeback substrate active (depth=128)
 VFS: Mounted root (hostfs filesystem) on device 0:16.
 devtmpfs: mounted
 VFS: Pivoted into new rootfs
-um: section split: .text.frozen 0000000083f85de4..000000006b2d547a (4009 KiB), .um_patch_text 00000000bf675888..00000000bf675888 (0 KiB)
+um: section split: .text.frozen 00000000b3a968c1..00000000c0897c70 (4009 KiB), .um_patch_text 00000000e03bb5f0..00000000e03bb5f0 (0 KiB)
 Run /home/mjbommar/projects/personal/linux/Documentation/virt/uml/examples/aperf-mperf/aperf-mperf-demo as init process
 um: kvm-v2 cpuid_install: CPUID installed (67 entries; RDRAND/RDSEED/AVX-512/FSGSBASE masked; SMP-T57 un-masked XSAVE/OSXSAVE/AVX/AVX2/FMA/F16C)
 um: kvm-v2 install_xcrs: vcpu_fd=5 set=0x7 get_rc=0 nr=1 xcr0=0x7
@@ -125,37 +125,38 @@ APERF_MPERF_DEMO: ioctl_attempted=0
 APERF_MPERF_DEMO: ioctl_rc=0
 APERF_MPERF_DEMO: host_feature_aperfmperf=1
 APERF_MPERF_DEMO: status=disabled
-APERF_MPERF_DEMO: FAIL plumbing_ok=0 reason=passthrough_off_by_cmdline
+APERF_MPERF_DEMO: gadget_rc1=-38 gadget_rc2=-38 reason=gadget_not_present
+APERF_MPERF_DEMO: FAIL plumbing_ok=0 reason=kconfig_kvm_v2_gadget_off
 Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
-CPU: 0 UID: 0 PID: 1 Comm: aperf-mperf-dem Not tainted 7.1.0-rc5-00017-g442621da6b4a-dirty #9 VOLUNTARY 
+CPU: 0 UID: 0 PID: 1 Comm: aperf-mperf-dem Not tainted 7.1.0-rc5-00018-g1547df42a286-dirty #11 VOLUNTARY 
 Stack:
- 68803950 604f592a 603f28eb 00000000
- 00000001 604f592a 68803a08 60024f68
+ 68803950 604f594a 603f292b 00000000
+ 00000001 604f594a 68803a08 60024f68
  68803980 6002d648 605be0f0 606af360
 Call Trace:
  [<60024f68>] ? _printk+0x0/0x5b
  [<600308e8>] show_stack+0x10f/0x11e
- [<603f28eb>] ? dump_stack_print_info+0x0/0x12f
+ [<603f292b>] ? dump_stack_print_info+0x0/0x12f
  [<60024f68>] ? _printk+0x0/0x5b
  [<6002d648>] dump_stack_lvl+0x65/0x80
  [<6002d681>] dump_stack+0x1e/0x20
  [<60023e7e>] vpanic+0x122/0x33d
  [<60049ef6>] ? um_set_signals+0x0/0x3e
- [<60063e01>] ? cgroup_threadgroup_change_end+0x0/0x89
+ [<60063e41>] ? cgroup_threadgroup_change_end+0x0/0x89
  [<60049ead>] ? block_signals+0x0/0x1a
  [<600240f2>] warn_slowpath_fmt+0x0/0x9a
  [<60024099>] ? panic+0x0/0x59
- [<6005bfd7>] do_exit+0x208/0x99c
+ [<6005c017>] do_exit+0x208/0x99c
  [<60049ec7>] ? unblock_signals+0x0/0x22
- [<6005d0a6>] sys_exit_group+0x0/0x1a
- [<6005d008>] ? do_group_exit+0x0/0x9e
- [<6005d0c0>] pid_child_should_wake+0x0/0x46
+ [<6005d0e6>] sys_exit_group+0x0/0x1a
+ [<6005d048>] ? do_group_exit+0x0/0x9e
+ [<6005d100>] pid_child_should_wake+0x0/0x46
  [<600333bf>] handle_syscall+0x15c/0x287
  [<600516f1>] kvm_v2_handle_io_trap+0xb1f/0xc39
  [<6004a439>] ? os_nsecs+0x2d/0x3b
  [<600309b9>] ? timer_read+0x1a/0x7c
- [<600b77da>] ? ktime_get+0x6a/0xd6
- [<60074647>] ? __task_pid_nr_ns+0x0/0x60
+ [<600b781a>] ? ktime_get+0x6a/0xd6
+ [<60074687>] ? __task_pid_nr_ns+0x0/0x60
  [<60030ed7>] ? update_pud_range.isra.0+0x163/0x19d
  [<60046028>] ? os_ioctl_generic+0x0/0x2e
  [<60049ee6>] ? unblock_signals+0x1f/0x22
@@ -165,9 +166,9 @@ Call Trace:
  [<600310ef>] ? um_mmu_gather_drain+0x73/0x124
  [<6004f6eb>] kvm_v2_vcpu_run+0x95d/0xa16
  [<6003396f>] ? raw_copy_to_user+0x32/0x34
- [<6018d5c7>] ? _inline_copy_to_user+0x33/0x3b
- [<6018e7f6>] ? load_elf_binary+0x11a0/0x1239
- [<60141082>] ? copy_strings_kernel+0x0/0x8b
+ [<6018d607>] ? _inline_copy_to_user+0x33/0x3b
+ [<6018e836>] ? load_elf_binary+0x11a0/0x1239
+ [<601410c2>] ? copy_strings_kernel+0x0/0x8b
  [<6004bff1>] userspace+0x29/0x2b
  [<6004bfc8>] ? userspace+0x0/0x2b
  [<6002f7ef>] new_thread_handler+0x5e/0x62

@@ -234,6 +234,15 @@ struct kvm_v2_vm *kvm_v2_vm_get(void);
 #ifdef CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
 bool kvm_v2_aperfmperf_enabled(void);
 void kvm_v2_aperfmperf_record_ioctl(int rc);
+/*
+ * True iff vm_create issued KVM_ENABLE_CAP AND KVM accepted it.
+ * The h_aperfmperf gadget body consumes this via the per-vCPU
+ * KVM_V2_GADGET_OFF_APERF_CAP byte programmed by exception.c at
+ * gadget-state install time.  When false, the gadget falls back
+ * to the host trap path so rdmsr is NOT executed at guest CPL=0
+ * (KVM would deliver a #GP injection without the cap).
+ */
+bool kvm_v2_aperfmperf_cap_active(void);
 #endif
 
 /*
