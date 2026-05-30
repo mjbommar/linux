@@ -226,6 +226,16 @@ void kvm_v2_vm_destroy(void);
 struct kvm_v2_vm *kvm_v2_vm_get(void);
 
 /*
+ * APERF/MPERF MSR passthrough toggle — defined in aperfmperf.c when
+ * CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y; absent (and the
+ * one call site #ifdef'd out) otherwise.  See aperfmperf.c file-scope
+ * comment + Documentation/virt/uml/aperf-mperf.rst.
+ */
+#ifdef CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
+bool kvm_v2_aperfmperf_enabled(void);
+#endif
+
+/*
  * Phase D.4b-pre: physmem identity-offset memslot install (memo 26 §D.4).
  * Idempotent — re-invocation after a successful install short-circuits.
  * Returns 0 on success / already-installed, -EAGAIN if uml_physmem /

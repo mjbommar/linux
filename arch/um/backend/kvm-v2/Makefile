@@ -46,6 +46,15 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += record.o
 # memcpy's them into the trampoline page at GVA 0xffffe000_00000040.
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += lstar_gadget.o
 
+# APERF/MPERF MSR passthrough — boot-param parser + debugfs probe.
+# Compiled out entirely when the feature Kconfig is n; when y the TU
+# adds (a) the kvm_v2_aperfmperf_enabled() predicate consulted by
+# context.c::kvm_v2_vm_create and (b) a debugfs read file at
+# /sys/kernel/debug/um/kvm_v2/aperf_mperf that issues rdmsrl on
+# 0xE7/0xE8 from the running UML kernel (CPL=0 inside the KVM guest).
+# See Documentation/virt/uml/aperf-mperf.rst.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH) += aperfmperf.o
+
 # Per-CPU state-snapshot trace ring. Compiled out entirely when
 # CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=n; runtime gated via
 # static_branch when =y. See state_trace.h for the design.

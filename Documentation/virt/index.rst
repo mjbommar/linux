@@ -18,6 +18,7 @@ Virtualization Support
    uml/kmsan
    uml/snapshot
    uml/launcher
+   uml/aperf-mperf
    uml/profiles/index
    paravirt_ops
    guest-halt-polling

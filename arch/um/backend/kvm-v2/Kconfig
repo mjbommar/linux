@@ -130,6 +130,55 @@ config UM_BACKEND_KVM_V2_STATE_TRACE
 	  toggle so you can ship a CONFIG=y kernel and only pay cost
 	  when actively tracing.
 
+config UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
+	bool "Pass APERF/MPERF MSRs through to guest (host-counter visibility)"
+	depends on UM_BACKEND_KVM_V2
+	default n
+	help
+	  Issue KVM_ENABLE_CAP(KVM_CAP_X86_DISABLE_EXITS) with the
+	  KVM_X86_DISABLE_EXITS_APERFMPERF bit during VM creation so the
+	  guest can read IA32_APERF (0xE7) and IA32_MPERF (0xE8) directly
+	  via rdmsr.  Without this, KVM traps the read and returns zero;
+	  with it, the rdmsr passes through to hardware and the guest sees
+	  the actual host performance counters for the CPU the vCPU is
+	  currently pinned to.
+
+	  Useful for:
+	    - Guest-side frequency / utilization observation
+	      (cpupower, turbostat, perf governors)
+	    - Reproducing the QEMU/libvirt gap where -overcommit
+	      cpu-pm=on plumbs HLT/MWAIT/PAUSE/CSTATE but not APERFMPERF
+	      (the v2 backend is its own VMM and exposes the bit directly)
+	    - Anyone studying how the disable-exits surface behaves under
+	      a non-QEMU userspace
+
+	  Host requirements:
+	    - boot_cpu_has(X86_FEATURE_APERFMPERF) must be set; KVM's
+	      kvm_get_allowed_disable_exits() gates the bit on that.
+	      The probe is non-fatal — vm_create logs a warning and
+	      continues if the host rejects the cap.
+
+	  Constraints:
+	    - The ioctl is issued from kvm_v2_vm_create(), strictly
+	      before kvm_v2_vcpu_create().  KVM's KVM_CAP_X86_DISABLE_EXITS
+	      handler enforces `if (kvm->created_vcpus) return -EINVAL;`
+	      so the ordering must not slip.
+	    - Bit is per-VM; in v2 there is one VM per UML invocation
+	      (decisions-log D57) so this is also a per-instance toggle.
+
+	  Runtime override:
+	    Boot param  kvm_v2_aperfmperf=on   forces enable
+	                kvm_v2_aperfmperf=off  forces disable
+	    overriding the Kconfig default.  The override only takes
+	    effect when CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y
+	    (the cmdline parser is gated on the same symbol).
+
+	  See Documentation/virt/uml/aperf-mperf.rst for the in-guest
+	  rdmsr verification path and the QEMU bridging context.
+
+	  Say N for production builds; Y when reproducing the QEMU
+	  disable-exits gap or doing host-counter-visible workloads.
+
 config UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
 	bool "Account host KVM_RUN CPU time as guest utime (ITIMER_VIRTUAL)"
 	depends on UM_BACKEND_KVM_V2

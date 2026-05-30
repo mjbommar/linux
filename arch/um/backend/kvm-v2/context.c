@@ -214,6 +214,46 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 		}
 	}
 
+#ifdef CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
+	/*
+	 * APERF/MPERF MSR passthrough (host-counter visibility).
+	 *
+	 * KVM_CAP_X86_DISABLE_EXITS / KVM_X86_DISABLE_EXITS_APERFMPERF
+	 * (bit 4) tells KVM to skip the IA32_APERF (0xE7) / IA32_MPERF
+	 * (0xE8) rdmsr intercept and let the guest read the host
+	 * counters directly.  Without it KVM returns zero — the
+	 * regression Anderson hit with QEMU + libvirt, which plumb
+	 * HLT/MWAIT/PAUSE/CSTATE via -overcommit cpu-pm=on but not
+	 * APERFMPERF.  See Documentation/virt/uml/aperf-mperf.rst.
+	 *
+	 * Strict ordering: kvm/x86.c::kvm_vm_ioctl_enable_cap rejects
+	 * the cap with -EINVAL if kvm->created_vcpus is non-zero (the
+	 * "no vCPUs may exist yet" check).  vm_create runs before
+	 * kvm_v2_vcpu_create — this is the only valid window.
+	 *
+	 * Host requirement: boot_cpu_has(X86_FEATURE_APERFMPERF).
+	 * kvm_get_allowed_disable_exits() masks the bit off when the
+	 * host CPU lacks the feature; the ioctl then returns -EINVAL
+	 * and we log + continue (non-fatal — the guest just sees zero
+	 * counters, matching the pre-passthrough behavior).
+	 */
+	if (kvm_v2_aperfmperf_enabled()) {
+		struct kvm_enable_cap cap = {
+			.cap     = KVM_CAP_X86_DISABLE_EXITS,
+			.args[0] = KVM_X86_DISABLE_EXITS_APERFMPERF,
+		};
+		int erc;
+
+		erc = os_ioctl_generic(vm_fd, KVM_ENABLE_CAP,
+				       (unsigned long)&cap);
+		if (erc < 0)
+			pr_warn("um: kvm-v2 vm_create: APERFMPERF passthrough rejected (%d) — host may lack X86_FEATURE_APERFMPERF; guest rdmsr(0xE7/0xE8) will continue to read zero\n",
+				erc);
+		else
+			pr_info("um: kvm-v2 vm_create: APERF/MPERF MSR passthrough enabled (guest rdmsr(0xE7/0xE8) reads host counters)\n");
+	}
+#endif
+
 	vm.kvm_fd = kvm_fd;
 	vm.vm_fd  = vm_fd;
 	vm.caps   = caps;
