@@ -56,6 +56,33 @@ configuring which event a counter tracks.
   which is the architectural signal of "PCE is on."
 
 
+## Cross-host validation (2026-05-30)
+
+The kselftest was run across the development fleet to characterize
+the host-KVM-dependent outcome distribution:
+
+| Host | CPU | µarch | host `kvm.enable_pmu` | rdpmc-smoke result |
+|---|---|---|---|---|
+| s1 | Xeon E3-1225 v6 | Kaby Lake | Y | **PASS (partial)** -- rdpmc works |
+| s2 | Xeon E3-1225 v5 | Skylake | Y | **PASS (partial)** -- rdpmc works |
+| s3 | Xeon W-2123 | Skylake-W | Y | **PASS (partial)** -- rdpmc works |
+| s5 | Ryzen 7 7840HS | Zen 4 | Y | SKIP (AMD vPMU rejected the rdpmc) |
+| s6 | Ryzen 7 7840HS | Zen 4 | Y | SKIP (AMD vPMU rejected the rdpmc) |
+| s7 | Ryzen 7 7840HS | Zen 4 | Y | SKIP (AMD vPMU rejected the rdpmc) |
+
+3/3 Intel hosts with `enable_pmu=Y` correctly produced PASS
+(partial) -- `CR4.PCE` was set, `rdpmc(0)` returned a value without
+`#GP`, and the only reason "PASS" wasn't full PASS is that fixed
+counters were not armed (a separate kernel-side concern documented
+above as "Honest scope" point 2).
+
+3/3 Zen 4 hosts SKIPped with the documented "host KVM rejected
+rdpmc" diagnostic.  The kernel-side change is architecturally
+correct; the AMD KVM legacy vPMU path needs a separate
+investigation (PERFCTR_CORE CPUID propagation or
+`enable_mediated_pmu=Y` reload) to enable the PASS path on AMD.
+
+
 ## Demo
 
 ```bash
