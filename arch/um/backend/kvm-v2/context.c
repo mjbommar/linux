@@ -246,11 +246,12 @@ int kvm_v2_vm_create(int kvm_fd, u64 caps)
 
 		erc = os_ioctl_generic(vm_fd, KVM_ENABLE_CAP,
 				       (unsigned long)&cap);
+		kvm_v2_aperfmperf_record_ioctl(erc);
 		if (erc < 0)
 			pr_warn("um: kvm-v2 vm_create: APERFMPERF passthrough rejected (%d) — host may lack X86_FEATURE_APERFMPERF; guest rdmsr(0xE7/0xE8) will continue to read zero\n",
 				erc);
 		else
-			pr_info("um: kvm-v2 vm_create: APERF/MPERF MSR passthrough enabled (guest rdmsr(0xE7/0xE8) reads host counters)\n");
+			pr_info("um: kvm-v2 vm_create: APERF/MPERF MSR passthrough enabled (guest CPL=0 rdmsr(0xE7/0xE8) reads host counters; UML kernel runs at host CPL=3 and cannot itself exercise the path)\n");
 	}
 #endif
 

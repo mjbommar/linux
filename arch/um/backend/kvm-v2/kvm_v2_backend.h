@@ -233,6 +233,7 @@ struct kvm_v2_vm *kvm_v2_vm_get(void);
  */
 #ifdef CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
 bool kvm_v2_aperfmperf_enabled(void);
+void kvm_v2_aperfmperf_record_ioctl(int rc);
 #endif
 
 /*

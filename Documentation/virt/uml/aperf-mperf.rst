@@ -117,30 +117,55 @@ runs immediately after).  Do not move the ioctl past that boundary.
 Verifying from inside the guest
 ===============================
 
-The backend exposes a debugfs read file that issues rdmsr from the
-UML kernel context — which IS the KVM guest's CPL=0 context under
-the ``kvm-v2`` backend.  From inside the running guest::
+The backend exposes a debugfs **status** file that reports the
+architectural plumbing — toggle state, whether vm_create issued the
+ioctl, the ioctl return code, host CPU feature availability — so a
+userspace test can confirm the cap was actually requested and
+accepted.  The probe does NOT issue rdmsr from the UML kernel
+context: UML's "kernel" code runs as a host userspace process at
+host CPL=3, where rdmsr always ``#GP``s regardless of the
+disable-exits bit.  The bit only affects code running at GUEST
+CPL=0 inside the KVM guest — for a real Linux guest under QEMU,
+that means the guest kernel.
+
+From inside the running guest::
 
   # cat /sys/kernel/debug/um/kvm_v2/aperf_mperf
   toggle=on
-  aperf_rc=0
-  mperf_rc=0
-  aperf=84823592197
-  mperf=83110028441
-  ratio_pct=102
+  ioctl_attempted=1
+  ioctl_rc=0
+  host_feature_aperfmperf=1
+  status=enabled
+
+The ``status`` line decodes to one of four values:
+
+================== ===========================================================
+``enabled``        vm_create issued KVM_ENABLE_CAP and KVM accepted it.
+                   APERF/MPERF rdmsr at guest CPL=0 will pass through to
+                   hardware.
+``rejected``       vm_create issued the ioctl but KVM refused (rare; usually
+                   an SMT-RSB-mitigation overlap — see
+                   ``arch/x86/kvm/x86.c::kvm_vm_ioctl_enable_cap``).
+``host_no_feature`` vm_create issued the ioctl but KVM masked the bit off
+                   because ``boot_cpu_has(X86_FEATURE_APERFMPERF)`` is false.
+``disabled``       vm_create skipped the ioctl entirely — either the Kconfig
+                   is ``=n`` or the cmdline overrode the default to off.
+================== ===========================================================
 
 With the feature **off** (boot with ``kvm_v2_aperfmperf=off`` or
 build with the Kconfig=n) the output reads::
 
   toggle=off
-  aperf_rc=0
-  mperf_rc=0
-  aperf=0
-  mperf=0
-  ratio_pct=n/a
+  ioctl_attempted=0
+  ioctl_rc=0
+  host_feature_aperfmperf=1
+  status=disabled
 
-The non-zero / zero split is exactly the symptom Anderson reported
-against QEMU+libvirt.
+To actually read APERF/MPERF *values* from a guest, see the example
+README at ``Documentation/virt/uml/examples/aperf-mperf/README.md``
+under "Adapting for guest-side counter reads".  Three options
+documented: real Linux guest under QEMU (Anderson's case), an LSTAR
+gadget extension, or in-kernel nested KVM.
 
 Selftest
 ========
