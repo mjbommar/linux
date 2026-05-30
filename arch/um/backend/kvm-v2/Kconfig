@@ -130,6 +130,54 @@ config UM_BACKEND_KVM_V2_STATE_TRACE
 	  toggle so you can ship a CONFIG=y kernel and only pay cost
 	  when actively tracing.
 
+config UM_BACKEND_KVM_V2_RDPMC
+	bool "Allow guest userspace rdpmc (CR4.PCE=1)"
+	depends on UM_BACKEND_KVM_V2
+	default y
+	help
+	  Set CR4.PCE=1 in the guest's per-vCPU control registers so
+	  userspace can execute `rdpmc` directly without #GP at CPL=3.
+	  Without this, rdpmc is privileged (PMC accessible only to
+	  guest CPL=0 code — for UML that means the LSTAR gadget and
+	  exception stubs, neither of which currently calls rdpmc).
+
+	  What this enables:
+	    - Userspace `perf` inside the guest gets accurate hardware
+	      counter reads (instructions retired, cycles, branches,
+	      cache misses, ...) directly via rdpmc.  No gadget syscall
+	      round-trip, no IPC, just a one-instruction read.
+	    - profile-guided JITs (PyPy, JS engines) and microbenchmark
+	      harnesses can self-measure inside the UML guest.
+	    - The example at
+	      Documentation/virt/uml/examples/rdpmc/ demonstrates the
+	      pattern (read PMC fixed-counter 0 = instructions retired,
+	      assert it advances across a busy loop).
+
+	  What this does NOT enable:
+	    - rdmsr / wrmsr on PMU MSRs — those stay privileged.  The
+	      guest cannot program PERFEVTSEL counters from userspace
+	      (counter selection is a kernel-only operation under
+	      Linux's perf subsystem; gated behind the perf_event
+	      syscall).
+	    - Specific PMU event allowlist control — that's a separate
+	      KVM cap (KVM_CAP_PMU_EVENT_FILTER) not exposed here.
+	    - Crossing the host/guest counter-attribution boundary in
+	      any new way.  KVM's vPMU already virtualizes counters
+	      per-vCPU; CR4.PCE just changes the CPL gate on rdpmc.
+
+	  Cost: a single bit set in the sregs install path; zero
+	  runtime overhead.
+
+	  Security: rdpmc returns counter values for the running vCPU.
+	  In SMP UML with vCPU pinning (SMP-T37) those values reflect
+	  the host CPU the vCPU is bound to.  Treating them as a side
+	  channel against other guests on the same physical CPU is a
+	  known concern for any KVM userspace -- gate this OFF for
+	  multi-tenant sandbox profiles.
+
+	  Say Y for research/dev/CI builds.  Say N for sandbox
+	  profiles that explicitly want rdpmc unavailable.
+
 config UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
 	bool "Pass APERF/MPERF MSRs through to guest (host-counter visibility)"
 	depends on UM_BACKEND_KVM_V2

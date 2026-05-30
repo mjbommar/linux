@@ -1426,6 +1426,9 @@ int kvm_v2_vcpu_prime_for_kunit(struct kvm_v2_vcpu *v)
 		return rc;
 	}
 	sregs2.cr4 |= X86_CR4_OSXSAVE;
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RDPMC
+	sregs2.cr4 |= X86_CR4_PCE;
+#endif
 	rc = os_ioctl_generic(v->vcpu_fd, KVM_SET_SREGS,
 			      (unsigned long)&sregs2);
 	if (rc < 0) {
@@ -2345,6 +2348,21 @@ void kvm_v2_vcpu_run(struct uml_pt_regs *regs)
 				panic("kvm-v2: SMP-T57 GET_SREGS pre-OSXSAVE (cpu=%d) failed: %d",
 				      cpu, rc);
 			sregs2.cr4 |= X86_CR4_OSXSAVE;
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RDPMC
+			/*
+			 * CR4.PCE (Performance Counter Enable) makes
+			 * `rdpmc` accessible at CPL=3.  Combined with KVM's
+			 * vPMU this lets guest userspace read hardware
+			 * performance counters directly -- no privileged
+			 * path, no gadget, one-instruction overhead.
+			 * Whether the rdpmc actually returns a useful value
+			 * depends on the host KVM module's vPMU emulation
+			 * (Intel vs AMD differences); see
+			 * Documentation/virt/uml/examples/rdpmc/ for the
+			 * runnable example and the honest-scope notes.
+			 */
+			sregs2.cr4 |= X86_CR4_PCE;
+#endif
 			rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
 					      (unsigned long)&sregs2);
 			if (rc < 0)

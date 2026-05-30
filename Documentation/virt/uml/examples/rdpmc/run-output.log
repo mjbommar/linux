@@ -1,0 +1,178 @@
+Core dump limits :
+	soft - 0
+	hard - NONE
+Checking environment variables for a tempdir...none found
+Checking if /dev/shm is on tmpfs...OK
+Checking PROT_EXEC mmap in /dev/shm...OK
+Checking that seccomp filters can be installed...OK
+um: kvm-v2 probe: /dev/kvm OK (API 12)
+um: kvm-v2 probed: kvm_fd=3 api=12 caps=0x103 (A.2 — creating VM)
+um: kvm-v2 vm_create: APERF/MPERF MSR passthrough enabled (guest CPL=0 rdmsr(0xE7/0xE8) reads host counters; UML kernel runs at host CPL=3 and cannot itself exercise the path)
+um: kvm-v2 physmem_memslot: deferred (uml_physmem=0x0 physmem_size=0x8000000 not yet populated; lazy retry will land it)
+swapper: page allocation failure: order:0, mode:0x100(__GFP_ZERO), nodemask=(null)
+CPU: 0 UID: 0 PID: 0 Comm: swapper Not tainted 7.1.0-rc5-00019-gf2f7fd673927-dirty #14 VOLUNTARY 
+Stack:
+ 7fffffffbfc0 604f596c 603f292b 00000000
+ ffffff00 604f596c 605a0548 604f43fb
+ 7fffffffbff0 6002d648 00000005 00000000
+Call Trace:
+Mem-Info:
+active_anon:0 inactive_anon:0 isolated_anon:0
+ active_file:0 inactive_file:0 isolated_file:0
+ unevictable:0 dirty:0 writeback:0
+ slab_reclaimable:0 slab_unreclaimable:0
+ mapped:0 shmem:0 pagetables:0
+ sec_pagetables:0 bounce:0
+ kernel_misc_reclaimable:0
+ free:0 free_pcp:0 free_cma:0
+0 total pagecache pages
+0 pages in swap cache
+Free swap  = 0kB
+Total swap = 0kB
+0 pages RAM
+0 pages HighMem/MovableOnly
+0 pages reserved
+um: kvm-v2 trampoline_install: alloc_page returned NULL (buddy allocator not up at init_backend time per memo 26 §D.0a); deferring to first lazy retry
+um: kvm-v2 vm_create: vm_fd=4 caps=0x103 tss=0xfffbd000 ident=0xfffbc000 physmem_memslot=deferred trampoline=deferred (memslots empty; A.3 attaches vCPU + installs CPUID)
+um: kvm-v2 program_msrs: vcpu_fd=5 cpu=0 LSTAR=0xffffe00000000040 STAR=0x18000800000000 FMASK=0x47700 KERNEL_GS_BASE=0xffffe00000006000
+um: kvm-v2 install_sregs: vcpu_fd=5 cr0=0x80010023 cr4=0x620 efer=0xd01 cs.l=1
+um: kvm-v2 install_sigmask: vcpu_fd=5 (sigfillset minus SIGALRM)
+um: kvm-v2 vcpu_create: pool of 1 vCPU(s) up (kvm_run_size=12288)
+um: backend = kvm-v2 (contract v2)
+Linux version 7.1.0-rc5-00019-gf2f7fd673927-dirty (mjbommar@server7) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #14 Sat May 30 19:46:04 EDT 2026
+random: crng init done
+Zone ranges:
+  Normal   [mem 0x0000000000000000-0x0000000067ffffff]
+Movable zone start for each node
+Early memory node ranges
+  node   0: [mem 0x0000000000000000-0x0000000007ffffff]
+Initmem setup node 0 [mem 0x0000000000000000-0x0000000007ffffff]
+Kernel command line: init=/home/mjbommar/projects/personal/linux/Documentation/virt/uml/examples/rdpmc/rdpmc-demo con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw panic=-1 console=tty0
+printk: log buffer data + meta data: 16384 + 57344 = 73728 bytes
+Dentry cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+Inode-cache hash table entries: 8192 (order: 4, 65536 bytes, linear)
+Sorting __ex_table...
+Built 1 zonelists, mobility grouping on.  Total pages: 32768
+mem auto-init: stack:all(zero), heap alloc:off, heap free:off
+SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 64
+clocksource: timer: mask: 0xffffffffffffffff max_cycles: 0x1cd42e205, max_idle_ns: 881590404426 ns
+Calibrating delay loop... 9792.71 BogoMIPS (lpj=48963584)
+Checking that host ptys support output SIGIO...Yes
+pid_max: default: 32768 minimum: 301
+Mount-cache hash table entries: 512 (order: 0, 4096 bytes, linear)
+Mountpoint-cache hash table entries: 512 (order: 0, 4096 bytes, linear)
+VFS: Finished mounting rootfs on nullfs
+Memory: 120900K/131072K available (4011K kernel code, 1033K rwdata, 1496K rodata, 177K init, 200K bss, 9380K reserved, 0K cma-reserved)
+devtmpfs: initialized
+clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604462750000 ns
+posixtimers hash table entries: 512 (order: 0, 4096 bytes, linear)
+futex hash table entries: 256 (8192 bytes on 1 NUMA nodes, total 8 KiB, linear).
+NET: Registered PF_NETLINK/PF_ROUTE protocol family
+um: worker model: spawner ready (CONFIG_UM_WORKER_PROCESS=y; no workers yet — memo 28 E.2)
+um: kvm-v2 physmem_memslot: slot=0 gpa=0 hva=0x60000000 size=0x8000000
+um: kvm-v2 trampoline_install: kva=(____ptrval____) gpa=0x0000000000918000 gva=0xffffe00000000040 (5-byte fallback LSTAR at +0x40; gadget upgrade pending exception_install)
+um: kvm-v2 kernel_half_install: pud_gpa=0x0000000000919000 pmd_gpa=0x000000000091a000 pte_gpa=0x000000000091b000 leaf=trampoline_gpa=0x0000000000918000 gva=0xffffe00000000040 (swapper_pg_dir[448] + init_mm.pgd[448] = 0x919023)
+um: kvm-v2 handler_verify: GP stub @+0x100 = [e6 f9 48 83 c4 08 48 cf] (expect e6 f9 48 83 c4 08 48 cf)
+um: kvm-v2 per_vcpu_ist_tss: cpu=0 vcpu_fd=5 ist_gpa=0x000000000091f000 ist_top_gva=0xffffe00000005000 tss_gpa=0x0000000000920000 tss_gva=0xffffe00000005000
+um: kvm-v2 per_vcpu_gadget_state: cpu=0 vcpu_fd=5 gpa=0x0000000000921000 gva=0xffffe00000006000 (pte_idx=6, task_size_cap=0x7f7ffffffff0)
+um: kvm-v2 install_descriptors_sregs: vcpu_fd=5 idt=0xffffe00000001000 (limit=0xfff) gdt=0xffffe00000003000 (limit=0x3f) tr.base=0xffffe00000005000 tr.limit=103 tr.sel=0x30 tr.type=11
+um: kvm-v2 exception_install: GDT TSS_DESC slot=6 base=0xffffe00000005000 limit=103 (vCPU 0 TSS — per-vCPU SREGS.tr overrides)
+um: kvm-v2 exception_install: idt_gpa=0x000000000091c000 idt_gva=0xffffe00000001000 handlers_gpa=0x000000000091d000 handlers_gva=0xffffe00000002000 gdt_gpa=0x000000000091e000 gdt_gva=0xffffe00000003000 (256 IDT vectors / 8 GDT slots)
+um: kvm-v2 trampoline_upgrade: LSTAR body upgraded to 561-byte gadget at +0x40 (per-vCPU state pages confirmed installed)
+pps_core: LinuxPPS API ver. 1 registered
+pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+PTP clock support registered
+clocksource: Switched to clocksource timer
+VFS: Disk quotas dquot_6.6.0
+VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+NET: Registered PF_INET protocol family
+IP idents hash table entries: 2048 (order: 2, 16384 bytes, linear)
+tcp_listen_portaddr_hash hash table entries: 512 (order: 0, 4096 bytes, linear)
+Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+TCP established hash table entries: 1024 (order: 1, 8192 bytes, linear)
+TCP bind hash table entries: 1024 (order: 2, 16384 bytes, linear)
+TCP: Hash tables configured (established 1024 bind 1024)
+UDP hash table entries: 256 (order: 2, 16384 bytes, linear)
+NET: Registered PF_UNIX/PF_LOCAL protocol family
+printk: legacy console [stderr0] disabled
+mconsole (version 2) initialized on /home/mjbommar/.uml/ksRtoz/mconsole
+Checking host MADV_REMOVE support...OK
+ubd: io_uring substrate active (depth=256)
+workingset: timestamp_bits=62 (anon: 58) max_order=15 bucket_order=0 (anon: 0)
+io scheduler mq-deadline registered
+io scheduler kyber registered
+NET: Registered PF_PACKET protocol family
+Initialized stdio console driver
+Console initialized on /dev/tty0
+printk: legacy console [tty0] enabled
+Initializing software serial port version 1
+printk: legacy console [mc-1] enabled
+Failed to initialize ubd device 0 :Couldn't determine size of device's file
+KTAP version 1
+1..0
+epollctl add err fd 0, Operation not permitted
+hostfs: io_uring writeback substrate active (depth=128)
+VFS: Mounted root (hostfs filesystem) on device 0:16.
+devtmpfs: mounted
+VFS: Pivoted into new rootfs
+um: section split: .text.frozen 00000000b9376776..00000000897adbac (4009 KiB), .um_patch_text 00000000603ff353..00000000603ff353 (0 KiB)
+Run /home/mjbommar/projects/personal/linux/Documentation/virt/uml/examples/rdpmc/rdpmc-demo as init process
+um: kvm-v2 cpuid_install: CPUID installed (67 entries; RDRAND/RDSEED/AVX-512/FSGSBASE masked; SMP-T57 un-masked XSAVE/OSXSAVE/AVX/AVX2/FMA/F16C)
+um: kvm-v2 install_xcrs: vcpu_fd=5 set=0x7 get_rc=0 nr=1 xcr0=0x7
+rdpmc-demo[1]: segfault at 0 ip 0000000000401635 sp 00007f7fffb78908 error 0 in rdpmc-demo[1635,401000+1000]
+Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b
+CPU: 0 UID: 0 PID: 1 Comm: rdpmc-demo Not tainted 7.1.0-rc5-00019-gf2f7fd673927-dirty #14 VOLUNTARY 
+Stack:
+ 68803860 604f596c 603f292b 00000000
+ 00000001 604f596c 68803918 60024f68
+ 68803890 6002d648 605be0f0 606af360
+Call Trace:
+ [<60024f68>] ? _printk+0x0/0x5b
+ [<600308e8>] show_stack+0x10f/0x11e
+ [<603f292b>] ? dump_stack_print_info+0x0/0x12f
+ [<60024f68>] ? _printk+0x0/0x5b
+ [<6002d648>] dump_stack_lvl+0x65/0x80
+ [<6002d681>] dump_stack+0x1e/0x20
+ [<60023e7e>] vpanic+0x122/0x33d
+ [<60049ef6>] ? um_set_signals+0x0/0x3e
+ [<60063e41>] ? cgroup_threadgroup_change_end+0x0/0x89
+ [<60049ead>] ? block_signals+0x0/0x1a
+ [<600240f2>] warn_slowpath_fmt+0x0/0x9a
+ [<60024099>] ? panic+0x0/0x59
+ [<6005c017>] do_exit+0x208/0x99c
+ [<60049ec7>] ? unblock_signals+0x0/0x22
+ [<6005d0e6>] sys_exit_group+0x0/0x1a
+ [<6005d048>] ? do_group_exit+0x0/0x9e
+ [<60067865>] get_signal+0x714/0x738
+ [<60067151>] ? get_signal+0x0/0x738
+ [<60055bf2>] ? setup_signal_stack_si+0x0/0x1d9
+ [<60066d9a>] ? signal_setup_done+0x0/0xb5
+ [<6003065f>] do_signal+0x58/0x1d2
+ [<60409f9f>] ? schedule+0x0/0x63
+ [<60030607>] ? do_signal+0x0/0x1d2
+ [<60253608>] ? blkcg_maybe_throttle_current+0x0/0x1d3
+ [<6002f9ce>] interrupt_end+0x6b/0xb0
+ [<60050edb>] kvm_v2_handle_io_trap+0x309/0xc39
+ [<6004a439>] ? os_nsecs+0x2d/0x3b
+ [<6004cb3d>] ? seccomp_read_clock_ns+0x14/0x16
+ [<600309b9>] ? timer_read+0x1a/0x7c
+ [<600b781a>] ? ktime_get+0x6a/0xd6
+ [<60074687>] ? __task_pid_nr_ns+0x0/0x60
+ [<60030ed7>] ? update_pud_range.isra.0+0x163/0x19d
+ [<6004fb58>] ? kvm_v2_mm_region_removed+0x0/0xa4
+ [<60049ee6>] ? unblock_signals+0x1f/0x22
+ [<60049f1e>] ? um_set_signals+0x28/0x3e
+ [<60049ee6>] ? unblock_signals+0x1f/0x22
+ [<60049f1e>] ? um_set_signals+0x28/0x3e
+ [<600310ef>] ? um_mmu_gather_drain+0x73/0x124
+ [<6004f6eb>] kvm_v2_vcpu_run+0x95d/0xa16
+ [<6003396f>] ? raw_copy_to_user+0x32/0x34
+ [<6018d607>] ? _inline_copy_to_user+0x33/0x3b
+ [<6018e836>] ? load_elf_binary+0x11a0/0x1239
+ [<601410c2>] ? copy_strings_kernel+0x0/0x8b
+ [<6004bff1>] userspace+0x29/0x2b
+ [<6004bfc8>] ? userspace+0x0/0x2b
+ [<6002f7ef>] new_thread_handler+0x5e/0x62
+um: DIAG panic: dumping last 0 mm-syscall events (head_snap=0)
+bash: line 1: 2344427 Aborted                    (core dumped) timeout --kill-after=5 30 /home/mjbommar/src/uml-builds/uml-aperf-test/linux backend=force=kvm-v2 init=/home/mjbommar/projects/personal/linux/Documentation/virt/uml/examples/rdpmc/rdpmc-demo mem=128M con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw panic=-1 < /dev/null
