@@ -184,7 +184,11 @@ Current boundary:
   and throughput fails at 2250/3000 takes against the 2700 target;
 - `pool-exec-smoke` still validates the clean daemon error envelope for missing
   in-guest mconsole exec support; successful daemon-routed guest exec remains
-  pending;
+  pending, and the current blocker is now characterized in
+  `06-sequencing/2026-06-10-pool-mconsole-exec-investigation.md`: the
+  per-member mconsole socket is absent, the active mconsole command table has
+  no `exec` verb, and a naive child-side socket rebind experiment panicked
+  before `MEMBER_DONE`;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller

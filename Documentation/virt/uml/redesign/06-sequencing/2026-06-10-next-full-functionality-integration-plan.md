@@ -88,7 +88,12 @@ The active blockers are now:
    far above the original 100-member RSS target and below the throughput gate.
 2. Validate successful daemon-routed guest exec. The current smoke validates a
    clean error envelope; it does not yet prove a successful guest command
-   through the final member mconsole path.
+   through the final member mconsole path. The current blocker is split into
+   two pieces: per-member mconsole sockets are absent for daemon-taken
+   members, and the active kernel mconsole command table has no `exec` verb.
+   A naive child-side mconsole rebind was tested locally and rejected because
+   it panicked before the member reached `MEMBER_DONE`; see
+   `2026-06-10-pool-mconsole-exec-investigation.md`.
 3. Decide the final request-specific warm scheduling contract. Either add a
    predeclared slot/identity API before warm fork, or route syzkaller and other
    fast consumers through daemon-assigned ready identities with
@@ -1495,7 +1500,9 @@ Immediate engineering conclusion:
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.
 3. Validate successful daemon-routed guest exec through the final member
-   mconsole path.
+   mconsole path. The next step is not another blind rebind attempt; first
+   prove a durable per-member control socket with an existing mconsole command,
+   then add or replace the actual guest exec primitive.
 4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
 5. Import or complete record/replay, or land it behind an explicit
