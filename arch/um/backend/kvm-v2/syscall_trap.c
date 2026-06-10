@@ -262,7 +262,7 @@ static int kvm_v2_kernel_half_alloc_pages(void **pud_kva, void **pmd_kva,
 	*pmd_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	*pte_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	if (!*pud_kva || !*pmd_kva || !*pte_kva) {
-		pr_debug("um: kvm-v2 kernel_half_install: __get_free_page returned NULL (buddy not up?); deferring\n");
+		pr_debug("um: kvm-v2 kernel_half_install: page allocation failed; deferring\n");
 		kvm_v2_kernel_half_free_pages(*pud_kva, *pmd_kva, *pte_kva);
 		*pud_kva = NULL;
 		*pmd_kva = NULL;

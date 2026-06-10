@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
-
  * Copyright (C) 2015 Thomas Meyer (thomas@m3y3r.de)
  * Copyright (C) 2005 Jeff Dike (jdike@karaya.com)
  */
@@ -69,7 +68,7 @@ struct stub_data {
 	/* seccomp architecture specific state restore */
 	struct stub_data_arch arch_data;
 
-	/* Stack for our signal handlers and for calling into . */
+	/* Stack for signal handlers and stub syscall execution. */
 	unsigned char sigstack[UM_KERN_PAGE_SIZE] __aligned(UM_KERN_PAGE_SIZE);
 };
 

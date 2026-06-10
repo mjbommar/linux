@@ -843,7 +843,7 @@ static int kvm_v2_exception_alloc_pages(void **idt_kva, void **handlers_kva,
 	*handlers_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	*gdt_kva = (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	if (!*idt_kva || !*handlers_kva || !*gdt_kva) {
-		pr_err("um: kvm-v2 exception_install: __get_free_page returned NULL (buddy not up?)\n");
+		pr_err("um: kvm-v2 exception_install: page allocation failed\n");
 		kvm_v2_exception_free_pages(*idt_kva, *handlers_kva,
 					    *gdt_kva);
 		*idt_kva = NULL;
