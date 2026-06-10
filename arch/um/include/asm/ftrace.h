@@ -61,7 +61,7 @@ static inline unsigned long ftrace_call_adjust(unsigned long addr)
 	/*
 	 * With -fpatchable-function-entry=5,0 the compiler records the
 	 * address of the first (and only) NOP region, which is already
-	 * the address we want to patch. No adjustment needed.
+	 * the address to patch. No adjustment needed.
 	 */
 	return addr;
 }

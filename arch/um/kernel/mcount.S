@@ -13,12 +13,12 @@
  *     the address just past the patched 5-byte sequence in the
  *     traced function).
  *   - All System V AMD64 caller-clobbered registers belong to the
- *     traced function; they hold its incoming arguments. We must
- *     preserve them.
+ *     traced function; they hold its incoming arguments. The
+ *     trampoline must preserve them.
  *
- * We call ftrace_stub by default at the ftrace_call label; at
+ * The default target at the ftrace_call label is ftrace_stub; at
  * init time ftrace_update_ftrace_func() patches that call to point
- * at ftrace_ops_list_func (or a per-ops trampoline).
+ * at ftrace_ops_list_func or a per-ops trampoline.
  *
  * When CONFIG_FUNCTION_GRAPH_TRACER is enabled, the tail of
  * ftrace_caller reaches a 5-byte patchable ftrace_graph_call site
@@ -50,14 +50,14 @@ SYM_FUNC_END(ftrace_stub)
  * arguments.
  */
 SYM_FUNC_START(ftrace_caller)
-	/* Save all SysV AMD64 caller-clobbered regs, in a stable order
-	 * so we can reach parent_ip and the return address by offset.
+	/*
+	 * Save all SysV AMD64 caller-clobbered regs in a stable order
+	 * so parent_ip and the return address have fixed offsets.
 	 *
 	 * x86_64 pushq decrements rsp then stores, so after 9 pushes
 	 * rsp has dropped by 72 and the last-pushed reg (r11) sits at
-	 * the new (%rsp). The two slots sitting above the pushed frame
-	 * are the two return addresses the two nested calls pushed
-	 * onto the stack before we got here:
+	 * the new (%rsp). The two slots above the pushed frame are the
+	 * return addresses the nested calls pushed before entry:
 	 *
 	 *   [entry_rsp+0] = return-to-traced-fn
 	 *                   (pushed by the patched call ftrace_caller
@@ -137,7 +137,7 @@ SYM_INNER_LABEL(ftrace_graph_call, SYM_L_GLOBAL)
 	 * the graph tracer activates,
 	 * ftrace_enable_ftrace_graph_caller() patches this to JMP
 	 * rel32 ftrace_graph_caller. Forcing the rel32 encoding via
-		 * raw bytes keeps the patch the same size as the default encoding
+	 * raw bytes keeps the patch the same size as the default encoding
 	 * regardless of how close the jump target is; a plain jmp
 	 * mnemonic at this distance would be assembled as a 2-byte
 	 * JMP rel8 by gas.
@@ -163,11 +163,11 @@ SYM_FUNC_END(ftrace_caller)
  *               call ftrace_caller inside traced_fn's 5-byte
  *               prologue slot)
  *   8(%rsp)   = parent_ip (pushed by the outer call traced_fn
- *               from the traced function's caller; this is the
- *               slot we rewrite)
+ *               from the traced function's caller; this slot is
+ *               rewritten by prepare_ftrace_return)
  *
- * We must preserve every SysV AMD64 caller-clobbered reg because
- * those hold the traced function's arguments. Nine pushes matches
+ * Preserve every SysV AMD64 caller-clobbered reg because those hold
+ * the traced function's arguments. Nine pushes matches
  * ftrace_caller's save set; the offsets to return-to-traced-fn and
  * parent_ip shift by 72 bytes.
  */
@@ -195,7 +195,7 @@ SYM_FUNC_START(ftrace_graph_caller)
 	 * will pop with its own ret. */
 	leaq	80(%rsp), %rsi
 
-	/* Arg 3 (%rdx): frame_pointer. UML doesn't build with frame
+	/* Arg 3 (%rdx): frame_pointer. UML does not build with frame
 	 * pointers on the ftrace trampoline path, so pass 0; the
 	 * generic fgraph code tolerates this and skips the
 	 * frame-pointer-based unwind verification when it's 0.
@@ -214,7 +214,8 @@ SYM_FUNC_START(ftrace_graph_caller)
 	popq	%rcx
 	popq	%rax
 
-	/* Returns into the traced function (which eventually rets
+	/*
+	 * Returns into the traced function (which eventually rets
 	 * to the rewritten parent slot and then return_to_handler).
 	 */
 	ret
@@ -230,25 +231,25 @@ SYM_FUNC_END(ftrace_graph_caller)
  * the rewritten parent slot):
  *
  *   (%rsp) = whatever was below the parent slot; the previous
- *            ret already popped our trampoline's address off
- *            the top.
+ *            ret already popped the trampoline address off the top.
  *
  * ftrace_return_to_handler(NULL) returns the real caller's ip in
- * %rax. We must preserve the traced function's return values
- * (%rax, %rdx per SysV AMD64) across the call, because the
- * caller expects to receive them.
+ * %rax. Preserve the traced function's return values (%rax, %rdx
+ * per SysV AMD64) across the call, because the caller expects to
+ * receive them.
  */
 SYM_CODE_START(return_to_handler)
 	/*
 	 * Save the traced function's return values (SysV AMD64
 	 * uses %rax for integer/pointer, %rdx for the high half of
-	 * 128-bit returns). %rdi is clobbered by our call-out.
+	 * 128-bit returns). %rdi is clobbered by the call-out.
 	 */
 	subq	$24, %rsp
 	movq	%rax, (%rsp)
 	movq	%rdx, 8(%rsp)
 
-	/* Arg 1 (%rdi): frame_pointer, 0 since we don't maintain
+	/*
+	 * Arg 1 (%rdi): frame_pointer, 0 because UML does not maintain
 	 * frame pointers through the trampoline. The generic
 	 * ftrace_return_to_handler() consumes the current task's
 	 * ret_stack to recover the real return address.
@@ -256,16 +257,19 @@ SYM_CODE_START(return_to_handler)
 	xorq	%rdi, %rdi
 	call	ftrace_return_to_handler
 
-	/* %rax now holds the real caller ip. Stash it below our
-	 * saved retvals, then restore retvals. */
+	/*
+	 * %rax now holds the real caller ip. Store it below the saved
+	 * return values, then restore those values.
+	 */
 	movq	%rax, 16(%rsp)
 	movq	(%rsp), %rax
 	movq	8(%rsp), %rdx
 	addq	$16, %rsp
 
-	/* Top of stack now holds the real caller ip. A ret here
-	 * pops it into %rip. This is cleaner than jmp *(%rsp)/add
-	 * %rsp; it keeps the return-stack-buffer balanced. */
+	/*
+	 * Top of stack now holds the real caller ip. A ret pops it into
+	 * %rip and keeps the return-stack-buffer balanced.
+	 */
 	ret
 SYM_CODE_END(return_to_handler)
 #endif /* CONFIG_FUNCTION_GRAPH_TRACER */
