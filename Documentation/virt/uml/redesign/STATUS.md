@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 fork smoke and stress validation.
+Last updated: 2026-06-10 sustained pool-member XFAIL bound.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -150,7 +150,8 @@ Current boundary:
   identity round-trips, no kernel panics, and no live orphans after teardown;
 - `template-pause-pool-sustained-smoke` remains an expected failure after the
   first member because the current MAP_SHARED physmem model does not support
-  the repeated member lifetime this test requires;
+  the repeated member lifetime this test requires; the harness now stops on
+  the first post-member panic/segfault instead of generating a long panic log;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before

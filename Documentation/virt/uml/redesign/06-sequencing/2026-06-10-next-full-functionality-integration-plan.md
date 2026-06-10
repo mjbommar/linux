@@ -1252,8 +1252,11 @@ Result:
 
 - XFAIL;
 - iteration 1 reached `MEMBER_DONE`;
-- iteration 2 timed out;
-- the run hit the known MAP_SHARED physmem limit;
+- iteration 2 observed the known post-first-member panic/segfault condition;
+- the harness now stamps the current member identity before each take and
+  stops at the first post-member panic/segfault instead of generating a long
+  panic log;
+- the run still hits the known MAP_SHARED physmem limit;
 - the fix is a real per-member physmem file-descriptor design, not a test-only
   workaround.
 

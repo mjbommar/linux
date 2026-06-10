@@ -112,15 +112,28 @@ def count_done():
             return fh.read().count("SUSTAINED_MEMBER_DONE")
     except FileNotFoundError: return 0
 
+def read_log():
+    try:
+        with open(log_path, errors="replace") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return ""
+
 prev = 0
 for i in range(1, N+1):
     s = wait_state(pid, "T", 15)
     if s != "T":
         print(f"iter {i}: master state {s}, abort")
         break
-    if i < N:
-        os.lseek(fd, 0, 0); os.write(fd, make_blob(i+1))
+
+    os.lseek(fd, 0, 0); os.write(fd, make_blob(i))
+    os.lseek(fd, 260, 0); os.write(fd, b"\x00" * 4)
+    before = read_log()
+    panic_base = before.count("Kernel panic")
+    segv_base = before.count("segfault at")
+
     os.kill(pid, signal.SIGCONT)
+    fatal_seen = False
     end = time.time() + 20
     while time.time() < end:
         try:
@@ -131,9 +144,17 @@ for i in range(1, N+1):
             prev = c
             print(f"iter {i}: MEMBER_DONE total={c}")
             break
+        content = read_log()
+        if i > 1 and (content.count("Kernel panic") > panic_base or
+                      content.count("segfault at") > segv_base):
+            print(f"iter {i}: observed post-first-member panic/segfault")
+            fatal_seen = True
+            break
         time.sleep(0.2)
     else:
         print(f"iter {i}: TIMEOUT")
+        break
+    if fatal_seen:
         break
     time.sleep(0.5)
 
