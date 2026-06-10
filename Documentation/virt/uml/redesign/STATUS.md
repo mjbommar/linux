@@ -189,6 +189,10 @@ Current boundary:
   per-member mconsole socket is absent, the active mconsole command table has
   no `exec` verb, and a naive child-side socket rebind experiment panicked
   before `MEMBER_DONE`;
+- `pool-mconsole-path-probe` now preserves that boundary as a focused
+  diagnostic gate: with a non-empty `mconsole_path`, the replicated member
+  reaches `PMCON_MEMBER_DONE` without panic, but the requested socket remains
+  absent and the test exits XFAIL;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller

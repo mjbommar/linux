@@ -56,6 +56,22 @@ tools/testing/selftests/um/template-pause-pool-sustained-smoke/run-template-paus
 passed with 3/3 members reaching `MEMBER_DONE`, three `POOL_REPLICATE_OK`
 markers, no kernel panic, and no v1 ceiling regression.
 
+The new bounded mconsole-path probe also records the current blocker:
+
+```sh
+UML_BINARY=$PWD/linux \
+tools/testing/selftests/um/pool-mconsole-path-probe/run-pool-mconsole-path-probe.sh
+```
+
+Current result: XFAIL with exit code 4.
+
+- `PMCON_MEMBER_DONE : 1`;
+- `POOL_ENTER : 1`;
+- `POOL_REPLICATE_OK : 1`;
+- `Kernel panic : False`;
+- requested mconsole path under `/tmp/pool-mconsole-path-probe.*/`; and
+- `mconsole exists : False`.
+
 ## Findings
 
 There are two independent blockers behind successful daemon-routed exec.
@@ -142,7 +158,9 @@ Recommended next sequence:
 
 1. Add a small, bounded diagnostic mode or selftest probe that can arm a
    non-empty `mconsole_path` and preserve the boot log without relying on the
-   daemon's null stdout/stderr.
+   daemon's null stdout/stderr. Current status: done as
+   `tools/testing/selftests/um/pool-mconsole-path-probe/`; it XFAILs on the
+   current socket-missing behavior and fails on panic or timeout.
 2. Find the first safe point after `POOL_REPLICATE_OK` where the child can bind
    a process-local control socket without corrupting the repaired task, timer,
    IRQ, or SKAS stub state.
@@ -154,4 +172,3 @@ Recommended next sequence:
 5. Update `pool-exec-smoke` so case A becomes a required pass once the kernel
    advertises the exec primitive, while older kernels continue to produce the
    current clean failure envelope.
-

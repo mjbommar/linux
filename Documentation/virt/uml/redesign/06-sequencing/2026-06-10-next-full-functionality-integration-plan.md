@@ -93,7 +93,9 @@ The active blockers are now:
    members, and the active kernel mconsole command table has no `exec` verb.
    A naive child-side mconsole rebind was tested locally and rejected because
    it panicked before the member reached `MEMBER_DONE`; see
-   `2026-06-10-pool-mconsole-exec-investigation.md`.
+   `2026-06-10-pool-mconsole-exec-investigation.md`. The checked-in
+   `pool-mconsole-path-probe` now preserves the current socket-missing
+   boundary as an XFAIL diagnostic.
 3. Decide the final request-specific warm scheduling contract. Either add a
    predeclared slot/identity API before warm fork, or route syzkaller and other
    fast consumers through daemon-assigned ready identities with
@@ -1212,6 +1214,8 @@ Runtime smoke:
 - Pool spawn smoke.
 - Pool serve smoke.
 - Pool exec smoke.
+- Pool mconsole path probe. Current status: XFAIL diagnostic; member reaches
+  userspace, no panic, requested mconsole socket absent.
 - Pool port-forward smoke.
 - Vector2 sandbox audit.
 - Vector2 fd handoff.
@@ -1502,7 +1506,9 @@ Immediate engineering conclusion:
 3. Validate successful daemon-routed guest exec through the final member
    mconsole path. The next step is not another blind rebind attempt; first
    prove a durable per-member control socket with an existing mconsole command,
-   then add or replace the actual guest exec primitive.
+   then add or replace the actual guest exec primitive. The first diagnostic
+   probe for this now exists as `pool-mconsole-path-probe` and XFAILs on the
+   current socket-missing behavior.
 4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
 5. Import or complete record/replay, or land it behind an explicit
