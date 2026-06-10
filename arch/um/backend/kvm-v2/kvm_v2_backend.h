@@ -141,13 +141,12 @@ struct kvm_v2_vm {
 };
 
 /*
- * In-memory memslot record. One exists per registered region and lives on
- * @vm->memslots until kvm_v2_memslot_del() removes it.
+ * In-memory memslot record. One exists per registered KVM memory slot
+ * and lives on @vm->memslots until kvm_v2_memslot_del() removes it.
  *
- * Identity-map invariant: KVM_SET_USER_MEMORY_REGION passes
- * userspace_addr == guest_phys_addr. @host_va and @gpa are stored
- * separately so that invariant can change without changing this record
- * shape.
+ * @gpa and @host_va are intentionally separate: the physmem slot maps
+ * guest physical offset 0 to the UML physmem host mapping, and future
+ * slots may use different GPA/HVA relationships.
  */
 struct kvm_v2_memslot {
 	struct list_head	list;
@@ -622,21 +621,19 @@ void kvm_v2_fpu_capture_for_switch_out(struct task_struct *from);
 void kvm_v2_context_switch(struct task_struct *from, struct task_struct *to);
 
 /*
- * Memslot allocator and lookup, defined in memslot.c. The functions
- * below take @vm->lock internally; callers must not hold it.
+ * Memslot record management, defined in memslot.c. The helpers take
+ * @vm->lock internally; callers must not hold it. KVM ioctls are issued
+ * by callers after kvm_v2_memslot_add() returns a slot id.
  */
-int  kvm_v2_memslot_alloc_id(struct kvm_v2_vm *vm);
-void kvm_v2_memslot_free_id(struct kvm_v2_vm *vm, u32 slot_id);
 int  kvm_v2_memslot_add(struct kvm_v2_vm *vm, u64 gpa, u64 host_va,
 			u64 size, u32 flags);
 void kvm_v2_memslot_del(struct kvm_v2_vm *vm, u32 slot_id);
-struct kvm_v2_memslot *kvm_v2_memslot_lookup(struct kvm_v2_vm *vm, u64 gpa);
 
 /*
- * mm_region_added/mm_region_removed ops in region.c. They issue
- * KVM_SET_USER_MEMORY_REGION add/delete operations for each VA range the
- * mm-arbiter surfaces. They also call the corresponding seccomp handlers
- * because KVM v2 reuses the seccomp stub-child lifecycle.
+ * mm_region_added/mm_region_removed ops in region.c. The giant physmem
+ * memslot installed by context.c covers guest page-table walks, so the
+ * per-region hooks serialize the mm update and leave KVM memslots
+ * unchanged.
  */
 int  kvm_v2_mm_region_added(struct mm_struct *mm,
 			    const struct um_memory_region *region);

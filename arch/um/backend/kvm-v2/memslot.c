@@ -1,36 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KVM backend memslot allocator and lookup helpers.
+ * KVM backend memslot record helpers.
  *
  * This file owns the per-VM list of registered memslots and the bitmap
- * that hands out KVM_SET_USER_MEMORY_REGION slot ids. It does not issue
- * KVM ioctls; callers own the ioctl sequencing.
- *
- * Why a bitmap and not e.g. an idr / xarray:
- *   The slot-id space is small (KVM_V2_MAX_USER_MEM_SLOTS == 32767),
- *   bounded, and dense in practice (a long-running UML guest will fill
- *   it in well under a minute of fork/exec churn). A flat bitmap fits
- *   in 4 KiB and gives O(slots) allocation with cache-friendly scans.
- *   idr would allocate per-id, xarray would over-engineer for the
- *   workload.
- *
- * Why list_head, not a hash/tree:
- *   Lookup-by-GPA traffic is dominated by exit-handler paths that
- *   already do per-region bookkeeping (mm_region_added/removed
- *   are "build a region object, hand it to the backend" calls; one
- *   per drained TLB entry). At expected densities (hundreds of regions
- *   per running mm, not tens of thousands) a
- *   linear list under spinlock is simpler than a tree and avoids forcing
- *   GPA-overlap policy into tree keys.
- *   The alloc/free API keeps the backing data structure private to
- *   this file.
- *
- * Locking: every public function in this file acquires vm->lock.
- *   Callers must not hold vm->lock when calling in. This file uses
- *   scoped_guard(spinlock, &vm->lock); spin_lock_irqsave is
- *   unnecessary because the only contention is between the kernel
- *   thread TLB drain path and v2's exit handler, neither of which runs
- *   from hard-irq context.
+ * that hands out KVM_SET_USER_MEMORY_REGION slot ids. Callers own KVM
+ * ioctl sequencing; these helpers only allocate records, publish them on
+ * @vm->memslots, and free them during VM teardown. All exported helpers
+ * take @vm->lock internally.
  */
 
 #include <linux/bitmap.h>
@@ -48,7 +24,7 @@
 
 #include "kvm_v2_backend.h"
 
-int kvm_v2_memslot_alloc_id(struct kvm_v2_vm *vm)
+static int kvm_v2_memslot_alloc_id(struct kvm_v2_vm *vm)
 {
 	unsigned int id;
 
@@ -65,7 +41,7 @@ int kvm_v2_memslot_alloc_id(struct kvm_v2_vm *vm)
 	return (int)id;
 }
 
-void kvm_v2_memslot_free_id(struct kvm_v2_vm *vm, u32 slot_id)
+static void kvm_v2_memslot_free_id(struct kvm_v2_vm *vm, u32 slot_id)
 {
 	if (!vm)
 		return;
@@ -151,27 +127,4 @@ void kvm_v2_memslot_del(struct kvm_v2_vm *vm, u32 slot_id)
 
 	trace_um_backend_kvm_v2_memslot_del(slot_id);
 	kfree(found);
-}
-
-struct kvm_v2_memslot *kvm_v2_memslot_lookup(struct kvm_v2_vm *vm, u64 gpa)
-{
-	struct kvm_v2_memslot *m;
-
-	if (!vm)
-		return NULL;
-
-	/*
-	 * Returning the pointer after dropping the lock is safe for the
-	 * current callers: deletion also takes vm->lock, and lookups run from
-	 * the vCPU exit path that owns the active memslot walk. If a caller
-	 * needs lock-free lookup, convert the list to RCU without
-	 * changing this API.
-	 */
-	scoped_guard(spinlock, &vm->lock) {
-		list_for_each_entry(m, &vm->memslots, list) {
-			if (gpa >= m->gpa && gpa < m->gpa + m->size)
-				return m;
-		}
-	}
-	return NULL;
 }
