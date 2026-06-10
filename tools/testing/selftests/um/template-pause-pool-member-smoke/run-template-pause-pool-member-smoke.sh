@@ -23,10 +23,14 @@
 #              no kernel panic.
 #   1  FAIL  - child never reached MEMBER_DONE.
 #   4  SKIP  - kernel binary missing or python3 unavailable.
+#
+# Optional:
+#   UML_POOL_REPLICATE=1 boots with per-member physmem replication enabled.
 
 set -u
 
 KERNEL=${UML_BINARY:-$HOME/src/uml-builds/uml-tplpause-fork/linux}
+REPLICATE=${UML_POOL_REPLICATE:-0}
 
 if [ ! -x "$KERNEL" ]; then
 	echo "SKIP: UML binary $KERNEL not found (set UML_BINARY)"
@@ -65,10 +69,11 @@ IEOF
 chmod +x "$OUT/init.sh"
 
 PYRC=0
-python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" <<'PYEOF' || PYRC=$?
+python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" "$REPLICATE" <<'PYEOF' || PYRC=$?
 import ctypes, ctypes.util, fcntl, os, signal, struct, sys, time
 
-kernel, init_path, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
+kernel, init_path, log_path, replicate_str = sys.argv[1:5]
+replicate = replicate_str == "1"
 
 def Z(b, n):
     return b.ljust(n, b'\x00')[:n]
@@ -110,13 +115,16 @@ if pid == 0:
     os.setsid()
     os.dup2(log.fileno(), 1)
     os.dup2(log.fileno(), 2)
-    os.execve(kernel, [
+    cmdline = [
         "linux", "mem=128M", "rootfstype=hostfs", "rootflags=/",
         "root=/dev/root", "rw", "ncpus=1",
         "um_template_pause=fork",
         "um_template_pause_pool_member=1",
-        f"init={init_path}",
-    ], env)
+    ]
+    if replicate:
+        cmdline.append("um_template_pause_pool_replicate=1")
+    cmdline.append(f"init={init_path}")
+    os.execve(kernel, cmdline, env)
     os._exit(127)
 
 def state(p):
@@ -189,6 +197,8 @@ with open(log_path, errors="replace") as fh:
     content = fh.read()
 
 pool_enter = content.count("POOL_ENTER")
+replicate_ok = content.count("POOL_REPLICATE_OK")
+replicate_fail = content.count("POOL_REPLICATE_FAIL")
 post_pause = content.count("TPPM_POST_PAUSE")
 alive_1    = content.count("TPPM_MEMBER_ALIVE_1")
 ticks      = content.count("TPPM_MEMBER_TICK")
@@ -202,6 +212,8 @@ identity_parsed = "identity-parsed" in content and \
                   'name="pool-member-1"' in content
 
 print(f"POOL_ENTER       : {pool_enter}")
+print(f"POOL_REPLICATE_OK: {replicate_ok}")
+print(f"POOL_REPLICATE_FAIL: {replicate_fail}")
 print(f"TPPM_POST_PAUSE  : {post_pause}")
 print(f"TPPM_MEMBER_ALIVE_1: {alive_1}")
 print(f"TPPM_MEMBER_TICK : {ticks}")
@@ -216,6 +228,12 @@ if panic or ceiling:
     sys.exit(1)
 if pool_enter < 1:
     print("FAIL: no POOL_ENTER from child entry")
+    sys.exit(1)
+if replicate and replicate_ok < 1:
+    print("FAIL: replication marker not found")
+    sys.exit(1)
+if replicate_fail:
+    print("FAIL: replication failure marker found")
     sys.exit(1)
 if post_pause < 1:
     print("FAIL: init.sh did not return from /proc write")

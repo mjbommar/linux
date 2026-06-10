@@ -4,17 +4,20 @@
 # um/template-pause-pool-sustained-smoke - N-member sustained
 # pool dispatch.
 #
-# Currently EXPECTED TO FAIL after iter 1. The test records the known
-# MAP_SHARED physmem/member ownership limitation while still catching
-# regressions in the first pool-member handoff.
+# The default no-replication path is expected to fail after iter 1 and records
+# the known MAP_SHARED physmem/member ownership limitation. With
+# UML_POOL_REPLICATE=1, all requested members are expected to complete.
 #
 # Exit codes:
-#   0   PASS - N members all reached MEMBER_DONE (NOT YET ACHIEVABLE)
+#   0   PASS - N members all reached MEMBER_DONE.
 #   4   SKIP/XFAIL - kernel binary missing, OR the default path reaches
 #              iter 1 PASS + iter 2+ hits the architectural limit, OR
-#              UML_POOL_REPLICATE=1 reaches the current bounded
-#              post-replication failure.
+#              UML_POOL_REPLICATE=1 reaches a bounded post-replication
+#              regression.
 #   1   FAIL - iter 1 itself broke (regression in pool-member entry).
+#
+# Optional:
+#   KEEP_OUT=1 preserves the temporary directory and boot log.
 
 set -u
 
@@ -32,7 +35,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 OUT=$(mktemp -d -t template-pause-pool-sustained-smoke.XXXXXX)
-trap 'rm -rf "$OUT"' EXIT
+trap 'if [ "${KEEP_OUT:-0}" = "1" ]; then echo "kept: $OUT" >&2; else rm -rf "$OUT"; fi' EXIT
 
 cat >"$OUT/init.sh" <<'IEOF'
 #!/bin/sh
@@ -154,6 +157,7 @@ for i in range(1, N+1):
 
     os.kill(pid, signal.SIGCONT)
     fatal_seen = False
+    done_seen = False
     end = time.time() + 20
     while time.time() < end:
         try:
@@ -163,6 +167,7 @@ for i in range(1, N+1):
         if c > prev:
             prev = c
             print(f"iter {i}: MEMBER_DONE total={c} child_pid={child_pid_slot()}")
+            done_seen = True
             break
         content = read_log()
         if (replicate or i > 1) and (
@@ -176,6 +181,20 @@ for i in range(1, N+1):
     else:
         print(f"iter {i}: TIMEOUT child_pid={child_pid_slot()}")
         break
+    if fatal_seen:
+        break
+    if done_seen:
+        end = time.time() + 1
+        while time.time() < end:
+            content = read_log()
+            if (replicate or i > 1) and (
+                    content.count("Kernel panic") > panic_base or
+                    content.count("segfault at") > segv_base):
+                print(f"iter {i}: observed panic/segfault after MEMBER_DONE "
+                      f"child_pid={child_pid_slot()}")
+                fatal_seen = True
+                break
+            time.sleep(0.05)
     if fatal_seen:
         break
     time.sleep(0.5)

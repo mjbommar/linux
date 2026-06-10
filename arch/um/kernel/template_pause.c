@@ -16,6 +16,7 @@
 #include <linux/cpumask.h>
 #include <linux/errno.h>
 #include <linux/hardirq.h>
+#include <linux/hrtimer.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/preempt.h>
@@ -24,6 +25,7 @@
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/string.h>
+#include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
@@ -269,16 +271,18 @@ child_entry_pivot_test(void)
  * Sequence:
  *
  *   1. preempt_enable() - master held preempt_disable across fork.
- *   2. os_template_pause_signals_restore_host() - master blocked
+ *   2. um_pool_replicate_physmem() - optional: give the child private
+ *      guest RAM before it mutates task, timer, or saved-register state.
+ *   3. os_template_pause_signals_restore_host() - master blocked
  *      host signals pre-fork; child must unblock so timer ticks,
  *      SIGIO, SIGCHLD reach the seccomp dispatch loop.
- *   3. PT_REGS_SET_SYSCALL_RETURN(current regs, resume_ret) -
+ *   4. PT_REGS_SET_SYSCALL_RETURN(current regs, resume_ret) -
  *      the /proc write that triggered template_pause is "returning"
  *      with the byte count stored before fork.
- *   4. um_skas_respawn_all_stubs() - master tore the stubs down
+ *   5. um_skas_respawn_all_stubs() - master tore the stubs down
  *      before fork in fork_on_resume_loop().  Child needs
  *      a fresh stub for its own userspace.
- *   5. userspace(&current->thread.regs.regs) - drop into the
+ *   6. userspace(&current->thread.regs.regs) - drop into the
  *      seccomp dispatch loop forever, pumping the caller's userspace.
  *      Never returns.
  */
@@ -317,6 +321,14 @@ static void template_pause_write_pool_replicate_marker(bool ok)
 
 static void template_pause_rebuild_child_timer(void)
 {
+	/*
+	 * The generic timer wheel can contain timers inherited from
+	 * detached parent-side kthreads. Drop those before the child
+	 * arms its own tick source.
+	 */
+	hrtimers_worker_reset();
+	timers_worker_reset();
+
 	/*
 	 * Per timer(7), POSIX interval timers are not preserved across
 	 * fork(2): the child must rebuild its own SIGALRM source.
@@ -414,12 +426,12 @@ child_entry_pool_member(void)
 	template_pause_write_pool_enter_marker();
 
 	preempt_enable();
+	template_pause_replicate_child_physmem();
 	(void)os_template_pause_signals_restore_host();
 
 	template_pause_rebuild_child_timer();
 	template_pause_complete_child_proc_write();
 	template_pause_reset_child_task_state();
-	template_pause_replicate_child_physmem();
 	template_pause_refresh_child_stubs();
 
 	/*

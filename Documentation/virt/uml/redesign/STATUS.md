@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 sustained pool-member replication range narrowed.
+Last updated: 2026-06-10 replicated sustained pool-member lifetime passes.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -153,23 +153,22 @@ Current boundary:
   identity round-trips, no kernel panics, and no live orphans after teardown;
 - `template-pause-pool-sustained-smoke` remains an expected failure after the
   first member in the default path because the current MAP_SHARED physmem model
-  does not support the repeated member lifetime this test requires; the harness
-  keeps the first member alive, stamps each requested member identity, and
-  narrows the default second-member failure to a timeout before the second
-  `POOL_ENTER` with the child-pid write-back slot still zero, and with no
-  kernel panic, v1 ceiling regression, or live UML process leak in the bounded
-  run; local marker instrumentation also showed the second take reaches the
-  runqueue lock inside `sched_worker_detach_other_tasks()` and then stalls
-  while walking scheduler state, which is consistent with the first live member
-  mutating kernel memory still shared with the master; the gated replication
-  path now copies and remaps the full runtime `uml_reserved..high_physmem`
-  kernel physmem window rather than the stale setup-time registered range, so
-  `UML_POOL_REPLICATE=1` reaches iteration 1 `MEMBER_DONE` before the second
-  take hits the remaining panic/segfault boundary; the implementation path is
-  tracked in
+  does not support repeated member lifetime; this default XFAIL remains useful
+  as a sentinel for accidental shared-physmem regressions; the gated
+  replication path now copies and remaps the full runtime
+  `uml_reserved..high_physmem` kernel physmem window before the child mutates
+  task, timer, or saved-register state, resets inherited timer and hrtimer
+  queues, and passes the sustained smoke with `UML_POOL_REPLICATE=1`:
+  three members reach `MEMBER_DONE`, three distinct child-pid slots are
+  reported, `POOL_REPLICATE_OK` appears three times, and no kernel panic or
+  v1 ceiling regression is observed; `template-pause-pool-member-smoke` also
+  passes with `UML_POOL_REPLICATE=1`, including five timer ticks; the
+  implementation path is tracked in
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;
+- the daemon pool still needs to opt into the replicated member path before
+  daemon-routed pool functionality is called complete;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before
   pool functionality is called done; and
 - tap-fd handoff through vector2 pool members and the syzkaller shim still need

@@ -188,6 +188,10 @@ int timers_dead_cpu(unsigned int cpu);
 #define timers_dead_cpu		NULL
 #endif
 
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+void timers_worker_reset(void);
+#endif
+
 #if defined(CONFIG_SMP) && defined(CONFIG_NO_HZ_COMMON)
 extern int tmigr_isolated_exclude_cpumask(struct cpumask *exclude_cpumask);
 #else

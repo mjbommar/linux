@@ -63,18 +63,25 @@ Replicating only the registered setup-time range left the lower runtime kernel
 physmem window backed by the master's old fd while `phys_mapping()` returned
 the new fd for later stub mappings.
 
-The current gated replication path now copies and remaps the full runtime
-`uml_reserved..high_physmem` window and updates the registered region to match.
+The current gated replication path now:
+
+- copies and remaps the full runtime `uml_reserved..high_physmem` window and
+  updates the registered region to match;
+- runs replication before the child mutates task, timer, or saved-register
+  state inherited from the master;
+- resets inherited timer-wheel and hrtimer queues before arming the child's
+  fresh POSIX timer; and
+- passes the sustained smoke with `UML_POOL_REPLICATE=1`.
+
 With `UML_POOL_REPLICATE=1`, the sustained smoke now reports:
 
-- iteration 1 reaches `MEMBER_DONE`;
-- iteration 1 reports a nonzero child-pid slot;
-- iteration 2 observes a panic/segfault while awaiting the member;
-- `SUSTAINED_MEMBER_DONE : 1`;
+- iterations 1, 2, and 3 reach `MEMBER_DONE`;
+- all three child-pid slots are nonzero;
+- `SUSTAINED_MEMBER_DONE : 3`;
 - `POOL_ENTER : 3`;
-- `POOL_REPLICATE_OK : 2`;
+- `POOL_REPLICATE_OK : 3`;
 - `POOL_REPLICATE_FAIL : 0`;
-- `Kernel panic : True`; and
+- `Kernel panic : False`; and
 - no v1 ceiling regression.
 
 Older bisect work remains relevant:
@@ -198,9 +205,10 @@ Status:
   `um_pool_replicate_physmem()` and `um_pool_remap_self_test()` use the current
   `uml_reserved..high_physmem` runtime window instead of the stale setup-time
   registered mapping;
-- `UML_POOL_REPLICATE=1` now reaches iteration 1 `MEMBER_DONE`; and
-- the remaining failure is the second replicated take, which still hits the
-  bounded panic/segfault boundary before sustained lifetime can be called fixed.
+- moved replication before the child reinitializes timers, task state, and
+  saved syscall return state; and
+- reset inherited timer and hrtimer queues in the child so stale parent-side
+  timer list links cannot fire in a long-lived member.
 
 ### Step 4: Fix New Guest-MM Stub Creation
 
@@ -223,12 +231,18 @@ Candidate fixes to evaluate:
 Acceptance for this step:
 
 ```sh
-UML_BINARY=$PWD/linux \
+UML_BINARY=$PWD/linux UML_POOL_REPLICATE=1 \
 tools/testing/selftests/um/template-pause-pool-member-smoke/run-template-pause-pool-member-smoke.sh
 ```
 
 with replication enabled must still pass, including timer ticks and
 `MEMBER_DONE`.
+
+Status:
+
+- passes with `UML_POOL_REPLICATE=1`, including five `TPPM_MEMBER_TICK`
+  markers, `POOL_REPLICATE_OK : 1`, no kernel panic, and no v1 ceiling
+  regression.
 
 ### Step 5: Flip Sustained Smoke From XFAIL to PASS
 
@@ -244,6 +258,14 @@ replication-enabled path and require:
 
 Keep an explicit no-replication XFAIL mode if it remains useful as a regression
 sentinel for the shared-physmem failure.
+
+Status:
+
+- passes with `UML_POOL_REPLICATE=1`: three members reach `MEMBER_DONE`, all
+  reported child-pid slots are nonzero, `POOL_REPLICATE_OK` appears three
+  times, no kernel panic is observed, and the v1 ceiling marker is absent;
+- the default no-replication mode remains an XFAIL sentinel for the old
+  MAP_SHARED member-ownership failure.
 
 ### Step 6: Move Daemon Pool to Real Live Members
 
@@ -295,7 +317,13 @@ make ARCH=um -j16
 bash -n \
 tools/testing/selftests/um/template-pause-pool-sustained-smoke/run-template-pause-pool-sustained-smoke.sh
 
+bash -n \
+tools/testing/selftests/um/template-pause-pool-member-smoke/run-template-pause-pool-member-smoke.sh
+
 UML_BINARY=$PWD/linux \
+tools/testing/selftests/um/template-pause-pool-member-smoke/run-template-pause-pool-member-smoke.sh
+
+UML_BINARY=$PWD/linux UML_POOL_REPLICATE=1 \
 tools/testing/selftests/um/template-pause-pool-member-smoke/run-template-pause-pool-member-smoke.sh
 
 UML_BINARY=$PWD/linux \

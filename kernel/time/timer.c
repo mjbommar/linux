@@ -2482,6 +2482,39 @@ void update_process_times(int user_tick)
 		run_posix_cpu_timers();
 }
 
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+/*
+ * UML forkserver workers run in a child process that inherited kernel timer
+ * bases from the master. The child must not run those timer lists: their
+ * entries can point at parent-side task stacks or detached kthreads that have
+ * no valid host execution context in the child. Drop the inherited wheel state;
+ * timers armed after the reset are local to the child and work normally.
+ */
+void timers_worker_reset(void)
+{
+	struct timer_base *base;
+	unsigned long flags;
+	int b, i;
+
+	for (b = 0; b < NR_BASES; b++) {
+		base = this_cpu_ptr(&timer_bases[b]);
+
+		raw_spin_lock_irqsave(&base->lock, flags);
+		base->running_timer = NULL;
+		base->clk = jiffies;
+		base->next_expiry = base->clk + TIMER_NEXT_MAX_DELTA;
+		base->next_expiry_recalc = false;
+		base->is_idle = false;
+		base->timers_pending = false;
+		memset(base->pending_map, 0, sizeof(base->pending_map));
+		for (i = 0; i < WHEEL_SIZE; i++)
+			INIT_HLIST_HEAD(base->vectors + i);
+		raw_spin_unlock_irqrestore(&base->lock, flags);
+	}
+}
+EXPORT_SYMBOL_GPL(timers_worker_reset);
+#endif
+
 #ifdef CONFIG_HOTPLUG_CPU
 static void migrate_timer_list(struct timer_base *new_base, struct hlist_head *head)
 {

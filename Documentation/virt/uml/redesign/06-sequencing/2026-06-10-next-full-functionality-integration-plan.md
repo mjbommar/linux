@@ -1285,11 +1285,16 @@ Runtime replication recheck:
 - `um_pool_replicate_physmem()` now copies and remaps
   `uml_reserved..high_physmem`, and refreshes the registered region to the same
   range after swapping the backing fd;
-- with `UML_POOL_REPLICATE=1`, the sustained harness reaches iteration 1
-  `MEMBER_DONE` and records two successful `POOL_REPLICATE_OK` markers before
-  iteration 2 hits the remaining panic/segfault boundary;
-- the replication mode remains a bounded XFAIL, not a completion signal, until
-  repeated replicated takes pass.
+- replication now runs before the child mutates task, timer, or saved-register
+  state inherited from the master;
+- the pool-member child resets inherited timer-wheel and hrtimer queues before
+  arming its own fresh tick source;
+- with `UML_POOL_REPLICATE=1`, the sustained harness reaches three
+  `MEMBER_DONE` markers, records three nonzero child-pid slots, sees
+  `POOL_REPLICATE_OK` three times, and observes no kernel panic or v1 ceiling
+  regression;
+- `template-pause-pool-member-smoke` also passes with
+  `UML_POOL_REPLICATE=1`, including five timer ticks.
 
 Detailed implementation plan:
 
@@ -1313,7 +1318,8 @@ Result:
 - take latency, lifecycle drift, and throughput gates pass;
 - the live-child count was `0/5`, so the RSS gate is not a valid completion
   signal yet;
-- this aligns with the sustained pool-member lifetime limitation.
+- this now aligns with the daemon/benchmark path not yet using the replicated
+  live-member mode.
 
 Immediate engineering conclusion:
 
@@ -1321,31 +1327,34 @@ Immediate engineering conclusion:
 - single template pause, fork-on-resume smoke/stress, identity apply, pivot,
   one-shot pool member, spawn, serve, typed exec error handling, and
   port-forward result handling are real;
-- final completion requires fixing repeated pool-member lifetime, real warm
-  `min_warm`, vector2 TAP/fd pool networking, successful daemon-routed guest
-  exec, and the syzkaller take/exec/destroy path.
+- replicated sustained pool-member lifetime now passes in the direct harness;
+- final completion requires routing daemon pool takes through the replicated
+  live-member path, real warm `min_warm`, vector2 TAP/fd pool networking,
+  successful daemon-routed guest exec, and the syzkaller take/exec/destroy
+  path.
 
 ## Immediate Next Actions
 
-1. Fix sustained pool-member lifetime with a real per-member physmem fd model
-   or equivalent production design.
+1. Move daemon pool take/serve paths onto the replicated live-member mode and
+   prove daemon-routed member liveness.
 2. Complete real warm-pool `min_warm` behavior.
-3. Validate vector2 TAP/fd handoff through pool members and the syzkaller
+3. Re-run pool benchmark gates so RSS samples live replicated children.
+4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
-4. Prove successful daemon-routed guest exec through the final member mconsole
+5. Prove successful daemon-routed guest exec through the final member mconsole
    path.
-5. Import or complete record/replay, or land it behind an explicit
+6. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-6. Decide whether private state trace is worth importing as clean optional
+7. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-7. Re-audit vector2 transport claims, Kconfig wording, and replacement
+8. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-8. Curate selftests and source comments for upstream style: no internal issue
+9. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-9. Refresh reports/presentations from normalized status and evidence tables
+10. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-10. Run the final validation matrix, update `STATUS.md` and the inventory,
+11. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

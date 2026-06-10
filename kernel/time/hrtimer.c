@@ -2433,6 +2433,36 @@ int hrtimers_cpu_starting(unsigned int cpu)
 	return 0;
 }
 
+#ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
+/*
+ * UML forkserver workers inherit hrtimer queues from the master process.
+ * Those queued callbacks can reference parent-side task state that is invalid
+ * in a long-lived child, so the child drops inherited queue contents and lets
+ * timers armed after the reset populate fresh state.
+ */
+void hrtimers_worker_reset(void)
+{
+	struct hrtimer_cpu_base *cpu_base = this_cpu_ptr(&hrtimer_bases);
+	unsigned long flags;
+	int i;
+
+	raw_spin_lock_irqsave(&cpu_base->lock, flags);
+	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++)
+		timerqueue_linked_init_head(&cpu_base->clock_base[i].active);
+
+	cpu_base->active_bases = 0;
+	cpu_base->hang_detected = false;
+	cpu_base->next_timer = NULL;
+	cpu_base->softirq_next_timer = NULL;
+	cpu_base->expires_next = KTIME_MAX;
+	cpu_base->softirq_expires_next = KTIME_MAX;
+	cpu_base->softirq_activated = false;
+	cpu_base->online = true;
+	raw_spin_unlock_irqrestore(&cpu_base->lock, flags);
+}
+EXPORT_SYMBOL_GPL(hrtimers_worker_reset);
+#endif
+
 #ifdef CONFIG_HOTPLUG_CPU
 
 static void migrate_hrtimer_list(struct hrtimer_clock_base *old_base,
