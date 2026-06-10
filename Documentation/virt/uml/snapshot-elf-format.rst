@@ -204,6 +204,10 @@ From the operator side:
   socket and sends ``snapshot_export <path>``; the kernel writes the ELF
   through UML host-file helpers.
 
+* ``kvm_v2_snapshot_elf_export=<host-path>`` on the UML command line exports
+  once during late init.  This is mainly for selftests and automation that need
+  a host-visible ELF before guest userspace is available.
+
 * Direct debugfs write (for inside-the-guest scripts)::
 
     echo /path/to/dump.elf > /sys/kernel/debug/um/kvm_v2_snapshot_elf_export_path
@@ -223,3 +227,4 @@ dump with:
 * ``readelf -n dump.elf``
 * ``gdb -c dump.elf``
 * ``gdb -ex 'source tools/uml/uml-gdb/uml-snapshot.py' -c dump.elf``
+* ``tools/testing/selftests/um/snapshot-elf-roundtrip/run-snapshot-elf-roundtrip.sh``

@@ -611,7 +611,7 @@ Current comparison result:
   take/exec/destroy.
 - Historical snapshot test wrappers from `memo09-phase4` should be imported
   or replaced as cleaned kselftests because the underlying snapshot hooks now
-  exist on `next`.
+  exist on `next`. Current status: imported and PASS on 2026-06-10.
 
 Acceptance gates:
 
@@ -1069,7 +1069,12 @@ Runtime smoke:
 - Snapshot restore smoke. Current status: PASS on 2026-06-10 through
   `kvm-snapshot-restore-smoke`.
 - Snapshot ELF export roundtrip. Current status: live `umlctl snapshot export`
-  plus `readelf`, `gdb`, and helper parse PASS on 2026-06-10.
+  plus `readelf`, `gdb`, and helper parse PASS; `snapshot-elf-roundtrip`
+  kselftest PASS on 2026-06-10.
+- Snapshot benchmark kselftest. Current status: `kvm-snapshot-bench` PASS on
+  2026-06-10.
+- Snapshot KUnit kselftest wrapper. Current status: `snapshot-kvm-smoke` PASS
+  on 2026-06-10.
 - Template-pause fork smoke.
 - Template-pause fork stress.
 - Pool spawn smoke.
@@ -1116,24 +1121,22 @@ branch lands.
 
 ## Immediate Next Actions
 
-1. Import or replace the historical snapshot kselftest wrappers from
-   `memo09-phase4`: snapshot benchmark, KUnit smoke, and ELF roundtrip.
-2. Run the current pool/template-pause smokes and complete real warm-pool
+1. Run the current pool/template-pause smokes and complete real warm-pool
    `min_warm` behavior.
-3. Validate vector2 TAP/fd handoff through pool members and the syzkaller
+2. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
-4. Import or complete record/replay, or land it behind an explicit
+3. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-5. Decide whether private state trace is worth importing as clean optional
+4. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-6. Re-audit vector2 transport claims, Kconfig wording, and replacement
+5. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-7. Curate selftests and source comments for upstream style: no internal issue
+6. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-8. Refresh reports/presentations from normalized status and evidence tables
+7. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-9. Run the final validation matrix, update `STATUS.md` and the inventory,
+8. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

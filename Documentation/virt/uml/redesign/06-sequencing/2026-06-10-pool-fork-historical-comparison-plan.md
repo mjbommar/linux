@@ -307,6 +307,15 @@ Remaining work:
 
 ### Step 1: Import Clean Snapshot Test Wrappers
 
+Status: complete on 2026-06-10. The imported wrappers are:
+
+- `tools/testing/selftests/um/kvm-snapshot-bench/`
+- `tools/testing/selftests/um/snapshot-kvm-smoke/`
+- `tools/testing/selftests/um/snapshot-elf-roundtrip/`
+
+The ELF roundtrip wrapper uses `kvm_v2_snapshot_elf_export=<host-path>` so it
+can validate the exported file before guest userspace runs.
+
 Files to add or adapt:
 
 - `tools/testing/selftests/um/kvm-snapshot-bench/Makefile`
@@ -315,7 +324,6 @@ Files to add or adapt:
 - `tools/testing/selftests/um/snapshot-kvm-smoke/run-snapshot-kvm-smoke.sh`
 - `tools/testing/selftests/um/snapshot-elf-roundtrip/Makefile`
 - `tools/testing/selftests/um/snapshot-elf-roundtrip/run-snapshot-elf-roundtrip.sh`
-- `tools/testing/selftests/um/snapshot-elf-roundtrip/snapshot-elf-roundtrip-guest.sh`
 
 Cleanup requirements:
 

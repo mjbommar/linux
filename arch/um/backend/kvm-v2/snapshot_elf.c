@@ -48,6 +48,7 @@
  */
 #define KVM_V2_NT_UML_STATE	0x554d4c01u
 #define KVM_V2_NT_UML_OWNER	"UML"
+#define KVM_V2_ELF_PATH_MAX	4095u
 
 /*
  * UML-private payload version. Bumped on any layout change to
@@ -775,6 +776,47 @@ static int kvm_v2_snapshot_elf_export_host_path(const char *path)
 	return rc;
 }
 
+static char kvm_v2_snapshot_elf_boot_path[KVM_V2_ELF_PATH_MAX + 1];
+
+static int __init kvm_v2_snapshot_elf_export_setup(char *str)
+{
+	size_t len;
+
+	if (!str || !*str)
+		return 1;
+
+	len = strnlen(str, sizeof(kvm_v2_snapshot_elf_boot_path));
+	if (len >= sizeof(kvm_v2_snapshot_elf_boot_path)) {
+		pr_warn("um: kvm-v2 snapshot elf: boot export path too long\n");
+		return 1;
+	}
+
+	strscpy(kvm_v2_snapshot_elf_boot_path, str,
+		sizeof(kvm_v2_snapshot_elf_boot_path));
+	return 1;
+}
+__setup("kvm_v2_snapshot_elf_export=", kvm_v2_snapshot_elf_export_setup);
+
+static int __init kvm_v2_snapshot_elf_boot_export_late_init(void)
+{
+	int rc;
+
+	if (!kvm_v2_snapshot_elf_boot_path[0])
+		return 0;
+
+	rc = kvm_v2_snapshot_elf_export_host_path(kvm_v2_snapshot_elf_boot_path);
+	if (rc < 0) {
+		pr_warn("um: kvm-v2 snapshot elf: boot export failed (%d)\n",
+			rc);
+		return rc;
+	}
+
+	pr_info("um: kvm-v2 snapshot elf: boot export complete path=%s\n",
+		kvm_v2_snapshot_elf_boot_path);
+	return 0;
+}
+late_initcall_sync(kvm_v2_snapshot_elf_boot_export_late_init);
+
 #ifdef CONFIG_MCONSOLE
 void mconsole_snapshot_export(struct mc_request *req)
 {
@@ -817,8 +859,6 @@ void mconsole_snapshot_export(struct mc_request *req)
  * isn't a meaningful operation, and the heap allocation should be
  * pageable on a tight UML config.
  */
-#define KVM_V2_ELF_PATH_MAX	4095u
-
 static ssize_t kvm_v2_elf_path_write(struct file *f,
 				     const char __user *buf,
 				     size_t count, loff_t *ppos)

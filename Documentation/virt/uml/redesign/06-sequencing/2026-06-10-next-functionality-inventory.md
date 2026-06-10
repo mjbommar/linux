@@ -59,12 +59,12 @@ This file is the live execution tracker for
 | KVM snapshot | Register-only snapshot | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; runtime smoke still pending. | `um_kvm_v2_snapshot` KUnit PASS 4/4, 2026-06-10. |
 | KVM snapshot | Full memslot snapshot capture | Present-validated | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; live export smoke covers metadata-only large-slot behavior; SMP is gated to one online CPU. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live export smoke PASS, 2026-06-10. |
 | KVM snapshot | Snapshot restore | Present-validated | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; SMP is gated to one online CPU. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus `kvm-snapshot-restore-smoke` PASS, 2026-06-10. |
-| KVM snapshot | Snapshot ELF64 export | Present-validated | `kvm-v2-snapshot-elf64` | Kernel exporter, debugfs trigger, mconsole trigger, and `umlctl` export path are present; SMP is gated to one online CPU. | `umlctl snapshot export` PASS with `readelf -h/-l/-n`, `gdb -c`, and helper load, 2026-06-10. |
+| KVM snapshot | Snapshot ELF64 export | Present-validated | `kvm-v2-snapshot-elf64` | Kernel exporter, debugfs trigger, mconsole trigger, boot-time export trigger, and `umlctl` export path are present; SMP is gated to one online CPU. | `umlctl snapshot export` PASS with `readelf -h/-l/-n`, `gdb -c`, and helper load; `snapshot-elf-roundtrip` PASS, 2026-06-10. |
 | KVM snapshot | GDB snapshot helper | Present-validated | `kvm-v2-snapshot-elf64`, `next` | Keep helper matched to UML private note layout. | helper loads against fresh exported core, 2026-06-10. |
-| KVM snapshot | Snapshot selftests | Present-validated/needs-wrapper-import | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite imported with current vCPU priming; live export and restore smoke pass; SMP policy is gated. Historical kselftest wrappers for bench, KUnit smoke, and ELF roundtrip still need import or replacement. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live ELF and restore smoke PASS, 2026-06-10. |
-| KVM snapshot | Snapshot benchmark kselftest | Historical-only | `memo09-phase4` | Import as a cleaned wrapper around current `kvm_v2_snapshot_bench=`. | `kvm-snapshot-bench`. |
-| KVM snapshot | Snapshot KUnit kselftest wrapper | Historical-only | `memo09-phase4` | Import or replace with a cleaned wrapper for the current four-case `um_kvm_v2_snapshot` suite. | `snapshot-kvm-smoke`. |
-| KVM snapshot | Snapshot ELF roundtrip kselftest | Historical-only | `memo09-phase4` | Import after updating to the current mconsole/debugfs exporter contract. | `snapshot-elf-roundtrip`. |
+| KVM snapshot | Snapshot selftests | Present-validated | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite, restore smoke, benchmark wrapper, KUnit wrapper, and ELF roundtrip wrapper are present. | `um_kvm_v2_snapshot` KUnit PASS 4/4, `kvm-snapshot-restore-smoke` PASS, `kvm-snapshot-bench` PASS, `snapshot-kvm-smoke` PASS, and `snapshot-elf-roundtrip` PASS, 2026-06-10. |
+| KVM snapshot | Snapshot benchmark kselftest | Present-validated | `memo09-phase4` | Clean wrapper around current `kvm_v2_snapshot_bench=` imported. | `kvm-snapshot-bench` PASS, 2026-06-10. |
+| KVM snapshot | Snapshot KUnit kselftest wrapper | Present-validated | `memo09-phase4` | Clean wrapper for the current four-case `um_kvm_v2_snapshot` suite imported. | `snapshot-kvm-smoke` PASS, 2026-06-10. |
+| KVM snapshot | Snapshot ELF roundtrip kselftest | Present-validated | `memo09-phase4` | Clean wrapper imported using `kvm_v2_snapshot_elf_export=<host-path>` and host `readelf`/`gdb` validation. | `snapshot-elf-roundtrip` PASS, 2026-06-10. |
 | Record/replay | Record state machine | Historical-only | `kvm-v2-snapshot-elf64` | Complete or land behind explicit experimental Kconfig. | record KUnit. |
 | Record/replay | Syscall observe path | Historical-only | `kvm-v2-snapshot-elf64` | Complete; no-op stubs are not completion. | record smoke. |
 | Record/replay | Replay consume path | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Implement deterministic replay tier or keep experimental. | replay smoke. |
@@ -147,10 +147,9 @@ These items must be closed before the final branch can be called complete:
 2. Vector2 replacement claims must match validation evidence.
 3. Pool/fork-server current tests must pass, including warm-pool, pool-member,
    vector2 TAP/fd, and syzkaller-facing paths.
-4. Historical snapshot kselftest wrappers must be imported or replaced.
-5. Selftests and source comments must be cleaned of diary/history material on
+4. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
-6. The final validation matrix from the integration plan must pass.
+5. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules
 

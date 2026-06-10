@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 pool/fork historical comparison.
+Last updated: 2026-06-10 snapshot kselftest wrappers.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -69,6 +69,9 @@ The strongest current KVM v2 evidence is:
 - Snapshot export: a disposable KVM v2 hostfs guest exports a core through
   `umlctl snapshot export`; `readelf -h/-l/-n`, `gdb -c`, and
   `tools/uml/uml-gdb/uml-snapshot.py` all parse the resulting ELF.
+- Snapshot kselftests: `kvm-snapshot-bench`, `snapshot-kvm-smoke`,
+  `snapshot-elf-roundtrip`, and `kvm-snapshot-restore-smoke` pass against
+  the current `./linux` build.
 - Snapshot restore smoke: `kvm-snapshot-restore-smoke` boots KVM v2 with
   `kvm_v2_snapshot_bench=1` and observes the kernel capture plus
   `restore_full` timing summary in full snapshot mode.
@@ -144,16 +147,14 @@ Current boundary:
 The following work is not yet present in the active `next` implementation:
 
 - KVM-specific record/replay sources and tests;
-- private state-trace ring and parser tooling;
-- historical snapshot kselftest wrappers for benchmark, KUnit smoke, and ELF
-  roundtrip coverage. The underlying kernel hooks are present, so these should
-  be imported or replaced as cleaned test wrappers.
+- private state-trace ring and parser tooling.
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
-source. KUnit coverage and live `umlctl` ELF export validation now pass.
-The restore smoke gate now passes. SMP snapshot semantics are closed by an
-explicit single-online-CPU gate; multi-vCPU snapshot support remains future
-work unless all-vCPU quiescence is implemented.
+source. KUnit coverage, live `umlctl` ELF export validation, snapshot
+benchmark, snapshot KUnit wrapper, snapshot ELF roundtrip, and restore smoke
+now pass. SMP snapshot semantics are closed by an explicit
+single-online-CPU gate; multi-vCPU snapshot support remains future work unless
+all-vCPU quiescence is implemented.
 
 ## Publication Checklist
 

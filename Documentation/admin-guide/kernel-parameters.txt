@@ -3263,6 +3263,12 @@ Kernel parameters
 			for UML snapshot restore smoke tests and local timing
 			checks.
 
+	kvm_v2_snapshot_elf_export=
+			[UML] Export one KVM v2 snapshot ELF core to the given
+			host path at late initcall time. Intended for UML
+			snapshot ELF smoke tests and automation that need a
+			host-visible dump before guest userspace is available.
+
 	kvm-intel.ept=	[KVM,Intel] Control KVM's use of Extended Page Tables,
 			a.k.a. Two-Dimensional Page Tables.  Default is 1
 			(enabled). Disable by KVM if hardware lacks support
