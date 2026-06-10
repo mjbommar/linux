@@ -389,7 +389,9 @@ Functional requirements:
 
 Acceptance gates:
 
-- KVM v2 snapshot KUnit tests pass.
+- KVM v2 snapshot KUnit tests pass. Current status: PASS 4/4 on 2026-06-10
+  with `backend=force=kvm-v2`,
+  `kunit.filter_glob=um_kvm_v2_snapshot`, and `kunit_shutdown=halt`.
 - Snapshot smoke test passes.
 - `umlctl snapshot export <instance> --output dump.elf` works.
 - `readelf -h`, `readelf -l`, and `readelf -n` parse the file.
@@ -840,7 +842,8 @@ Exit criteria:
 
 - `umlctl snapshot export` works on `next`.
 - Snapshot docs are true.
-- Snapshot KUnit and smoke pass.
+- Snapshot KUnit and smoke pass. Current status: KUnit passes; smoke remains
+  open.
 
 ### Phase 3: Fork Server And Pool Completion
 
@@ -973,7 +976,8 @@ Kernel/unit gates:
 - KVM v2 KUnit.
 - Vector2 KUnit.
 - Backend contract KUnit.
-- Snapshot KUnit.
+- Snapshot KUnit. Current status: `um_kvm_v2_snapshot` PASS 4/4 on
+  2026-06-10.
 - Record KUnit if record/replay lands.
 
 Runtime smoke:
@@ -1038,8 +1042,11 @@ branch lands.
    should be temporarily hidden.
 4. Start `integrate/kvm-snapshot` from `next`.
 5. Port `snapshot.c`, `snapshot_elf.c`, declarations, Kconfig, Makefile, and
-   tests cleanly.
-6. Run build, KUnit, snapshot smoke, and `umlctl snapshot export`.
+   tests cleanly. Current status: snapshot source and KUnit are present on
+   `next`.
+6. Run build, KUnit, snapshot smoke, and `umlctl snapshot export`. Current
+   status: build and KUnit pass; snapshot smoke and `umlctl snapshot export`
+   remain open.
 7. Land into `next`, update status docs, and push.
 
 ## Policy For Retiring Functionality

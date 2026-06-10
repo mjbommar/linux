@@ -1726,6 +1726,53 @@ static void kvm_v2_prime_vcpu_for_run(struct kvm_v2_vcpu *vcpu, int cpu)
 	vcpu->cpuid_primed = true;
 }
 
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
+int kvm_v2_vcpu_prime_for_kunit(struct kvm_v2_vcpu *vcpu)
+{
+	struct kvm_v2_vm *vm;
+	struct kvm_run *run;
+	struct kvm_sregs sregs;
+	int rc;
+
+	if (!vcpu || vcpu->vcpu_fd < 0 || !vcpu->kvm_run)
+		return -EINVAL;
+	if (vcpu->cpuid_primed)
+		return 0;
+
+	vm = kvm_v2_vm_get();
+	if (!vm)
+		return -ENODEV;
+
+	rc = kvm_v2_install_cpuid(vm, vcpu->vcpu_fd);
+	if (rc < 0)
+		return rc;
+
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_GET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0)
+		return rc;
+
+	sregs.cr4 |= X86_CR4_OSXSAVE;
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RDPMC
+	sregs.cr4 |= X86_CR4_PCE;
+#endif
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SREGS,
+			      (unsigned long)&sregs);
+	if (rc < 0)
+		return rc;
+
+	run = vcpu->kvm_run;
+	run->s.regs.sregs.cr4 = sregs.cr4;
+
+	rc = kvm_v2_install_xcrs(vcpu->vcpu_fd);
+	if (rc < 0)
+		return rc;
+
+	vcpu->cpuid_primed = true;
+	return 0;
+}
+#endif
+
 static void kvm_v2_sync_current_mm_for_run(void)
 {
 	int rc;

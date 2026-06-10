@@ -416,6 +416,10 @@ void kvm_v2_vcpu_destroy(void);
  */
 struct kvm_v2_vcpu *kvm_v2_vcpu_get(int cpu);
 
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_KUNIT)
+int kvm_v2_vcpu_prime_for_kunit(struct kvm_v2_vcpu *vcpu);
+#endif
+
 /*
  * Install IDT/GDT bases and the TR cache in SREGS for one pool member.
  * Called after the descriptor-table pages and per-vCPU TSS have been

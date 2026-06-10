@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 snapshot import pass.
+Last updated: 2026-06-10 snapshot KUnit pass.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -36,8 +36,9 @@ Current source-tree direction:
 - KVM v1 archive code has been removed from the active tree.
 - KVM v2 snapshot capture/restore and snapshot ELF export source is present on
   `next` and builds.
-- KVM v2 snapshot KUnit, runtime smoke, `umlctl snapshot export`, `readelf`,
-  `gdb`, and GDB helper validation remain open.
+- KVM v2 snapshot KUnit passes on `next`; runtime smoke,
+  `umlctl snapshot export`, `readelf`, `gdb`, and GDB helper validation remain
+  open.
 - KVM v2 record/replay and private trace-ring sources have not yet been
   reimported into `next`.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
@@ -61,6 +62,10 @@ The strongest current KVM v2 evidence is:
   faster than seccomp after the LSTAR fast path and FPU-state fixes.
 - Cheap syscall benchmark: the in-guest fast path keeps getpid-family calls
   in the low-hundreds-cycle range on the measured host.
+- Snapshot KUnit: `um_kvm_v2_snapshot` passes 4/4 under
+  `backend=force=kvm-v2` with `kunit_shutdown=halt`, covering register-only
+  capture, one-page memslot capture/restore, task iotrap state restore, and
+  ELF64 note export.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU
@@ -70,8 +75,7 @@ and keeps CPUID xstate leaves consistent with the exposed feature set.
 
 Remaining validation before publication or completion:
 
-- run snapshot KUnit and snapshot smoke once the KUnit priming helper is
-  reconciled with the current vCPU code;
+- run snapshot runtime smoke against the imported snapshot code;
 - validate `umlctl snapshot export <instance> --output dump.elf`, `readelf`,
   `gdb -c`, and `tools/uml/uml-gdb/uml-snapshot.py` against a fresh dump;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
@@ -131,8 +135,9 @@ The following work is not yet present in the active `next` implementation:
   still historical-only.
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
-source, but their selftests and runtime gates still need to land and pass
-before the snapshot workstream can be called complete.
+source, and their KUnit coverage now passes. Runtime smoke, `umlctl` export,
+external ELF tooling, GDB, and GDB helper validation still need to pass before
+the snapshot workstream can be called complete.
 
 ## Publication Checklist
 

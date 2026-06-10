@@ -34,3 +34,7 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_marshal.o
 # IDT-pushed exception frame, GDT segment descriptors, LSTAR trampoline,
 # and IDT handler stubs. Pure data tests; no kernel state assumed.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_byteshape.o
+
+# Snapshot KUnit suite. Requires a live KVM v2 VM/vCPU pool at runtime and
+# skips cleanly when the backend is not initialised.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_snapshot.o

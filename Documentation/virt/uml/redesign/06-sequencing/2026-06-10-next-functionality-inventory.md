@@ -27,6 +27,8 @@ This file is the live execution tracker for
 
 - `Present`: code exists on `next` and has not been found broken by this
   inventory.
+- `Present-KUnit-pass`: code exists on `next` and the named KUnit gate has
+  passed, but broader runtime/tool validation may still be open.
 - `Present-needs-fix`: code exists on `next`, but a correctness, validation,
   documentation, or user-surface issue is known.
 - `Historical-only`: functionality exists only on one or more historical
@@ -51,12 +53,12 @@ This file is the live execution tracker for
 | KVM v2 core | APERF/MPERF passthrough | Present | `next`, `umlctl-deploy` | Keep optional. | `aperf-mperf-smoke` if config enabled. |
 | KVM v2 core | RDPMC userspace support | Present | `next`, `umlctl-deploy` | Keep optional and document sandbox tradeoff. | `rdpmc-smoke` if config enabled. |
 | KVM v2 core | ITIMER_VIRTUAL accounting | Present | `next` | Keep; include in KVM smoke. | timer/CPython signal smoke. |
-| KVM snapshot | Register-only snapshot | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; add KUnit/smoke validation. | snapshot KUnit. |
-| KVM snapshot | Full memslot snapshot capture | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; validate metadata-only large-slot behavior and define SMP semantics. | snapshot KUnit and smoke. |
-| KVM snapshot | Snapshot restore | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; validate restore ordering and lazy-state reset. | snapshot restore smoke. |
-| KVM snapshot | Snapshot ELF64 export | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel exporter and debugfs trigger imported; validate via CLI/readelf/gdb. | `umlctl snapshot export`, `readelf`, `gdb`. |
+| KVM snapshot | Register-only snapshot | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; runtime smoke still pending. | `um_kvm_v2_snapshot` KUnit PASS 4/4, 2026-06-10. |
+| KVM snapshot | Full memslot snapshot capture | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; validate metadata-only large-slot behavior in smoke and define SMP semantics. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus smoke pending. |
+| KVM snapshot | Snapshot restore | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; validate lazy-state reset in runtime smoke. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus restore smoke pending. |
+| KVM snapshot | Snapshot ELF64 export | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel exporter and debugfs trigger imported; KUnit verifies ELF64 register notes, external CLI/readelf/gdb validation still pending. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus `umlctl snapshot export`, `readelf`, and `gdb` pending. |
 | KVM snapshot | GDB snapshot helper | Present-needs-validation | `kvm-v2-snapshot-elf64`, `next` | Validate helper against a fresh exported core. | helper loads against exported core. |
-| KVM snapshot | Snapshot selftests | Partial | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Reconcile and import after KUnit priming helper is adapted to current vCPU code. | `snapshot-smoke`, `snapshot-kvm-smoke`, ELF roundtrip. |
+| KVM snapshot | Snapshot selftests | Present-KUnit-pass | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite imported with current vCPU priming; add external snapshot smoke and ELF roundtrip gates. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus `snapshot-smoke`, `snapshot-kvm-smoke`, and ELF roundtrip pending. |
 | Record/replay | Record state machine | Historical-only | `kvm-v2-snapshot-elf64` | Complete or land behind explicit experimental Kconfig. | record KUnit. |
 | Record/replay | Syscall observe path | Historical-only | `kvm-v2-snapshot-elf64` | Complete; no-op stubs are not completion. | record smoke. |
 | Record/replay | Replay consume path | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Implement deterministic replay tier or keep experimental. | replay smoke. |
@@ -118,13 +120,17 @@ This file is the live execution tracker for
   `KVM_SET_MSRS`, `KVM_SET_XSAVE`, or `KVM_SET_VCPU_EVENTS`.
 - KVM v2 snapshot capture/restore and snapshot ELF64 export source is present
   on `next` and builds with `make ARCH=um -j16`.
+- KVM v2 snapshot KUnit coverage is present on `next` and passes under
+  `backend=force=kvm-v2` with
+  `kunit.filter_glob=um_kvm_v2_snapshot kunit_shutdown=halt`:
+  4 pass, 0 fail, 0 skip.
 
 ## Remaining Hard Blockers
 
 These items must be closed before the final branch can be called complete:
 
-1. Snapshot KUnit, snapshot smoke, `umlctl snapshot export`, `readelf`, `gdb`,
-   and GDB helper validation must pass on the imported snapshot code.
+1. Snapshot smoke, `umlctl snapshot export`, `readelf`, `gdb`, and GDB helper
+   validation must pass on the imported snapshot code.
 2. Snapshot SMP constraints must be defined, gated, or validated.
 3. Record/replay functionality must be imported or completed.
 4. Vector2 replacement claims must match validation evidence.
