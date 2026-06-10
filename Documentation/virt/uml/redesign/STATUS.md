@@ -111,6 +111,11 @@ run:
   and a single queue;
 - logs reached the expected server-ready and guest-request success markers;
 - teardown left no matching soak process or stray TAP device.
+- A focused `vector2-fd-multiqueue-smoke` now validates launcher-owned fd
+  multiqueue handoff: `umlctl up` creates a multiqueue TAP, opens four TAP
+  fds, inherits fd range 200..203, the guest reports `UMLCTL_NETWORK_QUEUES=4`
+  and `UMLCTL_NETWORK_FD_COUNT=4`, `vec2.0` reports four TX queues, and a
+  one-packet host TAP ping succeeds.
 
 Open vector2 publication work:
 
@@ -215,6 +220,11 @@ Current boundary:
 - `vector2-sandbox-audit` validates the untrusted vector2 fd boot audit:
   `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot
   and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations;
+- `vector2-fd-multiqueue-smoke` validates launcher-owned vector2 fd
+  multiqueue handoff: `umlctl up` creates a multiqueue TAP, opens four TAP
+  fds, inherits fd range 200..203, guest metadata reports four queues and four
+  fds, `vec2.0` reports four TX queues, and the guest reaches the host-side
+  TAP with a one-packet ping;
 - `vector2-fd-handoff-smoke` validates launcher-owned vector2 fd handoff:
   `umlctl up` creates the TAP, opens the TAP queue in the launcher, reports
   fd 200 inheritance, the guest sees `UMLCTL_NETWORK_*` fd metadata, `vec2.0`

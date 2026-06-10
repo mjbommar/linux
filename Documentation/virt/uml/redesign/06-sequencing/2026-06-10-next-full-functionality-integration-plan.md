@@ -765,7 +765,8 @@ Required functionality:
   fd, tap, proxy, raw, gre, l2tpv3, vde, bess, hybrid.
 - If some transports are parser-only or not implemented, either implement them
   or remove/mark them as unsupported.
-- Complete multiqueue behavior and fairness validation.
+- Keep multiqueue fd handoff validated and complete fairness/performance
+  validation.
 - Keep sandbox validation for untrusted mode green.
 - Complete in-process trusted host validation.
 - Keep launcher-owned fd handoff validated and decide whether per-take pool fd
@@ -787,7 +788,8 @@ Acceptance gates:
   `vector2-fd-handoff-smoke`.
 - vector2 pool-member TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-pool-tap-smoke`.
-- multiqueue smoke and fairness/perf test.
+- multiqueue smoke. Current status: PASS on 2026-06-10 through
+  `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
 - seccomp backend vector2 Tier 3 networking.
 - KVM v2 backend vector2 Tier 3 networking.
 - Long soak.
@@ -1249,7 +1251,8 @@ Runtime smoke:
   `vector2-fd-handoff-smoke`.
 - Vector2 pool-member TAP handoff. Current status: PASS through
   `vector2-pool-tap-smoke`.
-- Vector2 tap/multiqueue.
+- Vector2 tap/multiqueue. Current multiqueue smoke status: PASS through
+  `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
 - Syzkaller shim smoke.
 
 Longer gates:
