@@ -38,9 +38,8 @@
  *     regs. For normal syscall returns that means RIP is the user
  *     continuation from RCX and RFLAGS is the user flags from R11.
  *
- * VM creation can run before the buddy allocator is ready, so trampoline
- * allocation is best-effort during VM creation and retried by the idempotent
- * install helper.
+ * VM creation can run before page allocation is available, so trampoline
+ * allocation may defer until the subsys_initcall late-install helper.
  */
 
 #include <linux/bits.h>
@@ -139,19 +138,18 @@ static struct page *kvm_v2_trampoline_alloc_page(void)
 	struct page *page;
 
 	/*
-	 * GFP_KERNEL is valid here because both the VM-create and lazy retry
+	 * GFP_KERNEL is valid here because both the VM-create and late-install
 	 * callers run in process context. Keep the page zero-filled so
 	 * unpopulated trampoline regions are deterministic.
 	 */
 	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 	if (!page) {
 		/*
-		 * Pre-mm_init the buddy allocator returns NULL silently.
-		 * Do not report this as an error: early VM creation can run
-		 * before page allocation is available, and the retry path is
-		 * expected to complete the install.
+		 * Early VM creation can run before page allocation is available.
+		 * Return -ENOMEM quietly; the late-install path retries after
+		 * mm_init.
 		 */
-		pr_debug("um: kvm-v2 trampoline_install: alloc_page returned NULL; deferring to lazy retry\n");
+		pr_debug("um: kvm-v2 trampoline_install: page allocation failed; deferring to late install\n");
 	}
 	return page;
 }
@@ -218,9 +216,9 @@ int kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm)
 
 	/*
 	 * Idempotent: a successful prior install short-circuits. The
-	 * vm_create attempt may have failed before the buddy allocator was
-	 * ready; the lazy retry path calls back once allocation is safe, and
-	 * this guard keeps a multiply-installed trampoline impossible.
+	 * vm_create attempt may have run before page allocation was available;
+	 * the late-install path calls back after mm_init, and this guard keeps a
+	 * multiply-installed trampoline impossible.
 	 */
 	if (vm->trampoline_page)
 		return 0;
@@ -491,10 +489,10 @@ void kvm_v2_kernel_half_free(struct kvm_v2_vm *vm)
 static bool kvm_v2_late_install_trampoline_page(struct kvm_v2_vm *vm)
 {
 	/*
-	 * Piggy-back the physmem-memslot lazy retry on this initcall.
-	 * vm_create's eager attempt may have returned -EAGAIN because
-	 * uml_physmem / physmem_size were not set yet. subsys_initcall fires
-	 * after linux_main() completes, so the globals are stable here.
+	 * Finish any deferred physmem memslot install from this initcall.
+	 * vm_create may have returned -EAGAIN because uml_physmem /
+	 * physmem_size were not set yet. subsys_initcall fires after
+	 * linux_main() completes, so the globals are stable here.
 	 * The helper is idempotent through the physmem_memslot_id sentinel, so a
 	 * successful eager install short-circuits. Failure is reported by the
 	 * helper; the trampoline retry below still runs.
@@ -557,9 +555,9 @@ static int kvm_v2_late_install_exceptions(struct kvm_v2_vm *vm)
 }
 
 /*
- * Lazy retry path. vm_create's best-effort install can run before the
- * buddy allocator and physmem globals are ready; this initcall runs after
- * mm_init, picks up the deferral, and completes the per-VM install.
+ * Late-install path. vm_create can run before page allocation and physmem
+ * globals are ready; this initcall runs after mm_init and completes the
+ * per-VM install.
  *
  * The trampoline is per-VM rather than per-vCPU, so an initcall is the
  * natural retry point. CPUID remains per-vCPU and lazy-installs from the

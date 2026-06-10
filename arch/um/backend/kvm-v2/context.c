@@ -71,8 +71,8 @@ static struct kvm_v2_vm vm = {
  * pages.
  *
  * Idempotent: physmem_memslot_id >= 0 means the slot is installed. The
- * install is reachable from VM creation and from the late-install retry,
- * so the slot id is the single source of truth for teardown.
+ * install is reachable from VM creation and from the late-install path, so the
+ * slot id is the single source of truth for teardown.
  *
  * Returns 0 on success / already-installed, -EAGAIN if uml_physmem /
  * physmem_size aren't yet populated (vm_create runs from init_backend
@@ -84,8 +84,8 @@ static int kvm_v2_physmem_globals_ready(void)
 	if (!uml_physmem || !physmem_size) {
 		/*
 		 * vm_create runs from init_backend() before linux_main populates
-		 * uml_physmem / physmem_size. Log once and let the late retry path
-		 * install the slot after the globals are stable.
+		 * uml_physmem / physmem_size. Log once and let the late-install
+		 * path add the slot after the globals are stable.
 		 */
 		pr_debug("um: kvm-v2 physmem_memslot: deferred (uml_physmem=%#lx physmem_size=%#llx not ready)\n",
 			 uml_physmem, physmem_size);
@@ -281,12 +281,10 @@ static int kvm_v2_vm_install_deferred_state(void)
 	 * trampoline alloc. KVM's TDP needs a memslot covering the physmem
 	 * range so __pa(pgd) and __pa(trampoline_kva) resolve.
 	 *
-	 * This can defer at vm_create time, exactly like the trampoline alloc
-	 * below: linux_main() runs init_backend() before it sets
-	 * uml_physmem / physmem_size. The helper returns -EAGAIN in that
-	 * window; the subsys_initcall lazy retry in syscall_trap.c completes
-	 * the install once the globals are populated. Other negative errnos
-	 * unwind via err_close_vm.
+	 * This can return -EAGAIN during VM creation because init_backend()
+	 * runs before linux_main() populates uml_physmem / physmem_size. The
+	 * late-install path completes the slot once the globals are stable.
+	 * Other negative errnos unwind via err_close_vm.
 	 *
 	 * Order vs TSS_ADDR/IDENTITY_MAP_ADDR (above): KVM Intel rejects
 	 * those two ioctls once any memslot exists, so memslot install
@@ -303,9 +301,8 @@ static int kvm_v2_vm_install_deferred_state(void)
 
 	/*
 	 * Allocate the LSTAR trampoline page and write the initial trap+sysretq
-	 * bytes. This can defer because the buddy allocator may not
-	 * be up at init_backend time. The helper logs deferral; late init
-	 * retries once the buddy is available.
+	 * bytes. Early init may run before page allocation is available; the
+	 * late-install path retries after mm_init.
 	 */
 	rc = kvm_v2_trampoline_alloc_and_install(&vm);
 	if (rc && rc != -ENOMEM) {

@@ -75,8 +75,8 @@ struct kvm_v2_vm {
 	 * exposed to KVM as the guest physical address. The trampoline body
 	 * lives at KVM_V2_TRAMPOLINE_LSTAR_OFFSET and is the target of the
 	 * guest MSR_LSTAR. The field stays NULL until allocation succeeds;
-	 * early VM creation can run before the buddy allocator is ready, so
-	 * callers must tolerate a retry.
+	 * early VM creation can run before page allocation is available, so the
+	 * late-install path may complete it.
 	 */
 	void			*trampoline_page;
 	phys_addr_t		trampoline_gpa;
@@ -200,13 +200,13 @@ bool kvm_v2_aperfmperf_cap_active(void);
  * Idempotent -- re-invocation after a successful install short-circuits.
  * Returns 0 on success / already-installed, -EAGAIN if uml_physmem /
  * physmem_size are not initialized yet and the caller should defer to the
- * lazy retry path, or any other negative errno from
+ * late-install path, or any other negative errno from
  * KVM_SET_USER_MEMORY_REGION on ioctl failure.
  *
- * vm_create's eager attempt may hit the -EAGAIN branch because
- * init_backend() runs before linux_main() finishes populating
- * uml_physmem / physmem_size. The subsys_initcall lazy retry in
- * syscall_trap.c completes the install once the globals are stable.
+ * vm_create can hit the -EAGAIN branch because init_backend() runs before
+ * linux_main() finishes populating uml_physmem / physmem_size. The
+ * subsys_initcall late-install path completes the install once the globals
+ * are stable.
  *
  * Defined in context.c.
  */
@@ -228,7 +228,7 @@ int  kvm_v2_physmem_memslot_install(struct kvm_v2_vm *vm);
  *
  * Returns 0 on success / already-installed; -EINVAL when prerequisites are
  * unmet; -ENOMEM if alloc_page returns NULL and the caller should defer to
- * the lazy retry path; other negative errno on ioctl failure.
+ * the late-install path; other negative errno on ioctl failure.
  *
  * Defined in syscall_trap.c (alongside the trampoline install -- both
  * sides of the LSTAR install live in the same TU because the PT
