@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 sustained pool-member long-lived XFAIL narrowed.
+Last updated: 2026-06-10 sustained pool-member replication range narrowed.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -152,21 +152,21 @@ Current boundary:
   iterations in 10 seconds, median 18.2 ms iteration time, 548/548 clean
   identity round-trips, no kernel panics, and no live orphans after teardown;
 - `template-pause-pool-sustained-smoke` remains an expected failure after the
-  first member because the current MAP_SHARED physmem model does not support
-  the repeated member lifetime this test requires; the harness keeps the first
-  member alive, stamps each requested member identity, and now narrows the
-  second-member failure to a timeout before the second `POOL_ENTER` with the
-  child-pid write-back slot still zero, and with no kernel panic, v1 ceiling
-  regression, or live UML process leak in the bounded run; local marker
-  instrumentation also showed the second take reaches the runqueue lock inside
-  `sched_worker_detach_other_tasks()` and then stalls while walking scheduler
-  state, which is consistent with the first live member mutating kernel memory
-  still shared with the master; re-wiring `um_pool_replicate_physmem()` in the
-  child entry remains broken because iteration 1 reaches `POOL_ENTER` but then
-  segfaults in libc before `MEMBER_DONE`; `um_template_pause_pool_replicate=1`
-  now gates that path explicitly and `UML_POOL_REPLICATE=1` gives the sustained
-  smoke a bounded XFAIL for the post-replication userspace/stub failure; the
-  implementation path is tracked in
+  first member in the default path because the current MAP_SHARED physmem model
+  does not support the repeated member lifetime this test requires; the harness
+  keeps the first member alive, stamps each requested member identity, and
+  narrows the default second-member failure to a timeout before the second
+  `POOL_ENTER` with the child-pid write-back slot still zero, and with no
+  kernel panic, v1 ceiling regression, or live UML process leak in the bounded
+  run; local marker instrumentation also showed the second take reaches the
+  runqueue lock inside `sched_worker_detach_other_tasks()` and then stalls
+  while walking scheduler state, which is consistent with the first live member
+  mutating kernel memory still shared with the master; the gated replication
+  path now copies and remaps the full runtime `uml_reserved..high_physmem`
+  kernel physmem window rather than the stale setup-time registered range, so
+  `UML_POOL_REPLICATE=1` reaches iteration 1 `MEMBER_DONE` before the second
+  take hits the remaining panic/segfault boundary; the implementation path is
+  tracked in
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;

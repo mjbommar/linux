@@ -30,10 +30,11 @@ EXPORT_SYMBOL(high_physmem);
 
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
 /*
- * Kernel mmap registry entry for the guest-RAM mapping set up by
- * setup_physmem(). Filled in at boot and registered once, before user
- * tasks exist. Static storage lets the registry's list linkage outlive
- * init-time setup.
+ * Kernel mmap registry entry for the current kernel-VA guest-RAM window.
+ * setup_physmem() initializes it during boot. Pool-member physmem
+ * replication updates it after swapping the backing fd, because
+ * arch_mm_preinit() lowers uml_reserved after the initial registration.
+ * Static storage lets the registry's list linkage outlive init-time setup.
  *
  * INHERIT_COW: guest RAM is MAP_SHARED file-backed; fork() gives the
  * child a COW view of the same file-backed pages. SERIALIZE marks
@@ -166,17 +167,18 @@ EXPORT_SYMBOL(phys_mapping);
  */
 int um_pool_remap_self_test(void)
 {
+	void *base = (void *)uml_reserved;
+	unsigned long len;
+
 	if (physmem_fd < 0)
 		return -EINVAL;
-	if (!physmem_mmap_region.base || !physmem_mmap_region.len)
+	if (high_physmem <= uml_reserved)
 		return -EINVAL;
+	len = high_physmem - uml_reserved;
 
-	return os_remap_region_shared(physmem_mmap_region.base,
-				      physmem_fd,
-				      (unsigned long long)
-					__pa((unsigned long)
-					     physmem_mmap_region.base),
-				      physmem_mmap_region.len);
+	return os_remap_region_shared(base, physmem_fd,
+				      (unsigned long long)__pa(uml_reserved),
+				      len);
 }
 EXPORT_SYMBOL_GPL(um_pool_remap_self_test);
 
@@ -196,14 +198,17 @@ EXPORT_SYMBOL_GPL(um_pool_remap_self_test);
 int um_pool_replicate_physmem(void)
 {
 	void *scratch;
+	void *base = (void *)uml_reserved;
 	int new_fd, ret;
 	unsigned long long phys_off;
+	unsigned long len;
 	unsigned long flags;
 
 	if (physmem_fd < 0)
 		return -EINVAL;
-	if (!physmem_mmap_region.base || !physmem_mmap_region.len)
+	if (high_physmem <= uml_reserved)
 		return -EINVAL;
+	len = high_physmem - uml_reserved;
 
 	local_irq_save(flags);
 
@@ -231,10 +236,8 @@ int um_pool_replicate_physmem(void)
 		return ret;
 	}
 
-	phys_off = (unsigned long long)__pa((unsigned long)
-					    physmem_mmap_region.base);
-	memcpy((char *)scratch + phys_off, physmem_mmap_region.base,
-	       physmem_mmap_region.len);
+	phys_off = (unsigned long long)__pa((unsigned long)base);
+	memcpy((char *)scratch + phys_off, base, len);
 
 	if (phys_off > 0) {
 		ret = os_seek_file(physmem_fd, 0);
@@ -259,8 +262,7 @@ int um_pool_replicate_physmem(void)
 	 * This preserves host signal delivery while replacing the backing
 	 * inode for the kernel physmem area.
 	 */
-	ret = os_remap_region_via_anon(physmem_mmap_region.base, new_fd,
-				       phys_off, physmem_mmap_region.len);
+	ret = os_remap_region_via_anon(base, new_fd, phys_off, len);
 	if (ret < 0) {
 		os_close_file(new_fd);
 		local_irq_restore(flags);
@@ -268,6 +270,8 @@ int um_pool_replicate_physmem(void)
 	}
 
 	physmem_fd = new_fd;
+	physmem_mmap_region.base = base;
+	physmem_mmap_region.len = len;
 	physmem_mmap_region.backing_fd = new_fd;
 
 	local_irq_restore(flags);

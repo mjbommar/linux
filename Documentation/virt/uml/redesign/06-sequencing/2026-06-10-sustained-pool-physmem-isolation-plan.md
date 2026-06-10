@@ -21,8 +21,10 @@ The result must be production code, not a selftest-only workaround.
 
 ## Current Facts
 
-The current committed tree deliberately keeps `um_pool_replicate_physmem()`
-unwired from `child_entry_pool_member()`.
+The default path still leaves physmem replication disabled so the passing
+one-shot pool-member behavior is unchanged. The optional
+`um_template_pause_pool_replicate=1` path is wired into
+`child_entry_pool_member()` for bounded validation.
 
 With no physmem replication:
 
@@ -46,14 +48,34 @@ Temporary local markers narrowed the no-replication failure:
 - this is consistent with member 1 mutating kernel memory that is still backed
   by the master's shared `physmem_fd`.
 
-With `um_pool_replicate_physmem()` temporarily re-wired into
-`child_entry_pool_member()`:
+Earlier gated replication failed during iteration 1:
 
-- iteration 1 reports a child pid;
-- iteration 1 reaches `POOL_ENTER`;
-- iteration 1 does not reach `MEMBER_DONE`;
-- the preserved boot log shows an `init.sh` libc segfault, init-kill panic, and
-  repeated master resume cycles.
+- iteration 1 reported a child pid;
+- iteration 1 reached `POOL_ENTER`;
+- iteration 1 did not reach `MEMBER_DONE`; and
+- the preserved boot log showed an `init.sh` libc segfault, init-kill panic,
+  and repeated master resume cycles.
+
+The immediate cause was a stale physmem range. `setup_physmem()` registered the
+initial mapping based on the boot-time `reserve_end`, but `arch_mm_preinit()`
+later maps `brk_end..old_uml_reserved` and lowers `uml_reserved` to `brk_end`.
+Replicating only the registered setup-time range left the lower runtime kernel
+physmem window backed by the master's old fd while `phys_mapping()` returned
+the new fd for later stub mappings.
+
+The current gated replication path now copies and remaps the full runtime
+`uml_reserved..high_physmem` window and updates the registered region to match.
+With `UML_POOL_REPLICATE=1`, the sustained smoke now reports:
+
+- iteration 1 reaches `MEMBER_DONE`;
+- iteration 1 reports a nonzero child-pid slot;
+- iteration 2 observes a panic/segfault while awaiting the member;
+- `SUSTAINED_MEMBER_DONE : 1`;
+- `POOL_ENTER : 3`;
+- `POOL_REPLICATE_OK : 2`;
+- `POOL_REPLICATE_FAIL : 0`;
+- `Kernel panic : True`; and
+- no v1 ceiling regression.
 
 Older bisect work remains relevant:
 
@@ -170,6 +192,16 @@ Expected output for this step:
 - a short-lived local marker result documented in this file before the next
   implementation attempt.
 
+Status:
+
+- fixed the immediate iteration-1 replication regression by making
+  `um_pool_replicate_physmem()` and `um_pool_remap_self_test()` use the current
+  `uml_reserved..high_physmem` runtime window instead of the stale setup-time
+  registered mapping;
+- `UML_POOL_REPLICATE=1` now reaches iteration 1 `MEMBER_DONE`; and
+- the remaining failure is the second replicated take, which still hits the
+  bounded panic/segfault boundary before sustained lifetime can be called fixed.
+
 ### Step 4: Fix New Guest-MM Stub Creation
 
 Once iteration 1 reaches `MEMBER_DONE` under replication, run a member workload
@@ -267,6 +299,9 @@ UML_BINARY=$PWD/linux \
 tools/testing/selftests/um/template-pause-pool-member-smoke/run-template-pause-pool-member-smoke.sh
 
 UML_BINARY=$PWD/linux \
+tools/testing/selftests/um/template-pause-pool-sustained-smoke/run-template-pause-pool-sustained-smoke.sh
+
+UML_BINARY=$PWD/linux UML_POOL_REPLICATE=1 \
 tools/testing/selftests/um/template-pause-pool-sustained-smoke/run-template-pause-pool-sustained-smoke.sh
 ```
 

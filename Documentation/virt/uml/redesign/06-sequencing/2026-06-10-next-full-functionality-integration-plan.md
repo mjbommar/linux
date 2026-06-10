@@ -1278,18 +1278,18 @@ Additional local boundary:
 
 Runtime replication recheck:
 
-- temporarily wiring `um_pool_replicate_physmem()` back into
-  `child_entry_pool_member()` is still not viable;
-- with the current sustained harness, iteration 1 reports a child pid and
-  reaches `POOL_ENTER`, but does not reach `MEMBER_DONE`;
-- the preserved boot log shows `init.sh` segfaulting in libc followed by an
-  init-kill panic and repeated master resume cycles;
-- keep the helper unwired until the post-replication userspace/stub path is
-  fixed.
-- `um_template_pause_pool_replicate=1` now gates the replication path
-  explicitly, and `UML_POOL_REPLICATE=1` in the sustained smoke records the
-  current post-replication failure as a bounded XFAIL instead of a generic
-  regression.
+- `um_template_pause_pool_replicate=1` gates the replication path explicitly;
+- the immediate iteration-1 regression was caused by copying/remapping only the
+  setup-time registered physmem range, even though `arch_mm_preinit()` later
+  lowers `uml_reserved` and exposes a larger runtime kernel physmem window;
+- `um_pool_replicate_physmem()` now copies and remaps
+  `uml_reserved..high_physmem`, and refreshes the registered region to the same
+  range after swapping the backing fd;
+- with `UML_POOL_REPLICATE=1`, the sustained harness reaches iteration 1
+  `MEMBER_DONE` and records two successful `POOL_REPLICATE_OK` markers before
+  iteration 2 hits the remaining panic/segfault boundary;
+- the replication mode remains a bounded XFAIL, not a completion signal, until
+  repeated replicated takes pass.
 
 Detailed implementation plan:
 

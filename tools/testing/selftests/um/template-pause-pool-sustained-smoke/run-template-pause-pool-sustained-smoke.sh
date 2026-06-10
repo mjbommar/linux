@@ -219,8 +219,12 @@ if done >= N and not panic:
     print(f"PASS: {done}/{N} pool members reached MEMBER_DONE")
     sys.exit(0)
 # Iter 1 worked but subsequent iterations did not complete - expected today.
-print(f"XFAIL: iter 1 PASS, iter 2+ hits MAP_SHARED physmem/member limit")
-print("       - repeated live members need independent physmem ownership.")
+if replicate:
+    print("XFAIL: replication iter 1 PASS, iter 2+ hits repeated-member boundary")
+    print("       - per-member physmem isolation still needs the second take fixed.")
+else:
+    print(f"XFAIL: iter 1 PASS, iter 2+ hits MAP_SHARED physmem/member limit")
+    print("       - repeated live members need independent physmem ownership.")
 sys.exit(4)
 PYEOF
 
