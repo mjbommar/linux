@@ -1498,8 +1498,12 @@ Result:
 - lifecycle RSS drift was 0.00% over 10,000 take/destroy cycles;
 - throughput completed 3000/3000 target takes in the 60-second gate, above the
   2700 pass threshold;
-- a local zero-skip plus lazy-remap experiment was rejected because it worsened
-  full-scale RSS to 9,389.1 MiB for 100/100 live members;
+- RSS follow-up rejected local remap/cache tweaks rather than closing the
+  gate: lazy final remap inside the anon-intermediate sequence was unstable
+  across full runs, direct lazy remap left settled diagnostic members as
+  zombies, post-reinit `MADV_DONTNEED` regressed both RSS and liveness, and
+  zero-chunk sparse-copy skipping did not materially change the settled
+  footprint;
 - artifacts from the full run were kept at `/tmp/pool-bench.QKNALB/results.json`
   and `/tmp/pool-bench-rt.9KvqGd`;
 - this keeps memory amplification from per-member private copies of populated
@@ -1525,7 +1529,10 @@ Immediate engineering conclusion:
 1. Fix the remaining full-scale pool benchmark failure: 100 live replicated
    members currently consume 5,486.9 MiB RSS against the 200 MiB target, with
    3,964.5 MiB private dirty in smaps rollup. The 60-second throughput gate now
-   passes at 3000/3000 takes against the 2700 pass threshold.
+   passes at 3000/3000 takes against the 2700 pass threshold. The rejected
+   local remap/cache experiments above mean the next implementation attempt
+   should change the isolation model itself, or explicitly revise the target
+   with evidence and approval.
 2. Decide whether request-specific warm scheduling needs a predeclared slot API
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.

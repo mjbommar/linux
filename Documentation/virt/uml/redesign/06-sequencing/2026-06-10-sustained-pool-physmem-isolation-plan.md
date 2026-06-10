@@ -300,10 +300,15 @@ Status:
   4,119.8 MiB PSS, 3,964.5 MiB private dirty, and 186.8 MiB shared dirty, so
   the miss is real private memory amplification rather than shared text
   double-counting;
-- a local zero-skip plus lazy-remap experiment was rejected: skipping zero
-  chunks in the sparse copy and removing MAP_POPULATE from the final
-  replicated physmem remap made the full-scale RSS worse at 9,389.1 MiB for
-  100/100 live members, so that approach was not retained;
+- RSS follow-up after the throughput fix rejected four local tweaks:
+  lazy final remap inside the existing anon-intermediate sequence kept
+  `pool-serve-smoke` and reduced `pool-bench` green and once improved full
+  RSS to 3,413.0 MiB, but a repeat full run regressed to 9,643.0 MiB with
+  only 82/100 live children at the RSS sample; direct lazy remap removed the
+  transient full-window copy but left all 50 diagnostic members as zombies
+  after settling; post-reinit `MADV_DONTNEED` regressed the full RSS gate to
+  10,469.5 MiB with only 78/100 live children; and zero-chunk sparse-copy
+  skipping did not materially change the settled 50-member footprint;
 - request-specific takes remain lazy so caller-supplied MAC/TAP/mconsole
   identity is applied before fork.
 

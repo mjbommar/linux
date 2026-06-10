@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 pool benchmark throughput closure.
+Last updated: 2026-06-10 pool RSS experiment calibration.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -188,6 +188,12 @@ Current boundary:
   rollup shows this is dominated by real private memory rather than shared
   text accounting: 4,119.8 MiB PSS, 3,964.5 MiB private dirty, and
   186.8 MiB shared dirty;
+- RSS follow-up rejected the obvious local remap/cache tweaks: lazy final
+  remap was unstable across full runs, direct lazy remap left members as
+  zombies after settling, post-reinit `MADV_DONTNEED` regressed RSS and
+  liveness, and zero-chunk sparse-copy skipping did not materially change the
+  settled footprint; the remaining RSS blocker needs a different isolation
+  strategy or an explicit target revision;
 - `pool-mconsole-path-probe` now passes: with a non-empty `mconsole_path`, the
   replicated member reaches `PMCON_MEMBER_DONE` without panic, the requested
   per-member mconsole socket exists, and the socket answers `version`;
