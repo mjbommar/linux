@@ -59,11 +59,10 @@ sudo semodule -r uml_launcher
 Analogous to the AppArmor profile's `aa_change_profile()`
 call in `src/backend/apparmor.rs`, the SELinux counterpart
 is `setcon(3)` / `selinux_setcon(2)` from the same three
-backend entry points. That lands when the C-10 v2
-orchestrator (commit 8) gains a fork+exec path that can
-decorate each child with the right context via
-`setexeccon()` at the parent side — matching libvirt's
-pattern for domain transitions around `qemu-system-*`
+backend entry points. That lands when the backend orchestrator
+gains a fork+exec path that can decorate each child with the
+right context via `setexeccon()` at the parent side, matching
+libvirt's pattern for domain transitions around `qemu-system-*`
 subprocesses.
 
 Until that lands, enforcement is coarse: the whole

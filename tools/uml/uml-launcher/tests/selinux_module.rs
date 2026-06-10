@@ -6,10 +6,10 @@
 // cleanly on hosts without the SELinux devel toolchain so CI
 // matrices without it don't regress.
 //
-// Workstream C-10 v2 commit 7: the module itself lives at
+// The module itself lives at
 // `tools/uml/uml-launcher/selinux/{uml_launcher.te,.fc,.if}`;
-// this test guards it against syntax + reference drift as
-// the files evolve.
+// this test guards it against syntax and reference drift as the
+// files evolve.
 
 use std::path::PathBuf;
 use std::process::Command;

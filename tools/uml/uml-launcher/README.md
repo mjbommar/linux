@@ -74,8 +74,8 @@ RUST_LOG=uml_launcher=trace uml-launcher run ...  # env overrides
 
 ## Forkserver interop
 
-The C-09 AFL forkserver protocol wants host fds 198 (ctl) and
-199 (status) plumbed into the UML child. Pass an already-open
+The AFL-compatible forkserver protocol wants host fds 198 (ctl)
+and 199 (status) plumbed into the UML child. Pass an already-open
 pair of fds to the launcher:
 
 ```
@@ -92,7 +92,7 @@ fork, pre-`exec`). No shell-side fd juggling required.
 - CLI + env + TOML config merge.
 - SIGINT/SIGTERM/SIGHUP/SIGQUIT forwarded to the UML child.
 - Exit-code passthrough (launcher's `$?` is UML's `$?`).
-- `--forkserver` fd plumbing for C-09 AFL protocol.
+- `--forkserver` fd plumbing for the AFL-compatible protocol.
 - hostfs root. Block-device (ubd) root deferred to v2.
 - stdio / null console. PTY console deferred.
 

@@ -15,8 +15,8 @@
  * If output shows SIGALRMs arriving post-swap, the host kernel
  * preserves signal delivery and the UML-side bug is elsewhere.
  *
- * If output shows ZERO SIGALRMs post-swap, this is a kernel-level
- * bug to file at LKML.
+ * If output shows ZERO SIGALRMs post-swap, this is a host-kernel
+ * signal-delivery regression.
  *
  * Build:  cc -O2 -Wall -o /tmp/mmap-fixed-sigalrm-repro \
  *             /tmp/mmap-fixed-sigalrm-repro.c

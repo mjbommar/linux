@@ -5,7 +5,7 @@
 // Skipped cleanly on hosts without AppArmor so CI matrices
 // without that LSM don't regress.
 //
-// Workstream C-10 v2: the profile itself lives at
+// The profile itself lives at
 // `tools/uml/uml-launcher/apparmor/uml-launcher`; this test
 // guards it against syntax drift as the file evolves.
 
