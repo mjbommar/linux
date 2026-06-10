@@ -1566,6 +1566,8 @@ static bool kvm_v2_rip_in_handler_area(u64 rip)
 
 static void kvm_v2_restore_lstar_kernel_gs(struct kvm_v2_vcpu *vcpu, u64 rip)
 {
+	int rc;
+
 	if (rip < KVM_V2_LSTAR_GVA + 3)
 		return;
 
@@ -1581,8 +1583,11 @@ static void kvm_v2_restore_lstar_kernel_gs(struct kvm_v2_vcpu *vcpu, u64 rip)
 			}},
 		};
 
-		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_MSRS,
-				       (unsigned long)&req);
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_MSRS,
+				      (unsigned long)&req);
+		if (rc < 0)
+			panic("kvm-v2: restore MSR_KERNEL_GS_BASE after LSTAR EINTR (cpu=%d) failed: %d",
+			      vcpu->cpu, rc);
 	}
 }
 
@@ -1768,8 +1773,11 @@ static void kvm_v2_restore_task_state_for_run(struct kvm_v2_vcpu *vcpu,
 		 * AVX YMM state whose upper half lives only in extended XSAVE
 		 * state.
 		 */
-		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_XSAVE,
-				       (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_XSAVE,
+				      (unsigned long)&current->thread.arch.kvm_v2.iotrap_fpu);
+		if (rc < 0)
+			panic("kvm-v2: restore iotrap XSAVE (cpu=%d) failed: %d",
+			      cpu, rc);
 		current->thread.arch.kvm_v2.iotrap_fpu_valid = false;
 		vcpu->fpu_dirty      = false;
 		vcpu->fpu_owner_task = current;
@@ -1780,8 +1788,11 @@ static void kvm_v2_restore_task_state_for_run(struct kvm_v2_vcpu *vcpu,
 		 * Restore pending exceptions, interrupt shadow, NMI, and SMI
 		 * state before the task reuses this pool vCPU.
 		 */
-		(void)os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_VCPU_EVENTS,
-				       (unsigned long)&current->thread.arch.kvm_v2.iotrap_events);
+		rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_VCPU_EVENTS,
+				      (unsigned long)&current->thread.arch.kvm_v2.iotrap_events);
+		if (rc < 0)
+			panic("kvm-v2: restore iotrap VCPU events (cpu=%d) failed: %d",
+			      cpu, rc);
 		current->thread.arch.kvm_v2.iotrap_events_valid = false;
 	}
 }
