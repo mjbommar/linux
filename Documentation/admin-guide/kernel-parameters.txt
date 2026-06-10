@@ -3256,6 +3256,13 @@ Kernel parameters
 			Format: <integer>
 			Default: 5
 
+	kvm_v2_snapshot_bench=
+			[UML] Run a KVM v2 snapshot capture/restore benchmark at
+			late initcall time. The value is the number of
+			restore_full iterations to run after one capture. Intended
+			for UML snapshot restore smoke tests and local timing
+			checks.
+
 	kvm-intel.ept=	[KVM,Intel] Control KVM's use of Extended Page Tables,
 			a.k.a. Two-Dimensional Page Tables.  Default is 1
 			(enabled). Disable by KVM if hardware lacks support

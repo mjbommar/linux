@@ -807,6 +807,8 @@ static int kvm_v2_snapshot_bench_u64_cmp(const void *a, const void *b)
 	return 0;
 }
 
+static unsigned int kvm_v2_snapshot_bench_boot_n;
+
 /*
  * Drive an N-iteration capture-once + restore_full-N-times bench
  * cycle. Returns 0 on success, -errno on the first failure. Used by
@@ -881,6 +883,46 @@ out_destroy:
 	kvm_v2_snapshot_destroy(snap);
 	return rc;
 }
+
+static int __init kvm_v2_snapshot_bench_setup(char *str)
+{
+	unsigned int n;
+	int rc;
+
+	rc = kstrtouint(str, 0, &n);
+	if (rc < 0 || n == 0 || n > KVM_V2_SNAPSHOT_BENCH_N_MAX) {
+		pr_warn("um: kvm-v2 snapshot bench: invalid kvm_v2_snapshot_bench=%s\n",
+			str);
+		return 1;
+	}
+
+	kvm_v2_snapshot_bench_boot_n = n;
+	return 1;
+}
+__setup("kvm_v2_snapshot_bench=", kvm_v2_snapshot_bench_setup);
+
+static int __init kvm_v2_snapshot_bench_late_init(void)
+{
+	u64 *samples;
+	int rc;
+
+	if (!kvm_v2_snapshot_bench_boot_n)
+		return 0;
+
+	samples = kvmalloc_array(kvm_v2_snapshot_bench_boot_n,
+				 sizeof(*samples), GFP_KERNEL);
+	if (!samples)
+		return -ENOMEM;
+
+	rc = kvm_v2_snapshot_bench_run(kvm_v2_snapshot_bench_boot_n, samples);
+	kvfree(samples);
+	if (rc < 0)
+		pr_warn("um: kvm-v2 snapshot bench: boot run failed (%d)\n",
+			rc);
+
+	return rc;
+}
+late_initcall_sync(kvm_v2_snapshot_bench_late_init);
 
 #ifdef CONFIG_DEBUG_FS
 

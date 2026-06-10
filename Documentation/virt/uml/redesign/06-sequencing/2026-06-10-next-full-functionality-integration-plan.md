@@ -155,7 +155,8 @@ Problems:
 - Some functionality is prototype-quality or phase-scoped.
 - Snapshot capture, snapshot restore, and snapshot ELF export started as
   historical-only functionality and have now been reimported into `next` with
-  KUnit coverage. Runtime restore smoke and SMP semantics still need closure.
+  KUnit, live export, and restore smoke coverage. SMP semantics still need
+  closure.
 - Record/replay and private state trace functionality remain historical-only.
 
 Disposition:
@@ -451,7 +452,8 @@ Acceptance gates:
 - `gdb -c dump.elf` opens the file. Current status: PASS.
 - `tools/uml/uml-gdb/uml-snapshot.py` helper loads and reports state. Current
   status: PASS.
-- Snapshot restore runtime smoke passes. Current status: open.
+- Snapshot restore runtime smoke passes. Current status: PASS on 2026-06-10
+  through `kvm-snapshot-restore-smoke` with `kvm_v2_snapshot_bench=1`.
 - SMP behavior is either passing or explicitly gated.
 
 ## Workstream C: KVM Record/Replay
@@ -900,8 +902,8 @@ Exit criteria:
 - Snapshot docs are true.
 - Snapshot KUnit and live ELF export smoke pass. Current status: KUnit PASS
   4/4 and live `umlctl snapshot export` PASS on 2026-06-10.
-- Snapshot restore runtime smoke passes or the unsupported state is explicitly
-  gated.
+- Snapshot restore runtime smoke passes. Current status: PASS on 2026-06-10
+  through `kvm-snapshot-restore-smoke`.
 - SMP snapshot semantics are validated or explicitly gated.
 
 ### Phase 3: Fork Server And Pool Completion
@@ -1047,7 +1049,8 @@ Runtime smoke:
 - CPython tier0.
 - CPython parity.
 - CPython full where practical.
-- Snapshot restore smoke. Current status: open.
+- Snapshot restore smoke. Current status: PASS on 2026-06-10 through
+  `kvm-snapshot-restore-smoke`.
 - Snapshot ELF export roundtrip. Current status: live `umlctl snapshot export`
   plus `readelf`, `gdb`, and helper parse PASS on 2026-06-10.
 - Template-pause fork smoke.
@@ -1079,7 +1082,7 @@ branch lands.
 | ---- | ------------- | -------------------- | ------ |
 | KVM v2 core | Present on `next` | Hardened, validated | In progress |
 | KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
-| KVM snapshot | Present with KUnit pass | Present, validated, SMP policy defined | In progress |
+| KVM snapshot | Present with KUnit, live export, and restore smoke pass | Present, validated, SMP policy defined | In progress |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
 | Record/replay | Historical/prototype | Complete or experimental | Open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
@@ -1096,24 +1099,23 @@ branch lands.
 
 ## Immediate Next Actions
 
-1. Add or run a snapshot restore runtime smoke test.
-2. Define the SMP snapshot policy: validate all-vCPU quiescence, gate the
+1. Define the SMP snapshot policy: validate all-vCPU quiescence, gate the
    feature to UP/single-vCPU, or mark SMP snapshot unsupported with explicit
    checks.
-3. Compare pool/fork-server behavior against `fork-server-phase1c`,
+2. Compare pool/fork-server behavior against `fork-server-phase1c`,
    `memo09-phase2`, `memo09-phase3-pool-bench`, and `memo09-phase4`.
-4. Import or complete record/replay, or land it behind an explicit
+3. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-5. Decide whether private state trace is worth importing as clean optional
+4. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-6. Re-audit vector2 transport claims, Kconfig wording, and replacement
+5. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-7. Curate selftests and source comments for upstream style: no internal issue
+6. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-8. Refresh reports/presentations from normalized status and evidence tables
+7. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-9. Run the final validation matrix, update `STATUS.md` and the inventory,
+8. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

@@ -36,8 +36,8 @@ Current source-tree direction:
 - KVM v1 archive code has been removed from the active tree.
 - KVM v2 snapshot capture/restore and snapshot ELF export source is present on
   `next` and builds.
-- KVM v2 snapshot KUnit and live `umlctl snapshot export` validation pass on
-  `next`; restore smoke and SMP semantics remain open.
+- KVM v2 snapshot KUnit, live `umlctl snapshot export`, and snapshot restore
+  smoke validation pass on `next`; SMP semantics remain open.
 - KVM v2 record/replay and private trace-ring sources have not yet been
   reimported into `next`.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
@@ -68,6 +68,9 @@ The strongest current KVM v2 evidence is:
 - Snapshot export: a disposable KVM v2 hostfs guest exports a core through
   `umlctl snapshot export`; `readelf -h/-l/-n`, `gdb -c`, and
   `tools/uml/uml-gdb/uml-snapshot.py` all parse the resulting ELF.
+- Snapshot restore smoke: `kvm-snapshot-restore-smoke` boots KVM v2 with
+  `kvm_v2_snapshot_bench=1` and observes the kernel capture plus
+  `restore_full` timing summary in full snapshot mode.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU
@@ -77,8 +80,7 @@ and keeps CPUID xstate leaves consistent with the exposed feature set.
 
 Remaining validation before publication or completion:
 
-- run snapshot restore smoke and define, gate, or validate SMP snapshot
-  semantics;
+- define, gate, or validate SMP snapshot semantics;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
@@ -137,8 +139,8 @@ The following work is not yet present in the active `next` implementation:
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
 source. KUnit coverage and live `umlctl` ELF export validation now pass.
-Restore smoke and SMP constraints still need to close before the snapshot
-workstream can be called complete.
+The restore smoke gate now passes. SMP constraints still need to close before
+the snapshot workstream can be called complete.
 
 ## Publication Checklist
 
