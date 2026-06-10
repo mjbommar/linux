@@ -185,11 +185,9 @@ static void kvm_v2_trampoline_protect_ro(void *kva)
 	 * so CPL=3 code cannot write the trampoline page either way.
 	 */
 	rc = set_memory_ro((unsigned long)kva, 1);
-	if (rc) {
+	if (rc)
 		pr_warn("um: kvm-v2 trampoline_install: set_memory_ro(%p) returned %d\n",
 			kva, rc);
-		/* Read-only enforcement is best-effort on UML. */
-	}
 }
 
 static void kvm_v2_trampoline_publish(struct kvm_v2_vm *vm, void *kva,
@@ -1308,7 +1306,7 @@ static int kvm_v2_handle_io_nm(struct uml_pt_regs *regs,
 	 */
 	vcpu->fpu_dirty = true;
 
-	/* Drain pending signal/scheduler work -- same pattern as peers. */
+	/* Drain pending signal and scheduler work before guest re-entry. */
 	interrupt_end();
 
 	kvm_v2_marshal_to_kvm_regs(&run->s.regs.regs, regs);
@@ -1320,8 +1318,8 @@ static int kvm_v2_handle_io_nm(struct uml_pt_regs *regs,
 /*
  * Default-stub dispatcher. Any vector without a dedicated handler points
  * at the panic port. The firing vector may or may not have pushed an
- * error code, so read the no-error-code layout and treat the result
- * as best-effort frame state.
+ * error code; the no-error-code layout is enough to report the user RIP
+ * and deliver SIGSEGV.
  *
  * Hitting this path means either an unimplemented vector fired or the
  * IDT gate points at the wrong stub.

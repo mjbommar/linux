@@ -335,8 +335,8 @@ static_assert(KVM_V2_GADGET_OFF_MONO_NSEC + 8 <= KVM_V2_GADGET_OFF_BUDGET,
  * Allocate the per-VM trampoline page, write the 5 LSTAR bytes at the
  * documented offset, and stash the kernel VA + GPA on vm. Idempotent:
  * a successful prior call short-circuits. Allocation can fail before the
- * buddy allocator is available; the late init retry path completes the
- * install after mm_init.
+ * buddy allocator is available; the late-install path completes the install
+ * after mm_init.
  */
 int  kvm_v2_trampoline_alloc_and_install(struct kvm_v2_vm *vm);
 

@@ -361,8 +361,8 @@ h_clock_gettime:
  * that the gadget handled the UML-private syscall; the host fallback
  * returns -ENOSYS.
  *
- * Non-NULL: bounds-check RDI against TASK_SIZE_CAP (same pattern
- * as h_getcpu / h_clock_gettime). On success, save user RCX
+ * Non-NULL: bounds-check RDI against TASK_SIZE_CAP, matching
+ * h_getcpu / h_clock_gettime. On success, save user RCX
  * (= user RIP for SYSRETQ; rdmsr reads ECX as MSR index input
  * and clobbers it), rdmsr 0xE7 to APERF, rdmsr 0xE8 to MPERF, store
  * both as u64 at *RDI, restore RCX, fall through to tail.

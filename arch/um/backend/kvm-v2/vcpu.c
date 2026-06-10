@@ -336,9 +336,9 @@ static void kvm_v2_save_cpuid(struct kvm_v2_vm *vm, struct kvm_cpuid2 *cpuid)
 }
 
 /*
- * Lazy CPUID install before guest entry. By the first KVM_RUN the buddy allocator is
- * available, so GET_SUPPORTED_CPUID can allocate its buffer and the
- * curated mask can be installed before guest code executes. Failure is
+ * Lazy CPUID install before guest entry. By the first KVM_RUN the buddy
+ * allocator is available, so GET_SUPPORTED_CPUID can allocate its buffer and
+ * the curated mask can be installed before guest code executes. Failure is
  * required before guest entry because running with KVM-default CPUID would
  * expose unsupported or nondeterministic architectural state.
  *
@@ -409,8 +409,8 @@ static int kvm_v2_install_cpuid(struct kvm_v2_vm *vm, int vcpu_fd)
  * After KVM_SET_MSRS, immediately KVM_GET_MSRS and verify each value
  * round-tripped exactly. A silent KVM_SET_MSRS failure would send SYSCALL
  * to the wrong RIP, use the wrong SYSRET selectors, or leak bad RFLAGS.
- * One readback before guest entry catches partial writes and ABI surprises before
- * guest code executes.
+ * One readback before guest entry catches partial writes or unexpected KVM
+ * ABI behavior before guest code executes.
  */
 static void kvm_v2_init_syscall_msrs(struct kvm_v2_msr_batch *msrs, int cpu)
 {
