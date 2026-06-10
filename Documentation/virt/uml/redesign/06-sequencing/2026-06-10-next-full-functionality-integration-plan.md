@@ -1323,6 +1323,26 @@ Result:
 - this proves the benchmark now measures live children, but it is not a
   substitute for the full default-scale benchmark.
 
+Full default-scale validation:
+
+```sh
+timeout --kill-after=10 900 env UM_FORK_KERNEL=$PWD/linux \
+	UMLCTL=$PWD/tools/uml/uml-launcher/target/debug/umlctl \
+	tools/testing/selftests/um/pool-bench/run-pool-bench.sh
+```
+
+Result:
+
+- FAIL overall, 3/5 gates passed;
+- take p50 was 1.3 ms and p99 was 1.6 ms over 1000 measured takes;
+- RSS sampled 100/100 live replicated children and total RSS was 17,262.7 MiB,
+  failing the 200 MiB gate;
+- lifecycle RSS drift was 0.09% over 10,000 take/destroy cycles;
+- throughput completed 2246/3000 target takes in the 60-second gate, below the
+  2700 pass threshold;
+- this makes memory amplification from full per-member physmem replication the
+  next pool correctness/performance blocker.
+
 Immediate engineering conclusion:
 
 - current `next` already has the broad pool/fork command surface;
@@ -1333,15 +1353,16 @@ Immediate engineering conclusion:
 - daemon pool take/serve now routes through the replicated live-member path;
 - daemon `min_warm` now prefills, consumes, replenishes, reports, and cleans up
   pre-identified ready members through `pool take --ready`;
-- final completion requires full-scale pool benchmark validation,
-  request-specific warm scheduling decision or API, vector2 TAP/fd pool
-  networking, successful daemon-routed guest exec, and the syzkaller
-  take/exec/destroy path.
+- final completion requires fixing the full-scale pool benchmark RSS and
+  throughput failures, resolving the request-specific warm scheduling decision
+  or API, vector2 TAP/fd pool networking, successful daemon-routed guest exec,
+  and the syzkaller take/exec/destroy path.
 
 ## Immediate Next Actions
 
-1. Re-run the full default-scale pool benchmark now that RSS samples live
-   replicated children.
+1. Fix the full-scale pool benchmark failures: 100 live replicated members
+   currently consume 17,262.7 MiB RSS against the 200 MiB target, and 60-second
+   throughput reaches 2246/3000 takes against the 2700 pass threshold.
 2. Decide whether request-specific warm scheduling needs a predeclared slot API
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.

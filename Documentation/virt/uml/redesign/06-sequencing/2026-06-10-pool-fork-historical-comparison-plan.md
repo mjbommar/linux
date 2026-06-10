@@ -205,11 +205,18 @@ Current validation result:
 - A reduced `pool-bench` passes all five gates with live replicated children:
   p50 1.3 ms, p99 1.6 ms, 3/3 live RSS children at 152.4 MiB, 0.00% lifecycle
   drift across five cycles, and 4/4 throughput takes in a two-second gate.
+- The full default-scale `pool-bench` runs to completion but fails 2/5 gates:
+  p50 1.3 ms, p99 1.6 ms, and 0.09% lifecycle drift pass; RSS is 17,262.7 MiB
+  for 100/100 live children against a 200 MiB gate, and throughput is
+  2246/3000 takes against a 2700 gate.
 
 Remaining work:
 
 - Keep `cargo fmt --check` and `cargo test` in `tools/uml/uml-launcher` green;
   the warm-ready update passed both.
+- Fix full-scale pool memory amplification and throughput. The current
+  correctness-oriented replicated physmem path is stable, but it does not meet
+  the original 100-member memory or 50/sec throughput targets.
 - Decide the final request-specific warm scheduling contract: either add a
   predeclared slot/identity API before warm fork, or route syzkaller through
   daemon-assigned ready identities with `pool take --ready`.
@@ -331,7 +338,7 @@ Remaining work:
 | Daemon-routed exec | Present, partially validated | `memo09-phase4` | Missing-feature failures are validated; successful exec still pending. |
 | Port-forward result | Present, validated | `memo09-phase4` | Tie to final network validation. |
 | Warm pool `min_warm` | Present for daemon-assigned ready members | `memo09-phase3-pool-bench`, `memo09-phase4` | Decide request-specific warm identity scheduling. |
-| Pool benchmark | Present, reduced gate passes | `memo09-phase3-pool-bench`, `memo09-phase4` | Run full default-scale gate. |
+| Pool benchmark | Present, full gate fails RSS/throughput | `memo09-phase3-pool-bench`, `memo09-phase4` | Fix memory amplification and throughput. |
 | Syzkaller VM shim | Present, unvalidated | `memo09-phase4`, current `next` | Build and run syzkaller-style take/exec/destroy smoke. |
 | Snapshot bench kselftest | Historical-only wrapper | `memo09-phase4` | Import clean wrapper around active kernel hook. |
 | Snapshot KUnit kselftest wrapper | Historical-only wrapper | `memo09-phase4` | Import or replace for current 4-case KUnit suite. |

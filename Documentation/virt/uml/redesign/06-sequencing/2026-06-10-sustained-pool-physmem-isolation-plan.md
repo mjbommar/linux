@@ -289,6 +289,10 @@ Status:
   daemon replenishes the ready queue before shutdown cleanup;
 - reduced `pool-bench` now samples live replicated children and passes the RSS
   gate with 3/3 live members;
+- full default-scale `pool-bench` runs to completion but fails RSS and
+  throughput: 100/100 live children measure 17,262.7 MiB against the 200 MiB
+  gate, and the 60-second throughput gate reaches 2246/3000 takes against the
+  2700 pass threshold;
 - request-specific takes remain lazy so caller-supplied MAC/TAP/mconsole
   identity is applied before fork.
 

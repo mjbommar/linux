@@ -176,6 +176,11 @@ Current boundary:
 - reduced `pool-bench` now passes all five gates with live replicated children:
   5/5 latency takes, 3/3 live RSS children, 0.00% lifecycle RSS drift across
   5 take/destroy cycles, and 4/4 throughput takes in a 2-second reduced gate;
+- the full default-scale `pool-bench` now runs to completion and passes 3/5
+  gates: p50 1.3 ms, p99 1.6 ms, and 0.09% lifecycle drift across 10,000
+  cycles pass; RSS fails at 17,262.7 MiB for 100/100 live children against the
+  200 MiB target, and throughput fails at 2246/3000 takes against the 2700
+  target;
 - `pool-exec-smoke` still validates the clean daemon error envelope for missing
   in-guest mconsole exec support; successful daemon-routed guest exec remains
   pending;
