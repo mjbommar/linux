@@ -768,7 +768,7 @@ Required functionality:
 - Keep multiqueue fd handoff validated and complete fairness/performance
   validation.
 - Keep sandbox validation for untrusted mode green.
-- Complete in-process trusted host validation.
+- Keep in-process trusted host validation green.
 - Keep launcher-owned fd handoff validated and decide whether per-take pool fd
   handoff is required or retired.
 - Confirm failure injection is test-only or clearly documented.
@@ -790,6 +790,8 @@ Acceptance gates:
   `vector2-pool-tap-smoke`.
 - multiqueue smoke. Current status: PASS on 2026-06-10 through
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
+- trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
+  `vector2-inproc-tap-smoke`.
 - seccomp backend vector2 Tier 3 networking.
 - KVM v2 backend vector2 Tier 3 networking.
 - Long soak.
@@ -1253,6 +1255,8 @@ Runtime smoke:
   `vector2-pool-tap-smoke`.
 - Vector2 tap/multiqueue. Current multiqueue smoke status: PASS through
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
+- Vector2 trusted in-process TAP. Current status: PASS through
+  `vector2-inproc-tap-smoke`.
 - Syzkaller shim smoke.
 
 Longer gates:

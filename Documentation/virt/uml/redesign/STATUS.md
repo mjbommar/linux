@@ -116,6 +116,10 @@ run:
   fds, inherits fd range 200..203, the guest reports `UMLCTL_NETWORK_QUEUES=4`
   and `UMLCTL_NETWORK_FD_COUNT=4`, `vec2.0` reports four TX queues, and a
   one-packet host TAP ping succeeds.
+- A focused `vector2-inproc-tap-smoke` now validates the explicit trusted
+  in-process TAP path: `umlctl up` reports `transport=tap host_mode=inproc`,
+  does not inherit launcher-owned TAP fds, the guest reports TAP/inproc
+  metadata with no fd count, and a one-packet host TAP ping succeeds.
 
 Open vector2 publication work:
 
@@ -220,6 +224,11 @@ Current boundary:
 - `vector2-sandbox-audit` validates the untrusted vector2 fd boot audit:
   `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot
   and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations;
+- `vector2-inproc-tap-smoke` validates the explicit trusted vector2
+  in-process TAP path: `umlctl up` reports `transport=tap host_mode=inproc`,
+  no launcher-owned fd inheritance is reported, guest metadata reports
+  TAP/inproc mode with fd count zero, and the guest reaches the host-side TAP
+  with a one-packet ping;
 - `vector2-fd-multiqueue-smoke` validates launcher-owned vector2 fd
   multiqueue handoff: `umlctl up` creates a multiqueue TAP, opens four TAP
   fds, inherits fd range 200..203, guest metadata reports four queues and four
