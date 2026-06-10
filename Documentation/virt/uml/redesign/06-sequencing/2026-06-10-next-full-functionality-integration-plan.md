@@ -36,6 +36,83 @@ The integration strategy is:
 7. Finish with one full integration gate that proves build, tests, tools,
    networking, snapshot/fork/pool, and KVM v2 behavior together.
 
+## Current Plan State
+
+This section is the short, current reading order for the plan after the
+2026-06-10 pool replication, warm-ready, and sparse-copy updates.
+
+Current branch facts:
+
+- `next` is the active integration branch.
+- `next` and `origin/next` both point at `71eda3d9c0df`.
+- `next` is `0` commits behind and `64` commits ahead of the local
+  `torvalds/master` ref used for the current upstream comparison.
+- The latest landed pool commits are:
+  - `a291aa71748c` - route the pool daemon to replicated members;
+  - `f6dcf99b5c89` - add warm ready pool members;
+  - `0da923133d82` - document the full pool benchmark result; and
+  - `71eda3d9c0df` - sparse-copy pool member physmem.
+
+Closed or substantially closed since the initial 2026-06-10 review:
+
+- KVM v2 snapshot capture, restore, and ELF export are present on `next`,
+  validated by KUnit, live mconsole-backed export, GDB/readelf parsing, and
+  snapshot kselftest wrappers.
+- Snapshot SMP behavior is explicitly bounded: capture and restore reject
+  guests with more than one online CPU until all-vCPU quiescence exists.
+- The known KVM v2 architectural restore error-handling hole is fixed for the
+  reviewed restore paths.
+- Template-pause single-shot, pivot, fork-on-resume smoke, fork stress,
+  pool-member one-shot, and replicated sustained pool-member lifetime have
+  all passed on the current production path.
+- `umlctl pool serve` now uses replicated pool-member mode and returns live
+  runnable members.
+- `pool serve --min-warm` now keeps daemon-assigned ready members, exposes
+  ready/taken/failed/min-warm status, supports `pool take --ready`, and
+  cleans up ready members during destroy/shutdown.
+- Reduced `pool-bench` passes all five gates with live sparse-copied
+  replicated children: 5/5 latency takes, 3/3 live RSS children at
+  146.0 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
+  reduced two-second gate.
+- Full default `pool-bench` now runs to completion but still fails 2/5 gates:
+  RSS is 7,409.4 MiB for 100/100 live children against the 200 MiB target, and
+  throughput reaches 2250/3000 takes against the 2700 target.
+
+The active blockers are now:
+
+1. Fix or intentionally revise the full-scale pool memory/throughput targets.
+   The current implementation is stable, live, and sparse-copied, but still
+   far above the original 100-member RSS target and below the throughput gate.
+2. Validate successful daemon-routed guest exec. The current smoke validates a
+   clean error envelope; it does not yet prove a successful guest command
+   through the final member mconsole path.
+3. Decide the final request-specific warm scheduling contract. Either add a
+   predeclared slot/identity API before warm fork, or route syzkaller and other
+   fast consumers through daemon-assigned ready identities with
+   `pool take --ready`.
+4. Validate vector2 TAP/fd handoff through live pool members, then run the
+   relevant vector2 networking gates against seccomp and KVM v2.
+5. Validate the syzkaller UML shim against the final take/exec/destroy path,
+   including stdout/stderr/status/timeout and cleanup behavior.
+6. Import or complete record/replay, or land it behind an explicit
+   experimental Kconfig and keep it out of the completion claim.
+7. Decide whether the historical KVM v2 private state trace should be imported
+   as clean optional diagnostics.
+8. Curate source comments, selftests, reports, and status docs so upstream-
+   facing code is free of internal issue numbers, phase diaries, random
+   history, and stale claims.
+
+Execution discipline for the remaining work:
+
+- Land one coherent workstream at a time on top of current `next`.
+- Run the smallest meaningful test gate before each commit, and the broader
+  gate before declaring a workstream closed.
+- Update this plan, the inventory, and `STATUS.md` when a user-visible state
+  changes.
+- Commit and push `next` after each validated workstream.
+- Do not direct-merge historical branches; port or reimplement their useful
+  functionality with normal kernel comments and tests.
+
 ## Source Material Reviewed
 
 This plan treats the following documents and branch families as source
@@ -99,11 +176,12 @@ Current branch status at review time:
 
 - Branch: `next`
 - Remote tracking: `origin/next`
-- Baseline before the snapshot SMP gate update: `7a1c1bb88142`
-- Relative to local `torvalds/master` at that baseline: `0` behind, `43`
-  ahead
-- Current update: snapshot capture/restore are explicitly gated to one online
-  CPU, with docs and smoke coverage updated accordingly.
+- Current head: `71eda3d9c0df`
+- Remote head: `origin/next` also points at `71eda3d9c0df`
+- Relative to local `torvalds/master`: `0` behind, `64` ahead
+- Current update: pool daemon live-member routing, warm-ready members, full
+  pool benchmark documentation, and sparse physmem copying are landed and
+  pushed; full-scale pool RSS and throughput remain open.
 
 Approximate changed review surface relative to Linus:
 
@@ -270,9 +348,11 @@ Disposition:
 - Diff module by module.
 - Import missing launcher features and examples after running cargo tests.
 
-## Current `next` Blockers
+## Initial `next` Blockers And Disposition
 
-These should be fixed before major imports.
+These were the main blockers from the initial 2026-06-10 review. They are kept
+here because they explain the sequencing, but the current active blocker list
+is in `Current Plan State` and `Immediate Next Actions`.
 
 ### KVM v2 restore ioctls drop state on failure
 
@@ -304,6 +384,12 @@ Acceptance:
 - KVM v2 KUnit passes.
 - No `(void)os_ioctl_generic()` remains for required architectural restore
   state.
+
+Current status:
+
+- Closed for the reviewed restore paths. Keep the broader KVM v2 ioctl audit
+  in Workstream A as a hardening task, but this specific blocker is no longer
+  first in the execution order.
 
 ### `umlctl snapshot export` needed a real kernel control surface
 
@@ -581,13 +667,16 @@ Functional requirements:
 - Daemon `pool serve` works.
 - `pool take` produces members reliably.
 - `pool list`, `pool status`, `pool destroy`, and daemon shutdown work.
-- `umlctl exec` works through mconsole or a documented fallback.
+- `umlctl exec` works through mconsole, or the command surface is explicitly
+  marked incomplete until a successful guest exec path is validated.
 - `port-forward` works for pool members.
 - TAP/fd handoff works for vector2 pool members.
 - Identity blob layout is documented and tested.
 - Per-member mconsole path synthesis is reliable.
-- Warm pool support is either implemented or explicitly marked not part of
-  completion.
+- Warm pool support is implemented for daemon-assigned ready members, with a
+  final contract decision for request-specific warm identity scheduling.
+- The full-scale pool benchmark either meets the original RSS/throughput
+  targets or the targets are consciously revised with rationale.
 
 Required historical comparison:
 
@@ -608,9 +697,11 @@ Current comparison result:
   members and `pool take --ready` consumes that queue. Request-specific takes
   remain lazy so the daemon does not lie about caller-supplied identity; the
   kernel applies MAC/TAP/mconsole identity before the member is forked.
-- The remaining validation gaps are current pool/template-pause smokes,
-  vector2 TAP/fd handoff through pool members, and syzkaller-style
-  take/exec/destroy.
+- Current template-pause, fork, spawn, serve, port-forward, and reduced
+  benchmark smokes pass on the live replicated-member path.
+- The remaining pool/fork gaps are full default `pool-bench` RSS/throughput,
+  successful daemon-routed guest exec, vector2 TAP/fd handoff through pool
+  members, and syzkaller-style take/exec/destroy.
 - Historical snapshot test wrappers from `memo09-phase4` should be imported
   or replaced as cleaned kselftests because the underlying snapshot hooks now
   exist on `next`. Current status: imported and PASS on 2026-06-10.
@@ -882,6 +973,12 @@ Acceptance gates:
 
 Create a live tracking document with a row for every historical feature.
 
+Current status:
+
+- Started in
+  `2026-06-10-next-functionality-inventory.md`; keep it live as each
+  workstream lands.
+
 Columns:
 
 - Feature.
@@ -907,6 +1004,12 @@ Fix current blockers:
 - Snapshot CLI/doc mismatch temporary guard if snapshot import is not first.
 - KVM gadget status reconciliation.
 
+Current status:
+
+- The reviewed KVM v2 restore failure-handling issue is closed.
+- Snapshot CLI/doc mismatch is closed by the mconsole-backed exporter.
+- Gadget status still needs final validation on the cleaned tree.
+
 Exit criteria:
 
 - Current `next` has no known hard correctness bug from the 2026-06-10 review.
@@ -914,6 +1017,10 @@ Exit criteria:
 ### Phase 2: Snapshot And Snapshot ELF
 
 Port or reimplement snapshot and snapshot ELF export.
+
+Current status:
+
+- Closed for the current single-online-CPU scope.
 
 Exit criteria:
 
@@ -927,12 +1034,27 @@ Exit criteria:
 
 ### Phase 3: Fork Server And Pool Completion
 
-Consolidate pool/fork-server behavior.
+Consolidate pool/fork-server behavior and close the remaining production
+pool gaps.
+
+Current status:
+
+- Template-pause, fork-on-resume, one-shot pool member, sustained replicated
+  pool member, direct pool spawn, daemon pool serve/take/status/destroy,
+  warm-ready members, port-forward result handling, and reduced pool-bench
+  pass on the current path.
+- Full default `pool-bench` still fails RSS and throughput.
+- Successful daemon-routed guest exec remains pending.
 
 Exit criteria:
 
-- Pool serve/take/exec/port-forward works.
-- Pool benchmark and smoke tests pass.
+- Pool serve/take/port-forward continues to pass on live members.
+- Successful daemon-routed guest exec works or is explicitly removed from the
+  completion claim.
+- Full pool benchmark passes, or the original RSS/throughput targets are
+  revised with evidence and approval.
+- Vector2 TAP/fd handoff works through live pool members.
+- Syzkaller-style take/exec/destroy works through the final path.
 - Missing `memo09-*` functionality is either landed or explicitly retired.
 
 ### Phase 4: Record/Replay
