@@ -142,7 +142,11 @@ Current validation result:
   records the current member identity for each take, and narrows the second
   member failure to a timeout before the second `POOL_ENTER` with the child-pid
   write-back slot still zero, and with no kernel panic, v1 ceiling regression,
-  or live UML process leak in the bounded run.
+  or live UML process leak in the bounded run.  Temporary local markers showed
+  the second take reaches the runqueue lock in
+  `sched_worker_detach_other_tasks()` and then stalls while walking scheduler
+  state, consistent with shared physmem/kernel-memory mutation by the first
+  live member.
 
 Remaining work:
 

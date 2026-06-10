@@ -1266,6 +1266,16 @@ Result:
 - the fix is a real per-member physmem file-descriptor design, not a test-only
   workaround.
 
+Additional local boundary:
+
+- temporary, uncommitted markers around fork preparation showed iteration 2
+  reaches `sched_worker_detach_other_tasks()`, takes the runqueue lock, and
+  then stalls before returning from the `rq->cfs_tasks` walk;
+- this is consistent with the first live pool member mutating scheduler/kernel
+  state that is still backed by the master's shared physmem;
+- the next production fix should therefore isolate member kernel memory before
+  the child re-enters userspace, rather than adding more loop-level guards.
+
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
 	POOL_BENCH_TAKES=10 POOL_BENCH_FORKS=5 \

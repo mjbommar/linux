@@ -154,7 +154,11 @@ Current boundary:
   member alive, stamps each requested member identity, and now narrows the
   second-member failure to a timeout before the second `POOL_ENTER` with the
   child-pid write-back slot still zero, and with no kernel panic, v1 ceiling
-  regression, or live UML process leak in the bounded run;
+  regression, or live UML process leak in the bounded run; local marker
+  instrumentation also showed the second take reaches the runqueue lock inside
+  `sched_worker_detach_other_tasks()` and then stalls while walking scheduler
+  state, which is consistent with the first live member mutating kernel memory
+  still shared with the master;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before
