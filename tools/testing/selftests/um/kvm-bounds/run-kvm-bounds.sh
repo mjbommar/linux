@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# KVM gadget user-pointer bounds-check selftest (audit round-6
-# G1, task #240). Boots a freestanding ring-3 binary that calls
+# KVM gadget user-pointer bounds-check selftest. Boots a freestanding
+# ring-3 binary that calls
 # clock_gettime / time / getcpu with a canonical kernel VA
 # (0xffff800000001000) and a non-canonical address
 # (0x800000000000) for each output pointer, then asserts each
@@ -14,7 +14,7 @@
 #     case. The fallback kernel acts as a baseline showing
 #     -EFAULT is the universal expected behaviour, not a
 #     gadget-specific quirk; the gadget kernel additionally
-#     validates that G1's TASK_SIZE_CAP bounds check correctly
+#     validates that the TASK_SIZE_CAP bounds check correctly
 #     routes bad pointers to handle_syscall before the ring-0
 #     store happens.
 #
@@ -49,12 +49,11 @@ if [ ! -e /dev/kvm ]; then
 	exit 4
 fi
 
-# Self-heal /dev/kvm ACL — udev / elogind sometimes drops the
+# Self-heal /dev/kvm ACL: udev / elogind sometimes drops the
 # user ACL between successive UML invocations. Retry up to 3
 # times with a brief settle delay before giving up. Used both
 # at runner entry and before every kvm-side spawn so an in-loop
-# ACL drop doesn't surface as a spurious "no KVM_BOUNDS line"
-# FAIL (the prior pattern, fixed in task #267).
+# ACL drop doesn't surface as a spurious "no KVM_BOUNDS line" FAIL.
 ensure_kvm_readable() {
 	local i
 	for i in 1 2 3; do

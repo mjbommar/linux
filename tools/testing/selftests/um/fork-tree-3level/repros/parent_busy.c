@@ -6,7 +6,7 @@
 #include <sys/wait.h>
 
 int main(void) {
-	/* 100 getpid calls before fork — accumulate parent state. */
+	/* 100 getpid calls before fork - accumulate parent state. */
 	for (int i = 0; i < 100; i++) (void)getpid();
 	pid_t p = fork();
 	if (p == 0) {

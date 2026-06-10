@@ -1,19 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Spawner ↔ worker IPC wire format (memo 25 R4 / memo 28 Part D).
+ * Spawner/worker IPC wire format.
  *
  * Fixed-size 128-byte binary messages over a per-worker UNIX socket
  * pair. SCM_RIGHTS rides on the cmsg channel for FD passing. Each
  * recvmsg() reads exactly one message.
  *
  * Protocol versioning: bump WORKER_IPC_MAGIC if the wire breaks.
- * Minor additions can use the `flags` field.
+ * Minor additions can use the flags field.
  *
  * Endianness: native (UML's spawner and worker run on the same
  * host architecture).
  *
- * This header is shared between the spawner (kernel TU) and the
- * worker (USER TU). Avoid kernel-only types here — use plain u32 /
+ * This header is shared between the spawner and the host worker.
+ * Avoid kernel-only types here; use plain u32 /
  * u64 / u16 / u8 from <linux/types.h> in kernel context and the
  * matching uintN_t from <stdint.h> in USER context.
  */
@@ -38,35 +38,33 @@ typedef u8  worker_u8;
 #define WORKER_MSG_SIZE		128u
 
 /*
- * E.3b ABI: STUB_ALLOC_REQ / WRITE_REGS / RETURN_VALUE / WRITE_REGS_ACK
- * are the minimum-viable cut from memo 28 Part K.6. They prove the
- * spawner→worker→spawner round-trip without yet integrating real
- * start_userspace() calls or SIGSYS handling — that's E.3c.
+ * STUB_ALLOC_REQ / WRITE_REGS / RETURN_VALUE / WRITE_REGS_ACK support
+ * the spawner -> worker -> spawner register round-trip.
  *
- * E.3d.0 adds STUB_ALLOC_REP: the worker calls start_userspace() in
- * its own VA, then ships the populated mm_id back along with the
- * parent-side socketpair fd via SCM_RIGHTS so the spawner-side mm_id
- * has a usable .sock.
+ * STUB_ALLOC_REP is the stub-allocation reply: the worker calls
+ * start_userspace() in its own VA, then ships the populated mm_id
+ * back along with the parent-side socketpair fd via SCM_RIGHTS so
+ * the spawner-side mm_id has a usable .sock.
  */
 #define WORKER_REGS_SLOTS	9u	/* rip,rsp,rax,rdi,rsi,rdx,r10,r8,r9 */
 
 enum worker_msg_type {
 	WORKER_MSG_NONE             = 0,
-	WORKER_MSG_SYSCALL_REQ      = 1,	/* worker → spawner: do this syscall */
-	WORKER_MSG_SYSCALL_REP      = 2,	/* spawner → worker: here's the return */
-	WORKER_MSG_SIGNAL           = 3,	/* spawner → worker: deliver signal */
-	WORKER_MSG_MIGRATE_TO       = 4,	/* spawner → worker: receive task */
-	WORKER_MSG_MIGRATE_ACK      = 5,	/* worker → spawner: migration done */
-	WORKER_MSG_QUIESCE_REQ      = 6,	/* spawner → worker: stop scheduling */
-	WORKER_MSG_QUIESCE_REP      = 7,	/* worker → spawner: quiesced */
-	WORKER_MSG_SHUTDOWN         = 8,	/* spawner → worker: clean exit */
-	WORKER_MSG_STUB_ALLOC_REQ   = 9,	/* spawner → worker: mm_id snapshot, alloc local stub */
-	WORKER_MSG_WRITE_REGS       = 10,	/* spawner → worker: synthetic regs */
-	WORKER_MSG_RETURN_VALUE     = 11,	/* spawner → worker: sentinel for stub reply */
-	WORKER_MSG_WRITE_REGS_ACK   = 12,	/* worker → spawner: regs round-trip ACK */
-	WORKER_MSG_STUB_ALLOC_REP   = 13,	/* worker → spawner: stub child up, here's mm_id + .sock fd */
-	WORKER_MSG_VCPU_RUN         = 14,	/* spawner → worker: drive one vcpu trap iteration */
-	WORKER_MSG_VCPU_DONE        = 15,	/* worker → spawner: stub trap completed (non-SIGSYS) */
+	WORKER_MSG_SYSCALL_REQ      = 1,	/* worker to spawner: do this syscall */
+	WORKER_MSG_SYSCALL_REP      = 2,	/* spawner to worker: here's the return */
+	WORKER_MSG_SIGNAL           = 3,	/* spawner to worker: deliver signal */
+	WORKER_MSG_MIGRATE_TO       = 4,	/* spawner to worker: receive task */
+	WORKER_MSG_MIGRATE_ACK      = 5,	/* worker to spawner: migration done */
+	WORKER_MSG_QUIESCE_REQ      = 6,	/* spawner to worker: stop scheduling */
+	WORKER_MSG_QUIESCE_REP      = 7,	/* worker to spawner: quiesced */
+	WORKER_MSG_SHUTDOWN         = 8,	/* spawner to worker: clean exit */
+	WORKER_MSG_STUB_ALLOC_REQ   = 9,	/* spawner to worker: alloc local stub */
+	WORKER_MSG_WRITE_REGS       = 10,	/* spawner to worker: synthetic regs */
+	WORKER_MSG_RETURN_VALUE     = 11,	/* spawner to worker: sentinel for stub reply */
+	WORKER_MSG_WRITE_REGS_ACK   = 12,	/* worker to spawner: regs round-trip ACK */
+	WORKER_MSG_STUB_ALLOC_REP   = 13,	/* worker to spawner: stub child up */
+	WORKER_MSG_VCPU_RUN         = 14,	/* spawner to worker: drive vcpu trap */
+	WORKER_MSG_VCPU_DONE        = 15,	/* worker to spawner: stub trap done */
 };
 
 struct worker_msg_syscall {
@@ -95,12 +93,11 @@ struct worker_msg_migrate {
 /*
  * Snapshot of struct mm_id (arch/um/include/shared/skas/mm_id.h) sent
  * from spawner to worker so the worker can populate a local mm_id and
- * drive the seccomp futex round-trip itself. See memo 28 Part K.2
- * (option γ: pass via IPC, no struct refactor).
+ * drive the seccomp futex round-trip itself.
  */
 struct worker_msg_stub_alloc {
 	worker_u64 stack;		/* host VA of stub_data page */
-	worker_u32 pid;			/* echo-only in E.3b; worker overwrites post-spawn */
+	worker_u32 pid;			/* worker overwrites after spawning */
 	worker_u32 syscall_data_len;
 	worker_u32 sock;		/* parent-side sockpair fd */
 	worker_u32 syscall_fd_num;
@@ -109,11 +106,10 @@ struct worker_msg_stub_alloc {
 };
 
 /*
- * Compact regs frame for E.3b's round-trip. Not the full uml_pt_regs
- * (that's MAX_REG_NR * 8 bytes — too large for the 112-byte ceiling).
- * E.3c will define a richer encoding once handle_syscall integration
- * lands; for now WORKER_REGS_SLOTS holds the 9 slots set_stub_state
- * needs to drive a simulated stub child reply.
+ * Compact regs frame for the sentinel round-trip. This is not the
+ * full uml_pt_regs (MAX_REG_NR * 8 bytes is too large for the
+ * 112-byte payload ceiling). WORKER_REGS_SLOTS holds the slots that
+ * set_stub_state needs to drive a simulated stub child reply.
  */
 struct worker_msg_regs {
 	worker_u64 slot[9];		/* WORKER_REGS_SLOTS; slot[2] = rax/sentinel */
@@ -126,13 +122,12 @@ struct worker_msg_retval {
 };
 
 /*
- * VCPU_RUN payload (E.3d.2). The stub_data page lives in physmem
- * (MAP_SHARED file-backed) so set_stub_state / get_stub_state — both
- * run on the spawner side — operate on memory the worker also sees,
+ * VCPU_RUN payload. The stub_data page lives in physmem
+ * (MAP_SHARED file-backed) so set_stub_state / get_stub_state, both
+ * run on the spawner side, operate on memory the worker also sees,
  * and the futex word the worker_user.c trap-iter wakes/waits on hashes
  * to the same kernel object as the stub child's wait. No regs are
- * marshalled on the wire; the regs_va field is informational
- * (E.4 may use it to dispatch to a per-task pthread).
+ * marshalled on the wire; the regs_va field is informational.
  */
 struct worker_msg_vcpu_run {
 	worker_u64 regs_va;		/* spawner-side &uml_pt_regs (informational) */
@@ -154,7 +149,7 @@ struct worker_msg_vcpu_done {
 };
 
 /*
- * Reply payload for STUB_ALLOC_REP (E.3d.0). status == 0 means the
+ * Reply payload for STUB_ALLOC_REP. status == 0 means the
  * worker's start_userspace() succeeded and the remaining fields mirror
  * the worker's local mm_id; the sock fd rides on the cmsg channel via
  * SCM_RIGHTS (not in this struct). status < 0 means start_userspace

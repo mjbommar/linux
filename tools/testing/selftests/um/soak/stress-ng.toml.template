@@ -25,32 +25,32 @@ expect = ""
 timeout_secs = 0
 
 # stress-ng kitchen-sink, --verify catches data-corruption (mt-mini analog
-# at scale across ~30 stressors). MM + sched + signal + pipe — explicitly
+# at scale across ~30 stressors). MM + sched + signal + pipe; explicitly
 # skip filesystem/network/device/numa/hugetlb (UML-incompatible).
 #
-# Critical pre-step: `cd /tmp` — stress-ng requires a writable cwd for
+# Critical pre-step: `cd /tmp`; stress-ng requires a writable cwd for
 # its `temp-path .` sentinel files; UML's hostfs root is RO from the
 # guest, so without the cd stress-ng aborts immediately with
 # "temp-path '.' must be readable and writeable".
 #
-# Use `&& echo OK || (echo FAIL; exit 1)` — `;` lets the harness's
+# Use `&& echo OK || (echo FAIL; exit 1)`; `;` lets the harness's
 # `echo` mask stress-ng's non-zero exit (echo always rc=0), producing
 # false PASS verdicts for failed runs. Same pipefail-loss bug class
 # bit kbuild + cpython templates earlier.
 #
-# Tuned to fit ~30s wall-clock per iter: 15s --timeout × 2 stressor
+# Tuned to fit ~30s wall-clock per iter: 15s --timeout x 2 stressor
 # instances each in 4 classes (vm/fork/futex/signal), 32M vm working
 # set, --verify enabled.
-# IPC-only profile — picked because the stress-ng --vm stressor's
+# IPC-only profile: picked because the stress-ng --vm stressor's
 # verify path produced "not readable" errors on kvm-v2 in initial
 # pilot smoke (seccomp passed; v2 stressor exit=2). Could be a real
 # v2 MM-write-then-read coherence residual OR a stress-ng/hostfs
-# interaction. Tracked as a follow-up; pilot uses IPC stressors only
+# interaction. The pilot uses IPC stressors only
 # so flake-rate measurement isn't contaminated by that signal.
 #
 # Active stressors: futex (futex_wait/wake), pipe (pipe2/read/write),
 # switch (sched_yield bursts). All are syscall-heavy with minimal
-# RSS — exactly the path the kvm-v2 gadget + EINTR carve-out matter
+# RSS: the path the kvm-v2 gadget + EINTR carve-out matter
 # most for.
 [[init.phases]]
 name = "stress"
@@ -58,7 +58,7 @@ cmd = "cd /tmp && stress-ng --futex 2 --pipe 2 --switch 2 --oom-avoid --timeout 
 expect = ""
 timeout_secs = 60
 
-# Note: do not chain commands here — under stress-ng's heavy fork
+# Note: do not chain commands here; under stress-ng's heavy fork
 # load, pid=1 can take a few seconds to reap all zombies before
 # subsequent commands run. Keep report to a single echo.
 [[init.phases]]
@@ -68,9 +68,8 @@ expect = ""
 timeout_secs = 0
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt in; they require host-side reservation.
+# Cgroup limits opt in; they require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

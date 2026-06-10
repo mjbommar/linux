@@ -1,7 +1,7 @@
-# umlctl Umlfile — FastAPI server hosted inside a UML guest.
+# umlctl Umlfile - FastAPI server hosted inside a UML guest.
 #
 # Inspired by docker-compose.yml: one declarative file describes
-# everything a workload needs to come up — kernel, network, ports,
+# everything a workload needs to come up - kernel, network, ports,
 # volumes, env, init phases. `umlctl up -f fastapi.toml` does the
 # rest.
 #
@@ -12,7 +12,7 @@
 #   - tmpfs /etc + scripted /etc/resolv.conf so DNS works inside
 #     the guest without touching the host's symlinked resolv.conf.
 #   - Volume bind-mount of a pre-built venv (read-only by default).
-#   - Multi-phase init (echo a marker → start uvicorn).
+#   - Multi-phase init (echo a marker -> start uvicorn).
 #
 # Usage:
 #   1. Pre-build a venv with the Python deps you want available
@@ -87,7 +87,7 @@ mode = "ro"
 HOME = "${HOME}"
 PATH = "/opt/venv/bin:/usr/bin:/bin:/sbin:/usr/sbin"
 
-# Phases run sequentially after networking + volumes are up.
+# Init phases run sequentially after networking + volumes are up.
 # Each is a single shell command; failures abort.
 [[init.phases]]
 name = "ready"

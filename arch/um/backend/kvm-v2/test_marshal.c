@@ -1,28 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — marshal-shape KUnit suite (memo 26 D.2 +
- * task #74).
+ * UML backend v2 (KVM) marshal-shape KUnit suite.
  *
  * Tests the byte-shape mapping of:
- *   - kvm_v2_marshal_to_kvm_regs   (gp[HOST_*] → struct kvm_regs)
- *   - kvm_v2_marshal_from_kvm_regs (struct kvm_regs → gp[HOST_*])
+ *   - kvm_v2_marshal_to_kvm_regs   (gp[HOST_*] -> struct kvm_regs)
+ *   - kvm_v2_marshal_from_kvm_regs (struct kvm_regs -> gp[HOST_*])
  *
- * These are pure data-transform functions — no host syscalls, no
- * vCPU state, no FPU. The test exercises every GPR + RIP + RFLAGS
- * field with distinct sentinel values and asserts the right field
- * lands at the right slot. Catches:
- *
- *   - Off-by-one in HOST_* index → kvm_regs field mapping
- *   - Wrong field name in dst (rsi vs rdi swap, etc.)
- *   - Lost upper bits (e.g. accidentally using u32 instead of u64)
- *   - RFLAGS bit-1-must-be-1 invariant on marshal_to (per AMD64 SDM
- *     §3.1.4) and bit-1-pass-through on marshal_from
- *
- * The bugs at E.5 (IST frame off-by-8 with error code,
- * `arch/um/backend/kvm-v2/syscall_trap.c::kvm_v2_ist_frame_read`)
- * were the same SHAPE class as what these tests would catch had they
- * existed earlier. Marshal correctness is load-bearing for every
- * single KVM_RUN dispatch.
+ * These are pure data-transform functions: no host syscalls, vCPU state,
+ * or FPU state. The tests exercise every GPR, RIP, and RFLAGS field with
+ * distinct sentinel values so wrong-slot mappings and width truncation are
+ * visible in KUnit failures.
  */
 #include <kunit/test.h>
 #include <linux/kvm.h>
@@ -127,9 +114,8 @@ static void test_marshal_to_zero(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, (u64)dst.r15,    (u64)0);
 	KUNIT_EXPECT_EQ(test, (u64)dst.rip,    (u64)0);
 	/*
-	 * RFLAGS bit 1 is reserved-must-be-1 per AMD64 §3.1.4; the
-	 * marshal OR's it in defensively. With src bit 1 = 0 the dst
-	 * must still have it set.
+	 * RFLAGS bit 1 is reserved-must-be-1 per AMD64 section 3.1.4;
+	 * marshal_to sets it even when the source bit is clear.
 	 */
 	KUNIT_EXPECT_EQ(test, (u64)dst.rflags, (u64)(1UL << 1));
 }
@@ -252,7 +238,7 @@ static void test_marshal_from_full_pattern(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, (u64)dst.gp[HOST_R15],    (u64)sentinel(HOST_R15));
 	KUNIT_EXPECT_EQ(test, (u64)dst.gp[HOST_IP],     (u64)sentinel(HOST_IP));
 	/*
-	 * marshal_from passes RFLAGS through verbatim — no bit 1 OR (the
+	 * marshal_from passes RFLAGS through verbatim: no bit 1 OR (the
 	 * value already came from KVM, which tracks the architectural
 	 * invariant in VMCS).
 	 */
@@ -271,7 +257,7 @@ static void test_marshal_round_trip(struct kunit *test)
 
 	fill_uml_regs_pattern(&src);
 	/*
-	 * Set RFLAGS such that bit 1 is already set in src — then the
+	 * Set RFLAGS such that bit 1 is already set in src; then the
 	 * to/from cycle must be lossless. (Bit 1 OR'd in by marshal_to
 	 * is a no-op when src already has it.)
 	 */
@@ -287,7 +273,7 @@ static void test_marshal_round_trip(struct kunit *test)
 	 * All 18 marshal-owned slots should equal src exactly. Slots
 	 * outside the marshal's domain (HOST_ORIG_AX, HOST_FS_BASE,
 	 * HOST_GS_BASE, HOST_DS, HOST_ES, HOST_FS, HOST_GS) stay at
-	 * their pre-from poisoned 0xff bytes — caller's responsibility.
+	 * their pre-from poisoned 0xff bytes; caller's responsibility.
 	 */
 	for (i = 0; i < HOST_AX; i++)
 		;	/* AX is the lowest marshal-owned index; nothing below to skip */
@@ -315,9 +301,9 @@ static void test_marshal_round_trip(struct kunit *test)
 /*
  * Round-trip with src RFLAGS bit 1 = 0: the to/from cycle should
  * return src.rflags | bit1 (because marshal_to ORs it in, and
- * marshal_from passes through verbatim — so bit 1 ends up set in
- * `back` even though it was clear in `src`). This is the documented
- * behavior, not a bug — RFLAGS is special-cased.
+ * marshal_from passes through verbatim, so bit 1 ends up set in
+ * back even though it was clear in src). This documents the
+ * special handling for RFLAGS.
  */
 static void test_marshal_round_trip_rflags_bit1(struct kunit *test)
 {
@@ -358,5 +344,5 @@ static struct kunit_suite kvm_v2_marshal_test_suite = {
 
 kunit_test_suite(kvm_v2_marshal_test_suite);
 
-MODULE_DESCRIPTION("UML kvm-v2 marshal-shape KUnit tests (D.2 + #74)");
-MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("UML kvm-v2 marshal-shape KUnit tests");
+MODULE_LICENSE("GPL");

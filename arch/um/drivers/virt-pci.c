@@ -189,7 +189,7 @@ static void __iomem *um_pci_map_bus(struct pci_bus *bus, unsigned int devfn,
 	if (busn > 0)
 		return NULL;
 
-	/* not allowing functions for now ... */
+	/* UML PCI exposes one function per slot. */
 	if (devfn % 8)
 		return NULL;
 
@@ -323,7 +323,7 @@ static long um_pci_map_iomem(unsigned long offset, size_t size,
 			     void **priv)
 {
 	struct um_pci_map_iomem_data data = {
-		/* we want the full address here */
+		/* Use the full address here. */
 		.offset = offset + virt_iomem_resource.start,
 		.size = size,
 		.ops = ops,
@@ -342,13 +342,13 @@ static const struct logic_iomem_region_ops um_pci_iomem_ops = {
 static void um_pci_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 {
 	/*
-	 * This is a very low address and not actually valid 'physical' memory
-	 * in UML, so we can simply map MSI(-X) vectors to there, it cannot be
-	 * legitimately written to by the device in any other way.
-	 * We use the (virtual) IRQ number here as the message to simplify the
-	 * code that receives the message, where for now we simply trust the
-	 * device to send the correct message.
-	 */
+		 * This is a very low address and not actually valid 'physical'
+		 * memory in UML, so MSI(-X) vectors can be mapped there; the
+		 * device cannot legitimately write to it in any other way.
+		 * Use the virtual IRQ number as the message to simplify the
+		 * receive path, where the device is trusted to send the correct
+		 * message.
+		 */
 	msg->address_hi = 0;
 	msg->address_lo = 0xa0000;
 	msg->data = data->irq;
@@ -434,7 +434,7 @@ static int um_pci_map_irq(const struct pci_dev *pdev, u8 slot, u8 pin)
 	if (WARN_ON(!reg->dev))
 		return -EINVAL;
 
-	/* Yes, we map all pins to the same IRQ ... doesn't matter for now. */
+	/* UML PCI maps all pins for a device to its single host IRQ. */
 	return reg->dev->irq;
 }
 

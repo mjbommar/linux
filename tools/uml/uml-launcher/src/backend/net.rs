@@ -8,7 +8,7 @@
 // rather than a codebase-wide clippy config change.
 #![allow(clippy::disallowed_methods)]
 
-// virtio-net vhost-user backend (workstream C-10 v2).
+// virtio-net vhost-user backend.
 //
 // Data path: open /dev/net/tun at startup, attach via
 // TUNSETIFF to the --tap interface name, and shuttle Ethernet
@@ -22,22 +22,20 @@
 //     wake, read frames from TAP into the guest's posted
 //     buffers.
 //
-// Scope of this commit:
+// Implemented setup:
 //   * Open /dev/net/tun with O_RDWR | O_CLOEXEC | O_NONBLOCK.
 //   * TUNSETIFF with IFF_TAP | IFF_NO_PI so the TAP fd
 //     carries raw Ethernet frames with no prepended tag. No
-//     IFF_VNET_HDR — that requires VIRTIO_NET_F_MRG_RXBUF +
-//     all the TSO/CSUM negotiation, which belongs with a
-//     follow-on.
+//     IFF_VNET_HDR. That requires VIRTIO_NET_F_MRG_RXBUF and
+//     the matching TSO/CSUM negotiation.
 //   * Feature bits advertised: VIRTIO_F_VERSION_1 + protocol
 //     features. No MAC, CSUM, GSO, MRG_RXBUF, STATUS, MQ.
 //     Frontend sees a "dumb" Ethernet NIC at 1500 MTU; guest
 //     drivers configure a random locally-administered MAC
 //     and don't expect any offloads.
 //   * Class-specific seccomp additions: SYS_ioctl is in the
-//     baseline already, but we add SYS_recvfrom / SYS_sendto
-//     + socket + connect in case a future TAP setup path
-//     needs them. SYS_openat for /dev/net/tun is NOT added;
+//     baseline already. SYS_recvfrom / SYS_sendto + socket +
+//     connect cover TAP setup paths. SYS_openat for /dev/net/tun is NOT added;
 //     the fd is opened BEFORE seccomp applies.
 //
 // Deliberately out of scope:
@@ -46,7 +44,7 @@
 //   * VIRTIO_NET_F_MRG_RXBUF / large-receive offload.
 //   * VIRTIO_NET_F_MAC / MTU / STATUS config.
 //   * Multi-queue (VIRTIO_NET_F_MQ).
-//   * TAP creation or persistence — the operator sets up
+//   * TAP creation or persistence — the user sets up
 //     `ip tuntap add tap0 mode tap ...` before launch.
 //
 // Reference: cloud-hypervisor/vhost_user_net (older

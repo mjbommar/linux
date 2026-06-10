@@ -7,7 +7,7 @@
 struct um_pci_device {
 	const struct um_pci_ops *ops;
 
-	/* for now just standard BARs */
+	/* Standard PCI BARs. */
 	u8 resptr[PCI_STD_NUM_BARS];
 
 	int irq;

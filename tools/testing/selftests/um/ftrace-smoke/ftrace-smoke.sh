@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/ftrace-smoke/ftrace-smoke.sh — workstream C-05 smoke test.
+# um/ftrace-smoke/ftrace-smoke.sh - ftrace smoke test.
 #
 # Runs inside a UML guest via init=. Verifies the UML function
 # tracer port is live:
@@ -12,14 +12,11 @@
 #   4. writing `nop` to current_tracer succeeds
 #   5. if CONFIG_FUNCTION_GRAPH_TRACER=y, `function_graph` tracer
 #      accepts writes, produces trace output, and disables cleanly
-#      (C-04 commit 3b, landed 2026-04-22; see D34 addendum-4)
 #   6. emits a single FTRACE_SMOKE: PASS|FAIL line and halts
 #
-# Requires CONFIG_FUNCTION_TRACER=y + CONFIG_DYNAMIC_FTRACE=y (the
-# `research` profile enables both; see
-# Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/
-# 05-port-ftrace.md). CONFIG_FUNCTION_GRAPH_TRACER=y (also on in
-# the `research` profile) exercises the step-5 sub-check.
+# Requires CONFIG_FUNCTION_TRACER=y + CONFIG_DYNAMIC_FTRACE=y.  If
+# CONFIG_FUNCTION_GRAPH_TRACER=y is available, the script also
+# exercises the function-graph tracer.
 
 echo "FTRACE_SMOKE: init running"
 
@@ -64,9 +61,8 @@ if [ "$lines" -lt 100 ]; then
 fi
 
 # function_graph sub-check. Only runs if the kernel advertises the
-# tracer via available_tracers — CONFIG_FUNCTION_GRAPH_TRACER=y in
-# the research profile as of C-04 commit 3b. Older builds or
-# profiles without graph support skip silently.
+# tracer via available_tracers.  Builds or profiles without graph
+# support skip this sub-check silently.
 if grep -qw function_graph "$T/available_tracers" 2>/dev/null; then
 	echo "FTRACE_SMOKE: function_graph tracer available"
 
@@ -84,7 +80,7 @@ if grep -qw function_graph "$T/available_tracers" 2>/dev/null; then
 	echo "nop" > "$T/current_tracer"
 	echo "FTRACE_SMOKE: function_graph trace has $glines lines"
 
-	# The preempt_count guard (D34 addendum-4) drops events for
+	# The preempt_count guard drops events for
 	# the atomic-context window, but a non-atomic `ls /` workload
 	# should still produce plenty of output. Use a lower
 	# threshold than the function-tracer check (the per-event

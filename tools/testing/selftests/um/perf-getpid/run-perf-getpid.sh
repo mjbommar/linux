@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# D-06 getpid() round-trip bookend (memo 08 sub-commit #6).
+# getpid() round-trip bookend.
 #
 # Boots UML with the freestanding getpid-loop binary as init=
 # under each backend available in the kernel, captures the
 # PERF_GETPID: line from stdout, and prints a three-row
 # comparison. A regression gate runs at the end: the KVM
-# backend must land within MAX_KVM_RATIO × seccomp's
+# backend must land within MAX_KVM_RATIO times seccomp's
 # cyc_per_call (default 2.0). Set MAX_KVM_RATIO=0 to skip the
 # gate and just report numbers.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
 #
 # Environment:
 #   UML_BINARY   UML kernel with CONFIG_UM_BACKEND_KVM_
@@ -24,19 +24,18 @@
 #                CONFIG_UM_BACKEND_KVM_GADGET=y. If set and
 #                readable, the runner adds a fourth measurement
 #                row (backend=kvm-gadget) and computes the
-#                gadget:fallback ratio as a second-class gate
-#                (memo 11 G7). Default unset.
+#                gadget:fallback ratio as a secondary gate.
+#                Default unset.
 #   UML_MEM      mem= argument. Default 256M.
 #   BACKENDS     space-separated backend list to measure.
-#                Default "seccomp kvm" (ptrace was removed in
-#                memo 25 refactor 11). The runner skips any
+#                Default "seccomp kvm". The runner skips any
 #                backend the host can't support (e.g. kvm if
 #                /dev/kvm isn't readable).
 #   MAX_KVM_RATIO  KVM:seccomp cyc_per_call ratio ceiling for
 #                  the PASS gate. Default 2.5.
 #   MAX_GADGET_RATIO  gadget:fallback cyc_per_call ratio
 #                     ceiling for the G7 PASS gate. Default
-#                     0.20 — the gadget must be at least 5×
+#                     0.20; the gadget must be at least 5x
 #                     faster than the fallback or it's not
 #                     earning its complexity. Set 0 to skip.
 #
@@ -69,13 +68,12 @@ if [ ! -x "$LOOP" ]; then
 fi
 
 ensure_kvm_readable() {
-	# Self-heal /dev/kvm ACL — udev / elogind sometimes drops
+	# Self-heal /dev/kvm ACL: udev / elogind sometimes drops
 	# the user ACL between successive UML invocations. Retry
 	# up to 3 times with a brief settle delay before giving
 	# up. Used both at runner entry and before every kvm-side
 	# spawn so an in-loop ACL drop doesn't surface as a
-	# spurious SKIP / FAIL (the prior pattern, fixed in task
-	# #267).
+	# spurious SKIP / FAIL.
 	local i
 	for i in 1 2 3; do
 		if [ -r /dev/kvm ]; then
@@ -103,11 +101,11 @@ measure_one() {
 	# `force=<kind>`. An earlier version of this runner used
 	# `force=<kind>` which silently parses as an unknown
 	# kernel cmdline arg and falls back to the default
-	# backend — producing a seccomp-vs-seccomp-vs-seccomp
-	# table mislabelled as ptrace/seccomp/kvm. Decisions-log
-	# D70 retracts that result. The backend-selection line
-	# `um: backend = <kind>` is extracted + asserted below
-	# so this class of silent fallback can't recur.
+	# backend, producing a seccomp-vs-seccomp-vs-seccomp
+	# table mislabelled as ptrace/seccomp/kvm.  The
+	# backend-selection line `um: backend = <kind>` is extracted
+	# and asserted below so this class of silent fallback cannot
+	# recur.
 	log=$(timeout --kill-after=5 30 "$binary" \
 		backend="force=$backend" \
 		init="$LOOP" mem="$MEM" \
@@ -170,13 +168,12 @@ for B in $BACKENDS; do
 	CYC_PER_CALL[$storage_label]=${CYC:-0}
 done
 
-# Memo 11 G7: optional gadget measurement. When the caller
-# supplies UML_GADGET_BINARY alongside UML_BINARY (which is
-# then the fallback reference), run one extra invocation with
-# backend=kvm against the gadget kernel and record it as
-# backend=kvm. The primary ratio gate then evaluates the
-# gadget (not the fallback) against seccomp, and a secondary
-# gate checks that the gadget actually beat the fallback.
+# Optional gadget measurement. When the caller supplies
+# UML_GADGET_BINARY alongside UML_BINARY (which is then the fallback
+# reference), run one extra invocation with backend=kvm against the
+# gadget kernel and record it as backend=kvm. The primary ratio gate
+# then evaluates the gadget against seccomp, and a secondary gate
+# checks that the gadget actually beat the fallback.
 # measure_one calls ensure_kvm_readable for kvm-side spawns,
 # so the gadget pass below doesn't need its own self-heal.
 if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -e /dev/kvm ]; then
@@ -204,9 +201,9 @@ echo "PERF_GETPID: SUMMARY backends=[${!CYC_PER_CALL[@]}]" \
 	"kvm_cyc=$KVM_CYC seccomp_cyc=$SECCOMP_CYC" \
 	"ratio_kvm_over_seccomp=$RATIO max_allowed=$MAX_KVM_RATIO"
 
-# Memo 11 G7: gadget:fallback summary + gate. When a second
-# kernel was supplied the primary kvm row IS the gadget; the
-# fallback measurement sits under kvm-fallback.
+# Gadget:fallback summary + gate. When a second kernel was supplied
+# the primary kvm row is the gadget; the fallback measurement sits
+# under kvm-fallback.
 FALLBACK_CYC=${CYC_PER_CALL[kvm-fallback]:-0}
 GADGET_RATIO="n/a"
 if [ "$KVM_CYC" != "0" ] && [ "$FALLBACK_CYC" != "0" ]; then
@@ -225,7 +222,7 @@ if [ "$MAX_KVM_RATIO" = "0" ]; then
 fi
 if [ "$SECCOMP_CYC" = "0" ] || [ "$KVM_CYC" = "0" ]; then
 	# One of the two we need for the ratio was missing; can't
-	# evaluate the gate. SKIP rather than fail — the raw
+	# evaluate the gate. SKIP rather than fail - the raw
 	# measurements are still useful.
 	echo "PERF_GETPID: SKIP (missing seccomp or kvm measurement; gate not evaluable)"
 	exit 4

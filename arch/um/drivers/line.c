@@ -68,7 +68,7 @@ unsigned int line_chars_in_buffer(struct tty_struct *tty)
 	unsigned int ret;
 
 	spin_lock_irqsave(&line->lock, flags);
-	/* write_room subtracts 1 for the needed NULL, so we readd it.*/
+	/* write_room subtracts 1 for the needed NULL, so add it back. */
 	ret = LINE_BUFSIZE - (write_room(line) + 1);
 	spin_unlock_irqrestore(&line->lock, flags);
 
@@ -107,8 +107,7 @@ static int buffer_data(struct line *line, const u8 *buf, size_t len)
 	if (len < end) {
 		memcpy(line->tail, buf, len);
 		line->tail += len;
-	}
-	else {
+	} else {
 		/* The circular buffer is wrapping */
 		memcpy(line->tail, buf, end);
 		buf += end;
@@ -127,7 +126,8 @@ static int buffer_data(struct line *line, const u8 *buf, size_t len)
  * 0 when the buffer is not empty on exit,
  * and -errno when an error occurred.
  *
- * Must be called while holding line->lock!*/
+ * Must be called while holding line->lock!
+ */
 static int flush_buffer(struct line *line)
 {
 	int n, count;
@@ -137,11 +137,11 @@ static int flush_buffer(struct line *line)
 
 	if (line->tail < line->head) {
 		/*
-		 * Ring-wrap case: data spans `line->head .. buffer_end`
-		 * and `buffer_start .. line->tail`.  Memo #7 Phase 1:
-		 * coalesce the two writes into one writev(2) when the
-		 * channel is an fd-shaped sink (the common case —
-		 * pty/pts/port/fd all are).  This saves one host
+		 * Ring-wrap case: data spans line->head .. buffer_end
+		 * and buffer_start .. line->tail. Coalesce the two
+		 * writes into one writev(2) when the channel is an
+		 * fd-shaped sink (the common case: pty/pts/port/fd all
+		 * are).  This saves one host
 		 * syscall per ring-wrap on heavy console traffic
 		 * (dmesg | head -N, boot log replay).  Falls back to
 		 * the two-call shape when the channel doesn't carry an
@@ -174,8 +174,9 @@ static int flush_buffer(struct line *line)
 			}
 			if (wv == 0)
 				return 0;
-			/* wv < 0 — fall through to legacy write_chan path
-			 * so error handling stays on one code path.
+			/*
+			 * wv < 0. Continue with write_chan() so error
+			 * handling stays on one path.
 			 */
 		}
 
@@ -187,8 +188,8 @@ static int flush_buffer(struct line *line)
 			return n;
 		if (n == count) {
 			/*
-			 * We have flushed from ->head to buffer end, now we
-			 * must flush only from the beginning to ->tail.
+			 * The range from ->head to buffer end has been flushed;
+			 * only the range from the beginning to ->tail remains.
 			 */
 			line->head = line->buffer;
 		} else {
@@ -384,7 +385,7 @@ int line_install(struct tty_driver *driver, struct tty_struct *tty,
 	return 0;
 }
 
-void line_close(struct tty_struct *tty, struct file * filp)
+void line_close(struct tty_struct *tty, struct file *filp)
 {
 	struct line *line = tty->driver_data;
 
@@ -402,7 +403,7 @@ void close_lines(struct line *lines, int nlines)
 {
 	int i;
 
-	for(i = 0; i < nlines; i++)
+	for (i = 0; i < nlines; i++)
 		close_chan(&lines[i]);
 }
 
@@ -474,8 +475,7 @@ int line_setup(char **conf, unsigned int num, char **def,
 
 	if (*init == '=') {
 		/*
-		 * We said con=/ssl= instead of con#=, so we are configuring all
-		 * consoles at once.
+		 * con=/ssl= instead of con#= configures all consoles at once.
 		 */
 		*def = init + 1;
 	} else {

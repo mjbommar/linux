@@ -2,11 +2,8 @@
 //
 // `umlctl gate loop` — parallel up/wait/classify/stop/rm test loop.
 //
-// Replaces the canonical 20-boot bash loop pattern from toolkit memo
-// §8c (Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-// state-audit/05-toolkit.md). That pattern was hand-rolled in shell
-// for every flake-characterization session; this implementation
-// builds it in so:
+// Replaces hand-rolled repeated-boot shell loops with a built-in
+// flake-characterization harness:
 //
 //   1. Parallelism is one flag (`-W`) instead of `for w in ... &; wait`.
 //   2. Per-iteration init.log capture happens BEFORE `umlctl rm` so
@@ -16,8 +13,7 @@
 //   4. Wilson 95% CI is computed in-binary so you don't have to
 //      eyeball "is 195/200 statistically the same as 957/1000?".
 //   5. Sweeps (`--sweep KEY=v1,v2,...`) take the cartesian product
-//      and run the loop per point — replaces the bash for-loop that
-//      generated per-jitter-value TOMLs in the SMP-T35 jitter sweep.
+//      and run the loop per point.
 //
 // Per-worker isolation is by instance-name suffix: a Umlfile with
 // `instance.name = "mt-mini"` and `--workers 4` becomes 4 instances
@@ -834,8 +830,8 @@ mod tests {
 
     #[test]
     fn wilson_ci_95_known_values() {
-        // PASS=957 FAIL=43, n=1000: from the SMP-T33 N=1000 run,
-        // rate=95.7%, Wilson CI roughly 94.2%..96.9%.
+        // PASS=957 FAIL=43, n=1000: rate=95.7%, Wilson CI roughly
+        // 94.2%..96.9%.
         let r = PointResult {
             label: "x".into(),
             pass: 957,

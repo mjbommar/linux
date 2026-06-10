@@ -15,9 +15,8 @@
 static struct mconsole_command commands[] = {
 	/*
 	 * With uts namespaces, uts information becomes process-specific, so
-	 * we need a process context.  If we try handling this in interrupt
-	 * context, we may hit an exiting process without a valid uts
-	 * namespace.
+	 * this needs process context.  Handling this in interrupt context
+	 * may hit an exiting process without a valid uts namespace.
 	 */
 	{ "version", mconsole_version, MCONSOLE_PROC },
 	{ "halt", mconsole_halt, MCONSOLE_PROC },
@@ -72,7 +71,7 @@ static struct mconsole_command *mconsole_parse(struct mc_request *req)
 }
 
 #ifndef MIN
-#define MIN(a,b) ((a)<(b) ? (a):(b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
 #define STRINGX(x) #x
@@ -128,11 +127,6 @@ int mconsole_get_request(int fd, struct mc_request *req)
 int mconsole_reply_len(struct mc_request *req, const char *str, int total,
 		       int err, int more)
 {
-	/*
-	 * XXX This is a stack consumption problem.  It'd be nice to
-	 * make it global and serialize access to it, but there are a
-	 * ton of callers to this function.
-	 */
 	struct mconsole_reply reply;
 	int len, n;
 
@@ -144,8 +138,10 @@ int mconsole_reply_len(struct mc_request *req, const char *str, int total,
 
 		len = MIN(total, MCONSOLE_MAX_DATA - 1);
 
-		if (len == total) reply.more = more;
-		else reply.more = 1;
+		if (len == total)
+			reply.more = more;
+		else
+			reply.more = 1;
 
 		memcpy(reply.data, str, len);
 		reply.data[len] = '\0';

@@ -78,9 +78,9 @@ pid_t os_reap_child(void)
 }
 
 /*
- * Snapshot / forkserver primitives (workstream C-09).
+ * Snapshot / forkserver primitives.
  *
- * These live here rather than in a separate TU because they are thin
+ * These live here rather than in a separate file because they are thin
  * wrappers around host libc calls that the in-kernel snapshot.c needs
  * to reach through the os-Linux boundary. Semantics:
  *
@@ -90,25 +90,25 @@ pid_t os_reap_child(void)
  *	opened fds 198/199 before UML's main() ran.
  *
  *   os_snapshot_fork_worker(void):
- *	Raw ``fork()`` via syscall(__NR_fork). Unlike ``helper.c``'s
- *	``clone(CLONE_VM)``, this gives the child its own copy-on-
+ *	Raw fork() via syscall(__NR_fork). Unlike helper.c's
+ *	clone(CLONE_VM), this gives the child its own copy-on-
  *	write address space, which is what the fuzz forkserver wants
  *	(child mutates RAM, parent stays pristine). Returns the host
  *	pid of the child in the parent and 0 in the child, as fork()
- *	does. A negative return carries ``-errno``.
+ *	does. A negative return carries -errno.
  *
  *   os_snapshot_{read,write}_all(fd, buf, len):
- *	Loop until ``len`` bytes have been read/written or an error
+ *	Loop until len bytes have been read/written or an error
  *	occurs. Partial reads/writes are handled internally. These
  *	are the 4-byte AFL wire-protocol moves; wrappers keep the
  *	in-kernel caller free of EINTR handling.
  *
  *   os_snapshot_waitpid_status(pid):
  *	Block-reap the given pid. Returns the encoded wait status, or
- *	``-errno`` on failure.
+ *	-errno on failure.
  *
- * All five are USER_OBJS-scope helpers; they must not call into
- * kernel code. The in-kernel driver lives in arch/um/kernel/snapshot.c.
+ * All five are host-side helpers; they must not call into kernel code.
+ * The in-kernel driver lives in arch/um/kernel/snapshot.c.
  */
 int os_snapshot_fd_is_open(int fd)
 {
@@ -171,25 +171,12 @@ int os_snapshot_waitpid_status(int pid)
 	int status;
 	long ret;
 
-	/*
-	 * Use raw syscall(__NR_wait4, ...) rather than glibc's
-	 * waitpid() wrapper. In commit 3d-a v1 the glibc wrapper
-	 * crashed the parent with a null-jump even under UML-level
-	 * signal gating; one plausible cause is glibc's cancellation-
-	 * point machinery (__syscall_cancel in modern glibc) doing an
-	 * indirect call through a pthread-specific pointer that is
-	 * inconsistent when we call it from UML kernel context. The
-	 * raw syscall bypasses all that and just returns the kernel's
-	 * answer. wait4() is the canonical kernel entry (waitpid() is
-	 * historically a libc wrapper over wait4 with rusage=NULL).
-	 *
-	 * This blocking variant is currently unsafe to call from the
-	 * forkserver loop: even with UML signal gating + raw syscall,
-	 * the parent crashes during the wait (the 3d-a root cause
-	 * remains unresolved — see snapshot.c's historical-note
-	 * comment). The non-blocking drain below
-	 * (os_snapshot_reap_zombies) is what the loop currently uses.
-	 */
+		/*
+		 * Use raw wait4 so this path does not enter libc cancellation or
+		 * pthread state while UML is running kernel code.  This helper is
+		 * for callers that explicitly want to wait for @pid; forkserver
+		 * iteration uses the non-blocking drain below.
+		 */
 	for (;;) {
 		ret = syscall(__NR_wait4, pid, &status, 0, NULL);
 		if (ret == pid)
@@ -199,23 +186,20 @@ int os_snapshot_waitpid_status(int pid)
 				continue;
 			return -errno;
 		}
-		/* Shouldn't happen for a specific pid, but be defensive. */
+		/* wait4() returned a different child despite a specific pid. */
 		return -EINVAL;
 	}
 }
 
 /*
- * Non-blocking zombie drain. Walks any exited children that have
- * not yet been reaped and reaps them, returning the count. Used
- * between forkserver iterations to keep the host zombie table
- * empty without the blocking-wait crash mode 3d-a hit.
+ * Non-blocking zombie drain. Walks and reaps any exited children,
+ * returning the count. Used between forkserver iterations to keep the
+ * host zombie table empty without blocking in wait4.
  *
  * Same raw-wait4 rationale as os_snapshot_waitpid_status above;
- * the WNOHANG flag makes this safe to call from the forkserver
- * loop because it never blocks and therefore never invokes the
- * scheduler-reentry path that crashed the blocking variant.
+ * the WNOHANG flag makes this safe to call from the forkserver loop.
  *
- * A -ECHILD return from wait4 just means "no children left" —
+ * A -ECHILD return from wait4 just means "no children left",
  * not an error for our purposes; return zero for clean-drain
  * completion.
  */
@@ -241,18 +225,17 @@ int os_snapshot_reap_zombies(void)
 	}
 }
 
-
 /*
  * Gate UML's in-kernel signal dispatch for the duration of the
- * forkserver loop body. Not the host sigprocmask — that only stops
+ * forkserver loop body. Not the host sigprocmask; that only stops
  * host delivery, and when unblocked UML's sig_handler runs queued
  * signals back-to-back from whatever context we happen to be in,
- * which is exactly the crash mode commit 3d-a v1 hit. UML provides
- * its own TLS flag (`signals_enabled` in arch/um/os-Linux/signal.c)
+ * which is exactly the crash mode this path avoids. UML provides
+ * its own TLS flag (signals_enabled in arch/um/os-Linux/signal.c)
  * that sig_handler checks on every delivery; when it's 0, the
- * handler stores the signal in `signals_pending` and returns
+ * handler stores the signal in signals_pending and returns
  * without running any UML kernel code. When we flip it back to 1,
- * `unblock_signals()` drains `signals_pending` synchronously and
+ * unblock_signals() drains signals_pending synchronously and
  * in a deterministic order that UML expects.
  *
  * Using um_set_signals(0)/um_set_signals(saved) gives us that
@@ -286,7 +269,8 @@ void os_snapshot_unblock_iter_signals(void)
 void os_snapshot_worker_exit(int status)
 {
 	syscall(__NR_exit_group, status);
-	/* unreachable; if the syscall somehow returns, panic the host
+	/*
+	 * Unreachable; if the syscall somehow returns, panic the host
 	 * process via a raw abort so the parent sees a clean SIGABRT
 	 * rather than the child hanging in a half-alive state.
 	 */
@@ -314,22 +298,19 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 		(x ? PROT_EXEC : 0);
 
 	/*
-	 * SMP-T71 experiment (2026-05-18, Round 13): add MAP_POPULATE so
-	 * the host PTEs are installed at mmap time rather than on first
-	 * touch. The kvm-v2 Django cache-flake hypothesis is that KVM's
-	 * fast-page-fault path races with UML's mmap/munmap pattern from
-	 * um_tlb_sync; pre-populating may eliminate the refault window.
+	 * Use MAP_POPULATE so the host PTEs are installed at mmap time
+	 * rather than on first touch.
 	 *
-	 * MAP_LOCKED would additionally tell the host kernel to lock the
-	 * resulting pages in RAM, blocking migration/reclaim. Gate on
-	 * `um_kvm_v2_pin_physmem` so we can A/B test without rebuilds.
+	 * MAP_LOCKED additionally tells the host kernel to keep the resulting
+	 * pages resident. Gate it on UM_KVM_V2_PIN_PHYSMEM so launchers can
+	 * choose the residency policy at runtime.
 	 *
-	 * SMP-T81 (memo 52 §2.1): if UM_HUGEPAGES=2M or =1G, request
-	 * explicit hugepage backing via MAP_HUGETLB. Massive TLB pressure
+	 * If UM_HUGEPAGES=2M or =1G, request explicit hugepage backing
+	 * via MAP_HUGETLB. Massive TLB pressure
 	 * reduction (1 GiB physmem at 4K = 262144 PTEs vs 512 at 2M vs
 	 * 1 at 1G). Falls back to 4K (with a perror) if the hugepage pool
-	 * is empty — operator should pre-reserve via
-	 * /proc/sys/vm/nr_hugepages.
+	 * is empty; reserve /proc/sys/vm/nr_hugepages before launch when
+	 * hugepage backing is required.
 	 */
 	flags = MAP_SHARED | MAP_FIXED | MAP_POPULATE;
 	if (getenv("UM_KVM_V2_PIN_PHYSMEM"))
@@ -355,10 +336,10 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 	loc = mmap64((void *)virt, len, prot, flags, fd, off);
 	if (loc == MAP_FAILED && (flags & MAP_HUGETLB)) {
 		/*
-		 * SMP-T81 fallback: hugepage pool exhausted (typical:
-		 * /proc/sys/vm/nr_hugepages unreserved). Retry with 4K so
-		 * the run proceeds; operator sees the warning + can reserve
-		 * the pool for the next launch.
+		 * Hugepage pool exhausted, typically because
+		 * /proc/sys/vm/nr_hugepages was not reserved. Retry with 4K so
+		 * the run proceeds and the warning identifies the missing host
+		 * reservation.
 		 */
 		perror("um: UM_HUGEPAGES requested but mmap returned ENOMEM; falling back to 4K");
 		flags &= ~(MAP_HUGETLB | (0x3fU << MAP_HUGE_SHIFT));
@@ -368,25 +349,24 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 		return -errno;
 
 	/*
-	 * SMP-T78 (memo 52 §1.1): tell host KSM to skip this range.
+	 * Tell host KSM to skip this range.
 	 * KSM (Kernel Same-page Merging) is a host-side feature that
 	 * scans VM memory looking for identical pages and merges them
 	 * via COW. Removes a known noise source for hypervisor
 	 * workloads (latency spikes when the guest writes to a merged
-	 * page and the host has to un-share). Apply unconditionally —
+	 * page and the host has to un-share). Apply unconditionally;
 	 * EINVAL on a host without KSM configured is fine.
 	 */
 	if (madvise(loc, len, MADV_UNMERGEABLE) < 0 && errno != EINVAL)
-		perror("um: SMP-T78 madvise(MADV_UNMERGEABLE)");
+		perror("um: madvise(MADV_UNMERGEABLE)");
 
 	/*
-	 * SMP-T79 (memo 52 §1.2): apply Transparent Huge Pages policy
-	 * for predictability. UM_THP=off → NOHUGEPAGE (predictable,
-	 * no khugepaged scan latency spikes); =on → HUGEPAGE
-	 * (throughput-oriented, eager defrag); =auto/unset → inherit
-	 * system default (today's behaviour).
+	 * Apply Transparent Huge Pages policy for predictability.
+	 * UM_THP=off -> NOHUGEPAGE (predictable, no khugepaged scan
+	 * latency spikes); =on -> HUGEPAGE (throughput-oriented,
+	 * eager defrag); =auto/unset -> inherit the system default.
 	 *
-	 * Distinct from MAP_HUGETLB (SMP-T81 above): MAP_HUGETLB
+	 * Distinct from MAP_HUGETLB: MAP_HUGETLB
 	 * guarantees specific page sizes from the pre-reserved
 	 * hugetlbfs pool; MADV_HUGEPAGE is opportunistic via
 	 * khugepaged on regular 4K-backed memory.
@@ -395,10 +375,10 @@ int os_map_memory(void *virt, int fd, unsigned long long off, unsigned long len,
 	if (thp_knob) {
 		if (!strcmp(thp_knob, "off")) {
 			if (madvise(loc, len, MADV_NOHUGEPAGE) < 0)
-				perror("um: SMP-T79 madvise(MADV_NOHUGEPAGE)");
+				perror("um: madvise(MADV_NOHUGEPAGE)");
 		} else if (!strcmp(thp_knob, "on")) {
 			if (madvise(loc, len, MADV_HUGEPAGE) < 0)
-				perror("um: SMP-T79 madvise(MADV_HUGEPAGE)");
+				perror("um: madvise(MADV_HUGEPAGE)");
 		}
 		/* "auto"/anything else: no madvise, inherit default. */
 	}
@@ -418,12 +398,12 @@ int os_protect_memory(void *addr, unsigned long len, int r, int w, int x)
 }
 
 /*
- * os_remap_region_shared() — atomically swap the backing fd for a
+ * os_remap_region_shared() - atomically swap the backing fd for a
  * MAP_SHARED region.  Used by pool-member fork-child entry to
  * isolate physmem: replicate master's physmem content into a fresh
  * memfd, then point the kernel's MAP_SHARED mapping at the new fd.
  *
- * MAP_SHARED is preserved across the swap (kernel↔stub coherence
+ * MAP_SHARED is preserved across the swap (kernel/stub coherence
  * within a member relies on both ends mapping the same fd
  * MAP_SHARED; see arch/um/kernel/skas/stub.c which always uses
  * MAP_SHARED | MAP_FIXED for STUB_SYSCALL_MMAP).
@@ -463,13 +443,11 @@ int os_remap_region_shared(void *addr, int fd, unsigned long long off,
  *      from new_fd's MAP_SHARED scratch
  *   5. mmap-FIXED swap to new fd
  *
- * Theory: the intermediate anonymous mapping resets whatever host-
- * kernel state was tied to the original inode, breaking the
- * SIGALRM-after-different-inode-mmap regression.  Verified
- * by following bisect after running smoke.
+ * The intermediate anonymous mapping resets host-kernel state tied to
+ * the original inode before the destination fd is installed.
  *
  * Returns 0 on success, -errno on failure (original mapping may be
- * left in an intermediate state on partial failure — caller must
+ * left in an intermediate state on partial failure; caller must
  * treat any failure as fatal).
  */
 int os_remap_region_via_anon(void *addr, int new_fd, unsigned long long off,
@@ -524,7 +502,7 @@ int os_remap_region_via_anon(void *addr, int new_fd, unsigned long long off,
 }
 
 /*
- * os_create_memfd() — create a fresh, anonymous memfd sized to
+ * os_create_memfd() - create a fresh, anonymous memfd sized to
  * @size bytes.  Returns the new fd on success, -errno on failure.
  * Caller owns the fd.
  *
@@ -538,7 +516,7 @@ int os_remap_region_via_anon(void *addr, int new_fd, unsigned long long off,
  * (b) cannot be backdoored via path interception.
  */
 /*
- * os_mmap_rw_scratch() — mmap @fd at @off for @len bytes as a
+ * os_mmap_rw_scratch() - mmap @fd at @off for @len bytes as a
  * scratch VA (host-chosen address, MAP_SHARED, RW).  Stores the
  * resulting VA in *@out_addr.  Returns 0 on success or -errno on
  * failure (*@out_addr untouched).
@@ -562,11 +540,9 @@ int os_mmap_rw_scratch(int fd, unsigned long long off, unsigned long len,
 
 /*
  * Drain any pending signals via sigtimedwait with a zero timeout.
- * Per the research subagent's recommendation, this forces a
- * get_signal()-equivalent pass that may clear stuck signal-
- * delivery state (e.g., TIF_NOTIFY_SIGNAL from inherited io_uring
- * task_work, or other accumulated pending state).  Returns the
- * count of signals drained.
+ * This forces a get_signal()-equivalent pass that may clear stuck
+ * signal-delivery state, such as TIF_NOTIFY_SIGNAL from inherited
+ * io_uring task_work. Returns the count of signals drained.
  */
 int os_drain_pending_signals(void)
 {
@@ -603,12 +579,10 @@ int os_create_memfd(const char *name, unsigned long long size)
 }
 
 /*
- * os_create_tmpfile() — create an unnamed tmpfs file via
+ * os_create_tmpfile() - create an unnamed tmpfs file via
  * open(O_TMPFILE) on @dir, sized to @size bytes.  Parallel to
- * os_create_memfd() but using a "real" tmpfs file (the same
- * mechanism setup_physmem uses for the boot-time physmem_fd).
- * Useful to bisect whether the new-fd timer regression is
- * memfd-vs-tmpfs sensitive.
+ * os_create_memfd() but using a tmpfs file, the same mechanism
+ * setup_physmem uses for the boot-time physmem_fd.
  */
 int os_create_tmpfile(const char *dir, unsigned long long size)
 {
@@ -652,15 +626,15 @@ int os_drop_memory(void *addr, int length)
 }
 
 /*
- * SMP-T26 experiment (2026-05-02): madvise(MADV_DONTNEED) drops host
- * kernel PT entries for the range without disturbing file content
+ * madvise(MADV_DONTNEED) drops host kernel PT entries for the range
+ * without disturbing file content
  * (safe on MAP_SHARED tmpfs/physmem). Crucially, this fires
  * mmu_notifier in the host kernel, which causes KVM to invalidate
  * any cached EPT/TDP entries pointing to the dropped HPAs.
  *
  * Used by kvm-v2's handle_io_pf to force TDP invalidation after a
  * fresh anon page is allocated for a faulting GVA, preventing the
- * "fd/bk writes go to stale TDP" bug captured in T26.
+ * stale TDP writes.
  */
 int os_drop_caching(void *addr, int length)
 {
@@ -720,11 +694,9 @@ void init_new_thread_signals(void)
 	set_handler(SIGIO);
 	/*
 	 * Only install the SIGCHLD reaper when the active backend
-	 * uses the child-reaper IRQ. The seccomp backend does;
-	 * ptrace reaps inline via waitpid in the trap loop; KVM
-	 * has no host stub child. Reads the ops-table capability
-	 * flag rather than the legacy `using_seccomp` int per D59
-	 * Phase II Lift #4a.
+	 * uses the child-reaper IRQ. The seccomp backend does; KVM has
+	 * no host stub child. Reads the ops-table capability flag rather
+	 * than a backend-specific global.
 	 */
 	if (um_backend && um_backend->uses_stub_reaper)
 		set_handler(SIGCHLD);

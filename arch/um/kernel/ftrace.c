@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML dynamic ftrace patching (workstream C-05).
+ * UML dynamic ftrace patching.
  *
  * The compiler emits a 5-byte NOP at every traced function's entry
- * via -fpatchable-function-entry=5,0 (see arch/um/Makefile and
- * decisions-log D29). This file implements the arch hooks that
- * patch those NOPs to `call ftrace_caller` and back.
+ * via -fpatchable-function-entry=5,0 (see arch/um/Makefile). This
+ * file implements the arch hooks that
+ * patch those NOPs to call ftrace_caller and back.
  *
- * Patch mechanism (decisions-log D28 + D30):
+ * Patch mechanism:
  *   1. text_mutex is held by the generic ftrace core across the
  *      arch_ftrace_update_code() callback (see
  *      ftrace_arch_code_modify_prepare()).
@@ -15,23 +15,22 @@
  *      so no peer UML vCPU host thread runs kernel code during the
  *      patch window.
  *   3. Inside the stop_machine callback we mprotect the kernel text
- *      image [_text, _etext) RW **once**, call ftrace_modify_all_code()
- *      which iterates every record and invokes our per-site memcpy
- *      helpers, then mprotect back to RX **once**. Two mprotect
+	 *      image [_text, _etext) RW once, call ftrace_modify_all_code()
+	 *      which iterates every record and invokes our per-site memcpy
+	 *      helpers, then mprotect back to RX once. Two mprotect
  *      syscalls per enable/disable, regardless of how many records
  *      are patched. Per-site mprotect would turn one enable into
- *      2 * N syscalls (N ≈ 21000) and cumulative VMA fragmentation
- *      hangs the host process (D30).
+ *      2 * N syscalls (N is about 21000) and cumulative VMA fragmentation
+ *      hangs the host process.
  *
  * UML cannot replicate arm/arm64/riscv's fixmap-alias or x86's
  * text_poke_mm pattern because UML has exactly one mm (its host
  * process's). stop_machine + bulk mprotect is the closest analogue:
  * no peer kernel path observes the transient RW window.
  *
- * Function graph is added here in C-04 commit 3b. The trampolines
- * themselves live in arch/um/kernel/mcount.S; this file implements
- * the three hooks fgraph needs: prepare_ftrace_return() (called
- * from ftrace_graph_caller on every traced function entry when
+ * The function graph trampolines live in arch/um/kernel/mcount.S; this
+ * file implements the hooks fgraph needs: prepare_ftrace_return()
+ * (called from ftrace_graph_caller on every traced function entry when
  * fgraph is active) and the enable/disable pair that patches the
  * ftrace_graph_call site inside ftrace_caller.
  */
@@ -102,8 +101,8 @@ int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 /*
  * ftrace_modify_call() is only required when CONFIG_DYNAMIC_FTRACE_WITH_REGS
  * or *_WITH_CALL_OPS or *_WITH_DIRECT_CALLS is set. UML enables none of
- * those in C-05; the generic static-inline stub in <linux/ftrace.h>
- * returns -EINVAL and is never reached.
+ * those; the generic static-inline stub in <linux/ftrace.h> returns -EINVAL
+ * and is never reached.
  */
 
 int ftrace_update_ftrace_func(ftrace_func_t func)
@@ -154,12 +153,12 @@ void arch_ftrace_update_code(int command)
  * trampolines this file patches and hooks via prepare_ftrace_return.
  *
  * ftrace_graph_call is a 5-byte JMP rel32 site inside ftrace_caller
- * that starts as `jmp ftrace_stub` (a no-op return path) and gets
- * patched to `jmp ftrace_graph_caller` when the function graph
+ * that starts as jmp ftrace_stub (a no-op return path) and gets
+ * patched to jmp ftrace_graph_caller when the function graph
  * tracer activates. Patching happens from inside
  * ftrace_modify_all_code() (generic kernel/trace/ftrace.c, see
  * FTRACE_START_FUNC_RET/FTRACE_STOP_FUNC_RET), which on UML runs
- * inside arch_ftrace_update_code()'s stop_machine callback — so
+ * inside arch_ftrace_update_code()'s stop_machine callback, so
  * [_text, _etext) is already mapped RW and no peer CPU is
  * executing kernel code. Plain memcpy is safe; we do not need the
  * per-patch mprotect dance that native x86's smp_text_poke_single()
@@ -200,22 +199,20 @@ int ftrace_disable_ftrace_graph_caller(void)
  *   entry (== traced_fn's real start on UML).
  * - @parent: pointer to the return-address slot on the traced
  *   function's stack. Rewriting *parent sends the traced
- *   function's `ret` to return_to_handler instead of the real
+ *   function's ret to return_to_handler instead of the real
  *   caller.
  * - @frame_pointer: 0 on UML (no frame pointers through the
  *   ftrace trampoline path).
  *
  * function_graph_enter() pushes a shadow-stack entry keyed by the
- * original parent address; return_to_handler() → ftrace_return_
+ * original parent address; return_to_handler() to ftrace_return_
  * to_handler() pops it to recover the real caller ip.
  *
  * Safety: the signal-gate family in arch/um/{kernel,os-Linux}/
- * signal.c is marked `notrace` (kernel/signal.c) or built without
- * patchable NOPs (os-Linux/signal.c, per the strip set added in
- * C-04 commit 3a) so that this path never fires from inside
- * arch_local_irq_* callers. Without that, the activation-path
- * mutex inside function_graph_enter would sleep in atomic context
- * (decisions-log D34 addendum-3).
+ * signal.c is marked notrace (kernel/signal.c) or built without
+ * patchable NOPs (os-Linux/signal.c), so this path never fires from
+ * inside arch_local_irq_* callers. Without that, the activation-path
+ * mutex inside function_graph_enter would sleep in atomic context.
  */
 void notrace prepare_ftrace_return(unsigned long ip, unsigned long *parent,
 				   unsigned long frame_pointer)
@@ -236,8 +233,8 @@ void notrace prepare_ftrace_return(unsigned long ip, unsigned long *parent,
 	 * visibly on the path) therefore run with preempt_count > 0.
 	 * Under PROVE_LOCKING + DEBUG_ATOMIC_SLEEP, the body of a
 	 * graph-traced function that happens to take a sleeping lock
-	 * (free_irq → __mutex_lock, tracer activation →
-	 * tracepoints_mutex, …) will then trip __might_resched() and
+	 * (free_irq to __mutex_lock, tracer activation to
+	 * tracepoints_mutex, etc.) will then trip __might_resched() and
 	 * emit a lockdep-flavoured BUG. Native x86 escapes because it
 	 * builds with TREE_RCU, where rcu_read_lock() does not touch
 	 * preempt_count; UML-UP has no equivalent option.
@@ -249,11 +246,9 @@ void notrace prepare_ftrace_return(unsigned long ip, unsigned long *parent,
 	 * fgraph trampoline's push-then-callback-then-pop contract is
 	 * unsafe on UML. The traced function still executes normally,
 	 * and all fgraph events that happen outside atomic context
-	 * are still captured. Matches the option-(2) guard sketched in
-	 * Documentation/virt/uml/redesign/04-risks/decisions-log.md
-	 * D34 addendum-3, formalized in addendum-4 as the landing fix.
-	 * We read preempt_count() directly rather than in_atomic() so
-	 * the check is explicit — the same bits, named what they are.
+	 * are still captured. We read preempt_count() directly rather
+	 * than in_atomic() so the check is explicit: the same bits, named
+	 * what they are.
 	 */
 	if (unlikely(preempt_count()))
 		return;

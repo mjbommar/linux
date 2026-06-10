@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/cpython-tier0/run-cpython-tier0.sh — host-side launcher for
-# the CPython tier-0 regression gate (task #274).
+# um/cpython-tier0/run-cpython-tier0.sh - host-side launcher for
+# the CPython tier-0 regression gate.
 #
 # Boots UML with the chosen backend, runs cpython-tier0.py as init,
 # and asserts the terminal "CPYTHON_TIER0: TOTAL ... PASS" line.
@@ -13,15 +13,15 @@
 # current_mm_sync()). Hashlib alone catches the dlopen+libcrypto
 # path; the wider tier-0 list catches anything else along the
 # common single-process Python paths (numerics, containers, regex,
-# strings, …).
+# strings, etc.).
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL - kselftest convention.
 #
 # Environment:
 #   UML_BINARY    UML kernel built with the desired backend config
 #                 (default: /tmp/uml-kvmint/linux for kvm-integrated;
 #                  override for seccomp/ptrace builds).
-#   UML_MEM       mem= argument. Default 1024M — CPython's tier-0
+#   UML_MEM       mem= argument. Default 1024M - CPython's tier-0
 #                 sweep needs more headroom than dyn-loader because
 #                 test_array / test_set / test_typing allocate
 #                 substantial heap before they exit.
@@ -37,7 +37,7 @@
 # tests that write `@test_*_tmp` files have a writable directory
 # (the host's /tmp). If your host's /tmp is non-writable from the
 # guest's UID/GID, the test will fail identically under every
-# backend — fix the host config, not this script.
+# backend - fix the host config, not this script.
 
 set -u
 
@@ -56,7 +56,7 @@ fi
 
 # Confirm the python interpreter the guest will use exists on the
 # host (since hostfs makes the host's /usr/bin/python3 visible to
-# the guest). If python isn't installed, skip — we can't run the
+# the guest). If python isn't installed, skip; we can't run the
 # tier-0 gate without an interpreter.
 if [ ! -x "$PY" ]; then
 	echo "SKIP: $PY not found on host (install python3)" >&2
@@ -72,7 +72,7 @@ if [ -z "$PY_TESTDIR" ] || [ ! -f "$PY_TESTDIR/test_hashlib.py" ]; then
 	exit 4
 fi
 
-# /dev/kvm self-heal — same retry pattern as the other kvm runners.
+# /dev/kvm self-heal: same retry pattern as the other kvm runners.
 if [ "${CPYTHON_TIER0_BACKEND:-}" = "kvm" ]; then
 	if [ ! -e /dev/kvm ]; then
 		echo "SKIP: /dev/kvm not present" >&2
@@ -106,23 +106,23 @@ if [ -n "${CPYTHON_TIER0_BACKEND:-}" ]; then
 	fi
 fi
 
-# Per-module results — every line is informational, but we display
+# Per-module results: every line is informational, but we display
 # them so a flake is diagnosable from the kselftest log alone.
 echo "$OUT" | grep '^CPYTHON_TIER0:'
 
 SUMMARY=$(echo "$OUT" | grep '^CPYTHON_TIER0: TOTAL' | tail -1)
 if [ -z "$SUMMARY" ]; then
-	echo "CPYTHON_TIER0: FAIL — no TOTAL line found (init crashed before completion?)"
+	echo "CPYTHON_TIER0: FAIL - no TOTAL line found (init crashed before completion?)"
 	echo "$OUT" | tail -30
 	exit 1
 fi
 case "$SUMMARY" in
 	*PASS*)
-		echo "CPYTHON_TIER0: PASS — $SUMMARY"
+		echo "CPYTHON_TIER0: PASS - $SUMMARY"
 		exit 0
 		;;
 	*)
-		echo "CPYTHON_TIER0: FAIL — $SUMMARY"
+		echo "CPYTHON_TIER0: FAIL - $SUMMARY"
 		echo "$OUT" | grep -E '^CPYTHON_TIER0:' | grep -v 'ok=True' | head -10
 		exit 1
 		;;

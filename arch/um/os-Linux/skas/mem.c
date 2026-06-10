@@ -46,16 +46,14 @@ void syscall_stub_dump_error(struct mm_id *mm_idp)
 		       16, 4, sc, sizeof(*sc), 0);
 
 	/*
-	 * Dump the per-mm SCM_RIGHTS fd map only for backends
-	 * that actually populate it (seccomp today). Reads the
-	 * ops-table capability flag rather than the legacy
-	 * `using_seccomp` int per D59 Phase II Lift #4b. Debug-
-	 * path only — called from the error branch of
+	 * Dump the per-mm SCM_RIGHTS fd map only for backends that actually
+	 * populate it. Reads the ops-table capability flag rather than the
+	 * using_seccomp int. Debug path only: called from the error branch of
 	 * do_syscall_stub below and from the seccomp backend's
-	 * run_userspace when the stub reports an errored
-	 * syscall batch. um_backend is guaranteed non-NULL here
-	 * (all callers run post-init_backend); the guard is
-	 * belt-and-suspenders.
+	 * run_userspace when the stub reports an errored syscall batch.
+	 * um_backend is guaranteed non-NULL here because all callers run
+	 * post-init_backend; keep the NULL check so the dump path remains
+	 * tolerant of call-site changes.
 	 */
 	if (um_backend && um_backend->has_syscall_stub_fd_map) {
 		printk(UM_KERN_ERR "%s: FD map num: %d", __func__,
@@ -68,7 +66,7 @@ void syscall_stub_dump_error(struct mm_id *mm_idp)
 	}
 }
 
-static inline unsigned long *check_init_stack(struct mm_id * mm_idp,
+static inline unsigned long *check_init_stack(struct mm_id *mm_idp,
 					      unsigned long *stack)
 {
 	if (stack == NULL) {
@@ -88,16 +86,15 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 
 	/*
 	 * Dispatch via the futex + wait_stub_done_seccomp round-trip
-	 * (the only stub-child mechanism after memo 25 refactor 11
-	 * removed ptrace). The stub_syscall_uses_futex flag is still
-	 * checked so a future per-mm-worker-process backend (memo 25
-	 * R4 / memo 26) can opt out without further dispatch surgery.
+	 * when the active backend supports it. The capability flag lets
+	 * non-futex worker backends opt out without further dispatch
+	 * surgery.
 	 */
 	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		proc_data->restart_wait = 1;
 		wait_stub_done_seccomp(mm_idp, 0, 1);
 	} else {
-		panic("%s : no stub-child backend supports the legacy ptrace dispatch (memo 25 R11); pid = %d",
+		panic("%s : no stub-child backend supports stub syscall dispatch; pid = %d",
 		      __func__, pid);
 	}
 
@@ -117,8 +114,7 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 
 	/*
 	 * Reset the FD-map count only for backends that populate
-	 * it. Routed through um_backend->has_syscall_stub_fd_map
-	 * per D59 Phase II Lift #4c.
+	 * it. Routed through um_backend->has_syscall_stub_fd_map.
 	 */
 	if (um_backend && um_backend->has_syscall_stub_fd_map)
 		mm_idp->syscall_fd_num = 0;
@@ -193,8 +189,7 @@ static int get_stub_fd(struct mm_id *mm_idp, int fd)
 	 * Only the seccomp backend maintains an FD indirection
 	 * table for SCM_RIGHTS; ptrace returns the raw FD
 	 * straight through. Routed through
-	 * um_backend->has_syscall_stub_fd_map per D59 Phase II
-	 * Lift #4c.
+	 * um_backend->has_syscall_stub_fd_map.
 	 */
 	if (!um_backend || !um_backend->has_syscall_stub_fd_map)
 		return fd;
@@ -245,7 +240,7 @@ int um_stub_mm_map(struct mm_id *mm_idp, unsigned long virt,
 		 * The stored sc->mem.fd is a slot-index on seccomp
 		 * (indirection through mm_id->syscall_fd_map), a raw
 		 * FD on ptrace. Routed through um_backend->has_
-		 * syscall_stub_fd_map per D59 Phase II Lift #4c.
+		 * syscall_stub_fd_map.
 		 */
 		if (um_backend && um_backend->has_syscall_stub_fd_map)
 			prev_fd = mm_idp->syscall_fd_map[sc->mem.fd];

@@ -43,7 +43,7 @@ static struct um_vec2_fd_host *um_vec2_host_to_fd(struct um_vec2_host *host)
 
 /*
  * Send one skb to the host TAP fd.  When @vnet_hdr is true the
- * tap was opened with IFF_VNET_HDR — we prepend a virtio_net_hdr
+ * tap was opened with IFF_VNET_HDR; prepend a virtio_net_hdr
  * so the host kernel can offload large TCP segments (TSO) instead
  * of forcing the guest to MTU-segment.  Mirrors vector2_host_tap.c.
  */
@@ -116,6 +116,53 @@ static int um_vec2_fd_tx_batch(struct um_vec2_host *host,
 	return sent;
 }
 
+static int um_vec2_fd_parse_vnet_skb(struct sk_buff *skb, int len)
+{
+	struct virtio_net_hdr hdr;
+
+	if (len <= (int)sizeof(hdr))
+		return -EPROTO;
+
+	skb_trim(skb, len);
+	memcpy(&hdr, skb->data, sizeof(hdr));
+	skb_pull(skb, sizeof(hdr));
+	if (virtio_net_hdr_to_skb(skb, &hdr, true))
+		return -EPROTO;
+
+	return skb->len;
+}
+
+static int um_vec2_fd_parse_raw_skb(struct sk_buff *skb, int len)
+{
+	if (len < ETH_HLEN)
+		return -EPROTO;
+
+	skb_trim(skb, len);
+	return skb->len;
+}
+
+static int um_vec2_fd_read_skb(struct um_vec2_fd_host *fdhost,
+			       struct sk_buff *skb)
+{
+	unsigned char *data;
+	int ret;
+
+	data = skb_put(skb, fdhost->frame_len);
+	ret = os_read_file(fdhost->rx_fd, data, fdhost->frame_len);
+	if (ret < 0)
+		return ret;
+
+	if (fdhost->vnet_hdr)
+		ret = um_vec2_fd_parse_vnet_skb(skb, ret);
+	else
+		ret = um_vec2_fd_parse_raw_skb(skb, ret);
+	if (ret < 0)
+		return ret;
+
+	skb->dev = fdhost->dev;
+	return ret;
+}
+
 static int um_vec2_fd_rx_batch(struct um_vec2_host *host,
 			       struct um_vec2_rx_batch *batch,
 			       unsigned int budget, um_vec2_rx_alloc_fn alloc,
@@ -140,39 +187,14 @@ static int um_vec2_fd_rx_batch(struct um_vec2_host *host,
 
 	for (i = 0; i < budget; i++) {
 		struct sk_buff *skb = batch->slot[i].owner;
-		unsigned char *data;
 
-		data = skb_put(skb, fdhost->frame_len);
-		ret = os_read_file(fdhost->rx_fd, data, fdhost->frame_len);
+		ret = um_vec2_fd_read_skb(fdhost, skb);
 		if (ret == -EAGAIN)
 			break;
 		if (ret < 0)
 			goto complete;
 
-		if (fdhost->vnet_hdr) {
-			struct virtio_net_hdr hdr;
-
-			if (ret <= (int)sizeof(hdr)) {
-				ret = -EPROTO;
-				goto complete;
-			}
-			skb_trim(skb, ret);
-			memcpy(&hdr, skb->data, sizeof(hdr));
-			skb_pull(skb, sizeof(hdr));
-			if (virtio_net_hdr_to_skb(skb, &hdr, true)) {
-				ret = -EPROTO;
-				goto complete;
-			}
-		} else {
-			if (ret < ETH_HLEN) {
-				ret = -EPROTO;
-				goto complete;
-			}
-			skb_trim(skb, ret);
-		}
-
-		skb->dev = fdhost->dev;
-		lens[received++] = skb->len;
+		lens[received++] = ret;
 	}
 
 	ret = 0;
@@ -251,6 +273,112 @@ static void um_vec2_fd_host_close(struct um_vec2_fd_host *fdhost)
 	fdhost->tx_fd = -1;
 }
 
+static void um_vec2_fd_channel_init(struct um_vec2_dev *vdev,
+				    struct um_vec2_channel *channel,
+				    unsigned int index)
+{
+	um_vec2_chan_lifecycle_init(&channel->life);
+	channel->vdev = vdev;
+	channel->index = index;
+	channel->rx_fd = UM_VEC2_NO_FD;
+	channel->tx_fd = UM_VEC2_NO_FD;
+	channel->rx_irq = UM_VEC2_NO_IRQ;
+	channel->tx_irq = UM_VEC2_NO_IRQ;
+}
+
+static int um_vec2_fd_dup_source(unsigned int source_fd)
+{
+	int fd;
+	int ret;
+
+	fd = os_dup_file(source_fd);
+	if (fd < 0)
+		return fd;
+
+	ret = os_set_fd_block(fd, 0);
+	if (ret) {
+		os_close_file(fd);
+		return ret;
+	}
+
+	return fd;
+}
+
+static bool um_vec2_fd_has_vnet_hdr(int fd)
+{
+	struct ifreq ifr = {};
+	int ret;
+
+	/*
+	 * Probe the inherited tap fd for IFF_VNET_HDR. When set, the tap was
+	 * opened with virtio_net_hdr-prefixed framing. Non-TAP fds and probe
+	 * failures use raw Ethernet frames.
+	 */
+	ret = os_ioctl_generic(fd, TUNGETIFF, (unsigned long)&ifr);
+	return ret == 0 && (ifr.ifr_flags & IFF_VNET_HDR) != 0;
+}
+
+static void um_vec2_fd_attach_channel(struct um_vec2_fd_host *fdhost,
+				      struct um_vec2_channel *channel,
+				      struct net_device *dev, int fd)
+{
+	fdhost->host.ops = &um_vec2_fd_host_ops;
+	fdhost->dev = dev;
+	fdhost->vnet_hdr = um_vec2_fd_has_vnet_hdr(fd);
+	fdhost->frame_len = um_vec2_runtime_frame_len(dev, fdhost->vnet_hdr);
+	fdhost->rx_fd = fd;
+	fdhost->tx_fd = fd;
+
+	channel->host = &fdhost->host;
+	channel->rx_fd = fd;
+	channel->tx_fd = fd;
+}
+
+static void um_vec2_fd_detach_channel(struct um_vec2_fd_host *fdhost,
+				      struct um_vec2_channel *channel)
+{
+	um_vec2_fd_host_close(fdhost);
+	channel->host = NULL;
+	channel->rx_fd = UM_VEC2_NO_FD;
+	channel->tx_fd = UM_VEC2_NO_FD;
+}
+
+static void um_vec2_fd_channel_mark_closed(struct um_vec2_channel *channel)
+{
+	if (um_vec2_chan_can_transition(channel->life.state,
+					UM_VEC2_CHAN_QUIESCING))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
+	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
+}
+
+static struct um_vec2_fd_host *um_vec2_fd_host_alloc(void)
+{
+	struct um_vec2_fd_host *fdhost;
+
+	fdhost = kzalloc_obj(*fdhost);
+	if (!fdhost)
+		return NULL;
+
+	fdhost->rx_fd = UM_VEC2_NO_FD;
+	fdhost->tx_fd = UM_VEC2_NO_FD;
+	return fdhost;
+}
+
+static int um_vec2_fd_channel_prepare(struct um_vec2_dev *vdev,
+				      struct um_vec2_channel *channel,
+				      unsigned int index)
+{
+	int ret;
+
+	um_vec2_fd_channel_init(vdev, channel, index);
+	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
+	if (ret)
+		return ret;
+
+	return um_vec2_queue_pair_alloc(channel, vdev->cfg.depth);
+}
+
 static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
 				   struct um_vec2_channel *channel,
 				   unsigned int index,
@@ -263,69 +391,25 @@ static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
 
 #if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2_HOST_FD_KUNIT)
 	if (um_vec2_fd_fault_index >= 0 &&
-	    (unsigned int)um_vec2_fd_fault_index == index)
+		    (unsigned int)um_vec2_fd_fault_index == index)
 		return -EIO;
-#endif
+	#endif
 
-	fdhost = kzalloc_obj(*fdhost);
+	fdhost = um_vec2_fd_host_alloc();
 	if (!fdhost)
 		return -ENOMEM;
-	fdhost->rx_fd = UM_VEC2_NO_FD;
-	fdhost->tx_fd = UM_VEC2_NO_FD;
 
-	um_vec2_chan_lifecycle_init(&channel->life);
-	channel->vdev = vdev;
-	channel->index = index;
-	channel->rx_fd = UM_VEC2_NO_FD;
-	channel->tx_fd = UM_VEC2_NO_FD;
-	channel->rx_irq = UM_VEC2_NO_IRQ;
-	channel->tx_irq = UM_VEC2_NO_IRQ;
-	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
+	ret = um_vec2_fd_channel_prepare(vdev, channel, index);
 	if (ret)
 		goto out_free_host;
 
-	ret = um_vec2_queue_pair_alloc(channel, vdev->cfg.depth);
-	if (ret)
-		goto out_free_host;
-
-	fd = os_dup_file(source_fd);
+	fd = um_vec2_fd_dup_source(source_fd);
 	if (fd < 0) {
 		ret = fd;
 		goto out_free_queue;
 	}
 
-	ret = os_set_fd_block(fd, 0);
-	if (ret) {
-		os_close_file(fd);
-		goto out_free_queue;
-	}
-
-	fdhost->host.ops = &um_vec2_fd_host_ops;
-	fdhost->dev = dev;
-
-	/*
-	 * Probe the inherited tap fd for IFF_VNET_HDR.  When set, the
-	 * tap was opened with virtio_net_hdr-prefixed framing — vec2
-	 * can then use IORING-style TSO and the guest→host TCP path
-	 * stops paying per-MTU-frame syscall cost (memo 01 Step 2).
-	 * Probe failure (non-tap fd, ENOTTY) is benign — we just fall
-	 * back to the raw-frame shape.
-	 */
-	{
-		struct ifreq ifr = {};
-		int probe;
-
-		probe = os_ioctl_generic(fd, TUNGETIFF, (unsigned long)&ifr);
-		fdhost->vnet_hdr = (probe == 0) &&
-				   ((ifr.ifr_flags & IFF_VNET_HDR) != 0);
-	}
-	fdhost->frame_len = um_vec2_runtime_frame_len(dev, fdhost->vnet_hdr);
-	fdhost->rx_fd = fd;
-	fdhost->tx_fd = fd;
-	channel->host = &fdhost->host;
-	channel->rx_fd = fd;
-	channel->tx_fd = fd;
-
+	um_vec2_fd_attach_channel(fdhost, channel, dev, fd);
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_FD_ATTACHED);
 	if (ret)
 		goto out_close_fd;
@@ -333,17 +417,10 @@ static int um_vec2_fd_channel_open(struct um_vec2_dev *vdev,
 	return 0;
 
 out_close_fd:
-	um_vec2_fd_host_close(fdhost);
-	channel->host = NULL;
-	channel->rx_fd = UM_VEC2_NO_FD;
-	channel->tx_fd = UM_VEC2_NO_FD;
+	um_vec2_fd_detach_channel(fdhost, channel);
 out_free_queue:
 	um_vec2_queue_pair_free(channel, dev);
-	if (um_vec2_chan_can_transition(channel->life.state,
-					UM_VEC2_CHAN_QUIESCING))
-		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
-	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
-		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
+	um_vec2_fd_channel_mark_closed(channel);
 out_free_host:
 	kfree(fdhost);
 	return ret;
@@ -361,24 +438,44 @@ static void um_vec2_fd_channel_close(struct um_vec2_channel *channel,
 	if (um_vec2_chan_can_transition(channel->life.state,
 					UM_VEC2_CHAN_QUIESCING))
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
-	um_vec2_fd_host_close(fdhost);
+	um_vec2_fd_detach_channel(fdhost, channel);
 	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
 		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
 
 	um_vec2_queue_pair_free(channel, dev);
-	channel->host = NULL;
-	channel->rx_fd = UM_VEC2_NO_FD;
-	channel->tx_fd = UM_VEC2_NO_FD;
 	kfree(fdhost);
 }
 
-int um_vec2_fd_open(struct um_vec2_dev *vdev)
+static void um_vec2_fd_clear_channels(struct um_vec2_dev *vdev)
 {
-	struct um_vec2_channel *channels;
-	unsigned int queues;
+	vdev->channels = NULL;
+	vdev->num_channels = 0;
+}
+
+static int um_vec2_fd_validate_range(struct um_vec2_dev *vdev,
+				     unsigned int queues)
+{
 	unsigned int i;
 	int ret;
 
+	if (vdev->cfg.fd > INT_MAX - (queues - 1)) {
+		pr_err("vec2.%u inherited fd range fd=%u queues=%u exceeds INT_MAX\n",
+		       vdev->unit, vdev->cfg.fd, queues);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < queues; i++) {
+		ret = um_vec2_fd_validate_source(vdev, vdev->cfg.fd + i);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int um_vec2_fd_prepare_open(struct um_vec2_dev *vdev,
+				   unsigned int *queues)
+{
 	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_FD || !vdev->cfg.has_fd)
 		return -EINVAL;
 	if (!vdev->netdev)
@@ -386,50 +483,64 @@ int um_vec2_fd_open(struct um_vec2_dev *vdev)
 	if (vdev->channels)
 		return -EBUSY;
 
-	queues = um_vec2_netdev_queue_count(vdev);
-	if (vdev->cfg.fd > INT_MAX - (queues - 1)) {
-		pr_err("vec2.%u inherited fd range fd=%u queues=%u exceeds INT_MAX\n",
-		       vdev->unit, vdev->cfg.fd, queues);
-		return -EINVAL;
-	}
+	*queues = um_vec2_netdev_queue_count(vdev);
+	return um_vec2_fd_validate_range(vdev, *queues);
+}
 
-	/*
-	 * Validate the whole inherited-fd range before duplicating any fd.
-	 * Otherwise dup() for an early queue could reuse a closed later
-	 * queue fd number and mask a broken launcher handoff.
-	 */
-	for (i = 0; i < queues; i++) {
-		ret = um_vec2_fd_validate_source(vdev, vdev->cfg.fd + i);
+static int um_vec2_fd_open_channels(struct um_vec2_dev *vdev,
+				    struct um_vec2_channel *channels,
+				    unsigned int queues,
+				    unsigned int *opened)
+{
+	int ret;
+
+	*opened = 0;
+	while (*opened < queues) {
+		ret = um_vec2_fd_channel_open(vdev, &channels[*opened], *opened,
+					      vdev->cfg.fd + *opened);
 		if (ret)
 			return ret;
+		(*opened)++;
 	}
+
+	return 0;
+}
+
+static void um_vec2_fd_close_channels(struct um_vec2_dev *vdev,
+				      struct um_vec2_channel *channels,
+				      unsigned int count)
+{
+	while (count--)
+		um_vec2_fd_channel_close(&channels[count], vdev->netdev);
+}
+
+int um_vec2_fd_open(struct um_vec2_dev *vdev)
+{
+	struct um_vec2_channel *channels;
+	unsigned int queues;
+	unsigned int opened;
+	int ret;
+
+	ret = um_vec2_fd_prepare_open(vdev, &queues);
+	if (ret)
+		return ret;
 
 	channels = kcalloc(queues, sizeof(*channels), GFP_KERNEL);
 	if (!channels)
 		return -ENOMEM;
 
-	for (i = 0; i < queues; i++) {
-		ret = um_vec2_fd_channel_open(vdev, &channels[i], i,
-					      vdev->cfg.fd + i);
-		if (ret)
-			goto out_close_channels;
-	}
+	ret = um_vec2_fd_open_channels(vdev, channels, queues, &opened);
+	if (ret)
+		goto out_close_channels;
 
 	vdev->channels = channels;
 	vdev->num_channels = queues;
 	return 0;
 
 out_close_channels:
-	while (i--)
-		um_vec2_fd_channel_close(&channels[i], vdev->netdev);
+	um_vec2_fd_close_channels(vdev, channels, opened);
 	kfree(channels);
-	/*
-	 * Defensive: ensure vdev->channels stays NULL after a partial-open
-	 * unwind so a subsequent um_vec2_fd_close() cannot walk freed
-	 * channel memory.  See the regression that B1 fixed.
-	 */
-	vdev->channels = NULL;
-	vdev->num_channels = 0;
+	um_vec2_fd_clear_channels(vdev);
 	return ret;
 }
 
@@ -444,6 +555,5 @@ void um_vec2_fd_close(struct um_vec2_dev *vdev)
 	for (i = 0; i < vdev->num_channels; i++)
 		um_vec2_fd_channel_close(&channels[i], vdev->netdev);
 	kfree(channels);
-	vdev->channels = NULL;
-	vdev->num_channels = 0;
+	um_vec2_fd_clear_channels(vdev);
 }

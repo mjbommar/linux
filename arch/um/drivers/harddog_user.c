@@ -58,9 +58,7 @@ int start_watchdog(int *in_fd_ret, int *out_fd_ret, char *sock)
 	if (sock != NULL) {
 		mconsole_args[2] = sock;
 		args = mconsole_args;
-	}
-	else {
-		/* XXX The os_getpid() is not SMP correct */
+	} else {
 		sprintf(pid_buf, "%d", os_getpid());
 		args = pid_args;
 	}
@@ -82,8 +80,7 @@ int start_watchdog(int *in_fd_ret, int *out_fd_ret, char *sock)
 		helper_wait(pid);
 		err = -EIO;
 		goto out_close_out;
-	}
-	else if (n < 0) {
+	} else if (n < 0) {
 		printk("harddog_open - read of watchdog pipe failed, "
 		       "err = %d\n", errno);
 		helper_wait(pid);

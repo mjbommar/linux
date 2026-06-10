@@ -47,8 +47,7 @@ impl Paths {
 
     /// Root directory for per-run bundles — `$STATE/runs/`.
     /// Each subdirectory is one `run_id` (ULID) with run.json,
-    /// init.log, kernel.log, events.jsonl, etc. per the
-    /// observability-spine memo (13).
+    /// init.log, kernel.log, events.jsonl, and related artifacts.
     pub fn runs_dir(&self) -> PathBuf {
         self.state_dir.join("runs")
     }

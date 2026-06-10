@@ -14,7 +14,6 @@
  * Build: gcc -static -O0 -pthread -o mt-yieldonly mt-yieldonly.c
  */
 #define _GNU_SOURCE
-#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -23,22 +22,11 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-static void dump_trace(void)
-{
-	int fd = open("/sys/kernel/debug/um_kvm_v2_trace/enabled", O_WRONLY);
-	if (fd >= 0) { (void)!write(fd, "0\n", 2); close(fd); }
-	fd = open("/sys/kernel/debug/um_kvm_v2_trace/dump", O_WRONLY);
-	if (fd < 0) return;
-	(void)!write(fd, "1\n", 2);
-	close(fd);
-}
-
 static volatile int crash_dumped;
 static void sigsegv_handler(int sig, siginfo_t *si, void *ctx_)
 {
 	if (__sync_lock_test_and_set(&crash_dumped, 1))
 		_exit(3);
-	dump_trace();
 	ucontext_t *uc = (ucontext_t *)ctx_;
 	greg_t *g = uc->uc_mcontext.gregs;
 	fprintf(stderr,

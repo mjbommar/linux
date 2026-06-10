@@ -4,8 +4,8 @@
 UML profile: fuzz-deep
 =======================
 
-:Intended user: targeted investigation after ``fuzz`` identifies a
-   candidate bug; needs more detail per iteration even at the cost
+:Intended user: targeted debugging after ``fuzz`` identifies a
+   candidate bug; collects more detail per iteration even at the cost
    of iteration rate
 :Backend: SECCOMP_ONLY
 :Fragment: ``arch/um/configs/profiles/fuzz-deep.config``
@@ -15,8 +15,8 @@ What this profile is for
 
 Everything ``fuzz`` has, plus tighter KASAN mode and full lockdep.
 The long-term plan has ``CONFIG_KCSAN=y`` here too, but the UML
-KCSAN port lands in workstream **C-03**; until then ``fuzz-deep``
-ships without KCSAN (gap explicitly noted in the fragment).
+KCSAN port is not available in this profile. ``fuzz-deep`` therefore
+ships without KCSAN.
 
 Use ``fuzz-deep`` after a candidate bug falls out of the ``fuzz``
 corpus and you want a denser observation window before handing off
@@ -33,21 +33,18 @@ Build
 What's on (in addition to ``fuzz``)
 ====================================
 
-- ``KASAN_INLINE`` — tighter poison catch.
-- ``KFENCE`` (C-02) — sampling OOB/UAF detector with guard pages.
+- ``KASAN_INLINE`` - tighter poison catch.
+- ``KFENCE`` - sampling OOB/UAF detector with guard pages.
   Complements KASAN by catching bugs in paths that KASAN's shadow
   cost would cover up. Stats at
   ``/sys/kernel/debug/kfence/stats``.
-- ``PROVE_LOCKING``, ``DEBUG_ATOMIC_SLEEP`` — lockdep catches some
+- ``PROVE_LOCKING``, ``DEBUG_ATOMIC_SLEEP`` - lockdep catches some
   of the races KCSAN would eventually catch.
 
 What's still off
 ================
 
-- ``KCSAN`` — pending C-03.
-- Record-replay's full machinery — the Layer 2 ``record_replay``
-  gate ships, but its slow path is still the stub counter that B-02
-  landed. A real record/replay consumer is phase-F work.
+- ``KCSAN`` - unavailable together with KASAN in a stock kernel.
 
 KCSAN availability
 ==================
@@ -60,27 +57,22 @@ so a single build can have one or the other, not both.
 Rather than modify the upstream constraint or fork fuzz-deep into
 two variants, this release ships:
 
-- **``fuzz-deep``** — KASAN-focused (the current profile).
-- **``race``** — KCSAN-focused. See :doc:`race`.
+- **``fuzz-deep``** - KASAN-focused (the current profile).
+- **``race``** - KCSAN-focused. See :doc:`race`.
 
-Pick the detector matching your bug class. The decision is
-recorded as D26 in
-``Documentation/virt/uml/redesign/04-risks/decisions-log.md``.
+Pick the detector matching the bug class.
 
 Gap note
 ========
 
-Beyond the KCSAN constraint above, fuzz-deep's distinctive
-features vs fuzz are ``KASAN_INLINE`` + lockdep + KFENCE. When
-phase F lands real record/replay the diff widens again. The
-fragment comment tracks the remaining gap so the profile's name
-doesn't quietly drift.
+Beyond the KCSAN constraint above, fuzz-deep's distinctive features
+vs fuzz are ``KASAN_INLINE`` + lockdep + KFENCE.
 
 When to use something else
 ==========================
 
-- Iteration rate matters more than depth → ``fuzz``.
-- You want every tool on, not just the deep-catch ones → ``research``.
+- Iteration rate matters more than depth: ``fuzz``.
+- You want every tool on, not just the deep-catch ones: ``research``.
 
 See also
 ========

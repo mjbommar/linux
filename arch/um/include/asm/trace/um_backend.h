@@ -1,31 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * UML backend tracepoints (memo 25 R7).
+ * UML backend tracepoints.
  *
- * Per-event definitions for the `um_backend` ftrace subsystem.
+ * Per-event definitions for the um_backend ftrace subsystem.
  * Hooks fire at the boundary between UML's mm-arbiter / trap loop
- * and the active backend (today: seccomp; tomorrow: kvm-v2).
+ * and the active backend.
  *
- * Enable with `trace-cmd record -e um_backend:*`.
+ * Enable with trace-cmd record -e um_backend:*.
  *
  * Event list:
  *
- *  - um_backend_mm_create(mm)         — per-mm lifecycle start
- *  - um_backend_mm_destroy(mm)        — per-mm lifecycle end
- *  - um_backend_mm_region_added(...)  — backend learned of a new
+ *  - um_backend_mm_create(mm)         - per-mm lifecycle start
+ *  - um_backend_mm_destroy(mm)        - per-mm lifecycle end
+ *  - um_backend_mm_region_added(...)  - backend learned of a new
  *                                       VA range mapping
- *  - um_backend_mm_region_removed     — backend learned of an
+ *  - um_backend_mm_region_removed     - backend learned of an
  *                                       unmap
  *
- * The seccomp run loop has no kernel-side vcpu_run_enter / exit
- * hook (it lives in a USER TU compiled with USER_CFLAGS, no access
- * to kernel-side tracepoint macros). Phase C.2's
- * kvm_v2_vcpu_run() runs in kernel context, so the
- * um_backend_kvm_v2_vcpu_enter / _exit events below cover the v2
- * dispatcher; seccomp-side coverage is left to the worker-process
- * wrapper as memo 28 lands. Memo 25 R7's longer wishlist
- * (mm_region_protected, syscall_dispatch, signal_received) lands
- * incrementally as each surface gets a kernel-side hook.
+ * The seccomp run loop has no kernel-side vcpu_run_enter / exit hook:
+ * it is built with libc support and cannot use kernel tracepoint
+ * macros. kvm_v2_vcpu_run() runs in kernel context, so
+ * um_backend_kvm_v2_vcpu_enter / _exit cover the v2 dispatcher.
  */
 
 #undef TRACE_SYSTEM
@@ -104,21 +99,15 @@ TRACE_EVENT(um_backend_mm_region_removed,
 );
 
 /*
- * v2 vcpu_enter / vcpu_exit live further down (Phase C.2). They
- * are kvm-v2 specific because the seccomp loop has no kernel-side
- * site to fire from.
+ * v2 vcpu_enter / vcpu_exit are kvm-v2 specific because the seccomp
+ * loop has no kernel-side site to fire from.
  */
 
 /*
- * kvm_v2_init — fired once when the v2 backend's init op runs after a
+ * kvm_v2_init - fired once when the v2 backend's init op runs after a
  * successful /dev/kvm probe + capability negotiation. The cap bitmap
  * encodes which optional KVM_CHECK_EXTENSION queries returned >0; layout
  * is private to arch/um/backend/kvm-v2/ (see KVM_V2_CAP_* in init.c).
- *
- * This event is the canonical Phase A.1 observability hook per memo 26
- * §A.1 + memo 27 Part B.9 ("build observability before you need it");
- * later phases extend the v2 tracepoint family rather than logging cap
- * results ad-hoc.
  */
 TRACE_EVENT(um_backend_kvm_v2_init,
 	TP_PROTO(int kvm_fd, int api_version, u64 caps),
@@ -138,12 +127,8 @@ TRACE_EVENT(um_backend_kvm_v2_init,
 );
 
 /*
- * kvm_v2_vcpu_create — fired when A.3's placeholder vCPU is built.
- * Phase C will emit a separate event per pool member; until then this
- * tracepoint marks the single placeholder's birth so a `trace-cmd
- * record -e um_backend:um_backend_kvm_v2_vcpu_create` confirms the v2
- * init path made it past KVM_CREATE_VCPU + kvm_run mmap. Per memo 27
- * Part B.9 every new v2 surface is observable from the day it lands.
+ * kvm_v2_vcpu_create - fired when a vCPU is built and its kvm_run
+ * shared page is mapped.
  */
 TRACE_EVENT(um_backend_kvm_v2_vcpu_create,
 	TP_PROTO(int vcpu_fd, u32 kvm_run_size),
@@ -161,11 +146,8 @@ TRACE_EVENT(um_backend_kvm_v2_vcpu_create,
 );
 
 /*
- * kvm_v2_memslot_add / _del — fired whenever B.1's allocator hands out
- * or frees a memslot id. Phase B.1 lands the events alongside the
- * allocator so B.2's KVM_SET_USER_MEMORY_REGION wiring is observable
- * from the day it lights up (memo 27 Part B.9). Until B.2, no caller
- * invokes kvm_v2_memslot_add() and the events are silent.
+ * kvm_v2_memslot_add / _del - fired whenever the allocator hands out
+ * or frees a memslot id.
  */
 TRACE_EVENT(um_backend_kvm_v2_memslot_add,
 	TP_PROTO(u32 slot_id, u64 gpa, u64 host_va, u64 size, u32 flags),
@@ -202,21 +184,14 @@ TRACE_EVENT(um_backend_kvm_v2_memslot_del,
 );
 
 /*
- * kvm_v2_physmem_memslot_install — fired once when D.4b-pre's giant
- * physmem identity-offset memslot lands (memo 26 §D.4 D.4b-pre). One
- * slot at gpa=0 / hva=uml_physmem / size=physmem_size; mirrors v1's
- * kvm_ensure_memslot at kvm-v1-archive/lifecycle.c:613-648. The slot
- * makes KVM's TDP walk resolve __pa(pgd) and __pa(trampoline_kva) —
- * both physmem-offset GPAs in [0, physmem_size) — to host pages.
+ * kvm_v2_physmem_memslot_install - fired once when the physmem
+ * identity-offset memslot is installed. The slot maps
+ * gpa=0 / hva=uml_physmem / size=physmem_size and lets KVM's TDP walk
+ * resolve __pa(pgd) and __pa(trampoline_kva), both physmem-offset GPAs
+ * in [0, physmem_size), to host pages.
  *
- * Fires from either the eager vm_create attempt or (more often, since
- * uml_physmem isn't set at init_backend time) the
- * subsys_initcall lazy retry in syscall_trap.c. Idempotent at the
- * helper level so the event fires AT MOST once per VM lifetime.
- *
- * Until D.4b lands the PML4[448] PT chain and D.5 flips .vcpu_run, no
- * guest CR3 walk hits this slot — but the install is observable from
- * D.4b-pre. Per memo 27 §B.9: observability lands with the helper.
+ * The helper is idempotent and the event fires at most once per VM
+ * lifetime.
  */
 TRACE_EVENT(um_backend_kvm_v2_physmem_memslot_install,
 	TP_PROTO(int slot_id, unsigned long hva, u64 size),
@@ -236,8 +211,8 @@ TRACE_EVENT(um_backend_kvm_v2_physmem_memslot_install,
 );
 
 /*
- * kvm_v2_vcpu_enter / kvm_v2_vcpu_exit — bracket each KVM_RUN ioctl
- * issued by Phase C.2's dispatcher (kvm_v2_vcpu_run). enter fires
+ * kvm_v2_vcpu_enter / kvm_v2_vcpu_exit - bracket each KVM_RUN ioctl
+ * issued by kvm_v2_vcpu_run(). enter fires
  * after the per-iteration vCPU state load (CR3 / fs.base / gs.base /
  * GPRs) and before the ioctl; exit fires immediately after the
  * ioctl returns, before the exit-reason switch and the GET_REGS
@@ -245,9 +220,6 @@ TRACE_EVENT(um_backend_kvm_v2_physmem_memslot_install,
  * kvm_run is the mmap'd shared page (lets a tracer correlate
  * userspace and kernel views of the same vCPU). exit_reason matches
  * KVM_EXIT_* in <uapi/linux/kvm.h>.
- *
- * Per memo 27 Part B.9: observability lands with the helper, not
- * after it earns a caller.
  */
 TRACE_EVENT(um_backend_kvm_v2_vcpu_enter,
 	TP_PROTO(int cpu, void *kvm_run),
@@ -278,20 +250,14 @@ TRACE_EVENT(um_backend_kvm_v2_vcpu_exit,
 );
 
 /*
- * kvm_v2_fpu_capture / kvm_v2_fpu_install — bracket the fork-time
+ * kvm_v2_fpu_capture / kvm_v2_fpu_install - bracket the fork-time
  * KVM_GET_FPU snapshot (capture) and the per-KVM_RUN restore
- * (install). Phase C.4 wires both. `valid` reports whether the
+ * (install). valid reports whether the
  * helper produced (capture) / consumed (install) a parent snapshot;
- * a `valid=0` install means the dispatcher fell back to the
+ * a valid=0 install means the dispatcher fell back to the
  * architectural reset values (fcw=0x037f, mxcsr=0x1f80) instead of
- * inheriting parent FPU state. Useful for diagnosing fork→FPU
- * inheritance regressions when Phase D's pointer flip activates the
- * dispatcher end-to-end.
- *
- * Per memo 27 Part B.9: observability lands with the helper, not
- * after it earns a caller (capture has a real caller via
- * arch_copy_thread today; install fires only when Phase D wires
- * .vcpu_run).
+ * inheriting parent FPU state. Useful for diagnosing fork-to-FPU
+ * inheritance regressions.
  */
 TRACE_EVENT(um_backend_kvm_v2_fpu_capture,
 	TP_PROTO(int cpu, int valid),
@@ -322,12 +288,8 @@ TRACE_EVENT(um_backend_kvm_v2_fpu_install,
 );
 
 /*
- * kvm_v2_cpuid_install — fired when the lazy first-run CPUID install
- * (memo 26 §D.0a) lands the curated KVM_SET_CPUID2 against a pool
- * member. A.3's eager install ran at init_backend before the buddy
- * allocator was up and silently degraded to KVM-default CPUID; D.0a
- * defers the install to first KVM_RUN. Until D.5 flips .vcpu_run
- * this event has no caller and stays silent.
+ * kvm_v2_cpuid_install - fired when lazy CPUID setup applies the curated
+ * KVM_SET_CPUID2 against a pool member.
  *
  * vcpu_fd identifies the pool member; nent is the number of
  * kvm_cpuid_entry2 entries the curated mask was applied to (matches
@@ -348,15 +310,12 @@ TRACE_EVENT(um_backend_kvm_v2_cpuid_install,
 );
 
 /*
- * kvm_v2_msr_program — fired when D.4a's eager SYSCALL-MSR install
- * (memo 26 §D.4) lands MSR_LSTAR / MSR_STAR / MSR_SYSCALL_MASK +
- * readback against a pool member at vcpu_create_one. Fires once per
+ * kvm_v2_msr_program - fired when SYSCALL MSR install lands
+ * MSR_LSTAR / MSR_STAR / MSR_SYSCALL_MASK + readback against a
+ * pool member at vcpu_create_one. Fires once per
  * pool member at backend init; readback mismatch panics inside the
  * helper before this event would fire, so a successful trace event
- * means the three SYSCALL MSRs round-tripped exactly. Until D.5 flips
- * .vcpu_run away from seccomp the MSRs we programmed have no consumer
- * — but the event is observable from D.4a as a "trampoline armed"
- * signal. Per memo 27 §B.9: observability lands with the helper.
+ * means the three SYSCALL MSRs round-tripped exactly.
  */
 TRACE_EVENT(um_backend_kvm_v2_msr_program,
 	TP_PROTO(int vcpu_fd),
@@ -371,11 +330,9 @@ TRACE_EVENT(um_backend_kvm_v2_msr_program,
 );
 
 /*
- * kvm_v2_sregs_install — fired when long-mode SREGS (CS/DS/SS/CR0/
- * CR4/EFER) are programmed at vcpu_create_one. D.5-fix landed this
- * after diagnosing that the sync-regs mmap is zero on first dispatch
- * and KVM_RUN returns -EINVAL because kvm_is_valid_sregs rejects
- * EFER.LMA=1 with CR0.PG=0. One event per pool member at create.
+ * kvm_v2_sregs_install - fired when long-mode SREGS (CS/DS/SS/CR0/
+ * CR4/EFER) are programmed at vcpu_create_one. One event per pool
+ * member at create.
  */
 TRACE_EVENT(um_backend_kvm_v2_sregs_install,
 	TP_PROTO(int vcpu_fd),
@@ -390,15 +347,10 @@ TRACE_EVENT(um_backend_kvm_v2_sregs_install,
 );
 
 /*
- * kvm_v2_sigmask_install — fired when KVM_SET_SIGNAL_MASK
+ * kvm_v2_sigmask_install - fired when KVM_SET_SIGNAL_MASK
  * (sigfillset minus SIGALRM) is programmed at vcpu_create_one.
- * D.5-fix-2 landed this after the .vcpu_run flip + sregs install
- * (D.5-fix-1) surfaced a SIGALRM EINTR loop: UML's HZ=100 timer
- * fires before the guest can make progress, and without an installed
- * sigmask + post-KVM_RUN unblock_signals() the deferred-signal queue
- * stays armed and re-EINTRs on every dispatch. Mirrors v1's pattern
- * at kvm-v1-archive/thread.c:71-124. One event per pool member at
- * create. Per memo 27 §B.9: observability lands with the helper.
+ * UML's HZ=100 timer can otherwise interrupt KVM_RUN before the
+ * guest can make progress. One event fires per pool member at create.
  */
 TRACE_EVENT(um_backend_kvm_v2_sigmask_install,
 	TP_PROTO(int vcpu_fd),
@@ -413,18 +365,13 @@ TRACE_EVENT(um_backend_kvm_v2_sigmask_install,
 );
 
 /*
- * kvm_v2_trampoline_install — fired when the per-VM LSTAR trampoline
- * page (memo 26 §D.1) is allocated and the 5 SYSCALL-trap bytes
+ * kvm_v2_trampoline_install - fired when the per-VM LSTAR trampoline
+ * page is allocated and the 5 SYSCALL-trap bytes
  * (out %al, $0xf4 / sysretq) are written. gpa is __pa(host page); gva
  * is KVM_V2_LSTAR_GVA (= KVM_V2_TRAMPOLINE_GVA + 0x40 = the address
- * D.4 will program into MSR_LSTAR). Fires at most once per VM
+ * programmed into MSR_LSTAR). Fires at most once per VM
  * lifetime; idempotent re-invocations from the lazy retry path
- * short-circuit before reaching the trace site. Until D.4 / D.5 wire
- * MSR_LSTAR + ops.vcpu_run, no guest code reaches the trampoline,
- * but the bytes + storage are observable from this event.
- *
- * Per memo 27 §B.9: observability lands with the helper, not after
- * it earns a caller.
+ * short-circuit before reaching the trace site.
  */
 TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
 	TP_PROTO(u64 gpa, u64 gva),
@@ -441,14 +388,12 @@ TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
 );
 
 /*
- * kvm_v2_pml4_install — fired once per VM when D.4b's kernel-half PT
- * chain lands (memo 26 §D.4 D.4b). pud_gpa is __pa(pud_kva) — what gets
- * written to swapper_pg_dir[448] and init_mm.pgd[448] (OR'd with
- * _KERNPG_TABLE). gva is KVM_V2_LSTAR_GVA — the trampoline VA the chain
+ * kvm_v2_pml4_install - fired once per VM when the kernel-half PT
+ * chain is installed. pud_gpa is __pa(pud_kva), which is written to
+ * swapper_pg_dir[448] and init_mm.pgd[448] (OR'd with _KERNPG_TABLE).
+ * gva is KVM_V2_LSTAR_GVA, the trampoline VA the chain
  * walks down to. The chain is per-VM, VM-lifetime; freed only at
- * vm_destroy. Until D.5 flips .vcpu_run no guest CR3 walk hits the
- * chain — but the install is observable from D.4b. Per memo 27 §B.9
- * observability lands with the helper.
+ * vm_destroy.
  */
 TRACE_EVENT(um_backend_kvm_v2_pml4_install,
 	TP_PROTO(u64 pud_gpa, u64 gva),
@@ -465,37 +410,20 @@ TRACE_EVENT(um_backend_kvm_v2_pml4_install,
 );
 
 /*
- * kvm_v2_iotrap_syscall_enter / kvm_v2_iotrap_syscall_exit — bracket
- * the KVM_EXIT_IO → handle_syscall path that Phase D.2 wires (memo 26
- * §D.2). enter fires immediately before the handle_syscall() call,
- * after the syscall NR has been extracted from regs->gp[HOST_AX] and
- * the user RIP/RFLAGS have been propagated from RCX/R11; exit fires
- * immediately after handle_syscall returns, with the syscall return
- * value (still in regs->gp[HOST_AX] at this point — D.3 will marshal
- * it back to kvm_run->s.regs.regs.rax). port is run->io.port (today
- * UM_KVM_TRAP_SYSCALL = 0xf4); future Phase E.3 exception classes
- * will push other ports through the same enter/exit pair so the
- * tracer can distinguish them by port.
- *
- * Until D.5 flips ops.vcpu_run away from seccomp these events have no
- * caller and stay silent — D.2's helper is unreferenced from any
- * production .vcpu_run path. Per memo 27 §B.9 the observability lands
- * with the helper, not after it earns a caller.
+ * kvm_v2_iotrap_syscall_enter / kvm_v2_iotrap_syscall_exit - bracket
+ * the KVM_EXIT_IO to handle_syscall path. enter fires immediately
+ * before handle_syscall(), after the syscall NR has been extracted
+ * from regs->gp[HOST_AX] and the user RIP/RFLAGS have been propagated
+ * from RCX/R11. exit fires immediately after handle_syscall() returns,
+ * with the syscall return value still in regs->gp[HOST_AX]. port is
+ * run->io.port.
  */
 /*
- * kvm_v2_vcpu_eintr — fired when KVM_RUN returned -EINTR (SIGALRM or
+ * kvm_v2_vcpu_eintr - fired when KVM_RUN returned -EINTR (SIGALRM or
  * other unmasked host signal interrupted the ioctl before the guest
- * produced a meaningful exit_reason). D.3 replaces the historical panic
- * on rc<0 with a fall-through that re-enables preempt and returns; the
- * UML scheduler will re-enter the dispatcher on the next slice. Phase
- * F's full signal handling adds restart-via-RAX-rewrite; D.3's minimum
- * is "don't panic." Reference: v1 archive's EINTR path at
- * kvm-v1-archive/thread.c:5121-5127.
- *
- * Until D.5 flips ops.vcpu_run away from seccomp this event has no
- * caller and stays silent — the v2 dispatcher is unreferenced from any
- * production .vcpu_run path. Per memo 27 §B.9 observability lands with
- * the helper, not after it earns a caller.
+ * produced a meaningful exit_reason). The dispatcher re-enables
+ * preemption and returns so the UML scheduler can re-enter it on the
+ * next slice.
  */
 TRACE_EVENT(um_backend_kvm_v2_vcpu_eintr,
 	TP_PROTO(int cpu),
@@ -538,13 +466,11 @@ TRACE_EVENT(um_backend_kvm_v2_iotrap_syscall_exit,
 );
 
 /*
- * kvm_v2_exception_install — fired once per VM when E.1 lands the
+ * kvm_v2_exception_install - fired once per VM when the
  * IDT + handler stubs + GDT pages and patches PTE[1..3] of the
- * trampoline PT chain (memo 26 §E.1). The three GPAs are __pa() of
+ * trampoline PT chain are installed. The three GPAs are __pa() of
  * the buddy-allocated pages (each in physmem, so they sit inside
- * D.4b-pre's identity-offset memslot). Until E.3.5 flips .vcpu_run
- * away from seccomp the IDT/GDT pages have no consumer; per memo 27
- * §B.9 observability lands with the helper anyway.
+ * the identity-offset memslot).
  */
 TRACE_EVENT(um_backend_kvm_v2_exception_install,
 	TP_PROTO(u64 idt_gpa, u64 handlers_gpa, u64 gdt_gpa),
@@ -564,15 +490,12 @@ TRACE_EVENT(um_backend_kvm_v2_exception_install,
 );
 
 /*
- * kvm_v2_descriptors_sregs_install — fired once per pool member when
- * E.1's exception_install iterates the pool and re-issues
- * KVM_SET_SREGS to install the IDT/GDT bases. Codex --search audit
- * finding #5: the eager kvm_v2_install_production_sregs at
- * vcpu_create_one ran before E.1's pages existed, so its sregs.idt /
- * sregs.gdt fields stayed at the KVM_GET_SREGS defaults. This event
- * is the post-E.1 patch — observable per pool member separately from
- * the original sregs_install event so a tracer can distinguish "vCPU
- * created" from "descriptor tables installed".
+ * kvm_v2_descriptors_sregs_install - fired once per pool member when
+ * exception_install iterates the pool and re-issues
+ * KVM_SET_SREGS to install the IDT/GDT bases. This event is observable
+ * per pool member separately from the original sregs_install event so
+ * a tracer can distinguish "vCPU created" from "descriptor tables
+ * installed".
  */
 TRACE_EVENT(um_backend_kvm_v2_descriptors_sregs_install,
 	TP_PROTO(int vcpu_fd, u64 idt_base, u64 gdt_base),
@@ -592,17 +515,11 @@ TRACE_EVENT(um_backend_kvm_v2_descriptors_sregs_install,
 );
 
 /*
- * kvm_v2_per_vcpu_ist_tss_install — fired once per pool member when
- * E.2 lands the per-vCPU IST stack + TSS pages. The IST stack top is
+ * kvm_v2_per_vcpu_ist_tss_install - fired once per pool member when
+ * the per-vCPU IST stack + TSS pages are installed. The IST stack top is
  * the GVA the TSS body's IST1 field points at (CPU pushes iretq
  * frame here on exception delivery); the TSS GVA is what SREGS.tr.base
  * cached on this vCPU points at.
- *
- * Per memo 26 §E.2 + the codex audit independent finding (per-vCPU
- * TSS is REQUIRED — multiple vCPUs cannot share a TSS without IST1
- * collision risk). Until E.3.5 flips .vcpu_run away from seccomp the
- * IST stack + TSS pages have no consumer; per memo 27 §B.9
- * observability lands with the helper anyway.
  */
 TRACE_EVENT(um_backend_kvm_v2_per_vcpu_ist_tss_install,
 	TP_PROTO(int vcpu_fd, u64 ist_stack_top_gva, u64 tss_gva),
@@ -623,14 +540,9 @@ TRACE_EVENT(um_backend_kvm_v2_per_vcpu_ist_tss_install,
 );
 
 /*
- * Phase E.3 (memo 26 §E.3): per-class exception dispatch tracepoints.
+ * Per-class exception dispatch tracepoints.
  *
  * Fired once per KVM_EXIT_IO that lands on an exception-class port.
- * Until E.3.5 flips ops.vcpu_run away from seccomp these events have
- * no caller — kvm_v2_vcpu_run is unreferenced from production paths.
- * Per memo 27 §B.9 observability lands with the helper, not after it
- * earns a caller.
- *
  * Each event captures the user-state-at-fault from the IST iretq
  * frame; #PF and #GP additionally carry the CPU-pushed error_code
  * (and #PF carries CR2 from sync-regs sregs.cr2). The panic event

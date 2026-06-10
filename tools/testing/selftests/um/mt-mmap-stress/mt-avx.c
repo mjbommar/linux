@@ -10,7 +10,7 @@
 #define ITERS 50
 #define ALLOC_SZ 0x10000
 
-/* Pure AVX VMOVDQU memset — 16 bytes at a time. */
+/* Pure AVX VMOVDQU memset - 16 bytes at a time. */
 static void __attribute__((target("avx2")))
 avx_memset(void *p, unsigned char val, size_t n) {
     __m256i v = _mm256_set1_epi8((char)val);

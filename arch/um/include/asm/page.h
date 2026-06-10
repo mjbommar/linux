@@ -24,7 +24,7 @@ struct page;
  */
 
 #define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+#define copy_page(to, from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
 
 #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
 
@@ -35,13 +35,13 @@ typedef struct { unsigned long pgd; } pgd_t;
 
 typedef struct { unsigned long pmd; } pmd_t;
 #define pmd_val(x)	((x).pmd)
-#define __pmd(x) ((pmd_t) { (x) } )
+#define __pmd(x) ((pmd_t){ (x) })
 
 #if CONFIG_PGTABLE_LEVELS > 3
 
 typedef struct { unsigned long pud; } pud_t;
 #define pud_val(x)	((x).pud)
-#define __pud(x) ((pud_t) { (x) } )
+#define __pud(x) ((pud_t){ (x) })
 
 #endif /* CONFIG_PGTABLE_LEVELS > 3 */
 #endif /* CONFIG_PGTABLE_LEVELS > 2 */
@@ -64,9 +64,9 @@ typedef struct page *pgtable_t;
 #define pgd_val(x)	((x).pgd)
 #define pgprot_val(x)	((x).pgprot)
 
-#define __pte(x) ((pte_t) { (x) } )
-#define __pgd(x) ((pgd_t) { (x) } )
-#define __pgprot(x)	((pgprot_t) { (x) } )
+#define __pte(x) ((pte_t){ (x) })
+#define __pgd(x) ((pgd_t){ (x) })
+#define __pgprot(x)	((pgprot_t){ (x) })
 
 extern unsigned long uml_physmem;
 
@@ -77,10 +77,9 @@ extern unsigned long uml_physmem;
 
 #include <mem.h>
 
-/* Cast to unsigned long before casting to void * to avoid a warning from
- * mmap_kmem about cutting a long long down to a void *.  Not sure that
- * casting is the right thing, but 32-bit UML can't have 64-bit virtual
- * addresses
+/*
+ * Cast through unsigned long before converting to void * so 32-bit UML
+ * truncates physical addresses at the native virtual-address width.
  */
 #define __pa(virt) uml_to_phys((void *) (unsigned long) (virt))
 #define __va(phys) uml_to_virt((unsigned long) (phys))

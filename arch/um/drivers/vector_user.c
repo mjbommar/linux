@@ -61,9 +61,9 @@
 static const char padchar[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 static const char *template = "tapXXXXXX";
 
-/* This is very ugly and brute force lookup, but it is done
- * only once at initialization so not worth doing hashes or
- * anything more intelligent
+/*
+ * Linear lookup is sufficient here: this runs only once at initialization,
+ * so a hashed table would add complexity without a measurable benefit.
  */
 
 char *uml_vector_fetch_arg(struct arglist *ifspec, char *token)
@@ -224,16 +224,15 @@ static struct vector_fds *user_init_tap_fds(struct arglist *ifspec)
 	result->remote_addr = NULL;
 	result->remote_addr_size = 0;
 
-	/* TAP */
-	do {
-		if (dynamic) {
-			strcpy(iface, template);
-			for (i = 0; i < strlen(iface); i++) {
-				if (iface[i] == 'X') {
-					iface[i] = padchar[rand() % strlen(padchar)];
+		/* TAP */
+		do {
+			if (dynamic) {
+				strscpy(dynamic_ifname, template);
+				for (i = 0; i < strlen(iface); i++) {
+					if (iface[i] == 'X')
+						iface[i] = padchar[rand() % strlen(padchar)];
 				}
 			}
-		}
 		fd = create_tap_fd(iface);
 		if ((fd < 0) && (!dynamic)) {
 			printk(UM_KERN_ERR "uml_tap: failed to create tun interface\n");
@@ -455,12 +454,14 @@ static struct vector_fds *user_init_vde_fds(struct arglist *ifspec)
 	int sv[2];
 	struct vector_fds *result = NULL;
 
-	char *vnl = uml_vector_fetch_arg(ifspec,"vnl");
-	char *descr = uml_vector_fetch_arg(ifspec,"descr");
-	char *port = uml_vector_fetch_arg(ifspec,"port");
-	char *mode = uml_vector_fetch_arg(ifspec,"mode");
-	char *group = uml_vector_fetch_arg(ifspec,"group");
-	if (descr == NULL) descr = VDE_DEFAULT_DESCRIPTION;
+	char *vnl = uml_vector_fetch_arg(ifspec, "vnl");
+	char *descr = uml_vector_fetch_arg(ifspec, "descr");
+	char *port = uml_vector_fetch_arg(ifspec, "port");
+	char *mode = uml_vector_fetch_arg(ifspec, "mode");
+	char *group = uml_vector_fetch_arg(ifspec, "group");
+
+	if (descr == NULL)
+		descr = VDE_DEFAULT_DESCRIPTION;
 
 	argv[argc++] = "--descr";
 	argv[argc++] = descr;
@@ -848,8 +849,10 @@ int uml_vector_attach_bpf(int fd, void *bpf)
 int uml_vector_detach_bpf(int fd, void *bpf)
 {
 	struct sock_fprog *prog = bpf;
+	int err;
 
-	int err = setsockopt(fd, SOL_SOCKET, SO_DETACH_FILTER, bpf, sizeof(struct sock_fprog));
+	err = setsockopt(fd, SOL_SOCKET, SO_DETACH_FILTER, bpf,
+			 sizeof(struct sock_fprog));
 	if (err < 0)
 		printk(KERN_ERR BPF_DETACH_FAIL, prog->len, prog->filter, fd, -errno);
 	return err;

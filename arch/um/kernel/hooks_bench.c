@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Workstream B-05: microbenchmarks for Layer 2 gate cost.
+ * Microbenchmarks for static-key gate cost.
  *
  * Exports /sys/kernel/debug/um/bench (root, 0400) that, when read,
  * runs a tight kernel-side loop over each um_on_*() hook helper in
  * both off and on states and emits per-hook ns-per-call numbers.
  *
  * Why this lives in the kernel: the hook helpers are __always_inline;
- * measuring them from userspace would measure the USER→KERNEL syscall
+ * measuring them from userspace would measure the USER/KERNEL syscall
  * boundary instead of the gate itself. Running the loop in-kernel
  * isolates the gate cost.
  *
  * Why a debugfs-read entry (not a module param, not a /proc file):
  * triggering a benchmark is a meaningful side-effect that takes ~1 s
- * (7 hooks × 2 states × 1M iterations), so treating the fetch as a
+ * (7 hooks x 2 states x 1M iterations), so treating the fetch as a
  * pull-driven seq_file operation gives clean user-triggered control
  * without a new syscall or sysctl.
  *
- * Methodology: for each hook helper, 10 batches × 100k iterations
+ * Methodology: for each hook helper, 10 batches x 100k iterations
  * each in a tight loop, median-of-batches reported as the per-call
  * cost. Wall time via ktime_get_ns(). 100k per batch is large enough
  * to amortize ktime read overhead (~10 ns per read) to <1% of the
@@ -101,7 +101,7 @@ static u64 median_ns_per_call(u64 *batch_ns, unsigned int batches,
 			      unsigned int iters)
 {
 	/* divide each batch by iters, then median the per-call
-	 * figures. Returns ns × 1000 so one decimal of precision
+	 * figures. Returns ns * 1000 so one decimal of precision
 	 * survives the integer-only path.
 	 */
 	u64 per_call[BENCH_BATCHES];
@@ -187,7 +187,7 @@ static int um_bench_show(struct seq_file *m, void *v)
 	 */
 	save_gates(saved);
 
-	seq_puts(m, "# UML Layer 2 gate microbenchmark (B-05)\n");
+	seq_puts(m, "# UML static-key gate microbenchmark\n");
 	seq_printf(m, "# %u iters/batch x %u batches, median ns x 1000 per call\n",
 		   BENCH_ITERS, BENCH_BATCHES);
 	seq_puts(m, "# format: <site>  off_ns_x1000  on_ns_x1000\n");

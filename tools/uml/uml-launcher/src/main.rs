@@ -2,15 +2,8 @@
 //
 // uml-launcher — host-side launcher for User-Mode Linux kernels.
 //
-// Workstream C-10 of the UML redesign. See
-// Documentation/virt/uml/redesign/02-workstreams/
-// C-profiles-and-gaps/10-host-launcher-crosvm.md for the design
-// and Documentation/virt/uml/launcher.rst for the user-facing
+// See Documentation/virt/uml/launcher.rst for the user-facing
 // reference.
-//
-// v1 replaces the hand-rolled shell wrappers that people write
-// to invoke UML. v2 will add per-device vhost-user processes
-// with seccomp filters, matching crosvm/Firecracker posture.
 
 use std::process::ExitCode;
 

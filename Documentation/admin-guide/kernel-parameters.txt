@@ -8043,6 +8043,35 @@ Kernel parameters
 			the tests in environments where they run too slowly. All
 			CPUs must have the same vector unaligned access speed.
 
+	um_template_pause[={early|fork|early-fork}]
+			[UML] Enable the template-pause ready-point hook.
+			Without a value, a UML instance pauses when
+			/proc/um/template_pause is written. "early" pauses from
+			a late initcall before userspace starts. "fork" enables
+			fork-on-resume mode, where the paused master forks a child
+			for each take. "early-fork" combines both modes.
+
+	um_template_pause_pivot_test[=1]
+			[UML] In fork-on-resume mode, make each child run the
+			private-stack pivot test entry point and exit after
+			printing its marker. Intended for UML selftests.
+
+	um_template_pause_pool_member[=1]
+			[UML] In fork-on-resume mode, make each child restore
+			host signal state, respawn per-mm SKAS stubs, and enter
+			userspace as a long-lived pool member.
+
+	um_template_pause_private_stack=
+			[UML] Control whether fork-on-resume children use a
+			private clone stack. Format: <bool>. Defaults to true.
+			Disabling this forces the raw fork plus SIGKILL path.
+
+	um_ubd_no_uring=
+			[UML] Force the UBD block driver to use the legacy
+			synchronous helper-thread I/O path instead of io_uring.
+			Useful for performance comparisons and host io_uring
+			troubleshooting. Format: <bool>.
+
 	unknown_nmi_panic
 			[X86] Cause panic on unknown NMI.
 

@@ -57,11 +57,10 @@ int os_event_mask(enum um_irq_type irq_type)
 /*
  * Initial Epoll Setup
  *
- * FD disposition (C-09 commit 4): inherit-and-mutate. The main UML
+ * FD disposition: inherit-and-mutate. The main UML
  * kernel IRQ epollfd is the core event source driving all UML kernel
- * I/O. Across a forkserver fork() (see D41/D42 in
- * Documentation/virt/uml/redesign/04-risks/decisions-log.md), the
- * worker inherits this fd via CoW and continues to use it — adding
+ * I/O. Across a forkserver fork(), the worker inherits this fd via
+ * CoW and continues to use it: adding
  * and removing epoll entries as its own guest syscalls mutate the
  * device graph. EPOLL_CLOEXEC is set atomically to prevent leaks
  * into any accidental exec() (stub trampoline, helper subprocess).

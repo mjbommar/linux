@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/userspace-smoke/run-userspace-smoke.sh — host-side launcher
+# um/userspace-smoke/run-userspace-smoke.sh - host-side launcher
 # for the baseline UML userspace regression guard.
 #
 # Boots the UML binary, runs userspace-smoke.sh as init, looks
@@ -13,15 +13,13 @@
 #
 # Environment:
 #   UML_BINARY  path to the UML binary (default: /tmp/uml-research/linux)
-#   UML_MEM     mem=N argument (default: 256M — python3's heap needs
+#   UML_MEM     mem=N argument (default: 256M; python3's heap needs
 #               a bit more headroom than kprobes-stress's 64M)
 #   USERSPACE_SMOKE_BACKEND  optional `backend=force=<kind>` value.
 #               When set, the runner adds the cmdline arg + asserts
-#               that backend was selected at boot. Audit P0 #1
-#               called out that the prior "no backend forced" mode
-#               left dynamically-linked-binary KVM coverage entirely
-#               implicit. Set to "kvm" to force-test KVM coverage of
-#               the python3 / dash / coreutils stack.
+#               that backend was selected at boot. Set to "kvm" to
+#               force-test KVM coverage of the python3 / dash /
+#               coreutils stack.
 
 set -u
 
@@ -40,7 +38,7 @@ if [ ! -x "$GUEST_SCRIPT" ]; then
 	exit 1
 fi
 
-# Self-heal /dev/kvm ACL when forcing kvm (task #267).
+# Self-heal /dev/kvm ACL when forcing kvm.
 ensure_kvm_readable() {
 	local i
 	for i in 1 2 3; do

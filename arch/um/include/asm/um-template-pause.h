@@ -3,24 +3,17 @@
 #define __ASM_UM_TEMPLATE_PAUSE_H
 
 /*
- * UML template-pause + fork hook (Memo 09).
+ * UML template-pause hook.
  *
- * The cooperative in-kernel seam that lets a booted UML quiesce at a
- * named "ready point," signal its host supervisor (via raise(SIGSTOP)),
- * and resume execution on SIGCONT after the supervisor has forked the
- * host process N times and replumbed each child's identity.
+ * Lets a booted UML stop at a named ready point, raise SIGSTOP in its
+ * host process, and resume on SIGCONT after an optional identity blob
+ * has been supplied.
  *
- * Distinct from the older AFL-style forkserver path in
- * arch/um/kernel/snapshot.c (workstream C-09): that path's parent
- * never returns and uses fds 198/199 to drive per-iteration fork. The
- * template-pause path's parent DOES return after SIGCONT and is meant
- * to be forked externally by the supervisor (umlctl pool serve), so
- * each forked child wakes from the same SIGSTOP point with its own
- * identity blob to apply.
- *
- * Long-form design:
- *   Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-
- *   next-sprint/09-fork-server-snapshot-restore.md
+ * In fork-on-resume mode the paused master forks a child for each take,
+ * reports the child's host pid through the identity channel, and pauses
+ * again for the next take. This is separate from the AFL-style
+ * forkserver path in arch/um/kernel/snapshot.c, where fds 198/199 drive
+ * the loop.
  */
 
 #include <linux/errno.h>
@@ -29,8 +22,8 @@
 /*
  * Identity blob shape. The supervisor writes one of these to a memfd
  * that the master/child has open via env var UM_TEMPLATE_IDENTITY_FD.
- * Phase 1a (this commit): kernel reads and logs the blob but does
- * NOT yet apply MAC / IP / netdev changes — that's Phase 2.
+ * The kernel reads, validates, and applies the identity after the
+ * paused process resumes.
  */
 #define UM_TEMPLATE_IDENTITY_MAGIC 0x44495455u	/* 'UTID' little-endian */
 #define UM_TEMPLATE_IDENTITY_VERSION 1u
@@ -44,8 +37,8 @@ struct um_template_identity {
 	char  tap_name[16];		/* new IFF_TAP device name */
 	char  ipv4_cidr[20];		/* e.g. "10.7.0.42/24"; empty = unchanged */
 	char  ipv4_gateway[16];		/* e.g. "10.7.0.1"; empty = unchanged */
-	char  mconsole_path[96];	/* mconsole socket path (Phase 2+) */
-	__u8  reserved[32];		/* zero-init; future-proofing */
+	char  mconsole_path[96];	/* mconsole socket path */
+	__u8  reserved[32];		/* must be zero */
 };
 
 #ifdef CONFIG_UM_TEMPLATE_PAUSE
@@ -62,17 +55,17 @@ struct um_template_identity {
  *
  * Behavior:
  *   - Logs entry, then raises SIGSTOP on the UML host process.
- *   - Host kernel suspends the process; the supervisor sees the stop
- *     via waitpid(WUNTRACED) and fork(2)s the master.  Each child
- *     inherits the SIGSTOPped state.
- *   - When the supervisor SIGCONTs the (child) process, kill() returns
- *     and we resume here.
- *   - If UM_TEMPLATE_IDENTITY_FD is plumbed, read the identity blob
- *     and validate its magic/version.  Phase 1a logs; Phase 2 applies.
+ *   - Host kernel suspends the process; a supervisor may update the
+ *     identity memfd while the process is stopped.
+ *   - When the supervisor sends SIGCONT, execution resumes here.
+ *   - If UM_TEMPLATE_IDENTITY_FD is plumbed, read the identity blob,
+ *     validate its magic/version, and apply the requested identity.
  *
- * Returns 0 on a clean resume, -errno on a host syscall failure, or
- * -ENODEV if template-pause was not armed on the cmdline.  Identity-
- * read failures degrade gracefully (logged, but pause still succeeds).
+ * Returns 0 on a clean single-shot resume, -errno on a host syscall
+ * failure, or -ENODEV if template-pause was not armed on the cmdline.
+ * In fork-on-resume mode the master stays in the fork loop until an
+ * error or teardown; child behavior depends on the configured child
+ * entry path. Identity-read failures degrade gracefully.
  */
 int um_template_pause_enter(const char *named_point);
 

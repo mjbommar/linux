@@ -3,7 +3,7 @@
  *
  * Key UML-specific things we test:
  *  1. Use SYNC_REGS dirty bits (kvm_dirty_regs |= KVM_SYNC_X86_REGS) to update
- *     regs between KVM_RUNs — UML uses this to avoid KVM_SET_REGS ioctls.
+ *     regs between KVM_RUNs - UML uses this to avoid KVM_SET_REGS ioctls.
  *  2. Many KVM_RUN cycles (multiple IO traps).
  *  3. Modify CR4.PGE between dispatches via SYNC_X86_SREGS dirty bit
  *     (UML's TLB flush trick).

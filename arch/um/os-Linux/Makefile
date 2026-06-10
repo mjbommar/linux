@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0
-# 
+#
 # Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
 #
 
-# Don't instrument UML-specific code: this directory is USER-side
-# TUs that compile against host headers and don't participate in
-# the kernel sanitizer/coverage machinery. Disable every sanitizer
-# explicitly to keep the USER/KERNEL TU boundary clean.
+# Don't instrument UML-specific code: this directory is built against
+# host headers and does not participate in the kernel sanitizer or
+# coverage machinery. Disable every sanitizer explicitly to keep that
+# boundary clean.
 KCOV_INSTRUMENT                := n
 KASAN_SANITIZE                 := n
 KCSAN_SANITIZE                 := n
@@ -23,11 +23,7 @@ CFLAGS_signal.o += -Wframe-larger-than=4096
 # signals into UML's in-kernel handlers. Without this strip,
 # graph-tracing these TUs leaks one shadow-stack entry per signal
 # delivery because the signal frame is torn down via rt_sigreturn
-# rather than a function `ret`. See UML redesign decisions-log
-# D34 (source 1). Reaching these files required a per-file
-# CFLAGS_REMOVE hook in arch/um/scripts/Makefile.rules; before
-# that hook, CFLAGS_REMOVE_<file>.o did nothing for USER_OBJS
-# because the rule overrode c_flags wholesale.
+# rather than a function `ret`.
 CFLAGS_REMOVE_signal.o := $(CC_FLAGS_FTRACE)
 CFLAGS_REMOVE_sigio.o := $(CC_FLAGS_FTRACE)
 CFLAGS_REMOVE_irq.o := $(CC_FLAGS_FTRACE)

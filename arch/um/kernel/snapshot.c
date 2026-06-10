@@ -1,36 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML snapshot / forkserver seam (workstream C-09).
+ * UML snapshot / forkserver interface.
  *
- * This translation unit is the cooperative in-kernel seam that lets a
- * UML guest reach a named "ready point," quiesce to a barrier, and
- * ``fork()`` itself for each fuzz iteration. The AFL-compatible
+ * This translation unit provides the in-kernel coordination point that
+ * lets a UML guest reach a named "ready point," quiesce to a barrier,
+ * and fork() itself for each fuzz iteration. The AFL-compatible
  * 12-byte-per-iteration wire protocol on fds 198/199 lives here too;
- * it binds directly onto syzkaller's ``Instance.RunSnapshot`` API so
+ * it binds directly onto syzkaller's Instance.RunSnapshot API so
  * the fuzz profile does not need its own per-iteration negotiation.
  *
- * Commit 2 (this patch) lands the real ``um_snapshot_ready()``
- * quiesce-and-fork path with strict ready-point assertions (D37 pull-
- * forward #2), driven by a debugfs trigger. Workers do a single round-
- * trip: AFL handshake → fork → worker exits → parent reaps → return.
- * Full multi-iteration forkserver loop and the worker-side reinit
- * that lets a worker run guest code both come in commit 3.
- *
- * Commit 1 landed: the static key, the mmap-region registry, and
- * WARN-stubbed public entry points. Commit 3 lands worker-side post-
- * fork reinit (including the KASAN MADV_DONTFORK fix from D37 pull-
- * forward #6); commit 4 the host-fd hygiene sweep; commit 5 the user
- * doc + selftest; commit 6 the fuzz-defconfig wire-up.
- *
- * Design + decisions:
- *   - Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/
- *     09-snapshot-forkserver.md — the v1 design.
- *   - 04-risks/decisions-log.md D35 — v1 scope (forkserver, not CRIU).
- *   - 04-risks/decisions-log.md D36 — v2 on-disk format (ELF + notes).
- *   - 04-risks/decisions-log.md D37 — v1 pull-forward items, including
- *     this file's mmap registry and the ready-point assertions below.
- *   - 04-risks/decisions-log.md D38 — v2 Mode A vs Mode B split; v1 is
- *     Mode B by construction.
+ * The ready point asserts that the current UML state can be forked,
+ * enables the snapshot static key only while the forkserver is active,
+ * and runs the AFL-compatible protocol until the fuzzer disconnects.
  */
 
 #include <linux/debugfs.h>
@@ -55,11 +36,8 @@
 
 #include <os.h>
 
-/* AFL forkserver protocol: caller opens host fds 198 (fuzzer→server)
- * and 199 (server→fuzzer) before exec'ing UML. Matches AFL++'s
- * src/afl-forkserver.c and lcamtuf's original technical_details.txt.
- * See 09-snapshot-forkserver.md §"Per-iteration protocol (AFL-
- * compatible)" for the wire format.
+/* AFL forkserver protocol: caller opens host fds 198 (fuzzer to server)
+ * and 199 (server to fuzzer) before exec'ing UML.
  */
 #define UM_FORKSERVER_CTL_FD	198
 #define UM_FORKSERVER_STATUS_FD	199
@@ -67,7 +45,7 @@
 /* 4-byte handshake the parent sends on status fd right after quiesce.
  * AFL++ accepts any value whose top 24 bits match 'A','F','L' and
  * uses the bottom 8 bits for protocol-version flags. We send the
- * classic zero value; commit 5's selftest speaks matching bytes.
+ * classic zero value.
  */
 static const u8 um_forkserver_hello[4] = { 'A', 'F', 'L', 0 };
 
@@ -80,11 +58,11 @@ static const u8 um_forkserver_hello[4] = { 'A', 'F', 'L', 0 };
 DEFINE_STATIC_KEY_FALSE(um_snapshot_enabled);
 EXPORT_SYMBOL_GPL(um_snapshot_enabled);
 
-/* Registry of kernel mmap regions (D37 pull-forward #1). Populated by
- * boot-time callers of um_register_mmap_region(); today append-only
- * at boot, read without the lock afterwards. The lock is declared
- * here for the day a post-boot registration path appears (hot-plug
- * hostfs, runtime-attached time-travel shm, …).
+/* Registry of kernel mmap regions. Populated by
+ * boot-time callers of um_register_mmap_region(); append-only at boot
+ * and read without the lock afterwards. The lock is declared here for
+ * a possible post-boot registration path, such as hot-plug hostfs or
+ * runtime-attached time-travel shm.
  */
 LIST_HEAD(um_mmap_regions);
 EXPORT_SYMBOL_GPL(um_mmap_regions);
@@ -113,31 +91,28 @@ void um_register_mmap_region(struct um_mmap_region *r)
 EXPORT_SYMBOL_GPL(um_register_mmap_region);
 
 /*
- * Strict ready-point assertions (D37 pull-forward #2).
+ * Strict ready-point assertions.
  *
  * Fires WARN_ONCE for every invariant the ready-point contract
  * requires. Returns 0 if all held, -EBUSY if any violation was
  * observed. Callers should propagate the error up and refuse to fork:
- * snapshotting from an inconsistent state breaks both the fork-
- * server (Q6 drift) and the future v2 writer.
+ * snapshotting from an inconsistent state breaks the forkserver.
  *
-/*
- * Today we check the cheapest/most-load-bearing subset:
+ * This checks the low-cost invariants needed before forking:
  *   - caller is in task context (not in IRQ or softirq)
  *   - caller has no pending non-SIGCHLD signals
- *   - UML is UP (multi-vCPU quiesce is commit-3+ scope)
- *   - UML's own signals_enabled flag is 1 (D41): the ready-point
- *     contract requires a caller who has NOT already gated UML
- *     signals, so our own os_snapshot_block_iter_signals() call
- *     inside the forkserver loop actually takes effect. A future
+ *   - UML is UP (multi-vCPU quiesce is not supported here)
+ *   - UML's own signals_enabled flag is 1: the ready-point
+ *     contract requires a caller who has not already gated UML
+ *     signals, so the os_snapshot_block_iter_signals() call
+ *     inside the forkserver loop actually takes effect. A
  *     caller who enters the ready point already-gated would
  *     otherwise silently make the block-iter a no-op and the
- *     crash mode from D41's investigation would return.
+ *     signal-delivery hazard would return.
  *
- * The richer assertions the design doc describes — dirty inodes,
- * pending RCU callbacks, non-caller kthreads in TASK_RUNNING — are
- * expensive enough that we land them incrementally; commit 3 grows
- * this function as the worker reinit path matures.
+ * More expensive checks, such as dirty inodes, pending RCU callbacks,
+ * and non-caller kthreads in TASK_RUNNING, are intentionally not part
+ * of this hot ready-point path.
  */
 static int um_snapshot_assert_ready(const char *named_point)
 {
@@ -154,108 +129,73 @@ static int um_snapshot_assert_ready(const char *named_point)
 		violations++;
 
 	if (WARN_ONCE(num_online_cpus() > 1,
-		      "%s(\"%s\"): SMP ready point not yet supported; commit 3+ will park secondary vCPUs. Build with NR_CPUS=1 for now.\n",
+		      "%s(\"%s\"): SMP ready point unsupported; build with NR_CPUS=1.\n",
 		      __func__, named_point))
 		violations++;
 
 	if (WARN_ONCE(um_get_signals() != 1,
-		      "%s(\"%s\"): UML signals_enabled is %d at ready-point entry; must be 1 per D41 signal-gating contract\n",
+		      "%s(\"%s\"): UML signals_enabled is %d at ready-point entry; must be 1\n",
 		      __func__, named_point, um_get_signals()))
 		violations++;
 
 	/*
-	 * Task #250: refuse to enter the AFL forkserver path under
-	 * the KVM backend. The C-09 v1 forkserver uses raw
-	 * `__NR_fork` (os_snapshot_fork_worker), and a fork() under
-	 * KVM aliases the parent's /dev/kvm + per-vCPU mmap state
-	 * into the child. Two processes then race ioctls against
-	 * the same vCPU, the kvm_run mmap is shared (concurrent
-	 * KVM_RUN corrupts state), and KVM_USER_MEMORY_REGION host
-	 * VAs that were CoW-mapped to the parent's pages diverge in
-	 * the child once any write fires.
+	 * Refuse to enter the AFL forkserver path under the KVM backend.
+	 * This path uses raw __NR_fork (os_snapshot_fork_worker), and
+	 * fork() under KVM aliases the parent's /dev/kvm + per-vCPU mmap
+	 * state into the child. Two processes then race ioctls against the
+	 * same vCPU, the kvm_run mmap is shared (concurrent KVM_RUN
+	 * corrupts state), and KVM_USER_MEMORY_REGION host VAs that were
+	 * CoW-mapped to the parent's pages diverge in the child once any
+	 * write fires.
 	 *
 	 * The proper KVM-aware snapshot path saves vCPU state via
 	 * KVM_GET_REGS / SREGS / MSRS / FPU at checkpoint, snapshots
 	 * the memslot host VAs, and restores via KVM_SET_* on either
-	 * a fresh vCPU in the same VM or a new VM entirely. That's
-	 * deferred to a future commit (vision §"Snapshot/forkserver
-	 * <50 ms cold-start"). Until then, refuse loudly so a
-	 * misconfigured fuzz build doesn't silently corrupt KVM
-	 * state.
+	 * a fresh vCPU in the same VM or a new VM entirely. This helper
+	 * is only the fork-based snapshot path; refuse loudly so a
+	 * misconfigured fuzz build doesn't silently corrupt KVM state.
 	 *
-	 * Detection: um_backend->kind. The dynamic-backend selector
-	 * may resolve to KVM at boot even when CONFIG_UM_BACKEND_
-	 * KVM_ONLY=n, so the runtime check is more reliable than
-	 * any compile-time `depends on !UM_BACKEND_KVM_ONLY` clause.
+	 * Detection: um_backend->kind. The dynamic-backend selector may
+	 * resolve to KVM at boot, so a runtime check is more reliable than
+	 * a build-time dependency.
 	 */
 	if (WARN_ONCE(um_backend &&
 		      um_backend->kind == UM_BACKEND_KIND_KVM,
-		      "%s(\"%s\"): C-09 v1 snapshot/forkserver is incompatible with the KVM backend — fork() under KVM corrupts /dev/kvm + vCPU state. KVM-aware snapshot path is a Phase 3 deliverable.\n",
+		      "%s(\"%s\"): KVM backend cannot use fork snapshot\n",
 		      __func__, named_point))
 		violations++;
 
 	return violations ? -EBUSY : 0;
 }
 
-/*
- * AFL forkserver loop: handshake once, then iterate
- * {read cmd, fork, report pid} forever until the fuzzer
- * disconnects (fd 198 closes / fd 199 breaks).
- *
- * The parent never returns from this function in the happy path
- * — real fuzz use sits here for the UML process's entire lifetime.
- * On fuzzer disconnect, the function returns so the caller can tear
- * down. Iteration count is tracked for the diagnostic printk so
- * operators can see forkserver is making progress.
- *
- * Commit 3a scope: worker still exits immediately (no reinit, no
- * guest code); parent still does not waitpid (status-byte response
- * arrives in 3c/3d). The multi-iteration loop alone lets a host
- * harness drive arbitrarily many iterations and catches at-scale
- * bugs (leaks across iterations, stale fd state, parent drift) that
- * commit 2's one-shot could not see.
- *
- * Protocol on fds 198/199 matches AFL++ afl-forkserver.c:
- *
- *   one time:
- *     parent -> 199: 4 bytes "AFL\0"                   (handshake)
- *
- *   per iteration:
- *     198    -> parent: 4 bytes testcase descriptor    (ignored today)
- *     parent forks
- *     parent -> 199: 4 bytes worker host pid
- *     worker exit_group(0)
- *
- * Commit 3c/3d extend per-iteration with waitpid + status byte.
- */
-static int um_snapshot_forkserver_loop(const char *named_point)
+static bool um_snapshot_forkserver_fds_ready(const char *named_point)
 {
-	unsigned long iter = 0;
-	u32 cmd;
-	int pid, status;
-	ssize_t n;
-
-	/* If a host harness didn't plumb fds 198/199 open, do not enter
-	 * the AFL path. This makes um_snapshot_ready() safe to invoke
-	 * from debugfs even when no fuzzer is listening — the caller
-	 * gets a clean printk and a non-zero return, and nothing in
-	 * kernel state is disturbed.
+	/* If fds 198/199 are not open, do not enter the AFL path. This
+	 * makes um_snapshot_ready() safe to invoke from debugfs even when
+	 * no fuzzer is listening; the caller gets a clean printk and a
+	 * non-zero return, and nothing in kernel state is disturbed.
 	 *
-	 * Returning here BEFORE flipping um_snapshot_enabled is load-
+	 * Returning here before flipping um_snapshot_enabled is load-
 	 * bearing: a benign debugfs poke (someone writing a name to
 	 * /sys/kernel/debug/um/snapshot_ready in a non-fuzz profile or
 	 * before a fuzzer has attached) must not permanently latch the
 	 * hot-path check on. If the key were enabled in the caller and
-	 * we returned here, every subsequent kernel hot path gated by
+	 * this returned here, every subsequent kernel hot path gated by
 	 * um_snapshot_enabled would pay the taken-branch cost forever,
-	 * turning a diagnostic poke into a performance regression.
+	 * turning a debugfs poke into a performance regression.
 	 */
-	if (!os_snapshot_fd_is_open(UM_FORKSERVER_CTL_FD) ||
-	    !os_snapshot_fd_is_open(UM_FORKSERVER_STATUS_FD)) {
-		pr_info("snapshot: ready point \"%s\" hit but fds %d/%d not open; forkserver skipped\n",
-			named_point, UM_FORKSERVER_CTL_FD, UM_FORKSERVER_STATUS_FD);
-		return -ENODEV;
-	}
+	if (os_snapshot_fd_is_open(UM_FORKSERVER_CTL_FD) &&
+	    os_snapshot_fd_is_open(UM_FORKSERVER_STATUS_FD))
+		return true;
+
+	pr_info("snapshot: ready point \"%s\" hit but fds %d/%d not open; forkserver skipped\n",
+		named_point, UM_FORKSERVER_CTL_FD, UM_FORKSERVER_STATUS_FD);
+	return false;
+}
+
+static int um_snapshot_forkserver_handshake(void)
+{
+	ssize_t n;
 
 	n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
 				  um_forkserver_hello,
@@ -264,6 +204,160 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 		pr_err("snapshot: handshake write failed: %zd\n", n);
 		return (int)n;
 	}
+
+	return 0;
+}
+
+static int um_snapshot_forkserver_parent_exit(int ret)
+{
+	os_snapshot_unblock_iter_signals();
+	static_branch_disable(&um_snapshot_enabled);
+	return ret;
+}
+
+static void um_snapshot_reap_previous_workers(void)
+{
+	/*
+	 * Drain any zombies from previous iterations before the fuzzer's
+	 * next command. Non-blocking so it never enters the wait-crash
+	 * path; between iterations the fuzzer's think time is plenty for
+	 * prior workers to have exited via os_snapshot_worker_exit(0), so
+	 * in practice this reaps them all on the first call. If a worker
+	 * has not exited yet, the zombie sticks around one more iteration,
+	 * which is tolerable at any real fuzz cadence.
+	 */
+	(void)os_snapshot_reap_zombies();
+}
+
+static int um_snapshot_read_forkserver_cmd(unsigned long iter)
+{
+	u32 cmd;
+	ssize_t n;
+
+	n = os_snapshot_read_all(UM_FORKSERVER_CTL_FD, &cmd, sizeof(cmd));
+	if (n >= 0)
+		return 0;
+
+	/* EPIPE / EOF: fuzzer disconnected, normal exit path. */
+	if (n == -EPIPE)
+		pr_info("snapshot: fuzzer disconnected after %lu iteration(s)\n",
+			iter);
+	else
+		pr_err("snapshot: command read failed at iter %lu: %zd\n",
+		       iter, n);
+
+	return (int)n;
+}
+
+static int um_snapshot_fork_worker(unsigned long iter)
+{
+	int pid;
+
+	pid = os_snapshot_fork_worker();
+	if (pid < 0)
+		pr_err("snapshot: fork failed at iter %lu: %d\n", iter, pid);
+
+	return pid;
+}
+
+static int um_snapshot_report_worker_pid(unsigned long iter, int pid)
+{
+	ssize_t n;
+
+	n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
+				  &pid, sizeof(pid));
+	if (n >= 0)
+		return 0;
+
+	if (n == -EPIPE)
+		pr_info("snapshot: fuzzer disconnected mid-iter %lu\n", iter);
+	else
+		pr_err("snapshot: pid write failed at iter %lu: %zd\n",
+		       iter, n);
+
+	return (int)n;
+}
+
+static int um_snapshot_report_worker_status(unsigned long iter)
+{
+	int status = 0;
+	ssize_t n;
+
+	n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
+				  &status, sizeof(status));
+	if (n >= 0)
+		return 0;
+
+	if (n == -EPIPE)
+		pr_info("snapshot: fuzzer disconnected while writing status at iter %lu\n",
+			iter);
+	else
+		pr_err("snapshot: status write failed at iter %lu: %zd\n",
+		       iter, n);
+
+	return (int)n;
+}
+
+static int um_snapshot_report_worker(unsigned long iter, int pid)
+{
+	int ret;
+
+	/* Parent: AFL protocol per iteration -
+	 *   1. report the worker pid (4 bytes)
+	 *   2. report the exit status (4 bytes, hard 0)
+	 *
+	 * Do not wait for the worker between pid and status writes: the
+	 * parent can take host signals while it is outside normal UML kernel
+	 * execution, and the signal path may re-enter the scheduler with
+	 * parent-captured longjmp targets. Reap exited workers at the top of
+	 * the next loop instead. Status is reported as hard 0; consumers that
+	 * need worker crash status must use a side channel such as the
+	 * coverage map.
+	 */
+	ret = um_snapshot_report_worker_pid(iter, pid);
+	if (ret)
+		return ret;
+
+	return um_snapshot_report_worker_status(iter);
+}
+
+/*
+ * AFL forkserver loop: handshake once, then iterate
+ * {read cmd, fork, report pid} forever until the fuzzer
+ * disconnects (fd 198 closes / fd 199 breaks).
+ *
+ * The parent never returns from this function in the happy path;
+ * real fuzz use sits here for the UML process's entire lifetime.
+ * On fuzzer disconnect, the function returns so the caller can tear
+ * down. Iteration count is logged so userspace can see forkserver
+ * progress.
+ *
+ * Protocol on fds 198/199 matches AFL++ afl-forkserver.c:
+ *
+ *   one time:
+ *     parent -> 199: 4 bytes "AFL\0"                   (handshake)
+ *
+ *   per iteration:
+ *     198    -> parent: 4 bytes testcase descriptor    (ignored)
+ *     parent forks
+ *     parent -> 199: 4 bytes worker host pid
+ *     worker exit_group(0)
+ *
+ * The multi-iteration loop lets a fuzzer drive arbitrarily many
+ * iterations and exposes leaks across iterations, inherited fd state,
+ * and parent drift.
+ */
+static int um_snapshot_forkserver_loop(const char *named_point)
+{
+	unsigned long iter = 0;
+	int pid, ret;
+
+	if (!um_snapshot_forkserver_fds_ready(named_point))
+		return -ENODEV;
+
+	ret = um_snapshot_forkserver_handshake();
+	if (ret)
+		return ret;
 
 	/*
 	 * Forkserver is committed: fds plumbed, handshake sent. Flip
@@ -290,139 +384,30 @@ static int um_snapshot_forkserver_loop(const char *named_point)
 	os_snapshot_block_iter_signals();
 
 	for (;;) {
-		/*
-		 * Drain any zombies from previous iterations before the
-		 * fuzzer's next command. Non-blocking so it never enters
-		 * the wait-crash path; between iterations the fuzzer's
-		 * think time is plenty for prior workers to have exited
-		 * via os_snapshot_worker_exit(0), so in practice this
-		 * reaps them all on the first call. If a worker hasn't
-		 * exited yet (extremely tight fuzz loop with a slow
-		 * worker), the zombie sticks around one more iteration
-		 * — tolerable at any real fuzz cadence.
-		 */
-		(void)os_snapshot_reap_zombies();
+		um_snapshot_reap_previous_workers();
 
-		n = os_snapshot_read_all(UM_FORKSERVER_CTL_FD,
-					 &cmd, sizeof(cmd));
-		if (n < 0) {
-			/* EPIPE / EOF: fuzzer disconnected — normal exit
-			 * path. Anything else is a loud failure.
-			 */
-			if (n == -EPIPE)
-				pr_info("snapshot: fuzzer disconnected after %lu iteration(s)\n",
-					iter);
-			else
-				pr_err("snapshot: command read failed at iter %lu: %zd\n",
-				       iter, n);
-			os_snapshot_unblock_iter_signals();
-			static_branch_disable(&um_snapshot_enabled);
-			return (int)n;
-		}
+		ret = um_snapshot_read_forkserver_cmd(iter);
+		if (ret)
+			return um_snapshot_forkserver_parent_exit(ret);
 
-		pid = os_snapshot_fork_worker();
-		if (pid < 0) {
-			pr_err("snapshot: fork failed at iter %lu: %d\n",
-			       iter, pid);
-			os_snapshot_unblock_iter_signals();
-			static_branch_disable(&um_snapshot_enabled);
-			return pid;
-		}
+		pid = um_snapshot_fork_worker(iter);
+		if (pid < 0)
+			return um_snapshot_forkserver_parent_exit(pid);
 
 		if (pid == 0) {
 			/*
-			 * Worker path — 3d-c iteration.
-			 *
-			 * Intermediate scope: worker returns from the
-			 * forkserver loop (so it can eventually resume
-			 * guest code) but does NOT open the UML signal
-			 * gate. The first attempt at 3d-c (with unblock
-			 * here) crashed both parent and worker at the
-			 * same BSS/heap addresses as the waitpid
-			 * investigation from D41, consistent with the
-			 * scheduler re-entering via SIGALRM / timer
-			 * dispatch and longjmp'ing into a jmp_buf that
-			 * was saved by the parent pre-fork (stale).
-			 *
-			 * Keeping signals gated in the worker means no
-			 * preemption, no SIGIO, no scheduler re-entry
-			 * via the timer path. The return still unwinds
-			 * up through um_snapshot_ready → debugfs_write
-			 * → sys_write; if THAT path doesn't crash, the
-			 * worker has reached guest-userspace and can
-			 * run un-preemptible code (echo, exit) before
-			 * halting. 3d-d's job is to then re-enable
-			 * signals only after the scheduler has been
-			 * rebuilt so that longjmp targets are valid.
+			 * Worker path. Keep UML signals gated until worker
+			 * host-side state has been rebuilt; otherwise timer or
+			 * SIGIO delivery can re-enter the scheduler with
+			 * parent-captured longjmp targets.
 			 */
 			um_snapshot_worker_init();
 			return 0;
 		}
 
-		/* Parent: AFL protocol per iteration -
-		 *   1. report the worker pid (4 bytes)
-		 *   2. report the exit status (4 bytes, hard 0 today)
-		 *
-		 * KNOWN LIMITATION (v1 ceiling — four iterations of
-		 * investigation have failed to resolve, most recently
-		 * on 2026-04-23 during the Finding #1 fix attempt).
-		 * Inserting ANY wait4 path between (1) and (2) — blocking
-		 * wait4, WNOHANG poll loop, poll loop with
-		 * clock_nanosleep / sched_yield between polls, poll loop
-		 * with host sigprocmask SIG_BLOCK around the poll — all
-		 * crash the parent with "Kernel mode signal 4" (SIGILL)
-		 * in kernel context. The underlying hazard is UML's timer
-		 * SIGALRM (or any host signal queued while we're in
-		 * non-UML-kernel code) being delivered into UML's signal
-		 * handler mid-poll, which runs switch_threads() and
-		 * longjmp()s into a jmp_buf captured pre-fork — stale
-		 * stack, next instruction decoded from garbage, SIGILL.
-		 *
-		 * Workaround that ACTUALLY works today: the non-blocking
-		 * os_snapshot_reap_zombies() drain at the top of the loop
-		 * reaps any workers that exited since the prior iteration.
-		 * Status is reported as hard 0 for now. Consumers that
-		 * care about worker status must use a side channel (e.g.
-		 * AFL's shared-memory coverage map encodes crashes
-		 * independently; fuzzer-facing status=0 is the documented
-		 * v1 ceiling — see Documentation/virt/uml/snapshot.rst
-		 * §"Limitations (v1 ceiling)").
-		 *
-		 * Proper fix requires UML infrastructure work on the
-		 * signal/schedule interaction during parent non-kernel
-		 * execution windows (or a refactor where the worker
-		 * reports its own status via the status fd before
-		 * exit — which sidesteps the whole parent-reap path).
-		 * Tracked as a follow-on to Finding #1.
-		 */
-		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
-					  &pid, sizeof(pid));
-		if (n < 0) {
-			if (n == -EPIPE)
-				pr_info("snapshot: fuzzer disconnected mid-iter %lu\n",
-					iter);
-			else
-				pr_err("snapshot: pid write failed at iter %lu: %zd\n",
-				       iter, n);
-			os_snapshot_unblock_iter_signals();
-			static_branch_disable(&um_snapshot_enabled);
-			return (int)n;
-		}
-
-		status = 0;	/* see KNOWN LIMITATION above. */
-		n = os_snapshot_write_all(UM_FORKSERVER_STATUS_FD,
-					  &status, sizeof(status));
-		if (n < 0) {
-			if (n == -EPIPE)
-				pr_info("snapshot: fuzzer disconnected while writing status at iter %lu\n",
-					iter);
-			else
-				pr_err("snapshot: status write failed at iter %lu: %zd\n",
-				       iter, n);
-			os_snapshot_unblock_iter_signals();
-			static_branch_disable(&um_snapshot_enabled);
-			return (int)n;
-		}
+		ret = um_snapshot_report_worker(iter, pid);
+		if (ret)
+			return um_snapshot_forkserver_parent_exit(ret);
 
 		iter++;
 	}
@@ -432,16 +417,10 @@ static int um_snapshot_forkserver_loop(const char *named_point)
  * um_snapshot_ready() - reach the named "ready point" and quiesce.
  * @named_point: printable identifier of the call site.
  *
- * Commit 3a semantics: runs the multi-iteration AFL forkserver loop
- * until the fuzzer disconnects, if fds 198/199 are open; otherwise
- * emits an info message and returns. In the happy path, this
- * function does not return — the parent sits in the forkserver loop
- * for the UML process's entire lifetime, and only workers return
- * (via os_snapshot_worker_exit in commit 3a; via
- * um_snapshot_worker_init + caller unwind in commits 3c/3d).
- *
- * Commits 3c/3d extend per-iteration with worker-side reinit +
- * waitpid + status-byte response.
+ * Runs the AFL forkserver loop until the fuzzer disconnects, if fds
+ * 198/199 are open; otherwise emits an info message and returns. In
+ * the happy path the parent remains in the forkserver loop for the UML
+ * process's lifetime, and only workers return.
  */
 void um_snapshot_ready(const char *named_point)
 {
@@ -462,28 +441,21 @@ void um_snapshot_ready(const char *named_point)
 	 * only after the fd-open check passes and the handshake lands,
 	 * and flipped off again on every loop exit path. That keeps a
 	 * benign debugfs poke (ready-point hit with no fuzzer plumbed)
-	 * from latching the hot-path cost on — a bug we regressed into
-	 * once before (see commit history around 2026-04 snapshot
-	 * review).
+	 * from latching the hot-path cost on.
 	 */
 	ret = um_snapshot_forkserver_loop(named_point);
 
 	/*
 	 * Two classes of callers reach this point:
 	 *   - Parent, on disconnect / error (fuzzer closed its end,
-	 *     fork failed, write failed). This path currently still
-	 *     panics shortly afterwards on the parent-unwind bug
-	 *     noted in commit 2's header; fuzz-profile use never
-	 *     reaches it in the happy path.
-	 *   - Worker, from commit 3d-c onwards, returning up through
-	 *     the forkserver loop to continue guest execution.
+	 *     fork failed, write failed).
+	 *   - Worker, returning up through the forkserver loop to
+	 *     continue guest execution.
 	 *
 	 * Deliberately no pr_info here. The worker's kernel state
 	 * immediately post-fork has seen fork-inheritance quirks
 	 * that trip vsnprintf via its per-CPU / TLS lookups
-	 * (observed in commits 3c and 3d-c's bring-up). A future
-	 * commit can re-introduce a diagnostic print once the
-	 * worker-side state is consistent enough for printk.
+	 * before worker-side state is consistent enough for printk.
 	 * Suppress ret to silence unused-variable warnings.
 	 */
 	(void)ret;
@@ -496,16 +468,14 @@ EXPORT_SYMBOL_GPL(um_snapshot_ready);
  *
  * Called exactly once in the forked child right after the
  * os_snapshot_fork_worker() return discriminates parent vs worker.
- * Commit 3c scope (this commit): a no-crash "forget" that drops
- * stale references to parent-owned host threads, POSIX timers, and
- * SIGIO infrastructure. The worker still exits immediately via
- * os_snapshot_worker_exit(0) after this returns — running actual
- * guest code is commit 3d's job, and needs the additional recreate
- * logic (timer re-arm, new SIGIO thread, stub respawn).
+ * Drops parent-owned references to host threads, POSIX timers,
+ * and SIGIO infrastructure, then rebuilds the child-side pieces that
+ * can be safely recreated before guest execution resumes.
  *
  * What fork() inherits but child cannot safely use:
  *   - write_sigio_td (pthread_t of parent's SIGIO helper thread):
- *     stale; child has no such thread. Abandon, do not join.
+ *     invalid in the child because no such thread exists. Abandon,
+ *     do not join.
  *   - epollfd (file descriptor parent's SIGIO thread was waiting on):
  *     inherited but has no reader in the child. Close.
  *   - POSIX timers (per-CPU): timer_create()'d with SIGEV_THREAD_ID
@@ -513,22 +483,17 @@ EXPORT_SYMBOL_GPL(um_snapshot_ready);
  *     exist in the child. Disable so no signal delivery is
  *     attempted.
  *
- * Explicitly out of scope for commit 3c:
- *   - Recreating a child-side SIGIO thread / timer / signalfd.
- *     That's commit 3d, where the worker needs them to run code.
+ * Explicitly out of scope here:
+ *   - Recreating a child-side signalfd.
  *   - Seccomp stub children: no stubs exist at ready-point because
  *     no guest userspace task has run yet. First user-space
- *     syscall in a worker (commit 3d) will lazily spawn one via
- *     start_userspace().
+ *     syscall in a worker will lazily spawn one via start_userspace().
  *   - Mconsole socket: compiled out in the fuzz profile per
- *     `03-profiles/fuzz.md`; nothing to forget.
+ *     03-profiles/fuzz.md; nothing to forget.
  *   - UBD / winch / virtio: not present in the fuzz profile init;
- *     if a future profile enables them with snapshot, they'll want
- *     their own "forget" helpers here.
+ *     profiles that enable them with snapshot need their own forget
+ *     helpers here.
  *
- * See D39 (the commit-3 split) and the agent research captured in
- * the implementation notes for `09-snapshot-forkserver.md` for the
- * full host-side inventory.
  */
 void um_snapshot_worker_init(void)
 {
@@ -537,51 +502,39 @@ void um_snapshot_worker_init(void)
 	/*
 	 * Step 0: flip um_snapshot_enabled off in the child's own
 	 * address space. The key was forked-in ON from the parent
-	 * (enabled inside um_snapshot_forkserver_loop before we
-	 * reached fork_worker). The worker resumes guest execution
-	 * and must not pay the snapshot hot-path cost — every gate
+	 * (enabled inside um_snapshot_forkserver_loop before the
+	 * fork_worker call). The worker resumes guest execution
+	 * and must not pay the snapshot hot-path cost; every gate
 	 * guarded by static_branch_unlikely(&um_snapshot_enabled)
-	 * should fall through the same way as on a non-snapshot
+	 * should behave the same way as on a non-snapshot
 	 * kernel. Matches the documented contract in
 	 * arch/um/include/asm/um-snapshot.h.
 	 */
 	static_branch_disable(&um_snapshot_enabled);
 
 	/*
-	 * Step 1 (commit 3c): forget parent-inherited state. Drops
-	 * stale references that point at threads / tids / pthread
+	 * Forget parent-inherited state. Drops references that point at
+	 * threads / tids / pthread
 	 * handles unique to the parent. Must happen before any
-	 * rebuild so the rebuild doesn't inherit stale state.
+	 * rebuild so the rebuild doesn't inherit parent-owned state.
 	 */
 	os_sigio_worker_forget();
 	os_timer_worker_forget();
 
 	/*
-	 * Step 1b (commit 3d-d, D42): detach fork-inherited tasks from
+	 * Detach fork-inherited tasks from
 	 * the worker's CFS runqueue. Before this, schedule() can pick
 	 * kthreads like ksoftirqd whose saved jmp_buf targets parent-
-	 * side host-thread state that doesn't exist in the worker —
-	 * observed as KASAN slab-OOB in __set_next_task_fair in
-	 * commit 3d-c's bring-up. The helper is defined in
-	 * kernel/sched/core.c, guarded by CONFIG_UM_SNAPSHOT_FORKSERVER,
-	 * and is the one explicit cross-subsystem touch the C-09 v1
-	 * makes. v2 replaces it with a freezer-cgroup pre-fork barrier
-	 * per D41's revisit triggers.
+	 * side host-thread state that doesn't exist in the worker.
+	 * The helper is defined in kernel/sched/core.c and guarded by
+	 * CONFIG_UM_SNAPSHOT_FORKSERVER.
 	 */
 	sched_worker_detach_other_tasks();
 
 	/*
-	 * Step 2 (commit 3d-b): rebuild fresh host-side infrastructure
-	 * in the worker's own address space. Per D41, register
-	 * handlers / fds / timers FIRST and leave signals_enabled at
-	 * 0. Commit 3d-c adds the final um_set_signals(1) before
-	 * guest code resumes.
-	 *
-	 * Rebuild failures are non-fatal in commit 3d-b because the
-	 * worker still exits immediately via os_snapshot_worker_exit
-	 * at the end of um_snapshot_forkserver_loop — the rebuilt
-	 * infrastructure is not exercised. A pr_err records the
-	 * failure so future bring-up (3d-c) knows what broke.
+	 * Rebuild fresh host-side infrastructure in the worker's own
+	 * address space. Register handlers, fds, and timers before
+	 * reopening UML signal delivery.
 	 */
 	err = os_sigio_worker_rebuild();
 	if (err)
@@ -592,35 +545,23 @@ void um_snapshot_worker_init(void)
 		pr_err("snapshot: worker timer rebuild failed: %d\n", err);
 
 	/*
-	 * mm_list clear deliberately omitted in commit 3d-b. At the
-	 * current ready-point (before first guest-userspace task),
-	 * mm_list is empty by construction. Commit 3d-c moves the
-	 * ready point later or the worker starts creating guest
-	 * tasks, at which point mm_list clearing under the
-	 * mm_list_lock spinlock becomes meaningful and load-bearing.
-	 *
-	 * Other child-side state the commit-plan docs mention
-	 * (cpu_online_mask / __curr_cpu / signals_active) defaults
-	 * are fine for a worker that exits immediately. Commit 3d-c
-	 * revisits when those consumers appear.
+	 * At the current ready point, before the first guest userspace
+	 * task, mm_list is empty by construction. Later ready points that
+	 * allow guest tasks must clear mm_list under mm_list_lock here.
 	 *
 	 * Deliberately no printk-on-success here: the worker's
 	 * kernel state immediately post-fork has seen fork-
 	 * inheritance quirks that trip vsnprintf via its per-CPU /
 	 * TLS lookups. pr_err above is tolerated because it only
-	 * fires on failure, which in the happy path doesn't happen.
-	 * Commit 3d-c will re-enable normal printk in workers once
-	 * enough per-CPU state is rebuilt.
+	 * fires on failure.
 	 */
 }
 EXPORT_SYMBOL_GPL(um_snapshot_worker_init);
 
 /*
- * Debugfs trigger (commit 2). Writing a printable name to
+ * Debugfs trigger. Writing a printable name to
  * /sys/kernel/debug/um/snapshot_ready invokes um_snapshot_ready()
- * with that name. Commit 5's selftest speaks to this node. A commit-
- * 5+ signal-based trigger (SIGRTMIN+N, per D38) can share the same
- * entry point when it lands.
+ * with that name.
  */
 
 #ifdef CONFIG_DEBUG_FS
@@ -637,7 +578,7 @@ static ssize_t um_snapshot_debugfs_write(struct file *f, const char __user *buf,
 		return -EFAULT;
 	name[n] = '\0';
 
-	/* Strip a trailing newline so `echo foo > node` DTRT. */
+	/* Strip a trailing newline so echo foo > node DTRT. */
 	if (n > 0 && name[n - 1] == '\n')
 		name[n - 1] = '\0';
 
@@ -653,13 +594,12 @@ static int __init um_snapshot_debugfs_init(void)
 {
 	struct dentry *d;
 
-	/* Share the "um" dentry with arch/um/kernel/um_debugfs.c so our
+	/* Share the "um" dentry with arch/um/kernel/um_debugfs.c so the
 	 * snapshot_ready file appears alongside its backend / stats /
-	 * hooks entries. We use late_initcall_sync() so we run strictly
-	 * after um_debugfs.c's late_initcall() has created the "um"
-	 * dir; debugfs_lookup() then picks it up. If DEBUG_FS is on but
-	 * um_debugfs.c didn't create it for some reason, fall back to
-	 * creating it ourselves.
+	 * hooks entries. late_initcall_sync() runs strictly after
+	 * um_debugfs.c's late_initcall() has created the "um" dir;
+	 * debugfs_lookup() then picks it up. If DEBUG_FS is on but
+	 * um_debugfs.c did not create it, create it here.
 	 */
 	d = debugfs_lookup("um", NULL);
 	if (!d) {
@@ -677,18 +617,16 @@ late_initcall_sync(um_snapshot_debugfs_init);
 #endif /* CONFIG_DEBUG_FS */
 
 /*
- * /sys/kernel/um/state_version — read-only unsigned integer telling
+ * /sys/kernel/um/state_version - read-only unsigned integer telling
  * userspace which version of the UML snapshot/forkserver wire contract
- * this kernel speaks. Incremented on protocol-breaking changes; v1 is
- * the initial AFL-compatible 12-bytes-per-iteration protocol landed in
- * commits 1 through 4 of workstream C-09.
+ * this kernel speaks. Incremented on protocol-breaking changes; 1 is
+ * the initial AFL-compatible 12-bytes-per-iteration protocol.
  *
- * Consumed by tools/testing/selftests/um/snapshot-smoke to gate its
- * assertions, and by any external fuzzer harness (AFL++, syzkaller's
- * upcoming vm/uml backend) to refuse to bind to a kernel it doesn't
- * understand. Note: "state_version" is the wire-protocol version, not
- * a kernel build version — it stays 1 across unrelated kernel bumps
- * as long as the 12-byte protocol is unchanged.
+ * Read by selftests and external fuzzers so they can refuse to bind to a
+ * kernel whose snapshot/forkserver wire protocol they do not understand.
+ * Note: "state_version" is the wire-protocol version, not a kernel build
+ * version; it stays 1 across unrelated kernel bumps as long as the
+ * 12-byte protocol is unchanged.
  */
 #define UM_SNAPSHOT_STATE_VERSION 1u
 

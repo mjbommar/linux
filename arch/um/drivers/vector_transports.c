@@ -137,10 +137,9 @@ static int l2tpv3_verify_header(
 	if ((!td->udp) && (!td->ipv6))
 		header += sizeof(struct iphdr) /* fix for ipv4 raw */;
 
-	/* we do not do a strict check for "data" packets as per
-	 * the RFC spec because the pure IP spec does not have
-	 * that anyway.
-	 */
+		/* Do not strictly check for RFC "data" packets because the
+		 * pure IP transport has no such field.
+		 */
 
 	if (td->cookie) {
 		if (td->cookie_is_64)
@@ -201,7 +200,7 @@ static int raw_verify_header(
 	if ((vheader->gso_type != VIRTIO_NET_HDR_GSO_NONE) &&
 		(vp->req_size != 65536)) {
 		/*
-		 * Fire at most once per interface — the underlying
+		 * Fire at most once per interface; the underlying
 		 * condition (req_size != 64K) is a static property
 		 * of the open vector device, so repeating the warning
 		 * per packet just floods any interactive console.
@@ -494,4 +493,3 @@ int build_transport_data(struct vector_private *vp)
 		return build_bess_transport_data(vp);
 	return 0;
 }
-

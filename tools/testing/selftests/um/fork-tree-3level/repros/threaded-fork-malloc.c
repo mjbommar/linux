@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Minimal C reproducer for the SMP-T26 glibc-heap-corruption residual.
+// Minimal C reproducer for fork/exec heap-corruption regressions.
 //
 // Mirrors threaded-subprocess-wait.py's fork+exec churn, but the
 // child process executes malloc/free cycles to exercise heap
 // integrity checks (vs threaded-fork-exec.c which execve's /bin/true
-// — too small to hit glibc heap metadata).
+// - too small to hit glibc heap metadata).
 //
-// If H1 (cross-vCPU TLB stale → recycled-page read) is correct, the
-// child process should occasionally trip glibc's malloc/free integrity
-// check and abort with SIGABRT (rc=-6 / WTERMSIG=6). The check fires
-// when malloc/free metadata bytes (chunk size, prev_size, fd/bk
-// pointers) are inconsistent — the same signature we see in the
-// Python repro.
+// If stale mappings expose recycled pages, the child process should
+// occasionally trip glibc's malloc/free integrity check and abort with
+// SIGABRT. The check fires when malloc/free metadata bytes (chunk size,
+// prev_size, fd/bk pointers) are inconsistent.
 //
 // Build (multi-binary):
 //   cc -O0 -static -pthread -o threaded-fork-malloc \
@@ -21,7 +19,7 @@
 //      -DCHILD_MAIN threaded-fork-malloc.c
 // Run:
 //   ./threaded-fork-malloc [N_WORKERS] [ITERS_PER_WORKER]
-// Default: 4 workers × 100 iters = 400 forks (matches Python repro)
+// Default: 4 workers x 100 iters = 400 forks (matches Python repro)
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -67,7 +65,7 @@ int main(void)
 	/* Free in reverse order. */
 	for (i = N - 1; i >= 0; i--)
 		free(p[i]);
-	/* Round 2 — alloc + free in interleaved order. */
+		/* Allocate and free in interleaved order. */
 	for (i = 0; i < N; i++) {
 		size_t sz = sizes[(i * 7) % nsizes];
 		p[i] = malloc(sz);
@@ -125,7 +123,7 @@ static void *worker(void *arg)
 		}
 
 		if (WIFSIGNALED(status) && WTERMSIG(status) == 6) {
-			/* SIGABRT — likely glibc integrity check. */
+			/* SIGABRT - likely glibc integrity check. */
 			fprintf(stderr,
 				"[w%ld iter=%d] CHILD_ABORT (SIGABRT)\n",
 				wid, i);

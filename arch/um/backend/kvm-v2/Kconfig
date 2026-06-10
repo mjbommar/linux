@@ -1,65 +1,43 @@
 config UM_BACKEND_KVM_V2
-	bool "KVM backend v2 (production)"
+	bool "KVM backend v2"
 	depends on X86_64
 	default n
 	help
-	  The v2 KVM backend reimplemented from scratch on top of the
-	  12 ARCH=um core refactors landed during the v1 → v2 transition
-	  (see Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-	  25-v2-restart-guide.md). Uses TDP via per-host-CPU vCPU pool,
-	  KVM_SET_USER_MEMORY_REGION memslot covering uml_physmem, and
-	  standard x86_64 memory layout (uml_physmem in PML4[256+]).
-
-	  At the v2 substrate parity milestone (memo 26 §H.1b,
-	  2026-04-30) v2 is at full seccomp parity on the regrtest-
-	  substrate gate (PASS=25 / FAIL=3 / EXPECTED_FAIL=3, bit-for-
-	  bit match) and ~2× faster than seccomp on minimal Python
-	  startup. Phase A through Phase F have closed; Phase G (SMP),
-	  Phase H (perf optimization beyond the current 2× lead),
-	  Phase I (this Kconfig + KUnit/ftrace/docs polish), and
-	  Phase J (validation) are still open. Multi-thread + multi-
-	  subinterpreter workloads (cpython-parity test_struct's
-	  test_endian_table_init_subinterpreters) show a ~50% flake
-	  rate that's deferred to a focused investigation session
-	  (memo §H.1b residual).
+	  Build the UML KVM backend v2 alongside the existing seccomp
+	  backend. KVM v2 uses a per-host-CPU vCPU pool, a
+	  KVM_SET_USER_MEMORY_REGION memslot covering uml_physmem, and the
+	  standard x86_64 UML memory layout.
 
 	  Boot uses seccomp via DYNAMIC unless `backend=force=kvm-v2`
 	  explicitly picks v2. Selecting Y here builds v2's machinery
 	  alongside seccomp; the runtime backend is still chosen by
 	  cmdline / capability probe.
 
-	  The archived v1 implementation lives at
-	  arch/um/backend/kvm-v1-archive/ (not built; depends on BROKEN);
-	  memos 21-24 document its history.
-
-	  Say Y to build v2 alongside seccomp; production runtimes can
-	  either default to seccomp or opt into v2 via the cmdline
-	  selector. Phase J validation (24h continuous + Tier 1/2/3 +
-	  soak) will gate flipping `default y`.
+	  Say Y to build v2 alongside seccomp. Runtime selection still
+	  happens through the backend command-line selector.
 
 config UM_BACKEND_KVM_V2_GADGET
 	bool "Stay-in-guest LSTAR gadget for trivial syscalls"
 	depends on UM_BACKEND_KVM_V2
 	default y
 	help
-	  Phase H gadget mechanism: an in-LSTAR dispatch tree that handles
-	  trivial syscalls (getpid, gettid, getppid, getuid, geteuid, getgid,
+	  In-LSTAR dispatch tree that handles trivial syscalls (getpid,
+	  gettid, getppid, getuid, geteuid, getgid,
 	  getegid, getcpu, time, clock_gettime(CLOCK_MONOTONIC)) entirely
 	  in-guest by reading per-task fields via swapgs + %gs:OFFSET. Avoids
 	  the host-side KVM_EXIT_IO roundtrip for those syscalls.
 
-	  Performance impact: bench-micro getpid drops from ~36 800 cyc/call
-	  to ~90 cyc/call (~410× faster) on Zen 4. Workload-level speedup
-	  (Python imports, anything calling clock_gettime in a tight loop) is
-	  proportional to gadget-syscall density.
+	  This reduces syscall overhead for workloads dominated by cheap
+	  syscalls. Workload-level speedup is proportional to gadget-syscall
+	  density.
 
-	  Mechanism: the LSTAR target is a ~343-byte trampoline page mapped
+	  Mechanism: the LSTAR target is a small trampoline page mapped
 	  in the kernel-half VA range. On guest SYSCALL the CPU jumps there
 	  at CPL=0; the body decodes RAX (NR), reads task state from a
 	  per-vCPU state page (programmed via MSR_KERNEL_GS_BASE), and
-	  returns via SYSRETQ — no vmexit. Any non-gadget NR falls through
+	  returns via SYSRETQ; no vmexit. Any non-gadget NR falls through
 	  to the same out+sysretq fallback path that the non-gadget v2
-	  backend uses, routed through KVM_EXIT_IO → handle_io_trap →
+	  backend uses, routed through KVM_EXIT_IO -> handle_io_trap ->
 	  handle_syscall.
 
 	  Selecting N disables the gadget at compile time:
@@ -67,68 +45,26 @@ config UM_BACKEND_KVM_V2_GADGET
 	    - per-vCPU state pages are not allocated
 	    - load_user_sregs skips the per-dispatch field refresh
 	    - MSR_KERNEL_GS_BASE is not programmed
-	  The result is structurally identical to pre-gadget v2: every
-	  SYSCALL takes the slow KVM_EXIT_IO path.
+
+	  The result is a backend where every SYSCALL takes the KVM_EXIT_IO
+	  path.
 
 	  Say N for security-sensitive deployments that don't want a custom
 	  CPL=0 trampoline body executing in the guest. Say Y (default) to
-	  pay the trampoline complexity in exchange for the perf benefit.
+	  enable the lower-overhead syscall path.
 
 config UM_BACKEND_KVM_V2_KUNIT
 	tristate "KVM v2 backend KUnit tests"
 	depends on UM_BACKEND_KVM_V2 && KUNIT
 	default n
 	help
-	  Build the v2 backend KUnit suites: marshal-shape (D.2 +
-	  task #74) and any future per-helper tests. These are pure
-	  data-transform tests — no host syscalls, no vCPU state.
+	  Build the v2 backend KUnit suites. These are pure data-transform
+	  and byte-layout tests.
 	  Catches off-by-one register slot mappings + RFLAGS-bit-1
 	  invariants in kvm_v2_marshal_to/from_kvm_regs.
 
-	  Say N for production builds; Y or M to validate marshal
-	  correctness during v2 development.
-
-config UM_BACKEND_KVM_V2_STATE_TRACE
-	bool "KVM v2 state-snapshot trace ring (debugging only)"
-	depends on UM_BACKEND_KVM_V2 && DEBUG_FS
-	default n
-	help
-	  Per-CPU ring buffer that captures a structured snapshot of
-	  ~30 v2 state fields (live KVM regs, sregs, per-task arch
-	  state, per-mm tlb_gen, per-vCPU last_seen, IST frame) at
-	  every operation transition the state-audit Layer 2
-	  inventoried (Documentation/virt/uml/redesign/02-workstreams/
-	  D-kvm-backend/state-audit/02-operations-inventory.md).
-
-	  Designed to root-cause cross-task state contamination under
-	  SMP T>=N stress (memo §G mt-mini residual). Per-(pid, op)
-	  state evolution from a FAIL boot is dumped to dmesg via
-	  debugfs or via the magic ioport 0xfd from user space.
-
-	  Three layers of shielding from production paths:
-	    1. CONFIG=n compiles every hook to do{}while(0) — zero
-	       text, zero icache footprint.
-	    2. CONFIG=y but disabled at runtime: each hook is a single
-	       5-byte NOP via static_branch_unlikely.
-	    3. Per-CPU ring storage; no cross-CPU cacheline traffic.
-
-	  Toggle at runtime:
-	    echo 1 > /sys/kernel/debug/um_kvm_v2_trace/enabled
-	    # ... reproduce ...
-	    echo 1 > /sys/kernel/debug/um_kvm_v2_trace/dump
-	    dmesg | grep KVMV2T
-
-	  Or from a user-space test binary on FAIL:
-	    asm volatile("outb %%al, $0xfd" : : "a"(0));
-
-	  Default ring size is 2 MB / CPU (≈5400 entries × ~384 B).
-	  Adjustable via /sys/kernel/debug/um_kvm_v2_trace/ring_bytes
-	  (read at next enable=1).
-
-	  Say N for normal builds (zero overhead). Say Y when
-	  diagnosing v2 SMP races; the runtime is gated on debugfs
-	  toggle so you can ship a CONFIG=y kernel and only pay cost
-	  when actively tracing.
+	  Say N for normal builds; Y or M to run the v2 backend
+	  KUnit suites.
 
 config UM_BACKEND_KVM_V2_RDPMC
 	bool "Allow guest userspace rdpmc (CR4.PCE=1)"
@@ -138,28 +74,28 @@ config UM_BACKEND_KVM_V2_RDPMC
 	  Set CR4.PCE=1 in the guest's per-vCPU control registers so
 	  userspace can execute `rdpmc` directly without #GP at CPL=3.
 	  Without this, rdpmc is privileged (PMC accessible only to
-	  guest CPL=0 code — for UML that means the LSTAR gadget and
-	  exception stubs, neither of which currently calls rdpmc).
+	  guest CPL=0 code; for UML that means the LSTAR gadget and
+	  exception stubs, neither of which uses rdpmc).
 
-	  What this enables:
+	  This enables:
 	    - Userspace `perf` inside the guest gets accurate hardware
 	      counter reads (instructions retired, cycles, branches,
 	      cache misses, ...) directly via rdpmc.  No gadget syscall
 	      round-trip, no IPC, just a one-instruction read.
-	    - profile-guided JITs (PyPy, JS engines) and microbenchmark
+	    - Profile-guided JITs (PyPy, JS engines) and microbenchmark
 	      harnesses can self-measure inside the UML guest.
 	    - The example at
 	      Documentation/virt/uml/examples/rdpmc/ demonstrates the
 	      pattern (read PMC fixed-counter 0 = instructions retired,
 	      assert it advances across a busy loop).
 
-	  What this does NOT enable:
-	    - rdmsr / wrmsr on PMU MSRs — those stay privileged.  The
+	  This does not enable:
+	    - rdmsr / wrmsr on PMU MSRs: those stay privileged. The
 	      guest cannot program PERFEVTSEL counters from userspace
 	      (counter selection is a kernel-only operation under
 	      Linux's perf subsystem; gated behind the perf_event
 	      syscall).
-	    - Specific PMU event allowlist control — that's a separate
+	    - Specific PMU event allowlist control: that's a separate
 	      KVM cap (KVM_CAP_PMU_EVENT_FILTER) not exposed here.
 	    - Crossing the host/guest counter-attribution boundary in
 	      any new way.  KVM's vPMU already virtualizes counters
@@ -169,50 +105,49 @@ config UM_BACKEND_KVM_V2_RDPMC
 	  runtime overhead.
 
 	  Security: rdpmc returns counter values for the running vCPU.
-	  In SMP UML with vCPU pinning (SMP-T37) those values reflect
-	  the host CPU the vCPU is bound to.  Treating them as a side
+	  In SMP UML with vCPU pinning those values reflect the host CPU
+	  the vCPU is bound to. Treating them as a side
 	  channel against other guests on the same physical CPU is a
 	  known concern for any KVM userspace -- gate this OFF for
 	  multi-tenant sandbox profiles.
 
-	  Say Y for research/dev/CI builds.  Say N for sandbox
-	  profiles that explicitly want rdpmc unavailable.
+	  Say Y for test and observability builds. Say N for sandbox profiles
+	  that explicitly want rdpmc unavailable.
 
 config UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
 	bool "Pass APERF/MPERF MSRs through to guest (host-counter visibility)"
 	depends on UM_BACKEND_KVM_V2
 	default n
 	help
-	  Issue KVM_ENABLE_CAP(KVM_CAP_X86_DISABLE_EXITS) with the
+	  Enable KVM_CAP_X86_DISABLE_EXITS with the
 	  KVM_X86_DISABLE_EXITS_APERFMPERF bit during VM creation so the
 	  guest can read IA32_APERF (0xE7) and IA32_MPERF (0xE8) directly
-	  via rdmsr.  Without this, KVM traps the read and returns zero;
+	  via rdmsr. Without this, KVM traps the read and returns zero;
 	  with it, the rdmsr passes through to hardware and the guest sees
 	  the actual host performance counters for the CPU the vCPU is
-	  currently pinned to.
+	  pinned to.
 
 	  Useful for:
 	    - Guest-side frequency / utilization observation
 	      (cpupower, turbostat, perf governors)
-	    - Reproducing the QEMU/libvirt gap where -overcommit
-	      cpu-pm=on plumbs HLT/MWAIT/PAUSE/CSTATE but not APERFMPERF
-	      (the v2 backend is its own VMM and exposes the bit directly)
+	    - Testing APERF/MPERF passthrough behavior that is not exposed
+	      by every userspace VMM
 	    - Anyone studying how the disable-exits surface behaves under
 	      a non-QEMU userspace
 
 	  Host requirements:
 	    - boot_cpu_has(X86_FEATURE_APERFMPERF) must be set; KVM's
 	      kvm_get_allowed_disable_exits() gates the bit on that.
-	      The probe is non-fatal — vm_create logs a warning and
-	      continues if the host rejects the cap.
+	      If the host rejects the cap, vm_create logs a warning and
+	      leaves KVM's default zero-counter behavior in place.
 
 	  Constraints:
 	    - The ioctl is issued from kvm_v2_vm_create(), strictly
 	      before kvm_v2_vcpu_create().  KVM's KVM_CAP_X86_DISABLE_EXITS
 	      handler enforces `if (kvm->created_vcpus) return -EINVAL;`
 	      so the ordering must not slip.
-	    - Bit is per-VM; in v2 there is one VM per UML invocation
-	      (decisions-log D57) so this is also a per-instance toggle.
+	    - Bit is per-VM; in v2 there is one VM per UML invocation, so
+	      this is also a per-instance toggle.
 
 	  Runtime override:
 	    Boot param  kvm_v2_aperfmperf=on   forces enable
@@ -222,10 +157,10 @@ config UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH
 	    (the cmdline parser is gated on the same symbol).
 
 	  See Documentation/virt/uml/aperf-mperf.rst for the in-guest
-	  rdmsr verification path and the QEMU bridging context.
+	  rdmsr verification path.
 
-	  Say N for production builds; Y when reproducing the QEMU
-	  disable-exits gap or doing host-counter-visible workloads.
+	  Say N for normal builds. Say Y when testing APERF/MPERF
+	  disable-exits or doing host-counter-visible workloads.
 
 config UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
 	bool "Account host KVM_RUN CPU time as guest utime (ITIMER_VIRTUAL)"
@@ -235,14 +170,14 @@ config UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
 	  Account TSC-cycle delta around each ioctl(KVM_RUN) to the
 	  calling task's utime via account_user_time().  Without this,
 	  host timer signals interrupting KVM_RUN default to is_user=0
-	  (system time) — guest utime never advances and ITIMER_VIRTUAL
-	  never delivers SIGVTALRM.  SMP-T80, state-audit/29.
+	  (system time). Without this accounting, guest utime never advances
+	  and ITIMER_VIRTUAL never delivers SIGVTALRM.
 
 	  Cost: ~30 cycles per KVM_RUN dispatch (two rdtsc reads +
-	  mult_frac conversion).  Negligible vs the original
-	  clock_gettime-based approach which cost ~25 % bench-py
-	  regression on Python startup.  Default y because the cost is
-	  small enough not to need an opt-in.
+	  mult_frac conversion). Negligible vs the original
+	  clock_gettime-based approach which added ~25% bench-py overhead on
+	  Python startup. Default y because the cost is small enough not to
+	  need an opt-in.
 
 	  Say N only if you specifically need to disable guest utime
 	  accounting (rare).  setitimer(ITIMER_VIRTUAL) will arm but

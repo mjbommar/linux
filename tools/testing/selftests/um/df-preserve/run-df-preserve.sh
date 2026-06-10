@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Direction-flag preservation selftest (audit round-4 F3 follow-on,
-# task #222). Boots a freestanding ring-3 binary that sets DF=1,
-# invokes a class-A SYSCALL (forces the F2 helper round-trip)
-# and a recoverable #PF, then
-# checks DF survived both round-trips. F2 (decisions-log D75) is
-# the fix this validates; F2 KUnit covers the pure-data helper,
-# this selftest covers the live path.
+# Direction-flag preservation selftest. Boots a freestanding ring-3
+# binary that sets DF=1, invokes a class-A SYSCALL to force the
+# fallback round-trip and a recoverable #PF, then checks DF survived
+# both paths.  KUnit covers the pure-data helper; this selftest covers
+# the live path.
 #
 # Default: tests under each of {ptrace, seccomp, kvm}; KVM is the
 # only backend whose RFLAGS round-trip went through a custom
@@ -16,7 +14,7 @@
 # act as a baseline showing DF=PASS is the universal expected
 # behaviour, not a KVM-specific quirk.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
 #
 # Environment:
 #   UML_BINARY     UML kernel (default /tmp/uml-kvmint/linux).
@@ -45,9 +43,9 @@ if [ ! -x "$LOOP" ]; then
 fi
 
 ensure_kvm_readable() {
-	# Self-heal /dev/kvm ACL — udev / elogind sometimes drops
+	# Self-heal /dev/kvm ACL: udev / elogind sometimes drops
 	# the user ACL between successive UML invocations. Retry
-	# up to 3 times with a brief settle delay (task #267).
+	# up to 3 times with a brief settle delay.
 	local i
 	for i in 1 2 3; do
 		if [ -r /dev/kvm ]; then

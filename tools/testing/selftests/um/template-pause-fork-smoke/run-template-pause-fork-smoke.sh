@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/template-pause-fork-smoke — Memo 09 Phase 2a Patch 5.
+# um/template-pause-fork-smoke - fork-on-resume structural test.
 #
 # Verifies the EXPERIMENTAL fork-on-resume primitive's structural
 # progress:
 #
 #   1. Kernel cmdline `um_template_pause=fork` arms fork mode.
 #   2. Pre-fork SKAS stub teardown executes (kernel logs
-#      "torn down N stub(s) pre-fork") — proves Patch 4's
-#      um_skas_teardown_all_stubs() wired correctly.
+#      "torn down N stub(s) pre-fork") and proves the teardown
+#      path is wired correctly.
 #   3. os_template_pause_fork() returns; the parent reports the
 #      new child pid via the identity memfd at offset 260.
 #   4. The harness reads back the child pid from memfd[260:264]
 #      and confirms it matches what the kernel logged.
 #
 # Exit codes:
-#   0  PASS — all four structural assertions hold.
-#   4  SKIP — kernel lacks CONFIG_UM_TEMPLATE_PAUSE_FORK, or the
+#   0  PASS - all four structural assertions hold.
+#   4  SKIP - kernel lacks CONFIG_UM_TEMPLATE_PAUSE_FORK, or the
 #         documented v1-ceiling secondary hazard (IP=0x4 NULL
 #         function call as the master returns from the loop)
-#         fires.  This is the open work tracked in
-#         Documentation/virt/uml/redesign/06-sequencing/
-#         post-2026-05-19-next-sprint/09-fork-server-STATUS.md.
-#   1  FAIL — structural progress regressed: teardown didn't
+#         fires.
+#   1  FAIL - structural progress regressed: teardown didn't
 #         happen, or fork didn't return a positive pid, or
 #         memfd[260:264] didn't get the new child's pid.
 #
@@ -113,8 +111,8 @@ def state(p):
         return None
     return None
 
-# Wait for first stop (Phase 1a single-shot pause completes inside
-# fork loop's first one_pause_cycle).
+# Wait for the initial single-shot pause inside the fork loop's first
+# one_pause_cycle.
 deadline = time.time() + 30
 while time.time() < deadline:
     s = state(pid)
@@ -146,18 +144,16 @@ PYEOF
 PYRC=${PYRC:-0}
 
 # Extract findings.  The PASS criterion is the MASTER's survival
-# through multiple fork iterations — that's the structural fork-
+# through multiple fork iterations - that's the structural fork-
 # primitive working end-to-end.  Master surviving means:
 #   * identity blob parses (initial pause/resume cycle works)
 #   * pre-fork teardown executes
 #   * MULTIPLE "resumed via SIGCONT ... count=N" lines with N>=2
 #     (master made it through at least one fork+respawn cycle)
-# Child-side panic is a separate downstream issue (UML kernel state
-# inheritance post-fork — see Control B in 09-fork-server-EXTERNAL-
-# RESEARCH.md and the "v1 ceiling" commentary in
-# arch/um/kernel/snapshot.c).  Child-side userspace re-entry is
-# explicitly out of scope for this selftest's PASS criterion; the
-# test PASSes if the master is the one surviving.
+# Child-side panic is a separate downstream issue in post-fork UML
+# kernel state inheritance.  Child-side userspace re-entry is outside
+# this selftest's PASS criterion; the test passes if the master is
+# the one surviving.
 TORN_DOWN=$(grep -c "template_pause: torn down" "$OUT/boot.log" 2>/dev/null || true)
 PAUSE_OK=$(grep -c "template_pause: identity at" "$OUT/boot.log" 2>/dev/null || true)
 MASTER_RESUMES=$(grep -cE "template_pause: resumed via SIGCONT.*count=" "$OUT/boot.log" 2>/dev/null || true)
@@ -184,10 +180,11 @@ fi
 
 if [ $RC -ne 0 ]; then
 	echo
-	echo "VERDICT: FAIL — master-side fork survival regressed"
+	echo "VERDICT: FAIL - master-side fork survival regressed"
 	exit 1
 fi
 
 echo
-echo "VERDICT: PASS — master survives multi-take fork-on-resume (child-side downstream issues tracked separately)"
+echo "VERDICT: PASS - master survives multi-take fork-on-resume"
+echo "DETAIL: child-side downstream issues tracked separately"
 exit 0

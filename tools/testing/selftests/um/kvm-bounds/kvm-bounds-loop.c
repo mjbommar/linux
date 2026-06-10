@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * KVM gadget user-pointer bounds-check selftest (audit round-6
- * G1, decisions-log D93, task #240).
+ * KVM gadget user-pointer bounds-check selftest.
  *
  * The clock_gettime / time / getcpu gadget handlers store
  * through user-supplied output pointers at CPL=0. Without a
  * bounds check, the gadget could (a) write to a canonical
  * kernel VA mapped in the shadow PT (corrupt ring-0 data) or
  * (b) trigger #GP on a non-canonical address (no IDT[13]
- * handler — would triple-fault). G1 added an inline cap check
+ * handler; that would triple-fault).  The gadget path has an inline cap check
  * (cmp ptr, %gs:TASK_SIZE_CAP; jbe fallback) before each store
  * so bad pointers route to handle_syscall and return -EFAULT
  * per POSIX.
@@ -22,7 +21,7 @@
  * boot crash.
  *
  * Freestanding 64-bit ELF, same shape as getpid-loop /
- * df-preserve-loop. Routed through both kvmint (no gadget) and
+ * df-preserve-loop.  Routed through both kvmint (no gadget) and
  * kvmbench (gadget) by the runner so we get a baseline + a
  * gadget-side check.
  */
@@ -96,13 +95,13 @@ int main(void)
 	unsigned int n = 0;
 
 	/*
-	 * Canonical kernel VA — bit 47 set, sign-extended high.
+	 * Canonical kernel VA - bit 47 set, sign-extended high.
 	 * Well above task_size_cap (~128 TB on 64-bit UML).
 	 */
 	void *kva = (void *)0xffff800000001000UL;
 
 	/*
-	 * Non-canonical address — bit 47 = 0, bit 48 = 1. CPU
+	 * Non-canonical address - bit 47 = 0, bit 48 = 1. CPU
 	 * raises #GP if accessed at CPL=0 without G1's bounds
 	 * check; with the check, gadget falls back before the
 	 * faulting access.

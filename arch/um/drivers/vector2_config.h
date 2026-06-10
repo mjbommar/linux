@@ -53,8 +53,8 @@ enum um_vec2_host_mode {
 
 enum um_vec2_parse_flags {
 	/*
-	 * Ignore unknown keys.  This exists only for staged migration from
-	 * the legacy parser; strict mode is the default.
+	 * Ignore unknown keys for compatibility; strict mode is the
+	 * default.
 	 */
 	UM_VEC2_PARSE_COMPAT		= BIT(0),
 

@@ -9,6 +9,7 @@
 #define __OS_H__
 
 #include <irq_user.h>
+#include <linux/compiler_attributes.h>
 #include <longjmp.h>
 #include <mm_id.h>
 /* This is to get size_t */
@@ -18,7 +19,8 @@
 #include <sys/types.h>
 #endif
 
-#define CATCH_EINTR(expr) while ((errno = 0, ((expr) < 0)) && (errno == EINTR))
+#define CATCH_EINTR(expr)						\
+	do { } while ((errno = 0, ((expr) < 0)) && (errno == EINTR))
 
 #define OS_TYPE_FILE 1
 #define OS_TYPE_DIR 2
@@ -71,7 +73,7 @@ struct openflags {
 	unsigned int a : 1;	/* O_APPEND */
 	unsigned int e : 1;	/* O_EXCL */
 	unsigned int cl : 1;    /* FD_CLOEXEC */
-	unsigned int dr : 1;    /* O_DIRECT (memo #2 Phase 4) */
+	unsigned int dr : 1;    /* O_DIRECT */
 };
 
 #define OPENFLAGS() ((struct openflags) { .r = 0, .w = 0, .s = 0, .c = 0, \
@@ -156,12 +158,7 @@ extern int os_mode_fd(int fd, int mode);
 extern int os_seek_file(int fd, unsigned long long offset);
 extern int os_open_file(const char *file, struct openflags flags, int mode);
 
-/*
- * Memo #7 Phase 1: scatter-gather write wrapper for the console
- * ring-wrap coalescing case in line.c::flush_buffer.  Saves one
- * syscall per wrap.  Returns total bytes written, 0 on EAGAIN,
- * or -errno.
- */
+/* Scatter-gather write wrapper for the console ring-wrap case. */
 struct iovec;
 extern ssize_t os_writev(int fd, const struct iovec *iov, int iovcnt);
 extern int os_read_file(int fd, void *buf, int len);
@@ -187,9 +184,9 @@ extern int os_file_type(char *file);
 extern int os_file_mode(const char *file, struct openflags *mode_out);
 extern int os_lock_file(int fd, int excl);
 extern void os_flush_stdout(void);
-extern unsigned os_major(unsigned long long dev);
-extern unsigned os_minor(unsigned long long dev);
-extern unsigned long long os_makedev(unsigned major, unsigned minor);
+extern unsigned int os_major(unsigned long long dev);
+extern unsigned int os_minor(unsigned long long dev);
+extern unsigned long long os_makedev(unsigned int major, unsigned int minor);
 extern int os_falloc_punch(int fd, unsigned long long offset, int count);
 extern int os_falloc_zeroes(int fd, unsigned long long offset, int count);
 extern int os_eventfd(unsigned int initval, int flags);
@@ -222,41 +219,40 @@ extern void os_kill_ptraced_process(int pid, int reap_child);
 
 extern int os_getpid(void);
 
-/* Snapshot/forkserver primitives (workstream C-09). */
+/* Snapshot/forkserver primitives. */
 extern int os_snapshot_fd_is_open(int fd);
 extern int os_snapshot_fork_worker(void);
 extern ssize_t os_snapshot_read_all(int fd, void *buf, size_t len);
 extern ssize_t os_snapshot_write_all(int fd, const void *buf, size_t len);
 extern int os_snapshot_waitpid_status(int pid);
 extern int os_snapshot_reap_zombies(void);
-extern void os_snapshot_worker_exit(int status) __attribute__((noreturn));
+extern void os_snapshot_worker_exit(int status) __noreturn;
 
-/* Forget / rebuild inherited host-side state in a forkserver worker
- * (C-09 commits 3c and 3d-b). Each "forget" drops references that
+/* Forget / rebuild inherited host-side state in a forkserver worker.
+ * Each "forget" drops references that
  * fork() inherited but that point at threads/tids/pthread handles
  * unique to the parent process. Each "rebuild" creates fresh
  * equivalents targeting the worker's own thread. Paired: call
  * forget then rebuild; the caller is the in-kernel
- * um_snapshot_worker_init() wrapper. Per D41 (signal-gating
- * contract), rebuilds install handlers/fds/timers FIRST and
- * signals_enabled stays 0 until the caller explicitly re-enables
- * it in the tail of worker_init — 3d-b does not flip the gate.
+ * um_snapshot_worker_init() wrapper. Rebuilds install handlers, fds,
+ * and timers first; signals_enabled stays 0 until the caller
+ * explicitly re-enables it in the tail of worker_init.
  */
 extern void os_sigio_worker_forget(void);
 extern void os_timer_worker_forget(void);
 extern int os_sigio_worker_rebuild(void);
 extern int os_timer_worker_rebuild(void);
 
-/* Parent-side signal masking around the forkserver loop (commit
- * 3d-a). Wraps one static sigset_t inside os-Linux so the kernel-
- * side caller doesn't need sigset_t visibility. Paired calls only.
+/* Parent-side signal masking around the forkserver loop. Wraps one
+ * static sigset_t inside os-Linux so the kernel-side caller doesn't
+ * need sigset_t visibility. Paired calls only.
  * See the comment block near the definitions in
  * arch/um/os-Linux/process.c for the rationale.
  */
 extern void os_snapshot_block_iter_signals(void);
 extern void os_snapshot_unblock_iter_signals(void);
 
-/* Template-pause primitives (Memo 09 Phase 1a).
+/* Template-pause primitives.
  *
  * Thin host-syscall wrappers used by the in-kernel
  * arch/um/kernel/template_pause.c driver. Defined in
@@ -269,13 +265,11 @@ extern ssize_t os_template_pause_read_identity(int fd, void *buf, size_t len);
 extern int os_template_pause_fork(void);
 extern int os_template_pause_fork_clone(void);
 /*
- * Path A primitive: post-clone child jmpq's into @entry on a private
+ * Post-clone child primitive: jmpq into @entry on a private
  * stack instead of exit_group(0).  @entry must not return.  See
- * arch/um/os-Linux/template_pause.c for the full contract and
- * Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
- * state-audit/30-path-c-v1-ceiling-confirmed.md for the motivation.
+ * arch/um/os-Linux/template_pause.c for the full contract.
  */
-typedef void __attribute__((__noreturn__)) (*os_template_pause_child_entry_t)(void);
+typedef void __noreturn (*os_template_pause_child_entry_t)(void);
 extern int os_template_pause_fork_clone_to(os_template_pause_child_entry_t entry);
 extern int os_template_pause_write_child_pid(int fd, off_t offset, int child_pid);
 extern void os_template_pause_child_exit(int code);
@@ -292,8 +286,8 @@ extern int os_protect_memory(void *addr, unsigned long len,
  * Atomically swap the backing fd of a MAP_SHARED region.  Used by
  * pool-member physmem isolation: after replicating master's
  * physmem content into a fresh memfd, point the kernel's MAP_SHARED
- * mapping at the new fd.  MAP_SHARED is preserved so that kernel↔
- * stub coherence within the member (both ends mmap the same fd
+ * mapping at the new fd.  MAP_SHARED is preserved so that kernel/stub
+ * coherence within the member (both ends mmap the same fd
  * MAP_SHARED) keeps working.
  */
 extern int os_remap_region_shared(void *addr, int fd,
@@ -303,10 +297,8 @@ extern int os_remap_region_shared(void *addr, int fd,
 /*
  * Same as os_remap_region_shared but routes the swap through an
  * intermediate MAP_ANONYMOUS|MAP_SHARED mapping at the original VA.
- * Theory: anonymous mapping resets host-kernel state tied to the
- * original inode, breaking the SIGALRM-after-different-inode
- * regression.  Caller must pre-populate @new_fd at @off with the
- * desired content; this helper does NOT copy data into the new fd.
+ * Caller must pre-populate @new_fd at @off with the desired content;
+ * this helper does not copy data into the new fd.
  */
 extern int os_remap_region_via_anon(void *addr, int new_fd,
 				    unsigned long long off,
@@ -322,31 +314,29 @@ extern int os_create_memfd(const char *name, unsigned long long size);
 
 /*
  * Drain any pending signals via sigtimedwait with a zero timeout.
- * Returns the count of signals drained.  Used by pool-member
- * physmem-isolation triage to test the "stuck pending signal"
- * hypothesis for SIGALRM-after-swap delivery failures.
+ * Returns the count of signals drained. Used by pool-member physmem
+ * isolation after backing-file swaps.
  */
 extern int os_drain_pending_signals(void);
 
 /*
- * Diagnostic: read POSIX timer expiry state via timer_getoverrun
- * and timer_gettime.  Stores overrun count and it_value (ns) in
- * the out parameters.  Returns 0 on success or -errno.
+ * Read POSIX timer expiry state via timer_getoverrun and
+ * timer_gettime. Stores overrun count and it_value (ns) in the out
+ * parameters. Returns 0 on success or -errno.
  */
 extern int os_timer_diagnose(unsigned long *out_overrun,
 			     unsigned long long *out_it_value_ns);
 
-/* Busy-wait via clock_nanosleep — used by variant 9 diagnostic. */
+/* Busy-wait via clock_nanosleep. */
 extern void os_busy_wait_ns(unsigned long long nsecs);
 
 /*
  * Create an unnamed tmpfs file via O_TMPFILE on @dir of @size
  * bytes.  Parallel to os_create_memfd() but uses the same
  * mechanism as setup_physmem's boot-time physmem_fd.  Used for
- * memfd-vs-tmpfs bisect of the per-pool-member physmem isolation.
+ * per-pool-member physmem isolation with tmpfs-backed storage.
  */
 extern int os_create_tmpfile(const char *dir, unsigned long long size);
-
 
 /*
  * mmap @fd at @off for @len bytes as a scratch VA (host-chosen
@@ -357,7 +347,7 @@ extern int os_mmap_rw_scratch(int fd, unsigned long long off,
 			      unsigned long len, void **out_addr);
 extern int os_unmap_memory(void *addr, int len);
 extern int os_drop_memory(void *addr, int length);
-extern int os_drop_caching(void *addr, int length);	/* SMP-T26: madvise(DONTNEED) */
+extern int os_drop_caching(void *addr, int length);
 extern int can_drop_memory(void);
 
 void os_set_pdeathsig(void);
@@ -407,13 +397,13 @@ extern int raw(int fd);
 extern void setup_machinename(char *machine_out);
 extern void setup_hostinfo(char *buf, int len);
 extern ssize_t os_getrandom(void *buf, size_t len, unsigned int flags);
-extern void os_dump_core(void) __attribute__ ((noreturn));
+extern void os_dump_core(void) __noreturn;
 extern void um_early_printk(const char *s, unsigned int n);
 extern void os_fix_helper_signals(void);
 extern void os_info(const char *fmt, ...)
-	__attribute__ ((format (printf, 1, 2)));
+	__printf(1, 2);
 extern void os_warn(const char *fmt, ...)
-	__attribute__ ((format (printf, 1, 2)));
+	__printf(1, 2);
 
 /* time.c */
 void os_idle_prepare(void);
@@ -443,8 +433,8 @@ extern void send_stub_syscall_fds(struct mm_id *mm_idp);
 extern int start_userspace(struct mm_id *mm_id);
 extern int start_userspace_redo(struct mm_id *mm_id);
 /*
- * Variant of start_userspace() that backs stub_data with a per-mm
- * memfd (private to the calling process) instead of UML's global
+ * start_userspace() helper that backs stub_data with a per-mm
+ * memfd private to the calling process instead of UML's global
  * physmem_fd.  Required for pool-member children to get physically-
  * isolated stub_data.  See arch/um/os-Linux/skas/process.c for the
  * full contract.
@@ -523,10 +513,9 @@ static inline void os_local_ipi_disable(void) { }
 #endif /* CONFIG_SMP */
 
 /*
- * SMP-T80 — kvm-v2 dispatch loop brackets ioctl(KVM_RUN, ...) with
- * these so the host signal handler can route ticks-during-KVM_RUN
- * to guest utime instead of stime.  No effect on non-kvm-v2
- * backends.
+ * kvm-v2 dispatch loop brackets ioctl(KVM_RUN, ...) with these so
+ * the host signal handler can route ticks-during-KVM_RUN to guest
+ * utime instead of stime. No effect on non-kvm-v2 backends.
  */
 void os_kvm_run_enter(void);
 void os_kvm_run_exit(void);

@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KUnit coverage for the UML template-pause identity-apply parse
- * helpers (Memo 09 Phase 2).
+ * KUnit coverage for the UML template-pause identity-apply parse helpers.
  *
  * The full apply path (dev_set_mac_address, devinet_ioctl,
  * ip_rt_ioctl) needs a registered netdev and an init_net with a
- * working IP stack — neither of which is available in a KUnit-only
- * test build.  Phase 2 of the selftest harness drives the apply path
- * end-to-end against a real UML kernel boot; here we cover the
- * non-IO helpers that determine the correctness of the blob → kernel
- * arguments transformation.
+ * working IP stack, neither of which is available in a KUnit-only
+ * test build.  Runtime tests cover the end-to-end apply path against a
+ * real UML kernel boot; here we cover the non-IO helpers that transform
+ * the blob into kernel arguments.
  */
 
 #include <kunit/test.h>

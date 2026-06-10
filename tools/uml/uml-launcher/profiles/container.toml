@@ -1,7 +1,7 @@
 # umlbuild profile — "container": run OCI containers inside UML.
 #
-# Mirrors the docker-in-UML kernel config from the 2026-05-22 demo:
-# base_defconfig + cgroup v2 + all namespaces + overlay + bridge +
+# Container-capable UML profile: base_defconfig + cgroup v2 + all
+# namespaces + overlay + bridge +
 # netfilter + nftables.  The rootfs ships `runc` so the guest can
 # execute OCI bundles natively (defense-in-depth on top of UML's
 # kernel boundary).

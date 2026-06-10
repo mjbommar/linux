@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend tracepoint instantiations (memo 25 R7).
+ * UML backend tracepoint instantiations.
  *
  * Single TU that defines CREATE_TRACE_POINTS so the linker emits
  * the tracepoint stubs exactly once. All other call sites just

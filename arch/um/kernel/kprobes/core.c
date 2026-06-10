@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML kprobes arch layer — int3 + single-step path (workstream C-04).
+ * UML kprobes arch layer: int3 + single-step path.
  *
- * Commit 1a scope: skeleton only. Every arch hook is stubbed to return
- * a sensible error so the tree builds with CONFIG_KPROBES=y but
- * register_kprobe() fails cleanly. Commits 1b and 1c fill in
- * arch_prepare/arm/disarm, the relay_signal() hook in trap.c, and the
- * single-step completion path.
+ * Every arch hook returns a sensible error until its implementation is
+ * wired, so the tree builds with CONFIG_KPROBES=y and unsupported
+ * operations fail cleanly.
  *
  * References:
  *   - arch/x86/kernel/kprobes/core.c (primary reference)
- *   - Documentation/virt/uml/redesign/02-workstreams/
- *     C-profiles-and-gaps/04-port-kprobes.md (design)
- *   - Documentation/virt/uml/redesign/04-risks/decisions-log.md §D32
+ *   - Documentation/virt/uml/kprobes.rst
  */
 
 #include <linux/kprobes.h>
@@ -46,12 +42,9 @@ DEFINE_PER_CPU(struct kprobe_ctlblk, kprobe_ctlblk);
 DEFINE_PER_CPU(struct kprobe *, current_kprobe);
 
 /*
- * kretprobe blacklist. Kept empty on UML for now — the blacklist
- * is a protection for functions whose return addresses cannot be
- * safely probed (e.g. recursive printk helpers on some arches).
- * UML does not need arch-specific blacklist entries for the
- * minimal int3 port; C-04's kretprobes commit populates this if
- * testing surfaces entries that must be excluded.
+ * kretprobe blacklist. UML does not need arch-specific blacklist entries
+ * for the int3 port; the generic blacklist remains available for functions
+ * whose return addresses cannot be safely probed.
  */
 struct kretprobe_blackpoint kretprobe_blacklist[] = { };
 const int kretprobe_blacklist_size = ARRAY_SIZE(kretprobe_blacklist);
@@ -61,7 +54,7 @@ const int kretprobe_blacklist_size = ARRAY_SIZE(kretprobe_blacklist);
  * Arch hook that tells the kprobes core whether a given kprobe sits
  * inside a trampoline (and so must not be handled via the normal
  * re-entry path). With CONFIG_KRETPROBE_ON_RETHOOK=y the arch
- * trampoline is owned by rethook, not kprobes — matching x86 we
+ * trampoline is owned by rethook, not kprobes; matching x86 we
  * always answer "no". When CONFIG_KRETPROBES=n, <linux/kprobes.h>
  * provides a static inline definition, so this one is guarded.
  */
@@ -76,12 +69,12 @@ NOKPROBE_SYMBOL(arch_trampoline_kprobe);
  * Allocate an out-of-line instruction slot and copy the original
  * bytes. The generic kprobes core's insn-slot cache (backed by
  * execmem_alloc(EXECMEM_KPROBES)) gives us an RWX page-backed slot
- * guaranteed to be within ±2GB of the kernel image — enough for
+ * guaranteed to be within 2GB of the kernel image, enough for
  * rip-relative instructions to remain correct when single-stepped
  * out of line.
  *
  * We copy MAX_INSN_SIZE bytes (x86_64 max instruction length = 15,
- * we round up to 16). Commit 1b doesn't decode; commit 1c relies
+ * we round up to 16). This path relies
  * on TF-driven single-step to trap after the first instruction,
  * then uses (regs->ip - insn_slot) as the effective length.
  */
@@ -100,9 +93,9 @@ int arch_prepare_kprobe(struct kprobe *p)
 
 /*
  * Install the int3 (0xcc) breakpoint. UML has no text_poke_bp; we
- * use the B-04 C-05-extended mprotect helpers to open the one
- * page containing p->addr RW, write the single byte, and restore
- * RX. Caller (kernel/kprobes.c) already holds text_mutex; UML is
+ * use the section-split mprotect helpers to open the one page containing
+ * p->addr RW, write the single byte, and restore RX. Caller
+ * (kernel/kprobes.c) already holds text_mutex; UML is
  * effectively UP-serialized for the purposes of this write, so no
  * stop_machine needed for a 1-byte atomic store.
  */
@@ -156,19 +149,18 @@ static nokprobe_inline void set_current_kprobe(struct kprobe *p,
 					       struct kprobe_ctlblk *kcb)
 {
 	__this_cpu_write(current_kprobe, p);
-	kcb->kprobe_saved_flags = kcb->kprobe_old_flags =
-		(KPROBE_REGS_FLAGS(regs) & (X86_EFLAGS_TF | X86_EFLAGS_IF));
+	kcb->kprobe_old_flags =
+		KPROBE_REGS_FLAGS(regs) & (X86_EFLAGS_TF | X86_EFLAGS_IF);
+	kcb->kprobe_saved_flags = kcb->kprobe_old_flags;
 }
 
 /*
  * Set up out-of-line single-step. We redirect the guest IP to the
  * copied instruction, clear IF so interrupts don't fire mid-step,
  * and set TF so the CPU delivers another SIGTRAP after one
- * instruction. D32 + the architectural research in
- * 02-workstreams/C-profiles-and-gaps/04-port-kprobes.md §"Green-
- * light 2" confirmed X86_EFLAGS_TF propagates through UML's
- * mcontext ↔ regs roundtrip (arch/x86/um/os-Linux/mcontext.c:81..84)
- * without arch-specific emulation.
+ * instruction. X86_EFLAGS_TF propagates through UML's mcontext/regs
+ * roundtrip (arch/x86/um/os-Linux/mcontext.c:81..84) without
+ * arch-specific emulation.
  */
 static void setup_singlestep(struct kprobe *p, struct pt_regs *regs,
 			     struct kprobe_ctlblk *kcb, int reenter)
@@ -208,7 +200,7 @@ static void kprobe_post_process(struct kprobe *p, struct pt_regs *regs,
 NOKPROBE_SYMBOL(kprobe_post_process);
 
 /*
- * Handle a re-entered kprobe — one handler being probed by another.
+ * Handle a re-entered kprobe: one handler being probed by another.
  * We silently single-step the inner probe without invoking its
  * user handlers, since the outer probe owns the kcb state.
  */
@@ -247,7 +239,7 @@ NOKPROBE_SYMBOL(reenter_kprobe);
  * probe address is IP - 1.
  *
  * Return: 1 if we consumed the trap (a kprobe is installed at IP-1),
- * 0 if not (relay_signal should fall through to its panic path).
+ * 0 if not (relay_signal should continue to its panic path).
  */
 int kprobe_int3_handler(struct pt_regs *regs)
 {
@@ -264,9 +256,8 @@ int kprobe_int3_handler(struct pt_regs *regs)
 		return 0;
 
 	/*
-	 * Generic kprobes contract (enforced by lib/tests/test_kprobes.c
-	 * and PROVE_LOCKING under research profile): pre/post handlers
-	 * run with preemption disabled. On architectural int3 this is
+	 * Generic kprobes contract: pre/post handlers run with preemption
+	 * disabled. On architectural int3 this is
 	 * provided by the exception entry path; UML's SIGTRAP handler
 	 * is just a signal handler, so preempt state is whatever the
 	 * interrupted guest-kernel context had. Disable explicitly
@@ -285,7 +276,7 @@ int kprobe_int3_handler(struct pt_regs *regs)
 		 * happens in kprobe_debug_handler() when the inner
 		 * single-step completes (status == KPROBE_REENTER
 		 * restores the outer state via restore_previous_kprobe).
-		 * Do NOT re-enable here — a double-enable would
+		 * Do NOT re-enable here; a double-enable would
 		 * underflow preempt_count across the re-entry pair.
 		 */
 		return reenter_kprobe(p, regs, kcb);
@@ -294,7 +285,7 @@ int kprobe_int3_handler(struct pt_regs *regs)
 	set_current_kprobe(p, regs, kcb);
 	kcb->kprobe_status = KPROBE_HIT_ACTIVE;
 
-	/* Rewind IP back to the probe address — pre_handler and
+	/* Rewind IP back to the probe address; pre_handler and
 	 * single-step should see it pointing at the probed
 	 * instruction, not one byte past.
 	 */
@@ -372,8 +363,7 @@ NOKPROBE_SYMBOL(kprobe_debug_handler);
 
 /*
  * Called from do_page_fault when a fault occurs inside a kprobe
- * handler. Minimal stub for now — commit 1c may grow it if the
- * single-step path requires fault-fixup.
+ * handler. UML has no arch-specific fault fixups for the int3 path.
  */
 int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 {

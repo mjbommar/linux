@@ -5,7 +5,7 @@
 #
 # This is intentionally a lightweight harness, not a benchmark suite.  It
 # keeps the Umlfile shape stable and switches only the network driver so
-# legacy vector and vector2 can be compared through the same umlctl path.
+# vec0 and vector2 can be compared through the same umlctl path.
 
 set -euo pipefail
 

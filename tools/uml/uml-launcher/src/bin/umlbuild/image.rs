@@ -48,7 +48,10 @@ pub fn run(args: ImageArgs) -> Result<()> {
         );
     }
     if args.fstype != "ext4" {
-        bail!("only fstype = ext4 is supported at v1 (got {})", args.fstype);
+        bail!(
+            "only fstype = ext4 is supported at v1 (got {})",
+            args.fstype
+        );
     }
 
     let bytes = parse_size(&args.size)?;
@@ -66,8 +69,7 @@ pub fn run(args: ImageArgs) -> Result<()> {
 
     // Make sure the parent dir exists.
     if let Some(parent) = args.out.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     // Truncate the file to the requested size (sparse).
     let f = std::fs::File::create(&args.out)

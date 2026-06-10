@@ -33,30 +33,29 @@ pub struct Profile {
 /// through to the kernel cmdline at boot.
 ///
 /// `mode = "none"` (default) produces a guest with only loopback.
-/// `mode = "tap"` requires the operator to bring up the host TAP
+/// `mode = "tap"` requires the user to bring up the host TAP
 /// (umlbuild shell --network tap handles this via sudo); the guest's
 /// /sbin/init brings up the corresponding NIC inside the guest and
 /// writes /etc/resolv.conf from `dns`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkSpec {
-    pub mode: String,          // "none" or "tap"
-    pub driver: String,        // "vector" (v1) or "vector2"
-    pub tap_name: String,      // host-side TAP device name
-    pub host_ip: String,       // e.g. "10.7.0.1/24"
-    pub guest_ip: String,      // e.g. "10.7.0.2/24"
-    pub gateway: String,       // e.g. "10.7.0.1"
-    pub dns: Vec<String>,      // e.g. ["1.1.1.1", "8.8.8.8"]
+    pub mode: String,     // "none" or "tap"
+    pub driver: String,   // "vector" (v1) or "vector2"
+    pub tap_name: String, // host-side TAP device name
+    pub host_ip: String,  // e.g. "10.7.0.1/24"
+    pub guest_ip: String, // e.g. "10.7.0.2/24"
+    pub gateway: String,  // e.g. "10.7.0.1"
+    pub dns: Vec<String>, // e.g. ["1.1.1.1", "8.8.8.8"]
 }
 
 impl Default for NetworkSpec {
     fn default() -> Self {
         Self {
             mode: "none".into(),
-            // v2 default: current architecture, no per-packet GSO
-            // log spam, `vec2.0` guest interface name.  Set
-            // driver = "vector" explicitly to use the legacy v1
-            // driver.
+            // Current default: vector2 with the `vec2.0` guest
+            // interface name. Set driver = "vector" explicitly to
+            // use vec0.
             driver: "vector2".into(),
             tap_name: "umlb-tap0".into(),
             host_ip: "10.7.0.1/24".into(),
@@ -223,8 +222,8 @@ pub fn resolve(reference: &str) -> Result<Profile> {
 pub fn load(path: &Path) -> Result<Profile> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read profile {}", path.display()))?;
-    let prof: Profile = toml::from_str(&text)
-        .with_context(|| format!("parse profile TOML {}", path.display()))?;
+    let prof: Profile =
+        toml::from_str(&text).with_context(|| format!("parse profile TOML {}", path.display()))?;
     validate(&prof)?;
     Ok(prof)
 }

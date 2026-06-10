@@ -3,31 +3,27 @@
 #define __ASM_UM_MMAPS_H
 
 /*
- * Enumeration of UML's kernel-side host mmap regions (workstream C-09,
- * D37 pull-forward #1).
+ * Enumeration of UML's kernel-side host mmap regions.
  *
  * UML runs the Linux kernel as a host-userspace ELF process. The
  * kernel's "physical" memory, KASAN shadow, vmalloc region, stub
  * stacks, and time-travel shared memory are all ordinary host mmaps
- * in the UML process's address space. They are currently described
- * only implicitly — each mmap call site is on its own, with no
- * central place to ask "what are all the kernel regions?".
+ * in the UML process's address space. This table gives those mappings one
+ * typed registry instead of leaving each mmap call site to describe itself.
  *
  * This header introduces a typed, registry-style table so that:
  *
- *   - The C-09 fork-server worker_init path can know which regions
+ *   - The fork-server worker_init path can know which regions
  *     to re-map, which to let COW, and which are ephemeral (see the
  *     disposition enum below).
- *   - The FD-hygiene sweep (C-09 commit 4) can cross-reference which
+ *   - The FD-hygiene sweep can cross-reference which
  *     mmaps are file-backed and need FD disposition tags.
- *   - The v2 snapshot-to-disk writer (see
- *     `Documentation/virt/uml/redesign/08-future-phases/
- *     02-snapshot-to-disk.md`) can walk this table to emit one ELF
- *     PT_LOAD per entry with the right sparseness / zero-fill policy.
+ *   - Snapshot serializers can walk this table to emit one ELF PT_LOAD per
+ *     entry with the right sparseness / zero-fill policy.
  *
- * Registration lives in `arch/um/kernel/snapshot.c`. Today the table
- * is populated at boot by `setup_physmem()` and `kasan_map_memory()`;
- * other mmap sites join in later C-09 commits.
+ * Registration lives in arch/um/kernel/snapshot.c. The table is
+ * populated at boot by setup_physmem() and kasan_map_memory();
+ * other mmap sites can register when they become snapshot-aware.
  */
 
 #include <linux/compiler.h>
@@ -37,28 +33,27 @@
 
 /**
  * enum um_mmap_disposition - how each kernel mmap region should be
- * handled by fork-server worker re-init and by v2 snapshot-to-disk.
+ * handled by fork-server worker re-init and snapshot serialization.
  *
- * @UM_MMAP_INHERIT_COW: region is inherited across ``fork()`` via
+ * @UM_MMAP_INHERIT_COW: region is inherited across fork() via
  *	copy-on-write (MAP_SHARED file-backed, or MAP_PRIVATE without
  *	MADV_DONTFORK). Worker sees the parent's state; pages copy on
- *	first write. Example: ``physmem_fd`` guest RAM.
+ *	first write. Example: physmem_fd guest RAM.
  * @UM_MMAP_REMAP_IN_WORKER: region is NOT inherited; worker must
- *	re-map it. Used today by KASAN shadow via MADV_DONTFORK (see
- *	D37 pull-forward #6 for the C-09 fix that flips this to
- *	INHERIT_COW under ``CONFIG_UM_FUZZ_HOOKS``).
+ *	re-map it. Used by regions that are explicitly excluded from
+ *	fork inheritance.
  * @UM_MMAP_EPHEMERAL: region is ephemeral scratch space; neither
- *	worker nor snapshot-to-disk care about its contents. Example:
+ *	worker nor snapshot serialization needs its contents. Example:
  *	boot-time stub probe buffers, per-CPU IRQ stacks.
- * @UM_MMAP_SERIALIZE: region must be written to v2 snapshot files.
+ * @UM_MMAP_SERIALIZE: region must be written by snapshot serializers.
  *	This is the subset that matters for survive-reboot. Usually
  *	implies INHERIT_COW (fork sees it too).
  *
  * A region can be INHERIT_COW without being SERIALIZE (guest RAM that
  * is reconstructible from boot) and SERIALIZE without being
- * INHERIT_COW (hypothetical: a region only needed on restore). The
- * two axes are tracked together in ``um_mmap_region.flags`` rather
- * than as a single enum.
+ * INHERIT_COW (for example, a region only needed on restore). The two axes
+ * are tracked together in um_mmap_region.flags rather than as a single
+ * enum.
  */
 enum um_mmap_disposition {
 	UM_MMAP_INHERIT_COW		= 1 << 0,
@@ -70,15 +65,15 @@ enum um_mmap_disposition {
 /**
  * struct um_mmap_region - one host mmap owned by the UML kernel.
  * @name: short, unique, printable identifier; used in WARN/OOPS paths
- *	and as the ELF ``PT_NOTE`` name in v2.
+ *	and as a stable note/section name for snapshot serializers.
  * @base: region start virtual address in the UML process.
  * @len: region length in bytes. Must be a multiple of PAGE_SIZE.
- * @flags: OR of ``enum um_mmap_disposition`` bits.
+ * @flags: OR of enum um_mmap_disposition bits.
  * @backing_fd: host fd backing the mapping, or -1 if anonymous.
- *	For ``physmem_fd``-backed regions this is the one tempfile
+ *	For physmem_fd-backed regions this is the one tempfile
  *	that holds all of guest RAM.
- * @list: linkage in ``um_mmap_regions`` list, protected by
- *	``um_mmap_regions_lock``.
+ * @list: linkage in um_mmap_regions list, protected by
+ *	um_mmap_regions_lock.
  */
 struct um_mmap_region {
 	const char		*name;
@@ -91,13 +86,12 @@ struct um_mmap_region {
 
 /*
  * Registry of all registered kernel mmap regions. Populated by
- * boot-time callers of ``um_register_mmap_region()``; iterated by
- * snapshot / worker_init code behind ``um_mmap_regions_lock``.
+ * boot-time callers of um_register_mmap_region(); iterated by
+ * snapshot / worker_init code behind um_mmap_regions_lock.
  *
- * Today the list is append-only at boot and never modified
- * afterwards, so readers need no lock. The lock is declared for the
- * day a post-boot registration path appears (e.g. hot-pluggable
- * hostfs mounts).
+ * The list is append-only at boot and never modified afterwards, so
+ * readers need no lock. The lock also covers a post-boot registration
+ * path, such as hot-pluggable hostfs mounts.
  */
 extern struct list_head um_mmap_regions;
 extern spinlock_t um_mmap_regions_lock;

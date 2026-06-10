@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Orchestration of per-device vhost-user backends
-// (workstream C-10 v2 commit 10).
+// Orchestration of per-device vhost-user backends.
 //
 // `uml-launcher run --virtio <class>[:<args>]` spawns the
 // matching `uml-launcher backend <class> …` subprocess,
@@ -35,12 +34,10 @@
 //   virtio_bus slot. Multiple instances of the same class
 //   (e.g. two disks) increment the id.
 //
-// This is a first-pass orchestration. The more capable
-// design (full enum of class args, multi-disk slot
-// allocation, SIGCHLD-driven supervision) can layer on
-// top without breaking the existing interface.
+// The orchestration keeps class parsing, socket allocation, and backend
+// child lifetime in one place so each device backend can stay focused on
+// its vhost-user protocol.
 
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread::sleep;
@@ -77,10 +74,8 @@ pub struct VirtioSpec {
 
 impl VirtioSpec {
     /// Stable virtio-id per class. Multiple instances of the
-    /// same class are not yet supported; orchestrate() rejects
-    /// a duplicate class in the `specs` list. That restriction
-    /// can relax once the class-id allocator learns to hand
-    /// out successive slots (follow-on).
+    /// same class are rejected so the class-id mapping stays
+    /// deterministic.
     fn virtio_id(&self) -> u32 {
         match self.class {
             VirtioClass::Console => 1,
@@ -196,10 +191,8 @@ impl BackendProcess {
         )
     }
 
-    /// Child pid, for logging. Not currently used by the
-    /// launcher main path (tracing just shows class+socket),
-    /// but useful for tests and future lifecycle-management
-    /// code.
+    /// Child pid, for logging and tests. The launcher main path traces
+    /// class and socket, so it does not need this accessor.
     #[allow(dead_code)]
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(|c| c.id())
@@ -366,14 +359,6 @@ fn wait_for_socket(path: &Path) -> Result<()> {
         path.display(),
         SOCKET_POLL_TIMEOUT
     ))
-}
-
-/// Silence `dead_code` on AsRawFd which we import for
-/// future libselinux/apparmor parallel wire-up without
-/// currently using it in this module.
-#[allow(dead_code)]
-fn _unused() -> i32 {
-    std::io::stderr().as_raw_fd()
 }
 
 #[cfg(test)]

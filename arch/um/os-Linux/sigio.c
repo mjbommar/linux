@@ -108,7 +108,7 @@ static void write_sigio_workaround(void)
 		goto out;
 
 	/*
-	 * FD disposition (C-09 commit 4): worker-rebuild. The SIGIO
+	 * FD disposition: worker-rebuild. The SIGIO
 	 * helper thread's epollfd is dropped in
 	 * os_sigio_worker_forget() and recreated in
 	 * os_sigio_worker_rebuild() (see below) after a forkserver
@@ -165,8 +165,8 @@ static void sigio_cleanup(void)
 __uml_exitcall(sigio_cleanup);
 
 /*
- * Abandon inherited SIGIO helper-thread state after a fork()
- * (workstream C-09, commit 3c). Unlike sigio_cleanup(), this does
+ * Abandon inherited SIGIO helper-thread state after a fork().
+ * Unlike sigio_cleanup(), this does
  * NOT try to signal/join the helper thread: in a forked child the
  * pthread handle in write_sigio_td is stale (the thread only exists
  * in the parent) and joining would either hang or corrupt state.
@@ -187,17 +187,14 @@ void os_sigio_worker_forget(void)
 }
 
 /*
- * Re-install SIGIO helper-thread state in a forkserver worker
- * (workstream C-09, commit 3d-b). Pair with os_sigio_worker_forget:
- * that call dropped the parent-inherited epollfd + pthread handle;
- * this one creates a fresh epollfd and spawns a new helper thread
- * in the worker's own address space.
+ * Re-install SIGIO helper-thread state in a forkserver worker.
+ * Pair with os_sigio_worker_forget: that call dropped the
+ * parent-inherited epollfd + pthread handle; this one creates a fresh
+ * epollfd and spawns a new helper thread in the worker's own address
+ * space.
  *
  * Mirrors write_sigio_workaround() above. Returns 0 on success or
- * -errno on failure; the worker path treats failure as non-fatal
- * for commit 3d-b (worker exits immediately at end of
- * um_snapshot_worker_init either way), but commit 3d-c will use
- * the return to decide whether to resume guest code.
+ * -errno on failure.
  */
 int os_sigio_worker_rebuild(void)
 {
@@ -207,8 +204,7 @@ int os_sigio_worker_rebuild(void)
 		return 0;	/* already rebuilt; idempotent */
 
 	/*
-	 * FD disposition (C-09 commit 4): worker-rebuild — this is the
-	 * rebuild-side creation. EPOLL_CLOEXEC is atomic to match
+	 * Worker-rebuild creation. EPOLL_CLOEXEC is atomic to match
 	 * write_sigio_workaround() above.
 	 */
 	epollfd = epoll_create1(EPOLL_CLOEXEC);
@@ -343,7 +339,8 @@ static void tty_output(int master, int slave)
 
 	memset(buf, 0, sizeof(buf));
 
-	while (write(master, buf, sizeof(buf)) > 0) ;
+	while (write(master, buf, sizeof(buf)) > 0)
+		;
 	if (errno != EAGAIN)
 		printk(UM_KERN_ERR "tty_output : write failed, errno = %d\n",
 		       errno);
@@ -354,10 +351,11 @@ static void tty_output(int master, int slave)
 	if (got_sigio) {
 		printk(UM_KERN_CONT "Yes\n");
 		pty_output_sigio = 1;
-	} else if (n == -EAGAIN)
+	} else if (n == -EAGAIN) {
 		printk(UM_KERN_CONT "No, enabling workaround\n");
-	else
+	} else {
 		printk(UM_KERN_CONT "tty_output : read failed, err = %d\n", n);
+	}
 }
 
 static void __init check_sigio(void)
@@ -371,7 +369,7 @@ static void __init check_sigio(void)
 	check_one_sigio(tty_output);
 }
 
-/* Here because it only does the SIGIO testing for now */
+/* Host capability checks performed before UML starts normal execution. */
 void __init os_check_bugs(void)
 {
 	check_sigio();

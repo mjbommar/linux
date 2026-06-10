@@ -53,7 +53,7 @@ int uml_vfio_user_setup_iommu(int container)
 	 * This is a bit tricky. See the big comment in
 	 * vhost_user_set_mem_table() in virtio_uml.c.
 	 */
-	/* Offset of `reserved` within the physmem region (host VA math) */
+	/* Offset of reserved within the physmem region (host VA math) */
 	unsigned long reserved = uml_reserved - __binary_start_hva;
 	struct vfio_iommu_type1_dma_map dma_map = {
 		.argsz = sizeof(dma_map),

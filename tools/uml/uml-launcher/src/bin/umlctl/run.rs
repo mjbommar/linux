@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Per-run bundle metadata — the minimum slice of the
-// observability-spine (memo 13) that Phase O1.1 lands.
+// Per-run bundle metadata.
 //
 // One `umlctl start` produces exactly one run; the run_id is
 // a ULID (Crockford base32, lexicographic + time-sortable),
@@ -9,9 +8,9 @@
 // `run.json` at the root of that directory records the scalar
 // metadata this file defines.
 //
-// Later spine phases add `events.jsonl`, `kernel.log`
-// (separated from init.log), `trace.perfetto`, etc. alongside
-// `run.json` in the same bundle directory.
+// Additional observability artifacts such as `events.jsonl`,
+// `kernel.log`, and traces live alongside `run.json` in the same
+// bundle directory.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,9 +22,8 @@ use super::paths::Paths;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Run {
-    /// Schema version for the run.json payload itself. Frozen
-    /// at 1 for the O1.1 lift; a future bump is additive-only
-    /// until we need a migration.
+    /// Schema version for the run.json payload itself. Frozen at 1;
+    /// a future bump is additive-only until we need a migration.
     pub schema_version: u32,
     pub run_id: String,
     pub instance: String,
@@ -199,9 +197,8 @@ pub fn finalize_run(
     let _ = r.write_to(&dir);
 }
 
-/// Find the most recent run directory for `instance`. Used by
-/// `logs` + future `dmesg` / `events` to resolve the default
-/// bundle when no explicit run_id is named.
+/// Find the most recent run directory for `instance`. Used by commands
+/// that need a default run bundle when no explicit run_id is named.
 pub fn latest_run_for(paths: &Paths, instance: &str) -> Option<String> {
     let runs = paths.runs_dir();
     if !runs.exists() {

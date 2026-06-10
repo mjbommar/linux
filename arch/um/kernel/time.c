@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/threads.h>
+#include <linux/printk.h>
 #include <asm/backend.h>
 #include <asm/irq.h>
 #include <asm/param.h>
@@ -62,22 +63,6 @@ notrace unsigned long long sched_clock(void)
 
 static void time_travel_set_time(unsigned long long ns)
 {
-	/*
-	 * memo 04 Phase 3 (post-2026-05-19 sprint): if we're replaying a
-	 * recorded run, override @ns with the value captured at this
-	 * advance during the original record run.  Done BEFORE the
-	 * backwards-time panic so a backwards-going replay (which would
-	 * indicate divergence from the original run) still trips the
-	 * panic.
-	 *
-	 * Quiet no-op when CONFIG_UM_BACKEND_KVM_V2=n, when no record
-	 * container is active, or when the log is exhausted / not in
-	 * REPLAYING state.  Static-key gate keeps off-state cost at one
-	 * predicted-not-taken branch.
-	 */
-	if (static_branch_unlikely(&um_hook_record_replay))
-		um_time_travel_consume_replay(&ns);
-
 	if (unlikely(ns < time_travel_time))
 		panic("time-travel: time goes backwards %lld -> %lld\n",
 		      time_travel_time, ns);
@@ -87,12 +72,10 @@ static void time_travel_set_time(unsigned long long ns)
 	time_travel_time = ns;
 
 	/*
-	 * Post-2026-05-19 sprint memo 04: notify the redesign hook layer
-	 * of every time-travel advance.  um_on_clock_read() fans the
-	 * value into the static-key-gated time-travel, KFENCE-sample and
-	 * record/replay observers (the record-side observe lives there).
-	 * Production builds with all three keys off pay zero cost (the
-	 * inline is patched out entirely).  See
+	 * Notify hook consumers of every time-travel advance.
+	 * um_on_clock_read() fans the value into the static-key-gated
+	 * time-travel and KFENCE-sample observers. Normal builds with
+	 * both keys off pay zero cost (the inline is patched out entirely). See
 	 * arch/um/include/asm/um-hooks.h::um_on_clock_read.
 	 */
 	um_on_clock_read(ns);
@@ -111,7 +94,7 @@ int time_travel_should_print_bc_msg;
 void _time_travel_print_bc_msg(void)
 {
 	time_travel_should_print_bc_msg = 0;
-	printk(KERN_INFO "time-travel: received broadcast 0x%llx\n", bc_message);
+	pr_info("time-travel: received broadcast 0x%llx\n", bc_message);
 }
 
 static void time_travel_setup_shm(int fd, u16 id)
@@ -163,9 +146,8 @@ static void time_travel_handle_message(struct um_timetravel_msg *msg,
 	if (mode != TTMH_READ) {
 		BUG_ON(mode == TTMH_IDLE && !irqs_disabled());
 
-		while (os_poll(1, &time_travel_ext_fd) != 0) {
-			/* nothing */
-		}
+		while (os_poll(1, &time_travel_ext_fd) != 0)
+			;
 	}
 
 	if (unlikely(mode == TTMH_READ_START_ACK)) {
@@ -176,7 +158,7 @@ static void time_travel_handle_message(struct um_timetravel_msg *msg,
 		if (ret == sizeof(*msg)) {
 			time_travel_setup_shm(fd[UM_TIMETRAVEL_SHARED_MEMFD],
 					      msg->time & UM_TIMETRAVEL_START_ACK_ID);
-			/* we don't use the logging for now */
+			/* The logging fd is not used by UML. */
 			os_close_file(fd[UM_TIMETRAVEL_SHARED_LOGFD]);
 		}
 	} else {
@@ -235,7 +217,7 @@ static u64 time_travel_ext_req(u32 op, u64 time)
 	/*
 	 * We need to block even the timetravel handlers of SIGIO here and
 	 * only restore their use when we got the ACK - otherwise we may
-	 * (will) get interrupted by that, try to queue the IRQ for future
+	 * (will) get interrupted by that, try to queue the IRQ for deferred
 	 * processing and thus send another request while we're still waiting
 	 * for an ACK, but the peer doesn't know we got interrupted and will
 	 * send the ACKs in the same order as the message, but we'd need to
@@ -441,11 +423,9 @@ static void __time_travel_add_event(struct time_travel_event *e,
 	local_irq_save(flags);
 	list_for_each_entry(tmp, &time_travel_events, list) {
 		/*
-		 * Add the new entry before one with higher time,
-		 * or if they're equal and both on stack, because
-		 * in that case we need to unwind the stack in the
-		 * right order, and the later event (timer sleep
-		 * or such) must be dequeued first.
+		 * Add the new entry before one with higher time, or if they're
+		 * equal and both on stack. In that case, unwind the stack in the
+		 * right order by dequeuing the more recent event first.
 		 */
 		if ((tmp->time > e->time) ||
 		    (tmp->time == e->time && tmp->onstack && e->onstack)) {
@@ -497,8 +477,8 @@ void deliver_time_travel_irqs(void)
 	unsigned long flags;
 
 	/*
-	 * Don't do anything for most cases. Note that because here we have
-	 * to disable IRQs (and re-enable later) we'll actually recurse at
+	 * Don't do anything for most cases. Note that because here we have to
+	 * disable IRQs and re-enable before returning, we'll actually recurse at
 	 * the end of the function, so this is strictly necessary.
 	 */
 	if (likely(list_empty(&time_travel_irqs)))
@@ -629,9 +609,8 @@ void time_travel_add_irq_event(struct time_travel_event *e)
 
 	time_travel_ext_get_time();
 	/*
-	 * We could model interrupt latency here, for now just
-	 * don't have any latency at all and request the exact
-	 * same time (again) to run the interrupt...
+	 * Interrupt latency is not modeled here; request the same timestamp
+	 * again to run the interrupt.
 	 */
 	time_travel_add_event(e, time_travel_time);
 }
@@ -702,8 +681,10 @@ static int time_travel_connect_external(const char *socket)
 	unsigned long long id = (unsigned long long)-1;
 	int rc;
 
-	if ((sep = strchr(socket, ':'))) {
+	sep = strchr(socket, ':');
+	if (sep) {
 		char buf[25] = {};
+
 		if (sep - socket > sizeof(buf) - 1)
 			goto invalid_number;
 
@@ -976,18 +957,18 @@ static void __init um_timer_init(void)
 
 	err = request_irq(TIMER_IRQ, um_timer, IRQF_TIMER, "hr timer", NULL);
 	if (err != 0)
-		printk(KERN_ERR "register_timer : request_irq failed - "
-		       "errno = %d\n", -err);
+		pr_err("register_timer : request_irq failed - errno = %d\n",
+		       -err);
 
 	err = um_setup_timer();
 	if (err) {
-		printk(KERN_ERR "creation of timer failed - errno = %d\n", -err);
+		pr_err("creation of timer failed - errno = %d\n", -err);
 		return;
 	}
 
 	err = clocksource_register_hz(&timer_clocksource, NSEC_PER_SEC/TIMER_MULTIPLIER);
 	if (err) {
-		printk(KERN_ERR "clocksource_register_hz returned %d\n", err);
+		pr_err("clocksource_register_hz returned %d\n", err);
 		return;
 	}
 }

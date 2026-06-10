@@ -1,73 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — APERF/MPERF MSR passthrough toggle + status probe.
+ * KVM backend APERF/MPERF MSR passthrough control.
  *
- * What this file is for:
+ * KVM exposes APERF/MPERF passthrough through the per-VM
+ * KVM_CAP_X86_DISABLE_EXITS cap. Setting
+ * KVM_X86_DISABLE_EXITS_APERFMPERF lets guest CPL0 rdmsr instructions
+ * for IA32_APERF and IA32_MPERF pass through to hardware instead of
+ * returning the default emulated zero.
  *
- *   The KVM uapi exposes a per-VM cap, KVM_CAP_X86_DISABLE_EXITS, with
- *   a KVM_X86_DISABLE_EXITS_APERFMPERF bit (1 << 4) that tells KVM to
- *   skip the rdmsr intercept on IA32_APERF (0xE7) and IA32_MPERF
- *   (0xE8) so guest reads pass through to hardware.  QEMU's
- *   -overcommit cpu-pm=on plumbs HLT / MWAIT / PAUSE / CSTATE but not
- *   APERFMPERF; libvirt does not surface a property for it.  Guests
- *   under QEMU+libvirt therefore see zero on those MSRs even when
- *   CPUID advertises the feature.
+ * This file owns the boot-time toggle, the predicate used by
+ * kvm_v2_vm_create(), the recorded KVM_ENABLE_CAP result, and the
+ * debugfs status file. It does not execute rdmsr from UML kernel code:
+ * UML itself runs as a host userspace process, while the cap affects code
+ * executing inside the KVM guest context.
  *
- *   The v2 backend is its own KVM userspace VMM (it does not go
- *   through QEMU), so it can issue the cap-enable directly.  This
- *   file owns:
+ * The cap must be enabled before any vCPU is created. The predicate is
+ * therefore seeded by Kconfig and the UML cmdline parser and is not
+ * mutated after VM creation starts. Host APERF/MPERF support is left to
+ * KVM's capability check; rejection leaves the default zero-counter
+ * behavior in place and is reported through the status file.
  *
- *     1. The runtime predicate kvm_v2_aperfmperf_enabled() that
- *        kvm_v2_vm_create() consults before issuing KVM_ENABLE_CAP.
- *     2. The kvm_v2_aperfmperf={on,off,1,0,y,n} boot-param parser.
- *     3. The kvm_v2_aperfmperf_ioctl_rc / _attempted record so the
- *        probe can report the exact outcome of the ioctl.
- *     4. A debugfs read file
- *        /sys/kernel/debug/um/kvm_v2/aperf_mperf that reports the
- *        STATUS of the architectural plumbing (toggle on/off, the
- *        ioctl return code, host CPU feature availability) so a
- *        userspace test can verify the cap was actually plumbed.
- *
- * IMPORTANT — what this file does NOT do:
- *
- *   It does NOT execute rdmsr from within the UML kernel.  UML's
- *   kernel code runs as a host userspace process at host CPL=3;
- *   rdmsr requires CPL=0 and would #GP every time.  The disable-
- *   exits bit only affects rdmsr executed at GUEST CPL=0 inside the
- *   KVM guest (i.e., real guest kernel code running in VMX non-root
- *   mode).  For UML, the only code that runs at guest CPL=0 is the
- *   LSTAR gadget and the IDT/exception stubs.  Adding rdmsr to the
- *   gadget is possible (a future custom NR could expose APERF/MPERF
- *   to guest userspace) but is out of scope for this commit.
- *
- *   The architectural value is real: UML's kvm-v2 is now a faithful
- *   KVM userspace VMM with respect to APERFMPERF disable-exits.
- *   That fills the cap-plumbing gap in the upstream QEMU+libvirt
- *   userspace VMM and provides a reproducer for the cap-plumbing
- *   logic.  Actually consuming the counters from guest code is a
- *   separate problem (see the README under
- *   Documentation/virt/uml/examples/aperf-mperf/ for the bridging
- *   notes).
- *
- * Constraints captured here so this file stays self-contained:
- *
- *   - The cap is per-VM and must be enabled before any vCPU is
- *     created.  kvm_v2_vm_create() runs before kvm_v2_vcpu_create();
- *     the predicate must therefore be queryable at that point and
- *     never change after.  We use a single static bool seeded by
- *     Kconfig default + cmdline override; no late writers.
- *
- *   - Host CPU must have X86_FEATURE_APERFMPERF for KVM to accept
- *     the bit.  We do NOT pre-probe here — KVM rejects the ioctl
- *     with -EINVAL and the caller logs + continues, which is the
- *     correct behavior (same observable state as
- *     CONFIG_..._APERFMPERF_PASSTHROUGH=n).  The status probe
- *     surfaces the ioctl rc so the test can distinguish "feature
- *     was enabled by ops but host rejected" from "ops never asked".
- *
- * See Documentation/virt/uml/aperf-mperf.rst for the operator-facing
- * usage doc and Documentation/virt/uml/examples/aperf-mperf/README.md
- * for the runnable example and captured output.
+ * See Documentation/virt/uml/aperf-mperf.rst for user-facing usage and
+ * Documentation/virt/uml/examples/aperf-mperf/README.md for an in-guest
+ * example.
  */
 
 #include <linux/debugfs.h>
@@ -75,6 +30,7 @@
 #include <linux/kernel.h>
 #include <linux/printk.h>
 #include <linux/seq_file.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #include <asm/cpufeatures.h>
@@ -85,19 +41,19 @@
 #include "kvm_v2_backend.h"
 
 /*
- * Default state of the toggle.  Single bool — predicate is read at
- * vm_create time (well after the boot-param parser settles) and
- * once more per debugfs open.  No locking required.
+ * Default state of the toggle. Single bool; predicate is read at
+ * vm_create time after the boot-param parser settles and once more per
+ * debugfs open. No locking required.
  */
 static bool aperfmperf_enabled = true;
 
 /*
  * Outcome record updated by kvm_v2_vm_create() right after the
- * KVM_ENABLE_CAP ioctl returns.  Read by the debugfs probe so the
- * test can distinguish:
+ * KVM_ENABLE_CAP ioctl returns. Read by the debugfs probe so callers can
+ * distinguish:
  *
  *   attempted = 0:  passthrough disabled (Kconfig=n compile-out or
- *                   boot param off — vm_create skipped the ioctl)
+ *                   boot param off; vm_create skipped the ioctl)
  *   attempted = 1, ioctl_rc = 0:
  *                   passthrough enabled, KVM accepted the cap
  *   attempted = 1, ioctl_rc < 0:
@@ -121,12 +77,12 @@ void kvm_v2_aperfmperf_record_ioctl(int rc)
 }
 
 /*
- * Consumed by exception.c::kvm_v2_install_per_vcpu_gadget_state to
+ * Consumed by kvm_v2_install_per_vcpu_gadget_state() to
  * decide whether to set the per-vCPU APERF_CAP byte that the
  * h_aperfmperf gadget body checks before issuing rdmsr.
  *
  * Returns true only when vm_create both attempted the cap-enable
- * AND KVM accepted it.  This is the definitive "rdmsr from guest
+ * and KVM accepted it. This is the definitive "rdmsr from guest
  * CPL=0 will pass through to hardware" predicate; using just the
  * toggle would mis-arm the gadget on hosts that lack
  * X86_FEATURE_APERFMPERF (KVM rejects the ioctl in that case).
@@ -137,27 +93,22 @@ bool kvm_v2_aperfmperf_cap_active(void)
 }
 
 /*
- * Boot-param parser.  Accepts on/off/1/0/y/n; bare key without value
- * defaults to on.  Unknown values warn and leave the default
- * untouched — silently accepting garbage would hide cmdline typos.
+ * Boot-param parser. Accepts on/off/1/0/y/n; bare key without value
+ * defaults to on. Unknown values warn and leave the default
+ * untouched; silently accepting garbage would hide cmdline typos.
  *
- * Registered as __uml_setup (NOT __setup or early_param) because
- * init_backend() runs from linux_main() in arch/um/kernel/um_arch.c
- * BEFORE start_kernel() and parse_args().  Neither __setup nor
- * early_param hooks have fired by that point.  __uml_setup is the
- * UML-specific cmdline parser registered with init.h's section
- * machinery (extern struct uml_param __uml_setup_start);
- * uml_check_setup() iterates it from check_environ() during
- * linux_main, so the predicate is correct by the time
- * kvm_v2_vm_create() consults it.  Same path uml_backend_config()
- * and uml_seccomp_config() use; see start_up.c.
+ * Registered as __uml_setup because init_backend() runs from linux_main()
+ * before start_kernel() and parse_args(). Neither __setup nor early_param
+ * hooks have fired by that point. uml_check_setup() has already iterated
+ * __uml_setup entries, so the predicate is correct by the time
+ * kvm_v2_vm_create() consults it.
  */
 static int __init kvm_v2_aperfmperf_uml_setup(char *line, int *add)
 {
 	*add = 0;
 
 	if (!line || !*line) {
-		/* bare `kvm_v2_aperfmperf` with no value => on */
+		/* bare kvm_v2_aperfmperf with no value => on */
 		aperfmperf_enabled = true;
 		return 0;
 	}
@@ -175,22 +126,19 @@ static int __init kvm_v2_aperfmperf_uml_setup(char *line, int *add)
 }
 
 __uml_setup("kvm_v2_aperfmperf=", kvm_v2_aperfmperf_uml_setup,
-"kvm_v2_aperfmperf=<on|off>\n"
-"    Override the Kconfig default for the KVM v2 backend's\n"
-"    APERF/MPERF MSR passthrough cap (KVM_CAP_X86_DISABLE_EXITS /\n"
-"    KVM_X86_DISABLE_EXITS_APERFMPERF).  `on' tells vm_create to\n"
-"    issue KVM_ENABLE_CAP so rdmsr 0xE7/0xE8 at guest CPL=0 reads\n"
-"    host counters; `off' skips the ioctl and KVM keeps emulating\n"
-"    the MSRs as zero.  See Documentation/virt/uml/aperf-mperf.rst.\n"
-"\n"
-);
+	    "kvm_v2_aperfmperf=<on|off>\n"
+	    "    Override the Kconfig default for the KVM v2 backend's\n"
+	    "    APERF/MPERF MSR passthrough cap (KVM_CAP_X86_DISABLE_EXITS /\n"
+	    "    KVM_X86_DISABLE_EXITS_APERFMPERF).  'on' tells vm_create to\n"
+	    "    issue KVM_ENABLE_CAP so rdmsr 0xE7/0xE8 at guest CPL=0 reads\n"
+	    "    host counters; 'off' skips the ioctl and KVM keeps emulating\n"
+	    "    the MSRs as zero.  See Documentation/virt/uml/aperf-mperf.rst.\n"
+	    "\n");
 
 /*
- * Debugfs status probe.  Reports the architectural plumbing — does
- * NOT execute rdmsr (see file-scope comment for why that would be
- * wrong).  Output format is line-oriented so the freestanding demo
- * (Documentation/virt/uml/examples/aperf-mperf/) can parse it
- * without libc:
+ * Debugfs status probe. Reports the architectural plumbing; does not
+ * execute rdmsr. Output format is line-oriented so userspace probes can
+ * parse it without libc:
  *
  *     toggle=on|off                # final state after Kconfig + cmdline
  *     ioctl_attempted=0|1          # did vm_create issue KVM_ENABLE_CAP?
@@ -198,18 +146,17 @@ __uml_setup("kvm_v2_aperfmperf=", kvm_v2_aperfmperf_uml_setup,
  *     host_feature_aperfmperf=0|1  # boot_cpu_has(X86_FEATURE_APERFMPERF)
  *     status=enabled|disabled|rejected|host_no_feature
  *
- * The `status` line is the operator-readable verdict:
+ * The status line is the human-readable verdict:
  *
- *   enabled         — ioctl_attempted=1 ioctl_rc=0:
+ *   enabled         - ioctl_attempted=1 ioctl_rc=0:
  *                     KVM accepted; APERF/MPERF rdmsr at guest CPL=0
  *                     will now pass through to hardware
- *   rejected        — ioctl_attempted=1 ioctl_rc<0 AND host has feature:
- *                     KVM refused the cap (rare; usually a SMT-RSB
- *                     mitigation overlap — see x86.c:6817)
- *   host_no_feature — ioctl_attempted=1 ioctl_rc<0 AND host lacks
+ *   rejected        - ioctl_attempted=1 ioctl_rc<0 and host has feature:
+ *                     KVM refused the cap.
+ *   host_no_feature - ioctl_attempted=1 ioctl_rc<0 and host lacks
  *                     X86_FEATURE_APERFMPERF (kvm_get_allowed_disable_exits
  *                     masks the bit off in that case)
- *   disabled        — ioctl_attempted=0:
+ *   disabled        - ioctl_attempted=0:
  *                     boot param said off, or Kconfig compiled it out
  */
 static int kvm_v2_aperfmperf_show(struct seq_file *s, void *v)
@@ -242,8 +189,8 @@ static int __init kvm_v2_aperfmperf_debugfs_init(void)
 	struct dentry *um_dir, *kvm_v2_dir;
 
 	/*
-	 * debugfs_create_dir does NOT split a slashed path — it makes
-	 * the literal name a single entry.  Build the hierarchy in two
+	 * debugfs_create_dir does not split a slashed path; it makes
+	 * the literal name a single entry. Build the hierarchy in two
 	 * steps, reusing an existing "um" dir if some other subsystem
 	 * has already created it.
 	 */
@@ -251,9 +198,9 @@ static int __init kvm_v2_aperfmperf_debugfs_init(void)
 	if (!um_dir) {
 		um_dir = debugfs_create_dir("um", NULL);
 		if (IS_ERR(um_dir)) {
-			pr_warn("um: kvm-v2: debugfs_create_dir(um) failed (%ld) — aperf_mperf probe unavailable\n",
+			pr_warn("um: kvm-v2: debugfs_create_dir(um) failed (%ld); aperf_mperf probe unavailable\n",
 				PTR_ERR(um_dir));
-			return 0;	/* non-fatal */
+			return 0;
 		}
 	}
 
@@ -261,9 +208,9 @@ static int __init kvm_v2_aperfmperf_debugfs_init(void)
 	if (!kvm_v2_dir) {
 		kvm_v2_dir = debugfs_create_dir("kvm_v2", um_dir);
 		if (IS_ERR(kvm_v2_dir)) {
-			pr_warn("um: kvm-v2: debugfs_create_dir(um/kvm_v2) failed (%ld) — aperf_mperf probe unavailable\n",
+			pr_warn("um: kvm-v2: debugfs_create_dir(um/kvm_v2) failed (%ld); aperf_mperf probe unavailable\n",
 				PTR_ERR(kvm_v2_dir));
-			return 0;	/* non-fatal */
+			return 0;
 		}
 	}
 

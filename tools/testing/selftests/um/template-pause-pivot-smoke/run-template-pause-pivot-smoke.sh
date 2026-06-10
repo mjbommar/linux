@@ -1,34 +1,30 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/template-pause-pivot-smoke — Path A integration smoke.
+# um/template-pause-pivot-smoke - template-pause stack-pivot smoke.
 #
 # What this proves:
 #
-#   1. um_template_pause_pivot_test=1 arms the new mode (Path A
-#      stack-pivot primitive integrated into the M-fork child path).
+#   1. um_template_pause_pivot_test=1 arms the stack-pivot mode.
 #   2. master forks via os_template_pause_fork_clone_to(@entry).
 #   3. The child runs `child_entry_pivot_test` on a MAP_PRIVATE
 #      stack, executes raw-syscall write of "PIVOT_OK\n" to host
 #      fd 1, then exit_group(0).
 #   4. No "Kernel tried to access user memory" panic at
-#      um_template_pause_enter+0xf6 (the v1 ceiling).
+#      um_template_pause_enter+0xf6.
 #   5. Master sustains repeated iterations (multiple SIGCONTs ->
 #      multiple PIVOT_OKs).
 #
 # Background:
 #
-#   Path A's host-side primitive was validated in
-#   tools/testing/selftests/um/rt-sigreturn-isolation/.  Path C
-#   experiment (state-audit/30-path-c-v1-ceiling-confirmed.md)
-#   showed the M-fork child cannot return up the syscall stack
-#   without panic.  This selftest closes the gap: the same primitive
-#   working in real kernel context post-fork.
+#   The host-side primitive is validated in
+#   tools/testing/selftests/um/rt-sigreturn-isolation/. This selftest
+#   checks the same primitive in real kernel context after fork.
 #
 # Exit codes:
-#   0  PASS  — >= 5 PIVOT_OK occurrences and zero v1-ceiling panics.
-#   1  FAIL  — PIVOT_OK missing, v1 panic present, or master crashed.
-#   4  SKIP  — kernel binary missing or python3 unavailable.
+#   0  PASS  - >= 5 PIVOT_OK occurrences and zero access panics.
+#   1  FAIL  - PIVOT_OK missing, panic present, or master crashed.
+#   4  SKIP  - kernel binary missing or python3 unavailable.
 #
 # Environment:
 #   UML_BINARY  UML kernel with CONFIG_UM_TEMPLATE_PAUSE_FORK=y.

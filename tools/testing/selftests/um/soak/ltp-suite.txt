@@ -1,8 +1,5 @@
-# Phase J LTP KEEP suite-list — kirk --run-suite consumer.
+# LTP keep suite-list for kirk --run-suite.
 # SPDX-License-Identifier: GPL-2.0
-#
-# Curation walk: Documentation/virt/uml/redesign/02-workstreams/
-#   D-kvm-backend/phase-J-ltp-curation-2026-05-14.md §2.2.
 #
 # Each non-comment, non-blank line is a runtest/* basename that
 # kirk accepts under --run-suite. The 9-suite list below totals

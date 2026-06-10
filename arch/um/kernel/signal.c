@@ -30,10 +30,10 @@ EXPORT_SYMBOL(unblock_signals);
  * The generic function_graph tracer's first activation takes
  * sched_register_mutex / tracepoints_mutex; if it pushes a shadow-
  * stack entry from inside one of these atomic-context callers the
- * prepare_ftrace_return → function_graph_enter → __mutex_lock chain
+ * prepare_ftrace_return to function_graph_enter to __mutex_lock chain
  * sleeps with preempt_count > 0 and the kernel panics (observed in
- * decisions-log D34 addendum-3). On native x86 the analogous path
- * cannot even exist because arch_local_irq_* is inline asm and has
+ * graph-tracing stress). On native x86 the analogous path cannot
+ * even exist because arch_local_irq_* is inline asm and has
  * no function-entry NOP to patch; on UML these are real C functions
  * so we need the notrace annotation to match.
  */

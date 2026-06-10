@@ -33,14 +33,13 @@ int generic_read(int fd, __u8 *c_out, void *unused)
 	return -errno;
 }
 
-/* XXX Trivial wrapper around write */
-
 int generic_write(int fd, const __u8 *buf, size_t n, void *unused)
 {
 	int written = 0;
 	int err;
 
-	/* The FD may be in blocking mode, as such, need to retry short writes,
+	/*
+	 * The FD may be in blocking mode, as such, need to retry short writes,
 	 * they may have been interrupted by a signal.
 	 */
 	do {
@@ -111,8 +110,7 @@ int generic_console_write(int fd, const char *buf, int n)
 	}
 	err = generic_write(fd, buf, n, NULL);
 	/*
-	 * Restore raw mode, in any case; we *must* ignore any error apart
-	 * EINTR, except for debug.
+	 * Restore raw mode. Ignore all errors except EINTR.
 	 */
 	if (isatty(fd)) {
 		CATCH_EINTR(tcsetattr(fd, TCSAFLUSH, &save));
@@ -127,21 +125,15 @@ error:
 /*
  * UML SIGWINCH handling
  *
- * The point of this is to handle SIGWINCH on consoles which have host
- * ttys and relay them inside UML to whatever might be running on the
- * console and cares about the window size (since SIGWINCH notifies
- * about terminal size changes).
+ * Handle SIGWINCH on consoles with host ttys and relay window-size changes
+ * inside UML to the process attached to the console.
  *
- * So, we have a separate thread for each host tty attached to a UML
- * device (side-issue - I'm annoyed that one thread can't have
- * multiple controlling ttys for the purpose of handling SIGWINCH, but
- * I imagine there are other reasons that doesn't make any sense).
+ * A separate thread is used for each host tty attached to a UML device because
+ * one thread cannot have multiple controlling ttys for SIGWINCH delivery.
  *
- * SIGWINCH can't be received synchronously, so you have to set up to
- * receive it as a signal.  That being the case, if you are going to
- * wait for it, it is convenient to sit in sigsuspend() and wait for
- * the signal to bounce you out of it (see below for how we make sure
- * to exit only on SIGWINCH).
+ * SIGWINCH can't be received synchronously, so it needs signal setup.  It is
+ * then convenient to sit in sigsuspend() and wait for the signal to interrupt
+ * it.
  */
 
 static void winch_handler(int sig)
@@ -171,8 +163,7 @@ static __noreturn int winch_thread(void *arg)
 			-count);
 
 	/*
-	 * We are not using SIG_IGN on purpose, so don't fix it as I thought to
-	 * do! If using SIG_IGN, the sigsuspend() call below would not stop on
+	 * SIG_IGN is not used here because sigsuspend() must be interrupted by
 	 * SIGWINCH.
 	 */
 
@@ -207,8 +198,8 @@ static __noreturn int winch_thread(void *arg)
 
 	/*
 	 * These are synchronization calls between various UML threads on the
-	 * host - since they are not different kernel threads, we cannot use
-	 * kernel semaphores. We don't use SysV semaphores because they are
+	 * host. They are not different kernel threads, so kernel semaphores
+	 * are unavailable. SysV semaphores are avoided because they are
 	 * persistent.
 	 */
 	count = read(pipe_fd, &c, sizeof(c));
@@ -216,7 +207,7 @@ static __noreturn int winch_thread(void *arg)
 		os_info("winch_thread : failed to read synchronization byte, err = %d\n",
 			errno);
 
-	while(1) {
+	while (1) {
 		/*
 		 * This will be interrupted by SIGWINCH only, since
 		 * other signals are blocked.
@@ -250,12 +241,14 @@ static int winch_tramp(int fd, struct tty_port *port, int *fd_out,
 		goto out;
 	}
 
-	data = ((struct winch_data) { .pty_fd 		= fd,
-				      .pipe_fd 		= fds[1] } );
+	data = (struct winch_data) {
+		.pty_fd = fd,
+		.pipe_fd = fds[1],
+	};
 	/*
-	 * CLONE_FILES so this thread doesn't hold open files which are open
-	 * now, but later closed in a different thread.  This is a
-	 * problem with /dev/net/tun, which if held open by this
+	 * CLONE_FILES prevents this thread from holding files open after
+	 * another thread closes them.  This is a problem with /dev/net/tun,
+	 * which if held open by this
 	 * thread, prevents the TUN/TAP device from being reused.
 	 */
 	pid = run_helper_thread(winch_thread, &data, CLONE_FILES, stack_out);

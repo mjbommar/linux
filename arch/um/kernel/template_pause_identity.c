@@ -1,42 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML template-pause identity application (Memo 09 Phase 2).
+ * UML template-pause identity application.
  *
  * Apply the identity blob delivered by the supervisor (instance MAC,
- * IPv4 CIDR, IPv4 gateway) to in-guest kernel state.  Phase 1a only
- * read + logged the blob; Phase 2 (this TU) actually mutates the
- * netdev MAC and rebinds the IPv4 address.
+ * IPv4 CIDR, IPv4 gateway) to in-guest kernel state.
  *
- * Architectural choice (design memo 2026-05-21):
+ * In fork-on-resume mode the master applies the per-take identity
+ * before forking.  The child inherits the applied netdev state via CoW,
+ * and the child path does not need to take RTNL or walk global network
+ * state immediately after fork.
  *
- *   The IDENTITY APPLY happens in the MASTER (parent) of the fork-on-
- *   resume loop, AFTER reading the per-take blob and BEFORE forking
- *   for that take.  The forked child inherits the applied identity via
- *   CoW.  This sidesteps the bug-B1 hazard zone (the M-fork child runs
- *   on a private stack and cannot safely re-enter kernel C code that
- *   touches shared physmem) — kernel C helpers like dev_set_mac_address
- *   and devinet_ioctl take RTNL and walk net-global data structures,
- *   which the post-fork child is not safe to do.
+ * The master's own netdev identity drifts across iterations, but the
+ * master is never exposed as a pool member.  Each apply is
+ * idempotent: re-applying the same blob is a no-op, and applying a new
+ * blob replaces the previous one.
  *
- *   Cost: the master's own netdev identity drifts across iterations
- *   (it always carries the LAST applied blob).  The master is never
- *   exposed as a pool member, so this is invisible to consumers.  Each
- *   `apply` is idempotent — re-applying the same blob is a no-op, and
- *   applying a NEW blob cleanly replaces the previous one.
- *
- *   Tap-name semantics: blob->tap_name is the HOST-side TAP device
- *   name (created by the supervisor via `ip tuntap add`).  The
- *   IN-GUEST netdev that the supervisor's TAP is attached to is named
- *   by UML's vector driver ("vecN") or the legacy uml_net driver
- *   ("ethN").  We resolve the target by scanning for the first
- *   registered netdev whose name matches a known UML pattern, since
- *   the blob's tap_name does NOT correspond to any in-guest netdev
- *   name.  This avoids adding a new field to the blob (which would
- *   break the wire format already shared with the umlctl userspace).
- *
- *   If the operator needs an explicit override, add a new field to a
- *   future blob version (UM_TEMPLATE_IDENTITY_VERSION = 2) — Phase 2
- *   doesn't need that complexity today.
+ * Tap-name semantics: blob->tap_name is the host-side TAP device name
+ * created by the supervisor. The in-guest netdev attached to that TAP is
+ * named by UML's vector driver ("vecN") or the legacy uml_net driver
+ * ("ethN"). This code resolves the target by scanning for the first
+ * registered netdev whose name matches a known UML pattern. The identity
+ * blob intentionally does not carry an in-guest netdev name, preserving
+ * the wire format shared with umlctl.
  *
  * Routes:
  *   The default gateway is added via ip_rt_ioctl(SIOCADDRT).  Any
@@ -65,9 +50,9 @@
 
 #include <asm/um-template-pause.h>
 #include "template_pause_identity.h"
-#include "../drivers/mconsole.h"	/* mconsole_reinit_for_pool_member — Phase 4 */
+#include "../drivers/mconsole.h"	/* mconsole_reinit_for_pool_member() */
 #if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2)
-/* um_vec2_tap_reopen_for_pool_member — Memo 09 Phase 2.2 */
+/* um_vec2_tap_reopen_for_pool_member() */
 #include "../drivers/vector2_internal.h"
 #endif
 
@@ -76,7 +61,7 @@
  * address and prefix length.  Returns 0 on success, -EINVAL on parse
  * failure or out-of-range prefix.
  *
- * Empty input → -ENODATA, distinguishable from a malformed string.
+ * Empty input returns -ENODATA, distinguishable from a malformed string.
  * The caller can treat -ENODATA as "no IPv4 change requested" rather
  * than as an error.
  */
@@ -123,7 +108,7 @@ int um_template_identity_parse_cidr(const char *str, __be32 *addr_be,
 
 /*
  * Parse a bare IPv4 string like "10.7.0.1" into a network-order
- * address.  Empty input → -ENODATA so callers can distinguish "no
+ * address.  Empty input returns -ENODATA so callers can distinguish "no
  * gateway requested" from a malformed gateway string.
  */
 int um_template_identity_parse_addr(const char *str, __be32 *addr_be)
@@ -145,8 +130,8 @@ int um_template_identity_parse_addr(const char *str, __be32 *addr_be)
 }
 
 /*
- * Convert a /N prefix length to a network-order netmask.  N=0 →
- * 0.0.0.0; N=32 → 255.255.255.255.  Any N>32 is clamped to 32 by the
+ * Convert a /N prefix length to a network-order netmask.  N=0 returns
+ * 0.0.0.0; N=32 returns 255.255.255.255.  Any N>32 is clamped to 32 by the
  * shift guard.
  */
 __be32 um_template_identity_cidr_mask(u8 prefix_len)
@@ -219,14 +204,14 @@ static int apply_mac(struct net_device *dev,
 		pr_warn("template_pause: dev_set_mac_address(%s, %pM) failed: %d\n",
 			dev->name, blob->mac_addr, rc);
 	else
-		pr_info("template_pause: MAC set on %s -> %pM\n",
-			dev->name, blob->mac_addr);
+		pr_debug("template_pause: MAC set on %s -> %pM\n",
+			 dev->name, blob->mac_addr);
 	return rc;
 }
 
 /*
  * Remove the first IPv4 address currently bound to @dev.  Called
- * before apply_ipv4 to give idempotence — without clearing, a second
+ * before apply_ipv4 to give idempotence; without clearing, a second
  * identity-apply with a different CIDR would leave the old address
  * behind as a secondary.  Called WITHOUT RTNL (devinet_ioctl takes
  * it internally).
@@ -277,8 +262,8 @@ static int apply_ipv4(struct net_device *dev,
 	rc = um_template_identity_parse_cidr(blob->ipv4_cidr,
 					     &addr_be, &prefix_len);
 	if (rc == -ENODATA) {
-		pr_info("template_pause: ipv4_cidr empty on %s; skipping IPv4 rebind\n",
-			dev->name);
+		pr_debug("template_pause: ipv4_cidr empty on %s; skipping IPv4 rebind\n",
+			 dev->name);
 		return 0;
 	}
 	if (rc) {
@@ -322,8 +307,8 @@ static int apply_ipv4(struct net_device *dev,
 		pr_warn("template_pause: SIOCSIFFLAGS(%s, UP) failed: %d\n",
 			dev->name, rc);
 
-	pr_info("template_pause: IPv4 set on %s -> %pI4/%u\n",
-		dev->name, &addr_be, prefix_len);
+	pr_debug("template_pause: IPv4 set on %s -> %pI4/%u\n",
+		 dev->name, &addr_be, prefix_len);
 	return 0;
 }
 
@@ -332,12 +317,10 @@ static int apply_ipv4(struct net_device *dev,
  * SIOCADDRT to install a default route via @gateway_be on @dev.
  *
  * Idempotence: SIOCADDRT returns -EEXIST if the same route already
- * exists.  We treat -EEXIST as success.  For "gateway changed
- * between takes" we would need a SIOCDELRT first, but that requires
- * remembering the previous gateway.  The simpler path: cooperatively
- * assume the supervisor only changes the gateway when the underlying
- * network changes (which would also change tap/MAC) — and accept the
- * -EEXIST in the steady state.
+ * exists, and that is treated as success. Gateway changes require deleting
+ * the old route first; the identity protocol treats TAP/MAC changes as the
+ * network-change signal, so repeated applies of the same gateway stay on
+ * the -EEXIST success path.
  */
 static int apply_default_route(struct net_device *dev,
 			       const struct um_template_identity *blob)
@@ -350,8 +333,8 @@ static int apply_default_route(struct net_device *dev,
 
 	rc = um_template_identity_parse_addr(blob->ipv4_gateway, &gw_be);
 	if (rc == -ENODATA) {
-		pr_info("template_pause: ipv4_gateway empty on %s; skipping default route\n",
-			dev->name);
+		pr_debug("template_pause: ipv4_gateway empty on %s; skipping default route\n",
+			 dev->name);
 		return 0;
 	}
 	if (rc) {
@@ -377,8 +360,8 @@ static int apply_default_route(struct net_device *dev,
 
 	rc = ip_rt_ioctl(net, SIOCADDRT, &rt);
 	if (rc == -EEXIST) {
-		pr_info("template_pause: default route via %pI4 already present on %s\n",
-			&gw_be, dev->name);
+		pr_debug("template_pause: default route via %pI4 already present on %s\n",
+			 &gw_be, dev->name);
 		return 0;
 	}
 	if (rc) {
@@ -387,24 +370,13 @@ static int apply_default_route(struct net_device *dev,
 		return rc;
 	}
 
-	pr_info("template_pause: default route set via %pI4 dev %s\n",
-		&gw_be, dev->name);
+	pr_debug("template_pause: default route set via %pI4 dev %s\n",
+		 &gw_be, dev->name);
 	return 0;
 }
 
 /*
- * Public entry: apply @blob's identity (MAC + IPv4 + gateway) to the
- * in-guest netdev.  Returns 0 on success, -errno on any one step
- * failing.  Errors do NOT abort subsequent steps — the function
- * applies as much as it can and reports the first failure, so a
- * partial-apply (e.g., MAC succeeded but IP didn't) is the visible
- * outcome rather than an all-or-nothing.
- *
- * Must be called in process context with no locks held.  RTNL is
- * taken internally as needed.
- */
-/*
- * um_template_identity_log_parsed() — log the blob's contents
+ * um_template_identity_log_parsed() - log the blob's contents
  * after validation.  Split out from um_template_identity_apply()
  * so callers can verify "did the blob parse cleanly?" without
  * also requiring a target netdev to exist (selftests with hostfs-
@@ -421,6 +393,15 @@ void um_template_identity_log_parsed(const struct um_template_identity *blob)
 }
 EXPORT_SYMBOL_GPL(um_template_identity_log_parsed);
 
+/*
+ * Apply @blob's identity (MAC + IPv4 + gateway) to the in-guest netdev.
+ * Returns 0 on success, -errno if any step fails. Errors do not abort
+ * subsequent steps; the function applies as much as it can and reports
+ * the first failure.
+ *
+ * Must be called in process context with no locks held. RTNL is taken
+ * internally as needed.
+ */
 int um_template_identity_apply(const struct um_template_identity *blob)
 {
 	struct net_device *dev;
@@ -430,10 +411,8 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 		return -EINVAL;
 
 	/*
-	 * Log the parsed blob first.  This always succeeds (blob is
-	 * non-NULL by this point) and gives selftests a reliable
-	 * marker that the read+parse pipeline worked, independent of
-	 * whether a netdev is present to apply to.
+	 * Log the parsed blob first. This gives callers a stable read+parse
+	 * signal even when no netdev exists for apply.
 	 */
 	um_template_identity_log_parsed(blob);
 
@@ -444,8 +423,8 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 		pr_warn("template_pause: no target netdev found; identity NOT applied (parse OK)\n");
 		return -ENODEV;
 	}
-	pr_info("template_pause: applying identity to in-guest netdev %s (blob tap=\"%s\")\n",
-		dev->name, blob->tap_name);
+	pr_debug("template_pause: applying identity to in-guest netdev %s (blob tap=\"%s\")\n",
+		 dev->name, blob->tap_name);
 
 	rc = apply_mac(dev, blob);
 	if (rc && !first_err)
@@ -453,27 +432,22 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 	rtnl_unlock();
 
 	/*
-	 * Memo 09 Phase 2.2 (hardening-plan §1.4): swap the netdev's
-	 * underlying host TAP to a per-member name.  Without this,
-	 * every pool member ends up sharing the master's TAP via CoW
-	 * — the interface name is wrong, the host's bridge / IP
-	 * configuration was set up against ONE TAP, and SIOCSIFFLAGS
-	 * UP later fails because the inherited fd is bogus from the
-	 * test harness's perspective.
+	 * Swap the netdev's underlying host TAP to a per-member name.
+	 * Without this, every pool member inherits the master's TAP via
+	 * CoW and subsequent network configuration targets the wrong host fd.
 	 *
-	 * blob->tap_name carries the per-member host TAP name the
-	 * daemon allocated.  We open a fresh /dev/net/tun fd with
-	 * TUNSETIFF(<that name>) and attach it to the netdev.  The
-	 * operator is responsible for the host-side TAP existing (or
-	 * being creatable with the calling guest's CAP_NET_ADMIN).
+	 * blob->tap_name carries the per-member host TAP name the daemon
+	 * allocated. Open a fresh /dev/net/tun fd with TUNSETIFF(<that name>)
+	 * and attach it to the netdev. The host-side TAP must already exist
+	 * or be creatable with the calling guest's CAP_NET_ADMIN.
 	 *
 	 * Reopen only valid for vec2 TAP-backed netdevs.  Non-vec2
-	 * (legacy uml_net eth0, virtio-net) → skip silently; those
+	 * (legacy uml_net eth0, virtio-net) skips silently; those
 	 * use different mechanisms.  Failure is non-fatal but
 	 * recorded as first_err so the caller knows the network is
-	 * not yet usable.
+	 * unusable.
 	 *
-	 * Done BEFORE apply_ipv4 + apply_default_route so the
+	 * Done before apply_ipv4 + apply_default_route so the
 	 * IPv4-on-up sequence below sees the right fd.
 	 */
 #if IS_ENABLED(CONFIG_UML_NET_VECTOR_V2)
@@ -492,8 +466,8 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 				if (!first_err)
 					first_err = rc;
 			} else {
-				pr_info("template_pause: tap-reopened %s on host TAP %s\n",
-					dev->name, tap_name);
+				pr_debug("template_pause: tap-reopened %s on host TAP %s\n",
+					 dev->name, tap_name);
 			}
 		}
 	}
@@ -512,25 +486,22 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 		first_err = rc;
 
 	/*
-	 * Memo 09 Phase 4 (hardening-plan §1.6): per-pool-member
-	 * mconsole socket.  Without this, every pool member inherits
-	 * the master's mconsole IRQ + socket file, so `umlctl exec
-	 * --pid <member>` ends up addressing the master rather than
-	 * the specific member.  The identity blob's mconsole_path
-	 * (96 bytes) carries the per-member path the daemon synthesized;
-	 * if it's non-empty, rebind here.
+	 * Rebind the per-pool-member mconsole socket.  Without this,
+	 * every pool member inherits the master's mconsole IRQ and socket
+	 * file, so supervisor commands may address the master rather than
+	 * the specific member.  The identity blob's mconsole_path carries
+	 * the per-member path; if it is non-empty, rebind here.
 	 *
-	 * Failure is not fatal — the member still works for everything
-	 * except remote exec.  Log via apply_mconsole's own pr_info on
-	 * success; mconsole_reinit_for_pool_member already pr_warn's
-	 * on failure.
+	 * Failure is not fatal; the member still works for everything
+	 * except remote exec.  mconsole_reinit_for_pool_member() reports
+	 * failures and records routine success at debug level.
 	 */
 	if (blob->mconsole_path[0] != '\0') {
 		size_t plen;
 		char path[sizeof(blob->mconsole_path) + 1];
 
-		/* Defensive NUL-terminate; blob fields are not guaranteed
-		 * to be NUL-terminated.
+		/* Identity blob fields are fixed-width and may not include a
+		 * trailing NUL.
 		 */
 		memcpy(path, blob->mconsole_path, sizeof(blob->mconsole_path));
 		path[sizeof(blob->mconsole_path)] = '\0';

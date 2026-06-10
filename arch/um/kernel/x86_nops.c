@@ -5,11 +5,9 @@
  * arch/x86/kernel/alternative.c defines x86_nops[] for bare-metal
  * x86 builds. UML doesn't compile arch/x86/kernel/ (it has its
  * own entry path), but consumers like arch/x86/net/bpf_jit_comp.c
- * (BPF JIT, workstream C-06) reference the table to emit padding
+ * reference the table to emit padding
  * between BPF instructions. Provide a UML-local copy matching the
  * upstream sequences so the JIT emits correct code.
- *
- * Per D43 fifth-view + D45 fork-scope policy.
  */
 #include <linux/export.h>
 #include <linux/types.h>

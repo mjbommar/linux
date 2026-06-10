@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0
  *
- * iocheck — minimal fio-style write/fsync/read/verify loop on tmpfs.
+ * iocheck - minimal fio-style write/fsync/read/verify loop on tmpfs.
  *
  * Replaces fio for the case where apt isn't reachable. Per iteration:
  *   1. Open <path>, ftruncate to <MB>
@@ -20,10 +20,10 @@
  * Exit code = total mismatched blocks across all iters. 0 = clean.
  *
  * Usage:  iocheck <PATH> <MB> [iters] [blocksize]
- *   PATH      — file to write/read (typically /tmp/iocheck-$$)
- *   MB        — file size in MiB (default 32)
- *   iters     — repeat count (default 1)
- *   blocksize — bytes per block (default 4096)
+ *   PATH      - file to write/read (typically /tmp/iocheck-$$)
+ *   MB        - file size in MiB (default 32)
+ *   iters     - repeat count (default 1)
+ *   blocksize - bytes per block (default 4096)
  */
 #include <stdio.h>
 #include <stdint.h>

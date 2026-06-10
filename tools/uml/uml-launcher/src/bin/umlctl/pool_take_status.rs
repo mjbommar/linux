@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // umlctl pool take / pool status — client-side wrappers for the
-// `pool serve` daemon's `take` and `status` RPCs (spec memo 11 §3.3).
+// `pool serve` daemon's `take` and `status` RPCs.
 //
 // Why a thin client verb and not "let the Go shim speak the socket":
 // keeping one Rust source of truth for the wire format avoids the
 // classic vendor-integration cost where every caller re-implements
 // the JSON envelope and drifts.  The syzkaller shim shells out to
-// these verbs; an operator can also drive them from the shell.
+// these verbs; users can also drive them from the shell.
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
@@ -47,7 +47,7 @@ pub struct TakeArgs {
     pub gateway: String,
 
     /// Mconsole socket path.  Empty = let the daemon synthesize one
-    /// under the per-pool runtime dir (per spec memo 11 §6 q2).
+    /// under the per-pool runtime dir.
     #[arg(long, default_value = "", value_name = "PATH")]
     pub mconsole: String,
 

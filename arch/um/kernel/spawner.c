@@ -1,29 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML per-mm host worker process — spawner side
- * (memo 25 refactor 4 / memo 28 commit E.2).
+ * UML per-mm host worker process, spawner side.
  *
- * The spawner is the original UML host process. After memo 25 R4
- * lands fully (E.6 commit), the spawner owns control-plane state
- * only — no guest-task execution happens in the spawner's VA
- * space. Each guest mm gets its own worker process.
+ * The spawner is the original UML host process. It owns control-plane
+ * state and can attach a separate worker process to each guest mm.
  *
- * This TU is the kernel-side dispatch + list management. The
- * actual clone-without-CLONE_VM lives in
- * arch/um/os-Linux/spawner_user.c (E.3 commit).
- *
- * What this commit (E.2) provides:
- * - struct um_worker definition (opaque to callers via
- *   arch/um/include/shared/worker_api.h's forward decl).
- * - Per-spawner state: list of workers, lock.
- * - spawner_init / spawner_shutdown wired into the boot path.
- * - spawn_worker_for_mm / reap_worker_for_mm stubs that always
- *   return success without actually spawning. The seccomp
- *   mm_create path falls back to today's stub-child-in-spawner
- *   model when mm->context.worker == NULL after the call —
- *   i.e. always in this commit.
- *
- * E.3 makes spawn_worker_for_mm actually create a worker.
+ * This file provides the kernel-side worker list, lifecycle, and IPC
+ * dispatch. The host clone-without-CLONE_VM implementation lives in
+ * arch/um/os-Linux/worker_user.c.
  */
 
 #include <linux/err.h>
@@ -33,6 +17,8 @@
 #include <linux/kthread.h>
 #include <linux/list.h>
 #include <linux/mm_types.h>
+#include <linux/notifier.h>
+#include <linux/panic_notifier.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -47,25 +33,25 @@
 #include <worker_user.h>
 
 /*
- * Per-mm worker handle. Opaque to callers; only spawner.c (and
- * later spawner_user.c) reference fields directly.
+ * Per-mm worker handle. Opaque to callers; only spawner.c references
+ * fields directly.
  *
- * `dispatcher` is only populated for the smoke-test scaffold path
- * (UM_WORKER_SMOKE_TEST_ON_BOOT); production worker bring-up
- * (worker_alloc_stub_for_mm) leaves it NULL and uses the synchronous
- * VCPU_RUN/VCPU_DONE round-trip in worker_drive_vcpu_run instead.
+ * dispatcher is only populated for callers that need asynchronous
+ * IPC handling. worker_alloc_stub_for_mm leaves it NULL and uses the
+ * synchronous VCPU_RUN/VCPU_DONE round-trip in worker_drive_vcpu_run
+ * instead.
  *
- * `vcpu_done` is the completion the dispatcher kthread signals when
- * it observes WORKER_MSG_VCPU_DONE — kept for the smoke-test path
- * and as a defensive sink should an asynchronous VCPU_DONE arrive
- * outside of worker_drive_vcpu_run's synchronous read.
+ * vcpu_done is the completion the dispatcher kthread signals when
+ * it observes WORKER_MSG_VCPU_DONE; kept for the self-test path and
+ * for asynchronous VCPU_DONE notifications that arrive outside
+ * worker_drive_vcpu_run's synchronous read.
  */
 struct um_worker {
 	struct list_head	list;		/* on workers list, under workers_lock */
 	struct mm_struct	*mm;		/* back-ref to the guest mm we serve */
-	int			pid;		/* worker process pid; -1 until E.3 spawns */
-	int			ipc_sock;	/* spawner-side socket end; -1 in E.2 */
-	struct task_struct	*dispatcher;	/* smoke-test kthread; NULL in production */
+	int			pid;		/* worker process pid; -1 until spawned */
+	int			ipc_sock;	/* spawner-side socket end; -1 until open */
+	struct task_struct	*dispatcher;	/* optional IPC kthread */
 
 	struct completion	vcpu_done;
 	int			vcpu_done_status;
@@ -78,13 +64,13 @@ static bool spawner_initialized;
 int spawner_init(void)
 {
 	if (spawner_initialized) {
-		pr_warn("um: worker model: spawner_init called twice\n");
+		pr_warn("um: worker model: %s called twice\n", __func__);
 		return -EBUSY;
 	}
 
 	/* List + lock are statically initialized; nothing to do here yet. */
 	spawner_initialized = true;
-	pr_info("um: worker model: spawner ready (CONFIG_UM_WORKER_PROCESS=y; no workers yet — memo 28 E.2)\n");
+	pr_debug("um: worker model: spawner ready\n");
 	return 0;
 }
 
@@ -102,35 +88,29 @@ void spawner_shutdown(void)
 
 	list_for_each_entry_safe(w, tmp, &reap_list, list) {
 		/*
-		 * Today (E.2) the list is always empty here because
-		 * spawn_worker_for_mm doesn't actually allocate. Once
-		 * E.3 lands, this loop kills + waitpid()s each worker.
+		 * The list may be empty if no worker was allocated. Otherwise
+		 * reap each worker before shutting the spawner down.
 		 */
 		list_del(&w->list);
 		kfree(w);
 	}
 
 	spawner_initialized = false;
-	pr_info("um: worker model: spawner shutdown complete\n");
+	pr_debug("um: worker model: spawner shutdown complete\n");
 }
 
 /*
  * Per-worker IPC dispatcher kthread.
  *
- * E.3d.2's spawner-side reroute (set_stub_state / get_stub_state /
- * handle_syscall all run in seccomp_vcpu_run's continuation under the
- * originating guest task's `current`) and worker_drive_vcpu_run's
- * synchronous read of the IPC socket leave this kthread with no
- * production role. It survives only as the smoke-test scaffold's
- * waiter: when UM_WORKER_SMOKE_TEST_ON_BOOT drives a worker through
+ * Normal VCPU_RUN/VCPU_DONE traffic is handled synchronously by
+ * worker_drive_vcpu_run from the originating guest task's context.
+ * This kthread remains as the asynchronous receiver and self-test waiter: when
+ * UM_WORKER_IPC_SELFTEST_ON_BOOT drives a worker through
  * STUB_ALLOC / WRITE_REGS / RETURN_VALUE / WRITE_REGS_ACK, the
- * spawner side reads the ACK directly via worker_smoke_test rather
- * than this dispatcher — so in fact even the smoke test does not
- * route messages here. The kthread therefore acts as a defensive
- * sink: VCPU_DONE updates the completion (in case an asynchronous
- * stub-loss notification ever arrives outside a worker_drive_vcpu_run
- * call), SHUTDOWN exits cleanly, anything else (including SYSCALL_REQ,
- * which production paths no longer emit) is warn-and-dropped.
+ * spawner side reads the ACK directly via worker_ipc_selftest rather
+ * than this dispatcher, so even the self-test does not
+ * route messages here. VCPU_DONE updates the completion, SHUTDOWN
+ * exits cleanly, and anything else is warn-and-dropped.
  */
 static int worker_dispatcher_fn(void *arg)
 {
@@ -154,7 +134,8 @@ static int worker_dispatcher_fn(void *arg)
 
 		if (msg.magic != WORKER_IPC_MAGIC) {
 			pr_warn_ratelimited("um: worker disp: bad magic 0x%x type=%u\n",
-					    (unsigned)msg.magic, (unsigned)msg.type);
+					    (unsigned int)msg.magic,
+					    (unsigned int)msg.type);
 			continue;
 		}
 
@@ -166,8 +147,8 @@ static int worker_dispatcher_fn(void *arg)
 		case WORKER_MSG_SHUTDOWN:
 			return 0;
 		default:
-			pr_warn_ratelimited("um: worker disp: unexpected msg type %u (production paths route VCPU_RUN/VCPU_DONE inline)\n",
-					    (unsigned)msg.type);
+			pr_warn_ratelimited("um: worker disp: unexpected msg type %u (VCPU_RUN/VCPU_DONE are handled inline)\n",
+					    (unsigned int)msg.type);
 			break;
 		}
 	}
@@ -175,21 +156,20 @@ static int worker_dispatcher_fn(void *arg)
 }
 
 /*
- * Per-mm worker lifecycle — stubs. E.3 replaces with real impls.
+ * Per-mm worker lifecycle.
  *
- * Callers (today only seccomp_mm_create / seccomp_mm_destroy via
- * mm_create / mm_destroy ops) must tolerate either branch:
+ * Callers through the mm_create / mm_destroy ops must tolerate either
+ * branch:
  *  - mm->context.worker == NULL after spawn_worker_for_mm: fall
  *    back to the stub-child-in-spawner path.
  *  - mm->context.worker != NULL: route through the worker IPC.
  *
- * That fallback discipline is what keeps WORKER_PROCESS=y a no-op
- * until E.3 actually spawns workers, and what lets the toggle ship
- * default-y in E.6 without breaking existing seccomp setups.
+ * That fallback discipline keeps WORKER_PROCESS compatible with
+ * seccomp setups that still use the stub-child-in-spawner path.
  */
 /*
  * Start the per-worker dispatcher kthread. Split from
- * spawn_worker_for_mm so the E.3d.0 stub-alloc round-trip can drain
+ * spawn_worker_for_mm so the stub-alloc round-trip can drain
  * the IPC socket synchronously before the dispatcher takes ownership
  * of read(). Returns 0 on success or a negative errno; the caller is
  * responsible for tearing down the worker on failure.
@@ -208,11 +188,11 @@ static int worker_start_dispatcher(struct um_worker *w)
 }
 
 /*
- * Allocate + spawn a worker for `mm`. When `defer_dispatcher` is
- * false (the legacy callers) the dispatcher kthread starts before
- * returning. When true (E.3d.0's seccomp_mm_create path), the caller
- * is responsible for invoking worker_start_dispatcher after any
- * dispatcher-incompatible synchronous IPC round-trip has completed.
+ * Allocate + spawn a worker for mm. When defer_dispatcher is
+ * false the dispatcher kthread starts before returning. When true,
+ * the caller is responsible for either starting the dispatcher after
+ * any dispatcher-incompatible synchronous IPC round-trip, or using the
+ * IPC socket synchronously for the worker's lifetime.
  */
 static int __spawn_worker_for_mm(struct mm_struct *mm, bool defer_dispatcher)
 {
@@ -222,9 +202,9 @@ static int __spawn_worker_for_mm(struct mm_struct *mm, bool defer_dispatcher)
 	if (!spawner_initialized)
 		return -ENODEV;
 
-	WARN_ON_ONCE(mm->context.worker != NULL);
+	WARN_ON_ONCE(mm->context.worker);
 
-	w = kzalloc(sizeof(*w), GFP_KERNEL);
+	w = kzalloc_obj(*w, GFP_KERNEL);
 	if (!w)
 		return -ENOMEM;
 
@@ -255,8 +235,9 @@ static int __spawn_worker_for_mm(struct mm_struct *mm, bool defer_dispatcher)
 
 	mm->context.worker = w;
 
-	pr_info("um: worker model: spawned worker pid=%d for mm=%p (ipc_sock=%d, dispatcher=%s)\n",
-		w->pid, mm, w->ipc_sock, defer_dispatcher ? "deferred" : "running");
+	pr_debug("um: worker model: spawned worker pid=%d for mm=%p (ipc_sock=%d, dispatcher=%s)\n",
+		 w->pid, mm, w->ipc_sock,
+		 defer_dispatcher ? "deferred" : "running");
 	return 0;
 }
 
@@ -285,7 +266,7 @@ void reap_worker_for_mm(struct mm_struct *mm)
 	 * unblocks the dispatcher's os_read_file with EOF/-EBADF; then
 	 * SIGTERM+waitpid finishes the worker. After that, kthread_stop
 	 * collects an already-exited kthread (kthread_stop on a returned
-	 * kthread is fine — it just returns the exit code). Reversing
+	 * kthread is fine; it just returns the exit code. Reversing
 	 * (kthread_stop first) would deadlock since kthread_stop waits
 	 * for the kthread to exit, but the kthread is blocked in read.
 	 */
@@ -301,19 +282,19 @@ void reap_worker_for_mm(struct mm_struct *mm)
 }
 
 /*
- * worker_alloc_stub_for_mm — bring up the per-mm worker AND its
- * stub child (memo 28 E.3d.0).
+ * worker_alloc_stub_for_mm - bring up the per-mm worker and its
+ * stub child.
  *
- * The worker is spawned with the dispatcher kthread DEFERRED so this
- * function can synchronously drive the STUB_ALLOC_REQ → STUB_ALLOC_REP
+ * The worker is spawned with the dispatcher kthread deferred so this
+ * function can synchronously drive the STUB_ALLOC_REQ to STUB_ALLOC_REP
  * round-trip without racing the dispatcher on the IPC socket. On
- * success the spawner-side `*id_out` is fully populated (including
+ * success the spawner-side *id_out is fully populated (including
  * id_out->sock, which is a fresh fd installed in this process's FD
- * table by recvmsg's SCM_RIGHTS handling) and the dispatcher kthread
- * is running.
+ * table by recvmsg's SCM_RIGHTS handling). The worker then remains on
+ * the synchronous IPC path.
  *
  * Failure modes (any of which leave mm->context.worker == NULL so
- * seccomp_mm_create's caller can fall back to the legacy in-spawner
+ * seccomp_mm_create's caller can fall back to the in-spawner
  * start_userspace path):
  *   -ENODEV   spawner not initialized
  *   -EIO      short read/write on IPC socket
@@ -330,7 +311,7 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 	ssize_t n;
 	int rc, i;
 
-	rc = __spawn_worker_for_mm(mm, true /* defer_dispatcher */);
+	rc = __spawn_worker_for_mm(mm, true);
 	if (rc < 0)
 		return rc;
 
@@ -341,7 +322,7 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 	req.type  = WORKER_MSG_STUB_ALLOC_REQ;
 	/*
 	 * Pass the spawner-allocated stub_data VA (init_new_context did
-	 * __get_free_pages from physmem) so the worker uses the SAME
+	 * __get_free_pages from physmem) so the worker uses the same
 	 * shared page. The worker inherited the MAP_SHARED physmem
 	 * mapping CoW from the spawner; arithmetic on this VA in
 	 * start_userspace's userspace_tramp resolves through phys_mapping
@@ -370,7 +351,7 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 	if (rep.magic != WORKER_IPC_MAGIC ||
 	    rep.type  != WORKER_MSG_STUB_ALLOC_REP) {
 		pr_err("um: worker alloc: bad reply magic=0x%x type=%u\n",
-		       (unsigned)rep.magic, (unsigned)rep.type);
+		       (unsigned int)rep.magic, (unsigned int)rep.type);
 		rc = -EPROTO;
 		goto out_reap;
 	}
@@ -402,20 +383,20 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 	/*
 	 * vcpu_run directly reads/writes the IPC socket from the
 	 * originating guest task's context (single-consumer model).
-	 * No dispatcher kthread is started here — leaving
+	 * No dispatcher kthread is started here; leaving
 	 * w->dispatcher == NULL keeps reap_worker_for_mm's
 	 * kthread_stop branch a no-op.
 	 */
 
-	pr_info("um: worker model: stub alloc OK for mm=%p (worker_pid=%d stub_pid=%d sock=%d)\n",
-		mm, w->pid, id_out->pid, id_out->sock);
+	pr_debug("um: worker model: stub alloc OK for mm=%p (worker_pid=%d stub_pid=%d sock=%d)\n",
+		 mm, w->pid, id_out->pid, id_out->sock);
 	return 0;
 
 out_reap:
 	/*
 	 * Tear down the worker so seccomp_mm_create can fall back. The
 	 * dispatcher hasn't started yet (deferred), so reap_worker_for_mm
-	 * is safe — it'll skip the kthread_stop branch since
+	 * is safe; it'll skip the kthread_stop branch since
 	 * w->dispatcher is NULL.
 	 */
 	reap_worker_for_mm(mm);
@@ -425,10 +406,9 @@ out_reap:
 /*
  * Synchronous send of a worker_msg over an mm's IPC socket.
  *
- * Production callers: worker_drive_vcpu_run sends VCPU_RUN here and
- * reads VCPU_DONE inline. Returns 0 on success or a negative errno;
- * the caller is responsible for reading the reply separately if one
- * is expected.
+ * worker_drive_vcpu_run() sends VCPU_RUN here and reads VCPU_DONE inline.
+ * Returns 0 on success or a negative errno; the caller is responsible for
+ * reading the reply separately if one is expected.
  */
 int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg)
 {
@@ -445,18 +425,18 @@ int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg)
 }
 
 /*
- * worker_drive_vcpu_run — ship one outer vcpu_run iteration to the
+ * worker_drive_vcpu_run - ship one outer vcpu_run iteration to the
  * worker and read its VCPU_DONE reply.
  *
  * Synchronization:
  *  - The worker's main loop is single-threaded; it owns the futex
  *    round-trip with the stub child and replies VCPU_DONE when the
  *    stub re-traps. There is exactly one consumer-on-each-side per
- *    iteration, so a synchronous read on the spawner end is correct
- *    (no dispatcher kthread is started for this worker — E.3d.2).
+ *    iteration, so a synchronous read on the spawner end is correct;
+ *    no dispatcher kthread is started for this worker.
  *  - SIGSYS dispatch happens in the spawner's seccomp_vcpu_run
  *    continuation (handle_syscall is called there, on the originating
- *    guest task's `current`). The next iteration's set_stub_state
+ *    guest task's current). The next iteration's set_stub_state
  *    propagates the syscall return value into the stub's mcontext.
  *
  * Lifetime: caller holds current->mm pinned; reap_worker_for_mm only
@@ -464,7 +444,7 @@ int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg)
  * valid across this call.
  *
  * Returns 0 on a clean trap completion; -ENODEV if the worker is gone
- * (caller falls back to the legacy in-spawner wait_stub_done_seccomp);
+ * (caller falls back to the in-spawner wait_stub_done_seccomp);
  * -EIO / -EPROTO on IPC failure (caller surfaces fatal_sigsegv).
  */
 int worker_drive_vcpu_run(struct uml_pt_regs *regs,
@@ -484,8 +464,8 @@ int worker_drive_vcpu_run(struct uml_pt_regs *regs,
 	 * Ship any queued stub-syscall fds via SCM_RIGHTS now: those fds
 	 * live in the spawner's FD table, and the stub child will
 	 * recvmsg them after the worker's futex_wake. Mirrors the
-	 * sendmsg in wait_stub_done_seccomp's !running prelude (the
-	 * legacy WORKER_PROCESS=n path).
+	 * sendmsg in wait_stub_done_seccomp's !running prelude
+	 * (the WORKER_PROCESS=n path).
 	 */
 	if (mm_id && mm_id->syscall_fd_num)
 		send_stub_syscall_fds(mm_id);
@@ -503,14 +483,13 @@ int worker_drive_vcpu_run(struct uml_pt_regs *regs,
 		return rc;
 
 	/*
-	 * Direct synchronous read of the IPC socket — bypass the
+	 * Direct synchronous read of the IPC socket; bypass the
 	 * dispatcher kthread for the duration of this vcpu_run
-	 * iteration. The single-task-per-mm assumption (E.3d.2; E.4
-	 * generalizes it) means there is exactly one consumer at a
-	 * time. Worker emits exactly one VCPU_DONE per VCPU_RUN; the
+	 * iteration. There is exactly one consumer at a time. Worker
+	 * emits exactly one VCPU_DONE per VCPU_RUN; the
 	 * post-trap signal dispatch (including handle_syscall for
 	 * SIGSYS) runs in the spawner's seccomp_vcpu_run continuation,
-	 * which is already on the originating guest task's `current`.
+	 * which is already on the originating guest task's current.
 	 */
 	for (;;) {
 		n = os_read_file(w->ipc_sock, &msg, sizeof(msg));
@@ -526,22 +505,21 @@ int worker_drive_vcpu_run(struct uml_pt_regs *regs,
 			return (int)msg.u.vcpu_done.status;
 
 		pr_warn_ratelimited("um: drv: unexpected msg type %u\n",
-				    (unsigned)msg.type);
+				    (unsigned int)msg.type);
 	}
 }
 
 /*
- * worker_smoke_test — drive the E.3b round-trip end-to-end.
+ * worker_ipc_selftest - drive the worker IPC round-trip end-to-end.
  *
  * Spawns a worker (no mm_struct involved; the test is for the IPC
  * dispatcher itself), exchanges STUB_ALLOC_REQ + WRITE_REGS +
  * RETURN_VALUE, and verifies WRITE_REGS_ACK echoes the sentinel back
  * in slot 2 (HOST_AX). Reaps the worker before returning.
  *
- * Not auto-wired. E.3c will replace this with the dispatcher thread
- * that drives real syscall round-trips.
+ * Not auto-wired; this is a direct worker IPC self-test.
  */
-int worker_smoke_test(void)
+int worker_ipc_selftest(void)
 {
 	struct worker_msg msg;
 	int pid = -1, sock = -1, rc, n;
@@ -552,7 +530,7 @@ int worker_smoke_test(void)
 
 	rc = spawn_worker_process(&pid, &sock);
 	if (rc < 0) {
-		pr_err("um: worker smoke: spawn failed: %d\n", rc);
+		pr_err("um: worker ipc: self-test spawn failed: %d\n", rc);
 		return rc;
 	}
 
@@ -562,7 +540,7 @@ int worker_smoke_test(void)
 	msg.u.stub_alloc.pid              = (worker_u32)pid;
 	msg.u.stub_alloc.stack            = 0;
 	msg.u.stub_alloc.syscall_data_len = 0;
-	msg.u.stub_alloc.sock             = (worker_u32)-1;
+	msg.u.stub_alloc.sock             = (worker_u32)(-1);
 	msg.u.stub_alloc.syscall_fd_num   = 0;
 	n = os_write_file(sock, &msg, sizeof(msg));
 	if (n != sizeof(msg)) {
@@ -594,7 +572,7 @@ int worker_smoke_test(void)
 	memset(&msg, 0, sizeof(msg));
 	n = os_read_file(sock, &msg, sizeof(msg));
 	if (n != sizeof(msg)) {
-		pr_err("um: worker smoke: short read (%d)\n", n);
+		pr_err("um: worker ipc: self-test short read (%d)\n", n);
 		rc = n < 0 ? n : -EIO;
 		goto out;
 	}
@@ -602,15 +580,15 @@ int worker_smoke_test(void)
 	if (msg.magic != WORKER_IPC_MAGIC ||
 	    msg.type  != WORKER_MSG_WRITE_REGS_ACK ||
 	    msg.u.regs.slot[2] != sentinel) {
-		pr_err("um: worker smoke: ack mismatch magic=0x%x type=%u slot2=0x%llx\n",
-		       (unsigned)msg.magic, (unsigned)msg.type,
+		pr_err("um: worker ipc: self-test ack mismatch magic=0x%x type=%u slot2=0x%llx\n",
+		       (unsigned int)msg.magic, (unsigned int)msg.type,
 		       (unsigned long long)msg.u.regs.slot[2]);
 		rc = -EPROTO;
 		goto out;
 	}
 
-	pr_info("um: worker smoke: round-trip OK (sentinel 0x%llx)\n",
-		(unsigned long long)sentinel);
+	pr_debug("um: worker ipc: self-test OK (sentinel 0x%llx)\n",
+		 (unsigned long long)sentinel);
 	rc = 0;
 
 out:
@@ -638,9 +616,6 @@ arch_initcall(spawner_arch_init);
  * subsys_initcall reboot ordering via a panic notifier so spawner
  * teardown runs before the host process exits.
  */
-#include <linux/notifier.h>
-#include <linux/panic_notifier.h>
-
 static int spawner_panic_handler(struct notifier_block *nb,
 				 unsigned long event, void *data)
 {
@@ -661,14 +636,14 @@ static int __init spawner_register_notifiers(void)
 }
 late_initcall(spawner_register_notifiers);
 
-#ifdef CONFIG_UM_WORKER_SMOKE_TEST_ON_BOOT
-static int __init spawner_run_smoke_test(void)
+#ifdef CONFIG_UM_WORKER_IPC_SELFTEST_ON_BOOT
+static int __init spawner_run_worker_ipc_selftest(void)
 {
-	int rc = worker_smoke_test();
+	int rc = worker_ipc_selftest();
 
 	if (rc < 0)
-		pr_err("um: worker smoke (boot): FAIL rc=%d\n", rc);
+		pr_err("um: worker ipc: self-test FAIL rc=%d\n", rc);
 	return 0;
 }
-late_initcall_sync(spawner_run_smoke_test);
+late_initcall_sync(spawner_run_worker_ipc_selftest);
 #endif

@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 #
-# Phase J Tier 1 smoke test — host-installed Python C-extension exercise.
+# Tier 1 smoke test: host-installed Python C-extension exercise.
 #
-# Spec: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-#       phase-J-design-2026-05-07.md §3.1.
-#
-# The memo's literal proposal (`pytest --pyargs requests.tests`) doesn't
-# work as-is — Debian/Ubuntu's `python3-requests` / `python3-cryptography`
-# / `python3-numpy` apt packages do NOT include their upstream `tests/`
-# submodules. Adapting per the memo's "favour breadth over depth" guidance:
-# this script exercises one C-extension-heavy code path per library
-# deterministically, in a single 1-2 s wall-clock window, without network.
+# Debian/Ubuntu's `python3-requests`, `python3-cryptography`, and
+# `python3-numpy` packages do not include their upstream `tests/`
+# submodules. This script instead exercises one C-extension-heavy code
+# path per library in a deterministic 1-2 s window, without network.
 #
 # Targets (one bounded check per library):
-#   requests       — PreparedRequest URL + JSON-body + header handling
+#   requests       - PreparedRequest URL + JSON-body + header handling
 #                    (URL parsing C-extension via charset_normalizer +
 #                    urllib3's parser).
-#   cryptography   — AES-256-CBC encrypt/decrypt round-trip, 4 KiB block.
-#                    Exercises the OpenSSL bindings — the original
-#                    "Python C-extension import" P0 (issue #274) path.
-#   numpy          — 64x64 matrix inverse round-trip + FFT/iFFT round-trip.
+#   cryptography   - AES-256-CBC encrypt/decrypt round-trip, 4 KiB block.
+#                    Exercises the OpenSSL bindings.
+#   numpy          - 64x64 matrix inverse round-trip + FFT/iFFT round-trip.
 #                    Exercises the BLAS + FFT C-extensions.
 #
 # Exits 0 on ALL_OK, 1 on any test failure. Intended to run inside UML
-# under Phase J soak rotation; the daemon's classifier looks for
+# under soak rotation; the daemon's classifier looks for
 # `REPRO_DONE rc=0` per pilot/daemon convention.
 
 import os
@@ -108,7 +102,7 @@ TESTS = {
 
 def main() -> int:
 	# Single-test mode: argv[1] selects which library to exercise. Used by
-	# the Phase J Tier 1 template — each library runs in its own fresh
+	# the Tier 1 template; each library runs in its own fresh
 	# Python process to avoid C-extension cross-contamination (we hit a
 	# kvm-v2 import-chain pathology when requests + cryptography + numpy
 	# share a process; tracked separately, see soak/README.md).
@@ -129,7 +123,7 @@ def main() -> int:
 
 	# All-in-one mode: kept for host-side smoke + ad-hoc invocation.
 	# Will trip the kvm-v2 import-chain pathology in-guest; use the per
-	# -test invocation in soak templates.
+	# test invocation in soak templates.
 	failed = []
 	for name, fn in TESTS.items():
 		try:

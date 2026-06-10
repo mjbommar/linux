@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# seccomp backend (workstream A-03; ops renamed by memo 25 R2).
+# seccomp backend.
 #
-# Most ops point at shared host-side helpers (the formerly-shared
-# arch/um/backend/ptrace/ counterpart was removed by memo 25 R11).
-# The truly seccomp-specific ones (probe, vcpu_run, mm_create/destroy,
-# set/get_stub_state) live in dedicated TUs here.
+# Most ops point at shared host-side helpers. The seccomp-specific
+# ones (probe, vcpu_run, mm_create/destroy, set/get_stub_state) live
+# in dedicated files here.
 #
-# Files ending in _user.o are USER TUs (libc available, USER_CFLAGS
-# applied) per arch/um/scripts/Makefile.rules.
+# Files ending in _user.o are built with libc available per
+# arch/um/scripts/Makefile.rules.
 
 obj-y += seccomp_backend.o
 obj-y += debug_user.o

@@ -1,9 +1,6 @@
-# Phase J LTP skip-list seed — kirk --skip-file consumer.
+# LTP skip-list seed for kirk --skip-file.
 # SPDX-License-Identifier: GPL-2.0
-#
-# Curation walk: Documentation/virt/uml/redesign/02-workstreams/
-#   D-kvm-backend/phase-J-ltp-curation-2026-05-14.md §3.
-# Total: 112 entries (suite-level skips in §2 are not listed here —
+# Total: 112 entries (suite-level skips are not listed here;
 # kirk's --run-suite list is the source of truth for those).
 #
 # Each section header notes the rationale; the entries below the
@@ -11,10 +8,9 @@
 # /opt/ltp/runtest/*).
 #
 # When a UML config change unblocks one of these (e.g. CONFIG_KEYS=y
-# would let the key-ring tests run), remove the corresponding section
-# and add a brief comment to the curation memo explaining the un-skip.
+# would let the key-ring tests run), remove the corresponding section.
 
-# Section 3.1 — Loadable kernel modules. UML doesn't load modules.
+# Section 3.1 - Loadable kernel modules. UML doesn't load modules.
 init_module01
 init_module02
 finit_module01
@@ -23,7 +19,7 @@ delete_module01
 delete_module02
 delete_module03
 
-# Section 3.2 — Key-ring tests. UML kernel doesn't build keyrings
+# Section 3.2 - Key-ring tests. UML kernel doesn't build keyrings
 # module by default; some may pass once CONFIG_KEYS=y is set.
 add_key01
 add_key02
@@ -46,7 +42,7 @@ request_key03
 request_key04
 request_key05
 
-# Section 3.3 — BPF. UML has no JIT; bpf() returns EPERM/ENOSYS.
+# Section 3.3 - BPF. UML has no JIT; bpf() returns EPERM/ENOSYS.
 bpf_map01
 bpf_prog01
 bpf_prog02
@@ -56,7 +52,7 @@ bpf_prog05
 bpf_prog06
 bpf_prog07
 
-# Section 3.4 — Hugepages. UML MM doesn't expose hugetlbfs.
+# Section 3.4 - Hugepages. UML MM doesn't expose hugetlbfs.
 # (The hugetlb suite is also skipped at the kirk --run-suite layer.)
 mmap10
 mmap11
@@ -64,7 +60,7 @@ mmap12
 mmap13
 mmap14
 
-# Section 3.5 — fanotify. CONFIG_FANOTIFY=n in the reference build;
+# Section 3.5 - fanotify. CONFIG_FANOTIFY=n in the reference build;
 # enable it and remove this block to KEEP fanotify (high-signal).
 fanotify01
 fanotify02
@@ -92,12 +88,12 @@ fanotify23
 fanotify24
 fanotify25
 
-# Section 3.6 — Performance counters. UML has no perf-event subsystem.
+# Section 3.6 - Performance counters. UML has no perf-event subsystem.
 perf_event_open01
 perf_event_open02
 perf_event_open03
 
-# Section 3.7 — kexec / reboot. Destructive in UML.
+# Section 3.7 - kexec / reboot. Destructive in UML.
 # reboot01/02 would halt the UML kernel mid-iteration if not skipped;
 # this is the highest-cost mis-skip on the list.
 kexec_load01
@@ -107,7 +103,7 @@ kexec_file_load02
 reboot01
 reboot02
 
-# Section 3.8 — Network namespace tests. Some unshare may work; the
+# Section 3.8 - Network namespace tests. Some unshare may work; the
 # seed skips them all and defers per-test triage.
 setns01
 setns02
@@ -117,13 +113,13 @@ unshare03
 unshare04
 unshare05
 
-# Section 3.9 — io_uring. CONFIG_IO_URING=n in the reference build.
+# Section 3.9 - io_uring. CONFIG_IO_URING=n in the reference build.
 io_uring_setup01
 io_uring_register01
 io_uring_register02
 
-# Section 3.10 — Memory-pin / userfaultfd / pkey. UML's mlock has
-# historically been a no-op; tests assert non-no-op return values.
+# Section 3.10 - Memory-pin / userfaultfd / pkey. These need explicit
+# verification because tests assert non-no-op mlock return values.
 mlockall01
 mlockall02
 mlockall03
@@ -134,7 +130,7 @@ userfaultfd02
 pkey_mprotect01
 pkey_alloc01
 
-# Section 3.11 — Landlock. LSM not in the UML reference config.
+# Section 3.11 - Landlock. LSM not in the UML reference config.
 landlock01
 landlock02
 landlock03
@@ -149,7 +145,7 @@ landlock11
 landlock12
 landlock13
 
-# Section 3.12 — swapon/swapoff. UML soak rig has no swap device.
+# Section 3.12 - swapon/swapoff. UML soak rig has no swap device.
 # swapping01 allocates 80% of RAM and forces it to swap.
 swapon01
 swapon02

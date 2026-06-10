@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Path A from Documentation/virt/uml/redesign/06-sequencing/
-# post-2026-05-21-three-test-paths.md §1.
-#
-# Runs the host-only atomic stack-pivot primitive test.  Validates
+# Runs the host-only atomic stack-pivot primitive test. Validates
 # that we can leave a deep C call chain behind and resume on a
-# fresh stack at a clean entry — the v1-ceiling escape mechanism
-# the UML pool-member work needs.
+# fresh stack at a clean entry.
 #
-# Exits 0 on PASS, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 1 on FAIL - kselftest convention.
 
 set -u
 
@@ -17,7 +13,7 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 TEST=$DIR/rt_sigreturn_test
 
 if [ ! -x "$TEST" ]; then
-	echo "SKIP: $TEST not built — run make first"
+	echo "SKIP: $TEST not built - run make first"
 	exit 4
 fi
 

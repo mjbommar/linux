@@ -3,7 +3,7 @@
  * E.3d.0 will pass the worker's stub-child syscall_fd_map[] back to
  * the spawner over the per-mm UNIX socket via SCM_RIGHTS. Verify the
  * host kernel honours sendmsg/recvmsg(SCM_RIGHTS) on a stream
- * socketpair — if UML diverges from host glibc semantics here, we
+ * socketpair - if UML diverges from host glibc semantics here, we
  * find out before E.3d.0 ships.
  */
 #define _GNU_SOURCE

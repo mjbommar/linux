@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# HONEST-AUDIT §5: validate the `umlctl bpf` pre-canned scripts
+# Validate the `umlctl bpf` pre-canned scripts
 # actually produce output against a live UML guest.
 #
 # The transparency.rs scripts were shipped without this check;
@@ -10,7 +10,7 @@
 #
 # Exits 0 iff every script attaches its probes and produces at
 # least one observable @-map entry (or, for net/io scripts that
-# need active I/O, attaches probes without parse error — a clean
+# need active I/O, attaches probes without parse error; a clean
 # "0 lines because idle UML" outcome is still considered PASS).
 
 set -euo pipefail
@@ -63,18 +63,18 @@ run_one() {
     data=$(grep -cE "^@" "$OUT/$label.out" || true)
     printf "  %-12s attached=%s data_lines=%s" "$label" "$attached" "$data"
     if [ "$attached" -eq 0 ]; then
-        echo "  → FAIL (no probes attached — script parse error)"
+        echo "  -> FAIL (no probes attached - script parse error)"
         return 1
     fi
     if [ "$expect_data" = "required" ] && [ "$data" -eq 0 ]; then
-        echo "  → FAIL (expected data, got none)"
+        echo "  -> FAIL (expected data, got none)"
         return 1
     fi
-    echo "  → PASS"
+    echo "  -> PASS"
     return 0
 }
 
-# Inline copies of the scripts from transparency.rs — kept in sync
+# Inline copies of the scripts from transparency.rs; kept in sync
 # manually (any change there should land here too).  Acceptance:
 # syscalls + sched produce data on idle UML; the others attach
 # cleanly and only need an active workload to produce output.

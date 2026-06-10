@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# H.1b/Phase J Tier 1: cpython-tier0 — minimal CPython parity gate.
+# cpython-tier0: minimal CPython parity gate.
 #
 # Boots UML with `init=python3 -m cpython-tier0`, runs the curated
 # tier-0 sweep (hashlib + numerics + containers + regex + strings +
@@ -13,11 +13,9 @@
 # This is a HEAVY workload (single python process, but exercises
 # substantial libc + libcrypto + zlib + ssl).
 #
-# Pre-TLB-fix this was DEFERRED on kvm-v2 because v2 couldn't
-# reliably import even hashlib (memo 26 §H.1b "deferred until #94
-# resolves"). After the 6 fixes this session (FS_BASE, cr2, TLB
-# flush, EINTR snapshot, EINTR interrupt_end, ctx-switch drain)
-# the gate PASSes on kvm-v2.
+# The gate should pass on kvm-v2; a failure here means Python's
+# C-extension import path is not safe enough for the wider parity
+# suite.
 
 schema_version = 1
 

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# bench-py — canned Python workload exercising the four syscall
+# bench-py - canned Python workload exercising the four syscall
 # classes that diverge most between UML backends:
 #   1. CPU+mm: hashlib.sha256 over 8 MiB (no syscalls in hot loop)
-#   2. fs:     200× (open/write/close/stat) + 200× (open/read/close)
+#   2. fs:     200x (open/write/close/stat) + 200x (open/read/close)
 #              in tmpfs
-#   3. trap:   20000× os.getpid() (bare syscall)
-#   4. fd:     100× (socketpair + close-both) — fd lifecycle
+#   3. trap:   20000x os.getpid() (bare syscall)
+#   4. fd:     100x (socketpair + close-both) - fd lifecycle
 #
 # Tier budget: <30 s for SAMPLES=5 + WARMUP=1. Each section runs
 # in ~1 s on a modern host. Median over samples is the comparison

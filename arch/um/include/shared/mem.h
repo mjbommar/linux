@@ -9,31 +9,24 @@
 extern int phys_mapping(unsigned long phys, unsigned long long *offset_out);
 
 /*
- * UML address-space anchors (memo 25 R1 abstraction).
+ * UML address-space anchors.
  *
- * Two distinct concepts that today happen to be equal but will
- * diverge under the v2 KVM backend (memo 26 Phase B):
+ * UML tracks two address-space bases:
  *
- * - `uml_physmem`: kernel direct-map base in the *guest pgd*.
- *   Used by __pa()/__va() and PAGE_OFFSET. Today equals
- *   `__binary_start & PAGE_MASK` (low host VA) because seccomp's
- *   kernel runs directly in the host process. Under v2 (when the
- *   per-mm pgd's kernel half lives at PML4[256+]) this becomes a
- *   high constant — the guest CPU walks `mm->pgd` and finds kernel
- *   pages there, while the host process keeps its memory wherever.
+ * - uml_physmem: kernel direct-map base in the *guest pgd*.
+ *   Used by __pa()/__va() and PAGE_OFFSET. Backends that run directly
+ *   in the host process can use the low host VA here; KVM-backed
+ *   execution can use a guest-pgd direct map independent of the host
+ *   mapping address.
  *
- * - `__binary_start_hva`: host VA where UML's pages physically live.
+ * - __binary_start_hva: host VA where UML's pages physically live.
  *   Used by call sites that compute offsets into the host process's
- *   mmap'd physmem region (mmap targets, vhost-user / VFIO offsets,
- *   range checks against the host process layout). Today equals
- *   uml_physmem; under v2 it stays at the low host VA while
- *   uml_physmem moves high.
+ *   mmap'd physmem region (mmap targets, vhost-user/VFIO offsets,
+ *   range checks against the host process layout).
  *
  * Sites that mean "host VA where UML's pages live" should use
- * `__binary_start_hva`. Sites that mean "kernel pgd direct-map base"
- * should use `uml_physmem` / `PAGE_OFFSET`. Today the rename is the
- * abstraction; the runtime split lands when v2 flips the Kconfig
- * gate in arch/um/include/asm/page.h.
+ * __binary_start_hva. Sites that mean "kernel pgd direct-map base"
+ * should use uml_physmem / PAGE_OFFSET.
  */
 extern unsigned long uml_physmem;
 extern unsigned long __binary_start_hva;

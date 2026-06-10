@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Phase J LTP smoke driver — single-suite probe to confirm that LTP +
+# LTP smoke driver: single-suite probe to confirm that LTP,
 # kirk + the skip-list + the host's UML kernel all wire together
 # before paying the 45-minute per-cycle cost of the daemon-driven
 # full curated run.
 #
-# Spec: phase-J-ltp-curation-2026-05-14.md §5.3 ("What happens on
-# first run") + §6.2 (kirk JSON schema validation).
-#
-# Pre-flight (see ltp-preflight-checklist memo for the full list):
+# Pre-flight:
 #   - /opt/ltp populated by `make install` from upstream LTP.
 #   - /opt/kirk populated by `git clone linux-test-project/kirk`.
-#   - UML kernel binary at $UML_KERNEL (default: post-Phase-A build).
+#   - UML kernel binary at $UML_KERNEL.
 #   - Optional: CONFIG_UML_NET_VECTOR=y (only needed if SUITE pulls
 #     in the few syscalls tests that probe AF_NETLINK rt-netlink;
 #     defaults below pick suites that don't).
@@ -56,11 +53,11 @@ err() { echo "run-ltp-smoke: $*" >&2; }
 
 preflight_ok=1
 if [ ! -d "$LTP_ROOT" ] || [ ! -d "$LTP_ROOT/runtest" ]; then
-    err "LTP_ROOT=$LTP_ROOT missing or lacks runtest/ — clone+install upstream LTP."
+    err "LTP_ROOT=$LTP_ROOT missing or lacks runtest/ - clone+install upstream LTP."
     preflight_ok=0
 fi
 if [ ! -d "$KIRK_DIR" ] || [ ! -f "$KIRK_DIR/kirk" -a ! -f "$KIRK_DIR/libkirk/main.py" ]; then
-    err "KIRK_DIR=$KIRK_DIR missing or lacks kirk entry-point — clone upstream kirk."
+    err "KIRK_DIR=$KIRK_DIR missing or lacks kirk entry-point - clone upstream kirk."
     preflight_ok=0
 fi
 if [ ! -f "$SKIP_FILE" ]; then

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Preflight resource verification for SMP-T84 (memo 52 §3.4).
+// Preflight resource verification for UML host controls.
 //
 // At UML spawn time, before exec, verify that the resource
 // controls declared in the manifest can actually be applied.
@@ -21,8 +21,8 @@ use std::path::Path;
 
 use crate::manifest::CgroupV2Config;
 
-/// Warnings collected during preflight. Non-empty means the
-/// operator should investigate, but the run proceeds (UML
+/// Warnings collected during preflight. Non-empty means the user
+/// should investigate, but the run proceeds (UML
 /// itself logs a perror if a runtime fallback was needed).
 #[derive(Default, Debug)]
 pub struct PreflightReport {
@@ -41,7 +41,10 @@ impl PreflightReport {
 /// the UM_* env vars umlctl is about to set; cgroup_v2 carries
 /// the cgroup limits umlctl is about to install. Either can be
 /// empty / None — checks for those are skipped.
-pub fn run(host_env: &BTreeMap<String, String>, cgroup_v2: Option<&CgroupV2Config>) -> Result<PreflightReport> {
+pub fn run(
+    host_env: &BTreeMap<String, String>,
+    cgroup_v2: Option<&CgroupV2Config>,
+) -> Result<PreflightReport> {
     let mut report = PreflightReport::default();
 
     // Hugepage pool — only check if UM_HUGEPAGES is set.
@@ -51,8 +54,8 @@ pub fn run(host_env: &BTreeMap<String, String>, cgroup_v2: Option<&CgroupV2Confi
 
     // mlockall / pin_physmem — requires CAP_IPC_LOCK or a raised
     // RLIMIT_MEMLOCK. Check our own rlimit. (The kernel-side
-    // code reads UM_KVM_V2_PIN_PHYSMEM regardless; this check
-    // is operator hygiene.)
+    // code reads UM_KVM_V2_PIN_PHYSMEM regardless; this check keeps
+    // the host-side warning close to launch.)
     if host_env.contains_key("UM_KVM_V2_PIN_PHYSMEM") {
         check_memlock_rlimit(&mut report);
     }
@@ -117,7 +120,10 @@ fn check_hugepages(req: &str, report: &mut PreflightReport) {
 }
 
 fn check_memlock_rlimit(report: &mut PreflightReport) {
-    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rl) };
     if rc == 0 && rl.rlim_cur < 64 * 1024 * 1024 && rl.rlim_cur != libc::RLIM_INFINITY {
         report.warnings.push(format!(
@@ -164,10 +170,7 @@ fn check_dev_kvm(report: &mut PreflightReport) {
     if Path::new("/dev/kvm").exists() {
         match std::fs::metadata("/dev/kvm") {
             Ok(_) => {
-                if let Err(_) = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open("/dev/kvm")
-                {
+                if let Err(_) = std::fs::OpenOptions::new().read(true).open("/dev/kvm") {
                     report.warnings.push(
                         "/dev/kvm present but not readable — kvm-v2 backend \
                          will probe-fail; consider `sudo setfacl -m \
@@ -177,9 +180,7 @@ fn check_dev_kvm(report: &mut PreflightReport) {
                 }
             }
             Err(e) => {
-                report.warnings.push(format!(
-                    "/dev/kvm stat failed: {e}"
-                ));
+                report.warnings.push(format!("/dev/kvm stat failed: {e}"));
             }
         }
     }

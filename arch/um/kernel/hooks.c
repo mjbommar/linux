@@ -1,24 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Layer 2 infrastructure: static-key gate definitions, slow-path
- * stubs, and per-gate hit counters.
+ * UML hook gate definitions, slow-path stubs, and per-gate hit counters.
  *
  * The gates are declared in arch/um/include/asm/um-hooks.h and
  * inserted at hot paths by the um_on_*() helpers there. When a gate
  * is off the call site short-circuits via the jump-label machinery;
  * when on it becomes a call into one of the __um_* slow-path
- * functions defined below. Off-state cost today uses the jump-label
- * C fallback (~1–2 ns per gate) because UML does not yet select
- * HAVE_ARCH_JUMP_LABEL; literal 5-byte-NOP off cost is unlocked by
- * workstream B-04's mprotect helpers. See D19.
+ * functions defined below. Off-state cost uses the jump-label C fallback
+ * because UML does not select HAVE_ARCH_JUMP_LABEL.
  *
  * Each slow-path stub bumps a per-CPU counter; totals are summed in
  * um_hook_stats_read. Per-CPU avoids cross-CPU cacheline contention
  * under high hit rates so "gate on" benchmarks measure the hook
- * itself, not atomic fencing (D22). Workstream C replaces individual
- * stubs with real consumers (ftrace syscall tracer, kcov, KFENCE
- * sampling, etc.) without modifying the gate call sites or this
- * file's public surface.
+ * itself, not atomic fencing. Real consumers can replace individual
+ * stubs without modifying the gate call sites or this file's public
+ * surface.
  */
 
 #include <linux/cpumask.h>
@@ -33,26 +29,7 @@
 #include <asm/um-hooks.h>
 #include <sysdep/ptrace.h>
 
-/*
- * memo 04 Phase 2/3 (post-2026-05-19 sprint): wire the time-travel
- * record/replay hook into kvm-v2's record machinery.  The
- * kvm_v2_record_{active, observe_time_travel, consume_time_travel}
- * functions live in arch/um/backend/kvm-v2/record.c, which only
- * gets built under CONFIG_UM_BACKEND_KVM_V2.  Pull them in by
- * forward declaration here so we don't drag the full kvm_v2 header
- * into a kernel TU.
- */
-#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2)
-struct kvm_v2_record;
-struct kvm_v2_record *kvm_v2_record_active(void);
-void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
-				       u64 ns_at_advance);
-int  kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
-				       u64 *ns_out,
-				       u64 *syscall_count_anchor_out);
-#endif
-
-/* --- Gate definitions (6) ------------------------------------------- */
+/* --- Gate definitions ------------------------------------------------ */
 
 DEFINE_STATIC_KEY_FALSE(um_hook_trace_syscalls);
 EXPORT_SYMBOL_GPL(um_hook_trace_syscalls);
@@ -62,20 +39,17 @@ DEFINE_STATIC_KEY_FALSE(um_hook_time_travel_active);
 EXPORT_SYMBOL_GPL(um_hook_time_travel_active);
 DEFINE_STATIC_KEY_FALSE(um_hook_kfence_sample);
 EXPORT_SYMBOL_GPL(um_hook_kfence_sample);
-DEFINE_STATIC_KEY_FALSE(um_hook_record_replay);
-EXPORT_SYMBOL_GPL(um_hook_record_replay);
 DEFINE_STATIC_KEY_FALSE(um_hook_perf_dispatch);
 EXPORT_SYMBOL_GPL(um_hook_perf_dispatch);
 
-/* --- Hit counters (per-CPU; see D22) -------------------------------- *
+/* --- Hit counters (per-CPU) ----------------------------------------- *
  *
  * Each CPU owns its own u64 array; increments are unlocked native
  * writes on the writing CPU, and the reader sums across CPUs. Reads
- * are inherently racy against concurrent writers — acceptable for
+ * are inherently racy against concurrent writers; acceptable for
  * observability telemetry where the exact count matters less than
- * rate of change. A global atomic was used in the first cut (B-02)
- * but distorted "gate on" benchmarks because every hit site
- * collided on one cacheline.
+ * rate of change. A global atomic distorts "gate on" benchmarks
+ * because every hit site collides on one cacheline.
  */
 
 struct um_hook_percpu_counters {
@@ -90,7 +64,6 @@ static const char * const um_hook_names[UM_HOOK__COUNT] = {
 	[UM_HOOK_KCOV_ENABLED]       = "kcov_enabled",
 	[UM_HOOK_TIME_TRAVEL_ACTIVE] = "time_travel_active",
 	[UM_HOOK_KFENCE_SAMPLE]      = "kfence_sample",
-	[UM_HOOK_RECORD_REPLAY]      = "record_replay",
 	[UM_HOOK_PERF_DISPATCH]      = "perf_dispatch",
 };
 
@@ -99,7 +72,6 @@ static struct static_key_false * const um_hook_keys[UM_HOOK__COUNT] = {
 	[UM_HOOK_KCOV_ENABLED]       = &um_hook_kcov_enabled,
 	[UM_HOOK_TIME_TRAVEL_ACTIVE] = &um_hook_time_travel_active,
 	[UM_HOOK_KFENCE_SAMPLE]      = &um_hook_kfence_sample,
-	[UM_HOOK_RECORD_REPLAY]      = &um_hook_record_replay,
 	[UM_HOOK_PERF_DISPATCH]      = &um_hook_perf_dispatch,
 };
 
@@ -152,8 +124,8 @@ EXPORT_SYMBOL_GPL(um_hook_key);
 
 /* --- Slow-path stubs ------------------------------------------------ *
  *
- * One per gate × hook site combination. For now they all just bump a
- * counter. Workstream C replaces them one-by-one with real consumers.
+ * One per gate and hook site combination. The default implementations
+ * bump counters; consumers can replace them one by one.
  *
  * The implementations are marked notrace to avoid recursion if ftrace
  * is enabled on the syscall tracepoint the trace_syscalls gate feeds.
@@ -209,100 +181,6 @@ notrace void __um_kcov_record_syscall(struct pt_regs *regs)
 	um_hook_stats_inc(UM_HOOK_KCOV_ENABLED);
 }
 EXPORT_SYMBOL_GPL(__um_kcov_record_syscall);
-
-notrace void __um_record_event_syscall_entry(struct pt_regs *regs)
-{
-	(void)regs;
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-}
-EXPORT_SYMBOL_GPL(__um_record_event_syscall_entry);
-
-notrace void __um_record_event_syscall_exit(struct pt_regs *regs)
-{
-	(void)regs;
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-}
-EXPORT_SYMBOL_GPL(__um_record_event_syscall_exit);
-
-notrace void __um_record_event_page_fault(struct faultinfo *fi)
-{
-	(void)fi;
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-}
-EXPORT_SYMBOL_GPL(__um_record_event_page_fault);
-
-notrace void __um_record_event_context_switch(struct task_struct *from,
-					      struct task_struct *to)
-{
-	(void)from; (void)to;
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-}
-EXPORT_SYMBOL_GPL(__um_record_event_context_switch);
-
-notrace void __um_record_event_irq(int irq)
-{
-	(void)irq;
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-}
-EXPORT_SYMBOL_GPL(__um_record_event_irq);
-
-notrace void __um_record_event_clock(u64 ns)
-{
-	/*
-	 * memo 04 Phase 2: observe each time_travel_set_time advance.
-	 * Inside observe_time_travel, the rec->state == RECORDING gate
-	 * filters out the replay-side and "just allocated, not yet
-	 * armed" cases.  Calls during REPLAY mode are a quiet no-op
-	 * (the consume side runs from um_time_travel_consume_replay
-	 * before this hook fires).
-	 */
-#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2)
-	struct kvm_v2_record *rec = kvm_v2_record_active();
-
-	if (rec)
-		kvm_v2_record_observe_time_travel(rec, ns);
-#else
-	(void)ns;
-#endif
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-}
-EXPORT_SYMBOL_GPL(__um_record_event_clock);
-
-/**
- * um_time_travel_consume_replay - replay-side override for the
- * time_travel_set_time() ns value.
- * @ns: in/out — if a recorded value is consumed, *ns is overwritten.
- *
- * Returns true iff the recorded value was consumed and *ns updated.
- *
- * memo 04 Phase 3 (post-2026-05-19 sprint).  Called from
- * arch/um/kernel/time.c::time_travel_set_time under the
- * um_hook_record_replay static-key gate, BEFORE the value is
- * committed to time_travel_time, so the replay run sees the same
- * monotonic-clock sequence the recording run did.
- *
- * Quiet no-op when CONFIG_UM_BACKEND_KVM_V2 is off or when no
- * record container is active.
- */
-notrace bool um_time_travel_consume_replay(u64 *ns)
-{
-#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2)
-	struct kvm_v2_record *rec = kvm_v2_record_active();
-	u64 recorded;
-
-	if (!rec)
-		return false;
-	if (kvm_v2_record_consume_time_travel(rec, &recorded, NULL) != 1)
-		return false;
-	*ns = recorded;
-	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
-	return true;
-#else
-	(void)ns;
-	return false;
-#endif
-}
-EXPORT_SYMBOL_GPL(um_time_travel_consume_replay);
 
 notrace void __um_perf_syscall(struct pt_regs *regs)
 {

@@ -10,22 +10,16 @@
  *
  * We cannot include those headers from the stub TU because they
  * transitively pull declarations UML's include path doesn't
- * fully assemble (``__ro_after_init`` ``struct mm_struct *``,
- * the ``retpoline_thunk_t`` typedef that conflicts with our
- * dummy indirect-thunk arrays, …). Extracting the three
- * prototypes into a UML-specific header keeps both the definer
- * (arch/um/kernel/bpf_jit_stubs.c) and any future caller-side
- * UML TU in sync, while avoiding a checkpatch
- * "externs should be avoided in .c files" warning on the stub
+ * fully assemble (__ro_after_init struct mm_struct *,
+ * the retpoline_thunk_t typedef that conflicts with UML's
+ * dummy indirect-thunk arrays, and other x86-only details). Extracting
+ * the three prototypes into a UML-specific header keeps both the definer
+ * (arch/um/kernel/bpf_jit_stubs.c) and UML callers in sync, while avoiding
+ * a checkpatch "externs should be avoided in .c files" warning on the stub
  * TU.
  *
- * A signature mismatch with the upstream headers would manifest
- * as a link-time resolution against the wrong-typed symbol;
- * verified by visual diff against the upstream headers as of
- * 2026-04-21.
- *
- * Workstream C-06 per Documentation/virt/uml/redesign/
- * 04-risks/decisions-log.md D43 fifth-view.
+ * A signature mismatch with the upstream headers would manifest as a
+ * link-time resolution against the wrong-typed symbol.
  */
 #ifndef _ASM_UM_BPF_JIT_SHIMS_H
 #define _ASM_UM_BPF_JIT_SHIMS_H

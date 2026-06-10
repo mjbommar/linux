@@ -1,12 +1,10 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# HONEST-AUDIT §12: UBD Phase 5 (COW bitmap drain) round-trip test.
+# UBD COW bitmap round-trip test.
 #
-# Phase 5 ships code that updates the COW bitmap via io_uring when
-# the substrate is available; the existing soak workloads
-# (django/fastapi) are non-COW so the path was never exercised
-# under load.  This test:
+# The io_uring path updates the COW bitmap when the substrate is
+# available. This test:
 #
 #   1. Creates a 64 MiB ext4 backing file with known content.
 #   2. Launches UML with a COW image on top, has the guest write
@@ -38,7 +36,7 @@ mkfs.ext4 -F -q "$BACKING"
 # here to keep the test root-free; the bitmap-update path is exercised
 # regardless because any write touches at least one COW segment.
 
-# Step 2: in-guest init script — writes data, verifies, unmounts.
+# Step 2: in-guest init script writes data, verifies, unmounts.
 GUEST_MNT=$HOME/src/ubd-cow-mnt
 mkdir -p "$GUEST_MNT"
 
@@ -90,7 +88,7 @@ run_one() {
 
     local post_sha=$(sha256sum "$BACKING" | awk '{print $1}')
     if [ "$pre_sha" != "$post_sha" ]; then
-        echo "  $label: FAIL — backing file mutated (COW invariant broken)"
+        echo "  $label: FAIL - backing file mutated (COW invariant broken)"
         echo "     pre=$pre_sha"
         echo "     post=$post_sha"
         return 1
@@ -99,7 +97,8 @@ run_one() {
     local pre=$(grep "^COW_TEST_PRE_MD5=" "$out" | sed 's/.*=//' | tr -d '\r')
     local post=$(grep "^COW_TEST_POST_MD5=" "$out" | sed 's/.*=//' | tr -d '\r')
     if [ "$verdict" != "PASS" ] || [ -z "$pre" ] || [ "$pre" != "$post" ]; then
-        echo "  $label: FAIL — round-trip md5 mismatch or no verdict (verdict=$verdict pre=$pre post=$post)"
+        echo "  $label: FAIL - round-trip md5 mismatch or no verdict"
+        echo "     verdict=$verdict pre=$pre post=$post"
         return 1
     fi
     echo "  $label: PASS  (backing immutable; md5=$pre round-trips)"
@@ -109,7 +108,7 @@ run_one() {
 echo "=== legacy path (um_ubd_no_uring=1) ==="
 run_one legacy "um_ubd_no_uring=1" "$OUT/legacy.cow"
 
-echo "=== io_uring path (default; Phase 5 bitmap drain) ==="
+echo "=== io_uring path (default COW bitmap updates) ==="
 run_one io_uring "" "$OUT/io_uring.cow"
 
 echo

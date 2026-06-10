@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Phase J pilot soak — multi-workload realistic stress.
+# SPDX-License-Identifier: GPL-2.0
+# UML pilot soak: multi-workload realistic stress.
 #
 # For each workload (stress-ng, cpython-soak, kbuild-tiny):
 #   - Materialize a per-backend Umlfile from the .template
@@ -63,7 +64,7 @@ read_max_temp_c() {
 thermal_check() {
     local t=$(read_max_temp_c)
     if [ "$t" -ge "$THERMAL_PAUSE_C" ]; then
-        echo "  [thermal] $t C >= ${THERMAL_PAUSE_C}C — pausing until <= ${THERMAL_RESUME_C}C"
+        echo "  [thermal] $t C >= ${THERMAL_PAUSE_C}C - pausing until <= ${THERMAL_RESUME_C}C"
         while [ "$(read_max_temp_c)" -gt "$THERMAL_RESUME_C" ]; do
             sleep 5
         done
@@ -126,7 +127,7 @@ case "$WORKLOAD" in
         WORKLOADS=(memcheck iocheck stress-ng cpython-soak kbuild-tiny)
         TIMEOUTS=(90 90 120 360 600)
         ;;
-    short)  # the 3 fast ones — for smoke testing the harness
+    short)  # the 3 fast ones; for smoke testing the harness
         WORKLOADS=(memcheck iocheck stress-ng)
         TIMEOUTS=(90 90 120)
         ;;

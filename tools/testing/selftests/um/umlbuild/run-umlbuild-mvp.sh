@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/umlbuild — end-to-end gate for the umlbuild MVP profile.
+# um/umlbuild - end-to-end gate for the umlbuild mvp profile.
 #
 # What this proves:
 #   1. `umlbuild instance --profile mvp` builds without error
@@ -12,7 +12,7 @@
 # Exit codes (kselftest convention):
 #   0 PASS
 #   1 FAIL
-#   4 SKIP — required tooling missing on the host
+#   4 SKIP - required tooling missing on the host
 #
 # The host needs: cargo, gcc, make, curl, tar, e2fsprogs >= 1.43,
 # and one of {apk, bubblewrap, unshare}.
@@ -62,7 +62,7 @@ echo "  kernel:  $(wc -c < "$WORK/inst/linux") bytes"
 echo "  image:   $(wc -c < "$WORK/inst/rootfs.img") bytes"
 
 echo "== direct kernel boot =="
-# Boot the kernel directly first (bypasses umlctl) — proves the
+# Boot the kernel directly first (bypasses umlctl); proves the
 # kernel + ubd image work standalone.
 timeout 60 "$WORK/inst/linux" \
     mem=256M \

@@ -75,14 +75,13 @@ int os_timer_set_interval(int cpu, unsigned long long nsecs)
 }
 
 /*
- * Diagnostic: read timer expiry state via timer_getoverrun and
- * timer_gettime.  Used by pool-member triage to distinguish two
- * SIGALRM-after-swap failure modes:
- *   - overrun > 0 → host POSIX timer is firing but signals lost
+ * Read timer expiry state via timer_getoverrun and timer_gettime.
+ * Used by pool-member signal-delivery checks:
+ *   - overrun > 0: host POSIX timer is firing but signals lost
  *     (delivery problem)
- *   - overrun == 0 + it_value > 0 → timer armed, hasn't fired
- *     yet (timer is genuinely stopped or far in future)
- *   - it_value == 0 → timer disarmed
+ *   - overrun == 0 + it_value > 0: timer armed, has not fired
+ *     (timer is genuinely stopped or its expiry is far out)
+ *   - it_value == 0: timer disarmed
  *
  * Stores results in @out_overrun and @out_it_value_ns.  Returns
  * 0 on success, -errno on failure.
@@ -108,9 +107,9 @@ int os_timer_diagnose(unsigned long *out_overrun,
 }
 
 /*
- * Diagnostic: busy-wait via clock_nanosleep for @nsecs.  Used by
- * pool-member variant 9 to wait for the POSIX timer to expire
- * without depending on UML's signal-driven scheduler tick.
+ * Busy-wait via clock_nanosleep for @nsecs. Used by pool-member
+ * signal-delivery checks to wait for the POSIX timer to expire without
+ * depending on UML's signal-driven scheduler tick.
  */
 void os_busy_wait_ns(unsigned long long nsecs)
 {
@@ -119,7 +118,7 @@ void os_busy_wait_ns(unsigned long long nsecs)
 		.tv_nsec = nsecs % UM_NSEC_PER_SEC,
 	};
 
-	/* CLOCK_MONOTONIC + relative request — does not depend on
+	/* CLOCK_MONOTONIC + relative request; does not depend on
 	 * signal delivery to return.
 	 */
 	(void)clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
@@ -132,7 +131,7 @@ int os_timer_one_shot(int cpu, unsigned long long nsecs)
 		.it_value.tv_nsec = nsecs % UM_NSEC_PER_SEC,
 
 		.it_interval.tv_sec = 0,
-		.it_interval.tv_nsec = 0, // we cheat here
+		.it_interval.tv_nsec = 0,
 	};
 
 	timer_settime(event_high_res_timer[cpu], 0, &its, NULL);
@@ -152,8 +151,8 @@ void os_timer_disable(int cpu)
 }
 
 /*
- * Forget inherited POSIX timer state after a fork() (workstream C-09,
- * commit 3c). Each CPU's timer was created with SIGEV_THREAD_ID
+ * Forget inherited POSIX timer state after a fork(). Each CPU's
+ * timer was created with SIGEV_THREAD_ID
  * targeting the CPU thread's gettid() in the parent; in the forked
  * child those tids refer to threads that do not exist, and any
  * SIGALRM the kernel tries to deliver would be misdirected or lost.
@@ -182,26 +181,21 @@ void os_timer_worker_forget(void)
 }
 
 /*
- * Re-create a POSIX timer in a forkserver worker (workstream C-09,
- * commit 3d-b). Pair with os_timer_worker_forget: that call
- * disabled parent-inherited timers whose SIGEV_THREAD_ID pointed
- * at threads that no longer exist in the child; this one installs
- * a fresh timer targeting the current thread's gettid(), which
- * IS valid in the worker.
+ * Re-create a POSIX timer in a forkserver worker. Pair with
+ * os_timer_worker_forget: that call disabled parent-inherited timers whose
+ * SIGEV_THREAD_ID pointed at threads that no longer exist in the child; this
+ * one installs a fresh timer targeting the current thread's gettid().
  *
- * Overwrites event_high_res_timer[0] with the new handle. The
- * parent's handles survive in its own address space (fork COW'd
- * the timer_t array; the worker's writes here are local). Only
- * CPU 0 is rebuilt; UP is the fuzz-profile constraint today per
- * um_snapshot_assert_ready's num_online_cpus > 1 refusal.
+ * Overwrites event_high_res_timer[0] with the new handle. The parent's
+ * handles survive in its own address space; the worker's writes here are
+ * local. Only CPU 0 is rebuilt; um_snapshot_assert_ready refuses
+ * num_online_cpus > 1 for this profile.
  *
- * Returns 0 on success or -errno on failure. Commit 3d-b tolerates
- * failure (worker exits immediately anyway); commit 3d-c will
- * treat failure as a reason to skip the guest-code-resume path.
+ * Returns 0 on success or -errno on failure.
  */
 int os_timer_worker_rebuild(void)
 {
-	int cpu = 0;	/* UP per D41; SMP deferred */
+	int cpu = 0;	/* UP-only forkserver worker rebuild */
 	timer_t *t = &event_high_res_timer[cpu];
 	struct sigevent sev = {
 		.sigev_notify = SIGEV_THREAD_ID,
@@ -220,7 +214,7 @@ long long os_nsecs(void)
 {
 	struct timespec ts;
 
-	clock_gettime(CLOCK_MONOTONIC,&ts);
+	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return timespec_to_ns(&ts);
 }
 
@@ -229,15 +223,8 @@ long long os_nsecs(void)
  * Counts host CPU time accrued by the calling host thread, including
  * time spent inside ioctl(KVM_RUN, ...).  Used by the kvm-v2 backend
  * to credit user-CPU time accumulated during guest execution to the
- * calling guest task — without it, ITIMER_VIRTUAL accounting (and any
+ * calling guest task; without it, ITIMER_VIRTUAL accounting (and any
  * other utime-sensitive guest path) doesn't accrue.
- *
- * SMP-T80 fix: prior to this helper, kvm-v2's KVM_RUN time was
- * accounted to "system" via timer_handler's r.is_user=0 default,
- * giving ITIMER_VIRTUAL workloads 0 % progress under the kvm-v2
- * backend.  Crediting deltas of CLOCK_THREAD_CPUTIME_ID around each
- * ioctl(KVM_RUN) restores the user-time semantics CPython's
- * test_itimer_virtual depends on.
  */
 long long os_thread_cputime_ns(void)
 {
@@ -264,13 +251,13 @@ void os_idle_prepare(void)
 	 * and unlike handling SIGALRM, we cannot simply flag it in
 	 * signals_pending.
 	 *
-	 * FD disposition (C-09 commit 4): inherit. The signalfd
+	 * FD disposition: inherit. The signalfd
 	 * targets signals blocked in the calling thread's mask; after
 	 * a forkserver fork the worker inherits both the signal mask
 	 * and the fd, and the fd remains correctly wired for the
 	 * worker's own thread-local mask. No rebuild is needed. The
 	 * separate POSIX timer is what gets rebuilt in
-	 * os_timer_worker_rebuild() — that's the per-thread timer-
+	 * os_timer_worker_rebuild(); that's the per-thread timer-
 	 * delivery target; this fd is the idle-sleep wake source.
 	 */
 	wake_signals = signalfd(-1, &set, SFD_CLOEXEC);

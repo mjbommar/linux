@@ -9,7 +9,7 @@
 #include <linux/mm.h>
 
 /*
- * UML's TLB-sync contract (memo 25 R3 — backend decoupled).
+ * UML's backend-decoupled TLB-sync contract.
  *
  * UML "syncs the TLB" by reaching out from the kernel into the
  * stub-child process (or, under v2 KVM, the per-mm worker process)
@@ -20,15 +20,13 @@
  * (prot, fd, offset) tuples, and dispatches to the backend's
  * mm_region_added / mm_region_removed ops.
  *
- * Per memo 25 R3, this layer carries NO backend-specific knowledge:
- * pte_clear / set_pte / set_ptes / pmd_clear etc. mark VAs as
- * needing sync; they never call a backend op directly. Backends
- * see range notifications at drain time, never per-PTE writes.
- * (v1's kvm_shadow_sync_pte hook-everywhere model — a major source
- * of race classes — was stripped in memo 25 Step 3.)
+ * This layer carries no backend-specific knowledge: pte_clear /
+ * set_pte / set_ptes / pmd_clear etc. mark VAs as needing sync; they
+ * never call a backend op directly. Backends see range notifications
+ * at drain time, never per-PTE writes.
  *
  * The only special case is that flush_tlb_kernel_range() drains
- * immediately (kernel-VA mappings have no later synchronization
+ * immediately (kernel-VA mappings have no deferred synchronization
  * point); user-mm flushes wait for the next set_pte / segfault /
  * task switch before draining.
  *
@@ -45,7 +43,6 @@ extern void flush_tlb_all(void);
 extern void flush_tlb_mm(struct mm_struct *mm);
 
 /*
- * Memo §H.1b residual fix: deferred free for mmu_gather pages.
  * mmu_gather's tlb_batch_pages_flush calls um_mmu_gather_defer
  * to hand pages off to the per-mm deferred queue; the active
  * backend's vcpu_run calls um_mmu_gather_drain after KVM_RUN's

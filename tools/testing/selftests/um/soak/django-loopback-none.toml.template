@@ -15,7 +15,7 @@ name = "soak-django-loopback-none-{{BACKEND}}-w0"
 [kernel]
 path = "{{KERNEL}}"
 backend = "{{BACKEND}}"
-append = ["kvm_v2_trace_enable"]
+append = []
 
 [runtime]
 mem = "1024M"
@@ -58,17 +58,6 @@ dump_server_log() {
     cat /tmp/django-loopback.log 2>/dev/null || true
     echo DJANGO_LOOPBACK_LOG_END
 }
-dump_kvm_v2_trace() {
-    mkdir -p /sys/kernel/debug 2>/dev/null || true
-    grep -q ' /sys/kernel/debug ' /proc/mounts 2>/dev/null ||
-        mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
-    if [ -w /sys/kernel/debug/um_kvm_v2_trace/dump ]; then
-        echo KVM_V2_TRACE_DUMP_BEGIN
-        echo 1 > /sys/kernel/debug/um_kvm_v2_trace/dump 2>/dev/null || true
-        dmesg | grep 'KVMV2T' 2>/dev/null || true
-        echo KVM_V2_TRACE_DUMP_END
-    fi
-}
 port_ready() {
 python3 - <<'PY'
 import socket, sys
@@ -86,7 +75,7 @@ for i in $(seq 1 60); do
     port_ready && break
     sleep 0.5
 done
-port_ready || { dump_server_log; dump_kvm_v2_trace; echo SERVER_FAIL; exit 1; }
+port_ready || { dump_server_log; echo SERVER_FAIL; exit 1; }
 echo SERVER_READY
 """
 expect = "SERVER_READY"
@@ -119,9 +108,8 @@ expect = ""
 timeout_secs = 10
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt-in require host-side reservation.
+# Cgroup limits opt-in require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

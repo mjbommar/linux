@@ -24,17 +24,9 @@
 static struct hwrng hwrng;
 
 /*
- * SMP-T112 (post-2026-05-19 sprint memo 08): pre-sprint this driver
- * opened /dev/random and serialised reads through a SIGIO wakeup +
- * completion.  Post-5.6 mainline /dev/random is "identical to
- * /dev/urandom but with slower init semantics" so the SIGIO dance no
- * longer matches the underlying source.  The cleaner shape is to call
- * the host's getrandom(2) syscall directly: it handles blocking on
- * entropy init internally and never needs SIGIO plumbing.
- *
- * The host-side wrapper os_getrandom() already exists at
- * arch/um/os-Linux/util.c:99; it's the same call the kernel-internal
- * arch_get_random_longs() at arch/um/include/asm/archrandom.h uses.
+ * Use the host's getrandom(2) syscall directly. It handles blocking
+ * on entropy init internally and avoids the older /dev/random SIGIO
+ * plumbing.
  */
 static int rng_dev_read(struct hwrng *rng, void *buf, size_t max, bool block)
 {
@@ -46,7 +38,7 @@ static int rng_dev_read(struct hwrng *rng, void *buf, size_t max, bool block)
 	} while (ret == -EINTR);
 
 	/*
-	 * hwrng core treats -EAGAIN as "try again later", which is what
+	 * hwrng core treats -EAGAIN as retryable, which is what
 	 * getrandom(GRND_NONBLOCK) returns before the host entropy pool is
 	 * initialised.  Surface it unchanged so the core's retry semantics
 	 * work.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/kprobes-stress/run-kprobes-stress.sh — host-side launcher for
-# the workstream C-04 kprobes/kretprobes stress selftest.
+# um/kprobes-stress/run-kprobes-stress.sh - host-side launcher for
+# the kprobes/kretprobes stress selftest.
 #
 # Boots a UML guest built with CONFIG_KPROBES=y + CONFIG_KRETPROBES=y
 # (research profile, or any build that selects HAVE_RETHOOK). Runs
@@ -11,12 +11,12 @@
 # fork-heavy workload, and emits a KPROBES_STRESS: PASS|FAIL line.
 #
 # Pattern mirrors um/ftrace-smoke/run-ftrace-smoke.sh. The two
-# selftests together cover the C-04 + C-05 tracer/probe surface.
+# selftests together cover the tracer/probe surface.
 #
 # Environment:
 #   UML_BINARY  path to the UML binary built with CONFIG_KPROBES=y
 #               (default: /tmp/uml-research/linux)
-#   UML_MEM     mem=N argument (default: 512M — research build is large)
+#   UML_MEM     mem=N argument (default: 512M; research build is large)
 #
 # The default binary path matches `make ARCH=um uml/research` when
 # the user builds into /tmp/uml-research/. See
@@ -52,8 +52,8 @@ if [ -z "$MODULE" ]; then
 	fi
 fi
 
-# The guest init script cannot read host env vars — env doesn't
-# propagate through UML's kernel-start → init exec path. Pass
+# The guest init script cannot read host env vars; env doesn't
+# propagate through UML's kernel-start -> init exec path. Pass
 # module path + iteration count via the kernel command line
 # (kretprobe_module=/path, kretprobe_iters=N); the guest script
 # parses both from /proc/cmdline. Quote the path to survive

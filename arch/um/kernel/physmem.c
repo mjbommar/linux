@@ -7,8 +7,10 @@
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/pfn.h>
+#include <linux/thread_info.h>
 #include <asm/page.h>
 #include <asm/sections.h>
+#include <asm/um-snapshot.h>
 #include <as-layout.h>
 #include <init.h>
 #include <kern.h>
@@ -17,7 +19,6 @@
 #include <os.h>
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
 #include <asm/um-mmaps.h>
-#include <asm/thread_info.h>		/* THREAD_SIZE */
 #include <linux/smp-internal.h>	/* cpu_irqstacks */
 #endif
 
@@ -29,16 +30,15 @@ EXPORT_SYMBOL(high_physmem);
 
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
 /*
- * Entry in the C-09 kernel mmap registry (D37 pull-forward #1) that
- * describes the guest-RAM mapping set up by setup_physmem(). Filled
- * in at boot and registered once, before user tasks exist. Static
- * storage so the registry's list linkage outlives the kernel's init
- * phase.
+ * Kernel mmap registry entry for the guest-RAM mapping set up by
+ * setup_physmem(). Filled in at boot and registered once, before user
+ * tasks exist. Static storage lets the registry's list linkage outlive
+ * init-time setup.
  *
  * INHERIT_COW: guest RAM is MAP_SHARED file-backed; fork() gives the
- * child a COW view of the same file-backed pages. SERIALIZE: v2
- * snapshot-to-disk reads the physmem_fd's content directly rather
- * than walking pagemap. See D36.
+ * child a COW view of the same file-backed pages. SERIALIZE marks
+ * the region for snapshot code that reads physmem_fd directly rather
+ * than walking pagemap.
  */
 static struct um_mmap_region physmem_mmap_region = {
 	.name  = "physmem",
@@ -56,11 +56,9 @@ void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
 	err = os_map_memory((void *) virt, fd, offset, len, r, w, x);
 	if (err) {
 		if (err == -ENOMEM)
-			printk(KERN_ERR "try increasing the host's "
-			       "/proc/sys/vm/max_map_count to <physical "
-			       "memory size>/4096\n");
-		panic("map_memory(0x%lx, %d, 0x%llx, %ld, %d, %d, %d) failed, "
-		      "err = %d\n", virt, fd, offset, len, r, w, x, err);
+			pr_err("try increasing the host's /proc/sys/vm/max_map_count to <physical memory size>/4096\n");
+		panic("%s(0x%lx, %d, 0x%llx, %ld, %d, %d, %d) failed, err = %d\n",
+		      __func__, virt, fd, offset, len, r, w, x, err);
 	}
 }
 
@@ -72,7 +70,7 @@ void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
  * @len:	Length of total physical memory that should be mapped/made
  *		available, in bytes.
  *
- * Creates an unlinked temporary file of size (len) and memory maps
+ * Creates an unlinked backing file of size (len) and memory maps
  * it on the last executable image address (uml_reserved).
  *
  * The offset is needed as the length of the total physical memory
@@ -80,19 +78,18 @@ void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
  * but the mapped-to address is the last address of the executable image
  * (uml_reserved == end address of executable image).
  *
- * The memory mapped memory of the temporary file is used as backing memory
- * of all user space processes/kernel tasks.
+ * The mmap of that backing file supplies memory for all user space
+ * processes/kernel tasks.
  *
- * Contract (workstream C-09, D37 pull-forward #5): physmem_fd must
- * be a regular host file — not an anonymous mapping — and the range
- * mapped by os_map_memory() below must use MAP_SHARED. Both hold
- * today: create_mem_file() → create_tmp_file() returns a real
- * tempfile in tmpfs, and os_map_memory() always maps with
+ * Contract: physmem_fd must
+ * be a regular host file, not an anonymous mapping, and the range
+ * mapped by os_map_memory() below must use MAP_SHARED. Both properties
+ * are provided here: create_mem_file() -> create_tmp_file() returns a
+ * real tempfile in tmpfs, and os_map_memory() always maps with
  * MAP_SHARED | MAP_FIXED (arch/um/os-Linux/process.c:96). Do not
- * silently flip either property without re-reading
- * `Documentation/virt/uml/redesign/04-risks/decisions-log.md` D37:
- * v2 snapshot-to-disk depends on being able to write out guest RAM
- * by reading this one fd, and the fork-server worker depends on
+ * silently flip either property without checking snapshot/forkserver
+ * callers. Snapshot serialization depends on being able to write out
+ * guest RAM by reading this one fd, and the fork-server worker depends on
  * inheriting guest RAM via MAP_SHARED COW.
  */
 void __init setup_physmem(unsigned long start, unsigned long reserve_end,
@@ -113,15 +110,14 @@ void __init setup_physmem(unsigned long start, unsigned long reserve_end,
 	err = os_map_memory((void *) reserve_end, physmem_fd, reserve,
 			    map_size, 1, 1, 1);
 	if (err < 0) {
-		os_warn("setup_physmem - mapping %lu bytes of memory at 0x%p "
-			"failed - errno = %d\n", map_size,
-			(void *) reserve_end, err);
+		os_warn("%s - mapping %lu bytes of memory at 0x%p failed - errno = %d\n",
+			__func__, map_size, (void *)reserve_end, err);
 		exit(1);
 	}
 
 	/*
-	 * Special kludge - This page will be mapped in to userspace processes
-	 * from physmem_fd, so it needs to be written out there.
+	 * This page is mapped into userspace processes from physmem_fd,
+	 * so it needs to be written out there.
 	 */
 	os_seek_file(physmem_fd, __pa(__syscall_stub_start));
 	os_write_file(physmem_fd, __syscall_stub_start, PAGE_SIZE);
@@ -133,10 +129,11 @@ void __init setup_physmem(unsigned long start, unsigned long reserve_end,
 	max_low_pfn = min_low_pfn + (map_size >> PAGE_SHIFT);
 
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
-	/* Register the guest-RAM region with the C-09 mmap registry.
-	 * Consumers: the fork-server worker reinit path (commit 3c),
-	 * v2 snapshot-to-disk (D36; reads this region out of the
-	 * backing file instead of walking pagemap).
+	/*
+	 * Register the guest-RAM region with the mmap registry.
+	 * Consumers: the fork-server worker reinit path and snapshot
+	 * serialization, which reads this region out of the backing
+	 * file instead of walking pagemap.
 	 */
 	physmem_mmap_region.base = (void *)reserve_end;
 	physmem_mmap_region.len  = map_size;
@@ -160,39 +157,10 @@ EXPORT_SYMBOL(phys_mapping);
 
 #ifdef CONFIG_UM_SNAPSHOT_FORKSERVER
 /**
- * um_pool_replicate_physmem() — fork-child entry helper that
- * isolates this UML kernel's physmem from master and sibling pool
- * members.
- *
- * Replicates master's physmem_fd content into a fresh memfd, swaps
- * the kernel-side MAP_SHARED mapping over to the new fd, and
- * updates the global physmem_fd so that:
- *
- *   - Subsequent kernel slab/page-allocator writes land in the
- *     child-private memfd.
- *   - phys_mapping() returns the new fd, so new stubs spawned by
- *     start_userspace_fresh() also mmap the new fd (kernel↔stub
- *     coherence within the member preserved by both ends using
- *     MAP_SHARED on the same fd).
- *   - Master's physmem_fd and master's existing stubs are
- *     untouched (they continue using the original fd).
- *
- * MUST be called from the pool-member child entry, AFTER Path A
- * pivot (private kernel stack so the MAP_FIXED remap doesn't
- * unmap the page we're running on) and BEFORE any kernel slab
- * write that would otherwise leak back to master.
- *
- * Returns 0 on success, -errno on failure (kernel still mapped to
- * the original physmem_fd; caller continues but iters > 1 will
- * crash via aliasing).
- */
-/**
- * um_pool_remap_self_test() — dispositive control for the
- * SIGALRM-after-mmap-FIXED regression.  Re-mmaps the kernel-VA
- * physmem region with the SAME fd at the SAME offset (functionally
- * a no-op for content) so we can tell whether the mmap-FIXED
- * operation itself disrupts signal delivery, independent of any
- * fd swap or content change.
+ * um_pool_remap_self_test() - remap the kernel-VA physmem region with
+ * the same fd at the same offset. The content is unchanged; callers use
+ * this to isolate whether MAP_FIXED remapping itself disrupts signal
+ * delivery, independent of any fd swap or content change.
  *
  * Returns 0 on success, -errno on failure.
  */
@@ -212,10 +180,23 @@ int um_pool_remap_self_test(void)
 }
 EXPORT_SYMBOL_GPL(um_pool_remap_self_test);
 
+/**
+ * um_pool_replicate_physmem() - give a forked pool member private physmem backing.
+ *
+ * Copies the current physmem contents into a new backing file, remaps
+ * the kernel physmem area to that file, and updates phys_mapping() to
+ * hand the new fd to subsequently spawned stubs.  The master process
+ * and its existing stubs keep using their original physmem fd.
+ *
+ * Call after the pool member has switched to a private kernel stack and
+ * before it resumes normal kernel allocation.
+ *
+ * Return: 0 on success or a negative errno on failure.
+ */
 int um_pool_replicate_physmem(void)
 {
 	void *scratch;
-	int new_fd, old_fd, ret;
+	int new_fd, ret;
 	unsigned long long phys_off;
 	unsigned long flags;
 
@@ -226,7 +207,8 @@ int um_pool_replicate_physmem(void)
 
 	local_irq_save(flags);
 
-	/* Use O_TMPFILE on /dev/shm or /tmp to match setup_physmem's
+	/*
+	 * Use O_TMPFILE on /dev/shm or /tmp to match setup_physmem's
 	 * boot-time physmem_fd shape exactly.
 	 */
 	new_fd = os_create_tmpfile("/dev/shm", physmem_size);
@@ -237,7 +219,8 @@ int um_pool_replicate_physmem(void)
 		return new_fd;
 	}
 
-	/* mmap the new fd as a scratch VA so we can populate it
+	/*
+	 * mmap the new fd as a scratch VA so we can populate it
 	 * from the kernel's existing physmem-VA mapping (which is
 	 * still backed by master's physmem_fd at this point).
 	 */
@@ -271,13 +254,10 @@ int um_pool_replicate_physmem(void)
 		return -EFAULT;
 	}
 
-	/* Swap kernel-VA mapping to new_fd via an intermediate
-	 * anonymous mapping.  Theory: the anon step resets host-
-	 * kernel state that was binding SIGALRM delivery to the
-	 * original inode.  Direct mmap-FIXED-to-different-inode
-	 * is dispositively known to break SIGALRM; same-inode
-	 * (dup'd-fd) works.  This variant tests whether routing
-	 * through anon decouples the inode binding.
+	/*
+	 * Install the new file through an intermediate anonymous mapping.
+	 * This preserves host signal delivery while replacing the backing
+	 * inode for the kernel physmem area.
 	 */
 	ret = os_remap_region_via_anon(physmem_mmap_region.base, new_fd,
 				       phys_off, physmem_mmap_region.len);
@@ -287,10 +267,8 @@ int um_pool_replicate_physmem(void)
 		return ret;
 	}
 
-	old_fd = physmem_fd;
 	physmem_fd = new_fd;
 	physmem_mmap_region.backing_fd = new_fd;
-	(void)old_fd;
 
 	local_irq_restore(flags);
 	return 0;
@@ -303,7 +281,7 @@ static int __init uml_mem_setup(char *line, int *add)
 	char *retptr;
 
 	*add = 0;
-	physmem_size = memparse(line,&retptr);
+	physmem_size = memparse(line, &retptr);
 	return 0;
 }
 __uml_setup("mem=", uml_mem_setup,

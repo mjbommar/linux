@@ -40,8 +40,7 @@ pub struct InstanceArgs {
 
 pub fn run(args: InstanceArgs) -> Result<()> {
     let prof = profile::resolve(&args.profile)?;
-    std::fs::create_dir_all(&args.out)
-        .with_context(|| format!("create {}", args.out.display()))?;
+    std::fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     let kernel_out = args.out.join("linux");
     let rootfs_dir = args.out.join("rootfs.d");

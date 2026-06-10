@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-exec-smoke — kselftest for `umlctl exec` end-to-end (Memo 09
-# Phase 4).
+# um/pool-exec-smoke - kselftest for `umlctl exec` end-to-end.
 #
 # What it asserts:
 #   1. `umlctl exec --pid <pid> --json -- /bin/true` against a real
@@ -14,7 +13,7 @@
 #      `timed_out` fields.
 #   4. When the in-guest exec primitive is unavailable (no
 #      uml_mconsole or no mconsole socket), the daemon returns
-#      ok=false with a diagnostic — and the exec verb surfaces it as a
+#      ok=false with a diagnostic - and the exec verb surfaces it as a
 #      non-zero exit + a stderr NDJSON frame.  This is the contract
 #      the syzkaller shim relies on: a clean failure envelope, never a
 #      hang.
@@ -29,8 +28,7 @@
 set -u
 
 KERNEL=${UM_FORK_KERNEL:-$HOME/src/uml-builds/uml-tplpause-fork/linux}
-# Fallback: the working build the implementation session was directed
-# to use.  Either works as long as it's CONFIG_UM_TEMPLATE_PAUSE_FORK=y.
+# Fallback to a known fork-capable local build, if present.
 if [ ! -x "$KERNEL" ]; then
 	KERNEL=$HOME/src/uml-builds/uml-smp-t41fix/linux
 fi
@@ -131,10 +129,10 @@ TAKEN_PID=$(echo "$TAKE_JSON" | python3 -c \
 echo "took member pid=$TAKEN_PID: PASS"
 
 # Run umlctl exec --json.  Two cases:
-# (A) uml_mconsole present + member's mconsole socket present →
+# (A) uml_mconsole present + member's mconsole socket present ->
 #     expect ok exit, "exit" frame with code 0 (assuming /bin/true
 #     succeeded inside the guest).
-# (B) Otherwise → expect non-zero exit, and a `stderr` frame in the
+# (B) Otherwise -> expect non-zero exit, and a `stderr` frame in the
 #     NDJSON stream containing "daemon error".  THIS is the
 #     dispositive failure-mode test for the syzkaller shim contract.
 set +e
@@ -206,7 +204,7 @@ echo "NDJSON frames valid: PASS ($(cat "$OUT/parse.out"))"
 
 # When case B (the typical state in this tree because the daemon does
 # not yet wire mconsole exec end-to-end), the in-guest stdout should
-# be empty.  When case A, stdout from `/bin/true` is empty too — so
+# be empty.  When case A, stdout from `/bin/true` is empty too - so
 # either way we don't assert stdout content beyond the frame stream.
 
 # Destroy + shutdown via the daemon path.

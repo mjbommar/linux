@@ -23,7 +23,7 @@ int main(void) {
 	pid_t p = fork();
 	if (p == 0) {
 		unsigned long child_canary = read_canary();
-		/* write child canary via raw asm — no libc */
+		/* write child canary via raw asm - no libc */
 		char buf[64];
 		int n = snprintf(buf, sizeof buf, "CHILD 0x%lx\n", child_canary);
 		long r;

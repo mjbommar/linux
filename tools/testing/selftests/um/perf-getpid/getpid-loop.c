@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * D-06 getpid() round-trip bookend (memo 08 sub-commit #6).
+ * getpid() round-trip bookend.
  *
  * Measures the cost of one SYS_getpid round-trip from guest
  * userspace under whatever UML backend is selected at host
@@ -25,9 +25,9 @@
  * Clock source: `rdtsc`. On UML-under-KVM this reads the
  * host TSC via KVM's passthrough (modern x86 host TSCs are
  * invariant, so a single-core pin makes the measurement
- * stable). No TSC rate calibration — the runner is fed
+ * stable). No TSC rate calibration: the runner is fed
  * `tsc_hz` from /proc/cpuinfo if it wants to convert
- * cycles→ns; otherwise the cycle count alone is the
+ * cycles to ns; otherwise the cycle count alone is the
  * cross-backend comparison surface.
  */
 

@@ -1,9 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/kmsan-smoke/kmsan-smoke.sh — runs INSIDE a UML guest.
+# um/kmsan-smoke/kmsan-smoke.sh - runs inside a UML guest.
 #
-# Validates two load-bearing invariants for the C-07 port:
+# Validates two load-bearing KMSAN invariants:
 #
 #   1. CONFIG_KMSAN=y: the /sys/kernel/debug/kmsan/ directory
 #      exists once debugfs is mounted. This is registered by
@@ -40,7 +40,7 @@ fi
 #
 # Doing this from userspace rather than a kernel module means
 # no build-time CONFIG_MODULES dependency and no out-of-tree
-# code — exactly the "integration test" shape the rest of the
+# code: exactly the "integration test" shape the rest of the
 # um/ selftests use.
 #
 # busybox's `yes` is too noisy; use a tiny shell expansion
@@ -68,7 +68,7 @@ if [ "$debugfs_ok" = "y" ] && [ "$reproducer_ok" = "y" ]; then
 fi
 
 # Accept "debugfs present but no report seen" as PASS when
-# CONFIG_KMSAN_KUNIT_TEST wasn't compiled in — the infra is
+# CONFIG_KMSAN_KUNIT_TEST wasn't compiled in; the infra is
 # alive, just no planted trigger. This matches the research
 # profile's current defconfig (KUnit is on but the KMSAN
 # test is separate and memory-hungry).

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Per-backend BPF seccomp filters for C-10 v2 vhost-user backends.
+// Per-backend BPF seccomp filters for vhost-user backends.
 //
-// Design (D52):
+// Design:
 //   - Allow-list posture. Every syscall outside the configured set
 //     triggers SECCOMP_RET_KILL_PROCESS — the same default that
 //     Firecracker and crosvm use for their backend processes.
@@ -147,11 +147,9 @@ impl FilterBuilder {
 
     /// Add a class-specific syscall to the allow list.
     ///
-    /// Used by net (tap ioctls, recvmsg sockets) and block
-    /// (preadv/pwritev, fallocate, fdatasync) backends landing
-    /// in subsequent v2 commits. Currently only exercised by
-    /// in-file tests; the `allow(dead_code)` silences that while
-    /// the callers ship.
+    /// Keeps backend-specific policy layered over the shared baseline.
+    /// Some build profiles only exercise this from unit tests, so keep
+    /// the dead-code allowance local to the helper.
     #[allow(dead_code)]
     pub fn allow(mut self, syscall: libc::c_long) -> Self {
         self.allow.push(syscall);
@@ -175,10 +173,9 @@ impl FilterBuilder {
         allow.sort_unstable();
         allow.dedup();
 
-        // Map every allowed syscall to an unconditional Allow
-        // rule. Args-level filtering (e.g. restricting ioctl by
-        // cmd number) is a follow-on refinement; the v2 commit 3
-        // scope is "allow-list by syscall, deny everything else".
+        // Map every allowed syscall to an unconditional Allow rule.
+        // Argument-level filtering can be layered on top of this
+        // syscall allow-list if a backend needs narrower policy.
         let rules: std::collections::BTreeMap<libc::c_long, Vec<SeccompRule>> = allow
             .into_iter()
             .map(|syscall| (syscall, Vec::new()))

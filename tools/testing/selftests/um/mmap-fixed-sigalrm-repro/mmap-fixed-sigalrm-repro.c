@@ -1,7 +1,6 @@
 /*
  * Minimal Linux-only repro of the mmap-FIXED-to-different-inode +
- * POSIX timer SIGALRM-delivery interaction documented in the UML
- * pool-completion roadmap §3.1 Option B (variants 3-4).
+ * POSIX timer SIGALRM-delivery interaction.
  *
  * Setup:
  *   1. mmap a tmpfs O_TMPFILE at FIXED VA, MAP_SHARED, identical
@@ -107,7 +106,7 @@ int main(void)
 		fprintf(stderr, "make_tmpfile failed\n");
 		return 1;
 	}
-	/* Initial bytes — pattern 'A' at offset 0 in both. */
+	/* Initial bytes: pattern 'A' at offset 0 in both. */
 	{
 		char buf[16] = "AAAAAAAAAAAAAAAA";
 		pwrite(fd1, buf, sizeof(buf), 0);
@@ -149,7 +148,7 @@ int main(void)
 	clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
 	pre_swap = sigalrm_count;
 
-	/* mmap-FIXED swap to fd2 — different inode, identical content
+	/* mmap-FIXED swap to fd2: different inode, identical content
 	 * (both just have 'A' at offset 0).
 	 */
 	m2_scratch = mmap64(NULL, REGION_SZ, PROT_READ | PROT_WRITE,

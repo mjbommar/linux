@@ -4,7 +4,9 @@
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -46,34 +48,30 @@ static void __init set_stklim(void)
 static void last_ditch_exit(int sig)
 {
 	/*
-	 * Async-signal-handler context — only async-signal-safe
+	 * Async-signal-handler context: only async-signal-safe
 	 * operations allowed here (see signal-safety(7)).
 	 *
 	 * The previous implementation called uml_cleanup() from here
 	 * and then exit(). That is unsafe: uml_cleanup() walks the
 	 * task list under tasklist_lock, runs the __exitcall() chain
-	 * (including console_exit → free_irq → __mutex_lock → might
+	 * (including console_exit -> free_irq -> __mutex_lock -> might
 	 * _sleep), and dispatches um_backend->shutdown() through
 	 * kmalloc-capable code paths. free_irq(3) also WARN()s when
 	 * called with in_interrupt() == true, which is the state a
 	 * signal inherits when it preempts a kernel raw_spin_lock_
-	 * irqsave region. Under PROVE_LOCKING + DEBUG_ATOMIC_SLEEP
-	 * (research profile) the result is a "Trying to free IRQ
-	 * from IRQ context" WARN plus a sleeping-in-atomic BUG on
-	 * every SIGTERM.
+	 * irqsave region. With lock debugging enabled, the result is
+	 * a "Trying to free IRQ from IRQ context" warning plus a
+	 * sleeping-in-atomic splat on every SIGTERM.
 	 *
 	 * Instead, exit immediately. The host kernel closes all fds,
-	 * unmaps all mmaps, and delivers SIGKILL to every stub child
-	 * — every stub is forked with PR_SET_PDEATHSIG=SIGKILL (see
+	 * unmaps all mmaps, and delivers SIGKILL to every stub child:
+	 * every stub is forked with PR_SET_PDEATHSIG=SIGKILL (see
 	 * arch/um/os-Linux/process.c and arch/um/kernel/skas/stub_
-	 * exe.c). We lose the um_backend->shutdown() dispatch (no-op
-	 * today for PTRACE / SECCOMP, nice-to-have for a future KVM
-	 * backend but not load-bearing), the __exitcall chain (the
-	 * host reclaims the resources those exitcalls would release),
-	 * and the ptraced-task kill loop (pdeathsig covers it).
+	 * exe.c). We lose the um_backend->shutdown() dispatch and the
+	 * __exitcall chain; the host reclaims those resources.
 	 *
 	 * install_fatal_handler() sets SA_RESETHAND, so a second
-	 * signal of the same type hits the default disposition —
+	 * signal of the same type hits the default disposition:
 	 * safety net if something hangs before _exit completes.
 	 *
 	 * Use _exit() (async-signal-safe) rather than exit() to skip
@@ -84,10 +82,10 @@ static void last_ditch_exit(int sig)
 
 	/*
 	 * write(2) is marked warn_unused_result in glibc, and this
-	 * is an async-signal-handler context — the only sane
+	 * is an async-signal-handler context; the only sane
 	 * response to a short write or EINTR here is to exit anyway.
 	 * Consume the return value explicitly to silence the
-	 * warning; a bare `(void)write(...)` does not.
+	 * warning; a bare (void)write(...) does not.
 	 */
 	ret = write(STDERR_FILENO, msg, sizeof(msg) - 1);
 	(void)ret;
@@ -111,8 +109,8 @@ static void __init install_fatal_handler(int sig)
 	action.sa_restorer = NULL;
 	action.sa_handler = last_ditch_exit;
 	if (sigaction(sig, &action, NULL) < 0) {
-		os_warn("failed to install handler for signal %d "
-			"- errno = %d\n", sig, errno);
+		os_warn("failed to install handler for signal %d - errno = %d\n",
+			sig, errno);
 		exit(1);
 	}
 }
@@ -130,7 +128,9 @@ static void __init setup_env_path(void)
 	 * if no PATH variable is set or it has an empty value
 	 * just use the default + /usr/lib/uml
 	 */
-	if (!old_path || (path_len = strlen(old_path)) == 0) {
+	if (old_path)
+		path_len = strlen(old_path);
+	if (!path_len) {
 		if (putenv("PATH=:/bin:/usr/bin/" UML_LIB_PATH))
 			perror("couldn't putenv");
 		return;
@@ -150,12 +150,10 @@ static void __init setup_env_path(void)
 	}
 }
 
-int __init main(int argc, char **argv, char **envp)
+static void __init disable_aslr_and_reexec(char **argv, char **envp)
 {
-	char **new_argv;
-	int ret, i, err;
+	int ret;
 
-	/* Disable randomization and re-exec if it was changed successfully */
 	ret = personality(PER_LINUX | ADDR_NO_RANDOMIZE);
 	if (ret >= 0 && (ret & (PER_LINUX | ADDR_NO_RANDOMIZE)) !=
 			 (PER_LINUX | ADDR_NO_RANDOMIZE)) {
@@ -169,30 +167,22 @@ int __init main(int argc, char **argv, char **envp)
 		}
 		execve(buf, argv, envp);
 	}
+}
 
-	set_stklim();
-
+static void __init maybe_pin_physmem(void)
+{
 	/*
-	 * SMP-T71 (Round 13): optionally raise RLIMIT_MEMLOCK and
-	 * mlockall all current + future mappings. Combined with
-	 * MAP_POPULATE in os_map_memory, this would prevent the host
-	 * kernel from migrating / reclaiming / KSM-merging UML's
-	 * physmem pages. Round 13 T72 disproved the working hypothesis
-	 * (UML doesn't host-unmap guest user pages at all — the
-	 * mmu_notifier traffic was on guest kernel VAs only), so
-	 * pinning is no longer dispositive. Kept as a gated knob in
-	 * case future work needs it.
+	 * Optionally raise RLIMIT_MEMLOCK and mlockall all current and
+	 * subsequent mappings. Combined with MAP_POPULATE in os_map_memory,
+	 * this prevents the host kernel from migrating, reclaiming, or
+	 * KSM-merging UML's physmem pages. This is a launcher-controlled
+	 * tuning knob.
 	 *
-	 * Gated by UM_KVM_V2_PIN_PHYSMEM env var. Note: umlctl strips
-	 * the env when spawning, passing only PATH/HOME/USER/LANG/TERM
-	 * plus the [env] section of the toml — neither carries this
-	 * var by default. To activate, the soak harness must export it
-	 * before the umlctl invocation OR add it to umlctl's
-	 * passthrough list in tools/uml/uml-launcher/src/bin/umlctl/
-	 * gate.rs and up.rs.
+	 * Gated by UM_KVM_V2_PIN_PHYSMEM. Launchers that sanitize the
+	 * environment must pass it explicitly.
 	 *
 	 * Both setrlimit and mlockall require CAP_IPC_LOCK or a raised
-	 * RLIMIT_MEMLOCK — non-root execution returns EPERM/ENOMEM.
+	 * RLIMIT_MEMLOCK; non-root execution returns EPERM/ENOMEM.
 	 */
 	if (getenv("UM_KVM_V2_PIN_PHYSMEM")) {
 		struct rlimit rl;
@@ -200,48 +190,103 @@ int __init main(int argc, char **argv, char **envp)
 		rl.rlim_cur = RLIM_INFINITY;
 		rl.rlim_max = RLIM_INFINITY;
 		if (setrlimit(RLIMIT_MEMLOCK, &rl) < 0)
-			perror("SMP-T71 setrlimit(RLIMIT_MEMLOCK)");
+			perror("um: setrlimit(RLIMIT_MEMLOCK)");
 		if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) < 0)
-			perror("SMP-T71 mlockall");
+			perror("um: mlockall");
 	}
+}
 
+static void __init maybe_set_oom_score_adj(void)
+{
 	/*
-	 * SMP-T80 (memo 52 §1.3): apply OOM score adjustment if
-	 * UM_OOM_SCORE_ADJ env var is set. Value range [-1000, +1000];
-	 * the host kernel clamps out-of-range values. Operator policy:
-	 *   - Soak harness: UM_OOM_SCORE_ADJ=+500 → UML is expendable,
-	 *     gets killed first when host is under memory pressure.
-	 *   - Long-running research session: -500 → UML is precious.
-	 *   - Production: 0 (host policy decides).
+	 * Apply OOM score adjustment if UM_OOM_SCORE_ADJ is set. Value
+	 * range is [-1000, +1000]; the host kernel clamps out-of-range
+	 * values. Positive values make UML easier to reclaim under memory
+	 * pressure; negative values protect it.
 	 */
-	{
-		const char *oom_str = getenv("UM_OOM_SCORE_ADJ");
+	const char *oom_str = getenv("UM_OOM_SCORE_ADJ");
+	int fd;
 
-		if (oom_str) {
-			int fd = open("/proc/self/oom_score_adj",
-				      O_WRONLY | O_CLOEXEC);
+	if (!oom_str)
+		return;
 
-			if (fd < 0) {
-				perror("SMP-T80 open(/proc/self/oom_score_adj)");
-			} else {
-				ssize_t n = write(fd, oom_str, strlen(oom_str));
+	fd = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
 
-				if (n < 0)
-					perror("SMP-T80 write(oom_score_adj)");
-				close(fd);
-			}
-		}
+	if (fd < 0) {
+		perror("um: open(/proc/self/oom_score_adj)");
+		return;
 	}
 
+	if (write(fd, oom_str, strlen(oom_str)) < 0)
+		perror("um: write(oom_score_adj)");
+	close(fd);
+}
+
+static int __init parse_cpu_range(const char **pos, cpu_set_t *mask)
+{
+	char *end;
+	long lo, hi;
+	long cpu;
+
+	lo = strtol(*pos, &end, 10);
+	if (end == *pos)
+		return 0;
+
+	*pos = end;
+	hi = lo;
+	if (**pos == '-') {
+		(*pos)++;
+		hi = strtol(*pos, &end, 10);
+		if (end == *pos)
+			return 0;
+		*pos = end;
+	}
+
+	if (lo < 0 || hi < lo || hi >= CPU_SETSIZE)
+		return 0;
+
+	for (cpu = lo; cpu <= hi; cpu++)
+		CPU_SET((int)cpu, mask);
+	return 1;
+}
+
+static int __init parse_cpu_affinity(const char *aff, cpu_set_t *mask)
+{
+	const char *p = aff;
+	int parsed_any = 0;
+
+	CPU_ZERO(mask);
+	while (*p) {
+		if (!parse_cpu_range(&p, mask))
+			return parsed_any;
+		parsed_any = 1;
+
+		if (*p == ',')
+			p++;
+		else if (*p)
+			return parsed_any;
+	}
+
+	return parsed_any;
+}
+
+static void __init maybe_set_cpu_affinity(void)
+{
+	const char *aff = getenv("UM_KVM_V2_CPU_AFFINITY");
+	cpu_set_t mask;
+
+	if (!aff || !*aff)
+		return;
+
 	/*
-	 * SMP-T82 (memo 52 §2.2): apply process-level CPU affinity if
+	 * Apply process-level CPU affinity if
 	 * UM_KVM_V2_CPU_AFFINITY env var is set. Format: comma-
 	 * separated CPU list with optional ranges, e.g. "0-3" or
 	 * "0,2,4". Confines the UML process (and all its host threads)
 	 * to the listed CPU subset.
 	 *
 	 * Under v2's per-host-CPU vCPU pool design, this consolidates
-	 * the working set: all guest tasks dispatching land on vCPUs
+	 * the working set: all guest tasks dispatch onto vCPUs
 	 * within the listed CPU subset, which keeps the host's per-CPU
 	 * KVM caches (mmu_cache, posted_interrupts) warm. Cross-vCPU
 	 * transitions within the subset still occur (load balancing
@@ -249,88 +294,58 @@ int __init main(int argc, char **argv, char **envp)
 	 * a-cold-CPU class is eliminated.
 	 *
 	 * Parser is intentionally simple: handles "M" / "M-N" /
-	 * "M,N,..." / combinations. Anything malformed → perror +
+	 * "M,N,..." / combinations. Anything malformed means perror +
 	 * inherit existing affinity (don't fail the boot).
 	 */
-	{
-		const char *aff = getenv("UM_KVM_V2_CPU_AFFINITY");
-
-		if (aff && *aff) {
-			cpu_set_t mask;
-			const char *p = aff;
-			char *end;
-			long lo, hi;
-			int parsed_any = 0;
-
-			CPU_ZERO(&mask);
-			while (*p) {
-				lo = strtol(p, &end, 10);
-				if (end == p)
-					break;
-				p = end;
-				hi = lo;
-				if (*p == '-') {
-					p++;
-					hi = strtol(p, &end, 10);
-					if (end == p)
-						break;
-					p = end;
-				}
-				if (lo >= 0 && hi >= lo && hi < CPU_SETSIZE) {
-					long cpu;
-
-					for (cpu = lo; cpu <= hi; cpu++)
-						CPU_SET((int)cpu, &mask);
-					parsed_any = 1;
-				}
-				if (*p == ',')
-					p++;
-				else if (*p)
-					break;
-			}
-			if (parsed_any) {
-				int rc;
-
-				errno = 0;
-				rc = sched_setaffinity(0, sizeof(mask), &mask);
-				if (rc < 0 && errno != 0)
-					perror("SMP-T82 sched_setaffinity");
-			} else {
-				fprintf(stderr,
-					"SMP-T82: malformed UM_KVM_V2_CPU_AFFINITY='%s' — ignoring\n",
-					aff);
-			}
-		}
+	if (parse_cpu_affinity(aff, &mask)) {
+		errno = 0;
+		if (sched_setaffinity(0, sizeof(mask), &mask) < 0 &&
+		    errno != 0)
+			perror("um: sched_setaffinity");
+	} else {
+		fprintf(stderr,
+			"um: malformed UM_KVM_V2_CPU_AFFINITY='%s'; ignoring\n",
+			aff);
 	}
+}
+
+static void __init maybe_note_vcpu_affinity(void)
+{
+	const char *vaff = getenv("UM_KVM_V2_VCPU_AFFINITY");
+
+	if (!vaff || !*vaff || strcmp(vaff, "off") == 0)
+		return;
 
 	/*
-	 * Memo 06 Phase 1 / HONEST-AUDIT §7: per-vCPU host-thread
-	 * affinity.  In kvm-v2's per-host-CPU pool design, vcpus[N] is
+	 * Per-vCPU host-thread affinity. In kvm-v2's per-host-CPU pool
+	 * design, vcpus[N] is
 	 * already used only from smp_processor_id() == N, so the
 	 * "thread N pinned to host CPU N" property is enforced by
-	 * construction — there's nothing extra to sched_setaffinity()
+	 * construction; there is nothing extra to sched_setaffinity()
 	 * at this point.
 	 *
 	 * The env var is read here so the value flows into the boot
-	 * log (mission Phase 4 verifies its presence + the
-	 * pool-design property), and so an operator misconception
-	 * ("did umlctl pass my vcpu_thread_affinity through?") has
+	 * log and so configuration mistakes have
 	 * an observable answer in the boot output.  Real per-task
-	 * pinning (cgroup cpuset for guest userspace tasks) is the
-	 * follow-on documented in memo 52 §3.2 Tier 3.
+	 * pinning (cgroup cpuset for guest userspace tasks) is separate.
 	 */
-	{
-		const char *vaff = getenv("UM_KVM_V2_VCPU_AFFINITY");
+	fprintf(stderr,
+		"um: UM_KVM_V2_VCPU_AFFINITY='%s' noted; per-vCPU pinning is enforced by the kvm-v2 per-host-CPU pool.\n",
+		vaff);
+}
 
-		if (vaff && *vaff && strcmp(vaff, "off") != 0)
-			fprintf(stderr,
-				"SMP-T82b: UM_KVM_V2_VCPU_AFFINITY='%s' noted; per-vCPU pinning is enforced by the kvm-v2 per-host-CPU pool (memo 06 Phase 1).\n",
-				vaff);
-	}
+static void __init apply_host_resource_env(void)
+{
+	maybe_pin_physmem();
+	maybe_set_oom_score_adj();
+	maybe_set_cpu_affinity();
+	maybe_note_vcpu_affinity();
+}
 
-	setup_env_path();
-
-	setsid();
+static char **__init copy_argv(int argc, char **argv)
+{
+	char **new_argv;
+	int i;
 
 	new_argv = malloc((argc + 1) * sizeof(char *));
 	if (new_argv == NULL) {
@@ -345,31 +360,32 @@ int __init main(int argc, char **argv, char **envp)
 		}
 	}
 	new_argv[argc] = NULL;
+	return new_argv;
+}
 
+static void __init prepare_fatal_handlers(void)
+{
 	/*
-	 * Allow these signals to bring down a UML if all other
-	 * methods of control fail.
+	 * Allow these signals to bring down a UML if all other methods of
+	 * control fail.
 	 */
 	install_fatal_handler(SIGINT);
 	install_fatal_handler(SIGTERM);
+}
 
-	scan_elf_aux(envp);
-
-	change_sig(SIGPIPE, 0);
-	ret = linux_main(argc, argv, envp);
+static void shutdown_host_io(void)
+{
+	int err;
 
 	/*
-	 * Disable SIGPROF - I have no idea why libc doesn't do this or turn
-	 * off the profiling time, but UML dies with a SIGPROF just before
-	 * exiting when profiling is active.
+	 * Disable SIGPROF before shutdown. Profiling timers can otherwise
+	 * deliver SIGPROF just before exit when profiling is active.
 	 */
 	change_sig(SIGPROF, 0);
 
 	/*
-	 * This signal stuff used to be in the reboot case.  However,
-	 * sometimes a timer signal can come in when we're halting (reproducably
-	 * when writing out gcov information, presumably because that takes
-	 * some time) and cause a segfault.
+	 * A timer signal can arrive while halting, particularly while writing
+	 * gcov data, and run against partially torn-down state.
 	 */
 
 	/* stop timers and set timer signal to be ignored */
@@ -381,11 +397,31 @@ int __init main(int argc, char **argv, char **envp)
 		os_warn("deactivate_all_fds failed, errno = %d\n", -err);
 
 	/*
-	 * Let any pending signals fire now.  This ensures
-	 * that they won't be delivered after the exec, when
-	 * they are definitely not expected.
+	 * Let any pending signals fire now. This ensures that they are not
+	 * delivered after the exec, when they are definitely not expected.
 	 */
 	unblock_signals();
+}
+
+int __init main(int argc, char **argv, char **envp)
+{
+	char **new_argv;
+	int ret;
+
+	disable_aslr_and_reexec(argv, envp);
+	set_stklim();
+	apply_host_resource_env();
+	setup_env_path();
+	setsid();
+	new_argv = copy_argv(argc, argv);
+	prepare_fatal_handlers();
+
+	scan_elf_aux(envp);
+
+	change_sig(SIGPIPE, 0);
+	ret = linux_main(argc, argv, envp);
+
+	shutdown_host_io();
 
 	os_info("\n");
 	/* Reboot */
@@ -400,7 +436,7 @@ int __init main(int argc, char **argv, char **envp)
 extern void *__real_malloc(int);
 extern void __real_free(void *);
 
-/* workaround for -Wmissing-prototypes warnings */
+/* Prototypes for linker-wrapped allocation hooks. */
 void *__wrap_malloc(int size);
 void *__wrap_calloc(int n, int size);
 void __wrap_free(void *ptr);
@@ -414,7 +450,8 @@ void *__wrap_malloc(int size)
 	else if (size <= UM_KERN_PAGE_SIZE)
 		/* finding contiguous pages can be hard*/
 		ret = uml_kmalloc(size, UM_GFP_KERNEL);
-	else ret = vmalloc(size);
+	else
+		ret = vmalloc(size);
 
 	/*
 	 * glibc people insist that if malloc fails, errno should be
@@ -442,37 +479,32 @@ void __wrap_free(void *ptr)
 
 	/*
 	 * We need to know how the allocation happened, so it can be correctly
-	 * freed.  This is done by seeing what region of memory the pointer is
-	 * in -
-	 * 	physical memory - kmalloc/kfree
-	 *	kernel virtual memory - vmalloc/vfree
-	 * 	anywhere else - malloc/free
-	 * If kmalloc is not yet possible, then either high_physmem and/or
+	 * freed. This is done by seeing what region of memory the pointer is in:
+	 *   physical memory - kmalloc/kfree
+	 *   kernel virtual memory - vmalloc/vfree
+	 *   anywhere else - malloc/free
+	 * If kmalloc is unavailable, then either high_physmem and/or
 	 * end_vm are still 0 (as at startup), in which case we call free, or
 	 * we have set them, but anyway addr has not been allocated from those
 	 * areas. So, in both cases __real_free is called.
 	 *
 	 * CAN_KMALLOC is checked because it would be bad to free a buffer
 	 * with kmalloc/vmalloc after they have been turned off during
-	 * shutdown.
-	 * XXX: However, we sometimes shutdown CAN_KMALLOC temporarily, so
-	 * there is a possibility for memory leaks.
+	 * shutdown. If CAN_KMALLOC is temporarily disabled, this path may
+	 * leak memory rather than freeing through a disabled allocator.
 	 */
 
 	/*
 	 * Host-VA range check: was this pointer kmalloc'd from the physmem
-	 * region? Both bounds are host VAs. Today high_physmem ==
-	 * __binary_start_hva + physmem_size; under v2 that equality
-	 * breaks (high_physmem stays a kernel-pgd-VA concept) and this
-	 * upper bound will need a __binary_end_hva sibling. Memo 25 R1.
+	 * region? Both bounds are host VAs in the current layout.
 	 */
-	if ((addr >= __binary_start_hva) && (addr < high_physmem)) {
+	if (addr >= __binary_start_hva && addr < high_physmem) {
 		if (kmalloc_ok)
 			kfree(ptr);
-	}
-	else if ((addr >= start_vm) && (addr < end_vm)) {
+	} else if (addr >= start_vm && addr < end_vm) {
 		if (kmalloc_ok)
 			vfree(ptr);
+	} else {
+		__real_free(ptr);
 	}
-	else __real_free(ptr);
 }

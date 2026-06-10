@@ -2,9 +2,6 @@
 /*
  * Host-side io_uring substrate for UML drivers.
  *
- * Per Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-
- * next-sprint/02-ubd-io-uring.md (memo 02, Phase 1).
- *
  * Minimal raw-syscall interface (no liburing dependency, by convention
  * for arch/um/os-Linux/).  Provides the same shape io_uring callers
  * have come to expect:
@@ -16,9 +13,8 @@
  *   - os_io_ring_peek_cqe(ring, *cqe)       : non-blocking harvest
  *
  * The user_data field of the SQE/CQE is opaque to this module; callers
- * encode req+segment identity into it.  UBD's converted do_io() (memo
- * 02 Phase 2) is the first consumer; hostfs writeback (memo 03 Phase
- * 2) reuses the same substrate.
+ * encode request and segment identity into it. UBD and hostfs callers
+ * reuse the same substrate.
  *
  * Fallback:  os_io_ring_create() returns NULL on EPERM/ENOSYS so
  * callers can demote to the legacy synchronous helper-thread path.
@@ -105,9 +101,8 @@ struct os_io_ring {
 	 * Flushed implicitly by the next wait_cqe / peek_cqe (since
 	 * waiting / peeking is the only operation that cares about
 	 * the kernel actually starting on them).  Cuts the
-	 * io_uring_enter syscall cost from O(N) to O(1) per cycle —
-	 * critical for the small-random-IO regression vs legacy
-	 * (memo #2 Phase 2b/4 follow-on).
+	 * io_uring_enter syscall cost from O(N) to O(1) per cycle;
+	 * critical for small random I/O.
 	 */
 	unsigned int	pending_submit;
 };
@@ -225,9 +220,9 @@ static struct io_uring_sqe *sqe_acquire(struct os_io_ring *r)
 
 /*
  * Commit the SQE: advance the SQ tail (release ordering pairs with
- * the kernel's acquire-load) and defer io_uring_enter until the
- * next peek/wait — the kernel only needs to know about the new
- * tail when we're ready to consume completions.
+ * the kernel's acquire-load) and defer io_uring_enter until the next
+ * peek/wait. The kernel only needs to know about the new tail when
+ * completions are being consumed.
  */
 static int sqe_commit(struct os_io_ring *r)
 {
@@ -433,7 +428,7 @@ unsigned int os_io_ring_in_flight(const struct os_io_ring *r)
 }
 
 /*
- * Phase 1 of memo #5 — register an eventfd with the ring so the
+ * Register an eventfd with the ring so the
  * kernel signals it on every CQE.  The fd is the caller's to add
  * to its epoll set / select / poll loop; on each wake the consumer
  * drains CQEs via os_io_ring_peek_cqe().
@@ -459,32 +454,20 @@ int os_io_ring_register_eventfd(struct os_io_ring *r, int *out_fd)
 }
 
 /*
- * os_close_inherited_io_uring_fds() — walk /proc/self/fd, close
- * every io_uring file inherited via fork.  Returns the count of
- * fds closed.  Use case: pool-member fork-child entry, before any
- * SIGALRM-sensitive operation (mmap-FIXED swap, etc.) — the
- * research subagent's hypothesis is that inherited io_uring task_
- * work (with TWA_SIGNAL) sets TIF_NOTIFY_SIGNAL on the child and
- * blocks subsequent signal delivery via `signal_pending()` short-
- * circuits.  Closing the io_uring fds drops the task_work
- * association.
- *
- * Identifies io_uring fds via /proc/self/fd/<n> symlink content:
- * an io_uring fd's readlink target is `anon_inode:[io_uring]`.
- * Robust against fd-table layout differences from one boot to
- * another.
- */
-/*
  * Conservative variant: probe a small range of plausible io_uring
  * fd numbers and close those that look like io_uring backings.
- * Uses only direct syscalls — no libc TLS, no snprintf, no
+ * Uses only direct syscalls; no libc TLS, no snprintf, no
  * stack-heavy state.  Identification via readlinkat returning a
  * path that contains the literal "io_uring" substring.
  *
  * Range: fd 3..63 covers UML's typical io_uring fd allocation
  * (ubd_ring + hostfs writeback ring + any auxiliary).  Fds below
- * 3 are stdio.  Above 63 we'd be unlikely to encounter io_uring
+ * 3 are stdio. Above 63 UML is unlikely to encounter io_uring
  * fds in early-init UML.
+ *
+ * Inherited io_uring task_work can leave TIF_NOTIFY_SIGNAL pending in the
+ * child and interfere with subsequent signal delivery; closing the io_uring
+ * fds drops the task_work association.
  */
 int os_close_inherited_io_uring_fds(void)
 {
@@ -494,9 +477,9 @@ int os_close_inherited_io_uring_fds(void)
 	ssize_t r;
 
 	for (fd = 3; fd < 64; fd++) {
-		/* Build "/proc/self/fd/<fd>" manually — no snprintf. */
+		/* Build "/proc/self/fd/<fd>" manually; no snprintf. */
 		int p = 0;
-		const char prefix[] = "/proc/self/fd/";
+			static const char prefix[] = "/proc/self/fd/";
 		int digits[3], dlen = 0, v = fd;
 
 		memcpy(path, prefix, sizeof(prefix) - 1);

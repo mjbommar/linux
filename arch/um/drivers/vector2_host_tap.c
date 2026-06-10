@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Trusted TAP host backend for UML vector networking v2.
- *
- * Trusted TAP backend for the experimental vector v2 runtime.
- * Packet movement, interrupts, NAPI, and carrier enablement are left to the
- * later datapath phases.
  */
 
 #define pr_fmt(fmt) "uml-vector2-tap: " fmt
@@ -235,6 +231,65 @@ out_close:
 	return ret;
 }
 
+static struct um_vec2_tap_host *um_vec2_tap_host_alloc(void)
+{
+	struct um_vec2_tap_host *taphost;
+
+	taphost = kzalloc_obj(*taphost);
+	if (!taphost)
+		return NULL;
+
+	taphost->fd = UM_VEC2_NO_FD;
+	return taphost;
+}
+
+static void um_vec2_tap_channel_init(struct um_vec2_dev *vdev,
+				     struct um_vec2_channel *channel,
+				     unsigned int index, int fd)
+{
+	um_vec2_chan_lifecycle_init(&channel->life);
+	channel->vdev = vdev;
+	channel->index = index;
+	channel->rx_fd = fd;
+	channel->tx_fd = fd;
+	channel->rx_irq = UM_VEC2_NO_IRQ;
+	channel->tx_irq = UM_VEC2_NO_IRQ;
+}
+
+static int um_vec2_tap_channel_prepare(struct um_vec2_dev *vdev,
+				       struct um_vec2_channel *channel,
+				       unsigned int index, int fd)
+{
+	int ret;
+
+	um_vec2_tap_channel_init(vdev, channel, index, fd);
+	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
+	if (ret)
+		return ret;
+
+	return um_vec2_queue_pair_alloc(channel, vdev->cfg.depth);
+}
+
+static void um_vec2_tap_attach_host(struct um_vec2_tap_host *taphost,
+				    struct um_vec2_channel *channel,
+				    struct net_device *dev, int fd)
+{
+	taphost->host.ops = &um_vec2_tap_host_ops;
+	taphost->dev = dev;
+	taphost->frame_len = um_vec2_runtime_frame_len(dev, true);
+	taphost->fd = fd;
+	channel->host = &taphost->host;
+}
+
+static void um_vec2_tap_channel_mark_closed(struct um_vec2_channel *channel)
+{
+	if (um_vec2_chan_can_transition(channel->life.state,
+					UM_VEC2_CHAN_QUIESCING))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
+	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
+		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
+}
+
 static int um_vec2_tap_channel_attach_fd(struct um_vec2_dev *vdev,
 					 struct um_vec2_channel *channel,
 					 unsigned int index, int fd)
@@ -243,31 +298,15 @@ static int um_vec2_tap_channel_attach_fd(struct um_vec2_dev *vdev,
 	struct net_device *dev = vdev->netdev;
 	int ret;
 
-	taphost = kzalloc_obj(*taphost);
+	taphost = um_vec2_tap_host_alloc();
 	if (!taphost)
 		return -ENOMEM;
 
-	um_vec2_chan_lifecycle_init(&channel->life);
-	channel->vdev = vdev;
-	channel->index = index;
-	channel->rx_fd = fd;
-	channel->tx_fd = fd;
-	channel->rx_irq = UM_VEC2_NO_IRQ;
-	channel->tx_irq = UM_VEC2_NO_IRQ;
-	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ALLOCATED);
+	ret = um_vec2_tap_channel_prepare(vdev, channel, index, fd);
 	if (ret)
 		goto out_free_host;
 
-	ret = um_vec2_queue_pair_alloc(channel, vdev->cfg.depth);
-	if (ret)
-		goto out_free_host;
-
-	taphost->host.ops = &um_vec2_tap_host_ops;
-	taphost->dev = dev;
-	taphost->frame_len = um_vec2_runtime_frame_len(dev, true);
-	taphost->fd = fd;
-	channel->host = &taphost->host;
-
+	um_vec2_tap_attach_host(taphost, channel, dev, fd);
 	ret = um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_FD_ATTACHED);
 	if (ret)
 		goto out_free_queue;
@@ -277,17 +316,7 @@ static int um_vec2_tap_channel_attach_fd(struct um_vec2_dev *vdev,
 out_free_queue:
 	channel->host = NULL;
 	um_vec2_queue_pair_free(channel, dev);
-	/*
-	 * Mirror FD backend's unwind: drive the channel lifecycle through
-	 * QUIESCING -> CLOSED so subsequent introspection sees a clean
-	 * terminal state rather than the partial ALLOCATED/FD_ATTACHED
-	 * state left by the failed transition.  See audit B4.
-	 */
-	if (um_vec2_chan_can_transition(channel->life.state,
-					UM_VEC2_CHAN_QUIESCING))
-		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_QUIESCING);
-	if (um_vec2_chan_can_transition(channel->life.state, UM_VEC2_CHAN_CLOSED))
-		um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_CLOSED);
+	um_vec2_tap_channel_mark_closed(channel);
 out_free_host:
 	kfree(taphost);
 	return ret;
@@ -313,6 +342,78 @@ static void um_vec2_tap_channel_close(struct um_vec2_channel *channel,
 	channel->rx_fd = UM_VEC2_NO_FD;
 	channel->tx_fd = UM_VEC2_NO_FD;
 	kfree(taphost);
+}
+
+static void um_vec2_tap_clear_channels(struct um_vec2_dev *vdev)
+{
+	vdev->channels = NULL;
+	vdev->num_channels = 0;
+}
+
+static int um_vec2_tap_prepare_open(struct um_vec2_dev *vdev,
+				    unsigned int *queues)
+{
+	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
+		return -EINVAL;
+	if (!IS_ENABLED(CONFIG_UML_NET_VECTOR_V2_INPROC))
+		return -EACCES;
+	if (vdev->cfg.mode != UM_VEC2_HOST_AUTO &&
+	    vdev->cfg.mode != UM_VEC2_HOST_INPROC)
+		return -EOPNOTSUPP;
+	if (!vdev->cfg.ifname[0])
+		return -EINVAL;
+	if (!vdev->netdev)
+		return -ENODEV;
+	if (vdev->channels)
+		return -EBUSY;
+
+	*queues = um_vec2_netdev_queue_count(vdev);
+	return 0;
+}
+
+static int um_vec2_tap_open_one_channel(struct um_vec2_dev *vdev,
+					struct um_vec2_channel *channel,
+					unsigned int index,
+					unsigned int queues)
+{
+	int fd;
+	int ret;
+
+	fd = um_vec2_tap_create_fd(vdev->cfg.ifname, queues > 1);
+	if (fd < 0)
+		return fd;
+
+	ret = um_vec2_tap_channel_attach_fd(vdev, channel, index, fd);
+	if (ret)
+		os_close_file(fd);
+	return ret;
+}
+
+static int um_vec2_tap_open_channels(struct um_vec2_dev *vdev,
+				     struct um_vec2_channel *channels,
+				     unsigned int queues,
+				     unsigned int *opened)
+{
+	int ret;
+
+	*opened = 0;
+	while (*opened < queues) {
+		ret = um_vec2_tap_open_one_channel(vdev, &channels[*opened],
+						   *opened, queues);
+		if (ret)
+			return ret;
+		(*opened)++;
+	}
+
+	return 0;
+}
+
+static void um_vec2_tap_close_channels(struct um_vec2_dev *vdev,
+				       struct um_vec2_channel *channels,
+				       unsigned int count)
+{
+	while (count--)
+		um_vec2_tap_channel_close(&channels[count], vdev->netdev);
 }
 
 /*
@@ -355,51 +456,27 @@ int um_vec2_tap_open(struct um_vec2_dev *vdev)
 {
 	struct um_vec2_channel *channels;
 	unsigned int queues;
-	unsigned int i;
+	unsigned int opened;
 	int ret;
 
-	if (vdev->cfg.transport != UM_VEC2_TRANSPORT_TAP)
-		return -EINVAL;
-	if (!IS_ENABLED(CONFIG_UML_NET_VECTOR_V2_INPROC))
-		return -EACCES;
-	if (vdev->cfg.mode != UM_VEC2_HOST_AUTO &&
-	    vdev->cfg.mode != UM_VEC2_HOST_INPROC)
-		return -EOPNOTSUPP;
-	if (!vdev->cfg.ifname[0])
-		return -EINVAL;
-	if (!vdev->netdev)
-		return -ENODEV;
-	if (vdev->channels)
-		return -EBUSY;
+	ret = um_vec2_tap_prepare_open(vdev, &queues);
+	if (ret)
+		return ret;
 
-	queues = um_vec2_netdev_queue_count(vdev);
 	channels = kcalloc(queues, sizeof(*channels), GFP_KERNEL);
 	if (!channels)
 		return -ENOMEM;
 
-	for (i = 0; i < queues; i++) {
-		int fd;
-
-		fd = um_vec2_tap_create_fd(vdev->cfg.ifname, queues > 1);
-		if (fd < 0) {
-			ret = fd;
-			goto out_close_channels;
-		}
-
-		ret = um_vec2_tap_channel_attach_fd(vdev, &channels[i], i, fd);
-		if (ret) {
-			os_close_file(fd);
-			goto out_close_channels;
-		}
-	}
+	ret = um_vec2_tap_open_channels(vdev, channels, queues, &opened);
+	if (ret)
+		goto out_close_channels;
 
 	vdev->channels = channels;
 	vdev->num_channels = queues;
 	return 0;
 
 out_close_channels:
-	while (i--)
-		um_vec2_tap_channel_close(&channels[i], vdev->netdev);
+	um_vec2_tap_close_channels(vdev, channels, opened);
 	kfree(channels);
 	return ret;
 }
@@ -407,26 +484,23 @@ out_close_channels:
 void um_vec2_tap_close(struct um_vec2_dev *vdev)
 {
 	struct um_vec2_channel *channels = vdev->channels;
-	unsigned int i;
 
 	if (!channels)
 		return;
 
-	for (i = 0; i < vdev->num_channels; i++)
-		um_vec2_tap_channel_close(&channels[i], vdev->netdev);
+	um_vec2_tap_close_channels(vdev, channels, vdev->num_channels);
 	kfree(channels);
-	vdev->channels = NULL;
-	vdev->num_channels = 0;
+	um_vec2_tap_clear_channels(vdev);
 }
 
 /*
- * Memo 09 Phase 2.2 — re-bind this vec2 netdev to a different
- * host TAP interface name (closing the inherited channels and
- * opening fresh ones via TUNSETIFF on the new name).
+ * Re-bind this vec2 netdev to a different host TAP interface name,
+ * closing the inherited channels and opening fresh ones via TUNSETIFF
+ * on the new name.
  *
- * Used by Phase 2 identity-apply when the M-fork child needs its
- * own TAP (the master's TAP fd is shared via CoW post-fork, so all
- * pool members would otherwise contend on the same host interface).
+ * Used when a forked pool member needs its own TAP. The master's TAP
+ * fd is shared via CoW post-fork, so all pool members would otherwise
+ * contend on the same host interface.
  *
  * The new TAP is created via the standard um_vec2_tap_open() path
  * which opens /dev/net/tun + TUNSETIFF.  Caller must hold a
@@ -434,7 +508,7 @@ void um_vec2_tap_close(struct um_vec2_dev *vdev)
  *
  * Returns 0 on success, -EINVAL for a non-TAP vec2 interface or
  * empty new_ifname, -errno on tap_open failure.  On failure the
- * old channels are already torn down — caller must accept that
+ * old channels are already torn down; caller must accept that
  * the netdev is now without a working backend; recovery requires
  * either retrying with a valid name or calling um_vec2_tap_close
  * + a fresh open with the original name.

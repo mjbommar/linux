@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Declared spine event schemas (memo 13 Phase O1.3).
+// Declared UML event schemas.
 //
 // Each entry names an ECS-shaped event type the spine knows
 // how to produce or consume. Schemas are versioned and frozen
@@ -9,15 +9,10 @@
 // build filters / predicates against a stable surface, even
 // for schemas whose *producer* hasn't landed yet.
 //
-// For O1.3 only `uml.lifecycle.v1` actually got emitted. The
-// O3.1 lift (dmesg parser, see `dmesg_parse.rs`) turned
-// `uml.panic.v1` + `uml.oom.v1` plus every sanitizer /
-// stall / lockdep schema into an actual producer: at
-// `umlctl stop` time, `kernel.log` is scanned for canonical
-// BUG/WARNING tokens and one spine event is emitted per
-// matched line. `umlctl assert --no-kasan` and friends
-// therefore work against real UML output, not just synthetic
-// injection.
+// `uml.lifecycle.v1` is emitted by umlctl lifecycle verbs.  The dmesg
+// parser emits panic, OOM, sanitizer, stall, and lockdep schemas at
+// `umlctl stop` time by scanning `kernel.log` for canonical
+// BUG/WARNING tokens.
 
 use serde::Serialize;
 
@@ -48,7 +43,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
         description: "panic() called in the guest. Payload carries the panic message; \
-             produced by the O3.1 dmesg parser at stop time.",
+             produced by the dmesg parser at stop time.",
     },
     SchemaDecl {
         name: "uml.oom.v1",
@@ -56,7 +51,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "warning",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "OOM killer invoked in the guest. Produced by the O3.1 dmesg parser \
+        description: "OOM killer invoked in the guest. Produced by the dmesg parser \
              at stop time.",
     },
     SchemaDecl {
@@ -65,7 +60,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "error",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "KASAN reported a memory-safety bug. O3.1 dmesg parser.",
+        description: "KASAN reported a memory-safety bug. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.sanitizer.kfence.v1",
@@ -73,7 +68,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "error",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "KFENCE reported a bounds/use-after-free hit. O3.1 dmesg parser.",
+        description: "KFENCE reported a bounds/use-after-free hit. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.sanitizer.kcsan.v1",
@@ -81,7 +76,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "error",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "KCSAN reported a data-race. O3.1 dmesg parser.",
+        description: "KCSAN reported a data-race. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.sanitizer.kmsan.v1",
@@ -89,7 +84,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "error",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "KMSAN reported a use-of-uninitialized-value. O3.1 dmesg parser.",
+        description: "KMSAN reported a use-of-uninitialized-value. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.sanitizer.ubsan.v1",
@@ -97,7 +92,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "error",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "UBSAN reported undefined behavior. O3.1 dmesg parser.",
+        description: "UBSAN reported undefined behavior. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.rcu_stall.v1",
@@ -105,7 +100,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "warning",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "RCU stall detected. O3.1 dmesg parser.",
+        description: "RCU stall detected. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.lockdep.v1",
@@ -114,7 +109,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
         description: "Lockdep reported a recursive / circular / inconsistent lock-state \
-             hazard. O3.1 dmesg parser.",
+             hazard. Produced by the dmesg parser.",
     },
     SchemaDecl {
         name: "uml.watchdog_stall.v1",
@@ -122,7 +117,7 @@ pub const REGISTRY: &[SchemaDecl] = &[
         severity: "warning",
         source: "guest kernel (via dmesg parser)",
         status: "emitted",
-        description: "Soft/hard lockup watchdog fired. O3.1 dmesg parser.",
+        description: "Soft/hard lockup watchdog fired. Produced by the dmesg parser.",
     },
 ];
 

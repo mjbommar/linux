@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Private runtime types for the UML vector networking v2 rewrite.
+ * Private runtime types for the UML vector networking v2 driver.
  *
- * The v2 runtime is intentionally built in phases.  This header gives each
- * phase named ownership boundaries without exposing partially implemented
- * driver state as public API.
+ * This header keeps ownership boundaries internal without exposing driver
+ * state as public API.
  */
 #ifndef __UM_VECTOR2_INTERNAL_H
 #define __UM_VECTOR2_INTERNAL_H
@@ -150,15 +149,15 @@ void um_vec2_fd_close(struct um_vec2_dev *vdev);
 /*
  * KUnit-only fault injector: when set to a non-negative value, the next
  * call to um_vec2_fd_channel_open() whose channel index matches will
- * return -EIO before allocating any host resources.  Used to exercise
- * the partial-open unwind path that B1 fixed.  Set to -1 to disarm.
+ * return -EIO before allocating any host resources. Used to exercise
+ * the partial-open unwind path. Set to -1 to disarm.
  */
 extern int um_vec2_fd_fault_index;
 #endif
 int um_vec2_tap_open(struct um_vec2_dev *vdev);
 int um_vec2_tap_attach_fd(struct um_vec2_dev *vdev, int fd);
 void um_vec2_tap_close(struct um_vec2_dev *vdev);
-/* Memo 09 Phase 2.2: re-bind to a different host TAP name. */
+/* Re-bind to a different host TAP name. */
 int um_vec2_tap_reopen_for_pool_member(struct net_device *dev,
 				       const char *new_ifname);
 

@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Workstream B-04: UML .text section split — mprotect helpers and
- * init-time finalization.
+ * UML .text section split: mprotect helpers and init-time finalization.
  *
  * Layout delivered by arch/um/kernel/{uml,dyn}.lds.S:
  *
- *   __start_text_frozen .. __end_text_frozen        — the bulk of
+ *   __start_text_frozen .. __end_text_frozen        - the bulk of
  *       kernel .text; mapped RX by the host ELF loader, stays RX.
- *   __start_um_patch_text .. __end_um_patch_text    — a distinct
+ *   __start_um_patch_text .. __end_um_patch_text    - a distinct
  *       page-aligned range holding runtime-patchable code (static
  *       branch call sites, mcount stubs, kprobe insertion points).
- *       Currently empty; workstream C or a follow-up will populate
- *       it via the __patchable_function attribute.
+ *       Populated by code that needs runtime text patching.
  *
  * UML kernel .text is mmap'd from the ELF binary by the host loader.
  * That loader mprotects the image RX, so no special action is needed
@@ -20,9 +18,8 @@
  * on completion. See Documentation/virt/uml/section-split.rst for the
  * full discussion.
  *
- * Today the only caller of these helpers is future code; their
- * existence makes the path trivial when workstream B-04 follow-ups
- * (jump-label JIT, ftrace patching, kprobes) land.
+ * These helpers provide common range checks and mprotect transitions for
+ * runtime text patching.
  */
 
 #include <linux/kernel.h>
@@ -35,10 +32,10 @@
 #include <asm/patchable.h>
 #include <os.h>
 
-/* A single global lock — patch operations are rare and always
- * system-serialized in practice. If a future workstream needs finer
- * granularity (e.g. per-call-site batching), it can replace this
- * with text_mutex or a similar mechanism from the generic kernel.
+/* A single global lock: patch operations are rare and always
+ * system-serialized in practice. If callers need finer granularity
+ * (e.g. per-call-site batching), this can move to text_mutex or a
+ * similar mechanism from the generic kernel.
  */
 static DEFINE_SPINLOCK(um_patch_lock);
 
@@ -66,8 +63,8 @@ static bool range_in_patchable(const void *addr, unsigned long len)
  * lives before _stext and has its own patchable sites during the
  * window between ftrace_init() and free_initmem()), the main .text,
  * .um_patch_text, .syscall_stub, and .fini. Patching callers
- * (ftrace, future kprobes) target compiled function bodies anywhere
- * in that range; the at-most-two-page invariant below is the real
+ * (ftrace, kprobes) target compiled function bodies anywhere in that
+ * range; the at-most-two-page invariant below is the real
  * safeguard against wild writes.
  */
 extern char _text[], _etext[];
@@ -126,7 +123,7 @@ int um_text_patch_begin(void *addr, unsigned long len)
 	aligned_len = end - start;
 
 	spin_lock(&um_patch_lock);
-	/* r=1, w=1, x=1 — RWX only for the duration of the poke. */
+	/* r=1, w=1, x=1; RWX only for the duration of the poke. */
 	err = os_protect_memory((void *)start, aligned_len, 1, 1, 1);
 	if (err)
 		spin_unlock(&um_patch_lock);
@@ -215,7 +212,7 @@ void um_section_split_finalize(void)
 		patch_bytes >> 10);
 }
 
-/* Silence -Wunused on a validator helper kept for future use. */
+/* Validator helper for users that need an address membership check. */
 static __maybe_unused bool um_addr_in_patchable(const void *addr)
 {
 	return addr_in_patchable(addr);

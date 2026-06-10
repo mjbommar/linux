@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Run the regrtest substrate gate twice — once under backend=seccomp,
-# once under backend=kvm-v2 — and diff the per-test results. Mid-Phase
-# D, v2 delegates everything HOT to seccomp so the outputs should be
-# bit-identical; any divergence is a v2 regression. Post-Phase D.5
-# (when v2's .vcpu_run flips), the outputs may legitimately diverge as
-# v2 fixes things seccomp can't (itimer_virtual, getrusage_split etc.)
-# — but they should never *regress* relative to seccomp.
+# Run the regrtest substrate gate twice - once under backend=seccomp,
+# once under backend=kvm-v2 - and diff the per-test results. The
+# outputs should either be bit-identical or show kvm-v2 improving on
+# seccomp-only failures; any new kvm-v2 failure is a regression.
 #
 # Usage:
 #   UML_BINARY=/path/to/uml/linux \
 #     bash tools/testing/selftests/um/regrtest-repros/run-parity-diff.sh
 #
 # Exit codes:
-#   0 — bit-identical PASS/FAIL/EXPECTED_FAIL across both backends
-#   1 — divergence (printed unified diff)
-#   2 — one or both backends couldn't run the gate at all
-#
-# Companion to run-regrtest-repros.sh (memo 29 §2.5). Lands per the
-# "v2 vs seccomp parity diff wrapper" task in the Phase D test plan.
+#   0 - bit-identical PASS/FAIL/EXPECTED_FAIL across both backends
+#   1 - divergence (printed unified diff)
+#   2 - one or both backends couldn't run the gate at all
 
 set -u
 

@@ -39,16 +39,25 @@ static struct um_vec2_dev *vector2_ethtool_test_alloc_vdev(struct kunit *test,
 }
 
 static struct net_device *
-vector2_ethtool_test_alloc_netdev(struct kunit *test, struct um_vec2_dev *vdev)
+vector2_ethtool_test_alloc_netdev_mqs(struct kunit *test,
+				       struct um_vec2_dev *vdev,
+				       unsigned int queues)
 {
 	struct net_device *dev;
 
-	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), 1, 1);
+	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), queues,
+				 queues);
 	KUNIT_ASSERT_NOT_NULL(test, dev);
 
 	um_vec2_netdev_init(vdev, dev);
 	vdev->netdev = dev;
 	return dev;
+}
+
+static struct net_device *
+vector2_ethtool_test_alloc_netdev(struct kunit *test, struct um_vec2_dev *vdev)
+{
+	return vector2_ethtool_test_alloc_netdev_mqs(test, vdev, 1);
 }
 
 static int vector2_ethtool_find_stat(struct kunit *test,
@@ -95,6 +104,13 @@ static u64 *vector2_ethtool_test_stats(struct kunit *test,
 
 	ops->get_ethtool_stats(dev, &stats, data);
 	return data;
+}
+
+static void vector2_ethtool_assert_stat_id(struct kunit *test, int stat,
+					   unsigned int count)
+{
+	KUNIT_ASSERT_GE(test, stat, 0);
+	KUNIT_ASSERT_LT(test, stat, (int)count);
 }
 
 static void vector2_ethtool_stats_stopped_test(struct kunit *test)
@@ -199,34 +215,36 @@ static void vector2_ethtool_xmit_drop_stats_test(struct kunit *test)
 	free_netdev(dev);
 }
 
-static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
+struct vector2_ethtool_depth_stat_ids {
+	int tx_depth;
+	int rx_depth;
+	int queue_tx_depth[2];
+	int queue_rx_depth[2];
+};
+
+static void vector2_ethtool_attach_test_channels(struct kunit *test,
+						 struct um_vec2_dev *vdev,
+						 unsigned int count,
+						 unsigned int depth)
 {
-	struct um_vec2_dev *vdev = vector2_ethtool_test_alloc_vdev(test, 3);
-	struct net_device *dev = vector2_ethtool_test_alloc_netdev(test, vdev);
 	struct um_vec2_channel *channels;
 	struct um_vec2_queue_pair *queues;
 	struct um_vec2_tx_desc *tx_desc;
 	struct um_vec2_rx_slot *rx_slot;
-	unsigned int count;
-	int tx_depth;
-	int rx_depth;
-	int q0_tx_depth;
-	int q1_tx_depth;
-	int q0_rx_depth;
-	int q1_rx_depth;
-	u64 *data;
 	unsigned int i;
 
-	channels = kunit_kcalloc(test, 2, sizeof(*channels), GFP_KERNEL);
-	queues = kunit_kcalloc(test, 2, sizeof(*queues), GFP_KERNEL);
-	tx_desc = kunit_kcalloc(test, 4, sizeof(*tx_desc), GFP_KERNEL);
-	rx_slot = kunit_kcalloc(test, 4, sizeof(*rx_slot), GFP_KERNEL);
+	channels = kunit_kcalloc(test, count, sizeof(*channels), GFP_KERNEL);
+	queues = kunit_kcalloc(test, count, sizeof(*queues), GFP_KERNEL);
+	tx_desc = kunit_kcalloc(test, count * depth, sizeof(*tx_desc),
+				GFP_KERNEL);
+	rx_slot = kunit_kcalloc(test, count * depth, sizeof(*rx_slot),
+				GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, channels);
 	KUNIT_ASSERT_NOT_NULL(test, queues);
 	KUNIT_ASSERT_NOT_NULL(test, tx_desc);
 	KUNIT_ASSERT_NOT_NULL(test, rx_slot);
 
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < count; i++) {
 		channels[i].vdev = vdev;
 		channels[i].index = i;
 		channels[i].queue = &queues[i];
@@ -234,44 +252,67 @@ static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
 		spin_lock_init(&queues[i].rx_lock);
 		KUNIT_ASSERT_EQ(test,
 				um_vec2_tx_ring_init(&queues[i].tx,
-						     &tx_desc[i * 2], 2), 0);
+						     &tx_desc[i * depth],
+						     depth),
+				0);
 		KUNIT_ASSERT_EQ(test,
 				um_vec2_rx_batch_init(&queues[i].rx,
-						      &rx_slot[i * 2], 2), 0);
+						      &rx_slot[i * depth],
+						      depth),
+				0);
 	}
 	vdev->channels = channels;
-	vdev->num_channels = 2;
+	vdev->num_channels = count;
+}
 
+static void
+vector2_ethtool_find_depth_stats(struct kunit *test, struct net_device *dev,
+				 unsigned int count,
+				 struct vector2_ethtool_depth_stat_ids *ids)
+{
+	ids->tx_depth = vector2_ethtool_find_stat(test, dev, "tx_ring_depth");
+	ids->rx_depth = vector2_ethtool_find_stat(test, dev, "rx_batch_depth");
+	ids->queue_tx_depth[0] =
+		vector2_ethtool_find_stat(test, dev, "queue0_tx_ring_depth");
+	ids->queue_tx_depth[1] =
+		vector2_ethtool_find_stat(test, dev, "queue1_tx_ring_depth");
+	ids->queue_rx_depth[0] =
+		vector2_ethtool_find_stat(test, dev, "queue0_rx_batch_depth");
+	ids->queue_rx_depth[1] =
+		vector2_ethtool_find_stat(test, dev, "queue1_rx_batch_depth");
+
+	vector2_ethtool_assert_stat_id(test, ids->tx_depth, count);
+	vector2_ethtool_assert_stat_id(test, ids->rx_depth, count);
+	vector2_ethtool_assert_stat_id(test, ids->queue_tx_depth[0], count);
+	vector2_ethtool_assert_stat_id(test, ids->queue_tx_depth[1], count);
+	vector2_ethtool_assert_stat_id(test, ids->queue_rx_depth[0], count);
+	vector2_ethtool_assert_stat_id(test, ids->queue_rx_depth[1], count);
+}
+
+static void
+vector2_ethtool_expect_depth_stats(struct kunit *test, const u64 *data,
+				   const struct vector2_ethtool_depth_stat_ids *ids)
+{
+	KUNIT_EXPECT_EQ(test, data[ids->tx_depth], 4ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->rx_depth], 4ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->queue_tx_depth[0]], 2ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->queue_tx_depth[1]], 2ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->queue_rx_depth[0]], 2ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->queue_rx_depth[1]], 2ULL);
+}
+
+static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_ethtool_test_alloc_vdev(test, 3);
+	struct net_device *dev = vector2_ethtool_test_alloc_netdev(test, vdev);
+	struct vector2_ethtool_depth_stat_ids ids;
+	unsigned int count;
+	u64 *data;
+
+	vector2_ethtool_attach_test_channels(test, vdev, 2, 2);
 	data = vector2_ethtool_test_stats(test, dev, &count);
-	tx_depth = vector2_ethtool_find_stat(test, dev, "tx_ring_depth");
-	rx_depth = vector2_ethtool_find_stat(test, dev, "rx_batch_depth");
-	q0_tx_depth = vector2_ethtool_find_stat(test, dev,
-						"queue0_tx_ring_depth");
-	q1_tx_depth = vector2_ethtool_find_stat(test, dev,
-						"queue1_tx_ring_depth");
-	q0_rx_depth = vector2_ethtool_find_stat(test, dev,
-						"queue0_rx_batch_depth");
-	q1_rx_depth = vector2_ethtool_find_stat(test, dev,
-						"queue1_rx_batch_depth");
-
-	KUNIT_ASSERT_GE(test, tx_depth, 0);
-	KUNIT_ASSERT_GE(test, rx_depth, 0);
-	KUNIT_ASSERT_GE(test, q0_tx_depth, 0);
-	KUNIT_ASSERT_GE(test, q1_tx_depth, 0);
-	KUNIT_ASSERT_GE(test, q0_rx_depth, 0);
-	KUNIT_ASSERT_GE(test, q1_rx_depth, 0);
-	KUNIT_ASSERT_LT(test, tx_depth, (int)count);
-	KUNIT_ASSERT_LT(test, rx_depth, (int)count);
-	KUNIT_ASSERT_LT(test, q0_tx_depth, (int)count);
-	KUNIT_ASSERT_LT(test, q1_tx_depth, (int)count);
-	KUNIT_ASSERT_LT(test, q0_rx_depth, (int)count);
-	KUNIT_ASSERT_LT(test, q1_rx_depth, (int)count);
-	KUNIT_EXPECT_EQ(test, data[tx_depth], 4ULL);
-	KUNIT_EXPECT_EQ(test, data[rx_depth], 4ULL);
-	KUNIT_EXPECT_EQ(test, data[q0_tx_depth], 2ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_tx_depth], 2ULL);
-	KUNIT_EXPECT_EQ(test, data[q0_rx_depth], 2ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_rx_depth], 2ULL);
+	vector2_ethtool_find_depth_stats(test, dev, count, &ids);
+	vector2_ethtool_expect_depth_stats(test, data, &ids);
 
 	vdev->channels = NULL;
 	vdev->num_channels = 0;
@@ -280,16 +321,13 @@ static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
 }
 
 /*
- * P3.2 — exercise um_vec2_get_ethtool_stats' per-queue
- * spin_lock_bh(tx_lock) + spin_lock_bh(rx_lock) paths against a live
- * fake-host-backed device.  The previous coverage built channels by
- * hand and never opened the netdev, so the locks were taken with no
- * concurrent path.  KUnit cannot easily run parallel threads in UML;
- * instead this test interleaves enqueue, partial drain via the NAPI
- * poll, ethtool stats read, and a second drain — proving the
- * spin_lock_bh path does not deadlock against an actively-served
- * queue and that the per-queue counters reflect the traffic round.
- * See audit P3.2.
+ * Exercise um_vec2_get_ethtool_stats' per-queue spin_lock_bh(tx_lock)
+ * and spin_lock_bh(rx_lock) paths against a live fake-host-backed
+ * device. KUnit cannot easily run parallel threads in UML, so this
+ * test interleaves enqueue, partial drain via the NAPI poll, ethtool
+ * stats read, and a second drain. That proves the spin_lock_bh path
+ * does not deadlock against an actively served queue and that the
+ * per-queue counters reflect the traffic round.
  */
 struct vector2_ethtool_traffic_channel {
 	struct um_vec2_fake_host fake;
@@ -302,6 +340,91 @@ struct vector2_ethtool_traffic_ctx {
 	int fds[2];
 	struct vector2_ethtool_traffic_channel ch[2];
 };
+
+struct vector2_ethtool_traffic_stat_ids {
+	int tx_used[2];
+	int rx_received[2];
+	int tx_enqueued;
+	int rx_received_total;
+};
+
+static void vector2_ethtool_traffic_cleanup(void *data)
+{
+	struct vector2_ethtool_traffic_ctx *ctx = data;
+	unsigned int i;
+
+	if (ctx->vdev && ctx->vdev->channels) {
+		for (i = 0; i < ARRAY_SIZE(ctx->ch); i++) {
+			if (ctx->ch[i].saved_host)
+				ctx->vdev->channels[i].host =
+					ctx->ch[i].saved_host;
+		}
+	}
+
+	if (ctx->dev)
+		um_vec2_netdev_stop(ctx->dev);
+
+	for (i = 0; i < ARRAY_SIZE(ctx->fds); i++) {
+		if (ctx->fds[i] >= 0) {
+			os_close_file(ctx->fds[i]);
+			ctx->fds[i] = -1;
+		}
+	}
+
+	if (ctx->vdev)
+		ctx->vdev->netdev = NULL;
+	if (ctx->dev)
+		free_netdev(ctx->dev);
+}
+
+static void
+vector2_ethtool_traffic_attach_fake_hosts(struct vector2_ethtool_traffic_ctx *ctx)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ctx->ch); i++) {
+		um_vec2_fake_host_init(&ctx->ch[i].fake);
+		ctx->ch[i].saved_host = ctx->vdev->channels[i].host;
+		ctx->vdev->channels[i].host =
+			um_vec2_fake_host_base(&ctx->ch[i].fake);
+	}
+}
+
+static struct vector2_ethtool_traffic_ctx *
+vector2_ethtool_traffic_open(struct kunit *test)
+{
+	struct vector2_ethtool_traffic_ctx *ctx;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	ctx->fds[0] = -1;
+	ctx->fds[1] = -1;
+	KUNIT_ASSERT_EQ(test,
+			kunit_add_action_or_reset(test,
+						  vector2_ethtool_traffic_cleanup,
+						  ctx),
+			0);
+
+	ctx->vdev = vector2_ethtool_test_alloc_vdev(test, 4);
+	ctx->vdev->cfg.queues = 2;
+	ctx->vdev->cfg.transport = UM_VEC2_TRANSPORT_FD;
+
+	ctx->dev = vector2_ethtool_test_alloc_netdev_mqs(test, ctx->vdev, 2);
+	KUNIT_ASSERT_EQ(test, netif_set_real_num_tx_queues(ctx->dev, 2), 0);
+	KUNIT_ASSERT_EQ(test, netif_set_real_num_rx_queues(ctx->dev, 2), 0);
+
+	KUNIT_ASSERT_EQ(test, os_pipe(ctx->fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, ctx->fds[1], ctx->fds[0] + 1);
+	ctx->vdev->cfg.fd = ctx->fds[0];
+	ctx->vdev->cfg.has_fd = true;
+
+	KUNIT_ASSERT_EQ(test, um_vec2_netdev_open(ctx->dev), 0);
+	KUNIT_ASSERT_NOT_NULL(test, ctx->vdev->channels);
+	KUNIT_ASSERT_EQ(test, ctx->vdev->num_channels, 2U);
+
+	vector2_ethtool_traffic_attach_fake_hosts(ctx);
+	return ctx;
+}
 
 static int
 vector2_ethtool_traffic_invoke_poll(struct vector2_ethtool_traffic_ctx *ctx,
@@ -317,130 +440,119 @@ vector2_ethtool_traffic_invoke_poll(struct vector2_ethtool_traffic_ctx *ctx,
 	return ret;
 }
 
-static void vector2_ethtool_stats_during_traffic_test(struct kunit *test)
+static void
+vector2_ethtool_traffic_stage(struct kunit *test,
+			      struct vector2_ethtool_traffic_ctx *ctx)
 {
-	struct vector2_ethtool_traffic_ctx *ctx;
-	struct um_vec2_dev *vdev;
-	struct net_device *dev;
-	const struct ethtool_ops *ops;
-	struct sk_buff *skbs[2];
-	unsigned int count;
-	int q0_tx_used;
-	int q1_tx_used;
-	int q0_rx_recv;
-	int q1_rx_recv;
-	int tx_enq;
-	int rx_recv;
-	u64 *data;
 	unsigned int i;
 
-	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, ctx);
-	ctx->fds[0] = -1;
-	ctx->fds[1] = -1;
+	for (i = 0; i < ARRAY_SIZE(ctx->ch); i++) {
+		struct um_vec2_channel *channel = &ctx->vdev->channels[i];
+		struct sk_buff *skb;
 
-	vdev = vector2_ethtool_test_alloc_vdev(test, 4);
-	vdev->cfg.queues = 2;
-	vdev->cfg.transport = UM_VEC2_TRANSPORT_FD;
-	dev = alloc_etherdev_mqs(sizeof(struct um_vec2_netdev_priv), 2, 2);
-	KUNIT_ASSERT_NOT_NULL(test, dev);
-	um_vec2_netdev_init(vdev, dev);
-	vdev->netdev = dev;
-	KUNIT_ASSERT_EQ(test, netif_set_real_num_tx_queues(dev, 2), 0);
-	KUNIT_ASSERT_EQ(test, netif_set_real_num_rx_queues(dev, 2), 0);
-
-	KUNIT_ASSERT_EQ(test, os_pipe(ctx->fds, 1, 1), 0);
-	KUNIT_ASSERT_EQ(test, ctx->fds[1], ctx->fds[0] + 1);
-	vdev->cfg.fd = ctx->fds[0];
-	vdev->cfg.has_fd = true;
-
-	KUNIT_ASSERT_EQ(test, um_vec2_netdev_open(dev), 0);
-	KUNIT_ASSERT_NOT_NULL(test, vdev->channels);
-	KUNIT_ASSERT_EQ(test, vdev->num_channels, 2U);
-
-	ctx->vdev = vdev;
-	ctx->dev = dev;
-
-	for (i = 0; i < 2; i++) {
-		um_vec2_fake_host_init(&ctx->ch[i].fake);
-		ctx->ch[i].saved_host = vdev->channels[i].host;
-		vdev->channels[i].host =
-			um_vec2_fake_host_base(&ctx->ch[i].fake);
-	}
-
-	/*
-	 * Enqueue one TX per channel and push one RX per channel.
-	 * Read ethtool stats BEFORE the poll runs — the tx_lock /
-	 * rx_lock paths see populated queues and must not deadlock.
-	 */
-	for (i = 0; i < 2; i++) {
-		struct um_vec2_channel *channel = &vdev->channels[i];
-
-		skbs[i] = alloc_skb(64, GFP_KERNEL);
-		KUNIT_ASSERT_NOT_NULL(test, skbs[i]);
-		skb_put(skbs[i], 64);
+		skb = alloc_skb(64, GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, skb);
+		skb_put(skb, 64);
 		KUNIT_ASSERT_EQ(test,
 				um_vec2_tx_ring_enqueue(&channel->queue->tx,
-							skbs[i], skbs[i]->len),
+							skb, skb->len),
 				0);
 		KUNIT_ASSERT_EQ(test,
 				um_vec2_fake_host_push_rx(&ctx->ch[i].fake, 64),
 				0);
 	}
+}
 
-	ops = dev->ethtool_ops;
-	data = vector2_ethtool_test_stats(test, dev, &count);
-	q0_tx_used = vector2_ethtool_find_stat(test, dev, "queue0_tx_ring_used");
-	q1_tx_used = vector2_ethtool_find_stat(test, dev, "queue1_tx_ring_used");
-	q0_rx_recv = vector2_ethtool_find_stat(test, dev,
-					       "queue0_rx_batch_received_total");
-	q1_rx_recv = vector2_ethtool_find_stat(test, dev,
-					       "queue1_rx_batch_received_total");
-	tx_enq = vector2_ethtool_find_stat(test, dev, "tx_ring_enqueued");
-	rx_recv = vector2_ethtool_find_stat(test, dev,
-					    "rx_batch_received_total");
-	KUNIT_ASSERT_GE(test, q0_tx_used, 0);
-	KUNIT_ASSERT_GE(test, q1_tx_used, 0);
-	KUNIT_ASSERT_GE(test, q0_rx_recv, 0);
-	KUNIT_ASSERT_GE(test, q1_rx_recv, 0);
-	KUNIT_ASSERT_GE(test, tx_enq, 0);
-	KUNIT_ASSERT_GE(test, rx_recv, 0);
+static void
+vector2_ethtool_traffic_find_stats(struct kunit *test, struct net_device *dev,
+				   unsigned int count,
+				   struct vector2_ethtool_traffic_stat_ids *ids)
+{
+	ids->tx_used[0] = vector2_ethtool_find_stat(test, dev,
+						    "queue0_tx_ring_used");
+	ids->tx_used[1] = vector2_ethtool_find_stat(test, dev,
+						    "queue1_tx_ring_used");
+	ids->rx_received[0] =
+		vector2_ethtool_find_stat(test, dev,
+					  "queue0_rx_batch_received_total");
+	ids->rx_received[1] =
+		vector2_ethtool_find_stat(test, dev,
+					  "queue1_rx_batch_received_total");
+	ids->tx_enqueued = vector2_ethtool_find_stat(test, dev,
+						     "tx_ring_enqueued");
+	ids->rx_received_total =
+		vector2_ethtool_find_stat(test, dev,
+					  "rx_batch_received_total");
 
-	/* Pre-poll: TX rings populated, RX not yet drained. */
-	KUNIT_EXPECT_EQ(test, data[q0_tx_used], 1ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_tx_used], 1ULL);
-	KUNIT_EXPECT_GE(test, data[tx_enq], 2ULL);
+	vector2_ethtool_assert_stat_id(test, ids->tx_used[0], count);
+	vector2_ethtool_assert_stat_id(test, ids->tx_used[1], count);
+	vector2_ethtool_assert_stat_id(test, ids->rx_received[0], count);
+	vector2_ethtool_assert_stat_id(test, ids->rx_received[1], count);
+	vector2_ethtool_assert_stat_id(test, ids->tx_enqueued, count);
+	vector2_ethtool_assert_stat_id(test, ids->rx_received_total, count);
+}
+
+static void
+vector2_ethtool_expect_traffic_queued(struct kunit *test, const u64 *data,
+				      const struct vector2_ethtool_traffic_stat_ids *ids)
+{
+	KUNIT_EXPECT_EQ(test, data[ids->tx_used[0]], 1ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->tx_used[1]], 1ULL);
+	KUNIT_EXPECT_GE(test, data[ids->tx_enqueued], 2ULL);
+}
+
+static void
+vector2_ethtool_expect_channel0_drained(struct kunit *test, const u64 *data,
+					const struct vector2_ethtool_traffic_stat_ids *ids)
+{
+	KUNIT_EXPECT_EQ(test, data[ids->tx_used[0]], 0ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->tx_used[1]], 1ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->rx_received[0]], 1ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->rx_received[1]], 0ULL);
+}
+
+static void
+vector2_ethtool_expect_all_drained(struct kunit *test, const u64 *data,
+				   const struct vector2_ethtool_traffic_stat_ids *ids)
+{
+	KUNIT_EXPECT_EQ(test, data[ids->tx_used[0]], 0ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->tx_used[1]], 0ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->rx_received[0]], 1ULL);
+	KUNIT_EXPECT_EQ(test, data[ids->rx_received[1]], 1ULL);
+	KUNIT_EXPECT_GE(test, data[ids->rx_received_total], 2ULL);
+}
+
+static void vector2_ethtool_stats_during_traffic_test(struct kunit *test)
+{
+	struct vector2_ethtool_traffic_stat_ids ids;
+	struct vector2_ethtool_traffic_ctx *ctx =
+		vector2_ethtool_traffic_open(test);
+	unsigned int count;
+	u64 *data;
+
+	/*
+	 * Enqueue one TX per channel and push one RX per channel.
+	 * Read ethtool stats BEFORE the poll runs; the tx_lock /
+	 * rx_lock paths see populated queues and must not deadlock.
+	 */
+	vector2_ethtool_traffic_stage(test, ctx);
+	data = vector2_ethtool_test_stats(test, ctx->dev, &count);
+	vector2_ethtool_traffic_find_stats(test, ctx->dev, count, &ids);
+
+	/* Before RX drain: TX rings are populated. */
+	vector2_ethtool_expect_traffic_queued(test, data, &ids);
 
 	/* Drain channel 0 only, then re-read stats. */
 	KUNIT_EXPECT_EQ(test, vector2_ethtool_traffic_invoke_poll(ctx, 0, 4), 1);
 
-	data = vector2_ethtool_test_stats(test, dev, &count);
-	KUNIT_EXPECT_EQ(test, data[q0_tx_used], 0ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_tx_used], 1ULL);
-	KUNIT_EXPECT_EQ(test, data[q0_rx_recv], 1ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_rx_recv], 0ULL);
+	data = vector2_ethtool_test_stats(test, ctx->dev, &count);
+	vector2_ethtool_expect_channel0_drained(test, data, &ids);
 
 	/* Drain channel 1 and confirm final stats. */
 	KUNIT_EXPECT_EQ(test, vector2_ethtool_traffic_invoke_poll(ctx, 1, 4), 1);
 
-	data = vector2_ethtool_test_stats(test, dev, &count);
-	KUNIT_EXPECT_EQ(test, data[q0_tx_used], 0ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_tx_used], 0ULL);
-	KUNIT_EXPECT_EQ(test, data[q0_rx_recv], 1ULL);
-	KUNIT_EXPECT_EQ(test, data[q1_rx_recv], 1ULL);
-	KUNIT_EXPECT_GE(test, data[rx_recv], 2ULL);
-
-	/* Restore real hosts for the close path's release callbacks. */
-	for (i = 0; i < 2; i++)
-		vdev->channels[i].host = ctx->ch[i].saved_host;
-
-	um_vec2_netdev_stop(dev);
-	if (ctx->fds[0] >= 0)
-		os_close_file(ctx->fds[0]);
-	if (ctx->fds[1] >= 0)
-		os_close_file(ctx->fds[1]);
-	vdev->netdev = NULL;
-	free_netdev(dev);
+	data = vector2_ethtool_test_stats(test, ctx->dev, &count);
+	vector2_ethtool_expect_all_drained(test, data, &ids);
 }
 
 static struct kunit_case vector2_ethtool_test_cases[] = {

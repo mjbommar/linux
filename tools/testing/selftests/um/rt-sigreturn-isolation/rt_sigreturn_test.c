@@ -1,33 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Path A from Documentation/virt/uml/redesign/06-sequencing/
- * post-2026-05-21-three-test-paths.md §1.2.
+ * Host-only test for the atomic stack-and-control swap primitive.
+ * From inside a deep C call chain, the primitive switches to a fresh
+ * stack and jumps to a clean entry function. It leaves the inherited
+ * stack behind without executing `ret` against any saved-RIP slots.
  *
- * Validates the "atomic stack-and-control swap" primitive that
- * UML's pool-member work needs to escape the v1 ceiling.  The
- * primitive: from inside an arbitrary deep C call chain, switch
- * to a fresh stack and jump to a clean entry function, leaving
- * the inherited (possibly corrupted) kernel stack behind without
- * ever executing `ret` against any of its saved-RIP slots.
- *
- * Original plan called this an `rt_sigreturn`-based test (the
- * CRIU pattern).  Empirically, hand-constructed rt_sigframes are
- * fragile against host-kernel layout drift (the kernel rejected
- * our first frame with SEGV at NULL; segment / FS_BASE / GS_BASE
- * are easy to get wrong).  And rt_sigreturn isn't strictly
- * necessary for what UML needs — the goal is "leave the stack
- * behind," not "atomically restore registers."  Pure inline asm
- * that pivots %rsp and jmpq's into the target achieves the same.
- *
- * For comparison: glibc's setcontext() uses rt_sigprocmask plus
- * a manual register reload — NOT rt_sigreturn (verified via
- * strace).  So the in-tree EXTERNAL-RESEARCH §4 recommendation
- * to use rt_sigreturn was a guess at how CRIU does it; CRIU's
- * userspace restorer does, but glibc's API-level escape doesn't.
+ * The test uses pure inline asm rather than a hand-built rt_sigframe:
+ * `movq new_rsp, %rsp; jmpq *entry`.
  *
  *   1. main() recurses ~20 frames deep to mimic the
  *      "syscall_handler -> vfs_write -> ... -> fork_on_resume_loop"
- *      shape UML hits.  Saved RIPs on the stack should be
+ *      shape UML hits. Saved RIPs on the stack should be
  *      irrelevant once we pivot.
  *   2. At the bottom of the recursion, call build_frame_and_jump
  *      which does inline `movq new_rsp, %rsp; jmpq *entry`.
@@ -62,7 +45,7 @@
 static char alt_stack[64 * 1024] __attribute__((aligned(16)));
 
 /*
- * Forward decl — clean_entry is the post-pivot landing.
+ * Forward decl: clean_entry is the post-pivot landing.
  * Marked noreturn because it _exit()s; the compiler is happy not
  * to allocate a stack frame at the entry point as long as we
  * make sure we never call it the C way.
@@ -79,14 +62,14 @@ static const char trampoline_msg[] = "about to pivot stack\n";
  * clean_entry runs on the fresh alt_stack.
  *
  * %rsp alignment: x86_64 ABI says %rsp at function entry is
- * (16N + 8) — the 8 is the CALL-pushed return address.  Since
+ * (16N + 8): the 8 is the CALL-pushed return address. Since
  * we jmpq (no CALL), we need %rsp to be 16-byte aligned at
  * function entry instead.  Adjust accordingly.
  *
  * Register clobbers: we leave segment registers, FS_BASE,
  * GS_BASE alone (TLS continues to work).  We zero RBP so
  * stack-unwinders see a clean root.  RAX/RCX/RDX are caller-
- * saved per the ABI — clean_entry restores them as needed.
+ * saved per the ABI; clean_entry restores them as needed.
  */
 static void __attribute__((noinline, noreturn))
 build_frame_and_jump(void)
@@ -114,8 +97,7 @@ static void clean_entry(void)
 }
 
 /*
- * Mimic deep call chain — UML's hot path is ~5+ frames deep when
- * it hits the v1-ceiling crash.  Recurse 20 levels.  Marked
+ * Mimic a deep call chain. Recurse 20 levels. Marked
  * noinline + volatile sentinel so the compiler can't fold the
  * recursion away.
  */

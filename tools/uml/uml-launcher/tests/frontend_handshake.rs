@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Real vhost-user frontend handshake test (workstream C-10 v2).
+// Real vhost-user frontend handshake test.
 //
 // Drives an actual `vhost::vhost_user::Frontend` against a
 // spawned `uml-launcher backend console --socket …`

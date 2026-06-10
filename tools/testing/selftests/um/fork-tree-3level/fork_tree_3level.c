@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // Minimal reproducer for the v2 "exit_code=255 after grandchild
-// reap" bug (memo §E.4 follow-up; underlies #95, #96, and the
-// substrate gate truncation).
+// reap" fork-state regression.
 //
 // Trigger: a 3-level process tree where the middle process forks
 // a child, waits for it, and exits cleanly. The kernel's do_exit
 // path reports the parent's group_exit_code as 0xff (255) instead
-// of 0 — only on kvm-v2, only on this exact shape. Two-level trees
+// of 0 on kvm-v2 with this exact shape. Two-level trees
 // and 3-level trees without the middle wait both work fine.
 //
 // Run from a shell init script under UML so init (PID 1) is the

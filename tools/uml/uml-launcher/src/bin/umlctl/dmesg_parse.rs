@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // dmesg_parse — convert kernel printk splats in `kernel.log`
-// into structured events.jsonl records. Phase O3.1 of the
-// observability spine (Documentation/virt/uml/redesign/
-// 08-future-phases/13-uml-observability-spine.md).
+// into structured events.jsonl records.
 //
 // This is a transitional path: the upstream direction is to
 // add tracepoints inside each sanitizer's report path so
@@ -199,8 +197,7 @@ pub fn classify_line(payload: &str) -> Option<SplatKind> {
 
 /// Extract the free-form message portion after the leading
 /// token. Used for the `message` field in the emitted event
-/// body so operators can see what matched without re-reading
-/// kernel.log.
+/// body so users can see what matched without re-reading kernel.log.
 fn extract_message(kind: SplatKind, payload: &str) -> String {
     let body = match kind {
         SplatKind::Kasan | SplatKind::Kfence | SplatKind::Kcsan | SplatKind::Kmsan => {

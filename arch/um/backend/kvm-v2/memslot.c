@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML backend v2 (KVM) — Phase B.1: memslot allocator + lookup.
+ * KVM backend memslot allocator and lookup helpers.
  *
- * Per memo 26 §B.1. This TU owns the per-VM list of registered memslots
- * and the bitmap that hands out KVM_SET_USER_MEMORY_REGION slot ids.
- * It does NOT issue any KVM ioctl — the wiring of mm_region_added /
- * mm_region_removed onto KVM_SET_USER_MEMORY_REGION lands in B.2/B.3,
- * and CR3 / mmu_notifier work in B.5/B.6. Until then the allocator is
- * reachable but unused; B.2 turns it on.
+ * This file owns the per-VM list of registered memslots and the bitmap
+ * that hands out KVM_SET_USER_MEMORY_REGION slot ids. It does not issue
+ * KVM ioctls; callers own the ioctl sequencing.
  *
  * Why a bitmap and not e.g. an idr / xarray:
  *   The slot-id space is small (KVM_V2_MAX_USER_MEM_SLOTS == 32767),
@@ -15,29 +12,25 @@
  *   it in well under a minute of fork/exec churn). A flat bitmap fits
  *   in 4 KiB and gives O(slots) allocation with cache-friendly scans.
  *   idr would allocate per-id, xarray would over-engineer for the
- *   workload. v1 archive's policy-A "one giant slot" model used no
- *   allocator at all; B.1 is the first commit where we need one.
+ *   workload.
  *
  * Why list_head, not a hash/tree:
- *   Phase B's lookup-by-GPA traffic is dominated by exit-handler paths
- *   that already do per-region bookkeeping (mm_region_added/removed
- *   are "build a region object, hand it to the backend" calls — one
- *   per drained TLB entry). At the densities memo 26 anticipates
- *   (hundreds of regions per running mm, not tens of thousands) a
- *   linear list under spinlock is simpler than a tree and avoids the
- *   GPA-overlap edge cases a tree would force us to encode in keys.
- *   If profiling later shows the list is hot, B.1's struct-shape +
- *   alloc/free API are stable enough to swap in a maple tree without
- *   touching B.2-B.6.
+ *   Lookup-by-GPA traffic is dominated by exit-handler paths that
+ *   already do per-region bookkeeping (mm_region_added/removed
+ *   are "build a region object, hand it to the backend" calls; one
+ *   per drained TLB entry). At expected densities (hundreds of regions
+ *   per running mm, not tens of thousands) a
+ *   linear list under spinlock is simpler than a tree and avoids forcing
+ *   GPA-overlap policy into tree keys.
+ *   The alloc/free API keeps the backing data structure private to
+ *   this file.
  *
- * Locking: every public function in this TU acquires vm->lock. Callers
- *   (B.2's mm_region_added wiring, B.6's mmu_notifier validator) must
- *   NOT hold vm->lock when calling in. Inside this TU we use
- *   scoped_guard(spinlock, &vm->lock) per memo 27 Part E ("kernel
- *   idioms first") — the spin_lock_irqsave dance is unnecessary
- *   because the only contention is between the (kernel-thread) tlb
- *   drain path and v2's eventual exit handler; neither runs from
- *   hard-irq context.
+ * Locking: every public function in this file acquires vm->lock.
+ *   Callers must not hold vm->lock when calling in. This file uses
+ *   scoped_guard(spinlock, &vm->lock); spin_lock_irqsave is
+ *   unnecessary because the only contention is between the kernel
+ *   thread TLB drain path and v2's exit handler, neither of which runs
+ *   from hard-irq context.
  */
 
 #include <linux/bitmap.h>
@@ -104,7 +97,7 @@ int kvm_v2_memslot_add(struct kvm_v2_vm *vm, u64 gpa, u64 host_va,
 	if (id < 0)
 		return id;
 
-	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	m = kzalloc_obj(*m, GFP_KERNEL);
 	if (!m) {
 		kvm_v2_memslot_free_id(vm, (u32)id);
 		return -ENOMEM;
@@ -168,13 +161,11 @@ struct kvm_v2_memslot *kvm_v2_memslot_lookup(struct kvm_v2_vm *vm, u64 gpa)
 		return NULL;
 
 	/*
-	 * Returning the pointer out from under the lock is safe in B.1
-	 * because the only deletion path (kvm_v2_memslot_del) is also
-	 * under vm->lock and the lookup's caller in B.2+ will be the
-	 * exit handler running on the vCPU that triggered the lookup —
-	 * the slot can't go away mid-walk. If lock-free lookup is
-	 * needed later (e.g., from mmu_notifier callback context),
-	 * convert to RCU; the API doesn't change.
+	 * Returning the pointer after dropping the lock is safe for the
+	 * current callers: deletion also takes vm->lock, and lookups run from
+	 * the vCPU exit path that owns the active memslot walk. If a caller
+	 * needs lock-free lookup, convert the list to RCU without
+	 * changing this API.
 	 */
 	scoped_guard(spinlock, &vm->lock) {
 		list_for_each_entry(m, &vm->memslots, list) {

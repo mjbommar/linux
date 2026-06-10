@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-port-forward-smoke — kselftest for `umlctl port-forward`
-# (Memo 09 Phase 4).
+# um/pool-port-forward-smoke - kselftest for `umlctl port-forward`
+# metadata.
 #
 # What it asserts:
 #   1. After taking a member with --gateway 10.7.0.1, `umlctl
@@ -15,9 +15,9 @@
 #   3. Querying without --host-port is a clap-level error (exit 2).
 #
 # The verb is metadata-only; we do NOT bind a host or guest socket
-# here because the kernel-side tap fd swap (Memo 09 Phase 2 deferred)
-# isn't wired yet.  When that lands, this selftest gains a real
-# end-to-end nc-binding-on-host + dial-from-guest assertion.
+# here because the kernel-side tap fd swap is not wired yet.  Once it
+# is available, this selftest can grow a real end-to-end
+# nc-binding-on-host plus dial-from-guest assertion.
 #
 # Exit codes: 0 PASS, 4 SKIP, 1 FAIL.
 
@@ -164,7 +164,7 @@ if [ $MISSING_RC -ne 2 ]; then
 	echo "FAIL: missing --host-port did not exit 2 (got $MISSING_RC)"
 	cat "$OUT/missing.err"; exit 1
 fi
-echo "missing --host-port → exit 2 (clap): PASS"
+echo "missing --host-port -> exit 2 (clap): PASS"
 
 echo
 echo "VERDICT: umlctl port-forward TAP-direct envelope works end-to-end"

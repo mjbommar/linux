@@ -1,8 +1,8 @@
 # umlbuild profile — "mvp": the minimum-viable UML.
 #
-# Derived from the 2026-05-23-minimum-viable-uml diary: starting from
-# `tinyconfig`, eleven explicit Kconfig flips produce a 2.4 MB stripped
-# UML binary that boots through hostfs and runs cpython-tier0.
+# Starting from `tinyconfig`, eleven explicit Kconfig flips produce a
+# 2.4 MB stripped UML binary that boots through hostfs and runs
+# cpython-tier0.
 #
 # This profile additionally builds a tiny Alpine-based ubd rootfs so
 # the resulting instance boots from /dev/ubda (not hostfs).  Total
@@ -15,8 +15,8 @@ name        = "mvp"
 description = "Minimum viable UML (2.4 MB kernel, Alpine 3.20 + python3, ubd-rooted)."
 
 # ---------------------------------------------------------------------
-# Kernel: tinyconfig + 11 forced enables (each one is required by a
-# specific boot failure documented in the diary).
+# Kernel: tinyconfig + 11 forced enables required for this profile's
+# boot and cpython-tier0 path.
 # ---------------------------------------------------------------------
 [kernel]
 base_config = "tinyconfig"

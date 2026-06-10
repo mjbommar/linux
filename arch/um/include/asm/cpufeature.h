@@ -15,8 +15,7 @@
  * supplied by a generated cpufeaturemasks.h; UML doesn't pull that
  * generator in. Stub it to zero so the short-circuit always falls
  * through to static_cpu_has() which reads boot_cpu_data (UML
- * inherits the host's CPUID bits). Workstream C-06 shim per D43
- * fifth-view.
+ * inherits the host's CPUID bits).
  */
 #ifndef DISABLED_MASK_BIT_SET
 #define DISABLED_MASK_BIT_SET(bit)	0
@@ -44,7 +43,7 @@ extern const char * const x86_bug_flags[NBUGINTS*32];
  * see if it is set in the mask word.
  */
 #define CHECK_BIT_IN_MASK_WORD(maskname, word, bit)	\
-	(((bit)>>5)==(word) && (1UL<<((bit)&31) & maskname##word ))
+	(((bit) >> 5) == (word) && (1UL << ((bit) & 31) & maskname##word))
 
 #define cpu_has(c, bit)							\
 	 test_cpu_cap(c, bit)
@@ -89,8 +88,7 @@ static __always_inline bool _static_cpu_has(u16 bit)
 {
 	asm goto("1: jmp 6f\n"
 		 "2:\n"
-		 ".skip -(((5f-4f) - (2b-1b)) > 0) * "
-			 "((5f-4f) - (2b-1b)),0x90\n"
+		 ".skip -(((5f-4f) - (2b-1b)) > 0) * ((5f-4f) - (2b-1b)),0x90\n"
 		 "3:\n"
 		 ".section .altinstructions,\"a\"\n"
 		 " .long 1b - .\n"		/* src offset */

@@ -144,7 +144,7 @@ static const char um_vec2_ethtool_stat_names
 };
 
 static const char * const um_vec2_ethtool_queue_stat_names
-	[UM_VEC2_ETHTOOL_QUEUE_STAT_MAX] = {
+		[UM_VEC2_ETHTOOL_QUEUE_STAT_MAX] = {
 	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_DEPTH] =
 		"tx_ring_depth",
 	[UM_VEC2_ETHTOOL_QUEUE_TX_RING_USED] =
@@ -167,8 +167,33 @@ static const char * const um_vec2_ethtool_queue_stat_names
 		"rx_batch_received_total",
 	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_CONSUMED_TOTAL] =
 		"rx_batch_consumed_total",
-	[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
-		"rx_batch_released_total",
+		[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
+			"rx_batch_released_total",
+	};
+
+struct um_vec2_ethtool_counter_stat {
+	enum um_vec2_ethtool_stat stat;
+	enum um_vec2_stat_counter counter;
+};
+
+static const struct um_vec2_ethtool_counter_stat um_vec2_counter_stats[] = {
+	{ UM_VEC2_ETHTOOL_STAT_OPEN_ATTEMPTS, UM_VEC2_STAT_OPEN_ATTEMPTS },
+	{ UM_VEC2_ETHTOOL_STAT_OPEN_FAILURES, UM_VEC2_STAT_OPEN_FAILURES },
+	{ UM_VEC2_ETHTOOL_STAT_CLOSES, UM_VEC2_STAT_CLOSES },
+	{ UM_VEC2_ETHTOOL_STAT_NAPI_POLLS, UM_VEC2_STAT_NAPI_POLLS },
+	{ UM_VEC2_ETHTOOL_STAT_RX_IRQS, UM_VEC2_STAT_RX_IRQS },
+	{ UM_VEC2_ETHTOOL_STAT_TX_IRQS, UM_VEC2_STAT_TX_IRQS },
+	{ UM_VEC2_ETHTOOL_STAT_TX_XMIT_CALLS, UM_VEC2_STAT_TX_XMIT_CALLS },
+	{ UM_VEC2_ETHTOOL_STAT_TX_BUSY, UM_VEC2_STAT_TX_BUSY },
+	{ UM_VEC2_ETHTOOL_STAT_TX_DROPPED, UM_VEC2_STAT_TX_DROPPED },
+	{ UM_VEC2_ETHTOOL_STAT_TX_TRANSIENT_ERRORS,
+	  UM_VEC2_STAT_TX_TRANSIENT_ERRORS },
+	{ UM_VEC2_ETHTOOL_STAT_TX_FATAL_ERRORS,
+	  UM_VEC2_STAT_TX_FATAL_ERRORS },
+	{ UM_VEC2_ETHTOOL_STAT_RX_ALLOC_ERRORS, UM_VEC2_STAT_RX_ALLOC_ERRORS },
+	{ UM_VEC2_ETHTOOL_STAT_RX_PROTO_DROPS, UM_VEC2_STAT_RX_PROTO_DROPS },
+	{ UM_VEC2_ETHTOOL_STAT_RX_FATAL_ERRORS, UM_VEC2_STAT_RX_FATAL_ERRORS },
+	{ UM_VEC2_ETHTOOL_STAT_BACKEND_DEAD, UM_VEC2_STAT_BACKEND_DEAD },
 };
 
 static unsigned int um_vec2_ethtool_queue_count(struct um_vec2_dev *vdev)
@@ -182,7 +207,7 @@ static void um_vec2_get_drvinfo(struct net_device *dev,
 				struct ethtool_drvinfo *info)
 {
 	strscpy(info->driver, UM_VEC2_DRIVER_NAME, sizeof(info->driver));
-	strscpy(info->version, "r6-ethtool-hardening", sizeof(info->version));
+	strscpy(info->version, "2", sizeof(info->version));
 	strscpy(info->bus_info, "uml", sizeof(info->bus_info));
 }
 
@@ -293,21 +318,16 @@ static int um_vec2_get_coalesce(struct net_device *dev,
 	return 0;
 }
 
-static void um_vec2_get_ethtool_stats(struct net_device *dev,
-				      struct ethtool_stats *stats, u64 *data)
+static void um_vec2_clear_ethtool_stats(u64 *data, unsigned int queues)
 {
-	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
-	struct um_vec2_channel *channel;
-	struct um_vec2_queue_pair *queue;
-	unsigned int queues;
-	unsigned int q;
-
-	mutex_lock(&vdev->lock);
-	queues = um_vec2_ethtool_queue_count(vdev);
 	memset(data, 0,
 	       sizeof(u64) * (UM_VEC2_ETHTOOL_STAT_MAX +
 			      queues * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX));
+}
 
+static void um_vec2_sample_config_stats(const struct um_vec2_dev *vdev,
+					u64 *data)
+{
 	data[UM_VEC2_ETHTOOL_STAT_LIFECYCLE_STATE] = vdev->life.state;
 	data[UM_VEC2_ETHTOOL_STAT_TRANSPORT] = vdev->cfg.transport;
 	data[UM_VEC2_ETHTOOL_STAT_HOST_MODE] = vdev->cfg.mode;
@@ -318,105 +338,118 @@ static void um_vec2_get_ethtool_stats(struct net_device *dev,
 		vdev->cfg.coalesce_usecs;
 	data[UM_VEC2_ETHTOOL_STAT_VNET_HDR] =
 		vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP;
-	data[UM_VEC2_ETHTOOL_STAT_OPEN_ATTEMPTS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS);
-	data[UM_VEC2_ETHTOOL_STAT_OPEN_FAILURES] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_FAILURES);
-	data[UM_VEC2_ETHTOOL_STAT_CLOSES] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_CLOSES);
-	data[UM_VEC2_ETHTOOL_STAT_NAPI_POLLS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_NAPI_POLLS);
-	data[UM_VEC2_ETHTOOL_STAT_RX_IRQS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_RX_IRQS);
-	data[UM_VEC2_ETHTOOL_STAT_TX_IRQS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_TX_IRQS);
-	data[UM_VEC2_ETHTOOL_STAT_TX_XMIT_CALLS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_TX_XMIT_CALLS);
-	data[UM_VEC2_ETHTOOL_STAT_TX_BUSY] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_TX_BUSY);
-	data[UM_VEC2_ETHTOOL_STAT_TX_DROPPED] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_TX_DROPPED);
-	data[UM_VEC2_ETHTOOL_STAT_TX_TRANSIENT_ERRORS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_TX_TRANSIENT_ERRORS);
-	data[UM_VEC2_ETHTOOL_STAT_TX_FATAL_ERRORS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_TX_FATAL_ERRORS);
-	data[UM_VEC2_ETHTOOL_STAT_RX_ALLOC_ERRORS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_RX_ALLOC_ERRORS);
-	data[UM_VEC2_ETHTOOL_STAT_RX_PROTO_DROPS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_RX_PROTO_DROPS);
-	data[UM_VEC2_ETHTOOL_STAT_RX_FATAL_ERRORS] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_RX_FATAL_ERRORS);
-	data[UM_VEC2_ETHTOOL_STAT_BACKEND_DEAD] =
-		um_vec2_stat_read(vdev, UM_VEC2_STAT_BACKEND_DEAD);
+}
+
+static void um_vec2_sample_counter_stats(const struct um_vec2_dev *vdev,
+					 u64 *data)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(um_vec2_counter_stats); i++)
+		data[um_vec2_counter_stats[i].stat] =
+			um_vec2_stat_read(vdev, um_vec2_counter_stats[i].counter);
+}
+
+static u64 *um_vec2_queue_stat_data(u64 *data, unsigned int q)
+{
+	return data + UM_VEC2_ETHTOOL_STAT_MAX +
+	       q * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX;
+}
+
+static void um_vec2_sample_tx_stats(struct um_vec2_queue_pair *queue,
+				    u64 *data, u64 *qdata)
+{
+	spin_lock_bh(&queue->tx_lock);
+	data[UM_VEC2_ETHTOOL_STAT_TX_RING_DEPTH] += queue->tx.depth;
+	data[UM_VEC2_ETHTOOL_STAT_TX_RING_USED] += queue->tx.count;
+	data[UM_VEC2_ETHTOOL_STAT_TX_RING_MAX_USED] += queue->tx.max_count;
+	data[UM_VEC2_ETHTOOL_STAT_TX_RING_ENQUEUED] += queue->tx.enqueued;
+	data[UM_VEC2_ETHTOOL_STAT_TX_RING_COMPLETED] += queue->tx.completed;
+	data[UM_VEC2_ETHTOOL_STAT_TX_RING_RELEASED] += queue->tx.released;
+
+	if (qdata) {
+		qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_DEPTH] = queue->tx.depth;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_USED] = queue->tx.count;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_MAX_USED] =
+			queue->tx.max_count;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_ENQUEUED] =
+			queue->tx.enqueued;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_COMPLETED] =
+			queue->tx.completed;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_RELEASED] =
+			queue->tx.released;
+	}
+	spin_unlock_bh(&queue->tx_lock);
+}
+
+static void um_vec2_sample_rx_stats(struct um_vec2_queue_pair *queue,
+				    u64 *data, u64 *qdata)
+{
+	spin_lock_bh(&queue->rx_lock);
+	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_DEPTH] += queue->rx.depth;
+	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_FILLED] += queue->rx.filled;
+	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_PREPARED_TOTAL] +=
+		queue->rx.prepared_total;
+	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RECEIVED_TOTAL] +=
+		queue->rx.received_total;
+	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_CONSUMED_TOTAL] +=
+		queue->rx.consumed_total;
+	data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RELEASED_TOTAL] +=
+		queue->rx.released_total;
+
+	if (qdata) {
+		qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_DEPTH] = queue->rx.depth;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_FILLED] = queue->rx.filled;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_PREPARED_TOTAL] =
+			queue->rx.prepared_total;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RECEIVED_TOTAL] =
+			queue->rx.received_total;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_CONSUMED_TOTAL] =
+			queue->rx.consumed_total;
+		qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
+			queue->rx.released_total;
+	}
+	spin_unlock_bh(&queue->rx_lock);
+}
+
+static void um_vec2_sample_channel_stats(struct um_vec2_channel *channel,
+					 u64 *data, unsigned int queues)
+{
+	struct um_vec2_queue_pair *queue = channel->queue;
+	u64 *qdata = NULL;
+
+	if (!queue)
+		return;
+	if (channel->index < queues)
+		qdata = um_vec2_queue_stat_data(data, channel->index);
+
+	um_vec2_sample_tx_stats(queue, data, qdata);
+	um_vec2_sample_rx_stats(queue, data, qdata);
+}
+
+static void um_vec2_sample_queue_stats(struct um_vec2_dev *vdev, u64 *data,
+				       unsigned int queues)
+{
+	struct um_vec2_channel *channel;
 
 	for (channel = vdev->channels;
 	     channel && channel < vdev->channels + vdev->num_channels;
-	     channel++) {
-		queue = channel->queue;
-		if (!queue)
-			continue;
+	     channel++)
+		um_vec2_sample_channel_stats(channel, data, queues);
+}
 
-		q = channel->index;
-		spin_lock_bh(&queue->tx_lock);
-		data[UM_VEC2_ETHTOOL_STAT_TX_RING_DEPTH] += queue->tx.depth;
-		data[UM_VEC2_ETHTOOL_STAT_TX_RING_USED] += queue->tx.count;
-		data[UM_VEC2_ETHTOOL_STAT_TX_RING_MAX_USED] +=
-			queue->tx.max_count;
-		data[UM_VEC2_ETHTOOL_STAT_TX_RING_ENQUEUED] +=
-			queue->tx.enqueued;
-		data[UM_VEC2_ETHTOOL_STAT_TX_RING_COMPLETED] +=
-			queue->tx.completed;
-		data[UM_VEC2_ETHTOOL_STAT_TX_RING_RELEASED] +=
-			queue->tx.released;
-		if (q < queues) {
-			u64 *qdata = data + UM_VEC2_ETHTOOL_STAT_MAX +
-				     q * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX;
+static void um_vec2_get_ethtool_stats(struct net_device *dev,
+				      struct ethtool_stats *stats, u64 *data)
+{
+	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+	unsigned int queues;
 
-			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_DEPTH] =
-				queue->tx.depth;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_USED] =
-				queue->tx.count;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_MAX_USED] =
-				queue->tx.max_count;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_ENQUEUED] =
-				queue->tx.enqueued;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_COMPLETED] =
-				queue->tx.completed;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_TX_RING_RELEASED] =
-				queue->tx.released;
-		}
-		spin_unlock_bh(&queue->tx_lock);
-
-		spin_lock_bh(&queue->rx_lock);
-		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_DEPTH] += queue->rx.depth;
-		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_FILLED] += queue->rx.filled;
-		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_PREPARED_TOTAL] +=
-			queue->rx.prepared_total;
-		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RECEIVED_TOTAL] +=
-			queue->rx.received_total;
-		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_CONSUMED_TOTAL] +=
-			queue->rx.consumed_total;
-		data[UM_VEC2_ETHTOOL_STAT_RX_BATCH_RELEASED_TOTAL] +=
-			queue->rx.released_total;
-		if (q < queues) {
-			u64 *qdata = data + UM_VEC2_ETHTOOL_STAT_MAX +
-				     q * UM_VEC2_ETHTOOL_QUEUE_STAT_MAX;
-
-			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_DEPTH] =
-				queue->rx.depth;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_FILLED] =
-				queue->rx.filled;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_PREPARED_TOTAL] =
-				queue->rx.prepared_total;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RECEIVED_TOTAL] =
-				queue->rx.received_total;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_CONSUMED_TOTAL] =
-				queue->rx.consumed_total;
-			qdata[UM_VEC2_ETHTOOL_QUEUE_RX_BATCH_RELEASED_TOTAL] =
-				queue->rx.released_total;
-		}
-		spin_unlock_bh(&queue->rx_lock);
-	}
+	mutex_lock(&vdev->lock);
+	queues = um_vec2_ethtool_queue_count(vdev);
+	um_vec2_clear_ethtool_stats(data, queues);
+	um_vec2_sample_config_stats(vdev, data);
+	um_vec2_sample_counter_stats(vdev, data);
+	um_vec2_sample_queue_stats(vdev, data, queues);
 
 	mutex_unlock(&vdev->lock);
 }

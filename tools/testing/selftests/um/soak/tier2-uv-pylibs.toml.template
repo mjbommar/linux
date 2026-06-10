@@ -20,8 +20,7 @@ TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
 HOME = "/home/mjbommar"
 
-# Phase J Tier 2 — pre-built venv Python C-extension exercise.
-# Spec: phase-J-design-2026-05-07.md §3.2 (post-uv-swap).
+# Tier 2: pre-built uv virtualenv Python package exercise.
 #
 # Originally designed around `uv run --with <pkg>` per invocation,
 # but uv's offline resolver was unreliable inside UML (the simple
@@ -29,15 +28,12 @@ HOME = "/home/mjbommar"
 # cached wheels). Switched to a pre-built persistent venv: `uv
 # venv` + `uv pip install` once on the host produces a ~ 70 MB
 # self-contained venv at ~/.cache/uml-soak-tier2-venv. The
-# template invokes that venv's `python` directly — no resolver
+# template invokes that venv's `python` directly: no resolver
 # work, no network, no cache traversal at run time.
 #
-# The #17 numpy-after-cryptography import-chain pathology is
-# sidestepped by-construction: this venv doesn't include
-# cryptography (that's Tier 1's territory), so the trigger sequence
-# never fires. If a future Tier 2 ever needs both, run them as
-# separate Python invocations OR install cryptography in this same
-# venv and verify the import order from a clean venv works.
+# Import-order problems are sidestepped by construction: this venv does
+# not include cryptography, so numpy is exercised independently from the
+# Tier 1 OpenSSL binding test.
 #
 # Bootstrap (one-time, host-side; documented in soak/README.md):
 #
@@ -65,9 +61,8 @@ expect = ""
 timeout_secs = 0
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt in; they require host-side reservation.
+# Cgroup limits opt in; they require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

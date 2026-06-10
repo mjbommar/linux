@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/kmsan-smoke/run-kmsan-smoke.sh — host-side launcher
-# for the KMSAN bring-up regression guard (workstream C-07).
+# um/kmsan-smoke/run-kmsan-smoke.sh - host-side launcher
+# for the KMSAN regression guard.
 #
 # Boots a UML binary built with CONFIG_KMSAN=y under clang
 # (LLVM=1 research or research-kmsan profile), runs
@@ -20,7 +20,7 @@
 # Environment:
 #   UML_BINARY  path to a KMSAN-enabled UML binary.
 #               Default: /tmp/uml-research-kmsan/linux
-#   UML_MEM     mem=N (default 512M — KMSAN triples RSS for
+#   UML_MEM     mem=N (default 512M; KMSAN triples RSS for
 #               touched pages; 256M boots but OOMs during
 #               stack_depot_init on some runners).
 

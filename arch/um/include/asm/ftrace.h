@@ -3,20 +3,20 @@
 #define __ASM_UM_FTRACE_H
 
 /*
- * UML function tracer arch bits (workstream C-05).
+ * UML function tracer arch bits.
  *
- * UML uses -fpatchable-function-entry=5,0 (decisions-log D29) rather
- * than -pg -mfentry + recordmcount, because UML's -mcmodel=large
+ * UML uses -fpatchable-function-entry=5,0 rather than -pg -mfentry +
+ * recordmcount, because UML's -mcmodel=large
  * breaks the -mfentry emission. The compiler places a 5-byte NOP at
  * every traced function's entry and records its address in the
  * __patchable_function_entries section. At runtime the kernel patches
- * that NOP to `call ftrace_caller` (and back to a NOP when disabling).
+ * that NOP to call ftrace_caller (and back to a NOP when disabling).
  */
 
 #ifdef CONFIG_FUNCTION_TRACER
 
 #define MCOUNT_ADDR		((unsigned long)(ftrace_caller))
-#define MCOUNT_INSN_SIZE	5	/* 5-byte NOP or `call rel32` */
+#define MCOUNT_INSN_SIZE	5	/* 5-byte NOP or call rel32 */
 
 #ifndef __ASSEMBLER__
 
@@ -25,16 +25,16 @@
  *
  * ftrace_call is an inner label inside ftrace_caller (see
  * arch/um/kernel/mcount.S). ftrace_update_ftrace_func() patches the
- * `call` at this address to point at the active dispatcher.
+ * call at this address to point at the active dispatcher.
  */
 void ftrace_call(void);
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 /*
- * ftrace_graph_call is an inner label inside ftrace_caller — the
+ * ftrace_graph_call is an inner label inside ftrace_caller: the
  * 5-byte patchable JMP site that ftrace_enable_ftrace_graph_caller
- * rewrites from `jmp ftrace_stub` (the no-op return path) to
- * `jmp ftrace_graph_caller` when the graph tracer activates.
+ * rewrites from jmp ftrace_stub (the no-op return path) to
+ * jmp ftrace_graph_caller when the graph tracer activates.
  *
  * ftrace_graph_caller and return_to_handler are the trampolines
  * defined in arch/um/kernel/mcount.S; arch/um/kernel/ftrace.c's
@@ -49,8 +49,8 @@ void return_to_handler(void);
  * prepare_ftrace_return is the C-side fgraph hook that
  * ftrace_graph_caller (mcount.S) tail-calls on every traced
  * function entry. Mirrors arch/x86/include/asm/ftrace.h's
- * declaration so generic trace code + our own .c impl both see
- * a prototype.
+ * declaration so generic trace code and the UML implementation see
+ * the same declaration.
  */
 void prepare_ftrace_return(unsigned long ip, unsigned long *parent,
 			   unsigned long frame_pointer);
@@ -77,8 +77,8 @@ struct dyn_arch_ftrace {
  * already contains a 5-byte NOP at compile time. The generic
  * ftrace_init_nop() fallback calls ftrace_make_nop() on every record
  * during ftrace_init(), which on UML means 21000+ mprotect round
- * trips against the host process's one mm — fragmenting the VMA
- * list and, in the research profile, hanging boot.
+ * trips against the host process's one mm and can fragment the VMA
+ * list badly enough to stall boot.
  *
  * Override with a no-op (see arch/um/kernel/ftrace.c): if a site is
  * ever observed to hold anything other than the expected NOP5 at

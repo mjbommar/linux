@@ -8,8 +8,7 @@
 // what the upstream libapparmor symbols expect.
 #![allow(clippy::disallowed_methods)]
 
-// libapparmor bindings for runtime sub-profile transitions
-// (workstream C-10 v2 commit 6 wire-up per D52).
+// libapparmor bindings for runtime sub-profile transitions.
 //
 // The in-tree AppArmor profile (`tools/uml/uml-launcher/
 // apparmor/uml-launcher`) declares three sub-profiles:
@@ -24,7 +23,7 @@
 // process to the sub-profile and denials follow. That's what
 // this module does.
 //
-// Design calls (see decisions-log D52):
+// Design:
 //
 //   * Runtime-loaded via `dlopen(3)`, not link-time. The
 //     launcher builds without libapparmor-dev on the host
@@ -34,11 +33,9 @@
 //   * `aa_change_profile()` rather than `aa_change_onexec()`.
 //     Each backend subcommand stays in the same process after
 //     clap dispatch — there's no fork+exec inside the backend
-//     handler for the transition to ride on. The orchestration
-//     commit (v2 commit 8) will use `aa_change_onexec()` on
-//     the fork+exec path it introduces; this module keeps
-//     the same-process path that `uml-launcher backend <class>`
-//     uses today.
+//     handler for the transition to ride on. Fork+exec call paths
+//     should use `aa_change_onexec()`; this module keeps the
+//     same-process path that `uml-launcher backend <class>` uses.
 //   * Graceful-skip on ENOENT (profile not loaded), EINVAL
 //     (AA module not loaded), EPERM (caller doesn't have the
 //     change_profile rule for this target — common when the
@@ -224,9 +221,8 @@ mod tests {
                 panic!("somehow transitioned into a non-existent profile");
             }
             Err(e) => {
-                // Only acceptable if we're in some weird CI
-                // environment where AA is active and strict.
-                // Log for debugging; don't fail the test.
+                // Accept this on CI hosts where AppArmor is active
+                // and strict. Log for debugging; don't fail the test.
                 eprintln!("change_profile returned unexpected error: {e}");
             }
         }

@@ -1,10 +1,8 @@
 /* Cross-process futex on a memfd-shared page.
  *
- * Memo 28 Part L.3 E.3d.0 assumes the seccomp stub_data futex still
- * works once the parent (worker) and child (stub) live in different
- * VA spaces sharing only the memfd-mapped stub_data. Verify the host
- * kernel actually supports this; if not, E.3d.0's wire format needs
- * to change before code lands.
+ * Verify that a futex on a memfd-shared page works when the parent
+ * and child live in different VA spaces. The seccomp stub-data path
+ * depends on this shape when worker and stub state are split.
  */
 #define _GNU_SOURCE
 #include <errno.h>

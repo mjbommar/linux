@@ -43,9 +43,7 @@ pub fn run(args: RootfsArgs) -> Result<()> {
     let prof = profile::resolve(&args.profile)?;
     let p = paths::Paths::resolve()?;
 
-    let out = args
-        .out
-        .unwrap_or_else(|| p.rootfs_dir(&prof.profile.name));
+    let out = args.out.unwrap_or_else(|| p.rootfs_dir(&prof.profile.name));
 
     if out.is_dir() {
         let nonempty = std::fs::read_dir(&out)
@@ -57,15 +55,11 @@ pub fn run(args: RootfsArgs) -> Result<()> {
                 std::fs::remove_dir_all(&out)
                     .with_context(|| format!("remove {}", out.display()))?;
             } else {
-                bail!(
-                    "{} is non-empty; pass --force to overwrite",
-                    out.display()
-                );
+                bail!("{} is non-empty; pass --force to overwrite", out.display());
             }
         }
     }
-    std::fs::create_dir_all(&out)
-        .with_context(|| format!("create {}", out.display()))?;
+    std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
 
     match prof.rootfs.base.as_str() {
         "alpine" => populate_alpine(&prof, &p, &out)?,
@@ -78,8 +72,18 @@ pub fn run(args: RootfsArgs) -> Result<()> {
     // Write a sidecar manifest beside the rootfs dir (one level up).
     let manifest = out.with_extension("manifest.toml");
     let n_packages = match prof.rootfs.base.as_str() {
-        "alpine" => prof.rootfs.alpine.as_ref().map(|a| a.packages.len()).unwrap_or(0),
-        "debian-slim" => prof.rootfs.debian.as_ref().map(|d| d.packages.len()).unwrap_or(0),
+        "alpine" => prof
+            .rootfs
+            .alpine
+            .as_ref()
+            .map(|a| a.packages.len())
+            .unwrap_or(0),
+        "debian-slim" => prof
+            .rootfs
+            .debian
+            .as_ref()
+            .map(|d| d.packages.len())
+            .unwrap_or(0),
         _ => 0,
     };
     let mtext = format!(
@@ -97,7 +101,11 @@ pub fn run(args: RootfsArgs) -> Result<()> {
     std::fs::write(&manifest, mtext)
         .with_context(|| format!("write manifest {}", manifest.display()))?;
 
-    eprintln!("umlbuild rootfs: {} populated ({} bytes)", out.display(), du_bytes(&out)?);
+    eprintln!(
+        "umlbuild rootfs: {} populated ({} bytes)",
+        out.display(),
+        du_bytes(&out)?
+    );
     Ok(())
 }
 
@@ -387,7 +395,10 @@ fn populate_debian(prof: &profile::Profile, out: &Path) -> Result<()> {
     cmd.arg(suite);
     cmd.arg(out);
 
-    tracing::info!("running {} (this can take a few minutes)", mmdebstrap.display());
+    tracing::info!(
+        "running {} (this can take a few minutes)",
+        mmdebstrap.display()
+    );
     let status = cmd.status().context("spawn mmdebstrap")?;
     if !status.success() {
         bail!("mmdebstrap exited with {status}");
@@ -443,8 +454,7 @@ fn install_init(prof: &profile::Profile, out: &Path) -> Result<()> {
     } else {
         format!("{}\n", prof.instance.sandbox_cmd)
     };
-    std::fs::write(&cmd_path, cmd)
-        .with_context(|| format!("write {}", cmd_path.display()))?;
+    std::fs::write(&cmd_path, cmd).with_context(|| format!("write {}", cmd_path.display()))?;
 
     // Bake the network plan into /etc/sandbox.net so /sbin/init can
     // bring up the NIC defensively (no-op if mode = "none").  Format
@@ -470,8 +480,7 @@ fn install_init(prof: &profile::Profile, out: &Path) -> Result<()> {
         gw = net.gateway,
         dns_lines = dns_lines,
     );
-    std::fs::write(&net_path, net_sh)
-        .with_context(|| format!("write {}", net_path.display()))?;
+    std::fs::write(&net_path, net_sh).with_context(|| format!("write {}", net_path.display()))?;
 
     // Pre-create the /results mountpoint so the init's tmpfs mount has
     // somewhere to land.
@@ -616,8 +625,8 @@ fn which(prog: &str) -> Result<PathBuf> {
 
 fn sha256_of_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read {} for sha256", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read {} for sha256", path.display()))?;
     let mut h = Sha256::new();
     h.update(&bytes);
     Ok(hex::encode(h.finalize()))

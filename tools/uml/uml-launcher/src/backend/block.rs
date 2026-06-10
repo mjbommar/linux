@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// virtio-blk vhost-user backend (workstream C-10 v2).
+// virtio-blk vhost-user backend.
 //
 // Data path: opens a file-backed disk image at startup, handles
 // VIRTIO_BLK_T_IN / OUT / FLUSH / GET_ID request types, enforces
@@ -8,7 +8,7 @@
 // flushes, writes the 1-byte status descriptor back to the
 // guest. Single request queue, no multi-queue.
 //
-// Scope of this commit:
+// Implemented request set:
 //   * IN  (read)   : preadv from image fd into virtqueue writer.
 //   * OUT (write)  : pwritev from virtqueue reader into image fd.
 //   * FLUSH        : fdatasync. Write-only, returns UNSUPP on
@@ -18,17 +18,16 @@
 //                    `blkid` distinguish disks).
 //   * status byte  : VIRTIO_BLK_S_OK / _IOERR / _UNSUPP.
 //
-// Explicitly out of scope (feature-bit gated, future commits):
-//   * DISCARD, WRITE_ZEROES, SECURE_ERASE — each adds its own
+// Unsupported feature-bit-gated request set:
+//   * DISCARD, WRITE_ZEROES, SECURE_ERASE - each adds its own
 //     request type, response struct, and feature bit.
-//   * ZONED — append-only disk model.
-//   * O_DIRECT — optimization; the initial data path uses the
+//   * ZONED - append-only disk model.
+//   * O_DIRECT - optimization; the initial data path uses the
 //     host page cache. O_DIRECT requires sector-aligned user
 //     buffers which need posix_memalign-equivalent allocation.
-//     Deferred; tracked in decisions-log.
 //
 // Reference:
-//   - virtio 1.1 §5.2 (virtio-blk device)
+//   - virtio 1.1 section5.2 (virtio-blk device)
 //   - cloud-hypervisor/vhost_user_block/ (different vhost-user-
 //     backend version, same shape)
 
@@ -61,7 +60,7 @@ const REQ_QUEUE: u16 = 0;
 const NUM_QUEUES: usize = 1;
 const QUEUE_SIZE: usize = 256;
 
-/// virtio-blk sector size. Hard-coded at 512 by the spec — the
+/// virtio-blk sector size. Hard-coded at 512 by the spec - the
 /// protocol uses `sector` as a 512-byte offset regardless of
 /// the logical block size exposed via VIRTIO_BLK_F_BLK_SIZE.
 const SECTOR_SIZE: u64 = 512;
@@ -79,8 +78,8 @@ const MAX_SEG_COUNT: u32 = (QUEUE_SIZE as u32) - 2;
 /// mandated; guest tools (blkid, udev) read exactly 20 bytes.
 const VIRTIO_BLK_ID_BYTES: usize = 20;
 
-/// virtio_blk request header, guest → host. Bytes laid out per
-/// virtio 1.1 §5.2.6. Backed by ByteValued so vm_memory can
+/// virtio_blk request header, guest -> host. Bytes laid out per
+/// virtio 1.1 section5.2.6. Backed by ByteValued so vm_memory can
 /// `read_obj` it straight out of guest memory with no copying.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -127,7 +126,7 @@ fn device_features(read_only: bool) -> u64 {
         | (1u64 << VIRTIO_BLK_F_FLUSH)
         | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
     if read_only {
-        // RO is advertised ONLY when the operator asked for it;
+        // RO is advertised ONLY when the user asked for it;
         // it's a hint to the guest to mount read-only, not a
         // security gate (the backend's own read_only check is
         // the actual gate).
@@ -148,7 +147,7 @@ struct ImageBacking {
     file: Mutex<File>,
     capacity_sectors: u64,
     read_only: bool,
-    /// 20-byte device id returned on VIRTIO_BLK_T_GET_ID —
+    /// 20-byte device id returned on VIRTIO_BLK_T_GET_ID -
     /// computed from the image path's basename so two different
     /// disks attached to the same guest get different ids.
     device_id: [u8; VIRTIO_BLK_ID_BYTES],
@@ -164,10 +163,8 @@ impl ImageBacking {
         // Do NOT use O_DIRECT here. O_DIRECT requires sector-
         // aligned user buffers which the vm_memory ByteBuffer
         // path doesn't guarantee; adopting it would require
-        // per-request bounce buffers allocated via
-        // posix_memalign, which belongs in a follow-on
-        // commit. The host page cache is the correct default
-        // for a first landing.
+        // per-request bounce buffers allocated via posix_memalign.
+        // The host page cache is the correct default for this backend.
         opts.custom_flags(libc::O_CLOEXEC);
         let file = opts
             .open(path)
@@ -342,7 +339,7 @@ impl BlockBackend {
         R: Read,
         W: Write,
     {
-        // Parse header. Any short read here → malformed
+        // Parse header. Any short read here -> malformed
         // request; log + IOERR.
         let mut hdr_bytes = [0u8; std::mem::size_of::<VirtioBlkReqHeader>()];
         if reader.read_exact(&mut hdr_bytes).is_err() {
@@ -443,7 +440,7 @@ impl BlockBackend {
     ) -> (u8, u32) {
         let offset = sector.saturating_mul(SECTOR_SIZE);
         let mut buf = Vec::with_capacity(MAX_SEG_SIZE as usize);
-        // Read from the reader until EOF — virtio_queue's
+        // Read from the reader until EOF - virtio_queue's
         // Reader reports available_bytes via the trait
         // method on the concrete type; read_to_end is the
         // simplest portable path through the generic
@@ -589,9 +586,9 @@ pub fn run(args: BackendBlockArgs) -> Result<i32> {
 
     // Block-class seccomp filter: event-loop baseline + the
     // three syscalls the data path does:
-    //   preadv / pwritev — user-data movement
-    //   fdatasync        — VIRTIO_BLK_T_FLUSH
-    //   pread64/pwrite64 — File::read_at/write_at on x86_64
+    //   preadv / pwritev - user-data movement
+    //   fdatasync        - VIRTIO_BLK_T_FLUSH
+    //   pread64/pwrite64 - File::read_at/write_at on x86_64
     //                      actually lower to SYS_pread64 +
     //                      SYS_pwrite64, not the preadv/pwritev
     //                      pair. Add both so either glibc path
@@ -677,7 +674,7 @@ mod tests {
 
     #[test]
     fn config_reports_capacity_in_sectors() {
-        // 8 sectors × 512 = 4 KiB.
+        // 8 sectors x 512 = 4 KiB.
         let (b, _tmp) = backend_for_image(&vec![0u8; 4096], false);
         let cfg = b.config();
         assert_eq!(u64::from(cfg.capacity), 8);
@@ -693,7 +690,7 @@ mod tests {
         }
         let (b, _tmp) = backend_for_image(&img, false);
 
-        let req = build_req(VIRTIO_BLK_T_IN, 2); // sector 2 → offset 1024
+        let req = build_req(VIRTIO_BLK_T_IN, 2); // sector 2 -> offset 1024
         let mut reader = Cursor::new(req);
         let mut writer: Vec<u8> = Vec::new();
 

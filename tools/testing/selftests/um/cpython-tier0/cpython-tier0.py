@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 #
-# CPython "tier 0" regression gate — single-process, single-import
-# tests. Today this is just `import hashlib + sha256(...)` which is
-# the *reliable* repro for the original task #274 backend bug.
+# CPython "tier 0" regression gate - single-process, single-import
+# tests. Today this is just `import hashlib + sha256(...)`, which
+# exercises the dlopen path for Python C extensions.
 #
 # Aspiration: the whole CPython test suite, tiered. Reality: only
 # hashlib is currently load-bearing here because larger sweeps
@@ -24,12 +24,12 @@
 #
 # These all share the same root cause: under the integrated kvm
 # backend, all UML processes share the host process's VA space, AND
-# the singleton shadow PGD is updated only via current_mm_sync →
-# kvm_mm_map → kvm_shadow_invalidate_va_range. The cumulative-imports
+# the singleton shadow PGD is updated only via current_mm_sync ->
+# kvm_mm_map -> kvm_shadow_invalidate_va_range. The cumulative-imports
 # case appears to hit a path where pgd updates land but shadow
 # invalidation is skipped (cleared=0 case in invalidate_va_range);
-# the fork+exec case hits cross-process host-VA collision. Per-mm
-# shadow PGD (#243) is the architectural fix; until then, this
+# the fork+exec case hits cross-process host-VA collision. A per-mm
+# shadow PGD is the architectural fix; until then, this
 # kselftest documents the actual reliable surface.
 
 import sys

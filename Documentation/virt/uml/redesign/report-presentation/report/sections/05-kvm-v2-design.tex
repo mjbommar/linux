@@ -33,7 +33,7 @@ The \KVMvTwo{} design is not just a cleaned-up version of the first
 KVM implementation. The v1 implementation was valuable because it
 proved the fast trap path was possible, but it also showed that the
 initial data model would not survive sustained SMP execution. The
-diary around the April 27 architecture review and the v1 restart guide
+April 27 architecture review and the v1 restart guide
 converged on the same lesson: treating a KVM vCPU as a passive trap
 resource shared by \UML{} scheduler machinery creates state ownership
 bugs that cannot be made impossible by adding more repair code.
@@ -54,7 +54,7 @@ rules are documented and audited. \\
 Repair on next entry & Snapshotting exit state and repairing later
 does not compose with \texttt{-EINTR}, host signals, and SMP
 scheduling. & Use explicit entry/exit boundaries, KVM-visible signal
-masking, and state trace instead of relying on opportunistic repair. \\
+masking, and normal tracepoints instead of relying on opportunistic repair. \\
 Shadow page-table machinery & Multiple producers had to keep a shadow
 view coherent while KVM consumed it; every new fix added another
 ordering rule. & Keep the v2 memory contract smaller and make TLB
@@ -63,9 +63,9 @@ Implicit scheduler assumptions & \texttt{preempt\_disable()} did not
 mean ``this task cannot move to another host CPU'' for the KVM state
 being touched. & Use \texttt{migrate\_disable()} at the dispatch and
 capture sites that depend on a selected per-host-CPU vCPU. \\
-Ad hoc bug hunting & Individual hypotheses produced regressions or
+Ad hoc bug chasing & Individual hypotheses produced regressions or
 negative results because the state space was not enumerated. & The
-state-audit method enumerates state items, operations, owners,
+state ownership method enumerates state items, operations, owners,
 save/restore rules, and suspect registers before accepting a fix. \\
 \bottomrule
 \end{tabularx}
@@ -112,7 +112,7 @@ vCPU execution & \path{vcpu.c} & Owns KVM\_RUN, register marshaling, migration p
 Syscall path & \path{syscall_trap.c}, \path{lstar_gadget.S} & Handles LSTAR entry, in-guest fast syscalls, slow-path exits, and return-state repair. \\
 Memory and regions & \path{memslot.c}, \path{region.c}, backend memory ops & Maps \UML{} memory changes into KVM-visible regions and memslot policy. \\
 Exceptions & \path{exception.c} & Installs and handles IDT/TSS/IST paths, page faults, and special recovery paths. \\
-State tracing & \path{state_trace.[ch]} & Gives low-overhead, static-key-controlled visibility into state ownership bugs. \\
+Tracepoints & \path{asm/trace/um_backend.h} & Provides the normal kernel tracing surface for backend lifecycle, vCPU dispatch, syscall exits, and exception paths. \\
 Tests & \path{test_marshal.c}, \path{test_byteshape.c} & Protect register ABI, gadget byte shape, and internal assumptions. \\
 \bottomrule
 \end{tabularx}
@@ -139,16 +139,16 @@ separately:
         user-visible architectural state exactly.
 \end{itemize}
 
-\subsection{State-Audit Method}
+\subsection{State Ownership Method}
 
-The state-audit directory is part of the design, not just project
-diary. It converted a vague SMP corruption class into a finite audit:
+The state ownership directory is part of the design. It converted a
+vague SMP corruption class into a finite analysis:
 149 state items, 50+ operations, an ownership matrix, suspect
 register audits, runtime tracing, and ranked findings.
 
 \begin{table}[h]
 \centering
-\caption{State-audit layers.}
+\caption{State ownership layers.}
 \begin{tabularx}{\linewidth}{@{}p{0.09\linewidth}p{0.29\linewidth}X@{}}
 \toprule
 Layer & Artefact & Contribution \\
@@ -186,25 +186,21 @@ SMP-T55 & Per-vCPU FPU-dirty epoch & Restored perf-py-startup gate while preserv
 SMP-T57 AVX/XSAVE & CR4.OSXSAVE, XCR0=0x7, CPUID AVX/XSAVE unmask & Turned stress-ng AVX \#UD from a fragile mask problem into supported guest architectural state. \\
 Gadget revival & LSTAR in-guest fast path & Collapsed trivial syscall cost from host-exit scale to roughly 90 cycles on measured hosts. \\
 SMP-T68 & LSTAR-gadget inverted bounds check (operand order) & Restored correctness of the gadget's user-pointer bounds gate after a regression introduced by an earlier assembler-syntax change. \\
-SMP-T71 & \texttt{MAP\_POPULATE} on physmem + opt-in \texttt{MAP\_LOCKED} + unconditional \texttt{mlockall(MCL\_CURRENT|MCL\_FUTURE|MCL\_ONFAULT)} & Eliminates first-touch page-fault latency and (with \texttt{setcap}) blocks host migration / reclaim of the UML physmem mapping. Foundation for memo 52's resource-control plan. \\
-SMP-T73 & \texttt{KVM\_GET\_FPU} $\rightarrow$ \texttt{KVM\_GET\_XSAVE} at 5 per-task save/restore sites & \emph{The R14 closure.} See \S\ref{subsec:r14-saga}. Five-week, fourteen-round investigation; 1--2\% bytecode-page corruption under SMP traced to legacy 512-byte FXSAVE area missing YMM upper 128 bits after SMP-T57's AVX un-mask. \\
-SMP-T74 / T75 / T76 & DEBUGREGS pinned-zero at vCPU create; per-task \texttt{KVM\_GET/SET\_VCPU\_EVENTS} save/restore (\texttt{iotrap\_events}); CPUID leaf 0xD sub-leaf 5/6/7/17/18 consistency mask & Latent-bug follow-ups identified during the R14 hardware-acceleration audit. Same architectural shape as T73 (per-host-CPU vCPU pool, cross-task state hand-off). \\
-SMP-T77 & Feature-enablement checklist memo (state-audit Layer 26) & Forward-looking: documents what changes when a new CPUID bit is un-masked (AVX-512 / AMX / PKRU / CET / AVX-VNNI / AVX10+APX). Prevents re-walking the T26 $\rightarrow$ T57 $\rightarrow$ T73 audit gap on the next feature exposure. \\
-SMP-T78--T82 & Host-side env-var-gated knobs: \texttt{MADV\_UNMERGEABLE} on physmem (always on); \texttt{UM\_THP=off/on}; \texttt{UM\_OOM\_SCORE\_ADJ=N}; \texttt{UM\_HUGEPAGES=2M/1G}; \texttt{UM\_KVM\_V2\_CPU\_AFFINITY=list} & Memo 52 \S1--\S2. Predictable physmem behaviour, host-memory budget control, hugepage-backed TLB win, CPU-set confinement. \\
+SMP-T71 & \texttt{MAP\_POPULATE} on physmem + opt-in \texttt{MAP\_LOCKED} + unconditional \texttt{mlockall(MCL\_CURRENT|MCL\_FUTURE|MCL\_ONFAULT)} & Eliminates first-touch page-fault latency and (with \texttt{setcap}) blocks host migration / reclaim of the UML physmem mapping. Foundation for the host resource-control plan. \\
+SMP-T73 & \texttt{KVM\_GET\_FPU} $\rightarrow$ \texttt{KVM\_GET\_XSAVE} at 5 per-task save/restore sites & \emph{The R14 closure.} See \S\ref{subsec:r14-saga}. Five-week, fourteen-round analysis; 1--2\% bytecode-page corruption under SMP traced to older 512-byte FXSAVE area missing YMM upper 128 bits after SMP-T57's AVX un-mask. \\
+SMP-T74 / T75 / T76 & DEBUGREGS pinned-zero at vCPU create; per-task \texttt{KVM\_GET/SET\_VCPU\_EVENTS} save/restore (\texttt{iotrap\_events}); CPUID leaf 0xD sub-leaf 5/6/7/17/18 consistency mask & Latent-bug follow-ups identified during the R14 hardware-acceleration analysis. Same architectural shape as T73 (per-host-CPU vCPU pool, cross-task state hand-off). \\
+SMP-T77 & Feature-enablement checklist (state ownership Layer 26) & Documents what changes when a new CPUID bit is un-masked (AVX-512 / AMX / PKRU / CET / AVX-VNNI / AVX10+APX). Prevents re-walking the T26 $\rightarrow$ T57 $\rightarrow$ T73 gap on the next feature exposure. \\
+SMP-T78--T82 & Host-side env-var-gated knobs: \texttt{MADV\_UNMERGEABLE} on physmem (always on); \texttt{UM\_THP=off/on}; \texttt{UM\_OOM\_SCORE\_ADJ=N}; \texttt{UM\_HUGEPAGES=2M/1G}; \texttt{UM\_KVM\_V2\_CPU\_AFFINITY=list} & Host resource controls: predictable physmem behaviour, host-memory budget control, hugepage-backed TLB win, CPU-set confinement. \\
 SMP-T83 / T84 & \texttt{umlctl [host\_resources]} TOML section + cgroup v2 per-instance subgroup + preflight resource verification & Declarative form of T78--T82 plus cgroup \texttt{memory.max} / \texttt{cpu.max} / \texttt{pids.max}; preflight emits clear warnings (empty hugepage pool, unwritable cgroup, missing \texttt{CAP\_IPC\_LOCK}). \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\subsection{The Round-14 Cache-Flake Saga (SMP-T73)}
+\subsection{XSAVE Cache-Flake Closure (SMP-T73)}
 \label{subsec:r14-saga}
 
-This subsection is the closest thing the project has to a teaching
-case study: a 1--2\% corruption rate, fourteen rounds of
-hypothesis-elimination, an unrelated bug discovered and shipped
-along the way, an honest false-positive root-cause claim that had
-to be retracted, and a final fix that landed in a single ioctl
-substitution.
+This subsection preserves the technical reason for the 1--2\%
+corruption rate and the final ioctl substitution that fixed it.
 
 \paragraph{Symptom.} A subset of soak iterations of the no-network
 Django stdlib loopback workload exhibited a 1--2\% rate of
@@ -213,25 +209,25 @@ The corruption shape was specific: 16-, 24-, 26-, or 40-byte zero
 regions interspersed with valid bytecode. \KVMvTwo{} only;
 \Seccomp{} clean.
 
-\paragraph{Investigation arc.}
+\paragraph{Debugging arc.}
 Round~1--12 worked through and eliminated: KSM page merging,
 khugepaged collapse, kswapd reclaim, host pagecache demotion,
 fast-page-fault races, TLB-coherence gaps, mmu\_notifier traffic,
 UML self-unmap, physmem residency, CPython interpreter
 specialization, and the LSTAR-gadget bounds-check path (Round~13
 shipped SMP-T68 as an independent fix surfaced by the
-investigation). Round~13 also disproved a working hypothesis
+analysis). Round~13 also disproved a working hypothesis
 about MAP\_POPULATE + MAP\_LOCKED pinning of physmem (SMP-T71)
 as the bug cause --- the pinning still landed as foundation
 infrastructure but did not affect the rate.
 
-\paragraph{Root cause (Round~14 H17/H18).} The corruption shape
+\paragraph{Cause.} The corruption shape
 matched a half-AVX2 vector: 16 valid low bytes followed by 16
-leftover-zero upper bytes. SMP-T57 Phase~A had un-masked AVX in
+leftover-zero upper bytes. SMP-T57 had un-masked AVX in
 CPUID and set XCR0 = FP$|$SSE$|$YMM = 0x7. glibc's IFUNC dispatch
 then started selecting AVX2 \texttt{vmovdqu ymm} memcpy variants.
 But \KVMvTwo{}'s per-task FPU save/restore (T26/T27 era) used
-\texttt{KVM\_GET\_FPU} / \texttt{KVM\_SET\_FPU} --- the legacy
+\texttt{KVM\_GET\_FPU} / \texttt{KVM\_SET\_FPU} --- the older
 512-byte FXSAVE area, which covers x87 and XMM low 128 but
 \emph{not} YMM upper 128. Across a per-host-CPU vCPU pool the
 upper halves of YMM registers leaked between tasks; an inopportune
@@ -247,8 +243,8 @@ YMM upper bytes) at all five per-task save/restore sites in
 
 \paragraph{Validation.} 220/220 soak PASS at first repro
 ($p = 0.007$ vs baseline). 100/100 across five diverse workloads
-in the subsequent \texttt{umlctl mission} acceptance gate.
-A premature ``identified'' claim made mid-investigation
+in the subsequent \texttt{umlctl mission} validation run.
+A premature ``identified'' claim made during debugging
 (commit \texttt{714969f625f6}) had to be retracted: the
 contaminated H17 soak ran the workload-template with mid-run
 overrides reverted by a parallel git checkout. The honest
@@ -263,19 +259,19 @@ artefacts were extracted from the saga:
         state hand-off): DEBUGREGS not pinned, VCPU\_EVENTS not
         saved per task, CPUID leaf 0xD sub-leaves inconsistent
         with the un-masked feature bits.
-  \item SMP-T77 (memo state-audit Layer 26) is a forward-looking
-        feature-enablement checklist: every future un-mask in
+  \item SMP-T77 is a feature-enablement checklist:
+        every future un-mask in
         \texttt{kvm\_v2\_curate\_cpuid} comes with a checklist of
         what other code must change. The next un-mask cannot
         re-walk the same gap.
-  \item Memo 52 (host resource controls) is the broader response:
+  \item Host resource controls are the broader response:
         if any future regression has both a guest-side bug and a
         host-induced trigger, the host-side levers (pinning,
         KSM-disable, THP control, hugepage backing, CPU affinity,
         cgroup limits, preflight) reduce the noise the
-        investigation has to fight. Memo 52's lessons-learned
-        section is explicit that these levers did not cause or
-        fix R14 --- they make the \emph{next} R14 cheaper.
+        debugging pass has to fight. The resource-control design is
+        explicit that these levers did not cause or fix R14 --- they
+        make the \emph{next} R14 cheaper.
 \end{itemize}
 
 \subsection{Design Boundary}

@@ -5,14 +5,14 @@
 #
 # Boots UML, runs an init shell that fork()s the test binary which
 # itself fork()s a child and waits for it. The shell then echoes
-# its $? — which encodes the test process's exit code as the kernel
+# its $? - which encodes the test process's exit code as the kernel
 # reported it.
 #
 # Bug signature: shell sees rc=255 instead of 0 when the test's main
 # returned 0. Init kernel-panic exitcode = 0x0000ff00 instead of 0.
 # Only manifests under kvm-v2; seccomp is bit-identical across runs.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL - kselftest convention.
 
 set -u
 

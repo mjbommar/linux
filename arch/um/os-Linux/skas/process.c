@@ -6,6 +6,7 @@
  */
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <sched.h>
@@ -45,7 +46,7 @@ int is_skas_winch(int pid, int fd, void *data)
  * over mm_idp->sock. Extracted from wait_stub_done_seccomp's prelude so
  * the WORKER_PROCESS=y path can run it from the spawner (those fds
  * live in the spawner's FD table) before handing the futex round-trip
- * off to the worker (memo 28 E.3d.2).
+ * off to the worker.
  */
 void send_stub_syscall_fds(struct mm_id *mm_idp)
 {
@@ -179,14 +180,6 @@ out_kill:
 		fatal_sigsegv();
 }
 
-extern unsigned long current_stub_stack(void);
-
-/*
- * get_skas_faultinfo() and handle_trap() moved into
- * arch/um/backend/ptrace/trap_user.c with workstream A-02.HOT-1
- * (they're ptrace-only).
- */
-
 extern char __syscall_stub_start[];
 
 static int stub_exe_fd;
@@ -196,7 +189,7 @@ struct tramp_data {
 	/* 0 is inherited, 1 is the kernel side */
 	int sockpair[2];
 	/*
-	 * If >= 0, override phys_mapping() for stub_data — pass this
+	 * If >= 0, override phys_mapping() for stub_data; pass this
 	 * fd to the stub child instead of UML's shared physmem_fd.
 	 * Used by start_userspace_fresh() so post-fork pool members
 	 * get a per-mm stub_data backing fd (memfd) and the stub maps
@@ -219,13 +212,10 @@ static int userspace_tramp(void *data)
 	 * Stub-child seccomp wiring. init_data.seccomp is the
 	 * boolean "install the SIGSYS filter" flag the stub
 	 * binary reads; the handler/restorer trampoline offsets
-	 * pick between stub_signal_interrupt (seccomp SIGSYS
-	 * entry) and stub_segv_handler (ptrace SIGSEGV entry).
+	 * select the SIGSYS or SIGSEGV stub entry point.
 	 * Routed through um_backend->stub_child_runs_seccomp
-	 * per D59 Phase II Lift #4d. um_backend is populated
-	 * because userspace_tramp runs inside clone() of the
-	 * first start_userspace call, which is post-init_backend
-	 * (um_arch.c::linux_main ordering).
+	 * because userspace_tramp runs inside clone() of the first
+	 * start_userspace call, which is post-init_backend.
 	 */
 	bool want_seccomp = um_backend && um_backend->stub_child_runs_seccomp;
 	struct stub_init_data init_data = {
@@ -277,8 +267,8 @@ static int userspace_tramp(void *data)
 	/*
 	 * In the override path stub_code_fd != stub_data_fd (data is
 	 * a per-mm memfd; code is still UML's physmem_fd holding the
-	 * stub binary text).  The default path has them equal — both
-	 * are physmem_fd — so the fcntl above implicitly clears
+	 * stub binary text).  The default path has them equal: both
+	 * are physmem_fd, so the fcntl above implicitly clears
 	 * CLOEXEC on both.  Be explicit so the override case works.
 	 */
 	if (init_data.stub_code_fd != init_data.stub_data_fd)
@@ -316,6 +306,7 @@ extern char *tempdir;
 
 static int __init init_stub_exe_fd(void)
 {
+	size_t tmpfile_len;
 	size_t written = 0;
 	char *tmpfile = NULL;
 
@@ -325,17 +316,17 @@ static int __init init_stub_exe_fd(void)
 	if (stub_exe_fd < 0) {
 		printk(UM_KERN_INFO "Could not create executable memfd, using temporary file!");
 
-		tmpfile = malloc(strlen(tempdir) +
-				  strlen(STUB_EXE_NAME_TEMPLATE) + 1);
+		tmpfile_len = strlen(tempdir) + strlen(STUB_EXE_NAME_TEMPLATE) + 1;
+		tmpfile = malloc(tmpfile_len);
 		if (tmpfile == NULL)
 			panic("Failed to allocate memory for stub binary name");
 
-		strcpy(tmpfile, tempdir);
-		strcat(tmpfile, STUB_EXE_NAME_TEMPLATE);
+		snprintf(tmpfile, tmpfile_len, "%s%s", tempdir,
+			 STUB_EXE_NAME_TEMPLATE);
 
 		stub_exe_fd = mkstemp(tmpfile);
 		if (stub_exe_fd < 0)
-			panic("Could not create temporary file for stub binary: %d",
+			panic("Could not create fallback file for stub binary: %d",
 			      -errno);
 	}
 
@@ -366,7 +357,7 @@ static int __init init_stub_exe_fd(void)
 
 		close(stub_exe_fd);
 		/*
-		 * FD disposition (C-09 commit 4): inherit. The stub
+		 * FD disposition: inherit. The stub
 		 * binary fd is the fexecve() target for every
 		 * userspace stub spawn and is held for the UML
 		 * kernel's entire lifetime. Workers inherit it CoW
@@ -395,12 +386,11 @@ int using_seccomp;
  * start_userspace() - prepare a new userspace process
  * @mm_id: The corresponding struct mm_id
  *
- * Setups a new temporary stack page that is used while userspace_tramp() runs
+ * Sets up a scratch stack page used while userspace_tramp() runs.
  * Clones the kernel process into a new userspace process, with FDs only.
  *
- * Return: When positive: the process id of the new userspace process,
- *         when negative: an error number.
- * FIXME: can PIDs become negative?!
+ * Return: positive process id of the new userspace process, or a
+ * negative errno.
  */
 int start_userspace(struct mm_id *mm_id)
 {
@@ -413,7 +403,7 @@ int start_userspace(struct mm_id *mm_id)
 	unsigned long sp;
 	int err;
 
-	/* setup a temporary stack page */
+	/* Set up a scratch stack page. */
 	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
 		     PROT_READ | PROT_WRITE | PROT_EXEC,
 		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -429,8 +419,8 @@ int start_userspace(struct mm_id *mm_id)
 
 	/*
 	 * Socket pair for init data and SECCOMP FD passing.
-	 * FD disposition (C-09 commit 4): exec-transmit. No
-	 * SOCK_CLOEXEC on purpose — the userspace stub child
+	 * FD disposition: exec-transmit. No
+	 * SOCK_CLOEXEC on purpose; the userspace stub child
 	 * exec()s into the stub binary and must inherit this fd to
 	 * receive init data and (optionally) a seccomp fd from the
 	 * UML kernel. This is the one socketpair() in arch/um that
@@ -444,11 +434,10 @@ int start_userspace(struct mm_id *mm_id)
 	}
 
 	/*
-	 * Pre-clone futex seed — only meaningful for backends
+	 * Pre-clone futex seed; only meaningful for backends
 	 * whose stub dispatch uses the futex-wait_stub_done_
 	 * seccomp round-trip. Routed through
-	 * um_backend->stub_syscall_uses_futex per D59 Phase II
-	 * Lift #4d (mirrors the 4c dispatch-mechanism flag).
+	 * um_backend->stub_syscall_uses_futex.
 	 */
 	if (um_backend && um_backend->stub_syscall_uses_futex)
 		proc_data->futex = FUTEX_IN_CHILD;
@@ -466,8 +455,6 @@ int start_userspace(struct mm_id *mm_id)
 	/*
 	 * Wait for the stub child to reach its initial ready state via
 	 * the futex round-trip. KVM doesn't reach this code path.
-	 * (Pre-memo-25-R11 the else branch handled ptrace's SIGSTOP +
-	 * PTRACE_SETOPTIONS dance; ptrace was removed.)
 	 */
 	wait_stub_done_seccomp(mm_id, 1, 1);
 
@@ -484,8 +471,7 @@ int start_userspace(struct mm_id *mm_id)
 	 * that use it for subsequent SCM_RIGHTS FD passing to
 	 * the stub child (seccomp). Ptrace closes it; KVM never
 	 * gets here. Routed through um_backend->has_syscall_
-	 * stub_fd_map per D59 Phase II Lift #4d (the sockpair
-	 * retention is part of the same fd-map mechanism).
+	 * stub_fd_map.
 	 */
 	if (um_backend && um_backend->has_syscall_stub_fd_map)
 		mm_id->sock = tramp_data.sockpair[1];
@@ -506,12 +492,12 @@ out_close:
 }
 
 /*
- * os_skas_reap_stub() — SIGKILL + wait4 the stub child attached to a
+ * os_skas_reap_stub() - SIGKILL + wait4 the stub child attached to a
  * given mm_id, close the parent-side socketpair end, and zero the
  * stub_data round-trip fields so a subsequent start_userspace()
  * sees fresh state.
  *
- * Used by the template-pause fork-on-resume loop (Memo 09 Phase 2a)
+ * Used by the template-pause fork-on-resume loop
  * BOTH:
  *   * Pre-fork in the master, where every stub child must be killed
  *     so fork() does not alias their pids into the forked-child
@@ -521,9 +507,8 @@ out_close:
  * Idempotent: if mm_id->pid <= 0, the kill/wait is skipped and only
  * the sock close / stub_data zero / id field reset runs.
  *
- * Uses raw __NR_wait4 per the os_snapshot_waitpid_status rationale:
- * glibc's cancellation-point waitpid wrapper has historically
- * misbehaved when called from UML kernel context.
+ * Uses raw __NR_wait4 to avoid glibc's cancellation-point waitpid
+ * wrapper from UML kernel context.
  *
  * Returns 0 on success, -errno on kill/wait failure (other than
  * ESRCH/ECHILD which are treated as "stub already gone" and silently
@@ -571,7 +556,7 @@ int os_skas_reap_stub(struct mm_id *mm_id)
 
 	/* Zero the round-trip fields so the new stub's first futex
 	 * handshake sees fresh state.  Leave the rest of stub_data
-	 * alone — pages, code, mctx storage, fault info — those are
+	 * alone; pages, code, mctx storage, fault info; those are
 	 * stub-binary-owned and respawn doesn't alter them.
 	 */
 	proc_data->futex = 0;
@@ -588,21 +573,20 @@ int os_skas_reap_stub(struct mm_id *mm_id)
 }
 
 /*
- * start_userspace_fresh() — spawn a stub with PRIVATE stub_data
+ * start_userspace_fresh() - spawn a stub with private stub_data
  * backing.
  *
  * Standard start_userspace() relies on UML's global physmem_fd
  * for stub_data: the kernel allocates a page via __get_free_pages,
  * phys_mapping() resolves that to (physmem_fd, offset), the stub
  * mmaps physmem_fd at that offset.  For pool-member children
- * post-fork, physmem_fd is MAP_SHARED with the master and all
- * sibling pool members — every stub reads/writes the SAME physical
- * bytes.  Sustained N-member dispatch is impossible in this model.
+ * post-fork, physmem_fd is MAP_SHARED with the master and sibling
+ * pool members, so inherited stub_data would alias across processes.
  *
- * This variant creates a PER-CALL memfd for stub_data, mmaps it
+ * This variant creates a per-call memfd for stub_data, mmaps it
  * MAP_SHARED into the calling process (which becomes the new
  * id->stack VA), and passes the memfd to the stub via the
- * stub_data_fd_override path so the stub mmaps the SAME memfd
+ * stub_data_fd_override path so the stub mmaps the same memfd
  * (in CLONE_VM child context, the mmap is shared with this
  * process).  Each pool member gets physically-isolated stub_data.
  *
@@ -651,18 +635,16 @@ int start_userspace_fresh(struct mm_id *mm_id)
 	 */
 	memset(proc_data, 0, map_size);
 
-	/* Replace the inherited id->stack with our private mapping.
-	 * The OLD page (master's stub_data) is left behind — child
-	 * doesn't own it.  Per-iteration leak budget: STUB_DATA_PAGES
-	 * of address space (and zero physical pages, since master's
-	 * page is still mapped by master).
+	/*
+	 * Replace the inherited id->stack with the private mapping.  The
+	 * inherited page still belongs to the parent-side stub state.
 	 */
 	mm_id->stack = (unsigned long)proc_data;
 
 	tramp_data.stub_data = proc_data;
 	tramp_data.stub_data_fd_override = data_fd;
 
-	/* Temporary stack for userspace_tramp. */
+	/* Scratch stack for userspace_tramp. */
 	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
 		     PROT_READ | PROT_WRITE | PROT_EXEC,
 		     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -706,7 +688,7 @@ int start_userspace_fresh(struct mm_id *mm_id)
 	else
 		close(tramp_data.sockpair[1]);
 
-	/* Parent no longer needs the fd reference — stub has its own
+	/* Parent no longer needs the fd reference; stub has its own
 	 * mmap keeping the backing alive; our mmap (proc_data) keeps
 	 * a kernel-side reference too.
 	 */
@@ -724,7 +706,7 @@ out_close_data:
 }
 
 /*
- * start_userspace_redo() — replace a stub child after a fork(2).
+ * start_userspace_redo() - replace a stub child after a fork(2).
  *
  * Equivalent to os_skas_reap_stub() followed by start_userspace().
  * Idempotent w.r.t. the kill side: a previously-reaped mm
@@ -747,19 +729,19 @@ int start_userspace_redo(struct mm_id *mm_id)
  * Counter shared between both backends' run_userspace impls and
  * reset by switch_threads (below) on every context switch. It
  * implements the time-travel-mode rate-limit on extra scheduler
- * jiffies — counting UNSCHEDULED iterations of the per-backend trap
- * loop body. Per-backend trap loops extern-declare it.
+ * jiffies; counting UNSCHEDULED iterations of the per-backend trap
+ * loop body.
  */
 unsigned int unscheduled_userspace_iterations;
 
 /*
  * Trap loop. Per-iteration body lives in the active backend's
- * run_userspace op; this function is just the loop scaffolding.
+ * run_userspace op; this function owns the scheduler-facing loop.
  *
  * The dispatch macro is the single source of truth for which backend
  * runs: in *_ONLY builds it expands to a direct call to the chosen
- * backend; in DYNAMIC builds init_backend() set `um_backend` to
- * match the host probe (`using_seccomp`) before this function is
+ * backend; in DYNAMIC builds init_backend() set um_backend to
+ * match the host probe (using_seccomp) before this function is
  * ever entered.
  */
 void userspace(struct uml_pt_regs *regs)

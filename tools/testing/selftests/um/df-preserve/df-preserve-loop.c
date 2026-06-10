@@ -1,13 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Direction-flag preservation selftest (audit round-4 F3 follow-on,
- * task #222).
+ * Direction-flag preservation selftest.
  *
- * Validates that the F2 user-RFLAGS round-trip fix (decisions-log
- * D75) actually preserves DF across the two paths it claims to:
+ * Validates that the user-RFLAGS round-trip path preserves DF across
+ * the two paths it covers:
  *
  *   1. SYSCALL round-trip. Set DF=1, call a class-A passthrough
- *      syscall (__NR_getsid — deliberately NOT a gadget-handled
+ *      syscall (__NR_getsid, deliberately NOT a gadget-handled
  *      NR; getsid VMEXITs to handle_syscall on every backend),
  *      read RFLAGS back via pushfq, check DF still set.
  *      Exercises the kvm_build_sysret_r11 helper that rebuilds
@@ -68,12 +67,12 @@ static inline long sys6(long nr, long a, long b, long c, long d, long e, long f)
  * Use __NR_getsid (NR 124, class A passthrough) instead of a
  * gadget-handled NR. Gadget syscalls preserve user RFLAGS
  * "for free" because R11 is left untouched by the LSTAR
- * trampoline — SYSRETQ at the gadget tail loads RFLAGS from R11
+ * trampoline.  SYSRETQ at the gadget tail loads RFLAGS from R11
  * which still holds the original. The kvm_build_sysret_r11
- * helper that F2 introduced is exercised on the FALLBACK path:
- * a non-gadget syscall VMEXITs to handle_syscall, then the next
- * kvm_enter_guest's bootstrap SYSRETQ rebuilds R11 via the
- * helper. Routing through getsid forces that fallback path.
+ * helper is exercised on the fallback path: a non-gadget syscall
+ * VMEXITs to handle_syscall, then the next kvm_enter_guest bootstrap
+ * SYSRETQ rebuilds R11 via the helper.  Routing through getsid forces
+ * that fallback path.
  */
 static inline long sys_getsid(long pid)
 { return sys6(__NR_getsid, pid, 0, 0, 0, 0, 0); }
@@ -148,9 +147,9 @@ int main(void)
 	unsigned n;
 
 	/*
-	 * Path 1 — SYSCALL via the class-A fallback.
+	 * Path 1 - SYSCALL via the class-A fallback.
 	 *
-	 * Set DF=1, call __NR_getsid(0) (class A — not gadget-
+	 * Set DF=1, call __NR_getsid(0) (class A - not gadget-
 	 * handled), read RFLAGS. F2 says the user-visible RFLAGS
 	 * bits (including DF) survive the kvm_build_sysret_r11
 	 * round-trip when handle_syscall returns and the next
@@ -162,7 +161,7 @@ int main(void)
 	syscall_ok = !!(rflags & DF_BIT);
 
 	/*
-	 * Path 2 — recoverable #PF.
+	 * Path 2 - recoverable #PF.
 	 *
 	 * Allocate a fresh anonymous mapping and write a byte to its
 	 * first page. The first write forces UML's mm to instantiate

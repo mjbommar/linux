@@ -44,9 +44,8 @@ config DEBUG_UM_PT_FREE
 	  Emit "UMPTFREE pfn=<hex> count=<dec>" to dmesg for every
 	  page-table page freed via the RCU-deferred mmu_gather path.
 
-	  Originally added for the SMP-T39 mt-mini PT-recycle bisect
-	  (resolved by SMP-T79).  Off by default — turn this on only if
-	  you're debugging a similar PT-aliasing race.  When on, every
+	  Off by default; turn this on only if you're debugging a
+	  PT-aliasing race. When on, every
 	  munmap / process exit produces dmesg traffic that will drown
 	  any interactive console session.
 

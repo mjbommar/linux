@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// SMP-T26 diagnostic version of malloc-stress-child: installs a
-// SIGSEGV handler that dumps register state and surrounding memory
-// when the child trips the deterministic glibc _int_malloc NULL deref
-// at IP 0x4074ed (cmp %rdx, 0x10(%rdi); rdi=NULL).
+// Diagnostic version of malloc-stress-child: installs a SIGSEGV
+// handler that dumps register state and surrounding memory when the
+// child trips the deterministic glibc _int_malloc NULL deref at
+// IP 0x4074ed (cmp %rdx, 0x10(%rdi); rdi=NULL).
 //
-// The dump tells us WHAT BYTES are wrong in glibc's heap arena —
+// The dump tells us WHAT BYTES are wrong in glibc's heap arena:
 // distinguishes:
-//   - All zeros → page reused without re-zeroing (H4 page-recycling)
-//   - Random bytes resembling parent data → uninitialized page (H4)
-//   - Specific patterns (text, addresses) → leak from sibling worker
-//   - Stack canary / glibc poison values → glibc hardening detected
+//   - All zeros: page reused without re-zeroing.
+//   - Random bytes resembling parent data: uninitialized page.
+//   - Specific patterns (text, addresses): leak from sibling worker.
+//   - Stack canary / glibc poison values: glibc hardening detected
 //     pre-existing corruption
 //
 // Build:
@@ -57,7 +57,7 @@ static void segv_handler(int sig, siginfo_t *si, void *ucv)
 	greg_t rsi = regs[REG_RSI];
 
 	fprintf(stderr,
-		"SMP-T26-DIAG SIGSEGV: cr2=%p ip=0x%llx pid=%d\n"
+		"MALLOC-STRESS-DIAG SIGSEGV: cr2=%p ip=0x%llx pid=%d\n"
 		"  GPRs: rax=%llx rbx=%llx rcx=%llx rdx=%llx\n"
 		"        rsi=%llx rdi=%llx rbp=%llx rsp=%llx\n"
 		"        r8=%llx r9=%llx r10=%llx r11=%llx\n"
@@ -80,11 +80,11 @@ static void segv_handler(int sig, siginfo_t *si, void *ucv)
 		(unsigned long long)regs[REG_R14],
 		(unsigned long long)regs[REG_R15]);
 
-	/* SMP-T26 / T27: dump XMM register state to test FPU leak hypothesis.
+	/* Dump XMM register state to detect cross-task FPU leaks.
 	 * If the bug is that glibc's MOVUPS write of fd+bk lost the high
 	 * half (bk = 0), then xmm0 at fault time may show the corruption.
 	 * Note: by the time SIGSEGV handler runs, the user code may have
-	 * advanced past the MOVUPS — but XMM0..XMM15 should still have
+	 * advanced past the MOVUPS, but XMM0..XMM15 should still have
 	 * the values from the failed write context. */
 	{
 		struct _libc_fpstate *fp = (struct _libc_fpstate *)uc->uc_mcontext.fpregs;
@@ -131,16 +131,16 @@ static void segv_handler(int sig, siginfo_t *si, void *ucv)
 /*
  * SIGABRT handler: fires when glibc's heap-integrity check kills the
  * process via abort(). Captures the same register/XMM state as
- * segv_handler so we can diagnose the rare residual T26/T27 class
+ * segv_handler so we can diagnose the rare heap-corruption class
  * (~1/120000 fork rate) where heap corruption manifests as abort
  * instead of segfault.
  */
 static void abrt_handler(int sig, siginfo_t *si, void *ucv)
 {
 	fprintf(stderr,
-		"SMP-T26-DIAG SIGABRT (likely glibc heap-integrity check) pid=%d\n",
+		"MALLOC-STRESS-DIAG SIGABRT (likely glibc heap-integrity check) pid=%d\n",
 		getpid());
-	/* Reuse the same state-dumper as segv_handler — same register
+	/* Reuse the same state-dumper as segv_handler: same register
 	 * layout, same registers of interest. */
 	segv_handler(sig, si, ucv);
 }

@@ -10,7 +10,7 @@
 //
 // VMware / VirtualBox / Firecracker cannot do any of these without
 // a guest-side agent.  UML's process model gets it for free; this
-// module just adds the discoverability surface so operators don't
+// module just adds the discoverability surface so users don't
 // have to know the right strace/gdb/bpftrace incantation.
 
 use std::os::unix::process::CommandExt;
@@ -34,8 +34,9 @@ fn resolve_live(paths: &Paths, name: &str) -> Result<(u32, PathBuf)> {
     }
     let manifest = Manifest::read(&manifest_path)
         .with_context(|| format!("read manifest for instance '{name}'"))?;
-    let run_id = supervise::read_run_id_file(&paths.run_id_file_path(name))
-        .with_context(|| format!("no live run for instance '{name}' — has umlctl up been called?"))?;
+    let run_id = supervise::read_run_id_file(&paths.run_id_file_path(name)).with_context(|| {
+        format!("no live run for instance '{name}' — has umlctl up been called?")
+    })?;
     let run = Run::read(&paths.run_dir(&run_id).join("run.json"))
         .with_context(|| format!("read run.json for run {run_id}"))?;
     Ok((run.pid, manifest.kernel.path.clone()))
@@ -54,9 +55,7 @@ fn resolve_live(paths: &Paths, name: &str) -> Result<(u32, PathBuf)> {
 pub fn cmd_strace(paths: &Paths, name: &str, extra: &[String]) -> Result<()> {
     let (pid, _kernel) = resolve_live(paths, name)?;
     let strace = which("strace")?;
-    eprintln!(
-        "[umlctl] attaching strace to PID {pid} (instance '{name}'); ^C to detach."
-    );
+    eprintln!("[umlctl] attaching strace to PID {pid} (instance '{name}'); ^C to detach.");
     let mut cmd = Command::new(strace);
     cmd.arg("-p").arg(pid.to_string()).arg("-f").arg("-t");
     if extra.is_empty() {
@@ -90,8 +89,10 @@ pub fn cmd_gdb(paths: &Paths, name: &str, extra: &[String]) -> Result<()> {
     // Reasonable defaults for "I just want to look around":
     //   pagination off → don't stall on long output
     //   confirm off    → don't second-guess detach
-    cmd.arg("-ex").arg("set pagination off")
-       .arg("-ex").arg("set confirm off");
+    cmd.arg("-ex")
+        .arg("set pagination off")
+        .arg("-ex")
+        .arg("set confirm off");
     for a in extra {
         cmd.arg(a);
     }
@@ -151,9 +152,7 @@ fn which(prog: &str) -> Result<String> {
         .output()
         .with_context(|| format!("which {prog}"))?;
     if !out.status.success() {
-        bail!(
-            "`{prog}` not found in PATH — install it first (apt install {prog} or equivalent)"
-        );
+        bail!("`{prog}` not found in PATH — install it first (apt install {prog} or equivalent)");
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -163,13 +162,8 @@ fn which(prog: &str) -> Result<String> {
 // __PID__ is substituted at run time.  In bpftrace, the `pid`
 // builtin is the thread-group id (TGID), so the filter captures
 // the UML main thread AND its host helper threads (io_thread,
-// vector2 RX threads, etc.) — exactly what an operator wants
+// vector2 RX threads, etc.) — exactly what a user wants
 // when looking at "what is this guest doing?"
-//
-// HONEST-AUDIT §5: all five scripts validated against a live UML
-// (boot to BPF_TEST_READY, run script for 2 s, observe non-empty
-// output).  Validation script:
-// tools/testing/selftests/um/transparency/run-bpftrace-validate.sh.
 //
 //   syscalls / sched   produce output immediately on an idle UML
 //                      (timer wakeups, scheduler switches with
@@ -217,11 +211,9 @@ interval:s:5
 ";
 
 // Block-IO script: uses the canonical block_rq_issue / _complete
-// tracepoint pair.  Note that under UBD's io_uring path (memo 02
-// Phase 2b+), the issue/complete tracepoints DO still fire — they
-// hook at the block-layer dispatch, which is upstream of the
-// driver-side io_uring submission.  Verified against vmlinux
-// includes/trace/events/block.h.
+// tracepoint pair.  Under UBD's io_uring path the issue/complete
+// tracepoints still fire because they hook at block-layer dispatch,
+// upstream of driver-side io_uring submission.
 const SCRIPT_IO: &str = "
 tracepoint:block:block_rq_issue
 /pid == __PID__/
@@ -242,10 +234,10 @@ interval:s:5
 ";
 
 // Network script: traces guest TX (writev) and RX (recvfrom)
-// syscalls from the UML host process.  For vector2 fd-handoff
-// (the post-2026-05-19 default), TX uses raw write() not writev()
-// — that produces a per-skb sys_enter_write event.  Operators
-// chasing vector2 throughput should switch to sys_enter_write
+// syscalls from the UML host process. For vector2 fd-handoff, TX
+// uses raw write() not writev(), which produces a per-skb
+// sys_enter_write event. Users chasing vector2 throughput should
+// switch to sys_enter_write
 // if they expect non-zero @tx_bytes.
 const SCRIPT_NET: &str = "
 tracepoint:syscalls:sys_enter_writev

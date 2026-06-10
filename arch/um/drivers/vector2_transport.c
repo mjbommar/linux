@@ -145,14 +145,69 @@ int um_vec2_gre_build(const struct um_vec2_gre_spec *spec, void *buf,
 	return 0;
 }
 
+static int um_vec2_gre_parse_base(const struct um_vec2_gre_spec *spec,
+				  const void *buf, size_t len,
+				  size_t *offset)
+{
+	u16 flags;
+	u16 proto;
+	int err;
+
+	err = um_vec2_get_be16(buf, len, *offset, &flags);
+	if (err)
+		return err;
+	*offset += 2;
+
+	err = um_vec2_get_be16(buf, len, *offset, &proto);
+	if (err)
+		return err;
+	*offset += 2;
+
+	if (flags != um_vec2_gre_flags(spec) || proto != UM_VEC2_GRE_PROTO_TEB)
+		return -EPROTO;
+	return 0;
+}
+
+static int um_vec2_gre_parse_key(const struct um_vec2_gre_spec *spec,
+				 const void *buf, size_t len, size_t *offset)
+{
+	u32 key;
+	int err;
+
+	if (!spec->has_key)
+		return 0;
+
+	err = um_vec2_get_be32(buf, len, *offset, &key);
+	if (err)
+		return err;
+	if (key != spec->rx_key)
+		return -EPROTO;
+	*offset += 4;
+	return 0;
+}
+
+static int um_vec2_gre_parse_sequence(const struct um_vec2_gre_spec *spec,
+				      const void *buf, size_t len,
+				      size_t offset,
+				      struct um_vec2_gre_rx *rx)
+{
+	int err;
+
+	if (!spec->has_sequence || !rx)
+		return 0;
+
+	err = um_vec2_get_be32(buf, len, offset, &rx->sequence);
+	if (err)
+		return err;
+	rx->has_sequence = true;
+	return 0;
+}
+
 int um_vec2_gre_parse(const struct um_vec2_gre_spec *spec, const void *buf,
 		      size_t len, struct um_vec2_gre_rx *rx)
 {
 	size_t need = um_vec2_gre_header_len(spec);
 	size_t offset = 0;
-	u16 flags;
-	u16 proto;
-	u32 key;
 	int err;
 
 	if (!buf || len < need)
@@ -161,36 +216,15 @@ int um_vec2_gre_parse(const struct um_vec2_gre_spec *spec, const void *buf,
 	if (rx)
 		memset(rx, 0, sizeof(*rx));
 
-	err = um_vec2_get_be16(buf, len, offset, &flags);
+	err = um_vec2_gre_parse_base(spec, buf, len, &offset);
 	if (err)
 		return err;
-	offset += 2;
 
-	err = um_vec2_get_be16(buf, len, offset, &proto);
+	err = um_vec2_gre_parse_key(spec, buf, len, &offset);
 	if (err)
 		return err;
-	offset += 2;
 
-	if (flags != um_vec2_gre_flags(spec) || proto != UM_VEC2_GRE_PROTO_TEB)
-		return -EPROTO;
-
-	if (spec->has_key) {
-		err = um_vec2_get_be32(buf, len, offset, &key);
-		if (err)
-			return err;
-		if (key != spec->rx_key)
-			return -EPROTO;
-		offset += 4;
-	}
-
-	if (spec->has_sequence && rx) {
-		err = um_vec2_get_be32(buf, len, offset, &rx->sequence);
-		if (err)
-			return err;
-		rx->has_sequence = true;
-	}
-
-	return 0;
+	return um_vec2_gre_parse_sequence(spec, buf, len, offset, rx);
 }
 
 size_t um_vec2_l2tpv3_header_len(const struct um_vec2_l2tpv3_spec *spec)
@@ -207,6 +241,63 @@ size_t um_vec2_l2tpv3_header_len(const struct um_vec2_l2tpv3_spec *spec)
 	return len;
 }
 
+static int um_vec2_l2tpv3_put_udp(const struct um_vec2_l2tpv3_spec *spec,
+				  void *buf, size_t len, size_t *offset)
+{
+	int err;
+
+	if (!spec->udp)
+		return 0;
+
+	err = um_vec2_put_be32(buf, len, *offset, UM_VEC2_L2TPV3_DATA_PACKET);
+	if (err)
+		return err;
+	*offset += 4;
+	return 0;
+}
+
+static int um_vec2_l2tpv3_put_session(const struct um_vec2_l2tpv3_spec *spec,
+				      void *buf, size_t len, size_t *offset)
+{
+	int err;
+
+	err = um_vec2_put_be32(buf, len, *offset, spec->tx_session);
+	if (err)
+		return err;
+	*offset += 4;
+	return 0;
+}
+
+static int um_vec2_l2tpv3_put_cookie(const struct um_vec2_l2tpv3_spec *spec,
+				     void *buf, size_t len, size_t *offset)
+{
+	int err;
+
+	if (!spec->has_cookie)
+		return 0;
+
+	if (spec->cookie64)
+		err = um_vec2_put_be64(buf, len, *offset, spec->tx_cookie);
+	else
+		err = um_vec2_put_be32(buf, len, *offset,
+				       (u32)spec->tx_cookie);
+	if (err)
+		return err;
+	*offset += spec->cookie64 ? 8 : 4;
+	return 0;
+}
+
+static int um_vec2_l2tpv3_put_counter(const struct um_vec2_l2tpv3_spec *spec,
+				      void *buf, size_t len, size_t offset,
+				      u32 counter)
+{
+	if (!spec->has_counter)
+		return 0;
+	if (spec->pin_counter)
+		counter = 0;
+	return um_vec2_put_be32(buf, len, offset, counter);
+}
+
 int um_vec2_l2tpv3_build(const struct um_vec2_l2tpv3_spec *spec, void *buf,
 			 size_t len, u32 counter)
 {
@@ -217,39 +308,100 @@ int um_vec2_l2tpv3_build(const struct um_vec2_l2tpv3_spec *spec, void *buf,
 	if (!buf || len < need)
 		return -EMSGSIZE;
 
-	if (spec->udp) {
-		err = um_vec2_put_be32(buf, len, offset,
-				       UM_VEC2_L2TPV3_DATA_PACKET);
-		if (err)
-			return err;
-		offset += 4;
-	}
-
-	err = um_vec2_put_be32(buf, len, offset, spec->tx_session);
+	err = um_vec2_l2tpv3_put_udp(spec, buf, len, &offset);
 	if (err)
 		return err;
-	offset += 4;
 
-	if (spec->has_cookie) {
-		if (spec->cookie64)
-			err = um_vec2_put_be64(buf, len, offset,
-					       spec->tx_cookie);
-		else
-			err = um_vec2_put_be32(buf, len, offset,
-					       spec->tx_cookie);
+	err = um_vec2_l2tpv3_put_session(spec, buf, len, &offset);
+	if (err)
+		return err;
+
+	err = um_vec2_l2tpv3_put_cookie(spec, buf, len, &offset);
+	if (err)
+		return err;
+
+	return um_vec2_l2tpv3_put_counter(spec, buf, len, offset, counter);
+}
+
+static int um_vec2_l2tpv3_parse_udp(const struct um_vec2_l2tpv3_spec *spec,
+				    const void *buf, size_t len,
+				    size_t *offset)
+{
+	u32 value;
+	int err;
+
+	if (!spec->udp)
+		return 0;
+
+	err = um_vec2_get_be32(buf, len, *offset, &value);
+	if (err)
+		return err;
+	if (value != UM_VEC2_L2TPV3_DATA_PACKET)
+		return -EPROTO;
+	*offset += 4;
+	return 0;
+}
+
+static int um_vec2_l2tpv3_parse_session(const struct um_vec2_l2tpv3_spec *spec,
+					const void *buf, size_t len,
+					size_t *offset)
+{
+	u32 value;
+	int err;
+
+	err = um_vec2_get_be32(buf, len, *offset, &value);
+	if (err)
+		return err;
+	if (value != spec->rx_session)
+		return -EPROTO;
+	*offset += 4;
+	return 0;
+}
+
+static int um_vec2_l2tpv3_parse_cookie(const struct um_vec2_l2tpv3_spec *spec,
+				       const void *buf, size_t len,
+				       size_t *offset)
+{
+	u64 cookie64;
+	u32 value;
+	int err;
+
+	if (!spec->has_cookie)
+		return 0;
+
+	if (spec->cookie64) {
+		err = um_vec2_get_be64(buf, len, *offset, &cookie64);
 		if (err)
 			return err;
-		offset += spec->cookie64 ? 8 : 4;
+		if (cookie64 != spec->rx_cookie)
+			return -EPROTO;
+		*offset += 8;
+		return 0;
 	}
 
-	if (spec->has_counter) {
-		if (spec->pin_counter)
-			counter = 0;
-		err = um_vec2_put_be32(buf, len, offset, counter);
-		if (err)
-			return err;
-	}
+	err = um_vec2_get_be32(buf, len, *offset, &value);
+	if (err)
+		return err;
+	if (value != (u32)spec->rx_cookie)
+		return -EPROTO;
+	*offset += 4;
+	return 0;
+}
 
+static int um_vec2_l2tpv3_parse_counter(const struct um_vec2_l2tpv3_spec *spec,
+					const void *buf, size_t len,
+					size_t offset,
+					struct um_vec2_l2tpv3_rx *rx)
+{
+	int err;
+
+	if (!spec->has_counter || !rx)
+		return 0;
+
+	err = um_vec2_get_be32(buf, len, offset, &rx->counter);
+	if (err)
+		return err;
+	rx->has_counter = true;
 	return 0;
 }
 
@@ -259,8 +411,6 @@ int um_vec2_l2tpv3_parse(const struct um_vec2_l2tpv3_spec *spec,
 {
 	size_t need = um_vec2_l2tpv3_header_len(spec);
 	size_t offset = 0;
-	u64 cookie64;
-	u32 value;
 	int err;
 
 	if (!buf || len < need)
@@ -269,46 +419,17 @@ int um_vec2_l2tpv3_parse(const struct um_vec2_l2tpv3_spec *spec,
 	if (rx)
 		memset(rx, 0, sizeof(*rx));
 
-	if (spec->udp) {
-		err = um_vec2_get_be32(buf, len, offset, &value);
-		if (err)
-			return err;
-		if (value != UM_VEC2_L2TPV3_DATA_PACKET)
-			return -EPROTO;
-		offset += 4;
-	}
-
-	err = um_vec2_get_be32(buf, len, offset, &value);
+	err = um_vec2_l2tpv3_parse_udp(spec, buf, len, &offset);
 	if (err)
 		return err;
-	if (value != spec->rx_session)
-		return -EPROTO;
-	offset += 4;
 
-	if (spec->has_cookie) {
-		if (spec->cookie64) {
-			err = um_vec2_get_be64(buf, len, offset, &cookie64);
-			if (err)
-				return err;
-			if (cookie64 != spec->rx_cookie)
-				return -EPROTO;
-			offset += 8;
-		} else {
-			err = um_vec2_get_be32(buf, len, offset, &value);
-			if (err)
-				return err;
-			if (value != (u32)spec->rx_cookie)
-				return -EPROTO;
-			offset += 4;
-		}
-	}
+	err = um_vec2_l2tpv3_parse_session(spec, buf, len, &offset);
+	if (err)
+		return err;
 
-	if (spec->has_counter && rx) {
-		err = um_vec2_get_be32(buf, len, offset, &rx->counter);
-		if (err)
-			return err;
-		rx->has_counter = true;
-	}
+	err = um_vec2_l2tpv3_parse_cookie(spec, buf, len, &offset);
+	if (err)
+		return err;
 
-	return 0;
+	return um_vec2_l2tpv3_parse_counter(spec, buf, len, offset, rx);
 }

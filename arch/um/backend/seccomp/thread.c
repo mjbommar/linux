@@ -2,10 +2,10 @@
 /*
  * seccomp backend: thread + ipi ops.
  *
- * Workstream A-03.S1.5. The jmp_buf machinery (switch_threads,
- * new_thread, start_idle_thread) is host-process-based and shared
- * verbatim with the ptrace backend; these wrappers exist so the
- * dispatch macro resolves to seccomp_<op>() in single-backend builds.
+ * The jmp_buf machinery (switch_threads, new_thread,
+ * start_idle_thread) is host-process-based. These wrappers exist so
+ * the dispatch macro resolves to seccomp_<op>() in single-backend
+ * builds.
  */
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>

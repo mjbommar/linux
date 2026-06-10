@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Host operation boundary for the UML vector networking v2 rewrite.
+ * Host operation boundary for UML vector networking v2.
  */
 #ifndef __UM_VECTOR2_HOST_H
 #define __UM_VECTOR2_HOST_H
@@ -13,7 +13,7 @@ struct um_vec2_host;
 
 /**
  * struct um_vec2_host_ops - host data-plane operations.
- * @name: Stable backend name for diagnostics and cscope/clang queries.
+ * @name: Stable backend name for logs and trace output.
  * @tx_batch: Complete up to @budget descriptors from a TX ring.
  * @rx_batch: Prepare up to @budget RX buffers and complete received slots.
  *

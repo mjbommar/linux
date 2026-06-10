@@ -276,16 +276,12 @@ static void vector2_tap_rx_batch_reads_frame_test(struct kunit *test)
 }
 
 /*
- * B2 regression: short frame must propagate -EPROTO from rx_batch.
+ * Short frames must propagate -EPROTO from rx_batch.
  *
- * um_vec2_tap_read_skb() returns -EPROTO when the host-read frame
- * is too short to even contain a virtio_net_hdr.  Pre-fix, the rx
- * loop would `break` on -EPROTO and then unconditionally zero ret
- * before the complete label, masking the error.  The NAPI poll
- * therefore never saw -EPROTO and UM_VEC2_STAT_RX_PROTO_DROPS was
- * dead for TAP.  Post-fix, -EPROTO `goto complete`s with ret
- * preserved (matching the FD backend's pattern), so the NAPI poll
- * sees the error and increments the counter.
+ * um_vec2_tap_read_skb() returns -EPROTO when the host-read frame is
+ * too short to contain a virtio_net_hdr. The RX loop must preserve
+ * that error so NAPI sees -EPROTO and UM_VEC2_STAT_RX_PROTO_DROPS is
+ * updated for TAP.
  */
 static void vector2_tap_rx_batch_short_frame_returns_eproto_test(struct kunit *test)
 {

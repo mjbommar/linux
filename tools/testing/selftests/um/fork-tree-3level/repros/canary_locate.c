@@ -23,7 +23,7 @@ static void abort_handler(int sig, siginfo_t *info, void *ucv) {
 	    "ABORT_RIP=0x%lx RSP=0x%lx RBP=0x%lx sig=%d\n",
 	    rip, rsp, rbp, sig);
 	if (log_fd >= 0) write(log_fd, buf, n);
-	/* Don't return — let the default action kill us. */
+	/* Don't return - let the default action kill us. */
 	signal(sig, SIG_DFL);
 	raise(sig);
 }

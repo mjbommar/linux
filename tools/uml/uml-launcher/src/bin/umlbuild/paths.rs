@@ -70,9 +70,11 @@ impl Paths {
         self.cache_root.join("rootfs").join(profile)
     }
 
-    #[allow(dead_code)] // used by future `umlbuild cache` verb (v2)
+    #[allow(dead_code)] // reserved for image-producing build flows
     pub fn image_path(&self, profile: &str) -> PathBuf {
-        self.cache_root.join("images").join(format!("{profile}.img"))
+        self.cache_root
+            .join("images")
+            .join(format!("{profile}.img"))
     }
 
     pub fn user_profile_dir(&self) -> PathBuf {

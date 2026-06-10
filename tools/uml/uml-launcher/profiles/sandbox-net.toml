@@ -106,7 +106,7 @@ sandbox_cmd = "echo '--- guest network ---'; ip addr; echo; echo '--- resolv ---
 
 [network]
 mode     = "tap"            # "tap" or "none"
-driver   = "vector2"        # "vector2" (default, current arch) or "vector" (legacy v1)
+driver   = "vector2"        # "vector2" (default) or "vector" (vec0)
 tap_name = "umlb-tap0"
 host_ip  = "10.7.0.1/24"
 guest_ip = "10.7.0.2/24"

@@ -15,10 +15,8 @@ is equivalent to (and replaces) the traditional:
         con=null con0=fd:0,fd:1 root=/dev/root rw
 ```
 
-Workstream C-10 of the UML redesign. See
-[`Documentation/virt/uml/redesign/02-workstreams/
-C-profiles-and-gaps/10-host-launcher-crosvm.md`](../../../Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/10-host-launcher-crosvm.md)
-for the design document.
+See [`Documentation/virt/uml/launcher.rst`](../../../Documentation/virt/uml/launcher.rst)
+for the user-facing reference.
 
 ## Build
 
@@ -106,7 +104,8 @@ fork, pre-`exec`). No shell-side fd juggling required.
 - AppArmor / SELinux reference profiles.
 - Multi-instance daemon + RPC control surface.
 
-See the [design doc](../../../Documentation/virt/uml/redesign/02-workstreams/C-profiles-and-gaps/10-host-launcher-crosvm.md) §"v2" for scope.
+See [`Documentation/virt/uml/launcher.rst`](../../../Documentation/virt/uml/launcher.rst)
+for the user-facing reference.
 
 ## Dependencies
 

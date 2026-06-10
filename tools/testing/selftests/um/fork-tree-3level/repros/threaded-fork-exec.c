@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Minimal C reproducer for the SMP-T24 page-recycling-class residual.
+// Minimal C reproducer for fork/exec page-table state regressions.
 //
 // Mirrors threaded-subprocess-wait.py's fork+exec churn but in pure
-// C — no Python interpreter overhead. N pthreads each loop fork()
+// C, without Python interpreter overhead. N pthreads each loop fork()
 // + execve(/bin/true) + waitpid().
 //
 // If the residual reproduces here, the bug is independent of Python's
-// subprocess/threading machinery — it's a kernel-side fork+exec PT
+// subprocess/threading machinery; it is a kernel-side fork+exec PT
 // race triggered by concurrent worker_thread activity in the same mm.
 //
 // Build:  cc -O0 -static -pthread -o threaded-fork-exec threaded-fork-exec.c
 // Run:    ./threaded-fork-exec [N_WORKERS] [ITERS_PER_WORKER]
-// Default: 2 workers × 200 iters = 400 forks (matches Python repro)
+// Default: 2 workers x 200 iters = 400 forks (matches Python repro)
 
 #define _GNU_SOURCE
 #include <errno.h>

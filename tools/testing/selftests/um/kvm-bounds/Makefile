@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# KVM gadget user-pointer bounds-check selftest (audit round-6
-# G1, decisions-log D93). Validates that the gadget's TASK_SIZE_
-# CAP check returns -EFAULT for canonical kernel VAs and non-
-# canonical pointers across clock_gettime / time / getcpu.
+# KVM gadget user-pointer bounds-check selftest. Validates that the
+# gadget's TASK_SIZE_CAP check returns -EFAULT for canonical kernel VAs
+# and non-canonical pointers across clock_gettime / time / getcpu.
 
 TEST_PROGS := run-kvm-bounds.sh
 TEST_GEN_FILES := kvm-bounds-loop

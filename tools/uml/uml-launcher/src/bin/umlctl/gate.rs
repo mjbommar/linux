@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// umlctl gate — sealed wrappers around existing UML test harnesses.
-// See Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-// 30-gate-discipline.md for the policy this module enforces.
+// umlctl gate - sealed wrappers around existing UML test harnesses.
 //
 // The contract: a Gatefile describes how to invoke a pre-existing
 // harness (run-regrtest-repros.sh, run-perf-getpid.sh, kunit, cargo
-// test, …) and how to extract PASS/FAIL/EXPECTED_FAIL counts from its
-// stdout. The gate runner does NOT define passing or failing — it
+// test, ...) and how to extract PASS/FAIL/EXPECTED_FAIL counts from its
+// stdout. The gate runner does NOT define passing or failing - it
 // reports what the harness said. Tightening thresholds is progress,
-// loosening is a tracked TOML diff that requires a memo entry.
+// loosening must be a visible TOML diff.
 //
 // Output: one row appended to tools/testing/selftests/um/
 // scoreboard.jsonl per run. `umlctl gate diff` shows trend so a
@@ -55,7 +53,7 @@ pub struct GateMeta {
 #[serde(deny_unknown_fields)]
 pub struct RunSpec {
     /// Command to execute. Run via /bin/bash -c so the full string
-    /// is the script — that lets descriptors like `make -C ...` work
+    /// is the script - that lets descriptors like `make -C ...` work
     /// unchanged.
     pub cmd: String,
     /// Working directory; defaults to the linux source root if empty.
@@ -108,7 +106,7 @@ pub struct MetricSpec {
 #[serde(deny_unknown_fields)]
 pub struct Thresholds {
     /// Minimum required PASS count. The gate FAILs if the harness
-    /// reports fewer. To loosen this number, edit the TOML — that
+    /// reports fewer. To loosen this number, edit the TOML - that
     /// shows up in git history as an explicit policy change.
     #[serde(default)]
     pub min_pass: Option<u32>,
@@ -117,7 +115,7 @@ pub struct Thresholds {
     pub max_fail: Option<u32>,
     /// If set, the gate FAILs when the harness exits non-zero, even
     /// if PASS/FAIL counts would otherwise meet thresholds. Default
-    /// true — exit code is the most authoritative pass/fail signal a
+    /// true - exit code is the most authoritative pass/fail signal a
     /// harness can give us.
     #[serde(default = "default_require_clean_exit")]
     pub require_clean_exit: bool,
@@ -426,7 +424,7 @@ pub fn render_diff(rows: &[Row], gate_filter: Option<&str>, n: usize) -> String 
         ));
         if !r.failures.is_empty() {
             for f in &r.failures {
-                out.push_str(&format!("    └─ {}\n", f));
+                out.push_str(&format!("    +- {}\n", f));
             }
         }
     }
@@ -495,7 +493,7 @@ fn git_branch(root: &Path) -> Option<String> {
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s == "HEAD" {
-        // Detached — fall back to the short rev so the row is still
+        // Detached - fall back to the short rev so the row is still
         // attributable.
         git_short_rev(root)
     } else {
@@ -597,7 +595,7 @@ some-noise-line
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scoreboard.jsonl");
         let row = Row {
-            ts: "2026-04-30T15:00:00Z".into(),
+            ts: "1970-01-01T00:00:00Z".into(),
             gate: "regrtest-class-a-env".into(),
             backend: "seccomp".into(),
             commit: "deadbeef0000".into(),
@@ -631,7 +629,7 @@ some-noise-line
     #[test]
     fn diff_marks_pass_delta() {
         let mk = |pass| Row {
-            ts: "2026-04-30T00:00:00Z".into(),
+            ts: "1970-01-01T00:00:00Z".into(),
             gate: "g".into(),
             backend: "seccomp".into(),
             commit: "c".into(),

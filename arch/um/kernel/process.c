@@ -112,7 +112,7 @@ int get_current_pid(void)
  */
 void new_thread_handler(void)
 {
-	int (*fn)(void *);
+	int (*fn)(void *arg);
 	void *arg;
 
 	if (current->thread.prev_sched != NULL)
@@ -134,11 +134,6 @@ static void fork_handler(void)
 {
 	schedule_tail(current->thread.prev_sched);
 
-	/*
-	 * XXX: if interrupt_end() calls schedule, this call to
-	 * arch_switch_to isn't needed. We could want to apply this to
-	 * improve performance. -bb
-	 */
 	arch_switch_to(current);
 
 	current->thread.prev_sched = NULL;
@@ -146,7 +141,7 @@ static void fork_handler(void)
 	userspace(&current->thread.regs.regs);
 }
 
-int copy_thread(struct task_struct * p, const struct kernel_clone_args *args)
+int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
 	u64 clone_flags = args->flags;
 	unsigned long sp = args->stack;
@@ -157,7 +152,7 @@ int copy_thread(struct task_struct * p, const struct kernel_clone_args *args)
 	p->thread = (struct thread_struct) INIT_THREAD;
 
 	if (!args->fn) {
-	  	memcpy(&p->thread.regs.regs, current_pt_regs(),
+		memcpy(&p->thread.regs.regs, current_pt_regs(),
 		       sizeof(p->thread.regs.regs));
 		PT_REGS_SET_SYSCALL_RETURN(&p->thread.regs, 0);
 		if (sp != 0)
@@ -227,9 +222,9 @@ void arch_cpu_idle_prepare(void)
 	os_idle_prepare();
 }
 
-int __uml_cant_sleep(void) {
-	return in_atomic() || irqs_disabled() || in_interrupt();
-	/* Is in_interrupt() really needed? */
+int __uml_cant_sleep(void)
+{
+	return preempt_count() || irqs_disabled() || in_interrupt();
 }
 
 int uml_need_resched(void)

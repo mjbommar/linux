@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/hooks-flip/hooks-flip.sh — workstream B-06 first-flip demo.
+# um/hooks-flip/hooks-flip.sh - runtime hook flip smoke test.
 #
 # Verifies the killer property of the UML Layer 2 gate design:
 # a gate can be flipped at runtime, observed in stats, and flipped
@@ -67,12 +67,12 @@ if [ "$off_state" != "0" ]; then
 	fail "default gate state is $off_state, expected 0"
 fi
 
-# Step 2: workload with gate off — hits should stay at baseline
+# Step 2: workload with gate off; hits should stay at baseline
 workload
 hits_after_off=$(read_hits)
 off_delta=$((hits_after_off - baseline_hits))
 if [ "$off_delta" -gt 0 ]; then
-	fail "gate off but $off_delta hits recorded — static-key machinery broken"
+	fail "gate off but $off_delta hits recorded - static-key machinery broken"
 fi
 
 # Step 3: flip on
@@ -82,7 +82,7 @@ if [ "$on_state" != "1" ]; then
 	fail "after write 1, reads $on_state"
 fi
 
-# Step 4: workload with gate on — hits should increase
+# Step 4: workload with gate on; hits should increase
 workload
 hits_after_on=$(read_hits)
 on_delta=$((hits_after_on - hits_after_off))

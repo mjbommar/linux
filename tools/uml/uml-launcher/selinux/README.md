@@ -6,9 +6,8 @@ one; both together is redundant-safe (defense-in-depth).
 The AppArmor profile is the more-detailed confinement today
 (per-backend sub-profiles); this module currently declares
 only the parent `uml_launcher_t` domain. Sub-domains
-(`uml_backend_console_t`, `_net_t`, `_block_t`) are a
-follow-on that parallels the AppArmor sub-profile wire-up
-once the orchestrator lands (workstream C-10 v2 commit 8).
+(`uml_backend_console_t`, `_net_t`, `_block_t`) can parallel the
+AppArmor sub-profile split when finer SELinux separation is needed.
 
 ## Files
 
@@ -89,5 +88,4 @@ As with the AppArmor profile: seccomp gates which syscalls
 are reachable, SELinux (or AppArmor) gates which files /
 sockets / network ops those syscalls can target. Either LSM
 alone is some protection; the LSM + seccomp together match
-the crosvm / Firecracker isolation posture this workstream
-is modeled on.
+the crosvm / Firecracker isolation posture.

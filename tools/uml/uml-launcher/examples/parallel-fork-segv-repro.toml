@@ -1,6 +1,6 @@
-# Repro: parallel fork+exec from two threads, see if the SMP-T36-class
-# UML mm-counter / deferred-free race fires when two mm teardowns happen
-# concurrently.  Smaller than running regrtest -j2.
+# Repro: parallel fork+exec from two threads, exercising UML
+# mm-counter and deferred-free teardown under concurrent mm exits.
+# Smaller than running regrtest -j2.
 schema_version = 1
 
 [instance]

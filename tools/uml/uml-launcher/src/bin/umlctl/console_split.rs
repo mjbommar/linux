@@ -4,8 +4,6 @@
 // printk" vs "everything else" and derive a `kernel.log`
 // sidecar from the merged `init.log`.
 //
-// Phase O1.2 of the observability spine (Documentation/virt/uml/
-// redesign/08-future-phases/13-uml-observability-spine.md).
 // UML runs its init process on the same console fd that the
 // kernel's printk subsystem writes to, so child stdout
 // captures both streams. v1 splits them post-hoc at
@@ -22,11 +20,9 @@
 // (pre-printk UML init noise, userspace stdout, shell output,
 // anything init prints) stays in init.log.
 //
-// This is a heuristic — the memo calls it out as "needs real
-// UML cooperation testing." When a future phase adds a
-// dedicated kernel-side event emitter that writes to its own
-// fd, this module becomes the fallback path for distros with
-// older UML kernels.
+// This is a heuristic.  If a dedicated kernel-side event emitter is
+// available, this module remains the fallback path for kernels that
+// still multiplex printk and init output.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -101,7 +97,7 @@ pub fn derive_kernel_log(init_log: &Path, kernel_log: &Path) -> std::io::Result<
 /// Stream the kernel-shaped lines of `init_log` to `out`
 /// without materializing a sidecar file. Used by the
 /// `umlctl dmesg` verb when the bundle doesn't yet have a
-/// kernel.log (still-live run, or a pre-O1.2 bundle).
+/// kernel.log (for example, a still-live run).
 pub fn stream_kernel_lines<W: Write>(init_log: &Path, mut out: W) -> std::io::Result<usize> {
     if !init_log.exists() {
         return Ok(0);

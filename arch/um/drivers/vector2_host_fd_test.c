@@ -189,16 +189,12 @@ static void vector2_fd_multiqueue_missing_second_fd_unwinds_test(struct kunit *t
 }
 
 /*
- * B1 regression: partial-open unwind must leave vdev->channels = NULL.
+ * Partial-open unwind must leave vdev->channels = NULL.
  *
  * Validation passes for both fds in the multi-queue range, then the
- * fault injector trips um_vec2_fd_channel_open() at index 1.  The
- * unwind path closes channel 0 + frees the channels array.  Before
- * the fix, vdev->channels still pointed at the freed array because
- * um_vec2_fd_channel_open() published it per-iteration.  Calling
- * um_vec2_fd_close() after that would walk freed memory.  After the
- * fix the publish happens only on success in um_vec2_fd_open(), and
- * the unwind explicitly resets vdev->channels = NULL.
+ * fault injector trips um_vec2_fd_channel_open() at index 1. The
+ * unwind path closes channel 0 and frees the channels array. A subsequent
+ * um_vec2_fd_close() must be a no-op rather than walking freed memory.
  */
 static void vector2_fd_multiqueue_partial_open_unwind_test(struct kunit *test)
 {
@@ -221,11 +217,7 @@ static void vector2_fd_multiqueue_partial_open_unwind_test(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, vdev->channels);
 	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
 
-	/*
-	 * Belt-and-suspenders: a follow-up um_vec2_fd_close() on a freshly
-	 * unwound vdev must be a no-op rather than walking freed memory.
-	 * Pre-fix this would UAF.
-	 */
+	/* Closing a freshly unwound vdev must not walk freed memory. */
 	um_vec2_fd_close(vdev);
 	KUNIT_EXPECT_NULL(test, vdev->channels);
 	KUNIT_EXPECT_EQ(test, vdev->num_channels, 0U);
@@ -260,52 +252,61 @@ static void vector2_fd_netdev_open_stop_test(struct kunit *test)
 	vector2_fd_test_close_pipe(fds);
 }
 
-static void vector2_fd_netdev_open_stop_repeats_test(struct kunit *test)
+static struct net_device *
+vector2_fd_test_alloc_pipe_netdev(struct kunit *test, struct um_vec2_dev *vdev,
+				  int fds[2])
 {
-	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 8);
-	struct net_device *dev;
-	unsigned int i;
-	int fds[2] = { -1, -1 };
-
 	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
 	vdev->cfg.fd = fds[0];
 	vdev->cfg.has_fd = true;
-	dev = vector2_fd_test_alloc_netdev(test, vdev);
+	return vector2_fd_test_alloc_netdev(test, vdev);
+}
 
-	for (i = 0; i < VECTOR2_FD_OPEN_STOP_STRESS_ITERS; i++) {
-		int ret;
+static bool vector2_fd_repeat_open(struct kunit *test, struct um_vec2_dev *vdev,
+				   struct net_device *dev, unsigned int iter)
+{
+	int ret;
 
-		ret = um_vec2_netdev_open(dev);
-		if (ret) {
-			KUNIT_FAIL(test, "iter %u open ret=%d", i, ret);
-			break;
-		}
-		if (vdev->life.state != UM_VEC2_DEV_RUNNING) {
-			KUNIT_FAIL(test, "iter %u state after open=%d", i,
-				   vdev->life.state);
-			break;
-		}
-		if (!vdev->channels || !netif_carrier_ok(dev)) {
-			KUNIT_FAIL(test, "iter %u open did not attach channel", i);
-			break;
-		}
-
-		ret = um_vec2_netdev_stop(dev);
-		if (ret) {
-			KUNIT_FAIL(test, "iter %u stop ret=%d", i, ret);
-			break;
-		}
-		if (vdev->life.state != UM_VEC2_DEV_REGISTERED ||
-		    vdev->channels || netif_carrier_ok(dev)) {
-			KUNIT_FAIL(test, "iter %u stop did not return closed", i);
-			break;
-		}
-
-		if (!(i & 0x3f))
-			cond_resched();
+	ret = um_vec2_netdev_open(dev);
+	if (ret) {
+		KUNIT_FAIL(test, "iter %u open ret=%d", iter, ret);
+		return false;
+	}
+	if (vdev->life.state != UM_VEC2_DEV_RUNNING) {
+		KUNIT_FAIL(test, "iter %u state after open=%d", iter,
+			   vdev->life.state);
+		return false;
+	}
+	if (!vdev->channels || !netif_carrier_ok(dev)) {
+		KUNIT_FAIL(test, "iter %u open did not attach channel", iter);
+		return false;
 	}
 
-	KUNIT_EXPECT_EQ(test, i, VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
+	return true;
+}
+
+static bool vector2_fd_repeat_stop(struct kunit *test, struct um_vec2_dev *vdev,
+				   struct net_device *dev, unsigned int iter)
+{
+	int ret;
+
+	ret = um_vec2_netdev_stop(dev);
+	if (ret) {
+		KUNIT_FAIL(test, "iter %u stop ret=%d", iter, ret);
+		return false;
+	}
+	if (vdev->life.state != UM_VEC2_DEV_REGISTERED ||
+	    vdev->channels || netif_carrier_ok(dev)) {
+		KUNIT_FAIL(test, "iter %u stop did not return closed", iter);
+		return false;
+	}
+
+	return true;
+}
+
+static void vector2_fd_expect_repeat_stats(struct kunit *test,
+					   struct um_vec2_dev *vdev)
+{
 	KUNIT_EXPECT_EQ(test,
 			um_vec2_stat_read(vdev, UM_VEC2_STAT_OPEN_ATTEMPTS),
 			(u64)VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
@@ -314,6 +315,29 @@ static void vector2_fd_netdev_open_stop_repeats_test(struct kunit *test)
 			0ULL);
 	KUNIT_EXPECT_EQ(test, um_vec2_stat_read(vdev, UM_VEC2_STAT_CLOSES),
 			(u64)VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
+}
+
+static void vector2_fd_netdev_open_stop_repeats_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_fd_test_alloc_vdev(test, 8);
+	struct net_device *dev;
+	unsigned int i;
+	int fds[2] = { -1, -1 };
+
+	dev = vector2_fd_test_alloc_pipe_netdev(test, vdev, fds);
+
+	for (i = 0; i < VECTOR2_FD_OPEN_STOP_STRESS_ITERS; i++) {
+		if (!vector2_fd_repeat_open(test, vdev, dev, i))
+			break;
+		if (!vector2_fd_repeat_stop(test, vdev, dev, i))
+			break;
+
+		if (!(i & 0x3f))
+			cond_resched();
+	}
+
+	KUNIT_EXPECT_EQ(test, i, VECTOR2_FD_OPEN_STOP_STRESS_ITERS);
+	vector2_fd_expect_repeat_stats(test, vdev);
 
 	if (vdev->life.state != UM_VEC2_DEV_REGISTERED)
 		um_vec2_netdev_stop(dev);

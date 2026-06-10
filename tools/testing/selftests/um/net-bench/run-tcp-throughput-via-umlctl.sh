@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Memo 01 Step 2 — guest→host TCP throughput via the production
+# guest->host TCP throughput via the production
 # umlctl fd-handoff path.
 #
 # The earlier standalone wrapper (run-tcp-throughput.sh +
@@ -157,7 +157,7 @@ RATIO=$(python3 -c "v=$V2_MED; l=$VEC_MED; print(f'{v/l:.3f}' if l > 0 else 'inf
 PASS=$(python3 -c "v=$V2_MED; l=$VEC_MED; print('PASS' if l > 0 and v/l >= 0.85 else 'FAIL')")
 
 cat > "$OUT/verdict.txt" <<EOF
-Memo 01 Step 2 — guest→host TCP throughput via umlctl fd-handoff
+guest->host TCP throughput via umlctl fd-handoff
 
 Kernel:    $KERNEL
 Backend:   $BACKEND
@@ -172,7 +172,7 @@ vector2 per-rep Mbps: ${V2[*]:-(none)}
 
 vector  median Mbps: $VEC_MED
 vector2 median Mbps: $V2_MED
-ratio (v2 / legacy): $RATIO   (gate ≥ 0.85)
+ratio (v2 / legacy): $RATIO   (gate >= 0.85)
 
 VERDICT: $PASS
 EOF

@@ -89,12 +89,12 @@ SECTIONS
   } =0x90909090
 
   /*
-   * .um_patch_text — UML runtime-patchable code (static_branch call
-   * sites, future ftrace mcount stubs, kprobe insertion points).
-   * Deliberately named with a leading `.um` so it does not match the
-   * generic `.text.*` wildcard above. Kept in its own page-aligned
-   * range so B-04's mprotect helpers can make *only* this region
-   * writable during a poke. See Documentation/virt/uml/section-split.rst.
+   * .um_patch_text - UML runtime-patchable code (static_branch call
+   * sites, ftrace mcount stubs, kprobe insertion points).
+   * Deliberately named with a leading .um so it does not match the
+   * generic .text.* wildcard above. Kept in its own page-aligned
+   * range so the mprotect helpers can make *only* this region writable
+   * during a poke. See Documentation/virt/uml/section-split.rst.
    */
   . = ALIGN(PAGE_SIZE);
   .um_patch_text : {

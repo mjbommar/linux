@@ -1,5 +1,5 @@
 /*
- * Multi-thread file-mmap+PROT_EXEC repro — mimics cpython's subinterpreter
+ * Multi-thread file-mmap+PROT_EXEC repro - mimics cpython's subinterpreter
  * import workload: each thread repeatedly dlopen/dlclose a small .so,
  * exercising file-backed PROT_EXEC mmap from sibling threads sharing the mm.
  *

@@ -1,14 +1,12 @@
 schema_version = 1
 volumes = []
 
-# Phase J LTP runner — kirk-driven LTP suite execution.
-# Spec: phase-J-design-2026-05-07.md §4 + phase-J-ltp-curation-
-# 2026-05-14.md §4.
+# LTP runner: kirk-driven LTP suite execution.
 #
 # Operator pre-flight (ONE-TIME, NOT yet done at landing):
 #   1. git clone --depth 1 https://github.com/linux-test-project/ltp /opt/ltp-src
 #      cd /opt/ltp-src && make autotools && ./configure
-#      make -j$(nproc) && sudo make install   # → /opt/ltp
+#      make -j$(nproc) && sudo make install   # installs /opt/ltp
 #   2. git clone --depth 1 https://github.com/linux-test-project/kirk /opt/kirk
 #      (kirk is Python; no compile needed; runs with system python3)
 #   3. Confirm /opt/ltp and /opt/kirk are hostfs-visible from the
@@ -23,12 +21,8 @@ volumes = []
 #      OR copy ltp-skip.txt to /opt/uml-soak/ltp-skip.txt and
 #      edit the path below.
 #
-# Daemon scheduling (per Phase J design §4.3): runs every 8
-# daemon rotations rather than every rotation, due to the
-# 45-60 min per-cycle wall-clock. The daemon's rotation counter
-# in run-soak-daemon.sh switches LTP on/off via the per-workload
-# frequency attribute (memo phase-J-design-2026-05-07.md §2.7
-# open question — to be added at template-list expansion time).
+# Daemon scheduling: this workload is intended to run less often than
+# short smoke workloads because each cycle can take 45-60 minutes.
 
 [instance]
 name = "soak-ltp-runner-{{BACKEND}}-w0"
@@ -56,11 +50,11 @@ cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 5
 
-# Phase 2: kirk-driven LTP run.
+# Step 2: kirk-driven LTP run.
 #
-# kirk invocation per LTP curation memo §4:
+# kirk invocation:
 #   --run-suite <suite>    : the curated suite name (or path to suite file)
-#   --skip-file <file>     : per-test deny-list (112 entries seeded by curation memo §3)
+#   --skip-file <file>     : per-test deny-list
 #   --json-report <file>   : machine-readable verdict, parsed by the report phase
 #   --sut host             : run on the local (in-guest) host, not via SSH
 #
@@ -79,21 +73,19 @@ python3 ./kirk \
 echo LTP_RUN_RC=$?
 """
 expect = ""
-timeout_secs = 3600   # 60 min hard kill per LTP curation memo §5
+timeout_secs = 3600   # 60 min hard kill
 
-# Phase 3: parse + emit verdict.
+# Step 3: parse + emit verdict.
 #
 # Bridge from kirk's JSON output to the daemon's REPRO_DONE
 # convention. kirk's JSON has a top-level `tests` array; each
-# entry has `status` in {PASS, CONF, FAIL, BROK, …}. The bridge:
-#   - PASS or CONF (skipped-by-CONFIG) → counts as PASS
-#   - FAIL or BROK → counts as FAIL
-#   - Anything > X% FAIL of total → emit LTP_FAIL else LTP_OK
+# entry has `status` in {PASS, CONF, FAIL, BROK, ...}. The bridge:
+#   - PASS or CONF (skipped-by-CONFIG) counts as PASS
+#   - FAIL or BROK counts as FAIL
+#   - Anything > X% FAIL of total emits LTP_FAIL, else LTP_OK
 #
-# The X% threshold for "soak it's a regression" vs "noise floor"
-# is a Phase J operational tuning knob; default 1% per LTP
-# curation memo §5. The kirk JSON is preserved at logs/ltp-
-# report-<run>.json for post-mortem regardless of verdict.
+# The X% threshold for "regression" vs "noise floor" defaults to 1%.
+# The kirk JSON is preserved for post-mortem regardless of verdict.
 [[init.phases]]
 name = "report"
 cmd = """
@@ -108,10 +100,10 @@ total = len(tests)
 fail_pct = (fail_n * 100.0 / total) if total else 0.0
 print(f"LTP_SUMMARY tests={total} pass={pass_n} fail={fail_n} fail_pct={fail_pct:.2f}")
 if total == 0:
-    print("LTP_FAIL — empty result")
+    print("LTP_FAIL - empty result")
     sys.exit(1)
 if fail_pct > 1.0:
-    print(f"LTP_FAIL — fail_pct {fail_pct:.2f}% > 1% threshold")
+    print(f"LTP_FAIL - fail_pct {fail_pct:.2f}% > 1% threshold")
     sys.exit(1)
 print("LTP_OK")
 '
@@ -121,9 +113,8 @@ expect = ""
 timeout_secs = 60
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt in; they require host-side reservation.
+# Cgroup limits opt in; they require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

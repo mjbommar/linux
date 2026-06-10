@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/template-pause-pool-member-smoke — Memo 09 §2 end-to-end smoke.
+# um/template-pause-pool-member-smoke - pool-member entry smoke test.
 #
 # What this proves:
 #
@@ -10,20 +10,19 @@
 #      resumes on SIGCONT, and forks via
 #      os_template_pause_fork_clone_to(child_entry_pool_member).
 #   3. The M-fork child runs child_entry_pool_member on a private
-#      MAP_PRIVATE stack: preempt_enable + signal restore + POSIX
-#      timer rebuild + one_shot prime + PT_REGS_SET_SYSCALL_RETURN
-#      + userspace().
+#      MAP_PRIVATE stack, restores kernel/user state, and re-enters
+#      userspace().
 #   4. Init.sh's /proc write returns rc=0 (POST_PAUSE).
 #   5. Init.sh executes subsequent commands (MEMBER_ALIVE_1).
-#   6. sleep(2) wakeups succeed — multiple MEMBER_TICK markers
+#   6. sleep(2) wakeups succeed - multiple MEMBER_TICK markers
 #      confirm timer firing in the child.
 #   7. Init.sh reaches MEMBER_DONE without panic.
 #
 # Exit codes:
-#   0  PASS  — POOL_ENTER + MEMBER_DONE seen, >=3 MEMBER_TICKs,
+#   0  PASS  - POOL_ENTER + MEMBER_DONE seen, >=3 MEMBER_TICKs,
 #              no kernel panic.
-#   1  FAIL  — child never reached MEMBER_DONE.
-#   4  SKIP  — kernel binary missing or python3 unavailable.
+#   1  FAIL  - child never reached MEMBER_DONE.
+#   4  SKIP  - kernel binary missing or python3 unavailable.
 
 set -u
 
@@ -54,7 +53,7 @@ while [ $i -lt 5 ]; do
 	i=$((i+1))
 	echo "TPPM_MEMBER_TICK $i pid=$$"
 done
-# Read back applied identity (if any) — proves master ran
+# Read back applied identity (if any) - proves master ran
 # um_template_identity_apply on this iteration's blob.
 if [ -r /proc/sys/kernel/hostname ]; then
 	HN=$(cat /proc/sys/kernel/hostname 2>/dev/null)
@@ -74,7 +73,7 @@ kernel, init_path, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
 def Z(b, n):
     return b.ljust(n, b'\x00')[:n]
 
-# Identity blob — supervisor stamps the pool-member identity.
+# Identity blob - supervisor stamps the pool-member identity.
 # Master reads this at fork iteration start and calls
 # um_template_identity_apply() before forking the child.
 blob = struct.pack(
@@ -140,7 +139,7 @@ if state(pid) == "X":
     log.close()
     sys.exit("master exited before reaching SIGSTOP")
 
-# One SIGCONT — drive a single fork iteration to completion.
+# One SIGCONT - drive a single fork iteration to completion.
 if state(pid) == "T":
     os.kill(pid, signal.SIGCONT)
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-bench — Memo 09 Phase 3 acceptance harness.
+# um/pool-bench - pool acceptance harness.
 #
-# Boots ONE `umlctl pool serve` daemon and drives it through the four
-# Phase 3 acceptance gates from Memo 09 §3:
+# Boots one `umlctl pool serve` daemon and drives it through the pool
+# acceptance gates:
 #
 #   1. take.p50/p99 latency over 1000 sequential takes.
 #      gate: p50 <= 5 ms, p99 <= 50 ms
@@ -20,9 +20,9 @@
 # and verdict.  The runner exits 0 only if all gates pass.
 #
 # Exit codes (kselftest convention):
-#   0 PASS — all gates hold
-#   4 SKIP — /dev/kvm absent, $UM_FORK_KERNEL missing, or umlctl unbuilt
-#   1 FAIL — any gate violated
+#   0 PASS - all gates hold
+#   4 SKIP - /dev/kvm absent, $UM_FORK_KERNEL missing, or umlctl unbuilt
+#   1 FAIL - any gate violated
 #
 # Environment:
 #   UM_FORK_KERNEL    Fork-mode UML kernel built with
@@ -106,7 +106,7 @@ except Exception:
 	if [ -n "${MASTER_PID:-}" ]; then
 		kill -KILL "$MASTER_PID" 2>/dev/null || true
 	fi
-	# Sweep any UML masters that may have escaped — same defensive
+	# Sweep any UML masters that may have escaped - same defensive
 	# pattern as template-pause-fork-stress, since each leaks a
 	# 128 MiB tmpfs allocation otherwise.
 	pgrep -f "linux mem=128M" 2>/dev/null | while read -r p; do
@@ -177,7 +177,7 @@ if ! kill -0 "$MASTER_PID" 2>/dev/null; then
 fi
 
 # Run the bench harness.  Single Python invocation so the gates share
-# one daemon boot — boot is ~5-10 s on a healthy host and we don't
+# one daemon boot - boot is ~5-10 s on a healthy host and we don't
 # want to amortize it four times.
 python3 - \
 	"$SOCK" "$DAEMON_PID" "$MASTER_PID" \
@@ -204,7 +204,7 @@ def rpc(payload, timeout=10.0):
 
     A fresh socket per call matches the daemon's "one request per
     connection" contract (pool_serve.rs::handle_client), and the cost
-    is ~10 us of AF_UNIX socket+connect+close — well below the 5 ms
+    is ~10 us of AF_UNIX socket+connect+close - well below the 5 ms
     p50 budget.
     """
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -226,10 +226,10 @@ def rss_kb(pid):
 
     The supervisor (umlctl pool serve) is a normal Rust process so its
     RSS is always immediately available.  The master is SIGSTOP'd
-    between iterations and its VmRSS field is updated lazily; for the
-    Phase-3 gates we sample it AFTER a take returns (master is back in
-    T state with a stable VmRSS), so the lazy-update issue doesn't
-    matter here.
+    between iterations and its VmRSS field is updated lazily; these
+    gates sample it after a take returns (master is back in T state
+    with a stable VmRSS), so the lazy-update issue does not matter
+    here.
     """
     try:
         with open(f"/proc/{pid}/status") as f:
@@ -256,7 +256,7 @@ def take_payload(instance, mac_suffix):
 
     The kernel validates the identity blob's magic + version, so we
     have to round-trip a structurally valid blob even though the M-fork
-    child doesn't actually plumb identity in Phase 2a.
+    child does not actually plumb identity.
     """
     a = (mac_suffix >> 16) & 0xff
     b = (mac_suffix >> 8) & 0xff
@@ -353,8 +353,8 @@ for i in range(FORKS):
     if p > 0:
         fork_pids.append(p)
 # Sum the RSS of supervisor + master + every still-runnable fork pid.
-# In Phase 2a the M-fork children are SIGKILL'd by the master
-# immediately post-fork and become zombies (VmRSS=0 / unreadable);
+# The M-fork children are SIGKILL'd by the master immediately
+# post-fork and become zombies (VmRSS=0 / unreadable);
 # the live-RSS bucket therefore captures actual amplification,
 # which is what the gate is about.  Zombies are accounted as 0.
 rss_supervisor_end = rss_kb(DAEMON_PID) or 0
@@ -409,8 +409,8 @@ for i in range(LIFECYCLE_N):
     p = r.get("result", {}).get("pid", 0)
     if p > 0:
         # Destroy via RPC so the daemon drops the member-table entry;
-        # the master has already SIGKILL'd it in Phase 2a, so this is
-        # primarily a daemon-side bookkeeping unbind.
+        # the master has already SIGKILL'd it, so this is primarily a
+        # daemon-side bookkeeping unbind.
         try:
             rpc({"op": "destroy", "pid": p})
         except Exception:
@@ -501,7 +501,7 @@ import json, sys
 with open(sys.argv[1]) as f:
     r = json.load(f)
 
-# Gate ceilings (per Memo 09 §3 Phase 3).
+# Gate ceilings.
 GATE_P50_MS = 5.0
 GATE_P99_MS = 50.0
 GATE_RSS_TOTAL_MIB = 200.0
@@ -537,11 +537,10 @@ else:
 # Gate 2: memory amplification.
 #
 # The gate is meaningless without live children to measure.
-# Phase 2a's pre-private-stack code SIGKILL'd children immediately
-# post-fork, which would let this gate silently PASS at
-# (master + supervisor) RSS only — a misleading "200 MiB for 100
-# forks" claim when the real number was "200 MiB for 0 live
-# children."  Hardening-plan §1.5 fix: require at least half the
+# Earlier fork paths SIGKILL'd children immediately post-fork, which
+# would let this gate silently PASS at (master + supervisor) RSS only
+# - a misleading "200 MiB for 100 forks" claim when the real number
+# was "200 MiB for 0 live children."  Require at least half the
 # attempted forks to be alive when we sample RSS; report a clear
 # FAIL otherwise.  Operators reading this output get a real
 # amplification number or an honest "gate cannot measure" verdict.

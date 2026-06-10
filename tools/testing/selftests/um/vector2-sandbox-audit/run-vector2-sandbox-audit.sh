@@ -3,8 +3,7 @@
 #
 # Selftest: drive `umlctl gate loop --audit-vector-sandbox` against
 # a vector2 auto-queue fd boot and assert no forbidden host
-# operations were issued.  Designed for CI preflight per audit
-# P5.1.
+# operations were issued.
 #
 # Skip semantics (kselftest exit 4):
 #   - missing UML_KERNEL with CONFIG_UML_NET_VECTOR_V2=y;
@@ -13,10 +12,10 @@
 #     runner.
 #
 # Exit codes:
-#   0 — PASS (audit gate ran, no forbidden ops, scoreboard PASS)
-#   1 — FAIL (audit detected /dev/net/tun open, TUNSETIFF, AF_PACKET,
+#   0 - PASS (audit gate ran, no forbidden ops, scoreboard PASS)
+#   1 - FAIL (audit detected /dev/net/tun open, TUNSETIFF, AF_PACKET,
 #       bpf(), or UML network-helper exec in vector host path)
-#   4 — SKIP
+#   4 - SKIP
 
 set -u
 

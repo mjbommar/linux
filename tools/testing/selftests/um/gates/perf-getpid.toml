@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# L5: getpid() round-trip perf gate (memo 08 sub-commit #6).
+# getpid() round-trip perf gate.
 #
 # Wraps run-perf-getpid.sh, which boots UML with a tight getpid()
 # loop as init=, captures cyc_per_call from the in-guest output line,
 # and computes the kvm:seccomp ratio. The harness already enforces
-# its own MAX_KVM_RATIO ceiling and exits non-zero on regression — we
+# its own MAX_KVM_RATIO ceiling and exits non-zero on regression; we
 # pass that exit code through and additionally extract the ratio for
 # trend tracking in the scoreboard.
 #
 # Note: this gate measures the v1 KVM (gadget/integrated) backend,
-# NOT v2 — perf-getpid predates v2 and runs on the legacy stack. v2
-# perf measurement uses a different harness (Python startup, memo
-# §H.1). Kept here so the launcher can still bisect v1 perf
+# NOT v2. v2 perf measurement uses a different harness (Python
+# startup). Kept here so the launcher can still bisect v1 perf
 # regressions.
 
 schema_version = 1
@@ -31,14 +30,14 @@ UML_BINARY = "{{kernel}}"
 # Backend list is fixed for this harness; {{backend}} is informational
 # only (the harness measures all three).
 BACKENDS = "ptrace seccomp kvm"
-# Default ceiling: kvm cyc_per_call ≤ 2.5× seccomp's. Set MAX_KVM_RATIO=0
+# Default ceiling: kvm cyc_per_call <= 2.5x seccomp's. Set MAX_KVM_RATIO=0
 # to skip the gate and just record numbers.
 MAX_KVM_RATIO = "2.5"
 
 [parse]
 pass_on_exit_zero = true
 
-# Trend metrics — captured into scoreboard.row.metrics.
+# Trend metrics: captured into scoreboard.row.metrics.
 [[parse.metrics]]
 name  = "kvm_cyc"
 regex = "kvm_cyc=([0-9]+)"

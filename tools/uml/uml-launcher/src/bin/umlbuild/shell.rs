@@ -90,9 +90,8 @@ pub fn run(args: ShellArgs) -> Result<()> {
     };
 
     // Build / reuse the instance.
-    let need_build = args.force
-        || !out.join("linux").is_file()
-        || !out.join("rootfs.img").is_file();
+    let need_build =
+        args.force || !out.join("linux").is_file() || !out.join("rootfs.img").is_file();
     if need_build {
         eprintln!(
             "umlbuild shell: building instance at {} (use --out to override)",
@@ -188,7 +187,8 @@ pub fn run(args: ShellArgs) -> Result<()> {
             anyhow::bail!(
                 "--network=tap requires the profile to set [network].mode = \"tap\" \
                  (profile '{}' has mode = \"{}\"). Try --profile sandbox-net.",
-                prof.profile.name, prof.network.mode
+                prof.profile.name,
+                prof.network.mode
             );
         }
         let plan = NetworkSetup::plan(&prof.network, &args.nat_via)?;
@@ -243,8 +243,7 @@ pub fn run(args: ShellArgs) -> Result<()> {
     } else {
         // Interactive + no network: execve to give the kernel the TTY directly.
         let err = Command::new(&kernel).args(&argv).exec();
-        return Err(anyhow::Error::new(err)
-            .context(format!("execve {}", kernel.display())));
+        return Err(anyhow::Error::new(err).context(format!("execve {}", kernel.display())));
     };
     result
 }
@@ -313,20 +312,49 @@ impl NetworkSetup {
         let _ = sudo(&["ip", "link", "delete", &self.tap_name]);
 
         sudo_required(&[
-            "ip", "tuntap", "add", "dev", &self.tap_name, "mode", "tap", "user", &user,
+            "ip",
+            "tuntap",
+            "add",
+            "dev",
+            &self.tap_name,
+            "mode",
+            "tap",
+            "user",
+            &user,
         ])?;
         sudo_required(&["ip", "addr", "add", &self.host_ip, "dev", &self.tap_name])?;
         sudo_required(&["ip", "link", "set", &self.tap_name, "up"])?;
         sudo_required(&["sysctl", "-w", "net.ipv4.ip_forward=1"])?;
         sudo_required(&[
-            "iptables", "-t", "nat", "-A", "POSTROUTING",
-            "-s", &self.nat_cidr, "-o", &self.nat_iface, "-j", "MASQUERADE",
+            "iptables",
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            &self.nat_cidr,
+            "-o",
+            &self.nat_iface,
+            "-j",
+            "MASQUERADE",
         ])?;
         sudo_required(&[
-            "iptables", "-A", "FORWARD", "-i", &self.tap_name, "-j", "ACCEPT",
+            "iptables",
+            "-A",
+            "FORWARD",
+            "-i",
+            &self.tap_name,
+            "-j",
+            "ACCEPT",
         ])?;
         sudo_required(&[
-            "iptables", "-A", "FORWARD", "-o", &self.tap_name, "-j", "ACCEPT",
+            "iptables",
+            "-A",
+            "FORWARD",
+            "-o",
+            &self.tap_name,
+            "-j",
+            "ACCEPT",
         ])?;
         Ok(())
     }
@@ -337,21 +365,38 @@ impl NetworkSetup {
     fn tear_down(&self) {
         eprintln!("\numlbuild shell: tearing down TAP {}", self.tap_name);
         let _ = sudo(&[
-            "iptables", "-D", "FORWARD", "-o", &self.tap_name, "-j", "ACCEPT",
+            "iptables",
+            "-D",
+            "FORWARD",
+            "-o",
+            &self.tap_name,
+            "-j",
+            "ACCEPT",
         ]);
         let _ = sudo(&[
-            "iptables", "-D", "FORWARD", "-i", &self.tap_name, "-j", "ACCEPT",
+            "iptables",
+            "-D",
+            "FORWARD",
+            "-i",
+            &self.tap_name,
+            "-j",
+            "ACCEPT",
         ]);
         let _ = sudo(&[
-            "iptables", "-t", "nat", "-D", "POSTROUTING",
-            "-s", &self.nat_cidr, "-o", &self.nat_iface, "-j", "MASQUERADE",
+            "iptables",
+            "-t",
+            "nat",
+            "-D",
+            "POSTROUTING",
+            "-s",
+            &self.nat_cidr,
+            "-o",
+            &self.nat_iface,
+            "-j",
+            "MASQUERADE",
         ]);
-        let _ = sudo(&[
-            "ip", "link", "set", &self.tap_name, "down",
-        ]);
-        let _ = sudo(&[
-            "ip", "tuntap", "del", "dev", &self.tap_name, "mode", "tap",
-        ]);
+        let _ = sudo(&["ip", "link", "set", &self.tap_name, "down"]);
+        let _ = sudo(&["ip", "tuntap", "del", "dev", &self.tap_name, "mode", "tap"]);
     }
 }
 
@@ -418,8 +463,7 @@ fn sudo_required(argv: &[&str]) -> Result<()> {
 /// Minimal RFC 4648 base64 encoder.  No padding-shenanigans, no
 /// dep — keeps the launcher's transitive dep tree from growing.
 fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let mut buf = [0u8; 3];

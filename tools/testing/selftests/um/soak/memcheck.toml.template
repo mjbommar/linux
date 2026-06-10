@@ -40,9 +40,8 @@ expect = ""
 timeout_secs = 0
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt in; they require host-side reservation.
+# Cgroup limits opt in; they require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Dynamic-loader kselftest (task #270).
+# Dynamic-loader kselftest.
 #
 # All other UML kselftests use freestanding-ELF init binaries
 # that don't exercise ld-linux (perf-getpid, perf-fallback,
@@ -9,7 +9,7 @@
 # host #PF recovery path: ld-linux faults on shared-library
 # pages before main(), and on the KVM backend's lazy-fault
 # path the first-instruction-fetch of a freshly mapped lib
-# page fails to be serviced — boot dies before reaching the
+# page fails to be serviced, boot dies before reaching the
 # script body.
 #
 # This selftest boots UML with `init=/bin/dash -c "echo
@@ -20,11 +20,10 @@
 # any error pattern (segfault, double-fault, kernel panic
 # other than the panic=-1-on-clean-init-exit pattern).
 #
-# Used as the deterministic repro for #238 STEP-2 attempts.
-# When STEP-2 lands cleanly, this test must PASS for both
-# kvmint (no gadget) and kvmbench (gadget-on) kernels.
+# This test must PASS for both kvmint (no gadget) and kvmbench
+# (gadget-on) kernels.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
 #
 # Environment:
 #   UML_BINARY        UML kernel (default /tmp/uml-kvmint/linux).
@@ -84,7 +83,7 @@ run_one() {
 	# Note: rootfs=hostfs so the host's /bin/echo + ld-linux
 	# + libc are visible at the same paths inside the guest.
 	# init=/bin/echo + positional cmdline args become argv to
-	# echo, which prints them — exercises ld-linux on libc but
+	# echo, which prints them; this exercises ld-linux on libc but
 	# not a shell tree.
 	log=$(timeout --kill-after=5 30 "$binary" \
 		backend="force=$backend" \
@@ -155,11 +154,9 @@ if [ -n "$GADGET_BINARY" ] && [ -x "$GADGET_BINARY" ] && [ -e /dev/kvm ]; then
 fi
 
 if [ "$FAIL" -gt 0 ]; then
-	# Tasks #272 (IRETQ-based bootstrap re-entry preserving RCX/R11)
-	# and #273 (KVM_SET_CPUID2 passthrough) closed the original
-	# blockers — kvm + kvm-gadget rows now pass deterministically.
-	# A failure here is a real regression and should fail the
-	# test outright.
+	# The kvm and kvm-gadget rows are expected to pass
+	# deterministically.  A failure here is a real regression and
+	# should fail the test outright.
 	echo "DYN_LOADER: FAIL ($FAIL backend(s) failed)"
 	exit 1
 fi

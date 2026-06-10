@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* 
+/*
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
@@ -45,11 +45,10 @@ void uml_cleanup(void)
 	 * reboot/halt, releases backend resources). Dispatch it
 	 * before kmalloc_ok=0 so the backend can still free things
 	 * if it needs to. um_backend is NULL only if init_backend()
-	 * never ran — that can happen if a fatal error during very
+	 * never ran; that can happen if a fatal error during very
 	 * early boot reaches the reboot path; skip in that case.
-	 * Matching ptrace and seccomp shutdown ops are no-ops
-	 * today; the dispatch exists so a future KVM backend with
-	 * real resources to release is plumbed correctly.
+	 * Some backends have no resources to release; call through the
+	 * backend table anyway so the lifecycle contract stays uniform.
 	 */
 	if (um_backend && um_backend->shutdown)
 		um_backend->shutdown();
@@ -59,7 +58,7 @@ void uml_cleanup(void)
 	kill_off_processes();
 }
 
-void machine_restart(char * __unused)
+void machine_restart(char *__unused)
 {
 	uml_cleanup();
 	reboot_skas();

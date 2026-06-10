@@ -1,22 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Fallback-path syscall round-trip bookend (task #241).
+ * Fallback-path syscall round-trip bookend.
  *
  * Sibling to perf-getpid that exercises the non-gadget path
  * deliberately. perf-getpid measures the Class E gadget fast
  * path (~100 cyc / ~28 ns under the gadget kernel). This
  * binary loops a Class A passthrough syscall (`__NR_getsid`)
- * which always VMEXITs — even under the gadget kernel — so
+ * which always VMEXITs, even under the gadget kernel, so
  * the measurement reflects the real cost of the
  * `kvm_enter_guest + KVM_RUN + handle_syscall` round-trip.
  *
- * Used as the regression-and-progress gate for the
- * fallback-lever series (sync_regs / MSR prime / SREGS skip
- * / handle_mm_fault refactor / shadow_fill skip / huge-page
- * shadow PT / per-mm cached shadow PGD). Each lever's commit
- * appends a row to Documentation/virt/uml/redesign/02-
- * workstreams/D-kvm-backend/measurements.md showing the
- * before/after numbers from this binary.
+ * Used as the regression-and-progress gate for fallback-path
+ * improvements (sync_regs, MSR prime, SREGS skip,
+ * handle_mm_fault refactor, shadow_fill skip, huge-page shadow
+ * page tables, and per-mm cached shadow PGD).
  *
  * No libc dependencies: raw `syscall` instruction, rdtsc
  * directly, write() to emit the report. Same shape as

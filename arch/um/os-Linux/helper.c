@@ -17,7 +17,7 @@
 #include <um_malloc.h>
 
 struct helper_data {
-	void (*pre_exec)(void*);
+	void (*pre_exec)(void *data);
 	void *pre_data;
 	char **argv;
 	int fd;
@@ -52,8 +52,8 @@ int run_helper(void (*pre_exec)(void *), void *pre_data, char **argv)
 		return -ENOMEM;
 
 	/*
-	 * FD disposition (C-09 commit 4): exec-probe. Both ends
-	 * CLOEXEC — the child's exec()-success closes fds[1]
+	 * FD disposition: exec-probe. Both ends are CLOEXEC: the child's
+	 * exec()-success closes fds[1]
 	 * without ever touching write(), and the parent reads 0
 	 * bytes to learn that exec() succeeded. An exec failure
 	 * leaves fds[1] open in the child just long enough for it

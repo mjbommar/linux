@@ -12,52 +12,32 @@
 #include <linux/mm_types.h>
 
 /*
- * UML PTE bit layout - aligned with x86 hardware paging (memo 26 Phase E.3.6).
+ * UML PTE bit layout, aligned with x86 hardware paging. KVM v2 hands
+ * UML's pgd directly to the CPU as guest CR3, so every bit visible to
+ * hardware must carry its x86 architectural meaning.
  *
- * Before this change, UML's _PAGE_* assignments were software-only book-
- * keeping: bits picked arbitrarily relative to x86 hardware. With the v2
- * KVM backend (which hands UML's pgd directly to the CPU as the guest CR3)
- * those positions collide with x86 paging semantics:
- *
- *   - UML _PAGE_RW=0x020 sat at x86 bit 5, which the CPU reads as A.
- *   - UML _PAGE_USER=0x040 sat at x86 bit 6, which on a leaf is D and on
- *     a non-leaf is ignored. The value never quite matched.
- *   - UML _PAGE_ACCESSED=0x080 sat at x86 bit 7, which on a leaf is the
- *     PS-bit (2MB/1GB large page). CPU walking a UML pgd would mistake
- *     a young 4K leaf for a large page, causing silent map corruption.
- *   - UML _PAGE_DIRTY=0x100 sat at x86 bit 8, the G-bit on leaves and
- *     ignored on non-leaves; mostly benign but still a value mismatch.
- *
- * Bits 0..6 now match x86 architectural PTE positions. The software-only
- * bits (NEEDSYNC, PROTNONE, SWP_EXCLUSIVE) move into the AVL window
- * (bits 9..11) where x86 ignores them entirely on hardware walks.
+ * Bits 0..6 match x86 architectural PTE positions. The software-only bits
+ * (NEEDSYNC, PROTNONE, SWP_EXCLUSIVE) live in the AVL window (bits 9..11)
+ * where x86 ignores them on hardware walks.
  *
  *   bit  0  P    _PAGE_PRESENT       (matches x86)
- *   bit  1  R/W  _PAGE_RW            (was 0x020)
- *   bit  2  U/S  _PAGE_USER          (was 0x040)
+ *   bit  1  R/W  _PAGE_RW
+ *   bit  2  U/S  _PAGE_USER
  *   bit  3  PWT  -                   (reserved for x86 cacheability)
  *   bit  4  PCD  -                   (reserved for x86 cacheability)
- *   bit  5  A    _PAGE_ACCESSED      (was 0x080)
- *   bit  6  D    _PAGE_DIRTY         (was 0x100; leaf-only on x86)
+ *   bit  5  A    _PAGE_ACCESSED
+ *   bit  6  D    _PAGE_DIRTY         (leaf-only on x86)
  *   bit  7  PS   -                   (large page; UML always 4K leaves)
  *   bit  8  G    -                   (global; not used by UML)
- *   bit  9  AVL  _PAGE_NEEDSYNC      (sw-only; was 0x002)
- *   bit 10  AVL  _PAGE_PROTNONE      (sw-only; was 0x010, only if P=0)
- *   bit 11  AVL  _PAGE_SWP_EXCLUSIVE (sw-only; was 0x400, swap PTEs only)
+ *   bit  9  AVL  _PAGE_NEEDSYNC      (software-only)
+ *   bit 10  AVL  _PAGE_PROTNONE      (software-only, only if P=0)
+ *   bit 11  AVL  _PAGE_SWP_EXCLUSIVE (software-only, swap PTEs only)
  *
- * Consequences:
- *
- * - kernel-core code (tlb.c, trap.c, mmu.c, mem.c, skas/uaccess.c) goes
- *   through the named pte_/pmd_/p4d_ accessors and is bit-position-
- *   agnostic; no source change required outside this file.
- * - The seccomp backend never references _PAGE_ macros directly: it is
- *   unaffected by this change.
- * - The KVM v2 backend can now pass __pa(active_mm->pgd) to KVM as CR3
- *   without any shadow-PT translation: UML's leaf entries are valid x86
- *   PTEs by construction.
- * - The swap-PTE encoding moves: type and offset fields can no longer
- *   overlap _PAGE_NEEDSYNC at bit 9. See __swp_type / __swp_offset and
- *   the format comment near the bottom of this file.
+ * KVM v2 can pass __pa(active_mm->pgd) to KVM as CR3 without shadow page
+ * table translation: UML's leaf entries are valid x86 PTEs by
+ * construction. Swap-PTE encoding must not overlap _PAGE_NEEDSYNC at bit
+ * 9; see __swp_type / __swp_offset and the format comment near the
+ * bottom of this file.
  */
 #define _PAGE_PRESENT	0x001	/* x86 P   (bit 0) */
 #define _PAGE_RW	0x002	/* x86 R/W (bit 1) */
@@ -108,23 +88,20 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
  * [VMALLOC_START, TASK_SIZE - 2 * PAGE_SIZE) into four
  * equal quarters matching x86_64's layout
  * (arch/x86/include/asm/pgtable_64_types.h:124-169). This
- * is the D62-selected resolution for the D58 "dedicated
- * KMSAN shadow slab doesn't fit" breakage. See
- * `Documentation/virt/uml/redesign/02-workstreams/
- * C-profiles-and-gaps/07-port-kmsan-redesign.md` for the
- * feasibility comparison.
+ * gives UML room for vmalloc shadow and origin mappings without
+ * consuming additional host-reserved slabs.
  *
  *   quarter 1 [VMALLOC_START, VMALLOC_END)
- *                              — the effective vmalloc area
+ *                              - the effective vmalloc area
  *                                (1/4 of original size)
  *   quarter 2 [KMSAN_VMALLOC_SHADOW_START, ...)
- *                              — shadow for vmalloc range
+ *                              - shadow for vmalloc range
  *                                (1 byte per byte)
  *   quarter 3 [KMSAN_VMALLOC_ORIGIN_START, ...)
- *                              — origin for vmalloc range
- *   quarter 4 — unused on UML
+ *                              - origin for vmalloc range
+ *   quarter 4 - unused on UML
  *
- * **Modules-vs-vmalloc note.** On UML, MODULES_VADDR ==
+ * Modules-vs-vmalloc note: On UML, MODULES_VADDR ==
  * VMALLOC_START (see the definitions below); modules live
  * inside the same VA range as vmalloc. The generic
  * mm/kmsan/shadow.c::vmalloc_meta() checks the vmalloc
@@ -133,12 +110,12 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
  * quarter 2 (shadow) / quarter 3 (origin). The modules-
  * shadow and modules-origin 4th-quarter slots x86 uses
  * therefore have no corresponding consumer on UML; we
- * alias the `KMSAN_MODULES_*_START` macros to their
+ * alias the KMSAN_MODULES_*_START macros to their
  * VMALLOC equivalents so any caller that does reach the
  * module branch gets a consistent address in quarters
  * 2 / 3 rather than an otherwise-unused quarter 4 region.
- * The 4th quarter is left unreserved — future subsystems
- * (e.g. a dedicated per-CPU shadow bank) can claim it.
+ * The 4th quarter is left unreserved for another UML subsystem
+ * that needs a dedicated virtual range.
  *
  * The generic KMSAN code (mm/kmsan/shadow.c::vmalloc_meta)
  * computes shadow/origin addresses as VMALLOC_START +
@@ -161,7 +138,7 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 	(VMALLOC_START + KMSAN_VMALLOC_ORIGIN_OFFSET)
 
 /*
- * Modules overlap vmalloc on UML — alias to vmalloc shadow
+ * Modules overlap vmalloc on UML: alias to vmalloc shadow
  * and origin. See the "Modules-vs-vmalloc note" above.
  */
 #define KMSAN_MODULES_SHADOW_START	KMSAN_VMALLOC_SHADOW_START
@@ -243,8 +220,8 @@ static inline int pte_exec(pte_t pte)
 
 static inline int pte_write(pte_t pte)
 {
-	return((pte_get_bits(pte, _PAGE_RW)) &&
-	       !(pte_get_bits(pte, _PAGE_PROTNONE)));
+	return pte_get_bits(pte, _PAGE_RW) &&
+	       !pte_get_bits(pte, _PAGE_PROTNONE);
 }
 
 static inline int pte_dirty(pte_t pte)
@@ -271,13 +248,13 @@ static inline int pte_needsync(pte_t pte)
 static inline pte_t pte_mkclean(pte_t pte)
 {
 	pte_clear_bits(pte, _PAGE_DIRTY);
-	return(pte);
+	return pte;
 }
 
 static inline pte_t pte_mkold(pte_t pte)
 {
 	pte_clear_bits(pte, _PAGE_ACCESSED);
-	return(pte);
+	return pte;
 }
 
 static inline pte_t pte_wrprotect(pte_t pte)
@@ -295,13 +272,13 @@ static inline pte_t pte_mkread(pte_t pte)
 static inline pte_t pte_mkdirty(pte_t pte)
 {
 	pte_set_bits(pte, _PAGE_DIRTY);
-	return(pte);
+	return pte;
 }
 
 static inline pte_t pte_mkyoung(pte_t pte)
 {
 	pte_set_bits(pte, _PAGE_ACCESSED);
-	return(pte);
+	return pte;
 }
 
 static inline pte_t pte_mkwrite_novma(pte_t pte)
@@ -319,44 +296,29 @@ static inline pte_t pte_mkuptodate(pte_t pte)
 static inline pte_t pte_mkneedsync(pte_t pte)
 {
 	pte_set_bits(pte, _PAGE_NEEDSYNC);
-	return(pte);
+	return pte;
 }
 
 static inline void set_pte(pte_t *pteptr, pte_t pteval)
 {
 	/*
-	 * Publish the final PTE value (with _PAGE_NEEDSYNC set) in a
-	 * SINGLE store. The previous shape did two stores —
-	 *   pte_copy(*pteptr, pteval);
-	 *   *pteptr = pte_mkneedsync(*pteptr);
-	 * — leaving a transient window where another reader of the PTE
-	 * (KVM TDP walker on a different host CPU during v2's mt-mmap-
-	 * stress workload, concurrent um_tlb_sync on a sibling thread
-	 * of the same mm, or hardware A/D-bit update) could observe
-	 * PRESENT-without-NEEDSYNC, and the second store's read-modify-
-	 * write could clobber any concurrent update.
+	 * Publish the final PTE value, including _PAGE_NEEDSYNC, in one
+	 * store. KVM's TDP walker, um_tlb_sync(), or hardware A/D-bit
+	 * updates may read the entry concurrently; a two-store update could
+	 * expose PRESENT without NEEDSYNC or clobber a concurrent update.
 	 *
 	 * Also marks _PAGE_NEEDSYNC on swap entries so update_pte_range
 	 * knows to unmap them.
 	 *
-	 * Caught by tools/testing/selftests/um/mt-mmap-stress (3 pthreads
-	 * × 100 iters of mmap+memset+munmap) which fails ~100% under v2
-	 * with the previous two-store form — post-memset readback returns
-	 * bytes from a sibling thread or stale physmem because PTE
-	 * publication interleaved with KVM's TDP walks.
-	 *
 	 * Seccomp doesn't have a hardware page-table consumer (the stub
 	 * child uses host syscalls, not direct PT walks), so the two-
 	 * store window is harmless there. v2's KVM TDP walker reads
-	 * UML's pgd as part of every guest VA → host PA translation,
+	 * UML's pgd as part of every guest VA to host PA translation,
 	 * so the transient state escapes to KVM's caches.
 	 *
-	 * MAP_POPULATE workaround masks the bug by resolving anon faults
-	 * eagerly under mmap_write_lock — no concurrent lazy-PF
+	 * MAP_POPULATE masks the race by resolving anon faults eagerly
+	 * under mmap_write_lock: no concurrent lazy-PF
 	 * publication, no transient window.
-	 *
-	 * Single-store fix attributed to codex (gpt-5.5 xhigh) audit
-	 * 2026-04-30, memo §H.1b.
 	 */
 	pte_copy(*pteptr, pte_mkneedsync(pteval));
 }
@@ -384,14 +346,9 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 			    pte_t *ptep, pte_t pte, int nr)
 {
 	/*
-	 * Bugfix vs the version in commit bcf3d957c63d ("um: refactor TLB
-	 * update handling"): the original advance formula was
-	 *   pte = __pte(pte_val(pte) + (nr << PFN_PTE_SHIFT));
-	 * but `nr` has just been decremented, so for nr_in >= 3 each
-	 * subsequent PTE picks up an extra (nr_remaining-1) pages of
-	 * PFN drift. Fix matches include/linux/pgtable.h's generic
-	 * set_ptes which advances by exactly one page per iteration
-	 * via pte_next_pfn().
+	 * Advance exactly one PFN per iteration. The remaining count is
+	 * decremented inside the loop, so deriving the next PTE from it would
+	 * skip PFNs when setting more than two entries.
 	 */
 	size_t length = nr * PAGE_SIZE;
 
@@ -441,25 +398,30 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 struct mm_struct;
 extern pte_t *virt_to_pte(struct mm_struct *mm, unsigned long addr);
 
-#define update_mmu_cache(vma,address,ptep) do {} while (0)
+#define update_mmu_cache(vma, address, ptep)		\
+	do {						\
+		(void)(vma);				\
+		(void)(address);			\
+		(void)(ptep);				\
+	} while (0)
 #define update_mmu_cache_range(vmf, vma, address, ptep, nr) do {} while (0)
 
 /*
  * Encode/decode swap entries and swap PTEs. Swap PTEs are all PTEs that
  * are !pte_none() && !pte_present().
  *
- * Format of swap PTEs (post memo 26 Phase E.3.6 x86-aligned bit layout):
+ * Format of swap PTEs with the x86-aligned bit layout:
  *
  *   6 6 5 5 5 5 5 5 5 5 5 5 4 4         1 1 1 1 1 1 1 1 1 1
  *   3 2 1 0 9 8 7 6 5 4 3 2 1 0 ...     1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
  *   <----------------- offset ----------------> E S 0 0 0 0 0 < type > 0
  *
  *   bit  0     = _PAGE_PRESENT = 0  (this is a swap entry, not a present PTE)
- *   bits 1..5  = swap type (5 bits → 32 types; matches the old encoding)
+ *   bits 1..5  = swap type (5 bits, 32 types)
  *   bits 6..8  = 0 (UML never sets D / PS / G on swap entries)
  *   bit  9 (S) = _PAGE_NEEDSYNC = 1 (set by set_pte() so the next sync drains
  *                                    the swap-out)
- *   bit 10     = _PAGE_PROTNONE = 0 (swap entries must NOT look like
+ *   bit 10     = _PAGE_PROTNONE = 0 (swap entries must not look like
  *                                    pte_present)
  *   bit 11 (E) = _PAGE_SWP_EXCLUSIVE
  *   bits 12+   = offset

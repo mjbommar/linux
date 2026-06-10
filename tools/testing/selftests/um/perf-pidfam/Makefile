@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Mixed pid-family gadget perf loop (review-01 P2 #12).
+# Mixed pid-family gadget perf loop.
 
 TEST_PROGS := run-perf-pidfam.sh
 TEST_GEN_FILES := pidfam-loop

@@ -20,14 +20,12 @@ pub struct Manifest {
     pub runtime: RuntimeSection,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// Host-process env vars to apply at UML spawn (memo 52
-    /// SMP-T78..T82 translated from Umlfile.host_resources at
-    /// create-time). Empty map means "inherit current env."
+    /// Host-process env vars translated from Umlfile.host_resources
+    /// at create-time. Empty map means "inherit current env."
     #[serde(default)]
     pub host_env: BTreeMap<String, String>,
-    /// Cgroup v2 limits to install at UML spawn (memo 52 §2.3
-    /// SMP-T83). None means "don't create a per-instance
-    /// cgroup."
+    /// Cgroup v2 limits to install at UML spawn. None means "don't
+    /// create a per-instance cgroup."
     #[serde(default)]
     pub cgroup_v2: Option<CgroupV2Config>,
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# H.1 perf gate: minimal Python startup wall-clock under each
+# Minimal Python startup wall-clock under each
 # backend, measured via in-kernel printk timestamps.
 #
 # Boots UML with init=<shell wrapper that runs python3 -c "import
@@ -11,8 +11,8 @@
 # python startup + sync; pre-init kernel boot is identical across
 # backends and excluded from the comparison.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
-# PASS gate: kvm-v2 / seccomp ratio ≤ MAX_V2_RATIO (default 1.2).
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
+# PASS gate: kvm-v2 / seccomp ratio <= MAX_V2_RATIO (default 1.2).
 #
 # Environment:
 #   UML_BINARY     UML kernel built with both backends co-selected.
@@ -20,12 +20,12 @@
 #   SAMPLES        Samples per backend after warm-up. Default 7.
 #   UML_MEM        mem= argument. Default 512M.
 #   MAX_V2_RATIO   kvm-v2:seccomp wall-clock ratio ceiling. Default
-#                  1.2 (matches memo 25 perf gate). Set 0 to skip.
+#                  1.2. Set 0 to skip.
 #
 # Resolution caveat: printk's CONFIG_PRINTK_TIME timer has 10 ms
 # granularity in the UML_BINARY we ship, so individual measurements
 # are bucketed to multiples of 10 ms. That's enough to detect
-# >2× regressions but not for fine-grained tuning. For tighter
+# >2x regressions but not for fine-grained tuning. For tighter
 # numbers, instrument with ftrace and use the bench harness in
 # tools/testing/selftests/um/perf-getpid (cycle-level).
 
@@ -77,7 +77,7 @@ run_one() {
         init="$INIT_SCRIPT" </dev/null 2>&1 | extract_init_dur
 }
 
-# Warm-up — first run pays page-cache costs.
+# Warm-up: first run pays page-cache costs.
 for backend in seccomp kvm-v2; do run_one "$backend" >/dev/null; done
 
 declare -A SAMPLES_OF

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# bench-micro — pure trap-mechanism cyc/getpid micro-benchmark.
+# bench-micro - pure trap-mechanism cyc/getpid micro-benchmark.
 #
 # Boots UML with the static `getpid-loop` C binary as init=. The
 # binary runs N=100000 SYS_getpid round-trips, rdtsc-bracketed,

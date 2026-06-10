@@ -1,13 +1,12 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Memo 01 Step 2 — guest→host TCP throughput, vector vs vector2.
+# guest->host TCP throughput, vector vs vector2.
 #
 # Boots a UML guest twice (legacy vector + vector2), runs a Python
-# TCP sender for $DURATION seconds against a host-side sink, reports
-# the throughput each side delivered.  Verdict: vector2 must be
-# >= 0.85 * vector (per memo 49 §3.1 P4.3) to land Step 4b (the
-# umlctl default flip) and Step 5 (Kconfig deprecation).
+# TCP sender for $DURATION seconds against a host-side sink, and
+# reports the throughput each side delivered.  Verdict: vector2 must
+# be >= 0.85 * vector.
 #
 # Usage:
 #   tools/testing/selftests/um/net-bench/run-tcp-throughput.sh \
@@ -137,7 +136,7 @@ EOF
 
     if [ "$DRV" = "vector2" ]; then
         # Open tap fd in pre-exec wrapper, then exec UML with fd=200.
-        # backend=seccomp (not kvm-v2) — kvm-v2 maps host fds into the
+# backend=seccomp (not kvm-v2): kvm-v2 maps host fds into the
         # vCPU pool and trips a fatal signal on the inherited tap fd.
         # seccomp uses the legacy ptrace shape that lets the fd live
         # in the init process's table.
@@ -206,7 +205,7 @@ RATIO=$(python3 -c "v=$V2_MED; l=$VEC_MED; print(f'{v/l:.3f}' if l > 0 else 'inf
 PASS=$(python3 -c "v=$V2_MED; l=$VEC_MED; print('PASS' if l > 0 and v/l >= 0.85 else 'FAIL')")
 
 cat > "$OUT/verdict.txt" <<EOF
-Memo 01 Step 2 — guest→host TCP throughput verdict
+guest->host TCP throughput verdict
 
 Kernel:    $KERNEL
 Duration:  ${DURATION}s per iteration, $REPS reps
@@ -219,7 +218,7 @@ vector2 per-rep Mbps: ${V2_RESULTS[*]}
 
 vector  median Mbps: $VEC_MED
 vector2 median Mbps: $V2_MED
-ratio (v2 / legacy): $RATIO   (gate ≥ 0.85)
+ratio (v2 / legacy): $RATIO   (gate >= 0.85)
 
 VERDICT: $PASS
 EOF

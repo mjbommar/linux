@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// umlctl exec — run a command inside a running pool member (Memo 09
-// Phase 4, spec memo 11 §3.1).
+// umlctl exec - run a command inside a running pool member.
 //
 // `umlctl exec --pid <PID> [--name <pool>] [--timeout SECS]
 //              [--json] [--env K=V]… [--cwd PATH]
 //              -- ARGV...`
 //
 // Wire shape: send a single `{"op":"exec",...}` JSON RPC to the
-// daemon's Unix socket; receive an NDJSON stream framed per spec §3.4:
+// daemon's Unix socket; receive an NDJSON stream:
 //
 //   {"type":"start", "schema_version":"exec/1", "pid":N,
 //    "argv":[…], "cwd":"…", "ts_ns":...}
@@ -56,10 +55,9 @@ pub struct ExecArgs {
     #[arg(long, default_value_t = 0, value_name = "SECS")]
     pub timeout: u64,
 
-    /// Emit NDJSON frames per memo 11 §3.4 instead of passing the
-    /// guest's stdout/stderr through transparently.  The syzkaller
-    /// shim sets this; an operator invoking `umlctl exec` for a quick
-    /// `ls /` usually does not.
+    /// Emit NDJSON frames instead of passing the guest's stdout/stderr
+    /// through transparently.  The syzkaller shim sets this; a human
+    /// invoking `umlctl exec` for a quick `ls /` usually does not.
     #[arg(long)]
     pub json: bool,
 
@@ -99,11 +97,9 @@ pub fn build_exec_request(args: &ExecArgs) -> Result<serde_json::Value> {
     }))
 }
 
-/// Output frame as parsed back from the daemon's reply.  The daemon
-/// today returns ONE envelope per RPC (it does not currently stream);
-/// we synthesize NDJSON frames from a single envelope so the wire
-/// shape the syzkaller shim sees is stable across future daemons that
-/// DO stream.  See spec memo 11 §3.4 for the canonical frame shape.
+/// Output frame as parsed back from the daemon's reply. The daemon
+/// returns one envelope per RPC; we synthesize NDJSON frames from that
+/// envelope so syzkaller sees a stable framed stream.
 #[derive(Debug)]
 pub struct ExecOutcome {
     pub stdout: String,
@@ -175,8 +171,8 @@ pub fn decode_exec_reply(reply: &serde_json::Value) -> Result<ExecOutcome> {
     })
 }
 
-/// Emit NDJSON frames in the shape spec memo 11 §3.4 documents.
-/// Public for tests so we can assert frame ordering.
+/// Emit NDJSON frames.  Public for tests so we can assert frame
+/// ordering.
 pub fn emit_ndjson_frames<W: Write>(
     out: &mut W,
     args: &ExecArgs,
@@ -230,9 +226,8 @@ pub fn emit_ndjson_frames<W: Write>(
     Ok(())
 }
 
-/// Split `s` into <=`n`-byte chunks at char boundaries.  64 KiB is
-/// spec memo 11 §3.4's "no frame larger than 64 KiB" limit; we use
-/// 60_000 to leave headroom for the JSON wrapping.
+/// Split `s` into <=`n`-byte chunks at char boundaries.  Frames stay
+/// below 64 KiB; 60_000 leaves headroom for the JSON wrapping.
 fn chunked(s: &str, n: usize) -> Vec<String> {
     if s.len() <= n {
         return vec![s.to_string()];
@@ -279,7 +274,7 @@ pub fn cmd_exec(args: ExecArgs, paths: &crate::paths::Paths, quiet: bool) -> Res
         let mut lock = stdout.lock();
         emit_ndjson_frames(&mut lock, &args, &outcome, started_ns)?;
     } else {
-        // Transparent pass-through for interactive operators.
+        // Transparent pass-through for interactive users.
         let stdout = std::io::stdout();
         let stderr = std::io::stderr();
         {

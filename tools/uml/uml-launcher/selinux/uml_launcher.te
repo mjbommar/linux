@@ -1,21 +1,16 @@
 ## SPDX-License-Identifier: GPL-2.0
 ##
-## SELinux reference policy for the UML host launcher
-## (workstream C-10 v2 commit 7). Parallel in intent to the
+## SELinux reference policy for the UML host launcher.
+## Parallel in intent to the
 ## AppArmor profile at tools/uml/uml-launcher/apparmor/:
 ## either LSM alone is some protection; both together are
 ## defense-in-depth.
 ##
 ## This module ships a SINGLE parent domain (uml_launcher_t)
 ## for now — no per-backend subdomains. Per-backend
-## transitions (console / net / block) are a follow-on once
-## the orchestrator lands (v2 commit 8) and can parallel the
-## aa_change_profile() wiring in src/backend/apparmor.rs
-## with a setcon()/libselinux equivalent. See the C-10 v2
-## commit plan in
-## Documentation/virt/uml/redesign/02-workstreams/
-## C-profiles-and-gaps/10-host-launcher-crosvm.md for the
-## decomposition plan and decisions-log D52 for the design.
+## transitions (console / net / block) can parallel the
+## aa_change_profile() wiring in src/backend/apparmor.rs with a
+## setcon()/libselinux equivalent.
 
 policy_module(uml_launcher, 0.1.0)
 
@@ -65,8 +60,8 @@ files_runtime_filetrans(uml_launcher_t, uml_launcher_runtime_t, { dir sock_file 
 kernel_read_system_state(uml_launcher_t)
 kernel_read_proc_symlinks(uml_launcher_t)
 
-# /dev/net/tun for the net backend; /dev/kvm is anticipated
-# for the D-workstream KVM backend (no-op today).
+# /dev/net/tun for the net backend; /dev/kvm is harmless here and
+# useful when the launcher also supervises KVM-backed UML guests.
 dev_rw_kvm(uml_launcher_t)
 corenet_rw_tun_tap_dev(uml_launcher_t)
 

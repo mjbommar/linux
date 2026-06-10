@@ -2,11 +2,9 @@
 /*
  * seccomp backend: struct um_backend_ops singleton.
  *
- * Workstream A-03. The seccomp backend wraps Benjamin Berg's
- * SIGSYS-trap impl that landed in 6.16. Most ops share the same
- * host-side helpers as the ptrace backend; the per-backend wrappers
- * exist so the dispatch macro resolves to a named symbol per the
- * D11 dispatch convention.
+ * The seccomp backend uses UML's SIGSYS trap path. These per-backend
+ * wrappers let the dispatch macro resolve to named seccomp symbols
+ * while reusing the common host-side helpers.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -20,7 +18,7 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	.kind			= UM_BACKEND_KIND_SECCOMP,
 	.contract_version	= UM_BACKEND_CONTRACT_VERSION,
 
-	/* Capability flags — see backend.h */
+	/* Capability flags; see backend.h */
 	.uses_stub_reaper	= true,
 	.has_syscall_stub_fd_map = true,
 	.stub_syscall_uses_futex = true,
@@ -32,7 +30,7 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	.shutdown		= seccomp_shutdown,
 	.vcpu_run		= seccomp_vcpu_run,	/* HOT */
 
-	/* Memory (5) — memo 25 R2 ops cleanup */
+	/* Memory (5) */
 	.mm_create		= seccomp_mm_create,
 	.mm_destroy		= seccomp_mm_destroy,
 	.mm_region_added	= seccomp_mm_region_added,	/* HOT */
@@ -47,7 +45,7 @@ const struct um_backend_ops um_backend_seccomp_ops = {
 	/*
 	 * Cross-vCPU TLB kick: NULL for seccomp. The seccomp stub-child
 	 * model already cross-CPU-flushes via host mmu_notifier on the
-	 * real munmap that mm_region_removed issues — no extra kick
+	 * real munmap that mm_region_removed issues; no extra kick
 	 * needed. um_tlb_sync NULL-checks before calling.
 	 */
 	.tlb_kick_others	= NULL,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# gdb python helper for UML kvm-v2 snapshot ELF64-core files (#181).
+# gdb python helper for UML kvm-v2 snapshot ELF64-core files.
 #
 # Sourced into gdb via:
 #
@@ -8,10 +8,10 @@
 #
 # Provides three new commands:
 #
-#   uml-snap-info     — header dump of the UML private PT_NOTE
-#   uml-snap-sregs    — pretty-print captured sregs (CS/SS/IDT/GDT/CR3)
-#   uml-snap-msrs     — list captured MSRs (LSTAR/STAR/EFER/FS_BASE/...)
-#   uml-snap-memslots — table of memslot descriptors
+#   uml-snap-info     - header dump of the UML private PT_NOTE
+#   uml-snap-sregs    - pretty-print captured sregs (CS/SS/IDT/GDT/CR3)
+#   uml-snap-msrs     - list captured MSRs (LSTAR/STAR/EFER/FS_BASE/...)
+#   uml-snap-memslots - table of memslot descriptors
 #
 # All commands are no-ops on a non-UML core file (the helper detects
 # the UML private note by 'UMLE' magic + version 1 and silently skips
@@ -21,7 +21,7 @@
 # Implementation note: gdb's `gdb.python` API does NOT expose the raw
 # note bytes from the core file in a convenient way (the closest is
 # the unhelpful Frame / Inferior triple). We work around this by
-# `subprocess.check_output(['readelf', '-x', '0xXX', core])` — readelf
+# `subprocess.check_output(['readelf', '-x', '0xXX', core])` - readelf
 # can dump arbitrary note sections by file offset, and we drive it
 # from the python side after grepping `readelf -n` for the right
 # UML note offset. This keeps the helper independent of bleeding-edge
@@ -35,20 +35,20 @@ import sys
 
 import gdb
 
-# UML private PT_NOTE n_type — must match
+# UML private PT_NOTE n_type - must match
 # arch/um/backend/kvm-v2/snapshot_elf.c::KVM_V2_NT_UML_STATE.
 UML_NT_STATE = 0x554D4C01
 
-# 'UMLE' little-endian — must match
+# 'UMLE' little-endian - must match
 # arch/um/backend/kvm-v2/snapshot_elf.c::kvm_v2_uml_state_hdr.magic
-# (the value written is 0x554d4c45 — 'E','L','M','U' on disk).
+# (the value written is 0x554d4c45 - 'E','L','M','U' on disk).
 UML_MAGIC = 0x554D4C45
 
 UML_VERSION = 1
 
 # 7 MSRs, fixed list (matches arch/um/backend/kvm-v2/snapshot.c
 # kvm_v2_snapshot_msr_indices). Order is intentionally separate from
-# the captured payload — the payload carries the indices.
+# the captured payload - the payload carries the indices.
 MSR_NAMES = {
     0xC0000080: "MSR_EFER",
     0xC0000081: "MSR_STAR",
@@ -221,7 +221,7 @@ def _load_uml_note():
 
 
 class UmlSnapInfo(gdb.Command):
-    """uml-snap-info — summarise the UML private PT_NOTE.
+    """uml-snap-info - summarise the UML private PT_NOTE.
 
     Prints the magic / version / counts so the operator can confirm
     they're looking at a UML kvm-v2 snapshot (rather than a native
@@ -249,7 +249,7 @@ class UmlSnapInfo(gdb.Command):
 
 
 class UmlSnapMsrs(gdb.Command):
-    """uml-snap-msrs — list the captured MSR (index, value) pairs."""
+    """uml-snap-msrs - list the captured MSR (index, value) pairs."""
     def __init__(self):
         super().__init__("uml-snap-msrs", gdb.COMMAND_USER)
 
@@ -265,7 +265,7 @@ class UmlSnapMsrs(gdb.Command):
 
 
 class UmlSnapMemslots(gdb.Command):
-    """uml-snap-memslots — table of captured memslot descriptors."""
+    """uml-snap-memslots - table of captured memslot descriptors."""
     def __init__(self):
         super().__init__("uml-snap-memslots", gdb.COMMAND_USER)
 
@@ -275,7 +275,7 @@ class UmlSnapMemslots(gdb.Command):
             print("uml-snap-memslots: no UML PT_NOTE in current core")
             return
         if not note["memslots"]:
-            print("(no memslots captured — regs-only snapshot?)")
+            print("(no memslots captured - regs-only snapshot?)")
             return
         print(f"  {'id':<4} {'flags':<10} {'gpa':<18} "
               f"{'host_va':<18} {'size':<18}")
@@ -285,7 +285,7 @@ class UmlSnapMemslots(gdb.Command):
 
 
 class UmlSnapSregs(gdb.Command):
-    """uml-snap-sregs — pretty-print captured x86_64 sregs (cs/ss/idt/gdt
+    """uml-snap-sregs - pretty-print captured x86_64 sregs (cs/ss/idt/gdt
     cr0/cr2/cr3/cr4/efer + segment selectors).
     """
     def __init__(self):
@@ -300,11 +300,11 @@ class UmlSnapSregs(gdb.Command):
         # struct kvm_segment is 24 bytes: u64 base, u32 limit, u16
         # selector, 7 u8 fields, 1 u8 unusable, 4 u8 padding.
         # struct kvm_sregs layout (arch/x86/include/uapi/asm/kvm.h):
-        #  kvm_segment cs, ds, es, fs, gs, ss, tr, ldt;   (8 × 24 = 192)
-        #  kvm_dtable gdt, idt;                            (2 × 16 = 32)
+        #  kvm_segment cs, ds, es, fs, gs, ss, tr, ldt;   (8 x 24 = 192)
+        #  kvm_dtable gdt, idt;                            (2 x 16 = 32)
         #  __u64 cr0, cr2, cr3, cr4, cr8, efer;
         #  __u64 apic_base;
-        #  __u64 interrupt_bitmap[(KVM_NR_INTERRUPTS+63)/64]; (4 × 8)
+        #  __u64 interrupt_bitmap[(KVM_NR_INTERRUPTS+63)/64]; (4 x 8)
         if len(b) < 192 + 32 + 8 * 7:
             print(f"uml-snap-sregs: payload too short ({len(b)})")
             return

@@ -11,7 +11,7 @@
 #include <asm/seccomp.h>
 #include <asm/extable.h>
 
-/* workaround for a warning with -Wmissing-prototypes */
+/* Forward declaration avoids -Wmissing-prototypes. */
 void foo(void);
 
 void foo(void)

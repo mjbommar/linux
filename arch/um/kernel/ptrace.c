@@ -67,7 +67,7 @@ long arch_ptrace(struct task_struct *child, long request,
 			ret = -EIO;
 			break;
 		}
-		for ( i = 0; i < MAX_REG_OFFSET; i += sizeof(long) ) {
+		for (i = 0; i < MAX_REG_OFFSET; i += sizeof(long)) {
 			__put_user(getreg(child, i), p);
 			p++;
 		}
@@ -78,11 +78,12 @@ long arch_ptrace(struct task_struct *child, long request,
 #ifdef PTRACE_SETREGS
 	case PTRACE_SETREGS: { /* Set all gp regs in the child. */
 		unsigned long tmp = 0;
+
 		if (!access_ok(p, MAX_REG_OFFSET)) {
 			ret = -EIO;
 			break;
 		}
-		for ( i = 0; i < MAX_REG_OFFSET; i += sizeof(long) ) {
+		for (i = 0; i < MAX_REG_OFFSET; i += sizeof(long)) {
 			__get_user(tmp, p);
 			putreg(child, i, tmp);
 			p++;
@@ -117,10 +118,6 @@ static void send_sigtrap(struct uml_pt_regs *regs, int error_code)
 			UPT_IS_USER(regs) ? (void __user *) UPT_IP(regs) : NULL);
 }
 
-/*
- * XXX Check TIF_SINGLESTEP for singlestepping check and
- * PT_PTRACED vs TIF_SYSCALL_TRACE for syscall tracing check
- */
 int syscall_trace_enter(struct pt_regs *regs)
 {
 	audit_syscall_entry(UPT_SYSCALL_NR(&regs->regs),

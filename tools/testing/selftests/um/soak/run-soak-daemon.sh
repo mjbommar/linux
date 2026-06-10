@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Phase J #167 daemon-mode soak driver. Sibling to run-pilot.sh.
+# UML daemon-mode soak driver. Sibling to run-pilot.sh.
 #
-# Long-running, signal-driven, append-only. Cycles through the J-pilot
-# workload templates within a wall-clock budget, writing per-iteration
+# Long-running, signal-driven, append-only. Cycles through workload
+# templates within a wall-clock budget, writing per-iteration
 # rows to scoreboard.jsonl + a rolling Wilson-CI summary table to
 # summary.md, until budget elapses, an operator sends SIGTERM/SIGINT,
 # or a per-(workload, backend) failure-rate threshold trips.
-#
-# Spec: Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/
-#       phase-J-design-2026-05-07.md §2.
 #
 # Usage:
 #   UML_KERNEL=$HOME/src/uml-builds/uml-smp-t41fix/linux \
@@ -25,7 +22,7 @@
 #   UML_KERNEL=... ./run-soak-daemon.sh --backends seccomp \
 #       --workloads tier3-django-v2,tier3-fastapi-v2
 #
-# Stop with SIGTERM/SIGINT — daemon finishes the in-flight workload
+# Stop with SIGTERM/SIGINT; daemon finishes the in-flight workload
 # phase before exiting (does NOT kill umlctl mid-iteration).
 # Force a summary refresh: kill -USR1 $pid.
 
@@ -133,13 +130,13 @@ if ! command -v python3 >/dev/null; then
 	exit 2
 fi
 
-# Default OUT — phase-J-soak-<ISO> under $PWD if unset.
+# Default OUT: uml-soak-<ISO> under $PWD if unset.
 if [ -z "$OUT" ]; then
-	OUT="$PWD/phase-J-soak-$(date -u +%Y-%m-%dT%H%M%SZ)"
+	OUT="$PWD/uml-soak-$(date -u +%Y-%m-%dT%H%M%SZ)"
 fi
 mkdir -p "$OUT/logs" "$OUT/logs/panics" || exit 2
 
-# Resolve workloads CSV → array; validate each template.
+# Resolve workloads CSV -> array; validate each template.
 IFS=',' read -ra WORKLOADS <<< "$WORKLOADS_CSV"
 IFS=',' read -ra BACKENDS <<< "$BACKENDS_CSV"
 SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -197,13 +194,13 @@ declare -A WL_WINDOW
 # Signal handlers.
 # ----------------------------------------------------------------------
 on_term() {
-	echo "[$(date -uIs)] received SIGTERM/SIGINT — will stop after current workload phase"
+	echo "[$(date -uIs)] received SIGTERM/SIGINT - will stop after current workload phase"
 	STOP_REQUESTED=1
 }
 trap on_term TERM INT
 
 on_usr1() {
-	echo "[$(date -uIs)] received SIGUSR1 — refreshing summary"
+	echo "[$(date -uIs)] received SIGUSR1 - refreshing summary"
 	write_summary || true
 }
 trap on_usr1 USR1
@@ -249,7 +246,7 @@ thermal_check() {
 	if [ "$t" -ge "$THERMAL_PAUSE_C" ]; then
 		local pause_start
 		pause_start=$(date +%s)
-		echo "[$(date -uIs)] [thermal] $t C >= ${THERMAL_PAUSE_C}C — pausing"
+		echo "[$(date -uIs)] [thermal] $t C >= ${THERMAL_PAUSE_C}C - pausing"
 		# Append a thermal scoreboard row.
 		emit_scoreboard_row \
 			"$SOAK_RUN_ID" "thermal" "thermal" "" 0 0 \
@@ -266,7 +263,7 @@ thermal_check() {
 	fi
 }
 
-# Wilson 95% CI — closed-form, no external dep beyond python3 stdlib.
+# Wilson 95% CI - closed-form, no external dep beyond python3 stdlib.
 # Echoes "rate_pct lower_pct upper_pct" (3 floats, 2-decimal).
 wilson_ci() {
 	local n=$1 k=$2
@@ -284,10 +281,10 @@ wilson_ci() {
 	PY
 }
 
-# JSON-escape a string (minimal — assumes 7-bit input from filenames/paths).
+# JSON-escape a string (minimal - assumes 7-bit input from filenames/paths).
 json_esc() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
 
-# Append a row to scoreboard.jsonl. Field order matches §2.6 schema.
+# Append a row to scoreboard.jsonl. Field order matches section2.6 schema.
 emit_scoreboard_row() {
 	local soak_run_id=$1 gate=$2 workload=$3 backend=$4
 	local rotation=$5 iter_within=$6 verdict=$7 init_log=$8
@@ -350,7 +347,7 @@ write_summary() {
 	pct_consumed=$(awk -v e="$elapsed" -v b="$BUDGET_SEC" \
 		'BEGIN { printf "%.1f", (e * 100.0) / b }')
 	{
-		echo "# Phase J soak summary — $SOAK_RUN_ID"
+		echo "# UML soak summary - $SOAK_RUN_ID"
 		echo
 		echo "Start:    $(date -u -d "@$START_TS" +%Y-%m-%dT%H:%M:%SZ)"
 		echo "Now:      $(date -u +%Y-%m-%dT%H:%M:%SZ)   (${elapsed}s elapsed)"
@@ -398,8 +395,9 @@ process_phase_results() {
 		elif grep -q -E "TIMEOUT|deadline exceeded" "$f"; then
 			verdict=TIMEOUT; timeout_b=true
 		fi
-		dur_ms=0  # umlctl gate loop's per-iter timing isn't easily extractable; leave 0 for now
-		emit_scoreboard_row "$SOAK_RUN_ID" "phase-J-soak-$workload" \
+			# umlctl gate loop does not expose per-iteration timing.
+			dur_ms=0
+		emit_scoreboard_row "$SOAK_RUN_ID" "uml-soak-$workload" \
 			"$workload" "$backend" "$rotation" "$iter_within" \
 			"$verdict" "$log_rel" \
 			"$panic_b" "$timeout_b" "$host_error" \
@@ -467,8 +465,7 @@ write_config() {
 
 # Tier 3 workloads require per-worker IP carve-out from 192.168.42.0/24
 # rather than the single shared TAP that `umlctl gate loop --workers N`
-# produces — see Documentation/virt/uml/redesign/02-workstreams/
-# D-kvm-backend/phase-J-tier3-design-2026-05-14.md §4-§6.
+# produces.
 is_tier3_workload() {
 	case "$1" in
 		tier3-*) return 0 ;;
@@ -525,7 +522,7 @@ process_tier3_phase_results() {
 				verdict=TIMEOUT; timeout_b=true
 			fi
 			dur_ms=0
-			emit_scoreboard_row "$SOAK_RUN_ID" "phase-J-soak-$workload" \
+			emit_scoreboard_row "$SOAK_RUN_ID" "uml-soak-$workload" \
 				"$workload" "$backend" "$rotation" "$iter_within" \
 				"$verdict" "$log_rel" \
 				"$panic_b" "$timeout_b" "$host_error" \
@@ -615,7 +612,7 @@ run_one_tier3_phase() {
 	done
 
 	# Wait for all per-worker invocations. We do not propagate
-	# child exit codes — verdicts come from per-iter log scraping.
+	# child exit codes - verdicts come from per-iter log scraping.
 	local pid
 	for pid in "${pids[@]}"; do
 		wait "$pid" 2>/dev/null || true
@@ -679,7 +676,7 @@ run_one_phase() {
 # Main loop.
 # ----------------------------------------------------------------------
 write_config
-echo "[$(date -uIs)] phase-J-soak START run_id=$SOAK_RUN_ID budget=${BUDGET_SEC}s"
+echo "[$(date -uIs)] uml-soak START run_id=$SOAK_RUN_ID budget=${BUDGET_SEC}s"
 echo "[$(date -uIs)] workloads=${WORKLOADS_CSV} backends=${BACKENDS_CSV}"
 echo "[$(date -uIs)] workers=$WORKERS iters=$ITERS"
 echo "[$(date -uIs)] out_dir=$OUT"
@@ -717,7 +714,10 @@ done
 # Final summary + clean exit.
 # ----------------------------------------------------------------------
 write_summary
-echo "[$(date -uIs)] phase-J-soak STOP run_id=$SOAK_RUN_ID rotations=$ROTATION elapsed=$((($(date +%s)) - START_TS))s"
+ELAPSED=$(($(date +%s) - START_TS))
+echo "[$(date -uIs)] uml-soak STOP run_id=$SOAK_RUN_ID rotations=$ROTATION elapsed=${ELAPSED}s"
 echo "[$(date -uIs)] artefacts at $OUT"
-[ -f "$OUT/THRESHOLD_TRIPPED" ] && echo "[$(date -uIs)] *** failure-rate threshold tripped — see $OUT/scoreboard.jsonl ***" >&2
+if [ -f "$OUT/THRESHOLD_TRIPPED" ]; then
+	echo "[$(date -uIs)] failure-rate threshold tripped; see $OUT/scoreboard.jsonl" >&2
+fi
 exit 0

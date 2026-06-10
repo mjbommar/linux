@@ -243,11 +243,11 @@ static int get_transport_options(struct arglist *def)
 }
 
 
-/* A mini-buffer for packet drop read
- * All of our supported transports are datagram oriented and we always
- * read using recvmsg or recvmmsg. If we pass a buffer which is smaller
+/* A mini-buffer for packet drop read.
+ * Supported transports are datagram oriented and use recvmsg or
+ * recvmmsg. If the buffer is smaller
  * than the packet size it still counts as full packet read and will
- * clean the incoming stream to keep sigio/epoll happy
+ * clean the incoming stream to keep sigio/epoll happy.
  */
 
 #define DROP_BUFFER_SIZE 32
@@ -427,10 +427,10 @@ static int vector_send(struct vector_queue *qi)
 				vp->in_write_poll =
 					(result != send_len);
 			}
-			/* For some of the sendmmsg error scenarios
-			 * we may end being unsure in the TX success
-			 * for all packets. It is safer to declare
-			 * them all TX-ed and blame the network.
+			/* Some sendmmsg error scenarios make TX
+			 * completion ambiguous for the submitted
+			 * packet range. Treat the range as consumed
+			 * and report the error through device state.
 			 */
 			if (result < 0) {
 				if (net_ratelimit())
@@ -441,9 +441,9 @@ static int vector_send(struct vector_queue *qi)
 			}
 			if (result > 0) {
 				consume_vector_skbs(qi, result);
-				/* This is equivalent to an TX IRQ.
-				 * Restart the upper layers to feed us
-				 * more packets.
+				/* This is equivalent to a TX IRQ.
+				 * Restart the upper layers so more
+				 * packets can be queued.
 				 */
 				if (result > vp->estats.tx_queue_max)
 					vp->estats.tx_queue_max = result;
@@ -451,8 +451,8 @@ static int vector_send(struct vector_queue *qi)
 					(vp->estats.tx_queue_running_average + result) >> 1;
 			}
 			netif_wake_queue(qi->dev);
-			/* if TX is busy, break out of the send loop,
-			 *  poll write IRQ will reschedule xmit for us.
+			/* If TX is busy, break out of the send loop;
+			 * the write IRQ will reschedule xmit.
 			 */
 			if (result != send_len) {
 				vp->estats.tx_restart_queue++;
@@ -464,8 +464,8 @@ static int vector_send(struct vector_queue *qi)
 	return atomic_read(&qi->queue_depth);
 }
 
-/* Queue destructor. Deliberately stateless so we can use
- * it in queue cleanup if initialization fails.
+/* Queue destructor. Deliberately stateless so it can be used
+ * during cleanup after partial initialization.
  */
 
 static void destroy_queue(struct vector_queue *qi)
@@ -477,9 +477,7 @@ static void destroy_queue(struct vector_queue *qi)
 
 	if (qi == NULL)
 		return;
-	/* deallocate any skbuffs - we rely on any unused to be
-	 * set to NULL.
-	 */
+	/* Deallocate any skbuffs. Unused entries are NULL. */
 	if (qi->skbuff_vector != NULL) {
 		for (i = 0; i < qi->max_depth; i++) {
 			if (*(qi->skbuff_vector + i) != NULL)
@@ -537,8 +535,8 @@ static struct vector_queue *create_queue(
 
 	mmsg_vector = result->mmsg_vector;
 	for (i = 0; i < max_size; i++) {
-		/* Clear all pointers - we use non-NULL as marking on
-		 * what to free on destruction
+		/* Clear all pointers. Non-NULL marks entries to free
+		 * during destruction.
 		 */
 		*(result->skbuff_vector + i) = NULL;
 		mmsg_vector->msg_hdr.msg_iov = NULL;
@@ -589,12 +587,10 @@ out_fail:
 }
 
 /*
- * We do not use the RX queue as a proper wraparound queue for now
- * This is not necessary because the consumption via napi_gro_receive()
- * happens in-line. While we can try using the return code of
- * netif_rx() for flow control there are no drivers doing this today.
- * For this RX specific use we ignore the tail/head locks and
- * just read into a prepared queue filled with skbuffs.
+ * RX consumes packets inline through napi_gro_receive(), so this queue
+ * is a prepared skbuff batch rather than a producer/consumer ring.
+ * The RX path therefore ignores the generic head/tail locking used by
+ * other queue users.
  */
 
 static struct sk_buff *prep_skb(
@@ -667,16 +663,15 @@ static void prep_queue_for_rx(struct vector_queue *qi)
 	if (queue_depth == 0)
 		return;
 
-	/* RX is always emptied 100% during each cycle, so we do not
-	 * have to do the tail wraparound math for it.
+	/* RX is always emptied completely during each cycle, so there is no
+	 * tail wraparound math for it.
 	 */
 
 	qi->head = qi->tail = 0;
 
 	for (i = 0; i < queue_depth; i++) {
-		/* it is OK if allocation fails - recvmmsg with NULL data in
-		 * iov argument still performs an RX, just drops the packet
-		 * This allows us stop faffing around with a "drop buffer"
+		/* Allocation failure is acceptable: recvmmsg with a NULL
+		 * iov data pointer still consumes and drops the packet.
 		 */
 
 		*skbuff_vector = prep_skb(vp, &mmsg_vector->msg_hdr);
@@ -744,9 +739,8 @@ static int vector_config(char *str, char **error_out)
 	if (err != 0)
 		return err;
 
-	/* This string is broken up and the pieces used by the underlying
-	 * driver. We should copy it to make sure things do not go wrong
-	 * later.
+	/* Copy the command-line string because the underlying driver keeps
+	 * pointers into the parsed fragments.
 	 */
 
 	params = kstrdup(params, GFP_KERNEL);
@@ -801,9 +795,8 @@ static int vector_remove(int n, char **error_out)
 }
 
 /*
- * There is no shared per-transport initialization code, so
- * we will just initialize each interface one by one and
- * add them to a list
+ * There is no shared per-transport initialization code, so each interface
+ * is initialized separately and added to the device list.
  */
 
 static struct platform_driver uml_net_driver = {
@@ -942,8 +935,8 @@ drop:
 }
 
 /*
- * Receive as many messages as we can in one call using the special
- * mmsg vector matched to an skb vector which we prepared earlier.
+ * Receive as many messages as possible in one call using the mmsg vector
+ * matched to the prepared skb vector.
  */
 
 static int vector_mmsg_rx(struct vector_private *vp, int budget)
@@ -955,13 +948,13 @@ static int vector_mmsg_rx(struct vector_private *vp, int budget)
 	void **skbuff_vector = qi->skbuff_vector;
 	int header_check;
 
-	/* Refresh the vector and make sure it is with new skbs and the
-	 * iovs are updated to point to them.
+	/* Refresh the vector with new skbs and update the iovs to point
+	 * to them.
 	 */
 
 	prep_queue_for_rx(qi);
 
-	/* Fire the Lazy Gun - get as many packets as we can in one go. */
+	/* Receive up to the budget in one recvmmsg call. */
 
 	if (budget > qi->max_depth)
 		budget = qi->max_depth;
@@ -975,9 +968,9 @@ static int vector_mmsg_rx(struct vector_private *vp, int budget)
 	if (packet_count <= 0)
 		return packet_count;
 
-	/* We treat packet processing as enqueue, buffer refresh as dequeue
-	 * The queue_depth tells us how many buffers have been used and how
-	 * many do we need to prep the next time prep_queue_for_rx() is called.
+	/* Treat packet processing as enqueue and buffer refresh as dequeue.
+	 * queue_depth records how many buffers have been used and how many
+	 * need to be prepared the next time prep_queue_for_rx() is called.
 	 */
 
 	atomic_add(packet_count, &qi->queue_depth);
@@ -1093,11 +1086,8 @@ static irqreturn_t vector_tx_interrupt(int irq, void *dev_id)
 
 	if (!netif_running(dev))
 		return IRQ_NONE;
-	/* We need to pay attention to it only if we got
-	 * -EAGAIN or -ENOBUFFS from sendmmsg. Otherwise
-	 * we ignore it. In the future, it may be worth
-	 * it to improve the IRQ controller a bit to make
-	 * tweaking the IRQ mask less costly
+	/* This IRQ matters only after sendmmsg returns -EAGAIN or
+	 * -ENOBUFS. Other write readiness notifications can be ignored.
 	 */
 
 	napi_schedule(&vp->napi);
@@ -1279,7 +1269,7 @@ static int vector_net_open(struct net_device *dev)
 	dev->irq = irq_rr + VECTOR_BASE_IRQ;
 	irq_rr = (irq_rr + 1) % VECTOR_IRQ_SPACE;
 
-	/* WRITE IRQ - we need it only if we have vector TX */
+	/* WRITE IRQ is only needed for vector TX. */
 	if ((vp->options & VECTOR_TX) > 0) {
 		err = um_request_irq(
 			irq_rr + VECTOR_BASE_IRQ, vp->fds->tx_fd,
@@ -1308,8 +1298,8 @@ static int vector_net_open(struct net_device *dev)
 	netif_start_queue(dev);
 	vector_reset_stats(vp);
 
-	/* clear buffer - it can happen that the host side of the interface
-	 * is full when we get here. In this case, new data is never queued,
+	/* Clear the buffer. The host side of the interface may already be
+	 * full at open time. In this case, new data is never queued,
 	 * SIGIOs never arrive, and the net never works.
 	 */
 
@@ -1329,7 +1319,7 @@ out_close:
 
 static void vector_net_set_multicast_list(struct net_device *dev)
 {
-	/* TODO: - we can do some BPF games here */
+	/* Multicast filtering is handled by the host transport. */
 	return;
 }
 
@@ -1353,9 +1343,8 @@ static int vector_set_features(struct net_device *dev,
 	netdev_features_t features)
 {
 	struct vector_private *vp = netdev_priv(dev);
-	/* Adjust buffer sizes for GSO/GRO. Unfortunately, there is
-	 * no way to negotiate it on raw sockets, so we can change
-	 * only our side.
+	/* Adjust buffer sizes for GSO/GRO. Raw sockets have no
+	 * negotiation channel, so only the UML side can change.
 	 */
 	if (features & NETIF_F_GRO)
 		/* All new frame buffers will be GRO-sized */
@@ -1652,10 +1641,7 @@ static void vector_eth_configure(
 	vp->options	= get_transport_options(def);
 	vp->parsed	= def;
 	vp->max_packet	= get_mtu(def) + ETH_HEADER_OTHER;
-	/*
-	 * TODO - we need to calculate headroom so that ip header
-	 * is 16 byte aligned all the time
-	 */
+	/* Transport-specific headroom includes link-layer alignment needs. */
 	vp->headroom	= get_headroom(def);
 	vp->coalesce	= 2;
 	vp->req_size	= get_req_size(def);
@@ -1665,12 +1651,11 @@ static void vector_eth_configure(
 
 	timer_setup(&vp->tl, vector_timer_expire, 0);
 
-	/* FIXME */
 	dev->netdev_ops = &vector_netdev_ops;
 	dev->ethtool_ops = &vector_net_ethtool_ops;
 	dev->watchdog_timeo = (HZ >> 1);
-	/* primary IRQ - fixme */
-	dev->irq = 0; /* we will adjust this once opened */
+	/* Primary IRQ is assigned when the device opens. */
+	dev->irq = 0; /* assigned once opened */
 
 	rtnl_lock();
 	err = register_netdevice(dev);
@@ -1696,7 +1681,7 @@ out_free_device:
 
 
 /*
- * Invoked late in the init
+	 * Invoked late in init.
  */
 
 static int __init vector_init(void)
@@ -1715,10 +1700,7 @@ static int __init vector_init(void)
 }
 
 
-/* Invoked at initial argument parsing, only stores
- * arguments until a proper vector_init is called
- * later
- */
+/* Invoked at initial argument parsing; stores arguments until vector_init. */
 
 static int __init vector_setup(char *str)
 {

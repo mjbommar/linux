@@ -33,14 +33,12 @@
 
 #ifdef CONFIG_KASAN
 #if defined(CONFIG_UM_SNAPSHOT_FORKSERVER)
-/* Entry in the C-09 kernel mmap registry (D37 pull-forward #1) that
- * describes the KASAN shadow mapping. Registered after
- * kasan_map_memory(). REMAP_IN_WORKER is not set because D37 pull-
- * forward #6 drops MADV_DONTFORK on the shadow under
- * CONFIG_UM_FUZZ_HOOKS, so workers inherit via COW instead. Shadow
- * contents are not in v2 snapshots by default — too sparse to
- * justify; snapshot restore reconstructs the needed shadow from the
- * allocator state.
+/* Kernel mmap registry entry for the KASAN shadow mapping. Registered
+ * after kasan_map_memory(). REMAP_IN_WORKER is not set because workers
+ * inherit the shadow via COW under CONFIG_UM_FUZZ_HOOKS. Shadow
+ * contents are not in snapshots by default; they are too sparse to
+ * justify serializing, and restore can reconstruct the needed shadow
+ * from allocator state.
  */
 static struct um_mmap_region kasan_shadow_mmap_region = {
 	.name  = "kasan-shadow",
@@ -77,14 +75,12 @@ __section(".kasan_init") __used
 #endif
 
 /*
- * Under the D62 VMALLOC-quarter-split layout (2026-04-23,
- * supersedes D58), KMSAN shadow + origin live inside the
- * VMALLOC range's 2nd and 3rd quarters (see
- * arch/um/include/asm/pgtable.h). The generic mm/kmsan/
- * shadow.c::vmalloc_meta arithmetic maps every vmalloc or
- * module address to its shadow/origin via VMALLOC_START
- * offset + KMSAN_VMALLOC_*_OFFSET — no arch-specific
- * bootstrap mmap required. The weak generic
+ * KMSAN shadow and origin metadata live inside the VMALLOC range's
+ * second and third quarters (see arch/um/include/asm/pgtable.h). The
+ * generic mm/kmsan/shadow.c::vmalloc_meta arithmetic maps every
+ * vmalloc or module address to its shadow/origin via VMALLOC_START
+ * offset + KMSAN_VMALLOC_*_OFFSET; no arch-specific bootstrap mmap is
+ * required. The weak generic
  * kmsan_arch_init_early_shadow() from mm/kmsan/init.c is
  * the correct no-op; do NOT override it here.
  *
@@ -92,9 +88,8 @@ __section(".kasan_init") __used
  * with um_register_mmap_region() are similarly unnecessary
  * under the quarter-split: vmalloc pages (including the
  * KMSAN shadow/origin quarters) already inherit through
- * the normal snapshot-forkserver vmalloc COW path, which
- * C-09 already validates for vmalloc-backed allocations
- * more broadly.
+ * the normal snapshot-forkserver vmalloc COW path, which already
+ * covers vmalloc-backed allocations more broadly.
  */
 
 /*
@@ -104,7 +99,7 @@ __section(".kasan_init") __used
 pgd_t swapper_pg_dir[PTRS_PER_PGD];
 
 /* Initialized at boot time, and readonly after that */
-int kmalloc_ok = 0;
+int kmalloc_ok;
 
 /* Used during early boot */
 static unsigned long brk_end;

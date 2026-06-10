@@ -13,9 +13,9 @@
 # actually fires when its failure mode is present.
 #
 # Exit codes:
-#   0 — all gates correctly failed on their respective synthetic
+#   0 - all gates correctly failed on their respective synthetic
 #       inputs (the gates work).
-#   1 — at least one gate did NOT detect its failure mode (the test
+#   1 - at least one gate did NOT detect its failure mode (the test
 #       framework is broken; fix before relying on results).
 
 import json

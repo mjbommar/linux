@@ -1,16 +1,16 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 #
-# bench-stress — concurrency / mm-churn workload. Runs mt-mini
-# with strict_memset enabled, T=8 pthread workers × N iterations
+# bench-stress - concurrency / mm-churn workload. Runs mt-mini
+# with strict_memset enabled, T=8 pthread workers x N iterations
 # each. Captures wall-clock + STRICT_MEMSET_FAIL count + VERIFY_FAIL
 # count.
 #
 # Tunables:
-#   BENCH_SAMPLES   — sample count (default 3 — each takes ~5-15 s)
-#   BENCH_WARMUP    — discard first M (default 1)
-#   MT_MINI_BIN     — path to mt-mini binary
-#   MT_THREADS      — pthread workers (default 8)
+#   BENCH_SAMPLES   - sample count (default 3 - each takes ~5-15 s)
+#   BENCH_WARMUP    - discard first M (default 1)
+#   MT_MINI_BIN     - path to mt-mini binary
+#   MT_THREADS      - pthread workers (default 8)
 #
 # Output:
 #   BENCH: tier=stress sample=<N> elapsed_ms=<X> rc=<R> \
@@ -44,7 +44,7 @@ run_once() {
     echo "$RC $SF $VF"
 }
 
-# Warm-up — discard
+# Warm-up - discard
 i=0
 while [ $i -lt $WARMUP ]; do
     run_once >/dev/null 2>&1

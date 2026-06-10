@@ -4,11 +4,11 @@
 #
 # `cargo test --bin umlctl` runs every test in the umlctl crate.
 # This is the cheapest gate (~5 sec on a warm cache) and catches
-# regressions in the host-side tooling — Umlfile parsing, gate
+# regressions in the host-side tooling: Umlfile parsing, gate
 # parsing itself, manifest serialization, supervise argv shape,
 # scoreboard roundtrip, port-forward parsing.
 #
-# Runs first in the L0..L7 ladder (memo 30-gate-discipline.md).
+# Runs first because it is the cheapest host-side gate.
 
 schema_version = 1
 

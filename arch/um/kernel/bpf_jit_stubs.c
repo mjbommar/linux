@@ -5,23 +5,20 @@
  * UML doesn't compile (alternative.c, cfi.c, retpoline.S, etc.).
  *
  * Each runtime path that would reach these stubs is gated by a
- * `cpu_feature_enabled(X86_FEATURE_*)` check that returns false
+ * cpu_feature_enabled(X86_FEATURE_*) check that returns false
  * on UML (no retpoline, no ITS/BHB mitigations, no CFI in the
  * UML kernel's BPF JIT output). The stubs exist solely to satisfy
  * the linker; they should never be called at runtime. If any of
  * them runs, it means a cpu_feature gate is misconfigured and we
  * want to know about it immediately (hence the panic rather than
  * silent empty body).
- *
- * Workstream C-06 per Documentation/virt/uml/redesign/
- * 04-risks/decisions-log.md D43 fifth-view.
  */
 
 #include <linux/export.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/bug.h>
-#include <asm/cfi.h>
+#include <linux/cfi.h>
 #include <asm/bpf_jit_shims.h>
 
 /*
@@ -39,8 +36,7 @@ EXPORT_SYMBOL_GPL(__x86_indirect_jump_thunk_array);
 
 /*
  * CFI mode. emit_cfi in bpf_jit_comp.c:479 switches on this.
- * UML builds with CFI off (for now); CFI_OFF leads the emitter
- * to skip all CFI prologue bytes.
+ * UML leaves CFI disabled, so the emitter skips all CFI prologue bytes.
  */
 enum cfi_mode cfi_mode = CFI_OFF;
 EXPORT_SYMBOL_GPL(cfi_mode);
@@ -54,8 +50,8 @@ EXPORT_SYMBOL_GPL(cfi_mode);
  */
 void clear_bhb_loop(void)
 {
-	panic("UML: clear_bhb_loop reached — BHB mitigation should be "
-	      "inert on UML. Check cpu_feature_enabled gates.");
+	panic("%s: BHB mitigation should be inert on UML; check cpu_feature_enabled gates",
+	      __func__);
 }
 EXPORT_SYMBOL_GPL(clear_bhb_loop);
 
@@ -64,7 +60,7 @@ EXPORT_SYMBOL_GPL(clear_bhb_loop);
  * overwrite a JIT image with 0xcc (int3) bytes on unload. On
  * UML the JIT image lives in execmem-allocated memory which is
  * plain RWX host memory; memset is sufficient and semantically
- * correct. No host icache flush needed — self-modifying code on
+ * correct. No host icache flush needed; self-modifying code on
  * the same CPU is coherent without explicit sync on x86.
  */
 void *text_poke_set(void *addr, int c, size_t len)
@@ -89,7 +85,7 @@ EXPORT_SYMBOL_GPL(smp_text_poke_single);
 
 /*
  * text_poke_copy is already provided by arch/um/kernel/um_arch.c:502
- * (workstream B-04's patching infrastructure). Do not redefine
- * here — the linker will reject a duplicate symbol. Keep this
- * comment so future editors don't add it back.
+ * as part of the patching infrastructure. Do not redefine here: the
+ * linker will reject a duplicate symbol. Keep this comment so the local
+ * definition is not reintroduced.
  */

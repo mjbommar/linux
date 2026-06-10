@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/ftrace-smoke/run-ftrace-smoke.sh — host-side launcher for the
-# workstream C-05 ftrace smoke test.
+# um/ftrace-smoke/run-ftrace-smoke.sh - host-side launcher for the
+# ftrace smoke test.
 #
 # Boots a UML guest built with CONFIG_FUNCTION_TRACER=y and runs
 # ftrace-smoke.sh as init. The guest enables the function tracer,
@@ -13,7 +13,7 @@
 # Environment:
 #   UML_BINARY   path to the UML binary built with CONFIG_FUNCTION_TRACER=y
 #                (default: /tmp/uml-research/linux)
-#   UML_MEM      mem=N argument  (default: 512M — research build is large)
+#   UML_MEM      mem=N argument  (default: 512M; research build is large)
 #
 # The default binary path matches the `make ARCH=um uml/research`
 # workflow when the user follows Documentation/virt/uml/profiles/
@@ -35,13 +35,12 @@ if [ ! -x "$GUEST_SCRIPT" ]; then
 	exit 1
 fi
 
-# --kill-after=10: UML has its own signal plumbing and can
-# ignore SIGTERM under some conditions (see D59 Finding #1
-# forensic memo). Without --kill-after, a wedged guest
-# hangs this harness silently for the full timeout plus
-# whatever the CI harness's outer watchdog allows. 10 s
-# grace is enough for a clean halt path; if the guest is
-# truly wedged, SIGKILL follows and we fail loudly.
+# --kill-after=10: UML has its own signal plumbing and can ignore
+# SIGTERM under some conditions. Without --kill-after, a wedged guest
+# hangs this harness silently for the full timeout plus whatever the
+# CI harness's outer watchdog allows. 10 s grace is enough for a clean
+# halt path; if the guest is truly wedged, SIGKILL follows and we fail
+# loudly.
 OUT=$(timeout --kill-after=10 60 "$BINARY" init="$GUEST_SCRIPT" mem="$MEM" \
 	con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw 2>&1)
 

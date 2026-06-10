@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * KUnit tests for the UML vector networking v2 netdev skeleton.
+ * KUnit tests for the UML vector networking v2 netdev layer.
  */
 
 #include <kunit/test.h>
@@ -180,19 +180,13 @@ static void vector2_netdev_queue_cpu_policy_test(struct kunit *test)
 }
 
 /*
- * P3.1 — NAPI poll path coverage with the deterministic fake host.
+ * NAPI poll path coverage with the deterministic fake host.
  *
- * The existing tests above exercise the netdev surface (xmit / open /
- * stop) but never drive um_vec2_netdev_poll() end-to-end through a host
- * backend.  These tests open the netdev with the FD transport against a
- * pipe so um_vec2_start_datapath() registers the real NAPI callback
- * (napi->poll == um_vec2_netdev_poll), then swap channel->host out for
- * the deterministic fake host.  Invoking napi->poll() directly with
- * controlled fake-host responses asserts that each branch
- * (healthy round, backend-dead tx, backend-dead rx, tx_more reschedule,
- * rx alloc error, rx protocol drop) routes the right stat and
- * NAPI/queue state.  See audit P3.1 in the vector v2 code audit
- * (08-future-phases/46-...).
+ * These tests open the FD transport against a pipe so start_datapath()
+ * registers the real NAPI callback, then swap channel->host out for the
+ * deterministic fake host. Direct poll invocation covers healthy traffic,
+ * backend-dead paths, TX reschedule, RX allocation failure, and RX protocol
+ * drops.
  */
 struct vector2_netdev_poll_ctx {
 	struct um_vec2_dev *vdev;
@@ -204,11 +198,11 @@ struct vector2_netdev_poll_ctx {
 
 /*
  * Open the netdev via the FD transport against a pipe, then swap the
- * channel's host backend out for our deterministic fake host.  This
- * gives us a properly initialised NAPI (napi->poll = um_vec2_netdev_poll
- * because um_vec2_start_datapath wired it up) that we can invoke
- * directly, while still controlling tx/rx outcomes byte-for-byte via
- * the fake host primitives.  See P3.1 of the audit.
+ * channel's host backend out for the deterministic fake host.  This
+ * gives the test a properly initialized NAPI (napi->poll =
+ * um_vec2_netdev_poll because um_vec2_start_datapath wired it up) that
+ * can be invoked directly, while still controlling tx/rx outcomes
+ * byte-for-byte via the fake host primitives.
  */
 static struct vector2_netdev_poll_ctx *
 vector2_netdev_poll_ctx_open(struct kunit *test, unsigned int unit)
@@ -282,12 +276,9 @@ static int vector2_netdev_poll_invoke(struct vector2_netdev_poll_ctx *ctx,
 	int ret;
 
 	/*
-	 * Mark NAPI scheduled so the in-poll napi_complete_done() sees
-	 * the expected NAPIF_STATE_SCHED + NAPIF_STATE_MISSED state and
-	 * doesn't trip its WARN_ON_ONCE.  Clear NAPIF_STATE_MISSED first
-	 * so we can later distinguish a real napi_schedule() reschedule
-	 * (from the tx_more branch) without the kernel having set MISSED
-	 * itself.
+	 * Mark NAPI scheduled so in-poll napi_complete_done() sees the expected
+	 * state. Clear MISSED first so a tx_more reschedule is distinguishable
+	 * from this setup state.
 	 */
 	clear_bit(NAPI_STATE_MISSED, &napi->state);
 	set_bit(NAPI_STATE_SCHED, &napi->state);
@@ -310,11 +301,9 @@ static void vector2_netdev_poll_healthy_round_test(struct kunit *test)
 	int rx_done;
 
 	/*
-	 * um_vec2_netdev_open() ends with napi_schedule(), which the
-	 * softirq layer may or may not have drained by the time we run.
-	 * Snapshot NAPI_POLLS after our own invocation primes the
-	 * counter so the delta below is unaffected by any prior
-	 * softirq-driven poll round.
+	 * um_vec2_netdev_open() ends with napi_schedule(), which the softirq
+	 * layer may or may not have drained by this point. Snapshot NAPI_POLLS
+	 * after this direct invocation so the delta below is stable.
 	 */
 	skb = alloc_skb(64, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, skb);
@@ -371,7 +360,7 @@ static void vector2_netdev_poll_backend_dead_tx_test(struct kunit *test)
 	 * The skb remained on the TX ring because tx_batch returned
 	 * -ENODEV before completion.  um_vec2_queue_pair_free() inside
 	 * the ctx_close path resets the ring with um_vec2_tx_drop_skb,
-	 * which kfree_skb's any leftover owners.
+	 * which releases any remaining skb references.
 	 */
 
 	vector2_netdev_poll_ctx_close(ctx);

@@ -1,15 +1,13 @@
 /* Dump the termios mode UML hands PID-1 init under con0=fd:0,fd:1.
  *
  * The substrate gate's class-a-env/termios_get says "tcgetattr
- * succeeds on stdin" — surprising under PID-1, since we expected no
+ * succeeds on stdin" - surprising under PID-1, since we expected no
  * tty. The actual UML boot wires guest fd 0/1/2 through con0 to the
- * host's tty, so it IS a real tty — just maybe not the one CPython's
+ * host's tty, so it is a real tty, just maybe not the one CPython's
  * test_termios expects. This probe dumps the iflag/oflag/cflag/lflag
- * bits so memo 29 §2.5.2 can decide whether the skip-list entry for
- * test_termios is right or whether UML should be giving CPython a
- * different mode.
+ * bits so the skip-list entry for test_termios can be validated.
  *
- * Always emits PASS — this reproducer is diagnostic, not pass/fail.
+ * Always emits PASS; this reproducer is diagnostic, not pass/fail.
  */
 #define _GNU_SOURCE
 #include <errno.h>

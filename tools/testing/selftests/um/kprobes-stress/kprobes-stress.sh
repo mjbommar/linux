@@ -1,13 +1,12 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/kprobes-stress/kprobes-stress.sh — workstream C-04 stress test.
+# um/kprobes-stress/kprobes-stress.sh - kprobes stress test.
 #
 # Runs inside a UML guest via init=. Exercises the kprobes +
 # kretprobes-via-rethook port under a fork-heavy workload. Intended
-# as the regression guard for C-04 commits 1a-1d + 2, and as the
-# empirical gate for a future HAVE_FUNCTION_GRAPH_TRACER landing
-# (decisions-log D34).
+# as the regression guard for the kprobes and kretprobes-via-rethook
+# implementation.
 #
 # What it does:
 #
@@ -26,8 +25,8 @@
 # both; see Documentation/virt/uml/profiles/research.rst.
 #
 # If samples/kprobes/kretprobe_example.ko is not available, the
-# script emits SKIP and halts cleanly — commit 5 is a regression
-# guard, not a kernel-build verifier.
+# script emits SKIP and halts cleanly. This is a regression guard, not
+# a kernel-build verifier.
 
 ITERS=${KPROBES_STRESS_ITERS:-200}
 MODULE=${UML_KRETPROBE_MODULE:-}
@@ -36,7 +35,7 @@ mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
 mount -t debugfs none /sys/kernel/debug 2>/dev/null
 
-# Env vars don't propagate through UML's kernel-start → init exec
+# Env vars don't propagate through UML's kernel-start -> init exec
 # path. Allow the host-side runner to override ITERS via the
 # kernel command line (kretprobe_iters=N); the env var still
 # works for manual invocations.
@@ -56,7 +55,7 @@ fi
 
 if [ -z "$MODULE" ] || [ ! -f "$MODULE" ]; then
 	# Environment variables don't propagate from the host into
-	# the UML guest's init process — kernel cmdline is the portable
+	# the UML guest's init process; kernel cmdline is the portable
 	# channel. Try kretprobe_module=/path/to/ko on /proc/cmdline
 	# first (set by run-kprobes-stress.sh), then fall back to a
 	# few well-known build-tree locations.

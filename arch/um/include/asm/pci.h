@@ -9,8 +9,8 @@
 
 #ifdef CONFIG_PCI_MSI
 /*
- * This is a bit of an annoying hack, and it assumes we only have
- * the virt-pci (if anything). Which is true, but still.
+ * UML only has the virt-pci root, so one arch-level fwnode hook is
+ * enough for MSI support.
  */
 void *pci_root_bus_fwnode(struct pci_bus *bus);
 #define pci_root_bus_fwnode	pci_root_bus_fwnode

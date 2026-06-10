@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Experimental command-line collection for UML vector networking v2.
+ * Command-line collection for UML vector networking v2.
  */
 
 #define pr_fmt(fmt) "uml-vector2: " fmt
@@ -130,8 +130,8 @@ __setup("vec2=", um_vec2_setup_equals);
 
 __uml_help(um_vec2_setup_dot,
 	   "vec2.<n>:<option>=<value>,<option>=<value>\n"
-	   "    Configure an experimental vector io v2 network device.\n\n");
+	   "    Configure a vector io v2 network device.\n\n");
 
 __uml_help(um_vec2_setup_equals,
 	   "vec2=<n>,<option>=<value>,<option>=<value>\n"
-	   "    Configure an experimental vector io v2 network device.\n\n");
+	   "    Configure a vector io v2 network device.\n\n");

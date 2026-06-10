@@ -16,7 +16,7 @@
 #     enable lives in the fragment (e.g. research enables KASAN);
 #   - settings that never change across profiles live only here.
 #
-# Keep this file lean — every line is paid for by every profile.
+# Keep this file lean; every line is paid for by every profile.
 
 # --- init / basic kernel -------------------------------------------
 CONFIG_SYSVIPC=y
@@ -41,7 +41,7 @@ CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_PROC_KCORE=y
 CONFIG_TMPFS=y
 
-# --- per-mm host worker process (memo 25 R4 / memo 28 E.6) ---------
+# --- per-mm host worker process ------------------------------------
 CONFIG_UM_WORKER_PROCESS=y
 
 # --- character devices (stdin/stdout) ------------------------------

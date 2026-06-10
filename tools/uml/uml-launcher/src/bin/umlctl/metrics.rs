@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // metrics — host-side `/proc/<pid>/*` + cgroup v2 scraper for
-// `umlctl metrics`. Phase O2 of the observability spine
-// (Documentation/virt/uml/redesign/08-future-phases/
-// 13-uml-observability-spine.md).
+// `umlctl metrics`.
 //
 // One-shot scrape (no daemon, no listener): resolves the
 // instance's live pid via the runtime pidfile, reads a
@@ -12,8 +10,7 @@
 //
 // Deliberate non-goals for v1:
 //   - no OpenMetrics HTTP endpoint (would need a daemon).
-//   - no eBPF off-CPU/wakeup-lat scraping (bigger lift, its
-//     own phase).
+//   - no eBPF off-CPU/wakeup-lat scraping.
 //   - no sampling loop (callers can `watch umlctl metrics ...`).
 //
 // The fields chosen are the ones that matter for UML
@@ -125,7 +122,7 @@ pub fn scrape(pid: u32) -> Result<Metrics> {
 }
 
 /// Find the `0::<path>` line (unified v2 hierarchy) and return
-/// its payload. Returns None on legacy-v1-only systems.
+/// its payload. Returns None on cgroup v1-only systems.
 fn parse_cgroup_v2_path(s: &str) -> Option<String> {
     for line in s.lines() {
         // Form: `0::/<path>`

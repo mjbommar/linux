@@ -8,7 +8,7 @@
 // the pidfile and polls `kill(pid, 0)` until it returns ESRCH.
 // If the initial signal doesn't land inside --timeout, we
 // escalate to SIGKILL. No more orphan accumulation from
-// `timeout ./linux …` shortcuts.
+// `timeout ./linux ...` shortcuts.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::os::fd::RawFd;
@@ -54,9 +54,7 @@ pub struct StopInfo {
 
 /// Descriptor of a just-started run, threaded back to the
 /// command layer so umlctl can print `run_id` + record it in
-/// history.jsonl. Supersedes the earlier "just return a pid"
-/// signature now that the observability spine (memo 13) needs
-/// every start to produce a correlation id.
+/// history.jsonl.
 pub struct StartOutcome {
     pub pid: u32,
     pub run_id: String,
@@ -100,7 +98,7 @@ pub fn start_with_fds(
         let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
     }
 
-    // Mint a run_id up front — the bundle directory is
+    // Mint a run_id up front - the bundle directory is
     // created pre-spawn so the log file we're about to
     // redirect into already has its permanent home.
     let run_id = run::generate_run_id();
@@ -111,10 +109,10 @@ pub fn start_with_fds(
 
     let argv = build_kernel_argv(m);
 
-    // v1 layout: stdout + stderr merged into init.log inside
-    // the bundle. The O1.2 lift derives a `kernel.log` sidecar
-    // at stop time by filtering init.log for `[<ts>] …` and
-    // `<N>…` printk-shape lines; the merged file stays
+    // stdout + stderr are merged into init.log inside the bundle.
+    // Stop derives a `kernel.log` sidecar by filtering init.log for
+    // `[<ts>] ...` and
+    // `<N>...` printk-shape lines; the merged file stays
     // authoritative because UML's init process shares the same
     // console fd that the kernel's printk subsystem writes to.
     let log_path = if args.no_log {
@@ -156,8 +154,8 @@ pub fn start_with_fds(
     };
     cmd.args(&argv).stdout(stdout_cfg).stderr(stderr_cfg);
 
-    // SMP-T78..T82 (memo 52 §1-§2): apply host_env from manifest.
-    // Each entry becomes a UM_* env var read by os-Linux/main.c /
+    // Apply host_env from the manifest. Each entry becomes a UM_*
+    // env var read by os-Linux/main.c /
     // os-Linux/process.c at UML startup (UM_THP / UM_OOM_SCORE_ADJ /
     // UM_KVM_V2_CPU_AFFINITY / UM_HUGEPAGES / UM_KVM_V2_PIN_PHYSMEM).
     // Empty map = no-op (inherit caller's env unchanged).
@@ -174,20 +172,19 @@ pub fn start_with_fds(
     }
     install_pre_exec(&mut cmd, !args.foreground, inherited_fds);
 
-    // SMP-T84 (memo 52 §3.4): preflight resource verification.
-    // Each warning is logged but the run proceeds — kernel-side
-    // fallbacks handle missing hugepage pool / cgroup writability
-    // gracefully.
+    // Preflight resource verification.  Each warning is logged but
+    // the run proceeds: kernel-side fallbacks handle missing hugepage
+    // pools and cgroup writability gracefully.
     if !m.host_env.is_empty() || m.cgroup_v2.is_some() {
         if let Ok(report) = preflight::run(&m.host_env, m.cgroup_v2.as_ref()) {
             report.print();
         }
     }
 
-    // SMP-T83 (memo 52 §2.3): if the manifest has a cgroup_v2
-    // config, create the per-instance cgroup with limits BEFORE
-    // spawn. We move the pid in after spawn returns. Failure is
-    // not fatal — ensure_cgroup logs and returns None when the
+    // If the manifest has a cgroup_v2 config, create the per-instance
+    // cgroup with limits BEFORE spawn. We move the pid in after spawn
+    // returns. Failure is not fatal: ensure_cgroup logs and returns None
+    // when the
     // cgroup hierarchy isn't writable, and we proceed
     // unconstrained.
     let cgroup_path = m
@@ -209,8 +206,8 @@ pub fn start_with_fds(
         None => child.id(),
     };
 
-    // SMP-T83: move the freshly-spawned pid into the cgroup so
-    // the limits take effect.
+    // Move the freshly-spawned pid into the cgroup so the limits take
+    // effect.
     if let Some(cg) = &cgroup_path {
         cgroup::move_pid_in(cg, pid);
     }
@@ -245,8 +242,8 @@ pub fn start_with_fds(
     // --ready-timeout. Fall back to "trust the spawn" if no
     // log file was created.
     //
-    // Audit finding A6 (2026-04-24): early-exit detection uses
-    // the owned Child handle's try_wait() rather than
+    // Early-exit detection uses the owned Child handle's try_wait()
+    // rather than
     // kill(pid, 0). A quickly-exited but unreaped child shows
     // up as live to kill(pid, 0) since the zombie is still in
     // the process table under our pid; try_wait() transparently
@@ -294,7 +291,7 @@ pub fn start_with_fds(
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        // Timeout expired — kill the child so the caller doesn't
+        // Timeout expired - kill the child so the caller doesn't
         // leave it wedged.
         let _ = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid as i32),
@@ -367,7 +364,7 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
         return Err(StopError::NotRunning);
     }
 
-    // Run_id side-file is best-effort — a missing/corrupt
+    // Run_id side-file is best-effort - a missing/corrupt
     // one shouldn't block a stop. Fall back to the empty
     // string so history still records the event.
     let run_id = read_run_id_file(&paths.run_id_file_path(&args.name)).unwrap_or_default();
@@ -408,14 +405,13 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
     // Drain any zombies of our own (helper procs we may have
     // spawned in this invocation). The UML itself isn't our
     // child post-start-detach, so this is cheap no-op on the
-    // common path — it's a safety net for future helpers.
+    // common path - it's a safety net for future helpers.
     drain_zombies();
 
     // Finalize the run bundle with our exit-side fields.
     // exit_status stays None on the detach path because the
-    // UML isn't our child post-start; a later phase (control
-    // socket) can surface a real one via guest-agent shutdown
-    // handshakes.
+    // UML isn't our child post-start; a control socket can surface a
+    // real one via guest-agent shutdown handshakes.
     if !run_id.is_empty() {
         run::finalize_run(paths, &run_id, run::boottime_ns(), &signal_name, None);
         derive_kernel_log_best_effort(paths, &run_id);
@@ -425,9 +421,9 @@ pub fn stop(paths: &Paths, args: &StopArgs) -> std::result::Result<StopInfo, Sto
     let _ = std::fs::remove_file(&pidfile);
     let _ = std::fs::remove_file(paths.run_id_file_path(&args.name));
 
-    // SMP-T83: teardown the per-instance cgroup. Safe to call
-    // even if no cgroup was created at start (no-op on missing
-    // dir). EBUSY (still-non-empty cgroup) is logged + ignored.
+    // Teardown the per-instance cgroup. Safe to call even if no
+    // cgroup was created at start (no-op on missing dir). EBUSY
+    // (still-non-empty cgroup) is logged and ignored.
     cgroup::teardown(&args.name);
 
     Ok(StopInfo {
@@ -446,21 +442,19 @@ pub fn is_running(paths: &Paths, name: &str) -> bool {
     }
 }
 
-/// Pidfile identity after the A5 (2026-04-24) change: carries
-/// both the pid and /proc/<pid>/stat's starttime_ticks.
-/// `starttime = None` means the pidfile was written by a
-/// pre-A5 umlctl (legacy single-line `<pid>\n` format).
+/// Pidfile identity.  Carries both the pid and
+/// /proc/<pid>/stat's starttime_ticks.  `starttime = None` means the
+/// pidfile uses the single-line `<pid>\n` compatibility format.
 #[derive(Copy, Clone)]
 pub(super) struct PidIdentity {
     pub pid: u32,
     pub starttime: Option<u64>,
 }
 
-/// Read /proc/<pid>/stat field 22 (starttime, clock ticks
-/// since boot). Returns None if /proc/<pid>/stat doesn't
-/// exist OR can't be parsed — caller treats None as "no
-/// starttime info available," which disables the A5 PID-
-/// reuse check for that call-site only.
+/// Read /proc/<pid>/stat field 22 (starttime, clock ticks since
+/// boot). Returns None if /proc/<pid>/stat doesn't exist OR can't be
+/// parsed; the caller then disables the PID-reuse check for that call
+/// site only.
 pub(super) fn read_starttime(pid: u32) -> Option<u64> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rparen = s.rfind(')')?;
@@ -471,8 +465,8 @@ pub(super) fn read_starttime(pid: u32) -> Option<u64> {
 
 pub(super) fn read_pidfile(path: &Path) -> Option<PidIdentity> {
     let s = std::fs::read_to_string(path).ok()?;
-    // A5 pidfile format is "<pid> <starttime>\n"; legacy is
-    // "<pid>\n". Accept both for backward compat.
+    // Current pidfile format is "<pid> <starttime>\n"; accept the
+    // older "<pid>\n" shape for backward compatibility.
     let trimmed = s.trim();
     let mut it = trimmed.split_whitespace();
     let pid: u32 = it.next()?.parse().ok()?;
@@ -485,10 +479,10 @@ fn write_pidfile(path: &Path, pid: u32) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create runtime dir {}", parent.display()))?;
     }
-    // A5 format: "<pid> <starttime>\n". Starttime is read from
+    // Current format: "<pid> <starttime>\n". Starttime is read from
     // /proc/<pid>/stat right after spawn; a missing value
-    // (child raced away before we could read stat) is fine —
-    // we fall back to the legacy "<pid>\n" format on that row
+    // (child raced away before we could read stat) is fine -
+    // we fall back to the "<pid>\n" format on that row
     // and the corresponding read_pidfile returns
     // starttime=None. Subsequent identity checks for that
     // pidfile fall back to kill(pid, 0) semantics with a one-
@@ -525,12 +519,12 @@ pub(super) fn read_run_id_file(path: &Path) -> Option<String> {
 pub(super) fn process_alive(pid: u32) -> bool {
     // kill(pid, 0): 0 means live + we have perms. ESRCH means
     // dead for real. EPERM means live but not ours (still
-    // alive — treat as running). Everything else counts as dead.
+    // alive - treat as running). Everything else counts as dead.
     //
     // NOTE: this helper is PID-only and therefore vulnerable to
     // pid-reuse races. Prefer identity_alive() which also checks
     // /proc/<pid>/stat starttime against a captured baseline.
-    // process_alive() is retained for pre-A5 pidfiles that never
+    // process_alive() is retained for pidfiles that never
     // recorded a starttime; identity_alive() calls through to it
     // as the fallback.
     unsafe {
@@ -543,8 +537,8 @@ pub(super) fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// PID-reuse-safe liveness probe for A5 (audit finding 2026-04-
-/// 24). A raw kill(pid, 0) can't distinguish "the process we
+/// PID-reuse-safe liveness probe. A raw kill(pid, 0) can't distinguish
+/// "the process we
 /// originally spawned is still running" from "that pid was
 /// recycled by the kernel for an unrelated process." We defend
 /// by comparing /proc/<pid>/stat starttime_ticks against the
@@ -552,10 +546,10 @@ pub(super) fn process_alive(pid: u32) -> bool {
 /// per-pid (set at fork-time, never changed), so a mismatch
 /// means pid-reuse.
 ///
-/// If `identity.starttime` is None (legacy pidfile), falls back
-/// to the PID-only check with a one-shot warn — this only fires
-/// for pidfiles written by pre-A5 umlctl and disappears after
-/// the next stop+start cycle.
+/// If `identity.starttime` is None (older pidfile), falls back
+/// to the PID-only check with a one-shot warn - this only fires
+/// for compatibility-format pidfiles and disappears after the next
+/// stop+start cycle.
 pub(super) fn identity_alive(identity: PidIdentity) -> bool {
     if !process_alive(identity.pid) {
         return false;
@@ -567,7 +561,7 @@ pub(super) fn identity_alive(identity: PidIdentity) -> bool {
                 /*
                  * /proc/<pid>/stat disappeared between the
                  * kill(pid, 0) probe and the starttime read
-                 * — unlikely but possible. Treat as "dead"
+                 * - unlikely but possible. Treat as "dead"
                  * since we can't confirm identity.
                  */
                 false
@@ -578,9 +572,9 @@ pub(super) fn identity_alive(identity: PidIdentity) -> bool {
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
                 eprintln!(
-                    "umlctl: warning: pidfile predates A5 birth-marker; \
+                    "umlctl: warning: pidfile lacks birth marker; \
                           pid-reuse race possible on this instance. \
-                          Restart the instance to upgrade."
+                          restart the instance to rewrite it."
                 );
             }
             true
@@ -669,7 +663,7 @@ fn derive_kernel_log_best_effort(paths: &Paths, run_id: &str) {
 
 /// Scan the derived `kernel.log` for sanitizer/panic/oom
 /// splats and append one structured event per match to
-/// `events.jsonl`. Best-effort on the stop path — a parser
+/// `events.jsonl`. Best-effort on the stop path - a parser
 /// hiccup must never block the signal-and-reap sequence.
 fn parse_dmesg_best_effort(paths: &Paths, run_id: &str, instance: &str) {
     let kernel_log = paths.run_dir(run_id).join("kernel.log");
@@ -726,7 +720,7 @@ mod tests {
             schema_version: 1,
             instance: super::super::manifest::InstanceSection {
                 name: "foo".into(),
-                created_at: "2026-04-23T00:00:00Z".into(),
+                created_at: "1970-01-01T00:00:00Z".into(),
             },
             kernel: super::super::manifest::KernelSection {
                 path: PathBuf::from("/tmp/linux"),
@@ -805,7 +799,7 @@ mod tests {
     #[test]
     fn strace_pid_parser_ignores_non_pid_prefixes() {
         let path = std::env::temp_dir().join(format!(
-            "umlctl-strace-pid-parser-junk-{}-{}.log",
+            "umlctl-strace-pid-parser-nonpid-{}-{}.log",
             std::process::id(),
             run::generate_run_id()
         ));

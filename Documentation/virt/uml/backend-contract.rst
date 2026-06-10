@@ -15,17 +15,6 @@ declared in ``arch/um/include/shared/backend.h``.
 The contract version covered by this document is
 ``UM_BACKEND_CONTRACT_VERSION = 1``.
 
-.. note::
-
-   This document was rewritten for the post-memo-25-R2/R5 ops shape
-   on 2026-04-28. ``run_userspace`` is now ``vcpu_run``;
-   ``mm_attach`` / ``mm_detach`` are ``mm_create`` / ``mm_destroy``
-   (taking ``struct mm_struct *``); ``mm_map`` / ``mm_unmap`` are
-   ``mm_region_added`` / ``mm_region_removed`` (taking
-   ``struct mm_struct *`` plus ``const struct um_memory_region *``);
-   new ``mm_region_protected`` op for backends that want a direct
-   prot-update path. ``struct mm_id`` is now seccomp-internal.
-
 For end-user documentation (which backend to pick, the boot
 parameters, the trap-path diagrams), see
 :doc:`UML Backends <backends>`.
@@ -34,17 +23,15 @@ parameters, the trap-path diagrams), see
 Overview
 ************
 
-A UML backend is a host-side trap mechanism that lets a user-mode
+A UML backend is a host-side trap mechanism that lets a User-Mode
 Linux instance intercept its guest's syscalls, page faults, signals,
-and context switches. Two backends are currently in tree:
+and context switches. Two backends are in tree:
 
-- ``ptrace`` — the original SKAS mechanism. Works everywhere Linux
-  ptrace works. ~1–5 µs per syscall round-trip on bare metal.
-- ``seccomp`` — merged in 6.16. Trades a small in-guest BPF filter
-  for ~3–4× faster traps via SIGSYS + futex. ~300–500 ns per syscall.
-
-A KVM backend (~100 ns syscall via gVisor-style ring-0 entry) is
-in design.
+- ``seccomp`` - merged in 6.16. Trades a small in-guest BPF filter
+  for ~3-4x faster traps via SIGSYS + futex. ~300-500 ns per syscall.
+- ``kvm-v2`` - accelerated backend using KVM exits and in-guest
+  fast paths for selected syscalls. It is opt-in while validation
+  continues.
 
 Each backend is a single immutable instance of ``struct
 um_backend_ops``. Only one backend is active per UML kernel instance,
@@ -73,13 +60,13 @@ Conventions
   in-tree backend; ``init_backend()`` validates this at boot and
   panics otherwise.
 - **All other (cold) ops MUST also be non-NULL.** The dispatch macro
-  is a plain function-pointer call with no NULL check — it cannot
+  is a plain function-pointer call with no NULL check; it cannot
   synthesize ``-ENOSYS`` for a missing ``void`` or ``u64`` op.
   Backends that don't yet implement a cold op should provide a thin
   wrapper that returns ``-EOPNOTSUPP`` (for ops returning ``int``)
-  rather than leave the field NULL. See the ptrace and seccomp
+  rather than leave the field NULL. See the seccomp
   backends' ``read_guest_regs`` / ``write_guest_regs`` for examples
-  pending KGDB integration (workstream C-11).
+  pending KGDB integration.
 - Errno conventions follow standard kernel style: 0 on success,
   negative ``errno`` on failure.
 
@@ -95,18 +82,15 @@ All three cold lifecycle ops dispatch through the ops table from
 validation, and ``uml_cleanup()`` on the reboot/halt path calls
 ``shutdown()``. Call sites panic on any non-zero return from
 probe/init; shutdown returns void. The in-tree seccomp backend
-ships stub implementations that return 0 today — the real probe
-still runs in ``arch/um/os-Linux/start_up.c`` pending the
-migration documented in
-``arch/um/backend/seccomp/lifecycle.c`` — but the dispatch path
-itself is authoritative, so the v2 KVM backend's
-``kvm_open()`` / per-mm-worker spawn work (memo 26 Phase A) has
-a wired call site.
+ships implementations that return 0; host probing remains in
+``arch/um/os-Linux/start_up.c``. The dispatch path itself is
+authoritative, so the v2 KVM backend's
+``kvm_open()`` / per-mm-worker spawn work has a wired call site.
 
 ``probe(void)``
     Cold. Returns 0 if this backend can run on the current host
     (hardware capability + kernel feature checks), or a negative
-    errno otherwise. Must be cheap (≤1 ms typical) and side-effect
+    errno otherwise. Must be cheap (<=1 ms typical) and side-effect
     free beyond opening probe FDs that are immediately closed.
     Dispatched from ``init_backend()`` after HOT-ops validation.
 
@@ -135,16 +119,13 @@ a wired call site.
     not return to the caller without invoking the appropriate
     handler.
 
-    (Renamed from ``run_userspace`` by memo 25 R2 ops cleanup.)
-
 Memory (5 ops)
 --------------
 
-Per memo 25 R2 + R5, all per-mm and per-region ops take
-``struct mm_struct *`` and ``const struct um_memory_region *``;
-backends manage their own per-mm storage layout
-(seccomp uses ``mm->context.id``; v2's per-mm worker process model
-keys off the mm pointer differently).
+All per-mm and per-region ops take ``struct mm_struct *`` and
+``const struct um_memory_region *``. Backends manage their own
+per-mm storage layout: seccomp uses ``mm->context.id`` and kvm-v2
+keys off the mm pointer differently.
 
 ``mm_create(struct mm_struct *mm)``
     Cold. Called once per ``init_new_context()``. Sets up per-mm
@@ -173,7 +154,7 @@ keys off the mm pointer differently).
 
 ``mm_region_protected(struct mm_struct *mm, const struct um_memory_region *region)``
     Cold. Optional (backend may set NULL). Notification that an
-    existing region's ``prot`` changed. Today's mprotect path goes
+    existing region's ``prot`` changed. The mprotect path goes
     through ``um_tlb_sync`` which emits a ``mm_region_removed`` +
     ``mm_region_added`` pair; backends that want a direct path
     (v2's memslot-flag-update) implement this op. mm-arbiter
@@ -213,10 +194,10 @@ Time (3 ops)
 ``set_timer(cpu, deadline_ns, mode)``
     Cold. Configure the host timer for ``cpu``:
 
-    - ``UM_TIMER_DISABLE`` — disable; ``deadline_ns`` ignored.
-    - ``UM_TIMER_ONE_SHOT`` — fire once after ``deadline_ns``
+    - ``UM_TIMER_DISABLE`` - disable; ``deadline_ns`` ignored.
+    - ``UM_TIMER_ONE_SHOT`` - fire once after ``deadline_ns``
       nanoseconds (relative).
-    - ``UM_TIMER_PERIODIC`` — fire every ``deadline_ns`` nanoseconds.
+    - ``UM_TIMER_PERIODIC`` - fire every ``deadline_ns`` nanoseconds.
 
 ``read_persistent_clock_ns(void)``
     Cold. Returns the host wall clock in nanoseconds. Used for boot
@@ -256,13 +237,12 @@ Backends hold state in three places:
 There is **no** ``void *backend_private`` slot. Allocator round-
 trips and ownership ambiguity outweigh the flexibility.
 
-mm_id field ownership (legacy)
-==============================
+mm_id field ownership
+=====================
 
-Pre-memo-25-R2, ``struct mm_id`` (declared in
-``arch/um/include/shared/skas/mm_id.h``) was the universal per-mm
-handle that backend ops took as their first argument. After R2,
-``struct mm_id`` is **seccomp-internal**: it lives in
+``struct mm_id`` (declared in
+``arch/um/include/shared/skas/mm_id.h``) is **seccomp-internal**:
+it lives in
 ``mm->context.id`` and seccomp's ``mm_create`` /
 ``mm_region_added`` impls look it up via ``&mm->context.id``.
 Other backends are free to ignore ``struct mm_id`` entirely and
@@ -284,8 +264,7 @@ Field                Use
 ``syscall_fd_map[]`` seccomp       FD slot table
 ==================== =========== ==================================
 
-The ``kvm_shadow`` field on the legacy struct was removed by memo
-25 Step 3 (b19444243944) along with the v1 archive.
+Backend-owned per-mm state lives outside ``struct mm_id``.
 
 For v2's per-region state (memslot ID, mmap'd buffer, mmu_notifier
 handle), use ``struct um_memory_region::backend_data`` instead of
@@ -303,7 +282,7 @@ policy:
 - **Bump** on any change to the struct: adding ops, removing ops,
   changing op signatures. All in-tree backends migrate in lockstep
   with the bump.
-- The dispatch macro is a plain function-pointer call — there is no
+- The dispatch macro is a plain function-pointer call; there is no
   NULL-op fallback. Adding an op without populating it on every
   in-tree backend is a build/runtime regression; init_backend()'s
   HOT-op validator catches the HOT subset at boot, but cold ops
@@ -323,10 +302,8 @@ Build-time
 
 One of these is set:
 
-- ``CONFIG_UM_BACKEND_PTRACE_ONLY`` — only ptrace; direct calls.
-- ``CONFIG_UM_BACKEND_SECCOMP_ONLY`` — only seccomp; direct calls.
-- ``CONFIG_UM_BACKEND_KVM_ONLY`` — only KVM; direct calls.
-- ``CONFIG_UM_BACKEND_DYNAMIC`` — multi-backend; indirect calls
+- ``CONFIG_UM_BACKEND_SECCOMP_ONLY`` - only seccomp; direct calls.
+- ``CONFIG_UM_BACKEND_DYNAMIC`` - multi-backend; indirect calls
   through ``um_backend``.
 
 Single-backend builds inline the chosen backend's symbols directly,
@@ -340,50 +317,41 @@ Boot-time (multi-backend builds)
 In ``CONFIG_UM_BACKEND_DYNAMIC`` builds the active backend is chosen
 at boot from the kernel command line:
 
-- ``backend=auto`` — **Default.** Runs the host seccomp probe at
-  boot and picks seccomp when the host supports it, falling back
-  to ptrace otherwise. Matches ``os_early_checks()`` behavior in
+- ``backend=auto`` - **Default.** Runs the host seccomp probe at
+  boot and picks seccomp when the host supports it. Matches
+  ``os_early_checks()`` behavior in
   ``arch/um/os-Linux/start_up.c`` (which runs the probe
   unconditionally) and the selector in
-  ``arch/um/kernel/backend.c::pick_dynamic_backend()``. Prior to
-  2026-04 the probe was gated on an explicit ``seccomp=`` request
-  so ``backend=auto`` silently preferred ptrace; that's been
-  corrected.
-- ``backend=ptrace`` — preference for ptrace; falls through to
-  whichever backend is actually available if ptrace isn't.
-- ``backend=seccomp`` — preference for seccomp; falls through
+  ``arch/um/kernel/backend.c::pick_dynamic_backend()``.
+- ``backend=seccomp`` - preference for seccomp; falls through
   similarly.
-- ``backend=kvm`` — preference for the workstream-D KVM backend
-  (``CONFIG_UM_BACKEND_KVM=y``). Diagnostic / scaffold today;
-  non-harness builds still panic on missing hot ops. Falls
-  through to seccomp/ptrace on probe failure.
-- ``backend=force=ptrace`` — require ptrace; **panic** if the
-  ptrace backend isn't compiled in.
-- ``backend=force=seccomp`` — require seccomp; the probe runs
+- ``backend=kvm-v2`` - preference for kvm-v2. Falls through to
+  seccomp on probe failure.
+- ``backend=force=seccomp`` - require seccomp; the probe runs
   (no need to also set ``seccomp=on``); **panic** if the probe
   fails or the seccomp backend isn't compiled in.
-- ``backend=force=kvm`` — require KVM; **panic** if ``/dev/kvm``
-  isn't accessible or the KVM backend isn't compiled in.
+- ``backend=force=kvm-v2`` - require kvm-v2; **panic** if
+  ``/dev/kvm`` isn't accessible or the backend isn't compiled in.
 
 In ``*_ONLY`` builds the boot param is honored only as a sanity
 check: ``backend=force=<other>`` against an ``*_ONLY`` build that
 doesn't include that backend panics; otherwise the Kconfig choice
 wins regardless of the boot param.
 
-Legacy ``seccomp=on/auto/off`` is preserved one release as a
-transitional alias and is consumed by ``os_early_checks`` to set
-``using_seccomp`` (which ``auto`` reads). Migration:
+The ``seccomp=on/auto/off`` compatibility alias is consumed by
+``os_early_checks`` to set ``using_seccomp`` (which ``auto`` reads).
+Mapping:
 
-- ``seccomp=on``    → ``backend=force=seccomp``
-- ``seccomp=auto``  → ``backend=auto``
-- ``seccomp=off``   → ``backend=ptrace``
+- ``seccomp=on``    -> ``backend=force=seccomp``
+- ``seccomp=auto``  -> ``backend=auto``
+- ``seccomp=off``   -> ``backend=auto``
 
 ***********************
 Conformance
 ***********************
 
 Backends are validated by the conformance suite under
-``arch/um/backend/contract/`` (workstream A-05). The suite exercises:
+``arch/um/backend/contract/``. The suite exercises:
 
 - Per-op unit tests (one kunit test per op).
 - Cross-backend equivalence (LTP syscall subset on every available
@@ -394,11 +362,4 @@ Backends are validated by the conformance suite under
 A backend that does not pass the conformance suite cannot land in
 mainline.
 
-***********************
-References
-***********************
-
-- Architecture: ``Documentation/virt/uml/redesign/01-architecture/three-layers.md``
-- Workstream A: ``Documentation/virt/uml/redesign/02-workstreams/A-backend-abstraction/``
-- Decisions log: ``Documentation/virt/uml/redesign/04-risks/decisions-log.md``
-- Header: ``arch/um/include/asm/backend.h``
+The authoritative API is ``arch/um/include/shared/backend.h``.

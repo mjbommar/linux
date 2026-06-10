@@ -1,38 +1,33 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 #
-# Phase J Tier 2 smoke test — uv-managed pip C-extension exercise.
+# Tier 2 smoke test: uv-managed Python package exercise.
 #
-# Spec: phase-J-design-2026-05-07.md §3.2 (post-uv-swap, commit
-# bcd791f5a369). The Tier 1 pattern from tier1-smoketest.py is
-# extended to packages NOT pre-installed on the host — fetched via
-# `uv run --with <pkg>` from the warmed offline cache.
+# Extends the Tier 1 pattern from tier1-smoketest.py to packages not
+# pre-installed on the host. The workload normally runs from a prebuilt
+# uv virtualenv visible through hostfs.
 #
 # Targets (one bounded check per library, all without network):
 #
-#   httpx     — async HTTP client, urllib3-shaped URL+JSON+headers
+#   httpx     - async HTTP client, urllib3-shaped URL+JSON+headers
 #               round-trip (PreparedRequest equivalent). Same path
 #               as Tier 1's `requests` test but on a different
 #               C-extension stack.
-#   pyyaml    — round-trip a multi-document YAML stream through
+#   pyyaml    - round-trip a multi-document YAML stream through
 #               yaml.safe_load + yaml.safe_dump (libyaml C
 #               extension under the hood).
-#   pendulum  — datetime arithmetic + timezone conversion (pure
-#               Python now in 3.x but historically a Rust-via-
-#               PyO3 extension; exercises the import + the
-#               datetime ABI).
-#   numpy     — same matrix-inverse + FFT round-trip as
+#   pendulum  - datetime arithmetic + timezone conversion.
+#   numpy     - same matrix-inverse + FFT round-trip as
 #               tier1-smoketest.py. Run here to confirm `uv`'s
-#               isolated venv resolves the import-chain bug
-#               (#17) where numpy fails to import after
-#               cryptography in a shared site-packages.
+#               isolated venv resolves import-order problems seen
+#               with shared site-packages.
 #
 # Invocation patterns:
 #   Per-library:   ./tier2-uv-smoketest.py <httpx|pyyaml|pendulum|numpy>
 #   All-in-one:    ./tier2-uv-smoketest.py
 #
 # In the Tier 2 templates each library is run as its OWN `uv run
-# --with <pkg>` invocation — fresh isolated venv, no chain
+# --with <pkg>` invocation: fresh isolated venv, no chain
 # contamination. The all-in-one mode is kept for host-side smoke
 # and ad-hoc debugging.
 #

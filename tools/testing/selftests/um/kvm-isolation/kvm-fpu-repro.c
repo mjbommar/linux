@@ -1,6 +1,6 @@
 /*
  * Minimal KVM userspace test: does XMM register state survive across
- * KVM_EXIT_IO (in-guest `out` instruction → userspace) → KVM_RUN re-entry?
+ * KVM_EXIT_IO (in-guest `out` instruction -> userspace) -> KVM_RUN re-entry?
  *
  * Mimics UML v2's dispatch pattern:
  *   - Guest in long mode, CR4.OSFXSR set (XMM enabled)
@@ -10,11 +10,11 @@
  *       movdqa xmm0, [readback]  ; save xmm0 to guest memory
  *       hlt
  *
- * After first exit, we (host userspace) "do nothing" — just KVM_RUN again.
+ * After first exit, we (host userspace) "do nothing" - just KVM_RUN again.
  * Then check the guest's readback memory: should match pattern.
  *
  * If the readback differs, KVM didn't preserve XMM across the userspace
- * exit boundary — that's the upstream bug.
+ * exit boundary - that's the upstream bug.
  *
  * To match UML v2's pattern, we ALSO test with SYNC_REGS dirty bits set
  * between exits, which is what UML uses for fast register sync.
@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
 				run->io.port, run->io.direction, run->io.size, run->io.count);
 			port_seen = run->io.port;
 			if (run->io.port == 0xf6) {
-				/* "done" signal — check readback */
+				/* "done" signal - check readback */
 				goto check;
 			}
 			/* Otherwise: continue (KVM advances RIP automatically) */
@@ -223,10 +223,10 @@ check: ;
 	printf("\n");
 
 	if (matches == 16) {
-		printf("RESULT: XMM PRESERVED — no KVM bug\n");
+		printf("RESULT: XMM PRESERVED - no KVM bug\n");
 		return 0;
 	} else {
-		printf("RESULT: XMM CORRUPTED (%d/16 bytes match) — KVM BUG\n", matches);
+		printf("RESULT: XMM CORRUPTED (%d/16 bytes match) - KVM BUG\n", matches);
 		return 2;
 	}
 }

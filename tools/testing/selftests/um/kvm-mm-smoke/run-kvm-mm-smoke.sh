@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/kvm-mm-smoke/run-kvm-mm-smoke.sh — host-side launcher for
-# the review-01 P1 #6 mm-mutation kvm regression guard.
+# um/kvm-mm-smoke/run-kvm-mm-smoke.sh - host-side launcher for the
+# mm-mutation KVM regression guard.
 #
 # Boots UML with `backend=force=kvm`, runs the freestanding
 # mm-smoke-loop binary as init, scrapes the "MM_SMOKE: PASS"
@@ -10,14 +10,13 @@
 # mremap, munmap, brk in sequence and validates each step's
 # memory contents post-syscall.
 #
-# This guards experiment #1 (commit b3f81904d990): the
-# correctness invariant that mm-mutating syscalls flow through
-# UML's mm_map / mm_unmap callbacks — which already invalidate
-# the shadow PT — so kvm_decode_syscall doesn't need to issue
-# an unconditional post-handle_syscall shadow refill. If a future
-# syscall mutates mm without going through those callbacks, this
-# test fails by either SIGSEGV-on-stale-mapping or silent data
-# corruption on readback.
+# This guards the correctness invariant that mm-mutating syscalls flow
+# through UML's mm_map / mm_unmap callbacks, which already invalidate
+# the shadow page tables, so kvm_decode_syscall does not need an
+# unconditional post-handle_syscall shadow refill. If a future syscall
+# mutates mm without going through those callbacks, this test fails by
+# either SIGSEGV-on-stale-mapping or silent data corruption on
+# readback.
 #
 # Pattern mirrors um/kvm-bounds/run-kvm-bounds.sh. Exits 0 on
 # PASS, 4 on SKIP, 1 on FAIL.

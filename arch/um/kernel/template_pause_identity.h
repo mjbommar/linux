@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * UML template-pause identity application — internal interface
- * shared between template_pause_identity.c (implementation), the
- * KUnit test TU (template_pause_identity_test.c), and the fork-on-
- * resume loop driver (template_pause.c).
+ * UML template-pause identity application.
+ *
+ * Shared declarations for template_pause_identity.c, the KUnit test
+ * translation unit, and the fork-on-resume loop in template_pause.c.
  *
  * See template_pause_identity.c for the architectural rationale.
  */
@@ -16,10 +16,9 @@
 struct um_template_identity;
 
 /*
- * Parse helpers (pure C — KUnit-testable, no kernel net stack
- * dependencies).  The implementation lives in
- * template_pause_identity.c; the KUnit TU consumes them via this
- * header without dragging in the net-stack-heavy apply helpers.
+ * Parse helpers with no kernel net-stack dependencies. The KUnit
+ * test translation unit consumes them through this header without
+ * pulling in the apply path.
  */
 int um_template_identity_parse_cidr(const char *str, __be32 *addr_be,
 				    u8 *prefix_len);
@@ -35,9 +34,9 @@ __be32 um_template_identity_cidr_mask(u8 prefix_len);
 int um_template_identity_apply(const struct um_template_identity *blob);
 
 /*
- * Log the parsed identity blob to dmesg.  Always succeeds (no
- * external state required); selftests can grep for the
- * "identity-parsed" marker to verify the read+parse pipeline
+ * Log the parsed identity blob to dmesg. Always succeeds because it
+ * requires no external state; selftests use the stable
+ * "identity-parsed" log line to verify the read+parse pipeline
  * without requiring a netdev for the apply step.
  */
 void um_template_identity_log_parsed(const struct um_template_identity *blob);

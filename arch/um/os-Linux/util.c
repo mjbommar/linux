@@ -39,10 +39,10 @@ int raw(int fd)
 	if (err < 0)
 		return -errno;
 
-	/*
-	 * XXX tcsetattr could have applied only some changes
-	 * (and cfmakeraw() is a set of changes)
-	 */
+		/*
+		 * tcsetattr() may have applied only part of the cfmakeraw()
+		 * state change.
+		 */
 	return 0;
 }
 
@@ -173,12 +173,10 @@ __uml_setup("quiet", quiet_cmd_param,
 "    Turns off information messages during boot.\n\n");
 
 /*
- * HONEST-AUDIT §4 / sub-200 ms boot.  The `quiet` cmdline flag only
- * fires AFTER the kernel's __setup parsing runs — too late to
- * suppress the host-side preflight chatter (`Core dump limits`,
- * `Checking that seccomp filters can be installed`) that fires from
- * os_early_checks() in linux_main(), BEFORE start_kernel() and its
- * cmdline parser run.
+ * Host-side quiet handling. The quiet cmdline flag only fires after
+ * the kernel's __setup parsing runs, too late to suppress host-side
+ * preflight chatter from os_early_checks() in linux_main(), before
+ * start_kernel() and its cmdline parser run.
  *
  * Reading UM_FAST_BOOT=1 from the env at first os_info() call lets
  * the preflight be silent too.  Each write(stderr) the preflight

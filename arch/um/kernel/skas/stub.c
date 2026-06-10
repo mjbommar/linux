@@ -120,24 +120,11 @@ stub_signal_interrupt(int sig, siginfo_t *info, void *p)
 
 #ifdef CONFIG_X86_64
 	/*
-	 * The SECCOMP filter (see arch/um/kernel/skas/stub_exe.c) ALLOWs
-	 * __NR_arch_prctl so the guest can install its TLS without a
-	 * SIGSYS round-trip.  As a result, when guest userspace runs
-	 * arch_prctl(SET_FS_BASE,...) the actual host FS_BASE changes but
-	 * UML's view (arch_data.fs_base + pt_regs.gp[FS_BASE]) lags.
-	 *
-	 * Without this sync, the next set_stub_state's compare can decide
-	 * arch_data and pt_regs already "agree" (both stale) and skip the
-	 * STUB_SYNC_FS_BASE update — leaving the stub's host FS_BASE at
-	 * whatever it last drifted to.  Later, a different guest task
-	 * scheduled into the same stub child re-pushes a stale 0 (or the
-	 * launcher's snapshot) and Python TLS reads through %fs deref
-	 * NULL+offset, SIGSEGV @ _Py_Dealloc.
-	 *
-	 * Re-read the authoritative host FS_BASE/GS_BASE into arch_data
-	 * here, right before we hand control back to UML.  Paired with
-	 * get_stub_state(), which now copies arch_data.fs_base into
-	 * pt_regs.gp[FS_BASE] so subsequent compares are accurate.
+	 * The seccomp filter allows arch_prctl so guest userspace can install
+	 * TLS without a SIGSYS round trip. That changes the host FS/GS base
+	 * directly, so refresh arch_data before handing control back to UML.
+	 * get_stub_state() copies these values to pt_regs, keeping subsequent
+	 * set_stub_state() comparisons accurate.
 	 */
 	stub_syscall2(__NR_arch_prctl, ARCH_GET_FS,
 		      (unsigned long)&d->arch_data.fs_base);

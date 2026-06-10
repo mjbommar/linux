@@ -1,20 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * KVM-backend mm-mutation regression guard (review-01 P1 #6).
+ * KVM-backend mm-mutation regression guard.
  *
- * Experiment #1 (commit b3f81904d990) dropped the unconditional
- * post-syscall shadow PT refill in kvm_decode_syscall. The
- * correctness invariant: only mm-mutating syscalls (mmap, munmap,
+ * Only mm-mutating syscalls (mmap, munmap,
  * mprotect, mremap, brk) need the refill, and those go through
  * UML's mm_map / mm_unmap callbacks which already reset
- * shadow_pgd_synced=false → next kvm_enter_guest's #242
- * skip-fill check refills correctly.
+ * shadow_pgd_synced=false so the next kvm_enter_guest refill path
+ * repopulates shadow page tables correctly.
  *
  * This freestanding ELF binary exercises each mm-mutating
  * syscall in turn and verifies post-syscall reads/writes against
- * the affected pages observe the right contents. If experiment
- * #1's invariant ever breaks (e.g. a future syscall mutates mm
- * without flowing through mm_map/unmap), the test fails by
+ * the affected pages observe the right contents. If a future syscall
+ * mutates mm without flowing through mm_map/unmap, the test fails by
  * either:
  *   - SIGSEGV when the shadow PT serves a stale mapping
  *   - silent data corruption when reads/writes hit the wrong
@@ -134,8 +131,8 @@ int main(void)
 
 	/*
 	 * Test 2: mprotect to PROT_READ; second write must SIGSEGV.
-	 * We can't easily catch SIGSEGV from a freestanding binary
-	 * — instead just validate the read still works, and let
+	 * We can't easily catch SIGSEGV from a freestanding binary;
+	 * instead just validate the read still works, and let
 	 * the absence-of-corruption-on-readback gate cover the
 	 * shadow-PT consistency.
 	 */

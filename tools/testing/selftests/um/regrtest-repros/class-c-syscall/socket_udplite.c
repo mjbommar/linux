@@ -3,7 +3,7 @@
  * UDP-Lite was retired from the kernel in commit 56520b398e5e
  * ("ipv4: Retire UDP-Lite."). On post-retirement trees, socket()
  * with IPPROTO_UDPLITE = 136 now fails with EPROTONOSUPPORT (errno 93).
- * That's the permanent expected behavior, not a UML bug — emit
+ * That's the permanent expected behavior, not a UML bug - emit
  * EXPECTED_FAIL so the substrate gate stays clean. test_socket's
  * 41 UDPLITE subtests need an upstream skip in the regrtest -x list.
  */

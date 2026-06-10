@@ -6,12 +6,12 @@
 # Boots a kvm-v2 UML kernel built with
 # CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y, runs the
 # freestanding demo at Documentation/virt/uml/examples/aperf-mperf/
-# as init, and asserts the demo emits its PASS verdict.  Direct
-# regression guard for the kvm-v2 cap-enable plumbing — proves
+# as init, and asserts the demo emits its PASS verdict. Direct
+# regression guard for the kvm-v2 cap-enable plumbing; proves
 # vm_create issues KVM_ENABLE_CAP with the APERFMPERF bit and KVM
 # accepts the cap.
 #
-# Exits 0 PASS, 4 SKIP, 1 FAIL — kselftest convention.
+# Exits 0 PASS, 4 SKIP, 1 FAIL - kselftest convention.
 #
 # Environment:
 #   UML_BINARY    UML kernel built with kvm-v2 + APERFMPERF=y +
@@ -34,7 +34,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # ---- preflight ----------------------------------------------------
 
 if [ ! -x "$BINARY" ]; then
-	skip "UML binary $BINARY not found; build with CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH=y and point UML_BINARY at it"
+	skip "UML binary $BINARY not found; enable APERF/MPERF and set UML_BINARY"
 fi
 
 if [ ! -x "$DEMO" ]; then
@@ -42,7 +42,7 @@ if [ ! -x "$DEMO" ]; then
 fi
 
 if ! grep -q aperfmperf /proc/cpuinfo 2>/dev/null; then
-	skip "host CPU lacks X86_FEATURE_APERFMPERF — KVM masks the disable-exits bit off in kvm_get_allowed_disable_exits()"
+	skip "host CPU lacks X86_FEATURE_APERFMPERF; KVM will mask disable exits"
 fi
 
 ensure_kvm_readable() {
@@ -86,7 +86,7 @@ setsid -w bash -c '
 if ! grep -q APERF_MPERF_DEMO "$LOG"; then
 	echo "---- guest log (last 40 lines) ----" >&2
 	tail -40 "$LOG" >&2
-	fail "demo did not run — boot wedged or hostfs init exec failed"
+	fail "demo did not run - boot wedged or hostfs init exec failed"
 fi
 
 VERDICT=$(grep -oE "APERF_MPERF_DEMO: (PASS|FAIL) [^$]*" "$LOG" | tail -1)

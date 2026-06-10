@@ -1,27 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * UML debugfs controls for Layer 2 static-key gates.
+ * UML debugfs controls for static-key gates.
  *
  * Mounts at /sys/kernel/debug/um/ when debugfs is available on the
  * running host kernel. Layout:
  *
  *   /sys/kernel/debug/um/
- *   ├── backend                 (ro) current backend name
- *   ├── hooks/<gate>            (rw) 0|1 — flip the static key
- *   └── stats                   (ro) per-gate hit counter (YAML)
+ *   |-- backend                 (ro) current backend name
+ *   |-- hooks/<gate>            (rw) 0|1 - flip the static key
+ *   -- stats                   (ro) per-gate hit counter (YAML)
  *
  * Writes to hooks/<gate> call static_branch_enable/disable on the
  * gate. Reads return the current static-key state (literal 0 or 1
  * plus a newline).
  *
- * Root-only (mode 0600 on each file) because KCOV coverage and
- * record/replay event streams can be sensitive. Matches the
- * kernel's general debugfs discipline.
+ * Root-only (mode 0600 on each file) because KCOV coverage and tracing
+ * data can be sensitive. Matches the kernel's general debugfs discipline.
  *
- * This entire TU compiles to nothing unless CONFIG_DEBUG_FS=y. The
- * sandbox profile (which sets CONFIG_DEBUG_FS=n) therefore gets the
- * gates themselves but no runtime-flip interface — exactly what B-03
- * §Q1 calls for.
+ * This entire TU compiles to nothing unless CONFIG_DEBUG_FS=y. Minimal
+ * profiles therefore get the gates themselves but no runtime-flip
+ * interface.
  */
 
 #include <linux/atomic.h>

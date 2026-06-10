@@ -3,7 +3,7 @@
 #define __ASM_UM_KFENCE_H
 
 /*
- * UML KFENCE support (workstream C-02).
+ * UML KFENCE support.
  *
  * KFENCE is a sampling allocator that places some kmalloc'd objects
  * into a separate "pool" of pages interleaved with guard pages. The
@@ -20,11 +20,11 @@
  *     .data, so this is unconditionally true.
  *   - kfence_protect_page(addr, protect): set the given page
  *     unreadable (protect=true) or readable+writable (protect=false).
- *     On UML the kernel address space is just a host mmap; we use
- *     os_protect_memory() / mprotect() to toggle PROT_NONE ↔
+ *     On UML the kernel address space is just a host mmap; UML uses
+ *     os_protect_memory() / mprotect() to toggle PROT_NONE to
  *     PROT_READ|PROT_WRITE on a single page.
  *
- * Fault integration is in arch/um/kernel/trap.c::segv — see that
+ * Fault integration is in arch/um/kernel/trap.c::segv; see that
  * file for the kfence_handle_page_fault call.
  */
 
@@ -55,7 +55,7 @@ static inline bool kfence_protect_page(unsigned long addr, bool protect)
 	 * resulting SIGSEGV is delivered into segv() which hands off
 	 * to kfence_handle_page_fault(). protect=false restores
 	 * PROT_READ|PROT_WRITE so KFENCE can use the page as a normal
-	 * object slot. The executable bit stays off in both cases —
+	 * object slot. The executable bit stays off in both cases;
 	 * KFENCE pool pages never hold code.
 	 */
 	err = os_protect_memory((void *)addr, PAGE_SIZE, r, w, 0);

@@ -9,7 +9,7 @@
 # tmpfs (memory note: tmpfs fill silently breaks Bash stdout
 # capture).
 #
-# This gate doesn't run KUnit or boot the kernel — it just ensures
+# This gate doesn't run KUnit or boot the kernel; it just ensures
 # `vmlinux` was produced. L2 (kunit-marshal) chains off the same
 # build dir to validate behavior.
 
@@ -23,13 +23,13 @@ phase = "L1"
 [run]
 # We let the user override BUILD_DIR via env; default lands under
 # their HOME so it survives reboots and tmpfs evictions. The build
-# command is plain make — no defconfig, since the gate assumes the
+# command is plain make - no defconfig, since the gate assumes the
 # build dir is already configured. (Configuring is a manual step the
 # user does once: `make ARCH=um O=$BUILD_DIR defconfig`.)
 cmd = """
 set -euo pipefail
 BUILD_DIR=${BUILD_DIR:-$HOME/src/uml-builds/uml-clean}
-test -f "$BUILD_DIR/.config" || { echo "ERROR: $BUILD_DIR has no .config — run 'make ARCH=um O=$BUILD_DIR defconfig' first" >&2; exit 2; }
+test -f "$BUILD_DIR/.config" || { echo "ERROR: $BUILD_DIR has no .config - run 'make ARCH=um O=$BUILD_DIR defconfig' first" >&2; exit 2; }
 make ARCH=um O="$BUILD_DIR" -j"$(nproc)" 2>&1 | tail -50
 test -x "$BUILD_DIR/linux"
 echo "BUILD-OK: $BUILD_DIR/linux"

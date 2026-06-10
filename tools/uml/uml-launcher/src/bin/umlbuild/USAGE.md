@@ -1,4 +1,4 @@
-# umlbuild — operator guide
+# umlbuild — user guide
 
 `umlbuild` is the sibling of `umlctl`: it builds the inputs umlctl
 consumes — a UML kernel binary, a ubd-attachable rootfs image, and a

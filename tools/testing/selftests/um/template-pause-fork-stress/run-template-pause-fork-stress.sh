@@ -1,47 +1,45 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/template-pause-fork-stress — Memo 09 Phase 2a stress test.
+# um/template-pause-fork-stress - fork-on-resume stress test.
 #
 # Drives the master through N=100+ fork-on-resume iterations and
 # asserts the six gates listed below (master alive, child pids
-# distinct, RSS drift ≤ 5 %, no orphan stubs, ≥ N iters AND
-# median per-iter wall time ≤ 50 ms, identity-blob 100 % byte-match):
+# distinct, RSS drift <= 5%, no orphan stubs, at least N iters AND
+# median per-iter wall time <= 50 ms, identity-blob 100% byte-match):
 #
-#   G1.  master alive throughout — NO kernel panics anywhere in the
+#   G1.  master alive throughout - NO kernel panics anywhere in the
 #        boot log.  A panic mid-loop fails this gate even if master
 #        managed several iters first.  This is the toughest gate
-#        and currently EXPOSES an open kernel race (see
-#        09-fork-server-STATUS.md): wait_stub_done_seccomp with
+#        and exposes a known kernel race: wait_stub_done_seccomp with
 #        pid=-1 reached via an unisolated kernel path, sending
-#        SIGSEGV to current and killing init.  Pass rate is ~30%
-#        per run as of 2026-05-20; when it fails this is the
-#        signal the kernel needs more work, NOT a hint to lower
-#        the bar.
-#   G2.  all observed child pids distinct — catches SKAS aliasing.
-#   G3.  RSS drift ≤ 5 % across samples — per-iter leak detector.
+#        SIGSEGV to current and killing init.  A failure here means
+#        the kernel path needs more work, not that the gate should be
+#        relaxed.
+#   G2.  all observed child pids distinct - catches SKAS aliasing.
+#   G3.  RSS drift <= 5% across samples - per-iter leak detector.
 #   G4.  zero post-teardown live orphans (any seen child still
 #        alive 1 s after master kill is a stub leak).
-#   G5.  ≥ N iterations within the observation window.
-#   G5b. median per-iter wall time ≤ 50 ms (perf regression).
-#   G6.  identity-blob round-trip 100 % clean — every "identity at"
+#   G5.  >= N iterations within the observation window.
+#   G5b. median per-iter wall time <= 50 ms (perf regression).
+#   G6.  identity-blob round-trip 100 % clean - every "identity at"
 #        line in the kernel log must parse to a stress-blob-NNNNN
 #        name with no torn-read corruption.
 #   G7.  zero kernel panics in the boot log.  Each M-fork child's
 #        in-kernel exit_group path used to emit "Kernel tried to
-#        access user memory" panics — those are real kernel bugs,
+#        access user memory" panics - those are real kernel bugs,
 #        not a free pass.  Production cannot ship with thousands
 #        of per-second kernel panics in /var/log/messages.
 #   G8.  side-channel verification: harness-side /proc sampling
 #        of master's direct children must approximately match the
 #        kernel-log "torn down" iteration count.  If they diverge,
 #        either the kernel is lying about iterations OR the
-#        harness sampling is broken — both are bugs.
+#        harness sampling is broken - both are bugs.
 #
 # Exit codes per kselftest convention:
-#   0 PASS — all gates hold.
-#   4 SKIP — kernel lacks CONFIG_UM_TEMPLATE_PAUSE_FORK.
-#   1 FAIL — any gate violated; per-gate detail printed.
+#   0 PASS - all gates hold.
+#   4 SKIP - kernel lacks CONFIG_UM_TEMPLATE_PAUSE_FORK.
+#   1 FAIL - any gate violated; per-gate detail printed.
 #
 # Environment:
 #   UML_BINARY                 UML kernel built with
@@ -61,17 +59,16 @@
 set -u
 
 KERNEL=${UML_BINARY:-$HOME/src/uml-builds/uml-tplpause-fork/linux}
-# G5 minimum iterations.  Default 100 per the Phase 2a stress spec.
+# G5 minimum iterations.
 # The kernel still has a residual race where master may die mid-loop
-# with wait_stub_done_seccomp pid=-1 (root cause not fully isolated,
-# see 09-fork-server-STATUS.md).  When the race hits, this test
-# legitimately FAILs — that's the signal that the kernel needs more
-# work, not a reason to lower N.
+# with wait_stub_done_seccomp pid=-1.  When the race hits, this test
+# legitimately fails; that is the signal that the kernel path needs
+# more work, not a reason to lower N.
 N=${UM_FORK_STRESS_N:-100}
 SECS=${UM_FORK_STRESS_SECS:-10}
 BLOBS=${UM_FORK_STRESS_BLOBS:-20}
 RSS_DRIFT_PCT=${UM_FORK_STRESS_RSS_DRIFT:-5}
-# Median per-iter wall time gate (G5b).  Per the spec.
+# Median per-iter wall time gate (G5b).
 MEDIAN_MS=${UM_FORK_STRESS_MEDIAN_MS:-50}
 
 if [ ! -x "$KERNEL" ]; then
@@ -170,7 +167,7 @@ def rss_kb(pid):
     For a process in T (stopped) state, the field is still
     present but may reflect the value at the moment the task
     last ran.  More importantly, on UML the master process is
-    SIGSTOP'd between iterations — so we need to either accept
+    SIGSTOP'd between iterations - so we need to either accept
     those "frozen" snapshots OR send SIGCONT and wait for the
     field to refresh.  The harness's main loop sends SIGCONT
     every 20 ms so the freezes are bounded.
@@ -287,7 +284,7 @@ while time.monotonic() < end_time:
                     "t": elapsed, "rss_kb": v})
 
     # Read child pid; record if changed.  Defensively handle short
-    # reads — memfd can race with master's ftruncate/lseek during
+    # reads - memfd can race with master's ftruncate/lseek during
     # the rare boot path where the kernel is still initializing the
     # identity slot.
     try:
@@ -310,7 +307,7 @@ while time.monotonic() < end_time:
         results["blob_rotations"] = blob_idx
         next_blob_rotate = now + 0.05
 
-    # Periodic SIGCONT nudge — send SIGCONT every 20ms regardless
+    # Periodic SIGCONT nudge - send SIGCONT every 20ms regardless
     # of state.  Extra SIGCONTs are no-ops when master is running;
     # they unstick master if it's in T.  This eliminates the
     # empirical flakiness where master gets stuck early.
@@ -364,10 +361,10 @@ results["master_state_at_end"] = state(master)
 
 # Orphan check BEFORE killing master.  Differentiate:
 #   * live_orphans = procs with ppid==master in non-zombie state
-#                    — these are real leaks (stub-children that
+#                    - these are real leaks (stub-children that
 #                    should have been reaped via os_skas_reap_stub
 #                    + wait4 in teardown).
-#   * zombie_descendants = procs with ppid==master in Z state —
+#   * zombie_descendants = procs with ppid==master in Z state -
 #                    these are M-fork children that died and
 #                    are waiting for master to wait4 them.
 #                    Master can't (gives up after one_pause_cycle),
@@ -403,7 +400,7 @@ def sample_descendants(parent):
 # the master sits as a Z zombie + its tmpfs mem=128M backing
 # allocation leaks until the harness exits.  Back-to-back runs (or
 # `mission` integration) then fail with "host /dev/shm ran out of
-# space".  Also kill every M-fork child we observed via memfd —
+# space".  Also kill every M-fork child we observed via memfd -
 # they get reparented to us (PR_SET_CHILD_SUBREAPER) and otherwise
 # leak their mem=128M tmpfs backing.
 for victim in [master, *seen_pids]:
@@ -432,7 +429,7 @@ while time.monotonic() < deadline:
     except ChildProcessError:
         break
 
-# Final non-blocking sweep — anything from seen_pids still alive
+# Final non-blocking sweep - anything from seen_pids still alive
 # gets one more SIGKILL.
 for victim in seen_pids:
     try:
@@ -440,7 +437,7 @@ for victim in seen_pids:
     except ProcessLookupError:
         pass
 # Plus: sweep /proc for any process whose argv starts with the
-# UML kernel binary — these are M-fork descendants we never saw via
+# UML kernel binary - these are M-fork descendants we never saw via
 # memfd (the master forks ~600/run; memfd only holds the latest).
 # Without this they leak their mem=128M tmpfs allocation across
 # runs and back-to-back invocations exhaust /dev/shm.
@@ -531,7 +528,7 @@ failures = []
 # stops further iteration logging in the boot log, so the "torn
 # down" line count is the authoritative measure of how many fork
 # iterations master completed alive.  We gate G1 strictly on
-# torn >= N — i.e., master did NOT die before completing N iters.
+# torn >= N - i.e., master did NOT die before completing N iters.
 torn_count_for_g1 = len(re.findall(r"template_pause: torn down ", boot))
 state_at_end = r.get("master_state_at_end")
 master_alive_through_n = torn_count_for_g1 >= N
@@ -556,7 +553,7 @@ print(f"G2 distinct child pids : {unique}/{len(seen)}")
 # behaviour; previous "SKIPPED" behaviour was the test laundering
 # its own broken sampler.  rss_kb_force() in the harness sends
 # SIGCONT and retries before each sample, so a missing VmRSS field
-# here means master genuinely wasn't observable — a real bug.
+# here means master genuinely wasn't observable - a real bug.
 samples = []
 for s in r.get("rss_samples", []):
     v = s.get("rss_kb")
@@ -580,10 +577,10 @@ if len(samples) >= MIN_SAMPLES:
 else:
     failures.append(
         f"G3: only {len(samples)} RSS samples (need >= {MIN_SAMPLES}); "
-        f"sampler may be broken — VmRSS unavailable on stopped task")
+        f"sampler may be broken - VmRSS unavailable on stopped task")
     print(f"G3 RSS drift           : FAIL ({len(samples)} samples, need {MIN_SAMPLES}+)")
 
-# Compute iteration count up front (kernel log "torn down" lines —
+# Compute iteration count up front (kernel log "torn down" lines -
 # one per fork_on_resume_loop iteration).  Used by G4 budget + G5.
 torn = len(re.findall(r"template_pause: torn down ", boot))
 
@@ -606,9 +603,9 @@ if torn < N:
         f"(need >= {N})")
 print(f"G5 master iterations   : {torn} (target >= {N})")
 
-# G5b: median per-iteration wall time < MEDIAN_MS.  Per the Phase
-# 2a stress spec.  We approximate per-iter time as (window /
-# iters) — the master loop runs uninterrupted between SIGSTOPs,
+# G5b: median per-iteration wall time < MEDIAN_MS.  We approximate
+# per-iter time as (window / iters): the master loop runs
+# uninterrupted between SIGSTOPs,
 # so the wall-time-per-iter is observation_window / iter_count.
 # For finer-grained measurement (parsing per-iter SIGCONT
 # timestamps), see kernel-log dmesg timestamps.
@@ -623,7 +620,7 @@ if torn > 0:
 else:
     failures.append("G5b: cannot compute median iter time (no iters)")
 
-# G6: identity-blob round-trip — 100 % byte-match.  Per the spec:
+# G6: identity-blob round-trip - 100 % byte-match.  Per the spec:
 # every "identity at" line the kernel logged must parse to a clean
 # stress-blob-NNNNN name with no torn-read corruption.  This
 # requires the harness's memfd writes (260 bytes) to be atomic
@@ -671,7 +668,7 @@ if all_panics:
 print(f"G7 zero kernel panics  : {len(all_panics) == 0} "
       f"(observed {len(all_panics)})")
 
-# G8: side-channel verification — harness /proc sampling of master's
+# G8: side-channel verification - harness /proc sampling of master's
 # direct children must approximately match kernel-log torn-down
 # count.  If they diverge by > 5 % of torn, either the kernel is
 # under-reporting iterations or the harness is under-sampling.
@@ -683,7 +680,7 @@ if torn > 0:
     # The harness is non-blocking; we won't see every transient
     # child.  Allow up to 50 % undercount on harness side (we
     # genuinely miss many fast-lived children) but require that
-    # we saw AT LEAST 5 % of them — otherwise the harness loop
+    # we saw AT LEAST 5 % of them - otherwise the harness loop
     # isn't actually sampling /proc.
     proc_to_torn = (proc_seen / torn) if torn else 0.0
     if proc_to_torn < 0.05:
@@ -706,7 +703,7 @@ if failures:
         print(f"  {f}")
     sys.exit(1)
 print()
-print(f"VERDICT: PASS — all six gates hold")
+print(f"VERDICT: PASS - all six gates hold")
 PYGATES
 EXIT_RC=$?
 exit $EXIT_RC

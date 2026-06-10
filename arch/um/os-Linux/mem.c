@@ -47,19 +47,16 @@ void kasan_map_memory(void *start, size_t len)
 	}
 
 	/*
-	 * Workstream C-09 / D37 pull-forward #6.
-	 *
 	 * Historically we set MADV_DONTFORK on the KASAN shadow so it
 	 * wasn't inherited into child processes. That is still the
-	 * right default for non-fuzz profiles — the shadow is a 16 TB
+	 * right default for non-fuzz profiles: the shadow is a 16 TB
 	 * VA region, and needlessly COW'ing it into every host fork
 	 * wastes kernel page-table memory and makes strace/ps output
-	 * confusing. But the C-09 snapshot/forkserver (CONFIG_UM_FUZZ_HOOKS)
+	 * confusing. But the snapshot/forkserver (CONFIG_UM_FUZZ_HOOKS)
 	 * forks the UML process itself per fuzz iteration, and the
-	 * forked worker needs to inherit the shadow via COW — otherwise
+	 * forked worker needs to inherit the shadow via COW; otherwise
 	 * the first KASAN-instrumented kernel access in the worker
-	 * SEGVs on an unmapped shadow range. See D35's Q2 and D37 #6
-	 * for the analysis.
+	 * SEGVs on an unmapped shadow range.
 	 *
 	 * Under CONFIG_UM_FUZZ_HOOKS, skip the MADV_DONTFORK so fork()
 	 * propagates the shadow mapping. The per-iteration COW cost on
@@ -77,7 +74,7 @@ void kasan_map_memory(void *start, size_t len)
 }
 
 /* Set by make_tempfile() during early boot. */
-char *tempdir = NULL;
+char *tempdir;
 
 /* Check if dir is on tmpfs. Return 0 if yes, -1 if no or error. */
 static int __init check_tmpfs(const char *dir)
@@ -166,7 +163,7 @@ static int __init make_tempfile(const char *template)
 	}
 
 	/*
-	 * FD disposition (C-09 commit 4): inherit (physmem fd).
+	 * FD disposition: inherit (physmem fd).
 	 * This fd backs the UML kernel's physical-memory file and
 	 * is the target of all kernel-page mmap()s. Across a
 	 * forkserver fork() the worker inherits this fd and the

@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Multi-thread mmap stress reproducer for the H.1b residual.
+# Multi-thread mmap stress reproducer.
 #
 # Boots UML and runs mt-mmap-stress with N pthreads each looping
-# mmap+memset+munmap. Detects "memset corruption" — when a thread's
+# mmap+memset+munmap. Detects "memset corruption" - when a thread's
 # private mmap'd page returns bytes from another thread or stale
-# physmem after a memset. Under v2, this flakes ~50% with N=2 and
-# ~100% with N>=3 because of a multi-thread mm-arbiter race that
-# Phase H.1b investigation hasn't pinpointed yet (memo §H.1b
-# residual, task #115).
+# physmem after a memset.
 #
-# Under seccomp, 10/10 PASS — same code, same pthreads, no flake.
+# Under seccomp, the same code and pthread workload should pass.
 #
 # Exits 0 on PASS, 1 on FAIL, 4 on SKIP.
 #

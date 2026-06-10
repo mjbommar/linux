@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/hooks-flip/run-hooks-flip.sh — host-side launcher for the B-06
-# first-flip demo.
+# um/hooks-flip/run-hooks-flip.sh - host-side launcher for the runtime
+# hook flip smoke test.
 #
 # Boots a UML guest with hooks-flip.sh as init. The guest runs the
 # full flip sequence in a few hundred milliseconds and halts. This

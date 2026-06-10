@@ -24,15 +24,11 @@ cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 0
 
-# 64MB file × 4 iters = 256MB total write+fsync+read+verify on
+# 64MB file x 4 iters = 256MB total write+fsync+read+verify on
 # tmpfs. Stresses pagecache + write/read coherence + fsync ordering.
 # block-size 4096 = standard pagesize.
-# 2026-05-14 (task #23): bumped from 60 -> 120 because under daemon
-# W>=2 two parallel iocheck workers on the same host's tmpfs hit
-# IO/CPU contention; seccomp's signal-based syscall path occasionally
-# pushes a 4-iter run past 60 s (kvm-v2 unaffected — gadget hot path
-# is ~100x faster). See phase-J-soak-2h-2026-05-14.md root-cause +
-# decisions-log D122.
+# Timeout is 120 seconds because parallel iocheck workers on the same
+# host tmpfs can hit IO/CPU contention under sustained daemon runs.
 [[init.phases]]
 name = "iocheck"
 cmd = "/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/soak/iocheck /tmp/iocheck-$$ 64 4 4096"
@@ -46,9 +42,8 @@ expect = ""
 timeout_secs = 0
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt in; they require host-side reservation.
+# Cgroup limits opt in; they require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# CPython parity gate (#277): run a curated set of CPython
+# CPython parity gate: run a curated set of CPython
 # stdlib test modules under BOTH backends (seccomp baseline +
 # kvm under test) and report module-by-module divergence.
 #
@@ -36,7 +36,7 @@ if [ -z "$PY_TESTDIR" ] || [ ! -f "$PY_TESTDIR/test_hashlib.py" ]; then
 	exit 4
 fi
 
-# Curated module list — pure-CPU + memory, no external deps.
+# Curated module list: pure-CPU + memory, no external deps.
 MODULES="${MODULES:-test_struct test_math test_hashlib test_bisect test_array test_decimal test_fractions test_string test_bytes test_dict test_list test_set test_tuple test_int test_float test_complex test_heapq test_itertools test_operator test_typing test_abc}"
 
 # Build a Python harness that loads + runs ONE module's tests.

@@ -95,7 +95,7 @@ UML_KERNEL=/path/to/uml/linux \
     --fail-marker 'VECTOR2_FAILED_OPEN_.*(FAIL|UNEXPECTED|MISSING|BAD)|VERIFY_FAIL|kernel BUG|Kernel panic|BUG:|WARNING:|KCSAN:|data-race'
 ```
 
-For a quick legacy-vs-vector2 guest-to-host TCP baseline through the
+For a quick vec0-vs-vector2 guest-to-host TCP baseline through the
 same `umlctl` path, use the helper script:
 
 ```sh

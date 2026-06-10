@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// `umlctl snapshot` subcommands — operator-facing wrappers around the
-// kvm-v2 backend's snapshot/export plumbing (#181 + #168).
+// `umlctl snapshot` subcommands — user-facing wrappers around the
+// kvm-v2 backend's snapshot/export plumbing.
 //
 // Today this module exposes one verb:
 //
@@ -19,15 +19,14 @@
 // filesystem at / via rootfstype=hostfs (the common case for the dev
 // configs), any absolute host path is also a valid guest path. The
 // CLI verb assumes that shape and writes the path verbatim to the
-// debugfs trigger; if the guest's namespace differs the operator is
+// debugfs trigger; if the guest's namespace differs the user is
 // expected to use the more explicit shell-into-guest path. The CLI's
 // `--output` flag is a host path either way; we resolve to absolute
 // and write it through.
 //
-// Mirror command for capture (no-op kernel side today; reserved for
-// the in-memory capture API once the host has a reason to hold the
-// snapshot handle across a debugfs trigger): omitted for now to keep
-// the surface focused on the demonstrated capability.
+// Capture is intentionally not exposed until the kernel side has a
+// durable handle that can outlive the debugfs trigger. This command
+// only implements the demonstrated restore path.
 
 use anyhow::{bail, Context, Result};
 use std::fs::OpenOptions;
@@ -86,8 +85,11 @@ pub fn cmd_export(paths: &Paths, args: ExportArgs, quiet: bool) -> Result<()> {
     // the host-visible view of the guest's mount namespace. This
     // works because UML runs as a host process — the same property
     // umlctl strace / gdb / bpf already exploits.
-    let trigger_host_path = PathBuf::from(format!("/proc/{pid}/root"))
-        .join(args.trigger_path.strip_prefix("/").unwrap_or(&args.trigger_path));
+    let trigger_host_path = PathBuf::from(format!("/proc/{pid}/root")).join(
+        args.trigger_path
+            .strip_prefix("/")
+            .unwrap_or(&args.trigger_path),
+    );
 
     if !args.no_precheck && !trigger_host_path.exists() {
         bail!(
@@ -163,8 +165,9 @@ fn resolve_live(paths: &Paths, name: &str) -> Result<(u32, PathBuf)> {
     }
     let manifest = Manifest::read(&manifest_path)
         .with_context(|| format!("read manifest for instance '{name}'"))?;
-    let run_id = supervise::read_run_id_file(&paths.run_id_file_path(name))
-        .with_context(|| format!("no live run for instance '{name}' — has umlctl up been called?"))?;
+    let run_id = supervise::read_run_id_file(&paths.run_id_file_path(name)).with_context(|| {
+        format!("no live run for instance '{name}' — has umlctl up been called?")
+    })?;
     let run = Run::read(&paths.run_dir(&run_id).join("run.json"))
         .with_context(|| format!("read run.json for run {run_id}"))?;
     Ok((run.pid, manifest.kernel.path.clone()))

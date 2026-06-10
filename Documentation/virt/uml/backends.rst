@@ -8,36 +8,28 @@ UML Backends
 
 User-Mode Linux runs the upstream Linux kernel as a host process.
 "Backend" is the host-side mechanism the UML kernel uses to
-intercept its guest's syscalls, page faults, and signals — the
+intercept its guest's syscalls, page faults, and signals: the
 plumbing between the host kernel and the UML kernel.
 
-Two backends are buildable today; a third is archived:
+Two backends are buildable:
 
 ==========  =====================================  ============================
 Backend     Mechanism                              Per-syscall cost on bare metal
 ==========  =====================================  ============================
-seccomp     ``SECCOMP_RET_TRAP`` + ``SIGSYS`` +    ~300–500 ns (seccomp filter
+seccomp     ``SECCOMP_RET_TRAP`` + ``SIGSYS`` +    ~300-500 ns (seccomp filter
             futex round-trip                       hits, futex wakes UML kernel)
 kvm-v2      ``KVM_RUN`` + IDT/IST exception        ~150 ns measured on minimal
-            delivery + IO-port syscall trap        Python startup (~2× faster
-                                                   than seccomp; memo 26 §H.1)
+            delivery + IO-port syscall trap        Python startup (~2x faster
+                                                   than seccomp)
 ==========  =====================================  ============================
 
-seccomp landed in 6.16 (Benjamin Berg). kvm v2 reached substrate
-parity with seccomp at the 2026-04-30 milestone (PASS=25 / FAIL=3 /
-EXPECTED_FAIL=3 on the ``regrtest-substrate`` gate, bit-for-bit
-match). v2 still defaults to ``n`` because Phase J validation (24h
-continuous, Tier 1/2/3 third-party libs, soak) is open; production
-runtimes can opt in via ``backend=force=kvm-v2``. The archived v1
-implementation lives at ``arch/um/backend/kvm-v1-archive/`` (not
-built; ``CONFIG_UM_BACKEND_KVM_V1_ARCHIVE`` depends on ``BROKEN``).
-See ``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/``
-memos 24-26 for design and 27 for the execution prompt.
+seccomp landed in 6.16 (Benjamin Berg) and remains the default
+backend. kvm-v2 is the new accelerated backend; it is opt-in while
+validation continues and can be selected with ``backend=force=kvm-v2``
+when built.
 
-The historical **ptrace** backend (``PTRACE_SYSEMU`` + ``waitpid``,
-Jeff Dike, 1990s) was removed in memo 25 refactor 11. The archived
-source is reachable via
-``git show kvm-v1-archive-20260428:arch/um/backend/ptrace/``.
+The previous **ptrace** backend (``PTRACE_SYSEMU`` + ``waitpid``,
+Jeff Dike, 1990s) has been removed.
 Hosts that genuinely lack ``CONFIG_SECCOMP_FILTER`` (mainline since
 3.5 / 2012) should pin to UML v6.16 or earlier.
 
@@ -45,21 +37,20 @@ Hosts that genuinely lack ``CONFIG_SECCOMP_FILTER`` (mainline since
 Picking a backend
 ******************
 
-Default builds compile in seccomp; the v2 KVM backend is in
-development (memo 26). Today's defaults give the typical user the
-right behavior without thinking about it:
+Default builds compile in seccomp. kvm-v2 is opt-in while validation
+continues. The defaults give the typical user the right behavior
+without thinking about it:
 
 ============================  ==============================================
-You want…                     Use
+You want                      Use
 ============================  ==============================================
 "It just works"               No flags needed. Default config compiles in
                               seccomp; ``backend=auto`` selects it.
 Maximum speed                 Build with ``CONFIG_UM_BACKEND_KVM_V2=y`` and
-                              boot ``backend=force=kvm-v2``. ~2× faster than
-                              seccomp on minimal Python startup; full
-                              substrate-gate parity at the 2026-04-30
-                              milestone. Phase J validation still pending —
-                              not yet the runtime default.
+                              boot ``backend=force=kvm-v2``. ~2x faster than
+                              seccomp on minimal Python startup. seccomp
+                              remains the runtime default while validation
+                              completes.
 Smallest binary / minimum     Build with
 TCB (sandbox profile)         ``CONFIG_UM_BACKEND_SECCOMP_ONLY=y``. The
                               dispatch macro inlines to direct calls.
@@ -80,27 +71,22 @@ Boot parameters
     seccomp probe at boot and picks seccomp when the host supports
     it. ``force=`` makes the choice mandatory and panics if the
     requested backend isn't compiled in or fails its host probe.
-    ``kvm-v2`` is at substrate parity with seccomp (memo 26 §H.1b,
-    2026-04-30) and **3-4× faster on Python startup, 193-908×
-    faster on per-syscall round-trip** with the Phase H LSTAR
-    gadget enabled (default; see ``CONFIG_UM_BACKEND_KVM_V2_GADGET``
-    and the cross-host bench at
-    ``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md``).
-    Opt in via ``backend=force=kvm-v2`` until Phase J validation
-    flips it to default. The archived v1 implementation
-    (``arch/um/backend/kvm-v1-archive/``, depends on ``BROKEN``) is
-    not selectable.
+    ``kvm-v2`` is the accelerated backend and can be built with
+    ``CONFIG_UM_BACKEND_KVM_V2=y``. With the LSTAR gadget enabled
+    (default; see ``CONFIG_UM_BACKEND_KVM_V2_GADGET``), common
+    identity and clock syscalls avoid a VM exit.
+    Opt in via ``backend=force=kvm-v2``. seccomp remains the default
+    while kvm-v2 validation continues.
 
     ``backend=ptrace`` is parsed for compatibility but the ptrace
-    backend was removed (memo 25 R11; archived at the
-    ``kvm-v1-archive-20260428`` tag). Requests warn and fall
-    through to seccomp; ``backend=force=ptrace`` panics with a
+    backend was removed. Requests warn and fall through to seccomp;
+    ``backend=force=ptrace`` panics with a
     pin-to-v6.16-or-earlier hint.
 
-``seccomp=<on|auto|off>`` (legacy alias)
-    Preserved for one transitional release. Maps to:
-    ``seccomp=on`` → ``backend=force=seccomp``;
-    ``seccomp=auto`` → ``backend=auto``;
+``seccomp=<on|auto|off>`` (compatibility alias)
+    Maps to:
+    ``seccomp=on`` -> ``backend=force=seccomp``;
+    ``seccomp=auto`` -> ``backend=auto``;
     ``seccomp=off`` is now equivalent to ``backend=auto`` since
     ptrace is no longer a fallback.
 
@@ -111,14 +97,10 @@ Trap path diagrams
 ptrace (archived)
 =================
 
-The ptrace backend was removed in memo 25 R11. Source is
-preserved at the ``kvm-v1-archive-20260428`` tag::
-
-    git show kvm-v1-archive-20260428:arch/um/backend/ptrace/trap_user.c
-
-The trap path was the classic ``PTRACE_SYSEMU`` + ``waitpid`` +
+The ptrace backend has been removed. The trap path was the classic
+``PTRACE_SYSEMU`` + ``waitpid`` +
 ``PTRACE_GETREGS`` + ``PTRACE_SETREGS`` + ``PTRACE_CONT`` round
-trip, ~1–5 µs per syscall.
+trip, ~1-5 us per syscall.
 
 seccomp
 =======
@@ -126,38 +108,38 @@ seccomp
 .. code-block::
 
     UML host process            stub child (per-mm)
-    ────────────────            ─────────────────────────
+    ----------------            -------------------------
                                  1. Issues guest syscall
                                  2. Seccomp filter returns SIGSYS
                                  3. SIGSYS handler in stub copies
                                     regs/siginfo to shared
                                     `stub_data->sigstack[]`
                                  4. Stub waits on futex
-    ◄── futex wake ───────────  5. UML kernel sees futex
+    <-- futex wake -----------  5. UML kernel sees futex
     [kernel runs syscall in
      handle_syscall, then
      writes new regs into
      stub_data + clears futex]
-    ─── futex wake ───────────► 6. Stub resumes, reads new regs
+    --- futex wake -----------> 6. Stub resumes, reads new regs
 
 Round-trip cost: 1 SIGSYS delivery + 1 futex wait/wake pair +
-shared-memory copy. ~300–500 ns.
+shared-memory copy. ~300-500 ns.
 
-kvm-v2 (workstream D)
-=====================
+kvm-v2
+======
 
 .. code-block::
 
     UML host process               KVM guest
-    ───────────────                ────────────────────────
+    ---------------                ------------------------
                                     1. Guest userspace runs at CPL=3
-                                    2. SYSCALL instruction → MSR_LSTAR
+                                    2. SYSCALL instruction -> MSR_LSTAR
                                        trampoline (CPL=0, kernel CS) at
                                        PML4[508] kernel-half VA
                                     3. Trampoline: ``out %al,$0xf4``
-                                       → KVM_EXIT_IO
+                                       -> KVM_EXIT_IO
     4. KVM_RUN returns to host;
-       handle_io_trap → handle_syscall
+       handle_io_trap -> handle_syscall
        runs the syscall on the host
        UML kernel; marshals result back
        into kvm_run->s.regs via
@@ -175,17 +157,15 @@ instruction.
 Round-trip cost on the slow KVM_EXIT_IO path: ~150 ns measured,
 dominated by the KVM_EXIT_IO ioctl pair.
 
-Phase H gadget (default, ``CONFIG_UM_BACKEND_KVM_V2_GADGET=y``):
+Fast syscall gadget (default, ``CONFIG_UM_BACKEND_KVM_V2_GADGET=y``):
 ten trivial syscalls (getpid/gettid/getppid/getuid/geteuid/getgid/
 getegid/getcpu/time/clock_gettime CLOCK_MONOTONIC) handle entirely
 in-guest via an in-LSTAR dispatch tree. The body reads per-task
 state from a per-vCPU page (mapped at MSR_KERNEL_GS_BASE,
-populated in ``load_user_sregs``) and returns via SYSRETQ — no
+populated in ``load_user_sregs``) and returns via SYSRETQ; no
 vmexit. Per-syscall round-trip drops from ~36 800 cyc to ~90 cyc
 (see ``arch/um/backend/kvm-v2/lstar_gadget.S`` for the assembled
-trampoline body and the cross-host bench at
-``Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/bench-cross-host-2026-05-04-postgadget.md``
-for measurements).
+trampoline body).
 
 ******************
 Implementation map
@@ -195,12 +175,11 @@ Code lives under ``arch/um/backend/<kind>/``. Each backend
 implements the ops table declared in
 ``arch/um/include/shared/backend.h`` (``struct um_backend_ops``).
 The kernel-side selection arbiter is ``init_backend()`` in
-``arch/um/kernel/backend.c`` — it runs once at boot, validates the
+``arch/um/kernel/backend.c``; it runs once at boot, validates the
 chosen backend's HOT ops are non-NULL, and sets the global
 ``um_backend`` pointer.
 
-Per-backend file layout (current — seccomp; v2 KVM follows the
-same shape per memo 26):
+Per-backend file layout:
 
 ==================================  ==============================
 File                                Op(s)
@@ -231,7 +210,6 @@ The HOT ops (``vcpu_run``, ``mm_region_added``,
 validated non-NULL at ``init_backend()`` time;
 ``mm_region_protected`` is optional (mm-arbiter falls back to
 remove+add when NULL).
-==================================  ==============================
 
 ******************
 Compatibility
@@ -250,7 +228,7 @@ kvm-v2          Host with ``/dev/kvm`` accessible to the running user
                 ``setfacl -m u:$(id -un):rw /dev/kvm``).  x86_64 host
                 CPU with VT-x or SVM. Linux 5.x+ for the KVM API
                 surface (KVM_CAP_SYNC_REGS, KVM_SET_USER_MEMORY_REGION).
-ptrace          Removed (memo 25 R11). Pin to UML v6.16 or earlier
+ptrace          Removed. Pin to UML v6.16 or earlier
                 if you need it.
 ==============  ==========================================================
 

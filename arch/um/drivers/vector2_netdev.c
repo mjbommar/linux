@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Netdev registration skeleton for UML vector networking v2.
+ * Netdev integration for UML vector networking v2.
  */
 
 #define pr_fmt(fmt) "uml-vector2: " fmt
@@ -44,12 +44,9 @@ static const struct net_device_ops um_vec2_netdev_ops = {
 };
 
 /*
- * Minimal watchdog handler: log the timeout and mark the queue start
- * timestamp so netif_tx_lock_bh can deliver the next xmit attempt.
- * Matches legacy vector_kern.c's vector_net_tx_timeout shape: the
- * driver does not auto-reset state today because the backend has no
- * "TX stuck" notion separate from BACKEND_DEAD.  Logging the event
- * is what tooling needs.  See audit P2.4.
+ * Watchdog handler: log the timeout and refresh the transmit timestamp.
+ * The backend reports terminal channel state separately, so the watchdog
+ * does not reset driver state on its own.
  */
 static void um_vec2_netdev_tx_timeout(struct net_device *dev,
 				      unsigned int txqueue)
@@ -62,12 +59,11 @@ static void um_vec2_netdev_tx_timeout(struct net_device *dev,
 }
 
 /*
- * ndo_set_rx_mode stub.  The host TAP backend negotiates flags at
- * /dev/net/tun open time (IFF_TAP | IFF_NO_PI | IFF_VNET_HDR) and
- * has no live interface for per-multicast/promisc filter changes
- * from the guest side.  Accept the call (avoid -EOPNOTSUPP noise
- * from "ip" / userspace) and rely on the host's TAP for upstream
- * filtering.  See audit P2.5.
+ * ndo_set_rx_mode implementation. The host TAP backend negotiates flags
+ * at /dev/net/tun open time (IFF_TAP | IFF_NO_PI | IFF_VNET_HDR) and
+ * has no live interface for per-multicast/promisc filter changes from
+ * the guest side. Accept the call and rely on the host TAP for upstream
+ * filtering.
  */
 static void um_vec2_netdev_set_rx_mode(struct net_device *dev)
 {
@@ -77,8 +73,7 @@ static void um_vec2_netdev_set_rx_mode(struct net_device *dev)
 #ifdef CONFIG_NET_POLL_CONTROLLER
 /*
  * netconsole support: drive a poll cycle on each channel's NAPI to
- * flush the receive ring without waiting for an IRQ.  Legacy parity
- * (vector_kern.c::vector_net_poll_controller).  See audit P2.6.
+ * flush the receive ring without waiting for an IRQ.
  */
 static void um_vec2_netdev_poll_controller(struct net_device *dev)
 {
@@ -111,19 +106,21 @@ static int um_vec2_open_backend(struct um_vec2_dev *vdev)
 		return um_vec2_fd_open(vdev);
 	default:
 		/*
-		 * The cmdline parser accepts seven additional transports
-		 * (raw/gre/l2tpv3/hybrid/bess/vde/proxy) for forward
-		 * compatibility + KUnit coverage of transport-specific
-		 * keys, but only TAP and FD have runtime backends today.
-		 * Surface that explicitly here rather than the bare
-		 * -EOPNOTSUPP that downstream ip-link sees as "operation
-		 * not supported".  See audit P4.2.
+		 * The cmdline parser accepts transport names that are not
+		 * backed by this netdev datapath. Surface that explicitly
+		 * instead of leaving userspace with a bare -EOPNOTSUPP.
 		 */
-		pr_err("vec2.%u transport=%s is parsed but not implemented; use transport=tap or transport=fd\n",
+		pr_err("vec2.%u transport=%s is unsupported by this netdev path; use transport=tap or transport=fd\n",
 		       vdev->unit,
 		       um_vec2_transport_name(vdev->cfg.transport));
 		return -EOPNOTSUPP;
 	}
+}
+
+static bool um_vec2_transport_has_datapath(const struct um_vec2_dev *vdev)
+{
+	return vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP ||
+	       vdev->cfg.transport == UM_VEC2_TRANSPORT_FD;
 }
 
 static void um_vec2_close_backend(struct um_vec2_dev *vdev)
@@ -283,22 +280,11 @@ static unsigned int um_vec2_napi_weight(const struct um_vec2_dev *vdev)
 	return min_t(unsigned int, vdev->cfg.depth, UM_VEC2_NAPI_MAX_WEIGHT);
 }
 
-static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
+static int um_vec2_poll_tx(struct um_vec2_dev *vdev, struct net_device *dev,
+			   struct um_vec2_channel *channel,
+			   struct um_vec2_queue_pair *queue, bool *tx_more)
 {
-	struct um_vec2_channel *channel =
-		container_of(napi, struct um_vec2_channel, napi);
-	struct um_vec2_dev *vdev = channel->vdev;
-	struct net_device *dev = vdev->netdev;
-	struct um_vec2_queue_pair *queue = channel->queue;
-	struct um_vec2_rx_poll_ctx rx_ctx;
-	bool tx_more = false;
 	int tx_done = 0;
-	int rx_done = 0;
-
-	um_vec2_stat_inc(vdev, UM_VEC2_STAT_NAPI_POLLS);
-
-	if (!channel->host || !queue)
-		goto complete;
 
 	spin_lock(&queue->tx_lock);
 	if (!um_vec2_tx_ring_empty(&queue->tx)) {
@@ -311,8 +297,8 @@ static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
 			netif_wake_subqueue(dev, channel->index);
 			netif_trans_update(dev);
 		}
-		tx_more = !um_vec2_tx_ring_empty(&queue->tx);
-		if (!tx_done && tx_more)
+		*tx_more = !um_vec2_tx_ring_empty(&queue->tx);
+		if (!tx_done && *tx_more)
 			um_vec2_stat_inc(vdev,
 					 UM_VEC2_STAT_TX_TRANSIENT_ERRORS);
 		else if (tx_done < 0 && tx_done != -ENODEV)
@@ -320,10 +306,16 @@ static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
 	}
 	spin_unlock(&queue->tx_lock);
 
-	if (tx_done == -ENODEV) {
-		um_vec2_stat_inc(vdev, UM_VEC2_STAT_BACKEND_DEAD);
-		goto backend_dead;
-	}
+	return tx_done;
+}
+
+static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
+			   struct um_vec2_dev *vdev, struct net_device *dev,
+			   struct um_vec2_channel *channel,
+			   struct um_vec2_queue_pair *queue)
+{
+	struct um_vec2_rx_poll_ctx rx_ctx;
+	int rx_done;
 
 	rx_ctx.napi = napi;
 	rx_ctx.dev = dev;
@@ -348,33 +340,29 @@ static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
 	}
 	spin_unlock(&queue->rx_lock);
 
-	if (rx_done == -ENODEV) {
-		um_vec2_stat_inc(vdev, UM_VEC2_STAT_BACKEND_DEAD);
-		goto backend_dead;
-	}
-	if (rx_done < 0)
-		rx_done = 0;
+	return rx_done;
+}
 
-complete:
+static int um_vec2_poll_finish(struct napi_struct *napi, int budget,
+			       int rx_done, int tx_done, bool tx_more)
+{
 	if (rx_done < budget)
 		napi_complete_done(napi, rx_done);
 	if (tx_more && tx_done > 0)
 		napi_schedule(napi);
 	return rx_done;
+}
 
-backend_dead:
+static int um_vec2_poll_backend_dead(struct napi_struct *napi, int budget,
+				     struct net_device *dev, int rx_done)
+{
 	/*
-	 * Terminal state: backend signalled -ENODEV (host fd closed,
-	 * TAP vanished, etc.).  We stop xmit + drop carrier so the
-	 * netdev framework + tooling see "link down" + queue stopped.
-	 * Recovery requires "ip link set vec2.X down && up" — the
-	 * B5-fixed um_vec2_netdev_stop now handles the carrier-off
-	 * + queues-stopped state idempotently, so a subsequent
-	 * "down" drives lifecycle back to REGISTERED and "up"
-	 * re-opens cleanly.  Auto-recovery is intentionally not
-	 * attempted: the operator has to fix whatever the host
-	 * condition was before retry can succeed.  See audit P3.3 +
-	 * 47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md.
+	 * Terminal state: backend signalled -ENODEV (host fd closed, TAP
+	 * vanished, etc.). Stop xmit and drop carrier so the netdev framework
+	 * and tooling see "link down" plus stopped queues. Recovery requires
+	 * "ip link set vec2.X down && up"; stop handles the carrier-off and
+	 * queues-stopped state idempotently, then open retries cleanly after
+	 * the host-side condition is fixed.
 	 */
 	netif_tx_stop_all_queues(dev);
 	netif_carrier_off(dev);
@@ -383,6 +371,43 @@ backend_dead:
 	if (rx_done < budget)
 		napi_complete_done(napi, rx_done);
 	return rx_done;
+}
+
+static int um_vec2_netdev_poll(struct napi_struct *napi, int budget)
+{
+	struct um_vec2_channel *channel =
+		container_of(napi, struct um_vec2_channel, napi);
+	struct um_vec2_dev *vdev = channel->vdev;
+	struct net_device *dev = vdev->netdev;
+	struct um_vec2_queue_pair *queue = channel->queue;
+	bool tx_more = false;
+	int tx_done = 0;
+	int rx_done = 0;
+
+	um_vec2_stat_inc(vdev, UM_VEC2_STAT_NAPI_POLLS);
+
+	if (!channel->host || !queue)
+		goto complete;
+
+	tx_done = um_vec2_poll_tx(vdev, dev, channel, queue, &tx_more);
+	if (tx_done == -ENODEV) {
+		um_vec2_stat_inc(vdev, UM_VEC2_STAT_BACKEND_DEAD);
+		goto backend_dead;
+	}
+
+	rx_done = um_vec2_poll_rx(napi, budget, vdev, dev, channel, queue);
+	if (rx_done == -ENODEV) {
+		um_vec2_stat_inc(vdev, UM_VEC2_STAT_BACKEND_DEAD);
+		goto backend_dead;
+	}
+	if (rx_done < 0)
+		rx_done = 0;
+
+complete:
+	return um_vec2_poll_finish(napi, budget, rx_done, tx_done, tx_more);
+
+backend_dead:
+	return um_vec2_poll_backend_dead(napi, budget, dev, rx_done);
 }
 
 static irqreturn_t um_vec2_rx_interrupt(int irq, void *dev_id)
@@ -419,10 +444,72 @@ static irqreturn_t um_vec2_tx_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static int um_vec2_start_channel_irqs(struct net_device *dev,
+				      struct um_vec2_channel *channel,
+				      unsigned int index)
+{
+	int ret;
+
+	if (channel->rx_fd == UM_VEC2_NO_FD || channel->tx_fd == UM_VEC2_NO_FD)
+		return -EBADF;
+
+	ret = um_request_irq(UM_IRQ_ALLOC, channel->rx_fd, IRQ_READ,
+			     um_vec2_rx_interrupt, IRQF_SHARED, dev->name,
+			     channel);
+	if (ret < 0)
+		return ret;
+
+	channel->rx_irq = ret;
+	if (!index)
+		dev->irq = ret;
+
+	ret = um_request_irq(UM_IRQ_ALLOC, channel->tx_fd, IRQ_WRITE,
+			     um_vec2_tx_interrupt, IRQF_SHARED, dev->name,
+			     channel);
+	if (ret < 0)
+		return ret;
+
+	channel->tx_irq = ret;
+	return 0;
+}
+
+static int um_vec2_start_channel(struct net_device *dev,
+				 struct um_vec2_dev *vdev,
+				 struct um_vec2_channel *channel,
+				 unsigned int index)
+{
+	int ret;
+
+	if (!channel->host || !channel->queue)
+		return -EINVAL;
+
+	netif_napi_add_weight(dev, &channel->napi, um_vec2_netdev_poll,
+			      um_vec2_napi_weight(vdev));
+	channel->napi_added = true;
+
+	ret = um_vec2_start_channel_irqs(dev, channel, index);
+	if (ret < 0)
+		return ret;
+
+	ret = um_vec2_chan_transition(&channel->life,
+				      UM_VEC2_CHAN_IRQ_ATTACHED);
+	if (ret)
+		return ret;
+
+	napi_enable(&channel->napi);
+	channel->napi_enabled = true;
+
+	ret = um_vec2_chan_transition(&channel->life,
+				      UM_VEC2_CHAN_NAPI_ENABLED);
+	if (ret)
+		return ret;
+
+	return um_vec2_chan_transition(&channel->life, UM_VEC2_CHAN_ACTIVE);
+}
+
 static int um_vec2_start_datapath(struct net_device *dev,
 				  struct um_vec2_dev *vdev)
 {
-	struct um_vec2_channel *channel;
 	unsigned int i;
 	int ret;
 
@@ -433,56 +520,7 @@ static int um_vec2_start_datapath(struct net_device *dev,
 		return -EINVAL;
 
 	for (i = 0; i < vdev->num_channels; i++) {
-		channel = &vdev->channels[i];
-		if (!channel->host || !channel->queue) {
-			ret = -EINVAL;
-			goto out_stop_started;
-		}
-
-		netif_napi_add_weight(dev, &channel->napi,
-				      um_vec2_netdev_poll,
-				      um_vec2_napi_weight(vdev));
-		channel->napi_added = true;
-
-		if (channel->rx_fd == UM_VEC2_NO_FD ||
-		    channel->tx_fd == UM_VEC2_NO_FD) {
-			ret = -EBADF;
-			goto out_stop_started;
-		}
-
-		ret = um_request_irq(UM_IRQ_ALLOC, channel->rx_fd, IRQ_READ,
-				     um_vec2_rx_interrupt, IRQF_SHARED,
-				     dev->name, channel);
-		if (ret < 0)
-			goto out_stop_started;
-
-		channel->rx_irq = ret;
-		if (!i)
-			dev->irq = ret;
-
-		ret = um_request_irq(UM_IRQ_ALLOC, channel->tx_fd, IRQ_WRITE,
-				     um_vec2_tx_interrupt, IRQF_SHARED,
-				     dev->name, channel);
-		if (ret < 0)
-			goto out_stop_started;
-
-		channel->tx_irq = ret;
-
-		ret = um_vec2_chan_transition(&channel->life,
-					      UM_VEC2_CHAN_IRQ_ATTACHED);
-		if (ret)
-			goto out_stop_started;
-
-		napi_enable(&channel->napi);
-		channel->napi_enabled = true;
-
-		ret = um_vec2_chan_transition(&channel->life,
-					      UM_VEC2_CHAN_NAPI_ENABLED);
-		if (ret)
-			goto out_stop_started;
-
-		ret = um_vec2_chan_transition(&channel->life,
-					      UM_VEC2_CHAN_ACTIVE);
+		ret = um_vec2_start_channel(dev, vdev, &vdev->channels[i], i);
 		if (ret)
 			goto out_stop_started;
 	}
@@ -539,6 +577,117 @@ static int um_vec2_unwind_open(struct um_vec2_dev *vdev)
 	return um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_REGISTERED);
 }
 
+static void um_vec2_open_unwind(struct net_device *dev,
+				struct um_vec2_dev *vdev,
+				bool stop_datapath)
+{
+	if (stop_datapath)
+		um_vec2_stop_datapath(dev, vdev);
+	if (um_vec2_unwind_open(vdev))
+		netdev_err(dev, "vector v2 open unwind failed\n");
+}
+
+static bool um_vec2_open_fault_injected(struct net_device *dev,
+					struct um_vec2_dev *vdev,
+					u64 attempt)
+{
+	if (!vdev->cfg.fail_open_after ||
+	    attempt < vdev->cfg.fail_open_after)
+		return false;
+
+	netdev_info(dev,
+		    "vector v2 injected open failure at attempt %llu threshold %u\n",
+		    (unsigned long long)attempt, vdev->cfg.fail_open_after);
+	return true;
+}
+
+static int um_vec2_enter_opening(struct net_device *dev,
+				 struct um_vec2_dev *vdev)
+{
+	int ret;
+
+	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_OPENING);
+	if (ret)
+		return ret;
+
+	netif_carrier_off(dev);
+	netif_tx_stop_all_queues(dev);
+	return 0;
+}
+
+static int um_vec2_open_host_backend(struct net_device *dev,
+				     struct um_vec2_dev *vdev)
+{
+	int ret;
+
+	ret = um_vec2_open_backend(vdev);
+	if (ret)
+		netdev_info(dev, "vector v2 host backend is not available: %d\n",
+			    ret);
+	return ret;
+}
+
+static void um_vec2_schedule_all_channels(struct um_vec2_dev *vdev)
+{
+	unsigned int i;
+
+	/*
+	 * napi_schedule() under vdev->lock is safe: it sets NAPI_STATE_SCHED
+	 * and raises a softirq, taking no external locks itself. The softirq
+	 * runs um_vec2_netdev_poll in a separate context which never takes
+	 * vdev->lock, so there is no AB-BA ordering risk.
+	 */
+	for (i = 0; i < vdev->num_channels; i++)
+		napi_schedule(&vdev->channels[i].napi);
+}
+
+static void um_vec2_activate_netdev(struct net_device *dev,
+				    struct um_vec2_dev *vdev)
+{
+	um_vec2_netdev_configure_xps(dev, dev->real_num_tx_queues);
+	netif_carrier_on(dev);
+	netif_tx_start_all_queues(dev);
+	um_vec2_schedule_all_channels(vdev);
+}
+
+static int um_vec2_finish_open(struct net_device *dev,
+			       struct um_vec2_dev *vdev)
+{
+	int ret;
+
+	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_RUNNING);
+	if (ret)
+		return ret;
+
+	if (um_vec2_transport_has_datapath(vdev))
+		um_vec2_activate_netdev(dev, vdev);
+	return 0;
+}
+
+static int um_vec2_open_runtime(struct net_device *dev,
+				struct um_vec2_dev *vdev)
+{
+	int ret;
+
+	ret = um_vec2_open_host_backend(dev, vdev);
+	if (ret) {
+		um_vec2_open_unwind(dev, vdev, false);
+		return ret;
+	}
+
+	ret = um_vec2_start_datapath(dev, vdev);
+	if (ret) {
+		netdev_err(dev, "vector v2 datapath start failed: %d\n", ret);
+		um_vec2_open_unwind(dev, vdev, false);
+		return ret;
+	}
+
+	ret = um_vec2_finish_open(dev, vdev);
+	if (ret)
+		um_vec2_open_unwind(dev, vdev, true);
+	return ret;
+}
+
 int um_vec2_netdev_open(struct net_device *dev)
 {
 	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
@@ -552,68 +701,18 @@ int um_vec2_netdev_open(struct net_device *dev)
 		goto out;
 	}
 
-	if (vdev->cfg.fail_open_after &&
-	    attempt >= vdev->cfg.fail_open_after) {
-		netdev_info(dev,
-			    "vector v2 injected open failure at attempt %llu threshold %u\n",
-			    (unsigned long long)attempt,
-			    vdev->cfg.fail_open_after);
+	if (um_vec2_open_fault_injected(dev, vdev, attempt)) {
 		ret = -EIO;
 		goto out;
 	}
 
-	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_OPENING);
+	ret = um_vec2_enter_opening(dev, vdev);
 	if (ret)
 		goto out;
 
-	netif_carrier_off(dev);
-	netif_tx_stop_all_queues(dev);
-
-	ret = um_vec2_open_backend(vdev);
-	if (ret) {
-		netdev_info(dev, "vector v2 host backend is not available: %d\n",
-			    ret);
-		if (um_vec2_unwind_open(vdev))
-			netdev_err(dev, "vector v2 open unwind failed\n");
+	ret = um_vec2_open_runtime(dev, vdev);
+	if (ret)
 		goto out;
-	}
-
-	ret = um_vec2_start_datapath(dev, vdev);
-	if (ret) {
-		netdev_err(dev, "vector v2 datapath start failed: %d\n", ret);
-		if (um_vec2_unwind_open(vdev))
-			netdev_err(dev, "vector v2 open unwind failed\n");
-		goto out;
-	}
-
-	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_RUNNING);
-	if (ret) {
-		um_vec2_stop_datapath(dev, vdev);
-		if (um_vec2_unwind_open(vdev))
-			netdev_err(dev, "vector v2 open unwind failed\n");
-		goto out;
-	}
-
-	if (vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP ||
-	    vdev->cfg.transport == UM_VEC2_TRANSPORT_FD) {
-		unsigned int i;
-
-		um_vec2_netdev_configure_xps(dev, dev->real_num_tx_queues);
-		netif_carrier_on(dev);
-		netif_tx_start_all_queues(dev);
-		/*
-		 * napi_schedule() under vdev->lock is safe: it sets
-		 * NAPI_STATE_SCHED and raises a softirq, taking no
-		 * external locks itself.  The softirq runs
-		 * um_vec2_netdev_poll in a separate context which never
-		 * takes vdev->lock, so there is no AB-BA ordering risk.
-		 * See audit R4 +
-		 * 47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md.
-		 */
-		for (i = 0; i < vdev->num_channels; i++)
-			napi_schedule(&vdev->channels[i].napi);
-		ret = 0;
-	}
 
 out:
 	if (ret)
@@ -651,9 +750,8 @@ int um_vec2_netdev_stop(struct net_device *dev)
 		 * ndo_stop is expected to be idempotent: returning an
 		 * error here would make "ip link set vec2.X down" fail
 		 * for already-stopped devices, which the netdev framework
-		 * (and operator tooling) treats as a hard failure.  Log
-		 * the unexpected state for diagnostics and return 0.
-		 * See audit B5.
+		 * treats as a command failure.  Log the unexpected state and
+		 * return 0.
 		 */
 		netdev_warn(dev,
 			    "vector v2 ndo_stop called in unexpected state %s; treating as already stopped\n",
@@ -665,43 +763,30 @@ int um_vec2_netdev_stop(struct net_device *dev)
 	return ret;
 }
 
-netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
-				      struct net_device *dev)
+static netdev_tx_t um_vec2_drop_xmit_skb(struct sk_buff *skb,
+					 struct net_device *dev,
+					 struct um_vec2_dev *vdev)
 {
-	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
-	struct um_vec2_channel *channel;
-	struct um_vec2_queue_pair *queue;
-	unsigned int len = skb->len;
+	dev->stats.tx_dropped++;
+	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static bool um_vec2_xmit_channel_ready(const struct um_vec2_channel *channel)
+{
+	return channel && channel->host && channel->queue;
+}
+
+static netdev_tx_t um_vec2_enqueue_xmit(struct sk_buff *skb,
+					struct net_device *dev,
+					struct um_vec2_dev *vdev,
+					struct um_vec2_channel *channel,
+					unsigned int len)
+{
+	struct um_vec2_queue_pair *queue = channel->queue;
 	int ret;
 
-	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_XMIT_CALLS);
-
-	/*
-	 * The lifecycle check below is intentionally unlocked.  The
-	 * netdev framework guarantees `__LINK_STATE_START` is cleared
-	 * and any in-flight `ndo_start_xmit` has drained (via
-	 * synchronize_net) before our `um_vec2_netdev_stop` runs, so
-	 * a parallel ndo_stop cannot tear down the backend while we
-	 * are here.  Adding `vdev->lock` would defeat the spin_lock_bh
-	 * fast path with no real-world benefit.  See audit R3 +
-	 * 47-uml-vector-driver-v2-audit-risks-resolution-2026-05-17.md.
-	 */
-	if (!um_vec2_dev_can_xmit(&vdev->life)) {
-		dev->stats.tx_dropped++;
-		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
-		dev_kfree_skb_any(skb);
-		return NETDEV_TX_OK;
-	}
-
-	channel = um_vec2_channel_for_skb(vdev, skb);
-	if (!channel || !channel->host || !channel->queue) {
-		dev->stats.tx_dropped++;
-		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
-		dev_kfree_skb_any(skb);
-		return NETDEV_TX_OK;
-	}
-
-	queue = channel->queue;
 	spin_lock_bh(&queue->tx_lock);
 	if (um_vec2_tx_ring_full(&queue->tx)) {
 		netif_stop_subqueue(dev, channel->index);
@@ -713,11 +798,9 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 	ret = um_vec2_tx_ring_enqueue(&queue->tx, skb, len);
 	if (ret) {
 		spin_unlock_bh(&queue->tx_lock);
-		dev->stats.tx_dropped++;
-		um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_DROPPED);
-		dev_kfree_skb_any(skb);
-		return NETDEV_TX_OK;
+		return um_vec2_drop_xmit_skb(skb, dev, vdev);
 	}
+
 	if (um_vec2_tx_ring_full(&queue->tx))
 		netif_stop_subqueue(dev, channel->index);
 	spin_unlock_bh(&queue->tx_lock);
@@ -726,14 +809,47 @@ netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
-void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
+netdev_tx_t um_vec2_netdev_start_xmit(struct sk_buff *skb,
+				      struct net_device *dev)
+{
+	struct um_vec2_dev *vdev = um_vec2_dev_from_netdev(dev);
+	struct um_vec2_channel *channel;
+	unsigned int len = skb->len;
+
+	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_XMIT_CALLS);
+
+	/*
+	 * The lifecycle check below is intentionally unlocked.  The
+	 * netdev framework guarantees __LINK_STATE_START is cleared
+	 * and any in-flight ndo_start_xmit has drained (via
+	 * synchronize_net) before um_vec2_netdev_stop runs, so a
+	 * parallel ndo_stop cannot tear down the backend from under this
+	 * path.  Adding vdev->lock would defeat the spin_lock_bh fast
+	 * path with no real-world benefit.
+	 */
+	if (!um_vec2_dev_can_xmit(&vdev->life))
+		return um_vec2_drop_xmit_skb(skb, dev, vdev);
+
+	channel = um_vec2_channel_for_skb(vdev, skb);
+	if (!um_vec2_xmit_channel_ready(channel))
+		return um_vec2_drop_xmit_skb(skb, dev, vdev);
+
+	return um_vec2_enqueue_xmit(skb, dev, vdev, channel, len);
+}
+
+static void um_vec2_netdev_init_name(struct um_vec2_dev *vdev,
+				     struct net_device *dev)
 {
 	struct um_vec2_netdev_priv *priv = netdev_priv(dev);
 
 	priv->vdev = vdev;
 	snprintf(dev->name, sizeof(dev->name), "%s.%u",
 		 UM_VEC2_NAME_PREFIX, vdev->unit);
+}
 
+static void um_vec2_netdev_init_mtu(struct um_vec2_dev *vdev,
+				    struct net_device *dev)
+{
 	/*
 	 * Cap dev->max_mtu at the parse-time configured MTU.  The host
 	 * backends compute their per-channel frame buffer at channel
@@ -743,49 +859,97 @@ void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
 	 * leave the backend buffer too small and produce truncated
 	 * frames.  Lowering the MTU at runtime is safe because the
 	 * backend's larger buffer still holds any frame the netdev
-	 * framework now accepts.  See audit R2.
+	 * framework now accepts.
 	 */
 	dev->mtu = vdev->cfg.mtu;
 	dev->min_mtu = UM_VEC2_MIN_MTU;
 	dev->max_mtu = vdev->cfg.mtu;
-	dev->netdev_ops = &um_vec2_netdev_ops;
+}
 
-	/*
-	 * Wire parser-time feature toggles into the kernel netdev surface.
-	 * Pre-fix, cfg.gro/gso/csum were parsed but never consulted: the
-	 * ethtool / "ip link show" view of features was a lie.  Mirror
-	 * the legacy driver's baseline (SG + FRAGLIST) and layer the
-	 * parser flags on top so reviewers + tooling see the same shape
-	 * the cmdline asked for.  See audit P1.2.
-	 */
+static void um_vec2_netdev_init_features(struct um_vec2_dev *vdev,
+					 struct net_device *dev)
+{
 	dev->hw_features = NETIF_F_SG | NETIF_F_FRAGLIST;
 	if (vdev->cfg.gro)
 		dev->hw_features |= NETIF_F_GRO;
 	if (vdev->cfg.gso) {
-		/*
-		 * GSO + TSO go together: the TCP stack only generates
-		 * large GSO skbs when NETIF_F_TSO* is advertised, and
-		 * `virtio_net_hdr_from_skb` in our tap/fd write path
-		 * encodes the gso_type for the host kernel to segment
-		 * (saves the per-MTU-frame syscall cost — memo 01
-		 * Step 2 root cause).
-		 */
 		dev->hw_features |= NETIF_F_GSO;
 		dev->hw_features |= NETIF_F_TSO | NETIF_F_TSO6;
 	}
 	if (vdev->cfg.csum)
 		dev->hw_features |= NETIF_F_HW_CSUM;
 	dev->features = dev->hw_features;
-	dev->watchdog_timeo = HZ;
-	dev->irq = 0;
+}
 
+static void um_vec2_netdev_init_addr(struct um_vec2_dev *vdev,
+				     struct net_device *dev)
+{
 	if (vdev->cfg.has_mac)
 		eth_hw_addr_set(dev, vdev->cfg.mac);
 	else
 		eth_hw_addr_random(dev);
+}
 
+void um_vec2_netdev_init(struct um_vec2_dev *vdev, struct net_device *dev)
+{
+	um_vec2_netdev_init_name(vdev, dev);
+	um_vec2_netdev_init_mtu(vdev, dev);
+	dev->netdev_ops = &um_vec2_netdev_ops;
+	um_vec2_netdev_init_features(vdev, dev);
+	dev->watchdog_timeo = HZ;
+	dev->irq = 0;
+	um_vec2_netdev_init_addr(vdev, dev);
 	um_vec2_ethtool_attach(dev);
 	netif_carrier_off(dev);
+}
+
+static int um_vec2_netdev_set_real_queues(struct net_device *dev,
+					  unsigned int queues)
+{
+	int ret;
+
+	ret = netif_set_real_num_tx_queues(dev, queues);
+	if (ret)
+		return ret;
+	return netif_set_real_num_rx_queues(dev, queues);
+}
+
+static int um_vec2_register_visible_netdev(struct um_vec2_dev *vdev,
+					   struct net_device *dev)
+{
+	int ret;
+
+	/*
+	 * Publish vdev->netdev before register_netdevice() exposes dev.
+	 * A racing ndo_open after registration can enter the backend, which
+	 * needs vdev->netdev while sizing per-channel frames.
+	 */
+	vdev->netdev = dev;
+
+	rtnl_lock();
+	ret = register_netdevice(dev);
+	rtnl_unlock();
+	if (ret)
+		vdev->netdev = NULL;
+	return ret;
+}
+
+static int um_vec2_finish_netdev_register(struct um_vec2_dev *vdev,
+					  struct net_device *dev,
+					  unsigned int queues)
+{
+	int ret;
+
+	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_REGISTERED);
+	if (ret) {
+		vdev->netdev = NULL;
+		unregister_netdev(dev);
+		return ret;
+	}
+
+	vdev->registered_queues = queues;
+	pr_info("registered netdev %s for vec2.%u\n", dev->name, vdev->unit);
+	return 0;
 }
 
 int um_vec2_netdev_register(struct um_vec2_dev *vdev)
@@ -804,49 +968,17 @@ int um_vec2_netdev_register(struct um_vec2_dev *vdev)
 		return -ENOMEM;
 
 	um_vec2_netdev_init(vdev, dev);
-	ret = netif_set_real_num_tx_queues(dev, queues);
-	if (ret)
-		goto out_free_netdev;
-	ret = netif_set_real_num_rx_queues(dev, queues);
+	ret = um_vec2_netdev_set_real_queues(dev, queues);
 	if (ret)
 		goto out_free_netdev;
 
-	/*
-	 * Publish vdev->netdev BEFORE register_netdevice() makes dev
-	 * visible to the kernel netdev framework.  After register_netdevice()
-	 * returns, a racing netlink "ip link set vec2.X up" can call
-	 * ndo_open() (um_vec2_netdev_open) which dispatches into the host
-	 * backend.  The TAP backend has no vdev->netdev NULL guard and
-	 * dereferences dev->mtu in um_vec2_runtime_frame_len(); without
-	 * this ordering a NULL deref is possible in the window between
-	 * register_netdevice() returning and the post-register
-	 * vdev->netdev = dev assignment.  See audit R1.
-	 *
-	 * On any failure below, NULL the field back out so an out-path
-	 * free_netdev() doesn't leave vdev->netdev pointing at freed memory.
-	 */
-	vdev->netdev = dev;
-
-	rtnl_lock();
-	ret = register_netdevice(dev);
-	rtnl_unlock();
-	if (ret) {
-		vdev->netdev = NULL;
+	ret = um_vec2_register_visible_netdev(vdev, dev);
+	if (ret)
 		goto out_free_netdev;
-	}
 
-	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_REGISTERED);
-	if (ret) {
-		vdev->netdev = NULL;
-		goto out_unregister_netdev;
-	}
-
-	vdev->registered_queues = queues;
-	pr_info("registered netdev %s for vec2.%u\n", dev->name, vdev->unit);
-	return 0;
-
-out_unregister_netdev:
-	unregister_netdev(dev);
+	ret = um_vec2_finish_netdev_register(vdev, dev, queues);
+	if (!ret)
+		return 0;
 out_free_netdev:
 	free_netdev(dev);
 	return ret;

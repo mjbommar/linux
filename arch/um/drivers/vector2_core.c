@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Experimental runtime core for UML vector networking v2.
+ * Runtime core for UML vector networking v2.
  */
 
 #define pr_fmt(fmt) "uml-vector2: " fmt
@@ -72,55 +72,91 @@ static int __init um_vec2_validate_one(const struct um_vec2_cmdline_spec *spec,
 	return 0;
 }
 
-static int __init um_vec2_configure_one(const struct um_vec2_cmdline_spec *spec,
-					void *data)
+static struct um_vec2_dev *__init um_vec2_alloc_dev(unsigned int unit)
 {
-	struct um_vec2_build_context *ctx = data;
-	struct um_vec2_config_error err;
 	struct um_vec2_dev *vdev;
-	int ret;
 
 	vdev = kzalloc_obj(*vdev);
 	if (!vdev)
-		return -ENOMEM;
+		return NULL;
 
 	INIT_LIST_HEAD(&vdev->list);
 	mutex_init(&vdev->lock);
-	vdev->unit = spec->unit;
+	vdev->unit = unit;
 	um_vec2_dev_lifecycle_init(&vdev->life);
+	return vdev;
+}
 
-	ret = um_vec2_config_parse(spec->spec, ctx->parse_flags, &vdev->cfg,
-				   &err);
-	if (ret) {
+static int __init um_vec2_parse_dev_config(struct um_vec2_dev *vdev,
+					   const struct um_vec2_cmdline_spec *spec,
+					   unsigned int parse_flags)
+{
+	struct um_vec2_config_error err;
+	int ret;
+
+	ret = um_vec2_config_parse(spec->spec, parse_flags, &vdev->cfg, &err);
+	if (ret)
 		pr_err("vec2.%u config rejected after validation: key='%s' msg='%s' ret=%d\n",
 		       spec->unit, err.key, err.msg, ret);
-		kfree(vdev);
-		return ret;
-	}
+	return ret;
+}
+
+static int __init um_vec2_register_configured_dev(struct um_vec2_dev *vdev)
+{
+	int ret;
 
 	ret = um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_CONFIGURED);
-	if (ret) {
-		kfree(vdev);
+	if (ret)
 		return ret;
-	}
 
 	ret = um_vec2_netdev_register(vdev);
-	if (ret) {
+	if (ret)
 		um_vec2_dev_transition(&vdev->life, UM_VEC2_DEV_DEAD);
-		kfree(vdev);
-		return ret;
-	}
+	return ret;
+}
 
+static void __init um_vec2_publish_dev(struct um_vec2_dev *vdev)
+{
 	mutex_lock(&um_vec2_devices_lock);
 	list_add_tail(&vdev->list, &um_vec2_devices);
 	mutex_unlock(&um_vec2_devices_lock);
+}
 
-	ctx->configured++;
+static void __init um_vec2_log_configured_dev(const struct um_vec2_dev *vdev)
+{
 	pr_info("vec2.%u configured transport=%s mode=%s requested_queues=%u runtime_queues=%u depth=%u\n",
 		vdev->unit, um_vec2_transport_name(vdev->cfg.transport),
 		um_vec2_host_mode_name(vdev->cfg.mode), vdev->cfg.queues,
 		vdev->registered_queues, vdev->cfg.depth);
+}
+
+static int __init um_vec2_configure_one(const struct um_vec2_cmdline_spec *spec,
+					void *data)
+{
+	struct um_vec2_build_context *ctx = data;
+	struct um_vec2_dev *vdev;
+	int ret;
+
+	vdev = um_vec2_alloc_dev(spec->unit);
+	if (!vdev)
+		return -ENOMEM;
+
+	ret = um_vec2_parse_dev_config(vdev, spec, ctx->parse_flags);
+	if (ret)
+		goto out_free_dev;
+
+	ret = um_vec2_register_configured_dev(vdev);
+	if (ret)
+		goto out_free_dev;
+
+	um_vec2_publish_dev(vdev);
+	ctx->configured++;
+	um_vec2_log_configured_dev(vdev);
 	return 0;
+
+out_free_dev:
+	kfree(vdev);
+	return ret;
 }
 
 static int __init um_vec2_core_init(void)
@@ -149,7 +185,7 @@ static int __init um_vec2_core_init(void)
 		return ret;
 	}
 
-	pr_info("configured %u experimental v2 runtime device(s)\n",
+	pr_info("configured %u vector v2 device(s)\n",
 		ctx.configured);
 	return 0;
 }

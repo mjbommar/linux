@@ -29,13 +29,13 @@ void dump_trace(struct task_struct *tsk,
 
 	/*
 	 * Bound the walk by the task's actual thread stack. Without
-	 * this, an early-boot panic (where `current` is init_task and
+	 * this, an early-boot panic (where current is init_task and
 	 * the saved SP is still in the main() stack, not a thread
 	 * stack) walks past the end of mapped memory and segfaults on
-	 * the first READ_ONCE_NOCHECK — masking the real panic
+	 * the first READ_ONCE_NOCHECK, masking the real panic
 	 * message. A SIGSEGV inside panic() is the worst-case UML
-	 * failure mode because printk buffer never flushes and the
-	 * operator sees a silent crash loop.
+	 * failure mode because the printk buffer never flushes, leaving
+	 * only a silent crash loop.
 	 */
 	stack_start = (unsigned long *)task_stack_page(tsk);
 	stack_end = stack_start + THREAD_SIZE / sizeof(unsigned long);

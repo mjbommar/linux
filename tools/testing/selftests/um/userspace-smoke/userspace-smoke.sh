@@ -18,12 +18,12 @@
 #     leak state that breaks later ones
 #   - halt/shutdown path returns control cleanly
 #
-# Regression-guard, not a feature test. A backend refactor (A-02)
-# or syscall-emulation change that lets the kernel boot but
-# breaks usermode exec would be invisible to kprobes-stress /
-# ftrace-smoke / snapshot-smoke (all of which run inside already-
-# booted UML and assume userspace works) — userspace-smoke catches
-# exactly that class of regression.
+# Regression guard, not a feature test. A backend refactor or
+# syscall-emulation change that lets the kernel boot but breaks
+# usermode exec would be invisible to kprobes-stress / ftrace-smoke /
+# snapshot-smoke, all of which run inside already-booted UML and
+# assume userspace works.  userspace-smoke catches exactly that class
+# of regression.
 #
 # Emits one terminal line:
 #   USERSPACE_SMOKE: PASS python=<version> pid_first=<N> pid_second=<N>
@@ -59,7 +59,7 @@ fi
 
 # Call 2: exercises a different execve, heap reuse, different pid.
 # Also verifies UML's time source is moving (time.monotonic()
-# strictly increases across two reads) — catches a regression in
+# strictly increases across two reads); catches a regression in
 # the clocksource path that would otherwise pass syscall tests.
 OUT2=$("$PY" -c 'import os, time
 t0 = time.monotonic()
@@ -94,10 +94,9 @@ fi
 # across host GNU sed / busybox sed / ash+dash variants (the
 # earlier sed pipeline silently returned empty under one
 # specific busybox build on GitHub Actions ubuntu-latest
-# runners — see Documentation/virt/uml/redesign/ for the
-# incident trail).
+# runners.
 extract() {
-	# extract <field> <blob> — prints the token that follows
+	# extract <field> <blob> - prints the token that follows
 	# "<field>=" up to the next whitespace, or "" if no match.
 	case " $2 " in
 	*\ "$1"=*)

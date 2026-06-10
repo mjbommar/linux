@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Fallback-path syscall round-trip bookend (task #241).
+# Fallback-path syscall round-trip bookend.
 #
 # Boots UML with the freestanding fallback-loop binary as
 # init= under each backend available, captures the
 # PERF_FALLBACK: line from stdout, and prints a comparison
-# table. Sibling to run-perf-getpid.sh — uses __NR_getsid
+# table. Sibling to run-perf-getpid.sh: uses __NR_getsid
 # instead of __NR_getpid so the gadget kernel still VMEXITs
 # (getsid is Class A passthrough, not Class E gadget).
 #
-# Used as the regression-and-progress gate for the fallback-
-# lever series. Each lever's commit appends a row to
-# Documentation/virt/uml/redesign/02-workstreams/D-kvm-
-# backend/measurements.md showing the before/after numbers.
+# Used as the regression-and-progress gate for fallback-path
+# performance.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
 #
 # Environment:
 #   UML_BINARY         UML kernel (default /tmp/uml-kvmint/linux).
@@ -30,10 +28,8 @@
 #   UML_MEM            mem= argument. Default 256M.
 #   BACKENDS           backend list. Default "ptrace seccomp kvm".
 #   MAX_KVM_RATIO      kvm-fallback:seccomp ratio ceiling for
-#                      the PASS gate. Default 4.0 — set high
-#                      enough to absorb pre-#238 numbers, will
-#                      be tightened to 1.1 (seccomp parity)
-#                      after #238 lands.
+#                      the PASS gate. Default 4.0 - set high
+#                      enough for current fallback-path builds.
 
 set -u
 
@@ -55,12 +51,12 @@ if [ ! -x "$LOOP" ]; then
 fi
 
 ensure_kvm_readable() {
-	# Self-heal /dev/kvm ACL — udev / elogind sometimes drops
+	# Self-heal /dev/kvm ACL: udev / elogind sometimes drops
 	# the user ACL between successive UML invocations. Retry
 	# up to 3 times with a brief settle delay before giving
 	# up. Used both at runner entry and before every kvm-side
 	# spawn so an in-loop ACL drop doesn't surface as a
-	# spurious SKIP / FAIL (task #267).
+	# spurious SKIP / FAIL.
 	local i
 	for i in 1 2 3; do
 		if [ -r /dev/kvm ]; then

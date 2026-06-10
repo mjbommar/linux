@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* 
+/*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
@@ -66,10 +66,7 @@ int xterm_fd(int socket, int *pid_out)
 		goto out;
 	}
 
-	/* ... so here we wait for an xterm interrupt.
-	 *
-	 * XXX Note, if the xterm doesn't work for some reason (eg. DISPLAY
-	 * isn't set) this will hang... */
+	/* Wait for the xterm helper to report its pty fd. */
 	wait_for_completion(&data->ready);
 
 	um_free_irq(XTERM_IRQ, data);

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* 
+/*
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
@@ -9,10 +9,8 @@
 #include <generated/asm-offsets.h>
 
 /*
- * The usual definition - copied here because the kernel provides its own,
- * fancier, type-safe, definition.  Using that one would require
- * copying too much infrastructure for my taste, so userspace files
- * get less checking than kernel files.
+ * The usual definition, copied here because the kernel's type-safe version
+ * pulls in more infrastructure than host-built userspace files need.
  */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -62,7 +60,10 @@ extern size_t strlcat(char *, const char *, size_t);
 extern size_t sized_strscpy(char *, const char *, size_t);
 #define strscpy(dst, src)	sized_strscpy(dst, src, sizeof(dst))
 
-/* Copied from linux/compiler-gcc.h since we can't include it directly */
-#define barrier() __asm__ __volatile__("": : :"memory")
+/* Host-built files cannot include the kernel compiler barrier directly. */
+static inline void barrier(void)
+{
+	__asm__ __volatile__("" : : : "memory");
+}
 
 #endif

@@ -10,13 +10,11 @@
 //
 // Reference implementation that is intended to be dropped into
 // upstream syzkaller at vm/uml/uml.go with the blank import added
-// to vm/vm.go.  See README.md in this directory and
-// Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-next-sprint/
-// 11-syzkaller-shim-spec.md (Memo 09 Phase 4 spec).
+// to vm/vm.go. See README.md in this directory.
 //
 // This file deliberately depends only on github.com/google/syzkaller
-// packages — there are no direct dependencies on the Rust binary
-// beyond the wire shapes documented in the spec memo.
+// packages - there are no direct dependencies on the Rust binary
+// beyond the wire shapes documented below.
 
 package uml
 
@@ -37,7 +35,6 @@ import (
 )
 
 // Config is the per-pool config block, JSON-decoded from Env.Config.
-// Field shape mirrors spec memo 11 §3.7.
 type Config struct {
 	Pool      string `json:"pool"`        // "default"
 	UmlctlBin string `json:"umlctl"`      // "/usr/local/bin/umlctl"

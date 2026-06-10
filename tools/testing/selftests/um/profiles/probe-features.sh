@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 #
-# probe-features.sh — run INSIDE a UML guest. Mounts the usual
+# probe-features.sh - run INSIDE a UML guest. Mounts the usual
 # pseudo-filesystems and emits one line per feature/path in the
 # form:
 #
@@ -12,7 +12,7 @@
 # runs where `timeout $BIN ... 2>&1` is captured cleanly) and
 # to a hostfs file at `/tmp/uml-probe-output` (for
 # environments where UML's tty driver discards the pending
-# queue when halt_skas unwinds the process — e.g. GitHub
+# queue when halt_skas unwinds the process - e.g. GitHub
 # Actions runners with `con=fd:0,fd:1` piped to a non-tty fd).
 # The host-side run-profile-checks.sh prefers the file and
 # falls back to the stdout capture.
@@ -28,12 +28,11 @@
 PROBE_OUT=/tmp/uml-probe-output
 : >"$PROBE_OUT" 2>/dev/null || PROBE_OUT=
 
-# Breadcrumb: write to /dev/kmsg so that even if init's stdout
-# is wired to a dead console (seen on GHA runners where
-# `con=null` is our default), the "init reached" signal still
-# lands in the kernel log ring — which the harness captures
-# via the UML process's stdout. First thing, before any mount
-# or exec that could fail.
+# Write to /dev/kmsg so that even if init's stdout is wired to a
+# dead console (seen on GHA runners where `con=null` is our default),
+# the "init reached" signal still lands in the kernel log ring, which
+# the harness captures via the UML process's stdout. First thing,
+# before any mount or exec that could fail.
 echo 'probe-features.sh: init running' >/dev/kmsg 2>/dev/null || true
 
 # hostfs is root; the guest sees the host's /proc, /sys, /dev

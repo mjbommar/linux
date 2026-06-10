@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Structured event emission for the observability spine
-// (Documentation/virt/uml/redesign/08-future-phases/13-uml-
-// observability-spine.md, Phase O1.3).
+// Structured event emission for UML run bundles.
 //
 // Every spine event lands as one JSON object per line in
 // `$STATE/runs/<run_id>/events.jsonl`. Fields follow the
@@ -14,13 +12,8 @@
 // plus schema-specific extensions (the `extra` field of
 // `Event`) flattened into the output object.
 //
-// Minimal registry of declared schemas for O1.3: `uml.lifecycle.v1`
-// is emitted from umlctl itself on create/start/stop/rm;
-// `uml.panic.v1` and `uml.oom.v1` are declared + documented
-// but not yet populated — their sources (dmesg parser, control
-// socket) land in later phases. Keeping the schemas declared
-// means consumer tooling can be written against a stable
-// surface before the producers exist.
+// The registry declares stable schemas so consumer tooling can build
+// filters and predicates against a known surface while producers evolve.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -232,7 +225,7 @@ fn event_matches(ev: &serde_json::Value, filters: &[FilterExpr]) -> bool {
 /// `--since` accepts `30s|5m|2h|1d` relative or RFC3339 absolute.
 /// Returns a pair `(host_ts_ns_floor, wall_ts_floor_rfc3339)`;
 /// events pass if *either* comparison succeeds (we accept the
-/// later of the two clocks so operators don't get tripped by
+/// later of the two clocks so users don't get tripped by
 /// a clock skew between host_ts_ns and @timestamp).
 enum Since {
     /// CLOCK_BOOTTIME floor in nanoseconds.
@@ -342,10 +335,9 @@ pub fn cmd_assert(paths: &Paths, args: &AssertArgs, quiet: bool) -> Result<()> {
         std::process::exit(7);
     }
 
-    // Read everything into memory. Bundle sizes are bounded by
-    // the producer (ring overflow in later phases emits gap
-    // markers instead of growing unbounded); it's fine to
-    // slurp here.
+    // Read everything into memory. Bundle sizes are bounded by the
+    // producer, which emits gap markers instead of growing unbounded;
+    // it is fine to slurp here.
     let content = std::fs::read_to_string(&events_path)
         .with_context(|| format!("read {}", events_path.display()))?;
 
@@ -484,9 +476,8 @@ pub fn cmd_assert(paths: &Paths, args: &AssertArgs, quiet: bool) -> Result<()> {
 ///
 /// Shells out to `tar --zstd` rather than pulling a Rust
 /// zstd crate. GNU tar ≥ 1.31 + zstd are both packaged on
-/// every modern distro; the format is the one the memo
-/// calls out verbatim; no runtime footprint for the tar+zstd
-/// path means `tools/uml/uml-launcher`'s dep graph stays
+/// every modern distro; using the system tools keeps
+/// `tools/uml/uml-launcher`'s dep graph
 /// small. If either binary is missing, the error message
 /// points the user at the fix (`apt install zstd` or
 /// equivalent).

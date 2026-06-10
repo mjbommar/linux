@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
 	regs.rflags = 2;
 	if (ioctl(vcpu_fd, KVM_SET_REGS, &regs) < 0) return fail("set_regs");
 
-	/* Set up SIGALRM 100us interval — should fire within spin loop */
+	/* Set up SIGALRM 100us interval - should fire within spin loop */
 	itv.it_interval.tv_sec = 0;
 	itv.it_interval.tv_usec = 100;
 	itv.it_value.tv_sec = 0;

@@ -6,7 +6,7 @@ Checking if /dev/shm is on tmpfs...OK
 Checking PROT_EXEC mmap in /dev/shm...OK
 Checking that seccomp filters can be installed...OK
 um: kvm-v2 probe: /dev/kvm OK (API 12)
-um: kvm-v2 probed: kvm_fd=3 api=12 caps=0x103 (A.2 — creating VM)
+um: kvm-v2 probed: kvm_fd=3 api=12 caps=0x103 (creating VM)
 um: kvm-v2 vm_create: APERF/MPERF MSR passthrough enabled (guest CPL=0 rdmsr(0xE7/0xE8) reads host counters; UML kernel runs at host CPL=3 and cannot itself exercise the path)
 um: kvm-v2 physmem_memslot: deferred (uml_physmem=0x0 physmem_size=0x8000000 not yet populated; lazy retry will land it)
 swapper: page allocation failure: order:0, mode:0x100(__GFP_ZERO), nodemask=(null)
@@ -32,8 +32,8 @@ Total swap = 0kB
 0 pages RAM
 0 pages HighMem/MovableOnly
 0 pages reserved
-um: kvm-v2 trampoline_install: alloc_page returned NULL (buddy allocator not up at init_backend time per memo 26 §D.0a); deferring to first lazy retry
-um: kvm-v2 vm_create: vm_fd=4 caps=0x103 tss=0xfffbd000 ident=0xfffbc000 physmem_memslot=deferred trampoline=deferred (memslots empty; A.3 attaches vCPU + installs CPUID)
+um: kvm-v2 trampoline_install: alloc_page returned NULL; deferring to lazy retry
+um: kvm-v2 vm_create: vm_fd=4 caps=0x103 tss=0xfffbd000 ident=0xfffbc000 physmem=deferred trampoline=deferred memslots=empty
 um: kvm-v2 program_msrs: vcpu_fd=5 cpu=0 LSTAR=0xffffe00000000040 STAR=0x18000800000000 FMASK=0x47700 KERNEL_GS_BASE=0xffffe00000006000
 um: kvm-v2 install_sregs: vcpu_fd=5 cr0=0x80010023 cr4=0x620 efer=0xd01 cs.l=1
 um: kvm-v2 install_sigmask: vcpu_fd=5 (sigfillset minus SIGALRM)
@@ -69,15 +69,15 @@ clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911
 posixtimers hash table entries: 512 (order: 0, 4096 bytes, linear)
 futex hash table entries: 256 (8192 bytes on 1 NUMA nodes, total 8 KiB, linear).
 NET: Registered PF_NETLINK/PF_ROUTE protocol family
-um: worker model: spawner ready (CONFIG_UM_WORKER_PROCESS=y; no workers yet — memo 28 E.2)
+um: worker model: spawner ready
 um: kvm-v2 physmem_memslot: slot=0 gpa=0 hva=0x60000000 size=0x8000000
-um: kvm-v2 trampoline_install: kva=(____ptrval____) gpa=0x0000000000918000 gva=0xffffe00000000040 (5-byte fallback LSTAR at +0x40; gadget upgrade pending exception_install)
+um: kvm-v2 trampoline_install: kva=(____ptrval____) gpa=0x0000000000918000 gva=0xffffe00000000040 lstar_off=0x40
 um: kvm-v2 kernel_half_install: pud_gpa=0x0000000000919000 pmd_gpa=0x000000000091a000 pte_gpa=0x000000000091b000 leaf=trampoline_gpa=0x0000000000918000 gva=0xffffe00000000040 (swapper_pg_dir[448] + init_mm.pgd[448] = 0x919023)
 um: kvm-v2 handler_verify: GP stub @+0x100 = [e6 f9 48 83 c4 08 48 cf] (expect e6 f9 48 83 c4 08 48 cf)
 um: kvm-v2 per_vcpu_ist_tss: cpu=0 vcpu_fd=5 ist_gpa=0x000000000091f000 ist_top_gva=0xffffe00000005000 tss_gpa=0x0000000000920000 tss_gva=0xffffe00000005000
 um: kvm-v2 per_vcpu_gadget_state: cpu=0 vcpu_fd=5 gpa=0x0000000000921000 gva=0xffffe00000006000 (pte_idx=6, task_size_cap=0x7f7ffffffff0)
 um: kvm-v2 install_descriptors_sregs: vcpu_fd=5 idt=0xffffe00000001000 (limit=0xfff) gdt=0xffffe00000003000 (limit=0x3f) tr.base=0xffffe00000005000 tr.limit=103 tr.sel=0x30 tr.type=11
-um: kvm-v2 exception_install: GDT TSS_DESC slot=6 base=0xffffe00000005000 limit=103 (vCPU 0 TSS — per-vCPU SREGS.tr overrides)
+um: kvm-v2 exception_install: GDT TSS_DESC slot=6 base=0xffffe00000005000 limit=103 (vCPU 0 TSS, per-vCPU SREGS.tr overrides)
 um: kvm-v2 exception_install: idt_gpa=0x000000000091c000 idt_gva=0xffffe00000001000 handlers_gpa=0x000000000091d000 handlers_gva=0xffffe00000002000 gdt_gpa=0x000000000091e000 gdt_gva=0xffffe00000003000 (256 IDT vectors / 8 GDT slots)
 um: kvm-v2 trampoline_upgrade: LSTAR body upgraded to 561-byte gadget at +0x40 (per-vCPU state pages confirmed installed)
 pps_core: LinuxPPS API ver. 1 registered
@@ -174,5 +174,4 @@ Call Trace:
  [<6004bff1>] userspace+0x29/0x2b
  [<6004bfc8>] ? userspace+0x0/0x2b
  [<6002f7ef>] new_thread_handler+0x5e/0x62
-um: DIAG panic: dumping last 0 mm-syscall events (head_snap=0)
 bash: line 1: 2344427 Aborted                    (core dumped) timeout --kill-after=5 30 /home/mjbommar/src/uml-builds/uml-aperf-test/linux backend=force=kvm-v2 init=/home/mjbommar/projects/personal/linux/Documentation/virt/uml/examples/rdpmc/rdpmc-demo mem=128M con=null con0=fd:0,fd:1 root=/dev/root rootfstype=hostfs rw panic=-1 < /dev/null

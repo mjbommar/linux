@@ -3,7 +3,7 @@
 #define __ASM_UM_KPROBES_H
 
 /*
- * UML kprobes arch header (workstream C-04).
+ * UML kprobes arch header.
  *
  * UML runs the kernel as a host userspace process; int3 (0xCC)
  * executed by the guest kernel becomes a host SIGTRAP delivered
@@ -14,7 +14,7 @@
  * emulation, no optprobes. Every probed instruction single-steps
  * through an out-of-line copy using the host's X86_EFLAGS_TF
  * propagation (arch/x86/um/os-Linux/mcontext.c:81..84) to deliver
- * the post-step SIGTRAP. See decisions-log D32.
+ * the post-step SIGTRAP.
  */
 
 #include <asm-generic/kprobes.h>
@@ -46,8 +46,8 @@ struct pt_regs;
 struct kprobe;
 
 /* Per-kprobe arch-specific storage. We keep this small: the
- * out-of-line instruction copy + its length. No booster/emulate
- * state (C-04 first pass uses single-step for every probe).
+ * out-of-line instruction copy plus its length. UML uses
+ * single-step for every probe.
  */
 struct arch_specific_insn {
 	kprobe_opcode_t	*insn;		/* out-of-line copy, MAX_INSN_SIZE */
@@ -81,7 +81,7 @@ void arch_remove_kprobe(struct kprobe *p);
 
 /* Size of the arch-specific kretprobe blacklist. Defined alongside
  * kretprobe_blacklist[] in arch/um/kernel/kprobes/core.c. Kept as a
- * zero-length array on UML today (see core.c for the rationale).
+ * zero-length array on UML; see core.c for the rationale.
  */
 extern const int kretprobe_blacklist_size;
 

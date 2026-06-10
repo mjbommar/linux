@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0
  *
- * memcheck — minimal memtester-style memory pattern verifier.
+ * memcheck - minimal memtester-style memory pattern verifier.
  *
  * Allocates an anon MAP_PRIVATE region of <MB> megabytes, writes a
  * pattern, fsync-equivalent (sync via msync MS_SYNC isn't applicable
- * — it's anon), reads back + verifies, then runs a sequence of
+ * - it's anon), reads back + verifies, then runs a sequence of
  * walking-bit + checkerboard patterns. Each pattern miscompare is
  * counted; final RC = number of corrupt qwords seen across all
  * patterns. Exit 0 = clean.
@@ -14,8 +14,8 @@
  * (which is far slower than bare metal at memory-touching loops).
  *
  * Usage:  memcheck <MB> [iters]
- *   MB    — region size in mebibytes (default 64)
- *   iters — repeat count (default 1)
+ *   MB    - region size in mebibytes (default 64)
+ *   iters - repeat count (default 1)
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -85,7 +85,7 @@ int main(int argc, char **argv)
 		for (int i = 0; i < npat; i++)
 			total_bad += fill_and_verify(p, n, patterns[i], names[i]);
 
-		/* Walking-bit (one bit set per qword, rotated) — more
+		/* Walking-bit (one bit set per qword, rotated) - more
 		 * sensitive to addressing/wiring bugs than constant fills. */
 		size_t wb_bad = 0;
 		for (size_t i = 0; i < n; i++)

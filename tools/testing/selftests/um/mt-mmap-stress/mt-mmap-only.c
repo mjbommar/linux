@@ -1,5 +1,5 @@
 /*
- * Minimal MT mmap reproducer — no memset, no munmap.
+ * Minimal MT mmap reproducer - no memset, no munmap.
  * Just N threads doing mmap() in a tight loop, looking for:
  *  - duplicate addresses returned to different threads
  *  - addresses in unexpected ranges (e.g., < 0x40000000)

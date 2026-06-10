@@ -4,7 +4,7 @@
 # make Python actually useful (loopback networking, a writable tmpfs
 # overlay at /tmp + /home, devpts for subprocess pty, real /dev/random
 # entropy).  The host UML process can still be cgroup-bounded by the
-# operator before launch; nothing inside the guest can break out of
+# user before launch; nothing inside the guest can break out of
 # the kernel-as-process boundary.
 #
 # Differences from mvp:

@@ -1,13 +1,13 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/snapshot-smoke/snapshot-smoke.sh — workstream C-09 smoke test.
+# um/snapshot-smoke/snapshot-smoke.sh - snapshot smoke test.
 #
 # Runs inside a UML guest as init=. Validates that the snapshot /
 # forkserver kernel-side plumbing is wired up:
 #
 #   1. /sys/kernel/um/state_version exists and reads "1"
-#      (the C-09 v1 AFL-compatible 12-byte wire contract).
+#      (the AFL-compatible 12-byte wire contract).
 #   2. /sys/kernel/debug/um/snapshot_ready exists and is write-only.
 #   3. Writing a named point to snapshot_ready with fds 198/199 NOT
 #      plumbed produces the expected -ENODEV clean-skip path
@@ -65,7 +65,7 @@ if [ ! -e "$RP" ]; then
 	exit 1
 fi
 
-# Write-only node — reads should fail with EACCES; writes should be
+# Write-only node: reads should fail with EACCES; writes should be
 # accepted. We expect the write to succeed (the kernel takes the
 # input, discovers fds 198/199 aren't open, logs and returns
 # -ENODEV). From userspace the write() returns the byte count, so

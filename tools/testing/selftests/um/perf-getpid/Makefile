@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# D-06 getpid() bookend (memo 08 sub-commit #6). Builds a
-# freestanding 64-bit ELF binary that measures the cost of a
-# single getpid() round-trip from guest userspace; the host
-# runner boots it as init= under each backend and compares
-# the cycle counts.
+# getpid() round-trip bookend. Builds a freestanding 64-bit ELF binary
+# that measures the cost of a single getpid() round-trip from guest
+# userspace; the host runner boots it as init= under each backend and
+# compares the cycle counts.
 
 TEST_PROGS := run-perf-getpid.sh
 TEST_GEN_FILES := getpid-loop

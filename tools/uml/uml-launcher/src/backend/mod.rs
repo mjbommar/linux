@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Per-device vhost-user backend dispatcher (C-10 v2).
+// Per-device vhost-user backend dispatcher.
 //
 // `uml-launcher backend <class>` dispatches to the matching per-
 // class handler. Each class lives in its own sub-module and pulls
 // in the rust-vmm stack (vhost, vhost-user-backend, vm-memory,
-// virtio-queue) through a single-binary multi-call shape — see
-// decisions-log D52 for the rationale and commit plan.
+// virtio-queue) through a single-binary multi-call shape.
 
 use anyhow::Result;
 

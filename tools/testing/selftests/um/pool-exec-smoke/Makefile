@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-exec-smoke kselftest — Memo 09 Phase 4.
+# um/pool-exec-smoke kselftest.
 #
 # Verifies `umlctl exec` returns a clean error envelope from the
 # daemon when the in-guest exec primitive (uml_mconsole(1) + mconsole

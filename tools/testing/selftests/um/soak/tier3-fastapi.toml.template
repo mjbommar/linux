@@ -1,23 +1,19 @@
 schema_version = 1
 volumes = []
 
-# Phase J Tier 3 — FastAPI (uvicorn) loopback HTTP server.
-# Spec: phase-J-tier3-design-2026-05-14.md §7.2 (analogous to
-# §7.1 Django; same shape, different framework).
+# Tier 3 FastAPI-shaped loopback HTTP server.
 #
-# This template uses Python stdlib `http.server` as a stand-in
-# for the FastAPI+uvicorn stack until operator pre-flight
-# installs python3-fastapi + python3-uvicorn. The Django
-# variant uses the same stdlib shim — they share the in-tree
-# template body but exercise different operator-time installs.
+# This template uses Python stdlib `http.server` as a self-contained
+# stand-in for the FastAPI+uvicorn stack. The Django variant uses the
+# same stdlib shape; deployments can switch this command to uvicorn
+# after installing python3-fastapi and python3-uvicorn.
 #
-# Operator pre-flight (ONE-TIME, NOT yet done):
-#   1. apt-get install python3-fastapi python3-uvicorn (OR use
+# Host prerequisites:
+#   1. Install python3-fastapi python3-uvicorn or use
 #      a uv venv: `uv venv ~/.cache/uml-soak-tier3-fastapi-venv;
 #      uv pip install --python ... fastapi uvicorn`).
-#   2. CONFIG_UML_NET_VECTOR=y rebuild (see tier3-django.toml.
-#      template header).
-#   3. Replace the `python3 -m http.server` stand-in below with
+#   2. Rebuild the UML kernel with CONFIG_UML_NET_VECTOR=y.
+#   3. To exercise the real FastAPI stack, replace the stdlib server with
 #      a real `python3 -m uvicorn app:app --host 0.0.0.0
 #      --port 8080` invocation.
 
@@ -29,11 +25,8 @@ path = "{{KERNEL}}"
 backend = "{{BACKEND}}"
 
 [runtime]
-# 1024M headroom — first live smoke of the sibling Django
-# template at mem=768M tripped a swapper page allocation
-# failure (order:0) during guest boot under the deferred-
-# physmem-memslot v2 path. FastAPI/uvicorn has a smaller
-# import set than Django but the headroom is the same.
+# 1024M leaves room for framework imports and the kvm-v2 vCPU pool's
+# pinned overhead.
 mem = "1024M"
 ncpus = 2
 
@@ -59,9 +52,9 @@ cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 5
 
-# Phase 2: bring up the async HTTP server in background.
-# Stand-in: Python stdlib `http.server`. Replace with uvicorn
-# once operator pre-flight is done.
+# Start the HTTP server in the background.
+# The default uses Python stdlib `http.server`; deployments can switch
+# this command to uvicorn when testing the full FastAPI stack.
 [[init.phases]]
 name = "fastapi-up"
 cmd = """
@@ -85,17 +78,6 @@ dump_server_log() {
     cat /tmp/fastapi.log 2>/dev/null || true
     echo FASTAPI_LOG_END
 }
-dump_kvm_v2_trace() {
-    mkdir -p /sys/kernel/debug 2>/dev/null || true
-    grep -q ' /sys/kernel/debug ' /proc/mounts 2>/dev/null ||
-        mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
-    if [ -w /sys/kernel/debug/um_kvm_v2_trace/dump ]; then
-        echo KVM_V2_TRACE_DUMP_BEGIN
-        echo 1 > /sys/kernel/debug/um_kvm_v2_trace/dump 2>/dev/null || true
-        dmesg | grep 'KVMV2T' | tail -n 400 2>/dev/null || true
-        echo KVM_V2_TRACE_DUMP_END
-    fi
-}
 port_ready() {
 python3 - <<'PY'
 import socket, sys
@@ -113,13 +95,13 @@ for i in $(seq 1 60); do
     port_ready && break
     sleep 0.5
 done
-port_ready || { dump_server_log; dump_kvm_v2_trace; echo SERVER_FAIL; exit 1; }
+port_ready || { dump_server_log; echo SERVER_FAIL; exit 1; }
 echo SERVER_READY
 """
 expect = "SERVER_READY"
 timeout_secs = 45
 
-# Phase 3: in-guest self-test.
+# In-guest check.
 [[init.phases]]
 name = "guest-curl"
 cmd = """
@@ -136,7 +118,7 @@ echo "GUEST_CURL ok=$ok fail=$fail"
 expect = ""
 timeout_secs = 30
 
-# Phase 4: shutdown.
+# Shut down the server.
 [[init.phases]]
 name = "shutdown"
 cmd = """
@@ -148,9 +130,8 @@ expect = ""
 timeout_secs = 10
 
 [host_resources]
-# SMP-T78..T84 (memo 52: UML host resource controls).
 # Soak defaults: predictable THP, expendable OOM bias.
-# Hugepages and cpu_affinity opt-in — require host-side reservation.
-# Cgroup limits opt-in — require writable cgroup hierarchy.
+# Hugepages and cpu_affinity opt-in require host-side reservation.
+# Cgroup limits opt-in require a writable cgroup hierarchy.
 thp = "off"
 oom_score_adj = 500

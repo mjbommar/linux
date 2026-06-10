@@ -56,10 +56,7 @@ static void fatal(char *fmt, ...)
 }
 
 /*
- * Pre-memo-25-R11: check_ptrace + check_sysemu + start/stop_ptraced_child
- * + ptrace_child verified the host's ptrace + PTRACE_SYSEMU support
- * before init_backend selected the ptrace backend. With ptrace removed,
- * the probes are unreachable; deleted along with the backend impl.
+ * The former ptrace host probes were removed with the ptrace backend.
  */
 
 extern unsigned long host_fp_size;
@@ -251,17 +248,17 @@ void  __init get_host_cpu_features(
 }
 
 /*
- * `backend=` boot param (workstream A-04). Parsed early in linux_main
+ * backend= boot param. Parsed early in linux_main
  * via __uml_setup; consumed by init_backend() in arch/um/kernel/backend.c.
  *
- *   backend=auto                  — Kconfig default + using_seccomp probe
- *   backend=ptrace                — prefer ptrace; fall through if N/A
- *   backend=seccomp               — prefer seccomp; fall through if N/A
- *   backend=force=ptrace          — require ptrace; panic if N/A
- *   backend=force=seccomp         — require seccomp; panic if N/A
+ *   backend=auto                  - Kconfig default + using_seccomp probe
+ *   backend=ptrace                - prefer ptrace; use seccomp if unavailable
+ *   backend=seccomp               - prefer seccomp; use seccomp if unavailable
+ *   backend=force=ptrace          - require ptrace; panic if N/A
+ *   backend=force=seccomp         - require seccomp; panic if N/A
  *
- * The legacy `seccomp=on/auto/off` boot param is preserved for one
- * release as an alias; `backend=` takes precedence when both are set.
+ * The seccomp=on/auto/off boot param is accepted as a compatibility
+ * alias; backend= takes precedence when both are set.
  */
 int backend_arg_requested __initdata;	/* enum um_backend_kind */
 int backend_arg_force __initdata;
@@ -281,11 +278,8 @@ static int __init uml_backend_config(char *line, int *add)
 		backend_arg_force = 0;
 	} else if (strcmp(line, "kvm") == 0 || strcmp(line, "kvm-v2") == 0) {
 		/*
-		 * "kvm-v2" is a synonym for "kvm" — there is only one KVM
-		 * backend in-tree (v1 archived; v2 pending memo 26 phases).
-		 * The synonym lets ops/test scripts spell out which v# they
-		 * mean without needing to know that selection collapses
-		 * inside init_backend.
+		 * "kvm-v2" is a synonym for "kvm"; there is only one KVM
+		 * backend selector in this tree.
 		 */
 		backend_arg_requested = UM_BACKEND_KIND_KVM;
 		backend_arg_force = 0;
@@ -301,7 +295,7 @@ static int __init uml_backend_config(char *line, int *add)
 		backend_arg_force = 1;
 	} else {
 		static const char valid[] =
-			"auto ptrace seccomp kvm kvm-v2 force=ptrace force=seccomp force=kvm force=kvm-v2";
+			"auto ptrace seccomp kvm kvm-v2 force=<ptrace|seccomp|kvm|kvm-v2>";
 
 		fatal("Invalid backend option '%s'; valid: %s\n", line, valid);
 	}
@@ -309,21 +303,19 @@ static int __init uml_backend_config(char *line, int *add)
 }
 
 __uml_setup("backend=", uml_backend_config,
-"backend=<auto|seccomp|kvm|force=seccomp|force=kvm>\n"
-"    Pick the trap mechanism. `auto' (default) uses Kconfig +\n"
-"    runtime probe. Bare names are preferences that fall through\n"
-"    to seccomp if the requested backend isn't built. `force=' makes\n"
-"    the choice mandatory and panics if the requested backend isn't\n"
-"    compiled in or fails its probe.\n"
-"\n"
-"    `ptrace' is parsed for compatibility but the ptrace backend was\n"
-"    removed (memo 25 refactor 11; archived at the\n"
-"    kvm-v1-archive-20260428 tag). `kvm' is archived (v1) / pending\n"
-"    (v2 — memos 25-26).\n"
-"\n"
-"    Replaces the legacy `seccomp=on/auto/off' param (still accepted\n"
-"    for one release).\n\n"
-);
+	    "backend=<auto|seccomp|kvm|force=seccomp|force=kvm>\n"
+	    "    Pick the trap mechanism. auto' (default) uses Kconfig +\n"
+	    "    runtime probe. Bare names are preferences that resolve\n"
+	    "    to seccomp if the requested backend isn't built. force=' makes\n"
+	    "    the choice mandatory and panics if the requested backend isn't\n"
+	    "    compiled in or fails its probe.\n"
+	    "\n"
+	    "    ptrace' is parsed for compatibility, but the ptrace backend is\n"
+	    "    not built by this tree. kvm' selects the KVM v2 backend when\n"
+	    "    CONFIG_UM_BACKEND_KVM_V2 is enabled.\n"
+	    "\n"
+	    "    Replaces seccomp=on/auto/off', which is still accepted as a\n"
+	    "    compatibility alias.\n\n");
 
 static int seccomp_config __initdata;
 
@@ -366,8 +358,6 @@ __uml_setup("seccomp=", uml_seccomp_config,
 
 void __init os_early_checks(void)
 {
-	int pid;
-
 	/* Print out the core dump limits early */
 	check_coredump_limit();
 
@@ -376,37 +366,14 @@ void __init os_early_checks(void)
 	 */
 	check_tmpexec();
 
-	/*
-	 * If neither stub-child backend is compiled in, there's
-	 * nothing to probe. (Pre-archive: KVM_ONLY builds took this
-	 * path because they had no stub-child backend at all. v2's
-	 * eventual KVM_ONLY equivalent will reuse the same guard.)
-	 */
-	if (!IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP) &&
-	    !IS_ENABLED(CONFIG_UM_BACKEND_PTRACE))
+	/* If seccomp is not compiled in, there is nothing to probe. */
+	if (!IS_ENABLED(CONFIG_UM_BACKEND_SECCOMP))
 		return;
 
 	/*
 	 * Run the seccomp probe whenever CONFIG_UM_BACKEND_SECCOMP is
-	 * compiled in. Previously the probe was gated on an explicit
-	 * `seccomp=` or `backend=seccomp` request, which made
-	 * `backend=auto` (the DYNAMIC default, and what every
-	 * `uml/<profile>` Makefile target bakes in) silently prefer
-	 * ptrace — contradicting prod-fast's documented "backend=auto
-	 * picks seccomp where available" and producing a ~3–4× slower
-	 * default than the profile advertises.
-	 *
-	 * The probe is cheap (a single fork+prctl pair under
-	 * init_seccomp), and `pick_dynamic_backend()` already chooses
-	 * ptrace when `using_seccomp == 0`, so there's no semantic
-	 * downside to always running it; only upside is closing the
-	 * prod-fast UX gap.
-	 *
-	 * `backend=force=ptrace` still skips the probe entirely
-	 * (trivially satisfied by the ptrace branch further down) —
-	 * but nobody on DYNAMIC force-requests ptrace and then cares
-	 * whether the probe fired.
-	 *
+	 * compiled in. backend=force=ptrace skips the probe so
+	 * init_backend() can report the removed backend cleanly.
 	 * init_backend() (called from linux_main() right after this
 	 * function) consumes the using_seccomp result + boot params
 	 * and selects the backend authoritatively.
@@ -420,17 +387,16 @@ void __init os_early_checks(void)
 
 		if (seccomp_config == 2)
 			fatal("SECCOMP userspace requested but not functional!\n");
-		/*
-		 * `backend=force=seccomp` will be panicked by init_backend
-		 * once it sees using_seccomp == 0; we don't fatal here so
-		 * the diagnostic message above is the user-visible signal.
-		 */
-	}
+			/*
+			 * backend=force=seccomp will be panicked by init_backend
+			 * once it sees using_seccomp == 0; we don't fatal here so
+			 * the probe failure above remains the user-visible signal.
+			 */
+		}
 
 	/*
-	 * No ptrace fallback after memo 25 R11 — seccomp is the only
-	 * stub-child backend in tree. Pin to v6.16 or earlier UML if
-	 * the host genuinely lacks CONFIG_SECCOMP_FILTER.
+	 * No ptrace fallback is available; seccomp is the only stub-child
+	 * backend in tree.
 	 */
-	fatal("seccomp probe failed and no fallback backend is available; pin to v6.16 or earlier UML or fix the host's seccomp support\n");
+	fatal("seccomp probe failed and no fallback backend is available\n");
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/perf-pidfam/run-perf-pidfam.sh — mixed pid-family gadget
-# perf measurement (review-01 P2 #12).
+# um/perf-pidfam/run-perf-pidfam.sh - mixed pid-family gadget
+# perf measurement.
 #
 # Boots UML with the freestanding pidfam-loop binary as init=
 # under each backend (ptrace / seccomp / kvm), captures the
@@ -123,7 +123,7 @@ if [ "$MAX_KVM_RATIO" = "0" ] || [ "$MAX_KVM_RATIO" = "0.0" ]; then
 	exit 0
 fi
 
-# awk-based comparison: ratio > MAX_KVM_RATIO ⇒ FAIL
+# awk-based comparison: ratio > MAX_KVM_RATIO => FAIL
 fail=$(awk -v r="$ratio" -v m="$MAX_KVM_RATIO" 'BEGIN{print (r > m) ? "1" : "0"}')
 if [ "$fail" = "1" ]; then
 	echo "PERF_PIDFAM: FAIL (ratio $ratio > $MAX_KVM_RATIO)"

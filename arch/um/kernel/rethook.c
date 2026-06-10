@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * UML rethook arch layer — mirrors arch/x86/kernel/rethook.c almost
+ * UML rethook arch layer; mirrors arch/x86/kernel/rethook.c almost
  * verbatim. When a probed function returns, control reaches the
  * arch_rethook_trampoline below (the probed callsite's return slot
  * was overwritten by arch_rethook_prepare). The trampoline saves
@@ -14,18 +14,15 @@
  *   - arch/x86/kernel/rethook.c (primary reference)
  *   - arch/s390/kernel/rethook.c (minimal port; callback sanity check)
  *   - arch/x86/kernel/kprobes/common.h (SAVE_REGS_STRING / RESTORE_REGS_STRING)
- *   - commit 0ef6f5c09371 ("x86,rethook: generate a complete pt_regs")
- *     — trampoline must push a non-garbage ss slot; callback later
- *     overwrites it with flags for the popfq+ret sequence
- *   - Documentation/virt/uml/redesign/04-risks/decisions-log.md §D33
- *     (pivot to rethook; why this file exists instead of a legacy
- *     kretprobe_trampoline in arch/um/kernel/kprobes/core.c)
+ *   - x86 rethook's complete-pt_regs trampoline shape: the trampoline
+ *     must push a non-garbage ss slot; the callback overwrites it with
+ *     flags for the popfq+ret sequence.
  *
  * UML-specific differences vs the x86 file:
  *
  *   1. pt_regs access uses the UPT_* accessor macros because UML's
- *      struct pt_regs wraps struct uml_pt_regs — direct member
- *      access like `regs->ip` is not valid. The memory image that
+ *      struct pt_regs wraps struct uml_pt_regs; direct member
+ *      access like regs->ip is not valid. The memory image that
  *      SAVE_REGS_STRING builds on the stack is byte-compatible with
  *      UML's gp[] layout (both derive from the host user_regs_struct
  *      ordering), so no layout gymnastics are needed.
@@ -41,7 +38,7 @@
  *      doesn't provide it). We push UM_RETHOOK_KERNEL_DS = 0x18
  *      (x86's conventional value) purely to keep the trampoline's
  *      push layout identical and the regs->ss slot non-garbage
- *      until the callback overwrites it per commit 0ef6f5c09371.
+ *      until the callback overwrites it.
  */
 
 #include <linux/bug.h>
@@ -139,7 +136,7 @@ __used __visible void arch_rethook_trampoline_callback(struct pt_regs *regs)
 	rethook_trampoline_handler(regs, (unsigned long)frame_pointer);
 
 	/* Copy FLAGS to the SS slot so the trampoline's popfq restores
-	 * flags (see commit 0ef6f5c09371 rationale in the header).
+	 * flags.
 	 */
 	UPT_SS(&regs->regs) = UPT_EFLAGS(&regs->regs);
 }

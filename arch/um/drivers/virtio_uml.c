@@ -133,18 +133,15 @@ static int vhost_user_recv(struct virtio_uml_device *vu_dev,
 	size_t size;
 	int rc;
 
-	/*
-	 * In virtio time-travel mode, we're handling all the vhost-user
-	 * FDs by polling them whenever appropriate. However, we may get
-	 * into a situation where we're sending out an interrupt message
-	 * to a device (e.g. a net device) and need to handle a simulation
-	 * time message while doing so, e.g. one that tells us to update
-	 * our idea of how long we can run without scheduling.
-	 *
-	 * Thus, we need to not just read() from the given fd, but need
-	 * to also handle messages for the simulation time - this function
-	 * does that for us while waiting for the given fd to be readable.
-	 */
+		/*
+		 * In virtio time-travel mode, vhost-user FDs are polled when
+		 * appropriate. An interrupt message to a device can arrive while
+		 * a simulation-time message also needs handling, such as an
+		 * update to the current unscheduled run window.
+		 *
+		 * This path waits for the given fd to become readable while also
+		 * processing simulation-time messages.
+		 */
 	if (wait)
 		time_travel_wait_readable(fd);
 
@@ -235,11 +232,11 @@ static int vhost_user_send(struct virtio_uml_device *vu_dev,
 
 	msg->header.flags |= VHOST_USER_VERSION;
 
-	/*
-	 * The need_response flag indicates that we already need a response,
-	 * e.g. to read the features. In these cases, don't request an ACK as
-	 * it is meaningless. Also request an ACK only if supported.
-	 */
+		/*
+		 * The need_response flag indicates that a response is already
+		 * required, e.g. to read the features. In these cases, don't
+		 * request a redundant ACK. Also request an ACK only if supported.
+		 */
 	request_ack = !need_response;
 	if (!(vu_dev->protocol_features &
 			BIT_ULL(VHOST_USER_PROTOCOL_F_REPLY_ACK)))
@@ -426,7 +423,7 @@ static irqreturn_t vu_req_read_message(struct virtio_uml_device *vu_dev,
 			vhost_user_reply(vu_dev, &msg.msg, response);
 		irq_rc = IRQ_HANDLED;
 	}
-	/* mask EAGAIN as we try non-blocking read until socket is empty */
+		/* Treat EAGAIN as success after the non-blocking socket drain. */
 	vu_dev->recv_rc = (rc == -EAGAIN) ? 0 : rc;
 	return irq_rc;
 }
@@ -649,7 +646,7 @@ static int vhost_user_set_mem_table(struct virtio_uml_device *vu_dev)
 		.header.size = offsetof(typeof(msg.payload.mem_regions), regions[1]),
 		.payload.mem_regions.num = 1,
 	};
-	/* Offset of `reserved` within the physmem region (host VA math) */
+	/* Offset of reserved within the physmem region (host VA math) */
 	unsigned long reserved = uml_reserved - __binary_start_hva;
 	int fds[2];
 	int rc;
@@ -657,25 +654,20 @@ static int vhost_user_set_mem_table(struct virtio_uml_device *vu_dev)
 	/*
 	 * This is a bit tricky, see also the comment with setup_physmem().
 	 *
-	 * Essentially, setup_physmem() uses a file to mmap() our physmem,
-	 * but the code and data we *already* have is omitted. To us, this
-	 * is no difference, since they both become part of our address
-	 * space and memory consumption. To somebody looking in from the
-	 * outside, however, it is different because the part of our memory
-	 * consumption that's already part of the binary (code/data) is not
-	 * mapped from the file, so it's not visible to another mmap from
-	 * the file descriptor.
-	 *
-	 * Thus, don't advertise this space to the vhost-user slave. This
-	 * means that the slave will likely abort or similar when we give
-	 * it an address from the hidden range, since it's not marked as
-	 * a valid address, but at least that way we detect the issue and
-	 * don't just have the slave read an all-zeroes buffer from the
-	 * shared memory file, or write something there that we can never
-	 * see (depending on the direction of the virtqueue traffic.)
-	 *
-	 * Since we usually don't want to use .text for virtio buffers,
-	 * this effectively means that you cannot use
+		 * setup_physmem() uses a file to mmap() UML physical memory, but
+		 * omits the code and data already mapped from the binary. This
+		 * makes no difference to UML addressability or memory consumption,
+		 * but a peer mapping the physical-memory file cannot see the
+		 * omitted code/data range.
+		 *
+		 * Do not advertise this space to the vhost-user slave. If the
+		 * slave receives an address from the hidden range, it will likely
+		 * abort because the address is not marked valid. That is preferable
+		 * to silently reading an all-zeroes buffer from the shared memory
+		 * file or writing data UML cannot observe.
+		 *
+		 * Since .text is usually unsuitable for virtio buffers,
+		 * this effectively means that you cannot use
 	 *  1) global variables, which are in the .bss and not in the shm
 	 *     file-backed memory
 	 *  2) the stack in some processes, depending on where they have
@@ -684,10 +676,9 @@ static int vhost_user_set_mem_table(struct virtio_uml_device *vu_dev)
 	 * The stack is already not typically valid for DMA, so this isn't
 	 * much of a restriction, but global variables might be encountered.
 	 *
-	 * It might be possible to fix it by copying around the data that's
-	 * between bss_start and where we map the file now, but it's not
-	 * something that you typically encounter with virtio drivers, so
-	 * it didn't seem worthwhile.
+		 * It might be possible to fix this by copying the data between
+		 * bss_start and the current file mapping point, but typical virtio
+		 * drivers do not encounter this case.
 	 */
 	rc = vhost_user_init_mem_region(reserved, physmem_size - reserved,
 					&fds[0],
@@ -896,7 +887,7 @@ static void vu_del_vqs(struct virtio_device *vdev)
 	struct virtqueue *vq, *n;
 	u64 features;
 
-	/* Note: reverse order as a workaround to a decoding bug in snabb */
+	/* Reverse order for compatibility with snabb's vring decoder. */
 	list_for_each_entry_reverse(vq, &vdev->vqs, list)
 		WARN_ON(vhost_user_set_vring_enable(vu_dev, vq->index, false));
 
@@ -1041,7 +1032,7 @@ static int vu_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 	int i, queue_idx = 0, rc;
 	struct virtqueue *vq;
 
-	/* not supported for now */
+	/* The transport encodes queue indexes in a 64-bit mask. */
 	if (WARN(nvqs > 64 || nvqs > vu_dev->max_vqs,
 		 "%d VQs requested, only up to 64 or %lld supported\n",
 		 nvqs, vu_dev->max_vqs))
@@ -1168,10 +1159,9 @@ static void vu_of_conn_broken(struct work_struct *wk)
 
 	virtio_break_device(&vu_dev->vdev);
 
-	/*
-	 * We can't remove the device from the devicetree so the only thing we
-	 * can do is warn.
-	 */
+		/*
+		 * The device cannot be removed from the devicetree, so warn.
+		 */
 	WARN_ON(1);
 }
 

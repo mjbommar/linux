@@ -4,8 +4,7 @@
  */
 
 /*
- * _XOPEN_SOURCE is needed for pread, but we define _GNU_SOURCE, which defines
- * that.
+ * _XOPEN_SOURCE is needed for pread; _GNU_SOURCE provides it.
  */
 #include <unistd.h>
 #include <errno.h>
@@ -19,7 +18,7 @@
  * arch/um/Makefile remaps strrchr to kernel_strrchr; call the kernel
  * name directly to avoid glibc >= 2.43's C23 strrchr macro.
  */
-extern char *kernel_strrchr(const char *, int);
+char *kernel_strrchr(const char *s, int c);
 
 #define PATH_LEN_V1 256
 
@@ -39,8 +38,7 @@ struct cow_header_v1 {
  * Define PATH_LEN_V3 as the usual value of MAXPATHLEN, just hard-code it in
  * case other systems have different values for MAXPATHLEN.
  *
- * The same must hold for V2 - we want file format compatibility, not anything
- * else.
+ * V2 uses the same value for file format compatibility.
  */
 #define PATH_LEN_V3 4096
 #define PATH_LEN_V2 PATH_LEN_V3
@@ -58,14 +56,12 @@ struct cow_header_v2 {
  * Changes from V2 -
  *	PATH_LEN_V3 as described above
  *	Explicitly specify field bit lengths for systems with different
- *		lengths for the usual C types.  Not sure whether char or
- *		time_t should be changed, this can be changed later without
- *		breaking compatibility
+ *		lengths for the usual C types.  char and time_t can still
+ *		change without breaking compatibility
  *	Add alignment field so that different alignments can be used for the
  *		bitmap and data
- * 	Add cow_format field to allow for the possibility of different ways
- *		of specifying the COW blocks.  For now, the only value is 0,
- * 		for the traditional COW bitmap.
+ *	Add cow_format field to allow different COW block encodings.
+ *		Value 0 selects the traditional COW bitmap.
  *	Move the backing_file field to the end of the header.  This allows
  *		for the possibility of expanding it into the padding required
  *		by the bitmap alignment.
@@ -76,7 +72,7 @@ struct cow_header_v2 {
  *		allows the data to be more aligned more strictly than on
  *		sector boundaries.  This is needed for ubd-mmap, which needs
  *		the data to be page aligned.
- *	Fixed (finally!) the rounding bug
+ *	Fix the bitmap/data rounding used by the V2 layout.
  */
 
 /*
@@ -87,7 +83,8 @@ struct cow_header_v2 {
  *
  * However, this _can be detected_: it means that cow_format (always 0 until
  * now) is shifted onto the first 4 bytes of backing_file, where it is otherwise
- * impossible to find 4 zeros. -bb */
+ * impossible to find 4 zeros.
+ */
 
 struct cow_header_v3 {
 	__u32 magic;
@@ -112,7 +109,7 @@ struct cow_header_v3_broken {
 	char backing_file[PATH_LEN_V3];
 };
 
-/* COW format definitions - for now, we have only the usual COW bitmap */
+/* COW format definitions. */
 #define COW_BITMAP 0
 
 union cow_header {
@@ -126,7 +123,7 @@ union cow_header {
 #define COW_VERSION 3
 
 #define DIV_ROUND(x, len) (((x) + (len) - 1) / (len))
-#define ROUND_UP(x, align) DIV_ROUND(x, align) * (align)
+#define ROUND_UP(x, align) (DIV_ROUND(x, align) * (align))
 
 void cow_sizes(int version, __u64 size, int sectorsize, int align,
 	       int bitmap_offset, unsigned long *bitmap_len_out,
@@ -139,8 +136,7 @@ void cow_sizes(int version, __u64 size, int sectorsize, int align,
 		*data_offset_out = (*data_offset_out + sectorsize - 1) /
 			sectorsize;
 		*data_offset_out *= sectorsize;
-	}
-	else {
+	} else {
 		*bitmap_len_out = DIV_ROUND(size, sectorsize);
 		*bitmap_len_out = DIV_ROUND(*bitmap_len_out, 8);
 
@@ -181,8 +177,7 @@ static int absolutize(char *to, int size, char *from)
 			return -1;
 		}
 		strcat(to, slash);
-	}
-	else {
+	} else {
 		if (strlen(save_cwd) + 1 + strlen(from) + 1 > size) {
 			cow_printf("absolutize : unable to fit '%s' into %d "
 			       "chars\n", from, size);
@@ -279,8 +274,6 @@ int file_reader(__u64 offset, char *buf, int len, void *arg)
 	return pread(fd, buf, len, offset);
 }
 
-/* XXX Need to sanity-check the values read from the header */
-
 int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 		    __u32 *version_out, char **backing_file_out,
 		    long long *mtime_out, unsigned long long *size_out,
@@ -294,7 +287,7 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 
 	header = cow_malloc(sizeof(*header));
 	if (header == NULL) {
-	        cow_printf("read_cow_header - Failed to allocate header\n");
+		cow_printf("%s - Failed to allocate header\n", __func__);
 		return -ENOMEM;
 	}
 	err = -EINVAL;
@@ -310,7 +303,8 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 	else if (magic == be32toh(COW_MAGIC))
 		version = be32toh(header->v1.version);
 	/* No error printed because the non-COW case comes through here */
-	else goto out;
+	else
+		goto out;
 
 	*version_out = version;
 
@@ -326,8 +320,7 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 		*bitmap_offset_out = sizeof(header->v1);
 		*align_out = *sectorsize_out;
 		file = header->v1.backing_file;
-	}
-	else if (version == 2) {
+	} else if (version == 2) {
 		if (n < sizeof(header->v2)) {
 			cow_printf("read_cow_header - failed to read V2 "
 				   "header\n");
@@ -341,7 +334,7 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 		file = header->v2.backing_file;
 	}
 	/* This is very subtle - see above at union cow_header definition */
-	else if (version == 3 && (*((int*)header->v3.backing_file) != 0)) {
+	else if (version == 3 && (*((int *)header->v3.backing_file) != 0)) {
 		if (n < sizeof(header->v3)) {
 			cow_printf("read_cow_header - failed to read V3 "
 				   "header\n");
@@ -357,8 +350,7 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 		}
 		*bitmap_offset_out = ROUND_UP(sizeof(header->v3), *align_out);
 		file = header->v3.backing_file;
-	}
-	else if (version == 3) {
+	} else if (version == 3) {
 		cow_printf("read_cow_header - broken V3 file with"
 			   " 64-bit layout - recovering content.\n");
 
@@ -369,14 +361,14 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 		}
 
 		/*
-		 * this was used until Dec2005 - 64bits are needed to represent
-		 * 2106+. I.e. we can safely do this truncating cast.
+		 * This format was used until Dec 2005; 64 bits are needed
+		 * to represent 2106+. This truncating cast is therefore safe.
 		 *
-		 * Additionally, we must use be32toh() instead of be64toh(), since
-		 * the program used to use the former (tested - I got mtime
-		 * mismatch "0 vs whatever").
+		 * Use be32toh() instead of be64toh() because the old
+		 * writer used the former.
 		 *
-		 * Ever heard about bug-to-bug-compatibility ? ;-) */
+		 * Preserve compatibility with the old on-disk encoding.
+		 */
 		*mtime_out = (time32_t) be32toh(header->v3_b.mtime);
 
 		*size_out = be64toh(header->v3_b.size);
@@ -388,8 +380,7 @@ int read_cow_header(int (*reader)(__u64, char *, int, void *), void *arg,
 		}
 		*bitmap_offset_out = ROUND_UP(sizeof(header->v3_b), *align_out);
 		file = header->v3_b.backing_file;
-	}
-	else {
+	} else {
 		cow_printf("read_cow_header - invalid COW version\n");
 		goto out;
 	}
@@ -431,9 +422,8 @@ int init_cow_file(int fd, char *cow_file, char *backing_file, int sectorsize,
 	}
 
 	/*
-	 * does not really matter how much we write it is just to set EOF
-	 * this also sets the entire COW bitmap
-	 * to zero without having to allocate it
+	 * The write length does not matter; it sets EOF and zeroes the
+	 * entire COW bitmap without allocating it.
 	 */
 	err = cow_write_file(fd, &zero, sizeof(zero));
 	if (err != sizeof(zero)) {

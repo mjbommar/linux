@@ -4,9 +4,9 @@
 # launcher-smoke/launcher-forkserver-driver.py
 #
 # End-to-end test for uml-launcher's --forkserver fd-plumbing
-# path (workstream C-10). Mirrors snapshot-smoke-driver.py but
+# path. Mirrors snapshot-smoke-driver.py but
 # routes the UML spawn through uml-launcher instead of invoking
-# the kernel binary directly — the launcher does the dup2 of our
+# the kernel binary directly; the launcher does the dup2 of our
 # pipe fds to 198/199 inside CommandExt::pre_exec.
 #
 # If this passes, it proves:
@@ -46,18 +46,9 @@ def main():
     mem = sys.argv[4] if len(sys.argv) > 4 else "128M"
     # Iteration count knob. DEFAULT: 1.
     #
-    # The C-09 v1 ceiling (documented in decisions-log D42 and
-    # 09-snapshot-forkserver.md commit-3d-d status note) is that
-    # a single worker can run short non-blocking guest code but
-    # the inherited CFS runqueue state is not fully sanitized;
-    # multi-iteration parent-side operation trips the slab-OOB
-    # at __set_next_task_fair+0x11b somewhere between iteration
-    # 1's reap and iteration 2's fork, hanging or crashing the
-    # parent. v2 freezer-cgroup redesign unblocks iterations > 1.
-    #
-    # This knob lets a caller who is debugging v2 crank iterations
-    # up past 1 to validate the fix. Selftest keeps it at 1
-    # because that's what v1 ships.
+    # Keep the default to a single iteration. The knob remains useful
+    # when debugging multi-iteration forkserver behavior, but the
+    # selftest only requires the shipped one-iteration protocol.
     iterations = int(sys.argv[5]) if len(sys.argv) > 5 else 1
 
     if not os.access(launcher, os.X_OK):
@@ -90,7 +81,7 @@ def main():
         pass_fds=(ctl_r, status_w),
     )
     # The launcher inherited our ctl_r / status_w. Drop OUR copies
-    # — only the launcher/UML side should hold them now.
+    # - only the launcher/UML side should hold them now.
     os.close(ctl_r)
     os.close(status_w)
 
@@ -139,7 +130,7 @@ def main():
             pids.append(pid)
 
         # Across iterations the parent should be allocating fresh
-        # host pids — distinct pids each round confirm the fork()
+        # host pids; distinct pids each round confirm the fork()
         # path is genuinely re-running, not replaying a cached
         # response. On a severely hung parent we'd either see the
         # same pid repeatedly or hang on the status read above.

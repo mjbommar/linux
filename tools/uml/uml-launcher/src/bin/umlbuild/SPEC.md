@@ -1,6 +1,6 @@
 # umlbuild — design spec
 
-**Status:** draft 1, 2026-05-23
+**Status:** draft
 **Sibling of:** `umlctl` (lifecycle CLI)
 **Goal:** produce reproducible UML instances — kernel binary + rootfs
 ubd image + a generated `Umlfile.toml` that `umlctl up` can boot.
@@ -245,13 +245,11 @@ sandbox_user = "sandbox"   # /sbin/init drops to this uid
 Built-in profiles to ship at v1 (under
 `tools/uml/uml-launcher/profiles/`):
 
-- `mvp.toml` — 11-Kconfig minimum from the
-  2026-05-23-minimum-viable-uml diary. Runs cpython-tier0.
+- `mvp.toml` — minimal Kconfig profile. Runs cpython-tier0.
 - `sandbox.toml` — `mvp` + NET, INET, TMPFS, DEVTMPFS, DEVPTS,
   OVERLAY_FS. The "safe but useful for real code" target.
 - `dev.toml` — base_defconfig. The everyday development build.
-- `container.toml` — base_defconfig + container fragment (the
-  yesterday's docker-in-UML build, ~110 MB).
+- `container.toml` — base_defconfig + container fragment.
 
 ## Privilege model
 
@@ -269,8 +267,8 @@ Built-in profiles to ship at v1 (under
      `--root $rootfs --no-chown --keys-dir /etc/apk/keys`, avoiding
      the chroot. Alpine's `apk` supports this since 2.10.
 
-  v1 ships option (2) wherever possible; falls back to (1) with a
-  clear error message if it can't.
+  Prefer option (2) wherever possible; fall back to option (1) with a
+  clear error message when required.
 - **Debian path:** `mmdebstrap --mode=unshare` runs entirely rootless
   via user namespaces. No sudo.
 
@@ -345,8 +343,8 @@ tools/uml/uml-launcher/profiles/   # in-tree profiles
 
 In order, each commit lands a working slice:
 
-1. `umlbuild kernel` + `mvp.toml` profile. Selftest: builds the
-   exact same 2.41 MB binary the diary produced.
+1. `umlbuild kernel` + `mvp.toml` profile. Selftest: builds a
+   reproducible minimal UML binary.
 2. `umlbuild rootfs` + Alpine path. Selftest: produces a 30 MB
    populated tree containing `/usr/bin/python3`.
 3. `umlbuild image`. Selftest: produces an ext4 image that mounts

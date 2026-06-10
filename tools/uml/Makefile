@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# tools/uml/Makefile — aggregate subdirectory targets for the
+# tools/uml/Makefile - aggregate subdirectory targets for the
 # UML host-side tool tree.
 #
-# Today the only sub-tool is uml-launcher (workstream C-10 v1).
-# As v2 lands (per-device vhost-user helpers, RPC control
-# surface, etc.) new sub-tools drop into SUBDIRS and pick up
-# the all / check / test / clean / install / help fan-out for
-# free.
+# New sub-tools drop into SUBDIRS and pick up the all / check / test /
+# clean / install / help fan-out.
 #
 # Usage:
 #   make -C tools/uml             # build everything that has a Makefile

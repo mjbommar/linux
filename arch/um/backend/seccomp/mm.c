@@ -2,13 +2,9 @@
 /*
  * seccomp backend: mm ops.
  *
- * Workstream A-03.S1 + memo 25 R2.
- *
- * Ops take `struct mm_struct *mm` (memo 25 R2 cleanup) and look up the
- * per-mm seccomp state via `&mm->context.id` internally. Other backends
- * (kvm-v2's per-mm worker process) will key their per-mm state off the
- * mm pointer differently — keeping mm_id seccomp-internal lets each
- * backend pick its own storage.
+ * Ops take `struct mm_struct *mm` and look up the
+ * per-mm seccomp state via `&mm->context.id` internally. Keeping
+ * mm_id seccomp-internal lets each backend pick its own storage.
  *
  * mm_create delegates to start_userspace() which dispatches on the
  * stub_syscall_uses_futex capability to do the socketpair + futex
@@ -30,15 +26,14 @@ int seccomp_mm_create(struct mm_struct *mm)
 
 #ifdef CONFIG_UM_WORKER_PROCESS
 	/*
-	 * memo 28 E.3d.0: under WORKER_PROCESS=y, hand the stub-child
-	 * allocation off to a freshly-spawned per-mm worker. The worker
-	 * runs start_userspace() inside its own VA and ships back the
+	 * Under WORKER_PROCESS=y, hand the stub-child allocation off to a
+	 * freshly-spawned per-mm worker. The worker runs start_userspace()
+	 * inside its own VA and ships back the
 	 * parent-side socketpair fd via SCM_RIGHTS so this id->sock is a
-	 * spawner-side fd to the same kernel file. vcpu_run still goes
-	 * through the spawner-side path until E.3d.2 reroutes it.
+	 * spawner-side fd to the same kernel file.
 	 *
-	 * On any failure fall back to the legacy in-spawner clone so
-	 * boots can complete even with a broken worker setup.
+	 * On failure fall back to the in-spawner clone so boots can
+	 * complete even with a broken worker setup.
 	 */
 	if (!worker_alloc_stub_for_mm(mm, id))
 		return 0;

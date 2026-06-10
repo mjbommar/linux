@@ -9,8 +9,6 @@
 #   UML_BINARY=/tmp/uml-clean/linux \
 #     bash tools/testing/selftests/um/regrtest-repros/run-regrtest-repros.sh
 #
-# See memo 29 (Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/29-regrtest-substrate.md)
-
 set -u
 
 BINARY=${UML_BINARY:-/tmp/uml-clean/linux}

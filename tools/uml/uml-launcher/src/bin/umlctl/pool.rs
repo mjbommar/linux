@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// umlctl pool — fork-server / template-pause integration (Memo 09).
+// umlctl pool - fork-server and template-pause integration.
 //
-// Phase 1b-MVP (this module) ships a single subcommand:
+// This module provides the direct single-member path and file-backed
+// member bookkeeping:
 //
 //   umlctl pool spawn --kernel PATH [--mem SIZE] [--cmdline EXTRA]
 //                     [--instance NAME] [--mac MAC]
 //                     [--tap NAME] [--ipv4 CIDR] [--gateway GW]
 //                     [--json] [--foreground]
 //
-// `spawn` is the unit primitive of the template-pause + fork model:
+// `spawn` is the unit primitive for template-pause:
 //
 //   1. Create a host memfd, write the requested identity blob.
 //   2. Fork+exec the UML kernel with `um_template_pause` on the
@@ -22,23 +23,15 @@
 //   5. Print { pid, instance_name, mac, tap, ipv4_cidr } as JSON (or
 //      a human-readable line) and return.
 //
-// Phase 1c (next session) adds a long-lived `umlctl pool serve`
-// daemon that pre-spawns N members, exposes a Unix-socket take API,
-// and pre-warms for syzkaller's create-on-slot-rotation cadence.
-// Phase 1c's wire shape is forward-compatible with this MVP: a
-// `pool take` against the daemon will return the same JSON envelope.
+// `pool serve` is the long-lived fork-on-resume daemon.  It exposes
+// the socket API used by `pool take`, `pool status`, daemon-routed
+// `pool destroy`, `exec`, and `port-forward`.
 //
-// What this DOES NOT do (yet):
-//   - Apply the identity blob to in-kernel state (kernel-side Phase 2:
-//     swap MAC, rebind IPv4, swap tap fd).  Today the kernel logs the
-//     blob.  The identity *fields* round-trip end-to-end via memfd
-//     here; the kernel can be wired to act on them in Phase 2.
-//   - Manage > 1 member per master.  Each `pool spawn` boots a fresh
-//     master, which becomes the taken instance.  N-fork-per-master
-//     requires extending the kernel's um_template_pause_enter() to
-//     loop on SIGSTOP/fork (Phase 2 in the kernel TU).
-//   - Bundle-dir bookkeeping under $STATE/pools/<name>/.  Today the
-//     command returns the pid; the caller is responsible for lifecycle.
+// Direct `pool spawn` remains useful for smoke tests and manual
+// debugging, but it does not share a master across members.  Each
+// invocation boots one UML instance and records it under the runtime
+// member directory so `pool list` and file-backed `pool destroy` can
+// manage it later.
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
@@ -103,7 +96,7 @@ pub struct SpawnArgs {
     #[arg(long, default_value = "", value_name = "ADDR")]
     pub gateway: String,
 
-    /// Mconsole socket path (Phase 2+).
+    /// Mconsole socket path written into the identity blob.
     #[arg(long, default_value = "", value_name = "PATH")]
     pub mconsole: String,
 
@@ -120,8 +113,11 @@ pub struct SpawnArgs {
 
     /// rootfs args for the guest cmdline. Default = use hostfs at /.
     /// Override with e.g. "ubd0=/path/to/img" for a UBD root.
-    #[arg(long, default_value = "rootfstype=hostfs rootflags=/ root=/dev/root rw",
-          value_name = "STRING")]
+    #[arg(
+        long,
+        default_value = "rootfstype=hostfs rootflags=/ root=/dev/root rw",
+        value_name = "STRING"
+    )]
     pub rootfs: String,
 
     /// Block waiting for the child to exit, streaming its stderr.
@@ -163,13 +159,10 @@ fn member_path(runtime_dir: &Path, pid: i32) -> PathBuf {
 
 fn record_spawn(runtime_dir: &Path, r: &SpawnResult) -> Result<()> {
     let dir = pool_members_dir(runtime_dir);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = member_path(runtime_dir, r.pid);
-    let json = serde_json::to_string_pretty(r)
-        .context("serialize spawn record")?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("write {}", path.display()))?;
+    let json = serde_json::to_string_pretty(r).context("serialize spawn record")?;
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -184,8 +177,7 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
     let kernel_abs = std::fs::canonicalize(&args.kernel)
         .with_context(|| format!("canonicalize {}", args.kernel.display()))?;
 
-    let mac_bytes = parse_mac(&args.mac)
-        .with_context(|| format!("parse --mac {}", args.mac))?;
+    let mac_bytes = parse_mac(&args.mac).with_context(|| format!("parse --mac {}", args.mac))?;
     let blob = build_identity_blob(
         &args.instance,
         &mac_bytes,
@@ -196,16 +188,14 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
     )?;
     assert_eq!(blob.len(), IDENTITY_BLOB_SIZE);
 
-    let memfd = create_identity_memfd(&blob)
-        .context("create identity memfd")?;
+    let memfd = create_identity_memfd(&blob).context("create identity memfd")?;
     let memfd_raw = memfd.as_raw_fd();
 
     // Resolve / synthesize an init script.  If user passed --init,
     // use it verbatim; else write a default to a tempfile.
     let init_path = match &args.init {
         Some(p) => p.clone(),
-        None => default_init_script(&args.instance)
-            .context("write default init script")?,
+        None => default_init_script(&args.instance).context("write default init script")?,
     };
 
     // Build argv.  All template-pause-mandatory args come first;
@@ -227,7 +217,10 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
     if !quiet {
         eprintln!(
             "umlctl pool spawn: kernel={} mem={} instance={} identity_fd={}",
-            kernel_abs.display(), args.mem, args.instance, memfd_raw,
+            kernel_abs.display(),
+            args.mem,
+            args.instance,
+            memfd_raw,
         );
         eprintln!("    cmdline: {}", argv[1..].join(" "));
     }
@@ -245,12 +238,7 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
             if flags < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            if libc::fcntl(
-                memfd_for_preexec,
-                libc::F_SETFD,
-                flags & !libc::FD_CLOEXEC,
-            ) < 0
-            {
+            if libc::fcntl(memfd_for_preexec, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -261,19 +249,20 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
         cmd.stderr(std::process::Stdio::null());
     }
 
-    let child = cmd.spawn().with_context(|| {
-        format!("spawn {} (is CONFIG_UM_TEMPLATE_PAUSE=y?)", argv[0])
-    })?;
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {} (is CONFIG_UM_TEMPLATE_PAUSE=y?)", argv[0]))?;
     let pid = child.id() as libc::pid_t;
     if !quiet {
-        eprintln!("umlctl pool spawn: master pid={}, waiting for SIGSTOP…", pid);
+        eprintln!(
+            "umlctl pool spawn: master pid={}, waiting for SIGSTOP…",
+            pid
+        );
     }
 
     // Wait for the master to SIGSTOP itself.  WUNTRACED makes
     // waitpid return on stop, not just exit.
-    wait_for_sigstop(pid).with_context(|| {
-        format!("wait for SIGSTOP from master pid={}", pid)
-    })?;
+    wait_for_sigstop(pid).with_context(|| format!("wait for SIGSTOP from master pid={}", pid))?;
     if !quiet {
         eprintln!("umlctl pool spawn: master SIGSTOPped; sending SIGCONT.");
     }
@@ -282,8 +271,7 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
     // applied.  Do NOT waitpid further unless foreground was asked.
     let r = unsafe { libc::kill(pid, libc::SIGCONT) };
     if r < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("SIGCONT master")?;
+        return Err(std::io::Error::last_os_error()).context("SIGCONT master")?;
     }
 
     let result = SpawnResult {
@@ -306,8 +294,7 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
     }
 
     if args.json {
-        let s = serde_json::to_string(&result)
-            .context("serialize spawn result")?;
+        let s = serde_json::to_string(&result).context("serialize spawn result")?;
         println!("{}", s);
     } else if !quiet {
         println!(
@@ -322,8 +309,7 @@ pub fn cmd_spawn(args: SpawnArgs, paths: &crate::paths::Paths, quiet: bool) -> R
         // still re-read it post-SIGCONT if it wants.
         let r = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
         if r < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("foreground waitpid")?;
+            return Err(std::io::Error::last_os_error()).context("foreground waitpid")?;
         }
     } else {
         // Background mode: drop ownership of the memfd by leaking
@@ -370,7 +356,7 @@ pub struct DestroyArgs {
     /// at `$RUNTIME_DIR/uml/pools/<name>/api.sock` instead of acting
     /// on a file-based spawn record.  The daemon owns the actual
     /// member process tree, so daemon-spawned members must be
-    /// destroyed this way.  Spec memo 11 §3.3.
+    /// destroyed this way.
     #[arg(long, value_name = "POOL")]
     pub name: Option<String>,
 }
@@ -391,9 +377,7 @@ pub fn cmd_list(args: ListArgs, paths: &crate::paths::Paths, _quiet: bool) -> Re
     }
 
     let mut members: Vec<SpawnResult> = Vec::new();
-    for ent in std::fs::read_dir(&dir)
-        .with_context(|| format!("readdir {}", dir.display()))?
-    {
+    for ent in std::fs::read_dir(&dir).with_context(|| format!("readdir {}", dir.display()))? {
         let ent = ent?;
         let p = ent.path();
         if p.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -422,25 +406,28 @@ pub fn cmd_list(args: ListArgs, paths: &crate::paths::Paths, _quiet: bool) -> Re
 
     if args.json {
         for m in &members {
-            println!("{}", serde_json::to_string(m)
-                .context("serialize member")?);
+            println!("{}", serde_json::to_string(m).context("serialize member")?);
         }
     } else if members.is_empty() {
         println!("(no live pool members)");
     } else {
-        println!("{:>8}  {:<24}  {:<19}  {:<18}  {:<12}",
-                 "PID", "INSTANCE", "MAC", "IPv4", "MEM");
+        println!(
+            "{:>8}  {:<24}  {:<19}  {:<18}  {:<12}",
+            "PID", "INSTANCE", "MAC", "IPv4", "MEM"
+        );
         for m in &members {
-            println!("{:>8}  {:<24}  {:<19}  {:<18}  {:<12}",
-                     m.pid, m.instance, m.mac, m.ipv4_cidr, m.mem);
+            println!(
+                "{:>8}  {:<24}  {:<19}  {:<18}  {:<12}",
+                m.pid, m.instance, m.mac, m.ipv4_cidr, m.mem
+            );
         }
     }
     Ok(())
 }
 
 pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) -> Result<()> {
-    // Daemon-routed mode (Memo 09 Phase 4 / spec memo 11 §3.3).  When
-    // --name is given, the file-based bookkeeping doesn't apply — the
+    // Daemon-routed mode.  When --name is given, the file-based
+    // bookkeeping doesn't apply: the
     // daemon owns the master+children tree, so we send the destroy
     // RPC and surface its reply.
     if let Some(pool_name) = &args.name {
@@ -465,7 +452,11 @@ pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) 
             println!(
                 "umlctl pool destroy: pid {} {} (daemon pool={})",
                 args.pid,
-                if destroyed { "destroyed" } else { "STILL ALIVE" },
+                if destroyed {
+                    "destroyed"
+                } else {
+                    "STILL ALIVE"
+                },
                 pool_name
             );
         }
@@ -481,8 +472,10 @@ pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) 
         // Already gone — just clean up the record.
         let _ = std::fs::remove_file(&record_path);
         if !quiet {
-            eprintln!("umlctl pool destroy: pid {} already dead; record cleaned",
-                      args.pid);
+            eprintln!(
+                "umlctl pool destroy: pid {} already dead; record cleaned",
+                args.pid
+            );
         }
         if args.json {
             // emit best-effort JSON shape
@@ -497,14 +490,17 @@ pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) 
         return Ok(());
     }
 
-    let sig = if args.graceful { libc::SIGTERM } else { libc::SIGKILL };
+    let sig = if args.graceful {
+        libc::SIGTERM
+    } else {
+        libc::SIGKILL
+    };
     if !quiet {
         eprintln!("umlctl pool destroy: signal {} → pid {}", sig, args.pid);
     }
     let r = unsafe { libc::kill(args.pid, sig) };
     if r < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("kill pool member");
+        return Err(std::io::Error::last_os_error()).context("kill pool member");
     }
 
     let deadline = std::time::Instant::now()
@@ -529,7 +525,9 @@ pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) 
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         true
-    } else { false };
+    } else {
+        false
+    };
 
     let _ = std::fs::remove_file(&record_path);
 
@@ -543,8 +541,15 @@ pub fn cmd_destroy(args: DestroyArgs, paths: &crate::paths::Paths, quiet: bool) 
         });
         println!("{}", envelope);
     } else if !quiet {
-        println!("umlctl pool destroy: pid {} {}", args.pid,
-                 if still_alive { "STILL ALIVE (giving up)" } else { "destroyed" });
+        println!(
+            "umlctl pool destroy: pid {} {}",
+            args.pid,
+            if still_alive {
+                "STILL ALIVE (giving up)"
+            } else {
+                "destroyed"
+            }
+        );
     }
     Ok(())
 }
@@ -565,13 +570,11 @@ pub(crate) fn default_init_script(instance: &str) -> Result<std::path::PathBuf> 
          echo \"POOL_MEMBER_BOOTING\"\n\
          echo \"{instance}\" > /proc/um/template_pause\n\
          echo \"POOL_MEMBER_RESUMED\"\n\
-         # Keep the instance alive; Phase 1c will replace this with\n\
-         # the user-payload exec or a syzkaller-style command runner.\n\
+         # Keep the instance alive for manual inspection.\n\
          exec sleep infinity\n",
         instance = instance,
     );
-    std::fs::write(&path, content)
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("chmod {}", path.display()))?;
@@ -585,8 +588,8 @@ pub(crate) fn parse_mac(s: &str) -> Result<[u8; 6]> {
     }
     let mut out = [0u8; 6];
     for (i, p) in parts.iter().enumerate() {
-        out[i] = u8::from_str_radix(p, 16)
-            .with_context(|| format!("octet {} not hex: {:?}", i, p))?;
+        out[i] =
+            u8::from_str_radix(p, 16).with_context(|| format!("octet {} not hex: {:?}", i, p))?;
     }
     Ok(out)
 }
@@ -627,8 +630,7 @@ pub(crate) fn create_identity_memfd(blob: &[u8]) -> Result<OwnedFd> {
     // before execve so the child inherits the fd.
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("memfd_create");
+        return Err(std::io::Error::last_os_error()).context("memfd_create");
     }
     let owned: OwnedFd = unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) };
     let mut f = std::fs::File::from(owned.try_clone().context("dup memfd")?);
@@ -647,19 +649,14 @@ fn wait_for_sigstop(pid: libc::pid_t) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let mut status: libc::c_int = 0;
-        let r = unsafe {
-            libc::waitpid(pid, &mut status as *mut _, libc::WUNTRACED | libc::WNOHANG)
-        };
+        let r =
+            unsafe { libc::waitpid(pid, &mut status as *mut _, libc::WUNTRACED | libc::WNOHANG) };
         if r < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("waitpid WUNTRACED");
+            return Err(std::io::Error::last_os_error()).context("waitpid WUNTRACED");
         }
         if r == 0 {
             if Instant::now() > deadline {
-                return Err(anyhow!(
-                    "timeout waiting for master pid {} to SIGSTOP",
-                    pid
-                ));
+                return Err(anyhow!("timeout waiting for master pid {} to SIGSTOP", pid));
             }
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -670,7 +667,8 @@ fn wait_for_sigstop(pid: libc::pid_t) -> Result<()> {
             if sig != libc::SIGSTOP {
                 return Err(anyhow!(
                     "master stopped with unexpected signal {} (expected SIGSTOP={})",
-                    sig, libc::SIGSTOP
+                    sig,
+                    libc::SIGSTOP
                 ));
             }
             return Ok(());
@@ -736,14 +734,7 @@ mod tests {
     fn identity_blob_overlong_field_rejected() {
         let mac = [0u8; 6];
         let too_long_name = "x".repeat(64);
-        let r = build_identity_blob(
-            &too_long_name,
-            &mac,
-            "",
-            "",
-            "",
-            "",
-        );
+        let r = build_identity_blob(&too_long_name, &mac, "", "", "", "");
         assert!(r.is_err());
     }
 }

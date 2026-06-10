@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-port-forward-smoke kselftest — Memo 09 Phase 4.
+# um/pool-port-forward-smoke kselftest.
 #
 # Verifies `umlctl port-forward --json` returns the well-typed
 # tap-direct envelope for a daemon-taken pool member.  The verb is

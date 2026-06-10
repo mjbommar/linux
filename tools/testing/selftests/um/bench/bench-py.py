@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 #
-# bench-py — canned, fixed-cost Python workload for cross-backend
+# bench-py - canned, fixed-cost Python workload for cross-backend
 # regression tracking. Boot UML with this as init (or run from
 # inside an init shell). Exits 0 on success after printing one
 # BENCH summary line per sample plus a final BENCH_MEDIAN line.
@@ -11,7 +11,7 @@
 #   - exercise the three syscall classes that diverge most between
 #     UML backends: trap-mechanism (getpid), file I/O (open/write/
 #     read/stat), socket-fd lifecycle (socketpair/close)
-#   - use ONLY Python stdlib + tmpfs — no host-FS dependency
+#   - use ONLY Python stdlib + tmpfs - no host-FS dependency
 #     beyond what every UML init image already has
 #
 # Output (one line per sample, plus median):
@@ -32,7 +32,7 @@ import tempfile
 import time
 
 # Tunable counts. Sized so each section is ~1 s on a modern host
-# at python3 ~10 µs/syscall. Halved if BENCH_QUICK is set (used
+# at python3 ~10 us/syscall. Halved if BENCH_QUICK is set (used
 # in CI to keep a single sample under 5 s).
 _quick = os.environ.get("BENCH_QUICK") == "1"
 HASH_ITERS = 1000 if _quick else 2000
@@ -68,7 +68,7 @@ def section_fs():
 
 
 def section_getpid():
-    """Bare syscall churn — closest analogue to the C getpid-loop micro."""
+    """Bare syscall churn - closest analogue to the C getpid-loop micro."""
     g = os.getpid
     for _ in range(GETPID_ITERS):
         g()

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// umlctl `up`/`down` — declarative UML deployment from a single
+// umlctl `up`/`down` - declarative UML deployment from a single
 // TOML "Umlfile". Inspired by docker-compose.yml: one file
 // describes kernel, network, ports, mounts, env, init phases.
 //
@@ -10,14 +10,11 @@
 // hand-rolling iptables and init scripts. `umlctl down` tears
 // it down cleanly.
 //
-// Why this exists: see Documentation/virt/uml/redesign/
-// 08-future-phases/05-umlctl.md (umlctl spec) and the
-// post-mortem of the 2026-04-29 fastapi-on-UML session that
-// motivated this — every path-name and port-forward had to be
-// re-derived because the lifecycle CLI didn't know about
-// network or workloads, just kernels.
+// This exists so every path name, network detail, and port forward is
+// declared once instead of being re-derived by shell scripts around
+// the low-level lifecycle verbs.
 //
-// Keep this file additive — the existing `create`/`start`/
+// Keep this file additive - the existing `create`/`start`/
 // `stop` verbs stay as the low-level primitives; `up`/`down`
 // are sugar that compiles an Umlfile down to a manifest +
 // host-side setup steps + a generated init script.
@@ -72,8 +69,8 @@ pub struct Umlfile {
     pub init: InitSection,
     #[serde(default)]
     pub debug: DebugSection,
-    /// Host-process resource controls (memo 52 SMP-T78..T84).
-    /// Optional — empty section → no env vars set, no cgroup created.
+    /// Host-process resource controls.
+    /// Optional - empty section -> no env vars set, no cgroup created.
     #[serde(default)]
     pub host_resources: HostResourcesSection,
 }
@@ -111,19 +108,18 @@ pub struct RuntimeSection {
     /// the server7 reference host with mem=64M ncpus=1.
     ///
     /// The lpj value is sniffed from the host's
-    /// /proc/cpuinfo BogoMIPS at deploy time (BogoMIPS × 1e6 / 2 ≈
+    /// /proc/cpuinfo BogoMIPS at deploy time (BogoMIPS x 1e6 / 2 ~=
     /// loops_per_jiffy at HZ=1000); a missing/unparseable cpuinfo
     /// falls back to no lpj=, which gives the standard ~300 ms boot
     /// with calibration jitter.
     #[serde(default)]
     pub fast_boot: bool,
-    /// Root filesystem source.  Defaults to "hostfs" (the historical
-    /// umlctl-up behavior): host's `/` is bind-mounted as the guest's
-    /// root via hostfs, and umlctl synthesizes an init.sh that runs
-    /// the init.phases pipeline.
+    /// Root filesystem source.  Defaults to "hostfs": the host's `/`
+    /// is bind-mounted as the guest's root via hostfs, and umlctl
+    /// synthesizes an init.sh that runs the init.phases pipeline.
     ///
     /// Set to "ubd" when the Umlfile was emitted by `umlbuild instance`
-    /// — the kernel boots from a ubd-attached ext4 image specified by
+    /// - the kernel boots from a ubd-attached ext4 image specified by
     /// `kernel.append`, and umlctl skips its init.sh synthesis (the
     /// rootfs ships its own /sbin/init).  Any other value is passed
     /// through verbatim as `root=<value>` (e.g. "/dev/ubdb").
@@ -150,7 +146,7 @@ impl Default for RuntimeSection {
 pub struct NetworkSection {
     /// "none" (default) or "tap".
     pub mode: String,
-    /// "vector" (legacy vec0) or "vector2" (experimental vec2.0).
+    /// "vector" for vec0 or "vector2" for vec2.0.
     pub driver: String,
     /// "auto", "fd", or "inproc". For vector2, auto chooses the
     /// launcher-owned inherited-fd TAP path.
@@ -168,14 +164,14 @@ pub struct NetworkSection {
     pub nameservers: Vec<String>,
     /// "auto" picks the host's default-route iface; or e.g. "enp3s0".
     pub masquerade_via: String,
-    /// Each entry: "host_port:guest_port[/proto]" — proto defaults
+    /// Each entry: "host_port:guest_port[/proto]" - proto defaults
     /// to tcp. Implemented via host-side DNAT to guest_ip:guest_port.
     pub ports: Vec<String>,
     /// Set to true by the TOML deserializer when `driver` was present
     /// in the source file (vs. serde-defaulted to "vector2").
-    /// Validator uses this to distinguish "operator explicitly chose
-    /// a driver while mode=none" (error) from "operator left it alone
-    /// and the default flowed in" (fine).  Skipped on serialize so
+    /// Validator uses this to distinguish "user explicitly chose a
+    /// driver while mode=none" (error) from "user left it unset and
+    /// the default flowed in" (fine).  Skipped on serialize so
     /// round-tripped manifests don't accumulate this metadata.
     #[serde(skip)]
     pub driver_explicit: bool,
@@ -184,7 +180,7 @@ pub struct NetworkSection {
 /* Manual Deserialize so we can track whether `driver` was present in
  * the source TOML.  serde's #[serde(default)] flatten makes it
  * impossible to distinguish "field absent" from "field present with
- * default-equal value" — exactly the case HONEST-AUDIT §15 flagged.
+ * default-equal value".
  * The wrapper struct uses Option<String> for driver, then resolve()
  * fills in the post-flip default ("vector2") and sets
  * driver_explicit accordingly.
@@ -356,17 +352,9 @@ impl Default for NetworkSection {
     fn default() -> Self {
         Self {
             mode: "none".into(),
-            // Memo 01 Step 4b (post-2026-05-19 sprint): default flipped
-            // from "vector" → "vector2".  Predecessors:
-            //   * Step 1: kvm-v2 + vector2 Tier 3 30/30 PASS
-            //   * Step 2: TCP throughput ratio 0.877 ≥ 0.85 gate
-            //     (with TSO/vnet_hdr patch 9f5fca43fc2a + a73377ac4b9a)
-            //   * Step 3: 7200 s long-soak 440/440 PASS, aggregate
-            //     Wilson 95 % lower bound 98.28 % per backend
-            //   * Step 4a: opt-in mission gate (02fe7d14f476)
-            // Operators relying on the legacy `vector` (vec0) driver
-            // can opt back via `[network].driver = "vector"`; the
-            // tap_name / IP / port plumbing is the same shape.
+            // vector2 is the default network driver.  Users who need
+            // vec0 can opt back via `[network].driver = "vector"`;
+            // tap_name, IP, and port plumbing keep the same shape.
             driver: "vector2".into(),
             host_mode: "auto".into(),
             queues: NetworkQueueSpec::default(),
@@ -421,12 +409,8 @@ pub struct InitPhase {
     pub timeout_secs: u32,
 }
 
-/// Host-process resource controls — memo 52
-/// (Documentation/virt/uml/redesign/08-future-phases/
-///  52-uml-host-resource-controls.md).
-///
-/// Declarative TOML form of the SMP-T78..T84 features. Empty
-/// section (the default) leaves the host process unmanaged.
+/// Host-process resource controls.  An empty section leaves the host
+/// process unmanaged.
 ///
 /// Translated into env vars (UM_THP / UM_OOM_SCORE_ADJ /
 /// UM_KVM_V2_CPU_AFFINITY / UM_HUGEPAGES / UM_KVM_V2_PIN_PHYSMEM)
@@ -435,27 +419,26 @@ pub struct InitPhase {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct HostResourcesSection {
-    /// SMP-T79 transparent-huge-page policy on physmem.
-    /// "off" → MADV_NOHUGEPAGE (predictable, no defrag latency).
-    /// "on"  → MADV_HUGEPAGE (throughput-oriented).
-    /// "auto" / "" → inherit system default.
+    /// Transparent-huge-page policy on physmem.
+    /// "off" -> MADV_NOHUGEPAGE (predictable, no defrag latency).
+    /// "on"  -> MADV_HUGEPAGE (throughput-oriented).
+    /// "auto" / "" -> inherit system default.
     pub thp: String,
 
-    /// SMP-T80 OOM score adjustment. None → no write to
-    /// /proc/self/oom_score_adj. Some(n) → write n (range
+    /// OOM score adjustment. None -> no write to
+    /// /proc/self/oom_score_adj. Some(n) -> write n (range
     /// [-1000, +1000], host clamps out-of-range).
     pub oom_score_adj: Option<i32>,
 
-    /// SMP-T82 process-level CPU affinity. CPU list with optional
-    /// ranges, e.g. "0-3" / "0,2,4" / "0-1,4-5". Empty → no
+    /// Process-level CPU affinity. CPU list with optional
+    /// ranges, e.g. "0-3" / "0,2,4" / "0-1,4-5". Empty -> no
     /// sched_setaffinity call (inherit current mask).
     pub cpu_affinity: String,
 
-    /// Memo 06 Phase 1 (post-2026-05-19 sprint) + HONEST-AUDIT §7.
     /// Per-vCPU host-thread affinity.  "auto" / "off" / "<list>".
     ///
     ///   "auto"   each vCPU host thread bound to one host CPU
-    ///            within @cpu_affinity (vCPU N → cpu_set[N %
+    ///            within @cpu_affinity (vCPU N -> cpu_set[N %
     ///            len(cpu_set)]).
     ///   "off"    no thread-level pinning (current behaviour;
     ///            threads inherit @cpu_affinity).
@@ -472,31 +455,31 @@ pub struct HostResourcesSection {
     /// section just plumbs the value into env vars.
     pub vcpu_thread_affinity: String,
 
-    /// SMP-T81 hugepage backing for physmem.
-    /// "2M" → MAP_HUGETLB | MAP_HUGE_2MB.
-    /// "1G" → MAP_HUGETLB | MAP_HUGE_1GB.
-    /// "off" / "" → 4 KiB.
+    /// Hugepage backing for physmem.
+    /// "2M" -> MAP_HUGETLB | MAP_HUGE_2MB.
+    /// "1G" -> MAP_HUGETLB | MAP_HUGE_1GB.
+    /// "off" / "" -> 4 KiB.
     /// Requires the host hugetlbfs pool to be pre-reserved via
-    /// /proc/sys/vm/nr_hugepages. Empty pool → 4 KiB fallback +
+    /// /proc/sys/vm/nr_hugepages. Empty pool -> 4 KiB fallback +
     /// pr_warn at boot.
     pub hugepages: String,
 
-    /// SMP-T71 MAP_LOCKED on physmem. Foundation pin/populate is
-    /// always active under T71; setting this true additionally
-    /// applies MAP_LOCKED on the physmem mapping (requires
-    /// cap_ipc_lock setcap on the UML binary).
+    /// MAP_LOCKED on physmem.  Foundation pin/populate is always
+    /// active; setting this true additionally applies MAP_LOCKED on
+    /// the physmem mapping (requires cap_ipc_lock setcap on the UML
+    /// binary).
     pub pin_physmem: bool,
 
-    /// SMP-T83 cgroup v2 memory.max. "1G" / "512M" / "0" (unlimited).
-    /// Empty → no cgroup memory limit set.
+    /// cgroup v2 memory.max. "1G" / "512M" / "0" (unlimited).
+    /// Empty -> no cgroup memory limit set.
     pub memory_max: String,
 
-    /// SMP-T83 cgroup v2 cpu.max. "200%" (two full cores) /
-    /// "100ms 100ms" (raw cgroup v2 form). Empty → no cgroup
+    /// cgroup v2 cpu.max. "200%" (two full cores) /
+    /// "100ms 100ms" (raw cgroup v2 form). Empty -> no cgroup
     /// cpu limit.
     pub cpu_max: String,
 
-    /// SMP-T83 cgroup v2 pids.max. Empty → no pids limit.
+    /// cgroup v2 pids.max. Empty -> no pids limit.
     pub pids_max: Option<u32>,
 }
 
@@ -513,7 +496,7 @@ pub struct DebugSection {
     /// Defaults to "./logs/<instance-name>/".
     pub log_dir: String,
     /// Keep the UML process alive (and host-side TAP/iptables) when
-    /// an init phase fails — useful for poking around with `umlctl
+    /// an init phase fails - useful for poking around with `umlctl
     /// exec` / `umlctl logs`.
     pub keep_running_on_failure: bool,
 }
@@ -554,7 +537,7 @@ impl Umlfile {
             v.dst = expand_env(&v.dst);
             if v.mode != "ro" && v.mode != "rw" {
                 bail!(
-                    "volume {} → {}: mode must be 'ro' or 'rw' (got {:?})",
+                    "volume {} -> {}: mode must be 'ro' or 'rw' (got {:?})",
                     v.src,
                     v.dst,
                     v.mode
@@ -591,8 +574,8 @@ pub fn set_network_driver(uml: &mut Umlfile, driver: &str) -> Result<()> {
     let old = uml.network.driver.clone();
     let old_explicit = uml.network.driver_explicit;
     uml.network.driver = driver.to_string();
-    // Set by CLI / sweep / programmatic mutation — counts as explicit
-    // for validation purposes (HONEST-AUDIT §15).
+    // Set by CLI / sweep / programmatic mutation; validation treats
+    // this the same as an explicit TOML field.
     uml.network.driver_explicit = true;
     if let Err(e) = validate_network_section(&uml.network, &uml.runtime) {
         uml.network.driver = old;
@@ -685,11 +668,10 @@ fn validate_network_section(net: &NetworkSection, runtime: &RuntimeSection) -> R
     }
     validate_network_driver(&net.driver)?;
     validate_network_host_mode(&net.host_mode)?;
-    // network.driver is informational when mode != "tap" — the driver
-    // only ever does work in tap mode.  HONEST-AUDIT §15 restore: we
-    // distinguish "operator explicitly set driver while mode=none"
-    // (error — they're confused about what driver does) from "field
-    // defaulted to vector2 in absence of any setting" (harmless).
+    // network.driver is informational when mode != "tap": the driver
+    // only ever does work in tap mode.  Distinguish an explicit
+    // driver with mode=none (error) from an absent field that defaulted
+    // to vector2 (harmless).
     // The driver_explicit flag is populated by the manual Deserialize
     // impl above.  Unknown driver names are still caught by
     // validate_network_driver() above regardless of mode.
@@ -736,7 +718,7 @@ pub fn validate_network_host_mode(host_mode: &str) -> Result<()> {
 }
 
 /// Expand $VAR / ${VAR} / $HOME from process env. Unknown vars
-/// expand to empty (not an error — gives us "kernel.path = $UML_KERNEL"
+/// expand to empty (not an error - gives us "kernel.path = $UML_KERNEL"
 /// usability without per-Umlfile gating).
 fn expand_env(s: &str) -> String {
     shellexpand::env(s)
@@ -744,7 +726,7 @@ fn expand_env(s: &str) -> String {
         .unwrap_or_else(|_| s.to_string())
 }
 
-/// Parse "8765:8765/tcp" → (host=8765, guest=8765, proto="tcp").
+/// Parse "8765:8765/tcp" -> (host=8765, guest=8765, proto="tcp").
 /// Proto defaults to tcp when omitted.
 pub fn parse_port_forward(s: &str) -> Result<(u16, u16, String)> {
     let (mapping, proto) = match s.split_once('/') {
@@ -797,13 +779,12 @@ fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<Ne
                     fail_open_after: net.fail_open_after,
                     kernel_arg: format!(
                         // gso=on + csum=on are safe with the fd-handoff
-                        // shape — tapfd.rs opens /dev/net/tun with
+                        // shape - tapfd.rs opens /dev/net/tun with
                         // IFF_VNET_HDR + TUNSETOFFLOAD(TUN_F_CSUM | TSO*),
                         // so the kernel's TCP stack hands large GSO skbs
                         // down and `virtio_net_hdr_from_skb` encodes the
-                        // gso_type for the host to segment.  Cuts the
-                        // per-MTU-frame syscall cost that drove memo 01
-                        // Step 2's 0.126 ratio.
+                        // gso_type for the host to segment, reducing
+                        // per-MTU-frame syscall cost.
                         "vec2.0:transport=fd,mode=fd,fd={fd},depth=128,gso=1,csum=1{queue_arg}{fail_open_arg}",
                         fd = VECTOR2_TAP_FD,
                         queue_arg = queue_arg,
@@ -858,7 +839,7 @@ fn tap_network_plan(net: &NetworkSection, runtime: &RuntimeSection) -> Result<Ne
 }
 
 // -------------------------------------------------------------------
-// Compile: Umlfile → (host setup actions, init script, kernel cmdline)
+// Compile: Umlfile -> (host setup actions, init script, kernel cmdline)
 // -------------------------------------------------------------------
 
 /// What we produced by compiling an Umlfile. The caller (cmd_up)
@@ -915,7 +896,7 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
             net.masquerade_via.clone()
         };
 
-        // Setup: ip tuntap add → addr → up → forwarding → MASQUERADE → port-forwards
+        // Setup: ip tuntap add -> addr -> up -> forwarding -> MASQUERADE -> port-forwards
         let user = std::env::var("USER").unwrap_or_else(|_| "uml".into());
         let multi_queue = if plan.driver == "vector2" && plan.queue_count > 1 {
             " multi_queue"
@@ -974,7 +955,7 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
                 guest = guest_ip_only, guest_port = guest_port,
             ));
             // SNAT host-local replies back through 10.7.0.1 so the guest's
-            // reply path (uml-tap0 → host) is symmetric.
+            // reply path (uml-tap0 -> host) is symmetric.
             setup_steps.push(format!(
                 "iptables -t nat -A POSTROUTING -p {proto} -d {guest} --dport {guest_port} -j SNAT --to-source {host_ip_only}",
                 proto = proto, guest = guest_ip_only, guest_port = guest_port,
@@ -1047,12 +1028,12 @@ pub fn compile(uml: &Umlfile) -> Result<Compiled> {
 }
 
 /// Render the in-guest init script. Stdlib bash, no fancy deps.
-/// Sequence: tmpfs /etc → resolv.conf → selected netdev up →
-/// volume bind-mounts → env exports → init phases.
+/// Sequence: tmpfs /etc -> resolv.conf -> selected netdev up ->
+/// volume bind-mounts -> env exports -> init phases.
 fn render_init_script(uml: &Umlfile) -> Result<String> {
     let mut s = String::new();
     s.push_str("#!/bin/bash\n");
-    s.push_str("# Auto-generated by `umlctl up`. Do not edit by hand —\n");
+    s.push_str("# Auto-generated by `umlctl up`. Do not edit by hand -\n");
     s.push_str("# regenerated on every `up` from the Umlfile.\n");
     s.push_str("set +e\n");
     s.push_str("\n");
@@ -1068,7 +1049,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("# Default environment (must come before user env so they\n");
     s.push_str("# can override). Without PATH set, sh's PATH lookup means\n");
     s.push_str("# argv[0]='python3' (no slash), and CPython's getpath cannot\n");
-    s.push_str("# resolve sys.executable — breaking subprocess.Popen,\n");
+    s.push_str("# resolve sys.executable - breaking subprocess.Popen,\n");
     s.push_str("# multiprocessing, regrtest workers, pytest, etc.\n");
     s.push_str(
         "export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\"\n",
@@ -1081,11 +1062,11 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     // Standard pseudo-filesystems and runtime mountpoints. The kernel
     // doesn't auto-mount these for init; without them, common
     // userspace bits silently break:
-    //   /proc       — /proc/self/exe, /proc/cpuinfo, etc.
-    //   /sys        — sysfs (cgroups, network info, etc.)
-    //   /dev/pts    — devpts, required for os.openpty() and TTY tests
-    //   /dev/shm    — POSIX shm_open / multiprocessing.shared_memory
-    //   /tmp        — tmpfs, ensures fresh writable scratch
+    //   /proc       - /proc/self/exe, /proc/cpuinfo, etc.
+    //   /sys        - sysfs (cgroups, network info, etc.)
+    //   /dev/pts    - devpts, required for os.openpty() and TTY tests
+    //   /dev/shm    - POSIX shm_open / multiprocessing.shared_memory
+    //   /tmp        - tmpfs, ensures fresh writable scratch
     //
     // All "mount; true" so re-runs / hostfs-prepopulated mounts don't
     // fail the script. Errors are silenced to avoid cluttering output.
@@ -1133,7 +1114,9 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("         ca-certificates ld.so.conf ld.so.conf.d \\\n");
     s.push_str("         machine-id localtime timezone apt \\\n");
     s.push_str("         python3 python3.13 python3.14; do\n");
-    s.push_str("    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n");
+    s.push_str(
+        "    [ -e \"/etc/$f\" ] && cp -a \"/etc/$f\" \"/tmp/.umlctl-etc-stash/\" 2>/dev/null\n",
+    );
     s.push_str("done\n");
     s.push_str("mount -t tmpfs tmpfs /etc 2>/dev/null || true\n");
     s.push_str("# Restore stashed files into the fresh tmpfs.\n");
@@ -1157,7 +1140,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     // to "localhost" (test_asyncio.test_events, test_multiprocessing*,
     // test_concurrent_futures.*) and would otherwise hit
     //   OSError: [Errno -3] Temporary failure in name resolution
-    // even when /etc snapshot above succeeded — the host's /etc/hosts
+    // even when /etc snapshot above succeeded - the host's /etc/hosts
     // doesn't always include the standard localhost entries (some
     // distros leave it minimal).
     s.push_str("cat > /etc/hosts <<'__HOSTS__'\n");
@@ -1168,7 +1151,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("__HOSTS__\n");
     s.push_str("\n");
 
-    // Network up (tap-specific config — lo already up above).
+    // Network up (tap-specific config - lo already up above).
     if uml.network.mode == "tap" {
         let dev = tap_network_plan(&uml.network, &uml.runtime)?.guest_dev;
 
@@ -1183,7 +1166,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
         s.push_str("\n");
     }
 
-    // Volumes — bind-mount src → dst. UML uses hostfs as root, so
+    // Volumes - bind-mount src -> dst. UML uses hostfs as root, so
     // src is reachable as-is; we just `mount --bind` to give the
     // workload a stable in-guest path.
     //
@@ -1198,7 +1181,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     //
     // Read-only volumes use `mount -o remount,bind,ro` after the
     // bind because Linux ignores the ro flag on the initial bind
-    // and requires the remount step to actually flip RW→RO.
+    // and requires the remount step to actually flip RW->RO.
     if !uml.volumes.is_empty() {
         s.push_str("# Volume bind-mounts (tmpfs parents to make dst writable\n");
         s.push_str("# under hostfs root; bind-mounts shadow with src content).\n");
@@ -1242,7 +1225,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
 
     render_network_metadata_exports(&mut s, uml)?;
 
-    // Phases. Each runs sequentially. The phase command goes through
+    // Init commands run sequentially. The phase command goes through
     // bash's `eval` so users can write pipelines, redirections, &c.
     s.push_str("__umlctl_phase() {\n");
     s.push_str("    local name=\"$1\"; shift\n");
@@ -1255,20 +1238,11 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
 
     // Deterministic shutdown via sysrq-trigger.
     //
-    // BUG (SMP-T54, 2026-05-04): /sbin/halt on most distros today is a
-    // symlink to /bin/systemctl. systemctl-as-halt opens a unix DBus
-    // socket to systemd and recvmsg-blocks waiting for a reply. Inside
-    // a UML guest where pid=1 is bash (not systemd), the reply never
-    // comes — `halt -f` then hangs in recvmsg(NR=47), the kernel RCU
-    // stall fires after ~21 jiffies, and the gate-loop counts the run
-    // as TIMEOUT instead of PASS. Observed at ~0.5-0.75% per N=400
-    // mt-mini SMP soak; the recvmsg-RCU-stall signature was the
-    // long-running "init.sh-hang in libc syscall" residual misfiled as
-    // a v2 kernel bug.
-    //
-    // Fix: drop the userspace halt path entirely. `echo b > /proc/sysrq
+    // Avoid the userspace halt path.  On many hosts /sbin/halt routes
+    // through systemctl, which can block in a UML guest where PID 1 is
+    // this shell script rather than systemd.  `echo b > /proc/sysrq
     // -trigger` invokes the kernel's sysrq_handle_reboot path, which
-    // calls machine_restart() immediately — no userspace cooperation
+    // calls machine_restart() immediately - no userspace cooperation
     // and no reliance on pid=1 handling SIGINT (sysrq-`o` would call
     // kill_cad_pid(SIGINT) which only works if init catches SIGINT;
     // bash does not, so sysrq-`o` is unreliable in our setup).
@@ -1287,7 +1261,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     //
     // Side benefit: user Umlfiles no longer need a trailing `halt -f`
     // phase. Existing ones still work in the success path; in the
-    // failure path their halt hangs and the gate-loop times out — to
+    // failure path their halt hangs and the gate-loop times out - to
     // avoid that, drop the halt phase from your Umlfile and let
     // umlctl handle shutdown.
     s.push_str("__umlctl_halt() {\n");
@@ -1300,7 +1274,7 @@ fn render_init_script(uml: &Umlfile) -> Result<String> {
     s.push_str("}\n\n");
 
     if uml.init.phases.is_empty() {
-        // No phases declared — drop into a shell so the user can poke around.
+        // No phases declared - drop into a shell so the user can poke around.
         s.push_str("echo '[umlctl] no phases declared; dropping into /bin/sh'\n");
         s.push_str("exec /bin/sh\n");
     } else {
@@ -1391,7 +1365,7 @@ fn shell_quote(s: &str) -> String {
     out
 }
 
-/// Parse "10.7.0.2/24" → "10.7.0.0/24". Used for the MASQUERADE
+/// Parse "10.7.0.2/24" -> "10.7.0.0/24". Used for the MASQUERADE
 /// source rule.
 fn guest_cidr(guest_ip: &str) -> Result<String> {
     let (ip, prefix) = guest_ip
@@ -1431,7 +1405,7 @@ fn guest_cidr(guest_ip: &str) -> Result<String> {
     ))
 }
 
-/// Strip the prefix from "10.7.0.2/24" → "10.7.0.2".
+/// Strip the prefix from "10.7.0.2/24" -> "10.7.0.2".
 fn guest_ip_addr(guest_ip: &str) -> Result<String> {
     Ok(guest_ip
         .split('/')
@@ -1446,14 +1420,12 @@ fn guest_ip_addr(guest_ip: &str) -> Result<String> {
 /// file is unparseable or doesn't have a BogoMIPS line.
 ///
 /// Used by fast-boot to pass `lpj=` on the kernel cmdline so the
-/// in-kernel BogoMIPS calibration loop is skipped — that calibration
+/// in-kernel BogoMIPS calibration loop is skipped - that calibration
 /// rounds up to the next jiffy and adds ~100 ms of wall-clock jitter.
 ///
-/// HONEST-AUDIT §17 — host-machine assumption.  The BogoMIPS this
-/// reads is from the *deploy host* (the machine umlctl is running
-/// on), which is the same machine the UML guest will run on.  So
-/// the calibration matches the actual hardware the guest's
-/// udelay() / mdelay() will execute on — which is what we want.
+/// The BogoMIPS this reads is from the deploy host, which is the same
+/// machine the UML guest will run on.  That keeps udelay()/mdelay()
+/// calibration tied to the actual hardware executing the guest.
 ///
 /// The corner that *could* be wrong: if the UML binary is later
 /// migrated to a different host without re-running umlctl deploy,
@@ -1474,14 +1446,14 @@ fn sniff_host_lpj() -> Option<u64> {
     let f = std::fs::File::open("/proc/cpuinfo").ok()?;
     for line in std::io::BufReader::new(f).lines().flatten() {
         if let Some(rest) = line.strip_prefix("bogomips") {
-            // "bogomips\t: 9866.44" → 9866.44
+            // "bogomips\t: 9866.44" -> 9866.44
             let v: f64 = rest
                 .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '.')
                 .split_whitespace()
                 .next()?
                 .parse()
                 .ok()?;
-            // loops_per_jiffy ≈ BogoMIPS × 1e6 / 2 (the kernel's
+            // loops_per_jiffy ~= BogoMIPS x 1e6 / 2 (the kernel's
             // calibration formula); cast to u64.
             return Some((v * 500_000.0) as u64);
         }
@@ -1517,28 +1489,23 @@ fn detect_default_iface() -> Result<String> {
 
 /// Run a list of `sh -c` steps via sudo, stopping on first failure.
 /// Used by `up` (setup_steps) and `down` (teardown_steps; non-fatal).
-/// SMP-T78..T84: translate `Umlfile.host_resources` into the
-/// manifest's host_env + cgroup_v2 fields. Empty input fields
-/// produce no entries (leave manifest unchanged).
-///
-/// Memo 52 (Documentation/virt/uml/redesign/08-future-phases/
-/// 52-uml-host-resource-controls.md). The kernel-side knobs read
-/// UM_* env vars at UML startup; this function is the declarative
-/// → procedural bridge.
+/// Translate `Umlfile.host_resources` into the manifest's host_env
+/// and cgroup_v2 fields. Empty input fields produce no entries and
+/// leave the manifest unchanged. The kernel-side knobs read UM_* env
+/// vars at UML startup; this function is the declarative-to-runtime
+/// bridge.
 pub fn apply_host_resources(hr: &HostResourcesSection, m: &mut crate::manifest::Manifest) {
     if !hr.thp.is_empty() {
         m.host_env.insert("UM_THP".into(), hr.thp.clone());
     }
     if let Some(n) = hr.oom_score_adj {
-        m.host_env
-            .insert("UM_OOM_SCORE_ADJ".into(), n.to_string());
+        m.host_env.insert("UM_OOM_SCORE_ADJ".into(), n.to_string());
     }
     if !hr.cpu_affinity.is_empty() {
         m.host_env
             .insert("UM_KVM_V2_CPU_AFFINITY".into(), hr.cpu_affinity.clone());
     }
     /*
-     * Memo 06 Phase 1 / HONEST-AUDIT §7: per-vCPU thread affinity.
      * "off" is the no-op default; everything else translates to
      * UM_KVM_V2_VCPU_AFFINITY for the kernel-side consumer.
      * "auto" computes the per-vCPU mask from @cpu_affinity at
@@ -1593,11 +1560,7 @@ pub fn run_sudo_steps(steps: &[String], stop_on_failure: bool, quiet: bool) -> R
 mod tests {
     use super::*;
 
-    /// HONEST-AUDIT §16: when this test was first added the manifest
-    /// fixture in supervise.rs was missing host_env and cgroup_v2,
-    /// which the production code path populates via
-    /// apply_host_resources().  This test locks the contract: every
-    /// HostResourcesSection field that should map to host_env or
+    /// Every HostResourcesSection field that should map to host_env or
     /// cgroup_v2 ends up in the Manifest.
     #[test]
     fn apply_host_resources_populates_host_env_and_cgroup_v2() {
@@ -1620,7 +1583,7 @@ mod tests {
             schema_version: 1,
             instance: crate::manifest::InstanceSection {
                 name: "test".into(),
-                created_at: "2026-05-19T00:00:00Z".into(),
+                created_at: "1970-01-01T00:00:00Z".into(),
             },
             kernel: crate::manifest::KernelSection {
                 path: PathBuf::from("/x"),
@@ -1643,10 +1606,7 @@ mod tests {
         apply_host_resources(&hr, &mut m);
 
         assert_eq!(m.host_env.get("UM_THP"), Some(&"off".to_string()));
-        assert_eq!(
-            m.host_env.get("UM_OOM_SCORE_ADJ"),
-            Some(&"500".to_string())
-        );
+        assert_eq!(m.host_env.get("UM_OOM_SCORE_ADJ"), Some(&"500".to_string()));
         assert_eq!(
             m.host_env.get("UM_KVM_V2_CPU_AFFINITY"),
             Some(&"0-3".to_string())
@@ -1654,8 +1614,7 @@ mod tests {
         assert_eq!(
             m.host_env.get("UM_KVM_V2_VCPU_AFFINITY"),
             Some(&"auto".to_string()),
-            "Memo 06 Phase 1 / HONEST-AUDIT §7: vcpu_thread_affinity \
-             plumbed into env"
+            "vcpu_thread_affinity plumbed into env"
         );
         assert_eq!(m.host_env.get("UM_HUGEPAGES"), Some(&"2M".to_string()));
         assert_eq!(
@@ -1682,7 +1641,7 @@ mod tests {
             schema_version: 1,
             instance: crate::manifest::InstanceSection {
                 name: "test".into(),
-                created_at: "2026-05-19T00:00:00Z".into(),
+                created_at: "1970-01-01T00:00:00Z".into(),
             },
             kernel: crate::manifest::KernelSection {
                 path: PathBuf::from("/x"),
@@ -1704,8 +1663,14 @@ mod tests {
 
         apply_host_resources(&hr, &mut m);
 
-        assert!(m.host_env.is_empty(), "host_env should stay empty for default HostResourcesSection");
-        assert!(m.cgroup_v2.is_none(), "cgroup_v2 should stay None for default HostResourcesSection");
+        assert!(
+            m.host_env.is_empty(),
+            "host_env should stay empty for default HostResourcesSection"
+        );
+        assert!(
+            m.cgroup_v2.is_none(),
+            "cgroup_v2 should stay None for default HostResourcesSection"
+        );
     }
 
     #[test]
@@ -1779,8 +1744,7 @@ path = "/x"
     #[test]
     fn render_init_includes_phases() {
         // Explicit driver = "vector" so the test continues to exercise
-        // the legacy vec0 render path even after Step 4b flipped the
-        // default to vector2.
+        // the vec0 render path while the default remains vector2.
         let u: Umlfile = toml::from_str(
             r#"
 schema_version = 1
@@ -2016,9 +1980,8 @@ tap_name = "compat-tap0"
 
     #[test]
     fn set_network_driver_validates_mode() {
-        // Explicit driver = "vector" so the legacy-to-vector2 flip
-        // sequence the test exercises still has somewhere to flip
-        // *from* after Step 4b changed the default to vector2.
+        // Explicit driver = "vector" so the test has a concrete value
+        // to replace while the default remains vector2.
         let mut u: Umlfile = toml::from_str(
             r#"
 schema_version = 1
@@ -2035,12 +1998,12 @@ driver = "vector"
 
         set_network_driver(&mut u, "vector2").unwrap();
         assert_eq!(u.network.driver, "vector2");
-        // set_network_driver flips driver_explicit on (HONEST-AUDIT §15).
+        // set_network_driver marks the driver as explicit.
         assert!(u.network.driver_explicit);
 
         u.network.mode = "none".into();
-        // mode!=tap rejects an explicitly-set driver (operator must
-        // either set mode=tap or drop the explicit driver= line).
+        // mode!=tap rejects an explicitly-set driver; users must
+        // either set mode=tap or drop the explicit driver= line.
         assert!(set_network_driver(&mut u, "vector2").is_err());
         assert!(set_network_driver(&mut u, "bogus").is_err());
     }
@@ -2132,10 +2095,9 @@ driver = "vector"
 
     #[test]
     fn network_fail_open_after_requires_vector2_and_positive_value() {
-        // Start at the legacy "vector" driver so the test exercises
-        // the "fail_open_after requires vector2" path.  Default flipped
-        // to vector2 under Step 4b — without the explicit driver line
-        // this assertion would otherwise pass trivially.
+        // Start at the "vector" driver so the test exercises the
+        // "fail_open_after requires vector2" path.  Without the
+        // explicit driver line this assertion would pass trivially.
         let mut u: Umlfile = toml::from_str(
             r#"
 schema_version = 1
@@ -2182,11 +2144,9 @@ driver = "bogus"
         std::fs::write(&path, toml::to_string(&u).unwrap()).unwrap();
         assert!(Umlfile::from_path(&path).is_err());
 
-        // mode!=tap rejects an explicitly-set driver
-        // (HONEST-AUDIT §15 — restored after the original drop).
-        // The check uses driver_explicit which the manual
-        // Deserialize impl sets to true whenever `driver` is
-        // present in the TOML source.
+        // mode!=tap rejects an explicitly-set driver. The check uses
+        // driver_explicit, which the manual Deserialize impl sets to
+        // true whenever `driver` is present in the TOML source.
         u.network.driver = "vector".into();
         u.network.driver_explicit = true;
         u.network.mode = "none".into();
@@ -2239,7 +2199,7 @@ mode = "none"
         )
         .unwrap();
         let s = render_init_script(&u).unwrap();
-        // PATH default — required for CPython sys.executable resolution.
+        // PATH default - required for CPython sys.executable resolution.
         assert!(s.contains("export PATH=\"${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}\""),
                 "missing default PATH export");
         // HOME, TERM, SHELL fallbacks.

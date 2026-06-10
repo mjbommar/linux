@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-spawn-smoke/run-pool-spawn-smoke.sh — kselftest for
-# `umlctl pool spawn` (Memo 09 Phase 1b).
+# um/pool-spawn-smoke/run-pool-spawn-smoke.sh - kselftest for
+# `umlctl pool spawn`.
 #
 # What it asserts:
 #   - `umlctl pool spawn` exits 0 against a CONFIG_UM_TEMPLATE_PAUSE=y

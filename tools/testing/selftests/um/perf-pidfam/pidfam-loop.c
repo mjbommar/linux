@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Mixed pid-family gadget perf loop (review-01 P2 #12).
+ * Mixed pid-family gadget perf loop.
  *
  * The perf-getpid microbenchmark only exercises the
  * __NR_getpid handler in the LSTAR gadget. The G4-G6 ladder
  * actually wired seven pid-family handlers + clock_gettime +
- * time + getcpu — review-01 noted that "useful remaining work
- * is measurement coverage for the non-getpid gadget family".
+ * time + getcpu.  This benchmark covers the non-getpid gadget family.
  *
  * This binary loops through the seven pid-family NRs in
  * round-robin so the measured per-call cost reflects the full

@@ -2,11 +2,12 @@
 #ifndef _LINUX_UML_INIT_H
 #define _LINUX_UML_INIT_H
 
-/* These macros are used to mark some functions or
+/*
+ * These macros are used to mark some functions or
  * initialized data (doesn't apply to uninitialized data)
- * as `initialization' functions. The kernel can take this
+ * as initialization' functions. The kernel can take this
  * as hint that the function is used only during the initialization
- * phase and free up used memory resources after
+ * path and free up used memory resources after
  *
  * Usage:
  * For functions:
@@ -18,8 +19,8 @@
  *    extern int z; z = x * y;
  * }
  *
- * If the function has a prototype somewhere, you can also add
- * __init between closing brace of the prototype and semicolon:
+ * If the function has a declaration somewhere, you can also add
+ * __init between the closing parenthesis and semicolon:
  *
  * extern int initialize_foobar_device(int, int, int) __init;
  *
@@ -43,8 +44,10 @@ typedef void (*exitcall_t)(void);
 
 #include <linux/compiler_types.h>
 
-/* These are for everybody (although not all archs will actually
-   discard it in modules) */
+/*
+ * These are for everybody, although not all archs will actually discard it in
+ * modules.
+ */
 #define __init		__section(".init.text")
 #define __initdata	__section(".init.data")
 #define __exitdata	__section(".exit.data")
@@ -60,8 +63,8 @@ typedef void (*exitcall_t)(void);
 
 #ifndef MODULE
 struct uml_param {
-        const char *str;
-        int (*setup_func)(char *, int *);
+	const char *str;
+	int (*setup_func)(char *line, int *add);
 };
 
 extern initcall_t __uml_postsetup_start, __uml_postsetup_end;
@@ -76,7 +79,7 @@ extern struct uml_param __uml_setup_start, __uml_setup_end;
 #define __uml_postsetup(fn)						\
 	static initcall_t __uml_postsetup_##fn __uml_postsetup_call = fn
 
-#define __non_empty_string(dummyname,string)				\
+#define __non_empty_string(dummyname, string)				\
 	struct __uml_non_empty_string_struct_##dummyname		\
 	{								\
 		char _string[sizeof(string)-2];				\
@@ -109,11 +112,12 @@ extern struct uml_param __uml_setup_start, __uml_setup_end;
 
 #ifdef __UM_HOST__
 
-#define __define_initcall(level,fn) \
-	static initcall_t __initcall_##fn __used \
-	__attribute__((__section__(".initcall" level ".init"))) = fn
+#define __define_initcall(level, fn)					\
+	static initcall_t __initcall_##fn __used			\
+	__section(".initcall" level ".init") = fn
 
-/* Userspace initcalls shouldn't depend on anything in the kernel, so we'll
+/*
+ * Userspace initcalls shouldn't depend on anything in the kernel, so we'll
  * make them run first.
  */
 #define __initcall(fn) __define_initcall("1", fn)

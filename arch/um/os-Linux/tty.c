@@ -30,10 +30,9 @@ int get_pty(void)
 	int fd, err;
 
 	/*
-	 * FD disposition (C-09 commit 4): consumer-disposition. The
-	 * PTY master fd is handed to chan drivers and retained for
-	 * the console's UML-side lifetime. O_CLOEXEC is atomic-safe
-	 * and consistent with the post-commit-4 hygiene contract.
+	 * The PTY master fd is handed to chan drivers and retained for the
+	 * console's UML-side lifetime. O_CLOEXEC avoids leaking it across
+	 * exec.
 	 */
 	fd = open("/dev/ptmx", O_RDWR | O_CLOEXEC);
 	if (fd < 0) {

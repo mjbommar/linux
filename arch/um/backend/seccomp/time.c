@@ -2,9 +2,9 @@
 /*
  * seccomp backend: time ops.
  *
- * Workstream A-03.S1.5. The host POSIX timer + clock_gettime
- * primitives are backend-neutral; these wrappers exist for the
- * dispatch macro to resolve.
+ * The host POSIX timer + clock_gettime primitives are
+ * backend-neutral; these wrappers exist for the dispatch macro to
+ * resolve.
  */
 #include <linux/errno.h>
 #include <linux/types.h>

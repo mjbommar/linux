@@ -49,13 +49,13 @@ SECTIONS
 
   /*
    * .um_patch_text holds UML runtime-patchable code: static_branch
-   * call sites, future ftrace mcount stubs, kprobe insertion points.
-   * Named with a leading `.um` so the generic `.text.*` wildcard does
+   * call sites, ftrace mcount stubs, kprobe insertion points.
+   * Named with a leading .um so the generic .text.* wildcard does
    * not claim it. Given its own page range so mprotect-writable windows
    * during patching don't expose the bulk of .text. Functions land here
    * via the __patchable_function attribute
    * (arch/um/include/asm/patchable.h). See
-   * Documentation/virt/uml/section-split.rst (workstream B-04).
+   * Documentation/virt/uml/section-split.rst.
    */
   . = ALIGN(PAGE_SIZE);
   .um_patch_text : {

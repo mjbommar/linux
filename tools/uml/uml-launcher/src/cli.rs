@@ -2,9 +2,8 @@
 //
 // CLI surface. clap-derive.
 //
-// Subcommand skeleton intentionally leaves room for v2 commands
-// (`snapshot`, `attach`, `list`, `stop`). v1 ships `run` + the
-// always-there `version`.
+// Subcommands are intentionally grouped here so the public CLI shape is
+// visible from one file.
 
 use std::path::PathBuf;
 
@@ -42,7 +41,7 @@ pub enum Command {
     /// Launch a UML kernel.
     Run(RunArgs),
 
-    /// Run a per-device vhost-user backend process (C-10 v2).
+    /// Run a per-device vhost-user backend process.
     ///
     /// `uml-launcher backend <class>` is the multi-call-binary dispatch
     /// that lets one binary ship all device classes (console, net,
@@ -50,11 +49,7 @@ pub enum Command {
     /// separate subcommand so per-class flags stay close to the code
     /// that uses them. Matches the `crosvm device <kind>` shape.
     ///
-    /// Currently scaffolding only: every class returns 0 after
-    /// emitting a "not yet implemented" line. The real vhost-user
-    /// logic, seccomp filters, and LSM transitions land in the
-    /// per-class commits that follow (see decisions-log D52 for the
-    /// bisectable plan).
+    /// Dispatches to the selected backend class.
     #[command(subcommand)]
     Backend(BackendClass),
 
@@ -64,17 +59,17 @@ pub enum Command {
 
 /// Device class served by `uml-launcher backend <class>`.
 ///
-/// The class set mirrors crosvm's device decomposition (minus the
-/// niche ones — gpu, snd, wl, pmem — which are v3+ per D52). Each
-/// variant carries its own args struct so per-class flags stay
-/// type-checked without leaking into the common surface.
+/// The class set mirrors crosvm's device decomposition, minus device
+/// types that UML does not expose here. Each variant carries its own
+/// args struct so per-class flags stay type-checked without leaking
+/// into the common surface.
 #[derive(Subcommand, Debug, Clone)]
 pub enum BackendClass {
     /// virtio-console backend. Simplest vhost-user surface: one RX
     /// + one TX queue, byte-oriented.
     Console(BackendConsoleArgs),
 
-    /// virtio-net backend. Tap-backed in v2; slirp is v3+.
+    /// virtio-net backend. Tap-backed.
     Net(BackendNetArgs),
 
     /// virtio-blk backend. File-backed image via O_DIRECT.
@@ -164,7 +159,7 @@ pub struct RunArgs {
     pub mem: Option<String>,
 
     /// Root filesystem mode: `hostfs` (default) or a path to a
-    /// ubd image (not yet wired in v1 — hostfs only).
+    /// ubd image.
     ///
     /// Left as Option<_> with no clap default so TOML/env layers
     /// can override; the final default lives in Config::default().
@@ -179,7 +174,7 @@ pub struct RunArgs {
     pub console: Option<Console>,
 
     /// Plumb host fds 198 (ctl) and 199 (status) into the UML
-    /// child for the C-09 AFL forkserver protocol. The CTL fd is
+    /// child for the AFL-style forkserver protocol. The CTL fd is
     /// the one the launcher reads from externally (fuzzer →
     /// kernel); STATUS is the one the launcher writes to
     /// (kernel → fuzzer). Accepts `--forkserver=ctl_fd,status_fd`.

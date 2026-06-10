@@ -60,9 +60,11 @@ pub fn run(args: KernelArgs) -> Result<()> {
     std::fs::create_dir_all(&build_dir)
         .with_context(|| format!("create build dir {}", build_dir.display()))?;
 
-    let jobs = args
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2));
+    let jobs = args.jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+    });
 
     tracing::info!(
         profile = %prof.profile.name,
@@ -72,13 +74,13 @@ pub fn run(args: KernelArgs) -> Result<()> {
         "umlbuild kernel: starting"
     );
 
-    // Phase 1: write the base .config.
+    // Write the base .config.
     write_base_config(&source, &build_dir, &prof.kernel.base_config)?;
 
-    // Phase 2: apply the Kconfig overlay.
+    // Apply the Kconfig overlay.
     apply_overlay(&source, &build_dir, &prof.kernel)?;
 
-    // Phase 3: olddefconfig + make.
+    // Run olddefconfig + make.
     let config_sha = sha256_of_file(&build_dir.join(".config"))?;
     let stamp = build_dir.join(".umlbuild-config-sha256");
     let prior = std::fs::read_to_string(&stamp).ok();
@@ -102,14 +104,12 @@ pub fn run(args: KernelArgs) -> Result<()> {
             .with_context(|| format!("write stamp {}", stamp.display()))?;
     }
 
-    // Phase 4: optional strip, copy to --out.
+    // Optional strip, copy to --out.
     let built = build_dir.join("linux");
     if !built.is_file() {
         bail!("expected {} to exist after make", built.display());
     }
-    let out = args
-        .out
-        .unwrap_or_else(|| build_dir.join("linux"));
+    let out = args.out.unwrap_or_else(|| build_dir.join("linux"));
     if out != built {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)
@@ -128,7 +128,7 @@ pub fn run(args: KernelArgs) -> Result<()> {
         }
     }
 
-    // Phase 5: emit a sidecar manifest.
+    // Emit a sidecar manifest.
     let size = std::fs::metadata(&out)
         .with_context(|| format!("stat {}", out.display()))?
         .len();
@@ -254,7 +254,7 @@ fn run_make(
     // thousands of `CC file.o` lines that drown any interactive shell.
     // The user sees the make invocation summary; errors are propagated
     // via the exit status (then we tail the log on failure for the
-    // operator to see).  Set UMLBUILD_VERBOSE=1 to keep stdout/stderr
+    // user to see).  Set UMLBUILD_VERBOSE=1 to keep stdout/stderr
     // attached.
     let verbose = std::env::var_os("UMLBUILD_VERBOSE").is_some();
     let status = if verbose {
@@ -271,7 +271,7 @@ fn run_make(
             .with_context(|| format!("spawn make for phase '{phase}'"))?
     };
     if !status.success() {
-        // On failure, surface the last bit of the log so the operator
+        // On failure, surface the last bit of the log so the user
         // sees what broke without having to know the path.
         if !verbose {
             eprintln!("umlbuild kernel: make {phase} failed — last 30 log lines:");

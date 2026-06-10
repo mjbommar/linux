@@ -34,7 +34,7 @@ ifdef CONFIG_64BIT
 	KBUILD_CFLAGS += -mcmodel=large
 endif
 
-# Ftrace call-site emission (workstream C-05, decisions-log D29).
+# Ftrace call-site emission.
 # Under -mcmodel=large, GCC's -pg -mfentry expands to a 33-byte
 # indirect call sequence that recordmcount cannot recognize. Use
 # -fpatchable-function-entry=5,0 instead: the compiler emits a
@@ -52,12 +52,11 @@ include $(srctree)/$(HOST_DIR)/Makefile.um
 
 core-y += $(HOST_DIR)/um/
 
-# Workstream C-06 v1: pull arch/x86/net/ into the UML build when
-# BPF JIT is configured. UML-local shim headers in
+# Pull arch/x86/net/ into the UML build when BPF JIT is configured.
+# UML-local shim headers in
 # arch/um/include/asm/ + arch/um/kernel/x86_nops.c +
 # bpf_jit_comp.c's CONFIG_UM reg2pt_regs[] branch satisfy the
-# x86-host divergences. See Documentation/virt/uml/redesign/
-# 02-workstreams/C-profiles-and-gaps/06-port-bpf-jit.md.
+# x86-host divergences.
 core-$(CONFIG_BPF_JIT) += $(HOST_DIR)/net/
 
 SHARED_HEADERS	:= $(ARCH_DIR)/include/shared
@@ -121,7 +120,7 @@ linux: vmlinux
 	@echo '  LINK $@'
 	$(Q)ln -f $< $@
 
-# --- uml/<profile> configure targets (workstream C-01) -------------
+# --- uml/<profile> configure targets -------------------------------
 #
 # Merge arch/um/configs/base_defconfig with
 # arch/um/configs/profiles/<profile>.config into .config, then let

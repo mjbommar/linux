@@ -79,35 +79,32 @@ static struct io_thread_req **io_req_buffer;
 static struct io_thread_req *io_remainder;
 static int io_remainder_size;
 
-/*
- * Phase 2a of memo #2 (UBD io_uring) — declarations hoisted here so
- * ubd_driver_init can initialise the ring (forward reference resolved
- * at file scope).  Definitions and the do_io_ring() body live next to
- * the legacy do_io() further down.
- */
+/* io_uring state; definitions live next to the legacy do_io() path. */
 #define UBD_RING_DEPTH 256
 static struct os_io_ring *ubd_ring;
 
 /*
- * Memo #2 perf-comparison knob.  Set via cmdline `um_ubd_no_uring=1`
+ * Performance-comparison knob. Set via cmdline um_ubd_no_uring=1
  * to force the legacy synchronous helper-thread path even when the
- * host kernel could support io_uring.  Used by the A/B bench in
- * tools/testing/selftests/um/ubd-bench/.  Default 0 keeps the
+ * host kernel could support io_uring. Used by the performance benchmark
+ * in tools/testing/selftests/um/ubd-bench/. Default 0 keeps the
  * io_uring path enabled.
  *
- * Note: name starts with `um_ubd_` rather than `ubd_` because
- * __setup("ubd", ubd_setup) above does a prefix match and would
- * otherwise capture this and try to parse it as a device spec.
+ * Note: name starts with um_ubd_ rather than ubd_ because
+ * the ubd device parser uses a prefix match and would otherwise
+ * capture this and try to parse it as a device spec.
  */
 static int ubd_no_io_uring;
 static int __init ubd_no_io_uring_setup(char *s)
 {
-	ubd_no_io_uring = simple_strtol(s, NULL, 0);
+	int ret;
+
+	ret = kstrtoint(s, 0, &ubd_no_io_uring);
+	if (ret)
+		pr_warn("ubd: invalid um_ubd_no_uring value '%s'\n", s);
 	return 1;
 }
 __setup("um_ubd_no_uring=", ubd_no_io_uring_setup);
-
-
 
 static inline int ubd_test_bit(__u64 bit, unsigned char *data)
 {
@@ -143,9 +140,9 @@ static int ubd_getgeo(struct gendisk *disk, struct hd_geometry *geo);
 #define MAX_DEV (16)
 
 static const struct block_device_operations ubd_blops = {
-        .owner		= THIS_MODULE,
-        .ioctl		= ubd_ioctl,
-        .compat_ioctl	= blkdev_compat_ptr_ioctl,
+	.owner		= THIS_MODULE,
+	.ioctl		= ubd_ioctl,
+	.compat_ioctl	= blkdev_compat_ptr_ioctl,
 	.getgeo		= ubd_getgeo,
 };
 
@@ -199,13 +196,13 @@ struct ubd {
 }
 
 #define DEFAULT_UBD { \
-	.file = 		NULL, \
+		.file =			NULL, \
 	.serial =		NULL, \
 	.fd =			-1, \
 	.size =			-1, \
 	.boot_openflags =	OPEN_FLAGS, \
 	.openflags =		OPEN_FLAGS, \
-	.no_cow =               0, \
+		.no_cow =		0, \
 	.no_trim =		0, \
 	.shared =		0, \
 	.cow =			DEFAULT_COW, \
@@ -235,13 +232,12 @@ static int parse_unit(char **ptr)
 	char *str = *ptr, *end;
 	int n = -1;
 
-	if(isdigit(*str)) {
+	if (isdigit(*str)) {
 		n = simple_strtoul(str, &end, 0);
-		if(end == str)
+		if (end == str)
 			return -1;
 		*ptr = end;
-	}
-	else if (('a' <= *str) && (*str <= 'z')) {
+	} else if (('a' <= *str) && (*str <= 'z')) {
 		n = *str - 'a';
 		str++;
 		*ptr = str;
@@ -260,11 +256,12 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 	char *file, *backing_file, *serial;
 	int n, err = 0, i;
 
-	if(index_out) *index_out = -1;
+	if (index_out)
+		*index_out = -1;
 	n = *str;
-	if(n == '='){
+	if (n == '=') {
 		str++;
-		if(!strcmp(str, "sync")){
+		if (!strcmp(str, "sync")) {
 			global_openflags = of_sync(global_openflags);
 			return err;
 		}
@@ -274,11 +271,11 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 	}
 
 	n = parse_unit(&str);
-	if(n < 0){
+	if (n < 0) {
 		*error_out = "Couldn't parse device number";
 		return -EINVAL;
 	}
-	if(n >= MAX_DEV){
+	if (n >= MAX_DEV) {
 		*error_out = "Device number out of range";
 		return 1;
 	}
@@ -287,7 +284,7 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 	mutex_lock(&ubd_lock);
 
 	ubd_dev = &ubd_devs[n];
-	if(ubd_dev->file != NULL){
+	if (ubd_dev->file != NULL) {
 		*error_out = "Device is already configured";
 		goto out;
 	}
@@ -315,10 +312,10 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 			break;
 		case 'D':
 			/*
-			 * memo #2 Phase 4: O_DIRECT on the backing file.
-			 * Skips the host page cache so io_uring's queue
+			 * O_DIRECT on the backing file skips the host page
+			 * cache so io_uring's queue
 			 * depth (UBD_RING_DEPTH = 256) actually shows
-			 * up as a measured win — buffered I/O lets the
+			 * up as a measured win. Buffered I/O lets the
 			 * host pagecache absorb writes and mask the
 			 * ring's advantage over the legacy depth-1
 			 * helper thread.
@@ -335,8 +332,7 @@ static int ubd_setup_common(char *str, int *index_out, char **error_out)
 			str++;
 			goto break_loop;
 		default:
-			*error_out = "Expected '=' or flag letter "
-				"(r, s, c, t, D, or d)";
+			*error_out = "Expected '=' or supported flag letter";
 			goto out;
 		}
 		str++;
@@ -382,7 +378,7 @@ static int ubd_setup(char *str)
 	int err;
 
 	err = ubd_setup_common(str, NULL, &error);
-	if(err)
+	if (err)
 		printk(KERN_ERR "Failed to initialize device with \"%s\" : "
 		       "%s\n", str, error);
 	return 1;
@@ -414,7 +410,7 @@ __uml_help(ubd_setup,
 "    cluster filesystem and inappropriate at almost all other times.\n\n"
 "    't' will disable trim/discard support on the device (enabled by default).\n\n"
 "    'D' will open the backing file with O_DIRECT, bypassing the host page\n"
-"    cache. Pairs naturally with the io_uring submission path (memo #2);\n"
+"    cache. Pairs naturally with the io_uring submission path;\n"
 "    the host's queue depth then drives throughput rather than the page\n"
 "    cache. Requires page-aligned bvecs (default for whole-page block I/O\n"
 "    on Linux); sub-page sectored I/O via COW may trip O_DIRECT alignment\n"
@@ -570,7 +566,7 @@ static inline int ubd_file_size(struct ubd *ubd_dev, __u64 *size_out)
 		&mtime, &size, &sector_size, &align, &bitmap_offset);
 	os_close_file(fd);
 
-	if(err == -EINVAL)
+	if (err == -EINVAL)
 		file = ubd_dev->file;
 	else
 		file = backing_file;
@@ -611,8 +607,7 @@ static int backing_file_mismatch(char *file, __u64 size, time64_t mtime)
 	}
 
 	if (actual != size) {
-		/*__u64 can be a long on AMD64 and with %lu GCC complains; so
-		 * the typecast.*/
+		/* Cast explicitly so both arguments match the %llu format. */
 		printk(KERN_ERR "Size mismatch (%llu vs %llu) of COW header "
 		       "vs backing file\n", (unsigned long long) size, actual);
 		return -EINVAL;
@@ -764,7 +759,7 @@ static int create_cow_file(char *cow_file, char *backing_file,
 static void ubd_close_dev(struct ubd *ubd_dev)
 {
 	os_close_file(ubd_dev->fd);
-	if(ubd_dev->cow.file == NULL)
+	if (ubd_dev->cow.file == NULL)
 		return;
 
 	os_close_file(ubd_dev->cow.fd);
@@ -789,29 +784,29 @@ static int ubd_open_dev(struct ubd *ubd_dev)
 				&ubd_dev->cow.bitmap_len, &ubd_dev->cow.data_offset,
 				create_ptr);
 
-	if((fd == -ENOENT) && create_cow){
+	if ((fd == -ENOENT) && create_cow) {
 		fd = create_cow_file(ubd_dev->file, ubd_dev->cow.file,
 					  ubd_dev->openflags, SECTOR_SIZE, PAGE_SIZE,
 					  &ubd_dev->cow.bitmap_offset,
 					  &ubd_dev->cow.bitmap_len,
 					  &ubd_dev->cow.data_offset);
-		if(fd >= 0){
+		if (fd >= 0) {
 			printk(KERN_INFO "Creating \"%s\" as COW file for "
 			       "\"%s\"\n", ubd_dev->file, ubd_dev->cow.file);
 		}
 	}
 
-	if(fd < 0){
+	if (fd < 0) {
 		printk("Failed to open '%s', errno = %d\n", ubd_dev->file,
 		       -fd);
 		return fd;
 	}
 	ubd_dev->fd = fd;
 
-	if(ubd_dev->cow.file != NULL){
+	if (ubd_dev->cow.file != NULL) {
 		err = -ENOMEM;
 		ubd_dev->cow.bitmap = vmalloc(ubd_dev->cow.bitmap_len);
-		if(ubd_dev->cow.bitmap == NULL){
+		if (ubd_dev->cow.bitmap == NULL) {
 			printk(KERN_ERR "Failed to vmalloc COW bitmap\n");
 			goto error;
 		}
@@ -819,14 +814,15 @@ static int ubd_open_dev(struct ubd *ubd_dev)
 		err = read_cow_bitmap(ubd_dev->fd, ubd_dev->cow.bitmap,
 				      ubd_dev->cow.bitmap_offset,
 				      ubd_dev->cow.bitmap_len);
-		if(err < 0)
+		if (err < 0)
 			goto error;
 
 		flags = ubd_dev->openflags;
 		flags.w = 0;
 		err = open_ubd_file(ubd_dev->cow.file, &flags, ubd_dev->shared, NULL,
 				    NULL, NULL, NULL, NULL);
-		if(err < 0) goto error;
+		if (err < 0)
+			goto error;
 		ubd_dev->cow.fd = err;
 	}
 	return 0;
@@ -895,7 +891,7 @@ static int ubd_add(int n, char **error_out)
 	struct gendisk *disk;
 	int err = 0;
 
-	if(ubd_dev->file == NULL)
+	if (ubd_dev->file == NULL)
 		goto out;
 
 	if (ubd_dev->cow.file)
@@ -906,7 +902,7 @@ static int ubd_add(int n, char **error_out)
 	}
 
 	err = ubd_file_size(ubd_dev, &ubd_dev->size);
-	if(err < 0){
+	if (err < 0) {
 		*error_out = "Couldn't determine size of device's file";
 		goto out;
 	}
@@ -1012,7 +1008,7 @@ static int ubd_get_config(char *name, char *str, int size, char **error_out)
 	int n, len = 0;
 
 	n = parse_unit(&name);
-	if((n >= MAX_DEV) || (n < 0)){
+	if ((n >= MAX_DEV) || (n < 0)) {
 		*error_out = "ubd_get_config : device number out of range";
 		return -1;
 	}
@@ -1020,18 +1016,19 @@ static int ubd_get_config(char *name, char *str, int size, char **error_out)
 	ubd_dev = &ubd_devs[n];
 	mutex_lock(&ubd_lock);
 
-	if(ubd_dev->file == NULL){
+	if (ubd_dev->file == NULL) {
 		CONFIG_CHUNK(str, size, len, "", 1);
 		goto out;
 	}
 
 	CONFIG_CHUNK(str, size, len, ubd_dev->file, 0);
 
-	if(ubd_dev->cow.file != NULL){
+	if (ubd_dev->cow.file != NULL) {
 		CONFIG_CHUNK(str, size, len, ",", 0);
 		CONFIG_CHUNK(str, size, len, ubd_dev->cow.file, 1);
+	} else {
+		CONFIG_CHUNK(str, size, len, "", 1);
 	}
-	else CONFIG_CHUNK(str, size, len, "", 1);
 
  out:
 	mutex_unlock(&ubd_lock);
@@ -1057,7 +1054,7 @@ static int ubd_remove(int n, char **error_out)
 
 	ubd_dev = &ubd_devs[n];
 
-	if(ubd_dev->file == NULL)
+	if (ubd_dev->file == NULL)
 		goto out;
 
 	if (ubd_dev->disk) {
@@ -1103,7 +1100,7 @@ static int __init ubd0_init(void)
 	struct ubd *ubd_dev = &ubd_devs[0];
 
 	mutex_lock(&ubd_lock);
-	if(ubd_dev->file == NULL)
+	if (ubd_dev->file == NULL)
 		ubd_dev->file = "root_fs";
 	mutex_unlock(&ubd_lock);
 
@@ -1146,9 +1143,9 @@ static int __init ubd_init(void)
 	}
 	platform_driver_register(&ubd_driver);
 	mutex_lock(&ubd_lock);
-	for (i = 0; i < MAX_DEV; i++){
+	for (i = 0; i < MAX_DEV; i++) {
 		err = ubd_add(i, &error);
-		if(err)
+		if (err)
 			printk(KERN_ERR "Failed to initialize ubd device %d :"
 			       "%s\n", i, error);
 	}
@@ -1163,7 +1160,7 @@ static int __init ubd_driver_init(void)
 	int err;
 
 	/* Set by CONFIG_BLK_DEV_UBD_SYNC or ubd=sync.*/
-	if(global_openflags.s){
+	if (global_openflags.s) {
 		printk(KERN_INFO "ubd: Synchronous mode\n");
 		/* Letting ubd=sync be like using ubd#s= instead of ubd#= is
 		 * enough. So use anyway the io thread. */
@@ -1176,29 +1173,29 @@ static int __init ubd_driver_init(void)
 		return 0;
 	}
 	/*
-	 * Phase 2a (memo #2): try to bring up the io_uring substrate.
-	 * If it succeeds, do_io_ring takes over for read/write ops with
-	 * within-request parallelism.  If io_uring_setup is unavailable
-	 * (older host, seccomp-blocked) ubd_ring stays NULL and the
-	 * legacy synchronous do_io path runs unchanged.
+	 * Try to bring up the io_uring substrate. If it succeeds,
+	 * do_io_ring_batch() takes over for read/write ops with
+	 * parallelism. If io_uring_setup is unavailable (older host,
+	 * seccomp-blocked), ubd_ring stays NULL and the legacy synchronous
+	 * do_io path runs unchanged.
 	 *
-	 * `ubd_no_io_uring=1` cmdline forces the legacy path for A/B
-	 * perf comparison without changing the binary.
+	 * um_ubd_no_uring=1 cmdline forces the legacy path for
+	 * performance comparison without changing the binary.
 	 */
 	if (ubd_no_io_uring) {
-		printk(KERN_INFO "ubd: io_uring disabled by ubd_no_io_uring=1; using legacy sync I/O\n");
+		pr_info("ubd: io_uring disabled by um_ubd_no_uring=1; using legacy sync I/O\n");
 		ubd_ring = NULL;
 	} else {
 		ubd_ring = os_io_ring_create(UBD_RING_DEPTH);
 		if (ubd_ring)
-			printk(KERN_INFO "ubd: io_uring substrate active (depth=%d)\n",
-			       UBD_RING_DEPTH);
+			pr_info("ubd: io_uring substrate active (depth=%d)\n",
+				UBD_RING_DEPTH);
 		else
-			printk(KERN_INFO "ubd: io_uring unavailable, using legacy sync I/O\n");
+			pr_info("ubd: io_uring unavailable, using legacy sync I/O\n");
 	}
 	err = um_request_irq(UBD_IRQ, thread_fd, IRQ_READ, ubd_intr,
 			     0, "ubd", ubd_devs);
-	if(err < 0)
+	if (err < 0)
 		printk(KERN_ERR "um_request_irq failed - errno = %d\n", -err);
 	return 0;
 }
@@ -1214,21 +1211,21 @@ static void cowify_bitmap(__u64 io_offset, int length, unsigned long *cow_mask,
 	int i, update_bitmap = 0;
 
 	for (i = 0; i < length >> SECTOR_SHIFT; i++) {
-		if(cow_mask != NULL)
+		if (cow_mask != NULL)
 			ubd_set_bit(i, (unsigned char *) cow_mask);
-		if(ubd_test_bit(sector + i, (unsigned char *) bitmap))
+		if (ubd_test_bit(sector + i, (unsigned char *) bitmap))
 			continue;
 
 		update_bitmap = 1;
 		ubd_set_bit(sector + i, (unsigned char *) bitmap);
 	}
 
-	if(!update_bitmap)
+	if (!update_bitmap)
 		return;
 
 	*cow_offset = sector / (sizeof(unsigned long) * 8);
 
-	/* This takes care of the case where we're exactly at the end of the
+	/* This takes care of the case where the request ends exactly at the
 	 * device, and *cow_offset + 1 is off the end.  So, just back it up
 	 * by one word.  Thanks to Lynn Kerby for the fix and James McMechan
 	 * for the original diagnosis.
@@ -1256,7 +1253,7 @@ static void cowify_req(struct io_thread_req *req, struct io_desc *segment,
 
 	if (req_op(req->req) == REQ_OP_READ) {
 		for (i = 0; i < segment->length >> SECTOR_SHIFT; i++) {
-			if(ubd_test_bit(sector + i, (unsigned char *) bitmap))
+			if (ubd_test_bit(sector + i, (unsigned char *) bitmap))
 				ubd_set_bit(i, (unsigned char *)
 					    &segment->sector_mask);
 		}
@@ -1422,19 +1419,19 @@ static int ubd_ioctl(struct block_device *bdev, blk_mode_t mode,
 		ubd_id[ATA_ID_CYLS]	= ubd_dev->size / (128 * 32 * 512);
 		ubd_id[ATA_ID_HEADS]	= 128;
 		ubd_id[ATA_ID_SECTORS]	= 32;
-		if(copy_to_user((char __user *) arg, (char *) &ubd_id,
+		if (copy_to_user((char __user *)arg, (char *)&ubd_id,
 				 sizeof(ubd_id)))
 			return -EFAULT;
 		return 0;
 
 	case CDROMVOLREAD:
-		if(copy_from_user(&volume, (char __user *) arg, sizeof(volume)))
+		if (copy_from_user(&volume, (char __user *)arg, sizeof(volume)))
 			return -EFAULT;
 		volume.channel0 = 255;
 		volume.channel1 = 255;
 		volume.channel2 = 255;
 		volume.channel3 = 255;
-		if(copy_to_user((char __user *) arg, &volume, sizeof(volume)))
+		if (copy_to_user((char __user *)arg, &volume, sizeof(volume)))
 			return -EFAULT;
 		return 0;
 	}
@@ -1490,10 +1487,10 @@ static void do_io(struct io_thread_req *req, struct io_desc *desc)
 	int n, nsectors, start, end, bit;
 	__u64 off;
 
-	/* FLUSH is really a special case, we cannot "case" it with others */
+	/* FLUSH needs separate handling from data operations. */
 
 	if (req_op(req->req) == REQ_OP_FLUSH) {
-		/* fds[0] is always either the rw image or our cow file */
+		/* fds[0] is always either the rw image or the COW file. */
 		req->error = map_error(-os_sync_file(req->fds[0]));
 		return;
 	}
@@ -1503,7 +1500,7 @@ static void do_io(struct io_thread_req *req, struct io_desc *desc)
 	do {
 		bit = ubd_test_bit(start, (unsigned char *) &desc->sector_mask);
 		end = start;
-		while((end < nsectors) &&
+		while ((end < nsectors) &&
 		      (ubd_test_bit(end, (unsigned char *) &desc->sector_mask) == bit))
 			end++;
 
@@ -1524,12 +1521,13 @@ static void do_io(struct io_thread_req *req, struct io_desc *desc)
 					req->error = map_error(-n);
 					return;
 				}
-			} while((n < len) && (n != 0));
-			if (n < len) memset(&buf[n], 0, len - n);
+			} while ((n < len) && (n != 0));
+			if (n < len)
+				memset(&buf[n], 0, len - n);
 			break;
 		case REQ_OP_WRITE:
 			n = os_pwrite_file(req->fds[bit], buf, len, off);
-			if(n != len){
+			if (n != len) {
 				req->error = map_error(-n);
 				return;
 			}
@@ -1555,7 +1553,7 @@ static void do_io(struct io_thread_req *req, struct io_desc *desc)
 		}
 
 		start = end;
-	} while(start < nsectors);
+	} while (start < nsectors);
 
 	req->offset += len;
 	req->error = update_bitmap(req, desc);
@@ -1566,28 +1564,20 @@ static void do_io(struct io_thread_req *req, struct io_desc *desc)
  */
 int kernel_fd = -1;
 
-/* Only changed by the io thread. XXX: currently unused. */
+/* Only the I/O thread updates this field. */
 static int io_count;
 
 /*
- * Per Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-
- * next-sprint/02-ubd-io-uring.md (memo #2, Phase 2a).
- *
  * Async per-request submission via the host io_uring substrate
  * (arch/um/os-Linux/io_uring.c).  Each request's segments are
  * submitted in parallel; completions are harvested in any order;
  * partial reads/writes are re-submitted for the remainder.
  *
  * The DISCARD / WRITE_ZEROES / FLUSH paths stay on the legacy
- * synchronous helpers (memo §Phase 5 future work).  Bitmap update
- * stays synchronous (memo §Phase 5 with IOSQE_IO_DRAIN).
+ * synchronous helpers. Bitmap update stays synchronous.
  *
- * Cross-request parallelism (memo Phase 2b) requires restructuring
- * the io_thread loop to drain reqs into the ring without per-req
- * harvest barriers.  This commit lands within-request parallelism
- * only — already a measurable win on multi-segment requests (the
- * common case for MAX_SG > 1 workloads like Postgres / mmapped
- * pagewriteback).
+ * Cross-request parallelism uses do_io_ring_batch(), which drains
+ * reqs into the ring without per-req harvest barriers.
  *
  * UBD_RING_DEPTH + ubd_ring forward-declared near the top of the
  * file so __init code paths see them without reorder pain.
@@ -1608,14 +1598,14 @@ struct ubd_pending_slot {
 	unsigned long long off;
 
 	/*
-	 * Phase 2b (memo #2): the owning request, so a CQE harvested
+	 * Owning request, so a CQE harvested
 	 * from any pending slot can be routed back to its req's error
 	 * field even when slots from many reqs are in flight at once.
 	 */
 	struct io_thread_req	*req;
 
 	/*
-	 * Phase 3 (memo #2): vectored submission.  When .vec_cnt > 0
+	 * Vectored submission. When .vec_cnt > 0
 	 * the slot represents a single IORING_OP_READV / WRITEV
 	 * spanning io_desc[0..vec_cnt-1].  Short-completion fall-back
 	 * routes the remainder through the per-segment path via
@@ -1625,7 +1615,6 @@ struct ubd_pending_slot {
 	struct iovec	vec[MAX_SG];
 };
 
-static struct os_io_ring *ubd_ring;
 static struct ubd_pending_slot ubd_slots[UBD_RING_DEPTH];
 
 static int ubd_slot_alloc(void)
@@ -1641,7 +1630,10 @@ static int ubd_slot_alloc(void)
 	return -1;
 }
 
-static void ubd_slot_free(int i) { ubd_slots[i].in_use = 0; }
+static void ubd_slot_free(int i)
+{
+	ubd_slots[i].in_use = 0;
+}
 
 /*
  * Vectored-slot short-completion: trim consumed iovecs from the
@@ -1663,7 +1655,7 @@ static int ubd_ring_resubmit_vectored(int slot_idx)
 		pos += ilen;
 	}
 	if (i >= s->vec_cnt)
-		return -EINVAL;	/* over-completed — caller frees slot */
+		return -EINVAL;	/* over-completed; caller frees slot */
 
 	if (s->done > pos) {
 		unsigned long inner = s->done - pos;
@@ -1745,9 +1737,8 @@ static int ubd_ring_submit_one(struct io_thread_req *req, int op, int fd,
 }
 
 /*
- * Phase 3 (memo #2) — vectored submission.
- *
- * When a request's io_desc[] is entirely uniform (sector_mask == 0 +
+ * Vectored submission. When a request's io_desc[] is entirely uniform
+ * (sector_mask == 0 +
  * cow_offset == -1 everywhere), all descriptors target the same fd
  * and run contiguously on disk.  Coalesce them into a single
  * IORING_OP_WRITEV / READV submission: one SQE instead of desc_cnt.
@@ -1815,20 +1806,7 @@ static bool ubd_req_vectored_eligible(struct io_thread_req *req)
 }
 
 /*
- * Async path for a single req.  Submits every read/write
- * sub-segment (split by sector_mask bit, same as legacy do_io) and
- * harvests all completions before returning.  Falls back to legacy
- * sync do_io for FLUSH / DISCARD / WRITE_ZEROES which aren't yet on
- * the ring (memo §Phase 5).
- */
-/*
- * Phase 2b (memo #2) — cross-request parallelism helpers.
- *
- * do_io_ring() handles a single request at a time: submit all its
- * SQEs, drain all its CQEs, do its bitmap update.  That leaves the
- * ring's depth largely unused when the block layer hands us a batch
- * of N requests (UBD_REQ_BUFFER_SIZE / sizeof(*req) reqs per
- * bulk_req_safe_read).
+ * Cross-request parallelism helpers.
  *
  * do_io_ring_batch() submits the SQEs for every request in the
  * batch *before* draining, so multiple reqs are in flight at once.
@@ -1949,7 +1927,7 @@ static void ubd_submit_req_async(struct io_thread_req *req)
 
 	op = req_op(req->req);
 	if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
-		/* FLUSH / DISCARD / WRITE_ZEROES — sync fallback. */
+		/* FLUSH / DISCARD / WRITE_ZEROES sync fallback. */
 		for (i = 0; !req->error && i < req->desc_cnt; i++)
 			do_io(req, &req->io_desc[i]);
 		return;
@@ -1965,25 +1943,25 @@ static void ubd_submit_req_async(struct io_thread_req *req)
 		return;
 	}
 
-	for (i = 0; !req->error && i < req->desc_cnt; i++) {
-		struct io_desc *d = &req->io_desc[i];
-		int nsectors = d->length / req->sectorsize;
-		int start = 0;
-		unsigned long last_len = 0;
+		for (i = 0; !req->error && i < req->desc_cnt; i++) {
+			struct io_desc *d = &req->io_desc[i];
+			unsigned char *sector_mask =
+				(unsigned char *)&d->sector_mask;
+			int nsectors = d->length / req->sectorsize;
+			int start = 0;
+			unsigned long last_len = 0;
 
-		do {
-			int bit = ubd_test_bit(start,
-				(unsigned char *)&d->sector_mask);
-			int end = start;
-			__u64 off;
-			unsigned long len;
-			char *buf;
-			int slot;
+			do {
+				int bit = ubd_test_bit(start, sector_mask);
+				int end = start;
+				__u64 off;
+				unsigned long len;
+				char *buf;
+				int slot;
 
-			while (end < nsectors &&
-			       ubd_test_bit(end,
-				(unsigned char *)&d->sector_mask) == bit)
-				end++;
+				while (end < nsectors &&
+				       ubd_test_bit(end, sector_mask) == bit)
+					end++;
 
 			off = base_offset + req->offsets[bit] +
 			      start * req->sectorsize;
@@ -2012,9 +1990,9 @@ static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
 	int i, j;
 
 	/*
-	 * Phase 2b fast-path (memo #2): when the bulk batch is one
-	 * single-desc request, the io_uring path has no parallelism
-	 * to win — just a fixed +2 syscall cycle (sqe_commit +
+	 * When the bulk batch is one single-desc request, the io_uring
+	 * path has no parallelism to win: just a fixed +2 syscall cycle
+	 * (sqe_commit +
 	 * io_uring_enter + cqe_poll) over the legacy depth-1 pwrite.
 	 * Small-block O_DIRECT workloads (fio --bs=4k --numjobs=N
 	 * --ioengine=psync) hit this case on every iteration because
@@ -2032,18 +2010,18 @@ static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
 	}
 
 	/*
-	 * Phase 1: submit every request's SQEs.  The submission loop
+	 * First submit every request's SQEs. The submission loop
 	 * itself harvests CQEs from earlier reqs whenever the ring is
 	 * full, so the maximum in-flight is bounded by UBD_RING_DEPTH.
 	 */
 	for (i = 0; i < n_reqs; i++)
 		ubd_submit_req_async(reqs[i]);
 
-	/* Phase 2: drain remaining in-flight SQEs from any req. */
+	/* Then drain remaining in-flight SQEs from any req. */
 	ubd_ring_drain_all();
 
 	/*
-	 * Phase 5 (memo #2): batched COW bitmap drain through the ring.
+	 * Batched COW bitmap drain through the ring.
 	 * Submit one IORING_OP_WRITE per cow_offset != -1 segment, drain
 	 * together at the end.  For non-COW UBD images every cow_offset
 	 * is -1 so the submission loop is a no-op and the drain returns
@@ -2068,224 +2046,16 @@ static void do_io_ring_batch(struct io_thread_req **reqs, int n_reqs)
 
 			if (d->cow_offset == -1)
 				continue;
-			slot = ubd_submit_with_harvest(
-				req, REQ_OP_WRITE, req->fds[1],
-				(char *)&d->bitmap_words,
-				sizeof(d->bitmap_words),
-				d->cow_offset);
+			slot = ubd_submit_with_harvest(req, REQ_OP_WRITE,
+						       req->fds[1],
+						       (char *)&d->bitmap_words,
+						       sizeof(d->bitmap_words),
+						       d->cow_offset);
 			if (slot < 0 && !req->error)
 				req->error = map_error(-slot);
 		}
 	}
 	ubd_ring_drain_all();
-}
-
-static void do_io_ring(struct io_thread_req *req)
-{
-	int submitted = 0, harvested = 0;
-	int i, op;
-	u64 base_offset;
-
-	op = req_op(req->req);
-	if (op != REQ_OP_READ && op != REQ_OP_WRITE) {
-		/* FLUSH / DISCARD / WRITE_ZEROES — sync fallback. */
-		for (i = 0; !req->error && i < req->desc_cnt; i++)
-			do_io(req, &req->io_desc[i]);
-		return;
-	}
-
-	/*
-	 * Mirror legacy do_io()'s req->offset += len advance across
-	 * io_desc[] entries — otherwise multi-bvec requests would all
-	 * target the same on-disk offset.  Local snapshot so we don't
-	 * mutate req->offset in flight.
-	 */
-	base_offset = req->offset;
-
-	/*
-	 * Phase 3 fast-path: one writev/readv for the whole request
-	 * when every desc is uniform (no COW overlay, no sector mask).
-	 */
-	if (ubd_req_vectored_eligible(req)) {
-		int slot;
-
-		for (;;) {
-			slot = ubd_ring_submit_vectored(op, req, base_offset);
-			if (slot >= 0) {
-				submitted++;
-				break;
-			}
-			if (slot != -EAGAIN) {
-				req->error = map_error(-slot);
-				goto harvest;
-			}
-			/* Ring full — wait for any CQE and retry. */
-			{
-				struct os_io_cqe cqe;
-				int hrc = os_io_ring_wait_cqe(ubd_ring,
-							      &cqe, -1);
-
-				if (hrc < 0) {
-					req->error = map_error(-hrc);
-					goto harvest;
-				}
-				if (hrc == 1) {
-					/* Spurious CQE before our submit;
-					 * the harvest loop below is the
-					 * only entity that touches slots,
-					 * so just release this one.
-					 */
-					ubd_slot_free(cqe.user_data);
-				}
-			}
-		}
-		/* Mirror per-desc base_offset advance for the whole req. */
-		for (i = 0; i < req->desc_cnt; i++)
-			base_offset += req->io_desc[i].length;
-		/* Skip per-desc loop — vectored path covers all descs. */
-		goto harvest;
-	}
-
-	for (i = 0; !req->error && i < req->desc_cnt; i++) {
-		struct io_desc *d = &req->io_desc[i];
-		int nsectors = d->length / req->sectorsize;
-		int start = 0;
-		unsigned long last_len = 0;
-
-		do {
-			int bit = ubd_test_bit(start,
-				(unsigned char *)&d->sector_mask);
-			int end = start;
-			__u64 off;
-			unsigned long len;
-			char *buf;
-			int slot;
-
-			while (end < nsectors &&
-			       ubd_test_bit(end,
-				(unsigned char *)&d->sector_mask) == bit)
-				end++;
-
-			off = base_offset + req->offsets[bit] +
-			      start * req->sectorsize;
-			len = (end - start) * req->sectorsize;
-			last_len = len;
-			buf = d->buffer
-			      ? &d->buffer[start * req->sectorsize]
-			      : NULL;
-
-			for (;;) {
-				slot = ubd_ring_submit_one(req, op,
-					req->fds[bit], buf, len, off);
-				if (slot >= 0) {
-					submitted++;
-					break;
-				}
-				if (slot != -EAGAIN) {
-					req->error = map_error(-slot);
-					goto harvest;
-				}
-				/* Ring full — harvest one CQE and retry. */
-				{
-					struct os_io_cqe cqe;
-					int hrc = os_io_ring_wait_cqe(
-						ubd_ring, &cqe, -1);
-					if (hrc < 0) {
-						req->error = map_error(-hrc);
-						goto harvest;
-					}
-					if (hrc == 1) {
-						struct ubd_pending_slot *s =
-						   &ubd_slots[cqe.user_data];
-						if (cqe.res < 0) {
-							req->error =
-							  map_error(-cqe.res);
-							ubd_slot_free(
-							  cqe.user_data);
-							harvested++;
-						} else if (cqe.res == 0) {
-							if (s->op == REQ_OP_READ
-							    && s->buf)
-								memset(
-								 s->buf + s->done,
-								 0,
-								 s->total - s->done);
-							ubd_slot_free(
-							  cqe.user_data);
-							harvested++;
-						} else {
-							s->done += cqe.res;
-							if (s->done < s->total) {
-								int rc =
-								 ubd_ring_resubmit(
-								  cqe.user_data);
-								if (rc < 0) {
-									req->error =
-									 map_error(-rc);
-									ubd_slot_free(
-									 cqe.user_data);
-									harvested++;
-								}
-							} else {
-								ubd_slot_free(
-								  cqe.user_data);
-								harvested++;
-							}
-						}
-					}
-				}
-			}
-			start = end;
-		} while (start < nsectors);
-
-		base_offset += last_len;
-	}
-
-harvest:
-	while (harvested < submitted) {
-		struct os_io_cqe cqe;
-		int hrc = os_io_ring_wait_cqe(ubd_ring, &cqe, -1);
-		struct ubd_pending_slot *s;
-
-		if (hrc < 0) {
-			req->error = map_error(-hrc);
-			break;
-		}
-		if (hrc == 0)
-			continue;
-		s = &ubd_slots[cqe.user_data];
-		if (cqe.res < 0) {
-			if (!req->error)
-				req->error = map_error(-cqe.res);
-			ubd_slot_free(cqe.user_data);
-			harvested++;
-		} else if (cqe.res == 0) {
-			if (s->op == REQ_OP_READ && s->buf)
-				memset(s->buf + s->done, 0,
-				       s->total - s->done);
-			ubd_slot_free(cqe.user_data);
-			harvested++;
-		} else {
-			s->done += cqe.res;
-			if (s->done < s->total) {
-				int rc = ubd_ring_resubmit(cqe.user_data);
-				if (rc < 0) {
-					req->error = map_error(-rc);
-					ubd_slot_free(cqe.user_data);
-					harvested++;
-				}
-			} else {
-				ubd_slot_free(cqe.user_data);
-				harvested++;
-			}
-		}
-	}
-
-	req->offset = base_offset;
-
-	/* Bitmap update stays synchronous (memo §Phase 5). */
-	for (i = 0; !req->error && i < req->desc_cnt; i++)
-		req->error = update_bitmap(req, &req->io_desc[i]);
 }
 
 void *io_thread(void *arg)
@@ -2294,7 +2064,7 @@ void *io_thread(void *arg)
 
 	os_fix_helper_thread_signals();
 
-	while(1){
+	while (1) {
 		n = bulk_req_safe_read(
 			kernel_fd,
 			io_req_buffer,
@@ -2310,7 +2080,7 @@ void *io_thread(void *arg)
 		}
 
 		if (ubd_ring) {
-			/* Phase 2b (memo #2): cross-req parallelism — all
+			/* Cross-req parallelism: all
 			 * reqs in the bulk batch overlap on the ring.
 			 */
 			io_count += n / sizeof(struct io_thread_req *);
@@ -2326,7 +2096,7 @@ void *io_thread(void *arg)
 				io_count++;
 				for (i = 0; !req->error && i < req->desc_cnt;
 				     i++)
-					do_io(req, &(req->io_desc[i]));
+					do_io(req, &req->io_desc[i]);
 			}
 		}
 

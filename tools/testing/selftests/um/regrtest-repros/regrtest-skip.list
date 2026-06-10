@@ -4,10 +4,8 @@
 #
 # Each entry below names a CPython regrtest module that fails on
 # seccomp UML for a known, non-bug reason. The reproducer suite
-# in this directory exercises the underlying surface in seconds —
+# in this directory exercises the underlying surface in seconds;
 # when a substrate fix lands, retire the relevant skip here.
-#
-# Memo 29 §2.5.2 / §Class A-D triage.
 
 # --- Class A: environmental (PID-1 init env, no real tty/pty/PATH) ---
 # Reproducers: class-a-env/{terminal_size,openpty,tty_isatty,
@@ -26,8 +24,8 @@ test_venv
 # Reproducers PASS; failures are Python-internal (asyncio transport
 # state, multiprocessing.Pool start methods). Skip until we either
 # find Python-level fixes or accept these as not-ready under seccomp.
-# Per R4 design (memo 28), several may resolve when worker-owns-
-# process model lands.
+# Several may resolve when worker ownership moves into the process
+# model.
 # Reproducers: class-b-process/*.
 test.test_asyncio.test_events
 test.test_asyncio.test_subprocess
@@ -53,13 +51,12 @@ test_unicodedata
 # --- Class D: structural (ITIMER_VIRTUAL accounting) ---
 # Reproducer: class-d-structural/itimer_virtual.c.
 # Hangs 180s+ in regrtest because the seccomp stub-child CPU-time
-# mis-attribution makes SIGVTALRM never fire. Memo 29 §2.5.5
-# defers fix to post-R4 (worker-owns-process). Always pass `-x
-# test_signal` to regrtest until then.
+# mis-attribution makes SIGVTALRM never fire. Always pass `-x
+# test_signal` to regrtest until the accounting model changes.
 test_signal
 
 # --- Other miscellaneous regrtest modules that observe environment
-# rather than substrate. Triage per memo 29 future updates ---
+# rather than substrate. ---
 test_sys
 test_traceback
 test_warnings

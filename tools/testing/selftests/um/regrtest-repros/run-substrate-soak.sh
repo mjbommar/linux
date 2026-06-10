@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Phase J.1 prep — substrate-gate soak runner.
+# Substrate-gate soak runner.
 #
 # Wraps run-regrtest-repros.sh in a loop, running it N times and
 # collecting PASS/FAIL/EXPECTED_FAIL counts per iteration. Reports
-# a histogram + flake rate at the end. This is the per-iteration
-# version of the 24h continuous soak Phase J.1 calls for: the same
-# harness extended to a wall-clock budget gives the 24h gate.
+# a histogram + flake rate at the end. The same harness can be
+# extended to a wall-clock budget for longer soak runs.
 #
 # Usage:
 #   UML_BINARY=$HOME/src/uml-builds/uml-clean/linux \

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // umlctl pool client — Unix-socket RPC client for the `umlctl pool
-// serve` daemon (Memo 09 Phase 4).
+// serve` daemon.
 //
 // The daemon (pool_serve.rs) exposes a one-request-per-connection
 // JSON-line protocol on $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.
@@ -13,10 +13,9 @@
 //   2. send one JSON line + read one JSON line back,
 //   3. unwrap the {"ok":true|false,...} envelope into a Result.
 //
-// Why a single module: the syzkaller shim spec (memo 11 §3.3)
-// explicitly chose option (b) — `umlctl pool take` etc. wrap the
-// daemon RPC rather than each Go caller speaking the wire format.
-// Keeping the wire shape in one Rust place protects that choice.
+// Keep the wire shape in one Rust place: `umlctl pool take` and
+// related verbs wrap the daemon RPC rather than each caller speaking
+// the socket protocol directly.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::{BufRead, BufReader, Write};

@@ -43,7 +43,7 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ctx_) {
             (unsigned long long)g[REG_RAX],
             (unsigned long long)g[REG_RDX],
             (unsigned long long)g[REG_RDI]);
-    /* Read -0x8(%rbp), -0x18(%rbp) — the stack slots */
+    /* Read -0x8(%rbp), -0x18(%rbp) - the stack slots */
     uint64_t rbp = (uint64_t)g[REG_RBP];
     if (rbp) {
         unsigned char *sp = (unsigned char *)rbp;

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// umlctl v1 — multi-instance lifecycle CLI for User-Mode Linux
-// instances. See Documentation/virt/uml/redesign/08-future-phases/
-// 05-umlctl.md for the authoritative spec.
+// umlctl - multi-instance lifecycle CLI for User-Mode Linux
+// instances.
 //
-// Podman-shaped, not Docker-shaped: rootless, no daemon,
-// process-tree-based. Every invocation exits. State lives on
-// the filesystem (XDG state + runtime dirs) so there's no need
-// to serialize between calls.
+// The standard lifecycle verbs are rootless, process-tree-based, and
+// filesystem-backed.  State lives in XDG state and runtime dirs so
+// independent invocations can coordinate without a global service.
+// Pool mode can also run a fork-server daemon for low-latency member
+// creation.
 //
-// v1 verbs: create, start, stop, rm, ps, logs.
-// Deferred: top, stat, exec, attach, backend (v2+).
+// Core verbs: create, start, stop, rm, ps, logs, gate, mission,
+// pool, exec, and port-forward.
 //
 // Primary motivation: eliminate the runaway-UML-process class of
 // bug — raw `timeout ./linux …` invocations leave the UML child
@@ -54,9 +54,8 @@ enum PoolCmd {
     /// Boot a UML in template-pause mode, write its identity blob,
     /// SIGCONT it, and return the host pid (+ instance info as JSON
     /// when --json). This is the unit primitive of the umlctl pool
-    /// integration; Phase 1c will add a long-lived `pool serve`
-    /// daemon plus a Unix-socket `take` RPC.  Until then, callers
-    /// (syzkaller harness, smoke tests) drive `spawn` directly.
+    /// integration; callers that need a long-lived fork server should
+    /// use `pool serve` plus the Unix-socket `take` RPC.
     Spawn(pool::SpawnArgs),
     /// List live pool members previously created by `pool spawn`.
     /// Reads $RUNTIME_DIR/pools/members/*.json + filters out
@@ -64,24 +63,20 @@ enum PoolCmd {
     List(pool::ListArgs),
     /// Kill a pool member + remove its record.  Default is SIGKILL;
     /// pass --graceful for SIGTERM + grace period + SIGKILL escalation.
-    /// With `--name <pool>`, routes through the daemon socket
-    /// (Memo 09 Phase 4 / spec memo 11 §3.3).
+    /// With `--name <pool>`, routes through the daemon socket.
     Destroy(pool::DestroyArgs),
     /// Long-lived supervisor: boots one master in fork mode, accepts
     /// take/list/status/destroy/exec/shutdown RPCs on a Unix socket
-    /// under $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.  Memo 09
-    /// Phase 1c + Phase 4.
+    /// under $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.
     Serve(pool_serve::ServeArgs),
     /// Client-side `take`: sends a take RPC to a running `pool serve`
     /// daemon and prints the `SpawnResult` it returns.  Equivalent to
     /// driving the socket protocol from a shell; the syzkaller Go
-    /// shim shells out to this verb on every `Create()`.  Spec memo
-    /// 11 §3.3.
+    /// shim shells out to this verb on every `Create()`.
     Take(pool_take_status::TakeArgs),
     /// Client-side `status`: query the running `pool serve` daemon
-    /// for its master pid, member count, and socket path.  Useful
-    /// from operator scripts; the syzkaller shim's `Info()` calls
-    /// it.  Spec memo 11 §3.3.
+    /// for its master pid, member count, and socket path.  Useful for
+    /// scripts; the syzkaller shim's `Info()` calls it.
     Status(pool_take_status::StatusArgs),
 }
 use std::io::{self, Write};
@@ -198,15 +193,14 @@ enum Cmd {
     /// harness, parse PASS/FAIL/EXPECTED_FAIL counts from stdout,
     /// append a scoreboard.jsonl row. The gate runner does NOT
     /// define passing or failing — it reports what the harness
-    /// said. See memo 30-gate-discipline.md.
+    /// said.
     #[command(subcommand)]
     Gate(GateCmd),
-    /// Mission-accomplished acceptance gate for the kvm-v2 backend.
-    /// Runs the full 6-phase comprehensive check in ~10-15 min:
+    /// Mission-accomplished gate for the kvm-v2 backend.
+    /// Runs the full multi-stage comprehensive check in ~10-15 min:
     /// (1) KUnit, (2) bench, (3) substrate, (4) host_resources,
     /// (5) diverse soak, (6) diagnostic snapshot. Single binary
-    /// verdict: MISSION_ACCOMPLISHED / MISSION_FAILED. See memo
-    /// 52 (host resource controls) + STATUS.md.
+    /// verdict: MISSION_ACCOMPLISHED / MISSION_FAILED.
     Mission(MissionArgs),
     /// Attach strace to a running UML guest — the guest IS a host
     /// process under both seccomp and kvm-v2 backends, so the host
@@ -223,26 +217,23 @@ enum Cmd {
     /// the menu of available scripts (syscalls / pagefaults / io /
     /// net / sched).
     Bpf(BpfArgs),
-    /// Fork-server pool integration (Memo 09).
+    /// Fork-server pool integration.
     #[command(subcommand)]
     Pool(PoolCmd),
     /// Run a command inside a running pool member via the `pool serve`
     /// daemon's exec RPC.  Returns the in-guest command's stdout,
     /// stderr, and exit code.  With `--json`, emits NDJSON frames
-    /// shaped per spec memo 11 §3.4 for the syzkaller shim.  Memo 09
-    /// Phase 4.
+    /// shaped for the syzkaller shim.
     Exec(exec::ExecArgs),
     /// Return a host:port address the guest can dial to reach a
     /// host-side service.  TAP-direct mode by default (the guest's
-    /// gateway IP is the host).  Memo 09 Phase 4, spec memo 11 §3.2.
+    /// gateway IP is the host).
     #[command(name = "port-forward")]
     PortForward(port_forward::PortForwardArgs),
-    /// Snapshot of a running UML guest's KVM-v2 state (#181).
+    /// Snapshot of a running UML guest's KVM-v2 state.
     ///
     /// Today: `export` triggers an ELF64-core dump via debugfs and
-    /// writes it to a host path the operator nominates. Future verbs
-    /// will cover the lazy-restore tier (memo 02-snapshot-to-disk.md
-    /// Phase 4) once that lands.
+    /// writes it to a host path the user provides.
     #[command(subcommand)]
     Snapshot(SnapshotCmd),
 }
@@ -266,8 +257,8 @@ enum GateCmd {
     /// List discovered Gatefiles under tools/testing/selftests/um/gates/.
     List(GateListArgs),
     /// Run an Umlfile in a parallel up/wait/classify/stop/rm loop —
-    /// the canonical 20-boot flake-characterization pattern from
-    /// toolkit memo §8c, automated. Reports PASS/N + Wilson 95% CI.
+    /// the repeated-boot flake-characterization pattern, automated.
+    /// Reports PASS/N + Wilson 95% CI.
     /// Optional --sweep KEY=v1,v2,... for env-var sweeps.
     Loop(GateLoopArgs),
 }
@@ -409,8 +400,7 @@ struct GateLoopArgs {
     kernel: Option<std::path::PathBuf>,
 
     /// Override `[network].driver` for every generated worker
-    /// Umlfile. Use `vector` for legacy vec0 or `vector2` for
-    /// experimental vec2.0.
+    /// Umlfile. Use `vector` for vec0 or `vector2` for vec2.0.
     #[arg(long = "network-driver", value_name = "vector|vector2")]
     network_driver: Option<String>,
 
@@ -575,14 +565,14 @@ struct LogsArgs {
     #[arg(long, default_value_t = 0, value_name = "N")]
     tail: usize,
 
-    /// Refuse to fall back to the latest historical run bundle.
+    /// Refuse to fall back to the latest saved run bundle.
     /// Without this flag, `umlctl logs <name>` after a fresh `up`
-    /// can return content from a PRIOR instance with the same name
+    /// can return content from a previous instance with the same name
     /// if the new instance hasn't yet written a `run_id_file`.
-    /// That bit a real flake-hunting test loop in the v2 SMP
-    /// investigation: greping for REPRO_DONE returned matches from
-    /// the previous iteration's bundle while the current kernel
-    /// was still booting (or already crashed). Use --require-current
+    /// That can mislead repeated test loops: greping for a marker may
+    /// return matches from the previous iteration's bundle while the
+    /// current kernel is still booting or already crashed. Use
+    /// --require-current
     /// in scripts; it exits 7 if no live run is bound.
     #[arg(long)]
     require_current: bool,
@@ -706,7 +696,7 @@ struct UpArgs {
     skip_network_setup: bool,
 
     /// Override `[network].driver` without editing the Umlfile. Use
-    /// `vector` for legacy vec0 or `vector2` for experimental vec2.0.
+    /// `vector` for vec0 or `vector2` for vec2.0.
     #[arg(long = "network-driver", value_name = "vector|vector2")]
     network_driver: Option<String>,
 
@@ -1054,14 +1044,13 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
         &labels,
     )
     .context("build manifest from Umlfile")?;
-    /* SMP-T78..T84: translate Umlfile.host_resources into host_env
-     * + cgroup_v2 on the manifest. Empty fields leave the manifest
-     * unchanged (no env, no cgroup). */
+    /* Translate Umlfile.host_resources into host_env + cgroup_v2 on
+     * the manifest. Empty fields leave the manifest unchanged. */
     deploy::apply_host_resources(&uml.host_resources, &mut m);
 
     /*
-     * HONEST-AUDIT §4: when [runtime].fast_boot is true, also export
-     * UM_FAST_BOOT=1 so the host-side preflight prints in
+     * When [runtime].fast_boot is true, also export UM_FAST_BOOT=1 so
+     * the host-side preflight prints in
      * os_early_checks() (which run BEFORE the kernel cmdline parser
      * fires) are silenced.  See arch/um/os-Linux/util.c::os_info for
      * the env-var consumer.  Saves the per-line stderr write()
@@ -1243,7 +1232,7 @@ mod inherited_fd_tests {
 /// `timeout`); returns normally on match.
 ///
 /// Intentionally only consults the live `run_id_file` — never falls
-/// back to the latest historical bundle. That fallback is the source
+/// back to the latest saved bundle. That fallback is the source
 /// of the stale-log pitfall this verb is designed to avoid.
 fn wait_for_marker(
     paths: &paths::Paths,
@@ -1817,7 +1806,7 @@ fn cmd_dmesg(paths: &paths::Paths, args: DmesgArgs) -> Result<()> {
     // Prefer the materialized kernel.log if `umlctl stop`
     // already derived it; fall back to an on-the-fly filter
     // over init.log when the run is still live (stop hasn't
-    // happened) or for bundles predating the O1.2 lift.
+    // happened) or for bundles created before kernel.log sidecars.
     let lines: Vec<String> = if kernel_log.exists() {
         std::fs::read_to_string(&kernel_log)
             .context("read kernel.log")?

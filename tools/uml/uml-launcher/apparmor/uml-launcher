@@ -1,7 +1,7 @@
 #include <tunables/global>
 
 # AppArmor reference profile for the UML launcher and its
-# vhost-user backends (workstream C-10 v2).
+# vhost-user backends.
 #
 # This file declares four profiles:
 #   - `uml-launcher`                    the main binary (run subcommand)
@@ -13,10 +13,7 @@
 # without doing I/O itself; each sub-profile narrows the
 # permission set to exactly what that backend class needs. The
 # launcher uses `change_profile` at backend-spawn time to
-# transition each child into its sub-profile (the code path that
-# installs the transition is its own follow-on commit per the D52
-# plan; this file ships the profile data so packagers can start
-# carrying it now).
+# transition each child into its sub-profile.
 #
 # Installation: copy to /etc/apparmor.d/uml-launcher and run
 #   sudo apparmor_parser -r /etc/apparmor.d/uml-launcher

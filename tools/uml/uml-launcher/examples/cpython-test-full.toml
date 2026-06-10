@@ -4,8 +4,7 @@
 # deliberately avoids fork/exec/subprocess paths (documented as
 # "out of scope, divergence from seccomp parity"), this Umlfile runs
 # `python3 -m test` with no module list — all ~521 stdlib test
-# modules.  Used to capture the HONEST UML failure ledger and as the
-# regression gate for fixing them.
+# modules.  Use this as a broad CPython regression gate.
 #
 # Expected runtime on the reference host: 30-60 min depending on which
 # subprocess-related tests hang vs crash vs pass.

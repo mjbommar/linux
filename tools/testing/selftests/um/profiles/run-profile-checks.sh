@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# run-profile-checks.sh — workstream C-01 validation harness.
+# run-profile-checks.sh - UML profile validation harness.
 #
 # For each UML profile built under /tmp/uml-profile-<name>/linux,
 # boots the kernel with probe-features.sh as init and asserts the
@@ -31,9 +31,9 @@ probe_profile() {
 	local binary="$ROOT/uml-profile-$profile/linux"
 	local out probe
 
-	# Use 512M — fuzz-deep and research carry KASAN + heavy
+	# Use 512M: fuzz-deep and research carry KASAN + heavy
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
-	# 40s timeout — KCSAN (race profile) adds several seconds of
+	# 40s timeout: KCSAN (race profile) adds several seconds of
 	# lockdep/selftest init at boot before the probe runs.
 	# panic=0 keeps the kernel from instantly restarting if
 	# init fails to launch, so the failure path's printk output
@@ -47,9 +47,9 @@ probe_profile() {
 	# before each run so a stale hit from a prior profile
 	# can't false-positive us.
 	rm -f /tmp/uml-probe-output
-	# Use 512M — fuzz-deep and research carry KASAN + heavy
+	# Use 512M: fuzz-deep and research carry KASAN + heavy
 	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
-	# 40s timeout — KCSAN (race profile) adds several seconds of
+	# 40s timeout: KCSAN (race profile) adds several seconds of
 	# lockdep/selftest init at boot before the probe runs.
 	# panic=0 keeps the kernel from instantly restarting if
 	# init fails to launch, so the failure path's printk output
@@ -62,7 +62,7 @@ probe_profile() {
 		panic=0 loglevel=8 2>&1)
 	rc=$?
 
-	# Prefer the hostfs file — it's written by direct host
+	# Prefer the hostfs file: it is written by direct host
 	# write() syscalls and survives UML's exit regardless of
 	# the tty driver's queue state. Fall back to the stdout
 	# capture for environments that don't write to the file
@@ -78,7 +78,7 @@ probe_profile() {
 	fi
 
 	# If the probe block is missing from both sources, the
-	# guest never reached its init script — usually a boot
+	# guest never reached its init script: usually a boot
 	# failure, ptrace/seccomp refusal, or OOM. Emit the raw
 	# captured stream on stderr so the caller's log makes the
 	# root cause visible without a second "what just happened"
@@ -92,8 +92,8 @@ probe_profile() {
 			printf '=== %s: probe block missing (UML exit=%d)\n' \
 				"$profile" "$rc"
 			printf '    raw boot output follows ===\n'
-			# rc=124 → outer `timeout` tripped (UML hung).
-			# rc!=0 && rc!=124 → UML exited itself, likely a
+			# rc=124: outer `timeout` tripped (UML hung).
+			# rc!=0 && rc!=124: UML exited itself, likely a
 			# kernel panic that didn't flush or a host-side
 			# crash (segfault in the UML host stub, etc.).
 			echo "$out"
@@ -149,7 +149,7 @@ run_one() {
 
 	# If the operator built only a subset of profiles (as CI
 	# does via the per-profile matrix), the missing ones are a
-	# clean SKIP — not a test failure. Return 0 so the caller's
+	# clean SKIP, not a test failure. Return 0 so the caller's
 	# `|| any_fail=1` guard doesn't trip.
 	if [ ! -x "$binary" ]; then
 		local o="$ROOT/uml-profile-$profile"
@@ -217,7 +217,7 @@ run_one fuzz \
 	proc_sysrq=ABSENT \
 	|| any_fail=1
 
-# fuzz-deep: fuzz + KFENCE (C-02) + KASAN_INLINE (KCSAN still pending C-03).
+# fuzz-deep: fuzz + KFENCE + KASAN_INLINE.
 run_one fuzz-deep \
 	debugfs_um=PRESENT \
 	debugfs_kcov=PRESENT \
@@ -235,7 +235,7 @@ run_one race \
 	proc_sysrq=ABSENT \
 	|| any_fail=1
 
-# sandbox: minimum TCB — everything off including proc_kcore.
+# sandbox: minimum TCB; everything off including proc_kcore.
 run_one sandbox \
 	debugfs_um=ABSENT \
 	debugfs_kcov=ABSENT \

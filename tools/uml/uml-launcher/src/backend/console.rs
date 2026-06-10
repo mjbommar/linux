@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// virtio-console vhost-user backend (workstream C-10 v2).
+// virtio-console vhost-user backend.
 //
 // This is the simplest vhost-user surface in UML's v2 device set:
 // two queues (RX at index 0, TX at index 1), byte-oriented, no
@@ -26,7 +26,6 @@
 // Design references:
 //   - rust-vmm/vhost-device/vhost-device-console (0.21 API)
 //   - rust-vmm/vhost-device/vhost-device-rng     (simpler, 0.22)
-//   - D52 (the C-10 v2 plan these choices come from)
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -115,7 +114,7 @@ pub type ConsoleSink = Box<dyn Write + Send>;
 /// Mutable state for a live console backend. Wrapped in
 /// `Arc<RwLock<...>>` so both `VhostUserDaemon` (via the blanket
 /// `VhostUserBackend` impl for `RwLock<T: VhostUserBackendMut>`)
-/// and any future control-path code see the same instance.
+/// and control-path code see the same instance.
 pub struct ConsoleBackend {
     /// Guest memory set at `set_mem_table()` time. `None` until the
     /// frontend calls `update_memory` the first time.
@@ -189,13 +188,12 @@ impl ConsoleBackend {
     }
 
     /// Push host-to-guest bytes into the RX FIFO. The bytes are
-    /// delivered to the guest on the next RX virtqueue kick (or
-    /// sooner if an external eventfd is wired — that plumbing
-    /// lands in a follow-on commit).
+    /// delivered to the guest on the next RX virtqueue kick, or
+    /// sooner if an external eventfd is wired.
     ///
     /// `#[allow(dead_code)]` because the only current caller is
-    /// the test module; production stdin plumbing arrives in
-    /// the next C-10 v2 commit.
+    /// the test module; production stdin plumbing can use the same
+    /// queue.
     #[allow(dead_code)]
     pub fn push_rx_bytes(&self, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -535,11 +533,8 @@ impl VhostUserBackendMut for ConsoleBackend {
                 // otherwise leave the chains in the avail ring
                 // for the next kick.
                 //
-                // Production stdin plumbing (stdin reader thread
-                // + eventfd wake-up) is queued as the next C-10
-                // v2 commit. Until then, the FIFO is populated
-                // via `push_rx_bytes()` — exercised by tests and
-                // available for orchestration glue.
+                // Production stdin plumbing can populate the FIFO via
+                // `push_rx_bytes()`; tests exercise that path today.
                 let vring = &vrings[RX_QUEUE as usize];
                 self.process_rx_queue(vring)?;
             }

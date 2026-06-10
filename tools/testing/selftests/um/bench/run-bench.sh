@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# run-bench.sh — host-side wrapper for the umlctl bench tiers.
+# run-bench.sh - host-side wrapper for the umlctl bench tiers.
 #
 # Pattern after run-perf-py-startup.sh: boot UML with the tier's
 # umlctl toml, capture the BENCH_MEDIAN line, parse it, compute
@@ -22,7 +22,7 @@
 #   - Final BENCH_RATIO line + exit code
 #
 # Exit codes:
-#   0  = PASS (ratio ≤ max-ratio for all backends; no STRICT fails)
+#   0  = PASS (ratio <= max-ratio for all backends; no STRICT fails)
 #   1  = FAIL (ratio exceeds threshold OR strict fails > 0)
 #   4  = SKIP (kernel binary not found)
 
@@ -91,7 +91,7 @@ run_one_backend() {
     # Materialize a per-backend copy: rewrite both instance.name
     # AND kernel.backend (the backend field is parsed into an enum
     # before env-substitution, so a ${VAR} placeholder there is
-    # rejected by umlctl up — sed-substitute the placeholder
+    # rejected by umlctl up - sed-substitute the placeholder
     # instead).
     local tmp_toml
     tmp_toml=$(mktemp /tmp/bench-${TIER}-${backend}-XXXXXX.toml)

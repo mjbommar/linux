@@ -82,12 +82,10 @@ vmm-sys-util = "0.15"
 # needs the backend to be Clone so we wrap it in Arc<RwLock<>>.
 # (RwLock from std is fine; no tokio here — keep v2 sync.)
 log = "0.4"
-# Per-backend BPF seccomp filters (C-10 v2 commit 3). Firecracker-
-# authored, now standalone rust-vmm. Used in allow-list posture:
-# every syscall outside the class-specific set triggers
-# SECCOMP_RET_KILL_PROCESS. Applied after rust-vmm setup, before
-# the event-loop enters its run() — matches Firecracker discipline
-# per D52.
+# Per-backend BPF seccomp filters. Used in allow-list posture: every
+# syscall outside the class-specific set triggers
+# SECCOMP_RET_KILL_PROCESS. Applied after rust-vmm setup, before the
+# event-loop enters its run().
 seccompiler = "0.5"
 
 [dev-dependencies]

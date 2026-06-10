@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/pool-serve-smoke — kselftest for `umlctl pool serve` (Memo 09
-# Phase 1c).
+# um/pool-serve-smoke - kselftest for `umlctl pool serve`.
 #
 # What it asserts end-to-end:
 #   1. `umlctl pool serve --background` boots a CONFIG_UM_TEMPLATE_PAUSE_FORK
@@ -19,7 +18,7 @@
 # Environment:
 #   UM_FORK_KERNEL  Fork-mode UML kernel.  Default
 #                   $HOME/src/uml-builds/uml-tplpause-fork/linux.
-#                   Mirrors `umlctl mission` Phase 8.
+#                   Used by the mission gate's fork-server check.
 #   UMLCTL          umlctl binary.  Auto-detected from the source tree.
 
 set -u
@@ -182,10 +181,10 @@ if ! echo "$DESTROY" | python3 -c \
 	exit 1
 fi
 echo "destroy RPC ok: PASS"
-# The M-fork child is the master's child, not the daemon's — so once
-# the master SIGKILLs it (which it always does in Phase 2a), the host
+# The M-fork child is the master's child, not the daemon's, so once
+# the master SIGKILLs it, the host
 # pid lingers as a zombie owned by master until master reaps it.  The
-# destroy contract is: "no longer a runnable process" — gone or Z/X
+# destroy contract is: "no longer a runnable process" - gone or Z/X
 # state.  Mirror the daemon's pid_runnable() check here.
 not_runnable() {
 	local p=$1

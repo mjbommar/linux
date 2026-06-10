@@ -37,7 +37,7 @@
 #include "mconsole_kern.h"
 #include <os.h>
 
-static struct vfsmount *proc_mnt = NULL;
+static struct vfsmount *proc_mnt;
 
 static int do_unlink_socket(struct notifier_block *notifier,
 			    unsigned long what, void *data)
@@ -51,7 +51,7 @@ static struct notifier_block reboot_notifier = {
 	.priority		= 0,
 };
 
-/* Safe without explicit locking for now.  Tasklets provide their own
+/* Safe without explicit locking. Tasklets provide their own
  * locking, and the interrupt handler is safe because it can't interrupt
  * itself and it can only happen on CPU 0.
  */
@@ -303,8 +303,7 @@ static int mem_config(char *str, char **error_out)
 		add = 0;
 	else if (str[0] == '+') {
 		add = 1;
-	}
-	else {
+	} else {
 		*error_out = "Expected increment to start with '-' or '+'";
 		goto out;
 	}
@@ -339,8 +338,7 @@ static int mem_config(char *str, char **error_out)
 
 			free_page((unsigned long) addr);
 			unplugged_pages_count--;
-		}
-		else {
+		} else {
 			struct page *page;
 
 			page = alloc_page(GFP_ATOMIC);
@@ -351,8 +349,7 @@ static int mem_config(char *str, char **error_out)
 			if (unplug_index == UNPLUGGED_PER_PAGE) {
 				list_add(&unplugged->list, &unplugged_pages);
 				unplug_index = 0;
-			}
-			else {
+			} else {
 				struct list_head *entry = unplugged_pages.next;
 				addr = unplugged;
 
@@ -418,8 +415,8 @@ static int __init mem_mc_init(void)
 {
 	if (can_drop_memory())
 		mconsole_register_dev(&mem_mc);
-	else printk(KERN_ERR "Can't release memory to the host - memory "
-		    "hotplug won't be supported\n");
+	else
+		pr_err("Can't release memory to the host - memory hotplug won't be supported\n");
 	return 0;
 }
 
@@ -492,8 +489,9 @@ void mconsole_config(struct mc_request *req)
 	if (*ptr == '=') {
 		err = (*dev->config)(name, &error_string);
 		mconsole_reply(req, error_string, err, 0);
+	} else {
+		mconsole_get_config(dev->get_config, req, name);
 	}
-	else mconsole_get_config(dev->get_config, req, name);
 }
 
 void mconsole_remove(struct mc_request *req)
@@ -518,8 +516,7 @@ void mconsole_remove(struct mc_request *req)
 	if (n < 0) {
 		err_msg = "Couldn't parse device number";
 		goto out;
-	}
-	else if ((n < start) || (n > end)) {
+	} else if ((n < start) || (n > end)) {
 		sprintf(error, "Invalid device number - must be between "
 			"%d and %d", start, end);
 		err_msg = error;
@@ -528,7 +525,7 @@ void mconsole_remove(struct mc_request *req)
 
 	err_msg = NULL;
 	err = (*dev->remove)(n, &err_msg);
-	switch(err) {
+	switch (err) {
 	case 0:
 		err_msg = "";
 		break;
@@ -632,7 +629,7 @@ void mconsole_sysrq(struct mc_request *req)
 
 	/*
 	 * With 'b', the system will shut down without a chance to reply,
-	 * so in this case, we reply first.
+	 * so reply first.
 	 */
 	if (*ptr == 'b')
 		mconsole_reply(req, "", 0, 0);
@@ -655,29 +652,19 @@ static void stack_proc(void *arg)
 
 /*
  * Mconsole stack trace
- *  Added by Allan Graves, Jeff Dike
- *  Dumps a stacks registers to the linux console.
- *  Usage stack <pid>.
+ * Added by Allan Graves and Jeff Dike.
+ * Dumps a task's stack to the Linux console.
+ * Usage: stack <pid>.
  */
 void mconsole_stack(struct mc_request *req)
 {
 	char *ptr = req->request.data;
-	int pid_requested= -1;
+	int pid_requested = -1;
 	struct task_struct *to = NULL;
-
-	/*
-	 * Would be nice:
-	 * 1) Send showregs output to mconsole.
-	 * 2) Add a way to stack dump all pids.
-	 */
 
 	ptr += strlen("stack");
 	ptr = skip_spaces(ptr);
 
-	/*
-	 * Should really check for multiple pids or reject bad args here
-	 */
-	/* What do the arguments in mconsole_reply mean? */
 	if (sscanf(ptr, "%d", &pid_requested) == 0) {
 		mconsole_reply(req, "Please specify a pid", 1, 0);
 		return;
@@ -713,13 +700,11 @@ static int __init mount_proc(void)
  * Changed by mconsole_setup, which is __setup, and called before SMP is
  * active.
  */
-static char *notify_socket = NULL;
+static char *notify_socket;
 
 /*
- * SMP-T80 follow-up / Phase 4 — track the current mconsole socket
- * fd so mconsole_reinit_for_pool_member can pass the right dev_id
- * to um_free_irq (which matches by (irq, dev_id)).  Pre-T80 this
- * was a local variable inside mconsole_init.
+ * Track the current mconsole socket fd so pool-member reinit can pass
+ * the right dev_id to um_free_irq, which matches by (irq, dev_id).
  */
 static long mconsole_current_sock = -1;
 
@@ -754,15 +739,16 @@ static int __init mconsole_init(void)
 		goto out;
 	}
 
-	if (notify_socket != NULL) {
-		notify_socket = kstrdup(notify_socket, GFP_KERNEL);
-		if (notify_socket != NULL)
-			mconsole_notify(notify_socket, MCONSOLE_SOCKET,
-					mconsole_socket_name,
-					strlen(mconsole_socket_name) + 1);
-		else printk(KERN_ERR "mconsole_setup failed to strdup "
-			    "string\n");
-	}
+		if (notify_socket != NULL) {
+			notify_socket = kstrdup(notify_socket, GFP_KERNEL);
+			if (notify_socket != NULL) {
+				mconsole_notify(notify_socket, MCONSOLE_SOCKET,
+						mconsole_socket_name,
+						strlen(mconsole_socket_name) + 1);
+			} else {
+				pr_err("mconsole_setup failed to strdup string\n");
+			}
+		}
 
 	printk(KERN_INFO "mconsole (version %d) initialized on %s\n",
 	       MCONSOLE_VERSION, mconsole_socket_name);
@@ -776,13 +762,11 @@ static int __init mconsole_init(void)
 __initcall(mconsole_init);
 
 /*
- * Re-init the mconsole socket against a NEW absolute path.
- * Memo 09 Phase 4 / hardening-plan §1.6: pool members spawned via
- * template_pause fork-on-resume inherit the master's mconsole IRQ
- * + socket, so umlctl exec to "pool member N" actually hits the
- * master.  After the per-take identity blob delivers a unique
- * mconsole_path, the M-fork child calls this to bind a fresh
- * socket so the daemon can address each member individually.
+ * Re-init the mconsole socket against a new absolute path. Pool
+ * members spawned via template_pause fork-on-resume inherit the
+ * master's mconsole IRQ and socket; after the identity blob delivers a
+ * unique mconsole_path, the forked child binds a fresh socket so the
+ * daemon can address each member individually.
  *
  * Steps:
  *   1. Free the inherited MCONSOLE_IRQ (releases the old fd as a
@@ -815,12 +799,9 @@ int mconsole_reinit_for_pool_member(const char *path)
 	 * Detach the old IRQ + fd FIRST so um_request_irq below sees a
 	 * clean MCONSOLE_IRQ slot.
 	 *
-	 * Note on dev_id: um_free_irq matches by (irq, dev_id), and
-	 * mconsole_init registered with dev_id = (void *)sock.  Earlier
-	 * iterations passed NULL here, which silently failed to release
-	 * the irqaction — the new socket's IRQ then went to the wrong
-	 * handler and umlctl exec never worked.  Pass the recorded sock
-	 * via mconsole_current_sock.
+	 * um_free_irq matches by (irq, dev_id), and mconsole_init registered
+	 * with dev_id = (void *)sock. Pass the recorded sock so the irqaction
+	 * is released before the new socket is registered.
 	 *
 	 * The inherited fd is CoW from the master.  Closing it in the
 	 * child releases the child's per-fd reference; the master's fd
@@ -854,8 +835,8 @@ int mconsole_reinit_for_pool_member(const char *path)
 
 	mconsole_current_sock = new_sock;
 	strscpy(mconsole_socket_name, path, 256);	/* defined in mconsole_user.c */
-	pr_info("mconsole: re-bound on %s for pool member (sock=%ld)\n",
-		mconsole_socket_name, new_sock);
+	pr_debug("mconsole: re-bound on %s for pool member (sock=%ld)\n",
+		 mconsole_socket_name, new_sock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mconsole_reinit_for_pool_member);
@@ -915,8 +896,9 @@ static int mconsole_setup(char *str)
 	if (!strncmp(str, NOTIFY, strlen(NOTIFY))) {
 		str += strlen(NOTIFY);
 		notify_socket = str;
+	} else {
+		pr_err("%s : Unknown option - '%s'\n", __func__, str);
 	}
-	else printk(KERN_ERR "mconsole_setup : Unknown option - '%s'\n", str);
 	return 1;
 }
 

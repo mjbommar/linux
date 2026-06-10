@@ -88,13 +88,13 @@ Advisory vs. mandatory: the backend treats `ENOENT`
 as graceful skips — the seccomp filter below is still
 load-bearing. `EACCES` and other unexpected errors abort
 the backend, because those indicate policy misconfig that
-could silently run the backend unconfined when the operator
+could silently run the backend unconfined when the user
 expected otherwise.
 
 ## Site-local tightening
 
 The in-tree profile permits reasonably broad file-system
-locations so site operators don't have to edit it for basic
+locations so site users don't have to edit it for basic
 use. Likely tightening knobs when hardening:
 
 - **Block class**: replace the rw disk-image rules with `r`
@@ -119,9 +119,8 @@ it).
   granted.
 - Socket files live under `/tmp/` with names matching
   `uml-*.sock` or `uml-*-{console,net,block}-*.sock`. The
-  orchestration commit will fix this naming scheme; the
-  profile already allows both patterns so an early operator
-  running the scaffold classes directly works today.
+  launcher accepts both patterns so direct backend runs and
+  orchestrated runs share one profile.
 - Disk images live under the user's `$HOME` or `/tmp` or a
   shared `/srv/uml/images/`. Site-local paths outside this
   set require adding a rule.

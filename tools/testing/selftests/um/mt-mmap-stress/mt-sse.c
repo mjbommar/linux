@@ -10,7 +10,7 @@
 #define ITERS 50
 #define ALLOC_SZ 0x10000
 
-/* Pure SSE2 memset — uses XMM. */
+/* Pure SSE2 memset - uses XMM. */
 static void __attribute__((target("sse2")))
 sse_memset(void *p, unsigned char val, size_t n) {
     __m128i v = _mm_set1_epi8((char)val);

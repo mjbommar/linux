@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/template-pause-smoke/run-template-pause-smoke.sh — kselftest for the
-# UML template-pause + fork primitive (Memo 09 Phase 1a).
+# um/template-pause-smoke/run-template-pause-smoke.sh - kselftest for the
+# UML template-pause primitive.
 #
 # Verifies, in three independent boots of the same kernel binary:
 #
-#   case 1 — unarmed boot
+#   case 1 - unarmed boot
 #     UML booted WITHOUT `um_template_pause` on the cmdline. The
 #     /proc/um/template_pause entry must NOT exist (no /proc/um dir
 #     created), and boot must complete normally.
 #
-#   case 2 — armed boot, no identity fd
+#   case 2 - armed boot, no identity fd
 #     UML booted WITH `um_template_pause` and an init script that
 #     writes to /proc/um/template_pause. UM_TEMPLATE_IDENTITY_FD is
 #     unset, so the kernel should:
@@ -22,13 +22,13 @@
 #     After the test harness sends SIGCONT, the kernel logs
 #     "resumed via SIGCONT" and the init script logs POST_PAUSE_MARKER.
 #
-#   case 3 — armed boot, identity blob via memfd
+#   case 3 - armed boot, identity blob via memfd
 #     Like case 2, but with a memfd containing a valid
 #     `struct um_template_identity` plumbed via UM_TEMPLATE_IDENTITY_FD.
 #     The kernel additionally parses + logs the blob's instance name,
 #     MAC, tap name, and IPv4 fields.
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
 #
 # Environment:
 #   UML_BINARY   UML kernel built with CONFIG_UM_TEMPLATE_PAUSE=y.
@@ -58,7 +58,7 @@ fi
 # detect that in case 2 and bail out with SKIP if absent.
 
 ###############################################################################
-# case 1 — unarmed boot
+# case 1 - unarmed boot
 ###############################################################################
 
 cat >"$OUT/init1.sh" <<'IEOF'
@@ -86,7 +86,7 @@ fi
 echo "case 1 (unarmed boot): PASS"
 
 ###############################################################################
-# case 2 — armed boot, no identity fd
+# case 2 - armed boot, no identity fd
 ###############################################################################
 
 cat >"$OUT/init2.sh" <<'IEOF'
@@ -158,7 +158,7 @@ fi
 echo "case 2 (armed, no identity fd): PASS"
 
 ###############################################################################
-# case 3 — armed boot, identity blob via memfd
+# case 3 - armed boot, identity blob via memfd
 ###############################################################################
 
 cat >"$OUT/init3.sh" <<'IEOF'
@@ -261,7 +261,7 @@ if ! grep -q "mac=52:54:00:aa:bb:cc" "$OUT/case3.log"; then
 	grep template_pause "$OUT/case3.log"
 	exit 1
 fi
-# Phase 2 contract: identity-apply path MUST execute on a valid blob.
+# Identity-apply path must execute on a valid blob.
 # Without a configured netdev in the smoke bootstrap, the apply
 # returns -ENODEV gracefully and logs "no target netdev found".
 # With one configured (see case 4 below), it logs "MAC set on" and
@@ -275,7 +275,7 @@ fi
 echo "case 3 (armed, identity blob): PASS"
 
 ###############################################################################
-# case 4 — armed boot WITH netdev, identity-apply end-to-end (Phase 2)
+# case 4 - armed boot WITH netdev, identity-apply end-to-end
 ###############################################################################
 #
 # Provisions a vec0 netdev backed by transport=fd (a pair of pipe fds
@@ -286,7 +286,7 @@ echo "case 3 (armed, identity blob): PASS"
 # The fd transport is the lowest-friction option: it does not require
 # root, does not create a host TAP, and gives us a registered netdev
 # whose name starts with "vec".  Packets sent on the netdev go into a
-# pipe that nothing reads — that's fine; we're testing identity
+# pipe that nothing reads - that's fine; we're testing identity
 # state, not throughput.
 #
 # Skipped (not failed) on hosts where:
@@ -400,7 +400,7 @@ if [ $? -ne 0 ]; then
 fi
 
 if ! grep -q CASE4_POST_PAUSE "$OUT/case4.log"; then
-	# Don't fail if the kernel lacks vec0 support — that's a SKIP.
+	# Don't fail if the kernel lacks vec0 support - that's a SKIP.
 	if grep -qE "vec0:|vector_eth_configure" "$OUT/case4.log"; then
 		echo "FAIL case 4: never saw CASE4_POST_PAUSE"
 		tail -40 "$OUT/case4.log"
@@ -408,7 +408,7 @@ if ! grep -q CASE4_POST_PAUSE "$OUT/case4.log"; then
 	fi
 	echo "SKIP case 4: kernel lacks UML_NET_VECTOR or vec0 didn't register"
 else
-	# Case 4 post-apply checks — read the in-guest 'ip addr show vec0'
+	# Case 4 post-apply checks - read the in-guest 'ip addr show vec0'
 	# capture from the init script's stdout (echoed between
 	# CASE4_POST_STATE_BEGIN and CASE4_POST_STATE_END).
 	awk '/CASE4_POST_STATE_BEGIN/{flag=1; next} /CASE4_POST_STATE_END/{flag=0} flag' \
@@ -416,7 +416,7 @@ else
 
 	# MAC check: the apply path sets vec0's MAC to 52:54:00:de:ad:be.
 	if ! grep -qiE "link/ether 52:54:00:de:ad:be" "$OUT/case4-post-state.txt"; then
-		# Some configs may have vec0 absent — degrade to SKIP if so.
+		# Some configs may have vec0 absent - degrade to SKIP if so.
 		if ! grep -q "vec0" "$OUT/case4-post-state.txt"; then
 			echo "SKIP case 4: vec0 not visible in guest"
 		else
@@ -440,5 +440,5 @@ else
 fi
 
 echo
-echo "VERDICT: template-pause primitive + Phase 2 identity-apply works"
+echo "VERDICT: template-pause primitive and identity-apply path work"
 exit 0

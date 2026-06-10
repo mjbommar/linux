@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* 
+/*
  * Copyright (C) 2001, 2002 Jeff Dike (jdike@karaya.com)
  */
 
@@ -15,7 +15,7 @@
 #include "chan_user.h"
 #include "mconsole_kern.h"
 
-/* There's only two modifiable fields in this - .mc.list and .driver */
+/* Only .mc.list and .driver are modified after initialization. */
 struct line_driver {
 	const char *name;
 	const char *device_name;
@@ -39,14 +39,15 @@ struct line {
 	struct list_head chan_list;
 	struct chan *chan_in, *chan_out;
 
-	/*This lock is actually, mostly, local to*/
+	/* This lock is mostly local to the line discipline. */
 	spinlock_t lock;
 	int throttled;
-	/* Yes, this is a real circular buffer.
-	 * XXX: And this should become a struct kfifo!
+	/*
+	 * Circular buffer owned by the line discipline.
 	 *
 	 * buffer points to a buffer allocated on demand, of length
-	 * LINE_BUFSIZE, head to the start of the ring, tail to the end.*/
+	 * LINE_BUFSIZE, head to the start of the ring, tail to the end.
+	 */
 	u8 *buffer;
 	u8 *head;
 	u8 *tail;
@@ -56,13 +57,13 @@ struct line {
 	const struct line_driver *driver;
 };
 
-extern void line_close(struct tty_struct *tty, struct file * filp);
+extern void line_close(struct tty_struct *tty, struct file *filp);
 extern int line_open(struct tty_struct *tty, struct file *filp);
 extern int line_install(struct tty_driver *driver, struct tty_struct *tty,
 	struct line *line);
 extern void line_cleanup(struct tty_struct *tty);
 extern void line_hangup(struct tty_struct *tty);
-extern int line_setup(char **conf, unsigned nlines, char **def,
+extern int line_setup(char **conf, unsigned int nlines, char **def,
 		      char *init, char *name);
 extern ssize_t line_write(struct tty_struct *tty, const u8 *buf, size_t len);
 extern unsigned int line_chars_in_buffer(struct tty_struct *tty);

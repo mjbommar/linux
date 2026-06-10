@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/launcher-smoke/run-launcher-smoke.sh — regression guard for
-# tools/uml/uml-launcher (workstream C-10).
+# um/launcher-smoke/run-launcher-smoke.sh - regression guard for
+# tools/uml/uml-launcher.
 #
 # Exercises the launcher end-to-end:
 #
@@ -10,7 +10,7 @@
 #      without spawning (catches bitrot in the argv builder).
 #   B. `uml-launcher run --kernel ... --init /bin/true` boots UML
 #      and exits with 128 + SIGABRT = 134 (the expected init-
-#      exit panic — init=/bin/true returns, kernel panics,
+#      exit panic: init=/bin/true returns, kernel panics,
 #      launcher returns that exit code).
 #   C. `uml-launcher run --forkserver <ctl>,<status>` plumbs the
 #      caller's pipe fds to UML's 198/199 via the launcher's
@@ -20,7 +20,7 @@
 #      status bytes come back. Skipped if the UML binary isn't
 #      fuzz-profile (doesn't have CONFIG_UM_SNAPSHOT_FORKSERVER=y).
 #
-# Exits 0 on PASS, 4 on SKIP, 1 on FAIL — kselftest convention.
+# Exits 0 on PASS, 4 on SKIP, 1 on FAIL, per kselftest convention.
 #
 # Environment:
 #   UML_BINARY        path to UML kernel (default: /tmp/uml-research/linux)
@@ -49,7 +49,7 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 if [ -n "${UML_LAUNCHER:-}" ]; then
 	LAUNCHER="$UML_LAUNCHER"
 else
-	# tools/testing/selftests/um/launcher-smoke → up 4 → tree root.
+	# tools/testing/selftests/um/launcher-smoke -> up 4 -> tree root.
 	ROOT=$(cd "$DIR/../../../../.." && pwd)
 	LAUNCHER="$ROOT/tools/uml/uml-launcher/target/release/uml-launcher"
 fi
@@ -91,7 +91,7 @@ RC_B=$?
 # If the launcher passes through cleanly, we see 134 here too.
 # Some builds/configurations return a different signal; accept
 # any exit code in [1, 255] that isn't 0 as evidence that the
-# spawn + supervise + reap path worked. rc=0 is suspicious — it
+# spawn + supervise + reap path worked. rc=0 is suspicious: it
 # means the kernel panic didn't fire or the launcher swallowed
 # the exit code.
 case "$RC_B" in
@@ -117,7 +117,7 @@ esac
 #
 # Only meaningful if the UML binary has CONFIG_UM_SNAPSHOT_FORKSERVER=y
 # (fuzz / fuzz-deep profiles). Auto-detect by grepping the binary
-# for the forkserver handshake string "AFL\0" — present only when
+# for the forkserver handshake string "AFL\0", present only when
 # the Kconfig is on.
 PART_C=${PART_C:-auto}
 DRIVER="$DIR/launcher-forkserver-driver.py"

@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // umlctl port-forward — return a guest-reachable host address for a
-// pool member (Memo 09 Phase 4, spec memo 11 §3.2).
+// pool member.
 //
-// In TAP-direct mode (the preferred mode per the memo) the guest is
-// already wired to the host's TAP gateway IP at take time; nothing
-// extra has to happen.  The verb's only job is to look up the
-// member's `ipv4_gateway` via the daemon's `list` RPC and print a
-// well-typed answer:
+// In TAP-direct mode the guest is already wired to the host's TAP
+// gateway IP at take time; nothing extra has to happen.  The verb's
+// only job is to look up the member's `ipv4_gateway` via the daemon's
+// `list` RPC and print a well-typed answer:
 //
 //   { "ok": true,
 //     "schema_version": "port-forward/1",
@@ -18,10 +17,8 @@
 //     "pid": 1234 }
 //
 // iptables-DNAT fallback is intentionally NOT implemented here.  The
-// spec memo (§3.2.1) says "we defer this complexity until a real
-// caller needs it"; the syzkaller shim does not in the TAP-direct
-// world.  When a caller appears, this verb gains a `--scheme dnat`
-// branch.
+// syzkaller shim does not need it in the TAP-direct model.  A future
+// caller that needs DNAT can add a `--scheme dnat` branch.
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;

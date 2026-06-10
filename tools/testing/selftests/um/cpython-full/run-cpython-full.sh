@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# um/cpython-full — full CPython stdlib regrtest under UML.
+# um/cpython-full - full CPython stdlib regrtest under UML.
 #
-# Replaces the previous misleading "cpython-test"-style curated
-# gates that ran 29 of 439 modules and called it "the CPython test
-# suite passing".  This gate runs `python3 -m test` with no module
-# list, then compares the failure set against an explicit allowlist
-# of known-failing modules.  PASS iff exactly the documented set
-# fails — any NEW failure is a regression.
-#
-# Honest accounting: the allowlist starts (in expected_failures.txt)
-# at the modules that fail today.  Every line should eventually have
-# a tracked issue or be flipped to pass.  This is the inverse of the
-# old setup: the gate exists to make it impossible to silently regress
-# more tests into the "expected failure" bucket.
+# Runs `python3 -m test` with no module list, then compares the failure
+# set against an explicit allowlist of known-failing modules. PASS iff
+# exactly the documented set fails; any new failure is a regression.
 #
 # Exits 0 PASS / 1 FAIL / 4 SKIP (kselftest convention).
 
@@ -106,7 +97,8 @@ if [ -n "$FIXED" ]; then
     echo "  Tests that now PASS but are still in expected_failures.txt"
     echo "  (please remove from allowlist):"
     echo "$FIXED" | sed 's/^/    /'
-    # This is a soft warning, not a fail — fixing tests should never break the gate.
+    # This is a soft warning, not a fail; fixing tests should never
+    # break the gate.
 fi
 
 echo

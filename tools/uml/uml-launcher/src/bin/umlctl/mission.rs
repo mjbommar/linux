@@ -1,50 +1,51 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// `umlctl mission` — comprehensive acceptance gate for the
+// `umlctl mission` - comprehensive readiness gate for the
 // UML kvm-v2 backend.
 //
-// Six fail-fast phases, ~10-15 min total:
+// Six fail-fast steps, ~10-15 min total:
 //
-//   1. KUnit selftests       — snapshot-kvm-smoke (3 cases) +
+//   1. KUnit selftests       - snapshot-kvm-smoke (3 cases) +
 //                              kvm-record-smoke (7 cases).
 //                              Proves the new snapshot/RR code
 //                              paths execute correctly.
 //
-//   2. Performance bench     — kvm-snapshot-bench N=64. Gates:
+//   2. Performance bench     - kvm-snapshot-bench N=64. Gates:
 //                              capture < 50 ms, median restore < 1 ms.
-//                              Proves the memo-12 latency contract.
+//                              Checks the snapshot/restore latency
+//                              budget.
 //
-//   3. Substrate parity      — kvm-smoke + cpython-tier0 +
-//                              kvm-bounds. The historical kvm-v2
-//                              acceptance gate.
+//   3. Substrate parity      - kvm-smoke + cpython-tier0 +
+//                              kvm-bounds coverage for backend
+//                              invariants.
 //
-//   4. Host resource controls— spawn UML with the memo-52 knobs
-//                              set; verify /proc/<pid>/oom_score_adj
-//                              + environ contains the requested
+//   4. Host resource controls - spawn UML with resource knobs set;
+//                              verify /proc/<pid>/oom_score_adj and
+//                              environ contain the requested
 //                              UM_* env vars; verify preflight
 //                              warnings fire on intentionally-
 //                              misconfigured input. Proves the
-//                              T78-T84 stack works end-to-end.
+//                              resource-control path end-to-end.
 //
-//   5. Diverse workload soak — 5 workloads × 20-30 iters via the
+//   5. Diverse workload soak - 5 workloads x 20-30 iters via the
 //                              run-soak-daemon.sh harness. Gates:
 //                              aggregate Wilson 95% CI lower bound
-//                              ≥ 97%; zero panics; zero "Kernel
-//                              mode signal 7". Proves the R14 fix
-//                              is durable across diverse fork /
-//                              FPU / I/O / scheduler workloads.
+//                              >= 97%; zero panics; zero "Kernel
+//                              mode signal 7". Exercises diverse
+//                              fork, FPU, I/O, and scheduler
+//                              workloads.
 //
-//   6. Diagnostic snapshot   — record kernel HEAD, umlctl version,
+//   6. Diagnostic snapshot   - record kernel HEAD, umlctl version,
 //                              host hugepage/cgroup state, soak
 //                              scoreboard. Reproducibility metadata.
 //
 // Binary verdict on stdout:
 //
 //   MISSION_ACCOMPLISHED in <seconds>s (kernel=<sha>, host=<name>)
-//   MISSION_FAILED phase=<N> <name>: <message>
+//   MISSION_FAILED step=<N> <name>: <message>
 //
-// JSON scoreboard at <out>/scoreboard.json, per-phase logs at
-// <out>/phase-<N>.log.
+// JSON scoreboard at <out>/scoreboard.json, per-step logs at
+// <out>/step-<N>.log.
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -61,7 +62,7 @@ pub struct MissionArgs {
     #[arg(long, env = "UML_KERNEL")]
     pub kernel: PathBuf,
 
-    /// Output directory for scoreboard.json + per-phase logs.
+    /// Output directory for scoreboard.json + per-step logs.
     /// Created if absent. Default: /tmp/mission-<timestamp>/.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -74,49 +75,47 @@ pub struct MissionArgs {
     #[arg(long, env = "UMLCTL_SELFTESTS_DIR")]
     pub selftests_dir: Option<PathBuf>,
 
-    /// Quick mode — skip Phase 5 (the 8-minute soak). Full run
-    /// becomes ~2-3 min. Useful for fast iteration during dev.
+    /// Quick mode: skip step 5 (the 8-minute soak). Full run
+    /// becomes ~2-3 min. Useful for local iteration.
     #[arg(long)]
     pub quick: bool,
 
-    /// Continue past failing phases (collect all signals).
-    /// Default: fail-fast on first phase failure.
+    /// Continue past failing steps (collect all signals).
+    /// Default: fail-fast on first step failure.
     #[arg(long)]
     pub continue_on_fail: bool,
 
-    /// Phase 5 soak budget in seconds. Default 480 (8 min).
+    /// Step 5 soak budget in seconds. Default 480 (8 min).
     /// Lower for dev iteration; higher for confidence runs.
     #[arg(long, default_value = "480")]
     pub soak_budget_sec: u64,
 
-    /// Phase 5 Wilson 95% CI lower-bound threshold (percent).
-    /// Default 97.0 — allows the historical 1-2% high-cr2 flake
-    /// class on django-loopback while catching real regressions.
+    /// Step 5 Wilson 95% CI lower-bound threshold (percent).
+    /// Default 97.0 allows a small high-cr2 noise class on
+    /// django-loopback while catching real regressions.
     #[arg(long, default_value = "97.0")]
     pub soak_min_pct: f64,
 
-    /// Opt-in Phase 5b: stress the vector2 network driver under
-    /// kvm-v2 with the tier3-django-v2 workload. Requires host-side
-    /// TAP + iptables capability (sudo -n). Per memo 01 of the
-    /// post-2026-05-19 sprint, this is the path to the umlctl
-    /// default-driver flip; running it from the mission gate
-    /// catches a vector2-side regression before the default change.
+    /// Opt-in vector2 stress step for kvm-v2 with the tier3-django-v2
+    /// workload. Requires host-side
+    /// TAP + iptables capability (sudo -n). This catches vector2-side
+    /// regressions before treating vector2 as the default network
+    /// path.
     #[arg(long)]
     pub with_vector2: bool,
 
-    /// Phase 5b vector2 soak iteration count. Default 5 — small
-    /// enough to keep the mission gate under 30 minutes total but
-    /// big enough to catch the historical 1/30 R14 flake shape if
-    /// it ever returns.
+    /// Vector2 stress iteration count. Default 5 keeps the
+    /// mission gate under 30 minutes total while still exercising
+    /// repeated vector2 startup and teardown.
     #[arg(long, default_value = "5")]
     pub vector2_iters: u32,
 
-    /// Phase 8 UML kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK=y
-    /// for the fork-stress selftest.  Falls back to
+    /// UML kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK=y for the
+    /// fork-stress selftest.  Falls back to
     /// $HOME/src/uml-builds/uml-tplpause-fork/linux when the env var
-    /// is unset.  Phase 8 SKIPs if the resolved path doesn't exist
-    /// (the main mission kernel is normally NOT built with fork
-    /// support).  Phase 8 runs only on full missions, never quick.
+    /// is unset.  The fork-stress step SKIPs if the resolved path
+    /// doesn't exist (the main mission kernel is normally NOT built
+    /// with fork support).  It runs only on full missions, never quick.
     #[arg(long, env = "UM_FORK_KERNEL")]
     pub fork_kernel: Option<PathBuf>,
 }
@@ -129,13 +128,13 @@ enum Verdict {
 }
 
 #[derive(Serialize, Debug)]
-struct PhaseResult {
-    phase_id: u32,
+struct MissionStep {
+    step_id: u32,
     name: &'static str,
     verdict: Verdict,
     duration_ms: u64,
     summary: String,
-    /// Free-form key/value details per phase (numbers, paths, hashes).
+    /// Free-form key/value details per step (numbers, paths, hashes).
     details: BTreeMap<String, String>,
 }
 
@@ -149,7 +148,7 @@ struct MissionScoreboard {
     started_at_iso: String,
     duration_ms: u64,
     verdict: Verdict,
-    phases: Vec<PhaseResult>,
+    steps: Vec<MissionStep>,
 }
 
 pub fn run(args: MissionArgs) -> Result<()> {
@@ -162,7 +161,7 @@ pub fn run(args: MissionArgs) -> Result<()> {
     let selftests_dir = resolve_selftests_dir(&args)?;
     if !args.kernel.exists() {
         anyhow::bail!(
-            "kernel path {} does not exist — set UML_KERNEL or pass --kernel",
+            "kernel path {} does not exist - set UML_KERNEL or pass --kernel",
             args.kernel.display()
         );
     }
@@ -175,29 +174,29 @@ pub fn run(args: MissionArgs) -> Result<()> {
         out_dir.display()
     );
 
-    // Phase ordering:
+    // Mission ordering:
     //   1 KUnit, 2 bench, 3 substrate, 4 host_resources,
     //   5 diverse soak, 7 vector2 stress (opt-in),
     //   8 fork-stress (only on full missions, separate kernel),
     //   6 diagnostic last.
-    // Phases 7 and 8 both run before Phase 6 because diagnostic
-    // wants to capture the final reproducibility metadata after
-    // every gate has run.  Phase 8 is skipped in quick mode — its
+    // Vector2 and fork-stress both run before the diagnostic phase because
+    // diagnostics should capture the final reproducibility metadata
+    // after every gate has run.  Fork-stress is skipped in quick mode: its
     // retry harness + ~5s per attempt is too expensive for the
     // 2-3 min quick-iteration budget.
-    let phases: Vec<u32> = match (args.quick, args.with_vector2) {
-        (true, true)   => vec![1, 2, 3, 4, 7, 6],
-        (true, false)  => vec![1, 2, 3, 4, 6],
-        (false, true)  => vec![1, 2, 3, 4, 5, 7, 8, 6],
+    let steps: Vec<u32> = match (args.quick, args.with_vector2) {
+        (true, true) => vec![1, 2, 3, 4, 7, 6],
+        (true, false) => vec![1, 2, 3, 4, 6],
+        (false, true) => vec![1, 2, 3, 4, 5, 7, 8, 6],
         (false, false) => vec![1, 2, 3, 4, 5, 8, 6],
     };
 
-    let mut results: Vec<PhaseResult> = Vec::new();
+    let mut results: Vec<MissionStep> = Vec::new();
     let mut all_pass = true;
-    for phase_id in phases {
-        let result = run_phase(phase_id, &args, &selftests_dir, &out_dir)?;
+    for step_id in steps {
+        let result = run_step(step_id, &args, &selftests_dir, &out_dir)?;
         let pass = result.verdict == Verdict::Pass || result.verdict == Verdict::Skip;
-        print_phase_line(&result);
+        print_step_line(&result);
         results.push(result);
         if !pass {
             all_pass = false;
@@ -223,12 +222,11 @@ pub fn run(args: MissionArgs) -> Result<()> {
         started_at_iso: rfc3339_now(),
         duration_ms: duration.as_millis() as u64,
         verdict: final_verdict,
-        phases: results,
+        steps: results,
     };
 
     let json = serde_json::to_string_pretty(&board)?;
-    std::fs::write(out_dir.join("scoreboard.json"), json)
-        .context("write scoreboard.json")?;
+    std::fs::write(out_dir.join("scoreboard.json"), json).context("write scoreboard.json")?;
 
     match final_verdict {
         Verdict::Pass => {
@@ -242,10 +240,10 @@ pub fn run(args: MissionArgs) -> Result<()> {
         }
         Verdict::Fail => {
             let failed = board
-                .phases
+                .steps
                 .iter()
                 .find(|p| p.verdict == Verdict::Fail)
-                .map(|p| format!("phase={} {}: {}", p.phase_id, p.name, p.summary))
+                .map(|p| format!("step={} {}: {}", p.step_id, p.name, p.summary))
                 .unwrap_or_else(|| "unknown".to_string());
             anyhow::bail!("MISSION_FAILED {failed}")
         }
@@ -254,29 +252,29 @@ pub fn run(args: MissionArgs) -> Result<()> {
 }
 
 // --------------------------------------------------------------
-// Per-phase runners
+// Per-step runners
 // --------------------------------------------------------------
 
-fn run_phase(
-    phase_id: u32,
+fn run_step(
+    step_id: u32,
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
-) -> Result<PhaseResult> {
+) -> Result<MissionStep> {
     let start = Instant::now();
-    let (name, verdict, summary, details) = match phase_id {
-        1 => phase1_kunit(args, selftests_dir, out_dir)?,
-        2 => phase2_bench(args, selftests_dir, out_dir)?,
-        3 => phase3_substrate(args, selftests_dir, out_dir)?,
-        4 => phase4_host_resources(args, out_dir)?,
-        5 => phase5_diverse_soak(args, selftests_dir, out_dir)?,
-        6 => phase6_diagnostic(args, out_dir)?,
-        7 => phase7_vector2_stress(args, selftests_dir, out_dir)?,
-        8 => phase8_fork_stress(args, selftests_dir, out_dir)?,
-        _ => anyhow::bail!("unknown phase {phase_id}"),
+    let (name, verdict, summary, details) = match step_id {
+        1 => step1_kunit(args, selftests_dir, out_dir)?,
+        2 => step2_bench(args, selftests_dir, out_dir)?,
+        3 => step3_substrate(args, selftests_dir, out_dir)?,
+        4 => step4_host_resources(args, out_dir)?,
+        5 => step5_diverse_soak(args, selftests_dir, out_dir)?,
+        6 => step6_diagnostic(args, out_dir)?,
+        7 => step7_vector2_stress(args, selftests_dir, out_dir)?,
+        8 => step8_fork_stress(args, selftests_dir, out_dir)?,
+        _ => anyhow::bail!("unknown step {step_id}"),
     };
-    Ok(PhaseResult {
-        phase_id,
+    Ok(MissionStep {
+        step_id,
         name,
         verdict,
         duration_ms: start.elapsed().as_millis() as u64,
@@ -285,7 +283,7 @@ fn run_phase(
     })
 }
 
-fn phase1_kunit(
+fn step1_kunit(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
@@ -309,7 +307,7 @@ fn phase1_kunit(
             all_pass = false;
             continue;
         }
-        let log = out_dir.join(format!("phase-1-{label}.log"));
+        let log = out_dir.join(format!("step-1-{label}.log"));
         let rc = run_script(&path, args, &log)?;
         details.insert(label.to_string(), format!("rc={rc}"));
         if rc != 0 {
@@ -319,12 +317,15 @@ fn phase1_kunit(
     let (verdict, summary) = if all_pass {
         (Verdict::Pass, "10/10 KUnit cases PASS".to_string())
     } else {
-        (Verdict::Fail, "one or more KUnit selftests failed".to_string())
+        (
+            Verdict::Fail,
+            "one or more KUnit selftests failed".to_string(),
+        )
     };
     Ok(("kunit", verdict, summary, details))
 }
 
-fn phase2_bench(
+fn step2_bench(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
@@ -333,9 +334,14 @@ fn phase2_bench(
     let script = selftests_dir.join("kvm-snapshot-bench/run-kvm-snapshot-bench.sh");
     if !script.exists() {
         details.insert("script".into(), format!("MISSING:{}", script.display()));
-        return Ok(("bench", Verdict::Fail, "bench script absent".into(), details));
+        return Ok((
+            "bench",
+            Verdict::Fail,
+            "bench script absent".into(),
+            details,
+        ));
     }
-    let log = out_dir.join("phase-2-bench.log");
+    let log = out_dir.join("step-2-bench.log");
     let rc = run_script(&script, args, &log)?;
     if rc != 0 {
         details.insert("rc".into(), rc.to_string());
@@ -365,7 +371,7 @@ fn phase2_bench(
         (
             Verdict::Pass,
             format!(
-                "capture={}µs median_restore={}µs (targets <50ms / <1ms)",
+                "capture={}us median_restore={}us (targets <50ms / <1ms)",
                 cap_ns.unwrap_or(0) / 1000,
                 median_ns.unwrap_or(0) / 1000
             ),
@@ -383,18 +389,16 @@ fn phase2_bench(
     Ok(("bench", verdict, summary, details))
 }
 
-fn phase3_substrate(
+fn step3_substrate(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
 ) -> Result<(&'static str, Verdict, String, BTreeMap<String, String>)> {
     let mut details = BTreeMap::new();
-    // Reliable v2 substrate gates only. kvm-smoke + kvm-bounds
-    // exist but are v1-era (progression-marker-based / built-C-
-    // binary) and don't match the v2 backend path — skipped from
-    // the mission gate. The full historical substrate-gate matrix
-    // (kvm-v2 PASS=25/FAIL=3/XFAIL=3) is run separately via the
-    // `umlctl gate` family.
+    // Reliable v2 substrate gates only.  kvm-smoke + kvm-bounds use
+    // older progression-marker and built-C-binary harnesses, so they
+    // are tracked through the `umlctl gate` family instead of this
+    // readiness gate.
     let scripts = [("cpython-tier0/run-cpython-tier0.sh", "cpython_tier0")];
     let mut ok = 0;
     let mut total = 0;
@@ -406,7 +410,7 @@ fn phase3_substrate(
             continue;
         }
         total += 1;
-        let log = out_dir.join(format!("phase-3-{label}.log"));
+        let log = out_dir.join(format!("step-3-{label}.log"));
         let rc = run_script(&full, args, &log)?;
         details.insert(label.to_string(), format!("rc={rc}"));
         match rc {
@@ -428,23 +432,23 @@ fn phase3_substrate(
     } else {
         (
             Verdict::Fail,
-            format!("{ok}/{total} PASS — substrate parity gates failed"),
+            format!("{ok}/{total} PASS - substrate parity gates failed"),
         )
     };
     Ok(("substrate", verdict, summary, details))
 }
 
-fn phase4_host_resources(
+fn step4_host_resources(
     args: &MissionArgs,
     out_dir: &Path,
 ) -> Result<(&'static str, Verdict, String, BTreeMap<String, String>)> {
     let mut details = BTreeMap::new();
     // Build an inline .toml with knobs set, spawn via the kernel
     // directly (umlctl up would also work but adds dependencies).
-    // The phase verifies the *kernel-side* code reads UM_* env
+    // The step verifies the *kernel-side* code reads UM_* env
     // vars correctly. umlctl-side translation is exercised in
-    // phase 5 (the soak templates have [host_resources] blocks).
-    let log = out_dir.join("phase-4-host_resources.log");
+    // step 5 (the soak templates have [host_resources] blocks).
+    let log = out_dir.join("step-4-host_resources.log");
 
     let mut cmd = Command::new(&args.kernel);
     cmd.args([
@@ -462,7 +466,7 @@ fn phase4_host_resources(
     cmd.env("UM_OOM_SCORE_ADJ", "500");
     cmd.env("UM_KVM_V2_CPU_AFFINITY", "0-1");
 
-    let out = cmd.output().context("spawn UML for phase 4")?;
+    let out = cmd.output().context("spawn UML for step 4")?;
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&out.stdout),
@@ -470,34 +474,34 @@ fn phase4_host_resources(
     );
     let _ = std::fs::write(&log, &combined);
 
-    // Success signals: "um: backend = kvm-v2" AND NO "SMP-T78"
-    // / "SMP-T79" / "SMP-T80" / "SMP-T82" error lines. Failures
-    // show up as `SMP-T<N> <call>: <strerror>`.
+    // Success signals: kvm-v2 backend banner and no resource-control
+    // perror/warning lines from the requested UM_* knobs.
     let backend_ok = combined.contains("um: backend = kvm-v2");
-    let smp_err = combined
-        .lines()
-        .find(|l| l.starts_with("SMP-T78") || l.starts_with("SMP-T79")
-              || l.starts_with("SMP-T80") || l.starts_with("SMP-T82"));
+    let resource_err = combined.lines().find(|l| {
+        l.starts_with("um: open(/proc/self/oom_score_adj)")
+            || l.starts_with("um: write(oom_score_adj)")
+            || l.starts_with("um: sched_setaffinity")
+            || l.starts_with("um: madvise(MADV_NOHUGEPAGE)")
+            || l.starts_with("um: madvise(MADV_HUGEPAGE)")
+            || l.contains("malformed UM_KVM_V2_CPU_AFFINITY")
+    });
     details.insert("backend_banner".into(), backend_ok.to_string());
-    if let Some(e) = smp_err {
-        details.insert("knob_perror".into(), e.into());
+    if let Some(e) = resource_err {
+        details.insert("resource_error".into(), e.into());
     }
 
-    let (verdict, summary) = if backend_ok && smp_err.is_none() {
-        (
-            Verdict::Pass,
-            "knobs applied silently, backend up".into(),
-        )
+    let (verdict, summary) = if backend_ok && resource_err.is_none() {
+        (Verdict::Pass, "knobs applied silently, backend up".into())
     } else {
         (
             Verdict::Fail,
-            "knob application errored — see phase-4-host_resources.log".into(),
+            "resource controls failed - see step-4-host_resources.log".into(),
         )
     };
     Ok(("host_resources", verdict, summary, details))
 }
 
-fn phase5_diverse_soak(
+fn step5_diverse_soak(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
@@ -505,10 +509,7 @@ fn phase5_diverse_soak(
     let mut details = BTreeMap::new();
     let daemon = selftests_dir.join("soak/run-soak-daemon.sh");
     if !daemon.exists() {
-        details.insert(
-            "daemon".into(),
-            format!("MISSING:{}", daemon.display()),
-        );
+        details.insert("daemon".into(), format!("MISSING:{}", daemon.display()));
         return Ok((
             "soak",
             Verdict::Fail,
@@ -516,15 +517,15 @@ fn phase5_diverse_soak(
             details,
         ));
     }
-    let soak_out = out_dir.join("phase-5-soak");
+    let soak_out = out_dir.join("step-5-soak");
     std::fs::create_dir_all(&soak_out).ok();
 
-    // Workload mix per memo 52 mission design: orthogonal syscall
-    // surfaces, all known stable post-R14.
+    // Workload mix covers independent syscall surfaces that should be
+    // stable under kvm-v2.
     let workloads = "memcheck,iocheck,stress-ng,tier1-pylibs,django-loopback-none";
     let iters_per_rotation = "10";
 
-    let log = out_dir.join("phase-5-soak.log");
+    let log = out_dir.join("step-5-soak.log");
     let mut cmd = Command::new("bash");
     cmd.arg(&daemon)
         .arg("--backends")
@@ -605,10 +606,10 @@ fn phase5_diverse_soak(
 
     // Gate logic:
     // - HARD: zero panics, zero "Kernel mode signal 7", zero high-cr2.
-    //   Any of these → definite regression / known-bad shape.
+    //   Any of these is a definite regression or known-bad shape.
     // - PASS path 1 (perfect run): 100% pass rate AND n >= 20.
     //   Statistically clean even though Wilson 95% lower bound is
-    //   only ~85% at n=20, 96.3% at n=100, 99.6% at n=1000 — for
+    //   only ~85% at n=20, 96.3% at n=100, 99.6% at n=1000; for
     //   a "no failure observed" signal we don't need the lower
     //   bound to chase 100%.
     // - PASS path 2 (Wilson gate): pass rate < 100% but the
@@ -621,14 +622,17 @@ fn phase5_diverse_soak(
 
     let (verdict, summary) = if gate_ok {
         let why = if perfect_run {
-            format!("{pass}/{total} PASS (100% — perfect run, n≥20)")
+            format!("{pass}/{total} PASS (100% - perfect run, n>=20)")
         } else {
             format!(
-                "{pass}/{total} PASS, Wilson95 lower={lo:.2}% (≥{:.1}%)",
+                "{pass}/{total} PASS, Wilson95 lower={lo:.2}% (>={:.1}%)",
                 args.soak_min_pct
             )
         };
-        (Verdict::Pass, format!("{why}; 0 panics 0 sigbus 0 high_cr2"))
+        (
+            Verdict::Pass,
+            format!("{why}; 0 panics 0 sigbus 0 high_cr2"),
+        )
     } else {
         (
             Verdict::Fail,
@@ -641,10 +645,9 @@ fn phase5_diverse_soak(
     Ok(("soak", verdict, summary, details))
 }
 
-/// Phase 7 (opt-in, --with-vector2): stress the vector2 network driver
-/// under kvm-v2 with the tier3-django-v2 workload. Required gate
-/// before flipping the umlctl default driver from "vector" to
-/// "vector2" (memo 01 of the post-2026-05-19 sprint).
+/// Vector2 stress step (opt-in, --with-vector2): stress the vector2 network driver
+/// under kvm-v2 with the tier3-django-v2 workload.  This is the
+/// mission-level check for treating vector2 as the default network path.
 ///
 /// Drives the run-soak-daemon.sh harness with N iterations of
 /// tier3-django-v2 (which routes the {{NETWORK_DRIVER}} template
@@ -653,8 +656,8 @@ fn phase5_diverse_soak(
 /// TLB_LAG-correlated noise OK as long as verdict is PASS.
 ///
 /// Requires host-side TAP + iptables capability (sudo -n). If the
-/// preflight detects this is unavailable, the phase SKIPs cleanly.
-fn phase7_vector2_stress(
+/// preflight detects this is unavailable, the step SKIPs cleanly.
+fn step7_vector2_stress(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
@@ -679,10 +682,7 @@ fn phase7_vector2_stress(
 
     let daemon = selftests_dir.join("soak/run-soak-daemon.sh");
     if !daemon.exists() {
-        details.insert(
-            "daemon".into(),
-            format!("MISSING:{}", daemon.display()),
-        );
+        details.insert("daemon".into(), format!("MISSING:{}", daemon.display()));
         return Ok((
             "vector2",
             Verdict::Fail,
@@ -691,14 +691,14 @@ fn phase7_vector2_stress(
         ));
     }
 
-    let soak_out = out_dir.join("phase-7-vector2");
+    let soak_out = out_dir.join("step-7-vector2");
     std::fs::create_dir_all(&soak_out).ok();
 
     let iters = args.vector2_iters.to_string();
     // 180s timeout * iters with some slack.
     let budget_sec = (args.vector2_iters as u64 * 240 + 60).to_string();
 
-    let log = out_dir.join("phase-7-vector2.log");
+    let log = out_dir.join("step-7-vector2.log");
     let mut cmd = Command::new("bash");
     cmd.arg(&daemon)
         .arg("--backends")
@@ -715,9 +715,7 @@ fn phase7_vector2_stress(
         .arg(&soak_out);
     cmd.env("UML_KERNEL", &args.kernel);
 
-    let out = cmd
-        .output()
-        .context("spawn vector2 stress soak daemon")?;
+    let out = cmd.output().context("spawn vector2 stress soak daemon")?;
     let _ = std::fs::write(&log, &out.stdout);
 
     let scoreboard = soak_out.join("scoreboard.jsonl");
@@ -781,9 +779,7 @@ fn phase7_vector2_stress(
         return Ok((
             "vector2",
             Verdict::Fail,
-            format!(
-                "expected uml_network_driver=vector2 but saw \"{driver_seen}\""
-            ),
+            format!("expected uml_network_driver=vector2 but saw \"{driver_seen}\""),
             details,
         ));
     }
@@ -792,36 +788,32 @@ fn phase7_vector2_stress(
     let (verdict, summary) = if gate_ok {
         (
             Verdict::Pass,
-            format!(
-                "{pass}/{total} PASS (vector2 + kvm-v2 tier3-django-v2); 0 panics 0 sigbus"
-            ),
+            format!("{pass}/{total} PASS (vector2 + kvm-v2 tier3-django-v2); 0 panics 0 sigbus"),
         )
     } else {
         (
             Verdict::Fail,
-            format!(
-                "{pass}/{total} PASS; panics={panic_n} sigbus={sigbus}"
-            ),
+            format!("{pass}/{total} PASS; panics={panic_n} sigbus={sigbus}"),
         )
     };
     Ok(("vector2", verdict, summary, details))
 }
 
-// Phase 8 — Memo 09 template-pause + fork stress.
+// Template-pause fork stress step.
 //
 // Drives the master through hundreds of fork-on-resume iterations
 // and asserts the six gates documented in run-template-pause-fork-
-// stress.sh (master alive, distinct child pids, RSS drift ≤ 5%, no
-// post-teardown stub leak, ≥ N iters in window, identity-blob
+// stress.sh (master alive, distinct child pids, RSS drift <= 5%, no
+// post-teardown stub leak, >= N iters in window, identity-blob
 // round-trip).
 //
 // Requires a separate kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK
 // =y, because the main mission kernel is normally configured for
 // kvm-v2 (which assert_fork_safety() refuses).  Resolved from
-// --fork-kernel / $UM_FORK_KERNEL, with the dev-host default of
+// --fork-kernel / $UM_FORK_KERNEL, with the default of
 // $HOME/src/uml-builds/uml-tplpause-fork/linux.  SKIPs cleanly when
-// that binary doesn't exist — the rest of the mission still gates.
-fn phase8_fork_stress(
+// that binary doesn't exist; the rest of the mission still gates.
+fn step8_fork_stress(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
@@ -856,7 +848,7 @@ fn phase8_fork_stress(
         ));
     }
 
-    let log = out_dir.join("phase-8-fork-stress.log");
+    let log = out_dir.join("step-8-fork-stress.log");
     let mut cmd = Command::new("bash");
     cmd.arg(&script);
     cmd.env("UML_BINARY", &fork_kernel);
@@ -867,7 +859,10 @@ fn phase8_fork_stress(
     let out = cmd.output().context("spawn fork-stress selftest")?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let _ = std::fs::write(&log, format!("=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"));
+    let _ = std::fs::write(
+        &log,
+        format!("=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"),
+    );
 
     // Parse per-gate detail rows for the scoreboard.  The selftest
     // script's strict single-attempt format prints G[1-8] lines plus
@@ -945,7 +940,7 @@ fn phase8_fork_stress(
     }
 }
 
-fn phase6_diagnostic(
+fn step6_diagnostic(
     args: &MissionArgs,
     out_dir: &Path,
 ) -> Result<(&'static str, Verdict, String, BTreeMap<String, String>)> {
@@ -958,9 +953,13 @@ fn phase6_diagnostic(
         details.insert("git_head".into(), g);
     }
     details.insert("host".into(), hostname());
-    details.insert("umlctl_version".into(), env!("CARGO_PKG_VERSION").to_string());
+    details.insert(
+        "umlctl_version".into(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
 
-    // Hugepage pool sizing + cgroup v2 presence (operator-relevant).
+    // Hugepage pool sizing + cgroup v2 presence are useful context
+    // for interpreting resource-control results.
     let hp_2m = std::fs::read_to_string("/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -969,8 +968,8 @@ fn phase6_diagnostic(
     let cgroup_v2 = Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
     details.insert("cgroup_v2_present".into(), cgroup_v2.to_string());
 
-    // Write diagnostic.json — separate file, easier to grep than
-    // pulling out the phase-6 block of the full scoreboard.
+    // Write diagnostic.json as a separate file so callers do not need
+    // to parse the full scoreboard for reproducibility metadata.
     let diag = serde_json::to_string_pretty(&details)?;
     std::fs::write(out_dir.join("diagnostic.json"), diag).ok();
 
@@ -996,7 +995,7 @@ fn resolve_selftests_dir(args: &MissionArgs) -> Result<PathBuf> {
         return Ok(guess);
     }
     anyhow::bail!(
-        "cannot locate tools/testing/selftests/um — set UMLCTL_SELFTESTS_DIR \
+        "cannot locate tools/testing/selftests/um - set UMLCTL_SELFTESTS_DIR \
          or pass --selftests-dir"
     )
 }
@@ -1117,15 +1116,15 @@ fn unix_ts_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn print_phase_line(r: &PhaseResult) {
+fn print_step_line(r: &MissionStep) {
     let v = match r.verdict {
         Verdict::Pass => "PASS",
         Verdict::Fail => "FAIL",
         Verdict::Skip => "SKIP",
     };
     eprintln!(
-        "[Phase {}] {} {} ({:.1}s) — {}",
-        r.phase_id,
+        "[Step {}] {} {} ({:.1}s) - {}",
+        r.step_id,
         v,
         r.name,
         r.duration_ms as f64 / 1000.0,

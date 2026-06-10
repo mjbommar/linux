@@ -1,8 +1,8 @@
 schema_version = 1
 volumes = []
 
-# TCP throughput bench workload — used by run-tcp-throughput-via-umlctl.sh
-# to measure guest→host TCP under either legacy vector or vector2 driver
+# TCP throughput bench workload, used by run-tcp-throughput-via-umlctl.sh
+# to measure guest->host TCP under either legacy vector or vector2 driver
 # via the production fd-handoff path that umlctl deploy uses.
 #
 # Placeholders (substituted by the wrapper):
@@ -41,7 +41,7 @@ cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 5
 
-# Phase 2: TCP throughput sender — connect to host sink, stream for N
+# TCP throughput sender: connect to host sink, stream for N
 # seconds, print BENCH_RESULT.  The wrapper script starts the host
 # sink on {{HOST_IP_PLAIN}}:{{BENCH_PORT}} before invoking umlctl.
 [[init.phases]]

@@ -2,17 +2,15 @@
 /*
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  *
- * UML mm-arbiter: TLB-sync drain orchestration (memo 25 R8).
+ * UML TLB-sync drain orchestration.
  *
- * Contract (post memo 25 R3 / R5 / R8):
- *
- * - This layer carries NO backend-specific knowledge. The drain
+ * - This layer carries no backend-specific knowledge. The drain
  *   loop dispatches through um_backend->mm_region_added /
  *   mm_region_removed for user mms (via the vm_ops table loaded
  *   once at the top of um_tlb_sync), or kern_map / kern_unmap
  *   for init_mm.
  *
- * - The "deferred sync queue" today is the compact (from, to)
+ * - The "deferred sync queue" is the compact (from, to)
  *   range stashed in struct mm_context::sync_tlb_range_{from,to}
  *   and updated by um_tlb_mark_sync() (called from set_pte,
  *   set_ptes, flush_tlb_*, etc.). At drain time, um_tlb_sync()
@@ -21,21 +19,17 @@
  *   needsync PTE. Equivalent to "queue of regions" but stored as
  *   bounds + on-demand pgd walk.
  *
- * - Backends see only struct um_memory_region values — never
- *   struct mm_id (memo 25 R2 cleanup), never per-PTE callbacks
- *   (memo 25 R3 + Step 3 strip), never v1's shadow_sync_pte
- *   hook chain (gone since memo 25 Step 3, b19444243944).
+ * - Backends see only struct um_memory_region values, not struct
+ *   mm_id internals or per-PTE callback chains.
  *
- * Future (memo 26 Phase B): when v2's per-mapping memslot path
- * lands, a higher-level mmap-time notification at the vma layer
- * may augment this drain loop so v2 sees one mm_region_added per
- * user mmap (vs today's per-page emission). The drain orchestration
- * itself stays — that path remains the synchronous "force backend
- * to catch up before the next access" point.
+ * Higher-level mmap-time notifications may supplement this drain loop,
+ * but this path remains the synchronous "force backend to catch up before
+ * the next access" point.
  */
 
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/printk.h>
 #include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
@@ -53,28 +47,22 @@
 #include <kern_util.h>
 
 /*
- * Memo §H.1b residual fix: deferred-free queue.
- *
  * UML's flush_tlb_range only marks (sync_tlb_range_*); the actual
  * guest-TLB flush is the CR4.PGE toggle on the next vcpu_run
  * dispatch (kvm-v2/vcpu.c:1148). mmu_gather's tlb_batch_pages_flush
- * (mm/mmu_gather.c) frees pages back to buddy BEFORE that flush —
+ * (mm/mmu_gather.c) frees pages back to buddy before that flush,
  * which violates the standard mm contract and exposes a window
  * where kernel slab can take a freed PFN and write data while the
  * guest CPU's user-half TLB still has stale translations to it.
  *
- * Diagnostic confirmed (memo §H.1b ROOT-CAUSED, 2026-04-30): under
- * mt-mmap-stress 3T×50 iters, the failing PFN appears in
- * tlb_batch_pages_flush with sync_tlb_range_to non-empty.
- *
- * Fix shape: instead of letting mmu_gather call
+ * Instead of letting mmu_gather call
  * free_pages_and_swap_cache, we transfer the batch's encoded_page
  * entries into per-mm deferred_free batches. We do NOT touch
- * refcounts here — the encoded_page array's "ownership" of each
+ * refcounts here; the encoded_page array's "ownership" of each
  * page (the ref that mmu_gather holds during the unmap) is
  * preserved by transferring the entries. At drain time (next
  * vcpu_run, after KVM_RUN's CR4.PGE flush has executed), we call
- * free_pages_and_swap_cache on the deferred batches — the same
+ * free_pages_and_swap_cache on the deferred batches, the same
  * operation mmu_gather would have done, just deferred until the
  * TLB has actually been flushed.
  *
@@ -86,7 +74,7 @@
 
 struct um_defer_batch {
 	struct list_head list;
-	struct rcu_head rcu;	/* SMP-T20: RCU-deferred free (memo §SMP-T20) */
+	struct rcu_head rcu;
 	unsigned int nr;
 	struct encoded_page *pages[UM_DEFER_BATCH_NR];
 };
@@ -97,14 +85,14 @@ struct um_defer_batch {
  *
  * The encoded_page array's "ownership" of the page (the ref that
  * mmu_gather held during the unmap) must be PRESERVED in the deferred
- * list — we transfer that ref here without taking a new one. The
+ * list; we transfer that ref here without taking a new one. The
  * caller then sets batch->nr to skip the matching entry in
  * __tlb_batch_free_encoded_pages, so the standard release_pages
- * decrement does NOT run on this entry. The deferred drain calls
+ * decrement does not run on this entry. The deferred drain calls
  * free_pages_and_swap_cache to do that decrement at the safe time.
  *
  * Returns 0 on success; on kmalloc failure returns -ENOMEM and the
- * caller MUST fall back to the immediate-free path (otherwise we'd
+ * caller must fall back to the immediate-free path (otherwise we'd
  * leak the ref).
  */
 static int __um_defer_append_locked(struct mm_context *ctx,
@@ -143,14 +131,13 @@ static int __um_defer_append_locked(struct mm_context *ctx,
  * On full success we set batch->nr = 0 (caller skips its own free).
  * On partial success (kmalloc OOM mid-batch), we set batch->nr to
  * the number of REMAINING entries shifted to the front of the
- * array — caller resumes the standard free flow on those.
+ * array; caller resumes the standard free flow on those.
  */
 unsigned int um_mmu_gather_defer(struct mm_struct *mm,
 				 struct encoded_page **encoded,
 				 unsigned int nr)
 {
 	struct mm_context *ctx;
-	unsigned long flags;
 	unsigned int deferred = 0;
 	unsigned int i;
 
@@ -158,7 +145,7 @@ unsigned int um_mmu_gather_defer(struct mm_struct *mm,
 		return 0;
 
 	/*
-	 * init_mm is special — it's the kernel's own mm and runs
+	 * init_mm is special: it is the kernel's own mm and runs
 	 * outside of vcpu_run (kernel-half VAs). The deferred-free
 	 * mechanism only makes sense for user-half mappings draining
 	 * before guest TLB flush. Init_mm pages get freed normally.
@@ -171,10 +158,13 @@ unsigned int um_mmu_gather_defer(struct mm_struct *mm,
 	scoped_guard(spinlock_irqsave, &ctx->deferred_free_lock) {
 		for (i = 0; i < nr; i++) {
 			if (__um_defer_append_locked(ctx, encoded[i]) < 0) {
-				/* kmalloc OOM mid-batch: stop deferring,
+				/*
+				 * kmalloc OOM mid-batch: stop deferring,
 				 * shift remaining entries to front so caller
-				 * frees them inline. */
+				 * frees them inline.
+				 */
 				unsigned int rem = nr - i;
+
 				memmove(&encoded[0], &encoded[i],
 					rem * sizeof(encoded[0]));
 				return deferred;
@@ -206,28 +196,17 @@ static void um_defer_batch_rcu_free(struct rcu_head *rh)
  * (so the GUEST TLB no longer caches stale translations to these
  * pages).
  *
- * SMP-T20 (2026-05-02): switched from immediate kfree to call_rcu.
- * Reason: the local-CR4.PGE flush at THIS dispatch's KVM_RUN
- * entry only flushes THIS vCPU's guest TLB. Other vCPUs running
- * tasks in the same mm may still cache stale GVA→guest-PA
- * translations to these pages until their own next dispatch.
- * Without a grace period, those stale TLB entries can alias the
- * recycled physical page, yielding the high-cr2 user faults seen
- * in fork-stress (Angle 2 / mt-mmap-stress flake class).
+ * The local CR4.PGE flush at this dispatch's KVM_RUN entry only flushes
+ * this vCPU's guest TLB. Other vCPUs running tasks in the same mm may
+ * still cache stale GVA-to-guest-PA translations to these pages until
+ * their own next dispatch. call_rcu defers the actual free until every
+ * CPU has passed through a quiescent state, which means every running
+ * vCPU has exited KVM_RUN at least once before the callback fires.
  *
- * call_rcu defers the actual free until every CPU has passed
- * through a quiescent state. The migrate_disable() in vcpu_run is
- * a preempt-disable section under PREEMPT=n, which is itself an
- * RCU read-side critical section — so RCU's grace period waits
- * for every running vCPU to exit KVM_RUN at least once before
- * firing the callback. By that point every vCPU has executed the
- * CR4.PGE toggle and flushed its guest TLB → safe to free.
- *
- * The local TLB-kick (tlb.c:um_tlb_sync) re-fired by SMP-T13 stays
- * in place; its job changes from "ensure flush before free" to
- * "ensure forward progress of the grace period under CPU-bound
- * guest workloads" — without it a vCPU spinning in guest user
- * code wouldn't reach a quiescent state until its next SIGALRM.
+ * um_tlb_sync() can also ask the backend to kick other vCPUs after a
+ * successful user-mm sync. That is for forward progress under CPU-bound
+ * guest workloads where a remote vCPU may otherwise stay in guest code
+ * until its next timer signal.
  *
  * Splices the queue under the lock so the registration runs
  * without holding the lock.
@@ -275,7 +254,7 @@ struct vm_ops {
 static int kern_map(struct mm_struct *mm,
 		    const struct um_memory_region *region)
 {
-	/* TODO: Why is executable needed to be always set in the kernel? */
+	/* Kernel mappings intentionally keep executable host permission. */
 	return os_map_memory((void *)region->va, region->phys_fd,
 			     region->offset, region->len,
 			     region->prot & UM_PROT_READ,
@@ -291,9 +270,7 @@ static int kern_unmap(struct mm_struct *mm,
 
 void report_enomem(void)
 {
-	printk(KERN_ERR "UML ran out of memory on the host side! "
-			"This can happen due to a memory limitation or "
-			"vm.max_map_count has been reached.\n");
+	pr_err("UML ran out of host memory; check memory limits and vm.max_map_count\n");
 }
 
 static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
@@ -353,7 +330,7 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 		/*
 		 * Only mark the PTE uptodate if the backend op succeeded.
 		 * Otherwise the next sync would skip this PTE thinking it
-		 * was already synced — leaving the host VA mapping (and,
+		 * was already synced, leaving the host VA mapping (and,
 		 * under integrated KVM, the shadow PT) divergent from the
 		 * pgd permanently.
 		 */
@@ -385,8 +362,9 @@ static inline int update_pmd_range(pud_t *pud, unsigned long addr,
 				if (!ret)
 					pmd_mkuptodate(*pmd);
 			}
-		}
-		else ret = update_pte_range(pmd, addr, next, ops);
+			} else {
+				ret = update_pte_range(pmd, addr, next, ops);
+			}
 	} while (pmd++, addr = next, ((addr < end) && !ret));
 	return ret;
 }
@@ -413,8 +391,9 @@ static inline int update_pud_range(p4d_t *p4d, unsigned long addr,
 				if (!ret)
 					pud_mkuptodate(*pud);
 			}
-		}
-		else ret = update_pmd_range(pud, addr, next, ops);
+			} else {
+				ret = update_pmd_range(pud, addr, next, ops);
+			}
 	} while (pud++, addr = next, ((addr < end) && !ret));
 	return ret;
 }
@@ -470,9 +449,6 @@ int um_tlb_sync(struct mm_struct *mm)
 		 * function-pointer load is one-shot per um_tlb_sync()
 		 * call; the inner update_*_range() helpers continue to
 		 * indirect through ops.{mmap,unmap} as before.
-		 *
-		 * Memo 25 R2: the HOT memory ops are now mm_region_added /
-		 * mm_region_removed, taking struct mm_struct * directly.
 		 */
 		ops.mmap = um_backend->mm_region_added;
 		ops.unmap = um_backend->mm_region_removed;
@@ -491,12 +467,8 @@ int um_tlb_sync(struct mm_struct *mm)
 				};
 				ret = ops.unmap(ops.mm, &region);
 				/*
-				 * #274 issue #12: gate pgd_mkuptodate on
-				 * success, mirroring the per-PTE/PMD/PUD/P4D
-				 * fix. An -ENOMEM or backend invalidate
-				 * failure here would otherwise leave the
-				 * pgd entry marked synced even though the
-				 * unmap didn't actually happen.
+				 * Mark the pgd synced only after the backend
+				 * unmap succeeds.
 				 */
 				if (!ret)
 					pgd_mkuptodate(*pgd);
@@ -510,14 +482,12 @@ int um_tlb_sync(struct mm_struct *mm)
 		report_enomem();
 
 	/*
-	 * #274 issue #11: only clear the pending sync range on
-	 * SUCCESS. If a backend op failed mid-sweep, we left some
-	 * portion of the range un-drained — clearing the from/to
-	 * fields here would lose that pending work and the next
-	 * sync would think there's nothing to do, leaving the host
-	 * VA / shadow PT divergent from the pgd permanently.
+	 * Only clear the pending sync range on success. If a backend op
+	 * failed mid-sweep, clearing from/to here would lose the remaining
+	 * work and the next sync would think there is nothing to do,
+	 * leaving the host VA / shadow PT divergent from the pgd.
 	 *
-	 * On failure, narrow the pending range to start at `addr`
+	 * On failure, narrow the pending range to start at addr
 	 * (the first VA we did NOT successfully drain) so the next
 	 * sync resumes from there. The remaining un-drained range
 	 * is [addr, sync_tlb_range_to). On success addr equals
@@ -526,44 +496,16 @@ int um_tlb_sync(struct mm_struct *mm)
 	 * narrowing is a no-op-equivalent clear.
 	 */
 	/*
-	 * Phase G.2-fix (2026-05-01): bump per-mm tlb_gen so each
-	 * vCPU's load_user_sregs can detect "drained-since-last-flush"
-	 * and update its last_seen_tlb_gen. KICK ACTIVATION DEFERRED:
-	 * even with v1-pattern narrowing (current_mm match + last_seen
-	 * gen check + cmpxchg dedup), calling tlb_kick_others from here
-	 * regressed mt-mini T=4/ncpus=4 60→42 and T=8 18→7. The IPI
-	 * itself disrupts forward progress under high mm-churn,
-	 * regardless of how aggressively it's targeted/dedup'd.
-	 *
-	 * Conclusion: T>=N stress flake is NOT cross-vCPU guest-TLB
-	 * stale (since per-vCPU CR4.PGE on every dispatch already
-	 * flushes locally). The actual root cause is elsewhere —
-	 * needs deeper investigation.
-	 *
-	 * The gen counter still gets bumped (cheap) so future code
-	 * can use it for diagnostics or a non-IPI mechanism (e.g.
-	 * shared-memory generation polling at vmexit boundaries).
-	 *
-	 * Skip init_mm: kernel-mm syncs go via kern_map/kern_unmap.
+	 * Bump per-mm tlb_gen after a successful user-mm sync so vCPUs
+	 * can observe that the backend has drained mappings since their
+	 * last local flush. Skip init_mm: kernel-mm syncs go via
+	 * kern_map/kern_unmap.
 	 */
 	if (ret == 0 && mm != &init_mm) {
 		atomic64_inc(&mm->context.tlb_gen);
 		/*
-		 * SMP-T13 followup (2026-05-02): activate the cross-vCPU
-		 * tlb kicker now that the migrate_disable fix has closed
-		 * the dominant SMP T>=N race. Earlier activation attempts
-		 * regressed T=4 from 60/60 to 18/60 because the IPI storm
-		 * piled on top of the migration race. With the migration
-		 * race gone, the kicker should help close the residual
-		 * "stale guest TLB on remote vCPU" window that produces
-		 * mt-mini's `got=0 expect=tid` symptoms.
-		 *
-		 * SMP-T26 ablation (2026-05-02): disabling this kicker
-		 * leaves the threaded-fork-malloc fail rate unchanged
-		 * (G.2-on: 6/6 boots × ~6 fails; G.2-off: 6/6 × ~5).
-		 * H1 (cross-vCPU TLB stale) is therefore NOT the SMP-T26
-		 * mechanism. Kicker stays active for defensive correctness;
-		 * see Layer 14 memo for next-step hypothesis ranking.
+		 * Ask the backend to force remote vCPUs out of guest mode
+		 * so they observe tlb_gen and flush stale guest TLB entries.
 		 */
 		if (um_backend->tlb_kick_others)
 			um_backend->tlb_kick_others(mm);
@@ -594,6 +536,7 @@ void flush_tlb_all(void)
 void flush_tlb_mm(struct mm_struct *mm)
 {
 	struct vm_area_struct *vma;
+
 	VMA_ITERATOR(vmi, mm, 0);
 
 	for_each_vma(vmi, vma)

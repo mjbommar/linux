@@ -14,7 +14,7 @@
  *
  * Initialized at init time.
  */
-static int use_stderr_console = 0;
+static unsigned int use_stderr_console;
 
 static void stderr_console_write(struct console *console, const char *string,
 				 unsigned len)
@@ -40,18 +40,16 @@ static int stderr_setup(char *str)
 {
 	if (!str)
 		return 0;
-	use_stderr_console = simple_strtoul(str,&str,0);
+	if (kstrtouint(str, 0, &use_stderr_console))
+		use_stderr_console = 0;
 	return 1;
 }
 __setup("stderr=", stderr_setup);
 
-/* The previous behavior of not unregistering led to /dev/console being
- * impossible to open.  My FC5 filesystem started having init die, and the
- * system panicing because of this.  Unregistering causes the real
- * console to become the default console, and /dev/console can then be
- * opened.  Making this an initcall makes this happen late enough that
- * there is no added value in dumping everything to stderr, and the
- * normal console is good enough to show you all available output.
+/*
+ * Unregister stderr after the real console is available. Leaving it registered
+ * can keep /dev/console from opening; unregistering late preserves early boot
+ * output while allowing the normal console to become the default.
  */
 static int __init unregister_stderr(void)
 {

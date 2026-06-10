@@ -4,7 +4,7 @@
 Open a TAP device and exec UML with the fd inherited at the requested
 slot.  Used by run-tcp-throughput.sh to feed vector2 a pre-opened tap
 fd (the production "mode=fd" handoff path; the alternative
-"mode=inproc,ifname=…" path requires CONFIG_UML_NET_VECTOR_V2_INPROC
+"mode=inproc,ifname=..." path requires CONFIG_UML_NET_VECTOR_V2_INPROC
 and is slower).
 
 Usage:
@@ -27,7 +27,7 @@ TUNSETIFF = 0x400454CA
 IFF_TAP = 0x0002
 IFF_NO_PI = 0x1000
 
-# No IFF_VNET_HDR — vec2's fd transport reads raw Ethernet frames,
+# No IFF_VNET_HDR - vec2's fd transport reads raw Ethernet frames,
 # same shape as the umlctl deploy fd-handoff (tools/uml/uml-launcher/
 # src/backend/net.rs comment block).
 fd = os.open("/dev/net/tun", os.O_RDWR)

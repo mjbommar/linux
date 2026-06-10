@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 """
-um/snapshot-smoke/snapshot-smoke-driver.py — minimal AFL-compatible
-forkserver driver for the C-09 selftest. Launches the UML binary
+um/snapshot-smoke/snapshot-smoke-driver.py - minimal AFL-compatible
+forkserver driver. Launches the UML binary
 with host fds 198 (ctl, driver -> kernel) and 199 (status, kernel
 -> driver) pre-plumbed, exchanges the 12-byte handshake for one
 iteration, checks the returned pid is positive and the status byte
@@ -68,7 +68,7 @@ def main():
     ctl_fd = os.fdopen(ctl_w, "wb", buffering=0)
 
     # Drain the UML stdout in the background so it doesn't block on
-    # a full pipe. We don't print it — the kselftest output is
+    # a full pipe. We don't print it; the kselftest output is
     # already noisy enough.
     def drain():
         try:
@@ -86,9 +86,7 @@ def main():
             print(f"DRV: FAIL handshake expected b'AFL\\x00', got {hs!r}")
             return 1
 
-        # Single iteration for now. Per the v1 ceiling documented
-        # in Documentation/virt/uml/snapshot.rst + the KNOWN
-        # LIMITATION block in arch/um/kernel/snapshot.c:
+        # Single iteration. Current protocol constraints:
         #
         #   1. Status is hard-coded 0 until the UML signal/schedule
         #      reentry during parent non-kernel-exec windows is
@@ -97,7 +95,7 @@ def main():
         #
         #   2. Multi-iter can't run today because the smoke init
         #      script halts UML via `halt -f` after the first
-        #      iteration returns from the RP write — the worker
+        #      iteration returns from the RP write; the worker
         #      inherits and kills the whole UML. A proper multi-
         #      iter harness needs the init script refactored so
         #      the worker's continuation exits cleanly (e.g. via
@@ -120,13 +118,12 @@ def main():
             return 1
         status = struct.unpack("<i", status_bytes)[0]
 
-        # v1 ceiling assertion — see comment above.
+        # Current status-byte assertion; see comment above.
         if status != 0:
             print(f"DRV: FAIL status=0x{status:x} (v1 ceiling expects 0)")
             return 1
 
-        # Zombie-drain invariant (per D47 item 5 / commit 257b8cf61b84).
-        # After the iteration completes, the parent's loop body runs
+        # Zombie-drain invariant. After the iteration completes, the parent's loop body runs
         # os_snapshot_reap_zombies() at the top of the next iteration
         # (WNOHANG wait4) before blocking on read() for the next cmd.
         # Give it a beat to get there, then assert that ps --ppid shows

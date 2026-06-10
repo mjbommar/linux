@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Direction-flag preservation selftest (audit round-4 F3
-# follow-on, task #222 / decisions-log D87 cross-ref).
-# Builds a freestanding 64-bit ELF that validates F2's claim
-# that user RFLAGS (specifically DF) survive the SYSCALL +
+# Direction-flag preservation selftest.
+# Builds a freestanding 64-bit ELF that validates that user RFLAGS
+# (specifically DF) survive the SYSCALL +
 # recoverable #PF round-trips through the KVM backend's
 # kvm_build_sysret_r11 helper.
 

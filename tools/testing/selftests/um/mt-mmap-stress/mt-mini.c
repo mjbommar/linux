@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * SMP-T10 minimal reproducer for the mt-byteset T>=N flake.
+ * Minimal two-thread mmap/memset/munmap stress reproducer.
  *
  * Two pthreads each run a tight mmap+memset+munmap loop while a
  * SIGSEGV handler captures full register state + per-thread TLS
@@ -39,41 +39,13 @@
 #include <ucontext.h>
 #include <unistd.h>
 
-/*
- * SMP-T11 state-trace dump trigger. Disables tracing first (so the
- * dispatches we do to issue the dump don't overwrite the failing
- * context in the per-CPU ring), then dumps. No-op (silent) when the
- * kernel wasn't built with CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y or
- * when tracing isn't enabled at runtime.
- *
- * Called from the FAIL paths so the per-CPU ring captures up to the
- * moment of detection — kernel dumps to dmesg (KVMV2T lines).
- */
-static void kvmv2_state_trace_dump(void)
-{
-	int fd;
-
-	fd = open("/sys/kernel/debug/um_kvm_v2_trace/enabled", O_WRONLY);
-	if (fd >= 0) {
-		(void)!write(fd, "0\n", 2);
-		close(fd);
-	}
-	fd = open("/sys/kernel/debug/um_kvm_v2_trace/dump", O_WRONLY);
-	if (fd < 0)
-		return;
-	(void)!write(fd, "1\n", 2);
-	close(fd);
-}
-
 #define ITERS    50
 #define ALLOC_SZ 0x10000
 
 /*
- * SMP-T35 jitter sweep (option #6). MT_JITTER_NS env var, parsed once
- * at main(), inserts a nanosleep between slow_memset() and verify in
- * each worker iteration. Default 0 = no change. Used to discriminate
- * timing-dependent races (cross-vCPU SPTE/TLB lag) from structural
- * staleness. Sweep recipe: 0, 100, 1000, 10000, 100000.
+ * Optional jitter sweep. MT_JITTER_NS inserts a nanosleep between
+ * slow_memset() and verify in each worker iteration. Default 0 means
+ * no extra delay.
  */
 static long jitter_ns;
 
@@ -89,15 +61,11 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ctx_)
 	if (__sync_lock_test_and_set(&crash_dumped, 1))
 		_exit(3);
 
-	/* Trigger kvm-v2 state-trace dump as early as possible — before
-	 * fprintf/_exit run additional syscalls on this vCPU and possibly
-	 * push older entries out of the ring. */
-	kvmv2_state_trace_dump();
 	ucontext_t *uc = (ucontext_t *)ctx_;
 	greg_t *g = uc->uc_mcontext.gregs;
 	int now_cpu = sched_getcpu();
 	fprintf(stderr,
-		"DIAG: tid=%ld iter=%d last_mmap_p=%p si_addr=%p start_cpu=%d fault_cpu=%d\n"
+		"FAULT_CONTEXT tid=%ld iter=%d last_mmap_p=%p si_addr=%p start_cpu=%d fault_cpu=%d\n"
 		"      RIP=%llx RSP=%llx RBP=%llx\n"
 		"      RAX=%llx RBX=%llx RCX=%llx RDX=%llx\n"
 		"      RDI=%llx RSI=%llx R8=%llx R9=%llx\n",
@@ -136,11 +104,8 @@ static void slow_memset(void *p, unsigned char val, size_t n)
 }
 
 /*
- * SMP-T38b: stricter slow_memset that READS each byte back IMMEDIATELY
- * after writing. Discriminates "write went to wrong place at write
- * time" (read-back inside slow_memset would mismatch) from "write OK
- * but byte got zeroed before verify started" (read-back inside
- * slow_memset matches, but later verify finds 0).
+ * Strict slow_memset reads each byte back immediately after writing.
+ * This separates write-time corruption from later verify-time changes.
  *
  * Returns offset of first mismatch, or n on success.
  * Only used when MT_STRICT_MEMSET=1.
@@ -159,11 +124,9 @@ static size_t strict_memset(void *p, unsigned char val, size_t n)
 static int strict_memset_enabled;
 
 /*
- * SMP-T39: read /proc/self/pagemap to get the PFN for a virtual
- * address. Used at VERIFY_FAIL/STRICT_MEMSET_FAIL time to log the
- * failing GVA's PFN, so we can cross-reference against the kernel's
- * UMPTFREE log to test the PT-page-recycle hypothesis. Returns 0
- * on any error (page not present, no permission, etc).
+ * Read /proc/self/pagemap to get the PFN for a virtual address. Used
+ * at VERIFY_FAIL/STRICT_MEMSET_FAIL time to log the failing address's
+ * PFN. Returns 0 on any error.
  */
 static unsigned long pagemap_pfn(const void *vaddr)
 {
@@ -187,26 +150,14 @@ static unsigned long pagemap_pfn(const void *vaddr)
 }
 
 /*
- * SMP-T38c: pin each worker to a single guest CPU via sched_setaffinity.
- * Discriminating test for cross-vCPU prev_roots staleness:
- * if pinning eliminates the bug, the residual is guest-task migration
- * across guest vCPUs hitting stale SPTE caches; per-mm/per-task vCPU
- * is the real fix. If pinning doesn't help, the mechanism is
- * elsewhere. MT_PIN_GUEST_CPUS=1.
+ * Optional CPU pinning via MT_PIN_GUEST_CPUS=1. Worker tid N pins to
+ * CPU (N % online).
  */
 static int pin_guest_cpus_enabled;
 
 /*
- * SMP-T40 (2026-05-03): pre-fault each page in the mmap by reading
- * its first byte BEFORE any writes. The hypothesis: byte[0]=0 + V at
- * offsets 1..7 + write_retry succeeds = the FIRST STORE to a freshly-
- * faulted page is being SKIPPED during #PF replay (UML/KVM installs
- * the page after init_on_alloc zeros it, but resumes after/around the
- * faulting store; the next store at offset 1 succeeds normally).
- *
- * Pre-faulting via READS (not WRITES) avoids the same bug class on
- * the pre-fault itself — loads on x86 page-fault paths are reliably
- * retried because they have no destination state to reconstruct.
+ * Optional prefault via MT_PREFAULT=1. If enabled, slow_memset() does
+ * not need to service first-touch page faults in the hot write loop.
  *
  * If MT_PREFAULT=1 makes failures vanish: fault-replay confirmed,
  * fix is in arch/um/backend/kvm-v2/vcpu.c PF EINTR handler.
@@ -240,13 +191,11 @@ static void *worker(void *arg)
 			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		last_mmap_p = p;
 		if (p == MAP_FAILED) {
-			kvmv2_state_trace_dump();
 			fprintf(stderr, "MMAP_FAILED tid=%ld iter=%d\n",
 				tid, i);
 			return (void *)1;
 		}
 		if (p == NULL) {
-			kvmv2_state_trace_dump();
 			fprintf(stderr, "MMAP_NULL tid=%ld iter=%d\n",
 				tid, i);
 			return (void *)4;
@@ -254,16 +203,12 @@ static void *worker(void *arg)
 		last_cpu = sched_getcpu();
 		if (prefault_enabled) {
 			/*
-			 * SMP-T40 fix: use MADV_POPULATE_WRITE not
-			 * read-touch. Anonymous mmap reads map the shared
+			 * Use MADV_POPULATE_WRITE instead of read-touch.
+			 * Anonymous mmap reads map the shared
 			 * zero page read-only; the COW fault still fires
 			 * on first WRITE. POPULATE_WRITE forces writable
 			 * fault-in for the whole range, so strict_memset's
 			 * first stores per page won't trigger #PF.
-			 *
-			 * If failures stop, the bug is "first store after
-			 * fresh write-fault is skipped". If failures persist,
-			 * fault-replay on first store is NOT the mechanism.
 			 */
 			if (madvise(p, ALLOC_SZ, MADV_POPULATE_WRITE) != 0) {
 				static int once = 0;
@@ -279,7 +224,6 @@ static void *worker(void *arg)
 			size_t first_mismatch =
 				strict_memset(p, (unsigned char)tid, ALLOC_SZ);
 			if (first_mismatch < ALLOC_SZ) {
-				kvmv2_state_trace_dump();
 				unsigned long pfn = pagemap_pfn(
 					(unsigned char *)p + first_mismatch);
 				fprintf(stderr,
@@ -303,8 +247,7 @@ static void *worker(void *arg)
 			unsigned char got = vp[j];
 			if (got != (unsigned char)tid) {
 				/*
-				 * SMP-T38 diagnostic. Capture at the moment of
-				 * failure to discriminate root cause:
+				 * Capture at the moment of failure:
 				 *
 				 *   read1   = the byte we just read (already in `got`)
 				 *   probe1  = read 16 surrounding bytes (does the
@@ -358,13 +301,12 @@ static void *worker(void *arg)
 					}
 				}
 
-				kvmv2_state_trace_dump();
 				unsigned long pfn =
 					pagemap_pfn((unsigned char *)p + j);
 				fprintf(stderr,
 					"VERIFY_FAIL tid=%ld iter=%d off=%#zx got=%u expect=%u p=%p\n"
-					"DIAG_T38 read2=%u write_retry=%u probe=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n"
-					"DIAG_T38 page_scan: has_v=%d has_nonzero=%d other_val=%u fault_cpu=%d pfn=%lx\n",
+					"VERIFY_PROBE read2=%u write_retry=%u probe=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n"
+					"VERIFY_PAGE_SCAN has_v=%d has_nonzero=%d other_val=%u fault_cpu=%d pfn=%lx\n",
 					tid, i, j, got, (unsigned char)tid, p,
 					read2, write_retry,
 					probe[0], probe[1], probe[2], probe[3],

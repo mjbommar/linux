@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Minimal guest-side TCP sender for the Memo 01 Step 2 throughput
+// Minimal guest-side TCP sender for the throughput
 // bench.  Removes the Python GIL / per-loop overhead that the
-// Python sender pays — exposes the true driver-bound throughput.
+// Python sender pays; exposes the true driver-bound throughput.
 //
 // Build (host): gcc -O2 -o tcp-send tools/testing/selftests/um/net-bench/tcp-send.c
 // Invoke (guest):  tcp-send HOST_IP PORT DURATION_SEC

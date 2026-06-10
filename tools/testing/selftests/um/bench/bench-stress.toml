@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# bench-stress — concurrency / mm-churn workload at SMP T=8.
+# bench-stress - concurrency / mm-churn workload at SMP T=8.
 #
 # Boots UML with ncpus=4 (the SMP build's default) and runs the
 # mt-mini reproducer with 8 pthread workers, MT_STRICT_MEMSET=1.
 # Each worker does 50 iterations of:
-#   mmap(64KB, PRIVATE|ANON) → strict_memset(tid) → verify → munmap
-# Per iteration: 8 × 50 × 16 = 6400 first-touch page-faults.
+#   mmap(64KB, PRIVATE|ANON) -> strict_memset(tid) -> verify -> munmap
+# Per iteration: 8 x 50 x 16 = 6400 first-touch page-faults.
 #
-# This is the workload that surfaced the byte[0]=0 bug closed by
-# SMP-T41. It's the regression-canary tier — we don't expect
-# significant cross-backend perf delta here (kvm-v2 should be
+# This workload stresses the byte[0]=0 bug class. It is the
+# regression-canary tier; we don't expect significant cross-backend
+# perf delta here (kvm-v2 should be
 # faster but the mt-mini iteration is dominated by host kernel
 # vmas + page-allocation, not trap mechanism). What we ARE
 # tracking: STRICT_MEMSET_FAIL count must remain 0 forever.

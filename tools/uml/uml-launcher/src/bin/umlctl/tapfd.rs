@@ -55,7 +55,6 @@ pub fn open_tap(ifname: &str, multi_queue: bool) -> io::Result<OwnedFd> {
     // IFF_VNET_HDR via TUNGETIFF and dispatches accordingly, so an
     // older kernel without that detect logic still works (we just
     // hand back to per-MTU-frame writes — slow but correct).
-    // memo 01 Step 2 — guest→host TCP throughput.
     set_offload(&owned).ok();
     Ok(owned)
 }
@@ -64,9 +63,7 @@ fn set_offload(fd: &OwnedFd) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
     let offload: libc::c_uint = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
-    let rc = unsafe {
-        libc::ioctl(fd.as_raw_fd(), TUNSETOFFLOAD, offload as libc::c_ulong)
-    };
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETOFFLOAD, offload as libc::c_ulong) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -100,7 +97,7 @@ fn tap_flags(multi_queue: bool) -> libc::c_int {
     // IFF_VNET_HDR is always requested.  The vec2 fd transport probes
     // TUNGETIFF at fd-inherit time and uses virtio_net_hdr framing
     // when set, so guest→host TCP can ride TSO instead of paying
-    // per-MTU-frame syscall cost (memo 01 Step 2).
+    // per-MTU-frame syscall cost.
     let mut flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR;
     if multi_queue {
         flags |= IFF_MULTI_QUEUE;

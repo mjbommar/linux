@@ -1,10 +1,10 @@
 level;gate;budget;purpose;current_state
 L0;launcher-cargo;5 s;host-side tooling;active
 L1;kernel-build;5-60 s;compile and link;active
-L2;kunit-marshal+snapshot+record;30 s;backend ABI register marshaling + snapshot 3/3 + record/replay 7/7;active
+L2;kunit-marshal+byteshape;30 s;backend ABI register marshaling + byte-layout coverage;active
 L3;regrtest-substrate;90 s;substrate correctness;active PASS=25/FAIL=3/XFAIL=3
 L4;regrtest-class-b/c;3 min;process and syscall integration;active
-L5;perf-getpid + snapshot bench;30 s;hot-path performance regression; snapshot capture 38.9us median 13us;active
+L5;perf-getpid;30 s;hot-path performance regression;active
 L6;umlctl up workload;30 s;real workload end-to-end;active
-L7;umlctl mission;~15 min;6-phase comprehensive acceptance gate;active 6/6 PASS at HEAD
+L7;umlctl mission;~15 min;six-step comprehensive validation;active 6/6 PASS at HEAD
 L8;24h long-tail soak;24 h;drift leaks intermittent failures;in progress

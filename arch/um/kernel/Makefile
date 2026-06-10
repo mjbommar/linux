@@ -16,14 +16,13 @@ always-$(KBUILD_BUILTIN) := vmlinux.lds
 
 obj-y = backend.o config.o exec.o exitcode.o hooks.o irq.o ksyms.o mem.o \
 	physmem.o process.o ptrace.o reboot.o section_split.o sigio.o \
-	signal.o sysrq.o time.o tlb.o trace.o trap.o um_diag.o \
+	signal.o sysrq.o time.o tlb.o trace.o trap.o \
 	um_arch.o umid.o kmsg_dump.o capflags.o skas/
 
 # x86_nops[] + link-time stubs for bpf_jit_comp.c's cpu_feature-
 # gated references to retpoline thunks, cfi_mode, clear_bhb_loop,
-# text_poke_set (workstream C-06, per D43 fifth-view). Bare-
-# metal x86 gets these from arch/x86/kernel/ TUs UML doesn't
-# build.
+# text_poke_set. Bare-metal x86 gets these from arch/x86/kernel/ TUs
+# UML doesn't build.
 obj-$(CONFIG_BPF_JIT) += x86_nops.o bpf_jit_stubs.o
 
 obj-$(CONFIG_KPROBES) += kprobes/
@@ -56,7 +55,7 @@ CFLAGS_REMOVE_early_printk.o  := $(CC_FLAGS_FTRACE)
 # normal `call`; their function_graph prologue push would
 # therefore rewrite garbage at 8(%rsp) and never see a matching
 # return_to_handler pop, leaking one shadow-stack entry per
-# task creation. See decisions-log D34 (source 2).
+# task creation.
 CFLAGS_REMOVE_process.o       := $(CC_FLAGS_FTRACE)
 
 obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o

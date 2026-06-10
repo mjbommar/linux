@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// umlctl pool serve — long-lived fork-server supervisor (Memo 09
-// Phase 1c).
+// umlctl pool serve - long-lived fork-server supervisor.
 //
 // Boots ONE master kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK=y
 // in `um_template_pause=fork` mode, then listens on a Unix-domain
@@ -31,9 +30,8 @@
 // On any error: {"ok":false,"error":"<message>"}.
 //
 // The `take` response envelope is exactly the `SpawnResult` shape
-// `umlctl pool spawn` emits when --json is given (Phase 1b), so any
-// existing caller can be repointed at the daemon without code
-// changes.
+// `umlctl pool spawn` emits when --json is given, so direct-spawn
+// callers can move to the daemon without changing their parser.
 //
 // Concurrency: a single thread serializes all take operations
 // because the identity memfd (write blob at offset 0 / read pid at
@@ -67,7 +65,7 @@ pub struct ServeArgs {
     /// Path to the UML kernel binary.  Must be built with
     /// CONFIG_UM_TEMPLATE_PAUSE_FORK=y.  If absent, --fork-kernel
     /// (or $UM_FORK_KERNEL) is consulted; this matches `umlctl
-    /// mission`'s Phase 8 resolution discipline.
+    /// mission`'s fork-stress kernel resolution.
     #[arg(long, value_name = "PATH")]
     pub kernel: Option<PathBuf>,
 
@@ -98,9 +96,9 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub init: Option<PathBuf>,
 
-    /// Minimum number of warm pre-forked members the daemon should
-    /// try to maintain.  MVP: option wired through, replenish loop
-    /// is a TODO (see `replenish_warm_pool`).  0 means lazy-only.
+    /// Target number of warm pre-forked members.  The current daemon
+    /// accepts the option for configuration compatibility and serves
+    /// takes on demand.  0 means lazy-only.
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub min_warm: u32,
 
@@ -251,8 +249,8 @@ impl DaemonState {
     /// Drive one fork-on-resume cycle and capture the resulting
     /// child pid.  Holds the implicit single-threaded lock via the
     /// outer event loop; do not call concurrently.
-    /// Per spec memo 11 §6 question 2: synthesize a per-instance
-    /// mconsole socket path when the caller leaves it empty.  This
+    /// Synthesize a per-instance mconsole socket path when the caller
+    /// leaves it empty.  This
     /// keeps `umlctl exec` working even when the take RPC came from a
     /// caller (eg the syzkaller shim) that doesn't care to pick the
     /// path.  The directory is the per-pool runtime dir, which the
@@ -362,23 +360,21 @@ impl DaemonState {
         Ok(rec)
     }
 
-    /// `exec` RPC handler.  Spec memo 11 §3.1.  Today's MVP backend
-    /// drives the member's mconsole socket via the standard
+    /// `exec` RPC handler.  The current backend drives the member's
+    /// mconsole socket via the standard
     /// `uml_mconsole(1)` tool if it's installed; otherwise the verb
     /// returns a clean diagnostic instead of pretending to work.
     ///
-    /// Returns a JSON object shaped as the spec's exec reply
-    /// envelope: `{"ok":true, "stdout":"…", "stderr":"…", "exit":N,
+    /// Returns a JSON object shaped as the exec reply envelope:
+    /// `{"ok":true, "stdout":"…", "stderr":"…", "exit":N,
     /// "signal":S, "duration_ms":D, "timed_out":bool}` on completion,
     /// or `{"ok":false, "error":"…"}` on failure.
     ///
     /// Note on the in-guest exec primitive: `uml_mconsole exec` is
     /// the standard Linux upstream tool but is not present on all
-    /// hosts; when it's absent we surface that as a clear operator
-    /// message rather than silently producing empty output.  Future
-    /// work (spec memo 11 §6 question 3) replaces this with a pty
-    /// pair + SCM_RIGHTS-passed master fd; the envelope stays the
-    /// same so callers don't need to change.
+    /// hosts; when it's absent we surface a clear diagnostic rather
+    /// than silently producing empty output. The response envelope is
+    /// stable so callers do not depend on the transport.
     fn do_exec(
         &self,
         pid: i32,
@@ -407,9 +403,9 @@ impl DaemonState {
         if !Path::new(&member.mconsole_path).exists() {
             bail!(
                 "pool member pid {} mconsole socket {:?} not present yet \
-                 (the in-guest exec primitive is not available in this build; \
-                 see Documentation/virt/uml/redesign/06-sequencing/post-2026-05-19-next-sprint/11-syzkaller-shim-spec.md §6 q2)",
-                pid, member.mconsole_path
+                 (the in-guest exec primitive is not available in this build)",
+                pid,
+                member.mconsole_path
             );
         }
         // We expose the standard `uml_mconsole exec` shape here.  If
@@ -560,8 +556,8 @@ fn pid_runnable(pid: i32) -> bool {
 /// to itself, and a parent waitpid only collects ONE stop-notification
 /// per iteration.  /proc shows the cumulative state.
 ///
-/// Poll cadence is tuned to Memo 09 Phase 3's `take.p50 ≤ 5 ms` gate:
-/// the fast path (master re-pauses in <2 ms in steady state) needs a
+/// Poll cadence is tuned for low-latency `take`: the fast path
+/// (master re-pauses in <2 ms in steady state) needs a
 /// sub-ms quantum or the gate's measured latency tail is dominated by
 /// sleep, not by kernel work.  Adaptive backoff starts at 250 µs (fast
 /// path; ~4 polls cover the typical kernel fork + identity-apply +
@@ -757,9 +753,9 @@ pub fn cmd_serve(args: ServeArgs, paths: &crate::paths::Paths, _quiet: bool) -> 
 
     if socket_path.exists() {
         // Stale socket from a prior daemon.  We could probe-and-fail
-        // if another daemon is live, but Phase 1c-MVP keeps it simple:
-        // unlink and rebind.  A second concurrent daemon is operator
-        // error; we don't try to fence it.
+        // if another daemon is live, but the current daemon keeps the
+        // policy simple: unlink and rebind.  A second concurrent
+        // daemon is a configuration error; we don't try to fence it.
         std::fs::remove_file(&socket_path).ok();
     }
 
@@ -797,10 +793,11 @@ pub fn cmd_serve(args: ServeArgs, paths: &crate::paths::Paths, _quiet: bool) -> 
         min_warm: args.min_warm,
     };
 
-    // Optional pre-warm: out of MVP scope, but stub the hook in place.
+    // Optional pre-warm is accepted for configuration compatibility.
+    // This daemon serves takes on demand.
     if state.min_warm > 0 {
         eprintln!(
-            "umlctl pool serve: min_warm={} requested; replenish loop is a TODO",
+            "umlctl pool serve: min_warm={} requested; serving takes on demand",
             state.min_warm
         );
     }
@@ -979,13 +976,11 @@ impl ExitStatusSignal for std::process::ExitStatus {
     }
 }
 
-// Suppress dead-code warning while replenish is wired-but-unused.
+// Suppress dead-code warning while pre-warm support is reserved.
 #[allow(dead_code)]
 fn replenish_warm_pool(_state: &DaemonState) {
-    // TODO Phase 1c-proper: pre-take up to min_warm members without a
-    // corresponding RPC, park them in a "warm" queue, and pop on
-    // take.  The fork primitive is identical to do_take; the
-    // bookkeeping is a separate set keyed by pid.
+    // Reserved for a pre-taken member queue keyed by pid.  The current
+    // daemon serves `take` requests on demand.
 }
 
 #[cfg(test)]
