@@ -6,9 +6,8 @@
  * kicks, and region add/remove. Operations that still rely on existing
  * seccomp machinery delegate to the seccomp backend through this table.
  */
-#include <linux/init.h>
-#include <linux/kernel.h>
 #include <linux/types.h>
+
 #include <asm/backend.h>
 
 #include "kvm_v2_backend.h"
@@ -19,19 +18,8 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.contract_version	= UM_BACKEND_CONTRACT_VERSION,
 
 	/*
-	 * KVM-v2 reuses the seccomp stub-child lifecycle helpers. Each
-	 * flag describes the worker-internal stub-child machinery those
-	 * helpers drive:
-	 *   uses_stub_reaper        - worker SIGCHLD-reaps stub
-	 *   has_syscall_stub_fd_map - SCM_RIGHTS fd-passing per region
-	 *   stub_syscall_uses_futex - futex round-trip on stub_data
-	 *   stub_child_runs_seccomp - stub installs seccomp filter
-	 *
-	 * These flags describe stub-child behavior, not whether KVM owns
-	 * guest syscall execution. Guest user code runs in KVM, not in the
-	 * stub. The stub child is still spawned (seccomp_mm_create)
-	 * but its SIGSYS handler never fires under v2 because no
-	 * syscall traps to it.
+	 * KVM v2 reuses the seccomp stub-child lifecycle, but guest syscalls
+	 * are handled by KVM_EXIT_IO rather than the stub's SIGSYS path.
 	 */
 	.uses_stub_reaper	= true,
 	.has_syscall_stub_fd_map = true,
@@ -54,10 +42,8 @@ const struct um_backend_ops um_backend_kvm_v2_ops = {
 	.mm_region_added	= kvm_v2_mm_region_added,	/* HOT */
 	.mm_region_removed	= kvm_v2_mm_region_removed,	/* HOT */
 	/*
-	 * The mm arbiter falls back to remove+add when this is NULL. KVM v2's
-	 * region hooks are synchronized no-ops behind the giant physmem slot,
-	 * so the fallback is sufficient until v2 needs separate protection
-	 * bookkeeping.
+	 * Protection changes use the arbiter's remove+add fallback. The
+	 * region hooks serialize the mm update behind the physmem slot.
 	 */
 	.mm_region_protected	= NULL,
 
