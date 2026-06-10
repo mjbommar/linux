@@ -10,11 +10,11 @@
 #ifndef __ARCH_UM_BACKEND_KVM_V2_H
 #define __ARCH_UM_BACKEND_KVM_V2_H
 
+#include <linux/atomic.h>
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
 #include <linux/kvm.h>
 #include <linux/list.h>
-#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
