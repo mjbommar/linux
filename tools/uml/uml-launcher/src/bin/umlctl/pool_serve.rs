@@ -483,14 +483,7 @@ impl DaemonState {
             }
             return Err(err).context("SIGKILL pool member");
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if !pid_runnable(pid) {
-                return Ok(true);
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        Ok(!pid_runnable(pid))
+        Ok(wait_for_not_runnable(pid, Duration::from_secs(2)))
     }
 
     /// Reap zombies + prune dead entries from the member table.
@@ -543,6 +536,27 @@ fn pid_runnable(pid: i32) -> bool {
     let rest = &stat[close + 1..];
     let state = rest.trim_start().chars().next().unwrap_or('?');
     !matches!(state, 'Z' | 'X')
+}
+
+fn wait_for_not_runnable(pid: i32, timeout: Duration) -> bool {
+    let end = Instant::now() + timeout;
+    let mut iter: u32 = 0;
+
+    while Instant::now() < end {
+        if !pid_runnable(pid) {
+            return true;
+        }
+        let sleep_us: u64 = match iter / 8 {
+            0 => 250,
+            1 => 1_000,
+            2 => 4_000,
+            _ => 16_000,
+        };
+        std::thread::sleep(Duration::from_micros(sleep_us));
+        iter = iter.saturating_add(1);
+    }
+
+    !pid_runnable(pid)
 }
 
 fn wait_for_mconsole_ready(path: &str, deadline: Duration) -> Result<()> {
@@ -1178,6 +1192,11 @@ mod tests {
         assert!(parse_request("not json").is_err());
         assert!(parse_request(r#"{"op":"bogus"}"#).is_err());
         assert!(parse_request(r#"{"op":"destroy"}"#).is_err()); // missing pid
+    }
+
+    #[test]
+    fn wait_for_not_runnable_accepts_absent_pid() {
+        assert!(wait_for_not_runnable(-1, Duration::from_millis(1)));
     }
 
     #[test]

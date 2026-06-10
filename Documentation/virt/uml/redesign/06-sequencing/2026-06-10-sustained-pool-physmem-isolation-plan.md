@@ -287,16 +287,19 @@ Status:
 - `--min-warm=1` now prefills one pre-identified ready member, an anonymous
   ready take consumes it, status reports ready/taken/failed counts, and the
   daemon replenishes the ready queue before shutdown cleanup;
-- reduced `pool-bench` now samples live replicated children and passes the RSS
-  gate with 3/3 live members at 147.6 MiB; its smaps breakdown is 132.8 MiB
-  PSS, 12.0 MiB private dirty, and 6.8 MiB shared dirty;
-- full default-scale `pool-bench` runs to completion but fails RSS and
-  throughput: 100/100 live replicated children consume 8,215.9 MiB RSS
-  against the 200 MiB gate; smaps rollup reports 6,525.1 MiB PSS,
-  6,289.2 MiB private dirty, and 211.3 MiB shared dirty, so the miss is real
-  private memory amplification rather than shared text double-counting; the
-  60-second throughput gate reaches 2248/3000 takes against the 2700 pass
-  threshold;
+- reduced `pool-bench` now samples live replicated children and passes all gates
+  with p50 0.5 ms, p99 0.9 ms, 3/3 live members at 148.6 MiB, 0.00%
+  lifecycle RSS drift across 20 take/destroy cycles, and 150/150 throughput
+  takes; its smaps breakdown is 133.6 MiB PSS, 16.5 MiB private dirty, and
+  6.7 MiB shared dirty;
+- full default-scale `pool-bench` runs to completion and now passes 4/5 gates
+  after adaptive destroy polling closed the throughput miss: p50 0.5 ms,
+  p99 0.9 ms, 0.00% lifecycle RSS drift, and 3000/3000 throughput takes pass;
+  the remaining failure is RSS, where 100/100 live replicated children consume
+  5,486.9 MiB RSS against the 200 MiB gate; smaps rollup reports
+  4,119.8 MiB PSS, 3,964.5 MiB private dirty, and 186.8 MiB shared dirty, so
+  the miss is real private memory amplification rather than shared text
+  double-counting;
 - a local zero-skip plus lazy-remap experiment was rejected: skipping zero
   chunks in the sparse copy and removing MAP_POPULATE from the final
   replicated physmem remap made the full-scale RSS worse at 9,389.1 MiB for

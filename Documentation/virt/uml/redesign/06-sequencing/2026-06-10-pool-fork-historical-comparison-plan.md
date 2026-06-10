@@ -199,30 +199,31 @@ Current validation result:
 - `pool-serve-smoke` passes for daemon readiness, `--min-warm=1` prefill,
   ready take, replenish, request-specific take, destroy, shutdown, and master
   cleanup.
-- `pool-exec-smoke` passes for typed NDJSON failure envelopes when the member
-  lacks the mconsole path needed for successful exec.
+- `pool-exec-smoke` passes for successful daemon-routed guest exec through the
+  member mconsole socket, stdout/stderr capture, guest exit-code preservation,
+  timeout reporting, late-output suppression, helper cleanup, and stale daemon
+  error boundaries.
 - `pool-port-forward-smoke` passes for typed result/error handling.
 - A reduced `pool-bench` passes all five gates with live replicated children:
-  p50 1.4 ms, p99 1.4 ms, 3/3 live RSS children at 146.0 MiB, 0.00% lifecycle
-  drift across five cycles, and 4/4 throughput takes in a two-second gate.
-- The full default-scale `pool-bench` runs to completion but fails 2/5 gates:
-  p50 1.3 ms, p99 1.6 ms, and 0.10% lifecycle drift pass; sparse physmem copy
-  improves RSS from 17,262.7 MiB to 7,409.4 MiB for 100/100 live children, but
-  the 200 MiB gate still fails, and throughput is 2250/3000 takes against a
-  2700 gate.
+  p50 0.5 ms, p99 0.9 ms, 3/3 live RSS children at 148.6 MiB, 0.00% lifecycle
+  drift across 20 cycles, and 150/150 throughput takes in a three-second gate.
+- The full default-scale `pool-bench` runs to completion and passes 4/5 gates:
+  p50 0.5 ms, p99 0.9 ms, 0.00% lifecycle drift, and 3000/3000 throughput
+  takes pass; the 200 MiB RSS gate still fails at 5,486.9 MiB for 100/100 live
+  children with 3,964.5 MiB private dirty.
 
 Remaining work:
 
 - Keep `cargo fmt --check` and `cargo test` in `tools/uml/uml-launcher` green;
   the warm-ready update passed both.
-- Fix full-scale pool memory amplification and throughput. The current
-  sparse-copied replicated physmem path is stable and better than the full-copy
-  path, but it still does not meet the original 100-member memory or 50/sec
-  throughput targets.
+- Fix full-scale pool memory amplification. The current sparse-copied
+  replicated physmem path is stable and throughput now passes, but it still
+  does not meet the original 100-member RSS target.
 - Decide the final request-specific warm scheduling contract: either add a
   predeclared slot/identity API before warm fork, or route syzkaller through
   daemon-assigned ready identities with `pool take --ready`.
-- Fix or prove the successful member mconsole exec path.
+- Decide whether the bounded shell-backed `exec` command string and guest
+  `timeout(1)` helper dependency are the final daemon-routed exec ABI.
 - Re-run full `pool-bench` after fork/member lifetime fixes.
 - Keep validated failure reporting for kernels that lack the required mconsole
   `exec` primitive.
@@ -330,17 +331,17 @@ Remaining work:
 | Template pause single-shot | Present, validated | `fork-server-phase1c`, `memo09-*` | Keep cleaned source; validate vector2 leg when guest `vec0` is visible. |
 | Template pause fork-on-resume | Present, validated | `memo09-phase2`, `memo09-phase4` | Keep smoke and stress green. |
 | Template pause pivot mode | Present, validated | `memo09-phase4`, current `next` | Keep. |
-| Template pause pool-member mode | Present, partially validated | `memo09-phase4`, current `next` | One-shot member passes; sustained lifetime needs production fix. |
+| Template pause pool-member mode | Present, validated | `memo09-phase4`, current `next` | One-shot and sustained replicated member lifetime pass. |
 | Identity blob parse/apply | Present, validated | `memo09-phase2`, `memo09-phase4` | Keep KUnit plus live pool validation. |
-| Per-member mconsole path | Present, needs fix/proof | `memo09-phase4` | Error envelope validated; successful exec still pending. |
+| Per-member mconsole path | Present, validated | `memo09-phase4` | Successful daemon-routed exec now proves the member mconsole path. |
 | Vector2 TAP/fd handoff | Present hook, needs validation | `memo09-phase4`, `umlctl-deploy` | Validate through pool member and vector2 smoke. |
 | Direct pool spawn | Present, validated | `memo09-*` | Keep `pool-spawn-smoke` green. |
 | Pool daemon serve/take/status | Present, validated | `fork-server-phase1c`, `memo09-phase4` | Keep live-member and warm-ready smokes green. |
 | Pool destroy/shutdown | Present, validated | `memo09-phase4` | Keep in lifecycle smoke. |
-| Daemon-routed exec | Present, partially validated | `memo09-phase4` | Missing-feature failures are validated; successful exec still pending. |
+| Daemon-routed exec | Present, validated-needs-decision | `memo09-phase4` | Successful exec is validated; decide final shell/helper ABI. |
 | Port-forward result | Present, validated | `memo09-phase4` | Tie to final network validation. |
 | Warm pool `min_warm` | Present for daemon-assigned ready members | `memo09-phase3-pool-bench`, `memo09-phase4` | Decide request-specific warm identity scheduling. |
-| Pool benchmark | Present, full gate fails RSS/throughput | `memo09-phase3-pool-bench`, `memo09-phase4` | Fix memory amplification and throughput. |
+| Pool benchmark | Present, full gate fails RSS only | `memo09-phase3-pool-bench`, `memo09-phase4` | Fix memory amplification or revise the RSS target with evidence. |
 | Syzkaller VM shim | Present, unvalidated | `memo09-phase4`, current `next` | Build and run syzkaller-style take/exec/destroy smoke. |
 | Snapshot bench kselftest | Historical-only wrapper | `memo09-phase4` | Import clean wrapper around active kernel hook. |
 | Snapshot KUnit kselftest wrapper | Historical-only wrapper | `memo09-phase4` | Import or replace for current 4-case KUnit suite. |
