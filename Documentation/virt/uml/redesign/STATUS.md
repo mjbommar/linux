@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 snapshot SMP gate.
+Last updated: 2026-06-10 pool/fork historical comparison.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -129,8 +129,15 @@ Current boundary:
 - the pool daemon and basic pool selftests exist;
 - kernel identity parsing and application have KUnit coverage;
 - the syzkaller-facing shim and JSON command paths exist;
-- tap-fd handoff and per-pool-member mconsole plumbing remain open for the
-  full end-to-end pool networking and exec path.
+- comparison against `fork-server-phase1c`, `memo09-phase2`,
+  `memo09-phase3-pool-bench`, and `memo09-phase4` is documented in
+  `06-sequencing/2026-06-10-pool-fork-historical-comparison-plan.md`;
+- current `next` already contains the memo09 command surfaces, pivot mode,
+  pool-member mode, per-member mconsole path handling, and related selftests;
+- warm-pool `min_warm` behavior is still lazy-only and must be completed before
+  pool functionality is called done; and
+- tap-fd handoff, per-pool-member networking, pool exec, port-forward, and the
+  syzkaller shim still need live end-to-end validation.
 
 ## Historical-Only Work
 
@@ -138,8 +145,9 @@ The following work is not yet present in the active `next` implementation:
 
 - KVM-specific record/replay sources and tests;
 - private state-trace ring and parser tooling;
-- benchmark and smoke tests whose only purpose was to exercise code that is
-  still historical-only.
+- historical snapshot kselftest wrappers for benchmark, KUnit smoke, and ELF
+  roundtrip coverage. The underlying kernel hooks are present, so these should
+  be imported or replaced as cleaned test wrappers.
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
 source. KUnit coverage and live `umlctl` ELF export validation now pass.

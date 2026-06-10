@@ -13,8 +13,8 @@ This file is the live execution tracker for
 
 | Ref | Commit | Date | Role |
 | --- | ------ | ---- | ---- |
-| `next` | `51a058582ccd` | 2026-06-10 | Authoritative integration target. |
-| `origin/next` | `51a058582ccd` | 2026-06-10 | Remote tracking ref for `next`. |
+| `next` | `d0fecac57c26` | 2026-06-10 | Authoritative integration target. |
+| `origin/next` | `d0fecac57c26` | 2026-06-10 | Remote tracking ref for `next`. |
 | `kvm-v2-snapshot-elf64` | `fe9616e221c7` | 2026-05-21 | KVM v2 snapshot, ELF export, record, and state trace source branch. |
 | `fork-server-phase1c` | `df19046e0b49` | 2026-05-21 | Historical fork-server phase branch. |
 | `memo09-phase2` | `d933f95f06c2` | 2026-05-21 | Historical identity apply phase branch. |
@@ -22,6 +22,7 @@ This file is the live execution tracker for
 | `memo09-phase4` | `83ab00dc2f33` | 2026-05-21 | Historical pool/fork-server landed branch. |
 | `experiment-path-c` | `73c98eabd31b` | 2026-05-21 | Historical path-C experiment branch. |
 | `umlctl-deploy` | `ea849a35e20c` | 2026-05-25 | Historical launcher/deploy/gate branch. |
+| `torvalds/master` | `acb7500801e9` | 2026-06-10 | Linus baseline used for current up-to-date check. |
 
 ## Status Labels
 
@@ -60,7 +61,10 @@ This file is the live execution tracker for
 | KVM snapshot | Snapshot restore | Present-validated | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; SMP is gated to one online CPU. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus `kvm-snapshot-restore-smoke` PASS, 2026-06-10. |
 | KVM snapshot | Snapshot ELF64 export | Present-validated | `kvm-v2-snapshot-elf64` | Kernel exporter, debugfs trigger, mconsole trigger, and `umlctl` export path are present; SMP is gated to one online CPU. | `umlctl snapshot export` PASS with `readelf -h/-l/-n`, `gdb -c`, and helper load, 2026-06-10. |
 | KVM snapshot | GDB snapshot helper | Present-validated | `kvm-v2-snapshot-elf64`, `next` | Keep helper matched to UML private note layout. | helper loads against fresh exported core, 2026-06-10. |
-| KVM snapshot | Snapshot selftests | Present-validated | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite imported with current vCPU priming; live export and restore smoke pass; SMP policy is gated. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live ELF and restore smoke PASS, 2026-06-10. |
+| KVM snapshot | Snapshot selftests | Present-validated/needs-wrapper-import | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite imported with current vCPU priming; live export and restore smoke pass; SMP policy is gated. Historical kselftest wrappers for bench, KUnit smoke, and ELF roundtrip still need import or replacement. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live ELF and restore smoke PASS, 2026-06-10. |
+| KVM snapshot | Snapshot benchmark kselftest | Historical-only | `memo09-phase4` | Import as a cleaned wrapper around current `kvm_v2_snapshot_bench=`. | `kvm-snapshot-bench`. |
+| KVM snapshot | Snapshot KUnit kselftest wrapper | Historical-only | `memo09-phase4` | Import or replace with a cleaned wrapper for the current four-case `um_kvm_v2_snapshot` suite. | `snapshot-kvm-smoke`. |
+| KVM snapshot | Snapshot ELF roundtrip kselftest | Historical-only | `memo09-phase4` | Import after updating to the current mconsole/debugfs exporter contract. | `snapshot-elf-roundtrip`. |
 | Record/replay | Record state machine | Historical-only | `kvm-v2-snapshot-elf64` | Complete or land behind explicit experimental Kconfig. | record KUnit. |
 | Record/replay | Syscall observe path | Historical-only | `kvm-v2-snapshot-elf64` | Complete; no-op stubs are not completion. | record smoke. |
 | Record/replay | Replay consume path | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Implement deterministic replay tier or keep experimental. | replay smoke. |
@@ -68,17 +72,17 @@ This file is the live execution tracker for
 | Record/replay | Time, vvar, RDTSC, SIGALRM determinism | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Define supported tier and implement before declaring complete. | deterministic workload gate. |
 | Diagnostics | KVM v2 state trace ring | Historical-only | `kvm-v2-snapshot-elf64` | Rework as clean optional debug infrastructure. | enable/capture/dump/clear smoke. |
 | Diagnostics | State trace parser | Historical-only | `umlctl-deploy`, `kvm-v2-snapshot-elf64` | Import only if state trace lands. | parser smoke. |
-| Template pause | Kernel template pause entry | Present-needs-comparison | `next`, `memo09-phase*`, `fork-server-phase1c` | Compare against phase branches and import missing semantics. | template-pause smoke/stress. |
-| Template pause | Identity blob layout and apply path | Present-needs-comparison | `next`, `memo09-phase2`, `memo09-phase4` | Confirm current layout matches final tool contract. | identity KUnit/selftest. |
-| Template pause | Template pause pivot mode | Partial/needs-decision | `memo09-phase4`, `next` | Decide whether pivot smoke remains required. | pivot smoke if kept. |
-| Fork server | Fork-on-resume loop | Present-needs-comparison | `next`, `memo09-phase4` | Compare missing kernel/user semantics. | fork-server smoke. |
+| Template pause | Kernel template pause entry | Present-needs-validation | `next`, `memo09-phase*`, `fork-server-phase1c` | Historical comparison complete in `2026-06-10-pool-fork-historical-comparison-plan.md`; run and fix current smokes. | template-pause smoke/stress. |
+| Template pause | Identity blob layout and apply path | Present-needs-validation | `next`, `memo09-phase2`, `memo09-phase4` | Current layout matches the final launcher contract by source comparison; validate live through pool member tests. | identity KUnit/selftest. |
+| Template pause | Template pause pivot mode | Present-needs-validation | `memo09-phase4`, `next` | Keep if pivot smoke passes; fix or retire only with explicit approval. | pivot smoke. |
+| Fork server | Fork-on-resume loop | Present-needs-validation | `next`, `memo09-phase4` | Historical comparison complete; validate current production path rather than reimporting old diagnostic scaffolding. | fork-server smoke. |
 | Fork server | Child PID reporting through identity memfd | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate in pool take. | pool serve/take smoke. |
 | Fork server | Snapshot-backed fork-server path | Historical-only/needs-decision | `memo09-phase4`, `kvm-v2-snapshot-elf64` | Complete after KVM snapshot import or retire with approval. | snapshot fork smoke. |
 | Pool | Direct `umlctl pool spawn` | Present | `next`, `memo09-phase*` | Keep. | `pool-spawn-smoke`. |
 | Pool | Daemon `pool serve` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | `pool-serve-smoke`. |
 | Pool | `pool take` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | pool take/status smoke. |
 | Pool | `pool list/status/destroy/shutdown` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | pool lifecycle smoke. |
-| Pool | Warm member pool | Partial/needs-decision | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Implement or explicitly mark out of current completion. | pool benchmark. |
+| Pool | Warm member pool | Partial | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Complete real `min_warm` pre-warm behavior; do not count pool completion while this is lazy-only. | pool benchmark plus warm-pool smoke. |
 | Pool | Pool benchmark thresholds | Partial | `memo09-phase3-pool-bench`, `memo09-phase4` | Import final acceptance thresholds. | `pool-bench`. |
 | Pool | mconsole path synthesis | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate against exec. | `pool-exec-smoke`. |
 | Pool | `umlctl exec` via daemon | Present-needs-validation | `next`, `memo09-phase4` | Keep and test with mconsole availability detection. | exec smoke. |
@@ -141,10 +145,12 @@ These items must be closed before the final branch can be called complete:
 
 1. Record/replay functionality must be imported or completed.
 2. Vector2 replacement claims must match validation evidence.
-3. Pool/fork-server behavior must be compared against all `memo09-*` branches.
-4. Selftests and source comments must be cleaned of diary/history material on
+3. Pool/fork-server current tests must pass, including warm-pool, pool-member,
+   vector2 TAP/fd, and syzkaller-facing paths.
+4. Historical snapshot kselftest wrappers must be imported or replaced.
+5. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
-5. The final validation matrix from the integration plan must pass.
+6. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules
 

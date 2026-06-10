@@ -597,6 +597,22 @@ Required historical comparison:
 - Import only missing behavior.
 - Keep current newer launcher modules where they supersede older branch code.
 
+Current comparison result:
+
+- Completed in
+  `2026-06-10-pool-fork-historical-comparison-plan.md`.
+- Current `next` already contains the memo09 command surfaces, cleaned
+  template-pause modes, identity application, daemon-routed exec,
+  port-forward, pivot and pool-member smokes, and pool benchmark.
+- The main remaining pool gap is real `min_warm` warm-pool behavior; current
+  `pool serve` accepts the option but serves takes lazily.
+- The remaining validation gaps are current pool/template-pause smokes,
+  vector2 TAP/fd handoff through pool members, and syzkaller-style
+  take/exec/destroy.
+- Historical snapshot test wrappers from `memo09-phase4` should be imported
+  or replaced as cleaned kselftests because the underlying snapshot hooks now
+  exist on `next`.
+
 Acceptance gates:
 
 - `cargo fmt --check`
@@ -1087,8 +1103,8 @@ branch lands.
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
 | Record/replay | Historical/prototype | Complete or experimental | Open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
-| Template pause | Present | Validated and documented | Open |
-| Fork server | Present/partial | Complete pool workflow | Open |
+| Template pause | Present and compared with memo09 branches | Validated and documented | Open |
+| Fork server | Present, compared, warm-pool partial | Complete pool workflow | Open |
 | Pool exec | Present | Validated with mconsole path | Open |
 | Pool port-forward | Present | Validated | Open |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
@@ -1100,20 +1116,24 @@ branch lands.
 
 ## Immediate Next Actions
 
-1. Compare pool/fork-server behavior against `fork-server-phase1c`,
-   `memo09-phase2`, `memo09-phase3-pool-bench`, and `memo09-phase4`.
-2. Import or complete record/replay, or land it behind an explicit
+1. Import or replace the historical snapshot kselftest wrappers from
+   `memo09-phase4`: snapshot benchmark, KUnit smoke, and ELF roundtrip.
+2. Run the current pool/template-pause smokes and complete real warm-pool
+   `min_warm` behavior.
+3. Validate vector2 TAP/fd handoff through pool members and the syzkaller
+   take/exec/destroy path.
+4. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-3. Decide whether private state trace is worth importing as clean optional
+5. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-4. Re-audit vector2 transport claims, Kconfig wording, and replacement
+6. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-5. Curate selftests and source comments for upstream style: no internal issue
+7. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-6. Refresh reports/presentations from normalized status and evidence tables
+8. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-7. Run the final validation matrix, update `STATUS.md` and the inventory,
+9. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality
