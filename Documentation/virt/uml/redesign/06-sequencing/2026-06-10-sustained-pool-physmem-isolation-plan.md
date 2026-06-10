@@ -277,6 +277,17 @@ Only after Step 5 passes:
 - update `pool-serve-smoke` to prove member liveness, not just pid write-back;
 - update `pool-bench` so the RSS gate samples live children.
 
+Status:
+
+- `umlctl pool serve` now boots the master with
+  `um_template_pause_pool_member=1` and
+  `um_template_pause_pool_replicate=1`;
+- `pool-serve-smoke` proves daemon-routed `take` returns a live runnable
+  member and that `destroy` makes it non-runnable;
+- reduced `pool-bench` now samples live replicated children and passes the RSS
+  gate with 3/3 live members;
+- real `min_warm` prefill/replenish behavior remains open.
+
 ### Step 7: Validate User-Facing Pool Functionality
 
 Run and fix, in order:

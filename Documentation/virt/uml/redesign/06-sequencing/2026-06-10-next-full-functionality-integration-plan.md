@@ -1313,13 +1313,13 @@ timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
 
 Result:
 
-- FAIL overall because the memory amplification gate cannot measure live
-  children;
-- take latency, lifecycle drift, and throughput gates pass;
-- the live-child count was `0/5`, so the RSS gate is not a valid completion
-  signal yet;
-- this now aligns with the daemon/benchmark path not yet using the replicated
-  live-member mode.
+- PASS in the reduced validation gate;
+- take p50 was 1.3 ms and p99 was 1.6 ms over five measured takes;
+- RSS sampled 3/3 live replicated children and total RSS was 151.8 MiB;
+- lifecycle RSS drift was 0.00% over five take/destroy cycles;
+- throughput completed 4/4 takes in the 2-second reduced gate;
+- this proves the benchmark now measures live children, but it is not a
+  substitute for the full default-scale benchmark.
 
 Immediate engineering conclusion:
 
@@ -1328,33 +1328,32 @@ Immediate engineering conclusion:
   one-shot pool member, spawn, serve, typed exec error handling, and
   port-forward result handling are real;
 - replicated sustained pool-member lifetime now passes in the direct harness;
-- final completion requires routing daemon pool takes through the replicated
-  live-member path, real warm `min_warm`, vector2 TAP/fd pool networking,
-  successful daemon-routed guest exec, and the syzkaller take/exec/destroy
-  path.
+- daemon pool take/serve now routes through the replicated live-member path;
+- final completion requires real warm `min_warm`, full-scale pool benchmark
+  validation, vector2 TAP/fd pool networking, successful daemon-routed guest
+  exec, and the syzkaller take/exec/destroy path.
 
 ## Immediate Next Actions
 
-1. Move daemon pool take/serve paths onto the replicated live-member mode and
-   prove daemon-routed member liveness.
-2. Complete real warm-pool `min_warm` behavior.
-3. Re-run pool benchmark gates so RSS samples live replicated children.
+1. Complete real warm-pool `min_warm` behavior.
+2. Re-run the full default-scale pool benchmark now that RSS samples live
+   replicated children.
+3. Validate successful daemon-routed guest exec through the final member
+   mconsole path.
 4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
-5. Prove successful daemon-routed guest exec through the final member mconsole
-   path.
-6. Import or complete record/replay, or land it behind an explicit
+5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-7. Decide whether private state trace is worth importing as clean optional
+6. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-8. Re-audit vector2 transport claims, Kconfig wording, and replacement
+7. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-9. Curate selftests and source comments for upstream style: no internal issue
+8. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-10. Refresh reports/presentations from normalized status and evidence tables
+9. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-11. Run the final validation matrix, update `STATUS.md` and the inventory,
+10. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

@@ -165,10 +165,16 @@ Current boundary:
   passes with `UML_POOL_REPLICATE=1`, including five timer ticks; the
   implementation path is tracked in
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
-- reduced `pool-bench` passes four of five gates, but the RSS amplification
-  gate cannot measure live children because no benchmark children remain live;
-- the daemon pool still needs to opt into the replicated member path before
-  daemon-routed pool functionality is called complete;
+- `umlctl pool serve` now boots the master with replicated pool-member mode,
+  and `pool-serve-smoke` proves daemon-routed `take` returns a live runnable
+  member, retains it in daemon status, destroys it, and shuts the master down
+  cleanly;
+- reduced `pool-bench` now passes all five gates with live replicated children:
+  5/5 latency takes, 3/3 live RSS children, 0.00% lifecycle RSS drift across
+  5 take/destroy cycles, and 4/4 throughput takes in a 2-second reduced gate;
+- `pool-exec-smoke` still validates the clean daemon error envelope for missing
+  in-guest mconsole exec support; successful daemon-routed guest exec remains
+  pending;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before
   pool functionality is called done; and
 - tap-fd handoff through vector2 pool members and the syzkaller shim still need

@@ -3,11 +3,11 @@
 // umlctl pool serve - long-lived fork-server supervisor.
 //
 // Boots ONE master kernel built with CONFIG_UM_TEMPLATE_PAUSE_FORK=y
-// in `um_template_pause=fork` mode, then listens on a Unix-domain
-// socket at `$XDG_RUNTIME_DIR/uml/pools/<name>/api.sock` for line-
+// in `um_template_pause=fork` pool-member replication mode, then listens on a
+// Unix-domain socket at `$XDG_RUNTIME_DIR/uml/pools/<name>/api.sock` for line-
 // delimited JSON RPCs.  Each `take` rewrites the identity memfd,
 // SIGCONTs the master, waits for it to re-SIGSTOP, and reads the
-// new child host pid back from memfd[260:264].
+// live child host pid back from memfd[260:264].
 //
 // Wire format (one JSON object per line, both directions):
 //
@@ -315,7 +315,7 @@ impl DaemonState {
             return Err(std::io::Error::last_os_error()).context("pwrite zero child-pid slot");
         }
 
-        // SIGCONT the master; it will fork, kill the M-fork child,
+        // SIGCONT the master; it will fork a live pool member,
         // write the new child's pid into the memfd, then re-SIGSTOP.
         let r = unsafe { libc::kill(self.master_pid, libc::SIGCONT) };
         if r < 0 {
@@ -345,6 +345,10 @@ impl DaemonState {
         let child_pid = u32::from_le_bytes(buf) as i32;
         if child_pid <= 0 {
             bail!("master did not report child pid (memfd slot still zero)");
+        }
+
+        if !pid_runnable(child_pid) {
+            bail!("reported child pid {} is not runnable", child_pid);
         }
 
         let rec = MemberRecord {
@@ -488,11 +492,7 @@ impl DaemonState {
     fn do_destroy(&self, pid: i32) -> Result<bool> {
         let _removed = self.members.lock().unwrap().remove(&pid).is_some();
         // "Destroyed" semantics: the member is no longer a runnable
-        // host process.  This includes Z (zombie) — the master kills
-        // the M-fork child immediately post-fork, so by the time the
-        // caller asks us to destroy it the pid is typically already a
-        // zombie waiting for the master to wait4() it.  We treat
-        // zombies and gone-from-/proc identically: not-runnable.
+        // host process.  This includes Z (zombie) and gone-from-/proc.
         if !pid_runnable(pid) {
             return Ok(true);
         }
@@ -528,7 +528,7 @@ impl DaemonState {
             }
         }
         let mut members = self.members.lock().unwrap();
-        members.retain(|pid, _| pool::pid_is_alive(*pid));
+        members.retain(|pid, _| pid_runnable(*pid));
     }
 }
 
@@ -629,6 +629,8 @@ fn launch_master(args: &ServeArgs) -> Result<(Child, OwnedFd)> {
         kernel.display().to_string(),
         format!("mem={}", args.mem),
         "um_template_pause=fork".to_string(),
+        "um_template_pause_pool_member=1".to_string(),
+        "um_template_pause_pool_replicate=1".to_string(),
     ];
     for tok in args.rootfs.split_whitespace() {
         argv.push(tok.to_string());
@@ -870,7 +872,7 @@ fn run_accept_loop(
         state.reap_dead();
         // If the master died unexpectedly, give up — restarting it is
         // out of scope for the MVP.
-        if !pool::pid_is_alive(state.master_pid) {
+        if !pid_runnable(state.master_pid) {
             return Err(anyhow!("master pid {} died unexpectedly", state.master_pid));
         }
         if fds[0].revents & libc::POLLIN != 0 {

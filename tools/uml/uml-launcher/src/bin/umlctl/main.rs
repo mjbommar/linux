@@ -65,8 +65,8 @@ enum PoolCmd {
     /// pass --graceful for SIGTERM + grace period + SIGKILL escalation.
     /// With `--name <pool>`, routes through the daemon socket.
     Destroy(pool::DestroyArgs),
-    /// Long-lived supervisor: boots one master in fork mode, accepts
-    /// take/list/status/destroy/exec/shutdown RPCs on a Unix socket
+    /// Long-lived supervisor: boots one replicated pool-member master,
+    /// accepts take/list/status/destroy/exec/shutdown RPCs on a Unix socket
     /// under $XDG_RUNTIME_DIR/uml/pools/<name>/api.sock.
     Serve(pool_serve::ServeArgs),
     /// Client-side `take`: sends a take RPC to a running `pool serve`

@@ -272,6 +272,14 @@ def take_payload(instance, mac_suffix):
     }
 
 
+def destroy_pid(pid):
+    if pid > 0:
+        try:
+            rpc({"op": "destroy", "pid": pid}, timeout=2.0)
+        except Exception:
+            pass
+
+
 def percentile(sorted_xs, p):
     """Linear-interpolated percentile over a pre-sorted list."""
     if not sorted_xs:
@@ -302,6 +310,7 @@ for i in range(5):
     if not r.get("ok"):
         print(f"FAIL: warm-up take {i} failed: {r}")
         sys.exit(1)
+    destroy_pid(r.get("result", {}).get("pid", 0))
 
 # ---------------------------------------------------------------------
 # Gate 1: take.p50/p99 over $TAKES sequential takes.
@@ -318,6 +327,7 @@ for i in range(TAKES):
         fails += 1
         continue
     latencies_ms.append((b - a) / 1e6)
+    destroy_pid(r.get("result", {}).get("pid", 0))
 t1 = time.monotonic_ns()
 results["gate1_takes_attempted"] = TAKES
 results["gate1_takes_successful"] = len(latencies_ms)
@@ -353,10 +363,9 @@ for i in range(FORKS):
     if p > 0:
         fork_pids.append(p)
 # Sum the RSS of supervisor + master + every still-runnable fork pid.
-# The M-fork children are SIGKILL'd by the master immediately
-# post-fork and become zombies (VmRSS=0 / unreadable);
-# the live-RSS bucket therefore captures actual amplification,
-# which is what the gate is about.  Zombies are accounted as 0.
+# In replicated pool-member mode these are real live UML members; if
+# they are not live, the gate fails below instead of reporting a
+# misleading master-only RSS number.
 rss_supervisor_end = rss_kb(DAEMON_PID) or 0
 rss_master_end = rss_kb(MASTER_PID) or 0
 rss_children_kb = 0
@@ -384,10 +393,7 @@ print(f"  -> supervisor={rss_supervisor_end} kB master={rss_master_end} kB "
 # Destroy all the fork pids the daemon recorded so the daemon's
 # member-table size drops back to ~0 before the lifecycle gate.
 for p in fork_pids:
-    try:
-        rpc({"op": "destroy", "pid": p})
-    except Exception:
-        pass
+    destroy_pid(p)
 
 # ---------------------------------------------------------------------
 # Gate 3: lifecycle leak over $LIFECYCLE_N take+destroy cycles.
@@ -408,13 +414,9 @@ for i in range(LIFECYCLE_N):
         continue
     p = r.get("result", {}).get("pid", 0)
     if p > 0:
-        # Destroy via RPC so the daemon drops the member-table entry;
-        # the master has already SIGKILL'd it, so this is primarily a
-        # daemon-side bookkeeping unbind.
-        try:
-            rpc({"op": "destroy", "pid": p})
-        except Exception:
-            pass
+        # Destroy via RPC so the daemon drops the member-table entry
+        # and the live replicated member exits before the next cycle.
+        destroy_pid(p)
     if i == mid:
         rss_mid = g3_rss()
 g3_t1 = time.monotonic_ns()
@@ -459,12 +461,8 @@ while time.monotonic() < deadline:
     if r.get("ok"):
         ok_count += 1
         p = r.get("result", {}).get("pid", 0)
-        if p > 0:
-            # Close = destroy; matches the spec's "take + close".
-            try:
-                rpc({"op": "destroy", "pid": p}, timeout=2.0)
-            except Exception:
-                pass
+        # Close = destroy; matches the spec's "take + close".
+        destroy_pid(p)
     else:
         fail_count += 1
     i += 1

@@ -7,7 +7,7 @@
 #   1. `umlctl pool serve --background` boots a CONFIG_UM_TEMPLATE_PAUSE_FORK
 #      master, writes its pidfile, and starts listening on the api.sock.
 #   2. A {"op":"take", ...} JSON-line RPC over the socket returns a
-#      result containing a live host pid.
+#      result containing a live, runnable replicated pool-member pid.
 #   3. {"op":"destroy", "pid":N} reports destroyed=true and the pid
 #      is no longer alive.
 #   4. {"op":"shutdown"} terminates the daemon + master cleanly
@@ -160,17 +160,34 @@ TAKEN_PID=$(echo "$TAKE" | python3 -c \
 	"import json,sys;print(json.load(sys.stdin)['result']['pid'])")
 echo "took member pid=$TAKEN_PID: PASS"
 
-# Member pid should be alive *at the moment of return*; it may be
-# short-lived in the MVP since the M-fork child is SIGKILL'd by the
-# master.  The contract is that the daemon RECORDS the pid the kernel
-# fork loop reported, not that the child outlives the take return.
-# So we accept either "alive" or "already-reaped"; what we don't
-# accept is a missing/zero pid.
 if [ -z "$TAKEN_PID" ] || [ "$TAKEN_PID" -le 0 ]; then
 	echo "FAIL: invalid taken pid=$TAKEN_PID"
 	exit 1
 fi
 echo "taken pid valid: PASS"
+
+runnable() {
+	local p=$1
+	local state
+	state=$(awk '{ for (i=NF; i>=1; i--) if ($i ~ /^[RSDTZXIt]$/) { print $i; exit } }' \
+		"/proc/$p/stat" 2>/dev/null || true)
+	[ -n "$state" ] && [ "$state" != "Z" ] && [ "$state" != "X" ]
+}
+if ! runnable "$TAKEN_PID"; then
+	echo "FAIL: taken pid $TAKEN_PID is not a live runnable member"
+	exit 1
+fi
+echo "taken pid live/runnable: PASS"
+
+STATUS_AFTER_TAKE=$(rpc status)
+TAKEN_COUNT=$(echo "$STATUS_AFTER_TAKE" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['taken'])")
+if [ "$TAKEN_COUNT" -lt 1 ]; then
+	echo "FAIL: daemon status did not retain live member"
+	echo "$STATUS_AFTER_TAKE"
+	exit 1
+fi
+echo "daemon retained live member: PASS"
 
 # destroy RPC.
 DESTROY=$(rpc destroy "{\"pid\":$TAKEN_PID}")
@@ -181,11 +198,9 @@ if ! echo "$DESTROY" | python3 -c \
 	exit 1
 fi
 echo "destroy RPC ok: PASS"
-# The M-fork child is the master's child, not the daemon's, so once
-# the master SIGKILLs it, the host
-# pid lingers as a zombie owned by master until master reaps it.  The
-# destroy contract is: "no longer a runnable process" - gone or Z/X
-# state.  Mirror the daemon's pid_runnable() check here.
+# The live member is the master's child, not the daemon's. The destroy contract
+# is: "no longer a runnable process" - gone or Z/X state. Mirror the daemon's
+# pid_runnable() check here.
 not_runnable() {
 	local p=$1
 	local state
