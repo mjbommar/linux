@@ -62,7 +62,7 @@ enum um_backend_kind {
  * Forwarded from kernel command line by init_backend(). All fields
  * have a "0 means 'no preference'" semantics. Populated by
  * uml_backend_config() in arch/um/os-Linux/start_up.c from the
- * backend= / backend_force= boot params.
+ * backend= boot param.
  */
 struct um_backend_args {
 	enum um_backend_kind requested;	/* boot-param override; 0 = auto */
@@ -117,10 +117,8 @@ struct um_backend_ops {
 	 * is driven by a SIGCHLD-registered reaper IRQ. Seccomp
 	 * sets this because its stub is reaped asynchronously;
 	 * KVM leaves it false because it has no host stub child.
-	 * Consulted by arch/um/os-Linux/signal.c::set_handler
-	 * (mask SIGCHLD in other handlers) and arch/um/os-Linux/
-	 * process.c::init_new_thread_signals (install the SIGCHLD
-	 * handler itself).
+	 * Consulted by signal setup so only backends with a stub reaper
+	 * reserve SIGCHLD for child lifecycle events.
 	 *
 	 * has_syscall_stub_fd_map: true when the backend's stub-
 	 * syscall ABI carries per-mm FD indirection
@@ -128,34 +126,25 @@ struct um_backend_ops {
 	 * SCM_RIGHTS fd-passing into the stub child. Seccomp
 	 * sets this because its stub uses a per-mm sendmsg-delivered
 	 * fd table; KVM leaves it false. Consulted by
-	 * arch/um/os-Linux/skas/mem.c::syscall_stub_dump_error
-	 * (dump the fd-map on error), get_stub_fd (fd-to-slot
-	 * indirection), um_stub_mm_map (coalesce-previous lookup),
-	 * and do_syscall_stub (fd_num reset after a batch).
+	 * seccomp stub error reporting, fd-slot lookup, map coalescing,
+	 * and batch reset paths.
 	 *
 	 * stub_syscall_uses_futex: true when the backend wakes
 	 * the stub child to process a batched syscall queue via
 	 * a futex + wait_stub_done_seccomp round-trip; false when
 	 * it uses PTRACE_SETREGS + PTRACE_CONT + wait_stub_done
 	 * instead. Seccomp true, ptrace false, KVM false (KVM
-	 * doesn't use do_syscall_stub at all). Consulted by the
-	 * dispatch-mechanism branch of arch/um/os-Linux/skas/
-	 * mem.c::do_syscall_stub and the stub-child-initial-wait
-	 * branch of arch/um/os-Linux/skas/process.c::
-	 * start_userspace, plus the pre-clone futex seed
-	 * (proc_data->futex = FUTEX_IN_CHILD) in that same
-	 * function.
+	 * does not use do_syscall_stub at all). Consulted by the
+	 * seccomp stub-dispatch path and the initial stub wait/setup
+	 * path.
 	 *
 	 * stub_child_runs_seccomp: true when the stub child
 	 * installs its own SIGSYS-filter (and dispatches via
 	 * stub_signal_interrupt); false when the parent traces
 	 * it via ptrace (and dispatches via stub_segv_handler).
 	 * Seccomp true, ptrace false, KVM false (no stub child
-	 * on KVM). Consulted by the clone-tramp init-data
-	 * builder in arch/um/os-Linux/skas/process.c::
-	 * userspace_tramp: both the .seccomp field sent over
-	 * the tramp sockpair and the signal_handler /
-	 * signal_restorer trampoline-offset choice.
+	 * on KVM). Consulted when building the clone-trampoline init
+	 * data sent over the tramp sockpair.
 	 */
 	bool				uses_stub_reaper;
 	bool				has_syscall_stub_fd_map;
