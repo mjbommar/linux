@@ -33,6 +33,12 @@
 #include <linux/user.h>		/* struct user_regs_struct */
 #include <linux/vmalloc.h>
 
+#ifdef CONFIG_MCONSOLE
+#include "../../drivers/mconsole.h"
+#endif
+
+#include <os.h>
+
 #include "kvm_v2_backend.h"
 
 /*
@@ -228,19 +234,38 @@ static inline size_t kvm_v2_elf_align_up(size_t v, size_t align)
 	return (v + align - 1) & ~(align - 1);
 }
 
+struct kvm_v2_elf_writer {
+	struct file *file;
+	int host_fd;
+};
+
 /*
  * Write @len bytes from @buf at file offset @off. Wrapper around
- * kernel_write that retries on short writes the way binfmt_elf's
- * dump_emit does. Returns 0 on success, -errno on hard failure.
+ * kernel_write or the UML host-file helpers that retries on short
+ * writes the way binfmt_elf's dump_emit does. Returns 0 on success,
+ * -errno on hard failure.
  */
-static int kvm_v2_elf_write(struct file *f, loff_t *pos,
+static int kvm_v2_elf_write(struct kvm_v2_elf_writer *writer, loff_t *pos,
 			    const void *buf, size_t len)
 {
 	const u8 *p = buf;
 	ssize_t n;
+	int rc;
 
 	while (len) {
-		n = kernel_write(f, p, len, pos);
+		if (writer->file) {
+			n = kernel_write(writer->file, p, len, pos);
+		} else {
+			size_t count = min_t(size_t, len, INT_MAX);
+
+			rc = os_seek_file(writer->host_fd,
+					  (unsigned long long)*pos);
+			if (rc < 0)
+				return rc;
+			n = os_write_file(writer->host_fd, p, (int)count);
+			if (n > 0)
+				*pos += n;
+		}
 		if (n < 0)
 			return (int)n;
 		if (n == 0)
@@ -260,7 +285,8 @@ static int kvm_v2_elf_write(struct file *f, loff_t *pos,
  * Wframe-larger-than= threshold even when PAGE_SIZE > 1024 - the
  * buffer is heap-allocated.
  */
-static int kvm_v2_elf_pad_zero(struct file *f, loff_t *pos, loff_t target_off)
+static int kvm_v2_elf_pad_zero(struct kvm_v2_elf_writer *writer,
+			       loff_t *pos, loff_t target_off)
 {
 	void *zero;
 	size_t chunk;
@@ -273,7 +299,7 @@ static int kvm_v2_elf_pad_zero(struct file *f, loff_t *pos, loff_t target_off)
 		return -ENOMEM;
 	while (*pos < target_off) {
 		chunk = min_t(size_t, PAGE_SIZE, target_off - *pos);
-		rc = kvm_v2_elf_write(f, pos, zero, chunk);
+		rc = kvm_v2_elf_write(writer, pos, zero, chunk);
 		if (rc < 0)
 			break;
 	}
@@ -286,7 +312,7 @@ static int kvm_v2_elf_pad_zero(struct file *f, loff_t *pos, loff_t target_off)
  * padded payload. The owner string is copied including its trailing
  * NUL (per the standard).
  */
-static int kvm_v2_elf_emit_note(struct file *f, loff_t *pos,
+static int kvm_v2_elf_emit_note(struct kvm_v2_elf_writer *writer, loff_t *pos,
 				const char *owner, u32 type,
 				const void *payload, u32 paylen)
 {
@@ -298,23 +324,24 @@ static int kvm_v2_elf_emit_note(struct file *f, loff_t *pos,
 	nhdr.n_namesz = namesz;
 	nhdr.n_descsz = paylen;
 	nhdr.n_type   = type;
-	rc = kvm_v2_elf_write(f, pos, &nhdr, sizeof(nhdr));
+	rc = kvm_v2_elf_write(writer, pos, &nhdr, sizeof(nhdr));
 	if (rc < 0)
 		return rc;
-	rc = kvm_v2_elf_write(f, pos, owner, namesz);
+	rc = kvm_v2_elf_write(writer, pos, owner, namesz);
 	if (rc < 0)
 		return rc;
 	if (namesz & 3) {
-		rc = kvm_v2_elf_write(f, pos, pad, 4 - (namesz & 3));
+		rc = kvm_v2_elf_write(writer, pos, pad, 4 - (namesz & 3));
 		if (rc < 0)
 			return rc;
 	}
 	if (paylen) {
-		rc = kvm_v2_elf_write(f, pos, payload, paylen);
+		rc = kvm_v2_elf_write(writer, pos, payload, paylen);
 		if (rc < 0)
 			return rc;
 		if (paylen & 3) {
-			rc = kvm_v2_elf_write(f, pos, pad, 4 - (paylen & 3));
+			rc = kvm_v2_elf_write(writer, pos, pad,
+					      4 - (paylen & 3));
 			if (rc < 0)
 				return rc;
 		}
@@ -362,10 +389,11 @@ static int kvm_v2_elf_count_loadable(const struct kvm_v2_snapshot *snap)
  */
 #define KVM_V2_ELF_FPREGSET_SIZE	512u
 
-static int kvm_v2_elf_emit_fpregset(struct file *f, loff_t *pos,
+static int kvm_v2_elf_emit_fpregset(struct kvm_v2_elf_writer *writer,
+				    loff_t *pos,
 				    const struct kvm_v2_snapshot *snap)
 {
-	return kvm_v2_elf_emit_note(f, pos, "CORE", NT_PRFPREG,
+	return kvm_v2_elf_emit_note(writer, pos, "CORE", NT_PRFPREG,
 				    &snap->xsave,
 				    KVM_V2_ELF_FPREGSET_SIZE);
 }
@@ -391,35 +419,8 @@ static void kvm_v2_elf_build_prstatus(const struct kvm_v2_snapshot *snap,
 	kvm_v2_elf_fill_user_regs(snap, (struct user_regs_struct *)&ps->pr_reg);
 }
 
-/**
- * kvm_v2_snapshot_elf_export_to_file - write an ELF64 core file
- *                                      from an in-memory snapshot.
- * @snap: previously-captured snapshot. Must not be NULL.
- * @file: open file for write. The export is sequential - caller
- *        should pass an empty/truncated file at position 0.
- *
- * Layout written:
- *
- *   [ Elf64_Ehdr                      ]
- *   [ Elf64_Phdr * (1 + N_load)       ]   PT_NOTE + N PT_LOAD
- *   [ note payloads (back-to-back)    ]
- *   [ PT_LOAD payloads                ]
- *
- * Returns 0 on success, -errno on the first failed write.
- *
- * Documented user-visible behaviours:
- *   - For regs-only snapshots (snap->memslots == NULL), N_load == 0
- *     and the file consists of header + one PT_NOTE phdr + notes.
- *     `readelf -n` and `gdb -c <file>` both accept this shape.
- *   - For full snapshots, each memslot with .data != NULL becomes one
- *     PT_LOAD with p_vaddr == guest_phys_addr.  gdb's `x` against a
- *     guest physical address shows the captured bytes.
- *   - The UML-private note's payload begins with a 'UMLE' magic +
- *     version so future readers can refuse mismatched layouts cleanly
- *     instead of mis-parsing.
- */
-int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
-				       struct file *file)
+static int kvm_v2_snapshot_elf_export_to_writer(const struct kvm_v2_snapshot *snap,
+						struct kvm_v2_elf_writer *writer)
 {
 	struct elf64_hdr ehdr;
 	struct elf64_phdr *phdrs = NULL;
@@ -436,7 +437,7 @@ int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
 	int i;
 	int rc;
 
-	if (!snap || !file)
+	if (!snap || !writer || (!writer->file && writer->host_fd < 0))
 		return -EINVAL;
 
 	n_load  = kvm_v2_elf_count_loadable(snap);
@@ -517,33 +518,33 @@ int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
 	ehdr.e_shnum     = 0;
 	ehdr.e_shstrndx  = 0;
 
-	rc = kvm_v2_elf_write(file, &pos, &ehdr, sizeof(ehdr));
+	rc = kvm_v2_elf_write(writer, &pos, &ehdr, sizeof(ehdr));
 	if (rc < 0)
 		goto out_free_phdrs;
 
-	rc = kvm_v2_elf_write(file, &pos, phdrs,
+	rc = kvm_v2_elf_write(writer, &pos, phdrs,
 			      (size_t)n_phdr * sizeof(*phdrs));
 	if (rc < 0)
 		goto out_free_phdrs;
 
 	/* Notes section. */
 	kvm_v2_elf_build_prstatus(snap, &prstatus);
-	rc = kvm_v2_elf_emit_note(file, &pos, "CORE", NT_PRSTATUS,
+	rc = kvm_v2_elf_emit_note(writer, &pos, "CORE", NT_PRSTATUS,
 				  &prstatus, sizeof(prstatus));
 	if (rc < 0)
 		goto out_free_phdrs;
 
-	rc = kvm_v2_elf_emit_fpregset(file, &pos, snap);
+	rc = kvm_v2_elf_emit_fpregset(writer, &pos, snap);
 	if (rc < 0)
 		goto out_free_phdrs;
 
-	rc = kvm_v2_elf_emit_note(file, &pos, "LINUX", NT_X86_XSTATE,
+	rc = kvm_v2_elf_emit_note(writer, &pos, "LINUX", NT_X86_XSTATE,
 				  &snap->xsave,
 				  KVM_V2_ELF_X86_XSTATE_SIZE);
 	if (rc < 0)
 		goto out_free_phdrs;
 
-	rc = kvm_v2_elf_emit_note(file, &pos, KVM_V2_NT_UML_OWNER,
+	rc = kvm_v2_elf_emit_note(writer, &pos, KVM_V2_NT_UML_OWNER,
 				  KVM_V2_NT_UML_STATE,
 				  uml_payload, (u32)uml_payload_len);
 	if (rc < 0)
@@ -551,7 +552,7 @@ int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
 
 	/* Pad to first PT_LOAD's p_offset. */
 	if (n_load > 0) {
-		rc = kvm_v2_elf_pad_zero(file, &pos, loads_off);
+		rc = kvm_v2_elf_pad_zero(writer, &pos, loads_off);
 		if (rc < 0)
 			goto out_free_phdrs;
 	}
@@ -562,7 +563,7 @@ int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
 
 		if (!e->data || e->data_size == 0)
 			continue;
-		rc = kvm_v2_elf_write(file, &pos, e->data, e->data_size);
+		rc = kvm_v2_elf_write(writer, &pos, e->data, e->data_size);
 		if (rc < 0)
 			goto out_free_phdrs;
 	}
@@ -578,7 +579,56 @@ out_free_uml:
 	kvfree(uml_payload);
 	return rc;
 }
+
+/**
+ * kvm_v2_snapshot_elf_export_to_file - write an ELF64 core file
+ *                                      from an in-memory snapshot.
+ * @snap: previously-captured snapshot. Must not be NULL.
+ * @file: open file for write. The export is sequential - caller
+ *        should pass an empty/truncated file at position 0.
+ *
+ * Layout written:
+ *
+ *   [ Elf64_Ehdr                      ]
+ *   [ Elf64_Phdr * (1 + N_load)       ]   PT_NOTE + N PT_LOAD
+ *   [ note payloads (back-to-back)    ]
+ *   [ PT_LOAD payloads                ]
+ *
+ * Returns 0 on success, -errno on the first failed write.
+ *
+ * Documented user-visible behaviours:
+ *   - For regs-only snapshots (snap->memslots == NULL), N_load == 0
+ *     and the file consists of header + one PT_NOTE phdr + notes.
+ *     `readelf -n` and `gdb -c <file>` both accept this shape.
+ *   - For full snapshots, each memslot with .data != NULL becomes one
+ *     PT_LOAD with p_vaddr == guest_phys_addr.  gdb's `x` against a
+ *     guest physical address shows the captured bytes.
+ *   - The UML-private note's payload begins with a 'UMLE' magic +
+ *     version so future readers can refuse mismatched layouts cleanly
+ *     instead of mis-parsing.
+ */
+int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
+				       struct file *file)
+{
+	struct kvm_v2_elf_writer writer = {
+		.file = file,
+		.host_fd = -1,
+	};
+
+	return kvm_v2_snapshot_elf_export_to_writer(snap, &writer);
+}
 EXPORT_SYMBOL_GPL(kvm_v2_snapshot_elf_export_to_file);
+
+static int kvm_v2_snapshot_elf_export_to_host_fd(const struct kvm_v2_snapshot *snap,
+						 int fd)
+{
+	struct kvm_v2_elf_writer writer = {
+		.file = NULL,
+		.host_fd = fd,
+	};
+
+	return kvm_v2_snapshot_elf_export_to_writer(snap, &writer);
+}
 
 /**
  * kvm_v2_snapshot_elf_export_to_fd - convenience wrapper: take an fd,
@@ -606,40 +656,15 @@ int kvm_v2_snapshot_elf_export_to_fd(const struct kvm_v2_snapshot *snap, int fd)
 EXPORT_SYMBOL_GPL(kvm_v2_snapshot_elf_export_to_fd);
 
 /*
- * debugfs trigger: writing a path to
- *   /sys/kernel/debug/um/kvm_v2_snapshot_elf_export_path
- * causes the kernel to capture a fresh snapshot AND write it to the
- * named path as ET_CORE. The interface is stateless: every write captures
- * a fresh snapshot and exports it synchronously.
+ * Single shared lock for path-triggered exports. This avoids concurrent
+ * debugfs or mconsole writes racing the kernel-side capture/restore
+ * primitives.
  */
-#ifdef CONFIG_DEBUG_FS
+static DEFINE_MUTEX(kvm_v2_elf_export_lock);
 
-/*
- * Single shared lock for the debugfs writer - avoids two concurrent
- * writes racing the kernel-side capture/restore primitives.
- */
-static DEFINE_MUTEX(kvm_v2_elf_debugfs_lock);
-
-/*
- * Maximum path length we'll accept on a single write. Bounded
- * deliberately: a debugfs write of "give us the whole filesystem"
- * isn't a meaningful operation, and the heap allocation should be
- * pageable on a tight UML config.
- */
-#define KVM_V2_ELF_PATH_MAX	4095u
-
-static int kvm_v2_elf_debugfs_export(const char *path)
+static int kvm_v2_snapshot_capture_for_export(struct kvm_v2_snapshot *snap)
 {
-	struct kvm_v2_snapshot *snap;
-	struct file *f;
 	int rc;
-
-	if (!path || !*path)
-		return -EINVAL;
-
-	snap = kvm_v2_snapshot_alloc();
-	if (!snap)
-		return -ENOMEM;
 
 	rc = kvm_v2_snapshot_capture(snap);
 	if (rc == -EOPNOTSUPP || rc == -ENOMEM) {
@@ -652,6 +677,23 @@ static int kvm_v2_elf_debugfs_export(const char *path)
 			rc);
 		rc = kvm_v2_snapshot_capture_regs_only(snap);
 	}
+	return rc;
+}
+
+static int __kvm_v2_snapshot_elf_export_path(const char *path)
+{
+	struct kvm_v2_snapshot *snap;
+	struct file *f;
+	int rc;
+
+	if (!path || !*path)
+		return -EINVAL;
+
+	snap = kvm_v2_snapshot_alloc();
+	if (!snap)
+		return -ENOMEM;
+
+	rc = kvm_v2_snapshot_capture_for_export(snap);
 	if (rc < 0)
 		goto out_destroy;
 
@@ -673,6 +715,109 @@ out_destroy:
 	kvm_v2_snapshot_destroy(snap);
 	return rc;
 }
+
+static int __kvm_v2_snapshot_elf_export_host_path(const char *path)
+{
+	struct kvm_v2_snapshot *snap;
+	int fd;
+	int rc;
+
+	if (!path || !*path)
+		return -EINVAL;
+
+	snap = kvm_v2_snapshot_alloc();
+	if (!snap)
+		return -ENOMEM;
+
+	rc = kvm_v2_snapshot_capture_for_export(snap);
+	if (rc < 0)
+		goto out_destroy;
+
+	fd = os_open_file(path, of_trunc(of_create(of_write(OPENFLAGS()))),
+			  0600);
+	if (fd < 0) {
+		rc = fd;
+		pr_warn("um: kvm-v2 snapshot elf: host open(%s) rc=%d\n",
+			path, rc);
+		goto out_destroy;
+	}
+
+	rc = kvm_v2_snapshot_elf_export_to_host_fd(snap, fd);
+	if (rc < 0)
+		pr_warn("um: kvm-v2 snapshot elf: host export rc=%d\n", rc);
+
+	os_close_file(fd);
+
+out_destroy:
+	kvm_v2_snapshot_destroy(snap);
+	return rc;
+}
+
+static int kvm_v2_snapshot_elf_export_path(const char *path)
+{
+	int rc;
+
+	mutex_lock(&kvm_v2_elf_export_lock);
+	rc = __kvm_v2_snapshot_elf_export_path(path);
+	mutex_unlock(&kvm_v2_elf_export_lock);
+
+	return rc;
+}
+
+static int kvm_v2_snapshot_elf_export_host_path(const char *path)
+{
+	int rc;
+
+	mutex_lock(&kvm_v2_elf_export_lock);
+	rc = __kvm_v2_snapshot_elf_export_host_path(path);
+	mutex_unlock(&kvm_v2_elf_export_lock);
+
+	return rc;
+}
+
+#ifdef CONFIG_MCONSOLE
+void mconsole_snapshot_export(struct mc_request *req)
+{
+	char *path = req->request.data;
+	int rc;
+
+	path += strlen("snapshot_export");
+	path = skip_spaces(path);
+	if (!*path) {
+		mconsole_reply(req, "snapshot_export requires a path", 1, 0);
+		return;
+	}
+
+	rc = kvm_v2_snapshot_elf_export_host_path(path);
+	if (rc < 0) {
+		char reply[128];
+
+		snprintf(reply, sizeof(reply),
+			 "snapshot_export failed: %d", rc);
+		mconsole_reply(req, reply, 1, 0);
+		return;
+	}
+
+	mconsole_reply(req, "snapshot_export complete", 0, 0);
+}
+#endif
+
+/*
+ * debugfs trigger: writing a path to
+ *   /sys/kernel/debug/um/kvm_v2_snapshot_elf_export_path
+ * causes the kernel to capture a fresh snapshot AND write it to the
+ * named path as ET_CORE. The interface is stateless: every write captures
+ * a fresh snapshot and exports it synchronously.
+ */
+#ifdef CONFIG_DEBUG_FS
+
+/*
+ * Maximum path length we'll accept on a single write. Bounded
+ * deliberately: a debugfs write of "give us the whole filesystem"
+ * isn't a meaningful operation, and the heap allocation should be
+ * pageable on a tight UML config.
+ */
+#define KVM_V2_ELF_PATH_MAX	4095u
 
 static ssize_t kvm_v2_elf_path_write(struct file *f,
 				     const char __user *buf,
@@ -696,9 +841,7 @@ static ssize_t kvm_v2_elf_path_write(struct file *f,
 	if (copy_n > 0 && path[copy_n - 1] == '\n')
 		path[copy_n - 1] = '\0';
 
-	mutex_lock(&kvm_v2_elf_debugfs_lock);
-	rc = kvm_v2_elf_debugfs_export(path);
-	mutex_unlock(&kvm_v2_elf_debugfs_lock);
+	rc = kvm_v2_snapshot_elf_export_path(path);
 
 	kfree(path);
 	return rc < 0 ? rc : (ssize_t)count;

@@ -200,8 +200,9 @@ Producing the file
 From the operator side:
 
 * ``umlctl snapshot export <instance> --output dump.elf`` — the
-  blessed path.  Drives the guest's debugfs trigger via
-  ``/proc/<pid>/root/sys/kernel/debug/um/kvm_v2_snapshot_elf_export_path``.
+  blessed host-side path.  It resolves the running instance's mconsole
+  socket and sends ``snapshot_export <path>``; the kernel writes the ELF
+  through UML host-file helpers.
 
 * Direct debugfs write (for inside-the-guest scripts)::
 

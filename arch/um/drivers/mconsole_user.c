@@ -31,6 +31,7 @@ static struct mconsole_command commands[] = {
 	{ "log", mconsole_log, MCONSOLE_INTR },
 	{ "proc", mconsole_proc, MCONSOLE_PROC },
 	{ "stack", mconsole_stack, MCONSOLE_INTR },
+	{ "snapshot_export", mconsole_snapshot_export, MCONSOLE_PROC },
 };
 
 /* Initialized in mconsole_init, which is an initcall */

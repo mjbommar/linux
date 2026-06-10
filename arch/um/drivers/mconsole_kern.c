@@ -192,12 +192,20 @@ void mconsole_proc(struct mc_request *req)
     log <string> - make UML enter <string> into the kernel log\n\
     proc <file> - returns the contents of the UML's /proc/<file>\n\
     stack <pid> - returns the stack of the specified pid\n\
+\tsnapshot_export <path> - write a KVM v2 snapshot ELF core\n\
 "
 
 void mconsole_help(struct mc_request *req)
 {
 	mconsole_reply(req, UML_MCONSOLE_HELPTEXT, 0, 0);
 }
+
+#ifndef CONFIG_UM_BACKEND_KVM_V2
+void mconsole_snapshot_export(struct mc_request *req)
+{
+	mconsole_reply(req, "KVM v2 snapshot export is not available", 1, 0);
+}
+#endif
 
 void mconsole_halt(struct mc_request *req)
 {

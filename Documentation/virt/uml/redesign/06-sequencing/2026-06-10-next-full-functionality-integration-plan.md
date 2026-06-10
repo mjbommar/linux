@@ -12,8 +12,9 @@ and validation strong enough to declare the original plan complete.
 ## Executive Summary
 
 The current `next` branch is cleanly based on Linus' tree and contains the
-main KVM v2 core, vector2, launcher tooling, syzkaller shim, and a large
-selftest/documentation surface. It is not yet the complete UML v2 branch.
+main KVM v2 core, KVM v2 snapshot source, vector2, launcher tooling,
+syzkaller shim, and a large selftest/documentation surface. It is not yet the
+complete UML v2 branch.
 
 Several historical branches contain functionality that is either absent from
 `next`, only partially represented in `next`, or represented in `next` by
@@ -34,6 +35,38 @@ The integration strategy is:
    absent functionality.
 7. Finish with one full integration gate that proves build, tests, tools,
    networking, snapshot/fork/pool, and KVM v2 behavior together.
+
+## Source Material Reviewed
+
+This plan treats the following documents and branch families as source
+material, not as automatically-current truth:
+
+- `Documentation/virt/uml/redesign/00-vision.md`: original mission,
+  success criteria, profiles, record/replay, snapshot/forkserver, KVM backend,
+  instrumentation, and syzkaller goals.
+- `Documentation/virt/uml/redesign/02-workstreams/`: architectural and
+  workstream decomposition for backend abstraction, static keys, profiles,
+  KVM v2, instrumentation, and validation.
+- `Documentation/virt/uml/redesign/03-profiles/`: intended profile surface
+  for research, fuzz, fuzz-deep, prod-fast, prod-with-hooks, sandbox,
+  embedded, library, and time-travel builds.
+- `Documentation/virt/uml/redesign/05-validation/a-plus-quality-plan.md`:
+  quality bar for builds, static analysis, runtime validation, sanitizer
+  profiles, KUnit, selftests, and performance evidence.
+- `Documentation/virt/uml/redesign/report-presentation/PLAN.md`: reporting
+  rule that vision, landed status, and evidence must be normalized before
+  making completion claims.
+- `Documentation/virt/uml/redesign/STATUS.md`: current top-level readiness
+  view.
+- `Documentation/virt/uml/redesign/06-sequencing/2026-06-10-next-functionality-inventory.md`:
+  live feature-by-feature tracker for this plan.
+- Historical branches listed below: evidence and source material for missing
+  behavior, not merge bases.
+
+The rule for conflicting documents is simple: implementation and fresh
+validation on `next` override old reports, phase notes, presentations, and
+historical branch status. Old material remains useful only after it is either
+ported, retired with approval, or clearly marked historical.
 
 ## Definition Of Completion
 
@@ -66,9 +99,10 @@ Current branch status at review time:
 
 - Branch: `next`
 - Remote tracking: `origin/next`
-- Head: `51a058582ccd`
-- Relative to `torvalds/master`: `0` behind, `38` ahead
-- Worktree: clean
+- Baseline before this integration update: `58e50e5dedf7`
+- Relative to local `torvalds/master`: `0` behind, `41` ahead
+- Current update: mconsole-backed snapshot export integration, validation, and
+  documentation are being landed together.
 
 Approximate changed review surface relative to Linus:
 
@@ -89,7 +123,9 @@ integration with explicit acceptance gates.
 Current role:
 
 - Authoritative integration branch.
-- Contains cleaned KVM v2 core without snapshot/record/replay source.
+- Contains cleaned KVM v2 core and the reimported snapshot
+  capture/restore/export source.
+- Does not yet contain record/replay or private state trace source.
 - Contains vector2 implementation.
 - Contains launcher, pool, exec, port-forward, deploy, gates, and examples.
 - Contains syzkaller UML shim.
@@ -117,8 +153,10 @@ Problems:
 - Source comments include internal issue numbers, memo references, phase logs,
   branch-specific commit IDs, and investigation narrative.
 - Some functionality is prototype-quality or phase-scoped.
-- Snapshot/record functionality is absent from current `next`, while some
-  docs/tools on `next` still refer to it.
+- Snapshot capture, snapshot restore, and snapshot ELF export started as
+  historical-only functionality and have now been reimported into `next` with
+  KUnit coverage. Runtime restore smoke and SMP semantics still need closure.
+- Record/replay and private state trace functionality remain historical-only.
 
 Disposition:
 
@@ -265,33 +303,41 @@ Acceptance:
 - No `(void)os_ioctl_generic()` remains for required architectural restore
   state.
 
-### `umlctl snapshot export` targets absent kernel surface
+### `umlctl snapshot export` needed a real kernel control surface
 
 Files:
 
 - `tools/uml/uml-launcher/src/bin/umlctl/snapshot.rs`
 - `Documentation/virt/uml/snapshot-elf-format.rst`
 - `tools/uml/uml-gdb/uml-snapshot.py`
+- `arch/um/backend/kvm-v2/snapshot_elf.c`
+- `arch/um/drivers/mconsole_user.c`
+- `arch/um/drivers/mconsole_kern.c`
 - `arch/um/backend/kvm-v2/Makefile`
 
 Problem:
 
-- `umlctl snapshot export` expects
-  `/sys/kernel/debug/um/kvm_v2_snapshot_elf_export_path`.
-- Documentation describes `kvm_v2_snapshot_elf_export_to_file()` and
-  `kvm_v2_snapshot_elf_export_to_fd()`.
-- Current `next` does not build `snapshot.o` or `snapshot_elf.o`.
+- Earlier `umlctl snapshot export` logic assumed the host could drive the
+  guest debugfs trigger through `/proc/<pid>/root/...`.
+- For UML, `/proc/<pid>/root` is the host process root, not the guest VFS.
+- The kernel needed a host-side control path that does not depend on entering
+  the guest filesystem namespace.
 
 Required fix:
 
-- Preferred: port clean snapshot ELF export into `next`.
-- Temporary alternative: hide or mark `umlctl snapshot export` unavailable
-  until the kernel surface lands.
+- Keep direct debugfs export for inside-guest scripts.
+- Add an mconsole command that accepts `snapshot_export <host-path>`.
+- Make `umlctl snapshot export` resolve the running instance's mconsole
+  socket and request the export through that control channel.
+- Write the resulting ELF through UML host-file helpers from mconsole context.
 
 Acceptance:
 
 - No CLI command advertises functionality that cannot exist on `next`.
-- Snapshot export smoke passes once the kernel side lands.
+- Live `umlctl snapshot export` produces a non-empty ELF file.
+- `readelf -h`, `readelf -l`, `readelf -n`, `gdb -c`, and the UML gdb helper
+  parse the exported file.
+- Current status: PASS on 2026-06-10 in the mconsole-backed export update.
 
 ### KVM v2 gadget validation/defaults need final decision
 
@@ -362,10 +408,13 @@ Likely source files to port:
 - `arch/um/backend/kvm-v2/snapshot.c`
 - `arch/um/backend/kvm-v2/snapshot_elf.c`
 - `arch/um/backend/kvm-v2/test_snapshot.c`
+- `arch/um/drivers/mconsole_user.c`
+- `arch/um/drivers/mconsole_kern.c`
 - relevant declarations in `arch/um/backend/kvm-v2/kvm_v2_backend.h`
 - relevant Makefile and Kconfig entries
 - snapshot selftests
 - `tools/uml/uml-gdb/uml-snapshot.py` updates if needed
+- `tools/uml/uml-launcher/src/bin/umlctl/snapshot.rs` updates if needed
 
 Clean rewrite requirements:
 
@@ -382,7 +431,8 @@ Functional requirements:
 - Capture SREGS, GPRS, XCRS, VCPU events, and required MSRs.
 - Capture memslot contents safely under the right locking discipline.
 - Restore memslots and vCPU state in a deterministic order.
-- Provide debugfs trigger for ELF export if `umlctl snapshot export` remains.
+- Provide a host-side `umlctl snapshot export` path through mconsole.
+- Preserve the debugfs trigger for inside-guest scripts.
 - Keep snapshot code safe when KVM v2 is compiled but not selected at runtime.
 - Clearly define SMP constraints. If all-vCPU quiescence is not complete, the
   feature must be gated or documented as single-vCPU only.
@@ -392,11 +442,16 @@ Acceptance gates:
 - KVM v2 snapshot KUnit tests pass. Current status: PASS 4/4 on 2026-06-10
   with `backend=force=kvm-v2`,
   `kunit.filter_glob=um_kvm_v2_snapshot`, and `kunit_shutdown=halt`.
-- Snapshot smoke test passes.
-- `umlctl snapshot export <instance> --output dump.elf` works.
-- `readelf -h`, `readelf -l`, and `readelf -n` parse the file.
-- `gdb -c dump.elf` opens the file.
-- `tools/uml/uml-gdb/uml-snapshot.py` helper loads and reports state.
+- Live snapshot ELF export smoke passes. Current status: PASS on 2026-06-10
+  against a disposable KVM v2 hostfs guest.
+- `umlctl snapshot export <instance> --output dump.elf` works. Current
+  status: PASS through mconsole `snapshot_export <path>`.
+- `readelf -h`, `readelf -l`, and `readelf -n` parse the file. Current
+  status: PASS.
+- `gdb -c dump.elf` opens the file. Current status: PASS.
+- `tools/uml/uml-gdb/uml-snapshot.py` helper loads and reports state. Current
+  status: PASS.
+- Snapshot restore runtime smoke passes. Current status: open.
 - SMP behavior is either passing or explicitly gated.
 
 ## Workstream C: KVM Record/Replay
@@ -641,7 +696,8 @@ Acceptance gates:
 - gate dry run
 - `umlbuild` MVP smoke
 - pool/exec/port-forward smoke
-- snapshot export smoke after Workstream B
+- snapshot export smoke after Workstream B. Current status: live export PASS
+  in the mconsole-backed export update on 2026-06-10.
 
 ## Workstream H: Syzkaller UML VM Shim
 
@@ -842,8 +898,11 @@ Exit criteria:
 
 - `umlctl snapshot export` works on `next`.
 - Snapshot docs are true.
-- Snapshot KUnit and smoke pass. Current status: KUnit passes; smoke remains
-  open.
+- Snapshot KUnit and live ELF export smoke pass. Current status: KUnit PASS
+  4/4 and live `umlctl snapshot export` PASS on 2026-06-10.
+- Snapshot restore runtime smoke passes or the unsupported state is explicitly
+  gated.
+- SMP snapshot semantics are validated or explicitly gated.
 
 ### Phase 3: Fork Server And Pool Completion
 
@@ -988,8 +1047,9 @@ Runtime smoke:
 - CPython tier0.
 - CPython parity.
 - CPython full where practical.
-- Snapshot smoke.
-- Snapshot ELF export roundtrip.
+- Snapshot restore smoke. Current status: open.
+- Snapshot ELF export roundtrip. Current status: live `umlctl snapshot export`
+  plus `readelf`, `gdb`, and helper parse PASS on 2026-06-10.
 - Template-pause fork smoke.
 - Template-pause fork stress.
 - Pool spawn smoke.
@@ -1017,10 +1077,10 @@ branch lands.
 
 | Area | Current state | Required final state | Status |
 | ---- | ------------- | -------------------- | ------ |
-| KVM v2 core | Present on `next` | Hardened, validated | Open |
-| KVM v2 restore error handling | Known issue | Checked/fatal policy | Open |
-| KVM snapshot | Historical branch only | Present on `next` | Open |
-| Snapshot ELF export | Docs/tools on `next`, code absent | Working on `next` | Open |
+| KVM v2 core | Present on `next` | Hardened, validated | In progress |
+| KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
+| KVM snapshot | Present with KUnit pass | Present, validated, SMP policy defined | In progress |
+| Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
 | Record/replay | Historical/prototype | Complete or experimental | Open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Present | Validated and documented | Open |
@@ -1036,18 +1096,25 @@ branch lands.
 
 ## Immediate Next Actions
 
-1. Create the feature inventory tracking document.
-2. Fix KVM v2 restore ioctl error handling.
-3. Decide whether snapshot import is next or whether `umlctl snapshot export`
-   should be temporarily hidden.
-4. Start `integrate/kvm-snapshot` from `next`.
-5. Port `snapshot.c`, `snapshot_elf.c`, declarations, Kconfig, Makefile, and
-   tests cleanly. Current status: snapshot source and KUnit are present on
-   `next`.
-6. Run build, KUnit, snapshot smoke, and `umlctl snapshot export`. Current
-   status: build and KUnit pass; snapshot smoke and `umlctl snapshot export`
-   remain open.
-7. Land into `next`, update status docs, and push.
+1. Add or run a snapshot restore runtime smoke test.
+2. Define the SMP snapshot policy: validate all-vCPU quiescence, gate the
+   feature to UP/single-vCPU, or mark SMP snapshot unsupported with explicit
+   checks.
+3. Compare pool/fork-server behavior against `fork-server-phase1c`,
+   `memo09-phase2`, `memo09-phase3-pool-bench`, and `memo09-phase4`.
+4. Import or complete record/replay, or land it behind an explicit
+   experimental Kconfig with docs that do not count it as mission-complete.
+5. Decide whether private state trace is worth importing as clean optional
+   diagnostics.
+6. Re-audit vector2 transport claims, Kconfig wording, and replacement
+   readiness against actual validation.
+7. Curate selftests and source comments for upstream style: no internal issue
+   numbers, diary prose, branch-specific commit IDs, or stale phase notes on
+   upstream-facing paths.
+8. Refresh reports/presentations from normalized status and evidence tables
+   once functionality and validation are final.
+9. Run the final validation matrix, update `STATUS.md` and the inventory,
+   commit, and push `next`.
 
 ## Policy For Retiring Functionality
 
