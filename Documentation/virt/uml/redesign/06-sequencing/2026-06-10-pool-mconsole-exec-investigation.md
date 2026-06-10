@@ -160,17 +160,18 @@ repair and control-socket ownership model is better understood.
 ## Implementation Implications
 
 Successful daemon-routed guest exec still needs an actual guest command
-primitive. Either add a kernel mconsole `exec` command with a bounded ABI,
-or replace the daemon's current `uml_mconsole exec` assumption with another
+primitive. The daemon now uses a native mconsole client and waits for the
+member socket to answer `version` before issuing `exec`, so the remaining work
+is either a kernel mconsole `exec` command with a bounded ABI or another
 transport that can return stdout, stderr, exit status, signal, and timeout
 state.
 
 Until that is done, `pool-exec-smoke` should continue to be treated as an
-error-envelope test, not proof of successful guest exec. On the current host,
-the daemon now reaches the later failure mode:
+error-envelope test, not proof of successful guest exec. The daemon now reaches
+the later kernel-command failure mode:
 
 ```text
-uml_mconsole(1) not found in PATH
+mconsole command failed: Unknown command
 ```
 
 ## Next Work

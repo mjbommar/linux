@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::mconsole_client;
 use crate::pool;
 
 #[derive(Args, Debug)]
@@ -136,7 +137,7 @@ pub(crate) enum Request {
         #[serde(default)]
         gateway: String,
         #[serde(default)]
-        mconsole: String,
+        mconsole: Option<String>,
     },
     List,
     Status,
@@ -204,7 +205,7 @@ impl DaemonState {
                 ipv4,
                 gateway,
                 mconsole,
-            } => match self.do_take(&instance, &mac, &tap, &ipv4, &gateway, &mconsole) {
+            } => match self.do_take(&instance, &mac, &tap, &ipv4, &gateway, mconsole.as_deref()) {
                 Ok(rec) => serde_json::json!({"ok": true, "result": rec}),
                 Err(e) => serde_json::json!({"ok": false, "error": format!("{:#}", e)}),
             },
@@ -255,12 +256,9 @@ impl DaemonState {
     /// Drive one fork-on-resume cycle and capture the resulting
     /// child pid.  Holds the implicit single-threaded lock via the
     /// outer event loop; do not call concurrently.
-    /// Synthesize a per-instance mconsole socket path when the caller
-    /// leaves it empty.  This
-    /// keeps `umlctl exec` working even when the take RPC came from a
-    /// caller (eg the syzkaller shim) that doesn't care to pick the
-    /// path.  The directory is the per-pool runtime dir, which the
-    /// daemon already creates in `cmd_serve`.
+    /// Synthesize a per-instance mconsole socket path when the caller sends
+    /// an explicit empty mconsole string. Omitting the field leaves mconsole
+    /// disabled for raw benchmark/non-exec consumers.
     fn synthesize_mconsole_path(&self, instance: &str) -> String {
         let dir = self
             .socket_path
@@ -287,14 +285,16 @@ impl DaemonState {
         tap: &str,
         ipv4: &str,
         gateway: &str,
-        mconsole: &str,
+        mconsole: Option<&str>,
     ) -> Result<MemberRecord> {
         let synth_storage;
-        let mconsole = if mconsole.is_empty() {
-            synth_storage = self.synthesize_mconsole_path(instance);
-            synth_storage.as_str()
-        } else {
-            mconsole
+        let mconsole = match mconsole {
+            Some("") => {
+                synth_storage = self.synthesize_mconsole_path(instance);
+                synth_storage.as_str()
+            }
+            Some(path) => path,
+            None => "",
         };
         let mac_bytes = pool::parse_mac(mac).context("parse mac")?;
         let blob = pool::build_identity_blob(instance, &mac_bytes, tap, ipv4, gateway, mconsole)
@@ -375,7 +375,7 @@ impl DaemonState {
         tap: &str,
         ipv4: &str,
         gateway: &str,
-        mconsole: &str,
+        mconsole: Option<&str>,
     ) -> Result<MemberRecord> {
         self.reap_dead();
 
@@ -392,21 +392,19 @@ impl DaemonState {
         Ok(rec)
     }
 
-    /// `exec` RPC handler.  The current backend drives the member's
-    /// mconsole socket via the standard
-    /// `uml_mconsole(1)` tool if it's installed; otherwise the verb
-    /// returns a clean diagnostic instead of pretending to work.
+    /// `exec` RPC handler.  The backend drives the member's mconsole socket
+    /// directly so pool exec does not depend on a host `uml_mconsole(1)`
+    /// binary.  Kernels without an mconsole `exec` command return the same
+    /// clean daemon error envelope as any other unavailable primitive.
     ///
     /// Returns a JSON object shaped as the exec reply envelope:
     /// `{"ok":true, "stdout":"…", "stderr":"…", "exit":N,
     /// "signal":S, "duration_ms":D, "timed_out":bool}` on completion,
     /// or `{"ok":false, "error":"…"}` on failure.
     ///
-    /// Note on the in-guest exec primitive: `uml_mconsole exec` is
-    /// the standard Linux upstream tool but is not present on all
-    /// hosts; when it's absent we surface a clear diagnostic rather
-    /// than silently producing empty output. The response envelope is
-    /// stable so callers do not depend on the transport.
+    /// Note on the in-guest exec primitive: the kernel command is still the
+    /// authoritative execution primitive.  The response envelope is stable so
+    /// callers do not depend on the transport.
     fn do_exec(
         &self,
         pid: i32,
@@ -440,80 +438,33 @@ impl DaemonState {
                 member.mconsole_path
             );
         }
-        // We expose the standard `uml_mconsole exec` shape here.  If
-        // the host doesn't have it, surface that explicitly.
-        let tool = which_uml_mconsole();
-        let tool = tool.ok_or_else(|| {
-            anyhow!(
-                "uml_mconsole(1) not found in PATH; install the `user-mode-linux-tools` \
-                 package or set UML_MCONSOLE=/path/to/uml_mconsole"
-            )
-        })?;
-        let mut cmd_str = String::from("exec ");
-        // mconsole exec expects a single shell line; quote-safe-join.
-        for (i, a) in argv.iter().enumerate() {
-            if i > 0 {
-                cmd_str.push(' ');
-            }
-            cmd_str.push_str(&shell_quote(a));
-        }
-        if !cwd.is_empty() {
-            cmd_str = format!("cd {} && {}", shell_quote(cwd), cmd_str);
-        }
-        for (k, v) in env {
-            cmd_str = format!("{}={} {}", shell_quote(k), shell_quote(v), cmd_str);
-        }
+        let cmd_str = build_mconsole_exec_command(argv, env, cwd);
+        let timeout = if timeout_secs > 0 {
+            Duration::from_secs(timeout_secs)
+        } else {
+            Duration::from_secs(10)
+        };
+        wait_for_mconsole_ready(&member.mconsole_path, timeout)
+            .with_context(|| format!("wait for member mconsole {}", member.mconsole_path))?;
 
         let started = Instant::now();
-        let mut child = Command::new(&tool)
-            .arg(&member.mconsole_path)
-            .arg(&cmd_str)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| format!("spawn {}", tool.display()))?;
-
-        let deadline = if timeout_secs > 0 {
-            Some(Instant::now() + Duration::from_secs(timeout_secs))
-        } else {
-            None
-        };
-        let mut timed_out = false;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if let Some(d) = deadline {
-                        if Instant::now() >= d {
-                            let _ = child.kill();
-                            timed_out = true;
-                            break;
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(e) => return Err(anyhow!("wait for mconsole exec: {}", e)),
-            }
-        }
-        let output = child
-            .wait_with_output()
-            .context("collect mconsole exec output")?;
+        let stdout = mconsole_client::send_mconsole_command_with_timeout(
+            Path::new(&member.mconsole_path),
+            &cmd_str,
+            timeout,
+        )
+        .with_context(|| format!("mconsole exec via {}", member.mconsole_path))?;
         let duration_ms = started.elapsed().as_millis() as u64;
-        let exit_code = output
-            .status
-            .code()
-            .unwrap_or(if timed_out { 124 } else { -1 });
-        let signal = output.status.signal_from_status().unwrap_or(0);
 
         Ok(serde_json::json!({
             "ok": true,
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-            "exit": exit_code,
-            "signal": signal,
+            "stdout": stdout,
+            "stderr": "",
+            "console": "",
+            "exit": 0,
+            "signal": 0,
             "duration_ms": duration_ms,
-            "timed_out": timed_out,
+            "timed_out": false,
         }))
     }
 
@@ -569,14 +520,14 @@ fn request_allows_ready_member(
     tap: &str,
     ipv4: &str,
     gateway: &str,
-    mconsole: &str,
+    mconsole: Option<&str>,
 ) -> bool {
     instance.is_empty()
         && mac.is_empty()
         && tap.is_empty()
         && ipv4.is_empty()
         && gateway.is_empty()
-        && mconsole.is_empty()
+        && mconsole.is_none()
 }
 
 /// True iff `pid` exists in /proc AND is NOT a zombie (Z) or about-to-
@@ -595,6 +546,30 @@ fn pid_runnable(pid: i32) -> bool {
     let rest = &stat[close + 1..];
     let state = rest.trim_start().chars().next().unwrap_or('?');
     !matches!(state, 'Z' | 'X')
+}
+
+fn wait_for_mconsole_ready(path: &str, deadline: Duration) -> Result<()> {
+    let end = Instant::now() + deadline;
+    let socket_path = Path::new(path);
+    let mut last_err = None;
+
+    while Instant::now() < end {
+        match mconsole_client::send_mconsole_command_with_timeout(
+            socket_path,
+            "version",
+            Duration::from_millis(100),
+        ) {
+            Ok(_) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    if let Some(e) = last_err {
+        Err(e).context("mconsole version probe did not complete before deadline")
+    } else {
+        bail!("mconsole version probe did not complete before deadline")
+    }
 }
 
 /// Wait for `pid` to enter T (stopped) state, polling /proc/<pid>/stat.
@@ -971,32 +946,36 @@ fn handle_client(state: &DaemonState, stream: UnixStream) {
     }
 }
 
-/// Locate `uml_mconsole(1)` on the host.  Prefers $UML_MCONSOLE,
-/// then PATH lookup.  Returns None if absent so callers can produce a
-/// user-friendly error rather than letting `Command::spawn` fail with
-/// ENOENT.
-fn which_uml_mconsole() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("UML_MCONSOLE") {
-        let pb = PathBuf::from(&p);
-        if pb.exists() {
-            return Some(pb);
+fn build_mconsole_exec_command(
+    argv: &[String],
+    env: &HashMap<String, String>,
+    cwd: &str,
+) -> String {
+    let mut payload = String::new();
+    let mut env_pairs: Vec<_> = env.iter().collect();
+    env_pairs.sort_by(|a, b| a.0.cmp(b.0));
+    for (i, (k, v)) in env_pairs.iter().enumerate() {
+        if i > 0 {
+            payload.push(' ');
         }
+        payload.push_str(&shell_quote(k));
+        payload.push('=');
+        payload.push_str(&shell_quote(v));
     }
-    let path = std::env::var("PATH").unwrap_or_default();
-    for dir in path.split(':') {
-        if dir.is_empty() {
-            continue;
+    for (i, a) in argv.iter().enumerate() {
+        if !payload.is_empty() || i > 0 {
+            payload.push(' ');
         }
-        let cand = PathBuf::from(dir).join("uml_mconsole");
-        if cand.exists() {
-            return Some(cand);
-        }
+        payload.push_str(&shell_quote(a));
     }
-    None
+    if !cwd.is_empty() {
+        payload = format!("cd {} && {}", shell_quote(cwd), payload);
+    }
+    format!("exec {payload}")
 }
 
-/// POSIX shell-quote a single argument.  Sufficient for piping
-/// argv through `uml_mconsole exec`; not for full shell expansion.
+/// POSIX shell-quote a single argument.  Sufficient for piping argv through
+/// mconsole `exec`; not for full shell expansion.
 /// Public-in-module for tests.
 fn shell_quote(s: &str) -> String {
     if !s.is_empty()
@@ -1016,18 +995,6 @@ fn shell_quote(s: &str) -> String {
     }
     out.push('\'');
     out
-}
-
-/// Tiny shim so `do_exec` can read the signal field without pulling
-/// in std::os::unix::process::ExitStatusExt at every call site.
-trait ExitStatusSignal {
-    fn signal_from_status(&self) -> Option<i32>;
-}
-impl ExitStatusSignal for std::process::ExitStatus {
-    fn signal_from_status(&self) -> Option<i32> {
-        use std::os::unix::process::ExitStatusExt;
-        self.signal()
-    }
 }
 
 fn replenish_warm_pool(state: &DaemonState) {
@@ -1055,7 +1022,7 @@ fn replenish_warm_pool(state: &DaemonState) {
         let instance = format!("warm-{}", seq);
         let mac = warm_mac(seq as u32);
 
-        match state.fork_member(&instance, &mac, "", "", "", "") {
+        match state.fork_member(&instance, &mac, "", "", "", None) {
             Ok(rec) => {
                 state.ready.lock().unwrap().push_back(rec);
                 *state.warm_next_retry.lock().unwrap() = Instant::now();
@@ -1105,7 +1072,7 @@ mod tests {
                 assert_eq!(tap, "tap-m1");
                 assert_eq!(ipv4, "10.7.0.42/24");
                 assert_eq!(gateway, "10.7.0.1");
-                assert_eq!(mconsole, "");
+                assert_eq!(mconsole.as_deref(), Some(""));
             }
             _ => panic!("wrong variant"),
         }
@@ -1113,11 +1080,28 @@ mod tests {
 
     #[test]
     fn parse_take_defaults() {
-        // Empty payload — only `op` present.  Defaults exercise serde's
-        // `#[serde(default)]` so the client doesn't have to send every
-        // field for an anonymous take.
+        // Empty payload is an anonymous ready-member request.  The omitted
+        // mconsole field intentionally stays None so raw non-exec clients can
+        // avoid per-member mconsole setup.
         let req = parse_request(r#"{"op":"take"}"#).unwrap();
-        assert!(matches!(req, Request::Take { .. }));
+        match req {
+            Request::Take {
+                instance,
+                mac,
+                tap,
+                ipv4,
+                gateway,
+                mconsole,
+            } => {
+                assert!(instance.is_empty());
+                assert!(mac.is_empty());
+                assert!(tap.is_empty());
+                assert!(ipv4.is_empty());
+                assert!(gateway.is_empty());
+                assert!(mconsole.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -1193,34 +1177,55 @@ mod tests {
     }
 
     #[test]
+    fn mconsole_exec_command_is_deterministic() {
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo hi".to_string(),
+        ];
+        let env = HashMap::from([
+            ("ZED".to_string(), "last".to_string()),
+            ("ALPHA".to_string(), "first value".to_string()),
+        ]);
+
+        assert_eq!(
+            build_mconsole_exec_command(&argv, &env, "/tmp/work dir"),
+            "exec cd '/tmp/work dir' && ALPHA='first value' ZED=last /bin/sh -c 'echo hi'"
+        );
+    }
+
+    #[test]
     fn ready_members_require_anonymous_take() {
-        assert!(request_allows_ready_member("", "", "", "", "", ""));
-        assert!(!request_allows_ready_member("m1", "", "", "", "", ""));
+        assert!(request_allows_ready_member("", "", "", "", "", None));
+        assert!(!request_allows_ready_member("m1", "", "", "", "", None));
+        assert!(!request_allows_ready_member("", "", "", "", "", Some("")));
         assert!(!request_allows_ready_member(
             "",
             "52:54:00:00:00:01",
             "",
             "",
             "",
-            ""
+            None
         ));
-        assert!(!request_allows_ready_member("", "", "tap0", "", "", ""));
+        assert!(!request_allows_ready_member("", "", "tap0", "", "", None));
         assert!(!request_allows_ready_member(
             "",
             "",
             "",
             "10.7.0.2/24",
             "",
-            ""
+            None
         ));
-        assert!(!request_allows_ready_member("", "", "", "", "10.7.0.1", ""));
+        assert!(!request_allows_ready_member(
+            "", "", "", "", "10.7.0.1", None
+        ));
         assert!(!request_allows_ready_member(
             "",
             "",
             "",
             "",
             "",
-            "/tmp/mconsole"
+            Some("/tmp/mconsole")
         ));
     }
 

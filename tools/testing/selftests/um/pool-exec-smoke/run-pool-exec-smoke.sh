@@ -11,12 +11,11 @@
 #      pid.
 #   3. The `exit` frame is the last frame and includes `code` /
 #      `timed_out` fields.
-#   4. When the in-guest exec primitive is unavailable (no
-#      uml_mconsole or no mconsole socket), the daemon returns
-#      ok=false with a diagnostic - and the exec verb surfaces it as a
-#      non-zero exit + a stderr NDJSON frame.  This is the contract
-#      the syzkaller shim relies on: a clean failure envelope, never a
-#      hang.
+#   4. When the in-guest exec primitive is unavailable (for example, no
+#      kernel mconsole exec command), the daemon returns ok=false with a
+#      diagnostic - and the exec verb surfaces it as a non-zero exit +
+#      a stderr NDJSON frame.  This is the contract the syzkaller shim
+#      relies on: a clean failure envelope, never a hang.
 #
 # Exit codes: 0 PASS, 4 SKIP, 1 FAIL.
 #
@@ -129,9 +128,9 @@ TAKEN_PID=$(echo "$TAKE_JSON" | python3 -c \
 echo "took member pid=$TAKEN_PID: PASS"
 
 # Run umlctl exec --json.  Two cases:
-# (A) uml_mconsole present + member's mconsole socket present ->
-#     expect ok exit, "exit" frame with code 0 (assuming /bin/true
-#     succeeded inside the guest).
+# (A) member's mconsole socket present + kernel exec primitive available ->
+#     expect ok exit, "exit" frame with code 0 (assuming /bin/true succeeded
+#     inside the guest).
 # (B) Otherwise -> expect non-zero exit, and a `stderr` frame in the
 #     NDJSON stream containing "daemon error".  THIS is the
 #     dispositive failure-mode test for the syzkaller shim contract.
@@ -191,6 +190,18 @@ saw_error = any(
     f.get("type") == "stderr" and "daemon error" in f.get("data", "")
     for f in frames
 )
+stderr_text = "".join(
+    f.get("data", "") for f in frames if f.get("type") == "stderr"
+)
+stale_boundaries = [
+    "uml_mconsole(1) not found",
+    "Resource temporarily unavailable",
+    "mconsole socket",
+    "not present yet",
+]
+if saw_error and any(s in stderr_text for s in stale_boundaries):
+    print("STALE_DAEMON_EXEC_BOUNDARY", stderr_text)
+    sys.exit(1)
 print("FRAMES_OK", "case=B" if saw_error else "case=A", len(frames))
 PYEOF
 PARSE_RC=$?
@@ -202,9 +213,9 @@ if [ $PARSE_RC -ne 0 ]; then
 fi
 echo "NDJSON frames valid: PASS ($(cat "$OUT/parse.out"))"
 
-# When case B (the typical state in this tree because the daemon does
-# not yet wire mconsole exec end-to-end), the in-guest stdout should
-# be empty.  When case A, stdout from `/bin/true` is empty too - so
+# When case B (the typical state in this tree because the kernel has no
+# mconsole exec primitive), the in-guest stdout should be empty.  When case A,
+# stdout from `/bin/true` is empty too - so
 # either way we don't assert stdout content beyond the frame stream.
 
 # Destroy + shutdown via the daemon path.

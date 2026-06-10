@@ -256,7 +256,8 @@ def take_payload(instance, mac_suffix):
 
     The kernel validates the identity blob's magic + version, so we
     have to round-trip a structurally valid blob even though the M-fork
-    child does not actually plumb identity.
+    child does not actually plumb identity. Omit mconsole so this harness
+    measures raw take latency; pool-exec-smoke covers mconsole-enabled takes.
     """
     a = (mac_suffix >> 16) & 0xff
     b = (mac_suffix >> 8) & 0xff
@@ -268,7 +269,6 @@ def take_payload(instance, mac_suffix):
         "tap": "tap-bench",
         "ipv4": "10.7.0.42/24",
         "gateway": "10.7.0.1",
-        "mconsole": "",
     }
 
 

@@ -174,9 +174,10 @@ Current boundary:
   still returns a live runnable member, destroy makes members non-runnable,
   and shutdown kills the master cleanly;
 - reduced `pool-bench` now passes all five gates with sparse-copied live
-  replicated children: 5/5 latency takes, 3/3 live RSS children at 146.0 MiB,
+  replicated children: 5/5 latency takes, 3/3 live RSS children at 145.8 MiB,
   0.00% lifecycle RSS drift across 5 take/destroy cycles, and 4/4 throughput
-  takes in a 2-second reduced gate;
+  takes in a 2-second reduced gate; raw benchmark take RPCs omit `mconsole`,
+  while exec-capable takes request the daemon-synthesized path explicitly;
 - the full default-scale `pool-bench` now runs to completion and passes 3/5
   gates: p50 1.3 ms, p99 1.6 ms, and 0.09% lifecycle drift across 10,000
   cycles pass; sparse physmem copying improves RSS from 17,262.7 MiB to
@@ -189,8 +190,9 @@ Current boundary:
   in-guest exec support; successful daemon-routed guest exec remains pending,
   and the current blocker is now characterized in
   `06-sequencing/2026-06-10-pool-mconsole-exec-investigation.md`: the
-  per-member mconsole socket is addressable, but the active mconsole command
-  table has no `exec` verb and this host lacks `uml_mconsole(1)` in `PATH`;
+  daemon now waits for the per-member mconsole socket to answer `version`
+  before issuing exec and drives it with a native mconsole client, but the
+  active mconsole command table has no `exec` verb;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller

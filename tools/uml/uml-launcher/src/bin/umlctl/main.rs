@@ -92,6 +92,7 @@ mod gate;
 mod gate_loop;
 mod history;
 mod manifest;
+mod mconsole_client;
 mod metrics;
 mod mission;
 mod paths;
