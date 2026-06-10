@@ -5,18 +5,15 @@
 # pool dispatch.
 #
 # Currently EXPECTED TO FAIL after iter 1. The test records the known
-# MAP_SHARED physmem limitation while still catching regressions in the
-# first pool-member handoff.
+# MAP_SHARED physmem/member ownership limitation while still catching
+# regressions in the first pool-member handoff.
 #
 # Exit codes:
 #   0   PASS - N members all reached MEMBER_DONE (NOT YET ACHIEVABLE)
-#   4   SKIP - kernel binary missing, OR iter 1 PASS + iter 2+
-#              hits the architectural limit: UML's physmem_fd is
-#              MAP_SHARED across forked UML kernels; iter 1's
-#              userspace writes to bash's heap propagate to
-#              iter 2 via shared backing, causing bash mis-replay.
-#              Fix requires per-pool-member physmem_fd isolation or
-#              userspace page snapshot/restore.
+#   4   SKIP/XFAIL - kernel binary missing, OR iter 1 PASS + iter 2+
+#              hits the architectural limit: repeated live members need
+#              independent physmem ownership instead of the current
+#              shared backing model.
 #   1   FAIL - iter 1 itself broke (regression in pool-member entry).
 
 set -u
@@ -43,7 +40,7 @@ echo SUSTAINED_PRE_PAUSE pid=$$
 echo fork-smoke > /proc/um/template_pause
 echo SUSTAINED_POST_PAUSE pid=$$ rc=$?
 echo SUSTAINED_MEMBER_DONE pid=$$
-exit 0
+sleep 9999
 IEOF
 chmod +x "$OUT/init.sh"
 
@@ -81,6 +78,7 @@ env = dict(os.environ, UM_TEMPLATE_IDENTITY_FD=str(fd))
 log = open(log_path, "wb")
 pid = os.fork()
 if pid == 0:
+    os.setsid()
     os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
     os.execve(kernel, ["linux", "mem=128M", "rootfstype=hostfs",
                        "rootflags=/", "root=/dev/root", "rw", "ncpus=1",
@@ -119,6 +117,14 @@ def read_log():
     except FileNotFoundError:
         return ""
 
+def kill_uml_tree(p):
+    try:
+        os.killpg(p, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        os.kill(p, signal.SIGKILL)
+
 prev = 0
 for i in range(1, N+1):
     s = wait_state(pid, "T", 15)
@@ -147,7 +153,7 @@ for i in range(1, N+1):
         content = read_log()
         if i > 1 and (content.count("Kernel panic") > panic_base or
                       content.count("segfault at") > segv_base):
-            print(f"iter {i}: observed post-first-member panic/segfault")
+            print(f"iter {i}: observed panic/segfault while awaiting member")
             fatal_seen = True
             break
         time.sleep(0.2)
@@ -159,9 +165,11 @@ for i in range(1, N+1):
     time.sleep(0.5)
 
 if state(pid) not in ("X", "?"):
-    os.kill(pid, signal.SIGKILL)
-    try: os.waitpid(pid, 0)
-    except ChildProcessError: pass
+    kill_uml_tree(pid)
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
 
 with open(log_path, errors="replace") as fh:
     content = fh.read()
@@ -184,10 +192,9 @@ if done < 1:
 if done >= N and not panic:
     print(f"PASS: {done}/{N} pool members reached MEMBER_DONE")
     sys.exit(0)
-# Iter 1 worked but subsequent iters crashed - expected today.
-print(f"XFAIL: iter 1 PASS, iter 2+ hits MAP_SHARED physmem limit")
-print("       - bash userspace pages shared across forked UML")
-print("       kernels.  Needs per-member physmem_fd refactor.")
+# Iter 1 worked but subsequent iterations did not complete - expected today.
+print(f"XFAIL: iter 1 PASS, iter 2+ hits MAP_SHARED physmem/member limit")
+print("       - repeated live members need independent physmem ownership.")
 sys.exit(4)
 PYEOF
 

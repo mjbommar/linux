@@ -137,9 +137,11 @@ Current validation result:
   iterations, median 18.2 ms iteration time, 548/548 clean identity
   round-trips, no kernel panics, and no live orphans.
 - `template-pause-pool-sustained-smoke` is still an expected failure after the
-  first member because repeated members hit the MAP_SHARED physmem limit.  The
-  harness now stops on the first post-member panic/segfault and records the
-  current member identity for each take.
+  first member because repeated members hit the MAP_SHARED physmem/member
+  ownership limit.  The harness now keeps the first accepted member alive,
+  records the current member identity for each take, and narrows the second
+  member failure to a timeout before the second `POOL_ENTER`, with no kernel
+  panic, v1 ceiling regression, or live UML process leak in the bounded run.
 
 Remaining work:
 

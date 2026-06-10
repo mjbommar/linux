@@ -1251,12 +1251,16 @@ timeout --kill-after=5 150 env UML_BINARY=$PWD/linux \
 Result:
 
 - XFAIL;
-- iteration 1 reached `MEMBER_DONE`;
-- iteration 2 observed the known post-first-member panic/segfault condition;
-- the harness now stamps the current member identity before each take and
-  stops at the first post-member panic/segfault instead of generating a long
-  panic log;
-- the run still hits the known MAP_SHARED physmem limit;
+- iteration 1 reached `MEMBER_DONE` and remains alive rather than exiting PID
+  1;
+- iteration 2 timed out before the second `POOL_ENTER`;
+- no kernel panic was observed;
+- no v1 ceiling regression was observed;
+- no live UML process remained after process-group teardown;
+- the harness now stamps the current member identity before each take and keeps
+  the accepted member alive so the test exercises sustained member ownership,
+  not the expected panic path from exiting PID 1;
+- the run still exposes the known MAP_SHARED physmem/member-ownership limit;
 - the fix is a real per-member physmem file-descriptor design, not a test-only
   workaround.
 
