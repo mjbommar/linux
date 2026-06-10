@@ -1108,10 +1108,10 @@ branch lands.
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
 | Record/replay | Historical/prototype | Complete or experimental | Open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
-| Template pause | Present and compared with memo09 branches | Validated and documented | Open |
-| Fork server | Present, compared, warm-pool partial | Complete pool workflow | Open |
-| Pool exec | Present | Validated with mconsole path | Open |
-| Pool port-forward | Present | Validated | Open |
+| Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
+| Fork server | Fork-on-resume master survives one iteration only | Complete multi-iteration fork workflow | Open, needs fix |
+| Pool exec | Daemon failure envelope validated | Successful mconsole exec path validated | Partially closed |
+| Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
 | Syzkaller shim | Present | End-to-end smoke | Open |
 | Profiles | Present | Build/test matrix | Open |
@@ -1119,24 +1119,175 @@ branch lands.
 | Docs/reports | Mixed current/stale | Truthful final status | Open |
 | Upstream queue | Drafted/stale | Refreshed from final `next` | Open |
 
+## Pool/Fork Execution Snapshot: 2026-06-10
+
+This snapshot records the first live pass over the current pool and
+template-pause surfaces after the historical branch comparison and snapshot
+selftest import. It is the current truth for the next engineering increment.
+
+Commands that pass:
+
+```sh
+bash -n tools/testing/selftests/um/template-pause-smoke/run-template-pause-smoke.sh
+```
+
+```sh
+UML_BINARY=$PWD/linux tools/testing/selftests/um/template-pause-smoke/run-template-pause-smoke.sh
+```
+
+Result:
+
+- case 1 PASS;
+- case 2 PASS;
+- case 3 PASS;
+- case 4 SKIP because `vec0` was not visible in the guest;
+- verdict: the template-pause primitive and identity-apply path work.
+
+```sh
+timeout --kill-after=5 90 env UML_BINARY=$PWD/linux \
+	tools/testing/selftests/um/template-pause-pivot-smoke/run-template-pause-pivot-smoke.sh
+```
+
+Result:
+
+- PASS with 20 `PIVOT_OK` observations;
+- no v1 ceiling panic;
+- 20 `SIGCONT` events sent.
+
+```sh
+timeout --kill-after=5 120 env UML_BINARY=$PWD/linux \
+	tools/testing/selftests/um/template-pause-pool-member-smoke/run-template-pause-pool-member-smoke.sh
+```
+
+Result:
+
+- PASS;
+- `POOL_ENTER`, `TPPM_POST_PAUSE`, `TPPM_MEMBER_ALIVE_1`, and
+  `TPPM_MEMBER_DONE` were observed;
+- identity fd and identity parsing were observed;
+- no kernel panic and no v1 ceiling IP.
+
+```sh
+timeout --kill-after=5 120 env UML_BINARY=$PWD/linux \
+	tools/testing/selftests/um/pool-spawn-smoke/run-pool-spawn-smoke.sh
+```
+
+Result:
+
+- PASS for spawn, list, and destroy lifecycle.
+
+```sh
+timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
+	tools/testing/selftests/um/pool-serve-smoke/run-pool-serve-smoke.sh
+```
+
+Result:
+
+- PASS for daemon socket readiness, status, valid take PID, destroy, clean
+  shutdown, and master cleanup.
+
+```sh
+timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
+	tools/testing/selftests/um/pool-exec-smoke/run-pool-exec-smoke.sh
+```
+
+Result:
+
+- PASS for typed NDJSON start, stderr, and exit frames;
+- the expected execution result is a clean error envelope because the tested
+  member did not expose the mconsole socket required by successful exec;
+- successful guest command execution still needs a final end-to-end gate after
+  the member mconsole path is fixed or proven.
+
+```sh
+timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
+	tools/testing/selftests/um/pool-port-forward-smoke/run-pool-port-forward-smoke.sh
+```
+
+Result:
+
+- PASS for typed JSON result shape;
+- split host/guest port handling works;
+- bogus PID fails cleanly;
+- missing `--host-port` exits through clap with status 2.
+
+Commands that still fail or remain expected failures:
+
+```sh
+timeout --kill-after=5 90 env UML_BINARY=$PWD/linux \
+	tools/testing/selftests/um/template-pause-fork-smoke/run-template-pause-fork-smoke.sh
+```
+
+Result:
+
+- FAIL;
+- identity blob parsing was observed;
+- pre-fork teardown and one master resume cycle were observed;
+- the master did not survive past one fork iteration and must reach at least
+  two iterations before this can count as complete.
+
+```sh
+timeout --kill-after=5 150 env UML_BINARY=$PWD/linux \
+	tools/testing/selftests/um/template-pause-pool-sustained-smoke/run-template-pause-pool-sustained-smoke.sh
+```
+
+Result:
+
+- XFAIL;
+- iteration 1 reached `MEMBER_DONE`;
+- iteration 2 timed out;
+- the run hit the known MAP_SHARED physmem limit;
+- the fix is a real per-member physmem file-descriptor design, not a test-only
+  workaround.
+
+```sh
+timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
+	POOL_BENCH_TAKES=10 POOL_BENCH_FORKS=5 \
+	POOL_BENCH_LIFECYCLE_N=10 POOL_BENCH_THROUGHPUT_S=3 \
+	POOL_BENCH_THROUGHPUT_R=2 \
+	tools/testing/selftests/um/pool-bench/run-pool-bench.sh
+```
+
+Result:
+
+- FAIL overall because the memory amplification gate cannot measure live
+  children;
+- take latency, lifecycle drift, and throughput gates pass;
+- the live-child count was `0/5`, so the RSS gate is not a valid completion
+  signal yet;
+- this aligns with the sustained pool-member and fork-on-resume lifetime
+  limitations.
+
+Immediate engineering conclusion:
+
+- current `next` already has the broad pool/fork command surface;
+- single template pause, identity apply, pivot, one-shot pool member, spawn,
+  serve, typed exec error handling, and port-forward result handling are real;
+- final completion requires fixing master fork survival, repeated pool-member
+  lifetime, real warm `min_warm`, vector2 TAP/fd pool networking, and the
+  syzkaller take/exec/destroy path.
+
 ## Immediate Next Actions
 
-1. Run the current pool/template-pause smokes and complete real warm-pool
-   `min_warm` behavior.
-2. Validate vector2 TAP/fd handoff through pool members and the syzkaller
+1. Fix template-pause fork-on-resume so the master survives repeated member
+   creation instead of stopping after one fork/resume cycle.
+2. Fix sustained pool-member lifetime with a real per-member physmem fd model
+   or equivalent production design.
+3. Complete real warm-pool `min_warm` behavior.
+4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
-3. Import or complete record/replay, or land it behind an explicit
+5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-4. Decide whether private state trace is worth importing as clean optional
+6. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-5. Re-audit vector2 transport claims, Kconfig wording, and replacement
+7. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-6. Curate selftests and source comments for upstream style: no internal issue
+8. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-7. Refresh reports/presentations from normalized status and evidence tables
+9. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-8. Run the final validation matrix, update `STATUS.md` and the inventory,
+10. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

@@ -124,15 +124,25 @@ Comparison result:
 - The current comments are substantially cleaner than `memo09-phase4`; the old
   branch's phase notes and diagnostic diary text should not be reimported.
 
+Current validation result:
+
+- `template-pause-smoke` passes cases 1-3 and skips the vector2 case when
+  guest `vec0` is absent.
+- `template-pause-pivot-smoke` passes.
+- `template-pause-pool-member-smoke` passes.
+- `template-pause-fork-smoke` fails because the master reaches only one
+  fork/resume cycle.
+- `template-pause-pool-sustained-smoke` is still an expected failure after the
+  first member because repeated members hit the MAP_SHARED physmem limit.
+
 Remaining work:
 
-- Run `template-pause-fork-smoke`.
-- Run `template-pause-fork-stress`.
-- Run `template-pause-pivot-smoke`.
-- Run `template-pause-pool-member-smoke`.
-- Run `template-pause-pool-sustained-smoke`.
-- If sustained pool-member mode fails, fix the production path rather than
-  reimporting historical diagnostic scaffolding.
+- Fix fork-on-resume master survival.
+- Fix sustained member lifetime with production code, likely by giving members
+  independent physmem file descriptors or an equivalent ownership model.
+- Run `template-pause-fork-stress` after the smoke is fixed.
+- Validate the vector2 leg of `template-pause-smoke` when a guest-visible
+  `vec0` device is available.
 
 ### Launcher Pool And Fork Commands
 
@@ -169,18 +179,27 @@ Comparison result:
   serves takes on demand. That is a real functional gap if warm pool support is
   part of completion.
 
+Current validation result:
+
+- `pool-spawn-smoke` passes for spawn, list, and destroy lifecycle.
+- `pool-serve-smoke` passes for daemon readiness, status, take, destroy,
+  shutdown, and master cleanup.
+- `pool-exec-smoke` passes for typed NDJSON failure envelopes when the member
+  lacks the mconsole path needed for successful exec.
+- `pool-port-forward-smoke` passes for typed result/error handling.
+- A reduced `pool-bench` passes take-latency, lifecycle-drift, and throughput
+  gates, but fails the RSS gate because no benchmark children remain live.
+
 Remaining work:
 
 - Run `cargo fmt --check` and `cargo test` in `tools/uml/uml-launcher`.
-- Run `pool-spawn-smoke`.
-- Run `pool-serve-smoke`.
-- Run `pool-exec-smoke`.
-- Run `pool-port-forward-smoke`.
 - Complete real `min_warm` behavior. Because the overall policy is to import
   or complete all promised functionality, lazy-only compatibility is not enough
   for final completion.
-- Verify `exec` failure reporting against kernels that lack the required
-  mconsole `exec` primitive.
+- Fix or prove the successful member mconsole exec path.
+- Re-run full `pool-bench` after fork/member lifetime fixes.
+- Keep validated failure reporting for kernels that lack the required mconsole
+  `exec` primitive.
 
 ### Pool And Template-Pause Selftests
 
@@ -282,20 +301,20 @@ Remaining work:
 
 | Area | Current status on `next` | Historical source | Completion action |
 | ---- | ------------------------ | ----------------- | ----------------- |
-| Template pause single-shot | Present | `fork-server-phase1c`, `memo09-*` | Run smoke and keep cleaned source. |
-| Template pause fork-on-resume | Present | `memo09-phase2`, `memo09-phase4` | Run smoke/stress and fix production path if needed. |
-| Template pause pivot mode | Present | `memo09-phase4`, current `next` | Run pivot smoke; keep if passing. |
-| Template pause pool-member mode | Present | `memo09-phase4`, current `next` | Run member and sustained smoke; fix if failing. |
-| Identity blob parse/apply | Present | `memo09-phase2`, `memo09-phase4` | KUnit plus live pool validation. |
-| Per-member mconsole path | Present | `memo09-phase4` | Validate through `pool-exec-smoke`. |
+| Template pause single-shot | Present, validated | `fork-server-phase1c`, `memo09-*` | Keep cleaned source; validate vector2 leg when guest `vec0` is visible. |
+| Template pause fork-on-resume | Present, failing | `memo09-phase2`, `memo09-phase4` | Fix master survival, then run smoke/stress. |
+| Template pause pivot mode | Present, validated | `memo09-phase4`, current `next` | Keep. |
+| Template pause pool-member mode | Present, partially validated | `memo09-phase4`, current `next` | One-shot member passes; sustained lifetime needs production fix. |
+| Identity blob parse/apply | Present, validated | `memo09-phase2`, `memo09-phase4` | Keep KUnit plus live pool validation. |
+| Per-member mconsole path | Present, needs fix/proof | `memo09-phase4` | Error envelope validated; successful exec still pending. |
 | Vector2 TAP/fd handoff | Present hook, needs validation | `memo09-phase4`, `umlctl-deploy` | Validate through pool member and vector2 smoke. |
-| Direct pool spawn | Present | `memo09-*` | Run `pool-spawn-smoke`. |
-| Pool daemon serve/take/status | Present | `fork-server-phase1c`, `memo09-phase4` | Run `pool-serve-smoke`. |
-| Pool destroy/shutdown | Present | `memo09-phase4` | Include in lifecycle smoke. |
-| Daemon-routed exec | Present | `memo09-phase4` | Run `pool-exec-smoke`; verify missing-feature failures. |
-| Port-forward result | Present | `memo09-phase4` | Run `pool-port-forward-smoke`; tie to network validation. |
+| Direct pool spawn | Present, validated | `memo09-*` | Keep `pool-spawn-smoke` green. |
+| Pool daemon serve/take/status | Present, validated | `fork-server-phase1c`, `memo09-phase4` | Extend validation after warm-pool work. |
+| Pool destroy/shutdown | Present, validated | `memo09-phase4` | Keep in lifecycle smoke. |
+| Daemon-routed exec | Present, partially validated | `memo09-phase4` | Missing-feature failures are validated; successful exec still pending. |
+| Port-forward result | Present, validated | `memo09-phase4` | Tie to final network validation. |
 | Warm pool `min_warm` | Partial | `memo09-phase3-pool-bench`, `memo09-phase4` | Complete real pre-warm queue. |
-| Pool benchmark | Present | `memo09-phase3-pool-bench`, `memo09-phase4` | Run `pool-bench`; update thresholds to final evidence. |
+| Pool benchmark | Present, needs fix | `memo09-phase3-pool-bench`, `memo09-phase4` | 4/5 reduced gates pass; fix live-child/RSS gate. |
 | Syzkaller VM shim | Present, unvalidated | `memo09-phase4`, current `next` | Build and run syzkaller-style take/exec/destroy smoke. |
 | Snapshot bench kselftest | Historical-only wrapper | `memo09-phase4` | Import clean wrapper around active kernel hook. |
 | Snapshot KUnit kselftest wrapper | Historical-only wrapper | `memo09-phase4` | Import or replace for current 4-case KUnit suite. |

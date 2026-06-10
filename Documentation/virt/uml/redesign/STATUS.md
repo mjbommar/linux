@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 snapshot kselftest wrappers.
+Last updated: 2026-06-10 pool/fork validation snapshot.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -137,10 +137,22 @@ Current boundary:
   `06-sequencing/2026-06-10-pool-fork-historical-comparison-plan.md`;
 - current `next` already contains the memo09 command surfaces, pivot mode,
   pool-member mode, per-member mconsole path handling, and related selftests;
+- `template-pause-smoke` now completes with bounded teardown: cases 1-3 pass
+  and the vector2 case skips when `vec0` is not visible in the guest;
+- `template-pause-pivot-smoke`, `template-pause-pool-member-smoke`,
+  `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`, and
+  `pool-port-forward-smoke` pass against the current `./linux` build;
+- `template-pause-fork-smoke` still fails because the master survives only one
+  fork/resume iteration;
+- `template-pause-pool-sustained-smoke` remains an expected failure after the
+  first member because the current MAP_SHARED physmem model does not support
+  the repeated member lifetime this test requires;
+- reduced `pool-bench` passes four of five gates, but the RSS amplification
+  gate cannot measure live children because no benchmark children remain live;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before
   pool functionality is called done; and
-- tap-fd handoff, per-pool-member networking, pool exec, port-forward, and the
-  syzkaller shim still need live end-to-end validation.
+- tap-fd handoff through vector2 pool members and the syzkaller shim still need
+  live end-to-end validation.
 
 ## Historical-Only Work
 

@@ -38,6 +38,8 @@ This file is the live execution tracker for
   branches.
 - `Partial`: some of the feature exists on `next`, but required behavior is
   missing.
+- `Partial-needs-fix`: some of the feature exists on `next`, and a known
+  implementation fix is required before it can count as complete.
 - `Stale-surface`: docs, tools, or tests on `next` refer to functionality that
   is not implemented on `next`.
 - `Needs-decision`: the plan must decide whether to complete, keep
@@ -72,21 +74,21 @@ This file is the live execution tracker for
 | Record/replay | Time, vvar, RDTSC, SIGALRM determinism | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Define supported tier and implement before declaring complete. | deterministic workload gate. |
 | Diagnostics | KVM v2 state trace ring | Historical-only | `kvm-v2-snapshot-elf64` | Rework as clean optional debug infrastructure. | enable/capture/dump/clear smoke. |
 | Diagnostics | State trace parser | Historical-only | `umlctl-deploy`, `kvm-v2-snapshot-elf64` | Import only if state trace lands. | parser smoke. |
-| Template pause | Kernel template pause entry | Present-needs-validation | `next`, `memo09-phase*`, `fork-server-phase1c` | Historical comparison complete in `2026-06-10-pool-fork-historical-comparison-plan.md`; run and fix current smokes. | template-pause smoke/stress. |
-| Template pause | Identity blob layout and apply path | Present-needs-validation | `next`, `memo09-phase2`, `memo09-phase4` | Current layout matches the final launcher contract by source comparison; validate live through pool member tests. | identity KUnit/selftest. |
-| Template pause | Template pause pivot mode | Present-needs-validation | `memo09-phase4`, `next` | Keep if pivot smoke passes; fix or retire only with explicit approval. | pivot smoke. |
-| Fork server | Fork-on-resume loop | Present-needs-validation | `next`, `memo09-phase4` | Historical comparison complete; validate current production path rather than reimporting old diagnostic scaffolding. | fork-server smoke. |
-| Fork server | Child PID reporting through identity memfd | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate in pool take. | pool serve/take smoke. |
+| Template pause | Kernel template pause entry | Present-validated | `next`, `memo09-phase*`, `fork-server-phase1c` | Historical comparison complete; smoke now finishes with bounded teardown. Vector2 leg skips when guest `vec0` is absent. | `template-pause-smoke` PASS cases 1-3, SKIP case 4, 2026-06-10. |
+| Template pause | Identity blob layout and apply path | Present-validated | `next`, `memo09-phase2`, `memo09-phase4` | Current layout matches the final launcher contract by source comparison and live pool-member validation. | `template-pause-pool-member-smoke` PASS, 2026-06-10. |
+| Template pause | Template pause pivot mode | Present-validated | `memo09-phase4`, `next` | Keep; pivot smoke passed on current `next`. | `template-pause-pivot-smoke` PASS, 2026-06-10. |
+| Fork server | Fork-on-resume loop | Present-needs-fix | `next`, `memo09-phase4` | Fix current production path rather than reimporting old diagnostic scaffolding; master currently survives one fork/resume only. | `template-pause-fork-smoke` FAIL, master resume cycles=1, 2026-06-10. |
+| Fork server | Child PID reporting through identity memfd | Present-validated | `next`, `memo09-phase4` | Keep; validate in pool take and pool-member smoke. | `pool-serve-smoke` PASS and `template-pause-pool-member-smoke` PASS, 2026-06-10. |
 | Fork server | Snapshot-backed fork-server path | Historical-only/needs-decision | `memo09-phase4`, `kvm-v2-snapshot-elf64` | Complete after KVM snapshot import or retire with approval. | snapshot fork smoke. |
-| Pool | Direct `umlctl pool spawn` | Present | `next`, `memo09-phase*` | Keep. | `pool-spawn-smoke`. |
-| Pool | Daemon `pool serve` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | `pool-serve-smoke`. |
-| Pool | `pool take` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | pool take/status smoke. |
-| Pool | `pool list/status/destroy/shutdown` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | pool lifecycle smoke. |
-| Pool | Warm member pool | Partial | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Complete real `min_warm` pre-warm behavior; do not count pool completion while this is lazy-only. | pool benchmark plus warm-pool smoke. |
-| Pool | Pool benchmark thresholds | Partial | `memo09-phase3-pool-bench`, `memo09-phase4` | Import final acceptance thresholds. | `pool-bench`. |
-| Pool | mconsole path synthesis | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate against exec. | `pool-exec-smoke`. |
-| Pool | `umlctl exec` via daemon | Present-needs-validation | `next`, `memo09-phase4` | Keep and test with mconsole availability detection. | exec smoke. |
-| Pool | `umlctl port-forward` | Present-needs-validation | `next`, `memo09-phase4` | Keep and validate. | port-forward smoke. |
+| Pool | Direct `umlctl pool spawn` | Present-validated | `next`, `memo09-phase*` | Keep. | `pool-spawn-smoke` PASS, 2026-06-10. |
+| Pool | Daemon `pool serve` | Present-validated | `next`, `memo09-phase4` | Keep and continue through warm-pool completion. | `pool-serve-smoke` PASS, 2026-06-10. |
+| Pool | `pool take` | Present-validated | `next`, `memo09-phase4` | Keep and extend for warm ready members. | `pool-serve-smoke` PASS, 2026-06-10. |
+| Pool | `pool list/status/destroy/shutdown` | Present-validated | `next`, `memo09-phase4` | Keep. | `pool-spawn-smoke` PASS and `pool-serve-smoke` PASS, 2026-06-10. |
+| Pool | Warm member pool | Partial-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Complete real `min_warm` pre-warm behavior; do not count pool completion while this is lazy-only. | Reduced `pool-bench` FAIL memory gate, 0/5 live children, 2026-06-10. |
+| Pool | Pool benchmark thresholds | Present-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4` | Threshold script is present, but final acceptance needs live children and sustained members. | Reduced `pool-bench` PASS 4/5 gates, FAIL RSS gate, 2026-06-10. |
+| Pool | mconsole path synthesis | Present-needs-fix | `next`, `memo09-phase4` | Keep and fix/prove successful member exec path. | `pool-exec-smoke` PASS for typed error envelope; successful exec still pending, 2026-06-10. |
+| Pool | `umlctl exec` via daemon | Present-needs-fix | `next`, `memo09-phase4` | Keep; error envelope validated, but successful guest exec still needs final proof. | `pool-exec-smoke` PASS for expected failure envelope, 2026-06-10. |
+| Pool | `umlctl port-forward` | Present-validated | `next`, `memo09-phase4` | Keep and later validate against final network mode. | `pool-port-forward-smoke` PASS, 2026-06-10. |
 | Pool | TAP/fd handoff | Partial | `next`, `memo09-phase4`, `umlctl-deploy` | Complete with vector2 fd path. | fd handoff smoke. |
 | Vector2 | Typed parser | Present | `next` | Keep. | vector2 parser KUnit. |
 | Vector2 | Queue ownership | Present | `next` | Keep. | vector2 queue KUnit. |

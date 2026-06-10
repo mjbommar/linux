@@ -47,6 +47,22 @@ if [ ! -x "$BINARY" ]; then
 	exit 4
 fi
 
+stop_uml_pid() {
+	local pid=$1
+	local i
+
+	kill "$pid" 2>/dev/null || true
+	for i in $(seq 1 20); do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			wait "$pid" 2>/dev/null || true
+			return
+		fi
+		sleep 0.1
+	done
+	kill -KILL "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+}
+
 if ! command -v python3 >/dev/null 2>&1; then
 	echo "SKIP: python3 required for case 3"
 	exit 4
@@ -143,7 +159,7 @@ for _ in $(seq 1 60); do
 	grep -q CASE2_POST_PAUSE "$OUT/case2.log" 2>/dev/null && break
 	sleep 0.3
 done
-wait "$PID2" 2>/dev/null || true
+stop_uml_pid "$PID2"
 
 if ! grep -q CASE2_POST_PAUSE "$OUT/case2.log"; then
 	echo "FAIL case 2: never saw CASE2_POST_PAUSE after SIGCONT"
@@ -237,7 +253,49 @@ else:
     sys.exit(f"case 3: never saw SIGSTOP (state={state})")
 
 os.kill(pid, signal.SIGCONT)
-os.waitpid(pid, 0)
+deadline = time.time() + 20
+while time.time() < deadline:
+    try:
+        with open(log_path, "rb") as f:
+            if b"CASE3_POST_PAUSE" in f.read():
+                break
+    except FileNotFoundError:
+        pass
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    except ChildProcessError:
+        break
+    time.sleep(0.2)
+else:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    sys.exit("case 3: never saw CASE3_POST_PAUSE")
+
+try:
+    os.kill(pid, signal.SIGTERM)
+except OSError:
+    pass
+for _ in range(20):
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    except ChildProcessError:
+        break
+    time.sleep(0.1)
+else:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
 PYEOF
 
 if [ $? -ne 0 ]; then
@@ -390,7 +448,49 @@ else:
     sys.exit(f"case 4: never saw SIGSTOP (state={state})")
 
 os.kill(pid, signal.SIGCONT)
-os.waitpid(pid, 0)
+deadline = time.time() + 20
+while time.time() < deadline:
+    try:
+        with open(log_path, "rb") as f:
+            if b"CASE4_POST_PAUSE" in f.read():
+                break
+    except FileNotFoundError:
+        pass
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    except ChildProcessError:
+        break
+    time.sleep(0.2)
+else:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    sys.exit("case 4: never saw CASE4_POST_PAUSE")
+
+try:
+    os.kill(pid, signal.SIGTERM)
+except OSError:
+    pass
+for _ in range(20):
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+    except ChildProcessError:
+        break
+    time.sleep(0.1)
+else:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
 PYEOF
 
 if [ $? -ne 0 ]; then
