@@ -56,11 +56,11 @@ This file is the live execution tracker for
 | KVM v2 core | RDPMC userspace support | Present | `next`, `umlctl-deploy` | Keep optional and document sandbox tradeoff. | `rdpmc-smoke` if config enabled. |
 | KVM v2 core | ITIMER_VIRTUAL accounting | Present | `next` | Keep; include in KVM smoke. | timer/CPython signal smoke. |
 | KVM snapshot | Register-only snapshot | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; runtime smoke still pending. | `um_kvm_v2_snapshot` KUnit PASS 4/4, 2026-06-10. |
-| KVM snapshot | Full memslot snapshot capture | Present-KUnit-pass | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; live export smoke covers metadata-only large-slot behavior; SMP semantics still need definition. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live export smoke PASS, 2026-06-10. |
-| KVM snapshot | Snapshot restore | Present-validated | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; SMP semantics remain separate. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus `kvm-snapshot-restore-smoke` PASS, 2026-06-10. |
-| KVM snapshot | Snapshot ELF64 export | Present-validated | `kvm-v2-snapshot-elf64` | Kernel exporter, debugfs trigger, mconsole trigger, and `umlctl` export path are present; restore/SMP semantics remain separate. | `umlctl snapshot export` PASS with `readelf -h/-l/-n`, `gdb -c`, and helper load, 2026-06-10. |
+| KVM snapshot | Full memslot snapshot capture | Present-validated | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; live export smoke covers metadata-only large-slot behavior; SMP is gated to one online CPU. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live export smoke PASS, 2026-06-10. |
+| KVM snapshot | Snapshot restore | Present-validated | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; SMP is gated to one online CPU. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus `kvm-snapshot-restore-smoke` PASS, 2026-06-10. |
+| KVM snapshot | Snapshot ELF64 export | Present-validated | `kvm-v2-snapshot-elf64` | Kernel exporter, debugfs trigger, mconsole trigger, and `umlctl` export path are present; SMP is gated to one online CPU. | `umlctl snapshot export` PASS with `readelf -h/-l/-n`, `gdb -c`, and helper load, 2026-06-10. |
 | KVM snapshot | GDB snapshot helper | Present-validated | `kvm-v2-snapshot-elf64`, `next` | Keep helper matched to UML private note layout. | helper loads against fresh exported core, 2026-06-10. |
-| KVM snapshot | Snapshot selftests | Present-validated | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite imported with current vCPU priming; live export and restore smoke pass; add SMP policy/gate. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live ELF and restore smoke PASS, 2026-06-10. |
+| KVM snapshot | Snapshot selftests | Present-validated | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Clean KUnit suite imported with current vCPU priming; live export and restore smoke pass; SMP policy is gated. | `um_kvm_v2_snapshot` KUnit PASS 4/4 plus live ELF and restore smoke PASS, 2026-06-10. |
 | Record/replay | Record state machine | Historical-only | `kvm-v2-snapshot-elf64` | Complete or land behind explicit experimental Kconfig. | record KUnit. |
 | Record/replay | Syscall observe path | Historical-only | `kvm-v2-snapshot-elf64` | Complete; no-op stubs are not completion. | record smoke. |
 | Record/replay | Replay consume path | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Implement deterministic replay tier or keep experimental. | replay smoke. |
@@ -132,18 +132,19 @@ This file is the live execution tracker for
 - Snapshot restore smoke works through `kvm_v2_snapshot_bench=1` and the
   `kvm-snapshot-restore-smoke` selftest, which observes a capture plus
   `restore_full` timing summary in full snapshot mode.
+- Snapshot SMP semantics are explicitly gated: capture and restore return
+  `-EOPNOTSUPP` when more than one CPU is online.
 
 ## Remaining Hard Blockers
 
 These items must be closed before the final branch can be called complete:
 
-1. SMP snapshot constraints must be defined, gated, or validated.
-2. Record/replay functionality must be imported or completed.
-3. Vector2 replacement claims must match validation evidence.
-4. Pool/fork-server behavior must be compared against all `memo09-*` branches.
-5. Selftests and source comments must be cleaned of diary/history material on
+1. Record/replay functionality must be imported or completed.
+2. Vector2 replacement claims must match validation evidence.
+3. Pool/fork-server behavior must be compared against all `memo09-*` branches.
+4. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
-6. The final validation matrix from the integration plan must pass.
+5. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules
 

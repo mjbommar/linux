@@ -7,7 +7,9 @@
  * full XSAVE image and XCR0 so AVX state can round-trip without falling
  * back to legacy FPU state.  The memory side snapshots the memslot list
  * as independent descriptors so future slots do not change the container
- * ABI.
+ * ABI.  Multi-vCPU snapshots require all-vCPU quiescence and are not
+ * implemented yet, so capture and restore reject guests with more than
+ * one online CPU.
  */
 
 #include <linux/cleanup.h>
@@ -44,6 +46,18 @@ static const u32 kvm_v2_snapshot_msr_indices[KVM_V2_SNAPSHOT_MSR_COUNT] = {
 	0xC0000101,	/* MSR_GS_BASE */
 	0xC0000080,	/* MSR_EFER */
 };
+
+static int kvm_v2_snapshot_require_single_online_cpu(void)
+{
+	unsigned int online = num_online_cpus();
+
+	if (online == 1)
+		return 0;
+
+	pr_warn_once("um: kvm-v2 snapshot: refusing SMP snapshot with %u online CPUs; all-vCPU quiescence is not implemented\n",
+		     online);
+	return -EOPNOTSUPP;
+}
 
 /*
  * kvm_v2_snapshot_pick_vcpu - resolve the pool entry the snapshot
@@ -320,6 +334,10 @@ int kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap)
 	if (!snap)
 		return -EINVAL;
 
+	rc = kvm_v2_snapshot_require_single_online_cpu();
+	if (rc < 0)
+		return rc;
+
 	memset(snap, 0, sizeof(*snap));
 
 	/*
@@ -493,6 +511,10 @@ int kvm_v2_snapshot_capture_full(struct kvm_v2_snapshot *snap,
 	if (!snap)
 		return -EINVAL;
 
+	rc = kvm_v2_snapshot_require_single_online_cpu();
+	if (rc < 0)
+		return rc;
+
 	memset(snap, 0, sizeof(*snap));
 
 	vm = kvm_v2_vm_get();
@@ -582,6 +604,10 @@ int kvm_v2_snapshot_restore_full_vcpu(const struct kvm_v2_snapshot *snap,
 
 	if (!snap)
 		return -EINVAL;
+
+	rc = kvm_v2_snapshot_require_single_online_cpu();
+	if (rc < 0)
+		return rc;
 
 	/*
 	 * Restore memslot bytes FIRST, outside preempt_disable() -

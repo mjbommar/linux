@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 snapshot export pass.
+Last updated: 2026-06-10 snapshot SMP gate.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -37,7 +37,8 @@ Current source-tree direction:
 - KVM v2 snapshot capture/restore and snapshot ELF export source is present on
   `next` and builds.
 - KVM v2 snapshot KUnit, live `umlctl snapshot export`, and snapshot restore
-  smoke validation pass on `next`; SMP semantics remain open.
+  smoke validation pass on `next`; SMP snapshot semantics are explicitly
+  gated to one online CPU.
 - KVM v2 record/replay and private trace-ring sources have not yet been
   reimported into `next`.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
@@ -71,6 +72,10 @@ The strongest current KVM v2 evidence is:
 - Snapshot restore smoke: `kvm-snapshot-restore-smoke` boots KVM v2 with
   `kvm_v2_snapshot_bench=1` and observes the kernel capture plus
   `restore_full` timing summary in full snapshot mode.
+- Snapshot SMP policy: capture and restore reject guests with more than one
+  online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
+  The default validated tree is a UP build, so the selftest reports the negative
+  SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU
@@ -80,7 +85,6 @@ and keeps CPUID xstate leaves consistent with the exposed feature set.
 
 Remaining validation before publication or completion:
 
-- define, gate, or validate SMP snapshot semantics;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
@@ -139,8 +143,9 @@ The following work is not yet present in the active `next` implementation:
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
 source. KUnit coverage and live `umlctl` ELF export validation now pass.
-The restore smoke gate now passes. SMP constraints still need to close before
-the snapshot workstream can be called complete.
+The restore smoke gate now passes. SMP snapshot semantics are closed by an
+explicit single-online-CPU gate; multi-vCPU snapshot support remains future
+work unless all-vCPU quiescence is implemented.
 
 ## Publication Checklist
 

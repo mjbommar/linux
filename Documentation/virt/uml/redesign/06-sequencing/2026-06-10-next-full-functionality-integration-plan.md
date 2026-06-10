@@ -99,10 +99,11 @@ Current branch status at review time:
 
 - Branch: `next`
 - Remote tracking: `origin/next`
-- Baseline before this integration update: `58e50e5dedf7`
-- Relative to local `torvalds/master`: `0` behind, `41` ahead
-- Current update: mconsole-backed snapshot export integration, validation, and
-  documentation are being landed together.
+- Baseline before the snapshot SMP gate update: `7a1c1bb88142`
+- Relative to local `torvalds/master` at that baseline: `0` behind, `43`
+  ahead
+- Current update: snapshot capture/restore are explicitly gated to one online
+  CPU, with docs and smoke coverage updated accordingly.
 
 Approximate changed review surface relative to Linus:
 
@@ -155,8 +156,8 @@ Problems:
 - Some functionality is prototype-quality or phase-scoped.
 - Snapshot capture, snapshot restore, and snapshot ELF export started as
   historical-only functionality and have now been reimported into `next` with
-  KUnit, live export, and restore smoke coverage. SMP semantics still need
-  closure.
+  KUnit, live export, and restore smoke coverage. SMP semantics are explicitly
+  gated to one online CPU.
 - Record/replay and private state trace functionality remain historical-only.
 
 Disposition:
@@ -436,7 +437,7 @@ Functional requirements:
 - Preserve the debugfs trigger for inside-guest scripts.
 - Keep snapshot code safe when KVM v2 is compiled but not selected at runtime.
 - Clearly define SMP constraints. If all-vCPU quiescence is not complete, the
-  feature must be gated or documented as single-vCPU only.
+  feature must be gated as single-vCPU only.
 
 Acceptance gates:
 
@@ -454,7 +455,7 @@ Acceptance gates:
   status: PASS.
 - Snapshot restore runtime smoke passes. Current status: PASS on 2026-06-10
   through `kvm-snapshot-restore-smoke` with `kvm_v2_snapshot_bench=1`.
-- SMP behavior is either passing or explicitly gated.
+- SMP behavior is explicitly gated to one online CPU with `-EOPNOTSUPP`.
 
 ## Workstream C: KVM Record/Replay
 
@@ -904,7 +905,7 @@ Exit criteria:
   4/4 and live `umlctl snapshot export` PASS on 2026-06-10.
 - Snapshot restore runtime smoke passes. Current status: PASS on 2026-06-10
   through `kvm-snapshot-restore-smoke`.
-- SMP snapshot semantics are validated or explicitly gated.
+- SMP snapshot semantics are explicitly gated to one online CPU.
 
 ### Phase 3: Fork Server And Pool Completion
 
@@ -1082,7 +1083,7 @@ branch lands.
 | ---- | ------------- | -------------------- | ------ |
 | KVM v2 core | Present on `next` | Hardened, validated | In progress |
 | KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
-| KVM snapshot | Present with KUnit, live export, and restore smoke pass | Present, validated, SMP policy defined | In progress |
+| KVM snapshot | Present with KUnit, live export, restore smoke, and SMP gate | Present, validated, SMP policy defined | Closed for current scope |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
 | Record/replay | Historical/prototype | Complete or experimental | Open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
@@ -1099,23 +1100,20 @@ branch lands.
 
 ## Immediate Next Actions
 
-1. Define the SMP snapshot policy: validate all-vCPU quiescence, gate the
-   feature to UP/single-vCPU, or mark SMP snapshot unsupported with explicit
-   checks.
-2. Compare pool/fork-server behavior against `fork-server-phase1c`,
+1. Compare pool/fork-server behavior against `fork-server-phase1c`,
    `memo09-phase2`, `memo09-phase3-pool-bench`, and `memo09-phase4`.
-3. Import or complete record/replay, or land it behind an explicit
+2. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
-4. Decide whether private state trace is worth importing as clean optional
+3. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-5. Re-audit vector2 transport claims, Kconfig wording, and replacement
+4. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-6. Curate selftests and source comments for upstream style: no internal issue
+5. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-7. Refresh reports/presentations from normalized status and evidence tables
+6. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-8. Run the final validation matrix, update `STATUS.md` and the inventory,
+7. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality
