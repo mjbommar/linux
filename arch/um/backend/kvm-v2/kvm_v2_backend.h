@@ -640,4 +640,60 @@ int  kvm_v2_mm_region_added(struct mm_struct *mm,
 int  kvm_v2_mm_region_removed(struct mm_struct *mm,
 			      const struct um_memory_region *region);
 
+/*
+ * KVM v2 snapshots capture one pool vCPU's architectural state plus the
+ * current VM memslot descriptors and any byte payloads that fit in memory.
+ */
+#define KVM_V2_SNAPSHOT_MSR_COUNT	7
+
+struct kvm_v2_memslot_snapshot {
+	struct kvm_userspace_memory_region region;
+	void *data;
+	size_t data_size;
+};
+
+struct kvm_v2_snapshot {
+	struct kvm_regs		regs;
+	struct kvm_sregs	sregs;
+	struct kvm_xsave	xsave;
+	struct kvm_xcrs		xcrs;
+	struct kvm_vcpu_events	events;
+	struct {
+		__u32 nmsrs;
+		__u32 pad;
+		struct kvm_msr_entry entries[KVM_V2_SNAPSHOT_MSR_COUNT];
+	} msrs;
+
+	struct kvm_v2_memslot_snapshot *memslots;
+	int memslot_count;
+
+	struct kvm_xsave	task_iotrap_fpu;
+	struct kvm_vcpu_events	task_iotrap_events;
+	bool			task_iotrap_fpu_valid;
+	bool			task_iotrap_events_valid;
+	bool			task_state_captured;
+	pid_t			task_source_pid;
+};
+
+struct kvm_v2_snapshot *kvm_v2_snapshot_alloc(void);
+void kvm_v2_snapshot_destroy(struct kvm_v2_snapshot *snap);
+void kvm_v2_snapshot_free(struct kvm_v2_snapshot *snap);
+int kvm_v2_snapshot_capture(struct kvm_v2_snapshot *snap);
+int kvm_v2_snapshot_capture_regs_only(struct kvm_v2_snapshot *snap);
+int kvm_v2_snapshot_restore_full(struct kvm_v2_snapshot *snap);
+int kvm_v2_snapshot_capture_full(struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu);
+int kvm_v2_snapshot_restore_full_vcpu(const struct kvm_v2_snapshot *snap,
+				      struct kvm_v2_vcpu *vcpu);
+int kvm_v2_snapshot_capture_task(struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu);
+int kvm_v2_snapshot_restore_task(const struct kvm_v2_snapshot *snap,
+				 struct kvm_v2_vcpu *vcpu);
+
+struct file;
+int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
+				       struct file *file);
+int kvm_v2_snapshot_elf_export_to_fd(const struct kvm_v2_snapshot *snap,
+				     int fd);
+
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

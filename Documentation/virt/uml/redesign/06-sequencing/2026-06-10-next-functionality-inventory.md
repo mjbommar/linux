@@ -51,12 +51,12 @@ This file is the live execution tracker for
 | KVM v2 core | APERF/MPERF passthrough | Present | `next`, `umlctl-deploy` | Keep optional. | `aperf-mperf-smoke` if config enabled. |
 | KVM v2 core | RDPMC userspace support | Present | `next`, `umlctl-deploy` | Keep optional and document sandbox tradeoff. | `rdpmc-smoke` if config enabled. |
 | KVM v2 core | ITIMER_VIRTUAL accounting | Present | `next` | Keep; include in KVM smoke. | timer/CPython signal smoke. |
-| KVM snapshot | Register-only snapshot | Historical-only | `kvm-v2-snapshot-elf64` | Port or reimplement cleanly. | snapshot KUnit. |
-| KVM snapshot | Full memslot snapshot capture | Historical-only | `kvm-v2-snapshot-elf64` | Port or reimplement cleanly; define SMP semantics. | snapshot KUnit and smoke. |
-| KVM snapshot | Snapshot restore | Historical-only | `kvm-v2-snapshot-elf64` | Port or reimplement cleanly. | snapshot restore smoke. |
-| KVM snapshot | Snapshot ELF64 export | Stale-surface | `kvm-v2-snapshot-elf64` | Port kernel code or hide `umlctl snapshot export`. | `umlctl snapshot export`, `readelf`, `gdb`. |
-| KVM snapshot | GDB snapshot helper | Stale-surface | `kvm-v2-snapshot-elf64`, `next` | Keep only once kernel exporter exists; otherwise mark historical. | helper loads against exported core. |
-| KVM snapshot | Snapshot selftests | Partial | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Import after kernel code lands. | `snapshot-smoke`, `snapshot-kvm-smoke`, ELF roundtrip. |
+| KVM snapshot | Register-only snapshot | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; add KUnit/smoke validation. | snapshot KUnit. |
+| KVM snapshot | Full memslot snapshot capture | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; validate metadata-only large-slot behavior and define SMP semantics. | snapshot KUnit and smoke. |
+| KVM snapshot | Snapshot restore | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel code imported and cleaned; validate restore ordering and lazy-state reset. | snapshot restore smoke. |
+| KVM snapshot | Snapshot ELF64 export | Present-needs-validation | `kvm-v2-snapshot-elf64` | Kernel exporter and debugfs trigger imported; validate via CLI/readelf/gdb. | `umlctl snapshot export`, `readelf`, `gdb`. |
+| KVM snapshot | GDB snapshot helper | Present-needs-validation | `kvm-v2-snapshot-elf64`, `next` | Validate helper against a fresh exported core. | helper loads against exported core. |
+| KVM snapshot | Snapshot selftests | Partial | `kvm-v2-snapshot-elf64`, `memo09-phase4` | Reconcile and import after KUnit priming helper is adapted to current vCPU code. | `snapshot-smoke`, `snapshot-kvm-smoke`, ELF roundtrip. |
 | Record/replay | Record state machine | Historical-only | `kvm-v2-snapshot-elf64` | Complete or land behind explicit experimental Kconfig. | record KUnit. |
 | Record/replay | Syscall observe path | Historical-only | `kvm-v2-snapshot-elf64` | Complete; no-op stubs are not completion. | record smoke. |
 | Record/replay | Replay consume path | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Implement deterministic replay tier or keep experimental. | replay smoke. |
@@ -92,7 +92,7 @@ This file is the live execution tracker for
 | Launcher | `umlctl up/down/ps/logs` | Present | `next`, `umlctl-deploy` | Keep. | `umlctl-smoke`. |
 | Launcher | deploy configs | Present-needs-comparison | `next`, `umlctl-deploy` | Import missing useful configs only. | deploy smoke. |
 | Launcher | gates and gate-loop | Present-needs-validation | `next`, `umlctl-deploy` | Keep and validate. | gate dry run. |
-| Launcher | snapshot export CLI | Stale-surface | `next`, `kvm-v2-snapshot-elf64` | Fix by importing kernel exporter or hiding command. | snapshot export smoke. |
+| Launcher | snapshot export CLI | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Kernel debugfs exporter is present; validate end-to-end from `umlctl`. | snapshot export smoke. |
 | Launcher | transparency tooling | Present-needs-validation | `next`, `umlctl-deploy` | Keep if docs/tests match. | transparency smoke. |
 | Launcher | `umlbuild` | Present-needs-validation | `next`, `umlctl-deploy` | Keep and run MVP smoke. | `umlbuild` smoke. |
 | Syzkaller | UML VM shim | Present-needs-validation | `next`, `umlctl-deploy` | Validate against final pool/exec path. | syzkaller-style exec smoke. |
@@ -108,7 +108,7 @@ This file is the live execution tracker for
 | Selftests | historical repros | Present/needs-cleanup | all branches | Move or mark archival. | grep for diary/internal labels. |
 | Docs | `STATUS.md` | Present-needs-update | `next` | Update after every landed workstream. | status review. |
 | Docs | old reports/presentations | Present-stale | `next`, historical docs | Refresh or mark historical. | docs audit. |
-| Docs | snapshot ELF docs | Stale-surface | `next`, `kvm-v2-snapshot-elf64` | Match real kernel code after import. | trigger/symbol grep. |
+| Docs | snapshot ELF docs | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Re-audit against imported kernel code and fresh exported core. | trigger/symbol grep. |
 | Docs | vector2 validation docs | Present-needs-update | `next` | Align with final gates. | docs audit. |
 | Upstream | patch queue | Present-stale | `next` docs | Regenerate from final `next`. | checkpatch and cover letters. |
 
@@ -116,18 +116,22 @@ This file is the live execution tracker for
 
 - KVM v2 no longer ignores failed architectural-state restore ioctls for
   `KVM_SET_MSRS`, `KVM_SET_XSAVE`, or `KVM_SET_VCPU_EVENTS`.
+- KVM v2 snapshot capture/restore and snapshot ELF64 export source is present
+  on `next` and builds with `make ARCH=um -j16`.
 
 ## Remaining Hard Blockers
 
 These items must be closed before the final branch can be called complete:
 
-1. `umlctl snapshot export` and snapshot ELF docs must match real kernel code.
-2. Snapshot and record/replay functionality must be imported or completed.
-3. Vector2 replacement claims must match validation evidence.
-4. Pool/fork-server behavior must be compared against all `memo09-*` branches.
-5. Selftests and source comments must be cleaned of diary/history material on
+1. Snapshot KUnit, snapshot smoke, `umlctl snapshot export`, `readelf`, `gdb`,
+   and GDB helper validation must pass on the imported snapshot code.
+2. Snapshot SMP constraints must be defined, gated, or validated.
+3. Record/replay functionality must be imported or completed.
+4. Vector2 replacement claims must match validation evidence.
+5. Pool/fork-server behavior must be compared against all `memo09-*` branches.
+6. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
-6. The final validation matrix from the integration plan must pass.
+7. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules
 

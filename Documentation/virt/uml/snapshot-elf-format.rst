@@ -5,10 +5,8 @@ UML kvm-v2 snapshot ELF64-core on-disk format
 ================================================
 
 :Author: UML kvm-v2 maintainers
-:Status: v1 — initial format, version-tagged for forward evolution
-:Related: Documentation/virt/uml/redesign/08-future-phases/02-snapshot-to-disk.md (design memo),
-          Documentation/virt/uml/redesign/02-workstreams/D-kvm-backend/26-snapshot-v2-port.md
-          (snapshot capture/restore primitives)
+:Status: v1, version-tagged for forward evolution; current ``next``
+         validation is pending.
 
 This document specifies the on-disk layout of the ELF64 core file
 produced by ``kvm_v2_snapshot_elf_export_to_file()``.  The format is
@@ -143,12 +141,10 @@ phdr with:
 * ``p_memsz   = memslot.memory_size``
 * ``p_align   = PAGE_SIZE``
 
-Memslots whose data buffer failed to allocate during capture
-(Phase 3 graceful degradation — see memo 26-snapshot §Phase 3) are
-recorded in the UML private note's memslot descriptor array with
-``size`` populated but NO matching ``PT_LOAD`` segment.  Readers
-should iterate the UML note's slot list rather than assuming a 1:1
-correspondence with ``PT_LOAD`` phdrs.
+Memslots whose data buffer failed to allocate during capture are recorded in
+the UML private note's memslot descriptor array with ``size`` populated but no
+matching ``PT_LOAD`` segment.  Readers should iterate the UML note's slot list
+rather than assuming a 1:1 correspondence with ``PT_LOAD`` phdrs.
 
 Version
 =======
@@ -215,12 +211,14 @@ From the operator side:
   ``kvm_v2_snapshot_elf_export_to_fd()`` (declared in
   ``arch/um/backend/kvm-v2/kvm_v2_backend.h``).
 
-Tested with
-===========
+Validation requirements
+=======================
 
-* ``readelf`` from GNU binutils 2.42 — ``readelf -h / -l / -n`` all
-  parse without errors.
-* ``gdb`` 14.2 — ``gdb -c dump.elf`` opens without errors;
-  ``info registers`` prints the captured register set.
-* The bundled ``tools/uml/uml-gdb/uml-snapshot.py`` helper sources
-  cleanly and exposes the four ``uml-snap-*`` commands.
+Before this format is marked complete on ``next``, validate a freshly exported
+dump with:
+
+* ``readelf -h dump.elf``
+* ``readelf -l dump.elf``
+* ``readelf -n dump.elf``
+* ``gdb -c dump.elf``
+* ``gdb -ex 'source tools/uml/uml-gdb/uml-snapshot.py' -c dump.elf``

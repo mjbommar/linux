@@ -10,6 +10,8 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += memslot.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += region.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += syscall_trap.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2) += exception.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += snapshot.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2) += snapshot_elf.o
 
 # LSTAR gadget trampoline body. This position-independent x86_64 blob
 # lives in .rodata so objtool treats the bytes as host data; the install

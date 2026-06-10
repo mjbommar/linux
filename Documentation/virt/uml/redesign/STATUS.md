@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: publishability cleanup pass.
+Last updated: 2026-06-10 snapshot import pass.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -9,31 +9,37 @@ active, what is proven, and what still blocks publication.
 
 ## Active Scope
 
-The active KVM v2 series is the backend core:
+The active KVM v2 series is the backend core plus the functionality being
+restored for the full UML v2 completion branch:
 
 - VM and vCPU lifecycle;
 - syscall dispatch and the optional in-guest LSTAR fast path;
 - exception delivery through backend-owned descriptor and handler pages;
 - signal, FPU/XSAVE, timer, and SMP state handling;
 - memory-slot and region management;
-- the validation needed to send the backend upstream.
+- snapshot capture/restore and snapshot ELF export; and
+- the validation needed to decide which pieces are publishable upstream.
 
-KVM-specific snapshot, ELF export, record/replay, and private state-trace
-experiments answered useful architecture questions, but they are no longer
-part of the publishable KVM v2 series. Generic UML snapshot and fork-server
-work remains separate from the KVM backend core.
+Record/replay and private state-trace code remain historical-only at this
+point. Generic UML snapshot and fork-server work remains separate from the KVM
+backend core unless the integration plan explicitly pulls it into `next`.
 
 ## Current Readiness
 
 KVM v2 is functionally past the architecture-unknown stage. The current work
-is publication hardening: removing retired code, normalizing comments and
-documentation, checking series shape, and finishing long-duration validation.
+is full-functionality integration: importing or completing missing historical
+features, normalizing comments and documentation, checking series shape, and
+finishing validation.
 
 Current source-tree direction:
 
 - KVM v1 archive code has been removed from the active tree.
-- KVM v2 snapshot, record/replay, ELF export, and private trace-ring sources
-  have been removed from the backend core.
+- KVM v2 snapshot capture/restore and snapshot ELF export source is present on
+  `next` and builds.
+- KVM v2 snapshot KUnit, runtime smoke, `umlctl snapshot export`, `readelf`,
+  `gdb`, and GDB helper validation remain open.
+- KVM v2 record/replay and private trace-ring sources have not yet been
+  reimported into `next`.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
   backend unless KVM v2 is selected.
@@ -62,8 +68,12 @@ ioctls, preserving YMM upper halves after AVX is exposed to the guest. Related
 hardening also pins debug-register state, saves/restores pending vCPU events,
 and keeps CPUID xstate leaves consistent with the exposed feature set.
 
-Remaining validation before publication:
+Remaining validation before publication or completion:
 
+- run snapshot KUnit and snapshot smoke once the KUnit priming helper is
+  reconciled with the current vCPU code;
+- validate `umlctl snapshot export <instance> --output dump.elf`, `readelf`,
+  `gdb -c`, and `tools/uml/uml-gdb/uml-snapshot.py` against a fresh dump;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
@@ -111,21 +121,18 @@ Current boundary:
 - tap-fd handoff and per-pool-member mconsole plumbing remain open for the
   full end-to-end pool networking and exec path.
 
-## Retired Work
+## Historical-Only Work
 
-The following work is intentionally absent from the publishable KVM backend
-series:
+The following work is not yet present in the active `next` implementation:
 
-- KVM v1 backend archive sources;
-- KVM-specific snapshot capture/restore sources and tests;
 - KVM-specific record/replay sources and tests;
-- snapshot ELF export sources and tests;
 - private state-trace ring and parser tooling;
-- benchmark and smoke tests whose only purpose was to exercise those retired
-  KVM-specific experiments.
+- benchmark and smoke tests whose only purpose was to exercise code that is
+  still historical-only.
 
-If a future series revives any of this, it should do so as a new design with a
-small public interface, not by reintroducing the retired private scaffolding.
+Snapshot capture/restore and snapshot ELF export have been restored as active
+source, but their selftests and runtime gates still need to land and pass
+before the snapshot workstream can be called complete.
 
 ## Publication Checklist
 
@@ -140,8 +147,8 @@ Before treating UML v2 as publishable, verify:
 - checkpatch on changed KVM v2 patches has no unexplained warnings;
 - public docs describe the design and validation state, not the development
   history;
-- retired experiments are absent from source, Kconfig, selftests, and
-  publication-facing docs.
+- historical-only experiments are either imported with tests or clearly marked
+  as not part of the completed branch.
 
 ## Maintenance Rules
 
