@@ -24,6 +24,15 @@
 #include <poll.h>
 #include <os.h>
 
+#ifndef SEEK_DATA
+#define SEEK_DATA 3
+#endif
+#ifndef SEEK_HOLE
+#define SEEK_HOLE 4
+#endif
+
+#define SPARSE_COPY_CHUNK (1024 * 1024)
+
 static void copy_stat(struct uml_stat *dst, const struct stat64 *src)
 {
 	*dst = ((struct uml_stat) {
@@ -312,6 +321,97 @@ int os_write_file(int fd, const void *buf, int len)
 	if (n < 0)
 		return -errno;
 	return n;
+}
+
+int os_sparse_copy_file(int src_fd, int dst_fd, unsigned long long start,
+			unsigned long long len)
+{
+	unsigned long long end = start + len;
+	unsigned long long pos = start;
+	char *buf;
+	int ret = 0;
+
+	if (end < start)
+		return -EINVAL;
+
+	buf = mmap(NULL, SPARSE_COPY_CHUNK, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (buf == MAP_FAILED)
+		return -ENOMEM;
+
+	while (pos < end) {
+		unsigned long long data, hole, off;
+		off64_t r;
+
+		r = lseek64(src_fd, pos, SEEK_DATA);
+		if (r < 0) {
+			if (errno == ENXIO)
+				break;
+			ret = errno == EINVAL ? -EOPNOTSUPP : -errno;
+			goto out;
+		}
+		data = r;
+		if (data >= end)
+			break;
+
+		r = lseek64(src_fd, data, SEEK_HOLE);
+		if (r < 0) {
+			ret = errno == EINVAL ? -EOPNOTSUPP : -errno;
+			goto out;
+		}
+		hole = r;
+		if (hole > end)
+			hole = end;
+
+		off = data;
+		while (off < hole) {
+			size_t want;
+			ssize_t n;
+			size_t got;
+			size_t done = 0;
+
+			want = hole - off;
+			if (want > SPARSE_COPY_CHUNK)
+				want = SPARSE_COPY_CHUNK;
+
+			do {
+				n = pread64(src_fd, buf, want, off);
+			} while (n < 0 && errno == EINTR);
+			if (n < 0) {
+				ret = -errno;
+				goto out;
+			}
+			if (n == 0) {
+				ret = -EIO;
+				goto out;
+			}
+
+			got = n;
+			while (done < got) {
+				ssize_t w;
+
+				do {
+					w = pwrite64(dst_fd, buf + done,
+						     got - done, off + done);
+				} while (w < 0 && errno == EINTR);
+				if (w < 0) {
+					ret = -errno;
+					goto out;
+				}
+				if (w == 0) {
+					ret = -EIO;
+					goto out;
+				}
+				done += w;
+			}
+			off += got;
+		}
+		pos = hole;
+	}
+
+out:
+	munmap(buf, SPARSE_COPY_CHUNK);
+	return ret;
 }
 
 int os_sync_file(int fd)

@@ -182,6 +182,34 @@ int um_pool_remap_self_test(void)
 }
 EXPORT_SYMBOL_GPL(um_pool_remap_self_test);
 
+static int um_pool_full_copy_physmem(int new_fd, void *base, unsigned long len,
+				     unsigned long long phys_off)
+{
+	void *scratch;
+	int ret;
+
+	ret = os_mmap_rw_scratch(new_fd, 0, physmem_size, &scratch);
+	if (ret < 0)
+		return ret;
+
+	memcpy((char *)scratch + phys_off, base, len);
+
+	if (phys_off > 0) {
+		ret = os_seek_file(physmem_fd, 0);
+		if (ret == 0)
+			ret = os_read_file(physmem_fd, scratch, phys_off);
+		if (ret < 0) {
+			os_unmap_memory(scratch, physmem_size);
+			return ret;
+		}
+	}
+
+	if (os_unmap_memory(scratch, physmem_size) < 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 /**
  * um_pool_replicate_physmem() - give a forked pool member private physmem backing.
  *
@@ -197,7 +225,6 @@ EXPORT_SYMBOL_GPL(um_pool_remap_self_test);
  */
 int um_pool_replicate_physmem(void)
 {
-	void *scratch;
 	void *base = (void *)uml_reserved;
 	int new_fd, ret;
 	unsigned long long phys_off;
@@ -224,37 +251,15 @@ int um_pool_replicate_physmem(void)
 		return new_fd;
 	}
 
-	/*
-	 * mmap the new fd as a scratch VA so we can populate it
-	 * from the kernel's existing physmem-VA mapping (which is
-	 * still backed by master's physmem_fd at this point).
-	 */
-	ret = os_mmap_rw_scratch(new_fd, 0, physmem_size, &scratch);
+	phys_off = (unsigned long long)__pa((unsigned long)base);
+	/* Preserve holes in the tmpfs physmem file; fall back if unsupported. */
+	ret = os_sparse_copy_file(physmem_fd, new_fd, 0, physmem_size);
+	if (ret < 0)
+		ret = um_pool_full_copy_physmem(new_fd, base, len, phys_off);
 	if (ret < 0) {
 		os_close_file(new_fd);
 		local_irq_restore(flags);
 		return ret;
-	}
-
-	phys_off = (unsigned long long)__pa((unsigned long)base);
-	memcpy((char *)scratch + phys_off, base, len);
-
-	if (phys_off > 0) {
-		ret = os_seek_file(physmem_fd, 0);
-		if (ret == 0)
-			ret = os_read_file(physmem_fd, scratch, phys_off);
-		if (ret < 0) {
-			os_unmap_memory(scratch, physmem_size);
-			os_close_file(new_fd);
-			local_irq_restore(flags);
-			return ret;
-		}
-	}
-
-	if (os_unmap_memory(scratch, physmem_size) < 0) {
-		os_close_file(new_fd);
-		local_irq_restore(flags);
-		return -EFAULT;
 	}
 
 	/*

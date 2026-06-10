@@ -164,6 +164,8 @@ extern ssize_t os_writev(int fd, const struct iovec *iov, int iovcnt);
 extern int os_read_file(int fd, void *buf, int len);
 extern int os_write_file(int fd, const void *buf, int count);
 extern int os_sync_file(int fd);
+int os_sparse_copy_file(int src_fd, int dst_fd, unsigned long long start,
+			unsigned long long len);
 extern int os_file_size(const char *file, unsigned long long *size_out);
 extern int os_pread_file(int fd, void *buf, int len, unsigned long long offset);
 extern int os_pwrite_file(int fd, const void *buf, int count, unsigned long long offset);

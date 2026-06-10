@@ -203,20 +203,22 @@ Current validation result:
   lacks the mconsole path needed for successful exec.
 - `pool-port-forward-smoke` passes for typed result/error handling.
 - A reduced `pool-bench` passes all five gates with live replicated children:
-  p50 1.3 ms, p99 1.6 ms, 3/3 live RSS children at 152.4 MiB, 0.00% lifecycle
+  p50 1.4 ms, p99 1.4 ms, 3/3 live RSS children at 146.0 MiB, 0.00% lifecycle
   drift across five cycles, and 4/4 throughput takes in a two-second gate.
 - The full default-scale `pool-bench` runs to completion but fails 2/5 gates:
-  p50 1.3 ms, p99 1.6 ms, and 0.09% lifecycle drift pass; RSS is 17,262.7 MiB
-  for 100/100 live children against a 200 MiB gate, and throughput is
-  2246/3000 takes against a 2700 gate.
+  p50 1.3 ms, p99 1.6 ms, and 0.10% lifecycle drift pass; sparse physmem copy
+  improves RSS from 17,262.7 MiB to 7,409.4 MiB for 100/100 live children, but
+  the 200 MiB gate still fails, and throughput is 2250/3000 takes against a
+  2700 gate.
 
 Remaining work:
 
 - Keep `cargo fmt --check` and `cargo test` in `tools/uml/uml-launcher` green;
   the warm-ready update passed both.
 - Fix full-scale pool memory amplification and throughput. The current
-  correctness-oriented replicated physmem path is stable, but it does not meet
-  the original 100-member memory or 50/sec throughput targets.
+  sparse-copied replicated physmem path is stable and better than the full-copy
+  path, but it still does not meet the original 100-member memory or 50/sec
+  throughput targets.
 - Decide the final request-specific warm scheduling contract: either add a
   predeclared slot/identity API before warm fork, or route syzkaller through
   daemon-assigned ready identities with `pool take --ready`.

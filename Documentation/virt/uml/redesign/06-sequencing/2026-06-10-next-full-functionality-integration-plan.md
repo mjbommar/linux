@@ -1316,8 +1316,9 @@ timeout --kill-after=5 180 env UM_FORK_KERNEL=$PWD/linux \
 Result:
 
 - PASS in the reduced validation gate;
-- take p50 was 1.3 ms and p99 was 1.6 ms over five measured takes;
-- RSS sampled 3/3 live replicated children and total RSS was 152.4 MiB;
+- take p50 was 1.4 ms and p99 was 1.4 ms over five measured takes;
+- RSS sampled 3/3 live sparse-copied replicated children and total RSS was
+  146.0 MiB;
 - lifecycle RSS drift was 0.00% over five take/destroy cycles;
 - throughput completed 4/4 takes in the 2-second reduced gate;
 - this proves the benchmark now measures live children, but it is not a
@@ -1335,13 +1336,14 @@ Result:
 
 - FAIL overall, 3/5 gates passed;
 - take p50 was 1.3 ms and p99 was 1.6 ms over 1000 measured takes;
-- RSS sampled 100/100 live replicated children and total RSS was 17,262.7 MiB,
-  failing the 200 MiB gate;
+- RSS sampled 100/100 live replicated children and total RSS improved from
+  17,262.7 MiB with full physmem copy to 7,409.4 MiB with sparse extent copy,
+  still failing the 200 MiB gate;
 - lifecycle RSS drift was 0.09% over 10,000 take/destroy cycles;
-- throughput completed 2246/3000 target takes in the 60-second gate, below the
+- throughput completed 2250/3000 target takes in the 60-second gate, below the
   2700 pass threshold;
-- this makes memory amplification from full per-member physmem replication the
-  next pool correctness/performance blocker.
+- this makes memory amplification from per-member private copies of populated
+  physmem extents the next pool correctness/performance blocker.
 
 Immediate engineering conclusion:
 
@@ -1361,8 +1363,9 @@ Immediate engineering conclusion:
 ## Immediate Next Actions
 
 1. Fix the full-scale pool benchmark failures: 100 live replicated members
-   currently consume 17,262.7 MiB RSS against the 200 MiB target, and 60-second
-   throughput reaches 2246/3000 takes against the 2700 pass threshold.
+   currently consume 7,409.4 MiB RSS against the 200 MiB target after sparse
+   extent copying, and 60-second throughput reaches 2250/3000 takes against the
+   2700 pass threshold.
 2. Decide whether request-specific warm scheduling needs a predeclared slot API
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.
