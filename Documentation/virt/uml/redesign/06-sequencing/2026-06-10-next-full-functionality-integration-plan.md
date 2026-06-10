@@ -1254,6 +1254,8 @@ Result:
 - iteration 1 reached `MEMBER_DONE` and remains alive rather than exiting PID
   1;
 - iteration 2 timed out before the second `POOL_ENTER`;
+- iteration 2 left the child-pid write-back slot at `0`, so the master did
+  not reach the supervisor-visible pid report;
 - no kernel panic was observed;
 - no v1 ceiling regression was observed;
 - no live UML process remained after process-group teardown;

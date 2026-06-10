@@ -117,6 +117,15 @@ def read_log():
     except FileNotFoundError:
         return ""
 
+def child_pid_slot():
+    try:
+        data = os.pread(fd, 4, 260)
+    except OSError:
+        return 0
+    if len(data) != 4:
+        return 0
+    return struct.unpack("<I", data)[0]
+
 def kill_uml_tree(p):
     try:
         os.killpg(p, signal.SIGKILL)
@@ -148,17 +157,18 @@ for i in range(1, N+1):
         c = count_done()
         if c > prev:
             prev = c
-            print(f"iter {i}: MEMBER_DONE total={c}")
+            print(f"iter {i}: MEMBER_DONE total={c} child_pid={child_pid_slot()}")
             break
         content = read_log()
         if i > 1 and (content.count("Kernel panic") > panic_base or
                       content.count("segfault at") > segv_base):
-            print(f"iter {i}: observed panic/segfault while awaiting member")
+            print(f"iter {i}: observed panic/segfault while awaiting member "
+                  f"child_pid={child_pid_slot()}")
             fatal_seen = True
             break
         time.sleep(0.2)
     else:
-        print(f"iter {i}: TIMEOUT")
+        print(f"iter {i}: TIMEOUT child_pid={child_pid_slot()}")
         break
     if fatal_seen:
         break

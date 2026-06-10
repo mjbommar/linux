@@ -140,8 +140,9 @@ Current validation result:
   first member because repeated members hit the MAP_SHARED physmem/member
   ownership limit.  The harness now keeps the first accepted member alive,
   records the current member identity for each take, and narrows the second
-  member failure to a timeout before the second `POOL_ENTER`, with no kernel
-  panic, v1 ceiling regression, or live UML process leak in the bounded run.
+  member failure to a timeout before the second `POOL_ENTER` with the child-pid
+  write-back slot still zero, and with no kernel panic, v1 ceiling regression,
+  or live UML process leak in the bounded run.
 
 Remaining work:
 

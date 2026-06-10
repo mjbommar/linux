@@ -152,9 +152,9 @@ Current boundary:
   first member because the current MAP_SHARED physmem model does not support
   the repeated member lifetime this test requires; the harness keeps the first
   member alive, stamps each requested member identity, and now narrows the
-  second-member failure to a timeout before the second `POOL_ENTER`, with no
-  kernel panic, v1 ceiling regression, or live UML process leak in the bounded
-  run;
+  second-member failure to a timeout before the second `POOL_ENTER` with the
+  child-pid write-back slot still zero, and with no kernel panic, v1 ceiling
+  regression, or live UML process leak in the bounded run;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before
