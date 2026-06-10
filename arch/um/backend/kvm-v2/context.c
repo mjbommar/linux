@@ -242,54 +242,35 @@ static void kvm_v2_vm_enable_optional_caps(int vm_fd)
 #endif
 }
 
-static void kvm_v2_vm_init_state(int kvm_fd, int vm_fd, u64 caps)
+static void kvm_v2_vm_reset_runtime_state(void)
 {
-	vm.kvm_fd = kvm_fd;
-	vm.vm_fd  = vm_fd;
-	vm.caps   = caps;
-	vm.cpuid  = NULL;	/* vCPU path owns CPUID query + install. */
+	vm.cpuid = NULL;
 	INIT_LIST_HEAD(&vm.memslots);
-	/*
-	 * Memslot id bitmap. Zero on create even though the static is
-	 * zero-initialised at boot; explicit clear keeps the create path
-	 * correct across VM teardown and reinitialisation.
-	 */
 	bitmap_zero(vm.memslot_bitmap, KVM_V2_MAX_USER_MEM_SLOTS);
 	spin_lock_init(&vm.lock);
-	/*
-	 * Filled by kvm_v2_trampoline_alloc_and_install. Best-effort here; the
-	 * buddy allocator may not be up yet, so late init retries.
-	 */
+
 	vm.trampoline_page = NULL;
-	vm.trampoline_gpa  = 0;
-	/*
-	 * Install is attempted below; lazy retry from trampoline_late_install
-	 * picks up an init_backend-time defer once uml_physmem / physmem_size
-	 * are set.
-	 */
+	vm.trampoline_gpa = 0;
 	vm.physmem_memslot_id = -1;
-	/*
-	 * Kernel-half PT chain; installed by the subsys_initcall lazy retry once
-	 * the trampoline allocation above lands. Avoid an eager attempt here
-	 * because the chain's leaf PTE references the trampoline GPA, which
-	 * itself can defer before the buddy allocator is ready.
-	 */
 	vm.trampoline_pud_kva = NULL;
 	vm.trampoline_pmd_kva = NULL;
 	vm.trampoline_pte_kva = NULL;
 	vm.trampoline_pud_gpa = 0;
-	/*
-	 * IDT + handler stubs + GDT pages. Installed by the subsys_initcall
-	 * lazy retry once the kernel-half PT chain is up. No eager attempt
-	 * at vm_create because the buddy allocator and trampoline PTE table
-	 * may not exist yet. Sentinel NULL means "not installed yet".
-	 */
-	vm.idt_kva       = NULL;
-	vm.idt_gpa       = 0;
-	vm.handlers_kva  = NULL;
-	vm.handlers_gpa  = 0;
-	vm.gdt_kva       = NULL;
-	vm.gdt_gpa       = 0;
+
+	vm.idt_kva = NULL;
+	vm.idt_gpa = 0;
+	vm.handlers_kva = NULL;
+	vm.handlers_gpa = 0;
+	vm.gdt_kva = NULL;
+	vm.gdt_gpa = 0;
+}
+
+static void kvm_v2_vm_init_state(int kvm_fd, int vm_fd, u64 caps)
+{
+	kvm_v2_vm_reset_runtime_state();
+	vm.kvm_fd = kvm_fd;
+	vm.vm_fd = vm_fd;
+	vm.caps = caps;
 }
 
 static int kvm_v2_vm_install_deferred_state(void)
@@ -348,26 +329,10 @@ static void kvm_v2_vm_log_create_result(void)
 
 static void kvm_v2_vm_reset_state(void)
 {
+	kvm_v2_vm_reset_runtime_state();
 	vm.kvm_fd = -1;
 	vm.vm_fd = -1;
 	vm.caps = 0;
-	vm.cpuid = NULL;
-	INIT_LIST_HEAD(&vm.memslots);
-	bitmap_zero(vm.memslot_bitmap, KVM_V2_MAX_USER_MEM_SLOTS);
-	spin_lock_init(&vm.lock);
-	vm.trampoline_page = NULL;
-	vm.trampoline_gpa = 0;
-	vm.physmem_memslot_id = -1;
-	vm.trampoline_pud_kva = NULL;
-	vm.trampoline_pmd_kva = NULL;
-	vm.trampoline_pte_kva = NULL;
-	vm.trampoline_pud_gpa = 0;
-	vm.idt_kva = NULL;
-	vm.idt_gpa = 0;
-	vm.handlers_kva = NULL;
-	vm.handlers_gpa = 0;
-	vm.gdt_kva = NULL;
-	vm.gdt_gpa = 0;
 }
 
 static void kvm_v2_vm_drain_memslots(void)
