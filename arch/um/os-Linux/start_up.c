@@ -254,8 +254,10 @@ void  __init get_host_cpu_features(
  *   backend=auto                  - Kconfig default + using_seccomp probe
  *   backend=ptrace                - prefer ptrace; use seccomp if unavailable
  *   backend=seccomp               - prefer seccomp; use seccomp if unavailable
+ *   backend=kvm                   - prefer KVM; use seccomp if unavailable
  *   backend=force=ptrace          - require ptrace; panic if N/A
  *   backend=force=seccomp         - require seccomp; panic if N/A
+ *   backend=force=kvm             - require KVM; panic if N/A
  *
  * The seccomp=on/auto/off boot param is accepted as a compatibility
  * alias; backend= takes precedence when both are set.
@@ -304,17 +306,17 @@ static int __init uml_backend_config(char *line, int *add)
 
 __uml_setup("backend=", uml_backend_config,
 	    "backend=<auto|seccomp|kvm|force=seccomp|force=kvm>\n"
-	    "    Pick the trap mechanism. auto' (default) uses Kconfig +\n"
+	    "    Pick the trap mechanism. auto (default) uses Kconfig plus\n"
 	    "    runtime probe. Bare names are preferences that resolve\n"
-	    "    to seccomp if the requested backend isn't built. force=' makes\n"
-	    "    the choice mandatory and panics if the requested backend isn't\n"
+	    "    to seccomp if the requested backend is not built. force= makes\n"
+	    "    the choice mandatory and panics if the requested backend is not\n"
 	    "    compiled in or fails its probe.\n"
 	    "\n"
-	    "    ptrace' is parsed for compatibility, but the ptrace backend is\n"
-	    "    not built by this tree. kvm' selects the KVM v2 backend when\n"
+	    "    ptrace is parsed for compatibility, but the ptrace backend is\n"
+	    "    not built by this tree. kvm selects the KVM v2 backend when\n"
 	    "    CONFIG_UM_BACKEND_KVM_V2 is enabled.\n"
 	    "\n"
-	    "    Replaces seccomp=on/auto/off', which is still accepted as a\n"
+	    "    Replaces seccomp=on/auto/off, which is still accepted as a\n"
 	    "    compatibility alias.\n\n");
 
 static int seccomp_config __initdata;
@@ -387,11 +389,6 @@ void __init os_early_checks(void)
 
 		if (seccomp_config == 2)
 			fatal("SECCOMP userspace requested but not functional!\n");
-			/*
-			 * backend=force=seccomp will be panicked by init_backend
-			 * once it sees using_seccomp == 0; we don't fatal here so
-			 * the probe failure above remains the user-visible signal.
-			 */
 		}
 
 	/*
