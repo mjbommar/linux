@@ -1109,7 +1109,7 @@ branch lands.
 | Record/replay | Historical/prototype | Complete or experimental | Open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
-| Fork server | Fork-on-resume master survives one iteration only | Complete multi-iteration fork workflow | Open, needs fix |
+| Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
 | Pool exec | Daemon failure envelope validated | Successful mconsole exec path validated | Partially closed |
 | Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
@@ -1211,8 +1211,6 @@ Result:
 - bogus PID fails cleanly;
 - missing `--host-port` exits through clap with status 2.
 
-Commands that still fail or remain expected failures:
-
 ```sh
 timeout --kill-after=5 90 env UML_BINARY=$PWD/linux \
 	tools/testing/selftests/um/template-pause-fork-smoke/run-template-pause-fork-smoke.sh
@@ -1220,11 +1218,30 @@ timeout --kill-after=5 90 env UML_BINARY=$PWD/linux \
 
 Result:
 
-- FAIL;
-- identity blob parsing was observed;
-- pre-fork teardown and one master resume cycle were observed;
-- the master did not survive past one fork iteration and must reach at least
-  two iterations before this can count as complete.
+- PASS;
+- two distinct child PIDs were reported through the identity memfd;
+- identity blob parsing was observed twice;
+- pre-fork teardown was observed twice;
+- the master logged two resume cycles, proving that the harness drove the
+  second take instead of killing the master at the second stop.
+
+```sh
+timeout --kill-after=5 150 env UML_BINARY=$PWD/linux \
+	tools/testing/selftests/um/template-pause-fork-stress/run-template-pause-fork-stress.sh
+```
+
+Result:
+
+- PASS;
+- 548 kernel-log iterations over a 10 second observation window;
+- 435 distinct child PIDs observed by the harness;
+- median iteration time 18.2 ms, under the 50 ms budget;
+- 548/548 clean identity round-trips across 20 distinct names;
+- no kernel panics;
+- no live orphans after teardown;
+- `/proc` side-channel captured 98.2% of kernel-log iterations.
+
+Commands that still fail or remain expected failures:
 
 ```sh
 timeout --kill-after=5 150 env UML_BINARY=$PWD/linux \
@@ -1255,27 +1272,27 @@ Result:
 - take latency, lifecycle drift, and throughput gates pass;
 - the live-child count was `0/5`, so the RSS gate is not a valid completion
   signal yet;
-- this aligns with the sustained pool-member and fork-on-resume lifetime
-  limitations.
+- this aligns with the sustained pool-member lifetime limitation.
 
 Immediate engineering conclusion:
 
 - current `next` already has the broad pool/fork command surface;
-- single template pause, identity apply, pivot, one-shot pool member, spawn,
-  serve, typed exec error handling, and port-forward result handling are real;
-- final completion requires fixing master fork survival, repeated pool-member
-  lifetime, real warm `min_warm`, vector2 TAP/fd pool networking, and the
-  syzkaller take/exec/destroy path.
+- single template pause, fork-on-resume smoke/stress, identity apply, pivot,
+  one-shot pool member, spawn, serve, typed exec error handling, and
+  port-forward result handling are real;
+- final completion requires fixing repeated pool-member lifetime, real warm
+  `min_warm`, vector2 TAP/fd pool networking, successful daemon-routed guest
+  exec, and the syzkaller take/exec/destroy path.
 
 ## Immediate Next Actions
 
-1. Fix template-pause fork-on-resume so the master survives repeated member
-   creation instead of stopping after one fork/resume cycle.
-2. Fix sustained pool-member lifetime with a real per-member physmem fd model
+1. Fix sustained pool-member lifetime with a real per-member physmem fd model
    or equivalent production design.
-3. Complete real warm-pool `min_warm` behavior.
-4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
+2. Complete real warm-pool `min_warm` behavior.
+3. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
+4. Prove successful daemon-routed guest exec through the final member mconsole
+   path.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
 6. Decide whether private state trace is worth importing as clean optional

@@ -130,17 +130,19 @@ Current validation result:
   guest `vec0` is absent.
 - `template-pause-pivot-smoke` passes.
 - `template-pause-pool-member-smoke` passes.
-- `template-pause-fork-smoke` fails because the master reaches only one
-  fork/resume cycle.
+- `template-pause-fork-smoke` passes after the harness drives two
+  SIGSTOP/SIGCONT cycles; it reports two distinct child PIDs and observes two
+  master resume cycles.
+- `template-pause-fork-stress` passes its default gate with 548 kernel
+  iterations, median 18.2 ms iteration time, 548/548 clean identity
+  round-trips, no kernel panics, and no live orphans.
 - `template-pause-pool-sustained-smoke` is still an expected failure after the
   first member because repeated members hit the MAP_SHARED physmem limit.
 
 Remaining work:
 
-- Fix fork-on-resume master survival.
 - Fix sustained member lifetime with production code, likely by giving members
   independent physmem file descriptors or an equivalent ownership model.
-- Run `template-pause-fork-stress` after the smoke is fixed.
 - Validate the vector2 leg of `template-pause-smoke` when a guest-visible
   `vec0` device is available.
 
@@ -302,7 +304,7 @@ Remaining work:
 | Area | Current status on `next` | Historical source | Completion action |
 | ---- | ------------------------ | ----------------- | ----------------- |
 | Template pause single-shot | Present, validated | `fork-server-phase1c`, `memo09-*` | Keep cleaned source; validate vector2 leg when guest `vec0` is visible. |
-| Template pause fork-on-resume | Present, failing | `memo09-phase2`, `memo09-phase4` | Fix master survival, then run smoke/stress. |
+| Template pause fork-on-resume | Present, validated | `memo09-phase2`, `memo09-phase4` | Keep smoke and stress green. |
 | Template pause pivot mode | Present, validated | `memo09-phase4`, current `next` | Keep. |
 | Template pause pool-member mode | Present, partially validated | `memo09-phase4`, current `next` | One-shot member passes; sustained lifetime needs production fix. |
 | Identity blob parse/apply | Present, validated | `memo09-phase2`, `memo09-phase4` | Keep KUnit plus live pool validation. |

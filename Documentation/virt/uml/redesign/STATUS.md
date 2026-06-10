@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 pool/fork validation snapshot.
+Last updated: 2026-06-10 fork smoke and stress validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -139,11 +139,15 @@ Current boundary:
   pool-member mode, per-member mconsole path handling, and related selftests;
 - `template-pause-smoke` now completes with bounded teardown: cases 1-3 pass
   and the vector2 case skips when `vec0` is not visible in the guest;
-- `template-pause-pivot-smoke`, `template-pause-pool-member-smoke`,
+- `template-pause-fork-smoke`, `template-pause-fork-stress`,
+  `template-pause-pivot-smoke`, `template-pause-pool-member-smoke`,
   `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`, and
   `pool-port-forward-smoke` pass against the current `./linux` build;
-- `template-pause-fork-smoke` still fails because the master survives only one
-  fork/resume iteration;
+- `template-pause-fork-smoke` now drives two SIGSTOP/SIGCONT cycles and
+  observes two distinct child PIDs plus two master resume cycles;
+- `template-pause-fork-stress` passed its default gate with 548 kernel
+  iterations in 10 seconds, median 18.2 ms iteration time, 548/548 clean
+  identity round-trips, no kernel panics, and no live orphans after teardown;
 - `template-pause-pool-sustained-smoke` remains an expected failure after the
   first member because the current MAP_SHARED physmem model does not support
   the repeated member lifetime this test requires;

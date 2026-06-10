@@ -56,8 +56,8 @@ IEOF
 chmod +x "$OUT/init.sh"
 
 # Python harness: memfd_create, write identity blob, dup off
-# CLOEXEC, fork+exec UML, wait for SIGSTOP, send SIGCONT, read
-# child pid back from memfd[260:264].
+# CLOEXEC, fork+exec UML, drive two SIGSTOP/SIGCONT cycles, and
+# read child pids back from memfd[260:264].
 python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" <<'PYEOF' || PYRC=$?
 import ctypes, ctypes.util, fcntl, os, signal, struct, sys, time
 
@@ -111,6 +111,53 @@ def state(p):
         return None
     return None
 
+def log_count(needle):
+    try:
+        with open(log_path, "rb") as f:
+            return f.read().count(needle)
+    except FileNotFoundError:
+        return 0
+
+def wait_for_log_count(needle, expected, message, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if log_count(needle) >= expected:
+            return
+        s = state(pid)
+        if s is None:
+            sys.exit(f"UML died while waiting for {message}")
+        time.sleep(0.1)
+    sys.exit(f"timeout waiting for {message}")
+
+def wait_for_stop(message, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = state(pid)
+        if s in ("T", "t"):
+            return
+        if s is None:
+            sys.exit(f"UML died before {message}")
+        time.sleep(0.1)
+    sys.exit(f"timeout waiting for {message}")
+
+def zero_reported_child_pid():
+    os.lseek(fd, 260, 0)
+    os.write(fd, b"\x00\x00\x00\x00")
+
+def read_reported_child_pid(message, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        os.lseek(fd, 260, 0)
+        child_pid_bytes = os.read(fd, 4)
+        child_pid = struct.unpack("<I", child_pid_bytes)[0]
+        if child_pid > 0:
+            return child_pid
+        s = state(pid)
+        if s is None:
+            sys.exit(f"UML died before reporting {message}")
+        time.sleep(0.1)
+    sys.exit(f"timeout waiting for {message}")
+
 # Wait for the initial single-shot pause inside the fork loop's first
 # one_pause_cycle.
 deadline = time.time() + 30
@@ -125,21 +172,28 @@ else:
     sys.exit("never saw SIGSTOP")
 
 os.kill(pid, signal.SIGCONT)
+first_child_pid = read_reported_child_pid("first child pid")
+wait_for_log_count(b"template_pause: raising SIGSTOP", 2,
+                   "second SIGSTOP")
+wait_for_stop("second SIGSTOP")
 
-# Wait a moment for fork to happen, then read child pid from memfd.
-time.sleep(2.0)
-os.lseek(fd, 260, 0)
-child_pid_bytes = os.read(fd, 4)
-child_pid = struct.unpack("<I", child_pid_bytes)[0]
+zero_reported_child_pid()
+os.kill(pid, signal.SIGCONT)
+wait_for_log_count(b"template_pause: resumed via SIGCONT", 2,
+                   "second resume")
+second_child_pid = read_reported_child_pid("second child pid")
 
 # cleanup
 try: os.kill(pid, signal.SIGKILL)
 except OSError: pass
-try:
-    if child_pid > 0: os.kill(child_pid, signal.SIGKILL)
-except OSError: pass
+for child_pid in (first_child_pid, second_child_pid):
+    try:
+        os.kill(child_pid, signal.SIGKILL)
+    except OSError:
+        pass
 time.sleep(0.3)
-print(f"REPORTED_CHILD_PID={child_pid}")
+print(f"REPORTED_CHILD_PID={first_child_pid}")
+print(f"REPORTED_CHILD_PID_2={second_child_pid}")
 PYEOF
 PYRC=${PYRC:-0}
 
