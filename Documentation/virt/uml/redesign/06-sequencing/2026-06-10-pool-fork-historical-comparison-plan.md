@@ -188,27 +188,31 @@ Comparison result:
 
 - The command surface from `memo09-phase4` is present on `next`.
 - Current `next` is cleaner than `memo09-phase4` in user-facing comments.
-- `pool_serve.rs` still documents that `min_warm` is accepted but currently
-  serves takes on demand. That is a real functional gap if warm pool support is
-  part of completion.
+- `pool_serve.rs` now implements a `min_warm` ready queue for pre-identified
+  daemon-assigned members and exposes `pool take --ready` to consume that
+  queue. Request-specific identity takes still fork lazily because identity is
+  applied before the member is forked.
 
 Current validation result:
 
 - `pool-spawn-smoke` passes for spawn, list, and destroy lifecycle.
-- `pool-serve-smoke` passes for daemon readiness, status, take, destroy,
-  shutdown, and master cleanup.
+- `pool-serve-smoke` passes for daemon readiness, `--min-warm=1` prefill,
+  ready take, replenish, request-specific take, destroy, shutdown, and master
+  cleanup.
 - `pool-exec-smoke` passes for typed NDJSON failure envelopes when the member
   lacks the mconsole path needed for successful exec.
 - `pool-port-forward-smoke` passes for typed result/error handling.
-- A reduced `pool-bench` passes take-latency, lifecycle-drift, and throughput
-  gates, but fails the RSS gate because no benchmark children remain live.
+- A reduced `pool-bench` passes all five gates with live replicated children:
+  p50 1.3 ms, p99 1.6 ms, 3/3 live RSS children at 152.4 MiB, 0.00% lifecycle
+  drift across five cycles, and 4/4 throughput takes in a two-second gate.
 
 Remaining work:
 
-- Run `cargo fmt --check` and `cargo test` in `tools/uml/uml-launcher`.
-- Complete real `min_warm` behavior. Because the overall policy is to import
-  or complete all promised functionality, lazy-only compatibility is not enough
-  for final completion.
+- Keep `cargo fmt --check` and `cargo test` in `tools/uml/uml-launcher` green;
+  the warm-ready update passed both.
+- Decide the final request-specific warm scheduling contract: either add a
+  predeclared slot/identity API before warm fork, or route syzkaller through
+  daemon-assigned ready identities with `pool take --ready`.
 - Fix or prove the successful member mconsole exec path.
 - Re-run full `pool-bench` after fork/member lifetime fixes.
 - Keep validated failure reporting for kernels that lack the required mconsole
@@ -322,12 +326,12 @@ Remaining work:
 | Per-member mconsole path | Present, needs fix/proof | `memo09-phase4` | Error envelope validated; successful exec still pending. |
 | Vector2 TAP/fd handoff | Present hook, needs validation | `memo09-phase4`, `umlctl-deploy` | Validate through pool member and vector2 smoke. |
 | Direct pool spawn | Present, validated | `memo09-*` | Keep `pool-spawn-smoke` green. |
-| Pool daemon serve/take/status | Present, validated | `fork-server-phase1c`, `memo09-phase4` | Extend validation after warm-pool work. |
+| Pool daemon serve/take/status | Present, validated | `fork-server-phase1c`, `memo09-phase4` | Keep live-member and warm-ready smokes green. |
 | Pool destroy/shutdown | Present, validated | `memo09-phase4` | Keep in lifecycle smoke. |
 | Daemon-routed exec | Present, partially validated | `memo09-phase4` | Missing-feature failures are validated; successful exec still pending. |
 | Port-forward result | Present, validated | `memo09-phase4` | Tie to final network validation. |
-| Warm pool `min_warm` | Partial | `memo09-phase3-pool-bench`, `memo09-phase4` | Complete real pre-warm queue. |
-| Pool benchmark | Present, needs fix | `memo09-phase3-pool-bench`, `memo09-phase4` | 4/5 reduced gates pass; fix live-child/RSS gate. |
+| Warm pool `min_warm` | Present for daemon-assigned ready members | `memo09-phase3-pool-bench`, `memo09-phase4` | Decide request-specific warm identity scheduling. |
+| Pool benchmark | Present, reduced gate passes | `memo09-phase3-pool-bench`, `memo09-phase4` | Run full default-scale gate. |
 | Syzkaller VM shim | Present, unvalidated | `memo09-phase4`, current `next` | Build and run syzkaller-style take/exec/destroy smoke. |
 | Snapshot bench kselftest | Historical-only wrapper | `memo09-phase4` | Import clean wrapper around active kernel hook. |
 | Snapshot KUnit kselftest wrapper | Historical-only wrapper | `memo09-phase4` | Import or replace for current 4-case KUnit suite. |
@@ -417,14 +421,17 @@ Expected outcome:
 
 Current state:
 
-- `pool serve --min-warm` is accepted for compatibility.
-- The daemon currently serves takes on demand.
+- `pool serve --min-warm` maintains pre-identified ready members.
+- Request-specific identity takes currently serve lazily to preserve identity
+  correctness.
 
 Required final behavior:
 
 - `min_warm=N` maintains up to `N` pre-taken, ready members when possible.
-- A `take` consumes a ready member when available.
-- The daemon replenishes asynchronously after a successful take.
+- An anonymous `take` or `pool take --ready` consumes a ready member when
+  available.
+- The daemon replenishes after a successful ready take on the serialized event
+  loop.
 - The status RPC reports ready, taken, and failed member counts.
 - Shutdown and destroy clean up ready members as well as taken members.
 - Failures to pre-warm members do not wedge the daemon; status exposes the
@@ -443,7 +450,7 @@ Validation:
 - `cargo test` for request parsing, status shape, and warm-pool bookkeeping.
 - `pool-serve-smoke` for take/status/destroy/shutdown.
 - `pool-bench` for p50/p95 take latency and memory growth.
-- A new or extended smoke that proves `min_warm=1` returns an already-ready
+- Extended `pool-serve-smoke` proves `min_warm=1` returns an already-ready
   member and replenishes after take.
 
 ### Step 4: Validate TAP/fd Handoff Through Pool Members

@@ -166,17 +166,23 @@ Current boundary:
   implementation path is tracked in
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
 - `umlctl pool serve` now boots the master with replicated pool-member mode,
-  and `pool-serve-smoke` proves daemon-routed `take` returns a live runnable
-  member, retains it in daemon status, destroys it, and shuts the master down
-  cleanly;
+  maintains a separate `min_warm` ready queue, reports ready/taken/failed
+  counts in status, and exposes `pool take --ready` for consuming a
+  pre-identified ready member; `pool-serve-smoke` proves `--min-warm=1`
+  prefills one ready member, an anonymous ready take returns a live runnable
+  pid, the daemon replenishes the ready queue, request-specific lazy `take`
+  still returns a live runnable member, destroy makes members non-runnable,
+  and shutdown kills the master cleanly;
 - reduced `pool-bench` now passes all five gates with live replicated children:
   5/5 latency takes, 3/3 live RSS children, 0.00% lifecycle RSS drift across
   5 take/destroy cycles, and 4/4 throughput takes in a 2-second reduced gate;
 - `pool-exec-smoke` still validates the clean daemon error envelope for missing
   in-guest mconsole exec support; successful daemon-routed guest exec remains
   pending;
-- warm-pool `min_warm` behavior is still lazy-only and must be completed before
-  pool functionality is called done; and
+- request-specific warm scheduling remains intentionally lazy because the
+  kernel applies identity before forking the member; pre-warmed members carry
+  daemon-assigned identity and cannot safely be rebound to a later caller
+  MAC/TAP/mconsole request; and
 - tap-fd handoff through vector2 pool members and the syzkaller shim still need
   live end-to-end validation.
 

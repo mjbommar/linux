@@ -604,8 +604,10 @@ Current comparison result:
 - Current `next` already contains the memo09 command surfaces, cleaned
   template-pause modes, identity application, daemon-routed exec,
   port-forward, pivot and pool-member smokes, and pool benchmark.
-- The main remaining pool gap is real `min_warm` warm-pool behavior; current
-  `pool serve` accepts the option but serves takes lazily.
+- `min_warm` now maintains a daemon-owned ready queue for pre-identified
+  members and `pool take --ready` consumes that queue. Request-specific takes
+  remain lazy so the daemon does not lie about caller-supplied identity; the
+  kernel applies MAC/TAP/mconsole identity before the member is forked.
 - The remaining validation gaps are current pool/template-pause smokes,
   vector2 TAP/fd handoff through pool members, and syzkaller-style
   take/exec/destroy.
@@ -1304,9 +1306,9 @@ Detailed implementation plan:
   final pool/vector2/syzkaller acceptance gates.
 
 ```sh
-timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
-	POOL_BENCH_TAKES=10 POOL_BENCH_FORKS=5 \
-	POOL_BENCH_LIFECYCLE_N=10 POOL_BENCH_THROUGHPUT_S=3 \
+timeout --kill-after=5 180 env UM_FORK_KERNEL=$PWD/linux \
+	POOL_BENCH_TAKES=5 POOL_BENCH_FORKS=3 \
+	POOL_BENCH_LIFECYCLE_N=5 POOL_BENCH_THROUGHPUT_S=2 \
 	POOL_BENCH_THROUGHPUT_R=2 \
 	tools/testing/selftests/um/pool-bench/run-pool-bench.sh
 ```
@@ -1315,7 +1317,7 @@ Result:
 
 - PASS in the reduced validation gate;
 - take p50 was 1.3 ms and p99 was 1.6 ms over five measured takes;
-- RSS sampled 3/3 live replicated children and total RSS was 151.8 MiB;
+- RSS sampled 3/3 live replicated children and total RSS was 152.4 MiB;
 - lifecycle RSS drift was 0.00% over five take/destroy cycles;
 - throughput completed 4/4 takes in the 2-second reduced gate;
 - this proves the benchmark now measures live children, but it is not a
@@ -1329,15 +1331,20 @@ Immediate engineering conclusion:
   port-forward result handling are real;
 - replicated sustained pool-member lifetime now passes in the direct harness;
 - daemon pool take/serve now routes through the replicated live-member path;
-- final completion requires real warm `min_warm`, full-scale pool benchmark
-  validation, vector2 TAP/fd pool networking, successful daemon-routed guest
-  exec, and the syzkaller take/exec/destroy path.
+- daemon `min_warm` now prefills, consumes, replenishes, reports, and cleans up
+  pre-identified ready members through `pool take --ready`;
+- final completion requires full-scale pool benchmark validation,
+  request-specific warm scheduling decision or API, vector2 TAP/fd pool
+  networking, successful daemon-routed guest exec, and the syzkaller
+  take/exec/destroy path.
 
 ## Immediate Next Actions
 
-1. Complete real warm-pool `min_warm` behavior.
-2. Re-run the full default-scale pool benchmark now that RSS samples live
+1. Re-run the full default-scale pool benchmark now that RSS samples live
    replicated children.
+2. Decide whether request-specific warm scheduling needs a predeclared slot API
+   or whether syzkaller should consume daemon-assigned ready identities through
+   `pool take --ready`.
 3. Validate successful daemon-routed guest exec through the final member
    mconsole path.
 4. Validate vector2 TAP/fd handoff through pool members and the syzkaller

@@ -284,9 +284,13 @@ Status:
   `um_template_pause_pool_replicate=1`;
 - `pool-serve-smoke` proves daemon-routed `take` returns a live runnable
   member and that `destroy` makes it non-runnable;
+- `--min-warm=1` now prefills one pre-identified ready member, an anonymous
+  ready take consumes it, status reports ready/taken/failed counts, and the
+  daemon replenishes the ready queue before shutdown cleanup;
 - reduced `pool-bench` now samples live replicated children and passes the RSS
   gate with 3/3 live members;
-- real `min_warm` prefill/replenish behavior remains open.
+- request-specific takes remain lazy so caller-supplied MAC/TAP/mconsole
+  identity is applied before fork.
 
 ### Step 7: Validate User-Facing Pool Functionality
 
@@ -368,7 +372,8 @@ The original pool/fork functionality can be called complete when:
 
 - sustained member lifetime passes in production mode;
 - daemon `take` returns live members;
-- warm `min_warm` creates and replenishes ready members;
+- warm `min_warm` creates and replenishes ready members, with an explicit final
+  decision for request-specific warm identity scheduling;
 - successful daemon exec works through final member mconsole paths;
 - port-forward and vector2/TAP handoff work on live members;
 - pool-bench gates measure live children and pass;

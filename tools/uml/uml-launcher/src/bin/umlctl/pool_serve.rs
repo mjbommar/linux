@@ -19,7 +19,8 @@
 //   <-- {"ok":true,"members":[<SpawnResult>, …]}
 //
 //   --> {"op":"status"}
-//   <-- {"ok":true,"master_pid":N,"taken":K,"socket":"…","name":"…"}
+//   <-- {"ok":true,"master_pid":N,"taken":K,"ready":R,"failed":F,
+//        "socket":"…","name":"…"}
 //
 //   --> {"op":"destroy","pid":N}
 //   <-- {"ok":true,"destroyed":true,"pid":N}
@@ -42,7 +43,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -96,9 +97,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub init: Option<PathBuf>,
 
-    /// Target number of warm pre-forked members.  The current daemon
-    /// accepts the option for configuration compatibility and serves
-    /// takes on demand.  0 means lazy-only.
+    /// Target number of warm pre-forked members.  0 means lazy-only.
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub min_warm: u32,
 
@@ -187,8 +186,12 @@ struct DaemonState {
     master_pid: i32,
     identity_memfd: OwnedFd,
     members: Mutex<HashMap<i32, MemberRecord>>,
+    ready: Mutex<VecDeque<MemberRecord>>,
     shutdown_requested: AtomicI32,
     min_warm: u32,
+    warm_failed: AtomicI32,
+    warm_next_seq: AtomicI32,
+    warm_next_retry: Mutex<Instant>,
 }
 
 impl DaemonState {
@@ -214,11 +217,14 @@ impl DaemonState {
             Request::Status => {
                 self.reap_dead();
                 let members = self.members.lock().unwrap();
+                let ready = self.ready.lock().unwrap();
                 serde_json::json!({
                     "ok": true,
                     "name": self.name,
                     "master_pid": self.master_pid,
                     "taken": members.len(),
+                    "ready": ready.len(),
+                    "failed": self.warm_failed.load(Ordering::SeqCst),
                     "socket": self.socket_path.display().to_string(),
                     "min_warm": self.min_warm,
                 })
@@ -274,7 +280,7 @@ impl DaemonState {
         dir.join(format!("{}.mconsole", safe)).display().to_string()
     }
 
-    fn do_take(
+    fn fork_member(
         &self,
         instance: &str,
         mac: &str,
@@ -351,7 +357,7 @@ impl DaemonState {
             bail!("reported child pid {} is not runnable", child_pid);
         }
 
-        let rec = MemberRecord {
+        Ok(MemberRecord {
             pid: child_pid,
             instance: instance.to_string(),
             mac: mac.to_string(),
@@ -359,8 +365,30 @@ impl DaemonState {
             ipv4_cidr: ipv4.to_string(),
             ipv4_gateway: gateway.to_string(),
             mconsole_path: mconsole.to_string(),
-        };
-        self.members.lock().unwrap().insert(child_pid, rec.clone());
+        })
+    }
+
+    fn do_take(
+        &self,
+        instance: &str,
+        mac: &str,
+        tap: &str,
+        ipv4: &str,
+        gateway: &str,
+        mconsole: &str,
+    ) -> Result<MemberRecord> {
+        self.reap_dead();
+
+        if request_allows_ready_member(instance, mac, tap, ipv4, gateway, mconsole) {
+            if let Some(rec) = self.ready.lock().unwrap().pop_front() {
+                self.members.lock().unwrap().insert(rec.pid, rec.clone());
+                return Ok(rec);
+            }
+            bail!("no ready warm member available");
+        }
+
+        let rec = self.fork_member(instance, mac, tap, ipv4, gateway, mconsole)?;
+        self.members.lock().unwrap().insert(rec.pid, rec.clone());
         Ok(rec)
     }
 
@@ -491,6 +519,7 @@ impl DaemonState {
 
     fn do_destroy(&self, pid: i32) -> Result<bool> {
         let _removed = self.members.lock().unwrap().remove(&pid).is_some();
+        self.ready.lock().unwrap().retain(|rec| rec.pid != pid);
         // "Destroyed" semantics: the member is no longer a runnable
         // host process.  This includes Z (zombie) and gone-from-/proc.
         if !pid_runnable(pid) {
@@ -529,7 +558,25 @@ impl DaemonState {
         }
         let mut members = self.members.lock().unwrap();
         members.retain(|pid, _| pid_runnable(*pid));
+        let mut ready = self.ready.lock().unwrap();
+        ready.retain(|rec| pid_runnable(rec.pid));
     }
+}
+
+fn request_allows_ready_member(
+    instance: &str,
+    mac: &str,
+    tap: &str,
+    ipv4: &str,
+    gateway: &str,
+    mconsole: &str,
+) -> bool {
+    instance.is_empty()
+        && mac.is_empty()
+        && tap.is_empty()
+        && ipv4.is_empty()
+        && gateway.is_empty()
+        && mconsole.is_empty()
 }
 
 /// True iff `pid` exists in /proc AND is NOT a zombie (Z) or about-to-
@@ -791,18 +838,15 @@ pub fn cmd_serve(args: ServeArgs, paths: &crate::paths::Paths, _quiet: bool) -> 
         master_pid,
         identity_memfd,
         members: Mutex::new(HashMap::new()),
+        ready: Mutex::new(VecDeque::new()),
         shutdown_requested: AtomicI32::new(0),
         min_warm: args.min_warm,
+        warm_failed: AtomicI32::new(0),
+        warm_next_seq: AtomicI32::new(0),
+        warm_next_retry: Mutex::new(Instant::now()),
     };
 
-    // Optional pre-warm is accepted for configuration compatibility.
-    // This daemon serves takes on demand.
-    if state.min_warm > 0 {
-        eprintln!(
-            "umlctl pool serve: min_warm={} requested; serving takes on demand",
-            state.min_warm
-        );
-    }
+    replenish_warm_pool(&state);
 
     let result = run_accept_loop(&state, &listener, &read_pipe);
 
@@ -811,6 +855,12 @@ pub fn cmd_serve(args: ServeArgs, paths: &crate::paths::Paths, _quiet: bool) -> 
         let members = state.members.lock().unwrap();
         for pid in members.keys() {
             unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    {
+        let ready = state.ready.lock().unwrap();
+        for rec in ready.iter() {
+            unsafe { libc::kill(rec.pid, libc::SIGKILL) };
         }
     }
     unsafe { libc::kill(state.master_pid, libc::SIGKILL) };
@@ -875,10 +925,12 @@ fn run_accept_loop(
         if !pid_runnable(state.master_pid) {
             return Err(anyhow!("master pid {} died unexpectedly", state.master_pid));
         }
+        replenish_warm_pool(state);
         if fds[0].revents & libc::POLLIN != 0 {
             match listener.accept() {
                 Ok((stream, _)) => {
                     handle_client(state, stream);
+                    replenish_warm_pool(state);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
@@ -978,11 +1030,53 @@ impl ExitStatusSignal for std::process::ExitStatus {
     }
 }
 
-// Suppress dead-code warning while pre-warm support is reserved.
-#[allow(dead_code)]
-fn replenish_warm_pool(_state: &DaemonState) {
-    // Reserved for a pre-taken member queue keyed by pid.  The current
-    // daemon serves `take` requests on demand.
+fn replenish_warm_pool(state: &DaemonState) {
+    if state.min_warm == 0 {
+        return;
+    }
+
+    state.reap_dead();
+
+    let now = Instant::now();
+    {
+        let next = *state.warm_next_retry.lock().unwrap();
+        if now < next {
+            return;
+        }
+    }
+
+    loop {
+        let ready_len = state.ready.lock().unwrap().len();
+        if ready_len >= state.min_warm as usize {
+            return;
+        }
+
+        let seq = state.warm_next_seq.fetch_add(1, Ordering::SeqCst);
+        let instance = format!("warm-{}", seq);
+        let mac = warm_mac(seq as u32);
+
+        match state.fork_member(&instance, &mac, "", "", "", "") {
+            Ok(rec) => {
+                state.ready.lock().unwrap().push_back(rec);
+                *state.warm_next_retry.lock().unwrap() = Instant::now();
+            }
+            Err(e) => {
+                state.warm_failed.fetch_add(1, Ordering::SeqCst);
+                *state.warm_next_retry.lock().unwrap() = Instant::now() + Duration::from_secs(1);
+                eprintln!("umlctl pool serve: warm replenish failed: {:#}", e);
+                return;
+            }
+        }
+    }
+}
+
+fn warm_mac(seq: u32) -> String {
+    format!(
+        "52:54:00:{:02x}:{:02x}:{:02x}",
+        (seq >> 16) & 0xff,
+        (seq >> 8) & 0xff,
+        seq & 0xff
+    )
 }
 
 #[cfg(test)]
@@ -1096,6 +1190,46 @@ mod tests {
         assert_eq!(shell_quote("hello world"), "'hello world'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote("a;b|c&d"), "'a;b|c&d'");
+    }
+
+    #[test]
+    fn ready_members_require_anonymous_take() {
+        assert!(request_allows_ready_member("", "", "", "", "", ""));
+        assert!(!request_allows_ready_member("m1", "", "", "", "", ""));
+        assert!(!request_allows_ready_member(
+            "",
+            "52:54:00:00:00:01",
+            "",
+            "",
+            "",
+            ""
+        ));
+        assert!(!request_allows_ready_member("", "", "tap0", "", "", ""));
+        assert!(!request_allows_ready_member(
+            "",
+            "",
+            "",
+            "10.7.0.2/24",
+            "",
+            ""
+        ));
+        assert!(!request_allows_ready_member("", "", "", "", "10.7.0.1", ""));
+        assert!(!request_allows_ready_member(
+            "",
+            "",
+            "",
+            "",
+            "",
+            "/tmp/mconsole"
+        ));
+    }
+
+    #[test]
+    fn warm_mac_is_deterministic() {
+        assert_eq!(warm_mac(0), "52:54:00:00:00:00");
+        assert_eq!(warm_mac(1), "52:54:00:00:00:01");
+        assert_eq!(warm_mac(0x12fe), "52:54:00:00:12:fe");
+        assert_eq!(warm_mac(0xabcdef), "52:54:00:ab:cd:ef");
     }
 
     #[test]

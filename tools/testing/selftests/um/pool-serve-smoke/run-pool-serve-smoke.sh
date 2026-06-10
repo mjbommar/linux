@@ -6,11 +6,14 @@
 # What it asserts end-to-end:
 #   1. `umlctl pool serve --background` boots a CONFIG_UM_TEMPLATE_PAUSE_FORK
 #      master, writes its pidfile, and starts listening on the api.sock.
-#   2. A {"op":"take", ...} JSON-line RPC over the socket returns a
+#   2. `--min-warm=1` pre-fills one anonymous ready member.
+#   3. An anonymous {"op":"take"} consumes a ready member, returns a
+#      live pid, and the daemon replenishes the ready queue.
+#   4. A {"op":"take", ...} JSON-line RPC over the socket returns a
 #      result containing a live, runnable replicated pool-member pid.
-#   3. {"op":"destroy", "pid":N} reports destroyed=true and the pid
+#   5. {"op":"destroy", "pid":N} reports destroyed=true and the pid
 #      is no longer alive.
-#   4. {"op":"shutdown"} terminates the daemon + master cleanly
+#   6. {"op":"shutdown"} terminates the daemon + master cleanly
 #      (pidfile gone, socket gone, master pid no longer alive).
 #
 # Exit codes: 0 PASS, 4 SKIP (no fork-kernel / no binary), 1 FAIL.
@@ -72,6 +75,9 @@ cleanup() {
 	if [ -n "${TAKEN_PID:-}" ]; then
 		kill -KILL "$TAKEN_PID" 2>/dev/null || true
 	fi
+	if [ -n "${WARM_PID:-}" ]; then
+		kill -KILL "$WARM_PID" 2>/dev/null || true
+	fi
 	rm -rf "$OUT" "$RUNTIME"
 }
 trap cleanup EXIT
@@ -102,6 +108,7 @@ print(buf.decode().rstrip())
 	--name "$POOL_NAME" \
 	--kernel "$KERNEL" \
 	--mem 128M \
+	--min-warm 1 \
 	--background \
 	>"$OUT/serve.out" 2>"$OUT/serve.err"
 RC=$?
@@ -147,7 +154,87 @@ if ! kill -0 "$MASTER_PID" 2>/dev/null; then
 	exit 1
 fi
 
-# take RPC.
+runnable() {
+	local p=$1
+	local state
+	state=$(awk '{ for (i=NF; i>=1; i--) if ($i ~ /^[RSDTZXIt]$/) { print $i; exit } }' \
+		"/proc/$p/stat" 2>/dev/null || true)
+	[ -n "$state" ] && [ "$state" != "Z" ] && [ "$state" != "X" ]
+}
+
+MIN_WARM=$(echo "$STATUS" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['min_warm'])")
+READY_COUNT=$(echo "$STATUS" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['ready'])")
+FAILED_COUNT=$(echo "$STATUS" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['failed'])")
+if [ "$MIN_WARM" -ne 1 ]; then
+	echo "FAIL: min_warm status was $MIN_WARM, expected 1"
+	echo "$STATUS"
+	exit 1
+fi
+if [ "$FAILED_COUNT" -ne 0 ]; then
+	echo "FAIL: warm replenish failed before first take"
+	echo "$STATUS"
+	exit 1
+fi
+if [ "$READY_COUNT" -lt 1 ]; then
+	echo "FAIL: min_warm did not prefill ready member"
+	echo "$STATUS"
+	exit 1
+fi
+echo "warm ready prefilled: PASS"
+
+WARM_TAKE=$("$UMLCTL" --runtime-dir "$RUNTIME" pool take \
+	--name "$POOL_NAME" --ready --json)
+if ! echo "$WARM_TAKE" | python3 -c \
+	"import json,sys;o=json.load(sys.stdin);sys.exit(0 if o.get('pid', 0) > 0 else 1)"; then
+	echo "FAIL: pool take --ready did not return a member JSON object"
+	echo "$WARM_TAKE"
+	exit 1
+fi
+WARM_PID=$(echo "$WARM_TAKE" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['pid'])")
+if [ -z "$WARM_PID" ] || [ "$WARM_PID" -le 0 ]; then
+	echo "FAIL: invalid warm pid=$WARM_PID"
+	exit 1
+fi
+if ! runnable "$WARM_PID"; then
+	echo "FAIL: warm pid $WARM_PID is not runnable"
+	exit 1
+fi
+echo "warm take returned live pid=$WARM_PID: PASS"
+
+STATUS_AFTER_WARM=$(rpc status)
+READY_AFTER_WARM=$(echo "$STATUS_AFTER_WARM" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['ready'])")
+TAKEN_AFTER_WARM=$(echo "$STATUS_AFTER_WARM" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['taken'])")
+FAILED_AFTER_WARM=$(echo "$STATUS_AFTER_WARM" | python3 -c \
+	"import json,sys;print(json.load(sys.stdin)['failed'])")
+if [ "$TAKEN_AFTER_WARM" -lt 1 ]; then
+	echo "FAIL: daemon did not retain warm member as taken"
+	echo "$STATUS_AFTER_WARM"
+	exit 1
+fi
+if [ "$READY_AFTER_WARM" -lt 1 ] || [ "$FAILED_AFTER_WARM" -ne 0 ]; then
+	echo "FAIL: warm queue did not replenish after take"
+	echo "$STATUS_AFTER_WARM"
+	exit 1
+fi
+echo "warm queue replenished: PASS"
+
+WARM_DESTROY=$(rpc destroy "{\"pid\":$WARM_PID}")
+if ! echo "$WARM_DESTROY" | python3 -c \
+	"import json,sys;o=json.load(sys.stdin);sys.exit(0 if o.get('ok') else 1)"; then
+	echo "FAIL: warm destroy RPC did not return ok=true"
+	echo "$WARM_DESTROY"
+	exit 1
+fi
+echo "warm destroy RPC ok: PASS"
+WARM_PID=
+
+# take RPC with request-specific identity.
 TAKE_PAYLOAD='{"instance":"serve-smoke-m1","mac":"52:54:00:11:22:33","tap":"tap-ss","ipv4":"10.7.0.42/24","gateway":"10.7.0.1","mconsole":""}'
 TAKE=$(rpc take "$TAKE_PAYLOAD")
 if ! echo "$TAKE" | python3 -c \
@@ -166,13 +253,6 @@ if [ -z "$TAKEN_PID" ] || [ "$TAKEN_PID" -le 0 ]; then
 fi
 echo "taken pid valid: PASS"
 
-runnable() {
-	local p=$1
-	local state
-	state=$(awk '{ for (i=NF; i>=1; i--) if ($i ~ /^[RSDTZXIt]$/) { print $i; exit } }' \
-		"/proc/$p/stat" 2>/dev/null || true)
-	[ -n "$state" ] && [ "$state" != "Z" ] && [ "$state" != "X" ]
-}
 if ! runnable "$TAKEN_PID"; then
 	echo "FAIL: taken pid $TAKEN_PID is not a live runnable member"
 	exit 1

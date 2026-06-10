@@ -51,6 +51,12 @@ pub struct TakeArgs {
     #[arg(long, default_value = "", value_name = "PATH")]
     pub mconsole: String,
 
+    /// Consume a pre-warmed ready member.  The daemon returns the
+    /// member's preassigned identity; request-specific identity flags
+    /// are not applied to an already-forked member.
+    #[arg(long)]
+    pub ready: bool,
+
     /// Emit the daemon's reply as a single JSON object.
     #[arg(long)]
     pub json: bool,
@@ -88,21 +94,34 @@ pub fn cmd_take(args: TakeArgs, paths: &crate::paths::Paths, quiet: bool) -> Res
             args.name
         );
     }
-    let instance = args
-        .instance
-        .clone()
-        .unwrap_or_else(|| default_instance(args.index));
-    let mac = args.mac.clone().unwrap_or_else(|| default_mac(args.index));
+    let req = if args.ready {
+        if args.instance.is_some()
+            || args.mac.is_some()
+            || !args.tap.is_empty()
+            || !args.ipv4.is_empty()
+            || !args.gateway.is_empty()
+            || !args.mconsole.is_empty()
+        {
+            bail!("--ready cannot be combined with request-specific identity flags");
+        }
+        serde_json::json!({"op": "take"})
+    } else {
+        let instance = args
+            .instance
+            .clone()
+            .unwrap_or_else(|| default_instance(args.index));
+        let mac = args.mac.clone().unwrap_or_else(|| default_mac(args.index));
 
-    let req = serde_json::json!({
-        "op": "take",
-        "instance": instance,
-        "mac": mac,
-        "tap": args.tap,
-        "ipv4": args.ipv4,
-        "gateway": args.gateway,
-        "mconsole": args.mconsole,
-    });
+        serde_json::json!({
+            "op": "take",
+            "instance": instance,
+            "mac": mac,
+            "tap": args.tap,
+            "ipv4": args.ipv4,
+            "gateway": args.gateway,
+            "mconsole": args.mconsole,
+        })
+    };
     let reply = pool_client::rpc(&socket, &req).context("take RPC")?;
     let reply = pool_client::unwrap_envelope(reply)?;
     let result = reply
@@ -148,10 +167,13 @@ pub fn cmd_status(args: StatusArgs, paths: &crate::paths::Paths, quiet: bool) ->
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         let taken = reply.get("taken").and_then(|v| v.as_i64()).unwrap_or(0);
+        let ready = reply.get("ready").and_then(|v| v.as_i64()).unwrap_or(0);
+        let failed = reply.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
+        let min_warm = reply.get("min_warm").and_then(|v| v.as_i64()).unwrap_or(0);
         let sock = reply.get("socket").and_then(|v| v.as_str()).unwrap_or("");
         println!(
-            "pool={} master_pid={} taken={} socket={}",
-            args.name, master, taken, sock
+            "pool={} master_pid={} taken={} ready={} failed={} min_warm={} socket={}",
+            args.name, master, taken, ready, failed, min_warm, sock
         );
     }
     Ok(())
