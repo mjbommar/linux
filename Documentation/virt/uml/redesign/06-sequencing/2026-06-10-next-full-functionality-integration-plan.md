@@ -108,9 +108,9 @@ The active blockers are now:
    fast consumers through daemon-assigned ready identities with
    `pool take --ready`.
 4. Decide whether the historical per-take pool fd handoff design is required.
-   Launcher-owned vector2 fd handoff and vector2 pool-member TAP handoff now
-   have live smoke gates; the remaining vector2 networking gates still need
-   to run against seccomp and KVM v2.
+   Vector2 sandbox audit, launcher-owned fd handoff, and pool-member TAP
+   handoff now have live smoke gates; the remaining vector2 networking gates
+   still need multiqueue/fairness, Tier 3 seccomp, and KVM v2 coverage.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig and keep it out of the completion claim.
 6. Decide whether the historical KVM v2 private state trace should be imported
@@ -766,7 +766,7 @@ Required functionality:
 - If some transports are parser-only or not implemented, either implement them
   or remove/mark them as unsupported.
 - Complete multiqueue behavior and fairness validation.
-- Complete sandbox validation for untrusted mode.
+- Keep sandbox validation for untrusted mode green.
 - Complete in-process trusted host validation.
 - Keep launcher-owned fd handoff validated and decide whether per-take pool fd
   handoff is required or retired.
@@ -781,7 +781,8 @@ Publication rule:
 Acceptance gates:
 
 - vector2 KUnit suites.
-- vector2 sandbox audit.
+- vector2 sandbox audit. Current status: PASS on 2026-06-10 through
+  `vector2-sandbox-audit`.
 - launcher fd handoff smoke. Current status: PASS on 2026-06-10 through
   `vector2-fd-handoff-smoke`.
 - vector2 pool-member TAP smoke. Current status: PASS on 2026-06-10 through
@@ -1242,7 +1243,8 @@ Runtime smoke:
 - Pool mconsole path probe. Current status: PASS; member reaches userspace, no
   panic, requested mconsole socket present, and `version` replies.
 - Pool port-forward smoke.
-- Vector2 sandbox audit.
+- Vector2 sandbox audit. Current status: PASS through
+  `vector2-sandbox-audit`.
 - Vector2 launcher fd handoff. Current status: PASS through
   `vector2-fd-handoff-smoke`.
 - Vector2 pool-member TAP handoff. Current status: PASS through

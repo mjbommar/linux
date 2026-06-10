@@ -99,7 +99,7 @@ This file is the live execution tracker for
 | Vector2 | tap backend | Present-validated-needs-long-gates | `next`, `umlctl-deploy` | Keep and run networking/Tier 3 gates. | `vector2-pool-tap-smoke` PASS on the pool path, 2026-06-10; Tier 3 still required. |
 | Vector2 | multiqueue | Partial | `next`, `umlctl-deploy` | Finish fairness/performance gates. | multiqueue perf/fairness. |
 | Vector2 | raw/gre/l2tpv3/vde/bess/proxy/hybrid transports | Needs-decision | `next`, historical vector branches | Implement or remove parser/doc claims for unsupported modes. | transport-specific smoke. |
-| Vector2 | sandbox mode | Present-needs-validation | `next` | Keep default-safe and audit. | vector2 sandbox audit. |
+| Vector2 | sandbox mode | Present-validated | `next` | Keep the default-safe audit gate. | `vector2-sandbox-audit` PASS: `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations, 2026-06-10. |
 | Vector2 | in-process trusted mode | Present-needs-validation | `next` | Keep explicit and document authority. | trusted mode smoke. |
 | Vector2 | replacement-readiness claim | Present-needs-fix | `next` docs/Kconfig | Align wording with validation. | docs/Kconfig audit. |
 | Launcher | `umlctl up/down/ps/logs` | Present | `next`, `umlctl-deploy` | Keep. | `umlctl-smoke`. |

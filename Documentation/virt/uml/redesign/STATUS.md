@@ -211,7 +211,10 @@ Current boundary:
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller
-  MAC/TAP/mconsole request; and
+  MAC/TAP/mconsole request;
+- `vector2-sandbox-audit` validates the untrusted vector2 fd boot audit:
+  `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot
+  and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations;
 - `vector2-fd-handoff-smoke` validates launcher-owned vector2 fd handoff:
   `umlctl up` creates the TAP, opens the TAP queue in the launcher, reports
   fd 200 inheritance, the guest sees `UMLCTL_NETWORK_*` fd metadata, `vec2.0`
