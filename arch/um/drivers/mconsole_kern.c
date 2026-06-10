@@ -18,6 +18,8 @@
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
+#include <linux/ktime.h>
+#include <linux/umh.h>
 #include <linux/utsname.h>
 #include <linux/socket.h>
 #include <linux/un.h>
@@ -38,6 +40,15 @@
 #include <os.h>
 
 static struct vfsmount *proc_mnt;
+
+#define MCONSOLE_EXEC_OUTPUT_LIMIT 2048
+#define MCONSOLE_EXEC_REPLY_LIMIT  32768
+
+static char *mconsole_exec_envp[] = {
+	"HOME=/",
+	"PATH=/sbin:/bin:/usr/sbin:/usr/bin",
+	NULL,
+};
 
 static int do_unlink_socket(struct notifier_block *notifier,
 			    unsigned long what, void *data)
@@ -124,6 +135,200 @@ void mconsole_log(struct mc_request *req)
 	mconsole_reply(req, "", 0, 0);
 }
 
+static int mconsole_exec_read_file(const char *path, char *buf, size_t size,
+				   size_t *len_out, bool *truncated)
+{
+	struct file *file;
+	loff_t pos = 0;
+	size_t total = 0;
+	ssize_t n;
+	char extra;
+
+	*len_out = 0;
+	*truncated = false;
+	if (!size)
+		return -EINVAL;
+
+	file = filp_open(path, O_RDONLY, 0);
+	if (IS_ERR(file)) {
+		buf[0] = '\0';
+		return PTR_ERR(file);
+	}
+
+	while (total < size - 1) {
+		n = kernel_read(file, buf + total, size - 1 - total, &pos);
+		if (n < 0) {
+			fput(file);
+			buf[0] = '\0';
+			return n;
+		}
+		if (n == 0)
+			break;
+		total += n;
+	}
+	buf[total] = '\0';
+	*len_out = total;
+
+	if (total == size - 1) {
+		n = kernel_read(file, &extra, 1, &pos);
+		if (n > 0)
+			*truncated = true;
+	}
+
+	fput(file);
+	return 0;
+}
+
+static void mconsole_exec_rm_tmp(const char *stdout_path,
+				 const char *stderr_path)
+{
+	char *argv[5];
+
+	argv[0] = "/bin/rm";
+	argv[1] = "-f";
+	argv[2] = (char *)stdout_path;
+	argv[3] = (char *)stderr_path;
+	argv[4] = NULL;
+
+	call_usermodehelper(argv[0], argv, mconsole_exec_envp, UMH_WAIT_PROC);
+}
+
+static void mconsole_exec_json_char(char *reply, size_t size, size_t *pos,
+				    unsigned char c)
+{
+	switch (c) {
+	case '"':
+		*pos += scnprintf(reply + *pos, size - *pos, "\\\"");
+		break;
+	case '\\':
+		*pos += scnprintf(reply + *pos, size - *pos, "\\\\");
+		break;
+	case '\n':
+		*pos += scnprintf(reply + *pos, size - *pos, "\\n");
+		break;
+	case '\r':
+		*pos += scnprintf(reply + *pos, size - *pos, "\\r");
+		break;
+	case '\t':
+		*pos += scnprintf(reply + *pos, size - *pos, "\\t");
+		break;
+	default:
+		if (c < 0x20 || c >= 0x80)
+			*pos += scnprintf(reply + *pos, size - *pos,
+					  "\\u%04x", c);
+		else
+			*pos += scnprintf(reply + *pos, size - *pos, "%c", c);
+		break;
+	}
+}
+
+static void mconsole_exec_json_string(char *reply, size_t size, size_t *pos,
+				      const char *name, const char *value,
+				      size_t len)
+{
+	size_t i;
+
+	*pos += scnprintf(reply + *pos, size - *pos, "\"%s\":\"", name);
+	for (i = 0; i < len; i++)
+		mconsole_exec_json_char(reply, size, pos, value[i]);
+	*pos += scnprintf(reply + *pos, size - *pos, "\"");
+}
+
+static int mconsole_exec_wait_exit(int status)
+{
+	if (status < 0)
+		return 255;
+	if ((status & 0x7f) == 0)
+		return (status >> 8) & 0xff;
+	return 128 + (status & 0x7f);
+}
+
+static int mconsole_exec_wait_signal(int status)
+{
+	if (status < 0)
+		return 0;
+	if ((status & 0x7f) == 0)
+		return 0;
+	return status & 0x7f;
+}
+
+void mconsole_exec(struct mc_request *req)
+{
+	char *cmd = req->request.data + strlen("exec");
+	char stdout_path[64], stderr_path[64];
+	char *shell_cmd, *stdout_buf, *stderr_buf, *reply;
+	size_t stdout_len, stderr_len, pos = 0;
+	bool stdout_truncated, stderr_truncated;
+	u64 id = ktime_get_ns();
+	int status, ret;
+	char *argv[4];
+
+	cmd = skip_spaces(cmd);
+	if (!*cmd) {
+		mconsole_reply(req, "exec requires a command", 1, 0);
+		return;
+	}
+
+	scnprintf(stdout_path, sizeof(stdout_path),
+		  "/tmp/uml-mconsole-exec-%llu.out", id);
+	scnprintf(stderr_path, sizeof(stderr_path),
+		  "/tmp/uml-mconsole-exec-%llu.err", id);
+
+	shell_cmd = kmalloc(MCONSOLE_MAX_DATA + 160, GFP_KERNEL);
+	stdout_buf = kmalloc(MCONSOLE_EXEC_OUTPUT_LIMIT, GFP_KERNEL);
+	stderr_buf = kmalloc(MCONSOLE_EXEC_OUTPUT_LIMIT, GFP_KERNEL);
+	reply = kvzalloc(MCONSOLE_EXEC_REPLY_LIMIT, GFP_KERNEL);
+	if (!shell_cmd || !stdout_buf || !stderr_buf || !reply) {
+		mconsole_reply(req, "Out of memory", 1, 0);
+		goto out_free;
+	}
+
+	scnprintf(shell_cmd, MCONSOLE_MAX_DATA + 160,
+		  "exec >%s 2>%s; %s", stdout_path, stderr_path, cmd);
+	argv[0] = "/bin/sh";
+	argv[1] = "-c";
+	argv[2] = shell_cmd;
+	argv[3] = NULL;
+
+	status = call_usermodehelper(argv[0], argv, mconsole_exec_envp,
+				     UMH_WAIT_PROC);
+
+	ret = mconsole_exec_read_file(stdout_path, stdout_buf,
+				      MCONSOLE_EXEC_OUTPUT_LIMIT,
+				      &stdout_len, &stdout_truncated);
+	if (ret < 0)
+		stdout_len = 0;
+	ret = mconsole_exec_read_file(stderr_path, stderr_buf,
+				      MCONSOLE_EXEC_OUTPUT_LIMIT,
+				      &stderr_len, &stderr_truncated);
+	if (ret < 0)
+		stderr_len = 0;
+	mconsole_exec_rm_tmp(stdout_path, stderr_path);
+
+	pos += scnprintf(reply + pos, MCONSOLE_EXEC_REPLY_LIMIT - pos, "{");
+	mconsole_exec_json_string(reply, MCONSOLE_EXEC_REPLY_LIMIT, &pos,
+				  "stdout", stdout_buf, stdout_len);
+	pos += scnprintf(reply + pos, MCONSOLE_EXEC_REPLY_LIMIT - pos, ",");
+	mconsole_exec_json_string(reply, MCONSOLE_EXEC_REPLY_LIMIT, &pos,
+				  "stderr", stderr_buf, stderr_len);
+	pos += scnprintf(reply + pos, MCONSOLE_EXEC_REPLY_LIMIT - pos,
+			 ",\"stdout_truncated\":%s,\"stderr_truncated\":%s",
+			 stdout_truncated ? "true" : "false",
+			 stderr_truncated ? "true" : "false");
+	pos += scnprintf(reply + pos, MCONSOLE_EXEC_REPLY_LIMIT - pos,
+			 ",\"exit\":%d,\"signal\":%d,\"timed_out\":false}",
+			 mconsole_exec_wait_exit(status),
+			 mconsole_exec_wait_signal(status));
+
+	mconsole_reply(req, reply, 0, 0);
+
+out_free:
+	kvfree(reply);
+	kfree(stderr_buf);
+	kfree(stdout_buf);
+	kfree(shell_cmd);
+}
+
 void mconsole_proc(struct mc_request *req)
 {
 	struct vfsmount *mnt = proc_mnt;
@@ -190,6 +395,7 @@ void mconsole_proc(struct mc_request *req)
     stop - pause the UML; it will do nothing until it receives a 'go' \n\
     go - continue the UML after a 'stop' \n\
     log <string> - make UML enter <string> into the kernel log\n\
+\texec command - run a shell command and return a JSON result\n\
     proc <file> - returns the contents of the UML's /proc/<file>\n\
     stack <pid> - returns the stack of the specified pid\n\
 \tsnapshot_export <path> - write a KVM v2 snapshot ELF core\n\

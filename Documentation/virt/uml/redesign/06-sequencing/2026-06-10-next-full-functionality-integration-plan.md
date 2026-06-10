@@ -75,7 +75,7 @@ Closed or substantially closed since the initial 2026-06-10 review:
   cleans up ready members during destroy/shutdown.
 - Reduced raw `pool-bench` passes all five gates with live sparse-copied
   replicated children: 5/5 latency takes, 3/3 live RSS children at
-  145.8 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
+  146.0 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
   reduced two-second gate.
 - Full default `pool-bench` now runs to completion but still fails 2/5 gates:
   RSS is 7,409.4 MiB for 100/100 live children against the 200 MiB target, and
@@ -86,14 +86,14 @@ The active blockers are now:
 1. Fix or intentionally revise the full-scale pool memory/throughput targets.
    The current implementation is stable, live, and sparse-copied, but still
    far above the original 100-member RSS target and below the throughput gate.
-2. Validate successful daemon-routed guest exec. The current smoke validates a
-   clean error envelope; it does not yet prove a successful guest command
-   through the final member mconsole path. The daemon now waits for the
-   per-member mconsole socket to answer `version` before issuing exec and
-   drives it with a native client, but the active kernel mconsole command table
-   has no `exec` verb. A naive child-side mconsole rebind was tested locally
-   and rejected because it
-   panicked before the member reached `MEMBER_DONE`; see
+2. Finish daemon-routed guest exec semantics. The current smoke now proves a
+   successful command through the final member mconsole path: `/bin/true`
+   exits 0, captured stdout/stderr round-trip through NDJSON, and a guest exit
+   code of 7 is preserved as a normal exec result rather than a daemon error.
+   The kernel command is intentionally bounded and shell-backed; kernel-side
+   timeout/cancellation remains open, so the daemon still owns receive timeout
+   behavior. A naive child-side mconsole rebind was tested locally and
+   rejected because it panicked before the member reached `MEMBER_DONE`; see
    `2026-06-10-pool-mconsole-exec-investigation.md`. The checked-in
    `pool-mconsole-path-probe` now passes as a focused socket-addressability
    gate.
@@ -1330,11 +1330,13 @@ timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
 
 Result:
 
-- PASS for typed NDJSON start, stderr, and exit frames;
-- the expected execution result is a clean error envelope because the kernel
-  has no mconsole `exec` verb and replies `Unknown command`;
-- successful guest command execution still needs a final end-to-end gate after
-  the exec primitive or replacement transport is implemented.
+- PASS for successful typed NDJSON start and exit frames from `/bin/true`;
+- PASS for captured stdout, captured stderr, and preserved guest exit code 7
+  from a shell command;
+- stale daemon error boundaries such as missing `uml_mconsole(1)`, missing
+  member socket, or kernel `Unknown command` are rejected by the selftest;
+- kernel-side timeout/cancellation is still not complete and remains a
+  follow-up before claiming the full exec contract closed.
 
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
@@ -1451,9 +1453,9 @@ timeout --kill-after=5 180 env UM_FORK_KERNEL=$PWD/linux \
 Result:
 
 - PASS in the reduced validation gate;
-- take p50 was 1.2 ms and p99 was 1.5 ms over five measured takes;
+- take p50 was 1.0 ms and p99 was 1.1 ms over five measured takes;
 - RSS sampled 3/3 live sparse-copied replicated children and total RSS was
-  145.8 MiB;
+  146.0 MiB;
 - lifecycle RSS drift was 0.00% over five take/destroy cycles;
 - throughput completed 4/4 takes in the 2-second reduced gate;
 - this proves the benchmark now measures live children, but it is not a

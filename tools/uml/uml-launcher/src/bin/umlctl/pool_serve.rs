@@ -448,7 +448,7 @@ impl DaemonState {
             .with_context(|| format!("wait for member mconsole {}", member.mconsole_path))?;
 
         let started = Instant::now();
-        let stdout = mconsole_client::send_mconsole_command_with_timeout(
+        let reply = mconsole_client::send_mconsole_command_with_timeout(
             Path::new(&member.mconsole_path),
             &cmd_str,
             timeout,
@@ -456,16 +456,8 @@ impl DaemonState {
         .with_context(|| format!("mconsole exec via {}", member.mconsole_path))?;
         let duration_ms = started.elapsed().as_millis() as u64;
 
-        Ok(serde_json::json!({
-            "ok": true,
-            "stdout": stdout,
-            "stderr": "",
-            "console": "",
-            "exit": 0,
-            "signal": 0,
-            "duration_ms": duration_ms,
-            "timed_out": false,
-        }))
+        decode_mconsole_exec_reply(&reply, duration_ms)
+            .with_context(|| format!("decode mconsole exec reply from {}", member.mconsole_path))
     }
 
     fn do_destroy(&self, pid: i32) -> Result<bool> {
@@ -974,6 +966,51 @@ fn build_mconsole_exec_command(
     format!("exec {payload}")
 }
 
+fn decode_mconsole_exec_reply(reply: &str, duration_ms: u64) -> Result<serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_str(reply.trim()).context("parse kernel exec JSON")?;
+    let stdout = v
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let stderr = v
+        .get("stderr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let exit = v.get("exit").and_then(|v| v.as_i64()).unwrap_or(0);
+    let signal = v.get("signal").and_then(|v| v.as_i64()).unwrap_or(0);
+    let timed_out = v
+        .get("timed_out")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut console = String::new();
+    if v.get("stdout_truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        console.push_str("mconsole exec stdout truncated\n");
+    }
+    if v.get("stderr_truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        console.push_str("mconsole exec stderr truncated\n");
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "stdout": stdout,
+        "stderr": stderr,
+        "console": console,
+        "exit": exit,
+        "signal": signal,
+        "duration_ms": duration_ms,
+        "timed_out": timed_out,
+    }))
+}
+
 /// POSIX shell-quote a single argument.  Sufficient for piping argv through
 /// mconsole `exec`; not for full shell expansion.
 /// Public-in-module for tests.
@@ -1192,6 +1229,49 @@ mod tests {
             build_mconsole_exec_command(&argv, &env, "/tmp/work dir"),
             "exec cd '/tmp/work dir' && ALPHA='first value' ZED=last /bin/sh -c 'echo hi'"
         );
+    }
+
+    #[test]
+    fn mconsole_exec_reply_decodes_kernel_json() {
+        let reply = r#"{
+            "stdout":"hello\n",
+            "stderr":"warn\n",
+            "exit":7,
+            "signal":0,
+            "timed_out":false
+        }"#;
+
+        let decoded = decode_mconsole_exec_reply(reply, 42).unwrap();
+        assert_eq!(decoded["ok"], true);
+        assert_eq!(decoded["stdout"], "hello\n");
+        assert_eq!(decoded["stderr"], "warn\n");
+        assert_eq!(decoded["exit"], 7);
+        assert_eq!(decoded["signal"], 0);
+        assert_eq!(decoded["duration_ms"], 42);
+        assert_eq!(decoded["timed_out"], false);
+    }
+
+    #[test]
+    fn mconsole_exec_reply_surfaces_truncation_as_console() {
+        let reply = r#"{
+            "stdout":"",
+            "stderr":"",
+            "stdout_truncated":true,
+            "stderr_truncated":true,
+            "exit":0,
+            "signal":0,
+            "timed_out":false
+        }"#;
+
+        let decoded = decode_mconsole_exec_reply(reply, 1).unwrap();
+        assert!(decoded["console"]
+            .as_str()
+            .unwrap()
+            .contains("stdout truncated"));
+        assert!(decoded["console"]
+            .as_str()
+            .unwrap()
+            .contains("stderr truncated"));
     }
 
     #[test]

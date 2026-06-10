@@ -17,12 +17,11 @@
 //   {"type":"exit",    "code":N, "signal":S, "duration_ms":D,
 //                      "timed_out":false}
 //
-// In the daemon's MVP backend the in-guest exec primitive is
-// mconsole's `exec` verb (synthesized per-take when the caller did
-// not supply --mconsole; see pool_serve.rs::synthesize_mconsole_path).
-// If the daemon's `exec` RPC returns ok=false, we surface that as a
-// `{"type":"exit","code":<N>,"timed_out":false}` frame plus a non-zero
-// process exit so syzkaller's harness sees a clean failure.
+// The daemon drives the member's mconsole `exec` verb through the
+// per-take control socket.  If the daemon's `exec` RPC returns ok=false,
+// we surface that as a `{"type":"exit","code":<N>,"timed_out":false}`
+// frame plus a non-zero process exit so syzkaller's harness sees a clean
+// failure.
 //
 // Why a daemon RPC and not a fork+exec from the umlctl process: the
 // pool member is the daemon's grandchild via the master kernel; the

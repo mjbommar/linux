@@ -159,20 +159,20 @@ repair and control-socket ownership model is better understood.
 
 ## Implementation Implications
 
-Successful daemon-routed guest exec still needs an actual guest command
-primitive. The daemon now uses a native mconsole client and waits for the
-member socket to answer `version` before issuing `exec`, so the remaining work
-is either a kernel mconsole `exec` command with a bounded ABI or another
-transport that can return stdout, stderr, exit status, signal, and timeout
-state.
+Successful daemon-routed guest exec now has a first bounded kernel primitive.
+The daemon uses a native mconsole client, waits for the member socket to answer
+`version`, sends `exec <command>`, decodes the kernel's JSON reply, and maps
+it into the existing `umlctl exec` NDJSON contract.
 
-Until that is done, `pool-exec-smoke` should continue to be treated as an
-error-envelope test, not proof of successful guest exec. The daemon now reaches
-the later kernel-command failure mode:
+The current kernel command is shell-backed and captures up to 2 KiB each of
+stdout and stderr through temporary guest files. `pool-exec-smoke` now proves
+case A on a freshly built kernel: `/bin/true` exits 0, a shell command returns
+captured stdout/stderr, and guest exit code 7 is preserved without a daemon
+transport error.
 
-```text
-mconsole command failed: Unknown command
-```
+The remaining exec work is timeout/cancellation. The kernel command currently
+waits for the helper to finish; the daemon receive timeout can still bound the
+client-facing call, but it does not yet cancel a long-running guest helper.
 
 ## Next Work
 
@@ -183,9 +183,8 @@ Recommended next sequence:
    daemon's null stdout/stderr. Current status: done as
    `tools/testing/selftests/um/pool-mconsole-path-probe/`; it now passes by
    sending `version` through the per-member socket.
-2. Design the guest exec primitive. The preferred shape should be explicit and
-   bounded: argv, cwd, environment, timeout, stdout/stderr capture limits, exit
-   code, signal, and an error path that preserves the current NDJSON contract.
-3. Update `pool-exec-smoke` so case A becomes a required pass once the kernel
-   advertises the exec primitive, while older kernels continue to produce the
-   current clean failure envelope.
+2. Add kernel-side timeout/cancellation semantics for `exec` so a daemon
+   timeout cannot leave a long-running guest helper behind.
+3. Decide whether the shell-backed command string is the final ABI or whether
+   it should be replaced with a stricter argv/env/cwd encoding before the
+   completion claim.

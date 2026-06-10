@@ -6,16 +6,13 @@
 # What it asserts:
 #   1. `umlctl exec --pid <pid> --json -- /bin/true` against a real
 #      daemon-managed pool member returns a well-formed NDJSON frame
-#      stream (start + exit, in that order).
+#      stream (start + exit, in that order) with exit code 0.
 #   2. The `start` frame carries schema_version="exec/1" and the right
 #      pid.
 #   3. The `exit` frame is the last frame and includes `code` /
 #      `timed_out` fields.
-#   4. When the in-guest exec primitive is unavailable (for example, no
-#      kernel mconsole exec command), the daemon returns ok=false with a
-#      diagnostic - and the exec verb surfaces it as a non-zero exit +
-#      a stderr NDJSON frame.  This is the contract the syzkaller shim
-#      relies on: a clean failure envelope, never a hang.
+#   4. A shell command can return stdout, stderr, and a non-zero guest
+#      exit status without being mistaken for a daemon transport error.
 #
 # Exit codes: 0 PASS, 4 SKIP, 1 FAIL.
 #
@@ -127,13 +124,10 @@ TAKEN_PID=$(echo "$TAKE_JSON" | python3 -c \
 	"import json,sys;print(json.load(sys.stdin)['pid'])")
 echo "took member pid=$TAKEN_PID: PASS"
 
-# Run umlctl exec --json.  Two cases:
-# (A) member's mconsole socket present + kernel exec primitive available ->
-#     expect ok exit, "exit" frame with code 0 (assuming /bin/true succeeded
-#     inside the guest).
-# (B) Otherwise -> expect non-zero exit, and a `stderr` frame in the
-#     NDJSON stream containing "daemon error".  THIS is the
-#     dispositive failure-mode test for the syzkaller shim contract.
+# Run umlctl exec --json.  The current kernel has a bounded mconsole exec
+# primitive, so a fresh build must execute /bin/true successfully.  Older
+# kernels used to return a clean daemon error here; that boundary is now stale
+# for this tree.
 set +e
 "$UMLCTL" --runtime-dir "$RUNTIME" exec \
 	--name "$POOL_NAME" --pid "$TAKEN_PID" --json -- /bin/true \
@@ -149,8 +143,8 @@ echo "--- end exec.out ---"
 # Parse NDJSON frame stream regardless of exit code.  We assert:
 #   - first non-blank line is type=start with schema_version=exec/1
 #   - last non-blank line is type=exit
-# These hold whether the in-guest exec succeeded (case A) or the
-# daemon surfaced a clean error envelope (case B).
+# The daemon must not surface this as a transport error with the current
+# kernel.
 python3 - <<PYEOF >"$OUT/parse.out" 2>"$OUT/parse.err"
 import json, sys
 frames = []
@@ -185,7 +179,6 @@ if "code" not in frames[-1]:
 if "timed_out" not in frames[-1]:
     print("EXIT_MISSING_TIMED_OUT", frames[-1])
     sys.exit(1)
-# Case dispatch: A vs B
 saw_error = any(
     f.get("type") == "stderr" and "daemon error" in f.get("data", "")
     for f in frames
@@ -202,7 +195,13 @@ stale_boundaries = [
 if saw_error and any(s in stderr_text for s in stale_boundaries):
     print("STALE_DAEMON_EXEC_BOUNDARY", stderr_text)
     sys.exit(1)
-print("FRAMES_OK", "case=B" if saw_error else "case=A", len(frames))
+if saw_error:
+    print("DAEMON_ERROR_BOUNDARY_IS_STALE", stderr_text)
+    sys.exit(1)
+if frames[-1].get("code") != 0:
+    print("TRUE_EXIT_NOT_ZERO", frames[-1])
+    sys.exit(1)
+print("FRAMES_OK case=A", len(frames))
 PYEOF
 PARSE_RC=$?
 if [ $PARSE_RC -ne 0 ]; then
@@ -213,10 +212,63 @@ if [ $PARSE_RC -ne 0 ]; then
 fi
 echo "NDJSON frames valid: PASS ($(cat "$OUT/parse.out"))"
 
-# When case B (the typical state in this tree because the kernel has no
-# mconsole exec primitive), the in-guest stdout should be empty.  When case A,
-# stdout from `/bin/true` is empty too - so
-# either way we don't assert stdout content beyond the frame stream.
+# Exercise output capture and non-zero guest exit without turning that guest
+# exit into a daemon transport error.
+set +e
+"$UMLCTL" --runtime-dir "$RUNTIME" exec \
+	--name "$POOL_NAME" --pid "$TAKEN_PID" --json -- \
+	/bin/sh -c 'printf "pool-stdout\n"; printf "pool-stderr\n" >&2; exit 7' \
+	>"$OUT/exec-rich.out" 2>"$OUT/exec-rich.err"
+RICH_RC=$?
+set -e
+
+echo "rich exec exit_code=$RICH_RC"
+echo "--- exec-rich.out ---"
+cat "$OUT/exec-rich.out"
+echo "--- end exec-rich.out ---"
+
+python3 - <<PYEOF >"$OUT/parse-rich.out" 2>"$OUT/parse-rich.err"
+import json, sys
+frames = []
+with open("$OUT/exec-rich.out") as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            frames.append(json.loads(line))
+stdout = "".join(f.get("data", "") for f in frames if f.get("type") == "stdout")
+stderr = "".join(f.get("data", "") for f in frames if f.get("type") == "stderr")
+if not frames or frames[0].get("type") != "start":
+    print("RICH_FIRST_NOT_START", frames[:1])
+    sys.exit(1)
+if frames[-1].get("type") != "exit":
+    print("RICH_LAST_NOT_EXIT", frames[-1] if frames else None)
+    sys.exit(1)
+if stdout != "pool-stdout\n":
+    print("RICH_STDOUT_MISMATCH", repr(stdout))
+    sys.exit(1)
+if stderr != "pool-stderr\n":
+    print("RICH_STDERR_MISMATCH", repr(stderr))
+    sys.exit(1)
+if frames[-1].get("code") != 7:
+    print("RICH_EXIT_MISMATCH", frames[-1])
+    sys.exit(1)
+if any("daemon error" in f.get("data", "") for f in frames if f.get("type") == "stderr"):
+    print("RICH_DAEMON_ERROR", stderr)
+    sys.exit(1)
+print("RICH_FRAMES_OK", len(frames))
+PYEOF
+PARSE_RICH_RC=$?
+if [ $PARSE_RICH_RC -ne 0 ]; then
+	echo "FAIL: rich NDJSON frame validation failed"
+	cat "$OUT/parse-rich.out"
+	cat "$OUT/parse-rich.err"
+	exit 1
+fi
+if [ $RICH_RC -ne 7 ]; then
+	echo "FAIL: rich exec process exit $RICH_RC, expected 7"
+	exit 1
+fi
+echo "rich NDJSON frames valid: PASS ($(cat "$OUT/parse-rich.out"))"
 
 # Destroy + shutdown via the daemon path.
 "$UMLCTL" --runtime-dir "$RUNTIME" pool destroy --name "$POOL_NAME" "$TAKEN_PID" \
