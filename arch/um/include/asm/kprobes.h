@@ -30,13 +30,15 @@ typedef u8 kprobe_opcode_t;
 /* x86_64 int3 opcode. */
 #define BREAKPOINT_INSTRUCTION	0xcc
 
-/* Maximum instruction bytes we copy for out-of-line single-step.
+/*
+ * Maximum instruction bytes copied for out-of-line single-step.
  * x86_64 instructions are at most 15 bytes.
  */
 #define MAX_INSN_SIZE		16
 
-/* Let the generic kprobe insn-slot cache allocate our copy buffers
- * (kernel/kprobes.c's alloc_insn_page via execmem).
+/*
+ * Use the generic kprobe insn-slot cache for out-of-line instruction
+ * buffers (kernel/kprobes.c's alloc_insn_page via execmem).
  */
 #define __ARCH_WANT_KPROBES_INSN_SLOT
 
@@ -45,17 +47,18 @@ typedef u8 kprobe_opcode_t;
 struct pt_regs;
 struct kprobe;
 
-/* Per-kprobe arch-specific storage. We keep this small: the
- * out-of-line instruction copy plus its length. UML uses
- * single-step for every probe.
+/*
+ * Per-kprobe arch-specific storage: the out-of-line instruction copy plus
+ * its length. UML uses single-step for every probe.
  */
 struct arch_specific_insn {
 	kprobe_opcode_t	*insn;		/* out-of-line copy, MAX_INSN_SIZE */
 	unsigned char	size;		/* bytes of original instruction */
 };
 
-/* Saved previous-kprobe state for re-entry (a kprobe handler that
- * itself triggers a kprobe).
+/*
+ * Saved previous-kprobe state for re-entry (a kprobe handler that itself
+ * triggers a kprobe).
  */
 struct prev_kprobe {
 	struct kprobe		*kp;
@@ -79,7 +82,8 @@ int kprobe_fault_handler(struct pt_regs *regs, int trapnr);
 
 void arch_remove_kprobe(struct kprobe *p);
 
-/* Size of the arch-specific kretprobe blacklist. Defined alongside
+/*
+ * Size of the arch-specific kretprobe blacklist. Defined alongside
  * kretprobe_blacklist[] in arch/um/kernel/kprobes/core.c. Kept as a
  * zero-length array on UML; see core.c for the rationale.
  */

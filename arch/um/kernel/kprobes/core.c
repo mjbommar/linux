@@ -2,9 +2,8 @@
 /*
  * UML kprobes arch layer: int3 + single-step path.
  *
- * Every arch hook returns a sensible error until its implementation is
- * wired, so the tree builds with CONFIG_KPROBES=y and unsupported
- * operations fail cleanly.
+ * Unimplemented arch hooks return errors so CONFIG_KPROBES=y builds and
+ * unsupported operations fail cleanly.
  *
  * References:
  *   - arch/x86/kernel/kprobes/core.c (primary reference)
@@ -21,10 +20,11 @@
 #include <asm/patchable.h>
 #include <asm/processor-flags.h>	/* X86_EFLAGS_TF, X86_EFLAGS_IF */
 
-/* Access guest EFLAGS via UML's uml_pt_regs.gp[HOST_EFLAGS] layout.
+/*
+ * Access guest EFLAGS via UML's uml_pt_regs.gp[HOST_EFLAGS] layout.
  * arch/x86/um/shared/sysdep/ptrace.h already defines UPT_EFLAGS for
- * uml_pt_regs; here we wrap it for the struct-pt_regs-wrapping-
- * uml-pt-regs container that kprobes handlers receive.
+ * uml_pt_regs; this macro adapts it to the struct pt_regs container that
+ * kprobe handlers receive.
  */
 #define KPROBE_REGS_FLAGS(r)	UPT_EFLAGS(&(r)->regs)
 
@@ -54,8 +54,8 @@ const int kretprobe_blacklist_size = ARRAY_SIZE(kretprobe_blacklist);
  * Arch hook that tells the kprobes core whether a given kprobe sits
  * inside a trampoline (and so must not be handled via the normal
  * re-entry path). With CONFIG_KRETPROBE_ON_RETHOOK=y the arch
- * trampoline is owned by rethook, not kprobes; matching x86 we
- * always answer "no". When CONFIG_KRETPROBES=n, <linux/kprobes.h>
+ * trampoline is owned by rethook, not kprobes; matching x86, UML returns
+ * false here. When CONFIG_KRETPROBES=n, <linux/kprobes.h>
  * provides a static inline definition, so this one is guarded.
  */
 int arch_trampoline_kprobe(struct kprobe *p)
@@ -68,15 +68,14 @@ NOKPROBE_SYMBOL(arch_trampoline_kprobe);
 /*
  * Allocate an out-of-line instruction slot and copy the original
  * bytes. The generic kprobes core's insn-slot cache (backed by
- * execmem_alloc(EXECMEM_KPROBES)) gives us an RWX page-backed slot
+ * execmem_alloc(EXECMEM_KPROBES)) provides an RWX page-backed slot
  * guaranteed to be within 2GB of the kernel image, enough for
  * rip-relative instructions to remain correct when single-stepped
  * out of line.
  *
- * We copy MAX_INSN_SIZE bytes (x86_64 max instruction length = 15,
- * we round up to 16). This path relies
- * on TF-driven single-step to trap after the first instruction,
- * then uses (regs->ip - insn_slot) as the effective length.
+ * Copy MAX_INSN_SIZE bytes: x86_64 instructions are at most 15 bytes,
+ * and UML rounds up to 16. TF-driven single-step traps after the first
+ * instruction; regs->ip - insn_slot gives the executed instruction length.
  */
 int arch_prepare_kprobe(struct kprobe *p)
 {
@@ -92,8 +91,8 @@ int arch_prepare_kprobe(struct kprobe *p)
 }
 
 /*
- * Install the int3 (0xcc) breakpoint. UML has no text_poke_bp; we
- * use the section-split mprotect helpers to open the one page containing
+ * Install the int3 (0xcc) breakpoint. UML has no text_poke_bp, so this
+ * uses the section-split mprotect helpers to open the one page containing
  * p->addr RW, write the single byte, and restore RX. Caller
  * (kernel/kprobes.c) already holds text_mutex; UML is
  * effectively UP-serialized for the purposes of this write, so no
@@ -155,10 +154,10 @@ static nokprobe_inline void set_current_kprobe(struct kprobe *p,
 }
 
 /*
- * Set up out-of-line single-step. We redirect the guest IP to the
- * copied instruction, clear IF so interrupts don't fire mid-step,
- * and set TF so the CPU delivers another SIGTRAP after one
- * instruction. X86_EFLAGS_TF propagates through UML's mcontext/regs
+ * Set up out-of-line single-step. Redirect guest IP to the copied
+ * instruction, clear IF so interrupts cannot fire mid-step, and set TF
+ * so the CPU delivers another SIGTRAP after one instruction.
+ * X86_EFLAGS_TF propagates through UML's mcontext/regs
  * roundtrip (arch/x86/um/os-Linux/mcontext.c:81..84) without
  * arch-specific emulation.
  */
@@ -173,10 +172,10 @@ static void setup_singlestep(struct kprobe *p, struct pt_regs *regs,
 		kcb->kprobe_status = KPROBE_HIT_SS;
 	}
 
-	/* Clear IF during single-step so interrupts don't re-enter
-	 * the trap path while we're in the middle of servicing a
-	 * probe. Set TF so the CPU delivers SIGTRAP (TRAP_TRACE) after
-	 * the next instruction.
+	/*
+	 * Clear IF during single-step so interrupts cannot re-enter the trap
+	 * path while a probe is being serviced. Set TF so the CPU delivers
+	 * SIGTRAP (TRAP_TRACE) after the next instruction.
 	 */
 	KPROBE_REGS_FLAGS(regs) &= ~X86_EFLAGS_IF;
 	KPROBE_REGS_FLAGS(regs) |= X86_EFLAGS_TF;
@@ -189,7 +188,7 @@ static void kprobe_post_process(struct kprobe *p, struct pt_regs *regs,
 				struct kprobe_ctlblk *kcb)
 {
 	if (kcb->kprobe_status == KPROBE_REENTER) {
-		/* Pops the re-entered kprobe back to the outer one. */
+		/* Restore the outer kprobe after inner re-entry. */
 		restore_previous_kprobe(kcb);
 	} else {
 		if (p->post_handler)
@@ -201,8 +200,8 @@ NOKPROBE_SYMBOL(kprobe_post_process);
 
 /*
  * Handle a re-entered kprobe: one handler being probed by another.
- * We silently single-step the inner probe without invoking its
- * user handlers, since the outer probe owns the kcb state.
+ * Single-step the inner probe without invoking its user handlers, since
+ * the outer probe owns the kcb state.
  */
 static int reenter_kprobe(struct kprobe *p, struct pt_regs *regs,
 			  struct kprobe_ctlblk *kcb)
@@ -215,9 +214,10 @@ static int reenter_kprobe(struct kprobe *p, struct pt_regs *regs,
 		setup_singlestep(p, regs, kcb, 1);
 		break;
 	case KPROBE_REENTER:
-		/* Nested re-entry: the kprobes machinery cannot recover
-		 * from a probe inside a probe handler inside a probe
-		 * handler. Raise BUG before we stack overflow.
+		/*
+		 * Nested re-entry: the kprobes machinery cannot recover from a
+		 * probe inside a probe handler inside a probe handler. Raise
+		 * BUG before stack overflow.
 		 */
 		pr_err("Unrecoverable kprobe detected.\n");
 		dump_kprobe(p);
@@ -257,9 +257,9 @@ int kprobe_int3_handler(struct pt_regs *regs)
 
 	/*
 	 * Generic kprobes contract: pre/post handlers run with preemption
-	 * disabled. On architectural int3 this is
-	 * provided by the exception entry path; UML's SIGTRAP handler
-	 * is just a signal handler, so preempt state is whatever the
+	 * disabled. On architectural int3 this is provided by the exception
+	 * entry path; UML's SIGTRAP handler is delivered through a signal
+	 * handler, so preempt state is whatever the
 	 * interrupted guest-kernel context had. Disable explicitly
 	 * before touching per-CPU kprobe state or running user handlers.
 	 *
@@ -285,14 +285,15 @@ int kprobe_int3_handler(struct pt_regs *regs)
 	set_current_kprobe(p, regs, kcb);
 	kcb->kprobe_status = KPROBE_HIT_ACTIVE;
 
-	/* Rewind IP back to the probe address; pre_handler and
-	 * single-step should see it pointing at the probed
-	 * instruction, not one byte past.
+	/*
+	 * Rewind IP back to the probe address; pre_handler and single-step
+	 * should see it pointing at the probed instruction, not one byte past.
 	 */
 	instruction_pointer(regs) = (unsigned long)addr;
 
-	/* Pre-handler may ask us to skip the single-step (for example
-	 * a jprobe-style emulation that already adjusted regs). Returns
+	/*
+	 * The pre-handler may request that single-step be skipped, for
+	 * example after jprobe-style emulation already adjusted regs. Return
 	 * non-zero to skip.
 	 */
 	if (!p->pre_handler || !p->pre_handler(p, regs)) {
@@ -318,8 +319,8 @@ NOKPROBE_SYMBOL(kprobe_int3_handler);
  * before its kernel-mode panic path.
  *
  * Fix up the IP so control resumes at the instruction following
- * the original probed instruction, clear our TF bit, restore the
- * saved IF, and run the post-handler.
+ * the original probed instruction, clear TF, restore the saved IF, and
+ * run the post-handler.
  */
 int kprobe_debug_handler(struct pt_regs *regs)
 {
@@ -337,15 +338,16 @@ int kprobe_debug_handler(struct pt_regs *regs)
 	    kcb->kprobe_status != KPROBE_REENTER)
 		return 0;
 
-	/* How many bytes the single-stepped instruction consumed.
-	 * With TF, the CPU trapped after executing exactly one
-	 * instruction; regs->ip points past that instruction in the
+	/*
+	 * Number of bytes consumed by the single-stepped instruction. With TF,
+	 * the CPU trapped after executing exactly one instruction; regs->ip
+	 * points past that instruction in the
 	 * out-of-line copy.
 	 */
 	insn_length = instruction_pointer(regs) - (unsigned long)p->ainsn.insn;
 	instruction_pointer(regs) = (unsigned long)p->addr + insn_length;
 
-	/* Clear our TF; restore the IF the traced function had. */
+	/* Clear TF and restore the saved IF. */
 	KPROBE_REGS_FLAGS(regs) &= ~X86_EFLAGS_TF;
 	KPROBE_REGS_FLAGS(regs) |= (kcb->kprobe_saved_flags & X86_EFLAGS_IF);
 

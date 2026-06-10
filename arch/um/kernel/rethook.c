@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * UML rethook arch layer; mirrors arch/x86/kernel/rethook.c almost
- * verbatim. When a probed function returns, control reaches the
+ * UML rethook arch layer, based on arch/x86/kernel/rethook.c. When a
+ * probed function returns, control reaches the
  * arch_rethook_trampoline below (the probed callsite's return slot
  * was overwritten by arch_rethook_prepare). The trampoline saves
  * regs into a pt_regs-shaped frame and calls the generic
@@ -25,7 +25,7 @@
  *      access like regs->ip is not valid. The memory image that
  *      SAVE_REGS_STRING builds on the stack is byte-compatible with
  *      UML's gp[] layout (both derive from the host user_regs_struct
- *      ordering), so no layout gymnastics are needed.
+ *      ordering), so no layout conversion is needed.
  *
  *   2. frame_pointer is computed as (char *)regs + 21*sizeof(long)
  *      instead of (regs + 1). UML's struct pt_regs is larger than
@@ -37,7 +37,7 @@
  *   3. __KERNEL_DS is not defined under UML (arch/x86/um/asm/segment.h
  *      doesn't provide it). We push UM_RETHOOK_KERNEL_DS = 0x18
  *      (x86's conventional value) purely to keep the trampoline's
- *      push layout identical and the regs->ss slot non-garbage
+ *      push layout identical and the regs->ss slot initialized
  *      until the callback overwrites it.
  */
 
@@ -50,7 +50,8 @@
 #include <asm/ptrace.h>
 #include <asm/unwind_hints.h>
 
-/* kprobes/common.h brings in <asm/insn.h> which sets MAX_INSN_SIZE=15,
+/*
+ * kprobes/common.h brings in <asm/insn.h> which sets MAX_INSN_SIZE=15,
  * but UML's asm/kprobes.h (pulled in by <linux/kprobes.h> above) sets
  * it to 16. Drop the UML definition so the two headers agree; rethook
  * only needs SAVE/RESTORE_REGS_STRING from common.h, not MAX_INSN_SIZE.
@@ -58,7 +59,8 @@
 #undef MAX_INSN_SIZE
 #include "../../x86/kernel/kprobes/common.h"
 
-/* Objtool macros are no-ops on UML (no IBT, no ORC unwinder), but
+/*
+ * Objtool macros are no-ops on UML (no IBT, no ORC unwinder), but
  * keep the names so the inline asm stays textually identical to the
  * x86 original. The headers above provide UNWIND_HINT_FUNC; the
  * ENDBR annotation is IBT-only.
@@ -104,39 +106,44 @@ NOKPROBE_SYMBOL(arch_rethook_trampoline);
 /*
  * Called from arch_rethook_trampoline. The caller passes %rsp (start
  * of the SAVE_REGS_STRING frame) as the pt_regs pointer. See the file
- * header comment for why we can't use (regs + 1) to locate
+ * header comment for why UML cannot use (regs + 1) to locate
  * frame_pointer on UML.
  */
 __used __visible void arch_rethook_trampoline_callback(struct pt_regs *regs)
 {
 	unsigned long *frame_pointer;
 
-	/* Fix up the register slots SAVE_REGS_STRING left uninitialized.
+	/*
+	 * Fix up the register slots SAVE_REGS_STRING left uninitialized.
 	 * UPT_CS / UPT_IP / UPT_ORIG_AX are gp[] indices that match the
-	 * subq-reserved slots in SAVE_REGS_STRING; writing them here
-	 * completes the pt_regs image.
+	 * subq-reserved slots in SAVE_REGS_STRING; writing them here completes
+	 * the pt_regs image.
 	 */
-	UPT_CS(&regs->regs) = 0;		/* UML has no kernel CS; any value works */
+	/* UML has no kernel CS; any value works. */
+	UPT_CS(&regs->regs) = 0;
 	UPT_IP(&regs->regs) = (unsigned long)&arch_rethook_trampoline;
 	UPT_ORIG_AX(&regs->regs) = ~0UL;
-	/* Undo the two pushq that preceded SAVE_REGS_STRING so the saved
-	 * sp reflects %rsp at the moment of the probed function's ret.
+	/*
+	 * Undo the two pushq that preceded SAVE_REGS_STRING so the saved sp
+	 * reflects %rsp at the moment of the probed function's ret.
 	 */
 	UPT_SP(&regs->regs) += 2 * sizeof(long);
 
-	/* Frame pointer (where arch_rethook_fixup_return writes the real
-	 * return address) sits immediately above the SAVE_REGS_STRING
-	 * frame: offset 21 * sizeof(long) from the top of pt_regs.
+	/*
+	 * Frame pointer (where arch_rethook_fixup_return writes the real return
+	 * address) sits immediately above the SAVE_REGS_STRING frame: offset
+	 * 21 * sizeof(long) from the top of pt_regs.
 	 */
 	frame_pointer = (unsigned long *)((char *)regs + 21 * sizeof(unsigned long));
 
-	/* Walk the task's shadow stack, invoke handlers, patch the fake
-	 * return address to the real one via arch_rethook_fixup_return.
+	/*
+	 * Walk the task's shadow stack, invoke handlers, patch the fake return
+	 * address to the real one via arch_rethook_fixup_return.
 	 */
 	rethook_trampoline_handler(regs, (unsigned long)frame_pointer);
 
-	/* Copy FLAGS to the SS slot so the trampoline's popfq restores
-	 * flags.
+	/*
+	 * Copy FLAGS to the SS slot so the trampoline's popfq restores flags.
 	 */
 	UPT_SS(&regs->regs) = UPT_EFLAGS(&regs->regs);
 }
@@ -152,7 +159,8 @@ NOKPROBE_SYMBOL(arch_rethook_trampoline_callback);
  */
 STACK_FRAME_NON_STANDARD_FP(arch_rethook_trampoline);
 
-/* Called from rethook_trampoline_handler() to write the real return
+/*
+ * Called from rethook_trampoline_handler() to write the real return
  * address into the stack slot that currently holds the fake
  * trampoline address.
  */
@@ -167,7 +175,8 @@ void arch_rethook_fixup_return(struct pt_regs *regs,
 }
 NOKPROBE_SYMBOL(arch_rethook_fixup_return);
 
-/* Hijack the return address on probed function entry. regs->sp
+/*
+ * Hijack the return address on probed function entry. regs->sp
  * points at the slot the CPU will ret into; save the original and
  * overwrite with the trampoline address.
  */
@@ -179,7 +188,7 @@ void arch_rethook_prepare(struct rethook_node *rh, struct pt_regs *regs,
 	rh->ret_addr = stack[0];
 	rh->frame = UPT_SP(&regs->regs);
 
-	/* Replace the return addr with trampoline addr */
+	/* Replace the return address with the trampoline address. */
 	stack[0] = (unsigned long)arch_rethook_trampoline;
 }
 NOKPROBE_SYMBOL(arch_rethook_prepare);
