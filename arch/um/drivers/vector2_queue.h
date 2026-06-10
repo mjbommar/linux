@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Queue ownership helpers for the UML vector networking v2 rewrite.
+ * Queue ownership helpers for UML vector networking v2.
  *
  * These helpers are intentionally independent of struct net_device and
  * struct sk_buff.  The runtime driver will pass sk_buff pointers as opaque

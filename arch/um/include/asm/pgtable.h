@@ -206,7 +206,7 @@ static inline int pte_none(pte_t pte)
 
 /*
  * The following only work if pte_present() is true.
- * Undefined behaviour if not..
+ * Undefined behavior otherwise.
  */
 static inline int pte_read(pte_t pte)
 {

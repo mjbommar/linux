@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Explicit state model for the UML vector networking v2 rewrite.
+ * Explicit state model for UML vector networking v2.
  */
 #ifndef __UM_VECTOR2_MODEL_H
 #define __UM_VECTOR2_MODEL_H

@@ -370,7 +370,7 @@ TRACE_EVENT(um_backend_kvm_v2_sigmask_install,
  * (out %al, $0xf4 / sysretq) are written. gpa is __pa(host page); gva
  * is KVM_V2_LSTAR_GVA (= KVM_V2_TRAMPOLINE_GVA + 0x40 = the address
  * programmed into MSR_LSTAR). Fires at most once per VM
- * lifetime; idempotent re-invocations from the lazy retry path
+ * lifetime; idempotent re-invocations from the late-install path
  * short-circuit before reaching the trace site.
  */
 TRACE_EVENT(um_backend_kvm_v2_trampoline_install,
