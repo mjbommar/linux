@@ -8074,6 +8074,12 @@ Kernel parameters
 			host signal state, respawn per-mm SKAS stubs, and enter
 			userspace as a long-lived pool member.
 
+	um_template_pause_pool_replicate[=1]
+			[UML] In pool-member mode, make each child switch to
+			replicated physmem backing before refreshing SKAS stubs
+			and entering userspace. Experimental; intended for UML
+			pool-member isolation development and selftests.
+
 	um_template_pause_private_stack=
 			[UML] Control whether fork-on-resume children use a
 			private clone stack. Format: <bool>. Defaults to true.

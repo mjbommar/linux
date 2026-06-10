@@ -1286,6 +1286,10 @@ Runtime replication recheck:
   init-kill panic and repeated master resume cycles;
 - keep the helper unwired until the post-replication userspace/stub path is
   fixed.
+- `um_template_pause_pool_replicate=1` now gates the replication path
+  explicitly, and `UML_POOL_REPLICATE=1` in the sustained smoke records the
+  current post-replication failure as a bounded XFAIL instead of a generic
+  regression.
 
 Detailed implementation plan:
 

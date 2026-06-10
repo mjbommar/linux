@@ -10,16 +10,17 @@
 #
 # Exit codes:
 #   0   PASS - N members all reached MEMBER_DONE (NOT YET ACHIEVABLE)
-#   4   SKIP/XFAIL - kernel binary missing, OR iter 1 PASS + iter 2+
-#              hits the architectural limit: repeated live members need
-#              independent physmem ownership instead of the current
-#              shared backing model.
+#   4   SKIP/XFAIL - kernel binary missing, OR the default path reaches
+#              iter 1 PASS + iter 2+ hits the architectural limit, OR
+#              UML_POOL_REPLICATE=1 reaches the current bounded
+#              post-replication failure.
 #   1   FAIL - iter 1 itself broke (regression in pool-member entry).
 
 set -u
 
 KERNEL=${UML_BINARY:-$HOME/src/uml-builds/uml-tplpause-fork/linux}
 N=3
+REPLICATE=${UML_POOL_REPLICATE:-0}
 
 if [ ! -x "$KERNEL" ]; then
 	echo "SKIP: UML binary $KERNEL not found"
@@ -45,11 +46,12 @@ IEOF
 chmod +x "$OUT/init.sh"
 
 PYRC=0
-python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" "$N" <<'PYEOF' || PYRC=$?
+python3 - "$KERNEL" "$OUT/init.sh" "$OUT/boot.log" "$N" "$REPLICATE" <<'PYEOF' || PYRC=$?
 import ctypes, ctypes.util, fcntl, os, signal, struct, sys, time
 
-kernel, init_path, log_path, n_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+kernel, init_path, log_path, n_str, replicate_str = sys.argv[1:6]
 N = int(n_str)
+replicate = replicate_str == "1"
 
 def Z(b, n): return b.ljust(n, b'\x00')[:n]
 def make_blob(idx):
@@ -80,11 +82,14 @@ pid = os.fork()
 if pid == 0:
     os.setsid()
     os.dup2(log.fileno(), 1); os.dup2(log.fileno(), 2)
-    os.execve(kernel, ["linux", "mem=128M", "rootfstype=hostfs",
-                       "rootflags=/", "root=/dev/root", "rw", "ncpus=1",
-                       "um_template_pause=fork",
-                       "um_template_pause_pool_member=1",
-                       f"init={init_path}"], env)
+    cmdline = ["linux", "mem=128M", "rootfstype=hostfs",
+               "rootflags=/", "root=/dev/root", "rw", "ncpus=1",
+               "um_template_pause=fork",
+               "um_template_pause_pool_member=1"]
+    if replicate:
+        cmdline.append("um_template_pause_pool_replicate=1")
+    cmdline.append(f"init={init_path}")
+    os.execve(kernel, cmdline, env)
     os._exit(127)
 
 def state(p):
@@ -160,8 +165,9 @@ for i in range(1, N+1):
             print(f"iter {i}: MEMBER_DONE total={c} child_pid={child_pid_slot()}")
             break
         content = read_log()
-        if i > 1 and (content.count("Kernel panic") > panic_base or
-                      content.count("segfault at") > segv_base):
+        if (replicate or i > 1) and (
+                content.count("Kernel panic") > panic_base or
+                content.count("segfault at") > segv_base):
             print(f"iter {i}: observed panic/segfault while awaiting member "
                   f"child_pid={child_pid_slot()}")
             fatal_seen = True
@@ -185,10 +191,16 @@ with open(log_path, errors="replace") as fh:
     content = fh.read()
 
 done = content.count("SUSTAINED_MEMBER_DONE")
+pool_enter = content.count("POOL_ENTER")
+replicate_ok = content.count("POOL_REPLICATE_OK")
+replicate_fail = content.count("POOL_REPLICATE_FAIL")
 panic = "Kernel panic" in content
 ceiling = "um_template_pause_enter+0xf" in content
 
 print(f"SUSTAINED_MEMBER_DONE : {done}")
+print(f"POOL_ENTER            : {pool_enter}")
+print(f"POOL_REPLICATE_OK     : {replicate_ok}")
+print(f"POOL_REPLICATE_FAIL   : {replicate_fail}")
 print(f"Kernel panic          : {panic}")
 print(f"v1 ceiling regression : {ceiling}")
 
@@ -197,6 +209,10 @@ if ceiling:
     print("FAIL: v1 ceiling regressed")
     sys.exit(1)
 if done < 1:
+    if replicate and pool_enter >= 1 and (replicate_ok >= 1 or replicate_fail >= 1):
+        print("XFAIL: replication path reached bounded post-clone boundary")
+        print("       - post-replication userspace/stub path still needs a fix.")
+        sys.exit(4)
     print("FAIL: iter 1 broken (regression in pool-member entry)")
     sys.exit(1)
 if done >= N and not panic:

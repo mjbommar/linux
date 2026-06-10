@@ -143,6 +143,9 @@ Current boundary:
   `template-pause-pivot-smoke`, `template-pause-pool-member-smoke`,
   `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`, and
   `pool-port-forward-smoke` pass against the current `./linux` build;
+- `template-pause-pool-member-smoke` now tears down the full UML process group
+  after the long-lived member reaches `MEMBER_DONE`, so the one-shot PASS does
+  not leave an orphaned member process;
 - `template-pause-fork-smoke` now drives two SIGSTOP/SIGCONT cycles and
   observes two distinct child PIDs plus two master resume cycles;
 - `template-pause-fork-stress` passed its default gate with 548 kernel
@@ -160,7 +163,10 @@ Current boundary:
   state, which is consistent with the first live member mutating kernel memory
   still shared with the master; re-wiring `um_pool_replicate_physmem()` in the
   child entry remains broken because iteration 1 reaches `POOL_ENTER` but then
-  segfaults in libc before `MEMBER_DONE`; the implementation path is tracked in
+  segfaults in libc before `MEMBER_DONE`; `um_template_pause_pool_replicate=1`
+  now gates that path explicitly and `UML_POOL_REPLICATE=1` gives the sustained
+  smoke a bounded XFAIL for the post-replication userspace/stub failure; the
+  implementation path is tracked in
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;

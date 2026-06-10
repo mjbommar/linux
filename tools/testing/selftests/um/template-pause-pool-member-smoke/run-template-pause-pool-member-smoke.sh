@@ -107,6 +107,7 @@ env = dict(os.environ, UM_TEMPLATE_IDENTITY_FD=str(fd))
 log = open(log_path, "wb")
 pid = os.fork()
 if pid == 0:
+    os.setsid()
     os.dup2(log.fileno(), 1)
     os.dup2(log.fileno(), 2)
     os.execve(kernel, [
@@ -127,6 +128,14 @@ def state(p):
     except FileNotFoundError:
         return "X"
     return "?"
+
+def kill_uml_tree(p):
+    try:
+        os.killpg(p, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        os.kill(p, signal.SIGKILL)
 
 # Wait for master's first SIGSTOP.
 for _ in range(120):
@@ -161,11 +170,11 @@ while time.time() < deadline and not done_seen:
         pass
 
 if state(pid) not in ("X", "?"):
-    os.kill(pid, signal.SIGKILL)
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass
+    kill_uml_tree(pid)
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
 log.close()
 
 while True:

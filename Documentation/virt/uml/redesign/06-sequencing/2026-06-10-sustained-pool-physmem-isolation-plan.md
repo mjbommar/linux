@@ -108,6 +108,14 @@ Rules:
 - failures must abort the child clearly instead of letting the master spin; and
 - the switch must be easy to remove if runtime replication is abandoned.
 
+Status:
+
+- `um_template_pause_pool_replicate=1` is now present and documented;
+- default pool-member behavior remains unchanged when the option is absent;
+- enabled runs emit `POOL_REPLICATE_OK` or `POOL_REPLICATE_FAIL` markers; and
+- the enabled path still fails after `POOL_REPLICATE_OK`, before
+  `MEMBER_DONE`, so Step 3 remains open.
+
 ### Step 2: Make Replication Failure Bounded
 
 Before fixing correctness, make the failed replication path diagnosable and
@@ -121,6 +129,16 @@ bounded:
 
 This keeps future experiments from producing long panic logs or ambiguous
 timeouts.
+
+Status:
+
+- `UML_POOL_REPLICATE=1` makes the sustained smoke boot with
+  `um_template_pause_pool_replicate=1`;
+- the replication mode now exits as XFAIL when it reaches `POOL_ENTER` plus a
+  replication marker and then observes the current panic/segfault boundary;
+- the harness kills the UML process group on exit, so the XFAIL does not leak
+  the master or member process; and
+- stopping repeated master resume cycles in production code remains open.
 
 ### Step 3: Fix the Immediate Iteration-1 Regression
 

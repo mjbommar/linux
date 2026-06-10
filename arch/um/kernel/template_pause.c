@@ -28,9 +28,9 @@
 #include <linux/uaccess.h>
 
 #include <asm/um-template-pause.h>
+#include <asm/um-snapshot.h>
 #include "template_pause_identity.h"
 #ifdef CONFIG_UM_TEMPLATE_PAUSE_FORK
-#include <asm/um-snapshot.h>
 #include <skas.h>
 #include <skas/skas.h>
 #include <os_io_ring.h>
@@ -111,6 +111,13 @@ static bool template_pause_pivot_test_armed_flag __read_mostly;
  * UML kernel running the caller's userspace continuation.
  */
 static bool template_pause_pool_member_armed_flag __read_mostly;
+
+/*
+ * Experimental pool-member physmem isolation.  Off by default.  When
+ * enabled, the forked pool member switches to its own physmem backing
+ * before it refreshes SKAS stubs and returns to userspace.
+ */
+static bool template_pause_pool_replicate_armed_flag __read_mostly;
 
 /*
  * Per-host-process flag: set in child_entry_pool_member after the
@@ -198,6 +205,19 @@ static int __init template_pause_pool_member_setup(char *str)
 }
 __setup("um_template_pause_pool_member", template_pause_pool_member_setup);
 
+static int __init template_pause_pool_replicate_setup(char *str)
+{
+	if (str && str[0] == '=' && str[1] == '1')
+		template_pause_pool_replicate_armed_flag = true;
+	else if (str && str[0] == '\0')
+		template_pause_pool_replicate_armed_flag = true;
+	if (template_pause_pool_replicate_armed_flag)
+		pr_warn("template_pause: experimental pool-member physmem replication armed\n");
+	return 1;
+}
+__setup("um_template_pause_pool_replicate",
+	template_pause_pool_replicate_setup);
+
 /*
  * Child entry for pivot-test mode.  Runs on a MAP_PRIVATE stack
  * allocated by os_template_pause_fork_clone_to(), so it does not
@@ -270,6 +290,24 @@ static void template_pause_write_pool_enter_marker(void)
 	register long rdi asm("rdi") = 1;
 	register long rsi asm("rsi") = (long)enter_msg;
 	register long rdx asm("rdx") = sizeof(enter_msg) - 1;
+
+	asm volatile ("syscall"
+		      : "+r" (rax)
+		      : "r" (rdi), "r" (rsi), "r" (rdx)
+		      : "rcx", "r11", "memory");
+}
+
+static void template_pause_write_pool_replicate_marker(bool ok)
+{
+	static const char ok_msg[] = "POOL_REPLICATE_OK\n";
+	static const char fail_msg[] = "POOL_REPLICATE_FAIL\n";
+	const char *msg = ok ? ok_msg : fail_msg;
+	size_t len = ok ? sizeof(ok_msg) - 1 : sizeof(fail_msg) - 1;
+
+	register long rax asm("rax") = 1;
+	register long rdi asm("rdi") = 1;
+	register long rsi asm("rsi") = (long)msg;
+	register long rdx asm("rdx") = len;
 
 	asm volatile ("syscall"
 		      : "+r" (rax)
@@ -351,6 +389,25 @@ static void template_pause_refresh_child_stubs(void)
 	}
 }
 
+static void template_pause_replicate_child_physmem(void)
+{
+	int ret;
+
+	if (!template_pause_pool_replicate_armed_flag)
+		return;
+
+	ret = um_pool_replicate_physmem();
+	if (ret) {
+		template_pause_write_pool_replicate_marker(false);
+		pr_err("template_pause: pool-member physmem replication failed: %d\n",
+		       ret);
+		os_template_pause_child_exit(100);
+	}
+
+	template_pause_write_pool_replicate_marker(true);
+	pr_info("template_pause: pool-member physmem replicated\n");
+}
+
 static void __noreturn
 child_entry_pool_member(void)
 {
@@ -362,6 +419,7 @@ child_entry_pool_member(void)
 	template_pause_rebuild_child_timer();
 	template_pause_complete_child_proc_write();
 	template_pause_reset_child_task_state();
+	template_pause_replicate_child_physmem();
 	template_pause_refresh_child_stubs();
 
 	/*
