@@ -367,8 +367,8 @@ int kvm_v2_trampoline_upgrade_to_gadget(struct kvm_v2_vm *vm);
  * pool member and provides access to the IST stack frame for exception
  * dispatch.
  *
- * Returns 0 on success, -EINVAL if vcpu is NULL. Panic-on-unknown-
- * port lives inside the panic dispatcher.
+ * Returns 0 on success, -EINVAL if vcpu is NULL. Unknown ports are
+ * handled by the panic dispatcher.
  */
 int kvm_v2_handle_io_trap(struct uml_pt_regs *regs,
 			  struct kvm_run *run,

@@ -8,10 +8,9 @@
  * cpu_feature_enabled(X86_FEATURE_*) check that returns false
  * on UML (no retpoline, no ITS/BHB mitigations, no CFI in the
  * UML kernel's BPF JIT output). The stubs exist solely to satisfy
- * the linker; they should never be called at runtime. If any of
- * them runs, it means a cpu_feature gate is misconfigured and we
- * want to know about it immediately (hence the panic rather than
- * silent empty body).
+ * the linker; they should never be called at runtime. Reaching one
+ * means the corresponding cpu_feature gate is misconfigured, so the
+ * stub panics instead of returning silently.
  */
 
 #include <linux/export.h>
@@ -44,9 +43,8 @@ EXPORT_SYMBOL_GPL(cfi_mode);
 /*
  * BHB loop clearing. Emitted as a call from the BPF program
  * prologue when X86_FEATURE_CLEAR_BHB_LOOP is enabled. UML
- * never sets that feature; the emission site is dead. If hit,
- * it's a bug elsewhere (a cpu_feature gate that shouldn't have
- * fired).
+ * never sets that feature; the emission site is dead. Reaching this
+ * function means the corresponding cpu_feature gate fired incorrectly.
  */
 void clear_bhb_loop(void)
 {
@@ -60,7 +58,7 @@ EXPORT_SYMBOL_GPL(clear_bhb_loop);
  * overwrite a JIT image with 0xcc (int3) bytes on unload. On
  * UML the JIT image lives in execmem-allocated memory which is
  * plain RWX host memory; memset is sufficient and semantically
- * correct. No host icache flush needed; self-modifying code on
+ * correct. No host icache flush is needed; self-modifying code on
  * the same CPU is coherent without explicit sync on x86.
  */
 void *text_poke_set(void *addr, int c, size_t len)
@@ -72,7 +70,7 @@ EXPORT_SYMBOL_GPL(text_poke_set);
 /*
  * smp_text_poke_single is called by __bpf_arch_text_poke to
  * atomically rewrite a 5-byte CALL/JMP with cross-CPU sync.
- * UML is single-host-process (no SMP at the host-kernel layer),
+ * UML is a single host process (no SMP at the host-kernel layer),
  * so a plain memcpy is sufficient on x86 self-modifying-code
  * coherency rules.
  */

@@ -3,8 +3,8 @@
  * UML backend kernel-only API surface.
  *
  * Most of the contract (struct definitions, the dispatch macro, the
- * extern um_backend pointer, per-backend op prototypes) lives in
- * <backend.h> so host-built UML files can include it too. This header
+ * um_backend extern declaration, and per-backend op prototypes) lives
+ * in <backend.h> so host-built UML files can include it too. This header
  * adds the kernel-only declarations: the init_backend() entry point,
  * ops-table singletons selected by the arbiter, and early boot handoff
  * state consumed by init_backend().
