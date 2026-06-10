@@ -281,6 +281,105 @@ void reap_worker_for_mm(struct mm_struct *mm)
 	kfree(w);
 }
 
+static void worker_init_msg(struct worker_msg *msg, enum worker_msg_type type)
+{
+	memset(msg, 0, sizeof(*msg));
+	msg->magic = WORKER_IPC_MAGIC;
+	msg->type = type;
+}
+
+static void worker_init_stub_alloc_req(struct worker_msg *req,
+				       struct mm_id *id_out)
+{
+	worker_init_msg(req, WORKER_MSG_STUB_ALLOC_REQ);
+	/*
+	 * Pass the spawner-allocated stub_data VA (init_new_context did
+	 * __get_free_pages from physmem) so the worker uses the same
+	 * shared page. The worker inherited the MAP_SHARED physmem
+	 * mapping CoW from the spawner; arithmetic on this VA in
+	 * start_userspace's userspace_tramp resolves through phys_mapping
+	 * the same way (uml_physmem is also CoW-inherited). The futex
+	 * stored at that VA is cross-process visible because the page is
+	 * memfd-backed and MAP_SHARED.
+	 */
+	req->u.stub_alloc.stack = (worker_u64)id_out->stack;
+}
+
+static int worker_send_msg_to_sock(int sock, const struct worker_msg *msg)
+{
+	ssize_t n;
+
+	n = os_write_file(sock, msg, sizeof(*msg));
+	if (n != sizeof(*msg))
+		return n < 0 ? n : -EIO;
+	return 0;
+}
+
+static int worker_send_msg(struct um_worker *w, const struct worker_msg *msg)
+{
+	return worker_send_msg_to_sock(w->ipc_sock, msg);
+}
+
+static int worker_recv_stub_alloc_rep(struct um_worker *w, int *sock_fd,
+				      struct worker_msg *rep)
+{
+	ssize_t n;
+
+	/*
+	 * recvmsg with cmsg buffer for the worker's SCM_RIGHTS reply.
+	 * os_rcv_fd_msg installs the inbound fd into the spawner's FD
+	 * table and returns the body length.
+	 */
+	n = os_rcv_fd_msg(w->ipc_sock, sock_fd, 1, rep, sizeof(*rep));
+	if (n != sizeof(*rep))
+		return n < 0 ? n : -EIO;
+	return 0;
+}
+
+static int worker_validate_stub_alloc_rep(const struct worker_msg *rep,
+					  int sock_fd)
+{
+	int rc;
+
+	if (rep->magic != WORKER_IPC_MAGIC ||
+	    rep->type != WORKER_MSG_STUB_ALLOC_REP) {
+		pr_err("um: worker alloc: bad reply magic=0x%x type=%u\n",
+		       (unsigned int)rep->magic, (unsigned int)rep->type);
+		return -EPROTO;
+	}
+
+	if (rep->u.stub_alloc_rep.status != 0) {
+		pr_err("um: worker alloc: start_userspace in worker failed (status=%d)\n",
+		       (int)rep->u.stub_alloc_rep.status);
+		rc = (int)rep->u.stub_alloc_rep.status;
+		return rc < 0 ? rc : -EIO;
+	}
+
+	if (sock_fd < 0) {
+		pr_err("um: worker alloc: reply OK but no SCM_RIGHTS fd\n");
+		return -EPROTO;
+	}
+
+	return 0;
+}
+
+static void worker_publish_stub_alloc(struct mm_id *id_out,
+				      const struct worker_msg *rep,
+				      int sock_fd)
+{
+	int i;
+
+	id_out->stack = (unsigned long)rep->u.stub_alloc_rep.stack;
+	id_out->pid = (int)rep->u.stub_alloc_rep.pid;
+	id_out->syscall_data_len =
+		(int)rep->u.stub_alloc_rep.syscall_data_len;
+	id_out->sock = sock_fd;
+	id_out->syscall_fd_num = (int)rep->u.stub_alloc_rep.syscall_fd_num;
+	for (i = 0; i < STUB_MAX_FDS; i++)
+		id_out->syscall_fd_map[i] =
+			(int)rep->u.stub_alloc_rep.syscall_fd_map[i];
+}
+
 /*
  * worker_alloc_stub_for_mm - bring up the per-mm worker and its
  * stub child.
@@ -308,8 +407,7 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 	struct worker_msg req;
 	struct worker_msg rep;
 	int sock_fd = -1;
-	ssize_t n;
-	int rc, i;
+	int rc;
 
 	rc = __spawn_worker_for_mm(mm, true);
 	if (rc < 0)
@@ -317,68 +415,20 @@ int worker_alloc_stub_for_mm(struct mm_struct *mm, struct mm_id *id_out)
 
 	w = mm->context.worker;
 
-	memset(&req, 0, sizeof(req));
-	req.magic = WORKER_IPC_MAGIC;
-	req.type  = WORKER_MSG_STUB_ALLOC_REQ;
-	/*
-	 * Pass the spawner-allocated stub_data VA (init_new_context did
-	 * __get_free_pages from physmem) so the worker uses the same
-	 * shared page. The worker inherited the MAP_SHARED physmem
-	 * mapping CoW from the spawner; arithmetic on this VA in
-	 * start_userspace's userspace_tramp resolves through phys_mapping
-	 * the same way (uml_physmem is also CoW-inherited). The futex
-	 * stored at that VA is cross-process visible because the page is
-	 * memfd-backed and MAP_SHARED.
-	 */
-	req.u.stub_alloc.stack = (worker_u64)id_out->stack;
-	n = os_write_file(w->ipc_sock, &req, sizeof(req));
-	if (n != sizeof(req)) {
-		rc = n < 0 ? n : -EIO;
+	worker_init_stub_alloc_req(&req, id_out);
+	rc = worker_send_msg(w, &req);
+	if (rc < 0)
 		goto out_reap;
-	}
 
-	/*
-	 * recvmsg with cmsg buffer for the worker's SCM_RIGHTS reply.
-	 * os_rcv_fd_msg installs the inbound fd into the spawner's FD
-	 * table and returns the body length.
-	 */
-	n = os_rcv_fd_msg(w->ipc_sock, &sock_fd, 1, &rep, sizeof(rep));
-	if (n != sizeof(rep)) {
-		rc = n < 0 ? n : -EIO;
+	rc = worker_recv_stub_alloc_rep(w, &sock_fd, &rep);
+	if (rc < 0)
 		goto out_reap;
-	}
 
-	if (rep.magic != WORKER_IPC_MAGIC ||
-	    rep.type  != WORKER_MSG_STUB_ALLOC_REP) {
-		pr_err("um: worker alloc: bad reply magic=0x%x type=%u\n",
-		       (unsigned int)rep.magic, (unsigned int)rep.type);
-		rc = -EPROTO;
+	rc = worker_validate_stub_alloc_rep(&rep, sock_fd);
+	if (rc < 0)
 		goto out_reap;
-	}
 
-	if (rep.u.stub_alloc_rep.status != 0) {
-		pr_err("um: worker alloc: start_userspace in worker failed (status=%d)\n",
-		       (int)rep.u.stub_alloc_rep.status);
-		rc = (int)rep.u.stub_alloc_rep.status;
-		if (rc >= 0)
-			rc = -EIO;
-		goto out_reap;
-	}
-
-	if (sock_fd < 0) {
-		pr_err("um: worker alloc: reply OK but no SCM_RIGHTS fd\n");
-		rc = -EPROTO;
-		goto out_reap;
-	}
-
-	id_out->stack            = (unsigned long)rep.u.stub_alloc_rep.stack;
-	id_out->pid              = (int)rep.u.stub_alloc_rep.pid;
-	id_out->syscall_data_len = (int)rep.u.stub_alloc_rep.syscall_data_len;
-	id_out->sock             = sock_fd;
-	id_out->syscall_fd_num   = (int)rep.u.stub_alloc_rep.syscall_fd_num;
-	for (i = 0; i < STUB_MAX_FDS; i++)
-		id_out->syscall_fd_map[i] =
-			(int)rep.u.stub_alloc_rep.syscall_fd_map[i];
+	worker_publish_stub_alloc(id_out, &rep, sock_fd);
 
 	/*
 	 * vcpu_run directly reads/writes the IPC socket from the
@@ -413,15 +463,53 @@ out_reap:
 int worker_send_msg_for_mm(struct mm_struct *mm, const struct worker_msg *msg)
 {
 	struct um_worker *w = mm ? mm->context.worker : NULL;
-	int n;
 
 	if (!w || w->ipc_sock < 0)
 		return -ENODEV;
 
-	n = os_write_file(w->ipc_sock, msg, sizeof(*msg));
-	if (n != sizeof(*msg))
-		return n < 0 ? n : -EIO;
-	return 0;
+	return worker_send_msg(w, msg);
+}
+
+static void worker_init_vcpu_run_msg(struct worker_msg *msg,
+				     struct uml_pt_regs *regs,
+				     int single_stepping,
+				     int syscall_data_len)
+{
+	worker_init_msg(msg, WORKER_MSG_VCPU_RUN);
+	msg->task_handle = (u64)(unsigned long)current;
+	msg->u.vcpu_run.regs_va = (u64)(unsigned long)regs;
+	msg->u.vcpu_run.single_stepping = single_stepping ? 1 : 0;
+	msg->u.vcpu_run.syscall_data_len = (u32)syscall_data_len;
+}
+
+static int worker_read_vcpu_done(struct um_worker *w, struct worker_msg *msg)
+{
+	int n;
+
+	/*
+	 * Direct synchronous read of the IPC socket; bypass the
+	 * dispatcher kthread for the duration of this vcpu_run
+	 * iteration. There is exactly one consumer at a time. Worker
+	 * emits exactly one VCPU_DONE per VCPU_RUN; the post-trap signal
+	 * dispatch runs in the spawner's seccomp_vcpu_run continuation,
+	 * which is already on the originating guest task's current.
+	 */
+	for (;;) {
+		n = os_read_file(w->ipc_sock, msg, sizeof(*msg));
+		if (n == -EINTR)
+			continue;
+		if (n != sizeof(*msg))
+			return n < 0 ? n : -EIO;
+
+		if (msg->magic != WORKER_IPC_MAGIC)
+			return -EPROTO;
+
+		if (msg->type == WORKER_MSG_VCPU_DONE)
+			return (int)msg->u.vcpu_done.status;
+
+		pr_warn_ratelimited("um: drv: unexpected msg type %u\n",
+				    (unsigned int)msg->type);
+	}
 }
 
 /*
@@ -455,7 +543,7 @@ int worker_drive_vcpu_run(struct uml_pt_regs *regs,
 	struct um_worker *w = mm ? mm->context.worker : NULL;
 	struct mm_id *mm_id = mm ? &mm->context.id : NULL;
 	struct worker_msg msg;
-	int rc, n;
+	int rc;
 
 	if (!w)
 		return -ENODEV;
@@ -470,43 +558,57 @@ int worker_drive_vcpu_run(struct uml_pt_regs *regs,
 	if (mm_id && mm_id->syscall_fd_num)
 		send_stub_syscall_fds(mm_id);
 
-	memset(&msg, 0, sizeof(msg));
-	msg.magic = WORKER_IPC_MAGIC;
-	msg.type  = WORKER_MSG_VCPU_RUN;
-	msg.task_handle = (u64)(unsigned long)current;
-	msg.u.vcpu_run.regs_va         = (u64)(unsigned long)regs;
-	msg.u.vcpu_run.single_stepping = single_stepping ? 1 : 0;
-	msg.u.vcpu_run.syscall_data_len = (u32)syscall_data_len;
-
-	rc = worker_send_msg_for_mm(mm, &msg);
+	worker_init_vcpu_run_msg(&msg, regs, single_stepping,
+				 syscall_data_len);
+	rc = worker_send_msg(w, &msg);
 	if (rc < 0)
 		return rc;
 
-	/*
-	 * Direct synchronous read of the IPC socket; bypass the
-	 * dispatcher kthread for the duration of this vcpu_run
-	 * iteration. There is exactly one consumer at a time. Worker
-	 * emits exactly one VCPU_DONE per VCPU_RUN; the
-	 * post-trap signal dispatch (including handle_syscall for
-	 * SIGSYS) runs in the spawner's seccomp_vcpu_run continuation,
-	 * which is already on the originating guest task's current.
-	 */
-	for (;;) {
-		n = os_read_file(w->ipc_sock, &msg, sizeof(msg));
-		if (n == -EINTR)
-			continue;
-		if (n != sizeof(msg))
-			return n < 0 ? n : -EIO;
+	return worker_read_vcpu_done(w, &msg);
+}
 
-		if (msg.magic != WORKER_IPC_MAGIC)
-			return -EPROTO;
+static void worker_selftest_init_stub_alloc(struct worker_msg *msg, int pid)
+{
+	worker_init_msg(msg, WORKER_MSG_STUB_ALLOC_REQ);
+	msg->u.stub_alloc.pid = (worker_u32)pid;
+	msg->u.stub_alloc.sock = (worker_u32)(-1);
+}
 
-		if (msg.type == WORKER_MSG_VCPU_DONE)
-			return (int)msg.u.vcpu_done.status;
+static void worker_selftest_init_write_regs(struct worker_msg *msg)
+{
+	worker_init_msg(msg, WORKER_MSG_WRITE_REGS);
+	msg->u.regs.slot[0] = 0xdeadULL;	/* rip */
+	msg->u.regs.slot[1] = 0xbeefULL;	/* rsp */
+}
 
-		pr_warn_ratelimited("um: drv: unexpected msg type %u\n",
-				    (unsigned int)msg.type);
+static void worker_selftest_init_return_value(struct worker_msg *msg,
+					      u64 sentinel)
+{
+	worker_init_msg(msg, WORKER_MSG_RETURN_VALUE);
+	msg->u.retval.sentinel = sentinel;
+}
+
+static int worker_selftest_read_ack(int sock, struct worker_msg *msg,
+				    u64 sentinel)
+{
+	int n;
+
+	n = os_read_file(sock, msg, sizeof(*msg));
+	if (n != sizeof(*msg)) {
+		pr_err("um: worker ipc: self-test short read (%d)\n", n);
+		return n < 0 ? n : -EIO;
 	}
+
+	if (msg->magic != WORKER_IPC_MAGIC ||
+	    msg->type != WORKER_MSG_WRITE_REGS_ACK ||
+	    msg->u.regs.slot[2] != sentinel) {
+		pr_err("um: worker ipc: self-test ack mismatch magic=0x%x type=%u slot2=0x%llx\n",
+		       (unsigned int)msg->magic, (unsigned int)msg->type,
+		       (unsigned long long)msg->u.regs.slot[2]);
+		return -EPROTO;
+	}
+
+	return 0;
 }
 
 /*
@@ -522,7 +624,7 @@ int worker_drive_vcpu_run(struct uml_pt_regs *regs,
 int worker_ipc_selftest(void)
 {
 	struct worker_msg msg;
-	int pid = -1, sock = -1, rc, n;
+	int pid = -1, sock = -1, rc;
 	const u64 sentinel = 0x1234ULL;
 
 	if (!spawner_initialized)
@@ -534,58 +636,24 @@ int worker_ipc_selftest(void)
 		return rc;
 	}
 
-	memset(&msg, 0, sizeof(msg));
-	msg.magic = WORKER_IPC_MAGIC;
-	msg.type  = WORKER_MSG_STUB_ALLOC_REQ;
-	msg.u.stub_alloc.pid              = (worker_u32)pid;
-	msg.u.stub_alloc.stack            = 0;
-	msg.u.stub_alloc.syscall_data_len = 0;
-	msg.u.stub_alloc.sock             = (worker_u32)(-1);
-	msg.u.stub_alloc.syscall_fd_num   = 0;
-	n = os_write_file(sock, &msg, sizeof(msg));
-	if (n != sizeof(msg)) {
-		rc = n < 0 ? n : -EIO;
+	worker_selftest_init_stub_alloc(&msg, pid);
+	rc = worker_send_msg_to_sock(sock, &msg);
+	if (rc < 0)
 		goto out;
-	}
 
-	memset(&msg, 0, sizeof(msg));
-	msg.magic = WORKER_IPC_MAGIC;
-	msg.type  = WORKER_MSG_WRITE_REGS;
-	msg.u.regs.slot[0] = 0xdeadULL;	/* rip */
-	msg.u.regs.slot[1] = 0xbeefULL;	/* rsp */
-	n = os_write_file(sock, &msg, sizeof(msg));
-	if (n != sizeof(msg)) {
-		rc = n < 0 ? n : -EIO;
+	worker_selftest_init_write_regs(&msg);
+	rc = worker_send_msg_to_sock(sock, &msg);
+	if (rc < 0)
 		goto out;
-	}
 
-	memset(&msg, 0, sizeof(msg));
-	msg.magic = WORKER_IPC_MAGIC;
-	msg.type  = WORKER_MSG_RETURN_VALUE;
-	msg.u.retval.sentinel = sentinel;
-	n = os_write_file(sock, &msg, sizeof(msg));
-	if (n != sizeof(msg)) {
-		rc = n < 0 ? n : -EIO;
+	worker_selftest_init_return_value(&msg, sentinel);
+	rc = worker_send_msg_to_sock(sock, &msg);
+	if (rc < 0)
 		goto out;
-	}
 
-	memset(&msg, 0, sizeof(msg));
-	n = os_read_file(sock, &msg, sizeof(msg));
-	if (n != sizeof(msg)) {
-		pr_err("um: worker ipc: self-test short read (%d)\n", n);
-		rc = n < 0 ? n : -EIO;
+	rc = worker_selftest_read_ack(sock, &msg, sentinel);
+	if (rc < 0)
 		goto out;
-	}
-
-	if (msg.magic != WORKER_IPC_MAGIC ||
-	    msg.type  != WORKER_MSG_WRITE_REGS_ACK ||
-	    msg.u.regs.slot[2] != sentinel) {
-		pr_err("um: worker ipc: self-test ack mismatch magic=0x%x type=%u slot2=0x%llx\n",
-		       (unsigned int)msg.magic, (unsigned int)msg.type,
-		       (unsigned long long)msg.u.regs.slot[2]);
-		rc = -EPROTO;
-		goto out;
-	}
 
 	pr_debug("um: worker ipc: self-test OK (sentinel 0x%llx)\n",
 		 (unsigned long long)sentinel);
