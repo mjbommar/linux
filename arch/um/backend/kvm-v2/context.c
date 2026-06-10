@@ -54,10 +54,9 @@ static struct kvm_v2_vm vm = {
  * kvm_v2_load_cr3 writes __pa(active_mm->pgd) to CR3.
  * Under UML __pa(kva) = kva - uml_physmem, so the GPA is an offset
  * inside physmem (in [0, physmem_size)), not a host VA. KVM's TDP walks
- * the pgd at this GPA and needs a memslot covering this range. Per-region
- * memslots use guest_phys_addr = host_va = region->va in user-half VA
- * space, far outside [0, physmem_size), so they don't cover the pgd,
- * PUD/PMD/PTE, or trampoline pages, all of which live in physmem.
+ * the pgd at this GPA and needs a memslot covering this range. The
+ * region hooks do not install per-mapping KVM slots; slot 0 covers the
+ * pgd, PUD/PMD/PTE pages, and trampoline pages that live in physmem.
  *
  * One slot covers everything in physmem: PT chain pages allocated from
  * buddy come from physmem; alloc_page -> page_address -> __pa = offset
@@ -340,10 +339,9 @@ static void kvm_v2_vm_drain_memslots(void)
 	struct kvm_v2_memslot *m, *tmp;
 
 	/*
-	 * Per-region entries and the giant physmem slot both sit on
-	 * vm.memslots and tear down through the same kvm_v2_memslot_del call.
-	 * No KVM_SET_USER_MEMORY_REGION(size=0) is needed here: closing the VM
-	 * fd tears down all kernel-side slots.
+	 * Registered slots tear down through the same record path. No
+	 * KVM_SET_USER_MEMORY_REGION(size=0) is needed here: closing the VM fd
+	 * tears down all kernel-side slots.
 	 */
 	list_for_each_entry_safe(m, tmp, &vm.memslots, list)
 		kvm_v2_memslot_del(&vm, m->slot_id);

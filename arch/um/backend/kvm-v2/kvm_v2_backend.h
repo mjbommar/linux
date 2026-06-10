@@ -52,7 +52,7 @@ struct um_memory_region;
  * Per-UML-kernel-invocation VM context. A single instance lives in
  * context.c and is available through kvm_v2_vm_get() after
  * kvm_v2_vm_create() succeeds. @memslots tracks registered KVM memory
- * regions; @cpuid holds the curated CPUID2 buffer installed lazily on
+ * slots; @cpuid holds the curated CPUID2 buffer installed lazily on
  * each vCPU once allocation is safe.
  */
 struct kvm_v2_vm {
@@ -145,8 +145,8 @@ struct kvm_v2_vm {
  * and lives on @vm->memslots until kvm_v2_memslot_del() removes it.
  *
  * @gpa and @host_va are intentionally separate: the physmem slot maps
- * guest physical offset 0 to the UML physmem host mapping, and future
- * slots may use different GPA/HVA relationships.
+ * guest physical offset 0 to the UML physmem host mapping, and other slot
+ * users may need different GPA/HVA relationships.
  */
 struct kvm_v2_memslot {
 	struct list_head	list;
