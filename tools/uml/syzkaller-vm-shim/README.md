@@ -35,6 +35,7 @@ the result into syzkaller's VM interface.
        "vm": {
            "pool": "syz-pool",
            "umlctl": "/usr/local/bin/umlctl",
+           "runtime_dir": "/run/user/1000/uml-syz",
            "auto_serve": true,
            "kernel": "/path/to/uml-fork-vmlinux",
            "count": 4,
@@ -56,6 +57,10 @@ the result into syzkaller's VM interface.
 | `Forward` | Run `umlctl port-forward --json`, with a local gateway fallback. |
 | `Copy` | Translate hostfs paths; no data copy is needed. |
 | `Close` | Run `umlctl pool destroy --name <pool>`. |
+
+If `runtime_dir` is set, the shim passes it to every `umlctl` invocation as
+the global `--runtime-dir` option. If `auto_serve` is set and `mem_mb` is
+non-zero, the shim starts the daemon with the matching `--mem <mem_mb>M`.
 
 ## Wire Contracts
 

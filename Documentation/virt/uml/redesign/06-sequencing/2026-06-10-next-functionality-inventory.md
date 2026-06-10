@@ -108,7 +108,7 @@ This file is the live execution tracker for
 | Launcher | snapshot export CLI | Present-validated | `next`, `kvm-v2-snapshot-elf64` | Keep mconsole-driven host export path. | live `umlctl snapshot export` smoke PASS, 2026-06-10. |
 | Launcher | transparency tooling | Present-needs-validation | `next`, `umlctl-deploy` | Keep if docs/tests match. | transparency smoke. |
 | Launcher | `umlbuild` | Present-needs-validation | `next`, `umlctl-deploy` | Keep and run MVP smoke. | `umlbuild` smoke. |
-| Syzkaller | UML VM shim | Present-needs-validation | `next`, `umlctl-deploy` | Validate against final pool/exec path. | syzkaller-style exec smoke. |
+| Syzkaller | UML VM shim | Present-validated-needs-ABI-decision | `next`, `umlctl-deploy` | Keep the shim aligned with the final exec ABI; current take/exec/port-forward/status/destroy wire path is validated. | `syzkaller-shim-smoke` PASS: source contract check plus syzkaller-style take, exec output merge, port-forward, status, destroy, 2026-06-10. |
 | Profiles | profile configs | Partial | `next`, historical docs | Build and test matrix required. | profile build matrix. |
 | Instrumentation | kprobes | Present-needs-validation | `next` | Keep and test. | kprobes stress. |
 | Instrumentation | ftrace | Present-needs-validation | `next` | Keep and test. | ftrace smoke. |
@@ -155,7 +155,8 @@ These items must be closed before the final branch can be called complete:
 1. Record/replay functionality must be imported or completed.
 2. Vector2 replacement claims must match validation evidence.
 3. Pool/fork-server current tests must pass, including warm-pool, pool-member,
-   vector2 TAP/fd, and syzkaller-facing paths.
+   and vector2 TAP/fd paths; the syzkaller-facing take/exec/destroy path now
+   has a dedicated smoke gate.
 4. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
 5. The final validation matrix from the integration plan must pass.

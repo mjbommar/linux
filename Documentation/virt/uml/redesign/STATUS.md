@@ -131,7 +131,9 @@ Current boundary:
 
 - the pool daemon and basic pool selftests exist;
 - kernel identity parsing and application have KUnit coverage;
-- the syzkaller-facing shim and JSON command paths exist;
+- the syzkaller-facing shim and JSON command paths exist, and
+  `syzkaller-shim-smoke` validates the take/exec/port-forward/status/destroy
+  wire path through `umlctl`;
 - comparison against `fork-server-phase1c`, `memo09-phase2`,
   `memo09-phase3-pool-bench`, and `memo09-phase4` is documented in
   `06-sequencing/2026-06-10-pool-fork-historical-comparison-plan.md`;
@@ -210,8 +212,8 @@ Current boundary:
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller
   MAC/TAP/mconsole request; and
-- tap-fd handoff through vector2 pool members and the syzkaller shim still need
-  live end-to-end validation.
+- tap-fd handoff through vector2 pool members still needs live end-to-end
+  validation.
 
 ## Historical-Only Work
 

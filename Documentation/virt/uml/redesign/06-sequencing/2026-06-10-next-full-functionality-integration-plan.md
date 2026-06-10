@@ -109,11 +109,9 @@ The active blockers are now:
    `pool take --ready`.
 4. Validate vector2 TAP/fd handoff through live pool members, then run the
    relevant vector2 networking gates against seccomp and KVM v2.
-5. Validate the syzkaller UML shim against the final take/exec/destroy path,
-   including stdout/stderr/status/timeout and cleanup behavior.
-6. Import or complete record/replay, or land it behind an explicit
+5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig and keep it out of the completion claim.
-7. Decide whether the historical KVM v2 private state trace should be imported
+6. Decide whether the historical KVM v2 private state trace should be imported
    as clean optional diagnostics.
 8. Curate source comments, selftests, reports, and status docs so upstream-
    facing code is free of internal issue numbers, phase diaries, random
@@ -718,8 +716,9 @@ Current comparison result:
 - Current template-pause, fork, spawn, serve, port-forward, and reduced
   benchmark smokes pass on the live replicated-member path.
 - The remaining pool/fork gaps are full default `pool-bench` RSS, the final
-  daemon-routed guest exec ABI decision, vector2 TAP/fd handoff through pool
-  members, and syzkaller-style take/exec/destroy.
+  daemon-routed guest exec ABI decision, and vector2 TAP/fd handoff through
+  pool members. The syzkaller-style take/exec/destroy wire path now has a
+  dedicated passing smoke gate.
 - Historical snapshot test wrappers from `memo09-phase4` should be imported
   or replaced as cleaned kselftests because the underlying snapshot hooks now
   exist on `next`. Current status: imported and PASS on 2026-06-10.
@@ -853,8 +852,10 @@ Functional requirements:
 Acceptance gates:
 
 - Build shim.
-- Unit or smoke test for take/exec/destroy.
-- End-to-end syzkaller-style command execution smoke.
+- Unit or smoke test for take/exec/destroy. Current status:
+  `syzkaller-shim-smoke` PASS on 2026-06-10.
+- End-to-end syzkaller-style command execution smoke. Current status:
+  `syzkaller-shim-smoke` PASS on 2026-06-10.
 - Crash capture smoke if practical.
 
 ## Workstream I: Profiles And Instrumentation
@@ -1075,7 +1076,8 @@ Exit criteria:
 - Full pool benchmark passes, or the original RSS target is revised with
   evidence and approval while throughput remains green.
 - Vector2 TAP/fd handoff works through live pool members.
-- Syzkaller-style take/exec/destroy works through the final path.
+- Syzkaller-style take/exec/destroy works through the current path; keep it
+  aligned with the final exec ABI decision.
 - Missing `memo09-*` functionality is either landed or explicitly retired.
 
 ### Phase 4: Record/Replay
@@ -1519,10 +1521,12 @@ Immediate engineering conclusion:
 - daemon pool take/serve now routes through the replicated live-member path;
 - daemon `min_warm` now prefills, consumes, replenishes, reports, and cleans up
   pre-identified ready members through `pool take --ready`;
+- `syzkaller-shim-smoke` now validates the shim source contract and the
+  syzkaller-style take/exec/port-forward/status/destroy wire path through
+  `umlctl`;
 - final completion requires fixing the full-scale pool benchmark RSS failure,
   resolving the request-specific warm scheduling decision or API, vector2
-  TAP/fd pool networking, the final daemon-routed exec ABI decision, and the
-  syzkaller take/exec/destroy path.
+  TAP/fd pool networking, and the final daemon-routed exec ABI decision.
 
 ## Immediate Next Actions
 
@@ -1542,8 +1546,7 @@ Immediate engineering conclusion:
    completion. The current `pool-exec-smoke` already validates command
    success, stdout/stderr/status, timeout reporting, late-output suppression,
    and helper cleanup.
-4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
-   take/exec/destroy path.
+4. Validate vector2 TAP/fd handoff through pool members.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
 6. Decide whether private state trace is worth importing as clean optional

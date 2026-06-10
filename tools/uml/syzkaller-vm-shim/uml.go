@@ -36,15 +36,16 @@ import (
 
 // Config is the per-pool config block, JSON-decoded from Env.Config.
 type Config struct {
-	Pool      string `json:"pool"`        // "default"
-	UmlctlBin string `json:"umlctl"`      // "/usr/local/bin/umlctl"
+	Pool       string `json:"pool"`        // "default"
+	UmlctlBin  string `json:"umlctl"`      // "/usr/local/bin/umlctl"
+	RuntimeDir string `json:"runtime_dir"` // optional umlctl --runtime-dir
 	AutoServe bool   `json:"auto_serve"`  // start `pool serve` if absent
-	Kernel    string `json:"kernel"`      // path to fork-capable vmlinux
-	Count     int    `json:"count"`       // matches syzkaller's vm count
-	MemMB     int    `json:"mem_mb"`      // matches umlctl --mem
-	TapPrefix string `json:"tap_prefix"`  // "tap-uml-"
-	Subnet    string `json:"subnet"`      // "10.7.0.0/24"
-	HostfsMap string `json:"hostfs_map"`  // guest path the host root mounts at; default "/host"
+	Kernel     string `json:"kernel"`      // path to fork-capable vmlinux
+	Count      int    `json:"count"`       // matches syzkaller's vm count
+	MemMB      int    `json:"mem_mb"`      // matches umlctl --mem
+	TapPrefix  string `json:"tap_prefix"`  // "tap-uml-"
+	Subnet     string `json:"subnet"`      // "10.7.0.0/24"
+	HostfsMap  string `json:"hostfs_map"`  // guest path the host root mounts at; default "/host"
 }
 
 type pool struct {
@@ -97,12 +98,23 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 		if cfg.Kernel != "" {
 			args = append(args, "--kernel", cfg.Kernel)
 		}
-		_ = exec.Command(cfg.UmlctlBin, args...).Run()
+		if cfg.MemMB > 0 {
+			args = append(args, "--mem", fmt.Sprintf("%dM", cfg.MemMB))
+		}
+		_ = exec.Command(cfg.UmlctlBin, umlctlArgs(cfg, args...)...).Run()
 	}
 	return &pool{env: env, cfg: cfg}, nil
 }
 
 func (p *pool) Count() int { return p.cfg.Count }
+
+func umlctlArgs(cfg *Config, args ...string) []string {
+	if cfg.RuntimeDir == "" {
+		return args
+	}
+	out := []string{"--runtime-dir", cfg.RuntimeDir}
+	return append(out, args...)
+}
 
 // allocIPv4Pair returns the per-instance CIDR + gateway.  Strategy:
 // take the /24 from cfg.Subnet, give index+10 to the guest, .1 to the
@@ -141,9 +153,10 @@ func (p *pool) Create(ctx context.Context, workdir string, index int) (vmimpl.In
 	mac := allocMAC(index)
 
 	cmd := exec.CommandContext(ctx, p.cfg.UmlctlBin,
-		"pool", "take", "--name", p.cfg.Pool, "--json",
-		"--instance", name, "--mac", mac, "--tap", tap,
-		"--ipv4", cidr, "--gateway", gw)
+		umlctlArgs(p.cfg,
+			"pool", "take", "--name", p.cfg.Pool, "--json",
+			"--instance", name, "--mac", mac, "--tap", tap,
+			"--ipv4", cidr, "--gateway", gw)...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, &vmimpl.BootError{
@@ -197,10 +210,10 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 // to get the canonical address string the daemon would advertise.
 func (inst *instance) Forward(port int) (string, error) {
 	inst.forwardPort = port
-	out, err := exec.Command(inst.pool.cfg.UmlctlBin,
+	out, err := exec.Command(inst.pool.cfg.UmlctlBin, umlctlArgs(inst.pool.cfg,
 		"port-forward", "--name", inst.pool.cfg.Pool,
 		"--pid", fmt.Sprint(inst.pid),
-		"--host-port", fmt.Sprint(port), "--json").Output()
+		"--host-port", fmt.Sprint(port), "--json")...).Output()
 	if err != nil {
 		// Fallback: synthesize the address from the gateway we
 		// already know.  This is the same logic the verb runs.
@@ -234,7 +247,7 @@ func (inst *instance) Run(ctx context.Context, timeout time.Duration,
 	}
 	args = append(args, "--", "/bin/sh", "-c", command)
 
-	cmd := exec.CommandContext(ctx, inst.pool.cfg.UmlctlBin, args...)
+	cmd := exec.CommandContext(ctx, inst.pool.cfg.UmlctlBin, umlctlArgs(inst.pool.cfg, args...)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, err
@@ -308,14 +321,14 @@ func (inst *instance) Run(ctx context.Context, timeout time.Duration,
 }
 
 func (inst *instance) Diagnose(rep *report.Report) ([]byte, bool) {
-	data, _ := exec.Command(inst.pool.cfg.UmlctlBin,
-		"pool", "status", "--name", inst.pool.cfg.Pool, "--json").Output()
+	data, _ := exec.Command(inst.pool.cfg.UmlctlBin, umlctlArgs(inst.pool.cfg,
+		"pool", "status", "--name", inst.pool.cfg.Pool, "--json")...).Output()
 	return data, false
 }
 
 func (inst *instance) Info() ([]byte, error) {
-	return exec.Command(inst.pool.cfg.UmlctlBin,
-		"pool", "status", "--name", inst.pool.cfg.Pool, "--json").Output()
+	return exec.Command(inst.pool.cfg.UmlctlBin, umlctlArgs(inst.pool.cfg,
+		"pool", "status", "--name", inst.pool.cfg.Pool, "--json")...).Output()
 }
 
 func (inst *instance) Close() error {
@@ -325,8 +338,8 @@ func (inst *instance) Close() error {
 		return nil
 	}
 	inst.closed = true
-	return exec.Command(inst.pool.cfg.UmlctlBin,
+	return exec.Command(inst.pool.cfg.UmlctlBin, umlctlArgs(inst.pool.cfg,
 		"pool", "destroy",
 		"--name", inst.pool.cfg.Pool,
-		fmt.Sprint(inst.pid)).Run()
+		fmt.Sprint(inst.pid))...).Run()
 }

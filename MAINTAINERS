@@ -27843,6 +27843,7 @@ F:	arch/um/
 F:	arch/x86/um/
 F:	fs/hostfs/
 F:	tools/testing/selftests/um/
+F:	tools/uml/
 
 USERSPACE COPYIN/COPYOUT (UIOVEC)
 M:	Alexander Viro <viro@zeniv.linux.org.uk>
