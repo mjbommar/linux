@@ -88,14 +88,14 @@ The active blockers are now:
    far above the original 100-member RSS target and below the throughput gate.
 2. Validate successful daemon-routed guest exec. The current smoke validates a
    clean error envelope; it does not yet prove a successful guest command
-   through the final member mconsole path. The current blocker is split into
-   two pieces: per-member mconsole sockets are absent for daemon-taken
-   members, and the active kernel mconsole command table has no `exec` verb.
-   A naive child-side mconsole rebind was tested locally and rejected because
-   it panicked before the member reached `MEMBER_DONE`; see
+   through the final member mconsole path. The per-member mconsole socket is now
+   addressable, but the active kernel mconsole command table has no `exec` verb
+   and the daemon still assumes an external `uml_mconsole exec` path. A naive
+   child-side mconsole rebind was tested locally and rejected because it
+   panicked before the member reached `MEMBER_DONE`; see
    `2026-06-10-pool-mconsole-exec-investigation.md`. The checked-in
-   `pool-mconsole-path-probe` now preserves the current socket-missing
-   boundary as an XFAIL diagnostic.
+   `pool-mconsole-path-probe` now passes as a focused socket-addressability
+   gate.
 3. Decide the final request-specific warm scheduling contract. Either add a
    predeclared slot/identity API before warm fork, or route syzkaller and other
    fast consumers through daemon-assigned ready identities with
@@ -1214,8 +1214,8 @@ Runtime smoke:
 - Pool spawn smoke.
 - Pool serve smoke.
 - Pool exec smoke.
-- Pool mconsole path probe. Current status: XFAIL diagnostic; member reaches
-  userspace, no panic, requested mconsole socket absent.
+- Pool mconsole path probe. Current status: PASS; member reaches userspace, no
+  panic, requested mconsole socket present, and `version` replies.
 - Pool port-forward smoke.
 - Vector2 sandbox audit.
 - Vector2 fd handoff.
@@ -1246,7 +1246,7 @@ branch lands.
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
-| Pool exec | Daemon failure envelope validated | Successful mconsole exec path validated | Partially closed |
+| Pool exec | Daemon failure envelope validated; per-member mconsole socket validated | Successful guest exec primitive validated | Partially closed |
 | Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
 | Syzkaller shim | Present | End-to-end smoke | Open |
@@ -1330,10 +1330,10 @@ timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
 Result:
 
 - PASS for typed NDJSON start, stderr, and exit frames;
-- the expected execution result is a clean error envelope because the tested
-  member did not expose the mconsole socket required by successful exec;
+- the expected execution result is a clean error envelope because this host
+  lacks `uml_mconsole(1)` and the kernel has no mconsole `exec` verb;
 - successful guest command execution still needs a final end-to-end gate after
-  the member mconsole path is fixed or proven.
+  the exec primitive or replacement transport is implemented.
 
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
@@ -1504,11 +1504,10 @@ Immediate engineering conclusion:
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.
 3. Validate successful daemon-routed guest exec through the final member
-   mconsole path. The next step is not another blind rebind attempt; first
-   prove a durable per-member control socket with an existing mconsole command,
-   then add or replace the actual guest exec primitive. The first diagnostic
-   probe for this now exists as `pool-mconsole-path-probe` and XFAILs on the
-   current socket-missing behavior.
+   mconsole path. The durable per-member control socket is now proven by
+   `pool-mconsole-path-probe`; the next step is to add or replace the actual
+   guest exec primitive and update `pool-exec-smoke` to require a successful
+   command round trip.
 4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
 5. Import or complete record/replay, or land it behind an explicit

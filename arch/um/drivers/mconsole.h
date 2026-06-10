@@ -67,11 +67,12 @@ struct mc_request {
 extern char mconsole_socket_name[];
 
 /*
- * Pool members spawned via template_pause fork-on-resume call this
- * after applying their identity blob, so each member binds its own
- * mconsole socket and is individually addressable by umlctl exec.
+ * Pool identity application uses these helpers to give each member a control
+ * socket.  The master binds the requested path before fork; the child then
+ * re-arms SIGIO ownership on the inherited fd after fork.
  */
 int mconsole_reinit_for_pool_member(const char *path);
+int mconsole_rearm_for_pool_member(void);
 
 extern int mconsole_unlink_socket(void);
 extern int mconsole_reply_len(struct mc_request *req, const char *reply,

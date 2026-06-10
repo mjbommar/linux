@@ -3,15 +3,14 @@
 #
 # um/pool-mconsole-path-probe - bounded probe for pool-member mconsole paths.
 #
-# Current expected result on `next`: XFAIL/SKIP because the member reaches
-# userspace but the requested per-member mconsole socket is not created.  A
-# panic before MEMBER_DONE is a regression.  Once the socket exists and answers
-# `version`, this test becomes a PASS and can feed successful daemon exec work.
+# Expected result: the member reaches userspace, the requested per-member
+# mconsole socket exists, and the socket answers `version`. A panic before
+# MEMBER_DONE is a regression.
 #
 # Exit codes:
 #   0 PASS  - requested socket exists and answers `version`.
-#   4 XFAIL - member reaches userspace but socket is absent.
-#   1 FAIL  - kernel panic, timeout before MEMBER_DONE, or bad mconsole reply.
+#   1 FAIL  - kernel panic, timeout before MEMBER_DONE, absent socket, or bad
+#             mconsole reply.
 #
 # Environment:
 #   UML_BINARY  UML kernel. Default $HOME/src/uml-builds/uml-tplpause-fork/linux.
@@ -233,9 +232,8 @@ try:
             print(line)
         raise SystemExit(1)
     if not os.path.exists(mconsole_path):
-        print("XFAIL: member reached userspace but requested mconsole socket is absent")
-        print("       this preserves the current pool exec blocker")
-        raise SystemExit(4)
+        print("FAIL: member reached userspace but requested mconsole socket is absent")
+        raise SystemExit(1)
 
     reply = mconsole_command(mconsole_path, "version")
     print("mconsole version reply:")

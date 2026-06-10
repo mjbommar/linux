@@ -394,6 +394,32 @@ void um_template_identity_log_parsed(const struct um_template_identity *blob)
 EXPORT_SYMBOL_GPL(um_template_identity_log_parsed);
 
 /*
+ * Rebind the per-pool-member mconsole socket.  This is independent of the
+ * network identity: hostfs-only guests may have no target netdev, but still
+ * need a member-specific control socket for pool supervision.
+ */
+static int apply_mconsole(const struct um_template_identity *blob)
+{
+	size_t plen;
+	char path[sizeof(blob->mconsole_path) + 1];
+
+	if (blob->mconsole_path[0] == '\0')
+		return 0;
+
+	/*
+	 * Identity blob fields are fixed-width and may not include a trailing
+	 * NUL.
+	 */
+	memcpy(path, blob->mconsole_path, sizeof(blob->mconsole_path));
+	path[sizeof(blob->mconsole_path)] = '\0';
+	plen = strnlen(path, sizeof(blob->mconsole_path));
+	if (plen == 0)
+		return 0;
+
+	return mconsole_reinit_for_pool_member(path);
+}
+
+/*
  * Apply @blob's identity (MAC + IPv4 + gateway) to the in-guest netdev.
  * Returns 0 on success, -errno if any step fails. Errors do not abort
  * subsequent steps; the function applies as much as it can and reports
@@ -416,12 +442,16 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 	 */
 	um_template_identity_log_parsed(blob);
 
+	rc = apply_mconsole(blob);
+	if (rc && !first_err)
+		first_err = rc;
+
 	rtnl_lock();
 	dev = find_target_netdev(&init_net);
 	if (!dev) {
 		rtnl_unlock();
 		pr_warn("template_pause: no target netdev found; identity NOT applied (parse OK)\n");
-		return -ENODEV;
+		return first_err ?: -ENODEV;
 	}
 	pr_debug("template_pause: applying identity to in-guest netdev %s (blob tap=\"%s\")\n",
 		 dev->name, blob->tap_name);
@@ -484,34 +514,6 @@ int um_template_identity_apply(const struct um_template_identity *blob)
 	rc = apply_default_route(dev, blob);
 	if (rc && !first_err)
 		first_err = rc;
-
-	/*
-	 * Rebind the per-pool-member mconsole socket.  Without this,
-	 * every pool member inherits the master's mconsole IRQ and socket
-	 * file, so supervisor commands may address the master rather than
-	 * the specific member.  The identity blob's mconsole_path carries
-	 * the per-member path; if it is non-empty, rebind here.
-	 *
-	 * Failure is not fatal; the member still works for everything
-	 * except remote exec.  mconsole_reinit_for_pool_member() reports
-	 * failures and records routine success at debug level.
-	 */
-	if (blob->mconsole_path[0] != '\0') {
-		size_t plen;
-		char path[sizeof(blob->mconsole_path) + 1];
-
-		/* Identity blob fields are fixed-width and may not include a
-		 * trailing NUL.
-		 */
-		memcpy(path, blob->mconsole_path, sizeof(blob->mconsole_path));
-		path[sizeof(blob->mconsole_path)] = '\0';
-		plen = strnlen(path, sizeof(blob->mconsole_path));
-		if (plen > 0) {
-			rc = mconsole_reinit_for_pool_member(path);
-			if (rc && !first_err)
-				first_err = rc;
-		}
-	}
 
 	return first_err;
 }

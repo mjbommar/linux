@@ -182,17 +182,15 @@ Current boundary:
   cycles pass; sparse physmem copying improves RSS from 17,262.7 MiB to
   7,409.4 MiB for 100/100 live children, but still fails the 200 MiB target,
   and throughput fails at 2250/3000 takes against the 2700 target;
+- `pool-mconsole-path-probe` now passes: with a non-empty `mconsole_path`, the
+  replicated member reaches `PMCON_MEMBER_DONE` without panic, the requested
+  per-member mconsole socket exists, and the socket answers `version`;
 - `pool-exec-smoke` still validates the clean daemon error envelope for missing
-  in-guest mconsole exec support; successful daemon-routed guest exec remains
-  pending, and the current blocker is now characterized in
+  in-guest exec support; successful daemon-routed guest exec remains pending,
+  and the current blocker is now characterized in
   `06-sequencing/2026-06-10-pool-mconsole-exec-investigation.md`: the
-  per-member mconsole socket is absent, the active mconsole command table has
-  no `exec` verb, and a naive child-side socket rebind experiment panicked
-  before `MEMBER_DONE`;
-- `pool-mconsole-path-probe` now preserves that boundary as a focused
-  diagnostic gate: with a non-empty `mconsole_path`, the replicated member
-  reaches `PMCON_MEMBER_DONE` without panic, but the requested socket remains
-  absent and the test exits XFAIL;
+  per-member mconsole socket is addressable, but the active mconsole command
+  table has no `exec` verb and this host lacks `uml_mconsole(1)` in `PATH`;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller

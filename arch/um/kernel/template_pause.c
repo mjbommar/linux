@@ -41,6 +41,7 @@
 #include <backend.h>
 
 #include <os.h>
+#include "../drivers/mconsole.h"
 
 /*
  * Armed via "um_template_pause" on the kernel cmdline.  Off by
@@ -282,7 +283,9 @@ child_entry_pivot_test(void)
  *   5. um_skas_respawn_all_stubs() - master tore the stubs down
  *      before fork in fork_on_resume_loop().  Child needs
  *      a fresh stub for its own userspace.
- *   6. userspace(&current->thread.regs.regs) - drop into the
+ *   6. mconsole_rearm_for_pool_member() - point SIGIO for the inherited
+ *      per-member mconsole fd at this child process.
+ *   7. userspace(&current->thread.regs.regs) - drop into the
  *      seccomp dispatch loop forever, pumping the caller's userspace.
  *      Never returns.
  */
@@ -401,6 +404,15 @@ static void template_pause_refresh_child_stubs(void)
 	}
 }
 
+static void template_pause_rearm_child_mconsole(void)
+{
+	int ret = mconsole_rearm_for_pool_member();
+
+	if (ret && ret != -ENODEV)
+		pr_warn("template_pause: child mconsole rearm returned %d (continuing)\n",
+			ret);
+}
+
 static void template_pause_replicate_child_physmem(void)
 {
 	int ret;
@@ -433,6 +445,7 @@ child_entry_pool_member(void)
 	template_pause_complete_child_proc_write();
 	template_pause_reset_child_task_state();
 	template_pause_refresh_child_stubs();
+	template_pause_rearm_child_mconsole();
 
 	/*
 	 * Mark this host process as a pool member so subsequent template_pause

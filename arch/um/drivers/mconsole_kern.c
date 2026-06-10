@@ -770,11 +770,9 @@ static int __init mconsole_init(void)
 __initcall(mconsole_init);
 
 /*
- * Re-init the mconsole socket against a new absolute path. Pool
- * members spawned via template_pause fork-on-resume inherit the
- * master's mconsole IRQ and socket; after the identity blob delivers a
- * unique mconsole_path, the forked child binds a fresh socket so the
- * daemon can address each member individually.
+ * Re-init the mconsole socket against a new absolute path. Template-pause
+ * identity application calls this before fork so the member child inherits a
+ * socket already bound to its requested path.
  *
  * Steps:
  *   1. Free the inherited MCONSOLE_IRQ (releases the old fd as a
@@ -848,6 +846,20 @@ int mconsole_reinit_for_pool_member(const char *path)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mconsole_reinit_for_pool_member);
+
+/*
+ * After fork the child inherits the bound mconsole socket and IRQ metadata,
+ * but F_SETOWN still targets the master host process. Reset async ownership so
+ * datagrams sent to the member path wake the child.
+ */
+int mconsole_rearm_for_pool_member(void)
+{
+	if (mconsole_current_sock < 0)
+		return -ENODEV;
+
+	return os_set_fd_async(mconsole_current_sock);
+}
+EXPORT_SYMBOL_GPL(mconsole_rearm_for_pool_member);
 
 static ssize_t mconsole_proc_write(struct file *file,
 		const char __user *buffer, size_t count, loff_t *pos)
