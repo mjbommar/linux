@@ -14,10 +14,8 @@
 #      table").
 #   3. Querying without --host-port is a clap-level error (exit 2).
 #
-# The verb is metadata-only; we do NOT bind a host or guest socket
-# here because the kernel-side tap fd swap is not wired yet.  Once it
-# is available, this selftest can grow a real end-to-end
-# nc-binding-on-host plus dial-from-guest assertion.
+# The verb is metadata-only; vector2 pool-member TAP connectivity is covered by
+# vector2-pool-tap-smoke.
 #
 # Exit codes: 0 PASS, 4 SKIP, 1 FAIL.
 

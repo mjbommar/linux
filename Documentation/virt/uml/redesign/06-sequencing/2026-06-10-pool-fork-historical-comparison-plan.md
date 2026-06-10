@@ -73,7 +73,8 @@ ways:
 2. Most command surfaces from `memo09-phase4` already exist on `next`: direct
    pool spawn, pool serve/take/status/destroy/shutdown, daemon-routed exec,
    port-forward result generation, identity blob parsing/application, per-member
-   mconsole socket handling, TAP/fd handoff hooks, template-pause pivot mode,
+   mconsole socket handling, vector2 TAP identity hooks, launcher fd handoff
+   hooks, template-pause pivot mode,
    pool-member mode, and the related smoke tests.
 
 The remaining work is therefore not a clean rewrite from the old branches. It
@@ -84,7 +85,8 @@ is a focused completion pass:
 - run and fix the current pool/fork tests;
 - complete warm-pool semantics that are currently accepted by the CLI but
   served lazily;
-- validate vector2 TAP/fd handoff through pool members;
+- validate vector2 TAP handoff through pool members and decide whether
+  per-take fd handoff is still required;
 - validate the syzkaller shim against the final pool/exec path;
 - keep historical diagnostics and diary material out of upstream-facing source.
 
@@ -334,7 +336,7 @@ Remaining work:
 | Template pause pool-member mode | Present, validated | `memo09-phase4`, current `next` | One-shot and sustained replicated member lifetime pass. |
 | Identity blob parse/apply | Present, validated | `memo09-phase2`, `memo09-phase4` | Keep KUnit plus live pool validation. |
 | Per-member mconsole path | Present, validated | `memo09-phase4` | Successful daemon-routed exec now proves the member mconsole path. |
-| Vector2 TAP/fd handoff | Present hook, needs validation | `memo09-phase4`, `umlctl-deploy` | Validate through pool member and vector2 smoke. |
+| Vector2 TAP and fd handoff | TAP present-validated; per-take fd deferred | `memo09-phase4`, `umlctl-deploy` | Keep the pool-member TAP smoke; decide whether the historical SCM_RIGHTS per-take fd design is required or retired. |
 | Direct pool spawn | Present, validated | `memo09-*` | Keep `pool-spawn-smoke` green. |
 | Pool daemon serve/take/status | Present, validated | `fork-server-phase1c`, `memo09-phase4` | Keep live-member and warm-ready smokes green. |
 | Pool destroy/shutdown | Present, validated | `memo09-phase4` | Keep in lifecycle smoke. |
@@ -469,21 +471,26 @@ Current state:
 
 - Identity apply can reopen a vector2 TAP for a pool member.
 - Launcher TAP helpers exist.
+- `vector2-pool-tap-smoke` now proves the live TAP path through a daemon-taken
+  pool member.
 - Port-forward currently returns the address a guest should dial; it is not a
   NAT engine by itself.
 
 Required final behavior:
 
 - A pool member taken with TAP/vector2 identity can communicate through the
-  assigned TAP/fd path.
+  assigned TAP path.
 - The member's mconsole and network identity are distinct from the master.
 - `port-forward` reports a correct guest-reachable address for the selected
   mode.
+- If per-take fd handoff remains a requirement, implement a real fd transfer
+  contract such as SCM_RIGHTS; the current identity memfd cannot carry fds.
 
 Validation:
 
-- pool member network smoke using vector2 TAP.
-- fd handoff smoke.
+- pool member network smoke using vector2 TAP. Current status:
+  `vector2-pool-tap-smoke` PASS on 2026-06-10.
+- launcher fd handoff smoke, plus a decision on per-take pool fd handoff.
 - port-forward smoke.
 - selected Tier 3 vector2 workload after pool paths are stable.
 
@@ -554,7 +561,7 @@ Work should continue in small pushed increments:
 1. Import and validate snapshot test wrappers.
 2. Validate current pool/fork tests and commit any fixes.
 3. Complete warm-pool behavior and validate.
-4. Validate vector2 TAP/fd handoff through pool.
+4. Validate vector2 pool-member TAP handoff and decide per-take fd handoff.
 5. Validate syzkaller shim.
 6. Refresh docs, reports, and final completion dashboard.
 
@@ -574,7 +581,8 @@ Pool/fork-server functionality can be called complete only when:
 - every current pool and template-pause selftest passes or has a justified SKIP;
 - `pool serve --min-warm` works as documented;
 - pool exec and port-forward work through the daemon path;
-- vector2 TAP/fd handoff works for pool members;
+- vector2 TAP handoff works for pool members and any retained per-take fd
+  handoff requirement is implemented or explicitly retired;
 - the syzkaller shim has an end-to-end take/exec/destroy smoke;
 - snapshot benchmark, KUnit smoke, and ELF roundtrip kselftest wrappers are
   either imported and passing or explicitly replaced by equivalent current

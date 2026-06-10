@@ -92,11 +92,11 @@ This file is the live execution tracker for
 | Pool | mconsole path synthesis | Present-validated | `next`, `memo09-phase4` | Keep the master-side bind plus child-side SIGIO rearm model; avoid the rejected child-side rebind experiment that panicked before `MEMBER_DONE`. | `pool-mconsole-path-probe` PASS with member alive, per-member socket present, and `version` reply; focused investigation in `2026-06-10-pool-mconsole-exec-investigation.md`, 2026-06-10. |
 | Pool | `umlctl exec` via daemon | Present-validated-needs-decision | `next`, `memo09-phase4` | Keep the current bounded exec path for now; decide whether shell-backed command strings and the guest `timeout(1)` helper dependency are the final ABI before the completion claim. | `pool-exec-smoke` PASS: `/bin/true` exits 0, stdout/stderr capture round-trips, guest exit 7 is preserved without a daemon error, timeout returns code 124 with `timed_out=true`, late stdout is suppressed, no extra guest `sleep` helper leaks, and stale `Unknown command`/missing-host-tool boundaries are rejected, 2026-06-10. |
 | Pool | `umlctl port-forward` | Present-validated | `next`, `memo09-phase4` | Keep and later validate against final network mode. | `pool-port-forward-smoke` PASS, 2026-06-10. |
-| Pool | TAP/fd handoff | Partial | `next`, `memo09-phase4`, `umlctl-deploy` | Complete with vector2 fd path. | fd handoff smoke. |
+| Pool | Vector2 TAP handoff | Present-validated | `next`, `memo09-phase4`, `umlctl-deploy` | Keep the vector2 TAP reopen path and smoke gate. Treat per-take fd handoff as a separate deferred SCM_RIGHTS design. | `vector2-pool-tap-smoke` PASS: per-member TAP/MAC/IPv4 identity visible through daemon exec and one-packet host TAP ping succeeds, 2026-06-10. |
 | Vector2 | Typed parser | Present | `next` | Keep. | vector2 parser KUnit. |
 | Vector2 | Queue ownership | Present | `next` | Keep. | vector2 queue KUnit. |
-| Vector2 | fd backend | Present-needs-validation | `next`, `umlctl-deploy` | Keep and test through launcher/pool. | fd handoff smoke. |
-| Vector2 | tap backend | Present-needs-validation | `next`, `umlctl-deploy` | Keep and run networking gates. | tap smoke and Tier 3. |
+| Vector2 | fd backend | Present-needs-validation | `next`, `umlctl-deploy` | Keep and validate the launcher-owned inherited-fd path; decide whether per-take pool fd handoff is required or retired. | fd handoff smoke. |
+| Vector2 | tap backend | Present-validated-needs-long-gates | `next`, `umlctl-deploy` | Keep and run networking/Tier 3 gates. | `vector2-pool-tap-smoke` PASS on the pool path, 2026-06-10; Tier 3 still required. |
 | Vector2 | multiqueue | Partial | `next`, `umlctl-deploy` | Finish fairness/performance gates. | multiqueue perf/fairness. |
 | Vector2 | raw/gre/l2tpv3/vde/bess/proxy/hybrid transports | Needs-decision | `next`, historical vector branches | Implement or remove parser/doc claims for unsupported modes. | transport-specific smoke. |
 | Vector2 | sandbox mode | Present-needs-validation | `next` | Keep default-safe and audit. | vector2 sandbox audit. |
@@ -154,9 +154,10 @@ These items must be closed before the final branch can be called complete:
 
 1. Record/replay functionality must be imported or completed.
 2. Vector2 replacement claims must match validation evidence.
-3. Pool/fork-server current tests must pass, including warm-pool, pool-member,
-   and vector2 TAP/fd paths; the syzkaller-facing take/exec/destroy path now
-   has a dedicated smoke gate.
+3. Pool/fork-server current tests must pass, including warm-pool and
+   pool-member paths. Vector2 pool-member TAP now has a dedicated smoke gate;
+   launcher fd and any per-take pool fd requirement still need a final
+   validation/contract decision.
 4. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
 5. The final validation matrix from the integration plan must pass.

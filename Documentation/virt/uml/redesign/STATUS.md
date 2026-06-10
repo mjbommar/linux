@@ -212,8 +212,18 @@ Current boundary:
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller
   MAC/TAP/mconsole request; and
-- tap-fd handoff through vector2 pool members still needs live end-to-end
-  validation.
+- `vector2-pool-tap-smoke` now validates live vector2 pool-member TAP
+  handoff: `pool serve` boots a vector2 TAP-backed master, `pool take`
+  assigns a different per-member TAP/MAC/IPv4/mconsole identity, daemon-routed
+  `exec` observes the assigned `vec2.0` address, brings the link up, and
+  reaches the host-side TAP with a one-packet ping.
+
+Remaining pool/vector2 boundary:
+
+- launcher-owned vector2 fd handoff is still a standalone `umlctl up` path;
+  per-take fd handoff for pool members remains a separate deferred design
+  because the current identity memfd carries strings, not SCM_RIGHTS-passed
+  fds.
 
 ## Historical-Only Work
 

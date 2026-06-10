@@ -107,8 +107,10 @@ The active blockers are now:
    predeclared slot/identity API before warm fork, or route syzkaller and other
    fast consumers through daemon-assigned ready identities with
    `pool take --ready`.
-4. Validate vector2 TAP/fd handoff through live pool members, then run the
-   relevant vector2 networking gates against seccomp and KVM v2.
+4. Validate launcher-owned vector2 fd handoff and decide whether the historical
+   per-take pool fd handoff design is required. Vector2 pool-member TAP
+   handoff now has a live smoke gate; the remaining vector2 networking gates
+   still need to run against seccomp and KVM v2.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig and keep it out of the completion claim.
 6. Decide whether the historical KVM v2 private state trace should be imported
@@ -685,7 +687,9 @@ Functional requirements:
 - `umlctl exec` works through mconsole, or the command surface is explicitly
   marked incomplete until a successful guest exec path is validated.
 - `port-forward` works for pool members.
-- TAP/fd handoff works for vector2 pool members.
+- Vector2 TAP handoff works for live pool members.
+- Launcher-owned vector2 fd handoff remains validated outside the pool-member
+  identity path unless a per-take SCM_RIGHTS fd design is added.
 - Identity blob layout is documented and tested.
 - Per-member mconsole path synthesis is reliable.
 - Warm pool support is implemented for daemon-assigned ready members, with a
@@ -715,10 +719,11 @@ Current comparison result:
   kernel applies MAC/TAP/mconsole identity before the member is forked.
 - Current template-pause, fork, spawn, serve, port-forward, and reduced
   benchmark smokes pass on the live replicated-member path.
-- The remaining pool/fork gaps are full default `pool-bench` RSS, the final
-  daemon-routed guest exec ABI decision, and vector2 TAP/fd handoff through
-  pool members. The syzkaller-style take/exec/destroy wire path now has a
-  dedicated passing smoke gate.
+- The remaining pool/fork gaps are full default `pool-bench` RSS and the final
+  daemon-routed guest exec ABI decision. Vector2 pool-member TAP handoff and
+  syzkaller-style take/exec/destroy now have dedicated passing smoke gates.
+  Per-take pool fd handoff remains a separate historical SCM_RIGHTS design
+  decision, not current implemented behavior.
 - Historical snapshot test wrappers from `memo09-phase4` should be imported
   or replaced as cleaned kselftests because the underlying snapshot hooks now
   exist on `next`. Current status: imported and PASS on 2026-06-10.
@@ -763,7 +768,8 @@ Required functionality:
 - Complete multiqueue behavior and fairness validation.
 - Complete sandbox validation for untrusted mode.
 - Complete in-process trusted host validation.
-- Confirm fd handoff from launcher/pool.
+- Confirm launcher-owned fd handoff and decide whether per-take pool fd handoff
+  is required or retired.
 - Confirm failure injection is test-only or clearly documented.
 - Align Kconfig wording with actual readiness.
 
@@ -776,8 +782,9 @@ Acceptance gates:
 
 - vector2 KUnit suites.
 - vector2 sandbox audit.
-- fd handoff smoke.
-- tap smoke.
+- launcher fd handoff smoke.
+- vector2 pool-member TAP smoke. Current status: PASS on 2026-06-10 through
+  `vector2-pool-tap-smoke`.
 - multiqueue smoke and fairness/perf test.
 - seccomp backend vector2 Tier 3 networking.
 - KVM v2 backend vector2 Tier 3 networking.
@@ -1075,7 +1082,10 @@ Exit criteria:
   the completion claim.
 - Full pool benchmark passes, or the original RSS target is revised with
   evidence and approval while throughput remains green.
-- Vector2 TAP/fd handoff works through live pool members.
+- Vector2 TAP handoff works through live pool members. Current status: PASS on
+  2026-06-10 through `vector2-pool-tap-smoke`.
+- Launcher-owned vector2 fd handoff works, or any per-take pool fd handoff
+  requirement is explicitly implemented or retired.
 - Syzkaller-style take/exec/destroy works through the current path; keep it
   aligned with the final exec ABI decision.
 - Missing `memo09-*` functionality is either landed or explicitly retired.
@@ -1231,7 +1241,9 @@ Runtime smoke:
   panic, requested mconsole socket present, and `version` replies.
 - Pool port-forward smoke.
 - Vector2 sandbox audit.
-- Vector2 fd handoff.
+- Vector2 launcher fd handoff.
+- Vector2 pool-member TAP handoff. Current status: PASS through
+  `vector2-pool-tap-smoke`.
 - Vector2 tap/multiqueue.
 - Syzkaller shim smoke.
 
@@ -1546,7 +1558,8 @@ Immediate engineering conclusion:
    completion. The current `pool-exec-smoke` already validates command
    success, stdout/stderr/status, timeout reporting, late-output suppression,
    and helper cleanup.
-4. Validate vector2 TAP/fd handoff through pool members.
+4. Validate launcher-owned vector2 fd handoff and decide whether per-take pool
+   fd handoff is required or should be retired.
 5. Import or complete record/replay, or land it behind an explicit
    experimental Kconfig with docs that do not count it as mission-complete.
 6. Decide whether private state trace is worth importing as clean optional
