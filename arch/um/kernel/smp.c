@@ -3,7 +3,7 @@
  * Copyright (C) 2025 Ant Group
  * Author: Tiwei Bie <tiwei.btw@antgroup.com>
  *
- * Based on the previous implementation in TT mode
+ * Derived from UML TT-mode SMP support.
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 

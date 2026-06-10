@@ -290,7 +290,7 @@ static void __init check_one_sigio(void (*proc)(int, int))
 		return;
 	}
 
-	/* Not now, but complain so we now where we failed. */
+	/* Report the setup step that failed. */
 	err = raw(master);
 	if (err < 0) {
 		printk(UM_KERN_ERR "check_one_sigio : raw failed, errno = %d\n",

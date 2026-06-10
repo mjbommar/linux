@@ -1334,7 +1334,7 @@ static int kvm_v2_handle_io_panic(struct uml_pt_regs *regs,
 {
 	struct kvm_v2_ist_frame frame;
 
-	kvm_v2_ist_frame_read(vcpu, &frame, false /* unknown -- best-effort */);
+	kvm_v2_ist_frame_read(vcpu, &frame, false /* no error_code */);
 
 	trace_um_backend_kvm_v2_iotrap_panic(run->io.port, frame.user_rip);
 

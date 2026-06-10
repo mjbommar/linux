@@ -51,31 +51,16 @@ static void last_ditch_exit(int sig)
 	 * Async-signal-handler context: only async-signal-safe
 	 * operations allowed here (see signal-safety(7)).
 	 *
-	 * The previous implementation called uml_cleanup() from here
-	 * and then exit(). That is unsafe: uml_cleanup() walks the
-	 * task list under tasklist_lock, runs the __exitcall() chain
-	 * (including console_exit -> free_irq -> __mutex_lock -> might
-	 * _sleep), and dispatches um_backend->shutdown() through
-	 * kmalloc-capable code paths. free_irq(3) also WARN()s when
-	 * called with in_interrupt() == true, which is the state a
-	 * signal inherits when it preempts a kernel raw_spin_lock_
-	 * irqsave region. With lock debugging enabled, the result is
-	 * a "Trying to free IRQ from IRQ context" warning plus a
-	 * sleeping-in-atomic splat on every SIGTERM.
+	 * Do not call uml_cleanup(), exit(), __exitcall handlers, or
+	 * um_backend->shutdown() from this path. They may take locks,
+	 * allocate memory, or run console/IRQ teardown code, none of
+	 * which is signal-safe.
 	 *
-	 * Instead, exit immediately. The host kernel closes all fds,
-	 * unmaps all mmaps, and delivers SIGKILL to every stub child:
-	 * every stub is forked with PR_SET_PDEATHSIG=SIGKILL (see
-	 * arch/um/os-Linux/process.c and arch/um/kernel/skas/stub_
-	 * exe.c). We lose the um_backend->shutdown() dispatch and the
-	 * __exitcall chain; the host reclaims those resources.
-	 *
-	 * install_fatal_handler() sets SA_RESETHAND, so a second
-	 * signal of the same type hits the default disposition:
-	 * safety net if something hangs before _exit completes.
-	 *
-	 * Use _exit() (async-signal-safe) rather than exit() to skip
-	 * atexit() and stdio cleanup, neither of which is signal-safe.
+	 * Use _exit() and leave process resource cleanup to the host
+	 * kernel. Stub children are created with PR_SET_PDEATHSIG=SIGKILL,
+	 * so they die with the UML parent. install_fatal_handler() sets
+	 * SA_RESETHAND, making a repeated signal fall back to the default
+	 * disposition. _exit() also skips atexit() and stdio cleanup.
 	 */
 	static const char msg[] = "UML: fatal signal; exiting\n";
 	ssize_t ret;
