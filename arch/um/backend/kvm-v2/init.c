@@ -34,6 +34,34 @@
 #define KVM_V2_CAPS_REQUIRED \
 	(KVM_V2_CAP_SYNC_REGS | KVM_V2_CAP_SET_GUEST_DEBUG)
 
+struct kvm_v2_cap_desc {
+	unsigned long cap;
+	const char *name;
+	u64 bit;
+	bool required;
+};
+
+static const struct kvm_v2_cap_desc kvm_v2_cap_descs[] = {
+	{
+		.cap = KVM_CAP_SYNC_REGS,
+		.name = "KVM_CAP_SYNC_REGS",
+		.bit = KVM_V2_CAP_SYNC_REGS,
+		.required = true,
+	},
+	{
+		.cap = KVM_CAP_SET_GUEST_DEBUG,
+		.name = "KVM_CAP_SET_GUEST_DEBUG",
+		.bit = KVM_V2_CAP_SET_GUEST_DEBUG,
+		.required = true,
+	},
+	{
+		.cap = KVM_CAP_HYPERV,
+		.name = "KVM_CAP_HYPERV",
+		.bit = KVM_V2_CAP_HYPERV,
+		.required = false,
+	},
+};
+
 /*
  * api_version stays here as a lifetime-of-backend fact about the host
  * kernel. Capability bits move to vm.caps inside kvm_v2_vm_create().
@@ -80,27 +108,27 @@ int kvm_v2_probe(void)
  * bitmap data, e.g. SYNC_REGS reports which reg classes sync). Treat
  * any positive return as supported.
  */
-static int probe_cap(int fd, unsigned long cap, const char *name,
-		     bool required, u64 cap_bit, u64 *caps_out)
+static int kvm_v2_probe_cap(int fd, const struct kvm_v2_cap_desc *desc,
+			    u64 *caps_out)
 {
-	int rc = os_ioctl_generic(fd, KVM_CHECK_EXTENSION, cap);
+	int rc = os_ioctl_generic(fd, KVM_CHECK_EXTENSION, desc->cap);
 
 	if (rc < 0) {
 		pr_err("um: kvm-v2 init: KVM_CHECK_EXTENSION(%s) failed (%d)\n",
-		       name, rc);
+		       desc->name, rc);
 		return rc;
 	}
 	if (rc == 0) {
-		if (required) {
+		if (desc->required) {
 			pr_err("um: kvm-v2 init: required cap %s not supported by host KVM\n",
-			       name);
+			       desc->name);
 			return -EOPNOTSUPP;
 		}
 		pr_debug("um: kvm-v2 init: optional cap %s not supported (continuing)\n",
-			 name);
+			 desc->name);
 		return 0;
 	}
-	*caps_out |= cap_bit;
+	*caps_out |= desc->bit;
 	return 0;
 }
 
@@ -114,27 +142,25 @@ static int kvm_v2_check_api_version(int fd)
 		       rc);
 		return rc;
 	}
+	if (rc != KVM_API_VERSION) {
+		pr_err("um: kvm-v2 init: host API %d, built for %d\n",
+		       rc, KVM_API_VERSION);
+		return -EOPNOTSUPP;
+	}
 	kvm_v2_api_version = rc;
 	return 0;
 }
 
 static int kvm_v2_probe_caps(int fd, u64 *caps)
 {
-	int rc;
+	int i, rc;
 
 	*caps = 0;
-	rc = probe_cap(fd, KVM_CAP_SYNC_REGS, "KVM_CAP_SYNC_REGS",
-		       true, KVM_V2_CAP_SYNC_REGS, caps);
-	if (rc)
-		return rc;
-	rc = probe_cap(fd, KVM_CAP_SET_GUEST_DEBUG, "KVM_CAP_SET_GUEST_DEBUG",
-		       true, KVM_V2_CAP_SET_GUEST_DEBUG, caps);
-	if (rc)
-		return rc;
-	rc = probe_cap(fd, KVM_CAP_HYPERV, "KVM_CAP_HYPERV",
-		       false, KVM_V2_CAP_HYPERV, caps);
-	if (rc)
-		return rc;
+	for (i = 0; i < ARRAY_SIZE(kvm_v2_cap_descs); i++) {
+		rc = kvm_v2_probe_cap(fd, &kvm_v2_cap_descs[i], caps);
+		if (rc)
+			return rc;
+	}
 
 	if ((*caps & KVM_V2_CAPS_REQUIRED) != KVM_V2_CAPS_REQUIRED) {
 		pr_err("um: kvm-v2 init: required cap bitmap mismatch (have %#llx, need %#llx)\n",
