@@ -29,7 +29,7 @@ without depending on guest boot pages.
 | `ops.c` | `struct um_backend_ops` table and seccomp delegations |
 | `context.c` | VM fd lifecycle, TSS/identity-map ioctls, physmem memslot |
 | `vcpu.c` | vCPU pool, `KVM_RUN`, SREGS/MSR/CPUID programming, FPU state |
-| `memslot.c` | memslot id allocation and lookup |
+| `memslot.c` | memslot id allocation and record management |
 | `region.c` | UML memory-region hooks for the slot-0 KVM model |
 | `syscall_trap.c` | LSTAR trampoline install and I/O-trap dispatch |
 | `exception.c` | IDT/GDT/TSS/IST pages and exception handler stubs |
