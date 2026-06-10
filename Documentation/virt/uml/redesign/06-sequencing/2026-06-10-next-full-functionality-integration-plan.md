@@ -41,12 +41,15 @@ The integration strategy is:
 This section is the short, current reading order for the plan after the
 2026-06-10 pool replication, warm-ready, and sparse-copy updates.
 
-Current branch facts:
+Functional baseline facts:
 
 - `next` is the active integration branch.
-- `next` and `origin/next` both point at `71eda3d9c0df`.
-- `next` is `0` commits behind and `64` commits ahead of the local
-  `torvalds/master` ref used for the current upstream comparison.
+- The functional baseline for this plan update is `71eda3d9c0df`.
+- At that baseline, `next` and `origin/next` both pointed at
+  `71eda3d9c0df`.
+- At that baseline, `next` was `0` commits behind and `64` commits ahead of
+  the local `torvalds/master` ref used for the upstream comparison.
+- Documentation-only plan commits may sit above this functional baseline.
 - The latest landed pool commits are:
   - `a291aa71748c` - route the pool daemon to replicated members;
   - `f6dcf99b5c89` - add warm ready pool members;
@@ -176,10 +179,10 @@ Current branch status at review time:
 
 - Branch: `next`
 - Remote tracking: `origin/next`
-- Current head: `71eda3d9c0df`
-- Remote head: `origin/next` also points at `71eda3d9c0df`
-- Relative to local `torvalds/master`: `0` behind, `64` ahead
-- Current update: pool daemon live-member routing, warm-ready members, full
+- Functional baseline: `71eda3d9c0df`
+- Relative to local `torvalds/master` at the functional baseline: `0` behind,
+  `64` ahead
+- Baseline update: pool daemon live-member routing, warm-ready members, full
   pool benchmark documentation, and sparse physmem copying are landed and
   pushed; full-scale pool RSS and throughput remain open.
 
