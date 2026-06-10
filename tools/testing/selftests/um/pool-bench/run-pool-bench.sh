@@ -243,6 +243,22 @@ def rss_kb(pid):
     return None
 
 
+def smaps_rollup_kb(pid):
+    out = {}
+    try:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            for ln in f:
+                if ":" not in ln:
+                    continue
+                key, val = ln.split(":", 1)
+                parts = val.split()
+                if parts and parts[0].isdigit():
+                    out[key] = int(parts[0])
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return {}
+    return out
+
+
 def pid_alive(pid):
     try:
         os.kill(pid, 0)
@@ -370,12 +386,27 @@ rss_supervisor_end = rss_kb(DAEMON_PID) or 0
 rss_master_end = rss_kb(MASTER_PID) or 0
 rss_children_kb = 0
 live_children = 0
+rollup_totals = {
+    "Rss": 0,
+    "Pss": 0,
+    "Shared_Clean": 0,
+    "Shared_Dirty": 0,
+    "Private_Clean": 0,
+    "Private_Dirty": 0,
+}
+for p in (DAEMON_PID, MASTER_PID):
+    for key, val in smaps_rollup_kb(p).items():
+        if key in rollup_totals:
+            rollup_totals[key] += val
 for p in fork_pids:
     if pid_alive(p):
         v = rss_kb(p)
         if v:
             rss_children_kb += v
             live_children += 1
+            for key, val in smaps_rollup_kb(p).items():
+                if key in rollup_totals:
+                    rollup_totals[key] += val
 total_kb = rss_supervisor_end + rss_master_end + rss_children_kb
 results["gate2_supervisor_rss_kb_start"] = rss_supervisor_start
 results["gate2_supervisor_rss_kb_end"] = rss_supervisor_end
@@ -386,9 +417,15 @@ results["gate2_live_children"] = live_children
 results["gate2_total_kb"] = total_kb
 results["gate2_forks_attempted"] = FORKS
 results["gate2_forks_failed"] = fork_fails
+for key, val in rollup_totals.items():
+    results[f"gate2_smaps_{key.lower()}_kb"] = val
 print(f"  -> supervisor={rss_supervisor_end} kB master={rss_master_end} kB "
       f"children={rss_children_kb} kB (live={live_children}/{FORKS}) "
       f"total={total_kb} kB ({total_kb/1024:.1f} MiB)", flush=True)
+print(f"  -> smaps pss={rollup_totals['Pss']/1024:.1f} MiB "
+      f"private_dirty={rollup_totals['Private_Dirty']/1024:.1f} MiB "
+      f"shared_dirty={rollup_totals['Shared_Dirty']/1024:.1f} MiB",
+      flush=True)
 
 # Destroy all the fork pids the daemon recorded so the daemon's
 # member-table size drops back to ~0 before the lifecycle gate.

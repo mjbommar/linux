@@ -75,17 +75,20 @@ Closed or substantially closed since the initial 2026-06-10 review:
   cleans up ready members during destroy/shutdown.
 - Reduced raw `pool-bench` passes all five gates with live sparse-copied
   replicated children: 5/5 latency takes, 3/3 live RSS children at
-  145.9 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
+  147.6 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
   reduced two-second gate.
 - Full default `pool-bench` now runs to completion but still fails 2/5 gates:
-  RSS is 7,409.4 MiB for 100/100 live children against the 200 MiB target, and
-  throughput reaches 2250/3000 takes against the 2700 target.
+  RSS is 8,215.9 MiB for 100/100 live children against the 200 MiB target,
+  with 6,289.2 MiB private dirty in smaps rollup, and throughput reaches
+  2248/3000 takes against the 2700 target.
 
 The active blockers are now:
 
 1. Fix or intentionally revise the full-scale pool memory/throughput targets.
    The current implementation is stable, live, and sparse-copied, but still
    far above the original 100-member RSS target and below the throughput gate.
+   Fresh smaps evidence shows the RSS miss is mostly private dirty memory, so
+   a measurement-only change would not close the blocker.
 2. Decide the final daemon-routed guest exec ABI. The current smoke now proves
    successful commands through the final member mconsole path: `/bin/true`
    exits 0, captured stdout/stderr round-trip through NDJSON, guest exit code
@@ -1463,9 +1466,11 @@ timeout --kill-after=5 180 env UM_FORK_KERNEL=$PWD/linux \
 Result:
 
 - PASS in the reduced validation gate;
-- take p50 was 1.4 ms and p99 was 1.5 ms over five measured takes;
+- take p50 was 1.3 ms and p99 was 1.5 ms over five measured takes;
 - RSS sampled 3/3 live sparse-copied replicated children and total RSS was
-  145.9 MiB;
+  147.6 MiB;
+- smaps rollup for the reduced gate reported 132.8 MiB PSS, 12.0 MiB private
+  dirty, and 6.8 MiB shared dirty;
 - lifecycle RSS drift was 0.00% over five take/destroy cycles;
 - throughput completed 4/4 takes in the 2-second reduced gate;
 - this proves the benchmark now measures live children, but it is not a
@@ -1483,13 +1488,17 @@ Result:
 
 - FAIL overall, 3/5 gates passed;
 - take p50 was 1.3 ms and p99 was 1.6 ms over 1000 measured takes;
-- RSS sampled 100/100 live replicated children and total RSS improved from
-  17,262.7 MiB with full physmem copy to 7,409.4 MiB with sparse extent copy,
+- RSS sampled 100/100 live replicated children and total RSS was 8,215.9 MiB,
   still failing the 200 MiB gate;
-- lifecycle RSS drift was 0.09% over 10,000 take/destroy cycles;
-- throughput completed 2250/3000 target takes in the 60-second gate, below the
+- smaps rollup reported 6,525.1 MiB PSS, 6,289.2 MiB private dirty, and
+  211.3 MiB shared dirty, which makes the RSS failure a real private-memory
+  amplification problem rather than shared executable double-counting;
+- lifecycle RSS drift was 0.07% over 10,000 take/destroy cycles;
+- throughput completed 2248/3000 target takes in the 60-second gate, below the
   2700 pass threshold;
-- this makes memory amplification from per-member private copies of populated
+- a local zero-skip plus lazy-remap experiment was rejected because it worsened
+  full-scale RSS to 9,389.1 MiB for 100/100 live members;
+- this keeps memory amplification from per-member private copies of populated
   physmem extents the next pool correctness/performance blocker.
 
 Immediate engineering conclusion:
@@ -1510,9 +1519,9 @@ Immediate engineering conclusion:
 ## Immediate Next Actions
 
 1. Fix the full-scale pool benchmark failures: 100 live replicated members
-   currently consume 7,409.4 MiB RSS against the 200 MiB target after sparse
-   extent copying, and 60-second throughput reaches 2250/3000 takes against the
-   2700 pass threshold.
+   currently consume 8,215.9 MiB RSS against the 200 MiB target, with
+   6,289.2 MiB private dirty in smaps rollup, and 60-second throughput reaches
+   2248/3000 takes against the 2700 pass threshold.
 2. Decide whether request-specific warm scheduling needs a predeclared slot API
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.

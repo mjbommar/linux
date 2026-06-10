@@ -288,11 +288,19 @@ Status:
   ready take consumes it, status reports ready/taken/failed counts, and the
   daemon replenishes the ready queue before shutdown cleanup;
 - reduced `pool-bench` now samples live replicated children and passes the RSS
-  gate with 3/3 live members at 146.0 MiB;
+  gate with 3/3 live members at 147.6 MiB; its smaps breakdown is 132.8 MiB
+  PSS, 12.0 MiB private dirty, and 6.8 MiB shared dirty;
 - full default-scale `pool-bench` runs to completion but fails RSS and
-  throughput: sparse physmem copy improves 100/100 live children from
-  17,262.7 MiB to 7,409.4 MiB against the 200 MiB gate, and the 60-second
-  throughput gate reaches 2250/3000 takes against the 2700 pass threshold;
+  throughput: 100/100 live replicated children consume 8,215.9 MiB RSS
+  against the 200 MiB gate; smaps rollup reports 6,525.1 MiB PSS,
+  6,289.2 MiB private dirty, and 211.3 MiB shared dirty, so the miss is real
+  private memory amplification rather than shared text double-counting; the
+  60-second throughput gate reaches 2248/3000 takes against the 2700 pass
+  threshold;
+- a local zero-skip plus lazy-remap experiment was rejected: skipping zero
+  chunks in the sparse copy and removing MAP_POPULATE from the final
+  replicated physmem remap made the full-scale RSS worse at 9,389.1 MiB for
+  100/100 live members, so that approach was not retained;
 - request-specific takes remain lazy so caller-supplied MAC/TAP/mconsole
   identity is applied before fork.
 
