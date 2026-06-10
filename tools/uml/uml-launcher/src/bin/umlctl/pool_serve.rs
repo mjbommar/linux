@@ -438,20 +438,25 @@ impl DaemonState {
                 member.mconsole_path
             );
         }
-        let cmd_str = build_mconsole_exec_command(argv, env, cwd);
-        let timeout = if timeout_secs > 0 {
-            Duration::from_secs(timeout_secs)
+        if timeout_secs > 86_400 {
+            bail!("exec timeout {} exceeds 86400 seconds", timeout_secs);
+        }
+
+        let cmd_str = build_mconsole_exec_command(argv, env, cwd, timeout_secs);
+        let ready_timeout = Duration::from_secs(10);
+        let mconsole_timeout = if timeout_secs > 0 {
+            Duration::from_secs(timeout_secs).saturating_add(Duration::from_secs(3))
         } else {
             Duration::from_secs(10)
         };
-        wait_for_mconsole_ready(&member.mconsole_path, timeout)
+        wait_for_mconsole_ready(&member.mconsole_path, ready_timeout)
             .with_context(|| format!("wait for member mconsole {}", member.mconsole_path))?;
 
         let started = Instant::now();
         let reply = mconsole_client::send_mconsole_command_with_timeout(
             Path::new(&member.mconsole_path),
             &cmd_str,
-            timeout,
+            mconsole_timeout,
         )
         .with_context(|| format!("mconsole exec via {}", member.mconsole_path))?;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -942,6 +947,7 @@ fn build_mconsole_exec_command(
     argv: &[String],
     env: &HashMap<String, String>,
     cwd: &str,
+    timeout_secs: u64,
 ) -> String {
     let mut payload = String::new();
     let mut env_pairs: Vec<_> = env.iter().collect();
@@ -963,7 +969,11 @@ fn build_mconsole_exec_command(
     if !cwd.is_empty() {
         payload = format!("cd {} && {}", shell_quote(cwd), payload);
     }
-    format!("exec {payload}")
+    if timeout_secs > 0 {
+        format!("exec timeout={timeout_secs} -- {payload}")
+    } else {
+        format!("exec {payload}")
+    }
 }
 
 fn decode_mconsole_exec_reply(reply: &str, duration_ms: u64) -> Result<serde_json::Value> {
@@ -1226,8 +1236,19 @@ mod tests {
         ]);
 
         assert_eq!(
-            build_mconsole_exec_command(&argv, &env, "/tmp/work dir"),
+            build_mconsole_exec_command(&argv, &env, "/tmp/work dir", 0),
             "exec cd '/tmp/work dir' && ALPHA='first value' ZED=last /bin/sh -c 'echo hi'"
+        );
+    }
+
+    #[test]
+    fn mconsole_exec_command_carries_timeout() {
+        let argv = vec!["/bin/sleep".to_string(), "5".to_string()];
+        let env = HashMap::new();
+
+        assert_eq!(
+            build_mconsole_exec_command(&argv, &env, "", 3),
+            "exec timeout=3 -- /bin/sleep 5"
         );
     }
 

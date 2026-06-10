@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 replicated sustained pool-member lifetime passes.
+Last updated: 2026-06-10 pool exec timeout validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -174,7 +174,7 @@ Current boundary:
   still returns a live runnable member, destroy makes members non-runnable,
   and shutdown kills the master cleanly;
 - reduced `pool-bench` now passes all five gates with sparse-copied live
-  replicated children: 5/5 latency takes, 3/3 live RSS children at 146.0 MiB,
+  replicated children: 5/5 latency takes, 3/3 live RSS children at 145.9 MiB,
   0.00% lifecycle RSS drift across 5 take/destroy cycles, and 4/4 throughput
   takes in a 2-second reduced gate; raw benchmark take RPCs omit `mconsole`,
   while exec-capable takes request the daemon-synthesized path explicitly;
@@ -188,11 +188,13 @@ Current boundary:
   per-member mconsole socket exists, and the socket answers `version`;
 - `pool-exec-smoke` now validates successful daemon-routed guest exec through
   the member mconsole socket: `/bin/true` exits 0, a shell command returns
-  captured stdout/stderr and guest exit code 7, and stale daemon error
-  boundaries such as missing `uml_mconsole(1)` or kernel `Unknown command`
-  are rejected; the remaining exec limitation is kernel-side
-  timeout/cancellation semantics, because the current bounded mconsole `exec`
-  command waits for the helper and relies on the daemon for receive timeout;
+  captured stdout/stderr and guest exit code 7, a one-second timeout returns
+  exit code 124 with `timed_out=true`, no late stdout, and no leaked guest
+  `sleep` helper, and stale daemon error boundaries such as missing
+  `uml_mconsole(1)` or kernel `Unknown command` are rejected; the remaining
+  exec decision is whether the bounded shell-backed command string plus guest
+  `timeout(1)` helper dependency is the final ABI, or whether it should be
+  replaced by stricter argv/env/cwd encoding before the completion claim;
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller

@@ -75,7 +75,7 @@ Closed or substantially closed since the initial 2026-06-10 review:
   cleans up ready members during destroy/shutdown.
 - Reduced raw `pool-bench` passes all five gates with live sparse-copied
   replicated children: 5/5 latency takes, 3/3 live RSS children at
-  146.0 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
+  145.9 MiB, 0.00% lifecycle RSS drift, and 4/4 throughput takes in the
   reduced two-second gate.
 - Full default `pool-bench` now runs to completion but still fails 2/5 gates:
   RSS is 7,409.4 MiB for 100/100 live children against the 200 MiB target, and
@@ -86,13 +86,16 @@ The active blockers are now:
 1. Fix or intentionally revise the full-scale pool memory/throughput targets.
    The current implementation is stable, live, and sparse-copied, but still
    far above the original 100-member RSS target and below the throughput gate.
-2. Finish daemon-routed guest exec semantics. The current smoke now proves a
-   successful command through the final member mconsole path: `/bin/true`
-   exits 0, captured stdout/stderr round-trip through NDJSON, and a guest exit
-   code of 7 is preserved as a normal exec result rather than a daemon error.
-   The kernel command is intentionally bounded and shell-backed; kernel-side
-   timeout/cancellation remains open, so the daemon still owns receive timeout
-   behavior. A naive child-side mconsole rebind was tested locally and
+2. Decide the final daemon-routed guest exec ABI. The current smoke now proves
+   successful commands through the final member mconsole path: `/bin/true`
+   exits 0, captured stdout/stderr round-trip through NDJSON, guest exit code
+   7 is preserved as a normal exec result rather than a daemon error, and a
+   one-second timeout returns exit code 124 with `timed_out=true`, no late
+   stdout, and no leaked guest `sleep` helper. The kernel command is bounded,
+   shell-backed, and currently uses a guest `timeout(1)` helper for
+   cancellation. The open decision is whether that command string/helper model
+   is the final ABI or whether completion requires stricter argv/env/cwd
+   encoding. A naive child-side mconsole rebind was tested locally and
    rejected because it panicked before the member reached `MEMBER_DONE`; see
    `2026-06-10-pool-mconsole-exec-investigation.md`. The checked-in
    `pool-mconsole-path-probe` now passes as a focused socket-addressability
@@ -1055,13 +1058,16 @@ Current status:
   warm-ready members, port-forward result handling, and reduced pool-bench
   pass on the current path.
 - Full default `pool-bench` still fails RSS and throughput.
-- Successful daemon-routed guest exec remains pending.
+- Daemon-routed guest exec passes for command success, stdout/stderr capture,
+  exit-status preservation, timeout reporting, and helper cleanup; the final
+  ABI/helper dependency decision remains open.
 
 Exit criteria:
 
 - Pool serve/take/port-forward continues to pass on live members.
-- Successful daemon-routed guest exec works or is explicitly removed from the
-  completion claim.
+- Successful daemon-routed guest exec works through the final published ABI,
+  or any experimental shell/helper dependency is explicitly documented outside
+  the completion claim.
 - Full pool benchmark passes, or the original RSS/throughput targets are
   revised with evidence and approval.
 - Vector2 TAP/fd handoff works through live pool members.
@@ -1247,7 +1253,7 @@ branch lands.
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
-| Pool exec | Daemon failure envelope validated; per-member mconsole socket validated | Successful guest exec primitive validated | Partially closed |
+| Pool exec | Successful command, stdout/stderr capture, exit-status preservation, timeout reporting, and helper cleanup validated | Final ABI/helper dependency decision made | Validated path; ABI decision open |
 | Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
 | Syzkaller shim | Present | End-to-end smoke | Open |
@@ -1333,10 +1339,14 @@ Result:
 - PASS for successful typed NDJSON start and exit frames from `/bin/true`;
 - PASS for captured stdout, captured stderr, and preserved guest exit code 7
   from a shell command;
+- PASS for timeout behavior: a one-second timeout returns exit code 124 with
+  `timed_out=true`, suppresses late stdout, does not emit a daemon error, and
+  does not leak an extra guest `sleep` helper;
 - stale daemon error boundaries such as missing `uml_mconsole(1)`, missing
   member socket, or kernel `Unknown command` are rejected by the selftest;
-- kernel-side timeout/cancellation is still not complete and remains a
-  follow-up before claiming the full exec contract closed.
+- the remaining exec work is the final ABI decision: keep the current bounded
+  shell-backed command string plus guest `timeout(1)` helper dependency, or
+  replace it with stricter argv/env/cwd encoding before claiming completion.
 
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
@@ -1453,9 +1463,9 @@ timeout --kill-after=5 180 env UM_FORK_KERNEL=$PWD/linux \
 Result:
 
 - PASS in the reduced validation gate;
-- take p50 was 1.0 ms and p99 was 1.1 ms over five measured takes;
+- take p50 was 1.4 ms and p99 was 1.5 ms over five measured takes;
 - RSS sampled 3/3 live sparse-copied replicated children and total RSS was
-  146.0 MiB;
+  145.9 MiB;
 - lifecycle RSS drift was 0.00% over five take/destroy cycles;
 - throughput completed 4/4 takes in the 2-second reduced gate;
 - this proves the benchmark now measures live children, but it is not a
@@ -1494,8 +1504,8 @@ Immediate engineering conclusion:
   pre-identified ready members through `pool take --ready`;
 - final completion requires fixing the full-scale pool benchmark RSS and
   throughput failures, resolving the request-specific warm scheduling decision
-  or API, vector2 TAP/fd pool networking, successful daemon-routed guest exec,
-  and the syzkaller take/exec/destroy path.
+  or API, vector2 TAP/fd pool networking, the final daemon-routed exec ABI
+  decision, and the syzkaller take/exec/destroy path.
 
 ## Immediate Next Actions
 
@@ -1506,11 +1516,12 @@ Immediate engineering conclusion:
 2. Decide whether request-specific warm scheduling needs a predeclared slot API
    or whether syzkaller should consume daemon-assigned ready identities through
    `pool take --ready`.
-3. Validate successful daemon-routed guest exec through the final member
-   mconsole path. The durable per-member control socket is now proven by
-   `pool-mconsole-path-probe`; the next step is to add or replace the actual
-   guest exec primitive and update `pool-exec-smoke` to require a successful
-   command round trip.
+3. Decide whether the bounded shell-backed `exec` command string and guest
+   `timeout(1)` helper dependency are the final daemon-routed exec ABI, or
+   replace them with stricter argv/env/cwd encoding before claiming
+   completion. The current `pool-exec-smoke` already validates command
+   success, stdout/stderr/status, timeout reporting, late-output suppression,
+   and helper cleanup.
 4. Validate vector2 TAP/fd handoff through pool members and the syzkaller
    take/exec/destroy path.
 5. Import or complete record/replay, or land it behind an explicit

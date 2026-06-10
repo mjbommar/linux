@@ -32,6 +32,9 @@ This file is the live execution tracker for
   passed, but broader runtime/tool validation may still be open.
 - `Present-validated`: code exists on `next` and the named runtime/tool gate
   has passed.
+- `Present-validated-needs-decision`: code exists on `next` and the named
+  runtime/tool gate has passed, but a final ABI, support, or publication
+  decision remains open.
 - `Present-needs-fix`: code exists on `next`, but a correctness, validation,
   documentation, or user-surface issue is known.
 - `Historical-only`: functionality exists only on one or more historical
@@ -85,9 +88,9 @@ This file is the live execution tracker for
 | Pool | `pool take` | Present-validated | `next`, `memo09-phase4` | Keep and extend for warm ready members. | `pool-serve-smoke` PASS, 2026-06-10. |
 | Pool | `pool list/status/destroy/shutdown` | Present-validated | `next`, `memo09-phase4` | Keep. | `pool-spawn-smoke` PASS and `pool-serve-smoke` PASS, 2026-06-10. |
 | Pool | Warm member pool | Partial-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Daemon-assigned `min_warm` ready members are implemented and validated; request-specific warm identity scheduling still needs a final API/contract decision. | `pool-serve-smoke` PASS with `--min-warm=1`, ready take, replenish, destroy, and shutdown, 2026-06-10. |
-| Pool | Pool benchmark thresholds | Present-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4` | Reduced live-child benchmark passes; full default benchmark still needs RSS and throughput closure or a documented target revision. | Reduced raw `pool-bench` PASS 5/5 with p50 1.0 ms and 146.0 MiB RSS; full `pool-bench` PASS 3/5, FAIL RSS 7,409.4 MiB/200 MiB and throughput 2250/3000, 2026-06-10. |
+| Pool | Pool benchmark thresholds | Present-needs-fix | `memo09-phase3-pool-bench`, `memo09-phase4` | Reduced live-child benchmark passes; full default benchmark still needs RSS and throughput closure or a documented target revision. | Reduced raw `pool-bench` PASS 5/5 with p50 1.4 ms, p99 1.5 ms, and 145.9 MiB RSS; full `pool-bench` PASS 3/5, FAIL RSS 7,409.4 MiB/200 MiB and throughput 2250/3000, 2026-06-10. |
 | Pool | mconsole path synthesis | Present-validated | `next`, `memo09-phase4` | Keep the master-side bind plus child-side SIGIO rearm model; avoid the rejected child-side rebind experiment that panicked before `MEMBER_DONE`. | `pool-mconsole-path-probe` PASS with member alive, per-member socket present, and `version` reply; focused investigation in `2026-06-10-pool-mconsole-exec-investigation.md`, 2026-06-10. |
-| Pool | `umlctl exec` via daemon | Present-needs-fix | `next`, `memo09-phase4` | Keep; successful daemon-routed exec is implemented for bounded shell commands, but kernel-side timeout/cancellation remains open. | `pool-exec-smoke` PASS case A: `/bin/true` exits 0, stdout/stderr capture round-trips, and guest exit 7 is preserved without a daemon error; stale `Unknown command`/missing-host-tool boundaries are rejected, 2026-06-10. |
+| Pool | `umlctl exec` via daemon | Present-validated-needs-decision | `next`, `memo09-phase4` | Keep the current bounded exec path for now; decide whether shell-backed command strings and the guest `timeout(1)` helper dependency are the final ABI before the completion claim. | `pool-exec-smoke` PASS: `/bin/true` exits 0, stdout/stderr capture round-trips, guest exit 7 is preserved without a daemon error, timeout returns code 124 with `timed_out=true`, late stdout is suppressed, no extra guest `sleep` helper leaks, and stale `Unknown command`/missing-host-tool boundaries are rejected, 2026-06-10. |
 | Pool | `umlctl port-forward` | Present-validated | `next`, `memo09-phase4` | Keep and later validate against final network mode. | `pool-port-forward-smoke` PASS, 2026-06-10. |
 | Pool | TAP/fd handoff | Partial | `next`, `memo09-phase4`, `umlctl-deploy` | Complete with vector2 fd path. | fd handoff smoke. |
 | Vector2 | Typed parser | Present | `next` | Keep. | vector2 parser KUnit. |
@@ -140,6 +143,10 @@ This file is the live execution tracker for
   `restore_full` timing summary in full snapshot mode.
 - Snapshot SMP semantics are explicitly gated: capture and restore return
   `-EOPNOTSUPP` when more than one CPU is online.
+- Daemon-routed pool exec now validates success, stdout/stderr capture, guest
+  exit status preservation, timeout reporting, and guest helper cleanup through
+  `pool-exec-smoke`; the remaining exec work is the final ABI/helper
+  dependency decision.
 
 ## Remaining Hard Blockers
 

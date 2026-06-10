@@ -13,6 +13,8 @@
 #      `timed_out` fields.
 #   4. A shell command can return stdout, stderr, and a non-zero guest
 #      exit status without being mistaken for a daemon transport error.
+#   5. `--timeout` returns exit code 124 with timed_out=true instead of
+#      a daemon socket timeout.
 #
 # Exit codes: 0 PASS, 4 SKIP, 1 FAIL.
 #
@@ -269,6 +271,94 @@ if [ $RICH_RC -ne 7 ]; then
 	exit 1
 fi
 echo "rich NDJSON frames valid: PASS ($(cat "$OUT/parse-rich.out"))"
+
+SLEEP_COUNT_CMD='
+n=0
+for f in /proc/[0-9]*/comm; do
+	c=$(cat "$f" 2>/dev/null || true)
+	[ "$c" = sleep ] && n=$((n+1))
+done
+echo "$n"
+'
+"$UMLCTL" --runtime-dir "$RUNTIME" exec \
+	--name "$POOL_NAME" --pid "$TAKEN_PID" -- \
+	/bin/sh -c "$SLEEP_COUNT_CMD" \
+	>"$OUT/sleep-before.out" 2>"$OUT/sleep-before.err"
+BASE_SLEEP_COUNT=$(tr -dc '0-9' <"$OUT/sleep-before.out")
+BASE_SLEEP_COUNT=${BASE_SLEEP_COUNT:-0}
+echo "baseline guest sleep processes=$BASE_SLEEP_COUNT"
+
+# A timed-out command should return a normal exec exit frame with code 124 and
+# timed_out=true.  This validates the kernel mconsole timeout wrapper; the
+# daemon's socket timeout must not fire first.
+set +e
+"$UMLCTL" --runtime-dir "$RUNTIME" exec \
+	--name "$POOL_NAME" --pid "$TAKEN_PID" --timeout 1 --json -- \
+	/bin/sh -c 'sleep 5; printf "late-output\n"' \
+	>"$OUT/exec-timeout.out" 2>"$OUT/exec-timeout.err"
+TIMEOUT_RC=$?
+set -e
+
+echo "timeout exec exit_code=$TIMEOUT_RC"
+echo "--- exec-timeout.out ---"
+cat "$OUT/exec-timeout.out"
+echo "--- end exec-timeout.out ---"
+
+python3 - <<PYEOF >"$OUT/parse-timeout.out" 2>"$OUT/parse-timeout.err"
+import json, sys
+frames = []
+with open("$OUT/exec-timeout.out") as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            frames.append(json.loads(line))
+stdout = "".join(f.get("data", "") for f in frames if f.get("type") == "stdout")
+stderr = "".join(f.get("data", "") for f in frames if f.get("type") == "stderr")
+if not frames or frames[0].get("type") != "start":
+    print("TIMEOUT_FIRST_NOT_START", frames[:1])
+    sys.exit(1)
+if frames[-1].get("type") != "exit":
+    print("TIMEOUT_LAST_NOT_EXIT", frames[-1] if frames else None)
+    sys.exit(1)
+if frames[-1].get("code") != 124:
+    print("TIMEOUT_EXIT_MISMATCH", frames[-1])
+    sys.exit(1)
+if frames[-1].get("timed_out") is not True:
+    print("TIMEOUT_FLAG_MISMATCH", frames[-1])
+    sys.exit(1)
+if "late-output" in stdout:
+    print("TIMEOUT_LEAKED_STDOUT", repr(stdout))
+    sys.exit(1)
+if any("daemon error" in f.get("data", "") for f in frames if f.get("type") == "stderr"):
+    print("TIMEOUT_DAEMON_ERROR", stderr)
+    sys.exit(1)
+print("TIMEOUT_FRAMES_OK", len(frames))
+PYEOF
+PARSE_TIMEOUT_RC=$?
+if [ $PARSE_TIMEOUT_RC -ne 0 ]; then
+	echo "FAIL: timeout NDJSON frame validation failed"
+	cat "$OUT/parse-timeout.out"
+	cat "$OUT/parse-timeout.err"
+	exit 1
+fi
+if [ $TIMEOUT_RC -ne 124 ]; then
+	echo "FAIL: timeout exec process exit $TIMEOUT_RC, expected 124"
+	exit 1
+fi
+echo "timeout NDJSON frames valid: PASS ($(cat "$OUT/parse-timeout.out"))"
+
+"$UMLCTL" --runtime-dir "$RUNTIME" exec \
+	--name "$POOL_NAME" --pid "$TAKEN_PID" -- \
+	/bin/sh -c "$SLEEP_COUNT_CMD" \
+	>"$OUT/sleep-after.out" 2>"$OUT/sleep-after.err"
+AFTER_SLEEP_COUNT=$(tr -dc '0-9' <"$OUT/sleep-after.out")
+AFTER_SLEEP_COUNT=${AFTER_SLEEP_COUNT:-0}
+if [ "$AFTER_SLEEP_COUNT" -gt "$BASE_SLEEP_COUNT" ]; then
+	echo "FAIL: timeout leaked guest sleep process(es):" \
+		"before=$BASE_SLEEP_COUNT after=$AFTER_SLEEP_COUNT"
+	exit 1
+fi
+echo "timeout helper cleanup: PASS (sleep before=$BASE_SLEEP_COUNT after=$AFTER_SLEEP_COUNT)"
 
 # Destroy + shutdown via the daemon path.
 "$UMLCTL" --runtime-dir "$RUNTIME" pool destroy --name "$POOL_NAME" "$TAKEN_PID" \

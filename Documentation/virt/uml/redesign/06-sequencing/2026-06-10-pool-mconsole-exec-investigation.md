@@ -8,9 +8,12 @@ Branch: `next`
 Close the gap between the current `pool-exec-smoke` contract and the final
 goal for daemon-routed guest execution.
 
-Current `pool-exec-smoke` proves the NDJSON wire shape and the clean daemon
-failure envelope. It does not prove successful command execution inside a
-pool member.
+Current `pool-exec-smoke` proves the NDJSON wire shape, successful command
+execution inside a pool member, stdout/stderr capture, guest exit-status
+preservation, timeout reporting, and guest helper cleanup. The remaining
+question is whether the current shell-backed command string plus guest
+`timeout(1)` helper dependency is the final ABI, or whether completion should
+require stricter argv/env/cwd encoding.
 
 ## Current Verified Behavior
 
@@ -34,10 +37,19 @@ Result:
 
 - daemon socket came up;
 - `pool take` returned a live member pid;
-- `umlctl exec --json -- /bin/true` emitted valid `start`, `stderr`, and
-  `exit` NDJSON frames;
-- exit code was `1`, as expected for the current missing-feature path; and
-- the daemon error said the synthesized member mconsole socket was not present.
+- `umlctl exec --json -- /bin/true` emitted valid `start` and `exit` NDJSON
+  frames with exit code 0;
+- a shell command emitted captured stdout, captured stderr, and preserved
+  guest exit code 7 without a daemon error;
+- the timeout command returned exit code 124 with `timed_out=true`:
+
+  ```sh
+  umlctl exec --timeout 1 --json -- \
+      /bin/sh -c 'sleep 5; printf "late-output\n"'
+  ```
+
+- the timeout case did not emit `late-output`; and
+- the guest helper cleanup check observed no extra leaked `sleep` process.
 
 ```sh
 UM_FORK_KERNEL=$PWD/linux \
@@ -76,9 +88,9 @@ Current result: PASS.
 
 ## Findings
 
-There were two independent blockers behind successful daemon-routed exec.
+There were three independent blockers behind successful daemon-routed exec.
 
-The first blocker is now closed. `pool_serve.rs` synthesizes a path such as:
+The first blocker is closed. `pool_serve.rs` synthesizes a path such as:
 
 ```text
 <runtime>/pools/<pool>/<instance>.mconsole
@@ -88,31 +100,22 @@ That path now exists for live replicated pool members and answers existing
 mconsole commands after the child re-arms SIGIO ownership on the inherited
 socket.
 
-The remaining blocker is that the active kernel mconsole command table does
-not contain an `exec` verb. The current commands in
-`arch/um/drivers/mconsole_user.c` are:
+The second blocker is closed. The active kernel mconsole command table now
+contains an `exec` verb. The daemon uses a native mconsole client, waits for
+the member socket to answer `version`, sends `exec <command>`, decodes the
+kernel JSON reply, and maps it into the existing `umlctl exec` NDJSON
+contract.
 
-- `version`;
-- `halt`;
-- `reboot`;
-- `config`;
-- `remove`;
-- `sysrq`;
-- `help`;
-- `cad`;
-- `stop`;
-- `go`;
-- `log`;
-- `proc`;
-- `stack`; and
-- `snapshot_export`.
-
-Therefore, successful daemon-routed guest exec still needs either a new
-kernel-side command execution primitive or a different daemon transport.
+The third blocker is closed for the current contract. A positive
+`--timeout <seconds>` is forwarded to the kernel as `exec timeout=N -- ...`.
+The kernel wraps the shell command with the guest `timeout(1)` helper, records
+the real child status in a status marker file, reports timeout-owned exits as
+code 124 with `timed_out=true`, and removes the temporary stdout, stderr, and
+status files before returning.
 
 ## Current Fix
 
-The landed fix has two parts:
+The current fix has four parts:
 
 1. `um_template_identity_apply()` applies `mconsole_path` before looking for a
    target netdev. Hostfs-only guests have no non-loopback target netdev, but
@@ -121,9 +124,12 @@ The landed fix has two parts:
    timer/task/stub repair. The master binds the socket before fork, but
    `F_SETOWN` still targets the master host process; the child must re-arm
    SIGIO ownership before the socket is addressable.
-
-The fix deliberately does not add an exec command. It only proves the
-per-member control socket is durable and addressable.
+3. The mconsole command table includes a bounded `exec` command that captures
+   stdout and stderr through temporary guest files and returns a compact JSON
+   result.
+4. The launcher forwards requested exec timeouts into the mconsole command,
+   and `pool-exec-smoke` requires command success, stdout/stderr/status,
+   timeout reporting, late-output suppression, and helper cleanup.
 
 ## Invalidated Approach
 
@@ -170,9 +176,12 @@ case A on a freshly built kernel: `/bin/true` exits 0, a shell command returns
 captured stdout/stderr, and guest exit code 7 is preserved without a daemon
 transport error.
 
-The remaining exec work is timeout/cancellation. The kernel command currently
-waits for the helper to finish; the daemon receive timeout can still bound the
-client-facing call, but it does not yet cancel a long-running guest helper.
+Timeout/cancellation is now implemented for the current shell-backed command
+contract by relying on the guest `timeout(1)` helper. This is good enough for
+the current selftest contract, but it leaves one design decision before the
+completion claim: whether the final ABI should keep a shell command string and
+guest helper dependency, or move to stricter argv/env/cwd encoding with a
+kernel-owned cancellation mechanism.
 
 ## Next Work
 
@@ -183,8 +192,9 @@ Recommended next sequence:
    daemon's null stdout/stderr. Current status: done as
    `tools/testing/selftests/um/pool-mconsole-path-probe/`; it now passes by
    sending `version` through the per-member socket.
-2. Add kernel-side timeout/cancellation semantics for `exec` so a daemon
-   timeout cannot leave a long-running guest helper behind.
-3. Decide whether the shell-backed command string is the final ABI or whether
-   it should be replaced with a stricter argv/env/cwd encoding before the
-   completion claim.
+2. Keep `pool-exec-smoke` as the regression gate for command success,
+   stdout/stderr/status, timeout reporting, late-output suppression, and
+   helper cleanup.
+3. Decide whether the shell-backed command string plus guest `timeout(1)`
+   helper dependency is the final ABI or whether it should be replaced with a
+   stricter argv/env/cwd encoding before the completion claim.

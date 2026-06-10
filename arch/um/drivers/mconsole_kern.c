@@ -43,6 +43,8 @@ static struct vfsmount *proc_mnt;
 
 #define MCONSOLE_EXEC_OUTPUT_LIMIT 2048
 #define MCONSOLE_EXEC_REPLY_LIMIT  32768
+#define MCONSOLE_EXEC_SHELL_LIMIT  2048
+#define MCONSOLE_EXEC_TIMEOUT_MAX  86400
 
 static char *mconsole_exec_envp[] = {
 	"HOME=/",
@@ -180,17 +182,55 @@ static int mconsole_exec_read_file(const char *path, char *buf, size_t size,
 }
 
 static void mconsole_exec_rm_tmp(const char *stdout_path,
-				 const char *stderr_path)
+				 const char *stderr_path,
+				 const char *timeout_path)
 {
-	char *argv[5];
+	char *argv[6];
 
 	argv[0] = "/bin/rm";
 	argv[1] = "-f";
 	argv[2] = (char *)stdout_path;
 	argv[3] = (char *)stderr_path;
-	argv[4] = NULL;
+	argv[4] = (char *)timeout_path;
+	argv[5] = NULL;
 
 	call_usermodehelper(argv[0], argv, mconsole_exec_envp, UMH_WAIT_PROC);
+}
+
+static const char *mconsole_exec_timeout_helper(void)
+{
+	static const char * const helpers[] = {
+		"/usr/bin/timeout",
+		"/bin/timeout",
+	};
+	struct file *file;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(helpers); i++) {
+		file = filp_open(helpers[i], O_RDONLY, 0);
+		if (!IS_ERR(file)) {
+			fput(file);
+			return helpers[i];
+		}
+	}
+
+	return NULL;
+}
+
+static bool mconsole_exec_read_status(const char *path, int *status_out)
+{
+	char buf[32];
+	size_t len;
+	bool truncated;
+	int ret;
+
+	ret = mconsole_exec_read_file(path, buf, sizeof(buf), &len, &truncated);
+	if (ret < 0 || !len)
+		return false;
+
+	buf[len] = '\0';
+	ret = kstrtoint(strim(buf), 10, status_out);
+	return ret == 0;
 }
 
 static void mconsole_exec_json_char(char *reply, size_t size, size_t *pos,
@@ -252,16 +292,84 @@ static int mconsole_exec_wait_signal(int status)
 	return status & 0x7f;
 }
 
+static int mconsole_exec_parse_timeout(char **cmdp, unsigned int *timeoutp)
+{
+	char *cmd = *cmdp;
+	unsigned int timeout = 0;
+
+	*timeoutp = 0;
+	if (strncmp(cmd, "timeout=", strlen("timeout=")))
+		return 0;
+
+	cmd += strlen("timeout=");
+	if (!isdigit(*cmd))
+		return -EINVAL;
+
+	while (isdigit(*cmd)) {
+		unsigned int digit = *cmd - '0';
+
+		if (timeout > (MCONSOLE_EXEC_TIMEOUT_MAX - digit) / 10)
+			return -ERANGE;
+		timeout = timeout * 10 + digit;
+		cmd++;
+	}
+
+	if (!timeout)
+		return -EINVAL;
+
+	cmd = skip_spaces(cmd);
+	if (cmd[0] != '-' || cmd[1] != '-')
+		return -EINVAL;
+
+	cmd = skip_spaces(cmd + 2);
+	if (!*cmd)
+		return -EINVAL;
+
+	*cmdp = cmd;
+	*timeoutp = timeout;
+	return 0;
+}
+
+static int mconsole_exec_build_shell(char *shell_cmd, size_t size,
+				     const char *cmd,
+				     const char *stdout_path,
+				     const char *stderr_path,
+				     const char *status_path,
+				     unsigned int timeout)
+{
+	int n;
+
+	if (!timeout)
+		n = scnprintf(shell_cmd, size, "exec >%s 2>%s; %s",
+			      stdout_path, stderr_path, cmd);
+	else
+		n = scnprintf(shell_cmd, size,
+			      "exec >%s 2>%s; rm -f %s; %s; "
+			      "_um_status=$?; echo $_um_status >%s; "
+			      "exit $_um_status",
+			      stdout_path, stderr_path, status_path, cmd,
+			      status_path);
+
+	if (n >= size)
+		return -E2BIG;
+	return n;
+}
+
 void mconsole_exec(struct mc_request *req)
 {
 	char *cmd = req->request.data + strlen("exec");
-	char stdout_path[64], stderr_path[64];
+	char stdout_path[64], stderr_path[64], status_path[64];
+	char timeout_arg[32];
 	char *shell_cmd, *stdout_buf, *stderr_buf, *reply;
 	size_t stdout_len, stderr_len, pos = 0;
 	bool stdout_truncated, stderr_truncated;
+	bool timed_out = false;
+	unsigned int timeout = 0;
+	int guest_status;
 	u64 id = ktime_get_ns();
 	int status, ret;
-	char *argv[4];
+	char *argv[8];
+	const char *timeout_helper = NULL;
 
 	cmd = skip_spaces(cmd);
 	if (!*cmd) {
@@ -269,12 +377,27 @@ void mconsole_exec(struct mc_request *req)
 		return;
 	}
 
+	ret = mconsole_exec_parse_timeout(&cmd, &timeout);
+	if (ret) {
+		mconsole_reply(req, "invalid exec timeout", 1, 0);
+		return;
+	}
+	if (timeout) {
+		timeout_helper = mconsole_exec_timeout_helper();
+		if (!timeout_helper) {
+			mconsole_reply(req, "exec timeout helper not available", 1, 0);
+			return;
+		}
+	}
+
 	scnprintf(stdout_path, sizeof(stdout_path),
 		  "/tmp/uml-mconsole-exec-%llu.out", id);
 	scnprintf(stderr_path, sizeof(stderr_path),
 		  "/tmp/uml-mconsole-exec-%llu.err", id);
+	scnprintf(status_path, sizeof(status_path),
+		  "/tmp/uml-mconsole-exec-%llu.status", id);
 
-	shell_cmd = kmalloc(MCONSOLE_MAX_DATA + 160, GFP_KERNEL);
+	shell_cmd = kmalloc(MCONSOLE_EXEC_SHELL_LIMIT, GFP_KERNEL);
 	stdout_buf = kmalloc(MCONSOLE_EXEC_OUTPUT_LIMIT, GFP_KERNEL);
 	stderr_buf = kmalloc(MCONSOLE_EXEC_OUTPUT_LIMIT, GFP_KERNEL);
 	reply = kvzalloc(MCONSOLE_EXEC_REPLY_LIMIT, GFP_KERNEL);
@@ -283,12 +406,30 @@ void mconsole_exec(struct mc_request *req)
 		goto out_free;
 	}
 
-	scnprintf(shell_cmd, MCONSOLE_MAX_DATA + 160,
-		  "exec >%s 2>%s; %s", stdout_path, stderr_path, cmd);
-	argv[0] = "/bin/sh";
-	argv[1] = "-c";
-	argv[2] = shell_cmd;
-	argv[3] = NULL;
+	ret = mconsole_exec_build_shell(shell_cmd, MCONSOLE_EXEC_SHELL_LIMIT,
+					cmd, stdout_path, stderr_path,
+					status_path, timeout);
+	if (ret < 0) {
+		mconsole_reply(req, "exec command too large", 1, 0);
+		goto out_free;
+	}
+
+	if (timeout) {
+		scnprintf(timeout_arg, sizeof(timeout_arg), "%us", timeout);
+		argv[0] = (char *)timeout_helper;
+		argv[1] = "-k";
+		argv[2] = "1s";
+		argv[3] = timeout_arg;
+		argv[4] = "/bin/sh";
+		argv[5] = "-c";
+		argv[6] = shell_cmd;
+		argv[7] = NULL;
+	} else {
+		argv[0] = "/bin/sh";
+		argv[1] = "-c";
+		argv[2] = shell_cmd;
+		argv[3] = NULL;
+	}
 
 	status = call_usermodehelper(argv[0], argv, mconsole_exec_envp,
 				     UMH_WAIT_PROC);
@@ -303,7 +444,11 @@ void mconsole_exec(struct mc_request *req)
 				      &stderr_len, &stderr_truncated);
 	if (ret < 0)
 		stderr_len = 0;
-	mconsole_exec_rm_tmp(stdout_path, stderr_path);
+	if (mconsole_exec_read_status(status_path, &guest_status))
+		status = (guest_status & 0xff) << 8;
+	else if (timeout && mconsole_exec_wait_exit(status) == 124)
+		timed_out = true;
+	mconsole_exec_rm_tmp(stdout_path, stderr_path, status_path);
 
 	pos += scnprintf(reply + pos, MCONSOLE_EXEC_REPLY_LIMIT - pos, "{");
 	mconsole_exec_json_string(reply, MCONSOLE_EXEC_REPLY_LIMIT, &pos,
@@ -316,9 +461,10 @@ void mconsole_exec(struct mc_request *req)
 			 stdout_truncated ? "true" : "false",
 			 stderr_truncated ? "true" : "false");
 	pos += scnprintf(reply + pos, MCONSOLE_EXEC_REPLY_LIMIT - pos,
-			 ",\"exit\":%d,\"signal\":%d,\"timed_out\":false}",
-			 mconsole_exec_wait_exit(status),
-			 mconsole_exec_wait_signal(status));
+			 ",\"exit\":%d,\"signal\":%d,\"timed_out\":%s}",
+			 timed_out ? 124 : mconsole_exec_wait_exit(status),
+			 mconsole_exec_wait_signal(status),
+			 timed_out ? "true" : "false");
 
 	mconsole_reply(req, reply, 0, 0);
 
