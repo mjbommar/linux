@@ -95,7 +95,7 @@ This file is the live execution tracker for
 | Pool | Vector2 TAP handoff | Present-validated | `next`, `memo09-phase4`, `umlctl-deploy` | Keep the vector2 TAP reopen path and smoke gate. Treat per-take fd handoff as a separate deferred SCM_RIGHTS design. | `vector2-pool-tap-smoke` PASS: per-member TAP/MAC/IPv4 identity visible through daemon exec and one-packet host TAP ping succeeds, 2026-06-10. |
 | Vector2 | Typed parser | Present | `next` | Keep. | vector2 parser KUnit. |
 | Vector2 | Queue ownership | Present | `next` | Keep. | vector2 queue KUnit. |
-| Vector2 | fd backend | Present-needs-validation | `next`, `umlctl-deploy` | Keep and validate the launcher-owned inherited-fd path; decide whether per-take pool fd handoff is required or retired. | fd handoff smoke. |
+| Vector2 | fd backend | Present-validated-needs-long-gates | `next`, `umlctl-deploy` | Keep the launcher-owned inherited-fd path; decide whether per-take pool fd handoff is required or retired. | `vector2-fd-handoff-smoke` PASS: `umlctl up` creates the TAP, opens/inherits fd 200, guest metadata reports fd transport, `vec2.0` has the assigned IPv4 address, and one-packet host TAP ping succeeds, 2026-06-10. |
 | Vector2 | tap backend | Present-validated-needs-long-gates | `next`, `umlctl-deploy` | Keep and run networking/Tier 3 gates. | `vector2-pool-tap-smoke` PASS on the pool path, 2026-06-10; Tier 3 still required. |
 | Vector2 | multiqueue | Partial | `next`, `umlctl-deploy` | Finish fairness/performance gates. | multiqueue perf/fairness. |
 | Vector2 | raw/gre/l2tpv3/vde/bess/proxy/hybrid transports | Needs-decision | `next`, historical vector branches | Implement or remove parser/doc claims for unsupported modes. | transport-specific smoke. |
@@ -155,9 +155,9 @@ These items must be closed before the final branch can be called complete:
 1. Record/replay functionality must be imported or completed.
 2. Vector2 replacement claims must match validation evidence.
 3. Pool/fork-server current tests must pass, including warm-pool and
-   pool-member paths. Vector2 pool-member TAP now has a dedicated smoke gate;
-   launcher fd and any per-take pool fd requirement still need a final
-   validation/contract decision.
+   pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff
+   now have dedicated smoke gates; any per-take pool fd requirement still
+   needs a final contract decision.
 4. Selftests and source comments must be cleaned of diary/history material on
    upstream-facing paths.
 5. The final validation matrix from the integration plan must pass.

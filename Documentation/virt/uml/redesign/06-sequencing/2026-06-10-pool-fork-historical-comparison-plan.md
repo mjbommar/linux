@@ -490,7 +490,8 @@ Validation:
 
 - pool member network smoke using vector2 TAP. Current status:
   `vector2-pool-tap-smoke` PASS on 2026-06-10.
-- launcher fd handoff smoke, plus a decision on per-take pool fd handoff.
+- launcher fd handoff smoke. Current status: `vector2-fd-handoff-smoke` PASS
+  on 2026-06-10, plus a decision on per-take pool fd handoff.
 - port-forward smoke.
 - selected Tier 3 vector2 workload after pool paths are stable.
 
