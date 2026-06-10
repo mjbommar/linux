@@ -284,9 +284,9 @@ config UML_NET_VECTOR_V2_NETDEV_KUNIT
 	  tests validate stable device naming, lifecycle unwind for
 	  backend-missing open, stopped-state stop handling, xmit safety,
 	  configured queue counts, the deterministic queue-to-CPU policy
-	  used for XPS setup, and the NAPI poll path branches (healthy
-	  round, backend-dead, tx-more rescheduling, rx alloc error,
-	  rx protocol drop) driven via the deterministic fake host.
+	  used for XPS setup, and NAPI poll outcomes (healthy round,
+	  backend death, TX rescheduling, RX allocation error, RX protocol
+	  drop) driven via the deterministic fake host.
 
 	  Say N for normal builds. Say Y to run the netdev tests.
 

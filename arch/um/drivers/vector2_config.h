@@ -1,11 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Typed configuration for the UML vector networking v2 rewrite.
+ * Typed configuration for UML vector networking v2.
  *
- * This header is intentionally independent of the old arglist parser in
- * vector_user.h.  The v2 parser keeps command-line compatibility at the
- * boundary, then hands the rest of the driver a validated structure with
- * explicit policy decisions.
+ * The parser accepts command-line compatibility syntax at the boundary and
+ * hands the driver a validated structure with explicit policy decisions.
  */
 #ifndef __UM_VECTOR2_CONFIG_H
 #define __UM_VECTOR2_CONFIG_H

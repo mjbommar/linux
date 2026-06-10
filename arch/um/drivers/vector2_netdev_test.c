@@ -373,9 +373,9 @@ static void vector2_netdev_poll_backend_dead_rx_test(struct kunit *test)
 	int rx_done;
 
 	/*
-	 * Empty TX ring so tx_batch is skipped entirely and tx_done stays 0.
-	 * rx_batch then sees fake.dead and returns -ENODEV, which the poll
-	 * must route to the rx-side backend_dead branch.
+	 * Empty TX ring skips tx_batch, so fake.dead is first observed by
+	 * rx_batch. Poll should mark the backend dead and stop carrier from
+	 * the RX side.
 	 */
 	um_vec2_fake_host_kill(&ctx->fake);
 	KUNIT_ASSERT_TRUE(test, netif_carrier_ok(ctx->dev));
@@ -401,9 +401,9 @@ static void vector2_netdev_poll_tx_more_reschedules_test(struct kunit *test)
 	int rx_done;
 
 	/*
-	 * Two TX skbs enqueued, fake_host tx_limit = 1 so the first poll
-	 * round only completes one packet.  tx_more is then true AND
-	 * tx_done > 0, which is the napi_schedule() rescheduling branch.
+	 * Two TX skbs enqueued with fake_host tx_limit = 1 make the first
+	 * poll complete one packet and leave more queued. Because the poll
+	 * made TX progress, NAPI should stay scheduled for the remaining work.
 	 */
 	skb1 = alloc_skb(64, GFP_KERNEL);
 	skb2 = alloc_skb(64, GFP_KERNEL);
