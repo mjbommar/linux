@@ -146,7 +146,9 @@ Current validation result:
   the second take reaches the runqueue lock in
   `sched_worker_detach_other_tasks()` and then stalls while walking scheduler
   state, consistent with shared physmem/kernel-memory mutation by the first
-  live member.
+  live member.  Re-wiring `um_pool_replicate_physmem()` in the child entry is
+  still not acceptable: the current harness reaches `POOL_ENTER` on iteration
+  1 but then segfaults in libc before `MEMBER_DONE`.
 
 Remaining work:
 

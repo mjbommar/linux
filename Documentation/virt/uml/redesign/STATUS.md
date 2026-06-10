@@ -158,7 +158,9 @@ Current boundary:
   instrumentation also showed the second take reaches the runqueue lock inside
   `sched_worker_detach_other_tasks()` and then stalls while walking scheduler
   state, which is consistent with the first live member mutating kernel memory
-  still shared with the master;
+  still shared with the master; re-wiring `um_pool_replicate_physmem()` in the
+  child entry remains broken because iteration 1 reaches `POOL_ENTER` but then
+  segfaults in libc before `MEMBER_DONE`;
 - reduced `pool-bench` passes four of five gates, but the RSS amplification
   gate cannot measure live children because no benchmark children remain live;
 - warm-pool `min_warm` behavior is still lazy-only and must be completed before

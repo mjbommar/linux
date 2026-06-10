@@ -1276,6 +1276,17 @@ Additional local boundary:
 - the next production fix should therefore isolate member kernel memory before
   the child re-enters userspace, rather than adding more loop-level guards.
 
+Runtime replication recheck:
+
+- temporarily wiring `um_pool_replicate_physmem()` back into
+  `child_entry_pool_member()` is still not viable;
+- with the current sustained harness, iteration 1 reports a child pid and
+  reaches `POOL_ENTER`, but does not reach `MEMBER_DONE`;
+- the preserved boot log shows `init.sh` segfaulting in libc followed by an
+  init-kill panic and repeated master resume cycles;
+- keep the helper unwired until the post-replication userspace/stub path is
+  fixed.
+
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
 	POOL_BENCH_TAKES=10 POOL_BENCH_FORKS=5 \
