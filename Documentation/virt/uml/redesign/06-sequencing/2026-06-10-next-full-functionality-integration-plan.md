@@ -1287,6 +1287,13 @@ Runtime replication recheck:
 - keep the helper unwired until the post-replication userspace/stub path is
   fixed.
 
+Detailed implementation plan:
+
+- `2026-06-10-sustained-pool-physmem-isolation-plan.md` tracks the gated
+  replication path, bounded failure handling, post-replication userspace/stub
+  fixes, sustained-smoke PASS gate, daemon live-member conversion, and the
+  final pool/vector2/syzkaller acceptance gates.
+
 ```sh
 timeout --kill-after=5 150 env UM_FORK_KERNEL=$PWD/linux \
 	POOL_BENCH_TAKES=10 POOL_BENCH_FORKS=5 \
