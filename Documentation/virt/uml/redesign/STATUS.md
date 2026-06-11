@@ -269,9 +269,11 @@ Current boundary:
 Remaining pool/vector2 boundary:
 
 - launcher-owned vector2 fd handoff is validated on the standalone `umlctl up`
-  path; per-take fd handoff for pool members remains a separate deferred
-  design because the current identity memfd carries strings, not
-  SCM_RIGHTS-passed fds.
+  path. Per-take pool fd handoff is retired from the current completion claim:
+  historical `memo09` notes deferred a future SCM_RIGHTS TAP-fd swap, but
+  current `next` pool takes deliberately carry string identity through the
+  identity memfd and use the vector2 TAP reopen path for per-member TAP
+  isolation.
 
 ## Historical-Only Work
 

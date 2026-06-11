@@ -769,8 +769,10 @@ Required functionality:
   validation.
 - Keep sandbox validation for untrusted mode green.
 - Keep in-process trusted host validation green.
-- Keep launcher-owned fd handoff validated and decide whether per-take pool fd
-  handoff is required or retired.
+- Keep launcher-owned fd handoff validated. Per-take pool fd handoff is
+  retired from the current completion claim: current pool takes carry string
+  identity through the identity memfd and use the vector2 TAP reopen path for
+  per-member TAP isolation.
 - Confirm failure injection is test-only or clearly documented. Current
   status: `fail_open_after=N` is runtime-available for the live open-unwind
   gate, but documented as validation-only and not part of normal workload
@@ -1104,8 +1106,9 @@ Exit criteria:
 - Vector2 TAP handoff works through live pool members. Current status: PASS on
   2026-06-10 through `vector2-pool-tap-smoke`.
 - Launcher-owned vector2 fd handoff works. Current status: PASS on 2026-06-10
-  through `vector2-fd-handoff-smoke`; any per-take pool fd handoff
-  requirement still needs to be explicitly implemented or retired.
+  through `vector2-fd-handoff-smoke`; per-take pool fd handoff is explicitly
+  retired from the current completion claim in favor of the validated pool TAP
+  reopen path.
 - Syzkaller-style take/exec/destroy works through the current path; keep it
   aligned with the final exec ABI decision.
 - Missing `memo09-*` functionality is either landed or explicitly retired.
