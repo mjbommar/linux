@@ -781,6 +781,9 @@ struct kvm_v2_record {
 	u64				payload_entries_replayed;
 	u64				payload_bytes_recorded;
 	u64				payload_bytes_replayed;
+	u64				strict_replay_failures;
+	long				last_replay_failure_syscall;
+	int				last_replay_failure_rc;
 	struct mutex			lock;
 };
 
@@ -820,6 +823,8 @@ int kvm_v2_record_consume_syscall_payload(struct kvm_v2_record *rec,
 					  void *payload,
 					  size_t payload_size,
 					  size_t *payload_len_out);
+void kvm_v2_record_note_replay_failure(struct kvm_v2_record *rec,
+				       unsigned long syscall_nr, int rc);
 #endif
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

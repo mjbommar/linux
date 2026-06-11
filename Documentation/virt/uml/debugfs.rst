@@ -180,6 +180,9 @@ record container control surface:
       payload_entries_replayed: 0
       payload_bytes_recorded: 390
       payload_bytes_replayed: 0
+      strict_replay_failures: 0
+      last_replay_failure_syscall: -1
+      last_replay_failure_rc: 0
 
 The record path is still explicitly experimental. It can record live
 KVM v2 syscall returns through the host dispatcher and the LSTAR gadget
@@ -191,8 +194,12 @@ task-owned record run from a control-file writer that merely enabled
 recording for later work. The first payload-aware syscall is ``uname(2)``:
 record mode copies the returned ``struct new_utsname`` into the log, and
 replay mode can restore that payload when syscall number and arguments match.
-Full deterministic replay still needs broader payload coverage plus raw
-time/RDTSC, signal, and device policy described in the redesign plan.
+Strict replay currently allows the R/R-1 scalar task-owned subset
+(``getpid``, ``getppid``, ``gettid``) plus payload-aware ``uname(2)``; other
+syscalls fail closed and update the strict replay failure counters instead of
+falling back to live execution. Full deterministic replay still needs broader
+payload coverage plus raw time/RDTSC, signal, and device policy described in
+the redesign plan.
 
 Cost impact
 ===========

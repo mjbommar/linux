@@ -1451,6 +1451,31 @@ static bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
 	return syscall_nr == __NR_uname;
 }
 
+static bool kvm_v2_record_syscall_supported(unsigned long syscall_nr)
+{
+	switch (syscall_nr) {
+	case __NR_getpid:
+	case __NR_getppid:
+	case __NR_gettid:
+		return true;
+	default:
+		return kvm_v2_record_syscall_has_payload(syscall_nr);
+	}
+}
+
+static bool kvm_v2_record_check_strict_syscall(struct kvm_v2_record *rec,
+					       unsigned long syscall_nr)
+{
+	if (!rec->strict_replay || kvm_v2_record_syscall_supported(syscall_nr))
+		return true;
+
+	kvm_v2_record_note_replay_failure(rec, syscall_nr, -EOPNOTSUPP);
+	pr_info_ratelimited("kvm-v2 record: strict replay unsupported nr=%lu\n",
+			    syscall_nr);
+	force_sig(SIGSEGV);
+	return false;
+}
+
 static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
 					struct uml_pt_regs *regs,
 					unsigned long syscall_nr,
@@ -1491,6 +1516,8 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 	rec = kvm_v2_record_active();
 	if (!rec || rec->state != KVM_V2_RECORD_REPLAYING)
 		return false;
+	if (!kvm_v2_record_check_strict_syscall(rec, syscall_nr))
+		return true;
 
 	rc = kvm_v2_record_replay_payload(rec, regs, syscall_nr, &served_ret);
 	if (!rc)
@@ -1501,6 +1528,7 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 	}
 
 	if (rc < 0 && rec->strict_replay) {
+		kvm_v2_record_note_replay_failure(rec, syscall_nr, rc);
 		pr_info_ratelimited("kvm-v2 record: strict replay divergence nr=%lu rc=%d entries_replayed=%llu\n",
 				    syscall_nr, rc, rec->entries_replayed);
 		force_sig(SIGSEGV);

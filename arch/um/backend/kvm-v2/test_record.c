@@ -407,6 +407,38 @@ static void test_record_replay_divergence_preserves_cursor(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+static void test_record_strict_replay_failure_is_counted(struct kunit *test)
+{
+	struct kvm_v2_record *rec;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+
+	KUNIT_EXPECT_EQ(test, kvm_v2_record_start(rec), 0);
+	kvm_v2_record_note_replay_failure(rec, 999, -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, 0ULL);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+	kvm_v2_record_note_replay_failure(rec, 999, -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall, 999L);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_rc, -EOPNOTSUPP);
+
+	kvm_v2_record_note_replay_failure(rec, 39, -EILSEQ);
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, 2ULL);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall, 39L);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_rc, -EILSEQ);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_EXPECT_EQ(test, kvm_v2_record_reset(rec), 0);
+	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, 0ULL);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall, -1L);
+	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_rc, 0);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static void test_record_time_travel_fifo(struct kunit *test)
 {
 	static const u64 ns_values[] = {
@@ -527,6 +559,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_syscall_payload_arg_mismatch),
 	KUNIT_CASE(test_record_syscall_payload_overflow),
 	KUNIT_CASE(test_record_replay_divergence_preserves_cursor),
+	KUNIT_CASE(test_record_strict_replay_failure_is_counted),
 	KUNIT_CASE(test_record_time_travel_fifo),
 	KUNIT_CASE(test_record_buffer_overflow_is_counted),
 	KUNIT_CASE(test_record_reset_releases_snapshot),

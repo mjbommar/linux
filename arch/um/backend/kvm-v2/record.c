@@ -107,6 +107,9 @@ static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 	rec->payload_entries_replayed = 0;
 	rec->payload_bytes_recorded = 0;
 	rec->payload_bytes_replayed = 0;
+	rec->strict_replay_failures = 0;
+	rec->last_replay_failure_syscall = -1;
+	rec->last_replay_failure_rc = 0;
 }
 
 static void kvm_v2_record_release_snapshot_locked(struct kvm_v2_record *rec)
@@ -679,6 +682,22 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall_payload);
 
+void kvm_v2_record_note_replay_failure(struct kvm_v2_record *rec,
+				       unsigned long syscall_nr, int rc)
+{
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+	if (rec->state == KVM_V2_RECORD_REPLAYING) {
+		rec->strict_replay_failures++;
+		rec->last_replay_failure_syscall = (long)syscall_nr;
+		rec->last_replay_failure_rc = rc;
+	}
+	mutex_unlock(&rec->lock);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_note_replay_failure);
+
 void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
 				       u64 ns_at_advance)
 {
@@ -1073,6 +1092,12 @@ static int kvm_v2_record_status_show(struct seq_file *m, void *v)
 		   rec->payload_bytes_recorded);
 	seq_printf(m, "payload_bytes_replayed: %llu\n",
 		   rec->payload_bytes_replayed);
+	seq_printf(m, "strict_replay_failures: %llu\n",
+		   rec->strict_replay_failures);
+	seq_printf(m, "last_replay_failure_syscall: %ld\n",
+		   rec->last_replay_failure_syscall);
+	seq_printf(m, "last_replay_failure_rc: %d\n",
+		   rec->last_replay_failure_rc);
 	mutex_unlock(&rec->lock);
 	mutex_unlock(&kvm_v2_record_debugfs_lock);
 
