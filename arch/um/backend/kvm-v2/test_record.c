@@ -545,6 +545,54 @@ static void test_record_syscall_payload_gettimeofday_fifo(struct kunit *test)
 			0);
 
 	kvm_v2_record_destroy(rec);
+
+	{
+		const struct test_record_gettimeofday_payload tz_payload = {
+			.has_tz = 1,
+			.tz = {
+				.tz_minuteswest = 7,
+				.tz_dsttime = 8,
+			},
+		};
+
+		rec = kvm_v2_record_alloc(4096);
+		KUNIT_ASSERT_NOT_NULL(test, rec);
+		fill_syscall_regs(&regs);
+		regs.gp[HOST_DI] = 0;
+		regs.gp[HOST_SI] = 0x12346000ULL;
+		replay_regs = regs;
+		memset(&got_payload, 0, sizeof(got_payload));
+		got_len = 0;
+		got_ret = -1;
+
+		KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+		KUNIT_EXPECT_EQ(test,
+				kvm_v2_record_observe_syscall_payload(rec,
+								      __NR_gettimeofday,
+								      0, &regs, 0,
+								      &tz_payload,
+								      sizeof(tz_payload)),
+				1);
+		KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+		KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+		KUNIT_EXPECT_EQ(test,
+				kvm_v2_record_consume_syscall_payload(rec,
+								      __NR_gettimeofday,
+								      &replay_regs,
+								      &got_ret,
+								      &got_payload,
+								      sizeof(got_payload),
+								      &got_len),
+				1);
+		KUNIT_EXPECT_EQ(test, got_ret, 0L);
+		KUNIT_EXPECT_EQ(test, got_len, sizeof(tz_payload));
+		KUNIT_EXPECT_EQ(test,
+				memcmp(&got_payload, &tz_payload,
+				       sizeof(tz_payload)),
+				0);
+
+		kvm_v2_record_destroy(rec);
+	}
 }
 #endif
 

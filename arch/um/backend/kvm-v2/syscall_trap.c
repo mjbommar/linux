@@ -1618,8 +1618,13 @@ static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
 
 	arg = kvm_v2_record_payload_arg(syscall_nr);
 	user_ptr = kvm_v2_record_payload_ptr(regs, arg);
+#ifdef __NR_gettimeofday
+	if (!user_ptr && syscall_nr != __NR_gettimeofday)
+		return 0;
+#else
 	if (!user_ptr)
 		return 0;
+#endif
 
 	max_len = kvm_v2_record_payload_max_len(syscall_nr, regs);
 	if (!max_len)

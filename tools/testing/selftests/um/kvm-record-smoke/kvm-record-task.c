@@ -47,11 +47,15 @@
 #endif
 
 struct workload_sample {
-	struct timespec ts;
-	struct timeval tv;
-	struct timezone tz;
+	struct timespec mono_ts;
+	struct timespec real_ts;
+	struct timeval tv_both;
+	struct timeval tv_only;
+	struct timezone tz_both;
+	struct timezone tz_only;
 	long time_value;
 	long time_ret;
+	long time_null_ret;
 };
 
 static int ensure_dir(const char *path)
@@ -205,11 +209,23 @@ static long deterministic_workload(struct workload_sample *sample)
 	else
 		return -1;
 
-	rc = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &sample->ts);
+	rc = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &sample->mono_ts);
 	if (rc < 0)
 		return -1;
 
-	rc = syscall(SYS_gettimeofday, &sample->tv, &sample->tz);
+	rc = syscall(SYS_clock_gettime, CLOCK_REALTIME, &sample->real_ts);
+	if (rc < 0)
+		return -1;
+
+	rc = syscall(SYS_gettimeofday, &sample->tv_both, &sample->tz_both);
+	if (rc < 0)
+		return -1;
+
+	rc = syscall(SYS_gettimeofday, &sample->tv_only, NULL);
+	if (rc < 0)
+		return -1;
+
+	rc = syscall(SYS_gettimeofday, NULL, &sample->tz_only);
 	if (rc < 0)
 		return -1;
 
@@ -217,9 +233,16 @@ static long deterministic_workload(struct workload_sample *sample)
 	if (sample->time_ret < 0 || sample->time_ret != sample->time_value)
 		return -1;
 
-	sink += sample->ts.tv_nsec & 0xff;
-	sink += sample->tv.tv_usec & 0xff;
+	sample->time_null_ret = syscall(SYS_time, NULL);
+	if (sample->time_null_ret < 0)
+		return -1;
+
+	sink += sample->mono_ts.tv_nsec & 0xff;
+	sink += sample->real_ts.tv_nsec & 0xff;
+	sink += sample->tv_both.tv_usec & 0xff;
+	sink += sample->tv_only.tv_usec & 0xff;
 	sink += sample->time_value & 0xff;
+	sink += sample->time_null_ret & 0xff;
 
 	return sink;
 }
@@ -227,14 +250,23 @@ static long deterministic_workload(struct workload_sample *sample)
 static int samples_match(const struct workload_sample *recorded,
 			 const struct workload_sample *replayed)
 {
-	return recorded->ts.tv_sec == replayed->ts.tv_sec &&
-	       recorded->ts.tv_nsec == replayed->ts.tv_nsec &&
-	       recorded->tv.tv_sec == replayed->tv.tv_sec &&
-	       recorded->tv.tv_usec == replayed->tv.tv_usec &&
-	       recorded->tz.tz_minuteswest == replayed->tz.tz_minuteswest &&
-	       recorded->tz.tz_dsttime == replayed->tz.tz_dsttime &&
+	return recorded->mono_ts.tv_sec == replayed->mono_ts.tv_sec &&
+	       recorded->mono_ts.tv_nsec == replayed->mono_ts.tv_nsec &&
+	       recorded->real_ts.tv_sec == replayed->real_ts.tv_sec &&
+	       recorded->real_ts.tv_nsec == replayed->real_ts.tv_nsec &&
+	       recorded->tv_both.tv_sec == replayed->tv_both.tv_sec &&
+	       recorded->tv_both.tv_usec == replayed->tv_both.tv_usec &&
+	       recorded->tv_only.tv_sec == replayed->tv_only.tv_sec &&
+	       recorded->tv_only.tv_usec == replayed->tv_only.tv_usec &&
+	       recorded->tz_both.tz_minuteswest ==
+		       replayed->tz_both.tz_minuteswest &&
+	       recorded->tz_both.tz_dsttime == replayed->tz_both.tz_dsttime &&
+	       recorded->tz_only.tz_minuteswest ==
+		       replayed->tz_only.tz_minuteswest &&
+	       recorded->tz_only.tz_dsttime == replayed->tz_only.tz_dsttime &&
 	       recorded->time_ret == replayed->time_ret &&
-	       recorded->time_value == replayed->time_value;
+	       recorded->time_value == replayed->time_value &&
+	       recorded->time_null_ret == replayed->time_null_ret;
 }
 
 int main(void)
@@ -308,7 +340,7 @@ int main(void)
 	if (entries <= 0 || syscalls <= 0 || entries != syscalls ||
 	    same_task != syscalls ||
 	    other_tasks != 0 || first_pid != pid || last_pid != pid ||
-	    payload_entries < 5 || payload_bytes <= 440 || sink < 0) {
+	    payload_entries < 8 || payload_bytes <= 520 || sink < 0) {
 		printf("KVM_RECORD_TASK: FAIL pid=%ld entries=%ld syscalls=%ld ",
 		       pid, entries, syscalls);
 		printf("same=%ld other=%ld first=%ld last=%ld ",
@@ -369,10 +401,10 @@ int main(void)
 	if (!samples_match(&recorded_sample, &replayed_sample)) {
 		printf("KVM_RECORD_TASK: FAIL time payload mismatch ");
 		printf("recorded_clock=%ld.%09ld replayed_clock=%ld.%09ld ",
-		       (long)recorded_sample.ts.tv_sec,
-		       recorded_sample.ts.tv_nsec,
-		       (long)replayed_sample.ts.tv_sec,
-		       replayed_sample.ts.tv_nsec);
+		       (long)recorded_sample.mono_ts.tv_sec,
+		       recorded_sample.mono_ts.tv_nsec,
+		       (long)replayed_sample.mono_ts.tv_sec,
+		       replayed_sample.mono_ts.tv_nsec);
 		printf("recorded_time=%ld replayed_time=%ld\n",
 		       recorded_sample.time_value, replayed_sample.time_value);
 		(void)write_ctl("destroy\n");

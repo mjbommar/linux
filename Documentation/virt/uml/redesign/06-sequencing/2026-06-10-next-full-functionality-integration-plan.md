@@ -128,8 +128,8 @@ The active blockers are now:
    and current UML-vDSO-wrapper
    `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payloads, RDTSC/RDTSCP
    trapping, and replay SIGALRM-mask blocking are now live-smoke validated,
-   and task-owned direct-syscall raw-time workload coverage are now
-   live-smoke validated, but raw-time coverage beyond those syscall-wrapper
+   and task-owned direct-syscall raw-time argument-shape workload coverage is
+   now live-smoke validated, but raw-time coverage beyond those syscall-wrapper
    paths, replayable asynchronous signal ordering, device/network/hostfs event
    policy, and broader workload coverage beyond the current bounded subset are
    still open.
@@ -682,7 +682,7 @@ Current `next` checkpoint:
   and `mismatches=0`.
 - Validation on 2026-06-11 after the live strict-mismatch smoke:
   `kvm-record-smoke` PASS, including `um_kvm_v2_record` 24/24, live debugfs
-  recording, task-owned 389-entry deterministic replay, live supported-syscall
+  recording, task-owned deterministic replay, live supported-syscall
   mismatch rejection through `getcwd(2)`, and live unsupported-syscall
   rejection through `getrandom(2)`.
 - Validation on 2026-06-11 after the raw-time supported-entry mismatch smokes:
@@ -694,13 +694,14 @@ Current `next` checkpoint:
   replay-mode `openat(2)`, `read(2)`, `write(2)`, and `ioctl(2)` fail closed
   as unsupported syscalls instead of falling back to hostfs/device I/O outside
   the record log.
-- Validation on 2026-06-11 after adding direct raw-time calls to the
-  task-owned replay workload: `kvm-record-smoke` PASS includes
-  `KVM_RECORD_TASK: PASS pid=1 entries=389 syscalls=389 same=389 other=0
-  payload_entries=5 payload_bytes=448 replayed=389`, proving the same
+- Validation on 2026-06-11 after expanding direct raw-time argument shapes in
+  the task-owned replay workload: `kvm-record-smoke` PASS includes
+  `KVM_RECORD_TASK: PASS pid=1 entries=393 syscalls=393 same=393 other=0
+  payload_entries=8 payload_bytes=528 replayed=393`, proving the same
   snapshot-backed task-owned session now covers scalar IDs, `uname(2)`,
-  `getcwd(2)`, and direct `clock_gettime(2)`, `gettimeofday(2)`, and
-  `time(2)` payload bytes.
+  `getcwd(2)`, two `clock_gettime(2)` clock ids, multiple
+  `gettimeofday(2)` output-pointer shapes, and pointer plus `NULL`
+  `time(2)` calls.
 - Validation on 2026-06-11 after the public determinism-tier documentation:
   `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
   experimental task-owned replay tier, replayable syscall subset, strict
@@ -740,7 +741,8 @@ Acceptance gates:
 - Record KUnit tests. Current status: PASS 24/24 for the experimental core.
 - Record smoke test. Current status: PASS through `kvm-record-smoke`.
 - Replay smoke test. Current status: bounded PASS for the task-owned scalar
-  plus `uname(2)`, `getcwd(2)`, and direct raw-time payload workload.
+  plus `uname(2)`, `getcwd(2)`, and direct raw-time argument-shape payload
+  workload.
 - Buffer overflow behavior test. Current status: covered by KUnit.
 - Strict supported-entry mismatch smoke. Current status: PASS through the live
   `kvm-record-mismatch` helpers for `getcwd(2)`, `clock_gettime(2)`,

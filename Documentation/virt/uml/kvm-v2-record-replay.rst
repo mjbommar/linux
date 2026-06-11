@@ -153,7 +153,8 @@ The smoke gate currently validates:
 * live debugfs recording with a snapshot-backed session;
 * task-owned replay of a bounded scalar plus ``uname(2)``, ``getcwd(2)``,
   ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` direct-syscall
-  payload workload;
+  payload workload, including multiple clock ids, gettimeofday output-pointer
+  shapes, and pointer plus ``NULL`` ``time(2)`` calls;
 * strict fail-closed behavior for supported ``getcwd(2)``,
   ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` replay-entry
   mismatches;
