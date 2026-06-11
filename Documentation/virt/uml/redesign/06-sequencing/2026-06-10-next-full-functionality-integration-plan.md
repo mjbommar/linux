@@ -884,6 +884,10 @@ Acceptance gates:
   host gateway ping, injected second `ndo_open()` failure, `open_delta=1`,
   `fail_delta=1`, `close_delta=1`, closed/registered `vec2.0`, and TAP
   cleanup.
+- vector2 validation docs. Current status: the validation-gates memo is the
+  current gate tracker for `next`; the post-May-19 default-flip README is
+  marked historical and no longer competes with the June 10 completion
+  inventory.
 - seccomp backend vector2 Tier 3 networking.
 - KVM v2 backend vector2 Tier 3 networking.
 - Long soak.

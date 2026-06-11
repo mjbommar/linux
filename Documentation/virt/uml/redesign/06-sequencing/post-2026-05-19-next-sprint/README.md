@@ -5,6 +5,14 @@
 **Predecessor:** [`post-2026-05-14-next-sprint.md`](../post-2026-05-14-next-sprint.md)
 **Successor of:** [`PLAN-2026-05-14.md`](../PLAN-2026-05-14.md)
 
+> Historical status note: this file is a May 2026 sprint snapshot, not the
+> current readiness source for `next`.  As of the June 10 integration plan,
+> vector2 remains opt-in at Kconfig level, legacy vector is not deprecated,
+> and vector2 is not replacement-approved.  Current vector2 validation gates
+> live in
+> [`49-uml-vector-driver-v2-validation-gates-2026-05-17.md`](../../08-future-phases/49-uml-vector-driver-v2-validation-gates-2026-05-17.md)
+> and [`../2026-06-10-next-functionality-inventory.md`](../2026-06-10-next-functionality-inventory.md).
+
 ## Why this sprint exists
 
 The post-2026-05-14 sprint shipped:
@@ -49,7 +57,7 @@ deferred to the sprint after this one.
 
 | # | Memo | Priority | Effort | Depends on | Status (2026-05-19) |
 |---|------|----------|--------|-----------|--------|
-| 1 | [vector2 default flip + stress](01-vector2-default-flip.md) | HIGH | small flip (10 LoC) + 30/30 + 7200s soak + perf-gate work | none — start here | **ALL STEPS DONE.**  Step 1 (30/30), Step 2 (ratio 0.877 ≥ 0.85), Step 3 (440/440 long soak), Step 4a + 4b (default flipped), Step 5 (Kconfig legacy tag) all landed. |
+| 1 | [vector2 default flip + stress](01-vector2-default-flip.md) | HIGH | small flip (10 LoC) + 30/30 + 7200s soak + perf-gate work | none — start here | Historical branch result; superseded for current `next`. Current `next` keeps vector2 opt-in, keeps legacy vector available, and still requires natural seccomp soak, KVM-v2 Tier 3, and multiqueue fairness/perf evidence before replacement approval. |
 | 2 | [UBD io_uring port](02-ubd-io-uring.md) | HIGH | 400–700 LoC + new `os_*` shims | host kernel ≥ 5.6 | **ALL PHASES DONE.**  Phases 1 + 2a + 2b + 3 + 4 + 5 landed (substrate + within-req parallel + cross-req parallel + vectored submission + O_DIRECT + COW bitmap drain).  A/B bench (`um_ubd_no_uring=1` knob): parallel-dd 4×64 MiB shows **+106 %** with O_DIRECT, single-req fast-path closes the small-random regression. |
 | 3 | [hostfs `openat2` + io_uring writeback](03-hostfs-io-uring-openat2.md) | HIGH | 200–400 LoC | host kernel ≥ 5.6; can parallel with #2 | Phases 1 + 2 + 3 DONE (openat2 strict, writepages ring, fsync ring) |
 | 4 | [Time-travel ↔ record/replay wiring](04-time-travel-record-replay.md) | MEDIUM-HIGH | 200–400 LoC | record/replay Phase 1–7 (done) | Phases 1 + 2 + 3 + 4 DONE (clock hook + observe + consume + KUnit round-trip).  Live wiring from time_travel_set_time(ns) to observe/consume — replacing the current __um_time_travel_clock hook with a record-aware version under a static-key gate — remains as a small follow-on. |

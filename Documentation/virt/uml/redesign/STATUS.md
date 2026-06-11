@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, and snapshot ELF/debugfs documentation validation.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, and vector2 validation documentation alignment.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -190,6 +190,10 @@ run:
   drove a second `ndo_open()` failure, observed `open_delta=1`,
   `fail_delta=1`, `close_delta=1`, and left `vec2.0` closed/registered with
   the host TAP cleaned up.
+
+Current vector2 validation gates are tracked in
+`08-future-phases/49-uml-vector-driver-v2-validation-gates-2026-05-17.md`;
+older post-May-19 default-flip summaries are historical branch snapshots.
 
 Open vector2 publication work:
 

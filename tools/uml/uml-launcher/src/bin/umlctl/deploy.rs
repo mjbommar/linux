@@ -183,8 +183,8 @@ pub struct NetworkSection {
  * impossible to distinguish "field absent" from "field present with
  * default-equal value".
  * The wrapper struct uses Option<String> for driver, then resolve()
- * fills in the post-flip default ("vector2") and sets
- * driver_explicit accordingly.
+ * fills in the umlctl-managed TAP/fd default ("vector2") and records
+ * whether the user set the driver explicitly.
  */
 impl<'de> serde::Deserialize<'de> for NetworkSection {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>

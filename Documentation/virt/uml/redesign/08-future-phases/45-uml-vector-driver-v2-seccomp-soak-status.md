@@ -3,6 +3,10 @@
 **Status:** stopped-clean long-soak evidence; not replacement approval.
 **Date:** 2026-05-17.
 
+**Current status note:** this file records the May 17 seccomp soak evidence.
+The current vector2 publication gate tracker is
+`49-uml-vector-driver-v2-validation-gates-2026-05-17.md`.
+
 This note records the end-of-day vector2 seccomp Tier 3 soak status.
 The run was intentionally stopped by the operator before the 7200-second
 budget completed.  It is therefore strong long-run evidence, but it is
@@ -137,12 +141,12 @@ should let the 7200-second seccomp/vector2 soak finish naturally, then
 record the same scoreboard, marker, hidden-signature, and cleanup
 checks.
 
-## Current Open Items
+## Open Items At The May 17 Cutoff
 
 Vector2 is still not replacement-ready.  The remaining blockers are:
 
-- KVM-v2 Django/server/socket workload instability, reproduced even
-  without vector2;
+- at this cutoff, KVM-v2 Django/server/socket workload instability,
+  reproduced even without vector2;
 - KVM-v2 + vector2 Tier 3 acceptance after that backend blocker is
   fixed or bounded;
 - a naturally completed 7200-second seccomp/vector2 soak;

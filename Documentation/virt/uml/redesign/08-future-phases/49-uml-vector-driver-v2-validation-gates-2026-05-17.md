@@ -1,14 +1,40 @@
 # UML vector driver v2 — validation-gate roadmap
 
-**Status:** roadmap for the three remaining operator-time gates.
-**Date:** 2026-05-17.
+**Status:** current gate tracker; not replacement approval.
+**Initial date:** 2026-05-17.
+**Last updated:** 2026-06-10 against `next`.
 **Audit ref:** `46-uml-vector-driver-v2-code-audit-2026-05-17.md`
 §P4.3, §P4.4, §P4.5.
 
-The audit's swap-readiness checklist has three remaining gates that
-need wall-clock time + benchmarking on the operator's host fleet,
-not in-tree code work.  This memo defines what each gate needs and
-the acceptance criteria.
+This memo is the current vector2 validation-gate tracker.  It supersedes
+older default-flip status summaries that were tied to short-lived branches.
+The current `next` tree keeps `CONFIG_UML_NET_VECTOR_V2` opt-in, keeps the
+legacy vector driver available, and does not claim vector2 is replacement
+ready.
+
+The runtime transport claim is intentionally narrow: current vector2 netdevs
+support TAP and launcher-owned inherited fd paths.  GRE and L2TPv3 remain
+parser/header-helper coverage only; raw, proxy, VDE, BESS, and hybrid are not
+implemented runtime netdev transports.
+
+## Current `next` status
+
+| Gate | Current status | Remaining work |
+| --- | --- | --- |
+| Kconfig/publication claim | Current and bounded: v2 remains `default n`, legacy vector is not deprecated, and docs avoid saying vector2 supersedes legacy vector. | Do not flip defaults or deprecate legacy until the replacement gates below pass. |
+| Runtime transport scope | TAP and inherited fd are the only current vector2 runtime netdev transports. Parser-only transports fail explicitly from the netdev open path. | New runtime transports need backend code plus live smokes before entering the claim. |
+| Launcher-owned fd handoff | PASS on 2026-06-10 through `vector2-fd-handoff-smoke`. | Keep in CI/preflight. |
+| Pool-member TAP handoff | PASS on 2026-06-10 through `vector2-pool-tap-smoke`. Per-take pool fd handoff is retired from the current completion claim. | Keep validating the TAP reopen path used by pool members. |
+| fd multiqueue smoke | PASS on 2026-06-10 through `vector2-fd-multiqueue-smoke`. | Add fairness and performance acceptance data. |
+| Trusted in-process TAP | PASS on 2026-06-10 through `vector2-inproc-tap-smoke`. | Keep explicit; do not treat it as sandboxed mode. |
+| Sandbox audit | PASS on 2026-06-10 through `vector2-sandbox-audit`. | Keep CI/preflight coverage aligned with launcher-managed configs. |
+| Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
+| Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
+| KVM v2 Tier 3 | Open. June 10 KVM-v2 fixes make this worth rerunning, but focused dynamic-userspace and snapshot gates do not substitute for a KVM-v2/vector2 Tier 3 pass. | Run the same Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
+| Perf/fairness/KCSAN breadth | Partial. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. | Finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
+
+The sections below preserve the original three gate definitions and their
+acceptance bars.
 
 ## P4.3 — performance parity acceptance gate
 
@@ -96,8 +122,9 @@ KCSAN coverage so far:
   - 2-queue/6-flow + paced 8-flow/4-queue PASS.
 
 Missing:
-  - kvm-v2 reruns (blocked on KVM-v2's separate Django/socket
-    workload flake; once fixed, re-run all the KCSAN profiles);
+  - kvm-v2 reruns on the current final vector2 stack; June 10 KVM-v2
+    fixes removed the old reason to defer this, but they do not replace
+    KVM-v2/vector2 Tier 3 evidence;
   - longer fairness profiles (10k iters minimum on each
     queue-count + flow-count combination);
   - additional host/kernel coverage:
