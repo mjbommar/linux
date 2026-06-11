@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 pool RSS experiment calibration.
+Last updated: 2026-06-10 launcher and umlbuild validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -277,6 +277,29 @@ Remaining pool/vector2 boundary:
   current `next` pool takes deliberately carry string identity through the
   identity memfd and use the vector2 TAP reopen path for per-member TAP
   isolation.
+
+## Host Tooling
+
+The active launcher and build tooling is validated on `next` for the core
+developer-facing paths:
+
+- `cargo fmt --check` and `cargo test` pass in `tools/uml/uml-launcher`;
+- `umlctl-smoke` and `launcher-smoke` pass against the current build;
+- `umlctl gate run --dry-run` passes against
+  `tools/testing/selftests/um/gates/launcher-cargo.toml`;
+- `run-bpftrace-validate.sh` attaches all five transparency scripts, with
+  syscalls and sched producing idle UML data; and
+- `run-umlbuild-mvp.sh` passes when `UMLBUILD_SOURCE` points at a clean
+  temporary source worktree and the already-built debug `umlbuild`/`umlctl`
+  binaries are supplied. The selftest now accepts `UMLBUILD_SOURCE`,
+  `UMLBUILD`, and `UMLCTL` overrides so validating `umlbuild` does not require
+  destructive cleanup of a developer tree that contains in-tree kernel build
+  products.
+
+The active deployment path is `umlctl up/down` with Umlfile parsing, not a
+separate `deploy` subcommand. Historical `umlctl-deploy` examples still need a
+final comparison pass so useful configs are either imported or explicitly
+retired.
 
 ## Historical-Only Work
 

@@ -854,10 +854,23 @@ Acceptance gates:
 
 - `cargo fmt --check`
 - `cargo test`
-- launcher smoke
-- deploy smoke
-- gate dry run
-- `umlbuild` MVP smoke
+- launcher smoke. Current status: PASS on 2026-06-10 through
+  `umlctl-smoke` and `launcher-smoke`.
+- deploy smoke. Current status: active Umlfile deployment path is covered by
+  `cargo test` and `umlctl-smoke`; historical `umlctl-deploy` example
+  comparison remains open.
+- gate dry run. Current status: PASS on 2026-06-10 through
+  `umlctl gate run --dry-run` against
+  `tools/testing/selftests/um/gates/launcher-cargo.toml`.
+- transparency smoke. Current status: PASS on 2026-06-10 through
+  `run-bpftrace-validate.sh`; all five bpftrace scripts attached, with
+  syscalls and sched producing idle UML data.
+- `umlbuild` MVP smoke. Current status: PASS on 2026-06-10 through
+  `run-umlbuild-mvp.sh` with `UMLBUILD_SOURCE` pointing at a temporary clean
+  worktree and prebuilt debug `umlbuild`/`umlctl`; direct boot and `umlctl up`
+  both produced the expected guest sha256. The selftest now supports
+  `UMLBUILD_SOURCE`, `UMLBUILD`, and `UMLCTL` overrides so developer trees with
+  in-tree build products do not need destructive cleanup.
 - pool/exec/port-forward smoke
 - snapshot export smoke after Workstream B. Current status: live export PASS
   in the mconsole-backed export update on 2026-06-10.

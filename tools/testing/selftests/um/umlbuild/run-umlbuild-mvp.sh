@@ -16,6 +16,11 @@
 #
 # The host needs: cargo, gcc, make, curl, tar, e2fsprogs >= 1.43,
 # and one of {apk, bubblewrap, unshare}.
+#
+# Optional environment:
+#   UMLBUILD_SOURCE  clean kernel source tree to pass to umlbuild --source
+#   UMLBUILD         prebuilt umlbuild binary
+#   UMLCTL           prebuilt umlctl binary
 
 set -u
 
@@ -23,20 +28,30 @@ WORK=$(mktemp -d -t umlbuild-mvp.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 # Locate the source tree (assume we're invoked from anywhere within it).
-SRC=$(cd "$(dirname "$0")" && cd ../../../../.. && pwd)
+DEFAULT_SRC=$(cd "$(dirname "$0")" && cd ../../../../.. && pwd)
+SRC=${UMLBUILD_SOURCE:-$DEFAULT_SRC}
 if [ ! -f "$SRC/arch/um/Kconfig" ]; then
-    echo "SKIP: cannot locate kernel source root from $0" >&2
+    echo "SKIP: cannot locate kernel source root: $SRC" >&2
     exit 4
 fi
 
-UMLBUILD=$SRC/tools/uml/uml-launcher/target/release/umlbuild
-UMLCTL=$SRC/tools/uml/uml-launcher/target/release/umlctl
-if [ ! -x "$UMLBUILD" ]; then
-    UMLBUILD=$SRC/tools/uml/uml-launcher/target/debug/umlbuild
-    UMLCTL=$SRC/tools/uml/uml-launcher/target/debug/umlctl
+if [ -z "${UMLBUILD:-}" ]; then
+    UMLBUILD=$DEFAULT_SRC/tools/uml/uml-launcher/target/release/umlbuild
+    if [ ! -x "$UMLBUILD" ]; then
+        UMLBUILD=$DEFAULT_SRC/tools/uml/uml-launcher/target/debug/umlbuild
+    fi
+fi
+
+if [ -z "${UMLCTL:-}" ]; then
+    UMLCTL=$DEFAULT_SRC/tools/uml/uml-launcher/target/release/umlctl
+    if [ ! -x "$UMLCTL" ]; then
+        UMLCTL=$DEFAULT_SRC/tools/uml/uml-launcher/target/debug/umlctl
+    fi
 fi
 if [ ! -x "$UMLBUILD" ] || [ ! -x "$UMLCTL" ]; then
-    echo "SKIP: umlbuild/umlctl not built; run \`make -C tools/uml/uml-launcher\`" >&2
+    printf '%s %s\n' \
+        "SKIP: umlbuild/umlctl not built;" \
+        "run \`make -C tools/uml/uml-launcher\` or set UMLBUILD/UMLCTL" >&2
     exit 4
 fi
 
