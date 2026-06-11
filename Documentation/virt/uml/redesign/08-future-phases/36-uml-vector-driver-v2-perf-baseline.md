@@ -284,27 +284,93 @@ UML_PROCESS_ABSENT
 
 Interpretation:
 
-- the guest-to-host vector2 fd multiqueue regression persisted across
-  all measured sizes;
-- the host-to-guest vector2 fd multiqueue path remained much faster
-  than legacy vector TAP across all measured sizes;
+- at the May baseline, the guest-to-host vector2 fd multiqueue regression
+  persisted across all measured sizes;
+- at the May baseline, the host-to-guest vector2 fd multiqueue path remained
+  much faster than legacy vector TAP across all measured sizes;
 - legacy host-to-guest results were especially weak and variable on
   this host;
 - this is still a lightweight TCP smoke, not an accepted performance
   replacement decision.
 
+## 2026-06-11 Current `next` TCP Refresh
+
+After the TX/RX NAPI scheduling fix, the same lightweight fixed-byte harness
+was rerun on current `next` with the in-tree `./linux` binary:
+
+```sh
+rm -rf /tmp/um-vector-perf-current-bidi
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-current-bidi \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_BYTES_LIST=1048576,8388608,33554432 \
+UML_VECTOR_PERF_REPEAT=2 \
+UML_VECTOR_PERF_PORT=19093 \
+  timeout 1800s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Summary:
+
+```text
+summary: /tmp/um-vector-perf-current-bidi/summary.tsv
+```
+
+Best observed host-side throughput:
+
+```text
+direction      bytes     vector_mib_s  vector2_mib_s  ratio
+guest-to-host  1048576   754.867       729.377        0.966
+guest-to-host  8388608   981.650       988.662        1.007
+guest-to-host  33554432  1100.600      1018.140       0.925
+host-to-guest  1048576   1.887         0.912          0.483
+host-to-guest  8388608   1.200         2.403          2.002
+host-to-guest  33554432  4.219         3.802          0.901
+```
+
+The small host-to-guest cell was then rerun with four repeats:
+
+```sh
+rm -rf /tmp/um-vector-perf-h2g-1m-rerun
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g-1m-rerun \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=4 \
+UML_VECTOR_PERF_PORT=19094 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Focused rerun best observed host-side throughput:
+
+```text
+direction      bytes    vector_mib_s  vector2_mib_s  ratio
+host-to-guest  1048576  1.648         0.954          0.579
+```
+
+Interpretation:
+
+- current guest-to-host fixed-byte TCP now clears the 0.85 bar across all
+  three measured sizes;
+- host-to-guest clears the larger 8 MiB and 32 MiB cells in this harness;
+- host-to-guest 1 MiB remains a reproducible small-transfer regression in the
+  fixed-byte harness; and
+- this refresh improves the TCP story, but it does not close P4.3 because UDP,
+  syscall-rate, CPU-utilisation, and the host-to-guest small-transfer issue
+  remain open.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
-guest-to-host run, vector2 fd multiqueue is slower than legacy vector
-TAP.  On the host-to-guest run, vector2 fd multiqueue is much faster
-than legacy vector TAP on this host.  The repeated-size sweep confirms
-that both findings are reproducible enough to treat as measured
-blockers, not one-off noise.
+guest-to-host run, vector2 fd multiqueue was originally slower than legacy
+vector TAP.  The 2026-06-11 TX/RX NAPI scheduling fix removed that broad
+guest-to-host TCP regression in the current fixed-byte refresh.  Host-to-guest
+is now mixed: vector2 is strong at larger sizes in this harness, but the 1 MiB
+cell remains below legacy.
 
 The immediate value is that future vector2 changes now have a simple
 side-by-side `umlctl` command to catch large regressions and to track
-whether fd multiqueue batching work improves throughput.
+whether fd multiqueue batching, NAPI scheduling, and receive-side work improve
+throughput.
 
 ## Remaining Gate
 
@@ -313,6 +379,7 @@ The full replacement performance gate still needs:
 - UDP packet rate;
 - larger repeat counts and more host/kernel samples for the TCP size
   sweep;
+- host-to-guest small-transfer follow-up;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
 - CPU cycles per packet if practical;

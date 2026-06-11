@@ -283,6 +283,12 @@ Current bounded vector2 evidence adds:
   against the 0.85 acceptance bar.  The same slice passed `um_vector2_*` KUnit
   with 87 pass and 2 trusted-TAP skips, plus fd handoff, in-process TAP, and
   fd multiqueue smokes.
+- A current fixed-byte bidirectional TCP refresh with 1 MiB, 8 MiB, and
+  32 MiB transfers confirms the guest-to-host improvement: vector2/legacy
+  best observed host-side ratios were 0.966, 1.007, and 0.925 respectively.
+  Host-to-guest is mixed: 8 MiB and 32 MiB clear at 2.002 and 0.901, but
+  1 MiB remains below legacy at 0.483 in the bidirectional run and 0.579 in a
+  focused four-repeat rerun.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
@@ -310,9 +316,10 @@ Open vector2 publication work:
 - finish a natural 7200-second seccomp/vector2 run;
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
-- extend performance coverage beyond the fixed guest-to-host TCP gate: rerun
-  bidirectional TCP, add UDP, syscall-rate, and CPU-utilisation data, and
-  expand fairness/performance coverage for multiqueue operation;
+- extend performance coverage beyond the fixed guest-to-host TCP gate: follow
+  up the host-to-guest 1 MiB regression, add UDP, syscall-rate, and
+  CPU-utilisation data, and expand fairness/performance coverage for
+  multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
 ## Fork-Server And Pool Work
