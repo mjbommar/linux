@@ -347,13 +347,69 @@ direction      bytes    vector_mib_s  vector2_mib_s  ratio
 host-to-guest  1048576  1.648         0.954          0.579
 ```
 
+Vector2 was also rerun as a single-queue fd configuration to isolate whether
+the 1 MiB gap was caused only by multiqueue overhead:
+
+```sh
+rm -rf /tmp/um-vector-perf-h2g-1m-q1
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g-1m-q1 \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=4 \
+UML_VECTOR_PERF_QUEUES=1 \
+UML_VECTOR_PERF_PORT=19095 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Best observed host-side throughput:
+
+```text
+direction      bytes    vector_mib_s  vector2_q1_mib_s  ratio
+host-to-guest  1048576  1.648         1.093             0.663
+```
+
+The harness now prints `VECTOR_NET_DIAG_BEGIN/END` blocks around each transfer,
+including `ip -d link`, `ip -s link`, route state, `ethtool -k`, and
+`ethtool -S` output when those tools are available.  The diagnostic smoke was
+validated in both directions:
+
+```sh
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-diag-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_QUEUES=1 \
+UML_VECTOR_PERF_PORT=19096 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-diag-g2h-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=guest-to-host \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_QUEUES=1 \
+UML_VECTOR_PERF_PORT=19097 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+The host-to-guest diagnostic smoke recorded `vnet_hdr_enabled: 1` and, after
+the 1 MiB transfer, `napi_polls: 1257`, `rx_irqs: 500`,
+`rx_batch_prepared_total: 31936`, and `rx_batch_received_total: 909` with no
+RX or TX error counters.
+
 Interpretation:
 
 - current guest-to-host fixed-byte TCP now clears the 0.85 bar across all
   three measured sizes;
 - host-to-guest clears the larger 8 MiB and 32 MiB cells in this harness;
 - host-to-guest 1 MiB remains a reproducible small-transfer regression in the
-  fixed-byte harness; and
+  fixed-byte harness, and single-queue vector2 improves but does not close it;
+  and
 - this refresh improves the TCP story, but it does not close P4.3 because UDP,
   syscall-rate, CPU-utilisation, and the host-to-guest small-transfer issue
   remain open.
@@ -380,6 +436,8 @@ The full replacement performance gate still needs:
 - larger repeat counts and more host/kernel samples for the TCP size
   sweep;
 - host-to-guest small-transfer follow-up;
+- use the fixed-byte harness diagnostics to compare RX IRQ, NAPI, and batch
+  counters between legacy and vector2;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
 - CPU cycles per packet if practical;

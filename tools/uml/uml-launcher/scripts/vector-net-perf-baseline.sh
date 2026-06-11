@@ -252,6 +252,18 @@ phase_toml() {
 [[init.phases]]
 name = "guest-to-host"
 cmd = """
+DEV="${UMLCTL_NETDEV:-}"
+echo "VECTOR_NET_DIAG_BEGIN before direction=guest-to-host dev=$DEV"
+ip -d link show "$DEV" || true
+ip -s link show "$DEV" || true
+ip route show || true
+if command -v ethtool >/dev/null 2>&1; then
+    ethtool -k "$DEV" || true
+    ethtool -S "$DEV" || true
+else
+    echo "VECTOR_NET_DIAG ethtool=missing"
+fi
+echo "VECTOR_NET_DIAG_END before direction=guest-to-host dev=$DEV"
 python3 - "$UMLCTL_GATEWAY" "$UML_VECTOR_PERF_PORT" "$UML_VECTOR_PERF_BYTES" <<'PY'
 import os
 import socket
@@ -280,8 +292,20 @@ print(
     f"queues={os.environ.get('UMLCTL_NETWORK_QUEUES', '')} "
     f"bytes={sent} seconds={elapsed:.6f} mib_s={mib_s:.3f}"
 )
-print("VECTOR_NET_PERF_OK")
 PY
+rc=$?
+echo "VECTOR_NET_DIAG_BEGIN after direction=guest-to-host dev=$DEV"
+ip -s link show "$DEV" || true
+if command -v ethtool >/dev/null 2>&1; then
+    ethtool -S "$DEV" || true
+else
+    echo "VECTOR_NET_DIAG ethtool=missing"
+fi
+echo "VECTOR_NET_DIAG_END after direction=guest-to-host dev=$DEV"
+if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+fi
+echo "VECTOR_NET_PERF_OK"
 """
 expect = "VECTOR_NET_PERF_OK"
 timeout_secs = 120
@@ -292,6 +316,18 @@ EOF
 [[init.phases]]
 name = "host-to-guest"
 cmd = """
+DEV="${UMLCTL_NETDEV:-}"
+echo "VECTOR_NET_DIAG_BEGIN before direction=host-to-guest dev=$DEV"
+ip -d link show "$DEV" || true
+ip -s link show "$DEV" || true
+ip route show || true
+if command -v ethtool >/dev/null 2>&1; then
+    ethtool -k "$DEV" || true
+    ethtool -S "$DEV" || true
+else
+    echo "VECTOR_NET_DIAG ethtool=missing"
+fi
+echo "VECTOR_NET_DIAG_END before direction=host-to-guest dev=$DEV"
 python3 - "$UML_VECTOR_PERF_PORT" "$UML_VECTOR_PERF_BYTES" <<'PY'
 import os
 import socket
@@ -327,8 +363,20 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         )
         if received != expected:
             sys.exit(3)
-print("VECTOR_NET_PERF_OK")
 PY
+rc=$?
+echo "VECTOR_NET_DIAG_BEGIN after direction=host-to-guest dev=$DEV"
+ip -s link show "$DEV" || true
+if command -v ethtool >/dev/null 2>&1; then
+    ethtool -S "$DEV" || true
+else
+    echo "VECTOR_NET_DIAG ethtool=missing"
+fi
+echo "VECTOR_NET_DIAG_END after direction=host-to-guest dev=$DEV"
+if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+fi
+echo "VECTOR_NET_PERF_OK"
 """
 expect = "VECTOR_NET_PERF_OK"
 timeout_secs = 120

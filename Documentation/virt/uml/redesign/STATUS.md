@@ -288,7 +288,9 @@ Current bounded vector2 evidence adds:
   best observed host-side ratios were 0.966, 1.007, and 0.925 respectively.
   Host-to-guest is mixed: 8 MiB and 32 MiB clear at 2.002 and 0.901, but
   1 MiB remains below legacy at 0.483 in the bidirectional run and 0.579 in a
-  focused four-repeat rerun.
+  focused four-repeat rerun.  A single-queue vector2 rerun improved that cell
+  to 0.663 but did not close it, and the fixed-byte harness now records
+  before/after `ip` and `ethtool` diagnostics for each transfer.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
