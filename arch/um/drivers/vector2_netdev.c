@@ -349,7 +349,7 @@ static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
 	}
 	spin_unlock(&queue->rx_lock);
 
-	if (rx_done >= budget)
+	if (rx_done > 0)
 		WRITE_ONCE(channel->rx_pending, true);
 	return rx_done;
 }
@@ -357,10 +357,14 @@ static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
 static int um_vec2_poll_finish(struct napi_struct *napi, int budget,
 			       int rx_done, int tx_done, bool tx_more)
 {
+	/*
+	 * A productive RX pass gets one adjacent poll to catch burst follow-up
+	 * traffic before falling back to another host fd interrupt.
+	 */
+	if (rx_done > 0 || (tx_more && tx_done > 0))
+		napi_schedule(napi);
 	if (rx_done < budget)
 		napi_complete_done(napi, rx_done);
-	if (tx_more && tx_done > 0)
-		napi_schedule(napi);
 	return rx_done;
 }
 

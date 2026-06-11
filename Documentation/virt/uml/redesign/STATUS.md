@@ -357,6 +357,16 @@ Current bounded vector2 evidence adds:
   overhead in vector2: median UML process scheduler pcount was 26547.5 for
   vector2 versus 2213.0 for legacy vector, and median voluntary context
   switches were 26505.5 versus 2186.5.
+- A follow-up RX repoll slice now leaves RX pending after any productive
+  vector2 RX poll and asks NAPI for one adjacent pass, matching the legacy
+  vector burst-drain policy more closely.  Validation reports a clean UML
+  rebuild, `um_vector2_netdev` KUnit 16/16 PASS, and `um_vector2_*` KUnit
+  91 pass with 2 trusted-TAP skips.  On the same local 1 MiB host-to-guest
+  diagnostic shape, median vector2 NAPI polls dropped from about 1250 to 707
+  and median vector2 RX IRQs from about 504.5 to 220.5 for about the same
+  received-packet count.  This reduces interrupt/poll churn but does not close
+  the throughput gate: the rerun's host-side medians were legacy vector
+  1.6215 MiB/s and vector2 0.8850 MiB/s, ratio 0.5458.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now

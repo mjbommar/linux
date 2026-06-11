@@ -381,9 +381,10 @@ static int vector2_netdev_poll_invoke(struct vector2_netdev_poll_ctx *ctx,
 	set_bit(NAPI_STATE_SCHED, &napi->state);
 	ret = napi->poll(napi, budget);
 	/*
-	 * napi_complete_done() inside the poll cleared SCHED on the normal
-	 * exit.  For the tx_more / backend_dead paths it may still be set;
-	 * the per-test assertions handle both.
+	 * napi_complete_done() inside the poll clears SCHED when the poll
+	 * completes without requesting an immediate follow-up pass.  Productive
+	 * RX, tx_more, and backend-dead paths may leave it set; the per-test
+	 * assertions handle each case.
 	 */
 	return ret;
 }
@@ -423,6 +424,52 @@ static void vector2_netdev_poll_healthy_round_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			um_vec2_stat_read(ctx->vdev,
 					  UM_VEC2_STAT_BACKEND_DEAD), 0ULL);
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(channel->rx_pending));
+	KUNIT_EXPECT_TRUE(test, test_bit(NAPI_STATE_SCHED,
+					 &channel->napi.state));
+
+	rx_done = vector2_netdev_poll_invoke(ctx, 4);
+
+	KUNIT_EXPECT_EQ(test, rx_done, 0);
+	KUNIT_EXPECT_FALSE(test, READ_ONCE(channel->rx_pending));
+	KUNIT_EXPECT_FALSE(test, test_bit(NAPI_STATE_SCHED,
+					  &channel->napi.state));
+
+	vector2_netdev_poll_ctx_close(ctx);
+}
+
+static void vector2_netdev_poll_rx_progress_repolls_test(struct kunit *test)
+{
+	struct vector2_netdev_poll_ctx *ctx =
+		vector2_netdev_poll_ctx_open(test, 38);
+	struct um_vec2_channel *channel = vector2_netdev_poll_channel(ctx);
+	int rx_done;
+
+	um_vec2_fake_host_set_rx_limit(&ctx->fake, 1);
+	KUNIT_ASSERT_EQ(test, um_vec2_fake_host_push_rx(&ctx->fake, 64), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_fake_host_push_rx(&ctx->fake, 64), 0);
+	WRITE_ONCE(channel->rx_pending, true);
+
+	rx_done = vector2_netdev_poll_invoke(ctx, 4);
+
+	KUNIT_EXPECT_EQ(test, rx_done, 1);
+	KUNIT_EXPECT_EQ(test, ctx->fake.rx_count, 1U);
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(channel->rx_pending));
+	KUNIT_EXPECT_TRUE(test, test_bit(NAPI_STATE_SCHED,
+					 &channel->napi.state));
+
+	rx_done = vector2_netdev_poll_invoke(ctx, 4);
+
+	KUNIT_EXPECT_EQ(test, rx_done, 1);
+	KUNIT_EXPECT_EQ(test, ctx->fake.rx_count, 0U);
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(channel->rx_pending));
+	KUNIT_EXPECT_TRUE(test, test_bit(NAPI_STATE_SCHED,
+					 &channel->napi.state));
+
+	rx_done = vector2_netdev_poll_invoke(ctx, 4);
+
+	KUNIT_EXPECT_EQ(test, rx_done, 0);
+	KUNIT_EXPECT_FALSE(test, READ_ONCE(channel->rx_pending));
 	KUNIT_EXPECT_FALSE(test, test_bit(NAPI_STATE_SCHED,
 					  &channel->napi.state));
 
@@ -593,6 +640,7 @@ static struct kunit_case vector2_netdev_test_cases[] = {
 	KUNIT_CASE(vector2_netdev_rx_frame_len_follows_channel_test),
 	KUNIT_CASE(vector2_netdev_queue_cpu_policy_test),
 	KUNIT_CASE(vector2_netdev_poll_healthy_round_test),
+	KUNIT_CASE(vector2_netdev_poll_rx_progress_repolls_test),
 	KUNIT_CASE(vector2_netdev_poll_backend_dead_tx_test),
 	KUNIT_CASE(vector2_netdev_poll_backend_dead_rx_test),
 	KUNIT_CASE(vector2_netdev_poll_tx_more_reschedules_test),

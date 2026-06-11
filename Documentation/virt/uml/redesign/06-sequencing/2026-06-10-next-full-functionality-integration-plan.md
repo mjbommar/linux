@@ -118,8 +118,9 @@ The active blockers are now:
    multiqueue/fairness, Tier 3 seccomp, KVM v2 coverage, and full CPU/syscall
    publication evidence. The fixed-byte helper now appends per-process
    endpoint CPU timing and host-to-guest UML process metric deltas for focused
-   diagnostics, but the stronger CPU-utilisation and syscall-rate gate remains
-   open.
+   diagnostics, and the RX repoll follow-up reduces vector2 interrupt/poll
+   churn on the 1 MiB host-to-guest cell, but small-transfer throughput and
+   the stronger CPU-utilisation/syscall-rate gates remain open.
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
@@ -897,7 +898,13 @@ Acceptance gates:
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch
-  deltas.
+  deltas. A follow-up RX repoll slice brings vector2 closer to legacy
+  vector's burst-drain policy by keeping RX pending after productive NAPI
+  polls. It reduces vector2 median NAPI polls from about 1250 to 707 and
+  median RX IRQs from about 504.5 to 220.5 on the same local diagnostic
+  shape, but it does not close the throughput gate: the rerun's host-side
+  medians are legacy vector 1.6215 MiB/s and vector2 0.8850 MiB/s, ratio
+  0.5458.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
