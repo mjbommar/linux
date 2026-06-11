@@ -64,6 +64,10 @@ static void save_addr(void *data, unsigned long address, int reliable)
 
 	if (!reliable)
 		return;
+	if (trace->skip) {
+		trace->skip--;
+		return;
+	}
 	if (trace->nr_entries >= trace->max_entries)
 		return;
 

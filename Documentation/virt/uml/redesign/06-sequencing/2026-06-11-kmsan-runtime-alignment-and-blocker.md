@@ -144,6 +144,99 @@ KMSAN is not complete yet. The runtime smoke still fails before it can print the
 `KMSAN_SMOKE` marker, so the KMSAN row in the live inventory remains an open
 runtime-fix item.
 
+## Current-Head Refresh And Stacktrace Cleanup
+
+After the branch reached `df02aa4dd19b`, the KMSAN profile was rebuilt from a
+detached clean worktree:
+
+```bash
+git worktree add --detach "$src" HEAD
+make -C "$src" ARCH=um LLVM=1 O="$out" uml/research-kmsan
+make -C "$src" ARCH=um LLVM=1 O="$out" -j"$(nproc)" linux
+```
+
+The rebuilt KMSAN binary reported:
+
+```text
+7.1.0-rc7-00191-gdf02aa4dd19b
+```
+
+The stock wrapper still failed before the result marker:
+
+```bash
+UML_BINARY="$out/linux" UML_MEM=2048M \
+	tools/testing/selftests/um/kmsan-smoke/run-kmsan-smoke.sh \
+	> /tmp/uml-kmsan-current-wrapper-df02.out 2>&1
+```
+
+Result:
+
+```text
+wrapper_rc=1
+FAIL: no KMSAN_SMOKE PASS/FAIL/SKIP line in output
+BUG: KMSAN: uninit-value in save_stack_trace+0x51/0x80
+```
+
+A bounded earlyprintk run on that exact binary confirmed the previous vmalloc
+metadata failure remained absent:
+
+```text
+early_rc=124
+3426512 lines
+100892930 bytes
+Starting KernelMemorySanitizer
+VFS: Finished mounting rootfs on nullfs
+```
+
+There was no `vmalloc error` and no `__vmap_pages_range_noflush()` warning.
+The large log volume came from a repeated KMSAN report stream.
+
+That refresh exposed a separate UML stacktrace attribution bug. The
+non-`CONFIG_ARCH_STACKWALK` generic `stack_trace_save()` path passes a
+`skip` count through `struct stack_trace`, and other legacy arch stacktrace
+implementations consume that field before recording entries. UML's
+`save_addr()` callback did not, so KMSAN reports were headed by
+`save_stack_trace` rather than the real instrumented site.
+
+The landed stacktrace cleanup makes UML consume `trace->skip` before appending
+an address. Validation:
+
+```bash
+make ARCH=um -j"$(nproc)" linux
+```
+
+The same clean KMSAN worktree with only that stacktrace skip fix rebuilt
+successfully and changed the first visible report to the actual KMSAN site:
+
+```text
+BUG: KMSAN: uninit-value in sized_strscpy+0xe2/0x230
+ sized_strscpy+0xe2/0x230
+ copy_process+0x1388/0x74d0
+ kernel_clone+0x407/0x10b0
+ kernel_thread+0x1f1/0x220
+ kthreadd+0x424/0x910
+ new_thread_handler+0x137/0x240
+
+Uninit was created at:
+ stack_trace_save+0xd0/0x110
+ kmsan_internal_poison_memory+0x4a/0xa0
+ kmsan_slab_alloc+0xd2/0x230
+ __kmalloc_node_track_caller_noprof+0x511/0x11b0
+ kvasprintf+0xf8/0x360
+ __kthread_create_on_node+0x1eb/0x720
+ kthread_create_worker_on_node+0x302/0x680
+ wq_cpu_intensive_thresh_init+0x4c/0x3e4
+ workqueue_init+0x2d/0x725
+ kernel_init_freeable+0x110/0x3ee
+ kernel_init+0x3f/0x5f0
+ new_thread_handler+0x137/0x240
+```
+
+The stacktrace fix is therefore a real diagnostic correctness cleanup, not a
+KMSAN runtime closure. With attribution fixed, the remaining blocker is still
+the kthread-name allocation path followed by task, scheduler, credential, and
+string-formatting reports. The smoke still fails before `KMSAN_SMOKE`.
+
 ## Follow-Up Investigation
 
 After the alignment-only fix landed, a second disposable worktree explored the
@@ -206,18 +299,23 @@ These are investigation leads, not accepted code.
 
 ## Next Steps
 
-1. Inspect UML's KMSAN task and stack initialization contract, especially the
+1. Use the fixed stacktrace attribution for future KMSAN runs; reports headed
+   by `sized_strscpy`, `prepare_creds`, scheduler setup, or `string` are now
+   the meaningful sites.
+2. Inspect UML's KMSAN task and stack initialization contract, especially the
    interaction between `kmsan_task_create()`, `THREAD_INFO_IN_TASK`,
    `task_stack_page()`, and `new_thread_handler()`.
-2. Reproduce the `init_rescuer()` `id_buf` report without generic
+3. Determine why the `kvasprintf()` result for early kthread names remains
+   poisoned after the instrumented `vsnprintf()` write path.
+4. Reproduce the `init_rescuer()` `id_buf` report without generic
    `kvasprintf()` or `cred` annotations and determine why stores through the
    instrumented `scnprintf()` / `vsnprintf()` path do not leave the stack bytes
    initialized.
-3. Decide whether UML needs an arch-local KMSAN hook around new task stack
+5. Decide whether UML needs an arch-local KMSAN hook around new task stack
    setup, context switching, or dynamic `task_struct` copying.
-4. Re-test after the first report is closed and continue through the follow-on
+6. Re-test after the first report is closed and continue through the follow-on
    scheduler and credential reports.
-5. Require `kmsan-smoke` to reach a `KMSAN_SMOKE` result marker before changing
+7. Require `kmsan-smoke` to reach a `KMSAN_SMOKE` result marker before changing
    the inventory status from `Present-needs-runtime-fix`.
-6. Keep any generic KMSAN changes separate from the UML-local vmalloc alignment
+8. Keep any generic KMSAN changes separate from the UML-local vmalloc alignment
    fix unless the evidence proves they are independently correct upstream.

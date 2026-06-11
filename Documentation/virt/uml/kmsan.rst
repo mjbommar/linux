@@ -149,10 +149,10 @@ page-aligned vmalloc metadata layout gets past the previous early
 ``vmalloc error`` / ``__vmap_pages_range_noflush()`` failure. Runtime
 closure remains open because the smoke guest still reports KMSAN findings
 before it can emit the ``KMSAN_SMOKE`` result marker. The first observed
-path is currently a kthread-name allocation from ``kvasprintf()`` flowing
-into ``copy_process()``, followed by additional scheduler and credential
-paths. Those reports are being tracked as runtime KMSAN initialization
-work rather than as a vmalloc-layout failure.
+path is currently ``sized_strscpy()`` copying a kthread name allocated by
+``kvasprintf()``, followed by additional scheduler, credential, and string
+formatting paths. Those reports are being tracked as runtime KMSAN
+initialization work rather than as a vmalloc-layout failure.
 
 Further reading
 ===============
