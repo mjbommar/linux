@@ -9,8 +9,8 @@
 # entries. The final legs boot static helpers that start recording from the
 # same task that runs the scalar workload, replay the task-owned log, and
 # verify strict replay installs the replay signal policy, replays raw-time
-# payloads, and kills mismatched, RDTSC/RDTSCP, and unsupported live events
-# instead of falling back.
+# payloads, and kills mismatched, RDTSC/RDTSCP, randomness, and external-I/O
+# live events instead of falling back.
 
 set -u
 
@@ -20,6 +20,7 @@ MEM=${UML_MEM:-256M}
 GUEST_SCRIPT="$DIR/kvm-record-smoke.sh"
 TASK_HELPER=${KVM_RECORD_TASK_HELPER:-$DIR/kvm-record-task}
 NEGATIVE_HELPER=${KVM_RECORD_NEGATIVE_HELPER:-$DIR/kvm-record-negative}
+NEGATIVE_OPENAT_HELPER=${KVM_RECORD_NEGATIVE_OPENAT_HELPER:-$DIR/kvm-record-negative-openat}
 MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
 TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
 RDTSC_HELPER=${KVM_RECORD_RDTSC_HELPER:-$DIR/kvm-record-rdtsc}
@@ -40,6 +41,10 @@ if [ ! -x "$TASK_HELPER" ]; then
 fi
 if [ ! -x "$NEGATIVE_HELPER" ]; then
 	echo "SKIP: $NEGATIVE_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$NEGATIVE_OPENAT_HELPER" ]; then
+	echo "SKIP: $NEGATIVE_OPENAT_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -x "$MISMATCH_HELPER" ]; then
@@ -447,61 +452,70 @@ case "$RDTSCP_LINE" in
 	;;
 esac
 
-if ! ensure_kvm_readable; then
-	echo "SKIP: /dev/kvm not readable before negative smoke" >&2
-	exit 4
-fi
+run_negative_helper() {
+	local helper=$1
+	local tag=$2
+	local out line nr
 
-NEGATIVE_OUT=$(timeout --kill-after=10 45 "$BINARY" \
-	backend=force=kvm-v2 \
-	init="$NEGATIVE_HELPER" mem="$MEM" \
-	con=null con0=fd:0,fd:1 \
-	root=/dev/root rootfstype=hostfs rw \
-	panic=-1 </dev/null 2>&1 || true)
+	if ! ensure_kvm_readable; then
+		echo "SKIP: /dev/kvm not readable before $tag smoke" >&2
+		exit 4
+	fi
 
-NEGATIVE_LINE=$(echo "$NEGATIVE_OUT" | grep '^KVM_RECORD_NEGATIVE:' | head -1)
-if [ -z "$NEGATIVE_LINE" ]; then
-	echo "KVM_RECORD_SMOKE: FAIL (no negative smoke result line)"
-	echo "$NEGATIVE_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
+	out=$(timeout --kill-after=10 45 "$BINARY" \
+		backend=force=kvm-v2 \
+		init="$helper" mem="$MEM" \
+		con=null con0=fd:0,fd:1 \
+		root=/dev/root rootfstype=hostfs rw \
+		panic=-1 </dev/null 2>&1 || true)
 
-echo "$NEGATIVE_LINE"
-case "$NEGATIVE_LINE" in
-*armed\ syscall=*) ;;
-*)
-	echo "KVM_RECORD_SMOKE: FAIL (negative helper did not arm)"
-	echo "$NEGATIVE_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
-		tail -80
-	exit 1
-	;;
-esac
+	line=$(echo "$out" | grep '^KVM_RECORD_NEGATIVE:' | head -1)
+	if [ -z "$line" ]; then
+		echo "KVM_RECORD_SMOKE: FAIL (no $tag result line)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
 
-NEGATIVE_NR=$(echo "$NEGATIVE_LINE" |
-	sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
-if [ -z "$NEGATIVE_NR" ] ||
-   ! echo "$NEGATIVE_OUT" |
-	grep -q "kvm-v2 record: strict replay unsupported nr=$NEGATIVE_NR"; then
-	echo "KVM_RECORD_SMOKE: FAIL (negative strict rejection missing)"
-	echo "$NEGATIVE_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
-if echo "$NEGATIVE_OUT" | grep -q 'KVM_RECORD_NEGATIVE: FAIL'; then
-	echo "KVM_RECORD_SMOKE: FAIL (negative helper returned from unsupported syscall)"
-	echo "$NEGATIVE_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
+	echo "$line"
+	case "$line" in
+	*armed\ syscall=*) ;;
+	*)
+		echo "KVM_RECORD_SMOKE: FAIL ($tag helper did not arm)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
+			tail -80
+		exit 1
+		;;
+	esac
+
+	nr=$(echo "$line" |
+		sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
+	if [ -z "$nr" ] ||
+	   ! echo "$out" |
+		grep -q "kvm-v2 record: strict replay unsupported nr=$nr"; then
+		echo "KVM_RECORD_SMOKE: FAIL ($tag strict rejection missing)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
+	if echo "$out" | grep -q 'KVM_RECORD_NEGATIVE: FAIL'; then
+		echo "KVM_RECORD_SMOKE: FAIL ($tag helper returned from unsupported syscall)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_NEGATIVE|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
+}
+
+run_negative_helper "$NEGATIVE_HELPER" "negative"
+run_negative_helper "$NEGATIVE_OPENAT_HELPER" "external-I/O negative"
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
 SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
 SUMMARY="$SUMMARY $SIGNAL_SUMMARY live-time=1 live-rdtsc=1"
-SUMMARY="$SUMMARY $RDTSCP_SUMMARY live-negative=1)"
+SUMMARY="$SUMMARY $RDTSCP_SUMMARY live-negative=1 live-external-io=1)"
 echo "$SUMMARY"
 exit 0

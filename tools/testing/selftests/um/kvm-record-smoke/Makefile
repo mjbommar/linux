@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0
 TEST_PROGS := run-kvm-record-smoke.sh
 TEST_FILES := kvm-record-smoke.sh
-TEST_GEN_FILES := kvm-record-task kvm-record-negative kvm-record-mismatch \
-	kvm-record-time kvm-record-rdtsc kvm-record-rdtscp \
-	kvm-record-signal
-EXTRA_CLEAN := kvm-record-task kvm-record-negative kvm-record-mismatch \
-	kvm-record-time kvm-record-rdtsc kvm-record-rdtscp \
-	kvm-record-signal
+TEST_GEN_FILES := kvm-record-task kvm-record-negative \
+	kvm-record-negative-openat kvm-record-mismatch kvm-record-time \
+	kvm-record-rdtsc kvm-record-rdtscp kvm-record-signal
+EXTRA_CLEAN := kvm-record-task kvm-record-negative \
+	kvm-record-negative-openat kvm-record-mismatch kvm-record-time \
+	kvm-record-rdtsc kvm-record-rdtscp kvm-record-signal
 
 include ../../lib.mk
 
@@ -15,6 +15,9 @@ $(OUTPUT)/kvm-record-task: kvm-record-task.c
 
 $(OUTPUT)/kvm-record-negative: kvm-record-negative.c
 	$(CC) -Wall -Wextra -O2 -static -o $@ $<
+
+$(OUTPUT)/kvm-record-negative-openat: kvm-record-negative.c
+	$(CC) -Wall -Wextra -O2 -static -DKVM_RECORD_NEGATIVE_OPENAT -o $@ $<
 
 $(OUTPUT)/kvm-record-mismatch: kvm-record-mismatch.c
 	$(CC) -Wall -Wextra -O2 -static -o $@ $<

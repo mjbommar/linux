@@ -160,8 +160,9 @@ The smoke gate currently validates:
 * CR4.TSD fault behavior for direct user ``RDTSC``/``RDTSCP`` under replay;
 * tracepoint-visible KVM signal-mask policy that blocks ``SIGALRM`` during
   replay ``KVM_RUN`` and restores the normal mask afterward;
-* strict fail-closed behavior for an unsupported ``getrandom(2)`` syscall.
+* strict fail-closed behavior for unsupported ``getrandom(2)`` and
+  ``openat(2)`` syscalls.
 
 The expected summary line is::
 
-  KVM_RECORD_SMOKE: PASS (KUnit=24/24 live-debugfs=1 task-owned=1 live-mismatch=1 live-signal=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1)
+  KVM_RECORD_SMOKE: PASS (KUnit=24/24 live-debugfs=1 task-owned=1 live-mismatch=1 live-signal=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1 live-external-io=1)

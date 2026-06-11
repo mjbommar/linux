@@ -21,7 +21,13 @@
 
 #define CTL_PATH	"/sys/kernel/debug/um/kvm_v2_record_ctl"
 
-#ifndef SYS_getrandom
+#ifdef KVM_RECORD_NEGATIVE_OPENAT
+#ifndef SYS_openat
+#define SYS_openat		257
+#endif
+#define KVM_RECORD_NEGATIVE_SYSCALL	SYS_openat
+#define KVM_RECORD_NEGATIVE_NAME	"openat"
+#elif !defined(SYS_getrandom)
 #define KVM_RECORD_NEGATIVE_SYSCALL	SYS_getuid
 #define KVM_RECORD_NEGATIVE_NAME	"getuid"
 #else
@@ -77,7 +83,10 @@ static int write_ctl(const char *cmd)
 
 static long trigger_unsupported_syscall(void)
 {
-#ifdef SYS_getrandom
+#ifdef KVM_RECORD_NEGATIVE_OPENAT
+	return syscall(KVM_RECORD_NEGATIVE_SYSCALL, AT_FDCWD, "/dev/null",
+		       O_RDONLY | O_CLOEXEC);
+#elif defined(SYS_getrandom)
 	char byte;
 
 	return syscall(KVM_RECORD_NEGATIVE_SYSCALL, &byte, sizeof(byte), 0);

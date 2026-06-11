@@ -683,6 +683,10 @@ Current `next` checkpoint:
   recording, task-owned 386-entry deterministic replay, live supported-syscall
   mismatch rejection through `getcwd(2)`, and live unsupported-syscall
   rejection through `getrandom(2)`.
+- Validation on 2026-06-11 after the live external-I/O strict negative smoke:
+  `kvm-record-smoke` PASS includes `live-external-io=1`, proving replay-mode
+  `openat(2)` fails closed as an unsupported syscall instead of falling back
+  to hostfs/device I/O outside the record log.
 - Validation on 2026-06-11 after the public determinism-tier documentation:
   `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
   experimental task-owned replay tier, replayable syscall subset, strict
@@ -712,7 +716,9 @@ Current `next` checkpoint:
 - Still open: raw-time coverage beyond direct syscall and current UML vDSO
   wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)`, replayable
   asynchronous signal-event ordering, broader deterministic workload coverage,
-  and replayable device/network/hostfs event policy.
+  and replayable device/network/hostfs event policy. External-I/O fail-closed
+  policy now has live `openat(2)` evidence, but replayable external events are
+  not implemented.
 
 Acceptance gates:
 

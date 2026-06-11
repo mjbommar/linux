@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -203,11 +203,13 @@ The strongest current KVM v2 evidence is:
   the snapshot-backed log. This closes the first bounded session-start,
   payload-model, and bounded deterministic workload replay gates for the
   selected syscall subset.
-- Experimental strict negative smoke: the static `kvm-record-negative` helper
-  arms strict replay with an empty log and issues `getrandom(2)` as the first
-  replay-mode syscall. The host runner treats the expected init-killing
-  SIGSEGV as PASS only when the kernel logs the strict unsupported-syscall
-  rejection (`nr=318` on the validated x86_64 run).
+- Experimental strict negative smokes: the static `kvm-record-negative`
+  helper arms strict replay with an empty log and issues `getrandom(2)` as the
+  first replay-mode syscall. The sibling `kvm-record-negative-openat` helper
+  uses the same strict replay setup and issues `openat(2)` against `/dev/null`.
+  The host runner treats the expected init-killing SIGSEGV as PASS only when
+  the kernel logs the strict unsupported-syscall rejection (`nr=318` for
+  `getrandom` and `nr=257` for `openat` on the validated x86_64 run).
 - Experimental strict mismatch smoke: the static `kvm-record-mismatch` helper
   records one payload-aware `getcwd(2)` entry with a 256-byte buffer, arms
   replay, then issues `getcwd(2)` with a 64-byte buffer. The host runner treats
@@ -760,7 +762,8 @@ mode blocks `SIGALRM` at the KVM vCPU signal mask while inside `KVM_RUN`, so
 timer delivery is deferred to the post-exit UML signal path rather than
 becoming an unrecorded in-guest
 interruption point. Randomness and external I/O syscalls outside the supported
-subset are also fail-closed in strict replay. The task-owned smoke now proves
+subset are also fail-closed in strict replay; the live smoke now proves both
+`getrandom(2)` and `openat(2)` rejection. The task-owned smoke now proves
 deterministic replay for the bounded 386-entry scalar plus
 `uname(2)`/`getcwd(2)` payload workload, and the mismatch smoke proves that a
 supported `getcwd(2)` replay entry with different payload-size arguments kills
