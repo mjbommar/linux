@@ -202,9 +202,10 @@ run_one research \
 	|| any_fail=1
 
 # research-kmsan: research-like debug and tracing, with KMSAN instead of KASAN.
+# KMSAN has no debugfs directory; kmsan-smoke checks its runtime banner.
 run_one research-kmsan \
 	debugfs_um=PRESENT \
-	debugfs_kmsan=PRESENT \
+	debugfs_kmsan=ABSENT \
 	debugfs_kcov=ABSENT \
 	tracefs=PRESENT \
 	tracefs_syscalls=PRESENT \

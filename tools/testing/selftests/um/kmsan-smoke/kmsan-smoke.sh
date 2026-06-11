@@ -5,17 +5,16 @@
 #
 # Validates two load-bearing KMSAN invariants:
 #
-#   1. CONFIG_KMSAN=y: the /sys/kernel/debug/kmsan/ directory
-#      exists once debugfs is mounted. This is registered by
-#      mm/kmsan/ when the feature is on; its absence means
-#      Kconfig silently fell back to KMSAN=n.
+#   1. CONFIG_KMSAN=y: the KMSAN runtime prints its boot banner
+#      in dmesg. Its absence means Kconfig silently fell back to
+#      KMSAN=n or the supplied image is not the KMSAN image.
 #
 #   2. Runtime detector: read 4 bytes of uninitialized stack
 #      memory. KMSAN prints "BUG: KMSAN: uninit-value" to
 #      dmesg via kmsan_emit_bug_report(). Grep for it.
 #
 # Emits exactly one terminal line:
-#   KMSAN_SMOKE: PASS debugfs=<y|n> reproducer=<y|n>
+#   KMSAN_SMOKE: PASS runtime=<y|n> reproducer=<y|n>
 #   KMSAN_SMOKE: FAIL <reason>
 #   KMSAN_SMOKE: SKIP <reason>
 
@@ -26,11 +25,6 @@ echo "KMSAN_SMOKE: init running"
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
 mount -t debugfs none /sys/kernel/debug 2>/dev/null
-
-debugfs_ok=n
-if [ -d /sys/kernel/debug/kmsan ]; then
-	debugfs_ok=y
-fi
 
 # The reproducer: ask printk (via /dev/kmsg) to emit a
 # message whose content depends on stack memory we haven't
@@ -56,28 +50,33 @@ sleep 1  # let late_initcall autorun kmsan_test kunit if any
 
 dmesg_out=$(dmesg 2>/dev/null || cat /dev/kmsg 2>/dev/null | head -200)
 
+runtime_ok=n
+if echo "$dmesg_out" | grep -q "Starting KernelMemorySanitizer"; then
+	runtime_ok=y
+fi
+
 reproducer_ok=n
 if echo "$dmesg_out" | grep -q "BUG: KMSAN:"; then
 	reproducer_ok=y
 fi
 
-if [ "$debugfs_ok" = "y" ] && [ "$reproducer_ok" = "y" ]; then
-	echo "KMSAN_SMOKE: PASS debugfs=y reproducer=y"
+if [ "$runtime_ok" = "y" ] && [ "$reproducer_ok" = "y" ]; then
+	echo "KMSAN_SMOKE: PASS runtime=y reproducer=y"
 	halt -f 2>/dev/null
 	exit 0
 fi
 
-# Accept "debugfs present but no report seen" as PASS when
+# Accept "runtime present but no report seen" as PASS when
 # CONFIG_KMSAN_KUNIT_TEST wasn't compiled in; the infra is
 # alive, just no planted trigger. This matches the research
 # profile's current defconfig (KUnit is on but the KMSAN
 # test is separate and memory-hungry).
-if [ "$debugfs_ok" = "y" ]; then
-	echo "KMSAN_SMOKE: PASS debugfs=y reproducer=n"
+if [ "$runtime_ok" = "y" ]; then
+	echo "KMSAN_SMOKE: PASS runtime=y reproducer=n"
 	halt -f 2>/dev/null
 	exit 0
 fi
 
-echo "KMSAN_SMOKE: FAIL debugfs=$debugfs_ok reproducer=$reproducer_ok"
+echo "KMSAN_SMOKE: FAIL runtime=$runtime_ok reproducer=$reproducer_ok"
 halt -f 2>/dev/null
 exit 1

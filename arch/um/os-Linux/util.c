@@ -217,6 +217,7 @@ void os_info(const char *fmt, ...)
 		return;
 
 	va_start(list, fmt);
+	um_kmsan_clear_context_state();
 	len = vscnprintf(buf, sizeof(buf), fmt, list);
 	fwrite(buf, len, 1, stderr);
 	va_end(list);
@@ -229,6 +230,7 @@ void os_warn(const char *fmt, ...)
 	int len;
 
 	va_start(list, fmt);
+	um_kmsan_clear_context_state();
 	len = vscnprintf(buf, sizeof(buf), fmt, list);
 	fwrite(buf, len, 1, stderr);
 	va_end(list);

@@ -10,10 +10,10 @@ Under ``CONFIG_KMSAN=y``, the VMALLOC range is split into
 four equal quarters: new vmalloc, vmalloc shadow, vmalloc
 origin, and modules shadow+origin.
 
-The port exposes the standard Linux uninitialized-memory
-detector surface — ``/sys/kernel/debug/kmsan/``, clang
-``-fsanitize=kernel-memory`` instrumentation, the
-``BUG: KMSAN: uninit-value`` report style — to UML guests.
+The port exposes the standard Linux uninitialized-memory detector surface:
+clang ``-fsanitize=kernel-memory`` instrumentation, the
+``Starting KernelMemorySanitizer`` boot banner, and the
+``BUG: KMSAN: uninit-value`` report style.
 
 Memory layout
 =============
@@ -120,10 +120,8 @@ Usage
 
 To trigger KMSAN from inside a booted guest::
 
-   mount -t debugfs none /sys/kernel/debug
-   ls /sys/kernel/debug/kmsan/
-   # Planted uninit-read reproducer (via the existing
-   # KMSAN test module when CONFIG_KMSAN_KUNIT_TEST=y):
+   # Optional planted uninit-read reproducer when
+   # CONFIG_KMSAN_KUNIT_TEST=y:
    modprobe kmsan-kunit-test
 
 KMSAN reports land in dmesg as::
@@ -138,25 +136,16 @@ Regression test
 
 ``tools/testing/selftests/um/kmsan-smoke/`` boots a
 ``CONFIG_KMSAN=y`` UML image and asserts that
-``/sys/kernel/debug/kmsan/`` exists and, optionally, that
-a planted uninit-read reproducer triggered the
-``BUG: KMSAN:`` report. Drives via::
+the KMSAN runtime banner appears in guest dmesg and, optionally, that a
+planted uninit-read reproducer triggered the ``BUG: KMSAN:`` report. Drives
+via::
 
    make -C tools/testing/selftests/um/kmsan-smoke run_tests
 
-Current status: an LLVM ``uml/research-kmsan`` build passes, and the
-page-aligned vmalloc metadata layout gets past the previous early
-``vmalloc error`` / ``__vmap_pages_range_noflush()`` failure. Runtime
-closure remains open because the smoke guest still reports KMSAN findings
-before it can emit the ``KMSAN_SMOKE`` result marker. Current-head testing gets
-past the earlier UMID host-helper boundary report, the printk
-``console_flush_type`` local-state report, and the generic raw ``memset()``
-reports that appeared while UML's ``-fno-builtin`` flag prevented Clang's KMSAN
-memory-intrinsic lowering. The first repeated landed-head report is now a
-``vsnprintf()`` report from the non-instrumented UML host-helper
-``os_add_epoll_fd()`` path during ``console_on_rootfs()``. That report stream is
-being tracked as a UML host-boundary metadata problem rather than as a
-vmalloc-layout failure.
+Current status: as of 2026-06-11, a clean LLVM ``uml/research-kmsan`` build
+passes and the runtime smoke reaches ``KMSAN_SMOKE: PASS runtime=y
+reproducer=n``. The profile does not enable the optional KUnit KMSAN
+reproducer, so the smoke accepts a live runtime without a planted report.
 
 Further reading
 ===============

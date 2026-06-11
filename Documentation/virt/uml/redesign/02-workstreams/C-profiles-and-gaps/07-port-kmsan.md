@@ -7,13 +7,11 @@ D51 until maintainer coordination). `ARCH=um LLVM=1 uml/
 research-kmsan` + `-j$(nproc)` produces a full `vmlinux`
 end-to-end on this tree — first UML image with
 `HAVE_ARCH_KMSAN=y`. gcc prod-fast stays clean (KMSAN=n
-default). `tools/testing/selftests/um/kmsan-smoke/` boots and
-asserts `/sys/kernel/debug/kmsan/` present + optional planted
-uninit-read report; registered in the in-tree selftest target
-list. Boot-time runtime verification (KMSAN KUnit pass, dmesg
-report on planted uninit) is the operator's responsibility per
-the usual `run_tests` + manual-reproducer flow documented in
-`Documentation/virt/uml/kmsan.rst`.
+default). As of the 2026-06-11 runtime-closure pass,
+`tools/testing/selftests/um/kmsan-smoke/` boots the profile and
+asserts the guest-visible KMSAN runtime banner, with an optional
+planted uninit-read report when the KUnit KMSAN test module is
+enabled; registered in the in-tree selftest target list.
 **Effort:** 6 weeks (budget). Optimistic-case scope — KASAN's
 UML port paved the mmap pattern we reuse — is closer to **2-3
 weeks of disciplined work** if U1/U2/U3 hold. Kept at 6 weeks

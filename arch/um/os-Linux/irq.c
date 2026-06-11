@@ -83,11 +83,8 @@ int os_waiting_for_events_epoll(void)
 	if (n < 0) {
 		err = -errno;
 		if (errno != EINTR)
-			printk(
-				UM_KERN_ERR "os_waiting_for_events:"
-				" epoll returned %d, error = %s\n", n,
-				strerror(errno)
-			);
+			printk(KERN_ERR "os_waiting_for_events: epoll returned %d, errno = %d\n",
+			       n, errno);
 		return err;
 	}
 	return n;
@@ -100,15 +97,18 @@ int os_waiting_for_events_epoll(void)
 int os_add_epoll_fd(int events, int fd, void *data)
 {
 	struct epoll_event event;
-	int result;
+	int result, err;
 
 	event.data.ptr = data;
 	event.events = events | EPOLLET;
 	result = epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
 	if ((result) && (errno == EEXIST))
 		result = os_mod_epoll_fd(events, fd, data);
-	if (result)
-		printk("epollctl add err fd %d, %s\n", fd, strerror(errno));
+	if (result) {
+		err = errno;
+		printk(KERN_ERR "epollctl add err fd %d, errno = %d\n",
+		       fd, err);
+	}
 	return result;
 }
 
@@ -118,14 +118,16 @@ int os_add_epoll_fd(int events, int fd, void *data)
 int os_mod_epoll_fd(int events, int fd, void *data)
 {
 	struct epoll_event event;
-	int result;
+	int result, err;
 
 	event.data.ptr = data;
 	event.events = events;
 	result = epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
-	if (result)
+	if (result) {
+		err = errno;
 		printk(UM_KERN_ERR
-			"epollctl mod err fd %d, %s\n", fd, strerror(errno));
+			"epollctl mod err fd %d, errno = %d\n", fd, err);
+	}
 	return result;
 }
 

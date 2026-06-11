@@ -7,7 +7,7 @@
 # Boots a UML binary built with CONFIG_KMSAN=y under clang
 # (LLVM=1 research or research-kmsan profile), runs
 # kmsan-smoke.sh as init, and asserts that KMSAN is alive:
-#   * /sys/kernel/debug/kmsan/ is present (CONFIG_KMSAN=y).
+#   * the KMSAN runtime boot banner is visible in guest dmesg.
 #   * At least one kmsan_* kunit testcase or the in-tree
 #     kmsan-trivial reproducer prints "BUG: KMSAN:" to
 #     dmesg when reading an uninitialized stack variable.

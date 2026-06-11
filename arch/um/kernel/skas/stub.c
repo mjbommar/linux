@@ -6,6 +6,7 @@
 #include <sysdep/stub.h>
 
 #include <linux/futex.h>
+#include <linux/stringify.h>
 #include <sys/socket.h>
 #include <errno.h>
 
@@ -187,9 +188,13 @@ restart_wait:
 	/* Return so that the host modified mcontext is restored. */
 }
 
-void __section(".__syscall_stub")
+void __section(".__syscall_stub") __noreturn __attribute__((naked))
 stub_signal_restorer(void)
 {
 	/* We must not have anything on the stack when doing rt_sigreturn */
-	stub_syscall0(__NR_rt_sigreturn);
+#ifdef CONFIG_X86_64
+	__asm__ volatile("movq $" __stringify(__NR_rt_sigreturn) ", %rax; syscall");
+#else
+	__asm__ volatile("movl $" __stringify(__NR_rt_sigreturn) ", %eax; int $0x80");
+#endif
 }

@@ -61,15 +61,11 @@ Regression test
 binary and checks that the KMSAN runtime is present. The runner exits
 with kselftest SKIP if the supplied binary was not built with KMSAN.
 
-As of 2026-06-11, a clean LLVM ``uml/research-kmsan`` kernel build passes.
-The runtime smoke now gets past the earlier KMSAN vmalloc shadow/origin
-mapping failure, the UMID host-helper boundary report, the printk
-``console_flush_type`` local-state report, and the raw ``memset()`` reports
-caused by UML's normal ``-fno-builtin`` build flags. It still fails before the
-``KMSAN_SMOKE`` marker with a repeated ``vsnprintf()`` report from the
-non-instrumented ``os_add_epoll_fd()`` host-helper path during
-``console_on_rootfs()``. Treat this profile as buildable but not yet
-runtime-closed.
+As of 2026-06-11, a clean LLVM ``uml/research-kmsan`` kernel build passes and
+the runtime smoke reaches ``KMSAN_SMOKE: PASS runtime=y reproducer=n``. The
+``reproducer=n`` result is expected for this profile because it does not enable
+the optional KUnit KMSAN test module; the smoke still proves that the KMSAN
+runtime booted inside the UML guest.
 
 See also
 ========

@@ -428,3 +428,50 @@ These are investigation leads, not accepted code.
    the inventory status from `Present-needs-runtime-fix`.
 8. Keep any generic KMSAN changes separate from the UML-local vmalloc alignment
    fix unless the evidence proves they are independently correct upstream.
+
+## Runtime Closure
+
+The follow-on host-boundary pass closed the runtime blocker. The landed shape is
+UML-local:
+
+- `arch/x86/Makefile.um` restores Clang builtin lowering under `CONFIG_KMSAN`,
+  so explicit memory intrinsics lower to the KMSAN-aware `__msan_mem*` helpers.
+- UML host-side printk users clear the KMSAN parameter/return metadata before
+  entering instrumented kernel formatting code from non-instrumented host
+  helper objects.
+- The epoll helper diagnostics print numeric errno values instead of passing
+  libc-owned `strerror()` strings into instrumented kernel formatting.
+- hostfs unpoisons buffers and structs filled by host syscalls before VFS code
+  consumes them.
+- `kmsan_virt_addr_valid()` now rejects host-side UML mappings before generic
+  KMSAN calls `virt_to_page()` for direct-map metadata.
+- the seccomp stub `rt_sigreturn` restorer is a stackless naked function, which
+  keeps frame-pointer/KMSAN builds from pushing a frame over the host signal
+  frame before `rt_sigreturn`.
+- `tools/testing/selftests/um/kmsan-smoke/` now checks the actual KMSAN runtime
+  surface, the `Starting KernelMemorySanitizer` dmesg banner, rather than the
+  nonexistent `/sys/kernel/debug/kmsan` directory.
+
+Validation:
+
+```bash
+make ARCH=um -j"$(nproc)" linux
+
+make -C "$src" ARCH=um LLVM=1 O="$out" -j"$(nproc)" linux
+UML_BINARY="$out/linux" UML_MEM=2048M \
+	"$src/tools/testing/selftests/um/kmsan-smoke/run-kmsan-smoke.sh"
+```
+
+Results:
+
+- normal UML build passed;
+- clean `research-kmsan` LLVM build passed with `CONFIG_CC_IS_CLANG=y`,
+  `CONFIG_FORTIFY_SOURCE=y`, `CONFIG_KMSAN=y`, and
+  `CONFIG_KMSAN_CHECK_PARAM_RETVAL=y`;
+- object inspection confirmed `stub_signal_restorer` starts directly with
+  `movq $0xf, %rax; syscall`, with no stack frame;
+- `kmsan-smoke` reached `KMSAN_SMOKE: PASS runtime=y reproducer=n`.
+
+`reproducer=n` is expected for the current research profile because it does not
+enable the optional KUnit KMSAN test module. The runtime closure claim is the
+guest-visible KMSAN boot banner plus a smoke result marker.

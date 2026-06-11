@@ -122,7 +122,7 @@ This file is the live execution tracker for
 | Profiles | profile configs | Present-needs-runtime-builds | `next`, historical docs | Keep the 10 kernel Kconfig profiles and the 5 `umlbuild` profiles; full per-profile kernel builds and runtime feature probes remain required before final completion. | Clean-worktree `make ARCH=um O=<out> uml/<profile>` config matrix PASS for all 10 kernel profiles, `research-kmsan` now documented, listed in arch help, and covered by the runtime profile harness when its LLVM-built binary is present; all 5 `umlbuild` profiles resolve with `umlbuild profile show`, 2026-06-10. |
 | Instrumentation | kprobes | Present-validated | `next` | Keep kprobes/kretprobes in the research profile and the sample-module stress gate. | Clean temporary worktree `uml/research` confirms `CONFIG_KPROBES=y`, `CONFIG_KRETPROBES=y`, `CONFIG_SAMPLE_KPROBES=m`, `CONFIG_SAMPLE_KRETPROBES=m`, and `CONFIG_KPROBES_SANITY_TEST=y`; `make ARCH=um O=<out> linux samples/kprobes/kretprobe_example.ko` PASS; `kprobes-stress` PASS with `iters=1000`, `fires=1004`, `errors=0`, and `graph=on`, 2026-06-10. |
 | Instrumentation | ftrace | Present-validated | `next` | Keep normal dynamic function tracing; do not advertise function-graph tracing until the UML return-stack interaction is fixed. | Clean-worktree ftrace build with `FUNCTION_TRACER=y` and no `FUNCTION_GRAPH_TRACER` passed `ftrace-smoke` with 51,300 trace lines; `um/ftrace-smoke` now fails fast if a binary advertises unsupported `function_graph`, 2026-06-10. |
-| Instrumentation | KMSAN | Present-needs-runtime-fix | `next` | Keep `research-kmsan`; finish runtime host-boundary cleanup now that the LLVM profile build exists and the vmalloc metadata layout is fixed. | Clean LLVM `uml/research-kmsan` build PASS with `CONFIG_FORTIFY_SOURCE=y`, `CONFIG_KMSAN=y`, and `CONFIG_KMSAN_CHECK_PARAM_RETVAL=y`, 2026-06-11. `kmsan-smoke` still FAILs before the result marker, but the UMID host-helper report, printk `console_flush_type` report, and raw `memset()` reports from UML's `-fno-builtin` build are gone. The first repeated landed-head report is now `vsnprintf()` from non-instrumented `os_add_epoll_fd()` during `console_on_rootfs()`. A temp boundary experiment advanced past that into hostfs inode/stat metadata reports, so the remaining work is UML host-boundary metadata propagation rather than the earlier vmalloc layout failure. |
+| Instrumentation | KMSAN | Present-validated | `next` | Keep `research-kmsan`; rerun the KMSAN smoke in the final validation matrix. | Clean LLVM `research-kmsan` build PASS with `CONFIG_CC_IS_CLANG=y`, `CONFIG_FORTIFY_SOURCE=y`, `CONFIG_KMSAN=y`, and `CONFIG_KMSAN_CHECK_PARAM_RETVAL=y`; `kmsan-smoke` PASS with `KMSAN_SMOKE: PASS runtime=y reproducer=n`; stackless seccomp `rt_sigreturn` restorer verified by object inspection, 2026-06-11. |
 | Instrumentation | KASAN | Present-validated | `next`, `research` profile | Keep the research-profile `cve-repro` KASAN gate and its loadable `kasan_test.ko` module path. | Clean temporary worktree `make ARCH=um O=<out> uml/research` plus `make ARCH=um O=<out> linux mm/kasan/kasan_test.ko` PASS; `cve-repro` PASS with `ok=10`, `not_ok=0`, `kasan_bugs=13`, `guest_wall_s=0`, and `host_wall=2.71s`, 2026-06-10. |
 | Instrumentation | KFENCE | Present-validated | `next`, `research` and `fuzz-deep` profiles | Keep the profile config and the focused KFENCE report smoke. | Clean temporary research build confirms `CONFIG_KFENCE=y`, `CONFIG_KFENCE_KUNIT_TEST=m`, `CONFIG_KFENCE_SAMPLE_INTERVAL=100`, and `mm/kfence/kfence_test.ko` builds; `kfence-smoke` PASS with `bugs=1`, `stats_bugs=1`, `ok=1`, `not_ok=0`; runtime profile probe reports `PASS research (8 features match)`, 2026-06-10. |
 | Instrumentation | KCSAN | Present-validated | `next`, `race` profile | Keep the race profile and the focused KCSAN debugfs/selftest smoke. | Clean temporary race build confirms `CONFIG_HAVE_ARCH_KCSAN=y`, `CONFIG_KCSAN=y`, `CONFIG_KCSAN_SELFTEST=y`, `CONFIG_SMP=y`, `CONFIG_DEBUG_FS=y`, and `CONFIG_FTRACE=y`; runtime profile probe reports `PASS race (5 features match)`; `kcsan-smoke` PASS with `selftest=1`, `initial=0`, `enabled=1`, `disabled=0`, `microbench_begin=1`, `microbench_end=1`, and `unexpected=0`, 2026-06-10. |
@@ -209,17 +209,14 @@ This file is the live execution tracker for
   `kvm_v2_snapshot_elf_export=`, mconsole `snapshot_export`, direct debugfs
   `kvm_v2_snapshot_elf_export_path`, debugfs `kvm_v2_snapshot_bench`, and the
   in-kernel ELF export helpers.
-- UML KMSAN vmalloc metadata alignment is fixed on `next`: the quarter size
-  used to derive `KMSAN_VMALLOC_SHADOW_START` and
-  `KMSAN_VMALLOC_ORIGIN_START` is page-aligned, matching generic KMSAN's
-  page-array vmap metadata path. A clean LLVM `uml/research-kmsan` build
-  passes. Runtime smoke still fails before the `KMSAN_SMOKE` marker. The UML
-  stacktrace path now honors the generic `trace->skip` field, so the first
-  report is attributed to the real site rather than to `save_stack_trace()`.
-  A later UMID host-helper boundary cleanup moved the first repeated report
-  past `make_umid()`; the current blocker is `vsnprintf()` from
-  `console_on_rootfs()`. KMSAN remains open as a runtime blocker until
-  `kmsan-smoke` reaches its result marker.
+- UML KMSAN runtime closure is fixed on `next`: the page-aligned vmalloc
+  metadata layout builds cleanly with LLVM, UML restores Clang's KMSAN memory
+  intrinsic lowering under `CONFIG_KMSAN`, non-instrumented UML host helpers
+  clear KMSAN call metadata before kernel formatting, hostfs unpoisons data
+  filled by host syscalls, the KMSAN direct-map validity hook rejects host-side
+  mappings, and the seccomp stub signal restorer is stackless under
+  frame-pointer/KMSAN builds. `kmsan-smoke` now reaches
+  `KMSAN_SMOKE: PASS runtime=y reproducer=n` on a `research-kmsan` binary.
 
 ## Remaining Hard Blockers
 
@@ -246,9 +243,8 @@ These items must be closed before the final branch can be called complete:
    fixtures. The old report/deck workspace is now explicitly archived as
    historical May 2026 material.
 5. The final validation matrix from the integration plan must pass.
-6. KMSAN runtime closure must finish beyond the current vmalloc metadata
-   alignment fix: `kmsan-smoke` must reach the result marker on a
-   `research-kmsan` binary and prove the debugfs/runtime surface.
+6. KMSAN is no longer a hard blocker after the 2026-06-11 runtime-smoke pass;
+   rerun `kmsan-smoke` in the final validation matrix to protect the closure.
 
 ## Next Update Rules
 

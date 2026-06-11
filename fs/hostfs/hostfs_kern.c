@@ -19,6 +19,7 @@
 #include <linux/mount.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
+#include <linux/kmsan-checks.h>
 #include <linux/namei.h>
 #include "hostfs.h"
 #include <init.h>
@@ -182,6 +183,22 @@ static char *inode_name(struct inode *ino)
 	return name;
 }
 
+static int hostfs_readlink_file(char *file, char *buf, int size)
+{
+	int n;
+
+	n = hostfs_do_readlink(file, buf, size);
+	if (n < 0)
+		return n;
+
+	if (n < size)
+		kmsan_unpoison_memory(buf, n + 1);
+	else
+		kmsan_unpoison_memory(buf, n);
+
+	return n;
+}
+
 static char *follow_link(char *link)
 {
 	char *name, *resolved, *end;
@@ -193,7 +210,7 @@ static char *follow_link(char *link)
 		goto out_free;
 	}
 
-	n = hostfs_do_readlink(link, name, PATH_MAX);
+	n = hostfs_readlink_file(link, name, PATH_MAX);
 	if (n < 0)
 		goto out_free;
 	else if (n == PATH_MAX) {
@@ -736,10 +753,12 @@ static int hostfs_read_folio(struct file *file, struct folio *folio)
 	buffer = kmap_local_folio(folio, 0);
 	bytes_read = read_file(FILE_HOSTFS_I(file)->fd, &start, buffer,
 			PAGE_SIZE);
-	if (bytes_read < 0)
+	if (bytes_read < 0) {
 		ret = bytes_read;
-	else
+	} else {
+		kmsan_unpoison_memory(buffer, bytes_read);
 		buffer = folio_zero_tail(folio, bytes_read, buffer + bytes_read);
+	}
 	kunmap_local(buffer);
 
 	folio_end_read(folio, ret == 0);
@@ -817,6 +836,16 @@ static int hostfs_inode_update(struct inode *ino, const struct hostfs_stat *st)
 	return 0;
 }
 
+static int hostfs_stat_file(const char *name, struct hostfs_stat *st, int fd)
+{
+	int err;
+
+	err = stat_file(name, st, fd);
+	if (!err)
+		kmsan_unpoison_memory(st, sizeof(*st));
+	return err;
+}
+
 static int hostfs_inode_set(struct inode *ino, void *data)
 {
 	struct hostfs_stat *st = data;
@@ -872,7 +901,7 @@ static struct inode *hostfs_iget(struct super_block *sb, char *name)
 {
 	struct inode *inode;
 	struct hostfs_stat st;
-	int err = stat_file(name, &st, -1);
+	int err = hostfs_stat_file(name, &st, -1);
 
 	if (err)
 		return ERR_PTR(err);
@@ -1205,7 +1234,7 @@ static const char *hostfs_get_link(struct dentry *dentry,
 		char *path = dentry_name(dentry);
 		int err = -ENOMEM;
 		if (path) {
-			err = hostfs_do_readlink(path, link, PATH_MAX);
+			err = hostfs_readlink_file(path, link, PATH_MAX);
 			if (err == PATH_MAX)
 				err = -E2BIG;
 			__putname(path);

@@ -7,6 +7,7 @@
 #define __USER_H__
 
 #include <generated/asm-offsets.h>
+#include <kmsan_user.h>
 
 /*
  * The usual definition, copied here because the kernel's type-safe version
@@ -37,7 +38,11 @@ extern void panic(const char *fmt, ...)
 #define UM_KERN_CONT	KERN_CONT
 
 #if IS_ENABLED(CONFIG_PRINTK)
-#define printk(...) _printk(__VA_ARGS__)
+#define printk(...)							\
+	({								\
+		um_kmsan_clear_context_state();			\
+		_printk(__VA_ARGS__);					\
+	})
 extern int _printk(const char *fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
 extern void print_hex_dump(const char *level, const char *prefix_str,

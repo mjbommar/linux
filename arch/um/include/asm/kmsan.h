@@ -50,20 +50,11 @@ static inline void *arch_kmsan_get_meta_or_null(void *addr, bool is_origin)
 static inline bool kmsan_virt_addr_valid(const void *addr)
 {
 	/*
-	 * UML's kernel VA range is everything above TASK_SIZE
-	 * (physmem + vmalloc + modules). Under the VMALLOC-
-	 * quarter-split every shadow/origin address derives
-	 * from VMALLOC_START arithmetic, which is itself
-	 * inside that kernel VA range. Valid-range checks
-	 * therefore collapse to "is this at or above
-	 * VMALLOC_START". The generic vmalloc_meta() call
-	 * site already validates the shadow region bounds
-	 * before dereferencing, so returning true
-	 * unconditionally is safe for every code path that
-	 * reaches this predicate.
+	 * mm/kmsan/shadow.c handles vmalloc and module addresses before it
+	 * calls this hook. The remaining lookup is for direct-map memory, so
+	 * keep host-side UML mappings from being passed to virt_to_page().
 	 */
-	(void)addr;
-	return true;
+	return virt_addr_valid(addr);
 }
 
 #else /* !CONFIG_KMSAN */
