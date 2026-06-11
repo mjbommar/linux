@@ -47,11 +47,16 @@ What's on
 
 - **Backend**: SECCOMP_ONLY.
 - **SMP**: forced on. KCSAN without SMP has no races to catch.
-- ``CONFIG_KCSAN=y`` with ``KCSAN_EARLY_ENABLE=y`` — active from
-  boot. Runtime toggle via ``/sys/kernel/debug/kcsan`` (standard
-  KCSAN debugfs knobs).
-- ``CONFIG_KCSAN_KUNIT_TEST=y`` + ``CONFIG_KUNIT=y`` — the in-tree
-  KCSAN test suite runs at boot.
+- ``CONFIG_KCSAN=y`` with ``CONFIG_KCSAN_EARLY_ENABLE`` unset.
+  KCSAN starts disabled for predictable boot time and is toggled at
+  runtime via ``/sys/kernel/debug/kcsan``.
+- ``CONFIG_KCSAN_SELFTEST=y`` — the short in-tree KCSAN selftest
+  runs at boot and panics the kernel on failure.
+- ``tools/testing/selftests/um/kcsan-smoke/`` boots the profile
+  with ``ncpus=2``, requires the boot selftest result in ``dmesg``,
+  flips the debugfs control from off to on and back off, runs the
+  KCSAN debugfs microbenchmark path, and fails if the log contains
+  a KCSAN race report or other kernel warning.
 - **Lockdep**: ``PROVE_LOCKING``, ``DEBUG_SPINLOCK``,
   ``DEBUG_MUTEXES``, ``DEBUG_ATOMIC_SLEEP``, ``DEBUG_RT_MUTEXES``.
 - **debugfs + ftrace** surfaces for correlation.

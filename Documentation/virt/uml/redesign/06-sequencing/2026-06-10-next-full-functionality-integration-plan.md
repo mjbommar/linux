@@ -1054,9 +1054,13 @@ Acceptance gates:
   `CONFIG_KFENCE_KUNIT_TEST=m`, `CONFIG_KFENCE_SAMPLE_INTERVAL=100`,
   `KFENCE_SMOKE: PASS bugs=1 stats_bugs=1 ok=1 not_ok=0`, and
   `PASS research (8 features match)`.
-- KCSAN runtime smoke. Current status: open; build and boot the `race`
-  profile with `ncpus=2`, validate `debugfs_kcsan`, and capture selftest
-  evidence.
+- KCSAN runtime smoke. Current status: PASS on 2026-06-10 through
+  `kcsan-smoke` against a fresh race-profile UML binary:
+  `CONFIG_HAVE_ARCH_KCSAN=y`, `CONFIG_KCSAN=y`,
+  `CONFIG_KCSAN_SELFTEST=y`, `CONFIG_SMP=y`, `PASS race (5 features
+  match)`, `KCSAN_SMOKE: PASS`, `selftest=1`, `initial=0`,
+  `enabled=1`, `disabled=0`, `microbench_begin=1`,
+  `microbench_end=1`, and `unexpected=0`.
 - KCOV runtime smoke. Current status: PASS on 2026-06-10 through
   `kcov-smoke` against a fresh fuzz-profile UML binary:
   `CONFIG_KCOV=y`, `CONFIG_KCOV_ENABLE_COMPARISONS=y`,

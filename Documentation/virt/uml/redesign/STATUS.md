@@ -400,13 +400,20 @@ Current instrumentation evidence:
   `mm/kfence/kfence_test.ko` builds, the runtime profile probe reports
   `PASS research (8 features match)`, and `kfence-smoke` passes with
   `KFENCE_SMOKE: PASS bugs=1 stats_bugs=1 ok=1 not_ok=0`;
+- KCSAN is runtime-validated for the race profile: a clean-worktree
+  race build enables `CONFIG_HAVE_ARCH_KCSAN=y`, `CONFIG_KCSAN=y`,
+  `CONFIG_KCSAN_SELFTEST=y`, `CONFIG_SMP=y`, `CONFIG_DEBUG_FS=y`,
+  and `CONFIG_FTRACE=y`, the runtime profile probe reports
+  `PASS race (5 features match)`, and `kcsan-smoke` passes with
+  `KCSAN_SMOKE: PASS selftest=1 initial=0 enabled=1 disabled=0`,
+  `microbench_begin=1`, `microbench_end=1`, and `unexpected=0`;
 - KCOV is runtime-validated for the fuzz profile: a fresh fuzz-profile UML
   binary has `CONFIG_KCOV=y`, `CONFIG_KCOV_ENABLE_COMPARISONS=y`, and
   `CONFIG_KCOV_INSTRUMENT_ALL=y`, the runtime profile probe passes for
   `fuzz`, and `kcov-smoke` passes with `mode=pc`, `entries=4094`, and
   `first_pc=0x605daf39`; and
-- KMSAN and KCSAN still require the matching profile binaries/modules and
-  guest tooling for runtime closure.
+- KMSAN still requires the matching profile binary and guest tooling for
+  runtime closure.
 
 ## Historical-Only Work
 
