@@ -6,10 +6,10 @@
 # The first leg boots the KUnit suite for the in-memory state machine and FIFO
 # replay primitive. The second boots a guest script that drives the debugfs
 # control surface and verifies that a real KVM v2 workload records syscall
-# entries. The final leg boots a static helper that starts recording from the
-# same task that runs the scalar workload, then checks the record ownership
-# counters and replays the task-owned log. A negative helper verifies strict
-# replay kills an unsupported live syscall instead of falling back.
+# entries. The final legs boot static helpers that start recording from the
+# same task that runs the scalar workload, replay the task-owned log, and
+# verify strict replay kills both mismatched and unsupported live syscalls
+# instead of falling back.
 
 set -u
 
@@ -19,6 +19,7 @@ MEM=${UML_MEM:-256M}
 GUEST_SCRIPT="$DIR/kvm-record-smoke.sh"
 TASK_HELPER=${KVM_RECORD_TASK_HELPER:-$DIR/kvm-record-task}
 NEGATIVE_HELPER=${KVM_RECORD_NEGATIVE_HELPER:-$DIR/kvm-record-negative}
+MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
@@ -34,6 +35,10 @@ if [ ! -x "$TASK_HELPER" ]; then
 fi
 if [ ! -x "$NEGATIVE_HELPER" ]; then
 	echo "SKIP: $NEGATIVE_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$MISMATCH_HELPER" ]; then
+	echo "SKIP: $MISMATCH_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -e /dev/kvm ]; then
@@ -188,6 +193,58 @@ case "$TASK_LINE" in
 esac
 
 if ! ensure_kvm_readable; then
+	echo "SKIP: /dev/kvm not readable before mismatch smoke" >&2
+	exit 4
+fi
+
+MISMATCH_OUT=$(timeout --kill-after=10 45 "$BINARY" \
+	backend=force=kvm-v2 \
+	init="$MISMATCH_HELPER" mem="$MEM" \
+	con=null con0=fd:0,fd:1 \
+	root=/dev/root rootfstype=hostfs rw \
+	panic=-1 </dev/null 2>&1 || true)
+
+MISMATCH_LINE=$(echo "$MISMATCH_OUT" | grep '^KVM_RECORD_MISMATCH:' | head -1)
+if [ -z "$MISMATCH_LINE" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no mismatch smoke result line)"
+	echo "$MISMATCH_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+echo "$MISMATCH_LINE"
+case "$MISMATCH_LINE" in
+*armed\ syscall=*) ;;
+*)
+	echo "KVM_RECORD_SMOKE: FAIL (mismatch helper did not arm)"
+	echo "$MISMATCH_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+		tail -80
+	exit 1
+	;;
+esac
+
+MISMATCH_NR=$(echo "$MISMATCH_LINE" |
+	sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
+if [ -z "$MISMATCH_NR" ] ||
+   ! echo "$MISMATCH_OUT" |
+	grep -q "kvm-v2 record: strict replay divergence nr=$MISMATCH_NR"; then
+	echo "KVM_RECORD_SMOKE: FAIL (mismatch strict divergence missing)"
+	echo "$MISMATCH_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+if echo "$MISMATCH_OUT" | grep -q 'KVM_RECORD_MISMATCH: FAIL'; then
+	echo "KVM_RECORD_SMOKE: FAIL (mismatch helper returned from replay divergence)"
+	echo "$MISMATCH_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable before negative smoke" >&2
 	exit 4
 fi
@@ -240,6 +297,6 @@ if echo "$NEGATIVE_OUT" | grep -q 'KVM_RECORD_NEGATIVE: FAIL'; then
 fi
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
-SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-negative=1)"
+SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1 live-negative=1)"
 echo "$SUMMARY"
 exit 0

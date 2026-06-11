@@ -673,18 +673,28 @@ Current `next` checkpoint:
 - Validation on 2026-06-10 after time-travel clock-event wiring:
   `kvm-record-clock-bench` PASS with `N=100`, `observed=100`, `replayed=100`,
   and `mismatches=0`.
+- Validation on 2026-06-11 after the live strict-mismatch smoke:
+  `kvm-record-smoke` PASS, including `um_kvm_v2_record` 21/21, live debugfs
+  recording, task-owned 386-entry deterministic replay, live supported-syscall
+  mismatch rejection through `getcwd(2)`, and live unsupported-syscall
+  rejection through `getrandom(2)`.
 - Still open: raw time/RDTSC/signal determinism, supported replay tier docs,
-  and real deterministic workload replay smoke tests.
+  broader deterministic workload coverage, and replayable device/network/hostfs
+  event policy.
 
 Acceptance gates:
 
-- Record KUnit tests. Current status: PASS for the experimental core.
+- Record KUnit tests. Current status: PASS 21/21 for the experimental core.
 - Record smoke test. Current status: PASS through `kvm-record-smoke`.
-- Replay smoke test.
-- Buffer overflow behavior test.
+- Replay smoke test. Current status: bounded PASS for the task-owned scalar
+  plus `uname(2)`/`getcwd(2)` payload workload.
+- Buffer overflow behavior test. Current status: covered by KUnit.
+- Strict supported-entry mismatch smoke. Current status: PASS through the live
+  `kvm-record-mismatch` helper.
 - Gadget-on and gadget-off comparison. Current status: state-page bypass and
-  gadget-on hot path are covered; full record-mode workload smoke remains open
-  until live syscall dispatcher wiring lands.
+  gadget-on hot path are covered, and record/replay now forces gadget-handled
+  syscalls through the live dispatcher; side-by-side gadget-on/off workload
+  equivalence remains open if required for publication.
 - Documentation of supported determinism tier.
 
 ## Workstream D: KVM State Trace And Diagnostics
@@ -1497,7 +1507,7 @@ Kernel/unit gates:
 - Backend contract KUnit.
 - Snapshot KUnit. Current status: `um_kvm_v2_snapshot` PASS 4/4 on
   2026-06-10.
-- Record KUnit if record/replay lands.
+- Record KUnit. Current status: `um_kvm_v2_record` PASS 21/21 on 2026-06-11.
 
 Runtime smoke:
 
@@ -1576,7 +1586,7 @@ branch lands.
 | KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
 | KVM snapshot | Present with KUnit, live export, restore smoke, and SMP gate | Present, validated, SMP policy defined | Closed for current scope |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
-| Record/replay | Experimental syscall hook, snapshot-backed debugfs control, and live record smoke present; deterministic replay incomplete | Complete deterministic tier or explicitly experimental | Partially closed; replay runtime open |
+| Record/replay | Experimental syscall hook, snapshot-backed debugfs control, live bounded task-owned replay, and live strict mismatch/unsupported smokes present; broader deterministic replay incomplete | Complete deterministic tier or explicitly experimental | Partially closed; replay runtime open |
 | State trace | Clean optional KVM_RUN debugfs ring with parser smoke | Clean optional debug infra | Closed for optional diagnostics |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
