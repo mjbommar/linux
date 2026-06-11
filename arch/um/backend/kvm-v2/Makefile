@@ -27,6 +27,7 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += lstar_gadget.o
 obj-$(CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH) += aperfmperf.o
 
 obj-$(CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL) += record.o
+obj-$(CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE) += state_trace.o
 
 # Marshal-shape KUnit suite. Pure data-transform tests; no kernel state
 # assumed. Build only when explicitly requested.

@@ -126,8 +126,9 @@ The active blockers are now:
    gadget bypass are present, and UML time-travel clock events now round-trip
    through the record log, but raw time/RDTSC, signal, device, and
    deterministic workload recording/replay are still open.
-6. Decide whether the historical KVM v2 private state trace should be imported
-   as clean optional diagnostics.
+6. Keep the clean KVM v2 state-trace diagnostics bounded and optional. The
+   historical all-state trace remains archival; current `next` has a compact
+   debugfs ring with parser/smoke coverage.
 7. Curate source comments, selftests, reports, and status docs so upstream-
    facing code is free of internal issue numbers, phase diaries, random
    history, and stale claims. A focused active-source pass has removed the
@@ -242,7 +243,7 @@ Current role:
 - Contains an experimental record/replay core behind
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`, but not full
   deterministic runtime replay.
-- Does not yet contain private state trace source.
+- Contains a clean optional KVM v2 state-trace debugfs ring and parser smoke.
 - Contains vector2 implementation.
 - Contains launcher, pool, exec, port-forward, deploy, gates, and examples.
 - Contains syzkaller UML shim.
@@ -275,7 +276,7 @@ Problems:
   KUnit, live export, and restore smoke coverage. SMP semantics are explicitly
   gated to one online CPU.
 - Record/replay is now partially present as an experimental core on `next`;
-  private state trace functionality remains historical-only.
+  private state trace has been replaced by a clean optional debugfs ring.
 
 Disposition:
 
@@ -729,12 +730,18 @@ Current `next` decision:
 - Current `next` keeps normal `TRACE_EVENT` coverage under
   `arch/um/include/asm/trace/um_backend.h` as the supported observability
   surface.
-- Private state trace remains a future optional diagnostic, not a runtime
-  functionality blocker. If it is restored, implement a clean debug-only
-  version from the current KVM v2 state model with bounded memory use, stable
-  debugfs controls, a minimal hook set, and parser/smoke coverage.
-- Historical parser tools remain reference material until the kernel-side
-  trace format is deliberately reintroduced.
+- A clean optional replacement is now present behind
+  `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE`. It records compact KVM_RUN
+  entry/exit metadata in a bounded 4096-entry debugfs ring and exposes
+  `enable`, `disable`, `clear`, `status`, and `dump` files under
+  `/sys/kernel/debug/um/`.
+- Acceptance evidence on 2026-06-11: disabled build PASS, enabled build PASS,
+  `kvm-state-trace-smoke` PASS with `entries=4096 sequence=31280
+  capacity=4096`, parser PASS with 4096 entries and both enter/exit events,
+  `bash -n`, `python3 -m py_compile`, selftest make, `git diff --check`, and
+  checkpatch on the new kernel files PASS.
+- Historical parser tools remain reference material; the active parser is the
+  focused `parse-kvm-state-trace.py` kselftest helper for the new text format.
 
 ## Workstream E: Template Pause, Fork Server, And Pool
 
@@ -1570,7 +1577,7 @@ branch lands.
 | KVM snapshot | Present with KUnit, live export, restore smoke, and SMP gate | Present, validated, SMP policy defined | Closed for current scope |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
 | Record/replay | Experimental syscall hook, snapshot-backed debugfs control, and live record smoke present; deterministic replay incomplete | Complete deterministic tier or explicitly experimental | Partially closed; replay runtime open |
-| State trace | Historical/prototype | Clean optional debug infra | Open |
+| State trace | Clean optional KVM_RUN debugfs ring with parser smoke | Clean optional debug infra | Closed for optional diagnostics |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
 | Pool exec | Successful command, stdout/stderr capture, exit-status preservation, timeout reporting, and helper cleanup validated | Public `exec/1` ABI documented; future stricter kernel argv transport assigned to `exec/2` | Closed for current completion claim |
@@ -1832,7 +1839,7 @@ Immediate engineering conclusion:
   syzkaller-style take/exec/port-forward/status/destroy wire path through
   `umlctl`;
 - final completion requires finishing the remaining vector2 networking gates
-  plus the open record/replay, state trace, profile, selftest, CPU/syscall
+  plus the open record/replay, profile, selftest, CPU/syscall
   performance, and upstream readiness items tracked above.
 
 ## Immediate Next Actions
@@ -1848,16 +1855,14 @@ Immediate engineering conclusion:
 4. Complete record/replay beyond the explicit experimental syscall hook and
    snapshot-backed debugfs record control, including time, signal, device, and
    workload-level replay gates, before counting the original mission complete.
-5. Decide whether private state trace is worth importing as clean optional
-   diagnostics.
-6. Re-audit vector2 transport claims, Kconfig wording, and replacement
+5. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-7. Curate selftests and source comments for upstream style: no internal issue
+6. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-8. Refresh reports/presentations from normalized status and evidence tables
+7. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-9. Run the final validation matrix, update `STATUS.md` and the inventory,
+8. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

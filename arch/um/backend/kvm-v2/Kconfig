@@ -206,3 +206,26 @@ config UM_BACKEND_KVM_V2_ITIMER_VIRTUAL
 	  Say N only if you specifically need to disable guest utime
 	  accounting (rare).  setitimer(ITIMER_VIRTUAL) will arm but
 	  never fire when N.
+
+config UM_BACKEND_KVM_V2_STATE_TRACE
+	bool "KVM v2 private state trace ring"
+	depends on UM_BACKEND_KVM_V2 && DEBUG_FS
+	default n
+	help
+	  Build a small, debugfs-controlled KVM v2 state trace ring. The
+	  ring records bounded KVM_RUN entry and exit metadata: sequence,
+	  timestamp, task pid, host CPU, operation name, exit reason,
+	  I/O port, RIP, RSP, and RAX.
+
+	  This is a private diagnostic surface for backend bring-up and
+	  regression triage. It is intentionally smaller than the historical
+	  investigation trace: it does not dump full task, vCPU, or mm state,
+	  it is disabled by default, and the hook sites compile away entirely
+	  when this option is N.
+
+	  Runtime control lives under /sys/kernel/debug/um/:
+	    kvm_v2_state_trace_ctl     write "enable", "disable", or "clear"
+	    kvm_v2_state_trace_status  read counters and capacity
+	    kvm_v2_state_trace_dump    read the retained text dump
+
+	  Say N for normal builds. Say Y for focused KVM v2 diagnostics.

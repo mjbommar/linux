@@ -42,6 +42,7 @@
 #include <asm/trace/um_backend.h>
 
 #include "kvm_v2_backend.h"
+#include "state_trace.h"
 #include "syscall_trap.h"
 
 #define KVM_V2_USER_SEG_LIMIT		0xffffffff
@@ -2032,6 +2033,9 @@ static void kvm_v2_prepare_vcpu_entry(struct uml_pt_regs *regs,
 	run->kvm_dirty_regs |= KVM_SYNC_X86_REGS;
 
 	trace_um_backend_kvm_v2_vcpu_enter(cpu, run);
+	kvm_v2_state_trace(KVM_V2_STATE_TRACE_RUN_ENTER, cpu, 0, 0,
+			   run->s.regs.regs.rip, run->s.regs.regs.rsp,
+			   run->s.regs.regs.rax);
 }
 
 static void kvm_v2_snapshot_run_exit(struct kvm_run *run,
@@ -2060,6 +2064,9 @@ static bool kvm_v2_handle_run_failure(struct uml_pt_regs *regs,
 		panic("kvm-v2: KVM_RUN(cpu=%d) failed: %d (exit_reason=%u)",
 		      cpu, rc, vcpu->run_exit_reason);
 
+	kvm_v2_state_trace(KVM_V2_STATE_TRACE_RUN_EINTR, cpu,
+			   vcpu->run_exit_reason, 0, regs->gp[HOST_IP],
+			   regs->gp[HOST_SP], regs->gp[HOST_AX]);
 	kvm_v2_handle_interrupted_run(regs, run, vcpu, &vcpu->run_regs,
 				      &vcpu->run_sregs, cpu);
 	return true;
@@ -2145,6 +2152,12 @@ static int kvm_v2_enter_and_snapshot(struct uml_pt_regs *regs,
 	rc = kvm_v2_run_ioctl(vcpu);
 	kvm_v2_capture_task_state_after_run(vcpu);
 	kvm_v2_snapshot_run_exit(run, vcpu);
+	kvm_v2_state_trace(KVM_V2_STATE_TRACE_RUN_EXIT, cpu,
+			   vcpu->run_exit_reason,
+			   vcpu->run_exit_reason == KVM_EXIT_IO ?
+				   run->io.port : 0,
+			   vcpu->run_regs.rip, vcpu->run_regs.rsp,
+			   vcpu->run_regs.rax);
 
 	/*
 	 * Drain UML's deferred-signal queue. Signals are blocked at the

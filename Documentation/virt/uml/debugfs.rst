@@ -29,6 +29,9 @@ Layout
   ├── kvm_v2_snapshot_elf_export_path (wo, 0200)  KVM v2 snapshot ELF export
   ├── kvm_v2_record_ctl     (wo, 0200)  experimental KVM v2 record control
   ├── kvm_v2_record_status  (ro, 0400)  experimental KVM v2 record counters
+  ├── kvm_v2_state_trace_ctl     (wo, 0200)  KVM v2 state trace control
+  ├── kvm_v2_state_trace_status  (ro, 0400)  KVM v2 state trace counters
+  ├── kvm_v2_state_trace_dump    (ro, 0400)  KVM v2 state trace text dump
   └── stats              (ro, 0400)  per-hook on-state + hit counter
 
 ``backend``
@@ -215,11 +218,32 @@ randomness and external I/O syscalls outside the supported subset, including
 and ``ioctl(2)`` paths, instead of replaying them as scalar-only entries. Full
 deterministic replay still needs broader payload coverage plus replayable
 device, network, and hostfs policies described in the redesign plan. The
-current in-memory event format is
-versioned and
-debugfs reports its header size, total fixed entry size, and maximum
-variable payload length so validation tools can reject stale logs instead of
-guessing their shape.
+current in-memory event format is versioned and debugfs reports its header
+size, total fixed entry size, and maximum variable payload length so
+validation tools can reject stale logs instead of guessing their shape.
+
+KVM v2 state trace controls
+===========================
+
+When ``CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y`` and ``CONFIG_DEBUG_FS=y``,
+the KVM v2 backend exposes a private diagnostic ring. The ring is disabled by
+default and records only compact KVM_RUN entry/exit metadata while enabled.
+It is intended for backend triage, not as a stable workload tracing ABI. See
+``Documentation/virt/uml/kvm-v2-state-trace.rst`` for the format and
+validation path.
+
+``kvm_v2_state_trace_ctl``
+    Write-only command file. Supported commands are ``enable``, ``disable``,
+    and ``clear``.
+
+``kvm_v2_state_trace_status``
+    Read-only status and counters. Fields are ``enabled``, ``capacity``,
+    ``entry_size``, ``entries``, ``sequence``, and ``overwritten``.
+
+``kvm_v2_state_trace_dump``
+    Read-only text dump of retained entries, newest window in sequence order.
+    Each data line has ``key=value`` fields for sequence, timestamp, CPU, pid,
+    operation, KVM exit reason, I/O port, RIP, RSP, and RAX.
 
 Cost impact
 ===========

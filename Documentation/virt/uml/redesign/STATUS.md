@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, and active selftest wording cleanup.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -22,12 +22,13 @@ restored for the full UML v2 completion branch:
   hook; and
 - the validation needed to decide which pieces are publishable upstream.
 
-Private state-trace code remains historical-only at this point. Record/replay
-now has an experimental Kconfig-gated core in `next`, including a debugfs
-control/status surface and live syscall-record smoke coverage, but live
-deterministic runtime replay is not complete. Generic UML snapshot and
-fork-server work remains separate from the KVM backend core unless the
-integration plan explicitly pulls it into `next`.
+The historical private state-trace implementation remains archival, and
+`next` now has a clean optional debugfs state-trace ring with parser/smoke
+coverage. Record/replay now has an experimental Kconfig-gated core in `next`,
+including a debugfs control/status surface and live syscall-record smoke
+coverage, but live deterministic runtime replay is not complete. Generic UML
+snapshot and fork-server work remains separate from the KVM backend core unless
+the integration plan explicitly pulls it into `next`.
 
 ## Current Readiness
 
@@ -73,8 +74,11 @@ Current source-tree direction:
   them as scalar-only entries. Broader payload coverage, replayable
   signal-event ordering, device/network/hostfs event replay, and deterministic
   replay policy remain incomplete.
-  Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
+  A separate optional `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE` debugfs ring now
+  exists for private KVM_RUN diagnostics. It is disabled by default, keeps a
+  bounded 4096-entry text-dumpable ring, and is validated by
+  `kvm-state-trace-smoke`.
 - Runtime backend selection remains explicit; seccomp stays the fallback
   backend unless KVM v2 is selected.
 - KVM v2 KUnit coverage remains for register marshaling, byte-shape
@@ -667,12 +671,6 @@ Current instrumentation evidence:
 - KGDB is not part of any current UML profile. This is an explicit deferral,
   not a validated feature.
 
-## Historical-Only Work
-
-The following work is not yet present in the active `next` implementation:
-
-- private state-trace ring and parser tooling.
-
 KVM-specific record/replay is present as an experimental core with KUnit
 coverage. Gadget-handled syscalls now have record/replay bypass plumbing: the
 active record static key synchronizes a per-vCPU gadget-state byte, and the
@@ -694,12 +692,12 @@ deterministic replay for the bounded 386-entry scalar plus
 signal-event ordering, replayable device/network/hostfs events, and a live
 supported-entry mismatch smoke remain open.
 
-The private state-trace ring remains historical reference material. The
-historical source is not a clean import target because it contains stale field
-assumptions and investigation-specific auto-freeze logic. Current `next` uses
-normal `TRACE_EVENT` coverage as the supported KVM v2 observability surface;
-state trace should only return as a bounded optional debug facility with fresh
-tests and parser coverage.
+The historical private state-trace implementation remains reference material
+only. Current `next` replaces it with a clean optional diagnostic ring rather
+than importing the old source wholesale. The new ring captures compact KVM_RUN
+entry/exit metadata, exposes `enable`, `disable`, `clear`, `status`, and
+`dump` through debugfs, has parser coverage, and passes
+`kvm-state-trace-smoke` with `CONFIG_UM_BACKEND_KVM_V2_STATE_TRACE=y`.
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
 source. KUnit coverage, live `umlctl` ELF export validation, snapshot
