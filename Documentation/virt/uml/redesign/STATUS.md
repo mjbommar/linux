@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, and current-HEAD vector2 validation evidence.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, and current-HEAD vector2 validation evidence.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -146,17 +146,13 @@ The strongest current KVM v2 evidence is:
   KVM v2 record log can round-trip time-travel clock advances.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
-- UML KMSAN now has a clean LLVM `uml/research-kmsan` build and the
-  vmalloc metadata ranges used by generic KMSAN are page-aligned. The
-  previous early `__vmap_pages_range_noflush()` / `vmalloc error` failure
-  is no longer present in the focused smoke log. Runtime closure is still
-  open: `kmsan-smoke` fails before its result marker because KMSAN reports
-  early uninitialized data paths starting in kthread-name allocation and
-  followed by scheduler and credential setup paths. Follow-up experiments that
-  copied or unpoisoned metadata in `kvasprintf()`, `prepare_creds()`, and UML
-  task duplication moved the first report but did not produce a passing smoke;
-  the current investigation is focused on UML task, stack, and KMSAN context
-  setup rather than landing scattershot annotations.
+- UML KMSAN now has a clean LLVM `uml/research-kmsan` build, page-aligned
+  vmalloc metadata ranges, KMSAN-aware memory intrinsic lowering, UML-local
+  host-boundary metadata cleanup, hostfs unpoisoning for host-filled data, and
+  a stackless seccomp `rt_sigreturn` restorer for frame-pointer/KMSAN builds.
+  `kmsan-smoke` reaches `KMSAN_SMOKE: PASS runtime=y reproducer=n`; the
+  `reproducer=n` result is expected because the research profile does not
+  enable the optional KUnit KMSAN test module.
 - x86 UML ptrace/TLS cleanup validation: `git diff --check`, strict
   `scripts/checkpatch.pl --no-tree`, and a targeted TODO/XXX scan passed for
   the touched files. The x86_64 UML objects `syscalls_64.o`, `ptrace_64.o`,
@@ -181,8 +177,8 @@ Remaining validation before publication or completion:
 - finish record/replay time, signal, device, and deterministic replay policy
   before counting the original record/replay mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
-- finish KMSAN runtime initialization cleanup so `kmsan-smoke` reaches its
-  result marker and can validate the debugfs/runtime surface;
+- rerun `kmsan-smoke` in the final validation matrix to protect the KMSAN
+  runtime-smoke closure;
 - keep the seccomp comparison path green while the KVM v2 series is split;
 - refresh the upstream cover letter and patch boundaries after the cleanup.
 
@@ -476,8 +472,8 @@ Current instrumentation evidence:
   `CONFIG_KCOV_INSTRUMENT_ALL=y`, the runtime profile probe passes for
   `fuzz`, and `kcov-smoke` passes with `mode=pc`, `entries=4094`, and
   `first_pc=0x605daf39`; and
-- KMSAN still requires the matching profile binary and guest tooling for
-  runtime closure.
+- KMSAN is runtime-validated for the research-kmsan profile:
+  `KMSAN_SMOKE: PASS runtime=y reproducer=n`.
 - KGDB is not part of any current UML profile. This is an explicit deferral,
   not a validated feature.
 

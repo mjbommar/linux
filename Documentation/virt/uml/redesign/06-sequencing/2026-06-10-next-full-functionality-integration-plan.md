@@ -1033,9 +1033,11 @@ Acceptance gates:
 - kprobes stress. Current status: PASS on 2026-06-10 against a clean-worktree
   research-profile UML build with `samples/kprobes/kretprobe_example.ko`:
   `KPROBES_STRESS: PASS iters=1000 fires=1004 errors=0 graph=on`.
-- KMSAN smoke. Current status: SKIP on 2026-06-10 against the current
-  `./linux` build because it does not contain the KMSAN runtime; rerun with
-  `LLVM=1 uml/research-kmsan`.
+- KMSAN smoke. Current status: PASS on 2026-06-11 against a clean
+  LLVM-built `research-kmsan` binary:
+  `KMSAN_SMOKE: PASS runtime=y reproducer=n`. The `reproducer=n` result is
+  expected because the profile does not enable the optional KUnit KMSAN test
+  module.
 - BPF/JIT config/build slice. Current status: PASS on 2026-06-10 from a
   temporary clean worktree: `uml/research` enables `CONFIG_HAVE_EBPF_JIT=y`,
   `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`,
@@ -1508,7 +1510,7 @@ branch lands.
 | Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
 | Syzkaller shim | Present | End-to-end smoke | Open |
-| Profiles | Present | Build/test matrix | Open |
+| Profiles | Present; KMSAN runtime smoke closed for `research-kmsan` | Build/test matrix | Open |
 | Selftests | Broad, noisy | Curated suites | Open |
 | Docs/reports | Mixed current/stale | Truthful final status | Open |
 | Upstream queue | Drafted/stale | Refreshed from final `next` | Open |
