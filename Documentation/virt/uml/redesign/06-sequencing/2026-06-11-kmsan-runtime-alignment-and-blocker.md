@@ -144,28 +144,80 @@ KMSAN is not complete yet. The runtime smoke still fails before it can print the
 `KMSAN_SMOKE` marker, so the KMSAN row in the live inventory remains an open
 runtime-fix item.
 
+## Follow-Up Investigation
+
+After the alignment-only fix landed, a second disposable worktree explored the
+next runtime reports. These changes were not made in `next`.
+
+Evidence from that run:
+
+- adding `kmsan_unpoison_memory()` to `kvasprintf()` moved the first report from
+  the kthread-name copy into `prepare_creds()`, but produced a large report
+  stream rather than a passing smoke;
+- adding `kmsan_memmove()` after the credential copy moved the first report
+  into `dup_task_struct()` / scheduler setup;
+- adding `kmsan_memmove()` after UML's dynamic `arch_dup_task_struct()` copies
+  moved the first report again, this time to a stack local in
+  `workqueue.c:init_rescuer()`:
+
+```text
+BUG: KMSAN: uninit-value in save_stack_trace+0x51/0x80
+ string+0x33d/0x4a0
+ vsnprintf+0x1131/0x1d40
+ kvasprintf+0xac/0x3b0
+ __kthread_create_on_node+0x1eb/0x720
+ init_rescuer+0x317/0xa10
+
+Local variable id_buf created at:
+ init_rescuer+0x45/0xa10
+```
+
+The relevant objects in that test build, including `arch/um/kernel/process.o`,
+`kernel/workqueue.o`, and `lib/vsprintf.o`, were compiled with
+`-fsanitize=kernel-memory -fsanitize-memory-param-retval`. That makes a simple
+"object was not instrumented" explanation unlikely.
+
+One tempting source-level cleanup was rejected: replacing UML's
+`arch_dup_task_struct()` with the x86-style `memcpy_and_pad()` pattern. UML's
+dynamic task-struct tail is not padding; `struct thread_struct` contains
+`struct pt_regs regs`, whose `struct uml_pt_regs` ends with the flexible
+`fp[]` register area sized by `host_fp_size`. Copying or initializing that tail
+requires UML-specific FP/register semantics, not a blind zero-fill.
+
+The current hypothesis is therefore narrower: UML still has a KMSAN metadata
+propagation problem around task, stack, or sanitizer context setup. The
+scattershot annotations above move the first observable report but do not prove
+the underlying initialization contract.
+
 ## Non-Landed Experiments
 
-Two experiments were deliberately not landed:
+The following experiments were deliberately not landed:
 
-- `arch/um/kernel/process.c`: unpoisoning the dynamic task-struct allocation was
-  plausible, but the exact smoke run is blocked earlier and did not prove this
-  annotation.
-- `lib/kasprintf.c`: unpoisoning the `kvasprintf()` output advanced the first
-  failure in an earlier experiment, but that is a generic KMSAN behavior change
-  and did not make the smoke pass.
+- `lib/kasprintf.c`: unpoisoning the `kvasprintf()` output is a generic
+  sanitizer behavior change and did not make the smoke pass.
+- `kernel/cred.c`: copying KMSAN metadata after `prepare_creds()`'s `memcpy()`
+  advanced the first report but did not close the runtime smoke.
+- `arch/um/kernel/process.c`: copying KMSAN metadata after UML's dynamic
+  task-struct copy advanced the first report, but did not prove a source-level
+  fix. The dynamic FP-register tail also makes x86-style copy-and-pad semantics
+  inappropriate for UML without a separate design.
 
-Both are investigation leads, not accepted code.
+These are investigation leads, not accepted code.
 
 ## Next Steps
 
-1. Reproduce the first current report with a smaller early-boot trace around
-   `kthread_create_worker_on_node()` and `copy_process()`.
-2. Decide whether the kthread-name allocation should be initialized in generic
-   code, by a narrower KMSAN helper, or by a UML-specific arch boundary.
-3. Re-test after the first report is closed and continue through the follow-on
+1. Inspect UML's KMSAN task and stack initialization contract, especially the
+   interaction between `kmsan_task_create()`, `THREAD_INFO_IN_TASK`,
+   `task_stack_page()`, and `new_thread_handler()`.
+2. Reproduce the `init_rescuer()` `id_buf` report without generic
+   `kvasprintf()` or `cred` annotations and determine why stores through the
+   instrumented `scnprintf()` / `vsnprintf()` path do not leave the stack bytes
+   initialized.
+3. Decide whether UML needs an arch-local KMSAN hook around new task stack
+   setup, context switching, or dynamic `task_struct` copying.
+4. Re-test after the first report is closed and continue through the follow-on
    scheduler and credential reports.
-4. Require `kmsan-smoke` to reach a `KMSAN_SMOKE` result marker before changing
+5. Require `kmsan-smoke` to reach a `KMSAN_SMOKE` result marker before changing
    the inventory status from `Present-needs-runtime-fix`.
-5. Keep any generic KMSAN changes separate from the UML-local vmalloc alignment
+6. Keep any generic KMSAN changes separate from the UML-local vmalloc alignment
    fix unless the evidence proves they are independently correct upstream.

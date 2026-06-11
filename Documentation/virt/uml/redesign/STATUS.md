@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, and KMSAN vmalloc metadata alignment/runtime blocker characterization.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, and follow-up KVM v2 comment cleanup.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -66,6 +66,9 @@ Current source-tree direction:
   internal audit label and temporary-policy wording found in `arch/um`,
   `tools/testing/selftests/um`, and `tools/uml/uml-launcher`. KVM isolation
   reproducers are explicitly documented as diagnostic-only material.
+- Follow-up cleanup removed phase, memo, date, and internal bug labels from the
+  active x86 UML KVM v2 per-task state comments while keeping the state
+  isolation invariants in the source.
 - The old report/deck workspace under `report-presentation/` is marked as a
   historical May 2026 artifact. Its report, slides, comprehensive report,
   generated PDFs, and CSV data point readers back to this status file and the
@@ -133,7 +136,11 @@ The strongest current KVM v2 evidence is:
   is no longer present in the focused smoke log. Runtime closure is still
   open: `kmsan-smoke` fails before its result marker because KMSAN reports
   early uninitialized data paths starting in kthread-name allocation and
-  followed by scheduler and credential setup paths.
+  followed by scheduler and credential setup paths. Follow-up experiments that
+  copied or unpoisoned metadata in `kvasprintf()`, `prepare_creds()`, and UML
+  task duplication moved the first report but did not produce a passing smoke;
+  the current investigation is focused on UML task, stack, and KMSAN context
+  setup rather than landing scattershot annotations.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU

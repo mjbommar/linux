@@ -38,10 +38,6 @@ static int do_set_thread_area(struct task_struct* task, struct user_desc *info)
 	 * os_set_thread_area (ptrace). The stub reads arch_data.
 	 * tls[] + arch_data.sync on its next futex-driven
 	 * round-trip and applies the descriptor before resuming.
-	 * Routed through um_backend->stub_syscall_uses_futex
-	 * per D59 Phase II Lift #4d+ (this call site was not
-	 * originally cataloged in D59; discovered during the
-	 * extern-removal cleanup).
 	 */
 	if (um_backend && um_backend->stub_syscall_uses_futex) {
 		int idx = info->entry_number - host_gdt_entry_tls_min;
@@ -64,11 +60,9 @@ static int do_set_thread_area(struct task_struct* task, struct user_desc *info)
 
 /*
  * sys_get_thread_area: get a yet unused TLS descriptor index.
- * XXX: Consider leaving one free slot for glibc usage at first place. This must
- * be done here (and by changing GDT_ENTRY_TLS_* macros) and nowhere else.
  *
- * Also, this must be tested when compiling in SKAS mode with dynamic linking
- * and running against NPTL.
+ * Reserving a TLS slot for libc would require changing the GDT_ENTRY_TLS_*
+ * range and validating dynamic SKAS/NPTL userspace together.
  */
 static int get_free_idx(struct task_struct* task)
 {
