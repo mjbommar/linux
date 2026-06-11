@@ -52,6 +52,14 @@ as ``VMALLOC_START + offset + KMSAN_VMALLOC_*_OFFSET``; the
 arch/um macros in ``arch/um/include/asm/pgtable.h`` plug
 that arithmetic directly.
 
+``VMALLOC_QUARTER_SIZE`` is rounded down to a page boundary. The
+generic KMSAN vmap path backs the vmalloc shadow and origin ranges with
+page arrays, so the derived ``KMSAN_VMALLOC_SHADOW_START`` and
+``KMSAN_VMALLOC_ORIGIN_START`` addresses must stay page-aligned. Without
+that rounding, a subpage-aligned quarter can make early KMSAN metadata
+mapping fail in ``__vmap_pages_range_noflush()`` before the guest reaches
+the smoke-test init.
+
 Under ``CONFIG_KMSAN=n``, VMALLOC extends to
 ``TASK_SIZE - 2 * PAGE_SIZE`` as before — no impact on
 non-KMSAN builds.
@@ -135,6 +143,16 @@ a planted uninit-read reproducer triggered the
 ``BUG: KMSAN:`` report. Drives via::
 
    make -C tools/testing/selftests/um/kmsan-smoke run_tests
+
+Current status: an LLVM ``uml/research-kmsan`` build passes, and the
+page-aligned vmalloc metadata layout gets past the previous early
+``vmalloc error`` / ``__vmap_pages_range_noflush()`` failure. Runtime
+closure remains open because the smoke guest still reports KMSAN findings
+before it can emit the ``KMSAN_SMOKE`` result marker. The first observed
+path is currently a kthread-name allocation from ``kvasprintf()`` flowing
+into ``copy_process()``, followed by additional scheduler and credential
+paths. Those reports are being tracked as runtime KMSAN initialization
+work rather than as a vmalloc-layout failure.
 
 Further reading
 ===============

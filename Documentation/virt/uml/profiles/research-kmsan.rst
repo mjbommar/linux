@@ -59,6 +59,13 @@ Regression test
 binary and checks that the KMSAN runtime is present. The runner exits
 with kselftest SKIP if the supplied binary was not built with KMSAN.
 
+As of 2026-06-11, a clean LLVM ``uml/research-kmsan`` kernel build passes.
+The runtime smoke now gets past the earlier KMSAN vmalloc shadow/origin
+mapping failure, mounts the hostfs root, and then fails before the
+``KMSAN_SMOKE`` marker because early KMSAN reports are emitted from
+kthread-name allocation and follow-on scheduler/credential paths. Treat
+this profile as buildable but not yet runtime-closed.
+
 See also
 ========
 

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, and kprobes stress validation.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, and KMSAN vmalloc metadata alignment/runtime blocker characterization.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -127,6 +127,13 @@ The strongest current KVM v2 evidence is:
   KVM v2 record log can round-trip time-travel clock advances.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
+- UML KMSAN now has a clean LLVM `uml/research-kmsan` build and the
+  vmalloc metadata ranges used by generic KMSAN are page-aligned. The
+  previous early `__vmap_pages_range_noflush()` / `vmalloc error` failure
+  is no longer present in the focused smoke log. Runtime closure is still
+  open: `kmsan-smoke` fails before its result marker because KMSAN reports
+  early uninitialized data paths starting in kthread-name allocation and
+  followed by scheduler and credential setup paths.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU
@@ -143,6 +150,8 @@ Remaining validation before publication or completion:
 - finish record/replay time, signal, device, and deterministic replay policy
   before counting the original record/replay mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
+- finish KMSAN runtime initialization cleanup so `kmsan-smoke` reaches its
+  result marker and can validate the debugfs/runtime surface;
 - keep the seccomp comparison path green while the KVM v2 series is split;
 - refresh the upstream cover letter and patch boundaries after the cleanup.
 
