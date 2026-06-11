@@ -1,6 +1,6 @@
-// Parent does NOTHING after fork. Child does stack work.
-// If canary fires only in child: the bug is in child's post-fork
-// state (worker mm, CR3, TLB, etc.).
+// Parent exits immediately after fork while the child does stack work.
+// A child-only canary failure points at post-fork child state such as
+// worker mm, CR3, or TLB state.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>

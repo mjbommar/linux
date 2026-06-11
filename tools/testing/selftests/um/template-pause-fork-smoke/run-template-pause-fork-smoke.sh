@@ -18,9 +18,8 @@
 # Exit codes:
 #   0  PASS - all four structural assertions hold.
 #   4  SKIP - kernel lacks CONFIG_UM_TEMPLATE_PAUSE_FORK, or the
-#         documented v1-ceiling secondary hazard (IP=0x4 NULL
-#         function call as the master returns from the loop)
-#         fires.
+#         documented IP=0x4 NULL-call secondary hazard fires as the
+#         master returns from the loop.
 #   1  FAIL - structural progress regressed: teardown didn't
 #         happen, or fork didn't return a positive pid, or
 #         memfd[260:264] didn't get the new child's pid.

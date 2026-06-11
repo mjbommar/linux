@@ -221,10 +221,10 @@ print(f"TPPM_MEMBER_DONE : {done}")
 print(f"identity_fd seen : {identity_logged}")
 print(f"identity-parsed  : {identity_parsed}")
 print(f"Kernel panic     : {panic}")
-print(f"v1 ceiling IP    : {ceiling}")
+print(f"NULL-call IP     : {ceiling}")
 
 if panic or ceiling:
-    print("FAIL: panic or v1-ceiling regression")
+    print("FAIL: panic or NULL-call regression")
     sys.exit(1)
 if pool_enter < 1:
     print("FAIL: no POOL_ENTER from child entry")

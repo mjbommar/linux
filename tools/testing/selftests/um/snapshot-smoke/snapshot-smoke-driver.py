@@ -120,7 +120,7 @@ def main():
 
         # Current status-byte assertion; see comment above.
         if status != 0:
-            print(f"DRV: FAIL status=0x{status:x} (v1 ceiling expects 0)")
+            print(f"DRV: FAIL status=0x{status:x} (expected 0)")
             return 1
 
         # Zombie-drain invariant. After the iteration completes, the parent's loop body runs
@@ -136,9 +136,9 @@ def main():
             capture_output=True, text=True, timeout=5,
         )
         # Each line: "<pid>  <stat>". Zombies carry 'Z' in stat.
-        # Any non-zombie child here means a worker that hasn't exited
-        # yet (not our bug) OR the dispatcher still running (also not
-        # our bug). Count only zombies.
+        # Any non-zombie child here means a worker that has not exited
+        # yet or that the dispatcher is still running. Count only
+        # zombies.
         zombie_lines = [
             line for line in ps.stdout.splitlines()
             if line.split() and "Z" in line.split()[-1]
@@ -157,7 +157,7 @@ def main():
             proc.kill()
             proc.wait()
 
-        print(f"DRV: PASS pid={pid} status=0x{status:x} zombies=0 (v1-ceiling)")
+        print(f"DRV: PASS pid={pid} status=0x{status:x} zombies=0")
         return 0
     except Exception as e:
         print(f"DRV: FAIL exception: {e}")

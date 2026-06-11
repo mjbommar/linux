@@ -1,6 +1,6 @@
 // libc binary that uses raw syscall(SYS_clone) directly to bypass
-// glibc's CLONE_CHILD_SETTID/CLEARTID, see if the bug goes away.
-// Static + libc functions for printf etc, but custom fork.
+// glibc's CLONE_CHILD_SETTID/CLEARTID handling. Static + libc
+// functions for printf etc, but custom fork.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>

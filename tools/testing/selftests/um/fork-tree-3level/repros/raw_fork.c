@@ -1,6 +1,6 @@
-// Raw-syscall fork/wait/exit reproducer. Avoids libc paths to
-// determine if the v2 bug is in libc-glibc-fortify or in the
-// kernel's fork-state-leak. Static, no canary, manual asm.
+// Raw-syscall fork/wait/exit diagnostic. Avoids libc paths so a
+// failure can be attributed to kernel fork-state handling rather than
+// libc startup or fortify checks. Static, no canary, manual asm.
 #define _GNU_SOURCE
 #include <sys/syscall.h>
 

@@ -6,9 +6,9 @@
 // C, without Python interpreter overhead. N pthreads each loop fork()
 // + execve(/bin/true) + waitpid().
 //
-// If the residual reproduces here, the bug is independent of Python's
-// subprocess/threading machinery; it is a kernel-side fork+exec PT
-// race triggered by concurrent worker_thread activity in the same mm.
+// A failure here is independent of Python's subprocess/threading
+// machinery and points at fork+exec page-table state under concurrent
+// worker_thread activity in the same mm.
 //
 // Build:  cc -O0 -static -pthread -o threaded-fork-exec threaded-fork-exec.c
 // Run:    ./threaded-fork-exec [N_WORKERS] [ITERS_PER_WORKER]

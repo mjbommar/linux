@@ -11,7 +11,7 @@
  * time accumulates on the wrong process and SIGVTALRM never fires.
  *
  * test_signal::test_itimer_virtual hangs ~180s in CPython regrtest;
- * this reproducer flags the bug in ~1s wall time.
+ * this reproducer reports the same failure mode in ~1s wall time.
  */
 #define _GNU_SOURCE
 #include <stdio.h>

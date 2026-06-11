@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Reproducer gate for the v2 fork-tree-3level exit-code bug.
+# Regression gate for fork-tree exit-code propagation.
 #
 # Boots UML, runs an init shell that fork()s the test binary which
 # itself fork()s a child and waits for it. The shell then echoes
 # its $? - which encodes the test process's exit code as the kernel
 # reported it.
 #
-# Bug signature: shell sees rc=255 instead of 0 when the test's main
+# Failure signature: shell sees rc=255 instead of 0 when the test's main
 # returned 0. Init kernel-panic exitcode = 0x0000ff00 instead of 0.
-# Only manifests under kvm-v2; seccomp is bit-identical across runs.
+# Use seccomp as the baseline when comparing backend behavior.
 #
 # Exits 0 on PASS, 4 on SKIP, 1 on FAIL - kselftest convention.
 

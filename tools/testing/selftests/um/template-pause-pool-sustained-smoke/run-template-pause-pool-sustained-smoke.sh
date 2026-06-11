@@ -221,11 +221,11 @@ print(f"POOL_ENTER            : {pool_enter}")
 print(f"POOL_REPLICATE_OK     : {replicate_ok}")
 print(f"POOL_REPLICATE_FAIL   : {replicate_fail}")
 print(f"Kernel panic          : {panic}")
-print(f"v1 ceiling regression : {ceiling}")
+print(f"NULL-call regression  : {ceiling}")
 
 # Honest verdict:
 if ceiling:
-    print("FAIL: v1 ceiling regressed")
+    print("FAIL: NULL-call regression")
     sys.exit(1)
 if done < 1:
     if replicate and pool_enter >= 1 and (replicate_ok >= 1 or replicate_fail >= 1):

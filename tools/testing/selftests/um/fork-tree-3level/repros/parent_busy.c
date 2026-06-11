@@ -1,5 +1,5 @@
-// Lots of syscalls in PARENT before fork. If bug rate INCREASES,
-// parent state accumulates. If unchanged, child path is the issue.
+// Adds parent syscall churn before fork to test whether accumulated
+// parent state changes the failure rate.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>

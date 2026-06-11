@@ -860,9 +860,9 @@ fn step8_fork_stress(
     let mut cmd = Command::new("bash");
     cmd.arg(&script);
     cmd.env("UML_BINARY", &fork_kernel);
-    // Use the script's defaults for N / SECS / BLOBS / RSS_DRIFT /
-    // ATTEMPTS.  Override per-mission only if a regression of the
-    // residual v1-ceiling makes the default attempts insufficient.
+    // Use the script's defaults for N / SECS / BLOBS / RSS_DRIFT.
+    // Override per-mission only when a validation run needs different
+    // stress parameters.
 
     let out = cmd.output().context("spawn fork-stress selftest")?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -874,9 +874,7 @@ fn step8_fork_stress(
 
     // Parse per-gate detail rows for the scoreboard.  The selftest
     // script's strict single-attempt format prints G[1-8] lines plus
-    // a final VERDICT line.  (Older versions had a retry harness
-    // with "######## attempt N PASSED" markers; that was removed
-    // when the strict gates landed.)
+    // a final VERDICT line.
     let mut last_iters = String::new();
     let mut last_distinct_pids = String::new();
     let mut last_drift = String::new();

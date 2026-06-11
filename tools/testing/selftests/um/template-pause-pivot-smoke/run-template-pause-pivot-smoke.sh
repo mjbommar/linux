@@ -143,11 +143,11 @@ panic = "Kernel tried to access user memory" in content
 ceiling = "um_template_pause_enter+0xf" in content
 
 print(f"PIVOT_OK count   : {pivot_count}")
-print(f"v1 ceiling panic : {panic or ceiling}")
+print(f"NULL-call panic  : {panic or ceiling}")
 print(f"SIGCONT sent     : {cont_count}")
 
 if panic or ceiling:
-    print("FAIL: v1 ceiling panic present")
+    print("FAIL: NULL-call panic present")
     sys.exit(1)
 if pivot_count < 5:
     print(f"FAIL: too few PIVOT_OK ({pivot_count} < 5)")

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, and current-HEAD syzkaller shim rerun.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, and active selftest wording cleanup.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -83,6 +83,12 @@ Current source-tree direction:
   internal audit label and temporary-policy wording found in `arch/um`,
   `tools/testing/selftests/um`, and `tools/uml/uml-launcher`. KVM isolation
   reproducers are explicitly documented as diagnostic-only material.
+- Follow-up selftest wording cleanup normalized the active fork-tree,
+  template-pause, CPython parity, CVE/KASAN, mmap/signal, snapshot, and
+  launcher mission comments away from branch-history shorthand. The targeted
+  active-source scan is now limited to
+  ordinary kernel vocabulary such as `CONFIG_BUG`, a generic trap.c
+  deadlock-on-bug comment, and launcher cleanup of residual runtime files.
 - Follow-up cleanup removed phase, memo, date, and internal bug labels from the
   active x86 UML KVM v2 per-task state comments while keeping the state
   isolation invariants in the source.
@@ -481,7 +487,7 @@ Current boundary:
   task, timer, or saved-register state, resets inherited timer and hrtimer
   queues, and passes the sustained smoke with `UML_POOL_REPLICATE=1`: three
   members reach `MEMBER_DONE`, `POOL_REPLICATE_OK` appears three times, and no
-  kernel panic or v1 ceiling regression is observed;
+  kernel panic or NULL-call regression is observed;
   `template-pause-pool-member-smoke` also passes, including five timer ticks;
   the
   implementation path is tracked in

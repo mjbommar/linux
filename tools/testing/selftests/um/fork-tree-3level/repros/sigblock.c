@@ -1,5 +1,5 @@
-// Block ALL signals before fork. If bug persists: signal delivery
-// is NOT the cause. If bug disappears: bug is in signal/sigframe path.
+// Block all signals before fork. A persistent failure points away from
+// signal delivery; a clean run points back at signal/sigframe setup.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>

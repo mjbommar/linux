@@ -6,8 +6,7 @@
 # kvm under test) and report module-by-module divergence.
 #
 # Pass criterion: every module's pass/fail count under kvm is
-# >= the same module's count under seccomp. Goal: bit-identical
-# parity once the residual fork+exec staleness is resolved.
+# >= the same module's count under seccomp.
 #
 # Usage:
 #   UML_BINARY=/tmp/uml-kvmint/linux \

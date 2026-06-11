@@ -1173,6 +1173,13 @@ Current state:
   diagnostic-only. The residual active scan is limited to operational terms
   such as init/workload phases, sample BUG log text, proc/stat field numbers,
   and BPF filter syntax.
+- A later active selftest wording pass normalized fork-tree, template-pause,
+  CPython parity, CVE/KASAN, mmap/signal, snapshot, and launcher mission
+  comments away from branch-history shorthand. Validation passed with shell
+  syntax checks, Python bytecode compilation, focused selftest C builds, the
+  seccomp fork-tree smoke, `cargo fmt --check`, `cargo test`, `git diff
+  --check`, and a targeted active-source scan whose remaining hits are
+  ordinary kernel vocabulary.
 
 ## Workstream K: Documentation And Reports
 
@@ -1607,7 +1614,7 @@ timeout --kill-after=5 90 env UML_BINARY=$PWD/linux \
 Result:
 
 - PASS with 20 `PIVOT_OK` observations;
-- no v1 ceiling panic;
+- no NULL-call panic;
 - 20 `SIGCONT` events sent.
 
 ```sh
@@ -1621,7 +1628,7 @@ Result:
 - `POOL_ENTER`, `TPPM_POST_PAUSE`, `TPPM_MEMBER_ALIVE_1`, and
   `TPPM_MEMBER_DONE` were observed;
 - identity fd and identity parsing were observed;
-- no kernel panic and no v1 ceiling IP.
+- no kernel panic and no NULL-call IP.
 
 ```sh
 timeout --kill-after=5 120 env UML_BINARY=$PWD/linux \
@@ -1719,7 +1726,7 @@ Result:
 - iteration 2 left the child-pid write-back slot at `0`, so the master did
   not reach the supervisor-visible pid report;
 - no kernel panic was observed;
-- no v1 ceiling regression was observed;
+- no NULL-call regression was observed;
 - no live UML process remained after process-group teardown;
 - the harness now stamps the current member identity before each take and keeps
   the accepted member alive so the test exercises sustained member ownership,
@@ -1753,7 +1760,7 @@ Runtime replication recheck:
   arming its own fresh tick source;
 - with `UML_POOL_REPLICATE=1`, the sustained harness reaches three
   `MEMBER_DONE` markers, records three nonzero child-pid slots, sees
-  `POOL_REPLICATE_OK` three times, and observes no kernel panic or v1 ceiling
+  `POOL_REPLICATE_OK` three times, and observes no kernel panic or NULL-call
   regression;
 - `template-pause-pool-member-smoke` also passes with
   `UML_POOL_REPLICATE=1`, including five timer ticks.

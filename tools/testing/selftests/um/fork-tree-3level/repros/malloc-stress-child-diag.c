@@ -81,8 +81,8 @@ static void segv_handler(int sig, siginfo_t *si, void *ucv)
 		(unsigned long long)regs[REG_R15]);
 
 	/* Dump XMM register state to detect cross-task FPU leaks.
-	 * If the bug is that glibc's MOVUPS write of fd+bk lost the high
-	 * half (bk = 0), then xmm0 at fault time may show the corruption.
+	 * If glibc's MOVUPS write of fd+bk lost the high half (bk = 0),
+	 * then xmm0 at fault time may show the corruption.
 	 * Note: by the time SIGSEGV handler runs, the user code may have
 	 * advanced past the MOVUPS, but XMM0..XMM15 should still have
 	 * the values from the failed write context. */
@@ -163,7 +163,7 @@ int main(void)
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGSEGV, &sa, NULL);
 
-	/* SIGABRT for the glibc heap-integrity check residual case. */
+	/* SIGABRT for glibc heap-integrity failures. */
 	sa.sa_sigaction = abrt_handler;
 	sigaction(SIGABRT, &sa, NULL);
 

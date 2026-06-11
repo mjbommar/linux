@@ -10,12 +10,9 @@
 #
 #   G1.  master alive throughout - NO kernel panics anywhere in the
 #        boot log.  A panic mid-loop fails this gate even if master
-#        managed several iters first.  This is the toughest gate
-#        and exposes a known kernel race: wait_stub_done_seccomp with
-#        pid=-1 reached via an unisolated kernel path, sending
-#        SIGSEGV to current and killing init.  A failure here means
-#        the kernel path needs more work, not that the gate should be
-#        relaxed.
+#        managed several iters first.  A failure here means the
+#        fork-on-resume path needs more work, not that the gate should
+#        be relaxed.
 #   G2.  all observed child pids distinct - catches SKAS aliasing.
 #   G3.  RSS drift <= 5% across samples - per-iter leak detector.
 #   G4.  zero post-teardown live orphans (any seen child still
@@ -26,15 +23,13 @@
 #        line in the kernel log must parse to a stress-blob-NNNNN
 #        name with no torn-read corruption.
 #   G7.  zero kernel panics in the boot log.  Each M-fork child's
-#        in-kernel exit_group path used to emit "Kernel tried to
-#        access user memory" panics - those are real kernel bugs,
-#        not a free pass.  Production cannot ship with thousands
-#        of per-second kernel panics in /var/log/messages.
+#        in-kernel exit_group path must not emit "Kernel tried to
+#        access user memory" panics.
 #   G8.  side-channel verification: harness-side /proc sampling
 #        of master's direct children must approximately match the
 #        kernel-log "torn down" iteration count.  If they diverge,
-#        either the kernel is lying about iterations OR the
-#        harness sampling is broken - both are bugs.
+#        either kernel iteration reporting or harness sampling is
+#        wrong.
 #
 # Exit codes per kselftest convention:
 #   0 PASS - all gates hold.
@@ -60,10 +55,8 @@ set -u
 
 KERNEL=${UML_BINARY:-$HOME/src/uml-builds/uml-tplpause-fork/linux}
 # G5 minimum iterations.
-# The kernel still has a residual race where master may die mid-loop
-# with wait_stub_done_seccomp pid=-1.  When the race hits, this test
-# legitimately fails; that is the signal that the kernel path needs
-# more work, not a reason to lower N.
+# Keep the default stress size high enough to catch fork-on-resume
+# regressions without making routine smoke runs prohibitively long.
 N=${UM_FORK_STRESS_N:-100}
 SECS=${UM_FORK_STRESS_SECS:-10}
 BLOBS=${UM_FORK_STRESS_BLOBS:-20}

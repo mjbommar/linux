@@ -13,7 +13,7 @@
  *   6. sigsuspend wait, capture how many SIGALRMs fire over 500 ms
  *
  * If output shows SIGALRMs arriving post-swap, the host kernel
- * preserves signal delivery and the UML-side bug is elsewhere.
+ * preserves signal delivery and the failure is UML-side.
  *
  * If output shows ZERO SIGALRMs post-swap, this is a host-kernel
  * signal-delivery regression.
