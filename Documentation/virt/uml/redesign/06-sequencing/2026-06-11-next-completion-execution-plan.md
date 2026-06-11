@@ -353,6 +353,9 @@ Current state:
 - Launcher-owned fd handoff, multiqueue fd handoff, in-process TAP, failed-open
   validation, sandbox audit, pool TAP reopen, and long seccomp Tier 3 evidence
   exist.
+- Current-head rebuilt `98166580dc4f` validation adds fresh vector2 KUnit
+  evidence, focused live smoke reruns, and a bounded KVM-v2/vector2 Tier 3
+  path smoke for one Django-v2 and one FastAPI-v2 iteration.
 - GRE/L2TPv3 helpers are parser/header coverage only.
 - Raw, proxy, VDE, BESS, and hybrid transports are not current netdev runtime
   transports.
@@ -360,7 +363,8 @@ Current state:
 Remaining tasks:
 
 - Finish the natural seccomp/vector2 long run.
-- Run the same Tier 3 workload family under KVM v2.
+- Run the same full Tier 3 workload family under KVM v2; the one-iteration
+  Django-v2/FastAPI-v2 path smoke is not the full gate.
 - Add or refresh multiqueue fairness and performance gates.
 - Keep Kconfig/help text from saying v2 supersedes legacy vector until the
   publication gates justify that claim.

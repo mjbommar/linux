@@ -2,7 +2,7 @@
 
 **Status:** current gate tracker; not replacement approval.
 **Initial date:** 2026-05-17.
-**Last updated:** 2026-06-10 against `next`.
+**Last updated:** 2026-06-11 against `next`.
 **Audit ref:** `46-uml-vector-driver-v2-code-audit-2026-05-17.md`
 §P4.3, §P4.4, §P4.5.
 
@@ -23,18 +23,38 @@ implemented runtime netdev transports.
 | --- | --- | --- |
 | Kconfig/publication claim | Current and bounded: v2 remains `default n`, legacy vector is not deprecated, and docs avoid saying vector2 supersedes legacy vector. | Do not flip defaults or deprecate legacy until the replacement gates below pass. |
 | Runtime transport scope | TAP and inherited fd are the only current vector2 runtime netdev transports. Parser-only transports fail explicitly from the netdev open path. | New runtime transports need backend code plus live smokes before entering the claim. |
-| Launcher-owned fd handoff | PASS on 2026-06-10 through `vector2-fd-handoff-smoke`. | Keep in CI/preflight. |
-| Pool-member TAP handoff | PASS on 2026-06-10 through `vector2-pool-tap-smoke`. Per-take pool fd handoff is retired from the current completion claim. | Keep validating the TAP reopen path used by pool members. |
-| fd multiqueue smoke | PASS on 2026-06-10 through `vector2-fd-multiqueue-smoke`. | Add fairness and performance acceptance data. |
-| Trusted in-process TAP | PASS on 2026-06-10 through `vector2-inproc-tap-smoke`. | Keep explicit; do not treat it as sandboxed mode. |
-| Sandbox audit | PASS on 2026-06-10 through `vector2-sandbox-audit`. | Keep CI/preflight coverage aligned with launcher-managed configs. |
+| Launcher-owned fd handoff | PASS on 2026-06-11 through `vector2-fd-handoff-smoke` on rebuilt `98166580dc4f`. | Keep in CI/preflight. |
+| Pool-member TAP handoff | PASS on 2026-06-11 through `vector2-pool-tap-smoke` on rebuilt `98166580dc4f`. Per-take pool fd handoff is retired from the current completion claim. | Keep validating the TAP reopen path used by pool members. |
+| fd multiqueue smoke | PASS on 2026-06-11 through `vector2-fd-multiqueue-smoke` on rebuilt `98166580dc4f`. | Add fairness and performance acceptance data. |
+| Trusted in-process TAP | PASS on 2026-06-11 through `vector2-inproc-tap-smoke` on rebuilt `98166580dc4f`. | Keep explicit; do not treat it as sandboxed mode. |
+| Sandbox audit | PASS on 2026-06-11 through `vector2-sandbox-audit` on rebuilt `98166580dc4f`. | Keep CI/preflight coverage aligned with launcher-managed configs. |
 | Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
 | Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
-| KVM v2 Tier 3 | Open. June 10 KVM-v2 fixes make this worth rerunning, but focused dynamic-userspace and snapshot gates do not substitute for a KVM-v2/vector2 Tier 3 pass. | Run the same Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
+| KVM v2 Tier 3 | Partial current-head smoke: rebuilt `98166580dc4f` passed one KVM-v2/vector2 iteration each for `tier3-django-v2` and `tier3-fastapi-v2`, including `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. | Run the same full Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
 | Perf/fairness/KCSAN breadth | Partial. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. | Finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
 
 The sections below preserve the original three gate definitions and their
 acceptance bars.
+
+## 2026-06-11 Current-HEAD Refresh
+
+`06-sequencing/2026-06-11-vector2-current-head-validation.md` records a
+current-head vector2 refresh on rebuilt `98166580dc4f`
+(`7.1.0-rc7-00188-g98166580dc4f`):
+
+  - `um_vector2_*` KUnit: 84 pass, 0 fail, 2 trusted-TAP skips;
+  - `vector2-fd-handoff-smoke`: PASS;
+  - `vector2-fd-multiqueue-smoke`: PASS;
+  - `vector2-inproc-tap-smoke`: PASS;
+  - `vector2-sandbox-audit`: PASS, `PASS=1/1 FAIL=0 TIMEOUT=0`;
+  - `vector2-pool-tap-smoke`: PASS; and
+  - bounded KVM-v2/vector2 Tier 3 smoke: Django-v2 1/1 PASS and
+    FastAPI-v2 1/1 PASS, both with `SERVER_READY`,
+    `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`.
+
+This refresh improves confidence in the current stack but does not close the
+replacement gates: P4.3 perf parity, P4.4 natural 7200-second seccomp soak,
+and full P4.5 KVM-v2/fairness breadth remain open.
 
 ## P4.3 — performance parity acceptance gate
 
@@ -122,9 +142,9 @@ KCSAN coverage so far:
   - 2-queue/6-flow + paced 8-flow/4-queue PASS.
 
 Missing:
-  - kvm-v2 reruns on the current final vector2 stack; June 10 KVM-v2
-    fixes removed the old reason to defer this, but they do not replace
-    KVM-v2/vector2 Tier 3 evidence;
+  - full kvm-v2 reruns on the current final vector2 stack; the June 11
+    one-iteration Django-v2/FastAPI-v2 smoke proves the path is runnable, but
+    it does not replace full KVM-v2/vector2 Tier 3 evidence;
   - longer fairness profiles (10k iters minimum on each
     queue-count + flow-count combination);
   - additional host/kernel coverage:

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, and current-HEAD pool/fork/syzkaller regression evidence.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, and current-HEAD vector2 validation evidence.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -204,6 +204,15 @@ run:
   and a single queue;
 - logs reached the expected server-ready and guest-request success markers;
 - teardown left no matching soak process or stray TAP device.
+- A bounded KVM-v2/vector2 Tier 3 current-head smoke on rebuilt
+  `98166580dc4f` passed one Django-v2 and one FastAPI-v2 iteration. Both rows
+  recorded vector2, TAP transport, KVM-v2 backend, in-process host mode, and a
+  single queue, and both logs reached `SERVER_READY`,
+  `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. This is a
+  path smoke, not the full KVM-v2 Tier 3 publication gate.
+- Current-head `um_vector2_*` KUnit passes on rebuilt `98166580dc4f`: 84 pass,
+  0 fail, 2 trusted-TAP skips across config, queue, transport, fake-host,
+  model, cmdline, netdev, ethtool, host-fd, and host-tap suites.
 - A focused `vector2-fd-multiqueue-smoke` now validates launcher-owned fd
   multiqueue handoff: `umlctl up` creates a multiqueue TAP, opens four TAP
   fds, inherits fd range 200..203, the guest reports `UMLCTL_NETWORK_QUEUES=4`
@@ -238,8 +247,8 @@ older post-May-19 default-flip summaries are historical branch snapshots.
 Open vector2 publication work:
 
 - finish a natural 7200-second seccomp/vector2 run;
-- rerun the same Tier 3 coverage on KVM v2 now that the backend flake is
-  closed;
+- complete the same Tier 3 coverage on KVM v2 now that the current-head
+  one-iteration Django-v2/FastAPI-v2 path smoke passes;
 - expand fairness and performance coverage for multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
@@ -336,6 +345,10 @@ Current boundary:
 - `vector2-sandbox-audit` validates the untrusted vector2 fd boot audit:
   `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot
   and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations;
+- a bounded KVM-v2/vector2 Tier 3 smoke now validates the same network path
+  under the KVM-v2 backend for one Django-v2 and one FastAPI-v2 iteration on
+  rebuilt `98166580dc4f`; both logs reached `SERVER_READY`,
+  `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`;
 - vector2 parser-only transports are explicitly outside the current runtime
   transport claim: only TAP and inherited fd are netdev-backed; raw, GRE,
   L2TPv3, hybrid, BESS, VDE, and proxy return `-EOPNOTSUPP` from the netdev
