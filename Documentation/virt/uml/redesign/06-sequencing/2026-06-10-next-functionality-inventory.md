@@ -128,7 +128,7 @@ This file is the live execution tracker for
 | Selftests | local stress/soak tests | Present | `next`, `umlctl-deploy` | Keep under clear local/soak docs. | selected soak gates. |
 | Selftests | historical repros | Present/needs-cleanup | all branches | Move or mark archival. KVM FPU isolation reproducers are now explicitly diagnostic-only and outside the UML kselftest pass/fail gate. | Continue archival grep for diary/internal labels in broader historical repro material. |
 | Docs | `STATUS.md` | Present-current | `next` | Update after every landed workstream. | status review updated with launcher/selftest curation boundary, 2026-06-10. |
-| Docs | old reports/presentations | Present-stale | `next`, historical docs | Refresh or mark historical. | docs audit. |
+| Docs | old reports/presentations | Archived-historical | `next`, historical docs | Keep the May 2026 report/deck workspace as explicitly historical unless a future report refresh freezes a new `next` cutoff and regenerates the data, TeX, and PDFs from the live inventory. | `report-presentation/README.md` and `PLAN.md` mark the workspace archival; shared TeX/report/slides/comprehensive sources carry archive notices; `status_kpis.csv` is marked historical; tracked report, slides, and comprehensive PDFs rebuild with `make all`, 2026-06-10. |
 | Docs | snapshot ELF docs | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Re-audit against imported kernel code and fresh exported core. | trigger/symbol grep. |
 | Docs | active UML user docs | Present-cleaned | `next` | Keep non-redesign UML docs focused on current interfaces and limitations, not workstream history. | Normalized ftrace, kprobes, KMSAN, debugfs, section-split, snapshot/forkserver, launcher, APERF/MPERF, and profile docs; focused scan over non-redesign `Documentation/virt/uml/*.rst` now has no standalone workstream/decision/memo/phase-history labels apart from an OpenWrt sample `#0` line, 2026-06-10. |
 | Docs | vector2 validation docs | Present-needs-update | `next` | Align with final gates. | docs audit. |
@@ -197,10 +197,11 @@ These items must be closed before the final branch can be called complete:
    pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff
    now have dedicated smoke gates; per-take pool fd handoff has been retired
    from the current completion claim in favor of the validated TAP reopen path.
-4. Old reports and presentations still need final archival marking. Focused
-   scans over active source, launcher, selftests, and non-redesign UML docs are
-   clean for the targeted standalone planning-label patterns as of 2026-06-10,
-   with residual matches limited to operational wording and test fixtures.
+4. Focused scans over active source, launcher, selftests, and non-redesign UML
+   docs are clean for the targeted standalone planning-label patterns as of
+   2026-06-10, with residual matches limited to operational wording and test
+   fixtures. The old report/deck workspace is now explicitly archived as
+   historical May 2026 material.
 5. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, and KVM v2 dynamic-loader TLS closure.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, and KVM v2 dynamic-loader TLS closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -62,6 +62,10 @@ Current source-tree direction:
   internal audit label and temporary-policy wording found in `arch/um`,
   `tools/testing/selftests/um`, and `tools/uml/uml-launcher`. KVM isolation
   reproducers are explicitly documented as diagnostic-only material.
+- The old report/deck workspace under `report-presentation/` is marked as a
+  historical May 2026 artifact. Its report, slides, comprehensive report,
+  generated PDFs, and CSV data point readers back to this status file and the
+  live sequencing inventory for current completion claims.
 
 ## Validation Snapshot
 
@@ -414,6 +418,8 @@ Before treating UML v2 as publishable, verify:
 - checkpatch on changed KVM v2 patches has no unexplained warnings;
 - public docs describe the design and validation state, not the development
   history;
+- old generated reports and slide decks are either rebuilt from the final
+  inventory or visibly archived as historical artifacts;
 - historical-only experiments are either imported with tests or clearly marked
   as not part of the completed branch.
 

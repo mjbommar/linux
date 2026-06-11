@@ -125,8 +125,10 @@ The active blockers are now:
    facing code is free of internal issue numbers, phase diaries, random
    history, and stale claims. A focused active-source pass has removed the
    remaining internal audit label and temporary-policy comments found in
-   active UML source/selftest/launcher paths; old reports and presentations
-   remain the larger historical/archive cleanup.
+   active UML source/selftest/launcher paths. The May 2026 report/deck
+   workspace is now explicitly archived and rebuilt with archive notices; any
+   future report refresh must freeze a new `next` cutoff and regenerate data
+   from the live inventory.
 
 Execution discipline for the remaining work:
 
@@ -1127,9 +1129,14 @@ Current state:
   standalone workstream, decision-log, memo, phase-history, or future-phase
   labels in `*.rst` files except a real OpenWrt sample kernel version line
   containing `#0`.
-- Remaining documentation cleanup is now the historical/reporting side:
-  old reports, presentations, and redesign archive material must either stay
-  clearly historical or be refreshed from final `next`.
+- The May 2026 report/deck workspace under `report-presentation/` is now
+  marked historical in `README.md`, `PLAN.md`, the shared TeX metadata, report
+  source, slide source, comprehensive report source, and `status_kpis.csv`.
+  The tracked report, slide, and comprehensive PDFs were rebuilt from those
+  sources with `make all`.
+- Remaining documentation cleanup is now the broader redesign archive side:
+  old research notes must either stay clearly historical or be refreshed from
+  final `next` if they become user-facing evidence again.
 
 ## Workstream L: Upstream Series Readiness
 

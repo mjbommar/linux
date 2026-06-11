@@ -5,3 +5,6 @@ build/report/*
 !build/slides/
 build/slides/*
 !build/slides/uml-redesign-slides.pdf
+!build/comprehensive/
+build/comprehensive/*
+!build/comprehensive/uml-comprehensive-report.pdf

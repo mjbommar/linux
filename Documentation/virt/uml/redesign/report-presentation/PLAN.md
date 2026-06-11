@@ -1,5 +1,24 @@
 # Report / Presentation Plan
 
+## Historical Status
+
+This directory is an archival May 2026 publishing workspace. The report,
+slides, comprehensive report, generated PDFs, and CSV data remain useful as
+historical material and structure references, but they are not current status
+documents for UML v2.
+
+Use the live status files for completion claims:
+
+- `../STATUS.md`
+- `../06-sequencing/2026-06-10-next-functionality-inventory.md`
+- `../06-sequencing/2026-06-10-next-full-functionality-integration-plan.md`
+
+Any future report refresh must first freeze a new `next` cutoff commit,
+regenerate the data tables from the live inventory, and rebuild the report and
+deck from that cutoff. Until that happens, do not treat old branch names,
+commit IDs, validation counts, snapshot/record-replay claims, or upstream queue
+status in this directory as current truth.
+
 ## Purpose
 
 Create a small publishing workspace under `Documentation/virt/uml/redesign/`

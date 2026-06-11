@@ -1,13 +1,14 @@
 metric;value
-Reporting date;current
+Artifact status;historical May 2026 reporting data - current UML v2 status lives in Documentation/virt/uml/redesign/STATUS.md and the live sequencing inventory
+Reporting date;May 2026 historical cutoff
 Cutoff commit;fffd84d83955
 Branch;umlctl-deploy
 Redesign docs;276 files
-KVM v2 implementation state;guest entry, syscall dispatch, exceptions, signals, SMP repair, post-gadget performance, and host resource controls (SMP-T78-T84) in tree; KVM-specific snapshot and record/replay experiments removed from active series; umlctl mission gate operational
-Functional parity;cpython-parity 21/21 under UP and SMP; Round-14 Django cache-flake closed via SMP-T73 (YMM-upper XSAVE leak) with 220/220 validation soak
+KVM v2 implementation state;guest entry, syscall dispatch, exceptions, signals, SMP repair, post-gadget performance, and host resource controls (SMP-T78-T84) in tree, KVM-specific snapshot and record/replay experiments removed from active series, umlctl mission gate operational
+Functional parity;cpython-parity 21/21 under UP and SMP, Round-14 Django cache-flake closed via SMP-T73 (YMM-upper XSAVE leak) with 220/220 validation soak
 Substrate gate;kvm-v2 PASS=25 FAIL=3 XFAIL=3 matching seccomp
 Retired experiments;KVM-specific snapshot/ELF export and record/replay removed from active backend series
-umlctl mission validation;6/6 steps PASS in ~15min wall-clock; 100/100 soak; 0 panics / 0 SIGBUS / 0 high-cr2
-Vector2 seccomp Tier 3;requested-stop 6142/7200s; 970/970 PASS; Django-v2 490/490; FastAPI-v2 480/480
-Cross-host benchmark;micro 193x-908x; Python 2.99x-4.06x; stress 3.71x-8.72x faster than seccomp
-Open formal gate;24h long-tail wall-clock soak; Series 7 LKML cover-letter refresh + submission
+umlctl mission validation;6/6 steps PASS in ~15min wall-clock, 100/100 soak, 0 panics / 0 SIGBUS / 0 high-cr2
+Vector2 seccomp Tier 3;requested-stop 6142/7200s, 970/970 PASS, Django-v2 490/490, FastAPI-v2 480/480
+Cross-host benchmark;micro 193x-908x, Python 2.99x-4.06x, stress 3.71x-8.72x faster than seccomp
+Open formal gate;24h long-tail wall-clock soak, Series 7 LKML cover-letter refresh + submission
