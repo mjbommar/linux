@@ -99,8 +99,7 @@ pub struct MissionArgs {
     /// Opt-in vector2 stress step for kvm-v2 with the tier3-django-v2
     /// workload. Requires host-side
     /// TAP + iptables capability (sudo -n). This catches vector2-side
-    /// regressions before treating vector2 as the default network
-    /// path.
+    /// regressions in the default umlctl-managed vector2 TAP/fd path.
     #[arg(long)]
     pub with_vector2: bool,
 
@@ -647,7 +646,7 @@ fn step5_diverse_soak(
 
 /// Vector2 stress step (opt-in, --with-vector2): stress the vector2 network driver
 /// under kvm-v2 with the tier3-django-v2 workload.  This is the
-/// mission-level check for treating vector2 as the default network path.
+/// mission-level check for the default umlctl-managed vector2 TAP/fd path.
 ///
 /// Drives the run-soak-daemon.sh harness with N iterations of
 /// tier3-django-v2 (which routes the {{NETWORK_DRIVER}} template

@@ -777,7 +777,9 @@ Required functionality:
 Publication rule:
 
 - `CONFIG_UML_NET_VECTOR_V2` can stay `default n`, but documentation must not
-  say legacy vector is superseded until v2 passes replacement gates.
+  say legacy vector is superseded until v2 passes replacement gates. Current
+  status: Kconfig/help text now keeps v2 opt-in and names TAP/fd as the
+  current vec2 runtime netdev scope.
 
 Acceptance gates:
 

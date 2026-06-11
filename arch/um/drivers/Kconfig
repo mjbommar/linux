@@ -125,21 +125,18 @@ menu "UML Network Devices"
 	depends on NET
 
 config UML_NET_VECTOR
-	bool "Vector I/O high performance network devices (legacy)"
+	bool "Vector I/O high performance network devices"
 	select MAY_HAVE_RUNTIME_DEPS
 	help
-	  Legacy UML vector network driver, superseded by
-	  CONFIG_UML_NET_VECTOR_V2 for new deployments.
+	  Build the existing UML vector network driver.
 
 	  This driver uses multi-message send and receive functions.
 	  The host running the UML guest must have a linux kernel
 	  version above 3.0 and a libc version > 2.13.  Provides tap,
 	  raw, gre and l2tpv3 network transports.
 
-	  Kept for existing deployments and for the remaining raw, gre,
-	  and l2tpv3 transports that are not available in vec2.
-
-	  For new deployments, prefer CONFIG_UML_NET_VECTOR_V2.
+	  Keep this enabled when existing configurations rely on vec0,
+	  raw, gre or l2tpv3 transports.
 
 	  For more information, including explanations of the networking
 	  and sample configurations, see
@@ -156,8 +153,13 @@ config UML_NET_VECTOR_V2
 	  parsing, explicit queue ownership, host backends, and netdev
 	  integration for vec2 devices.
 
-	  Say Y to enable vec2 devices. Say N to use the existing vector
-	  driver only.
+	  The current vec2 netdev path supports TAP and inherited fd
+	  backends. Other transport names are either parser compatibility
+	  coverage or protocol-helper coverage and are not runtime netdev
+	  transports.
+
+	  Say Y to enable opt-in vec2 TAP/fd devices. Say N to use the
+	  existing vector driver only.
 
 config UML_NET_VECTOR_V2_INPROC
 	bool "Permit vector networking v2 trusted in-process host operations"

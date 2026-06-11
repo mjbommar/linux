@@ -352,9 +352,9 @@ impl Default for NetworkSection {
     fn default() -> Self {
         Self {
             mode: "none".into(),
-            // vector2 is the default network driver.  Users who need
-            // vec0 can opt back via `[network].driver = "vector"`;
-            // tap_name, IP, and port plumbing keep the same shape.
+            // vector2 is the default for umlctl-managed TAP/fd
+            // networking. Users who need vec0 or legacy-only
+            // transports can opt back via `[network].driver = "vector"`.
             driver: "vector2".into(),
             host_mode: "auto".into(),
             queues: NetworkQueueSpec::default(),

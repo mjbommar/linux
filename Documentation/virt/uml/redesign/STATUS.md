@@ -125,6 +125,9 @@ run:
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
   guards that parser-only transports fail explicitly with `-EOPNOTSUPP`
   instead of being counted as implemented runtime transports.
+- Kconfig now keeps v2 opt-in without saying the existing vector driver is
+  superseded or telling new deployments to prefer v2. The v2 help text names
+  TAP and inherited fd as the current netdev runtime scope.
 
 Open vector2 publication work:
 
