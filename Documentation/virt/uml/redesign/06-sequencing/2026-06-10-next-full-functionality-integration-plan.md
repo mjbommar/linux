@@ -856,9 +856,10 @@ Acceptance gates:
 - `cargo test`
 - launcher smoke. Current status: PASS on 2026-06-10 through
   `umlctl-smoke` and `launcher-smoke`.
-- deploy smoke. Current status: active Umlfile deployment path is covered by
-  `cargo test` and `umlctl-smoke`; historical `umlctl-deploy` example
-  comparison remains open.
+- deploy smoke. Current status: PASS on 2026-06-10. The current and
+  historical `umlctl-deploy` example/profile file sets match, all 18 example
+  Umlfiles pass `UML_KERNEL=$PWD/linux umlctl up --dry-run`, and all 5
+  built-in profiles resolve with `umlbuild profile show`.
 - gate dry run. Current status: PASS on 2026-06-10 through
   `umlctl gate run --dry-run` against
   `tools/testing/selftests/um/gates/launcher-cargo.toml`.

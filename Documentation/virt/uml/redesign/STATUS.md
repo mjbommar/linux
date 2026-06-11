@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 launcher and umlbuild validation.
+Last updated: 2026-06-10 launcher, deploy, and umlbuild validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -288,7 +288,11 @@ developer-facing paths:
 - `umlctl gate run --dry-run` passes against
   `tools/testing/selftests/um/gates/launcher-cargo.toml`;
 - `run-bpftrace-validate.sh` attaches all five transparency scripts, with
-  syscalls and sched producing idle UML data; and
+  syscalls and sched producing idle UML data;
+- historical `umlctl-deploy` comparison found no missing example or profile
+  TOML files; all 18 example Umlfiles pass `umlctl up --dry-run` with the
+  current `./linux` build, and all 5 built-in profiles resolve with
+  `umlbuild profile show`; and
 - `run-umlbuild-mvp.sh` passes when `UMLBUILD_SOURCE` points at a clean
   temporary source worktree and the already-built debug `umlbuild`/`umlctl`
   binaries are supplied. The selftest now accepts `UMLBUILD_SOURCE`,
@@ -297,9 +301,7 @@ developer-facing paths:
   products.
 
 The active deployment path is `umlctl up/down` with Umlfile parsing, not a
-separate `deploy` subcommand. Historical `umlctl-deploy` examples still need a
-final comparison pass so useful configs are either imported or explicitly
-retired.
+separate `deploy` subcommand.
 
 ## Historical-Only Work
 
