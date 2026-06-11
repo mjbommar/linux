@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, and substrate gate tightening.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, and CPython tier-0 gate evidence.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -84,6 +84,10 @@ The strongest current KVM v2 evidence is:
 
 - CPython parity: 21/21 curated standard-library modules match the seccomp
   backend under both UP and SMP configurations.
+- CPython tier-0 gate: `umlctl gate run` passes under both seccomp and KVM v2
+  on the current `./linux` binary. Each backend reports `pass=1 fail=0
+  expected_fail=0`, and the extracted hashlib empty-string SHA-256 metric
+  matches across backends.
 - Substrate gate: seccomp reports 25 pass, 3 fail, and 3 expected-fail
   results; KVM v2 reports 27 pass, 3 fail, and 1 expected-fail result on the
   same repro set. The `regrtest-substrate` gate now uses 25 as the shared pass
@@ -481,6 +485,8 @@ Before treating UML v2 as publishable, verify:
 - `make ARCH=um O=<build-dir> -j$(nproc) vmlinux` passes on the cleaned tree;
 - KVM v2 KUnit suites pass in the configured UML build;
 - CPython parity remains 21/21 against seccomp;
+- `cpython-tier0` continues to pass through `umlctl gate run` for both seccomp
+  and KVM v2;
 - the substrate gate stays at or above the current shared floor: seccomp
   `PASS=25 FAIL=3 EXPECTED_FAIL=3`, KVM v2
   `PASS=27 FAIL=3 EXPECTED_FAIL=1`;

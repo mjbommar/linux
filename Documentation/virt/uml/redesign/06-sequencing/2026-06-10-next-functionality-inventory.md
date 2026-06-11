@@ -154,6 +154,10 @@ This file is the live execution tracker for
 - KVM v2 dynamic-loader/TLS startup now passes the focused gates: forced-KVM
   `/bin/true` reaches clean init exit with `exitcode=0`, and the dyn-loader
   kselftest reports `DYN_LOADER: backend=kvm PASS`.
+- CPython tier-0 now passes through the current `umlctl gate run` path on the
+  same `./linux` binary under both seccomp and KVM v2. Both backends report
+  `pass=1 fail=0 expected_fail=0`, and both extract the same hashlib
+  empty-string SHA-256 metric.
 - KVM v2 snapshot capture/restore and snapshot ELF64 export source is present
   on `next` and builds with `make ARCH=um -j16`.
 - KVM v2 snapshot KUnit coverage is present on `next` and passes under
