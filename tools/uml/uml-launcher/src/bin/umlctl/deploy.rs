@@ -21,6 +21,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::Error as DeError;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fs;
@@ -142,7 +143,7 @@ impl Default for RuntimeSection {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct NetworkSection {
     /// "none" (default) or "tap".
     pub mode: String,
@@ -174,7 +175,6 @@ pub struct NetworkSection {
     /// driver while mode=none" (error) from "user left it unset and
     /// the default flowed in" (fine).  Skipped on serialize so
     /// round-tripped manifests don't accumulate this metadata.
-    #[serde(skip)]
     pub driver_explicit: bool,
 }
 
@@ -246,6 +246,37 @@ impl<'de> serde::Deserialize<'de> for NetworkSection {
             ports: r.ports,
             driver_explicit,
         })
+    }
+}
+
+impl Serialize for NetworkSection {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let include_driver = self.driver_explicit
+            || self.mode == "tap"
+            || self.driver != NetworkSection::default().driver;
+        let fields = 10 + usize::from(include_driver) + usize::from(self.fail_open_after.is_some());
+        let mut st = serializer.serialize_struct("NetworkSection", fields)?;
+
+        st.serialize_field("mode", &self.mode)?;
+        if include_driver {
+            st.serialize_field("driver", &self.driver)?;
+        }
+        st.serialize_field("host_mode", &self.host_mode)?;
+        st.serialize_field("queues", &self.queues)?;
+        if let Some(fail_open_after) = self.fail_open_after {
+            st.serialize_field("fail_open_after", &fail_open_after)?;
+        }
+        st.serialize_field("tap_name", &self.tap_name)?;
+        st.serialize_field("guest_ip", &self.guest_ip)?;
+        st.serialize_field("host_ip", &self.host_ip)?;
+        st.serialize_field("gateway", &self.gateway)?;
+        st.serialize_field("nameservers", &self.nameservers)?;
+        st.serialize_field("masquerade_via", &self.masquerade_via)?;
+        st.serialize_field("ports", &self.ports)?;
+        st.end()
     }
 }
 
@@ -1854,6 +1885,61 @@ fail_open_after = 2
         assert!(s.contains("export UMLCTL_NETWORK_FAIL_OPEN_AFTER='2'"));
         let labels = network_plan_labels(&plan);
         assert!(labels.contains(&"umlctl.network.fail_open_after=2".to_string()));
+    }
+
+    #[test]
+    fn implicit_default_network_driver_survives_round_trip() {
+        let u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(u.network.driver, "vector2");
+        assert!(!u.network.driver_explicit);
+        validate_network_section(&u.network, &u.runtime).unwrap();
+
+        let serialized = toml::to_string_pretty(&u).unwrap();
+        assert!(!serialized.contains("driver ="));
+
+        let round_tripped: Umlfile = toml::from_str(&serialized).unwrap();
+        assert_eq!(round_tripped.network.driver, "vector2");
+        assert!(!round_tripped.network.driver_explicit);
+        validate_network_section(&round_tripped.network, &round_tripped.runtime).unwrap();
+    }
+
+    #[test]
+    fn explicit_none_network_driver_remains_rejected_after_round_trip() {
+        let u: Umlfile = toml::from_str(
+            r#"
+schema_version = 1
+[instance]
+name = "demo"
+[kernel]
+path = "/x"
+[network]
+mode = "none"
+driver = "vector"
+"#,
+        )
+        .unwrap();
+
+        assert!(u.network.driver_explicit);
+        assert!(validate_network_section(&u.network, &u.runtime).is_err());
+
+        let serialized = toml::to_string_pretty(&u).unwrap();
+        assert!(serialized.contains("driver = \"vector\""));
+
+        let round_tripped: Umlfile = toml::from_str(&serialized).unwrap();
+        assert!(round_tripped.network.driver_explicit);
+        assert!(validate_network_section(&round_tripped.network, &round_tripped.runtime).is_err());
     }
 
     #[test]

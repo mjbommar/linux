@@ -21,6 +21,7 @@
 // cycle in a dedicated thread.
 
 use anyhow::{bail, Context, Result};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,6 +84,21 @@ impl SweepPoint {
 struct WorkerSpec {
     toml_path: PathBuf,
     strace_log: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct ChildPathArgs {
+    state_dir: PathBuf,
+    runtime_dir: PathBuf,
+}
+
+impl ChildPathArgs {
+    fn from_paths(paths: &paths::Paths) -> Self {
+        Self {
+            state_dir: paths.state_dir.clone(),
+            runtime_dir: paths.runtime_dir.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -276,6 +292,7 @@ fn run_one_point(
     fs::create_dir_all(&point_subdir)?;
 
     let umlctl = std::env::current_exe().context("locate own exe")?;
+    let child_paths = ChildPathArgs::from_paths(paths);
 
     // Generate per-worker Umlfiles into the point subdir.
     let mut base = deploy::Umlfile::from_path(&lo.file)
@@ -333,6 +350,7 @@ fn run_one_point(
     let mut handles = Vec::with_capacity(lo.workers as usize);
     for (w, worker) in worker_files.iter().enumerate() {
         let umlctl = umlctl.clone();
+        let child_paths = child_paths.clone();
         let toml_path = worker.toml_path.clone();
         let strace_log = worker.strace_log.clone();
         let pass = Arc::clone(&pass);
@@ -354,6 +372,7 @@ fn run_one_point(
             for i in 1..=iters {
                 let status = run_one_iter(
                     &umlctl,
+                    &child_paths,
                     &toml_path,
                     &inst_name,
                     &runs_dir,
@@ -442,6 +461,7 @@ enum IterStatus {
 #[allow(clippy::too_many_arguments)]
 fn run_one_iter(
     umlctl: &Path,
+    child_paths: &ChildPathArgs,
     toml_path: &Path,
     inst_name: &str,
     runs_dir: &Path,
@@ -457,7 +477,15 @@ fn run_one_iter(
     // Make sure no leftover instance or host resources with this name
     // exist. `down` is important for TAP-backed Umlfiles because a
     // plain stop+rm skips host-side teardown.
-    if !cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "pre") {
+    if !cleanup_umlfile_iter(
+        umlctl,
+        child_paths,
+        toml_path,
+        inst_name,
+        log_dir,
+        iter,
+        "pre",
+    ) {
         return IterStatus::Fail;
     }
 
@@ -468,6 +496,7 @@ fn run_one_iter(
     let ready_timeout = timeout_secs.to_string();
     let up_out = run_umlctl(
         umlctl,
+        child_paths,
         &[
             "up",
             "-f",
@@ -483,7 +512,15 @@ fn run_one_iter(
         // the up output and, when umlctl surfaced one, the run bundle's
         // init.log before cleanup removes the failed instance.
         save_failed_up_diagnostics(&up_out, runs_dir, &log_dir.join(format!("run-{iter}.log")));
-        cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "failed-up");
+        cleanup_umlfile_iter(
+            umlctl,
+            child_paths,
+            toml_path,
+            inst_name,
+            log_dir,
+            iter,
+            "failed-up",
+        );
         return IterStatus::Fail;
     }
 
@@ -525,7 +562,15 @@ fn run_one_iter(
         copy_or_create(&init_log, &saved);
     }
 
-    let cleanup_ok = cleanup_umlfile_iter(umlctl, toml_path, inst_name, log_dir, iter, "post");
+    let cleanup_ok = cleanup_umlfile_iter(
+        umlctl,
+        child_paths,
+        toml_path,
+        inst_name,
+        log_dir,
+        iter,
+        "post",
+    );
     let strace_ok = capture_and_audit_strace(
         strace_log,
         audit_vector_sandbox,
@@ -542,6 +587,7 @@ fn run_one_iter(
 
 fn cleanup_umlfile_iter(
     umlctl: &Path,
+    child_paths: &ChildPathArgs,
     toml_path: &Path,
     inst_name: &str,
     log_dir: &Path,
@@ -551,10 +597,14 @@ fn cleanup_umlfile_iter(
     let tap_name = cleanup_tap_name(toml_path);
 
     if let Some(toml) = toml_path.to_str() {
-        let _ = run_umlctl(umlctl, &["down", "-f", toml, "--force", "--rm"]);
+        let _ = run_umlctl(
+            umlctl,
+            child_paths,
+            &["down", "-f", toml, "--force", "--rm"],
+        );
     } else {
-        let _ = run_umlctl(umlctl, &["stop", inst_name]);
-        let _ = run_umlctl(umlctl, &["rm", inst_name]);
+        let _ = run_umlctl(umlctl, child_paths, &["stop", inst_name]);
+        let _ = run_umlctl(umlctl, child_paths, &["rm", inst_name]);
     }
 
     audit_tap_absent(
@@ -690,9 +740,20 @@ fn forbidden_vector_sandbox_line(line: &str) -> Option<&'static str> {
     None
 }
 
-fn run_umlctl(umlctl: &Path, args: &[&str]) -> String {
+fn child_umlctl_args(child_paths: &ChildPathArgs, args: &[&str]) -> Vec<OsString> {
+    let mut full = Vec::with_capacity(args.len() + 4);
+    full.push(OsString::from("--state-dir"));
+    full.push(child_paths.state_dir.as_os_str().to_owned());
+    full.push(OsString::from("--runtime-dir"));
+    full.push(child_paths.runtime_dir.as_os_str().to_owned());
+    full.extend(args.iter().map(OsString::from));
+    full
+}
+
+fn run_umlctl(umlctl: &Path, child_paths: &ChildPathArgs, args: &[&str]) -> String {
+    let full_args = child_umlctl_args(child_paths, args);
     Command::new(umlctl)
-        .args(args)
+        .args(&full_args)
         .output()
         .map(|o| {
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -866,6 +927,29 @@ mod tests {
         let pts = expand_sweep_matrix(&[]);
         assert_eq!(pts.len(), 1);
         assert_eq!(pts[0].label(), "default");
+    }
+
+    #[test]
+    fn child_umlctl_args_preserve_parent_state_and_runtime_dirs() {
+        let child_paths = ChildPathArgs {
+            state_dir: PathBuf::from("/tmp/state"),
+            runtime_dir: PathBuf::from("/tmp/run"),
+        };
+
+        let args = child_umlctl_args(&child_paths, &["up", "-f", "Umlfile.toml"]);
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--state-dir"),
+                OsString::from("/tmp/state"),
+                OsString::from("--runtime-dir"),
+                OsString::from("/tmp/run"),
+                OsString::from("up"),
+                OsString::from("-f"),
+                OsString::from("Umlfile.toml"),
+            ]
+        );
     }
 
     #[test]
