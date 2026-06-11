@@ -781,7 +781,61 @@ uml_involuntary_ctxt_switches_delta=13
 
 This is useful for the 1 MiB host-to-guest bottleneck pass, but it does not
 replace the P4.3 syscall-rate gate.  On this host, unprivileged `perf stat -e
-syscalls:sys_enter_*` is blocked by `perf_event_paranoid=4`.
+syscalls:sys_enter_*` is blocked by `perf_event_paranoid=4`; privileged
+`sudo -n perf stat` works and is recorded in the smoke below.
+
+## Privileged Perf-Stat Smoke: 2026-06-11
+
+The first privileged syscall-rate/CPU smoke wrapped one 64 KiB TCP
+host-to-guest fixed-byte run per driver.  Each run used a separate output
+directory and port so the perf counts are per driver rather than a single
+aggregate:
+
+```sh
+for spec in vector:19176 vector2:19177; do
+	driver=${spec%%:*}
+	port=${spec##*:}
+	out=/tmp/um-vector-perf-tcp-64k-h2g-perfstat-$driver
+	rm -rf "$out"
+	mkdir -p "$out"
+	sudo -n perf stat -x, \
+		-e 'syscalls:sys_enter_*' \
+		-e task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,cycles,instructions \
+		-o "$out/perf-stat.csv" -- \
+		env UML_VECTOR_PERF_OUT="$out" \
+			UML_VECTOR_PERF_DRIVERS="$driver" \
+			UML_VECTOR_PERF_DIRECTION=host-to-guest \
+			UML_VECTOR_PERF_PROTOCOL=tcp \
+			UML_VECTOR_PERF_BYTES_LIST=65536 \
+			UML_VECTOR_PERF_REPEAT=1 \
+			UML_VECTOR_PERF_PORT="$port" \
+			timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+				--kernel "$PWD/linux"
+done
+```
+
+Both runs passed and cleanup checks found no stale `vperf-*`/TAP links and no
+live matching UML or `umlctl` processes.  The perf CSVs reported 367 syscall
+tracepoint events per run.
+
+| Driver | Guest MiB/s | Host MiB/s | Total syscalls | Task-clock ms | CPU-clock ms | Context switches | Page faults |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vector | 0.145 | 15.597 | 4,294,127 | 111,886.52 | 108,734.81 | 152,987 | 2,740,965 |
+| vector2 | 0.097 | 13.701 | 510,383 | 8,725.39 | 7,261.33 | 71,373 | 121,847 |
+
+Selected syscall counts from the same `perf-stat.csv` files:
+
+| Driver | read | write | futex | ioctl | recvmsg | sendmsg | poll |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vector | 868,553 | 249,519 | 949,573 | 6,299 | 18,097 | 17,851 | 1,276 |
+| vector2 | 27,870 | 2,617 | 140,805 | 3,032 | 18,105 | 17,853 | 1,132 |
+
+This is still not the final P4.3 CPU/syscall acceptance gate: it measures the
+entire process subtree, including `umlctl` deployment, guest boot,
+host-side setup, logging, transfer, teardown, and `perf` wrapper overhead.  It
+does prove that privileged `perf stat` syscall and CPU accounting is available
+on this host and gives the next pass a concrete output shape to refine into a
+steady-state, same-throughput comparison.
 
 ## 1 MiB Host-To-Guest Metric Diagnostic: 2026-06-11
 
@@ -859,6 +913,8 @@ The full replacement performance gate still needs:
   the 1 MiB metric diagnostic shows about 12x higher vector2 scheduler pcount
   and voluntary context-switch deltas;
 - single-queue vector2 fd and TAP comparisons;
-- syscall and batching profiles;
-- full CPU-utilisation and CPU cycles per packet if practical;
+- refine the privileged `perf stat` smoke into steady-state syscall and
+  batching profiles;
+- full CPU-utilisation and CPU cycles per packet at matched throughput if
+  practical;
 - KCSAN/fairness runs under concurrent traffic.

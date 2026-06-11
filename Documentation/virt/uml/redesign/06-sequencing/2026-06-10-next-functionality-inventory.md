@@ -251,9 +251,12 @@ This file is the live execution tracker for
   UML metric deltas, side-by-side legacy vector/vector2 TCP 64 KiB
   host-to-guest smoke PASS with 22-field summary rows for both drivers, and
   vector2 TCP 64 KiB guest-to-host shape smoke PASS with `NA` metric fields,
-  2026-06-11. Local privileged syscall-rate
-  collection remains blocked by `perf_event_paranoid=4`, so this is bottleneck
-  diagnostic support rather than P4.3 syscall-rate closure.
+  2026-06-11. Unprivileged syscall-rate collection remains blocked by
+  `perf_event_paranoid=4`, but privileged `sudo -n perf stat` now works on
+  this host. A focused 64 KiB host-to-guest TCP smoke recorded subtree-wide
+  syscall and CPU counters for legacy vector and vector2, so privileged perf
+  collection is no longer missing; the final steady-state P4.3 syscall-rate
+  and full CPU-utilisation gate remains open.
 - The first focused 1 MiB host-to-guest run with UML process metrics confirms
   the small-transfer cell remains open. Four repeats each for legacy vector and
   vector2 passed. Host-side MiB/s medians were legacy vector 0.9845 and vector2

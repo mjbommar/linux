@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, vector2 fake RX batch fidelity, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 1 MiB host-to-guest metric diagnostic, vector2 fake RX batch fidelity, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -655,6 +655,16 @@ Current boundary:
   assigns a different per-member TAP/MAC/IPv4/mconsole identity, daemon-routed
   `exec` observes the assigned `vec2.0` address, brings the link up, and
   reaches the host-side TAP with a one-packet ping.
+- A focused privileged `perf stat` smoke now validates that syscall-rate and
+  CPU-counter collection is available on this host with `sudo -n perf stat`
+  despite unprivileged `perf_event_paranoid=4`.  One 64 KiB TCP
+  host-to-guest run per driver passed through the fixed-byte helper.  The
+  subtree-wide perf CSVs reported 367 syscall tracepoints per run: legacy
+  vector recorded 4,294,127 total syscalls, 111,886.52 ms task-clock, and
+  152,987 context switches; vector2 recorded 510,383 total syscalls,
+  8,725.39 ms task-clock, and 71,373 context switches.  This is setup, boot,
+  transfer, and teardown smoke evidence, not the final steady-state
+  CPU/syscall publication gate.
 
 The 2026-06-11 pool/fork/syzkaller rerun is focused current-HEAD regression
 evidence. The latest syzkaller-only rerun covers `e3a493eac9e5`. It does not
@@ -839,6 +849,8 @@ Before treating UML v2 as publishable, verify:
   `PASS=27 FAIL=3 EXPECTED_FAIL=1`;
 - the final KVM v2 24-hour soak completes naturally;
 - vector2 Tier 3 runs complete on both seccomp and KVM v2 where applicable;
+- vector2 has a steady-state syscall-rate and CPU-utilisation comparison, not
+  just endpoint timing, `umlctl metrics` deltas, or the initial perf-stat smoke;
 - checkpatch on changed KVM v2 patches has no unexplained warnings;
 - public docs describe the design and validation state, not the development
   history;

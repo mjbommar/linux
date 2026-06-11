@@ -977,7 +977,9 @@ Acceptance gates:
   exact-byte completion for both drivers when unpaced; a paced 20 usec 8 MiB
   host-to-guest run now passes for both drivers with vector2/vector host-side
   ratio 0.998875. The helper now also appends endpoint process CPU timing
-  columns and host-to-guest UML process metric deltas for focused runs; full
+  columns and host-to-guest UML process metric deltas for focused runs. A
+  privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
+  subtree-wide syscall and CPU counters per driver; steady-state
   CPU-utilisation and syscall-rate measurements remain open publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
@@ -1627,7 +1629,9 @@ Runtime smoke:
   exact-byte completion for both drivers when unpaced; a paced 20 usec 8 MiB
   host-to-guest run now passes for both drivers with vector2/vector host-side
   ratio 0.998875. The helper now also appends endpoint process CPU timing
-  columns and host-to-guest UML process metric deltas for focused runs; full
+  columns and host-to-guest UML process metric deltas for focused runs. A
+  privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
+  subtree-wide syscall and CPU counters per driver; steady-state
   CPU-utilisation and syscall-rate measurements remain open publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
