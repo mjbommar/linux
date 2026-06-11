@@ -8,8 +8,8 @@
 # control surface and verifies that a real KVM v2 workload records syscall
 # entries. The final legs boot static helpers that start recording from the
 # same task that runs the scalar workload, replay the task-owned log, and
-# verify strict replay kills mismatched, raw-time, and unsupported live
-# syscalls instead of falling back.
+# verify strict replay kills mismatched, raw-time, RDTSC, and unsupported
+# live events instead of falling back.
 
 set -u
 
@@ -21,6 +21,7 @@ TASK_HELPER=${KVM_RECORD_TASK_HELPER:-$DIR/kvm-record-task}
 NEGATIVE_HELPER=${KVM_RECORD_NEGATIVE_HELPER:-$DIR/kvm-record-negative}
 MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
 TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
+RDTSC_HELPER=${KVM_RECORD_RDTSC_HELPER:-$DIR/kvm-record-rdtsc}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
@@ -44,6 +45,10 @@ if [ ! -x "$MISMATCH_HELPER" ]; then
 fi
 if [ ! -x "$TIME_HELPER" ]; then
 	echo "SKIP: $TIME_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$RDTSC_HELPER" ]; then
+	echo "SKIP: $RDTSC_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -e /dev/kvm ]; then
@@ -302,6 +307,55 @@ if echo "$TIME_OUT" | grep -q 'KVM_RECORD_TIME: FAIL'; then
 fi
 
 if ! ensure_kvm_readable; then
+	echo "SKIP: /dev/kvm not readable before RDTSC smoke" >&2
+	exit 4
+fi
+
+RDTSC_OUT=$(timeout --kill-after=10 45 "$BINARY" \
+	backend=force=kvm-v2 \
+	init="$RDTSC_HELPER" mem="$MEM" \
+	con=null con0=fd:0,fd:1 \
+	root=/dev/root rootfstype=hostfs rw \
+	panic=-1 </dev/null 2>&1 || true)
+
+RDTSC_LINE=$(echo "$RDTSC_OUT" | grep '^KVM_RECORD_RDTSC:' | head -1)
+if [ -z "$RDTSC_LINE" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no RDTSC smoke result line)"
+	echo "$RDTSC_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSC|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+echo "$RDTSC_LINE"
+case "$RDTSC_LINE" in
+*armed\ instruction=rdtsc*) ;;
+*)
+	echo "KVM_RECORD_SMOKE: FAIL (RDTSC helper did not arm)"
+	echo "$RDTSC_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSC|UML: fatal|panic' |
+		tail -80
+	exit 1
+	;;
+esac
+
+if echo "$RDTSC_OUT" | grep -q 'KVM_RECORD_RDTSC: FAIL'; then
+	echo "KVM_RECORD_SMOKE: FAIL (RDTSC returned under replay)"
+	echo "$RDTSC_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSC|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+if ! echo "$RDTSC_OUT" |
+	grep -q "Kernel panic - not syncing: Attempted to kill init"; then
+	echo "KVM_RECORD_SMOKE: FAIL (RDTSC replay fault did not kill init)"
+	echo "$RDTSC_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSC|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable before negative smoke" >&2
 	exit 4
 fi
@@ -355,6 +409,6 @@ fi
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
 SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
-SUMMARY="$SUMMARY live-time=1 live-negative=1)"
+SUMMARY="$SUMMARY live-time=1 live-rdtsc=1 live-negative=1)"
 echo "$SUMMARY"
 exit 0

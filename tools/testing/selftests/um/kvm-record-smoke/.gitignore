@@ -2,3 +2,4 @@ kvm-record-task
 kvm-record-negative
 kvm-record-mismatch
 kvm-record-time
+kvm-record-rdtsc
