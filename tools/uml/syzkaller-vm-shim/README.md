@@ -77,6 +77,12 @@ The shim depends on these `umlctl` JSON shapes:
 Schema bumps should be reflected in the `schema_version` field carried
 by the relevant frame.
 
+The shim uses request-specific lazy `pool take` calls. It supplies instance,
+MAC, TAP, IPv4, and gateway values so syzkaller instances have deterministic
+network identity. It does not consume `pool take --ready`, because ready members
+carry daemon-assigned identity and are not rebound to caller-supplied TAP/IP
+values.
+
 `exec/1` is the current stable execution contract. The shim sends argv through
 `umlctl exec --json`, and `umlctl` sends structured argv/env/cwd/timeout fields
 to the pool daemon. The daemon may lower that request through the current UML

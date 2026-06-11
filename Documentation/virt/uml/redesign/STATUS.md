@@ -238,7 +238,9 @@ Current boundary:
 - request-specific warm scheduling remains intentionally lazy because the
   kernel applies identity before forking the member; pre-warmed members carry
   daemon-assigned identity and cannot safely be rebound to a later caller
-  MAC/TAP/mconsole request;
+  MAC/TAP/mconsole request. This is the final current contract: syzkaller uses
+  request-specific lazy takes for deterministic TAP/IP identity, while
+  `pool take --ready` is daemon-assigned identity only;
 - `vector2-sandbox-audit` validates the untrusted vector2 fd boot audit:
   `umlctl gate loop --audit-vector-sandbox` ran a vector2 auto-queue fd boot
   and reported `PASS=1/1 FAIL=0 TIMEOUT=0` with no forbidden host operations;

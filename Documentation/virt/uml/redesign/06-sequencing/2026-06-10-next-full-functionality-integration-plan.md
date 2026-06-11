@@ -105,10 +105,11 @@ The active blockers are now:
    checked-in
    `pool-mconsole-path-probe` now passes as a focused socket-addressability
    gate.
-3. Decide the final request-specific warm scheduling contract. Either add a
-   predeclared slot/identity API before warm fork, or route syzkaller and other
-   fast consumers through daemon-assigned ready identities with
-   `pool take --ready`.
+3. Keep the final warm scheduling contract explicit. Request-specific takes
+   stay lazy because MAC/TAP/IP/mconsole identity is applied before fork.
+   `pool take --ready` is the separate daemon-assigned ready-member mode and
+   cannot be combined with caller-supplied identity. Syzkaller remains on the
+   request-specific lazy path because it needs deterministic TAP/IP identity.
 4. Keep the historical per-take pool fd handoff decision explicit: it is
    retired from the current completion claim in favor of the validated pool TAP
    reopen path. Vector2 sandbox audit, launcher-owned fd handoff, and
@@ -693,11 +694,13 @@ Functional requirements:
 - `port-forward` works for pool members.
 - Vector2 TAP handoff works for live pool members.
 - Launcher-owned vector2 fd handoff remains validated outside the pool-member
-  identity path unless a per-take SCM_RIGHTS fd design is added.
+  identity path; per-take pool fd handoff is retired from the current
+  completion claim.
 - Identity blob layout is documented and tested.
 - Per-member mconsole path synthesis is reliable.
-- Warm pool support is implemented for daemon-assigned ready members, with a
-  final contract decision for request-specific warm identity scheduling.
+- Warm pool support is implemented for daemon-assigned ready members. The final
+  current contract keeps request-specific takes lazy and treats any
+  predeclared slot/identity API as future work.
 - The full-scale pool benchmark either meets the original RSS target while
   keeping the throughput gate green, or the RSS target is consciously revised
   with rationale.
@@ -1572,9 +1575,8 @@ Immediate engineering conclusion:
 - `syzkaller-shim-smoke` now validates the shim source contract and the
   syzkaller-style take/exec/port-forward/status/destroy wire path through
   `umlctl`;
-- final completion requires fixing the full-scale pool benchmark RSS failure,
-  resolving the request-specific warm scheduling decision or API, and finishing
-  the remaining vector2 networking gates.
+- final completion requires fixing the full-scale pool benchmark RSS failure
+  and finishing the remaining vector2 networking gates.
 
 ## Immediate Next Actions
 
@@ -1585,9 +1587,9 @@ Immediate engineering conclusion:
    local remap/cache experiments above mean the next implementation attempt
    should change the isolation model itself, or explicitly revise the target
    with evidence and approval.
-2. Decide whether request-specific warm scheduling needs a predeclared slot API
-   or whether syzkaller should consume daemon-assigned ready identities through
-   `pool take --ready`.
+2. Keep the current warm scheduling contract covered by `pool-serve-smoke` and
+   `syzkaller-shim-smoke`: request-specific takes stay lazy, while
+   `pool take --ready` is daemon-assigned identity only.
 3. Keep the daemon-routed `exec/1` ABI covered by `pool-exec-smoke` and the
    syzkaller shim smoke. Stricter kernel argv/env/cwd transport is future
    `exec/2` work, not a current completion blocker.

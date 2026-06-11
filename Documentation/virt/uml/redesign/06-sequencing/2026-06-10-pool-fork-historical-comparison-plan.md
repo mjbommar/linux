@@ -221,9 +221,11 @@ Remaining work:
 - Fix full-scale pool memory amplification. The current sparse-copied
   replicated physmem path is stable and throughput now passes, but it still
   does not meet the original 100-member RSS target.
-- Decide the final request-specific warm scheduling contract: either add a
-  predeclared slot/identity API before warm fork, or route syzkaller through
-  daemon-assigned ready identities with `pool take --ready`.
+- Keep the final current warm scheduling contract: request-specific takes stay
+  lazy because identity is applied before fork; `pool take --ready` consumes
+  daemon-assigned pre-identified members and cannot be combined with
+  caller-supplied identity. A predeclared slot/identity API is future work, not
+  required for the current completion claim.
 - Keep `exec/1` as the current public daemon-routed exec ABI. The bounded
   shell-backed mconsole lowering and guest `timeout(1)` helper dependency are
   documented implementation details; stricter kernel argv/env/cwd transport is
@@ -342,11 +344,11 @@ Remaining work:
 | Direct pool spawn | Present, validated | `memo09-*` | Keep `pool-spawn-smoke` green. |
 | Pool daemon serve/take/status | Present, validated | `fork-server-phase1c`, `memo09-phase4` | Keep live-member and warm-ready smokes green. |
 | Pool destroy/shutdown | Present, validated | `memo09-phase4` | Keep in lifecycle smoke. |
-| Daemon-routed exec | Present, validated-needs-decision | `memo09-phase4` | Successful exec is validated; decide final shell/helper ABI. |
+| Daemon-routed exec | Present, validated | `memo09-phase4` | Keep public `exec/1`; stricter kernel argv transport is future `exec/2` work. |
 | Port-forward result | Present, validated | `memo09-phase4` | Tie to final network validation. |
-| Warm pool `min_warm` | Present for daemon-assigned ready members | `memo09-phase3-pool-bench`, `memo09-phase4` | Decide request-specific warm identity scheduling. |
+| Warm pool `min_warm` | Present for daemon-assigned ready members | `memo09-phase3-pool-bench`, `memo09-phase4` | Keep request-specific identity takes lazy; use `pool take --ready` only for daemon-assigned identities. |
 | Pool benchmark | Present, full gate fails RSS only | `memo09-phase3-pool-bench`, `memo09-phase4` | Fix memory amplification or revise the RSS target with evidence. |
-| Syzkaller VM shim | Present, unvalidated | `memo09-phase4`, current `next` | Build and run syzkaller-style take/exec/destroy smoke. |
+| Syzkaller VM shim | Present, validated | `memo09-phase4`, current `next` | Keep `syzkaller-shim-smoke` green on request-specific lazy takes. |
 | Snapshot bench kselftest | Historical-only wrapper | `memo09-phase4` | Import clean wrapper around active kernel hook. |
 | Snapshot KUnit kselftest wrapper | Historical-only wrapper | `memo09-phase4` | Import or replace for current 4-case KUnit suite. |
 | Snapshot ELF roundtrip kselftest | Historical-only wrapper | `memo09-phase4` | Import with current mconsole/debugfs exporter contract. |
@@ -466,6 +468,8 @@ Validation:
 - `pool-bench` for p50/p95 take latency and memory growth.
 - Extended `pool-serve-smoke` proves `min_warm=1` returns an already-ready
   member and replenishes after take.
+- Syzkaller intentionally stays on request-specific lazy takes because it needs
+  deterministic TAP/IP identity for exec and port-forward validation.
 
 ### Step 4: Validate TAP/fd Handoff Through Pool Members
 
