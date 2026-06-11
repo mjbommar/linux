@@ -261,6 +261,10 @@ Current bounded vector2 evidence adds:
   surface without becoming a default runtime test: `net-bench` builds the
   `tcp-send` helper through kselftest, the wrappers use repo-relative defaults,
   and the privileged TAP benchmark remains an explicit operator-run gate.
+- The current guest-to-host TCP gate is failing on performance, not function:
+  legacy vector and vector2 both passed 3/3 `umlctl gate loop` iterations, but
+  vector2 median throughput was 18949.8 Mbps versus legacy vector 39805.4 Mbps,
+  a 0.476 ratio against the 0.85 acceptance bar.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
@@ -288,8 +292,8 @@ Open vector2 publication work:
 - finish a natural 7200-second seccomp/vector2 run;
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
-- run the TCP `net-bench` gate and expand fairness/performance coverage for
-  multiqueue operation;
+- investigate and fix the guest-to-host TCP `net-bench` regression, then expand
+  fairness/performance coverage for multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
 ## Fork-Server And Pool Work

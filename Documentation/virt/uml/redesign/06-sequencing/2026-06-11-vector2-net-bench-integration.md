@@ -1,6 +1,6 @@
 # UML vector2 net-bench integration
 
-Status: current-head tooling cleanup; performance gate still open.
+Status: current-head tooling cleanup complete; TCP performance gate failing.
 Date: 2026-06-11.
 Tree: `next`.
 
@@ -49,10 +49,47 @@ Result:
 - Shell wrappers pass syntax validation.
 - `exec-uml-fd.py` compiles through Python bytecode validation.
 
+## 2026-06-11 TCP Gate Run
+
+After the harness cleanup, the short guest-to-host TCP gate was run on the
+current tree:
+
+```sh
+OUT=/tmp/uml-net-bench-run-1781173986 \
+KERNEL=$PWD/linux \
+tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh \
+        --duration 8 \
+        --reps 3
+```
+
+Functional result:
+
+- legacy vector: 3/3 `umlctl gate loop` iterations passed;
+- vector2: 3/3 `umlctl gate loop` iterations passed;
+- host sink received all six TCP streams cleanly.
+
+Performance verdict:
+
+| Driver | Per-rep Mbps | Median Mbps |
+| ------ | ------------ | ----------- |
+| legacy vector | 40421.9, 36973.3, 39805.4 | 39805.4 |
+| vector2 | 18949.8, 19679.2, 17902.6 | 18949.8 |
+
+The vector2/legacy median ratio was `0.476`, below the `0.85` acceptance bar:
+
+```text
+VERDICT: FAIL
+```
+
+This is a real P4.3 failure for current guest-to-host TCP throughput, not a
+harness failure.  The functional datapath is alive, but vector2 remains far
+from replacement-ready on this gate.
+
 ## Remaining Gate
 
 This does not close P4.3 performance parity or P4.5 multiqueue fairness.  The
-next operator-run TCP check is:
+next work is to investigate the guest-to-host vector2 throughput gap, then
+rerun the same gate:
 
 ```sh
 make -C tools/testing/selftests/um/net-bench
