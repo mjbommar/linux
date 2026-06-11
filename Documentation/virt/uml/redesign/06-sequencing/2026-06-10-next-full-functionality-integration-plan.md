@@ -226,7 +226,10 @@ Current role:
 - Authoritative integration branch.
 - Contains cleaned KVM v2 core and the reimported snapshot
   capture/restore/export source.
-- Does not yet contain record/replay or private state trace source.
+- Contains an experimental record/replay core behind
+  `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`, but not full
+  deterministic runtime replay.
+- Does not yet contain private state trace source.
 - Contains vector2 implementation.
 - Contains launcher, pool, exec, port-forward, deploy, gates, and examples.
 - Contains syzkaller UML shim.
@@ -258,7 +261,8 @@ Problems:
   historical-only functionality and have now been reimported into `next` with
   KUnit, live export, and restore smoke coverage. SMP semantics are explicitly
   gated to one online CPU.
-- Record/replay and private state trace functionality remain historical-only.
+- Record/replay is now partially present as an experimental core on `next`;
+  private state trace functionality remains historical-only.
 
 Disposition:
 
@@ -615,9 +619,24 @@ If full replay is not ready:
 - Keep user-facing docs clear that it is not mission-complete.
 - Do not count original record/replay mission as complete.
 
+Current `next` checkpoint:
+
+- `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL` exists and defaults
+  off.
+- `arch/um/backend/kvm-v2/record.c` implements the single-active container,
+  lifecycle, strict replay flag, bounded syscall entries, FIFO consume,
+  mismatch reporting, and dropped-entry accounting.
+- `arch/um/backend/kvm-v2/test_record.c` validates the experimental core
+  without requiring a live vCPU.
+- Validation on 2026-06-10: `make ARCH=um -j16`, `um_kvm_v2_record` 7/7,
+  `kvm_v2_marshal` 8/8, and `kvm_v2_byteshape` 9/9.
+- Still open: live syscall dispatcher wiring, gadget interaction, snapshot
+  integration, time/RDTSC/signal determinism, supported replay tier docs, and
+  real workload record/replay smoke tests.
+
 Acceptance gates:
 
-- Record KUnit tests.
+- Record KUnit tests. Current status: PASS for the experimental core.
 - Record smoke test.
 - Replay smoke test.
 - Buffer overflow behavior test.
@@ -1372,7 +1391,7 @@ branch lands.
 | KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
 | KVM snapshot | Present with KUnit, live export, restore smoke, and SMP gate | Present, validated, SMP policy defined | Closed for current scope |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
-| Record/replay | Historical/prototype | Complete or experimental | Open |
+| Record/replay | Experimental core present; live runtime incomplete | Complete deterministic tier or explicitly experimental | Partially closed; runtime open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
@@ -1661,8 +1680,9 @@ Immediate engineering conclusion:
    `exec/2` work, not a current completion blocker.
 4. Keep the retired per-take pool fd handoff boundary covered in status docs;
    launcher-owned vector2 fd handoff is now covered by `vector2-fd-handoff-smoke`.
-5. Import or complete record/replay, or land it behind an explicit
-   experimental Kconfig with docs that do not count it as mission-complete.
+5. Complete record/replay beyond the explicit experimental core, including
+   live runtime hooks and workload-level replay gates, before counting the
+   original mission complete.
 6. Decide whether private state trace is worth importing as clean optional
    diagnostics.
 7. Re-audit vector2 transport claims, Kconfig wording, and replacement

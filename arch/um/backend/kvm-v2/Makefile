@@ -26,6 +26,8 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2) += lstar_gadget.o
 # state. See Documentation/virt/uml/aperf-mperf.rst.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_APERFMPERF_PASSTHROUGH) += aperfmperf.o
 
+obj-$(CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL) += record.o
+
 # Marshal-shape KUnit suite. Pure data-transform tests; no kernel state
 # assumed. Build only when explicitly requested.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_marshal.o
@@ -38,3 +40,6 @@ obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_byteshape.o
 # Snapshot KUnit suite. Requires a live KVM v2 VM/vCPU pool at runtime and
 # skips cleanly when the backend is not initialised.
 obj-$(CONFIG_UM_BACKEND_KVM_V2_KUNIT) += test_snapshot.o
+
+# Record/replay KUnit suite. Pure state-machine and log cursor coverage.
+obj-$(CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_KUNIT) += test_record.o

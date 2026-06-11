@@ -13,8 +13,10 @@
 #include <linux/atomic.h>
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
+#include <linux/jump_label.h>
 #include <linux/kvm.h>
 #include <linux/list.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
@@ -699,5 +701,65 @@ int kvm_v2_snapshot_elf_export_to_file(const struct kvm_v2_snapshot *snap,
 				       struct file *file);
 int kvm_v2_snapshot_elf_export_to_fd(const struct kvm_v2_snapshot *snap,
 				     int fd);
+
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+enum kvm_v2_record_state {
+	KVM_V2_RECORD_INIT = 0,
+	KVM_V2_RECORD_RECORDING,
+	KVM_V2_RECORD_STOPPED,
+	KVM_V2_RECORD_REPLAYING,
+};
+
+enum kvm_v2_replay_kind {
+	KVM_V2_REPLAY_NONE = 0,
+	KVM_V2_REPLAY_SYSCALL,
+};
+
+struct kvm_v2_replay_entry {
+	u32	kind;
+	u32	size;
+	u64	sequence;
+	struct {
+		s32	nr;
+		s32	_pad;
+		s64	retval;
+		u64	args[6];
+	} syscall;
+};
+
+struct kvm_v2_record {
+	enum kvm_v2_record_state	state;
+	bool				strict_replay;
+	void				*buffer;
+	size_t				buffer_size;
+	size_t				buffer_used;
+	size_t				buffer_replayed;
+	u64				sequence;
+	u64				entries_recorded;
+	u64				entries_replayed;
+	u64				entries_dropped;
+	u64				syscall_count;
+	struct mutex			lock;
+};
+
+DECLARE_STATIC_KEY_FALSE(um_kvm_v2_record_enabled);
+
+struct kvm_v2_record *kvm_v2_record_alloc(size_t buffer_size);
+void kvm_v2_record_destroy(struct kvm_v2_record *rec);
+void kvm_v2_record_free(struct kvm_v2_record *rec);
+int kvm_v2_record_start(struct kvm_v2_record *rec);
+int kvm_v2_record_stop(struct kvm_v2_record *rec);
+int kvm_v2_record_replay(struct kvm_v2_record *rec);
+int kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);
+bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec);
+struct kvm_v2_record *kvm_v2_record_active(void);
+void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
+				   unsigned long syscall_nr,
+				   long ret_value,
+				   const struct uml_pt_regs *regs);
+int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
+				  unsigned long syscall_nr,
+				  long *ret_value);
+#endif
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

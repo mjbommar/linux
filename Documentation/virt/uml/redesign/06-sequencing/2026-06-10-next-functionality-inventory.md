@@ -75,9 +75,9 @@ This file is the live execution tracker for
 | KVM snapshot | Snapshot benchmark kselftest | Present-validated | `memo09-phase4` | Clean wrapper around current `kvm_v2_snapshot_bench=` imported. | `kvm-snapshot-bench` PASS, 2026-06-10. |
 | KVM snapshot | Snapshot KUnit kselftest wrapper | Present-validated | `memo09-phase4` | Clean wrapper for the current four-case `um_kvm_v2_snapshot` suite imported. | `snapshot-kvm-smoke` PASS, 2026-06-10. |
 | KVM snapshot | Snapshot ELF roundtrip kselftest | Present-validated | `memo09-phase4` | Clean wrapper imported using `kvm_v2_snapshot_elf_export=<host-path>` and host `readelf`/`gdb` validation. | `snapshot-elf-roundtrip` PASS, 2026-06-10. |
-| Record/replay | Record state machine | Historical-only | `kvm-v2-snapshot-elf64` | Complete or land behind explicit experimental Kconfig. | record KUnit. |
-| Record/replay | Syscall observe path | Historical-only | `kvm-v2-snapshot-elf64` | Complete; no-op stubs are not completion. | record smoke. |
-| Record/replay | Replay consume path | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Implement deterministic replay tier or keep experimental. | replay smoke. |
+| Record/replay | Record state machine | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64` | Keep behind `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL` until live runtime integration is complete. | `um_kvm_v2_record` KUnit 7/7 PASS, 2026-06-10. |
+| Record/replay | Syscall observe path | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64` | Current core supports explicit observe into a bounded in-memory syscall log; live syscall dispatcher wiring remains open. | `um_kvm_v2_record` observe and buffer-overflow cases PASS, 2026-06-10. |
+| Record/replay | Replay consume path | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64`, `experiment-path-c` | Current core supports FIFO consume, strict mismatch reporting, and cursor preservation; deterministic workload replay remains open. | `um_kvm_v2_record` FIFO/end-of-log/divergence cases PASS, 2026-06-10. |
 | Record/replay | Gadget bypass in record mode | Historical-only | `kvm-v2-snapshot-elf64` | Required if gadget remains enabled. | gadget-on record smoke. |
 | Record/replay | Time, vvar, RDTSC, SIGALRM determinism | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Define supported tier and implement before declaring complete. | deterministic workload gate. |
 | Diagnostics | KVM v2 state trace ring | Historical-only | `kvm-v2-snapshot-elf64` | Rework as clean optional debug infrastructure. | enable/capture/dump/clear smoke. |
@@ -136,6 +136,12 @@ This file is the live execution tracker for
 
 - KVM v2 no longer ignores failed architectural-state restore ioctls for
   `KVM_SET_MSRS`, `KVM_SET_XSAVE`, or `KVM_SET_VCPU_EVENTS`.
+- KVM v2 experimental record/replay core is present on `next` behind
+  `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`. It includes the
+  single-active container, lifecycle, strict replay flag, bounded syscall
+  observe, FIFO consume, divergence cursor preservation, and overflow
+  accounting. Validation: `make ARCH=um -j16`, `um_kvm_v2_record` 7/7,
+  `kvm_v2_marshal` 8/8, and `kvm_v2_byteshape` 9/9 on 2026-06-10.
 - KVM v2 snapshot capture/restore and snapshot ELF64 export source is present
   on `next` and builds with `make ARCH=um -j16`.
 - KVM v2 snapshot KUnit coverage is present on `next` and passes under
@@ -170,7 +176,8 @@ This file is the live execution tracker for
 
 These items must be closed before the final branch can be called complete:
 
-1. Record/replay functionality must be imported or completed.
+1. Record/replay runtime functionality must be completed beyond the current
+   experimental core before the original record/replay mission is closed.
 2. Vector2 replacement claims must match validation evidence.
 3. Pool/fork-server current tests must pass, including warm-pool and
    pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff

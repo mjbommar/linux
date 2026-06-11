@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, and umlbuild validation.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, and experimental record/replay core.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -17,12 +17,15 @@ restored for the full UML v2 completion branch:
 - exception delivery through backend-owned descriptor and handler pages;
 - signal, FPU/XSAVE, timer, and SMP state handling;
 - memory-slot and region management;
-- snapshot capture/restore and snapshot ELF export; and
+- snapshot capture/restore and snapshot ELF export;
+- experimental record/replay container and syscall-log core; and
 - the validation needed to decide which pieces are publishable upstream.
 
-Record/replay and private state-trace code remain historical-only at this
-point. Generic UML snapshot and fork-server work remains separate from the KVM
-backend core unless the integration plan explicitly pulls it into `next`.
+Private state-trace code remains historical-only at this point. Record/replay
+now has an experimental Kconfig-gated core in `next`, but live deterministic
+runtime replay is not complete. Generic UML snapshot and fork-server work
+remains separate from the KVM backend core unless the integration plan
+explicitly pulls it into `next`.
 
 ## Current Readiness
 
@@ -39,13 +42,14 @@ Current source-tree direction:
 - KVM v2 snapshot KUnit, live `umlctl snapshot export`, and snapshot restore
   smoke validation pass on `next`; SMP snapshot semantics are explicitly
   gated to one online CPU.
-- KVM v2 record/replay and private trace-ring sources have not yet been
-  reimported into `next`.
+- KVM v2 record/replay has an experimental core on `next` behind
+  `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; private trace-ring
+  sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
   backend unless KVM v2 is selected.
-- KVM v2 KUnit coverage remains for register marshaling and byte-shape
-  invariants.
+- KVM v2 KUnit coverage remains for register marshaling, byte-shape
+  invariants, snapshots, and the experimental record/replay core.
 
 ## Validation Snapshot
 
@@ -79,6 +83,12 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 7/7 with
+  `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
+  invalid transitions, single-active ownership, syscall observe, FIFO replay,
+  divergence cursor preservation, and buffer-overflow accounting.
+- Existing pure KVM v2 KUnit suites still pass on the same build:
+  `kvm_v2_marshal` 8/8 and `kvm_v2_byteshape` 9/9.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU
@@ -89,6 +99,8 @@ and keeps CPUID xstate leaves consistent with the exposed feature set.
 Remaining validation before publication or completion:
 
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
+- finish live record/replay integration before counting the original
+  record/replay mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
 - refresh the upstream cover letter and patch boundaries after the cleanup.
@@ -338,8 +350,11 @@ Current instrumentation evidence:
 
 The following work is not yet present in the active `next` implementation:
 
-- KVM-specific record/replay sources and tests;
 - private state-trace ring and parser tooling.
+
+KVM-specific record/replay is present only as an experimental core with KUnit
+coverage. Live syscall interception, gadget interaction, snapshot integration,
+time/RDTSC/signal determinism, and workload-level replay smokes remain open.
 
 Snapshot capture/restore and snapshot ELF export have been restored as active
 source. KUnit coverage, live `umlctl` ELF export validation, snapshot

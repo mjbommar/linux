@@ -66,6 +66,27 @@ config UM_BACKEND_KVM_V2_KUNIT
 	  Say N for normal builds; Y or M to run the v2 backend
 	  KUnit suites.
 
+config UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+	bool "Experimental KVM v2 record/replay core"
+	depends on UM_BACKEND_KVM_V2
+	default n
+	help
+	  Build the KVM v2 record/replay container and its syscall-log
+	  encoder/decoder. The core provides a single active record session,
+	  a bounded in-memory event stream, strict replay checking, and KUnit
+	  coverage for the state machine and FIFO replay rules.
+
+	  This does not yet expose a supported user ABI or wire full
+	  deterministic runtime replay into the live syscall, time, signal, or
+	  device paths. Keep this off for normal builds while the remaining
+	  record/replay integration is completed.
+
+config UM_BACKEND_KVM_V2_RECORD_REPLAY_KUNIT
+	tristate
+	depends on UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+	depends on UM_BACKEND_KVM_V2_KUNIT
+	default UM_BACKEND_KVM_V2_KUNIT
+
 config UM_BACKEND_KVM_V2_RDPMC
 	bool "Allow guest userspace rdpmc (CR4.PCE=1)"
 	depends on UM_BACKEND_KVM_V2
