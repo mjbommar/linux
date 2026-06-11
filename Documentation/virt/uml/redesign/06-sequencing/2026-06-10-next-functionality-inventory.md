@@ -61,7 +61,7 @@ This file is the live execution tracker for
 | ---- | ------- | --------------------- | ----------------- | -------------------- | --------------- |
 | KVM v2 core | Backend selection and VM/vCPU lifecycle | Present | `next` | Keep and harden. | KVM smoke, CPython parity. |
 | KVM v2 core | Checked restore of saved XSAVE and VCPU events | Fixed-in-current-update | `next` | Keep checked fail-fast restore handling. | Build plus KVM v2 smoke. |
-| KVM v2 core | LSTAR gadget and fallback syscall path | Present-needs-fix | `next`, `kvm-v2-snapshot-elf64` | Static gadget/fallback coverage is green with `CONFIG_UM_BACKEND_KVM_V2_GADGET=y`, but forced-KVM dynamic `/bin/true` currently segfaults in `ld-linux` at address `0x10`; resolve before Tier 3 or publication closure. | `perf-getpid` PASS `cyc_per_call=89`, `perf-pidfam` PASS `cyc_per_call=94`, `kvm-bounds` PASS 9/9, fallback static loop PASS; dynamic `/bin/true` FAIL, 2026-06-10. |
+| KVM v2 core | LSTAR gadget and fallback syscall path | Present-validated | `next`, `kvm-v2-snapshot-elf64` | Keep the static gadget/fallback coverage and the dynamic-loader regression gate. The forced-KVM `ld-linux` fault at address `0x10` is fixed by preserving FS/GS bases after user segment refresh. Broader Tier 3 KVM workloads still run under the vector2 completion gates. | `perf-getpid` PASS `cyc_per_call=89`, `perf-pidfam` PASS `cyc_per_call=94`, `kvm-bounds` PASS 9/9, fallback static loop PASS; forced-KVM `/bin/true` clean init exit `exitcode=0`; `dyn-loader` backend=kvm PASS; `kvm_v2_marshal` 9/9 includes FS/GS-base ordering regression, 2026-06-10. |
 | KVM v2 core | XSAVE/YMM preservation after AVX exposure | Present | `next` | Keep; ensure no legacy FPU restore remains in active paths. | CPython/Tier 3 flake soak. |
 | KVM v2 core | APERF/MPERF passthrough | Present | `next`, `umlctl-deploy` | Keep optional. | `aperf-mperf-smoke` if config enabled. |
 | KVM v2 core | RDPMC userspace support | Present | `next`, `umlctl-deploy` | Keep optional and document sandbox tradeoff. | `rdpmc-smoke` if config enabled. |
@@ -142,7 +142,10 @@ This file is the live execution tracker for
   observe, FIFO consume, divergence cursor preservation, and overflow
   accounting, plus LSTAR gadget-bypass plumbing for future live dispatcher
   logging. Validation: `make ARCH=um -j16`, `um_kvm_v2_record` 8/8,
-  `kvm_v2_marshal` 8/8, and `kvm_v2_byteshape` 9/9 on 2026-06-10.
+  `kvm_v2_marshal` 9/9, and `kvm_v2_byteshape` 9/9 on 2026-06-10.
+- KVM v2 dynamic-loader/TLS startup now passes the focused gates: forced-KVM
+  `/bin/true` reaches clean init exit with `exitcode=0`, and the dyn-loader
+  kselftest reports `DYN_LOADER: backend=kvm PASS`.
 - KVM v2 snapshot capture/restore and snapshot ELF64 export source is present
   on `next` and builds with `make ARCH=um -j16`.
 - KVM v2 snapshot KUnit coverage is present on `next` and passes under

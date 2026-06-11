@@ -500,6 +500,17 @@ void kvm_v2_exception_free_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
 int  kvm_v2_load_cr3(struct kvm_v2_vcpu *vcpu, unsigned long pgd);
 
 /*
+ * Pure SREGS preparation helper: refresh user selectors when the next entry
+ * RIP is user-space, then install the per-task address state. Exposed so
+ * KUnit can lock the FS/GS base ordering without creating a live vCPU.
+ */
+void kvm_v2_load_user_address_sregs(struct kvm_sregs *sregs,
+				    unsigned long pgd_pa,
+				    unsigned long fs_base,
+				    unsigned long gs_base,
+				    unsigned long entry_rip);
+
+/*
  * KVM_RUN dispatcher. Picks the per-host-CPU vCPU, loads CR3, FS/GS
  * bases, and GPRs from @regs, issues KVM_RUN, marshals exit state back,
  * and dispatches by exit_reason.

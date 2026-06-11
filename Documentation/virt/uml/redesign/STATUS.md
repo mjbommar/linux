@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, and record/replay gadget bypass.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay gadget bypass, and KVM v2 dynamic-loader TLS closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -68,6 +68,12 @@ The strongest current KVM v2 evidence is:
   in the low-hundreds-cycle range on the measured host. On the current
   gadget-enabled validation build, freestanding KVM `perf-getpid` reports
   `cyc_per_call=89` and `perf-pidfam` reports `cyc_per_call=94`.
+- Dynamic-loader/TLS smoke: forced-KVM `/bin/true` with `kunit.enable=0`
+  now reaches the expected clean init-exit panic with `exitcode=0`, and
+  `tools/testing/selftests/um/dyn-loader/run-dyn-loader.sh` reports
+  `DYN_LOADER: backend=kvm PASS`. The fix keeps the user segment-selector
+  refresh from zeroing the `arch_prctl()`-installed FS/GS bases before KVM
+  entry.
 - Snapshot KUnit: `um_kvm_v2_snapshot` passes 4/4 under
   `backend=force=kvm-v2` with `kunit_shutdown=halt`, covering register-only
   capture, one-page memslot capture/restore, task iotrap state restore, and
@@ -91,7 +97,7 @@ The strongest current KVM v2 evidence is:
   divergence cursor preservation, buffer-overflow accounting, and the
   synthetic gadget-bypass page helper.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
-  `kvm_v2_marshal` 8/8 and `kvm_v2_byteshape` 9/9.
+  `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU
@@ -101,9 +107,9 @@ and keeps CPUID xstate leaves consistent with the exposed feature set.
 
 Remaining validation before publication or completion:
 
-- fix the current forced-KVM dynamic-userspace blocker: `/bin/true` with
-  `kunit.enable=0` segfaults in `ld-linux` at address `0x10`, even though
-  static gadget/fallback loops pass;
+- broaden the dynamic-userspace closure beyond `/bin/true` and the
+  dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
+  stack;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
 - finish live record/replay integration before counting the original
   record/replay mission complete;

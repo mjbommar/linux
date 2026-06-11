@@ -20,6 +20,7 @@
 #include <sysdep/ptrace_64.h>		/* HOST_* indexes (x86_64) */
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"
 
 /* ---------------------------------------------------------------- */
 /* Helpers                                                          */
@@ -321,6 +322,33 @@ static void test_marshal_round_trip_rflags_bit1(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, (u64)back.gp[HOST_EFLAGS], (u64)(0x202 | (1UL << 1)));
 }
 
+static void test_user_address_sregs_preserves_tls_bases(struct kunit *test)
+{
+	struct kvm_sregs sregs;
+	const unsigned long pgd_pa = 0x12345000UL;
+	const unsigned long fs_base = 0x700000123000UL;
+	const unsigned long gs_base = 0x710000456000UL;
+
+	memset(&sregs, 0, sizeof(sregs));
+	sregs.cs.selector = KVM_V2_KERNEL_CS_SEL;
+	sregs.ss.selector = KVM_V2_KERNEL_DS_SEL;
+
+	kvm_v2_load_user_address_sregs(&sregs, pgd_pa, fs_base, gs_base,
+				       0x400000UL);
+
+	KUNIT_EXPECT_EQ(test, (u64)sregs.cr3, (u64)pgd_pa);
+	KUNIT_EXPECT_EQ(test, (u64)sregs.fs.base, (u64)fs_base);
+	KUNIT_EXPECT_EQ(test, (u64)sregs.gs.base, (u64)gs_base);
+	KUNIT_EXPECT_EQ(test, (u16)sregs.cs.selector,
+			(u16)KVM_V2_USER_CS_SEL);
+	KUNIT_EXPECT_EQ(test, (u16)sregs.ss.selector,
+			(u16)KVM_V2_USER_DS_SEL);
+	KUNIT_EXPECT_EQ(test, (u16)sregs.fs.selector,
+			(u16)KVM_V2_USER_DS_SEL);
+	KUNIT_EXPECT_EQ(test, (u16)sregs.gs.selector,
+			(u16)KVM_V2_USER_DS_SEL);
+}
+
 /* ---------------------------------------------------------------- */
 /* Suite registration                                               */
 /* ---------------------------------------------------------------- */
@@ -334,6 +362,7 @@ static struct kunit_case kvm_v2_marshal_test_cases[] = {
 	KUNIT_CASE(test_marshal_from_full_pattern),
 	KUNIT_CASE(test_marshal_round_trip),
 	KUNIT_CASE(test_marshal_round_trip_rflags_bit1),
+	KUNIT_CASE(test_user_address_sregs_preserves_tls_bases),
 	{}
 };
 

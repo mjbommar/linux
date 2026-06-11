@@ -1320,6 +1320,23 @@ static void kvm_v2_load_user_address_state(struct kvm_sregs *sregs,
 	sregs->gs.base = (u64)gs_base;
 }
 
+void kvm_v2_load_user_address_sregs(struct kvm_sregs *sregs,
+				    unsigned long pgd_pa,
+				    unsigned long fs_base,
+				    unsigned long gs_base,
+				    unsigned long entry_rip)
+{
+	/*
+	 * Refresh selectors before FS/GS bases. kvm_v2_apply_user_segments()
+	 * replaces the whole FS/GS segment cache with flat data descriptors,
+	 * whose base is zero. arch_prctl() stores the guest TLS base in
+	 * regs->gp[HOST_FS_BASE/GS_BASE]; losing it here makes dynamic
+	 * loaders fault on their next %fs access.
+	 */
+	kvm_v2_load_user_segments(sregs, entry_rip);
+	kvm_v2_load_user_address_state(sregs, pgd_pa, fs_base, gs_base);
+}
+
 static void kvm_v2_note_fpu_owner_change(struct kvm_v2_vcpu *vcpu)
 {
 	if (vcpu->fpu_owner_task != current)
@@ -1433,8 +1450,8 @@ static int kvm_v2_load_user_sregs(struct kvm_v2_vcpu *vcpu,
 	struct kvm_sregs *sregs = &run->s.regs.sregs;
 	bool cross_task = kvm_v2_cross_task_or_mm(vcpu);
 
-	kvm_v2_load_user_address_state(sregs, pgd_pa, fs_base, gs_base);
-	kvm_v2_load_user_segments(sregs, entry_rip);
+	kvm_v2_load_user_address_sregs(sregs, pgd_pa, fs_base, gs_base,
+				       entry_rip);
 	kvm_v2_restore_or_clear_cr2(vcpu, sregs);
 	kvm_v2_note_fpu_owner_change(vcpu);
 	kvm_v2_force_guest_tlb_flush(sregs);

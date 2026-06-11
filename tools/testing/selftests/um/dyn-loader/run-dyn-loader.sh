@@ -12,10 +12,10 @@
 # page fails to be serviced, boot dies before reaching the
 # script body.
 #
-# This selftest boots UML with `init=/bin/dash -c "echo
-# DYN_LOADER: ok"`. dash is a small dynamically-linked PIE
-# binary that pulls in libc + ld-linux via the standard ELF
-# interpreter mechanism. PASS = the DYN_LOADER: ok line is
+# This selftest boots UML with `init=/bin/echo DYN_LOADER: ok`.
+# The init binary is dynamically linked on normal distributions and
+# pulls in libc + ld-linux via the standard ELF interpreter mechanism.
+# PASS = the DYN_LOADER: ok line is
 # emitted to stdout. FAIL = no line emitted (boot died) or
 # any error pattern (segfault, double-fault, kernel panic
 # other than the panic=-1-on-clean-init-exit pattern).
@@ -32,9 +32,8 @@
 #   UML_MEM           mem= argument. Default 256M (dash + libc need
 #                     more headroom than perf-* binaries).
 #   BACKENDS          backend list. Default "ptrace seccomp kvm".
-#   DYN_INIT          path to init binary inside hostfs. Default
-#                     /bin/dash (small dynamically-linked PIE).
-#   DYN_ARGS          space-separated args. Default '-c echo DYN_LOADER:\ ok'.
+#   DYN_INIT          path to init binary inside hostfs. Default /bin/echo.
+#   DYN_ARGS          space-separated args. Default 'DYN_LOADER: ok'.
 
 set -u
 
@@ -92,14 +91,20 @@ run_one() {
 		root=/dev/root rootfstype=hostfs rw \
 		panic=-1 </dev/null 2>&1 || true)
 	local observed
-	observed=$(echo "$log" | sed -n 's/^um: backend = \([a-z]*\).*/\1/p' | head -1)
+	observed=$(echo "$log" |
+		   sed -nE 's/^um: backend = ([^[:space:]]+).*/\1/p' |
+		   head -1)
 	# Debug: optionally save the full kernel log per-backend.
 	if [ -n "${DYN_LOADER_DUMP:-}" ]; then
 		echo "$log" > "${DYN_LOADER_DUMP}.${backend}"
 	fi
-	if [ "$observed" != "$backend" ]; then
-		printf 'DYN_LOADER: backend=%s FAIL (observed=%s)\n' \
-			"$backend" "$observed"
+	local expected=$backend
+	if [ "$backend" = "kvm" ]; then
+		expected="kvm-v2"
+	fi
+	if [ "$observed" != "$expected" ]; then
+		printf 'DYN_LOADER: backend=%s FAIL (expected=%s observed=%s)\n' \
+			"$backend" "$expected" "$observed"
 		return
 	fi
 	if echo "$log" | grep -q '^DYN_LOADER: ok'; then

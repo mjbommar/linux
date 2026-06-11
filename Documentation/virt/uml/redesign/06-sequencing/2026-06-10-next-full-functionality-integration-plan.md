@@ -81,6 +81,12 @@ Closed or substantially closed since the initial 2026-06-10 review:
   p50 0.5 ms, p99 0.9 ms, 0.00% lifecycle RSS drift, and 3000/3000 throughput
   takes pass; RSS still fails at 5,486.9 MiB for 100/100 live children against
   the 200 MiB target, with 3,964.5 MiB private dirty in smaps rollup.
+- The forced-KVM dynamic-userspace blocker is closed at the focused smoke
+  level. `/bin/true` now reaches the expected clean init-exit panic with
+  `exitcode=0` under `backend=force=kvm`, and the dyn-loader kselftest's KVM
+  row passes. The concrete bug was the user segment refresh running after the
+  FS/GS-base write in `kvm_v2_load_user_sregs()`, replacing the segment cache
+  with flat descriptors whose bases were zero.
 
 The active blockers are now:
 
@@ -116,11 +122,13 @@ The active blockers are now:
    pool-member TAP handoff now have live smoke gates; the remaining vector2
    networking gates still need multiqueue/fairness, Tier 3 seccomp, and KVM v2
    coverage.
-5. Import or complete record/replay, or land it behind an explicit
-   experimental Kconfig and keep it out of the completion claim.
+5. Complete live record/replay before counting it in the original completion
+   claim. The experimental Kconfig-gated core, syscall-log state machine, and
+   gadget bypass are present, but deterministic workload recording/replay is
+   still open.
 6. Decide whether the historical KVM v2 private state trace should be imported
    as clean optional diagnostics.
-8. Curate source comments, selftests, reports, and status docs so upstream-
+7. Curate source comments, selftests, reports, and status docs so upstream-
    facing code is free of internal issue numbers, phase diaries, random
    history, and stale claims.
 
@@ -1177,8 +1185,10 @@ Current status:
   `CONFIG_UM_BACKEND_KVM_V2_GADGET=y`: `perf-getpid` reports
   `cyc_per_call=89`, `perf-pidfam` reports `cyc_per_call=94`,
   `kvm-bounds` passes 9/9, and the fallback static loop emits its expected
-  result. The remaining hard blocker is dynamic userspace: forced-KVM
-  `/bin/true` with `kunit.enable=0` segfaults in `ld-linux` at address `0x10`.
+  result.
+- The focused dynamic-userspace blocker is closed: forced-KVM `/bin/true`
+  with `kunit.enable=0` reaches clean init exit with `exitcode=0`, and the
+  dyn-loader kselftest reports `DYN_LOADER: backend=kvm PASS`.
 
 Exit criteria:
 
