@@ -13,7 +13,7 @@ Functional code baseline used for this plan refresh:
 - `FETCH_HEAD...next`: `0` commits behind, `153` commits ahead
 - upstream ancestry: the fetched Linus ref is an ancestor of `next`
 - branch state before this plan/tooling refresh: `next` matched `origin/next`
-- note: this is the functional code baseline; documentation-only plan refresh
+- note: this is the functional code baseline; planning/tooling refresh
   commits may sit above it.
 
 Current execution evidence added on 2026-06-11:
