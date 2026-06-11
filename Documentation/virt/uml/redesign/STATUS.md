@@ -204,6 +204,9 @@ run:
   and a single queue;
 - logs reached the expected server-ready and guest-request success markers;
 - teardown left no matching soak process or stray TAP device.
+
+Current bounded vector2 evidence adds:
+
 - A bounded KVM-v2/vector2 Tier 3 current-head smoke on rebuilt
   `98166580dc4f` passed one Django-v2 and one FastAPI-v2 iteration. Both rows
   recorded vector2, TAP transport, KVM-v2 backend, in-process host mode, and a
