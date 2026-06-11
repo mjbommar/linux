@@ -173,7 +173,7 @@ done
 
 mkdir -p "$out"
 summary="$out/summary.tsv"
-printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\tguest_cpu_seconds\thost_cpu_seconds\n' > "$summary"
+printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\tguest_cpu_seconds\thost_cpu_seconds\tuml_user_cpu_seconds\tuml_system_cpu_seconds\tuml_sched_run_seconds\tuml_sched_wait_seconds\tuml_sched_pcount_delta\tuml_voluntary_ctxt_switches_delta\tuml_involuntary_ctxt_switches_delta\tuml_metrics_before_log\tuml_metrics_after_log\n' > "$summary"
 
 queue_toml() {
 	local driver="$1"
@@ -350,6 +350,61 @@ wait_guest_marker() {
 
 	echo "timed out waiting for $marker in $name" >&2
 	return 1
+}
+
+collect_metrics() {
+	local name="$1"
+	local out_json="$2"
+
+	cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
+		--bin umlctl -- metrics "$name" --json >"$out_json" 2>"$out_json.stderr"
+}
+
+metrics_delta() {
+	local before_json="$1"
+	local after_json="$2"
+
+	if [[ ! -s "$before_json" || ! -s "$after_json" ]]; then
+		printf 'NA\tNA\tNA\tNA\tNA\tNA\tNA'
+		return
+	fi
+
+	python3 - "$before_json" "$after_json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        before = json.load(f)
+    with open(sys.argv[2], encoding="utf-8") as f:
+        after = json.load(f)
+except Exception:
+    print("NA\tNA\tNA\tNA\tNA\tNA\tNA", end="")
+    sys.exit(0)
+
+bproc = before.get("proc", {})
+aproc = after.get("proc", {})
+clock_hz = aproc.get("clock_hz") or bproc.get("clock_hz") or 100
+
+def delta(key):
+    return max(int(aproc.get(key, 0)) - int(bproc.get(key, 0)), 0)
+
+user_cpu = delta("utime_ticks") / float(clock_hz)
+system_cpu = delta("stime_ticks") / float(clock_hz)
+sched_run = delta("sched_run_ns") / 1_000_000_000.0
+sched_wait = delta("sched_wait_ns") / 1_000_000_000.0
+
+print(
+    f"{user_cpu:.6f}\t"
+    f"{system_cpu:.6f}\t"
+    f"{sched_run:.6f}\t"
+    f"{sched_wait:.6f}\t"
+    f"{delta('sched_pcount')}\t"
+    f"{delta('nr_voluntary_ctxt_switches')}\t"
+    f"{delta('nr_involuntary_ctxt_switches')}",
+    end="",
+)
+PY
 }
 
 phase_toml() {
@@ -562,6 +617,8 @@ run_driver() {
 	local umlctl_log="$run_dir/umlctl-up.log"
 	local guest_log="$run_dir/guest.log"
 	local host_log="$run_dir/host-${safe_dir}-${safe_protocol}.log"
+	local metrics_before="$run_dir/uml-metrics-before.json"
+	local metrics_after="$run_dir/uml-metrics-after.json"
 	local name="vperf-$safe_driver-$safe_dir-$safe_protocol-b${run_bytes}-r${repeat_idx}"
 	local driver_tag="vec"
 	local dir_tag="g2h"
@@ -668,6 +725,8 @@ EOF
 			return 1
 		fi
 
+		collect_metrics "$name" "$metrics_before" || true
+
 		if ! host_send "10.93.0.2" "$host_log" "$run_bytes"; then
 			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
@@ -679,12 +738,13 @@ EOF
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
 			return 1
 		fi
+		collect_metrics "$name" "$metrics_after" || true
 	fi
 
 	cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 		--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
 
-	local guest_line host_line guest_seconds guest_mib_s host_seconds host_mib_s guest_cpu_seconds host_cpu_seconds
+	local guest_line host_line guest_seconds guest_mib_s host_seconds host_mib_s guest_cpu_seconds host_cpu_seconds metrics_fields metrics_before_log metrics_after_log
 	guest_line="$(grep 'VECTOR_NET_PERF ' "$guest_log" | tail -1)"
 	host_line="$(grep -E 'HOST_(SINK|SEND) ' "$host_log" | tail -1)"
 	guest_seconds="$(sed -n 's/.* seconds=\([0-9.]*\).*/\1/p' <<<"$guest_line")"
@@ -693,11 +753,19 @@ EOF
 	host_mib_s="$(sed -n 's/.* mib_s=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 	guest_cpu_seconds="$(sed -n 's/.* cpu_seconds=\([0-9.]*\).*/\1/p' <<<"$guest_line")"
 	host_cpu_seconds="$(sed -n 's/.* cpu_seconds=\([0-9.]*\).*/\1/p' <<<"$host_line")"
+	metrics_fields="$(metrics_delta "$metrics_before" "$metrics_after")"
+	metrics_before_log=""
+	metrics_after_log=""
+	if [[ -s "$metrics_before" && -s "$metrics_after" ]]; then
+		metrics_before_log="$metrics_before"
+		metrics_after_log="$metrics_after"
+	fi
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$guest_seconds" "$guest_mib_s" \
 		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" "$protocol" \
-		"$guest_cpu_seconds" "$host_cpu_seconds" >> "$summary"
+		"$guest_cpu_seconds" "$host_cpu_seconds" $metrics_fields \
+		"$metrics_before_log" "$metrics_after_log" >> "$summary"
 	echo "$guest_line"
 	echo "$host_line"
 }

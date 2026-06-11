@@ -235,6 +235,18 @@ This file is the live execution tracker for
   64 KiB guest-to-host smoke PASS, and paced vector2 UDP 64 KiB bidirectional
   smoke PASS, 2026-06-11. This is helper-level per-process timing, not the
   final full-system CPU-utilisation or syscall-rate gate.
+- Vector2 host-to-guest UML process metric deltas are now captured by the
+  fixed-byte helper through `umlctl metrics --json` before and after the
+  transfer window.  `summary.tsv` appends user/system CPU seconds, scheduler
+  run/wait seconds, scheduler pcount, voluntary/involuntary context-switch
+  deltas, and before/after metrics JSON paths. Validation: `bash -n`,
+  `git diff --check`, vector2 TCP 64 KiB host-to-guest smoke PASS with real
+  UML metric deltas, side-by-side legacy vector/vector2 TCP 64 KiB
+  host-to-guest smoke PASS with 22-field summary rows for both drivers, and
+  vector2 TCP 64 KiB guest-to-host shape smoke PASS with `NA` metric fields,
+  2026-06-11. Local privileged syscall-rate
+  collection remains blocked by `perf_event_paranoid=4`, so this is bottleneck
+  diagnostic support rather than P4.3 syscall-rate closure.
 - Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
   SELinux policy headers, sandbox/research launcher examples, gate metadata,
   tier smoke fixtures, and adjacent launcher/profile docs. Validation:
@@ -272,7 +284,8 @@ These items must be closed before the final branch can be called complete:
    feature alignment, and most fixed-byte bidirectional TCP cells pass, but
    the host-to-guest 1 MiB regression, natural 7200-second seccomp run, full
    KVM-v2 Tier 3 coverage, broader UDP plus syscall-rate/full CPU-utilisation
-   performance coverage, and multiqueue fairness/performance gates remain open.
+   performance coverage beyond the current endpoint and UML process deltas,
+   and multiqueue fairness/performance gates remain open.
 3. Pool/fork-server current tests pass on rebuilt current HEAD, including
    warm-pool, pool-member, replicated sustained-pool, pool-bench, and
    syzkaller paths. This remains a final-completion blocker only as a required

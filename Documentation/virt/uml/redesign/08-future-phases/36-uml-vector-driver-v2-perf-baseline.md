@@ -191,7 +191,8 @@ The helper was extended with:
 
 The helper later gained explicit TCP/UDP protocol selection and appended
 endpoint CPU timing columns. Current summaries include `protocol`,
-`guest_cpu_seconds`, and `host_cpu_seconds`.
+`guest_cpu_seconds`, `host_cpu_seconds`, and host-to-guest UML process metric
+deltas from `umlctl metrics`.
 
 Smoke command:
 
@@ -649,6 +650,61 @@ This is a lightweight diagnostic, not the final CPU-utilisation gate. It does
 not measure total host CPU, UML kernel CPU, softirq time, or syscall count, and
 short or paced transfers can round small guest process times to `0.000000`.
 
+## Host-To-Guest UML Process Metrics: 2026-06-11
+
+The helper now samples `umlctl metrics --json` before and after host-to-guest
+fixed-byte transfers.  The summary appends UML process user/system CPU seconds,
+scheduler run/wait seconds, scheduler pcount, voluntary/involuntary context
+switch deltas, and the before/after metrics JSON paths.
+
+Validation:
+
+```sh
+bash -n tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh
+git diff --check
+
+rm -rf /tmp/um-vector-perf-metrics-h2g-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-metrics-h2g-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19160 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+
+rm -rf /tmp/um-vector-perf-metrics-g2h-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-metrics-g2h-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=guest-to-host \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19161 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Result: syntax checks PASS, vector2 TCP 64 KiB host-to-guest smoke PASS with
+real UML process metric deltas, side-by-side legacy vector/vector2 TCP 64 KiB
+host-to-guest smoke PASS with 22-field summary rows for both drivers, and
+vector2 TCP 64 KiB guest-to-host shape smoke PASS with `NA` metric fields.
+
+The host-to-guest smoke recorded:
+
+```text
+uml_user_cpu_seconds=0.020000
+uml_system_cpu_seconds=0.500000
+uml_sched_run_seconds=0.525344
+uml_sched_wait_seconds=0.000360
+uml_sched_pcount_delta=1799
+uml_voluntary_ctxt_switches_delta=1785
+uml_involuntary_ctxt_switches_delta=13
+```
+
+This is useful for the 1 MiB host-to-guest bottleneck pass, but it does not
+replace the P4.3 syscall-rate gate.  On this host, unprivileged `perf stat -e
+syscalls:sys_enter_*` is blocked by `perf_event_paranoid=4`.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
@@ -672,7 +728,7 @@ The full replacement performance gate still needs:
   sweep;
 - host-to-guest small-transfer follow-up;
 - use the fixed-byte harness diagnostics to compare RX IRQ, NAPI, and batch
-  counters between legacy and vector2;
+  counters plus UML process metric deltas between legacy and vector2;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
 - full CPU-utilisation and CPU cycles per packet if practical;

@@ -117,8 +117,9 @@ The active blockers are now:
    networking gates still need host-to-guest small-transfer follow-up,
    multiqueue/fairness, Tier 3 seccomp, KVM v2 coverage, and full CPU/syscall
    publication evidence. The fixed-byte helper now appends per-process
-   endpoint CPU timing for focused diagnostics, but the stronger
-   CPU-utilisation and syscall-rate gate remains open.
+   endpoint CPU timing and host-to-guest UML process metric deltas for focused
+   diagnostics, but the stronger CPU-utilisation and syscall-rate gate remains
+   open.
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
@@ -891,8 +892,8 @@ Acceptance gates:
   helper now supports UDP; initial paced 1 MiB UDP evidence passes for legacy
   vector and vector2, while unpaced/larger UDP still needs publication
   coverage. The helper now also appends endpoint process CPU timing columns
-  for focused runs; full CPU-utilisation and syscall-rate measurements remain
-  open publication work.
+  and host-to-guest UML process metric deltas for focused runs; full
+  CPU-utilisation and syscall-rate measurements remain open publication work.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
@@ -1501,8 +1502,8 @@ Runtime smoke:
   now also supports UDP; initial paced 1 MiB UDP evidence passes for legacy
   vector and vector2, while unpaced/larger UDP still needs publication
   coverage. The helper now also appends endpoint process CPU timing columns
-  for focused runs; full CPU-utilisation and syscall-rate measurements remain
-  open publication work.
+  and host-to-guest UML process metric deltas for focused runs; full
+  CPU-utilisation and syscall-rate measurements remain open publication work.
 - Vector2 trusted in-process TAP. Current status: PASS through
   `vector2-inproc-tap-smoke`.
 - Vector2 parser-only transport boundary. Current status: TAP/fd are the only
