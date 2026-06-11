@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -79,9 +79,11 @@ Current source-tree direction:
   restoration. Strict replay also rejects
   randomness and external I/O syscalls outside the supported subset, including
   `getrandom`, `openat`, `read`, `write`, and `ioctl`, instead of replaying
-  them as scalar-only entries. The live raw-time smoke now proves an actual
-  replay-mode `clock_gettime(2)`, `gettimeofday(2)`, and `time(2)` syscalls
-  return recorded time bytes instead of observing host time outside the log.
+  them as scalar-only entries. The live raw-time smoke now proves replay-mode
+  direct syscall and current UML vDSO wrapper calls to `clock_gettime(2)`,
+  `gettimeofday(2)`, and `time(2)` return recorded time bytes instead of
+  observing host time outside the log. UML's current vDSO wrappers deliberately
+  enter the syscall path so UML can trap them.
   A live supported-syscall mismatch
   smoke now records `getcwd(2)` with one payload-size argument and verifies
   strict replay kills the guest when replay sees the same syscall with a
@@ -213,12 +215,14 @@ The strongest current KVM v2 evidence is:
   replay divergence for the supported syscall (`nr=79` on the validated x86_64
   run).
 - Experimental raw-time payload smoke: the static `kvm-record-time` helper
-  records one `clock_gettime(2)` result, one `gettimeofday(2)` result, and one
-  `time(2)` result, arms replay, consumes the recorded entries, and verifies
-  the replayed `struct timespec`, `struct timeval`/`struct timezone`, and
-  `time(2)` bytes match the recorded values. The `kvm-record-smoke` summary
-  now reports `live-time=1` for replayed raw-time payload bytes rather than
-  fail-closed rejection.
+  records one direct-syscall and one UML-vDSO-wrapper `clock_gettime(2)`
+  result, one direct-syscall and one UML-vDSO-wrapper `gettimeofday(2)` result,
+  and one direct-syscall and one UML-vDSO-wrapper `time(2)` result. It arms
+  replay, consumes the recorded entries, and verifies the replayed
+  `struct timespec`, `struct timeval`/`struct timezone`, and `time(2)` bytes
+  match the recorded values. The `kvm-record-smoke` summary now reports
+  `live-time=1` for replayed raw-time payload bytes rather than fail-closed
+  rejection.
 - Experimental timestamp-instruction smokes: the static `kvm-record-rdtsc` and
   `kvm-record-rdtscp` helpers record one `getpid(2)` entry, arm replay, and
   execute direct user `RDTSC` or `RDTSCP` before consuming that entry. The host
@@ -270,10 +274,11 @@ Remaining validation before publication or completion:
   dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
   stack;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
-- finish raw-time coverage beyond syscall `clock_gettime(2)`/
-  `gettimeofday(2)`/`time(2)`, replayable asynchronous signal-event ordering,
-  device/network/hostfs event policy, and broader deterministic workload
-  coverage before counting the original record/replay mission complete;
+- finish raw-time coverage beyond direct syscall and current UML vDSO wrapper
+  `clock_gettime(2)`/`gettimeofday(2)`/`time(2)`, replayable asynchronous
+  signal-event ordering, device/network/hostfs event policy, and broader
+  deterministic workload coverage before counting the original record/replay
+  mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - rerun `kmsan-smoke` in the final validation matrix to protect the KMSAN
   runtime-smoke closure;
@@ -745,9 +750,10 @@ syscall recording and snapshot-backed record start are now covered by the
 flags fields, and debugfs reports the format contract. The initial payload
 copyout set now covers `uname(2)` and `getcwd(2)`. Strict replay rejects
 syscalls outside the initial bounded replay subset instead of replaying arbitrary
-scalar-only entries. Raw `clock_gettime(2)`, `gettimeofday(2)`, and `time(2)`
-are now replayed from logged payload bytes, while broader raw-time interfaces
-remain outside the bounded tier. Replay mode sets CR4.TSD so direct user timestamp reads fault. The
+scalar-only entries. Direct syscall and current UML vDSO wrapper calls to raw
+`clock_gettime(2)`, `gettimeofday(2)`, and `time(2)` are now replayed from
+logged payload bytes, while broader raw-time interfaces remain outside the
+bounded tier. Replay mode sets CR4.TSD so direct user timestamp reads fault. The
 timestamp smokes now prove
 `RDTSC` and `RDTSCP` fault under replay instead of returning host time. Replay
 mode blocks `SIGALRM` at the KVM vCPU signal mask while inside `KVM_RUN`, so
@@ -758,9 +764,10 @@ subset are also fail-closed in strict replay. The task-owned smoke now proves
 deterministic replay for the bounded 386-entry scalar plus
 `uname(2)`/`getcwd(2)` payload workload, and the mismatch smoke proves that a
 supported `getcwd(2)` replay entry with different payload-size arguments kills
-the guest instead of falling back. The raw-time smoke proves live
-`clock_gettime(2)`, `gettimeofday(2)`, and `time(2)` return recorded time
-bytes rather than observing host time outside the log. Additional raw-time interfaces, explicit
+the guest instead of falling back. The raw-time smoke proves live direct
+syscall and current UML vDSO wrapper `clock_gettime(2)`, `gettimeofday(2)`,
+and `time(2)` calls return recorded time bytes rather than observing host time
+outside the log. Additional raw-time interfaces, explicit
 signal-event ordering, and replayable device/network/hostfs events remain
 open. The public
 `kvm-v2-record-replay.rst` page now documents the supported experimental

@@ -124,12 +124,13 @@ The active blockers are now:
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
-   through the record log. Strict raw-time policy, replayable
+   through the record log. Strict raw-time policy, replayable direct-syscall
+   and current UML-vDSO-wrapper
    `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payloads, RDTSC/RDTSCP
    trapping, and replay SIGALRM-mask blocking are now live-smoke validated,
-   but raw-time coverage beyond those syscalls, replayable asynchronous signal ordering,
-   device/network/hostfs event policy, and broader deterministic workload
-   coverage are still open.
+   but raw-time coverage beyond those syscall-wrapper paths, replayable
+   asynchronous signal ordering, device/network/hostfs event policy, and
+   broader deterministic workload coverage are still open.
 6. Keep the clean KVM v2 state-trace diagnostics bounded and optional. The
    historical all-state trace remains archival; current `next` has a compact
    debugfs ring with parser/smoke coverage.
@@ -678,7 +679,7 @@ Current `next` checkpoint:
   `kvm-record-clock-bench` PASS with `N=100`, `observed=100`, `replayed=100`,
   and `mismatches=0`.
 - Validation on 2026-06-11 after the live strict-mismatch smoke:
-  `kvm-record-smoke` PASS, including `um_kvm_v2_record` 21/21, live debugfs
+  `kvm-record-smoke` PASS, including `um_kvm_v2_record` 24/24, live debugfs
   recording, task-owned 386-entry deterministic replay, live supported-syscall
   mismatch rejection through `getcwd(2)`, and live unsupported-syscall
   rejection through `getrandom(2)`.
@@ -690,6 +691,13 @@ Current `next` checkpoint:
   `kvm-record-smoke` PASS includes `live-time=1`, proving replay-mode
   `clock_gettime(2)`, `gettimeofday(2)`, and `time(2)` return recorded time
   bytes instead of observing host time outside the log.
+- Validation on 2026-06-11 after the direct UML vDSO raw-time replay smoke:
+  `kvm-record-smoke` PASS includes `live-time=1`, and the helper reports
+  both `syscall_clock=...` and `vdso_clock=...`, proving direct calls to the
+  current UML vDSO `__vdso_clock_gettime`, `__vdso_gettimeofday`, and
+  `__vdso_time` wrappers replay from recorded syscall payloads. UML's current
+  vDSO intentionally routes those symbols through syscalls so UML can trap
+  them; native VVAR-style fast paths remain outside the current tier.
 - Validation on 2026-06-11 after the live RDTSC replay smoke:
   `kvm-record-smoke` PASS includes `live-rdtsc=1`, proving replay-mode direct
   user `RDTSC` faults instead of returning a host timestamp.
@@ -701,10 +709,10 @@ Current `next` checkpoint:
   `KVM_SET_SIGNAL_MASK` blocks `SIGALRM` during `KVM_RUN` and restores the
   normal mask afterward, as observed through
   `um_backend_kvm_v2_sigmask_install`.
-- Still open: raw-time coverage beyond syscall `clock_gettime(2)`/
-  `gettimeofday(2)`/`time(2)`,
-  replayable asynchronous signal-event ordering, broader deterministic
-  workload coverage, and replayable device/network/hostfs event policy.
+- Still open: raw-time coverage beyond direct syscall and current UML vDSO
+  wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)`, replayable
+  asynchronous signal-event ordering, broader deterministic workload coverage,
+  and replayable device/network/hostfs event policy.
 
 Acceptance gates:
 
@@ -1894,8 +1902,9 @@ Immediate engineering conclusion:
 3. Keep the retired per-take pool fd handoff boundary covered in status docs;
    launcher-owned vector2 fd handoff is now covered by `vector2-fd-handoff-smoke`.
 4. Complete record/replay beyond the explicit experimental syscall hook and
-   snapshot-backed debugfs record control, including time, signal, device, and
-   workload-level replay gates, before counting the original mission complete.
+   snapshot-backed debugfs record control, including remaining raw-time,
+   signal, device, and workload-level replay gates, before counting the
+   original mission complete.
 5. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
 6. Curate selftests and source comments for upstream style: no internal issue

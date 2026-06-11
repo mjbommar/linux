@@ -127,8 +127,9 @@ The following remain outside the current completion claim:
 
 * deterministic replay for arbitrary user workloads;
 * replayable asynchronous signal ordering;
-* replay for raw-time interfaces beyond ``clock_gettime(2)``,
-  ``gettimeofday(2)``, and ``time(2)``, including vDSO and VVAR fast paths;
+* replay for raw-time interfaces beyond direct syscall or current UML vDSO
+  wrapper calls to ``clock_gettime(2)``, ``gettimeofday(2)``, and
+  ``time(2)``, including native VVAR-style fast paths;
 * replayable device, network, hostfs, and randomness events;
 * a persistent on-disk record format or a stable user ABI.
 
@@ -154,7 +155,8 @@ The smoke gate currently validates:
   payload workload;
 * strict fail-closed behavior for a supported ``getcwd(2)`` argument mismatch;
 * raw ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` payload
-  replay from the recorded log;
+  replay from the recorded log through direct syscalls and direct calls to the
+  UML vDSO symbols, which route back through syscalls so UML can trap them;
 * CR4.TSD fault behavior for direct user ``RDTSC``/``RDTSCP`` under replay;
 * tracepoint-visible KVM signal-mask policy that blocks ``SIGALRM`` during
   replay ``KVM_RUN`` and restores the normal mask afterward;
