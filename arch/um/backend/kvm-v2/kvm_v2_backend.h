@@ -753,6 +753,8 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec);
 int kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);
 bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec);
 struct kvm_v2_record *kvm_v2_record_active(void);
+void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on);
+void kvm_v2_record_sync_gadget_bypass_page(void *gadget_state);
 void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 				   unsigned long syscall_nr,
 				   long ret_value,

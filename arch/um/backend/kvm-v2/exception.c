@@ -747,6 +747,9 @@ int kvm_v2_install_per_vcpu_gadget_state(struct kvm_v2_vm *vm,
 
 	kvm_v2_record_gadget_state(vcpu, kva, gpa, gva);
 	kvm_v2_seed_gadget_state_page(kva);
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+	kvm_v2_record_sync_gadget_bypass_page(kva);
+#endif
 
 	pr_debug("um: kvm-v2 per_vcpu_gadget_state: cpu=%d vcpu_fd=%d gpa=%pa gva=%#llx task_size_cap=%#llx\n",
 		 cpu, vcpu->vcpu_fd, &gpa, (unsigned long long)gva,

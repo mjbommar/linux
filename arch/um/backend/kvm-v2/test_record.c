@@ -16,6 +16,7 @@
 #include <sysdep/ptrace.h>
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"
 
 static void test_record_lifecycle(struct kunit *test)
 {
@@ -113,6 +114,20 @@ static void test_record_single_active_owner(struct kunit *test)
 	kvm_v2_record_destroy(second);
 	KUNIT_EXPECT_FALSE(test,
 			   static_branch_unlikely(&um_kvm_v2_record_enabled));
+}
+
+static void test_record_gadget_bypass_page(struct kunit *test)
+{
+	u8 state_page[128] = { 0 };
+
+	KUNIT_ASSERT_LT(test, KVM_V2_GADGET_OFF_RECORD,
+			(unsigned int)sizeof(state_page));
+
+	kvm_v2_record_set_gadget_bypass_page(state_page, true);
+	KUNIT_EXPECT_EQ(test, state_page[KVM_V2_GADGET_OFF_RECORD], (u8)1);
+
+	kvm_v2_record_set_gadget_bypass_page(state_page, false);
+	KUNIT_EXPECT_EQ(test, state_page[KVM_V2_GADGET_OFF_RECORD], (u8)0);
 }
 
 static void fill_syscall_regs(struct uml_pt_regs *regs)
@@ -245,6 +260,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_lifecycle),
 	KUNIT_CASE(test_record_invalid_transitions),
 	KUNIT_CASE(test_record_single_active_owner),
+	KUNIT_CASE(test_record_gadget_bypass_page),
 	KUNIT_CASE(test_record_observe_syscall),
 	KUNIT_CASE(test_record_replay_syscall_fifo),
 	KUNIT_CASE(test_record_replay_divergence_preserves_cursor),

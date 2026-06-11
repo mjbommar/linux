@@ -61,7 +61,7 @@ This file is the live execution tracker for
 | ---- | ------- | --------------------- | ----------------- | -------------------- | --------------- |
 | KVM v2 core | Backend selection and VM/vCPU lifecycle | Present | `next` | Keep and harden. | KVM smoke, CPython parity. |
 | KVM v2 core | Checked restore of saved XSAVE and VCPU events | Fixed-in-current-update | `next` | Keep checked fail-fast restore handling. | Build plus KVM v2 smoke. |
-| KVM v2 core | LSTAR gadget and fallback syscall path | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Reconcile gadget default with current Tier 3 evidence. | Gadget on/off Tier 3 comparison. |
+| KVM v2 core | LSTAR gadget and fallback syscall path | Present-needs-fix | `next`, `kvm-v2-snapshot-elf64` | Static gadget/fallback coverage is green with `CONFIG_UM_BACKEND_KVM_V2_GADGET=y`, but forced-KVM dynamic `/bin/true` currently segfaults in `ld-linux` at address `0x10`; resolve before Tier 3 or publication closure. | `perf-getpid` PASS `cyc_per_call=89`, `perf-pidfam` PASS `cyc_per_call=94`, `kvm-bounds` PASS 9/9, fallback static loop PASS; dynamic `/bin/true` FAIL, 2026-06-10. |
 | KVM v2 core | XSAVE/YMM preservation after AVX exposure | Present | `next` | Keep; ensure no legacy FPU restore remains in active paths. | CPython/Tier 3 flake soak. |
 | KVM v2 core | APERF/MPERF passthrough | Present | `next`, `umlctl-deploy` | Keep optional. | `aperf-mperf-smoke` if config enabled. |
 | KVM v2 core | RDPMC userspace support | Present | `next`, `umlctl-deploy` | Keep optional and document sandbox tradeoff. | `rdpmc-smoke` if config enabled. |
@@ -75,10 +75,10 @@ This file is the live execution tracker for
 | KVM snapshot | Snapshot benchmark kselftest | Present-validated | `memo09-phase4` | Clean wrapper around current `kvm_v2_snapshot_bench=` imported. | `kvm-snapshot-bench` PASS, 2026-06-10. |
 | KVM snapshot | Snapshot KUnit kselftest wrapper | Present-validated | `memo09-phase4` | Clean wrapper for the current four-case `um_kvm_v2_snapshot` suite imported. | `snapshot-kvm-smoke` PASS, 2026-06-10. |
 | KVM snapshot | Snapshot ELF roundtrip kselftest | Present-validated | `memo09-phase4` | Clean wrapper imported using `kvm_v2_snapshot_elf_export=<host-path>` and host `readelf`/`gdb` validation. | `snapshot-elf-roundtrip` PASS, 2026-06-10. |
-| Record/replay | Record state machine | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64` | Keep behind `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL` until live runtime integration is complete. | `um_kvm_v2_record` KUnit 7/7 PASS, 2026-06-10. |
+| Record/replay | Record state machine | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64` | Keep behind `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL` until live runtime integration is complete. | `um_kvm_v2_record` KUnit 8/8 PASS, 2026-06-10. |
 | Record/replay | Syscall observe path | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64` | Current core supports explicit observe into a bounded in-memory syscall log; live syscall dispatcher wiring remains open. | `um_kvm_v2_record` observe and buffer-overflow cases PASS, 2026-06-10. |
 | Record/replay | Replay consume path | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64`, `experiment-path-c` | Current core supports FIFO consume, strict mismatch reporting, and cursor preservation; deterministic workload replay remains open. | `um_kvm_v2_record` FIFO/end-of-log/divergence cases PASS, 2026-06-10. |
-| Record/replay | Gadget bypass in record mode | Historical-only | `kvm-v2-snapshot-elf64` | Required if gadget remains enabled. | gadget-on record smoke. |
+| Record/replay | Gadget bypass in record mode | Present-experimental-core | `next`, `kvm-v2-snapshot-elf64` | State-page bypass byte and LSTAR fallback branch are present behind `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; end-to-end logging still waits on live dispatcher wiring. | `um_kvm_v2_record` gadget-bypass helper PASS, `kvm_v2_byteshape` entry-sequence PASS, both under seccomp and `backend=force=kvm`; KVM `perf-getpid` gadget hot path PASS with `cyc_per_call=89`, 2026-06-10. |
 | Record/replay | Time, vvar, RDTSC, SIGALRM determinism | Historical-only/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Define supported tier and implement before declaring complete. | deterministic workload gate. |
 | Diagnostics | KVM v2 state trace ring | Deferred-historical | `kvm-v2-snapshot-elf64` | Do not import raw historical source; current supported observability is `TRACE_EVENT` coverage. Reintroduce only as clean optional debug infrastructure if needed. | build disabled/enabled plus enable/capture/dump/clear smoke if reintroduced. |
 | Diagnostics | State trace parser | Deferred-historical | `umlctl-deploy`, `kvm-v2-snapshot-elf64` | Keep as reference material until a clean kernel-side trace format lands. | parser smoke if reintroduced. |
@@ -140,7 +140,8 @@ This file is the live execution tracker for
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`. It includes the
   single-active container, lifecycle, strict replay flag, bounded syscall
   observe, FIFO consume, divergence cursor preservation, and overflow
-  accounting. Validation: `make ARCH=um -j16`, `um_kvm_v2_record` 7/7,
+  accounting, plus LSTAR gadget-bypass plumbing for future live dispatcher
+  logging. Validation: `make ARCH=um -j16`, `um_kvm_v2_record` 8/8,
   `kvm_v2_marshal` 8/8, and `kvm_v2_byteshape` 9/9 on 2026-06-10.
 - KVM v2 snapshot capture/restore and snapshot ELF64 export source is present
   on `next` and builds with `make ARCH=um -j16`.

@@ -191,6 +191,7 @@ static void test_lstar_gadget_entry_sequence(struct kunit *test)
 	 *   movq %rdx, %gs:KVM_V2_GADGET_OFF_SAVE_RDX   (9 B)
 	 *   movq %r8,  %gs:KVM_V2_GADGET_OFF_SAVE_R8    (9 B)
 	 *   movq %r10, %gs:KVM_V2_GADGET_OFF_SAVE_R10   (9 B)
+	 *   cmpb $0, %gs:KVM_V2_GADGET_OFF_RECORD       (9 B)
 	 *
 	 * The save sequence implements Linux x86_64 syscall ABI
 	 * preservation of RDX/R8/R10. Any change to it (regs reordered,
@@ -200,7 +201,7 @@ static void test_lstar_gadget_entry_sequence(struct kunit *test)
 	const u8 *p = kvm_v2_lstar_gadget_start;
 	const size_t len = kvm_v2_lstar_gadget_end - kvm_v2_lstar_gadget_start;
 
-	KUNIT_ASSERT_GE(test, (size_t)len, (size_t)30);
+	KUNIT_ASSERT_GE(test, (size_t)len, (size_t)39);
 
 	/* swapgs */
 	KUNIT_EXPECT_EQ(test, (u8)p[0], (u8)0x0f);
@@ -236,6 +237,15 @@ static void test_lstar_gadget_entry_sequence(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, (u8)p[25], (u8)0x25);
 	KUNIT_EXPECT_EQ(test, (u32)*(u32 *)&p[26],
 			(u32)KVM_V2_GADGET_OFF_SAVE_R10);
+
+	/* cmpb $0, %gs:OFF_RECORD */
+	KUNIT_EXPECT_EQ(test, (u8)p[30], (u8)0x65);
+	KUNIT_EXPECT_EQ(test, (u8)p[31], (u8)0x80);
+	KUNIT_EXPECT_EQ(test, (u8)p[32], (u8)0x3c);
+	KUNIT_EXPECT_EQ(test, (u8)p[33], (u8)0x25);
+	KUNIT_EXPECT_EQ(test, (u32)*(u32 *)&p[34],
+			(u32)KVM_V2_GADGET_OFF_RECORD);
+	KUNIT_EXPECT_EQ(test, (u8)p[38], (u8)0x00);
 }
 
 static void test_lstar_gadget_size_bounded(struct kunit *test)

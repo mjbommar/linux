@@ -21,6 +21,7 @@
 #include <sysdep/ptrace.h>
 
 #include "kvm_v2_backend.h"
+#include "syscall_trap.h"
 
 #define KVM_V2_RECORD_DEFAULT_BUFFER	(64U * 1024U)
 #define KVM_V2_RECORD_MAX_BUFFER	(64U * 1024U * 1024U)
@@ -30,6 +31,39 @@ EXPORT_SYMBOL_GPL(um_kvm_v2_record_enabled);
 
 static DEFINE_SPINLOCK(um_kvm_v2_record_lock);
 static struct kvm_v2_record *um_kvm_v2_active_record;
+
+void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on)
+{
+	u8 *flag;
+
+	if (!gadget_state)
+		return;
+
+	flag = (u8 *)gadget_state + KVM_V2_GADGET_OFF_RECORD;
+	WRITE_ONCE(*flag, on ? 1 : 0);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_set_gadget_bypass_page);
+
+void kvm_v2_record_sync_gadget_bypass_page(void *gadget_state)
+{
+	bool enabled = static_branch_unlikely(&um_kvm_v2_record_enabled);
+
+	kvm_v2_record_set_gadget_bypass_page(gadget_state, enabled);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_sync_gadget_bypass_page);
+
+static void kvm_v2_record_set_gadget_bypass(bool on)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < KVM_V2_MAX_VCPUS; cpu++) {
+		struct kvm_v2_vcpu *vcpu = kvm_v2_vcpu_get(cpu);
+
+		if (vcpu)
+			kvm_v2_record_set_gadget_bypass_page(vcpu->gadget_state_kva,
+							     on);
+	}
+}
 
 static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 {
@@ -81,8 +115,10 @@ static bool kvm_v2_record_disarm(struct kvm_v2_record *rec)
 		um_kvm_v2_active_record = NULL;
 	spin_unlock_irqrestore(&um_kvm_v2_record_lock, flags);
 
-	if (was_active)
+	if (was_active) {
 		static_branch_disable(&um_kvm_v2_record_enabled);
+		kvm_v2_record_set_gadget_bypass(false);
+	}
 
 	return was_active;
 }
@@ -140,6 +176,7 @@ int kvm_v2_record_start(struct kvm_v2_record *rec)
 
 	kvm_v2_record_reset_counters(rec);
 	rec->state = KVM_V2_RECORD_RECORDING;
+	kvm_v2_record_set_gadget_bypass(true);
 	static_branch_enable(&um_kvm_v2_record_enabled);
 
 out_unlock:
@@ -188,6 +225,7 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec)
 	rec->state = KVM_V2_RECORD_REPLAYING;
 	rec->buffer_replayed = 0;
 	rec->entries_replayed = 0;
+	kvm_v2_record_set_gadget_bypass(true);
 	static_branch_enable(&um_kvm_v2_record_enabled);
 
 out_unlock:

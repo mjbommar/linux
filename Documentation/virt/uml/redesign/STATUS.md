@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, and experimental record/replay core.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, and record/replay gadget bypass.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -65,7 +65,9 @@ The strongest current KVM v2 evidence is:
 - Python startup benchmark: current KVM v2 measurements remain materially
   faster than seccomp after the LSTAR fast path and FPU-state fixes.
 - Cheap syscall benchmark: the in-guest fast path keeps getpid-family calls
-  in the low-hundreds-cycle range on the measured host.
+  in the low-hundreds-cycle range on the measured host. On the current
+  gadget-enabled validation build, freestanding KVM `perf-getpid` reports
+  `cyc_per_call=89` and `perf-pidfam` reports `cyc_per_call=94`.
 - Snapshot KUnit: `um_kvm_v2_snapshot` passes 4/4 under
   `backend=force=kvm-v2` with `kunit_shutdown=halt`, covering register-only
   capture, one-page memslot capture/restore, task iotrap state restore, and
@@ -83,10 +85,11 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 7/7 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 8/8 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
-  divergence cursor preservation, and buffer-overflow accounting.
+  divergence cursor preservation, buffer-overflow accounting, and the
+  synthetic gadget-bypass page helper.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 8/8 and `kvm_v2_byteshape` 9/9.
 
@@ -98,6 +101,9 @@ and keeps CPUID xstate leaves consistent with the exposed feature set.
 
 Remaining validation before publication or completion:
 
+- fix the current forced-KVM dynamic-userspace blocker: `/bin/true` with
+  `kunit.enable=0` segfaults in `ld-linux` at address `0x10`, even though
+  static gadget/fallback loops pass;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
 - finish live record/replay integration before counting the original
   record/replay mission complete;
@@ -352,9 +358,12 @@ The following work is not yet present in the active `next` implementation:
 
 - private state-trace ring and parser tooling.
 
-KVM-specific record/replay is present only as an experimental core with KUnit
-coverage. Live syscall interception, gadget interaction, snapshot integration,
-time/RDTSC/signal determinism, and workload-level replay smokes remain open.
+KVM-specific record/replay is present as an experimental core with KUnit
+coverage. Gadget-handled syscalls now have record/replay bypass plumbing: the
+active record static key synchronizes a per-vCPU gadget-state byte, and the
+LSTAR gadget falls back to the host dispatcher when that byte is set. Live
+syscall interception, snapshot integration, time/RDTSC/signal determinism,
+and workload-level replay smokes remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field

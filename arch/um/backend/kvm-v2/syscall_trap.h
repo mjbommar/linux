@@ -149,7 +149,8 @@ enum um_kvm_iotrap {
 #define KVM_V2_GADGET_OFF_EUID		0x18	/* geteuid */
 #define KVM_V2_GADGET_OFF_GID		0x1c	/* getgid */
 #define KVM_V2_GADGET_OFF_EGID		0x20	/* getegid */
-/* +0x24..+0x27 padding aligns the 8-byte TASK_SIZE_CAP field. */
+#define KVM_V2_GADGET_OFF_RECORD	0x24	/* record/replay bypass */
+/* +0x25..+0x27 padding aligns the 8-byte TASK_SIZE_CAP field. */
 /*
  * u64, set once at install: task_size - 16, a 16-byte safety margin for
  * getcpu user-pointer bounds checks before storing cpu/node ids.
@@ -233,6 +234,8 @@ static_assert(KVM_V2_GADGET_OFF_BUDGET + 4 <= KVM_V2_GADGET_OFF_SAVE_RDX,
 	      "BUDGET overlaps SAVE_RDX");
 static_assert(KVM_V2_GADGET_OFF_MONO_NSEC + 8 <= KVM_V2_GADGET_OFF_BUDGET,
 	      "MONO_NSEC overlaps BUDGET");
+static_assert(KVM_V2_GADGET_OFF_RECORD + 1 <= KVM_V2_GADGET_OFF_TASK_SIZE_CAP,
+	      "RECORD overlaps TASK_SIZE_CAP");
 #endif /* __KERNEL__ */
 
 /*

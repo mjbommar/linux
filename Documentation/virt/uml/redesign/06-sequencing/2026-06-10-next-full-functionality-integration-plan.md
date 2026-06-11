@@ -626,13 +626,22 @@ Current `next` checkpoint:
 - `arch/um/backend/kvm-v2/record.c` implements the single-active container,
   lifecycle, strict replay flag, bounded syscall entries, FIFO consume,
   mismatch reporting, and dropped-entry accounting.
-- `arch/um/backend/kvm-v2/test_record.c` validates the experimental core
-  without requiring a live vCPU.
-- Validation on 2026-06-10: `make ARCH=um -j16`, `um_kvm_v2_record` 7/7,
-  `kvm_v2_marshal` 8/8, and `kvm_v2_byteshape` 9/9.
-- Still open: live syscall dispatcher wiring, gadget interaction, snapshot
-  integration, time/RDTSC/signal determinism, supported replay tier docs, and
-  real workload record/replay smoke tests.
+- Record/replay now owns the LSTAR gadget-bypass byte in the per-vCPU gadget
+  state page. Starting record or replay mode sets the byte across the live
+  vCPU pool; stopping or destroying the active container clears it. Newly
+  installed gadget state pages sync from the active static key.
+- `arch/um/backend/kvm-v2/lstar_gadget.S` checks that byte after saving user
+  scratch registers and forces the normal host fallback path when it is set,
+  so gadget-handled syscalls cannot disappear from the future dispatcher log.
+- `arch/um/backend/kvm-v2/test_record.c` validates the experimental core and
+  the synthetic gadget-bypass page helper without requiring a live vCPU.
+- Validation on 2026-06-10 after gadget-bypass wiring: `make ARCH=um -j16`,
+  `um_kvm_v2_record` 8/8, `kvm_v2_byteshape` 9/9, both record and byteshape
+  filters also PASS under `backend=force=kvm`, and the freestanding KVM
+  `perf-getpid` gadget smoke remains PASS with `cyc_per_call=89`.
+- Still open: live syscall dispatcher wiring, snapshot integration,
+  time/RDTSC/signal determinism, supported replay tier docs, and real workload
+  record/replay smoke tests.
 
 Acceptance gates:
 
@@ -640,7 +649,9 @@ Acceptance gates:
 - Record smoke test.
 - Replay smoke test.
 - Buffer overflow behavior test.
-- Gadget-on and gadget-off comparison.
+- Gadget-on and gadget-off comparison. Current status: state-page bypass and
+  gadget-on hot path are covered; full record-mode workload smoke remains open
+  until live syscall dispatcher wiring lands.
 - Documentation of supported determinism tier.
 
 ## Workstream D: KVM State Trace And Diagnostics
@@ -1162,7 +1173,12 @@ Current status:
 
 - The reviewed KVM v2 restore failure-handling issue is closed.
 - Snapshot CLI/doc mismatch is closed by the mconsole-backed exporter.
-- Gadget status still needs final validation on the cleaned tree.
+- Gadget static validation is green on the cleaned tree with
+  `CONFIG_UM_BACKEND_KVM_V2_GADGET=y`: `perf-getpid` reports
+  `cyc_per_call=89`, `perf-pidfam` reports `cyc_per_call=94`,
+  `kvm-bounds` passes 9/9, and the fallback static loop emits its expected
+  result. The remaining hard blocker is dynamic userspace: forced-KVM
+  `/bin/true` with `kunit.enable=0` segfaults in `ld-linux` at address `0x10`.
 
 Exit criteria:
 

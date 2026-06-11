@@ -46,6 +46,7 @@
 #define KVM_V2_GADGET_OFF_EUID		0x18
 #define KVM_V2_GADGET_OFF_GID		0x1c
 #define KVM_V2_GADGET_OFF_EGID		0x20
+#define KVM_V2_GADGET_OFF_RECORD	0x24
 #define KVM_V2_GADGET_OFF_TASK_SIZE_CAP	0x28
 #define KVM_V2_GADGET_OFF_REAL_SEC	0x30
 #define KVM_V2_GADGET_OFF_MONO_SEC	0x38
@@ -145,6 +146,14 @@ gadget_entry:
 	movq	%rdx, %gs:KVM_V2_GADGET_OFF_SAVE_RDX
 	movq	%r8,  %gs:KVM_V2_GADGET_OFF_SAVE_R8
 	movq	%r10, %gs:KVM_V2_GADGET_OFF_SAVE_R10
+
+	/*
+	 * Record/replay must see every syscall through the host dispatcher.
+	 * When record mode sets this per-vCPU byte, force the normal fallback
+	 * path after saving the user scratch registers.
+	 */
+	cmpb	$0, %gs:KVM_V2_GADGET_OFF_RECORD
+	jne	fallback
 
 	/*
 	 * getcpu pre-check. NR=309=0x135 does not fit imm8, so compare
