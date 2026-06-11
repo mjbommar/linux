@@ -971,10 +971,13 @@ Acceptance gates:
   versus legacy vector median 0.976 MiB/s, and this was treated as a
   correctness fix rather than replacement-readiness closure. The fixed-byte
   helper now supports UDP; initial paced 1 MiB UDP evidence passes for legacy
-  vector and vector2, while unpaced/larger UDP still needs publication
-  coverage. The helper now also appends endpoint process CPU timing columns
-  and host-to-guest UML process metric deltas for focused runs; full
-  CPU-utilisation and syscall-rate measurements remain open publication work.
+  vector and vector2, buffered unpaced 1 MiB UDP now passes, and buffered
+  8 MiB guest-to-host UDP passes for both drivers. Larger host-to-guest UDP
+  still needs publication coverage because the 8 MiB run loses bytes before
+  exact-byte completion for both drivers. The helper now also appends endpoint
+  process CPU timing columns and host-to-guest UML process metric deltas for
+  focused runs; full CPU-utilisation and syscall-rate measurements remain
+  open publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch
@@ -1617,10 +1620,13 @@ Runtime smoke:
   datapath. The 1 MiB host-to-guest fixed-byte cell remains below the final
   publication bar and needs the next bottleneck pass. The fixed-byte helper
   now also supports UDP; initial paced 1 MiB UDP evidence passes for legacy
-  vector and vector2, while unpaced/larger UDP still needs publication
-  coverage. The helper now also appends endpoint process CPU timing columns
-  and host-to-guest UML process metric deltas for focused runs; full
-  CPU-utilisation and syscall-rate measurements remain open publication work.
+  vector and vector2, buffered unpaced 1 MiB UDP now passes, and buffered
+  8 MiB guest-to-host UDP passes for both drivers. Larger host-to-guest UDP
+  still needs publication coverage because the 8 MiB run loses bytes before
+  exact-byte completion for both drivers. The helper now also appends endpoint
+  process CPU timing columns and host-to-guest UML process metric deltas for
+  focused runs; full CPU-utilisation and syscall-rate measurements remain
+  open publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch

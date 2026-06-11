@@ -223,13 +223,15 @@ This file is the live execution tracker for
   closes a correctness bug but not the small-transfer publication blocker.
 - Vector2 UDP fixed-byte evidence is no longer missing. The performance helper
   accepts `UML_VECTOR_PERF_PROTOCOL=tcp|udp`, keeps TCP as default, records a
-  `protocol` column, and supports paced UDP diagnostics. Validation:
-  TCP compatibility smoke PASS, vector2 UDP bidirectional 64 KiB smoke PASS,
-  and paced 1 MiB UDP matrix PASS with host-side MiB/s of vector 7.471
-  guest-to-host / 8.760 host-to-guest and vector2 7.319 guest-to-host / 8.660
-  host-to-guest, 2026-06-11. Unpaced legacy host-to-guest at 1 MiB did not
-  reach exact-byte completion, so UDP remains initial evidence rather than a
-  final publication gate.
+  `protocol` column, supports paced UDP diagnostics, now requests 4 MiB UDP
+  receive/send socket buffers by default, and fails fast if the guest exits
+  before the success marker. Validation: TCP compatibility smoke PASS,
+  vector2 UDP bidirectional 64 KiB smoke PASS, paced 1 MiB UDP matrix PASS,
+  and buffered unpaced 1 MiB UDP matrix PASS. In the buffered unpaced 1 MiB
+  run, vector2/vector host-side ratios were 0.963217 guest-to-host and
+  0.985371 host-to-guest. Buffered unpaced 8 MiB guest-to-host also passed
+  for both drivers, but 8 MiB host-to-guest still lost bytes before
+  exact-byte completion for both legacy vector and vector2, 2026-06-11.
 - Vector2 fixed-byte endpoint CPU timing is now captured by the same helper.
   Guest `VECTOR_NET_PERF` lines and host `HOST_SINK`/`HOST_SEND` lines include
   `cpu_seconds=...`, and `summary.tsv` appends `guest_cpu_seconds` and

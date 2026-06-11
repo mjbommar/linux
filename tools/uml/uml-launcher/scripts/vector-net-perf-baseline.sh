@@ -30,6 +30,8 @@ Environment overrides:
   UML_VECTOR_PERF_GUEST_CHUNK guest sender chunk size, default: 65536
   UML_VECTOR_PERF_UDP_PAYLOAD UDP payload size per datagram, default: 1472
   UML_VECTOR_PERF_UDP_PACE_USEC sleep between UDP datagrams, default: 0
+  UML_VECTOR_PERF_UDP_RCVBUF requested UDP receive socket buffer, default: 4194304
+  UML_VECTOR_PERF_UDP_SNDBUF requested UDP send socket buffer, default: 4194304
   UML_VECTOR_PERF_OUT        output directory, default: /tmp/um-vector-perf-baseline
 
 Outputs:
@@ -56,6 +58,8 @@ host_chunk="${UML_VECTOR_PERF_HOST_CHUNK:-65536}"
 guest_chunk="${UML_VECTOR_PERF_GUEST_CHUNK:-65536}"
 udp_payload="${UML_VECTOR_PERF_UDP_PAYLOAD:-1472}"
 udp_pace_usec="${UML_VECTOR_PERF_UDP_PACE_USEC:-0}"
+udp_rcvbuf="${UML_VECTOR_PERF_UDP_RCVBUF:-4194304}"
+udp_sndbuf="${UML_VECTOR_PERF_UDP_SNDBUF:-4194304}"
 out="${UML_VECTOR_PERF_OUT:-/tmp/um-vector-perf-baseline}"
 
 while [[ $# -gt 0 ]]; do
@@ -164,6 +168,14 @@ if [[ "$udp_pace_usec" == '' || "$udp_pace_usec" == *[!0-9]* ]]; then
 	echo "UDP pace must be a non-negative integer in microseconds (got $udp_pace_usec)" >&2
 	exit 2
 fi
+if [[ "$udp_rcvbuf" == '' || "$udp_rcvbuf" == *[!0-9]* ]]; then
+	echo "UDP receive buffer must be a non-negative integer (got $udp_rcvbuf)" >&2
+	exit 2
+fi
+if [[ "$udp_sndbuf" == '' || "$udp_sndbuf" == *[!0-9]* ]]; then
+	echo "UDP send buffer must be a non-negative integer (got $udp_sndbuf)" >&2
+	exit 2
+fi
 
 if [[ -z "$bytes_list" ]]; then
 	bytes_list="$bytes"
@@ -206,7 +218,7 @@ start_sink() {
 	local host_log="$1"
 	local run_bytes="$2"
 
-	python3 -u - "$port" "$run_bytes" "$protocol" "$udp_payload" >"$host_log" 2>&1 <<'PY' &
+	python3 -u - "$port" "$run_bytes" "$protocol" "$udp_payload" "$udp_rcvbuf" >"$host_log" 2>&1 <<'PY' &
 import socket
 import sys
 import time
@@ -215,6 +227,7 @@ port = int(sys.argv[1])
 expected = int(sys.argv[2])
 protocol = sys.argv[3]
 udp_payload = int(sys.argv[4])
+udp_rcvbuf = int(sys.argv[5])
 
 if protocol == "tcp":
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -234,6 +247,8 @@ if protocol == "tcp":
                 received += len(data)
 else:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if udp_rcvbuf:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, udp_rcvbuf)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", port))
         sock.settimeout(20)
@@ -289,7 +304,7 @@ host_send() {
 	local host_log="$2"
 	local run_bytes="$3"
 
-	python3 -u - "$guest_ip" "$port" "$run_bytes" "$protocol" "$tcp_nodelay" "$host_chunk" "$udp_payload" "$udp_pace_usec" >"$host_log" 2>&1 <<'PY'
+	python3 -u - "$guest_ip" "$port" "$run_bytes" "$protocol" "$tcp_nodelay" "$host_chunk" "$udp_payload" "$udp_pace_usec" "$udp_sndbuf" >"$host_log" 2>&1 <<'PY'
 import socket
 import sys
 import time
@@ -302,6 +317,7 @@ nodelay = int(sys.argv[5])
 tcp_chunk = int(sys.argv[6])
 udp_payload = int(sys.argv[7])
 udp_pace = int(sys.argv[8]) / 1_000_000.0
+udp_sndbuf = int(sys.argv[9])
 sent = 0
 
 start = time.monotonic()
@@ -319,6 +335,8 @@ if protocol == "tcp":
 else:
     chunk = bytes(udp_payload)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if udp_sndbuf:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, udp_sndbuf)
         sock.connect((host, port))
         while sent < total:
             n = min(len(chunk), total - sent)
@@ -349,6 +367,10 @@ wait_guest_marker() {
 			>"$log" 2>&1 || true
 		if grep -q "$marker" "$log"; then
 			return 0
+		fi
+		if grep -Eq 'Kernel panic|panic - not syncing|Attempted to kill init' "$log"; then
+			echo "guest exited before $marker in $name" >&2
+			return 1
 		fi
 		sleep 1
 	done
@@ -628,6 +650,7 @@ nodelay = int(os.environ.get("UML_VECTOR_PERF_TCP_NODELAY", "0"))
 tcp_chunk = int(os.environ.get("UML_VECTOR_PERF_GUEST_CHUNK", "65536"))
 udp_payload = int(os.environ.get("UML_VECTOR_PERF_UDP_PAYLOAD", "1472"))
 udp_pace = int(os.environ.get("UML_VECTOR_PERF_UDP_PACE_USEC", "0")) / 1_000_000.0
+udp_sndbuf = int(os.environ.get("UML_VECTOR_PERF_UDP_SNDBUF", "0"))
 sent = 0
 start = time.monotonic()
 cpu_start = time.process_time()
@@ -644,6 +667,8 @@ if protocol == "tcp":
 elif protocol == "udp":
     chunk = bytes(udp_payload)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if udp_sndbuf:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, udp_sndbuf)
         sock.connect((host, port))
         while sent < total:
             n = min(len(chunk), total - sent)
@@ -712,6 +737,7 @@ port = int(sys.argv[1])
 expected = int(sys.argv[2])
 protocol = os.environ.get("UML_VECTOR_PERF_PROTOCOL", "tcp")
 udp_payload = int(os.environ.get("UML_VECTOR_PERF_UDP_PAYLOAD", "1472"))
+udp_rcvbuf = int(os.environ.get("UML_VECTOR_PERF_UDP_RCVBUF", "0"))
 
 if protocol == "tcp":
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -731,6 +757,8 @@ if protocol == "tcp":
                 received += len(data)
 elif protocol == "udp":
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if udp_rcvbuf:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, udp_rcvbuf)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", port))
         sock.settimeout(20)
@@ -863,6 +891,8 @@ UML_VECTOR_PERF_TCP_NODELAY = "$tcp_nodelay"
 UML_VECTOR_PERF_GUEST_CHUNK = "$guest_chunk"
 UML_VECTOR_PERF_UDP_PAYLOAD = "$udp_payload"
 UML_VECTOR_PERF_UDP_PACE_USEC = "$udp_pace_usec"
+UML_VECTOR_PERF_UDP_RCVBUF = "$udp_rcvbuf"
+UML_VECTOR_PERF_UDP_SNDBUF = "$udp_sndbuf"
 
 [[init.phases]]
 name = "network-metadata"

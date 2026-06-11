@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, vector2 fake RX batch fidelity, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, vector2 fake RX batch fidelity, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -397,14 +397,21 @@ Current bounded vector2 evidence adds:
   correctness bug, not the small-transfer publication blocker.
 - The fixed-byte performance helper now supports explicit TCP or UDP runs.
   TCP remains the default; UDP adds fixed-byte sender/sink paths, a datagram
-  payload knob, optional inter-datagram pacing, and a `protocol` column in
-  `summary.tsv`.  Validation reports a TCP compatibility smoke PASS, a
-  vector2 UDP bidirectional smoke PASS, and a paced 1 MiB legacy-vs-vector2
-  UDP matrix: legacy vector host-side 7.471 MiB/s guest-to-host and
-  8.760 MiB/s host-to-guest, vector2 host-side 7.319 MiB/s guest-to-host and
-  8.660 MiB/s host-to-guest.  An unpaced 1 MiB legacy vector host-to-guest
-  UDP attempt did not reach exact-byte completion after the host sent the
-  payload, so this is initial paced UDP evidence, not the final UDP gate.
+  payload knob, optional inter-datagram pacing, requested UDP receive/send
+  buffer knobs defaulting to 4 MiB, fail-fast handling when a guest exits
+  before the success marker, and a `protocol` column in `summary.tsv`.
+  Validation reports a TCP compatibility smoke PASS, a vector2 UDP
+  bidirectional smoke PASS, the original paced 1 MiB legacy-vs-vector2 UDP
+  matrix, and a buffered unpaced 1 MiB UDP matrix PASS.  In the buffered
+  unpaced run, legacy vector host-side throughput was 105.918 MiB/s
+  guest-to-host and 466.051 MiB/s host-to-guest; vector2 host-side throughput
+  was 102.022 MiB/s guest-to-host and 459.233 MiB/s host-to-guest, for
+  vector2/vector host-side ratios of 0.963217 and 0.985371.  Buffered
+  unpaced 8 MiB guest-to-host also passes for both drivers: legacy vector
+  host-side 100.736 MiB/s and vector2 host-side 97.788 MiB/s.  Larger
+  host-to-guest UDP remains open: at 8 MiB, the host sent 8,388,608 bytes but
+  legacy vector received 5,358,080 bytes and vector2 received 5,674,560
+  bytes before guest exit.
 - The fixed-byte performance helper now records endpoint process CPU timing in
   addition to wall-clock throughput.  Guest `VECTOR_NET_PERF` lines and host
   `HOST_SINK`/`HOST_SEND` lines include `cpu_seconds=...`, and `summary.tsv`
@@ -512,10 +519,11 @@ Open vector2 publication work:
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
 - extend performance coverage beyond the fixed guest-to-host TCP gate: follow
-  up the host-to-guest 1 MiB regression, expand UDP beyond the initial paced
-  fixed-byte matrix, add syscall-rate and full CPU-utilisation data beyond the
-  helper's endpoint CPU timing and host-to-guest UML process deltas, and
-  expand fairness/performance coverage for multiqueue operation;
+  up the host-to-guest 1 MiB regression, expand larger host-to-guest UDP
+  beyond the buffered unpaced 1 MiB evidence, add syscall-rate and full
+  CPU-utilisation data beyond the helper's endpoint CPU timing and
+  host-to-guest UML process deltas, and expand fairness/performance coverage
+  for multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
 ## Fork-Server And Pool Work

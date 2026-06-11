@@ -1,6 +1,6 @@
 # UML vector driver v2 initial performance baseline
 
-**Status:** partial performance evidence - TCP and initial paced UDP smoke.
+**Status:** partial performance evidence - TCP and paced/buffered UDP smoke.
 **Date:** 2026-05-17.
 
 This note records the first repeatable legacy-vs-vector2 performance
@@ -536,7 +536,9 @@ of reporting a partial throughput result.
 Additional knobs:
 
 - `UML_VECTOR_PERF_UDP_PAYLOAD`, default `1472`;
-- `UML_VECTOR_PERF_UDP_PACE_USEC`, default `0`.
+- `UML_VECTOR_PERF_UDP_PACE_USEC`, default `0`;
+- `UML_VECTOR_PERF_UDP_RCVBUF`, default `4194304`;
+- `UML_VECTOR_PERF_UDP_SNDBUF`, default `4194304`.
 
 The summary file now includes a `protocol` column.
 
@@ -600,11 +602,57 @@ vector2  guest-to-host   7.319
 vector2  host-to-guest   8.660
 ```
 
-An unpaced 1 MiB UDP matrix attempt completed the legacy vector guest-to-host
-row, but legacy vector host-to-guest did not reach the exact-byte completion
-marker after the host sent the full payload. Treat that as useful negative
-evidence and keep unpaced/larger UDP coverage open for the final publication
-matrix.
+Buffered unpaced 1 MiB UDP matrix:
+
+```sh
+rm -rf /tmp/um-vector-perf-udp-1m-unpaced-buf
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-udp-1m-unpaced-buf \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19170 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Host-side MiB/s:
+
+```text
+driver   direction       host_mib_s
+vector   guest-to-host   105.918
+vector   host-to-guest   466.051
+vector2  guest-to-host   102.022
+vector2  host-to-guest   459.233
+```
+
+`comparison.tsv` reported vector2/vector host-side median ratios of
+`0.963217` for guest-to-host and `0.985371` for host-to-guest.  The 1 MiB
+unpaced UDP gap is therefore no longer open.
+
+Buffered unpaced 8 MiB guest-to-host evidence also passes:
+
+```text
+driver   direction       host_mib_s
+vector   guest-to-host   100.736
+vector2  guest-to-host    97.788
+```
+
+Larger host-to-guest UDP remains open.  At 8 MiB, both drivers completed the
+host send but the guest received fewer bytes before exiting:
+
+```text
+driver   host_sent_bytes  guest_received_bytes
+vector   8388608          5358080
+vector2  8388608          5674560
+```
+
+The helper now fails fast when the guest exits or panics before the success
+marker; the focused vector2 fail-fast rerun returned in about 25 seconds with
+`guest exited before VECTOR_NET_PERF_OK`.  Treat this as useful negative
+evidence and keep larger host-to-guest UDP coverage open for the final
+publication matrix.
 
 ## CPU Timing Extension: 2026-06-11
 
