@@ -282,6 +282,56 @@ propagation problem around task, stack, or sanitizer context setup. The
 scattershot annotations above move the first observable report but do not prove
 the underlying initialization contract.
 
+## Current-Head UMID Boundary Cleanup
+
+A later current-head run found a separate KMSAN false-positive source at the
+UML host-helper boundary. `arch/um/os-Linux/umid.c` is intentionally built with
+`KMSAN_SANITIZE := n` because it includes host headers and calls libc helpers.
+That non-instrumented code initialized the UMID path buffers, then passed them
+to instrumented kernel string helpers. Under KMSAN, the bytes were initialized
+but their shadow metadata was still poisoned.
+
+The landed cleanup keeps the host-helper boundary local:
+
+- `research-kmsan` now enables `CONFIG_FORTIFY_SOURCE=y`, so explicit
+  `memcpy()` / `memset()` / `memmove()` users in UML's `-fno-builtin` build can
+  route through the KMSAN-aware `__msan_mem*` helpers.
+- `arch/um/os-Linux/umid.c` now uses small non-instrumented UMID-local string
+  copy/append helpers for early UMID path construction.
+- Those helpers unpoison only destination bytes that the non-instrumented
+  host-helper code initialized.
+
+Validation:
+
+```bash
+make ARCH=um -j"$(nproc)" linux
+
+make -C "$src" ARCH=um LLVM=1 O="$out" uml/research-kmsan
+make -C "$src" ARCH=um LLVM=1 O="$out" -j"$(nproc)" linux
+UML_BINARY="$out/linux" \
+	"$src/tools/testing/selftests/um/kmsan-smoke/run-kmsan-smoke.sh"
+```
+
+Results:
+
+- normal UML build passed;
+- clean `research-kmsan` LLVM build passed with `CONFIG_FORTIFY_SOURCE=y`,
+  `CONFIG_KMSAN=y`, and `CONFIG_KMSAN_CHECK_PARAM_RETVAL=y`;
+- `kmsan-smoke` still failed before the `KMSAN_SMOKE` marker;
+- the first repeated report moved past `make_umid()` to:
+
+```text
+BUG: KMSAN: uninit-value in vsnprintf+0x17cc/0x1c80
+...
+console_on_rootfs+0x45/0x17d
+kernel_init_freeable+0x170/0x3ee
+UML: fatal signal; exiting
+```
+
+This closes the UMID host-helper false positive, but KMSAN remains open as a
+runtime blocker until the `vsnprintf()` / `console_on_rootfs()` report stream is
+closed and the smoke reaches a result marker.
+
 ## Non-Landed Experiments
 
 The following experiments were deliberately not landed:
@@ -299,15 +349,14 @@ These are investigation leads, not accepted code.
 
 ## Next Steps
 
-1. Use the fixed stacktrace attribution for future KMSAN runs; reports headed
-   by `sized_strscpy`, `prepare_creds`, scheduler setup, or `string` are now
-   the meaningful sites.
+1. Use the fixed stacktrace attribution for future KMSAN runs; the current
+   first report is headed by `vsnprintf()` from `console_on_rootfs()`.
 2. Inspect UML's KMSAN task and stack initialization contract, especially the
    interaction between `kmsan_task_create()`, `THREAD_INFO_IN_TASK`,
    `task_stack_page()`, and `new_thread_handler()`.
-3. Determine why the `kvasprintf()` result for early kthread names remains
-   poisoned after the instrumented `vsnprintf()` write path.
-4. Reproduce the `init_rescuer()` `id_buf` report without generic
+3. Determine why the early `console_on_rootfs()` formatting path still feeds
+   poisoned data into `vsnprintf()` after the UMID boundary cleanup.
+4. Reproduce the previous `init_rescuer()` `id_buf` report without generic
    `kvasprintf()` or `cred` annotations and determine why stores through the
    instrumented `scnprintf()` / `vsnprintf()` path do not leave the stack bytes
    initialized.

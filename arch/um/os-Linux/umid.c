@@ -25,14 +25,68 @@ static char umid[UMID_LEN] = { 0 };
 /* Changed by set_uml_dir and make_uml_dir, which are run early in boot */
 static char *uml_dir = UML_DIR;
 
+#ifdef CONFIG_KMSAN
+void kmsan_unpoison_memory(const void *address, size_t size);
+#else
+static inline void kmsan_unpoison_memory(const void *address, size_t size)
+{
+	(void)address;
+	(void)size;
+}
+#endif
+
+static size_t __init umid_strnlen(const char *str, size_t max)
+{
+	size_t len;
+
+	for (len = 0; len < max && str[len] != '\0'; len++)
+		;
+
+	return len;
+}
+
+static size_t __init umid_strlen(const char *str)
+{
+	size_t len;
+
+	for (len = 0; str[len] != '\0'; len++)
+		;
+
+	return len;
+}
+
+static void __init umid_strscpy(char *dst, const char *src, size_t size)
+{
+	size_t i;
+
+	if (!size)
+		return;
+
+	for (i = 0; i + 1 < size && src[i] != '\0'; i++)
+		dst[i] = src[i];
+	dst[i] = '\0';
+	kmsan_unpoison_memory(dst, i + 1);
+}
+
+static void __init umid_strlcat(char *dst, const char *src, size_t size)
+{
+	size_t len = umid_strnlen(dst, size);
+
+	if (len < size)
+		umid_strscpy(dst + len, src, size - len);
+}
+
 static int __init make_uml_dir(void)
 {
 	char dir[512] = { '\0' };
 	int len, err;
 
+	kmsan_unpoison_memory(dir, sizeof(dir));
+
 	if (*uml_dir == '~') {
 		char *home = getenv("HOME");
 
+		kmsan_unpoison_memory(&home, sizeof(home));
 		err = -ENOENT;
 		if (home == NULL) {
 			printk(UM_KERN_ERR
@@ -40,22 +94,23 @@ static int __init make_uml_dir(void)
 				__func__);
 			goto err;
 		}
-		strscpy(dir, home);
+		umid_strscpy(dir, home, sizeof(dir));
 		uml_dir++;
 	}
-	strlcat(dir, uml_dir, sizeof(dir));
-	len = strlen(dir);
+	umid_strlcat(dir, uml_dir, sizeof(dir));
+	len = umid_strnlen(dir, sizeof(dir));
 	if (len > 0 && dir[len - 1] != '/')
-		strlcat(dir, "/", sizeof(dir));
+		umid_strlcat(dir, "/", sizeof(dir));
 
 	err = -ENOMEM;
-	uml_dir = malloc(strlen(dir) + 1);
+	uml_dir = malloc(len + 1);
+	kmsan_unpoison_memory(&uml_dir, sizeof(uml_dir));
 	if (uml_dir == NULL) {
 		printk(UM_KERN_ERR "%s : malloc failed, errno = %d\n",
 			__func__, errno);
 		goto err;
 	}
-	strcpy(uml_dir, dir);
+	umid_strscpy(uml_dir, dir, len + 1);
 
 	if ((mkdir(uml_dir, 0777) < 0) && (errno != EEXIST)) {
 		printk(UM_KERN_ERR "Failed to mkdir '%s': %s\n",
@@ -251,10 +306,10 @@ out:
 
 int __init set_umid(char *name)
 {
-	if (strlen(name) > UMID_LEN - 1)
+	if (umid_strlen(name) > UMID_LEN - 1)
 		return -E2BIG;
 
-	strscpy(umid, name);
+	umid_strscpy(umid, name, sizeof(umid));
 
 	return 0;
 }
@@ -273,8 +328,8 @@ static int __init make_umid(void)
 	make_uml_dir();
 
 	if (*umid == '\0') {
-		strscpy(tmp, uml_dir);
-		strlcat(tmp, "XXXXXX", sizeof(tmp));
+		umid_strscpy(tmp, uml_dir, sizeof(tmp));
+		umid_strlcat(tmp, "XXXXXX", sizeof(tmp));
 		fd = mkstemp(tmp);
 		if (fd < 0) {
 			printk(UM_KERN_ERR "make_umid - mkstemp(%s) failed: "
@@ -285,7 +340,7 @@ static int __init make_umid(void)
 
 		close(fd);
 
-		set_umid(&tmp[strlen(uml_dir)]);
+		set_umid(&tmp[umid_strlen(uml_dir)]);
 
 		/*
 		 * There's a nice tiny little race between this unlink and
@@ -299,6 +354,7 @@ static int __init make_umid(void)
 	}
 
 	snprintf(tmp, sizeof(tmp), "%s%s", uml_dir, umid);
+	kmsan_unpoison_memory(tmp, umid_strnlen(tmp, sizeof(tmp)) + 1);
 	err = mkdir(tmp, 0777);
 	if (err < 0) {
 		err = -errno;

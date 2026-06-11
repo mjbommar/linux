@@ -45,6 +45,8 @@ What's on
 - **Backend**: SECCOMP_ONLY.
 - **KMSAN**: ``CONFIG_KMSAN=y`` and
   ``CONFIG_KMSAN_CHECK_PARAM_RETVAL=y``.
+- **FORTIFY**: ``CONFIG_FORTIFY_SOURCE=y`` so explicit memory helpers in UML's
+  ``-fno-builtin`` build can route through KMSAN-aware ``__msan_mem*`` helpers.
 - **KASAN**: explicitly off, because KASAN and KMSAN cannot coexist
   in one kernel image.
 - **Debug surface**: ``DEBUG_FS``, ``DEBUG_KERNEL``,
@@ -61,10 +63,9 @@ with kselftest SKIP if the supplied binary was not built with KMSAN.
 
 As of 2026-06-11, a clean LLVM ``uml/research-kmsan`` kernel build passes.
 The runtime smoke now gets past the earlier KMSAN vmalloc shadow/origin
-mapping failure, mounts the hostfs root, and then fails before the
-``KMSAN_SMOKE`` marker because early KMSAN reports are emitted from
-``sized_strscpy()`` in the kthread-name copy path and follow-on
-scheduler/credential/string paths. Treat this profile as buildable but not yet
+mapping failure and the later UMID host-helper boundary report, then fails
+before the ``KMSAN_SMOKE`` marker with a repeated ``vsnprintf()`` report from
+``console_on_rootfs()``. Treat this profile as buildable but not yet
 runtime-closed.
 
 See also
