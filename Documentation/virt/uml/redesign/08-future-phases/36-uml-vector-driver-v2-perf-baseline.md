@@ -654,6 +654,36 @@ marker; the focused vector2 fail-fast rerun returned in about 25 seconds with
 evidence and keep larger host-to-guest UDP coverage open for the final
 publication matrix.
 
+Paced 8 MiB host-to-guest UDP evidence:
+
+```sh
+rm -rf /tmp/um-vector-perf-udp-8m-h2g-pace20
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-udp-8m-h2g-pace20 \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=8388608 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19175 \
+UML_VECTOR_PERF_UDP_PACE_USEC=20 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+This completed exactly for both drivers:
+
+```text
+driver   direction       host_mib_s  guest_mib_s
+vector   host-to-guest   17.781      17.794
+vector2  host-to-guest   17.761      17.792
+```
+
+`comparison.tsv` reported a vector2/vector host-side median throughput ratio
+of `0.998875`, guest-side median throughput ratio of `0.999888`, scheduler
+pcount median ratio of `1.000000`, and voluntary context-switch median ratio
+of `0.999795`.  This is positive larger UDP host-to-guest evidence for the
+paced shape; it does not erase the unpaced 8 MiB byte-loss caveat above.
+
 ## CPU Timing Extension: 2026-06-11
 
 The helper now records endpoint process CPU time for each fixed-byte run. Host

@@ -231,7 +231,10 @@ This file is the live execution tracker for
   run, vector2/vector host-side ratios were 0.963217 guest-to-host and
   0.985371 host-to-guest. Buffered unpaced 8 MiB guest-to-host also passed
   for both drivers, but 8 MiB host-to-guest still lost bytes before
-  exact-byte completion for both legacy vector and vector2, 2026-06-11.
+  exact-byte completion for both legacy vector and vector2. With
+  `UML_VECTOR_PERF_UDP_PACE_USEC=20`, paced 8 MiB host-to-guest passed for
+  both drivers with vector2/vector host-side ratio 0.998875 and scheduler
+  pcount ratio 1.000000, 2026-06-11.
 - Vector2 fixed-byte endpoint CPU timing is now captured by the same helper.
   Guest `VECTOR_NET_PERF` lines and host `HOST_SINK`/`HOST_SEND` lines include
   `cpu_seconds=...`, and `summary.tsv` appends `guest_cpu_seconds` and

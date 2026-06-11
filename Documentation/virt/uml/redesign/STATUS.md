@@ -411,7 +411,11 @@ Current bounded vector2 evidence adds:
   host-side 100.736 MiB/s and vector2 host-side 97.788 MiB/s.  Larger
   host-to-guest UDP remains open: at 8 MiB, the host sent 8,388,608 bytes but
   legacy vector received 5,358,080 bytes and vector2 received 5,674,560
-  bytes before guest exit.
+  bytes before guest exit.  With `UML_VECTOR_PERF_UDP_PACE_USEC=20`, the
+  paced 8 MiB host-to-guest cell passes for both drivers: legacy vector
+  host-side 17.781 MiB/s and vector2 host-side 17.761 MiB/s, for a
+  vector2/vector host-side ratio of 0.998875 and matching scheduler pcount
+  ratio of 1.000000.
 - The fixed-byte performance helper now records endpoint process CPU timing in
   addition to wall-clock throughput.  Guest `VECTOR_NET_PERF` lines and host
   `HOST_SINK`/`HOST_SEND` lines include `cpu_seconds=...`, and `summary.tsv`
@@ -519,8 +523,8 @@ Open vector2 publication work:
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
 - extend performance coverage beyond the fixed guest-to-host TCP gate: follow
-  up the host-to-guest 1 MiB regression, expand larger host-to-guest UDP
-  beyond the buffered unpaced 1 MiB evidence, add syscall-rate and full
+  up the host-to-guest 1 MiB regression, decide the final acceptance shape for
+  paced versus unpaced larger host-to-guest UDP, add syscall-rate and full
   CPU-utilisation data beyond the helper's endpoint CPU timing and
   host-to-guest UML process deltas, and expand fairness/performance coverage
   for multiqueue operation;
