@@ -144,6 +144,10 @@ static void test_record_strict_syscall_policy(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test,
 			  kvm_v2_record_syscall_supported(__NR_clock_gettime));
 #endif
+#ifdef __NR_gettimeofday
+	KUNIT_EXPECT_TRUE(test,
+			  kvm_v2_record_syscall_supported(__NR_gettimeofday));
+#endif
 #ifdef __NR_time
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_time));
 #endif
@@ -154,6 +158,10 @@ static void test_record_strict_syscall_policy(struct kunit *test)
 #ifdef __NR_clock_gettime
 	KUNIT_EXPECT_TRUE(test,
 			  kvm_v2_record_syscall_has_payload(__NR_clock_gettime));
+#endif
+#ifdef __NR_gettimeofday
+	KUNIT_EXPECT_TRUE(test,
+			  kvm_v2_record_syscall_has_payload(__NR_gettimeofday));
 #endif
 #ifdef __NR_time
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_has_payload(__NR_time));
@@ -440,6 +448,91 @@ static void test_record_syscall_payload_clock_gettime_fifo(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			kvm_v2_record_consume_syscall_payload(rec,
 							      __NR_clock_gettime,
+							      &replay_regs,
+							      &got_ret,
+							      &got_payload,
+							      sizeof(got_payload),
+							      &got_len),
+			1);
+	KUNIT_EXPECT_EQ(test, got_ret, 0L);
+	KUNIT_EXPECT_EQ(test, got_len, sizeof(payload));
+	KUNIT_EXPECT_EQ(test, memcmp(&got_payload, &payload, sizeof(payload)),
+			0);
+
+	kvm_v2_record_destroy(rec);
+}
+#endif
+
+#ifdef __NR_gettimeofday
+struct test_record_gettimeofday_payload {
+	u8 has_tv;
+	u8 has_tz;
+	u8 reserved[6];
+	struct __kernel_old_timeval tv;
+	struct timezone tz;
+};
+
+static void test_record_syscall_payload_gettimeofday_fifo(struct kunit *test)
+{
+	const struct test_record_gettimeofday_payload payload = {
+		.has_tv = 1,
+		.has_tz = 1,
+		.tv = {
+			.tv_sec = 123,
+			.tv_usec = 456,
+		},
+		.tz = {
+			.tz_minuteswest = 7,
+			.tz_dsttime = 8,
+		},
+	};
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs regs;
+	struct uml_pt_regs replay_regs;
+	struct test_record_gettimeofday_payload got_payload;
+	size_t cursor;
+	size_t got_len = 0;
+	long got_ret = -1;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	fill_syscall_regs(&regs);
+	regs.gp[HOST_DI] = 0x12345000ULL;
+	regs.gp[HOST_SI] = 0x12346000ULL;
+	replay_regs = regs;
+	replay_regs.gp[HOST_DI] = 0;
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_observe_syscall_payload(rec,
+							      __NR_gettimeofday,
+							      0, &regs, 0,
+							      &payload,
+							      sizeof(payload)),
+			1);
+	KUNIT_EXPECT_EQ(test, rec->payload_entries_recorded, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_bytes_recorded,
+			(u64)sizeof(payload));
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+	cursor = rec->buffer_replayed;
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec,
+							      __NR_gettimeofday,
+							      &replay_regs,
+							      &got_ret,
+							      &got_payload,
+							      sizeof(got_payload),
+							      &got_len),
+			-EILSEQ);
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, cursor);
+
+	replay_regs = regs;
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec,
+							      __NR_gettimeofday,
 							      &replay_regs,
 							      &got_ret,
 							      &got_payload,
@@ -743,18 +836,15 @@ static void test_record_strict_time_policy(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, rejected);
 #endif
 #ifdef __NR_gettimeofday
-	KUNIT_EXPECT_FALSE(test,
-			   kvm_v2_record_syscall_has_payload(__NR_gettimeofday));
-	KUNIT_EXPECT_FALSE(test,
-			   kvm_v2_record_syscall_supported(__NR_gettimeofday));
+	KUNIT_EXPECT_TRUE(test,
+			  kvm_v2_record_syscall_has_payload(__NR_gettimeofday));
+	KUNIT_EXPECT_TRUE(test,
+			  kvm_v2_record_syscall_supported(__NR_gettimeofday));
 	KUNIT_EXPECT_EQ(test,
 			kvm_v2_record_check_strict_syscall(rec,
 							   __NR_gettimeofday),
-			-EOPNOTSUPP);
-	rejected++;
+			0);
 	KUNIT_EXPECT_EQ(test, rec->strict_replay_failures, rejected);
-	KUNIT_EXPECT_EQ(test, rec->last_replay_failure_syscall,
-			(long)__NR_gettimeofday);
 #endif
 #ifdef __NR_time
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_has_payload(__NR_time));
@@ -937,6 +1027,9 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_syscall_payload_getcwd_fifo),
 #ifdef __NR_clock_gettime
 	KUNIT_CASE(test_record_syscall_payload_clock_gettime_fifo),
+#endif
+#ifdef __NR_gettimeofday
+	KUNIT_CASE(test_record_syscall_payload_gettimeofday_fifo),
 #endif
 #ifdef __NR_time
 	KUNIT_CASE(test_record_syscall_payload_time_fifo),

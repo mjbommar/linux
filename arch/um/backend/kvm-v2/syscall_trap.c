@@ -64,6 +64,7 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/utsname.h>
+#include <uapi/linux/time.h>
 #include <uapi/linux/time_types.h>
 #include <uapi/asm-generic/siginfo.h>	/* ILL_ILLOPN, FPE_INTOVF, SEGV_MAPERR */
 
@@ -1448,12 +1449,24 @@ static void kvm_v2_clear_syscall_nr(struct uml_pt_regs *regs)
 }
 
 #ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+struct kvm_v2_record_gettimeofday_payload {
+	u8 has_tv;
+	u8 has_tz;
+	u8 reserved[6];
+	struct __kernel_old_timeval tv;
+	struct timezone tz;
+};
+
 static unsigned int kvm_v2_record_payload_arg(unsigned long syscall_nr)
 {
 	switch (syscall_nr) {
 #ifdef __NR_clock_gettime
 	case __NR_clock_gettime:
 		return 1;
+#endif
+#ifdef __NR_gettimeofday
+	case __NR_gettimeofday:
+		return 0;
 #endif
 #ifdef __NR_time
 	case __NR_time:
@@ -1496,6 +1509,12 @@ static size_t kvm_v2_record_payload_len(unsigned long syscall_nr, long ret)
 			return 0;
 		return sizeof(struct __kernel_timespec);
 #endif
+#ifdef __NR_gettimeofday
+	case __NR_gettimeofday:
+		if (ret < 0)
+			return 0;
+		return sizeof(struct kvm_v2_record_gettimeofday_payload);
+#endif
 #ifdef __NR_time
 	case __NR_time:
 		if (ret < 0)
@@ -1523,6 +1542,12 @@ static size_t kvm_v2_record_payload_max_len(unsigned long syscall_nr,
 	case __NR_clock_gettime:
 		return sizeof(struct __kernel_timespec);
 #endif
+#ifdef __NR_gettimeofday
+	case __NR_gettimeofday:
+		if (!regs->gp[HOST_DI] && !regs->gp[HOST_SI])
+			return 0;
+		return sizeof(struct kvm_v2_record_gettimeofday_payload);
+#endif
 #ifdef __NR_time
 	case __NR_time:
 		return sizeof(__kernel_old_time_t);
@@ -1535,6 +1560,45 @@ static size_t kvm_v2_record_payload_max_len(unsigned long syscall_nr,
 	default:
 		return 0;
 	}
+}
+
+static int kvm_v2_record_copy_gettimeofday_payload(struct uml_pt_regs *regs,
+						   const void *payload,
+						   size_t payload_len)
+{
+	const struct kvm_v2_record_gettimeofday_payload *gtod = payload;
+
+	if (payload_len != sizeof(*gtod))
+		return -EILSEQ;
+	if (!!regs->gp[HOST_DI] != !!gtod->has_tv ||
+	    !!regs->gp[HOST_SI] != !!gtod->has_tz)
+		return -EILSEQ;
+	if (gtod->has_tv &&
+	    copy_to_user((void __user *)regs->gp[HOST_DI], &gtod->tv,
+			 sizeof(gtod->tv)))
+		return -EFAULT;
+	if (gtod->has_tz &&
+	    copy_to_user((void __user *)regs->gp[HOST_SI], &gtod->tz,
+			 sizeof(gtod->tz)))
+		return -EFAULT;
+	return 0;
+}
+
+static int kvm_v2_record_copy_replay_payload(unsigned long syscall_nr,
+					     struct uml_pt_regs *regs,
+					     unsigned long user_ptr,
+					     const void *payload,
+					     size_t payload_len)
+{
+#ifdef __NR_gettimeofday
+	if (syscall_nr == __NR_gettimeofday)
+		return kvm_v2_record_copy_gettimeofday_payload(regs, payload,
+							       payload_len);
+#endif
+	if (payload_len &&
+	    copy_to_user((void __user *)user_ptr, payload, payload_len))
+		return -EFAULT;
+	return 0;
 }
 
 static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
@@ -1572,7 +1636,8 @@ static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
 		goto out_free;
 
 	if (*served_ret >= 0 && payload_len &&
-	    copy_to_user((void __user *)user_ptr, payload, payload_len))
+	    kvm_v2_record_copy_replay_payload(syscall_nr, regs, user_ptr,
+					      payload, payload_len))
 		rc = -EFAULT;
 
 out_free:
@@ -1621,6 +1686,38 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 	return false;
 }
 
+static bool kvm_v2_record_observe_gettimeofday(struct kvm_v2_record *rec,
+					       struct uml_pt_regs *regs,
+					       long ret)
+{
+#ifdef __NR_gettimeofday
+	struct kvm_v2_record_gettimeofday_payload payload;
+
+	if (ret < 0 || (!regs->gp[HOST_DI] && !regs->gp[HOST_SI]))
+		return false;
+
+	memset(&payload, 0, sizeof(payload));
+	payload.has_tv = !!regs->gp[HOST_DI];
+	payload.has_tz = !!regs->gp[HOST_SI];
+	if (payload.has_tv &&
+	    copy_from_user(&payload.tv,
+			   (void __user *)regs->gp[HOST_DI],
+			   sizeof(payload.tv)))
+		return false;
+	if (payload.has_tz &&
+	    copy_from_user(&payload.tz,
+			   (void __user *)regs->gp[HOST_SI],
+			   sizeof(payload.tz)))
+		return false;
+
+	return kvm_v2_record_observe_syscall_payload(rec, __NR_gettimeofday,
+						     ret, regs, 0, &payload,
+						     sizeof(payload)) > 0;
+#else
+	return false;
+#endif
+}
+
 static bool kvm_v2_record_observe_payload(struct kvm_v2_record *rec,
 					  struct uml_pt_regs *regs,
 					  unsigned long syscall_nr)
@@ -1631,6 +1728,11 @@ static bool kvm_v2_record_observe_payload(struct kvm_v2_record *rec,
 	size_t payload_len;
 	long ret = (long)regs->gp[HOST_AX];
 	bool observed = false;
+
+#ifdef __NR_gettimeofday
+	if (syscall_nr == __NR_gettimeofday)
+		return kvm_v2_record_observe_gettimeofday(rec, regs, ret);
+#endif
 
 	payload_len = kvm_v2_record_payload_len(syscall_nr, ret);
 	if (!payload_len)

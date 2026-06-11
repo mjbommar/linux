@@ -85,6 +85,11 @@ Syscall       Replay behavior
 ``clock_gettime``
               Return value and returned ``struct __kernel_timespec`` bytes are
               replayed when the clock id argument matches the recorded one.
+``gettimeofday``
+              Return value and the optional returned
+              ``struct __kernel_old_timeval`` and ``struct timezone`` bytes
+              are replayed when the output-pointer shape matches the recorded
+              call.
 ``time``      Scalar return value is replayed from the log; when the optional
               ``tloc`` pointer is non-NULL, the stored
               ``__kernel_old_time_t`` bytes are replayed too.
@@ -103,8 +108,7 @@ Strict replay fail-closes instead of guessing:
   different buffer-size argument, records a strict replay failure and kills the
   guest;
 * unsupported syscalls record a strict replay failure and kill the guest;
-* raw time interfaces outside the current replay set, such as
-  ``gettimeofday(2)``, remain unsupported;
+* raw time interfaces outside the current replay set remain unsupported;
 * replay mode sets CR4.TSD so user ``RDTSC`` and ``RDTSCP`` fault instead of
   observing host time outside the log;
 * replay mode asks KVM to block ``SIGALRM`` while the vCPU is inside
@@ -123,8 +127,8 @@ The following remain outside the current completion claim:
 
 * deterministic replay for arbitrary user workloads;
 * replayable asynchronous signal ordering;
-* replay for raw-time interfaces beyond ``clock_gettime(2)`` and ``time(2)``,
-  including vDSO and VVAR fast paths;
+* replay for raw-time interfaces beyond ``clock_gettime(2)``,
+  ``gettimeofday(2)``, and ``time(2)``, including vDSO and VVAR fast paths;
 * replayable device, network, hostfs, and randomness events;
 * a persistent on-disk record format or a stable user ABI.
 
@@ -149,8 +153,8 @@ The smoke gate currently validates:
 * task-owned replay of a bounded scalar plus ``uname(2)``/``getcwd(2)``
   payload workload;
 * strict fail-closed behavior for a supported ``getcwd(2)`` argument mismatch;
-* raw ``clock_gettime(2)`` and ``time(2)`` payload replay from the recorded
-  log;
+* raw ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` payload
+  replay from the recorded log;
 * CR4.TSD fault behavior for direct user ``RDTSC``/``RDTSCP`` under replay;
 * tracepoint-visible KVM signal-mask policy that blocks ``SIGALRM`` during
   replay ``KVM_RUN`` and restores the normal mask afterward;
@@ -158,4 +162,4 @@ The smoke gate currently validates:
 
 The expected summary line is::
 
-  KVM_RECORD_SMOKE: PASS (KUnit=23/23 live-debugfs=1 task-owned=1 live-mismatch=1 live-signal=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1)
+  KVM_RECORD_SMOKE: PASS (KUnit=24/24 live-debugfs=1 task-owned=1 live-mismatch=1 live-signal=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1)
