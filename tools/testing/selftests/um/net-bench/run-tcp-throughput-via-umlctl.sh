@@ -1,16 +1,12 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# guest->host TCP throughput via the production
-# umlctl fd-handoff path.
+# guest->host TCP throughput through the umlctl fd-handoff path.
 #
-# The earlier standalone wrapper (run-tcp-throughput.sh +
-# exec-uml-fd.py) only got a clean number for the vector2 inproc
-# path (CONFIG_UML_NET_VECTOR_V2_INPROC).  The production path is
-# fd-handoff: umlctl pre-opens /dev/net/tun, dups it onto a known
-# fd, and exec's the kernel with `vec2.0:transport=fd,mode=fd,fd=N`.
-# This script drives the production path by invoking `umlctl gate
-# loop` with --network-driver vector / vector2.
+# umlctl pre-opens /dev/net/tun, dups it onto known fds, and execs the
+# kernel with the vector2 fd transport.  This wrapper runs the same
+# workload with legacy vector and vector2, then gates vector2 against the
+# configured legacy throughput threshold.
 #
 # Usage:
 #   tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh \
@@ -18,8 +14,11 @@
 
 set -euo pipefail
 
-UMLCTL=${UMLCTL:-$HOME/bench-bundle/bin/umlctl}
-KERNEL=${KERNEL:-$HOME/src/uml-builds/uml-smp-t41fix/linux}
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$SCRIPT_DIR/../../../../.." && pwd)
+
+UMLCTL=${UMLCTL:-}
+KERNEL=${KERNEL:-${UML_KERNEL:-$ROOT/linux}}
 DURATION=${DURATION:-8}
 REPS=${REPS:-3}
 BACKEND=${BACKEND:-seccomp}
@@ -27,7 +26,19 @@ BENCH_PORT=${BENCH_PORT:-5302}
 TAP=${TAP:-tcpbench-tap1}
 HOST_IP_PLAIN=${HOST_IP_PLAIN:-192.168.45.1}
 GUEST_IP_PLAIN=${GUEST_IP_PLAIN:-192.168.45.2}
-OUT=${OUT:-$HOME/src/tcp-throughput-via-umlctl}
+OUT=${OUT:-$PWD/tcp-throughput-via-umlctl}
+TCP_SEND=${TCP_SEND:-$SCRIPT_DIR/tcp-send}
+
+if [ -z "$UMLCTL" ]; then
+    for cand in \
+        "$ROOT/tools/uml/uml-launcher/target/release/umlctl" \
+        "$ROOT/tools/uml/uml-launcher/target/debug/umlctl"; do
+        if [ -x "$cand" ]; then
+            UMLCTL=$cand
+            break
+        fi
+    done
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -40,9 +51,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ -z "$UMLCTL" ] || [ ! -x "$UMLCTL" ]; then
+    echo "error: umlctl not found (set UMLCTL=...)" >&2
+    exit 1
+fi
+if [ ! -x "$KERNEL" ]; then
+    echo "error: UML kernel $KERNEL not found (set KERNEL=...)" >&2
+    exit 1
+fi
+
 mkdir -p "$OUT"
-SRCDIR="$(dirname "$(readlink -f "$0")")"
-TEMPLATE="$SRCDIR/tcp-throughput.toml.template"
+TEMPLATE="$SCRIPT_DIR/tcp-throughput.toml.template"
 
 cleanup() {
     if [ -n "${SRV_PID:-}" ] && kill -0 "$SRV_PID" 2>/dev/null; then
@@ -90,6 +109,7 @@ resolve_template() {
         -e "s|{{NETWORK_DRIVER}}|$drv|g" \
         -e "s|{{DURATION_SEC}}|$DURATION|g" \
         -e "s|{{BENCH_PORT}}|$BENCH_PORT|g" \
+        -e "s|{{TCP_SEND}}|$TCP_SEND|g" \
         "$TEMPLATE" > "$out"
 }
 
@@ -120,7 +140,7 @@ run_driver() {
         fi
     done
     if [ ${#results[@]} -eq 0 ]; then
-        echo "no $drv results captured"
+        echo "no $drv results captured" >&2
         return 1
     fi
     printf '%s\n' "${results[@]}"
@@ -132,11 +152,19 @@ echo
 
 echo "=== driver=vector ==="
 mapfile -t VEC < <(run_driver vector)
+if [ ${#VEC[@]} -eq 0 ]; then
+    echo "FAIL: no vector throughput results captured" >&2
+    exit 1
+fi
 printf 'vector: %s\n' "${VEC[@]}"
 echo
 
 echo "=== driver=vector2 ==="
 mapfile -t V2 < <(run_driver vector2)
+if [ ${#V2[@]} -eq 0 ]; then
+    echo "FAIL: no vector2 throughput results captured" >&2
+    exit 1
+fi
 printf 'vector2: %s\n' "${V2[@]}"
 echo
 

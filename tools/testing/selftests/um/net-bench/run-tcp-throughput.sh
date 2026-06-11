@@ -17,14 +17,17 @@
 
 set -euo pipefail
 
-KERNEL=${KERNEL:-$HOME/src/uml-builds/uml-smp-t41fix/linux}
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$SCRIPT_DIR/../../../../.." && pwd)
+
+KERNEL=${KERNEL:-${UML_KERNEL:-$ROOT/linux}}
 TAP=${TAP:-tcpbench-tap0}
 HOST_IP=${HOST_IP:-192.168.43.1}
 GUEST_IP=${GUEST_IP:-192.168.43.2}
 PORT=${PORT:-5301}
 DURATION=${DURATION:-10}
 REPS=${REPS:-3}
-OUT=${OUT:-$HOME/src/tcp-throughput-bench}
+OUT=${OUT:-$PWD/tcp-throughput-bench}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -35,6 +38,11 @@ while [ $# -gt 0 ]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+if [ ! -x "$KERNEL" ]; then
+    echo "error: UML kernel $KERNEL not found (set KERNEL=...)" >&2
+    exit 1
+fi
 
 mkdir -p "$OUT"
 
@@ -136,7 +144,7 @@ EOF
 
     if [ "$DRV" = "vector2" ]; then
         # Open tap fd in pre-exec wrapper, then exec UML with fd=200.
-# backend=seccomp (not kvm-v2): kvm-v2 maps host fds into the
+        # backend=seccomp (not kvm-v2): kvm-v2 maps host fds into the
         # vCPU pool and trips a fatal signal on the inherited tap fd.
         # seccomp uses the legacy ptrace shape that lets the fd live
         # in the init process's table.

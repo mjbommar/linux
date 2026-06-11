@@ -257,6 +257,10 @@ Current bounded vector2 evidence adds:
   in-process TAP path: `umlctl up` reports `transport=tap host_mode=inproc`,
   does not inherit launcher-owned TAP fds, the guest reports TAP/inproc
   metadata with no fd count, and a one-packet host TAP ping succeeds.
+- The TCP performance benchmark harness is now wired into the UML selftest build
+  surface without becoming a default runtime test: `net-bench` builds the
+  `tcp-send` helper through kselftest, the wrappers use repo-relative defaults,
+  and the privileged TAP benchmark remains an explicit operator-run gate.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
@@ -284,7 +288,8 @@ Open vector2 publication work:
 - finish a natural 7200-second seccomp/vector2 run;
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
-- expand fairness and performance coverage for multiqueue operation;
+- run the TCP `net-bench` gate and expand fairness/performance coverage for
+  multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
 ## Fork-Server And Pool Work

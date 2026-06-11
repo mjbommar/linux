@@ -8,7 +8,7 @@ volumes = []
 # Placeholders (substituted by the wrapper):
 #   {{KERNEL}}, {{BACKEND}}, {{TAP_NAME}},
 #   {{HOST_IP}}, {{GUEST_IP}}, {{HOST_IP_PLAIN}}, {{GUEST_IP_PLAIN}},
-#   {{NETWORK_DRIVER}}, {{DURATION_SEC}}, {{BENCH_PORT}}
+#   {{NETWORK_DRIVER}}, {{DURATION_SEC}}, {{BENCH_PORT}}, {{TCP_SEND}}
 
 [instance]
 name = "tcp-throughput-{{NETWORK_DRIVER}}-{{BACKEND}}"
@@ -47,11 +47,11 @@ timeout_secs = 5
 [[init.phases]]
 name = "tcp-send"
 cmd = """
-SENDER=/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/net-bench/tcp-send
+SENDER="{{TCP_SEND}}"
 if [ -x "$SENDER" ]; then
     "$SENDER" {{HOST_IP_PLAIN}} {{BENCH_PORT}} {{DURATION_SEC}}
 else
-    # Fallback to Python (slower; pre-TSO numbers reproduced via PY).
+    # Fallback for installed trees where the compiled helper is absent.
     python3 - <<'PY'
 import socket, time
 s = socket.socket()

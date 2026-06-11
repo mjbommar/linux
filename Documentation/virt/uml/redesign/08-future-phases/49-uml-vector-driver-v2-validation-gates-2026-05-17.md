@@ -31,7 +31,7 @@ implemented runtime netdev transports.
 | Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
 | Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
 | KVM v2 Tier 3 | Partial current-head smoke: rebuilt `98166580dc4f` passed one KVM-v2/vector2 iteration each for `tier3-django-v2` and `tier3-fastapi-v2`, including `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. | Run the same full Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
-| Perf/fairness/KCSAN breadth | Partial. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. | Finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
+| Perf/fairness/KCSAN breadth | Partial. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. | Finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
 
 The sections below preserve the original three gate definitions and their
 acceptance bars.
@@ -70,6 +70,13 @@ Findings:
   - **Guest -> host:** vector2 is **slower** than legacy on this
     host across all three buffer sizes.
   - **UDP / syscall-rate / CPU-utilisation:** not measured.
+
+`06-sequencing/2026-06-11-vector2-net-bench-integration.md` records a
+current-head tooling cleanup: `tools/testing/selftests/um/net-bench` now builds
+the `tcp-send` helper through kselftest, removes developer-local absolute paths
+from the benchmark template, and keeps the privileged TAP throughput scripts as
+explicit operator-run gates rather than default selftests.  This improves the
+benchmark harness, but it does not add new performance acceptance data.
 
 ### Acceptance criteria for "perf parity"
 
@@ -148,7 +155,7 @@ Missing:
   - longer fairness profiles (10k iters minimum on each
     queue-count + flow-count combination);
   - additional host/kernel coverage:
-    - host: AMD Zen 4 (our dev host) is well-covered; add
+    - host: the current AMD Zen 4 development host is well-covered; add
       Intel Sapphire Rapids + ARM64 if available;
     - kernel: tip-of-master + 6.6 LTS + 6.12 LTS.
 

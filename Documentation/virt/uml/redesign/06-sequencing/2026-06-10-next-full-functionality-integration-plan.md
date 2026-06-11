@@ -874,6 +874,10 @@ Acceptance gates:
   `vector2-pool-tap-smoke`.
 - multiqueue smoke. Current status: PASS on 2026-06-10 through
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
+- TCP performance benchmark harness. Current status: `net-bench` builds its
+  `tcp-send` helper through kselftest and no longer carries developer-local
+  paths; the throughput gate remains operator-run and no new perf verdict is
+  claimed.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
@@ -1473,6 +1477,9 @@ Runtime smoke:
   `vector2-pool-tap-smoke`.
 - Vector2 tap/multiqueue. Current multiqueue smoke status: PASS through
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
+- Vector2 TCP net-bench harness. Current status: helper builds through
+  kselftest and wrappers are portable; operator-run throughput data remains
+  open.
 - Vector2 trusted in-process TAP. Current status: PASS through
   `vector2-inproc-tap-smoke`.
 - Vector2 parser-only transport boundary. Current status: TAP/fd are the only
