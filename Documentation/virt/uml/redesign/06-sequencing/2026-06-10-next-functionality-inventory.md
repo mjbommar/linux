@@ -203,6 +203,14 @@ This file is the live execution tracker for
   and pool TAP smokes pass; bounded KVM-v2/vector2 Tier 3 smoke passes 2/2
   for Django-v2 and FastAPI-v2. Full Tier 3, 7200-second seccomp, and
   fairness/performance gates remain open.
+- Vector2 RX checksum feature reporting now matches the vnet-header receive
+  path: when `csum=1`, vector2 exposes fixed RX checksum support like legacy
+  vector's TAP/vnet-header path. Validation: `make ARCH=um -j$(nproc)`,
+  `um_vector2_*` KUnit 89 pass, 0 fail, 2 trusted-TAP skips; fd handoff,
+  fd multiqueue, and in-process TAP smokes PASS; fixed-byte diagnostics show
+  vector2 `rx-checksumming: on [fixed]` with `vnet_hdr_enabled: 1`; and the
+  normal guest-to-host TCP gate remains green with vector2/legacy ratio 0.990,
+  2026-06-11. The 1 MiB host-to-guest fixed-byte gap remains open.
 - Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
   SELinux policy headers, sandbox/research launcher examples, gate metadata,
   tier smoke fixtures, and adjacent launcher/profile docs. Validation:
@@ -236,11 +244,11 @@ These items must be closed before the final branch can be called complete:
    original record/replay mission is closed.
 2. Vector2 replacement claims must match validation evidence. Current-head
    focused smokes, KUnit, bounded KVM-v2/vector2 Tier 3 path smoke, the
-   normal guest-to-host TCP gate, lazy-RX allocation-churn cleanup, and most
-   fixed-byte bidirectional TCP cells pass, but the host-to-guest 1 MiB
-   regression, natural 7200-second seccomp run, full KVM-v2 Tier 3 coverage,
-   UDP/syscall/CPU performance coverage, and multiqueue fairness/performance
-   gates remain open.
+   normal guest-to-host TCP gate, lazy-RX allocation-churn cleanup, RX checksum
+   feature alignment, and most fixed-byte bidirectional TCP cells pass, but
+   the host-to-guest 1 MiB regression, natural 7200-second seccomp run, full
+   KVM-v2 Tier 3 coverage, UDP/syscall/CPU performance coverage, and
+   multiqueue fairness/performance gates remain open.
 3. Pool/fork-server current tests pass on rebuilt current HEAD, including
    warm-pool, pool-member, replicated sustained-pool, pool-bench, and
    syzkaller paths. This remains a final-completion blocker only as a required

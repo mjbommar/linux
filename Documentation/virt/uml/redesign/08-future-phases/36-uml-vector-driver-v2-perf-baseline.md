@@ -439,6 +439,72 @@ with no RX/TX error counters.  The normal guest-to-host TCP gate still passes
 after the change: legacy vector median 39215.2 Mbps, vector2 median
 38960.1 Mbps, ratio 0.993 against the 0.85 bar.
 
+## RX Checksum Feature Alignment
+
+The next feature-alignment slice fixed a mismatch in vector2's netdev feature
+reporting.  The TAP and inherited-fd receive paths already consume
+`struct virtio_net_hdr` through `virtio_net_hdr_to_skb()`, but vector2 only
+advertised TX checksum offload when `csum=1`.  The driver now advertises fixed
+RX checksum support for that configuration, matching legacy vector's
+vnet-header TAP behavior.
+
+Validation:
+
+```sh
+make ARCH=um -j$(nproc)
+
+./linux mem=256M kunit.filter_glob='um_vector2_*' kunit_shutdown=halt
+
+UML_KERNEL=$PWD/linux \
+  tools/testing/selftests/um/vector2-fd-handoff-smoke/run-vector2-fd-handoff-smoke.sh
+
+UML_KERNEL=$PWD/linux \
+  tools/testing/selftests/um/vector2-fd-multiqueue-smoke/run-vector2-fd-multiqueue-smoke.sh
+
+UML_KERNEL=$PWD/linux \
+  tools/testing/selftests/um/vector2-inproc-tap-smoke/run-vector2-inproc-tap-smoke.sh
+```
+
+Results:
+
+- build PASS;
+- `um_vector2_*` KUnit: 89 pass, 0 fail, 2 trusted-TAP skips;
+- fd handoff, fd multiqueue, and trusted in-process TAP smokes PASS.
+
+The focused 1 MiB host-to-guest diagnostic used:
+
+```sh
+rm -rf /tmp/um-vector-perf-h2g-rxcsum
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-h2g-rxcsum \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=2 \
+UML_VECTOR_PERF_PORT=19120 \
+  timeout 900s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+It now records vector2 `rx-checksumming: on [fixed]`, `tx-checksumming: on`,
+GSO/TSO/GRO enabled, and `vnet_hdr_enabled: 1`.  The small-transfer
+throughput gap remains open:
+
+```text
+driver   repeat  host_mib_s
+vector   1       1.574
+vector   2       0.342
+vector2  1       0.952
+vector2  2       0.893
+```
+
+The normal guest-to-host TCP gate remains green:
+
+```text
+vector  median Mbps: 39854.4
+vector2 median Mbps: 39441.7
+ratio: 0.990
+```
+
 Interpretation:
 
 - current guest-to-host fixed-byte TCP now clears the 0.85 bar across all

@@ -139,7 +139,16 @@ Current execution evidence added on 2026-06-11:
 - extended the fixed-byte TCP diagnostic harness with knobs for vector2 host
   mode, active-sender `TCP_NODELAY`, and host/guest sender chunk size so the
   remaining 1 MiB host-to-guest blocker can be reproduced without ad hoc
-  script edits.
+  script edits; and
+- aligned vector2 RX checksum feature reporting with the vnet-header receive
+  path: when `csum=1`, vector2 now exposes fixed `NETIF_F_RXCSUM` alongside
+  TX checksum offload.  Validation reported `um_vector2_*` KUnit 89 pass,
+  0 fail, 2 trusted-TAP skips; fd handoff, fd multiqueue, and in-process TAP
+  smokes PASS; fixed-byte diagnostics show `rx-checksumming: on [fixed]` with
+  `vnet_hdr_enabled: 1`; and the normal TCP net-bench gate remains green with
+  legacy vector median 39854.4 Mbps, vector2 median 39441.7 Mbps, and ratio
+  0.990.  This closes a feature-advertisement mismatch, not the 1 MiB
+  host-to-guest throughput blocker.
 
 This file is now the plan of record for completing, importing, or explicitly
 retiring all original UML v2 functionality on `next`.
@@ -664,6 +673,11 @@ Current state:
   received / 31542 released slots to about 1410 prepared / 905 received / 505
   released slots.  The focused 1 MiB host-to-guest ratio remains only 0.594,
   so this is a churn cleanup rather than the final small-transfer fix.
+- RX checksum feature reporting now matches the vnet-header receive path:
+  vector2 reports `rx-checksumming: on [fixed]` when `csum=1`, while the
+  normal guest-to-host TCP gate remains green at ratio 0.990.  This removes a
+  legacy-vector parity mismatch but does not close the 1 MiB host-to-guest
+  cell.
 - The benchmark now captures guest link/route/feature/counter diagnostics
   around the sender, and vector2's ethtool stats now expose whether an
   inherited fd channel is actually using vnet-header framing.

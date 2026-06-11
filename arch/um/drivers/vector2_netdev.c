@@ -911,6 +911,8 @@ static void um_vec2_netdev_init_features(struct um_vec2_dev *vdev,
 	if (vdev->cfg.csum)
 		dev->hw_features |= NETIF_F_HW_CSUM;
 	dev->features = dev->hw_features;
+	if (vdev->cfg.csum)
+		dev->features |= NETIF_F_RXCSUM;
 }
 
 static void um_vec2_netdev_init_addr(struct um_vec2_dev *vdev,
