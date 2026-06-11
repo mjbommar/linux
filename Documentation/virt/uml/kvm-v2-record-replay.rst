@@ -105,8 +105,8 @@ Strict Replay Policy
 Strict replay fail-closes instead of guessing:
 
 * a supported syscall with a mismatched logged entry, such as ``getcwd`` with a
-  different buffer-size argument, records a strict replay failure and kills the
-  guest;
+  different buffer-size argument or raw-time syscalls with different replay
+  arguments, records a strict replay failure and kills the guest;
 * unsupported syscalls record a strict replay failure and kill the guest;
 * raw time interfaces outside the current replay set remain unsupported;
 * replay mode sets CR4.TSD so user ``RDTSC`` and ``RDTSCP`` fault instead of
@@ -154,7 +154,9 @@ The smoke gate currently validates:
 * task-owned replay of a bounded scalar plus ``uname(2)``, ``getcwd(2)``,
   ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` direct-syscall
   payload workload;
-* strict fail-closed behavior for a supported ``getcwd(2)`` argument mismatch;
+* strict fail-closed behavior for supported ``getcwd(2)``,
+  ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` replay-entry
+  mismatches;
 * raw ``clock_gettime(2)``, ``gettimeofday(2)``, and ``time(2)`` payload
   replay from the recorded log through direct syscalls and direct calls to the
   UML vDSO symbols, which route back through syscalls so UML can trap them;
@@ -166,4 +168,4 @@ The smoke gate currently validates:
 
 The expected summary line is::
 
-  KVM_RECORD_SMOKE: PASS (KUnit=24/24 live-debugfs=1 task-owned=1 live-mismatch=1 live-signal=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1 live-external-io=4/4)
+  KVM_RECORD_SMOKE: PASS (KUnit=24/24 live-debugfs=1 task-owned=1 live-mismatch=4/4 live-signal=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1 live-external-io=4/4)

@@ -25,6 +25,10 @@ NEGATIVE_READ_HELPER=${KVM_RECORD_NEGATIVE_READ_HELPER:-$DIR/kvm-record-negative
 NEGATIVE_WRITE_HELPER=${KVM_RECORD_NEGATIVE_WRITE_HELPER:-$DIR/kvm-record-negative-write}
 NEGATIVE_IOCTL_HELPER=${KVM_RECORD_NEGATIVE_IOCTL_HELPER:-$DIR/kvm-record-negative-ioctl}
 MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
+MISMATCH_CLOCK_HELPER=${KVM_RECORD_MISMATCH_CLOCK_HELPER:-$DIR/kvm-record-mismatch-clock}
+MISMATCH_GTOD_DEFAULT=$DIR/kvm-record-mismatch-gettimeofday
+MISMATCH_GTOD_HELPER=${KVM_RECORD_MISMATCH_GETTIMEOFDAY_HELPER:-$MISMATCH_GTOD_DEFAULT}
+MISMATCH_TIME_HELPER=${KVM_RECORD_MISMATCH_TIME_HELPER:-$DIR/kvm-record-mismatch-time}
 TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
 RDTSC_HELPER=${KVM_RECORD_RDTSC_HELPER:-$DIR/kvm-record-rdtsc}
 RDTSCP_HELPER=${KVM_RECORD_RDTSCP_HELPER:-$DIR/kvm-record-rdtscp}
@@ -64,6 +68,18 @@ if [ ! -x "$NEGATIVE_IOCTL_HELPER" ]; then
 fi
 if [ ! -x "$MISMATCH_HELPER" ]; then
 	echo "SKIP: $MISMATCH_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$MISMATCH_CLOCK_HELPER" ]; then
+	echo "SKIP: $MISMATCH_CLOCK_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$MISMATCH_GTOD_HELPER" ]; then
+	echo "SKIP: $MISMATCH_GTOD_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$MISMATCH_TIME_HELPER" ]; then
+	echo "SKIP: $MISMATCH_TIME_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -x "$TIME_HELPER" ]; then
@@ -273,57 +289,68 @@ case "$SIGNAL_LINE" in
 	;;
 esac
 
-if ! ensure_kvm_readable; then
-	echo "SKIP: /dev/kvm not readable before mismatch smoke" >&2
-	exit 4
-fi
+run_mismatch_helper() {
+	local helper=$1
+	local tag=$2
+	local out line nr
 
-MISMATCH_OUT=$(timeout --kill-after=10 45 "$BINARY" \
-	backend=force=kvm-v2 \
-	init="$MISMATCH_HELPER" mem="$MEM" \
-	con=null con0=fd:0,fd:1 \
-	root=/dev/root rootfstype=hostfs rw \
-	panic=-1 </dev/null 2>&1 || true)
+	if ! ensure_kvm_readable; then
+		echo "SKIP: /dev/kvm not readable before $tag smoke" >&2
+		exit 4
+	fi
 
-MISMATCH_LINE=$(echo "$MISMATCH_OUT" | grep '^KVM_RECORD_MISMATCH:' | head -1)
-if [ -z "$MISMATCH_LINE" ]; then
-	echo "KVM_RECORD_SMOKE: FAIL (no mismatch smoke result line)"
-	echo "$MISMATCH_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
+	out=$(timeout --kill-after=10 45 "$BINARY" \
+		backend=force=kvm-v2 \
+		init="$helper" mem="$MEM" \
+		con=null con0=fd:0,fd:1 \
+		root=/dev/root rootfstype=hostfs rw \
+		panic=-1 </dev/null 2>&1 || true)
 
-echo "$MISMATCH_LINE"
-case "$MISMATCH_LINE" in
-*armed\ syscall=*) ;;
-*)
-	echo "KVM_RECORD_SMOKE: FAIL (mismatch helper did not arm)"
-	echo "$MISMATCH_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
-		tail -80
-	exit 1
-	;;
-esac
+	line=$(echo "$out" | grep '^KVM_RECORD_MISMATCH:' | head -1)
+	if [ -z "$line" ]; then
+		echo "KVM_RECORD_SMOKE: FAIL (no $tag result line)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
 
-MISMATCH_NR=$(echo "$MISMATCH_LINE" |
-	sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
-if [ -z "$MISMATCH_NR" ] ||
-   ! echo "$MISMATCH_OUT" |
-	grep -q "kvm-v2 record: strict replay divergence nr=$MISMATCH_NR"; then
-	echo "KVM_RECORD_SMOKE: FAIL (mismatch strict divergence missing)"
-	echo "$MISMATCH_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
-if echo "$MISMATCH_OUT" | grep -q 'KVM_RECORD_MISMATCH: FAIL'; then
-	echo "KVM_RECORD_SMOKE: FAIL (mismatch helper returned from replay divergence)"
-	echo "$MISMATCH_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
+	echo "$line"
+	case "$line" in
+	*armed\ syscall=*) ;;
+	*)
+		echo "KVM_RECORD_SMOKE: FAIL ($tag helper did not arm)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+			tail -80
+		exit 1
+		;;
+	esac
+
+	nr=$(echo "$line" |
+		sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
+	if [ -z "$nr" ] ||
+	   ! echo "$out" |
+		grep -q "kvm-v2 record: strict replay divergence nr=$nr"; then
+		echo "KVM_RECORD_SMOKE: FAIL ($tag strict divergence missing)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
+	if echo "$out" | grep -q 'KVM_RECORD_MISMATCH: FAIL'; then
+		echo "KVM_RECORD_SMOKE: FAIL ($tag helper returned from replay divergence)"
+		echo "$out" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_MISMATCH|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
+}
+
+run_mismatch_helper "$MISMATCH_HELPER" "mismatch"
+run_mismatch_helper "$MISMATCH_CLOCK_HELPER" "raw-time mismatch"
+run_mismatch_helper "$MISMATCH_GTOD_HELPER" "raw-time mismatch"
+run_mismatch_helper "$MISMATCH_TIME_HELPER" "raw-time mismatch"
 
 if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable before raw-time smoke" >&2
@@ -532,7 +559,7 @@ run_negative_helper "$NEGATIVE_WRITE_HELPER" "external-I/O negative"
 run_negative_helper "$NEGATIVE_IOCTL_HELPER" "external-I/O negative"
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
-SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
+SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=4/4"
 SUMMARY="$SUMMARY $SIGNAL_SUMMARY live-time=1 live-rdtsc=1"
 SUMMARY="$SUMMARY $RDTSCP_SUMMARY live-negative=1 live-external-io=4/4)"
 echo "$SUMMARY"

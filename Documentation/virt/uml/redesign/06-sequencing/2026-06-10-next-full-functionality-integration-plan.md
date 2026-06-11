@@ -685,6 +685,10 @@ Current `next` checkpoint:
   recording, task-owned 389-entry deterministic replay, live supported-syscall
   mismatch rejection through `getcwd(2)`, and live unsupported-syscall
   rejection through `getrandom(2)`.
+- Validation on 2026-06-11 after the raw-time supported-entry mismatch smokes:
+  `kvm-record-smoke` PASS includes `live-mismatch=4/4`, proving strict
+  divergence handling for mismatched `getcwd(2)`, `clock_gettime(2)`,
+  `gettimeofday(2)`, and `time(2)` replay entries.
 - Validation on 2026-06-11 after the live external-I/O strict negative smoke:
   `kvm-record-smoke` PASS includes `live-external-io=4/4`, proving
   replay-mode `openat(2)`, `read(2)`, `write(2)`, and `ioctl(2)` fail closed
@@ -739,7 +743,8 @@ Acceptance gates:
   plus `uname(2)`, `getcwd(2)`, and direct raw-time payload workload.
 - Buffer overflow behavior test. Current status: covered by KUnit.
 - Strict supported-entry mismatch smoke. Current status: PASS through the live
-  `kvm-record-mismatch` helper.
+  `kvm-record-mismatch` helpers for `getcwd(2)`, `clock_gettime(2)`,
+  `gettimeofday(2)`, and `time(2)`.
 - Raw-time payload replay smoke. Current status: PASS through the live
   `kvm-record-time` helper.
 - Direct RDTSC/RDTSCP replay smoke. Current status: PASS through the live
