@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, and follow-up KVM v2 comment cleanup.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, and x86 UML ptrace/TLS regset cleanup.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -69,6 +69,10 @@ Current source-tree direction:
 - Follow-up cleanup removed phase, memo, date, and internal bug labels from the
   active x86 UML KVM v2 per-task state comments while keeping the state
   isolation invariants in the source.
+- Follow-up x86 UML cleanup fixed `PTRACE_ARCH_PRCTL` to operate on the traced
+  task's FS/GS base state instead of `current`, removed obsolete `XXX` include
+  and ptrace comments, and replaced the 32-bit TLS-regset TODO with an
+  `NT_386_TLS` regset backed by UML's existing TLS entry cache.
 - The old report/deck workspace under `report-presentation/` is marked as a
   historical May 2026 artifact. Its report, slides, comprehensive report,
   generated PDFs, and CSV data point readers back to this status file and the
@@ -141,6 +145,14 @@ The strongest current KVM v2 evidence is:
   task duplication moved the first report but did not produce a passing smoke;
   the current investigation is focused on UML task, stack, and KMSAN context
   setup rather than landing scattershot annotations.
+- x86 UML ptrace/TLS cleanup validation: `git diff --check`, strict
+  `scripts/checkpatch.pl --no-tree`, and a targeted TODO/XXX scan passed for
+  the touched files. The x86_64 UML objects `syscalls_64.o`, `ptrace_64.o`,
+  and `ptrace.o` compile in the current checkout. A clean detached i386 UML
+  compile was attempted for the 32-bit TLS-regset path, but the host lacks the
+  32-bit libc development headers required by UML's `user-offsets.c`
+  (`bits/libc-header-start.h`), so the build stops before reaching the
+  touched objects.
 
 The most important correctness closure was the CPython cache-flake fix:
 per-task FPU save/restore now uses KVM XSAVE state instead of the older FPU

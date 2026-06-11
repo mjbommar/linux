@@ -10,6 +10,9 @@ enum {
 #endif
 	REGSET_FP,
 	REGSET_XSTATE,
+#ifdef CONFIG_X86_32
+	REGSET_TLS,
+#endif
 };
 
 #include <linux/compiler.h>
@@ -58,11 +61,23 @@ struct user_desc;
 
 #ifdef CONFIG_X86_32
 
+#include <linux/regset.h>
+
 extern int ptrace_get_thread_area(struct task_struct *child, int idx,
                                   struct user_desc __user *user_desc);
 
 extern int ptrace_set_thread_area(struct task_struct *child, int idx,
                                   struct user_desc __user *user_desc);
+
+int uml_tls_regset_active(struct task_struct *target,
+			  const struct user_regset *regset);
+int uml_tls_regset_get(struct task_struct *target,
+		       const struct user_regset *regset,
+		       struct membuf to);
+int uml_tls_regset_set(struct task_struct *target,
+		       const struct user_regset *regset,
+		       unsigned int pos, unsigned int count,
+		       const void *kbuf, const void __user *ubuf);
 
 extern int arch_switch_tls(struct task_struct *to);
 

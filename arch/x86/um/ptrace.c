@@ -3,6 +3,7 @@
 #include <linux/sched.h>
 #include <linux/elf.h>
 #include <linux/regset.h>
+#include <asm/ptrace.h>
 #include <asm/user32.h>
 #include <asm/sigcontext.h>
 
@@ -277,7 +278,17 @@ static struct user_regset uml_regsets[] __ro_after_init = {
 		.regset_get	= generic_fpregs_get,
 		.set		= generic_fpregs_set,
 	},
-	/* TODO: Add TLS regset for 32bit */
+#ifdef CONFIG_X86_32
+	[REGSET_TLS] = {
+		USER_REGSET_NOTE_TYPE(386_TLS),
+		.n		= GDT_ENTRY_TLS_ENTRIES,
+		.size		= sizeof(struct user_desc),
+		.align		= sizeof(struct user_desc),
+		.active		= uml_tls_regset_active,
+		.regset_get	= uml_tls_regset_get,
+		.set		= uml_tls_regset_set,
+	},
+#endif
 };
 
 static const struct user_regset_view user_uml_view = {

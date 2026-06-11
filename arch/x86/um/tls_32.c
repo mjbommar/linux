@@ -4,9 +4,11 @@
  */
 
 #include <linux/percpu.h>
+#include <linux/regset.h>
 #include <linux/sched.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
+#include <asm/ptrace.h>
 #include <asm/ptrace-abi.h>
 #include <backend.h>
 #include <os.h>
@@ -269,6 +271,89 @@ clear:
 	clear_user_desc(info);
 	info->entry_number = idx;
 	goto out;
+}
+
+int uml_tls_regset_active(struct task_struct *target,
+			  const struct user_regset *regset)
+{
+	struct thread_struct *t = &target->thread;
+	int n = GDT_ENTRY_TLS_ENTRIES;
+
+	if (host_supports_tls <= 0)
+		return 0;
+
+	while (n > 0) {
+		struct uml_tls_struct *tls = &t->arch.tls_array[n - 1];
+
+		if (tls->present && !LDT_empty(&tls->tls))
+			break;
+		n--;
+	}
+
+	return n;
+}
+
+int uml_tls_regset_get(struct task_struct *target,
+		       const struct user_regset *regset,
+		       struct membuf to)
+{
+	struct user_desc info;
+	int idx, ret;
+
+	if (host_supports_tls <= 0)
+		return -EIO;
+
+	for (idx = GDT_ENTRY_TLS_MIN; to.left; idx++) {
+		ret = get_tls_entry(target, &info, idx);
+		if (ret)
+			return ret;
+		membuf_write(&to, &info, sizeof(info));
+	}
+
+	return 0;
+}
+
+int uml_tls_regset_set(struct task_struct *target,
+		       const struct user_regset *regset,
+		       unsigned int pos, unsigned int count,
+		       const void *kbuf, const void __user *ubuf)
+{
+	struct user_desc infobuf[GDT_ENTRY_TLS_ENTRIES];
+	const struct user_desc *info;
+	unsigned int size = sizeof(struct user_desc);
+	unsigned int total = GDT_ENTRY_TLS_ENTRIES * size;
+	int i, n, ret, slot;
+
+	if (host_supports_tls <= 0)
+		return -EIO;
+
+	if (count == 0)
+		return 0;
+
+	if (pos >= total || pos % size || count % size || count > total - pos)
+		return -EINVAL;
+
+	if (kbuf) {
+		info = kbuf;
+	} else {
+		if (copy_from_user(infobuf, ubuf, count))
+			return -EFAULT;
+		info = infobuf;
+	}
+
+	slot = pos / size;
+	n = count / size;
+
+	for (i = 0; i < n; i++) {
+		struct user_desc desc = info[i];
+
+		desc.entry_number = GDT_ENTRY_TLS_MIN + slot + i;
+		ret = set_tls_entry(target, &desc, desc.entry_number, 0);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 SYSCALL_DEFINE1(set_thread_area, struct user_desc __user *, user_desc)

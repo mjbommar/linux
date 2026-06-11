@@ -9,7 +9,7 @@
 #include <linux/sched/mm.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
-#include <asm/prctl.h> /* XXX This should get the constants from libc */
+#include <asm/prctl.h>
 #include <registers.h>
 #include <os.h>
 
@@ -20,20 +20,20 @@ long arch_prctl(struct task_struct *task, int option,
 
 	switch (option) {
 	case ARCH_SET_FS:
-		current->thread.regs.regs.gp[FS_BASE / sizeof(unsigned long)] =
+		task->thread.regs.regs.gp[FS_BASE / sizeof(unsigned long)] =
 			(unsigned long) arg2;
 		ret = 0;
 		break;
 	case ARCH_SET_GS:
-		current->thread.regs.regs.gp[GS_BASE / sizeof(unsigned long)] =
+		task->thread.regs.regs.gp[GS_BASE / sizeof(unsigned long)] =
 			(unsigned long) arg2;
 		ret = 0;
 		break;
 	case ARCH_GET_FS:
-		ret = put_user(current->thread.regs.regs.gp[FS_BASE / sizeof(unsigned long)], arg2);
+		ret = put_user(task->thread.regs.regs.gp[FS_BASE / sizeof(unsigned long)], arg2);
 		break;
 	case ARCH_GET_GS:
-		ret = put_user(current->thread.regs.regs.gp[GS_BASE / sizeof(unsigned long)], arg2);
+		ret = put_user(task->thread.regs.regs.gp[GS_BASE / sizeof(unsigned long)], arg2);
 		break;
 	}
 

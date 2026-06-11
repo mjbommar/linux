@@ -207,7 +207,6 @@ long subarch_ptrace(struct task_struct *child, long request,
 					     0, sizeof(struct user_i387_struct),
 					     datap);
 	case PTRACE_ARCH_PRCTL:
-		/* XXX Calls ptrace on the host - needs some SMP thinking */
 		ret = arch_prctl(child, data, (void __user *) addr);
 		break;
 	}
