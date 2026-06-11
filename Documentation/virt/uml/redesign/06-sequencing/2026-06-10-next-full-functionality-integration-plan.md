@@ -979,8 +979,10 @@ Acceptance gates:
   ratio 0.998875. The helper now also appends endpoint process CPU timing
   columns and host-to-guest UML process metric deltas for focused runs. A
   privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
-  subtree-wide syscall and CPU counters per driver; steady-state
-  CPU-utilisation and syscall-rate measurements remain open publication work.
+  subtree-wide syscall and CPU counters per driver, and the helper can now
+  emit host-to-guest UML-PID transfer-window rows in `perf-window.tsv`;
+  steady-state CPU-utilisation and syscall-rate measurements remain open
+  publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch
@@ -1631,8 +1633,10 @@ Runtime smoke:
   ratio 0.998875. The helper now also appends endpoint process CPU timing
   columns and host-to-guest UML process metric deltas for focused runs. A
   privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
-  subtree-wide syscall and CPU counters per driver; steady-state
-  CPU-utilisation and syscall-rate measurements remain open publication work.
+  subtree-wide syscall and CPU counters per driver, and the helper can now
+  emit host-to-guest UML-PID transfer-window rows in `perf-window.tsv`;
+  steady-state CPU-utilisation and syscall-rate measurements remain open
+  publication work.
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch

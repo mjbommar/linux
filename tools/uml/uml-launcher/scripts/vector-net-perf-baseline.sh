@@ -32,10 +32,14 @@ Environment overrides:
   UML_VECTOR_PERF_UDP_PACE_USEC sleep between UDP datagrams, default: 0
   UML_VECTOR_PERF_UDP_RCVBUF requested UDP receive socket buffer, default: 4194304
   UML_VECTOR_PERF_UDP_SNDBUF requested UDP send socket buffer, default: 4194304
+  UML_VECTOR_PERF_PERF_STAT enable host-to-guest UML PID perf stat, default: 0
+  UML_VECTOR_PERF_PERF_EVENTS comma-separated perf events, default: syscall wildcard + CPU counters
+  UML_VECTOR_PERF_PERF_SECONDS perf stat window after guest sink readiness, default: 2
   UML_VECTOR_PERF_OUT        output directory, default: /tmp/um-vector-perf-baseline
 
 Outputs:
   summary.tsv       raw per-run rows
+  perf-window.tsv   optional host-to-guest transfer-window perf stat rows
   aggregate.tsv     per-driver median/best throughput and median CPU/scheduler data
   comparison.tsv    vector2/vector ratios when both drivers are present
 EOF
@@ -60,6 +64,9 @@ udp_payload="${UML_VECTOR_PERF_UDP_PAYLOAD:-1472}"
 udp_pace_usec="${UML_VECTOR_PERF_UDP_PACE_USEC:-0}"
 udp_rcvbuf="${UML_VECTOR_PERF_UDP_RCVBUF:-4194304}"
 udp_sndbuf="${UML_VECTOR_PERF_UDP_SNDBUF:-4194304}"
+perf_stat="${UML_VECTOR_PERF_PERF_STAT:-0}"
+perf_events="${UML_VECTOR_PERF_PERF_EVENTS:-syscalls:sys_enter_*,task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,cycles,instructions}"
+perf_seconds="${UML_VECTOR_PERF_PERF_SECONDS:-2}"
 out="${UML_VECTOR_PERF_OUT:-/tmp/um-vector-perf-baseline}"
 
 while [[ $# -gt 0 ]]; do
@@ -176,6 +183,24 @@ if [[ "$udp_sndbuf" == '' || "$udp_sndbuf" == *[!0-9]* ]]; then
 	echo "UDP send buffer must be a non-negative integer (got $udp_sndbuf)" >&2
 	exit 2
 fi
+if [[ "$perf_stat" != "0" && "$perf_stat" != "1" ]]; then
+	echo "perf stat flag must be 0 or 1 (got $perf_stat)" >&2
+	exit 2
+fi
+if [[ "$perf_seconds" == '' || "$perf_seconds" == *[!0-9]* || "$perf_seconds" -lt 1 ]]; then
+	echo "perf stat seconds must be a positive integer (got $perf_seconds)" >&2
+	exit 2
+fi
+if [[ "$perf_stat" == "1" ]]; then
+	if ! command -v perf >/dev/null 2>&1; then
+		echo "perf stat requested but perf is not in PATH" >&2
+		exit 2
+	fi
+	if ! sudo -n true >/dev/null 2>&1; then
+		echo "perf stat requested but passwordless sudo is unavailable" >&2
+		exit 2
+	fi
+fi
 
 if [[ -z "$bytes_list" ]]; then
 	bytes_list="$bytes"
@@ -190,7 +215,9 @@ done
 
 mkdir -p "$out"
 summary="$out/summary.tsv"
+perf_summary="$out/perf-window.tsv"
 printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\tguest_cpu_seconds\thost_cpu_seconds\tuml_user_cpu_seconds\tuml_system_cpu_seconds\tuml_sched_run_seconds\tuml_sched_wait_seconds\tuml_sched_pcount_delta\tuml_voluntary_ctxt_switches_delta\tuml_involuntary_ctxt_switches_delta\tuml_metrics_before_log\tuml_metrics_after_log\n' > "$summary"
+printf 'driver\tdirection\tbytes\trepeat\tperf_stat_log\tperf_syscalls_total\tperf_task_clock_ms\tperf_cpu_clock_ms\tperf_context_switches\tperf_cpu_migrations\tperf_page_faults\tperf_cycles\tperf_instructions\tperf_read\tperf_write\tperf_futex\tperf_ioctl\tperf_recvmsg\tperf_sendmsg\tperf_poll\n' > "$perf_summary"
 
 queue_toml() {
 	local driver="$1"
@@ -431,6 +458,115 @@ print(
     f"{delta('nr_involuntary_ctxt_switches')}",
     end="",
 )
+PY
+}
+
+metrics_pid() {
+	local metrics_json="$1"
+
+	python3 - "$metrics_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(int(data["proc"]["pid"]))
+PY
+}
+
+TRANSFER_PERF_PID=""
+
+start_transfer_perf() {
+	local uml_pid="$1"
+	local perf_log="$2"
+
+	if [[ "$perf_stat" != "1" ]]; then
+		return 0
+	fi
+
+	sudo -n perf stat -x, -p "$uml_pid" -e "$perf_events" -o "$perf_log" -- sleep "$perf_seconds" &
+	TRANSFER_PERF_PID=$!
+	# Give perf a moment to attach before the active sender starts.
+	sleep 0.2
+}
+
+stop_transfer_perf() {
+	if [[ -z "$TRANSFER_PERF_PID" ]]; then
+		return 0
+	fi
+
+	wait "$TRANSFER_PERF_PID" >/dev/null 2>&1 || true
+	TRANSFER_PERF_PID=""
+}
+
+perf_fields() {
+	local perf_log="$1"
+
+	if [[ ! -s "$perf_log" ]]; then
+		printf 'NA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA'
+		return
+	fi
+
+	python3 - "$perf_log" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+fields = {
+    "task-clock": "NA",
+    "cpu-clock": "NA",
+    "context-switches": "NA",
+    "cpu-migrations": "NA",
+    "page-faults": "NA",
+    "cycles": "NA",
+    "instructions": "NA",
+}
+selected = {
+    "syscalls:sys_enter_read": "NA",
+    "syscalls:sys_enter_write": "NA",
+    "syscalls:sys_enter_futex": "NA",
+    "syscalls:sys_enter_ioctl": "NA",
+    "syscalls:sys_enter_recvmsg": "NA",
+    "syscalls:sys_enter_sendmsg": "NA",
+    "syscalls:sys_enter_poll": "NA",
+}
+total_syscalls = 0.0
+
+with open(path, encoding="utf-8", newline="") as f:
+    for row in csv.reader(f):
+        if len(row) < 3 or not row[0] or row[0].startswith("#"):
+            continue
+        value = row[0].strip()
+        event = row[2].strip()
+        try:
+            numeric = float(value)
+        except ValueError:
+            continue
+        if event.startswith("syscalls:sys_enter_"):
+            total_syscalls += numeric
+        if event in fields:
+            fields[event] = value
+        if event in selected:
+            selected[event] = str(int(numeric))
+
+out = [
+    str(int(total_syscalls)),
+    fields["task-clock"],
+    fields["cpu-clock"],
+    fields["context-switches"],
+    fields["cpu-migrations"],
+    fields["page-faults"],
+    fields["cycles"],
+    fields["instructions"],
+    selected["syscalls:sys_enter_read"],
+    selected["syscalls:sys_enter_write"],
+    selected["syscalls:sys_enter_futex"],
+    selected["syscalls:sys_enter_ioctl"],
+    selected["syscalls:sys_enter_recvmsg"],
+    selected["syscalls:sys_enter_sendmsg"],
+    selected["syscalls:sys_enter_poll"],
+]
+print("\t".join(out), end="")
 PY
 }
 
@@ -835,6 +971,7 @@ run_driver() {
 	local host_log="$run_dir/host-${safe_dir}-${safe_protocol}.log"
 	local metrics_before="$run_dir/uml-metrics-before.json"
 	local metrics_after="$run_dir/uml-metrics-after.json"
+	local perf_log="$run_dir/perf-stat.csv"
 	local name="vperf-$safe_driver-$safe_dir-$safe_protocol-b${run_bytes}-r${repeat_idx}"
 	local driver_tag="vec"
 	local dir_tag="g2h"
@@ -944,16 +1081,28 @@ EOF
 		fi
 
 		collect_metrics "$name" "$metrics_before" || true
+		if [[ "$perf_stat" == "1" ]]; then
+			start_transfer_perf "$(metrics_pid "$metrics_before")" "$perf_log"
+		fi
 
 		if ! host_send "10.93.0.2" "$host_log" "$run_bytes"; then
+			stop_transfer_perf
 			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
 			echo "host $protocol send failed for driver=$driver; see $host_log" >&2
 			return 1
 		fi
 		if ! wait_guest_marker "$name" VECTOR_NET_PERF_OK "$guest_log"; then
+			stop_transfer_perf
 			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
+			return 1
+		fi
+		stop_transfer_perf
+		if [[ "$perf_stat" == "1" && ! -s "$perf_log" ]]; then
+			cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
+				--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
+			echo "perf stat requested but no counters were written for driver=$driver; see $perf_log" >&2
 			return 1
 		fi
 		collect_metrics "$name" "$metrics_after" || true
@@ -962,7 +1111,7 @@ EOF
 	cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 		--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
 
-	local guest_line host_line guest_seconds guest_mib_s host_seconds host_mib_s guest_cpu_seconds host_cpu_seconds metrics_fields metrics_before_log metrics_after_log
+	local guest_line host_line guest_seconds guest_mib_s host_seconds host_mib_s guest_cpu_seconds host_cpu_seconds metrics_fields metrics_before_log metrics_after_log perf_log_field perf_stat_fields
 	guest_line="$(grep 'VECTOR_NET_PERF ' "$guest_log" | tail -1)"
 	host_line="$(grep -E 'HOST_(SINK|SEND) ' "$host_log" | tail -1)"
 	guest_seconds="$(sed -n 's/.* seconds=\([0-9.]*\).*/\1/p' <<<"$guest_line")"
@@ -978,12 +1127,20 @@ EOF
 		metrics_before_log="$metrics_before"
 		metrics_after_log="$metrics_after"
 	fi
+	perf_log_field=""
+	if [[ -s "$perf_log" ]]; then
+		perf_log_field="$perf_log"
+	fi
+	perf_stat_fields="$(perf_fields "$perf_log")"
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$guest_seconds" "$guest_mib_s" \
 		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" "$protocol" \
 		"$guest_cpu_seconds" "$host_cpu_seconds" $metrics_fields \
 		"$metrics_before_log" "$metrics_after_log" >> "$summary"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$perf_log_field" \
+		"$perf_stat_fields" >> "$perf_summary"
 	echo "$guest_line"
 	echo "$host_line"
 }

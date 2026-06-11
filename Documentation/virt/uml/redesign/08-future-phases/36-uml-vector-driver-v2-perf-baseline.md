@@ -837,6 +837,59 @@ does prove that privileged `perf stat` syscall and CPU accounting is available
 on this host and gives the next pass a concrete output shape to refine into a
 steady-state, same-throughput comparison.
 
+## Transfer-Window Perf-Stat Extension: 2026-06-11
+
+The helper now has an opt-in host-to-guest perf window:
+
+- `UML_VECTOR_PERF_PERF_STAT=1` enables it;
+- `UML_VECTOR_PERF_PERF_EVENTS=` overrides the default syscall wildcard plus
+  CPU counters; and
+- `UML_VECTOR_PERF_PERF_SECONDS=` controls the bounded window after the guest
+  sink is ready, defaulting to two seconds.
+
+When enabled for host-to-guest runs, the helper resolves the live UML PID from
+the pre-transfer `umlctl metrics --json` sample, runs `sudo -n perf stat -p
+<pid>` for the bounded window, and writes parsed rows to `perf-window.tsv`.
+Default runs still leave `summary.tsv`, `aggregate.tsv`, and `comparison.tsv`
+unchanged; `perf-window.tsv` records `NA` fields when perf is disabled or a
+direction is not covered.
+
+Validation:
+
+```sh
+bash -n tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh
+git diff --check
+
+rm -rf /tmp/um-vector-perf-window-h2g-64k-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-window-h2g-64k-smoke \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_PROTOCOL=tcp \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19186 \
+UML_VECTOR_PERF_PERF_STAT=1 \
+  timeout 420s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Result: both drivers passed, `perf-window.tsv` had 20 fields in the header and
+both data rows, both raw `perf-stat.csv` files were non-empty, and cleanup
+checks found no stale `vperf-*`/TAP links and no live matching UML or `umlctl`
+processes.
+
+Two-second UML-PID perf window:
+
+| Driver | Total syscalls | Task-clock ms | CPU-clock ms | Context switches | Page faults | read | write | futex | ioctl | recvmsg | sendmsg | poll |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vector | 85,743 | 1,195.24 | 1,000.21 | 9,895 | 6,620 | 1,076 | 488 | 17,476 | 2,740 | 2,736 | 2,890 | 1,013 |
+| vector2 | 65,186 | 984.71 | 849.45 | 6,582 | 3,922 | 1,216 | 619 | 10,842 | 2,742 | 1,543 | 1,707 | 1,024 |
+
+This is closer to the P4.3 shape than the subtree-wide smoke because it excludes
+the `umlctl up` path and most boot/setup cost.  It is still a short smoke at a
+single tiny transfer size, not the final same-throughput steady-state CPU and
+syscall-rate comparison.
+
 ## 1 MiB Host-To-Guest Metric Diagnostic: 2026-06-11
 
 The open 1 MiB host-to-guest cell was rerun with the new UML process metric
@@ -913,8 +966,8 @@ The full replacement performance gate still needs:
   the 1 MiB metric diagnostic shows about 12x higher vector2 scheduler pcount
   and voluntary context-switch deltas;
 - single-queue vector2 fd and TAP comparisons;
-- refine the privileged `perf stat` smoke into steady-state syscall and
-  batching profiles;
+- refine the `perf-window.tsv` transfer-window rows into steady-state syscall
+  and batching profiles;
 - full CPU-utilisation and CPU cycles per packet at matched throughput if
   practical;
 - KCSAN/fairness runs under concurrent traffic.

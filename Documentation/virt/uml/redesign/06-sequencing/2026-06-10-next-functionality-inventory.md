@@ -257,6 +257,14 @@ This file is the live execution tracker for
   syscall and CPU counters for legacy vector and vector2, so privileged perf
   collection is no longer missing; the final steady-state P4.3 syscall-rate
   and full CPU-utilisation gate remains open.
+- The fixed-byte helper now has opt-in transfer-window perf collection for
+  host-to-guest runs. With `UML_VECTOR_PERF_PERF_STAT=1`, it resolves the live
+  UML PID after guest sink readiness, runs bounded `sudo -n perf stat -p
+  <pid>`, and writes parsed rows to `perf-window.tsv`. Validation: `bash -n`,
+  `git diff --check`, and a two-driver 64 KiB host-to-guest TCP smoke with
+  non-empty raw perf CSVs and no stale TAP/UML state, 2026-06-11. This is the
+  right harness shape for the remaining steady-state syscall-rate work, but
+  the two-second 64 KiB smoke is not itself the final P4.3 gate.
 - The first focused 1 MiB host-to-guest run with UML process metrics confirms
   the small-transfer cell remains open. Four repeats each for legacy vector and
   vector2 passed. Host-side MiB/s medians were legacy vector 0.9845 and vector2
