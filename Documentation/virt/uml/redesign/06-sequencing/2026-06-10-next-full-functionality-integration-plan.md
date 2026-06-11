@@ -800,6 +800,11 @@ Acceptance gates:
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
   L2TPv3, hybrid, BESS, VDE, and proxy returning `-EOPNOTSUPP` from the
   netdev open path; GRE/L2TPv3 header-helper KUnit remains present.
+- failed-open open-unwind gate. Current status: PASS on 2026-06-10 through
+  `vector2-failed-open`: fd-handoff TAP with `fail_open_after=2`, successful
+  host gateway ping, injected second `ndo_open()` failure, `open_delta=1`,
+  `fail_delta=1`, `close_delta=1`, closed/registered `vec2.0`, and TAP
+  cleanup.
 - seccomp backend vector2 Tier 3 networking.
 - KVM v2 backend vector2 Tier 3 networking.
 - Long soak.
@@ -1268,6 +1273,8 @@ Runtime smoke:
 - Vector2 parser-only transport boundary. Current status: TAP/fd are the only
   runtime netdev transports; raw/GRE/L2TPv3/hybrid/BESS/VDE/proxy are guarded
   as unsupported by the current netdev path.
+- Vector2 failed-open open-unwind. Current status: PASS through
+  `vector2-failed-open`.
 - Syzkaller shim smoke.
 
 Longer gates:

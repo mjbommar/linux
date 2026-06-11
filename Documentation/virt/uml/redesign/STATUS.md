@@ -132,6 +132,11 @@ run:
   but it is documented as validation-only in the kernel config structure,
   umlctl schema comments, and example README. Normal workloads should leave it
   unset.
+- `vector2-failed-open` PASS on the current tree: `umlctl gate loop` ran the
+  fd-handoff TAP path with `fail_open_after=2`, verified host gateway ping,
+  drove a second `ndo_open()` failure, observed `open_delta=1`,
+  `fail_delta=1`, `close_delta=1`, and left `vec2.0` closed/registered with
+  the host TAP cleaned up.
 
 Open vector2 publication work:
 
