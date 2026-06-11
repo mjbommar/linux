@@ -582,21 +582,21 @@ Current boundary:
   `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`,
   `pool-port-forward-smoke`, `pool-mconsole-path-probe`, `pool-bench`, and
   `syzkaller-shim-smoke` pass against the rebuilt current-HEAD `./linux`
-  binary at `59ad334001ea`
-  (`7.1.0-rc7-00187-g59ad334001ea`);
+  binary at `bb092119158b`
+  (`7.1.0-rc7-00261-gbb092119158b`);
 - `template-pause-pool-member-smoke` now tears down the full UML process group
   after the long-lived member reaches `MEMBER_DONE`, so the one-shot PASS does
   not leave an orphaned member process;
 - `syzkaller-shim-smoke` was rerun against rebuilt current-HEAD `./linux` at
-  `e3a493eac9e5` (`7.1.0-rc7-00230-ge3a493eac9e5`) and passes the shim source
-  contract plus the syzkaller-style take, `exec/1` stdout/stderr/exit frames,
-  port-forward, status, and destroy wire path through `umlctl`;
+  `bb092119158b` (`7.1.0-rc7-00261-gbb092119158b`) and passes the shim source
+  contract plus the syzkaller-style take, `exec/1`, port-forward, status, and
+  destroy wire path through `umlctl`;
 - `template-pause-fork-smoke` now drives two SIGSTOP/SIGCONT cycles and
   observes two distinct child PIDs plus two master resume cycles;
-- `template-pause-fork-stress` passed its default gate with 540 kernel
-  iterations in 10 seconds, median 18.5 ms iteration time, 540/540 clean
-  identity round-trips, 425 distinct child PIDs, no kernel panics, no RSS
-  drift, and no live orphans after teardown;
+- `template-pause-fork-stress` passed its default gate with 555 kernel
+  iterations, median 18.0 ms iteration time, 555/555 clean identity
+  round-trips, 443 distinct child PIDs, no kernel panics, no RSS drift, and no
+  live orphans after teardown;
 - `template-pause-pool-sustained-smoke` remains an expected failure after the
   first member in the default path because the current MAP_SHARED physmem model
   does not support repeated member lifetime; this default XFAIL remains useful
@@ -626,8 +626,8 @@ Current boundary:
   executable, libc, and tmpfs-backed physmem pages that RSS counts once per
   process;
 - the full default-scale `pool-bench` passes all five gates on the current
-  rebuilt binary: p50 1.8 ms, p99 2.4 ms, 100/100 live quiesced members at
-  138.9 MiB PSS and 510.0 MiB summed RSS, 17.5 MiB private dirty, 0.05%
+  rebuilt binary: p50 1.8 ms, p99 2.5 ms, 100/100 live quiesced members at
+  139.6 MiB PSS and 509.2 MiB summed RSS, 17.9 MiB private dirty, 0.00%
   lifecycle drift across 10,000 cycles, and 3000/3000 throughput takes in the
   60-second gate;
 - `pool-mconsole-path-probe` now passes: with a non-empty `mconsole_path`, the
@@ -679,7 +679,8 @@ Current boundary:
   handoff: `pool serve` boots a vector2 TAP-backed master, `pool take`
   assigns a different per-member TAP/MAC/IPv4/mconsole identity, daemon-routed
   `exec` observes the assigned `vec2.0` address, brings the link up, and
-  reaches the host-side TAP with a one-packet ping.
+  reaches the host-side TAP with a one-packet ping. This was rerun against
+  `bb092119158b` after the vector2 TX write-IRQ suppression change.
 - A focused privileged `perf stat` smoke now validates that syscall-rate and
   CPU-counter collection is available on this host with `sudo -n perf stat`
   despite unprivileged `perf_event_paranoid=4`.  One 64 KiB TCP
@@ -706,7 +707,7 @@ Current boundary:
   not the final CPU/syscall-rate claim.
 
 The 2026-06-11 pool/fork/syzkaller rerun is focused current-HEAD regression
-evidence. The latest syzkaller-only rerun covers `e3a493eac9e5`. It does not
+evidence. The latest post-vector2 rerun covers `bb092119158b`. It does not
 replace the final integration matrix, and the same pool and syzkaller gates
 must still be rerun after any later KVM v2 or vector2 changes.
 
@@ -726,18 +727,21 @@ developer-facing paths:
 
 - `cargo fmt --check`, `cargo test`, and
   `make -C tools/uml/uml-launcher check` pass in
-  `tools/uml/uml-launcher`;
+  `tools/uml/uml-launcher`; the latest `cargo test --locked` rerun passed
+  213 tests across `uml-launcher`, `umlctl`, and policy/profile tests;
 - `cargo build --bins` and `cargo build --release --bins` produce current
   debug and release `umlctl` binaries;
 - an isolated current-branch lifecycle smoke against `./linux` passes through
   `umlctl create`, `start`, `ps`, `metrics`, `stop`, and `rm`, with no
   remaining files in the temporary state/runtime directories;
-- `umlctl-smoke` and `launcher-smoke` pass against the current build;
+- `umlctl-smoke` passes against the `bb092119158b` build, and
+  `launcher-smoke` passes against the current build;
 - with `UM_FORK_KERNEL=$PWD/linux`, `pool-serve-smoke`, `pool-exec-smoke`,
-  `pool-port-forward-smoke`, and `syzkaller-shim-smoke` pass against the
-  current branch. The same tests can fail if they fall back to stale external
-  fork-kernel artifacts under `$HOME/src/uml-builds`, so current-branch
-  validation should pin `UM_FORK_KERNEL` to the rebuilt branch binary;
+  `pool-port-forward-smoke`, `pool-mconsole-path-probe`, `pool-bench`, and
+  `syzkaller-shim-smoke` pass against the `bb092119158b` branch build. The
+  same tests can fail if they fall back to stale external fork-kernel artifacts
+  under `$HOME/src/uml-builds`, so current-branch validation should pin
+  `UM_FORK_KERNEL` to the rebuilt branch binary;
 - `umlctl gate run --dry-run` passes against
   `tools/testing/selftests/um/gates/launcher-cargo.toml`;
 - `run-bpftrace-validate.sh` attaches all five transparency scripts, with
