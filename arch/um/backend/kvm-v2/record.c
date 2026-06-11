@@ -61,6 +61,9 @@ EXPORT_SYMBOL_GPL(kvm_v2_record_state_name);
 bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
 {
 	switch (syscall_nr) {
+#ifdef __NR_clock_gettime
+	case __NR_clock_gettime:
+#endif
 	case __NR_getcwd:
 	case __NR_uname:
 		return true;
@@ -561,6 +564,10 @@ static bool kvm_v2_record_payload_args_match(const u64 args[6],
 	kvm_v2_record_fill_syscall_args(replay_args, regs);
 
 	switch (syscall_nr) {
+#ifdef __NR_clock_gettime
+	case __NR_clock_gettime:
+		return args[0] == replay_args[0];
+#endif
 	case __NR_uname:
 		return true;
 	case __NR_getcwd:

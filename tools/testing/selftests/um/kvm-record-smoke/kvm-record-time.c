@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Guest-side raw-time negative smoke for strict KVM v2 replay.
+ * Guest-side raw-time payload smoke for strict KVM v2 replay.
  *
- * The helper arms replay with an empty log and then executes clock_gettime(2)
- * through the syscall path. The host-side runner expects the kernel to log the
- * strict replay rejection and kill init; returning from the syscall is a
- * failure because replay must not observe host time outside the log.
+ * The helper records one clock_gettime(2) result, arms replay, and verifies
+ * that replay returns the recorded timestamp bytes instead of consulting host
+ * time again.
  */
 
 #define _GNU_SOURCE
@@ -74,7 +73,8 @@ static int write_ctl(const char *cmd)
 
 int main(void)
 {
-	struct timespec ts;
+	struct timespec recorded;
+	struct timespec replayed;
 	long rc;
 	int fd;
 
@@ -90,6 +90,17 @@ int main(void)
 		(void)close(fd);
 		return 1;
 	}
+
+	memset(&recorded, 0, sizeof(recorded));
+	rc = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &recorded);
+	if (rc < 0) {
+		printf("KVM_RECORD_TIME: FAIL record clock_gettime rc=%ld errno=%d\n",
+		       rc, errno);
+		(void)close(fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
 	if (write_ctl_fd(fd, "stop\n") < 0) {
 		printf("KVM_RECORD_TIME: FAIL stop errno=%d\n", errno);
 		(void)close(fd);
@@ -110,10 +121,6 @@ int main(void)
 		return 1;
 	}
 
-	printf("KVM_RECORD_TIME: armed syscall=%ld name=clock_gettime\n",
-	       (long)SYS_clock_gettime);
-	fflush(stdout);
-
 	if (write_ctl_fd(fd, "replay\n") < 0) {
 		printf("KVM_RECORD_TIME: FAIL replay errno=%d\n", errno);
 		(void)close(fd);
@@ -121,9 +128,38 @@ int main(void)
 		return 1;
 	}
 
-	memset(&ts, 0, sizeof(ts));
-	rc = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
-	printf("KVM_RECORD_TIME: FAIL clock_gettime returned rc=%ld errno=%d sec=%ld nsec=%ld\n",
-	       rc, errno, (long)ts.tv_sec, ts.tv_nsec);
-	return 1;
+	memset(&replayed, 0, sizeof(replayed));
+	rc = syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &replayed);
+	if (rc < 0) {
+		printf("KVM_RECORD_TIME: FAIL replay clock_gettime rc=%ld errno=%d\n",
+		       rc, errno);
+		(void)close(fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+	if (close(fd) < 0) {
+		printf("KVM_RECORD_TIME: FAIL close replay ctl errno=%d\n",
+		       errno);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
+	if (recorded.tv_sec != replayed.tv_sec ||
+	    recorded.tv_nsec != replayed.tv_nsec) {
+		printf("KVM_RECORD_TIME: FAIL mismatch recorded=%ld.%09ld replayed=%ld.%09ld\n",
+		       (long)recorded.tv_sec, recorded.tv_nsec,
+		       (long)replayed.tv_sec, replayed.tv_nsec);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
+	if (write_ctl("destroy\n") < 0) {
+		printf("KVM_RECORD_TIME: FAIL destroy errno=%d\n", errno);
+		return 1;
+	}
+
+	printf("KVM_RECORD_TIME: PASS syscall=%ld name=clock_gettime sec=%ld nsec=%ld\n",
+	       (long)SYS_clock_gettime, (long)replayed.tv_sec,
+	       replayed.tv_nsec);
+	return 0;
 }

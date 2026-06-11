@@ -64,6 +64,7 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/utsname.h>
+#include <uapi/linux/time_types.h>
 #include <uapi/asm-generic/siginfo.h>	/* ILL_ILLOPN, FPE_INTOVF, SEGV_MAPERR */
 
 #include <asm/unistd.h>
@@ -1447,9 +1448,51 @@ static void kvm_v2_clear_syscall_nr(struct uml_pt_regs *regs)
 }
 
 #ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+static unsigned int kvm_v2_record_payload_arg(unsigned long syscall_nr)
+{
+	switch (syscall_nr) {
+#ifdef __NR_clock_gettime
+	case __NR_clock_gettime:
+		return 1;
+#endif
+	case __NR_getcwd:
+	case __NR_uname:
+		return 0;
+	default:
+		return 6;
+	}
+}
+
+static unsigned long kvm_v2_record_payload_ptr(const struct uml_pt_regs *regs,
+					       unsigned int arg)
+{
+	switch (arg) {
+	case 0:
+		return regs->gp[HOST_DI];
+	case 1:
+		return regs->gp[HOST_SI];
+	case 2:
+		return regs->gp[HOST_DX];
+	case 3:
+		return regs->gp[HOST_R10];
+	case 4:
+		return regs->gp[HOST_R8];
+	case 5:
+		return regs->gp[HOST_R9];
+	default:
+		return 0;
+	}
+}
+
 static size_t kvm_v2_record_payload_len(unsigned long syscall_nr, long ret)
 {
 	switch (syscall_nr) {
+#ifdef __NR_clock_gettime
+	case __NR_clock_gettime:
+		if (ret < 0)
+			return 0;
+		return sizeof(struct __kernel_timespec);
+#endif
 	case __NR_getcwd:
 		if (ret <= 0 || ret > KVM_V2_RECORD_MAX_PAYLOAD)
 			return 0;
@@ -1467,6 +1510,10 @@ static size_t kvm_v2_record_payload_max_len(unsigned long syscall_nr,
 					    const struct uml_pt_regs *regs)
 {
 	switch (syscall_nr) {
+#ifdef __NR_clock_gettime
+	case __NR_clock_gettime:
+		return sizeof(struct __kernel_timespec);
+#endif
 	case __NR_getcwd:
 		return min_t(size_t, regs->gp[HOST_SI],
 			     KVM_V2_RECORD_MAX_PAYLOAD);
@@ -1483,11 +1530,18 @@ static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
 					long *served_ret)
 {
 	void *payload;
+	unsigned int arg;
+	unsigned long user_ptr;
 	size_t max_len;
 	size_t payload_len = 0;
 	int rc;
 
 	if (!kvm_v2_record_syscall_has_payload(syscall_nr))
+		return 0;
+
+	arg = kvm_v2_record_payload_arg(syscall_nr);
+	user_ptr = kvm_v2_record_payload_ptr(regs, arg);
+	if (!user_ptr)
 		return 0;
 
 	max_len = kvm_v2_record_payload_max_len(syscall_nr, regs);
@@ -1505,8 +1559,7 @@ static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
 		goto out_free;
 
 	if (*served_ret >= 0 && payload_len &&
-	    copy_to_user((void __user *)regs->gp[HOST_DI], payload,
-			 payload_len))
+	    copy_to_user((void __user *)user_ptr, payload, payload_len))
 		rc = -EFAULT;
 
 out_free:
@@ -1560,6 +1613,8 @@ static bool kvm_v2_record_observe_payload(struct kvm_v2_record *rec,
 					  unsigned long syscall_nr)
 {
 	void *payload;
+	unsigned int arg;
+	unsigned long user_ptr;
 	size_t payload_len;
 	long ret = (long)regs->gp[HOST_AX];
 	bool observed = false;
@@ -1568,16 +1623,20 @@ static bool kvm_v2_record_observe_payload(struct kvm_v2_record *rec,
 	if (!payload_len)
 		return false;
 
+	arg = kvm_v2_record_payload_arg(syscall_nr);
+	user_ptr = kvm_v2_record_payload_ptr(regs, arg);
+	if (!user_ptr)
+		return false;
+
 	payload = kmalloc(payload_len, GFP_KERNEL);
 	if (!payload)
 		return false;
 
-	if (copy_from_user(payload, (void __user *)regs->gp[HOST_DI],
-			   payload_len))
+	if (copy_from_user(payload, (void __user *)user_ptr, payload_len))
 		goto out_free;
 
 	observed = kvm_v2_record_observe_syscall_payload(rec, syscall_nr, ret,
-							 regs, 0, payload,
+							 regs, arg, payload,
 							 payload_len) > 0;
 
 out_free:

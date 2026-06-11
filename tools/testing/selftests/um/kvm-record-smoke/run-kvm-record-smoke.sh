@@ -8,8 +8,9 @@
 # control surface and verifies that a real KVM v2 workload records syscall
 # entries. The final legs boot static helpers that start recording from the
 # same task that runs the scalar workload, replay the task-owned log, and
-# verify strict replay installs the replay signal policy and kills mismatched,
-# raw-time, RDTSC/RDTSCP, and unsupported live events instead of falling back.
+# verify strict replay installs the replay signal policy, replays raw-time
+# payloads, and kills mismatched, RDTSC/RDTSCP, and unsupported live events
+# instead of falling back.
 
 set -u
 
@@ -112,6 +113,7 @@ CASES=(
 	"test_record_replay_syscall_fifo"
 	"test_record_syscall_payload_fifo"
 	"test_record_syscall_payload_getcwd_fifo"
+	"test_record_syscall_payload_clock_gettime_fifo"
 	"test_record_syscall_payload_short_buffer"
 	"test_record_syscall_payload_arg_mismatch"
 	"test_record_syscall_payload_overflow"
@@ -324,29 +326,17 @@ fi
 
 echo "$TIME_LINE"
 case "$TIME_LINE" in
-*armed\ syscall=*) ;;
+*PASS*) ;;
 *)
-	echo "KVM_RECORD_SMOKE: FAIL (raw-time helper did not arm)"
+	echo "KVM_RECORD_SMOKE: FAIL (raw-time helper did not pass)"
 	echo "$TIME_OUT" |
 		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
 		tail -80
 	exit 1
 	;;
 esac
-
-TIME_NR=$(echo "$TIME_LINE" |
-	sed -n 's/.*armed syscall=\([0-9][0-9]*\).*/\1/p')
-if [ -z "$TIME_NR" ] ||
-   ! echo "$TIME_OUT" |
-	grep -q "kvm-v2 record: strict replay unsupported nr=$TIME_NR"; then
-	echo "KVM_RECORD_SMOKE: FAIL (raw-time strict rejection missing)"
-	echo "$TIME_OUT" |
-		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
-		tail -80
-	exit 1
-fi
 if echo "$TIME_OUT" | grep -q 'KVM_RECORD_TIME: FAIL'; then
-	echo "KVM_RECORD_SMOKE: FAIL (raw-time helper returned from unsupported syscall)"
+	echo "KVM_RECORD_SMOKE: FAIL (raw-time helper reported failure)"
 	echo "$TIME_OUT" |
 		grep -E 'backend = |kvm-v2 record|KVM_RECORD_TIME|UML: fatal|panic' |
 		tail -80
