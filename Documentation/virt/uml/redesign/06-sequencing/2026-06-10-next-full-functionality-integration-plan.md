@@ -971,13 +971,12 @@ Acceptance gates:
   open: the fd/vnet allocation fix rerun showed vector2 median 0.895 MiB/s
   versus legacy vector median 0.976 MiB/s, and this was treated as a
   correctness fix rather than replacement-readiness closure. The fixed-byte
-  helper now supports UDP; initial paced 1 MiB UDP evidence passes for legacy
-  vector and vector2, buffered unpaced 1 MiB UDP now passes, and buffered
-  8 MiB guest-to-host UDP passes for both drivers. Larger host-to-guest UDP
-  still needs publication coverage because the 8 MiB run loses bytes before
-  exact-byte completion for both drivers when unpaced; a paced 20 usec 8 MiB
-  host-to-guest run now passes for both drivers with vector2/vector host-side
-  ratio 0.998875. The helper now also appends endpoint process CPU timing
+  helper now supports UDP; current-HEAD repeat-2 matrices pass for buffered
+  unpaced 1 MiB UDP and paced 8 MiB UDP in both directions with vector2 close
+  to or above legacy on host-side MiB/s. Larger unpaced host-to-guest UDP is
+  still explicitly bounded because the earlier 8 MiB unpaced run lost bytes
+  before exact-byte completion for both drivers. The helper now also appends
+  endpoint process CPU timing
   columns and host-to-guest UML process metric deltas for focused runs. A
   privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
   subtree-wide syscall and CPU counters per driver, and the helper can now
@@ -1625,13 +1624,12 @@ Runtime smoke:
   reporting and fd/vnet RX allocation are aligned with the vnet-header
   datapath. The 1 MiB host-to-guest fixed-byte cell remains below the final
   publication bar and needs the next bottleneck pass. The fixed-byte helper
-  now also supports UDP; initial paced 1 MiB UDP evidence passes for legacy
-  vector and vector2, buffered unpaced 1 MiB UDP now passes, and buffered
-  8 MiB guest-to-host UDP passes for both drivers. Larger host-to-guest UDP
-  still needs publication coverage because the 8 MiB run loses bytes before
-  exact-byte completion for both drivers when unpaced; a paced 20 usec 8 MiB
-  host-to-guest run now passes for both drivers with vector2/vector host-side
-  ratio 0.998875. The helper now also appends endpoint process CPU timing
+  now also supports UDP; current-HEAD repeat-2 matrices pass for buffered
+  unpaced 1 MiB UDP and paced 8 MiB UDP in both directions with vector2 close
+  to or above legacy on host-side MiB/s. Larger unpaced host-to-guest UDP is
+  still explicitly bounded because the earlier 8 MiB unpaced run lost bytes
+  before exact-byte completion for both drivers. The helper now also appends
+  endpoint process CPU timing
   columns and host-to-guest UML process metric deltas for focused runs. A
   privileged `perf stat` 64 KiB host-to-guest TCP smoke now records
   subtree-wide syscall and CPU counters per driver, and the helper can now

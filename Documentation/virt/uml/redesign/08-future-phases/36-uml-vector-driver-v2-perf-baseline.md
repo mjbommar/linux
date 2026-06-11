@@ -684,6 +684,64 @@ pcount median ratio of `1.000000`, and voluntary context-switch median ratio
 of `0.999795`.  This is positive larger UDP host-to-guest evidence for the
 paced shape; it does not erase the unpaced 8 MiB byte-loss caveat above.
 
+## UDP Repeat-2 Current-Head Refresh: 2026-06-11
+
+The current `next` head `7be847362e56` was rerun with two repeats for the two
+UDP shapes that remain useful for publication evidence: buffered unpaced
+1 MiB and paced 8 MiB.
+
+Buffered unpaced 1 MiB:
+
+```sh
+rm -rf /tmp/um-vector-udp-unpaced-1m-r2
+UML_VECTOR_PERF_OUT=/tmp/um-vector-udp-unpaced-1m-r2 \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=2 \
+UML_VECTOR_PERF_PORT=19190 \
+UML_VECTOR_PERF_UDP_RCVBUF=16777216 \
+UML_VECTOR_PERF_UDP_SNDBUF=16777216 \
+  timeout 1200s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Paced 8 MiB:
+
+```sh
+rm -rf /tmp/um-vector-udp-paced-8m-r2
+UML_VECTOR_PERF_OUT=/tmp/um-vector-udp-paced-8m-r2 \
+UML_VECTOR_PERF_DRIVERS=vector,vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=8388608 \
+UML_VECTOR_PERF_REPEAT=2 \
+UML_VECTOR_PERF_PORT=19191 \
+UML_VECTOR_PERF_UDP_RCVBUF=16777216 \
+UML_VECTOR_PERF_UDP_SNDBUF=16777216 \
+UML_VECTOR_PERF_UDP_PACE_USEC=20 \
+  timeout 1800s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Both matrices passed all rows with exact-byte completion.  Cleanup checks
+found no matching `vperf-*`/UML/`umlctl` process and no stale TAP links.
+
+Median host-side MiB/s from `aggregate.tsv`:
+
+| Shape | Direction | vector | vector2 | vector2/vector |
+| --- | --- | ---: | ---: | ---: |
+| unpaced 1 MiB | guest-to-host | 100.1005 | 99.9395 | 0.998392 |
+| unpaced 1 MiB | host-to-guest | 399.6525 | 449.8595 | 1.125627 |
+| paced 8 MiB | guest-to-host | 13.6935 | 13.5920 | 0.992588 |
+| paced 8 MiB | host-to-guest | 17.8400 | 17.8950 | 1.003083 |
+
+This refresh supports buffered 1 MiB unpaced UDP and 8 MiB paced UDP as the
+current accepted UDP evidence shapes.  It does not make unpaced larger
+host-to-guest UDP an accepted shape; the byte-loss evidence above still bounds
+that case.
+
 ## CPU Timing Extension: 2026-06-11
 
 The helper now records endpoint process CPU time for each fixed-byte run. Host

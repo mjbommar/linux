@@ -402,20 +402,17 @@ Current bounded vector2 evidence adds:
   before the success marker, and a `protocol` column in `summary.tsv`.
   Validation reports a TCP compatibility smoke PASS, a vector2 UDP
   bidirectional smoke PASS, the original paced 1 MiB legacy-vs-vector2 UDP
-  matrix, and a buffered unpaced 1 MiB UDP matrix PASS.  In the buffered
-  unpaced run, legacy vector host-side throughput was 105.918 MiB/s
-  guest-to-host and 466.051 MiB/s host-to-guest; vector2 host-side throughput
-  was 102.022 MiB/s guest-to-host and 459.233 MiB/s host-to-guest, for
-  vector2/vector host-side ratios of 0.963217 and 0.985371.  Buffered
-  unpaced 8 MiB guest-to-host also passes for both drivers: legacy vector
-  host-side 100.736 MiB/s and vector2 host-side 97.788 MiB/s.  Larger
-  host-to-guest UDP remains open: at 8 MiB, the host sent 8,388,608 bytes but
-  legacy vector received 5,358,080 bytes and vector2 received 5,674,560
-  bytes before guest exit.  With `UML_VECTOR_PERF_UDP_PACE_USEC=20`, the
-  paced 8 MiB host-to-guest cell passes for both drivers: legacy vector
-  host-side 17.781 MiB/s and vector2 host-side 17.761 MiB/s, for a
-  vector2/vector host-side ratio of 0.998875 and matching scheduler pcount
-  ratio of 1.000000.
+  matrix, and current-HEAD repeat-2 UDP matrices for buffered unpaced 1 MiB
+  and paced 8 MiB.  In the repeat-2 buffered unpaced 1 MiB run, vector2/vector
+  host-side median ratios were 0.998392 guest-to-host and 1.125627
+  host-to-guest.  In the repeat-2 paced 8 MiB run with
+  `UML_VECTOR_PERF_UDP_PACE_USEC=20`, vector2/vector host-side median ratios
+  were 0.992588 guest-to-host and 1.003083 host-to-guest.  Earlier negative
+  evidence still bounds the unpaced 8 MiB host-to-guest shape: both drivers
+  lost bytes before exact-byte completion when unpaced.  The current evidence
+  supports buffered 1 MiB unpaced UDP and 8 MiB paced UDP as acceptance
+  shapes; it does not close unpaced larger host-to-guest UDP or the
+  steady-state CPU/syscall publication gate.
 - The fixed-byte performance helper now records endpoint process CPU timing in
   addition to wall-clock throughput.  Guest `VECTOR_NET_PERF` lines and host
   `HOST_SINK`/`HOST_SEND` lines include `cpu_seconds=...`, and `summary.tsv`
