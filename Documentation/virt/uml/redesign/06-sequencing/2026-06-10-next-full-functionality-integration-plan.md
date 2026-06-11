@@ -634,6 +634,10 @@ Current `next` checkpoint:
 - `arch/um/backend/kvm-v2/record.c` implements the single-active container,
   lifecycle, strict replay flag, bounded syscall entries, FIFO consume,
   mismatch reporting, and dropped-entry accounting.
+- `arch/um/backend/kvm-v2/syscall_trap.c` now wires the live KVM syscall
+  dispatcher to that core: record mode appends post-syscall return values, and
+  replay mode can serve recorded syscall returns without reissuing the live
+  syscall.
 - Record/replay now owns the LSTAR gadget-bypass byte in the per-vCPU gadget
   state page. Starting record or replay mode sets the byte across the live
   vCPU pool; stopping or destroying the active container clears it. Newly
@@ -647,8 +651,8 @@ Current `next` checkpoint:
   `um_kvm_v2_record` 8/8, `kvm_v2_byteshape` 9/9, both record and byteshape
   filters also PASS under `backend=force=kvm`, and the freestanding KVM
   `perf-getpid` gadget smoke remains PASS with `cyc_per_call=89`.
-- Still open: live syscall dispatcher wiring, snapshot integration,
-  time/RDTSC/signal determinism, supported replay tier docs, and real workload
+- Still open: snapshot integration, time/RDTSC/signal determinism, supported
+  replay tier docs, a supported user ABI/control surface, and real workload
   record/replay smoke tests.
 
 Acceptance gates:
@@ -1433,7 +1437,7 @@ branch lands.
 | KVM v2 restore error handling | Fixed in current series | Checked/fatal policy | Closed for known issue |
 | KVM snapshot | Present with KUnit, live export, restore smoke, and SMP gate | Present, validated, SMP policy defined | Closed for current scope |
 | Snapshot ELF export | Present with live export pass | Working and documented on `next` | Closed for live export |
-| Record/replay | Experimental core present; live runtime incomplete | Complete deterministic tier or explicitly experimental | Partially closed; runtime open |
+| Record/replay | Experimental syscall hook present; deterministic runtime incomplete | Complete deterministic tier or explicitly experimental | Partially closed; runtime open |
 | State trace | Historical/prototype | Clean optional debug infra | Open |
 | Template pause | Single-shot and pivot/member paths validated; vector2 leg skips without guest `vec0` | Validated and documented | Mostly closed; vector2 leg pending |
 | Fork server | Fork-on-resume smoke and default stress pass | Complete multi-iteration fork workflow plus stress | Closed for current fork-on-resume scope |
@@ -1722,9 +1726,9 @@ Immediate engineering conclusion:
    `exec/2` work, not a current completion blocker.
 4. Keep the retired per-take pool fd handoff boundary covered in status docs;
    launcher-owned vector2 fd handoff is now covered by `vector2-fd-handoff-smoke`.
-5. Complete record/replay beyond the explicit experimental core, including
-   live runtime hooks and workload-level replay gates, before counting the
-   original mission complete.
+5. Complete record/replay beyond the explicit experimental syscall hook,
+   including snapshot, time, signal, device, user-ABI, and workload-level replay
+   gates, before counting the original mission complete.
 6. Decide whether private state trace is worth importing as clean optional
    diagnostics.
 7. Re-audit vector2 transport claims, Kconfig wording, and replacement

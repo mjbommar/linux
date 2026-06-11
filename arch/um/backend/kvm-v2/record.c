@@ -3,9 +3,9 @@
  * KVM v2 record/replay core.
  *
  * This file owns the in-memory record container and the bounded syscall log
- * used by the experimental replay path. The live KVM syscall dispatcher is not
- * wired here yet; callers exercise the core through explicit observe and
- * consume helpers while the remaining determinism policy is finished.
+ * used by the experimental replay path. The live KVM syscall dispatcher
+ * observes and consumes syscall entries from this core; snapshot, time, signal,
+ * and device determinism remain outside the current supported surface.
  */
 
 #include <linux/errno.h>

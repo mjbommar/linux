@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay gadget bypass, and KVM v2 dynamic-loader TLS closure.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass, and KVM v2 dynamic-loader TLS closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -18,7 +18,8 @@ restored for the full UML v2 completion branch:
 - signal, FPU/XSAVE, timer, and SMP state handling;
 - memory-slot and region management;
 - snapshot capture/restore and snapshot ELF export;
-- experimental record/replay container and syscall-log core; and
+- experimental record/replay container, syscall-log core, and live syscall
+  hook; and
 - the validation needed to decide which pieces are publishable upstream.
 
 Private state-trace code remains historical-only at this point. Record/replay
@@ -43,8 +44,10 @@ Current source-tree direction:
   smoke validation pass on `next`; SMP snapshot semantics are explicitly
   gated to one online CPU.
 - KVM v2 record/replay has an experimental core on `next` behind
-  `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; private trace-ring
-  sources have not yet been reimported.
+  `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; its live syscall
+  dispatcher hook can observe and replay syscall return values, but snapshot,
+  time, signal, device, and user-ABI integration remain incomplete. Private
+  trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
   backend unless KVM v2 is selected.
@@ -95,7 +98,9 @@ The strongest current KVM v2 evidence is:
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
   divergence cursor preservation, buffer-overflow accounting, and the
-  synthetic gadget-bypass page helper.
+  synthetic gadget-bypass page helper. The live KVM syscall dispatcher now
+  calls the observe/consume hooks, so this is no longer core-only syscall
+  plumbing.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
 
@@ -111,8 +116,8 @@ Remaining validation before publication or completion:
   dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
   stack;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
-- finish live record/replay integration before counting the original
-  record/replay mission complete;
+- finish record/replay snapshot, time, signal, device, and user-ABI integration
+  before counting the original record/replay mission complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - keep the seccomp comparison path green while the KVM v2 series is split;
 - refresh the upstream cover letter and patch boundaries after the cleanup.

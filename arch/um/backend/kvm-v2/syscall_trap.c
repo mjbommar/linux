@@ -48,12 +48,14 @@
 #include <linux/errno.h>
 #include <linux/gfp.h>
 #include <linux/init.h>
+#include <linux/jump_label.h>
 #include <linux/kernel.h>
 #include <linux/kvm.h>		/* struct kvm_run, KVM_EXIT_IO */
 #include <linux/mm.h>
 #include <linux/mm_types.h>	/* init_mm */
 #include <linux/pgtable.h>	/* pgd_index */
 #include <linux/printk.h>
+#include <linux/sched/signal.h>	/* force_sig */
 #include <linux/set_memory.h>
 #include <linux/signal.h>	/* clear_siginfo, kernel_siginfo_t */
 #include <linux/string.h>
@@ -1415,7 +1417,7 @@ static void kvm_v2_run_syscall_unpinned(struct uml_pt_regs *regs)
 	migrate_disable();
 }
 
-static void kvm_v2_finish_syscall_regs(struct uml_pt_regs *regs)
+static void kvm_v2_drain_syscall_work(struct uml_pt_regs *regs)
 {
 	long ret;
 
@@ -1428,7 +1430,10 @@ static void kvm_v2_finish_syscall_regs(struct uml_pt_regs *regs)
 	if (unlikely((ret <= -512 && ret >= -516) ||
 		     (read_thread_flags() & _TIF_WORK_MASK)))
 		interrupt_end();
+}
 
+static void kvm_v2_clear_syscall_nr(struct uml_pt_regs *regs)
+{
 	/*
 	 * Clear after signal/restart handling. The offset guard protects
 	 * layouts where the syscall-number and return-value slots alias.
@@ -1437,6 +1442,68 @@ static void kvm_v2_finish_syscall_regs(struct uml_pt_regs *regs)
 		PT_SYSCALL_NR(regs->gp) = -1;
 }
 
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
+				      unsigned long syscall_nr)
+{
+	struct kvm_v2_record *rec;
+	long served_ret = 0;
+	int rc;
+
+	if (!static_branch_unlikely(&um_kvm_v2_record_enabled))
+		return false;
+
+	rec = kvm_v2_record_active();
+	if (!rec || rec->state != KVM_V2_RECORD_REPLAYING)
+		return false;
+
+	rc = kvm_v2_record_consume_syscall(rec, syscall_nr, &served_ret);
+	if (rc > 0) {
+		regs->gp[HOST_AX] = (unsigned long)served_ret;
+		return true;
+	}
+
+	if (rc < 0 && rec->strict_replay) {
+		pr_info_ratelimited("kvm-v2 record: strict replay divergence nr=%lu rc=%d entries_replayed=%llu\n",
+				    syscall_nr, rc, rec->entries_replayed);
+		force_sig(SIGSEGV);
+		return true;
+	}
+
+	return false;
+}
+
+static void kvm_v2_observe_syscall(struct uml_pt_regs *regs,
+				   unsigned long syscall_nr)
+{
+	struct kvm_v2_record *rec;
+
+	if (!static_branch_unlikely(&um_kvm_v2_record_enabled))
+		return;
+
+	rec = kvm_v2_record_active();
+	if (rec)
+		kvm_v2_record_observe_syscall(rec, syscall_nr,
+					      (long)regs->gp[HOST_AX], regs);
+}
+#else
+static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
+				      unsigned long syscall_nr)
+{
+	(void)regs;
+	(void)syscall_nr;
+
+	return false;
+}
+
+static void kvm_v2_observe_syscall(struct uml_pt_regs *regs,
+				   unsigned long syscall_nr)
+{
+	(void)regs;
+	(void)syscall_nr;
+}
+#endif
+
 static int kvm_v2_handle_io_syscall(struct uml_pt_regs *regs, u16 io_port)
 {
 	unsigned long syscall_nr;
@@ -1444,13 +1511,19 @@ static int kvm_v2_handle_io_syscall(struct uml_pt_regs *regs, u16 io_port)
 	syscall_nr = kvm_v2_prepare_syscall_regs(regs);
 	trace_um_backend_kvm_v2_iotrap_syscall_enter(io_port, syscall_nr);
 
+	if (kvm_v2_try_replay_syscall(regs, syscall_nr))
+		goto out_clear;
+
 	kvm_v2_run_syscall_unpinned(regs);
-	kvm_v2_finish_syscall_regs(regs);
+	kvm_v2_drain_syscall_work(regs);
+	kvm_v2_observe_syscall(regs, syscall_nr);
 
 	/*
 	 * Do not marshal into kvm_run here: a sleeping syscall may have let
 	 * another task reuse the same per-CPU vCPU mmap.
 	 */
+out_clear:
+	kvm_v2_clear_syscall_nr(regs);
 	trace_um_backend_kvm_v2_iotrap_syscall_exit(io_port, regs->gp[HOST_AX]);
 	return 0;
 }
