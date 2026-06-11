@@ -173,7 +173,7 @@ done
 
 mkdir -p "$out"
 summary="$out/summary.tsv"
-printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\n' > "$summary"
+printf 'driver\tdirection\tbytes\trepeat\tguest_seconds\tguest_mib_s\thost_seconds\thost_mib_s\tguest_log\thost_log\tprotocol\tguest_cpu_seconds\thost_cpu_seconds\n' > "$summary"
 
 queue_toml() {
 	local driver="$1"
@@ -220,6 +220,7 @@ if protocol == "tcp":
         conn, addr = sock.accept()
         with conn:
             start = time.monotonic()
+            cpu_start = time.process_time()
             received = 0
             while True:
                 data = conn.recv(1024 * 1024)
@@ -235,6 +236,7 @@ else:
         received = 0
         addr = None
         start = None
+        cpu_start = None
         while received < expected:
             try:
                 data, addr = sock.recvfrom(max(udp_payload, 1) + 64)
@@ -242,15 +244,18 @@ else:
                 break
             if start is None:
                 start = time.monotonic()
+                cpu_start = time.process_time()
             received += len(data)
         if start is None:
             start = time.monotonic()
+            cpu_start = time.process_time()
 
 elapsed = max(time.monotonic() - start, 1e-9)
+cpu_elapsed = max(time.process_time() - cpu_start, 0.0)
 mib_s = received / 1048576.0 / elapsed
 print(
     f"HOST_SINK protocol={protocol} bytes={received} seconds={elapsed:.6f} "
-    f"mib_s={mib_s:.3f} addr={addr}",
+    f"mib_s={mib_s:.3f} cpu_seconds={cpu_elapsed:.6f} addr={addr}",
     flush=True,
 )
 if received != expected:
@@ -295,6 +300,7 @@ udp_pace = int(sys.argv[8]) / 1_000_000.0
 sent = 0
 
 start = time.monotonic()
+cpu_start = time.process_time()
 if protocol == "tcp":
     chunk = bytes(tcp_chunk)
     with socket.create_connection((host, port), timeout=20) as sock:
@@ -316,10 +322,11 @@ else:
             if udp_pace:
                 time.sleep(udp_pace)
 elapsed = max(time.monotonic() - start, 1e-9)
+cpu_elapsed = max(time.process_time() - cpu_start, 0.0)
 mib_s = sent / 1048576.0 / elapsed
 print(
     f"HOST_SEND protocol={protocol} bytes={sent} seconds={elapsed:.6f} "
-    f"mib_s={mib_s:.3f}",
+    f"mib_s={mib_s:.3f} cpu_seconds={cpu_elapsed:.6f}",
     flush=True,
 )
 PY
@@ -380,6 +387,7 @@ udp_payload = int(os.environ.get("UML_VECTOR_PERF_UDP_PAYLOAD", "1472"))
 udp_pace = int(os.environ.get("UML_VECTOR_PERF_UDP_PACE_USEC", "0")) / 1_000_000.0
 sent = 0
 start = time.monotonic()
+cpu_start = time.process_time()
 if protocol == "tcp":
     chunk = bytes(tcp_chunk)
     with socket.create_connection((host, port), timeout=20) as sock:
@@ -403,6 +411,7 @@ else:
     print(f"unsupported protocol={protocol}", file=sys.stderr)
     sys.exit(2)
 elapsed = max(time.monotonic() - start, 1e-9)
+cpu_elapsed = max(time.process_time() - cpu_start, 0.0)
 mib_s = sent / 1048576.0 / elapsed
 print(
     "VECTOR_NET_PERF "
@@ -411,7 +420,8 @@ print(
     f"driver={os.environ.get('UMLCTL_NETWORK_DRIVER', '')} "
     f"transport={os.environ.get('UMLCTL_NETWORK_TRANSPORT', '')} "
     f"queues={os.environ.get('UMLCTL_NETWORK_QUEUES', '')} "
-    f"bytes={sent} seconds={elapsed:.6f} mib_s={mib_s:.3f}"
+    f"bytes={sent} seconds={elapsed:.6f} mib_s={mib_s:.3f} "
+    f"cpu_seconds={cpu_elapsed:.6f}"
 )
 PY
 rc=$?
@@ -469,6 +479,7 @@ if protocol == "tcp":
         conn, addr = sock.accept()
         with conn:
             start = time.monotonic()
+            cpu_start = time.process_time()
             received = 0
             while True:
                 data = conn.recv(1024 * 1024)
@@ -484,6 +495,7 @@ elif protocol == "udp":
         received = 0
         addr = None
         start = None
+        cpu_start = None
         while received < expected:
             try:
                 data, addr = sock.recvfrom(max(udp_payload, 1) + 64)
@@ -491,14 +503,17 @@ elif protocol == "udp":
                 break
             if start is None:
                 start = time.monotonic()
+                cpu_start = time.process_time()
             received += len(data)
         if start is None:
             start = time.monotonic()
+            cpu_start = time.process_time()
 else:
     print(f"unsupported protocol={protocol}", file=sys.stderr)
     sys.exit(2)
 
 elapsed = max(time.monotonic() - start, 1e-9)
+cpu_elapsed = max(time.process_time() - cpu_start, 0.0)
 mib_s = received / 1048576.0 / elapsed
 print(
     "VECTOR_NET_PERF "
@@ -508,7 +523,7 @@ print(
     f"transport={os.environ.get('UMLCTL_NETWORK_TRANSPORT', '')} "
     f"queues={os.environ.get('UMLCTL_NETWORK_QUEUES', '')} "
     f"bytes={received} seconds={elapsed:.6f} mib_s={mib_s:.3f} "
-    f"addr={addr}"
+    f"cpu_seconds={cpu_elapsed:.6f} addr={addr}"
 )
 if received != expected:
     sys.exit(3)
@@ -669,17 +684,20 @@ EOF
 	cargo run --manifest-path "$repo_root/tools/uml/uml-launcher/Cargo.toml" \
 		--bin umlctl -- down -f "$umlf" --force --rm >/dev/null 2>&1 || true
 
-	local guest_line host_line guest_seconds guest_mib_s host_seconds host_mib_s
+	local guest_line host_line guest_seconds guest_mib_s host_seconds host_mib_s guest_cpu_seconds host_cpu_seconds
 	guest_line="$(grep 'VECTOR_NET_PERF ' "$guest_log" | tail -1)"
 	host_line="$(grep -E 'HOST_(SINK|SEND) ' "$host_log" | tail -1)"
 	guest_seconds="$(sed -n 's/.* seconds=\([0-9.]*\).*/\1/p' <<<"$guest_line")"
 	guest_mib_s="$(sed -n 's/.* mib_s=\([0-9.]*\).*/\1/p' <<<"$guest_line")"
 	host_seconds="$(sed -n 's/.* seconds=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 	host_mib_s="$(sed -n 's/.* mib_s=\([0-9.]*\).*/\1/p' <<<"$host_line")"
+	guest_cpu_seconds="$(sed -n 's/.* cpu_seconds=\([0-9.]*\).*/\1/p' <<<"$guest_line")"
+	host_cpu_seconds="$(sed -n 's/.* cpu_seconds=\([0-9.]*\).*/\1/p' <<<"$host_line")"
 
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$driver" "$perf_dir" "$run_bytes" "$repeat_idx" "$guest_seconds" "$guest_mib_s" \
-		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" "$protocol" >> "$summary"
+		"$host_seconds" "$host_mib_s" "$guest_log" "$host_log" "$protocol" \
+		"$guest_cpu_seconds" "$host_cpu_seconds" >> "$summary"
 	echo "$guest_line"
 	echo "$host_line"
 }

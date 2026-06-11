@@ -228,6 +228,13 @@ This file is the live execution tracker for
   host-to-guest, 2026-06-11. Unpaced legacy host-to-guest at 1 MiB did not
   reach exact-byte completion, so UDP remains initial evidence rather than a
   final publication gate.
+- Vector2 fixed-byte endpoint CPU timing is now captured by the same helper.
+  Guest `VECTOR_NET_PERF` lines and host `HOST_SINK`/`HOST_SEND` lines include
+  `cpu_seconds=...`, and `summary.tsv` appends `guest_cpu_seconds` and
+  `host_cpu_seconds`. Validation: `bash -n`, `git diff --check`, vector2 TCP
+  64 KiB guest-to-host smoke PASS, and paced vector2 UDP 64 KiB bidirectional
+  smoke PASS, 2026-06-11. This is helper-level per-process timing, not the
+  final full-system CPU-utilisation or syscall-rate gate.
 - Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
   SELinux policy headers, sandbox/research launcher examples, gate metadata,
   tier smoke fixtures, and adjacent launcher/profile docs. Validation:
@@ -264,8 +271,8 @@ These items must be closed before the final branch can be called complete:
    normal guest-to-host TCP gate, lazy-RX allocation-churn cleanup, RX checksum
    feature alignment, and most fixed-byte bidirectional TCP cells pass, but
    the host-to-guest 1 MiB regression, natural 7200-second seccomp run, full
-   KVM-v2 Tier 3 coverage, broader UDP plus syscall/CPU performance coverage, and
-   multiqueue fairness/performance gates remain open.
+   KVM-v2 Tier 3 coverage, broader UDP plus syscall-rate/full CPU-utilisation
+   performance coverage, and multiqueue fairness/performance gates remain open.
 3. Pool/fork-server current tests pass on rebuilt current HEAD, including
    warm-pool, pool-member, replicated sustained-pool, pool-bench, and
    syzkaller paths. This remains a final-completion blocker only as a required

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, and vector2 UDP fixed-byte harness/evidence.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, and vector2 fixed-byte CPU timing columns.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -325,6 +325,15 @@ Current bounded vector2 evidence adds:
   8.660 MiB/s host-to-guest.  An unpaced 1 MiB legacy vector host-to-guest
   UDP attempt did not reach exact-byte completion after the host sent the
   payload, so this is initial paced UDP evidence, not the final UDP gate.
+- The fixed-byte performance helper now records endpoint process CPU timing in
+  addition to wall-clock throughput.  Guest `VECTOR_NET_PERF` lines and host
+  `HOST_SINK`/`HOST_SEND` lines include `cpu_seconds=...`, and `summary.tsv`
+  appends `guest_cpu_seconds` and `host_cpu_seconds` after the existing
+  columns.  Validation reports `bash -n`, `git diff --check`, a vector2 TCP
+  64 KiB guest-to-host smoke PASS with guest/host CPU seconds populated, and a
+  paced vector2 UDP 64 KiB bidirectional smoke PASS.  This is lightweight
+  per-process endpoint timing only; full-system CPU-utilisation and
+  syscall-rate data remain open P4.3 publication work.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
@@ -354,8 +363,8 @@ Open vector2 publication work:
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
 - extend performance coverage beyond the fixed guest-to-host TCP gate: follow
   up the host-to-guest 1 MiB regression, expand UDP beyond the initial paced
-  fixed-byte matrix, add syscall-rate and CPU-utilisation data, and expand
-  fairness/performance coverage for
+  fixed-byte matrix, add syscall-rate and full CPU-utilisation data beyond the
+  helper's endpoint CPU timing, and expand fairness/performance coverage for
   multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 

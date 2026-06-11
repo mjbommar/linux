@@ -28,8 +28,9 @@ The helper:
 - boots the UML guest through `umlctl up`;
 - sends one or more fixed byte counts across the selected direction;
 - records guest-side and host-side MiB/s;
-- writes a TSV summary, including transfer size, repeat index, and protocol,
-  plus per-run logs;
+- records guest-side and host-side endpoint process CPU seconds;
+- writes a TSV summary, including transfer size, repeat index, protocol,
+  endpoint CPU seconds, and per-run logs;
 - tears the instance down with `umlctl down --force --rm`.
 
 Defaults:
@@ -187,6 +188,10 @@ The helper was extended with:
 - per-run output directories keyed by driver, direction, byte count,
   and repeat index;
 - a `repeat` column in `summary.tsv`.
+
+The helper later gained explicit TCP/UDP protocol selection and appended
+endpoint CPU timing columns. Current summaries include `protocol`,
+`guest_cpu_seconds`, and `host_cpu_seconds`.
 
 Smoke command:
 
@@ -517,7 +522,7 @@ Interpretation:
   but do not close it;
   and
 - this refresh improves the TCP story, but it does not close P4.3 because
-  broader UDP, syscall-rate, CPU-utilisation, and the host-to-guest
+  broader UDP, syscall-rate, full CPU-utilisation, and the host-to-guest
   small-transfer issue remain open.
 
 ## UDP Harness Extension: 2026-06-11
@@ -532,7 +537,7 @@ Additional knobs:
 - `UML_VECTOR_PERF_UDP_PAYLOAD`, default `1472`;
 - `UML_VECTOR_PERF_UDP_PACE_USEC`, default `0`.
 
-The summary file now includes a trailing `protocol` column.
+The summary file now includes a `protocol` column.
 
 Validation:
 
@@ -600,6 +605,50 @@ marker after the host sent the full payload. Treat that as useful negative
 evidence and keep unpaced/larger UDP coverage open for the final publication
 matrix.
 
+## CPU Timing Extension: 2026-06-11
+
+The helper now records endpoint process CPU time for each fixed-byte run. Host
+`HOST_SINK`/`HOST_SEND` lines and guest `VECTOR_NET_PERF` lines include
+`cpu_seconds=...`, and `summary.tsv` appends `guest_cpu_seconds` and
+`host_cpu_seconds` after the existing columns.
+
+Validation:
+
+```sh
+bash -n tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh
+git diff --check
+
+rm -rf /tmp/um-vector-perf-cpu-tcp-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-cpu-tcp-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=guest-to-host \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19150 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+
+rm -rf /tmp/um-vector-perf-cpu-udp-smoke
+UML_VECTOR_PERF_OUT=/tmp/um-vector-perf-cpu-udp-smoke \
+UML_VECTOR_PERF_DRIVERS=vector2 \
+UML_VECTOR_PERF_DIRECTION=both \
+UML_VECTOR_PERF_PROTOCOL=udp \
+UML_VECTOR_PERF_BYTES_LIST=65536 \
+UML_VECTOR_PERF_REPEAT=1 \
+UML_VECTOR_PERF_PORT=19151 \
+UML_VECTOR_PERF_UDP_PACE_USEC=100 \
+  timeout 300s tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+Result: syntax checks PASS, vector2 TCP 64 KiB guest-to-host smoke PASS, and
+paced vector2 UDP 64 KiB bidirectional smoke PASS. The smoke summaries include
+the appended CPU columns.
+
+This is a lightweight diagnostic, not the final CPU-utilisation gate. It does
+not measure total host CPU, UML kernel CPU, softirq time, or syscall count, and
+short or paced transfers can round small guest process times to `0.000000`.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
@@ -626,5 +675,5 @@ The full replacement performance gate still needs:
   counters between legacy and vector2;
 - single-queue vector2 fd and TAP comparisons;
 - syscall and batching profiles;
-- CPU cycles per packet if practical;
+- full CPU-utilisation and CPU cycles per packet if practical;
 - KCSAN/fairness runs under concurrent traffic.

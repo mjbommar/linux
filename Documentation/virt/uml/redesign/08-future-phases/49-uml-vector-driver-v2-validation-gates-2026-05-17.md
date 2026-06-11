@@ -31,7 +31,7 @@ implemented runtime netdev transports.
 | Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
 | Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
 | KVM v2 Tier 3 | Partial current-head smoke: rebuilt `98166580dc4f` passed one KVM-v2/vector2 iteration each for `tier3-django-v2` and `tier3-fastapi-v2`, including `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. | Run the same full Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
-| Perf/fairness/KCSAN breadth | Current guest-to-host TCP gate passes after the TX/RX NAPI scheduling fix and remains green after the lazy-RX cleanup and RX checksum feature-alignment slice. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run initially failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. Scatter-gather TX improved the follow-up ratio to 0.573, and a bounded `sendmmsg()` prototype did not improve the ratio. The subsequent TX/RX NAPI scheduling fix passed the normal gate: vector2 median 37.12 Gbps vs legacy 40.08 Gbps, ratio 0.926. Lazy RX preserved that gate with vector2 median 38.96 Gbps versus legacy 39.22 Gbps, ratio 0.993. The RX checksum slice keeps the gate green with vector2 median 39.44 Gbps versus legacy 39.85 Gbps, ratio 0.990, and makes vector2 report `rx-checksumming: on [fixed]` when `csum=1` and `vnet_hdr_enabled: 1`. A current fixed-byte bidirectional TCP refresh now clears guest-to-host at 1/8/32 MiB and host-to-guest at 8/32 MiB, but host-to-guest 1 MiB remains below legacy after focused reruns; single-queue vector2, lazy RX, and RX checksum feature alignment improve or clean up adjacent evidence but do not close that cell. Lazy RX reduces representative 1 MiB host-to-guest RX-slot preparation from 32448 prepared / 906 received / 31542 released slots to about 1410 prepared / 905 received / 505 released slots. The fixed-byte harness now captures guest `ip`/route/ethtool diagnostics, reports inherited-fd vnet-header state through ethtool, and supports UDP. Initial paced 1 MiB UDP evidence passes for legacy vector and vector2 with close host-side MiB/s. | Finish the rest of P4.3: host-to-guest small-transfer follow-up using the new diagnostics, unpaced/larger UDP, syscall-rate, CPU-utilisation, longer multiqueue fairness profiles, and broader host/kernel coverage. |
+| Perf/fairness/KCSAN breadth | Current guest-to-host TCP gate passes after the TX/RX NAPI scheduling fix and remains green after the lazy-RX cleanup and RX checksum feature-alignment slice. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run initially failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. Scatter-gather TX improved the follow-up ratio to 0.573, and a bounded `sendmmsg()` prototype did not improve the ratio. The subsequent TX/RX NAPI scheduling fix passed the normal gate: vector2 median 37.12 Gbps vs legacy 40.08 Gbps, ratio 0.926. Lazy RX preserved that gate with vector2 median 38.96 Gbps versus legacy 39.22 Gbps, ratio 0.993. The RX checksum slice keeps the gate green with vector2 median 39.44 Gbps versus legacy 39.85 Gbps, ratio 0.990, and makes vector2 report `rx-checksumming: on [fixed]` when `csum=1` and `vnet_hdr_enabled: 1`. A current fixed-byte bidirectional TCP refresh now clears guest-to-host at 1/8/32 MiB and host-to-guest at 8/32 MiB, but host-to-guest 1 MiB remains below legacy after focused reruns; single-queue vector2, lazy RX, and RX checksum feature alignment improve or clean up adjacent evidence but do not close that cell. Lazy RX reduces representative 1 MiB host-to-guest RX-slot preparation from 32448 prepared / 906 received / 31542 released slots to about 1410 prepared / 905 received / 505 released slots. The fixed-byte harness now captures guest `ip`/route/ethtool diagnostics, reports inherited-fd vnet-header state through ethtool, supports UDP, and appends endpoint CPU timing columns. Initial paced 1 MiB UDP evidence passes for legacy vector and vector2 with close host-side MiB/s. | Finish the rest of P4.3: host-to-guest small-transfer follow-up using the new diagnostics, unpaced/larger UDP, syscall-rate, full CPU-utilisation, longer multiqueue fairness profiles, and broader host/kernel coverage. |
 
 The sections below preserve the original three gate definitions and their
 acceptance bars.
@@ -74,8 +74,9 @@ Findings:
     fix now clears 1 MiB, 8 MiB, and 32 MiB in the fixed-byte harness and the
     duration-based `net-bench` gate.
   - **UDP / syscall-rate / CPU-utilisation:** initial paced 1 MiB UDP
-    fixed-byte evidence exists; unpaced/larger UDP, syscall-rate, and
-    CPU-utilisation are not measured.
+    fixed-byte evidence exists, and the fixed-byte helper now records
+    per-process endpoint CPU seconds in `summary.tsv`; unpaced/larger UDP,
+    syscall-rate, and full CPU-utilisation are not measured.
 
 `06-sequencing/2026-06-11-vector2-net-bench-integration.md` records a
 current-head tooling cleanup: `tools/testing/selftests/um/net-bench` now builds
@@ -166,8 +167,10 @@ It is "regressions are bounded + understood."  Concretely:
 
 The benchmarks live in
 `Documentation/virt/uml/redesign/08-future-phases/36-uml-vector-driver-v2-perf-baseline.md`
-already; extending the matrix to cover broader UDP + syscall + CPU is
-operator time.  Acceptance is a judgment call on the resulting
+already; extending the matrix to cover broader UDP + syscall + full CPU
+utilisation is operator time.  The helper-level endpoint CPU columns can
+support that work, but they do not replace `perf stat` syscall-rate data or
+steady-state CPU accounting.  Acceptance is a judgment call on the resulting
 table — this memo defines the bars.
 
 ## P4.4 — full 7200-second long-soak gate
