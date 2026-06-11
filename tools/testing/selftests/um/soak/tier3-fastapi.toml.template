@@ -44,7 +44,7 @@ ports = []
 [env]
 TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
-HOME = "/home/mjbommar"
+HOME = "/tmp"
 
 [[init.phases]]
 name = "smoke"

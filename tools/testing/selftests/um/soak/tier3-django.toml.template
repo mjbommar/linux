@@ -6,7 +6,7 @@ volumes = []
 # Host prerequisites:
 #   1. Install python3-django or provide a venv with django.
 #   2. Rebuild the UML kernel with CONFIG_UML_NET_VECTOR=y:
-#        cd ~/src/uml-builds/uml-smp-t41fix
+#        cd /path/to/linux
 #        ./scripts/config --enable CONFIG_UML_NET_VECTOR
 #        make ARCH=um O=$(pwd) olddefconfig -j
 #        make ARCH=um O=$(pwd) -j
@@ -46,7 +46,7 @@ ports = []
 [env]
 TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
-HOME = "/home/mjbommar"
+HOME = "/tmp"
 
 [[init.phases]]
 name = "smoke"

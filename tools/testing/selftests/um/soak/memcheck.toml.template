@@ -29,7 +29,7 @@ timeout_secs = 0
 # bugs in UML's MM. Strict pattern verify per qword.
 [[init.phases]]
 name = "memcheck"
-cmd = "/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/soak/memcheck 256 2"
+cmd = "{{SOAK_DIR}}/memcheck 256 2"
 expect = ""
 timeout_secs = 60
 

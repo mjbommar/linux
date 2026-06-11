@@ -41,7 +41,7 @@ mode = "none"   # LTP runs we exercise don't need network
 [env]
 TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
-HOME = "/home/mjbommar"
+HOME = "/tmp"
 PATH = "/opt/ltp/testcases/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [[init.phases]]

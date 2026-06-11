@@ -13,9 +13,25 @@
 
 set -u
 
-KERNEL_DEFAULT="/home/mjbommar/src/uml-builds/uml-smp-t41fix/linux"
+SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SOAK_DIR" && git rev-parse --show-toplevel 2>/dev/null || echo "")"
+if [ -z "$REPO_ROOT" ]; then
+	REPO_ROOT="$(cd "$SOAK_DIR/../../../../.." && pwd)"
+fi
+if [ -n "$REPO_ROOT" ]; then
+	KERNEL_DEFAULT="$REPO_ROOT/linux"
+else
+	KERNEL_DEFAULT=""
+fi
+if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/tools/uml/uml-launcher/target/debug/umlctl" ]; then
+	UMLCTL_DEFAULT="$REPO_ROOT/tools/uml/uml-launcher/target/debug/umlctl"
+else
+	UMLCTL_DEFAULT="umlctl"
+fi
+
 KERNEL="${UML_KERNEL:-$KERNEL_DEFAULT}"
-UMLCTL="${UMLCTL:-/home/mjbommar/bench-bundle/bin/umlctl}"
+UMLCTL="${UMLCTL:-$UMLCTL_DEFAULT}"
+TIER2_UV_PYTHON="${TIER2_UV_PYTHON:-$HOME/.cache/uml-soak-tier2-venv/bin/python}"
 
 WORKLOAD="${1:-all}"
 W="${2:-2}"           # default 2 to keep CPU temp under control
@@ -75,8 +91,6 @@ thermal_check() {
 OUT_BASE="/tmp/soak-pilot-$(date +%s)"
 mkdir -p "$OUT_BASE"
 
-SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
-
 run_one() {
     local workload="$1"
     local backend="$2"
@@ -88,6 +102,8 @@ run_one() {
     local toml="/tmp/soak-${workload}-${backend}.toml"
     sed -e "s|{{KERNEL}}|$KERNEL|g" -e "s|{{BACKEND}}|$backend|g" \
         -e "s|{{SOAK_DIR}}|$SOAK_DIR|g" \
+        -e "s|{{REPO_ROOT}}|$REPO_ROOT|g" \
+        -e "s|{{TIER2_UV_PYTHON}}|$TIER2_UV_PYTHON|g" \
         "$tmpl" > "$toml"
 
     local out_dir="$OUT_BASE/${workload}-${backend}"

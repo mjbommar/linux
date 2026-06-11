@@ -18,7 +18,7 @@ mode = "none"
 [env]
 TMPDIR = "/tmp"
 PYTHONHASHSEED = "0"
-HOME = "/home/mjbommar"
+HOME = "/tmp"
 
 # Tier 2: pre-built uv virtualenv Python package exercise.
 #
@@ -50,7 +50,7 @@ timeout_secs = 0
 
 [[init.phases]]
 name = "tier2-uv-pylibs"
-cmd = "cd /tmp && /home/mjbommar/.cache/uml-soak-tier2-venv/bin/python {{SOAK_DIR}}/tier2-uv-smoketest.py && echo TIER2_OK || (echo TIER2_FAIL; exit 1)"
+cmd = "cd /tmp && {{TIER2_UV_PYTHON}} {{SOAK_DIR}}/tier2-uv-smoketest.py && echo TIER2_OK || (echo TIER2_FAIL; exit 1)"
 expect = ""
 timeout_secs = 120
 

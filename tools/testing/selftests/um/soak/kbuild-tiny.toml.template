@@ -35,13 +35,13 @@ timeout_secs = 0
 # false PASS verdicts.
 [[init.phases]]
 name = "tinyconfig"
-cmd = "mkdir -p /tmp/build && cd /home/mjbommar/projects/personal/linux && make ARCH=um O=/tmp/build tinyconfig >/tmp/tc.log 2>&1 && echo TINYCONFIG_OK || (tail -10 /tmp/tc.log; echo TINYCONFIG_FAIL; exit 1)"
+cmd = "mkdir -p /tmp/build && cd {{REPO_ROOT}} && make ARCH=um O=/tmp/build tinyconfig >/tmp/tc.log 2>&1 && echo TINYCONFIG_OK || (tail -10 /tmp/tc.log; echo TINYCONFIG_FAIL; exit 1)"
 expect = ""
 timeout_secs = 60
 
 [[init.phases]]
 name = "kbuild"
-cmd = "cd /home/mjbommar/projects/personal/linux && make ARCH=um O=/tmp/build -j4 vmlinux >/tmp/kb.log 2>&1 && [ -e /tmp/build/vmlinux ] && echo KBUILD_OK || (tail -20 /tmp/kb.log; echo KBUILD_FAIL; exit 1)"
+cmd = "cd {{REPO_ROOT}} && make ARCH=um O=/tmp/build -j4 vmlinux >/tmp/kb.log 2>&1 && [ -e /tmp/build/vmlinux ] && echo KBUILD_OK || (tail -20 /tmp/kb.log; echo KBUILD_FAIL; exit 1)"
 expect = ""
 timeout_secs = 600
 

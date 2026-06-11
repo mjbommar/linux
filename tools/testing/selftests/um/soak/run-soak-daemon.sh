@@ -10,7 +10,7 @@
 # or a per-(workload, backend) failure-rate threshold trips.
 #
 # Usage:
-#   UML_KERNEL=$HOME/src/uml-builds/uml-smp-t41fix/linux \
+#   UML_KERNEL=/path/to/linux \
 #     bash tools/testing/selftests/um/soak/run-soak-daemon.sh \
 #          --budget-sec 86400 --workers 2 --iters-per-rotation 10
 #
@@ -27,6 +27,17 @@
 # Force a summary refresh: kill -USR1 $pid.
 
 set -u
+
+SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SOAK_DIR" && git rev-parse --show-toplevel 2>/dev/null || echo "")"
+if [ -z "$REPO_ROOT" ]; then
+	REPO_ROOT="$(cd "$SOAK_DIR/../../../../.." && pwd)"
+fi
+if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/tools/uml/uml-launcher/target/debug/umlctl" ]; then
+	UMLCTL_DEFAULT="$REPO_ROOT/tools/uml/uml-launcher/target/debug/umlctl"
+else
+	UMLCTL_DEFAULT="umlctl"
+fi
 
 # ----------------------------------------------------------------------
 # Defaults (CLI flag may override; env var read as middle-priority).
@@ -45,7 +56,8 @@ COOLDOWN="${COOLDOWN:-30}"
 THERMAL_PAUSE_C="${THERMAL_PAUSE_C:-88}"
 THERMAL_RESUME_C="${THERMAL_RESUME_C:-75}"
 UML_KERNEL="${UML_KERNEL:-}"
-UMLCTL="${UMLCTL:-/home/mjbommar/bench-bundle/bin/umlctl}"
+UMLCTL="${UMLCTL:-$UMLCTL_DEFAULT}"
+TIER2_UV_PYTHON="${TIER2_UV_PYTHON:-$HOME/.cache/uml-soak-tier2-venv/bin/python}"
 
 # ----------------------------------------------------------------------
 # CLI parsing.
@@ -139,7 +151,6 @@ mkdir -p "$OUT/logs" "$OUT/logs/panics" || exit 2
 # Resolve workloads CSV -> array; validate each template.
 IFS=',' read -ra WORKLOADS <<< "$WORKLOADS_CSV"
 IFS=',' read -ra BACKENDS <<< "$BACKENDS_CSV"
-SOAK_DIR="$(cd "$(dirname "$0")" && pwd)"
 for w in "${WORKLOADS[@]}"; do
 	tmpl_w=$(tier3_template_workload "$w")
 	if [ ! -f "$SOAK_DIR/${tmpl_w}.toml.template" ]; then
@@ -175,7 +186,7 @@ DEFAULT_TIMEOUT=120
 START_TS=$(date +%s)
 SOAK_RUN_ID=$(basename "$OUT")
 HOSTNAME_S=$(hostname)
-GIT_DIR=$(cd "$SOAK_DIR" && git rev-parse --show-toplevel 2>/dev/null || echo "")
+GIT_DIR="$REPO_ROOT"
 COMMIT=$(cd "$SOAK_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
 BRANCH=$(cd "$SOAK_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
 
@@ -478,7 +489,8 @@ is_tier3_workload() {
 # Placeholders set: {{KERNEL}}, {{BACKEND}}, {{WORKER_IDX}},
 # {{HOST_IP}} (CIDR), {{GUEST_IP}} (CIDR),
 # {{HOST_IP_PLAIN}} (no mask), {{GUEST_IP_PLAIN}} (no mask),
-# {{TAP_NAME}}, {{NETWORK_DRIVER}}, {{SOAK_DIR}}.
+# {{TAP_NAME}}, {{NETWORK_DRIVER}}, {{SOAK_DIR}}, {{REPO_ROOT}}, and
+# {{TIER2_UV_PYTHON}}.
 emit_tier3_worker_toml() {
 	local tmpl=$1 widx=$2 backend=$3 out=$4 network_driver=$5
 	local hip="192.168.42.$((4 * widx + 1))"
@@ -494,6 +506,8 @@ emit_tier3_worker_toml() {
 	    -e "s|{{TAP_NAME}}|${tap}|g"               \
 	    -e "s|{{NETWORK_DRIVER}}|${network_driver}|g" \
 	    -e "s|{{SOAK_DIR}}|$SOAK_DIR|g"            \
+	    -e "s|{{REPO_ROOT}}|$REPO_ROOT|g"          \
+	    -e "s|{{TIER2_UV_PYTHON}}|$TIER2_UV_PYTHON|g" \
 	    "$tmpl" > "$out"
 }
 
@@ -640,6 +654,8 @@ run_one_phase() {
 	local toml="$OUT/_${workload}-${backend}.toml"
 	sed -e "s|{{KERNEL}}|$UML_KERNEL|g" -e "s|{{BACKEND}}|$backend|g" \
 		-e "s|{{SOAK_DIR}}|$SOAK_DIR|g" \
+		-e "s|{{REPO_ROOT}}|$REPO_ROOT|g" \
+		-e "s|{{TIER2_UV_PYTHON}}|$TIER2_UV_PYTHON|g" \
 		"$SOAK_DIR/${workload}.toml.template" > "$toml"
 	local out_dir="$OUT/_loop/${workload}-${backend}-r${rotation}"
 	mkdir -p "$out_dir"

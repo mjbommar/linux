@@ -90,6 +90,9 @@ uv pip install --python ~/.cache/uml-soak-tier2-venv/bin/python \
   httpx pyyaml pendulum numpy
 ```
 
+Set `TIER2_UV_PYTHON=/path/to/venv/bin/python` when the venv lives somewhere
+else.
+
 The templates run each library in a bounded smoke test and print
 `REPRO_DONE rc=0` on success.
 

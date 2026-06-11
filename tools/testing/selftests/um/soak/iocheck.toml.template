@@ -31,7 +31,7 @@ timeout_secs = 0
 # host tmpfs can hit IO/CPU contention under sustained daemon runs.
 [[init.phases]]
 name = "iocheck"
-cmd = "/home/mjbommar/projects/personal/linux/tools/testing/selftests/um/soak/iocheck /tmp/iocheck-$$ 64 4 4096"
+cmd = "{{SOAK_DIR}}/iocheck /tmp/iocheck-$$ 64 4 4096"
 expect = ""
 timeout_secs = 120
 
