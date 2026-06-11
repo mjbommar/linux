@@ -158,6 +158,12 @@ um_vec2_channel_for_skb(struct um_vec2_dev *vdev, const struct sk_buff *skb)
 	return um_vec2_channel_for_mapping(vdev, skb_get_queue_mapping(skb));
 }
 
+unsigned int um_vec2_rx_frame_len(const struct net_device *dev,
+				  const struct um_vec2_channel *channel)
+{
+	return um_vec2_runtime_frame_len(dev, channel && channel->vnet_hdr);
+}
+
 bool um_vec2_tx_queue_uses_cpu_ordinal(unsigned int queue,
 				       unsigned int cpu_ordinal,
 				       unsigned int queues,
@@ -324,9 +330,7 @@ static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
 
 	rx_ctx.napi = napi;
 	rx_ctx.dev = dev;
-	rx_ctx.frame_len = um_vec2_runtime_frame_len(dev,
-						     vdev->cfg.transport ==
-						     UM_VEC2_TRANSPORT_TAP);
+	rx_ctx.frame_len = um_vec2_rx_frame_len(dev, channel);
 
 	spin_lock(&queue->rx_lock);
 	rx_done = channel->host->ops->rx_batch(channel->host, &queue->rx,

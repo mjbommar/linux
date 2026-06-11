@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, and vector2 RX checksum feature alignment.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, and vector2 fd/vnet RX allocation alignment.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -307,6 +307,14 @@ Current bounded vector2 evidence adds:
   shows vector2 `rx-checksumming: on [fixed]` with `vnet_hdr_enabled: 1`; and
   the normal guest-to-host TCP gate remains green with legacy vector median
   39854.4 Mbps, vector2 median 39441.7 Mbps, and ratio 0.990.
+- A follow-up fd/vnet RX allocation-alignment slice makes NAPI RX allocation
+  follow the channel's actual `vnet_hdr` runtime state instead of the transport
+  enum, so launcher-owned fd TAP channels with `IFF_VNET_HDR` allocate space
+  for the virtio header.  Validation reports `um_vector2_*` KUnit 90 pass, 0
+  fail, 2 trusted-TAP skips; fd handoff, fd multiqueue, and in-process TAP
+  smokes PASS; and a focused 1 MiB host-to-guest diagnostic shows vector2
+  median 0.895 MiB/s versus legacy vector median 0.976 MiB/s.  This closes a
+  correctness bug, not the small-transfer publication blocker.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now

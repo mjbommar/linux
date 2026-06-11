@@ -111,9 +111,11 @@ The active blockers are now:
 3. Keep the historical per-take pool fd handoff decision explicit: it is
    retired from the current completion claim in favor of the validated pool TAP
    reopen path. Vector2 sandbox audit, launcher-owned fd handoff, and
-   pool-member TAP handoff now have live smoke gates; the remaining vector2
-   networking gates still need multiqueue/fairness, Tier 3 seccomp, and KVM v2
-   coverage.
+   pool-member TAP handoff now have live smoke gates. Vector2 fd/vnet RX
+   allocation now follows the channel runtime `vnet_hdr` state, closing a
+   concrete inherited-fd framing correctness bug. The remaining vector2
+   networking gates still need host-to-guest small-transfer follow-up,
+   multiqueue/fairness, Tier 3 seccomp, and KVM v2 coverage.
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
@@ -876,11 +878,13 @@ Acceptance gates:
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
 - TCP performance benchmark harness. Current status: `net-bench` builds its
   `tcp-send` helper through kselftest and no longer carries developer-local
-  paths. Current guest-to-host TCP gate: functional runs pass 3/3 for both
-  drivers, but vector2 median throughput is 18949.8 Mbps versus legacy vector
-  39805.4 Mbps, ratio 0.476 below the 0.85 acceptance bar. The first vector2
-  scatter-gather TX fix improves the ratio to 0.573 but still fails; TX
-  batching remains open.
+  paths. Current guest-to-host TCP gate is green after TX/RX NAPI scheduling
+  and lazy-RX cleanup, and RX checksum feature reporting now matches the
+  vnet-header path. Vector2 fd/vnet RX allocation now follows the channel
+  runtime `vnet_hdr` state. The 1 MiB host-to-guest fixed-byte cell remains
+  open: the fd/vnet allocation fix rerun showed vector2 median 0.895 MiB/s
+  versus legacy vector median 0.976 MiB/s, and this was treated as a
+  correctness fix rather than replacement-readiness closure.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
@@ -1481,9 +1485,11 @@ Runtime smoke:
 - Vector2 tap/multiqueue. Current multiqueue smoke status: PASS through
   `vector2-fd-multiqueue-smoke`; fairness/perf coverage remains open.
 - Vector2 TCP net-bench harness. Current status: helper builds through
-  kselftest and wrappers are portable; current guest-to-host TCP perf gate
-  fails with vector2/legacy median ratio 0.573 below the 0.85 bar after the
-  first scatter-gather TX fix.
+  kselftest and wrappers are portable. Current guest-to-host TCP perf gate is
+  green after TX/RX NAPI scheduling and lazy-RX cleanup; RX checksum feature
+  reporting and fd/vnet RX allocation are aligned with the vnet-header
+  datapath. The 1 MiB host-to-guest fixed-byte cell remains below the final
+  publication bar and needs the next bottleneck pass.
 - Vector2 trusted in-process TAP. Current status: PASS through
   `vector2-inproc-tap-smoke`.
 - Vector2 parser-only transport boundary. Current status: TAP/fd are the only

@@ -678,6 +678,13 @@ Current state:
   normal guest-to-host TCP gate remains green at ratio 0.990.  This removes a
   legacy-vector parity mismatch but does not close the 1 MiB host-to-guest
   cell.
+- fd/vnet RX allocation now follows the channel runtime `vnet_hdr` state
+  instead of the configured transport enum.  This closes an inherited-fd TAP
+  framing correctness bug and is covered by `um_vector2_*` KUnit 90 pass, 0
+  fail, 2 trusted-TAP skips plus fd handoff, fd multiqueue, and in-process TAP
+  smokes.  The focused 1 MiB host-to-guest rerun reported vector2 median
+  0.895 MiB/s versus legacy vector median 0.976 MiB/s, so the publication
+  blocker remains open.
 - The benchmark now captures guest link/route/feature/counter diagnostics
   around the sender, and vector2's ethtool stats now expose whether an
   inherited fd channel is actually using vnet-header framing.
@@ -690,7 +697,9 @@ Remaining tasks:
 - Follow up the host-to-guest 1 MiB fixed-byte regression with the new
   before/after link and ethtool diagnostics while keeping the guest-to-host
   ratio at or above the 0.85 gate. Lazy RX removed RX-slot over-preparation,
-  so the next bottleneck pass should look beyond raw RX allocation churn.
+  fd/vnet allocation now follows the live channel framing state, and queue-count
+  plus RX-reschedule probes did not close the cell, so the next bottleneck pass
+  should look beyond raw RX allocation churn.
 - Add the remaining P4.3 measurements: UDP throughput, syscall rate, and CPU
   utilisation against legacy vector.
 - Finish the natural seccomp/vector2 long run.

@@ -8,6 +8,7 @@
 #include <linux/etherdevice.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
+#include <linux/virtio_net.h>
 
 #include <os.h>
 
@@ -207,6 +208,36 @@ vector2_netdev_checksum_features_follow_config_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, !!(dev->features & NETIF_F_GSO));
 	KUNIT_EXPECT_TRUE(test, !!(dev->features & NETIF_F_TSO));
 	KUNIT_EXPECT_TRUE(test, !!(dev->features & NETIF_F_TSO6));
+
+	free_netdev(dev);
+}
+
+static void vector2_netdev_rx_frame_len_follows_channel_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev;
+	struct um_vec2_channel channel = {};
+	struct net_device *dev;
+	unsigned int raw_len;
+	unsigned int vnet_len;
+
+	vdev = vector2_netdev_test_alloc_vdev(test, 8);
+	vdev->cfg.transport = UM_VEC2_TRANSPORT_FD;
+	dev = vector2_netdev_test_alloc(test, vdev);
+
+	raw_len = um_vec2_runtime_frame_len(dev, false);
+	vnet_len = um_vec2_runtime_frame_len(dev, true);
+	KUNIT_EXPECT_EQ(test, vnet_len,
+			raw_len + (unsigned int)sizeof(struct virtio_net_hdr));
+
+	channel.vnet_hdr = false;
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_frame_len(dev, &channel), raw_len);
+
+	channel.vnet_hdr = true;
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_frame_len(dev, &channel), vnet_len);
+
+	vdev->cfg.transport = UM_VEC2_TRANSPORT_TAP;
+	channel.vnet_hdr = false;
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_frame_len(dev, &channel), raw_len);
 
 	free_netdev(dev);
 }
@@ -559,6 +590,7 @@ static struct kunit_case vector2_netdev_test_cases[] = {
 	KUNIT_CASE(vector2_netdev_xmit_drops_when_not_running_test),
 	KUNIT_CASE(vector2_netdev_uses_configured_queue_count_test),
 	KUNIT_CASE(vector2_netdev_checksum_features_follow_config_test),
+	KUNIT_CASE(vector2_netdev_rx_frame_len_follows_channel_test),
 	KUNIT_CASE(vector2_netdev_queue_cpu_policy_test),
 	KUNIT_CASE(vector2_netdev_poll_healthy_round_test),
 	KUNIT_CASE(vector2_netdev_poll_backend_dead_tx_test),
