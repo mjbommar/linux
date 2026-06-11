@@ -81,6 +81,7 @@ struct um_vec2_channel {
 	int rx_irq;
 	int tx_irq;
 	bool vnet_hdr;
+	bool rx_pending;
 	bool napi_added;
 	bool napi_enabled;
 };

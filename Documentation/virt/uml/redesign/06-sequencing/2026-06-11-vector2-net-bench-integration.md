@@ -1,7 +1,8 @@
 # UML vector2 net-bench integration
 
-Status: current-head tooling cleanup complete; TCP performance gate still
-failing after first implementation fix.
+Status: current-head tooling cleanup complete; guest-to-host TCP gate passes
+after the TX/RX NAPI scheduling fix.  Broader vector2 publication gates remain
+open.
 Date: 2026-06-11.
 Tree: `next`.
 
@@ -170,11 +171,82 @@ TX drops/errors, and after the two-second sender `tx_xmit_calls` and
 This points the next investigation away from basic offload negotiation and
 toward syscall count, queue/NAPI scheduling, and per-packet transmit overhead.
 
+## Follow-Up TX/RX NAPI Scheduling Fix
+
+The next implementation slice addressed the NAPI scheduling evidence directly:
+
+- TX write IRQs now reschedule NAPI only when the channel's TX ring still has
+  queued completions to process.  Empty TX IRQs are acknowledged without
+  inflating the TX IRQ counter or forcing another NAPI round.
+- TX enqueue now honors `netdev_xmit_more()` while the ring still has space,
+  deferring the NAPI kick until the stack marks the burst complete or the ring
+  fills.
+- RX polling now prepares receive buffers only after RX readiness is known: an
+  RX IRQ, the initial post-open channel kick, or a prior full-budget RX poll.
+  Pure TX-completion NAPI rounds no longer allocate and release an entire RX
+  batch when no RX event is pending.
+
+The one-change-at-a-time diagnostic runs showed the direction of travel:
+
+- TX IRQ empty-ring filtering alone reduced TX IRQ churn but still failed the
+  short TCP gate: legacy vector 38891.5 Mbps, vector2 23724.7 Mbps, ratio
+  0.610.
+- Adding only the `netdev_xmit_more()` TX defer did not materially change the
+  result: legacy vector 40183.4 Mbps, vector2 23223.6 Mbps, ratio 0.578.
+- Adding RX readiness gating cut the two-second
+  `rx_batch_prepared_total` evidence from roughly 9.1 million prepared slots in
+  the failing diagnostic runs to 1.46 million, and the short gate passed:
+  legacy vector 40351.5 Mbps, vector2 36154.0 Mbps, ratio 0.896.
+
+Validation for the landed slice:
+
+```sh
+make ARCH=um -j$(nproc)
+timeout 240s ./linux mem=256M \
+        kunit.filter_glob='um_vector2_*' \
+        kunit_shutdown=halt
+python3 tools/testing/kunit/kunit.py parse \
+        /tmp/um-vector2-rxready3-kunit.log
+UML_KERNEL=$PWD/linux \
+        tools/testing/selftests/um/vector2-fd-handoff-smoke/run-vector2-fd-handoff-smoke.sh
+UML_KERNEL=$PWD/linux \
+        tools/testing/selftests/um/vector2-inproc-tap-smoke/run-vector2-inproc-tap-smoke.sh
+UML_KERNEL=$PWD/linux \
+        tools/testing/selftests/um/vector2-fd-multiqueue-smoke/run-vector2-fd-multiqueue-smoke.sh
+OUT=/tmp/uml-net-bench-rxready-final-1781176884 \
+KERNEL=$PWD/linux \
+BENCH_PORT=5317 \
+TAP=tcprxfin-tap1 \
+tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh \
+        --duration 8 \
+        --reps 3
+```
+
+Results:
+
+- `um_vector2_*` KUnit reported 87 pass, 0 fail, and 2 trusted-TAP skips.
+- `vector2-fd-handoff-smoke`: PASS.
+- `vector2-inproc-tap-smoke`: PASS.
+- `vector2-fd-multiqueue-smoke`: PASS.
+- the normal guest-to-host TCP gate passed:
+
+| Driver | Per-rep Mbps | Median Mbps |
+| ------ | ------------ | ----------- |
+| legacy vector | 39083.9, 40080.5, 40339.9 | 40080.5 |
+| vector2 | 37116.0, 38154.8, 36372.8 | 37116.0 |
+
+The vector2/legacy median ratio was `0.926`, above the `0.85` acceptance bar:
+
+```text
+VERDICT: PASS
+```
+
 ## Remaining Gate
 
-This does not close P4.3 performance parity or P4.5 multiqueue fairness.  The
-next work is measurement-driven bottleneck isolation, then rerunning the same
-gate after each narrow datapath change:
+This closes the current guest-to-host TCP regression that was blocking P4.3,
+but it does not close all of P4.3 performance parity or P4.5 multiqueue
+fairness.  The next work is to expand the same measurement discipline across
+the remaining publication matrix:
 
 ```sh
 make -C tools/testing/selftests/um/net-bench
@@ -187,5 +259,6 @@ tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh \
 Acceptance still requires the broader matrix from
 `08-future-phases/49-uml-vector-driver-v2-validation-gates-2026-05-17.md`:
 bidirectional TCP, UDP, syscall-rate, CPU-utilisation, and longer multiqueue
-fairness profiles.  Until those runs pass, vector2 remains opt-in and not a
-replacement for legacy vector.
+fairness profiles, plus the natural long-run and KVM-v2 Tier 3 networking
+gates.  Until those runs pass, vector2 remains opt-in and not a replacement for
+legacy vector.

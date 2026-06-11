@@ -96,16 +96,23 @@ Current execution evidence added on 2026-06-11:
   without copying the skb into a linear buffer;
 - validated that scatter-gather TX with `um_vector2_*` KUnit, fd handoff,
   in-process TAP, and multiqueue smokes, then reran TCP net-bench. The median
-  ratio improved to 0.573, but the gate still fails: legacy vector median
-  40041.7 Mbps versus vector2 median 22953.7 Mbps; and
+  ratio improved to 0.573, but the gate still failed: legacy vector median
+  40041.7 Mbps versus vector2 median 22953.7 Mbps;
 - tested a bounded `sendmmsg()` TX batching prototype locally and rejected it
   because it added complexity without improving the TCP gate. The prototype was
-  not committed; the next vector2 work must measure the remaining bottleneck
-  before another batching or queueing change lands; and
+  not committed;
 - added the first vector2 TCP diagnostic slice: the `net-bench` template now
   logs guest link, route, feature, and ethtool-counter state around each TCP
   sender, and vector2's `vnet_hdr_enabled` ethtool stat reports the runtime
-  inherited-fd vnet-header state.
+  inherited-fd vnet-header state; and
+- closed the measured vector2 guest-to-host TCP blocker with a TX/RX NAPI
+  scheduling fix: empty TX IRQs no longer force NAPI, TX enqueue honors
+  `netdev_xmit_more()` while the ring has space, and RX polling prepares
+  receive buffers only after RX readiness.  Validation reported
+  `um_vector2_*` KUnit 87 pass, 0 fail, and 2 trusted-TAP skips; fd handoff,
+  in-process TAP, and fd multiqueue smokes PASS; and normal TCP net-bench PASS
+  with legacy vector median 40080.5 Mbps, vector2 median 37116.0 Mbps, and
+  ratio 0.926 against the 0.85 gate.
 
 This file is now the plan of record for completing, importing, or explicitly
 retiring all original UML v2 functionality on `next`.
@@ -326,7 +333,7 @@ they are implemented and validated, or explicitly retired with approval.
 | Record/replay supported tier | The original vision names deterministic time-travel and record/replay as first-class functionality. Current `next` has an experimental core, live syscall hook, snapshot-backed start, time-travel clock-event logging, first payload models, fail-closed raw-time/signal/device/randomness policy, a task-owned 386-entry deterministic replay smoke, and a live-negative `getrandom(2)` strict rejection. Replayable raw-time payloads, explicit signal-event ordering, arbitrary device/network/hostfs replay, and supported-entry mismatch live coverage remain incomplete. | Finish the remaining broader-policy gates, keep unsupported operations documented, and preserve the experimental label until those gates pass. |
 | KMSAN regression protection | The original instrumentation goal includes KMSAN, and the runtime-smoke blocker is now closed on `next`. It remains in the blocker ledger only because final completion must prove the closure did not regress after record/replay, vector2, profile, or cleanup changes. | Rerun a clean LLVM `uml/research-kmsan` build and `kmsan-smoke` in the final validation matrix. Do not reopen KMSAN as an implementation gap unless that rerun regresses. |
 | KGDB disposition | The original instrumentation list includes KGDB, but current UML does not select `HAVE_ARCH_KGDB` and no live profile fragment enables `CONFIG_KGDB`. | KGDB is deferred-not-present in the current completion tracker. Reintroduce it only with UML architecture support, backend register access, a transport decision, and a smoke test. |
-| Vector2 publication readiness | Vector2 has strong focused smoke evidence, but the replacement/publication claim now has a concrete failing TCP performance gate. The integrated net-bench harness shows vector2 functionally completes guest-to-host TCP runs, but the current median throughput ratio is 0.573 after scatter-gather TX cleanup, below the 0.85 gate. The simple bounded `sendmmsg()` prototype did not improve the result. Full Tier 3, KVM v2, and multiqueue/fairness coverage also remain open. | Measure the remaining guest-to-host bottleneck before landing more TX changes, then rerun the TCP gate. Finish the natural seccomp long run, equivalent KVM v2 Tier 3 networking, and multiqueue fairness/performance evidence. Keep parser-only transports out of runtime claims and keep vector2 opt-in until the evidence justifies stronger language. |
+| Vector2 publication readiness | Vector2 has strong focused smoke evidence, and the measured guest-to-host TCP regression now passes the 0.85 gate after the TX/RX NAPI scheduling fix: vector2 median 37116.0 Mbps versus legacy 40080.5 Mbps, ratio 0.926. Replacement/publication still needs the rest of P4.3 plus long-run and fairness evidence. | Finish the natural seccomp long run, equivalent KVM v2 Tier 3 networking, bidirectional TCP confirmation, UDP, syscall-rate, CPU-utilisation, and multiqueue fairness/performance evidence. Keep parser-only transports out of runtime claims and keep vector2 opt-in until the evidence justifies stronger language. |
 | KVM v2 final workload breadth | KVM v2 is past architecture unknowns, but publication still needs broader dynamic-userspace and final-vector2 workload evidence. | Run Tier 3 and selected CPython/substrate gates on the final tree, including dynamic userspace beyond `/bin/true` and `dyn-loader`. |
 | Pool/fork-server final regression pass | The rebuilt current-HEAD `59ad334001ea` binary passes the focused pool/fork/syzkaller regression set, including warm-pool, replicated sustained-pool, pool benchmark, and syzkaller shim. Final validation must still be rerun after later KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
 | Active cleanup | The branch must read like normal kernel work. Active code cannot carry private issue numbers, phase diaries, or random branch history. | Review scans over active source, selftests, launcher, active UML docs, live status, and current vector2 trackers; archive or remove stale material. |
@@ -337,9 +344,11 @@ they are implemented and validated, or explicitly retired with approval.
 The plan from `cb7ee7d69471` is to finish one high-risk surface at a time and
 push after each validated slice. The ordering is intentional: record/replay
 changes can affect KVM syscall dispatch and time/signal handling, while vector2
-now has a measured TCP performance blocker. Work should therefore close the
-known failing vector2 gate with measurement-driven changes, then rerun the
-record/replay, pool, profile, and cleanup gates after that surface settles.
+publication still depends on long-run and performance/fairness evidence. The
+measured guest-to-host TCP blocker is now closed by the TX/RX NAPI scheduling
+slice, so the remaining vector2 work should expand the publication matrix and
+then rerun the record/replay, pool, profile, and cleanup gates after that
+surface settles.
 
 | Slice | Target | Implementation outcome | Required validation before commit |
 | --- | --- | --- | --- |
@@ -348,7 +357,7 @@ record/replay, pool, profile, and cleanup gates after that surface settles.
 | S2 | Record/replay syscall payload and event format model | First payload models are implemented for `uname(2)` and `getcwd(2)`: the record log stores variable-sized payload entries, replay validates syscall number plus syscall-specific input arguments before restoring payload bytes, and the task-owned smoke records a 390-byte `struct new_utsname` plus a 2-byte cwd path. Replay entries also carry explicit format version and flags, with debugfs exposing the current header/entry/payload sizes. Broader copyout coverage remains open. | Current status: `kvm-record-smoke` PASS with `KUnit=21/21`, `payload_entries=2`, `payload_bytes=392`, and `replayed=386`; `kvm-record-clock-bench` PASS. |
 | S3 | Record/replay time, signal, and device policy | First fail-closed strict policy is implemented for the initial R/R-1 syscall subset: `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`/`getcwd(2)`. Unsupported syscalls now record a strict replay failure and receive SIGSEGV instead of silently falling back to live execution or scalar-only replay. Raw time syscalls are outside the supported set, and replay mode sets CR4.TSD so user `RDTSC`/`RDTSCP` faults. R/R-1 signal handling uses a blocked-delivery tier: replay mode blocks `SIGALRM` during `KVM_RUN`, leaving replayable signal-event ordering for later. Randomness and representative external-I/O syscalls (`getrandom`, `openat`, `read`, `write`, `ioctl`) fail closed; replayable device/network/hostfs payloads remain open. | Current status: `um_kvm_v2_record` KUnit covers the accepted subset, unsupported `getuid`, raw-time syscall checks, strict external-I/O/randomness policy, strict-on rejection, strict-off permissive behavior, strict replay failure accounting, and the strict raw-time policy. `kvm-record-smoke` reports `KUnit=21/21`, task-owned replay 386/386, and `live-negative=1` for `getrandom`; `kvm-record-clock-bench` passes. |
 | S4 | Record/replay user-facing documentation | Update debugfs, Kconfig help, selftest README, and live inventory so users know the exact supported tier, limitations, and experimental status. | Documentation grep for stale stronger claims; `git diff --check`. |
-| S5 | Vector2 publication gates | The net-bench harness and first TX cleanup are landed. Scatter-gather TX improved TCP median ratio from 0.476 to 0.573, but the 0.85 gate still fails, and the rejected `sendmmsg()` prototype shows batching alone is not the obvious fix. Next work must measure syscall counts, GSO/offload shape, NAPI/queue scheduling, TAP feature negotiation, and guest netdev state before committing another datapath change. After the TCP gate improves, run the natural seccomp long gate, full KVM-v2 Tier 3 networking, and multiqueue fairness/performance tests. | Vector2 KUnit, fd/multiqueue/inproc/pool/sandbox smokes, TCP net-bench ratio >= 0.85 or a justified revised gate, Tier 3 reports, and fairness/performance report. |
+| S5 | Vector2 publication gates | The net-bench harness, scatter-gather TX cleanup, diagnostics, and TX/RX NAPI scheduling fix are landed. The normal guest-to-host TCP gate now passes at ratio 0.926 against the 0.85 bar. Next work is the rest of the publication matrix: natural seccomp long gate, full KVM-v2 Tier 3 networking, bidirectional TCP confirmation, UDP, syscall-rate, CPU-utilisation, and multiqueue fairness/performance tests. | Vector2 KUnit, fd/multiqueue/inproc/pool/sandbox smokes, TCP net-bench ratio >= 0.85, Tier 3 reports, and fairness/performance report. |
 | S6 | Pool, fork-server, and syzkaller final rerun | Revalidate the pool/fork/syzkaller surfaces after record/replay and vector2 are stable. Decide snapshot-backed fork-server disposition. | Full pool/fork/syzkaller smoke set listed below. |
 | S7 | Profile and instrumentation final matrix | Rebuild every UML profile and run matching runtime probes. KMSAN is a regression-protection gate here, not an open implementation gap. KGDB remains deferred unless implemented in a separate slice. | Profile config/build matrix; sanitizer/instrumentation smokes, including KMSAN. |
 | S8 | Active-source cleanup pass | Review active source, selftests, launcher, non-redesign docs, live status docs, and current trackers for private history, stale phase labels, and unsupported claims. | Focused grep scans reviewed; checkpatch for touched source; launcher Rust and script syntax gates as needed. |
@@ -597,11 +606,12 @@ Current state:
 - The current `cb7ee7d69471` tree adds the kselftest-integrated TCP net-bench
   harness and removes the forced vector2 TX linearization path for fd and TAP
   backends.
-- TCP guest-to-host throughput is the current measured publication blocker.
+- TCP guest-to-host throughput was the current measured publication blocker.
   The first integrated run completed all iterations but failed the 0.85
   replacement-readiness gate at 0.476. Scatter-gather TX improved the ratio to
-  0.573, but the gate still fails. A local bounded `sendmmsg()` prototype did
-  not improve the ratio and was not committed.
+  0.573, and a local bounded `sendmmsg()` prototype did not improve the ratio.
+  The follow-up TX/RX NAPI scheduling fix passes the normal gate at 0.926:
+  legacy vector median 40080.5 Mbps versus vector2 median 37116.0 Mbps.
 - The benchmark now captures guest link/route/feature/counter diagnostics
   around the sender, and vector2's ethtool stats now expose whether an
   inherited fd channel is actually using vnet-header framing.
@@ -611,12 +621,10 @@ Current state:
 
 Remaining tasks:
 
-- Measure the remaining vector2 TCP bottleneck before adding more datapath
-  code. Compare syscall counts, packet/GSO sizes, TAP offload negotiation,
-  guest netdev features, NAPI poll/interrupt behavior, queue wake behavior,
-  and lock contention against legacy vector.
-- Use those measurements to land one narrow TX/RX/offload/queueing fix at a
-  time, with a TCP net-bench rerun after each slice.
+- Rerun bidirectional TCP on the final vector2 stack and keep the guest-to-host
+  ratio at or above the 0.85 gate.
+- Add the remaining P4.3 measurements: UDP throughput, syscall rate, and CPU
+  utilisation against legacy vector.
 - Finish the natural seccomp/vector2 long run.
 - Run the same full Tier 3 workload family under KVM v2; the one-iteration
   Django-v2/FastAPI-v2 path smoke is not the full gate.
@@ -813,12 +821,11 @@ detour:
 
 1. Start every slice from clean, pushed `next` at `origin/next`, and record the
    `torvalds/master...next` count before making claims about upstream currency.
-2. Close the known vector2 TCP guest-to-host performance blocker. The harness
-   and scatter-gather TX fix are landed, but the latest measured ratio is
-   0.573 against the 0.85 gate, and the abandoned `sendmmsg()` prototype did
-   not move the result. Measure syscall counts, offload/GSO state, NAPI/queue
-   behavior, TAP feature negotiation, and guest netdev features before landing
-   the next datapath change.
+2. Preserve the fixed vector2 TCP guest-to-host gate on the final stack. The
+   harness, scatter-gather TX fix, diagnostics, and TX/RX NAPI scheduling fix
+   are landed; the latest normal gate ratio is 0.926 against the 0.85 bar.
+   Rerun it after later vector2/KVM changes and extend the matrix to
+   bidirectional TCP, UDP, syscall-rate, and CPU-utilisation evidence.
 3. Finish vector2 publication evidence after the TCP gate is fixed or
    explicitly re-scoped: natural 7200-second seccomp Tier 3, full KVM-v2 Tier 3
    networking coverage, and multiqueue fairness/performance. Keep v2 opt-in

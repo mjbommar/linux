@@ -31,7 +31,7 @@ implemented runtime netdev transports.
 | Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
 | Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
 | KVM v2 Tier 3 | Partial current-head smoke: rebuilt `98166580dc4f` passed one KVM-v2/vector2 iteration each for `tier3-django-v2` and `tier3-fastapi-v2`, including `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. | Run the same full Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
-| Perf/fairness/KCSAN breadth | Failing current TCP gate. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run passed all functional iterations but failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. The first TX scatter-gather fix improved the follow-up ratio to 0.573, still below the gate. A bounded `sendmmsg()` prototype did not improve the ratio and was not committed. The harness now captures guest `ip`/route/ethtool diagnostics, and vector2 reports inherited-fd vnet-header state through ethtool. | Use the new diagnostics to isolate syscall count, offload/GSO shape, TAP negotiation, NAPI/queue scheduling, and lock contention before landing another datapath change, then finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
+| Perf/fairness/KCSAN breadth | Current guest-to-host TCP gate passes after the TX/RX NAPI scheduling fix. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run initially failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. Scatter-gather TX improved the follow-up ratio to 0.573, and a bounded `sendmmsg()` prototype did not improve the ratio. The subsequent TX/RX NAPI scheduling fix passed the normal gate: vector2 median 37.12 Gbps vs legacy 40.08 Gbps, ratio 0.926. The harness now captures guest `ip`/route/ethtool diagnostics, and vector2 reports inherited-fd vnet-header state through ethtool. | Finish the rest of P4.3: bidirectional TCP confirmation, UDP, syscall-rate, CPU-utilisation, longer multiqueue fairness profiles, and broader host/kernel coverage. |
 
 The sections below preserve the original three gate definitions and their
 acceptance bars.
@@ -81,12 +81,16 @@ iterations but failed the throughput gate: legacy vector median 39805.4 Mbps,
 vector2 median 18949.8 Mbps, ratio 0.476 against the 0.85 bar.  The
 scatter-gather TX fix in
 `06-sequencing/2026-06-11-vector2-tx-scatter-gather.md` improved the follow-up
-run to vector2 median 22953.7 Mbps versus legacy 40041.7 Mbps, ratio 0.573;
-the gate still fails.  A follow-up bounded `sendmmsg()` prototype did not
-improve the ratio and was not committed.  The benchmark now records guest
-link, route, feature, and ethtool-counter diagnostics around each sender, and
-vector2's ethtool `vnet_hdr_enabled` stat now reflects inherited-fd runtime
-state.
+run to vector2 median 22953.7 Mbps versus legacy 40041.7 Mbps, ratio 0.573.
+A follow-up bounded `sendmmsg()` prototype did not improve the ratio and was
+not committed.  The benchmark diagnostics then pointed at TX-driven RX buffer
+preparation churn.  The TX/RX NAPI scheduling fix filters empty TX IRQ
+reschedules, honors `netdev_xmit_more()` while the TX ring has space, and
+gates RX buffer preparation on RX readiness.  The normal guest-to-host TCP gate
+now passes: legacy vector median 40080.5 Mbps, vector2 median 37116.0 Mbps,
+ratio 0.926.  The benchmark records guest link, route, feature, and
+ethtool-counter diagnostics around each sender, and vector2's ethtool
+`vnet_hdr_enabled` stat reflects inherited-fd runtime state.
 
 ### Acceptance criteria for "perf parity"
 

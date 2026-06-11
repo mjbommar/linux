@@ -346,6 +346,7 @@ static void vector2_netdev_poll_healthy_round_test(struct kunit *test)
 			um_vec2_tx_ring_enqueue(&channel->queue->tx, skb,
 						skb->len), 0);
 	KUNIT_ASSERT_EQ(test, um_vec2_fake_host_push_rx(&ctx->fake, 64), 0);
+	WRITE_ONCE(channel->rx_pending, true);
 
 	before_napi_polls = um_vec2_stat_read(ctx->vdev,
 					      UM_VEC2_STAT_NAPI_POLLS);
@@ -412,6 +413,7 @@ static void vector2_netdev_poll_backend_dead_rx_test(struct kunit *test)
 	 * the RX side.
 	 */
 	um_vec2_fake_host_kill(&ctx->fake);
+	WRITE_ONCE(vector2_netdev_poll_channel(ctx)->rx_pending, true);
 	KUNIT_ASSERT_TRUE(test, netif_carrier_ok(ctx->dev));
 
 	rx_done = vector2_netdev_poll_invoke(ctx, 4);
@@ -477,6 +479,7 @@ static void vector2_netdev_poll_rx_alloc_error_test(struct kunit *test)
 	int rx_done;
 
 	um_vec2_fake_host_set_rx_error(&ctx->fake, -ENOMEM);
+	WRITE_ONCE(vector2_netdev_poll_channel(ctx)->rx_pending, true);
 
 	rx_done = vector2_netdev_poll_invoke(ctx, 4);
 
@@ -500,6 +503,7 @@ static void vector2_netdev_poll_rx_eproto_test(struct kunit *test)
 
 	before_dropped = ctx->dev->stats.rx_dropped;
 	um_vec2_fake_host_set_rx_error(&ctx->fake, -EPROTO);
+	WRITE_ONCE(vector2_netdev_poll_channel(ctx)->rx_pending, true);
 
 	rx_done = vector2_netdev_poll_invoke(ctx, 4);
 

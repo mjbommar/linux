@@ -487,6 +487,7 @@ vector2_ethtool_traffic_stage(struct kunit *test,
 		KUNIT_ASSERT_EQ(test,
 				um_vec2_fake_host_push_rx(&ctx->ch[i].fake, 64),
 				0);
+		WRITE_ONCE(channel->rx_pending, true);
 	}
 }
 

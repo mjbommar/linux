@@ -315,7 +315,12 @@ static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
 			   struct um_vec2_queue_pair *queue)
 {
 	struct um_vec2_rx_poll_ctx rx_ctx;
+	bool rx_pending;
 	int rx_done;
+
+	rx_pending = xchg(&channel->rx_pending, false);
+	if (!rx_pending)
+		return 0;
 
 	rx_ctx.napi = napi;
 	rx_ctx.dev = dev;
@@ -340,6 +345,8 @@ static int um_vec2_poll_rx(struct napi_struct *napi, int budget,
 	}
 	spin_unlock(&queue->rx_lock);
 
+	if (rx_done >= budget)
+		WRITE_ONCE(channel->rx_pending, true);
 	return rx_done;
 }
 
@@ -423,8 +430,23 @@ static irqreturn_t um_vec2_rx_interrupt(int irq, void *dev_id)
 	if (!dev || !channel->napi_enabled || !netif_running(dev))
 		return IRQ_NONE;
 	um_vec2_stat_inc(vdev, UM_VEC2_STAT_RX_IRQS);
+	WRITE_ONCE(channel->rx_pending, true);
 	napi_schedule(&channel->napi);
 	return IRQ_HANDLED;
+}
+
+static bool um_vec2_channel_tx_pending(struct um_vec2_channel *channel)
+{
+	struct um_vec2_queue_pair *queue = channel->queue;
+	bool pending;
+
+	if (!queue)
+		return false;
+
+	spin_lock(&queue->tx_lock);
+	pending = !um_vec2_tx_ring_empty(&queue->tx);
+	spin_unlock(&queue->tx_lock);
+	return pending;
 }
 
 static irqreturn_t um_vec2_tx_interrupt(int irq, void *dev_id)
@@ -439,6 +461,8 @@ static irqreturn_t um_vec2_tx_interrupt(int irq, void *dev_id)
 	dev = vdev->netdev;
 	if (!dev || !channel->napi_enabled || !netif_running(dev))
 		return IRQ_NONE;
+	if (!um_vec2_channel_tx_pending(channel))
+		return IRQ_HANDLED;
 	um_vec2_stat_inc(vdev, UM_VEC2_STAT_TX_IRQS);
 	napi_schedule(&channel->napi);
 	return IRQ_HANDLED;
@@ -547,6 +571,7 @@ static void um_vec2_stop_datapath(struct net_device *dev,
 			napi_disable(&channel->napi);
 			channel->napi_enabled = false;
 		}
+		WRITE_ONCE(channel->rx_pending, false);
 		if (channel->rx_irq != UM_VEC2_NO_IRQ) {
 			um_free_irq(channel->rx_irq, channel);
 			channel->rx_irq = UM_VEC2_NO_IRQ;
@@ -637,8 +662,10 @@ static void um_vec2_schedule_all_channels(struct um_vec2_dev *vdev)
 	 * runs um_vec2_netdev_poll in a separate context which never takes
 	 * vdev->lock, so there is no AB-BA ordering risk.
 	 */
-	for (i = 0; i < vdev->num_channels; i++)
+	for (i = 0; i < vdev->num_channels; i++) {
+		WRITE_ONCE(vdev->channels[i].rx_pending, true);
 		napi_schedule(&vdev->channels[i].napi);
+	}
 }
 
 static void um_vec2_activate_netdev(struct net_device *dev,
@@ -785,6 +812,8 @@ static netdev_tx_t um_vec2_enqueue_xmit(struct sk_buff *skb,
 					unsigned int len)
 {
 	struct um_vec2_queue_pair *queue = channel->queue;
+	bool defer_schedule;
+	bool ring_full;
 	int ret;
 
 	spin_lock_bh(&queue->tx_lock);
@@ -801,11 +830,14 @@ static netdev_tx_t um_vec2_enqueue_xmit(struct sk_buff *skb,
 		return um_vec2_drop_xmit_skb(skb, dev, vdev);
 	}
 
-	if (um_vec2_tx_ring_full(&queue->tx))
+	ring_full = um_vec2_tx_ring_full(&queue->tx);
+	if (ring_full)
 		netif_stop_subqueue(dev, channel->index);
+	defer_schedule = !ring_full && netdev_xmit_more();
 	spin_unlock_bh(&queue->tx_lock);
 
-	napi_schedule(&channel->napi);
+	if (!defer_schedule)
+		napi_schedule(&channel->napi);
 	return NETDEV_TX_OK;
 }
 
