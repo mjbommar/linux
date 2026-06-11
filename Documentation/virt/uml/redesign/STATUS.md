@@ -257,6 +257,13 @@ The strongest current KVM v2 evidence is:
 - Experimental record clock bench: `kvm-record-clock-bench` passes with
   `N=100`, `observed=100`, `replayed=100`, and `mismatches=0`, proving the
   KVM v2 record log can round-trip time-travel clock advances.
+- Latest focused R/R-1 rerun:
+  `06-sequencing/2026-06-11-record-replay-rr1-validation.md` records the
+  current validation pass: `kvm-record-smoke` reports `KUnit=24/24`,
+  `live-debugfs=1`, `task-owned=1`, `live-mismatch=4/4`, `live-signal=1`,
+  `live-time=1`, `live-rdtsc=1`, `live-rdtscp=1`, `live-negative=1`, and
+  `live-external-io=4/4`; `kvm-record-clock-bench` reports `N=100`,
+  `observed=100`, `replayed=100`, and `mismatches=0`.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
 - UML KMSAN now has a clean LLVM `uml/research-kmsan` build, page-aligned

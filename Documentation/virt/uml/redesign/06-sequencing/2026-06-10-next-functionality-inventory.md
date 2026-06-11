@@ -200,6 +200,13 @@ This file is the live execution tracker for
   port-forward, per-member mconsole, pool benchmark, and syzkaller shim. This
   closes the immediate current-HEAD audit but must be repeated after later
   KVM v2 or vector2 changes.
+- The focused R/R-1 record/replay validation set was rerun after the branch was
+  pushed with current `umlctl` evidence. `kvm-record-smoke` passed with
+  `KUnit=24/24`, `task-owned=1`, `live-mismatch=4/4`, `live-signal=1`,
+  `live-time=1`, `live-rdtsc=1`, `live-rdtscp=1`, `live-negative=1`, and
+  `live-external-io=4/4`; `kvm-record-clock-bench` passed with `N=100`,
+  `observed=100`, `replayed=100`, and `mismatches=0`. The rerun is recorded in
+  `2026-06-11-record-replay-rr1-validation.md`.
 - The current-head vector2 validation refresh passes on rebuilt
   `98166580dc4f`: `um_vector2_*` KUnit reports 84 pass, 0 fail, 2
   trusted-TAP skips; fd handoff, fd multiqueue, in-process TAP, sandbox audit,

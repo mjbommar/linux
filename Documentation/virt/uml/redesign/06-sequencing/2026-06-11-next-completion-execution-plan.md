@@ -55,6 +55,12 @@ Current execution evidence added on 2026-06-11:
   `kvm-record-smoke` reported 3066 live syscall entries, 294336 bytes used,
   and 0 drops, and `kvm-record-clock-bench` reported `N=100`,
   `observed=100`, `replayed=100`, and `mismatches=0`; and
+- reran the focused R/R-1 validation set after the current `umlctl` evidence
+  push: `kvm-record-smoke` passed with `KUnit=24/24`, `task-owned=1`,
+  `live-mismatch=4/4`, `live-signal=1`, `live-time=1`, `live-rdtsc=1`,
+  `live-rdtscp=1`, `live-negative=1`, and `live-external-io=4/4`, while
+  `kvm-record-clock-bench` again passed with `N=100`, `observed=100`,
+  `replayed=100`, and `mismatches=0`; and
 - added the first R/R-1 task-owned session-start gate: record status now
   reports first/last syscall PID and same-task versus other-task syscall
   counters, and `kvm-record-smoke` includes a static helper that snapshots

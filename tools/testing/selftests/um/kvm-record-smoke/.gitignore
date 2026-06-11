@@ -1,6 +1,13 @@
 kvm-record-task
 kvm-record-negative
+kvm-record-negative-openat
+kvm-record-negative-read
+kvm-record-negative-write
+kvm-record-negative-ioctl
 kvm-record-mismatch
+kvm-record-mismatch-clock
+kvm-record-mismatch-gettimeofday
+kvm-record-mismatch-time
 kvm-record-time
 kvm-record-rdtsc
 kvm-record-rdtscp
