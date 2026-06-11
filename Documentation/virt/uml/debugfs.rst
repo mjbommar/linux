@@ -169,20 +169,20 @@ record container control surface:
       snapshot_task_state: 1
       snapshot_source_pid: 1
       buffer_size: 1048576
-      buffer_used: 38504
+      buffer_used: 38608
       buffer_replayed: 0
-      sequence: 397
-      entries_recorded: 397
+      sequence: 398
+      entries_recorded: 398
       entries_replayed: 0
       entries_dropped: 0
-      syscall_count: 397
+      syscall_count: 398
       first_syscall_pid: 1
       last_syscall_pid: 1
-      syscalls_from_snapshot_task: 397
+      syscalls_from_snapshot_task: 398
       syscalls_from_other_tasks: 0
-      payload_entries_recorded: 1
+      payload_entries_recorded: 2
       payload_entries_replayed: 0
-      payload_bytes_recorded: 390
+      payload_bytes_recorded: 392
       payload_bytes_replayed: 0
       strict_replay_failures: 0
       last_replay_failure_syscall: -1
@@ -195,15 +195,16 @@ It can also round-trip UML time-travel clock advances through the record
 log. The status counters identify whether recorded syscalls came from the
 snapshot owner or from other tasks, which lets selftests distinguish a
 task-owned record run from a control-file writer that merely enabled
-recording for later work. The first payload-aware syscall is ``uname(2)``:
-record mode copies the returned ``struct new_utsname`` into the log, and
-replay mode can restore that payload when syscall number and arguments match.
-Strict replay currently allows the R/R-1 scalar task-owned subset
-(``getpid``, ``getppid``, ``gettid``) plus payload-aware ``uname(2)``; other
-syscalls fail closed and update the strict replay failure counters instead of
-falling back to live execution. Full deterministic replay still needs broader
-payload coverage plus raw time/RDTSC, signal, and device policy described in
-the redesign plan. The current in-memory event format is versioned and
+recording for later work. The first payload-aware syscalls are ``uname(2)``,
+which records the returned ``struct new_utsname``, and ``getcwd(2)``, which
+records the returned path bytes. Replay mode can restore those payloads when
+the syscall number and arguments match. Strict replay currently allows the
+R/R-1 scalar task-owned subset (``getpid``, ``getppid``, ``gettid``) plus
+payload-aware ``uname(2)`` and ``getcwd(2)``; other syscalls fail closed and
+update the strict replay failure counters instead of falling back to live
+execution. Full deterministic replay still needs broader payload coverage plus
+raw time/RDTSC, signal, and device policy described in the redesign plan. The
+current in-memory event format is versioned and
 debugfs reports its header size, total fixed entry size, and maximum
 variable payload length so validation tools can reject stale logs instead of
 guessing their shape.

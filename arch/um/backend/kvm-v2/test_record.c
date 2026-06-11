@@ -137,9 +137,11 @@ static void test_record_strict_syscall_policy(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_getpid));
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_getppid));
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_gettid));
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_getcwd));
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_supported(__NR_uname));
 
 	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_has_payload(__NR_getpid));
+	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_has_payload(__NR_getcwd));
 	KUNIT_EXPECT_TRUE(test, kvm_v2_record_syscall_has_payload(__NR_uname));
 	KUNIT_EXPECT_FALSE(test, kvm_v2_record_syscall_supported(__NR_getuid));
 
@@ -325,6 +327,49 @@ static void test_record_syscall_payload_fifo(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, rec->payload_entries_replayed, 1ULL);
 	KUNIT_EXPECT_EQ(test, rec->payload_bytes_replayed,
 			(u64)sizeof(payload));
+
+	kvm_v2_record_destroy(rec);
+}
+
+static void test_record_syscall_payload_getcwd_fifo(struct kunit *test)
+{
+	static const char payload[] = "/record-root";
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs regs;
+	char got_payload[32];
+	size_t got_len = 0;
+	long got_ret = -1;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	fill_syscall_regs(&regs);
+	regs.gp[HOST_DI] = 0x12345000ULL;
+	regs.gp[HOST_SI] = sizeof(got_payload);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_observe_syscall_payload(rec, __NR_getcwd,
+							      sizeof(payload),
+							      &regs, 0,
+							      payload,
+							      sizeof(payload)),
+			1);
+	KUNIT_EXPECT_EQ(test, rec->payload_entries_recorded, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_bytes_recorded,
+			(u64)sizeof(payload));
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec, __NR_getcwd,
+							      &regs, &got_ret,
+							      got_payload,
+							      sizeof(got_payload),
+							      &got_len),
+			1);
+	KUNIT_EXPECT_EQ(test, got_ret, (long)sizeof(payload));
+	KUNIT_EXPECT_EQ(test, got_len, sizeof(payload));
+	KUNIT_EXPECT_EQ(test, memcmp(got_payload, payload, sizeof(payload)), 0);
 
 	kvm_v2_record_destroy(rec);
 }
@@ -658,6 +703,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_entry_format_contract),
 	KUNIT_CASE(test_record_replay_syscall_fifo),
 	KUNIT_CASE(test_record_syscall_payload_fifo),
+	KUNIT_CASE(test_record_syscall_payload_getcwd_fifo),
 	KUNIT_CASE(test_record_syscall_payload_short_buffer),
 	KUNIT_CASE(test_record_syscall_payload_arg_mismatch),
 	KUNIT_CASE(test_record_syscall_payload_overflow),

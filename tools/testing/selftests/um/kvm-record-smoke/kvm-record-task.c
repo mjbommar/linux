@@ -28,6 +28,10 @@
 #define SYS_uname	63
 #endif
 
+#ifndef SYS_getcwd
+#define SYS_getcwd	79
+#endif
+
 static int ensure_dir(const char *path)
 {
 	if (!mkdir(path, 0755) || errno == EEXIST)
@@ -144,7 +148,9 @@ static int get_long(const char *key, long *out)
 static long scalar_workload(void)
 {
 	struct utsname uts;
+	char cwd[256];
 	long sink = 0;
+	long cwd_len;
 	int i;
 
 	for (i = 0; i < 128; i++) {
@@ -156,6 +162,13 @@ static long scalar_workload(void)
 	memset(&uts, 0, sizeof(uts));
 	if (syscall(SYS_uname, &uts) == 0)
 		sink += uts.sysname[0] + uts.machine[0];
+	else
+		return -1;
+
+	memset(cwd, 0, sizeof(cwd));
+	cwd_len = syscall(SYS_getcwd, cwd, sizeof(cwd));
+	if (cwd_len > 0)
+		sink += cwd[0] + cwd[cwd_len - 1];
 	else
 		return -1;
 
@@ -218,7 +231,7 @@ int main(void)
 
 	if (entries <= 0 || syscalls <= 0 || same_task != syscalls ||
 	    other_tasks != 0 || first_pid != pid || last_pid != pid ||
-	    payload_entries < 1 || payload_bytes <= 0 || sink < 0) {
+	    payload_entries < 2 || payload_bytes <= 390 || sink < 0) {
 		printf("KVM_RECORD_TASK: FAIL pid=%ld entries=%ld syscalls=%ld ",
 		       pid, entries, syscalls);
 		printf("same=%ld other=%ld first=%ld last=%ld ",

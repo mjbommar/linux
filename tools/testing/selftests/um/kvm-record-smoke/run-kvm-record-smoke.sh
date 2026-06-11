@@ -80,6 +80,7 @@ CASES=(
 	"test_record_entry_format_contract"
 	"test_record_replay_syscall_fifo"
 	"test_record_syscall_payload_fifo"
+	"test_record_syscall_payload_getcwd_fifo"
 	"test_record_syscall_payload_short_buffer"
 	"test_record_syscall_payload_arg_mismatch"
 	"test_record_syscall_payload_overflow"

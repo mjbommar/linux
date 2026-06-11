@@ -60,7 +60,13 @@ EXPORT_SYMBOL_GPL(kvm_v2_record_state_name);
 
 bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
 {
-	return syscall_nr == __NR_uname;
+	switch (syscall_nr) {
+	case __NR_getcwd:
+	case __NR_uname:
+		return true;
+	default:
+		return false;
+	}
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_syscall_has_payload);
 
