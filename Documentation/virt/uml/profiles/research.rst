@@ -72,11 +72,11 @@ What's on
   ``arch/x86/net/bpf_jit_comp.c`` via UML-local shim headers when
   ``CONFIG_BPF_JIT=y``. This profile enables ``CONFIG_BPF_SYSCALL=y``,
   ``CONFIG_BPF_JIT=y``, and ``CONFIG_BPF_JIT_ALWAYS_ON=y``. Current
-  ``next`` validation covers clean profile configuration and compiling
-  the BPF JIT object; runtime closure still requires booting a
-  research profile binary and checking the guest
-  ``/proc/sys/net/core/bpf_jit_enable`` value plus a ``bpftool`` or
-  ``bpftrace`` smoke.
+  ``next`` validation covers clean profile configuration, compiling the
+  BPF JIT object, and ``tools/testing/selftests/um/bpf-jit-smoke/``:
+  the guest reads ``/proc/sys/net/core/bpf_jit_enable``, loads a
+  minimal eBPF socket-filter program through ``bpf()``, and requires
+  ``BPF_OBJ_GET_INFO_BY_FD`` to report a nonzero JITed program length.
 - **Coverage**: *none*. ``CONFIG_KCOV`` is explicitly off in
   ``research``; coverage-guided fuzzing lives in the ``fuzz`` and
   ``fuzz-deep`` profiles (which do not enable the function

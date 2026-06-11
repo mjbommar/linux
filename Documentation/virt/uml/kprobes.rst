@@ -44,11 +44,10 @@ From inside a booted guest the standard in-tree samples work::
 
 The ``research`` profile also enables ``CONFIG_BPF_SYSCALL`` and
 ``CONFIG_BPF_JIT`` so that kprobe-backed ``bpftrace`` workflows can be
-validated with a matching research-profile runtime. The current BPF/JIT
-closure is config/build-proven and still needs a guest runtime smoke with
-``bpftool`` or ``bpftrace`` before it should be treated as fully closed.
-``register_kprobe()`` / ``register_kretprobe()`` from out-of-tree modules work
-today.
+validated with a matching research-profile runtime. The BPF/JIT runtime
+itself is covered by ``tools/testing/selftests/um/bpf-jit-smoke/``; it loads a
+minimal eBPF program and requires a nonzero JITed length. ``register_kprobe()``
+/ ``register_kretprobe()`` from out-of-tree modules work today.
 
 How it works
 ============

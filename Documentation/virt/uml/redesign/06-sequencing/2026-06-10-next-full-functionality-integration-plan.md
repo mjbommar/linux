@@ -1040,9 +1040,12 @@ Acceptance gates:
   temporary clean worktree: `uml/research` enables `CONFIG_HAVE_EBPF_JIT=y`,
   `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`,
   `CONFIG_BPF_JIT_ALWAYS_ON=y`, and `arch/x86/net/bpf_jit_comp.o` builds.
-- KASAN/KFENCE/KCSAN/KCOV/BPF/JIT runtime smoke matrix. Current status: open;
-  each needs a matching profile binary and module/runtime/guest-tool
-  prerequisites.
+- BPF/JIT runtime smoke. Current status: PASS on 2026-06-10 through
+  `bpf-jit-smoke` against a fresh research-profile UML binary:
+  `bpf_jit_enable=1`, minimal `BPF_PROG_TYPE_SOCKET_FILTER` load succeeds,
+  and `BPF_OBJ_GET_INFO_BY_FD` reports `xlated_len=16` and `jited_len=16`.
+- KASAN/KFENCE/KCSAN/KCOV runtime smoke matrix. Current status: open; each
+  needs a matching profile binary and module/runtime/guest-tool prerequisites.
 - Documentation table with pass/fail/skip and rationale. Current status:
   partially updated in the live inventory; final docs matrix remains open.
 
