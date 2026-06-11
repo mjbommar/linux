@@ -135,7 +135,7 @@ fn crockford_base32_encode_128(bytes: &[u8; 16]) -> String {
     // Reserve the top 2 bits for padding — always zero
     // because a valid 128-bit integer fits in 128 bits.
     let mut out = [0u8; 26];
-    for i in 0..26 {
+    for (i, slot) in out.iter_mut().enumerate() {
         // Group `i` (0 = MSB) occupies bits
         // [125-5i .. 121-5i] after the 2-bit pad. Compute
         // the shift: after placing the value at the top of
@@ -146,7 +146,7 @@ fn crockford_base32_encode_128(bytes: &[u8; 16]) -> String {
         } else {
             ((reg << (-shift)) & 0x1f) as usize
         };
-        out[i] = CROCKFORD[group];
+        *slot = CROCKFORD[group];
     }
     String::from_utf8_lossy(&out).into_owned()
 }

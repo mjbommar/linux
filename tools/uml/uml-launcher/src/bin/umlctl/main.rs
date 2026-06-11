@@ -1194,39 +1194,6 @@ fn move_fd_out_of_inherited_range(fd: OwnedFd, first_fd: i32, count: i32) -> io:
     Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
 }
 
-#[cfg(test)]
-mod inherited_fd_tests {
-    use super::*;
-    use std::fs::File;
-
-    #[test]
-    fn inherited_fd_range_checks_half_open_interval() {
-        assert!(!fd_in_inherited_range(199, 200, 4));
-        assert!(fd_in_inherited_range(200, 200, 4));
-        assert!(fd_in_inherited_range(203, 200, 4));
-        assert!(!fd_in_inherited_range(204, 200, 4));
-        assert!(!fd_in_inherited_range(200, 200, 0));
-    }
-
-    #[test]
-    fn source_fd_is_moved_out_of_target_range_when_needed() {
-        let f = File::open("/dev/null").unwrap();
-        let first_fd = 200;
-        let count = 4;
-        let raw = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_DUPFD_CLOEXEC, first_fd) };
-        assert!(raw >= 0);
-
-        let original_in_range = fd_in_inherited_range(raw, first_fd, count);
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-        let moved = move_fd_out_of_inherited_range(fd, first_fd, count).unwrap();
-
-        assert!(!fd_in_inherited_range(moved.as_raw_fd(), first_fd, count));
-        if original_in_range {
-            assert!(moved.as_raw_fd() >= first_fd + count);
-        }
-    }
-}
-
 /// Poll the named instance's CURRENT run bundle's init.log for a line
 /// matching `pattern` (POSIX ERE — same semantics as `umlctl gate`).
 /// Exits the process on timeout (code 124, matches coreutils
@@ -1426,16 +1393,19 @@ fn cmd_create(paths: &paths::Paths, args: CreateArgs) -> Result<()> {
 }
 
 fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
-    let m = manifest::Manifest::read(&paths.manifest_path(&args.name)).map_err(|e| {
-        if e.downcast_ref::<std::io::Error>()
-            .map(|io| io.kind() == std::io::ErrorKind::NotFound)
-            .unwrap_or(false)
-        {
-            eprintln!("umlctl: instance '{}' not found", args.name);
-            std::process::exit(3);
+    let m = match manifest::Manifest::read(&paths.manifest_path(&args.name)) {
+        Ok(m) => m,
+        Err(e) => {
+            if e.downcast_ref::<std::io::Error>()
+                .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false)
+            {
+                eprintln!("umlctl: instance '{}' not found", args.name);
+                std::process::exit(3);
+            }
+            return Err(e);
         }
-        e
-    })?;
+    };
 
     if let Some(ident) = supervise::read_pidfile(&paths.pidfile_path(&args.name)) {
         if supervise::identity_alive(ident) {
@@ -1836,4 +1806,37 @@ fn cmd_dmesg(paths: &paths::Paths, args: DmesgArgs) -> Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod inherited_fd_tests {
+    use super::*;
+    use std::fs::File;
+
+    #[test]
+    fn inherited_fd_range_checks_half_open_interval() {
+        assert!(!fd_in_inherited_range(199, 200, 4));
+        assert!(fd_in_inherited_range(200, 200, 4));
+        assert!(fd_in_inherited_range(203, 200, 4));
+        assert!(!fd_in_inherited_range(204, 200, 4));
+        assert!(!fd_in_inherited_range(200, 200, 0));
+    }
+
+    #[test]
+    fn source_fd_is_moved_out_of_target_range_when_needed() {
+        let f = File::open("/dev/null").unwrap();
+        let first_fd = 200;
+        let count = 4;
+        let raw = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_DUPFD_CLOEXEC, first_fd) };
+        assert!(raw >= 0);
+
+        let original_in_range = fd_in_inherited_range(raw, first_fd, count);
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let moved = move_fd_out_of_inherited_range(fd, first_fd, count).unwrap();
+
+        assert!(!fd_in_inherited_range(moved.as_raw_fd(), first_fd, count));
+        if original_in_range {
+            assert!(moved.as_raw_fd() >= first_fd + count);
+        }
+    }
 }

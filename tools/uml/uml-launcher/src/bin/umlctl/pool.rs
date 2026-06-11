@@ -628,7 +628,8 @@ pub(crate) fn create_identity_memfd(blob: &[u8]) -> Result<OwnedFd> {
     let name = CString::new("um-pool-identity").unwrap();
     // MFD_CLOEXEC = 1; we explicitly clear cloexec in pre_exec
     // before execve so the child inherits the fd.
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    let fd =
+        unsafe { libc::memfd_create(name.as_bytes_with_nul().as_ptr().cast(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error()).context("memfd_create");
     }

@@ -210,10 +210,8 @@ fn parse_args(args: super::GateLoopArgs) -> Result<LoopArgs> {
             bail!("use either --network-driver or --sweep network.driver=..., not both");
         }
     }
-    if args.network_queues.is_some() {
-        if sweep_axes.iter().any(|axis| axis.key == "network.queues") {
-            bail!("use either --network-queues or --sweep network.queues=..., not both");
-        }
+    if args.network_queues.is_some() && sweep_axes.iter().any(|axis| axis.key == "network.queues") {
+        bail!("use either --network-queues or --sweep network.queues=..., not both");
     }
     if let Some(host_mode) = args.network_host_mode.as_deref() {
         if sweep_axes

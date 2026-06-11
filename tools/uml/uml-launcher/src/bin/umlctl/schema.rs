@@ -123,8 +123,8 @@ pub const REGISTRY: &[SchemaDecl] = &[
 
 pub fn print_human() {
     println!(
-        "{:<22} {:<10} {:<9} {:<10} {}",
-        "SCHEMA", "CATEGORY", "SEVERITY", "STATUS", "SOURCE"
+        "{:<22} {:<10} {:<9} {:<10} SOURCE",
+        "SCHEMA", "CATEGORY", "SEVERITY", "STATUS"
     );
     for s in REGISTRY {
         println!(

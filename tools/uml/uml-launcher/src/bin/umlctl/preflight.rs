@@ -170,7 +170,11 @@ fn check_dev_kvm(report: &mut PreflightReport) {
     if Path::new("/dev/kvm").exists() {
         match std::fs::metadata("/dev/kvm") {
             Ok(_) => {
-                if let Err(_) = std::fs::OpenOptions::new().read(true).open("/dev/kvm") {
+                if std::fs::OpenOptions::new()
+                    .read(true)
+                    .open("/dev/kvm")
+                    .is_err()
+                {
                     report.warnings.push(
                         "/dev/kvm present but not readable — kvm-v2 backend \
                          will probe-fail; consider `sudo setfacl -m \

@@ -156,13 +156,13 @@ pub fn print_table(rows: &[Row], args: &PsArgs) -> Result<()> {
 
     if args.size {
         println!(
-            "{:<20} {:<8} {:<9} {:<12} {:<6} {:<10} {:<9} {}",
-            "NAME", "PID", "BACKEND", "PROFILE", "MEM", "UPTIME", "RSS(kB)", "STATE"
+            "{:<20} {:<8} {:<9} {:<12} {:<6} {:<10} {:<9} STATE",
+            "NAME", "PID", "BACKEND", "PROFILE", "MEM", "UPTIME", "RSS(kB)"
         );
     } else {
         println!(
-            "{:<20} {:<8} {:<9} {:<12} {:<6} {:<10} {}",
-            "NAME", "PID", "BACKEND", "PROFILE", "MEM", "UPTIME", "STATE"
+            "{:<20} {:<8} {:<9} {:<12} {:<6} {:<10} STATE",
+            "NAME", "PID", "BACKEND", "PROFILE", "MEM", "UPTIME"
         );
     }
 

@@ -41,7 +41,7 @@ pub fn open_tap(ifname: &str, multi_queue: bool) -> io::Result<OwnedFd> {
     let path = std::ffi::CString::new("/dev/net/tun").expect("/dev/net/tun is static ascii");
     let fd = unsafe {
         libc::open(
-            path.as_ptr(),
+            path.as_bytes_with_nul().as_ptr().cast(),
             libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
     };
