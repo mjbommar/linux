@@ -84,9 +84,10 @@ static int um_vec2_fake_rx_batch(struct um_vec2_host *host,
 {
 	struct um_vec2_fake_host *fake = um_vec2_host_to_fake(host);
 	unsigned int lens[UM_VEC2_FAKE_HOST_MAX_RX];
+	unsigned int received = 0;
 	unsigned int limit;
-	unsigned int count;
-	int err;
+	unsigned int i;
+	int ret;
 
 	fake->stats.rx_calls++;
 
@@ -95,34 +96,47 @@ static int um_vec2_fake_rx_batch(struct um_vec2_host *host,
 		return -ENODEV;
 	}
 
-	err = fake->rx_error;
-	if (err) {
+	ret = fake->rx_error;
+	if (ret) {
 		fake->stats.rx_errors++;
-		return err;
+		return ret;
 	}
 
+	if (!budget)
+		return 0;
+	if (budget > batch->depth)
+		return -EINVAL;
 	if (budget > UM_VEC2_FAKE_HOST_MAX_RX)
 		return -EINVAL;
 
-	err = um_vec2_rx_batch_prepare(batch, budget, alloc, release, cookie);
-	if (err) {
-		fake->stats.rx_errors++;
-		return err;
-	}
-
+	ret = 0;
 	limit = min(budget, fake->rx_limit);
-	count = um_vec2_fake_rx_pop(fake, lens, limit);
-	if (!count)
-		fake->stats.rx_empty++;
 
-	err = um_vec2_rx_batch_complete(batch, count, lens, release, cookie);
-	if (err) {
-		fake->stats.rx_errors++;
-		return err;
+	for (i = 0; i < budget; i++) {
+		ret = um_vec2_rx_batch_prepare_next(batch, alloc, cookie);
+		if (ret)
+			break;
+
+		if (received >= limit || !fake->rx_count) {
+			if (!fake->rx_count && !received)
+				fake->stats.rx_empty++;
+			ret = 0;
+			break;
+		}
+
+		um_vec2_fake_rx_pop(fake, &lens[received], 1);
+		received++;
 	}
 
-	fake->stats.rx_packets += count;
-	return count;
+	if (um_vec2_rx_batch_complete(batch, received, lens, release, cookie))
+		return -EIO;
+	if (ret && !received)
+		fake->stats.rx_errors++;
+
+	fake->stats.rx_packets += received;
+	if (received)
+		return received;
+	return ret;
 }
 
 static const struct um_vec2_host_ops um_vec2_fake_host_ops = {

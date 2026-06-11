@@ -183,8 +183,11 @@ static void vector2_fake_host_rx_packets_test(struct kunit *test)
 						  vector2_fake_rx_alloc,
 						  vector2_fake_trace_release,
 						  &release_trace), 2);
-	KUNIT_EXPECT_EQ(test, release_trace.count, 2U);
+	KUNIT_EXPECT_EQ(test, release_trace.count, 1U);
 	KUNIT_EXPECT_EQ(test, batch.filled, 2U);
+	KUNIT_EXPECT_EQ(test, batch.prepared_total, 3ULL);
+	KUNIT_EXPECT_EQ(test, batch.received_total, 2ULL);
+	KUNIT_EXPECT_EQ(test, batch.released_total, 1ULL);
 	KUNIT_EXPECT_EQ(test, fake.stats.rx_packets, 2ULL);
 	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_consume(&batch, 2,
 						       vector2_fake_trace_release,
@@ -211,15 +214,51 @@ static void vector2_fake_host_rx_empty_test(struct kunit *test)
 						  vector2_fake_trace_release,
 						  &release_trace), 0);
 	KUNIT_EXPECT_TRUE(test, um_vec2_rx_batch_idle(&batch));
-	KUNIT_EXPECT_EQ(test, release_trace.count, 4U);
+	KUNIT_EXPECT_EQ(test, release_trace.count, 1U);
+	KUNIT_EXPECT_EQ(test, batch.prepared_total, 1ULL);
+	KUNIT_EXPECT_EQ(test, batch.released_total, 1ULL);
 	KUNIT_EXPECT_EQ(test, fake.stats.rx_empty, 1ULL);
+}
+
+static void vector2_fake_host_rx_limit_releases_probe_test(struct kunit *test)
+{
+	struct vector2_fake_trace release_trace = {};
+	struct vector2_fake_trace consume_trace = {};
+	struct um_vec2_rx_slot slots[4];
+	struct um_vec2_rx_batch batch;
+	struct um_vec2_fake_host fake;
+	struct um_vec2_host *host;
+
+	um_vec2_fake_host_init(&fake);
+	um_vec2_fake_host_set_rx_limit(&fake, 1);
+	host = um_vec2_fake_host_base(&fake);
+	KUNIT_ASSERT_EQ(test, um_vec2_rx_batch_init(&batch, slots, 4), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_fake_host_push_rx(&fake, 64), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_fake_host_push_rx(&fake, 128), 0);
+
+	KUNIT_EXPECT_EQ(test, host->ops->rx_batch(host, &batch, 4,
+						  vector2_fake_rx_alloc,
+						  vector2_fake_trace_release,
+						  &release_trace), 1);
+	KUNIT_EXPECT_EQ(test, fake.rx_count, 1U);
+	KUNIT_EXPECT_EQ(test, release_trace.count, 1U);
+	KUNIT_EXPECT_EQ(test, batch.filled, 1U);
+	KUNIT_EXPECT_EQ(test, batch.prepared_total, 2ULL);
+	KUNIT_EXPECT_EQ(test, batch.received_total, 1ULL);
+	KUNIT_EXPECT_EQ(test, batch.released_total, 1ULL);
+
+	KUNIT_EXPECT_EQ(test, um_vec2_rx_batch_consume(&batch, 1,
+						       vector2_fake_trace_release,
+						       &consume_trace), 0);
+	KUNIT_EXPECT_EQ(test, consume_trace.count, 1U);
+	KUNIT_EXPECT_TRUE(test, um_vec2_rx_batch_idle(&batch));
 }
 
 static void vector2_fake_host_rx_alloc_failure_test(struct kunit *test)
 {
 	struct vector2_fake_trace trace = {};
 	struct vector2_fake_rx_alloc_ctx alloc = {
-		.fail_at = 1,
+		.fail_at = 0,
 		.fail_enabled = true,
 		.trace = &trace,
 	};
@@ -237,8 +276,30 @@ static void vector2_fake_host_rx_alloc_failure_test(struct kunit *test)
 						  vector2_fake_alloc_ctx_release,
 						  &alloc), -ENOMEM);
 	KUNIT_EXPECT_TRUE(test, um_vec2_rx_batch_idle(&batch));
-	KUNIT_EXPECT_EQ(test, trace.count, 1U);
+	KUNIT_EXPECT_EQ(test, trace.count, 0U);
 	KUNIT_EXPECT_EQ(test, fake.stats.rx_errors, 1ULL);
+}
+
+static void vector2_fake_host_rx_rejects_oversized_budget_test(struct kunit *test)
+{
+	struct vector2_fake_trace trace = {};
+	struct um_vec2_rx_slot slots[2];
+	struct um_vec2_rx_batch batch;
+	struct um_vec2_fake_host fake;
+	struct um_vec2_host *host;
+
+	um_vec2_fake_host_init(&fake);
+	host = um_vec2_fake_host_base(&fake);
+	KUNIT_ASSERT_EQ(test, um_vec2_rx_batch_init(&batch, slots, 2), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_fake_host_push_rx(&fake, 64), 0);
+
+	KUNIT_EXPECT_EQ(test, host->ops->rx_batch(host, &batch, 3,
+						  vector2_fake_rx_alloc,
+						  vector2_fake_trace_release,
+						  &trace), -EINVAL);
+	KUNIT_EXPECT_TRUE(test, um_vec2_rx_batch_idle(&batch));
+	KUNIT_EXPECT_EQ(test, fake.rx_count, 1U);
+	KUNIT_EXPECT_EQ(test, trace.count, 0U);
 }
 
 static void vector2_fake_host_rx_dead_preserves_test(struct kunit *test)
@@ -270,7 +331,9 @@ static struct kunit_case vector2_fake_host_test_cases[] = {
 	KUNIT_CASE(vector2_fake_host_tx_dead_preserves_test),
 	KUNIT_CASE(vector2_fake_host_rx_packets_test),
 	KUNIT_CASE(vector2_fake_host_rx_empty_test),
+	KUNIT_CASE(vector2_fake_host_rx_limit_releases_probe_test),
 	KUNIT_CASE(vector2_fake_host_rx_alloc_failure_test),
+	KUNIT_CASE(vector2_fake_host_rx_rejects_oversized_budget_test),
 	KUNIT_CASE(vector2_fake_host_rx_dead_preserves_test),
 	{}
 };

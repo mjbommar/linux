@@ -258,6 +258,13 @@ This file is the live execution tracker for
   context switches were 26505.5 versus 2186.5, pointing the next bottleneck
   pass at wakeup/readiness/receive scheduling rather than raw RX-slot
   allocation alone.
+- Vector2 fake-host RX batching now matches the production fd/TAP lazy RX
+  shape used by the current datapath: one prepared slot per attempted read and
+  one released speculative slot on empty or limited reads. Validation:
+  `make ARCH=um -j$(nproc)`, `um_vector2_fake_host` KUnit 10/10 PASS, and
+  `um_vector2_*` KUnit 94 pass, 0 fail, 2 trusted-TAP skips, 2026-06-11. This
+  improves test fidelity for the host-to-guest bottleneck pass but does not
+  close the 1 MiB no-regression cell.
 - Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
   SELinux policy headers, sandbox/research launcher examples, gate metadata,
   tier smoke fixtures, and adjacent launcher/profile docs. Validation:

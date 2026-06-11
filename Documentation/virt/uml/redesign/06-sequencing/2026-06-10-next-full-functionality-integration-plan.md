@@ -995,7 +995,12 @@ Acceptance gates:
   host-side best ratio 0.4969, and scheduler pcount median ratio 4.5529.  That
   keeps the no-regression cell open: the legacy baseline was noisy, and
   vector2 still trails on best throughput while using substantially more
-  scheduler wakeups.
+  scheduler wakeups. The fake-host KUnit backend now mirrors the production
+  fd/TAP lazy RX batching shape, with one prepared slot per attempted read and
+  one released speculative slot on empty or limited reads; `um_vector2_*`
+  reports 94 pass, 0 fail, and 2 trusted-TAP skips. This tightens coverage for
+  the RX path used by the bottleneck investigation but does not close the
+  no-regression cell.
 - trusted in-process TAP smoke. Current status: PASS on 2026-06-10 through
   `vector2-inproc-tap-smoke`.
 - parser-only transport boundary. Current status: KUnit guards raw, GRE,
@@ -1619,7 +1624,10 @@ Runtime smoke:
   The first 1 MiB host-to-guest run with those deltas keeps the publication
   cell open: vector2/legacy host-side median ratio is 0.9147 and best ratio is
   0.6656, with about 12x higher vector2 scheduler pcount/context-switch
-  deltas.
+  deltas. The fake-host KUnit backend now mirrors production fd/TAP lazy RX
+  batching and validates the one-slot speculative read/release shape with
+  `um_vector2_fake_host` 10/10 PASS and `um_vector2_*` 94 pass, 0 fail, 2
+  trusted-TAP skips.
 - Vector2 trusted in-process TAP. Current status: PASS through
   `vector2-inproc-tap-smoke`.
 - Vector2 parser-only transport boundary. Current status: TAP/fd are the only
