@@ -116,8 +116,9 @@ The active blockers are now:
    coverage.
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
-   gadget bypass are present, but deterministic workload recording/replay is
-   still open.
+   gadget bypass are present, and UML time-travel clock events now round-trip
+   through the record log, but raw time/RDTSC, signal, device, and
+   deterministic workload recording/replay are still open.
 6. Decide whether the historical KVM v2 private state trace should be imported
    as clean optional diagnostics.
 7. Curate source comments, selftests, reports, and status docs so upstream-
@@ -637,24 +638,30 @@ Current `next` checkpoint:
 - `arch/um/backend/kvm-v2/lstar_gadget.S` checks that byte after saving user
   scratch registers and forces the normal host fallback path when it is set,
   so gadget-handled syscalls cannot disappear from the future dispatcher log.
-- `arch/um/backend/kvm-v2/test_record.c` validates the experimental core and
-  the synthetic gadget-bypass page helper without requiring a live vCPU.
+- `arch/um/backend/kvm-v2/test_record.c` validates the experimental core,
+  time-travel clock-event FIFO replay, and the synthetic gadget-bypass page
+  helper without requiring a live vCPU.
 - `arch/um/backend/kvm-v2/record.c` now exposes the experimental debugfs
   singleton control/status files `kvm_v2_record_ctl` and
   `kvm_v2_record_status`. They drive `start`, `stop`, `replay`, `strict`, and
   `destroy` for validation. Debugfs `start` now captures and attaches a KVM v2
   task snapshot before enabling the record static key, and snapshot-backed
-  `replay` restores it before entering the syscall replay core.
+  `replay` restores it before entering the syscall replay core. Record start
+  also enables the `record_replay` hook so UML time-travel clock advances can
+  be appended and replayed with syscall-count anchors.
 - Validation on 2026-06-10 after gadget-bypass wiring: `make ARCH=um -j16`,
-  `um_kvm_v2_record` 9/9, `kvm_v2_byteshape` 9/9, both record and byteshape
+  `um_kvm_v2_record` 10/10, `kvm_v2_byteshape` 9/9, both record and byteshape
   filters also PASS under `backend=force=kvm`, and the freestanding KVM
   `perf-getpid` gadget smoke remains PASS with `cyc_per_call=89`.
 - Validation on 2026-06-10 after debugfs control wiring:
-  `kvm-record-smoke` PASS, including `um_kvm_v2_record` 9/9 and a live KVM v2
+  `kvm-record-smoke` PASS, including `um_kvm_v2_record` 10/10 and a live KVM v2
   snapshot-backed record run with 3067 syscall entries, 245360 bytes used, and
   0 drops.
-- Still open: time/RDTSC/signal determinism, supported replay tier docs, and
-  real deterministic workload replay smoke tests.
+- Validation on 2026-06-10 after time-travel clock-event wiring:
+  `kvm-record-clock-bench` PASS with `N=100`, `observed=100`, `replayed=100`,
+  and `mismatches=0`.
+- Still open: raw time/RDTSC/signal determinism, supported replay tier docs,
+  and real deterministic workload replay smoke tests.
 
 Acceptance gates:
 

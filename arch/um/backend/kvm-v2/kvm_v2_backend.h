@@ -21,6 +21,7 @@
 #include <linux/types.h>
 
 #include <backend.h>
+#include <asm/um-kvm-v2-record.h>
 
 struct kvm_cpuid2;
 struct kvm_regs;
@@ -724,18 +725,25 @@ enum kvm_v2_record_state {
 enum kvm_v2_replay_kind {
 	KVM_V2_REPLAY_NONE = 0,
 	KVM_V2_REPLAY_SYSCALL,
+	KVM_V2_REPLAY_TIME_TRAVEL,
 };
 
 struct kvm_v2_replay_entry {
 	u32	kind;
 	u32	size;
 	u64	sequence;
-	struct {
-		s32	nr;
-		s32	_pad;
-		s64	retval;
-		u64	args[6];
-	} syscall;
+	union {
+		struct {
+			s32	nr;
+			s32	_pad;
+			s64	retval;
+			u64	args[6];
+		} syscall;
+		struct {
+			u64	ns_at_advance;
+			u64	syscall_count_anchor;
+		} time_travel;
+	};
 };
 
 struct kvm_v2_record {
@@ -770,7 +778,6 @@ int kvm_v2_record_stop(struct kvm_v2_record *rec);
 int kvm_v2_record_replay(struct kvm_v2_record *rec);
 int kvm_v2_record_set_strict_replay(struct kvm_v2_record *rec, bool strict);
 bool kvm_v2_record_strict_replay(const struct kvm_v2_record *rec);
-struct kvm_v2_record *kvm_v2_record_active(void);
 void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on);
 void kvm_v2_record_sync_gadget_bypass_page(void *gadget_state);
 void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,

@@ -12,6 +12,7 @@
 #include <linux/errno.h>
 #include <linux/debugfs.h>
 #include <linux/export.h>
+#include <linux/init.h>
 #include <linux/jump_label.h>
 #include <linux/kernel.h>
 #include <linux/mutex.h>
@@ -22,6 +23,7 @@
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
+#include <asm/um-hooks.h>
 #include <sysdep/ptrace.h>
 
 #include "kvm_v2_backend.h"
@@ -173,6 +175,7 @@ static bool kvm_v2_record_disarm(struct kvm_v2_record *rec)
 
 	if (was_active) {
 		static_branch_disable(&um_kvm_v2_record_enabled);
+		static_branch_disable(&um_hook_record_replay);
 		kvm_v2_record_set_gadget_bypass(false);
 	}
 
@@ -254,6 +257,7 @@ static int __kvm_v2_record_start(struct kvm_v2_record *rec,
 	rec->state = KVM_V2_RECORD_RECORDING;
 	kvm_v2_record_set_gadget_bypass(true);
 	static_branch_enable(&um_kvm_v2_record_enabled);
+	static_branch_enable(&um_hook_record_replay);
 
 out_unlock:
 	mutex_unlock(&rec->lock);
@@ -364,6 +368,7 @@ int kvm_v2_record_replay(struct kvm_v2_record *rec)
 	rec->entries_replayed = 0;
 	kvm_v2_record_set_gadget_bypass(true);
 	static_branch_enable(&um_kvm_v2_record_enabled);
+	static_branch_enable(&um_hook_record_replay);
 
 out_unlock:
 	mutex_unlock(&rec->lock);
@@ -496,6 +501,181 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall);
+
+void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
+				       u64 ns_at_advance)
+{
+	struct kvm_v2_replay_entry *entry;
+	const size_t need = sizeof(*entry);
+
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+	if (rec->state != KVM_V2_RECORD_RECORDING)
+		goto out_unlock;
+
+	if (rec->buffer_used + need > rec->buffer_size) {
+		rec->entries_dropped++;
+		goto out_unlock;
+	}
+
+	entry = (struct kvm_v2_replay_entry *)
+		((u8 *)rec->buffer + rec->buffer_used);
+	memset(entry, 0, sizeof(*entry));
+	entry->kind = KVM_V2_REPLAY_TIME_TRAVEL;
+	entry->size = (u32)need;
+	entry->sequence = ++rec->sequence;
+	entry->time_travel.ns_at_advance = ns_at_advance;
+	entry->time_travel.syscall_count_anchor = rec->syscall_count;
+
+	rec->buffer_used += need;
+	rec->entries_recorded++;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_observe_time_travel);
+
+int kvm_v2_record_consume_time_travel(struct kvm_v2_record *rec,
+				      u64 *ns_out,
+				      u64 *syscall_count_anchor_out)
+{
+	struct kvm_v2_replay_entry *entry;
+	size_t cursor;
+	int rc = 0;
+
+	if (!rec || !ns_out)
+		return 0;
+
+	mutex_lock(&rec->lock);
+	if (rec->state != KVM_V2_RECORD_REPLAYING)
+		goto out_unlock;
+
+	cursor = rec->buffer_replayed;
+	if (cursor >= rec->buffer_used) {
+		rc = -ENODATA;
+		goto out_unlock;
+	}
+
+	if (cursor + sizeof(*entry) > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	entry = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
+	if (entry->kind != KVM_V2_REPLAY_TIME_TRAVEL ||
+	    entry->size != sizeof(*entry) ||
+	    cursor + entry->size > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	*ns_out = entry->time_travel.ns_at_advance;
+	if (syscall_count_anchor_out)
+		*syscall_count_anchor_out =
+			entry->time_travel.syscall_count_anchor;
+	rec->buffer_replayed = cursor + entry->size;
+	rec->entries_replayed++;
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_consume_time_travel);
+
+#define KVM_V2_RECORD_CLOCK_BENCH_N_MAX	4096U
+
+static int kvm_v2_record_clock_bench_run(unsigned int n)
+{
+	struct kvm_v2_record *rec;
+	u64 entries_recorded = 0;
+	u64 entries_replayed = 0;
+	u64 mismatches = 0;
+	u64 base_ns = 1000;
+	unsigned int i;
+	bool pass;
+	int rc;
+
+	rec = kvm_v2_record_alloc((size_t)n *
+				  sizeof(struct kvm_v2_replay_entry));
+	if (!rec) {
+		pr_warn("um: kvm-v2 record clock bench: alloc failed\n");
+		return -ENOMEM;
+	}
+
+	rc = kvm_v2_record_start(rec);
+	if (rc < 0) {
+		pr_warn("um: kvm-v2 record clock bench: start rc=%d\n", rc);
+		goto out_report;
+	}
+
+	for (i = 0; i < n; i++)
+		um_on_time_travel_advance(base_ns + (u64)i * 1000);
+
+	entries_recorded = rec->entries_recorded;
+	rc = kvm_v2_record_stop(rec);
+	if (rc < 0) {
+		pr_warn("um: kvm-v2 record clock bench: stop rc=%d\n", rc);
+		goto out_report;
+	}
+
+	rc = kvm_v2_record_replay(rec);
+	if (rc < 0) {
+		pr_warn("um: kvm-v2 record clock bench: replay rc=%d\n", rc);
+		goto out_report;
+	}
+
+	for (i = 0; i < n; i++) {
+		u64 expected = base_ns + (u64)i * 1000;
+		u64 observed = 0;
+
+		if (!um_time_travel_consume_replay(&observed))
+			break;
+		if (observed != expected)
+			mismatches++;
+	}
+
+	entries_replayed = rec->entries_replayed;
+	(void)kvm_v2_record_stop(rec);
+
+out_report:
+	pass = entries_recorded == n && entries_replayed == n &&
+	       mismatches == 0;
+	pr_info("um: kvm-v2 record clock bench: N=%u observed=%llu replayed=%llu mismatches=%llu verdict=%s\n",
+		n, entries_recorded, entries_replayed, mismatches,
+		pass ? "PASS" : "FAIL");
+
+	kvm_v2_record_destroy(rec);
+	return pass ? 0 : (rc < 0 ? rc : -EIO);
+}
+
+static unsigned int kvm_v2_record_clock_bench_n;
+
+static int __init kvm_v2_record_clock_bench_setup(char *str)
+{
+	unsigned int n;
+
+	if (!str || kstrtouint(str, 10, &n) < 0)
+		return 1;
+	if (!n || n > KVM_V2_RECORD_CLOCK_BENCH_N_MAX)
+		return 1;
+
+	kvm_v2_record_clock_bench_n = n;
+	return 1;
+}
+__setup("kvm_v2_record_clock_bench=", kvm_v2_record_clock_bench_setup);
+
+static int __init kvm_v2_record_clock_bench_late_init(void)
+{
+	if (!kvm_v2_record_clock_bench_n)
+		return 0;
+
+	(void)kvm_v2_record_clock_bench_run(kvm_v2_record_clock_bench_n);
+	return 0;
+}
+late_initcall_sync(kvm_v2_record_clock_bench_late_init);
 
 #ifdef CONFIG_DEBUG_FS
 

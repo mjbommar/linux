@@ -43,6 +43,7 @@ DECLARE_STATIC_KEY_FALSE(um_hook_trace_syscalls);
 DECLARE_STATIC_KEY_FALSE(um_hook_kcov_enabled);
 DECLARE_STATIC_KEY_FALSE(um_hook_time_travel_active);
 DECLARE_STATIC_KEY_FALSE(um_hook_kfence_sample);
+DECLARE_STATIC_KEY_FALSE(um_hook_record_replay);
 DECLARE_STATIC_KEY_FALSE(um_hook_perf_dispatch);
 
 /* --- Stats: per-gate hit counters the slow paths bump --------------- */
@@ -52,6 +53,7 @@ enum um_hook_id {
 	UM_HOOK_KCOV_ENABLED,
 	UM_HOOK_TIME_TRAVEL_ACTIVE,
 	UM_HOOK_KFENCE_SAMPLE,
+	UM_HOOK_RECORD_REPLAY,
 	UM_HOOK_PERF_DISPATCH,
 	UM_HOOK__COUNT,
 };
@@ -81,6 +83,9 @@ void __um_kcov_record_syscall(struct pt_regs *regs);
 void __um_perf_syscall(struct pt_regs *regs);
 void __um_perf_context_switch(struct task_struct *from,
 			      struct task_struct *to);
+
+void __um_record_event_clock(u64 ns);
+bool um_time_travel_consume_replay(u64 *ns);
 
 void __um_time_travel_clock(u64 ns);
 void __um_kfence_clock_tick(u64 ns);
@@ -136,6 +141,12 @@ static __always_inline void um_on_clock_read(u64 ns)
 		__um_time_travel_clock(ns);
 	if (static_branch_unlikely(&um_hook_kfence_sample))
 		__um_kfence_clock_tick(ns);
+}
+
+static __always_inline void um_on_time_travel_advance(u64 ns)
+{
+	if (static_branch_unlikely(&um_hook_record_replay))
+		__um_record_event_clock(ns);
 }
 
 #endif /* __ASM_UM_HOOKS_H */

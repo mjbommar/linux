@@ -3269,6 +3269,12 @@ Kernel parameters
 			snapshot ELF smoke tests and automation that need a
 			host-visible dump before guest userspace is available.
 
+	kvm_v2_record_clock_bench=
+			[UML] Run a KVM v2 record/replay benchmark for UML
+			time-travel clock advances at late initcall time. The
+			value is the number of synthetic clock events to record
+			and replay. Intended for UML record/replay selftests.
+
 	kvm-intel.ept=	[KVM,Intel] Control KVM's use of Extended Page Tables,
 			a.k.a. Two-Dimensional Page Tables.  Default is 1
 			(enabled). Disable by KVM if hardware lacks support

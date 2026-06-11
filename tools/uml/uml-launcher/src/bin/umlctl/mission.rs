@@ -5,8 +5,9 @@
 //
 // Six fail-fast steps, ~10-15 min total:
 //
-//   1. KUnit selftests       - snapshot-kvm-smoke (4 cases) +
-//                              kvm-record-smoke (9 cases + live record).
+//   1. KUnit selftests       - snapshot-kvm-smoke (4 cases),
+//                              kvm-record-smoke (10 cases + live
+//                              record), and kvm-record-clock-bench.
 //                              Proves the new snapshot/RR code
 //                              paths execute correctly.
 //
@@ -69,7 +70,8 @@ pub struct MissionArgs {
 
     /// Path to the linux tree's tools/testing/selftests/um.
     /// Used to locate snapshot-kvm-smoke / kvm-record-smoke /
-    /// kvm-snapshot-bench / kvm-smoke / cpython-tier0 / kvm-bounds /
+    /// kvm-record-clock-bench / kvm-snapshot-bench /
+    /// kvm-smoke / cpython-tier0 / kvm-bounds /
     /// soak/run-soak-daemon.sh. Defaults to CWD/tools/testing/
     /// selftests/um if --selftests-dir not given.
     #[arg(long, env = "UMLCTL_SELFTESTS_DIR")]
@@ -262,7 +264,7 @@ fn run_step(
 ) -> Result<MissionStep> {
     let start = Instant::now();
     let (name, verdict, summary, details) = match step_id {
-        1 => step1_kunit(args, selftests_dir, out_dir)?,
+        1 => step1_snapshot_record(args, selftests_dir, out_dir)?,
         2 => step2_bench(args, selftests_dir, out_dir)?,
         3 => step3_substrate(args, selftests_dir, out_dir)?,
         4 => step4_host_resources(args, out_dir)?,
@@ -282,7 +284,7 @@ fn run_step(
     })
 }
 
-fn step1_kunit(
+fn step1_snapshot_record(
     args: &MissionArgs,
     selftests_dir: &Path,
     out_dir: &Path,
@@ -299,6 +301,10 @@ fn step1_kunit(
             "kvm-record-smoke/run-kvm-record-smoke.sh",
             "kvm_record_smoke",
         ),
+        (
+            "kvm-record-clock-bench/run-kvm-record-clock-bench.sh",
+            "kvm_record_clock_bench",
+        ),
     ] {
         let path = selftests_dir.join(script);
         if !path.exists() {
@@ -314,14 +320,17 @@ fn step1_kunit(
         }
     }
     let (verdict, summary) = if all_pass {
-        (Verdict::Pass, "10/10 KUnit cases PASS".to_string())
+        (
+            Verdict::Pass,
+            "snapshot, record, and record-clock selftests PASS".to_string(),
+        )
     } else {
         (
             Verdict::Fail,
             "one or more KUnit selftests failed".to_string(),
         )
     };
-    Ok(("kunit", verdict, summary, details))
+    Ok(("snapshot-record", verdict, summary, details))
 }
 
 fn step2_bench(

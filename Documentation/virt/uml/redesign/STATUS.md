@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control, and KVM v2 dynamic-loader TLS closure.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, and KVM v2 dynamic-loader TLS closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -48,8 +48,10 @@ Current source-tree direction:
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL`; its live syscall
   dispatcher hook can observe and replay syscall return values, and debugfs can
   start/stop/reset a singleton record container for validation. Debugfs record
-  start also captures and attaches a KVM v2 task snapshot. Time, signal,
-  device, and deterministic replay policy remain incomplete.
+  start also captures and attaches a KVM v2 task snapshot. The record log can
+  also round-trip UML time-travel clock advances through the `record_replay`
+  hook. Raw time/RDTSC, signal, device, and deterministic replay policy remain
+  incomplete.
   Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
@@ -97,17 +99,20 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 9/9 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 10/10 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
-  divergence cursor preservation, buffer-overflow accounting, and the
-  synthetic gadget-bypass page helper, and snapshot metadata cleanup. The live
-  KVM syscall dispatcher now calls the observe/consume hooks, so this is no
-  longer core-only syscall plumbing.
+  divergence cursor preservation, time-travel clock-event FIFO replay,
+  buffer-overflow accounting, the synthetic gadget-bypass page helper, and
+  snapshot metadata cleanup. The live KVM syscall dispatcher now calls the
+  observe/consume hooks, so this is no longer core-only syscall plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
   record start, and records 3067 live KVM v2 syscall entries with 245360
   bytes used and 0 drops.
+- Experimental record clock bench: `kvm-record-clock-bench` passes with
+  `N=100`, `observed=100`, `replayed=100`, and `mismatches=0`, proving the
+  KVM v2 record log can round-trip time-travel clock advances.
 - Existing pure KVM v2 KUnit suites still pass on the same build:
   `kvm_v2_marshal` 9/9 and `kvm_v2_byteshape` 9/9.
 
@@ -372,8 +377,9 @@ coverage. Gadget-handled syscalls now have record/replay bypass plumbing: the
 active record static key synchronizes a per-vCPU gadget-state byte, and the
 LSTAR gadget falls back to the host dispatcher when that byte is set. Live
 syscall recording and snapshot-backed record start are now covered by the
-`kvm-record-smoke` debugfs test. Time/RDTSC/signal determinism and
-workload-level replay smokes remain open.
+`kvm-record-smoke` debugfs test. UML time-travel clock events are covered by
+`kvm-record-clock-bench`. Raw time/RDTSC/signal determinism and workload-level
+replay smokes remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field

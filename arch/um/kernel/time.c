@@ -63,6 +63,9 @@ notrace unsigned long long sched_clock(void)
 
 static void time_travel_set_time(unsigned long long ns)
 {
+	if (static_branch_unlikely(&um_hook_record_replay))
+		um_time_travel_consume_replay(&ns);
+
 	if (unlikely(ns < time_travel_time))
 		panic("time-travel: time goes backwards %lld -> %lld\n",
 		      time_travel_time, ns);
@@ -70,6 +73,7 @@ static void time_travel_set_time(unsigned long long ns)
 		panic("The system was going to sleep forever, aborting");
 
 	time_travel_time = ns;
+	um_on_time_travel_advance(ns);
 
 	/*
 	 * Notify hook consumers of every time-travel advance.

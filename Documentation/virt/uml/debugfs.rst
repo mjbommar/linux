@@ -74,9 +74,10 @@ Gate semantics:
     Fires on clock reads. Reserved for KFENCE sampling control.
 
 ``record_replay``
-    Fires at every gate site. Destined for the record-replay
-    subsystem. This is the generic hook bit; it does not allocate a
-    KVM v2 record container by itself.
+    Fires on time-travel clock advances. When a KVM v2 record container
+    is active, the hook records the advanced nanosecond value and the
+    current syscall-count anchor. It does not allocate a KVM v2 record
+    container by itself.
 
 ``perf_dispatch``
     Fires on syscall entry and context switch. Feeds the kernel's
@@ -151,8 +152,9 @@ record container control surface:
 The record path is still explicitly experimental. It can record live
 KVM v2 syscall returns through the host dispatcher and the LSTAR gadget
 bypass path, and it can pair a record session with a KVM v2 task snapshot.
-Full deterministic replay still needs the time, signal, and device policy
-described in the redesign plan.
+It can also round-trip UML time-travel clock advances through the record
+log. Full deterministic replay still needs raw time/RDTSC, signal, and
+device policy described in the redesign plan.
 
 Cost impact
 ===========

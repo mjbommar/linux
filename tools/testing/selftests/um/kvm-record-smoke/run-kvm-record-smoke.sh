@@ -71,6 +71,7 @@ CASES=(
 	"test_record_observe_syscall"
 	"test_record_replay_syscall_fifo"
 	"test_record_replay_divergence_preserves_cursor"
+	"test_record_time_travel_fifo"
 	"test_record_buffer_overflow_is_counted"
 	"test_record_reset_releases_snapshot"
 )

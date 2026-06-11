@@ -237,6 +237,65 @@ static void test_record_replay_divergence_preserves_cursor(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+static void test_record_time_travel_fifo(struct kunit *test)
+{
+	static const u64 ns_values[] = {
+		1000ULL,
+		2500ULL,
+		1000000ULL,
+		1000000000ULL,
+	};
+	struct kvm_v2_record *rec;
+	u64 ns_got;
+	u64 anchor_got;
+	u64 syscalls_consumed = 0;
+	int rc;
+	int i;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+
+	for (i = 0; i < ARRAY_SIZE(ns_values); i++) {
+		int j;
+
+		for (j = 0; j < i; j++)
+			kvm_v2_record_observe_syscall(rec, 39, 0, NULL);
+		kvm_v2_record_observe_time_travel(rec, ns_values[i]);
+	}
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+	for (i = 0; i < ARRAY_SIZE(ns_values); i++) {
+		int j;
+
+		for (j = 0; j < i; j++) {
+			long ret = -1;
+
+			rc = kvm_v2_record_consume_syscall(rec, 39, &ret);
+			KUNIT_ASSERT_EQ(test, rc, 1);
+			KUNIT_EXPECT_EQ(test, ret, 0L);
+			syscalls_consumed++;
+		}
+
+		ns_got = 0;
+		anchor_got = 0;
+		rc = kvm_v2_record_consume_time_travel(rec, &ns_got,
+						       &anchor_got);
+		KUNIT_ASSERT_EQ(test, rc, 1);
+		KUNIT_EXPECT_EQ(test, ns_got, ns_values[i]);
+		KUNIT_EXPECT_EQ(test, anchor_got, syscalls_consumed);
+	}
+
+	ns_got = 0xdeadbeefULL;
+	rc = kvm_v2_record_consume_time_travel(rec, &ns_got, &anchor_got);
+	KUNIT_EXPECT_EQ(test, rc, -ENODATA);
+	KUNIT_EXPECT_EQ(test, ns_got, 0xdeadbeefULL);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static void test_record_buffer_overflow_is_counted(struct kunit *test)
 {
 	struct kvm_v2_record *rec;
@@ -294,6 +353,7 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_observe_syscall),
 	KUNIT_CASE(test_record_replay_syscall_fifo),
 	KUNIT_CASE(test_record_replay_divergence_preserves_cursor),
+	KUNIT_CASE(test_record_time_travel_fifo),
 	KUNIT_CASE(test_record_buffer_overflow_is_counted),
 	KUNIT_CASE(test_record_reset_releases_snapshot),
 	{}

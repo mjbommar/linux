@@ -29,6 +29,10 @@
 #include <asm/um-hooks.h>
 #include <sysdep/ptrace.h>
 
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL)
+#include <asm/um-kvm-v2-record.h>
+#endif
+
 /* --- Gate definitions ------------------------------------------------ */
 
 DEFINE_STATIC_KEY_FALSE(um_hook_trace_syscalls);
@@ -39,6 +43,8 @@ DEFINE_STATIC_KEY_FALSE(um_hook_time_travel_active);
 EXPORT_SYMBOL_GPL(um_hook_time_travel_active);
 DEFINE_STATIC_KEY_FALSE(um_hook_kfence_sample);
 EXPORT_SYMBOL_GPL(um_hook_kfence_sample);
+DEFINE_STATIC_KEY_FALSE(um_hook_record_replay);
+EXPORT_SYMBOL_GPL(um_hook_record_replay);
 DEFINE_STATIC_KEY_FALSE(um_hook_perf_dispatch);
 EXPORT_SYMBOL_GPL(um_hook_perf_dispatch);
 
@@ -64,6 +70,7 @@ static const char * const um_hook_names[UM_HOOK__COUNT] = {
 	[UM_HOOK_KCOV_ENABLED]       = "kcov_enabled",
 	[UM_HOOK_TIME_TRAVEL_ACTIVE] = "time_travel_active",
 	[UM_HOOK_KFENCE_SAMPLE]      = "kfence_sample",
+	[UM_HOOK_RECORD_REPLAY]      = "record_replay",
 	[UM_HOOK_PERF_DISPATCH]      = "perf_dispatch",
 };
 
@@ -72,6 +79,7 @@ static struct static_key_false * const um_hook_keys[UM_HOOK__COUNT] = {
 	[UM_HOOK_KCOV_ENABLED]       = &um_hook_kcov_enabled,
 	[UM_HOOK_TIME_TRAVEL_ACTIVE] = &um_hook_time_travel_active,
 	[UM_HOOK_KFENCE_SAMPLE]      = &um_hook_kfence_sample,
+	[UM_HOOK_RECORD_REPLAY]      = &um_hook_record_replay,
 	[UM_HOOK_PERF_DISPATCH]      = &um_hook_perf_dispatch,
 };
 
@@ -196,6 +204,42 @@ notrace void __um_perf_context_switch(struct task_struct *from,
 	um_hook_stats_inc(UM_HOOK_PERF_DISPATCH);
 }
 EXPORT_SYMBOL_GPL(__um_perf_context_switch);
+
+notrace void __um_record_event_clock(u64 ns)
+{
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL)
+	struct kvm_v2_record *rec = kvm_v2_record_active();
+
+	if (rec)
+		kvm_v2_record_observe_time_travel(rec, ns);
+#else
+	(void)ns;
+#endif
+	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
+}
+EXPORT_SYMBOL_GPL(__um_record_event_clock);
+
+notrace bool um_time_travel_consume_replay(u64 *ns)
+{
+#if IS_ENABLED(CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL)
+	struct kvm_v2_record *rec = kvm_v2_record_active();
+	u64 recorded;
+
+	if (!rec || !ns)
+		return false;
+
+	if (kvm_v2_record_consume_time_travel(rec, &recorded, NULL) != 1)
+		return false;
+
+	*ns = recorded;
+	um_hook_stats_inc(UM_HOOK_RECORD_REPLAY);
+	return true;
+#else
+	(void)ns;
+	return false;
+#endif
+}
+EXPORT_SYMBOL_GPL(um_time_travel_consume_replay);
 
 notrace void __um_time_travel_clock(u64 ns)
 {
