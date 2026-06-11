@@ -347,21 +347,24 @@ TRACE_EVENT(um_backend_kvm_v2_sregs_install,
 );
 
 /*
- * kvm_v2_sigmask_install - fired when KVM_SET_SIGNAL_MASK
- * (sigfillset minus SIGALRM) is programmed at vcpu_create_one.
- * UML's HZ=100 timer can otherwise interrupt KVM_RUN before the
- * guest can make progress. One event fires per pool member at create.
+ * kvm_v2_sigmask_install - fired when KVM_SET_SIGNAL_MASK is programmed.
+ * Normal execution leaves SIGALRM unblocked so UML's timer can preempt
+ * KVM_RUN; replay blocks SIGALRM so timer delivery cannot create an
+ * unrecorded in-guest EINTR point.
  */
 TRACE_EVENT(um_backend_kvm_v2_sigmask_install,
-	TP_PROTO(int vcpu_fd),
-	TP_ARGS(vcpu_fd),
+	TP_PROTO(int vcpu_fd, bool block_timer),
+	TP_ARGS(vcpu_fd, block_timer),
 	TP_STRUCT__entry(
 		__field(int, vcpu_fd)
+		__field(bool, block_timer)
 	),
 	TP_fast_assign(
 		__entry->vcpu_fd = vcpu_fd;
+		__entry->block_timer = block_timer;
 	),
-	TP_printk("vcpu_fd=%d", __entry->vcpu_fd)
+	TP_printk("vcpu_fd=%d block_timer=%d",
+		  __entry->vcpu_fd, __entry->block_timer)
 );
 
 /*

@@ -205,9 +205,14 @@ update the strict replay failure counters instead of falling back to live
 execution. Raw time syscalls such as ``clock_gettime(2)``, ``gettimeofday(2)``,
 and ``time(2)`` are outside the current replay set, and replay mode disables
 direct user ``RDTSC``/``RDTSCP`` with CR4.TSD so those observations fail
-closed instead of escaping the log. Full deterministic replay still needs
-broader payload coverage plus signal and device policy described in the
-redesign plan. The current in-memory event format is versioned and
+closed instead of escaping the log. Replay mode also asks KVM to block
+``SIGALRM`` while the vCPU is inside ``KVM_RUN`` so timer delivery cannot
+create an unrecorded in-guest ``EINTR`` point; pending UML timer work is
+handled after the VM exit. Workloads that require precise asynchronous signal
+delivery remain outside the current R/R-1 contract. Full deterministic replay
+still needs broader payload coverage plus device and randomness policy
+described in the redesign plan. The current in-memory event format is
+versioned and
 debugfs reports its header size, total fixed entry size, and maximum
 variable payload length so validation tools can reject stale logs instead of
 guessing their shape.

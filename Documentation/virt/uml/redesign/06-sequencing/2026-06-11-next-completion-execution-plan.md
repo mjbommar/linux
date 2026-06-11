@@ -69,6 +69,10 @@ Current execution evidence added on 2026-06-11:
   already route through syscalls, strict replay rejects raw time syscalls, and
   KVM v2 sets CR4.TSD during replay so user `RDTSC`/`RDTSCP` faults instead of
   observing host time outside the log; and
+- added the first R/R-1 signal policy: normal KVM execution keeps `SIGALRM`
+  unblocked for timer preemption, while replay mode blocks `SIGALRM` in KVM's
+  per-vCPU signal mask so timer delivery cannot create unrecorded in-guest
+  `EINTR` points. Replayable signal-event ordering remains future work; and
 - added the first versioned event-format gate: each replay entry now records
   format version and flags, debugfs reports `format_version=1`,
   `entry_header_size=24`, `entry_size=96`, and `max_payload=4096`, and KUnit
@@ -314,7 +318,7 @@ vector2, pool, profile, and cleanup gates should run after that work settles.
 | S0 | Plan and baseline refresh | This file records the current branch, closed KMSAN blocker, live record/replay evidence, and remaining order of work. | `git diff --check`; pushed docs-only commit. |
 | S1 | Record/replay tier definition and ABI | First task-owned session-start gate is implemented: the record status reports syscall ownership counters, and the task helper proves a single process can snapshot itself and keep the focused workload on that task. Keep the public support label experimental until payload, time, signal/device policy, and deterministic replay gates pass. | Current status: `kvm-record-smoke` PASS with `KVM_RECORD_TASK: PASS pid=1 entries=398 syscalls=398 same=398 other=0`; clock bench PASS. |
 | S2 | Record/replay syscall payload and event format model | First payload models are implemented for `uname(2)` and `getcwd(2)`: the record log stores variable-sized payload entries, replay validates syscall number and arguments before restoring payload bytes, and the task-owned smoke records a 390-byte `struct new_utsname` plus a 2-byte cwd path. Replay entries also carry explicit format version and flags, with debugfs exposing the current header/entry/payload sizes. Broader copyout coverage and full deterministic replay remain open. | Current status: `kvm-record-smoke` PASS with `KUnit=20/20`, `payload_entries=2`, `payload_bytes=392`; `kvm-record-clock-bench` PASS. |
-| S3 | Record/replay time, signal, and device policy | First fail-closed strict policy is implemented for the initial R/R-1 syscall subset: `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`/`getcwd(2)`. Unsupported syscalls now record a strict replay failure and receive SIGSEGV instead of silently falling back to live execution or scalar-only replay. Raw time syscalls are outside the supported set, and replay mode sets CR4.TSD so user `RDTSC`/`RDTSCP` faults. SIGALRM/signal delivery, randomness, device I/O, and deterministic workload replay remain open. | Current status: `um_kvm_v2_record` KUnit covers the accepted subset, unsupported `getuid`, `clock_gettime`, `gettimeofday`, `time`, and `getrandom` policy checks where available, strict-on rejection, strict-off permissive behavior, strict replay failure accounting, and the strict raw-time policy; full deterministic workload and unsupported-operation negative live tests remain required. |
+| S3 | Record/replay time, signal, and device policy | First fail-closed strict policy is implemented for the initial R/R-1 syscall subset: `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`/`getcwd(2)`. Unsupported syscalls now record a strict replay failure and receive SIGSEGV instead of silently falling back to live execution or scalar-only replay. Raw time syscalls are outside the supported set, and replay mode sets CR4.TSD so user `RDTSC`/`RDTSCP` faults. R/R-1 signal handling uses a blocked-delivery tier: replay mode blocks `SIGALRM` during `KVM_RUN`, leaving replayable signal-event ordering for later. Randomness, device I/O, and deterministic workload replay remain open. | Current status: `um_kvm_v2_record` KUnit covers the accepted subset, unsupported `getuid`, `clock_gettime`, `gettimeofday`, `time`, and `getrandom` policy checks where available, strict-on rejection, strict-off permissive behavior, strict replay failure accounting, and the strict raw-time policy. `kvm-record-smoke` and `kvm-record-clock-bench` pass after the signal-mask policy change; full deterministic workload and unsupported-operation negative live tests remain required. |
 | S4 | Record/replay user-facing documentation | Update debugfs, Kconfig help, selftest README, and live inventory so users know the exact supported tier, limitations, and experimental status. | Documentation grep for stale stronger claims; `git diff --check`. |
 | S5 | Vector2 publication gates | Run the natural seccomp long gate, full KVM-v2 Tier 3 networking, and multiqueue fairness/performance tests on the post-record/replay tree. | Vector2 KUnit, fd/multiqueue/inproc/pool/sandbox smokes, Tier 3 reports. |
 | S6 | Pool, fork-server, and syzkaller final rerun | Revalidate the pool/fork/syzkaller surfaces after record/replay and vector2 are stable. Decide snapshot-backed fork-server disposition. | Full pool/fork/syzkaller smoke set listed below. |
@@ -471,7 +475,12 @@ Concrete R/R-1 implementation slices:
    blocked during the deterministic gate, or recorded with explicit siginfo and
    delivery-order events. If the first tier excludes SIGALRM and host-injected
    signals, strict replay must detect and report that exclusion rather than
-   silently falling back to live behavior.
+   silently falling back to live behavior. Status: R/R-1 now uses the blocked
+   delivery tier for UML timer preemption. Replay mode reprograms KVM's
+   per-vCPU signal mask to block `SIGALRM` while inside `KVM_RUN`, while normal
+   KVM execution keeps `SIGALRM` unblocked. Pending UML timer work is handled
+   after VM exit; precise asynchronous signal-event ordering is outside the
+   current R/R-1 contract.
 
 6. **Device and randomness policy.**
    Network, block, hostfs mutation, and randomness are not allowed to be

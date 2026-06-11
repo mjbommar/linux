@@ -65,8 +65,11 @@ Current source-tree direction:
   `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`/`getcwd(2)`.
   Raw time syscalls are rejected by that same strict policy, and replay mode
   sets CR4.TSD so user `RDTSC`/`RDTSCP` faults instead of observing host time
-  outside the log. Broader payload coverage, signal, device, and deterministic
-  replay policy remain incomplete.
+  outside the log. Replay mode also blocks `SIGALRM` in KVM's per-vCPU signal
+  mask while inside `KVM_RUN`, preventing timer delivery from creating
+  unrecorded in-guest `EINTR` points. Broader payload coverage, replayable
+  signal-event ordering, device, and deterministic replay policy remain
+  incomplete.
   Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
@@ -519,8 +522,11 @@ flags fields, and debugfs reports the format contract. The initial payload
 copyout set now covers `uname(2)` and `getcwd(2)`. Strict replay rejects
 syscalls outside the initial R/R-1 subset instead of replaying arbitrary
 scalar-only entries. Raw time syscalls are fail-closed, and replay mode sets
-CR4.TSD so user `RDTSC`/`RDTSCP` faults. Replayable raw-time payloads,
-signal determinism, and workload-level replay smokes remain open.
+CR4.TSD so user `RDTSC`/`RDTSCP` faults. Replay mode blocks `SIGALRM` at the
+KVM vCPU signal mask while inside `KVM_RUN`, so timer delivery is deferred to
+the post-exit UML signal path rather than becoming an unrecorded in-guest
+interruption point. Replayable raw-time payloads, explicit signal-event
+ordering, and workload-level replay smokes remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field

@@ -267,6 +267,17 @@ struct kvm_v2_vcpu {
 	int   cpu;
 	bool  cpuid_primed;
 	/*
+	 * KVM's per-vCPU signal mask is dynamic while the experimental
+	 * record/replay core is in replay state: normal execution leaves
+	 * SIGALRM unblocked so the UML timer can preempt KVM_RUN, while replay
+	 * blocks it so timer delivery cannot create unrecorded in-guest EINTR
+	 * points. These fields cache the last mask installed by
+	 * KVM_SET_SIGNAL_MASK so the hot path only reprograms KVM when replay
+	 * starts or stops.
+	 */
+	bool  signal_mask_installed;
+	bool  signal_mask_blocks_timer;
+	/*
 	 * Snapshot of the KVM sync-regs mmap taken immediately after KVM_RUN
 	 * returns and before UML unblocks host signals. The vCPU pool member is
 	 * exclusively owned under migrate_disable() while this snapshot is used,

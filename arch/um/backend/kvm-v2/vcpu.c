@@ -88,6 +88,8 @@ static void kvm_v2_vcpu_pool_reset(void)
 		vcpus[i].kvm_run      = NULL;
 		vcpus[i].kvm_run_size = 0;
 		vcpus[i].cpu          = -1;
+		vcpus[i].signal_mask_installed = false;
+		vcpus[i].signal_mask_blocks_timer = false;
 		memset(&vcpus[i].run_regs, 0, sizeof(vcpus[i].run_regs));
 		memset(&vcpus[i].run_sregs, 0, sizeof(vcpus[i].run_sregs));
 		vcpus[i].run_exit_reason = 0;
@@ -772,15 +774,16 @@ static int kvm_v2_install_xcrs(int vcpu_fd)
 }
 
 /*
- * Install the per-vCPU signal mask before first KVM_RUN.
+ * Install or update the per-vCPU signal mask before KVM_RUN.
  *
- * Keep SIGALRM unblocked so UML's timer can preempt KVM_RUN. Block other
- * host signals so they are delivered through UML's normal return-to-user
- * handling rather than interrupting arbitrary kernel code mid-ioctl. On
- * SMP, also leave the UML IPI signal unblocked so remote TLB kicks can
- * force KVM_RUN to return.
+ * Normal execution keeps SIGALRM unblocked so UML's timer can preempt
+ * KVM_RUN. Replay blocks SIGALRM so timer delivery cannot create an
+ * unrecorded in-guest EINTR point. Block other host signals in both modes so
+ * they are delivered through UML's normal return-to-user handling rather than
+ * interrupting arbitrary kernel code mid-ioctl. On SMP, leave the UML IPI
+ * signal unblocked so remote TLB kicks can force KVM_RUN to return.
  */
-static int kvm_v2_install_signal_mask(int vcpu_fd)
+static int kvm_v2_set_signal_mask(struct kvm_v2_vcpu *vcpu, bool block_timer)
 {
 	struct {
 		__u32 len;
@@ -791,8 +794,13 @@ static int kvm_v2_install_signal_mask(int vcpu_fd)
 	sigset_t set;
 	int rc;
 
+	if (vcpu->signal_mask_installed &&
+	    vcpu->signal_mask_blocks_timer == block_timer)
+		return 0;
+
 	sigfillset(&set);
-	sigdelset(&set, SIGALRM);  /* timer-driven preemption */
+	if (!block_timer)
+		sigdelset(&set, SIGALRM);  /* timer-driven preemption */
 #if IS_ENABLED(CONFIG_SMP)
 	/*
 	 * Also unblock IPI_SIGNAL during KVM_RUN so a remote vCPU's
@@ -803,17 +811,19 @@ static int kvm_v2_install_signal_mask(int vcpu_fd)
 #endif
 	memcpy(mask.sigset, &set, sizeof(sigset_t));
 
-	rc = os_ioctl_generic(vcpu_fd, KVM_SET_SIGNAL_MASK,
+	rc = os_ioctl_generic(vcpu->vcpu_fd, KVM_SET_SIGNAL_MASK,
 			      (unsigned long)&mask);
 	if (rc < 0) {
 		pr_err("um: kvm-v2 install_sigmask: KVM_SET_SIGNAL_MASK(vcpu_fd=%d) failed (%d)\n",
-		       vcpu_fd, rc);
+		       vcpu->vcpu_fd, rc);
 		return rc;
 	}
-	pr_debug("um: kvm-v2 install_sigmask: vcpu_fd=%d (sigfillset minus SIGALRM%s)\n",
-		 vcpu_fd,
-		 IS_ENABLED(CONFIG_SMP) ? ", IPI_SIGNAL" : "");
-	trace_um_backend_kvm_v2_sigmask_install(vcpu_fd);
+	vcpu->signal_mask_installed = true;
+	vcpu->signal_mask_blocks_timer = block_timer;
+	pr_debug("um: kvm-v2 install_sigmask: vcpu_fd=%d (SIGALRM %s%s)\n",
+		 vcpu->vcpu_fd, block_timer ? "blocked" : "unblocked",
+		 IS_ENABLED(CONFIG_SMP) ? ", IPI_SIGNAL unblocked" : "");
+	trace_um_backend_kvm_v2_sigmask_install(vcpu->vcpu_fd, block_timer);
 	return 0;
 }
 
@@ -882,6 +892,8 @@ static void kvm_v2_vcpu_init_slot(struct kvm_v2_vcpu *v, int cpu, int vcpu_fd,
 	v->kvm_run      = kvm_run;
 	v->kvm_run_size = (u32)mmap_size;
 	v->cpu          = cpu;
+	v->signal_mask_installed = false;
+	v->signal_mask_blocks_timer = false;
 
 	/*
 	 * CPUID install is deferred to first KVM_RUN because the supported CPUID
@@ -938,7 +950,7 @@ static int kvm_v2_vcpu_finish_setup(struct kvm_v2_vcpu *v)
 	if (rc < 0)
 		return rc;
 
-	rc = kvm_v2_install_signal_mask(v->vcpu_fd);
+	rc = kvm_v2_set_signal_mask(v, false);
 	if (rc < 0)
 		return rc;
 
@@ -1367,6 +1379,22 @@ static void kvm_v2_apply_record_time_policy(struct kvm_sregs *sregs)
 		sregs->cr4 |= X86_CR4_TSD;
 	else
 		sregs->cr4 &= ~X86_CR4_TSD;
+#endif
+}
+
+static void kvm_v2_apply_record_signal_policy(struct kvm_v2_vcpu *vcpu)
+{
+#ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+	bool replay = static_branch_unlikely(&um_kvm_v2_record_enabled) &&
+		      kvm_v2_record_replay_active();
+	int rc;
+
+	rc = kvm_v2_set_signal_mask(vcpu, replay);
+	if (rc < 0)
+		panic("kvm-v2: record signal policy (cpu=%d replay=%d) failed: %d",
+		      vcpu->cpu, replay, rc);
+#else
+	(void)vcpu;
 #endif
 }
 
@@ -1986,6 +2014,7 @@ static void kvm_v2_prepare_vcpu_entry(struct uml_pt_regs *regs,
 
 	kvm_v2_prime_vcpu_for_run(vcpu, cpu);
 	kvm_v2_sync_current_mm_for_run();
+	kvm_v2_apply_record_signal_policy(vcpu);
 
 	(void)kvm_v2_load_user_sregs(vcpu,
 				     __pa(current->active_mm->pgd),
