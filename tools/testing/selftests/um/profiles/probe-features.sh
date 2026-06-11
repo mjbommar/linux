@@ -72,6 +72,7 @@ probe debugfs_um_stats        /sys/kernel/debug/um/stats
 probe debugfs_kcov            /sys/kernel/debug/kcov
 probe debugfs_kfence          /sys/kernel/debug/kfence/stats
 probe debugfs_kcsan           /sys/kernel/debug/kcsan
+probe debugfs_kmsan           /sys/kernel/debug/kmsan
 # tracefs: `mount -t tracefs` fails silently above if the kernel
 # doesn't register tracefs. available_tracers is created by ftrace
 # init and is present iff tracing is usable.

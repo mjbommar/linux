@@ -1011,7 +1011,8 @@ Acceptance gates:
 - Profile config build matrix. Current status: config-generation PASS on
   2026-06-10 for all 10 kernel Kconfig profiles in a clean temporary worktree;
   full per-profile kernel builds remain open. The `research-kmsan` profile is
-  now documented and listed in `make ARCH=um help`.
+  now documented, listed in `make ARCH=um help`, and included in the runtime
+  profile-probe harness when its LLVM-built binary is present.
 - `umlbuild` profile resolution. Current status: PASS on 2026-06-10 for all
   5 built-in `umlbuild profile show` profiles.
 - ftrace smoke. Current status: PASS on 2026-06-10 for a clean-worktree UML

@@ -353,7 +353,9 @@ Current profile evidence:
 - all 10 kernel profiles pass clean-worktree config generation through
   `make ARCH=um O=<out> uml/<profile>`;
 - all 5 `umlbuild` profiles resolve through `umlbuild profile show`;
-- `research-kmsan` is now documented and listed in `make ARCH=um help`; and
+- `research-kmsan` is now documented, listed in `make ARCH=um help`, and
+  covered by the profile runtime-probe harness when an LLVM-built
+  `/tmp/uml-profile-research-kmsan/linux` binary is present; and
 - full per-profile kernel builds and runtime feature probes remain open.
 
 Current instrumentation evidence:

@@ -8,7 +8,7 @@
 # profile delivered the feature set its documentation promises.
 #
 # Expected-feature sets per profile are encoded in assert_profile()
-# below. Running this on a tree that built all 8 profiles should
+# below. Running this on a tree that built all 10 profiles should
 # print one PASS per profile and exit 0.
 #
 # Environment:
@@ -31,16 +31,6 @@ probe_profile() {
 	local binary="$ROOT/uml-profile-$profile/linux"
 	local out probe
 
-	# Use 512M: fuzz-deep and research carry KASAN + heavy
-	# sanitizer/debug surface and OOM at 64M, borderline at 128M.
-	# 40s timeout: KCSAN (race profile) adds several seconds of
-	# lockdep/selftest init at boot before the probe runs.
-	# panic=0 keeps the kernel from instantly restarting if
-	# init fails to launch, so the failure path's printk output
-	# has a chance to flush to our captured fd before UML exits.
-	# loglevel=8 forces pr_info/debug into the console output so
-	# the "Run /path/to/init as init process" line (KERN_INFO)
-	# is visible.
 	local rc
 	# probe-features.sh writes its output to both stdout AND
 	# the hostfs path `/tmp/uml-probe-output`. Clear the file
@@ -150,15 +140,17 @@ run_one() {
 	# If the operator built only a subset of profiles (as CI
 	# does via the per-profile matrix), the missing ones are a
 	# clean SKIP, not a test failure. Return 0 so the caller's
-	# `|| any_fail=1` guard doesn't trip.
+# `|| any_fail=1` guard doesn't trip.
 	if [ ! -x "$binary" ]; then
 		local o="$ROOT/uml-profile-$profile"
+		skipped=$((skipped + 1))
 		printf 'SKIP %s (binary %s not built; run:\n' "$profile" "$binary"
 		printf '       make ARCH=um O=%s uml/%s &&\n' "$o" "$profile"
 		printf '       make ARCH=um O=%s -j$(nproc))\n' "$o"
 		return 0
 	fi
 
+	ran=$((ran + 1))
 	probe=$(probe_profile "$profile") || return $?
 	assert_profile "$profile" "$probe" "$@"
 }
@@ -167,12 +159,14 @@ run_one() {
 #
 # Features we probe:
 #   debugfs_um, debugfs_um_hooks, debugfs_um_stats, debugfs_kcov,
-#   tracefs, tracefs_syscalls, tracefs_user_events,
-#   proc_kcore, proc_sysrq.
+#   debugfs_kfence, debugfs_kcsan, debugfs_kmsan, tracefs,
+#   tracefs_syscalls, tracefs_user_events, proc_kcore, proc_sysrq.
 #
 # Each profile asserts what its documentation / fragment promises.
 
 any_fail=0
+ran=0
+skipped=0
 
 # prod-fast: everything OFF; proc_kcore stays on (base). No sandbox
 # tightening yet (that's C-follow-up) so the disable list is modest.
@@ -203,6 +197,17 @@ run_one research \
 	tracefs_syscalls=PRESENT \
 	tracefs_user_events=PRESENT \
 	proc_kcore=PRESENT \
+	proc_sysrq=PRESENT \
+	|| any_fail=1
+
+# research-kmsan: research-like debug and tracing, with KMSAN instead of KASAN.
+run_one research-kmsan \
+	debugfs_um=PRESENT \
+	debugfs_kmsan=PRESENT \
+	debugfs_kcov=ABSENT \
+	tracefs=PRESENT \
+	tracefs_syscalls=PRESENT \
+	tracefs_user_events=PRESENT \
 	proc_sysrq=PRESENT \
 	|| any_fail=1
 
@@ -257,10 +262,13 @@ run_one time-travel \
 	tracefs_user_events=PRESENT \
 	|| any_fail=1
 
-if [ $any_fail -eq 0 ]; then
-	echo 'All profile feature checks PASS'
+if [ $any_fail -eq 0 ] && [ $ran -gt 0 ]; then
+	echo "Profile feature checks PASS (ran=$ran skipped=$skipped)"
 	exit 0
+elif [ $any_fail -eq 0 ]; then
+	echo "SKIP all profile feature checks (no profile binaries under $ROOT)"
+	exit 4
 else
-	echo 'One or more profile checks FAILED'
+	echo "One or more profile checks FAILED (ran=$ran skipped=$skipped)"
 	exit 1
 fi
