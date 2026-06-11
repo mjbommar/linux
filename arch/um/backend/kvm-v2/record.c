@@ -5,8 +5,8 @@
  * This file owns the in-memory record container and the bounded syscall log
  * used by the experimental replay path. The live KVM syscall dispatcher
  * observes and consumes syscall entries from this core; snapshot-backed record
- * start is present, but time, signal, and device determinism remain outside the
- * current supported surface.
+ * start is present, but the supported replay surface remains deliberately
+ * bounded by explicit syscall, time, signal, and external-I/O policy.
  */
 
 #include <linux/errno.h>
@@ -155,6 +155,41 @@ static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 	rec->strict_replay_failures = 0;
 	rec->last_replay_failure_syscall = -1;
 	rec->last_replay_failure_rc = 0;
+	rec->suppress_next_syscall = false;
+	rec->suppress_syscall_pid = 0;
+	rec->suppress_syscall_nr = 0;
+}
+
+static void kvm_v2_record_suppress_next_syscall(struct kvm_v2_record *rec,
+						unsigned long syscall_nr)
+{
+	if (!rec)
+		return;
+
+	mutex_lock(&rec->lock);
+	rec->suppress_next_syscall = true;
+	rec->suppress_syscall_pid = current->pid;
+	rec->suppress_syscall_nr = syscall_nr;
+	mutex_unlock(&rec->lock);
+}
+
+static bool kvm_v2_record_should_suppress_syscall_locked(struct kvm_v2_record *rec,
+							 unsigned long syscall_nr)
+{
+	if (!rec->suppress_next_syscall ||
+	    rec->suppress_syscall_pid != current->pid)
+		return false;
+
+	rec->suppress_next_syscall = false;
+	rec->suppress_syscall_pid = 0;
+
+	if (rec->suppress_syscall_nr != syscall_nr) {
+		rec->suppress_syscall_nr = 0;
+		return false;
+	}
+
+	rec->suppress_syscall_nr = 0;
+	return true;
 }
 
 static void kvm_v2_record_release_snapshot_locked(struct kvm_v2_record *rec)
@@ -473,6 +508,28 @@ bool kvm_v2_record_replay_active(void)
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_replay_active);
 
+bool kvm_v2_record_finish_replay_if_complete(struct kvm_v2_record *rec)
+{
+	bool complete = false;
+
+	if (!rec)
+		return false;
+
+	mutex_lock(&rec->lock);
+	if (rec->state == KVM_V2_RECORD_REPLAYING &&
+	    rec->buffer_replayed >= rec->buffer_used) {
+		rec->state = KVM_V2_RECORD_STOPPED;
+		complete = true;
+	}
+	mutex_unlock(&rec->lock);
+
+	if (complete)
+		kvm_v2_record_disarm(rec);
+
+	return complete;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_finish_replay_if_complete);
+
 static void kvm_v2_record_fill_syscall_args(u64 args[6],
 					    const struct uml_pt_regs *regs)
 {
@@ -488,16 +545,37 @@ static void kvm_v2_record_fill_syscall_args(u64 args[6],
 	args[5] = regs->gp[HOST_R9];
 }
 
-static bool kvm_v2_record_syscall_args_match(const u64 args[6],
-					     const struct uml_pt_regs *regs)
+static bool kvm_v2_record_payload_args_match(const u64 args[6],
+					     const struct uml_pt_regs *regs,
+					     unsigned long syscall_nr,
+					     unsigned int payload_arg)
 {
 	u64 replay_args[6];
+	unsigned int i;
 
 	if (!regs)
 		return true;
+	if (payload_arg >= 6)
+		return false;
 
 	kvm_v2_record_fill_syscall_args(replay_args, regs);
-	return !memcmp(args, replay_args, sizeof(replay_args));
+
+	switch (syscall_nr) {
+	case __NR_uname:
+		return true;
+	case __NR_getcwd:
+		return args[1] == replay_args[1];
+	default:
+		break;
+	}
+
+	for (i = 0; i < 6; i++) {
+		if (i == payload_arg)
+			continue;
+		if (args[i] != replay_args[i])
+			return false;
+	}
+	return true;
 }
 
 static void kvm_v2_record_account_syscall_locked(struct kvm_v2_record *rec)
@@ -550,6 +628,8 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 
 	mutex_lock(&rec->lock);
 	if (rec->state != KVM_V2_RECORD_RECORDING)
+		goto out_unlock;
+	if (kvm_v2_record_should_suppress_syscall_locked(rec, syscall_nr))
 		goto out_unlock;
 
 	if (rec->buffer_used + need > rec->buffer_size) {
@@ -716,8 +796,9 @@ int kvm_v2_record_consume_syscall_payload(struct kvm_v2_record *rec,
 	    cursor + entry->size > rec->buffer_used ||
 	    entry->syscall_payload.nr != (s32)syscall_nr ||
 	    entry->syscall_payload.arg_index >= 6 ||
-	    !kvm_v2_record_syscall_args_match(entry->syscall_payload.args,
-					      regs)) {
+	    !kvm_v2_record_payload_args_match(entry->syscall_payload.args,
+					      regs, syscall_nr,
+					      entry->syscall_payload.arg_index)) {
 		rc = -EILSEQ;
 		goto out_unlock;
 	}
@@ -1051,6 +1132,9 @@ static int kvm_v2_record_debugfs_command(char *buf)
 		if (rc < 0)
 			goto out_unlock;
 		rc = kvm_v2_record_start_with_snapshot(kvm_v2_record_debugfs_rec);
+		if (!rc)
+			kvm_v2_record_suppress_next_syscall(kvm_v2_record_debugfs_rec,
+							    __NR_write);
 	} else if (!strcmp(cmd, "stop")) {
 		if (!kvm_v2_record_debugfs_rec) {
 			rc = -ENOENT;

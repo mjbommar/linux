@@ -803,6 +803,9 @@ struct kvm_v2_record {
 	u64				strict_replay_failures;
 	long				last_replay_failure_syscall;
 	int				last_replay_failure_rc;
+	bool				suppress_next_syscall;
+	pid_t				suppress_syscall_pid;
+	unsigned long			suppress_syscall_nr;
 	struct mutex			lock;
 };
 
@@ -823,6 +826,7 @@ bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr);
 bool kvm_v2_record_syscall_supported(unsigned long syscall_nr);
 struct kvm_v2_record *kvm_v2_record_active(void);
 bool kvm_v2_record_replay_active(void);
+bool kvm_v2_record_finish_replay_if_complete(struct kvm_v2_record *rec);
 int kvm_v2_record_check_strict_syscall(struct kvm_v2_record *rec,
 				       unsigned long syscall_nr);
 void kvm_v2_record_set_gadget_bypass_page(void *gadget_state, bool on);

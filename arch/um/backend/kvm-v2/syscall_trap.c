@@ -1540,6 +1540,7 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 		rc = kvm_v2_record_consume_syscall(rec, syscall_nr, &served_ret);
 	if (rc > 0) {
 		regs->gp[HOST_AX] = (unsigned long)served_ret;
+		kvm_v2_record_finish_replay_if_complete(rec);
 		return true;
 	}
 

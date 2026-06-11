@@ -162,17 +162,16 @@ The strongest current KVM v2 evidence is:
   plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
-  record start, and records 3067 live KVM v2 syscall entries with 294432
+  record start, and records 3066 live KVM v2 syscall entries with 294336
   bytes used and 0 drops.
 - Experimental task-owned record smoke: the static `kvm-record-task` helper
   runs as a single guest process, writes the debugfs `start` command itself,
   verifies `snapshot_source_pid == first_syscall_pid == last_syscall_pid`,
-  requires `syscalls_from_other_tasks=0`, and records two payload entries:
-  a 390-byte `uname(2)` payload and a 2-byte `getcwd(2)` path payload for the
-  focused workload. This closes the first R/R-1 session-start,
-  payload-model, and strict unsupported-syscall fail-closed gates for the
-  selected syscall subset, but does not yet prove full deterministic workload
-  replay.
+  requires `syscalls_from_other_tasks=0`, records two payload entries
+  totaling 392 bytes, then replays the same 386-entry task-owned workload from
+  the snapshot-backed log. This closes the first R/R-1 session-start,
+  payload-model, deterministic workload replay, and strict
+  unsupported-syscall fail-closed gates for the selected syscall subset.
 - Experimental record clock bench: `kvm-record-clock-bench` passes with
   `N=100`, `observed=100`, `replayed=100`, and `mismatches=0`, proving the
   KVM v2 record log can round-trip time-travel clock advances.
@@ -530,9 +529,11 @@ CR4.TSD so user `RDTSC`/`RDTSCP` faults. Replay mode blocks `SIGALRM` at the
 KVM vCPU signal mask while inside `KVM_RUN`, so timer delivery is deferred to
 the post-exit UML signal path rather than becoming an unrecorded in-guest
 interruption point. Randomness and external I/O syscalls outside the supported
-subset are also fail-closed in strict replay. Replayable raw-time payloads,
-explicit signal-event ordering, replayable device/network/hostfs events, and
-workload-level replay smokes remain open.
+subset are also fail-closed in strict replay. The task-owned smoke now proves
+deterministic replay for the bounded 386-entry scalar plus
+`uname(2)`/`getcwd(2)` payload workload. Replayable raw-time payloads, explicit
+signal-event ordering, replayable device/network/hostfs events, and a live
+strict-divergence smoke remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field

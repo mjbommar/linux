@@ -71,6 +71,14 @@ static int write_ctl(const char *cmd)
 	return written == (ssize_t)len ? 0 : -1;
 }
 
+static int write_ctl_fd(int fd, const char *cmd)
+{
+	size_t len = strlen(cmd);
+	ssize_t written = write(fd, cmd, len);
+
+	return written == (ssize_t)len ? 0 : -1;
+}
+
 static int read_status(char *buf, size_t size)
 {
 	ssize_t n;
@@ -186,7 +194,12 @@ int main(void)
 	long last_pid;
 	long payload_entries;
 	long payload_bytes;
+	long replayed_entries;
+	long replayed_payload_entries;
+	long replayed_payload_bytes;
+	long replay_failures;
 	long sink;
+	int ctl_fd;
 
 	setup_mounts();
 
@@ -196,28 +209,35 @@ int main(void)
 		return 1;
 	}
 
-	if (write_ctl("start 1048576\n") < 0) {
-		printf("KVM_RECORD_TASK: FAIL start errno=%d\n", errno);
+	ctl_fd = open(CTL_PATH, O_WRONLY | O_CLOEXEC);
+	if (ctl_fd < 0) {
+		printf("KVM_RECORD_TASK: FAIL open ctl errno=%d\n", errno);
 		return 1;
 	}
-
-	if (expect_long("enabled", 1) < 0 ||
-	    expect_long("snapshot_task_state", 1) < 0 ||
-	    expect_long("snapshot_source_pid", pid) < 0) {
-		(void)write_ctl("stop\n");
-		(void)write_ctl("destroy\n");
+	if (write_ctl_fd(ctl_fd, "start 1048576\n") < 0) {
+		printf("KVM_RECORD_TASK: FAIL start errno=%d\n", errno);
+		(void)close(ctl_fd);
 		return 1;
 	}
 
 	sink = scalar_workload();
 
-	if (write_ctl("stop\n") < 0) {
+	if (write_ctl_fd(ctl_fd, "stop\n") < 0) {
 		printf("KVM_RECORD_TASK: FAIL stop errno=%d\n", errno);
+		(void)close(ctl_fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+	if (close(ctl_fd) < 0) {
+		printf("KVM_RECORD_TASK: FAIL close ctl errno=%d\n", errno);
 		(void)write_ctl("destroy\n");
 		return 1;
 	}
 
-	if (get_long("entries_recorded", &entries) < 0 ||
+	if (expect_long("enabled", 0) < 0 ||
+	    expect_long("snapshot_task_state", 1) < 0 ||
+	    expect_long("snapshot_source_pid", pid) < 0 ||
+	    get_long("entries_recorded", &entries) < 0 ||
 	    get_long("syscall_count", &syscalls) < 0 ||
 	    get_long("syscalls_from_snapshot_task", &same_task) < 0 ||
 	    get_long("syscalls_from_other_tasks", &other_tasks) < 0 ||
@@ -229,7 +249,8 @@ int main(void)
 		return 1;
 	}
 
-	if (entries <= 0 || syscalls <= 0 || same_task != syscalls ||
+	if (entries <= 0 || syscalls <= 0 || entries != syscalls ||
+	    same_task != syscalls ||
 	    other_tasks != 0 || first_pid != pid || last_pid != pid ||
 	    payload_entries < 2 || payload_bytes <= 390 || sink < 0) {
 		printf("KVM_RECORD_TASK: FAIL pid=%ld entries=%ld syscalls=%ld ",
@@ -242,6 +263,54 @@ int main(void)
 		return 1;
 	}
 
+	ctl_fd = open(CTL_PATH, O_WRONLY | O_CLOEXEC);
+	if (ctl_fd < 0) {
+		printf("KVM_RECORD_TASK: FAIL open replay ctl errno=%d\n", errno);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+	if (write_ctl_fd(ctl_fd, "replay\n") < 0) {
+		printf("KVM_RECORD_TASK: FAIL replay errno=%d\n", errno);
+		(void)close(ctl_fd);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
+	sink = scalar_workload();
+	if (close(ctl_fd) < 0) {
+		printf("KVM_RECORD_TASK: FAIL close replay ctl errno=%d\n", errno);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
+	if (expect_long("enabled", 0) < 0 ||
+	    get_long("entries_recorded", &entries) < 0 ||
+	    get_long("syscall_count", &syscalls) < 0 ||
+	    get_long("syscalls_from_snapshot_task", &same_task) < 0 ||
+	    get_long("syscalls_from_other_tasks", &other_tasks) < 0 ||
+	    get_long("entries_replayed", &replayed_entries) < 0 ||
+	    get_long("payload_entries_recorded", &payload_entries) < 0 ||
+	    get_long("payload_entries_replayed", &replayed_payload_entries) < 0 ||
+	    get_long("payload_bytes_recorded", &payload_bytes) < 0 ||
+	    get_long("payload_bytes_replayed", &replayed_payload_bytes) < 0 ||
+	    get_long("strict_replay_failures", &replay_failures) < 0) {
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
+	if (sink < 0 || replay_failures != 0 || replayed_entries != entries ||
+	    replayed_payload_entries != payload_entries ||
+	    replayed_payload_bytes != payload_bytes) {
+		printf("KVM_RECORD_TASK: FAIL replay entries=%ld/%ld ",
+		       replayed_entries, entries);
+		printf("payload_entries=%ld/%ld payload_bytes=%ld/%ld ",
+		       replayed_payload_entries, payload_entries,
+		       replayed_payload_bytes, payload_bytes);
+		printf("failures=%ld sink=%ld\n", replay_failures, sink);
+		(void)write_ctl("destroy\n");
+		return 1;
+	}
+
 	if (write_ctl("destroy\n") < 0) {
 		printf("KVM_RECORD_TASK: FAIL destroy errno=%d\n", errno);
 		return 1;
@@ -249,7 +318,8 @@ int main(void)
 
 	printf("KVM_RECORD_TASK: PASS pid=%ld entries=%ld syscalls=%ld ",
 	       pid, entries, syscalls);
-	printf("same=%ld other=%ld payload_entries=%ld payload_bytes=%ld sink=%ld\n",
-	       same_task, other_tasks, payload_entries, payload_bytes, sink);
+	printf("same=%ld other=%ld payload_entries=%ld payload_bytes=%ld ",
+	       same_task, other_tasks, payload_entries, payload_bytes);
+	printf("replayed=%ld sink=%ld\n", replayed_entries, sink);
 	return 0;
 }
