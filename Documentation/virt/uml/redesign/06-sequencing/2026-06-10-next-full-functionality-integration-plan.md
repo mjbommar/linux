@@ -1018,9 +1018,12 @@ Acceptance gates:
 
 - Build shim.
 - Unit or smoke test for take/exec/destroy. Current status:
-  `syzkaller-shim-smoke` PASS on 2026-06-10.
+  `syzkaller-shim-smoke` PASS on 2026-06-11 against rebuilt current-head
+  `e3a493eac9e5` (`7.1.0-rc7-00230-ge3a493eac9e5`).
 - End-to-end syzkaller-style command execution smoke. Current status:
-  `syzkaller-shim-smoke` PASS on 2026-06-10.
+  `syzkaller-shim-smoke` PASS on 2026-06-11. The smoke validates the
+  syzkaller-style take, `exec/1` stdout/stderr/exit frames, port-forward,
+  status, and destroy wire path through `umlctl`.
 - Crash capture smoke if practical.
 
 ## Workstream I: Profiles And Instrumentation
@@ -1566,7 +1569,7 @@ branch lands.
 | Pool exec | Successful command, stdout/stderr capture, exit-status preservation, timeout reporting, and helper cleanup validated | Public `exec/1` ABI documented; future stricter kernel argv transport assigned to `exec/2` | Closed for current completion claim |
 | Pool port-forward | Typed result/error handling validated | Validated against final networking mode | Mostly closed |
 | Vector2 | Present, experimental | Replacement-ready or claims reduced | Open |
-| Syzkaller shim | Present | End-to-end smoke | Open |
+| Syzkaller shim | Present with current-head take/exec/port-forward/status/destroy smoke | End-to-end syzkaller-style wire-path smoke | Closed for current shim wire path |
 | Profiles | Present; KMSAN runtime smoke closed for `research-kmsan` | Build/test matrix | Open |
 | Selftests | Broad, noisy | Curated suites | Open |
 | Docs/reports | Mixed current/stale | Truthful final status | Open |

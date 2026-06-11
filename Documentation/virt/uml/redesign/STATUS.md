@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, and vector2 1 MiB host-to-guest metric diagnostic.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, and current-HEAD syzkaller shim rerun.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -462,6 +462,10 @@ Current boundary:
 - `template-pause-pool-member-smoke` now tears down the full UML process group
   after the long-lived member reaches `MEMBER_DONE`, so the one-shot PASS does
   not leave an orphaned member process;
+- `syzkaller-shim-smoke` was rerun against rebuilt current-HEAD `./linux` at
+  `e3a493eac9e5` (`7.1.0-rc7-00230-ge3a493eac9e5`) and passes the shim source
+  contract plus the syzkaller-style take, `exec/1` stdout/stderr/exit frames,
+  port-forward, status, and destroy wire path through `umlctl`;
 - `template-pause-fork-smoke` now drives two SIGSTOP/SIGCONT cycles and
   observes two distinct child PIDs plus two master resume cycles;
 - `template-pause-fork-stress` passed its default gate with 540 kernel
@@ -552,9 +556,10 @@ Current boundary:
   `exec` observes the assigned `vec2.0` address, brings the link up, and
   reaches the host-side TAP with a one-packet ping.
 
-The 2026-06-11 pool/fork/syzkaller rerun is a focused current-HEAD regression
-pass. It does not replace the final integration matrix, and the same pool and
-syzkaller gates must still be rerun after any later KVM v2 or vector2 changes.
+The 2026-06-11 pool/fork/syzkaller rerun is focused current-HEAD regression
+evidence. The latest syzkaller-only rerun covers `e3a493eac9e5`. It does not
+replace the final integration matrix, and the same pool and syzkaller gates
+must still be rerun after any later KVM v2 or vector2 changes.
 
 Remaining pool/vector2 boundary:
 
