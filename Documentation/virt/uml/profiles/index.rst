@@ -35,6 +35,7 @@ Profiles
    prod-fast
    prod-with-hooks
    research
+   research-kmsan
    fuzz
    fuzz-deep
    race
@@ -69,6 +70,11 @@ Summary matrix
      - yes
      - yes
      - developer debugging or profiling
+   * - research-kmsan
+     - SECCOMP_ONLY
+     - yes
+     - yes
+     - uninitialized-memory debugging with KMSAN
    * - fuzz
      - SECCOMP_ONLY
      - yes (for KCOV)

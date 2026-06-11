@@ -10,13 +10,11 @@
 #   2. writing `function` to current_tracer succeeds
 #   3. a small syscall workload produces trace output (>100 lines)
 #   4. writing `nop` to current_tracer succeeds
-#   5. if CONFIG_FUNCTION_GRAPH_TRACER=y, `function_graph` tracer
-#      accepts writes, produces trace output, and disables cleanly
+#   5. function_graph is not advertised, because UML does not
+#      currently support fgraph return-address rewriting safely
 #   6. emits a single FTRACE_SMOKE: PASS|FAIL line and halts
 #
-# Requires CONFIG_FUNCTION_TRACER=y + CONFIG_DYNAMIC_FTRACE=y.  If
-# CONFIG_FUNCTION_GRAPH_TRACER=y is available, the script also
-# exercises the function-graph tracer.
+# Requires CONFIG_FUNCTION_TRACER=y + CONFIG_DYNAMIC_FTRACE=y.
 
 echo "FTRACE_SMOKE: init running"
 
@@ -60,37 +58,10 @@ if [ "$lines" -lt 100 ]; then
 	exit 1
 fi
 
-# function_graph sub-check. Only runs if the kernel advertises the
-# tracer via available_tracers.  Builds or profiles without graph
-# support skip this sub-check silently.
 if grep -qw function_graph "$T/available_tracers" 2>/dev/null; then
-	echo "FTRACE_SMOKE: function_graph tracer available"
-
-	echo > "$T/trace"
-	echo "function_graph" > "$T/current_tracer"
-	if [ $? -ne 0 ]; then
-		echo "FTRACE_SMOKE: FAIL cannot enable function_graph tracer"
-		halt -f 2>/dev/null
-		exit 1
-	fi
-	echo 1 > "$T/tracing_on"
-	ls / > /dev/null
-	echo 0 > "$T/tracing_on"
-	glines=$(wc -l < "$T/trace")
-	echo "nop" > "$T/current_tracer"
-	echo "FTRACE_SMOKE: function_graph trace has $glines lines"
-
-	# The preempt_count guard drops events for
-	# the atomic-context window, but a non-atomic `ls /` workload
-	# should still produce plenty of output. Use a lower
-	# threshold than the function-tracer check (the per-event
-	# format is bigger so total lines may be lower at similar
-	# event counts).
-	if [ "$glines" -lt 20 ]; then
-		echo "FTRACE_SMOKE: FAIL function_graph trace_lines=$glines (expected >20)"
-		halt -f 2>/dev/null
-		exit 1
-	fi
+	echo "FTRACE_SMOKE: FAIL function_graph advertised but unsupported on UML"
+	halt -f 2>/dev/null
+	exit 1
 fi
 
 echo "FTRACE_SMOKE: PASS trace_lines=$lines"

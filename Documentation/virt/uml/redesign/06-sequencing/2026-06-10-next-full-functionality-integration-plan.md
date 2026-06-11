@@ -942,9 +942,28 @@ Tasks:
 
 Acceptance gates:
 
-- Profile config build matrix.
-- Instrumentation smoke tests.
-- Documentation table with pass/fail/skip and rationale.
+- Profile config build matrix. Current status: config-generation PASS on
+  2026-06-10 for all 10 kernel Kconfig profiles in a clean temporary worktree;
+  full per-profile kernel builds remain open. The `research-kmsan` profile is
+  now documented and listed in `make ARCH=um help`.
+- `umlbuild` profile resolution. Current status: PASS on 2026-06-10 for all
+  5 built-in `umlbuild profile show` profiles.
+- ftrace smoke. Current status: PASS on 2026-06-10 for a clean-worktree UML
+  build with normal dynamic function tracing and no function-graph tracer.
+  Function graph tracing is not part of the current supported UML surface
+  because its return-address rewriting still conflicts with UML task switching.
+- Hooks flip smoke. Current status: PASS on 2026-06-10 against the current
+  `./linux` build.
+- kprobes stress. Current status: SKIP on 2026-06-10 against the current
+  `./linux` build because `kretprobe_example.ko` was not built; rerun with a
+  research-profile build and sample module.
+- KMSAN smoke. Current status: SKIP on 2026-06-10 against the current
+  `./linux` build because it does not contain the KMSAN runtime; rerun with
+  `LLVM=1 uml/research-kmsan`.
+- KASAN/KFENCE/KCSAN/KCOV/BPF/JIT smoke matrix. Current status: open; each
+  needs a matching profile binary and module/runtime prerequisites.
+- Documentation table with pass/fail/skip and rationale. Current status:
+  partially updated in the live inventory; final docs matrix remains open.
 
 ## Workstream J: Selftest Curation
 

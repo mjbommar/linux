@@ -53,11 +53,10 @@ config UML
 	select HAVE_DYNAMIC_FTRACE if HAVE_FUNCTION_TRACER
 	select FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
 		if DYNAMIC_FTRACE
-	# HAVE_FUNCTION_GRAPH_TRACER depends on CC_FLAGS_FTRACE being
-	# stripped from arch/um's signal-dispatch + longjmp-entry TUs
-	# and on the notrace annotations in arch/um/kernel/signal.c's
-	# arch_local_irq_* helpers.
-	select HAVE_FUNCTION_GRAPH_TRACER if HAVE_FUNCTION_TRACER
+	# The normal function tracer is supported. Function graph tracing
+	# is not selected: its return-address rewriting still conflicts
+	# with UML's host-task stack switching and can corrupt the fgraph
+	# return stack under kernel-thread scheduling paths.
 	select HAVE_KPROBES if X86_64
 	# HAVE_RETHOOK auto-selects RETHOOK and turns on KRETPROBE_ON_RETHOOK,
 	# which is how modern x86_64 supplies KRETPROBES. No need

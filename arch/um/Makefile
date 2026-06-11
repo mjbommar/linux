@@ -155,8 +155,9 @@ define archhelp
   echo '		    real kernel binary, the "vmlinux" binary you'
   echo '		    find in the kernel root.'
   echo '  uml/<profile>   - Configure for a named UML profile'
-  echo '                    (prod-fast, prod-with-hooks, research, fuzz,'
-  echo '                    fuzz-deep, race, sandbox, embedded, time-travel).'
+  echo '                    (prod-fast, prod-with-hooks, research,'
+  echo '                    research-kmsan, fuzz, fuzz-deep, race,'
+  echo '                    sandbox, embedded, time-travel).'
   echo '                    See Documentation/virt/uml/profiles/.'
   echo '  uml/list-profiles - List available UML profile targets.'
 endef

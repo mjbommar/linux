@@ -37,6 +37,11 @@ This file is the live execution tracker for
   decision remains open.
 - `Present-needs-fix`: code exists on `next`, but a correctness, validation,
   documentation, or user-surface issue is known.
+- `Present-needs-runtime-builds`: profile/config source exists and configures,
+  but full kernel builds and runtime probes for those profiles remain open.
+- `Present-needs-profile-binary`: code exists, but the live smoke requires a
+  profile-specific binary or module that was not available in the current
+  checkout.
 - `Historical-only`: functionality exists only on one or more historical
   branches.
 - `Partial`: some of the feature exists on `next`, but required behavior is
@@ -110,10 +115,10 @@ This file is the live execution tracker for
 | Launcher | transparency tooling | Present-validated | `next`, `umlctl-deploy` | Keep. | `run-bpftrace-validate.sh` PASS: all five scripts attached; syscalls and sched produced idle UML data, 2026-06-10. |
 | Launcher | `umlbuild` | Present-validated | `next`, `umlctl-deploy` | Keep MVP smoke and the clean-source override path for developer trees with in-tree build products. | `run-umlbuild-mvp.sh` PASS with `UMLBUILD_SOURCE` set to a temporary clean worktree and prebuilt debug `umlbuild`/`umlctl`; direct boot and `umlctl up` both produced the expected guest sha256, 2026-06-10. |
 | Syzkaller | UML VM shim | Present-validated | `next`, `umlctl-deploy` | Keep the shim on request-specific lazy `pool take` plus the validated `umlctl` JSON contracts, including `exec/1` NDJSON frames. Future `exec/2` changes require a schema bump and shim update. | `syzkaller-shim-smoke` PASS: source contract check plus syzkaller-style take, exec output merge, port-forward, status, destroy, 2026-06-10. |
-| Profiles | profile configs | Partial | `next`, historical docs | Build and test matrix required. | profile build matrix. |
-| Instrumentation | kprobes | Present-needs-validation | `next` | Keep and test. | kprobes stress. |
-| Instrumentation | ftrace | Present-needs-validation | `next` | Keep and test. | ftrace smoke. |
-| Instrumentation | KMSAN | Present-needs-validation | `next` | Keep and test where config supports it. | KMSAN smoke. |
+| Profiles | profile configs | Present-needs-runtime-builds | `next`, historical docs | Keep the 10 kernel Kconfig profiles and the 5 `umlbuild` profiles; full per-profile kernel builds and runtime feature probes remain required before final completion. | Clean-worktree `make ARCH=um O=<out> uml/<profile>` config matrix PASS for all 10 kernel profiles, `research-kmsan` now documented and listed in arch help, and all 5 `umlbuild` profiles resolve with `umlbuild profile show`, 2026-06-10. |
+| Instrumentation | kprobes | Present-needs-profile-binary | `next` | Keep and test with a research-profile build that includes `samples/kprobes/kretprobe_example.ko`. | Current `./linux` has `CONFIG_KPROBES=y`/`CONFIG_KRETPROBES=y`, but `kprobes-stress` SKIPed because `kretprobe_example.ko` was not built, 2026-06-10. |
+| Instrumentation | ftrace | Present-validated | `next` | Keep normal dynamic function tracing; do not advertise function-graph tracing until the UML return-stack interaction is fixed. | Clean-worktree ftrace build with `FUNCTION_TRACER=y` and no `FUNCTION_GRAPH_TRACER` passed `ftrace-smoke` with 51,300 trace lines; `um/ftrace-smoke` now fails fast if a binary advertises unsupported `function_graph`, 2026-06-10. |
+| Instrumentation | KMSAN | Present-needs-profile-binary | `next` | Keep `research-kmsan`; test with a clang/LLVM KMSAN profile binary. | `research-kmsan` config matrix PASS; current `./linux` `kmsan-smoke` SKIPed because the binary does not contain the KMSAN runtime, 2026-06-10. |
 | Instrumentation | KASAN/KCSAN/KFENCE/KCOV | Partial/needs-validation | `next`, docs | Verify each profile and document gaps. | instrumentation matrix. |
 | Instrumentation | BPF/JIT shims | Present-needs-validation | `next` | Keep if tests pass and docs are accurate. | BPF smoke if available. |
 | Instrumentation | KGDB | Needs-decision | original plan/docs | Implement, document absent, or retire with approval. | KGDB smoke if kept. |

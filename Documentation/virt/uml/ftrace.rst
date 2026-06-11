@@ -83,36 +83,17 @@ they leave ``CONFIG_FTRACE`` off.
 Function graph
 ==============
 
-``HAVE_FUNCTION_GRAPH_TRACER`` landed in workstream C-04 commit 3b
-(``e0361af1c605``, 2026-04-22). The research profile enables it
-via ``CONFIG_FUNCTION_GRAPH_TRACER=y`` and the generic
-``function_graph`` tracer is reachable as ``echo function_graph >
-/sys/kernel/tracing/current_tracer`` from inside a booted guest.
-
-Commit 3a (``858f25db662d``, 2026-04-21) prepared the way by
-closing the three shadow-stack leak sources D34 identified:
-``notrace`` on generic ``kthread()`` / ``smpboot_thread_fn()``
-plus a narrow ``CFLAGS_REMOVE_<file>.o`` strip set on UML's
-signal-dispatch and longjmp-entry TUs. Commit 3b added the
-``ftrace_graph_caller`` / ``return_to_handler`` trampolines in
-``arch/um/kernel/mcount.S``, ``prepare_ftrace_return()`` in
-``arch/um/kernel/ftrace.c``, and the Kconfig select.
-
-One UML-specific quirk remains: ``prepare_ftrace_return()`` skips
-the shadow-stack push when ``preempt_count`` is non-zero. UML-UP
-builds with ``TINY_RCU``, where ``rcu_read_lock()`` is
-``preempt_disable()``, so a graph-traced function body that takes
-a sleeping lock while an outer ``rcu_read_lock`` is held would
-otherwise trip ``__might_resched`` under ``PROVE_LOCKING``. The
-guard loses graph events only for that narrow window; the traced
-function still executes and all events outside atomic context are
-still captured. See D34 addendum-3 / addendum-4 for the full
-analysis. D27 (original defer-the-graph decision) is superseded
-by the 3a/3b series.
+UML does not currently select ``HAVE_FUNCTION_GRAPH_TRACER``.
+The normal function tracer is supported, but fgraph's return-address
+rewriting is not safe across UML's host-task stack switching. Builds
+that advertise ``function_graph`` are treated as unsupported by the
+``um/ftrace-smoke`` selftest.
 
 What is not supported yet
 =========================
 
+- ``HAVE_FUNCTION_GRAPH_TRACER``: disabled until the return-stack
+  interaction with UML task switching is repaired.
 - ``HAVE_DYNAMIC_FTRACE_WITH_REGS`` / ``_WITH_ARGS`` /
   ``_WITH_DIRECT_CALLS``: not yet implemented. The minimal port
   in C-05 ships only the basic function tracer. REGS is expected

@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 launcher, deploy, and umlbuild validation.
+Last updated: 2026-06-10 profiles, ftrace, launcher, and umlbuild validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -302,6 +302,31 @@ developer-facing paths:
 
 The active deployment path is `umlctl up/down` with Umlfile parsing, not a
 separate `deploy` subcommand.
+
+## Profiles And Instrumentation
+
+The active profile surface has two layers:
+
+- 10 kernel Kconfig profiles under `arch/um/configs/profiles/`;
+- 5 `umlbuild` TOML profiles under `tools/uml/uml-launcher/profiles/`.
+
+Current profile evidence:
+
+- all 10 kernel profiles pass clean-worktree config generation through
+  `make ARCH=um O=<out> uml/<profile>`;
+- all 5 `umlbuild` profiles resolve through `umlbuild profile show`;
+- `research-kmsan` is now documented and listed in `make ARCH=um help`; and
+- full per-profile kernel builds and runtime feature probes remain open.
+
+Current instrumentation evidence:
+
+- normal dynamic ftrace is validated by a clean-worktree UML build that passes
+  `ftrace-smoke` with `FUNCTION_TRACER=y` and no `FUNCTION_GRAPH_TRACER`;
+- UML no longer advertises function graph tracing because the fgraph
+  return-address rewriting path is not safe across UML task switching;
+- `hooks-flip` passes against the current `./linux` build; and
+- kprobes, KMSAN, KASAN/KFENCE/KCSAN/KCOV, and BPF/JIT still require the
+  matching profile binaries/modules for runtime closure.
 
 ## Historical-Only Work
 
