@@ -4,31 +4,33 @@ Date: 2026-06-11
 
 Branch target: `next`
 
-Functional code baseline used for this plan refresh:
+Current branch baseline before this ease-order docs refresh:
 
-- `next`: `bb092119158b`
-- `origin/next`: `bb092119158b`
-- `torvalds/master`: `9716c086c8e8`
-- latest fetched Linus ref for this refresh: `FETCH_HEAD=9716c086c8e8`
-- `FETCH_HEAD...next`: `0` commits behind, `196` commits ahead
+- `next`: `aaed0a9c22f7`
+- `origin/next`: `aaed0a9c22f7`
+- `torvalds/master`: `2b414a95b8f7`
+- latest fetched Linus ref for this refresh: `FETCH_HEAD=2b414a95b8f7`
+- `FETCH_HEAD...next`: `0` commits behind, `202` commits ahead
 - upstream ancestry: the fetched Linus ref is an ancestor of `next`
-- branch state before this plan/tooling refresh: `next` matched `origin/next`
-- note: this is the functional code baseline; planning/tooling refresh
+- branch state before this ease-order refresh: `next` matched `origin/next`
+- note: this is the pre-refresh branch baseline; planning/tooling refresh
   commits may sit above it.
 
 Current execution evidence added on 2026-06-11:
 
-- refreshed this plan after the branch reached `bb092119158b` and a fresh
-  fetch of Linus' `master` confirmed `9716c086c8e8` as the upstream base used
+- refreshed this plan after the branch reached `aaed0a9c22f7` and a fresh
+  fetch of Linus' `master` confirmed `2b414a95b8f7` as the upstream base used
   for the comparison above;
+- merged Linus' `master` into `next`, rebuilt UML, and passed the focused
+  `um_vector2_*` KUnit sanity check on the post-merge binary;
 - cleaned KVM v2 state comments and x86 UML ptrace TLS register handling in
   active source;
 - tightened the substrate gate and recorded CPython tier-0 evidence through
   `umlctl gate run` for both seccomp and KVM v2;
 - documented KGDB as deferred-not-present rather than a current UML v2
   instrumentation feature;
-- rebuilt `./linux` from `next` at `bb092119158b`;
-- rebuilt kernel version: `7.1.0-rc7-00261-gbb092119158b`;
+- rebuilt `./linux` from `next` at `bb092119158b` before the upstream merge;
+- post-merge rebuilt kernel version: `7.1.0-rc7-00350-gb1c2aad96149`;
 - focused pool/fork/syzkaller regression pass recorded in
   `2026-06-11-pool-fork-regression-pass.md`;
 - the pass covers template pause, fork smoke/stress, pool-member, replicated
@@ -428,21 +430,54 @@ they are implemented and validated, or explicitly retired with approval.
 | KGDB disposition | The original instrumentation list includes KGDB, but current UML does not select `HAVE_ARCH_KGDB` and no live profile fragment enables `CONFIG_KGDB`. | KGDB is deferred-not-present in the current completion tracker. Reintroduce it only with UML architecture support, backend register access, a transport decision, and a smoke test. |
 | Vector2 publication readiness | Vector2 has strong focused smoke evidence, and the measured guest-to-host TCP regression now passes the 0.85 gate after the TX/RX NAPI scheduling fix: vector2 median 37116.0 Mbps versus legacy 40080.5 Mbps, ratio 0.926. Lazy RX preserved that gate at ratio 0.993, and the latest current-branch explicit `net-bench` rerun passes at ratio 0.958 with `um_vector2_*` KUnit at 96 pass, 0 fail, and 2 trusted-TAP skips. The natural seccomp/vector2 Tier 3 long run now passes at 7221 seconds with 740/740 rows, no bad rows, all expected success markers, and clean post-run process/TAP cleanup. The fake-host KUnit backend mirrors production fd/TAP lazy RX batching, and the latest no-TX-write-IRQ slice removes permanent TAP/fd `IRQ_WRITE` registration in favor of a bounded retry timer for no-progress TX polls. Its focused 1 MiB host-to-guest fd/multiqueue rerun improved the host-side median vector2/vector ratio from the prior 0.650602 sweep result to 0.899069, while transfer-window perf ratios showed vector2 at 0.315536x legacy vector syscalls, 0.362255x task-clock, and 0.205458x context switches. This is bounded progress, not final publication closure: vector2 still trails on best host throughput at 0.682038x and remains about 1.916x legacy vector on scheduler pcount/voluntary context-switch deltas. Current-head repeat-2 UDP matrices pass for buffered unpaced 1 MiB UDP and paced 8 MiB UDP in both directions. Unpaced larger host-to-guest UDP remains bounded by earlier exact-byte loss. Replacement/publication still needs the rest of P4.3 plus KVM-v2 Tier 3 and fairness evidence. | Finish equivalent KVM v2 Tier 3 networking, broader host-to-guest repeat/fairness coverage using the fixed-byte diagnostics, final UDP acceptance notes, steady-state syscall-rate, full CPU-utilisation, and multiqueue fairness/performance evidence. Keep parser-only transports out of runtime claims and keep vector2 opt-in until the evidence justifies stronger language. |
 | KVM v2 final workload breadth | KVM v2 is past architecture unknowns, but publication still needs broader dynamic-userspace and final-vector2 workload evidence. | Run Tier 3 and selected CPython/substrate gates on the final tree, including dynamic userspace beyond `/bin/true` and `dyn-loader`. |
-| Pool/fork-server final regression pass | The rebuilt current-HEAD `bb092119158b` binary passes the focused pool/fork/syzkaller regression set, including warm-pool, replicated sustained-pool, pool benchmark, syzkaller shim, and vector2 pool TAP. Final validation must still be rerun after later KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
+| Pool/fork-server final regression pass | The pre-merge rebuilt `bb092119158b` binary passes the focused pool/fork/syzkaller regression set, including warm-pool, replicated sustained-pool, pool benchmark, syzkaller shim, and vector2 pool TAP. Final validation must still be rerun after later KVM/vector2 changes and after the upstream merge. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
 | Active cleanup | The branch must read like normal kernel work. Active code cannot carry private issue numbers, phase diaries, or random branch history. | Review scans over active source, selftests, launcher, active UML docs, live status, and current vector2 trackers; archive or remove stale material. |
 | Final validation matrix | Individual smokes do not prove the branch as a product. | Run the final integration gate and record exact pass/fail/skip, commit, upstream base, retired/deferred items, and push confirmation. |
 
 ## Execution Slice Plan From Current Head
 
-The plan from `bb092119158b` is to finish one high-risk surface at a time and
-push after each validated slice. The ordering is intentional: record/replay
-changes can affect KVM syscall dispatch and time/signal handling, while vector2
-publication still depends on long-run and performance/fairness evidence. The
-measured guest-to-host TCP blocker is now closed and protected by the lazy-RX
-cleanup. The no-TX-write-IRQ slice materially improves the 1 MiB
+The current pushed head is `aaed0a9c22f7`, which includes Linus
+`torvalds/master` through `2b414a95b8f7`. Work should proceed from easiest to
+hardest so the branch keeps gaining durable closure while preserving focus for
+the expensive gates.
+
+The chronological slice table below records the major surfaces. The practical
+execution overlay is:
+
+1. **Branch hygiene and documentation alignment.** Keep `next == origin/next`,
+   keep Linus' fetched `master` as an ancestor, remove stale current-head
+   wording, and update status docs after each landed slice.
+2. **Active cleanup and explicit dispositions.** Finish cheap source, selftest,
+   launcher, and user-doc scans first. KGDB and historical-only experiments
+   should be either explicitly deferred or reintroduced with real code and
+   tests, not left as ambiguous original-plan promises.
+3. **Lightweight reruns.** Rerun fast KUnit, launcher, help-text, and focused
+   smoke gates after upstream merges or cleanup patches.
+4. **Profile and instrumentation matrix.** Rerun the profile config/build and
+   sanitizer/instrumentation checks, including KMSAN regression protection.
+5. **Pool, fork-server, and syzkaller final rerun.** Revalidate these after the
+   easier cleanup and profile work, but before the longest networking and KVM
+   soaks.
+6. **Vector2 publication matrix.** Finish KVM-v2 Tier 3 networking,
+   host-to-guest repeat/fairness, UDP acceptance, steady-state syscall-rate,
+   full CPU-utilisation, and multiqueue fairness/performance evidence. The
+   seccomp/vector2 natural long-soak gate is already closed for its tested
+   tree.
+7. **KVM v2 final workload breadth and long soak.** Broaden dynamic userspace
+   on the final vector2 stack and complete the natural 24-hour KVM v2 soak.
+8. **Record/replay tier closure.** This remains the hardest mission-level
+   implementation decision: either complete the bounded R/R-1 tier with
+   broader workload, signal, time, and device policy coverage, or explicitly
+   exclude record/replay from the final completion claim.
+9. **Upstream queue and final integration gate.** Regenerate patch boundaries,
+   cover letters, reports, and the final validation record only after the
+   implementation and validation surfaces above are stable.
+
+The measured guest-to-host TCP blocker is now closed and protected by the
+lazy-RX cleanup. The no-TX-write-IRQ slice materially improves the 1 MiB
 host-to-guest fd/multiqueue median, so remaining vector2 work should confirm
-that improvement under broader repeats, fairness, CPU/syscall, seccomp/KVM
-Tier 3, and long-run gates before treating the publication matrix as closed.
+that improvement under broader repeats, fairness, CPU/syscall, and KVM-v2
+Tier 3 gates before treating the publication matrix as closed.
 
 | Slice | Target | Implementation outcome | Required validation before commit |
 | --- | --- | --- | --- |
@@ -656,7 +691,7 @@ Current state:
 - Template pause, fork-on-resume, pool spawn, pool serve, pool take, daemon
   exec, ready members, pool benchmark, port-forward, and syzkaller shim all
   have current smoke evidence.
-- The 2026-06-11 current-HEAD rerun on rebuilt `bb092119158b` also covers
+- The 2026-06-11 pre-merge rerun on rebuilt `bb092119158b` also covers
   replicated sustained-pool mode, pivot mode, per-member mconsole path
   synthesis, full pool-bench, and syzkaller-style take/exec/port-forward/
   status/destroy.

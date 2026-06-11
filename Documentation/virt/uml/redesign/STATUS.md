@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 host-to-guest parameter/topology sweep, vector2 fake RX batch fidelity, vector2 TX write-ready IRQ suppression/retry-timer validation, current-HEAD syzkaller shim rerun, active selftest wording cleanup, clean KVM v2 state-trace diagnostics, pool exec mconsole readiness timeout alignment, refreshed vector2 current-head validation, natural seccomp/vector2 Tier 3 soak closure, and post-upstream-merge vector2 KUnit sanity.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, pre-merge pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay policy evidence, live raw-time supported-entry mismatch evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, live replay direct-syscall and UML-vDSO-wrapper `clock_gettime(2)`/`gettimeofday(2)`/`time(2)` payload evidence, live task-owned direct raw-time replay evidence, expanded task-owned raw-time argument-shape evidence, live replay external-I/O fail-closed evidence, current-branch umlctl operational confirmation, umlctl example schema refresh, bounded raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 buffered unpaced UDP evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 privileged perf-stat smoke, vector2 transfer-window perf-stat support and aggregate outputs, vector2 1 MiB host-to-guest metric diagnostic, vector2 host-to-guest parameter/topology sweep, vector2 fake RX batch fidelity, vector2 TX write-ready IRQ suppression/retry-timer validation, pre-merge syzkaller shim rerun, active selftest wording cleanup, clean KVM v2 state-trace diagnostics, pool exec mconsole readiness timeout alignment, refreshed vector2 current-head validation, natural seccomp/vector2 Tier 3 soak closure, post-upstream-merge vector2 KUnit sanity, and easiest-to-hardest completion sequencing.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -289,6 +289,12 @@ hardening also pins debug-register state, saves/restores pending vCPU events,
 and keeps CPUID xstate leaves consistent with the exposed feature set.
 
 Remaining validation before publication or completion:
+
+The execution order is now cheapest durable closure first, with the detailed
+ladder in `06-sequencing/2026-06-11-next-completion-execution-plan.md`:
+cleanup/dispositions, lightweight reruns, profiles/instrumentation,
+pool/fork/syzkaller reruns, vector2 publication breadth, KVM v2 final workload
+and long-soak evidence, then record/replay tier closure and upstream packaging.
 
 - broaden the dynamic-userspace closure beyond `/bin/true` and the
   dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
@@ -620,13 +626,13 @@ Current boundary:
   `template-pause-pool-sustained-smoke` with replication,
   `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`,
   `pool-port-forward-smoke`, `pool-mconsole-path-probe`, `pool-bench`, and
-  `syzkaller-shim-smoke` pass against the rebuilt current-HEAD `./linux`
+  `syzkaller-shim-smoke` pass against the rebuilt pre-merge `./linux`
   binary at `bb092119158b`
   (`7.1.0-rc7-00261-gbb092119158b`);
 - `template-pause-pool-member-smoke` now tears down the full UML process group
   after the long-lived member reaches `MEMBER_DONE`, so the one-shot PASS does
   not leave an orphaned member process;
-- `syzkaller-shim-smoke` was rerun against rebuilt current-HEAD `./linux` at
+- `syzkaller-shim-smoke` was rerun against rebuilt pre-merge `./linux` at
   `bb092119158b` (`7.1.0-rc7-00261-gbb092119158b`) and passes the shim source
   contract plus the syzkaller-style take, `exec/1`, port-forward, status, and
   destroy wire path through `umlctl`;
@@ -748,10 +754,11 @@ Current boundary:
   957.10 ms for vector2. The result proves the publication artifact shape,
   not the final CPU/syscall-rate claim.
 
-The 2026-06-11 pool/fork/syzkaller rerun is focused current-HEAD regression
+The 2026-06-11 pool/fork/syzkaller rerun is focused pre-merge regression
 evidence. The latest post-vector2 rerun covers `bb092119158b`. It does not
 replace the final integration matrix, and the same pool and syzkaller gates
-must still be rerun after any later KVM v2 or vector2 changes.
+must still be rerun after the upstream merge and any later KVM v2 or vector2
+changes.
 
 Remaining pool/vector2 boundary:
 
@@ -776,14 +783,14 @@ developer-facing paths:
 - an isolated current-branch lifecycle smoke against `./linux` passes through
   `umlctl create`, `start`, `ps`, `metrics`, `stop`, and `rm`, with no
   remaining files in the temporary state/runtime directories;
-- `umlctl-smoke` passes against the `bb092119158b` build, and
+- `umlctl-smoke` passes against the pre-merge `bb092119158b` build, and
   `launcher-smoke` passes against the current build;
 - with `UM_FORK_KERNEL=$PWD/linux`, `pool-serve-smoke`, `pool-exec-smoke`,
   `pool-port-forward-smoke`, `pool-mconsole-path-probe`, `pool-bench`, and
-  `syzkaller-shim-smoke` pass against the `bb092119158b` branch build. The
-  same tests can fail if they fall back to stale external fork-kernel artifacts
-  under `$HOME/src/uml-builds`, so current-branch validation should pin
-  `UM_FORK_KERNEL` to the rebuilt branch binary;
+  `syzkaller-shim-smoke` pass against the pre-merge `bb092119158b` branch
+  build. The same tests can fail if they fall back to stale external
+  fork-kernel artifacts under `$HOME/src/uml-builds`, so current-branch
+  validation should pin `UM_FORK_KERNEL` to the rebuilt branch binary;
 - `umlctl gate run --dry-run` passes against
   `tools/testing/selftests/um/gates/launcher-cargo.toml`;
 - `run-bpftrace-validate.sh` attaches all five transparency scripts, with
