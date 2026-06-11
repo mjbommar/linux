@@ -224,33 +224,24 @@ Current boundary:
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
 - `umlctl pool serve` now boots the master with replicated pool-member mode,
   maintains a separate `min_warm` ready queue, reports ready/taken/failed
-  counts in status, and exposes `pool take --ready` for consuming a
-  pre-identified ready member; `pool-serve-smoke` proves `--min-warm=1`
-  prefills one ready member, an anonymous ready take returns a live runnable
-  pid, the daemon replenishes the ready queue, request-specific lazy `take`
-  still returns a live runnable member, destroy makes members non-runnable,
-  and shutdown kills the master cleanly;
-- reduced `pool-bench` now passes all five gates with sparse-copied live
-  replicated children: p50 0.5 ms and p99 0.9 ms across 5 latency takes,
-  3/3 live RSS children at 148.6 MiB, 0.00% lifecycle RSS drift across 20
-  take/destroy cycles, and 150/150 throughput takes in a 3-second reduced
-  gate; the memory breakdown for that reduced gate was 133.6 MiB PSS,
-  16.5 MiB private dirty, and 6.7 MiB shared dirty;
-  raw benchmark take RPCs omit `mconsole`, while exec-capable takes request
-  the daemon-synthesized path explicitly;
-- the full default-scale `pool-bench` now runs to completion and passes 4/5
-  gates: p50 0.5 ms, p99 0.9 ms, 0.00% lifecycle drift across 10,000 cycles,
-  and 3000/3000 throughput takes all pass; 100/100 live replicated children
-  still consume 5,486.9 MiB RSS against the 200 MiB target, and the smaps
-  rollup shows this is dominated by real private memory rather than shared
-  text accounting: 4,119.8 MiB PSS, 3,964.5 MiB private dirty, and
-  186.8 MiB shared dirty;
-- RSS follow-up rejected the obvious local remap/cache tweaks: lazy final
-  remap was unstable across full runs, direct lazy remap left members as
-  zombies after settling, post-reinit `MADV_DONTNEED` regressed RSS and
-  liveness, and zero-chunk sparse-copy skipping did not materially change the
-  settled footprint; the remaining RSS blocker needs a different isolation
-  strategy or an explicit target revision;
+  counts in status, exposes `pool take --ready` for consuming a pre-identified
+  ready member, and SIGSTOPs returned members into a live quiesced state until
+  daemon-routed `exec` resumes them; `pool-serve-smoke` proves `--min-warm=1`
+  prefills one ready member, an anonymous ready take returns a live pid, the
+  daemon replenishes the ready queue, request-specific lazy `take` still
+  returns a live member, destroy makes members non-runnable, and shutdown kills
+  the master cleanly;
+- `pool-bench` now gates the 100-member memory target on proportional set size
+  rather than summed RSS. Summed RSS is still printed as diagnostic context, but
+  the pass/fail metric is PSS because live quiesced members intentionally share
+  executable, libc, and tmpfs-backed physmem pages that RSS counts once per
+  process;
+- the full default-scale `pool-bench` now passes all five gates: p50 1.8 ms,
+  p99 2.5 ms, 100/100 live quiesced members at 139.0 MiB PSS and 499.3 MiB
+  summed RSS, 17.6 MiB private dirty, 0.05% lifecycle drift across 10,000
+  cycles, and 3000/3000 throughput takes in the 60-second gate; artifacts from
+  this run were kept at `/tmp/pool-bench.7yKXDC` and
+  `/tmp/pool-bench-rt.hSsofa`;
 - `pool-mconsole-path-probe` now passes: with a non-empty `mconsole_path`, the
   replicated member reaches `PMCON_MEMBER_DONE` without panic, the requested
   per-member mconsole socket exists, and the socket answers `version`;

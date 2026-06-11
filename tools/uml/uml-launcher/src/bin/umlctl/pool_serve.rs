@@ -6,8 +6,9 @@
 // in `um_template_pause=fork` pool-member replication mode, then listens on a
 // Unix-domain socket at `$XDG_RUNTIME_DIR/uml/pools/<name>/api.sock` for line-
 // delimited JSON RPCs.  Each `take` rewrites the identity memfd,
-// SIGCONTs the master, waits for it to re-SIGSTOP, and reads the
-// live child host pid back from memfd[260:264].
+// SIGCONTs the master, waits for it to re-SIGSTOP, reads the live child host
+// pid back from memfd[260:264], then SIGSTOPs the child as a quiesced pool
+// member. Daemon-routed `exec` resumes the member before waiting for mconsole.
 //
 // Wire format (one JSON object per line, both directions):
 //
@@ -356,6 +357,11 @@ impl DaemonState {
         if !pid_runnable(child_pid) {
             bail!("reported child pid {} is not runnable", child_pid);
         }
+        // The member is now owned by the daemon, but it does not need to burn
+        // memory while waiting in the pool. Keep it live in T state until a
+        // command path, such as daemon-routed exec, resumes it.
+        stop_member(child_pid, Duration::from_secs(2))
+            .with_context(|| format!("quiesce pool member pid {}", child_pid))?;
 
         Ok(MemberRecord {
             pid: child_pid,
@@ -430,17 +436,11 @@ impl DaemonState {
                 pid
             );
         }
-        if !Path::new(&member.mconsole_path).exists() {
-            bail!(
-                "pool member pid {} mconsole socket {:?} not present yet \
-                 (the in-guest exec primitive is not available in this build)",
-                pid,
-                member.mconsole_path
-            );
-        }
         if timeout_secs > 86_400 {
             bail!("exec timeout {} exceeds 86400 seconds", timeout_secs);
         }
+
+        resume_member(pid).with_context(|| format!("resume pool member pid {}", pid))?;
 
         let cmd_str = build_mconsole_exec_command(argv, env, cwd, timeout_secs);
         let ready_timeout = Duration::from_secs(10);
@@ -557,6 +557,24 @@ fn wait_for_not_runnable(pid: i32, timeout: Duration) -> bool {
     }
 
     !pid_runnable(pid)
+}
+
+fn signal_pid(pid: i32, sig: libc::c_int) -> Result<()> {
+    let r = unsafe { libc::kill(pid, sig) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("kill({}, {})", pid, sig));
+    }
+    Ok(())
+}
+
+fn stop_member(pid: i32, timeout: Duration) -> Result<()> {
+    signal_pid(pid, libc::SIGSTOP)?;
+    wait_for_stop(pid, timeout).with_context(|| format!("wait for pid {} to stop", pid))
+}
+
+fn resume_member(pid: i32) -> Result<()> {
+    signal_pid(pid, libc::SIGCONT)
 }
 
 fn wait_for_mconsole_ready(path: &str, deadline: Duration) -> Result<()> {

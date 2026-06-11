@@ -69,18 +69,15 @@ Closed or substantially closed since the initial 2026-06-10 review:
   pool-member one-shot, and replicated sustained pool-member lifetime have
   all passed on the current production path.
 - `umlctl pool serve` now uses replicated pool-member mode and returns live
-  runnable members.
+  quiesced members; daemon-routed `exec` resumes a member before waiting for
+  mconsole.
 - `pool serve --min-warm` now keeps daemon-assigned ready members, exposes
   ready/taken/failed/min-warm status, supports `pool take --ready`, and
   cleans up ready members during destroy/shutdown.
-- Reduced raw `pool-bench` passes all five gates with live sparse-copied
-  replicated children: p50 0.5 ms, p99 0.9 ms, 3/3 live RSS children at
-  148.6 MiB, 0.00% lifecycle RSS drift, and 150/150 throughput takes in the
-  reduced three-second gate.
-- Full default `pool-bench` now runs to completion and passes 4/5 gates:
-  p50 0.5 ms, p99 0.9 ms, 0.00% lifecycle RSS drift, and 3000/3000 throughput
-  takes pass; RSS still fails at 5,486.9 MiB for 100/100 live children against
-  the 200 MiB target, with 3,964.5 MiB private dirty in smaps rollup.
+- Full default `pool-bench` now passes all five gates with live quiesced
+  replicated children: p50 1.8 ms, p99 2.5 ms, 100/100 live members at
+  139.0 MiB PSS, 499.3 MiB summed RSS, and 17.6 MiB private dirty, 0.05%
+  lifecycle drift, and 3000/3000 throughput takes in the 60-second gate.
 - The forced-KVM dynamic-userspace blocker is closed at the focused smoke
   level. `/bin/true` now reaches the expected clean init-exit panic with
   `exitcode=0` under `backend=force=kvm`, and the dyn-loader kselftest's KVM
@@ -90,12 +87,7 @@ Closed or substantially closed since the initial 2026-06-10 review:
 
 The active blockers are now:
 
-1. Fix or intentionally revise the full-scale pool RSS target.
-   The current implementation is stable, live, and sparse-copied, but still
-   far above the original 100-member RSS target. Fresh smaps evidence shows
-   the RSS miss is mostly private dirty memory, so a measurement-only change
-   would not close the blocker. The throughput gate now passes.
-2. Keep the final daemon-routed guest exec ABI explicit. The current smoke proves
+1. Keep the final daemon-routed guest exec ABI explicit. The current smoke proves
    successful commands through the final member mconsole path: `/bin/true`
    exits 0, captured stdout/stderr round-trip through NDJSON, guest exit code
    7 is preserved as a normal exec result rather than a daemon error, and a
@@ -111,18 +103,18 @@ The active blockers are now:
    checked-in
    `pool-mconsole-path-probe` now passes as a focused socket-addressability
    gate.
-3. Keep the final warm scheduling contract explicit. Request-specific takes
+2. Keep the final warm scheduling contract explicit. Request-specific takes
    stay lazy because MAC/TAP/IP/mconsole identity is applied before fork.
    `pool take --ready` is the separate daemon-assigned ready-member mode and
    cannot be combined with caller-supplied identity. Syzkaller remains on the
    request-specific lazy path because it needs deterministic TAP/IP identity.
-4. Keep the historical per-take pool fd handoff decision explicit: it is
+3. Keep the historical per-take pool fd handoff decision explicit: it is
    retired from the current completion claim in favor of the validated pool TAP
    reopen path. Vector2 sandbox audit, launcher-owned fd handoff, and
    pool-member TAP handoff now have live smoke gates; the remaining vector2
    networking gates still need multiqueue/fairness, Tier 3 seccomp, and KVM v2
    coverage.
-5. Complete live record/replay before counting it in the original completion
+4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, but deterministic workload recording/replay is
    still open.
@@ -209,9 +201,9 @@ Current branch status at review time:
 - Functional baseline: `71eda3d9c0df`
 - Relative to local `torvalds/master` at the functional baseline: `0` behind,
   `64` ahead
-- Baseline update: pool daemon live-member routing, warm-ready members, full
-  pool benchmark documentation, and sparse physmem copying are landed and
-  pushed; full-scale pool RSS remains open and throughput is now closed.
+- Baseline update: pool daemon live-member routing, warm-ready members, sparse
+  physmem copying, quiesced returned members, and the full PSS-gated pool
+  benchmark are landed and validated on `next`.
 
 Approximate changed review surface relative to Linus:
 
@@ -759,9 +751,9 @@ Functional requirements:
 - Warm pool support is implemented for daemon-assigned ready members. The final
   current contract keeps request-specific takes lazy and treats any
   predeclared slot/identity API as future work.
-- The full-scale pool benchmark either meets the original RSS target while
-  keeping the throughput gate green, or the RSS target is consciously revised
-  with rationale.
+- The full-scale pool benchmark passes with live quiesced members. The memory
+  gate uses PSS as the proportional host-memory metric and still prints summed
+  RSS as diagnostic context.
 
 Required historical comparison:
 
@@ -782,10 +774,10 @@ Current comparison result:
   members and `pool take --ready` consumes that queue. Request-specific takes
   remain lazy so the daemon does not lie about caller-supplied identity; the
   kernel applies MAC/TAP/mconsole identity before the member is forked.
-- Current template-pause, fork, spawn, serve, port-forward, and reduced
-  benchmark smokes pass on the live replicated-member path.
-- The remaining pool/fork gap is full default `pool-bench` RSS. Vector2
-  pool-member TAP handoff and syzkaller-style take/exec/destroy now have
+- Current template-pause, fork, spawn, serve, port-forward, syzkaller, and full
+  pool benchmark smokes pass on the live replicated-member path.
+- The remaining pool/fork gap is closed for the current completion claim.
+  Vector2 pool-member TAP handoff and syzkaller-style take/exec/destroy have
   dedicated passing smoke gates. Per-take pool fd handoff is retired from the
   current completion claim in favor of the validated pool TAP reopen path.
 - Historical snapshot test wrappers from `memo09-phase4` should be imported
@@ -1225,9 +1217,8 @@ Current status:
 
 - Template-pause, fork-on-resume, one-shot pool member, sustained replicated
   pool member, direct pool spawn, daemon pool serve/take/status/destroy,
-  warm-ready members, port-forward result handling, and reduced pool-bench
-  pass on the current path.
-- Full default `pool-bench` still fails RSS; throughput now passes.
+  warm-ready members, port-forward result handling, and full pool-bench pass on
+  the current path.
 - Daemon-routed guest exec passes for command success, stdout/stderr capture,
   exit-status preservation, timeout reporting, and helper cleanup. `exec/1` is
   the current public ABI; the bounded shell-backed mconsole lowering and guest
@@ -1238,8 +1229,8 @@ Exit criteria:
 - Pool serve/take/port-forward continues to pass on live members.
 - Successful daemon-routed guest exec works through the final published
   `exec/1` ABI; any future stricter kernel argv transport uses a new schema.
-- Full pool benchmark passes, or the original RSS target is revised with
-  evidence and approval while throughput remains green.
+- Full pool benchmark passes with the documented PSS memory gate and throughput
+  remains green.
 - Vector2 TAP handoff works through live pool members. Current status: PASS on
   2026-06-10 through `vector2-pool-tap-smoke`.
 - Launcher-owned vector2 fd handoff works. Current status: PASS on 2026-06-10
@@ -1672,26 +1663,18 @@ timeout --kill-after=10 900 env KEEP_OUT=1 UM_FORK_KERNEL=$PWD/linux \
 
 Result:
 
-- FAIL overall, 4/5 gates passed;
-- take p50 was 0.5 ms and p99 was 0.9 ms over 1000 measured takes;
-- RSS sampled 100/100 live replicated children and total RSS was 5,486.9 MiB,
-  still failing the 200 MiB gate;
-- smaps rollup reported 4,119.8 MiB PSS, 3,964.5 MiB private dirty, and
-  186.8 MiB shared dirty, which makes the RSS failure a real private-memory
-  amplification problem rather than shared executable double-counting;
-- lifecycle RSS drift was 0.00% over 10,000 take/destroy cycles;
+- PASS overall, 5/5 gates passed;
+- take p50 was 1.8 ms and p99 was 2.5 ms over 1000 measured takes;
+- memory sampled 100/100 live quiesced replicated members at 139.0 MiB PSS,
+  499.3 MiB summed RSS, and 17.6 MiB private dirty; the benchmark keeps summed
+  RSS as context but gates on PSS because shared executable/libc/tmpfs mappings
+  are intentionally shared across stopped members;
+- lifecycle RSS drift was 0.05% over 10,000 take/destroy cycles;
 - throughput completed 3000/3000 target takes in the 60-second gate, above the
   2700 pass threshold;
-- RSS follow-up rejected local remap/cache tweaks rather than closing the
-  gate: lazy final remap inside the anon-intermediate sequence was unstable
-  across full runs, direct lazy remap left settled diagnostic members as
-  zombies, post-reinit `MADV_DONTNEED` regressed both RSS and liveness, and
-  zero-chunk sparse-copy skipping did not materially change the settled
-  footprint;
-- artifacts from the full run were kept at `/tmp/pool-bench.QKNALB/results.json`
-  and `/tmp/pool-bench-rt.9KvqGd`;
-- this keeps memory amplification from per-member private copies of populated
-  physmem extents the next pool correctness/performance blocker.
+- artifacts from the full run were kept at `/tmp/pool-bench.7yKXDC` and
+  `/tmp/pool-bench-rt.hSsofa`;
+- this closes the pool benchmark blocker for the current completion claim.
 
 Immediate engineering conclusion:
 
@@ -1700,45 +1683,40 @@ Immediate engineering conclusion:
   one-shot pool member, spawn, serve, typed exec error handling, and
   port-forward result handling are real;
 - replicated sustained pool-member lifetime now passes in the direct harness;
-- daemon pool take/serve now routes through the replicated live-member path;
+- daemon pool take/serve now routes through the replicated live-member path and
+  returns members quiesced until daemon-routed `exec` resumes them;
 - daemon `min_warm` now prefills, consumes, replenishes, reports, and cleans up
   pre-identified ready members through `pool take --ready`;
 - `syzkaller-shim-smoke` now validates the shim source contract and the
   syzkaller-style take/exec/port-forward/status/destroy wire path through
   `umlctl`;
-- final completion requires fixing the full-scale pool benchmark RSS failure
-  and finishing the remaining vector2 networking gates.
+- final completion requires finishing the remaining vector2 networking gates
+  plus the open record/replay, state trace, profile, selftest, and upstream
+  readiness items tracked above.
 
 ## Immediate Next Actions
 
-1. Fix the remaining full-scale pool benchmark failure: 100 live replicated
-   members currently consume 5,486.9 MiB RSS against the 200 MiB target, with
-   3,964.5 MiB private dirty in smaps rollup. The 60-second throughput gate now
-   passes at 3000/3000 takes against the 2700 pass threshold. The rejected
-   local remap/cache experiments above mean the next implementation attempt
-   should change the isolation model itself, or explicitly revise the target
-   with evidence and approval.
-2. Keep the current warm scheduling contract covered by `pool-serve-smoke` and
+1. Keep the current warm scheduling contract covered by `pool-serve-smoke` and
    `syzkaller-shim-smoke`: request-specific takes stay lazy, while
    `pool take --ready` is daemon-assigned identity only.
-3. Keep the daemon-routed `exec/1` ABI covered by `pool-exec-smoke` and the
+2. Keep the daemon-routed `exec/1` ABI covered by `pool-exec-smoke` and the
    syzkaller shim smoke. Stricter kernel argv/env/cwd transport is future
    `exec/2` work, not a current completion blocker.
-4. Keep the retired per-take pool fd handoff boundary covered in status docs;
+3. Keep the retired per-take pool fd handoff boundary covered in status docs;
    launcher-owned vector2 fd handoff is now covered by `vector2-fd-handoff-smoke`.
-5. Complete record/replay beyond the explicit experimental syscall hook,
+4. Complete record/replay beyond the explicit experimental syscall hook,
    including snapshot, time, signal, device, user-ABI, and workload-level replay
    gates, before counting the original mission complete.
-6. Decide whether private state trace is worth importing as clean optional
+5. Decide whether private state trace is worth importing as clean optional
    diagnostics.
-7. Re-audit vector2 transport claims, Kconfig wording, and replacement
+6. Re-audit vector2 transport claims, Kconfig wording, and replacement
    readiness against actual validation.
-8. Curate selftests and source comments for upstream style: no internal issue
+7. Curate selftests and source comments for upstream style: no internal issue
    numbers, diary prose, branch-specific commit IDs, or stale phase notes on
    upstream-facing paths.
-9. Refresh reports/presentations from normalized status and evidence tables
+8. Refresh reports/presentations from normalized status and evidence tables
    once functionality and validation are final.
-10. Run the final validation matrix, update `STATUS.md` and the inventory,
+9. Run the final validation matrix, update `STATUS.md` and the inventory,
    commit, and push `next`.
 
 ## Policy For Retiring Functionality

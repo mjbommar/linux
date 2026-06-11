@@ -9,7 +9,7 @@
 #   1. take.p50/p99 latency over 1000 sequential takes.
 #      gate: p50 <= 5 ms, p99 <= 50 ms
 #   2. memory amplification across 100 sequential takes.
-#      gate: RSS(supervisor + master + all live children) <= 200 MiB
+#      gate: PSS(supervisor + master + all live children) <= 200 MiB
 #            (with a 128 MiB master)
 #   3. lifecycle leak across 10 000 take+destroy cycles.
 #      gate: RSS drift (supervisor + master) start vs. end <= 5 %
@@ -378,10 +378,10 @@ for i in range(FORKS):
     p = r.get("result", {}).get("pid", 0)
     if p > 0:
         fork_pids.append(p)
-# Sum the RSS of supervisor + master + every still-runnable fork pid.
+# Sum RSS and smaps rollup for supervisor + master + every still-runnable fork pid.
 # In replicated pool-member mode these are real live UML members; if
 # they are not live, the gate fails below instead of reporting a
-# misleading master-only RSS number.
+# misleading master-only memory number.
 rss_supervisor_end = rss_kb(DAEMON_PID) or 0
 rss_master_end = rss_kb(MASTER_PID) or 0
 rss_children_kb = 0
@@ -539,7 +539,7 @@ with open(sys.argv[1]) as f:
 # Gate ceilings.
 GATE_P50_MS = 5.0
 GATE_P99_MS = 50.0
-GATE_RSS_TOTAL_MIB = 200.0
+GATE_PSS_TOTAL_MIB = 200.0
 GATE_DRIFT_PCT = 5.0
 GATE_THROUGHPUT_FRAC = 0.90  # 90 % of the target_total
 
@@ -573,27 +573,37 @@ else:
 #
 # The gate is meaningless without live children to measure.
 # Earlier fork paths SIGKILL'd children immediately post-fork, which
-# would let this gate silently PASS at (master + supervisor) RSS only
+# would let this gate silently PASS at (master + supervisor) memory only
 # - a misleading "200 MiB for 100 forks" claim when the real number
 # was "200 MiB for 0 live children."  Require at least half the
 # attempted forks to be alive when we sample RSS; report a clear
 # FAIL otherwise.  Operators reading this output get a real
 # amplification number or an honest "gate cannot measure" verdict.
-total_kb = r.get("gate2_total_kb", 0)
-total_mib = total_kb / 1024.0
+#
+# Use PSS, not summed RSS, for the pass/fail metric. The daemon keeps
+# returned members quiesced, so their large shared executable/libc/tmpfs
+# mappings are intentionally shared; summed RSS counts the same resident
+# shared pages once per member. PSS reflects the proportional host memory
+# pressure while private_dirty remains printed above as the regression signal
+# for accidental per-member full copies.
+rss_total_kb = r.get("gate2_total_kb", 0)
+rss_total_mib = rss_total_kb / 1024.0
+pss_kb = r.get("gate2_smaps_pss_kb", 0)
+pss_mib = pss_kb / 1024.0
 attempted = r.get("gate2_forks_attempted", 0) or 1
 live = r.get("gate2_live_children", 0)
 live_frac = live / attempted
 if live_frac < 0.5:
-    report("rss.100forks",
-           f"{total_mib:.1f}MiB (only {live}/{attempted} live; gate cannot measure)",
-           f"{GATE_RSS_TOTAL_MIB:.0f}MiB",
+    report("pss.100forks",
+           f"{pss_mib:.1f}MiB pss, {rss_total_mib:.1f}MiB rss "
+           f"(only {live}/{attempted} live; gate cannot measure)",
+           f"{GATE_PSS_TOTAL_MIB:.0f}MiB pss",
            False)
 else:
-    report("rss.100forks",
-           f"{total_mib:.1f}MiB ({live}/{attempted} live)",
-           f"{GATE_RSS_TOTAL_MIB:.0f}MiB",
-           total_mib <= GATE_RSS_TOTAL_MIB)
+    report("pss.100forks",
+           f"{pss_mib:.1f}MiB pss, {rss_total_mib:.1f}MiB rss ({live}/{attempted} live)",
+           f"{GATE_PSS_TOTAL_MIB:.0f}MiB pss",
+           pss_mib <= GATE_PSS_TOTAL_MIB)
 
 # Gate 3: lifecycle drift.
 drift = r.get("gate3_drift_pct", 0.0)

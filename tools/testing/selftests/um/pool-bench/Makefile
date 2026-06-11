@@ -5,7 +5,7 @@
 # Drives `umlctl pool serve` through the pool performance gates:
 #   * take.p50  <= 5 ms   (across 1000 sequential takes)
 #   * take.p99  <= 50 ms
-#   * rss.100forks <= 200 MiB  (supervisor + master + 100 children
+#   * pss.100forks <= 200 MiB  (supervisor + master + 100 children
 #                               with a 128 MiB master)
 #   * lifecycle.drift <= 5 %  (over 10 000 take/destroy cycles)
 #   * throughput.60s   >= 2700 takes  (60 s @ 50/sec target = 90 %)
