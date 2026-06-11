@@ -21,6 +21,9 @@ GUEST_SCRIPT="$DIR/kvm-record-smoke.sh"
 TASK_HELPER=${KVM_RECORD_TASK_HELPER:-$DIR/kvm-record-task}
 NEGATIVE_HELPER=${KVM_RECORD_NEGATIVE_HELPER:-$DIR/kvm-record-negative}
 NEGATIVE_OPENAT_HELPER=${KVM_RECORD_NEGATIVE_OPENAT_HELPER:-$DIR/kvm-record-negative-openat}
+NEGATIVE_READ_HELPER=${KVM_RECORD_NEGATIVE_READ_HELPER:-$DIR/kvm-record-negative-read}
+NEGATIVE_WRITE_HELPER=${KVM_RECORD_NEGATIVE_WRITE_HELPER:-$DIR/kvm-record-negative-write}
+NEGATIVE_IOCTL_HELPER=${KVM_RECORD_NEGATIVE_IOCTL_HELPER:-$DIR/kvm-record-negative-ioctl}
 MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
 TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
 RDTSC_HELPER=${KVM_RECORD_RDTSC_HELPER:-$DIR/kvm-record-rdtsc}
@@ -45,6 +48,18 @@ if [ ! -x "$NEGATIVE_HELPER" ]; then
 fi
 if [ ! -x "$NEGATIVE_OPENAT_HELPER" ]; then
 	echo "SKIP: $NEGATIVE_OPENAT_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$NEGATIVE_READ_HELPER" ]; then
+	echo "SKIP: $NEGATIVE_READ_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$NEGATIVE_WRITE_HELPER" ]; then
+	echo "SKIP: $NEGATIVE_WRITE_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$NEGATIVE_IOCTL_HELPER" ]; then
+	echo "SKIP: $NEGATIVE_IOCTL_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -x "$MISMATCH_HELPER" ]; then
@@ -512,10 +527,13 @@ run_negative_helper() {
 
 run_negative_helper "$NEGATIVE_HELPER" "negative"
 run_negative_helper "$NEGATIVE_OPENAT_HELPER" "external-I/O negative"
+run_negative_helper "$NEGATIVE_READ_HELPER" "external-I/O negative"
+run_negative_helper "$NEGATIVE_WRITE_HELPER" "external-I/O negative"
+run_negative_helper "$NEGATIVE_IOCTL_HELPER" "external-I/O negative"
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
 SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
 SUMMARY="$SUMMARY $SIGNAL_SUMMARY live-time=1 live-rdtsc=1"
-SUMMARY="$SUMMARY $RDTSCP_SUMMARY live-negative=1 live-external-io=1)"
+SUMMARY="$SUMMARY $RDTSCP_SUMMARY live-negative=1 live-external-io=4/4)"
 echo "$SUMMARY"
 exit 0

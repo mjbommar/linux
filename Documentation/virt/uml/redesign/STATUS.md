@@ -206,10 +206,12 @@ The strongest current KVM v2 evidence is:
 - Experimental strict negative smokes: the static `kvm-record-negative`
   helper arms strict replay with an empty log and issues `getrandom(2)` as the
   first replay-mode syscall. The sibling `kvm-record-negative-openat` helper
-  uses the same strict replay setup and issues `openat(2)` against `/dev/null`.
+  and its `read(2)`, `write(2)`, and `ioctl(2)` variants use the same strict
+  replay setup for representative external-I/O syscalls.
   The host runner treats the expected init-killing SIGSEGV as PASS only when
   the kernel logs the strict unsupported-syscall rejection (`nr=318` for
-  `getrandom` and `nr=257` for `openat` on the validated x86_64 run).
+  `getrandom`, `nr=257` for `openat`, `nr=0` for `read`, `nr=1` for `write`,
+  and `nr=16` for `ioctl` on the validated x86_64 run).
 - Experimental strict mismatch smoke: the static `kvm-record-mismatch` helper
   records one payload-aware `getcwd(2)` entry with a 256-byte buffer, arms
   replay, then issues `getcwd(2)` with a 64-byte buffer. The host runner treats
@@ -762,8 +764,9 @@ mode blocks `SIGALRM` at the KVM vCPU signal mask while inside `KVM_RUN`, so
 timer delivery is deferred to the post-exit UML signal path rather than
 becoming an unrecorded in-guest
 interruption point. Randomness and external I/O syscalls outside the supported
-subset are also fail-closed in strict replay; the live smoke now proves both
-`getrandom(2)` and `openat(2)` rejection. The task-owned smoke now proves
+subset are also fail-closed in strict replay; the live smoke now proves
+`getrandom(2)`, `openat(2)`, `read(2)`, `write(2)`, and `ioctl(2)` rejection.
+The task-owned smoke now proves
 deterministic replay for the bounded 386-entry scalar plus
 `uname(2)`/`getcwd(2)` payload workload, and the mismatch smoke proves that a
 supported `getcwd(2)` replay entry with different payload-size arguments kills

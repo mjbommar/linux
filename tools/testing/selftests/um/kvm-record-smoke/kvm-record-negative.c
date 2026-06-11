@@ -27,6 +27,24 @@
 #endif
 #define KVM_RECORD_NEGATIVE_SYSCALL	SYS_openat
 #define KVM_RECORD_NEGATIVE_NAME	"openat"
+#elif defined(KVM_RECORD_NEGATIVE_READ)
+#ifndef SYS_read
+#define SYS_read		0
+#endif
+#define KVM_RECORD_NEGATIVE_SYSCALL	SYS_read
+#define KVM_RECORD_NEGATIVE_NAME	"read"
+#elif defined(KVM_RECORD_NEGATIVE_WRITE)
+#ifndef SYS_write
+#define SYS_write		1
+#endif
+#define KVM_RECORD_NEGATIVE_SYSCALL	SYS_write
+#define KVM_RECORD_NEGATIVE_NAME	"write"
+#elif defined(KVM_RECORD_NEGATIVE_IOCTL)
+#ifndef SYS_ioctl
+#define SYS_ioctl		16
+#endif
+#define KVM_RECORD_NEGATIVE_SYSCALL	SYS_ioctl
+#define KVM_RECORD_NEGATIVE_NAME	"ioctl"
 #elif !defined(SYS_getrandom)
 #define KVM_RECORD_NEGATIVE_SYSCALL	SYS_getuid
 #define KVM_RECORD_NEGATIVE_NAME	"getuid"
@@ -86,6 +104,20 @@ static long trigger_unsupported_syscall(void)
 #ifdef KVM_RECORD_NEGATIVE_OPENAT
 	return syscall(KVM_RECORD_NEGATIVE_SYSCALL, AT_FDCWD, "/dev/null",
 		       O_RDONLY | O_CLOEXEC);
+#elif defined(KVM_RECORD_NEGATIVE_READ)
+	char byte;
+
+	return syscall(KVM_RECORD_NEGATIVE_SYSCALL, STDIN_FILENO, &byte,
+		       sizeof(byte));
+#elif defined(KVM_RECORD_NEGATIVE_WRITE)
+	char byte = 0;
+
+	return syscall(KVM_RECORD_NEGATIVE_SYSCALL, STDOUT_FILENO, &byte,
+		       sizeof(byte));
+#elif defined(KVM_RECORD_NEGATIVE_IOCTL)
+	char byte;
+
+	return syscall(KVM_RECORD_NEGATIVE_SYSCALL, STDOUT_FILENO, 0, &byte);
 #elif defined(SYS_getrandom)
 	char byte;
 
