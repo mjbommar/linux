@@ -124,8 +124,11 @@ The active blockers are now:
 4. Complete live record/replay before counting it in the original completion
    claim. The experimental Kconfig-gated core, syscall-log state machine, and
    gadget bypass are present, and UML time-travel clock events now round-trip
-   through the record log, but raw time/RDTSC, signal, device, and
-   deterministic workload recording/replay are still open.
+   through the record log. Strict raw-time rejection, RDTSC/RDTSCP trapping,
+   and replay SIGALRM-mask blocking are now live-smoke validated, but
+   replayable raw-time payloads, replayable asynchronous signal ordering,
+   device/network/hostfs event policy, and broader deterministic workload
+   coverage are still open.
 6. Keep the clean KVM v2 state-trace diagnostics bounded and optional. The
    historical all-state trace remains archival; current `next` has a compact
    debugfs ring with parser/smoke coverage.
@@ -692,9 +695,14 @@ Current `next` checkpoint:
 - Validation on 2026-06-11 after the live RDTSCP replay smoke:
   `kvm-record-smoke` PASS includes `live-rdtscp=1`, proving replay-mode direct
   user `RDTSCP` faults instead of returning a host timestamp.
-- Still open: replayable raw-time payloads, signal determinism, broader
-  deterministic workload coverage, and replayable device/network/hostfs event
-  policy.
+- Validation on 2026-06-11 after the live replay signal-policy smoke:
+  `kvm-record-smoke` PASS includes `live-signal=1`, proving replay-mode
+  `KVM_SET_SIGNAL_MASK` blocks `SIGALRM` during `KVM_RUN` and restores the
+  normal mask afterward, as observed through
+  `um_backend_kvm_v2_sigmask_install`.
+- Still open: replayable raw-time payloads, replayable asynchronous
+  signal-event ordering, broader deterministic workload coverage, and
+  replayable device/network/hostfs event policy.
 
 Acceptance gates:
 
@@ -709,6 +717,8 @@ Acceptance gates:
   `kvm-record-time` helper.
 - Direct RDTSC/RDTSCP replay smoke. Current status: PASS through the live
   `kvm-record-rdtsc` and `kvm-record-rdtscp` helpers.
+- Replay signal-policy smoke. Current status: PASS through the live
+  `kvm-record-signal` helper.
 - Gadget-on and gadget-off comparison. Current status: state-page bypass and
   gadget-on hot path are covered, and record/replay now forces gadget-handled
   syscalls through the live dispatcher; side-by-side gadget-on/off workload

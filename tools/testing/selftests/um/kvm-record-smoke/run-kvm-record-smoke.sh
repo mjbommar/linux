@@ -8,8 +8,8 @@
 # control surface and verifies that a real KVM v2 workload records syscall
 # entries. The final legs boot static helpers that start recording from the
 # same task that runs the scalar workload, replay the task-owned log, and
-# verify strict replay kills mismatched, raw-time, RDTSC/RDTSCP, and unsupported
-# live events instead of falling back.
+# verify strict replay installs the replay signal policy and kills mismatched,
+# raw-time, RDTSC/RDTSCP, and unsupported live events instead of falling back.
 
 set -u
 
@@ -23,6 +23,7 @@ MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
 TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
 RDTSC_HELPER=${KVM_RECORD_RDTSC_HELPER:-$DIR/kvm-record-rdtsc}
 RDTSCP_HELPER=${KVM_RECORD_RDTSCP_HELPER:-$DIR/kvm-record-rdtscp}
+SIGNAL_HELPER=${KVM_RECORD_SIGNAL_HELPER:-$DIR/kvm-record-signal}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
@@ -54,6 +55,10 @@ if [ ! -x "$RDTSC_HELPER" ]; then
 fi
 if [ ! -x "$RDTSCP_HELPER" ]; then
 	echo "SKIP: $RDTSCP_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$SIGNAL_HELPER" ]; then
+	echo "SKIP: $SIGNAL_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -e /dev/kvm ]; then
@@ -198,6 +203,43 @@ fi
 
 echo "$TASK_LINE"
 case "$TASK_LINE" in
+*PASS*) ;;
+*FAIL*)
+	exit 1
+	;;
+*)
+	exit 1
+	;;
+esac
+
+SIGNAL_SUMMARY=live-signal=1
+if ! ensure_kvm_readable; then
+	echo "SKIP: /dev/kvm not readable before signal-policy smoke" >&2
+	exit 4
+fi
+
+SIGNAL_OUT=$(timeout --kill-after=10 45 "$BINARY" \
+	backend=force=kvm-v2 \
+	init="$SIGNAL_HELPER" mem="$MEM" \
+	con=null con0=fd:0,fd:1 \
+	root=/dev/root rootfstype=hostfs rw \
+	panic=-1 </dev/null 2>&1 || true)
+
+SIGNAL_LINE=$(echo "$SIGNAL_OUT" |
+	grep -E '^KVM_RECORD_SIGNAL: (PASS|FAIL|SKIP)' | tail -1)
+if [ -z "$SIGNAL_LINE" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no signal-policy smoke result line)"
+	echo "$SIGNAL_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_SIGNAL|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+echo "$SIGNAL_LINE"
+case "$SIGNAL_LINE" in
+*SKIP\ trace_event=*)
+	SIGNAL_SUMMARY=live-signal=skip
+	;;
 *PASS*) ;;
 *FAIL*)
 	exit 1
@@ -467,6 +509,7 @@ fi
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
 SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
-SUMMARY="$SUMMARY live-time=1 live-rdtsc=1 $RDTSCP_SUMMARY live-negative=1)"
+SUMMARY="$SUMMARY $SIGNAL_SUMMARY live-time=1 live-rdtsc=1"
+SUMMARY="$SUMMARY $RDTSCP_SUMMARY live-negative=1)"
 echo "$SUMMARY"
 exit 0

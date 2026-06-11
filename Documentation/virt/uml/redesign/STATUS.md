@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, live replay RDTSC/RDTSCP fault evidence, current-branch umlctl operational confirmation, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, live replay RDTSC/RDTSCP fault evidence, live replay SIGALRM mask trace evidence, current-branch umlctl operational confirmation, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -70,7 +70,9 @@ Current source-tree direction:
   `RDTSC` and `RDTSCP` fault and kill init instead of returning a host
   timestamp. Replay mode also blocks `SIGALRM` in KVM's per-vCPU signal mask
   while inside `KVM_RUN`, preventing timer delivery from creating unrecorded
-  in-guest `EINTR` points. Strict replay also rejects
+  in-guest `EINTR` points; the live signal-policy smoke now proves the
+  tracepoint-visible mask transition into timer-blocked replay mode and later
+  restoration. Strict replay also rejects
   randomness and external I/O syscalls outside the supported subset, including
   `getrandom`, `openat`, `read`, `write`, and `ioctl`, instead of replaying
   them as scalar-only entries. The live raw-time smoke now proves an actual
@@ -216,6 +218,13 @@ The strongest current KVM v2 evidence is:
   does not print its post-instruction failure line and the UML guest reports an
   init-killing panic, proving those instructions fault under replay instead of
   returning a host timestamp.
+- Experimental replay signal-policy smoke: the static `kvm-record-signal`
+  helper enables the `um_backend_kvm_v2_sigmask_install` tracepoint, records
+  one `getpid(2)` entry, arms replay, consumes the entry, and verifies the
+  trace buffer contains `block_timer=1` followed by `block_timer=0`. The
+  `kvm-record-smoke` summary now reports `live-signal=1`, proving replay mode
+  installs the timer-blocking KVM signal mask and restores the normal mask
+  afterward.
 - Public record/replay determinism-tier documentation:
   `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
   experimental task-owned replay tier, replayable syscall subset, strict
@@ -253,8 +262,10 @@ Remaining validation before publication or completion:
   dyn-loader kselftest into Tier 3 KVM v2 workloads on the final vector2
   stack;
 - complete a natural 24-hour KVM v2 soak on the final cleaned tree;
-- finish record/replay time, signal, device, and deterministic replay policy
-  before counting the original record/replay mission complete;
+- finish replayable raw-time payloads, replayable asynchronous signal-event
+  ordering, device/network/hostfs event policy, and broader deterministic
+  workload coverage before counting the original record/replay mission
+  complete;
 - rerun Tier 3 networking workloads on KVM v2 with the final vector2 stack;
 - rerun `kmsan-smoke` in the final validation matrix to protect the KMSAN
   runtime-smoke closure;
