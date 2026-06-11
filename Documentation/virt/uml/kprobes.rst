@@ -42,11 +42,13 @@ From inside a booted guest the standard in-tree samples work::
    rmmod kprobe_example
    rmmod kretprobe_example
 
-``bpftrace``'s ``kprobe:`` and ``kretprobe:`` matchers work in the
-``research`` profile: the profile enables ``CONFIG_BPF_SYSCALL`` +
-``CONFIG_BPF_JIT``, and the UML x86_64 JIT compiles BPF programs
-natively. ``register_kprobe()`` / ``register_kretprobe()`` from
-out-of-tree modules work today.
+The ``research`` profile also enables ``CONFIG_BPF_SYSCALL`` and
+``CONFIG_BPF_JIT`` so that kprobe-backed ``bpftrace`` workflows can be
+validated with a matching research-profile runtime. The current BPF/JIT
+closure is config/build-proven and still needs a guest runtime smoke with
+``bpftool`` or ``bpftrace`` before it should be treated as fully closed.
+``register_kprobe()`` / ``register_kretprobe()`` from out-of-tree modules work
+today.
 
 How it works
 ============

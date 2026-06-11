@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, and vector2 validation documentation alignment.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, and BPF/JIT config-build validation.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -380,9 +380,13 @@ Current instrumentation evidence:
   `ftrace-smoke` with `FUNCTION_TRACER=y` and no `FUNCTION_GRAPH_TRACER`;
 - UML no longer advertises function graph tracing because the fgraph
   return-address rewriting path is not safe across UML task switching;
-- `hooks-flip` passes against the current `./linux` build; and
+- `hooks-flip` passes against the current `./linux` build;
+- BPF/JIT is config/build-proven for the research profile: clean-worktree
+  `make ARCH=um O=<out> uml/research` enables `CONFIG_HAVE_EBPF_JIT=y`,
+  `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`, and
+  `CONFIG_BPF_JIT_ALWAYS_ON=y`, and `arch/x86/net/bpf_jit_comp.o` builds; and
 - kprobes, KMSAN, KASAN/KFENCE/KCSAN/KCOV, and BPF/JIT still require the
-  matching profile binaries/modules for runtime closure.
+  matching profile binaries/modules and guest tooling for runtime closure.
 
 ## Historical-Only Work
 

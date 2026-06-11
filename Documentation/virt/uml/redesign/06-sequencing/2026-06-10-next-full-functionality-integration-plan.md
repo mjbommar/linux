@@ -1036,8 +1036,13 @@ Acceptance gates:
 - KMSAN smoke. Current status: SKIP on 2026-06-10 against the current
   `./linux` build because it does not contain the KMSAN runtime; rerun with
   `LLVM=1 uml/research-kmsan`.
-- KASAN/KFENCE/KCSAN/KCOV/BPF/JIT smoke matrix. Current status: open; each
-  needs a matching profile binary and module/runtime prerequisites.
+- BPF/JIT config/build slice. Current status: PASS on 2026-06-10 from a
+  temporary clean worktree: `uml/research` enables `CONFIG_HAVE_EBPF_JIT=y`,
+  `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y`,
+  `CONFIG_BPF_JIT_ALWAYS_ON=y`, and `arch/x86/net/bpf_jit_comp.o` builds.
+- KASAN/KFENCE/KCSAN/KCOV/BPF/JIT runtime smoke matrix. Current status: open;
+  each needs a matching profile binary and module/runtime/guest-tool
+  prerequisites.
 - Documentation table with pass/fail/skip and rationale. Current status:
   partially updated in the live inventory; final docs matrix remains open.
 

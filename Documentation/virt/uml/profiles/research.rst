@@ -68,14 +68,15 @@ What's on
   (tracefs-based probe installation) depends on
   ``HAVE_REGS_AND_STACK_ACCESS_API`` which UML does not yet
   provide — tracked as a follow-up port.
-- **BPF JIT**: UML x86_64 consumes
-  ``arch/x86/net/bpf_jit_comp.c`` via UML-local shim headers.
-  ``CONFIG_BPF_SYSCALL=y`` + ``CONFIG_BPF_JIT=y`` + ``JIT_ALWAYS_ON``
-  are on by default in this profile, so ``bpftrace``'s
-  ``kprobe:`` / ``kretprobe:`` matchers and any other BPF program
-  type requiring the syscall + JIT are reachable here directly.
-  ``/proc/sys/net/core/bpf_jit_enable`` reads ``1`` in a freshly
-  booted guest.
+- **BPF JIT**: UML x86_64 selects ``HAVE_EBPF_JIT`` and consumes
+  ``arch/x86/net/bpf_jit_comp.c`` via UML-local shim headers when
+  ``CONFIG_BPF_JIT=y``. This profile enables ``CONFIG_BPF_SYSCALL=y``,
+  ``CONFIG_BPF_JIT=y``, and ``CONFIG_BPF_JIT_ALWAYS_ON=y``. Current
+  ``next`` validation covers clean profile configuration and compiling
+  the BPF JIT object; runtime closure still requires booting a
+  research profile binary and checking the guest
+  ``/proc/sys/net/core/bpf_jit_enable`` value plus a ``bpftool`` or
+  ``bpftrace`` smoke.
 - **Coverage**: *none*. ``CONFIG_KCOV`` is explicitly off in
   ``research``; coverage-guided fuzzing lives in the ``fuzz`` and
   ``fuzz-deep`` profiles (which do not enable the function
