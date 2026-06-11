@@ -86,12 +86,17 @@ What's on
   patching window.
 - **Sanitizers**: ``KASAN`` (generic), ``UBSAN`` with bounds
   checking, ``KFENCE`` (sampling heap-corruption detector,
-  ``sample_interval=100`` ms, 255 guarded objects). KFENCE works
-  end-to-end on UML: every OOB/UAF inside the pool is caught and
-  reported via ``dmesg``; live stats at
-  ``/sys/kernel/debug/kfence/stats``, object metadata at
-  ``/sys/kernel/debug/kfence/objects``. ``CONFIG_KASAN_KUNIT_
-  TEST=m`` builds ``mm/kasan/kasan_test.ko`` as a loadable
+  ``sample_interval=100`` ms, 255 guarded objects). KFENCE exposes
+  live stats at ``/sys/kernel/debug/kfence/stats`` and object
+  metadata at ``/sys/kernel/debug/kfence/objects``.
+  ``CONFIG_KFENCE_KUNIT_TEST=m`` builds
+  ``mm/kfence/kfence_test.ko``; the
+  ``tools/testing/selftests/um/kfence-smoke/`` selftest loads it
+  on demand with ``kfence.sample_interval=1`` and
+  ``kfence.fault=report``, then requires a ``BUG: KFENCE`` report
+  plus a nonzero KFENCE stats bug count.
+  ``CONFIG_KASAN_KUNIT_TEST=m`` builds
+  ``mm/kasan/kasan_test.ko`` as a loadable
   module; the ``tools/testing/selftests/um/cve-repro/``
   selftest loads it on demand and asserts that the stable KASAN
   KUnit subset produces KASAN reports in under 30 s of guest-side

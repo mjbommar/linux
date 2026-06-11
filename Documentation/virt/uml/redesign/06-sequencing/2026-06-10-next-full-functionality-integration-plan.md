@@ -1048,9 +1048,12 @@ Acceptance gates:
   `cve-repro` against a fresh research-profile UML binary plus
   `mm/kasan/kasan_test.ko`: `ok=10`, `not_ok=0`, `kasan_bugs=13`,
   `guest_wall_s=0`, and `host_wall=2.71s`.
-- KFENCE runtime smoke. Current status: partial; the research runtime profile
-  probe confirms `debugfs_kfence=PRESENT`, but a focused KFENCE report smoke
-  is still required before final completion.
+- KFENCE runtime smoke. Current status: PASS on 2026-06-10 through
+  `kfence-smoke` against a fresh research-profile UML binary plus
+  `mm/kfence/kfence_test.ko`: `CONFIG_KFENCE=y`,
+  `CONFIG_KFENCE_KUNIT_TEST=m`, `CONFIG_KFENCE_SAMPLE_INTERVAL=100`,
+  `KFENCE_SMOKE: PASS bugs=1 stats_bugs=1 ok=1 not_ok=0`, and
+  `PASS research (8 features match)`.
 - KCSAN runtime smoke. Current status: open; build and boot the `race`
   profile with `ncpus=2`, validate `debugfs_kcsan`, and capture selftest
   evidence.
