@@ -7,6 +7,7 @@
 #include <linux/etherdevice.h>
 #include <linux/if_ether.h>
 #include <linux/if.h>
+#include <linux/mm.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
@@ -63,8 +64,10 @@ static void vector2_tap_test_close_pipe(int *fds)
 }
 
 struct vector2_tap_tx_trace {
+	struct kunit *test;
 	unsigned int packets;
 	unsigned int bytes;
+	unsigned int expected_frags;
 };
 
 static void vector2_tap_tx_complete(void *owner, unsigned int len, void *cookie)
@@ -74,6 +77,9 @@ static void vector2_tap_tx_complete(void *owner, unsigned int len, void *cookie)
 
 	trace->packets++;
 	trace->bytes += len;
+	if (trace->test)
+		KUNIT_EXPECT_EQ(trace->test, skb_shinfo(skb)->nr_frags,
+				trace->expected_frags);
 	dev_consume_skb_any(skb);
 }
 
@@ -91,6 +97,28 @@ static struct sk_buff *vector2_tap_test_skb(struct kunit *test,
 	skb_put_data(skb, payload, len);
 	skb->dev = dev;
 	skb->ip_summed = CHECKSUM_NONE;
+	return skb;
+}
+
+static struct sk_buff *vector2_tap_test_frag_skb(struct kunit *test,
+						 struct net_device *dev,
+						 const u8 *linear,
+						 unsigned int linear_len,
+						 const u8 *frag,
+						 unsigned int frag_len)
+{
+	struct sk_buff *skb;
+	struct page *page;
+	void *addr;
+
+	skb = vector2_tap_test_skb(test, dev, linear, linear_len);
+	page = alloc_page(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, page);
+
+	addr = page_address(page);
+	KUNIT_ASSERT_NOT_NULL(test, addr);
+	memcpy(addr, frag, frag_len);
+	skb_add_rx_frag(skb, 0, page, 0, frag_len, frag_len);
 	return skb;
 }
 
@@ -229,6 +257,60 @@ static void vector2_tap_tx_batch_writes_frame_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_tap_tx_batch_preserves_frags_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_tap_test_alloc_vdev(test, 14);
+	struct net_device *dev = vector2_tap_test_alloc_netdev(test, vdev);
+	struct um_vec2_channel *channel;
+	struct vector2_tap_tx_trace trace = {
+		.test = test,
+		.expected_frags = 1,
+	};
+	u8 linear[ETH_HLEN] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x00,
+	};
+	u8 frag[8] = { 0x45, 0x00, 0x00, 0x08, 0x00, 0x00, 0x12, 0x34 };
+	unsigned char frame[sizeof(struct virtio_net_hdr) + sizeof(linear) +
+			    sizeof(frag)];
+	struct sk_buff *skb;
+	int fds[2] = { -1, -1 };
+	int ret;
+
+	KUNIT_ASSERT_EQ(test, os_pipe(fds, 1, 1), 0);
+	KUNIT_ASSERT_EQ(test, um_vec2_tap_attach_fd(vdev, fds[1]), 0);
+	fds[1] = -1;
+	channel = &vdev->channels[0];
+
+	skb = vector2_tap_test_frag_skb(test, dev, linear, sizeof(linear),
+					frag, sizeof(frag));
+	KUNIT_ASSERT_EQ(test,
+			um_vec2_tx_ring_enqueue(&channel->queue->tx, skb,
+						skb->len), 0);
+
+	ret = channel->host->ops->tx_batch(channel->host, &channel->queue->tx,
+					   1, vector2_tap_tx_complete,
+					   &trace);
+	KUNIT_EXPECT_EQ(test, ret, 1);
+	KUNIT_EXPECT_TRUE(test, um_vec2_tx_ring_empty(&channel->queue->tx));
+	KUNIT_EXPECT_EQ(test, trace.packets, 1U);
+	KUNIT_EXPECT_EQ(test, trace.bytes,
+			(unsigned int)(sizeof(linear) + sizeof(frag)));
+
+	ret = os_read_file(fds[0], frame, sizeof(frame));
+	KUNIT_EXPECT_EQ(test, ret, (int)sizeof(frame));
+	KUNIT_EXPECT_MEMEQ(test, frame + sizeof(struct virtio_net_hdr),
+			   linear, sizeof(linear));
+	KUNIT_EXPECT_MEMEQ(test, frame + sizeof(struct virtio_net_hdr) +
+			   sizeof(linear), frag, sizeof(frag));
+
+	um_vec2_tap_close(vdev);
+	vector2_tap_test_close_pipe(fds);
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 static void vector2_tap_rx_batch_reads_frame_test(struct kunit *test)
 {
 	struct um_vec2_dev *vdev = vector2_tap_test_alloc_vdev(test, 5);
@@ -353,6 +435,7 @@ static struct kunit_case vector2_tap_test_cases[] = {
 	KUNIT_CASE(vector2_tap_attach_close_test),
 	KUNIT_CASE(vector2_tap_attach_rejects_busy_test),
 	KUNIT_CASE(vector2_tap_tx_batch_writes_frame_test),
+	KUNIT_CASE(vector2_tap_tx_batch_preserves_frags_test),
 	KUNIT_CASE(vector2_tap_rx_batch_reads_frame_test),
 	KUNIT_CASE(vector2_tap_rx_batch_short_frame_returns_eproto_test),
 	KUNIT_CASE(vector2_tap_sandbox_open_fails_closed_test),

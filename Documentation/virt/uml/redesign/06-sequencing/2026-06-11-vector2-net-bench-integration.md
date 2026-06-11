@@ -1,6 +1,7 @@
 # UML vector2 net-bench integration
 
-Status: current-head tooling cleanup complete; TCP performance gate failing.
+Status: current-head tooling cleanup complete; TCP performance gate still
+failing after first implementation fix.
 Date: 2026-06-11.
 Tree: `next`.
 
@@ -85,11 +86,25 @@ This is a real P4.3 failure for current guest-to-host TCP throughput, not a
 harness failure.  The functional datapath is alive, but vector2 remains far
 from replacement-ready on this gate.
 
+## Follow-Up Scatter-Gather Fix
+
+`2026-06-11-vector2-tx-scatter-gather.md` records the first implementation
+response: vector2 fd/TAP TX now writes the virtio header, skb head, and skb
+frags through a scatter-gather iovec instead of forcing skb linearization.
+
+The same TCP gate improved but still failed:
+
+- legacy vector median: 40041.7 Mbps;
+- vector2 median: 22953.7 Mbps;
+- vector2/legacy ratio: 0.573, below the 0.85 gate.
+
+The remaining likely gap is vector2's lack of legacy vector's `sendmmsg()` TX
+batching.
+
 ## Remaining Gate
 
 This does not close P4.3 performance parity or P4.5 multiqueue fairness.  The
-next work is to investigate the guest-to-host vector2 throughput gap, then
-rerun the same gate:
+next work is vector2 TX batching, then rerunning the same gate:
 
 ```sh
 make -C tools/testing/selftests/um/net-bench

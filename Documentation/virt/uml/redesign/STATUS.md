@@ -265,6 +265,10 @@ Current bounded vector2 evidence adds:
   legacy vector and vector2 both passed 3/3 `umlctl gate loop` iterations, but
   vector2 median throughput was 18949.8 Mbps versus legacy vector 39805.4 Mbps,
   a 0.476 ratio against the 0.85 acceptance bar.
+- A first vector2 TX scatter-gather fix removed forced skb linearization from
+  fd/TAP TX and added fragmented-skb KUnit coverage.  The follow-up TCP gate
+  improved vector2 median throughput to 22953.7 Mbps versus legacy vector
+  40041.7 Mbps, ratio 0.573, but still fails the 0.85 bar.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
@@ -292,8 +296,8 @@ Open vector2 publication work:
 - finish a natural 7200-second seccomp/vector2 run;
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
-- investigate and fix the guest-to-host TCP `net-bench` regression, then expand
-  fairness/performance coverage for multiqueue operation;
+- add vector2 TX batching comparable to legacy vector's `sendmmsg()` path, then
+  expand fairness/performance coverage for multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
 ## Fork-Server And Pool Work

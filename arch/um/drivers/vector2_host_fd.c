@@ -41,41 +41,6 @@ static struct um_vec2_fd_host *um_vec2_host_to_fd(struct um_vec2_host *host)
 	return container_of(host, struct um_vec2_fd_host, host);
 }
 
-/*
- * Send one skb to the host TAP fd.  When @vnet_hdr is true the
- * tap was opened with IFF_VNET_HDR; prepend a virtio_net_hdr
- * so the host kernel can offload large TCP segments (TSO) instead
- * of forcing the guest to MTU-segment.  Mirrors vector2_host_tap.c.
- */
-static int um_vec2_fd_write_skb(int fd, struct sk_buff *skb, bool vnet_hdr)
-{
-	if (vnet_hdr) {
-		struct virtio_net_hdr hdr;
-		unsigned int original_len = skb->len;
-		int ret;
-
-		ret = skb_cow_head(skb, sizeof(hdr));
-		if (ret)
-			return ret;
-		ret = virtio_net_hdr_from_skb(skb, &hdr, true, false, 0);
-		if (ret)
-			return ret;
-		skb_push(skb, sizeof(hdr));
-		skb_copy_to_linear_data(skb, &hdr, sizeof(hdr));
-		ret = os_write_file(fd, skb->data, skb->len);
-		skb_pull(skb, sizeof(hdr));
-		if (ret == -EAGAIN || ret == -ENOBUFS)
-			return ret;
-		if (ret < 0)
-			return ret;
-		if (ret != original_len + (int)sizeof(hdr))
-			return -EIO;
-		return original_len;
-	}
-
-	return os_write_file(fd, skb->data, skb->len);
-}
-
 static int um_vec2_fd_tx_batch(struct um_vec2_host *host,
 			       struct um_vec2_tx_ring *ring,
 			       unsigned int budget,
@@ -95,11 +60,7 @@ static int um_vec2_fd_tx_batch(struct um_vec2_host *host,
 			break;
 
 		skb = desc->owner;
-		ret = skb_linearize(skb);
-		if (ret)
-			return sent ? (int)sent : ret;
-
-		ret = um_vec2_fd_write_skb(fdhost->tx_fd, skb, fdhost->vnet_hdr);
+		ret = um_vec2_write_skb(fdhost->tx_fd, skb, fdhost->vnet_hdr);
 		if (ret == -EAGAIN || ret == -ENOBUFS)
 			break;
 		if (ret < 0)

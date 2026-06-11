@@ -136,34 +136,10 @@ static void um_vec2_tap_host_close(struct um_vec2_tap_host *taphost)
 static int um_vec2_tap_write_skb(struct um_vec2_tap_host *taphost,
 				 struct sk_buff *skb)
 {
-	struct virtio_net_hdr hdr;
-	unsigned int original_len = skb->len;
-	int ret;
+	int ret = um_vec2_write_skb(taphost->fd, skb, true);
 
-	ret = skb_cow_head(skb, sizeof(hdr));
-	if (ret)
-		return ret;
-
-	ret = skb_linearize(skb);
-	if (ret)
-		return ret;
-
-	ret = virtio_net_hdr_from_skb(skb, &hdr, true, false, 0);
-	if (ret)
-		return ret;
-
-	skb_push(skb, sizeof(hdr));
-	skb_copy_to_linear_data(skb, &hdr, sizeof(hdr));
-
-	ret = os_write_file(taphost->fd, skb->data, skb->len);
-	skb_pull(skb, sizeof(hdr));
 	if (ret == -EAGAIN || ret == -ENOBUFS)
 		return 0;
-	if (ret < 0)
-		return ret;
-	if (ret != original_len + sizeof(hdr))
-		return -EIO;
-
 	return ret;
 }
 

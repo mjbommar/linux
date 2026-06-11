@@ -9,9 +9,14 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/uio.h>
 #include <linux/virtio_net.h>
 
+#include <os.h>
+
 #include "vector2_internal.h"
+
+#define UM_VEC2_TX_IOV_MAX	(MAX_SKB_FRAGS + 2)
 
 unsigned int um_vec2_runtime_frame_len(const struct net_device *dev,
 				       bool vnet_hdr)
@@ -22,6 +27,75 @@ unsigned int um_vec2_runtime_frame_len(const struct net_device *dev,
 		len += sizeof(struct virtio_net_hdr);
 
 	return len;
+}
+
+static int um_vec2_tx_iov_append(struct iovec *iov, int iovcnt, void *base,
+				 size_t len)
+{
+	if (!len)
+		return iovcnt;
+
+	iov[iovcnt].iov_base = base;
+	iov[iovcnt].iov_len = len;
+	return iovcnt + 1;
+}
+
+static int um_vec2_tx_iov_from_skb(struct sk_buff *skb, bool vnet_hdr,
+				   struct virtio_net_hdr *hdr,
+				   struct iovec *iov)
+{
+	int iovcnt = 0;
+	int nr_frags;
+	int frag;
+	int ret;
+
+	if (vnet_hdr) {
+		ret = virtio_net_hdr_from_skb(skb, hdr, true, false, 0);
+		if (ret)
+			return ret;
+		iovcnt = um_vec2_tx_iov_append(iov, iovcnt, hdr, sizeof(*hdr));
+	}
+
+	iovcnt = um_vec2_tx_iov_append(iov, iovcnt, skb->data,
+				       skb_headlen(skb));
+	nr_frags = skb_shinfo(skb)->nr_frags;
+	for (frag = 0; frag < nr_frags; frag++) {
+		skb_frag_t *skb_frag = &skb_shinfo(skb)->frags[frag];
+		void *addr = skb_frag_address_safe(skb_frag);
+
+		if (!addr)
+			return -EFAULT;
+		iovcnt = um_vec2_tx_iov_append(iov, iovcnt, addr,
+					       skb_frag_size(skb_frag));
+	}
+
+	return iovcnt;
+}
+
+int um_vec2_write_skb(int fd, struct sk_buff *skb, bool vnet_hdr)
+{
+	struct iovec iov[UM_VEC2_TX_IOV_MAX];
+	struct virtio_net_hdr hdr;
+	size_t wire_len = skb->len;
+	ssize_t written;
+	int iovcnt;
+
+	iovcnt = um_vec2_tx_iov_from_skb(skb, vnet_hdr, &hdr, iov);
+	if (iovcnt < 0)
+		return iovcnt;
+	if (!iovcnt)
+		return -EINVAL;
+
+	if (vnet_hdr)
+		wire_len += sizeof(hdr);
+
+	written = os_writev(fd, iov, iovcnt);
+	if (written <= 0)
+		return written;
+	if (written != (ssize_t)wire_len)
+		return -EIO;
+
+	return skb->len;
 }
 
 static void um_vec2_tx_drop_skb(void *owner, unsigned int len, void *cookie)

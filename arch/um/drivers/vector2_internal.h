@@ -137,6 +137,7 @@ void um_vec2_ethtool_attach(struct net_device *dev);
 
 unsigned int um_vec2_runtime_frame_len(const struct net_device *dev,
 				       bool vnet_hdr);
+int um_vec2_write_skb(int fd, struct sk_buff *skb, bool vnet_hdr);
 int um_vec2_queue_pair_alloc(struct um_vec2_channel *channel,
 			     unsigned int depth);
 void um_vec2_queue_pair_free(struct um_vec2_channel *channel,
