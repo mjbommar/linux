@@ -6,11 +6,11 @@
 ## either LSM alone is some protection; both together are
 ## defense-in-depth.
 ##
-## This module ships a SINGLE parent domain (uml_launcher_t)
-## for now — no per-backend subdomains. Per-backend
-## transitions (console / net / block) can parallel the
-## aa_change_profile() wiring in src/backend/apparmor.rs with a
-## setcon()/libselinux equivalent.
+## This module ships a single parent domain (uml_launcher_t).
+## Backend-specific transitions (console / net / block) can
+## parallel the aa_change_profile() wiring in
+## src/backend/apparmor.rs with a setcon()/libselinux equivalent
+## when their policy needs diverge.
 
 policy_module(uml_launcher, 0.1.0)
 

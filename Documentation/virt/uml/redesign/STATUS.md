@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, and KVM v2 dynamic-loader TLS closure.
+Last updated: 2026-06-10 profiles, ftrace, launcher, selftest/doc curation, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, and KVM v2 dynamic-loader TLS closure.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -58,6 +58,10 @@ Current source-tree direction:
   backend unless KVM v2 is selected.
 - KVM v2 KUnit coverage remains for register marshaling, byte-shape
   invariants, snapshots, and the experimental record/replay core.
+- Focused active-source and selftest comment cleanup has removed the remaining
+  internal audit label and temporary-policy wording found in `arch/um`,
+  `tools/testing/selftests/um`, and `tools/uml/uml-launcher`. KVM isolation
+  reproducers are explicitly documented as diagnostic-only material.
 
 ## Validation Snapshot
 

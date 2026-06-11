@@ -1,9 +1,10 @@
-# KVM-only FPU isolation reproducers
+# Diagnostic KVM FPU isolation reproducers
 
-Standalone userspace KVM tests verifying that **upstream KVM
-correctly preserves vcpu FPU across IO-trap exits** under various
-patterns. Used to distinguish UML backend state bugs from upstream
-KVM FPU handling.
+These standalone userspace KVM tests are diagnostic reproducers. They
+are not part of the UML kselftest pass/fail gate; use them to verify
+that upstream KVM correctly preserves vcpu FPU state across IO-trap
+exits and to separate host KVM behavior from UML KVM-v2 task-state
+bugs.
 
 All four tests PASS on standard kernels. The bug observed in
 UML+KVM-v2's mt-mmap-stress / mt-xmmprobe is therefore in UML's
@@ -26,7 +27,7 @@ FPU isolation logic, not in upstream KVM.
 
 Exits 0 on PASS, non-zero on FAIL.
 
-## What we learned
+## Diagnostic boundary
 
 KVM's `kvm_load_guest_fpu` / `kvm_put_guest_fpu` pair (called once per
 KVM_RUN ioctl) correctly saves/restores guest FPU around the userspace

@@ -10,7 +10,7 @@ ubd image + a generated `Umlfile.toml` that `umlctl up` can boot.
 `umlctl` runs an *already-built* UML instance: kernel binary + rootfs
 exist on disk, `umlctl up -f Umlfile.toml` wires them into a running
 guest. Today, building those inputs is a manual `make ARCH=um O=...`
-loop plus ad-hoc disk-image hacking. `umlbuild` makes that step a
+loop plus manual disk-image preparation. `umlbuild` makes that step a
 first-class, scriptable, idempotent operation.
 
 ## Constraints inherited from umlctl

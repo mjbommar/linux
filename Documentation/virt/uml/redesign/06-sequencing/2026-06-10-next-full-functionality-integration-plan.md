@@ -123,7 +123,10 @@ The active blockers are now:
    as clean optional diagnostics.
 7. Curate source comments, selftests, reports, and status docs so upstream-
    facing code is free of internal issue numbers, phase diaries, random
-   history, and stale claims.
+   history, and stale claims. A focused active-source pass has removed the
+   remaining internal audit label and temporary-policy comments found in
+   active UML source/selftest/launcher paths; old reports and presentations
+   remain the larger historical/archive cleanup.
 
 Execution discipline for the remaining work:
 
@@ -1080,6 +1083,12 @@ Current state:
   `tools/uml/uml-launcher` now reports no standalone workstream, decision,
   memo, or phase-label patterns after excluding operational post-mortem
   wording and archived redesign material.
+- A follow-up source/selftest pass removed the remaining internal audit label
+  from `kvm-bounds`, temporary-policy wording from the SELinux launcher policy
+  and deploy comments, and marked KVM FPU isolation reproducers as
+  diagnostic-only. The residual active scan is limited to operational terms
+  such as init/workload phases, sample BUG log text, proc/stat field numbers,
+  and BPF filter syntax.
 
 ## Workstream K: Documentation And Reports
 

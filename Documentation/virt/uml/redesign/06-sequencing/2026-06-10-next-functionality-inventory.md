@@ -124,9 +124,9 @@ This file is the live execution tracker for
 | Instrumentation | KASAN/KCSAN/KFENCE/KCOV | Partial/needs-validation | `next`, docs | Verify each profile and document gaps. | instrumentation matrix. |
 | Instrumentation | BPF/JIT shims | Present-needs-validation | `next` | Keep if tests pass and docs are accurate. | BPF smoke if available. |
 | Instrumentation | KGDB | Needs-decision | original plan/docs | Implement, document absent, or retire with approval. | KGDB smoke if kept. |
-| Selftests | Upstreamable smoke/regression tests | Partial-cleaned | all branches | Continue curation; active gate metadata and tier smoke fixtures now use semantic group names and neutral test data instead of planning phase labels. | Focused scan over `arch/um`, `tools/testing/selftests/um`, and `tools/uml/uml-launcher` found no standalone workstream/decision/memo/phase labels after cleanup, excluding operational post-mortem wording and archived redesign docs, 2026-06-10. |
+| Selftests | Upstreamable smoke/regression tests | Partial-cleaned | all branches | Continue curation; active gate metadata and tier smoke fixtures now use semantic group names and neutral test data instead of planning phase labels. Active source and selftest comments also no longer carry the found internal audit label or temporary-policy wording. | Focused scan over `arch/um`, `tools/testing/selftests/um`, and `tools/uml/uml-launcher` found no standalone workstream/decision/memo/phase labels after cleanup; residual matches are operational init/workload phases, sample BUG log text, proc/stat field numbers, and BPF filter syntax, 2026-06-10. |
 | Selftests | local stress/soak tests | Present | `next`, `umlctl-deploy` | Keep under clear local/soak docs. | selected soak gates. |
-| Selftests | historical repros | Present/needs-cleanup | all branches | Move or mark archival. | grep for diary/internal labels. |
+| Selftests | historical repros | Present/needs-cleanup | all branches | Move or mark archival. KVM FPU isolation reproducers are now explicitly diagnostic-only and outside the UML kselftest pass/fail gate. | Continue archival grep for diary/internal labels in broader historical repro material. |
 | Docs | `STATUS.md` | Present-current | `next` | Update after every landed workstream. | status review updated with launcher/selftest curation boundary, 2026-06-10. |
 | Docs | old reports/presentations | Present-stale | `next`, historical docs | Refresh or mark historical. | docs audit. |
 | Docs | snapshot ELF docs | Present-needs-validation | `next`, `kvm-v2-snapshot-elf64` | Re-audit against imported kernel code and fresh exported core. | trigger/symbol grep. |
@@ -197,10 +197,10 @@ These items must be closed before the final branch can be called complete:
    pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff
    now have dedicated smoke gates; per-take pool fd handoff has been retired
    from the current completion claim in favor of the validated TAP reopen path.
-4. Old reports, presentations, and historical repro notes still need final
-   archival marking. Focused scans over active source, launcher, selftests,
-   and non-redesign UML docs are clean for the targeted standalone
-   planning-label patterns as of 2026-06-10.
+4. Old reports and presentations still need final archival marking. Focused
+   scans over active source, launcher, selftests, and non-redesign UML docs are
+   clean for the targeted standalone planning-label patterns as of 2026-06-10,
+   with residual matches limited to operational wording and test fixtures.
 5. The final validation matrix from the integration plan must pass.
 
 ## Next Update Rules

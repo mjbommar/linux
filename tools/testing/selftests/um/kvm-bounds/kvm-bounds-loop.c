@@ -109,15 +109,13 @@ int main(void)
 	void *noncan = (void *)0x800000000000UL;
 
 	/*
-	 * Edge case (audit P3 #9): pointer in
-	 * [task_size - 16, task_size - 1]. With G1's range-aware
-	 * cap = task_size - 16, the gadget's `cmp ptr, %gs:cap;
-	 * jbe fallback` fires here and routes to the SYSCALL
-	 * fallback. Fallback's access_ok then checks
-	 * `ptr + size <= task_size` and rejects (the 16-byte
-	 * struct __kernel_timespec for clock_gettime, the 8-byte
-	 * time_t for time, the 4-byte u32 for getcpu would all
-	 * write past task_size). Expect -EFAULT for all three.
+	 * Pointer in [task_size - 16, task_size - 1]. With G1's
+	 * range-aware cap = task_size - 16, the gadget's
+	 * `cmp ptr, %gs:cap; jbe fallback` fires here and routes to
+	 * the SYSCALL fallback. Fallback's access_ok then checks
+	 * `ptr + size <= task_size` and rejects because the write
+	 * would extend beyond task_size. Expect -EFAULT for all three
+	 * calls.
 	 *
 	 * UML task_size on x86_64 is 0x7f8000000000 by default
 	 * (see arch/um/include/asm/processor-generic.h /

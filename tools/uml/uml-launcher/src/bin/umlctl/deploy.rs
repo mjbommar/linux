@@ -1439,9 +1439,9 @@ fn guest_ip_addr(guest_ip: &str) -> Result<String> {
 /// Mitigation if it ever matters: bracket the value with the
 /// observed mean across `/proc/cpuinfo` (multi-socket / asymmetric
 /// hosts can have varying BogoMIPS per CPU), or pass `lpj=` only
-/// when /proc/cpuinfo is stable enough.  For now we use the first
-/// BogoMIPS line which is enough for the homogeneous single-socket
-/// hosts our bench / serverless use cases target.
+/// when /proc/cpuinfo is stable enough.  The deployment path uses
+/// the first BogoMIPS line, which matches the homogeneous single-
+/// socket hosts targeted by the bench and serverless profiles.
 fn sniff_host_lpj() -> Option<u64> {
     use std::io::BufRead;
     let f = std::fs::File::open("/proc/cpuinfo").ok()?;
