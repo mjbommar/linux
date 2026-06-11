@@ -31,7 +31,7 @@ implemented runtime netdev transports.
 | Failed-open validation knob | PASS on 2026-06-10 through `vector2-failed-open`; `fail_open_after=N` is documented as validation-only. | Leave unset for normal workloads. |
 | Seccomp Tier 3 soak | Strong evidence but not final: `45-uml-vector-driver-v2-seccomp-soak-status.md` records a requested-stop 6142/7200 second run with 970/970 PASS. | Let the same 7200-second seccomp/vector2 soak complete naturally. |
 | KVM v2 Tier 3 | Partial current-head smoke: rebuilt `98166580dc4f` passed one KVM-v2/vector2 iteration each for `tier3-django-v2` and `tier3-fastapi-v2`, including `SERVER_READY`, `GUEST_CURL ok=100 fail=0`, `TIER3_OK`, and `REPRO_DONE rc=0`. | Run the same full Tier 3 networking coverage on KVM v2 with the final vector2 stack. |
-| Perf/fairness/KCSAN breadth | Failing current TCP gate. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run passed all functional iterations but failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. The first TX scatter-gather fix improved the follow-up ratio to 0.573, still below the gate. | Add vector2 TX batching comparable to legacy vector's `sendmmsg()` path, then finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
+| Perf/fairness/KCSAN breadth | Failing current TCP gate. Existing evidence covers TCP perf baseline, KCSAN multiqueue traffic, and several smoke profiles. The current tree now builds the TCP `net-bench` helper through kselftest and keeps the TAP benchmark scripts as explicit operator-run tools. A 2026-06-11 guest-to-host run passed all functional iterations but failed throughput parity: vector2 median 18.95 Gbps vs legacy 39.81 Gbps, ratio 0.476 below the 0.85 gate. The first TX scatter-gather fix improved the follow-up ratio to 0.573, still below the gate. A bounded `sendmmsg()` prototype did not improve the ratio and was not committed. The harness now captures guest `ip`/route/ethtool diagnostics, and vector2 reports inherited-fd vnet-header state through ethtool. | Use the new diagnostics to isolate syscall count, offload/GSO shape, TAP negotiation, NAPI/queue scheduling, and lock contention before landing another datapath change, then finish UDP/syscall/CPU perf acceptance, longer multiqueue fairness profiles, and broader host/kernel coverage. |
 
 The sections below preserve the original three gate definitions and their
 acceptance bars.
@@ -82,7 +82,11 @@ vector2 median 18949.8 Mbps, ratio 0.476 against the 0.85 bar.  The
 scatter-gather TX fix in
 `06-sequencing/2026-06-11-vector2-tx-scatter-gather.md` improved the follow-up
 run to vector2 median 22953.7 Mbps versus legacy 40041.7 Mbps, ratio 0.573;
-the gate still fails.
+the gate still fails.  A follow-up bounded `sendmmsg()` prototype did not
+improve the ratio and was not committed.  The benchmark now records guest
+link, route, feature, and ethtool-counter diagnostics around each sender, and
+vector2's ethtool `vnet_hdr_enabled` stat now reflects inherited-fd runtime
+state.
 
 ### Acceptance criteria for "perf parity"
 

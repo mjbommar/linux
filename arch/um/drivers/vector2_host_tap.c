@@ -255,6 +255,7 @@ static void um_vec2_tap_attach_host(struct um_vec2_tap_host *taphost,
 	taphost->frame_len = um_vec2_runtime_frame_len(dev, true);
 	taphost->fd = fd;
 	channel->host = &taphost->host;
+	channel->vnet_hdr = true;
 }
 
 static void um_vec2_tap_channel_mark_closed(struct um_vec2_channel *channel)
@@ -317,6 +318,7 @@ static void um_vec2_tap_channel_close(struct um_vec2_channel *channel,
 	um_vec2_queue_pair_free(channel, dev);
 	channel->rx_fd = UM_VEC2_NO_FD;
 	channel->tx_fd = UM_VEC2_NO_FD;
+	channel->vnet_hdr = false;
 	kfree(taphost);
 }
 

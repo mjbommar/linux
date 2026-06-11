@@ -27,9 +27,9 @@ TUNSETIFF = 0x400454CA
 IFF_TAP = 0x0002
 IFF_NO_PI = 0x1000
 
-# No IFF_VNET_HDR - vec2's fd transport reads raw Ethernet frames,
-# same shape as the umlctl deploy fd-handoff (tools/uml/uml-launcher/
-# src/backend/net.rs comment block).
+# No IFF_VNET_HDR: this helper feeds raw Ethernet frames to the direct
+# benchmark wrapper.  The umlctl-based benchmark is the production fd-handoff
+# path and opens TAP fds with IFF_VNET_HDR plus TUNSETOFFLOAD.
 fd = os.open("/dev/net/tun", os.O_RDWR)
 flags = IFF_TAP | IFF_NO_PI
 ifr = struct.pack("16sH", TAP_NAME.encode(), flags)

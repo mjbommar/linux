@@ -336,8 +336,9 @@ static void um_vec2_sample_config_stats(const struct um_vec2_dev *vdev,
 	data[UM_VEC2_ETHTOOL_STAT_CONFIGURED_MTU] = vdev->cfg.mtu;
 	data[UM_VEC2_ETHTOOL_STAT_CONFIGURED_COALESCE_USECS] =
 		vdev->cfg.coalesce_usecs;
-	data[UM_VEC2_ETHTOOL_STAT_VNET_HDR] =
-		vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP;
+	data[UM_VEC2_ETHTOOL_STAT_VNET_HDR] = 0;
+	if (vdev->cfg.transport == UM_VEC2_TRANSPORT_TAP)
+		data[UM_VEC2_ETHTOOL_STAT_VNET_HDR] = 1;
 }
 
 static void um_vec2_sample_counter_stats(const struct um_vec2_dev *vdev,
@@ -417,6 +418,9 @@ static void um_vec2_sample_channel_stats(struct um_vec2_channel *channel,
 {
 	struct um_vec2_queue_pair *queue = channel->queue;
 	u64 *qdata = NULL;
+
+	if (channel->vnet_hdr)
+		data[UM_VEC2_ETHTOOL_STAT_VNET_HDR] = 1;
 
 	if (!queue)
 		return;

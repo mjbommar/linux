@@ -8,7 +8,8 @@ volumes = []
 # Placeholders (substituted by the wrapper):
 #   {{KERNEL}}, {{BACKEND}}, {{TAP_NAME}},
 #   {{HOST_IP}}, {{GUEST_IP}}, {{HOST_IP_PLAIN}}, {{GUEST_IP_PLAIN}},
-#   {{NETWORK_DRIVER}}, {{DURATION_SEC}}, {{BENCH_PORT}}, {{TCP_SEND}}
+#   {{NETWORK_DRIVER}}, {{GUEST_DEV}}, {{DURATION_SEC}}, {{BENCH_PORT}},
+#   {{TCP_SEND}}
 
 [instance]
 name = "tcp-throughput-{{NETWORK_DRIVER}}-{{BACKEND}}"
@@ -41,6 +42,25 @@ cmd = "/bin/true && echo SMOKE_OK"
 expect = ""
 timeout_secs = 5
 
+[[init.phases]]
+name = "net-diag-before"
+cmd = """
+DEV="{{GUEST_DEV}}"
+echo "NET_DIAG_BEGIN before dev=$DEV"
+ip -d link show "$DEV" || true
+ip -s link show "$DEV" || true
+ip route show || true
+if command -v ethtool >/dev/null 2>&1; then
+    ethtool -k "$DEV" || true
+    ethtool -S "$DEV" || true
+else
+    echo "NET_DIAG ethtool=missing"
+fi
+echo "NET_DIAG_END before dev=$DEV"
+"""
+expect = ""
+timeout_secs = 10
+
 # TCP throughput sender: connect to host sink, stream for N
 # seconds, print BENCH_RESULT.  The wrapper script starts the host
 # sink on {{HOST_IP_PLAIN}}:{{BENCH_PORT}} before invoking umlctl.
@@ -72,6 +92,22 @@ echo REPRO_DONE rc=$?
 """
 expect = ""
 timeout_secs = 60
+
+[[init.phases]]
+name = "net-diag-after"
+cmd = """
+DEV="{{GUEST_DEV}}"
+echo "NET_DIAG_BEGIN after dev=$DEV"
+ip -s link show "$DEV" || true
+if command -v ethtool >/dev/null 2>&1; then
+    ethtool -S "$DEV" || true
+else
+    echo "NET_DIAG ethtool=missing"
+fi
+echo "NET_DIAG_END after dev=$DEV"
+"""
+expect = ""
+timeout_secs = 10
 
 [host_resources]
 thp = "off"

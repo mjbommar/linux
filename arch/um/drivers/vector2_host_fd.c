@@ -293,6 +293,7 @@ static void um_vec2_fd_attach_channel(struct um_vec2_fd_host *fdhost,
 	channel->host = &fdhost->host;
 	channel->rx_fd = fd;
 	channel->tx_fd = fd;
+	channel->vnet_hdr = fdhost->vnet_hdr;
 }
 
 static void um_vec2_fd_detach_channel(struct um_vec2_fd_host *fdhost,
@@ -302,6 +303,7 @@ static void um_vec2_fd_detach_channel(struct um_vec2_fd_host *fdhost,
 	channel->host = NULL;
 	channel->rx_fd = UM_VEC2_NO_FD;
 	channel->tx_fd = UM_VEC2_NO_FD;
+	channel->vnet_hdr = false;
 }
 
 static void um_vec2_fd_channel_mark_closed(struct um_vec2_channel *channel)

@@ -101,7 +101,11 @@ Current execution evidence added on 2026-06-11:
 - tested a bounded `sendmmsg()` TX batching prototype locally and rejected it
   because it added complexity without improving the TCP gate. The prototype was
   not committed; the next vector2 work must measure the remaining bottleneck
-  before another batching or queueing change lands.
+  before another batching or queueing change lands; and
+- added the first vector2 TCP diagnostic slice: the `net-bench` template now
+  logs guest link, route, feature, and ethtool-counter state around each TCP
+  sender, and vector2's `vnet_hdr_enabled` ethtool stat reports the runtime
+  inherited-fd vnet-header state.
 
 This file is now the plan of record for completing, importing, or explicitly
 retiring all original UML v2 functionality on `next`.
@@ -598,6 +602,9 @@ Current state:
   replacement-readiness gate at 0.476. Scatter-gather TX improved the ratio to
   0.573, but the gate still fails. A local bounded `sendmmsg()` prototype did
   not improve the ratio and was not committed.
+- The benchmark now captures guest link/route/feature/counter diagnostics
+  around the sender, and vector2's ethtool stats now expose whether an
+  inherited fd channel is actually using vnet-header framing.
 - GRE/L2TPv3 helpers are parser/header coverage only.
 - Raw, proxy, VDE, BESS, and hybrid transports are not current netdev runtime
   transports.

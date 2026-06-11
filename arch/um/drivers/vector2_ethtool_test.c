@@ -320,6 +320,33 @@ static void vector2_ethtool_multiqueue_stats_aggregate_test(struct kunit *test)
 	free_netdev(dev);
 }
 
+static void vector2_ethtool_vnet_hdr_runtime_fd_test(struct kunit *test)
+{
+	struct um_vec2_dev *vdev = vector2_ethtool_test_alloc_vdev(test, 5);
+	struct net_device *dev = vector2_ethtool_test_alloc_netdev(test, vdev);
+	unsigned int count;
+	int vnet_hdr;
+	u64 *data;
+
+	vdev->cfg.transport = UM_VEC2_TRANSPORT_FD;
+	vector2_ethtool_attach_test_channels(test, vdev, 2, 2);
+	vnet_hdr = vector2_ethtool_find_stat(test, dev, "vnet_hdr_enabled");
+	KUNIT_ASSERT_GE(test, vnet_hdr, 0);
+
+	data = vector2_ethtool_test_stats(test, dev, &count);
+	vector2_ethtool_assert_stat_id(test, vnet_hdr, count);
+	KUNIT_EXPECT_EQ(test, data[vnet_hdr], 0ULL);
+
+	vdev->channels[1].vnet_hdr = true;
+	data = vector2_ethtool_test_stats(test, dev, &count);
+	KUNIT_EXPECT_EQ(test, data[vnet_hdr], 1ULL);
+
+	vdev->channels = NULL;
+	vdev->num_channels = 0;
+	vdev->netdev = NULL;
+	free_netdev(dev);
+}
+
 /*
  * Exercise um_vec2_get_ethtool_stats' per-queue spin_lock_bh(tx_lock)
  * and spin_lock_bh(rx_lock) paths against a live fake-host-backed
@@ -560,6 +587,7 @@ static struct kunit_case vector2_ethtool_test_cases[] = {
 	KUNIT_CASE(vector2_ethtool_ring_policy_test),
 	KUNIT_CASE(vector2_ethtool_xmit_drop_stats_test),
 	KUNIT_CASE(vector2_ethtool_multiqueue_stats_aggregate_test),
+	KUNIT_CASE(vector2_ethtool_vnet_hdr_runtime_fd_test),
 	KUNIT_CASE(vector2_ethtool_stats_during_traffic_test),
 	{}
 };

@@ -98,13 +98,83 @@ The same TCP gate improved but still failed:
 - vector2 median: 22953.7 Mbps;
 - vector2/legacy ratio: 0.573, below the 0.85 gate.
 
-The remaining likely gap is vector2's lack of legacy vector's `sendmmsg()` TX
-batching.
+An uncommitted bounded `sendmmsg()` prototype was tested after this fix and
+did not improve the gate, so batching alone is not the obvious remaining
+answer.
+
+## Follow-Up Diagnostics
+
+The current benchmark template now records guest-side network diagnostics
+around the TCP sender:
+
+- `ip -d link show` for the active guest interface;
+- `ip -s link show` before and after the sender;
+- guest route state;
+- `ethtool -k` feature state when the tool is available; and
+- `ethtool -S` driver counters when the driver exposes them.
+
+The vector2 ethtool `vnet_hdr_enabled` stat is now runtime-aware for inherited
+fd channels.  It reports the actual `TUNGETIFF` result that the fd backend
+probed, instead of treating all fd transports as non-vnet.  That makes future
+net-bench logs capable of distinguishing a real datapath bottleneck from an
+offload-negotiation failure.
+
+Validation for this diagnostic slice:
+
+```sh
+make ARCH=um -j$(nproc)
+timeout 180s ./linux mem=256M \
+        kunit.filter_glob='um_vector2_ethtool' \
+        kunit_shutdown=halt
+python3 tools/testing/kunit/kunit.py parse \
+        /tmp/um-vector2-ethtool-diag-kunit.log
+timeout 240s ./linux mem=256M \
+        kunit.filter_glob='um_vector2_*' \
+        kunit_shutdown=halt
+python3 tools/testing/kunit/kunit.py parse \
+        /tmp/um-vector2-diag-kunit.log
+make -C tools/testing/selftests/um/net-bench clean
+make -C tools/testing/selftests/um/net-bench
+bash -n tools/testing/selftests/um/net-bench/run-tcp-throughput.sh \
+        tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh
+python3 -m py_compile tools/testing/selftests/um/net-bench/exec-uml-fd.py
+```
+
+The focused ethtool KUnit reported 6/6 pass, including the new inherited-fd
+vnet-header stat case.  The broader `um_vector2_*` KUnit run reported
+87 pass, 0 fail, and 2 trusted-TAP skips.
+
+A short expected-fail diagnostic TCP run was also executed:
+
+```sh
+OUT=/tmp/uml-net-bench-diag-1781175988 \
+KERNEL=$PWD/linux \
+BENCH_PORT=5312 \
+TAP=tcpdiag-tap1 \
+tools/testing/selftests/um/net-bench/run-tcp-throughput-via-umlctl.sh \
+        --duration 2 \
+        --reps 1
+```
+
+It still failed the throughput gate, as expected:
+
+- legacy vector: 39576.9 Mbps;
+- vector2: 21739.7 Mbps;
+- ratio: 0.549.
+
+The important result is the new diagnostic evidence in
+`loop-vector2/p0_default/w0/run-1.log`: vector2 reported
+`vnet_hdr_enabled: 1`, TX checksum/GSO/TSO/scatter-gather enabled, no
+TX drops/errors, and after the two-second sender `tx_xmit_calls` and
+`tx_ring_completed` both reached 88127 for 5441634350 transmitted bytes.
+This points the next investigation away from basic offload negotiation and
+toward syscall count, queue/NAPI scheduling, and per-packet transmit overhead.
 
 ## Remaining Gate
 
 This does not close P4.3 performance parity or P4.5 multiqueue fairness.  The
-next work is vector2 TX batching, then rerunning the same gate:
+next work is measurement-driven bottleneck isolation, then rerunning the same
+gate after each narrow datapath change:
 
 ```sh
 make -C tools/testing/selftests/um/net-bench

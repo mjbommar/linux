@@ -99,6 +99,14 @@ sleep 0.3
 # ----- resolve template (one .toml per driver) --------------------
 resolve_template() {
     local drv=$1 out=$2
+    local guest_dev
+
+    case "$drv" in
+        vector) guest_dev=vec0 ;;
+        vector2) guest_dev=vec2.0 ;;
+        *) echo "unknown driver: $drv" >&2; return 2 ;;
+    esac
+
     sed -e "s|{{KERNEL}}|$KERNEL|g" \
         -e "s|{{BACKEND}}|$BACKEND|g" \
         -e "s|{{TAP_NAME}}|$TAP|g" \
@@ -107,6 +115,7 @@ resolve_template() {
         -e "s|{{HOST_IP}}|$HOST_IP_PLAIN/30|g" \
         -e "s|{{GUEST_IP}}|$GUEST_IP_PLAIN/30|g" \
         -e "s|{{NETWORK_DRIVER}}|$drv|g" \
+        -e "s|{{GUEST_DEV}}|$guest_dev|g" \
         -e "s|{{DURATION_SEC}}|$DURATION|g" \
         -e "s|{{BENCH_PORT}}|$BENCH_PORT|g" \
         -e "s|{{TCP_SEND}}|$TCP_SEND|g" \

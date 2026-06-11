@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, and fail-closed raw-time replay policy.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, fail-closed raw-time replay policy, and vector2 TCP diagnostic capture.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -269,6 +269,13 @@ Current bounded vector2 evidence adds:
   fd/TAP TX and added fragmented-skb KUnit coverage.  The follow-up TCP gate
   improved vector2 median throughput to 22953.7 Mbps versus legacy vector
   40041.7 Mbps, ratio 0.573, but still fails the 0.85 bar.
+- A follow-up bounded `sendmmsg()` prototype was tested locally and rejected
+  because it did not improve the TCP ratio.  The next vector2 work is therefore
+  measurement-driven bottleneck isolation, not another blind batching change.
+- The net-bench template now logs guest `ip`/route/ethtool diagnostics around
+  the sender, and vector2's `vnet_hdr_enabled` ethtool stat reports the
+  runtime inherited-fd vnet-header state instead of treating all fd handoff as
+  raw Ethernet.
 - The vector2 runtime transport claim is bounded to TAP and inherited fd.
   GRE and L2TPv3 remain parser/header-helper coverage only; raw, proxy, VDE,
   BESS, and hybrid are unsupported by the current netdev datapath. KUnit now
@@ -296,8 +303,9 @@ Open vector2 publication work:
 - finish a natural 7200-second seccomp/vector2 run;
 - complete the same Tier 3 coverage on KVM v2 now that the current-head
   one-iteration Django-v2/FastAPI-v2 path smoke passes;
-- add vector2 TX batching comparable to legacy vector's `sendmmsg()` path, then
-  expand fairness/performance coverage for multiqueue operation;
+- isolate the remaining guest-to-host TCP bottleneck using syscall, offload,
+  GSO, queue, NAPI, and ethtool evidence, then expand fairness/performance
+  coverage for multiqueue operation;
 - keep CI/preflight coverage aligned with the launcher-facing configuration.
 
 ## Fork-Server And Pool Work
