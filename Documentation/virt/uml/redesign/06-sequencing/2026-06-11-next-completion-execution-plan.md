@@ -6,15 +6,23 @@ Branch target: `next`
 
 Current committed baseline at plan write:
 
-- `next`: `d51603e6e9de`
-- `origin/next`: `d51603e6e9de`
+- `next`: `d562ad95451a`
+- `origin/next`: `d562ad95451a`
 - `torvalds/master`: `9716c086c8e8`
-- `torvalds/master...next`: `0` commits behind, `114` commits ahead
+- `torvalds/master...next`: `0` commits behind, `116` commits ahead
+- upstream ancestry: `torvalds/master` is an ancestor of `next`
+- worktree state: clean at this plan refresh (`## next...origin/next`)
 
 This is the operating plan for turning `next` into the single complete UML v2
 branch. It complements the feature inventory in
 `2026-06-10-next-functionality-inventory.md` and the earlier integration plan in
 `2026-06-10-next-full-functionality-integration-plan.md`.
+
+The plan is deliberately execution-oriented. It is not another mission
+statement, and it is not a research journal. Each remaining feature must leave
+behind one of three outcomes: landed and validated code, an explicit retirement
+record, or a bounded experimental label that is excluded from the final
+completion claim.
 
 ## Objective
 
@@ -81,6 +89,44 @@ Treat these as input, not automatically-current truth:
 The conflict rule is simple: current implementation and fresh validation on
 `next` override old plans, reports, presentations, and branch notes.
 
+## Review Surface And Cleanup Calibration
+
+The full UML v2 branch is too large for one undifferentiated cleanup pass. The
+working review set should be split by whether a file is active implementation,
+active user-facing documentation, validation infrastructure, current status, or
+archival record.
+
+Current surface relative to `torvalds/master` at this plan refresh:
+
+| Area | Files in tree | Files changed vs. `torvalds/master` | Review posture |
+| --- | ---: | ---: | --- |
+| `arch/um/` | 314 | 206 | Full source review required for active KVM v2, vector2, snapshot, record/replay, profiles, and sanitizer paths. |
+| `tools/testing/selftests/um/` | 289 | 289 | Full validation-surface review required; remove private labels and stale expectations from active tests. |
+| `tools/uml/uml-launcher/` | 95 | 95 | Full CLI/help/config review required; match commands to live kernel surfaces. |
+| `Documentation/virt/uml/` total | 452 | 451 | Split active user docs from redesign archive before editing. |
+| Non-redesign UML docs | 36 | 35 | Active user-facing docs; must be current and upstream-style. |
+| `Documentation/virt/uml/redesign/` | 416 | 416 | Mostly archive/status/planning; mark historical material instead of rewriting it all. |
+| `redesign/06-sequencing/` | 43 | 43 | Current execution tracker; keep accurate and dated. |
+| `redesign/08-future-phases/` | 59 | 59 | Mixed active trackers and historical notes; promote only live trackers to current truth. |
+| `redesign/report-presentation/` | 42 | 42 | Historical May 2026 report/deck workspace unless regenerated from a new cutoff. |
+| `redesign/upstream-patches/` | 26 | 26 | Regenerate after final branch shape; do not treat old cover letters as current. |
+
+The changed active/review surface across source, selftests, launcher, and UML
+docs is about 1,041 files in 158 directories. The practical cleanup target is
+not "rewrite every historical markdown file." The target is:
+
+- every active source file and selftest touched by UML v2;
+- every launcher command, schema, help string, example, and gate used by the
+  current workflow;
+- every active UML RST page outside the redesign archive;
+- current status and sequencing docs that make completion claims;
+- future-phase/vector2 tracker docs that still serve as live publication
+  gates; and
+- upstream patch queue material after the implementation stabilizes.
+
+Archive material may keep dated history, but it must be visibly archival and
+must not be cited as current completion evidence.
+
 ## Branch And Commit Discipline
 
 Use `next` as the authority.
@@ -101,6 +147,34 @@ For each work slice:
 Historical branches are source material and regression references. They are not
 integration bases.
 
+## Import Versus Reimplementation Rule
+
+Do not reimplement the entire branch just because the architecture is now
+understood. Keep already-landed code when it is structurally sound, validated,
+and documented in normal kernel style. Reimplement or port narrowly when the
+historical source has one of the following problems:
+
+- it exists only on a historical branch;
+- it carries stale architecture assumptions that conflict with current `next`;
+- it is coupled to removed KVM v1/path-C code;
+- it exposes a user surface that no longer exists;
+- it contains diary prose, internal bug IDs, phase labels, or investigation
+  breadcrumbs in active source or tests;
+- it lacks a focused validation gate; or
+- it would make final upstream patch splitting harder than a clean rewrite.
+
+The default decision for each feature is:
+
+| Situation | Action |
+| --- | --- |
+| Present on `next`, validated, clean comments | Keep and protect with regression tests. |
+| Present on `next`, correct but comment/test/docs are messy | Clean in place with the smallest semantic delta. |
+| Present on `next`, user surface stale or behavior broken | Fix before importing more adjacent functionality. |
+| Historical-only and small/self-contained | Port with normal kernel comments and a focused test. |
+| Historical-only and tied to discarded architecture | Reimplement from the current design or retire. |
+| Historical-only and not required for completion | Retire explicitly with rationale and archive pointer. |
+| Experimental but useful | Keep behind Kconfig/debugfs/static-key boundaries and exclude from completion unless the selected tier passes. |
+
 ## Required Historical Branch Disposition
 
 | Branch | Use | Required disposition |
@@ -112,6 +186,22 @@ integration bases.
 | `memo09-phase4` | Later fork-server, pool, snapshot, and smoke surfaces. | Use for missing smokes and behavioral parity checks; do not import stale assumptions. |
 | `experiment-path-c` | KVM v1 archive, record/replay experiments, diagnostic repros. | Mine tests and lessons; keep KVM v1 archive out of active `next` unless explicitly archived. |
 | `umlctl-deploy` | Launcher, deploy, gates, vector2, and soak tooling. | Diff module-by-module; keep current launcher structure and import only missing commands, examples, or gates. |
+
+## Current Blocker Ledger
+
+The following items block a "100% complete from the original plan" claim unless
+they are implemented and validated, or explicitly retired with approval.
+
+| Blocker | Why it blocks | Required closeout |
+| --- | --- | --- |
+| Record/replay supported tier | The original vision names deterministic time-travel and record/replay as first-class functionality. Current `next` has an experimental core, live syscall hook, snapshot-backed start, and time-travel clock-event logging, but raw time/RDTSC/vvar, signals, device I/O, randomness, and deterministic workload policy are incomplete. | Define the first supported tier, implement missing policy, pass KUnit/live/deterministic workload gates, and document unsupported operations; or explicitly exclude record/replay from the completion claim as experimental. |
+| KMSAN runtime | The original instrumentation goal includes KMSAN. Current `next` builds `uml/research-kmsan` with LLVM and fixes the vmalloc metadata layout, but `kmsan-smoke` still fails before the result marker. | Fix the UML/KMSAN runtime metadata/stack/context issue or document the exact kernel blocker and decide whether KMSAN can remain non-completion. |
+| KGDB disposition | The original instrumentation list includes KGDB, but the current inventory marks it as undecided. | Implement and smoke KGDB, or explicitly retire/defer it with rationale. |
+| Vector2 publication readiness | Vector2 has strong focused and long seccomp evidence, but the replacement/publication claim still needs final Tier 3, KVM v2, and multiqueue/fairness coverage. | Finish the natural seccomp long run, run equivalent KVM v2 Tier 3 networking, add fairness/performance evidence, and keep parser-only transports out of runtime claims. |
+| KVM v2 final workload breadth | KVM v2 is past architecture unknowns, but publication still needs broader dynamic-userspace and final-vector2 workload evidence. | Run Tier 3 and selected CPython/substrate gates on the final tree, including dynamic userspace beyond `/bin/true` and `dyn-loader`. |
+| Pool/fork-server final regression pass | The pool path is mostly closed, but final validation must be rerun after KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
+| Active cleanup | The branch must read like normal kernel work. Active code cannot carry private issue numbers, phase diaries, or random branch history. | Review scans over active source, selftests, launcher, active UML docs, live status, and current vector2 trackers; archive or remove stale material. |
+| Final validation matrix | Individual smokes do not prove the branch as a product. | Run the final integration gate and record exact pass/fail/skip, commit, upstream base, retired/deferred items, and push confirmation. |
 
 ## Workstream Order
 
@@ -280,8 +370,10 @@ Current state:
 - Profile config matrix exists.
 - KASAN, KFENCE, KCSAN, KCOV, kprobes, ftrace, and BPF/JIT have focused
   validation evidence.
-- KMSAN profile configuration exists, but complete runtime validation still
-  needs a profile-built LLVM/KMSAN binary and clean smoke result.
+- KMSAN profile configuration and a clean LLVM `uml/research-kmsan` build
+  exist. The vmalloc metadata range alignment bug is fixed on `next`, but the
+  runtime smoke still fails before its result marker with early KMSAN reports
+  in kthread-name, scheduler, credential, and stack/string metadata paths.
 - KGDB remains undecided.
 
 Remaining tasks:
