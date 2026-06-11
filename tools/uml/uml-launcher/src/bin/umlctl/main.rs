@@ -795,10 +795,10 @@ fn run() -> Result<()> {
         .context("resolve state/runtime directories")?;
 
     match cli.cmd {
-        Cmd::Create(args) => cmd_create(&paths, args),
-        Cmd::Start(args) => cmd_start(&paths, args, cli.quiet),
-        Cmd::Stop(args) => cmd_stop(&paths, args, cli.quiet),
-        Cmd::Rm(args) => cmd_rm(&paths, args, cli.quiet),
+        Cmd::Create(args) => cmd_create(&paths, args, cli.quiet, cli.json),
+        Cmd::Start(args) => cmd_start(&paths, args, cli.quiet, cli.json),
+        Cmd::Stop(args) => cmd_stop(&paths, args, cli.quiet, cli.json),
+        Cmd::Rm(args) => cmd_rm(&paths, args, cli.quiet, cli.json),
         Cmd::Ps(args) => cmd_ps(&paths, args, cli.json, cli.quiet),
         Cmd::Logs(args) => cmd_logs(&paths, args),
         Cmd::Dmesg(args) => cmd_dmesg(&paths, args),
@@ -1125,7 +1125,7 @@ fn cmd_up(paths: &paths::Paths, args: UpArgs, quiet: bool) -> Result<()> {
             None
         },
     };
-    cmd_start(paths, start_args, quiet)?;
+    cmd_start(paths, start_args, quiet, false)?;
 
     if let Some(pat) = &args.wait_for {
         // Block until the spawn's init.log has a line matching `pat`.
@@ -1329,7 +1329,7 @@ fn cmd_down(paths: &paths::Paths, args: DownArgs, quiet: bool) -> Result<()> {
                 force: true,
                 keep_logs: false,
             };
-            cmd_rm(paths, rm_args, quiet)?;
+            cmd_rm(paths, rm_args, quiet, false)?;
         } else if !quiet {
             eprintln!("[umlctl] (manifest already absent; --rm, continuing)");
         }
@@ -1358,7 +1358,15 @@ fn cmd_schema(json: bool) -> Result<()> {
     }
 }
 
-fn cmd_create(paths: &paths::Paths, args: CreateArgs) -> Result<()> {
+fn print_json_value(value: &serde_json::Value) -> Result<()> {
+    let stdout = io::stdout();
+    let mut w = stdout.lock();
+    serde_json::to_writer(&mut w, value).context("serialize json output")?;
+    writeln!(&mut w).context("write json output")?;
+    Ok(())
+}
+
+fn cmd_create(paths: &paths::Paths, args: CreateArgs, quiet: bool, json: bool) -> Result<()> {
     manifest::validate_name(&args.name)?;
     let manifest_path = paths.manifest_path(&args.name);
     if manifest_path.exists() && !args.force {
@@ -1388,11 +1396,20 @@ fn cmd_create(paths: &paths::Paths, args: CreateArgs) -> Result<()> {
     m.write_to(&manifest_path).context("write manifest")?;
     history::append(paths, history::Event::Create { name: &args.name })?;
 
-    println!("created {}", args.name);
+    if !quiet {
+        if json {
+            print_json_value(&serde_json::json!({
+                "event": "create",
+                "name": &args.name,
+            }))?;
+        } else {
+            println!("created {}", args.name);
+        }
+    }
     Ok(())
 }
 
-fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
+fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool, json: bool) -> Result<()> {
     let m = match manifest::Manifest::read(&paths.manifest_path(&args.name)) {
         Ok(m) => m,
         Err(e) => {
@@ -1429,10 +1446,19 @@ fn cmd_start(paths: &paths::Paths, args: StartArgs, quiet: bool) -> Result<()> {
     match supervise::start_with_fds(paths, &m, &args, &inherited_fds.mappings) {
         Ok(outcome) => {
             if !quiet {
-                println!(
-                    "started {} pid={} run_id={}",
-                    args.name, outcome.pid, outcome.run_id
-                );
+                if json {
+                    print_json_value(&serde_json::json!({
+                        "event": "start",
+                        "name": &args.name,
+                        "pid": outcome.pid,
+                        "run_id": &outcome.run_id,
+                    }))?;
+                } else {
+                    println!(
+                        "started {} pid={} run_id={}",
+                        args.name, outcome.pid, outcome.run_id
+                    );
+                }
             }
             history::append(
                 paths,
@@ -1568,14 +1594,25 @@ fn prepare_inherited_fds(m: &manifest::Manifest) -> Result<PreparedInheritedFds>
     })
 }
 
-fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool) -> Result<()> {
+fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool, json: bool) -> Result<()> {
     match supervise::stop(paths, &args) {
         Ok(info) => {
             if !quiet {
-                println!(
-                    "stopped {} pid={} signal={} exit={:?} run_id={}",
-                    args.name, info.pid, info.signal_sent, info.exit_status, info.run_id
-                );
+                if json {
+                    print_json_value(&serde_json::json!({
+                        "event": "stop",
+                        "name": &args.name,
+                        "pid": info.pid,
+                        "signal": &info.signal_sent,
+                        "exit_status": info.exit_status,
+                        "run_id": &info.run_id,
+                    }))?;
+                } else {
+                    println!(
+                        "stopped {} pid={} signal={} exit={:?} run_id={}",
+                        args.name, info.pid, info.signal_sent, info.exit_status, info.run_id
+                    );
+                }
             }
             history::append(
                 paths,
@@ -1610,7 +1647,7 @@ fn cmd_stop(paths: &paths::Paths, args: StopArgs, quiet: bool) -> Result<()> {
     }
 }
 
-fn cmd_rm(paths: &paths::Paths, args: RmArgs, quiet: bool) -> Result<()> {
+fn cmd_rm(paths: &paths::Paths, args: RmArgs, quiet: bool, json: bool) -> Result<()> {
     let manifest_path = paths.manifest_path(&args.name);
     if !manifest_path.exists() {
         eprintln!("umlctl: instance '{}' not found", args.name);
@@ -1631,7 +1668,7 @@ fn cmd_rm(paths: &paths::Paths, args: RmArgs, quiet: bool) -> Result<()> {
             timeout: 10,
             force: false,
         };
-        cmd_stop(paths, stop_args, /* quiet = */ true)?;
+        cmd_stop(paths, stop_args, /* quiet = */ true, false)?;
     }
 
     // Delete manifest.
@@ -1657,7 +1694,14 @@ fn cmd_rm(paths: &paths::Paths, args: RmArgs, quiet: bool) -> Result<()> {
 
     history::append(paths, history::Event::Rm { name: &args.name })?;
     if !quiet {
-        println!("removed {}", args.name);
+        if json {
+            print_json_value(&serde_json::json!({
+                "event": "rm",
+                "name": &args.name,
+            }))?;
+        } else {
+            println!("removed {}", args.name);
+        }
     }
     Ok(())
 }
