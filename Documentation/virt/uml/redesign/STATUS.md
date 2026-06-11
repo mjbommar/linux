@@ -172,6 +172,11 @@ The strongest current KVM v2 evidence is:
   the snapshot-backed log. This closes the first R/R-1 session-start,
   payload-model, deterministic workload replay, and strict
   unsupported-syscall fail-closed gates for the selected syscall subset.
+- Experimental strict negative smoke: the static `kvm-record-negative` helper
+  arms strict replay with an empty log and issues `getrandom(2)` as the first
+  replay-mode syscall. The host runner treats the expected init-killing
+  SIGSEGV as PASS only when the kernel logs the strict unsupported-syscall
+  rejection (`nr=318` on the validated x86_64 run).
 - Experimental record clock bench: `kvm-record-clock-bench` passes with
   `N=100`, `observed=100`, `replayed=100`, and `mismatches=0`, proving the
   KVM v2 record log can round-trip time-travel clock advances.
@@ -533,7 +538,7 @@ subset are also fail-closed in strict replay. The task-owned smoke now proves
 deterministic replay for the bounded 386-entry scalar plus
 `uname(2)`/`getcwd(2)` payload workload. Replayable raw-time payloads, explicit
 signal-event ordering, replayable device/network/hostfs events, and a live
-strict-divergence smoke remain open.
+supported-entry mismatch smoke remain open.
 
 The private state-trace ring remains historical reference material. The
 historical source is not a clean import target because it contains stale field
