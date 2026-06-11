@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, and KGDB disposition cleanup.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN vmalloc metadata alignment/runtime blocker characterization, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, and current-HEAD pool/fork/syzkaller regression evidence.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -266,16 +266,21 @@ Current boundary:
   and the vector2 case skips when `vec0` is not visible in the guest;
 - `template-pause-fork-smoke`, `template-pause-fork-stress`,
   `template-pause-pivot-smoke`, `template-pause-pool-member-smoke`,
-  `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`, and
-  `pool-port-forward-smoke` pass against the current `./linux` build;
+  `template-pause-pool-sustained-smoke` with replication,
+  `pool-spawn-smoke`, `pool-serve-smoke`, `pool-exec-smoke`,
+  `pool-port-forward-smoke`, `pool-mconsole-path-probe`, `pool-bench`, and
+  `syzkaller-shim-smoke` pass against the rebuilt current-HEAD `./linux`
+  binary at `59ad334001ea`
+  (`7.1.0-rc7-00187-g59ad334001ea`);
 - `template-pause-pool-member-smoke` now tears down the full UML process group
   after the long-lived member reaches `MEMBER_DONE`, so the one-shot PASS does
   not leave an orphaned member process;
 - `template-pause-fork-smoke` now drives two SIGSTOP/SIGCONT cycles and
   observes two distinct child PIDs plus two master resume cycles;
-- `template-pause-fork-stress` passed its default gate with 548 kernel
-  iterations in 10 seconds, median 18.2 ms iteration time, 548/548 clean
-  identity round-trips, no kernel panics, and no live orphans after teardown;
+- `template-pause-fork-stress` passed its default gate with 540 kernel
+  iterations in 10 seconds, median 18.5 ms iteration time, 540/540 clean
+  identity round-trips, 425 distinct child PIDs, no kernel panics, no RSS
+  drift, and no live orphans after teardown;
 - `template-pause-pool-sustained-smoke` remains an expected failure after the
   first member in the default path because the current MAP_SHARED physmem model
   does not support repeated member lifetime; this default XFAIL remains useful
@@ -283,11 +288,11 @@ Current boundary:
   replication path now copies and remaps the full runtime
   `uml_reserved..high_physmem` kernel physmem window before the child mutates
   task, timer, or saved-register state, resets inherited timer and hrtimer
-  queues, and passes the sustained smoke with `UML_POOL_REPLICATE=1`:
-  three members reach `MEMBER_DONE`, three distinct child-pid slots are
-  reported, `POOL_REPLICATE_OK` appears three times, and no kernel panic or
-  v1 ceiling regression is observed; `template-pause-pool-member-smoke` also
-  passes with `UML_POOL_REPLICATE=1`, including five timer ticks; the
+  queues, and passes the sustained smoke with `UML_POOL_REPLICATE=1`: three
+  members reach `MEMBER_DONE`, `POOL_REPLICATE_OK` appears three times, and no
+  kernel panic or v1 ceiling regression is observed;
+  `template-pause-pool-member-smoke` also passes, including five timer ticks;
+  the
   implementation path is tracked in
   `06-sequencing/2026-06-10-sustained-pool-physmem-isolation-plan.md`;
 - `umlctl pool serve` now boots the master with replicated pool-member mode,
@@ -304,12 +309,11 @@ Current boundary:
   the pass/fail metric is PSS because live quiesced members intentionally share
   executable, libc, and tmpfs-backed physmem pages that RSS counts once per
   process;
-- the full default-scale `pool-bench` now passes all five gates: p50 1.8 ms,
-  p99 2.5 ms, 100/100 live quiesced members at 139.0 MiB PSS and 499.3 MiB
-  summed RSS, 17.6 MiB private dirty, 0.05% lifecycle drift across 10,000
-  cycles, and 3000/3000 throughput takes in the 60-second gate; artifacts from
-  this run were kept at `/tmp/pool-bench.7yKXDC` and
-  `/tmp/pool-bench-rt.hSsofa`;
+- the full default-scale `pool-bench` passes all five gates on the current
+  rebuilt binary: p50 1.8 ms, p99 2.4 ms, 100/100 live quiesced members at
+  138.9 MiB PSS and 510.0 MiB summed RSS, 17.5 MiB private dirty, 0.05%
+  lifecycle drift across 10,000 cycles, and 3000/3000 throughput takes in the
+  60-second gate;
 - `pool-mconsole-path-probe` now passes: with a non-empty `mconsole_path`, the
   replicated member reaches `PMCON_MEMBER_DONE` without panic, the requested
   per-member mconsole socket exists, and the socket answers `version`;
@@ -356,6 +360,10 @@ Current boundary:
   assigns a different per-member TAP/MAC/IPv4/mconsole identity, daemon-routed
   `exec` observes the assigned `vec2.0` address, brings the link up, and
   reaches the host-side TAP with a one-packet ping.
+
+The 2026-06-11 pool/fork/syzkaller rerun is a focused current-HEAD regression
+pass. It does not replace the final integration matrix, and the same pool and
+syzkaller gates must still be rerun after any later KVM v2 or vector2 changes.
 
 Remaining pool/vector2 boundary:
 

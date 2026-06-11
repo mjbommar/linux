@@ -2,6 +2,8 @@
 
 Date: 2026-06-10
 
+Last refreshed: 2026-06-11
+
 Purpose: track every known UML v2 feature area that must either be present on
 `next`, imported into `next`, completed on `next`, or explicitly retired before
 the UML v2 effort can be called complete.
@@ -13,8 +15,8 @@ This file is the live execution tracker for
 
 | Ref | Commit | Date | Role |
 | --- | ------ | ---- | ---- |
-| `next` | `d0fecac57c26` | 2026-06-10 | Authoritative integration target. |
-| `origin/next` | `d0fecac57c26` | 2026-06-10 | Remote tracking ref for `next`. |
+| `next` | `59ad334001ea` | 2026-06-11 | Authoritative integration target. |
+| `origin/next` | `59ad334001ea` | 2026-06-11 | Remote tracking ref for `next`. |
 | `kvm-v2-snapshot-elf64` | `fe9616e221c7` | 2026-05-21 | KVM v2 snapshot, ELF export, record, and state trace source branch. |
 | `fork-server-phase1c` | `df19046e0b49` | 2026-05-21 | Historical fork-server phase branch. |
 | `memo09-phase2` | `d933f95f06c2` | 2026-05-21 | Historical identity apply phase branch. |
@@ -22,7 +24,7 @@ This file is the live execution tracker for
 | `memo09-phase4` | `83ab00dc2f33` | 2026-05-21 | Historical pool/fork-server landed branch. |
 | `experiment-path-c` | `73c98eabd31b` | 2026-05-21 | Historical path-C experiment branch. |
 | `umlctl-deploy` | `ea849a35e20c` | 2026-05-25 | Historical launcher/deploy/gate branch. |
-| `torvalds/master` | `acb7500801e9` | 2026-06-10 | Linus baseline used for current up-to-date check. |
+| `torvalds/master` | `9716c086c8e8` | 2026-06-11 | Linus baseline used for current up-to-date check. |
 
 ## Status Labels
 
@@ -84,21 +86,21 @@ This file is the live execution tracker for
 | Record/replay | Raw time, vvar, RDTSC, SIGALRM determinism | Partial/needs-decision | `kvm-v2-snapshot-elf64`, `experiment-path-c` | Define supported tier and implement before declaring complete. UML time-travel clock events are present; raw RDTSC/vvar and SIGALRM injection are still open. | deterministic workload gate. |
 | Diagnostics | KVM v2 state trace ring | Deferred-historical | `kvm-v2-snapshot-elf64` | Do not import raw historical source; current supported observability is `TRACE_EVENT` coverage. Reintroduce only as clean optional debug infrastructure if needed. | build disabled/enabled plus enable/capture/dump/clear smoke if reintroduced. |
 | Diagnostics | State trace parser | Deferred-historical | `umlctl-deploy`, `kvm-v2-snapshot-elf64` | Keep as reference material until a clean kernel-side trace format lands. | parser smoke if reintroduced. |
-| Template pause | Kernel template pause entry | Present-validated | `next`, `memo09-phase*`, `fork-server-phase1c` | Historical comparison complete; smoke now finishes with bounded teardown. Vector2 leg skips when guest `vec0` is absent. | `template-pause-smoke` PASS cases 1-3, SKIP case 4, 2026-06-10. |
-| Template pause | Identity blob layout and apply path | Present-validated | `next`, `memo09-phase2`, `memo09-phase4` | Current layout matches the final launcher contract by source comparison and live pool-member validation. | `template-pause-pool-member-smoke` PASS, 2026-06-10. |
-| Template pause | Template pause pivot mode | Present-validated | `memo09-phase4`, `next` | Keep; pivot smoke passed on current `next`. | `template-pause-pivot-smoke` PASS, 2026-06-10. |
-| Fork server | Fork-on-resume loop | Present-validated | `next`, `memo09-phase4` | Keep the current production path; the corrected smoke drives the second take and default stress now passes. | `template-pause-fork-smoke` PASS, child PIDs distinct and master resume cycles=2; `template-pause-fork-stress` PASS, 548 iterations, median 18.2 ms, 548/548 clean identities, 2026-06-10. |
-| Fork server | Child PID reporting through identity memfd | Present-validated | `next`, `memo09-phase4` | Keep; validate in pool take and pool-member smoke. | `pool-serve-smoke` PASS and `template-pause-pool-member-smoke` PASS, 2026-06-10. |
+| Template pause | Kernel template pause entry | Present-validated | `next`, `memo09-phase*`, `fork-server-phase1c` | Historical comparison complete; smoke now finishes with bounded teardown. Vector2 leg skips when guest `vec0` is absent. | `template-pause-smoke` PASS cases 1-3, SKIP case 4, rebuilt `59ad334001ea`, 2026-06-11. |
+| Template pause | Identity blob layout and apply path | Present-validated | `next`, `memo09-phase2`, `memo09-phase4` | Current layout matches the final launcher contract by source comparison and live pool-member validation. | `template-pause-pool-member-smoke` PASS with identity fd parsed and five timer ticks, rebuilt `59ad334001ea`, 2026-06-11. |
+| Template pause | Template pause pivot mode | Present-validated | `memo09-phase4`, `next` | Keep; pivot smoke passed on current `next`. | `template-pause-pivot-smoke` PASS, 20 pivots, rebuilt `59ad334001ea`, 2026-06-11. |
+| Fork server | Fork-on-resume loop | Present-validated | `next`, `memo09-phase4` | Keep the current production path; the corrected smoke drives the second take and default stress now passes. | `template-pause-fork-smoke` PASS, child PIDs distinct and master resume cycles=2; `template-pause-fork-stress` PASS, 540 iterations, median 18.5 ms, 540/540 clean identities, rebuilt `59ad334001ea`, 2026-06-11. |
+| Fork server | Child PID reporting through identity memfd | Present-validated | `next`, `memo09-phase4` | Keep; validate in pool take and pool-member smoke. | `pool-serve-smoke` PASS and `template-pause-pool-member-smoke` PASS, rebuilt `59ad334001ea`, 2026-06-11. |
 | Fork server | Snapshot-backed fork-server path | Historical-only/needs-decision | `memo09-phase4`, `kvm-v2-snapshot-elf64` | Complete after KVM snapshot import or retire with approval. | snapshot fork smoke. |
-| Pool | Direct `umlctl pool spawn` | Present-validated | `next`, `memo09-phase*` | Keep. | `pool-spawn-smoke` PASS, 2026-06-10. |
-| Pool | Daemon `pool serve` | Present-validated | `next`, `memo09-phase4` | Keep and continue through warm-pool completion. | `pool-serve-smoke` PASS, 2026-06-10. |
-| Pool | `pool take` | Present-validated | `next`, `memo09-phase4` | Keep and extend for warm ready members. | `pool-serve-smoke` PASS, 2026-06-10. |
-| Pool | `pool list/status/destroy/shutdown` | Present-validated | `next`, `memo09-phase4` | Keep. | `pool-spawn-smoke` PASS and `pool-serve-smoke` PASS, 2026-06-10. |
-| Pool | Warm member pool | Present-validated | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Keep the two-mode contract: request-specific takes stay lazy because identity is applied before fork; returned members are live but quiesced until daemon-routed `exec` resumes them; `pool take --ready` consumes daemon-assigned pre-identified members and cannot be combined with caller-supplied identity. No predeclared slot API is required for the current completion claim. | `pool-serve-smoke` PASS with `--min-warm=1`, ready take, replenish, destroy, and shutdown; `pool-exec-smoke` proves resume-before-exec; syzkaller remains on the request-specific lazy take path because it needs deterministic TAP/IP identity, 2026-06-10. |
-| Pool | Pool benchmark thresholds | Present-validated | `memo09-phase3-pool-bench`, `memo09-phase4` | Full default benchmark now gates memory amplification on PSS while still reporting summed RSS as diagnostic context; this matches the quiesced live-member model where executable/libc/tmpfs pages are intentionally shared. | Full `pool-bench` PASS 5/5: p50 1.8 ms, p99 2.5 ms, `pss.100forks` 139.0 MiB PSS with 499.3 MiB summed RSS and 17.6 MiB private dirty for 100/100 live members, lifecycle drift 0.05%, throughput 3000/3000, 2026-06-10. |
-| Pool | mconsole path synthesis | Present-validated | `next`, `memo09-phase4` | Keep the master-side bind plus child-side SIGIO rearm model; avoid the rejected child-side rebind experiment that panicked before `MEMBER_DONE`. | `pool-mconsole-path-probe` PASS with member alive, per-member socket present, and `version` reply; focused investigation in `2026-06-10-pool-mconsole-exec-investigation.md`, 2026-06-10. |
-| Pool | `umlctl exec` via daemon | Present-validated | `next`, `memo09-phase4` | Keep `exec/1` as the current public ABI: callers send structured argv/env/cwd/timeout to the daemon and receive NDJSON frames. The current mconsole backend deliberately lowers that request through a bounded shell command; `--timeout` requires guest `timeout(1)`. Any stricter kernel transport is future `exec/2` work, not required for the current completion claim. | `pool-exec-smoke` PASS: `/bin/true` exits 0, stdout/stderr capture round-trips, guest exit 7 is preserved without a daemon error, timeout returns code 124 with `timed_out=true`, late stdout is suppressed, no extra guest `sleep` helper leaks, and stale `Unknown command`/missing-host-tool boundaries are rejected; historical `memo09`/`umlctl-deploy` branches had the same outer RPC/NDJSON intent and no stricter kernel argv transport to import, 2026-06-10. |
-| Pool | `umlctl port-forward` | Present-validated | `next`, `memo09-phase4` | Keep and later validate against final network mode. | `pool-port-forward-smoke` PASS, 2026-06-10. |
+| Pool | Direct `umlctl pool spawn` | Present-validated | `next`, `memo09-phase*` | Keep. | `pool-spawn-smoke` PASS, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | Daemon `pool serve` | Present-validated | `next`, `memo09-phase4` | Keep and continue through warm-pool completion. | `pool-serve-smoke` PASS, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | `pool take` | Present-validated | `next`, `memo09-phase4` | Keep and extend for warm ready members. | `pool-serve-smoke` PASS, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | `pool list/status/destroy/shutdown` | Present-validated | `next`, `memo09-phase4` | Keep. | `pool-spawn-smoke` PASS and `pool-serve-smoke` PASS, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | Warm member pool | Present-validated | `memo09-phase3-pool-bench`, `memo09-phase4`, `next` | Keep the two-mode contract: request-specific takes stay lazy because identity is applied before fork; returned members are live but quiesced until daemon-routed `exec` resumes them; `pool take --ready` consumes daemon-assigned pre-identified members and cannot be combined with caller-supplied identity. No predeclared slot API is required for the current completion claim. | `pool-serve-smoke` PASS with `--min-warm=1`, ready take, replenish, destroy, and shutdown; `pool-exec-smoke` proves resume-before-exec; syzkaller remains on the request-specific lazy take path because it needs deterministic TAP/IP identity, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | Pool benchmark thresholds | Present-validated | `memo09-phase3-pool-bench`, `memo09-phase4` | Full default benchmark now gates memory amplification on PSS while still reporting summed RSS as diagnostic context; this matches the quiesced live-member model where executable/libc/tmpfs pages are intentionally shared. | Full `pool-bench` PASS 5/5: p50 1.8 ms, p99 2.4 ms, `pss.100forks` 138.9 MiB PSS with 510.0 MiB summed RSS and 17.5 MiB private dirty for 100/100 live members, lifecycle drift 0.05%, throughput 3000/3000, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | mconsole path synthesis | Present-validated | `next`, `memo09-phase4` | Keep the master-side bind plus child-side SIGIO rearm model; avoid the rejected child-side rebind experiment that panicked before `MEMBER_DONE`. | `pool-mconsole-path-probe` PASS with member alive, per-member socket present, and rebuilt-kernel `version` reply; focused investigation in `2026-06-10-pool-mconsole-exec-investigation.md`, 2026-06-11. |
+| Pool | `umlctl exec` via daemon | Present-validated | `next`, `memo09-phase4` | Keep `exec/1` as the current public ABI: callers send structured argv/env/cwd/timeout to the daemon and receive NDJSON frames. The current mconsole backend deliberately lowers that request through a bounded shell command; `--timeout` requires guest `timeout(1)`. Any stricter kernel transport is future `exec/2` work, not required for the current completion claim. | `pool-exec-smoke` PASS: `/bin/true` exits 0, stdout/stderr capture round-trips, guest exit 7 is preserved without a daemon error, timeout returns code 124 with `timed_out=true`, late stdout is suppressed, no extra guest `sleep` helper leaks, and stale `Unknown command`/missing-host-tool boundaries are rejected; historical `memo09`/`umlctl-deploy` branches had the same outer RPC/NDJSON intent and no stricter kernel argv transport to import, rebuilt `59ad334001ea`, 2026-06-11. |
+| Pool | `umlctl port-forward` | Present-validated | `next`, `memo09-phase4` | Keep and later validate against final network mode. | `pool-port-forward-smoke` PASS, rebuilt `59ad334001ea`, 2026-06-11. |
 | Pool | Vector2 TAP handoff | Present-validated | `next`, `memo09-phase4`, `umlctl-deploy` | Keep the vector2 TAP reopen path and smoke gate. Per-take pool fd handoff is retired from the current completion claim; current pool takes carry string identity through the identity memfd and reopen vec2 TAP by per-member TAP name. | `vector2-pool-tap-smoke` PASS: per-member TAP/MAC/IPv4 identity visible through daemon exec and one-packet host TAP ping succeeds; source audit confirms `um_template_identity_apply()` calls `um_vec2_tap_reopen_for_pool_member()` before IPv4/route apply, 2026-06-10. |
 | Vector2 | Typed parser | Present | `next` | Keep. | vector2 parser KUnit. |
 | Vector2 | Queue ownership | Present | `next` | Keep. | vector2 queue KUnit. |
@@ -116,7 +118,7 @@ This file is the live execution tracker for
 | Launcher | snapshot export CLI | Present-validated | `next`, `kvm-v2-snapshot-elf64` | Keep mconsole-driven host export path. | live `umlctl snapshot export` smoke PASS, 2026-06-10. |
 | Launcher | transparency tooling | Present-validated | `next`, `umlctl-deploy` | Keep. | `run-bpftrace-validate.sh` PASS: all five scripts attached; syscalls and sched produced idle UML data, 2026-06-10. |
 | Launcher | `umlbuild` | Present-validated | `next`, `umlctl-deploy` | Keep MVP smoke and the clean-source override path for developer trees with in-tree build products. | `run-umlbuild-mvp.sh` PASS with `UMLBUILD_SOURCE` set to a temporary clean worktree and prebuilt debug `umlbuild`/`umlctl`; direct boot and `umlctl up` both produced the expected guest sha256, 2026-06-10. |
-| Syzkaller | UML VM shim | Present-validated | `next`, `umlctl-deploy` | Keep the shim on request-specific lazy `pool take` plus the validated `umlctl` JSON contracts, including `exec/1` NDJSON frames. Future `exec/2` changes require a schema bump and shim update. | `syzkaller-shim-smoke` PASS: source contract check plus syzkaller-style take, exec output merge, port-forward, status, destroy, 2026-06-10. |
+| Syzkaller | UML VM shim | Present-validated | `next`, `umlctl-deploy` | Keep the shim on request-specific lazy `pool take` plus the validated `umlctl` JSON contracts, including `exec/1` NDJSON frames. Future `exec/2` changes require a schema bump and shim update. | `syzkaller-shim-smoke` PASS: source contract check plus syzkaller-style take, exec output merge, port-forward, status, destroy, rebuilt `59ad334001ea`, 2026-06-11. |
 | Profiles | profile configs | Present-needs-runtime-builds | `next`, historical docs | Keep the 10 kernel Kconfig profiles and the 5 `umlbuild` profiles; full per-profile kernel builds and runtime feature probes remain required before final completion. | Clean-worktree `make ARCH=um O=<out> uml/<profile>` config matrix PASS for all 10 kernel profiles, `research-kmsan` now documented, listed in arch help, and covered by the runtime profile harness when its LLVM-built binary is present; all 5 `umlbuild` profiles resolve with `umlbuild profile show`, 2026-06-10. |
 | Instrumentation | kprobes | Present-validated | `next` | Keep kprobes/kretprobes in the research profile and the sample-module stress gate. | Clean temporary worktree `uml/research` confirms `CONFIG_KPROBES=y`, `CONFIG_KRETPROBES=y`, `CONFIG_SAMPLE_KPROBES=m`, `CONFIG_SAMPLE_KRETPROBES=m`, and `CONFIG_KPROBES_SANITY_TEST=y`; `make ARCH=um O=<out> linux samples/kprobes/kretprobe_example.ko` PASS; `kprobes-stress` PASS with `iters=1000`, `fires=1004`, `errors=0`, and `graph=on`, 2026-06-10. |
 | Instrumentation | ftrace | Present-validated | `next` | Keep normal dynamic function tracing; do not advertise function-graph tracing until the UML return-stack interaction is fixed. | Clean-worktree ftrace build with `FUNCTION_TRACER=y` and no `FUNCTION_GRAPH_TRACER` passed `ftrace-smoke` with 51,300 trace lines; `um/ftrace-smoke` now fails fast if a binary advertises unsupported `function_graph`, 2026-06-10. |
@@ -180,6 +182,12 @@ This file is the live execution tracker for
   returned members are quiesced until `exec`, the memory gate uses PSS to avoid
   summed-RSS double-counting of intentionally shared mappings, and
   `pool-bench` passes 5/5 on the current tree.
+- The focused pool/fork/syzkaller regression set passes on the rebuilt
+  current-HEAD `59ad334001ea` UML binary: template-pause, fork smoke/stress,
+  pool member, replicated sustained pool, pivot, spawn, serve, exec,
+  port-forward, per-member mconsole, pool benchmark, and syzkaller shim. This
+  closes the immediate current-HEAD audit but must be repeated after later
+  KVM v2 or vector2 changes.
 - Active launcher/selftest planning-label cleanup landed for `Cargo.toml`,
   SELinux policy headers, sandbox/research launcher examples, gate metadata,
   tier smoke fixtures, and adjacent launcher/profile docs. Validation:
@@ -211,10 +219,14 @@ These items must be closed before the final branch can be called complete:
    experimental core, snapshot-backed start, and live record smoke before the
    original record/replay mission is closed.
 2. Vector2 replacement claims must match validation evidence.
-3. Pool/fork-server current tests must pass, including warm-pool and
-   pool-member paths. Vector2 pool-member TAP and launcher-owned fd handoff
-   now have dedicated smoke gates; per-take pool fd handoff has been retired
-   from the current completion claim in favor of the validated TAP reopen path.
+3. Pool/fork-server current tests pass on rebuilt current HEAD, including
+   warm-pool, pool-member, replicated sustained-pool, pool-bench, and
+   syzkaller paths. This remains a final-completion blocker only as a required
+   rerun after later KVM v2/vector2 changes, plus the still-open
+   snapshot-backed fork-server disposition. Vector2 pool-member TAP and
+   launcher-owned fd handoff now have dedicated smoke gates; per-take pool fd
+   handoff has been retired from the current completion claim in favor of the
+   validated TAP reopen path.
 4. Focused scans over active source, launcher, selftests, and non-redesign UML
    docs are clean for the targeted standalone planning-label patterns as of
    2026-06-10, with residual matches limited to operational wording and test

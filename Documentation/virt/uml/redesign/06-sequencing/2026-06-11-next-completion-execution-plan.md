@@ -13,6 +13,18 @@ Current committed baseline at plan write:
 - upstream ancestry: `torvalds/master` is an ancestor of `next`
 - worktree state: clean at this plan refresh (`## next...origin/next`)
 
+Current execution evidence added on 2026-06-11:
+
+- rebuilt `./linux` from `next` at `59ad334001ea`;
+- rebuilt kernel version: `7.1.0-rc7-00187-g59ad334001ea`;
+- focused pool/fork/syzkaller regression pass recorded in
+  `2026-06-11-pool-fork-regression-pass.md`;
+- the pass covers template pause, fork smoke/stress, pool-member, replicated
+  sustained pool, pivot, pool spawn/serve/exec/port-forward/mconsole, full
+  pool benchmark, and syzkaller shim; and
+- this is current-HEAD evidence, not a substitute for the final post-KVM/vector2
+  validation matrix.
+
 This is the operating plan for turning `next` into the single complete UML v2
 branch. It complements the feature inventory in
 `2026-06-10-next-functionality-inventory.md` and the earlier integration plan in
@@ -199,7 +211,7 @@ they are implemented and validated, or explicitly retired with approval.
 | KGDB disposition | The original instrumentation list includes KGDB, but current UML does not select `HAVE_ARCH_KGDB` and no live profile fragment enables `CONFIG_KGDB`. | KGDB is deferred-not-present in the current completion tracker. Reintroduce it only with UML architecture support, backend register access, a transport decision, and a smoke test. |
 | Vector2 publication readiness | Vector2 has strong focused and long seccomp evidence, but the replacement/publication claim still needs final Tier 3, KVM v2, and multiqueue/fairness coverage. | Finish the natural seccomp long run, run equivalent KVM v2 Tier 3 networking, add fairness/performance evidence, and keep parser-only transports out of runtime claims. |
 | KVM v2 final workload breadth | KVM v2 is past architecture unknowns, but publication still needs broader dynamic-userspace and final-vector2 workload evidence. | Run Tier 3 and selected CPython/substrate gates on the final tree, including dynamic userspace beyond `/bin/true` and `dyn-loader`. |
-| Pool/fork-server final regression pass | The pool path is mostly closed, but final validation must be rerun after KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
+| Pool/fork-server final regression pass | The rebuilt current-HEAD `59ad334001ea` binary passes the focused pool/fork/syzkaller regression set, including warm-pool, replicated sustained-pool, pool benchmark, and syzkaller shim. Final validation must still be rerun after later KVM/vector2 changes. Snapshot-backed fork-server remains a decision item. | Re-run the full pool/fork-server/syzkaller smoke set on the final KVM/vector2 stack and retire or complete snapshot-backed fork-server. |
 | Active cleanup | The branch must read like normal kernel work. Active code cannot carry private issue numbers, phase diaries, or random branch history. | Review scans over active source, selftests, launcher, active UML docs, live status, and current vector2 trackers; archive or remove stale material. |
 | Final validation matrix | Individual smokes do not prove the branch as a product. | Run the final integration gate and record exact pass/fail/skip, commit, upstream base, retired/deferred items, and push confirmation. |
 
@@ -297,6 +309,10 @@ Current state:
 - Template pause, fork-on-resume, pool spawn, pool serve, pool take, daemon
   exec, ready members, pool benchmark, port-forward, and syzkaller shim all
   have current smoke evidence.
+- The 2026-06-11 current-HEAD rerun on rebuilt `59ad334001ea` also covers
+  replicated sustained-pool mode, pivot mode, per-member mconsole path
+  synthesis, full pool-bench, and syzkaller-style take/exec/port-forward/
+  status/destroy.
 - Per-take pool fd handoff is retired from the current claim in favor of the
   validated TAP reopen path.
 
@@ -317,10 +333,13 @@ Acceptance:
 - `template-pause-fork-smoke`
 - `template-pause-fork-stress`
 - `template-pause-pool-member-smoke`
+- `template-pause-pool-sustained-smoke` with `UML_POOL_REPLICATE=1`
+- `template-pause-pivot-smoke`
 - `pool-spawn-smoke`
 - `pool-serve-smoke`
 - `pool-exec-smoke`
 - `pool-port-forward-smoke`
+- `pool-mconsole-path-probe`
 - `pool-bench`
 - `syzkaller-shim-smoke`
 
