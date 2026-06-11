@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, live replay RDTSC fault evidence, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, first record/replay syscall-payload evidence, strict replay fail-closed syscall policy, strict replay gate coverage, record/replay versioned event-format coverage, `getcwd(2)` payload coverage, live supported-entry replay mismatch evidence, supported determinism-tier documentation, live raw-time replay rejection evidence, live replay RDTSC/RDTSCP fault evidence, fail-closed raw-time replay policy, vector2 TCP diagnostic capture, vector2 TX/RX NAPI scheduling closure, vector2 lazy-RX batch cleanup, vector2 RX checksum feature alignment, vector2 fd/vnet RX allocation alignment, vector2 UDP fixed-byte harness/evidence, vector2 fixed-byte CPU timing columns, vector2 host-to-guest UML process metric deltas, vector2 1 MiB host-to-guest metric diagnostic, current-HEAD syzkaller shim rerun, active selftest wording cleanup, and clean KVM v2 state-trace diagnostics.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -66,11 +66,11 @@ Current source-tree direction:
   `getpid`, `getppid`, `gettid`, and payload-aware `uname(2)`/`getcwd(2)`.
   Raw time syscalls are rejected by that same strict policy, and replay mode
   sets CR4.TSD so direct user timestamp reads fault instead of observing host
-  time outside the log. The live RDTSC smoke now proves a replay-mode `RDTSC`
-  faults and kills init instead of returning a host timestamp; direct `RDTSCP`
-  runtime evidence remains open. Replay mode also blocks `SIGALRM` in KVM's
-  per-vCPU signal mask while inside `KVM_RUN`, preventing timer delivery from
-  creating unrecorded in-guest `EINTR` points. Strict replay also rejects
+  time outside the log. The live timestamp smokes now prove replay-mode
+  `RDTSC` and `RDTSCP` fault and kill init instead of returning a host
+  timestamp. Replay mode also blocks `SIGALRM` in KVM's per-vCPU signal mask
+  while inside `KVM_RUN`, preventing timer delivery from creating unrecorded
+  in-guest `EINTR` points. Strict replay also rejects
   randomness and external I/O syscalls outside the supported subset, including
   `getrandom`, `openat`, `read`, `write`, and `ioctl`, instead of replaying
   them as scalar-only entries. The live raw-time smoke now proves an actual
@@ -209,12 +209,13 @@ The strongest current KVM v2 evidence is:
   PASS only when the kernel logs strict unsupported-syscall rejection (`nr=228`
   on the validated x86_64 run), proving replay does not silently read host time
   outside the log.
-- Experimental RDTSC smoke: the static `kvm-record-rdtsc` helper records one
-  `getpid(2)` entry, arms replay, and executes direct user `RDTSC` before
-  consuming that entry. The host runner treats the expected init-killing
-  SIGSEGV as PASS only if the helper does not print its post-`RDTSC` failure
-  line and the UML guest reports an init-killing panic, proving `RDTSC` faults
-  under replay instead of returning a host timestamp.
+- Experimental timestamp-instruction smokes: the static `kvm-record-rdtsc` and
+  `kvm-record-rdtscp` helpers record one `getpid(2)` entry, arm replay, and
+  execute direct user `RDTSC` or `RDTSCP` before consuming that entry. The host
+  runner treats the expected init-killing SIGSEGV as PASS only if the helper
+  does not print its post-instruction failure line and the UML guest reports an
+  init-killing panic, proving those instructions fault under replay instead of
+  returning a host timestamp.
 - Public record/replay determinism-tier documentation:
   `Documentation/virt/uml/kvm-v2-record-replay.rst` defines the current
   experimental task-owned replay tier, replayable syscall subset, strict
@@ -714,11 +715,11 @@ flags fields, and debugfs reports the format contract. The initial payload
 copyout set now covers `uname(2)` and `getcwd(2)`. Strict replay rejects
 syscalls outside the initial bounded replay subset instead of replaying arbitrary
 scalar-only entries. Raw time syscalls are fail-closed, and replay mode sets
-CR4.TSD so direct user timestamp reads fault. The RDTSC smoke now proves
-`RDTSC` faults under replay instead of returning host time; direct `RDTSCP`
-runtime evidence remains open. Replay mode blocks `SIGALRM` at the KVM vCPU
-signal mask while inside `KVM_RUN`, so timer delivery is deferred to the
-post-exit UML signal path rather than becoming an unrecorded in-guest
+CR4.TSD so direct user timestamp reads fault. The timestamp smokes now prove
+`RDTSC` and `RDTSCP` fault under replay instead of returning host time. Replay
+mode blocks `SIGALRM` at the KVM vCPU signal mask while inside `KVM_RUN`, so
+timer delivery is deferred to the post-exit UML signal path rather than
+becoming an unrecorded in-guest
 interruption point. Randomness and external I/O syscalls outside the supported
 subset are also fail-closed in strict replay. The task-owned smoke now proves
 deterministic replay for the bounded 386-entry scalar plus
@@ -726,9 +727,8 @@ deterministic replay for the bounded 386-entry scalar plus
 supported `getcwd(2)` replay entry with different payload-size arguments kills
 the guest instead of falling back. The raw-time smoke proves live
 `clock_gettime(2)` is rejected by strict replay rather than observing host
-time outside the log. Replayable raw-time payloads, direct `RDTSCP` runtime
-evidence, explicit signal-event ordering, and replayable device/network/hostfs
-events remain open. The public
+time outside the log. Replayable raw-time payloads, explicit signal-event
+ordering, and replayable device/network/hostfs events remain open. The public
 `kvm-v2-record-replay.rst` page now documents the supported experimental
 replay tier and validation path.
 

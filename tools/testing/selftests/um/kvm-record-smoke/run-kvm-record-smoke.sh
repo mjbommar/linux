@@ -8,7 +8,7 @@
 # control surface and verifies that a real KVM v2 workload records syscall
 # entries. The final legs boot static helpers that start recording from the
 # same task that runs the scalar workload, replay the task-owned log, and
-# verify strict replay kills mismatched, raw-time, RDTSC, and unsupported
+# verify strict replay kills mismatched, raw-time, RDTSC/RDTSCP, and unsupported
 # live events instead of falling back.
 
 set -u
@@ -22,6 +22,7 @@ NEGATIVE_HELPER=${KVM_RECORD_NEGATIVE_HELPER:-$DIR/kvm-record-negative}
 MISMATCH_HELPER=${KVM_RECORD_MISMATCH_HELPER:-$DIR/kvm-record-mismatch}
 TIME_HELPER=${KVM_RECORD_TIME_HELPER:-$DIR/kvm-record-time}
 RDTSC_HELPER=${KVM_RECORD_RDTSC_HELPER:-$DIR/kvm-record-rdtsc}
+RDTSCP_HELPER=${KVM_RECORD_RDTSCP_HELPER:-$DIR/kvm-record-rdtscp}
 
 if [ ! -x "$BINARY" ]; then
 	echo "SKIP: UML binary $BINARY not found (set UML_BINARY)" >&2
@@ -49,6 +50,10 @@ if [ ! -x "$TIME_HELPER" ]; then
 fi
 if [ ! -x "$RDTSC_HELPER" ]; then
 	echo "SKIP: $RDTSC_HELPER not built; run 'make' in this dir" >&2
+	exit 4
+fi
+if [ ! -x "$RDTSCP_HELPER" ]; then
+	echo "SKIP: $RDTSCP_HELPER not built; run 'make' in this dir" >&2
 	exit 4
 fi
 if [ ! -e /dev/kvm ]; then
@@ -355,6 +360,59 @@ if ! echo "$RDTSC_OUT" |
 	exit 1
 fi
 
+RDTSCP_SUMMARY=live-rdtscp=1
+if ! ensure_kvm_readable; then
+	echo "SKIP: /dev/kvm not readable before RDTSCP smoke" >&2
+	exit 4
+fi
+
+RDTSCP_OUT=$(timeout --kill-after=10 45 "$BINARY" \
+	backend=force=kvm-v2 \
+	init="$RDTSCP_HELPER" mem="$MEM" \
+	con=null con0=fd:0,fd:1 \
+	root=/dev/root rootfstype=hostfs rw \
+	panic=-1 </dev/null 2>&1 || true)
+
+RDTSCP_LINE=$(echo "$RDTSCP_OUT" | grep '^KVM_RECORD_RDTSCP:' | head -1)
+if [ -z "$RDTSCP_LINE" ]; then
+	echo "KVM_RECORD_SMOKE: FAIL (no RDTSCP smoke result line)"
+	echo "$RDTSCP_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSCP|UML: fatal|panic' |
+		tail -80
+	exit 1
+fi
+
+echo "$RDTSCP_LINE"
+case "$RDTSCP_LINE" in
+*SKIP\ instruction=rdtscp\ unsupported*)
+	RDTSCP_SUMMARY=live-rdtscp=skip
+	;;
+*armed\ instruction=rdtscp*)
+	if echo "$RDTSCP_OUT" | grep -q 'KVM_RECORD_RDTSCP: FAIL'; then
+		echo "KVM_RECORD_SMOKE: FAIL (RDTSCP returned under replay)"
+		echo "$RDTSCP_OUT" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSCP|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
+	if ! echo "$RDTSCP_OUT" |
+		grep -q "Kernel panic - not syncing: Attempted to kill init"; then
+		echo "KVM_RECORD_SMOKE: FAIL (RDTSCP replay fault did not kill init)"
+		echo "$RDTSCP_OUT" |
+			grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSCP|UML: fatal|panic' |
+			tail -80
+		exit 1
+	fi
+	;;
+*)
+	echo "KVM_RECORD_SMOKE: FAIL (RDTSCP helper did not arm or skip)"
+	echo "$RDTSCP_OUT" |
+		grep -E 'backend = |kvm-v2 record|KVM_RECORD_RDTSCP|UML: fatal|panic' |
+		tail -80
+	exit 1
+	;;
+esac
+
 if ! ensure_kvm_readable; then
 	echo "SKIP: /dev/kvm not readable before negative smoke" >&2
 	exit 4
@@ -409,6 +467,6 @@ fi
 
 SUMMARY="KVM_RECORD_SMOKE: PASS (KUnit=${#CASES[@]}/${#CASES[@]}"
 SUMMARY="$SUMMARY live-debugfs=1 task-owned=1 live-mismatch=1"
-SUMMARY="$SUMMARY live-time=1 live-rdtsc=1 live-negative=1)"
+SUMMARY="$SUMMARY live-time=1 live-rdtsc=1 $RDTSCP_SUMMARY live-negative=1)"
 echo "$SUMMARY"
 exit 0

@@ -2,9 +2,9 @@
 TEST_PROGS := run-kvm-record-smoke.sh
 TEST_FILES := kvm-record-smoke.sh
 TEST_GEN_FILES := kvm-record-task kvm-record-negative kvm-record-mismatch \
-	kvm-record-time kvm-record-rdtsc
+	kvm-record-time kvm-record-rdtsc kvm-record-rdtscp
 EXTRA_CLEAN := kvm-record-task kvm-record-negative kvm-record-mismatch \
-	kvm-record-time kvm-record-rdtsc
+	kvm-record-time kvm-record-rdtsc kvm-record-rdtscp
 
 include ../../lib.mk
 
@@ -20,5 +20,8 @@ $(OUTPUT)/kvm-record-mismatch: kvm-record-mismatch.c
 $(OUTPUT)/kvm-record-time: kvm-record-time.c
 	$(CC) -Wall -Wextra -O2 -static -o $@ $<
 
-$(OUTPUT)/kvm-record-rdtsc: kvm-record-rdtsc.c
+$(OUTPUT)/kvm-record-rdtsc: kvm-record-timestamp.c
 	$(CC) -Wall -Wextra -O2 -static -o $@ $<
+
+$(OUTPUT)/kvm-record-rdtscp: kvm-record-timestamp.c
+	$(CC) -Wall -Wextra -O2 -static -DKVM_RECORD_TIMESTAMP_RDTSCP -o $@ $<

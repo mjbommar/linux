@@ -689,9 +689,12 @@ Current `next` checkpoint:
 - Validation on 2026-06-11 after the live RDTSC replay smoke:
   `kvm-record-smoke` PASS includes `live-rdtsc=1`, proving replay-mode direct
   user `RDTSC` faults instead of returning a host timestamp.
-- Still open: replayable raw-time payloads, direct RDTSCP runtime evidence,
-  signal determinism, broader deterministic workload coverage, and replayable
-  device/network/hostfs event policy.
+- Validation on 2026-06-11 after the live RDTSCP replay smoke:
+  `kvm-record-smoke` PASS includes `live-rdtscp=1`, proving replay-mode direct
+  user `RDTSCP` faults instead of returning a host timestamp.
+- Still open: replayable raw-time payloads, signal determinism, broader
+  deterministic workload coverage, and replayable device/network/hostfs event
+  policy.
 
 Acceptance gates:
 
@@ -704,8 +707,8 @@ Acceptance gates:
   `kvm-record-mismatch` helper.
 - Strict raw-time syscall smoke. Current status: PASS through the live
   `kvm-record-time` helper.
-- Direct RDTSC replay smoke. Current status: PASS through the live
-  `kvm-record-rdtsc` helper.
+- Direct RDTSC/RDTSCP replay smoke. Current status: PASS through the live
+  `kvm-record-rdtsc` and `kvm-record-rdtscp` helpers.
 - Gadget-on and gadget-off comparison. Current status: state-page bypass and
   gadget-on hot path are covered, and record/replay now forces gadget-handled
   syscalls through the live dispatcher; side-by-side gadget-on/off workload

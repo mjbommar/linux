@@ -143,9 +143,9 @@ The smoke gate currently validates:
 * strict fail-closed behavior for a supported ``getcwd(2)`` argument mismatch;
 * strict fail-closed behavior for raw ``clock_gettime(2)`` outside the replay
   set;
-* CR4.TSD fault behavior for direct user ``RDTSC`` under replay;
+* CR4.TSD fault behavior for direct user ``RDTSC``/``RDTSCP`` under replay;
 * strict fail-closed behavior for an unsupported ``getrandom(2)`` syscall.
 
 The expected summary line is::
 
-  KVM_RECORD_SMOKE: PASS (KUnit=21/21 live-debugfs=1 task-owned=1 live-mismatch=1 live-time=1 live-rdtsc=1 live-negative=1)
+  KVM_RECORD_SMOKE: PASS (KUnit=21/21 live-debugfs=1 task-owned=1 live-mismatch=1 live-time=1 live-rdtsc=1 live-rdtscp=1 live-negative=1)
