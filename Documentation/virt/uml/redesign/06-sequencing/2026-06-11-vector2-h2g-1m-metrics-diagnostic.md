@@ -92,6 +92,44 @@ pcount.  The next bottleneck pass should inspect the host-to-guest wakeup,
 readiness, and receive scheduling path rather than only RX-slot allocation,
 which lazy RX already cleaned up.
 
-The run also does not close the P4.3 syscall-rate gate.  Local privileged
-`perf stat -e syscalls:sys_enter_*` remains unavailable under
-`perf_event_paranoid=4`.
+The run also does not close the P4.3 syscall-rate gate.  The helper now has
+bounded transfer-window `perf stat` support for host-to-guest runs, but this
+diagnostic used only the unprivileged `umlctl metrics` deltas.
+
+## Parameter And Topology Sweep
+
+The next bounded pass used the same 1 MiB host-to-guest cell with three repeats
+per driver.  Each run enabled transfer-window perf collection:
+
+```sh
+UML_VECTOR_PERF_DIRECTION=host-to-guest \
+UML_VECTOR_PERF_PROTOCOL=tcp \
+UML_VECTOR_PERF_BYTES_LIST=1048576 \
+UML_VECTOR_PERF_REPEAT=3 \
+UML_VECTOR_PERF_PERF_STAT=1 \
+UML_VECTOR_PERF_PERF_SECONDS=1 \
+  tools/uml/uml-launcher/scripts/vector-net-perf-baseline.sh \
+    --kernel "$PWD/linux"
+```
+
+The cells varied only the named knob:
+
+| Cell | Extra setting | Host median ratio | Host best ratio | Scheduler pcount ratio | Transfer-window syscall ratio |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default fd/multiqueue | none | 0.650602 | 0.655297 | 1.193753 | 0.179778 |
+| 16 KiB host chunk | `UML_VECTOR_PERF_HOST_CHUNK=16384` | 1.788009 | 0.530945 | 0.234691 | 1.005365 |
+| TCP_NODELAY | `UML_VECTOR_PERF_TCP_NODELAY=1` | 0.560706 | 0.524691 | 1.685262 | 0.092742 |
+| single-queue fd | `UML_VECTOR_PERF_QUEUES=1` | 0.810510 | 0.906732 | 1.214615 | 0.362521 |
+| in-process TAP | `UML_VECTOR_PERF_HOST_MODE=inproc` | 0.639896 | 0.661140 | 1.141699 | 0.173316 |
+
+Result: PASS for all 30 raw transfer rows, with no stale `vperf-*` TAP devices
+or live `umlctl` instances after the runs.
+
+The 16 KiB chunk cell is not a closure despite the median ratio above 1.0:
+legacy vector had two slow outliers, and the best-run vector2/vector ratio was
+only 0.530945.  `TCP_NODELAY` and in-process TAP also do not close the cell.
+The strongest hint is single-queue fd mode: it improves the host-side median
+ratio to 0.810510 and the best ratio to 0.906732, but it still misses the
+median no-regression bar.  That points the next implementation pass at vector2
+queue selection, wakeup, and receive scheduling policy rather than at fd
+handoff alone.

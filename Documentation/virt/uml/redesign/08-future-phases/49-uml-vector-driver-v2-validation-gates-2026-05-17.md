@@ -147,6 +147,17 @@ fixed-byte harness now records before/after link, route, feature, and ethtool
 counter diagnostics so the next pass can compare RX IRQ, NAPI, and batch
 behavior instead of relying on throughput alone.
 
+A follow-up 1 MiB host-to-guest TCP parameter/topology sweep used three
+repeats per driver with transfer-window perf collection.  Default
+fd/multiqueue vector2 stayed below legacy at host-side median ratio 0.650602.
+`TCP_NODELAY` and in-process TAP also stayed below the bar at 0.560706 and
+0.639896.  A 16 KiB sender chunk did not close the cell: its median ratio
+above 1.0 came from legacy-vector outliers, and its best-run ratio was
+0.530945.  Single-queue fd mode was the strongest hint, with median ratio
+0.810510 and best ratio 0.906732, but it still misses the median parity bar.
+The remaining bottleneck target is queue selection plus wakeup/receive
+scheduling policy, not fd handoff alone.
+
 ### Acceptance criteria for "perf parity"
 
 The gate is *not* "vector2 is faster than legacy in every cell."

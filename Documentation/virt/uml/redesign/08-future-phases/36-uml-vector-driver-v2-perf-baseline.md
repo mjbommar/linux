@@ -1048,6 +1048,31 @@ This does not close the host-to-guest no-regression bar.  It does narrow the
 next bottleneck pass: vector2 is steadier than legacy vector in this short run,
 but it spends much more scheduler/wakeup activity per transfer.
 
+## 1 MiB Host-To-Guest Parameter Sweep: 2026-06-11
+
+The next diagnostic sweep kept the same 1 MiB host-to-guest TCP cell, used
+three repeats per driver, and enabled transfer-window perf collection.  The
+runs varied one knob at a time: default fd/multiqueue, 16 KiB host sender
+chunk, `TCP_NODELAY`, single-queue fd, and in-process TAP.
+
+Selected ratios:
+
+| Cell | Host median ratio | Host best ratio | Scheduler pcount ratio | Perf syscall ratio |
+| --- | ---: | ---: | ---: | ---: |
+| default fd/multiqueue | 0.650602 | 0.655297 | 1.193753 | 0.179778 |
+| 16 KiB host chunk | 1.788009 | 0.530945 | 0.234691 | 1.005365 |
+| TCP_NODELAY | 0.560706 | 0.524691 | 1.685262 | 0.092742 |
+| single-queue fd | 0.810510 | 0.906732 | 1.214615 | 0.362521 |
+| in-process TAP | 0.639896 | 0.661140 | 1.141699 | 0.173316 |
+
+Result: PASS for all 30 transfer rows, and cleanup checks found no stale
+`vperf-*` TAP devices or live `umlctl` instances.  The 16 KiB chunk median is
+not an acceptance result because legacy vector had two slow outliers while the
+best-run ratio stayed at 0.530945.  Single-queue fd mode is the strongest
+current hint, but it still misses the median no-regression bar.  The next
+implementation target is vector2 queue selection plus wakeup/receive
+scheduling policy, not fd handoff alone.
+
 ## Interpretation
 
 This is a baseline, not an acceptance result.  On this short
@@ -1072,10 +1097,10 @@ The full replacement performance gate still needs:
 - host-to-guest small-transfer follow-up;
 - use the fixed-byte harness diagnostics to compare RX IRQ, NAPI, and batch
   counters plus UML process metric deltas between legacy and vector2;
-- inspect host-to-guest wakeup/readiness/receive scheduling behavior, because
-  the 1 MiB metric diagnostic shows about 12x higher vector2 scheduler pcount
-  and voluntary context-switch deltas;
-- single-queue vector2 fd and TAP comparisons;
+- inspect host-to-guest queue selection and wakeup/readiness/receive
+  scheduling behavior, because the 1 MiB metric diagnostic shows about 12x
+  higher vector2 scheduler pcount and voluntary context-switch deltas, and the
+  parameter sweep shows single-queue fd is the strongest current hint;
 - refine the `perf-window.tsv` transfer-window rows into steady-state syscall
   and batching profiles;
 - full CPU-utilisation and CPU cycles per packet at matched throughput if
