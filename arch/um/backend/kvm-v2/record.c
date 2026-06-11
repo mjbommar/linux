@@ -103,6 +103,10 @@ static void kvm_v2_record_reset_counters(struct kvm_v2_record *rec)
 	rec->last_syscall_pid = 0;
 	rec->syscalls_from_snapshot_task = 0;
 	rec->syscalls_from_other_tasks = 0;
+	rec->payload_entries_recorded = 0;
+	rec->payload_entries_replayed = 0;
+	rec->payload_bytes_recorded = 0;
+	rec->payload_bytes_replayed = 0;
 }
 
 static void kvm_v2_record_release_snapshot_locked(struct kvm_v2_record *rec)
@@ -413,6 +417,52 @@ struct kvm_v2_record *kvm_v2_record_active(void)
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_active);
 
+static void kvm_v2_record_fill_syscall_args(u64 args[6],
+					    const struct uml_pt_regs *regs)
+{
+	memset(args, 0, sizeof(u64) * 6);
+	if (!regs)
+		return;
+
+	args[0] = regs->gp[HOST_DI];
+	args[1] = regs->gp[HOST_SI];
+	args[2] = regs->gp[HOST_DX];
+	args[3] = regs->gp[HOST_R10];
+	args[4] = regs->gp[HOST_R8];
+	args[5] = regs->gp[HOST_R9];
+}
+
+static bool kvm_v2_record_syscall_args_match(const u64 args[6],
+					     const struct uml_pt_regs *regs)
+{
+	u64 replay_args[6];
+
+	if (!regs)
+		return true;
+
+	kvm_v2_record_fill_syscall_args(replay_args, regs);
+	return !memcmp(args, replay_args, sizeof(replay_args));
+}
+
+static void kvm_v2_record_account_syscall_locked(struct kvm_v2_record *rec)
+{
+	rec->syscall_count++;
+	if (!rec->first_syscall_pid)
+		rec->first_syscall_pid = current->pid;
+	rec->last_syscall_pid = current->pid;
+	if (rec->snapshot_valid && rec->snapshot &&
+	    current->pid == rec->snapshot->task_source_pid)
+		rec->syscalls_from_snapshot_task++;
+	else if (rec->snapshot_valid)
+		rec->syscalls_from_other_tasks++;
+}
+
+static size_t kvm_v2_record_payload_entry_size(size_t payload_len)
+{
+	return ALIGN(sizeof(struct kvm_v2_replay_entry) + payload_len,
+		     sizeof(u64));
+}
+
 void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 				   unsigned long syscall_nr,
 				   long ret_value,
@@ -441,32 +491,72 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 	entry->sequence = ++rec->sequence;
 	entry->syscall.nr = (s32)syscall_nr;
 	entry->syscall.retval = (s64)ret_value;
-
-	if (regs) {
-		entry->syscall.args[0] = regs->gp[HOST_DI];
-		entry->syscall.args[1] = regs->gp[HOST_SI];
-		entry->syscall.args[2] = regs->gp[HOST_DX];
-		entry->syscall.args[3] = regs->gp[HOST_R10];
-		entry->syscall.args[4] = regs->gp[HOST_R8];
-		entry->syscall.args[5] = regs->gp[HOST_R9];
-	}
+	kvm_v2_record_fill_syscall_args(entry->syscall.args, regs);
 
 	rec->buffer_used += need;
 	rec->entries_recorded++;
-	rec->syscall_count++;
-	if (!rec->first_syscall_pid)
-		rec->first_syscall_pid = current->pid;
-	rec->last_syscall_pid = current->pid;
-	if (rec->snapshot_valid && rec->snapshot &&
-	    current->pid == rec->snapshot->task_source_pid)
-		rec->syscalls_from_snapshot_task++;
-	else if (rec->snapshot_valid)
-		rec->syscalls_from_other_tasks++;
+	kvm_v2_record_account_syscall_locked(rec);
 
 out_unlock:
 	mutex_unlock(&rec->lock);
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_observe_syscall);
+
+int kvm_v2_record_observe_syscall_payload(struct kvm_v2_record *rec,
+					  unsigned long syscall_nr,
+					  long ret_value,
+					  const struct uml_pt_regs *regs,
+					  unsigned int arg_index,
+					  const void *payload,
+					  size_t payload_len)
+{
+	struct kvm_v2_replay_entry *entry;
+	size_t need;
+	int rc = 0;
+
+	if (!rec || arg_index >= 6 || (!payload && payload_len))
+		return -EINVAL;
+	if (payload_len > KVM_V2_RECORD_MAX_PAYLOAD)
+		return -E2BIG;
+
+	need = kvm_v2_record_payload_entry_size(payload_len);
+
+	mutex_lock(&rec->lock);
+	if (rec->state != KVM_V2_RECORD_RECORDING)
+		goto out_unlock;
+
+	if (rec->buffer_used + need > rec->buffer_size) {
+		rec->entries_dropped++;
+		rc = -ENOSPC;
+		goto out_unlock;
+	}
+
+	entry = (struct kvm_v2_replay_entry *)
+		((u8 *)rec->buffer + rec->buffer_used);
+	memset(entry, 0, need);
+	entry->kind = KVM_V2_REPLAY_SYSCALL_PAYLOAD;
+	entry->size = (u32)need;
+	entry->sequence = ++rec->sequence;
+	entry->syscall_payload.nr = (s32)syscall_nr;
+	entry->syscall_payload.arg_index = arg_index;
+	entry->syscall_payload.retval = (s64)ret_value;
+	kvm_v2_record_fill_syscall_args(entry->syscall_payload.args, regs);
+	entry->syscall_payload.payload_len = (u32)payload_len;
+	if (payload_len)
+		memcpy((u8 *)entry + sizeof(*entry), payload, payload_len);
+
+	rec->buffer_used += need;
+	rec->entries_recorded++;
+	rec->payload_entries_recorded++;
+	rec->payload_bytes_recorded += payload_len;
+	kvm_v2_record_account_syscall_locked(rec);
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_observe_syscall_payload);
 
 int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
 				  unsigned long syscall_nr,
@@ -514,6 +604,80 @@ out_unlock:
 	return rc;
 }
 EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall);
+
+int kvm_v2_record_consume_syscall_payload(struct kvm_v2_record *rec,
+					  unsigned long syscall_nr,
+					  const struct uml_pt_regs *regs,
+					  long *ret_value,
+					  void *payload,
+					  size_t payload_size,
+					  size_t *payload_len_out)
+{
+	struct kvm_v2_replay_entry *entry;
+	size_t payload_len;
+	size_t cursor;
+	int rc = 0;
+
+	if (!rec || !payload)
+		return 0;
+	if (payload_len_out)
+		*payload_len_out = 0;
+
+	mutex_lock(&rec->lock);
+	if (rec->state != KVM_V2_RECORD_REPLAYING)
+		goto out_unlock;
+
+	cursor = rec->buffer_replayed;
+	if (cursor >= rec->buffer_used) {
+		rc = -ENODATA;
+		goto out_unlock;
+	}
+
+	if (cursor + sizeof(*entry) > rec->buffer_used) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	entry = (struct kvm_v2_replay_entry *)((u8 *)rec->buffer + cursor);
+	if (entry->kind != KVM_V2_REPLAY_SYSCALL_PAYLOAD ||
+	    entry->size < sizeof(*entry) ||
+	    cursor + entry->size > rec->buffer_used ||
+	    entry->syscall_payload.nr != (s32)syscall_nr ||
+	    entry->syscall_payload.arg_index >= 6 ||
+	    !kvm_v2_record_syscall_args_match(entry->syscall_payload.args,
+					      regs)) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+
+	payload_len = entry->syscall_payload.payload_len;
+	if (payload_len > entry->size - sizeof(*entry)) {
+		rc = -EILSEQ;
+		goto out_unlock;
+	}
+	if (payload_len > payload_size) {
+		rc = -ENOSPC;
+		goto out_unlock;
+	}
+
+	if (payload_len)
+		memcpy(payload, (u8 *)entry + sizeof(*entry), payload_len);
+	if (payload_len_out)
+		*payload_len_out = payload_len;
+	if (ret_value)
+		*ret_value = (long)entry->syscall_payload.retval;
+
+	rec->buffer_replayed = cursor + entry->size;
+	rec->entries_replayed++;
+	rec->payload_entries_replayed++;
+	rec->payload_bytes_replayed += payload_len;
+	rc = 1;
+
+out_unlock:
+	mutex_unlock(&rec->lock);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(kvm_v2_record_consume_syscall_payload);
 
 void kvm_v2_record_observe_time_travel(struct kvm_v2_record *rec,
 				       u64 ns_at_advance)
@@ -901,6 +1065,14 @@ static int kvm_v2_record_status_show(struct seq_file *m, void *v)
 		   rec->syscalls_from_snapshot_task);
 	seq_printf(m, "syscalls_from_other_tasks: %llu\n",
 		   rec->syscalls_from_other_tasks);
+	seq_printf(m, "payload_entries_recorded: %llu\n",
+		   rec->payload_entries_recorded);
+	seq_printf(m, "payload_entries_replayed: %llu\n",
+		   rec->payload_entries_replayed);
+	seq_printf(m, "payload_bytes_recorded: %llu\n",
+		   rec->payload_bytes_recorded);
+	seq_printf(m, "payload_bytes_replayed: %llu\n",
+		   rec->payload_bytes_replayed);
 	mutex_unlock(&rec->lock);
 	mutex_unlock(&kvm_v2_record_debugfs_lock);
 

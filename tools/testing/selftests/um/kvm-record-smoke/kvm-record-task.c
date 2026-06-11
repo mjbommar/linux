@@ -18,10 +18,15 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #define CTL_PATH	"/sys/kernel/debug/um/kvm_v2_record_ctl"
 #define STATUS_PATH	"/sys/kernel/debug/um/kvm_v2_record_status"
+
+#ifndef SYS_uname
+#define SYS_uname	63
+#endif
 
 static int ensure_dir(const char *path)
 {
@@ -138,6 +143,7 @@ static int get_long(const char *key, long *out)
 
 static long scalar_workload(void)
 {
+	struct utsname uts;
 	long sink = 0;
 	int i;
 
@@ -146,6 +152,12 @@ static long scalar_workload(void)
 		sink += getppid();
 		sink += syscall(SYS_gettid);
 	}
+
+	memset(&uts, 0, sizeof(uts));
+	if (syscall(SYS_uname, &uts) == 0)
+		sink += uts.sysname[0] + uts.machine[0];
+	else
+		return -1;
 
 	return sink;
 }
@@ -159,6 +171,8 @@ int main(void)
 	long other_tasks;
 	long first_pid;
 	long last_pid;
+	long payload_entries;
+	long payload_bytes;
 	long sink;
 
 	setup_mounts();
@@ -195,17 +209,22 @@ int main(void)
 	    get_long("syscalls_from_snapshot_task", &same_task) < 0 ||
 	    get_long("syscalls_from_other_tasks", &other_tasks) < 0 ||
 	    get_long("first_syscall_pid", &first_pid) < 0 ||
-	    get_long("last_syscall_pid", &last_pid) < 0) {
+	    get_long("last_syscall_pid", &last_pid) < 0 ||
+	    get_long("payload_entries_recorded", &payload_entries) < 0 ||
+	    get_long("payload_bytes_recorded", &payload_bytes) < 0) {
 		(void)write_ctl("destroy\n");
 		return 1;
 	}
 
 	if (entries <= 0 || syscalls <= 0 || same_task != syscalls ||
-	    other_tasks != 0 || first_pid != pid || last_pid != pid) {
+	    other_tasks != 0 || first_pid != pid || last_pid != pid ||
+	    payload_entries < 1 || payload_bytes <= 0 || sink < 0) {
 		printf("KVM_RECORD_TASK: FAIL pid=%ld entries=%ld syscalls=%ld ",
 		       pid, entries, syscalls);
-		printf("same=%ld other=%ld first=%ld last=%ld sink=%ld\n",
-		       same_task, other_tasks, first_pid, last_pid, sink);
+		printf("same=%ld other=%ld first=%ld last=%ld ",
+		       same_task, other_tasks, first_pid, last_pid);
+		printf("payload_entries=%ld payload_bytes=%ld sink=%ld\n",
+		       payload_entries, payload_bytes, sink);
 		(void)write_ctl("destroy\n");
 		return 1;
 	}
@@ -217,6 +236,7 @@ int main(void)
 
 	printf("KVM_RECORD_TASK: PASS pid=%ld entries=%ld syscalls=%ld ",
 	       pid, entries, syscalls);
-	printf("same=%ld other=%ld sink=%ld\n", same_task, other_tasks, sink);
+	printf("same=%ld other=%ld payload_entries=%ld payload_bytes=%ld sink=%ld\n",
+	       same_task, other_tasks, payload_entries, payload_bytes, sink);
 	return 0;
 }

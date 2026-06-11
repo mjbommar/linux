@@ -1,6 +1,6 @@
 # UML Redesign Status
 
-Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, and record/replay task-owned session-start evidence.
+Last updated: 2026-06-11 profiles, ftrace, launcher, selftest/doc curation, report/presentation archival marking, active source comment cleanup, umlbuild validation, experimental record/replay core, record/replay live syscall hook/gadget bypass/debugfs control/time-travel clock events, KVM v2 dynamic-loader TLS closure, snapshot ELF/debugfs documentation validation, vector2 validation documentation alignment, BPF/JIT runtime smoke validation, kprobes stress validation, KMSAN runtime-smoke closure, follow-up KVM v2 comment cleanup, x86 UML ptrace/TLS regset cleanup, substrate gate tightening, CPython tier-0 gate evidence, KGDB disposition cleanup, current-HEAD pool/fork/syzkaller regression evidence, current-HEAD vector2 validation evidence, record/replay task-owned session-start evidence, and first record/replay syscall-payload evidence.
 
 This file records the current state of the UML v2 work. It is not a running
 chronicle. Prior investigations, retired designs, and detailed validation
@@ -56,9 +56,11 @@ Current source-tree direction:
   also round-trip UML time-travel clock advances through the `record_replay`
   hook. Record status now reports first/last recorded syscall PID and
   same-task versus other-task syscall counters, and the task-owned smoke proves
-  a single process can snapshot itself and record a focused scalar syscall
-  workload without other-task contamination. Raw time/RDTSC, payload replay,
-  signal, device, and deterministic replay policy remain incomplete.
+  a single process can snapshot itself and record a focused scalar plus
+  `uname(2)` payload workload without other-task contamination. The first
+  payload replay primitive can restore `uname(2)`'s `struct new_utsname` when
+  syscall number and arguments match. Raw time/RDTSC, broader payload
+  coverage, signal, device, and deterministic replay policy remain incomplete.
   Private trace-ring sources have not yet been reimported.
 - KVM v2 keeps normal kernel tracepoints as its public observability surface.
 - Runtime backend selection remains explicit; seccomp stays the fallback
@@ -133,23 +135,26 @@ The strongest current KVM v2 evidence is:
   online CPU with `-EOPNOTSUPP`, because all-vCPU quiescence is not implemented.
   The default validated tree is a UP build, so the selftest reports the negative
   SMP leg as not-built unless the tested UML binary has `CONFIG_SMP=y`.
-- Experimental record/replay KUnit: `um_kvm_v2_record` passes 10/10 with
+- Experimental record/replay KUnit: `um_kvm_v2_record` passes 14/14 with
   `CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL=y`, covering lifecycle,
   invalid transitions, single-active ownership, syscall observe, FIFO replay,
-  divergence cursor preservation, time-travel clock-event FIFO replay,
-  buffer-overflow accounting, the synthetic gadget-bypass page helper, and
-  snapshot metadata cleanup. The live KVM syscall dispatcher now calls the
-  observe/consume hooks, so this is no longer core-only syscall plumbing.
+  divergence cursor preservation, `uname(2)` payload restore, too-small
+  payload buffer rejection, payload argument mismatch, payload overflow
+  accounting, time-travel clock-event FIFO replay, the synthetic gadget-bypass
+  page helper, and snapshot metadata cleanup. The live KVM syscall dispatcher
+  now calls the observe/consume hooks, so this is no longer core-only syscall
+  plumbing.
 - Experimental live record smoke: `kvm-record-smoke` passes through the
   debugfs control surface, captures and attaches a KVM v2 task snapshot at
-  record start, and records 3067 live KVM v2 syscall entries with 245360
+  record start, and records 3067 live KVM v2 syscall entries with 269896
   bytes used and 0 drops.
 - Experimental task-owned record smoke: the static `kvm-record-task` helper
   runs as a single guest process, writes the debugfs `start` command itself,
   verifies `snapshot_source_pid == first_syscall_pid == last_syscall_pid`,
-  and requires `syscalls_from_other_tasks=0` for the scalar workload. This
-  closes the first R/R-1 session-start gate but does not yet prove payload
-  replay or full deterministic workload replay.
+  requires `syscalls_from_other_tasks=0`, and records one 390-byte `uname(2)`
+  payload for the focused workload. This closes the first R/R-1 session-start
+  and payload-model gates for a single copyout syscall, but does not yet prove
+  full deterministic workload replay.
 - Experimental record clock bench: `kvm-record-clock-bench` passes with
   `N=100`, `observed=100`, `replayed=100`, and `mismatches=0`, proving the
   KVM v2 record log can round-trip time-travel clock advances.

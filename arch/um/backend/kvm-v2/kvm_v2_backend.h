@@ -726,7 +726,10 @@ enum kvm_v2_replay_kind {
 	KVM_V2_REPLAY_NONE = 0,
 	KVM_V2_REPLAY_SYSCALL,
 	KVM_V2_REPLAY_TIME_TRAVEL,
+	KVM_V2_REPLAY_SYSCALL_PAYLOAD,
 };
+
+#define KVM_V2_RECORD_MAX_PAYLOAD	4096U
 
 struct kvm_v2_replay_entry {
 	u32	kind;
@@ -743,6 +746,14 @@ struct kvm_v2_replay_entry {
 			u64	ns_at_advance;
 			u64	syscall_count_anchor;
 		} time_travel;
+		struct {
+			s32	nr;
+			u32	arg_index;
+			s64	retval;
+			u64	args[6];
+			u32	payload_len;
+			u32	_pad;
+		} syscall_payload;
 	};
 };
 
@@ -766,6 +777,10 @@ struct kvm_v2_record {
 	pid_t				last_syscall_pid;
 	u64				syscalls_from_snapshot_task;
 	u64				syscalls_from_other_tasks;
+	u64				payload_entries_recorded;
+	u64				payload_entries_replayed;
+	u64				payload_bytes_recorded;
+	u64				payload_bytes_replayed;
 	struct mutex			lock;
 };
 
@@ -791,6 +806,20 @@ void kvm_v2_record_observe_syscall(struct kvm_v2_record *rec,
 int kvm_v2_record_consume_syscall(struct kvm_v2_record *rec,
 				  unsigned long syscall_nr,
 				  long *ret_value);
+int kvm_v2_record_observe_syscall_payload(struct kvm_v2_record *rec,
+					  unsigned long syscall_nr,
+					  long ret_value,
+					  const struct uml_pt_regs *regs,
+					  unsigned int arg_index,
+					  const void *payload,
+					  size_t payload_len);
+int kvm_v2_record_consume_syscall_payload(struct kvm_v2_record *rec,
+					  unsigned long syscall_nr,
+					  const struct uml_pt_regs *regs,
+					  long *ret_value,
+					  void *payload,
+					  size_t payload_size,
+					  size_t *payload_len_out);
 #endif
 
 #endif /* __ARCH_UM_BACKEND_KVM_V2_H */

@@ -165,17 +165,21 @@ record container control surface:
       snapshot_task_state: 1
       snapshot_source_pid: 1
       buffer_size: 1048576
-      buffer_used: 31680
+      buffer_used: 35328
       buffer_replayed: 0
-      sequence: 396
-      entries_recorded: 396
+      sequence: 397
+      entries_recorded: 397
       entries_replayed: 0
       entries_dropped: 0
-      syscall_count: 396
+      syscall_count: 397
       first_syscall_pid: 1
       last_syscall_pid: 1
-      syscalls_from_snapshot_task: 396
+      syscalls_from_snapshot_task: 397
       syscalls_from_other_tasks: 0
+      payload_entries_recorded: 1
+      payload_entries_replayed: 0
+      payload_bytes_recorded: 390
+      payload_bytes_replayed: 0
 
 The record path is still explicitly experimental. It can record live
 KVM v2 syscall returns through the host dispatcher and the LSTAR gadget
@@ -184,7 +188,10 @@ It can also round-trip UML time-travel clock advances through the record
 log. The status counters identify whether recorded syscalls came from the
 snapshot owner or from other tasks, which lets selftests distinguish a
 task-owned record run from a control-file writer that merely enabled
-recording for later work. Full deterministic replay still needs raw
+recording for later work. The first payload-aware syscall is ``uname(2)``:
+record mode copies the returned ``struct new_utsname`` into the log, and
+replay mode can restore that payload when syscall number and arguments match.
+Full deterministic replay still needs broader payload coverage plus raw
 time/RDTSC, signal, and device policy described in the redesign plan.
 
 Cost impact

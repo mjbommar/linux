@@ -61,11 +61,14 @@
 #include <linux/string.h>
 #include <linux/thread_info.h>	/* read_thread_flags, _TIF_WORK_MASK */
 #include <linux/types.h>
+#include <linux/uaccess.h>
+#include <linux/utsname.h>
 #include <uapi/asm-generic/siginfo.h>	/* ILL_ILLOPN, FPE_INTOVF, SEGV_MAPERR */
 
 #include <asm/page.h>
 #include <asm/processor-flags.h>	/* X86_CR0_TS */
 #include <asm/trace/um_backend.h>
+#include <asm/unistd.h>
 
 #include <kern_util.h>		/* segv_handler, relay_signal */
 #include <os.h>			/* os_drop_caching */
@@ -1443,6 +1446,38 @@ static void kvm_v2_clear_syscall_nr(struct uml_pt_regs *regs)
 }
 
 #ifdef CONFIG_UM_BACKEND_KVM_V2_RECORD_REPLAY_EXPERIMENTAL
+static bool kvm_v2_record_syscall_has_payload(unsigned long syscall_nr)
+{
+	return syscall_nr == __NR_uname;
+}
+
+static int kvm_v2_record_replay_payload(struct kvm_v2_record *rec,
+					struct uml_pt_regs *regs,
+					unsigned long syscall_nr,
+					long *served_ret)
+{
+	struct new_utsname payload;
+	size_t payload_len = 0;
+	int rc;
+
+	if (!kvm_v2_record_syscall_has_payload(syscall_nr))
+		return 0;
+
+	rc = kvm_v2_record_consume_syscall_payload(rec, syscall_nr, regs,
+						   served_ret, &payload,
+						   sizeof(payload),
+						   &payload_len);
+	if (rc <= 0)
+		return rc;
+
+	if (*served_ret >= 0 && payload_len &&
+	    copy_to_user((void __user *)regs->gp[HOST_DI], &payload,
+			 payload_len))
+		return -EFAULT;
+
+	return 1;
+}
+
 static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 				      unsigned long syscall_nr)
 {
@@ -1457,7 +1492,9 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 	if (!rec || rec->state != KVM_V2_RECORD_REPLAYING)
 		return false;
 
-	rc = kvm_v2_record_consume_syscall(rec, syscall_nr, &served_ret);
+	rc = kvm_v2_record_replay_payload(rec, regs, syscall_nr, &served_ret);
+	if (!rc)
+		rc = kvm_v2_record_consume_syscall(rec, syscall_nr, &served_ret);
 	if (rc > 0) {
 		regs->gp[HOST_AX] = (unsigned long)served_ret;
 		return true;
@@ -1473,6 +1510,25 @@ static bool kvm_v2_try_replay_syscall(struct uml_pt_regs *regs,
 	return false;
 }
 
+static bool kvm_v2_record_observe_payload(struct kvm_v2_record *rec,
+					  struct uml_pt_regs *regs,
+					  unsigned long syscall_nr)
+{
+	struct new_utsname payload;
+	long ret = (long)regs->gp[HOST_AX];
+
+	if (!kvm_v2_record_syscall_has_payload(syscall_nr) || ret < 0)
+		return false;
+
+	if (copy_from_user(&payload, (void __user *)regs->gp[HOST_DI],
+			   sizeof(payload)))
+		return false;
+
+	return kvm_v2_record_observe_syscall_payload(rec, syscall_nr, ret,
+						     regs, 0, &payload,
+						     sizeof(payload)) > 0;
+}
+
 static void kvm_v2_observe_syscall(struct uml_pt_regs *regs,
 				   unsigned long syscall_nr)
 {
@@ -1482,7 +1538,7 @@ static void kvm_v2_observe_syscall(struct uml_pt_regs *regs,
 		return;
 
 	rec = kvm_v2_record_active();
-	if (rec)
+	if (rec && !kvm_v2_record_observe_payload(rec, regs, syscall_nr))
 		kvm_v2_record_observe_syscall(rec, syscall_nr,
 					      (long)regs->gp[HOST_AX], regs);
 }

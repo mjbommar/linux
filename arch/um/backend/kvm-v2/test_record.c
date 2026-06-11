@@ -215,6 +215,171 @@ static void test_record_replay_syscall_fifo(struct kunit *test)
 	kvm_v2_record_destroy(rec);
 }
 
+static void test_record_syscall_payload_fifo(struct kunit *test)
+{
+	static const char payload[] = "recorded-uname-payload";
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs regs;
+	char got_payload[64];
+	size_t got_len = 0;
+	long got_ret = -1;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	fill_syscall_regs(&regs);
+	regs.gp[HOST_DI] = 0x12345000ULL;
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_observe_syscall_payload(rec, 63, 0,
+							      &regs, 0,
+							      payload,
+							      sizeof(payload)),
+			1);
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_entries_recorded, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_bytes_recorded,
+			(u64)sizeof(payload));
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec, 63, &regs,
+							      &got_ret,
+							      got_payload,
+							      sizeof(got_payload),
+							      &got_len),
+			1);
+	KUNIT_EXPECT_EQ(test, got_ret, 0L);
+	KUNIT_EXPECT_EQ(test, got_len, sizeof(payload));
+	KUNIT_EXPECT_EQ(test, memcmp(got_payload, payload, sizeof(payload)), 0);
+	KUNIT_EXPECT_EQ(test, rec->entries_replayed, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_entries_replayed, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_bytes_replayed,
+			(u64)sizeof(payload));
+
+	kvm_v2_record_destroy(rec);
+}
+
+static void test_record_syscall_payload_short_buffer(struct kunit *test)
+{
+	static const char payload[] = "payload-too-large";
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs regs;
+	char small[4];
+	size_t cursor;
+	size_t got_len;
+	long got_ret;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	fill_syscall_regs(&regs);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_ASSERT_EQ(test,
+			kvm_v2_record_observe_syscall_payload(rec, 63, 0,
+							      &regs, 0,
+							      payload,
+							      sizeof(payload)),
+			1);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+	cursor = rec->buffer_replayed;
+	got_len = 1234;
+	got_ret = -1;
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec, 63, &regs,
+							      &got_ret, small,
+							      sizeof(small),
+							      &got_len),
+			-ENOSPC);
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, cursor);
+	KUNIT_EXPECT_EQ(test, rec->entries_replayed, 0ULL);
+	KUNIT_EXPECT_EQ(test, got_len, 0UL);
+	KUNIT_EXPECT_EQ(test, got_ret, -1L);
+
+	kvm_v2_record_destroy(rec);
+}
+
+static void test_record_syscall_payload_arg_mismatch(struct kunit *test)
+{
+	static const char payload[] = "payload-arg-match";
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs regs;
+	struct uml_pt_regs replay_regs;
+	char got_payload[64];
+	size_t cursor;
+	size_t got_len;
+	long got_ret;
+
+	rec = kvm_v2_record_alloc(4096);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	fill_syscall_regs(&regs);
+	replay_regs = regs;
+	replay_regs.gp[HOST_DI]++;
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_ASSERT_EQ(test,
+			kvm_v2_record_observe_syscall_payload(rec, 63, 0,
+							      &regs, 0,
+							      payload,
+							      sizeof(payload)),
+			1);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_stop(rec), 0);
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_replay(rec), 0);
+
+	cursor = rec->buffer_replayed;
+	got_len = 0;
+	got_ret = -1;
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec, 63,
+							      &replay_regs,
+							      &got_ret,
+							      got_payload,
+							      sizeof(got_payload),
+							      &got_len),
+			-EILSEQ);
+	KUNIT_EXPECT_EQ(test, rec->buffer_replayed, cursor);
+	KUNIT_EXPECT_EQ(test, rec->entries_replayed, 0ULL);
+
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_consume_syscall_payload(rec, 63, &regs,
+							      &got_ret,
+							      got_payload,
+							      sizeof(got_payload),
+							      &got_len),
+			1);
+	KUNIT_EXPECT_EQ(test, got_len, sizeof(payload));
+	KUNIT_EXPECT_EQ(test, memcmp(got_payload, payload, sizeof(payload)), 0);
+
+	kvm_v2_record_destroy(rec);
+}
+
+static void test_record_syscall_payload_overflow(struct kunit *test)
+{
+	static const char payload[] = "payload-overflow";
+	struct kvm_v2_record *rec;
+	struct uml_pt_regs regs;
+
+	rec = kvm_v2_record_alloc(sizeof(struct kvm_v2_replay_entry));
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	fill_syscall_regs(&regs);
+
+	KUNIT_ASSERT_EQ(test, kvm_v2_record_start(rec), 0);
+	KUNIT_EXPECT_EQ(test,
+			kvm_v2_record_observe_syscall_payload(rec, 63, 0,
+							      &regs, 0,
+							      payload,
+							      sizeof(payload)),
+			-ENOSPC);
+	KUNIT_EXPECT_EQ(test, rec->entries_recorded, 0ULL);
+	KUNIT_EXPECT_EQ(test, rec->entries_dropped, 1ULL);
+	KUNIT_EXPECT_EQ(test, rec->payload_entries_recorded, 0ULL);
+
+	kvm_v2_record_destroy(rec);
+}
+
 static void test_record_replay_divergence_preserves_cursor(struct kunit *test)
 {
 	struct kvm_v2_record *rec;
@@ -357,6 +522,10 @@ static struct kunit_case kvm_v2_record_test_cases[] = {
 	KUNIT_CASE(test_record_gadget_bypass_page),
 	KUNIT_CASE(test_record_observe_syscall),
 	KUNIT_CASE(test_record_replay_syscall_fifo),
+	KUNIT_CASE(test_record_syscall_payload_fifo),
+	KUNIT_CASE(test_record_syscall_payload_short_buffer),
+	KUNIT_CASE(test_record_syscall_payload_arg_mismatch),
+	KUNIT_CASE(test_record_syscall_payload_overflow),
 	KUNIT_CASE(test_record_replay_divergence_preserves_cursor),
 	KUNIT_CASE(test_record_time_travel_fifo),
 	KUNIT_CASE(test_record_buffer_overflow_is_counted),
